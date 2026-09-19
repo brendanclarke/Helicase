@@ -43,14 +43,6 @@
 // #include "TriggerOut.h"
 
 
-//instance of the snare voice
-INCCMZ SnareVoice snareVoice;
-
-//---------------------------------------------------
-void Snare_setPan(const uint8_t pan)
-{
-	Snare_setPanVoice(&snareVoice, pan);
-}
 //---------------------------------------------------
 void Snare_setPanVoice(SnareVoice *voice, const uint8_t pan)
 {
@@ -58,9 +50,8 @@ void Snare_setPanVoice(SnareVoice *voice, const uint8_t pan)
 	 * Set pan on one explicit snare runtime instance.
 	 *
 	 * Inputs: caller-owned SnareVoice and raw 0..127 pan. Output: the instance
-	 * pan byte changes; mixer performs final pan-gain lookup. Dynamic
-	 * Instrument Load cannot use Snare_setPan() because non-native snare slots
-	 * are not represented by the single legacy snareVoice global.
+ * pan byte changes; mixer performs final pan-gain lookup. The manager supplies
+ * the tagged slot member, so this module never resolves a permanent snare.
 	 */
 	if(!voice)
 		return;
@@ -74,11 +65,9 @@ void Snare_initVoice(SnareVoice *voice)
 	/*
 	 * Initialize one snare runtime instance.
 	 *
-	 * Inputs: caller-owned SnareVoice. Output: all oscillator, envelope,
-	 * transient, filter, distortion, and LFO members receive the same defaults
-	 * formerly applied only to snareVoice. InstrumentManager owns additional
-	 * snare instances and calls this helper so default state remains in the
-	 * snare module rather than being duplicated in slot-dispatch code.
+ * Inputs: caller-owned SnareVoice. Output: oscillator, envelope, transient,
+ * filter, distortion, and LFO members receive snare defaults. The manager
+ * calls this for one tagged member so defaults remain in the snare module.
 	 */
 	if(!voice)
 		return;
@@ -119,16 +108,6 @@ void Snare_initVoice(SnareVoice *voice)
 	lfo_init(&voice->lfo);
 }
 //---------------------------------------------------
-void Snare_init()
-{
-	Snare_initVoice(&snareVoice);
-}
-//---------------------------------------------------
-void Snare_trigger(const uint8_t vel, const uint8_t note)
-{
-	Snare_triggerVoice(&snareVoice, 3u, vel, note);
-}
-//---------------------------------------------------
 void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
                         const uint8_t vel, const uint8_t note)
 {
@@ -163,7 +142,7 @@ void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
 		offset -= voice->transGen.volume;
 	}
 	if(voice->osc.waveform == SINE)
-		voice->osc.phase = (0x3ff<<20)*offset;//voiceArray[voiceNr].osc.startPhase ;
+		voice->osc.phase = (0x3ff<<20)*offset;
 	else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)
 		voice->osc.phase = (0xff<<20)*offset;
 	else
@@ -181,20 +160,14 @@ void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
 	SnapEg_trigger(&voice->snapEg);
 }
 //---------------------------------------------------
-void Snare_calcAsync()
-{
-	Snare_calcAsyncVoice(&snareVoice);
-}
-//---------------------------------------------------
 void Snare_calcAsyncVoice(SnareVoice *voice)
 {
 	/*
 	 * Calculate one snare instance's control-rate block.
 	 *
-	 * Inputs: SnareVoice pointer. Output: pitch envelope, amplitude envelope,
-	 * snap, and oscillator frequencies are advanced for that instance only.
-	 * InstrumentManager uses this to render current slot type without routing
-	 * all snare work through the single legacy global.
+ * Inputs: SnareVoice pointer. Output: pitch envelope, amplitude envelope,
+ * snap, and oscillator frequencies advance for that tagged instance only.
+ * InstrumentManager renders current slot type without global snare state.
 	 */
 	if(!voice)
 		return;
@@ -228,11 +201,6 @@ void Snare_calcAsyncVoice(SnareVoice *voice)
 	osc_setFreq(&voice->noiseOsc);
 }
 //---------------------------------------------------
-void Snare_calcSyncBlock(int16_t* buf, const uint8_t size)
-{
-	Snare_calcSyncBlockVoice(&snareVoice, buf, size);
-}
-//---------------------------------------------------
 void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
                               const uint8_t size)
 {
@@ -240,9 +208,8 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 	 * Render one snare instance into a mono block.
 	 *
 	 * Inputs: SnareVoice pointer, destination buffer, and block size. Output:
-	 * buf receives noise, oscillator, transient, envelope, and distortion for
-	 * that instance. This cannot be folded into Snare_calcSyncBlock() because
-	 * that legacy wrapper is hardwired to snareVoice.
+ * buf receives noise, oscillator, transient, envelope, and distortion for
+ * that tagged instance without relying on a fixed snare wrapper.
 	 */
 	if(!voice || !buf)
 		return;
@@ -259,7 +226,6 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 	//calc next osc sample
 	calcNextOscSampleBlock(&voice->osc,transBuf,size,(1.f-voice->mix));
 	//--AS apply filter to synthesized sound as well here if desired, or combine code for more efficiency
-	//SVF_calcBlockZDF(&snareVoice.filter,snareVoice.filterType,transBuf,size);
 
 	uint8_t j;
 	if(voice->volumeMod)

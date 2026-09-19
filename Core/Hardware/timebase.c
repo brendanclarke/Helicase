@@ -67,6 +67,7 @@
 #include "encoder.h"
 #include "endlessPots.h"
 #include "mixer.h"
+#include "PatternStackService.h"
 
 /* -----------------------------------------------------------------------
 ** TIM6 registers (APB1, base 0x40001000)
@@ -138,6 +139,25 @@ void TIM6_DAC_IRQHandler(void)
         frontpanel_service_due++;
 }
 
+void timebase_holdPreAudioMs(uint16_t duration_ms)
+{
+    uint16_t start = time_sysTick;
+
+    /*
+     * Provide one shared, wrap-safe hold for pre-audio hardware readiness.
+     *
+     * Inputs: duration_ms and the TIM6-owned 1 kHz time_sysTick, which main
+     * starts before SD boot work. Output: only foreground boot progression is
+     * delayed; interrupts continue, so the counter and LCD diagnostics still
+     * advance. Callers are SD power-up, ACMD41 pacing, post-mount settling, and
+     * the pre-Bank-load boundary. Runtime/audio code must remain non-blocking.
+     * The helper owns no retained state and adds no SRAM allocation.
+     */
+    while ((uint16_t)(time_sysTick - start) < duration_ms) {
+        /* Intentionally empty: boot-only hold before audioCodec_init(). */
+    }
+}
+
 void timebase_serviceFrontPanel(void)
 {
     uint32_t gpiob_idr;
@@ -166,6 +186,18 @@ void timebase_serviceFrontPanel(void)
 
     encoder_tick();
     endlessPots_tick();
+
+    /*
+     * Run the Pattern stack service at the bounded 500 Hz foreground cadence.
+     *
+     * What: drains deferred edits, advances bulk barriers, and gives gap
+     * maintenance/compaction one cooperative pass after front-panel input.
+     * Why: all dynamic-pool mutations remain outside TIM3 and the LCD/audio
+     * owners. Inputs: service queue and active Pattern target. Output: one
+     * bounded service step; no new timing or storage state is allocated here.
+     * Affiliate: PatternStackService.c.
+     */
+    patSvc_tick();
 }
 
 /* -----------------------------------------------------------------------

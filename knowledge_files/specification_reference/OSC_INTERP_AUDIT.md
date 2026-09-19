@@ -45,8 +45,9 @@ Why:
    loaded value, which re-applies the modulation runtime toggle.
 
 Result:
-- Saving `GLO.CFG` stores the interpolation setting.
-- Loading `GLO.CFG` restores and reapplies it.
+- The one-second keyed `settings.cfg` writer stores the interpolation setting.
+- Boot loading of `settings.cfg` restores and reapplies it; legacy `GLO.CFG` /
+  `glo.cfg` is not the current persistence path.
 
 ## File-Level Changes
 1. `Core/Bank/Scene/Preset/ParameterArray.h`

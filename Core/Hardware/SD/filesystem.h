@@ -100,7 +100,8 @@ typedef enum {
 
 /*
  * Root numbered-library domains served by the one generalized name cache.
- * Kit, root Scene, and root Bank indexes preserve slot order, including blank slots, so
+ * Kit, root Scene, root Bank, and root Pattern indexes preserve slot order,
+ * including blank slots, so
  * callers can reconstruct the visible `NNN Name` folder key. Instrument
  * indexes remain typed and are requested through their existing API because
  * their rows are alphabetically sorted files rather than numbered folders.
@@ -110,6 +111,8 @@ typedef enum {
     FS_LIBRARY_INDEX_SCENE,
     /* Root Bank uses the same slot-preserving cache/index contract. */
     FS_LIBRARY_INDEX_BANK,
+    /* Root Pattern uses numbered LFN files and the same slot cache. */
+    FS_LIBRARY_INDEX_PATTERN,
 } fs_library_index_kind_t;
 
 typedef void (*fs_completion_cb_t)(void);
@@ -117,9 +120,14 @@ typedef void (*fs_completion_cb_t)(void);
 /*
  * Temporary boot diagnostic callback for the resident-name writer.
  *
+ * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the user
+ * to assess how operations are proceeding. It does not and should not ever add
+ * additional file interaction steps, since the diagnostic may be used to
+ * assess in-situ file procedures.
+ *
  * phase identifies the live HCNAMES state: 0=root/open request, 1=open wait,
  * 2=row streaming, 3=close wait, 4=final media flush, 5=done, and 6=error.
- * row is the next fixed-order SRAM row to write (0..129). The callback is
+ * row is the next fixed-order SRAM row to write (0..144). The callback is
  * observational only and must not start or acknowledge filesystem operations.
  * It exists to locate the current hardware boot freeze and should be removed
  * after the stalled phase has been confirmed.
@@ -129,7 +137,12 @@ typedef void (*fs_hcnames_diag_cb_t)(uint8_t phase, uint16_t row);
 /*
  * Temporary operation codes returned by filesystem_getBootDiagnostic().
  *
- * Stage 11 can contain a Bank-name repair followed by Bank, Scene, or Kit
+ * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the user
+ * to assess how operations are proceeding. It does not and should not ever add
+ * additional file interaction steps, since the diagnostic may be used to
+ * assess in-situ file procedures.
+ *
+ * Stage 12 can contain a Bank-name repair followed by Bank, Scene, or Kit
  * payload loading and a final flush. Stable public codes keep the OLED output
  * interpretable without exposing the private fs_internal_op_t enum itself.
  * FS_BOOT_DIAG_OTHER means the active operation is outside that expected boot
@@ -147,6 +160,11 @@ typedef enum {
 /*
  * Temporary phase-43 substep callback used only during hardware diagnosis.
  *
+ * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the user
+ * to assess how operations are proceeding. It does not and should not ever add
+ * additional file interaction steps, since the diagnostic may be used to
+ * assess in-situ file procedures.
+ *
  * The Bank embedded-Kit quarantine path contains synchronous component calls
  * inside one filesystem phase, so the ordinary operation/phase accessor cannot
  * identify which call fails to return. The callback receives a documented
@@ -155,8 +173,283 @@ typedef enum {
  */
 typedef void (*fs_boot_substep_diag_cb_t)(uint8_t substep);
 
+/*
+ * Pre-audio filesystem timeout logger.
+ *
+ * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+ * must never print anything to the screen or otherwise delay operations
+ * unnecessarily since logging may be used to assess timing failures in other
+ * modules that might otherwise be obscured by screen write delays.
+ *
+ * What: Begin opens the diagnostic window, Arm copies exactly eight operation
+ * bytes and restarts its deadline, TimedOut/Code expose the latched result,
+ * the blocking writer abandons a timed-out owner and makes one bounded remount
+ * attempt to replace `/bootlog.bin`, and End disables the policy before
+ * runtime. Why: a splash-screen stall otherwise leaves no durable indication
+ * of the last storage boundary entered. Inputs are fixed-width operation codes
+ * and the existing filesystem/SD state; outputs are a timeout flag and, when
+ * a caller confirms timeout or boot filesystem failure, an eight-byte root
+ * file. A frozen `ASENSURE` timeout is the sole exception: it appends a
+ * documented 64-byte RAM-only FAT/SD capsule after the same token, for a
+ * 72-byte forensic file. These functions are boot/main-context APIs only, are
+ * not ISR-safe, and a failed recovery never prevents startup from continuing.
+ * Affiliates:
+ * filesystem_tick(), the private blocking FAT helpers, main.c's pre-audio
+ * ladder, and sdcard_abortTransferForBootLog().
+ */
+void        filesystem_bootLoggingBegin(void);
+/* Public Arm starts a new operation deadline; private filesystem.c detail
+ * capture may change only the retained eight-byte label inside that deadline. */
+void        filesystem_bootLoggingArm(const char code[8]);
+uint8_t     filesystem_bootLoggingTimedOut(void);
+const uint8_t *filesystem_bootLoggingCode(void);
+/* Write the retained boot failure code after either watchdog timeout or a
+ * caller-confirmed boot filesystem failure; recovery is bounded and never
+ * gates startup. */
+uint8_t     filesystem_writeBootFailureLogBlocking(void);
+void        filesystem_bootLoggingEnd(void);
+
+/*
+ * DEV_LOGGING_IWDG one-time boot entry point (config.h). Call exactly once,
+ * immediately after filesystem_bootLoggingBegin(), before
+ * filesystem_initCardAndMountBlocking(). It starts the STM32F765 independent
+ * watchdog for this boot and, only if RCC_CSR shows the previous reset was
+ * IWDG-caused and the retained SRAM2 capsule looks valid, replays that
+ * capsule's boot-log code through filesystem_writeBootFailureLogBlocking()
+ * before continuing. A no-op when DEV_LOGGING_IWDG is 0. Not ISR-safe; boot
+ * context only. See DEV_LOGGING_IWDG in config.h for the full contract.
+ */
+void        filesystem_devIwdgBootCheck(void);
+
+/*
+ * Initialize and mount the SD card during pre-audio boot.
+ *
+ * Inputs: TIM6 millisecond timing is active and no runtime filesystem request
+ * exists. Output: the bus is configured at initialization speed, held idle for
+ * the warm-reset card-settle interval, initialized through the paced SD
+ * command sequence, switched to transfer speed, and synchronously pumped until
+ * asyncfatfs reports ready or fatal. Returns nonzero only for a ready mount.
+ * This blocking API must not be called after audioCodec_init().
+ */
 uint8_t     filesystem_initCardAndMountBlocking(void);
 void        filesystem_initAfterCardReady(void);
+/*
+ * Ensure the two root working-Bank autosave register files exist during
+ * pre-audio boot.
+ *
+ * Inputs: a mounted card after the normal Bank-or-fallback ladder. Output:
+ * when no resident Bank exists, return success without card I/O; otherwise
+ * read HCNAMES and create only absent `/.hcprms1` or `/.hcprms2` records.
+ *
+ * New records are exact 34,768-byte baselines: a 64-byte validation header,
+ * 3,856-byte mutation mask, 128-byte Bank section, and sixteen 1,920-byte
+ * Scenes. Creation writes the current two-byte Bank restore slot plus names,
+ * with mask/parameters/Effects/padding zero; `/.hcprms1` begins as the current
+ * valid generation. An existing matching object is never opened for write.
+ *
+ * A successful return enables retained-owner dirty production and authorizes
+ * filesystem_tick()'s private parameter drain. Mutation tracking is disabled
+ * before setup, for no-Bank fallback, and on setup failure so boot population
+ * cannot manufacture dirty work. Autosave.c owns one persistent 3,856-byte SRAM
+ * record; one delayed runtime recovery validates the winner and ORs its carried
+ * bits into that owner even when SRAM initially starts clean.
+ *
+ * Each write captures at most the configured live-byte count, makes one
+ * transformed copy while calculating CRC, syncs that invalid copy, then
+ * publishes/syncs CRC before writing the valid commit marker last. A successful
+ * operation whose canonical mask remains dirty schedules the short 250 ms
+ * continuation. Successful clean recovery/drain disarms the writer completely,
+ * so no later validation, generation, CRC, or file write occurs until a retained
+ * owner sets a bit; the first such bit receives the ordinary five-second
+ * debounce. Errors retry after that ordinary interval. An empty merged mask
+ * completes read-only: no inactive peer is replaced and generation/probe do not
+ * advance.
+ * If a complete FAT free-cluster search reports genuine exhaustion, partial
+ * output is closed and this function returns zero rather than trapping boot in
+ * a zero-byte fwrite retry.
+ */
+uint8_t     filesystem_ensureAutosaveFilesBlocking(void);
+/*
+ * Boot-time .hcprms candidate validation and winner selection.
+ *
+ * Returns nonzero when a valid winner matching the resident Bank exists.
+ * Must be called after preset_loadGlobals() (active_bank known) and
+ * before preset_loadBank() (reader needs the result). Inputs: mounted
+ * card, BankData with active_bank set. Outputs: internal winner statics.
+ * Affiliates: filesystem_autosaveBootReaderBlocking(), main.c.
+ */
+uint8_t filesystem_validateAutosaveWinnerBlocking(void);
+/*
+ * Query boot-time winner validation result.
+ *
+ * What: returns nonzero when validateAutosaveWinnerBlocking() found a valid
+ * winner whose Bank slot agrees with settings.cfg's active_bank. Inputs:
+ * internal boot-reader winner statics. Output: boolean used by main.c's
+ * stage-11 decision gate. Affiliates: main.c, §4 S061_AUTOSAVE_READER.md.
+ */
+uint8_t filesystem_hasBootWinner(void);
+/*
+ * Record that the canonical Bank Load fallback path was taken at boot.
+ *
+ * What: sets the bank_fallback flag in the boot latch so the replay
+ * function calls autosave_markResidentBankDirty() after tracking enables.
+ * Inputs: called from main.c when stage 11 restores through the canonical
+ * preset_loadBank() ladder instead of the autosave winner. Outputs: latch
+ * flag consumed by filesystem_replayBootLatch(). Affiliates: §8
+ * S061_AUTOSAVE_READER.md, filesystem_ensureAutosaveFilesBlocking().
+ */
+void filesystem_setBootLatchBankFallback(void);
+/*
+ * Boot-reader notice mask for the Menu post-boot sequencer (§9).
+ *
+ * What: returns AND clears the Case-3 Scene invalidation mask and the
+ * bank-fallback flag. Inputs: the boot latch populated by the boot reader
+ * and replay path. Outputs: the 16-bit Scene mask (each set bit = one
+ * post-boot overlay) and the bank_fallback byte (1 = root notice for the
+ * canonical Bank Load fallback); both latch fields clear on read so Menu's
+ * one-shot sequencer drains each notice exactly once. Why: Menu must not
+ * access filesystem internal state directly, and replay deliberately keeps
+ * bank_fallback set until the notice sequencer consumes it (§8.3,
+ * S061_AUTOSAVE_READER.md). Affiliates: menu_drainAutosaveBootNotices(),
+ * fs_boot_latch, filesystem_replayBootLatch().
+ */
+uint16_t filesystem_bootReaderNoticeSceneMask(void);
+uint8_t  filesystem_bootReaderNoticeBankFallback(void);
+/*
+ * Regenerate .hcnames from a validated winner record's identity fields.
+ *
+ * Boot-blocking recovery for a present-but-corrupt/absent .hcnames while a
+ * valid .hcprms winner exists (§5.1, S061_AUTOSAVE_READER.md). Outputs:
+ * nonzero after the register is rewritten via the atomic temp/rename
+ * pattern with every row derived from the winner record (names, Phase C
+ * sources, Instrument type text) and all refreshed flags set, and
+ * fs_resident_source[]/hcnames_name_mirror[] repopulated to match.
+ * Affiliates: filesystem_validateAutosaveWinnerBlocking(), the Phase 5
+ * boot reader, filesystem_formatResidentNameLine().
+ */
+uint8_t filesystem_regenerateHcnamesFromWinnerBlocking(void);
+/*
+ * Boot-time autosave reader: populate resident SRAM from the winner record.
+ *
+ * Replaces the canonical preset_loadBank() when stage 10b proved a valid
+ * Bank-matching winner: reads .hcnames (regenerating it from the record
+ * when corrupt), applies the winner's Bank payload, then evaluates each
+ * present Scene's eight identity rows independently — Case 1 applies the
+ * winner payload, Case 2 narrow-loads a resolvable row from its library
+ * source, and Case 3 empties the whole Scene when a refreshed row cannot
+ * be resolved (P1). Returns nonzero when the winner restore completed;
+ * zero falls back to the canonical Bank Load ladder. Affiliates: main.c
+ * stage 11, validateAutosaveWinnerBlocking(), replayBootLatch(),
+ * autosave_apply*(), filesystem_bootReaderNarrowLoad*().
+ * Before any Case-2 narrow load, the reader preserves the complete 16-by-6
+ * HCNAMES Instrument-type image for the whole traversal. Later payload
+ * staging may not change the type used to resolve any remaining Instrument
+ * row. This is an internal zero-growth lifetime guarantee; the public API and
+ * on-card format are unchanged.
+ */
+uint8_t filesystem_autosaveBootReaderBlocking(void);
+/*
+ * Boot-blocking Pattern AutoSave reader.
+ *
+ * What: restores per-Scene Pattern data from the valid highest-generation
+ * `.patNNa`/`.patNNb` candidate pair. Must run after the parameter reader and
+ * normal Scene/Bank Pattern loads. Inputs: mounted filesystem, HCNAMES mirror,
+ * and resident Pattern regions already populated by the canonical boot path.
+ * Outputs: matching `@`-provenance Scenes update pat_regions[] and their
+ * winning generation becomes the next drain baseline; nonmatching or invalid
+ * pairs leave the existing directory/default Pattern authoritative and reset
+ * the hidden-file baseline.
+ * Affiliates: filesystem_autosaveBootReaderBlocking(),
+ * filesystem_bootReaderReadPatternFile(), PatternData, and main.c.
+ */
+void filesystem_patternAutosaveBootReaderBlocking(void);
+/*
+ * Reset one resident Pattern AutoSave generation after a directory-backed
+ * Pattern replacement.
+ *
+ * What: starts the next hidden-file drain for the selected Scene at
+ * generation 1 and target `.pat00a`-style file A. Inputs: a successfully
+ * committed library/Scene/Bank Pattern load. Output: one filesystem-owned
+ * generation baseline is cleared; no file I/O occurs. Affiliates: Preset
+ * Scene/Bank load completion and the Pattern drain scheduler.
+ */
+void filesystem_resetPatternAutosaveGeneration(uint8_t scene_index);
+/*
+ * Boot load driven entirely by .hcnames when it is authoritative.
+ *
+ * What: parses .hcnames (temp-file prelude first, then the register),
+ * then requires the two special-case checks — the register Bank row is a
+ * direct numeric slot equal to bank_restoreBankSlot() (the settings.cfg
+ * boot Bank), and all 145 HCNAMES rows carry the refreshed witness. When both
+ * hold, the register is authoritative: this function constructs the
+ * whole resident state from it — the Bank container via
+ * filesystem_bootNarrowLoadBank(), then every present Scene's eight rows
+ * via resolve-plus-narrow-load, Bank-inherited rows from the Bank tree
+ * and direct rows from their Scene/Kit/Instrument libraries, then the
+ * v4 `<name>.pat` Pattern child per non-emptied Scene. Any unresolvable child of a Scene
+ * applies the unbreakable rule: the Scene is not loaded, it is created
+ * empty and noticed. Returns 1 on a completed authoritative load and 0
+ * when either check fails or a hard failure occurs, in which case the
+ * caller falls through to the canonical Bank Load unchanged.
+ *
+ * Why: after a menu Bank Load plus further Load/Save actions, a power
+ * off before menu exit leaves every register row REFRESHED while the
+ * autosave payload is still the pre-session capture (the page guard
+ * holds the writer). The register is the freshest durable truth, so the
+ * boot must not discard it: every correctly defined sub-child source —
+ * Scene, Kit, and every single Instrument — must be respected, and a
+ * partially loaded Scene must never be assembled for a later Save
+ * (Session 061 Phase 2, SD_CARD_READER_4/5).
+ *
+ * Outputs: committed BankData and per-row resident SceneData;
+ * case2/case3 latch masks, Q trace records, notice state; register
+ * publication only for emptied Scenes. No new RAM. Affiliates: main.c
+ * stage 11, filesystem_autosaveBootReaderBlocking() (the
+ * winner-matching sibling), 061_READER_LOADED_SCENES_INVALID.md §16.
+ * Before any Case-2 narrow load, the reader preserves the complete 16-by-6
+ * HCNAMES Instrument-type image for the whole traversal. Later payload
+ * staging may not change the type used to resolve any remaining Instrument
+ * row. This is an internal zero-growth lifetime guarantee; the public API and
+ * on-card format are unchanged.
+ */
+uint8_t filesystem_bootHcnamesAuthoritativeLoad(void);
+/*
+ * Flush the currently pending autosave lifecycle trace before a deliberate
+ * bench-test power cycle.
+ *
+ * Inputs: an idle, mounted filesystem facade; output is nonzero only after
+ * every pending trace batch has closed and passed the normal AsyncFATFS sync
+ * gate. Why: a tester who removes power immediately after an observed
+ * transaction needs a deterministic trace boundary rather than the background
+ * 500 ms cadence. This is a test convenience, not a normal runtime path. When
+ * DEV_MODE_LOGGING is 0 there are no pending records and this returns success
+ * without opening a trace file. Affiliate: filesystem_autosaveTraceFlush_tick().
+ */
+uint8_t     filesystem_autosaveTraceFlushBlocking(void);
+/*
+ * Apply/query the persistent AutoSave policy without synchronous runtime I/O.
+ *
+ * Input: a settings/Menu byte normalized to OFF/ON. Output: OFF immediately
+ * disables mutation production and prevents every new ensure, validation,
+ * recovery, or drain start; ON retains the preference and queues asynchronous
+ * setup once runtime has a resident Bank. Neither transition deletes or opens
+ * a hidden file itself. An already-running autosave operation reaches its safe
+ * close/flush boundary; a canonical-mask discard is deferred until an active
+ * transform finishes. Why: aborting AsyncFATFS or changing CRC-covered mask
+ * bytes mid-copy risks corruption. Affiliates: Menu's `ats` commit, main.c's
+ * post-settings boot application, and filesystem_tick().
+ */
+void        filesystem_setAutosaveEnabled(uint8_t enabled);
+/*
+ * Read the normalized in-memory AutoSave policy without touching storage.
+ *
+ * Input: none. Output: zero when hidden-record reads/writes are disabled and
+ * one when they are authorized subject to the resident-Bank/runtime gates.
+ * Why: boot and callers that only need policy state must not accidentally
+ * trigger validation or file creation. Affiliates: main.c's optional blocking
+ * ensure guard and filesystem_setAutosaveEnabled().
+ */
+uint8_t     filesystem_autosaveEnabled(void);
 /*
  * Create/refresh one `.hcindex` file in every registry-defined Instrument
  * directory. This boot-only wrapper is valid before audio starts; normal
@@ -174,27 +467,40 @@ uint8_t     filesystem_createBootIndexBlocking(void);
  * this bootstrap writer because Scene identity is card-owned HCNAMES metadata,
  * not a scene_t field; successful root Scene and Bank operations subsequently
  * preserve/update them through the shared register cache. Rows with no loaded
- * object are blank. This is only a bootstrap writer, not a second name store.
+ * object are blank. Before its create-capable write, the implementation makes
+ * one read-only folded root scan: it creates only after proving HCNAMES absent,
+ * refreshes one proven existing entry, and returns an error without changing
+ * the card for duplicate entries or any scan/close failure. This is only a
+ * bootstrap writer, not a second name store or a duplicate-repair policy.
  */
 uint8_t filesystem_writeResidentNamesBlocking(
     fs_hcnames_diag_cb_t diagnostic_cb);
 /*
  * Observe the active filesystem operation for the temporary boot-screen hook.
  *
+ * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the user
+ * to assess how operations are proceeding. It does not and should not ever add
+ * additional file interaction steps, since the diagnostic may be used to
+ * assess in-situ file procedures.
+ *
  * Outputs: op receives one fs_boot_diag_op_t code and phase receives the
  * operation's current private state-machine phase. NULL outputs are allowed.
  * This function performs no polling, acknowledgement, or state mutation. For
- * Bank-repair finalization, phase 42 is root return, 43 is embedded-Kit
- * quarantine, and 44 is handoff to the Bank payload reader. Phase 43 releases
- * its top-level Bank-root handle immediately after opening the selected Bank,
- * preserving asyncfatfs' three-handle budget for selected Bank, Scene, and
- * embedded Kit during directory descent. After entering the Kit, its explicit
- * handle is also released because currentDirectory owns the copied Kit state;
- * the freed slot is then available for kitset.kcg and Instrument member files.
+ * Bank-name repair, phase 42 returns to root and phase 43 hands a successful
+ * Bank Load into its payload reader without a second callback. The handoff
+ * retains the original request callback; selected child Scene payloads then
+ * progress through the ordinary foreground reader.
  */
 void filesystem_getBootDiagnostic(uint8_t *op, uint8_t *phase);
-/* Register or clear the temporary phase-43 substep observer. Passing NULL
- * disables it. Registration changes no filesystem state or operation order. */
+/*
+ * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the user
+ * to assess how operations are proceeding. It does not and should not ever add
+ * additional file interaction steps, since the diagnostic may be used to
+ * assess in-situ file procedures.
+ *
+ * Register or clear the temporary phase-43 substep observer. Passing NULL
+ * disables it. Registration changes no filesystem state or operation order.
+ */
 void filesystem_setBootSubstepDiagnostic(fs_boot_substep_diag_cb_t cb);
 /*
  * Repair host-created long or duplicate product names before index generation.
@@ -218,16 +524,71 @@ uint8_t     filesystem_repairInstrumentNamesBlocking(void);
  */
 bool filesystem_requestRepairBankNames(uint16_t slot, fs_completion_cb_t cb);
 /*
- * Write one slot-ordered Kit, root Scene, or root Bank cache as `.hcindex` at
+ * Write one slot-ordered Kit, root Scene, root Bank, or root Pattern cache as
+ * `.hcindex` at
  * boot. If the requested domain is not active in the one shared cache, the
  * implementation first performs the matching physical directory scan so a
- * missed caller scan cannot silently omit the index.
+ * missed caller scan cannot silently omit the index. Returns nonzero only
+ * when the requested cache was produced and flushed; zero is not a successful
+ * empty cache, including an interrupted Kit-quarantine pass.
  */
 uint8_t     filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind);
 void        filesystem_tick(void);
 fs_status_t filesystem_status(void);
 const char *filesystem_errorCode(void);
 void        filesystem_ack(void);
+
+/*
+ * Select and observe the bounded runtime fast-drain policy.
+ *
+ * What: setFastDrain normalizes `on` to one facade-owned boolean. While set,
+ * the BUSY/non-READY branch of filesystem_tick() performs the private fast
+ * poll count instead of one. fastDrainActive returns that boolean.
+ *
+ * Why: after Menu suspends codec DMA/ISR/DSP work, released foreground time
+ * can advance bit-banged SD while preserving AsyncFATFS's one-context rule and
+ * the operation state machine's once-per-tick cadence.
+ *
+ * Inputs: zero selects ordinary drain; nonzero selects fast drain. Outputs:
+ * accessor returns 0/1. Neither call polls, starts/acks an operation, changes
+ * status, or invokes a callback. Foreground-only and not reference-counted.
+ *
+ * Ownership: Menu is the sole setter; it enables only after verified codec
+ * suspend and clears before resume. Affiliates: filesystem_tick(), Menu's
+ * no-playback helpers, and AudioCodecManager's suspended accessor.
+ */
+void        filesystem_setFastDrain(uint8_t on);
+uint8_t     filesystem_fastDrainActive(void);
+
+/*
+ * Bank operation child-progress query.
+ *
+ * Returns the zero-based Bank-local Scene slot currently being processed
+ * by a Bank Save or Bank Load, or 0xFF when no Bank operation is active.
+ * Inputs: current_op and op_bank_child_cursor. Output: the live child
+ * cursor or the sentinel. Why: the Menu needs progress feedback during
+ * long multi-child Bank operations so the LCD can distinguish "working"
+ * from "stuck". Affiliates: menu_paintLoadSaveConfirmation(),
+ * filesystem_saveBankDirectory_tick(), filesystem_loadBankDirectory_tick().
+ */
+uint8_t filesystem_bankChildCursor(void);
+
+/*
+ * Queue keyed settings persistence without taking filesystem ownership.
+ *
+ * filesystem_markSettingsDirty() records one changed Global value or durable
+ * Bank/Scene provenance event and restarts the configured trailing debounce.
+ * filesystem_enableRuntimeSettingsWrites() opens the autonomous settings and
+ * AutoSave scheduler gates only after main.c's complete pre-audio filesystem
+ * ladder; boot events remain queued until then. Inputs are current time and
+ * live settings/lifecycle state. Outputs are scheduler flags only; neither
+ * call opens, polls, or waits on a file. The idle filesystem_tick() later
+ * reuses FS_INTERNAL_OP_SAVE_GLOBALS and its final flush gate, or begins an
+ * eligible asynchronous AutoSave setup. Affiliates: Menu static Global
+ * commits, Preset completion, and main.c's mounted-card boot exit.
+ */
+void filesystem_markSettingsDirty(void);
+void filesystem_enableRuntimeSettingsWrites(void);
 
 bool filesystem_requestLoad(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 /*
@@ -271,15 +632,20 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot,
  * Inputs: direct root Scene slot, source resident Scene, eight-cell display
  * name, and completion callback. Output: asynchronous replacement scoped to
  * same-number children under /Scene/: Scene/<NNN Name>/ with sceneset.scg,
- * embedded Kit directory, six instrument files, a draft text pattern.pat, and
- * effects.fx placeholder. pattern.pat stores only the 128x7 step-active grid
- * plus per-track length/scale until the final pattern schema exists. Other
+ * embedded Kit directory, six instrument files, a named v4 Pattern child, and
+ * effects.fx placeholder. The Pattern child stores the complete dynamic
+ * address/pool/bitmap payload and its per-track settings. Other
  * numbered Scene directories must not be removed, regardless of how many nested
  * children they contain. The resident Scene display name updates only after the
  * directory save succeeds. After the directory is durable, the filesystem
  * rescans all of /Scene/ and rewrites the complete slot-ordered `.hcindex`
  * before invoking cb, so the index reflects the actual folder set rather than
- * only the selected save slot.
+ * only the selected save slot. The request first seeds the Kit and six
+ * Instrument identity cells from the source Scene's own register rows (the
+ * embedded "Kit <name>" folder and every member stem are then written from
+ * those identities), so a Save entered without any prior Kit/Instrument menu
+ * traversal still publishes a register that names exactly what was written
+ * (Session 061, 061_READER_LOADED_SCENES_INVALID.md).
  */
 bool filesystem_requestSaveSceneDirectory(uint16_t slot,
                                           uint8_t source_scene,
@@ -310,29 +676,40 @@ bool filesystem_requestLoadKitMorphForScenes(uint16_t slot,
  * the UI, unlike Kit Load's instant-on-scroll behavior. Its selected index row
  * is copied into existing operation scratch before separate Scene staging,
  * providing the two later directory opens and targeted HCNAMES source. The
- * name cache remains independently available throughout validation.
+ * name cache remains independently available throughout validation. After the
+ * payload commits, the targeted HCNAMES update publishes the complete
+ * committed hierarchy for every destination — the Scene row plus the embedded
+ * Kit row and its six Instrument rows from the identity store — with the
+ * refreshed witness staged at the same terminal boundary (Session 061).
  */
 bool filesystem_requestLoadSceneForScenes(uint16_t slot,
                                           uint16_t scene_mask,
                                           fs_completion_cb_t cb);
+bool filesystem_requestLoadPatternForScenes(uint16_t slot,
+                                            uint16_t scene_mask,
+                                            fs_completion_cb_t cb);
 /*
  * Load one root Bank directory and its selected Bank-local Scene.
  *
  * Inputs: root Bank slot 000..999, resident destination Scene mask, and
- * completion callback. Output: asynchronous Bank validation and, when the Bank
- * contains a usable child, a staged Scene load from Bank/<NNN>/<SS Name>/.
- * The Bank cache remains intact through the asynchronous name-repair preflight;
- * the child Scene stage is initialized only after that preflight has consumed
- * its selected row. The index cache and typed stage are separate SRAM, but
- * this ordering still keeps the preflight key immutable and avoids starting a
- * child-stage reset before Bank validation is complete.
- * Every selected Bank-local Scene is an independent directory payload: its
+ * completion callback. Output: asynchronous selected-child validation and,
+ * when the Bank contains a usable child, a staged Scene load from
+ * Bank/<NNN>/<SS Name>/.
+ * The Bank cache remains intact through the asynchronous immediate-child name
+ * repair; the child Scene stage is initialized only after that repair consumes
+ * its selected row. The reader then validates only selected payloads, rather
+ * than performing a recursive embedded-Kit preflight.
+ * Every selected Bank-local Scene is an independent foreground-pumped
+ * directory payload: its
  * embedded `Kit <name>` directory and its pattern/effect files are discovered
  * afresh before that child is read. This matters when a full Bank contains
  * different Kit names, because child `01` must never inherit child `00`'s
  * filenames. Empty Banks are successful Bank loads; callers inspect
  * filesystem_lastBankLoadLoadedScene() and run the fallback chain when no
- * child Scene was supplied.
+ * child Scene was supplied. Runtime Bank Load never recursively quarantines
+ * unselected embedded Kits; the shared Scene payload reader validates each
+ * selected child before committing it, preserving the single callback and the
+ * flexible declared Instrument/LFO payload mapping.
  */
 bool filesystem_requestLoadBank(uint16_t slot,
                                 uint16_t scene_mask,
@@ -353,32 +730,35 @@ uint16_t filesystem_bankChildSceneMask(void);
  * Save one root Bank directory from resident Scene memory.
  *
  * Inputs: root Bank slot, source Scene, eight-cell Bank display name, future
- * Bank-local Scene save mask, and completion callback. Output: bankset.bcg
- * plus selected two-digit child Scene folders. This first implementation
- * passes mask bit 0 only, but the writer loops over the mask boundary so
- * future 16-Scene toggles do not need a new public contract.
+ * Bank-local Scene save mask, force-save selector, and completion callback.
+ * Output: bankset.bcg plus selected two-digit child Scene folders. The force
+ * selector bypasses card-clean child skipping; zero selects normal reuse.
+ * This declaration matches the operation-scoped save policy in filesystem.c.
  */
 bool filesystem_requestSaveBank(uint16_t slot,
                                 uint8_t source_scene,
                                 const char display_name[8],
                                 uint16_t bank_scene_save_mask,
+                                uint8_t force_save,
                                 fs_completion_cb_t cb);
 bool filesystem_requestSave(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 bool filesystem_requestLoadName(fs_file_type_t type, uint16_t slot, fs_completion_cb_t cb);
 /*
- * Scan the physical Kit/, root Scene/, or root Bank/ directory representation.
+ * Scan the physical Kit/, root Scene/, root Bank/, or root Pattern/
+ * directory representation.
  *
  * What: clears and repopulates the single slot-ordered generalized name
  * cache from numbered directory entries. Why: boot/index maintenance still
  * needs to discover names from the card, while Load/Save browsing normally
  * enters through the corresponding `.hcindex`; a non-blank cache row is the
- * sole Kit/Scene/Bank occupancy record. No 1,000-entry presence bitmap or FAT
+ * sole Kit/Scene/Bank/Pattern occupancy record. No 1,000-entry presence bitmap or FAT
  * alias table is retained. Inputs: completion callback. Output: cache rows
- * only. Kit, Scene, and Bank no longer maintain parallel browser maps.
+ * only. Kit, Scene, Bank, and Pattern no longer maintain parallel browser maps.
  */
 bool filesystem_requestScanKits(fs_completion_cb_t cb);
 bool filesystem_requestScanScenes(fs_completion_cb_t cb);
 bool filesystem_requestScanBanks(fs_completion_cb_t cb);
+bool filesystem_requestScanPatterns(fs_completion_cb_t cb);
 bool filesystem_requestScanInstruments(fs_completion_cb_t cb);
 /*
  * Operation-scoped authoritative identity rows.
@@ -401,6 +781,54 @@ enum {
     FS_IDENTITY_INSTRUMENT_ROW_0,
     FS_IDENTITY_ROW_COUNT = FS_IDENTITY_INSTRUMENT_ROW_0 + 6u,
 };
+
+/*
+ * Root HCNAMES provenance tokens.
+ *
+ * Direct numbered-library sources are 0..999 and inherit their library class
+ * from the fixed HCNAMES row.  INHERIT walks Instrument -> Kit -> Scene ->
+ * Bank; UNKNOWN requests ordinary boot fallback; INSTRUMENT_DIRECT uses the
+ * row stem plus the committed type rather than an unstable browser index;
+ * PATTERN_AUTOSAVE is a Pattern-row-only `@` provenance with no hierarchy
+ * resolution as an Instrument source.
+ * The value field is limited to 13 bits so bit 13 can record that the object
+ * was refreshed by a completed library Load/Save while bit 15 remains the
+ * asynchronous HCNAMES dirty marker.
+ */
+#define FS_RESIDENT_SOURCE_INHERIT           0x1fffu
+#define FS_RESIDENT_SOURCE_UNKNOWN           0x1ffeu
+#define FS_RESIDENT_SOURCE_INSTRUMENT_DIRECT 0x1ffdu
+/*
+ * Pattern-row-only AutoSave provenance token.
+ *
+ * What: represents the serialized HCNAMES `@` source for a Pattern whose
+ * payload lives in a hidden root `.patNNx` file. Why: the existing
+ * INSTRUMENT_DIRECT token already serializes `@` for Instrument rows, but the
+ * same numeric value must not make a Pattern row look like a direct
+ * Instrument source during hierarchy resolution. Inputs/outputs: the token
+ * is accepted only for rows 129..144 by filesystem.c's parser/validator and
+ * formatter. Affiliates: Pattern AutoSave drain, boot reader, and HCNAMES.
+ */
+#define FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE  0x1ffcu
+#define FS_RESIDENT_SOURCE_REFRESHED_FLAG    0x2000u
+#define FS_RESIDENT_SOURCE_DIRTY_FLAG        0x8000u
+#define FS_RESIDENT_SOURCE_VALUE_MASK        0x1fffu
+
+/* Read, stage, or resolve one logical HCNAMES source without direct file I/O. */
+uint16_t filesystem_residentSource(uint16_t row);
+uint8_t filesystem_setResidentSource(uint16_t row, uint16_t source);
+/*
+ * Clear one resident HCNAMES refresh witness after a Pattern mutation.
+ *
+ * Input: a fixed HCNAMES row. Output: the refreshed bit is cleared in the
+ * filesystem-owned RAM register, or zero for an invalid row. This is a
+ * RAM-only mutation; the existing HCNAMES safe-write path publishes it later.
+ * Affiliate: Autosave.c Pattern dirty tracking.
+ */
+uint8_t filesystem_clearResidentRefreshed(uint16_t row);
+uint16_t filesystem_resolveResidentSource(uint16_t row,
+                                          uint16_t *resolved_row);
+
 void filesystem_setIdentityName(uint8_t row, const char name[8]);
 const char *filesystem_identityName(uint8_t row);
 /*
@@ -450,7 +878,7 @@ const char *filesystem_residentInstrumentName(uint8_t scene_index,
  * Resident Kit name-register access.
  *
  * The load request mirrors Instrument menu entry: it borrows the generalized
- * cache for all 129 root HCNAMES rows so Menu can copy one resident Scene's Kit
+ * cache for all 145 root HCNAMES rows so Menu can copy one resident Scene's Kit
  * name plus all six Instrument names before `/Kit/.hcindex` replaces that same
  * allocation. Menu retains those seven rows for the complete combined
  * Kit/Instrument session. Loads and saves only update the Menu scratch and an
@@ -479,14 +907,20 @@ const char *filesystem_residentKitName(uint8_t scene_index);
  * Resident Scene name-register access.
  *
  * What: reads one requested Scene identity from root `/.hcnames`, or replaces
- * only Scene rows selected by scene_mask with one fixed eight-cell name. Why:
- * SceneData deliberately has no per-Scene display-name mirror; Menu needs one
- * name for one Scene Load/Save editor, while a multi-target Scene Load must
- * publish the one loaded directory name for every destination. Inputs: Scene
- * coordinate/mask, eight-cell display name for update, optional callback.
- * Outputs: async operations borrowing the existing 1,000-row general cache;
- * no additional cache or retained Scene-name SRAM is allocated. Affiliates:
- * Menu Scene entry and filesystem root Scene/Bank load-save state machines.
+ * only Scene rows selected by scene_mask with one fixed eight-cell name. As of
+ * Session 061 a Scene-op update (root Scene Load or Scene Save) additionally
+ * overlays the committed Kit row and six Instrument rows of every destination
+ * from the identity store, so the register names the complete hierarchy the
+ * action just read or wrote; the boot reader's Case-2 Kit/Instrument narrow
+ * paths build physical folder names from exactly these rows. Read-only load
+ * requests are unchanged. Why: SceneData deliberately has no per-Scene
+ * display-name mirror; Menu needs one name for one Scene Load/Save editor,
+ * while a multi-target Scene Load must publish the one loaded directory name
+ * for every destination. Inputs: Scene coordinate/mask, eight-cell display
+ * name for update, optional callback. Outputs: async operations borrowing the
+ * existing 1,000-row general cache; no additional cache or retained Scene-name
+ * SRAM is allocated. Affiliates: Menu Scene entry, filesystem root Scene/Bank
+ * load-save state machines, and filesystem_cacheCurrentResidentSceneChildNames().
  */
 bool filesystem_requestLoadResidentSceneName(uint8_t scene_index,
                                              fs_completion_cb_t cb);
@@ -496,32 +930,48 @@ bool filesystem_requestUpdateResidentSceneNames(
     fs_completion_cb_t cb);
 /* Borrow the requested Scene row while HCNAMES owns the shared cache. */
 const char *filesystem_residentSceneName(uint8_t scene_index);
+/* Borrow the appended Pattern row for one resident Scene. */
+const char *filesystem_residentPatternName(uint8_t scene_index);
 /*
- * Load one registered Instrument type's `.hcindex` asynchronously.
+ * Load or repair one registered Instrument type's browser index.
  *
- * Inputs: a registered type and optional completion callback. Output: the
- * single shared Instrument name cache is replaced from that type's own
- * directory index. Clients call this when either nested Instrument Load or
- * nested Instrument Save is entered, and whenever its type changes. The
- * request never performs blocking SD work and returns false when the
- * filesystem is already busy or the type is not present in the registry.
+ * Inputs: registered type and optional completion callback. Output: the one
+ * shared cache contains that type's compact sorted stems. The fast path reads
+ * `.hcindex`; a missing or structurally invalid file transparently performs a
+ * selected-type physical scan and durable rewrite. The callback runs exactly
+ * once after either path and observes ERROR for genuine read/scan/write faults.
+ * The request performs no blocking runtime SD work and is refused only for an
+ * invalid type or busy facade. Clients: nested Instrument Load, InstrumentMrp,
+ * and Instrument Save entry/type transitions.
  */
 bool filesystem_requestLoadInstrumentIndex(instrument_type_t type,
                                            fs_completion_cb_t cb);
 /*
- * Load root Kit, root Scene, or root Bank slot-ordered names into the shared cache.
- * Each asynchronous request disposes the previous domain first, preserves
- * blank rows, and completes only when the selected `.hcindex` is available.
+ * Reload one existing root-library `.hcindex` into the shared browser cache.
+ *
+ * Inputs: a numbered root-library kind and optional completion callback.
+ * Output: the selected Kit, Scene, Bank, or Pattern slot-ordered index replaces the
+ * previous cache domain while preserving blank rows. This is a read-only cache
+ * restoration operation: it does not scan a directory or rewrite `.hcindex`.
+ * Pure Loads use it only after their runtime apply has completed; Saves use
+ * the separate filesystem-owned scan/rebuild chain after mutating a namespace.
+ */
+bool filesystem_requestReloadLibraryIndex(fs_library_index_kind_t kind,
+                                          fs_completion_cb_t cb);
+/*
+ * Compatibility wrappers for callers that already name one root domain.
+ * They delegate to filesystem_requestReloadLibraryIndex() and retain the same
+ * read-only, slot-preserving contract.
  */
 bool filesystem_requestLoadKitIndex(fs_completion_cb_t cb);
 bool filesystem_requestLoadSceneIndex(fs_completion_cb_t cb);
-/* Load `/Bank/.hcindex` into the one shared slot-ordered name cache; this
- * replaces any Kit or Scene rows because there is only one SRAM cache. */
 bool filesystem_requestLoadBankIndex(fs_completion_cb_t cb);
+/* Load the numbered root Pattern-file index into the shared browser cache. */
+bool filesystem_requestLoadPatternIndex(fs_completion_cb_t cb);
 /* True when the requested root library currently owns the shared cache. */
 bool filesystem_libraryNameCacheLoaded(fs_library_index_kind_t kind);
-/* Dispose the single shared Instrument/Kit/Scene/Bank browser cache or its
- * temporary 129-row HCNAMES view; no second name allocation exists. */
+/* Dispose the single shared Instrument/Kit/Scene/Bank/Pattern browser cache or its
+ * temporary 145-row HCNAMES view; no second name allocation exists. */
 void filesystem_clearNameCache(void);
 /* Compatibility spelling retained for existing Instrument menu callers. */
 void filesystem_clearInstrumentCache(void);
@@ -531,7 +981,7 @@ void filesystem_clearInstrumentCache(void);
  * Inputs are accepted only to keep stale developer-only callers buildable.
  * Outputs are empty/false and no filesystem transaction or SRAM cache is
  * created. Affiliates: matching presetManager compatibility stubs; musical
- * Load/Save code must use its Kit/Scene/Bank/Instrument requests instead.
+ * Load/Save code must use its Kit/Scene/Bank/Pattern/Instrument requests instead.
  */
 bool filesystem_requestScanTestFiles(fs_completion_cb_t cb);
 bool filesystem_requestScanTestDirs(fs_completion_cb_t cb);
@@ -617,6 +1067,22 @@ const kit_t *filesystem_loadedKit(void);
  */
 const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void);
 /*
+ * Report whether the just-completed staged Instrument came from `.hctmp`.
+ *
+ * Inputs: none; valid only in the completion window after the successful
+ * Instrument callback and before any later filesystem request starts. Output:
+ * nonzero exactly for the hidden reversible `kit` source captured by
+ * filesystem_requestLoadInstrumentTemp(). Why: Menu must distinguish a root
+ * pool replacement, which changes retained Instrument owners and marks
+ * AutoSave, from a temporary rollback without inferring it from the mutable
+ * browser cursor or its separate UI-operation latch. Affiliate: Menu's
+ * PRESET_OP_INSTRUMENT_LOAD completion handling.
+ */
+uint8_t filesystem_loadedInstrumentWasTemporary(void);
+/* True only when the completed hidden Instrument load is the Morph-only
+ * reversible `kit` baseline used by InstrumentMrp. */
+uint8_t filesystem_loadedInstrumentWasMorphTemporary(void);
+/*
  * Save/load the reversible normal Instrument Load `kit` source.
  *
  * Inputs: one Scene/voice and its typed family. Output: the normal Instrument
@@ -629,10 +1095,17 @@ const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void);
 bool filesystem_requestSaveInstrumentTemp(uint8_t source_scene,
                                           uint8_t source_slot,
                                           fs_completion_cb_t cb);
+bool filesystem_requestSaveInstrumentMorphTemp(uint8_t source_scene,
+                                               uint8_t source_slot,
+                                               fs_completion_cb_t cb);
 bool filesystem_requestLoadInstrumentTemp(uint8_t destination_scene,
                                           uint8_t destination_slot,
                                           instrument_type_t type,
                                           fs_completion_cb_t cb);
+bool filesystem_requestLoadInstrumentMorphTemp(uint8_t destination_scene,
+                                               uint8_t destination_slot,
+                                               instrument_type_t type,
+                                               fs_completion_cb_t cb);
 uint8_t filesystem_installSamplesBlocking(void);
 uint8_t filesystem_installLoopsBlocking(void);
 
@@ -687,10 +1160,39 @@ const char *filesystem_sceneSlotName(uint16_t zero_based_slot);
  */
 uint8_t     filesystem_bankSlotExists(uint16_t zero_based_slot);
 const char *filesystem_bankSlotName(uint16_t zero_based_slot);
+/* Root Pattern slots are numbered files (`NNN <name>.pat`) rather than folders. */
+uint8_t     filesystem_patternSlotExists(uint16_t zero_based_slot);
+const char *filesystem_patternSlotName(uint16_t zero_based_slot);
 uint16_t    filesystem_firstKitSlot(void);
 uint16_t    filesystem_firstSceneSlot(void);
 uint16_t    filesystem_firstBankSlot(void);
+uint16_t    filesystem_firstPatternSlot(void);
+/*
+ * Report whether the completed Bank Load committed at least one child Scene.
+ *
+ * The result becomes true only after the shared Scene reader validates and
+ * commits a selected child, and remains available for the immediate Preset/
+ * Menu completion decision. Pure Bank Load does not start an index rebuild
+ * before that decision; Menu consumes this result before its later read-only
+ * post-DSP Bank-index reload.
+ */
 uint8_t     filesystem_lastBankLoadLoadedScene(void);
+/*
+ * Report the exact resident Scene mask committed by the completed Bank Load.
+ *
+ * Inputs: the immediately completed Bank operation, after its requested mask
+ * was intersected with actual 00..15 child presence. Output: a 16-bit mask of
+ * successfully loaded resident Scenes, or zero for a valid empty Bank. Why:
+ * Preset provenance must not relabel requested-but-missing children. The value
+ * is operation scratch and must be consumed by the immediate completion
+ * callback before another request starts. Affiliates:
+ * filesystem_lastBankLoadLoadedScene() and on_bank_load_complete().
+ */
+uint16_t    filesystem_lastBankLoadSceneMask(void);
+/* Bank Load children that failed with provably-invalid content.  Nonzero
+ * signals Menu to show the existing filesystem error overlay after an
+ * otherwise-successful FS_STATUS_DONE Bank Load. */
+uint16_t    filesystem_lastBankLoadFailedSceneMask(void);
 /*
  * Query whether a root Instrument save target already exists.
  *

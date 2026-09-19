@@ -46,6 +46,8 @@
 #include "storageTypes.h"
 #include "presetMorphEngine.h"
 #include "BankData.h"
+#include "Autosave.h"
+#include "AutosaveTrace.h"
 #include "mixer.h"
 #include "valueShaper.h"
 #include <string.h>
@@ -74,7 +76,7 @@ static volatile uint8_t          pm_request_type = SAVE_TYPE_KIT;
  * menu.h prevents invisible UI slots from being selected by encoder stepping. */
 enum {
     PRESET_REQUEST_LEGACY_MORPH = NUM_SAVE_TYPES,
-    PRESET_REQUEST_LEGACY_PATTERN,
+    PRESET_REQUEST_PATTERN,
     PRESET_REQUEST_LEGACY_PERFORMANCE,
     PRESET_REQUEST_LEGACY_ALL,
 };
@@ -84,6 +86,7 @@ static volatile instrument_type_t pm_instrument_request_type = INSTRUMENT_TYPE_U
 /* The selected Instrument row can be any of the shared cache's 1,000 entries. */
 static volatile uint16_t         pm_instrument_request_index = 0u;
 static volatile uint16_t         pm_kit_request_scene_mask = 0u;
+static uint16_t                  pm_bank_load_failed_scene_mask = 0u;
 
 static void preset_markRequestedScenesPresentOnSuccessfulLoad(void)
 {
@@ -122,6 +125,20 @@ static void preset_markRequestedScenesPresentOnSuccessfulLoad(void)
  * Morph menu mirrors and global decimation apply at Scene switch time.
  */
 static uint8_t drumset_apply_active = 0;
+/*
+ * A Scene activation normally waits for each pending voice's amp envelope to
+ * become quiet before replacing that voice's runtime image. Continuous play
+ * can keep an envelope non-quiet indefinitely, which leaves this foreground
+ * worker active and consequently keeps Menu's accepted Load command from
+ * reaching its terminal index restore and command cleanup. The existing
+ * trigger-time force path already defines the accepted recovery behavior for
+ * a voice that cannot wait; this one-second bound selects that path after
+ * 1,000 main-tick passes without quiet progress. The value is a timing bound,
+ * not a new persistence or audio image.
+ */
+#define DRUMSET_APPLY_FORCE_TICKS 1000u
+/* Consecutive non-quiet foreground passes for the currently armed worker. */
+static uint16_t drumset_apply_stall_ticks = 0u;
 static uint8_t drumset_apply_voice = 0;
 static uint8_t drumset_apply_scene = 0u;
 static uint16_t drumset_apply_pending_mask = 0u;
@@ -232,8 +249,36 @@ static void preset_completeFilesystemOp(preset_op_type_t completed_op)
 
 static void on_kit_load_complete(void)
 {
+    uint8_t scene_index;
+
+    /*
+     * Publish the complete retained Kit image only after the normal Kit request
+     * reached its terminal successful filesystem callback.
+     *
+     * Inputs: the immutable pm_kit_request_scene_mask captured when
+     * preset_loadKitForScenes() was accepted, and FS_STATUS_DONE before
+     * preset_completeFilesystemOp() acknowledges the facade. Outputs: every
+     * selected now-present Scene receives the existing whole-Kit dirty scope,
+     * comprising its two live Kit settings and all six complete Instrument
+     * regions. Why: filesystem_loadKitDirectory_tick() assigns kit_t directly
+     * after validation, bypassing scalar SceneData/Preset setters. The marker
+     * records the already-retained bytes only; it performs no I/O and does not
+     * change HCNAMES, Menu state, or runtime application. Affiliates:
+     * preset_markRequestedScenesPresentOnSuccessfulLoad(),
+     * autosave_markKitDirty(), and preset_completeFilesystemOp().
+     */
     preset_markRequestedScenesPresentOnSuccessfulLoad();
-	preset_completeFilesystemOp(PRESET_OP_KIT_LOAD);
+    if (filesystem_status() == FS_STATUS_DONE) {
+        for (scene_index = 0u;
+             scene_index < SCENE_COUNT && scene_index < 16u;
+             scene_index++) {
+            if ((pm_kit_request_scene_mask &
+                 (uint16_t)(1u << scene_index)) != 0u) {
+                autosave_markKitDirty(scene_index);
+            }
+        }
+    }
+    preset_completeFilesystemOp(PRESET_OP_KIT_LOAD);
 }
 
 static void on_kit_save_complete(void)
@@ -283,11 +328,27 @@ static void on_morph_load_complete(void)
 
 static void on_globals_load_complete(void)
 {
+    /*
+     * Apply the loaded AutoSave preference at the completed file boundary.
+     *
+     * Inputs: terminal keyed-settings status and normalized flat policy byte.
+     * Output: successful boot or manual Settings Load updates only in-memory
+     * autosave authorization; any runtime setup remains asynchronous until the
+     * facade is acknowledged/idle. Errors preserve the current policy. Why:
+     * menu_sendAllGlobals() intentionally has no file-lifecycle side effects.
+     * Affiliates: main.c's early boot load, Menu Global apply, and
+     * filesystem_setAutosaveEnabled().
+     */
+    if (filesystem_status() == FS_STATUS_DONE) {
+        filesystem_setAutosaveEnabled(
+            parameter_values[PAR_AUTOSAVE_ENABLED]);
+    }
     preset_completeFilesystemOp(PRESET_OP_GLOBALS_LOAD);
 }
 
 static void on_pattern_load_complete(void)
 {
+    preset_markRequestedScenesPresentOnSuccessfulLoad();
     preset_completeFilesystemOp(PRESET_OP_PATTERN_LOAD);
 }
 
@@ -338,6 +399,12 @@ static void on_instrument_temp_save_complete(void)
     preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_TEMP_SAVE);
 }
 
+static void on_instrument_morph_temp_save_complete(void)
+{
+    /* Report completion of the hidden Morph-only InstrumentMrp baseline. */
+    preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_MORPH_TEMP_SAVE);
+}
+
 static void on_instrument_morph_save_complete(void)
 {
     /*
@@ -365,9 +432,71 @@ static void on_instrument_morph_load_complete(void)
     preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_MORPH_LOAD);
 }
 
+static void on_instrument_morph_temp_load_complete(void)
+{
+    /* The staged hidden file is committed through the Morph-only path. */
+    preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_MORPH_TEMP_LOAD);
+}
+
 static void on_scene_load_complete(void)
 {
+    uint8_t scene_index;
+
+    /*
+     * This is a RAM-only completion witness, emitted before any presence
+     * promotion or mutation marking. Its input is the filesystem terminal
+     * status still associated with this callback and the immutable destination
+     * mask captured by preset_loadSceneForScenes(). Bit 0 proves that the
+     * callback observed FS_STATUS_DONE; value32 preserves the exact Scene
+     * destinations the callback will iterate. Thus a missing R record proves
+     * the callback was not reached, R with bit 0 clear proves a terminal error
+     * entered it, and R with value zero proves the request arrived without a
+     * destination. It performs no filesystem I/O and adds no retained state.
+     */
+    autosaveTrace_record(AUTOSAVE_TRACE_STAGE_SCENE_LOAD_COMPLETE,
+                         (uint8_t)(filesystem_status() == FS_STATUS_DONE
+                                       ? AUTOSAVE_TRACE_SCENE_LOAD_COMPLETE_FLAG_STATUS_DONE
+                                       : 0u),
+                         (uint32_t)pm_kit_request_scene_mask);
+
+    /*
+     * Complete a durable root Scene load.
+     *
+     * Inputs: filesystem terminal status and the retained destination mask.
+     * Output: successful destinations become Bank-present before Menu begins
+     * runtime apply. The filesystem already stages HCNAMES provenance with the
+     * paired committed identity; Preset neither mirrors it nor dirties
+     * settings.cfg.
+     *
+     * Inputs: FS_STATUS_DONE and the immutable destination mask captured by
+     * preset_loadSceneForScenes(). Outputs: every selected now-present Scene
+     * gets the complete Scene scope—live Scene settings, the current Effect
+     * scope, the complete Kit scope, and the separate Pattern AutoSave dirty
+     * bit. Why:
+     * filesystem_commitSceneStage() assigns settings and kit_t directly before
+     * Pattern I/O; marking there could publish a load whose later Pattern,
+     * Effect, or HCNAMES work failed. This completion is the first boundary at
+     * which the complete Scene replacement, including Pattern, is known to
+     * have succeeded. Affiliates:
+     * filesystem_commitSceneStage(),
+     * preset_markRequestedScenesPresentOnSuccessfulLoad(),
+     * autosave_markSceneWithPatternDirty(), and
+     * preset_completeFilesystemOp().
+     */
     preset_markRequestedScenesPresentOnSuccessfulLoad();
+    if (filesystem_status() == FS_STATUS_DONE) {
+        for (scene_index = 0u;
+             scene_index < SCENE_COUNT && scene_index < 16u;
+             scene_index++) {
+            if ((pm_kit_request_scene_mask &
+                 (uint16_t)(1u << scene_index)) != 0u) {
+                /* A directory-backed Pattern replacement starts its own
+                 * hidden AutoSave generation epoch before dirty marking. */
+                filesystem_resetPatternAutosaveGeneration(scene_index);
+                autosave_markSceneWithPatternDirty(scene_index);
+            }
+        }
+    }
     preset_completeFilesystemOp(PRESET_OP_SCENE_LOAD);
 }
 
@@ -386,6 +515,9 @@ static void on_scene_save_complete(void)
 
 static void on_bank_load_complete(void)
 {
+    uint16_t completed_scene_mask;
+    uint8_t scene_index;
+
     /*
      * Complete one root Bank load.
      *
@@ -393,7 +525,43 @@ static void on_bank_load_complete(void)
      * Scene child or reported a valid empty Bank through
      * filesystem_lastBankLoadLoadedScene(). Menu/boot decide whether to run
      * the fallback chain after reading that bit.
+     *
+     * Inputs: FS_STATUS_DONE and filesystem_lastBankLoadSceneMask() before the
+     * completion helper acknowledges operation scratch. Output: each set child
+     * bit receives the complete Scene dirty scope, including Pattern; a valid
+     * empty Bank yields no Scene marks. Why: the original request may name absent
+     * children, while bank_scenePresentMask() also contains retained unselected
+     * Scenes; only the completed effective-child mask identifies this Bank
+     * Load's payload. BankData has already marked changed Bank fields through
+     * its own setters. Affiliates: filesystem_lastBankLoadSceneMask(), Bank
+     * phase-20 metadata commit, autosave_markSceneWithPatternDirty(), and
+     * preset_completeFilesystemOp().
      */
+    if (filesystem_status() == FS_STATUS_DONE) {
+        completed_scene_mask = filesystem_lastBankLoadSceneMask();
+        pm_bank_load_failed_scene_mask = filesystem_lastBankLoadFailedSceneMask();
+        for (scene_index = 0u;
+             scene_index < SCENE_COUNT && scene_index < 16u;
+             scene_index++) {
+            if ((completed_scene_mask & (uint16_t)(1u << scene_index)) != 0u) {
+                /* The loaded Bank child owns a fresh Pattern source; its next
+                 * AutoSave image must begin at generation 1/file A. */
+                filesystem_resetPatternAutosaveGeneration(scene_index);
+                autosave_markSceneWithPatternDirty(scene_index);
+            }
+        }
+        /*
+         * Option 2: publish card-clean authority for the completed effective
+         * child mask. The Bank Load slot is bank_restoreBankSlot(), set by the
+         * Bank phase-20 metadata commit. Publishing here (not during the commit)
+         * keeps the clean bit separate from the Autosave whole-Scene marker that
+         * the loop above also issues: the marker tracks persistence, while the
+         * clean bit tracks equality to the on-card child. Same-slot loads OR
+         * into existing bits; a different slot replaces the old authority.
+         */
+        bank_publishSdCleanAuthority(bank_restoreBankSlot(),
+                                     completed_scene_mask);
+    }
     preset_completeFilesystemOp(PRESET_OP_BANK_LOAD);
 }
 
@@ -479,6 +647,7 @@ static fs_file_type_t preset_fileTypeFromSaveType(uint8_t what, uint8_t *hasName
     case SAVE_TYPE_KIT_MORPH:   return FS_FILE_KIT;
     case SAVE_TYPE_SCENE:       return FS_FILE_SCENE;
     case SAVE_TYPE_BANK:        return FS_FILE_BANK;
+    case SAVE_TYPE_PATTERN:     return FS_FILE_PATTERN;
     case SAVE_TYPE_GLO:
         if (hasName) *hasName = 0;
         return FS_FILE_SETTINGS;
@@ -563,7 +732,6 @@ void preset_applySoundParameter(uint16_t paramNr, uint8_t value,
                                 uint8_t recordAutomation)
 {
     MidiMsg msg = {0};
-    uint8_t automationDest;
 
     /*
      * Applies one sound parameter directly to stored preset state and DSP.
@@ -601,17 +769,15 @@ void preset_applySoundParameter(uint16_t paramNr, uint8_t value,
     if (paramNr < 128u) {
         msg.status = MIDI_CC;
         msg.data1 = (uint8_t)((paramNr + 1u) & 0x7fu);
-        automationDest = msg.data1;
     } else {
         msg.status = MIDI_CC2;
         msg.data1 = (uint8_t)(paramNr - 128u);
-        automationDest = (uint8_t)paramNr;
     }
     msg.data2 = value;
     midiParser_ccHandler(msg, 1);
 
-    if (recordAutomation)
-        seq_recordAutomation(menu_getActiveVoice(), automationDest, value);
+    /* Pattern automation was removed with Step storage; retain no edit copy. */
+    (void)recordAutomation;
 }
 
 static uint8_t preset_applyInstrumentRuntimeValueInternal(uint8_t scene_index,
@@ -671,6 +837,58 @@ uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
     return preset_applyInstrumentRuntimeValueInternal(scene_index, id, value, 0u);
 }
 
+/*
+ * Commit one validated Instrument endpoint cell and mark its exact wire cell.
+ *
+ * Inputs: destination Scene/slot, active-type descriptor index, endpoint
+ * selection, and value after the public caller validates descriptor policy.
+ * Output: only a changed retained byte is stored, then the matching normal or
+ * Morph Autosave marker is called; equal values do nothing. Why: generic
+ * descriptor setters cover every current/future instrument type without per-
+ * type dirty switches. Affiliates: InstrumentManager registry validation,
+ * preset_setInstrumentParameter(), supplemental normalization, and Autosave's
+ * descriptor-indexed live getter. Derived interpolation is never marked.
+ */
+static void preset_storeInstrumentEndpoint(uint8_t scene_index,
+                                           uint8_t slot,
+                                           uint8_t descriptor_index,
+                                           instrument_image_select_t image,
+                                           instrument_param_value_t value)
+{
+    kit_instrument_slot_t *instrument =
+        scene_instrumentSlot(scene_index, slot);
+    instrument_param_value_t *storage;
+
+    if (!instrument || descriptor_index >= INSTRUMENT_PARAM_COUNT)
+        return;
+    if (image == INSTRUMENT_IMAGE_MORPH) {
+        storage = &instrument->parameter_images
+            .morph_instrument_parameters[descriptor_index];
+    } else {
+        storage = &instrument->parameter_images
+            .instrument_parameters[descriptor_index];
+    }
+    if (*storage == value)
+        return;
+    *storage = value;
+    /*
+     * Option 2: a committed Instrument normal/Morph byte invalidates the owning
+     * Scene's card-clean bit. This is the Instrument-side complement of
+     * SceneData's scalar funnels; an equal-value no-op was already rejected, so
+     * this line runs only for real retained-data change. It stays separate from
+     * the Autosave normal/Morph marker for the same source/authority reason.
+     * Affiliates: bank_invalidateSdCleanScene(), filesystem Bank Save skip.
+     */
+    bank_invalidateSdCleanScene(scene_index);
+    if (image == INSTRUMENT_IMAGE_MORPH) {
+        autosave_markInstrumentMorphParameterDirty(
+            scene_index, slot, descriptor_index);
+    } else {
+        autosave_markInstrumentNormalParameterDirty(
+            scene_index, slot, descriptor_index);
+    }
+}
+
 uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
                                       uint8_t descriptor_index,
                                       instrument_image_select_t image,
@@ -693,17 +911,15 @@ uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
      *
      * Why this exists: Menu, MIDI translation, tests, and future instrument
      * import should not write the Scene arrays directly. The setter enforces
-     * descriptor ownership/range, chooses the persisted endpoint, and schedules
-     * Morph interpolation so the runtime image and DSP backend follow the
-     * Scene state. Affiliate code: presetMorphEngine owns
+     * descriptor ownership/range, chooses the persisted endpoint, commits only
+     * a changed byte through the generic endpoint/Autosave boundary, and
+     * schedules Morph interpolation so the runtime image and DSP backend follow
+     * the Scene state. Affiliate code: presetMorphEngine owns
      * morph_interpolation[], while preset_applyInstrumentRuntimeValueInternal()
      * owns the temporary legacy DSP mirror.
      */
-    if (image == INSTRUMENT_IMAGE_MORPH) {
-        instrument->parameter_images.morph_instrument_parameters[descriptor_index] = value;
-    } else {
-        instrument->parameter_images.instrument_parameters[descriptor_index] = value;
-    }
+    preset_storeInstrumentEndpoint(
+        scene_index, slot, descriptor_index, image, value);
 
     if (scene_index == scene_getActiveIndex()) {
         scene_t *scene = scene_get(scene_index);
@@ -757,9 +973,12 @@ uint8_t preset_setSupplementalParameter(uint8_t scene_index, uint8_t slot,
      * store a local token interpreted through their paired target-voice row.
      * Preset retains the byte value unchanged; InstrumentManager expands it to
      * a canonical target ID only while applying the active Scene's runtime
-     * modulation graph.
+     * modulation graph. A changed normal token is stored and exactly marked by
+     * the generic endpoint helper before runtime apply; equal input creates no
+     * dirty work.
      */
-    instrument->parameter_images.instrument_parameters[descriptor_index] = value;
+    preset_storeInstrumentEndpoint(
+        scene_index, slot, descriptor_index, INSTRUMENT_IMAGE_MAIN, value);
     if (scene_index == scene_getActiveIndex())
         return instrumentManager_writeRuntime(slot, descriptor, value);
     return 1u;
@@ -903,15 +1122,20 @@ void preset_applySceneSettings(uint8_t scene_index)
     preset_applyVoiceDecimationAllRuntime(scene->settings.voice_decimation_all);
 }
 
-static void preset_storeSupplementalCell(kit_instrument_slot_t *instrument,
+static void preset_storeSupplementalCell(uint8_t scene_index,
+                                         uint8_t slot,
+                                         kit_instrument_slot_t *instrument,
                                          uint8_t index,
                                          instrument_param_value_t value)
 {
     /*
      * Keep all three generic images coherent for a non-morphable selector.
      *
-     * Inputs: retained slot, descriptor index, and normalized selector value.
-     * Output: main, Morph, and interpolation cells agree. This helper is kept
+     * Inputs: retained Scene/slot, slot pointer, descriptor index, and
+     * normalized selector value. Output: the serialized normal cell uses the
+     * common changed-value endpoint store and dirty marker; the nonserialized
+     * Morph mirror and derived interpolation cell are repaired directly. This
+     * helper is kept
      * separate from preset_setSupplementalParameter() because load-time
      * normalization must repair retained storage before that public setter
      * applies the active runtime binding; calling the setter three times would
@@ -919,7 +1143,8 @@ static void preset_storeSupplementalCell(kit_instrument_slot_t *instrument,
      */
     if (!instrument || index >= INSTRUMENT_PARAM_COUNT)
         return;
-    instrument->parameter_images.instrument_parameters[index] = value;
+    preset_storeInstrumentEndpoint(
+        scene_index, slot, index, INSTRUMENT_IMAGE_MAIN, value);
     instrument->parameter_images.morph_instrument_parameters[index] = value;
     instrument->parameter_images.morph_interpolation[index] = value;
 }
@@ -971,8 +1196,10 @@ static void preset_normalizeLfoTargetPair(uint8_t scene_index,
         token = instrumentManager_lfoTargetTokenFromId(
             scene_index, voice, id, INSTRUMENT_TARGET_MODULATION);
     }
-    preset_storeSupplementalCell(instrument, voice_index, voice);
-    preset_storeSupplementalCell(instrument, param_index, token);
+    preset_storeSupplementalCell(
+        scene_index, source_slot, instrument, voice_index, voice);
+    preset_storeSupplementalCell(
+        scene_index, source_slot, instrument, param_index, token);
 }
 
 static void preset_normalizeSlotModulationTargets(uint8_t scene_index,
@@ -1007,7 +1234,8 @@ static void preset_normalizeSlotModulationTargets(uint8_t scene_index,
                 scene_index, source_slot, target)) {
             target = INSTRUMENT_TARGET_TOKEN_OFF;
         }
-        preset_storeSupplementalCell(instrument, velocity_index, target);
+        preset_storeSupplementalCell(
+            scene_index, source_slot, instrument, velocity_index, target);
     }
 }
 
@@ -1043,19 +1271,24 @@ static void preset_applyKitVoiceSupplemental(uint8_t scene_index, uint8_t voice)
     }
 }
 
-/* Apply one loaded Scene kit slot's non-image affiliates.
+/* Reset and apply one loaded Scene slot's descriptor image, without binding
+ * cross-slot modulation destinations.
  *
- * Why this helper changed: the directory Kit loader now stores audio routing
- * and non-morph runtime cells in SceneData, while morphable image bytes are
- * handled by the Morph worker. A one-slot helper keeps post-load foreground
- * work bounded.
+ * Why this boundary exists: a tagged runtime member must first be reset from
+ * the active Scene's actual type, then receive routing and Morph-derived
+ * descriptor values. LFO/velocity targets are deliberately excluded because
+ * their target can be any other slot; binding them before every target member
+ * has been reset would resolve a valid token through a stale runtime type.
  *
- * Inputs: active Scene index and zero-based slot. Outputs: mixer route,
- * non-morph runtime cells are applied through typed Preset setters. Clients are
- * synchronous boot apply, preset_tickDrumsetApply(), and the one-slot
- * Instrument Load apply cursor.
+ * Inputs: active Scene index and zero-based slot. Outputs: the matching tagged
+ * member, its Scene routing, and its morphable descriptor image are current.
+ * Clients: synchronous boot activation, deferred Scene switching, and the
+ * trigger-time replacement path. Affiliates: preset_applyKitVoiceSupplemental
+ * owns the later all-source graph rebind, while InstrumentManager owns tagged
+ * type construction and PresetMorph owns descriptor interpolation.
  */
-static void preset_applyKitVoice(uint8_t scene_index, uint8_t voice)
+static void preset_resetAndApplyKitVoiceImage(uint8_t scene_index,
+                                              uint8_t voice)
 {
     if (!scene_instrumentSlotConst(scene_index, voice) ||
         voice >= INSTRUMENT_SLOT_COUNT) {
@@ -1065,42 +1298,88 @@ static void preset_applyKitVoice(uint8_t scene_index, uint8_t voice)
     /*
      * Rebind the DSP runtime type at the same time as parameter commit.
      *
-     * Input: active Scene slot selected by the deferred apply worker. Output:
+     * Input: active Scene slot selected by the activation worker. Output:
      * InstrumentManager's runtime type shadow and the concrete DSP voice object
-     * are reset immediately before descriptor/audio/supplemental values are
-     * copied in. Inactive Scene retained writes must not call this path because
-     * the runtime shadow always belongs to the audible Scene.
+     * are reset immediately before routing/Morph descriptor values are copied.
+     * Inactive Scene retained writes must not call this path because the
+     * runtime shadow always belongs to the audible Scene.
      */
     if (scene_index == scene_getActiveIndex())
         instrumentManager_resetRuntimeSlot(voice);
     (void)preset_applyKitAudioRouting(scene_index, voice);
-    preset_applyKitVoiceSupplemental(scene_index, voice);
     presetMorph_applyVoiceNow(scene_index, voice);
 }
 
-/* Synchronous loaded-kit apply.
+/* Start the existing bounded all-source modulation rebind cursor.
+ *
+ * Inputs: an active Scene whose every slot has already received its incoming
+ * tagged runtime type and descriptor image. Outputs: preset_tickInstrumentApply
+ * will normalize/install one source's velocity plus both LFO target pairs per
+ * foreground pass. Reusing this cursor avoids a new retained allocation and
+ * gives boot, deferred Scene selection, and normal Instrument Load the same
+ * target-resolution ordering. Clients must keep the Scene apply gate active
+ * until the cursor drains so Menu never releases a half-rebound graph.
+ */
+static void preset_startSceneModulationRebind(uint8_t scene_index)
+{
+    instrument_apply_active = 1u;
+    instrument_apply_scene = scene_index;
+    instrument_apply_phase = INSTRUMENT_APPLY_PHASE_TARGET_REBIND;
+    instrument_apply_rebind_source = 0u;
+    instrument_apply_morph_only = 0u;
+}
+
+/* Synchronously activate the complete active Scene before audio starts.
 **
-** Safe before audio starts and retained for boot-time loads. Runtime load
-** completion should prefer preset_startDrumsetApply()/preset_tickDrumsetApply()
-** so the six mod-target updates do not run as one foreground burst. */
+** Inputs: the Bank/Scene loader has committed and selected the active Scene;
+** audioCodec_renderCount is still zero. Outputs: all six tagged runtime types,
+** descriptor images, routing, and all-source LFO/velocity bindings match that
+** one Scene before DMA audio can render. The transaction is deliberately
+** four ordered phases: clear outgoing graph, reset/apply every image, drain
+** pending Morph writes, and returns with a coherent pre-audio image. It does
+** not install LFO/velocity targets: main.c starts the exact
+** preset_startDrumsetApply()/preset_tickDrumsetApply() Scene-switch worker as
+** soon as the audio engine is live. This avoids claiming that a boot-specific
+** pre-audio binding sequence is equivalent to the already-working runtime
+** Scene lifecycle. No retained state is allocated. */
 void preset_sendDrumsetParameters(void)
 {
     uint8_t voice;
 
+    instrumentManager_clearAllRuntimeModulationTargets();
+    preset_ensureMorphInitialized();
     preset_applySceneSettings(scene_getActiveIndex());
     for (voice = 0; voice < 6u; voice++)
-        preset_applyKitVoice(scene_getActiveIndex(), voice);
+        preset_resetAndApplyKitVoiceImage(scene_getActiveIndex(), voice);
 
     while (presetMorph_tick()) {
-        /* Boot-time synchronous path: audio has not started, so drain the
-         * Scene Morph worker immediately after applying routing. Runtime load
-         * completion uses preset_tickDrumsetApply() to perform the same work
-         * one foreground pass at a time. */
+        /*
+         * Resolve every pending descriptor interpolation before target install.
+         *
+         * Inputs: all six reset/image-applied members plus any retained Morph
+         * worker requests from the loaded active Scene. Output: final
+         * descriptor-domain bases are live before an LFO adapter snapshots its
+         * destination. This is pre-audio only; runtime Scene switching keeps
+         * the same ordering through its normal bounded workers. Affiliates:
+         * presetMorph_applyVoiceNow(), preset_tickInstrumentApply(), and
+         * instrumentManager_installLfoModulationTarget().
+         */
     }
+
 }
 
 void preset_startDrumsetApply(void)
 {
+    /*
+     * Detach outgoing runtime targets before the deferred Scene worker starts.
+     *
+     * Inputs: the six currently tagged runtime members and their all-source
+     * modulation graph. Output: no LFO or velocity node retains a pointer into
+     * a member that the worker may overwrite after a quiet or trigger-time
+     * handoff. This runs once per worker, not per slot reset, so later slots do
+     * not erase destinations that earlier incoming slots have already rebuilt.
+     */
+    instrumentManager_clearAllRuntimeModulationTargets();
     preset_ensureMorphInitialized();
     preset_applySceneSettings(scene_getActiveIndex());
     drumset_apply_scene = scene_getActiveIndex();
@@ -1108,6 +1387,8 @@ void preset_startDrumsetApply(void)
         (uint16_t)((1u << INSTRUMENT_SLOT_COUNT) - 1u);
     drumset_apply_active = 1u;
     drumset_apply_voice = 0u;
+    /* A new Scene worker must not inherit non-progress from its predecessor. */
+    drumset_apply_stall_ticks = 0u;
 }
 
 uint8_t preset_tickDrumsetApply(void)
@@ -1131,6 +1412,22 @@ uint8_t preset_tickDrumsetApply(void)
         return 0u;
     }
 
+    /*
+     * Complete Scene activation only after every incoming member is live.
+     *
+     * Inputs: the image pass cleared its six pending bits. Outputs: the
+     * existing Instrument apply cursor rebuilds all LFO/velocity sources
+     * against the final tagged type vector, one source per foreground pass.
+     * Keeping drumset_apply_active set until this cursor drains makes Menu's
+     * normal sound-apply gate wait for graph validity without new state.
+     */
+    if (drumset_apply_pending_mask == 0u) {
+        if (instrument_apply_active && preset_tickInstrumentApply())
+            return 1u;
+        drumset_apply_active = 0u;
+        return 0u;
+    }
+
     for (checked = 0u; checked < INSTRUMENT_SLOT_COUNT; checked++) {
         uint8_t voice = drumset_apply_voice;
         uint16_t bit = (uint16_t)(1u << voice);
@@ -1148,19 +1445,34 @@ uint8_t preset_tickDrumsetApply(void)
             drumset_apply_voice = 0u;
         if ((drumset_apply_pending_mask & bit) == 0u)
             continue;
-        if (!instrumentManager_ampEnvelopeQuiet(voice))
+        if (!instrumentManager_ampEnvelopeQuiet(voice)) {
+            /*
+             * No quiet result is observable for this pending voice. Count
+             * foreground passes rather than wall-clock calls so the bound is
+             * expressed in the same cadence that owns this cooperative
+             * worker. Once the bound is reached, use the already-established
+             * trigger-time force commit for this exact voice and clear the
+             * episode counter. The pending-mask helper performs the normal
+             * runtime-image commit; this branch only guarantees progress.
+             */
+            if (++drumset_apply_stall_ticks >= DRUMSET_APPLY_FORCE_TICKS) {
+                drumset_apply_stall_ticks = 0u;
+                preset_applyDeferredSceneSlotForTrigger(voice);
+            }
             continue;
+        }
 
-        preset_applyKitVoice(drumset_apply_scene, voice);
+        /* A quiet commit is real progress; a later voice starts a new wait. */
+        drumset_apply_stall_ticks = 0u;
+
+        preset_resetAndApplyKitVoiceImage(drumset_apply_scene, voice);
         drumset_apply_pending_mask =
             (uint16_t)(drumset_apply_pending_mask & ~bit);
         if (drumset_apply_pending_mask == 0u)
-            drumset_apply_active = 0u;
+            preset_startSceneModulationRebind(drumset_apply_scene);
         return 1u;
     }
 
-    if (drumset_apply_pending_mask == 0u)
-        drumset_apply_active = 0u;
     return 0u;
 }
 
@@ -1174,9 +1486,10 @@ void preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track)
      *
      * Inputs: visible trigger track 0..6 from the sequencer/MIDI trigger queue.
      * Output: if that track maps to a pending instrument slot for the active
-     * Scene, the slot's runtime type, parameters, LFO slots/targets, audio out,
-     * and future per-instrument mix affiliates are applied synchronously before
-     * InstrumentManager receives the note trigger.
+     * Scene, its runtime type, descriptor image, and audio route apply before
+     * InstrumentManager receives the note trigger. Cross-slot LFO/velocity
+     * bindings stay detached until every pending member is valid, then the
+     * common all-source rebind cursor installs them without stale pointers.
      */
     if (!drumset_apply_active ||
         drumset_apply_scene != scene_getActiveIndex()) {
@@ -1192,11 +1505,11 @@ void preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track)
         return;
 
     presetMorph_prioritizeVoice(drumset_apply_scene, voice);
-    preset_applyKitVoice(drumset_apply_scene, voice);
+    preset_resetAndApplyKitVoiceImage(drumset_apply_scene, voice);
     drumset_apply_pending_mask =
         (uint16_t)(drumset_apply_pending_mask & ~bit);
     if (drumset_apply_pending_mask == 0u)
-        drumset_apply_active = 0u;
+        preset_startSceneModulationRebind(drumset_apply_scene);
 }
 
 static uint8_t preset_copyInstrumentNormalToMorphIfSameType(
@@ -1257,6 +1570,66 @@ static uint8_t preset_commitStagedInstrumentNormalToMorph(
     return preset_copyInstrumentNormalToMorphIfSameType(destination, staged);
 }
 
+static uint8_t preset_copyInstrumentMorphToMorphIfSameType(
+    kit_instrument_slot_t *destination,
+    const kit_instrument_slot_t *source)
+{
+    const instrument_registry_entry_t *entry;
+    uint8_t index;
+    uint8_t copied = 0u;
+
+    /*
+     * Copy one staged source Morph endpoint into a resident Morph endpoint.
+     *
+     * Inputs: destination resident slot and staged source slot. Output:
+     * Morphable descriptor cells are copied from the staged Morph image only
+     * when the instrument types match. This restores the entry endpoint domain
+     * captured by the hidden InstrumentMrp kit snapshot. A mismatch is a
+     * complete no-change for that slot, which keeps InstrumentMrp
+     * per-instrument and avoids inventing cross-type parameter mapping.
+     */
+    if (!destination || !source || destination->type != source->type)
+        return 0u;
+    entry = instrumentManager_registryEntry(destination->type);
+    if (!entry)
+        return 0u;
+    for (index = 0u; index < entry->descriptor_count; index++) {
+        const ParamDescriptor *descriptor = &entry->descriptors[index];
+        if (!(descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE))
+            continue;
+        destination->parameter_images.morph_instrument_parameters[index] =
+            source->parameter_images.morph_instrument_parameters[index];
+        copied = 1u;
+    }
+    return copied;
+}
+
+static uint8_t preset_commitStagedInstrumentMorphToMorph(
+    uint8_t scene_index,
+    uint8_t slot)
+{
+    const kit_instrument_slot_t *staged =
+        (const kit_instrument_slot_t *)filesystem_loadedInstrumentSlot();
+    kit_instrument_slot_t *destination = scene_instrumentSlot(scene_index, slot);
+
+    /*
+     * Commit the staged hidden InstrumentMrp baseline as a Morph restore.
+     *
+     * The hidden snapshot's meaningful payload is its [morph] section, whose
+     * cells are the entry-time Morphable Morph endpoints. Unlike a pool
+     * InstrumentMrp load, which copies the file's normal endpoints, this path
+     * copies the staged Morph image back into the same resident Morph domain.
+     * Type, Normal image, display name, HCNAMES source, and routing remain
+     * untouched while the previewed endpoints return to their entry values.
+     */
+    if (!destination || !staged || slot >= INSTRUMENT_SLOT_COUNT ||
+        staged->type != destination->type ||
+        staged->type != (instrument_type_t)pm_instrument_request_type) {
+        return 0u;
+    }
+    return preset_copyInstrumentMorphToMorphIfSameType(destination, staged);
+}
+
 static uint8_t preset_commitStagedKitNormalToMorph(void)
 {
     const kit_t *source = filesystem_loadedKit();
@@ -1290,16 +1663,63 @@ static uint8_t preset_commitStagedKitNormalToMorph(void)
         for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
             if (preset_copyInstrumentNormalToMorphIfSameType(
                     &scene->kit.instruments[slot],
-                    &source->instruments[slot]) &&
-                scene_index == scene_getActiveIndex()) {
-                presetMorph_requestVoice(scene_index, slot);
-                active_queued = 1u;
+                    &source->instruments[slot])) {
+                /*
+                 * Record one successful KitMrp endpoint import at its
+                 * retained-data boundary.
+                 *
+                 * Inputs: a selected resident Scene/slot and a nonzero result
+                 * from preset_copyInstrumentNormalToMorphIfSameType(), which
+                 * proves the source and destination types matched and one or
+                 * more Morphable destination cells were assigned. Output:
+                 * Autosave offers exactly that slot's Morphable Morph
+                 * descriptor cells to its existing tracking/Bank-present map.
+                 * Why: KitMrp preserves type, Normal image, names, routing,
+                 * and modulation ownership, so a whole-Kit or whole-Instrument
+                 * marker would over-publish unrelated payload. This is outside
+                 * the active Scene runtime branch: inactive Bank-present Scenes
+                 * also need persistence, while only the active Scene needs
+                 * presetMorph_requestVoice(). Affiliates:
+                 * autosave_markInstrumentMorphDirty(),
+                 * presetMorph_requestVoice(), and the staged Kit lifetime
+                 * established by on_kit_morph_load_complete().
+                */
+                autosave_markInstrumentMorphDirty(scene_index, slot);
+                /*
+                 * Option 2: KitMrp changed the resident Morph endpoint image,
+                 * so the owning Scene can no longer be skipped as card-clean.
+                 * The slot-6 generated decay below invalidates through
+                 * SceneData; this covers the direct instrument-image copy that
+                 * otherwise bypasses the scalar funnels.
+                 */
+                bank_invalidateSdCleanScene(scene_index);
+                if (scene_index == scene_getActiveIndex()) {
+                    presetMorph_requestVoice(scene_index, slot);
+                    active_queued = 1u;
+                }
             }
         }
         if (INSTRUMENT_SLOT_COUNT > 5u &&
             scene->kit.instruments[5].type == source->instruments[5].type) {
-            scene->kit.settings.slot6_track7_morph_amp_envelope_decay =
-                source->settings.slot6_track7_amp_envelope_decay;
+            /*
+             * Commit the KitMrp source's generated track-7 normal decay as the
+             * destination Morph endpoint through SceneData's named setter.
+             *
+             * Inputs: a selected Scene, matching slot-6 types, and the bounded
+             * staged normal decay value. Output: the generated Morph-decay byte
+             * changes only when different and then offers
+             * AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_MORPH_DECAY to its existing dirty
+             * map. Why: this endpoint is a Kit setting rather than an
+             * Instrument descriptor, so the per-slot Morph marker cannot
+             * represent it. The setter preserves the normal owner rule—store
+             * first, then mark—and leaves runtime scheduling to the existing
+             * active-Scene branch. Affiliates:
+             * scene_setSlot6Track7MorphAmpEnvelopeDecay(),
+             * scene_storeKitParameterByte(), and presetMorph_requestVoice().
+             */
+            scene_setSlot6Track7MorphAmpEnvelopeDecay(
+                scene_index,
+                source->settings.slot6_track7_amp_envelope_decay);
             if (scene_index == scene_getActiveIndex()) {
                 presetMorph_requestVoice(scene_index, 5u);
                 active_queued = 1u;
@@ -1339,24 +1759,51 @@ void preset_startInstrumentMorphApply(uint8_t scene_index, uint8_t slot)
      * display name, performs no routing apply, and does not clear/rebind
      * modulation targets. A type mismatch is a no-change operation; the cursor
      * remains inactive and Menu will simply unlock on the next poll.
+     *
+     * The staged-image source is origin-dependent. A pool InstrumentMrp load
+     * commits the file's normal endpoints into the resident Morph endpoints,
+     * while the hidden reversible kit baseline commits its captured entry
+     * Morph endpoints through the matching Morph-to-Morph copy. The filesystem
+     * origin flag remains valid until the next request reuses operation
+     * scratch, and this completion runs before any new request is posted.
      */
     instrument_apply_active = 0u;
     preset_ensureMorphInitialized();
-    if (preset_commitStagedInstrumentNormalToMorph(scene_index, slot) &&
-        scene_index == scene_getActiveIndex()) {
-        presetMorph_requestVoice(scene_index, slot);
-        instrument_apply_active = 1u;
-        instrument_apply_scene = scene_index;
-        instrument_apply_phase = INSTRUMENT_APPLY_PHASE_MORPH_REBUILD;
-        instrument_apply_rebind_source = 0u;
-        instrument_apply_morph_only = 1u;
+    if (filesystem_loadedInstrumentWasMorphTemporary()
+            ? preset_commitStagedInstrumentMorphToMorph(scene_index, slot)
+            : preset_commitStagedInstrumentNormalToMorph(scene_index, slot)) {
+        /*
+         * InstrumentMrp copied only compatible Morphable endpoint values into
+         * the retained destination. Mark precisely that same descriptor domain
+         * now: type, Normal endpoints, name, HCNAMES source, routing, and
+         * runtime interpolation did not change. This remains outside the
+         * active-Scene branch because inactive resident Scene data still needs
+         * persistence even though it requires no immediate audible refresh.
+        */
+        autosave_markInstrumentMorphDirty(scene_index, slot);
+        /*
+         * Option 2: InstrumentMrp changed the resident Morph image. The
+         * destination Scene's card-clean bit clears because its saved payload
+         * no longer equals the on-card Bank child. Affiliate:
+         * bank_invalidateSdCleanScene().
+         */
+        bank_invalidateSdCleanScene(scene_index);
+        if (scene_index == scene_getActiveIndex()) {
+            presetMorph_requestVoice(scene_index, slot);
+            instrument_apply_active = 1u;
+            instrument_apply_scene = scene_index;
+            instrument_apply_phase = INSTRUMENT_APPLY_PHASE_MORPH_REBUILD;
+            instrument_apply_rebind_source = 0u;
+            instrument_apply_morph_only = 1u;
+        }
     }
 }
 
 static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged,
                                              uint16_t destination_mask,
                                              uint8_t slot,
-                                             instrument_type_t expected_type)
+                                             instrument_type_t expected_type,
+                                             uint8_t mark_autosave_whole_instrument)
 {
     uint8_t target_scene_index;
     uint8_t active_scene_touched = 0u;
@@ -1365,11 +1812,14 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
      * Commit one validated Instrument image and arm the bounded runtime apply.
      *
      * Inputs: an immutable typed stage, exact destination Scene mask, voice
-     * slot, and expected type. Output: every selected Scene receives audio
-     * parameters and the active Scene receives the existing ordered
-     * modulation-clear/reset/routing/Morph apply. The public normal loader and
-     * the reversible `kit` restore both use this one lifecycle path, so a
-     * restore cannot leave stale runtime targets or differ from a file load.
+     * slot, expected type, and an accepted-operation persistence decision.
+     * Output: every selected Scene receives audio parameters and the active
+     * Scene receives the existing ordered modulation-clear/reset/routing/Morph
+     * apply. The public normal loader and the reversible `kit` restore both
+     * use this one lifecycle path, so a restore cannot leave stale runtime
+     * targets or differ from a file load. Only a root-pool load enables the
+     * whole-Instrument AutoSave marker; temporary restore deliberately does
+     * not manufacture a new retained-data mutation.
      *
      * Affiliates: preset_startInstrumentApply(),
      * preset_loadInstrumentTemp(), filesystem_loadedInstrumentSlot(),
@@ -1393,7 +1843,60 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
         scene = scene_get(target_scene_index);
         if (!scene)
             continue;
+        /*
+         * Publish this committed destination before deriving its AutoSave map.
+         *
+         * Inputs: a valid Scene selected by the immutable accepted Instrument
+         * request and its existing resident kit storage. Output: an otherwise
+         * absent physical Scene becomes Bank-present before the assignment and
+         * whole-Instrument marker below; an already-present Scene is unchanged.
+         * Why: AutoSave deliberately maps only Bank-present Scene payloads, so
+         * relying solely on the earlier asynchronous completion notification
+         * leaves a timing-sensitive gap in which a valid Instrument commit can
+         * be real but its complete payload has no map and is silently skipped.
+         * This is the commit's authoritative retained-data boundary, and the
+         * Bank setter itself records its changed present-mask bytes when needed.
+         * Affiliates: preset_markRequestedScenesPresentOnSuccessfulLoad(),
+         * autosave_scenePayloadBase(), and autosave_markWholeInstrumentDirty().
+         */
+        bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
+                                            (uint16_t)(1u << target_scene_index)));
         scene->kit.instruments[slot] = *staged;
+        /*
+         * Option 2: a root Instrument Load or reversible kit restore replaces
+         * the resident instrument image from a source other than the exact Bank
+         * child, so this Scene's card-clean bit must clear. Direct assignment
+         * bypasses preset_storeInstrumentEndpoint(), hence the explicit call.
+         */
+        bank_invalidateSdCleanScene(target_scene_index);
+        {
+            uint8_t trace_flags = mark_autosave_whole_instrument
+                ? AUTOSAVE_TRACE_INSTRUMENT_COMMIT_FLAG_REQUESTED : 0u;
+            uint32_t trace_value =
+                ((uint32_t)target_scene_index <<
+                 AUTOSAVE_TRACE_INSTRUMENT_COMMIT_SCENE_SHIFT) |
+                ((uint32_t)slot <<
+                 AUTOSAVE_TRACE_INSTRUMENT_COMMIT_SLOT_SHIFT) |
+                ((uint32_t)staged->type <<
+                 AUTOSAVE_TRACE_INSTRUMENT_COMMIT_TYPE_SHIFT);
+
+            /*
+             * Witness the decision immediately beside the committed owner.
+             * Inputs: Menu's captured provenance decision and this loop's
+             * exact destination. Output: one existing RAM trace record says
+             * whether a whole-marker was requested and actually called; no
+             * persistence bit, SceneData value, or runtime ordering changes.
+             * Why: I records diagnose inside the marker, but only this point
+             * can prove a completed root Instrument reached that marker gate.
+             * Affiliates: Menu's completion classifier and Autosave's I event.
+             */
+            if (mark_autosave_whole_instrument) {
+                autosave_markWholeInstrumentDirty(target_scene_index, slot);
+                trace_flags |= AUTOSAVE_TRACE_INSTRUMENT_COMMIT_FLAG_CALLED;
+            }
+            autosaveTrace_record(AUTOSAVE_TRACE_STAGE_INSTRUMENT_COMMIT,
+                                 trace_flags, trace_value);
+        }
         /*
          * Do not attach a filename or display-name copy to the resident slot.
          *
@@ -1422,7 +1925,9 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
     instrument_apply_morph_only = 0u;
 }
 
-void preset_startInstrumentApply(uint8_t scene_index, uint8_t slot)
+void preset_startInstrumentApply(uint8_t scene_index,
+                                 uint8_t slot,
+                                 uint8_t mark_autosave_whole_instrument)
 {
     const kit_instrument_slot_t *staged =
         (const kit_instrument_slot_t *)filesystem_loadedInstrumentSlot();
@@ -1435,13 +1940,15 @@ void preset_startInstrumentApply(uint8_t scene_index, uint8_t slot)
      * image commit helper.
      *
      * Inputs: callback-captured Scene/slot plus Preset's immutable request
-     * type/mask. Output: the normal Instrument file result commits exactly as
-     * before. Keeping this wrapper preserves the filesystem completion API
-     * while allowing the `kit` preview restore to reuse the same DSP ordering.
-     * Affiliates: on_instrument_load_complete() and Menu completion polling.
+     * type/mask plus Menu's immutable root-pool versus temporary-restore
+     * decision. Output: the Instrument result commits through the same safe
+     * runtime ordering, while only a root-pool replacement marks its complete
+     * retained Instrument payload for AutoSave. Affiliates:
+     * on_instrument_load_complete() and Menu completion polling.
      */
     preset_startInstrumentApplyImage(staged, destination_mask, slot,
-                                     (instrument_type_t)pm_instrument_request_type);
+                                     (instrument_type_t)pm_instrument_request_type,
+                                     mark_autosave_whole_instrument);
 }
 
 uint8_t preset_saveInstrumentTemp(uint8_t source_scene, uint8_t source_slot)
@@ -1457,6 +1964,28 @@ uint8_t preset_saveInstrumentTemp(uint8_t source_scene, uint8_t source_slot)
     filesystem_ack();
     if (!filesystem_requestSaveInstrumentTemp(source_scene, source_slot,
                                               on_instrument_temp_save_complete))
+        return 0u;
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = source_slot;
+    pm_instrument_request_scene = source_scene;
+    pm_instrument_request_slot = source_slot;
+    return 1u;
+}
+
+uint8_t preset_saveInstrumentMorphTemp(uint8_t source_scene,
+                                       uint8_t source_slot)
+{
+    /*
+     * Save the entry Morph endpoints for the reversible InstrumentMrp row.
+     *
+     * Inputs: Menu's entry Scene/voice. Output: the existing hidden temporary
+     * filename receives a Morph-only projection; no normal image is staged or
+     * persisted as the restore contract. Completion is UI sequencing only.
+     */
+    filesystem_ack();
+    if (!filesystem_requestSaveInstrumentMorphTemp(
+            source_scene, source_slot, on_instrument_morph_temp_save_complete))
         return 0u;
     pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
@@ -1483,6 +2012,32 @@ uint8_t preset_loadInstrumentTemp(uint8_t destination_scene,
                                               destination_slot,
                                               type,
                                               on_instrument_load_complete))
+        return 0u;
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = destination_slot;
+    pm_instrument_request_scene = destination_scene;
+    pm_instrument_request_slot = destination_slot;
+    pm_instrument_request_type = type;
+    return 1u;
+}
+
+uint8_t preset_loadInstrumentMorphTemp(uint8_t destination_scene,
+                                       uint8_t destination_slot,
+                                       instrument_type_t type)
+{
+    /*
+     * Load the hidden Morph-only InstrumentMrp baseline.
+     *
+     * Inputs: the exact destination Scene/slot/type retained by Menu. Output:
+     * the existing Instrument stage receives the Morph snapshot and the
+     * completion path performs the same-type Morph-only commit, preserving
+     * type, Normal image, and HCNAMES identity.
+     */
+    filesystem_ack();
+    if (!filesystem_requestLoadInstrumentMorphTemp(
+            destination_scene, destination_slot, type,
+            on_instrument_morph_temp_load_complete))
         return 0u;
     pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
@@ -1689,6 +2244,15 @@ uint8_t preset_saveScene(uint16_t presetNr, uint8_t source_scene)
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = SAVE_TYPE_SCENE;
+    /*
+     * Retain the resident source independently of the root target slot.
+     *
+     * Input: accepted Scene Save coordinate. Output: the asynchronous DONE
+     * callback can update exactly this Scene's provenance without consulting
+     * later Menu selection. Why: pm_request_slot is the library destination,
+     * not a resident index. Affiliates: on_scene_save_complete().
+     */
+    pm_instrument_request_scene = source_scene;
     if (filesystem_requestSaveSceneDirectory(presetNr,
                                              source_scene,
                                              preset_currentName,
@@ -1723,28 +2287,41 @@ uint8_t preset_loadBank(uint16_t presetNr, uint16_t scene_mask)
     return 0u;
 }
 
-uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask)
+uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask,
+                        uint8_t force_save)
 {
     uint8_t source_scene = scene_getActiveIndex();
 
     /*
      * Post a multi-Scene Bank Save.
      *
-     * Inputs: root Bank slot plus edited preset_currentName as the Bank
-     * directory name and the caller-selected resident Scene mask. Output:
+     * Inputs: root Bank slot, edited preset_currentName as the Bank directory
+     * name, the caller-selected resident Scene mask, and force_save. Output:
      * filesystem writes bankset.bcg and one Bank-local child folder per
-     * selected bit. source_scene remains the active Scene for compatibility
-     * validation, but the mask determines the actual child set.
+     * selected bit (or fewer when Option 2 skips card-clean children and
+     * force_save is zero). source_scene remains the active Scene for
+     * compatibility validation, but the mask determines the actual child set.
      */
     filesystem_ack();
     pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
     pm_request_type = SAVE_TYPE_BANK;
+    /*
+     * Retain the Bank Save child selection through durable completion.
+     *
+     * Input: caller-selected resident mask already bounded by the 16-bit API.
+     * Output: on_bank_save_complete() can assign provenance only to children
+     * actually included in the successful save. Why: filesystem owns its own
+     * scratch copy, which Preset must not inspect after a later request.
+     * Affiliate: pm_kit_request_scene_mask's existing immutable-mask role.
+     */
+    pm_kit_request_scene_mask = scene_mask;
     if (filesystem_requestSaveBank(presetNr,
                                    source_scene,
                                    preset_currentName,
                                    scene_mask,
+                                   force_save,
                                    on_bank_save_complete)) {
         return 1u;
     }
@@ -1755,6 +2332,11 @@ uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask)
 uint8_t preset_completedBankLoadedScene(void)
 {
     return filesystem_lastBankLoadLoadedScene();
+}
+
+uint16_t preset_bankLoadFailedSceneMask(void)
+{
+    return pm_bank_load_failed_scene_mask;
 }
 
 uint8_t preset_loadFirstAvailableSceneOrKit(void)
@@ -1778,31 +2360,48 @@ uint8_t preset_loadFirstAvailableSceneOrKit(void)
 }
 
 /* -----------------------------------------------------------------------
-** preset_loadGlobals — post async globals load request.
+** preset_loadGlobals — post one accepted async globals load request.
+**
+** Inputs: mounted filesystem and the single Preset operation gate. Output:
+** returns one only after filesystem accepts Settings load and Preset enters
+** PRESET_LOAD_IN_PROGRESS; returns zero with Preset idle on rejection. Menu's
+** explicit OK lifecycle relies on this result so `...` never represents a
+** request that was not posted. Affiliate: presetManager.h declaration.
 ** ----------------------------------------------------------------------- */
-void preset_loadGlobals(void)
+uint8_t preset_loadGlobals(void)
 {
     filesystem_ack();
     pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = 0;
     pm_request_type = SAVE_TYPE_GLO;
-    if (!filesystem_requestLoad(FS_FILE_SETTINGS, 0, on_globals_load_complete))
+    if (!filesystem_requestLoad(FS_FILE_SETTINGS, 0, on_globals_load_complete)) {
         pm_status = PRESET_IDLE;
+        return 0u;
+    }
+    return 1u;
 }
 
 /* -----------------------------------------------------------------------
-** preset_saveGlobals — post async globals save request.
+** preset_saveGlobals — post one accepted async globals save request.
+**
+** Inputs/outputs mirror preset_loadGlobals(): a one result owns the later
+** completion callback, while zero leaves the confirmation row selectable.
+** Why: explicit Save:[Settings] needs the same accepted/rejected contract as
+** Kit, Scene, Bank, Instrument, and test commands. Affiliate: header API.
 ** ----------------------------------------------------------------------- */
-void preset_saveGlobals(void)
+uint8_t preset_saveGlobals(void)
 {
     filesystem_ack();
     pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = 0;
     pm_request_type = SAVE_TYPE_GLO;
-    if (!filesystem_requestSave(FS_FILE_SETTINGS, 0, on_globals_save_complete))
+    if (!filesystem_requestSave(FS_FILE_SETTINGS, 0, on_globals_save_complete)) {
         pm_status = PRESET_IDLE;
+        return 0u;
+    }
+    return 1u;
 }
 
 /* -----------------------------------------------------------------------
@@ -2117,28 +2716,46 @@ uint8_t preset_saveTestSimpleDir(const char *name) { (void)name; return 0u; }
 
 #define FILE_VERSION 2
 
-uint8_t preset_loadPattern(uint8_t presetNr)
+uint8_t preset_loadPattern(uint16_t presetNr)
 {
     filesystem_ack();
     pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
-    pm_request_type = PRESET_REQUEST_LEGACY_PATTERN;
+    pm_request_type = PRESET_REQUEST_PATTERN;
     if (filesystem_requestLoad(FS_FILE_PATTERN, presetNr, on_pattern_load_complete))
         return 1;
     pm_status = PRESET_IDLE;
     return 0;
 }
 
-void preset_savePattern(uint8_t presetNr)
+uint8_t preset_loadPatternForScenes(uint16_t presetNr, uint16_t scene_mask)
 {
     filesystem_ack();
     pm_status = PRESET_LOAD_IN_PROGRESS;
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = presetNr;
-    pm_request_type = PRESET_REQUEST_LEGACY_PATTERN;
-    if (!filesystem_requestSave(FS_FILE_PATTERN, presetNr, on_pattern_save_complete))
+    pm_request_type = PRESET_REQUEST_PATTERN;
+    pm_kit_request_scene_mask = scene_mask;
+    if (filesystem_requestLoadPatternForScenes(presetNr, scene_mask,
+                                               on_pattern_load_complete))
+        return 1;
+    pm_status = PRESET_IDLE;
+    return 0;
+}
+
+uint8_t preset_savePattern(uint16_t presetNr)
+{
+    filesystem_ack();
+    pm_status = PRESET_LOAD_IN_PROGRESS;
+    pm_completed_op = PRESET_OP_NONE;
+    pm_request_slot = presetNr;
+    pm_request_type = PRESET_REQUEST_PATTERN;
+    if (!filesystem_requestSave(FS_FILE_PATTERN, presetNr, on_pattern_save_complete)) {
         pm_status = PRESET_IDLE;
+        return 0u;
+    }
+    return 1u;
 }
 
 void preset_saveAll(uint8_t presetNr, uint8_t isAll)
@@ -2206,13 +2823,15 @@ void preset_morphScene(uint8_t scene_index, uint8_t morph)
      * out and 0..255 Morph amount. Outputs: retained Scene global Morph and
      * all six per-voice Morph amounts update. Runtime/PERF mirrors are updated
      * only for the active Scene, because inactive Scenes are stored state until
-     * selected.
+     * selected. The overall value and each per-voice value use SceneData's
+     * change-aware owner setters, so retained storage precedes exact dirty bits
+     * and identical values do not schedule a write.
      */
     preset_ensureMorphInitialized();
     scene = scene_get(scene_index);
     if (!scene)
         return;
-    scene->settings.morph_amount = morph;
+    scene_setMorphAmount(scene_index, morph);
     scene_setAllVoiceMorphAmounts(scene_index, morph);
     if (scene_index == scene_getActiveIndex()) {
         preset_syncSceneMorphMirrors(scene);
@@ -2284,13 +2903,15 @@ void preset_setVoiceDecimationAll(uint8_t scene_index, uint8_t value)
      * parameter_values[] is mirrored for the PERF page, and the active Scene's
      * mixer global decimation multiplier is updated. This function is separate
      * from the MIDI CC handler so future sceneset.scg load/save has one owner
-     * for the retained setting and runtime side effect.
+     * for the retained setting and runtime side effect. The normalized byte is
+     * committed through SceneData's changed-value Autosave boundary before the
+     * runtime mirrors below are updated.
      */
     if (!scene)
         return;
     if (value > 127u)
         value = 127u;
-    scene->settings.voice_decimation_all = value;
+    scene_setVoiceDecimationAll(scene_index, value);
     parameter_values[PAR_VOICE_DECIMATION_ALL] = value;
     if (scene_index == scene_getActiveIndex())
         preset_applyVoiceDecimationAllRuntime(value);

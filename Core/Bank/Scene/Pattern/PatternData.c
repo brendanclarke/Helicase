@@ -1,1029 +1,1422 @@
 /*
  * PatternData.c
  *
- * Scene/Pattern-owned storage and edit API.
+ * Live Scene Pattern state is a Scene-indexed resident region. The v4
+ * filesystem streams this same region through the public accessors in
+ * PatternData.h; no separate trigger-only file bridge is maintained.
  */
 
 #include "PatternData.h"
 #include "SceneData.h"
-#include "MidiMessages.h"
-#include "ParameterArray.h"
+#include "BankData.h"
+#include "Autosave.h"
+#include "config.h"
+/*
+ * Menu owns the parameter buffer and PAR_STEP_* identifiers used by the
+ * selected-step display bridge. Inputs/outputs: declaration visibility only;
+ * PatternData remains the owner of persisted live step-special values.
+ */
 #include "menu.h"
-#include "modulationNode.h"
-#include "sequencer.h"
+
 #include <string.h>
 
-/* Held-step automation edit target.
+/*
+ * Permanent SRAM1 Pattern region for one Scene.
  *
- * buttonHandler.c sets these when a step button is held long enough to arm
- * automation. Preset/MIDI parameter writes then call pat_recordArmedAutomation()
- * to write the destination/value into that held step. -1 means no armed step.
+ * What: 896 two-byte address entries, the configurable future dynamic pool,
+ * and a full-width 4,096-chunk free bitmap. Why: PatternData owns all live
+ * per-Scene Pattern storage independently of scene_t, allowing the retired
+ * 112-byte bridge bitmap to disappear without embedding a much larger payload
+ * in every Scene record. Inputs: NUM_TRACKS, NUM_STEPS, and PAT_STACK_SIZE.
+ * Outputs: one fixed region that pat_* functions index by Scene. Affiliates:
+ * pat_initScene(), the Session-062 C allocator, and SRAM_MANIFEST.md.
  */
-static int8_t pat_armedAutomationStep = -1;
-static int8_t pat_armedAutomationTrack = -1;
-
-/* Which automation lane receives edits/recording: 0 = param1, nonzero = param2.
- * This used to be set via a sequencer opcode; now menu.c writes it directly. */
-static uint8_t pat_activeAutomationTrack = 0;
+_Static_assert(PAT_STACK_SIZE > 0u && PAT_STACK_SIZE <= 512u,
+               "PAT_STACK_SIZE must fit the 14-bit pool bitmap");
+_Static_assert(sizeof(pat_scene_region_t) ==
+               (PAT_STEPS_PER_SCENE * 2u) + (PAT_STACK_SIZE * 32u) +
+               512u + 23u,
+               "pat_scene_region_t size must match the Pattern budget");
 
 /*
- * Track-scale menu values as exact rational timing ratios.
+ * Static lifetime owner for all resident Scene Pattern storage.
  *
- * Why this table lives in PatternData: track scale is Pattern-owned per-track
- * metadata, while Sequencer only needs a normalized numerator/denominator when
- * it schedules playback. Inputs are TRACK_SCALE_* menu/storage values. Output
- * is a small ratio where 1/1 means the corrected default 4-steps-per-beat grid,
- * 5/2 is x25, and 2/5 is /25. Risk: MenuText.h must keep the display order in
- * sync with this table because the menu value is the table index.
+ * Inputs: startup zero-initialization followed by pat_initScene() for each
+ * Scene. Outputs: 16 independent regions in normal SRAM1. No caller may
+ * allocate, point into, or free this storage; the Scene index is its owner
+ * key. Affiliate: every Scene-indexed pat_* operation in this file.
  */
-static const TrackScaleRatio pat_trackScaleRatios[TRACK_SCALE_COUNT] = {
-	{1u, 8u}, {1u, 7u}, {1u, 6u}, {1u, 5u}, {1u, 4u}, {1u, 3u},
-	{2u, 5u}, {1u, 2u}, {3u, 5u}, {3u, 4u}, {1u, 1u},
-	{4u, 3u}, {5u, 3u}, {2u, 1u}, {5u, 2u}, {3u, 1u},
-	{4u, 1u}, {5u, 1u}, {6u, 1u}, {7u, 1u}, {8u, 1u},
-};
+static pat_scene_region_t pat_regions[SCENE_COUNT];
 
-static void pat_resetStep(Step *step)
+/*
+ * Pattern AutoSave snapshot staging buffer.
+ *
+ * What: one standalone pat_scene_region_t separate from pat_regions[]. Why:
+ * the background writer snapshots one Scene in the main loop, then streams
+ * it over many filesystem ticks without reading data that recording/erasing
+ * may later change. SRAM cost: 10,519 bytes in SRAM1 .bss. Lifetime: static;
+ * written by pat_snapshotScene() and read by pat_autosaveSnapshot(). Owner:
+ * PatternData.c exclusively. Affiliate: filesystem.c Pattern drain writer.
+ */
+static pat_scene_region_t pat_autosave_snapshot;
+
+/*
+ * Mark one Pattern mutation at the existing card-clean boundary.
+ *
+ * What: combines the established Bank card-clean invalidation with the new
+ * per-Scene Pattern AutoSave dirty bit. Why: bank_invalidateSdCleanScene()
+ * is shared by non-Pattern owners, so wiring the Pattern bit in that generic
+ * helper would falsely dirty Pattern files for Scene/Kit/Instrument edits.
+ * Inputs: validated resident Scene index. Output: both ownership registers
+ * receive the same mutation boundary. Affiliates: every Pattern setter below.
+ */
+static void pat_markSceneDirty(uint8_t scene_index)
 {
-	/* Reset one bridge step to the default inactive edit state used by clear-pattern
-	 * and clear-track operations. Input/output is a live Step pointer. A null
-	 * guard keeps callers simple when pointer helpers return 0. */
-	if (!step)
-		return;
-	step->note 		= PAT_DEFAULT_NOTE;
-	step->param1Nr 	= NO_AUTOMATION;
-	step->param1Val = 0;
-	step->param2Nr	= NO_AUTOMATION;
-	step->param2Val	= 0;
-	step->prob		= 127;
-	step->volume	= 100;
+    bank_invalidateSdCleanScene(scene_index);
+    autosave_markPatternDirty(scene_index);
+}
+
+/*
+ * Mark a service-owned relocation through PatternData's established dirty
+ * boundary.
+ *
+ * What: keep card-clean invalidation and Pattern AutoSave ownership in this
+ * module while allowing PatternStackService.c to publish a completed pool
+ * relocation. Why: the service may mutate address offsets/bitmap runs, but it
+ * must not duplicate the two existing dirty-register calls. Inputs: a
+ * resident Scene index; invalid indices are ignored. Affiliate: the Tier 1/2
+ * relocation executor.
+ */
+void pat_markPoolMutationDirty(uint8_t scene_index)
+{
+    if (scene_indexValid(scene_index))
+        pat_markSceneDirty(scene_index);
+}
+
+/*
+ * Capture one coherent Pattern region for the background writer.
+ *
+ * Inputs: validated resident Scene index and an idle RECORD/ERASE boundary.
+ * Output: the dedicated 10,519-byte snapshot becomes a plain copy of the
+ * selected live region. No interrupt masking is performed; filesystem.c owns
+ * the scheduler guard that makes the copy safe. Affiliate:
+ * pat_autosaveSnapshot().
+ */
+void pat_snapshotScene(uint8_t scene_index)
+{
+    if (!scene_indexValid(scene_index))
+        return;
+    memcpy(&pat_autosave_snapshot, &pat_regions[scene_index],
+           sizeof(pat_scene_region_t));
+}
+
+/*
+ * Borrow the latest Pattern AutoSave snapshot for bounded file streaming.
+ *
+ * Input: none. Output: const pointer to PatternData's dedicated snapshot,
+ * valid until the next pat_snapshotScene() call. No allocation or I/O occurs;
+ * filesystem.c is the sole consumer. Affiliate: Pattern drain state machine.
+ */
+const pat_scene_region_t *pat_autosaveSnapshot(void)
+{
+    return &pat_autosave_snapshot;
+}
+
+/*
+ * Compute one resident Scene's dynamic-pool occupancy for the Global widget.
+ *
+ * What: count set bits in the first PAT_STACK_SIZE bitmap bytes, which cover
+ * the 2,048 backed four-byte chunks at the current 8,192-byte pool size, and
+ * convert that count to a saturated 0..99 percentage. Why: the settings
+ * widget needs a bounded one-shot reading while the bitmap is inside a
+ * packed resident region. Inputs are a resident Scene index; invalid input
+ * returns zero. Each four-byte word is copied with memcpy before popcount so
+ * no unaligned access is assumed. Affiliates: pat_sceneRegion(),
+ * PatternStackService.c, and menu.c.
+ */
+uint8_t pat_poolUsagePercent(uint8_t scene_index)
+{
+    const pat_scene_region_t *region = pat_sceneRegion(scene_index);
+    uint32_t used = 0u;
+    uint32_t word;
+    uint16_t i;
+
+    if (!region)
+        return 0u;
+    for (i = 0u; i < (uint16_t)(PAT_STACK_SIZE / 4u); i++) {
+        memcpy(&word, &region->bitmap[i * 4u], sizeof(word));
+        used += (uint32_t)__builtin_popcount(word);
+    }
+    used = (used * 100u) / (PAT_STACK_SIZE * 8u);
+    return used > 99u ? 99u : (uint8_t)used;
+}
+
+/*
+ * Resolve one live address-array entry.
+ *
+ * Inputs: resident Scene, track, and step coordinates. Output: a mutable
+ * pointer to one 2-byte entry, or NULL for any invalid coordinate. Keeping
+ * this check in one helper makes all address writes bounded and preserves the
+ * Cortex-M7 halfword read/modify/write contract. Affiliates: playback, UI,
+ * recording, clear, and future pool operations.
+ */
+static uint16_t *pat_addrPtr(uint8_t scene_index, uint8_t track,
+                             uint8_t step)
+{
+    if (!scene_indexValid(scene_index) || !pat_trackValid(track) ||
+        !pat_stepValid(step))
+        return NULL;
+    return &pat_regions[scene_index].address[track][step];
+}
+
+/*
+ * Read one occupancy bit from a Scene's four-byte-chunk bitmap.
+ *
+ * What: convert a nominal pool chunk index into the bitmap byte and bit.
+ * Why: the allocator and release path must share one LSB-first convention.
+ * Inputs: a valid Scene region and chunk 0..4095. Output: zero when free or
+ * one when occupied. No bounds check is performed; callers validate ranges.
+ * Affiliates: pat_poolAlloc(), pat_poolFree(), and pat_initScene().
+ */
+static uint8_t pat_bitmapGet(const pat_scene_region_t *r, uint16_t chunk)
+{
+    return (uint8_t)((r->bitmap[chunk >> 3u] >> (chunk & 7u)) & 1u);
+}
+
+/*
+ * Mark one free-tracking bitmap chunk occupied.
+ *
+ * What: set the bit corresponding to one four-byte pool chunk. Why: successful
+ * first-fit allocation must reserve every chunk before exposing its offset in
+ * an address entry. Inputs: validated region and chunk index. Output: one
+ * bitmap bit is set. Affiliates: pat_poolAlloc().
+ */
+static void pat_bitmapSet(pat_scene_region_t *r, uint16_t chunk)
+{
+    r->bitmap[chunk >> 3u] |= (uint8_t)(1u << (chunk & 7u));
+}
+
+/*
+ * Mark one occupied bitmap chunk free.
+ *
+ * What: clear the bit corresponding to one four-byte pool chunk. Why: erased
+ * or resized blocks must return their complete allocation to the Scene pool.
+ * Inputs: validated region and chunk index. Output: one bitmap bit is clear.
+ * Affiliates: pat_poolFree().
+ */
+static void pat_bitmapClear(pat_scene_region_t *r, uint16_t chunk)
+{
+    r->bitmap[chunk >> 3u] &= (uint8_t)~(1u << (chunk & 7u));
+}
+
+/*
+ * Validate one address-array pool offset against the configured pool.
+ *
+ * What: accept only four-byte-aligned offsets backed by pool storage. Why:
+ * `PAT_ADDR_SENTINEL` and the unbacked upper address range must never reach a
+ * pool read or free operation. Inputs: the 14-bit address-field value. Output:
+ * nonzero for a valid pool base offset. Affiliates: allocator clients and the
+ * public specials reader.
+ */
+static uint8_t pat_poolOffsetValid(uint16_t byte_offset)
+{
+    uint16_t pool_bytes = (uint16_t)(PAT_STACK_SIZE * 32u);
+
+    return (uint8_t)(byte_offset != PAT_ADDR_SENTINEL &&
+                     (byte_offset & 3u) == 0u &&
+                     byte_offset < pool_bytes);
+}
+
+/*
+ * Allocate a contiguous first-fit run of dynamic-pool chunks.
+ *
+ * What: scan the free bitmap from chunk zero and reserve `chunks` adjacent
+ * four-byte units. Why: menu-paced special edits need a bounded synchronous
+ * allocator; defragmentation and relocation are deferred. Inputs: Scene region
+ * and a nonzero chunk count. Output: byte offset on success or
+ * PAT_ADDR_SENTINEL when the pool has no suitable run. Affiliates:
+ * pat_poolFree(), pat_writeSpecials(), and pat_blockChunks().
+ */
+static uint16_t pat_poolAlloc(pat_scene_region_t *r, uint8_t chunks)
+{
+    uint16_t max_chunk = (uint16_t)(PAT_STACK_SIZE * 8u);
+    uint16_t start;
+    uint16_t run;
+    uint16_t i;
+
+    if (!r || chunks == 0u)
+        return PAT_ADDR_SENTINEL;
+
+    start = 0u;
+    while ((uint32_t)start + chunks <= max_chunk) {
+        run = 0u;
+        for (i = start; i < (uint16_t)(start + chunks); i++) {
+            if (pat_bitmapGet(r, i)) {
+                start = (uint16_t)(i + 1u);
+                run = 0u;
+                break;
+            }
+            run++;
+        }
+        if (run == chunks) {
+            for (i = start; i < (uint16_t)(start + chunks); i++)
+                pat_bitmapSet(r, i);
+            return (uint16_t)(start << 2u);
+        }
+    }
+    return PAT_ADDR_SENTINEL;
+}
+
+/*
+ * Release a previously allocated dynamic-pool block.
+ *
+ * What: clear the block's bitmap run and zero its bytes. Why: erase, clear,
+ * and specials reallocation must reclaim storage and prevent stale values from
+ * appearing in a later allocation. Inputs: region, original aligned byte
+ * offset, and original chunk count. Output: the allocation is free; malformed
+ * offsets/runs are ignored. The caller updates its address entry separately.
+ * Affiliates: pat_poolAlloc(), pat_eraseStep(), pat_clearTrack(), and
+ * pat_writeSpecials().
+ */
+static void pat_poolFree(pat_scene_region_t *r, uint16_t byte_offset,
+                         uint8_t chunks)
+{
+    uint16_t max_chunk = (uint16_t)(PAT_STACK_SIZE * 8u);
+    uint16_t base_chunk;
+    uint16_t i;
+
+    if (!r || !pat_poolOffsetValid(byte_offset) || chunks == 0u)
+        return;
+    base_chunk = (uint16_t)(byte_offset >> 2u);
+    if ((uint32_t)base_chunk + chunks > max_chunk)
+        return;
+    for (i = base_chunk; i < (uint16_t)(base_chunk + chunks); i++)
+        pat_bitmapClear(r, i);
+    memset(&r->pool[byte_offset], 0, (size_t)chunks * 4u);
+}
+
+/*
+ * Calculate the four-byte allocation size for one dynamic block.
+ *
+ * What: include the two-byte header, flags byte, one byte per supported
+ * special, and two bytes per automation entry, then round up to a chunk. Why:
+ * allocator/free/reallocation paths must agree on complete block ownership.
+ * Inputs: supported special flags and a bounded automation count. Output: the
+ * required four-byte chunk count. Affiliates: all dynamic block readers and
+ * writers below.
+ */
+static uint8_t pat_blockChunks(uint8_t special_flags, uint8_t auto_count)
+{
+    uint8_t value_count = 0u;
+    uint8_t total;
+
+    special_flags &= (uint8_t)PAT_SPECIAL_FLAGS_MASK;
+    if (special_flags & PAT_SPECIAL_NOTE_BIT)
+        value_count++;
+    if (special_flags & PAT_SPECIAL_VEL_BIT)
+        value_count++;
+    if (special_flags & PAT_SPECIAL_PROB_BIT)
+        value_count++;
+    if (auto_count > PAT_BLOCK_AUTO_COUNT_MASK)
+        auto_count = PAT_BLOCK_AUTO_COUNT_MASK;
+    total = (uint8_t)(PAT_BLOCK_HEADER_BYTES + 1u + value_count +
+                      ((uint16_t)auto_count * 2u));
+    return (uint8_t)((total + 3u) >> 2u);
+}
+
+/*
+ * Write one complete dynamic block at an allocated pool offset.
+ *
+ * What: encode the step back-reference, special flags/values, and packed
+ * automation entries in the fixed block order. Why: every menu mutation and
+ * future integrity reader needs one stable byte layout. Inputs: region/offset,
+ * bounded track/step, supported flags, special values, and up to 63 decoded
+ * automation entries. Output: the allocated block is written with a
+ * big-endian header and little-endian automation words. Affiliates:
+ * pat_blockRead(), pat_blockReadAutomations(), and pat_writeSpecials().
+ */
+static void pat_blockWrite(pat_scene_region_t *r, uint16_t byte_offset,
+                           uint8_t track, uint8_t step,
+                           uint8_t special_flags, uint8_t note,
+                           uint8_t velocity, uint8_t probability,
+                           const pat_automation_entry_t *autos,
+                           uint8_t auto_count)
+{
+    uint8_t *p;
+    uint16_t step_id;
+    uint16_t header;
+    uint8_t idx;
+    uint8_t auto_idx;
+
+    if (!r || !pat_poolOffsetValid(byte_offset))
+        return;
+    special_flags &= (uint8_t)PAT_SPECIAL_FLAGS_MASK;
+    if (auto_count > PAT_BLOCK_AUTO_COUNT_MASK)
+        auto_count = PAT_BLOCK_AUTO_COUNT_MASK;
+    p = &r->pool[byte_offset];
+    step_id = (uint16_t)(track * NUM_STEPS + step);
+    header = (uint16_t)((step_id << PAT_BLOCK_STEP_ID_SHIFT) &
+                        PAT_BLOCK_STEP_ID_MASK);
+    header |= (uint16_t)(auto_count & PAT_BLOCK_AUTO_COUNT_MASK);
+
+    memset(p, 0, (size_t)pat_blockChunks(special_flags, auto_count) * 4u);
+    p[0] = (uint8_t)(header >> 8u);
+    p[1] = (uint8_t)(header & 0xFFu);
+    p[2] = special_flags;
+
+    idx = 3u;
+    if (special_flags & PAT_SPECIAL_NOTE_BIT)
+        p[idx++] = note;
+    if (special_flags & PAT_SPECIAL_VEL_BIT)
+        p[idx++] = velocity;
+    if (special_flags & PAT_SPECIAL_PROB_BIT)
+        p[idx++] = probability;
+    for (auto_idx = 0u; auto_idx < auto_count; auto_idx++) {
+        uint16_t packed = (uint16_t)(((uint16_t)(autos[auto_idx].value & 0x7Fu)
+                                      << 9u) |
+                                     (autos[auto_idx].target & 0x01FFu));
+        p[idx++] = (uint8_t)(packed & 0xFFu);
+        p[idx++] = (uint8_t)(packed >> 8u);
+    }
+}
+
+/*
+ * Read resolved values from one dynamic block.
+ *
+ * What: parse the flags byte and value bytes in ascending flag order. Why: the
+ * Sequencer and STEP menu must resolve the same defaults and overrides. Inputs:
+ * a valid allocated Scene region offset. Output: a specials struct with
+ * PAT_DEFAULT_NOTE, PAT_DEFAULT_VELOCITY, and probability 127 where flags are
+ * absent. The header is retained for future integrity scans but skipped here.
+ * Affiliates: pat_readStepSpecials().
+ */
+static pat_step_specials_t pat_blockRead(const pat_scene_region_t *r,
+                                         uint16_t byte_offset)
+{
+    pat_step_specials_t out;
+    const uint8_t *p;
+    uint8_t flags;
+    uint8_t idx;
+    uint8_t auto_count;
+
+    out.note = PAT_DEFAULT_NOTE;
+    out.velocity = PAT_DEFAULT_VELOCITY;
+    out.probability = 127u;
+    out.flags = 0u;
+    if (!r || !pat_poolOffsetValid(byte_offset))
+        return out;
+
+    p = &r->pool[byte_offset];
+    flags = (uint8_t)(p[2] & PAT_SPECIAL_FLAGS_MASK);
+    auto_count = (uint8_t)(p[1] & PAT_BLOCK_AUTO_COUNT_MASK);
+    if ((uint32_t)byte_offset +
+            ((uint32_t)pat_blockChunks(flags, auto_count) * 4u) >
+        (PAT_STACK_SIZE * 32u))
+        return out;
+    out.flags = flags;
+    idx = 3u;
+    if (flags & PAT_SPECIAL_NOTE_BIT)
+        out.note = p[idx++];
+    if (flags & PAT_SPECIAL_VEL_BIT)
+        out.velocity = p[idx++];
+    if (flags & PAT_SPECIAL_PROB_BIT)
+        out.probability = p[idx++];
+
+    return out;
+}
+
+/*
+ * Decode the automation tail of one dynamic pool block.
+ *
+ * What: read the header count and unpack each little-endian 16-bit entry into
+ * the public target/value form. Why: menu editing and migration code need the
+ * automation list without duplicating the block layout. Inputs: a validated
+ * pool base, output storage, and its capacity. Outputs: the number copied,
+ * capped by both the encoded count and `max_count`; malformed tails return
+ * zero. Affiliate: the step-automation CRUD functions below.
+ */
+static uint8_t pat_blockReadAutomations(const pat_scene_region_t *r,
+                                        uint16_t byte_offset,
+                                        pat_automation_entry_t *out,
+                                        uint8_t max_count)
+{
+    const uint8_t *p;
+    uint8_t flags;
+    uint8_t value_count = 0u;
+    uint8_t auto_count;
+    uint8_t copy_count;
+    uint8_t idx;
+    uint8_t auto_idx;
+
+    if (!r || !out || max_count == 0u || !pat_poolOffsetValid(byte_offset))
+        return 0u;
+    p = &r->pool[byte_offset];
+    flags = (uint8_t)(p[2] & PAT_SPECIAL_FLAGS_MASK);
+    if (flags & PAT_SPECIAL_NOTE_BIT)
+        value_count++;
+    if (flags & PAT_SPECIAL_VEL_BIT)
+        value_count++;
+    if (flags & PAT_SPECIAL_PROB_BIT)
+        value_count++;
+    auto_count = (uint8_t)(p[1] & PAT_BLOCK_AUTO_COUNT_MASK);
+    if ((uint32_t)byte_offset +
+            ((uint32_t)pat_blockChunks(flags, auto_count) * 4u) >
+        (PAT_STACK_SIZE * 32u))
+        return 0u;
+    copy_count = auto_count < max_count ? auto_count : max_count;
+    idx = (uint8_t)(PAT_BLOCK_HEADER_BYTES + 1u + value_count);
+    for (auto_idx = 0u; auto_idx < copy_count; auto_idx++) {
+        uint16_t packed = (uint16_t)(p[idx] | ((uint16_t)p[idx + 1u] << 8u));
+        out[auto_idx].target = (uint16_t)(packed & 0x01FFu);
+        out[auto_idx].value = (uint8_t)((packed >> 9u) & 0x7Fu);
+        idx = (uint8_t)(idx + 2u);
+    }
+    return copy_count;
+}
+
+/*
+ * Append one new automation entry into an adjacent free chunk run.
+ *
+ * What: grow an unchanged-flags block in place only when the new operation is
+ * exactly one appended automation and the extra logical chunks are adjacent
+ * and free. The new entry is written before the header count is updated.
+ * Why: this is the safe Gate-6 growth optimization; existing block bytes are
+ * never cleared or rewritten while TIM3 can read them. Inputs: the old block,
+ * the complete requested automation list, and its new chunk count. Output:
+ * nonzero on an in-place append; zero leaves the block untouched so the normal
+ * disjoint write-new/swap/free-old path can run. Affiliate: pat_writeDynamic().
+ */
+static uint8_t pat_tryAppendAutomation(pat_scene_region_t *r,
+                                       uint16_t old_offset,
+                                       uint8_t old_chunks,
+                                       uint8_t old_flags,
+                                       uint8_t old_count,
+                                       const pat_automation_entry_t *autos,
+                                       uint8_t auto_count,
+                                       uint8_t new_chunks)
+{
+    uint8_t value_count = 0u;
+    uint16_t byte_index;
+    uint16_t i;
+
+    if (!r || !autos || old_count >= PAT_BLOCK_AUTO_COUNT_MASK ||
+        auto_count != (uint8_t)(old_count + 1u) ||
+        pat_blockChunks(old_flags, old_count) != old_chunks ||
+        pat_blockChunks(old_flags, auto_count) != new_chunks)
+        return 0u;
+    if (old_flags & PAT_SPECIAL_NOTE_BIT)
+        value_count++;
+    if (old_flags & PAT_SPECIAL_VEL_BIT)
+        value_count++;
+    if (old_flags & PAT_SPECIAL_PROB_BIT)
+        value_count++;
+    for (i = old_chunks; i < new_chunks; i++) {
+        if (pat_bitmapGet(r, (uint16_t)((old_offset >> 2u) + i)))
+            return 0u;
+    }
+    byte_index = (uint16_t)(PAT_BLOCK_HEADER_BYTES + 1u + value_count);
+    /* Confirm the old entries remain byte-for-byte in their original order. */
+    for (i = 0u; i < old_count; i++) {
+        uint16_t packed = (uint16_t)(r->pool[old_offset + byte_index] |
+                                     ((uint16_t)r->pool[old_offset + byte_index + 1u]
+                                      << 8u));
+        uint16_t expected = (uint16_t)(
+            ((uint16_t)(autos[i].value & 0x7Fu) << 9u) |
+            (autos[i].target & 0x01FFu));
+
+        if (packed != expected)
+            return 0u;
+        byte_index = (uint16_t)(byte_index + 2u);
+    }
+    for (i = old_chunks; i < new_chunks; i++)
+        pat_bitmapSet(r, (uint16_t)((old_offset >> 2u) + i));
+    {
+        uint16_t packed = (uint16_t)(
+            ((uint16_t)(autos[old_count].value & 0x7Fu) << 9u) |
+            (autos[old_count].target & 0x01FFu));
+
+        r->pool[old_offset + byte_index] = (uint8_t)packed;
+        r->pool[old_offset + byte_index + 1u] = (uint8_t)(packed >> 8u);
+    }
+    /* The count is published last; its two step-id bits are retained. */
+    r->pool[old_offset + 1u] = (uint8_t)(
+        (r->pool[old_offset + 1u] & (uint8_t)~PAT_BLOCK_AUTO_COUNT_MASK) |
+        (auto_count & PAT_BLOCK_AUTO_COUNT_MASK));
+    pat_markSceneDirty((uint8_t)(r - pat_regions));
+    return 1u;
+}
+
+/*
+ * Replace one step's complete dynamic block while preserving its trigger bit.
+ *
+ * What: free, reuse, or allocate the block selected by the special flags and
+ * automation list, then swap the address entry to its resulting offset. Why:
+ * special and automation edits must share one ownership transaction, including
+ * automation-only blocks whose special-flags byte is zero. Inputs: Scene/
+ * track/step, supported flags, special values, at most 63 entries, and a
+ * shrink-in-place policy used only by removal. Output: nonzero when the
+ * block/address state was committed; allocation failure otherwise leaves the
+ * old block and address untouched. Affiliates: pat_writeSpecials() and the
+ * public automation CRUD functions below.
+ */
+static uint8_t pat_writeDynamic(uint8_t scene_index, uint8_t track,
+                                uint8_t step, uint8_t new_flags,
+                                uint8_t note, uint8_t velocity,
+                                uint8_t probability,
+                                const pat_automation_entry_t *autos,
+                                uint8_t auto_count,
+                                uint8_t allow_shrink_in_place)
+{
+    pat_scene_region_t *r;
+    uint16_t *entry;
+    uint16_t addr;
+    uint16_t old_offset;
+    uint8_t old_chunks;
+    uint8_t new_chunks;
+    uint16_t new_offset;
+    uint16_t trigger_bits;
+    entry = pat_addrPtr(scene_index, track, step);
+    if (!entry)
+        return 0u;
+    r = &pat_regions[scene_index];
+    new_flags &= (uint8_t)PAT_SPECIAL_FLAGS_MASK;
+    if (auto_count > PAT_BLOCK_AUTO_COUNT_MASK)
+        return 0u;
+    if (auto_count > 0u && !autos)
+        return 0u;
+    addr = *entry;
+    trigger_bits = (uint16_t)(addr & PAT_ADDR_TRIGGER_BIT);
+    old_offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
+
+    if (new_flags == 0u && auto_count == 0u) {
+        /*
+         * Detach before freeing the old block.
+         *
+         * What: publish the no-data entry before clearing the old bitmap run
+         * and pool bytes. Why: TIM3 may preempt this foreground writer after
+         * the publish; it must see either the old complete block or the
+         * sentinel, never an old address whose bytes have already been
+         * zeroed. The short PRIMASK section also re-reads the live trigger bit
+         * so a concurrent static trigger edit is retained. Inputs: the live
+         * entry and its captured old offset. Output: a safe sentinel followed
+         * by old-block reclamation. Affiliate: pat_eraseStep().
+         */
+        if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u &&
+            pat_poolOffsetValid(old_offset)) {
+            old_chunks = pat_blockChunks(
+                r->pool[old_offset + 2u],
+                (uint8_t)(r->pool[old_offset + 1u] &
+                          PAT_BLOCK_AUTO_COUNT_MASK));
+        }
+        {
+            uint16_t published;
+
+            __asm volatile("cpsid i" ::: "memory");
+            trigger_bits = (uint16_t)(*entry & PAT_ADDR_TRIGGER_BIT);
+            published = (uint16_t)(trigger_bits | PAT_ADDR_SENTINEL);
+            *entry = published;
+            __asm volatile("cpsie i" ::: "memory");
+        }
+        if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u &&
+            pat_poolOffsetValid(old_offset))
+            pat_poolFree(r, old_offset, old_chunks);
+        pat_markSceneDirty(scene_index);
+        return 1u;
+    }
+
+    new_chunks = pat_blockChunks(new_flags, auto_count);
+    if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u &&
+        pat_poolOffsetValid(old_offset)) {
+        uint8_t old_flags;
+        uint8_t old_count;
+
+        old_flags = (uint8_t)(r->pool[old_offset + 2u] &
+                              PAT_SPECIAL_FLAGS_MASK);
+        old_count = (uint8_t)(r->pool[old_offset + 1u] &
+                              PAT_BLOCK_AUTO_COUNT_MASK);
+        old_chunks = pat_blockChunks(
+            r->pool[old_offset + 2u],
+            (uint8_t)(r->pool[old_offset + 1u] & PAT_BLOCK_AUTO_COUNT_MASK));
+        if (new_flags == old_flags && new_chunks > old_chunks &&
+            pat_tryAppendAutomation(r, old_offset, old_chunks, old_flags,
+                                    old_count, autos, auto_count,
+                                    new_chunks))
+            return 1u;
+    }
+
+    new_offset = pat_poolAlloc(r, new_chunks);
+    if (new_offset == PAT_ADDR_SENTINEL) {
+        /*
+         * Do not rewrite a live block in place on allocation failure.
+         *
+         * What: retain the old block and report failure when no disjoint
+         * replacement run exists. Why: even a removal can compact existing
+         * automation bytes, so rewriting the old block before publishing a
+         * replacement would let TIM3 observe a partially rewritten block.
+         * The service's deferred compaction path may create a run and retry
+         * the operation. Inputs: old/new block sizes and the caller's legacy
+         * shrink hint. Output: no live state changes on failure. Affiliate:
+         * PatternStackService.c reactive compaction.
+         */
+        (void)old_chunks;
+        (void)allow_shrink_in_place;
+        return 0u;
+    }
+
+    /*
+     * Publish the complete replacement before returning the old run.
+     *
+     * What: write the new block, atomically publish its offset with the latest
+     * trigger bit, then free the old allocation. Why: the aligned address
+     * halfword is TIM3's only pool pointer; publish-then-free guarantees that
+     * playback sees either complete old bytes or complete new bytes. Inputs:
+     * new_offset/new block and old_offset/old block. Output: one committed
+     * address swap and one reclaimed old run. Affiliate: pat_poolAlloc().
+     */
+    pat_blockWrite(r, new_offset, track, step, new_flags, note, velocity,
+                   probability, autos, auto_count);
+    {
+        uint16_t published;
+
+        __asm volatile("cpsid i" ::: "memory");
+        trigger_bits = (uint16_t)(*entry & PAT_ADDR_TRIGGER_BIT);
+        published = (uint16_t)(trigger_bits | PAT_ADDR_SPECIALS_BIT |
+                               new_offset);
+        *entry = published;
+        __asm volatile("cpsie i" ::: "memory");
+    }
+    if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u &&
+        pat_poolOffsetValid(old_offset))
+        pat_poolFree(r, old_offset, old_chunks);
+    pat_markSceneDirty(scene_index);
+    return 1u;
+}
+
+/*
+ * Replace one step's special values while retaining every automation entry.
+ *
+ * Inputs: Scene/track/step, desired special flags, and candidate values.
+ * Output: the shared dynamic-block transaction preserves automation entries
+ * and commits the special edit or leaves the old state on allocation failure.
+ * Affiliate: pat_setStepNote(), pat_setStepVolume(), and
+ * pat_setStepProbability().
+ */
+static uint8_t pat_writeSpecials(uint8_t scene_index, uint8_t track,
+                                 uint8_t step, uint8_t new_flags,
+                                 uint8_t note, uint8_t velocity,
+                                 uint8_t probability)
+{
+    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+    const pat_scene_region_t *r = pat_sceneRegion(scene_index);
+    const uint16_t *entry = pat_addrPtr(scene_index, track, step);
+    uint16_t offset;
+    uint8_t auto_count = 0u;
+
+    if (!r || !entry)
+        return 0u;
+    offset = (uint16_t)(*entry & PAT_ADDR_OFFSET_MASK);
+    if (((*entry & PAT_ADDR_SPECIALS_BIT) != 0u) &&
+        pat_poolOffsetValid(offset))
+        auto_count = pat_blockReadAutomations(r, offset, autos,
+                                              PAT_BLOCK_AUTO_COUNT_MASK);
+    return pat_writeDynamic(scene_index, track, step, new_flags, note, velocity,
+                            probability, autos, auto_count, 0u);
 }
 
 uint8_t pat_trackValid(uint8_t track)
 {
-	return (uint8_t)(track < NUM_TRACKS);
+    return (uint8_t)(track < NUM_TRACKS);
 }
 
 uint8_t pat_patternValid(uint8_t scene_index)
 {
-	return scene_indexValid(scene_index);
+    return scene_indexValid(scene_index);
 }
 
 uint8_t pat_stepValid(uint8_t step)
 {
-	return (uint8_t)(step < NUM_STEPS);
-}
-
-Step *pat_stepPtr(uint8_t scene_index, uint8_t track, uint8_t step)
-{
-	scene_t *scene;
-	/* Central bounded access to one Scene-owned Step. */
-	if (!pat_trackValid(track) || !pat_stepValid(step))
-		return 0;
-	scene = scene_get(scene_index);
-	if (!scene)
-		return 0;
-	return &scene->pattern.pat_subStepPattern[track][step];
-}
-
-uint16_t *pat_mainStepsPtr(uint8_t scene_index, uint8_t track)
-{
-	scene_t *scene;
-	if (!pat_trackValid(track))
-		return 0;
-	scene = scene_get(scene_index);
-	if (!scene)
-		return 0;
-	return &scene->pattern.pat_mainSteps[track];
-}
-
-PatternSetting *pat_patternSettingPtr(uint8_t scene_index)
-{
-	scene_t *scene = scene_get(scene_index);
-	return scene ? &scene->pattern.pat_patternSettings : 0;
-}
-
-LengthRotate *pat_lengthRotatePtr(uint8_t scene_index, uint8_t track)
-{
-	scene_t *scene;
-	/* Per-track Pattern settings live here during the bridge.
-	 *
-	 * LengthRotate keeps its historical name for now, but the record now owns
-	 * the STEP front-page track settings: length, rotation, scale, MIDI channel,
-	 * and MIDI note. The legacy pattern length stream may still supply only the
-	 * length byte; loaders must default the newer fields before reading the
-	 * optional settings extension block.
-	 */
-	if (!pat_trackValid(track))
-		return 0;
-	scene = scene_get(scene_index);
-	if (!scene)
-		return 0;
-	return &scene->pattern.pat_patternLengthRotate[track];
-}
-
-void pat_init(void)
-{
-	pat_initScene(scene_getActiveIndex());
-}
-
-void pat_initPatternSet(PatternSet *pattern, uint8_t next_pattern)
-{
-	uint8_t track;
-	uint8_t step;
-
-	/*
-	 * Reset a complete PatternSet without using resident Scene accessors.
-	 *
-	 * What: writes the same empty bridge pattern that pat_initScene() used to
-	 * build indirectly: no active main-step bits, all 128 steps per track reset
-	 * to default note/probability/automation values, 16-step track length, no
-	 * rotation, scale off, shuffle zero, changeBar zero, and caller-supplied
-	 * nextPattern.
-	 *
-	 * Why: filesystem Scene Load uses private staging memory until every child
-	 * file validates. Passing a staged PatternSet here avoids mutating resident
-	 * scenes[] while still sharing the canonical PatternData defaults.
-	 *
-	 * Loop details: the outer loop walks the seven retained tracks; the inner
-	 * loop walks the 128 real bridge steps per track. pat_resetStep() writes an
-	 * inactive default by leaving STEP_ACTIVE_MASK clear in volume. main-step
-	 * masks are uint16_t because the legacy bridge still has sixteen visible
-	 * main steps even though each main step maps to eight real substeps.
-	 */
-	if (!pattern)
-		return;
-	pattern->pat_patternSettings.changeBar = 0u;
-	pattern->pat_patternSettings.nextPattern = next_pattern;
-	for (track = 0u; track < NUM_TRACKS; track++) {
-		pattern->pat_mainSteps[track] = 0u;
-		pattern->pat_patternLengthRotate[track].length =
-			PAT_DEFAULT_TRACK_LENGTH;
-		pattern->pat_patternLengthRotate[track].rotate = 0u;
-		pattern->pat_patternLengthRotate[track].scale = TRACK_SCALE_OFF;
-		pattern->pat_patternLengthRotate[track].shuffle = 0u;
-		for (step = 0u; step < NUM_STEPS; step++)
-			pat_resetStep(&pattern->pat_subStepPattern[track][step]);
-	}
+    return (uint8_t)(step < NUM_STEPS);
 }
 
 void pat_initScene(uint8_t scene_index)
 {
-	scene_t *scene = scene_get(scene_index);
-	/*
-	 * Resident Scene wrapper for the generic PatternSet initializer.
-	 *
-	 * Inputs: Scene index. Output: that Scene's PatternSet is reset in place
-	 * with nextPattern equal to its own index, preserving the old startup
-	 * behavior while making filesystem staging share the same defaults.
-	 */
-	if (!scene)
-		return;
-	pat_initPatternSet(&scene->pattern, scene_index);
+    pat_scene_region_t *region;
+    uint8_t track;
+    uint16_t step;
+
+    /*
+     * Initialize live address/pool/bitmap storage for one validated Scene.
+     *
+     * Input: resident Scene index. Output: every address is the no-data
+     * sentinel, the reserved pool is zeroed, and the lower
+     * PAT_STACK_SIZE*8 bitmap chunks are free while the unbacked upper range
+     * is permanently occupied. SceneData owns the lifecycle and invokes this
+     * at boot; Scene Load and pattern-clear reuse the same reset boundary.
+     * The pool bitmap is prepared for the Session-062 synchronous allocator.
+     */
+    if (!scene_indexValid(scene_index))
+        return;
+    region = &pat_regions[scene_index];
+    for (track = 0u; track < NUM_TRACKS; track++)
+        for (step = 0u; step < NUM_STEPS; step++)
+            region->address[track][step] = PAT_ADDR_SENTINEL;
+    memset(region->pool, 0, sizeof(region->pool));
+    memset(region->bitmap, 0, PAT_STACK_SIZE);
+    memset(region->bitmap + PAT_STACK_SIZE, 0xFF,
+           512u - PAT_STACK_SIZE);
+    for (track = 0u; track < NUM_TRACKS; track++) {
+        region->track_length[track] = NUM_STEPS;
+        region->track_scale[track] = TRACK_SCALE_OFF;
+        region->track_shuffle[track] = 0u;
+    }
+    region->pattern_change_bar = 0u;
+    region->pattern_next = 0u;
 }
 
-uint8_t pat_isStepActive(uint8_t track, uint8_t step, uint8_t pattern)
+/*
+ * Return the resident read-only region for one Scene.
+ *
+ * Inputs: Scene index. Output: the initialized region or NULL for an invalid
+ * index. Filesystem readers use this boundary after pat_initScene() so the
+ * storage owner remains private to PatternData.c.
+ */
+const pat_scene_region_t *pat_sceneRegion(uint8_t scene_index)
 {
-	Step *s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return 0;
-	return (uint8_t)((s->volume & STEP_ACTIVE_MASK) > 0);
+    return scene_indexValid(scene_index) ? &pat_regions[scene_index] : NULL;
+}
+
+/*
+ * Return the resident mutable region for one Scene.
+ *
+ * Inputs: Scene index. Output: writable region or NULL for an invalid index.
+ * The v4 file reader uses this accessor to stream validated bytes directly
+ * into resident storage without a second full-size staging buffer.
+ */
+pat_scene_region_t *pat_sceneRegionMut(uint8_t scene_index)
+{
+    return scene_indexValid(scene_index) ? &pat_regions[scene_index] : NULL;
+}
+
+uint8_t pat_isStepActive(uint8_t track, uint8_t step, uint8_t scene_index)
+{
+    const uint16_t *entry = pat_addrPtr(scene_index, track, step);
+
+    /* Playback-safe bit-15 query for one live address-array entry. */
+    return entry ? (uint8_t)((*entry >> 15u) & 1u) : 0u;
+}
+
+void pat_setStepActive(uint8_t scene_index, uint8_t track, uint8_t step,
+                       uint8_t on)
+{
+    uint16_t *entry = pat_addrPtr(scene_index, track, step);
+
+    /*
+     * Apply an on/off edit to one resident address-array trigger bit.
+     *
+     * Inputs: Scene/track/step and desired state. Output: only bit 15 changes;
+     * bits 14..0 retain any special flag and pool offset. Sequencer
+     * recording, button UI, and Euclidean transfer share this operation;
+     * invalid coordinates are ignored. The retained-data invalidation remains
+     * the one resident Pattern mutation boundary.
+     */
+    if (!entry)
+        return;
+    if (on)
+        *entry |= (uint16_t)PAT_ADDR_TRIGGER_BIT;
+    else
+        *entry &= (uint16_t)~PAT_ADDR_TRIGGER_BIT;
+    /* The local Pattern mutation funnel also sets the S064 dirty bit. */
+    pat_markSceneDirty(scene_index);
+}
+
+void pat_toggleStep(uint8_t track, uint8_t step, uint8_t scene_index)
+{
+    uint16_t *entry = pat_addrPtr(scene_index, track, step);
+
+    /*
+     * Toggle only bit 15 of one live address entry.
+     *
+     * Inputs: bounded track/step/Scene coordinates. Output: trigger state is
+     * flipped while bits 14..0 remain untouched, so a later pool block
+     * survives an off -> on edit cycle. Affiliates: the SEQ button handler
+     * and the same Scene card-clean invalidation boundary as setStepActive().
+     */
+    if (!entry)
+        return;
+    *entry ^= (uint16_t)PAT_ADDR_TRIGGER_BIT;
+    pat_markSceneDirty(scene_index);
+}
+
+void pat_eraseStep(uint8_t scene_index, uint8_t track, uint8_t step)
+{
+    uint16_t *entry = pat_addrPtr(scene_index, track, step);
+    uint16_t addr;
+    uint16_t offset;
+
+    /*
+     * Erase one step's complete address state with detach-before-free order.
+     *
+     * What: capture the old block, publish PAT_ADDR_SENTINEL under a short
+     * PRIMASK section, then clear the detached pool run. Why: TIM3 must never
+     * read an old address after its pool bytes have been zeroed. The operation
+     * is destructive and intentionally clears the trigger bit as well as the
+     * specials/offset. Inputs: bounded Scene/track/step coordinates. Output:
+     * no-data address plus reclaimed old storage. Affiliate: deferred live
+     * erase through PatternStackService.c.
+     */
+    if (!entry)
+        return;
+    addr = *entry;
+    offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
+    {
+        __asm volatile("cpsid i" ::: "memory");
+        *entry = PAT_ADDR_SENTINEL;
+        __asm volatile("cpsie i" ::: "memory");
+    }
+    if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u &&
+        pat_poolOffsetValid(offset)) {
+        pat_scene_region_t *r = &pat_regions[scene_index];
+        uint8_t chunks = pat_blockChunks(r->pool[offset + 2u],
+                                         (uint8_t)(r->pool[offset + 1u] &
+                                                   PAT_BLOCK_AUTO_COUNT_MASK));
+        pat_poolFree(r, offset, chunks);
+    }
+    pat_markSceneDirty(scene_index);
+}
+
+/*
+ * Detach one dynamic block while preserving the latest trigger bit.
+ *
+ * What: publish the sentinel with bit 15 copied from the live address, then
+ * free the captured logical block. Why: queued live erase and track-clear
+ * barriers own pool reclamation in foreground context, while a trigger edit
+ * may have arrived after the request was accepted. Inputs are bounded
+ * Scene/track/step coordinates. Output: dynamic content is gone and the
+ * trigger state survives. Affiliate: PatternStackService.c queue executor.
+ */
+void pat_releaseStepDynamic(uint8_t scene_index, uint8_t track,
+                            uint8_t step)
+{
+    uint16_t *entry = pat_addrPtr(scene_index, track, step);
+    uint16_t addr;
+    uint16_t offset;
+    uint16_t published;
+
+    if (!entry)
+        return;
+    addr = *entry;
+    offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
+    __asm volatile("cpsid i" ::: "memory");
+    published = (uint16_t)((*entry & PAT_ADDR_TRIGGER_BIT) |
+                           PAT_ADDR_SENTINEL);
+    *entry = published;
+    __asm volatile("cpsie i" ::: "memory");
+    if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u &&
+        pat_poolOffsetValid(offset)) {
+        pat_scene_region_t *r = &pat_regions[scene_index];
+        uint8_t chunks = pat_blockChunks(r->pool[offset + 2u],
+                                         (uint8_t)(r->pool[offset + 1u] &
+                                                   PAT_BLOCK_AUTO_COUNT_MASK));
+        pat_poolFree(r, offset, chunks);
+    }
+    pat_markSceneDirty(scene_index);
+}
+
+/*
+ * Resolve one address entry into menu/playback-ready step specials.
+ *
+ * What: validate the entry's specials bit and pool offset, then parse its
+ * dynamic block. Why: Sequencer and Menu need one owner for defaults and pool
+ * bounds. Inputs: resident Scene/track/step coordinates. Output: note,
+ * velocity, probability, and explicit-special flags; invalid or trigger-only
+ * entries return PAT_DEFAULT_NOTE, PAT_DEFAULT_VELOCITY, probability 127, and
+ * zero flags. Affiliate: pat_blockRead().
+ */
+pat_step_specials_t pat_readStepSpecials(uint8_t scene_index,
+                                         uint8_t track, uint8_t step)
+{
+    pat_step_specials_t out;
+    const uint16_t *entry;
+    uint16_t addr;
+    uint16_t offset;
+
+    out.note = PAT_DEFAULT_NOTE;
+    out.velocity = PAT_DEFAULT_VELOCITY;
+    out.probability = 127u;
+    out.flags = 0u;
+
+    entry = pat_addrPtr(scene_index, track, step);
+    if (!entry)
+        return out;
+    addr = *entry;
+    if ((addr & PAT_ADDR_SPECIALS_BIT) == 0u)
+        return out;
+    offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
+    if (!pat_poolOffsetValid(offset))
+        return out;
+    return pat_blockRead(&pat_regions[scene_index], offset);
 }
 
 uint8_t pat_sceneHasActiveSteps(uint8_t scene_index)
 {
-	uint8_t track;
-	uint8_t step;
-	const scene_t *scene;
+    const pat_scene_region_t *region;
+    uint8_t track;
+    uint16_t step;
 
-	/*
-	 * Scan the complete retained PatternSet for Load-menu Scene feedback.
-	 *
-	 * Inputs: a Scene index. Output: returns immediately when any Step's active
-	 * flag is set, otherwise zero after all tracks and steps have been checked.
-	 * Clients: menu_refreshLoadSceneLeds(); affiliates are scene_getConst() and
-	 * STEP_ACTIVE_MASK. The nested loop stays here instead of repeatedly calling
-	 * pat_isStepActive() so this owner-level query validates the Scene once and
-	 * reads its contiguous pattern storage without introducing a thin iterator.
-	 */
-	if (!pat_patternValid(scene_index))
-		return 0u;
-	scene = scene_getConst(scene_index);
-	if (!scene)
-		return 0u;
-	for (track = 0u; track < NUM_TRACKS; track++) {
-		for (step = 0u; step < NUM_STEPS; step++) {
-			if ((scene->pattern.pat_subStepPattern[track][step].volume &
-			     STEP_ACTIVE_MASK) != 0u)
-				return 1u;
-		}
-	}
-	return 0u;
+    /*
+     * Report whether a Scene address array contains any trigger bit.
+     *
+     * Input: resident Scene index. Output: nonzero at the first bit-15 entry,
+     * otherwise zero. Menu load feedback uses this owner-level scan rather
+     * than learning either the address-array layout or future pool format.
+     */
+    if (!scene_indexValid(scene_index))
+        return 0u;
+    region = &pat_regions[scene_index];
+    for (track = 0u; track < NUM_TRACKS; track++)
+        for (step = 0u; step < NUM_STEPS; step++)
+            if ((region->address[track][step] & PAT_ADDR_TRIGGER_BIT) != 0u)
+                return 1u;
+    return 0u;
 }
 
-uint8_t pat_isMainStepActive(uint8_t track, uint8_t mainStep, uint8_t pattern)
+void pat_clearTrack(uint8_t scene_index, uint8_t track)
 {
-	uint16_t *mainSteps;
-	if (mainStep >= 16u)
-		return 0;
-	mainSteps = pat_mainStepsPtr(pattern, track);
-	if (!mainSteps)
-		return 0;
-	return (uint8_t)((*mainSteps & (uint16_t)(1u << mainStep)) > 0);
+    pat_scene_region_t *r;
+    uint16_t step;
+    uint16_t addr;
+    uint16_t offset;
+
+    /*
+     * Return all 128 address entries in one track to the empty sentinel.
+     *
+     * What: detach each address before clearing its referenced pool run. Why:
+     * a TIM3 read must see an intact old block or a sentinel, never a freed
+     * allocation still named by the address array. Inputs: resident Scene and
+     * track. Output: every trigger/address state is cleared and all detached
+     * blocks are reclaimed. Affiliates: the stack-service clear barrier and
+     * pat_poolFree().
+     */
+    if (!scene_indexValid(scene_index) || !pat_trackValid(track))
+        return;
+    r = &pat_regions[scene_index];
+    for (step = 0u; step < NUM_STEPS; step++) {
+        addr = r->address[track][step];
+        offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
+        if ((addr & PAT_ADDR_SPECIALS_BIT) != 0u &&
+            pat_poolOffsetValid(offset)) {
+            uint8_t chunks = pat_blockChunks(r->pool[offset + 2u],
+                                             (uint8_t)(r->pool[offset + 1u] &
+                                                       PAT_BLOCK_AUTO_COUNT_MASK));
+            __asm volatile("cpsid i" ::: "memory");
+            r->address[track][step] = PAT_ADDR_SENTINEL;
+            __asm volatile("cpsie i" ::: "memory");
+            pat_poolFree(r, offset, chunks);
+        } else {
+            __asm volatile("cpsid i" ::: "memory");
+            r->address[track][step] = PAT_ADDR_SENTINEL;
+            __asm volatile("cpsie i" ::: "memory");
+        }
+    }
+    pat_markSceneDirty(scene_index);
 }
 
-uint8_t pat_readStep(uint8_t pattern, uint8_t track, uint8_t step, Step *out)
+void pat_clearPattern(uint8_t scene_index)
 {
-	/*
-	 * Copies one Step out of PatternData for playback-side inspection.
-	 *
-	 * Why: sequencer.c still needs to parse automation nodes and trigger note/vol
-	 * data at playback time, but should no longer index PatternData arrays
-	 * directly. Inputs are pattern/track/step and a destination Step pointer.
-	 * Output is 1 plus a copied Step on success, 0 on invalid coordinates or null
-	 * output. Common callers are sequencer playback and roll/MIDI trigger paths.
-	 * Risk: the returned Step is a snapshot, not live storage; callers that need to
-	 * mutate pattern data must use pat_* mutation helpers instead.
-	 */
-	Step *s;
-	if (!out)
-		return 0;
-	s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return 0;
-	*out = *s;
-	return 1;
+    /*
+     * Clear the complete live Pattern region without touching Scene settings
+     * or Kit data. Inputs: resident Scene index. Outputs: address array,
+     * reserved pool, and free bitmap return to pat_initScene()'s empty state.
+     * Affiliate: copyClearTools' whole-pattern action.
+     */
+    if (!scene_indexValid(scene_index))
+        return;
+    pat_initScene(scene_index);
+    pat_markSceneDirty(scene_index);
 }
 
-uint8_t pat_getStepProbability(uint8_t pattern, uint8_t track, uint8_t step)
+void pat_copyTrack(uint8_t scene_index, uint8_t src_track, uint8_t dst_track)
 {
-	/*
-	 * Returns one step probability for sequencer playback.
-	 *
-	 * Inputs: pattern/track/step. Output: stored probability, or 0 for invalid
-	 * coordinates so invalid reads cannot trigger a voice by accident. Caller:
-	 * seq_nextStep() before comparing against its per-track random value.
-	 */
-	Step *s = pat_stepPtr(pattern, track, step);
-	return s ? s->prob : 0u;
+    /*
+     * Deliberate Session-062 no-op for track copy.
+     *
+     * Inputs: source/destination Scene track coordinates. Output: none.
+     * Duplicating address entries also requires duplicating or defining
+     * ownership for every referenced dynamic block, so copy operations are
+     * deferred to SCOPING_TARGETS Phase 4.5 rather than copying stale offsets.
+     */
+    (void)scene_index;
+    (void)src_track;
+    (void)dst_track;
 }
 
-uint8_t pat_getStepNote(uint8_t pattern, uint8_t track, uint8_t step)
+void pat_copyPattern(uint8_t src_scene, uint8_t dst_scene)
 {
-	/*
-	 * Returns one stored note value for playback/roll paths.
-	 *
-	 * Inputs: pattern/track/step. Output: stored MIDI note, or PAT_DEFAULT_NOTE
-	 * on invalid coordinates. Callers/clients: seq_nextStep(), seq_triggerVoice(),
-	 * and roll recording. Risk: this is a read-only helper; note edits must go
-	 * through pat_setStepNote() or pat_recordNote().
-	 */
-	Step *s = pat_stepPtr(pattern, track, step);
-	return s ? s->note : PAT_DEFAULT_NOTE;
+    /*
+     * Deliberate Session-062 no-op for cross-Scene Pattern copy.
+     *
+     * Inputs: source and destination Scene indices. Output: none. A correct
+     * implementation must duplicate the source address array and each pool
+     * block into destination-owned chunks; that allocator/ownership design is
+     * deferred to SCOPING_TARGETS Phase 4.5.
+     */
+    (void)src_scene;
+    (void)dst_scene;
 }
 
-uint8_t pat_getStepVolume(uint8_t pattern, uint8_t track, uint8_t step)
+void pat_copyBar(uint8_t scene_index, uint8_t track, uint8_t src_bar,
+                 uint8_t dst_bar)
 {
-	/*
-	 * Returns the stored 0..127 velocity for one step.
-	 *
-	 * Inputs: pattern/track/step. Output: lower seven bits of volume, or 0 on
-	 * invalid coordinates. Caller/confederates: sequencer voice trigger and MIDI
-	 * note echo paths use this to preserve the legacy behavior where MIDI output
-	 * velocity follows stored step velocity even if an internal roll trigger used a
-	 * fixed roll volume.
-	 */
-	Step *s = pat_stepPtr(pattern, track, step);
-	return s ? (uint8_t)(s->volume & STEP_VOLUME_MASK) : 0u;
+    /*
+     * Deliberate Session-062 no-op for bar copy.
+     *
+     * Inputs: Scene, track, and source/destination bars. Output: none. A bar
+     * copy must duplicate sixteen address entries and their dynamic blocks,
+     * not merely copy offsets into shared storage; that work is deferred with
+     * the other copy operations to SCOPING_TARGETS Phase 4.5.
+     */
+    (void)scene_index;
+    (void)track;
+    (void)src_bar;
+    (void)dst_bar;
 }
 
-void pat_setMainStep(uint8_t pattern, uint8_t track, uint8_t mainStep, uint8_t onOff)
+/*
+ * Repaint the resident global Pattern parameters in the menu buffer.
+ *
+ * Inputs: Scene index. Outputs: PAR_PATTERN_BEAT and PAR_PATTERN_NEXT mirror
+ * the resident v4 fields; invalid Scenes leave the menu untouched.
+ */
+void pat_applyPatternSettingsToMenu(uint8_t scene_index)
 {
-	/* Direct compatibility-mask setter used while old pattern file/menu fields
-	 * still exist. Inputs are target pattern/track, a 0..15 mask bit, and a
-	 * boolean onOff. Output is only the mask bit; Step data is not created or
-	 * cleared here, and playback does not consult this mask. */
-	uint16_t *mainSteps;
-	if (mainStep >= 16u)
-		return;
-	mainSteps = pat_mainStepsPtr(pattern, track);
-	if (!mainSteps)
-		return;
-	if (onOff)
-		*mainSteps |= (uint16_t)(1u << mainStep);
-	else
-		*mainSteps &= (uint16_t)~(uint16_t)(1u << mainStep);
+    const pat_scene_region_t *region = pat_sceneRegion(scene_index);
+
+    if (!region)
+        return;
+    parameter_values[PAR_PATTERN_BEAT] = region->pattern_change_bar;
+    parameter_values[PAR_PATTERN_NEXT] = region->pattern_next;
 }
 
-void pat_setMainStepsRaw(uint8_t pattern, uint8_t track, uint16_t bits)
+/*
+ * Repaint one resident track's v4 parameters in the menu buffer.
+ *
+ * Inputs: Scene and track. Outputs: length, scale, and shuffle cells mirror
+ * the resident region; invalid coordinates leave the menu untouched.
+ */
+void pat_applyTrackSettingsToMenu(uint8_t scene_index, uint8_t track)
 {
-	/* Raw compatibility-mask writer used by legacy file/staging code. It writes
-	 * the whole 16-bit mask in one shot; bridge playback and the Euklid generator
-	 * use Step active bits instead. */
-	uint16_t *mainSteps = pat_mainStepsPtr(pattern, track);
-	if (!mainSteps)
-		return;
-	*mainSteps = bits;
+    const pat_scene_region_t *region = pat_sceneRegion(scene_index);
+
+    if (!region || !pat_trackValid(track))
+        return;
+    parameter_values[PAR_TRACK_LENGTH] = region->track_length[track];
+    parameter_values[PAR_TRACK_SCALE] = region->track_scale[track];
+    parameter_values[PAR_SHUFFLE] = region->track_shuffle[track];
 }
 
-void pat_toggleStep(uint8_t track, uint8_t step, uint8_t pattern)
+/* Persist one track-length menu edit in the resident Scene region. */
+void pat_setTrackLength(uint8_t scene_index, uint8_t track, uint8_t value)
 {
-	/* Toggle the active bit of one bridge step while preserving the stored velocity
-	 * in the lower seven bits. Used by buttonHandler step toggles. */
-	Step *s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return;
-	if ((s->volume & STEP_ACTIVE_MASK) == 0)
-		s->volume |= STEP_ACTIVE_MASK;
-	else
-		s->volume &= (uint8_t)~STEP_ACTIVE_MASK;
+    pat_scene_region_t *region = pat_sceneRegionMut(scene_index);
+
+    if (!region || !pat_trackValid(track))
+        return;
+    region->track_length[track] = value;
+    pat_markSceneDirty(scene_index);
 }
 
-void pat_toggleMainStep(uint8_t track, uint8_t mainStep, uint8_t pattern)
+/* Persist one track-scale menu edit in the resident Scene region. */
+void pat_setTrackScale(uint8_t scene_index, uint8_t track, uint8_t value)
 {
-	/* Toggle one legacy 16-bit compatibility-mask bit. The LED refresh is done by
-	 * callers in ledHandler because PatternData does not own presentation. */
-	uint16_t *mainSteps;
-	if (mainStep >= 16u)
-		return;
-	mainSteps = pat_mainStepsPtr(pattern, track);
-	if (!mainSteps)
-		return;
-	*mainSteps ^= (uint16_t)(1u << mainStep);
+    pat_scene_region_t *region = pat_sceneRegionMut(scene_index);
+
+    if (!region || !pat_trackValid(track))
+        return;
+    region->track_scale[track] = value;
+    pat_markSceneDirty(scene_index);
 }
 
-void pat_setStepNote(uint8_t pattern, uint8_t track, uint8_t step, uint8_t note)
+/* Persist one track-shuffle menu edit in the resident Scene region. */
+void pat_setTrackShuffle(uint8_t scene_index, uint8_t track, uint8_t value)
 {
-	/* Menu edit path for PAR_STEP_NOTE. Writes storage and mirrors the edited
-	 * value into parameter_values so the display remains coherent. */
-	Step *s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return;
-	s->note = note;
-	parameter_values[PAR_STEP_NOTE] = note;
+    pat_scene_region_t *region = pat_sceneRegionMut(scene_index);
+
+    if (!region || !pat_trackValid(track))
+        return;
+    region->track_shuffle[track] = value;
+    pat_markSceneDirty(scene_index);
 }
 
-void pat_setStepVolume(uint8_t pattern, uint8_t track, uint8_t step, uint8_t volume)
+/*
+ * Return the encoded automation count for one dynamic step block.
+ *
+ * Inputs: resident Scene/track/step coordinates. Output: the six-bit count
+ * stored in the block header, or zero for trigger-only, invalid, or malformed
+ * entries. The complete block geometry is checked before the count is exposed
+ * so callers never trust a tail beyond the configured pool. Affiliate:
+ * pat_readStepAutomations().
+ */
+uint8_t pat_stepAutomationCount(uint8_t scene_index, uint8_t track,
+                                uint8_t step)
 {
-	/* Menu edit path for PAR_STEP_VOLUME. Only the lower seven velocity bits are
-	 * replaced; the high active bit must survive a volume edit. */
-	Step *s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return;
-	s->volume &= (uint8_t)~STEP_VOLUME_MASK;
-	s->volume |= (uint8_t)(volume & STEP_VOLUME_MASK);
-	parameter_values[PAR_STEP_VOLUME] = (uint8_t)(volume & STEP_VOLUME_MASK);
+    const pat_scene_region_t *r = pat_sceneRegion(scene_index);
+    const uint16_t *entry = pat_addrPtr(scene_index, track, step);
+    uint16_t offset;
+    uint8_t flags;
+    uint8_t count;
+
+    if (!r || !entry || ((*entry & PAT_ADDR_SPECIALS_BIT) == 0u))
+        return 0u;
+    offset = (uint16_t)(*entry & PAT_ADDR_OFFSET_MASK);
+    if (!pat_poolOffsetValid(offset))
+        return 0u;
+    flags = (uint8_t)(r->pool[offset + 2u] & PAT_SPECIAL_FLAGS_MASK);
+    count = (uint8_t)(r->pool[offset + 1u] & PAT_BLOCK_AUTO_COUNT_MASK);
+    if ((uint32_t)offset +
+            ((uint32_t)pat_blockChunks(flags, count) * 4u) >
+        (PAT_STACK_SIZE * 32u))
+        return 0u;
+    return count;
 }
 
-void pat_setStepProbability(uint8_t pattern, uint8_t track, uint8_t step, uint8_t prob)
+/*
+ * Decode one step's automation entries into caller-owned storage.
+ *
+ * Inputs: resident coordinates, output array, and its capacity. Output: the
+ * number of entries copied, preserving on-disk order and capping the result at
+ * `max_count`; invalid or trigger-only steps return zero. Affiliate:
+ * STEP automation rendering and sequencer persistence tests.
+ */
+uint8_t pat_readStepAutomations(uint8_t scene_index, uint8_t track,
+                                uint8_t step, pat_automation_entry_t *out,
+                                uint8_t max_count)
 {
-	/* Menu edit path for PAR_STEP_PROB. Probability is stored per bridge step and
-	 * read by sequencer playback before triggering a voice. */
-	Step *s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return;
-	s->prob = prob;
-	parameter_values[PAR_STEP_PROB] = prob;
+    const pat_scene_region_t *r = pat_sceneRegion(scene_index);
+    const uint16_t *entry = pat_addrPtr(scene_index, track, step);
+    uint16_t offset;
+
+    if (!r || !entry || !out || max_count == 0u ||
+        ((*entry & PAT_ADDR_SPECIALS_BIT) == 0u))
+        return 0u;
+    offset = (uint16_t)(*entry & PAT_ADDR_OFFSET_MASK);
+    if (!pat_poolOffsetValid(offset))
+        return 0u;
+    return pat_blockReadAutomations(r, offset, out, max_count);
 }
 
-void pat_setStepAutomationDestination(uint8_t pattern, uint8_t track,
-                                      uint8_t step, uint8_t slot,
-                                      uint16_t targetParam)
+/*
+ * Add or update one step automation entry.
+ *
+ * Inputs: resident coordinates, a canonical voice/Scene target ID, and a
+ * 7-bit value. Output: nonzero when the validated target is updated or
+ * appended; duplicate targets update in place, while a 64th entry or pool
+ * exhaustion leaves the existing block unchanged. Affiliate:
+ * instrumentManager_targetValid().
+ */
+uint8_t pat_writeStepAutomation(uint8_t scene_index, uint8_t track,
+                                uint8_t step, uint16_t target, uint8_t value)
 {
-	/* Menu edit path for PAR_P1_DEST/PAR_P2_DEST.
-	 *
-	 * targetParam comes from modTargets[].param. The Step struct stores the old
-	 * automation destination encoding: destinations below 128 are stored as
-	 * CC-number-style param+1 so midiParser_ccHandler can later interpret them
-	 * consistently. Off/stale/wide values become NO_AUTOMATION because playback
-	 * still passes through automationNode's legacy 0..254 CC namespace. Slot 0
-	 * writes param1Nr; slot 1 writes param2Nr.
-	 */
-	Step *s = pat_stepPtr(pattern, track, step);
-	uint16_t packed = targetParam;
+    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+    pat_step_specials_t sp;
+    uint8_t count;
+    uint8_t i;
 
-	if (!s)
-		return;
-	if (packed >= NO_AUTOMATION || packed == PAR_NONE)
-		packed = NO_AUTOMATION;
-	else if (packed < 128u)
-		packed++;
-
-	if (slot == 0)
-		s->param1Nr = packed;
-	else
-		s->param2Nr = packed;
+    if (!pat_addrPtr(scene_index, track, step) ||
+        target >= INSTRUMENT_TOTAL_ID_COUNT ||
+        !instrumentManager_targetValid(scene_index, target,
+                                       INSTRUMENT_TARGET_AUTOMATION))
+        return 0u;
+    count = pat_readStepAutomations(scene_index, track, step, autos,
+                                    PAT_BLOCK_AUTO_COUNT_MASK);
+    for (i = 0u; i < count; i++) {
+        if (autos[i].target == target) {
+            autos[i].value = (uint8_t)(value & 0x7Fu);
+            sp = pat_readStepSpecials(scene_index, track, step);
+            return pat_writeDynamic(scene_index, track, step, sp.flags, sp.note,
+                                    sp.velocity, sp.probability, autos, count,
+                                    0u);
+        }
+    }
+    if (count >= PAT_BLOCK_AUTO_COUNT_MASK)
+        return 0u;
+    autos[count].target = target;
+    autos[count].value = (uint8_t)(value & 0x7Fu);
+    count++;
+    sp = pat_readStepSpecials(scene_index, track, step);
+    return pat_writeDynamic(scene_index, track, step, sp.flags, sp.note,
+                            sp.velocity, sp.probability, autos, count, 0u);
 }
 
-void pat_setStepAutomationValue(uint8_t pattern, uint8_t track,
-                                uint8_t step, uint8_t slot,
-                                uint8_t value)
+/*
+ * Remove one exact target from a step's automation list.
+ *
+ * Inputs: resident coordinates and a canonical target ID. Output: nonzero
+ * when an entry was removed and the compacted block committed; the final
+ * automation may release the block entirely when no specials remain. Target
+ * validity is not required here so stale entries can be cleaned after an
+ * instrument replacement. Affiliate: menu delete/clear actions.
+ */
+uint8_t pat_removeStepAutomation(uint8_t scene_index, uint8_t track,
+                                 uint8_t step, uint16_t target)
 {
-	/* Menu edit path for PAR_P1_VAL/PAR_P2_VAL. The destination is handled by
-	 * pat_setStepAutomationDestination(); this only writes the automation value
-	 * for the requested slot. */
-	Step *s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return;
-	if (slot == 0)
-		s->param1Val = value;
-	else
-		s->param2Val = value;
+    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+    pat_step_specials_t sp;
+    uint8_t count;
+    uint8_t i;
+    uint8_t found = 0u;
+
+    if (!pat_addrPtr(scene_index, track, step) ||
+        target >= INSTRUMENT_TOTAL_ID_COUNT)
+        return 0u;
+    count = pat_readStepAutomations(scene_index, track, step, autos,
+                                    PAT_BLOCK_AUTO_COUNT_MASK);
+    for (i = 0u; i < count; i++) {
+        if (autos[i].target == target) {
+            found = 1u;
+            break;
+        }
+    }
+    if (!found)
+        return 0u;
+    for (; i + 1u < count; i++)
+        autos[i] = autos[i + 1u];
+    count--;
+    sp = pat_readStepSpecials(scene_index, track, step);
+    return pat_writeDynamic(scene_index, track, step, sp.flags, sp.note,
+                            sp.velocity, sp.probability, autos, count, 1u);
 }
 
-void pat_setPatternChangeBar(uint8_t pattern, uint8_t value)
+/*
+ * Remove every matching target from one track.
+ *
+ * Inputs: resident Scene/track coordinates and a canonical target ID. Output:
+ * all 128 steps are scanned and matching entries are removed through the
+ * single-step owner, including complete block release where appropriate.
+ * Affiliate: InstrumentManager slot replacement and future target cleanup.
+ */
+uint8_t pat_removeTrackAutomationByTarget(uint8_t scene_index, uint8_t track,
+                                          uint16_t target)
 {
-	/*
-	 * Retired pattern-repeat setter.
-	 *
-	 * Pattern repeat/next switching has moved out of the sequencer. A future
-	 * feature must switch at the Scene level so Pattern, Scene parameters, and
-	 * edit-mask state remain aligned. Inputs are accepted for compatibility with
-	 * stale menu/storage paths, but no PatternData state changes.
-	 */
-	(void)pattern;
-	(void)value;
+    uint8_t step;
+    uint8_t removed = 0u;
+
+    if (!scene_indexValid(scene_index) || !pat_trackValid(track) ||
+        target >= INSTRUMENT_TOTAL_ID_COUNT)
+        return 0u;
+    for (step = 0u; step < NUM_STEPS; step++)
+        if (pat_removeStepAutomation(scene_index, track, step, target))
+            removed++;
+    return removed;
 }
 
-void pat_setPatternNext(uint8_t pattern, uint8_t value)
+/* Persist the global Pattern change-bar selection. */
+void pat_setPatternChangeBar(uint8_t scene_index, uint8_t value)
 {
-	/*
-	 * Retired pattern-next setter.
-	 *
-	 * Pattern-only next targets desynchronize Scene parameters from playback in a
-	 * 16-Scene bank. Inputs are ignored; explicit switching now happens through
-	 * menu_perfModeSceneButtonPressed()/seq_selectActivePattern() only.
-	 */
-	(void)pattern;
-	(void)value;
+    pat_scene_region_t *region = pat_sceneRegionMut(scene_index);
+
+    if (!region)
+        return;
+    region->pattern_change_bar = value;
+    pat_markSceneDirty(scene_index);
 }
 
-uint8_t pat_getPatternChangeBar(uint8_t pattern)
+/* Persist the global Pattern-next selection. */
+void pat_setPatternNext(uint8_t scene_index, uint8_t value)
 {
-	/*
-	 * Retired pattern-repeat accessor.
-	 *
-	 * Output is always zero because the sequencer no longer consumes changeBar.
-	 * The argument is kept so legacy callers compile until Pattern is rebuilt.
-	 */
-	(void)pattern;
-	return 0u;
+    pat_scene_region_t *region = pat_sceneRegionMut(scene_index);
+
+    if (!region)
+        return;
+    region->pattern_next = value;
+    pat_markSceneDirty(scene_index);
 }
 
-uint8_t pat_getPatternNext(uint8_t pattern)
+/*
+ * Load one selected step's resolved specials into the STEP menu buffer.
+ *
+ * What: copy the pool reader's note, velocity, and probability into
+ * parameter_values[]. Why: selecting a step must repaint its stored values and
+ * show the agreed defaults when no block exists. Inputs: viewed Scene, active
+ * track, and selected step. Output: the three PAR_STEP_* cells are refreshed.
+ * Affiliates: menu_parseParameter() and pat_readStepSpecials().
+ */
+void pat_applyStepToMenu(uint8_t scene_index, uint8_t track, uint8_t step)
 {
-	/*
-	 * Retired pattern-next accessor.
-	 *
-	 * Output is the input pattern, expressing "stay here" for compatibility with
-	 * any legacy code that still asks PatternData for an automatic target.
-	 */
-	return pattern;
+    pat_step_specials_t sp = pat_readStepSpecials(scene_index, track, step);
+
+    parameter_values[PAR_STEP_NOTE] = sp.note;
+    parameter_values[PAR_STEP_VOLUME] = sp.velocity;
+    parameter_values[PAR_STEP_PROB] = sp.probability;
 }
 
-void pat_setTrackLength(uint8_t pattern, uint8_t track, uint8_t length)
+/*
+ * Set or clear one step's note override through a read-modify-write.
+ *
+ * What: retain velocity/probability specials while changing note. Why: the
+ * endless encoder edits one field at a time, and PAT_DEFAULT_NOTE needs no
+ * pool byte. Inputs: Scene/track/step and a MIDI note value 0..127. Output:
+ * pat_writeSpecials() reallocates, updates, or frees the block as required and
+ * returns nonzero only after the address/pool transaction commits.
+ * Affiliates: menu PAR_STEP_NOTE dispatch and pat_readStepSpecials().
+ */
+uint8_t pat_setStepNote(uint8_t scene_index, uint8_t track, uint8_t step,
+                        uint8_t value)
 {
-	/* Menu edit path for PAR_TRACK_LENGTH.
-	 *
-	 * The Phase 2 bridge stores a real 1..128 step count. A zero value can arrive from older files or defensive callers and is normalized to the full 128-step track default. Output updates both PatternData and the currently displayed menu value. */
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-	if (!lr)
-		return;
-	if (length == 0u)
-		length = NUM_STEPS;
-	else if (length > NUM_STEPS)
-		length = NUM_STEPS;
-	lr->length = length;
-	parameter_values[PAR_TRACK_LENGTH] = length;
+    pat_step_specials_t sp = pat_readStepSpecials(scene_index, track, step);
+    uint8_t new_flags;
+
+    if (value == PAT_DEFAULT_NOTE)
+        new_flags = (uint8_t)(sp.flags & (uint8_t)~PAT_SPECIAL_NOTE_BIT);
+    else
+        new_flags = (uint8_t)(sp.flags | PAT_SPECIAL_NOTE_BIT);
+    return pat_writeSpecials(scene_index, track, step, new_flags,
+                             value, sp.velocity, sp.probability);
 }
 
-uint8_t pat_getTrackLength(uint8_t pattern, uint8_t track)
+/*
+ * Set or clear one step's velocity override through a read-modify-write.
+ *
+ * What: retain note/probability specials while changing velocity. Why: the
+ * Step volume encoder must not disturb another stored value, and
+ * PAT_DEFAULT_VELOCITY needs no pool byte. Inputs: Scene/track/step and a
+ * 0..127 velocity. Output: pat_writeSpecials() updates or releases storage
+ * and returns nonzero only after the address/pool transaction commits.
+ * Affiliates: menu PAR_STEP_VOLUME dispatch and pat_readStepSpecials().
+ */
+uint8_t pat_setStepVolume(uint8_t scene_index, uint8_t track, uint8_t step,
+                          uint8_t value)
 {
-	/* Read storage length in UI form. Invalid indices and missing/zero legacy values return the bridge default of 128 steps. */
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-	uint8_t length;
-	if (!lr)
-		return NUM_STEPS;
-	length = lr->length;
-	if (length == 0u)
-		return NUM_STEPS;
-	if (length > NUM_STEPS)
-		return NUM_STEPS;
-	return length;
+    pat_step_specials_t sp = pat_readStepSpecials(scene_index, track, step);
+    uint8_t new_flags;
+
+    if (value == PAT_DEFAULT_VELOCITY)
+        new_flags = (uint8_t)(sp.flags & (uint8_t)~PAT_SPECIAL_VEL_BIT);
+    else
+        new_flags = (uint8_t)(sp.flags | PAT_SPECIAL_VEL_BIT);
+    return pat_writeSpecials(scene_index, track, step, new_flags,
+                             sp.note, value, sp.probability);
 }
 
-uint8_t pat_getEffectiveTrackLength(uint8_t pattern, uint8_t track)
+/*
+ * Set or clear one step's probability override through a read-modify-write.
+ *
+ * What: retain note/velocity specials while changing probability. Why: 127 is
+ * the always-fire default and therefore needs no pool byte. Inputs:
+ * Scene/track/step and a 0..127 probability. Output: pat_writeSpecials()
+ * updates or releases storage and returns nonzero only after commit; lower
+ * values gate playback probabilistically.
+ * Affiliates: menu PAR_STEP_PROB dispatch and pat_readStepSpecials().
+ */
+uint8_t pat_setStepProbability(uint8_t scene_index, uint8_t track,
+                               uint8_t step, uint8_t value)
 {
-	/*
-	 * Returns a nonzero playback length for one pattern track.
-	 *
-	 * Why: sequencer wrap and external-clock math require a concrete nonzero length. Inputs: pattern/track. Output: 1..128 steps, with invalid coordinates falling back to 128 so playback callers never divide/modulo by zero.
-	 * Callers/clients: seq_nextStep(), seq_triggerNextMasterStep(), and
-	 * seq_setStepIndexToStart().
-	 */
-	return pat_getTrackLength(pattern, track);
-}
+    pat_step_specials_t sp = pat_readStepSpecials(scene_index, track, step);
+    uint8_t new_flags;
 
-void pat_setTrackRotation(uint8_t pattern, uint8_t track, uint8_t rotation)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-	uint8_t oldRot;
-	uint8_t len;
-
-	/*
-	 * Why: track rotation is pattern edit state, but the old sequencer also
-	 * compensated the live step index when rotating the currently playing
-	 * pattern. Inputs: pattern/track/new rotation. Outputs: stored rotation,
-	 * menu value, and possibly a sequencer runtime index adjustment. Risk: the
-	 * runtime hook must remain narrow; PatternData must not take over timing.
-	 */
-	if (!lr)
-		return;
-	oldRot = lr->rotate;
-	if (rotation == oldRot)
-		return;
-	len = pat_getEffectiveTrackLength(pattern, track);
-	if (rotation >= len)
-		rotation = (uint8_t)(rotation % len);
-	if (pattern == seq_activePattern && seq_isRunning())
-		seq_offsetTrackStepIndexForRotation(track, oldRot, rotation, len);
-	lr->rotate = rotation;
-	parameter_values[PAR_TRACK_ROTATION] = rotation;
-}
-
-uint8_t pat_getTrackRotation(uint8_t pattern, uint8_t track)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-	return lr ? lr->rotate : 0;
-}
-
-void pat_setTrackScale(uint8_t pattern, uint8_t track, uint8_t scale)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-
-	/*
-	 * Stores the per-track timing scale selected from the Pattern STEP front
-	 * page.
-	 *
-	 * Inputs: pattern/track select the PatternData owner and scale is a
-	 * TRACK_SCALE_* menu index. Outputs: storage is clamped to a known scale and
-	 * PAR_TRACK_SCALE mirrors it for the current UI. The sequencer reads this
-	 * through pat_getTrackScaleRatio() when scheduling. If the edited pattern is
-	 * currently running, Sequencer is asked to realign immediately so a mid-run
-	 * change from a slow divide to a fast multiply cannot dump a long backlog of
-	 * "missed" scaled steps into one tick.
-	 */
-	if (!lr)
-		return;
-	if (scale >= TRACK_SCALE_COUNT)
-		scale = TRACK_SCALE_OFF;
-	lr->scale = scale;
-	parameter_values[PAR_TRACK_SCALE] = scale;
-	if (pattern == seq_activePattern && seq_isRunning())
-		seq_realignActivePatternToMasterClock();
-}
-
-uint8_t pat_getTrackScale(uint8_t pattern, uint8_t track)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-	if (!lr || lr->scale >= TRACK_SCALE_COUNT)
-		return TRACK_SCALE_OFF;
-	return lr->scale;
-}
-
-TrackScaleRatio pat_getTrackScaleRatio(uint8_t pattern, uint8_t track)
-{
-	uint8_t scale = pat_getTrackScale(pattern, track);
-
-	/*
-	 * Converts PatternData track scale to the exact rational ratio consumed by
-	 * Sequencer timing. Invalid storage falls back to 1/1 so corrupt or legacy
-	 * data cannot create a zero denominator in the timing path.
-	 */
-	if (scale >= TRACK_SCALE_COUNT)
-		scale = TRACK_SCALE_OFF;
-	return pat_trackScaleRatios[scale];
-}
-
-void pat_setTrackShuffle(uint8_t pattern, uint8_t track, uint8_t shuffle)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-
-	/*
-	 * Store one track's shuffle amount.
-	 *
-	 * Why: shuffle affects playback timing and must follow the Pattern track,
-	 * not Sequencer's transport globals. Menu edits the viewed pattern/track;
-	 * Sequencer queries this value when computing that track's due events.
-	 *
-	 * Inputs: pattern/track identify the PatternData owner, shuffle is the
-	 * 0..127 menu amount. Outputs: PatternData storage and PAR_SHUFFLE's visible
-	 * mirror update. Confederates: filesystem writes this from the optional
-	 * per-track shuffle extension. Risk: this must not forward to a
-	 * transport-global shuffle path; playback reads per-track values directly so
-	 * tracks can differ.
-	 */
-	if (!lr)
-		return;
-	if (shuffle > 127u)
-		shuffle = 127u;
-	lr->shuffle = shuffle;
-	parameter_values[PAR_SHUFFLE] = shuffle;
-}
-
-uint8_t pat_getTrackShuffle(uint8_t pattern, uint8_t track)
-{
-	LengthRotate *lr = pat_lengthRotatePtr(pattern, track);
-	if (!lr || lr->shuffle > 127u)
-		return 0u;
-	return lr->shuffle;
-}
-
-void pat_clearTrack(uint8_t pattern, uint8_t track)
-{
-	/* Clear all pattern data for one track.
-	 *
-	 * Outputs:
-	 * - every bridge step resets to default note, velocity, probability, and no automation
-	 * - every step is inactive
-	 * - the legacy main-step mask is cleared for file/UI compatibility
-	 * - length/rotation reset to the boot empty-pattern length/no rotation
-	 * - scale, MIDI defaults, note override, and per-track shuffle reset to
-	 *   their safe empty-pattern defaults
-	 *
-	 * PAT_DEFAULT_TRACK_LENGTH intentionally differs from the legacy/corrupt
-	 * file fallback in pat_getTrackLength(): freshly initialized empty patterns
-	 * should start as a compact 16-step loop, while zero loaded from older files
-	 * still expands defensively to the full 128-step bridge length.
-	 */
-	uint8_t k;
-	LengthRotate *settings;
-	if (!pat_patternValid(pattern) || !pat_trackValid(track))
-		return;
-	for (k = 0; k < NUM_STEPS; k++)
-		pat_resetStep(pat_stepPtr(pattern, track, k));
-	*pat_mainStepsPtr(pattern, track) = 0u;
-	settings = pat_lengthRotatePtr(pattern, track);
-	settings->length = PAT_DEFAULT_TRACK_LENGTH;
-	settings->rotate = 0u;
-	settings->scale = TRACK_SCALE_OFF;
-	settings->shuffle = 0u;
-}
-
-void pat_clearPattern(uint8_t pattern)
-{
-	/* Clear every track in one pattern. Used by initialization and copy/clear
-	 * menu actions. Does not touch other patterns. */
-	uint8_t i;
-	if (!pat_patternValid(pattern))
-		return;
-	for (i = 0; i < NUM_TRACKS; i++)
-		pat_clearTrack(pattern, i);
-}
-
-void pat_clearAutomation(uint8_t pattern, uint8_t track, uint8_t automTrack)
-{
-	/* Clear one automation lane across all bridge steps for a track. automTrack 0
-	 * clears param1Nr/param1Val; any other value clears param2Nr/param2Val. */
-	uint8_t k;
-	if (!pat_patternValid(pattern) || !pat_trackValid(track))
-		return;
-	for (k = 0; k < NUM_STEPS; k++) {
-		Step *step = pat_stepPtr(pattern, track, k);
-		if (automTrack == 0) {
-			step->param1Nr = NO_AUTOMATION;
-			step->param1Val = 0;
-		} else {
-			step->param2Nr = NO_AUTOMATION;
-			step->param2Val = 0;
-		}
-	}
-}
-
-void pat_recordNote(uint8_t pattern, uint8_t track, uint8_t step,
-                    uint8_t velocity, uint8_t note)
-{
-	/*
-	 * Records a quantized note into PatternData.
-	 *
-	 * Why this moved here: seq_addNote() owns recording state, quantization, and
-	 * target-pattern timing, but the Step mutation itself is pattern storage.
-	 * Inputs: pattern/track/step identify the destination, velocity is stored
-	 * in the lower seven volume bits, and note is the MIDI note to store. Outputs:
-	 * the target Step gets note, velocity, 100% probability, and active bit.
-	 * The legacy 16-bit mask is mirrored from step % 16 so old save/load fields
-	 * stay deterministic during the bridge.
-	 *
-	 * Callers/clients/confederates: seq_addNote() calls this after choosing the
-	 * quantized destination. ledHandler still receives dirty-step notifications
-	 * from sequencer because LED presentation is not PatternData ownership.
-	 * Risk: do not clear automation lanes here because recording a note did not
-	 * previously wipe step automation.
-	 */
-	Step *stepPtr;
-	uint8_t mainStep;
-	if (!pat_patternValid(pattern) || !pat_trackValid(track) || !pat_stepValid(step))
-		return;
-	mainStep = (uint8_t)(step & 0x0fu);
-	stepPtr = pat_stepPtr(pattern, track, step);
-	stepPtr->note = note;
-	stepPtr->volume = (uint8_t)(velocity & STEP_VOLUME_MASK);
-	stepPtr->prob = 127;
-	stepPtr->volume |= STEP_ACTIVE_MASK;
-	pat_setMainStep(pattern, track, mainStep, 1);
-}
-
-void pat_eraseMainStepSubSteps(uint8_t pattern, uint8_t track, uint8_t mainStep)
-{
-	/*
-	 * Legacy helper that erases one old main-step group.
-	 *
-	 * Why this moved here: live erase is triggered by sequencer timing, but clearing
-	 * Step records and main-step bits is PatternData mutation. Inputs:
-	 * pattern/track/mainStep select the historical eight-step cluster to reset.
-	 * Outputs: parent main-step bit is cleared, all eight Steps return to default
-	 * note, automation, probability, and velocity, then the first old-group step
-	 * is activated to preserve compatibility for any remaining legacy caller.
-	 *
-	 * Callers/clients/confederates: seq_nextStep() calls this when erase mode is
-	 * active on the visible voice. pat_resetStep() supplies the per-step defaults;
-	 * ledHandler repaint remains sequencer/UI responsibility. Risk: mainStep must
-	 * be 0..15; invalid indices are ignored so live playback cannot write outside
-	 * PatternData storage.
-	 */
-	uint8_t i;
-	uint8_t firstStep;
-	if (!pat_patternValid(pattern) || !pat_trackValid(track) || mainStep >= 16u)
-		return;
-	pat_setMainStep(pattern, track, mainStep, 0);
-	firstStep = (uint8_t)(mainStep * 8u);
-	for (i = firstStep; i < (uint8_t)(firstStep + 8u); i++)
-		pat_resetStep(pat_stepPtr(pattern, track, i));
-	pat_stepPtr(pattern, track, firstStep)->volume |= STEP_ACTIVE_MASK;
-}
-
-
-void pat_eraseStep(uint8_t pattern, uint8_t track, uint8_t step)
-{
-	/* Clear one bridge step without touching neighbouring steps.
-	 *
-	 * Why: the 8-bar bridge treats Step[0..127] as real sequencer steps rather
-	 * than old sub-steps grouped under a main-step mask. Live erase now needs to
-	 * remove only the current step. Inputs identify the PatternData destination;
-	 * output resets that Step to defaults and leaves it inactive. */
-	Step *s = pat_stepPtr(pattern, track, step);
-	if (!s)
-		return;
-	pat_resetStep(s);
-}
-void pat_copyTrack(uint8_t pattern, uint8_t srcTrack, uint8_t dstTrack)
-{
-	/* Copy one track inside one pattern. Copies all 128 bridge steps, the legacy
-	 * main-step mask, and length/rotation. Does not copy pattern-level next/change
-	 * settings. */
-	if (!pat_patternValid(pattern) || !pat_trackValid(srcTrack) || !pat_trackValid(dstTrack))
-		return;
-	memcpy(pat_stepPtr(pattern, dstTrack, 0u),
-	       pat_stepPtr(pattern, srcTrack, 0u),
-	       sizeof(Step) * NUM_STEPS);
-	*pat_mainStepsPtr(pattern, dstTrack) = *pat_mainStepsPtr(pattern, srcTrack);
-	*pat_lengthRotatePtr(pattern, dstTrack) =
-		*pat_lengthRotatePtr(pattern, srcTrack);
-}
-
-void pat_copyPattern(uint8_t srcPattern, uint8_t dstPattern)
-{
-	/*
-	 * Whole-pattern copy now means copying between complete Scene owners.
-	 * This compatibility wrapper copies only PatternSet; Scene/Bank copy paths
-	 * should copy the containing scene_t when kit/settings must travel too.
-	 */
-	scene_t *src = scene_get(srcPattern);
-	scene_t *dst = scene_get(dstPattern);
-	if (src && dst)
-		dst->pattern = src->pattern;
-}
-
-
-void pat_copyBar(uint8_t pattern, uint8_t track, uint8_t srcBar, uint8_t dstBar)
-{
-	/* Copy one 16-step bar inside one track.
-	 *
-	 * Caller/client: COPY + SELECT bridge gesture in buttonHandler/copyClearTools.
-	 * Inputs are zero-based bars 0..7 for the current track/pattern. Output: the
-	 * destination 16 Step records are overwritten, and track length is extended to
-	 * include the destination bar when needed. */
-	uint8_t srcStep;
-	uint8_t dstStep;
-	uint8_t neededLength;
-
-	if (!pat_patternValid(pattern) || !pat_trackValid(track) ||
-	    srcBar >= NUM_BARS || dstBar >= NUM_BARS)
-		return;
-
-	srcStep = (uint8_t)(srcBar * NUM_STEPS_PER_BAR);
-	dstStep = (uint8_t)(dstBar * NUM_STEPS_PER_BAR);
-	memcpy(pat_stepPtr(pattern, track, dstStep),
-	       pat_stepPtr(pattern, track, srcStep),
-	       sizeof(Step) * NUM_STEPS_PER_BAR);
-
-	neededLength = (uint8_t)((dstBar + 1u) * NUM_STEPS_PER_BAR);
-	if (pat_getTrackLength(pattern, track) < neededLength)
-		pat_setTrackLength(pattern, track, neededLength);
-}
-void pat_setSelectedStep(uint8_t step)
-{
-	/* Store the current edit step in the menu parameter array.
-	 *
-	 * Why: selected-step state is Pattern/Menu edit context, not sequencer
-	 * transport state. Inputs: absolute bridge step index. Output:
-	 * PAR_ACTIVE_STEP mirrors the selected step for the menu and later
-	 * PatternData edits. Callers/clients: buttonHandler step selection and menu
-	 * active-step changes. Risk: invalid steps are ignored so stale UI state does
-	 * not point later edit calls outside PatternData storage.
-	 */
-	if (!pat_stepValid(step))
-		return;
-	parameter_values[PAR_ACTIVE_STEP] = step;
-}
-
-void pat_setActiveAutomationTrack(uint8_t track)
-{
-	/* Menu path for PAR_AUTOM_TRACK. Values are treated as lane selectors:
-	 * 0 records/edits param1, nonzero records/edits param2. */
-	pat_activeAutomationTrack = track;
-}
-
-uint8_t pat_getActiveAutomationTrack(void)
-{
-	return pat_activeAutomationTrack;
-}
-
-void pat_armAutomationStep(uint8_t step, uint8_t track, uint8_t armed)
-{
-	/*
-	 * Why: long-press automation arming is step-edit state and no longer needs
-	 * a parser status byte. Inputs: step, track, armed flag. Outputs: remembered
-	 * armed target for later CC writes. Risk: invalid disarm values must clear
-	 * both fields so stale held-step recording cannot continue.
-	 */
-	if (armed && pat_stepValid(step) && pat_trackValid(track)) {
-		pat_armedAutomationStep = (int8_t)step;
-		pat_armedAutomationTrack = (int8_t)track;
-	} else {
-		pat_armedAutomationStep = -1;
-		pat_armedAutomationTrack = -1;
-	}
-}
-
-void pat_recordAutomation(uint8_t pattern, uint8_t track, uint8_t step,
-                          instrument_param_id_t dest, uint8_t value)
-{
-	/*
-	 * Writes one automation value into a quantized Pattern step.
-	 *
-	 * Callers: seq_recordAutomation() for live recording and
-	 * pat_recordArmedAutomation() for held-step recording. Sequencer still
-	 * decides whether recording is active and which step is quantized; PatternData
-	 * owns the stored Step mutation.
-	 *
-	 * Inputs: pattern/track/step identify the destination, dest is the
-	 * automation parameter id in the same encoded form used by playback, and
-	 * value is the recorded 0..127 value.
-	 *
-	 * Output: active automation lane param/value fields are written. Risk:
-	 * pat_activeAutomationTrack treats any nonzero value as lane 2 to preserve
-	 * the old menu behavior.
-	 */
-	if (!pat_patternValid(pattern) || !pat_trackValid(track) || !pat_stepValid(step))
-		return;
-	/*
-	 * Keep recorded automation in the legacy automationNode namespace.
-	 *
-	 * Inputs may come from MIDI/armed automation call sites that still pass
-	 * broader parameter ids. Output is either a valid 1..254 automation
-	 * destination or NO_AUTOMATION, matching the playback guard and default Step
-	 * reset value. This prevents live recording from writing a value that would
-	 * later be unsafe on trigger.
-	 */
-	if (dest == 0u || dest >= NO_AUTOMATION || dest == PAR_NONE)
-		dest = NO_AUTOMATION;
-	if (pat_activeAutomationTrack == 0) {
-		Step *target = pat_stepPtr(pattern, track, step);
-		target->param1Nr = dest;
-		target->param1Val = value;
-	} else {
-		Step *target = pat_stepPtr(pattern, track, step);
-		target->param2Nr = dest;
-		target->param2Val = value;
-	}
-}
-
-void pat_recordArmedAutomation(uint8_t pattern, instrument_param_id_t dest,
-                               uint8_t value)
-{
-	/*
-	 * Writes automation to the long-press armed step, if one exists.
-	 *
-	 * Caller: seq_recordAutomation() after the normal record-gated path. This
-	 * preserves the old ARM_AUTOMATION_STEP behavior where holding a step and
-	 * moving a control records that control to the held step even when the
-	 * sequencer is not currently writing a quantized live step.
-	 *
-	 * Inputs: pattern is the active pattern supplied by Sequencer, dest/value
-	 * describe the parameter edit. Output: no-op when nothing is armed, otherwise
-	 * pat_recordAutomation() writes the armed track/step.
-	 */
-	if (pat_armedAutomationStep == -1 || pat_armedAutomationTrack == -1)
-		return;
-	pat_recordAutomation(pattern, (uint8_t)pat_armedAutomationTrack,
-	                     (uint8_t)pat_armedAutomationStep, dest, value);
-}
-
-void pat_applyStepToMenu(uint8_t pattern, uint8_t track, uint8_t step)
-{
-	/* Replaces SEQ_REQUEST_STEP_PARAMS.
-	 *
-	 * Reads one Step from PatternData and mirrors its editable fields into
-	 * parameter_values[] for the menu display. Automation destinations are
-	 * converted from stored param-number encoding back to modTargets[] indices.
-	 * This function mutates menu edit state but does not change pattern data. */
-	Step *s = pat_stepPtr(pattern, track, step);
-	instrument_param_id_t dest;
-	if (!s)
-		return;
-	parameter_values[PAR_STEP_VOLUME] = (uint8_t)(s->volume & STEP_VOLUME_MASK);
-	parameter_values[PAR_STEP_NOTE] = s->note;
-	parameter_values[PAR_STEP_PROB] = s->prob;
-
-	dest = s->param1Nr;
-	if ((dest < 128u) && (dest != 0u))
-		dest--;
-	if (dest == NO_AUTOMATION)
-		parameter_values[PAR_P1_DEST] = 0u;
-	else if (dest < END_OF_SOUND_PARAMETERS)
-		parameter_values[PAR_P1_DEST] = paramToModTarget[dest];
-
-	dest = s->param2Nr;
-	if ((dest < 128u) && (dest != 0u))
-		dest--;
-	if (dest == NO_AUTOMATION)
-		parameter_values[PAR_P2_DEST] = 0u;
-	else if (dest < END_OF_SOUND_PARAMETERS)
-		parameter_values[PAR_P2_DEST] = paramToModTarget[dest];
-
-	parameter_values[PAR_P1_VAL] = s->param1Val;
-	parameter_values[PAR_P2_VAL] = s->param2Val;
-	pat_setSelectedStep(step);
-}
-
-void pat_applyPatternSettingsToMenu(uint8_t pattern)
-{
-	/*
-	 * Clears retired Pattern chain settings in menu parameter_values.
-	 *
-	 * Pattern Settings no longer exposes repeat/next controls. Callers still use
-	 * this helper when entering old pattern-settings paths, so it writes neutral
-	 * values instead of mirroring stale serialized PatternSetting bytes.
-	 *
-	 * Input: pattern is ignored. Output: PAR_PATTERN_BEAT and PAR_PATTERN_NEXT
-	 * are zeroed. Risk: this is a menu/UI sync helper, not a pattern mutation; do
-	 * not call it from interrupt context.
-	 */
-	(void)pattern;
-	parameter_values[PAR_PATTERN_BEAT] = 0u;
-	parameter_values[PAR_PATTERN_NEXT] = 0u;
-}
-
-void pat_applyTrackSettingsToMenu(uint8_t pattern, uint8_t track)
-{
-	/*
-	 * Copies PatternData track-level settings into menu parameter_values.
-	 *
-	 * Completes the non-LED side effect formerly hidden inside
-	 * LED_QUERY_SEQ_TRACK. Callers pair this with led_updatePatternTrack() when
-	 * changing viewed pattern/track so both physical LEDs and editable menu
-	 * params refresh from the same PatternData source.
-	 *
-	 * Inputs: pattern/track to display. Output: PAR_TRACK_LENGTH,
-	 * PAR_TRACK_ROTATION, and PAR_SHUFFLE are refreshed. Risk: shuffle still has
-	 * global playback backing, but the UI-facing API is Pattern-owned so callers
-	 * are ready for per-pattern/per-track shuffle later.
-	 */
-	if (!pat_patternValid(pattern) || !pat_trackValid(track))
-		return;
-	parameter_values[PAR_TRACK_LENGTH] = pat_getTrackLength(pattern, track);
-	parameter_values[PAR_TRACK_ROTATION] = pat_getTrackRotation(pattern, track);
-	parameter_values[PAR_TRACK_SCALE] = pat_getTrackScale(pattern, track);
-	/*
-	 * STEP front-page aliases mirror PatternData-owned track settings. Legacy
-	 * PAR_MIDI_* parameters may still be updated as a compatibility output when
-	 * these aliases are edited, but they are no longer the storage owner for
-	 * this page.
-	 */
-	parameter_values[PAR_TRACK_MIDI_CHAN] =
-		scene_getTrackMidiChannel(pattern, track);
-	parameter_values[PAR_TRACK_MIDI_NOTE] =
-		scene_getTrackMidiNote(pattern, track);
-	parameter_values[PAR_SHUFFLE] = pat_getTrackShuffle(pattern, track);
+    if (value == 127u)
+        new_flags = (uint8_t)(sp.flags & (uint8_t)~PAT_SPECIAL_PROB_BIT);
+    else
+        new_flags = (uint8_t)(sp.flags | PAT_SPECIAL_PROB_BIT);
+    return pat_writeSpecials(scene_index, track, step, new_flags,
+                             sp.note, sp.velocity, value);
 }

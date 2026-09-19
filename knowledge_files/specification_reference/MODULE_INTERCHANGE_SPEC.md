@@ -1,24 +1,22 @@
 # Module Interchange Spec
 
-Session 030 baseline, updated through Session 042 for the one-pattern bridge,
-STEP track-settings front page, per-track shuffle, LED blink idempotence,
-descriptor-owned instrument files, Scene-owned instrument parameter images, and
-dynamic VOICE menu pages, descriptor-aware LFO/velocity runtime targets,
-descriptor Morph, per-voice Morph, Scene modulation targets, asyncfatfs
-LFN/case expansion, restored Kit load/save, root Instrument Save, and
-Kit/Instrument Morph Save, root Scene Load/Save, and the 16-Scene Bank
-Load/Save workspace. This spec records the live module API boundaries
-after `frontPanelParser.c/h` removal, the PatternData storage-ownership pass,
-the `Core/Preset` -> `Core/Bank/Scene/Preset` folder move, the first Phase 2
-directory-kit filesystem boundary, the HCNAMES/identity ownership pass,
-independent filesystem payload staging, and the current bridge pattern
-behavior. The goal is to make the direct-call ownership clear so future work
-does not recreate a generic bridge or duplicate resident names.
+This is the current direct-call ownership and API-boundary map through Session
+067, including typed HCNAMES, AutoSave boot restore, typed Instrument-index
+repair, AsyncFATFS directory publication, the Phase 4 dynamic Pattern storage
+system, step automation editing/playback (Session 065), the VOICE-page
+held-step automation overlay (Session 066), and the Pattern Stack Service with
+dtype offset bug fix (Session 067). Historical migrations belong in session
+logs; this document states which live module owns each call, state transition,
+and retained object.
 
 ## Rules
 
 - UI code calls the owner module directly.
-- Pattern/track/step/automation edits go through `pat_*`.
+- Pool-mutating Pattern/track/step/automation edits go through `patSvc_*`
+  (the Pattern Stack Service, Session 067). Direct `pat_*` mutation calls are
+  reserved for PatternData internals and the service itself. Non-mutating
+  reads (e.g. `pat_readStepSpecials`, `pat_readStepAutomations`) remain
+  direct `pat_*` calls.
 - LED rendering goes through `led_*`.
 - Transport/playback timing goes through `seq_*`.
 - Sound parameter application goes through Preset.
@@ -28,8 +26,9 @@ does not recreate a generic bridge or duplicate resident names.
   live in `storageTypes.c/h`.
 - Sequencer may read pattern data through narrow PatternData playback helpers;
   it must not index PatternData storage arrays directly.
-- `pat_tmpPattern` is the active-pattern load staging buffer. The current
-  16-Scene Bank workspace does not allocate a separate staging Scene.
+- PAT4 readers stream into one selected live Scene and commit/fan out only
+  after validation. Pattern AutoSave streams from PatternData's one immutable
+  snapshot; there is no second staging Scene or per-Scene snapshot array.
 - Preset code lives under `Core/Bank/Scene/Preset/`, but public API names remain
   `preset_*`, `parameterArray_*`, and `paramArray_*` for this mechanical move.
 - Normal root Kit loads and saves are directory-based. Kit Morph Load and
@@ -47,33 +46,77 @@ does not recreate a generic bridge or duplicate resident names.
 - Instrument, Kit, root Scene, and root Bank browser names use one physical
   shared SRAM cache of 1,000 nine-byte rows. Kit/Scene/Bank rows are direct
   slot positions; Instrument rows are sorted browser positions. Type changes
-  replace the cache domain, and entering a type loads its `.hcindex`.
-- Root `/.hcnames` is the authoritative fixed-order resident-name register.
-  The 9,000-byte cache borrows its 129 rows only during a name transaction.
+  replace the cache domain. Entering an Instrument type opens its `.hcindex`
+  directly; missing/empty/corrupt metadata rebuilds only that type, while
+  genuine FAT/SD failures remain terminal errors.
+- Root `/.hcnames` is the authoritative fixed-order resident identity and
+  provenance register. A dedicated 1,305-byte name mirror and the
+  filesystem-owned 290-byte source register retain its 145 rows independently
+  of the browser cache.
+  Its physical file is a mandatory `#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat`
+  header plus 145 rows; Instrument rows carry a mandatory three-byte type
+  column and rows 129..144 own Pattern identity. Load/Save commits publish
+  name, source, and refreshed state for the complete hierarchy they committed.
   The sole active identity block is 81 bytes: BankData's Bank row plus
   filesystem's Scene, Kit, and six Instrument rows. SceneData stores no name or
   filename text.
+- HCNAMES creation requires a complete case-insensitive root absence proof.
+  A NULL read open, duplicate match, or failed scan/close remains an error and
+  cannot authorize creation or automatic repair.
 - The 9,000-byte cache never aliases payload validation. A separate aligned
   2,048-byte union stages one Kit, one Instrument candidate, or Scene settings
   plus embedded Kit. Pattern is excluded and reads directly into final Scene
   SRAM after the non-Pattern commit.
+- Boot reader Instrument types never alias that destructive stage. All 96 are
+  retained through the final Scene in the alternate view of the existing
+  144-byte Bank-child scratch; its 16x9 Bank-name view is used only after a
+  reader returns and canonical Bank Load starts.
 - Boot writes `/Kit/.hcindex`, `/Scene/.hcindex`, `/Bank/.hcindex`, and each
   registry-owned Instrument index. After Instrument index generation disposes
-  the shared cache, boot reloads `/Bank/.hcindex` before initial Bank load.
+  the shared cache, boot reloads `/Bank/.hcindex`, validates AutoSave candidates
+  when enabled, then selects the matching-winner reader, gated
+  HCNAMES-authoritative reader, or canonical library ladder.
 - Successful Kit, root Scene, and root Bank saves perform a physical parent
   rescan and complete `.hcindex` rewrite before the original save callback is
   released; Menu then refreshes the current Save slot display.
+- Pure root Scene and Bank Loads never enter that Save-owned physical rebuild.
+  After payload and HCNAMES commit, Preset/Menu applies the loaded active Scene,
+  then Menu reloads the unchanged selected `.hcindex` read-only before ending
+  `...` and releasing input. Its direct final-index callback snapshots the
+  terminal result, calls `filesystem_ack()`, then releases Menu; without that
+  acknowledgement the idle-only trace and AutoSave schedulers remain blocked
+  at `FS_STATUS_DONE`.
+- Load:Bank index completion is only the first browser boundary. Menu continues
+  directly into a physical child preview for the highlighted Bank and holds
+  input until that callback publishes the `00..15` destination mask.
+- Bank Load and Bank Save call `filesystem_markSettingsDirty()` beside their
+  committed `bank_setRestoreBankSlot()` update. The existing filesystem-owned
+  settings scheduler owns asynchronous `active_bank` serialization; Menu,
+  BankData, and AutoSave do not open or write `settings.cfg` directly.
 - Combined Kit/Instrument menu entry reads one Scene's Kit plus six Instrument
   identities once and family exit performs at most one HCNAMES rewrite. Bank
   Load/Save own a full-register transaction; selective Bank Load overlays only
   requested/present children.
+- Root Scene completion accumulates and publishes its Scene, Kit, and six
+  Instrument identity/source/refreshed rows as one committed hierarchy. Scene
+  Save seeds the child identity store from the source register before writing;
+  Bank Save child preparation stages the Kit identity too.
+- Known deferred UI boundary: Kit/Instrument HCNAMES publication normally waits
+  for family/page exit even though a browser item/type switch may dispose the
+  `.hcindex` cache. A later revision must queue the HCNAMES checkpoint without
+  blocking page repaint; see `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
 - asyncfatfs owns exact-case filename behavior. Product code should use
   filesystem/asyncfatfs object/LFN APIs instead of local FAT/LFN reconstruction.
-  Dot-prefixed files are ordinary filesystem objects and must not be hidden by
-  asyncfatfs. Product scans explicitly exclude `.hctmp.<ext>`.
+  Dot-prefixed files are ordinary filesystem objects except macOS AppleDouble
+  `._*` entries, which `afatfs_findNextObject()` filters system-wide. Product
+  scans explicitly exclude `.hctmp.<ext>` where required.
 - Filesystem shape, instrument file shape, descriptor tables, Scene storage,
   menu layout, and DSP propagation are specified in
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`.
+- AutoSave wire geometry, dirty ownership, scheduling, and extension rules are
+  specified only in `knowledge_files/specification_reference/AUTOSAVE.md`.
+  Development-mode and diagnostic-file policy are specified only in
+  `knowledge_files/specification_reference/DEV_MODES.md`.
 - Instrument voice parameter values are Scene-owned descriptor images. Dynamic
   VOICE menu cells resolve through the active slot's instrument descriptor
   layout, not through static `menuPages.h` cells or `parameter_values[]`.
@@ -84,13 +127,15 @@ does not recreate a generic bridge or duplicate resident names.
   parameter paths and by `AutomationNode`. It is no longer the canonical map
   for instrument file keys. `Step` destinations are already canonical 16-bit
   IDs, but AutomationNode still narrows them to legacy byte CC/CC2 routing;
-  descriptor step automation is therefore deliberately unfinished.
+  descriptor step automation uses canonical 9-bit `instrument_param_id_t`
+  targets and 7-bit pool-packed values with identity mapping (stored value =
+  parameter value; Session 065 storage, Session 067 dtype fix).
 - Descriptor-backed velocity/LFO target storage, menu display, and runtime
   application are live after Session 035 for direct descriptor targets,
   voice-local decimation, per-voice Morph, and Scene Decimation. Direct
   descriptor LFO overlays use InstrumentManager's descriptor-domain adapter and
-  the normal descriptor runtime writer; step automation remains the unfinished
-  descriptor/Scene target path.
+  the normal descriptor runtime writer; step automation now uses the same
+  descriptor runtime writer via `instrumentManager_writeRuntime()` (Session 065).
 - Direct descriptor modulation must use the descriptor owner's byte-domain
   runtime writer. Do not write raw DSP members such as `SlopeEg2.decay` for a
   byte descriptor: that bypasses the setter's unit conversion and can turn a
@@ -109,12 +154,68 @@ does not recreate a generic bridge or duplicate resident names.
   `Core/Bank/Scene/SceneModTargets.c/h`. The first target set is `1vm..6vm` plus
   Scene Decimation `srt`; future FX parameters join that namespace instead of
   being inserted into per-instrument descriptor tables.
-- Pattern/container storage is still a Phase 2 bridge shape. It does not
-  preserve the old single/global shuffle byte; per-track shuffle is the only
-  live shuffle storage, and final migration/backfill is expected to happen in
-  external Python converters once storage settles.
+- Live Pattern storage is the dynamic address-array + pool + bit-packed bitmap
+  system in `pat_regions`. PAT4 persists the complete object, including
+  dynamic note/velocity/probability specials and current track/Pattern
+  parameters. Pattern AutoSave uses a separate dirty mask and root A/B files;
+  HCPR contains Pattern identity but no Pattern payload.
+
+## Core/Bank/BankData
+
+Affiliate modules: filesystem, Preset, SceneData, PatternData, Menu, AutoSave.
+
+Purpose: owns the 16-Scene resident Bank workspace (present/edit masks, active
+Scene, restore slot, resident-Bank flag) and, since Session 058, the
+session-scoped card-verified clean-Scene authority used to skip Bank Save
+children that are provably unchanged on the current mounted card.
+
+| API | Use | Usual callers / clients |
+| --- | --- | --- |
+| `bank_init()` | Zero present/edit masks, active Scene, resident-Bank flag, and all Session 058 clean authority. | boot |
+| `bank_setScenePresentMask()` / `bank_scenePresentMask()` / `bank_scenePresent()` | Present-mask get/set; the setter reports whether it changed (Session 052). | filesystem Bank Load/Save, AutoSave, Preset |
+| `bank_hasResidentBank()` / `bank_setHasResidentBank()` | Resident-Bank presence flag; the empty-Scene/Bank overwrite guard (Session 057) depends on it. | filesystem |
+| `bank_clearSdCleanAuthority()` | Drop every card-clean bit and the identified Bank slot (`BANK_SD_CLEAN_SLOT_NONE = 0xffff`). Called at cold boot and every fresh mount/remount. | filesystem `initAfterCardReady` |
+| `bank_invalidateSdCleanScene(scene_index)` | Clear one resident Scene's card-clean bit and set its mutation-during-save bit. Called by every retained-data mutation funnel (Scene/Kit scalar setters, Instrument endpoint store, KitMrp/InstrumentMrp/whole-Instrument commit, Pattern mutators). Equal-value no-ops never reach it. | SceneData, presetManager, PatternData |
+| `bank_publishSdCleanAuthority(slot, proven_mask)` | Establish/merge clean authority after a completed Bank Load/Save. Same-slot ORs into existing bits; a different slot replaces the old authority. Autosave recovery never calls it. | presetManager `on_bank_load_complete`; filesystem Save completion |
+| `bank_sdCleanMask()` / `bank_sdCleanSlot()` / `bank_sdCleanSlotIsValid()` | Read the clean mask/slot/validity. | filesystem Bank Save skip |
+| `bank_resetSdSaveMutationWindow()` / `bank_resetSdSaveMutationScene()` / `bank_sdSaveMutatedMask()` | Own the operation-scoped mutation window across a Bank Save so a child edited while its write was in flight stays non-clean. | filesystem Bank Save |
+
+The clean authority is **never serialized** (not in settings, HCNAMES, Bank, or
+AutoSave): it survives only for one boot+mount and is rebuilt by successful
+Bank Load/Save completion paths. See `058_SESSION_HANDOFF_LOG.md` §5.
 
 ## Core/Bank/Scene/Pattern/PatternData
+
+### Session 067 current contract
+
+PatternData owns a three-part dynamic storage system per resident Scene:
+a 1,792-byte static address array (896 × uint16_t), an 8,192-byte event
+pool (PAT_STACK_SIZE=256 × 32-byte chunks), and a 512-byte free-tracking
+bitmap plus 23 parameter bytes. These live in the permanent `pat_regions` symbol (168,304 bytes
+total across 16 Scenes). Each address entry encodes trigger (bit 15),
+has-specials (bit 14), and a 14-bit pool byte offset (sentinel 0x3FFF).
+Pool blocks carry a 2-byte header, a 1-byte special-flags byte, and value
+bytes for note, velocity, and probability in ascending bit order.
+
+`pat_readStepSpecials()` is the unified read path for Sequencer playback
+and step-edit menu display; it returns resolved defaults for absent
+specials. `pat_setStepNote/Volume/Probability` perform real pool
+read-modify-write through `pat_writeSpecials` (returns `uint8_t`
+success/failure since Session 067), which handles reallocation, free, and
+graceful degradation on alloc failure. Session 067 publication ordering fix:
+all address-to-pool transactions use write-new/swap/free-old with PRIMASK
+trigger-bit re-read; in-place same-size rewrite removed entirely.
+`pat_eraseStep` and `pat_clearTrack` detach addresses before freeing pool
+blocks. Copy operations remain deliberate no-ops pending pool block
+duplication design. Since Session 067, all pool-mutating calls from callers
+outside PatternData route through the Pattern Stack Service (`patSvc_*`).
+
+Current Scene/Bank/root Pattern interchange is exact binary PAT4; legacy text
+is import-only and no retained `PatternSet`/discard instance remains. `scene_t`
+does not contain Pattern data. Affiliates are SceneData, Sequencer,
+UI/LED/copy-clear, Euklid/SOM, and filesystem; none may add a parallel
+Pattern owner. See `SRAM_MANIFEST.md` for linked sizes and
+`PATTERN_DYNAMIC_STACK.md` for the complete specification.
 
 Affiliate modules: Menu, buttonHandler, ledHandler, copyClearTools, filesystem,
 Sequencer, EuklidGenerator, Preset/MidiParser indirectly through Sequencer
@@ -145,8 +246,11 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 | `pat_setStepNote(pattern, track, step, note)` | Mutate selected step note and menu mirror. | `menu_parseGlobalParam(PAR_STEP_NOTE)` |
 | `pat_setStepVolume(pattern, track, step, volume)` | Mutate selected step velocity without clearing active bit. | `menu_parseGlobalParam(PAR_STEP_VOLUME)` |
 | `pat_setStepProbability(pattern, track, step, prob)` | Mutate selected step probability. | `menu_parseGlobalParam(PAR_STEP_PROB)` |
-| `pat_setStepAutomationDestination(pattern, track, step, slot, targetParam)` | Mutate step automation destination for lane 0/1. | `menu_parseGlobalParam(PAR_P1_DEST/PAR_P2_DEST)` |
-| `pat_setStepAutomationValue(pattern, track, step, slot, value)` | Mutate step automation value for lane 0/1. | `menu_parseGlobalParam(PAR_P1_VAL/PAR_P2_VAL)` |
+| `pat_readStepAutomations(scene, track, step, out[], maxEntries)` | Read decoded automation entries for one step; returns count. | Sequencer playback, step-edit menu display |
+| `pat_writeStepAutomation(scene, track, step, target9, value7)` | Add or update one automation entry; uniqueness enforced, returns 1 on success, 0 on pool exhaustion or 63-entry ceiling. | Step-edit menu add/update, future VOICE overlay |
+| `pat_removeStepAutomation(scene, track, step, target9)` | Remove one automation entry by 9-bit target; returns 1 if found. | Step-edit menu delete |
+| `pat_removeTrackAutomationByTarget(scene, track, target9)` | Remove all entries with a given target from all 128 steps of a track; returns count removed. | Step-edit menu clear-by-target |
+| `pat_stepAutomationCount(scene, track, step)` | Count automation entries without reading them. | Step-edit menu page count, sequencer |
 | `pat_setPatternChangeBar(pattern, value)` | Set pattern change-bar rule. | `menu_parseGlobalParam(PAR_PATTERN_BEAT)` |
 | `pat_setPatternNext(pattern, value)` | Set pattern next-pattern rule. | `menu_parseGlobalParam(PAR_PATTERN_NEXT)` |
 | `pat_getPatternChangeBar(pattern)` / `pat_getPatternNext(pattern)` | Read pattern settings. | Future callers; currently mostly direct pointer reads |
@@ -159,21 +263,56 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 | `pat_setTrackMidiChannel(pattern, track, channel)` / `pat_getTrackMidiChannel(pattern, track)` | Store/read per-track MIDI output channel in menu form (`1..16`). | `menu_parseGlobalParam(PAR_TRACK_MIDI_CHAN)`, Sequencer MIDI output/input matching |
 | `pat_setTrackMidiNote(pattern, track, note)` / `pat_getTrackMidiNote(pattern, track)` | Store/read per-track MIDI note override (`0` means fallback/default). | `menu_parseGlobalParam(PAR_TRACK_MIDI_NOTE)`, Sequencer trigger/preview/MIDI output |
 | `pat_setTrackShuffle(pattern, track, shuffle)` / `pat_getTrackShuffle(pattern, track)` | Store/read per-track shuffle amount (`0..127`); no legacy all-track shuffle import/export remains. | `menu_parseGlobalParam(PAR_SHUFFLE)`, filesystem per-track shuffle extension, Sequencer scheduler |
-| `pat_clearTrack(pattern, track)` | Reset one track. | copyClearTools, `pat_clearPattern()` |
-| `pat_clearPattern(pattern)` | Reset all tracks in one pattern. | copyClearTools, `pat_init()` |
-| `pat_clearAutomation(pattern, track, automTrack)` | Clear automation lane 0/1 for a track. | copyClearTools |
-| `pat_copyTrack(pattern, srcTrack, dstTrack)` | Copy one track inside a pattern. | copyClearTools |
-| `pat_copyPattern(srcPattern, dstPattern)` | Copy whole pattern slot. | copyClearTools |
+| `pat_clearTrack(scene, track)` | Free dynamic blocks and reset one track. | copyClearTools, `pat_clearPattern()` |
+| `pat_clearPattern(scene)` | Free dynamic blocks and reset all tracks in one Scene Pattern. | copyClearTools, initialization |
+| `pat_copyTrack(scene, src, dst)` / `pat_copyPattern(src_scene, dst_scene)` / `pat_copyBar(scene, track, src, dst)` | Reserved public copy surface. | Deliberate no-ops pending Phase 4.5 pool duplication |
 | `pat_setSelectedStep(step)` | Keep active step mirror in `PAR_ACTIVE_STEP`; `seq_selectedStep` no longer exists. | PatternData menu-apply and automation destination edit |
 | `pat_setActiveAutomationTrack(track)` / `pat_getActiveAutomationTrack(void)` | Select automation lane. | Menu; future UI clients |
 | `pat_armAutomationStep(step, track, armed)` | Arm/disarm held-step automation recording target. | buttonHandler long-press path |
-| `pat_recordNote(pattern, track, step, velocity, note)` | Record quantized note/velocity/probability/active state and parent main step. | `seq_addNote()` |
-| `pat_eraseMainStepSubSteps(pattern, track, mainStep)` | Erase one main-step cluster and restore first-sub-step invariant. | Sequencer live erase |
-| `pat_recordAutomation(pattern, track, step, dest, value)` | Write automation into a concrete quantized step. | Sequencer |
-| `pat_recordArmedAutomation(pattern, dest, value)` | Write automation into held/armed step if present. | Sequencer |
-| `pat_applyStepToMenu(pattern, track, step)` | Copy step editable fields into `parameter_values`. | buttonHandler, Menu active-step edits |
-| `pat_applyPatternSettingsToMenu(pattern)` | Copy pattern settings into menu params. | Menu load/apply paths, buttonHandler pattern view |
-| `pat_applyTrackSettingsToMenu(pattern, track)` | Copy track settings into menu params. | buttonHandler, led follow paths, Menu voice page |
+| `pat_readStepSpecials(scene, track, step)` | Resolve stored note/velocity/probability values and flags. | Sequencer, step menu |
+| `pat_setStepNote/Volume/Probability(scene, track, step, value)` | Tracked dynamic-block read/modify/write. | Menu edit path |
+| `pat_applyStepToMenu(scene, track, step)` | Copy step editable fields into `parameter_values`. | buttonHandler, Menu active-step edits |
+| `pat_applyPatternSettingsToMenu(scene)` | Copy Pattern settings into menu params. | Menu load/apply paths, buttonHandler Pattern view |
+| `pat_applyTrackSettingsToMenu(scene, track)` | Copy track settings into menu params. | buttonHandler, LED follow paths, Menu voice page |
+| `pat_releaseStepDynamic(scene, track, step)` | Trigger-preserving detach+free: clears bit 14 and sets sentinel offset while preserving the trigger bit, then frees pool block. (Session 067) | PatternStackService |
+| `pat_markPoolMutationDirty(scene)` | Narrow dirty-marking boundary for service operations that bypass normal `pat_write*` paths. (Session 067) | PatternStackService |
+| `pat_tryAppendAutomation(scene, track, step, target9, value7)` | In-place growth for adding automation entries when adjacent free space is available. Returns 1 on success. (Session 067) | PatternStackService |
+| `pat_poolUsagePercent(void)` | Return pool occupancy percentage 0..99 via memcpy+popcount of active Scene bitmap. (Session 067) | Menu settings widget |
+| `pat_snapshotScene(scene)` / `pat_autosaveSnapshot()` | Transfer one live Scene into the immutable Pattern AutoSave snapshot/read it during the drain. | filesystem Pattern scheduler/writer |
+
+## Core/Bank/Scene/Pattern/PatternStackService
+
+Affiliate modules: PatternData, Menu, Sequencer, copyClearTools,
+EuklidGenerator, filesystem, timebase.
+
+Purpose: unified pool mutation dispatcher (Session 067). Serializes all
+pool-mutating operations through a single service tick, guaranteeing exactly
+one mutation target at a time. Provides two-tier defragmentation
+(trailing-gap merge and paced compaction), bounded bulk barriers for
+track/pattern clear, filesystem replacement handover, and an elastic gap
+policy. See `PATTERN_DYNAMIC_STACK.md` §12 for the complete specification.
+
+| API | Use | Usual callers / clients |
+|---|---|---|
+| `patSvc_init(void)` | Initialize service state, queue, cursors. | `main.c` after boot filesystem ladder |
+| `patSvc_tick(void)` | Service tick: handover → queue drain → bulk barrier → Tier 1 gap → Tier 2 compaction. | `timebase.c` after `endlessPots_tick()` |
+| `patSvc_idle(void)` | Filesystem replacement handover: complete/abandon bulk barrier, drain queue, switch Scene, clear cursors. | `filesystem.c` at 5 replacement boundary points |
+| `patSvc_writeStepAutomation(scene, track, step, target9, value7)` | Add/update one automation entry via service. Returns 1 on success. | Menu VOICE overlay, step-edit menu |
+| `patSvc_removeStepAutomation(scene, track, step, target9)` | Remove one automation entry via service. Returns 1 if found. | Menu VOICE overlay, step-edit menu |
+| `patSvc_setStepNote(scene, track, step, note)` | Set step note via service. | Menu step edit |
+| `patSvc_setStepVolume(scene, track, step, volume)` | Set step velocity via service. | Menu step edit |
+| `patSvc_setStepProbability(scene, track, step, prob)` | Set step probability via service. | Menu step edit |
+| `patSvc_eraseStep(scene, track, step)` | Erase step via service. | Sequencer erase mode |
+| `patSvc_clearTrack(scene, track)` | Clear track via bounded bulk barrier. | copyClearTools |
+| `patSvc_clearPattern(scene)` | Clear pattern via bounded bulk barrier. | copyClearTools |
+| `patSvc_removeTrackAutomationByTarget(scene, track, target9)` | Remove all entries with a given target from all 128 steps. | Menu VOICE overlay |
+| `patSvc_enqueueErase(scene, track, step)` | Queue erase from TIM3 ISR context (PRIMASK-protected enqueue). | Sequencer live erase |
+
+Caller migration (Session 067): 15+ call sites across `menu.c`,
+`copyClearTools.c`, `EuklidGenerator.c`, and `sequencer.c` changed from
+direct `pat_*` mutation calls to `patSvc_*` routing. TIM3's automation read
+path is not routed through the service — it reads address entries directly,
+which are always consistent due to the publication ordering fix.
 
 ## Core/Bank/Scene/Pattern/EuklidGenerator
 
@@ -239,6 +378,7 @@ Sequencer LED feedback via `SeqLedState`.
 | `led_notifyPatternChanged(playedPattern)` | Sequencer pattern-change notification and follow-mode UI refresh. | Sequencer |
 | `led_notifyTrackRotationReset(rotation)` | Update visible rotation parameter after Sequencer stop reset. | Sequencer |
 | `led_processSeqLedState()` | Foreground drain of Sequencer LED dirty state. | `main.c` |
+| `led_updateAutomationStepView(track, target, scene)` | Light SEQ LEDs for steps with automation matching a target parameter (Session 066). | Menu VOICE overlay |
 
 Shared object: `SeqLedState seq_ledState` is written by Sequencer and consumed
 by ledHandler in foreground.
@@ -263,6 +403,8 @@ dispatch to owners.
 | `buttonHandler_setRunStopState(running)` | Sync UI transport bit and START/STOP LED. | MidiParser, local button path |
 | `buttonHandler_showMuteLEDs()` | Show mute-state LEDs. | Menu/voice/performance paths |
 | `buttonHandler_muteVoice(voice, isMuted)` | Update front-panel mute shadow. | buttonHandler local, MIDI/UI paths if needed |
+| `seqHeldMask()` | Return the current held-step bitmask for VOICE overlay (Session 066). | Menu overlay |
+| `visibleStep()` | Return the visible step index accounting for bar offset (Session 066, promoted to extern). | Menu, ledHandler |
 
 Public state used by other modules:
 
@@ -306,6 +448,9 @@ edit dispatch, and post-load operation follow-up.
 | `menu_getActiveVoice()` / `menu_setActiveVoice(voiceNr)` | UI active voice. | buttonHandler, MidiParser, PatternData callers |
 | `menu_areMuteLedsShown()` | Mute LED UI state query. | ledHandler/buttonHandler |
 | `menu_setShownPattern(patternNr)` / `menu_getViewedPattern()` | UI viewed/edited pattern. | buttonHandler, ledHandler, PatternData callers |
+| `menu_voiceAutoOverlayEnter()` / `menu_voiceAutoOverlayExit()` | Enter/exit VOICE-page held-step automation overlay (Session 066). Entry initializes 44-byte state block, starts async search. Exit restores normal VOICE display and clears CGRAM. | buttonHandler SEQ held-step timing |
+| `menu_voiceAutoOverlayHeldChanged()` | Notify overlay that the held-step mask changed. Invalidates working values, restarts async search. | buttonHandler SEQ press/release during overlay |
+| `menu_voiceAutoOverlayPatternDeleted()` | Notify overlay that the current pattern was deleted/cleared. Forces overlay exit. | copyClearTools |
 
 Shared state used by clients:
 
@@ -370,6 +515,8 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 | `seq_addNote(trackNr, vel, note)` | Record played note into pattern when recording. | MidiParser, roll path |
 | `seq_setRecordingMode(active)` / `seq_setErasingMode(active)` | Recording/erase gates. | buttonHandler |
 | `seq_recordAutomation(voice, dest, value)` | Sequencer-gated and held-step automation recording. | Preset, MidiParser |
+| `seq_drainPendingAutomation(void)` | Foreground drain of debounced pending buffer; passes stored 7-bit value directly to `instrumentManager_writeRuntime()` (identity mapping since Session 067 dtype fix; the previous `/2` `*2` conversion is removed) and sets dirty bits. Runs inside `audio_check_and_render()` after `voiceControl_processPending()`. | `main.c` render loop |
+| `seq_restoreAutomatedParameters(voice)` | Restore dirty descriptors from `morph_interpolation[]` on voice retrigger; clears per-slot dirty bitmap. | `voiceControl_triggerNow()` |
 | `seq_midiNoteOff(chan)` / `seq_sendMidiNoteOn(channel, note, veloc)` | MIDI note output ownership. | MidiParser, Sequencer |
 | `seq_offsetTrackStepIndexForRotation(trackNr, oldRot, newRot, len)` | Narrow runtime hook for live rotation compensation. | PatternData only |
 
@@ -394,13 +541,15 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_loadName(presetNr, what)` / `preset_applyLoadedName()` | Async slot name browsing. | Menu |
 | `preset_loadInstrument(scene, slot, type, browser_index)` | Post one immutable root Instrument request; request coordinates publish only after filesystem accepts it. | Instrument Load lower-row browser |
 | `preset_saveInstrumentTemp(scene, slot)` / `preset_loadInstrumentTemp(scene, slot, type)` | Save or restore the hidden typed `.hctmp.<ext>` used by the reversible Instrument Load `kit` row. These operations publish neither HCNAMES nor `.hcindex`. | Menu Instrument Load session |
+| `preset_saveInstrumentMorphTemp(scene, slot)` / `preset_loadInstrumentMorphTemp(scene, slot, type)` | Save or restore the Morph-only hidden baseline used by the reversible InstrumentMrp `kit` row. The load completion commits the staged Morph image back into the resident Morphable Morph endpoints only, never type/Normal/name/source/routing. | Menu InstrumentMrp session |
 | `preset_loadInstrumentMorph(scene, slot, type, browser_index)` | Post one root Instrument request for morph endpoint import; type must match the destination slot and only morphable source normal endpoint values are copied into the resident morph image. | Instrument Load `<Type>Mrp` lower-row browser |
 | `preset_saveInstrument(scene, slot, display_name)` | Post one root Instrument Save request from a resident Scene/voice slot. The display stem is captured at request acceptance and filesystem writes `Instrument/<stem.ext>`. | Instrument Save nested Save-page OK |
 | `preset_saveInstrumentMorph(scene, slot, display_name)` | Post one root InstrumentMrp Save request. The writer uses the normal Instrument schema but writes the current interpolated values into both endpoint sections and does not rename resident source metadata. | Instrument Save `<Type>Mrp` OK |
 | `preset_loadSceneForScenes(presetNr, scene_mask)` / `preset_saveScene(presetNr, source_scene)` | Load/save root Scene library folders through the non-Pattern Scene stage and direct Pattern phase. | Load/Save Scene |
-| `preset_loadBank(presetNr, scene_mask)` / `preset_saveBank(presetNr, scene_mask)` | Load/save root Bank folders with a 16-bit local-Scene mask. Load validates bankset.bcg v2, preserves unselected resident Scenes/HCNAMES rows, and can report a valid empty Bank; Save writes selected child payloads through a temporary sibling then promotes it. | Load/Save Bank, boot |
+| `preset_loadBank(presetNr, scene_mask)` / `preset_saveBank(presetNr, scene_mask, force_save)` | Load/save root Bank folders with a 16-bit local-Scene mask. Load validates bankset.bcg v2, preserves unselected resident Scenes/HCNAMES rows, can report a valid empty Bank, and publishes Session 058 card-clean authority for the completed effective child mask; a child proven invalid by content (not I/O abort) is excluded from the load rather than failing the whole operation (Session 057). Save deletes and rewrites only each selected child in place, skipping Option 2 card-verified clean children unless `force_save` is set; non-selected children are left untouched (Session 057; previously a total-tree delete/recreate that destroyed every child regardless of selection). | Load/Save Bank, boot |
+| `preset_bankLoadFailedSceneMask()` (Session 057) | Read `pm_bank_load_failed_scene_mask`, populated from `filesystem_lastBankLoadFailedSceneMask()` in `on_bank_load_complete()`. Nonzero after an otherwise-successful (`FS_STATUS_DONE`) Bank Load means Menu still needs to show the filesystem error overlay once for the excluded child(ren). | Menu `PRESET_OP_BANK_LOAD` success path (both the empty-Bank fallback and normal sound-apply branches) |
 | `preset_loadFirstAvailableSceneOrKit()` | Fallback after absent/empty Bank: lowest root Scene, then lowest root Kit, then defaults. | boot, Bank Load completion |
-| `preset_sendDrumsetParameters()` | Synchronous pre-audio Scene kit audio-routing and descriptor runtime apply. | Menu boot/load path |
+| `preset_sendDrumsetParameters()` | Synchronous pre-audio clear plus six-slot tagged reset/routing/descriptor-image apply. It intentionally leaves target installation to the exact ordinary Scene worker started after audio initialization. | Menu boot/load path |
 | `preset_applySoundParameter(paramNr, value, recordAutomation)` | Direct legacy/static sound parameter application and optional automation recording. | Menu, morph, reset-lock |
 | `preset_setInstrumentParameter(scene, slot, descriptor_index, image, value, recordAutomation)` | Store one descriptor-backed instrument main/morph value and apply/record when appropriate. | Menu dynamic VOICE cells, storage |
 | `preset_setSupplementalParameter(scene, slot, descriptor_index, value)` | Store one single-endpoint supplemental descriptor value. | Menu dynamic VOICE cells, storage |
@@ -410,10 +559,10 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_applyVoiceDecimationAllRuntime(value)` | Apply a transient Scene Decimation value for LFO modulation without changing the retained PERF `srt` setting. | InstrumentManager LFO Scene target path |
 | `preset_applyVelocityModTarget(voice, targetParam)` | Direct velocity mod destination update. | Menu, preset load apply |
 | `preset_applyLfoModTarget(lfo, targetParam)` | Direct LFO mod destination update. | Menu, preset load apply |
-| `preset_startDrumsetApply()` / `preset_tickDrumsetApply()` | Chunked runtime Scene kit audio-routing, descriptor runtime apply, and legacy mod-target apply. | Menu |
+| `preset_startDrumsetApply()` / `preset_tickDrumsetApply()` | Clear outgoing modulation, quiet/trigger-time reset and image-apply all six incoming tagged slots, then keep the Scene gate active while the existing Instrument cursor normalizes/rebinds every source's two LFO pairs and velocity against the final type vector. | Menu and `main.c` post-audio boot activation |
 | `preset_startKitMorphApply()` | Drain same-type KitMrp endpoint copies and refresh active-scene Morph runtime images without replacing kit membership or routing. | Menu KitMrp completion |
-| `preset_startInstrumentApply(scene, slot)` / `preset_tickInstrumentApply()` | Commit one validated staged Instrument. Active Scene path clears all outgoing modulation owners, commits/resets the incoming runtime, rebuilds all six Morph images, then normalizes/rebinds all six source target relationships. | Menu Instrument completion |
-| `preset_startInstrumentMorphApply(scene, slot)` | Copy staged same-type Instrument normal endpoints into the destination morph image and refresh active-scene Morph runtime. | Menu InstrumentMrp completion |
+| `filesystem_loadedInstrumentWasTemporary()` plus `preset_startInstrumentApply(scene, slot, mark_autosave_whole_instrument)` / `preset_tickInstrumentApply()` | Filesystem exposes the existing request-local root-pool versus hidden-`kit` origin during completion; Menu passes that immutable result as the mark flag. A root-pool commit immediately marks each destination's type/Normal/Morph payload for AutoSave; hidden restore supplies zero. Active Scene path clears all outgoing modulation owners, commits/resets the incoming runtime, rebuilds all six Morph images, then normalizes/rebinds all six source target relationships. | Filesystem, then Menu Instrument completion |
+| `preset_startInstrumentMorphApply(scene, slot)` | Copy staged same-type Instrument normal endpoints into the destination morph image, immediately mark only the committed Morphable Morph payload for AutoSave, and refresh active-scene Morph runtime. | Menu InstrumentMrp completion |
 | `preset_morph(morph)` / `preset_morphVoice(slot, morph)` / `preset_morphTick()` / `preset_getMorphValue(index, morph)` | Rate-limited descriptor Morph interpolation/application. Global Morph bulk-sets all six per-voice Morph values; per-voice Morph is the engine input. | Menu, MIDI, velocity modulation, main loop |
 | `presetMorph_setVoiceLfoModulation(source_slot, target_slot, amount, polarity, lfo_value)` / `presetMorph_clearLfoSource(source_slot)` | Maintain the hidden per-voice Morph LFO overlay that is summed around retained per-voice Morph base values. | InstrumentManager/LFO dispatch |
 
@@ -578,44 +727,85 @@ render boundary. Session 028 removed obsolete front-panel dependency.
 | `voiceControl_processPending()` | Drain pending triggers at audio render boundary. | `audio_check_and_render()` |
 | `voiceControl_isVoicePlaying(voice)` | Query voice state. | clients/future UI |
 
+## Core/Bank/Scene/Autosave and AutosaveTrace
+
+Affiliate modules: BankData, SceneData, Preset, filesystem, config.
+
+Purpose: `Autosave.c/.h` owns the hidden-record wire contract, live-byte
+projection, one canonical dirty mask, atomic dirty operations, typed scalar and
+whole-region marker vocabulary, CRC helpers, and the boot-only inverse
+payload-to-resident projection. It owns no file handle or scheduler.
+`AutosaveTrace.c/.h` is a logging-only observer with no filesystem
+ownership. Exact format and trace-field semantics remain authoritative in
+`AUTOSAVE.md` and `DEV_MODES.md` rather than being duplicated here.
+
+| API family | Interchange rule | Usual callers / clients |
+| --- | --- | --- |
+| `autosave_mark*Dirty(...)` | Retained owners store/commit first, then mark typed coordinates. Producers perform SRAM-only work and never calculate wire offsets. | BankData, SceneData, Preset, successful whole-object commits |
+| `autosave_maskHasDirty()` / atomic take and merge helpers | One canonical mask coordinates foreground capture and interrupt-reachable producers; filesystem may consume through the documented API but never owns a second mask. | filesystem AutoSave scheduler/writer |
+| `autosave_getLivePayloadByte()` and format/CRC helpers | Project final resident bytes and serialize/validate v1 records without copying C structs as the wire format. | filesystem AutoSave setup/validation/copy |
+| `autosave_applyBankPayload()` / `autosave_applyScenePayload()` / `autosave_applyKitPayload()` / `autosave_applyInstrumentPayload()` | Inverse-project validated winner bytes into retained boot state while tracking is off. Instrument apply rejects unknown three-byte type text. | filesystem matching-winner reader |
+| `autosave_extractPayloadSource()` | Read the two-byte source field used for Case-1 payload/HCNAMES cross-check. | filesystem matching-winner reader |
+| `autosave_setMutationTrackingEnabled()` / complete-resident dirty boundary | Filesystem policy enables tracking only after successful setup; AutoSave OFF/new-session transitions preserve active-transaction safety. | filesystem policy lifecycle |
+| `autosaveTrace_record()` and ring read/ack APIs | Producers append bounded RAM records; only filesystem may append them to the diagnostic file and acknowledge them after durable sync. | AutoSave and filesystem under `DEV_MODE_LOGGING` |
+
 ## Core/Hardware/SD/filesystem
 
-Affiliate modules: Preset, Menu, PatternData, SampleMemory,
-storageTypes, SceneData.
+Affiliate modules: Preset, Menu, PatternData, SampleMemory, storageTypes,
+SceneData, AutoSave, AutoSaveTrace, and development-mode boot logging.
 
 Purpose: public typed async filesystem facade. It serializes pattern data
 through PatternData accessors after Session 028. Normal kit load/save scans,
 opens, and writes root `Kit/NNN Name/` directory-format data, root Instrument
-Load/Save operates on registry-owned `Instrument/<type>/` pools, HCNAMES owns
-resident display identity, and the retired File/Dir compatibility surface
-performs no work. Storage text parsing/formatting and descriptor-key validation
-stay in `storageTypes.c/h`.
+Load/Save operates on registry-owned `Instrument/<type>/` pools, typed index
+loading owns validation and selected-type repair, HCNAMES owns resident display
+identity/provenance/type authority, boot readers restore the resident Bank, and
+the retired File/Dir compatibility surface performs no work.
+Storage text parsing/formatting and descriptor-key validation stay in
+`storageTypes.c/h`.
 
 | API | Use | Usual callers / clients |
 |---|---|---|
 | `filesystem_initCardAndMountBlocking()` / `filesystem_initAfterCardReady()` | Boot card init/mount. | `main.c` |
-| `filesystem_tick()` | Pump asyncfatfs work. | main loop |
-| `filesystem_status()` / `filesystem_ack()` | Operation status protocol. | Preset/Menu |
+| `filesystem_bootLoggingBegin()` / `filesystem_bootLoggingArm()` / `filesystem_bootLoggingTimedOut()` / `filesystem_writeBootFailureLogBlocking()` / `filesystem_bootLoggingEnd()` | Own the pre-audio ten-second filesystem deadline and one bounded best-effort retained-code recovery write. Private detail hooks may change only the label inside an armed deadline. | `main.c`; filesystem boot operations under `DEV_MODE_LOGGING` |
+| `filesystem_tick()` | Pump asyncfatfs work. While the Session 058 fast drain is active, the BUSY/non-READY branch runs four consecutive `afatfs_poll()` calls instead of one; idle polling keeps its rate limit. | main loop |
+| `filesystem_setFastDrain(on)` / `filesystem_fastDrainActive()` | Select/observe the Session 058 foreground fast-drain policy. Foreground-only, not reference-counted, no retained payload. Menu is the sole setter: it enables only after verified codec suspend and clears before resume. | Menu no-playback lifecycle |
+| `filesystem_status()` / `filesystem_ack()` | Operation status protocol. A direct Menu callback must snapshot its terminal result before acknowledging it; if it does not immediately post another filesystem request, it must acknowledge `DONE`/`ERROR` before releasing its UI owner so autonomous idle-only schedulers can run. | Preset/Menu |
 | `filesystem_requestLoad(type, slot, cb)` / `filesystem_requestSave(type, slot, cb)` | Async typed load/save. For `FS_FILE_KIT`, load is `Kit/NNN Name/kitset.kcg` plus instruments and save routes to the new Kit directory writer. For `FS_FILE_MORPH`, load/save remains legacy `.SND`. | Preset |
 | `filesystem_requestLoadKitForScenes(slot, scene_mask, cb)` | Parse one direct Kit library slot `000..999` into staging and fan the completed Kit payload into selected resident Scenes. | Preset/Menu Kit Load |
 | `filesystem_requestLoadKitMorphForScenes(slot, scene_mask, cb)` | Parse one Kit directory into staging only so Preset can copy matching source normal endpoints into resident morph endpoints. | Preset/Menu KitMrp Load |
 | `filesystem_requestSaveKitDirectory(slot, source_scene, display_name, morph_projection, cb)` | Create/open visible `Kit/<NNN Name>/` with asyncfatfs LFN creation, stream six descriptor-keyed instrument files with visible LFN stems, then stream `kitset.kcg` with returned 8.3 aliases. `morph_projection` writes current interpolated values into both endpoint sections. | Preset/Menu Kit Save |
-| `filesystem_requestLoadSceneForScenes(slot, scene_mask, cb)` | Parse `sceneset.scg` plus embedded Kit into the independent non-Pattern stage, commit them after validation, then read Pattern directly into final Scene SRAM and validate the Effect placeholder. Pattern is intentionally non-atomic. | Preset/Menu Scene Load, boot |
-| `filesystem_requestSaveSceneDirectory(slot, source_scene, display_name, cb)` | Replace one root Scene slot and stream `sceneset.scg`, embedded `Kit <name>/`, six Instrument files, thin `pattern.pat`, and placeholder `effects.fx` from a resident Scene. | Preset/Menu Scene Save |
+| `filesystem_requestLoadSceneForScenes(slot, scene_mask, cb)` | Parse `sceneset.scg` plus embedded Kit into the independent non-Pattern stage, commit them after validation, then read/validate PAT4 into final Pattern storage and validate the Effect placeholder. Successful terminal completion marks Scene-with-Pattern AutoSave scope. | Preset/Menu Scene Load, boot |
+| `filesystem_requestSaveSceneDirectory(slot, source_scene, display_name, cb)` | Replace one root Scene slot and stream `sceneset.scg`, embedded `Kit <name>/`, six Instrument files, one named PAT4 file, and placeholder `effects.fx` from a resident Scene. | Preset/Menu Scene Save |
+| `filesystem_requestLoadPatternForScenes(slot, scene_mask, cb)` | Validate one root-library PAT4 into the first selected Scene, fan out the complete region to the remaining selected Scenes, publish Pattern identity, and reset hidden-generation baselines. | Preset/Menu Pattern Load |
+| `filesystem_requestLoadInstrumentIndex(type, cb)` | Directly open and validate the registered type's `.hcindex` into the shared compact cache. Missing, empty, or structurally invalid metadata transfers the same accepted request into selected-type scan/write/sync recovery; fatal FAT/SD/read/scan/close/write faults return ERROR. The callback runs once. | Nested Instrument Load, InstrumentMrp, and Instrument Save type transitions |
 | `filesystem_requestScanInstruments(cb)` / `filesystem_instrumentCount()` / `filesystem_instrumentName()` / `filesystem_instrumentDisplayIndex()` | Scan/query the single shared 1,000-entry root Instrument browser cache for the currently loaded type. | Menu Instrument Load; boot uses one type-at-a-time scan/index passes |
 | `filesystem_requestLoadInstrument(scene, slot, type, browser_index, cb)` | Capture one typed index selection into immutable operation scratch and validate it into the one Instrument candidate stage without mutating live SceneData. | Preset Instrument request |
 | `filesystem_requestSaveInstrument(scene, slot, display_name, cb)` / `filesystem_requestSaveInstrumentMorph(scene, slot, display_name, cb)` | Save one resident Scene/voice slot to root `Instrument/<stem.ext>` using LFN/case-sensitive create and the descriptor-keyed instrument text writer. The Morph variant writes current interpolated values into both endpoint sections and preserves resident source naming. | Preset Instrument Save |
 | `filesystem_requestSaveInstrumentTemp(scene, slot, cb)` / `filesystem_requestLoadInstrumentTemp(scene, slot, type, cb)` | Write/read the hidden typed `.hctmp.<ext>` through the normal serializer/parser without publishing it to HCNAMES or `.hcindex`. | Preset/Menu reversible `kit` row |
+| `filesystem_requestSaveInstrumentMorphTemp(scene, slot, cb)` / `filesystem_requestLoadInstrumentMorphTemp(scene, slot, type, cb)` | Write/read the Morph-only `.hctmp.<ext>` projection: one parser anchor plus every Morphable `[morph]` endpoint. The load sets the morph-temporary origin flag so Preset can choose the Morph-to-Morph restore commit. | Preset/Menu InstrumentMrp reversible row |
+| `filesystem_loadedInstrumentWasMorphTemporary()` | Query whether the staged hidden Instrument load is the InstrumentMrp Morph-only baseline, valid beside the staged Instrument until the next request reuses operation scratch. | Preset Morph-apply origin dispatch |
+| `filesystem_ensureAutosaveFilesBlocking()` / `filesystem_setAutosaveEnabled(enabled)` / `filesystem_autosaveEnabled()` | Establish the hidden pair at boot, apply runtime policy, and authorize mutation tracking/background work only after successful setup. Format and failure rules are in `AUTOSAVE.md`. | `main.c`, Menu/settings policy |
+| `filesystem_validateAutosaveWinnerBlocking()` / `filesystem_hasBootWinner()` | Stream-validate both HCPR candidates after settings/index boot and expose only a valid active-Bank match to stage 11. | `main.c` boot stage 10b/11 |
+| `filesystem_autosaveBootReaderBlocking()` | Apply a validated matching HCPR v2 winner and evaluate scalar Scene rows as Case 1 payload, Case 2 narrow load, or Case 3 whole-Scene invalidation. | `main.c` boot stage 11 |
+| `filesystem_patternAutosaveBootReaderBlocking()` | Validate each present Scene's PAT4 A/B pair and apply the eligible newest Pattern-AutoSave winner. | `main.c` after scalar restore |
+| `filesystem_regenerateHcnamesFromWinnerBlocking()` | Atomically rebuild absent/corrupt typed HCNAMES from a validated winner before its reader proceeds. | boot reader orchestration |
+| `filesystem_bootHcnamesAuthoritativeLoad()` | Load the settings-Bank-matching, all-145-rows-refreshed special state entirely from HCNAMES/library sources; decline on failed gates/hard error. | `main.c` boot stage 11 |
+| `filesystem_setBootLatchBankFallback()` | Record a canonical or HCNAMES-authoritative Bank restore whose dirty mark must replay after tracking enables. | `main.c`, HCNAMES-authoritative reader |
+| `filesystem_bootReaderNoticeSceneMask()` / `filesystem_bootReaderNoticeBankFallback()` | Read and clear Case-3/Bank one-shot notice state after audio starts. | Menu boot-notice sequencer |
+| `filesystem_autosaveTraceFlushBlocking()` | Bench-only durable boundary for currently pending lifecycle records; ordinary runtime trace flushing is autonomous and lower priority. | temporary test harness only |
+| `filesystem_markSettingsDirty()` | Increment the keyed-settings change revision; the one-second writer acknowledges only the revision it actually serialized and synced. | Menu settings policy |
 | `filesystem_loadedInstrumentSlot()` | Borrow the validated candidate payload for Preset's ordered commit. Names are exchanged through identity rows, not staged filename/stem accessors. | Preset only |
 | `filesystem_requestLoadName(type, slot, cb)` | Async name load. For `FS_FILE_KIT`, returns the cached directory scan name instead of opening a `.SND` header. | Preset/Menu |
 | `filesystem_requestScanKits(cb)` | Scan root `Kit/` directories into the shared slot-indexed name cache; non-blank rows provide occupancy. | main startup, Menu |
-| `filesystem_requestLoadKitIndex(cb)` / `filesystem_requestLoadSceneIndex(cb)` / `filesystem_requestLoadBankIndex(cb)` | Replace the one shared name cache from slot-ordered `/Kit/.hcindex`, `/Scene/.hcindex`, or `/Bank/.hcindex`; blank rows remain slot positions. | Menu top-level Kit/Scene/Bank Load/Save |
-| `filesystem_createLibraryIndexBlocking(kind)` | Write the active shared Kit, root Scene, or root Bank cache as a slot-ordered `.hcindex`; runtime saves use the same async writer. | boot and filesystem save completion |
+| `filesystem_requestReloadLibraryIndex(kind, cb)` / domain-specific Kit/Scene/Bank wrappers | Read an existing slot-ordered root `.hcindex` into the one shared cache; blank rows remain slot positions. This is read-only cache restoration and never scans or rewrites the namespace. The accepted root Scene/Bank terminal callback acknowledges its captured result before Menu teardown. | Menu entry/type changes and post-DSP root Scene/Bank Load terminal work |
+| `filesystem_createLibraryIndexBlocking(kind)` | Boot-only repair/scan and slot-ordered `.hcindex` rebuild for one root library. Runtime numbered-root Saves use the common asynchronous scan/rebuild continuation instead. | boot |
 | `filesystem_clearNameCache()` / `filesystem_libraryNameCacheLoaded(kind)` | Dispose/query the one active Instrument/Kit/Scene/Bank browser-name cache. | Menu lifecycle and index gating |
 | `filesystem_setIdentityName(row, name)` / `filesystem_identityName(row)` / `filesystem_identityNameMutable(row)` / `filesystem_clearIdentityNames()` | Own the logical Bank/Scene/Kit/six-Instrument identity interface. Bank aliases BankData; the other eight rows occupy 72 bytes. | Menu and filesystem HCNAMES/load/save completion |
+| `filesystem_residentSource(row)` / `filesystem_setResidentSource(row, source)` / `filesystem_resolveResidentSource(row, resolved_row)` | Read, stage, and resolve the paired HCNAMES provenance token. The resolver follows Instrument -> Kit -> Scene -> Bank and does no I/O; boot readers own target opens and Case-2/3 decisions. | filesystem successful-load boundaries and AutoSave boot readers |
 | `filesystem_requestLoadResidentKitName()` / `filesystem_requestUpdateResidentKitNames()` | Borrow HCNAMES for one Scene's Kit-plus-six block or preserve/overlay full seven-row blocks for a dirty Scene mask. | combined Kit/Instrument Menu session |
 | `filesystem_requestLoadResidentInstrumentName()` / `filesystem_requestUpdateResidentInstrumentNames()` | Legacy/narrow one-Instrument HCNAMES row operations; the combined Menu entry normally loads the seven-row Kit block. | Menu/filesystem compatibility paths |
-| `filesystem_requestLoadResidentSceneName()` / `filesystem_requestUpdateResidentSceneNames()` | Borrow or update only selected Scene identity rows. | Scene menu and Scene completion |
+| `filesystem_requestLoadResidentSceneName()` / `filesystem_requestUpdateResidentSceneNames()` | Borrow selected Scene identity for menu use; Scene completion overlays the Scene plus its committed Kit/six-Instrument hierarchy before publication. | Scene menu and Scene completion |
 | `filesystem_repairLibraryNamesBlocking()` / `filesystem_repairInstrumentNamesBlocking()` / `filesystem_requestRepairBankNames()` | Canonicalize one namespace with one-candidate rename/sync/rescan before index publication or Bank payload load. No `.hcrepair` journal exists. | boot index wrappers and Bank Load |
 | `filesystem_installSamplesBlocking()` / `filesystem_installLoopsBlocking()` | Blocking sample/loop install under audio suspend. | Menu |
 | `filesystem_loadedName()` | Read loaded name buffer. | Preset |
@@ -634,6 +824,8 @@ filesystem API output, musical identity, or permission to restore the old
 diagnostics.
 | `filesystem_lastMountResult()` / `filesystem_bootDetectedUnsupportedCard()` | Boot/card status. | main/Menu |
 | `filesystem_takeStaleGlobalsWarning()` | One-shot stale globals warning source. | Menu |
+| `filesystem_bankChildCursor()` (Session 057) | Live 0-based Bank-local child slot (0-15) during an active Bank Load/Save, or `0xFF` otherwise. Pure read accessor of `op_bank_child_cursor`; drives the `NN.` Load/Save progress indicator. | Menu Bank progress display |
+| `filesystem_lastBankLoadFailedSceneMask()` (Session 057) | Bitmask of Bank Load children that failed with provably-invalid content (not I/O abort) during the just-completed, still-`FS_STATUS_DONE` Bank Load. Nonzero is the sole signal that the existing filesystem error overlay still needs to be shown once. Cleared at the start of every new Bank Load request. | `preset_bankLoadFailedSceneMask()` (below), Menu `PRESET_OP_BANK_LOAD` success path |
 
 Important private Phase 2 kit helpers:
 
@@ -648,6 +840,13 @@ Important private Phase 2 kit helpers:
   `kit_instrument_slot_t` candidate staging. It must never reset a live Scene
   slot during asynchronous I/O; Preset owns the post-completion transaction and
   identity publication is separate.
+- `filesystem_loadInstrumentIndex_tick()` opens the selected type's
+  `.hcindex` directly after changing CWD and closing the redundant directory
+  handle. It validates compact printable 1..8-character, nonblank,
+  non-temporary, unique, sorted rows. Missing/empty/corrupt metadata hands the
+  original callback to `filesystem_beginInstrumentIndexRecovery()`; genuine
+  lower-layer faults never start the writer. Menu snapshots and acknowledges
+  the terminal status before publishing the cache or showing an error.
 - `filesystem_saveInstrument_tick()` writes one resident Scene/voice slot into
   root `Instrument/` with `afatfs_mkdir_lfn()` plus `afatfs_fopen_lfn()`,
   streams `storage_formatInstrumentLine()`, and updates the Instrument browser
@@ -665,19 +864,33 @@ Important private Phase 2 kit helpers:
 - `filesystem_saveSceneDirectory_tick()` writes the current Scene folder shape:
   `sceneset.scg`, embedded Kit without `audio_out`, six instruments, thin
   `pattern.pat`, and placeholder `effects.fx`.
-- `filesystem_saveBankDirectory_tick()` promotes the staged Bank tree, then
-  parks the original callback while the root Bank directory is rescanned and
-  `/Bank/.hcindex` is rewritten. The same refresh chain is used for Kit and
-  root Scene saves.
+- `filesystem_saveBankDirectory_tick()` (rewritten Session 057): scans and
+  reuses the root Bank directory itself (open-or-rename-then-open if a match
+  for the target slot exists, create only if absent) rather than deleting and
+  recreating it, then for each Scene bit in the save mask deletes only that
+  one Bank-local child (`filesystem_deleteBankChildSlotDirectoryStart()`)
+  before writing its replacement — non-masked children are never scanned,
+  deleted, or written. This replaced an earlier total-tree-delete design that
+  destroyed every child, selected or not, and that could itself fail mid-scan
+  on a quarantined `errKit` directory's rewritten LFN entries (`ErrS05`).
+  After the per-child loop, it parks the original callback while the root
+  Bank directory is rescanned and `/Bank/.hcindex` is rewritten, the same
+  Save-owned rebuild chain used for Kit and root Scene saves.
 - `filesystem_loadLibraryIndex_tick()` reads one slot-preserving Kit, root
   Scene, or root Bank `.hcindex` into the shared cache. It never compacts blank
   rows and never retains per-slot aliases.
-- `filesystem_residentNames_tick()` reads the 129-row fixed HCNAMES register,
+- `filesystem_residentNames_tick()` reads the typed HCNAMES register (mandatory
+  `#types` header plus 129 fixed data rows),
   optionally overlays exactly the action-owned rows, rewrites the complete
-  variable-length file, and restores the required root index before completion.
-- Bank Load retains only a child-present mask. It rescans the selected Bank
-  parent for each requested child and keeps one display/open component in
-  operation scratch; it never rebuilds a 16-child name or alias cache.
+  variable-length file, and finishes only that metadata transaction. It does
+  not infer whether a root namespace changed: Scene Save declares its own
+  rebuild, while Scene/Bank Load defers read-only browser restoration until
+  after DSP apply.
+- Bank Load captures the selected Bank's 16 child display names in one scan.
+  Successful children return to and retain the selected Bank as parent CWD;
+  only recovery paths reopen from root. Its completed loaded-Scene result
+  becomes true only after shared Scene validation and commit and is consumed
+  before the later index-reload request.
 - Kit folders prefer `NNN Name` and accept `NNN_Name`; scan has a short-alias
   fallback for FAT aliases like `000INI~1` or `001SLA~1`.
 
@@ -687,12 +900,27 @@ asyncfatfs boundary:
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`.
   Module-level code should reuse `filesystem.c` or those documented
   component/object primitives instead of creating one-off FAT writers.
-- Dot-prefixed files/directories are ordinary objects. Product scanners filter
-  after object iteration.
+- Dot-prefixed files/directories are ordinary objects except macOS AppleDouble
+  `._*` entries, which object iteration filters before product scanners see
+  them. Product-specific hidden files such as `.hctmp.<ext>` remain explicit
+  scanner exclusions.
 - Native `afatfs_deleteTree()` provides filesystem-level recursive cleanup for
-  one captured object. Bank Save currently performs temporary/old sibling
-  promotion, but atomic/journaled replace is still missing; the existing flow
-  must not be described as power-loss recoverable.
+  one captured object and releases each FAT chain before retiring its complete
+  name run. Replacement flows still are not atomic/journaled and must not be
+  described as power-loss recoverable.
+- Short create, LFN create, and same-parent rename share a sector-local
+  deleted/terminator run reservation. A moved `0x00` run initializes and
+  persists its target sector before retiring the old tail. Directory extension
+  initializes only the new cluster's first sector; later sectors remain hidden
+  until that publication path clears them. FAT16 fixed-root exhaustion still
+  fails normally.
+- `afatfs_getDiagnosticSnapshot()` and `sdcard_getTransportSnapshot()` are
+  logging-only, read-only observation helpers for a frozen boot-time
+  `ASENSURE` failure capsule. They copy live allocator/cache/file and SD
+  transport state without polling, allocating, issuing I/O, changing callbacks,
+  retries, or filesystem ownership. `filesystem.c` may call them only while
+  freezing the capsule immediately before existing boot recovery destroys the
+  active state; ordinary product code must not use them as control flow.
 
 Private but important pattern serialization helpers:
 
@@ -766,11 +994,28 @@ Current ownership decisions:
 
 Purpose: boot ordering and foreground service scheduler.
 
-Relevant Session 028 interchange point:
+Relevant interchange points:
 
 - `led_processSeqLedState()` is called in the foreground loop after audio render
   opportunities and after TIM3-owned sequencer timing can mark LED state dirty.
   Do not move this into TIM3 without auditing Menu/button/LED access.
+- `scene_initAll()` and `bank_init()` run before `dsp_init()` so
+  InstrumentManager constructs each tagged runtime member from a defined
+  retained type rather than zeroed BSS (`DRM == 0`).
+- Pre-audio loading establishes a coherent six-slot image synchronously.
+  Immediately after `audioCodec_init()`, `preset_startDrumsetApply()` starts the
+  same live clear/image/all-source-rebind worker used by a manual Scene switch.
+- `audio_check_and_render()` returns immediately while
+  `audioCodec_isSuspended()` is true (Session 058): suspend empties the DMA/
+  render queue, so the renderer must not advance queue, trigger, DSP/control,
+  or buffer commit without a DMA consumer. `audioCodec_isSuspended()` is a
+  side-effect-free observer of the existing `audio_hw_suspended` hardware flag;
+  Menu pairs it with `filesystem_setFastDrain()` for eligible stopped-playback
+  Load/Save commands.
+- `timebase_holdPreAudioMs()` is used only for the current SD pre-init,
+  post-mount, and pre-Bank pacing experiment. It must not be used after audio
+  startup, from an ISR, or as runtime filesystem pacing. The intermittent hang
+  that motivated these holds remains unlocalized.
 
 ## Removed Front-Panel Protocol Surface
 

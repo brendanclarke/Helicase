@@ -131,6 +131,33 @@ uint8_t buttonHandler_getMode(void)  { return bh_state.selectButtonMode; }
 uint8_t buttonHandler_getShift(void) { return (uint8_t)(btn_held[BUT_SHIFT]); }
 int8_t buttonHandler_getArmedAutomationStep(void) { return buttonHandler_armedAutomationStep; }
 
+/*
+ * Return the raw physical held-state mask for the sixteen SEQ buttons.
+ *
+ * What: translates the scattered shift-register button numbers into a compact
+ * bitmask for Menu's held-step overlay. Why: the ISR state remains private so
+ * callers cannot depend on hardware ordering. Inputs: volatile btn_held[].
+ * Output: bit N is set for the physically held SEQ(N+1) button. This is a
+ * foreground read of byte-sized ISR values and performs no UI work.
+ */
+uint16_t buttonHandler_seqHeldMask(void)
+{
+    static const uint8_t seq_buttons[16] = {
+        BUT_SEQ1, BUT_SEQ2, BUT_SEQ3, BUT_SEQ4,
+        BUT_SEQ5, BUT_SEQ6, BUT_SEQ7, BUT_SEQ8,
+        BUT_SEQ9, BUT_SEQ10, BUT_SEQ11, BUT_SEQ12,
+        BUT_SEQ13, BUT_SEQ14, BUT_SEQ15, BUT_SEQ16
+    };
+    uint16_t mask = 0u;
+    uint8_t i;
+
+    for (i = 0u; i < 16u; i++) {
+        if (btn_held[seq_buttons[i]])
+            mask |= (uint16_t)(1u << i);
+    }
+    return mask;
+}
+
 static void buttonHandler_setMorphVoiceMode(uint8_t onOff)
 {
     /*
@@ -236,7 +263,15 @@ static uint8_t buttonHandler_barStartStep(void)
     return (uint8_t)(menu_currentBar * NUM_STEPS_PER_BAR);
 }
 
-static uint8_t buttonHandler_visibleStep(uint8_t seqButtonPressed)
+/*
+ * Convert a visible SEQ button index into the absolute Pattern step.
+ *
+ * What: folds the current Menu bar into the fixed 128-step track. Why: Menu's
+ * overlay retains compact button indices for press ordering but PatternData
+ * APIs use absolute coordinates. Inputs: zero-based visible button index.
+ * Output: menu_currentBar * NUM_STEPS_PER_BAR + index.
+ */
+uint8_t buttonHandler_visibleStep(uint8_t seqButtonPressed)
 {
     return (uint8_t)(buttonHandler_barStartStep() + seqButtonPressed);
 }
@@ -257,10 +292,12 @@ static void buttonHandler_selectBar(uint8_t bar)
     selectRowShowsBar = (uint8_t)(bh_state.selectButtonMode != SELECT_MODE_VOICE);
     led_updatePatternTrackView(menu_getActiveVoice(), menu_getViewedPattern(),
                                buttonHandler_selectedStep, selectRowShowsBar);
-    pat_applyTrackSettingsToMenu(menu_getViewedPattern(), menu_getActiveVoice());
     if (!selectRowShowsBar)
         led_setActiveSelectButton(menu_getSubPage());
     led_flashGroup(LED_FLASH_GROUP_SELECT, (uint16_t)(1u << bar));
+    /* S066: the held-step overlay uses the new bar for absolute Pattern
+     * resolution and must repaint its automation-presence LED row. */
+    menu_voiceAutoOverlayBarChanged();
 }
 static void buttonHandler_updateSubSteps(void)
 {
@@ -292,7 +329,6 @@ static void buttonHandler_updateSubSteps(void)
         uint8_t trackNr = menu_getActiveVoice();
         uint8_t patternNr = menu_getViewedPattern();
         led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
-        pat_applyTrackSettingsToMenu(patternNr, trackNr);
     }
 }
 
@@ -327,32 +363,43 @@ static void buttonHandler_leaveSeqModeStepMode(void)
 static void buttonHandler_armTimerActionStep(int8_t stepNr)
 {
     /*
-     * Arms the long-press automation editor for one concrete sequencer step.
+     * Completes the common long-press threshold for one sequencer step.
      *
-     * Caller context: buttonHandler_tick() promotes a held step button into an
-     * armed automation step after BUTTON_TIMEOUT. The ISR only records button
-     * events; this foreground path is where PatternData can be called safely.
+     * Caller context: buttonHandler_tick() promotes a held step button after
+     * BUTTON_TIMEOUT. The ISR only records button events; this foreground path
+     * is where the VOICE overlay or legacy STEP automation state is notified.
      *
-     * Why it lives here: the long-press gesture and blink choice are UI state,
-     * but the armed automation destination must live in PatternData because it
-     * controls later pattern/track mutation performed by menu parameter edits.
+     * Why it lives here: the shared gesture timing belongs to the button layer,
+     * while Menu owns VOICE overlay state and PatternData owns the legacy STEP
+     * automation destination. Keeping the branch here preserves one timer and
+     * one release-suppression path for both modes.
      *
      * Inputs: stepNr is a 0..127 absolute bridge step index. The visible bar is
      * already folded into that value, so the blink target is STEP1..16 at
      * stepNr % NUM_STEPS_PER_BAR.
      *
-     * Outputs: buttonHandler_armedAutomationStep tracks the UI gesture,
-     * pat_armAutomationStep(step, activeVoice, 1) records the edit target and
-     * enables recording automation values for that track.
+     * Outputs: VOICE mode calls menu_voiceAutoOverlayHoldExpired() and leaves
+     * release suppression to the existing timer sentinel. Legacy STEP mode
+     * records buttonHandler_armedAutomationStep and enables its blink target.
      *
      * Risk: recordAutomation is deliberately hard-coded to 1 to match the old
      * ARM_AUTOMATION_STEP opcode behavior. If automation arming becomes
      * per-pattern/per-track later, PatternData should absorb that policy.
      */
+    if (bh_state.selectButtonMode == SELECT_MODE_VOICE) {
+        /*
+         * VOICE hold threshold crossed: transfer gesture ownership to Menu.
+         * Menu reads the raw held mask in its next foreground service pass;
+         * this call only marks the overlay active and never touches LCD or
+         * PatternData. The timer sentinel then suppresses the matching release.
+         */
+        menu_voiceAutoOverlayHoldExpired();
+        return;
+    }
+
     buttonHandler_armedAutomationStep = stepNr;
     led_setBlinkLed((uint8_t)(LED_STEP1 + ((uint8_t)stepNr % NUM_STEPS_PER_BAR)), 1);
 
-    pat_armAutomationStep((uint8_t)stepNr, menu_getActiveVoice(), 1);
 }
 
 static void buttonHandler_disarmTimerActionStep(void)
@@ -390,7 +437,6 @@ static void buttonHandler_disarmTimerActionStep(void)
         }
 
         buttonHandler_armedAutomationStep = NO_STEP_SELECTED;
-        pat_armAutomationStep(0, 0, 0);
 
         if (buttonHandler_resetLock == 1) {
             buttonHandler_resetLock = 0;
@@ -410,7 +456,6 @@ static void buttonHandler_disarmTimerActionStep(void)
     }
 
     buttonHandler_armedAutomationStep = NO_STEP_SELECTED;
-    pat_armAutomationStep(0, 0, 0);
 }
 
 static uint8_t buttonHandler_TimerActionOccured(void)
@@ -431,12 +476,15 @@ static void buttonHandler_setTimeraction(uint8_t buttonNr)
 
 void buttonHandler_tick(void)
 {
-    /* _SEQUENCER_ADD_SPIKE_: restored AVR long-press timer/arm behavior. */
-    if (time_sysTick > buttonHandler_buttonTimer) {
-        if (buttonHandler_buttonTimerStepNr >= 0) {
-            buttonHandler_armTimerActionStep(buttonHandler_buttonTimerStepNr);
-            buttonHandler_buttonTimerStepNr = TIMER_ACTION_OCCURED;
-        }
+    /*
+     * Foreground long-press poll using the wrapping 16-bit millisecond clock.
+     * A deadline is in the past when unsigned elapsed time is below half the
+     * counter range. This remains correct across the time_sysTick wrap.
+     */
+    if (buttonHandler_buttonTimerStepNr >= 0 &&
+        (uint16_t)(time_sysTick - buttonHandler_buttonTimer) < 32768u) {
+        buttonHandler_armTimerActionStep(buttonHandler_buttonTimerStepNr);
+        buttonHandler_buttonTimerStepNr = TIMER_ACTION_OCCURED;
     }
 }
 
@@ -470,28 +518,8 @@ static void buttonHandler_selectActiveStep(uint8_t ledNr, uint8_t seqButtonPress
 
     led_setBlinkLed(ledNr, 1);
 
-    pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(),
-                        buttonHandler_visibleStep(seqButtonPressed));
+    menu_showStepEditPage();
     buttonHandler_updateSubSteps();
-}
-
-static void buttonHandler_showStepParameterPage(void)
-{
-    /*
-     * STEP mode starts on a track front page and moves to the per-step editor
-     * only after the user selects a concrete STEP1..16 button.
-     *
-     * Inputs are implicit current Menu state. Output: SEQ_PAGE subpage 1 is
-     * shown when STEP mode owns the SELECT/STEP UI. This keeps the front page
-     * visible on mode entry or track change, then leaves it hidden until STEP
-     * mode is re-entered or another voice changes the active track.
-     */
-    if (bh_state.selectButtonMode == SELECT_MODE_STEP &&
-        menu_activePage == SEQ_PAGE) {
-        if (menu_getSubPage() != 1u)
-            menu_switchSubPage(1u);
-        menu_repaintAll();
-    }
 }
 
 static void buttonHandler_setRemoveStep(uint8_t ledNr, uint8_t seqButtonPressed)
@@ -524,42 +552,11 @@ static void buttonHandler_setRemoveStep(uint8_t ledNr, uint8_t seqButtonPressed)
     parameter_values[PAR_ACTIVE_STEP] = buttonHandler_selectedStep;
     selectedStepLed = ledNr;
 
-    pat_applyStepToMenu(menu_getViewedPattern(), menu_getActiveVoice(), seqButtonPressed);
-
     trackNr = menu_getActiveVoice();
     patternNr = menu_getViewedPattern();
     pat_toggleStep(trackNr, seqButtonPressed, patternNr);
     led_setValue(pat_isStepActive(trackNr, seqButtonPressed, patternNr),
                  ledNr);
-}
-
-static void buttonHandler_setTrackRotation(uint8_t seqButtonPressed)
-{
-    /*
-     * Sets the visible track-rotation edit value from performance mode.
-     *
-     * Caller context: shift + STEP button while in SELECT_MODE_PERF.
-     *
-     * Why this calls PatternData: rotation mutates per-pattern/per-track data,
-     * so it belongs behind the pat_ API. The LED blink is only feedback for the
-     * front-panel performance gesture and therefore stays in buttonHandler/
-     * ledHandler instead of PatternData.
-     *
-     * Inputs: seqButtonPressed is the desired rotation index from the STEP
-     * button row. Current pattern and active voice are read from Menu.
-     *
-     * Outputs: PAR_TRACK_ROTATION is updated for the menu display, PatternData
-     * applies the same mutation timing that seq_setTrackRotation() used before
-     * this removal pass, and the selected rotation LED blinks.
-     *
-     * Risk: the long-term scoping target says this policy will change when
-     * Pattern owns more sequencer state. This function intentionally preserves
-     * current behavior for now.
-     */
-    parameter_values[PAR_TRACK_ROTATION] = seqButtonPressed;
-    pat_setTrackRotation(menu_getViewedPattern(), menu_getActiveVoice(), seqButtonPressed);
-    led_clearAllBlinkLeds();
-    led_setBlinkLed((uint8_t)(LED_STEP1 + seqButtonPressed), 1);
 }
 
 static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
@@ -573,10 +570,6 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
             break;
         case SELECT_MODE_STEP:
             buttonHandler_setRemoveStep(ledNr, seqButtonPressed);
-            buttonHandler_showStepParameterPage();
-            break;
-        case SELECT_MODE_PERF:
-            buttonHandler_setTrackRotation(seqButtonPressed);
             break;
         default:
             break;
@@ -584,12 +577,18 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
     } else {
         switch (bh_state.selectButtonMode) {
         case SELECT_MODE_VOICE:
-            buttonHandler_setTimeraction(buttonHandler_visibleStep(seqButtonPressed));
+            if (menu_voiceAutoOverlayActive()) {
+                /* An overlay-owned press is not a new tap/hold timer. Reuse
+                 * the existing timer sentinel so its release is consumed. */
+                buttonHandler_buttonTimerStepNr = TIMER_ACTION_OCCURED;
+            } else {
+                buttonHandler_setTimeraction(
+                    buttonHandler_visibleStep(seqButtonPressed));
+            }
             break;
         case SELECT_MODE_STEP:
             led_clearAllBlinkLeds();
             buttonHandler_selectActiveStep(ledNr, seqButtonPressed);
-            buttonHandler_showStepParameterPage();
             break;
         case SELECT_MODE_PERF:
             menu_perfModeSceneButtonPressed(seqButtonPressed);
@@ -614,6 +613,11 @@ static void buttonHandler_seqButtonReleased(uint8_t seqButtonPressed)
         break;
 
     case SELECT_MODE_VOICE:
+        if (menu_voiceAutoOverlayActive()) {
+            /* Overlay-owned release: Menu's raw-mask service removes it. */
+            buttonHandler_buttonTimerStepNr = TIMER_ACTION_OCCURED;
+            return;
+        }
         if (buttonHandler_TimerActionOccured())
             return;
         buttonHandler_setRemoveStep(ledNr, seqButtonPressed);
@@ -823,7 +827,6 @@ static void buttonHandler_partButtonPressed(uint8_t partNr)
             trackNr = menu_getActiveVoice();
             patternNr = menu_getViewedPattern();
             led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
-            pat_applyTrackSettingsToMenu(patternNr, trackNr);
         } else {
             copyClear_setSrc((int8_t)partNr, MODE_COPY_PATTERN);
             led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + partNr), 1);
@@ -888,7 +891,6 @@ static void handleVoiceButton(uint8_t voiceNr)
             trackNr = menu_getActiveVoice();
             patternNr = menu_getViewedPattern();
             led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
-            pat_applyTrackSettingsToMenu(patternNr, trackNr);
         } else {
             copyClear_setSrc((int8_t)voiceNr, MODE_COPY_TRACK);
             led_setBlinkLed((uint8_t)(LED_VOICE1 + voiceNr), 1);
@@ -1232,8 +1234,6 @@ static void processPress(uint8_t buttonNr)
                 trackNr = menu_getActiveVoice();
                 patternNr = menu_getViewedPattern();
                 led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
-                pat_applyPatternSettingsToMenu(patternNr);
-                pat_applyTrackSettingsToMenu(patternNr, trackNr);
             }
 
             led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + menu_getViewedPattern()), 1);

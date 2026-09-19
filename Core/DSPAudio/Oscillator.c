@@ -52,7 +52,6 @@
 #include "Samples.h"
 #include "MidiParser.h"
 #include "MidiNoteNumbers.h"
-#include "PatternData.h"
 #include "modulationNode.h"
 #include <math.h>
 // TODO DSP_PORT
@@ -978,7 +977,7 @@ void osc_setBaseNote(OscInfo* osc, uint8_t baseNote)
 	  * output is osc->freq and osc->baseNote. Common callers are voice parameter
 	  * apply paths; PatternData itself is not involved in DSP state mutation here.
 	  */
-	 int16_t note =  (osc->midiFreq>>8) + (baseNote-PAT_DEFAULT_NOTE);
+	 int16_t note =  (osc->midiFreq>>8) + (baseNote-MIDI_DEFAULT_TRIGGER_NOTE);
 	 if(note>127)note=127;
 	 if(note<0)note=0;
 
@@ -997,7 +996,7 @@ void osc_recalcFreq(OscInfo* osc)
 	  * uses osc->baseNote already stored in the oscillator. This keeps the renamed
 	  * PAT_DEFAULT_NOTE dependency explicit after the sequencer storage move.
 	  */
-	 int16_t note =  (osc->midiFreq>>8) + (osc->baseNote-PAT_DEFAULT_NOTE);
+	 int16_t note =  (osc->midiFreq>>8) + (osc->baseNote-MIDI_DEFAULT_TRIGGER_NOTE);
 
 	 if(note>127)note=127;
  	 if(note<0)note=0;

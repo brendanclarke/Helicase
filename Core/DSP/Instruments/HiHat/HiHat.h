@@ -90,19 +90,14 @@ typedef struct HiHatStruct
 
 } HiHatVoice;
 
-extern HiHatVoice hatVoice;
-
-//initialize all the parameters to sane values
-void HiHat_init();
-
 /*
- * Pointer-based hihat runtime entry points for dynamic instrument slots.
+ * Pointer-based hihat runtime entry points for tagged instrument slots.
  *
  * Inputs: a caller-owned HiHatVoice instance plus the logical source slot for
  * trigger/LFO/velocity affiliation where needed. Outputs: the same DSP state
- * changes as the legacy hatVoice wrappers, including closed/open decay
- * selection during trigger. InstrumentManager uses these helpers so Choke
- * hihats can live in slot 6 without tying every runtime access to hatVoice.
+ * changes on the supplied instance, including closed/open decay selection.
+ * InstrumentManager owns it as a tagged slot member, so Choke hihats can live
+ * in any supported slot without a permanent global or retained pointer.
  */
 void HiHat_initVoice(HiHatVoice *voice);
 void HiHat_setPanVoice(HiHatVoice *voice, const uint8_t pan);
@@ -111,15 +106,5 @@ void HiHat_triggerVoice(HiHatVoice *voice, const uint8_t source_slot,
 void HiHat_calcSyncBlockVoice(HiHatVoice *voice, int16_t* buf,
                               const uint8_t size);
 void HiHat_calcAsyncVoice(HiHatVoice *voice);
-
-void HiHat_trigger(uint8_t vel, uint8_t isOpen, const uint8_t note);
-
-void HiHat_calcSyncBlock(int16_t* buf, const uint8_t size);
-
-/** calculate envelopes etc (all 16 samples */
-void HiHat_calcAsync();
-
-//-0.5 = left 0=both max 0.5=right*/
-void HiHat_setPan(const uint8_t pan);
 
 #endif /* HIHAT_H_ */

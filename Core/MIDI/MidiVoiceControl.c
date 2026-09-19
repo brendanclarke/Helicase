@@ -61,6 +61,8 @@
 // #include "TriggerOut.h"
 #include "Uart.h"
 #include "ledHandler.h"
+/* Sequencer owns transient automation restore for the shared trigger funnel. */
+#include "sequencer.h"
 //#include "LCD_driver.h"
 
 static uint8_t active_voices=0;	// which voices are currently playing a note
@@ -159,6 +161,11 @@ static void voiceControl_triggerNow(uint8_t voice, uint8_t note, uint8_t vel)
 	 * new Scene's instrument parameters.
 	 */
 	preset_applyDeferredSceneSlotForTrigger(voice);
+	/*
+	 * Restore any foreground automation overlays before the new voice reads
+	 * them. All MIDI, roll, sequencer, and front-panel previews use this funnel.
+	 */
+	seq_restoreAutomatedParameters(voice);
 	instrumentManager_triggerTrack(voice, note, vel);
 
 	led_pulseLed((uint8_t)(LED_VOICE1 + voice));

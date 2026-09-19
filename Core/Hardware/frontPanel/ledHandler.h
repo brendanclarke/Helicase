@@ -43,6 +43,7 @@
 
 #include <stdint.h>
 #include "dout.h"
+#include "InstrumentManager.h"
 
 /*
  * Canonical public LED numbering model: legacy AVR logical IDs.
@@ -156,6 +157,21 @@ void led_setActive_step(uint8_t stepNr);
 void led_clearActive_step(void);
 void led_initPerformanceLeds(void);
 
+/*
+ * Paint the visible SEQ row from one parameter's automation presence.
+ *
+ * What: lights a step when its current Pattern block contains the exact
+ * canonical target, and always keeps physically held steps lit. Why: the
+ * single-parameter VOICE held-step overlay uses this row to show which steps
+ * can supply the displayed automation value. Inputs: Pattern track/Scene,
+ * target ID, and the 16-bit visible held-step mask. Output: STEP1..STEP16
+ * remembered LED state. Affiliates: pat_readStepAutomations() and
+ * led_updatePatternTrackView() for restoration after overlay exit.
+ */
+void led_updateAutomationStepView(uint8_t track, uint8_t pattern,
+                                  instrument_param_id_t target,
+                                  uint16_t heldMask);
+
 /* Deferred sequencer LED dirty bits.
  *
  * Why these flags exist:
@@ -243,7 +259,6 @@ void led_setBeatPulse(uint8_t on);
 /* Update Menu/LED pattern-follow state after Sequencer changes pattern. */
 void led_notifyPatternChanged(uint8_t playedPattern);
 /* Mirror a Sequencer rotation reset into the visible menu parameter. */
-void led_notifyTrackRotationReset(uint8_t rotation);
 /* Foreground drain for seq_ledState dirty payloads. */
 void led_processSeqLedState(void);
 

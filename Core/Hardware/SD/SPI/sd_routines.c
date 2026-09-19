@@ -26,7 +26,11 @@
 
 #include "sd_routines.h"
 #include "spi_sd.h"
+#include "timebase.h"
 #include <stdint.h>
+
+#define SD_ACMD41_RETRY_INTERVAL_MS 1u
+#define SD_ACMD41_READY_TIMEOUT_MS 1000u
 
 volatile unsigned char SDHC_flag = 0;
 volatile unsigned char cardType  = 0;
@@ -40,6 +44,7 @@ unsigned char SD_init(void)
 {
     unsigned char i, response, SD_version;
     unsigned int retry = 0;
+    uint16_t ready_start;
 
     /* 80 clock pulses with CS deasserted */
     SD_CS_DEASSERT;
@@ -71,15 +76,28 @@ unsigned char SD_init(void)
         }
     } while (response != 0x01);
 
-    retry = 0;
-
+    ready_start = time_sysTick;
     do {
         SD_sendCommand(APP_CMD, 0);
         response = SD_sendCommand(SD_SEND_OP_COND, 0x40000000);
-        retry++;
-        if (retry > 0xFE)
+        if (response == 0x00)
+            break;
+        /*
+         * Pace card readiness by elapsed time, not raw command count.
+         *
+         * Inputs: one unsuccessful CMD55/ACMD41 pair and the TIM6 timestamp
+         * captured before the first attempt. Output: the card receives a 1 ms
+         * quiet interval between attempts and up to one real second to finish
+         * power-up/internal initialization. This replaces the former 255
+         * CPU-speed attempts whose wall-clock window varied with bit-bang and
+         * compiler timing. The hold is legal only here, before audio starts.
+         */
+        if ((uint16_t)(time_sysTick - ready_start) >=
+            SD_ACMD41_READY_TIMEOUT_MS) {
             return 2;
-    } while (response != 0x00);
+        }
+        timebase_holdPreAudioMs(SD_ACMD41_RETRY_INTERVAL_MS);
+    } while (1);
 
     retry    = 0;
     SDHC_flag = 0;

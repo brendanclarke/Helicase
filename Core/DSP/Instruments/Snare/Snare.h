@@ -92,20 +92,14 @@ typedef struct SnareStruct
 
 } SnareVoice;
 
-//array holding all the voices
-extern SnareVoice snareVoice;
-
-//initialize all the parameters to sane values
-void Snare_init();
-
 /*
- * Pointer-based snare runtime entry points for dynamic instrument slots.
+ * Pointer-based snare runtime entry points for tagged instrument slots.
  *
  * Inputs: a caller-owned SnareVoice instance plus the logical source slot for
  * trigger/LFO/velocity affiliation where needed. Outputs: the same DSP state
- * mutations as the legacy single snareVoice API, but without coupling snare
- * rendering to physical slot 4. InstrumentManager is the new client; old
- * wrappers remain for compatibility with fixed-slot code.
+ * mutations on one explicit instance without coupling snare rendering to a
+ * physical slot. InstrumentManager owns this instance as a tagged slot member;
+ * callers must not retain it across a Scene/type reset.
  */
 void Snare_initVoice(SnareVoice *voice);
 void Snare_setPanVoice(SnareVoice *voice, const uint8_t pan);
@@ -114,15 +108,4 @@ void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
 void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
                               const uint8_t size);
 void Snare_calcAsyncVoice(SnareVoice *voice);
-
-void Snare_trigger(const uint8_t vel, const uint8_t note);
-
-/** claculate the oscillators and sample based stuff*/
-void Snare_calcSyncBlock(int16_t* buf, const uint8_t size);
-
-/** calculate envelopes etc (all 16 samples */
-void Snare_calcAsync();
-
-//-0.5 = left 0=both max 0.5=right*/
-void Snare_setPan(const uint8_t pan);
 #endif /* SNARE_H_ */

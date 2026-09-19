@@ -26,6 +26,30 @@ extern uint8_t seq_activePattern;
 extern uint8_t seq_newPatternAvailable;
 extern uint8_t seq_resetBarOnPatternChange;
 
+/*
+ * Live recording and erasing activity flags.
+ *
+ * What: nonzero while the front-panel RECORD or ERASE mode is active. Why:
+ * the Pattern AutoSave drain must not copy the live Pattern region while
+ * seq_tick() can still modify it. Inputs/outputs: written by the existing
+ * record/erase mode handlers and read by filesystem.c's drain scheduler.
+ * Affiliates: PatternData mutation paths and S064 Pattern AutoSave.
+ */
+extern uint8_t seq_recordActive;
+extern uint8_t seq_eraseActive;
+
+/*
+ * Per-track Pattern assignment stub for the unified stack service.
+ *
+ * What: seven resident Scene indices, one per sequencer track. Why: S067
+ * keeps every track assigned to seq_activePattern, but the array establishes
+ * the future per-track playback data path without adding a second mutation
+ * target today. Inputs: seq_init(), seq_selectActivePattern(), and the
+ * master-boundary switch. Output: all entries mirror the active Scene.
+ * RAM: +7 bytes SRAM1. Affiliate: future per-track Pattern assignment.
+ */
+extern uint8_t seq_perTrackPattern[NUM_TRACKS];
+
 void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note);
 /*
  * Stopped-transport voice preview.
@@ -75,6 +99,60 @@ void seq_setNextPattern(const uint8_t patNr);
  * must use this Scene-aligned path or a future Scene-level scheduler.
  */
 void seq_selectActivePattern(uint8_t pattern);
+/*
+ * Realign playback to a Scene selection that another owner has already made.
+ *
+ * Why this exists separately from seq_selectActivePattern(): Pattern is the one
+ * Scene-owned payload that playback and the STEP UI address through Sequencer/
+ * Menu state (seq_activePattern / menu_shownPattern) rather than through
+ * scene_getActiveIndex(). Both are BSS-zero at boot and, before this API
+ * existed, were assigned only by menu_perfModeSceneButtonPressed(). Bank Load
+ * commits a new active Scene without any front-panel press, so the two indices
+ * silently disagreed with SceneData: a subsequent Scene Load wrote its Pattern
+ * into the committed active Scene while the sequencer kept reading Scene 0.
+ * That produced the "Scene Load never loads the pattern" defect, with every
+ * other Scene payload appearing correct because they all resolve through
+ * scene_getActiveIndex(). See SCENE_LOAD_PAT_RESTORE.md for the full analysis.
+ *
+ * Inputs: a resident Scene/Pattern index, validated against PatternData exactly
+ * as seq_selectActivePattern() validates its own. Outputs: seq_activePattern
+ * and seq_pendingPattern are aligned to that Scene, deferred pattern-load flags
+ * are cleared, and fixed-grid track cursors are recalculated from the existing
+ * master clock.
+ *
+ * Deliberately NOT done here, and this is the whole reason the narrower entry
+ * point exists: no led_notifyPatternChanged(), no seq_sendProgChg() — which
+ * would emit a MIDI program change on the wire — and no voiceControl_noteOff().
+ * This is a state restore for a selection somebody else owns, not a performance
+ * action, and it must be safe to call during pre-audio boot Bank Load where
+ * emitting MIDI or forcing note-offs would be an unwanted side effect.
+ *
+ * Clients: filesystem.c's Bank Load active-Scene metadata commit. Front-panel
+ * PERF switching must keep using seq_selectActivePattern() so that its LED,
+ * program-change, and note-off behaviour is unchanged.
+ */
+void seq_alignActivePatternToScene(uint8_t scene_index);
+/*
+ * Drain TIM3-published voice automation in foreground context.
+ *
+ * Inputs: the bounded pending queue written by seq_advanceTrackStep(), whose
+ * packed automation values are already in the voice descriptor parameter
+ * domain. Output: validated voice descriptor runtime images are updated after
+ * front-panel service without MIDI-CC-style 7-bit expansion; Scene targets
+ * remain queued only for the later Scene-target session. Affiliate: main.c
+ * calls this before audio rendering.
+ */
+void seq_drainPendingAutomation(void);
+/*
+ * Restore transient automation overlays for one visible trigger track.
+ *
+ * Inputs: trigger track 0..6, with track 6 mapped to descriptor slot 5.
+ * Output: dirty voice-descriptor runtime values are restored from the active
+ * Scene endpoint image immediately before the trigger and their bitmap is
+ * cleared. Scene-level targets are intentionally not handled by this API.
+ * Client: MidiVoiceControl.c's common trigger path.
+ */
+void seq_restoreAutomatedParameters(uint8_t trigger_track);
 void seq_setRunning(uint8_t isRunning);
 uint8_t seq_isRunning(void);
 void seq_armActivePatternReload(void);
@@ -82,21 +160,17 @@ void seq_setMute(uint8_t trackNr, uint8_t isMuted);
 uint8_t seq_isTrackMuted(uint8_t trackNr);
 void seq_setRoll(uint8_t voice, uint8_t onOff);
 void seq_setRollRate(uint8_t rate);
-void seq_addNote(uint8_t trackNr,uint8_t vel, uint8_t note);
+/*
+ * Record a live MIDI/roll event as one quantized fixed-grid trigger bit.
+ * Input is the track; output is an on-bit only when recording is active.
+ * Note and velocity are not recorded here; they are assigned separately as
+ * per-step specials through the step editor. The live address array can carry
+ * those future values, but B/B½ records only bit 15.
+ */
+void seq_recordTrigger(uint8_t trackNr);
 void seq_setRecordingMode(uint8_t active);
 void seq_setErasingMode(uint8_t active);
-void seq_recordAutomation(uint8_t voice, uint8_t dest, uint8_t value);
 void seq_midiNoteOff(uint8_t chan);
 void seq_sendMidiNoteOn(const uint8_t channel, const uint8_t note, const uint8_t veloc);
-
-/*
- * Runtime hook used by PatternData.
- * Why: PatternData owns rotation storage, but sequencer.c owns seq_stepIndex[].
- * Inputs: track, previous/new rotation, and effective track length. Output:
- * adjusted live step index when the sequencer is running. Risk: this must stay
- * a narrow scheduler hook; UI code should call pat_setTrackRotation() instead.
- */
-void seq_offsetTrackStepIndexForRotation(uint8_t trackNr, uint8_t oldRot,
-                                         uint8_t newRot, uint8_t len);
 
 #endif /* SEQUENCER_H_ */

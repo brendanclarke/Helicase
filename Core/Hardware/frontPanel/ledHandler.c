@@ -1138,6 +1138,44 @@ void led_updatePatternTrack(uint8_t track, uint8_t pattern,
 }
 
 /*
+ * Paint automation-bearing steps for the VOICE single-parameter overlay.
+ *
+ * What: reads each of the sixteen steps in menu_currentBar, lights exact
+ * target matches, and forces every physically held step on. Why: the overlay
+ * must make automation presence visible without hiding the user's current
+ * multi-step edit selection. Inputs: track, viewed Pattern, canonical target,
+ * and visible held mask. Output: STEP1..STEP16 LED base state. The read buffer
+ * is stack-owned and bounded by the PatternData 63-entry ceiling; no ISR calls
+ * this foreground-only function. Affiliate: led_updatePatternTrackView().
+ */
+void led_updateAutomationStepView(uint8_t track, uint8_t pattern,
+                                  instrument_param_id_t target,
+                                  uint16_t heldMask)
+{
+    uint8_t start = (uint8_t)(menu_currentBar * NUM_STEPS_PER_BAR);
+    uint8_t i;
+    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+
+    for (i = 0u; i < NUM_STEPS_PER_BAR; i++) {
+        uint8_t on = (uint8_t)((heldMask & (uint16_t)(1u << i)) != 0u);
+        uint8_t j;
+
+        if (!on) {
+            uint8_t count = pat_readStepAutomations(
+                pattern, track, (uint8_t)(start + i), autos,
+                PAT_BLOCK_AUTO_COUNT_MASK);
+            for (j = 0u; j < count; j++) {
+                if (autos[j].target == target) {
+                    on = 1u;
+                    break;
+                }
+            }
+        }
+        led_setValue(on, (uint8_t)(LED_STEP1 + i));
+    }
+}
+
+/*
  * Apply the transport beat-pulse LED state.
  *
  * Input: on is boolean and comes from seq_ledState.beatPulse. Output:
@@ -1183,42 +1221,12 @@ void led_notifyPatternChanged(uint8_t playedPattern)
         menu_setShownPattern(patNr);
         led_clearSequencerLeds();
         led_updatePatternTrack(menu_getActiveVoice(), patNr, buttonHandler_selectedStep);
-        pat_applyTrackSettingsToMenu(patNr, menu_getActiveVoice());
     }
 
     if (buttonHandler_getMode() == SELECT_MODE_PERF) {
         led_clearAllBlinkLeds();
         menu_refreshPerfSceneLeds();
     }
-}
-
-/*
- * Mirror a sequencer-driven track-rotation reset into the visible menu value.
- *
- * Input: rotation is the value that should be displayed for PAR_TRACK_ROTATION,
- * normally 0 after stop/reset behavior. Output: parameter_values is updated;
- * no LEDs or PatternData storage are changed here.
- *
- * Common caller: sequencer.c after it has already reset stored track rotation
- * through PatternData. This exists because Sequencer owns transport reset
- * timing, PatternData owns stored rotation, and Menu owns the visible parameter.
- */
-void led_notifyTrackRotationReset(uint8_t rotation)
-{
-    /* Called by seq_setRunning() when stop resets all transient track rotation
-     * values to zero through pat_setTrackRotation().
-     *
-     * Why this tiny function exists:
-     * - The visible menu value PAR_TRACK_ROTATION is UI presentation state.
-     * - The actual stored rotation mutation belongs in PatternData.
-     * - Sequencer.c should not reach directly into menu parameter arrays for a
-     *   UI refresh side effect after the parser removal.
-     *
-     * Input: rotation value to show, normally 0 after transport stop.
-     * Output: menu edit parameter reflects the reset rotation.
-     * Risk: this does not mutate pattern storage; callers must reset storage
-     * through pat_setTrackRotation() before notifying the UI value here. */
-    parameter_values[PAR_TRACK_ROTATION] = rotation;
 }
 
 /*
@@ -1286,15 +1294,6 @@ void led_processSeqLedState(void)
      * should show playback chase. */
     if (d & SEQ_LED_DIRTY_CHASE)
         led_updateCurrentStep(seq_ledState.chaseStep);
-
-    /* Recorded SELECT-row feedback is a compatibility no-op in the bridge:
-     * SELECT1..8 identify bars, while REC_MAIN refreshes the STEP row. */
-    if (d & SEQ_LED_DIRTY_REC_SUB)
-        led_updateRecordedSubStep(activeTrack, shownPattern,
-                                  seq_ledState.recordSubStep,
-                                  buttonHandler_selectedStep,
-                                  buttonHandler_getShift(),
-                                  buttonHandler_getMode());
 
     /* Recorded step: update STEP1..16 for the visible bar unless performance
      * mode owns those LEDs. */

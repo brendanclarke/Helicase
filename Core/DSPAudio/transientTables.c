@@ -56,10 +56,11 @@ INCCM const float transientVolumeTable[69]=
 0.117647, 0.102941, 0.0882353, 0.0735294, 0.0588235,
 0.0441176, 0.0294118, 0.0147059, 0};
 
-/* signed 8 bit pcm
- *
- */
-INCCM const int8_t transientData[NUM_TRANSIENTS][TRANSIENT_SAMPLE_LENGTH] =
+/* Immutable transient PCM ROM: ordinary const placement keeps this
+** NUM_TRANSIENTS x TRANSIENT_SAMPLE_LENGTH table in internal FLASH.
+** transient_calcBlock() reads it directly; do not add an SRAM/DTCM shadow.
+** The DTCM capacity released by this placement is reserved for delay lines. */
+const int8_t transientData[NUM_TRANSIENTS][TRANSIENT_SAMPLE_LENGTH] =
 {
 		//js_expClick
 		 {

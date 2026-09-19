@@ -56,6 +56,7 @@
 #include "SceneData.h"
 #include "triggerJacks.h"
 #include "timebase.h"
+#include "InstrumentManager.h"
 #include <stdbool.h>
 
 static uint16_t midiParser_activeNrpnNumber = 0;
@@ -81,6 +82,182 @@ static union {
 uint8_t midiParser_txRxFilter = 0xFF;
 static uint32_t midiParser_lastDinSyncUs = 0;
 static uint8_t midiParser_haveDinSync = 0;
+
+/*
+ * Apply one historical MIDI control to the currently tagged runtime slot.
+ *
+ * Inputs: legacy visible slot, descriptor key, and MIDI byte value. Output:
+ * the current engine receives an immediate runtime-only descriptor write when
+ * it exposes that key; an unavailable key/type is a safe no-op. This replaces
+ * direct fixed-global field writes without turning external MIDI into a Scene
+ * persistence or morph edit, and it keeps future loaded types bounded by the
+ * manager's tagged runtime contract.
+ */
+static void midiParser_writeTaggedRuntime(uint8_t slot, const char *key,
+											 uint8_t value)
+{
+	const ParamDescriptor *descriptor;
+	instrument_type_t type = instrumentManager_runtimeType(slot);
+
+	if (type == INSTRUMENT_TYPE_UNKNOWN || !key)
+		return;
+	descriptor = instrumentManager_descriptorByKey(type, key);
+	if (descriptor)
+		(void)instrumentManager_writeRuntime(slot, descriptor, value);
+}
+
+/*
+ * Translate the non-persistent portion of the historical CC/CC2 map.
+ *
+ * Inputs: MIDI controller class, controller number, and 0..127 value. Output:
+ * descriptor-key writes reach the tagged runtime at the controller's visible
+ * slot. Mixer, note, mute, and target-selector controls remain handled by the
+ * caller because they do not own engine object storage. The compact mapping
+ * intentionally shares semantic keys across engine types, making a loaded
+ * type receive only controls it actually implements.
+ */
+static void midiParser_applyTaggedInstrumentCc(uint8_t cc2, uint8_t cc,
+													 uint8_t value)
+{
+	uint8_t slot;
+	const char *key = 0;
+
+	if (!cc2) {
+		switch (cc) {
+		case VOL_SLOPE1: slot = 0u; key = "amp_envelope_slope"; break;
+		case VOL_SLOPE2: slot = 1u; key = "amp_envelope_slope"; break;
+		case VOL_SLOPE3: slot = 2u; key = "amp_envelope_slope"; break;
+		case VOL_SLOPE6: slot = 5u; key = "amp_envelope_slope"; break;
+		case PITCH_SLOPE1: slot = 0u; key = "pitch_envelope_slope"; break;
+		case PITCH_SLOPE2: slot = 1u; key = "pitch_envelope_slope"; break;
+		case PITCH_SLOPE3: slot = 2u; key = "pitch_envelope_slope"; break;
+		case PITCH_SLOPE4: slot = 3u; key = "pitch_envelope_slope"; break;
+		case FILTER_FREQ_DRUM1: slot = 0u; key = "filter_freq"; break;
+		case FILTER_FREQ_DRUM2: slot = 1u; key = "filter_freq"; break;
+		case FILTER_FREQ_DRUM3: slot = 2u; key = "filter_freq"; break;
+		case RESO_DRUM1: slot = 0u; key = "filter_reso"; break;
+		case RESO_DRUM2: slot = 1u; key = "filter_reso"; break;
+		case RESO_DRUM3: slot = 2u; key = "filter_reso"; break;
+		case F_OSC1_COARSE: slot = 0u; key = "osc1_pitch_coarse"; break;
+		case F_OSC2_COARSE: slot = 1u; key = "osc1_pitch_coarse"; break;
+		case F_OSC3_COARSE: slot = 2u; key = "osc1_pitch_coarse"; break;
+		case F_OSC4_COARSE: slot = 3u; key = "osc1_pitch_coarse"; break;
+		case F_OSC5_COARSE: slot = 4u; key = "osc1_pitch_coarse"; break;
+		case F_OSC1_FINE: slot = 0u; key = "osc1_pitch_fine"; break;
+		case F_OSC2_FINE: slot = 1u; key = "osc1_pitch_fine"; break;
+		case F_OSC3_FINE: slot = 2u; key = "osc1_pitch_fine"; break;
+		case F_OSC4_FINE: slot = 3u; key = "osc1_pitch_fine"; break;
+		case F_OSC5_FINE: slot = 4u; key = "osc1_pitch_fine"; break;
+		case F_OSC6_FINE: slot = 5u; key = "osc1_pitch_fine"; break;
+		case OSC_WAVE_DRUM1: slot = 0u; key = "osc1_wave"; break;
+		case OSC_WAVE_DRUM2: slot = 1u; key = "osc1_wave"; break;
+		case OSC_WAVE_DRUM3: slot = 2u; key = "osc1_wave"; break;
+		case OSC_WAVE_SNARE: slot = 3u; key = "osc1_wave"; break;
+		case MOD_WAVE_DRUM1: slot = 0u; key = "osc2_wave"; break;
+		case MOD_WAVE_DRUM2: slot = 1u; key = "osc2_wave"; break;
+		case MOD_WAVE_DRUM3: slot = 2u; key = "osc2_wave"; break;
+		case VELOA1: slot = 0u; key = "amp_envelope_attack"; break;
+		case VELOA2: slot = 1u; key = "amp_envelope_attack"; break;
+		case VELOA3: slot = 2u; key = "amp_envelope_attack"; break;
+		case VELOA4: slot = 3u; key = "amp_envelope_attack"; break;
+		case VELOA5: slot = 4u; key = "amp_envelope_attack"; break;
+		case VELOA6: slot = 5u; key = "amp_envelope_attack"; break;
+		case VELOD1: slot = 0u; key = "amp_envelope_decay"; break;
+		case VELOD2: slot = 1u; key = "amp_envelope_decay"; break;
+		case VELOD3: slot = 2u; key = "amp_envelope_decay"; break;
+		case VELOD4: slot = 3u; key = "amp_envelope_decay"; break;
+		case VELOD5: slot = 4u; key = "amp_envelope_decay"; break;
+		case VELOD6: slot = 5u; key = "amp_envelope_decay"; break;
+		case VELOD6_OPEN: slot = 5u; key = "amp_envelope_decay_choke"; break;
+		case PITCHD1: slot = 0u; key = "pitch_envelope_decay"; break;
+		case PITCHD2: slot = 1u; key = "pitch_envelope_decay"; break;
+		case PITCHD3: slot = 2u; key = "pitch_envelope_decay"; break;
+		case PITCHD4: slot = 3u; key = "pitch_envelope_decay"; break;
+		case MODAMNT1: slot = 0u; key = "pitch_envelope_amount"; break;
+		case MODAMNT2: slot = 1u; key = "pitch_envelope_amount"; break;
+		case MODAMNT3: slot = 2u; key = "pitch_envelope_amount"; break;
+		case MODAMNT4: slot = 3u; key = "pitch_envelope_amount"; break;
+		case VOL1: slot = 0u; key = "instrument_vol"; break;
+		case VOL2: slot = 1u; key = "instrument_vol"; break;
+		case VOL3: slot = 2u; key = "instrument_vol"; break;
+		case VOL4: slot = 3u; key = "instrument_vol"; break;
+		case VOL5: slot = 4u; key = "instrument_vol"; break;
+		case VOL6: slot = 5u; key = "instrument_vol"; break;
+		case PAN1: slot = 0u; key = "instrument_pan"; break;
+		case PAN2: slot = 1u; key = "instrument_pan"; break;
+		case PAN3: slot = 2u; key = "instrument_pan"; break;
+		case PAN4: slot = 3u; key = "instrument_pan"; break;
+		case PAN5: slot = 4u; key = "instrument_pan"; break;
+		case PAN6: slot = 5u; key = "instrument_pan"; break;
+		case SNARE_NOISE_F: slot = 3u; key = "noise_freq"; break;
+		case SNARE_FILTER_F: slot = 3u; key = "filter_freq"; break;
+		case SNARE_RESO: slot = 3u; key = "filter_reso"; break;
+		case SNARE_MIX: slot = 3u; key = "osc1_noise_mix"; break;
+		case CYM_WAVE1: slot = 4u; key = "osc1_wave"; break;
+		case CYM_WAVE2: slot = 4u; key = "osc2_wave"; break;
+		case CYM_WAVE3: slot = 4u; key = "osc3_wave"; break;
+		case CYM_MOD_OSC_F1: slot = 4u; key = "osc2_pitch_coarse"; break;
+		case CYM_MOD_OSC_F2: slot = 4u; key = "osc3_pitch_coarse"; break;
+		case CYM_MOD_OSC_GAIN1: slot = 4u; key = "osc2_mod_amount"; break;
+		case CYM_MOD_OSC_GAIN2: slot = 4u; key = "osc3_mod_amount"; break;
+		case CYM_FIL_FREQ: slot = 4u; key = "filter_freq"; break;
+		case CYM_RESO: slot = 4u; key = "filter_reso"; break;
+		case CYM_REPEAT: slot = 4u; key = "amp_attack_repeat"; break;
+		case CYM_SLOPE: slot = 4u; key = "amp_envelope_slope"; break;
+		case WAVE1_HH: slot = 5u; key = "osc1_wave"; break;
+		case WAVE2_HH: slot = 5u; key = "osc2_wave"; break;
+		case WAVE3_HH: slot = 5u; key = "osc3_wave"; break;
+		case HAT_FILTER_F: slot = 5u; key = "filter_freq"; break;
+		case HAT_RESO: slot = 5u; key = "filter_reso"; break;
+		case F_OSC6_COARSE: slot = 5u; key = "osc1_pitch_coarse"; break;
+		case MOD_OSC_F1: slot = 5u; key = "osc2_pitch_coarse"; break;
+		case MOD_OSC_F2: slot = 5u; key = "osc3_pitch_coarse"; break;
+		case MOD_OSC_GAIN1: slot = 5u; key = "osc2_mod_amount"; break;
+		case MOD_OSC_GAIN2: slot = 5u; key = "osc3_mod_amount"; break;
+		case REPEAT1: slot = 3u; key = "amp_attack_repeat"; break;
+		case EG_SNARE1_SLOPE: slot = 3u; key = "amp_envelope_slope"; break;
+		case SNARE_DISTORTION: slot = 3u; key = "instrument_drive"; break;
+		case CYMBAL_DISTORTION: slot = 4u; key = "instrument_drive"; break;
+		case HAT_DISTORTION: slot = 5u; key = "instrument_drive"; break;
+		case FREQ_LFO1: slot = 0u; key = "lfo_rate"; break;
+		case FREQ_LFO2: slot = 1u; key = "lfo_rate"; break;
+		case FREQ_LFO3: slot = 2u; key = "lfo_rate"; break;
+		case FREQ_LFO4: slot = 3u; key = "lfo_rate"; break;
+		case FREQ_LFO5: slot = 4u; key = "lfo_rate"; break;
+		case FREQ_LFO6: slot = 5u; key = "lfo_rate"; break;
+		case AMOUNT_LFO1: slot = 0u; key = "lfo_amount"; break;
+		case AMOUNT_LFO2: slot = 1u; key = "lfo_amount"; break;
+		case AMOUNT_LFO3: slot = 2u; key = "lfo_amount"; break;
+		case AMOUNT_LFO4: slot = 3u; key = "lfo_amount"; break;
+		case AMOUNT_LFO5: slot = 4u; key = "lfo_amount"; break;
+		case AMOUNT_LFO6: slot = 5u; key = "lfo_amount"; break;
+		default: return;
+		}
+	} else {
+		if (cc >= CC2_TRANS1_WAVE && cc <= CC2_TRANS6_FREQ) {
+			slot = (uint8_t)((cc - CC2_TRANS1_WAVE) / 3u);
+			key = ((cc - CC2_TRANS1_WAVE) % 3u == 0u) ? "transient_wave" :
+			      ((cc - CC2_TRANS1_WAVE) % 3u == 1u) ? "transient_vol" : "transient_freq";
+		} else if (cc >= CC2_FILTER_TYPE_1 && cc <= CC2_FILTER_TYPE_6) {
+			slot = cc - CC2_FILTER_TYPE_1; key = "filter_type";
+		} else if (cc <= CC2_FILTER_DRIVE_6) {
+			slot = cc - CC2_FILTER_DRIVE_1; key = "filter_drive";
+		} else if (cc >= CC2_VOLUME_MOD_ON_OFF1 && cc <= CC2_VOLUME_MOD_ON_OFF6) {
+			slot = cc - CC2_VOLUME_MOD_ON_OFF1; key = "velo_vol_on_off";
+		} else if (cc >= CC2_WAVE_LFO1 && cc <= CC2_WAVE_LFO6) {
+			slot = cc - CC2_WAVE_LFO1; key = "lfo_wave";
+		} else if (cc >= CC2_RETRIGGER_LFO1 && cc <= CC2_RETRIGGER_LFO6) {
+			slot = cc - CC2_RETRIGGER_LFO1; key = "lfo_retrigger_voice";
+		} else if (cc >= CC2_SYNC_LFO1 && cc <= CC2_SYNC_LFO6) {
+			slot = cc - CC2_SYNC_LFO1; key = "lfo_sync";
+		} else if (cc >= CC2_OFFSET_LFO1 && cc <= CC2_OFFSET_LFO6) {
+			slot = cc - CC2_OFFSET_LFO1; key = "lfo_offset";
+		} else {
+			return;
+		}
+	}
+	midiParser_writeTaggedRuntime(slot, key, value);
+}
 
 enum State
 {
@@ -197,7 +374,7 @@ uint8_t midiParser_getVoiceMidiNote(uint8_t voice)
 	uint8_t note;
 
 	if (voice >= 7u)
-		return PAT_DEFAULT_NOTE;
+		return MIDI_DEFAULT_TRIGGER_NOTE;
 
 	/*
 	 * PatternData owns the track MIDI note shown on the STEP track-settings
@@ -280,7 +457,23 @@ void midiParser_ccHandler(MidiMsg msg, uint8_t updateOriginalValue)
 		if(updateOriginalValue) {
 			midiParser_originalCcValues[paramNr+1] = msg.data2;
 		}
+		if (msg.data1 == NRPN_DATA_ENTRY_COARSE) {
+			midiParser_nrpnHandler(msg.data2);
+			return;
+		}
+		if (msg.data1 == NRPN_FINE) {
+			midiParser_activeNrpnNumber &= ~(0x7fu);
+			midiParser_activeNrpnNumber |= (msg.data2 & 0x7fu);
+			return;
+		}
+		if (msg.data1 == NRPN_COARSE) {
+			midiParser_activeNrpnNumber &= 0x7fu;
+			midiParser_activeNrpnNumber |= ((uint16_t)msg.data2 << 7);
+			return;
+		}
 
+		midiParser_applyTaggedInstrumentCc(0u, msg.data1, msg.data2);
+#if 0 /* Retired fixed-engine field map; descriptor map above is authoritative. */
 		switch(msg.data1)
 		{
 
@@ -905,6 +1098,7 @@ void midiParser_ccHandler(MidiMsg msg, uint8_t updateOriginalValue)
 				default:
 					break;
 		}
+		#endif
 		modNode_originalValueChanged(paramNr);
 	} //msg.status == MIDI_CC
 
@@ -915,6 +1109,8 @@ void midiParser_ccHandler(MidiMsg msg, uint8_t updateOriginalValue)
 		if(updateOriginalValue) {
 			midiParser_originalCcValues[paramNr] = msg.data2;
 		}
+		midiParser_applyTaggedInstrumentCc(1u, msg.data1, msg.data2);
+#if 0 /* Retired fixed-engine field map; descriptor map above is authoritative. */
 		switch(msg.data1)
 		{
 
@@ -1210,6 +1406,7 @@ void midiParser_ccHandler(MidiMsg msg, uint8_t updateOriginalValue)
 			default:
 				break;
 		}
+		#endif
 		modNode_originalValueChanged(paramNr);
 	}
 }
@@ -1269,7 +1466,8 @@ static void midiParser_noteOn(uint8_t voice, uint8_t note, uint8_t vel, uint8_t 
 		const uint8_t chan=midi_MidiChannels[voice];
 
 		// record note if rec is on
-		seq_addNote(voice,vel, note);
+		/* Fixed-grid recording stores only the quantized trigger bit. */
+		seq_recordTrigger(voice);
 
 		//if a note is on for that channel send note-off first
 		seq_midiNoteOff(chan);
@@ -1618,8 +1816,6 @@ void midiParser_parseMidiMessage(MidiMsg msg)
 					 * per-voice provision available for the later MIDI rework.
 					 */
 					if (chanonly == midi_MidiChannels[7]) {
-						seq_recordAutomation(menu_getActiveVoice(),
-						                     msg.data1, msg.data2);
 						midiParser_setMorphFromModWheel(msg.data2);
 					} else {
 						(void)midiParser_setVoiceMorphFromModWheel(chanonly,
@@ -1632,7 +1828,6 @@ void midiParser_parseMidiMessage(MidiMsg msg)
 					 * owns the recording gate and delegates actual Pattern
 					 * writes onward.
 					 */
-					seq_recordAutomation(menu_getActiveVoice(), msg.data1, msg.data2);
 					midiParser_ccHandler(msg,1);
 				}
 				/* midiParser_ccHandler above already updates parameters locally.

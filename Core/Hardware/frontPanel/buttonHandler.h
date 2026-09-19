@@ -10,6 +10,7 @@
 #ifndef BUTTONHANDLER_H_
 #define BUTTONHANDLER_H_
 #include <stdint.h>
+#include "config.h"
 
 /* Select-button modes */
 #define SELECT_MODE_VOICE       0x00
@@ -20,7 +21,16 @@
 #define SELECT_MODE_SOM_GEN     0x06
 #define SELECT_MODE_MENU        0x07
 
-#define BUTTON_TIMEOUT          500u  /* ~500 ms; original AVR used 38 * 13.107 ms */
+/*
+ * Common short hold-vs-tap threshold, sourced from config.h.
+ *
+ * What: the legacy timer code still names this value BUTTON_TIMEOUT, but the
+ * actual policy is the shared BUTTON_HOLD_DELAY_MS used by all UI gestures.
+ * Why: S066 needs the VOICE overlay and existing long-press paths to agree on
+ * one wrap-safe threshold rather than drifting apart.
+ * Affiliates: config.h, buttonHandler_tick(), and buttonHandler_setTimeraction().
+ */
+#define BUTTON_TIMEOUT          BUTTON_HOLD_DELAY_MS
 #define NO_STEP_SELECTED        -1
 
 /* Button index constants — LXR-02 shift-register chain order
@@ -61,6 +71,25 @@ void buttonHandler_processEvents(void);
 
 /* Legacy tick — kept for long-press timer (can be called from main loop) */
 void buttonHandler_tick(void);
+
+/*
+ * Return the raw physical held-state mask for SEQ1..SEQ16.
+ *
+ * What: bit N corresponds to BUT_SEQ(N+1), independent of Menu mode or timer
+ * state. Why: Menu needs the physical selection while resolving held-step
+ * automation values. Inputs: the ISR-maintained btn_held[] array. Output: a
+ * 16-bit foreground-readable mask. Affiliate: buttonHandler_visibleStep().
+ */
+uint16_t buttonHandler_seqHeldMask(void);
+
+/*
+ * Convert a visible SEQ button index to its absolute Pattern step.
+ *
+ * What: folds menu_currentBar into the 0..127 Pattern grid. Why: the VOICE
+ * overlay stores button order as compact 0..15 indices but PatternData reads
+ * absolute steps. Inputs: zero-based SEQ button index. Output: absolute step.
+ */
+uint8_t buttonHandler_visibleStep(uint8_t seqButtonPressed);
 
 uint8_t buttonHandler_getMode(void);
 uint8_t buttonHandler_getShift(void);

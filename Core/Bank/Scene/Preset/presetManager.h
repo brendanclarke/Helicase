@@ -59,10 +59,13 @@ typedef enum {
     PRESET_OP_INSTRUMENT_SAVE,
     /* Hidden `.hctmp.<ext>` save that prepares Menu's reversible `kit` row. */
     PRESET_OP_INSTRUMENT_TEMP_SAVE,
+    /* Hidden Morph-only `.hctmp` save/load for InstrumentMrp's reversible row. */
+    PRESET_OP_INSTRUMENT_MORPH_TEMP_SAVE,
     PRESET_OP_KIT_SAVE,
     PRESET_OP_KIT_MORPH_LOAD,
     PRESET_OP_KIT_MORPH_SAVE,
     PRESET_OP_INSTRUMENT_MORPH_LOAD,
+    PRESET_OP_INSTRUMENT_MORPH_TEMP_LOAD,
     /*
      * New-format Morph Save completions.
      *
@@ -174,18 +177,28 @@ uint8_t preset_loadSceneForScenes(uint16_t presetNr, uint16_t scene_mask);
  * PRESET_OP_BANK_LOAD with no child payload; callers then run
  * preset_loadFirstAvailableSceneOrKit() for the required fallback chain.
  */
+/*
+ * Bank requests use settings.cfg only for the boot restore slot.  Successful
+ * Bank loads publish their own HCNAMES Bank/child provenance through the
+ * filesystem close gate; neither this interface nor settings.cfg owns Scene
+ * source state.
+ */
 uint8_t preset_loadBank(uint16_t presetNr, uint16_t scene_mask);
-uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask);
+uint8_t preset_saveBank(uint16_t presetNr, uint16_t scene_mask,
+                        uint8_t force_save);
 uint8_t preset_completedBankLoadedScene(void);
+uint16_t preset_bankLoadFailedSceneMask(void);
 uint8_t preset_loadFirstAvailableSceneOrKit(void);
 /*
  * Save the active resident Scene into the root Scene library.
  *
  * Inputs: direct root Scene slot and the current eight-cell preset_currentName
  * edited by the Save page. Output: asynchronous Scene directory write and a
- * PRESET_OP_SCENE_SAVE completion. This is separate from preset_saveDrumset()
- * because Scene Save serializes Scene settings, embedded Kit, Pattern stub,
- * and Effect placeholder, not only the Kit payload.
+ * PRESET_OP_SCENE_SAVE completion. Saving does not alter the retained HCNAMES
+ * source provenance; failure likewise preserves it. This is separate from
+ * preset_saveDrumset() because Scene Save serializes Scene settings, embedded
+ * Kit, Pattern, and Effect placeholder, not only the Kit payload.
+ * Affiliates: filesystem's HCNAMES identity/source register.
  */
 uint8_t preset_saveScene(uint16_t presetNr, uint8_t source_scene);
 /*
@@ -199,12 +212,21 @@ uint8_t preset_saveScene(uint16_t presetNr, uint8_t source_scene);
  */
 uint8_t preset_loadKitMorphForScenes(uint16_t presetNr, uint16_t scene_mask);
 /* Settings — keyed root settings.cfg file. */
-void    preset_loadGlobals(void);
-void    preset_saveGlobals(void);
+/*
+ * Post one explicit Settings request.
+ *
+ * Inputs: current settings storage authority. Output: one only when the
+ * filesystem accepted the asynchronous request; zero leaves Preset idle. Menu
+ * uses this accepted/rejected result to enter its `...` confirmation state
+ * only for work that will actually complete.
+ */
+uint8_t preset_loadGlobals(void);
+uint8_t preset_saveGlobals(void);
 
 /* Pattern — async direct serializer in filesystem.c. */
-uint8_t preset_loadPattern(uint8_t presetNr);
-void    preset_savePattern(uint8_t presetNr);
+uint8_t preset_loadPattern(uint16_t presetNr);
+uint8_t preset_loadPatternForScenes(uint16_t presetNr, uint16_t scene_mask);
+uint8_t preset_savePattern(uint16_t presetNr);
 
 /* All / Performance — async container serializers in filesystem.c. */
 void    preset_saveAll(uint8_t presetNr, uint8_t isAll);
@@ -250,6 +272,13 @@ uint8_t preset_saveInstrumentTemp(uint8_t source_scene, uint8_t source_slot);
 uint8_t preset_loadInstrumentTemp(uint8_t destination_scene,
                                   uint8_t destination_slot,
                                   instrument_type_t type);
+/* Save/load only the current Morphable Morph endpoints for the reversible
+ * InstrumentMrp `kit` row. */
+uint8_t preset_saveInstrumentMorphTemp(uint8_t source_scene,
+                                       uint8_t source_slot);
+uint8_t preset_loadInstrumentMorphTemp(uint8_t destination_scene,
+                                       uint8_t destination_slot,
+                                       instrument_type_t type);
 /*
  * Save one resident kit voice into the root Instrument/ pool.
  *
@@ -324,6 +353,14 @@ void    preset_applySoundParameter(uint16_t paramNr, uint8_t value,
  * storageTypes, or InstrumentManager. The per-slot storage cell is the
  * descriptor array index for that instrument type.
  *
+ * Retained mutation contract: both public endpoint setters compare and commit
+ * through one generic Preset store boundary, then mark the matching normal or
+ * Morph Autosave descriptor cell only when its final byte changed. A future
+ * registry descriptor automatically follows this path when edited through
+ * these setters; direct endpoint assignments are restricted to validated
+ * whole-object/load paths that must use the appropriate region marker. Derived
+ * morph_interpolation[] never represents autosave data.
+ *
  * Accessors/clients:
  * - storageTypes/filesystem populate Scene slots directly during load.
  * - menu.c load completion calls preset_startDrumsetApply(), which uses these
@@ -371,16 +408,29 @@ uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
 /*
  * Deferred active-Scene sound apply.
  *
- * preset_startDrumsetApply() swaps immediate Scene settings and arms one bit per
- * instrument slot. preset_tickDrumsetApply() commits at most one pending slot
- * whose old amp envelope is below the quiet threshold. A return value of 1 means
- * one bounded unit was performed; 0 can mean either fully idle or waiting for
- * ringing slots, so callers may poll it from the ordinary foreground loop.
+ * preset_startDrumsetApply() first detaches the outgoing all-source modulation
+ * graph, swaps immediate Scene settings, and arms one bit per instrument slot.
+ * preset_tickDrumsetApply() commits at most one quiet slot's tagged runtime
+ * type, routing, and descriptor image per pass. Once every member is valid,
+ * it reuses the existing Instrument apply cursor to normalize/rebind every
+ * source slot's velocity plus both LFO pairs. The pre-audio boot counterpart
+ * establishes only a safe temporary image; main.c calls
+ * preset_startDrumsetApply() after audio startup so boot uses this entire
+ * worker, including its clear/image/rebind order, rather than a partial
+ * boot-only target-install sequence. Thus target tokens are resolved only
+ * against the complete incoming type layout, not a stale physical-slot
+ * assumption. A return value of 1 means one bounded unit was performed; 0 can
+ * mean either fully idle or waiting for ringing slots, so callers may poll it
+ * from the ordinary foreground loop.
  *
  * preset_applyDeferredSceneSlotForTrigger() is the trigger-time escape hatch:
  * when the newly selected Scene pattern fires a pending slot, it synchronously
- * applies that slot's instrument parameters, LFO slot/targets, audio out, and
- * future per-instrument mix affiliates before the note trigger is dispatched.
+ * applies that slot's type, descriptor image, and audio out before the note
+ * trigger is dispatched. Cross-slot LFO/velocity bindings remain detached
+ * until all pending members finish, when the common rebind cursor installs
+ * them. The one pre-worker teardown is required because a tagged runtime
+ * replacement overwrites outgoing engine bytes to which old modulation nodes
+ * may point. This lifecycle adds no retained apply state.
  */
 void    preset_startDrumsetApply(void);
 uint8_t preset_tickDrumsetApply(void);
@@ -388,24 +438,42 @@ void    preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track);
 /*
  * Commit and start bounded runtime application for one staged Instrument slot.
  *
- * Inputs: immutable request Scene/slot and filesystem's validated staging
- * payload. Output: inactive Scenes receive retained state only. Active Scene
- * commits clear all outgoing modulation owners, replace/reset the incoming
- * runtime, rebuild all six Morph images, and rebind one normalized source per
- * tick. Client: Menu's Instrument Load completion handler.
+ * Inputs: immutable request Scene/slot, filesystem's validated staging payload,
+ * and a root-pool versus hidden-temporary persistence decision that Menu reads
+ * from filesystem's immutable completed-request flag. Output: inactive Scenes receive retained
+ * state only. A root-pool commit marks its complete type/Normal/Morph payload
+ * for AutoSave immediately at each retained Scene destination; hidden `kit`
+ * restore is deliberately non-marking. Active Scene commits clear all outgoing
+ * modulation owners, replace/reset the incoming runtime, rebuild all six Morph
+ * images, and rebind one normalized source per tick. Client: Menu's Instrument
+ * Load completion handler.
  *
  * This remains separate from the Kit cursor because Instrument commit must
  * preserve the outgoing slot identity until targets are cleared, whereas Kit
  * loading has already atomically replaced a fully staged six-slot payload.
  */
-void    preset_startInstrumentApply(uint8_t scene_index, uint8_t slot);
+void    preset_startInstrumentApply(uint8_t scene_index,
+                                    uint8_t slot,
+                                    uint8_t mark_autosave_whole_instrument);
 /*
- * Commit staged morph-load endpoints and drain the Morph worker.
+ * Commit staged KitMrp or InstrumentMrp endpoints and drain the bounded Morph
+ * worker without replacing identity, Normal images, routing, or modulation
+ * ownership.
  *
- * KitMrp and InstrumentMrp change endpoint values only. They must not clear
- * modulation, reset instrument runtime objects, replace display names, or
- * apply routing. These starters preserve slot identity and reuse the bounded
- * Morph worker so active-scene interpolation is refreshed safely.
+ * Inputs: filesystem-owned validated staging plus the immutable selected
+ * destination coordinates. Outputs: InstrumentMrp marks only the committed
+ * destination's Morphable Morph descriptors; KitMrp marks the same
+ * Morphable-only descriptor domain for each successfully type-compatible
+ * selected slot and commits its generated slot-6 Morph-decay setting through
+ * SceneData's named Kit setter. Mismatched slots, types, Normal endpoints,
+ * HCNAMES identity/source, and routing remain unchanged. Why: each loader
+ * imports endpoint data without becoming a normal Kit/Instrument replacement.
+ * The active Scene alone receives the existing deferred runtime refresh; an
+ * inactive selected Scene can publish only if it is already Bank-present.
+ * Affiliates: preset_commitStagedKitNormalToMorph(),
+ * preset_commitStagedInstrumentNormalToMorph(),
+ * autosave_markInstrumentMorphDirty(), and
+ * scene_setSlot6Track7MorphAmpEnvelopeDecay().
  */
 void    preset_startKitMorphApply(void);
 void    preset_startInstrumentMorphApply(uint8_t scene_index, uint8_t slot);
@@ -420,6 +488,12 @@ uint8_t preset_tickInstrumentApply(void);
  * worker from retained Scene values without changing any Morph amounts, which
  * is required after endpoint loads/edits. preset_setVoiceDecimationAll()
  * retains and applies the Scene-wide decimation multiplier used by PERF "srt".
+ *
+ * Serialized-owner rule: overall Morph and decimation are committed through
+ * SceneData's change-aware setters before runtime mirrors/work are updated.
+ * Inputs and runtime outputs remain unchanged; equal retained values create no
+ * autosave mutation. Affiliates: SceneData's named Scene parameter boundary
+ * and Autosave's scalar marker.
  */
 void    preset_morph(uint8_t morph);
 void    preset_morphVoice(uint8_t slot, uint8_t morph);

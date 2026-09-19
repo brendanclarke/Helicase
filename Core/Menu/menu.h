@@ -123,6 +123,10 @@ enum NamesEnum {
      */
     TEXT_VOICE1_MORPH, TEXT_VOICE2_MORPH, TEXT_VOICE3_MORPH,
     TEXT_VOICE4_MORPH, TEXT_VOICE5_MORPH, TEXT_VOICE6_MORPH,
+    /* Pattern pool-use widget; parallel short/long enums below stay aligned. */
+    TEXT_PAT_STORE_USE,
+    /* Global AutoSave cell; parallel short/long enums below stay aligned. */
+    TEXT_AUTOSAVE,
     NUM_NAMES
 };
 
@@ -159,6 +163,10 @@ enum longNamesEnum {
     /* Long names used in single-parameter PERF edit view for 1vm..6vm. */
     LONG_VOICE1_MORPH, LONG_VOICE2_MORPH, LONG_VOICE3_MORPH,
     LONG_VOICE4_MORPH, LONG_VOICE5_MORPH, LONG_VOICE6_MORPH,
+    /* Read-only Global widget title for the active Pattern pool occupancy. */
+    LONG_PAT_STORE_USE,
+    /* Long label for PAR_AUTOSAVE_ENABLED's Global edit view. */
+    LONG_AUTOSAVE,
 };
 
 enum shortNamesEnum {
@@ -182,10 +190,25 @@ enum shortNamesEnum {
     SHORT_BAR_RESET_MODE, SHORT_CPU_USE, SHORT_OSC_INTERP, SHORT_SCALE,
     /* Compact PERF labels for per-voice Morph columns. */
     SHORT_VOICE1_MORPH, SHORT_VOICE2_MORPH, SHORT_VOICE3_MORPH,
-    SHORT_VOICE4_MORPH, SHORT_VOICE5_MORPH, SHORT_VOICE6_MORPH
+    SHORT_VOICE4_MORPH, SHORT_VOICE5_MORPH, SHORT_VOICE6_MORPH,
+    /* Read-only three-character label for Pattern pool occupancy. */
+    SHORT_PAT_STORE_USE,
+    /* Three-cell Global-page label for PAR_AUTOSAVE_ENABLED. */
+    SHORT_AUTOSAVE
 };
 
 #define PAR_RUNTIME_CPU_USE 0xFFFEu
+
+/*
+ * Virtual parameter sentinel for the read-only Pattern pool-use widget.
+ *
+ * What: distinguishes the retained Pattern StoreUse cell from real
+ * ParameterArray entries. Why: Menu must format the one-shot occupancy value
+ * specially and reject encoder edits without allocating a parameter slot.
+ * Inputs/outputs: compile-time id only. Affiliates: menuPages.h, the CPU
+ * widget render/edit guards, and pat_poolUsagePercent().
+ */
+#define PAR_PAT_STORE_USE 0xFFFDu
 
 #define ARROW_SIGN '>'
 
@@ -226,6 +249,8 @@ enum loadSaveEnum {
     SAVE_TYPE_KIT_MORPH,
     SAVE_TYPE_SCENE,
     SAVE_TYPE_BANK,
+    /* Numbered root Pattern library backed by `/Pattern/` `<name>.pat` v4 files. */
+    SAVE_TYPE_PATTERN,
     SAVE_TYPE_GLO,
     SAVE_TYPE_SAMPLES,
     NUM_SAVE_TYPES
@@ -371,6 +396,25 @@ uint8_t menu_voiceHeldSceneButtonPressed(uint8_t scene_index);
  * encoder, and endless-pot code uses the matching parameter buffer.
  */
 void menu_setVoiceModeShowMorph(uint8_t onOff);
+
+/*
+ * VOICE held-step automation overlay bridge.
+ *
+ * What: ButtonHandler calls menu_voiceAutoOverlayHoldExpired() when the common
+ * hold timer crosses its deadline; Menu then owns held-step resolution and
+ * rendering. menu_voiceAutoOverlayActive() lets ButtonHandler suppress later
+ * SEQ tap/timer behavior while the overlay owns the gesture. Why: the raw
+ * button array is ISR-owned, while overlay state and LCD/Pattern work are
+ * foreground-owned. Affiliates: buttonHandler_tick(), buttonHandler_seqHeldMask(),
+ * and menu_serviceRuntimeWidgets().
+ */
+void menu_voiceAutoOverlayHoldExpired(void);
+uint8_t menu_voiceAutoOverlayActive(void);
+
+/* Re-evaluate overlay LEDs/display after a visible bar change. */
+void menu_voiceAutoOverlayBarChanged(void);
+/* Notify the VOICE search after an in-place Pattern/track clear. */
+void menu_voiceAutoOverlayPatternDeleted(void);
 /*
  * STEP front-page half navigation.
  *
@@ -380,6 +424,7 @@ void menu_setVoiceModeShowMorph(uint8_t onOff);
  */
 void menu_toggleStepTrackSettingsHalf(void);
 void menu_showStepTrackSettingsFirstHalf(void);
+void menu_showStepEditPage(void);
 void menu_resetActiveParameter(void);
 uint8_t menu_getSubPage(void);
 /*
@@ -402,6 +447,8 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value);
 void menu_sendAllParameters(void);
 void menu_serviceRuntimeWidgets(void);
 uint8_t menu_getActivePage(void);
+/* Use the accepted OK/OW busy window, not mere presence on the Load/Save page. */
+uint8_t menu_isLoadSaveCommandActive(void);
 uint8_t menu_areMuteLedsShown(void);
 uint8_t menu_getActiveVoice(void);
 void menu_setActiveVoice(uint8_t voiceNr);

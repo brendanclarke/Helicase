@@ -51,6 +51,32 @@
 | 040 | 2026-07-18 | local working directory, branch `dev-ph3-fsfix` | Verified 16-Scene Bank/settings/compact targets, native exact AsyncFATFS cleanup, hardware-confirmed BnkL14 Bank Load repair, and 8-bit instrument parameters |
 | 041 | 2026-07-19 | local working directory, development branch | Generalized one-cache `.hcindex` flow, Bank boot/index repair, post-save index refresh, SRAM closeout, and Session 042 preparation |
 | 042 | 2026-07-25 | local working directory, development branch | HCNAMES authority, exact 81-byte musical identity, independent 9,000-byte cache/2,048-byte stage, selective Bank preservation, five asyncfatfs handles, Instrument `.hctmp` kit restore, and documentation recovery |
+| 043 | 2026-07-25 | local working directory, development branch | Bitmap-only Pattern storage, 1,024-float slider LUT, tagged instrument runtime slots, transient PCM FLASH relocation, SRAM/DTCM reservation policy, and fresh memory manifest |
+| 044 | 2026-07-28 | local working directory, branch `dev-ph3-autosave` with uncommitted load/save and boot-pacing changes | Cold-boot tagged-runtime/LFO repair, working runtime Bank Load and final index ordering, unified OK/OW command UI, and inconclusive intermittent-boot pacing experiment |
+| 045 | 2026-08-02 | production source restored to commit `326a8a1` on branch `dev-ph3-autosave-retry`; later rejected code retained only as `*.failed` reference | Autosave A/B format and bounded parameter drain, single canonical dirty mask, Phase 1 scalar mutation hooks, settings/provenance persistence, boot splash ordering, and quarantine of the failed Phase 2 branch |
+| 046 | 2026-08-10 | rollback boundary commit `c9807fa`; later Session 046 firmware experiments reset, documentation/SD fixtures remain in the working tree | Boot filesystem localization and failure transparency, duplicate-safe HCNAMES handling, accepted Phase 1 scalar coverage, working autosave lifecycle trace, and rollback-safe Session 047 reimplementation plan |
+| 047 | 2026-08-10 | current working tree after bounded-CRC/boot-capture implementation | Bounded AutoSave CRC, missing-pair selector repair, trace arbitration, ASENSURE forensic capture, and focused hardware validation |
+| 048 | 2026-08-11 | `/Users/bc/Helicase Project/Helicase-check-fs/Helicase`, intentional dirty worktree based on `63bdd6e` | HCNAMES source authority, source-free settings, immediate Instrument/InstrumentMrp AutoSave mutation marks, trace/exit repair, and hardware acceptance |
+| 049 | 2026-08-12 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Kit/Scene/Bank write-on-load markers; KitMrp and Scene accepted, Bank persistence/restore failure isolated |
+| 050 | 2026-08-16 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Root Scene Load terminal facade acknowledgement; hardware-confirmed trace and AutoSave publication; deferred Scene/Bank embedded HCNAMES exit flush |
+| 051 | 2026-08-17 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Scene Load embedded Kit/Instrument HCNAMES exit flush and Scene-to-Kit-family boundary; InstrumentMrp reversible `kit` row with Morph-only snapshot/restore; hardware-confirmed Scene rows plus repaired Mrp restore |
+| 052 | 2026-08-18 | intentional dirty worktree on `dev-ph3-autosave-ph2` | Bank Load persistence: settings active_bank and AutoSave scene-present mask; Candidate B no-op re-mark, B trace witness, host validator, and deferred boot-sanitizer/Bank-Save refactor targets |
+| 053 | 2026-08-19 | intentional dirty worktree on `dev-ph3-autosave-ph2` | AsyncFATFS recursive-delete reimplementation (exact-object delete/recreate, direct Bank Save, structured remove/rename); LFN validator repair; boot/overwrite/AutoSave defect diagnosis; HCNAMES source-provenance failure |
+| 054 | 2026-08-20/21 | commits `b9bdb92`, `0827b40` on `dev-ph3-autosave-ph3` | Recursive-delete root cause found and fixed (Bugs #1-#5: spurious timeout error, then a descend/ascend identity invariant broken across two intermediate fixes); HCNAMES source-on-save staged for all four element types; Scene-Pattern playback/UI desync fix; self-introduced-and-fixed IWDG boot-hang regression; extensive new trace diagnostics (`'X'`/`'O'`/`'E'`) |
+| 055 | 2026-08-21 | uncommitted `Core/Menu/menu.c` on `dev-ph3-autosave-ph3` (338 insertions/2 deletions vs `0827b40`) | Hardware-confirmed Session 054's recursive-delete/HCNAMES fixes via full round-trip testing; Load-menu freeze root-caused and closed (missing `filesystem_ack()` in the shared error overlay, plus two self-deadlocking retry helpers); Load: Instrument `kit`-row restore permanent-failure fix; stale Bank/Scene/Kit name-on-entry race fix |
+| 056 | 2026-08-24 | commits `509115b`, `7108a00` plus uncommitted `filesystem.c` on `dev-ph3-autosave-ph4` | AsyncFATFS LFN duplicate-creation fix (latch-and-continue scan replaces early free-run exit); `afatfs_fseekAtomic()` cluster-boundary file-size fix (missing `afatfs_fileUpdateFilesize()` call left `logicalSize` at 0); autosave writer page-exit expedite (`fs_autosave_page_suppressed` flag resets deadline to 250 ms on Load/Save exit); hardware-verified duplicate and file-size fixes, page-exit expedite pending verification |
+| 057 | 2026-08-28 | commits `ad9b026`..`f99329c` on `dev-ph3-autosave-ph4` | AutoSave writer wrap (Bank Save present-mask union, Bank-identity-mismatch copy-forward instead of regeneration); settings.cfg safe write (temp+sync+promote, hardware-verified); empty-Scene/Bank overwrite guard; boot Kit-directory sanitizer replaced with lazy quarantine-on-failed-load (Kit→Scene cascade, Bank never-fails-whole-operation contract); Bank Save rebuilt as per-Scene delete-then-write (fixes `ErrS05`, stops deleting non-selected children); Bank Save/Load screen-freeze root-caused to a foreground-poll counter misread as milliseconds and removed, hardware-accepted full 16-Scene Bank Save |
+| 058 | 2026-08-29/30 | commits `9da35c7`, `124a6cf` on `dev-ph3-autosave-ph4` | Bank Load/Save speedup: Option 1 (one-pass Bank child-name capture, parent-CWD retention, dedicated HCNAMES mirror, buffered text reader) implemented + hardware-confirmed faster Bank Load; Option 2 (session-scoped card-verified clean-Scene skip) implemented, hardware pending; Option 3 (retained-cluster rewrite) implemented then reverted as ~15 s slower; Option 3B rejected; stopped-playback Load/Save fast drain + codec suspend + renderer guard; SD response-timeout root-cause fix (poll-count → elapsed TIM6 ms, hardware-accepted full stopped Bank Save); Bank progress `NN.` repaint fix; AsyncFATFS directory-create inefficiency deferred to Session 059 |
+| 059 | 2026-08-30/31 | commits `53a7676`, `3dc9a4b`, `d28f8f9`, `4067099`, `0c90434` plus Phase Two/doc closeout on `dev-ph3-autosave-ph5` | AsyncFATFS terminator-aware create/rename and first-sector-only directory initialization; stopped Bank Save reduced to about 10 s; typed Instrument `.hcindex` validation, recovery, and direct-open fast path; zero retained-SRAM growth; Phase Two hardware testing deliberately deferred with no problem expected from source/build review |
+| 060 | 2026-09-01/04 | commits `3ff43e4`..`eca4271` on `dev-ph3-autosave-pre-overscope-apply`, plus uncommitted `Core/Hardware/SD/filesystem.c` and `Core/Hardware/SD/asyncfatfs/asyncfatfs.c` (Instrument `.hcindex` boot fix and system-wide AppleDouble filter, applied after the last commit) | Autosave writer continuation-cycle speedup (winner cache, ~3.1s->2.2s drain); `.hcnames` atomic safe-write + refreshed-flag/HCNAMES-convergence reader prep (Phase B/B2); zero-growth 2-byte HCNAMES source fields in every autosave sub-object (Phase C); Phase D audited as already-implemented (no code change); boot Instrument `.hcindex` generation fixed (macOS AppleDouble `._` files filtered system-wide in asyncfatfs) |
+| 061 | 2026-09-05/08 | commit `6642f4c` on `dev-ph3-autosave-ph6`, plus documentation closeout and `SD_CARD_READER_9` capture | Typed 130-line HCNAMES; matching-winner and all-refreshed HCNAMES-authoritative AutoSave boot readers; complete hierarchy publication; Pattern fallback; zero-growth 96-type lifetime fix; Reader 9 hardware acceptance; deferred Load/Save test matrix |
+| 062 | 2026-09-09/10 | commit `7b3254b` on `dev-ph3-autosave-ph6` | Phase 4 dynamic Pattern storage: 16-Scene address array + 256-chunk pool + free bitmap (167,936 B), first-fit allocator, per-step note/velocity/probability specials, block read/write, hardware RNG probability gating in Sequencer, step-edit menu bridge, PatternSet removal from scene_t; hardware-verified |
+| 063 | 2026-09-12 | commit `6bc4fb9` on `dev-ph4-pattern` | v4 binary PAT4 Pattern file format, Pattern Save/Load bug fixes, `pat_scene_region_t` packed struct, HCNAMES 145-row expansion, `filesystem_requestLoadPatternForScenes` scene-mask API, S064 Pattern AutoSave plan |
+| 064 | 2026-09-12/14 | commits `e268107`..`d5af5fd` on `dev-ph4-pattern` | Per-Scene PAT4 A/B Pattern AutoSave, independent 16-bit dirty tracking and 10,519-byte snapshot, HCPR v2 plus 145-row HCNAMES, boot restore, Bank-Load Pattern-name publication fix, and hardware-accepted 16-Scene functional closeout |
+| 065 | 2026-09-15 | uncommitted on `dev-ph4-pattern` (base `87e275e`) | Step automation editing (Method 1) and sequencer playback: pool block automation read/write/remove APIs, step-edit cursor/navigation/detail views, sequencer pending buffer with foreground drain, per-slot dirty bitmap and trigger-time restore from morph interpolation, dtype-aware value display and bounds clamping; hardware-tested |
+| 066 | 2026-09-15/16 | uncommitted on `dev-ph4-pattern` (base `87e275e`) | VOICE-page held-step automation overlay (Method 2): overlay activation via configurable short long-press, four-slot bounded CGRAM underline cache, held-value resolution with endpoint fallback, async track-wide search agent, pot/encoder-to-automation write, debounced value-underline reapplication, step illumination of automated steps, Morph integration, 62-glyph alphanumeric font table for underlined characters; six post-hardware-test fixes (delta handling working-value cache, editMode bit index, non-numeric dtype display, 'S' glyph, PM63 nibble split, diff-based CGRAM transactions with retry bit); hardware-tested |
+| 067 | 2026-09-18 | uncommitted on `dev-ph4-pattern` (base `87e275e`) | Pattern Stack Service (Part A): unified pool mutation dispatcher with 64-entry SPSC ring, PRIMASK-protected queue, direct-when-idle/queued-when-busy admission, bounded bulk barriers for track/pattern clear, mutation-target handover, Tier 1 trailing-gap maintenance, Tier 2 paced compaction, elastic gap policy, 15+ caller migration; publication ordering fix (write-new/swap/free-old, detach-address-first for erase/clear, removed same-size in-place rewrite); Pool Usage Monitor (Part B): `pat_poolUsagePercent()` settings widget with memcpy+popcount; Dtype offset bug: removed /2 *2 MIDI CC-style automation value conversion (identity mapping for all automatable dtypes), four code sites fixed; hardware-validated (PatternTrace zero errors, AutoSaveTrace zero errors, PAT4 structural integrity confirmed) |
+
 
 ---
 
@@ -200,6 +226,10 @@ Session 035 completed the next Phase 3 filesystem/runtime pass, but Session 036 
 Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed incomplete long-name support. asyncfatfs now preserves short-name case bits, creates VFAT LFN file and directory entries, exposes case-sensitive LFN open/create helpers with returned 8.3 aliases, and provides an LFN-aware object iterator used by generic diagnostics and restored production Kit/Instrument scans. Temporary `Load:[File]`, `Load:[Dir]`, `Save:[File]`, and `Save:[Dir]` diagnostics proved exact-case root scans, reads, writes, directory creation, dot-prefixed object visibility, and flush persistence. Kit Save was repaired to create visible `Kit/NNN Name/` folders and mixed-case member files, write `kitset.kcg` after aliases are known, update scan caches, and avoid duplicate visible folders on occupied-slot saves. Numbered library slots are now direct `000..999`; `000` is real for all filetypes, while instrument file voice coordinates remain one-based `1..6`. The Load/Save type cycler now deliberately exposes only File, Dir, and Kit; root Instrument Save was added from the Save page VOICE gesture using the same descriptor-keyed text writer as Kit member files. Morph Save and Scene Load/Save must be redone deliberately on this filesystem foundation before Bank work begins.
 - **Find here**: `036_SESSION_HANDOFF_LOG.md`, `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`, `SCOPING_TARGETS.md`, `MEMORY.md`, `Core/Hardware/SD/asyncfatfs/`, `Core/Hardware/SD/filesystem.c/h`, `Core/Hardware/SD/storageTypes.c/h`, `Core/Hardware/SD/kitBrowser.h`, `Core/Menu/menu.c/h`, `Core/Scene/Preset/presetManager.c/h`, `Core/Hardware/frontPanel/buttonHandler.c`
 
+### 065 — Step Automation Editing + Sequencer Playback (2026-09-15)
+Session 065 delivered the first working end-to-end step automation path: the existing pool block `bits 5..0` automation count field is now live, `PatternData.c` has `pat_readStepAutomations()`, `pat_writeStepAutomation()`, `pat_removeStepAutomation()`, `pat_removeTrackAutomationByTarget()`, and `pat_stepAutomationCount()` — all of which enforce the uniqueness invariant at write time and preserve automation entries across specials edits. Four AVR-era stubs were removed. `instrumentManager_targetValid()` now accepts Scene-range IDs (`384+`) for `INSTRUMENT_TARGET_AUTOMATION`. The TIM3 ISR step-advance path copies decoded automation entries into a 32-entry debounced pending buffer (192 B, `sequencer.c`), and the foreground drain applies them via `instrumentManager_writeRuntime()` inside `audio_check_and_render()` (moved there after a 50% success-rate ordering race was identified and fixed). A `uint64_t` per-slot dirty bitmap (48 B, 6 slots) tracks which descriptor indices have been overridden; `seq_restoreAutomatedParameters()` restores the morph-interpolated image value before each voice trigger, covering all trigger sources through the `voiceControl_triggerNow` funnel. The step-edit menu has a full cursor (5 items: number, del/clr, voice, parameter, amount), number-lock mode, single-field detail views with `category+long_name` labels, dtype-aware 3-character value display (waveform/filter/on-off/polarity/note names), and per-dtype upper-bound clamping in the value editor. A `numtostrpu` 3-character overflow bug was found and fixed during the audit. PAT4 persistence is automatic (pool bytes are opaque to the file layer). Hardware-tested: automation fires reliably, restore-on-trigger works, menu navigation and value display are correct.
+- **Find here**: `065_SESSION_HANDOFF_LOG.md`, `S065_DYN_PAT_STEP_AUTOMATION.md`, `S065_DYN_PAT_STEP_AUTOM_EDITING.md`, `S065_DYN_PAT_AUTOM_EDITING_ADDITIONS.md`, `PATTERN_DYNAMIC_STACK.md`, `Core/Menu/menu.c`, `Core/Sequencer/sequencer.c/h`, `Core/MIDI/MidiVoiceControl.c`, `main.c`
+
 ---
 
 ## Key Cross-Session Facts (quick lookup)
@@ -240,6 +270,8 @@ Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed i
 | BAR1/BAR2 processPress() calls voiceControl_noteOn/Off() — latent DSP race | 010 |
 | encode_read4 moving to TIM6: cpsid/cpsie must become shadow copy — TIM1 preempts TIM6 | 010 |
 | asyncfatfs adopted — replaces ChaN FatFS entirely | 011 |
+| LFN create scan must complete entire directory before creating — do not reintroduce early free-run exit | 056 |
+| afatfs_fseekAtomic() must call afatfs_fileUpdateFilesize() — removal causes cluster-boundary file-size truncation | 056 |
 | SD cards: FAT16/FAT32 supported; MBR-FAT32 recommended; FAT12/exFAT unsupported and boot warning is `Unsupported card` / `use MBR-FAT32` | 025 |
 | NB_FatFS rejected — C++, heap, no FAT16, no _FS_TINY | 011 |
 | FatFS fork for async rejected — 20+ functions, 28 yield points, high risk | 011 |
@@ -404,6 +436,48 @@ Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed i
 | afatfs_fread() returning n==0 does NOT mean EOF — it means the SD buffer is not ready yet; always use n==0 && afatfs_feof(op_file) for EOF detection | 026 |
 | filesystem_loadName_tick() and filesystem_loadKit_tick() phase 2: malformed/zero-byte files now set name to "-       " and close cleanly; kit loads abort with FS_STATUS_ERROR before touching parameter_values[] | 026 |
 | PAR_EXT_SYNC (midi auto-sync) occupies the parameter slot where PAR_FETCH lived in LXR037 — potential cross-system file interchange mismatch at that offset; TODO before any LXR037 file interchange | 026 |
+| SceneData must initialize before tagged DSP runtime construction; Scene activation image-applies all six final types before the all-source two-LFO-pair/velocity rebind, and boot starts the exact ordinary Scene worker after audio startup | 044 |
+| Load:Bank index residency is not selection readiness: Menu must preview the highlighted Bank's `00..15` children and gate input until the destination mask is published | 044 |
+| Pure root Scene/Bank Load ends with a read-only `.hcindex` reload after DSP apply; only a Save that mutated Kit/Scene/Bank owns physical parent rescan and full index rebuild | 044 |
+| The committed Autosave implementation/drafts were explicitly rejected and are not an accepted Phase 3 baseline; the intermittent boot hang is also unlocalized despite four pre-audio timing holds | 044 |
+| Session 045 accepted Autosave baseline is commit `326a8a1`: 34,768-byte `.hcprms1/.hcprms2` records, one 3,856-byte canonical SRAM mask, a 4,608-byte transaction patch cache, 1,536 gets per write, 256 mask positions per foreground tick, five-second debounce, and 250 ms backlog continuation | 045 |
+| Session 045 Phase 1 covers change-aware scalar Bank/Scene/Kit/Instrument endpoint owners; whole-object Load/Save publication is still Phase 2 and is not accepted merely because region-marker stubs exist | 045 |
+| `settings.cfg` remains version 1 and now includes `autosave` plus sixteen `scene_source_NN` values; SRAM provenance is exactly 32 bytes, but the full source/update/error/off-on hardware matrix remains open | 045 |
+| `DEV_MODE_DIAGNOSTIC` is screen-only and disabled; `DEV_MODE_LOGGING` is file-only and enabled. Never make either diagnostic perform the other mode's work or add timing/file perturbation to the operation being observed | 045 |
+| Files ending in `.failed`, `_failed.c/.h`, or `_failed.md` preserve the rejected post-`326a8a1` Phase 2 attempts for diagnosis only; they are not production source, an implementation plan, or evidence of accepted behavior | 045 |
+| Session 046 closes at commit `c9807fa`: the retained firmware includes ten-second boot filesystem deadlines/detail codes, failure-transparent Kit/Bank boot handling, duplicate-safe HCNAMES absence proof, and the corrected `D/S/A/V/M/C/P/T` autosave lifecycle trace | 046 |
+| Phase 1 scalar coverage is accepted complete for user-testable owners: Scene, Kit/Instrument, and Scene-owned MIDI channel/note. There are no user-editable Bank scalar values in the current UI; do not reopen a vague coverage-matrix task | 046 |
+| Current logging files at `c9807fa` are `/bootlog.bin` and `/asavetrc.bin`; duplicate physical entries remain possible. The failed unified `/devlog.bin` experiment is not current code and must not be restored mechanically | 046 |
+| All autosave CRC work must be bounded across foreground ticks before further runtime save/load pacing work. The reverted blind 1 ms pacing experiment caused severe boot/load/save regressions and delayed, rather than removed, audio glitches | 046 |
+| `/.hcnames` is the sole 129-row resident identity/provenance register: paired `name<TAB>source` records use `-`, `?`, `000..999`, or `@`; its filesystem-owned 258-B source cache replaces the retired 32-B SceneData source array. `settings.cfg` is now a 17-line source-free schema and accepts old `scene_source_NN` keys only to ignore them during migration | 048 |
+| Successful root Instrument Load immediately marks type plus owned Normal/Morphable Morph payload; compatible InstrumentMrp marks only Morphable Morph payload. Hardware accepted `J=0x03`, `I=0x07`, 76/76 root bytes, and generation-3 A/B proof of a Drum-2 Morph-only change. HCPRMS names are not identity authority; HCNAMES is | 048 |
+| Session 049 scope is only normal Kit Load, root Scene Load without Pattern, and selective Bank Load mutation marks, one owner boundary and hardware fixture at a time. Do not combine it with writer exclusion, boot reader, Save-side marking, KitMrp, recursive delete, or active-Scene Bank behavior | 048 |
+| A foreground-poll count is not a time budget — `filesystem_tick()` runs ~7,600×/second on this build; a 300,000-poll Bank Save/Load watchdog fired at a fixed ~39.5 s regardless of Bank size or card speed, aborting mid-write. Removed outright, not replaced with a corrected counter | 057 |
+| `filesystem_finish(FS_STATUS_ERROR)` is not cancellation — it releases the shared facade without draining in-flight AsyncFATFS callbacks/handles. Aborting a stall detector while a callback may still be live let a later callback overwrite the next operation's shared `op_file` (observed: trace bytes written into an orphaned Bank instrument file). Only abort a phase proven to own no pending callback | 057 |
+| `AFATFS_MAX_OPEN_FILES` must stay 5 — bumping to 8 to test a handle-exhaustion hypothesis was disproven by trace evidence (handle count 0 between Bank Save children, 1 immediately after each child-directory create) and reverted. `sizeof(afatfsFile_t)` is 188 bytes on this target, not the historical 328 | 057 |
+| Bank Save is per-Scene delete-then-write, not total-tree-delete-then-recreate — a partial `Save:[Bank]` (subset mask) no longer deletes non-selected resident children | 057 |
+| v4 PAT4 binary Pattern format: 10,656 B (160B header + 1,792B addr + 512B bitmap + 8,192B pool), CRC32C at offset 14, generation counter at offset 10, magic "PAT4" | 063 |
+| `pat_scene_region_t` is the per-Scene SRAM struct: 10,519 B × 16 Scenes in SRAM1; Option B accessors `pat_sceneRegion()` / `pat_sceneRegionMut()` | 063 |
+| HCNAMES is 145 rows: row 0 Bank, 1..16 Scene, 17..32 Kit, 33..128 Instrument (6 per Scene), 129..144 Pattern (1 per Scene, no type field). `AUTOSAVE_HCNAMES_ROW_COUNT` is 145 as of S064 | 063, 064 |
+| `filesystem_requestLoadPatternForScenes(slot, scene_mask, cb)` is the root Pattern Load API with mask validation and fan-out `memcpy` of `pat_scene_region_t` | 063 |
+| Pattern Save must set `op_scene_load_scene_mask` to the single `op_pattern_scene` bit for HCNAMES multi-row publication compatibility | 063 |
+| HCPR is format v2 (34,768 B unchanged geometry); v1 records are rejected by the Pattern-aware reader. Pattern identity/payload never enter HCPR — they live in HCNAMES rows 129..144 and the 32 hidden PAT4 files | 064 |
+| Pattern AutoSave uses 16 independent hidden root A/B pairs (`/.pat00a/b` through `/.pat15a/b`), a separate 16-bit dirty mask, one 10,519-byte immutable snapshot, and per-Scene nonzero generation baselines. Pattern is the lowest-priority background claimant after settings, trace, and scalar HCPR | 064 |
+| Pattern AutoSave `@` source is `FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE == 0x1ffc`, distinct from Instrument-direct `@ == 0x1ffd`; only HCNAMES rows 129..144 may carry it | 064 |
+| Pattern snapshot admission is deferred while `seq_recordActive` or `seq_eraseActive` — the `memcpy` does not mask TIM3 or any interrupt | 064 |
+| Pattern AutoSave clear-before-snapshot: the dirty bit is cleared before `memcpy`, a later mutation re-sets it, any writer error re-arms it, and successful completion publishes `R` only if no post-snapshot edit occurred | 064 |
+| Boot Pattern reader applies the highest-generation valid hidden PAT4 winner only when the HCNAMES Pattern row is `@` and generation is nonzero; missing/corrupt candidates never empty scalar Scene state | 064 |
+| Explicit root Pattern Load and Scene/Bank directory Pattern loads reset the destination generation baseline to zero, starting a fresh AutoSave lineage | 064 |
+| `filesystem_cacheCurrentBankSceneNameBlock()` must cache the Pattern HCNAMES row (row 129+scene_index) alongside Scene/Kit/Instrument rows — the S064 fix for the `Empty|@` Bank Load defect | 064 |
+| `tools/decode_devlogs.py` operation-name table must match the `fs_internal_op_t` enum in `filesystem.c` (50 entries as of S064); Session 064 synchronized it after the S061/S063/S064 insertions broke labels after operation 8 | 064 |
+| Step automation entries are 2 bytes LE in the pool block (bits 15..9 = 7-bit value, bits 8..0 = 9-bit `instrument_param_id_t`), stored after specials, count in header bits 5..0; uniqueness invariant enforced at write time | 065 |
+| `seq_drainPendingAutomation()` must run inside `audio_check_and_render()` immediately after `voiceControl_processPending()` — placing it elsewhere creates an ordering race where trigger restore undoes automation | 065 |
+| `seq_restoreAutomatedParameters()` reads `morph_interpolation[]` (the morph-crossfader result), NOT `instrument_parameters[]` (raw Scene A); it runs before `instrumentManager_triggerTrack` in `voiceControl_triggerNow` | 065 |
+| `seq_automation_dirty[6]` (48 B) is the per-slot dirty bitmap; cleared on `seq_init`, transport stop, and `seq_setStepIndexToStart`; `__builtin_ctzll` bit-scan on Cortex-M7 | 065 |
+| Automation pending buffer is 32 entries × 6 B = 192 B in `sequencer.c`; ISR writes, foreground drains, `(step_id, target)` debounce coalesces same-step rewrites | 065 |
+| `menu_automationValueMax(descriptor)` returns dtype-aware upper clamp: DTYPE_MENU returns table count−1 (except MENU_WAVEFORM→127), DTYPE_ON_OFF/MIX_FM→1, DTYPE_LFO_POLARITY→2; `menu_formatAutomationValue3(descriptor, value, buf)` formats 3 display chars by dtype | 065 |
+| `numtostrpu(buf, num, pad)` writes exactly 3 characters to `buf[0..2]` — do not point it at a 2-character field or it overflows into the adjacent column | 065 |
+| `getMenuItemNameForValue()` lacks OOB checking for non-waveform menu tables; `menu_formatAutomationValue3()` bounds-checks before calling it | 065 |
 
 ---
 
@@ -444,3 +518,899 @@ Completed the generalized directory-index flow for Instrument, Kit, root Scene, 
 ### 042 — HCNAMES, Cache Disposal, Staging Separation, And Instrument Load Closure (2026-07-25)
 Made root `/.hcnames` the authoritative fixed 129-row resident-name register; reduced active musical identity to one Bank, one Scene, one Kit, and six Instrument names (81 bytes); retained exactly one 9,000-byte shared `.hcindex`/HCNAMES cache; and separated it from the aligned 2,048-byte non-Pattern Kit/Scene/Instrument staging workspace. Removed resident name/stem fields, Bank child name/key arrays, File/Dir list caches, recursive delete stacks, and KitBrowser storage. Corrected the Bank boot freeze by closing redundant asyncfatfs directory handles, then accepted five 328-byte handles (+656 B) as concurrency headroom. Implemented the hidden typed `.hctmp` source above Instrument pool row `000`, extension-free display, index-first scrolling, deferred family-exit HCNAMES writes, and rapid-backspin cancellation; Instrument Load is now confirmed working. Reconciled the recovered Session 042 plans/logs into the archived handoff and permanent specifications.
 - **Find here**: `/.hcnames` row contract and update state machine, `.hcindex` cache ownership, 81-byte identity, 2,048-byte stage/512-cell capacity, Pattern direct-final-SRAM policy, mask-selective Bank Load, five-handle lifetime rules, `.hctmp` Instrument `kit` row, canonical name repair, rejected shared-union/two-image designs, residual 107-byte diagnostic UI, and [042_SESSION_HANDOFF_LOG.md](042_SESSION_HANDOFF_LOG.md)
+
+### 043 — Pattern/Runtime/Transient Storage Closeout (2026-07-25)
+Replaced retained per-step Pattern state with one 112-byte `step_on[7][16]`
+bitmap per Scene and made Scene/Bank `pattern.pat` v3 seven literal hex rows;
+v1 remains empty and v2 imports only bits. Reduced the float slider LUT to
+1,024 entries with raw `>> 2` lookup and no LUT interpolation. Replaced all
+fixed per-engine voice/pool allocation with six 1,176-byte tagged runtime slots
+(7,056 B total), then moved the unchanged 26,460-B transient PCM table from
+DTCM to application FLASH. The final ELF uses 12,280 B DTCM and 66,780 B
+SRAM1; DTCM remainder is delay-line-only and SRAM1 remainder is Pattern-only,
+with user acknowledgement mandatory before any RAM increase. Full transient
+hardware stress remains pending.
+- **Find here**: bitmap Pattern API/v3 persistence/Full Bank conversion,
+  1,024-float slider LUT, tagged union lifecycle and retired globals,
+  transient FLASH address and DTCM release, RAM reservation policy, current
+  manifest, and [043_SESSION_HANDOFF_LOG.md](043_SESSION_HANDOFF_LOG.md)
+
+### 044 — Boot Scene Activation And Runtime Bank Load Closure (2026-07-28)
+Made cold boot construct tagged Instrument runtime members from initialized
+Scene types, separated six-slot image application from all-source modulation
+rebinding, and replayed the exact live Scene-switch worker after audio startup;
+hardware confirmed the initial Scene, arbitrary Instrument ownership, and both
+reported LFO destinations now apply correctly. Fixed top-level Load:Bank's
+zero-mask admission defect by chaining Bank-index entry into its child preview,
+then harmonized root Scene/Bank Load completion as payload/HCNAMES, DSP apply,
+and a final read-only `.hcindex` reload while Saves alone retain physical
+scan/index rebuilds. Accepted OK/OW operations now display `...`, suppress all
+cursors, lock input through their true terminal work, and always return to the
+bracketed type row. Four pre-audio SD timing holds were added after one
+intermittent boot report; they did not establish a reproducible fix, and the
+issue is left for non-perturbing localization if it recurs. The pre-existing
+autosave implementation was explicitly rejected and is not a Session 044
+outcome.
+- **Find here**: SceneData-before-DSP ordering, tagged runtime type invariant,
+  reset/image/all-source rebind lifecycle, boot LFO target activation,
+  Load:Bank index-to-preview mask handoff, `menu_storageBusy` preview gate,
+  read-only root-index reload versus Save-only rebuild, HCNAMES neutrality,
+  completed Bank result lifetime, unified `...`/cursor command state, SD
+  pre-init/ACMD41/post-mount/pre-Bank pacing, unresolved intermittent boot,
+  zero retained-SRAM growth, rejected autosave scope, and
+  [044_SESSION_HANDOFF_LOG.md](044_SESSION_HANDOFF_LOG.md)
+
+### 045 — Autosave Baseline, Settings Persistence, And Failed Phase 2 Quarantine (2026-08-02)
+Established and hardware-exercised the retained autosave foundation through
+commit `326a8a1`: two CRC/commit-last hidden records, bounded asynchronous
+parameter draining, one canonical mutation mask, and Phase 1 scalar mutation
+hooks. Added version-1 settings persistence for AutoSave policy and sixteen
+Scene-source values, a one-second background settings debounce, and the boot
+splash ordering correction. Later Phase 2/whole-load work changed too many
+ownership and scheduling boundaries, ultimately leaving both records unchanged
+and even preventing pre-existing bits from draining; all of that later work was
+rolled back and preserved only in `failed` reference files. Next work should
+first verify `AUTOSAVE_SETTINGS.md` end to end, establish non-perturbing
+autosave observability, rerun the retained Phase 1 matrix, and only then
+re-audit Phase 2 one independently testable boundary at a time.
+- **Find here**: exact 34,768-byte record geometry, CRC/generation/commit order,
+  one-mask ownership, 1,536-get bounded drain, Phase 1 scalar hooks, Effect and
+  copy/paste stubs, `settings.cfg` schema/provenance, AutoSave ON/OFF policy,
+  boot logger mode separation, splash hold correction, hardware evidence,
+  unverified areas, failed Phase 2 chronology, prohibited approaches, and
+  [045_SESSION_HANDOFF_LOG.md](045_SESSION_HANDOFF_LOG.md)
+
+### 046 — Boot/HCNAMES Hardening, Autosave Trace, And Rollback Reconciliation (2026-08-10)
+
+Closed the session at rollback commit `c9807fa`. The retained source adds a
+ten-second cooperative boot-filesystem watchdog with operation/substep logging,
+explicitly propagates Kit quarantine and Bank-load failures instead of
+misclassifying or acknowledging them, and guards every create-capable HCNAMES
+path with a case-insensitive root absence proof so a failed read cannot silently
+authorize a duplicate singleton. Phase 1 scalar AutoSave coverage was accepted
+complete for all user-testable parameter owners, and the corrected
+`D/S/A/V/M/C/P/T` lifecycle trace was hardware-exercised after fixing its first
+append callback so it no longer strands the shared filesystem facade. Later
+attempts to add generic 1 ms storage pacing, unify logs into `devlog.bin`, and
+combine duplicate-log work with AutoSave changes caused major regressions,
+including minute-scale Bank operations, persistent audio glitches, a boot
+timeout, and a partial 32,768-byte `.hcprms2`; those firmware changes were reset.
+Session 047 should start from the current source, chunk every AutoSave CRC path
+without sleeps, preserve the active Scene during runtime Bank Load, restore and
+verify settings persistence, then address SD/audio pressure one isolated
+boundary at a time.
+
+- **Find here**: [046_SESSION_HANDOFF_LOG.md](046_SESSION_HANDOFF_LOG.md),
+  Session 045 deletion-safe consolidation, KITQUAR/BANKLOAD detail codes and
+  non-masking failure rules, HCNAMES absence proof, accepted scalar-test scope,
+  AutoSave trace layout and scheduler callback correction, hardware evidence,
+  reverted pacing/unified-log failures, current `c9807fa` authority, and
+  Session 047 reimplementation order
+
+### 047 — Bounded AutoSave CRC, Trace Arbitration, And HCPRMS Capture (2026-08-10)
+
+Bounded every AutoSave CRC path to a retained 128-byte-per-tick work budget,
+then fixed the missing-A creation selector corruption exposed by the first
+boot fixture. Kept the accepted one-second `settings.cfg` writer unchanged
+after user retest, and prevented optional `asavetrc.bin` flushing from
+competing with an active Load/Save page; repeated playing-time Full/LoadTst
+loads and overwrites had no heard glitch. One initial-record B write stopped
+at exactly 32 KiB and hit the real `ASENSURE` boot deadline; added a
+logging-only 64-byte, E0..E7 AsyncFATFS/SD state capsule appended to the normal
+boot token solely on recurrence. Later boots created both exact 34,768-byte
+records and produced no bootlog, so the lower-layer cause is captured but not
+claimed solved. Deferred correct native recursive delete for stale overwrite
+folders, runtime Bank Load active-Scene preservation, and a future stable-log
+converter.
+- **Find here**: [047_SESSION_HANDOFF_LOG.md](047_SESSION_HANDOFF_LOG.md),
+  bounded CRC/cursor contract, selector fix, trace facade guard, settings
+  no-change result, 32 KiB evidence and capsule decoder, build modes/RAM,
+  PA2ST1/PA2ST2-3 disposition, and Session 048 boundaries
+
+### 048 — HCNAMES Source Authority And Instrument-Load AutoSave Acceptance (2026-08-11)
+
+Moved resident source authority entirely into paired `/.hcnames` records and
+removed Scene provenance from `settings.cfg`, then completed and hardware
+accepted the first Phase-2 mutation boundaries: root Instrument Load marks
+type/Normal/Morphable Morph at retained commit, while InstrumentMrp marks only
+the compatible Morph endpoints. Corrected the normal Load/Save exit release so
+the existing trace and writer schedulers can run, added compact `I`/`J`/`N`
+diagnostics, and verified generation-2/3 A/B records from copied hardware SD
+fixtures. Session 049 continues only with Kit, Scene-without-Pattern, and
+selective Bank Load marking. The blank InstrumentMrp `kit` row is documented
+as a deferred Morph-only temporary-snapshot UI bug.
+- **Find here**: [048_SESSION_HANDOFF_LOG.md](048_SESSION_HANDOFF_LOG.md),
+  HCNAMES paired source grammar/ownership, source-free settings migration,
+  immediate Instrument/InstrumentMrp dirty rules, direct-callback facade
+  acknowledgement, queued normal Load/Save exit, trace evidence and ring-wrap
+  interpretation, current SRAM/build figures, deferred UI bug, and Session
+  049 fixture order
+
+### 049 — Kit/Scene AutoSave Completion And Bank-Load Failure Evidence (2026-08-12)
+
+Completed the normal Kit, KitMrp, root Scene-without-Pattern, and selective
+Bank write-on-load boundaries. Hardware testing persisted two morph-kit changes
+and two root Scene loads in valid generation-5 `.hcprms` data. A subsequent
+Bank load updated `.hcnames` to `Full 005` but left the autosave payload and
+restore slot unchanged: the final `asavetrc.bin` whole-instrument markers had
+valid bases but tracking disabled and zero published bytes. `settings.cfg`
+also remained `active_bank=12`, so Bank identity and both restore authorities
+diverged. Bank-load repair and reboot verification are deferred to Session 050.
+
+- **Find here**: [049_SESSION_HANDOFF_LOG.md](049_SESSION_HANDOFF_LOG.md),
+  [AUTOSAVE_WRITE_LOAD_OPERATIONS_COMPLETE.md](../../AUTOSAVE_WRITE_LOAD_OPERATIONS_COMPLETE.md),
+  Kit/Scene implementation boundaries, hardware payload comparisons, trace
+  flag decoding, stale Bank restore-slot evidence, and the Session 050 repair
+  target
+
+### 050 — Scene-Load Trace And AutoSave Publication (2026-08-16)
+
+Diagnosed the actual root Scene/Bank Load publication blocker: the direct
+callback after its final read-only `.hcindex` reload observed `FS_STATUS_DONE`
+but did not call `filesystem_ack()`. The facade therefore remained terminal,
+so both idle-only autonomous publishers were permanently denied even though
+payload, HCNAMES Scene-row, and the correct Scene dirty marker had already
+completed. The minimal in-path fix snapshots the terminal result and
+acknowledges it before Menu teardown. Hardware loading root Scene 024
+`SeaWaked` into resident Scene 15 then exiting Load produced `R`, nested Kit
+and Scene `L`, command/page witnesses `F/W`, and the complete `A/V/M/C/P/T`
+transaction; `.hcprms2` advanced from generation 5 to 6. The temporary
+2,048-record logging ring, R/W/F/G diagnostic stages, and 1,000-pass
+non-quiet Scene-apply bound remain active. A Scene completion now accumulates
+the HCNAMES Kit-family mask, but the existing Menu exit predicate does not
+flush it for Scene/Bank sessions: the Scene row was `SeaWaked/024` while the
+embedded Kit/Instrument rows remained old. Bank persistence/restore and that
+one existing family-exit boundary are deferred separately.
+
+- **Find here**: [050_SESSION_HANDOFF_LOG.md](050_SESSION_HANDOFF_LOG.md),
+  `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`,
+  `DEV_MODES.md`, and `SRAM_MANIFEST.md` for the durable contracts, the exact
+  card evidence, temporary diagnostic RAM/configuration, and next-session
+  boundaries.
+
+### 051 — Scene Follow-up: HCNAMES Exit And InstrumentMrp Kit Restore (2026-08-17)
+
+Completed the two scoped Scene-follow-up items. Root Scene Load now
+accumulates its committed destination mask in Menu, and the physical Load/Save
+exit flushes the embedded Kit plus six Instrument HCNAMES rows through the
+existing one-shot writer; a Scene-to-Kit-family type boundary flushes first so
+a later Kit payload cannot overwrite the operation-scoped identity block.
+InstrumentMrp now displays the selected slot's HCNAMES name beside `kit`,
+writes a Morph-only `.hctmp` projection, and restores only the Morphable Morph
+endpoint cells. A post-build hardware pass caught the initial restore copying
+the staged normal image into the Morph endpoints; `presetManager.c` now
+selects a Morph-to-Morph staged commit when the morph-temporary origin flag is
+set. Hardware verified the Scene Load HCNAMES rows and AutoSave publication,
+and the repaired Mrp `kit` restore. Bank Load persistence is deferred to
+Session 052.
+
+- **Find here**: [051_SESSION_HANDOFF_LOG.md](051_SESSION_HANDOFF_LOG.md),
+  `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`, and
+  `SRAM_MANIFEST.md`.
+
+### 052 — Bank Load Persistence And Deferred Refactor Targets (2026-08-18)
+
+Made Bank Load durable in two ways: `settings.cfg` re-serializes `active_bank`
+from the committed Bank restore slot after a successful Bank Load/Save, and the
+AutoSave Bank `scene_present_mask` now equals the effective selected-child
+union. The zero-mask root cause was the change-aware BankData setter being a
+no-op against the boot-time mask; `bank_setScenePresentMask()` now reports
+whether it changed, and Bank Load explicitly re-marks the two present-mask bytes
+on a no-op. Added the logging-only `B` trace witness (commit and drain sites),
+its decoder in `decode_devlogs.py`, and the read-only
+`tools/verify_bank_autosave.py` validator. A rebuilt-image hardware pass
+verified `settings.cfg active_bank=8`, both `.hcprms` records
+`scene_present_mask=0xffff`, `B` trace commit/drain `0xffff`, and a validator
+PASS. A first-boot `KQ019KST` Kit-quarantine hang and two follow-up refactor
+targets (Bank Save present-mask union, boot settings-mark redundancy) are
+deferred in `SCOPING_TARGETS.md`.
+
+- **Find here**: [052_SESSION_HANDOFF_LOG.md](052_SESSION_HANDOFF_LOG.md),
+  `SESSION_052_POST_ANALYSIS.md`, `SESSION_052_PRE_PLAN.md`, `AUTOSAVE.md`,
+`FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`, `DEV_MODES.md`,
+`SRAM_MANIFEST.md`, and the `SCOPING_TARGETS.md` Session 052 section.
+
+### 053 — Recursive Delete Reimplementation And Boot/Overwrite/AutoSave Diagnosis (2026-08-19)
+
+Reimplemented the AsyncFATFS recursive delete and overwrite path per the pinned
+duplicate-slot target. `afatfs_deleteTree()` now copies a complete
+`afatfsObjectInfo_t` identity (all physical LFN/SFN pointers), validates the
+VFAT run, frees each cluster chain before retiring its name run, handles FAT16
+root, and is bounded by a structural budget with one structured result
+callback. The object iterator gained cross-sector LFN pointer capture and
+shape/ordinal/checksum validation; remove/rename use structured results.
+`filesystem.c` gained a singular delete-slot resolver and direct Bank Save
+delete/recreate; `tmp*`/`old*` promotion and funlink/move/copy/replace stubs
+were removed. ARM build text 379,660, data 396, bss 94,612 (no net SRAM
+increase).
+
+A follow-up boot stall traced to the new LFN shape validator rejecting valid
+host long names padded with `0xffff` (no `0x0000` terminator); relaxing the
+validator restored boot fallback and HCNAMES creation. Hardware passes then
+surfaced: boot Bank Load still times out (`B012S09I`) even at 20 s; the boot
+AutoSave Bank section stays empty (tracking enabled only after the boot Bank
+Load, deferred for the AutoSave reader milestone); HCNAMES source provenance is
+not updated on Save (reports the loaded slot, not the saved); Scene overwrite
+errors `ScnS05` though slot 019 was replaced; Kit Save did not materialize a
+library Kit; Kit Save menu was empty; and two hangs (Bank Save entry, boot
+drain truncating `.hcprms2` at 32 KiB). All deferred in `SCOPING_TARGETS.md`.
+
+- **Find here**: [053_SESSION_HANDOFF_LOG.md](053_SESSION_HANDOFF_LOG.md),
+  `RECURSIVE_TREE_DELETE_REIMPLEMENT.md`, `KIT_PARSE_BOOTLOCK_RESOLVE.md`,
+  `LOAD_SAVE_AUTO_ELEMENT_TEST_REPORT.md`, `ASYNCFATFS_REFERENCE.md`,
+  `FILESYSTEM_SPEC.md`, and the `SCOPING_TARGETS.md` Session 053 sections.
+
+### 054 — Recursive-Delete Root-Cause Repair, HCNAMES Source-on-Save, Scene-Pattern Desync (2026-08-20/21)
+
+Fixed the two bugs left open by Session 053 (a delete-resolver completion gate
+that converted its own diagnostic-only stall latch into a hard failure by
+itself; HCNAMES source never staged on any of the four Save paths, with root
+Instrument Save found to never reach any HCNAMES publish path at all), then
+used the new diagnostics those fixes required to iteratively hunt the actual
+`ScnS05` defect through five successive bugs. The real cause (#3/#4/#5): the
+native delete traversal's descend/ascend path depends on
+`file->directoryEntryPos` always identifying the directory currently open,
+and two well-intentioned earlier fixes (removing an invalid resume-target
+reconstruction; removing a redundant parent re-scan) each broke one half of
+that invariant while fixing their own narrower symptom. Fixed by snapshotting
+the child's identity and directory-entry pointer at descent
+(`descendTarget`/`parentEntry`) and restoring both on ascend. Also fixed,
+found during retest: a Scene-Pattern playback/UI desync (Bank Load never
+realigned `seq_activePattern`/`menu_shownPattern` to its committed active
+Scene) via new `seq_alignActivePatternToScene()`; a self-introduced IWDG
+boot-hang regression, fixed and shipped disabled by default; and six
+structurally-damaged root Scene folders repaired on the test card. Extensive
+new, permanent trace diagnostics were added (`'X'` `PHASE_STALL`, `'O'`
+`SAVE_LIFECYCLE`, `'E'` `OPERATION_ERROR`, a shared stall-detector helper, a
+17-value native failure-site classification).
+
+- **Find here**: [054_SESSION_HANDOFF_LOG.md](054_SESSION_HANDOFF_LOG.md),
+  `ASYNCFATFS_REFERENCE.md`, `FILESYSTEM_SPEC.md`, `AUTOSAVE.md`,
+  `DEV_MODES.md`, and the `SCOPING_TARGETS.md` Session 053-055 sections.
+
+### 055 — Recursive-Delete Hardware Confirmation, Load-Menu Freeze, Instrument `kit`-Row Restore, Stale Bank Name (2026-08-21)
+
+Hardware-confirmed Session 054's recursive-delete/HCNAMES fixes via a full
+Kit/Instrument/Scene/Bank load-modify-save round trip, then investigated a
+Load-menu freeze that same testing round surfaced. A first diagnosis (an
+AutoSave-vs-Menu retry livelock) was real but not the freeze — self-recovers
+in under a second, later confirmed by re-reading the same trace capture — and
+its fix was kept but is not the closing one. The actual cause:
+`menu_showFilesystemErrorOverlay()`, the shared terminal path for nearly
+every failed Menu filesystem operation, never called `filesystem_ack()`, so
+one failed read permanently parked the facade at `FS_STATUS_ERROR` — silently
+killing both the AutoSave writer and the trace flush from that moment on,
+which is why both freeze captures ended cleanly with no evidence of the
+freeze itself. Two request helpers that self-deadlocked their own retry path
+on refusal were fixed alongside it. Confirmed closed by the user. Also fixed:
+a permanent (not merely delayed) failure to restore the Load: Instrument
+`kit` row when scrolling back to it while a previewed pool file's apply was
+still draining (fixed by tracking restore-owed-ness as slot state rather than
+a call outcome); and a stale Bank/Scene/Kit name briefly shown with the
+correct slot number on fresh Load/Save entry (an unconditional repaint racing
+an async `.hcindex` reload it had just posted).
+
+- **Find here**: [055_SESSION_HANDOFF_LOG.md](055_SESSION_HANDOFF_LOG.md),
+  `AUTOSAVE.md`, `DEV_MODES.md`, and the `SCOPING_TARGETS.md` Session
+  054-055 sections.
+
+### 056 — AsyncFATFS Duplicate Fix, Cluster-Boundary File-Size Fix, Page-Exit Expedite (2026-08-24)
+
+Fixed two independent AsyncFATFS bugs and added an autosave writer
+optimization. The LFN duplicate-creation bug in `afatfs_createFileContinue()`
+exited the directory scan early when a viable free-run of deleted entries was
+found, creating a second directory entry for an existing file; fixed by
+latching the first viable position and continuing the scan to directory
+exhaustion. The cluster-boundary file-size bug in `afatfs_fseekAtomic()` never
+called `afatfs_fileUpdateFilesize()`, leaving `logicalSize` at 0 for new files
+so only the cluster-rounded `physicalSize` persisted to the FAT directory —
+explaining the earlier 32,768-byte `.hcprms` captures. Both fixes
+hardware-verified across a two-boot test: no duplicate files, all four
+`.hcprms` files correct 34,768 bytes, clean autosave lifecycles. A page-exit
+expedite was added to `filesystem.c`: `fs_autosave_page_suppressed` resets the
+writer deadline to 250 ms after leaving the Load/Save page, eliminating wasted
+5-second debounce time. This does not reduce the inherent two-cycle recovery
+cost (~12 s) but removes the variable gap between cycles.
+
+- **Find here**: [056_SESSION_HANDOFF_LOG.md](056_SESSION_HANDOFF_LOG.md),
+  `ASYNCFATFS_REFERENCE.md`, `AUTOSAVE.md`, and `FILESYSTEM_SPEC.md`.
+
+### 057 — AutoSave Writer Wrap-Up, Boot Kit-Sanitizer Refactor, And Bank Save Stall Root-Cause Fix (2026-08-28)
+
+Closed out the AutoSave writer punch list from `S057_AUTOSAVE_WRITER_WRAP.md`,
+then chased a user-reported Bank Save screen freeze through three escalating
+diagnostic rounds to its actual root cause. Fixed Bank Save's present-mask
+overwrite (unions instead of replacing, matching Bank Load — P1) and accepted
+the redundant per-boot settings write as harmless now that the write itself is
+safe (P2). Confirmed the AutoSave writer's Bank-identity-mismatch path already
+landed correctly in an earlier commit this session: a valid winner whose Bank
+identity differs from the resident Bank now gets a transformed copy-forward
+(marks the whole Bank payload dirty, phase 50) instead of full regeneration
+(phase 30), which is reserved for genuinely invalid records. Added a
+`settings.cfg` safe write — temp file (`settings.tmp`) + `afatfs_sync()` +
+remove-old/rename-promote, with a boot-time recovery prelude and a
+self-checking `lines=N` terminator — closing the same power-loss class of bug
+AutoSave's `.hcprms1/2` already guard against; hardware-verified with a
+deliberate mid-promotion power-cut simulation. Added an empty-Scene/Bank
+overwrite guard (`bank_hasResidentBank()` + `bank_scenePresentMask()`/
+`bank_scenePresent()`) so an unloaded Scene can never overwrite occupied
+Library data, gated on the P1 fix landing first. Replaced the boot-time
+blocking Kit-quarantine scan (308 blocking file operations sharing one
+10-second deadline on the 44-Kit test card — a live false-boot-failure risk as
+the library grows) with lazy quarantine-on-failed-load: a Kit/Scene folder is
+renamed `err...` only when an actual Load attempt proves its content invalid,
+with a Kit-failure-cascades-to-owning-Scene rule for root Scene Load and a
+never-fails-the-whole-operation partial-failure contract for Bank Load (one
+bad child is excluded from the present mask and shown via the existing error
+overlay; the operation still completes `FS_STATUS_DONE`, since a Bank-wide
+`FS_STATUS_ERROR` here would fail the whole boot). Testing that refactor
+surfaced `ErrS05`: a quarantined Bank-local Kit folder's rewritten LFN entries
+broke `afatfs_deleteTree()`'s directory scan on the next Bank Save, so Bank
+Save's old total-tree-delete-then-recreate was replaced with per-Scene
+delete-then-write — which also fixes an independent, previously-undocumented
+bug: a partial `Save:[Bank]` (subset mask) no longer silently deletes every
+non-selected resident child. That work then uncovered a genuine screen freeze
+during Bank Save. Ten new per-state-machine stall detectors and a
+`DEV_STALL_DETECTION` compile toggle were added first as general hardening;
+the freeze's actual cause, found only after a wrong first hypothesis
+(AsyncFATFS handle exhaustion — built out into a full diagnostic build with
+the handle pool bumped 5→8, then disproven by that same build's own trace
+evidence), was a leftover total-duration watchdog counting `filesystem_tick()`
+foreground polls and treating the count as elapsed milliseconds: at the
+measured ~7,600 polls/second, its 300,000-poll limit fired at a fixed ~39.5s
+regardless of Bank size, aborting mid-write and leaving provisional/corrupt
+files (a 32,768-byte all-`0xFF` instrument file; trace bytes misdirected into
+an orphaned Bank instrument file by a still-live callback after the abort).
+Fix: removed the watchdog outright (not replaced with a corrected one), made
+the two stall observers whose abort could fire mid-callback during a Bank
+operation (`BkSt`, `ScSv`) trace-only, and reverted the diagnostic handle-pool
+bump. Hardware-accepted: a full 16-Scene Bank Save now completes in
+~2.5 minutes (~137s trace-measured) with a byte-identical, uncorrupted output
+tree; that latency is a known, separately-deferred Session 058 target. Six
+other per-state-machine stall detectors added the same session (`KtSv`,
+`KtLd`, `ScLd`, `BkLd`, `StWr`, `Flsh`) were **not** reverted and still call
+`filesystem_finish(FS_STATUS_ERROR)` on a 20-30k-poll stall — confirmed by
+reading the current source, not assumed from the closeout document, which
+names only `BkSt`/`ScSv`. A handle-census hard-abort at Bank Save's per-child
+entry (`BkHd`) also remains live and unmentioned in the closeout. The Session
+056 page-exit expedite, first item on this session's own priority list, was
+never re-verified on hardware in any of this session's records.
+
+- **Find here**: `S057_AUTOSAVE_WRITER_WRAP.md`, `S057_SETTINGS_WRITE_SAFE.md`,
+  `S057_SCENE_OVERWRITE_SAFE.md`, `S057_BOOT_KIT_SANITIZE_REFACTOR.md`,
+  `S057_TESTING.md`, `S057_BANK_STALL.md`, `S057_BANK_STALL_FIX.md`,
+  [057_SESSION_HANDOFF_LOG.md](057_SESSION_HANDOFF_LOG.md), `FILESYSTEM_SPEC.md`,
+  `AUTOSAVE.md`, `DEV_MODES.md`, `ASYNCFATFS_REFERENCE.md`, and
+  `SCOPING_TARGETS.md`.
+
+### 058 — Bank Save/Load Speedup, Stopped-Playback Load/Save, And SD Timeout Fix (2026-08-29/30)
+
+Implemented and kept the Bank speedup work from
+`S058_BANK_LOAD_SPEEDUP_PROPOSAL.md`: Option 1 removed Bank Load's O(n²)
+per-child directory rescan (one-pass child-name capture into a 144-byte
+`op_bank_child_display` table, successful-child-only parent-CWD retention via
+`afatfs_chdirParent()`, a dedicated 1,161-byte HCNAMES mirror with a tri-state
+validity gate, and a buffered text reader over the existing 512-byte staging
+buffer at the unchanged 16-char/tick budget). Option 2 added session-scoped,
+card-verified clean-Scene skipping for Bank Save: four volatile BankData bytes
+plus two filesystem candidate bytes, published only by a completed Bank
+Load/Save on the current boot+mount and invalidated by every Scene/Kit/
+Instrument/Pattern mutation funnel; `preset_saveBank()` gained a `force_save`
+selector. Option 3 (in-place retained-cluster rewrite) was implemented then
+reverted because hardware showed it ~15 s slower (the canonical-proof scan +
+reopen overhead dominated the cluster saving), and Option 3B was rejected as
+useless on the fresh-boot first save. The static Option 1 review's five
+findings were addressed except two deliberate open items: Save-side
+`afatfs_chdirParent()` FAILURE is still masked to a root-return fallback
+(Finding 4), and the SRAM-manifest/interface closeout deferred to this logging
+pass. In parallel, the stopped-playback Load/Save feature (`S058_LOAD_SAVE_NOPLAYBACK.md`)
+added codec suspend + a four-pass `afatfs_poll()` fast drain for eligible
+stopped top-level commands (`audioCodec_isSuspended()`, `fs_fast_drain_active`,
+Menu predicate/lifecycle, renderer early return). Hardware then exposed that a
+stopped Bank Save livelocked because the SD shim's read-token/write-busy
+"timeouts" were raw `sdcard_poll()` call counts; the fix repurposed
+`retry_count` into a TIM6 `wait_started_tick` and switched both waits to
+elapsed-millisecond deadlines (1,000 ms token / 5,000 ms busy), bumping the
+HCPRMS boot capsule to schema 2 (`retry_count` → `wait_ms`, dual-schema
+decoders). A hardware-accepted full stopped Bank Save (~30 s, byte-identical
+slot 046 tree) closed the livelock. A final `menu_refreshBankChildProgress()`
+fix made the `00.`..`15.` child counter repaint as the asynchronous cursor
+advances. Final build `text=382,700 data=404 bss=96,160`; AsyncFATFS
+directory-create inefficiency deferred to `S059_ASYNCFATFS_SPEEDUP.md`.
+
+- **Find here**: `S058_BANK_LOAD_SPEEDUP_PROPOSAL.md`,
+  `S058_BANK_SPEEDUP_REVIEW.md`, `S058_LOAD_SAVE_NOPLAYBACK.md`,
+  `S058_SPEEDUP_FINAL_CHECK.md`,
+  [058_SESSION_HANDOFF_LOG.md](058_SESSION_HANDOFF_LOG.md),
+  `FILESYSTEM_SPEC.md`, `ASYNCFATFS_REFERENCE.md`, `DEV_MODES.md`,
+  `SRAM_MANIFEST.md`, `MODULE_INTERCHANGE_SPEC.md`, and
+  `S059_ASYNCFATFS_SPEEDUP.md`.
+
+### 059 — AsyncFATFS Directory Speedup And Instrument Index Repair (2026-08-30/31)
+
+Implemented shared `0x00`/`0xE5` directory-run reservation for short create,
+LFN create, and same-parent rename, including logical-sector rollover,
+target-before-tail persistence, and legacy no-terminator handling. Then changed
+directory-cluster extension from full-cluster zero-fill to first-sector-only
+initialization; later sectors remain hidden behind `0x00` and are cleared by
+the reservation path before exposure. A stopped-playback Bank Save was observed
+at about 10 seconds after Gate A. Phase Two passed source review and clean ARM
+builds; its hardware/media matrix was deliberately deferred, with no defect
+expected from the reviewed implementation.
+
+The same session repaired Instrument Load metadata: reserved `.hctmp.<ext>` and
+blank stems cannot enter typed indexes; typed rows are validated as compact,
+sorted, unique keys; missing, empty, or corrupt indexes rebuild only the
+selected type through the existing scan/write/sync chain; genuine FAT/SD errors
+remain errors; Menu acknowledges the terminal result before releasing its
+owner. A follow-up removed the redundant physical directory prescan so a valid
+`.hcindex` is opened directly. The supplied failing card capture remains the
+four-defect validator fixture. No Session 059 change added retained SRAM.
+
+- **Find here**: [059_SESSION_HANDOFF_LOG.md](059_SESSION_HANDOFF_LOG.md),
+  `S059_ASYNCFATFS_SPEEDUP.md`, `S059_ASYNCFATFS_PHASE_ONE.md`,
+  `S059_INST_LOAD_FIX.md`, `S059_ASYNCFATFS_PHASE_TWO.md`,
+  `ASYNCFATFS_REFERENCE.md`, `FILESYSTEM_SPEC.md`,
+  `MODULE_INTERCHANGE_SPEC.md`, and `SRAM_MANIFEST.md`.
+
+### 060 — AutoSave Writer Speedup, HCNAMES Safe-Write/Refreshed Flag, Source Fields, And Boot Instrument `.hcindex` Fix (2026-09-01/04)
+
+Five-phase session preparing AutoSave for a future boot reader, plus one
+independent boot-defect investigation and fix. **Phase A** added a
+four-static winner cache so continuation drain cycles (250 ms apart within
+one Bank session) skip dual-record CRC validation and the on-card mask
+re-read entirely, since the writer itself just committed the last target and
+SD removal while powered is not a product contract; combined with merging
+the CRC and commit-byte reopens into one open/close/sync cycle,
+steady-state drain time dropped from about 3.1 s to about 2.2 s. A
+follow-up boot failure (`.hcnames` written by prior firmware in a 4-column
+format) was root-caused and fixed by isolating the source token at the
+second tab instead of rejecting the row outright. **Phase B** converted all
+five `.hcnames` write paths (boot full-write, runtime targeted update, Bank
+Load, Bank Save, and the new AutoSave drain post-commit convergence) to the
+same atomic temp-file (`.hcnamtmp`) safe-write pattern `settings.cfg` and
+`.hcprms1/2` already use, with a boot recovery prelude that validates or
+discards a leftover temp file before any `.hcnames` read. **Phase B2** added
+a per-row "refreshed" witness (bit 13 of `fs_resident_source[]`, serialized
+as an optional `\tR` third column) that load/save completions set and the
+AutoSave drain clears only after that row's object is fully captured in the
+canonical dirty mask, narrowing `FS_RESIDENT_SOURCE_VALUE_MASK` from
+`0x7fff` to `0x1fff` to make room. A post-implementation hardware pass found
+and fixed a stale-`op_close_status` bug that made Bank Load's HCNAMES
+safe-write abort (cascading into `HNkL01`/`HNsL01` on subsequent Kit/Scene
+operations) and a settings-writer/Load-Save-command race that produced a
+spurious `FsErr` after Bank Load, fixed with the same
+`menu_isLoadSaveCommandActive()` guard the trace-flush scheduler already
+carried. Both fixes were hardware-confirmed clean across three full test
+passes. **Phase C** absorbed a 2-byte HCNAMES source field into each Scene,
+Kit, and Instrument autosave record header from existing reserved padding
+with zero record/mask growth, verified on hardware against `.hcnames`
+side-by-side. **Phase D**'s parent-plan requirements (deferred re-dirty
+mask, load/save re-dirtying, refreshed-flag lifecycle) were audited against
+the already-landed Phase B2/C code and found fully satisfied by the
+existing immediate-marking design; no code change was needed, only four
+hardware verification tests remain outstanding. Separately, a five-SD-card-capture
+investigation found that only `Instrument/Drum/.hcindex` was ever generated
+at boot — the other three typed indexes failed silently because macOS
+AppleDouble (`._<name>.<ext>`) resource-fork files broke the boot repair
+step's fallback canonical-name builder. Fixed at the lowest layer:
+`afatfs_findNextObject()` now filters `._`-prefixed objects system-wide, so
+every directory consumer (repair, scan, index, save, load) is affected
+automatically, with a narrower repair-step guard retained as
+defense-in-depth. Two independent hygiene items (case-sensitivity
+normalization, boot-index return-value check) were identified but
+deliberately left unapplied this session.
+
+- **Find here**: [060_SESSION_HANDOFF_LOG.md](060_SESSION_HANDOFF_LOG.md),
+  `S060_AUTOSAVE_UPDATE_READER_PREP.md`, `S060PHASE_A_WRITER_SPEEDUP.md`,
+  `S060PHASE_A_POST_FIXES.md`, `S060PHASE_B_B2_HCNAMES.md`,
+  `S060PHASE_B_POST_FIX.md`, `S060PHASE_C_AUTOSAVE_SOURCE.md`,
+  `S060PHASE_D_RE_DIRTY.md`, `S060_HCINDEX_FIXUP.md`, `AUTOSAVE.md`,
+  `FILESYSTEM_SPEC.md`, and `ASYNCFATFS_REFERENCE.md`.
+
+### 061 — Typed HCNAMES And AutoSave Boot Restore (2026-09-05/08)
+
+Completed the AutoSave boot reader and the HCNAMES schema it needs. HCNAMES
+now has a mandatory `#types\tdrm\tsnr\tcym\that` header, 129 fixed data rows,
+and a mandatory `drm|snr|cym|hat` field on Instrument rows 33..128; every
+writer, temp-file recovery path, parser, and verifier uses that contract. A
+separate `Err BKKit14` investigation proved the firmware was correctly
+rejecting fixture kitsets whose `file=` stems exceeded the canonical
+eight-character contract; the SD corpus was renamed consistently rather than
+weakening the Bank parser.
+
+Boot stage 10b now validates the HCPR A/B pair and stage 11 selects among
+three restore paths: the matching-winner reader, a narrowly gated
+HCNAMES-authoritative reader for an all-refreshed register matching
+`settings.cfg`, or the existing canonical Bank/Scene/Kit ladder. Both readers
+apply Bank/Scene/Kit/Instrument scalar payloads, resolve refreshed rows with
+single-level non-cascading loads, empty an entire Scene when any child cannot
+be resolved, replay deferred dirty marks after tracking becomes live, and
+show non-blocking post-boot notices. Pattern data is not in HCPR, so each
+accepted Scene gets a best-effort `pattern.pat` library load; Effects remain
+unimplemented. `Q` trace records expose Case 1 source mismatches, Case 2
+loads, Case 3 invalidations, and the two 16-bit Scene summaries.
+
+Several defects found by power-cycle fixtures were fixed: boot restore now
+loads Patterns; a direct numeric Instrument source is rejected only when the
+Instrument row itself supplied it (numeric sources inherited from Bank/Scene/
+Kit are valid); Scene and Bank Load/Save publication now stages the complete
+committed child identity/source/refreshed hierarchy; root `chdir(NULL)` waits
+until the reset root handle is actually idle; and all 96 parsed Instrument
+types survive the full reader traversal by aliasing the existing 144-byte
+Bank-child scratch instead of the destructive payload-stage union. The final
+change added no BSS and reduced text by 40 bytes. `SD_CARD_READER_9`, booted
+from the Bank-plus-four-`Rollin`-Scene fixture with image SHA-256
+`5732e821d256f521e48814d2cf255c895b1fbb7fdfa9f006b43f5ae293fb8c62`,
+hardware-accepted the HCNAMES-authoritative path: 128 Case-2 successes,
+`case2=0xffff`, `case3=0`, no `E`/`X`, correct Bank and all 16 Scenes, valid
+generation-9/10 HCPR records, and zero HCNAMES-R/object-mask disagreements.
+One bounded follow-up remains: reboot Reader 9 to exercise its mixed
+matching-winner Case-1/Case-2 state.
+
+The later Load/Save refactor backlog was consolidated into
+`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`: Kit/Instrument HCNAMES
+checkpoint timing, visible menu-exit stalls, blank-vs-`Empty` readiness,
+uniform latest-selection preview scheduling, and the explicit AutoSave /
+HCNAMES / `settings.cfg` edge-case matrix. Pattern storage is the next feature;
+the refactor is intentionally deferred unless a blocker appears.
+
+- **Find here**: [061_SESSION_HANDOFF_LOG.md](061_SESSION_HANDOFF_LOG.md),
+  `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`, `AUTOSAVE.md`,
+  `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`, `SRAM_MANIFEST.md`,
+  `DEV_MODES.md`, `ASYNCFATFS_REFERENCE.md`, and `SD_CARD_READER_9/`.
+
+### 062 — Phase 4 Dynamic Pattern Storage (2026-09-09/10)
+
+Replaced the bitmap-only Pattern representation with a three-part per-Scene
+dynamic storage system: a 1,792-byte static address array (896 × uint16_t),
+an 8,192-byte event pool (PAT_STACK_SIZE=256 × 32-byte chunks), and a
+512-byte free-tracking bitmap. Each 16-bit address entry encodes trigger
+(bit 15), has-specials (bit 14), and a 14-bit pool byte offset (sentinel
+0x3FFF). Pool blocks carry a 2-byte header (10-bit step-ID, 6-bit reserved
+automation count), a 1-byte special-flags byte (bit 0 = note, bit 1 =
+velocity, bit 2 = probability), and value bytes in ascending bit order.
+Chunk sizing: 1 special → 1 chunk (4 bytes), 2–3 specials → 2 chunks
+(8 bytes). The first-fit linear allocator is menu-paced with no
+defragmentation.
+
+Session 062 Step A designed the memory budget and architecture. Step B/B½
+implemented the address array and pool structures, removed `PatternSet` from
+`scene_t` (reducing `scenes` from 20,992 to 19,200 bytes), added the
+permanent `pat_regions` symbol at 167,936 bytes, and retained a 112-byte
+`filesystem_pattern_discard` for the disconnected v3 bridge. Step C
+implemented the bitmap allocator internals (`pat_bitmapGet/Set/Clear`,
+`pat_poolAlloc`, `pat_poolFree`), block read/write (`pat_blockChunks`,
+`pat_blockWrite`, `pat_blockRead`), the public `pat_readStepSpecials()` API,
+pool offset validation (`pat_poolOffsetValid`), and wired the step-edit menu
+bridge (`pat_applyStepToMenu` reads real pool data, `pat_setStepNote/Volume/
+Probability` do read-modify-write via `pat_writeSpecials`). Step D integrated
+Sequencer playback: `seq_advanceTrackStep` reads `pat_readStepSpecials()` for
+each triggered step, applies probability gating with `GetRngValue()` hardware
+RNG (`(rng & 0x7FFF) * 127 / 32767`, suppress if rnd >= probability), and
+triggers with the step's stored velocity and note. Roll triggers remain
+independent fixed-note events.
+
+The step-edit menu fix from prior context (Step B½) had two iterations:
+first `menu_showStepEditPage()` was created to set the subpage and apply step
+data, then a missing `menu_repaintAll()` call was added. Both were confirmed
+working on hardware at the start of this session.
+
+Hardware testing confirmed: note override, velocity override, probability
+gating, multi-scene independence, value persistence across scene switches,
+step erase/clear freeing pool blocks, and pool reuse after free. Copy
+operations (pat_copyTrack, pat_copyPattern, pat_copyBar) remain deliberate
+no-ops deferred to Phase 4.5. The filesystem bridge returns 0 on boot read
+and writes an empty discard PatternSet on save; fan-out is disconnected.
+
+Final link: text=408,220, data=404, bss=262,468. Image 408,640 bytes,
+SHA-256 `412ca5b21509e1e2a787d7f82f15a4946f0c92489eb3ed0f422056c87f58eee9`.
+
+- **Find here**: [062_SESSION_HANDOFF_LOG.md](062_SESSION_HANDOFF_LOG.md),
+  `PATTERN_DYNAMIC_STACK.md`, `SRAM_MANIFEST.md`,
+  `MODULE_INTERCHANGE_SPEC.md`.
+
+### 063 — v4 Binary Pattern File Format And Pattern Load/Save Fixes (2026-09-12)
+
+Implemented the v4 binary PAT4 Pattern file format (10,656 bytes: 160B header
++ 1,792B address array + 512B bitmap + 8,192B pool) with CRC32C integrity and
+a generation counter. Introduced `pat_scene_region_t` as the packed per-Scene
+SRAM struct (10,519 B × 16 = 168,304 B) combining address array, pool,
+bitmap, and per-track params (track_length, track_scale, track_shuffle,
+pattern_change_bar, pattern_next). Exposed these via Option B accessors
+`pat_sceneRegion()` / `pat_sceneRegionMut()`. Fixed two Pattern Save/Load
+defects: Pattern Save's HCNAMES update double-triggered the library index
+rebuild chain by replacing the completion callback (removed the three
+callback-replacement lines and the dead
+`filesystem_patternHcnamesUpdateComplete()` function, matching Scene/Kit
+Save's pending-flag-only approach); Pattern Load had two independent bugs —
+the `PRESET_OP_PATTERN_LOAD` branch in `menu.c` never called
+`menu_finishLoadSaveCommand()` (leaving `menu_loadSaveCommandActive = 1`
+permanently, so every subsequent Load/Save repaint showed `...`) and
+`preset_loadPattern()` lacked a scene-mask destination argument, always
+targeting `scene_getActiveIndex()` regardless of the user's SEQ-button
+selection. Added `filesystem_requestLoadPatternForScenes(slot, scene_mask,
+cb)` with mask validation, first-set-bit stream target, and CRC-validated
+fan-out `memcpy` of `pat_scene_region_t` to every other selected Scene.
+Added `preset_loadPatternForScenes()` and menu-to-filesystem scene-mask
+plumbing through `menu_kitLoadSceneMask`. HCNAMES expanded from 129 to 145
+rows (Pattern rows 129-144, one per resident Scene, no type field, format
+`name<TAB>source[<TAB>R]`). `filesystem_cacheCurrentResidentPatternName()`
+now iterates `op_scene_load_scene_mask` for multi-row publication. Pattern
+Save sets `op_scene_load_scene_mask` to its single `op_pattern_scene` bit
+for compatibility. `AUTOSAVE_HCNAMES_ROW_COUNT` stays at 129 for S063;
+expansion to 145 is an S064 breaking change. Created the S064 Pattern
+AutoSave planning document: separate per-Scene A/B pair files
+(`.pat00a`/`.pat00b` through `.pat15b`), 17th Scene snapshot region
+(10,519 B) with TIM3-masked `memcpy` (~50 µs), whole-file drain with 16-bit
+dirty mask. Build: `text=423996, data=416, bss=279372`.
+
+- **Find here**: v4 PAT4 binary format spec, `pat_scene_region_t` struct,
+  Pattern Save callback chain fix, Pattern Load dual-defect root cause (menu
+  command lifecycle + scene mask), `filesystem_requestLoadPatternForScenes()`
+  API, HCNAMES 145-row expansion, Pattern Load fan-out copy, S064 AutoSave
+  plan, and [063_SESSION_HANDOFF_LOG.md](063_SESSION_HANDOFF_LOG.md)
+
+### 064 — Dynamic Pattern AutoSave And Functional Closeout (2026-09-12/14)
+
+Implemented separate per-Scene hidden PAT4 ping-pong files (`/.pat00a/b`
+through `/.pat15a/b`) with generation/parity selection, exact-size and CRC32C
+validation, a 16-bit Pattern dirty mask, one 10,519-byte snapshot, whole-file
+background streaming, retry-on-error, and boot restore. Pattern identity now
+uses HCNAMES rows 129..144 with the Pattern-only `@` source token; HCPR moved
+to format v2 for the Pattern-aware 145-row HCNAMES contract without changing
+its 34,768-byte scalar geometry; Pattern identity/payload remain outside HCPR.
+Snapshot admission is deferred while sequencer
+record or erase is active, and Pattern remains the lowest-priority background
+claimant after settings, trace, and scalar AutoSave work.
+
+Hardware testing closed the functional Pattern AutoSave feature PASS. The
+full 16-Scene Card B capture contained 19 valid PAT4 candidates; every Scene's
+winning Pattern differed from its seed, all Pattern HCNAMES rows were `@|R`,
+both HCPR v2 records were valid, and all Scenes had scalar mutations. A Bank
+Load identity-publication defect found during testing was fixed by caching the
+Pattern row with the other Scene children. Deterministic mid-write power-loss
+and record/erase admission tests remain deferred pending instrumentation/live
+record readiness; they are not defects or prerequisites for this functional
+closeout. Card A stopped because its generated fixture/instructions were
+invalid, not because of a firmware `BKKit14` defect.
+
+- **Find here**: [064_SESSION_HANDOFF_LOG.md](064_SESSION_HANDOFF_LOG.md),
+  `AUTOSAVE.md`, `PATTERN_DYNAMIC_STACK.md`, `FILESYSTEM_SPEC.md`, and
+  `SRAM_MANIFEST.md`.
+
+### 066 — VOICE-Page Held-Step Automation Overlay (Method 2) (2026-09-15/16)
+
+Implemented the complete VOICE-page held-step automation overlay system from
+`S065_DYN_PAT_VOICE_PARAM_UX.md` (written as part of S065, implemented as
+S066). This is Method 2 of the step automation editing workflow: while viewing
+a VOICE parameter page, holding one or more SEQ step buttons and turning a pot
+or encoder overlays the held steps' automation values onto the normal VOICE
+display, with CGRAM-underlined characters indicating which parameters have
+stored automation. The full implementation schedule is
+`S066_IMPLEMENTATION_SCHEDULE.md` (12 steps, ~1720 lines of line-by-line
+implementation detail).
+
+**Overlay activation** (§1): configurable short long-press
+(`BUTTON_HOLD_DELAY_MS = 100u` in `config.h`). `buttonHandler.c` arms a timer
+on SEQ press during VOICE mode; if still held after 100ms and at least one step
+is active, the overlay enters. `seqHeldMask()` (new export) returns the current
+held-step bitmask. `visibleStep()` promoted to extern for inter-module use.
+Wrap-safe 16-bit millisecond timing against `time_sysTick`.
+
+**Four-slot bounded CGRAM underline cache** (§2): CGRAM slots 2..5 assigned to
+the four visible VOICE-page parameters. Two marker tiers: **value bar** (5-pixel
+bottom row, shows a step has automation for this exact parameter) and **assigned
+dot** (center pixel, shows automation exists for this parameter on at least one
+step in the track). Cache tracks which glyphs are loaded via `va_cgramValid`
+bitmask. `lcd_fontIndex()` maps ASCII 0x20..0x7E to a 62-entry flash font table
+(496 bytes); `lcd_underlineGlyph()` composites the ROM glyph with the marker
+tier into a CGRAM-ready 8-byte pattern.
+
+**Async track-wide automation search** (§5): polled state machine scanning all
+128 steps of the current track, 4 steps per pass
+(`VOICE_AUTOMATION_SCAN_STEPS_PER_PASS = 4u`), checking each step's pool block
+for entries matching the four visible parameter targets. Populates the
+"assigned" tier underlines. Self-invalidates on track change, page change, or
+any automation write.
+
+**Value display and resolution** (§3): per-parameter value-source resolution
+walks the held mask newest-to-oldest, returns the first held step with an exact
+target match. Display shows the resolved 8-bit value using dtype-aware
+formatting (`va_formatValue3()`). When no held step has automation for a
+parameter, the Scene image endpoint value is displayed instead.
+
+**Step illumination** (§4): `led_updateAutomationStepView()` lights SEQ LEDs
+for every step that has automation matching the focused parameter.
+
+**Automation write** (§6): pot delta and encoder delta enter through
+`va_writeAutomationFromKnob()`. Working-value cache (`va_workingValue[4]`)
+breaks the lossy 8→7→8 round-trip by caching the clamped 8-bit result between
+consecutive edits. Converts to 7-bit only at the `pat_writeStepAutomation()`
+call. Nibble-split suppression byte: lower nibble = underline suppression
+(clears on debounce), upper nibble = working value validity (persists until
+held mask change or overlay exit).
+
+**Debounced value-underline reapplication** (§7):
+`VOICE_AUTOMATION_UNDERLINE_QUIET_MS = 100u`. After pot/encoder edits stop
+for 100ms, the value-bar underline reappears. The underline is suppressed
+during rapid edits to avoid CGRAM queue thrashing.
+
+**Morph integration** (§8): held-step edits never mutate normal or Morph
+endpoint values. The overlay reads/writes only automation storage. Endpoint
+display values come from `morph_interpolation[]` (the runtime-interpolated
+value accounting for current Morph position).
+
+**State block**: 44 bytes total static SRAM (40 approved S066 + 4 approved
+extension for working values), verified by `_Static_assert`. Includes
+overlay-active flag, active-parameter index, async search state, CGRAM valid
+mask, underline suppression/validity byte, working value cache, debounce
+timestamp, and all associated tracking.
+
+**LCD async queue preflight**: CGRAM/DDRAM transactions are preflight-checked
+against the 128-entry SPSC ring's available capacity before committing.
+Transaction cost formula: `stale * 2 + changed * 10 + diff * 2 + cursor`.
+Fallback on insufficient space sets the retry bit and defers.
+
+**Diff-based CGRAM transaction** (Fix 6): replaced the fixed 32-char full-frame
+write with a diff against `currentDisplayBuffer`. Stale DDRAM references
+(positions still showing old CGRAM slot codes) are restored to their ROM
+characters and `currentDisplayBuffer` is synced before CGRAM redefinition and
+the diff-write. Typical cost during scrolling: ~16-24 ops instead of ~112.
+
+**Retry bit** (Fix 6): `VA_MARKER_RETRY_BIT` (bit 4 of `va_cgramValid`)
+survives `sendDisplayBuffer()` clearing `menu_lcdRefreshPending`. When set,
+`menu_serviceRuntimeWidgets()` checks for sufficient queue space (≥72 free) and
+triggers a repaint to recover underlines after a queue-full burst.
+
+**Six post-hardware-test fixes** (documented in `S066_DYN_P-LOCK_FOLLOW-UP.md`):
+
+- **Fix 1 — Delta handling (Critical)**: CW pot rotation produced no visible
+  change; CCW decremented by 2. Root cause: lossy 8→7→8 round-trip in
+  `va_writeAutomationFromKnob()`. Fixed with `va_workingValue[4]` cache that
+  breaks the feedback loop (+4 B SRAM, 40→44 total).
+- **Fix 1b — editMode bit index (Minor)**: `va_applyVoiceMarkers()` editMode
+  branch checked `va_underlineSuppressed & 0x01u` (always bit 0) instead of
+  the bit for the actual `activeParameter`. Fixed to use
+  `(1u << (activeParameter & 3u))`.
+- **Fix 2 — Non-numeric parameter display (Important)**: parameters with
+  non-numeric display types (waveform, filter type, on/off, ±63, note names)
+  showed raw numbers. Added `va_formatValue3()` — dtype-aware formatter matching
+  `menu_formatCellValue3()` but accepting an explicit value.
+- **Fix 3 — Capital 'S' font glyph (Minor)**: underlined 'S' had hooked end
+  pixels (serifs) that the WS0010 CGROM 'S' does not show. Fixed rows 1 and 5
+  of `lcd_font_alpha_numeric[28]`.
+- **Fix 4 — PM63 ±64 snap after debounce (Important)**: Fine tune and pan
+  reached +64 (8-bit 127) during editing but snapped to +63 after the 100ms
+  debounce quiet period. Root cause: working-value cache invalidated when
+  underline suppression cleared. Fixed by splitting `va_underlineSuppressed`
+  into two nibbles: lower = underline suppression (clears on debounce), upper =
+  working-value validity (persists until held mask change or overlay exit).
+- **Fix 5 — Overlay exit CGRAM ordering glitch (Important)**: releasing all held
+  step buttons caused a one-frame CGRAM glitch (value-row underlined character
+  appearing at the name-row position). Root cause: `menu_repaintAll()` filled
+  `currentDisplayBuffer` with 0x7F, defeating stale-ref detection. Fixed by
+  using `menu_repaint()` instead (preserves real LCD state).
+- **Fix 6 — Fast encoder scroll underline disappearance (Important)**: rapidly
+  scrolling the encoder caused all automation underlines to disappear and not
+  recover. Two sub-issues: (A) excessive queue cost from full 32-char frame
+  writes (~112 ops) vs 128-entry queue capacity, and (B) lost retry signal
+  (`sendDisplayBuffer()` cleared `menu_lcdRefreshPending` after a fallback).
+  Fixed with diff-based frame write (~16-24 ops typical) and a separate retry
+  bit in `va_cgramValid`.
+
+**Files changed:**
+
+| File | Changes |
+|------|---------|
+| `config.h` | +3 constants: `BUTTON_HOLD_DELAY_MS`, `VOICE_AUTOMATION_UNDERLINE_QUIET_MS`, `VOICE_AUTOMATION_SCAN_STEPS_PER_PASS` |
+| `lcd.c` | +496 B flash font table (62 glyphs), `lcd_fontIndex()`, `lcd_underlineGlyph()`, 'S' glyph fix |
+| `lcd.h` | `lcd_underlineGlyph()` declaration |
+| `menu.c` | ~660+ lines: 44-byte state block with `_Static_assert`, CGRAM cache helpers, async search agent, held-value resolution, overlay lifecycle, write intercepts, debounce service, context invalidation hooks, `va_formatValue3()`, all 6 fixes |
+| `menu.h` | Four overlay bridge function declarations |
+| `buttonHandler.c` | `BUTTON_TIMEOUT` alias, `seqHeldMask()` export, `visibleStep()` promoted to extern, wrap-safe tick comparison, VOICE branch in `armTimerActionStep`, overlay routing in SEQ press/release |
+| `buttonHandler.h` | `seqHeldMask()` and `visibleStep()` declarations |
+| `ledHandler.c` | `led_updateAutomationStepView()` implementation |
+| `ledHandler.h` | `led_updateAutomationStepView()` declaration |
+| `copyClearTools.c` | Two `menu_voiceAutoOverlayPatternDeleted()` calls |
+
+**Build (after all 6 fixes):** `text=439,396`, `data=412`, `bss=290,852`,
+`image=439,808`. Net text delta from S065: +5,360 (overlay + font table +
+helpers). Net bss delta: +64 (44 B overlay state + 20 B buttonHandler state).
+
+- **Find here**: [066_SESSION_HANDOFF_LOG.md](066_SESSION_HANDOFF_LOG.md),
+  `S066_DYN_PAT_VOICE_PARAM_UX.md` (design spec, 803 lines),
+  `S066_IMPLEMENTATION_SCHEDULE.md` (12-step implementation, 1720 lines),
+  `S066_DYN_P-LOCK_FOLLOW-UP.md` (6 hardware-test fixes),
+  `PATTERN_DYNAMIC_STACK.md`, `MODULE_INTERCHANGE_SPEC.md`.
+
+### 067 — Pattern Stack Service + Dtype Offset Bug Fix (2026-09-18)
+Session 067 delivered the Pattern Stack Service (the unified pool mutation dispatcher and defragmentation infrastructure) and fixed the dtype automation value offset bug. Two main parts plus a follow-up bug fix:
+
+**Part B — Pool Usage Monitor.** `pat_poolUsagePercent()` in PatternData.c uses `memcpy`+`popcount` for packed-bitmap-safe access, returning a 0..99 occupancy percentage. A Settings-menu widget shows `pts:NN` format with compute-on-entry (retained static byte), visibility predicate gating it to the Global subpage, `MenuText.h` short/long names, `menuPages.h` Global subpage 2 position 7, and forward declarations. 0 lines of new RAM (retained byte is in `.bss`, counted in the existing menu state).
+
+**Part A — Pattern Stack Service.** New `Core/Bank/Scene/Pattern/PatternStackService.c/h` (1225+106 lines, 2 new files). Unified dispatcher that serializes all pool-mutating operations through a single service tick, guaranteeing one mutation target at a time with instant playback switching. Architecture:
+
+- **64-entry volatile `uint32_t` SPSC ring** (256 B) with PRIMASK-protected enqueue. Each entry packs operation code (3 bits), scene (4 bits), track (3 bits), step (7 bits), target (9 bits), value (7 bits) into 32 bits. Direct-when-idle admission with queued-when-busy fallback.
+- **Service tick priority**: handover → queue drain → bulk barrier → Tier 1 gap → Tier 2 compaction.
+- **Bounded bulk barriers** for track clear (128-step sweep) and pattern clear (7-track × 128-step sweep) with per-tick budgets of 16 steps.
+- **Mutation-target handover state machine**: when filesystem replacement completes (e.g. Scene Load), the service switches its internal scene pointer to the newly loaded scene atomically.
+- **Tier 1 trailing-gap maintenance**: linear scan after each freed block, merging adjacent free chunks up to 16 per tick.
+- **Tier 2 paced compaction**: `PAT_COMPACT_INTERVAL_MS` (100 ms) throttled, `PAT_COMPACT_SCAN_PER_TICK` (16 chunks) budget, reactive compaction when head allocation fails. Relocates live blocks toward pool start, updating address entries under PRIMASK protection.
+- **Elastic gap policy**: `PAT_GAP_REDUCE_THRESHOLD` (60%) triggers gap reduction to maintain contiguous free space at pool tail.
+- **7 new PatternTrace stage codes**: `Q` (queue event), `C` (compaction), `F` (free/gap), `R` (relocation), `M` (mutation), `G` (gap scan), `X` (service state change).
+- **15+ call sites migrated** from `pat_*` to `patSvc_*` across `menu.c`, `copyClearTools.c`, `EuklidGenerator.c`, `sequencer.c`.
+- **Filesystem integration**: `patSvc_idle()` autosave guard in filesystem.c (5 filesystem replacement boundary points), `patSvc_tick()` after `endlessPots_tick()` in timebase.c, `patSvc_init()` in main.c after boot filesystem ladder.
+
+**Gate 1 — Publication Ordering Fix.** Three paths in PatternData.c fixed:
+- `pat_writeDynamic()`: write-new/PRIMASK-swap/free-old pattern with trigger-bit re-read; removed same-size in-place rewrite entirely (unsafe because even removal can compact automation bytes).
+- `pat_eraseStep()`: detach-address-first before freeing pool block.
+- `pat_releaseStepDynamic()` added for trigger-preserving detach+free.
+- `pat_markPoolMutationDirty()` added for narrow dirty-marking boundary.
+- `pat_tryAppendAutomation()` added for Gate 6 in-place growth.
+- `pat_writeSpecials()` and raw setters changed from `void` to `uint8_t` return.
+
+**Dtype Offset Bug Fix.** The MIDI CC-style `/2` (encode) and `*2` (decode) conversions applied to automation values were incorrect: automation targets are instrument descriptor parameters (range ≤127), not `parameter_values[]` entries (0..255). No `DTYPE_0B255` parameter is automatable. Fix: identity mapping (stored 7-bit value = parameter value directly) at four code sites:
+- `va_expand7to8()` renamed to `va_storedToParam()` — identity function (3 call sites in menu.c).
+- `va_writeAutomationFromKnob()` — removed halving, added defensive 127 saturation.
+- `seq_drainPendingAutomation()` — removed doubling, simplified to single variable.
+- `menu_stepAutomationAddDefault()` — removed halving on creation.
+- Five comments updated removing "lossy 8→7→8" language; `va_formatValue3()` comment updated.
+
+**Deviations from schedule** (all improvements): (1) shrink-in-place path removed entirely instead of PRIMASK-fixed; (2) inverted queued clear ordering (enqueue barrier first, then clear triggers) prevents orphaned dynamic blocks on full FIFO; (3) `pat_writeSpecials`/raw setters return success/failure; (4) `pat_releaseStepDynamic` added as a separate trigger-preserving detach; (5) `pat_markPoolMutationDirty` provides a narrow dirty-marking boundary; (6) `pat_tryAppendAutomation` supports Gate 6 in-place growth; (7) `osc2_mod_type=51` anomaly in T1S11 identified as pre-fix artifact.
+
+**Build metrics post-service:** `text=447,644`, `data=412`, `bss=291,140`. Deltas from S066 baseline: +8,248 text, +288 bss. RAM budget: 289 actual vs 282 scheduled, within +300 approved ceiling. **Post-dtype-fix:** `text=447,580`, `data=412`, `bss=291,140` (dtype fix removed code, no RAM change).
+
+**Hardware validation** (both parts):
+- Post-service: 1,539 PatternTrace records (1,283 TIER1_GAP + 256 TIER2_RELOC, zero errors); 78,592 AutoSaveTrace records (zero errors); 3 PAT4 files structural integrity confirmed; relocation chains verified; 2 user-write blocks explained.
+- Post-dtype-fix: 4,633 PatternTrace records (3,902 TIER1_GAP + 731 TIER2_RELOC, zero errors); 78,615 AutoSaveTrace records (zero errors); PAT4 integrity confirmed; automation values confirmed in identity domain.
+
+**Files changed (20 files, ~2,113 insertions):**
+
+| File | Changes |
+|------|---------|
+| `PatternStackService.c` | New: 1,225 lines — complete service dispatcher, queue, bulk barriers, handover, gap maintenance, compaction |
+| `PatternStackService.h` | New: 106 lines — public API declarations |
+| `PatternData.c` | `pat_poolUsagePercent()`, publication ordering fix, `pat_releaseStepDynamic()`, `pat_markPoolMutationDirty()`, `pat_tryAppendAutomation()`, `pat_writeSpecials` return type |
+| `PatternData.h` | `pat_poolUsagePercent()` declaration |
+| `PatternTrace.h` | 7 new trace stage codes (Q/C/F/R/M/G/X) |
+| `menu.c` | Part B widget, dtype fix (va_storedToParam, halving removed, comment updates), 15+ caller migration to patSvc_* |
+| `menu.h` | `TEXT_PAT_STORE_USE`, SHORT/LONG enum entries, `PAR_PAT_STORE_USE` sentinel (0xFFFD) |
+| `MenuText.h` | "pts" short name, "PtrnStoreUse" long name |
+| `menuPages.h` | Global subpage 2 position 7 |
+| `sequencer.c` | Dtype fix, TIM3 live erase → queue event, per-track pattern array definition+init |
+| `sequencer.h` | `extern seq_perTrackPattern[7]` |
+| `copyClearTools.c` | 2 call sites migrated to patSvc_* |
+| `EuklidGenerator.c` | 1 call site migrated to patSvc_* |
+| `timebase.c` | `patSvc_tick()` call after `endlessPots_tick()` |
+| `filesystem.c` | `patSvc_idle()` autosave guard, filesystem replacement boundary (5 points) |
+| `main.c` | `patSvc_init()` after boot filesystem ladder |
+| `Makefile` | Added PatternStackService.c |
+| `config.h` | `PAT_GAP_REDUCE_THRESHOLD` (60u), `PAT_COMPACT_INTERVAL_MS` (100u), `PAT_COMPACT_SCAN_PER_TICK` (16u) |
+
+- **Find here**: [067_SESSION_HANDOFF_LOG.md](067_SESSION_HANDOFF_LOG.md),
+  `S067_STACK_SERVICE_DETAIL_PLAN.md` (962 lines, authoritative design plan),
+  `S067_STACK_SERVICE_IMPLEMENTATION.md` (1826 lines, line-by-line code schedule and post-implementation assessment),
+  `S067_DTYPE_OFFSET_BUG.md` (root cause analysis),
+  `S067_DTYPE_BUG_IMPLEMENTATION.md` (588 lines, implementation schedule and hardware validation),
+  `PATTERN_DYNAMIC_STACK.md`, `MODULE_INTERCHANGE_SPEC.md`, `SRAM_MANIFEST.md`.

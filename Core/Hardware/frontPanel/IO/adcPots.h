@@ -43,8 +43,10 @@
  * The ADC DMA buffer (adc_dma_buf[]) is shared with endlessPots.c and
  * filled continuously — no blocking ADC reads here.
  *
- * adc_checkPots() reads from the DMA buffer, applies deadzone mapping,
- * and updates always-on slider gain multipliers.
+ * adc_checkPots() reads from the DMA buffer, applies a non-interpolated
+ * 1,024-node float LUT/deadzone mapping, and updates always-on gain multipliers.
+ * Each non-interpolated node covers four raw ADC codes; the selected gain and
+ * every downstream mixer calculation remain native `float` values.
  * Call once per main loop iteration.
  */
 
@@ -61,7 +63,8 @@ void adc_init(void);
 
 /* Check all 6 sliders and unconditionally refresh slider_vol[].
 ** The mixer applies slider_vol[] as a separate post-voice gain stage
-** (voice output multiplied by slider gain).
+** (voice output multiplied by slider gain). Every adjacent raw ADC pair shares
+** one LUT node; mixer smoothing is not LUT interpolation.
 ** Call once per main loop iteration. */
 void adc_checkPots(void);
 

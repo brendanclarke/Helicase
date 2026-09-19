@@ -152,6 +152,19 @@ void lcd_tim7_init(void);
 /* Add a custom character in display CGRAM, access with */
 void lcd_define_char(uint8_t location, const uint8_t *charmap);
 
+/*
+ * Produce an underlined CGRAM glyph from an ASCII alphanumeric character.
+ *
+ * What: copies the selected WS0010 English/Japanese ROM bitmap into out[8]
+ * and sets the bottom row to 0x1F. Only 0-9, A-Z, and a-z are accepted;
+ * rejected input leaves out unchanged and returns zero. Why: the LCD ROM is
+ * write-only, so VOICE automation markers need a compiled 62-glyph table.
+ * Inputs: rendered ASCII character and caller-owned eight-byte output buffer.
+ * Output: one on success, zero for unsupported punctuation/whitespace.
+ * Affiliates: lcd_define_char() and the Menu slots 2..5 underline cache.
+ */
+uint8_t lcd_underlineGlyph(uint8_t ascii_char, uint8_t out[8]);
+
 /* Enqueue a clear-display command (includes long post-wait). */
 void lcd_clear(void);
 

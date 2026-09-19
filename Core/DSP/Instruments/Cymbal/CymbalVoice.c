@@ -43,12 +43,6 @@
 // #include "TriggerOut.h"
 #include "config.h"
 
-INCCMZ CymbalVoice cymbalVoice;
-//---------------------------------------------------
-void Cymbal_setPan(const uint8_t pan)
-{
-	Cymbal_setPanVoice(&cymbalVoice, pan);
-}
 //---------------------------------------------------
 void Cymbal_setPanVoice(CymbalVoice *voice, const uint8_t pan)
 {
@@ -56,9 +50,8 @@ void Cymbal_setPanVoice(CymbalVoice *voice, const uint8_t pan)
 	 * Set pan on one explicit cymbal runtime instance.
 	 *
 	 * Inputs: caller-owned CymbalVoice and raw 0..127 pan. Output: the
-	 * instance pan byte changes; mixer translates it to gain. Instrument Load
-	 * needs this helper because a cymbal may now occupy either Advanced slot
-	 * position rather than only the legacy cymbalVoice global.
+ * instance pan byte changes; mixer translates it to gain. InstrumentManager
+ * supplies the current tagged member instead of a fixed cymbal global.
 	 */
 	if(!voice)
 		return;
@@ -73,10 +66,9 @@ void Cymbal_initVoice(CymbalVoice *voice)
 	/*
 	 * Initialize one cymbal runtime instance.
 	 *
-	 * Inputs: caller-owned CymbalVoice. Output: oscillator, transient,
-	 * envelope, filter, distortion, and LFO defaults match the legacy
-	 * cymbalVoice initialization. InstrumentManager calls this for dynamic
-	 * per-slot pools, keeping cymbal defaults local to the cymbal module.
+ * Inputs: caller-owned CymbalVoice. Output: oscillator, transient, envelope,
+ * filter, distortion, and LFO members receive cymbal defaults. The manager
+ * calls this for one tagged member, keeping defaults local to the module.
 	 */
 	if(!voice)
 		return;
@@ -125,16 +117,6 @@ void Cymbal_initVoice(CymbalVoice *voice)
 
 }
 //---------------------------------------------------
-void Cymbal_init()
-{
-	Cymbal_initVoice(&cymbalVoice);
-}
-//---------------------------------------------------
-void Cymbal_trigger( const uint8_t vel, const uint8_t note)
-{
-	Cymbal_triggerVoice(&cymbalVoice, 4u, vel, note);
-}
-//---------------------------------------------------
 void Cymbal_triggerVoice(CymbalVoice *voice, const uint8_t source_slot,
                          const uint8_t vel, const uint8_t note)
 {
@@ -168,7 +150,7 @@ void Cymbal_triggerVoice(CymbalVoice *voice, const uint8_t source_slot,
 		offset -= voice->transGen.volume;
 	}
 	if(voice->osc.waveform == SINE)
-		voice->osc.phase = (0x3ff<<20)*offset;//voiceArray[voiceNr].osc.startPhase ;
+		voice->osc.phase = (0x3ff<<20)*offset;
 	else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)
 		voice->osc.phase = (0xff<<20)*offset;
 	else
@@ -189,20 +171,14 @@ void Cymbal_triggerVoice(CymbalVoice *voice, const uint8_t source_slot,
 	SnapEg_trigger(&voice->snapEg);
 }
 //---------------------------------------------------
-void Cymbal_calcAsync()
-{
-	Cymbal_calcAsyncVoice(&cymbalVoice);
-}
-//---------------------------------------------------
 void Cymbal_calcAsyncVoice(CymbalVoice *voice)
 {
 	/*
 	 * Calculate one cymbal instance's control-rate block.
 	 *
-	 * Inputs: CymbalVoice pointer. Output: envelope, snap, and oscillator
-	 * frequencies advance on that instance only. The helper cannot be folded
-	 * into Cymbal_calcAsync() because dynamic slots may use a different
-	 * CymbalVoice than the legacy global.
+ * Inputs: CymbalVoice pointer. Output: envelope, snap, and oscillator
+ * frequencies advance on that tagged instance, independent of any historical
+ * physical cymbal slot.
 	 */
 	if(!voice)
 		return;
@@ -233,11 +209,6 @@ void Cymbal_calcAsyncVoice(CymbalVoice *voice)
 	osc_setFreq(&voice->modOsc2);
 }
 //---------------------------------------------------
-void Cymbal_calcSyncBlock(int16_t* buf, const uint8_t size)
-{
-	Cymbal_calcSyncBlockVoice(&cymbalVoice, buf, size);
-}
-//---------------------------------------------------
 void Cymbal_calcSyncBlockVoice(CymbalVoice *voice, int16_t* buf,
                                const uint8_t size)
 {
@@ -245,9 +216,8 @@ void Cymbal_calcSyncBlockVoice(CymbalVoice *voice, int16_t* buf,
 	 * Render one cymbal instance into a mono block.
 	 *
 	 * Inputs: CymbalVoice pointer, destination buffer, and block size. Output:
-	 * buf receives the FM cymbal, transient, envelope, and distortion output
-	 * for that instance. InstrumentManager uses this for current slot type
-	 * dispatch; the legacy wrapper remains only for old fixed-slot callers.
+ * buf receives the FM cymbal, transient, envelope, and distortion output for
+ * that tagged instance. InstrumentManager selects it through the runtime tag.
 	 */
 	if(!voice || !buf)
 		return;

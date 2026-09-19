@@ -18,9 +18,15 @@ InstrumentMrp Save, asyncfatfs LFN/case support, direct `000..999` slots,
 recursive Kit/Scene slot replacement rules, Load/Save hardware menu repair,
 Scene-owned mix settings, root Scene Load/Save, the first root Bank
 scan/load/save bridge, Bank-first boot fallback, and draft Scene/Bank
-`pattern.pat` persistence. The next Phase 3 emphasis is the real 16-Scene Bank
-workspace, Bank-local Scene toggle/save/load semantics, and later autosave
-promotion; descriptor-aware automation remains a parallel runtime follow-up.
+`pattern.pat` persistence. Sessions 040-044 completed the real 16-Scene Bank
+workspace, compact bitmap Pattern bridge, bounded identity/cache ownership,
+cold-boot tagged-runtime activation, and harmonized root Scene/Bank Load
+completion. Sessions 045-061 completed the accepted AutoSave A/B scalar
+reader/writer, typed HCNAMES provenance, committed Load/Save publication, and
+boot restore. Pattern and Effect data are not yet in HCPR. The remaining Phase
+3 emphasis is descriptor-aware automation and Effect placeholders; Pattern
+storage is the next feature, while the consolidated Load/Save refactor follows
+under `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
 Phase 4 is the dynamic stack Pattern implementation that used to be scoped as
 Phase 3. Phase 5 is user-facing performance workflow, MIDI cleanup, copy/clear
 helpers, and menu controls. Phase 6 is DSP expansion.
@@ -36,6 +42,329 @@ Within each phase, features are grouped by **where they live in the codebase**, 
 
 Every phase ends with **Open Engineering Questions** (things that need a decision or a measurement before/during implementation) and **Suggested Complementary Features** (ideas adjacent to what you asked for, flagged clearly as suggestions, not commitments).
 
+The open Load/Save, AutoSave, HCNAMES, `settings.cfg`, browser-cache, and
+related hardware-test backlog has been moved to
+`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`. That document is the sole
+forward-work list for the deferred post-Pattern Load/Save bugfix/refactor pass;
+historical resolved-session material below remains background only.
+
+---
+
+## Pinned filesystem correctness target — duplicate-slot overwrite
+
+**Status: CLOSED for ordinary use.** Session 054 found and fixed the actual
+root cause across five successive bugs (a spurious timeout-to-error
+conversion; HCNAMES source never staged on any Save path; and — the real
+`ScnS05` defect — a descend/ascend identity invariant in the native
+`afatfs_deleteTree()` traversal broken across two well-intentioned earlier
+fixes). Session 055 hardware-confirmed the fix: a full Kit-modify-save,
+Instrument-modify, Scene-modify-save, and Bank-save-then-load round trip
+reported no errors. Full round-by-round diagnostic trail:
+`knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md`.
+
+The duplicate-folder defect in Bank, root Scene, and Kit overwrites is an
+AsyncFATFS recursive-delete correctness problem. Its solution is to repair
+`afatfs_deleteTree()`, not to introduce an `oldNNN-xxxx` rename protocol,
+temporary root promotion, or a boot-time cleanup feature.
+
+The repair must make the native deleter recursively retire one exact directory
+object captured from the immediate parent scan, including its nested children,
+VFAT name entries, parent return, cluster chains, cache/handle ownership, and
+exactly-once terminal callback. Existing Save callers must continue to parse
+the requested visible slot, capture that one `afatfsObjectId_t`, wait for
+successful native deletion, and only then create the replacement numbered
+directory. A delete failure remains a Save failure; it must not delete a
+guessed path, all same-slot siblings, or be hidden behind a later boot task.
+
+Validation requires populated recursive Bank, Scene, and Kit fixtures: replace
+one occupied slot, reload the result, confirm neighbouring slots are unchanged,
+and exercise the native callback/error path. Saving while audio runs is a
+separate hardware gate. `OLD_OVERWRITE_CLEANUP.md` is the condensed decision
+record; it contains no implementation plan that overrides this pinned target.
+
+## Session 047 deferred filesystem and Bank behavior
+
+**Status: known bugs; deliberately deferred to a later, isolated session.**
+
+- **Overwrite Save may leave the old slot folder in place — RESOLVED Session
+  054, hardware-confirmed Session 055.** See the pinned target above. Do not
+  reintroduce an `old*`-rename scheme, boot-time cleanup, or a silent
+  best-effort fallback; the fixed design is exact-object delete/recreate.
+- **Pinned AutoSave reader rule — resolve Instrument type before reading its
+  parameter matrix.** The future HCPRMS reader must use each stored three-byte
+  Instrument type token (`drm`, `snr`, `cym`, or `hat`) to select the registry
+  descriptor table before interpreting that slot's fixed Normal/Morph cells.
+  For slot 6, a Choke type owns the alternate track-7 decay through its real
+  `amp_envelope_decay_choke` descriptor; the reader must not look for a second
+  generated Kit value in that case. Only a non-Choke slot-6 type with a base
+  `amp_envelope_decay` descriptor uses the separate Kit-owned track-7 endpoint
+  bytes (normal and Morph) in the Scene's Kit region. If the non-Choke type has
+  no base decay descriptor, there is no generated track-7 parameter to restore.
+  The `7dc` Scene modulation target remains a runtime overlay on that retained
+  base value, not another AutoSave field. Instrument names/filenames/provenance
+  continue to come from HCNAMES. Preserve this type-first reconstruction and
+  the existing wire layout when implementing the reader; do not add a second
+  parameter hunt or duplicate name authority.
+- **Deferred host tooling:** after AutoSave is complete and every development
+  log format is settled, add one read-only `/tools/` converter that consumes
+  copied `SD_CARD/` logging outputs and writes a dated, human-readable
+  `dev_log_date.txt` in the project root. It must understand the final
+  `asavetrc.bin` lifecycle records and `/bootlog.bin` token/capsule format,
+  but must not be implemented while either format is still evolving.
+
+---
+
+## Session 043 implementation baseline (2026-07-25)
+
+The storage prerequisites for later Pattern and DSP work are complete and must
+be treated as the current baseline, superseding older roadmap estimates:
+
+- Every resident Scene has only a 112-byte `PatternSet` on/off bitmap
+  (`7 x 128` bits); v3 `pattern.pat` writes seven 32-hex-character rows. The
+  former `Step`/automation/timing Pattern allocations and legacy binary stream
+  are retired. This is a deliberately minimal bridge, not the later dynamic
+  event-pool Pattern design.
+- The slider attenuator LUT is 1,024 native `float` entries (4,096 B), indexed
+  with raw ADC `>> 2` and no LUT interpolation. Mixer block smoothing remains
+  a separate behavior.
+- Six 1,176-B tagged InstrumentManager runtime slots (7,056 B total) replace
+  every former per-engine voice/pool allocation. Future instruments must fit
+  the reserve; increasing it expands all six slots and requires explicit user
+  approval of the SRAM allocation.
+- `transientData` is a 26,460-B FLASH ROM at `0x08053264`; DTCM static use is
+  now 12,280 B, leaving 118,792 B reserved exclusively for future delay-line
+  buffers. SRAM1 static use is 66,780 B, leaving 310,052 B reserved exclusively
+  for future Pattern data. Neither reservation is general headroom, and every
+  future RAM increase requires the user's byte/region/owner acknowledgement.
+- The flash transient placement is build/ELF verified; its full hardware audio
+  stress matrix remains pending. The complete measured baseline is in
+  `knowledge_files/specification_reference/SRAM_MANIFEST.md` and the durable
+  decisions are in Session 043's handoff.
+
+## Session 044 Phase 3 load/runtime baseline (2026-07-28)
+
+- SceneData initializes all retained Instrument types before tagged DSP runtime
+  construction. Scene activation clears outgoing destinations, image-applies
+  every incoming type, then performs one all-source LFO/velocity rebind. Cold
+  boot starts the exact ordinary Scene-switch worker after audio startup, and
+  hardware confirmed the initially selected Scene and both reported LFO targets.
+- Top-level Load:Bank loads its root index, immediately previews the unchanged
+  highlighted Bank's `00..15` children, and gates input until the destination
+  mask is valid. The explicit OK request alone enters command state.
+- Accepted OK/OW operations display `...`, suppress all cursors, and remain
+  locked through their real terminal work before returning to the bracketed
+  type row.
+- Pure root Scene/Bank Loads commit payload and HCNAMES, apply DSP, then reload
+  their unchanged `.hcindex` read-only as the final command step. Only Saves
+  that mutate Kit/Scene/Bank namespaces physically rescan/rebuild an index.
+- The final linked image uses 12,280 B DTCM and 66,776 B SRAM1. The RAM
+  reservation/approval policy is unchanged.
+- Four pre-audio SD pacing holds remain in the source after an intermittent
+  boot report. The hang is not reproducible or localized; these holds are not
+  evidence of a verified root-cause fix.
+
+## Session 052 Bank persistence and deferred boot-sanitizer refactor (2026-08-18)
+
+### Discovery and retry evidence
+
+The first updated-card boot failed before Bank Load with `bootlog.bin` equal to
+`KQ019KST`: the boot Kit-quarantine traversal had reached root Kit slot 019
+while opening/streaming `kitset.kcg`. The current boot path runs that content
+validation from `filesystem_createLibraryIndexBlocking(FS_LIBRARY_INDEX_KIT)`
+before the Scene and Bank scans (`main.c:551-599`; `filesystem.c:20732-20766`).
+It uses one ten-second `KITQUAR` deadline for the whole root Kit traversal and
+reads each `kitset.kcg` one byte at a time (`filesystem.c:16992-17064`). The
+visible Kit 019 fixture is structurally valid on the copied card, so this
+evidence identifies an unnecessarily broad/expensive boot gate, not proof of a
+bad Kit 019 file.
+
+On retry, boot completed and a full Bank 008 test load completed. The copied
+card then showed:
+
+- `settings.cfg`: `active_bank=8`;
+- both `.hcprms` records: Bank 008 / `Full`, active Scene 6, voice-edit mask
+  `0x0040`, and `scene_present_mask=0xffff`;
+- trace `B` at Bank commit: resident mask `0xffff`, effective load mask
+  `0xffff`;
+- trace `B` at AutoSave drain: resident mask `0xffff`, payload offset 10;
+- `tools/verify_bank_autosave.py SD_CARD 8`: `PASS`.
+
+This confirms the Session 052 settings and present-mask corrections. The
+unchanged eight-byte `bootlog.bin` is stale failure evidence: a successful
+boot does not delete the previous boot-failure record.
+
+### Resolved historical target — boot sanitation versus load validation
+
+Session 057 removed broad Kit-content validation from boot and moved validation
+to explicit Load. The still-unverified corrupt/partial-object behavior and the
+unimplemented over-eight-character canonicalization policy have moved to
+`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; the resolution ledger near the
+end of this file retains the historical implementation summary.
+
+
+### Resolved historical targets — Bank Save present-mask union and settings boot mark
+
+**Historical status: both resolved in Session 057.** These are the two items
+from `SESSION_052_POST_ANALYSIS.md` Section 8 (P1 and P2); the detailed text
+below records the pre-fix analysis, and the resolution ledger near the end of
+this file records their closeout.
+
+#### P1 — Bank Save still overwrites the resident Scene-present mask
+
+`filesystem.c:13945` still performs:
+
+    bank_setScenePresentMask(op_bank_scene_save_mask);
+
+`op_bank_scene_save_mask` is the caller-supplied save mask, validated only to
+16 bits at `filesystem.c:21165-21167`. Bank Save is explicitly a **subset**
+operation: the payload loop writes only children whose bits are set
+(`filesystem.c:13687-13703`), and the active-scene relocation guard at
+`filesystem.c:21175-21197` treats a partial mask as a first-class case
+("Save:[Bank] may intentionally save only a subset of resident Scenes").
+
+Failure scenario: start with 16 resident Scenes (`0xFFFF`), then `Save:[Bank]`
+with only Scenes 0-3 selected (`0x000F`). The overwrite drops bits 4-15 even
+though those Scenes remain resident in SRAM. Consequences:
+
+- `bank_scenePresent()` returns false for the dropped Scenes, so the AutoSave
+  Scene-payload capture (`autosave_scenePayloadBase()` gates on it) silently
+  stops persisting them.
+- Load/Save SEQ LEDs and voice-edit fan-out no longer match the data still in
+  RAM.
+- A later Bank Load that does a *union* cannot restore those bits unless the
+  new load happens to request them.
+
+Bank Load already uses a union (`filesystem.c:10454`); Save is the lone
+inconsistent writer and the only mechanism that can take a mask `bank_init()`
+seeded to 1 and make it zero. The Session 052 test was a **Load**, so this path
+was never exercised by the verification.
+
+Resolution (Candidate C, one line):
+
+    bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() | op_bank_scene_save_mask));
+
+#### P2 — Unconditional settings mark produces one redundant `active_bank` write per boot
+
+The three `filesystem_markSettingsDirty()` calls (`filesystem.c:10346`, `10501`,
+`13959`) are unconditional, so the boot ladder fires the settings writer on
+every power-on:
+
+1. `settings.cfg` parses `active_bank=12` -> `bank_setRestoreBankSlot(12)`
+   (`filesystem.c:2071-2075`).
+2. `main.c:806` runs `preset_loadBank(12, 0xffff)` -> the boot Bank Load commit
+   executes `bank_setRestoreBankSlot(12)` (a no-op, already 12) followed by
+   `filesystem_markSettingsDirty()`.
+3. At that moment `fs_settings_runtime_ready` is still `0`; the gate is not
+   opened until `main.c:942` calls `filesystem_enableRuntimeSettingsWrites()`.
+   The mark only latches `fs_settings_dirty = 1`.
+4. `filesystem_enableRuntimeSettingsWrites()` sees the dirty latch and restarts
+   the one-second debounce deadline (`filesystem.c:19151-19154`).
+5. `filesystem_settingsWriterSchedule_tick()` then starts
+   `FS_INTERNAL_OP_SAVE_GLOBALS`, which re-serializes `active_bank` from
+   `bank_restoreBankSlot()` — writing back the *same* value already on the card.
+
+Net effect: one value-idempotent `settings.cfg` rewrite on every boot with a
+valid Bank. It is harmless to correctness and has a real upside (if the boot
+Bank fell back to a different slot than the stored one, it reconciles
+`settings.cfg`), but it is an extra SD write plus one foreground filesystem
+operation per power-on. The Session 052 pre-plan explicitly chose the
+unconditional mark ("the unconditional mark so both paths share one authority")
+rather than gating it on `fs_settings_runtime_ready`. Session 057 deliberately
+accepted that tradeoff; this is no longer an open decision.
+
+### Resolved historical target — AutoSave boot reader
+
+The pre-reader durability plan formerly recorded here is implemented and has
+been superseded by the authoritative reader contract in
+`knowledge_files/specification_reference/AUTOSAVE.md` and the Session 061
+reader work. Its remaining interaction and regression tests now live in
+`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; do not use the former
+pre-implementation assumptions here as current behavior.
+
+### Session 053 test-report defects (status after Sessions 054-055)
+
+- **HCNAMES source provenance is not updated on Save — RESOLVED Session 054.**
+  All four Save paths now stage `filesystem_setResidentSource()`; root
+  Instrument Save additionally needed a new hand-off into
+  `FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT` since it had never reached any
+  HCNAMES publish path before. See `FILESYSTEM_SPEC.md`.
+- **Scene overwrite `ScnS05` — RESOLVED Session 054, hardware-confirmed
+  Session 055.** Not one bug but three in sequence (a spurious
+  timeout-to-error gate, then a descend/ascend identity invariant broken
+  across two intermediate fixes). See the pinned target above and
+  `054_SESSION_HANDOFF_LOG.md`.
+- **Bank Save entry freeze — almost certainly the same defect as, and fixed
+  by, the Session 055 Load-menu freeze investigation** (identical signature:
+  no forensic evidence, only the ordinary Load/Save-page writer-suppression
+  record). Not a separate open item; watch for a recurrence rather than
+  re-investigating from scratch.
+- **Boot freeze with `.hcprms2` truncated at 32 KiB — RESOLVED Session 056.**
+  `afatfs_fseekAtomic()` failed to update logical file size, leaving the FAT
+  entry at one 32 KiB physical cluster. The fix and 34,768-byte hardware
+  result are recorded in `knowledge_files/specification_reference/AUTOSAVE.md`.
+
+### Session 054-055 remaining non-Load/Save deferred targets
+
+- **`AUTOSAVE_TRACE_RECORD_COUNT` reversion decision.** Currently 2,048
+  records (`config.h:255`), a session-scoped approved expansion for the
+  recursive-delete investigation; normal default is 64. Needs an explicit
+  decision — revert now that the pinned target is hardware-confirmed closed,
+  or keep it while further Save-path work is plausible.
+- **`DEV_LOGGING_IWDG` hardware validation.** Ships disabled by default
+  (Session 054 fixed a boot-hang regression in it, and a second hazard where
+  it would have reset the modal sample install mid-`sampleFlash`
+  erase/program). The feature itself has never successfully run on hardware.
+  Enable deliberately for a future hang-hunting session, `make clean` first.
+- **Makefile header dependency tracking.** No `-MMD`/`-MP`/`-include *.d`;
+  editing `config.h` alone triggers no rebuild. Add `-MMD -MP` to `CFLAGS`
+  plus `-include $(OBJS:.o=.d)`. Until then, always `make clean` after any
+  header edit.
+
+### Session 060 resolved defects and remaining refactor targets
+
+- **Boot Instrument `.hcindex` generation for Snare/Cymbal/HiHat —
+  RESOLVED.** Only `Instrument/Drum/.hcindex` was ever generated at boot;
+  the other three typed indexes were silently missing across every SD card
+  capture, with the failure return value discarded at `main.c:727`. Root
+  cause: macOS creates hidden `._<name>.<ext>` AppleDouble resource-fork
+  files on FAT volumes, and the boot repair step
+  (`filesystem_repairBuildCandidate()`, `filesystem.c:9615`) had no
+  unusable-stem guard, unlike the scan step. Every `._` file passed type
+  classification (suffix-only match) but produced an empty display stem,
+  so repair fell back to a collision-prone canonical name `inst.<ext>`,
+  aborting the entire instrument repair pass before any scan/index could
+  run. Fixed at two layers: an unusable-stem guard added to the repair step
+  (`filesystem.c:9660`, defense-in-depth) and a system-wide `._` prefix
+  filter added to `afatfs_findNextObject()` itself
+  (`asyncfatfs.c:2972-3004`), making AppleDouble files invisible to every
+  directory consumer — repair, scan, index, save, load — not just this one
+  call site. See `S060_HCINDEX_FIXUP.md` and
+  `ASYNCFATFS_REFERENCE.md` Object Iteration section.
+- **`op_close_status` staleness hazard — general pattern, worth watching.**
+  Phase B's HCNAMES safe-write tail depends on `op_close_status`
+  (a shared, operation-scoped static) being accurate at the temp-file
+  close-wait phase. Bank Load's child Scene-loading sub-phases set this
+  same static to `FS_STATUS_ERROR` on recoverable per-child failures
+  (scene not found, etc.) long before the HCNAMES write phase runs later
+  in the same operation, and nothing re-initialized it in between. The fix
+  was three explicit `op_close_status = FS_STATUS_DONE;` insertions right
+  after each write path's temp-file open succeeds. The general lesson:
+  any new multi-phase state machine that reuses this shared static across
+  a long phase range must explicitly reinitialize it before the phase that
+  trusts it, not assume the previous phase left it correct. See
+  `S060PHASE_B_POST_FIX.md`.
+- **Settings-writer/Load-Save-command race — pattern now has two instances.**
+  Session 060 found a second occurrence of the class of bug first fixed for
+  the autosave trace flush scheduler: `filesystem_settingsWriterSchedule_tick()`
+  could start `SAVE_GLOBALS` and take the filesystem facade in the gap
+  between an accepted Load/Save command's payload completion and Menu's
+  final read-only `.hcindex` restore, producing a generic `FsErr` overlay
+  even though nothing actually failed. Fixed by adding the same
+  `menu_isLoadSaveCommandActive()` guard the trace flush scheduler already
+  had (`filesystem.c:22563`). **Any future idle/background filesystem
+  scheduler must carry this same guard** — it is not automatic, and this is
+  the second scheduler that shipped without it. See `S060PHASE_B_POST_FIX.md`
+  Hardware Test 2/3.
 ---
 
 ## Phase 1 — Foundation Refactors
@@ -200,6 +529,11 @@ dynamic Pattern rewrite begins.
 
 Finish descriptor-backed instrument load/apply coverage:
 
+- Status after Session 044: cold boot and later Scene switching now share the
+  same type-safe activation lifecycle. SceneData exists before
+  InstrumentManager constructs tagged members; every incoming slot type/image
+  is valid before the all-source two-LFO-pair/velocity rebind; no physical
+  Drum/Snare/Cymbal/HiHat arrangement is assumed.
 - Status after Session 034: the main descriptor runtime path is live for the
   current Drum/Snare/Cymbal/HiHat rows, including the LFO expansion,
   voice-local decimation, velocity amount, per-voice Morph, and Scene
@@ -306,18 +640,21 @@ Complete the menu path required for descriptor-backed instruments:
   names/stems. Root `Instrument/` scans `.drm`, `.snr`, `.cym`, and `.hat`
   pools per type in alphanumeric order; lower-row browsing loads immediately,
   while type changes do not replace the current kit-member display/source. The
-  display index is one-based and saturates at 999. `kit_t` preserves an
-  eight-character per-slot display stem plus a 16-character save stem for
-  provenance/save metadata.
+  display index is one-based and saturates at 999. Session 042 later removed
+  retained `kit_t`/Scene name and filename stems; HCNAMES and the one active
+  `.hcindex` cache now own display identity.
 - Load-context SEQ LEDs now use `pat_sceneHasActiveSteps()`: in Kit Load they
   are multi-Scene toggles and every selected target blinks; in Instrument Load
-  exactly one Scene is selected and blinks. The code is shaped for 16 Scenes
-  even though only Scene 1 is resident today.
+  exactly one Scene is selected and blinks. All 16 Scenes are resident.
 - Status after Session 039: Scene and Bank are promoted top-level Load/Save
   entries with explicit OK/OW confirmation. File/Dir/sDir diagnostics are
   compiled but hidden unless `CONFIG_DEV_MODE != 0`. Scene and Bank operations
   return the cursor to the top-row type field when they complete. Load Bank
   shows an OK affordance and does not load while scrolling.
+- Status after Session 044: successful Bank index entry continues into the
+  highlighted Bank's child preview and gates input until its mask is resident.
+  Accepted OK/OW commands show `...` with no cursor through payload, apply, and
+  terminal cache work, then always reset to the bracketed type row.
 - Keep scene-level MIDI note/channel and `voice_decimation_all` out of
   `kitset.kcg` and instrument files.
 
@@ -387,20 +724,20 @@ Implement load/save operations for the settled file types in
   exchange only and is not part of the autosave workspace.
 - Add an FX slot shim so Scene folders can validate/store `effects.fx` before
   Phase 6 implements full effects.
-- Bank load/save is implemented as the initial one-resident-Scene bridge.
-  Final Bank load/save still needs the 16-Scene workspace, SEQ-button Scene
-  toggles, per-Scene save/load masks, and preservation of untoggled Bank-local
-  child Scene folders.
+- Bank load/save is implemented for the 16-Scene workspace with SEQ-button
+  Scene masks, selected/present child intersection, preservation of unselected
+  resident payload/identity, one-child-at-a-time rescan, and shared Scene
+  parsing. Session 044 repaired unchanged-slot Load:Bank admission and made the
+  active loaded Scene apply immediately during playback.
 - Pattern load/save stays bridge-only until Phase 4 replaces the Pattern file
-  format. Session 039's Scene/Bank `pattern.pat` v2 draft stores only
-  128x7 step-active bits plus per-track length/scale and keeps all other step
-  data at PatternData defaults.
+  format. Session 043's Scene/Bank `pattern.pat` v3 stores exactly the 112-byte
+  128x7 on/off bitmap as seven 32-hex-character rows; v1 is accepted empty and
+  v2 imports only its final bit field.
 - Effect load/save may initially validate placeholders; real FX parameters land
   in Phase 6.
 - `settings.cfg` replaces `glo.cfg` for system settings and active-bank number
-  selection. `settings.cfg` has a `.settings.cfg` autosave/backer file; both are
-  updated/re-written when closing the global settings menu or loading/saving a
-  Bank.
+  selection. A `.settings.cfg` backer remains target design only; no accepted
+  autosave/backer implementation currently updates it.
 
 Session 041 name-index/cache completion:
 
@@ -417,7 +754,17 @@ Session 041 name-index/cache completion:
   the shared cache was disposed during Instrument index generation.
 - The old 128-entry Instrument limit and the dedicated Kit/Scene/Bank
   presence/display/alias arrays are retired. The remaining 2,013-byte
-  `kitBrowser` compatibility bridge is deferred to the next cleanup session.
+  `kitBrowser` compatibility bridge was removed in Session 042.
+
+Session 044 Load/index completion:
+
+- HCNAMES completion is metadata-neutral and does not infer that a root
+  namespace needs rebuilding.
+- Kit/Scene/Bank Save owns one physical parent scan plus complete index rebuild
+  because Save may mutate the numbered namespace.
+- Pure Scene/Bank Load instead publishes the completed payload/result, applies
+  the active Scene through the shared clear/image/rebind worker, then reloads
+  the unchanged root index read-only before ending the explicit command.
 
 asyncfatfs note for future save code:
 
@@ -437,6 +784,15 @@ Implement debounced autosave after explicit Bank save paths exist. The original
 one-file wording is not sufficient once a resident Bank has sixteen editable
 Scenes: menu parameter edits may target any subset of Scenes, and one gesture
 can dirty multiple embedded Kits/Instruments at once.
+
+**Current status after Session 048: partially implemented under an accepted
+isolated-boundary plan.** An earlier prototype was rejected, but the current
+root A/B writer, scalar mutation hooks, normal root-Instrument marking, and
+compatible InstrumentMrp Morph-only marking are accepted hardware work. Do not
+generalize those results into a broad whole-object claim: Session 049 is
+limited to normal Kit Load, root Scene Load without Pattern, and selective
+Bank Load marking, one committed owner boundary at a time. The authoritative
+current contract is `knowledge_files/specification_reference/AUTOSAVE.md`.
 
 Architecture decision:
 
@@ -466,9 +822,10 @@ Architecture decision:
   - `scene/kit/instrument[0..5]`
   - `scene/effects.fx`
   - `scene/pattern.pat`
-- Autosave applies only to committed Bank Scene slots 1..16. The future
-  seventeenth landing/staging Scene is excluded until it is committed into a
-  Bank slot.
+- Autosave applies only to the 16 committed resident Bank Scene slots. There is
+  no seventeenth resident landing Scene in the current product shape; any
+  future staging remains private operation storage unless separately designed
+  and approved.
 - The active Bank is identified by number, not by folder display name. Root
   `settings.cfg` records that number; `.settings.cfg` is its autosave/backer
   file. Closing the global settings menu or loading/saving a Bank rewrites both
@@ -578,9 +935,10 @@ Implementation sequencing:
 
 - **Rename/replace primitive in `asyncfatfs`:** confirm or add a safe async
   primitive before implementing `.tmp` replacement.
-- **SRAM budget for 17 scenes:** each resident scene carries settings, kit
-  descriptor images, Pattern storage, and future FX state. Re-measure once the
-  Scene and Bank structs are real.
+- **SRAM budget for any future staging/Scene expansion:** the current product
+  has exactly 16 resident Scenes and a separate 2,048-byte non-Pattern
+  filesystem stage. Any seventeenth Scene or larger stage is a new retained
+  allocation and requires exact measurement plus explicit user approval.
 - **Descriptor automation/runtime ownership:** migrate `AutomationNode` from
   legacy byte CC/CC2 targets to canonical descriptor/Scene targets, correct
   raw float LFO adapter writes, and make modulation-node enumeration dynamic
@@ -845,7 +1203,9 @@ That division range was originally expressed in **sub-step** terms (64 sub-steps
 
 ### 5.7 Load/save UI rework
 
-The original `putting it together` draft proposed a specific knob remapping for the load/save menus (knob 1 = type, knob 2 = number/cursor, knobs 3/4 = character entry with capitals/numbers/lowercase split across them). Per your note, this is superseded — "we have bigger file changes in mind" — because the whole load/save menu needs rebuilding around the Phase 3 file model: banks, scenes, kits, patterns, samples, wavetables, effects, instruments, and root `settings.cfg`. The specific knob assignment idea is worth keeping as a starting point for that rebuild, but the menu structure itself (what "type" even means, what "auto-load" means per type) needs designing fresh against the authoritative filesystem spec rather than patched onto the current flat slot menu.
+Deferred until after Pattern data storage. The current revision risks, UI
+behavioral contract, and explicit test matrix are tracked in
+`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
 
 ### 5.8 External MIDI sequencing tracks
 
@@ -866,6 +1226,14 @@ From "notes from others" in `putting it together`: doubling the sequencer's trac
 
 **Location:** `Core/DSPAudio/`
 
+**Session 043 correction:** the DTCM figures and transient-relocation proposal
+in the historical Phase 6 discussion below predate the tagged-slot migration
+and implemented FLASH move. Do not use those numbers for allocation. Current
+DTCM use/free/reservation is the Session 043 baseline above and the linked
+`SRAM_MANIFEST.md`; `transientData` is already in FLASH and `sine_table`
+remains DTCM-resident. Any concrete delay/advanced-buffer allocation requires
+the user's explicit byte/region/owner acknowledgement before code is written.
+
 The heaviest phase computationally, and the one where the earlier drafts did the most guessing. This version tries to separate what's confirmed by the current code, what's confirmed by your answers, and what genuinely needs a measurement or a decision before implementation — rather than asserting specific byte counts that sound precise but aren't backed by anything.
 
 ### 6.1 Voice tiers
@@ -878,7 +1246,9 @@ Currently: `DRUM`, `SNARE`, `CYMBAL`, `HIHAT` instrument types, freely swappable
 
 **ITCM is off the table for this buffer, per your call**, and that's the right decision independent of the reasoning that follows: ITCM is only 16KB total and already holds the oscillator hot-path code (`calcSineBlock`, `calcFmBlock`, and the rest of the dozen or so `INITCM`-tagged functions in `Oscillator.c`) — keeping it reserved for code, as you said, avoids a real resource conflict rather than trying to measure exactly how tight a squeeze it'd be.
 
-**Freeing DTCM headroom by moving read-only tables to flash.** You asked specifically about `transientData` and `sine_table` — both are real, and I checked their exact sizes and current placement rather than estimating:
+**Historical pre-Session-043 DTCM analysis (superseded).** The following
+numbers and proposal are retained only to preserve the design rationale; use
+the Session 043 baseline and linked manifest above for every current decision.
 
 - `sine_table` (`Core/DSPAudio/wavetable.c:43`) is `const int16_t[TABLESIZE+1]` with `TABLESIZE = 4096`, so **4,097 × 2 bytes = 8,194 bytes**.
 - `transientData` (`Core/DSPAudio/transientTables.c:62`) is `const int8_t[NUM_TRANSIENTS][TRANSIENT_SAMPLE_LENGTH]` with `NUM_TRANSIENTS = 12` and `TRANSIENT_SAMPLE_LENGTH = 2205`, so **12 × 2,205 = 26,460 bytes**.
@@ -985,3 +1355,109 @@ The version of this document that existed before this pass was generated by spaw
 This revision replaces those with figures checked directly against `Core/` and the linker script where they could be verified, and flags the rest as open questions with a clear path to resolving them (mainly: build once, read the `.map` file) rather than asserting numbers the code doesn't support.
 
 It also goes back to the two rounds of architectural questions you answered earlier in the process — the 128-step/8-bar sequencer redesign, the dynamic event pool's exact bit layout and defragmentation approach, the three-tier voice model, the FX sequencer's static 384-byte structure, and the morph engine's one-parameter-per-cycle drain order — and uses your actual answers as the source of truth throughout, rather than the compressed one-line paraphrases those answers got reduced to in the intermediate draft.
+
+---
+
+## Session 057 resolutions (2026-08-28)
+
+Appended rather than edited in place, so the exact line numbers several
+already-archived session handoffs and this session's own planning documents
+reference elsewhere in this file (e.g. `SCOPING_TARGETS.md:249-287`) stay
+valid. Full detail: `knowledge_files/log_archive/057_SESSION_HANDOFF_LOG.md`.
+
+- **"Deferred refactor target — boot sanitation versus load validation"**
+  (above, under Session 052) — **RESOLVED.** Boot-time Kit content
+  validation/quarantine was removed; content is now validated lazily at
+  actual Load time, with a Kit-failure-cascades-to-owning-Scene rule for
+  root Scene Load and a never-fails-the-whole-operation partial-failure
+  contract for Bank Load. The implementation differs from this section's
+  original 4-point sketch in the specific quarantine mechanism (rename on
+  proven Load failure, not a boot-time canonicalize/validate pass) but
+  satisfies its stated constraint that a malformed payload found during an
+  explicit load must fail that load, not silently become a successful empty
+  library. Remaining hardware verification is tracked in
+  `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
+- **P1 — Bank Save present-mask union** (above) — **RESOLVED**, exactly as
+  this section's own "Candidate C, one line" prescribed.
+- **P2 — redundant settings-mark boot write** (above) — **RESOLVED as
+  "accept deliberately,"** the first of this section's own two offered
+  options, now that the settings write itself is safe (below).
+- New, not previously scoped anywhere in this file: **`settings.cfg` safe
+  write** (temp file + sync + validated promote, mirroring `.hcprms1/2`'s own
+  pattern) — implemented and hardware-verified. **Empty-Scene/Bank overwrite
+  guard** — implemented, with remaining verification moved to the dedicated
+  revision document. **Bank Save rewritten from total-tree-delete to per-Scene
+  delete-then-write** — fixes a Kit-quarantine/
+  `afatfs_deleteTree()` interaction bug (`ErrS05`) and an independent,
+  previously-undocumented data-loss bug where a partial `Save:[Bank]` deleted
+  every non-selected resident child. Hardware-tested. **A Bank Save/Load
+  screen freeze was root-caused and fixed** — not handle exhaustion (a
+  plausible-looking hypothesis, built into a full diagnostic and disproven by
+  its own trace evidence), but a foreground-poll counter misread as an
+  elapsed-time budget. Hardware-accepted.
+- Load/Save-family verification gaps and design questions that remain open
+  have moved to `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`. The short list
+  immediately below now retains only unrelated open items.
+
+---
+
+## Session 057 remaining open items outside the Load/Save revision backlog
+
+Full historical detail: `knowledge_files/log_archive/057_SESSION_HANDOFF_LOG.md`
+§17. The Load/Save, AutoSave, HCNAMES, `settings.cfg`, and browser-cache
+items formerly in this section now live in
+`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
+
+- **Sequencer chaselight LED can disappear** (user-reported, not yet
+  reproduced under logging). Both the rendering side
+  (`led_updateCurrentStep()`) and producer side (`seq_ledState.chaseStep`)
+  were traced but not root-caused.
+- **`bootlog.bin`/`asavetrc.bin` duplicate-name limitation** remains tracked
+  in `DEV_MODES.md`. The Session 056 LFN early-free-run-exit fix may have
+  narrowed or closed its mechanism, but the deliberate hardware re-check has
+  not run.
+- The trace-record-count, diagnostic-watchdog, and Makefile dependency items
+  remain in the Session 054-055 non-Load/Save list above.
+
+---
+
+## Session 066 identified bugs and future work (2026-09-16)
+
+- **AutoSave CPU usage.** AutoSave uses ~4-5% CPU constantly even when no
+  pattern or parameter changes exist; disappears when autosave is set to 'off'.
+  Need to investigate and reduce resource usage — the idle-poll or debounce-timer
+  path may be re-evaluating work that has no dirty state to capture.
+- **AutoSave off→on doesn't pick up changes.** When autosave is switched off and
+  back on, it doesn't pick up changes until the next reboot. The re-enable path
+  likely fails to re-arm the dirty mask or restart the writer scheduler from the
+  current resident state.
+- **Probability step parameter 'prb' only applies to trigger.** The probability
+  special currently controls whether the step's note fires, but it should control
+  whether the whole step (including its automation entries) is played. When
+  probability suppresses a step, automation on that step should also be
+  suppressed, matching the user's intent that the step as a whole is
+  probabilistic.
+- **Chaselight still missing sometimes.** Particularly after reboot; tends to
+  come back after switching scenes. Partially traced in Session 057 — both the
+  rendering side (`led_updateCurrentStep()`) and the producer side
+  (`seq_ledState.chaseStep`) were examined but the root cause is unresolved. May
+  relate to the Pattern/Scene index alignment (the `seq_activePattern` /
+  `menu_shownPattern` desync class of bug from Session 054).
+- **Menu specification sheet.** Need a comprehensive menu specification
+  reference in `knowledge_files/specification_reference/` covering all pages,
+  sub-pages, parameter assignments, knob/button behaviors, and display rules.
+  Dedicated future session — do not implement now.
+
+---
+
+## Session 063 deferred items (2026-09-11)
+
+- **Hardware CRC32C acceleration**: the STM32F765 CRC peripheral uses the
+  Ethernet polynomial (0x04C11DB7), not Castagnoli (0x1EDC6F41). All current
+  CRC32C users (AutoSave `.hcprms` A/B records, v4 Pattern file, Instrument
+  save content CRC) use the software byte-at-a-time loop in Autosave.c.
+  The hardware unit could be configured with a custom polynomial on parts
+  that support it (F7 does via CRC_POL), or a 256-entry lookup table would
+  give ~4× throughput at +1 KB ROM. Not a performance concern at current
+  payload sizes (≤35 KB) but may matter if AutoSave or file payloads grow.
+  Evaluate when a CRC caller becomes latency-sensitive.

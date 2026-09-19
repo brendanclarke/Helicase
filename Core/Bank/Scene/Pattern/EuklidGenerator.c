@@ -37,6 +37,7 @@
 
 #include "EuklidGenerator.h"
 #include "PatternData.h"
+#include "PatternStackService.h"
 
 static uint8_t euklid_length[NUM_TRACKS];
 static uint8_t euklid_steps[NUM_TRACKS];
@@ -257,10 +258,8 @@ void euklid_transferPattern(uint8_t trackNr, uint8_t patternNr)
 	/* Transfer generated Euclidean rhythm into the 128-step bridge pattern.
 	 *
 	 * The old generator wrote a 16-bit main-step mask. During this bridge the
-	 * active bit in Step[0..127] is the sequencer source of truth, so this writes
-	 * those existing Step records directly through PatternData pointers. Notes,
-	 * probability, velocity, and automation values are preserved; only the active
-	 * bit is changed. */
+	 * bitmap is the sequencer source of truth, so this clears then sets bounded
+	 * PatternData on-bits. No note, timing, or automation state is retained. */
 	uint8_t len;
 	uint8_t steps;
 	uint8_t rotation;
@@ -282,25 +281,18 @@ void euklid_transferPattern(uint8_t trackNr, uint8_t patternNr)
 		steps = len;
 	rotation = (uint8_t)(euklid_rotation[trackNr] % len);
 
-	for (i = 0; i < NUM_STEPS; i++) {
-		Step *step = pat_stepPtr(patternNr, trackNr, i);
-		if (!step)
-			continue;
-		step->volume &= (uint8_t)~STEP_ACTIVE_MASK;
-	}
+	/* Clear pool ownership through the service; trigger generation remains
+	 * immediate and is preserved by the later barrier drain. */
+	patSvc_clearTrack(patternNr, trackNr);
 
 	for (i = 0; i < len; i++) {
 		uint8_t dst;
 		bucket = (uint16_t)(bucket + steps);
 		if (bucket >= len) {
-			Step *step;
 			bucket = (uint16_t)(bucket - len);
 			dst = (uint8_t)((i + rotation) % len);
-			step = pat_stepPtr(patternNr, trackNr, dst);
-			if (step)
-				step->volume |= STEP_ACTIVE_MASK;
+			pat_setStepActive(patternNr, trackNr, dst, 1u);
 		}
 	}
 
-	pat_setTrackLength(patternNr, trackNr, len);
 }

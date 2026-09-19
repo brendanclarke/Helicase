@@ -58,6 +58,7 @@
 #include "triggerJacks.h"
 #include "sequencer.h"
 #include "sequencerTimer.h"
+#include "PatternStackService.h"
 #include "EuklidGenerator.h"
 #include "SomGenerator.h"
 
@@ -70,6 +71,7 @@
 
 #include "menu.h"
 #include "screensaver.h"
+#include "SplashAnimation.h"
 #include "ParameterArray.h"
 #include "presetManager.h"
 #include "BankData.h"
@@ -82,24 +84,29 @@
 
 #define SCB_VTOR (*(volatile uint32_t*)0xE000ED08UL)
 #define LCD_LIMIT_TICKS_PER_REFRESH 20 // lazy 20ms rate limit on time_sysTick
+/*
+ * Explicit production boot pacing at storage ownership boundaries.
+ *
+ * Developer boot diagnostics drain roughly one LCD frame before each
+ * filesystem stage and therefore add incidental latency that production lacks.
+ * These two fixed holds reproduce only the boundaries relevant to SD/mount and
+ * initial Bank readiness; they do not slow each filesystem tick or runtime I/O.
+ */
+#define BOOT_SD_POST_MOUNT_SETTLE_MS 50u
+#define BOOT_SD_PRE_BANK_SETTLE_MS 50u
 
 static void dsp_init(void)
 {
     uint8_t i;
 
     initRng();
-    initDrumVoice();
-    Snare_init();
-    Cymbal_init();
-    HiHat_init();
     /*
-     * Initialize InstrumentManager's non-native per-slot runtime pools.
+     * Initialize InstrumentManager's complete tagged runtime ownership.
      *
-     * Inputs: the legacy engine globals have just been initialized above.
-     * Output: additional Drum/Snare/Cymbal/HiHat instances used by loadable
-     * instrument slots receive the same engine defaults before any kit/preset
-     * applies values into them. This boot step lives here because startup owns
-     * DSP lifetime; InstrumentManager owns only the type-to-runtime mapping.
+     * Inputs: RNG plus the boot-resident active Scene type for each slot.
+     * Output: one initialized engine union member per visible slot before any
+     * kit/preset value is applied. No engine module owns a permanent native
+     * voice, so startup delegates all DSP runtime construction to the manager.
      */
     instrumentManager_runtimeInit();
     mixer_init();
@@ -113,9 +120,16 @@ static void boot_show_splash(void)
 {
     lcd_clear();
     lcd_setcursor(0, 1);
-    lcd_string("Sonic Potions");
+    lcd_data(2);
+    lcd_data(3);
+    lcd_data(4);
+    lcd_string("      voskomm");
+
     lcd_setcursor(0, 2);
-    lcd_string("LXR Drums V0.37");
+    lcd_data(5);
+    lcd_data(6);
+    lcd_data(7);
+    lcd_string("helicase 0.00");
 }
 
 static inline uint32_t irq_getBasepri(void)
@@ -147,6 +161,23 @@ static inline uint32_t dsp_maskLowPriorityIrqs(void)
 
 static void audio_check_and_render(void)
 {
+    /*
+     * Freeze foreground audio work while codec hardware is deliberately offline.
+     *
+     * Input: authoritative codec suspension. Output: when suspended, return
+     * before querying/filling the queue, draining pending triggers, advancing
+     * DSP/control blocks, or committing a buffer; when live, preserve the
+     * complete render loop.
+     *
+     * Why: suspend leaves the queue empty, so without this guard main would
+     * still calculate/commit unused slots, and DSP/trigger time must not advance
+     * without a DMA consumer. Resume zeroes/restarts hardware and later calls
+     * refill it. Affiliates: codec accessor/mutators,
+     * voiceControl_processPending(), mixer, and Menu's no-playback lifecycle.
+     */
+    if (audioCodec_isSuspended())
+        return;
+
     /* Audio render.
     ** Hardware DMA halves stay large enough for scheduling slack, while the
     ** legacy DSP advances in OUTPUT_DMA_SIZE chunks. This keeps EG/LFO/control
@@ -159,6 +190,7 @@ static void audio_check_and_render(void)
         for (uint32_t frame = 0; frame < AUDIO_DMA_FRAMES; frame += OUTPUT_DMA_SIZE) {
             uint32_t basepri;
             voiceControl_processPending();
+            seq_drainPendingAutomation();
             basepri = dsp_maskLowPriorityIrqs();
             mixer_calcNextSampleBlock(&buf[frame * 2], &buf2[frame * 2]);
             irq_setBasepri(basepri);
@@ -227,16 +259,21 @@ static void boot_delayMs(uint16_t ms)
 /*
  * Development-only boot-screen instrumentation.
  *
- * What: CONFIG_DEV_MODE compiles the durable Boot/FS, FOp/FPhs, FPhs/FSub,
+ * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the user
+ * to assess how operations are proceeding. It does not and should not ever add
+ * additional file interaction steps, since the diagnostic may be used to
+ * assess in-situ file procedures.
+ *
+ * What: DEV_MODE_DIAGNOSTIC compiles the Boot/FS, FOp/FPhs, FPhs/FSub,
  * and HPhs/HRow OLED observers used to isolate a blocking storage phase. Why:
  * each observer may deliberately drain the LCD queue before filesystem work,
- * which is useful for diagnosis but must not replace the normal splash or add
- * boot latency in ordinary firmware. With development mode disabled, the
+ * which is useful for diagnosis but must never start, stop, or otherwise add
+ * a filesystem operation. With screen diagnostic mode disabled, the
  * stage/active-operation macros below compile to no-ops and both filesystem
  * callback arguments become NULL; the underlying boot and `.hcnames` work
  * therefore runs in exactly the same order without any diagnostic display.
  */
-#if CONFIG_DEV_MODE
+#if DEV_MODE_DIAGNOSTIC
 static void boot_showHcnamesDiagnostic(uint8_t phase, uint16_t row)
 {
     static uint8_t last_phase = 0xffu;
@@ -263,6 +300,12 @@ static void boot_showHcnamesDiagnostic(uint8_t phase, uint16_t row)
 
     last_phase = phase;
     last_update_tick = now;
+    /*
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
+     */
     lcd_diagDisplayInt("HPhs", (int32_t)phase,
                        "HRow", (int32_t)row);
 }
@@ -280,6 +323,12 @@ static void boot_showFilesystemStage(uint8_t stage)
      * the following filesystem call. This helper does not start, pump,
      * acknowledge, or reorder any filesystem operation.
      */
+    /*
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
+     */
     lcd_diagDisplayInt("Boot", (int32_t)stage,
                        "FS", (int32_t)filesystem_status());
     lcd_waitForIdle();
@@ -293,7 +342,7 @@ static void boot_showActiveFilesystemDiagnostic(void)
     uint8_t phase;
 
     /*
-     * Flush each stage-11 filesystem transition before pumping it.
+     * Flush each stage-12 filesystem transition before pumping it.
      *
      * Inputs: read-only operation/phase coordinates from filesystem.c.
      * Output: `FOp` identifies repair=1, Bank=2, Scene=3, Kit=4, flush=5,
@@ -303,12 +352,24 @@ static void boot_showActiveFilesystemDiagnostic(void)
      * enters the next phase, including a phase whose first pump never returns.
      * The helper does not mutate or acknowledge filesystem state.
      */
+    /*
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
+     */
     filesystem_getBootDiagnostic(&op, &phase);
     if (op == last_op && phase == last_phase)
         return;
 
     last_op = op;
     last_phase = phase;
+    /*
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
+     */
     lcd_diagDisplayInt("FOp", (int32_t)op,
                        "FPhs", (int32_t)phase);
     lcd_waitForIdle();
@@ -331,6 +392,12 @@ static void boot_showFilesystemSubstep(uint8_t substep)
     if (substep == last_substep)
         return;
     last_substep = substep;
+    /*
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
+     */
     lcd_diagDisplayInt("FPhs", 43,
                        "FSub", (int32_t)substep);
     lcd_waitForIdle();
@@ -367,6 +434,7 @@ int main(void)
     lcd_init();
     lcd_tim7_init();
     boot_show_splash();
+    // splashAnimation_play();
     encode_init();
     din_init();
     dout_init();
@@ -378,18 +446,24 @@ int main(void)
 
     triggerJacks_init();
     sampleMemory_init();
-    dsp_init();
     /*
-     * SceneData owns every stored Pattern/Kit/parameter image, while BankData
-     * owns only the currently loaded Bank container identity.
+     * Establish retained Scene type ownership before constructing tagged DSP
+     * runtime members.
      *
-     * Inputs: power-on SRAM. Outputs: resident Scene defaults and a blank
-     * non-Bank container state. Bank init belongs beside Scene init because
-     * boot may later load a Bank, an empty Bank, a root Scene fallback, or a
-     * root Kit fallback, and all of those paths read these identity cells.
+     * Inputs: power-on Scene/Bank SRAM. Outputs: scene_initAll() writes a
+     * valid descriptor type into every resident instrument slot before
+     * dsp_init() calls instrumentManager_runtimeInit(). This order is required
+     * because DRM is enum value zero: initializing runtime first would mistake
+     * raw BSS for six valid Drum assignments and let a loaded Snare/Cymbal/Hat
+     * descriptor write through the wrong tagged member until a later switch.
+     * Bank init remains adjacent because boot may load a Bank, an empty Bank,
+     * a root Scene fallback, or a root Kit fallback from this defined state.
+     * Affiliates: SceneData's default-type construction, BankData container
+     * identity, InstrumentManager tagged slots, and Preset's post-load apply.
      */
     scene_initAll();
     bank_init();
+    dsp_init();
     seq_init();
     euklid_init();
     som_init();
@@ -413,6 +487,35 @@ int main(void)
     ** After audioCodec_init(), all SD operations are non-blocking.
     ** ----------------------------------------------------------------- */
     {
+        /*
+         * Open the timeout-logging window around only pre-audio filesystem work.
+         *
+         * DEV_MODE_LOGGING writes operation codes to file for use in debugging.
+         * It must never print anything to the screen or otherwise delay
+         * operations unnecessarily since logging may be used to assess timing
+         * failures in other modules that might otherwise be obscured by screen
+         * write delays.
+         *
+         * Input is the idle boot storage facade; output enables eight-byte
+         * operation capture and cooperative ten-second deadlines until the
+         * common exit below. Why: runtime Menu/Preset/autosave work must never
+         * inherit diagnostic dirty-abandon behavior. Affiliates:
+         * filesystem_bootLoggingEnd() and audioCodec_init().
+         */
+        filesystem_bootLoggingBegin();
+        /*
+         * DEV_LOGGING_IWDG (config.h): starts the independent watchdog for
+         * this boot and, only if the previous boot's reset cause was the
+         * IWDG itself, replays its retained last-known boot-log code to
+         * bootlog.bin before continuing. A no-op when the flag is 0.
+         */
+        filesystem_devIwdgBootCheck();
+        /*
+         * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for
+         * the user to assess how operations are proceeding. It does not and
+         * should not ever add additional file interaction steps, since the
+         * diagnostic may be used to assess in-situ file procedures.
+         */
         boot_showFilesystemStage(1u);  /* card init + asyncfatfs mount */
         uint8_t sd_ok = filesystem_initCardAndMountBlocking();
         show_unsupported_card_warning = filesystem_bootDetectedUnsupportedCard();
@@ -420,18 +523,80 @@ int main(void)
         /* Menu init — must be before preset load (memsets parameter_values) */
         menu_init();
         menu_setNumSamples(sampleMemory_getNumSamples());
+        /*
+         * Mount can publish a timeout before Menu initialization, but Menu is
+         * still required by the runtime path reached after recovery. Input is
+         * the latched mount result; output jumps to the one cleanup path only
+         * after that mandatory initialization. Affiliate: MOUNTSD logging.
+         */
+        if (filesystem_bootLoggingTimedOut())
+            goto boot_filesystem_timeout;
 
         if (sd_ok) {
+            /*
+             * Separate a ready mount from the first root-directory scan.
+             *
+             * Inputs: SD SPI initialization and asyncfatfs mount both reported
+             * ready, and Menu initialization has completed. Output: a bounded
+             * 50 ms pre-audio hold before filesystem_requestScanKits() starts
+             * the first product traversal. This tests and covers cards whose
+             * controller needs a short post-mount quiet interval; no cache,
+             * filesystem status, or retained SRAM state changes during it.
+             */
+            timebase_holdPreAudioMs(BOOT_SD_POST_MOUNT_SETTLE_MS);
+
+            /*
+             * Load keyed settings before any initial Bank choice or autosave
+             * file decision.
+             *
+             * Inputs: mounted card, initialized Menu parameter storage, and
+             * the completed post-mount settle. Outputs: Global runtime values,
+             * active_bank, and the AutoSave byte are available before their
+             * first consumers. Why: the former late
+             * stage loaded settings only after Bank/fallback selection, making
+             * active_bank and AutoSave OFF ineffective during boot. Preset's
+             * pre-audio completion applies Globals synchronously and a missing
+             * file retains defaults. Affiliates: filesystem settings parser,
+             * BankData restore slot, HCNAMES' later Bank-load publication, and
+             * the policy call below.
+             */
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
+            boot_showFilesystemStage(2u);
+            preset_loadGlobals();
+            while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS &&
+                   !filesystem_bootLoggingTimedOut())
+                filesystem_tick();
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
+            menu_pollPresetStatus();  /* apply globals + ack */
+            filesystem_setAutosaveEnabled(
+                parameter_values[PAR_AUTOSAVE_ENABLED]);
+
             /*
              * (The root-level `.hcindex` boot marker generation has been moved
              * to run after the Instrument scan so it can write the cache).
              */
 
             /* Synchronous kit scan (blocking at boot, OK) */
-            boot_showFilesystemStage(2u);
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
+            boot_showFilesystemStage(3u);
             filesystem_requestScanKits(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
                 filesystem_tick();
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
             filesystem_ack();
 
             /*
@@ -442,8 +607,31 @@ int main(void)
              * rows are retained in `/Kit/.hcindex`; their position, not
              * alphabetic order, is the library identity used by Load/Save.
              */
-            boot_showFilesystemStage(3u);
-            (void)filesystem_createLibraryIndexBlocking(FS_LIBRARY_INDEX_KIT);
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+            */
+            boot_showFilesystemStage(4u);
+            /*
+             * Do not discard the Kit-index result at boot.
+             *
+             * Inputs: completed repair/quarantine/index work. Output: timeout
+             * and ordinary I/O abort both enter the bounded boot-failure record
+             * path before later scans can conceal the retained KITQUAR detail.
+             * Why: an interrupted quarantine is neither a valid empty library
+             * nor authorization to continue into the Scene scan.
+             */
+            if (!filesystem_createLibraryIndexBlocking(
+                    FS_LIBRARY_INDEX_KIT)) {
+                if (filesystem_bootLoggingTimedOut())
+                    goto boot_filesystem_timeout;
+                goto boot_filesystem_failure;
+            }
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
 
             /*
              * Synchronous Scene/ scan.
@@ -454,10 +642,19 @@ int main(void)
              * foreground. This mirrors Kit/ scan timing and is safe here
              * because audio rendering has not started yet.
              */
-            boot_showFilesystemStage(4u);
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
+            boot_showFilesystemStage(5u);
             filesystem_requestScanScenes(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
                 filesystem_tick();
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
             filesystem_ack();
 
             /*
@@ -466,9 +663,18 @@ int main(void)
              * `/Scene/` directory; Bank-local child Scenes are not included in
              * this index and remain Bank operation scratch.
              */
-            boot_showFilesystemStage(5u);
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
+            boot_showFilesystemStage(6u);
             (void)filesystem_createLibraryIndexBlocking(
                 FS_LIBRARY_INDEX_SCENE);
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
 
             /*
              * Synchronous Bank/ scan.
@@ -479,10 +685,19 @@ int main(void)
              * Scene/ because Bank-local children use a two-digit namespace and
              * must not populate the root Scene library browser.
              */
-            boot_showFilesystemStage(6u);
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
+            boot_showFilesystemStage(7u);
             filesystem_requestScanBanks(NULL);
             while (filesystem_status() == FS_STATUS_BUSY)
                 filesystem_tick();
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
             filesystem_ack();
 
             /*
@@ -491,9 +706,51 @@ int main(void)
              * Scenes are intentionally excluded; `/Bank/.hcindex` contains
              * only the root Bank display name for each 000..999 row.
              */
-            boot_showFilesystemStage(7u);
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
+            boot_showFilesystemStage(8u);
             (void)filesystem_createLibraryIndexBlocking(
                 FS_LIBRARY_INDEX_BANK);
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
+
+            /*
+             * Synchronous Pattern/ scan.
+             *
+             * Inputs: the mounted card and the numbered `/Pattern/` root.
+             * Output: the v4 Pattern library cache/index is ready before the
+             * Load/Save menu is exposed. Pattern files are named
+             * `NNN <name>.pat`; this pass preserves the same slot-ordered
+             * blank rows as Kit, Scene, and Bank without entering any Scene
+             * child directory.
+             */
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
+            boot_showFilesystemStage(9u);
+            filesystem_requestScanPatterns(NULL);
+            while (filesystem_status() == FS_STATUS_BUSY)
+                filesystem_tick();
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
+            filesystem_ack();
+            if (!filesystem_createLibraryIndexBlocking(
+                    FS_LIBRARY_INDEX_PATTERN)) {
+                if (filesystem_bootLoggingTimedOut())
+                    goto boot_filesystem_timeout;
+                goto boot_filesystem_failure;
+            }
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
 
             /*
              * Scan and create fresh per-type `.hcindex` files one type at a
@@ -503,8 +760,29 @@ int main(void)
              * audio starts; runtime Save refreshes use the same state machine
              * through filesystem_tick().
              */
-            boot_showFilesystemStage(8u);
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
+            boot_showFilesystemStage(10u);
             (void)filesystem_createBootIndexBlocking();
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
+
+            /*
+             * Settle the final boot index write before reloading/using Bank.
+             *
+             * Inputs: every root and typed Instrument `.hcindex` pass has
+             * completed through its close/flush gate. Output: a fixed 50 ms
+             * pre-audio boundary before `/Bank/.hcindex` is read and the
+             * initial Bank payload begins. This mirrors the useful latency
+             * formerly supplied by diagnostic stages 8/9 without inserting
+             * sleeps into any Save, filesystem tick, or DSP/runtime path.
+             */
+            timebase_holdPreAudioMs(BOOT_SD_PRE_BANK_SETTLE_MS);
 
             /*
              * Boot through the current top-level container ladder.
@@ -521,6 +799,7 @@ int main(void)
              */
             {
                 uint16_t boot_bank_slot = bank_restoreBankSlot();
+                uint8_t boot_restored_winner = 0u;
 
                 /*
                  * Instrument index generation above intentionally disposed
@@ -529,11 +808,54 @@ int main(void)
                  * directory can exist on the card while the cache reports no
                  * valid Bank slot and the boot load silently falls through.
                  */
-                boot_showFilesystemStage(9u);
-                filesystem_requestLoadBankIndex(NULL);
+                /*
+                 * DEV_MODE_DIAGNOSTIC displays runtime information on the
+                 * screen for the user to assess how operations are proceeding.
+                 * It does not and should not ever add additional file
+                 * interaction steps, since the diagnostic may be used to
+                 * assess in-situ file procedures.
+                */
+                boot_showFilesystemStage(10u);
+                /*
+                 * A failed Bank-index read is not an empty Bank index.
+                 *
+                 * Inputs: a mounted card and the preceding boot scan state.
+                 * Output: only a completed successful index is acknowledged;
+                 * rejection or terminal error enters the shared failure record
+                 * path. Why: acknowledging here would discard the retained
+                 * BIDXLOAD detail before Bank fallback could distinguish error
+                 * from an intentionally empty library.
+                 */
+                if (!filesystem_requestLoadBankIndex(NULL))
+                    goto boot_filesystem_failure;
                 while (filesystem_status() == FS_STATUS_BUSY)
                     filesystem_tick();
+                if (filesystem_bootLoggingTimedOut())
+                    goto boot_filesystem_timeout;
+                if (filesystem_status() != FS_STATUS_DONE)
+                    goto boot_filesystem_failure;
                 filesystem_ack();
+
+                /*
+                 * Stage 10b: validate autosave winner before Bank Load decision.
+                 *
+                 * What: streaming CRC32C validation of .hcprms1/.hcprms2 to
+                 * determine if a valid Bank-matching autosave winner exists.
+                 * Inputs: BankData with active_bank from settings.cfg (stage 2),
+                 * mounted card with index files (stages 3-10). Outputs: internal
+                 * filesystem winner state consulted by stage 11. Why: winner
+                 * must be known before the Bank Load decision; the existing
+                 * ensureAutosaveFilesBlocking (post-stage-12) only creates
+                 * files, never validates. Affiliates: §4 S061_AUTOSAVE_READER.md,
+                 * filesystem_validateAutosaveWinnerBlocking(),
+                 * filesystem_autosaveBootReaderBlocking().
+                 */
+                if (filesystem_autosaveEnabled()) {
+                    boot_showFilesystemStage(10u);
+                    (void)filesystem_validateAutosaveWinnerBlocking();
+                    if (filesystem_bootLoggingTimedOut())
+                        goto boot_filesystem_timeout;
+                }
 
                 /*
                  * boot_bank_slot is the root Bank cache coordinate retained in
@@ -544,19 +866,120 @@ int main(void)
                  * request with the discovered child-present mask before
                  * loading.
                  */
+                /*
+                 * DEV_MODE_DIAGNOSTIC displays runtime information on the
+                 * screen for the user to assess how operations are proceeding.
+                 * It does not and should not ever add additional file
+                 * interaction steps, since the diagnostic may be used to
+                 * assess in-situ file procedures.
+                 */
                 filesystem_setBootSubstepDiagnostic(
                     BOOT_SUBSTEP_DIAGNOSTIC_CALLBACK);
-                boot_showFilesystemStage(10u);
-                if (filesystem_bankSlotExists(boot_bank_slot)) {
-                    preset_loadBank(boot_bank_slot, 0xffffu);
-                } else {
+                /*
+                 * DEV_MODE_DIAGNOSTIC displays runtime information on the
+                 * screen for the user to assess how operations are proceeding.
+                 * It does not and should not ever add additional file
+                 * interaction steps, since the diagnostic may be used to
+                 * assess in-situ file procedures.
+                */
+                boot_showFilesystemStage(11u);
+                /*
+                 * Stage 11: autosave winner path or canonical library Bank Load.
+                 *
+                 * What: a valid Bank-slot-matching winner (stage 10b) makes
+                 * this stage call filesystem_autosaveBootReaderBlocking() to
+                 * populate resident SRAM from the winner record and .hcnames
+                 * (Cases 1/2/3). When the reader declines (no winner, an
+                 * empty-Bank record, or a restore failure) the canonical
+                 * preset_loadBank() ladder runs instead and latches the
+                 * whole-Bank dirty mark (§8) so it replays once mutation
+                 * tracking enables — preserving today's unconditional
+                 * ensure-time Bank re-mark. A boot-deadline timeout during
+                 * the reader takes the timeout path. Inputs: fs_boot_winner
+                 * from stage 10b, boot_bank_slot. Outputs: resident Scenes
+                 * populated either way; boot latch (§8) populated on the
+                 * canonical path. Affiliates: §4 S061_AUTOSAVE_READER.md,
+                 * filesystem_autosaveBootReaderBlocking(),
+                 * filesystem_setBootLatchBankFallback().
+                 */
+                if (filesystem_hasBootWinner()) {
+                    boot_restored_winner =
+                        filesystem_autosaveBootReaderBlocking();
+                    if (filesystem_bootLoggingTimedOut())
+                        goto boot_filesystem_timeout;
+                }
+                /*
+                 * HCNAMES-authoritative boot load between reader and canonical fallback.
+                 *
+                 * What: when the winner reader could not restore (no valid winner, Bank
+                 * mismatch, or reader decline), tries the special-case load driven
+                 * entirely by .hcnames — valid only when the register Bank row equals
+                 * the settings.cfg boot Bank and every register row is refreshed. Why:
+                 * that is exactly the state left by "load Bank in menu, power off before
+                 * menu exit", and in it the register fully names every library source;
+                 * proceeding from it respects all Scene/Kit/Instrument overrides that a
+                 * canonical wholesale Bank Load would discard. Inputs:
+                 * boot_restored_winner. Outputs: either the authoritative load
+                 * completes and the canonical ladder is skipped, or the ladder runs
+                 * unchanged. Affiliates:
+                 * filesystem_bootHcnamesAuthoritativeLoad(),
+                 * filesystem_autosaveBootReaderBlocking(), main.c stage 11/12.
+                 */
+                if (!boot_restored_winner && filesystem_autosaveEnabled()) {
+                    boot_restored_winner =
+                        filesystem_bootHcnamesAuthoritativeLoad();
+                    if (filesystem_bootLoggingTimedOut())
+                        goto boot_filesystem_timeout;
+                }
+                if (!boot_restored_winner &&
+                    filesystem_bankSlotExists(boot_bank_slot)) {
+                    /*
+                     * A rejected Bank Load has no callback to report it later.
+                     *
+                     * Inputs: the verified root Bank slot and all-children
+                     * mask. Output: the accepted request enters Preset's normal
+                     * completion path; rejection records a boot failure now.
+                     * Why: silently entering the fallback ladder here would
+                     * hide the retained BANKLOAD/BIDXLOAD diagnostic code.
+                     */
+                    if (!preset_loadBank(boot_bank_slot, 0xffffu))
+                        goto boot_filesystem_failure;
+                    /*
+                     * The canonical Bank Load fallback path was used.
+                     *
+                     * What: stage 11 restored through preset_loadBank(), so the
+                     * whole-Bank dirty mark is deferred through the §8 latch
+                     * and replayed by ensureAutosaveFilesBlocking() once
+                     * mutation tracking enables. Inputs: an accepted Bank Load
+                     * request with AutoSave policy enabled (an OFF session has
+                     * no autosave context and a later runtime ON re-marks the
+                     * whole Bank itself). Outputs: fs_boot_latch.bank_fallback
+                     * set. Why: marker calls during boot are documented no-ops,
+                     * and this preserves the former unconditional ensure-time
+                     * Bank re-mark until the Phase 5 winner reader replaces
+                     * this path for Bank-matching winners. Affiliates:
+                     * filesystem_setBootLatchBankFallback(),
+                     * filesystem_replayBootLatch().
+                     */
+                    if (filesystem_autosaveEnabled())
+                        filesystem_setBootLatchBankFallback();
+                } else if (!boot_restored_winner) {
                     /* No Bank is available: load the root Scene index before
                      * asking the existing fallback ladder to choose Scene/Kit.
                      * This cache transition is safe because no Bank payload is
                      * being loaded in this branch. */
-                    filesystem_requestLoadSceneIndex(NULL);
+                    /* A failed root Scene-index read is not an empty Scene
+                     * library. Check request acceptance and terminal status
+                     * before acknowledgement so failure logging retains the
+                     * storage boundary instead of silently selecting Kit. */
+                    if (!filesystem_requestLoadSceneIndex(NULL))
+                        goto boot_filesystem_failure;
                     while (filesystem_status() == FS_STATUS_BUSY)
                         filesystem_tick();
+                    if (filesystem_bootLoggingTimedOut())
+                        goto boot_filesystem_timeout;
+                    if (filesystem_status() != FS_STATUS_DONE)
+                        goto boot_filesystem_failure;
                     filesystem_ack();
                     if (filesystem_sceneSlotExists(
                             filesystem_firstSceneSlot())) {
@@ -565,21 +988,67 @@ int main(void)
                         /* The Scene index is empty, so replace it with the
                          * Kit index before asking the same fallback helper to
                          * choose the first available Kit. */
-                        filesystem_requestLoadKitIndex(NULL);
+                        /* A failed root Kit-index read is not an empty Kit
+                         * library. Preserve its terminal error before the
+                         * fallback helper can treat the cache as empty. */
+                        if (!filesystem_requestLoadKitIndex(NULL))
+                            goto boot_filesystem_failure;
                         while (filesystem_status() == FS_STATUS_BUSY)
                             filesystem_tick();
+                        if (filesystem_bootLoggingTimedOut())
+                            goto boot_filesystem_timeout;
+                        if (filesystem_status() != FS_STATUS_DONE)
+                            goto boot_filesystem_failure;
                         filesystem_ack();
                         preset_loadFirstAvailableSceneOrKit();
                     }
                 }
             }
-            boot_showFilesystemStage(11u);
+            /*
+             * DEV_MODE_DIAGNOSTIC displays runtime information on the screen
+             * for the user to assess how operations are proceeding. It does
+             * not and should not ever add additional file interaction steps,
+             * since the diagnostic may be used to assess in-situ file
+             * procedures.
+             */
+            boot_showFilesystemStage(12u);
             for (uint8_t boot_load_pass = 0u;
                  boot_load_pass < 2u;
                  boot_load_pass++) {
-                while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS) {
+                while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS &&
+                       !filesystem_bootLoggingTimedOut()) {
+                    /*
+                     * DEV_MODE_DIAGNOSTIC displays runtime information on the
+                     * screen for the user to assess how operations are
+                     * proceeding. It does not and should not ever add
+                     * additional file interaction steps, since the diagnostic
+                     * may be used to assess in-situ file procedures.
+                     */
                     boot_showActiveFilesystemDiagnostic();
                     filesystem_tick();
+                }
+                /*
+                 * Preset retains LOAD_IN_PROGRESS when its filesystem callback
+                 * is deliberately abandoned. Input is the watchdog latch;
+                 * output leaves before menu_pollPresetStatus() can apply an
+                 * incomplete stage or post a fallback request. Affiliates:
+                 * preset_ackStatus() in the common timeout cleanup.
+                 */
+                if (filesystem_bootLoggingTimedOut())
+                    goto boot_filesystem_timeout;
+                /*
+                 * Distinguish failed Bank Load from successful empty Bank
+                 * before Menu consumes Preset completion.
+                 *
+                 * Inputs: terminal Preset status and its filesystem-derived
+                 * success bit. Output: a failure enters the bounded bootlog
+                 * recovery; only success may let Menu post the Scene/Kit
+                 * fallback for a valid empty Bank. Why: acknowledgement would
+                 * otherwise hide a normal load error from file logging.
+                 */
+                if (preset_getStatus() == PRESET_UPDATE_READY &&
+                    !preset_getCompletedOk()) {
+                    goto boot_filesystem_failure;
                 }
                 menu_pollPresetStatus();  /* apply Bank/Scene/Kit + ack */
                 if (preset_getStatus() != PRESET_LOAD_IN_PROGRESS)
@@ -602,23 +1071,156 @@ int main(void)
              * the retained diagnostic stage numbering (stage 12 is skipped).
              */
 
-            /* Load globals via presetManager */
-            boot_showFilesystemStage(13u);
-            preset_loadGlobals();
-            while (preset_getStatus() == PRESET_LOAD_IN_PROGRESS)
-                filesystem_tick();
-            menu_pollPresetStatus();  /* apply globals + ack */
+            /*
+             * Restore per-Scene Pattern AutoSave files after the canonical
+             * Scene/Bank Pattern loads and before runtime AutoSave setup.
+             * Inputs: the mounted card's `.patNNa`/`.patNNb` pair, restored
+             * HCNAMES provenance, and resident Bank Scene presence. Output:
+             * only nonzero-generation `@`-provenance winners replace the
+             * directory/default Pattern; every winner generation becomes the
+             * next background-drain baseline. A Scene/Kit/default fallback is
+             * deliberately not an autosave context, so its directory/default
+             * Pattern remains authoritative. Affiliates:
+             * filesystem_patternAutosaveBootReaderBlocking(),
+             * filesystem_autosaveBootReaderBlocking(), and PatternData.
+             */
+            if (bank_hasResidentBank() && filesystem_autosaveEnabled()) {
+                filesystem_patternAutosaveBootReaderBlocking();
+                if (filesystem_bootLoggingTimedOut())
+                    goto boot_filesystem_timeout;
+            }
+
+            /*
+             * Establish the two working-Bank delta-register files only after
+             * the complete Bank-or-fallback ladder and globals operation have
+             * released filesystem ownership.  A Scene/Kit/default fallback is
+             * deliberately not an autosave context: no Bank slot was loaded,
+             * so the wrapper returns without card I/O.  This first pass creates
+             * only missing baseline files; it neither reads an overlay nor
+             * marks a record active before audio starts.
+             */
+            if (bank_hasResidentBank() && filesystem_autosaveEnabled()) {
+                (void)filesystem_ensureAutosaveFilesBlocking();
+                if (filesystem_bootLoggingTimedOut())
+                    goto boot_filesystem_timeout;
+            }
+            /*
+             * Release both autonomous writer gates only after blocking boot SD
+             * ownership is complete.
+             *
+             * Inputs: successful settings/Bank/fallback and optional AutoSave
+             * ensure. Outputs: boot provenance dirty events receive a fresh
+             * one-second deadline, and runtime AutoSave setup may be queued if
+             * an enabled resident Bank still lacks authorization. No file is
+             * opened by this call. Why: background work must never interleave
+             * with the pre-audio ladder. Affiliates: filesystem_tick()'s
+             * settings and autosave schedulers.
+             */
+            filesystem_enableRuntimeSettingsWrites();
         } else {
             /* SD card not detected — menu_init already ran above */
         }
+
+        goto boot_filesystem_done;
+
+boot_filesystem_timeout:
+        /*
+         * Preserve timeout identity, then share the confirmed-failure cleanup.
+         *
+         * A watchdog timeout is one specific boot filesystem failure. It must
+         * not apply Preset work or retry the failed storage ladder before the
+         * bounded recovery writer records the retained operation/detail code.
+         */
+        goto boot_filesystem_failure;
+
+boot_filesystem_failure:
+        /*
+         * Abandon the remaining SD boot ladder and make one bounded log attempt.
+         *
+         * DEV_MODE_LOGGING writes operation codes to file for use in debugging.
+         * It must never print anything to the screen or otherwise delay
+         * operations unnecessarily since logging may be used to assess timing
+         * failures in other modules that might otherwise be obscured by screen
+         * write delays.
+         *
+         * Inputs: a confirmed timeout or ordinary boot filesystem failure,
+         * possibly an installed substep observer, and possibly
+         * PRESET_LOAD_IN_PROGRESS. Outputs: observers and Preset ownership are
+         * cleared, then the filesystem facade remounts once and attempts the
+         * exact eight-byte `/bootlog.bin` write. Its result never gates startup.
+         * Why: applying an abandoned Preset stage or retrying the storage ladder
+         * could recreate the splash hang, while silently acknowledging an
+         * ordinary failure would discard the only retained diagnostic detail.
+         * Affiliates: filesystem_writeBootFailureLogBlocking() and the common
+         * pre-audio continuation below.
+         */
+        filesystem_setBootSubstepDiagnostic(NULL);
+        if (preset_getStatus() != PRESET_IDLE)
+            preset_ackStatus();
+        (void)filesystem_writeBootFailureLogBlocking();
+
+boot_filesystem_done:
+        /*
+         * Disable logging abort semantics on every route to runtime.
+         *
+         * DEV_MODE_LOGGING writes operation codes to file for use in debugging.
+         * It must never print anything to the screen or otherwise delay
+         * operations unnecessarily since logging may be used to assess timing
+         * failures in other modules that might otherwise be obscured by screen
+         * write delays.
+         *
+         * Inputs: normal completion, no-card mount failure, or completed/failed
+         * recovery. Output: the retained code remains observational, but no
+         * runtime operation is armed or timed out. Why: the ten-second dirty
+         * abandon policy is boot-only. Affiliates: stage 14, audio startup,
+         * Menu/Preset requests, and background autosave.
+         */
+        filesystem_bootLoggingEnd();
     }
 
+
+    /*
+     * Initialize the unified Pattern stack service after boot loading.
+     *
+     * What: bind service_scene to the final seq_activePattern and recount its
+     * live bitmap before runtime foreground ticks begin. Why: boot Scene/Bank
+     * loading may replace every resident Pattern region, so initialization
+     * must follow that complete filesystem ladder. Inputs: initialized
+     * PatternData regions and Sequencer's active Scene. Output: an open,
+     * empty service ready for menu/TIM3 admissions. Affiliate:
+     * PatternStackService.c.
+     */
+    patSvc_init();
 
     /* Initialise audio path: PLLI2S, GPIO, DMA circular streams, I2S.
     ** AFTER all blocking SD operations. From this point forward, SD
     ** operations are non-blocking via filesystem_tick() in the main loop. */
+    /*
+     * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the
+     * user to assess how operations are proceeding. It does not and should not
+     * ever add additional file interaction steps, since the diagnostic may be
+     * used to assess in-situ file procedures.
+     */
     boot_showFilesystemStage(14u);  /* pre-audio filesystem boot completed */
     audioCodec_init();
+    /*
+     * Replay the selected boot Scene through the exact runtime Scene-switch
+     * transaction once DMA audio is live.
+     *
+     * Inputs: the pre-audio loader has selected and image-applied the active
+     * Scene; audioCodec_init() has brought up the DMA/I2S control lifecycle.
+     * Output: the ordinary deferred worker clears the pre-audio modulation
+     * graph, reapplies all six tagged members, and rebinds every LFO/velocity
+     * source in the same order as a manual Scene switch. This must call the
+     * public worker starter rather than reconstructing its pending mask here:
+     * hardware proved pre-audio target installation differs from the live
+     * target-edit path. The existing drumset_apply_* cursor owns the short
+     * post-startup transition; no SRAM or new boot state is allocated.
+     * Affiliates: preset_sendDrumsetParameters(),
+     * preset_startDrumsetApply(), preset_tickDrumsetApply(), and
+     * menu_pollPresetStatus().
+     */
+    preset_startDrumsetApply();
     prevBtn = 0;
     last_repaint_tick = 0;
 

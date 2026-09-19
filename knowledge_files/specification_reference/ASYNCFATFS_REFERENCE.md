@@ -6,7 +6,7 @@ the low-level async FAT/VFAT API contract and the rules callers must follow.
 
 ## Role
 
-asyncfatfs is a single-context, foreground-pumped FAT32/VFAT layer. It owns SD
+asyncfatfs is a single-context, foreground-pumped FAT16/FAT32/VFAT layer. It owns SD
 sector cache access, FAT chain traversal, directory-entry parsing, file reads
 and writes, VFAT long filename entry construction, and object iteration.
 
@@ -18,6 +18,41 @@ is:
   validation.
 - `storageTypes.c/h` parses or formats text schemas.
 - asyncfatfs performs component-level FAT/VFAT operations.
+
+## SD response timeouts are real-time (Session 058)
+
+The SD transport shim (`sdcard_lxr02.c`) pumps one bounded token/busy byte or a
+16-byte data burst per `sdcard_poll()` call. Its two asynchronous response
+waits — the read-data token wait (`READING_WAIT_TOKEN`) and the
+write-program-busy wait (`WRITING_WAIT_BUSY`) — abandon on **elapsed TIM6
+milliseconds**, not on a count of caller polls:
+
+```c
+#define SDCARD_TOKEN_TIMEOUT_MS 1000u
+#define SDCARD_BUSY_TIMEOUT_MS  5000u
+static uint8_t sdcard_waitTimedOut(uint16_t timeout_ms) {
+    return (uint8_t)((uint16_t)(time_sysTick - wait_started_tick) >= timeout_ms);
+}
+```
+
+`wait_started_tick` (a two-byte `uint16_t` that repurposes the retired
+`retry_count`) is armed on accepted CMD17 before entering
+`READING_WAIT_TOKEN` and on the accepted write data-response before entering
+`WRITING_WAIT_BUSY`; command/payload/CRC transmission does not consume the
+card's response allowance. Every timeout/success branch clears the timestamp
+before invoking its callback so an admitted successor owns its own deadline.
+
+The rule exists because callers legitimately change foreground poll density:
+the Session 058 stopped-playback fast drain calls `afatfs_poll()` four times
+per facade pass while codec DMA/I2S/DSP are suspended. A poll-count ceiling
+would then expire in far less wall time and make a healthy busy card time out,
+which AsyncFATFS turns into an endless DIRTY -> WRITING -> timeout -> DIRTY
+retry cycle. Never reintroduce a poll-count deadline for either wait.
+
+The forensic transport snapshot reflects the same unit: its member is now
+`wait_ms` (elapsed milliseconds in `READING_WAIT_TOKEN` or
+`WRITING_WAIT_BUSY`, zero elsewhere), and the boot HCPRMS capsule is schema 2.
+See `DEV_MODES.md` for the capsule and decoder rules.
 
 ## Pumping And Completion
 
@@ -36,6 +71,9 @@ Important completion rules:
   the final flush boundary.
 - `afatfs_fread()` returning `0` is not EOF by itself. It may mean the sector
   buffer is not ready. EOF is `n == 0 && afatfs_feof(file)`.
+- A callback receiving `NULL` does not prove that a singleton name is absent.
+  Product code must distinguish missing, failed, and duplicate lookup before a
+  CREATE-capable mode is allowed to run.
 
 ## Paths Are Components
 
@@ -134,8 +172,16 @@ For newly-created directories, asyncfatfs must:
 
 - allocate the first cluster;
 - write the parent directory entry's first-cluster fields;
-- zero-fill the new cluster;
-- create `.` and `..` entries.
+- clear the complete first sector;
+- write `.` and `..` entries with the existing cluster values;
+- retain a zero entry immediately after the dot entries; and
+- complete mkdir only after this visible first sector is queued successfully.
+
+Later sectors in the allocated cluster remain hidden and untouched until
+marker advance clears each complete target sector. The FAT chain and
+`physicalSize` still cover the entire cluster even when only its first sector
+has been initialized. The existing final `afatfs_sync()`/flush boundary remains
+the persistence guarantee.
 
 This differs from ordinary files, which can allocate their first cluster lazily
 on first write.
@@ -143,6 +189,26 @@ on first write.
 The LFN variants return the generated/current short alias in `alias_out` when
 requested. Use that alias only to reopen or chdir later; do not put it in
 user-facing text schemas.
+
+What: This contract exposes a callback-ready directory with its allocated
+first cluster, initialized first sector, dot entries, and end marker while
+keeping later sectors hidden until needed.
+
+Why: Callers need to enter and populate the directory immediately, but unused
+sectors in a cluster do not need redundant writes while the persistent marker
+still protects remounts.
+
+Inputs: the component name, match mode, optional alias buffer, and completion
+callback accepted by the APIs above.
+
+Outputs: a usable directory handle or `NULL`, unchanged alias/result behavior,
+and the existing final `afatfs_sync()`/flush persistence boundary.
+
+Accessors/APIs: `afatfs_mkdir[_lfn]()`, `afatfs_opendir[_lfn]()`,
+`afatfs_chdir()`, and `afatfs_sync()`.
+
+Affiliates: the AsyncFATFS extension and create handoff, Gate-A target-sector
+preparation, and filesystem.c component workflows.
 
 ## File Create/Open
 
@@ -160,24 +226,14 @@ After writing:
 - use `afatfs_fclose(file, cb)`;
 - then let `filesystem.c` drain the final flush before reporting save success.
 
-## Declared APIs That Are Not Yet Product Primitives
+## Unsupported alternatives
 
-The public header currently declares parent-relative child lookup/create,
-move, copy-tree, and tree-replace entry points. They are design placeholders,
-not supported production operations in this checkout:
-
-- `afatfs_findFirstObjectInDir`, `afatfs_fopenChild`, and `afatfs_mkdirChild`
-  do not have the required parent-relative implementation.
-- `afatfs_moveObject` does not initialize its recycled handle or copy its
-  destination name, and its dispatcher continuation does not perform a move.
-- `afatfs_copyObjectTree` and the begin/commit/abort tree-replace API do not
-  provide a functioning foreground-pumped implementation.
-- `AFATFS_CREATE_REPLACE_FILE` must not be interpreted as an atomic or
-  crash-recoverable replacement promise.
-
-Use only the implemented component APIs, object iteration, exact removal, and
-`afatfs_deleteTree` described in this reference until those contracts are made
-real. The implementation plan is archived in `SESSION_040_AFATFS_FOLLOWUP.md`.
+Parent-relative child lookup/create, cross-parent move, tree copy, tree
+replace, and opened-handle unlink were removed from the public API because
+they had no complete foreground-pumped implementation. Use only the component
+APIs, object iteration, structured removal/rename, and exact `afatfs_deleteTree`
+described in this reference. A future move or transaction needs a separately
+approved API and RAM design.
 
 ## Object Iteration
 
@@ -194,11 +250,59 @@ Object iteration resolves:
 - short alias;
 - SFN case bits;
 - whether VFAT LFN entries were present;
-- the physical SFN entry and LFN entry-run position.
+- the physical SFN entry and every physical LFN entry-run pointer.
+
+The iterator validates the VFAT LAST ordinal, exact descending ordinal
+sequence, stable checksum, legal entry shape, and complete run before exposing
+the physical pointers. A malformed run is still returned as a browsable SFN
+object with a malformed-run flag; destructive clients must return
+`AFATFS_RESULT_CORRUPT_LFN_RUN` rather than infer adjacency across sectors or
+directory clusters.
 
 Use object iteration for production scans. It sees dot-prefixed files and
-directories as real objects. Product code may filter names by schema, but
-asyncfatfs must not hide them.
+directories as real objects, **except** the one filter below. Product code
+may filter names further by schema, but asyncfatfs must not otherwise hide
+objects.
+
+### macOS AppleDouble (`._<name>`) filtering (Session 060)
+
+`afatfs_findNextObject()` filters one specific two-byte-prefixed pattern at
+the object-iteration layer itself, after the display name is fully resolved
+(whichever of the three resolution paths — verified LFN, malformed-LFN
+fallback, or bare SFN — produced it) and before the function returns: any
+object whose resolved display name begins with `._` is skipped and the scan
+continues to the next raw entry, using the same reset-and-continue pattern
+already used for structural dot entries, deleted entries, LFN fragments, and
+volume labels.
+
+This is the one deliberate exception to "asyncfatfs must not hide dot-prefixed
+objects." The `._` two-character prefix is the canonical macOS AppleDouble
+resource-fork signature: macOS creates hidden `._<filename>` shadow files
+alongside real files on FAT/exFAT volumes to carry extended attributes and
+resource-fork data (`com.apple.quarantine`, etc.) whenever a user copies files
+onto the card from a Mac. These shadow files carry the same extension as
+their companion data file (`._kick.drm` alongside `kick.drm`), so every
+higher-layer classifier that matches by extension — Instrument type
+classification, library scans, filename repair — would otherwise misidentify
+them as real user content. No product-owned file uses this prefix: `.hcindex`,
+`.hcnames`, `.hcprms1`, `.hcprms2`, `.hcnamtmp`, and `.hctmp.<ext>` all begin
+with `.hc` or `.ht`, never `._`.
+
+Filtering at this layer, rather than in each higher-layer consumer, makes
+AppleDouble files invisible system-wide in one place: repair, scan, index,
+save, load, and any future enumerator all inherit the filter automatically.
+This was the fix for a boot defect where AppleDouble files broke Instrument
+`.hcindex` generation for every type after the first — see
+`FILESYSTEM_SPEC.md` "Boot Instrument `.hcindex` fix" and
+`S060_HCINDEX_FIXUP.md` for the full root-cause investigation. A narrower
+guard was also added at the repair-step call site
+(`filesystem_repairBuildCandidate()`, `filesystem.c:9660`) as defense-in-depth,
+but the asyncfatfs-level filter is the primary, system-wide fix.
+
+Do not extend this filter to any other prefix without equally strong
+evidence that a third-party OS creates it unconditionally on FAT media; a
+single hardcoded two-byte pattern is deliberately narrow so it cannot
+accidentally hide a legitimate future product file.
 
 The old raw `afatfs_findFirst()` / `afatfs_findNext()` APIs expose raw directory
 entries and are appropriate only for legacy code that explicitly wants raw FAT
@@ -212,7 +316,13 @@ APIs:
 - `afatfs_chdir(NULL)`
 - `afatfs_chdirParent()`
 
-`afatfs_chdir(NULL)` returns to root.
+`afatfs_chdir(NULL)` reinitializes `afatfs.currentDirectory` to root and starts
+its seek to offset zero. Since Session 061 it polls any queued seek to
+completion before returning true. A successful return therefore means root is
+both selected and idle, ready for the next relative open; this is required by
+the boot-only blocking Bank/Scene/Kit narrow loaders. A false return still means
+the current-directory object was busy and the caller must retry. Do not weaken
+this to an early success unless every blocking caller is changed with it.
 
 `afatfs_chdir(handle)` copies the selected directory state into
 `afatfs.currentDirectory`. The explicit application handle is not the current
@@ -234,9 +344,11 @@ The current implementation has five application file-handle slots:
 #define AFATFS_MAX_OPEN_FILES 5
 ```
 
-The linked `afatfsFile_t` size is 328 bytes. Raising the pool from three to five
-therefore added exactly 656 bytes to the zero-initialized asyncfatfs state; the
-current complete `afatfs` symbol is 7,344 bytes.
+**Current linked sizes (verified again Session 061):** `afatfsFile_t` is 188 bytes and the
+five-slot `afatfs` owner is 6,984 bytes. The 328-byte handle and 7,344-byte
+owner figures in older notes are obsolete. Session 059 asserts
+`afatfsCreateFile_t=144`, `afatfsFile_t=188`, and
+`afatfsRenameObject_t=552`; its two directory gates added no retained SRAM.
 
 Five slots are concurrency headroom, not a reason to retain redundant
 directory handles. Session 042 boot diagnostics proved that retaining Bank
@@ -246,6 +358,21 @@ the selected Bank and closes the explicit Kit handle after chdir, leaving slots
 for `kitset.kcg` and Instrument member files. `currentDirectory` remains usable
 because it is stored outside the application handle pool.
 
+**Session 057 case study — do not repeat this experiment without new
+evidence.** A Bank Save screen freeze was initially hypothesized to be handle
+exhaustion (the operation reliably stalled after exactly 5 children, matching
+`AFATFS_MAX_OPEN_FILES`). The pool was bumped to 8 and a read-only census
+helper, `afatfs_countOpenHandles()`, was added to test the hypothesis. Hardware
+evidence disproved it outright: the open-handle count stayed at exactly 1 (the
+just-created child directory handle) at every child boundary and never
+accumulated, and the per-phase stall detector never fired even once across
+three failed attempts — the operation was progressing normally throughout. The
+real cause was an unrelated foreground-poll counter misread as an elapsed-time
+budget (`057_SESSION_HANDOFF_LOG.md` §12-§14). The pool was reverted to 5.
+`afatfs_countOpenHandles()` was kept as a permanent read-only diagnostic (no
+retained SRAM) since it disproves rather than proves a leak at a glance, but
+the pool size itself must stay 5 until new, different evidence appears.
+
 Caller rule:
 
 - calculate the maximum simultaneously live handles for the state, including
@@ -253,20 +380,23 @@ Caller rule:
 - release an explicit directory handle after chdir unless a later API
   specifically requires that handle;
 - treat an unaccepted open as backpressure/failure according to that API;
-- never solve a lifetime leak only by increasing `AFATFS_MAX_OPEN_FILES`.
+- never solve a lifetime leak only by increasing `AFATFS_MAX_OPEN_FILES` — see
+  the Session 057 case study above for a concrete instance where the pool size
+  was never the actual problem.
 
 ## Removal
 
 APIs:
 
-- `afatfs_funlink(file, cb)`
 - `afatfs_removeObjects_lfn(display_name, match_mode, mode, cb)`
-
-`afatfs_funlink()` removes one opened file handle.
+- `afatfs_removeObject(short_alias, mode, cb)`
 
 `afatfs_removeObjects_lfn()` scans the current directory and removes every
 matching object under the supplied match mode. It restarts scanning after each
-delete because removing VFAT/SFN entry runs mutates the directory.
+delete because removing VFAT/SFN entry runs mutates the directory. Completion
+callbacks receive `afatfsResultCode_t`; non-OK results forbid a caller from
+creating or publishing a replacement. Regular removal releases at most one
+FAT cluster per foreground continuation, then retires the complete name run.
 
 Removal modes:
 
@@ -274,12 +404,15 @@ Removal modes:
 - `AFATFS_REMOVE_EMPTY_DIRECTORIES`: remove matching directories only when they
   are already empty.
 
-`afatfs_deleteTree()` is the native non-blocking recursive-delete primitive
-for one captured directory identity. It copies the supplied `afatfsObjectId_t`,
-walks the target tree, retires complete LFN/SFN entry runs, frees cluster
-chains, releases retained cache state, resets its private handle, and invokes
-its result callback once. A false start means no handle accepted the request
-and no callback will occur.
+`afatfs_deleteTree()` is the native non-blocking recursive-delete primitive for
+one captured `afatfsObjectInfo_t` directory identity. It copies every physical
+LFN/SFN pointer, walks without C recursion, frees each chain before retiring its
+name run, handles FAT16 root binding distinctly, and bounds descents plus
+released clusters with a structural budget. It releases the private handle and
+cache ownership before invoking exactly one structured result callback. A
+false start means no handle was accepted and no callback will occur. The
+operation is non-transactional: an I/O/layout failure may leave partial card
+mutation, and callers must not create or publish a replacement after failure.
 
 Product code still owns scope selection before it invokes deletion:
 
@@ -288,11 +421,55 @@ Product code still owns scope selection before it invokes deletion:
 - parse the product-visible name with the namespace-appropriate parser; and
 - pass the exact captured object identity for the selected slot.
 
-This prevents root-wipe and duplicate-LFN failures. Bank-local children are
-parsed as two-digit `00..15` folders before their selected identity is supplied
-to native deletion. The legacy `filesystem.c` delete walker remains only as
-compatibility/fallback code and uses `afatfs_removeObject()` with an exact
-short alias when available.
+This prevents root-wipe and duplicate-LFN failures. Root Kit may use its
+documented legacy short-alias fallback; root Scene and root Bank do not. Bank
+Save replaces the root Bank tree directly through this exact-object flow; it
+does not use temporary or `old*` promotion names.
+
+**Descend/ascend identity invariant (Session 054, hardware-confirmed Session
+055).** The traversal binds one `file` handle to whichever directory is
+currently open and tracks it via `file->directoryEntryPos`; that field is the
+sole thing distinguishing "the delete root just emptied" (finish
+successfully) from "a nested child just emptied" (ascend and continue). Two
+fields on the persistent `afatfs.deleteTreeState` singleton — `descendTarget`
+(a full `afatfsObjectInfo_t`) and `parentEntry` (a directory-entry
+pointer) — snapshot the child's identity and its directory-entry location at
+the moment of descent, and are restored into `op->currentTarget` and
+`file->directoryEntryPos` respectively on ascend. Both fields hold exactly
+one level (a descend nested inside another descend overwrites them), which
+matches the existing `op->parentCluster` depth-one bound and is not a
+regression: `afatfs_deleteTree()` has exactly one caller
+(`filesystem_deleteSlotDirectory_tick()`), invoked on at most a Kit slot
+(files only) or a Scene slot (files plus one `Kit …/` subdirectory) — never
+more than one nested directory below the delete root.
+
+Two earlier attempts at fixing an unrelated resume-target bug each broke one
+half of this invariant before the final repair: reconstructing a resume
+target directly from `op->parentCluster` cleared `directoryEntryPos` as a
+side effect of reusing `OPEN_DIR`'s reset sequence, and a later fix that
+removed a redundant (and apparently unreliable) parent re-scan assumed
+`op->currentTarget` stayed untouched between a child's discovery and its
+ascend — but the child's own internal deletes overwrite that register with
+every object they process. Both symptoms (an emptied root misread as a
+nested child; an ascend that free-list-corrupts by re-freeing an
+already-freed cluster chain) trace to the same missing snapshot-and-restore,
+not to two independent defects. Full round-by-round diagnostic trail
+(originally `AFAT_RECURSIVE_WHITEPAPER.md`) is preserved in
+`knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md`.
+
+## Logging-only diagnostic snapshots
+
+`afatfs_getDiagnosticSnapshot(file, snapshot)` and the paired SD-layer
+`sdcard_getTransportSnapshot(snapshot)` exist solely for the Session 047
+boot-time `ASENSURE` forensic capsule. They are read-only copies of live file,
+allocator/cache, and transport fields taken immediately before existing boot
+recovery abandons the failed operation. They must not poll, allocate, issue
+I/O, change cache/handle ownership, alter callbacks/retries, or drive product
+control flow. Their result is diagnostic evidence, not an AsyncFATFS recovery
+API; the fixed 72-byte bootlog envelope is specified in `DEV_MODES.md`. The
+transport snapshot's `wait_ms` field (Session 058, schema 2) reports elapsed
+wait milliseconds only while an SD read-token or write-busy wait is active and
+zero otherwise; it does not publish the retired poll-count value.
 
 ## Rename
 
@@ -303,26 +480,68 @@ API:
 Rename updates the complete VFAT LFN/SFN entry run while preserving the object's
 first cluster, file size, attributes, timestamps, and directory children.
 
-Session 038's working Kit Save path does not rely on rename for overwrite. It
-recursively deletes the old numbered slot directories and writes a clean
-replacement. Rename remains the intended future primitive for safe dot-file
-promotion and Bank autosave workflows after dedicated testing.
+Rename updates a validated complete run and returns a structured result;
+`alias_out` is valid only with `AFATFS_RESULT_OK`. Kit, Scene, and Bank
+overwrite do not rely on rename: they use exact delete/recreate. The current
+AutoSave design is the root A/B record pair specified in `AUTOSAVE.md`, not a
+per-product-file dot-backer transaction.
 
 ## Directory Terminators And LFN Creation
 
-VFAT LFN creation may need multiple contiguous directory entries. If a directory
-terminator (`0x00`) is encountered where there is not enough room for the full
-LFN/SFN run, asyncfatfs retires the skipped terminator into an ordinary deleted
-entry before scanning onward. Otherwise future directory scans would stop before
-the newly-created object.
+The first `0x00` filename byte ends the live namespace, and directory scanning
+stops there. `0xE5` marks a reusable deleted entry but does not prove absence:
+the first sufficiently large sector-local deleted run is latched while
+collision scanning continues. A deleted-run writer touches only its selected
+entries and never clears the following entry.
 
-When a subdirectory is extended to create space, the create state machine resets
-the entry index so the fresh cluster is scanned from entry 0 instead of
-skipping its first sector.
+A local terminator-owned run must fit the complete SFN or LFN/SFN run plus one
+replacement zero entry in the same 16-entry sector. If it does not fit, the
+whole run moves to entry zero of the next logical directory sector; no LFN/SFN
+run crosses a sector. The next sector is reached through the cursor and FAT
+chain. If allocated EOF is reached, a non-FAT16-root directory appends a
+cluster.
 
-These are internal details, but callers should understand the consequence:
-LFN creation is a multi-step directory mutation, and callers must wait for the
-callback/flush boundary before assuming a host or later scan can see the file.
+The complete target sector is cleared, the new run and replacement marker are
+written, and that target is allowed to reach media before the old marker's
+old-sector tail is retired to `0xE5`. Gate B initializes only an appended
+cluster's first sector. All later stale sectors remain invisible until this
+target-publication step initializes one.
+
+A directory with no terminator remains compatible: asyncfatfs uses a proven
+deleted run or extends at logical exhaustion; a full FAT16 fixed root fails
+normally. Short create, LFN create, and same-parent rename share these
+reservation and publication rules. This ordering does not make create/rename
+fully power-loss transactional; it prevents exposure of stale post-marker
+entries and preserves the final sync guarantee.
+
+What: This contract describes the persistent-marker boundary, sector-local
+SFN/LFN placement, lazy appended-cluster initialization, and target-before-tail
+publication ordering.
+
+Why: It permits unused appended-cluster sectors to retain arbitrary media bytes
+while ensuring that no stale bytes become visible and that mkdir still returns
+a usable directory.
+
+Inputs: the current-directory component, match policy, existing directory
+cursor/FAT chain, requested SFN/LFN run, and optional parent cluster for a new
+child directory.
+
+Outputs: a collision-checked object run, a fully initialized exposed target
+sector, correct marker/dot entries, and the unchanged callback/final-sync
+boundaries.
+
+Accessors: `afatfs_findNextObject()`, create/rename reservation state,
+`afatfs_extendSubdirectory()`, `afatfs_prepareDirectoryRunTarget()`,
+`afatfs_chdir()`, and `afatfs_sync()`.
+
+Affiliates: `asyncfatfs.c` create/rename phases, FAT-chain traversal, directory
+extension, filesystem.c component workflows, and host/remount verification.
+
+Session 059 status: Gate A was exercised through Kit, Scene, Bank, and
+Instrument saves; a stopped-playback Bank Save took about 10 seconds. Gate B
+passed source review and a forced ARM build but hardware/media testing was
+deliberately deferred. No defect is expected from the reviewed ordering, but
+hardware acceptance is not claimed. Neither gate is power-loss transactional.
 
 ## Caller Do/Don't Checklist
 
@@ -334,6 +553,9 @@ Do:
 - Use object iteration for scans that care about LFNs, case, aliases, or object
   kind.
 - Treat missing objects as normal where a browser slot can be empty.
+- For a firmware-owned singleton, prove absence with a complete,
+  successfully-closed case-insensitive directory scan before CREATE. Treat
+  multiple matches and scan/open/close failure as errors.
 - Drain close/flush before reporting save completion.
 - Use `afatfs_chdirParent()` for structural parent traversal.
 
@@ -344,9 +566,12 @@ Don't:
 - Treat `fread() == 0` as EOF without `afatfs_feof()`.
 - Optimistically publish browser/cache entries before a real scan/open proves
   the object exists.
+- Treat a failed/NULL open as permission to create a singleton, or silently
+  choose/delete one of multiple case-folded matches.
 - Start deletion from a display name after a scan already selected a concrete
   object; retain and use the captured object identity instead.
-- Hide dot-prefixed objects in asyncfatfs; filtering belongs in product scans.
+- Extend the asyncfatfs hidden-object policy beyond the narrow macOS
+  AppleDouble `._*` filter without a separately justified on-media rule.
 - Persist returned short aliases into user-facing schemas.
 
 ## Current Production Users
@@ -358,30 +583,54 @@ Don't:
   same-slot replacement through captured identities, and text schemas in
   `storageTypes`.
 - Bank scan/load/save uses object iteration, namespace-aware root/two-digit
-  child matching, captured identities for cleanup, staging/promotion
-  preflight, and text schemas in `storageTypes`. Bank Load rescans one selected
-  child at a time and retains no 16-child name/alias table.
+  child matching, captured identities, and text schemas in `storageTypes`.
+  Bank Save reuses the selected root Bank and deletes/rewrites only selected
+  child Scenes. Bank Load captures all 16 child display names in one scan and
+  retains the selected Bank as the parent CWD across successful children.
 - Root Instrument scan/load/save uses object iteration, registry-owned typed
   directories, one shared generalized browser-name cache with up to 1,000
   sorted rows, LFN file writes, and descriptor-keyed text schemas. Product
-  scan/repair policy excludes `.hctmp.<ext>`; asyncfatfs itself still exposes
-  the dot-prefixed object normally.
-- Kit/Scene/Bank `.hcindex` rows and HCNAMES reuse one 1,000-by-9-byte cache in
-  `filesystem.c`; that cache is above the asyncfatfs layer and does not alter
-  object iteration semantics.
+  scan/repair policy excludes `.hctmp.<ext>`; asyncfatfs exposes ordinary dot
+  files but filters `._*` AppleDouble entries before callbacks.
+- Kit/Scene/Bank `.hcindex` rows and typed Instrument rows reuse one
+  1,000-by-9-byte cache in `filesystem.c`. HCNAMES uses its dedicated
+  145-by-9 mirror. Both are above asyncfatfs and do not alter object iteration
+  semantics.
 - File/Dir/sDir diagnostic menu entries and their list caches are retired.
   Compatibility facade calls perform no asyncfatfs operation. A total of 107
   unreachable Menu bytes (two 49-byte editor/result strings plus nine result
   bytes) remains above this layer, but no multi-entry diagnostic cache or
   asyncfatfs traversal remains.
 
+## Seek and file-size tracking
+
+`afatfs_fseekAtomic()` and `afatfs_fseekInternalContinue()` both call
+`afatfs_fileUpdateFilesize(file)` after advancing `cursorOffset`. This ensures
+`logicalSize` tracks the true written extent on every successful seek, not only
+on the queued continuation path.
+
+Before Session 056 the atomic path omitted this call, leaving `logicalSize` at
+0 for newly created files throughout the entire write sequence. The only
+on-disk size that persisted was `physicalSize` (cluster-rounded) from
+`AFATFS_SAVE_DIRECTORY_NORMAL` during cluster allocation. If `fclose()`'s
+final `AFATFS_SAVE_DIRECTORY_FOR_CLOSE` write was lost (cache eviction, power
+loss), the on-disk file size reverted to a cluster boundary — e.g. 32,768
+instead of the true 34,768 bytes for an AutoSave record.
+
+Do not remove the `afatfs_fileUpdateFilesize()` call from either seek path.
+
 ## AsyncFATFS work still required
 
 - Parent-relative lookup/open/create with explicit collision policy and copied
   input lifetime.
-- Hardening native delete against corrupt/cyclic structures and reporting
-  partial progress.
-- Real same-parent rename and cross-parent move, bounded tree copy, and a
-  crash-recoverable staged replace protocol. The current move/copy/replace
-  declarations are not completed APIs.
+- The recursive-delete descend/ascend defect (`ScnS05` and its relatives) is
+  fixed and hardware-confirmed for ordinary Kit/Scene/Bank overwrite as of
+  Session 055 (a full Kit-modify-save / Instrument-modify / Scene-modify-save
+  / Bank-save-then-load round trip reported no errors). The low-level
+  acceptance matrix from `RECURSIVE_TREE_DELETE_REIMPLEMENT.md` §10
+  (malformed LFN, cyclic/broken-parent layout, injected FAT/cache error,
+  exhausted handle pool, cross-sector LFN runs) has still never been
+  exercised as dedicated fixtures — only encountered incidentally through
+  ordinary product use. Do not claim that matrix closed from product-level
+  testing alone.
 - Effect storage and any feature that needs durable replacement/promotion.

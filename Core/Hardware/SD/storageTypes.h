@@ -43,11 +43,20 @@
 #define STORAGE_ROOT_KIT              "Kit"
 #define STORAGE_ROOT_SCENE            "Scene"
 #define STORAGE_ROOT_BANK             "Bank"
+#define STORAGE_ROOT_PATTERN          "Pattern"
 #define STORAGE_ROOT_INSTRUMENT       "Instrument"
 #define STORAGE_KITSET_FILENAME       "kitset.kcg"
 #define STORAGE_SCENESET_FILENAME     "sceneset.scg"
 #define STORAGE_BANKSET_FILENAME      "bankset.bcg"
 #define STORAGE_SETTINGS_FILENAME     "settings.cfg"
+/*
+ * Temp-file target for the safe settings writer. The safe-write flow
+ * serializes new settings content here first, syncs it durable, then
+ * promotes it to STORAGE_SETTINGS_FILENAME via remove-old + rename.
+ * Plainly visible (no dot-prefix) so a leftover after an interrupted
+ * write is discoverable by anyone inspecting the card root.
+ */
+#define STORAGE_SETTINGS_TEMP_FILENAME "settings.tmp"
 #define STORAGE_KIT_SLOT_COUNT        6u
 /*
  * Kit and Scene folders are numbered directory entries, not legacy file slots.
@@ -60,6 +69,7 @@
 #define STORAGE_KIT_MAX_SLOTS         1000u
 #define STORAGE_SCENE_MAX_SLOTS       1000u
 #define STORAGE_BANK_MAX_SLOTS        1000u
+#define STORAGE_PATTERN_MAX_SLOTS     1000u
 #define STORAGE_BANK_SCENE_MAX_SLOTS  16u
 #define STORAGE_KIT_FILENAME_MAX      13u
 /*
@@ -210,33 +220,6 @@ typedef struct {
     uint8_t seen_version;
     uint8_t seen_placeholder;
 } storage_effect_state_t;
-
-/*
- * Incremental validation state for Scene/Bank draft pattern text files.
- *
- * Version 1 is the older thin placeholder:
- *   format=helicase.pattern, version=1, placeholder=1
- *
- * Version 2 is the current draft Scene/Bank payload:
- *   format=helicase.pattern
- *   version=2
- *   track1=<length>,<scale>,<128 on/off chars>
- *   ...
- *   track7=<length>,<scale>,<128 on/off chars>
- *
- * Only step on/off is stored; note, velocity, probability, automation,
- * rotation, shuffle, and pattern-next data remain PatternData defaults. This is
- * deliberately not the final pattern schema. It exists so Scene/Bank saves
- * recall the 128x7 active-step grid and the two required per-track timing
- * values while the real dynamic pattern format is still pending.
- */
-typedef struct {
-    uint8_t seen_format;
-    uint8_t seen_version;
-    uint8_t version;
-    uint8_t seen_placeholder;
-    uint8_t seen_track_mask;
-} storage_pattern_stub_state_t;
 
 /*
  * Incremental parse state for bankset.bcg.
@@ -496,7 +479,9 @@ const char *storage_instrumentTypeExtension(storage_instrument_type_t type);
  */
 typedef enum {
     STORAGE_INSTRUMENT_SAVE_NORMAL = 0u,
-    STORAGE_INSTRUMENT_SAVE_MORPH
+    STORAGE_INSTRUMENT_SAVE_MORPH,
+    /* Hidden `.hctmp` projection containing only the Morph endpoint image. */
+    STORAGE_INSTRUMENT_SAVE_MORPH_SNAPSHOT
 } storage_instrument_save_mode_t;
 
 /*
@@ -552,38 +537,10 @@ void storage_effectStateInit(storage_effect_state_t *state);
 storage_status_t storage_effectParseLine(storage_effect_state_t *state,
                                          const char *line);
 storage_status_t storage_effectFinalize(const storage_effect_state_t *state);
-/*
- * Initialize/parse/finalize Scene/Bank pattern text.
- *
- * Inputs are complete text lines from filesystem.c. Outputs are validation
- * bits plus PatternSet step-active/length/scale edits for v2 track lines. The
- * caller's PatternSet must already be seeded through pat_initPatternSet() so
- * omitted draft data, old placeholders, and non-stored step fields all keep the
- * same defaults.
- */
-void storage_patternStubStateInit(storage_pattern_stub_state_t *state);
-storage_status_t storage_patternStubParseLine(
-    storage_pattern_stub_state_t *state,
-    const char *line,
-    PatternSet *pattern);
-storage_status_t storage_patternStubFinalize(
-    const storage_pattern_stub_state_t *state);
-/*
- * Stream placeholder/draft Scene child files one line at a time.
- *
- * Inputs: destination buffer, capacity, and logical zero-based line index from
- * filesystem's generic text writer. Outputs: the number of bytes written,
- * including the trailing newline, or zero when the tiny schema has ended.
- * Clients: Scene Save and Bank-local Scene Save for effects.fx and
- * pattern.pat.
- */
+/* Pattern files use the fixed binary v4 stream owned by filesystem.c. */
 uint8_t storage_formatEffectPlaceholderLine(char *dst,
                                             uint16_t capacity,
                                             uint16_t line_index);
-uint8_t storage_formatPatternStubLine(char *dst,
-                                      uint16_t capacity,
-                                      const PatternSet *pattern,
-                                      uint16_t line_index);
 /*
  * Initialize/parse/finalize and stream the Bank-level config file.
  *

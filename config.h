@@ -49,37 +49,175 @@
 ** Feature flags
 ** ----------------------------------------------------------------------- */
 #define USE_SD_CARD          1
-#define DEBUG_CRASH_MODE     0
 /*
- * CONFIG_DEV_MODE exposes low-level storage diagnostics in the production UI.
+ * DEV_MODE_DIAGNOSTIC displays runtime information on the screen for the user
+ * to assess how operations are proceeding. It does not and should not ever add
+ * additional file interaction steps, since the diagnostic may be used to
+ * assess in-situ file procedures.
  *
- * What: when nonzero, the Load/Save type cycle includes the asyncfatfs test
- * entries "File", "Dir", and Save-only "sDir", and main.c compiles the
- * boot-stage/operation/substep/HCNAMES OLED observers used during storage
- * diagnosis. Why: ordinary firmware should neither expose test objects nor
- * replace the splash with durable boot coordinates, while one flag must restore
- * the complete front-panel diagnostic surface for hardware investigation.
- * Clients: Core/Menu/menu.c gates menu reachability; main.c compiles boot-screen
- * callbacks and display drains only in development mode. Filesystem test and
- * read-only observer functions remain callable so this flag changes visibility,
- * not storage behavior or on-card format.
+ * What: value 1 compiles only the existing boot OLED operation/phase
+ * observers. Value 0 makes every boot display hook a no-op and passes NULL for
+ * the filesystem observers. Why: screen instrumentation deliberately waits
+ * for LCD completion so the last operation is visible if boot stalls; keeping
+ * it independent prevents those waits from changing a file-timing diagnosis.
+ * Inputs: main.c's pre-audio boot stages and read-only filesystem coordinates.
+ * Outputs/effects: boot operation/phase information on the LCD only.
+ * Affiliates: boot_showFilesystemStage(),
+ * boot_showActiveFilesystemDiagnostic(), and the boot observer callbacks.
  */
+#define DEV_MODE_DIAGNOSTIC 0
+
 /*
- * Return the diagnostic-only UI surface to normal production behavior.
+ * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+ * must never print anything to the screen or otherwise delay operations
+ * unnecessarily since logging may be used to assess timing failures in other
+ * modules that might otherwise be obscured by screen write delays.
  *
- * What: value 0 compiles out main.c's pre-operation boot marker and live
- * filesystem operation/phase/substep observers. Why: the removed Instrument
- * Load diagnostic frame replaced the normal menu surface and made scrolling
- * untestable. Input: this compile-time flag is consumed by main.c and
- * Core/Menu/menu.c. Output: filesystem sequencing, SRAM allocation, and
- * SD-card contents remain unchanged, while diagnostic OLED frames and
- * developer-only menu entries are absent. Affiliates:
- * boot_showFilesystemStage(), boot_showActiveFilesystemDiagnostic(),
- * boot_showFilesystemSubstep(), filesystem_getBootDiagnostic(), and
- * filesystem_setBootSubstepDiagnostic(). Set to 1 only for a diagnostic that
- * preserves the UI under test.
+ * What: value 1 compiles the eight-byte filesystem-operation register,
+ * cooperative boot timeout, best-effort `/bootlog.bin` timeout writer, and
+ * bounded autosave lifecycle trace. Value 0 removes those logging behaviors.
+ * Why: a splash-screen stall or autosave regression otherwise loses the exact
+ * operation coordinate when power is removed.
+ * Inputs: main.c's pre-audio logging window and filesystem.c's foreground
+ * polling paths. Outputs/effects: SRAM code capture during normal progress and
+ * one bounded file write only after timeout recovery begins. This flag owns no
+ * LCD calls or LCD waits. Affiliates: filesystem_bootLoggingBegin(),
+ * filesystem_bootLoggingArm(), filesystem_tick(), AutosaveTrace.c, and the
+ * LXR-02 SD shim.
  */
-#define CONFIG_DEV_MODE      0
+#define DEV_MODE_LOGGING    1
+
+/*
+ * DEV_STALL_DETECTION enables cooperative stall detectors inside every
+ * foreground filesystem state machine. Each detector fires once after its
+ * phase stays unchanged for a site-specific tick threshold (20,000 to 50,000),
+ * writes a diagnostic named error code visible in the menu error overlay,
+ * records one AUTOSAVE_TRACE_STAGE_PHASE_STALL trace record (when
+ * DEV_MODE_LOGGING is also 1), and aborts the operation with FS_STATUS_ERROR
+ * so the menu is not frozen indefinitely.
+ *
+ * What: value 1 compiles all filesystem_pollPhaseStall() call sites, the
+ * per-state-machine stall counter statics, and the counter resets in request
+ * functions. Value 0 removes them entirely so no operation is ever aborted
+ * on a tick-count basis. Why: during bench testing an operation may need to
+ * run well beyond its normal threshold without being killed (e.g. a slow
+ * card or a diagnostic pause), and stall detectors that abort would mask the
+ * actual completion behavior. Inputs: none (compile-time only). Outputs:
+ * when 1, each state machine can produce one bounded error-abort per request.
+ * Affiliates: filesystem_pollPhaseStall(), every _tick function's stall
+ * detector block, every request function's counter reset, AutosaveTrace.h
+ * PHASE_STALL site constants.
+ */
+#define DEV_STALL_DETECTION 1
+
+/*
+ * Fixed boot-time AutoSave-ensure failure capsule geometry and schema.
+ *
+ * What: reserves eight fixed eight-byte records only in a logging build;
+ * schema 2 changes E7 bytes 5..6 from schema 1's SD retry_count to elapsed
+ * wait_ms. Why: SD response abandonment is now time-based and old captures
+ * must remain distinguishable from new evidence. Inputs are logging-only
+ * AsyncFATFS/SD snapshot producers. Output is the unchanged 64-byte suffix
+ * after the eight-byte ASENSURE token. Ownership: filesystem.c; lifetime: one
+ * boot attempt. No file is opened and no storage exists when logging is off.
+ * Record size/count, linker placement, and product on-card formats do not
+ * change. Affiliates: sdcardTransportSnapshot_t, DEV_MODES.md,
+ * decode_devlogs.py, and devlog_unpack.py.
+ */
+#if DEV_MODE_LOGGING
+#define HCPRMS_BOOT_CAPSULE_SCHEMA_VERSION 2u
+#define HCPRMS_BOOT_CAPSULE_RECORD_BYTES   8u
+#define HCPRMS_BOOT_CAPSULE_RECORD_COUNT   8u
+#define HCPRMS_BOOT_CAPSULE_BYTES \
+    (HCPRMS_BOOT_CAPSULE_RECORD_BYTES * HCPRMS_BOOT_CAPSULE_RECORD_COUNT)
+#endif
+
+/*
+ * Maximum duration of one armed boot filesystem operation.
+ *
+ * What: supplies the millisecond deadline used only while DEV_MODE_LOGGING is
+ * active before audio startup. Why: time_sysTick is a wrapping uint16_t, so the
+ * interval must stay below 32,768 ms for unsigned elapsed-time comparison.
+ * Inputs: one operation arm. Output: timeout after exactly ten seconds without
+ * terminal completion. Affiliates: filesystem_bootLoggingArm(),
+ * filesystem_tick(), and filesystem_blockPoll().
+ */
+#define BOOT_FILESYSTEM_TIMEOUT_MS 20000u
+
+/*
+ * DEV_LOGGING_IWDG: catch a genuine pre-audio hard lockup that the
+ * cooperative BOOT_FILESYSTEM_TIMEOUT_MS deadline above cannot see -- a raw
+ * blocking call (SD_init()'s command loop, the bit-bang SPI byte clocking,
+ * or a fixed timebase_holdPreAudioMs() hold) that never returns skips every
+ * cooperative poll, so nothing after it ever runs to notice or log it.
+ *
+ * What: value 1 starts the STM32F765's independent watchdog (IWDG) once,
+ * early in main(), and feeds it from the two foreground pumps --
+ * filesystem_tick() and filesystem_blockPoll() -- both reachable only from
+ * ordinary foreground code, never from an ISR. If the
+ * foreground genuinely stops calling filesystem_tick() (a blocking call
+ * above never returns), or keeps calling it forever without ever finishing
+ * boot, feeding stops and the IWDG resets the MCU on its own free-running
+ * hardware timer, independent of interrupts or software state. On the next
+ * boot, RCC_CSR's IWDGRSTF flag identifies that reset cause; if a small
+ * retained SRAM2 capsule (see filesystem.c) still holds a valid last-known
+ * boot-log code from before the reset, that code is written to bootlog.bin
+ * exactly like an ordinary cooperative timeout would, through the existing
+ * filesystem_writeBootFailureLogBlocking() path -- no new on-card format.
+ * Value 0 leaves the IWDG peripheral untouched and never starts it.
+ *
+ * This owns no NVIC/interrupt configuration and changes none: the IWDG has
+ * no interrupt line on this part, only a free-running hardware reset, so
+ * enabling it does not touch vector priorities or any existing ISR. Once
+ * started for a boot the IWDG cannot be stopped in software (only fed or
+ * left to expire), so it remains armed for the rest of that session,
+ * including all of runtime after boot completes.
+ *
+ * Affiliates: DEV_LOGGING_IWDG_EXPIRE below, filesystem.c's retained boot
+ * capsule, and main.c's single call to filesystem_devIwdgBootCheck()
+ * immediately after filesystem_bootLoggingBegin().
+ *
+ * DEFAULT IS 0 AFTER A REGRESSION (2026-08-21). The first version of this
+ * feature hung the instrument indefinitely on the boot splash: the IWDG init
+ * spun on IWDG_SR waiting for a PR/RLR write to cross into the LSI clock
+ * domain before it had written the 0xCCCC key that starts the LSI, and this
+ * firmware enables the LSI nowhere else. It produced no timeout, no bootlog,
+ * and no trace, because it ran before the card was mounted and the watchdog
+ * itself had not started. filesystem_devIwdgStart() is now ordered correctly,
+ * bounds every handshake against TIM6 milliseconds, and starts nothing at all
+ * if the LSI never reports ready, so that specific hang cannot recur.
+ *
+ * It is nevertheless left OFF by default so a normal build carries no
+ * watchdog risk. Before setting it back to 1, confirm every foreground path
+ * that can legitimately run longer than the ~32.8 s period still reaches a
+ * feed. Both known pumps are covered — filesystem_tick() and
+ * filesystem_blockPoll(), the latter specifically so the modal sample install
+ * cannot be reset part-way through a sampleFlash erase/program — but that
+ * audit should be repeated for any new long-running blocking operation.
+ * Enable it deliberately, for a hang-hunting session, not as a standing
+ * default.
+ */
+#define DEV_LOGGING_IWDG 0
+
+/*
+ * Software ceiling, in milliseconds, on how long the pre-audio boot window
+ * may keep feeding the IWDG before deliberately letting it lapse.
+ *
+ * What: measured against the free-running 32-bit systick_ticks (0.25ms
+ * resolution, ~12.4-day wrap) rather than the wrapping 16-bit time_sysTick
+ * used elsewhere in this file, because 2 minutes exceeds time_sysTick's safe
+ * 32,768ms comparison range. Why: a foreground loop that keeps calling
+ * filesystem_tick() forever without ever reaching filesystem_bootLoggingEnd()
+ * -- e.g. a state-machine retry loop that never reaches DONE and never trips
+ * the per-operation BOOT_FILESYSTEM_TIMEOUT_MS deadline -- is a hang
+ * BOOT_FILESYSTEM_TIMEOUT_MS cannot always bound end-to-end; this is the
+ * backstop that intentionally stops feeding once it elapses, letting the
+ * IWDG's own native period reset the MCU shortly after. A call that never
+ * returns at all is caught sooner, by the IWDG's native period alone.
+ * Only meaningful while DEV_LOGGING_IWDG is 1. Affiliate:
+ * filesystem_tick()'s IWDG feed gate.
+ */
+#define DEV_LOGGING_IWDG_EXPIRE 120000u
 
 //if 1 the amp EGs will be calculated on a per sample basis
 //takes too much calcuklation time
@@ -92,6 +230,44 @@
 
 // TODO DSP_PORT - should be declared in sequencer.h, some oscillator junk needs this defined for now.
 #define SEQ_DEFAULT_NOTE 63
+
+/*
+ * Session-062 dynamic Pattern storage sizing and playback defaults.
+ *
+ * PAT_STACK_SIZE is the number of 32-byte bitmap-tracking units reserved for
+ * one Scene's future dynamic event pool. The pool therefore occupies
+ * PAT_STACK_SIZE * 32 bytes, while PatternData keeps its free bitmap at the
+ * full 512-byte width for the complete 14-bit address space. The initial 256
+ * units provide an 8,192-byte pool; changing this to 512 later expands the
+ * pool without changing the address-entry or bitmap representation.
+ *
+ * PAT_DEFAULT_NOTE and PAT_DEFAULT_VELOCITY are Pattern-owned values used by
+ * the sequencer when a triggered step has no corresponding special. They are
+ * intentionally separate from the legacy MIDI and roll constants even though
+ * their initial numeric values match them.
+ *
+ * Inputs: compile-time configuration only. Outputs: PatternData region size,
+ * bitmap initialization, and the Step-B½ sequencer trigger defaults.
+ * Affiliates: PatternData.c and sequencer.c.
+ */
+#define PAT_STACK_SIZE           256u
+#define PAT_DEFAULT_NOTE          63u
+#define PAT_DEFAULT_VELOCITY     100u
+
+/*
+ * Pattern stack service maintenance policy.
+ *
+ * What: gap reduction selects one trailing free chunk at or above sixty
+ * percent logical occupancy; Tier 2 scans sixteen address entries per 500 Hz
+ * pass and waits at least 100 ms between background passes. Why: foreground
+ * edits and playback retain priority while fragmented free space is repaired
+ * cooperatively. Inputs: compile-time service policy. Outputs: bounded
+ * PatternStackService.c Tier 1/Tier 2 work. Affiliates: patSvc_tick().
+ */
+#define PAT_GAP_REDUCE_THRESHOLD   60u
+#define PAT_COMPACT_INTERVAL_MS   100u
+#define PAT_COMPACT_SCAN_PER_TICK  16u
+#define PAT_COMPACT_FREE_RUN_THRESHOLD 8u
 
 
 #define EG_SPEED 	1;//0.04125f
@@ -128,6 +304,140 @@
 #define SYSTICK_HZ           TIMEBASE_HZ
 #define FRONTPANEL_TICK_HZ   1000
 #define SYSTICK_TICKS_PER_MS (SYSTICK_HZ / 1000)
+
+/* -----------------------------------------------------------------------
+** VOICE overlay and UI hold-gesture timing.
+**
+** What: three tunable constants governing the VOICE-page held-step
+** automation overlay (S066). BUTTON_HOLD_DELAY_MS is the common short
+** long-press threshold shared by every UI gesture that distinguishes a hold
+** from a tap. VOICE_AUTOMATION_UNDERLINE_QUIET_MS is the quiet period before
+** reapplying a value underline after a rapid pot edit. The scan budget bounds
+** the asynchronous Pattern search to four steps per foreground pass.
+**
+** Why: timing belongs in config.h so one clean rebuild applies the same
+** thresholds to every UI path. The search budget also keeps the worst case at
+** 4 * 63 = 252 automation-entry comparisons per pass.
+**
+** Inputs: none (compile-time constants). Outputs: buttonHandler and Menu UI
+** timing/search policy. Affiliates: time_sysTick, buttonHandler_tick(), and
+** menu_serviceRuntimeWidgets().
+** ----------------------------------------------------------------------- */
+#define BUTTON_HOLD_DELAY_MS                 100u
+#define VOICE_AUTOMATION_UNDERLINE_QUIET_MS  100u
+#define VOICE_AUTOMATION_SCAN_STEPS_PER_PASS 4u
+
+/*
+ * Ordinary pause between autonomous autosave transactions.
+ *
+ * The writer compares this with the wrapping 16-bit `time_sysTick` using
+ * unsigned subtraction, so it must remain below 32,768 ms. This five-second
+ * cadence applies before the first runtime attempt and after an error,
+ * recovery, read-only empty-mask check, or fully drained write. A successful
+ * write that carries dirty bits forward uses the shorter continuation cadence
+ * below instead. Neither cadence is a synchronous deadline: Load/Save pages
+ * and ordinary filesystem work may defer the next background start.
+ */
+#define AUTOSAVE_WRITER_INTERVAL_MS 5000u
+
+/*
+ * Short pause between bounded writes while a durable backlog still exists.
+ *
+ * Input is Autosave.c's persistent canonical dirty record after a successful
+ * target commit and normal filesystem flush. Output schedules the next complete
+ * validation/drain transaction 250 ms later only when that owner still has a
+ * dirty bit. Why: bounded backlog drains promptly without changing the
+ * five-second debounce for new work, a complete record, or an error. This
+ * remains below the 16-bit scheduler's 32,768 ms comparison limit. Affiliates:
+ * filesystem_autosaveParameterDrain_tick() and its completion callback.
+ */
+#define AUTOSAVE_WRITER_CONTINUATION_INTERVAL_MS 250u
+
+/*
+ * Trailing debounce for autonomous settings.cfg persistence.
+ *
+ * What: supplies the one-second delay restarted by every changed Global-menu
+ * value or successful Bank/Scene provenance update. Why: bursts must coalesce
+ * without making a synchronous SD write from Menu or Preset completion code.
+ * Inputs: filesystem_markSettingsDirty() and the wrapping 16-bit time_sysTick.
+ * Output/effects: the idle filesystem scheduler may start one complete keyed
+ * settings write after the last change. Affiliates: filesystem_tick() and the
+ * existing FS_INTERNAL_OP_SAVE_GLOBALS state machine. This interval must stay
+ * nonzero and below the wrapping timer's 32,768 ms half range.
+ */
+#define SETTINGS_AUTOWRITE_DEBOUNCE_MS 1000u
+
+/*
+ * Bound live payload sampling inside one debounced autosave transaction.
+ *
+ * Input is Autosave.c's canonical mask after OR-merging the valid winner's
+ * file-carried completeness bits. Output is at most this many stable payload
+ * offset/value patches captured before the one transformed copy begins. Why:
+ * parameter reads and patch-cache growth remain predictable even when a whole
+ * Scene is dirty. The selected 1,536 entries occupy 4,608 filesystem-owned
+ * bytes; beside Autosave.c's 3,856-byte canonical mask, combined storage stays
+ * 8,464 bytes below the temporary 9,000-byte ceiling. It can capture about
+ * three current Scenes per generation. Affiliates: Autosave.c's live-byte
+ * projection and filesystem.c's parameter-drain cache.
+ */
+#define AUTOSAVE_PARAMETER_GETS_PER_WRITE 1536u
+
+/*
+ * Bound mutation-mask classification work performed by one foreground tick.
+ *
+ * Input is the retained payload scan cursor. Output advances by no more than
+ * this many bit positions before returning to the main loop. This is distinct
+ * from AUTOSAVE_PARAMETER_GETS_PER_WRITE: nonexistent/padding cells consume
+ * scan work but no live get. Affiliates: filesystem_autosaveParameterDrain_tick().
+ */
+#define AUTOSAVE_MASK_BITS_PER_TICK 256u
+
+/*
+ * Bound CRC32C CPU work performed by one cooperative filesystem pass.
+ *
+ * Input is a contiguous interval of one 34,768-byte hidden AutoSave record.
+ * Output limits initial-image generation, candidate validation, recovery, and
+ * transformed-copy checksum work to this many bytes before filesystem.c yields
+ * to the main loop. Why: a full-record CRC previously monopolized the
+ * foreground long enough to starve audio rendering; this is a work budget, not
+ * an SD transfer delay, timer interval, or filesystem pacing mechanism.
+ * Affiliates: Autosave.c's bounded initial-image updater and filesystem.c's
+ * AutoSave ensure/writer state machines.
+ */
+#define AUTOSAVE_CRC_BYTES_PER_TICK 128u
+
+/*
+ * Retained autosave-trace capacity. The default is 64 records (512 bytes);
+ * this diagnostic pass temporarily retains 2048 records (16,384 bytes) in
+ * the DEV_MODE_LOGGING-only SRAM1 ring. Restore the effective value to the
+ * default when the trace extension experiment is complete.
+ */
+#define AUTOSAVE_TRACE_RECORD_COUNT_DEFAULT 64u
+#define AUTOSAVE_TRACE_RECORD_COUNT 2048u /* TEMPORARY approved expansion */
+
+/*
+ * Minimum idle interval between background autosave-trace append attempts.
+ * Input is time_sysTick's wrapping millisecond clock; output keeps diagnostic
+ * trace I/O below settings persistence and the autosave writer in the shared
+ * filesystem scheduler. This is observability cadence only, never a writer
+ * debounce or durability policy, and applies solely when DEV_MODE_LOGGING is 1.
+ */
+#define AUTOSAVE_TRACE_FLUSH_INTERVAL_MS 500u
+
+/*
+ * Session-065 pending automation handoff and PatternTrace geometry.
+ *
+ * What: reserve one 4-byte pending automation record per queued ISR event and
+ * one eight-byte DEV-only PatternTrace record per retained trace event. Why:
+ * TIM3 must publish automation without doing descriptor/runtime work, while
+ * foreground filesystem code needs a bounded diagnostic history. SRAM cost:
+ * SEQ_PENDING_BUF_COUNT * 4 = 512 bytes in SRAM1 plus one 32-record trace ring
+ * of 256 bytes only when DEV_MODE_LOGGING is enabled. Affiliates: sequencer.c,
+ * PatternTrace.c, and filesystem.c.
+ */
+#define SEQ_PENDING_BUF_COUNT       128u
+#define PAT_TRACE_RECORD_COUNT      32u
+#define PAT_TRACE_FLUSH_INTERVAL_MS 1000u
 
 /* -----------------------------------------------------------------------
 ** Display — WS0010 OLED 16×2, 4-bit parallel

@@ -87,11 +87,15 @@ SRCS = \
   Core/Menu/Cc2Text.c \
   Core/Menu/copyClearTools.c \
   Core/Menu/screensaver.c \
+  Core/Menu/SplashAnimation.c \
   Core/Bank/Scene/Preset/presetManager.c \
   Core/Bank/Scene/Preset/presetMorphEngine.c \
   Core/Bank/Scene/Preset/ParameterArray.c \
   Core/Bank/BankData.c \
   Core/Bank/Scene/SceneData.c \
+  Core/Bank/Scene/Autosave.c \
+  Core/Bank/Scene/AutosaveTrace.c \
+  Core/Bank/Scene/Pattern/PatternTrace.c \
   Core/Bank/Scene/SceneModTargets.c \
   Core/DSP/Instruments/InstrumentManager.c \
   Core/DSP/Instruments/Drum/DrumParameters.c \
@@ -104,6 +108,7 @@ SRCS = \
 	  Core/MIDI/MidiVoiceControl.c \
 	  Core/MIDI/MidiParser.c \
   Core/Bank/Scene/Pattern/PatternData.c \
+  Core/Bank/Scene/Pattern/PatternStackService.c \
   Core/Bank/Scene/Pattern/EuklidGenerator.c \
   Core/Bank/Scene/Pattern/SomGenerator.c \
   Core/Bank/Scene/Pattern/SomData.c \
@@ -116,7 +121,6 @@ SRCS = \
 
 DSP_SRCS = \
   Core/DSPAudio/1PoleLp.c \
-  Core/DSPAudio/automationNode.c \
   Core/DSPAudio/BufferTools.c \
   Core/DSP/Instruments/Cymbal/CymbalVoice.c \
   Core/DSPAudio/Decay.c \

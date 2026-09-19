@@ -152,35 +152,6 @@ static uint8_t storage_formatAssignmentU16(char *dst, uint16_t capacity,
     return storage_formatAssignmentText(dst, capacity, key, digits);
 }
 
-static uint8_t storage_formatAssignmentHex16(char *dst, uint16_t capacity,
-                                             const char *key,
-                                             uint16_t value)
-{
-    char text[7];
-    uint8_t i;
-
-    /*
-     * Format "key=0xNNNN\n" for fixed-width Scene masks.
-     *
-     * Inputs: a 16-bit Bank Scene mask where bit N addresses resident Scene N.
-     * Output: four lowercase hexadecimal nibbles. The loop extracts the most
-     * significant nibble first by shifting 12, 8, 4, and 0 bits, then masking
-     * with 0x0f; that presentation makes SEQ-button groups visible in files
-     * without converting the mask to a decimal count.
-     */
-    text[0] = '0';
-    text[1] = 'x';
-    for (i = 0u; i < 4u; i++) {
-        uint8_t shift = (uint8_t)((3u - i) * 4u);
-        uint8_t nibble = (uint8_t)((value >> shift) & 0x0fu);
-        text[2u + i] = (nibble < 10u)
-            ? (char)('0' + nibble)
-            : (char)('a' + (nibble - 10u));
-    }
-    text[6] = '\0';
-    return storage_formatAssignmentText(dst, capacity, key, text);
-}
-
 static uint8_t storage_formatAssignmentU8(char *dst, uint16_t capacity,
                                           const char *key,
                                           instrument_param_value_t value)
@@ -289,53 +260,6 @@ static storage_status_t storage_parseU8(const char *text, uint8_t *out)
     if (digits == 0u || *storage_trimLeft(text) != '\0')
         return STORAGE_STATUS_BAD_VALUE;
     *out = (uint8_t)value;
-    return STORAGE_STATUS_OK;
-}
-
-static storage_status_t storage_parseU16Flexible(const char *text,
-                                                 uint16_t *out)
-{
-    uint16_t value = 0u;
-    uint8_t digits = 0u;
-    uint8_t base = 10u;
-
-    /*
-     * Parse decimal or 0x-prefixed unsigned 16-bit text.
-     *
-     * Inputs: bankset/settings value text. Outputs: *out receives 0..65535 on
-     * OK. Decimal is used for ordinary counters such as active_bank, while
-     * bankset Scene masks are written in hex so users can inspect button bits.
-     * Trailing non-space text, empty values, and overflow reject the line.
-     */
-    if (!text || !out)
-        return STORAGE_STATUS_BAD_VALUE;
-    text = storage_trimLeft(text);
-    if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
-        base = 16u;
-        text += 2;
-    }
-    while (*text != '\0') {
-        uint8_t digit;
-        if (*text >= '0' && *text <= '9') {
-            digit = (uint8_t)(*text - '0');
-        } else if (base == 16u && *text >= 'a' && *text <= 'f') {
-            digit = (uint8_t)(10u + (uint8_t)(*text - 'a'));
-        } else if (base == 16u && *text >= 'A' && *text <= 'F') {
-            digit = (uint8_t)(10u + (uint8_t)(*text - 'A'));
-        } else {
-            break;
-        }
-        if (digit >= base)
-            return STORAGE_STATUS_BAD_VALUE;
-        if (value > (uint16_t)((65535u - digit) / base))
-            return STORAGE_STATUS_BAD_VALUE;
-        value = (uint16_t)((value * base) + digit);
-        text++;
-        digits++;
-    }
-    if (digits == 0u || *storage_trimLeft(text) != '\0')
-        return STORAGE_STATUS_BAD_VALUE;
-    *out = value;
     return STORAGE_STATUS_OK;
 }
 
@@ -1005,6 +929,66 @@ uint8_t storage_formatInstrumentLineView(
     if (line_index == 4u)
         return storage_formatLiteral(dst, capacity, "[params]\n");
 
+    if (view->mode == STORAGE_INSTRUMENT_SAVE_MORPH_SNAPSHOT) {
+        /*
+         * Emit the smallest valid Instrument container for a reversible
+         * InstrumentMrp baseline.
+         *
+         * What: retain one ordinary [params] anchor for the existing parser,
+         * then stream every Morphable endpoint into [morph]. Why: the hidden
+         * `kit` row needs only the entry Morph image; writing the complete
+         * normal Instrument image would make InstrumentMrp depend on the
+         * normal-load snapshot and could accidentally restore type/Normal
+         * state. Inputs: the resident slot and its descriptor registry. Output:
+         * an ordinary parseable Instrument file whose only meaningful payload
+         * is the Morph endpoint domain. No RAM image is created.
+         */
+        if (line_index == 5u) {
+            for (i = 0u; i < entry->descriptor_count; i++) {
+                const ParamDescriptor *descriptor = &entry->descriptors[i];
+                if (storage_descriptorWritableInSection(descriptor, 0u)) {
+                    if ((descriptor->runtime.kind ==
+                             INSTRUMENT_BIND_LFO_TARGET_VOICE ||
+                         descriptor->runtime.kind ==
+                             INSTRUMENT_BIND_LFO_TARGET_VOICE_2) &&
+                        storage_valueForInstrumentSaveSection(
+                            view, descriptor, i, 0u) == view->one_based_voice) {
+                        return storage_formatAssignmentText(dst, capacity,
+                                                            descriptor->file_key,
+                                                            "self");
+                    }
+                    return storage_formatAssignmentU8(
+                        dst, capacity, descriptor->file_key,
+                        storage_valueForInstrumentSaveSection(
+                            view, descriptor, i, 0u));
+                }
+            }
+            return 0u;
+        }
+        if (line_index == 6u)
+            return storage_formatLiteral(dst, capacity, "\n");
+        if (line_index == 7u)
+            return storage_formatLiteral(dst, capacity, "[morph]\n");
+
+        descriptor_ordinal = (uint16_t)(line_index - 8u);
+        for (i = 0u; i < entry->descriptor_count; i++) {
+            const ParamDescriptor *descriptor = &entry->descriptors[i];
+            if (!storage_descriptorWritableInSection(descriptor, 1u))
+                continue;
+            if (descriptor_ordinal > 0u) {
+                descriptor_ordinal--;
+                continue;
+            }
+            return storage_formatAssignmentU8(
+                dst, capacity, descriptor->file_key,
+                storage_valueForInstrumentSaveSection(
+                    view, descriptor, i, 1u));
+        }
+        if (descriptor_ordinal == 0u)
+            return storage_formatLiteral(dst, capacity, "\n");
+        return 0u;
+    }
+
     descriptor_ordinal = (uint16_t)(line_index - 5u);
     for (i = 0u; i < entry->descriptor_count; i++) {
         const ParamDescriptor *descriptor = &entry->descriptors[i];
@@ -1167,475 +1151,72 @@ storage_status_t storage_effectFinalize(const storage_effect_state_t *state)
     return STORAGE_STATUS_OK;
 }
 
-void storage_patternStubStateInit(storage_pattern_stub_state_t *state)
+
+/* Bankset's hexadecimal mask parser remains shared with the Bank schema. */
+static int8_t storage_patternHex(char c)
 {
-    /*
-     * Clear Scene/Bank pattern text validation bits.
-     *
-     * Inputs/output: caller-owned parse state. Filesystem already seeded the
-     * staged PatternSet through PatternData before reading the file; v1
-     * placeholder files therefore validate without changing that default, while
-     * v2 track lines selectively overlay active-step bits and track timing.
-     */
-    if (state)
-        memset(state, 0, sizeof(*state));
+    if (c >= '0' && c <= '9') return (int8_t)(c - '0');
+    if (c >= 'a' && c <= 'f') return (int8_t)(c - 'a' + 10);
+    if (c >= 'A' && c <= 'F') return (int8_t)(c - 'A' + 10);
+    return -1;
 }
 
-static storage_status_t storage_patternDraftParseTrack(
-    storage_pattern_stub_state_t *state,
-    const char *key,
-    const char *value,
-    PatternSet *pattern)
+/* The effect and Bank directory schemas remain independent of Step storage. */
+uint8_t storage_formatEffectPlaceholderLine(char *dst, uint16_t capacity,
+                                            uint16_t line_index)
 {
-    uint8_t track;
-    uint8_t length;
-    uint8_t scale;
-    char token[4];
-    uint8_t token_len = 0u;
-    uint8_t step;
-    uint16_t main_steps = 0u;
-    LengthRotate *lr;
-
-    /*
-     * Parse one draft v2 `trackN=` line.
-     *
-     * Key input: exactly track1..track7, using one-based user track numbers so
-     * the file mirrors the hardware front panel. Value input:
-     * `<length>,<scale>,<128 bits>`. Outputs: PatternSet length/scale fields
-     * and the STEP_ACTIVE_MASK bit in every Step.volume cell for this track.
-     * All non-stored Step data has already been initialized to defaults.
-     */
-    if (!state || !key || !value || !pattern)
-        return STORAGE_STATUS_BAD_VALUE;
-    if (key[0] != 't' || key[1] != 'r' || key[2] != 'a' ||
-        key[3] != 'c' || key[4] != 'k' ||
-        key[5] < '1' || key[5] > '7' || key[6] != '\0') {
-        return STORAGE_STATUS_OK;
-    }
-    track = (uint8_t)(key[5] - '1');
-
-    /*
-     * Decimal length parser.
-     *
-     * The token buffer permits 1..128. Zero and values above NUM_STEPS are
-     * rejected because the draft file stores the real playback length, not the
-     * legacy "0 means default" compatibility byte.
-     */
-    value = storage_trimLeft(value);
-    while (*value != ',' && *value != '\0') {
-        if (token_len >= (sizeof(token) - 1u))
-            return STORAGE_STATUS_BAD_VALUE;
-        token[token_len++] = *value++;
-    }
-    token[token_len] = '\0';
-    if (*value != ',' || storage_parseU8(token, &length) != STORAGE_STATUS_OK ||
-        length == 0u || length > NUM_STEPS) {
-        return STORAGE_STATUS_BAD_VALUE;
-    }
-    value++;
-
-    /*
-     * Decimal scale parser.
-     *
-     * Scale is the PatternData TRACK_SCALE_* table index. The upper bound keeps
-     * future/corrupt values from indexing outside pat_trackScaleRatios at
-     * playback time.
-     */
-    token_len = 0u;
-    value = storage_trimLeft(value);
-    while (*value != ',' && *value != '\0') {
-        if (token_len >= (sizeof(token) - 1u))
-            return STORAGE_STATUS_BAD_VALUE;
-        token[token_len++] = *value++;
-    }
-    token[token_len] = '\0';
-    if (*value != ',' || storage_parseU8(token, &scale) != STORAGE_STATUS_OK ||
-        scale >= TRACK_SCALE_COUNT) {
-        return STORAGE_STATUS_BAD_VALUE;
-    }
-    value++;
-
-    /*
-     * 128-character active-step bitmap.
-     *
-     * Each character maps directly to Step[track][step]. `1` sets
-     * STEP_ACTIVE_MASK and `0` clears it while preserving the lower seven
-     * default velocity bits. The same loop builds the legacy 16-bit main-step
-     * shadow with step % 16, matching pat_recordNote() and the current
-     * 16-button LED row projection. The 128-bit Step array remains the source
-     * of truth; this mask is only the bridge compatibility mirror.
-     */
-    for (step = 0u; step < NUM_STEPS; step++) {
-        Step *s = &pattern->pat_subStepPattern[track][step];
-        if (value[step] == '1') {
-            s->volume = (uint8_t)((s->volume & STEP_VOLUME_MASK) |
-                                  STEP_ACTIVE_MASK);
-            main_steps = (uint16_t)(main_steps |
-                         (uint16_t)(1u << (step % NUM_STEPS_PER_BAR)));
-        } else if (value[step] == '0') {
-            s->volume = (uint8_t)(s->volume & STEP_VOLUME_MASK);
-        } else {
-            return STORAGE_STATUS_BAD_VALUE;
-        }
-    }
-    if (storage_trimLeft(&value[NUM_STEPS])[0] != '\0')
-        return STORAGE_STATUS_BAD_VALUE;
-
-    lr = &pattern->pat_patternLengthRotate[track];
-    lr->length = length;
-    lr->scale = scale;
-    pattern->pat_mainSteps[track] = main_steps;
-    state->seen_track_mask = (uint8_t)(state->seen_track_mask |
-                                       (uint8_t)(1u << track));
-    return STORAGE_STATUS_OK;
-}
-
-storage_status_t storage_patternStubParseLine(
-    storage_pattern_stub_state_t *state,
-    const char *line,
-    PatternSet *pattern)
-{
-    char key[24];
-    const char *value;
-    storage_status_t st;
-    uint8_t parsed;
-
-    /*
-     * Parse one Scene/Bank pattern text line.
-     *
-     * Inputs: a complete NUL-terminated text line with CR/LF already removed.
-     * Outputs: v1 placeholder validation bits or v2 draft PatternSet edits.
-     * Unknown keys are ignored so future pattern schemas can append metadata
-     * while this draft reader keeps accepting the fields it owns.
-     */
-    if (!state || !line)
-        return STORAGE_STATUS_BAD_VALUE;
-    line = storage_trimLeft(line);
-    if (*line == '\0' || *line == '#')
-        return STORAGE_STATUS_OK;
-    st = storage_splitKeyValue(line, key, sizeof(key), &value);
-    if (st != STORAGE_STATUS_OK)
-        return st;
-    if (storage_streq(key, "format")) {
-        if (!storage_streq(value, "helicase.pattern"))
-            return STORAGE_STATUS_INVALID_FORMAT;
-        state->seen_format = 1u;
-    } else if (storage_streq(key, "version")) {
-        st = storage_parseU8(value, &parsed);
-        if (st != STORAGE_STATUS_OK)
-            return st;
-        if (parsed != 1u && parsed != 2u)
-            return STORAGE_STATUS_UNSUPPORTED_VERSION;
-        state->version = parsed;
-        state->seen_version = 1u;
-    } else if (storage_streq(key, "placeholder")) {
-        st = storage_parseU8(value, &parsed);
-        if (st != STORAGE_STATUS_OK)
-            return st;
-        if (parsed != 1u)
-            return STORAGE_STATUS_BAD_VALUE;
-        state->seen_placeholder = 1u;
-    } else {
-        st = storage_patternDraftParseTrack(state, key, value, pattern);
-        if (st != STORAGE_STATUS_OK)
-            return st;
-    }
-    return STORAGE_STATUS_OK;
-}
-
-storage_status_t storage_patternStubFinalize(
-    const storage_pattern_stub_state_t *state)
-{
-    /*
-     * Validate pattern text after EOF.
-     *
-     * Version 1 requires the placeholder guard and leaves PatternSet defaults
-     * untouched. Version 2 requires all seven track lines because partial
-     * pattern recall would silently clear or mis-time tracks.
-     */
-    if (!state || !state->seen_format || !state->seen_version) {
-        return STORAGE_STATUS_MISSING_REQUIRED;
-    }
-    if (state->version == 1u) {
-        if (!state->seen_placeholder)
-            return STORAGE_STATUS_MISSING_REQUIRED;
-        return STORAGE_STATUS_OK;
-    }
-    if (state->version == 2u) {
-        if (state->seen_track_mask != 0x7fu)
-            return STORAGE_STATUS_MISSING_REQUIRED;
-        return STORAGE_STATUS_OK;
-    }
-    return STORAGE_STATUS_UNSUPPORTED_VERSION;
-}
-
-static uint8_t storage_appendDecimalU16(char *dst,
-                                        uint16_t capacity,
-                                        uint16_t *pos,
-                                        uint16_t value)
-{
-    char digits[6];
-    uint8_t count = 0u;
-    uint16_t divisor = 10000u;
-    uint8_t seen = 0u;
-
-    if (!dst || !pos)
-        return 0u;
-    while (divisor > 0u) {
-        uint8_t digit = (uint8_t)(value / divisor);
-        if (digit != 0u || seen || divisor == 1u) {
-            digits[count++] = (char)('0' + digit);
-            seen = 1u;
-        }
-        value = (uint16_t)(value % divisor);
-        divisor = (uint16_t)(divisor / 10u);
-    }
-    for (uint8_t i = 0u; i < count; i++) {
-        if (*pos + 1u >= capacity)
-            return 0u;
-        dst[(*pos)++] = digits[i];
-    }
-    dst[*pos] = '\0';
-    return 1u;
+    if (line_index == 0u) return storage_formatLiteral(dst, capacity, "format=helicase.effect\n");
+    if (line_index == 1u) return storage_formatLiteral(dst, capacity, "version=1\n");
+    if (line_index == 2u) return storage_formatLiteral(dst, capacity, "placeholder=1\n");
+    return 0u;
 }
 
 void storage_banksetInit(storage_bankset_t *state)
 {
-    /*
-     * Clear Bank config parse state and default active_scene/mask to Scene 0.
-     *
-     * Inputs/output: caller-owned state before reading bankset.bcg. The
-     * default matters for early or hand-authored Bank folders: format/version
-     * still validate the file, absent active_scene means "try slot 00", and
-     * absent scene_mask_voice_edit means edits target only that same Scene.
-     */
-    if (state) {
-        memset(state, 0, sizeof(*state));
-        state->scene_mask_voice_edit = 1u;
-    }
+    if (state) memset(state, 0, sizeof(*state));
 }
-
-storage_status_t storage_banksetParseLine(storage_bankset_t *state,
-                                          const char *line)
+storage_status_t storage_banksetParseLine(storage_bankset_t *state, const char *line)
 {
-    char key[24];
-    const char *value;
-    storage_status_t st;
-    uint8_t parsed;
-    uint16_t parsed16;
-
-    /*
-     * Parse one bankset.bcg assignment.
-     *
-     * The file is Bank-level config, not identity storage. Unknown keys are
-     * ignored so future Bank metadata can be appended. A legacy or accidental
-     * name= line is also ignored by that rule; no parser branch ever copies it
-     * into resident BankData.
-     */
-    if (!state || !line)
-        return STORAGE_STATUS_BAD_VALUE;
-    line = storage_trimLeft(line);
-    if (*line == '\0' || *line == '#')
-        return STORAGE_STATUS_OK;
-    st = storage_splitKeyValue(line, key, sizeof(key), &value);
-    if (st != STORAGE_STATUS_OK)
-        return st;
-    if (storage_streq(key, "format")) {
-        if (!storage_streq(value, "helicase.bankset"))
-            return STORAGE_STATUS_INVALID_FORMAT;
-        state->seen_format = 1u;
-    } else if (storage_streq(key, "version")) {
-        st = storage_parseU8(value, &parsed);
-        if (st != STORAGE_STATUS_OK)
-            return st;
-        if (parsed != 1u && parsed != 2u)
-            return STORAGE_STATUS_UNSUPPORTED_VERSION;
-        state->seen_version = 1u;
-    } else if (storage_streq(key, "active_scene")) {
-        st = storage_parseU8(value, &parsed);
-        if (st != STORAGE_STATUS_OK)
-            return st;
-        if (parsed >= STORAGE_BANK_SCENE_MAX_SLOTS)
-            return STORAGE_STATUS_BAD_SLOT;
-        state->active_scene = parsed;
-        state->seen_active_scene = 1u;
-    } else if (storage_streq(key, "scene_mask_voice_edit")) {
-        st = storage_parseU16Flexible(value, &parsed16);
-        if (st != STORAGE_STATUS_OK)
-            return st;
-        /*
-         * Accept the mask exactly in its 16-bit storage domain.
-         *
-         * Higher-level BankData owns the active-Scene invariant because it
-         * knows the finalized active_scene and is shared by UI toggles too.
-         * storageTypes only proves that the line is a syntactically valid
-         * uint16_t assignment and retains it for filesystem.c to apply.
-         */
-        state->scene_mask_voice_edit = parsed16;
+    char key[32]; const char *value; storage_status_t st;
+    if (!state || !line) return STORAGE_STATUS_BAD_VALUE;
+    st = storage_splitKeyValue(line, key, sizeof(key), &value); if (st != STORAGE_STATUS_OK) return st;
+    if (storage_streq(key,"format")) { if (!storage_streq(value,"helicase.bankset")) return STORAGE_STATUS_INVALID_FORMAT; state->seen_format=1u; }
+    else if (storage_streq(key,"version")) { uint8_t v; st=storage_parseU8(value,&v); if(st!=STORAGE_STATUS_OK||v!=2u) return STORAGE_STATUS_UNSUPPORTED_VERSION; state->seen_version=1u; }
+    else if (storage_streq(key,"active_scene")) { st=storage_parseU8(value,&state->active_scene); if(st!=STORAGE_STATUS_OK) return st; state->seen_active_scene=1u; }
+    else if (storage_streq(key,"scene_mask_voice_edit")) {
+        uint16_t value16 = 0u; uint8_t n = 0u; uint8_t digits = 0u;
+        if (value[0] == '0' && (value[1] == 'x' || value[1] == 'X'))
+            n = 2u;
+        while (value[n] != '\0' && digits < 4u) {
+            int8_t digit = storage_patternHex(value[n++]);
+            if (digit < 0) return STORAGE_STATUS_BAD_VALUE;
+            value16 = (uint16_t)((value16 << 4u) | (uint8_t)digit);
+            digits++;
+        }
+        if (value[n] != '\0' || digits == 0u) return STORAGE_STATUS_BAD_VALUE;
+        state->scene_mask_voice_edit = value16;
         state->seen_scene_mask_voice_edit = 1u;
     }
     return STORAGE_STATUS_OK;
 }
-
 storage_status_t storage_banksetFinalize(const storage_bankset_t *state)
+{ return (!state || !state->seen_format || !state->seen_version) ? STORAGE_STATUS_MISSING_REQUIRED : STORAGE_STATUS_OK; }
+uint8_t storage_formatBanksetLine(char *dst,uint16_t capacity,const storage_bankset_t *state,uint16_t line_index)
 {
-    /*
-     * Validate bankset.bcg after EOF.
-     *
-     * Required fields are only the guard and version. active_scene is optional
-     * because an empty Bank is valid and the initialized default 0 gives the
-     * loader a deterministic first child to try before it falls back to the
-     * lowest present child or root Scene/Kit defaults.
-     */
-    if (!state || !state->seen_format || !state->seen_version)
-        return STORAGE_STATUS_MISSING_REQUIRED;
-    return STORAGE_STATUS_OK;
-}
-
-uint8_t storage_formatBanksetLine(char *dst,
-                                  uint16_t capacity,
-                                  const storage_bankset_t *state,
-                                  uint16_t line_index)
-{
-    uint8_t active_scene = state ? state->active_scene : 0u;
-    uint16_t scene_mask_voice_edit = state
-        ? state->scene_mask_voice_edit
-        : 1u;
-
-    /*
-     * Emit the v2 Bank config one line at a time.
-     *
-     * Inputs: logical line index from filesystem's streaming writer and the
-     * Bank-level active Scene slot plus scene_mask_voice_edit. Output:
-     * format/version/active_scene/mask text, or zero after the schema ends.
-     * active_scene is decimal because it is a slot number; the edit mask is
-     * fixed-width hex because every bit is a Scene membership flag.
-     */
-    if (active_scene >= STORAGE_BANK_SCENE_MAX_SLOTS)
-        active_scene = 0u;
-    switch (line_index) {
-    case 0u:
-        return storage_formatLiteral(dst, capacity,
-                                     "format=helicase.bankset\n");
-    case 1u:
-        return storage_formatLiteral(dst, capacity, "version=2\n");
-    case 2u:
-        return storage_formatAssignmentU16(dst, capacity, "active_scene",
-                                           active_scene);
-    case 3u:
-        return storage_formatAssignmentHex16(dst, capacity,
-                                             "scene_mask_voice_edit",
-                                             scene_mask_voice_edit);
-    default:
-        return 0u;
+    if (!state) return 0u;
+    if(line_index==0u) return storage_formatLiteral(dst,capacity,"format=helicase.bankset\n");
+    if(line_index==1u) return storage_formatLiteral(dst,capacity,"version=2\n");
+    if(line_index==2u) return storage_formatAssignmentU16(dst,capacity,"active_scene",state->active_scene);
+    if(line_index==3u) {
+        static const char hex[]="0123456789abcdef";
+        if (capacity < 28u) return 0u;
+        memcpy(dst,"scene_mask_voice_edit=",22u);
+        dst[22]=hex[(state->scene_mask_voice_edit >> 12u)&15u];
+        dst[23]=hex[(state->scene_mask_voice_edit >> 8u)&15u];
+        dst[24]=hex[(state->scene_mask_voice_edit >> 4u)&15u];
+        dst[25]=hex[state->scene_mask_voice_edit&15u]; dst[26]='\n'; dst[27]='\0'; return 27u;
     }
-}
-
-uint8_t storage_formatEffectPlaceholderLine(char *dst,
-                                            uint16_t capacity,
-                                            uint16_t line_index)
-{
-    /*
-     * Emit one v1 placeholder effect line for Scene Save.
-     *
-     * Inputs: logical zero-based line index from filesystem's streaming writer.
-     * Output: a complete text line length, or zero after the schema ends.
-     * Keeping the writer beside the parser ensures the accepted placeholder
-     * contract and emitted contract remain identical.
-     */
-    switch (line_index) {
-    case 0u:
-        return storage_formatLiteral(dst, capacity,
-                                     "format=helicase.effect\n");
-    case 1u:
-        return storage_formatLiteral(dst, capacity, "version=1\n");
-    case 2u:
-        return storage_formatLiteral(dst, capacity, "placeholder=1\n");
-    default:
-        return 0u;
-    }
-}
-
-uint8_t storage_formatPatternStubLine(char *dst,
-                                      uint16_t capacity,
-                                      const PatternSet *pattern,
-                                      uint16_t line_index)
-{
-    uint16_t pos = 0u;
-    uint8_t track;
-    const LengthRotate *lr;
-
-    /*
-     * Emit one draft v2 Scene/Bank pattern line for Scene Save.
-     *
-     * Inputs: logical zero-based line index and the PatternSet owned by the
-     * Scene being saved. Output: format/version followed by seven track rows.
-     * Each track row stores the real 128-step active bitmap plus length/scale.
-     * All other step fields intentionally stay out of this draft schema.
-     */
-    if (!dst || capacity == 0u || !pattern)
-        return 0u;
-    if (line_index == 0u) {
-        return storage_formatLiteral(dst, capacity,
-                                     "format=helicase.pattern\n");
-    }
-    if (line_index == 1u)
-        return storage_formatLiteral(dst, capacity, "version=2\n");
-    if (line_index < 2u || line_index >= (uint16_t)(2u + NUM_TRACKS))
-        return 0u;
-
-    track = (uint8_t)(line_index - 2u);
-    lr = &pattern->pat_patternLengthRotate[track];
-
-    /*
-     * Assemble `trackN=<length>,<scale>,<bits>\n`.
-     *
-     * The first math expression converts zero-based C track indices to the
-     * one-based product labels used in the file. The 128-iteration loop writes
-     * exactly one character per real bridge step; it reads only
-     * STEP_ACTIVE_MASK and deliberately ignores velocity, note, probability,
-     * and automation fields so loading can reuse PatternData defaults.
-     */
-    if (pos + 7u >= capacity)
-        return 0u;
-    dst[pos++] = 't';
-    dst[pos++] = 'r';
-    dst[pos++] = 'a';
-    dst[pos++] = 'c';
-    dst[pos++] = 'k';
-    dst[pos++] = (char)('1' + track);
-    dst[pos++] = '=';
-    if (!storage_appendDecimalU16(dst, capacity, &pos,
-                                  (lr->length == 0u ||
-                                   lr->length > NUM_STEPS)
-                                      ? PAT_DEFAULT_TRACK_LENGTH
-                                      : lr->length)) {
-        return 0u;
-    }
-    if (pos + 1u >= capacity)
-        return 0u;
-    dst[pos++] = ',';
-    if (!storage_appendDecimalU16(dst, capacity, &pos,
-                                  (lr->scale < TRACK_SCALE_COUNT)
-                                      ? lr->scale
-                                      : TRACK_SCALE_OFF)) {
-        return 0u;
-    }
-    if (pos + 1u >= capacity)
-        return 0u;
-    dst[pos++] = ',';
-    for (uint8_t step = 0u; step < NUM_STEPS; step++) {
-        if (pos + 1u >= capacity)
-            return 0u;
-        dst[pos++] =
-            (pattern->pat_subStepPattern[track][step].volume &
-             STEP_ACTIVE_MASK) ? '1' : '0';
-    }
-    if (pos + 1u >= capacity)
-        return 0u;
-    dst[pos++] = '\n';
-    dst[pos] = '\0';
-    return (uint8_t)pos;
+    return 0u;
 }
 
 /* See storageTypes.h for the public contract.

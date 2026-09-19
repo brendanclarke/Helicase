@@ -12,6 +12,7 @@
 #include "../Hardware/frontPanel/ledHandler.h"
 #include "menu.h"
 #include "PatternData.h"
+#include "PatternStackService.h"
 
 uint8_t copyClear_Mode = MODE_NONE;
 #define SRC_DST_NONE -1
@@ -41,9 +42,8 @@ void copyClear_clearTrackAutom(uint8_t automTrack)
 	 * necessarily the currently playing pattern when follow/performance modes
 	 * diverge.
 	 */
-	uint8_t voice = menu_getActiveVoice();
-	uint8_t pattern = menu_getViewedPattern();
-	pat_clearAutomation(pattern, voice, automTrack);
+	/* Automation lanes are not part of the resident v4 Pattern region. */
+	(void)automTrack;
 };
 //-----------------------------------------------------------------------------
 void copyClear_clearCurrentPattern()
@@ -61,7 +61,10 @@ void copyClear_clearCurrentPattern()
 	 */
 	uint8_t pattern = menu_getViewedPattern();
 	led_clearSequencerLeds();
-	pat_clearPattern(pattern);
+	/* Pattern stack service owns the deferred/full-region pool mutation. */
+	patSvc_clearPattern(pattern);
+	/* S066: clear invalidates the asynchronous VOICE marker-presence result. */
+	menu_voiceAutoOverlayPatternDeleted();
 };
 //-----------------------------------------------------------------------------
 void copyClear_executeClear()
@@ -77,13 +80,6 @@ void copyClear_executeClear()
 			copyClear_clearCurrentPattern();
 		break;
 		
-		case CLEAR_AUTOMATION1:
-			copyClear_clearTrackAutom(0);
-		break;
-		
-		case CLEAR_AUTOMATION2:
-			copyClear_clearTrackAutom(1);
-		break;
 	}
 	
 	copyClear_armClearMenu(0);
@@ -131,7 +127,10 @@ void copyClear_clearCurrentTrack()
 	uint8_t voice = menu_getActiveVoice();
 	uint8_t pattern = menu_getViewedPattern();
 	led_clearSequencerLeds();
-	pat_clearTrack(pattern, voice);
+	/* Pattern stack service owns the bounded track-clear barrier. */
+	patSvc_clearTrack(pattern, voice);
+	/* S066: clear invalidates the asynchronous VOICE marker-presence result. */
+	menu_voiceAutoOverlayPatternDeleted();
 };
 //-----------------------------------------------------------------------------
 void copyClear_copyTrack()

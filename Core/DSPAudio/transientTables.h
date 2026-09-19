@@ -74,9 +74,11 @@ extern const float transientVolumeTable[69];
 
 
 
-/* signed 8 bit pcm
- * 4102__patchen__atik-2-10-stereoatik
- */
+/* Immutable firmware PCM ROM: NUM_TRANSIENTS signed 8-bit waveforms, each
+** TRANSIENT_SAMPLE_LENGTH frames. The definition uses default const placement
+** in internal FLASH; clients may read it but must not create a RAM shadow.
+** transientGenerator maps selectors 2..(NUM_TRANSIENTS + 1) to rows 0..11;
+** selectors 0 and 1 are generator special modes, not PCM rows. */
 extern const int8_t transientData[NUM_TRANSIENTS][TRANSIENT_SAMPLE_LENGTH];
 
 #endif /* TRANSIENTTABLES_H_ */

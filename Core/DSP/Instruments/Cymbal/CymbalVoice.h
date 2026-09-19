@@ -84,20 +84,14 @@ typedef struct CymbalStruct
 
 } CymbalVoice;
 
-extern CymbalVoice cymbalVoice;
-
-
-//initialize all the parameters to sane values
-void Cymbal_init();
-
 /*
- * Pointer-based cymbal runtime entry points for dynamic instrument slots.
+ * Pointer-based cymbal runtime entry points for tagged instrument slots.
  *
  * Inputs: a caller-owned CymbalVoice instance plus the logical source slot for
  * trigger/LFO/velocity affiliation where needed. Outputs: the same DSP state
- * changes as the legacy cymbalVoice wrappers, but suitable for any slot that
- * currently contains a cymbal instrument. InstrumentManager owns the dynamic
- * pools and calls these helpers; fixed-slot code can keep using the wrappers.
+ * changes on the supplied instance, suitable for any slot that currently hosts
+ * a cymbal. InstrumentManager owns that instance as a tagged slot member;
+ * callers must not retain it across a Scene/type reset.
  */
 void Cymbal_initVoice(CymbalVoice *voice);
 void Cymbal_setPanVoice(CymbalVoice *voice, const uint8_t pan);
@@ -106,16 +100,6 @@ void Cymbal_triggerVoice(CymbalVoice *voice, const uint8_t source_slot,
 void Cymbal_calcSyncBlockVoice(CymbalVoice *voice, int16_t* buf,
                                const uint8_t size);
 void Cymbal_calcAsyncVoice(CymbalVoice *voice);
-
-void Cymbal_trigger( const uint8_t vel, const uint8_t note);
-
-void Cymbal_calcSyncBlock(int16_t* buf, const uint8_t size);
-
-/** calculate envelopes etc (all 16 samples */
-void Cymbal_calcAsync();
-
-//-0.5 = left 0=both max 0.5=right*/
-void Cymbal_setPan(const uint8_t pan);
 
 
 #endif /* CYMBALVOICE_H_ */

@@ -20,6 +20,41 @@ typedef enum {
     AFATFS_OPERATION_FAILURE,
 } afatfsOperationStatus_e;
 
+/*
+ * Read-only diagnostic copy of one active AsyncFATFS file and allocator.
+ *
+ * What: exposes scalar state needed to distinguish a stalled FAT search,
+ * FAT update, cache wait, and explicit-full result after an external boot
+ * timeout. Why: the opaque file handle otherwise loses all of these values
+ * when the recovery path destroys AsyncFATFS. Input: a live handle or NULL;
+ * output: copied values only, with `available` zero for NULL. This API never
+ * polls, allocates, starts I/O, releases cache ownership, or retains a pointer.
+ * filesystem.c owns the resulting logging capsule; this header owns no storage.
+ */
+typedef struct {
+    uint8_t available;
+    uint8_t filesystem_state;
+    uint8_t filesystem_full;
+    uint8_t file_operation;
+    uint8_t append_phase;
+    uint8_t search_wrapped;
+    uint8_t cache_dirty_count;
+    uint8_t cache_locked_count;
+    uint8_t cache_reading_count;
+    uint8_t cache_writing_count;
+    uint8_t cache_flush_in_progress;
+    int8_t active_cache_index;
+    uint32_t cursor_offset;
+    uint32_t logical_size;
+    uint32_t physical_size;
+    uint32_t cursor_cluster;
+    uint32_t cursor_previous_cluster;
+    uint32_t append_previous_cluster;
+    uint32_t search_cluster;
+    uint32_t search_start_cluster;
+    uint32_t sectors_per_cluster;
+} afatfsDiagnosticSnapshot_t;
+
 typedef enum {
     AFATFS_ERROR_NONE = 0,
     AFATFS_ERROR_GENERIC = 1,
@@ -67,6 +102,10 @@ typedef afatfsDirEntryPointer_t afatfsFinder_t;
  */
 #define AFATFS_SHORT_FILENAME_MAX 13u
 #define AFATFS_LONG_FILENAME_MAX  48u
+/* Four VFAT fragments cover the complete 48-character component bound. */
+#define AFATFS_LONG_FILENAME_ENTRY_MAX \
+    ((AFATFS_LONG_FILENAME_MAX + FAT_LFN_CHARS_PER_ENTRY - 1u) / \
+     FAT_LFN_CHARS_PER_ENTRY)
 
 typedef enum {
     AFATFS_MATCH_CASE_INSENSITIVE = 0,
@@ -95,14 +134,20 @@ typedef enum {
  * Opaque physical identity of a FAT object.
  * Why: Resolves the "stale short alias" and "duplicate LFN" bugs. By storing
  * the physical directory entry pointers and cluster chains, subsequent operations
- * (open, delete, move) guarantee they act on the exact same object discovered
- * during scanning, regardless of string overlaps.
+ * (open, delete, and name retirement) guarantee they act on the exact same
+ * object discovered
+ * during scanning, regardless of string overlaps. `lfnFirstEntry` is the
+ * first on-card LFN fragment and `lfnFollowingEntry[0..N-2]` are the remaining
+ * fragments in physical directory order; they are never reconstructed by
+ * pointer arithmetic.
  */
 typedef struct {
     afatfsObjectKind_t kind;
     char displayName[AFATFS_LONG_FILENAME_MAX + 1u];
     char shortName[AFATFS_SHORT_FILENAME_MAX];
     afatfsDirEntryPointer_t lfnFirstEntry;
+    /* Physical VFAT entries after lfnFirstEntry, in on-card order. */
+    afatfsDirEntryPointer_t lfnFollowingEntry[AFATFS_LONG_FILENAME_ENTRY_MAX - 1u];
     uint8_t lfnEntryCount;
     afatfsDirEntryPointer_t sfnEntry;
     uint32_t firstCluster;
@@ -134,6 +179,9 @@ typedef enum {
  * opens. sfnEntry points at the owning physical directory entry; lfnFirstEntry
  * and lfnEntryCount identify the preceding VFAT fragment run so future delete
  * or rename code can update the whole object instead of only the short entry.
+ * lfnMalformed is set when VFAT-looking entries immediately precede this SFN
+ * but fail ordinal, checksum, shape, or completeness validation; destructive
+ * clients must reject that object rather than guess which entries belong to it.
  *
  * Note: Now wraps afatfsObjectId_t to enforce unified identity semantics.
  */
@@ -141,6 +189,7 @@ typedef struct {
     afatfsObjectId_t id;
     uint8_t ntReserved;
     uint8_t hasLongName;
+    uint8_t lfnMalformed;
 } afatfsObjectInfo_t;
 
 /*
@@ -163,8 +212,11 @@ typedef struct {
     uint8_t lfnValid;
     uint8_t lfnChecksum;
     uint8_t lfnEntryCount;
+    uint8_t lfnExpectedOrdinal;
+    uint8_t lfnMalformed;
     char lfnName[AFATFS_LONG_FILENAME_MAX + 1u];
     afatfsDirEntryPointer_t lfnFirstEntry;
+    afatfsDirEntryPointer_t lfnFollowingEntry[AFATFS_LONG_FILENAME_ENTRY_MAX - 1u];
 } afatfsObjectFinder_t;
 
 typedef enum {
@@ -198,7 +250,6 @@ bool afatfs_fopen_lfn(const char *displayName,
                       afatfsFileCallback_t complete);
 bool afatfs_ftruncate(afatfsFilePtr_t file, afatfsFileCallback_t callback);
 bool afatfs_fclose(afatfsFilePtr_t file, afatfsCallback_t callback);
-bool afatfs_funlink(afatfsFilePtr_t file, afatfsCallback_t callback);
 
 /*
  * Rename one object in the current directory by display component.
@@ -215,9 +266,8 @@ bool afatfs_funlink(afatfsFilePtr_t file, afatfsCallback_t callback);
  * short alias needed by existing open paths.
  *
  * Inputs: oldDisplayName and newDisplayName are current-directory components,
- * not paths. openNameOut may be NULL. complete fires after success or failure;
- * callers inspect openNameOut[0] or their outer filesystem state to decide
- * whether the rename succeeded.
+ * not paths. openNameOut may be NULL. complete receives a structured result
+ * after success or failure; openNameOut is valid only with OK.
  *
  * Outputs/effects: first cluster, file size, attributes, timestamps, and
  * directory children are preserved. Only the object name entry run changes.
@@ -230,7 +280,7 @@ bool afatfs_renameObject_lfn(const char *oldDisplayName,
                              const char *newDisplayName,
                              afatfsMatchMode_t matchMode,
                              char openNameOut[AFATFS_SHORT_FILENAME_MAX],
-                             afatfsCallback_t complete);
+                             afatfsResultCallback_t complete);
 
 /*
  * Remove all objects whose display name matches one component.
@@ -243,8 +293,9 @@ bool afatfs_renameObject_lfn(const char *oldDisplayName,
  * Why: Product overwrite is case-insensitive and case-preserving. If an
  * external filesystem created `Kick.drm` and `kick.drm`, saving `KiCk.drm`
  * must remove both old physical variants before writing one new object with the
- * user's entered case. afatfs_funlink() cannot do this because it needs an open
- * handle and deletes only the SFN entry.
+ * user's entered case. The retired opened-handle unlink shortcut was removed
+ * because it could only retire an SFN entry and was not a safe product
+ * primitive.
  *
  * Inputs: displayName is a single component in the current directory. LFN
  * operations convert unsupported display characters to '_' and strip trailing
@@ -253,8 +304,9 @@ bool afatfs_renameObject_lfn(const char *oldDisplayName,
  * writes. AFATFS_REMOVE_EMPTY_DIRECTORIES is used only by filesystem.c after
  * its recursive delete state machine has emptied the target directory.
  *
- * Outputs/effects: callbacks fire once the scan has reached the end or failed.
- * A successful no-op is allowed when no matching object exists. The operation
+ * Outputs/effects: callbacks receive a structured result once the scan has
+ * reached the end or failed. A successful no-op is allowed when no matching
+ * object exists. The operation
  * restarts its scan after each deletion because retiring entries mutates the
  * directory being scanned.
  *
@@ -265,7 +317,7 @@ bool afatfs_renameObject_lfn(const char *oldDisplayName,
 bool afatfs_removeObjects_lfn(const char *displayName,
                               afatfsMatchMode_t matchMode,
                               afatfsRemoveObjectMode_t mode,
-                              afatfsCallback_t complete);
+                              afatfsResultCallback_t complete);
 /*
  * Remove one exact short-alias object from the current directory.
  *
@@ -286,37 +338,62 @@ bool afatfs_removeObjects_lfn(const char *displayName,
  *
  * Inputs/accessors: filename must be the printable shortName returned in
  * afatfsObjectInfo_t or an openNameOut returned by mkdir/open LFN helpers.
- * Output/effects: the completion callback fires after the scan either retires
- * that exact entry or reaches the end as a successful no-op.
+ * Output/effects: the result callback fires after the scan either retires that
+ * exact entry or reaches the end as a successful no-op.
  */
 bool afatfs_removeObject(const char *filename,
                          afatfsRemoveObjectMode_t mode,
-                         afatfsCallback_t complete);
+                         afatfsResultCallback_t complete);
 
 bool afatfs_feof(afatfsFilePtr_t file);
 void afatfs_fputc(afatfsFilePtr_t file, uint8_t c);
 uint32_t afatfs_fwrite(afatfsFilePtr_t file, const uint8_t *buffer, uint32_t len);
 uint32_t afatfs_fread(afatfsFilePtr_t file, uint8_t *buffer, uint32_t len);
+/* Copy current diagnostics without changing AsyncFATFS progress or ownership. */
+void afatfs_getDiagnosticSnapshot(afatfsFilePtr_t file,
+                                  afatfsDiagnosticSnapshot_t *snapshot);
 afatfsOperationStatus_e afatfs_fseek(afatfsFilePtr_t file, int32_t offset, afatfsSeek_e whence);
 bool afatfs_ftell(afatfsFilePtr_t file, uint32_t *position);
 
 /*
- * Directory create/open contract.
+ * Persistent-marker and lazy directory-initialization public contract.
  *
- * The callback receives either NULL or a directory handle that is immediately
- * safe to pass to afatfs_chdir(). For newly-created subdirectories that means
- * asyncfatfs has already allocated the first cluster, written the firstCluster
- * fields back into the parent SFN entry, zero-filled the cluster, and created
- * "." / ".." entries. Regular files may still allocate their first cluster
- * lazily on first fwrite(); directories may not because callers create children
- * through currentDirectory immediately after chdir().
+ * What: Create and rename preserve the first FAT 0x00 namespace boundary.
+ * Newly created directories have an allocated first cluster, a completely
+ * initialized first sector, correct "." / ".." entries, and a valid
+ * terminator before their callback. Additional directory sectors are cleared
+ * internally before the marker can move into them.
  *
- * The *_lfn variants take one visible component in the current directory. They
- * sanitize unsupported UI characters to '_', strip trailing spaces/periods,
- * optionally match case-insensitively, and return an 8.3 alias in openNameOut
- * when the object is opened or created. Product code should store that alias
- * only as a reopen/chdir implementation detail; visible schemas such as
- * kitset.kcg should store the display component.
+ * Why: Callers need a handle that is immediately safe for afatfs_chdir() and
+ * child creation; they do not require every unused sector in the allocated
+ * cluster to be written. The on-disk terminator, rather than retained RAM, is
+ * sufficient to hide uninitialized sectors across close and remount.
+ *
+ * Inputs: the existing component name, mode or match policy, optional alias
+ * output buffer, and completion callback accepted by the declarations below.
+ *
+ * Outputs/effects: public handles, aliases, results, and callback timing are
+ * unchanged. No caller initializes sectors. Final removable-media persistence
+ * remains the caller-visible afatfs_sync()/flush boundary.
+ *
+ * Accessors/APIs: afatfs_fopen[_lfn](), afatfs_mkdir[_lfn](),
+ * afatfs_opendir[_lfn](), afatfs_renameObject_lfn(), afatfs_chdir(), and
+ * afatfs_sync().
+ *
+ * Affiliates: asyncfatfs.c create/rename reservation, directory extension,
+ * target-sector preparation, filesystem.c component workflows, and
+ * ASYNCFATFS_REFERENCE.md.
+ *
+ * Directory create/open details:
+ * The callback receives NULL or a directory handle immediately safe for
+ * afatfs_chdir(). A new child has its firstCluster fields written back to the
+ * parent SFN entry and its first sector initialized before callback. Ordinary
+ * files may still allocate their first cluster lazily on first fwrite().
+ *
+ * The *_lfn variants continue to accept one visible current-directory
+ * component, sanitize unsupported characters, strip trailing spaces/periods,
+ * apply matchMode, and optionally return an 8.3 alias. That alias remains an
+ * operation detail; user-visible schemas store the display component.
  */
 bool afatfs_mkdir(const char *filename, afatfsFileCallback_t complete);
 bool afatfs_opendir(const char *filename, afatfsFileCallback_t complete);
@@ -354,16 +431,6 @@ bool afatfs_opendir_lfn(const char *displayName,
                         afatfsMatchMode_t matchMode,
                         char openNameOut[AFATFS_SHORT_FILENAME_MAX],
                         afatfsFileCallback_t complete);
-
-/*
- * Parent-relative operations.
- * Why: Prevents asynchronous product state machines from clobbering the global
- * `afatfs.currentDirectory`.
- * Inputs: A valid open directory handle instead of using global state.
- */
-void afatfs_findFirstObjectInDir(afatfsDirHandle_t parent, afatfsObjectFinder_t *finder);
-bool afatfs_fopenChild(afatfsDirHandle_t parent, const char *displayName, afatfsCreateMode_t mode, afatfsFileCallback_t complete);
-bool afatfs_mkdirChild(afatfsDirHandle_t parent, const char *displayName, afatfsCreateMode_t mode, afatfsFileCallback_t complete);
 
 /**
  * @brief Change the working directory to the specified directory handle.
@@ -417,10 +484,58 @@ void afatfs_poll();
 
 uint32_t afatfs_getFreeBufferSpace();
 uint32_t afatfs_getContiguousFreeSpace();
+/*
+ * Report that a complete, wrap-around search of the regular FAT cluster pool
+ * (or the optional contiguous pool) found no space. The result is sticky until
+ * remount, so a caller extending a file must treat a zero-byte fwrite plus
+ * this result as terminal rather than retrying forever.
+ */
 bool afatfs_isFull();
 
 afatfsFilesystemState_e afatfs_getFilesystemState();
 afatfsError_e afatfs_getLastError();
+
+/*
+ * One code per distinct non-OK check inside afatfs_deleteTreeContinue() in
+ * asyncfatfs.c. Declaration order matches the order those checks appear in
+ * that function, top to bottom; add new sites at the end so previously-
+ * captured card evidence stays decodable. AFATFS_DELETE_TREE_FAILURE_SITE_NONE
+ * is the value afatfs_deleteTree() resets to before a fresh traversal
+ * starts, and is also what a caller reads if a result completed OK (no site
+ * fired). Declared here rather than in asyncfatfs.c so filesystem.c can
+ * recognize specific sites by name (see afatfs_getDeleteTreeFailureSite()).
+ *
+ * AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_PARENT_FOR_SELF_EXHAUSTED and
+ * ..._MATCH_CLUSTER_OUT_OF_RANGE are permanently unreachable as of the fix
+ * eliminating AFATFS_DELETE_TREE_SCAN_PARENT_FOR_SELF/_LOOP (see
+ * AFATFS_DELETE_TREE_REOPEN_PARENT's doc comment in asyncfatfs.c for why
+ * that re-scan-by-identity step was unnecessary and is gone, not just
+ * fixed) -- kept declared, not removed, only so already-captured card
+ * evidence from Session 054 rounds 5/6 naming them stays decodable.
+ */
+typedef enum {
+    AFATFS_DELETE_TREE_FAILURE_SITE_NONE = 0u,
+    AFATFS_DELETE_TREE_FAILURE_SITE_OPEN_DIR_BAD_ROOT_ON_FAT32,
+    AFATFS_DELETE_TREE_FAILURE_SITE_OPEN_DIR_CLUSTER_OUT_OF_RANGE,
+    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_ROOT_CLUSTER_MISMATCH,
+    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_MALFORMED_OBJECT,
+    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_CHILD_CLUSTER_OUT_OF_RANGE,
+    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_STRUCTURAL_BUDGET_EXHAUSTED_DESCEND,
+    AFATFS_DELETE_TREE_FAILURE_SITE_ASCEND_BAD_DOTDOT_ENTRY,
+    AFATFS_DELETE_TREE_FAILURE_SITE_ASCEND_PARENT_CLUSTER_OUT_OF_RANGE,
+    AFATFS_DELETE_TREE_FAILURE_SITE_ASCEND_PARENT_CLUSTER_MISMATCH,
+    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_PARENT_BAD_ROOT_ON_FAT32,
+    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_PARENT_FOR_SELF_EXHAUSTED, /* unreachable, see above */
+    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_PARENT_FOR_SELF_MATCH_CLUSTER_OUT_OF_RANGE, /* unreachable, see above */
+    AFATFS_DELETE_TREE_FAILURE_SITE_RETIRE_ENTRIES_ROOT_CLUSTER_MISMATCH,
+    AFATFS_DELETE_TREE_FAILURE_SITE_FREE_CLUSTERS_NONFILE_NONZERO_SIZE,
+    AFATFS_DELETE_TREE_FAILURE_SITE_FREE_CLUSTERS_CLUSTER_OUT_OF_RANGE_OR_BUDGET,
+    AFATFS_DELETE_TREE_FAILURE_SITE_FREE_CLUSTERS_NEXT_CLUSTER_INVALID,
+    /* Defensive catch-all: op->phase held a value no case above matches.
+     * Not expected to be reachable; tagged only so it is never silently
+     * indistinguishable from a real layout problem if it somehow is. */
+    AFATFS_DELETE_TREE_FAILURE_SITE_CORRUPT_PHASE
+} afatfsDeleteTreeFailureSite_e;
 
 /*
  * Start native asynchronous deletion of one concrete directory tree.
@@ -432,9 +547,10 @@ afatfsError_e afatfs_getLastError();
  * Why: replacement saves must delete the exact same-slot directory selected by
  * the product scanner, including cards with duplicate or stale display names,
  * without blocking audio while FAT sectors are read and written.
- * Inputs: root must describe a directory and remain valid only for the duration
- * of this call because the identity is copied into private operation state. cb
- * may be NULL; when non-NULL it is invoked exactly once with OK or an error.
+ * Inputs: root must be the complete directory result returned by
+ * afatfs_findNextObject() and remain valid only for the duration of this call
+ * because the identity is copied into private operation state. cb may be NULL;
+ * when non-NULL it is invoked exactly once with OK or an error.
  * Outputs/lifecycle: true means a private file handle accepted the operation;
  * false means no handle was available and no callback will occur. On every
  * terminal path the implementation releases retained cache sectors and resets
@@ -443,35 +559,23 @@ afatfsError_e afatfs_getLastError();
  * Affiliates: filesystem.c same-slot Kit/Scene cleanup,
  * afatfsObjectFinder_t, afatfs_getDeleteTreePhase(), and afatfs_poll().
  */
-bool afatfs_deleteTree(const afatfsObjectId_t *root, afatfsResultCallback_t cb);
+bool afatfs_deleteTree(const afatfsObjectInfo_t *root,
+                       afatfsResultCallback_t cb);
 uint8_t afatfs_getDeleteTreePhase(void);
+/*
+ * Read which exact internal check produced the last afatfs_deleteTree()
+ * call's afatfsResultCode_t (see afatfsDeleteTreeFailureSite_e above for
+ * the full list and afatfs_deleteTreeContinue() in asyncfatfs.c for where
+ * each fires). Returns 0 (NONE) if the last completed delete succeeded.
+ * Unlike afatfs_getDeleteTreePhase(), safe to call after the operation's
+ * result callback has already run and its openFiles[] handle reset -- read
+ * it there, before starting another delete, since that resets it.
+ */
+uint8_t afatfs_getDeleteTreeFailureSite(void);
 
 /*
- * State machine for cross-directory movement.
- * Why: Moves a physical object (and its cluster chain) to a new parent directory.
- * Requires allocating a new directory entry run in the destination, copying the
- * cluster pointer, and marking the old entry run as deleted (0xE5).
+ * Count allocated (non-NONE) entries in the open-file pool. Diagnostic
+ * only — no I/O, no side effects. Bank Save calls this at per-child
+ * boundaries to detect handle accumulation.
  */
-bool afatfs_moveObject(const afatfsObjectId_t *src, afatfsDirHandle_t dst_parent, const char *dst_name, afatfsResultCallback_t cb);
-
-/*
- * State machine for deep tree copy.
- * Why: Avoids loading product files into RAM just to re-serialize them.
- * Reads source clusters into the 4KB cache and flushes them to newly allocated
- * destination clusters.
- */
-bool afatfs_copyObjectTree(const afatfsObjectId_t *src, afatfsDirHandle_t dst_parent, const char *dst_name, afatfsResultCallback_t cb);
-
-/*
- * Transactional directory replace.
- * Why: Bank Save needs to guarantee that old data is entirely displaced and the
- * new tree is completely synced before becoming visible.
- * Internals:
- * 1. Generates `tmp_XXXX` under the parent.
- * 2. Caller populates `tmp_XXXX` (via explicit handle, not `chdir`).
- * 3. `commitTreeReplace` executes a rename of the old target to `old_XXXX`,
- *    renames `tmp_XXXX` to target, and schedules `old_XXXX` for background deletion.
- */
-bool afatfs_beginTreeReplace(afatfsDirHandle_t parent, const char *target_name, afatfsDirHandle_t *tx_out);
-bool afatfs_commitTreeReplace(afatfsDirHandle_t tx, afatfsResultCallback_t cb);
-bool afatfs_abortTreeReplace(afatfsDirHandle_t tx, afatfsResultCallback_t cb);
+uint8_t afatfs_countOpenHandles(void);

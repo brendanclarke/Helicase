@@ -45,6 +45,11 @@
 
 
 void midiParser_parseUartData(unsigned char data);
+/*
+ * Apply a decoded legacy CC/CC2 message to mixer, sequencer, or the current
+ * tagged instrument runtime. Type-specific MIDI controls resolve descriptor
+ * keys for immediate live behavior and never depend on fixed engine globals.
+ */
 void midiParser_ccHandler(MidiMsg msg, uint8_t updateOriginalValue);
 void midiParser_parseMidiMessage(MidiMsg msg);
 void midiParser_processRealtimeEvents(void);

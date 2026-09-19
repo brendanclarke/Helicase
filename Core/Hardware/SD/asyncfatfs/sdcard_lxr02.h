@@ -51,4 +51,49 @@
 /* Diagnostic: returns internal state machine state (0=IDLE, 1=SENDING_CMD, etc.) */
 uint8_t sdcard_getState(void);
 
+/*
+ * Read-only SD transport copy used by boot-time failure forensics.
+ *
+ * What: reports transfer state, operation, callback ownership, block/offset,
+ * and elapsed milliseconds in an active token/busy wait without exposing the
+ * private state machine. Why: timeout policy is real-time based, so diagnostics
+ * must expose the same coordinate rather than the retired caller-poll count.
+ * Input: caller-owned snapshot passed to sdcard_getTransportSnapshot(). Output:
+ * scalar copy valid until the next poll/abort; wait_ms is zero unless state is
+ * READING_WAIT_TOKEN or WRITING_WAIT_BUSY. Side effects: none - no SPI clock,
+ * callback, deadline, CS, buffer, or transfer mutation. The member rename
+ * preserves type, order, struct size, and HCPRMS E7 byte width. Affiliates:
+ * sdcard_lxr02.c's elapsed-time waits, TIM6 time_sysTick,
+ * filesystem_hcprmsCapsuleFreeze(), HCPRMS schema 2, and both host decoders.
+ */
+typedef struct {
+    uint8_t state;
+    uint8_t operation;
+    uint8_t callback_pending;
+    uint32_t block;
+    uint16_t offset;
+    uint16_t wait_ms;
+} sdcardTransportSnapshot_t;
+
+void sdcard_getTransportSnapshot(sdcardTransportSnapshot_t *snapshot);
+
+/*
+ * Abandon one LXR-02 SD block transfer for boot-log recovery.
+ *
+ * DEV_MODE_LOGGING writes operation codes to file for use in debugging. It
+ * must never print anything to the screen or otherwise delay operations
+ * unnecessarily since logging may be used to assess timing failures in other
+ * modules that might otherwise be obscured by screen write delays.
+ *
+ * What: deasserts chip select and clears the private transfer callback/state
+ * without reporting completion. Why: a DEV_MODE_LOGGING timeout discards the
+ * owning asyncfatfs image before it remounts to write `/bootlog.bin`; a delayed
+ * callback into that discarded image would corrupt the recovery mount.
+ * Inputs: the current read/write shim state. Outputs/effects: transport becomes
+ * idle and the interrupted operation is lost. This is not a general runtime
+ * cancellation API. Affiliates: filesystem_writeBootFailureLogBlocking(),
+ * afatfs_destroy(true), and SD_init().
+ */
+void sdcard_abortTransferForBootLog(void);
+
 #endif /* SDCARD_LXR02_H_ */

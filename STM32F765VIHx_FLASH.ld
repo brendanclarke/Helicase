@@ -59,10 +59,20 @@
  *   .bss         → SRAM1
  *   .dtcm        → DTCM (loaded from FLASH)   — INDTCM data
  *   .dtcmz       → DTCM (NOLOAD, runtime-zero) — INDTCMZ uninitialised
+ *   .devwdg_noinit → SRAM2 (NOLOAD, never zeroed) — DEV_LOGGING_IWDG capsule
  *
  * .dtcm is intentionally placed BEFORE .dtcmz in the DTCM region so any
  * accidental size growth in .dtcm shows up as a link error rather than
  * silently overlapping zero-init data. ASSERT below catches DTCM overflow.
+ *
+ * .devwdg_noinit is deliberately NOT referenced by Reset_Handler's
+ * LoopCopyDataInit/LoopFillZerobss (Core/Src/startup_stm32f765xx.s), which
+ * only walk _sdata.._edata, _sbss.._ebss, _sdtcm.._edtcm, and
+ * _sdtcmz.._edtcmz. That omission is what lets it survive a warm/watchdog
+ * reset instead of being cleared like .bss; it is lost only on an actual
+ * power cycle, which is fine since that is not the failure it exists to
+ * catch. It lives in previously-unmapped SRAM2 so it cannot overlap or grow
+ * into any existing SRAM1/DTCM allocation.
  */
 ENTRY(Reset_Handler)
 _estack = 0x20080000;
@@ -71,6 +81,7 @@ MEMORY {
     FLASH (rx)  : ORIGIN = 0x08008000, LENGTH = 0x78000
     DTCM  (xrw) : ORIGIN = 0x20000000, LENGTH = 0x20000
     SRAM1 (xrw) : ORIGIN = 0x20020000, LENGTH = 0x5C000
+    SRAM2 (xrw) : ORIGIN = 0x2007C000, LENGTH = 0x4000
 }
 SECTIONS {
     .isr_vector : { . = ALIGN(4); KEEP(*(.isr_vector)) . = ALIGN(4); } >FLASH
@@ -131,6 +142,19 @@ SECTIONS {
 
     /* No ._stack reservation here — main stack lives at _estack (top of
     ** SRAM1). DTCM is reserved in full for INDTCM/INDTCMZ DSP data. */
+
+    /* DEV_LOGGING_IWDG retained capsule — up to 32 approved bytes, currently
+    ** 12 bytes, in previously-unmapped SRAM2. NOLOAD and untouched by the
+    ** startup zero-fill loop so it survives an IWDG-caused warm reset. */
+    .devwdg_noinit (NOLOAD) : {
+        . = ALIGN(4);
+        _sdevwdg_noinit = .;
+        *(.devwdg_noinit) *(.devwdg_noinit.*)
+        . = ALIGN(4);
+        _edevwdg_noinit = .;
+    } >SRAM2
+    ASSERT(_edevwdg_noinit - _sdevwdg_noinit <= 32,
+           "DEV_LOGGING_IWDG capsule exceeds its approved 32-byte RAM allocation")
 
     ASSERT(_edtcmz <= ORIGIN(DTCM) + LENGTH(DTCM),
            "DTCM overflow: .dtcm + .dtcmz exceed 128KB")

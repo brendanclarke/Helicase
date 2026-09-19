@@ -49,10 +49,7 @@
 
 
 #include "modulationNode.h"
-#include "DrumVoice.h"
-#include "CymbalVoice.h"
-#include "HiHat.h"
-#include "Snare.h"
+#include "InstrumentManager.h"
 #include "Oscillator.h"
 #include "../SampleRom/SampleMemory.h"
 // TODO DSP_PORT
@@ -357,94 +354,91 @@ static void modNode_setDirectOriginalValueChanged(ModulationNode* vm,
 	}
 }
 //-----------------------------------------------------------------------
+/*
+ * Refresh a live LFO pair's legacy baseline through the tagged-slot visitor.
+ *
+ * Inputs: two synchronously borrowed nodes and one legacy parameter id.
+ * Output: matching nodes capture their new unmodulated base. The manager owns
+ * member selection, so this callback never assumes a fixed engine object or
+ * retains node pointers across a Scene/type replacement.
+ */
+static void modNode_refreshLegacyLfoPair(ModulationNode *primary,
+										 ModulationNode *secondary, void *context)
+{
+	const uint16_t idx = *((const uint16_t *)context);
+	modNode_setOriginalValueChanged(primary, idx);
+	modNode_setOriginalValueChanged(secondary, idx);
+}
+
 // This is called when a user changes a parameter value on the front. It saves
-// the new value as originalValue. Since the value changes as modulation happens,
-// we need to restore to the original value from time to time
+// the new value as originalValue so block modulation can later restore it.
 void modNode_originalValueChanged(uint16_t idx)
 {
 	uint8_t i;
 	for(i=0;i<6;i++)
-	{
 		modNode_setOriginalValueChanged(&velocityModulators[i],idx);
-	}
-
-	modNode_setOriginalValueChanged(&voiceArray[0].lfo.modTarget,idx);
-	modNode_setOriginalValueChanged(&voiceArray[1].lfo.modTarget,idx);
-	modNode_setOriginalValueChanged(&voiceArray[2].lfo.modTarget,idx);
-	modNode_setOriginalValueChanged(&snareVoice.lfo.modTarget,idx);
-	modNode_setOriginalValueChanged(&cymbalVoice.lfo.modTarget,idx);
-	modNode_setOriginalValueChanged(&hatVoice.lfo.modTarget,idx);
-	modNode_setOriginalValueChanged(&voiceArray[0].lfo.modTarget2,idx);
-	modNode_setOriginalValueChanged(&voiceArray[1].lfo.modTarget2,idx);
-	modNode_setOriginalValueChanged(&voiceArray[2].lfo.modTarget2,idx);
-	modNode_setOriginalValueChanged(&snareVoice.lfo.modTarget2,idx);
-	modNode_setOriginalValueChanged(&cymbalVoice.lfo.modTarget2,idx);
-	modNode_setOriginalValueChanged(&hatVoice.lfo.modTarget2,idx);
+	instrumentManager_visitRuntimeLfoNodes(modNode_refreshLegacyLfoPair, &idx);
 }
 //-----------------------------------------------------------------------
+typedef struct {
+	uint16_t destination;
+	mod_node_range_t range;
+} mod_node_direct_refresh_t;
+
+/*
+ * Refresh a live LFO pair's descriptor baseline and legal range.
+ *
+ * Inputs: tagged-slot node pair plus descriptor refresh context. Output: both
+ * matching nodes recapture their current value/range. The callback is strictly
+ * synchronous because union reset invalidates all runtime-owned node pointers.
+ */
+static void modNode_refreshDirectLfoPair(ModulationNode *primary,
+										 ModulationNode *secondary, void *context)
+{
+	const mod_node_direct_refresh_t *refresh = context;
+	modNode_setDirectOriginalValueChanged(primary, refresh->destination,
+											refresh->range);
+	modNode_setDirectOriginalValueChanged(secondary, refresh->destination,
+											refresh->range);
+}
+
 void modNode_directOriginalValueChanged(uint16_t destination,
-										mod_node_range_t range)
+											mod_node_range_t range)
 {
 	uint8_t i;
+	const mod_node_direct_refresh_t refresh = { destination, range };
 
-	/*
-	 * Public descriptor-target baseline/range refresh.
-	 *
-	 * Inputs: destination is a canonical descriptor id supplied by
-	 * InstrumentManager after it writes an ordinary instrument runtime value.
-	 * range is the current descriptor min/max contract for that id. Output:
-	 * every velocity/LFO node using direct descriptor mode for that id updates
-	 * its restore baseline and cached range. This is intentionally parallel to
-	 * the legacy modNode_originalValueChanged() API rather than overloading it
-	 * with a second id namespace.
-	 */
+	/* Descriptor-target baseline/range refresh for velocity and live LFO nodes. */
 	for(i=0;i<6;i++)
-	{
 		modNode_setDirectOriginalValueChanged(&velocityModulators[i],destination,range);
-	}
-
-	modNode_setDirectOriginalValueChanged(&voiceArray[0].lfo.modTarget,destination,range);
-	modNode_setDirectOriginalValueChanged(&voiceArray[1].lfo.modTarget,destination,range);
-	modNode_setDirectOriginalValueChanged(&voiceArray[2].lfo.modTarget,destination,range);
-	modNode_setDirectOriginalValueChanged(&snareVoice.lfo.modTarget,destination,range);
-	modNode_setDirectOriginalValueChanged(&cymbalVoice.lfo.modTarget,destination,range);
-	modNode_setDirectOriginalValueChanged(&hatVoice.lfo.modTarget,destination,range);
-	modNode_setDirectOriginalValueChanged(&voiceArray[0].lfo.modTarget2,destination,range);
-	modNode_setDirectOriginalValueChanged(&voiceArray[1].lfo.modTarget2,destination,range);
-	modNode_setDirectOriginalValueChanged(&voiceArray[2].lfo.modTarget2,destination,range);
-	modNode_setDirectOriginalValueChanged(&snareVoice.lfo.modTarget2,destination,range);
-	modNode_setDirectOriginalValueChanged(&cymbalVoice.lfo.modTarget2,destination,range);
-	modNode_setDirectOriginalValueChanged(&hatVoice.lfo.modTarget2,destination,range);
+	instrumentManager_visitRuntimeLfoNodes(modNode_refreshDirectLfoPair,
+											  (void *)&refresh);
 }
 //-----------------------------------------------------------------------
+/*
+ * Restore one live LFO pair before the next audio-block modulation overlay.
+ *
+ * Inputs: a borrowed tagged-slot node pair. Output: direct targets return to
+ * their stored base values without walking retired fixed engine allocations.
+ */
+static void modNode_restoreLfoPair(ModulationNode *primary,
+								  ModulationNode *secondary, void *context)
+{
+	(void)context;
+	modNode_restoreTarget(primary);
+	modNode_restoreTarget(secondary);
+}
+
 void modNode_resetTargets()
 {
-	modNode_waveInterpGeneration++;
-	if (modNode_waveInterpGeneration == 0u) {
-		modNode_waveInterpGeneration = 1u;
-	}
-	modNode_waveInterpActiveCount = 0u;
-
 	uint8_t i;
+	modNode_waveInterpGeneration++;
+	if (modNode_waveInterpGeneration == 0u)
+		modNode_waveInterpGeneration = 1u;
+	modNode_waveInterpActiveCount = 0u;
 	for(i=0;i<6;i++)
-	{
 		modNode_restoreTarget(&velocityModulators[i]);
-	}
-
-	modNode_restoreTarget(&voiceArray[0].lfo.modTarget);
-	modNode_restoreTarget(&voiceArray[1].lfo.modTarget);
-	modNode_restoreTarget(&voiceArray[2].lfo.modTarget);
-	modNode_restoreTarget(&snareVoice.lfo.modTarget);
-	modNode_restoreTarget(&cymbalVoice.lfo.modTarget);
-	modNode_restoreTarget(&hatVoice.lfo.modTarget);
-	modNode_restoreTarget(&voiceArray[0].lfo.modTarget2);
-	modNode_restoreTarget(&voiceArray[1].lfo.modTarget2);
-	modNode_restoreTarget(&voiceArray[2].lfo.modTarget2);
-	modNode_restoreTarget(&snareVoice.lfo.modTarget2);
-	modNode_restoreTarget(&cymbalVoice.lfo.modTarget2);
-	modNode_restoreTarget(&hatVoice.lfo.modTarget2);
-
-
+	instrumentManager_visitRuntimeLfoNodes(modNode_restoreLfoPair, 0);
 }
 //-----------------------------------------------------------------------
 void modNode_reassignVeloMod()

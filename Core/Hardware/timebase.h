@@ -80,6 +80,17 @@ void time_initSysTick(void);
 ** endlessPots_init(). */
 void time_initTimer(void);
 
+/*
+ * Hold a pre-audio boot boundary for a bounded number of milliseconds.
+ *
+ * Inputs: 16-bit duration after time_initTimer() has started TIM6. Output:
+ * foreground execution pauses while interrupts and the millisecond counter
+ * continue. This exists for hardware power/readiness boundaries such as SD
+ * initialization; it must not be used after audioCodec_init(), in an ISR, or
+ * as runtime filesystem pacing.
+ */
+void timebase_holdPreAudioMs(uint16_t duration_ms);
+
 /* Foreground front-panel service. Drains the TIM6-scheduled service flag and
 ** performs the heavier shift-register, encoder-button, jack-detect, and
 ** endless-pot work outside interrupt context. */

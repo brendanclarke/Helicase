@@ -49,10 +49,18 @@
  * continuing asynchronous I/O. Five provides that concurrency without making
  * path depth itself dictate handle lifetime.
  *
- * SRAM effect on the STM32F765 build: afatfsFile_t is 328 bytes, so raising
- * this pool from three to five consumes 656 additional zero-initialized SRAM1
- * bytes. All allocation, polling, shutdown, and diagnostic loops below use
- * this constant, so no independent loop bound may be introduced.
+ * SRAM effect on the current STM32F765 build: afatfsFile_t is 188 bytes, so
+ * raising this pool from three to five consumes 376 additional zero-initialized
+ * SRAM1 bytes. All allocation, polling, shutdown, and diagnostic loops below
+ * use this constant, so no independent loop bound may be introduced.
+ *
+ * Five handles are sufficient for the serialized filesystem facade. Session
+ * 057 temporarily raised this to eight while testing the apparent five-child
+ * Bank Save stop, but the handle census proved zero retained handles between
+ * children and exactly one expected handle after each child mkdir. Restoring
+ * five must remain paired with that ownership model: it reclaims the three
+ * unneeded 188-byte handles (564 bytes of handle payload) instead of masking a
+ * leak or spending Pattern-reserved memory on disproved headroom.
  */
 #define AFATFS_MAX_OPEN_FILES 5
 
@@ -124,14 +132,35 @@ typedef enum {
     CLUSTER_SEARCH_OCCUPIED,
 } afatfsClusterSearchCondition_e;
 
+/*
+ * Terminator-aware create phases. The scan owns only collision observation;
+ * placement phases separately prepare a logical target, publish its run, wait
+ * for moved-target persistence, and retire the old marker tail.
+ */
 enum {
     AFATFS_CREATEFILE_PHASE_INITIAL = 0,
     AFATFS_CREATEFILE_PHASE_FIND_FILE,
+    AFATFS_CREATEFILE_PHASE_SEEK_NEXT_SECTOR,
+    AFATFS_CREATEFILE_PHASE_PREPARE_TARGET_SECTOR,
     AFATFS_CREATEFILE_PHASE_CREATE_NEW_FILE,
     AFATFS_CREATEFILE_PHASE_CREATE_NEW_LFN_FILE,
+    AFATFS_CREATEFILE_PHASE_WAIT_TARGET_PERSISTENCE,
+    AFATFS_CREATEFILE_PHASE_RETIRE_OLD_TERMINATOR_TAIL,
     AFATFS_CREATEFILE_PHASE_SUCCESS,
     AFATFS_CREATEFILE_PHASE_FAILURE,
 };
+
+/*
+ * Proven origin of the selected directory-entry run. DELETED preserves the
+ * following live entries; either TERMINATOR origin requires a replacement
+ * 0x00 entry, with MOVED additionally retaining the old marker pointer.
+ */
+typedef enum {
+    AFATFS_DIRECTORY_RUN_ORIGIN_NONE = 0,
+    AFATFS_DIRECTORY_RUN_ORIGIN_DELETED,
+    AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_LOCAL,
+    AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED,
+} afatfsDirectoryRunOrigin_e;
 
 typedef enum {
     AFATFS_FIND_CLUSTER_IN_PROGRESS,
@@ -235,18 +264,46 @@ typedef struct afatfsCreateFile_t {
      * display component used only when a new directory entry must be created.
      * openNameOut is caller-owned storage that receives the generated 8.3 alias
      * once the request has selected it; callers can keep using short-alias
-     * opens without learning raw FAT internals. freeRunStart/freeRunLength are
-     * populated while scanning the current directory for a sector-local run
-     * large enough to hold LFN entries plus the final SFN entry.
+     * opens without learning raw FAT internals.
      *
      * shortNameCaseFlags describes filename[]: the raw 8.3 key remains
      * uppercase for FAT lookup, while these ntReserved bits preserve
      * all-lowercase display names such as kitset.kcg and slakd1.drm without
      * changing case-insensitive open behavior.
      */
-    uint8_t longNameEnabled;
+    /*
+     * Shared directory-entry run reservation for create and rename.
+     *
+     * What: Persists one sector-local candidate or selected FAT
+     * directory-entry run across asynchronous polls. requestedEntryCount is
+     * one for an SFN and lfnEntryCount plus one for an LFN/SFN run.
+     * reservationOrigin records whether selectedRunStart is a proven deleted
+     * run, the current terminator, or entry zero of a prepared next logical
+     * sector. scanRunStart tracks the current deleted run and is reused for
+     * the old terminator only after a moved-marker decision makes the scan run
+     * dead.
+     *
+     * Why: Deleted entries and the end marker are not interchangeable. Every
+     * writer must know whether it may overwrite only selected slots or must
+     * also publish a replacement zero entry. Keeping this state in the create
+     * operation makes short create, LFN create, and rename share one rule
+     * without adding a RAM-only sector-initialization witness or a second
+     * rename allocator.
+     *
+     * Inputs: requested object-entry count, raw finder position, entry class,
+     * create permission, and the 16-entry directory-sector boundary.
+     * Outputs/effects: either a latched deleted run that leaves the
+     * terminator untouched, a local terminator-owned run with room for a
+     * replacement marker, or resumable state for preparing a next logical
+     * sector and later retiring the old terminator tail.
+     * Affiliates: afatfs_createFileContinue(), the short and LFN writers,
+     * afatfs_renameObjectContinue(), afatfs_extendSubdirectory(),
+     * afatfs_findNext(), and AFATFS_FILES_PER_DIRECTORY_SECTOR.
+     */
+    uint8_t requestedEntryCount;
     uint8_t lfnEntryCount;
-    uint8_t freeRunLength;
+    uint8_t deletedRunLength;
+    uint8_t reservationOrigin;
     uint8_t scanLongNameValid;
     uint8_t scanLongNameChecksum;
     afatfsMatchMode_t matchMode;
@@ -254,9 +311,15 @@ typedef struct afatfsCreateFile_t {
     char longName[AFATFS_LONG_FILENAME_MAX + 1u];
     char scanLongName[AFATFS_LONG_FILENAME_MAX + 1u];
     char *openNameOut;
-    afatfsDirEntryPointer_t freeRunStart;
+    afatfsDirEntryPointer_t scanRunStart;
+    afatfsDirEntryPointer_t selectedRunStart;
 } afatfsCreateFile_t;
 
+/*
+ * Rename phases mirror create's shared reservation lifecycle: collision scan,
+ * logical target seek/prepare, target-media barrier, old-marker-tail cleanup,
+ * new-run publication, and complete old-name retirement.
+ */
 typedef enum {
     AFATFS_RENAME_OBJECT_PHASE_INITIAL = 0,
     AFATFS_RENAME_OBJECT_PHASE_FIND_SOURCE,
@@ -264,7 +327,10 @@ typedef enum {
     AFATFS_RENAME_OBJECT_PHASE_PREPARE_NEW_NAME,
     AFATFS_RENAME_OBJECT_PHASE_COLLISION_SCAN_BEGIN,
     AFATFS_RENAME_OBJECT_PHASE_COLLISION_SCAN,
-    AFATFS_RENAME_OBJECT_PHASE_WAIT_EXTEND,
+    AFATFS_RENAME_OBJECT_PHASE_PREPARE_NEW_RUN_SEEK,
+    AFATFS_RENAME_OBJECT_PHASE_PREPARE_NEW_RUN_TARGET,
+    AFATFS_RENAME_OBJECT_PHASE_WAIT_TARGET_PERSISTENCE,
+    AFATFS_RENAME_OBJECT_PHASE_RETIRE_OLD_TERMINATOR_TAIL,
     AFATFS_RENAME_OBJECT_PHASE_WRITE_NEW_RUN,
     AFATFS_RENAME_OBJECT_PHASE_RETIRE_OLD_RUN,
     AFATFS_RENAME_OBJECT_PHASE_FINISH,
@@ -275,9 +341,11 @@ typedef struct afatfsRenameObject_t {
     uint8_t succeeded;
     uint8_t movedEntryRun;
     uint8_t oldEntryCount;
+    afatfsResultCode_t result;
     afatfsRenameObjectPhase_e phase;
     afatfsMatchMode_t matchMode;
-    afatfsCallback_t callback;
+    /* Structured result callback; open-name output is published only on OK. */
+    afatfsResultCallback_t callback;
     char oldName[AFATFS_LONG_FILENAME_MAX + 1u];
     char newName[AFATFS_LONG_FILENAME_MAX + 1u];
     char generatedOpenName[AFATFS_SHORT_FILENAME_MAX];
@@ -289,6 +357,8 @@ typedef struct afatfsRenameObject_t {
     afatfsFinder_t rawFinder;
     afatfsDirEntryPointer_t oldRunStart;
     afatfsDirEntryPointer_t newRunStart;
+    /* Next physical old-name entry to retire; permits cross-sector yielding. */
+    uint8_t oldRunNextEntry;
 } afatfsRenameObject_t;
 
 typedef enum {
@@ -334,19 +404,62 @@ typedef enum {
 typedef struct afatfsAppendFreeCluster_t {
     uint32_t previousCluster;
     uint32_t searchCluster;
+    /*
+     * Bound the allocator's second, wrapped search pass.
+     *
+     * `searchStartCluster` records where the first pass began and
+     * `searchWrapped` records whether the search has restarted at FAT cluster
+     * 2. Together they make the last-allocation hint an optimization rather
+     * than an incorrect end-of-volume boundary: every legal cluster is
+     * examined once before the filesystem is declared full.
+     *
+     * Inputs: afatfs.lastClusterAllocated at operation initialization.
+     * Output: the exclusive upper bound for the wrapped pass. Affiliates:
+     * afatfs_appendRegularFreeClusterInitOperationState() and
+     * afatfs_appendRegularFreeClusterContinue().
+     */
+    uint32_t searchStartCluster;
+    uint8_t searchWrapped;
     afatfsAppendFreeClusterPhase_e phase;
 } afatfsAppendFreeCluster_t;
 
 typedef enum {
     AFATFS_EXTEND_SUBDIRECTORY_PHASE_INITIAL = 0,
     AFATFS_EXTEND_SUBDIRECTORY_PHASE_ADD_FREE_CLUSTER = 0,
-    AFATFS_EXTEND_SUBDIRECTORY_PHASE_WRITE_SECTORS,
+    AFATFS_EXTEND_SUBDIRECTORY_PHASE_INITIALIZE_FIRST_SECTOR,
     AFATFS_EXTEND_SUBDIRECTORY_PHASE_SUCCESS,
     AFATFS_EXTEND_SUBDIRECTORY_PHASE_FAILURE
 } afatfsExtendSubdirectoryPhase_e;
 
 typedef struct afatfsExtendSubdirectory_t {
-    // We need to call this as a sub-operation so we have it as our first member to be compatible with its memory layout:
+    /*
+     * Retained state for one asynchronous directory-cluster extension.
+     *
+     * What: Reuses afatfsAppendFreeCluster_t as the leading sub-operation, then
+     * retains only the extension phase, the parent cluster needed for a new
+     * child's ".." entry, and the original completion callback.
+     *
+     * Why: Gate B changes how much of an appended cluster is initialized, not
+     * the allocation or callback state machine. Keeping appendFreeCluster first
+     * preserves the required compatible union layout and avoids any retained-
+     * SRAM growth.
+     *
+     * Inputs: the prior cursor cluster supplied to the append sub-operation,
+     * the parent directory cluster for a first child cluster, and the caller
+     * callback.
+     *
+     * Outputs/effects: resumable append/initialize/success/failure state only;
+     * no sector buffer, initialized-sector witness, or additional cluster
+     * coordinate is retained here.
+     *
+     * Accessors: afatfs_appendRegularFreeClusterContinue() consumes the
+     * leading member; afatfs_fileGetCursorPhysicalSector() derives the
+     * initialized sector from the directory cursor when needed.
+     *
+     * Affiliates: afatfs_extendSubdirectoryContinue(),
+     * afatfs_extendSubdirectory(), afatfsFileOperation_t, AFATFS_MAX_OPEN_FILES,
+     * and the S059 retained-state static assertions.
+     */
     afatfsAppendFreeCluster_t appendFreeCluster;
 
     afatfsExtendSubdirectoryPhase_e phase;
@@ -379,11 +492,6 @@ typedef enum {
     AFATFS_DELETE_FILE_DEALLOCATE_CLUSTERS,
 } afatfsDeleteFilePhase_e;
 
-typedef struct afatfsDeleteFile_t {
-    afatfsTruncateFile_t truncateFile;
-    afatfsCallback_t callback;
-} afatfsUnlinkFile_t;
-
 typedef struct afatfsCloseFile_t {
     afatfsCallback_t callback;
 } afatfsCloseFile_t;
@@ -393,20 +501,66 @@ typedef enum {
     AFATFS_DELETE_TREE_OPEN_DIR,
     AFATFS_DELETE_TREE_SCAN,
     AFATFS_DELETE_TREE_EMPTY_DIR_ASCEND,
-    AFATFS_DELETE_TREE_SCAN_PARENT_FOR_SELF,
-    AFATFS_DELETE_TREE_SCAN_PARENT_FOR_SELF_LOOP,
+    AFATFS_DELETE_TREE_REOPEN_PARENT,
     AFATFS_DELETE_TREE_DESCEND_DIR,
+    AFATFS_DELETE_TREE_RESUME_PARENT,
     AFATFS_DELETE_TREE_RETIRE_ENTRIES,
     AFATFS_DELETE_TREE_FREE_FILE_CLUSTERS,
     AFATFS_DELETE_TREE_SUCCESS
 } afatfsDeleteTreePhase_e;
 
 typedef struct afatfsDeleteTree_t {
-    afatfsObjectId_t rootId;
-    afatfsObjectId_t currentTarget;
-    uint8_t currentTargetHasLongName;
+    /* Complete iterator identities are copied so no later name lookup occurs. */
+    afatfsObjectInfo_t root;
+    afatfsObjectInfo_t currentTarget;
     uint32_t currentCluster;
-    uint32_t targetClusterToRetire;
+    uint32_t parentCluster;
+    /*
+     * The parent directory's OWN directory-entry pointer, captured at descend.
+     *
+     * What: while AFATFS_DELETE_TREE_SCAN is iterating a directory, that
+     * directory's own identity lives in file->directoryEntryPos (written by
+     * AFATFS_DELETE_TREE_OPEN_DIR). Descending into a child overwrites that
+     * field with the child's identity, so the parent's copy is saved here
+     * first and restored by AFATFS_DELETE_TREE_REOPEN_PARENT on the way back
+     * up. Why: file->directoryEntryPos is what AFATFS_DELETE_TREE_SCAN's
+     * "directory is now empty" branch compares against root.id.sfnEntry to
+     * decide whether it has finished the whole tree (retire the root, then
+     * SUCCESS) or has merely emptied a nested child (ascend). If that field
+     * does not identify the directory actually being scanned, an emptied
+     * delete root is misread as a nested child and the traversal ascends out
+     * of the tree it was asked to delete. Pairs with parentCluster, and like
+     * parentCluster it holds one level only -- a descend nested inside
+     * another descend overwrites it, which is the same depth-one bound
+     * parentCluster's own ".."-agreement check already enforces.
+     */
+    afatfsDirEntryPointer_t parentEntry;
+    /*
+     * The complete identity of the directory this traversal descended into.
+     *
+     * What: a verbatim copy of currentTarget taken at descend time, when it
+     * still describes the child directory itself. Why: currentTarget is the
+     * "object currently being deleted" register, and AFATFS_DELETE_TREE_SCAN
+     * rewrites it for every object it processes -- so once the traversal has
+     * deleted the child's own contents, currentTarget names the LAST FILE
+     * deleted inside that child, not the child. The ascend path needs the
+     * child's cluster (to free its chain) and its complete VFAT name run
+     * (lfnEntryCount/lfnFirstEntry/lfnFollowingEntry, so
+     * afatfs_retireObjectNameRun() retires every fragment rather than
+     * orphaning them); neither survives in currentTarget, and
+     * file->directoryEntryPos carries only the short-entry pointer. Saving
+     * the whole afatfsObjectInfo_t at the one moment it is known-good is
+     * what lets AFATFS_DELETE_TREE_REOPEN_PARENT delete the right object
+     * without re-deriving it from a second physical scan. Same depth-one
+     * bound as parentCluster/parentEntry above.
+     */
+    afatfsObjectInfo_t descendTarget;
+    /* Saturated structural-work allowance; this is not a wall-clock timeout. */
+    uint32_t structuralBudget;
+    /* Next physical target-name entry to retire; zero means a fresh run. */
+    uint8_t nameRunNextEntry;
+    /* True only while finder owns the private directory scan's cache sector. */
+    uint8_t finderActive;
     /*
      * LFN-aware traversal state must be stored at its complete declared size.
      *
@@ -424,28 +578,41 @@ typedef struct afatfsDeleteTree_t {
     afatfsResultCallback_t callback;
     afatfsDeleteTreePhase_e phase;
     afatfsDeleteTreePhase_e lastPhase;
-    uint32_t timeoutTicks;
+    /*
+     * Which exact check inside afatfs_deleteTreeContinue() produced the most
+     * recent non-OK afatfsResultCode_t.
+     *
+     * What: afatfsResultCode_t alone cannot distinguish AFATFS_RESULT_UNSUPPORTED_LAYOUT
+     * raised by ~17 architecturally different checks scattered across this
+     * traversal (out-of-range cluster on open, a malformed ".." entry, a
+     * parent-cluster mismatch on ascend, failing to re-find a child's exact
+     * SFN/cluster identity in its re-scanned parent, a structural-budget
+     * exhaustion, and more). Why: filesystem.c's caller only ever sees the
+     * bare result code through afatfs_deleteTree()'s callback, and this
+     * project's card testing found that code alone is not enough to know
+     * which check to investigate. Set immediately before every non-OK
+     * afatfs_deleteTreeFinish() call in this file; read afterward through
+     * afatfs_getDeleteTreeFailureSite(), which -- unlike
+     * afatfs_getDeleteTreePhase() -- deliberately does not require an
+     * active openFiles[] entry, because by the time a caller wants this
+     * value, afatfs_deleteTreeFinish() has already reset the handle via
+     * afatfs_initFileHandle(); this struct is the persistent
+     * afatfs.deleteTreeState singleton, not part of that handle, so its
+     * fields (including this one) survive that reset until the next delete
+     * starts. Reset only by afatfs_deleteTree()'s own setup. Affiliates:
+     * afatfsDeleteTreeFailureSite_e, afatfs_getDeleteTreeFailureSite(),
+     * filesystem.c's op_delete_slot_error_detail/DELETE_RESULT trace record.
+     */
+    uint8_t failureSite;
 } afatfsDeleteTree_t;
 
-typedef enum {
-    AFATFS_MOVE_OBJECT_INITIAL,
-} afatfsMoveObjectPhase_e;
+/* afatfsDeleteTreeFailureSite_e is declared in asyncfatfs.h (public API,
+ * needed by filesystem.c to recognize specific sites) and defined there. */
 
-typedef struct afatfsMoveObject_t {
-    afatfsObjectId_t srcId;
-    afatfsDirHandle_t dstParent;
-    const char *dstName;
-    afatfsResultCallback_t callback;
-    afatfsMoveObjectPhase_e phase;
-} afatfsMoveObject_t;
-
-typedef struct afatfsCopyTree_t {
-    afatfsResultCallback_t callback;
-} afatfsCopyTree_t;
-
-typedef struct afatfsReplaceTree_t {
-    afatfsResultCallback_t callback;
-} afatfsReplaceTree_t;
+/*
+ * afatfs_getDeleteTreeFailureSite() is declared in asyncfatfs.h (public API)
+ * and defined beside afatfs_getDeleteTreePhase() below.
+ */
 
 typedef enum {
     AFATFS_FILE_OPERATION_NONE,
@@ -453,7 +620,6 @@ typedef enum {
     AFATFS_FILE_OPERATION_SEEK, // Seek the file's cursorCluster forwards by seekOffset bytes
     AFATFS_FILE_OPERATION_CLOSE,
     AFATFS_FILE_OPERATION_TRUNCATE,
-    AFATFS_FILE_OPERATION_UNLINK,
 #ifdef AFATFS_USE_FREEFILE
     AFATFS_FILE_OPERATION_APPEND_SUPERCLUSTER,
     AFATFS_FILE_OPERATION_LOCKED,
@@ -461,9 +627,6 @@ typedef enum {
     AFATFS_FILE_OPERATION_APPEND_FREE_CLUSTER,
     AFATFS_FILE_OPERATION_EXTEND_SUBDIRECTORY,
     AFATFS_FILE_OPERATION_DELETE_TREE,
-    AFATFS_FILE_OPERATION_MOVE_OBJECT,
-    AFATFS_FILE_OPERATION_COPY_TREE,
-    AFATFS_FILE_OPERATION_REPLACE_TREE,
 } afatfsFileOperation_e;
 
 typedef struct afatfsFileOperation_t {
@@ -474,13 +637,11 @@ typedef struct afatfsFileOperation_t {
         afatfsAppendSupercluster_t appendSupercluster;
         afatfsAppendFreeCluster_t appendFreeCluster;
         afatfsExtendSubdirectory_t extendSubdirectory;
-        afatfsUnlinkFile_t unlinkFile;
         afatfsTruncateFile_t truncateFile;
         afatfsCloseFile_t closeFile;
-        afatfsDeleteTree_t deleteTree;
-        afatfsMoveObject_t moveObject;
-        afatfsCopyTree_t copyTree;
-        afatfsReplaceTree_t replaceTree;
+        /* One native delete is allowed at a time; its expanded state lives in
+         * afatfs.deleteTreeState instead of inflating every open handle. */
+        afatfsDeleteTree_t *deleteTree;
     } state;
 } afatfsFileOperation_t;
 
@@ -576,6 +737,7 @@ typedef struct afatfsRemoveObjects_t {
     uint8_t active;
     /* Latched terminal result used by the FINISH phase before the callback releases the slot. */
     uint8_t succeeded;
+    afatfsResultCode_t result;
     /* Current async phase; each phase performs at most the next disk/cache-dependent step. */
     afatfsRemoveObjectsPhase_e phase;
     /* Caller-selected display-name comparison policy, normally case-insensitive for overwrite. */
@@ -594,8 +756,8 @@ typedef struct afatfsRemoveObjects_t {
      * and stores the object's printable shortName below.
      */
     uint8_t matchShortName;
-    /* Completion callback supplied by filesystem.c or diagnostics; it receives no payload. */
-    afatfsCallback_t callback;
+    /* Structured result callback supplied by filesystem.c or diagnostics. */
+    afatfsResultCallback_t callback;
     /* Sanitized target component copied once so caller-owned menu buffers can change while we scan. */
     char displayName[AFATFS_LONG_FILENAME_MAX + 1u];
     /* Exact printable 8.3 alias used only when matchShortName is nonzero. */
@@ -608,6 +770,8 @@ typedef struct afatfsRemoveObjects_t {
     fatDirectoryEntry_t sourceEntry;
     /* Private file handle used only to reuse the existing cluster-chain truncate logic. */
     afatfsFile_t syntheticFile;
+    /* Next physical object-name entry to retire across cache-sector yields. */
+    uint8_t nameRunNextEntry;
 } afatfsRemoveObjects_t;
 
 typedef enum {
@@ -669,6 +833,14 @@ typedef struct afatfs_t {
     // The current working directory:
     afatfsFile_t currentDirectory;
 
+    /*
+     * Sole owner of the expanded native delete state. Keeping this one active
+     * operation outside the five-handle union preserves the approved SRAM
+     * budget while the operation still retains one private file handle for
+     * cursor/cache ownership and polling dispatch.
+     */
+    afatfsDeleteTree_t deleteTreeState;
+
     afatfsRenameObject_t renameObject;
     afatfsRemoveObjects_t removeObjects;
 
@@ -698,15 +870,40 @@ typedef struct afatfs_t {
     uint32_t rootDirectorySectors; // Zero on FAT32, for FAT16 the number of sectors that the root directory occupies
 } afatfs_t;
 
+/*
+ * Retained-state ceiling for the S059 directory optimizations.
+ *
+ * What: Verifies that the target ABI still gives the create state, each file
+ * handle, and the global rename state their accepted pre-S059 sizes.
+ *
+ * Why: afatfsCreateFile_t is the largest per-handle operation-union member,
+ * so growth multiplies through five open handles and currentDirectory and
+ * also enlarges rename's embedded newNameState. Gate B must reuse the existing
+ * extension state and sector cache rather than consume Pattern-reserved SRAM1.
+ *
+ * Inputs: the compiler's completed private type layouts.
+ *
+ * Outputs/effects: a build failure instead of an unapproved retained-RAM
+ * increase; no runtime code or storage is emitted by passing assertions.
+ *
+ * Accessors: sizeof() is the sole compile-time accessor.
+ *
+ * Affiliates: AFATFS_MAX_OPEN_FILES, afatfsFileOperation_t, afatfs_t,
+ * afatfsExtendSubdirectory_t, and SRAM_MANIFEST.md.
+ */
+_Static_assert(sizeof(afatfsCreateFile_t) == 144u,
+               "S059 create state must remain 144 bytes");
+_Static_assert(sizeof(afatfsFile_t) == 188u,
+               "S059 file handle must remain 188 bytes");
+_Static_assert(sizeof(afatfsRenameObject_t) == 552u,
+               "S059 rename state must remain 552 bytes");
+
 static afatfs_t afatfs;
 
 static void afatfs_fileOperationContinue(afatfsFile_t *file);
 static void afatfs_renameObjectContinue(void);
 static void afatfs_removeObjectsContinue(void);
 static void afatfs_deleteTreeContinue(afatfsFile_t *file);
-static void afatfs_moveObjectContinue(afatfsFile_t *file);
-static void afatfs_copyTreeContinue(afatfsFile_t *file);
-static void afatfs_replaceTreeContinue(afatfsFile_t *file);
 static uint8_t* afatfs_fileLockCursorSectorForWrite(afatfsFilePtr_t file);
 static uint8_t* afatfs_fileRetainCursorSectorForRead(afatfsFilePtr_t file);
 
@@ -1106,20 +1303,6 @@ static uint32_t afatfs_fileGetCursorPhysicalSector(afatfsFilePtr_t file)
     } else {
         uint32_t cursorSectorInCluster = afatfs_sectorIndexInCluster(file->cursorOffset);
         return afatfs_fileClusterToPhysical(file->cursorCluster, cursorSectorInCluster);
-    }
-}
-
-/**
- * Sector here is the sector index within the cluster.
- */
-static void afatfs_fileGetCursorClusterAndSector(afatfsFilePtr_t file, uint32_t *cluster, uint16_t *sector)
-{
-    *cluster = file->cursorCluster;
-
-    if (file->type == AFATFS_FILE_TYPE_FAT16_ROOT_DIRECTORY) {
-        *sector = file->cursorOffset / AFATFS_SECTOR_SIZE;
-    } else {
-        *sector = afatfs_sectorIndexInCluster(file->cursorOffset);
     }
 }
 
@@ -1745,24 +1928,65 @@ static afatfsOperationStatus_e afatfs_appendRegularFreeClusterContinue(afatfsFil
 {
     afatfsAppendFreeCluster_t *opState = &file->operation.state.appendFreeCluster;
     afatfsOperationStatus_e status;
+    uint32_t searchLimit;
 
     doMore:
 
     switch (opState->phase) {
         case AFATFS_APPEND_FREE_CLUSTER_PHASE_FIND_FREESPACE:
-            switch (afatfs_findClusterWithCondition(CLUSTER_SEARCH_FREE, &opState->searchCluster, afatfs.numClusters + FAT_SMALLEST_LEGAL_CLUSTER_NUMBER)) {
+            /*
+             * Search the FAT as a ring around the last-allocation hint.
+             *
+             * The old single pass stopped at the physical end of the FAT. If
+             * free clusters existed before the hint, a multi-cluster fwrite()
+             * could allocate its first cluster, fail at the next cluster
+             * boundary, and set filesystemFull forever. The autosave baseline
+             * exposed that as a 16 KiB `.hcprms1` followed by a blocking boot.
+             *
+             * Pass one covers [searchStartCluster, volumeEnd). If it has no
+             * free entry, pass two covers [cluster 2, searchStartCluster).
+             * Only failure of both passes means the regular cluster pool is
+             * actually exhausted.
+             */
+            searchLimit = opState->searchWrapped
+                ? opState->searchStartCluster
+                : afatfs.numClusters + FAT_SMALLEST_LEGAL_CLUSTER_NUMBER;
+            switch (afatfs_findClusterWithCondition(
+                        CLUSTER_SEARCH_FREE, &opState->searchCluster,
+                        searchLimit)) {
                 case AFATFS_FIND_CLUSTER_FOUND:
                     afatfs.lastClusterAllocated = opState->searchCluster;
 
                     /*
-                     * Assign the new cluster to the active cursor before the
-                     * FAT and directory entry are fully committed. Directory
-                     * initialization relies on this exactly like fwrite(): the
-                     * following zero-fill phase needs a physical sector to
-                     * write. When previousCluster is zero this is also the
-                     * first cluster of the file/directory, so
-                     * saveDirectoryEntry() must publish it in firstClusterHigh
-                     * and firstClusterLow before mkdir reports success.
+                     * Publish the newly allocated cluster through the active
+                     * cursor.
+                     *
+                     * What: Records the allocated cluster as the cursor
+                     * cluster, expands physicalSize by one complete cluster,
+                     * and records firstCluster when this is the file or
+                     * directory's first allocation.
+                     *
+                     * Why: The following directory-extension phase derives
+                     * the first physical sector from this cursor and
+                     * initializes that sector before mkdir or marker advance
+                     * can expose it. FAT allocation remains cluster-sized even
+                     * though Gate B no longer initializes every sector
+                     * immediately.
+                     *
+                     * Inputs: the successful free-cluster search result and
+                     * previousCluster.
+                     *
+                     * Outputs/effects: updated cursorCluster, physicalSize,
+                     * and possibly firstCluster; the following FAT-link and
+                     * directory-entry publication phases are unchanged.
+                     *
+                     * Accessors: afatfs_clusterSize() supplies the allocation
+                     * increment; afatfs_saveDirectoryEntry() later writes
+                     * firstClusterHigh/Low for a first allocation.
+                     *
+                     * Affiliates: afatfs_extendSubdirectoryContinue(),
+                     * regular-file fwrite allocation, FAT1/FAT2 update phases,
+                     * and the mkdir callback boundary.
                      */
                     file->cursorCluster = opState->searchCluster;
                     file->physicalSize += afatfs_clusterSize();
@@ -1776,9 +2000,27 @@ static afatfsOperationStatus_e afatfs_appendRegularFreeClusterContinue(afatfsFil
                     goto doMore;
                 break;
                 case AFATFS_FIND_CLUSTER_FATAL:
-                case AFATFS_FIND_CLUSTER_NOT_FOUND:
                     // We couldn't find an empty cluster to append to the file
                     opState->phase = AFATFS_APPEND_FREE_CLUSTER_PHASE_FAILURE;
+                    goto doMore;
+                break;
+                case AFATFS_FIND_CLUSTER_NOT_FOUND:
+                    if (!opState->searchWrapped &&
+                        opState->searchStartCluster >
+                            FAT_SMALLEST_LEGAL_CLUSTER_NUMBER) {
+                        /*
+                         * The hint-to-end range was occupied; resume at the
+                         * first legal FAT cluster and stop just before the
+                         * original hint. This transition is scalar-only and
+                         * remains resumable through afatfs_poll().
+                         */
+                        opState->searchCluster =
+                            FAT_SMALLEST_LEGAL_CLUSTER_NUMBER;
+                        opState->searchWrapped = 1u;
+                        goto doMore;
+                    }
+                    opState->phase =
+                        AFATFS_APPEND_FREE_CLUSTER_PHASE_FAILURE;
                     goto doMore;
                 break;
                 case AFATFS_FIND_CLUSTER_IN_PROGRESS:
@@ -1836,9 +2078,27 @@ static afatfsOperationStatus_e afatfs_appendRegularFreeClusterContinue(afatfsFil
 
 static void afatfs_appendRegularFreeClusterInitOperationState(afatfsAppendFreeCluster_t *state, uint32_t previousCluster)
 {
+    uint32_t volumeEnd =
+        afatfs.numClusters + FAT_SMALLEST_LEGAL_CLUSTER_NUMBER;
+
     state->phase = AFATFS_APPEND_FREE_CLUSTER_PHASE_INITIAL;
     state->previousCluster = previousCluster;
-    state->searchCluster = afatfs.lastClusterAllocated;
+    /*
+     * Normalize the allocation hint before beginning the two-pass search.
+     *
+     * A valid hint starts the first pass near recent allocations. A stale or
+     * out-of-range hint falls back to cluster 2, which still searches the
+     * complete volume. `searchStartCluster` must remain unchanged while
+     * searchCluster advances asynchronously because it becomes the wrapped
+     * pass's exclusive bound.
+     */
+    state->searchStartCluster = afatfs.lastClusterAllocated;
+    if (state->searchStartCluster < FAT_SMALLEST_LEGAL_CLUSTER_NUMBER ||
+        state->searchStartCluster >= volumeEnd) {
+        state->searchStartCluster = FAT_SMALLEST_LEGAL_CLUSTER_NUMBER;
+    }
+    state->searchCluster = state->searchStartCluster;
+    state->searchWrapped = 0u;
 }
 
 /**
@@ -2228,6 +2488,8 @@ static bool afatfs_fseekAtomic(afatfsFilePtr_t file, int32_t offset)
         file->cursorOffset += offset;
     }
 
+    afatfs_fileUpdateFilesize(file);
+
     return true;
 }
 
@@ -2269,7 +2531,7 @@ static bool afatfs_fseekInternalContinue(afatfsFile_t *file)
         file->cursorOffset += opState->seekOffset;
     }
 
-    afatfs_fileUpdateFilesize(file); // TODO do we need this?
+    afatfs_fileUpdateFilesize(file);
 
     file->operation.operation = AFATFS_FILE_OPERATION_NONE;
 
@@ -2457,9 +2719,40 @@ static void afatfs_objectScanReset(afatfsObjectFinder_t *finder)
     finder->lfnValid = 0u;
     finder->lfnChecksum = 0u;
     finder->lfnEntryCount = 0u;
+    finder->lfnExpectedOrdinal = 0u;
+    finder->lfnMalformed = 0u;
     memset(finder->lfnName, 0, sizeof(finder->lfnName));
     finder->lfnFirstEntry.sectorNumberPhysical = 0u;
     finder->lfnFirstEntry.entryIndex = -1;
+    memset(finder->lfnFollowingEntry, 0, sizeof(finder->lfnFollowingEntry));
+}
+
+static bool afatfs_objectLfnEntryShapeIsValid(const fatDirectoryEntry_t *entry)
+{
+    const uint8_t *raw = (const uint8_t *)entry;
+    bool terminated = false;
+
+    /* LFN entries have type zero and no first-cluster payload. The character
+     * field is name text followed by an end marker; FAT implementations vary,
+     * so both 0x0000 and 0xffff terminate the name and 0xffff is legal padding
+     * with or without a preceding 0x0000. Non-ASCII units are retained because
+     * the name builder renders them as underscores. */
+    if (!entry || raw[11] != FAT_FILE_ATTRIBUTE_LFN || raw[12] != 0u ||
+        raw[26] != 0u || raw[27] != 0u)
+        return false;
+    for (uint8_t i = 0u; i < FAT_LFN_CHARS_PER_ENTRY; i++) {
+        static const uint8_t offsets[FAT_LFN_CHARS_PER_ENTRY] = {
+            1u, 3u, 5u, 7u, 9u, 14u, 16u, 18u, 20u, 22u, 24u, 28u, 30u
+        };
+        uint16_t ch = (uint16_t)raw[offsets[i]] |
+                      ((uint16_t)raw[offsets[i] + 1u] << 8u);
+        if (ch == 0x0000u || ch == 0xffffu) {
+            terminated = true;
+        } else if (terminated) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static void afatfs_objectScanAppendLfn(afatfsObjectFinder_t *finder,
@@ -2472,7 +2765,8 @@ static void afatfs_objectScanAppendLfn(afatfsObjectFinder_t *finder,
         28u, 30u
     };
     const uint8_t *raw = (const uint8_t *)entry;
-    uint8_t seq = raw[0] & 0x1fu;
+    uint8_t sequence = raw[0];
+    uint8_t seq = sequence & 0x1fu;
 
     /*
      * Rebuild one ASCII-safe VFAT display name while walking raw entries.
@@ -2483,23 +2777,32 @@ static void afatfs_objectScanAppendLfn(afatfsObjectFinder_t *finder,
      * remain identical across fragments; final validation happens when the next
      * SFN entry arrives because that entry owns the physical object metadata.
      */
-    if (seq == 0u ||
-        seq > ((AFATFS_LONG_FILENAME_MAX + FAT_LFN_CHARS_PER_ENTRY - 1u) /
-               FAT_LFN_CHARS_PER_ENTRY)) {
-        afatfs_objectScanReset(finder);
+    if (seq == 0u || seq > AFATFS_LONG_FILENAME_ENTRY_MAX ||
+        (sequence & 0xa0u) != 0u ||
+        !afatfs_objectLfnEntryShapeIsValid(entry)) {
+        finder->lfnValid = 0u;
+        finder->lfnMalformed = 1u;
         return;
     }
 
-    if (raw[0] & FAT_LFN_LAST_LONG_ENTRY) {
+    if (sequence & FAT_LFN_LAST_LONG_ENTRY) {
         afatfs_objectScanReset(finder);
         finder->lfnValid = 1u;
         finder->lfnChecksum = raw[13];
         finder->lfnFirstEntry = *rawFinder;
-    } else if (!finder->lfnValid) {
-        return;
-    } else if (finder->lfnChecksum != raw[13]) {
-        afatfs_objectScanReset(finder);
-        return;
+        finder->lfnEntryCount = 1u;
+        finder->lfnExpectedOrdinal = (uint8_t)(seq - 1u);
+    } else {
+        if (!finder->lfnValid || finder->lfnExpectedOrdinal != seq ||
+            finder->lfnChecksum != raw[13] ||
+            finder->lfnEntryCount >= AFATFS_LONG_FILENAME_ENTRY_MAX) {
+            finder->lfnValid = 0u;
+            finder->lfnMalformed = 1u;
+            return;
+        }
+        finder->lfnFollowingEntry[finder->lfnEntryCount - 1u] = *rawFinder;
+        finder->lfnEntryCount++;
+        finder->lfnExpectedOrdinal = (uint8_t)(seq - 1u);
     }
 
     uint8_t pos = (uint8_t)((seq - 1u) * FAT_LFN_CHARS_PER_ENTRY);
@@ -2519,7 +2822,6 @@ static void afatfs_objectScanAppendLfn(afatfsObjectFinder_t *finder,
          */
         finder->lfnName[pos] = (ch < 0x80u) ? (char)ch : '_';
     }
-    finder->lfnEntryCount++;
 }
 
 static bool afatfs_isStructuralDotEntry(const fatDirectoryEntry_t *entry)
@@ -2617,7 +2919,20 @@ afatfsOperationStatus_e afatfs_findNextObject(afatfsFilePtr_t directory,
                                   entry->firstClusterLow;
         object->id.logicalSize = entry->fileSize;
 
-        if (finder->lfnValid &&
+        if (finder->lfnMalformed ||
+            (finder->lfnValid &&
+             (finder->lfnExpectedOrdinal != 0u ||
+              finder->lfnChecksum !=
+                  fat_lfnChecksum((const uint8_t *)entry->filename) ||
+              finder->lfnName[0] == '\0'))) {
+            /* Preserve the SFN as a browsable object, but expose that its
+             * preceding VFAT-looking run is not a trusted identity. */
+            object->lfnMalformed = 1u;
+            for (uint8_t i = 0u;
+                 i < AFATFS_LONG_FILENAME_MAX &&
+                 object->id.shortName[i] != '\0'; i++)
+                object->id.displayName[i] = object->id.shortName[i];
+        } else if (finder->lfnValid &&
             finder->lfnChecksum ==
                 fat_lfnChecksum((const uint8_t *)entry->filename) &&
             finder->lfnName[0] != '\0') {
@@ -2635,6 +2950,9 @@ afatfsOperationStatus_e afatfs_findNextObject(afatfsFilePtr_t directory,
             object->hasLongName = 1u;
             object->id.lfnEntryCount = finder->lfnEntryCount;
             object->id.lfnFirstEntry = finder->lfnFirstEntry;
+            memcpy(object->id.lfnFollowingEntry,
+                   finder->lfnFollowingEntry,
+                   sizeof(object->id.lfnFollowingEntry));
         } else {
             uint8_t i;
 
@@ -2649,6 +2967,38 @@ afatfsOperationStatus_e afatfs_findNextObject(afatfsFilePtr_t directory,
                  i++)
                 object->id.displayName[i] = object->id.shortName[i];
             object->id.displayName[i] = '\0';
+        }
+
+        /*
+         * Skip macOS AppleDouble resource-fork files.
+         *
+         * What: rejects any directory object whose resolved display name
+         * begins with the two-character sequence `._` and continues the
+         * scan to the next physical entry. Why: macOS creates hidden
+         * `._<filename>` shadow files on FAT/exFAT volumes to store
+         * extended attributes and resource forks. These files carry the
+         * same extension as their companion data file (e.g. `._kick.drm`
+         * alongside `kick.drm`), so every higher-layer classifier that
+         * matches by extension — instrument type, library scan, filename
+         * repair — would misidentify them as user content. Filtering at
+         * this level makes AppleDouble files invisible to all directory
+         * consumers: repair, scan, index, save, load, and any future
+         * enumerator. The two-byte `._` prefix is the canonical
+         * AppleDouble signature defined by Apple's legacy resource-fork
+         * transport; no user-created content on this product uses it.
+         * Inputs: the finalized display name from any of the three
+         * preceding resolution paths (verified LFN, malformed-LFN
+         * fallback, or bare SFN). Output: the object is discarded and
+         * the finder advances to the next raw entry. Affiliates:
+         * afatfs_isStructuralDotEntry() (analogous structural filter),
+         * filesystem_instrumentStemIsUsable() (backup guard retained in
+         * filesystem_repairBuildCandidate), and
+         * filesystem_recordInstrumentFile().
+         */
+        if (object->id.displayName[0] == '.' &&
+            object->id.displayName[1] == '_') {
+            afatfs_objectScanReset(finder);
+            continue;
         }
 
         afatfs_objectScanReset(finder);
@@ -2672,8 +3022,7 @@ static afatfsOperationStatus_e afatfs_extendSubdirectoryContinue(afatfsFile_t *d
     afatfsExtendSubdirectory_t *opState = &directory->operation.state.extendSubdirectory;
     afatfsOperationStatus_e status;
     uint8_t *sectorBuffer;
-    uint32_t clusterNumber, physicalSector;
-    uint16_t sectorInCluster;
+    uint32_t physicalSector;
 
     doMore:
     switch (opState->phase) {
@@ -2681,73 +3030,86 @@ static afatfsOperationStatus_e afatfs_extendSubdirectoryContinue(afatfsFile_t *d
             status = afatfs_appendRegularFreeClusterContinue(directory);
 
             if (status == AFATFS_OPERATION_SUCCESS) {
-                opState->phase = AFATFS_EXTEND_SUBDIRECTORY_PHASE_WRITE_SECTORS;
+                opState->phase =
+                    AFATFS_EXTEND_SUBDIRECTORY_PHASE_INITIALIZE_FIRST_SECTOR;
                 goto doMore;
             } else if (status == AFATFS_OPERATION_FAILURE) {
                 opState->phase = AFATFS_EXTEND_SUBDIRECTORY_PHASE_FAILURE;
                 goto doMore;
             }
         break;
-        case AFATFS_EXTEND_SUBDIRECTORY_PHASE_WRITE_SECTORS:
-            // Now, zero out that cluster
-            afatfs_fileGetCursorClusterAndSector(directory, &clusterNumber, &sectorInCluster);
+        case AFATFS_EXTEND_SUBDIRECTORY_PHASE_INITIALIZE_FIRST_SECTOR:
+            /*
+             * Initialize only the first visible sector of the appended
+             * directory cluster.
+             *
+             * What: Obtains the sector at the appended-cluster cursor with
+             * WRITE-only cache ownership, clears all 512 bytes, writes "." and
+             * ".." only for a new child directory's first cluster, and leaves
+             * the first unused entry as 0x00. Later sectors in the allocated
+             * cluster remain untouched and logically invisible.
+             *
+             * Why: FAT allocation is cluster-sized, but a valid end marker
+             * makes bytes after it outside the live namespace. Clearing every
+             * sector caused 64 writes per child directory on the tested card.
+             * Gate A now guarantees that any later sector is fully cleared
+             * before the marker moves into it.
+             *
+             * Inputs: directory->cursorCluster/cursorOffset after append
+             * completion, directory->firstCluster, directoryEntryPos to
+             * distinguish a non-root child, and
+             * opState->parentDirectoryCluster for the first-cluster ".."
+             * entry.
+             *
+             * Outputs/effects: one dirty, fully initialized sector; correct
+             * dot entries for a first child cluster; a zero terminator at
+             * entry 2 for that cluster or entry 0 for a later appended cluster;
+             * unchanged FAT chain and physicalSize; and no cursor seek across
+             * the untouched remainder of the cluster.
+             *
+             * Accessors: afatfs_fileGetCursorPhysicalSector() maps the logical
+             * cursor to media; afatfs_cacheSector(..., AFATFS_CACHE_WRITE, ...)
+             * obtains and marks the cache sector dirty without reading stale
+             * media; memset() establishes the complete hidden-to-visible
+             * sector invariant.
+             *
+             * Affiliates: afatfs_appendRegularFreeClusterContinue(),
+             * afatfs_prepareDirectoryRunTarget(),
+             * afatfs_handoffCreatedDirectoryToInitializer(), afatfs_findNext(),
+             * FAT16-root no-extension handling, and the final afatfs_sync()
+             * boundary.
+             */
             physicalSector = afatfs_fileGetCursorPhysicalSector(directory);
+            status = afatfs_cacheSector(physicalSector,
+                                        &sectorBuffer,
+                                        AFATFS_CACHE_WRITE,
+                                        0);
+            if (status != AFATFS_OPERATION_SUCCESS)
+                return status;
 
-            while (1) {
-                status = afatfs_cacheSector(physicalSector, &sectorBuffer, AFATFS_CACHE_WRITE, 0);
+            memset(sectorBuffer, 0, AFATFS_SECTOR_SIZE);
 
-                if (status != AFATFS_OPERATION_SUCCESS) {
-                    return status;
-                }
+            if (directory->directoryEntryPos.sectorNumberPhysical != 0u &&
+                directory->cursorOffset == 0u) {
+                fatDirectoryEntry_t *dirEntries =
+                    (fatDirectoryEntry_t *)sectorBuffer;
 
-                /*
-                 * Zero every sector in the newly-appended cluster. FAT
-                 * directory scans stop at empty entries, so clearing the whole
-                 * cluster prevents stale card data from looking like child
-                 * files. sectorInCluster is compared against
-                 * sectorsPerCluster - 1 because both values are zero-based
-                 * within the new cluster.
-                 */
-                memset(sectorBuffer, 0, AFATFS_SECTOR_SIZE);
+                memset(dirEntries[0].filename, ' ', sizeof(dirEntries[0].filename));
+                dirEntries[0].filename[0] = '.';
+                dirEntries[0].firstClusterHigh = directory->firstCluster >> 16;
+                dirEntries[0].firstClusterLow = directory->firstCluster & 0xffffu;
+                dirEntries[0].attrib = FAT_FILE_ATTRIBUTE_DIRECTORY;
 
-                /*
-                 * The first sector of a non-root subdirectory must start with
-                 * "." and "..". directory->firstCluster points "." back at
-                 * this directory; parentDirectory supplied by mkdir/create
-                 * points ".." back at the directory that contained the
-                 * newly-created entry. Later directory extensions pass
-                 * parentDirectory == NULL and skip this block because
-                 * cursorOffset is no longer zero.
-                 */
-                if (directory->directoryEntryPos.sectorNumberPhysical != 0 && directory->cursorOffset == 0) {
-                    fatDirectoryEntry_t *dirEntries = (fatDirectoryEntry_t *) sectorBuffer;
-
-                    memset(dirEntries[0].filename, ' ', sizeof(dirEntries[0].filename));
-                    dirEntries[0].filename[0] = '.';
-                    dirEntries[0].firstClusterHigh = directory->firstCluster >> 16;
-                    dirEntries[0].firstClusterLow = directory->firstCluster & 0xFFFF;
-                    dirEntries[0].attrib = FAT_FILE_ATTRIBUTE_DIRECTORY;
-
-                    memset(dirEntries[1].filename, ' ', sizeof(dirEntries[1].filename));
-                    dirEntries[1].filename[0] = '.';
-                    dirEntries[1].filename[1] = '.';
-                    dirEntries[1].firstClusterHigh = opState->parentDirectoryCluster >> 16;
-                    dirEntries[1].firstClusterLow = opState->parentDirectoryCluster & 0xFFFF;
-                    dirEntries[1].attrib = FAT_FILE_ATTRIBUTE_DIRECTORY;
-                }
-
-                if (sectorInCluster < afatfs.sectorsPerCluster - 1) {
-                    // Move to next sector
-                    afatfs_assert(afatfs_fseekAtomic(directory, AFATFS_SECTOR_SIZE));
-                    sectorInCluster++;
-                    physicalSector++;
-                } else {
-                    break;
-                }
+                memset(dirEntries[1].filename, ' ', sizeof(dirEntries[1].filename));
+                dirEntries[1].filename[0] = '.';
+                dirEntries[1].filename[1] = '.';
+                dirEntries[1].firstClusterHigh =
+                    opState->parentDirectoryCluster >> 16;
+                dirEntries[1].firstClusterLow =
+                    opState->parentDirectoryCluster & 0xffffu;
+                dirEntries[1].attrib = FAT_FILE_ATTRIBUTE_DIRECTORY;
             }
 
-            // Seek back to the beginning of the cluster
-            afatfs_assert(afatfs_fseekAtomic(directory, -AFATFS_SECTOR_SIZE * (afatfs.sectorsPerCluster - 1)));
             opState->phase = AFATFS_EXTEND_SUBDIRECTORY_PHASE_SUCCESS;
             goto doMore;
         break;
@@ -2773,16 +3135,36 @@ static afatfsOperationStatus_e afatfs_extendSubdirectoryContinue(afatfsFile_t *d
     return AFATFS_OPERATION_IN_PROGRESS;
 }
 
-/**
- * Queue an operation to add a cluster to a sub-directory.
+/*
+ * Queue asynchronous extension of one non-FAT16-root directory.
  *
- * Tthe new cluster is zero-filled. "." and ".." entries are added if it is the first cluster of a new subdirectory.
+ * What: Appends one FAT cluster and initializes its first sector immediately.
+ * For a new child directory, that sector contains ".", "..", and a valid
+ * terminator. For a later extension, entry 0 is the terminator. Remaining
+ * sectors are initialized individually by marker-advance preparation before
+ * they can enter the live namespace.
  *
- * The directory must not be busy, otherwise AFATFS_OPERATION_FAILURE is returned immediately.
+ * Why: Callers need a directory that is safe to enter or continue scanning,
+ * not an eagerly zero-filled allocation unit. Keeping later sectors hidden
+ * removes redundant I/O while the persistent marker preserves remount safety.
  *
- * The directory's cursor must lie at the end of the directory file (i.e. isEndOfAllocatedFile() would return true).
+ * Inputs: directory must be idle with its cursor at allocated EOF;
+ * parentDirectory is required only for the first cluster of a new child and
+ * supplies the ".." cluster; callback may be NULL for an internal extension.
  *
- * You must provide parentDirectory if this is the first extension to the subdirectory, otherwise pass NULL for that argument.
+ * Outputs/effects: returns SUCCESS, IN_PROGRESS, or FAILURE through the
+ * existing asynchronous contract; appends one cluster, initializes one sector,
+ * and invokes callback with directory or NULL on the existing terminal path.
+ * FAT16 fixed root and busy handles fail before any operation is queued.
+ *
+ * Accessors: afatfs_fileIsBusy() enforces ownership;
+ * afatfs_appendRegularFreeClusterInitOperationState() seeds allocation from
+ * cursorPreviousCluster; afatfs_extendSubdirectoryContinue() performs the
+ * work.
+ *
+ * Affiliates: mkdir create handoff, Gate A next-sector preparation,
+ * afatfs_fileOperationContinue(), FAT allocation, directory scans, and
+ * afatfs_sync().
  */
 static afatfsOperationStatus_e afatfs_extendSubdirectory(afatfsFile_t *directory, afatfsFilePtr_t parentDirectory, afatfsFileCallback_t callback)
 {
@@ -2808,66 +3190,11 @@ static afatfsOperationStatus_e afatfs_extendSubdirectory(afatfsFile_t *directory
     return afatfs_extendSubdirectoryContinue(directory);
 }
 
-/**
- * Allocate space for a new directory entry to be written, store the position of that entry in the finder, and set
- * the *dirEntry pointer to point to the entry within the cached FAT sector. This pointer's lifetime is only as good
- * as the life of the cache, so don't dawdle.
- *
- * Before the first call to this function, call afatfs_findFirst() on the directory.
- *
- * The directory sector in the cache is marked as dirty, so any changes written through to the entry will be flushed out
- * in a subsequent poll cycle.
- *
- * Returns:
- *     AFATFS_OPERATION_IN_PROGRESS - Call again later to continue
- *     AFATFS_OPERATION_SUCCESS     - Entry has been inserted and *dirEntry and *finder have been updated
- *     AFATFS_OPERATION_FAILURE     - When the directory is full.
+/*
+ * The former single-entry allocator was removed with the phase-one marker
+ * contract. Create and rename now retain the selected run and its origin until
+ * their writers run, so a second scan cannot pass 0x00 or lose that origin.
  */
-static afatfsOperationStatus_e afatfs_allocateDirectoryEntry(afatfsFilePtr_t directory, fatDirectoryEntry_t **dirEntry, afatfsFinder_t *finder)
-{
-    afatfsOperationStatus_e result;
-
-    if (afatfs_fileIsBusy(directory)) {
-        return AFATFS_OPERATION_IN_PROGRESS;
-    }
-
-    while ((result = afatfs_findNext(directory, finder, dirEntry)) == AFATFS_OPERATION_SUCCESS) {
-        if (*dirEntry) {
-            if (fat_isDirectoryEntryEmpty(*dirEntry) || fat_isDirectoryEntryTerminator(*dirEntry)) {
-                afatfs_cacheSectorMarkDirty(afatfs_getCacheDescriptorForBuffer((uint8_t*) *dirEntry));
-
-                afatfs_findLast(directory);
-                return AFATFS_OPERATION_SUCCESS;
-            }
-        } else {
-            /*
-             * This allocator may extend an already-initialized current
-             * directory, but it must not create the first cluster of a
-             * subdirectory. The first cluster needs a real parentDirectory so
-             * ".." can be written correctly; only mkdir/create still has that
-             * parent available before chdir() copies the child into
-             * currentDirectory.
-             */
-            if (directory->type == AFATFS_FILE_TYPE_DIRECTORY &&
-                directory->directoryEntryPos.sectorNumberPhysical != 0 &&
-                directory->firstCluster == 0) {
-                return AFATFS_OPERATION_FAILURE;
-            }
-            // Need to extend directory size by adding a cluster
-            result = afatfs_extendSubdirectory(directory, NULL, NULL);
-
-            if (result == AFATFS_OPERATION_SUCCESS) {
-                // Continue the search in the newly-extended directory
-                continue;
-            } else {
-                // The status (in progress or failure) of extending the directory becomes our status
-                break;
-            }
-        }
-    }
-
-    return result;
-}
 
 /**
  * Return a pointer to a free entry in the open files table (a file whose type is "NONE"). You should initialize
@@ -2882,6 +3209,26 @@ static afatfsFilePtr_t afatfs_allocateFileHandle()
     }
 
     return NULL;
+}
+
+/*
+ * Count how many file handles in the pool are currently allocated.
+ *
+ * Returns the number of openFiles[] entries whose type is not NONE.
+ * Called by filesystem.c's Bank Save diagnostic to detect whether
+ * handles accumulate across per-child iterations. A count > 0 at the
+ * top of a new child cycle (when no handle should be in use) proves a
+ * leak; the value itself shows how many children have leaked so far.
+ * Pure read-only snapshot — no state change, no I/O, no allocation.
+ */
+uint8_t afatfs_countOpenHandles(void)
+{
+    uint8_t count = 0u;
+    for (int i = 0; i < AFATFS_MAX_OPEN_FILES; i++) {
+        if (afatfs.openFiles[i].type != AFATFS_FILE_TYPE_NONE)
+            count++;
+    }
+    return count;
 }
 
 /**
@@ -2951,29 +3298,28 @@ static afatfsOperationStatus_e afatfs_ftruncateContinue(afatfsFilePtr_t file, bo
         break;
 #endif
         case AFATFS_TRUNCATE_FILE_ERASE_FAT_CHAIN_NORMAL:
-            while (!afatfs_FATIsEndOfChainMarker(opState->currentCluster)) {
+            if (afatfs_FATIsEndOfChainMarker(opState->currentCluster)) {
+                opState->phase = AFATFS_TRUNCATE_FILE_SUCCESS;
+                goto doMore;
+            }
+            {
                 uint32_t nextCluster;
 
-                status = afatfs_FATGetNextCluster(0, opState->currentCluster, &nextCluster);
-
-                if (status != AFATFS_OPERATION_SUCCESS) {
+                /* One FAT entry per continuation keeps regular removal bounded
+                 * just like native tree deletion; cache hits still yield. */
+                status = afatfs_FATGetNextCluster(0, opState->currentCluster,
+                                                  &nextCluster);
+                if (status != AFATFS_OPERATION_SUCCESS)
                     return status;
-                }
-
                 status = afatfs_FATSetNextCluster(opState->currentCluster, 0);
-
-                if (status != AFATFS_OPERATION_SUCCESS) {
+                if (status != AFATFS_OPERATION_SUCCESS)
                     return status;
-                }
-
+                afatfs.lastClusterAllocated = MIN(
+                    afatfs.lastClusterAllocated,
+                    opState->currentCluster - 1u);
                 opState->currentCluster = nextCluster;
-
-                // Searches for unallocated regular clusters should be told about this free cluster now
-                afatfs.lastClusterAllocated = MIN(afatfs.lastClusterAllocated, opState->currentCluster - 1);
             }
-
-            opState->phase = AFATFS_TRUNCATE_FILE_SUCCESS;
-            goto doMore;
+            return AFATFS_OPERATION_IN_PROGRESS;
         break;
         case AFATFS_TRUNCATE_FILE_SUCCESS:
             if (file->operation.operation == AFATFS_FILE_OPERATION_TRUNCATE) {
@@ -3209,8 +3555,22 @@ static bool afatfs_generateShortAlias(afatfsCreateFile_t *opState)
     memset(ext, 0, sizeof(ext));
     memset(alias, 0, sizeof(alias));
 
+    /*
+     * A leading dot denotes a hidden display component, not an empty basename
+     * plus extension. Treat only later dots as the 8.3 extension separator.
+     *
+     * Why: `.hcprms1` and `.hcprms2` previously both collapsed to the initial
+     * alias FILE.HCP, forcing the second boot-created autosave record through
+     * an avoidable collision/restart path. Ignoring the leading dot here gives
+     * them the independent HCPRMS1 and HCPRMS2 aliases while their VFAT names
+     * remain exactly `.hcprms1` and `.hcprms2`.
+     *
+     * Inputs: the sanitized LFN component in `name`. Output: `dot` points only
+     * at a true extension separator after the first character. Affiliates:
+     * afatfs_fopen_lfn(), afatfs_mkdir_lfn(), and the autosave boot creator.
+     */
     for (const char *p = name; *p != '\0'; p++) {
-        if (*p == '.')
+        if (*p == '.' && p != name)
             dot = p;
     }
 
@@ -3365,58 +3725,269 @@ static void afatfs_lfnScanAppend(afatfsCreateFile_t *opState,
     }
 }
 
-static void afatfs_noteFreeDirectoryEntry(afatfsCreateFile_t *opState,
-                                          const afatfsFinder_t *finder)
+/*
+ * Reset one create/rename directory-run reservation without touching the
+ * request's names, alias, callback, LFN count, or requested entry count.
+ *
+ * What: Clears the current deleted-run observation, selected origin, and both
+ * sector-local pointers. Why: alias retries and new asynchronous placement
+ * decisions must not inherit a candidate or old marker from an earlier scan.
+ * Inputs: the embedded create-state reservation. Outputs/effects: invalid,
+ * unselected run state only; no directory byte or cache descriptor changes.
+ * Affiliates: create initial/retry paths, rename collision restarts, target
+ * preparation, and terminal cleanup.
+ */
+static void afatfs_resetDirectoryRunReservation(
+        afatfsCreateFile_t *opState)
 {
-    uint8_t needed = (uint8_t)(opState->lfnEntryCount + 1u);
+    opState->deletedRunLength = 0u;
+    opState->reservationOrigin = AFATFS_DIRECTORY_RUN_ORIGIN_NONE;
+    opState->scanRunStart.sectorNumberPhysical = 0u;
+    opState->scanRunStart.entryIndex = -1;
+    opState->selectedRunStart.sectorNumberPhysical = 0u;
+    opState->selectedRunStart.entryIndex = -1;
+}
 
-    /*
-     * Track a contiguous free run in one directory sector.
-     *
-     * VFAT LFN entries must immediately precede their owning SFN entry. By
-     * constraining the first implementation to a sector-local run, the writer
-     * can later cache one sector and write the whole chain atomically relative
-     * to asyncfatfs cache ownership, without assuming directory clusters are
-     * physically contiguous.
-     */
-    if (finder->entryIndex < 0)
+/*
+ * Observe deleted runs without ending collision scanning.
+ *
+ * What: Tracks sector-local 0xE5 runs and latches the first run large enough
+ * for the requested SFN or LFN/SFN entry count. A live entry breaks the
+ * current run without discarding an already-latched candidate.
+ * Why: A deleted hole is reusable but does not prove absence; a matching live
+ * display name or alias may still occur before the first 0x00 marker. Inputs
+ * are the reservation state, raw finder position, requested count, and the
+ * caller's deleted-versus-live classification. Outputs/effects update only
+ * reservation bytes/pointers; no directory or cache state is modified.
+ * Affiliates: create/rename collision scans, fat_isDirectoryEntryEmpty(),
+ * alias-restart reset, and the short/LFN writers.
+ */
+static void afatfs_noteDeletedDirectoryEntry(
+        afatfsCreateFile_t *opState,
+        const afatfsFinder_t *finder,
+        bool isDeleted)
+{
+    if (!isDeleted || !finder || finder->entryIndex < 0) {
+        opState->deletedRunLength = 0u;
         return;
-    if (opState->freeRunLength == 0u ||
-        finder->sectorNumberPhysical != opState->freeRunStart.sectorNumberPhysical ||
-        finder->entryIndex == 0) {
-        opState->freeRunStart = *finder;
-        opState->freeRunLength = 1u;
-    } else {
-        opState->freeRunLength++;
     }
-    if (opState->freeRunLength > AFATFS_FILES_PER_DIRECTORY_SECTOR)
-        opState->freeRunLength = AFATFS_FILES_PER_DIRECTORY_SECTOR;
-    (void)needed;
+
+    if (opState->deletedRunLength == 0u ||
+        finder->sectorNumberPhysical !=
+            opState->scanRunStart.sectorNumberPhysical ||
+        finder->entryIndex !=
+            opState->scanRunStart.entryIndex +
+                (int16_t)opState->deletedRunLength) {
+        opState->scanRunStart = *finder;
+        opState->deletedRunLength = 1u;
+    } else if (opState->deletedRunLength < AFATFS_FILES_PER_DIRECTORY_SECTOR) {
+        opState->deletedRunLength++;
+    }
+
+    if (opState->reservationOrigin == AFATFS_DIRECTORY_RUN_ORIGIN_NONE &&
+        opState->deletedRunLength >= opState->requestedEntryCount) {
+        opState->selectedRunStart = opState->scanRunStart;
+        opState->reservationOrigin = AFATFS_DIRECTORY_RUN_ORIGIN_DELETED;
+    }
 }
 
-static bool afatfs_freeRunIsReady(const afatfsCreateFile_t *opState)
+/*
+ * Finish collision scanning and select a run at the first FAT terminator.
+ *
+ * What: Treats 0x00 as the end of the live namespace. It chooses an earlier
+ * proven deleted run when one exists, otherwise reserves the terminator if
+ * the object run plus one replacement zero entry fits, or records that the
+ * complete run must move to the next logical sector.
+ * Why: No valid collision exists after 0x00, and retiring that marker while
+ * searching destroys the only persistent boundary hiding later stale bytes.
+ * Inputs: reservation state, terminator finder pointer, requested count, and
+ * AFATFS_FILES_PER_DIRECTORY_SECTOR. Outputs/effects select a run/origin or
+ * save the old marker pointer for a moved run. No cache sector is dirtied.
+ * Affiliates: create/open scan, rename collision scan, next-sector
+ * preparation, replacement-marker writers, and old-tail retirement.
+ */
+static bool afatfs_selectDirectoryRunAtTerminator(
+        afatfsCreateFile_t *opState,
+        const afatfsFinder_t *terminator)
 {
-    /*
-     * Report whether the current scan has found enough adjacent slots for the
-     * requested LFN fragment count plus the final SFN entry.
+    if (opState->reservationOrigin == AFATFS_DIRECTORY_RUN_ORIGIN_DELETED &&
+        opState->selectedRunStart.entryIndex >= 0) {
+        return true;
+    }
+
+    if (!terminator || terminator->entryIndex < 0 ||
+        (uint16_t)terminator->entryIndex >=
+            AFATFS_FILES_PER_DIRECTORY_SECTOR ||
+        opState->requestedEntryCount == 0u) {
+        return false;
+    }
+
+    if ((uint16_t)terminator->entryIndex +
+            (uint16_t)opState->requestedEntryCount <
+        AFATFS_FILES_PER_DIRECTORY_SECTOR) {
+        opState->selectedRunStart = *terminator;
+        opState->reservationOrigin =
+            AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_LOCAL;
+        return true;
+    }
+
+    /* The current scan run is dead after this decision; reuse its pointer for
+     * the marker sector while selectedRunStart becomes the next-sector target.
      */
-    return opState->freeRunLength >= (uint8_t)(opState->lfnEntryCount + 1u);
+    opState->scanRunStart = *terminator;
+    opState->selectedRunStart.sectorNumberPhysical = 0u;
+    opState->selectedRunStart.entryIndex = -1;
+    opState->reservationOrigin =
+        AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED;
+    return false;
 }
 
-static void afatfs_retireDirectoryTerminator(fatDirectoryEntry_t *entry)
+/*
+ * Prepare a later logical directory sector before moving the end marker.
+ *
+ * What: Uses currentDirectory's logical cursor and FAT chain, extends the
+ * directory if the cursor has reached allocated EOF, obtains the target sector
+ * with WRITE ownership, clears all 512 bytes, and selects entry zero for the
+ * pending SFN or LFN/SFN run.
+ *
+ * Why: Under Gate B, sectors after 0x00 may intentionally contain stale media
+ * bytes. The complete target must therefore be initialized immediately before
+ * the marker can move. Physical adjacency is not a valid substitute for FAT
+ * traversal, and an appended cluster's initialized first sector is cleared
+ * again here deliberately so this helper has one unconditional publication
+ * contract.
+ *
+ * Inputs: afatfs.currentDirectory at the next logical sector and a
+ * TERMINATOR_MOVED or end-of-allocated-directory reservation.
+ *
+ * Outputs/effects: a dirty fully zeroed target sector, selectedRunStart at
+ * entry zero, or the existing asynchronous/FAT failure status. No old marker
+ * byte is changed here.
+ *
+ * Accessors: afatfs_fileIsBusy(), afatfs_isEndOfAllocatedFile(),
+ * afatfs_extendSubdirectory(), afatfs_fileGetCursorPhysicalSector(), and
+ * afatfs_cacheSector(..., AFATFS_CACHE_WRITE, ...).
+ *
+ * Affiliates: create and rename target phases, target-media persistence,
+ * old-terminator-tail retirement, the lazy first-sector initializer, and the
+ * FAT16 fixed-root no-extension rule.
+ */
+static afatfsOperationStatus_e afatfs_prepareDirectoryRunTarget(
+        afatfsCreateFile_t *opState)
 {
-    /*
-     * Convert a FAT directory terminator into an ordinary deleted/free entry.
-     *
-     * LFN creation may need a sector-local run of two or more entries. If the
-     * first terminator is too close to the end of a sector, the writer has to
-     * place the new LFN/SFN run later. A 0x00 terminator left before that run
-     * would make normal directory enumeration stop before the new object, so
-     * retire the skipped terminator before scanning onward.
-     */
-    entry->filename[0] = FAT_DELETED_FILE_MARKER;
-    afatfs_cacheSectorMarkDirty(
-        afatfs_getCacheDescriptorForBuffer((uint8_t *)entry));
+    uint8_t *sector;
+    afatfsOperationStatus_e status;
+    uint32_t physicalSector;
+
+    if (afatfs_fileIsBusy(&afatfs.currentDirectory))
+        return AFATFS_OPERATION_IN_PROGRESS;
+
+    if (afatfs_isEndOfAllocatedFile(&afatfs.currentDirectory)) {
+        status = afatfs_extendSubdirectory(&afatfs.currentDirectory,
+                                           NULL,
+                                           NULL);
+        if (status != AFATFS_OPERATION_SUCCESS)
+            return status;
+    }
+
+    physicalSector = afatfs_fileGetCursorPhysicalSector(
+        &afatfs.currentDirectory);
+    if (physicalSector == 0u)
+        return AFATFS_OPERATION_FAILURE;
+    status = afatfs_cacheSector(physicalSector,
+                                &sector,
+                                AFATFS_CACHE_WRITE,
+                                0);
+    if (status != AFATFS_OPERATION_SUCCESS)
+        return status;
+
+    memset(sector, 0, AFATFS_SECTOR_SIZE);
+    opState->selectedRunStart.sectorNumberPhysical = physicalSector;
+    opState->selectedRunStart.entryIndex = 0;
+    return AFATFS_OPERATION_SUCCESS;
+}
+
+/*
+ * Prove a moved-run target has reached media before exposing it.
+ *
+ * What: Checks the existing cache descriptor for the selected target sector.
+ * IN_SYNC, or absence after preparation/write, means the target has completed
+ * its SD write. DIRTY or WRITING means the caller must keep yielding.
+ * Why: The old marker sector can already have an older dirty timestamp, so
+ * dirty-order alone does not prove target-before-tail persistence. Inputs are
+ * the selected target physical sector and cache descriptors. Outputs/effects
+ * are a read-only ready/not-ready/failure decision with no polling, I/O,
+ * allocation, timestamp, or ownership change. Affiliates: afatfs_poll(),
+ * afatfs_flush(), afatfs_findCacheSector(), moved create/rename phases, and
+ * old-tail retirement.
+ */
+static afatfsOperationStatus_e afatfs_directoryRunTargetPersistence(
+        const afatfsCreateFile_t *opState)
+{
+    afatfsCacheBlockDescriptor_t *descriptor =
+        afatfs_findCacheSector(opState->selectedRunStart.sectorNumberPhysical);
+
+    if (!descriptor)
+        return AFATFS_OPERATION_SUCCESS;
+
+    switch (descriptor->state) {
+        case AFATFS_CACHE_STATE_IN_SYNC:
+            return AFATFS_OPERATION_SUCCESS;
+        case AFATFS_CACHE_STATE_DIRTY:
+        case AFATFS_CACHE_STATE_WRITING:
+            return AFATFS_OPERATION_IN_PROGRESS;
+        case AFATFS_CACHE_STATE_EMPTY:
+        case AFATFS_CACHE_STATE_READING:
+        default:
+            afatfs_assert(false);
+            return AFATFS_OPERATION_FAILURE;
+    }
+}
+
+/*
+ * Retire the old terminator tail only after the new boundary is durable.
+ *
+ * What: Marks every entry from the saved old 0x00 position through entry 15
+ * as deleted after a prepared next-sector run and replacement marker have
+ * reached media. Why: Changing only the marker could expose stale directory
+ * bytes in the skipped tail, while changing the tail first could expose a
+ * partial target after reboot. Inputs are the saved old marker pointer and the
+ * completed target barrier. Outputs/effects are one dirty read/modify/write
+ * cache sector; live entries before the marker are untouched. Affiliates:
+ * target preparation/persistence, create completion, rename's write-new-before
+ * retire-old ordering, and final afatfs_sync().
+ */
+static afatfsOperationStatus_e afatfs_retireDirectoryTerminatorTail(
+        const afatfsCreateFile_t *opState)
+{
+    uint8_t *sector;
+    afatfsOperationStatus_e status;
+    fatDirectoryEntry_t *entries;
+
+    if (opState->reservationOrigin !=
+        AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED)
+        return AFATFS_OPERATION_SUCCESS;
+    if (opState->scanRunStart.sectorNumberPhysical == 0u ||
+        opState->scanRunStart.entryIndex < 0 ||
+        (uint16_t)opState->scanRunStart.entryIndex >=
+            AFATFS_FILES_PER_DIRECTORY_SECTOR)
+        return AFATFS_OPERATION_FAILURE;
+
+    status = afatfs_cacheSector(opState->scanRunStart.sectorNumberPhysical,
+                                &sector,
+                                AFATFS_CACHE_READ | AFATFS_CACHE_WRITE,
+                                0);
+    if (status != AFATFS_OPERATION_SUCCESS)
+        return status;
+
+    entries = (fatDirectoryEntry_t *)sector;
+    for (uint8_t i = (uint8_t)opState->scanRunStart.entryIndex;
+         i < AFATFS_FILES_PER_DIRECTORY_SECTOR;
+         i++) {
+        entries[i].filename[0] = FAT_DELETED_FILE_MARKER;
+    }
+    afatfs_cacheSectorMarkDirty(afatfs_getCacheDescriptorForBuffer(sector));
+    return AFATFS_OPERATION_SUCCESS;
 }
 
 static void afatfs_writeLfnChar(uint8_t *raw, uint8_t offset, uint16_t value)
@@ -3480,22 +4051,56 @@ static afatfsOperationStatus_e afatfs_createLongDirectoryEntries(
     uint8_t checksum = afatfs_lfnChecksum(opState->filename);
     fatDirectoryEntry_t *entries;
     uint8_t sfnIndex;
+    uint8_t cacheFlags;
 
     /*
-     * Write the reserved LFN run and final SFN entry into one cached sector.
+     * Write a complete VFAT LFN/SFN run under the selected-marker contract.
      *
-     * The SFN entry is written last because it is the authoritative entry that
-     * ordinary FAT readers open. If power is lost before that point, the card
-     * may contain orphan LFN fragments but not a complete file/directory entry.
+     * What: Emits the existing highest-to-lowest LFN fragments followed by
+     * their SFN in one sector. When the reservation consumed a terminator it
+     * also writes one complete zero entry after the SFN; when it reused deleted
+     * entries it leaves the following entry untouched.
+     * Why: The replacement marker keeps stale later bytes outside the live
+     * namespace, but clearing after a deleted run could erase the first entry
+     * of a valid object that follows the hole. Inputs are the selected
+     * run/origin, requested and LFN entry counts, sanitized long name,
+     * generated FAT filename/checksum, case bits, attributes, and timestamps.
+     * Outputs/effects: one valid dirty sector-local VFAT run, optional
+     * replacement marker, and file->directoryEntryPos at its SFN. Affiliates:
+     * LFN fragment writer/checksum, create state machine, mkdir initializer,
+     * object iterator, remove/delete identity, rename writer, and moved-target
+     * persistence.
      */
-    status = afatfs_cacheSector(opState->freeRunStart.sectorNumberPhysical,
+    if (opState->selectedRunStart.sectorNumberPhysical == 0u ||
+        opState->requestedEntryCount !=
+            (uint8_t)(opState->lfnEntryCount + 1u) ||
+        opState->selectedRunStart.entryIndex < 0 ||
+        (uint16_t)opState->selectedRunStart.entryIndex +
+                (uint16_t)opState->requestedEntryCount >
+            AFATFS_FILES_PER_DIRECTORY_SECTOR ||
+        ((opState->reservationOrigin ==
+              AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_LOCAL ||
+          opState->reservationOrigin ==
+              AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED) &&
+         (uint16_t)opState->selectedRunStart.entryIndex +
+                 (uint16_t)opState->requestedEntryCount >=
+             AFATFS_FILES_PER_DIRECTORY_SECTOR)) {
+        return AFATFS_OPERATION_FAILURE;
+    }
+
+    cacheFlags = opState->reservationOrigin ==
+        AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED
+        ? AFATFS_CACHE_WRITE
+        : AFATFS_CACHE_READ | AFATFS_CACHE_WRITE;
+    status = afatfs_cacheSector(opState->selectedRunStart.sectorNumberPhysical,
                                 &sector,
-                                AFATFS_CACHE_READ | AFATFS_CACHE_WRITE,
+                                cacheFlags,
                                 0);
     if (status != AFATFS_OPERATION_SUCCESS)
         return status;
 
-    entries = (fatDirectoryEntry_t *)sector + opState->freeRunStart.entryIndex;
+    entries = (fatDirectoryEntry_t *)sector +
+              opState->selectedRunStart.entryIndex;
     for (uint8_t i = 0u; i < opState->lfnEntryCount; i++)
         afatfs_writeLfnDirectoryEntry(&entries[i], opState, i, checksum);
 
@@ -3514,10 +4119,91 @@ static afatfsOperationStatus_e afatfs_createLongDirectoryEntries(
     entries[sfnIndex].lastWriteDate = AFATFS_DEFAULT_FILE_DATE;
     entries[sfnIndex].lastWriteTime = AFATFS_DEFAULT_FILE_TIME;
 
+    if (opState->reservationOrigin ==
+            AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_LOCAL ||
+        opState->reservationOrigin ==
+            AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED) {
+        memset(&entries[sfnIndex + 1u], 0, sizeof(entries[sfnIndex + 1u]));
+    }
+
     afatfs_cacheSectorMarkDirty(afatfs_getCacheDescriptorForBuffer(sector));
-    file->directoryEntryPos = opState->freeRunStart;
+    file->directoryEntryPos = opState->selectedRunStart;
     file->directoryEntryPos.entryIndex =
         (int16_t)(file->directoryEntryPos.entryIndex + opState->lfnEntryCount);
+    return AFATFS_OPERATION_SUCCESS;
+}
+
+/*
+ * Write one SFN into a previously selected directory-entry run.
+ *
+ * What: Initializes the selected short entry with the existing FAT name,
+ * attributes, case bits, and timestamps. A terminator-owned selection also
+ * clears the complete following directory entry; a deleted selection touches
+ * no byte after its SFN.
+ * Why: Short writers such as settings.tmp cannot rely on zero-filled bytes
+ * after the chosen slot, and a second allocator scan would lose whether the
+ * selected entry consumed the live namespace marker. Inputs are reservation
+ * origin/start, requested attributes/type, raw FAT filename, case bits, and
+ * create callback state. Outputs/effects are a dirty selected sector,
+ * file->directoryEntryPos at the SFN, an optional replacement 0x00 entry, and
+ * unchanged regular-file or mkdir completion flow. Affiliates:
+ * afatfs_fopen(), afatfs_mkdir(), settings safe-write,
+ * afatfs_handoffCreatedDirectoryToInitializer(), moved-target barrier, and
+ * close/truncate metadata publication.
+ */
+static afatfsOperationStatus_e afatfs_createShortDirectoryEntry(
+        afatfsFile_t *file)
+{
+    afatfsCreateFile_t *opState = &file->operation.state.createFile;
+    afatfsOperationStatus_e status;
+    uint8_t *sector;
+    fatDirectoryEntry_t *entry;
+    uint8_t cacheFlags;
+
+    if (opState->selectedRunStart.sectorNumberPhysical == 0u ||
+        opState->requestedEntryCount != 1u ||
+        opState->selectedRunStart.entryIndex < 0 ||
+        (uint16_t)opState->selectedRunStart.entryIndex >=
+            AFATFS_FILES_PER_DIRECTORY_SECTOR ||
+        ((opState->reservationOrigin ==
+              AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_LOCAL ||
+          opState->reservationOrigin ==
+              AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED) &&
+         (uint16_t)opState->selectedRunStart.entryIndex + 1u >=
+             AFATFS_FILES_PER_DIRECTORY_SECTOR)) {
+        return AFATFS_OPERATION_FAILURE;
+    }
+
+    cacheFlags = opState->reservationOrigin ==
+        AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED
+        ? AFATFS_CACHE_WRITE
+        : AFATFS_CACHE_READ | AFATFS_CACHE_WRITE;
+    status = afatfs_cacheSector(opState->selectedRunStart.sectorNumberPhysical,
+                                &sector,
+                                cacheFlags,
+                                0);
+    if (status != AFATFS_OPERATION_SUCCESS)
+        return status;
+
+    entry = (fatDirectoryEntry_t *)sector + opState->selectedRunStart.entryIndex;
+    memset(entry, 0, sizeof(*entry));
+    memcpy(entry->filename, opState->filename, FAT_FILENAME_LENGTH);
+    entry->attrib = file->attrib;
+    entry->ntReserved = opState->shortNameCaseFlags;
+    entry->creationDate = AFATFS_DEFAULT_FILE_DATE;
+    entry->creationTime = AFATFS_DEFAULT_FILE_TIME;
+    entry->lastWriteDate = AFATFS_DEFAULT_FILE_DATE;
+    entry->lastWriteTime = AFATFS_DEFAULT_FILE_TIME;
+
+    if (opState->reservationOrigin ==
+            AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_LOCAL ||
+        opState->reservationOrigin ==
+            AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED) {
+        memset(entry + 1, 0, sizeof(*entry));
+    }
+
+    afatfs_cacheSectorMarkDirty(afatfs_getCacheDescriptorForBuffer(sector));
+    file->directoryEntryPos = opState->selectedRunStart;
     return AFATFS_OPERATION_SUCCESS;
 }
 
@@ -3526,22 +4212,36 @@ static void afatfs_handoffCreatedDirectoryToInitializer(
     afatfsFileCallback_t callback)
 {
     /*
-     * Newly-created directories cannot complete through the ordinary
-     * empty-file success path.
+     * Transfer a newly named directory from create state to initialization
+     * state.
      *
-     * CREATE_FILE is still active when the parent directory entry has just
-     * been written, so afatfs_extendSubdirectory() would reject the handle as
-     * busy and its operation union would overwrite createFile state. The
-     * handoff is deliberate: preserve the original callback, clear
-     * CREATE_FILE, then let EXTEND_SUBDIRECTORY own the handle until it has
-     * allocated the first cluster and initialized "." / "..".
+     * What: Preserves the original mkdir callback, clears the CREATE_FILE
+     * union owner, and starts EXTEND_SUBDIRECTORY so the child's first cluster
+     * and first sector are ready before completion.
      *
-     * Inputs: file is the newly-created directory entry; callback is the
-     * original afatfs_mkdir()/afatfs_mkdir_lfn() completion. Output: callback
-     * is invoked by EXTEND_SUBDIRECTORY with file or NULL. Affiliates:
-     * afatfs_createFileContinue(), afatfs_extendSubdirectory(),
-     * afatfs_appendRegularFreeClusterContinue(), afatfs_saveDirectoryEntry().
+     * Why: A directory entry initially has firstCluster == 0 and cannot be
+     * entered. The operation union also cannot hold create and extension state
+     * at once. Gate B still requires the visible first sector, dot entries, and
+     * terminator before callback; only the unused remainder of the cluster is
+     * deferred.
+     *
+     * Inputs: the newly created directory handle and the original
+     * afatfs_mkdir()/afatfs_mkdir_lfn() callback.
+     *
+     * Outputs/effects: create reservation/LFN scan state is cleared; extension
+     * owns the handle; the callback is later invoked with a usable directory or
+     * NULL.
+     *
+     * Accessors: afatfs_resetDirectoryRunReservation(), afatfs_lfnScanReset(),
+     * and afatfs_extendSubdirectory().
+     *
+     * Affiliates: short/LFN create success phases,
+     * afatfs_appendRegularFreeClusterContinue(), afatfs_saveDirectoryEntry(),
+     * afatfs_chdir(), and the public mkdir contract.
      */
+    afatfs_resetDirectoryRunReservation(&file->operation.state.createFile);
+    afatfs_lfnScanReset(&file->operation.state.createFile);
+    file->operation.state.createFile.requestedEntryCount = 0u;
     file->operation.operation = AFATFS_FILE_OPERATION_NONE;
     (void)afatfs_extendSubdirectory(file, &afatfs.currentDirectory, callback);
 }
@@ -3551,13 +4251,14 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
     afatfsCreateFile_t *opState = &file->operation.state.createFile;
     fatDirectoryEntry_t *entry;
     afatfsOperationStatus_e status;
+    afatfsFileCallback_t callback;
 
     doMore:
 
     switch (opState->phase) {
         case AFATFS_CREATEFILE_PHASE_INITIAL:
             afatfs_findFirst(&afatfs.currentDirectory, &file->directoryEntryPos);
-            opState->freeRunLength = 0u;
+            afatfs_resetDirectoryRunReservation(opState);
             afatfs_lfnScanReset(opState);
             opState->phase = AFATFS_CREATEFILE_PHASE_FIND_FILE;
             goto doMore;
@@ -3569,95 +4270,93 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                 switch (status) {
                     case AFATFS_OPERATION_SUCCESS:
                         /*
-                         * Directory exhaustion and terminators are where the
-                         * create path diverges. Short-name creation can use
-                         * the old one-entry allocator. LFN creation must keep
-                         * looking until it has a sector-local run large enough
-                         * for every LFN fragment plus the final SFN entry.
+                         * Terminator-aware create/open collision scan.
+                         *
+                         * What: Scans live SFN/LFN objects and deleted holes
+                         * only until the first 0x00. Deleted runs are latched
+                         * as candidates while matching continues. At the
+                         * marker, open-only reports absence and create mode
+                         * receives a deleted-, local-terminator-, or
+                         * moved-terminator run.
+                         * Why: FAT guarantees that no live object follows
+                         * 0x00. Continuing to physical exhaustion wastes I/O
+                         * and destroys the persistent boundary, while
+                         * creating immediately in a deleted hole can duplicate
+                         * a matching object later in the live prefix. Inputs
+                         * are file mode, requested type, display/match mode,
+                         * SFN alias, LFN scanner state, and shared reservation.
+                         * Outputs/effects are an existing open, collision or
+                         * absence, alias restart, safe selected run, or
+                         * target preparation request. Affiliates: alias
+                         * generation, LFN scan helpers, raw finder ownership,
+                         * create phases, and both directory-entry writers.
                          */
                         if (entry == NULL) {
                             afatfs_findLast(&afatfs.currentDirectory);
 
-                            if ((file->mode & AFATFS_FILE_MODE_CREATE) != 0) {
-                                if (opState->longNameEnabled) {
-                                    if (afatfs_freeRunIsReady(opState)) {
-                                        opState->phase =
-                                            AFATFS_CREATEFILE_PHASE_CREATE_NEW_LFN_FILE;
-                                        goto doMore;
-                                    }
-                                    status = afatfs_extendSubdirectory(
-                                        &afatfs.currentDirectory, NULL, NULL);
-                                    if (status == AFATFS_OPERATION_SUCCESS) {
-                                        /*
-                                         * extendSubdirectory() leaves the
-                                         * current directory cursor at the
-                                         * start of the newly-added cluster.
-                                         * The raw finder still carries the
-                                         * index from the exhausted sector, so
-                                         * reset just the entry index here to
-                                         * scan the fresh cluster from entry 0
-                                         * instead of skipping its first sector.
-                                         */
-                                        file->directoryEntryPos.entryIndex = -1;
-                                        opState->freeRunLength = 0u;
-                                        opState->phase = AFATFS_CREATEFILE_PHASE_FIND_FILE;
-                                        break;
-                                    }
-                                    if (status == AFATFS_OPERATION_IN_PROGRESS)
-                                        break;
-                                    opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
-                                    goto doMore;
-                                }
-                                // The file didn't already exist, so we can create it. Allocate a new directory entry
-                                afatfs_findFirst(&afatfs.currentDirectory, &file->directoryEntryPos);
-
-                                opState->phase = AFATFS_CREATEFILE_PHASE_CREATE_NEW_FILE;
-                                goto doMore;
-                            } else {
-                                // File not found.
-
+                            if ((file->mode & AFATFS_FILE_MODE_CREATE) == 0u) {
                                 opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
                                 goto doMore;
                             }
-                        } else if (!opState->longNameEnabled &&
-                                   fat_isDirectoryEntryTerminator(entry)) {
+
+                            if (opState->reservationOrigin ==
+                                AFATFS_DIRECTORY_RUN_ORIGIN_DELETED) {
+                                opState->phase = opState->lfnEntryCount
+                                    ? AFATFS_CREATEFILE_PHASE_CREATE_NEW_LFN_FILE
+                                    : AFATFS_CREATEFILE_PHASE_CREATE_NEW_FILE;
+                                goto doMore;
+                            }
+
+                            /*
+                             * A legacy directory with no 0x00 either uses a
+                             * previously proven deleted run or advances to
+                             * logical allocated EOF. An extendable directory
+                             * then appends a cluster whose initialized first
+                             * sector exposes entry zero as a local
+                             * terminator-owned run; a full FAT16 fixed root
+                             * fails normally.
+                             */
+                            opState->reservationOrigin =
+                                AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_LOCAL;
+                            opState->phase =
+                                AFATFS_CREATEFILE_PHASE_PREPARE_TARGET_SECTOR;
+                            goto doMore;
+                        } else if (fat_isDirectoryEntryTerminator(entry)) {
+                            afatfs_noteDeletedDirectoryEntry(
+                                opState, &file->directoryEntryPos, false);
                             afatfs_findLast(&afatfs.currentDirectory);
 
-                            if ((file->mode & AFATFS_FILE_MODE_CREATE) != 0) {
-                                afatfs_findFirst(&afatfs.currentDirectory,
-                                                 &file->directoryEntryPos);
-                                opState->phase =
-                                    AFATFS_CREATEFILE_PHASE_CREATE_NEW_FILE;
+                            if ((file->mode & AFATFS_FILE_MODE_CREATE) == 0u) {
+                                opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
                                 goto doMore;
                             }
-                            opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
+                            if (afatfs_selectDirectoryRunAtTerminator(
+                                    opState, &file->directoryEntryPos)) {
+                                opState->phase = opState->lfnEntryCount
+                                    ? AFATFS_CREATEFILE_PHASE_CREATE_NEW_LFN_FILE
+                                    : AFATFS_CREATEFILE_PHASE_CREATE_NEW_FILE;
+                            } else if (opState->reservationOrigin ==
+                                       AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED) {
+                                opState->phase =
+                                    AFATFS_CREATEFILE_PHASE_SEEK_NEXT_SECTOR;
+                            } else {
+                                opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
+                            }
                             goto doMore;
-                        } else if (opState->longNameEnabled &&
-                                   (fat_isDirectoryEntryEmpty(entry) ||
-                                    fat_isDirectoryEntryTerminator(entry))) {
-                            uint8_t wasTerminator =
-                                fat_isDirectoryEntryTerminator(entry) ? 1u : 0u;
-                            afatfs_noteFreeDirectoryEntry(opState,
-                                                          &file->directoryEntryPos);
-                            if ((file->mode & AFATFS_FILE_MODE_CREATE) != 0 &&
-                                afatfs_freeRunIsReady(opState)) {
-                                afatfs_findLast(&afatfs.currentDirectory);
-                                opState->phase =
-                                    AFATFS_CREATEFILE_PHASE_CREATE_NEW_LFN_FILE;
-                                goto doMore;
-                            }
-                            if ((file->mode & AFATFS_FILE_MODE_CREATE) != 0 &&
-                                wasTerminator) {
-                                afatfs_retireDirectoryTerminator(entry);
-                            }
+                        } else if (fat_isDirectoryEntryEmpty(entry)) {
+                            afatfs_noteDeletedDirectoryEntry(
+                                opState, &file->directoryEntryPos, true);
                             afatfs_lfnScanReset(opState);
                         } else if (afatfs_isLfnDirectoryEntry(entry)) {
-                            opState->freeRunLength = 0u;
-                            if (opState->longNameEnabled)
+                            afatfs_noteDeletedDirectoryEntry(
+                                opState, &file->directoryEntryPos, false);
+                            if (opState->lfnEntryCount != 0u)
                                 afatfs_lfnScanAppend(opState, entry);
                             else
                                 afatfs_lfnScanReset(opState);
-                        } else if (opState->longNameEnabled) {
+                        } else if (opState->lfnEntryCount != 0u) {
+                            afatfs_noteDeletedDirectoryEntry(
+                                opState, &file->directoryEntryPos, false);
                             uint8_t displayMatches = 0u;
                             char shortDisplay[AFATFS_SHORT_FILENAME_MAX];
 
@@ -3739,7 +4438,6 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                             if (strncmp(entry->filename,
                                         (char*) opState->filename,
                                         FAT_FILENAME_LENGTH) != 0) {
-                                opState->freeRunLength = 0u;
                                 afatfs_lfnScanReset(opState);
                                 break;
                             }
@@ -3748,23 +4446,15 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                              * allowed.
                              *
                              * Read-only LFN opens cannot resolve by inventing
-                             * a new "~N" alias; if the display component did
-                             * not match this entry under the caller's display
-                             * policy, the colliding SFN proves that the
-                             * requested object is absent for this open.
-                             * Create/write modes still generate the next
-                             * "~N" candidate and restart the scan so duplicate
-                             * display names or same-folded SFN names do not
-                             * reuse the wrong physical entry. Product overwrite
-                             * removes same-casefold physical duplicates before
-                             * it reaches this create path, so a new object
-                             * created here is the single surviving visible
-                             * variant.
+                             * a new "~N" alias, but a colliding SFN is not
+                             * proof that the requested display component is
+                             * absent: a later live LFN object may still match.
+                             * Create/write modes generate the next candidate
+                             * and restart the complete scan.
                              */
                             if ((file->mode & AFATFS_FILE_MODE_CREATE) == 0u) {
-                                afatfs_findLast(&afatfs.currentDirectory);
-                                opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
-                                goto doMore;
+                                afatfs_lfnScanReset(opState);
+                                break;
                             }
                             opState->aliasOrdinal++;
                             if (!afatfs_generateShortAlias(opState)) {
@@ -3774,10 +4464,12 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                             }
                             afatfs_findFirst(&afatfs.currentDirectory,
                                              &file->directoryEntryPos);
-                            opState->freeRunLength = 0u;
+                            afatfs_resetDirectoryRunReservation(opState);
                             afatfs_lfnScanReset(opState);
                             break;
                         } else if (strncmp(entry->filename, (char*) opState->filename, FAT_FILENAME_LENGTH) == 0) {
+                            afatfs_noteDeletedDirectoryEntry(
+                                opState, &file->directoryEntryPos, false);
                             /*
                              * Existing short-name files opened for write should
                              * also pick up the caller's display-case metadata.
@@ -3802,7 +4494,8 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                             opState->phase = AFATFS_CREATEFILE_PHASE_SUCCESS;
                             goto doMore;
                         } else {
-                            opState->freeRunLength = 0u;
+                            afatfs_noteDeletedDirectoryEntry(
+                                opState, &file->directoryEntryPos, false);
                             afatfs_lfnScanReset(opState);
                         } // Else this entry doesn't match, fall through and continue the search
                     break;
@@ -3816,26 +4509,32 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                 }
             } while (status == AFATFS_OPERATION_SUCCESS);
         break;
+        case AFATFS_CREATEFILE_PHASE_SEEK_NEXT_SECTOR:
+            if (afatfs_fileIsBusy(&afatfs.currentDirectory) ||
+                !afatfs_fseekAtomic(&afatfs.currentDirectory,
+                                    AFATFS_SECTOR_SIZE)) {
+                return;
+            }
+            opState->phase = AFATFS_CREATEFILE_PHASE_PREPARE_TARGET_SECTOR;
+            goto doMore;
+        break;
+        case AFATFS_CREATEFILE_PHASE_PREPARE_TARGET_SECTOR:
+            status = afatfs_prepareDirectoryRunTarget(opState);
+            if (status == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (status == AFATFS_OPERATION_FAILURE) {
+                opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
+                goto doMore;
+            }
+            opState->phase = opState->lfnEntryCount
+                ? AFATFS_CREATEFILE_PHASE_CREATE_NEW_LFN_FILE
+                : AFATFS_CREATEFILE_PHASE_CREATE_NEW_FILE;
+            goto doMore;
+        break;
         case AFATFS_CREATEFILE_PHASE_CREATE_NEW_FILE:
-            status = afatfs_allocateDirectoryEntry(&afatfs.currentDirectory, &entry, &file->directoryEntryPos);
+            status = afatfs_createShortDirectoryEntry(file);
 
             if (status == AFATFS_OPERATION_SUCCESS) {
-                memset(entry, 0, sizeof(*entry));
-
-                memcpy(entry->filename, opState->filename, FAT_FILENAME_LENGTH);
-                entry->attrib = file->attrib;
-                /*
-                 * Preserve the caller's 8.3 display case in ntReserved while
-                 * keeping filename[] as the uppercase FAT lookup key. This is
-                 * what makes newly-created lowercase system files show as
-                 * kitset.kcg instead of KITSET.KCG.
-                 */
-                entry->ntReserved = opState->shortNameCaseFlags;
-                entry->creationDate = AFATFS_DEFAULT_FILE_DATE;
-                entry->creationTime = AFATFS_DEFAULT_FILE_TIME;
-                entry->lastWriteDate = AFATFS_DEFAULT_FILE_DATE;
-                entry->lastWriteTime = AFATFS_DEFAULT_FILE_TIME;
-
 #ifdef AFATFS_DEBUG_VERBOSE
                 fprintf(stderr, "Adding directory entry for %.*s to sector %u\n", FAT_FILENAME_LENGTH, opState->filename, file->directoryEntryPos.sectorNumberPhysical);
 #endif
@@ -3849,8 +4548,14 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                  * file operation to EXTEND_SUBDIRECTORY overwrites the
                  * createFile union storage.
                  */
+                if (opState->reservationOrigin ==
+                    AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED) {
+                    opState->phase =
+                        AFATFS_CREATEFILE_PHASE_WAIT_TARGET_PERSISTENCE;
+                    goto doMore;
+                }
                 if (file->type == AFATFS_FILE_TYPE_DIRECTORY) {
-                    afatfsFileCallback_t callback = opState->callback;
+                    callback = opState->callback;
                     afatfs_handoffCreatedDirectoryToInitializer(file, callback);
                     return;
                 }
@@ -3876,8 +4581,14 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                  * until its first cluster is allocated and recorded in the SFN
                  * entry.
                  */
+                if (opState->reservationOrigin ==
+                    AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED) {
+                    opState->phase =
+                        AFATFS_CREATEFILE_PHASE_WAIT_TARGET_PERSISTENCE;
+                    goto doMore;
+                }
                 if (file->type == AFATFS_FILE_TYPE_DIRECTORY) {
-                    afatfsFileCallback_t callback = opState->callback;
+                    callback = opState->callback;
                     afatfs_handoffCreatedDirectoryToInitializer(file, callback);
                     return;
                 }
@@ -3887,6 +4598,34 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                 opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
                 goto doMore;
             }
+        break;
+        case AFATFS_CREATEFILE_PHASE_WAIT_TARGET_PERSISTENCE:
+            status = afatfs_directoryRunTargetPersistence(opState);
+            if (status == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (status == AFATFS_OPERATION_FAILURE) {
+                opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
+                goto doMore;
+            }
+            opState->phase =
+                AFATFS_CREATEFILE_PHASE_RETIRE_OLD_TERMINATOR_TAIL;
+            goto doMore;
+        break;
+        case AFATFS_CREATEFILE_PHASE_RETIRE_OLD_TERMINATOR_TAIL:
+            status = afatfs_retireDirectoryTerminatorTail(opState);
+            if (status == AFATFS_OPERATION_IN_PROGRESS)
+                return;
+            if (status == AFATFS_OPERATION_FAILURE) {
+                opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
+                goto doMore;
+            }
+            if (file->type == AFATFS_FILE_TYPE_DIRECTORY) {
+                callback = opState->callback;
+                afatfs_handoffCreatedDirectoryToInitializer(file, callback);
+                return;
+            }
+            opState->phase = AFATFS_CREATEFILE_PHASE_SUCCESS;
+            goto doMore;
         break;
         case AFATFS_CREATEFILE_PHASE_SUCCESS:
             if ((file->mode & AFATFS_FILE_MODE_RETAIN_DIRECTORY) != 0) {
@@ -3945,8 +4684,11 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                 }
             }
 
+            callback = opState->callback;
+            afatfs_resetDirectoryRunReservation(opState);
+            opState->requestedEntryCount = 0u;
             file->operation.operation = AFATFS_FILE_OPERATION_NONE;
-            opState->callback(file);
+            callback(file);
         break;
         case AFATFS_CREATEFILE_PHASE_FAILURE:
             /*
@@ -3957,10 +4699,13 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
              * here guarantees callers can retry and the open-file pool does not
              * retain a dead CREATE_FILE operation after callback(NULL).
              */
+            callback = opState->callback;
+            afatfs_resetDirectoryRunReservation(opState);
+            opState->requestedEntryCount = 0u;
             file->type = AFATFS_FILE_TYPE_NONE;
             file->operation.operation = AFATFS_FILE_OPERATION_NONE;
-            if (opState->callback)
-                opState->callback(NULL);
+            if (callback)
+                callback(NULL);
         break;
     }
 }
@@ -3973,54 +4718,6 @@ static void afatfs_initFileHandle(afatfsFilePtr_t file)
     memset(file, 0, sizeof(*file));
     file->writeLockedCacheIndex = -1;
     file->readRetainCacheIndex = -1;
-}
-
-static void afatfs_funlinkContinue(afatfsFilePtr_t file)
-{
-    afatfsUnlinkFile_t *opState = &file->operation.state.unlinkFile;
-    afatfsOperationStatus_e status;
-
-    status = afatfs_ftruncateContinue(file, true);
-
-    if (status == AFATFS_OPERATION_SUCCESS) {
-        // Once the truncation is completed, we can close the file handle
-        file->operation.operation = AFATFS_FILE_OPERATION_NONE;
-        afatfs_fclose(file, opState->callback);
-    }
-}
-
-/**
- * Delete and close the file.
- *
- * Returns true if the operation was successfully queued (callback will be called some time after this routine returns)
- * or false if the file is busy and you should try again later.
- */
-bool afatfs_funlink(afatfsFilePtr_t file, afatfsCallback_t callback)
-{
-    afatfsUnlinkFile_t *opState = &file->operation.state.unlinkFile;
-
-    if (!file || file->type == AFATFS_FILE_TYPE_NONE) {
-        return true;
-    }
-
-    /*
-     * Internally an unlink is implemented by first doing a ftruncate(), marking the directory entry as deleted,
-     * then doing a fclose() operation.
-     */
-
-    // Start the sub-operation of truncating the file
-    if (!afatfs_ftruncate(file, NULL))
-        return false;
-
-    /*
-     * The unlink operation has its own private callback field so that the truncate suboperation doesn't end up
-     * calling back early when it completes:
-     */
-    opState->callback = callback;
-
-    file->operation.operation = AFATFS_FILE_OPERATION_UNLINK;
-
-    return true;
 }
 
 /**
@@ -4081,9 +4778,15 @@ static afatfsFilePtr_t afatfs_createFileInternal(
                     callback(NULL);
                 return file;
             }
-            opState->longNameEnabled = 1u;
             opState->lfnEntryCount =
                 (uint8_t)((longNameLength + 12u) / 13u);
+            /*
+             * LFN requests deliberately retain their complete VFAT run even
+             * when the display text could fit an 8.3 alias. This byte is the
+             * scan discriminator and the writer's immutable entry count.
+             */
+            opState->requestedEntryCount =
+                (uint8_t)(opState->lfnEntryCount + 1u);
             opState->aliasOrdinal = 0u;
             opState->openNameOut = openNameOut;
             if (!afatfs_generateShortAlias(opState)) {
@@ -4098,12 +4801,16 @@ static afatfsFilePtr_t afatfs_createFileInternal(
              * Preserve display case for ordinary 8.3 callers before converting
              * the raw FAT key to uppercase. This is what lets system files
              * created through afatfs_fopen appear as kitset.kcg,
-             * sceneset.scg, pattern.pat, effects.fx, and settings.cfg while
+             * sceneset.scg, named Pattern `.pat` children, effects.fx, and
+             * settings.cfg while
              * keeping existing case-insensitive open behavior.
              */
             opState->shortNameCaseFlags =
                 fat_calculateFilenameCaseFlags(name);
             fat_convertFilenameToFATStyle(name, opState->filename);
+            /* Short APIs reserve exactly their SFN slot; shared collision and
+             * terminator handling still applies without an LFN fragment. */
+            opState->requestedEntryCount = 1u;
         }
         file->attrib = attrib;
 
@@ -4139,8 +4846,9 @@ static bool afatfs_renameObjectRunIsSectorLocal(
         const afatfsObjectInfo_t *object)
 {
     /*
-     * The current LFN writer reserves one contiguous run inside one sector.
-     * Keep rename on the same footing until cross-sector VFAT runs are added.
+     * In-place rename still needs the existing single-sector writer. The
+     * shared retirement continuation below is independent of this placement
+     * optimization and accepts valid runs crossing sectors or clusters.
      */
     if (object->id.sfnEntry.entryIndex < 0)
         return false;
@@ -4154,14 +4862,55 @@ static bool afatfs_renameObjectRunIsSectorLocal(
                object->id.sfnEntry.entryIndex;
 }
 
+static afatfsResultCode_t afatfs_validateObjectInfo(
+        const afatfsObjectInfo_t *object,
+        afatfsObjectKind_t requiredKind)
+{
+    if (!object || object->id.kind != requiredKind || object->lfnMalformed ||
+        object->id.sfnEntry.sectorNumberPhysical == 0u ||
+        object->id.sfnEntry.entryIndex < 0 ||
+        (uint16_t)object->id.sfnEntry.entryIndex >=
+            AFATFS_FILES_PER_DIRECTORY_SECTOR ||
+        (object->id.firstCluster < FAT_SMALLEST_LEGAL_CLUSTER_NUMBER &&
+         !(object->id.kind == AFATFS_OBJECT_FILE &&
+           object->id.firstCluster == 0u && object->id.logicalSize == 0u)) ||
+        object->id.lfnEntryCount > AFATFS_LONG_FILENAME_ENTRY_MAX) {
+        return AFATFS_RESULT_UNSUPPORTED_LAYOUT;
+    }
+    if (object->id.lfnEntryCount != 0u &&
+        object->id.lfnFirstEntry.sectorNumberPhysical == 0u) {
+        return AFATFS_RESULT_CORRUPT_LFN_RUN;
+    }
+    for (uint8_t i = 0u; i < object->id.lfnEntryCount; i++) {
+        const afatfsDirEntryPointer_t *entry =
+            (i == 0u) ? &object->id.lfnFirstEntry
+                      : &object->id.lfnFollowingEntry[i - 1u];
+        if (entry->sectorNumberPhysical == 0u || entry->entryIndex < 0 ||
+            (uint16_t)entry->entryIndex >= AFATFS_FILES_PER_DIRECTORY_SECTOR)
+            return AFATFS_RESULT_CORRUPT_LFN_RUN;
+    }
+    return AFATFS_RESULT_OK;
+}
+
+static const afatfsDirEntryPointer_t *afatfs_objectNameEntryAt(
+        const afatfsObjectInfo_t *object,
+        uint8_t ordinal)
+{
+    if (ordinal < object->id.lfnEntryCount) {
+        return (ordinal == 0u) ? &object->id.lfnFirstEntry
+                              : &object->id.lfnFollowingEntry[ordinal - 1u];
+    }
+    return &object->id.sfnEntry;
+}
+
 static afatfsOperationStatus_e afatfs_retireObjectNameRun(
-        const afatfsObjectInfo_t *object)
+        const afatfsObjectInfo_t *object,
+        uint8_t *nextOrdinal)
 {
     uint8_t *sector;
     afatfsOperationStatus_e status;
-    afatfsDirEntryPointer_t runStart;
     uint8_t entryCount;
-    fatDirectoryEntry_t *entries;
+    uint32_t sectorNumber;
 
     /*
      * Retire one object's complete VFAT name entry run.
@@ -4171,14 +4920,14 @@ static afatfsOperationStatus_e afatfs_retireObjectNameRun(
      * object.
      *
      * Why: Removing or moving a VFAT object must not leave orphan display
-     * fragments visible to later scans. afatfs_funlink() currently marks only
-     * the SFN entry, which is acceptable for old short-name files but not for
-     * case-preserving LFN overwrite.
+     * fragments visible to later scans. All destructive callers now use this
+     * complete-run continuation rather than an SFN-only unlink shortcut.
      *
-     * Inputs: afatfsObjectInfo_t from afatfs_findNextObject(). Its
-     * lfnFirstEntry, lfnEntryCount, and sfnEntry identify the entry run. The
-     * helper requires the current sector-local run shape used by the existing
-     * LFN writer.
+     * Inputs: afatfsObjectInfo_t from afatfs_findNextObject(), plus a caller-
+     * owned next ordinal initially set to zero. The complete physical pointer
+     * list identifies every fragment; no pointer arithmetic or display-name
+     * lookup is performed. Outputs: one same-sector batch is marked deleted
+     * and nextOrdinal advances; callers yield before requesting the next batch.
      *
      * Outputs/effects: directory cache sector is marked dirty after entries are
      * marked deleted. It does not free clusters and does not inspect directory
@@ -4188,27 +4937,26 @@ static afatfsOperationStatus_e afatfs_retireObjectNameRun(
      * afatfs_removeObjects_lfn(), filesystem.c recursive delete, and save
      * overwrite preflight.
      */
-    if (!object || !afatfs_renameObjectRunIsSectorLocal(object))
+    if (!nextOrdinal || afatfs_validateObjectInfo(object, object->id.kind) !=
+        AFATFS_RESULT_OK)
         return AFATFS_OPERATION_FAILURE;
-
     entryCount = (uint8_t)(object->id.lfnEntryCount + 1u);
-    runStart = (object->id.lfnEntryCount != 0u)
-        ? object->id.lfnFirstEntry
-        : object->id.sfnEntry;
-    if (runStart.entryIndex < 0 ||
-        runStart.entryIndex + entryCount > AFATFS_FILES_PER_DIRECTORY_SECTOR) {
-        return AFATFS_OPERATION_FAILURE;
-    }
-
-    status = afatfs_cacheSector(runStart.sectorNumberPhysical,
+    if (*nextOrdinal >= entryCount)
+        return AFATFS_OPERATION_SUCCESS;
+    sectorNumber = afatfs_objectNameEntryAt(object, *nextOrdinal)
+                       ->sectorNumberPhysical;
+    status = afatfs_cacheSector(sectorNumber,
                                 &sector,
                                 AFATFS_CACHE_READ | AFATFS_CACHE_WRITE,
                                 0);
     if (status != AFATFS_OPERATION_SUCCESS)
         return status;
 
-    entries = (fatDirectoryEntry_t *)sector + runStart.entryIndex;
-    for (uint8_t i = 0u; i < entryCount; i++) {
+    while (*nextOrdinal < entryCount) {
+        const afatfsDirEntryPointer_t *entryPointer =
+            afatfs_objectNameEntryAt(object, *nextOrdinal);
+        if (entryPointer->sectorNumberPhysical != sectorNumber)
+            break;
         /*
          * Mark every name entry in the run deleted.
          *
@@ -4216,7 +4964,9 @@ static afatfsOperationStatus_e afatfs_retireObjectNameRun(
          * does not touch clusters; callers that delete file data free the
          * cluster chain before retiring the visible name metadata.
          */
-        entries[i].filename[0] = FAT_DELETED_FILE_MARKER;
+        ((fatDirectoryEntry_t *)sector)[entryPointer->entryIndex]
+            .filename[0] = FAT_DELETED_FILE_MARKER;
+        (*nextOrdinal)++;
     }
 
     afatfs_cacheSectorMarkDirty(afatfs_getCacheDescriptorForBuffer(sector));
@@ -4226,6 +4976,7 @@ static afatfsOperationStatus_e afatfs_retireObjectNameRun(
 static void afatfs_renameObjectSetOldRunStart(afatfsRenameObject_t *op)
 {
     op->oldEntryCount = (uint8_t)(op->source.id.lfnEntryCount + 1u);
+    op->oldRunNextEntry = 0u;
     if (op->source.id.lfnEntryCount != 0u) {
         op->oldRunStart = op->source.id.lfnFirstEntry;
     } else {
@@ -4245,19 +4996,31 @@ static void afatfs_renameObjectCopyOpenName(const char *src, char *dst)
     dst[AFATFS_SHORT_FILENAME_MAX - 1u] = '\0';
 }
 
-static void afatfs_renameObjectFinish(bool success)
+static void afatfs_renameObjectFinish(afatfsResultCode_t result)
 {
     afatfsRenameObject_t *op = &afatfs.renameObject;
-    afatfsCallback_t callback = op->callback;
+    afatfsResultCallback_t callback = op->callback;
 
-    op->succeeded = success ? 1u : 0u;
-    if (success) {
+    /*
+     * Complete rename ownership before returning to the caller.
+     *
+     * The embedded create-state object owns the collision reservation, LFN
+     * scanner, and target pointers. Reset those bytes before the callback can
+     * start another rename; names, callback storage, and the fixed operation
+     * object itself remain statically allocated and no retained state grows.
+     */
+    op->result = result;
+    op->succeeded = (result == AFATFS_RESULT_OK) ? 1u : 0u;
+    if (result == AFATFS_RESULT_OK) {
         afatfs_renameObjectCopyOpenName(op->generatedOpenName,
                                         op->openNameOut);
     }
+    afatfs_resetDirectoryRunReservation(&op->newNameState);
+    afatfs_lfnScanReset(&op->newNameState);
+    op->newNameState.requestedEntryCount = 0u;
     op->active = 0u;
     if (callback)
-        callback();
+        callback(result);
 }
 
 static bool afatfs_renameObjectRawEntryMatchesNew(
@@ -4286,18 +5049,26 @@ static bool afatfs_renameObjectRawEntryMatchesNew(
 
 static void afatfs_renameObjectRestartCollisionScan(afatfsRenameObject_t *op)
 {
+    /*
+     * Restart from a clean reservation.
+     *
+     * Alias retries must discard both the current deleted run and any marker
+     * decision from the previous candidate, then rebuild the raw finder and
+     * LFN chain for the new SFN alias. The reset is state-only and preserves
+     * the request's sanitized name, requested count, alias ordinal, and
+     * callback output.
+     */
+    afatfs_resetDirectoryRunReservation(&op->newNameState);
     afatfs_findFirst(&afatfs.currentDirectory, &op->rawFinder);
-    op->newNameState.freeRunLength = 0u;
     afatfs_lfnScanReset(&op->newNameState);
 }
 
 static bool afatfs_renameObjectCanRewriteInPlace(
         const afatfsRenameObject_t *op)
 {
-    uint8_t newEntryCount =
-        (uint8_t)(op->newNameState.lfnEntryCount + 1u);
+    uint8_t newEntryCount = op->newNameState.requestedEntryCount;
 
-    if (newEntryCount > op->oldEntryCount)
+    if (newEntryCount == 0u || newEntryCount > op->oldEntryCount)
         return false;
     if (!afatfs_renameObjectRunIsSectorLocal(&op->source))
         return false;
@@ -4313,19 +5084,50 @@ static afatfsOperationStatus_e afatfs_renameObjectWriteRun(
     uint8_t *sector;
     afatfsOperationStatus_e status;
     fatDirectoryEntry_t *entries;
+    uint8_t cacheFlags;
     uint8_t newLfnCount = op->newNameState.lfnEntryCount;
-    uint8_t newEntryCount = (uint8_t)(newLfnCount + 1u);
+    uint8_t newEntryCount = op->newNameState.requestedEntryCount;
     uint8_t checksum = afatfs_lfnChecksum(op->newNameState.filename);
 
-    if (op->newRunStart.entryIndex < 0 ||
-        op->newRunStart.entryIndex + newEntryCount >
+    /*
+     * Publish a selected rename run, preserving marker provenance.
+     *
+     * What: Writes the LFN fragments and SFN into the already-selected
+     * sector-local run. Terminator-owned runs also receive a complete zero
+     * replacement entry immediately after the SFN; deleted-hole runs leave
+     * following entries unchanged. Moved runs are written through a WRITE-only
+     * cache request because their target sector was zeroed before selection.
+     * Why: The new name must become valid before the old source is retired, and
+     * a deleted-hole write must not erase a later live entry. Inputs are the
+     * requested count, origin, selected target, source metadata, and generated
+     * alias. Outputs/effects are one dirty target sector and, for local/moved
+     * marker origins, a replacement 0x00 entry. Affiliates: collision scan,
+     * target preparation/barrier, old-tail retirement, and old-run retirement.
+     */
+    if (op->newRunStart.sectorNumberPhysical == 0u ||
+        newEntryCount != (uint8_t)(newLfnCount + 1u) ||
+        op->newRunStart.entryIndex < 0 ||
+        (uint16_t)op->newRunStart.entryIndex + (uint16_t)newEntryCount >
+            AFATFS_FILES_PER_DIRECTORY_SECTOR) {
+        return AFATFS_OPERATION_FAILURE;
+    }
+    if ((op->newNameState.reservationOrigin ==
+             AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_LOCAL ||
+         op->newNameState.reservationOrigin ==
+             AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED) &&
+        (uint16_t)op->newRunStart.entryIndex +
+                (uint16_t)newEntryCount >=
             AFATFS_FILES_PER_DIRECTORY_SECTOR) {
         return AFATFS_OPERATION_FAILURE;
     }
 
+    cacheFlags = op->newNameState.reservationOrigin ==
+        AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED
+        ? AFATFS_CACHE_WRITE
+        : AFATFS_CACHE_READ | AFATFS_CACHE_WRITE;
     status = afatfs_cacheSector(op->newRunStart.sectorNumberPhysical,
                                 &sector,
-                                AFATFS_CACHE_READ | AFATFS_CACHE_WRITE,
+                                cacheFlags,
                                 0);
     if (status != AFATFS_OPERATION_SUCCESS)
         return status;
@@ -4352,6 +5154,14 @@ static afatfsOperationStatus_e afatfs_renameObjectWriteRun(
            FAT_FILENAME_LENGTH);
     entries[newLfnCount].ntReserved = op->newNameState.shortNameCaseFlags;
 
+    if (op->newNameState.reservationOrigin ==
+            AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_LOCAL ||
+        op->newNameState.reservationOrigin ==
+            AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED) {
+        memset(&entries[newLfnCount + 1u], 0,
+               sizeof(entries[newLfnCount + 1u]));
+    }
+
     afatfs_cacheSectorMarkDirty(afatfs_getCacheDescriptorForBuffer(sector));
     return AFATFS_OPERATION_SUCCESS;
 }
@@ -4361,11 +5171,20 @@ static afatfsOperationStatus_e afatfs_renameObjectRetireOldRun(
 {
     (void)op->oldRunStart;
     (void)op->oldEntryCount;
-    return afatfs_retireObjectNameRun(&op->source);
+    return afatfs_retireObjectNameRun(&op->source,
+                                      &op->oldRunNextEntry);
 }
 
 static void afatfs_renameObjectChooseRun(afatfsRenameObject_t *op)
 {
+    /*
+     * Choose placement in the required priority order.
+     *
+     * A same-sector shrink/fit reuses the source run first. Otherwise the
+     * collision scan's selected deleted or terminator-derived target is used;
+     * no second allocator scan is permitted here. movedEntryRun records
+     * whether the old source must be retired after the new run is published.
+     */
     if (afatfs_renameObjectCanRewriteInPlace(op)) {
         op->movedEntryRun = 0u;
         op->newRunStart = op->source.id.sfnEntry;
@@ -4374,7 +5193,7 @@ static void afatfs_renameObjectChooseRun(afatfsRenameObject_t *op)
                       op->newNameState.lfnEntryCount);
     } else {
         op->movedEntryRun = 1u;
-        op->newRunStart = op->newNameState.freeRunStart;
+        op->newRunStart = op->newNameState.selectedRunStart;
     }
 }
 
@@ -4402,11 +5221,13 @@ doMore:
         if (status == AFATFS_OPERATION_IN_PROGRESS)
             return;
         if (status == AFATFS_OPERATION_FAILURE) {
+            op->result = AFATFS_RESULT_IO_ERROR;
             afatfs_findLastObject(&afatfs.currentDirectory, &op->objectFinder);
             op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
             goto doMore;
         }
         if (op->source.id.kind == AFATFS_OBJECT_NONE) {
+            op->result = AFATFS_RESULT_NOT_FOUND;
             afatfs_findLastObject(&afatfs.currentDirectory, &op->objectFinder);
             op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
             goto doMore;
@@ -4427,11 +5248,13 @@ doMore:
                 op->matchMode == AFATFS_MATCH_CASE_SENSITIVE) != 0) {
             return;
         }
-        afatfs_findLastObject(&afatfs.currentDirectory, &op->objectFinder);
-        if (!afatfs_renameObjectRunIsSectorLocal(&op->source)) {
+        if (op->source.lfnMalformed) {
+            op->result = AFATFS_RESULT_CORRUPT_LFN_RUN;
+            afatfs_findLastObject(&afatfs.currentDirectory, &op->objectFinder);
             op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
             goto doMore;
         }
+        afatfs_findLastObject(&afatfs.currentDirectory, &op->objectFinder);
         afatfs_renameObjectSetOldRunStart(op);
         op->phase = AFATFS_RENAME_OBJECT_PHASE_LOAD_SOURCE_ENTRY;
         goto doMore;
@@ -4447,6 +5270,7 @@ doMore:
             return;
         if (status == AFATFS_OPERATION_FAILURE ||
             op->source.id.sfnEntry.entryIndex < 0) {
+            op->result = AFATFS_RESULT_IO_ERROR;
             op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
             goto doMore;
         }
@@ -4465,6 +5289,7 @@ doMore:
                                    true) == 0) {
             afatfs_renameObjectCopyOpenName(op->source.id.shortName,
                                             op->generatedOpenName);
+            op->result = AFATFS_RESULT_OK;
             op->succeeded = 1u;
             op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
             goto doMore;
@@ -4480,15 +5305,19 @@ doMore:
         len = afatfs_copySanitizedLongName(op->newNameState.longName,
                                            op->newName);
         if (len == 0u) {
+            op->result = AFATFS_RESULT_INVALID_NAME;
             op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
             goto doMore;
         }
-        op->newNameState.longNameEnabled = 1u;
         op->newNameState.lfnEntryCount = (uint8_t)((len + 12u) / 13u);
+        /* The collision scan and writer share this immutable LFN/SFN run size. */
+        op->newNameState.requestedEntryCount =
+            (uint8_t)(op->newNameState.lfnEntryCount + 1u);
         op->newNameState.matchMode = op->matchMode;
         op->newNameState.aliasOrdinal = 0u;
         op->newNameState.openNameOut = op->generatedOpenName;
         if (!afatfs_generateShortAlias(&op->newNameState)) {
+            op->result = AFATFS_RESULT_ALREADY_EXISTS;
             op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
             goto doMore;
         }
@@ -4505,6 +5334,23 @@ doMore:
 
     case AFATFS_RENAME_OBJECT_PHASE_COLLISION_SCAN:
     {
+        /*
+         * Rename collision scan and reservation selection.
+         *
+         * What: Scans only through the first 0x00, records sector-local E5
+         * runs without ending the scan, and selects in-place, deleted-hole,
+         * local-terminator, or moved-terminator placement in that order. An
+         * alias collision restarts the complete scan with a clean reservation.
+         * Why: The source object may be the only matching live name, while a
+         * later live object can still collide with a generated alias. The old
+         * marker must stay untouched until the new run is ready to publish.
+         * Inputs: source identity, requested LFN/SFN count, candidate alias,
+         * match mode, raw finder, and shared reservation state. Outputs/effects:
+         * a selected run or a resumable target-preparation phase; scan cache
+         * ownership is released before every placement/restart/failure path.
+         * Affiliates: afatfs_findNext(), afatfs_findLast(), alias generation,
+         * deleted-run helpers, target barrier, and rename run writer.
+         */
         fatDirectoryEntry_t *entry = NULL;
         status = afatfs_findNext(&afatfs.currentDirectory,
                                  &op->rawFinder,
@@ -4512,6 +5358,7 @@ doMore:
         if (status == AFATFS_OPERATION_IN_PROGRESS)
             return;
         if (status == AFATFS_OPERATION_FAILURE) {
+            op->result = AFATFS_RESULT_IO_ERROR;
             afatfs_findLast(&afatfs.currentDirectory);
             op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
             goto doMore;
@@ -4519,42 +5366,59 @@ doMore:
         if (entry == NULL) {
             afatfs_findLast(&afatfs.currentDirectory);
             if (afatfs_renameObjectCanRewriteInPlace(op) ||
-                afatfs_freeRunIsReady(&op->newNameState)) {
+                op->newNameState.reservationOrigin ==
+                    AFATFS_DIRECTORY_RUN_ORIGIN_DELETED) {
                 afatfs_renameObjectChooseRun(op);
                 op->phase = AFATFS_RENAME_OBJECT_PHASE_WRITE_NEW_RUN;
                 goto doMore;
             }
-            if (afatfs_fileIsBusy(&afatfs.currentDirectory))
-                return;
-            status = afatfs_extendSubdirectory(&afatfs.currentDirectory,
-                                               NULL,
-                                               NULL);
-            if (status == AFATFS_OPERATION_FAILURE) {
-                op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+            op->newNameState.reservationOrigin =
+                AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_LOCAL;
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_PREPARE_NEW_RUN_TARGET;
+            goto doMore;
+        }
+        if (fat_isDirectoryEntryTerminator(entry)) {
+            afatfs_noteDeletedDirectoryEntry(
+                &op->newNameState, &op->rawFinder, false);
+            afatfs_findLast(&afatfs.currentDirectory);
+            if (afatfs_renameObjectCanRewriteInPlace(op) ||
+                afatfs_selectDirectoryRunAtTerminator(
+                    &op->newNameState, &op->rawFinder)) {
+                afatfs_renameObjectChooseRun(op);
+                op->phase = AFATFS_RENAME_OBJECT_PHASE_WRITE_NEW_RUN;
                 goto doMore;
             }
-            op->phase = AFATFS_RENAME_OBJECT_PHASE_WAIT_EXTEND;
-            return;
+            if (op->newNameState.reservationOrigin ==
+                AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED) {
+                op->phase = AFATFS_RENAME_OBJECT_PHASE_PREPARE_NEW_RUN_SEEK;
+                goto doMore;
+            }
+            op->result = AFATFS_RESULT_IO_ERROR;
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+            goto doMore;
         }
-        if (fat_isDirectoryEntryEmpty(entry) ||
-            fat_isDirectoryEntryTerminator(entry)) {
-            afatfs_noteFreeDirectoryEntry(&op->newNameState, &op->rawFinder);
+        if (fat_isDirectoryEntryEmpty(entry)) {
+            afatfs_noteDeletedDirectoryEntry(
+                &op->newNameState, &op->rawFinder, true);
             afatfs_lfnScanReset(&op->newNameState);
             return;
         }
         if (afatfs_isLfnDirectoryEntry(entry)) {
-            op->newNameState.freeRunLength = 0u;
+            afatfs_noteDeletedDirectoryEntry(
+                &op->newNameState, &op->rawFinder, false);
             afatfs_lfnScanAppend(&op->newNameState, entry);
             return;
         }
         if ((entry->attrib & FAT_FILE_ATTRIBUTE_VOLUME_ID) != 0u) {
-            op->newNameState.freeRunLength = 0u;
+            afatfs_noteDeletedDirectoryEntry(
+                &op->newNameState, &op->rawFinder, false);
             afatfs_lfnScanReset(&op->newNameState);
             return;
         }
         if (!afatfs_entryPointerEquals(&op->rawFinder, &op->source.id.sfnEntry) &&
             afatfs_renameObjectRawEntryMatchesNew(op, entry)) {
             afatfs_findLast(&afatfs.currentDirectory);
+            op->result = AFATFS_RESULT_ALREADY_EXISTS;
             op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
             goto doMore;
         }
@@ -4565,21 +5429,66 @@ doMore:
             afatfs_findLast(&afatfs.currentDirectory);
             op->newNameState.aliasOrdinal++;
             if (!afatfs_generateShortAlias(&op->newNameState)) {
+                op->result = AFATFS_RESULT_ALREADY_EXISTS;
                 op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
                 goto doMore;
             }
             op->phase = AFATFS_RENAME_OBJECT_PHASE_COLLISION_SCAN_BEGIN;
             goto doMore;
         }
-        op->newNameState.freeRunLength = 0u;
+        afatfs_noteDeletedDirectoryEntry(
+            &op->newNameState, &op->rawFinder, false);
         afatfs_lfnScanReset(&op->newNameState);
         return;
     }
 
-    case AFATFS_RENAME_OBJECT_PHASE_WAIT_EXTEND:
-        if (afatfs_fileIsBusy(&afatfs.currentDirectory))
+    case AFATFS_RENAME_OBJECT_PHASE_PREPARE_NEW_RUN_SEEK:
+        /*
+         * Move by logical FAT traversal; physical-sector increment is invalid
+         * because the next directory sector may be in a non-contiguous FAT
+         * cluster.
+         */
+        if (afatfs_fileIsBusy(&afatfs.currentDirectory) ||
+            !afatfs_fseekAtomic(&afatfs.currentDirectory, AFATFS_SECTOR_SIZE))
             return;
-        op->phase = AFATFS_RENAME_OBJECT_PHASE_COLLISION_SCAN_BEGIN;
+        op->phase = AFATFS_RENAME_OBJECT_PHASE_PREPARE_NEW_RUN_TARGET;
+        goto doMore;
+
+    case AFATFS_RENAME_OBJECT_PHASE_PREPARE_NEW_RUN_TARGET:
+        status = afatfs_prepareDirectoryRunTarget(&op->newNameState);
+        if (status == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (status == AFATFS_OPERATION_FAILURE) {
+            op->result = AFATFS_RESULT_IO_ERROR;
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+            goto doMore;
+        }
+        afatfs_renameObjectChooseRun(op);
+        op->phase = AFATFS_RENAME_OBJECT_PHASE_WRITE_NEW_RUN;
+        goto doMore;
+
+    case AFATFS_RENAME_OBJECT_PHASE_WAIT_TARGET_PERSISTENCE:
+        status = afatfs_directoryRunTargetPersistence(&op->newNameState);
+        if (status == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (status == AFATFS_OPERATION_FAILURE) {
+            op->result = AFATFS_RESULT_IO_ERROR;
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+            goto doMore;
+        }
+        op->phase = AFATFS_RENAME_OBJECT_PHASE_RETIRE_OLD_TERMINATOR_TAIL;
+        goto doMore;
+
+    case AFATFS_RENAME_OBJECT_PHASE_RETIRE_OLD_TERMINATOR_TAIL:
+        status = afatfs_retireDirectoryTerminatorTail(&op->newNameState);
+        if (status == AFATFS_OPERATION_IN_PROGRESS)
+            return;
+        if (status == AFATFS_OPERATION_FAILURE) {
+            op->result = AFATFS_RESULT_IO_ERROR;
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
+            goto doMore;
+        }
+        op->phase = AFATFS_RENAME_OBJECT_PHASE_RETIRE_OLD_RUN;
         goto doMore;
 
     case AFATFS_RENAME_OBJECT_PHASE_WRITE_NEW_RUN:
@@ -4587,12 +5496,18 @@ doMore:
         if (status == AFATFS_OPERATION_IN_PROGRESS)
             return;
         if (status == AFATFS_OPERATION_FAILURE) {
+            op->result = AFATFS_RESULT_IO_ERROR;
             op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
             goto doMore;
         }
-        if (op->movedEntryRun) {
+        if (op->movedEntryRun &&
+            op->newNameState.reservationOrigin ==
+                AFATFS_DIRECTORY_RUN_ORIGIN_TERMINATOR_MOVED) {
+            op->phase = AFATFS_RENAME_OBJECT_PHASE_WAIT_TARGET_PERSISTENCE;
+        } else if (op->movedEntryRun) {
             op->phase = AFATFS_RENAME_OBJECT_PHASE_RETIRE_OLD_RUN;
         } else {
+            op->result = AFATFS_RESULT_OK;
             op->succeeded = 1u;
             op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
         }
@@ -4602,13 +5517,20 @@ doMore:
         status = afatfs_renameObjectRetireOldRun(op);
         if (status == AFATFS_OPERATION_IN_PROGRESS)
             return;
+        if (status == AFATFS_OPERATION_SUCCESS &&
+            op->oldRunNextEntry < op->source.id.lfnEntryCount + 1u)
+            return;
+        if (status == AFATFS_OPERATION_SUCCESS)
+            op->result = AFATFS_RESULT_OK;
         if (status == AFATFS_OPERATION_SUCCESS)
             op->succeeded = 1u;
+        else
+            op->result = AFATFS_RESULT_IO_ERROR;
         op->phase = AFATFS_RENAME_OBJECT_PHASE_FINISH;
         goto doMore;
 
     case AFATFS_RENAME_OBJECT_PHASE_FINISH:
-        afatfs_renameObjectFinish(op->succeeded != 0u);
+        afatfs_renameObjectFinish(op->succeeded ? AFATFS_RESULT_OK : op->result);
         return;
     }
 }
@@ -4617,7 +5539,7 @@ bool afatfs_renameObject_lfn(const char *oldDisplayName,
                              const char *newDisplayName,
                              afatfsMatchMode_t matchMode,
                              char openNameOut[AFATFS_SHORT_FILENAME_MAX],
-                             afatfsCallback_t complete)
+                             afatfsResultCallback_t complete)
 {
     afatfsRenameObject_t *op = &afatfs.renameObject;
 
@@ -4636,6 +5558,7 @@ bool afatfs_renameObject_lfn(const char *oldDisplayName,
     }
 
     op->active = 1u;
+    op->result = AFATFS_RESULT_NOT_FOUND;
     op->phase = AFATFS_RENAME_OBJECT_PHASE_INITIAL;
     op->matchMode = matchMode;
     op->callback = complete;
@@ -4718,10 +5641,10 @@ static void afatfs_removeObjectPrepareSyntheticFile(
     op->syntheticFile.mode = AFATFS_FILE_MODE_WRITE;
 }
 
-static void afatfs_removeObjectsFinish(bool success)
+static void afatfs_removeObjectsFinish(afatfsResultCode_t result)
 {
     afatfsRemoveObjects_t *op = &afatfs.removeObjects;
-    afatfsCallback_t callback = op->callback;
+    afatfsResultCallback_t callback = op->callback;
 
     /*
      * Finish exactly once and release the global removal slot.
@@ -4730,10 +5653,11 @@ static void afatfs_removeObjectsFinish(bool success)
      * next open/create phase from their own filesystem state machine, while
      * asyncfatfs keeps no persistent success object to return.
      */
-    op->succeeded = success ? 1u : 0u;
+    op->result = result;
+    op->succeeded = (result == AFATFS_RESULT_OK) ? 1u : 0u;
     op->active = 0u;
     if (callback)
-        callback();
+        callback(result);
 }
 
 static void afatfs_removeObjectsContinue(void)
@@ -4760,11 +5684,13 @@ doMore:
         if (status == AFATFS_OPERATION_IN_PROGRESS)
             return;
         if (status == AFATFS_OPERATION_FAILURE) {
+            op->result = AFATFS_RESULT_IO_ERROR;
             afatfs_findLastObject(&afatfs.currentDirectory, &op->finder);
             op->phase = AFATFS_REMOVE_OBJECTS_PHASE_FINISH;
             goto doMore;
         }
         if (op->object.id.kind == AFATFS_OBJECT_NONE) {
+            op->result = AFATFS_RESULT_OK;
             afatfs_findLastObject(&afatfs.currentDirectory, &op->finder);
             op->succeeded = 1u;
             op->phase = AFATFS_REMOVE_OBJECTS_PHASE_FINISH;
@@ -4780,6 +5706,12 @@ doMore:
              * display component.
              */
             return;
+        }
+        if (op->object.lfnMalformed) {
+            op->result = AFATFS_RESULT_CORRUPT_LFN_RUN;
+            afatfs_findLastObject(&afatfs.currentDirectory, &op->finder);
+            op->phase = AFATFS_REMOVE_OBJECTS_PHASE_FINISH;
+            goto doMore;
         }
         if (op->object.id.kind == AFATFS_OBJECT_DIRECTORY &&
             !afatfs_removeObjectDirectoryAllowed(op, &op->object)) {
@@ -4812,10 +5744,7 @@ doMore:
             goto doMore;
         }
         afatfs_findLastObject(&afatfs.currentDirectory, &op->finder);
-        if (!afatfs_renameObjectRunIsSectorLocal(&op->object)) {
-            op->phase = AFATFS_REMOVE_OBJECTS_PHASE_FINISH;
-            goto doMore;
-        }
+        op->nameRunNextEntry = 0u;
         op->phase = AFATFS_REMOVE_OBJECTS_PHASE_LOAD_ENTRY;
         goto doMore;
 
@@ -4830,6 +5759,7 @@ doMore:
             return;
         if (status == AFATFS_OPERATION_FAILURE ||
             op->object.id.sfnEntry.entryIndex < 0) {
+            op->result = AFATFS_RESULT_IO_ERROR;
             op->phase = AFATFS_REMOVE_OBJECTS_PHASE_FINISH;
             goto doMore;
         }
@@ -4839,6 +5769,7 @@ doMore:
             op->mode == AFATFS_REMOVE_EMPTY_DIRECTORIES) {
             afatfs_removeObjectPrepareSyntheticFile(op);
             if (!afatfs_ftruncate(&op->syntheticFile, NULL)) {
+                op->result = AFATFS_RESULT_IO_ERROR;
                 op->phase = AFATFS_REMOVE_OBJECTS_PHASE_FINISH;
                 goto doMore;
             }
@@ -4850,10 +5781,13 @@ doMore:
     }
 
     case AFATFS_REMOVE_OBJECTS_PHASE_TRUNCATE_FILE:
-        status = afatfs_ftruncateContinue(&op->syntheticFile, true);
+        /* Release the chain while the SFN remains intact; the shared complete
+         * LFN/SFN retire continuation runs only after FAT cleanup succeeds. */
+        status = afatfs_ftruncateContinue(&op->syntheticFile, false);
         if (status == AFATFS_OPERATION_IN_PROGRESS)
             return;
         if (status == AFATFS_OPERATION_FAILURE) {
+            op->result = AFATFS_RESULT_IO_ERROR;
             op->phase = AFATFS_REMOVE_OBJECTS_PHASE_FINISH;
             goto doMore;
         }
@@ -4869,13 +5803,17 @@ doMore:
          * clusters. The shared run helper then removes both LFN fragments and
          * the already-deleted SFN entry from the visible directory namespace.
          */
-        status = afatfs_retireObjectNameRun(&op->object);
+        status = afatfs_retireObjectNameRun(&op->object,
+                                            &op->nameRunNextEntry);
         if (status == AFATFS_OPERATION_IN_PROGRESS)
             return;
         if (status == AFATFS_OPERATION_FAILURE) {
+            op->result = AFATFS_RESULT_IO_ERROR;
             op->phase = AFATFS_REMOVE_OBJECTS_PHASE_FINISH;
             goto doMore;
         }
+        if (op->nameRunNextEntry < op->object.id.lfnEntryCount + 1u)
+            return;
         op->phase = AFATFS_REMOVE_OBJECTS_PHASE_RESTART_SCAN;
         goto doMore;
 
@@ -4893,7 +5831,7 @@ doMore:
         goto doMore;
 
     case AFATFS_REMOVE_OBJECTS_PHASE_FINISH:
-        afatfs_removeObjectsFinish(op->succeeded != 0u);
+        afatfs_removeObjectsFinish(op->succeeded ? AFATFS_RESULT_OK : op->result);
         return;
     }
 }
@@ -4901,7 +5839,7 @@ doMore:
 bool afatfs_removeObjects_lfn(const char *displayName,
                               afatfsMatchMode_t matchMode,
                               afatfsRemoveObjectMode_t mode,
-                              afatfsCallback_t complete)
+                              afatfsResultCallback_t complete)
 {
     afatfsRemoveObjects_t *op = &afatfs.removeObjects;
 
@@ -4917,6 +5855,7 @@ bool afatfs_removeObjects_lfn(const char *displayName,
         return false;
 
     op->active = 1u;
+    op->result = AFATFS_RESULT_OK;
     op->phase = AFATFS_REMOVE_OBJECTS_PHASE_INITIAL;
     op->matchMode = matchMode;
     op->mode = mode;
@@ -4927,7 +5866,7 @@ bool afatfs_removeObjects_lfn(const char *displayName,
 
 bool afatfs_removeObject(const char *filename,
                          afatfsRemoveObjectMode_t mode,
-                         afatfsCallback_t complete)
+                         afatfsResultCallback_t complete)
 {
     afatfsRemoveObjects_t *op = &afatfs.removeObjects;
     uint8_t i;
@@ -4966,6 +5905,7 @@ bool afatfs_removeObject(const char *filename,
     op->shortName[AFATFS_SHORT_FILENAME_MAX - 1u] = '\0';
 
     op->active = 1u;
+    op->result = AFATFS_RESULT_OK;
     op->phase = AFATFS_REMOVE_OBJECTS_PHASE_INITIAL;
     op->mode = mode;
     op->matchShortName = 1u;
@@ -5210,7 +6150,25 @@ bool afatfs_chdir(afatfsFilePtr_t directory)
         // Root directories don't have a directory entry to represent themselves:
         afatfs.currentDirectory.directoryEntryPos.sectorNumberPhysical = 0;
 
-        afatfs_fseek(&afatfs.currentDirectory, 0, AFATFS_SEEK_SET);
+        /*
+         * Complete the root seek synchronously before reporting success.
+         *
+         * What: afatfs_fseek(..., 0, SEEK_SET) normally completes inline,
+         * but any caller-visible pending state on currentDirectory is
+         * eliminated here by polling the just-queued work to a terminal
+         * result. Why: blocking boot consumers (Bank/Scene/Kit narrow
+         * loaders) treat a successful chdir(NULL) as "root, idle, ready
+         * for relative opens"; returning with a queued operation let the
+         * next opendir scan race the cursor state (Session 061 Phase 2).
+         * Inputs/outputs: currentDirectory reinitialized to the root
+         * cluster and idle before the return. Affiliates:
+         * filesystem_blockChdir(), afatfs_poll(),
+         * afatfs_fileIsBusy().
+         */
+        (void)afatfs_fseek(&afatfs.currentDirectory, 0, AFATFS_SEEK_SET);
+        while (afatfs_fileIsBusy(&afatfs.currentDirectory)) {
+            afatfs_poll();
+        }
 
         return true;
     }
@@ -5509,6 +6467,68 @@ uint32_t afatfs_fwrite(afatfsFilePtr_t file, const uint8_t *buffer, uint32_t len
     return writtenBytes;
 }
 
+void afatfs_getDiagnosticSnapshot(afatfsFilePtr_t file,
+                                  afatfsDiagnosticSnapshot_t *snapshot)
+{
+    uint8_t cache_index;
+
+    /*
+     * Freeze-copy the state an external boot watchdog would otherwise lose.
+     * Input: the currently owned handle, which may be busy in a cluster
+     * append, plus AsyncFATFS global cache state. Output: scalar diagnostics
+     * only; no operation phase, cache flag, file cursor, poll, allocation, or
+     * SD request is changed. Why: callers must be able to classify a stalled
+     * append before afatfs_destroy(true) invalidates the handle during boot
+     * recovery. A NULL handle deliberately yields an unavailable snapshot.
+     */
+    if (!snapshot)
+        return;
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->active_cache_index = -1;
+    snapshot->filesystem_state = (uint8_t)afatfs.filesystemState;
+    snapshot->filesystem_full = afatfs.filesystemFull ? 1u : 0u;
+    snapshot->cache_flush_in_progress = afatfs.cacheFlushInProgress ? 1u : 0u;
+    for (cache_index = 0u; cache_index < AFATFS_NUM_CACHE_SECTORS;
+         cache_index++) {
+        const afatfsCacheBlockDescriptor_t *descriptor =
+            &afatfs.cacheDescriptor[cache_index];
+
+        if (descriptor->state == AFATFS_CACHE_STATE_DIRTY)
+            snapshot->cache_dirty_count++;
+        if (descriptor->locked)
+            snapshot->cache_locked_count++;
+        if (descriptor->state == AFATFS_CACHE_STATE_READING)
+            snapshot->cache_reading_count++;
+        if (descriptor->state == AFATFS_CACHE_STATE_WRITING)
+            snapshot->cache_writing_count++;
+    }
+    if (!file)
+        return;
+    snapshot->available = 1u;
+    snapshot->cursor_offset = file->cursorOffset;
+    snapshot->logical_size = file->logicalSize;
+    snapshot->physical_size = file->physicalSize;
+    snapshot->cursor_cluster = file->cursorCluster;
+    snapshot->cursor_previous_cluster = file->cursorPreviousCluster;
+    snapshot->file_operation = (uint8_t)file->operation.operation;
+    snapshot->sectors_per_cluster = afatfs.sectorsPerCluster;
+    if (file->writeLockedCacheIndex >= 0 &&
+        file->writeLockedCacheIndex < AFATFS_NUM_CACHE_SECTORS) {
+        snapshot->active_cache_index = file->writeLockedCacheIndex;
+    }
+    if (file->operation.operation ==
+        AFATFS_FILE_OPERATION_APPEND_FREE_CLUSTER) {
+        const afatfsAppendFreeCluster_t *append =
+            &file->operation.state.appendFreeCluster;
+
+        snapshot->append_phase = (uint8_t)append->phase;
+        snapshot->append_previous_cluster = append->previousCluster;
+        snapshot->search_cluster = append->searchCluster;
+        snapshot->search_start_cluster = append->searchStartCluster;
+        snapshot->search_wrapped = append->searchWrapped;
+    }
+}
+
 /**
  * Attempt to read `len` bytes from `file` into the `buffer`.
  *
@@ -5605,9 +6625,6 @@ static void afatfs_fileOperationContinue(afatfsFile_t *file)
         case AFATFS_FILE_OPERATION_CLOSE:
             afatfs_fcloseContinue(file);
         break;
-        case AFATFS_FILE_OPERATION_UNLINK:
-             afatfs_funlinkContinue(file);
-        break;
         case AFATFS_FILE_OPERATION_TRUNCATE:
             afatfs_ftruncateContinue(file, false);
         break;
@@ -5627,15 +6644,6 @@ static void afatfs_fileOperationContinue(afatfsFile_t *file)
         break;
         case AFATFS_FILE_OPERATION_DELETE_TREE:
             afatfs_deleteTreeContinue(file);
-        break;
-        case AFATFS_FILE_OPERATION_MOVE_OBJECT:
-            afatfs_moveObjectContinue(file);
-        break;
-        case AFATFS_FILE_OPERATION_COPY_TREE:
-            afatfs_copyTreeContinue(file);
-        break;
-        case AFATFS_FILE_OPERATION_REPLACE_TREE:
-            afatfs_replaceTreeContinue(file);
         break;
         case AFATFS_FILE_OPERATION_NONE:
             ;
@@ -6094,26 +7102,28 @@ uint32_t afatfs_getFreeBufferSpace()
     return result;
 }
 
-bool afatfs_deleteTree(const afatfsObjectId_t *root, afatfsResultCallback_t cb)
+bool afatfs_deleteTree(const afatfsObjectInfo_t *root,
+                       afatfsResultCallback_t cb)
 {
     afatfsFile_t *file;
+    afatfsResultCode_t validation =
+        afatfs_validateObjectInfo(root, AFATFS_OBJECT_DIRECTORY);
 
     /*
-     * Validate and fully initialize the private operation handle.
-     *
-     * Inputs: root must be a concrete directory identity discovered by object
-     * iteration. Output: false queues nothing for invalid input or when all
-     * open-file slots are occupied. Why initialization is mandatory:
-     * afatfs_allocateFileHandle() deliberately returns recycled storage; only
-     * afatfs_initFileHandle() restores cache indices to -1 and clears stale
-     * cursor/operation union bytes. Setting type alone, as the first native
-     * implementation did, violated that allocator contract and could inherit
-     * ownership from an earlier file. Affiliates: openFiles[], the polling
-     * dispatcher, and afatfs_deleteTreeFinish().
+     * Accept only one complete iterator result and copy it before returning.
+     * Inputs: the caller's immediate-parent scan result. Outputs: one private
+     * foreground-pumped handle or false with no callback. Why: the physical
+     * LFN/SFN pointers are the exact object identity, and the scan owner may
+     * be closed immediately after acceptance. Affiliates: filesystem.c's
+     * singular slot resolver, the object finder, and deleteTreeFinish().
      */
-    if (!root || root->kind != AFATFS_OBJECT_DIRECTORY ||
-        root->firstCluster < FAT_SMALLEST_LEGAL_CLUSTER_NUMBER) {
+    if (validation != AFATFS_RESULT_OK || afatfs.numClusters == 0u)
         return false;
+    for (uint8_t i = 0u; i < AFATFS_MAX_OPEN_FILES; i++) {
+        if (afatfs.openFiles[i].type != AFATFS_FILE_TYPE_NONE &&
+            afatfs.openFiles[i].operation.operation ==
+                AFATFS_FILE_OPERATION_DELETE_TREE)
+            return false;
     }
     file = afatfs_allocateFileHandle();
     if (!file)
@@ -6122,9 +7132,18 @@ bool afatfs_deleteTree(const afatfsObjectId_t *root, afatfsResultCallback_t cb)
     afatfs_initFileHandle(file);
     file->type = AFATFS_FILE_TYPE_NORMAL;
     file->operation.operation = AFATFS_FILE_OPERATION_DELETE_TREE;
-    file->operation.state.deleteTree.phase = AFATFS_DELETE_TREE_INITIAL;
-    file->operation.state.deleteTree.rootId = *root;
-    file->operation.state.deleteTree.callback = cb;
+    /* The sole state owner is recycled only after the previous callback. */
+    memset(&afatfs.deleteTreeState, 0, sizeof(afatfs.deleteTreeState));
+    afatfs.deleteTreeState.phase = AFATFS_DELETE_TREE_INITIAL;
+    afatfs.deleteTreeState.root = *root;
+    afatfs.deleteTreeState.callback = cb;
+    /* A valid tree may spend one unit on a descent and one on that directory's
+     * cluster; two volume-cluster units are therefore the conservative bound. */
+    afatfs.deleteTreeState.structuralBudget =
+        (afatfs.numClusters > UINT32_MAX / 2u)
+            ? UINT32_MAX : afatfs.numClusters * 2u;
+    afatfs.deleteTreeState.lastPhase = AFATFS_DELETE_TREE_INITIAL;
+    file->operation.state.deleteTree = &afatfs.deleteTreeState;
 
     return true;
 }
@@ -6134,26 +7153,25 @@ uint8_t afatfs_getDeleteTreePhase(void)
     for (int i = 0; i < AFATFS_MAX_OPEN_FILES; i++) {
         if (afatfs.openFiles[i].type != AFATFS_FILE_TYPE_NONE &&
             afatfs.openFiles[i].operation.operation == AFATFS_FILE_OPERATION_DELETE_TREE) {
-            return (uint8_t)afatfs.openFiles[i].operation.state.deleteTree.phase;
+            return (uint8_t)afatfs.openFiles[i].operation.state.deleteTree->phase;
         }
     }
     return 0xFF;
 }
 
-bool afatfs_moveObject(const afatfsObjectId_t *src, afatfsDirHandle_t dst_parent, const char *dst_name, afatfsResultCallback_t cb)
+uint8_t afatfs_getDeleteTreeFailureSite(void)
 {
-    afatfsFile_t *file = afatfs_allocateFileHandle();
-    if (!file) return false;
-
-    file->type = AFATFS_FILE_TYPE_NORMAL;
-    file->operation.operation = AFATFS_FILE_OPERATION_MOVE_OBJECT;
-    file->operation.state.moveObject.phase = AFATFS_MOVE_OBJECT_INITIAL;
-    file->operation.state.moveObject.srcId = *src;
-    file->operation.state.moveObject.dstParent = dst_parent;
-    file->operation.state.moveObject.dstName = dst_name;
-    file->operation.state.moveObject.callback = cb;
-
-    return true;
+    /*
+     * Deliberately reads afatfs.deleteTreeState directly rather than
+     * scanning openFiles[] the way afatfs_getDeleteTreePhase() does: by the
+     * time a caller wants this value, the delete has already completed and
+     * afatfs_deleteTreeFinish() has already reset its borrowed handle, so
+     * no matching openFiles[] entry exists to scan for. This struct is the
+     * persistent singleton afatfs_deleteTree() writes into, not part of
+     * that handle, and afatfs_deleteTreeFinish() never touches it -- only
+     * the next afatfs_deleteTree() call's memset() does.
+     */
+    return afatfs.deleteTreeState.failureSite;
 }
 
 /*
@@ -6174,9 +7192,16 @@ bool afatfs_moveObject(const afatfsObjectId_t *src, afatfsDirHandle_t dst_parent
 static void afatfs_deleteTreeFinish(afatfsFile_t *file,
                                     afatfsResultCode_t result)
 {
+    afatfsDeleteTree_t *op = file->operation.state.deleteTree;
     afatfsResultCallback_t callback =
-        file->operation.state.deleteTree.callback;
+        op->callback;
 
+    /* Finder owns a retained directory sector only between these two calls;
+     * finish closes that ownership before resetting the recycled handle. */
+    if (op->finderActive) {
+        afatfs_findLastObject(file, &op->finder);
+        op->finderActive = 0u;
+    }
     afatfs_fileUnlockCacheSector(file);
     afatfs_initFileHandle(file);
     if (callback)
@@ -6185,22 +7210,22 @@ static void afatfs_deleteTreeFinish(afatfsFile_t *file,
 
 static void afatfs_deleteTreeContinue(afatfsFile_t *file)
 {
-    afatfsDeleteTree_t *op = &file->operation.state.deleteTree;
+    afatfsDeleteTree_t *op = file->operation.state.deleteTree;
     afatfsOperationStatus_e status;
+    afatfsResultCode_t objectResult;
     afatfsObjectInfo_t object;
+
+    /* The phase latch is diagnostic only; structuralBudget is the actual
+     * corruption bound and is consumed by descents and released clusters. */
+    op->lastPhase = op->phase;
 
     doMore:
     switch (op->phase) {
         case AFATFS_DELETE_TREE_INITIAL:
-            /*
-             * Seed traversal from the copied physical root identity.
-             *
-             * The operation owns its root copy, so later product scans or UI
-             * name changes cannot redirect deletion. OPEN_DIR will configure
-             * the recycled file handle as a read-only directory cursor; root
-             * itself is retired only after its children are exhausted.
-             */
-            op->currentTarget = op->rootId;
+            /* Seed traversal from the copied root identity. */
+            op->currentTarget = op->root;
+            op->currentCluster = op->root.id.firstCluster;
+            op->nameRunNextEntry = 0u;
             op->phase = AFATFS_DELETE_TREE_OPEN_DIR;
             goto doMore;
 
@@ -6222,16 +7247,41 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
             afatfs_fileUnlockCacheSector(file);
             file->directoryEntryPos.sectorNumberPhysical = 0;
             file->directoryEntryPos.entryIndex = -1;
-            file->firstCluster = op->currentTarget.firstCluster;
-            file->cursorCluster = op->currentTarget.firstCluster;
+            if (op->currentTarget.id.firstCluster == 0u) {
+                if (afatfs.filesystemType != FAT_FILESYSTEM_TYPE_FAT16) {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_OPEN_DIR_BAD_ROOT_ON_FAT32;
+                    afatfs_deleteTreeFinish(file,
+                                            AFATFS_RESULT_UNSUPPORTED_LAYOUT);
+                    return;
+                }
+                file->type = AFATFS_FILE_TYPE_FAT16_ROOT_DIRECTORY;
+                file->firstCluster = 0u;
+                file->cursorCluster = 0u;
+            } else {
+                if (op->currentTarget.id.firstCluster <
+                        FAT_SMALLEST_LEGAL_CLUSTER_NUMBER ||
+                    op->currentTarget.id.firstCluster >=
+                        afatfs.numClusters + FAT_SMALLEST_LEGAL_CLUSTER_NUMBER) {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_OPEN_DIR_CLUSTER_OUT_OF_RANGE;
+                    afatfs_deleteTreeFinish(file,
+                                            AFATFS_RESULT_UNSUPPORTED_LAYOUT);
+                    return;
+                }
+                file->type = AFATFS_FILE_TYPE_DIRECTORY;
+                file->firstCluster = op->currentTarget.id.firstCluster;
+                file->cursorCluster = op->currentTarget.id.firstCluster;
+            }
+            file->directoryEntryPos = op->currentTarget.id.sfnEntry;
             file->cursorPreviousCluster = 0;
             file->logicalSize = 0;
             file->physicalSize = 0;
             file->cursorOffset = 0;
             file->mode = AFATFS_FILE_MODE_READ;
             file->attrib = FAT_FILE_ATTRIBUTE_DIRECTORY;
-            file->type = AFATFS_FILE_TYPE_DIRECTORY;
             afatfs_findFirstObject(file, &op->finder);
+            op->finderActive = 1u;
             op->phase = AFATFS_DELETE_TREE_SCAN;
             goto doMore;
 
@@ -6250,19 +7300,70 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
              * retain accounting, and the caller's structured result callback.
              */
             if (status == AFATFS_OPERATION_FAILURE) {
+                op->finderActive = 0u;
                 afatfs_findLastObject(file, &op->finder);
                 afatfs_deleteTreeFinish(file, AFATFS_RESULT_IO_ERROR);
                 return;
             }
             if (object.id.kind == AFATFS_OBJECT_NONE) {
+                op->finderActive = 0u;
                 afatfs_findLastObject(file, &op->finder);
-                op->phase = AFATFS_DELETE_TREE_EMPTY_DIR_ASCEND;
+                if (afatfs_entryPointerEquals(&file->directoryEntryPos,
+                                              &op->root.id.sfnEntry)) {
+                    if (file->firstCluster != op->root.id.firstCluster) {
+                        op->failureSite =
+                            AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_ROOT_CLUSTER_MISMATCH;
+                        afatfs_deleteTreeFinish(
+                            file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
+                        return;
+                    }
+                    op->currentTarget = op->root;
+                    op->nameRunNextEntry = 0u;
+                    op->phase = AFATFS_DELETE_TREE_FREE_FILE_CLUSTERS;
+                } else {
+                    op->phase = AFATFS_DELETE_TREE_EMPTY_DIR_ASCEND;
+                }
                 return; // YIELD to poll loop to prevent freezing!
             }
-            op->currentTarget = object.id;
-            op->currentTargetHasLongName = object.hasLongName;
+            /* Destructive traversal must never guess through a damaged VFAT
+             * run. Browsers may expose its SFN fallback, but delete must stop
+             * before touching either the child chain or its name entries. */
+            objectResult = afatfs_validateObjectInfo(&object, object.id.kind);
+            if (objectResult != AFATFS_RESULT_OK) {
+                op->finderActive = 0u;
+                afatfs_findLastObject(file, &op->finder);
+                if (!object.lfnMalformed) {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_MALFORMED_OBJECT;
+                }
+                afatfs_deleteTreeFinish(
+                    file, object.lfnMalformed
+                        ? AFATFS_RESULT_CORRUPT_LFN_RUN
+                        : AFATFS_RESULT_UNSUPPORTED_LAYOUT);
+                return;
+            }
+            if (object.id.firstCluster != 0u &&
+                (object.id.firstCluster < FAT_SMALLEST_LEGAL_CLUSTER_NUMBER ||
+                 object.id.firstCluster >= afatfs.numClusters +
+                     FAT_SMALLEST_LEGAL_CLUSTER_NUMBER ||
+                 afatfs_FATIsEndOfChainMarker(object.id.firstCluster))) {
+                op->finderActive = 0u;
+                afatfs_findLastObject(file, &op->finder);
+                op->failureSite =
+                    AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_CHILD_CLUSTER_OUT_OF_RANGE;
+                afatfs_deleteTreeFinish(
+                    file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
+                return;
+            }
+            op->currentTarget = object;
+            op->currentCluster = object.id.firstCluster;
+            op->nameRunNextEntry = 0u;
             if (object.id.kind == AFATFS_OBJECT_FILE) {
-                op->phase = AFATFS_DELETE_TREE_RETIRE_ENTRIES;
+                /* The file-chain/free-name phases use FAT and directory cache
+                 * sectors independently of the scan cursor. */
+                op->finderActive = 0u;
+                afatfs_findLastObject(file, &op->finder);
+                op->phase = AFATFS_DELETE_TREE_FREE_FILE_CLUSTERS;
                 return; // YIELD
             }
             if (object.id.kind == AFATFS_OBJECT_DIRECTORY) {
@@ -6272,6 +7373,40 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
                  * is later reconstructed structurally from the child's ".."
                  * entry; no live parent iterator is required across descent.
                  */
+                if (op->structuralBudget == 0u) {
+                    op->finderActive = 0u;
+                    afatfs_findLastObject(file, &op->finder);
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_STRUCTURAL_BUDGET_EXHAUSTED_DESCEND;
+                    afatfs_deleteTreeFinish(
+                        file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
+                    return;
+                }
+                op->structuralBudget--;
+                op->parentCluster = file->firstCluster;
+                /*
+                 * Snapshot everything the eventual ascend will need, now,
+                 * while it is all still known-good.
+                 *
+                 * What: parentEntry saves the directory-entry pointer of the
+                 * directory being left (file->directoryEntryPos still names
+                 * it, because AFATFS_DELETE_TREE_OPEN_DIR has not yet
+                 * rebound the handle to the child); descendTarget saves the
+                 * child's complete object identity, including its VFAT name
+                 * run. Why: both are destroyed by the descent itself --
+                 * OPEN_DIR overwrites file->directoryEntryPos with the
+                 * child's pointer, and the child's own scan overwrites
+                 * currentTarget with each object it deletes inside the
+                 * child. AFATFS_DELETE_TREE_REOPEN_PARENT restores both.
+                 * Inputs: file->directoryEntryPos and currentTarget as of
+                 * this instant. Outputs: two operation-state copies; no I/O
+                 * and no change to the card. Affiliates:
+                 * AFATFS_DELETE_TREE_REOPEN_PARENT (the sole reader),
+                 * afatfs_retireObjectNameRun() (consumes the saved name run).
+                 */
+                op->parentEntry = file->directoryEntryPos;
+                op->descendTarget = op->currentTarget;
+                op->finderActive = 0u;
                 afatfs_findLastObject(file, &op->finder);
                 op->phase = AFATFS_DELETE_TREE_DESCEND_DIR;
                 return; // YIELD
@@ -6283,103 +7418,225 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
             goto doMore;
 
         case AFATFS_DELETE_TREE_EMPTY_DIR_ASCEND:
-            if (file->firstCluster == op->rootId.firstCluster) {
-                /*
-                 * Retire the root through the physical entry run captured by
-                 * the caller's parent scan. rootId includes both SFN and LFN
-                 * pointers, so no name lookup or parent chdir is necessary.
-                 * The cluster comparison is safe for directories because a
-                 * valid directory always owns a nonzero first cluster.
-                 */
-                op->currentTarget = op->rootId;
-                op->currentTargetHasLongName = op->rootId.lfnEntryCount > 0 ? 1 : 0;
-                op->phase = AFATFS_DELETE_TREE_RETIRE_ENTRIES;
-                goto doMore;
-            } else {
-                uint32_t firstSector;
-                firstSector = afatfs_fileClusterToPhysical(file->firstCluster, 0);
+            {
+                uint32_t firstSector = afatfs_fileClusterToPhysical(
+                    file->firstCluster, 0u);
                 uint8_t *sector;
-                status = afatfs_cacheSector(firstSector, &sector, AFATFS_CACHE_READ, 0);
-                if (status == AFATFS_OPERATION_IN_PROGRESS) return;
+                fatDirectoryEntry_t *dotDot;
+                uint32_t parentCluster;
+
+                status = afatfs_cacheSector(firstSector, &sector,
+                                            AFATFS_CACHE_READ, 0u);
+                if (status == AFATFS_OPERATION_IN_PROGRESS)
+                    return;
                 if (status == AFATFS_OPERATION_FAILURE) {
                     afatfs_deleteTreeFinish(file, AFATFS_RESULT_IO_ERROR);
                     return;
                 }
-                fatDirectoryEntry_t *dotDot = &((fatDirectoryEntry_t*)sector)[1];
-                uint32_t parentCluster = (uint32_t)(((uint32_t)dotDot->firstClusterHigh << 16u) | dotDot->firstClusterLow);
-                if (parentCluster == 0) parentCluster = afatfs.rootDirectoryCluster;
-                op->targetClusterToRetire = file->firstCluster;
-                op->currentTarget.firstCluster = parentCluster;
-                op->phase = AFATFS_DELETE_TREE_SCAN_PARENT_FOR_SELF;
+                dotDot = &((fatDirectoryEntry_t *)sector)[1];
+                if ((dotDot->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY) == 0u ||
+                    dotDot->filename[0] != '.' || dotDot->filename[1] != '.' ||
+                    dotDot->filename[2] != ' ') {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_ASCEND_BAD_DOTDOT_ENTRY;
+                    afatfs_deleteTreeFinish(file,
+                                            AFATFS_RESULT_UNSUPPORTED_LAYOUT);
+                    return;
+                }
+                parentCluster = ((uint32_t)dotDot->firstClusterHigh << 16u) |
+                                dotDot->firstClusterLow;
+                if (afatfs.filesystemType == FAT_FILESYSTEM_TYPE_FAT32 &&
+                    parentCluster == 0u)
+                    parentCluster = afatfs.rootDirectoryCluster;
+                if (parentCluster != 0u &&
+                    (parentCluster < FAT_SMALLEST_LEGAL_CLUSTER_NUMBER ||
+                     parentCluster >= afatfs.numClusters +
+                         FAT_SMALLEST_LEGAL_CLUSTER_NUMBER)) {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_ASCEND_PARENT_CLUSTER_OUT_OF_RANGE;
+                    afatfs_deleteTreeFinish(file,
+                                            AFATFS_RESULT_UNSUPPORTED_LAYOUT);
+                    return;
+                }
+                if (op->parentCluster != parentCluster &&
+                    !(parentCluster == op->root.id.firstCluster &&
+                      op->parentCluster == op->root.id.firstCluster)) {
+                    /*
+                     * This is the specific check most consistent with
+                     * Session 054's slot-11 evidence: a nested Scene child
+                     * directory's own ".." entry disagrees with the parent
+                     * cluster recorded when this traversal descended into
+                     * it. See the failureSite doc comment on
+                     * afatfsDeleteTree_t for why this needed its own tag
+                     * rather than being lumped with every other
+                     * UNSUPPORTED_LAYOUT site.
+                     */
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_ASCEND_PARENT_CLUSTER_MISMATCH;
+                    afatfs_deleteTreeFinish(file,
+                                            AFATFS_RESULT_UNSUPPORTED_LAYOUT);
+                    return;
+                }
+                op->parentCluster = parentCluster;
+                op->phase = AFATFS_DELETE_TREE_REOPEN_PARENT;
                 goto doMore;
             }
             break;
 
-        case AFATFS_DELETE_TREE_SCAN_PARENT_FOR_SELF:
+        case AFATFS_DELETE_TREE_REOPEN_PARENT:
             /*
-             * Start a fresh scan of the recovered parent cluster.
+             * Rebind `file` to the parent directory -- no search.
              *
-             * The child scan was released before descent/ascend. Releasing
-             * again is harmless and guarantees this transition is safe if a
-             * future phase begins retaining a sector. The parent is scanned by
-             * physical firstCluster identity so duplicate display names cannot
-             * select a sibling directory.
+             * What: reopens `file` by cluster identity only (op->parentCluster,
+             * already validated and ".."-agreement checked in
+             * AFATFS_DELETE_TREE_EMPTY_DIR_ASCEND just above), restores both
+             * identities the descent destroyed, and proceeds to free the
+             * just-ascended-from child's own cluster chain.
+             *
+             * Why the identities are restored from saved copies rather than
+             * read out of live state: this phase previously took the child's
+             * identity straight from op->currentTarget, on the assumption
+             * that it still described the child. It does not. currentTarget
+             * is the "object currently being deleted" register, rewritten by
+             * AFATFS_DELETE_TREE_SCAN for every object it processes -- so
+             * whenever the child directory had contents, currentTarget by
+             * this point names the LAST FILE deleted inside the child, whose
+             * cluster chain was freed moments ago. Freeing it a second time
+             * walked a FAT link that now reads as free space, which is
+             * exactly the AFATFS_DELETE_TREE_FAILURE_SITE_FREE_CLUSTERS_NEXT_CLUSTER_INVALID
+             * that Session 054's Scene-slot-12 evidence reported (the
+             * assumption held only for a child that was already empty when
+             * discovered, which is why simpler fixtures appeared to work).
+             * op->descendTarget is that identity captured at descend time,
+             * complete with the VFAT name run afatfs_retireObjectNameRun()
+             * needs to retire every fragment instead of orphaning them.
+             *
+             * file->directoryEntryPos must likewise be restored to the
+             * PARENT's own pointer, not left cleared: AFATFS_DELETE_TREE_SCAN
+             * reads it to tell "I have emptied the delete root, retire it and
+             * finish" from "I have emptied a nested child, ascend". Leaving
+             * it zeroed made an emptied delete root look like a nested child
+             * and sent the traversal ascending out of the tree it was
+             * deleting. The root case is restored from op->root (the delete
+             * root's identity, always available); any deeper parent is
+             * restored from op->parentEntry.
+             *
+             * Inputs: op->parentCluster, op->parentEntry, op->descendTarget,
+             * op->root. Outputs: `file` rebound to and correctly identified
+             * as the parent; currentTarget/currentCluster/nameRunNextEntry
+             * set up so AFATFS_DELETE_TREE_FREE_FILE_CLUSTERS then
+             * AFATFS_DELETE_TREE_RETIRE_ENTRIES delete the child. No search
+             * and no extra card I/O. Affiliates:
+             * AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_PARENT_FOR_SELF_EXHAUSTED
+             * and ..._MATCH_CLUSTER_OUT_OF_RANGE, permanently unreachable
+             * since the re-scan this phase replaced was removed, and retained
+             * only so already-captured card evidence naming them decodes.
              */
             afatfs_fileUnlockCacheSector(file);
             file->directoryEntryPos.sectorNumberPhysical = 0;
             file->directoryEntryPos.entryIndex = -1;
-            file->firstCluster = op->currentTarget.firstCluster;
-            file->cursorCluster = op->currentTarget.firstCluster;
+            if (op->parentCluster == 0u) {
+                if (afatfs.filesystemType != FAT_FILESYSTEM_TYPE_FAT16) {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_SCAN_PARENT_BAD_ROOT_ON_FAT32;
+                    afatfs_deleteTreeFinish(file,
+                                            AFATFS_RESULT_UNSUPPORTED_LAYOUT);
+                    return;
+                }
+                file->type = AFATFS_FILE_TYPE_FAT16_ROOT_DIRECTORY;
+                file->firstCluster = 0u;
+                file->cursorCluster = 0u;
+            } else {
+                file->type = AFATFS_FILE_TYPE_DIRECTORY;
+                file->firstCluster = op->parentCluster;
+                file->cursorCluster = op->parentCluster;
+            }
             file->cursorPreviousCluster = 0;
             file->logicalSize = 0;
             file->physicalSize = 0;
             file->cursorOffset = 0;
             file->mode = AFATFS_FILE_MODE_READ;
             file->attrib = FAT_FILE_ATTRIBUTE_DIRECTORY;
-            file->type = AFATFS_FILE_TYPE_DIRECTORY;
-            afatfs_findFirstObject(file, &op->finder);
-            op->phase = AFATFS_DELETE_TREE_SCAN_PARENT_FOR_SELF_LOOP;
-            goto doMore;
-
-        case AFATFS_DELETE_TREE_SCAN_PARENT_FOR_SELF_LOOP:
-            status = afatfs_findNextObject(file, &op->finder, &object);
-            if (status == AFATFS_OPERATION_IN_PROGRESS)
-                return;
-            if (status == AFATFS_OPERATION_FAILURE || object.id.kind == AFATFS_OBJECT_NONE) {
-                afatfs_findLastObject(file, &op->finder);
-                afatfs_deleteTreeFinish(file, AFATFS_RESULT_IO_ERROR);
-                return;
-            }
-            if (object.id.firstCluster == op->targetClusterToRetire) {
-                op->currentTarget = object.id;
-                op->currentTargetHasLongName = object.hasLongName;
-                op->phase = AFATFS_DELETE_TREE_RETIRE_ENTRIES;
-                return; // YIELD
-            }
-            return; // YIELD (process one entry per poll)
-
-        case AFATFS_DELETE_TREE_RETIRE_ENTRIES:
-            object.id = op->currentTarget;
-            object.hasLongName = op->currentTargetHasLongName;
-            status = afatfs_retireObjectNameRun(&object);
-            if (status == AFATFS_OPERATION_IN_PROGRESS) return;
-            if (status == AFATFS_OPERATION_FAILURE) {
-                afatfs_deleteTreeFinish(file, AFATFS_RESULT_IO_ERROR);
-                return;
-            }
-            op->currentCluster = op->currentTarget.firstCluster;
+            /*
+             * Re-establish "which directory is `file` open on" for the parent.
+             * The delete root is identified from op->root so the traversal can
+             * still recognize the root once the parent's scan empties it; any
+             * deeper parent uses the pointer saved when we descended past it.
+             */
+            file->directoryEntryPos =
+                (op->parentCluster == op->root.id.firstCluster)
+                    ? op->root.id.sfnEntry
+                    : op->parentEntry;
+            /*
+             * Restore the ascended-from child as the object being deleted,
+             * then hand off: FREE_FILE_CLUSTERS releases its cluster chain and
+             * RETIRE_ENTRIES retires its complete name run. nameRunNextEntry
+             * is rewound to zero exactly as AFATFS_DELETE_TREE_SCAN does when
+             * it selects a fresh object.
+             */
+            op->currentTarget = op->descendTarget;
+            op->currentCluster = op->currentTarget.id.firstCluster;
+            op->nameRunNextEntry = 0u;
             op->phase = AFATFS_DELETE_TREE_FREE_FILE_CLUSTERS;
             goto doMore;
 
-        case AFATFS_DELETE_TREE_FREE_FILE_CLUSTERS:
-            if (op->currentCluster == 0 || afatfs_FATIsEndOfChainMarker(op->currentCluster)) {
-                if (op->currentTarget.firstCluster == op->rootId.firstCluster) {
-                    op->phase = AFATFS_DELETE_TREE_SUCCESS;
-                    return; // YIELD
-                } else {
-                    op->phase = AFATFS_DELETE_TREE_SCAN;
-                    return; // YIELD
+        case AFATFS_DELETE_TREE_RETIRE_ENTRIES:
+            status = afatfs_retireObjectNameRun(&op->currentTarget,
+                                                &op->nameRunNextEntry);
+            if (status == AFATFS_OPERATION_IN_PROGRESS) return;
+            if (status == AFATFS_OPERATION_FAILURE) {
+                afatfs_deleteTreeFinish(
+                    file, op->currentTarget.lfnMalformed
+                        ? AFATFS_RESULT_CORRUPT_LFN_RUN
+                        : AFATFS_RESULT_IO_ERROR);
+                return;
+            }
+            if (op->nameRunNextEntry <
+                op->currentTarget.id.lfnEntryCount + 1u)
+                return;
+            if (afatfs_entryPointerEquals(&op->currentTarget.id.sfnEntry,
+                                          &op->root.id.sfnEntry)) {
+                if (op->currentTarget.id.firstCluster !=
+                    op->root.id.firstCluster) {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_RETIRE_ENTRIES_ROOT_CLUSTER_MISMATCH;
+                    afatfs_deleteTreeFinish(
+                        file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
+                    return;
                 }
+                op->phase = AFATFS_DELETE_TREE_SUCCESS;
+            } else {
+                op->phase = AFATFS_DELETE_TREE_RESUME_PARENT;
+            }
+            goto doMore;
+
+        case AFATFS_DELETE_TREE_FREE_FILE_CLUSTERS:
+            if (op->currentCluster == 0u) {
+                if (op->currentTarget.id.kind != AFATFS_OBJECT_FILE ||
+                    op->currentTarget.id.logicalSize != 0u) {
+                    op->failureSite =
+                        AFATFS_DELETE_TREE_FAILURE_SITE_FREE_CLUSTERS_NONFILE_NONZERO_SIZE;
+                    afatfs_deleteTreeFinish(
+                        file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
+                    return;
+                }
+                op->phase = AFATFS_DELETE_TREE_RETIRE_ENTRIES;
+                goto doMore;
+            }
+            if (afatfs_FATIsEndOfChainMarker(op->currentCluster)) {
+                op->nameRunNextEntry = 0u;
+                op->phase = AFATFS_DELETE_TREE_RETIRE_ENTRIES;
+                goto doMore;
+            }
+            if (op->currentCluster < FAT_SMALLEST_LEGAL_CLUSTER_NUMBER ||
+                op->currentCluster >= afatfs.numClusters +
+                    FAT_SMALLEST_LEGAL_CLUSTER_NUMBER ||
+                op->structuralBudget == 0u) {
+                op->failureSite =
+                    AFATFS_DELETE_TREE_FAILURE_SITE_FREE_CLUSTERS_CLUSTER_OUT_OF_RANGE_OR_BUDGET;
+                afatfs_deleteTreeFinish(
+                    file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
+                return;
             }
             uint32_t nextCluster;
             status = afatfs_FATGetNextCluster(0, op->currentCluster, &nextCluster);
@@ -6388,15 +7645,90 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
                 afatfs_deleteTreeFinish(file, AFATFS_RESULT_IO_ERROR);
                 return;
             }
+            if (fat_isFreeSpace(nextCluster) ||
+                (!afatfs_FATIsEndOfChainMarker(nextCluster) &&
+                 (nextCluster < FAT_SMALLEST_LEGAL_CLUSTER_NUMBER ||
+                  nextCluster >= afatfs.numClusters +
+                      FAT_SMALLEST_LEGAL_CLUSTER_NUMBER))) {
+                op->failureSite =
+                    AFATFS_DELETE_TREE_FAILURE_SITE_FREE_CLUSTERS_NEXT_CLUSTER_INVALID;
+                afatfs_deleteTreeFinish(
+                    file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
+                return;
+            }
             status = afatfs_FATSetNextCluster(op->currentCluster, 0);
             if (status != AFATFS_OPERATION_SUCCESS) {
                 if (status == AFATFS_OPERATION_IN_PROGRESS) return;
                 afatfs_deleteTreeFinish(file, AFATFS_RESULT_IO_ERROR);
                 return;
             }
-            afatfs.lastClusterAllocated = MIN(afatfs.lastClusterAllocated, op->currentCluster - 1);
+            afatfs.lastClusterAllocated = MIN(afatfs.lastClusterAllocated,
+                                              op->currentCluster - 1u);
+            op->structuralBudget--;
             op->currentCluster = nextCluster;
             return;
+
+        case AFATFS_DELETE_TREE_RESUME_PARENT:
+            /*
+             * Re-scan the directory `file` already has open -- no reopen.
+             *
+             * What: resets the scan cursor on the currently-open handle and
+             * restarts AFATFS_DELETE_TREE_SCAN on it directly, instead of
+             * reconstructing a target from op->parentCluster and re-entering
+             * through AFATFS_DELETE_TREE_OPEN_DIR. Why: `file` is already
+             * correctly bound to the directory that needs to be resumed in
+             * both paths that reach this phase -- after deleting a plain
+             * file, `file` was never rebound away from the directory that
+             * contained it; after retiring an ascended, now-empty child's
+             * own entry, `file` is the parent AFATFS_DELETE_TREE_REOPEN_PARENT
+             * already reopened. Deriving a fresh target from
+             * op->parentCluster was the bug: that field is only ever
+             * assigned by a prior descend or ascend, so the first plain
+             * file object encountered directly under the traversal's own
+             * root -- before any descend/ascend has run this operation --
+             * reopened using its zero-initialized default, which
+             * AFATFS_DELETE_TREE_OPEN_DIR then reads as a FAT16 root
+             * reference on a FAT32 card and rejects. Root-caused from
+             * Session 054's ScnS05 evidence (Scene slot 2, "002 Hard",
+             * whose first scanned child was a plain file rather than its
+             * nested "Kit Hard" subdirectory). Inputs: the already-open
+             * `file` handle, whose firstCluster and directoryEntryPos both
+             * already describe the directory to resume. Outputs: one
+             * restarted scan; op->currentTarget and op->parentCluster are
+             * untouched (currentTarget is about to be overwritten by the
+             * next object AFATFS_DELETE_TREE_SCAN selects anyway; the
+             * ascend path reads op->descendTarget, not currentTarget).
+             * Affiliates:
+             * AFATFS_DELETE_TREE_FAILURE_SITE_OPEN_DIR_BAD_ROOT_ON_FAT32,
+             * AFATFS_DELETE_TREE_OPEN_DIR's reset sequence (which resets the
+             * same cursor fields but, unlike this phase, legitimately
+             * rebinds the handle and therefore rewrites directoryEntryPos).
+             */
+            afatfs_fileUnlockCacheSector(file);
+            /*
+             * Deliberately does NOT touch file->directoryEntryPos.
+             *
+             * This phase rewinds a scan of the directory `file` is already
+             * open on; it never rebinds the handle, so that directory's own
+             * identity must survive untouched. Clearing it here (as an
+             * earlier revision of this phase did, by copying
+             * AFATFS_DELETE_TREE_OPEN_DIR's reset sequence wholesale) erased
+             * the only record of which directory was being scanned, with two
+             * consequences: AFATFS_DELETE_TREE_SCAN could no longer recognize
+             * an emptied delete root and ascended out of the tree instead of
+             * retiring it, and the pointer that AFATFS_DELETE_TREE_EMPTY_DIR_ASCEND
+             * hands onward became a zeroed placeholder. Only the cursor
+             * fields below are reset, which is all a rewind requires.
+             */
+            file->cursorCluster = file->firstCluster;
+            file->cursorPreviousCluster = 0;
+            file->logicalSize = 0;
+            file->physicalSize = 0;
+            file->cursorOffset = 0;
+            afatfs_findFirstObject(file, &op->finder);
+            op->finderActive = 1u;
+            op->phase = AFATFS_DELETE_TREE_SCAN;
+            goto doMore;
 
         case AFATFS_DELETE_TREE_SUCCESS:
             /*
@@ -6410,10 +7742,8 @@ static void afatfs_deleteTreeContinue(afatfsFile_t *file)
 
         default:
             /* Corrupt or unsupported phase state is a terminal driver error. */
-            afatfs_deleteTreeFinish(file, AFATFS_RESULT_IO_ERROR);
+            op->failureSite = AFATFS_DELETE_TREE_FAILURE_SITE_CORRUPT_PHASE;
+            afatfs_deleteTreeFinish(file, AFATFS_RESULT_UNSUPPORTED_LAYOUT);
             return;
     }
 }
-static void afatfs_moveObjectContinue(afatfsFile_t *file) { (void)file; }
-static void afatfs_copyTreeContinue(afatfsFile_t *file) { (void)file; }
-static void afatfs_replaceTreeContinue(afatfsFile_t *file) { (void)file; }
