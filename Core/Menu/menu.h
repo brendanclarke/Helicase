@@ -460,6 +460,18 @@ void numtostru(char *buf, uint8_t num);
 
 /* Direct page name access for load page kit browser */
 void menu_setShownPattern(uint8_t patternNr);
+/*
+ * menu_setPlayedPattern — side-effect-free alignment of the played-Pattern
+ * UI mirror used by the chase renderer. See menu.c for full contract.
+ *
+ * Input: patternNr is the Scene/Pattern slot. Output: menu_playedPattern
+ * is set to the validated value. No LED, MIDI, follow, or repaint work.
+ *
+ * Callers: filesystem.c Scene/Bank realignment sites.
+ * Affiliates: menu_setShownPattern(), led_notifyPatternChanged(),
+ * led_updateCurrentStep(), seq_alignActivePatternToScene().
+ */
+void menu_setPlayedPattern(uint8_t patternNr);
 uint8_t menu_getViewedPattern(void);
 void sendDisplayBuffer(void);
 

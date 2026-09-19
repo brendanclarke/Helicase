@@ -311,7 +311,8 @@
 ** What: three tunable constants governing the VOICE-page held-step
 ** automation overlay (S066). BUTTON_HOLD_DELAY_MS is the common short
 ** long-press threshold shared by every UI gesture that distinguishes a hold
-** from a tap. VOICE_AUTOMATION_UNDERLINE_QUIET_MS is the quiet period before
+** from a tap; the current default is 200 ms. VOICE_AUTOMATION_UNDERLINE_QUIET_MS
+** is the quiet period before
 ** reapplying a value underline after a rapid pot edit. The scan budget bounds
 ** the asynchronous Pattern search to four steps per foreground pass.
 **
@@ -323,7 +324,7 @@
 ** timing/search policy. Affiliates: time_sysTick, buttonHandler_tick(), and
 ** menu_serviceRuntimeWidgets().
 ** ----------------------------------------------------------------------- */
-#define BUTTON_HOLD_DELAY_MS                 100u
+#define BUTTON_HOLD_DELAY_MS                 200u
 #define VOICE_AUTOMATION_UNDERLINE_QUIET_MS  100u
 #define VOICE_AUTOMATION_SCAN_STEPS_PER_PASS 4u
 

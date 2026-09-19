@@ -1408,16 +1408,45 @@ Full historical detail: `knowledge_files/log_archive/057_SESSION_HANDOFF_LOG.md`
 items formerly in this section now live in
 `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
 
-- **Sequencer chaselight LED can disappear** (user-reported, not yet
-  reproduced under logging). Both the rendering side
-  (`led_updateCurrentStep()`) and producer side (`seq_ledState.chaseStep`)
-  were traced but not root-caused.
+- **Sequencer chaselight LED can disappear — RESOLVED in Session 068.**
+  Root-caused to `menu_playedPattern` desync at boot. See
+  `S068_MISSING_CHASELIGHT.md`.
 - **`bootlog.bin`/`asavetrc.bin` duplicate-name limitation** remains tracked
   in `DEV_MODES.md`. The Session 056 LFN early-free-run-exit fix may have
   narrowed or closed its mechanism, but the deliberate hardware re-check has
   not run.
 - The trace-record-count, diagnostic-watchdog, and Makefile dependency items
   remain in the Session 054-055 non-Load/Save list above.
+
+---
+
+## Session 068 deferred items (2026-09-19)
+
+- **Chaselight after boot — RESOLVED.** Root-caused and fixed in Session 068.
+  `menu_playedPattern` was left at its BSS default of 0 when active Scene != 0,
+  causing the chase renderer's shown/played equality predicate to reject every
+  chase update. Fix: added `menu_setPlayedPattern()` at three filesystem
+  realignment sites. Hardware-accepted. See `S068_MISSING_CHASELIGHT.md`.
+- **Per-track step scale (sequencer consumption).** `track_scale[track]` is
+  stored, persisted, and editable through the Menu, but the sequencer advances
+  all tracks on a single global 24-PPQ-tick divisor
+  (`SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP`). All tracks play at 1/16th note
+  resolution regardless of the stored scale value. Fix requires per-track PPQ
+  tick accumulators (`seq_trackTickAccum[NUM_TRACKS]`, +28 bytes ISR static)
+  and a scale-to-ticks mapping table validated against the original LXR's
+  documented scale labels. Interacts with §4.7 "Per-track step timing scale"
+  design. See `S068_TRACK_SETTINGS_IGNORED.md` Root cause 2.
+- **Per-track shuffle (sequencer consumption).** `track_shuffle[track]` is
+  stored, persisted, and editable through the Menu, but the sequencer fires
+  every step at a uniform tick boundary with no shuffle offset. Fix requires
+  sub-step scheduling: either per-track delay counters (+7 bytes ISR static)
+  or a deferred trigger queue. Shuffle is orthogonal to both length and scale.
+  See `S068_TRACK_SETTINGS_IGNORED.md` Root cause 3.
+- **Per-track length — RESOLVED.** Sequencer now reads
+  `region->track_length[track]` in `seq_advanceTrackStep()` and
+  `seq_realignActivePatternToMasterClock()`. Default init changed from 128 to
+  16 to match historic behavior. All SD card PAT4 files patched to length=16.
+  Hardware-accepted. See `S068_TRACK_SETTINGS_IGNORED.md`.
 
 ---
 
@@ -1437,12 +1466,10 @@ items formerly in this section now live in
   probability suppresses a step, automation on that step should also be
   suppressed, matching the user's intent that the step as a whole is
   probabilistic.
-- **Chaselight still missing sometimes.** Particularly after reboot; tends to
-  come back after switching scenes. Partially traced in Session 057 — both the
-  rendering side (`led_updateCurrentStep()`) and the producer side
-  (`seq_ledState.chaseStep`) were examined but the root cause is unresolved. May
-  relate to the Pattern/Scene index alignment (the `seq_activePattern` /
-  `menu_shownPattern` desync class of bug from Session 054).
+- **Chaselight still missing sometimes — RESOLVED in Session 068.** Root cause
+  was `menu_playedPattern` left at BSS default 0 when active Scene != 0. Fixed
+  by adding `menu_setPlayedPattern()` at filesystem realignment sites.
+  Hardware-accepted. See `S068_MISSING_CHASELIGHT.md`.
 - **Menu specification sheet.** Need a comprehensive menu specification
   reference in `knowledge_files/specification_reference/` covering all pages,
   sub-pages, parameter assignments, knob/button behaviors, and display rules.

@@ -14027,12 +14027,13 @@ static void filesystem_loadBankDirectory_tick(void)
          * which is why only Pattern appeared broken.
          *
          * Inputs: the Bank manifest's committed active Scene. Outputs: the
-         * sequencer's active/pending Pattern indices and Menu's viewed Pattern
-         * follow it. Both callees validate the index themselves and are pure
-         * state realignment — no SD access, no allocation, no payload change,
-         * and no MIDI emission (the reason seq_alignActivePatternToScene()
-         * exists instead of seq_selectActivePattern(), which would send a
-         * program change and force note-offs during pre-audio boot).
+         * sequencer's active/pending Pattern indices and Menu's viewed and
+         * played Pattern mirrors follow it. All three callees validate the
+         * index themselves and are pure state realignment — no SD access, no
+         * allocation, no payload change, and no MIDI emission (the reason
+         * seq_alignActivePatternToScene() exists instead of
+         * seq_selectActivePattern(), which would send a program change and
+         * force note-offs during pre-audio boot).
          *
          * Repaint is intentionally not triggered here: filesystem.c must not
          * drive LCD/LED work. Boot repaints via menu_start()/menu_repaintAll()
@@ -14040,11 +14041,12 @@ static void filesystem_loadBankDirectory_tick(void)
          * Menu's PRESET_OP_BANK_LOAD completion.
          *
          * Affiliates: seq_alignActivePatternToScene(), menu_setShownPattern(),
-         * menu_perfModeSceneButtonPressed() (the equivalent front-panel
-         * pairing), and SCENE_LOAD_PAT_RESTORE.md.
+         * menu_setPlayedPattern(), menu_perfModeSceneButtonPressed() (the
+         * equivalent front-panel pairing), and SCENE_LOAD_PAT_RESTORE.md.
          */
         seq_alignActivePatternToScene(op_bank_active_scene);
         menu_setShownPattern(op_bank_active_scene);
+        menu_setPlayedPattern(op_bank_active_scene);
         memcpy(preset_currentName, op_bank_display_name, 8u);
         filesystem_cacheResidentName(0u, op_bank_display_name);
         filesystem_bootLoggingSetDetail("BKHCWRIT");
@@ -26877,11 +26879,14 @@ static uint16_t filesystem_bootNarrowLoadBank(uint16_t bank_slot)
     bank_setSceneMaskVoiceEdit(op_bankset_state.scene_mask_voice_edit);
     bank_setRestoreBankSlot(bank_slot);
     bank_setHasResidentBank(1u);
-    /* Reader active-Scene tail: same realignment the winner reader's
-     * step-2 apply performs after committing the Bank. */
+    /* Reader active-Scene tail: same side-effect-free realignment the winner
+     * reader's step-2 apply performs after committing the Bank. Keep the
+     * sequencer active/pending Pattern and both Menu Pattern mirrors equal;
+     * this path must not invoke runtime Scene-switch MIDI or repaint work. */
     scene_selectActive(active_scene);
     seq_alignActivePatternToScene(active_scene);
     menu_setShownPattern(active_scene);
+    menu_setPlayedPattern(active_scene);
     (void)filesystem_blockChdir(NULL);
     return present_mask;
 }
@@ -28035,8 +28040,13 @@ uint8_t filesystem_autosaveBootReaderBlocking(void)
     }
     bank_setHasResidentBank(1u);
     scene_selectActive(bank_activeSceneSlot());
+    /* Commit the sequencer Pattern and both Menu Pattern mirrors before the
+     * per-Scene Case 1/2/3 evaluation. This is state alignment only: no
+     * runtime Scene-switch MIDI, note-off, or repaint side effects belong in
+     * this pre-audio reader. */
     seq_alignActivePatternToScene(bank_activeSceneSlot());
     menu_setShownPattern(bank_activeSceneSlot());
+    menu_setPlayedPattern(bank_activeSceneSlot());
     /* Step 3: per-Scene Case 1/2/3 evaluation. */
     for (scene_index = 0u; scene_index < AUTOSAVE_SCENE_COUNT;
          scene_index++) {

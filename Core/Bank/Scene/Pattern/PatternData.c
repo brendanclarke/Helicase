@@ -764,8 +764,21 @@ void pat_initScene(uint8_t scene_index)
     memset(region->bitmap, 0, PAT_STACK_SIZE);
     memset(region->bitmap + PAT_STACK_SIZE, 0xFF,
            512u - PAT_STACK_SIZE);
+    /*
+     * Per-track playback settings defaults.
+     *
+     * track_length: the number of steps the sequencer visits before wrapping
+     * this track. Defaults to NUM_STEPS_PER_BAR (16) so a freshly initialized
+     * Scene plays one 16-step bar per track, matching the sequencer's historic
+     * fixed behavior. seq_advanceTrackStep() reads this at each step boundary
+     * and wraps independently per track; valid range is 1–NUM_STEPS (128).
+     *
+     * track_scale and track_shuffle: stored and persisted but not yet consumed
+     * by the sequencer — deferred for future implementation. Defaults are
+     * TRACK_SCALE_OFF (no per-track rate override) and 0 (no shuffle offset).
+     */
     for (track = 0u; track < NUM_TRACKS; track++) {
-        region->track_length[track] = NUM_STEPS;
+        region->track_length[track] = NUM_STEPS_PER_BAR;
         region->track_scale[track] = TRACK_SCALE_OFF;
         region->track_shuffle[track] = 0u;
     }

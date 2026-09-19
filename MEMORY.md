@@ -17,25 +17,24 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 067 complete — Pattern Stack Service plus
-dtype offset bug fix, compiled and hardware-validated on branch
-`dev-ph4-pattern`. The service dispatches all pool mutations through a SPSC
-queue with two-tier defragmentation, bulk barriers, and filesystem handover.
-The dtype fix changed automation values from halved MIDI CC-style to identity
-mapping at all four code sites. Build: `text=447,580`, `data=412`,
-`bss=291,140` (+8,184 text, +288 bss from Session 066). Hardware validation:
-PatternTrace zero errors across 6,172 records, AutoSaveTrace zero errors
-across 157,207 records, PAT4 structural integrity confirmed, automation
-values confirmed in identity domain.
+**Current working source**: Session 068 S068 Pattern Trigger Assignment and
+missing chase-light fixes implemented and clean-build verified on top of the
+Session 067 Pattern Stack Service baseline. The front-panel event path now
+uses a 64-entry monotonic SPSC ring with overflow reconciliation, the hold
+timer checks physical state, step toggles emit a logging-only witness, and
+filesystem Scene/Bank realignment now synchronizes the played-Pattern UI
+mirror without runtime side effects. Build: `text=447,772`, `data=412`,
+`bss=291,196`. Hardware acceptance of the VOICE/STEP rapid-tap,
+all-16-button release, and active-Scene chase-light fixtures remains pending.
 
-**Next feature step**: Phase 4.5 copy operations (`pat_copyTrack`,
-`pat_copyPattern`, `pat_copyBar`) with independent pool-block duplication,
-routed through the Pattern Stack Service. Hardware validation of service
-queueing under sustained load is recommended before proceeding. Permanent
-Session 067 authority is
-`knowledge_files/log_archive/067_SESSION_HANDOFF_LOG.md`,
-`PATTERN_DYNAMIC_STACK.md`, `MODULE_INTERCHANGE_SPEC.md`, and
-`SRAM_MANIFEST.md`.
+**Next feature step**: hardware acceptance of S068, followed by Phase 4.5 copy
+operations (`pat_copyTrack`, `pat_copyPattern`, `pat_copyBar`) with independent
+pool-block duplication routed through the Pattern Stack Service. Permanent
+Session 067 authority remains
+`knowledge_files/log_archive/067_SESSION_HANDOFF_LOG.md`; S068 implementation
+authority is `S068_PAT_ASSIGN_BUG_IMPLEMENTATION.md` together with
+`S068_PAT_ASSIGN_BUG_IN_DEPTH.md`, `PATTERN_DYNAMIC_STACK.md`,
+`MODULE_INTERCHANGE_SPEC.md`, and `SRAM_MANIFEST.md`.
 
 ## RAM Allocation Approval Policy
 
@@ -59,6 +58,12 @@ must not allocate those rings, cursors, or timing records.
 This section is for short carryover points only. Flush or rewrite it at session
 end; durable facts belong in `knowledge_files/log_archive/` or
 `knowledge_files/specification_reference/`.
+
+- Session 068 code pass is complete and build/image verified. Hardware
+  acceptance is still required before treating the front-panel and
+  missing-chase-light fixes as closed; use the acceptance fixtures recorded
+  in `S068_PAT_ASSIGN_BUG_IMPLEMENTATION.md` and
+  `S068_MISSING_CHASELIGHT.md`.
 
 - Read `knowledge_files/log_archive/040_SESSION_HANDOFF_LOG.md` before
   continuing Scene/Bank or filesystem work. It preserves the verified
