@@ -2,10 +2,11 @@
  * buttonHandler.h — LXR-02 button handler.
  * Ported from original LXR AVR buttonHandler.h by Julian Schmidt.
  *
- * ISR SAFETY: buttonHandler_buttonPressed / buttonReleased are called from
- * the TIM6 ISR (via din_dout_exchange). They must NOT call any LCD functions
- * or spin-wait. They record events; buttonHandler_processEvents() in the main
- * loop does all the work that touches the LCD/menu.
+ * CONCURRENCY: buttonHandler_buttonPressed / buttonReleased are called by the
+ * foreground scan (din_dout_exchange via timebase_serviceFrontPanel at about
+ * 500 Hz). They only update held state and enqueue an event; they do not call
+ * LCD/menu actions. buttonHandler_processEvents() in the main loop dispatches
+ * one event per call, with two bounded calls separated by audio rendering.
  */
 #ifndef BUTTONHANDLER_H_
 #define BUTTONHANDLER_H_
@@ -59,7 +60,9 @@ enum ButtonNumbers {
 };
 
 /*
- * Called from ISR context (TIM6) — only records events, no LCD calls.
+ * Called from the foreground front-panel scan — only records events and held
+ * state, with no LCD calls. The event producer is the scan; the consumer is
+ * buttonHandler_processEvents() in the main loop.
  */
 void buttonHandler_buttonPressed(uint8_t buttonNr);
 void buttonHandler_buttonReleased(uint8_t buttonNr);
@@ -77,8 +80,9 @@ void buttonHandler_tick(void);
  *
  * What: bit N corresponds to BUT_SEQ(N+1), independent of Menu mode or timer
  * state. Why: Menu needs the physical selection while resolving held-step
- * automation values. Inputs: the ISR-maintained btn_held[] array. Output: a
- * 16-bit foreground-readable mask. Affiliate: buttonHandler_visibleStep().
+ * automation values. Inputs: the foreground-scan-maintained held state.
+ * Output: a 16-bit foreground-readable mask. Affiliate:
+ * buttonHandler_visibleStep().
  */
 uint16_t buttonHandler_seqHeldMask(void);
 

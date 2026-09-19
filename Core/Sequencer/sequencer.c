@@ -516,16 +516,36 @@ static void seq_queueStepAutomations(uint8_t track, uint8_t step)
  * Advance and service one fixed-grid step for one track.
  *
  * Input: track index at a sixteenth-note scheduler boundary. Output: its
- * cursor advances modulo 16, active steps trigger with PatternData specials,
- * and raw automation is queued for foreground application. Probability gates
- * only the voice trigger; automation publication remains tied to the step
- * visit so descriptor/runtime state follows the authored automation. Affiliates:
- * PatternData and seq_drainPendingAutomation().
+ * cursor advances modulo the track's per-track length from PatternData,
+ * active steps trigger with PatternData specials, and raw automation is
+ * queued for foreground application. Probability gates only the voice
+ * trigger; automation publication remains tied to the step visit so
+ * descriptor/runtime state follows the authored automation.
+ *
+ * The wrap boundary is region->track_length[track] from the active Scene's
+ * pat_scene_region_t, not the compile-time NUM_STEPS_PER_BAR constant.
+ * This allows each track to loop independently at lengths 1–128. A zero or
+ * inaccessible length falls back to NUM_STEPS_PER_BAR (16) so a corrupt or
+ * uninitialized region never causes a stuck or runaway cursor.
+ *
+ * Affiliates: PatternData (region ownership, step trigger/automation data),
+ * seq_drainPendingAutomation() (foreground consumer of queued automation).
  */
 static void seq_advanceTrackStep(uint8_t track)
 {
+	/*
+	 * Read the per-track loop length from the active Scene's resident region.
+	 * pat_sceneRegion() returns a pointer to SRAM1 with no allocation or SD
+	 * I/O, so this is safe in TIM3 ISR context (priority 2). A NULL region or
+	 * a zero-length field falls back to the historic 16-step bar.
+	 */
+	const pat_scene_region_t *region = pat_sceneRegion(seq_activePattern);
+	uint8_t len = (region && region->track_length[track] > 0u)
+	              ? region->track_length[track]
+	              : NUM_STEPS_PER_BAR;
+
 	seq_stepIndex[track]++;
-	if (seq_stepIndex[track] >= (int16_t)NUM_STEPS_PER_BAR)
+	if (seq_stepIndex[track] >= (int16_t)len)
 		seq_stepIndex[track] = 0;
 
 	if (seq_SomModeActive) {
@@ -737,11 +757,32 @@ void seq_realignActivePatternToMasterClock(void)
 	/*
 	 * Recalculate runtime track positions from the master clock.
 	 *
-	 * This is a performance action, not a PatternData edit. It derives one shared
-	 * fixed-grid position from the master clock and applies it to every track.
+	 * What: derives each track's step cursor from the running master clock so a
+	 * mid-playback Scene/Bank realignment lands on the correct beat rather than
+	 * restarting from step 0. This is a performance action, not a PatternData
+	 * edit.
+	 *
+	 * Why per-track: each track wraps at its own track_length from the active
+	 * Scene's pat_scene_region_t. The master clock is the absolute sixteenth-
+	 * note count since start; the modulo of each track's length gives its
+	 * current position within its own independent loop. A zero or inaccessible
+	 * length falls back to NUM_STEPS_PER_BAR (16).
+	 *
+	 * Inputs: seq_masterStepClock (global), seq_activePattern (selects the
+	 * Scene region). Outputs: seq_stepIndex[] and seq_lastMasterStep[] for
+	 * every track, plus a chase LED dirty event for the UI-selected voice.
+	 *
+	 * Affiliates: pat_sceneRegion() (SRAM1 pointer, no SD I/O — safe in any
+	 * context), seq_advanceTrackStep() (uses the same per-track length for its
+	 * wrap boundary), led_processSeqLedState() (drains the chase dirty bit).
 	 */
+	const pat_scene_region_t *region = pat_sceneRegion(seq_activePattern);
+
 	for (track = 0u; track < NUM_TRACKS; track++) {
-		seq_stepIndex[track] = (int16_t)(seq_masterStepClock % NUM_STEPS_PER_BAR);
+		uint8_t len = (region && region->track_length[track] > 0u)
+		              ? region->track_length[track]
+		              : NUM_STEPS_PER_BAR;
+		seq_stepIndex[track] = (int16_t)(seq_masterStepClock % len);
 		seq_lastMasterStep[track] = (uint8_t)seq_stepIndex[track];
 	}
 	seq_ledState.chaseStep = seq_stepIndex[menu_getActiveVoice()];

@@ -153,6 +153,31 @@ typedef enum {
      * bits 16..31.
      */
     AUTOSAVE_TRACE_STAGE_BOOT_READER = 'Q',
+    /*
+     * U: button event ring overflow witness. Emitted by
+     * buttonHandler_processEvents() when evt_overflow_flag is set, proving
+     * that at least one button edge was dropped. flags: the saturating drop
+     * count since the last emission (0..255). value32: ring depth at the
+     * moment of detection.
+     *
+     * Why: the ring overflow is the root cause of S068's silent step-toggle
+     * failures. This record makes the condition visible in the trace file
+     * without a user-facing message. Under the 64-entry ring this stage
+     * should not appear in normal operation.
+     */
+    AUTOSAVE_TRACE_STAGE_EVT_OVERFLOW = 'U',
+    /*
+     * K: step toggle witness. Emitted by buttonHandler_setRemoveStep()
+     * immediately before pat_toggleStep(). It proves that the input delivery
+     * path reached the Pattern mutation call for a specific track, step, and
+     * pattern.
+     *
+     * flags: 0 (reserved). value32 packs track, absolute step, pattern/Scene,
+     * and pre-toggle trigger state using the shifts below. A bounded human
+     * button-press rate makes this diagnostic producer safe for the existing
+     * fixed-size trace ring.
+     */
+    AUTOSAVE_TRACE_STAGE_STEP_TOGGLE = 'K',
 } autosave_trace_stage_t;
 
 /*
@@ -372,6 +397,21 @@ typedef enum {
  * commit site bits 0..15 hold the effective selected-child load mask; at the
  * drain site they hold the payload offset of the field's first byte (10). */
 #define AUTOSAVE_TRACE_BANK_PRESENT_MASK_SHIFT 16u
+
+/*
+ * U (EVT_OVERFLOW) layout. flags is the saturating dropped-event count;
+ * value32 stores the ring depth in its low byte at detection time.
+ */
+
+/*
+ * K (STEP_TOGGLE) value32 layout. Track, absolute step, pattern, and
+ * pre-toggle trigger state fit in the existing 32-bit trace value so the
+ * coordinate needs no second record.
+ */
+#define AUTOSAVE_TRACE_STEP_TOGGLE_TRACK_SHIFT    0u
+#define AUTOSAVE_TRACE_STEP_TOGGLE_STEP_SHIFT     8u
+#define AUTOSAVE_TRACE_STEP_TOGGLE_PATTERN_SHIFT  16u
+#define AUTOSAVE_TRACE_STEP_TOGGLE_TRIGGER_SHIFT  24u
 
 /* Append one timestamped stage record without performing filesystem I/O. */
 void autosaveTrace_record(autosave_trace_stage_t stage, uint8_t flags,

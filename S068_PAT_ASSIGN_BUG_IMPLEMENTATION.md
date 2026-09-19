@@ -714,6 +714,22 @@ with:
 ** ----------------------------------------------------------------------- */
 ```
 
+### Site 5.4 — Public header concurrency comments
+
+**File:** `Core/Hardware/frontPanel/buttonHandler.h`
+**Lines:** 5–8, 61–64, and 80–83
+**Action:** Modify
+
+Update the public boundary comments from the retired TIM6-ISR model to the
+actual foreground `din_dout_exchange()` scan producer and main-loop consumer.
+The comments also document that `buttonHandler_processEvents()` is called
+twice per main-loop pass with audio rendering between calls, and that the
+held-state mask is maintained by the foreground scan.
+
+**Why:** the implementation and its public declaration must describe the same
+concurrency boundary. Leaving the old ISR claim in the header would invite a
+future caller to apply the wrong latency/safety assumptions to the event ring.
+
 ---
 
 ## Summary of changes
@@ -734,11 +750,13 @@ with:
 | 5.1 | buttonHandler.c | 1–12 | Modify | 0 | Header comment: ISR→foreground correction |
 | 5.2 | buttonHandler.c | 28–31 | Modify | 0 | Held-state comment: ISR→foreground |
 | 5.3 | buttonHandler.c | 51–53 | Modify | 0 | Scan-safe comment: ISR→foreground |
+| 5.4 | buttonHandler.h | 5–8, 61–64, 80–83 | Modify | 0 | Public concurrency comments: ISR→foreground |
 
 **Total RAM cost:** +50 bytes SRAM1 `.bss` (48 ring expansion + 1 overflow flag
 + 1 drop counter). Within the 66-byte approved ceiling.
 
-**Files modified:** 4 (`buttonHandler.c`, `main.c`, `AutosaveTrace.h`, `config.h`)
+**Files modified:** 5 (`buttonHandler.c`, `buttonHandler.h`, `main.c`,
+`AutosaveTrace.h`, `config.h`)
 
 **Build:** `make clean && make && make img`
 
@@ -746,3 +764,46 @@ with:
 rapid taps in VOICE and STEP modes, with playback + AutoSave + SD trace active.
 Assert zero event drops in the trace. Verify lower-numbered SEQ buttons toggle
 reliably after overlay gestures.
+
+---
+
+## Implementation notes
+
+### 2026-09-19 — Code implementation pass
+
+The source audit confirmed the scheduled boundaries: Pattern trigger toggling
+is a direct `pat_toggleStep()` operation, while the failure mechanism is in
+front-panel event delivery and shared hold-gesture state. The Pattern Stack
+Service was not changed.
+
+Implemented:
+
+- Replaced the 15-usable-entry masked ring with a 64-entry monotonic-counter
+  SPSC ring. All 64 slots are usable; unsigned counter subtraction remains
+  valid across the 8-bit wrap because the capacity is 64.
+- Added unconditional overflow reconciliation: a dropped event sets a flag;
+  the next foreground drain clears both overlay press/release masks and
+  cancels the shared hold timer. Logging builds emit stage `U` with the
+  saturating drop count and queue depth.
+- Added stage `K`, emitted immediately before `pat_toggleStep()`, packing the
+  track, absolute step, viewed Pattern/Scene, and pre-toggle trigger state.
+- Added the second one-event drain after `buttonHandler_tick()` in `main.c`,
+  retaining an `audio_check_and_render()` interleave on both sides.
+- Moved the SEQ physical-button lookup table to file scope and made timer
+  expiry require the initiating physical button to remain held. A released
+  button cancels the timer without setting `TIMER_ACTION_OCCURED`.
+- Increased `BUTTON_HOLD_DELAY_MS` from 100 ms to 200 ms.
+- Corrected stale ISR descriptions in both `buttonHandler.c` and
+  `buttonHandler.h` to document the foreground scan boundary and the two
+  bounded main-loop drains.
+
+The approved allocation is unchanged in ownership: the ring grows by 48
+bytes in SRAM1 `.bss`, plus one unconditional overflow flag and one
+`DEV_MODE_LOGGING`-only drop counter. No Pattern pool, snapshot, or service
+allocation was added.
+
+Verification completed for the source/build pass: `make clean && make` and
+`make img` both passed, and `git diff --check` passed. The resulting firmware
+reports `text=447,724`, `data=412`, `bss=291,196`; the linked symbols show the
+64-byte ring plus the two overflow-state bytes. Hardware acceptance of the
+VOICE/STEP rapid-tap and all-16-button release fixtures remains pending.

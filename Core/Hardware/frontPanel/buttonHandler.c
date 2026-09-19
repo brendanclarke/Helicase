@@ -2,13 +2,19 @@
  * buttonHandler.c — LXR-02 button handler.
  * Ported from original LXR AVR buttonHandler.c by Julian Schmidt.
  *
- * ISR SAFETY:
- *   buttonHandler_buttonPressed / buttonReleased are called from the TIM6 ISR
- *   (din_dout_exchange). They must not call any LCD functions or enter any
- *   spin-wait. They only write to the event ring and the held[] array.
+ * CONCURRENCY:
+ *   buttonHandler_buttonPressed / buttonReleased are called from the
+ *   foreground scan (din_dout_exchange via timebase_serviceFrontPanel at
+ *   500 Hz), not from an ISR. They write to the event ring and btn_held[].
  *
- *   buttonHandler_processEvents() is called from the main loop. It drains the
- *   ring and calls menu/LED actions, which are safe there.
+ *   buttonHandler_processEvents() is called from the main loop (two call
+ *   sites, separated by audio_check_and_render). It drains the ring and
+ *   dispatches to menu/LED actions. buttonHandler_tick() polls the hold timer
+ *   between the two drain calls.
+ *
+ *   The volatile qualifiers on btn_held[] and the ring remain correct: the
+ *   scan and consumer can interleave around audio rendering within the same
+ *   foreground context.
  */
 
 #include "buttonHandler.h"
@@ -24,32 +30,102 @@
 #include <string.h>
 #include <stdint.h>
 #include "MidiParser.h"
+#include "AutosaveTrace.h"
 
 /* -----------------------------------------------------------------------
-** Held-state array (written from ISR, read from both ISR and main loop)
+** Held-state array (written from foreground scan, read from main loop)
 ** ----------------------------------------------------------------------- */
 static volatile uint8_t btn_held[BUT_COUNT];
 
 /* -----------------------------------------------------------------------
-** Event ring — ISR writes, main loop reads
+** Event ring — foreground scan writes, main loop reads
+**
+** What: a power-of-two SPSC ring storing one byte per button edge event.
+** The high bit (EVT_PRESSED) encodes direction; the low seven bits encode
+** the button number (0..BUT_COUNT-1).
+**
+** Why monotonic counters instead of masked head/tail: the classic
+** `(head+1)&mask == tail` guard reserves one slot to distinguish full from
+** empty, leaving only SIZE-1 usable entries. With 16 SEQ buttons, modifier
+** keys, and transport buttons, a simultaneous release burst can exceed that
+** capacity. Monotonic producer/consumer counters (matching the
+** PatternStackService pattern) use `(producer - consumer) == SIZE` for full
+** detection, making all SIZE entries usable and eliminating the off-by-one
+** capacity loss.
+**
+** Why 64 entries: the hardware has 41 shift-register buttons. Even if every
+** button changes state in a single scan pass (physically impossible but the
+** architectural maximum), 41 events cannot overflow 64 slots.
+**
+** Inputs: evt_push() is called by the foreground din_dout_exchange() scan at
+** 500 Hz. Outputs: buttonHandler_processEvents() drains one event per call
+** from the main loop. Two call sites give roughly 30 events per scan.
+**
+** RAM: 64 bytes ring plus one unconditional overflow flag and one
+** DEV_MODE_LOGGING-only drop counter (66 bytes at the approved maximum).
 ** ----------------------------------------------------------------------- */
-#define EVT_RING_SIZE 16   /* power of two */
-#define EVT_PRESSED   0x80
+#define EVT_RING_SIZE 64u  /* power of two, greater than BUT_COUNT (41) */
+#define EVT_RING_MASK (EVT_RING_SIZE - 1u)
+#define EVT_PRESSED   0x80u
 
 static volatile uint8_t evt_ring[EVT_RING_SIZE];
-static volatile uint8_t evt_head = 0; /* written by ISR */
-static volatile uint8_t evt_tail = 0; /* read  by main  */
+static volatile uint8_t evt_producer = 0; /* monotonic, written by scan */
+static volatile uint8_t evt_consumer = 0; /* monotonic, written by main */
 
+/*
+ * Overflow detection state.
+ *
+ * What: evt_overflow_flag is set by evt_push() when the ring is full.
+ * buttonHandler_processEvents() checks and clears it on the next drain pass,
+ * using it to reconcile gesture state that may have been corrupted by the
+ * dropped event. evt_drop_count is a saturating logging-only count included
+ * in the diagnostic trace record and reset after emission.
+ *
+ * Why the flag is unconditional: even a production build must reconcile
+ * pairing masks and the hold timer after a dropped event. The count is
+ * logging-only because its value is useful only in trace analysis.
+ *
+ * Lifetime: file-scope static .bss, never freed.
+ */
+static volatile uint8_t evt_overflow_flag = 0;
+#if DEV_MODE_LOGGING
+static volatile uint8_t evt_drop_count = 0;
+#endif
+
+/*
+ * Push one button edge event into the ring.
+ *
+ * What: encodes buttonNr and direction into one byte, stores it at the
+ * producer's slot, and advances the monotonic producer counter. If the ring
+ * is full, the event is dropped and the overflow flag is set.
+ *
+ * Why inline: this runs during the 500 Hz scan, potentially once per hardware
+ * button in a single pass. The body is a few compares and a byte store.
+ *
+ * Full detection: unsigned modular subtraction remains correct across the
+ * 0xff-to-0x00 counter wrap because EVT_RING_SIZE divides the uint8_t range.
+ *
+ * Inputs: buttonNr is a BUT_* enum value; pressed is nonzero for a press edge.
+ * Outputs: one ring entry written, or overflow state updated on a drop.
+ * Affiliates: evt_consumer is read but never written here.
+ */
 static inline void evt_push(uint8_t buttonNr, uint8_t pressed)
 {
-    uint8_t next = (uint8_t)((evt_head + 1) & (EVT_RING_SIZE - 1));
-    if (next == evt_tail) return; /* ring full — drop event */
-    evt_ring[evt_head] = (uint8_t)(buttonNr | (pressed ? EVT_PRESSED : 0));
-    evt_head = next;
+    if ((uint8_t)(evt_producer - evt_consumer) >= EVT_RING_SIZE) {
+        evt_overflow_flag = 1;
+#if DEV_MODE_LOGGING
+        if (evt_drop_count < 255u)
+            evt_drop_count++;
+#endif
+        return;
+    }
+    evt_ring[evt_producer & EVT_RING_MASK] =
+        (uint8_t)(buttonNr | (pressed ? EVT_PRESSED : 0u));
+    evt_producer++;
 }
 
 /* -----------------------------------------------------------------------
-** ISR-safe pressed / released — only record, never block
+** Scan-safe pressed / released — only record, never block
 ** ----------------------------------------------------------------------- */
 void buttonHandler_buttonPressed(uint8_t buttonNr)
 {
@@ -94,10 +170,10 @@ static uint8_t buttonHandler_morphVoiceModeActive = 0;
 /*
  * Foreground MODE VOICE hold overlay state.
  *
- * Why: btn_held[] is written immediately by the scan ISR, while press/release
- * events are consumed later from the foreground ring. A SEQ press that happened
- * while MODE VOICE was physically held can therefore be processed after the ISR
- * has already cleared btn_held[BUT_MODE1] for the release edge. This flag is set
+ * Why: btn_held[] is written immediately by the foreground scan, while
+ * press/release events are consumed later from the ring. A SEQ press that
+ * happened while MODE VOICE was physically held can therefore be processed
+ * after the scan has already cleared btn_held[BUT_MODE1] for the release edge. This flag is set
  * and cleared in event order by processPress()/processRelease(), so MODE VOICE
  * Scene-mask SEQ buttons are always consumed as overlay toggles and cannot leak
  * into normal step editing.
@@ -135,19 +211,35 @@ int8_t buttonHandler_getArmedAutomationStep(void) { return buttonHandler_armedAu
  * Return the raw physical held-state mask for the sixteen SEQ buttons.
  *
  * What: translates the scattered shift-register button numbers into a compact
- * bitmask for Menu's held-step overlay. Why: the ISR state remains private so
- * callers cannot depend on hardware ordering. Inputs: volatile btn_held[].
+ * bitmask for Menu's held-step overlay. Why: the foreground scan state remains
+ * private so callers cannot depend on hardware ordering. Inputs: volatile
+ * btn_held[].
  * Output: bit N is set for the physically held SEQ(N+1) button. This is a
- * foreground read of byte-sized ISR values and performs no UI work.
+ * foreground read of byte-sized scan values and performs no UI work.
  */
+/*
+ * Physical button numbers for the sixteen SEQ buttons, indexed 0..15.
+ *
+ * What: maps the logical step-button index used by Menu, PatternData, and the
+ * hold timer back to the physical BUT_SEQ* number for btn_held[] lookup.
+ *
+ * Why file scope: buttonHandler_tick() needs this table to reverse-map
+ * buttonHandler_buttonTimerStepNr (an absolute step 0..127) back to a
+ * physical button number for the held-check. buttonHandler_seqHeldMask()
+ * uses the same table for the opposite physical-to-logical translation.
+ *
+ * Inputs: index is a 0..15 SEQ button index. Output: BUT_SEQ* enum value.
+ * RAM: zero additional; the static const table was already in .rodata.
+ */
+static const uint8_t seq_buttons[16] = {
+    BUT_SEQ1, BUT_SEQ2, BUT_SEQ3, BUT_SEQ4,
+    BUT_SEQ5, BUT_SEQ6, BUT_SEQ7, BUT_SEQ8,
+    BUT_SEQ9, BUT_SEQ10, BUT_SEQ11, BUT_SEQ12,
+    BUT_SEQ13, BUT_SEQ14, BUT_SEQ15, BUT_SEQ16
+};
+
 uint16_t buttonHandler_seqHeldMask(void)
 {
-    static const uint8_t seq_buttons[16] = {
-        BUT_SEQ1, BUT_SEQ2, BUT_SEQ3, BUT_SEQ4,
-        BUT_SEQ5, BUT_SEQ6, BUT_SEQ7, BUT_SEQ8,
-        BUT_SEQ9, BUT_SEQ10, BUT_SEQ11, BUT_SEQ12,
-        BUT_SEQ13, BUT_SEQ14, BUT_SEQ15, BUT_SEQ16
-    };
     uint16_t mask = 0u;
     uint8_t i;
 
@@ -478,11 +570,40 @@ void buttonHandler_tick(void)
 {
     /*
      * Foreground long-press poll using the wrapping 16-bit millisecond clock.
-     * A deadline is in the past when unsigned elapsed time is below half the
-     * counter range. This remains correct across the time_sysTick wrap.
+     *
+     * What: checks whether the hold timer deadline has elapsed, then verifies
+     * that the initiating button is still physically held before promoting the
+     * gesture to a long-press action.
+     *
+     * Why the held-check: without it, a quick tap whose release event is
+     * delayed behind other events in the ring can have its timer expire while
+     * the button is already physically released. The timer would then set
+     * TIMER_ACTION_OCCURED, causing the delayed release to be consumed as a
+     * completed hold instead of toggling the step.
+     *
+     * Reverse mapping: buttonHandler_buttonTimerStepNr stores the absolute
+     * step index (0..127) set by buttonHandler_setTimeraction() via
+     * buttonHandler_visibleStep(). The physical button is at
+     * seq_buttons[stepNr % NUM_STEPS_PER_BAR].
+     *
+     * Deadline comparison: unsigned elapsed time below half the counter range
+     * remains correct across the time_sysTick wrap.
+     *
+     * Inputs: timer step/deadline, btn_held[], and seq_buttons[]. Outputs:
+     * fires buttonHandler_armTimerActionStep() and sets TIMER_ACTION_OCCURED,
+     * or cancels the timer by resetting to NO_STEP_SELECTED so the later
+     * release is handled as a normal tap.
+     * Affiliates: buttonHandler_setTimeraction() arms the timer;
+     * buttonHandler_seqButtonReleased() checks TIMER_ACTION_OCCURED.
      */
     if (buttonHandler_buttonTimerStepNr >= 0 &&
         (uint16_t)(time_sysTick - buttonHandler_buttonTimer) < 32768u) {
+        uint8_t physBtn = seq_buttons[
+            (uint8_t)buttonHandler_buttonTimerStepNr % NUM_STEPS_PER_BAR];
+        if (!btn_held[physBtn]) {
+            buttonHandler_buttonTimerStepNr = NO_STEP_SELECTED;
+            return;
+        }
         buttonHandler_armTimerActionStep(buttonHandler_buttonTimerStepNr);
         buttonHandler_buttonTimerStepNr = TIMER_ACTION_OCCURED;
     }
@@ -554,6 +675,33 @@ static void buttonHandler_setRemoveStep(uint8_t ledNr, uint8_t seqButtonPressed)
 
     trackNr = menu_getActiveVoice();
     patternNr = menu_getViewedPattern();
+#if DEV_MODE_LOGGING
+    /*
+     * Diagnostic witness: prove that input delivery reached the Pattern
+     * mutation call.
+     *
+     * What: emits a trace record immediately before pat_toggleStep(),
+     * capturing the track, absolute step, pattern number, and trigger-bit
+     * state before the XOR.
+     *
+     * Why: future reports of "step did not toggle" can distinguish input
+     * delivery failure (no K record) from Pattern mutation failure (K present
+     * but the trigger state unchanged) without relying on LED appearance.
+     * This reads only the fixed-size address array; it performs no dynamic
+     * stack access, allocation, or service-queue operation.
+     *
+     * Value32 layout is defined by AUTOSAVE_TRACE_STEP_TOGGLE_* in
+     * AutosaveTrace.h. Flags are reserved and remain zero.
+     */
+    autosaveTrace_record(
+        AUTOSAVE_TRACE_STAGE_STEP_TOGGLE,
+        0u,
+        ((uint32_t)trackNr << AUTOSAVE_TRACE_STEP_TOGGLE_TRACK_SHIFT)
+        | ((uint32_t)seqButtonPressed << AUTOSAVE_TRACE_STEP_TOGGLE_STEP_SHIFT)
+        | ((uint32_t)patternNr << AUTOSAVE_TRACE_STEP_TOGGLE_PATTERN_SHIFT)
+        | ((uint32_t)pat_isStepActive(trackNr, seqButtonPressed, patternNr)
+           << AUTOSAVE_TRACE_STEP_TOGGLE_TRIGGER_SHIFT));
+#endif
     pat_toggleStep(trackNr, seqButtonPressed, patternNr);
     led_setValue(pat_isStepActive(trackNr, seqButtonPressed, patternNr),
                  ledNr);
@@ -1400,16 +1548,46 @@ static void processRelease(uint8_t buttonNr)
 /* -----------------------------------------------------------------------
 ** buttonHandler_processEvents — call from main loop, safe to call LCD
 **
-** Drains ONE event per call. Original AVR processed one button per main-loop
-** iteration. With our 1kHz TIM6 SPI exchange all 40 button states arrive
-** atomically and can fire many events at once. `if` keeps the original AVR
-** cadence of one button per main-loop pass.
+** What: drains ONE event per call from the monotonic-counter ring, then
+** returns. Two call sites in the main loop (separated by
+** audio_check_and_render) provide roughly 30 events per 500 Hz scan interval,
+** above the 41-button hardware maximum.
+**
+** Why one per call: the original AVR cadence of one button per main-loop
+** iteration keeps per-call CPU bounded and preserves the audio interleaving
+** contract. The button handler must never call audio_check_and_render() or
+** acquire an audio dependency itself.
+**
+** Overflow reconciliation: when evt_overflow_flag is set by evt_push(), this
+** function clears both pairing masks and resets the hold timer to
+** NO_STEP_SELECTED. This prevents stale overlay bits from suppressing the next
+** tap and prevents an orphaned timer from promoting a button whose release
+** was lost. The event that overflowed is still dropped; no user-facing error
+** path is added.
 ** ----------------------------------------------------------------------- */
 void buttonHandler_processEvents(void)
 {
-    if (evt_tail != evt_head) {
-        uint8_t ev  = evt_ring[evt_tail];
-        evt_tail = (uint8_t)((evt_tail + 1) & (EVT_RING_SIZE - 1));
+    if (evt_overflow_flag) {
+        evt_overflow_flag = 0;
+        buttonHandler_voiceSceneSeqPressedMask = 0u;
+        buttonHandler_loadSceneSeqPressedMask = 0u;
+        buttonHandler_buttonTimerStepNr = NO_STEP_SELECTED;
+#if DEV_MODE_LOGGING
+        {
+            uint8_t depth = (uint8_t)(evt_producer - evt_consumer);
+            uint8_t drops = evt_drop_count;
+            evt_drop_count = 0;
+            autosaveTrace_record(
+                AUTOSAVE_TRACE_STAGE_EVT_OVERFLOW,
+                drops,
+                (uint32_t)depth);
+        }
+#endif
+    }
+
+    if (evt_consumer != evt_producer) {
+        uint8_t ev = evt_ring[evt_consumer & EVT_RING_MASK];
+        evt_consumer++;
 
         uint8_t pressed  = (uint8_t)((ev & EVT_PRESSED) != 0);
         uint8_t buttonNr = (uint8_t)(ev & (uint8_t)~EVT_PRESSED);

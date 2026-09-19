@@ -1287,6 +1287,14 @@ boot_filesystem_done:
         // tick the update buttons async
         buttonHandler_tick();
         audio_check_and_render();
+        /*
+         * Drain one successor event after the hold-timer poll. A timer
+         * cancellation can make the next queued release immediately eligible
+         * for normal tap processing; keeping this second bounded drain here
+         * preserves the audio interleave while doubling foreground throughput.
+         */
+        buttonHandler_processEvents();
+        audio_check_and_render();
         // tick the preset change async
         menu_pollPresetStatus();
         audio_check_and_render();

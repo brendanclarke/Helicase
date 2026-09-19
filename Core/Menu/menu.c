@@ -11873,6 +11873,49 @@ void    menu_setShownPattern(uint8_t p)
         }
     }
 }
+
+/*
+ * menu_setPlayedPattern — align the played-Pattern UI mirror.
+ *
+ * What: stores the Pattern slot that the sequencer is currently playing,
+ * as a Menu-owned UI mirror. The chase renderer in led_updateCurrentStep()
+ * compares menu_getViewedPattern() against this mirror to decide whether
+ * the STEP-row chase LED should be visible: chase is shown only when the
+ * viewed and played Patterns match.
+ *
+ * Why this exists: led_notifyPatternChanged() is the normal runtime writer
+ * of menu_playedPattern, but that function carries follow-mode LED/menu
+ * repaint, PERF Scene LED refresh, and foreground-only ownership assumptions
+ * that are inappropriate during pre-audio boot or filesystem-driven Scene
+ * realignment. This setter provides the state update alone, with no
+ * side effects beyond the assignment.
+ *
+ * Input: patternNr is the Scene/Pattern slot to record as the played
+ * Pattern. Validated through pat_patternValid(); an out-of-range value
+ * falls back to 0.
+ *
+ * Output: menu_playedPattern is set to the validated value.
+ *
+ * Common callers: filesystem.c's three Scene/Bank realignment sites, each
+ * of which already calls seq_alignActivePatternToScene() (sequencer state)
+ * and menu_setShownPattern() (viewed-Pattern state). This setter completes
+ * the triple by aligning played-Pattern state.
+ *
+ * Affiliates:
+ *   - menu_playedPattern (this file) — the global this sets
+ *   - menu_setShownPattern() (this file) — the viewed-Pattern counterpart
+ *   - led_notifyPatternChanged() (ledHandler.c) — the runtime writer that
+ *     also sets menu_playedPattern but with follow/PERF/LED side effects
+ *   - led_updateCurrentStep() (ledHandler.c) — the chase renderer that
+ *     reads menu_playedPattern to gate chase visibility
+ *   - seq_alignActivePatternToScene() (sequencer.c) — the sequencer-state
+ *     counterpart called at the same realignment sites
+ */
+void menu_setPlayedPattern(uint8_t patternNr)
+{
+    menu_playedPattern = pat_patternValid(patternNr) ? patternNr : 0u;
+}
+
 uint8_t menu_getViewedPattern(void) { return menu_shownPattern; }
 
 /* -----------------------------------------------------------------------

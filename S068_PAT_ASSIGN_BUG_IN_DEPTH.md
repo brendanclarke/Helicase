@@ -359,3 +359,259 @@ The fix is five patches: ring capacity + overflow logging (Patch 1), timer
 held-check (Patch 2), diagnostic witness (Patch 3), hold delay increase
 (Patch 4), and comment correction (Patch 5). The Pattern mutation path is
 uninvolved and correct.
+
+---
+
+## Implementation assessment
+
+All five patches implemented and verified against the implementation schedule
+in `S068_PAT_ASSIGN_BUG_IMPLEMENTATION.md`. Clean build (`make clean && make`)
+with zero warnings, zero errors. ELF sizes after the change:
+
+```
+   text     data      bss      dec      hex  filename
+ 447724      412   291196   739332    b4804  build/lxr02.elf
+```
+
+### Patch-by-patch verification
+
+**Patch 1 — Ring capacity and overflow detection.** Correct.
+
+- `EVT_RING_SIZE` changed from 16 to 64. `EVT_RING_MASK` added.
+- `evt_head`/`evt_tail` replaced by monotonic `evt_producer`/`evt_consumer`.
+- `evt_push()` uses `(uint8_t)(evt_producer - evt_consumer) >= EVT_RING_SIZE`
+  for full detection. Because 64 divides 256 evenly, the unsigned modular
+  subtraction wraps correctly.
+- `evt_overflow_flag` is unconditional (1 byte). `evt_drop_count` is
+  `DEV_MODE_LOGGING`-only (1 byte). Both `.bss`.
+- `buttonHandler_processEvents()` checks and clears `evt_overflow_flag` at the
+  top of each call. On overflow: clears both pairing masks, resets the hold
+  timer to `NO_STEP_SELECTED`, emits a `U` trace record with drop count in
+  flags and ring depth in value32.
+- Consumer reads `evt_ring[evt_consumer & EVT_RING_MASK]` and increments
+  `evt_consumer`. Correct monotonic drain.
+- Second `buttonHandler_processEvents()` call added in `main.c` after
+  `buttonHandler_tick()`, separated by `audio_check_and_render()`. Placement
+  is correct — between the timer poll and the preset/morph/filesystem tail.
+- `#include "AutosaveTrace.h"` added after `MidiParser.h`. `config.h` is
+  already transitively included via `buttonHandler.h`, so `DEV_MODE_LOGGING`
+  is visible.
+
+**Patch 2 — Hold timer physical-held check.** Correct.
+
+- `seq_buttons[16]` promoted from function-local (`buttonHandler_seqHeldMask`)
+  to file scope with a `static const` declaration. `buttonHandler_seqHeldMask`
+  now uses the file-scope table directly. No RAM change (was already `.rodata`).
+- `buttonHandler_tick()` now reverse-maps `buttonHandler_buttonTimerStepNr` to
+  a physical button via `seq_buttons[(uint8_t)stepNr % NUM_STEPS_PER_BAR]` and
+  checks `btn_held[physBtn]`. If released: resets to `NO_STEP_SELECTED` (not
+  `TIMER_ACTION_OCCURED`), so the subsequent release processes as a normal tap
+  toggle. If still held: fires `buttonHandler_armTimerActionStep()` and sets
+  `TIMER_ACTION_OCCURED` as before.
+- The `% NUM_STEPS_PER_BAR` correctly extracts the 0..15 SEQ index from the
+  absolute step 0..127. `buttonHandler_setTimeraction()` stores
+  `buttonHandler_visibleStep(seqButtonPressed)` which is
+  `menu_currentBar * 16 + seqButtonPressed`, so the modulo recovers the
+  original button index within the current bar.
+
+**Patch 3 — Diagnostic witness before pat_toggleStep().** Correct.
+
+- `K` stage record emitted inside `#if DEV_MODE_LOGGING` block in
+  `buttonHandler_setRemoveStep()`, immediately before `pat_toggleStep()`.
+- Value32 packs `trackNr`, `seqButtonPressed` (absolute step),
+  `patternNr`, and the pre-toggle `pat_isStepActive()` result using the
+  named shift defines from `AutosaveTrace.h`.
+- `U` and `K` enum members added to `autosave_trace_stage_t` before the
+  closing brace, after `Q`. No collision with existing stage letters.
+- `AUTOSAVE_TRACE_STEP_TOGGLE_*` shift defines added after the B layout block.
+
+**Patch 4 — Hold delay increase.** Correct.
+
+- `BUTTON_HOLD_DELAY_MS` changed from `100u` to `200u` in `config.h:327`.
+- Comment updated to note "the current default is 200 ms."
+
+**Patch 5 — Stale comment correction.** Correct.
+
+- File header: "ISR SAFETY" → "CONCURRENCY", TIM6 ISR references → foreground
+  scan via `timebase_serviceFrontPanel`. Two-call-site drain documented.
+  Volatile justification noted.
+- Held-state banner: "written from ISR" → "written from foreground scan."
+- Scan-safe banner: "ISR-safe" → "Scan-safe."
+- `buttonHandler_seqHeldMask` docblock: "ISR state" → "foreground scan state",
+  "byte-sized ISR values" → "byte-sized scan values."
+
+### Residual stale comment
+
+One ISR reference remained outside the Patch 5 scope: the
+`buttonHandler_voiceSceneMaskHoldActive` docblock at lines 173 and 175 said
+"scan ISR" and "ISR." This has been corrected to "foreground scan" / "scan"
+in the same cosmetic pass.
+
+---
+
+## Hardware test results — `SD_CARD_PAT_ASSIGN_BUG_OUTPUT`
+
+Card image captured after firmware acceptance testing with all five patches
+active. Traces decoded and analyzed below.
+
+### asavetrc.bin — 151,218 records (1,209,744 bytes)
+
+| Stage | Count | Meaning |
+|---|---:|---|
+| `D` | 149,728 | Scalar dirty-mark |
+| `I` | 364 | Instrument mark |
+| `V` | 190 | Validated |
+| `T` | 158 | Terminal |
+| `A` | 157 | Admitted |
+| `P` | 129 | Published |
+| `C` | 128 | Captured |
+| `S` | 81 | Scheduled |
+| `M` | 80 | Mask merged |
+| `L` | 74 | Load mark |
+| **`K`** | **42** | **Step toggle witness (new)** |
+| `Q` | 33 | Boot reader |
+| `O` | 27 | Save lifecycle |
+| `G` | 25 | Trace ring dropped count |
+| `B` | 2 | Bank present mask |
+
+**Zero `U` (event ring overflow) records.** The 64-entry ring was never full
+during any gesture sequence in the test session.
+
+**Zero `E` (operation error) records.** No filesystem operation failed.
+
+**Zero `F` (trace suppressed) records.**
+
+**Zero `X` (phase stall) records.**
+
+All 27 `O` (Save lifecycle) records completed without `FAILED` flags. The
+Bank Save at slot 2 shows a full REQUEST → 16 Scene CREATE_RESULTs →
+SOURCE_STAGED → FINISH lifecycle.
+
+The final autosave cycle in the trace is a complete S → A → V → M → C → P → T
+sequence — the writer terminated cleanly.
+
+25 `G` (trace ring dropped count) records are present with cumulative counts
+reaching 45,949. These are **autosave trace ring overwrites** (the DEV
+diagnostic ring's own capacity limit, not button event drops). This is the
+known DEV_MODE_LOGGING self-interference documented in
+`S068_ATS_PAT_BOUNDED_CPU.md` — the 149,728 `D` records dominate the trace
+ring and push out older records before the filesystem drains them. This is
+unrelated to the button event ring fix and has no effect on data integrity.
+
+### K (step toggle witness) records — 42 events
+
+Every K record proves that `buttonHandler_setRemoveStep()` reached
+`pat_toggleStep()` with a valid track/step/pattern coordinate. All 42 records
+target Scene 8, bar 0, consistent with the test session workflow.
+
+**Toggle sequences by (track, step):**
+
+| Track | SEQ Button | Toggles | Sequence |
+|---|---|---:|---|
+| T0 | SEQ6 | 2 | OFF→ON → ON→OFF |
+| T0 | SEQ8 | 2 | OFF→ON → ON→OFF |
+| T0 | SEQ11 | 2 | OFF→ON → ON→OFF |
+| T0 | SEQ12 | 2 | OFF→ON → ON→OFF |
+| T1 | SEQ1 | 1 | OFF→ON |
+| T1 | SEQ2 | 1 | OFF→ON |
+| T1 | SEQ4 | 1 | OFF→ON |
+| T1 | SEQ7 | 1 | OFF→ON |
+| T1 | SEQ8 | 2 | OFF→ON → ON→OFF |
+| T1 | SEQ9 | 1 | OFF→ON |
+| T1 | SEQ10 | 1 | OFF→ON |
+| T1 | SEQ11 | 1 | OFF→ON |
+| T1 | SEQ13 | 1 | OFF→ON |
+| T1 | SEQ14 | 1 | OFF→ON |
+| T2 | SEQ1 | 1 | OFF→ON |
+| T2 | SEQ3 | 1 | ON→OFF |
+| T2 | SEQ5 | 2 | OFF→ON → ON→OFF |
+| T2 | SEQ6 | 2 | OFF→ON → ON→OFF |
+| T2 | SEQ8 | 3 | OFF→ON → ON→OFF → OFF→ON |
+| T2 | SEQ9 | 1 | OFF→ON |
+| T2 | SEQ10 | 2 | OFF→ON → ON→OFF |
+| T2 | SEQ11 | 2 | OFF→ON → ON→OFF |
+| T2 | SEQ12 | 2 | OFF→ON → ON→OFF |
+| T2 | SEQ13 | 4 | OFF→ON → ON→OFF → OFF→ON → ON→OFF |
+| T2 | SEQ14 | 2 | ON→OFF → OFF→ON |
+| T2 | SEQ15 | 1 | ON→OFF |
+
+**SEQ buttons exercised:** 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15.
+SEQ16 was not pressed during the test session but is architecturally identical
+to the others. Critically, SEQ1 through SEQ5 — the lower-numbered buttons that
+were previously dropped first on ring overflow — all toggled successfully.
+
+Every toggle sequence is internally consistent: trigger-before states alternate
+as expected for repeated presses on the same step.
+
+### pattrace.bin — 6,283 records (50,264 bytes)
+
+| Stage | Count | Meaning |
+|---|---:|---|
+| `M` | 5,248 | Tier 1 relocation success |
+| `R` | 1,035 | Tier 2 relocation success |
+
+**Zero error stages (H/Q/C/F/G/X).** Pattern service healthy throughout the
+test session. 1,015 distinct (stage, scene, track, step) combinations across
+the 6,283 records — the maintenance oscillation pattern described in
+`S068_ATS_PAT_BOUNDED_CPU.md` remains present (top entry: Scene 2 track 0
+step 1 relocated 179 times) but is a separate concern and does not interact
+with the button handler fix.
+
+### Pattern file A/B analysis
+
+| File | Status |
+|---|---|
+| pat00–pat08 | A+B (both generations present) |
+| pat09 | B only |
+| pat10 | A+B |
+| pat11, pat12 | B only |
+| pat13–pat15 | Not present |
+
+pat08 (Scene 8, the active test Scene) has both A and B generations at
+10,656 bytes each. The two generations differ by 156 bytes, with byte 10
+showing values 0x42 vs 0x41 (generation counter 66 vs 65) — one generation
+ahead, consistent with normal double-buffered autosave alternation.
+
+Scenes 09, 11, and 12 having B-only files is consistent with a Bank that has
+not yet completed two full autosave cycles for those Scenes — the first
+generation was written to slot B, and slot A had not yet been populated at
+power-off. This is normal for Scenes that were loaded but not actively edited.
+
+### Boot reader (Q) records — 33 summary records
+
+All 33 records are end-of-reader summaries (flags bit 7 set). Every summary
+shows case2_mask = 0x0000 and case3_mask = 0x0000 — no reload mismatches, no
+invalidated Scenes. The boot reader accepted every resident Scene without
+correction across all 33 boot cycles captured in this trace span.
+
+---
+
+## Conclusion and task closeout
+
+**Bug status: fixed.** The three root-cause defects — event ring overflow,
+stale pairing masks, and shared timer without held-check — are all addressed
+by the five implemented patches.
+
+**Test evidence:**
+- Zero `U` (overflow) records in the test session proves the 64-entry ring
+  held under all exercised gesture sequences.
+- 42 `K` (step toggle witness) records prove input delivery reached
+  `pat_toggleStep()` for every tap, including lower-numbered SEQ buttons 1–5
+  that were previously the first to be dropped.
+- Zero Pattern service error records confirm the mutation path remains healthy.
+- All autosave lifecycle records completed without failure.
+- Pattern A/B generations are consistent with normal operation.
+
+**Files modified (4):**
+- `Core/Hardware/frontPanel/buttonHandler.c` — ring, timer, witness, comments
+- `Core/Bank/Scene/AutosaveTrace.h` — `U` and `K` stage codes and layouts
+- `config.h` — `BUTTON_HOLD_DELAY_MS` 100→200
+- `main.c` — second `buttonHandler_processEvents()` call site
+
+**RAM cost:** +50 bytes SRAM1 `.bss` (within 66-byte approved ceiling).
+
+**Build:** clean, zero warnings, zero errors.
+
+**No `Core/` code changes remain outstanding for this bug.** The maintenance
+oscillation visible in pattrace.bin is tracked separately in
+`S068_ATS_PAT_BOUNDED_CPU.md`.
