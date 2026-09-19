@@ -31,20 +31,20 @@ Do not recommend bumping `AUTOSAVE_PARAMETER_GETS_PER_WRITE` or adjusting
 capture timing unless the user explicitly asks. The section-based CRC
 format redesign is the chosen path for write performance.
 
-## Current carryover after Session 066
+## Current carryover after Session 067
 
-Session 066 implemented VOICE-page held-step automation overlay (Method 2).
-Session 065 implemented step automation Method 1 (step-edit menu and sequencer
-playback). The durable authorities are
-`knowledge_files/log_archive/066_SESSION_HANDOFF_LOG.md`,
-`knowledge_files/log_archive/065_SESSION_HANDOFF_LOG.md`,
+Session 067 implemented the Pattern Stack Service (unified pool mutation
+dispatcher with SPSC queue, two-tier defragmentation, bulk barriers,
+filesystem replacement handover, pool usage monitor, and elastic gap policy)
+and fixed the dtype automation value offset bug (identity mapping at all
+four code sites). The durable authorities are
+`knowledge_files/log_archive/067_SESSION_HANDOFF_LOG.md`,
 `PATTERN_DYNAMIC_STACK.md`, `MODULE_INTERCHANGE_SPEC.md`, and
 `SRAM_MANIFEST.md`.
-The S066 planning documents (`S066_DYN_PAT_VOICE_PARAM_UX.md`,
-`S066_IMPLEMENTATION_SCHEDULE.md`, `S066_DYN_P-LOCK_FOLLOW-UP.md`) and the
-S065 planning documents (`S065_DYN_PAT_STEP_AUTOMATION.md`,
-`S065_DYN_PAT_STEP_AUTOM_EDITING.md`, `S065_DYN_PAT_AUTOM_EDITING_ADDITIONS.md`)
-are disposable; their durable facts are in the handoff logs and spec references.
+The S067 planning documents (`S067_STACK_SERVICE_DETAIL_PLAN.md`,
+`S067_STACK_SERVICE_IMPLEMENTATION.md`, `S067_DTYPE_OFFSET_BUG.md`,
+`S067_DTYPE_BUG_IMPLEMENTATION.md`) are disposable; their durable facts are
+in the handoff log and spec references.
 
 ### Automation ordering invariant
 
@@ -66,12 +66,17 @@ is the runtime-interpolated value that accounts for Morph position.
 buffered in the TIM3 ISR pending buffer and drained in the foreground only.
 Do not call `instrumentManager_writeRuntime()` from any interrupt context.
 
-### 7-bit automation storage with 8-bit display
+### 7-bit automation storage — identity mapping
 
-Automation values are stored as 7-bit (0..127). Display expansion to 8-bit:
-`(v == 127) ? 255 : v * 2`. Inverse: `(v >= 255) ? 127 : v / 2`. The
-working-value cache (`va_workingValue[4]`) stores 8-bit values to avoid lossy
-8→7→8 round-trip during pot edits. Nibble-split suppression byte
+Automation values are stored as 7-bit (0..127). The stored value equals the
+parameter value directly (identity mapping). Every automatable descriptor
+parameter has a range ≤127. The old MIDI CC-style `/2` `*2` conversion was
+removed from all four code sites in Session 067 (dtype offset bug fix).
+Do not reintroduce `/2` or `*2` conversions for automation values unless a
+DTYPE_0B255 parameter becomes automatable in the future (none is today).
+
+The working-value cache (`va_workingValue[4]`) stores values to avoid
+re-reading from pool storage during pot edits. Nibble-split suppression byte
 (`va_suppress[4]`): lower nibble = underline suppression, upper nibble =
 working value validity.
 
@@ -82,9 +87,17 @@ glyph for one of the 4 voice automation parameters. Diff-based CGRAM
 transactions with retry bit (`VA_MARKER_RETRY_BIT = 0x10`) prevent redundant
 LCD writes. Slot allocation is deterministic (voice parameter index + 2).
 
-### Next feature: S067 defragmentation service and pool monitor
+### Pattern Stack Service routing
 
-`S067_DYN_PAT_STACK_SERVICE.md` covers: two-tier defragmentation (micro-
-relocation + global compaction), bounded per-tick work budget, pool usage
-monitor in settings menu (`pol:NN`). 33 bytes RAM budget estimated.
-Phase 4.5 copy operations remain deferred.
+All pool-mutating operations from Menu, Sequencer, copyClearTools, and
+EuklidGenerator route through `patSvc_*` (PatternStackService), not direct
+`pat_*` mutation calls. TIM3's automation read path reads address entries
+directly (not through the service) — address entries are always consistent
+due to the publication ordering fix. `patSvc_idle()` must be called at all
+5 filesystem replacement boundary points.
+
+### Next feature: Phase 4.5 copy operations
+
+`pat_copyTrack`, `pat_copyPattern`, `pat_copyBar` are deliberate no-ops.
+Their implementation requires independent pool-block duplication and must
+route through the Pattern Stack Service.

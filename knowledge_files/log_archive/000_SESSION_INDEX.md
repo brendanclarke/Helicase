@@ -75,6 +75,7 @@
 | 064 | 2026-09-12/14 | commits `e268107`..`d5af5fd` on `dev-ph4-pattern` | Per-Scene PAT4 A/B Pattern AutoSave, independent 16-bit dirty tracking and 10,519-byte snapshot, HCPR v2 plus 145-row HCNAMES, boot restore, Bank-Load Pattern-name publication fix, and hardware-accepted 16-Scene functional closeout |
 | 065 | 2026-09-15 | uncommitted on `dev-ph4-pattern` (base `87e275e`) | Step automation editing (Method 1) and sequencer playback: pool block automation read/write/remove APIs, step-edit cursor/navigation/detail views, sequencer pending buffer with foreground drain, per-slot dirty bitmap and trigger-time restore from morph interpolation, dtype-aware value display and bounds clamping; hardware-tested |
 | 066 | 2026-09-15/16 | uncommitted on `dev-ph4-pattern` (base `87e275e`) | VOICE-page held-step automation overlay (Method 2): overlay activation via configurable short long-press, four-slot bounded CGRAM underline cache, held-value resolution with endpoint fallback, async track-wide search agent, pot/encoder-to-automation write, debounced value-underline reapplication, step illumination of automated steps, Morph integration, 62-glyph alphanumeric font table for underlined characters; six post-hardware-test fixes (delta handling working-value cache, editMode bit index, non-numeric dtype display, 'S' glyph, PM63 nibble split, diff-based CGRAM transactions with retry bit); hardware-tested |
+| 067 | 2026-09-18 | uncommitted on `dev-ph4-pattern` (base `87e275e`) | Pattern Stack Service (Part A): unified pool mutation dispatcher with 64-entry SPSC ring, PRIMASK-protected queue, direct-when-idle/queued-when-busy admission, bounded bulk barriers for track/pattern clear, mutation-target handover, Tier 1 trailing-gap maintenance, Tier 2 paced compaction, elastic gap policy, 15+ caller migration; publication ordering fix (write-new/swap/free-old, detach-address-first for erase/clear, removed same-size in-place rewrite); Pool Usage Monitor (Part B): `pat_poolUsagePercent()` settings widget with memcpy+popcount; Dtype offset bug: removed /2 *2 MIDI CC-style automation value conversion (identity mapping for all automatable dtypes), four code sites fixed; hardware-validated (PatternTrace zero errors, AutoSaveTrace zero errors, PAT4 structural integrity confirmed) |
 
 
 ---
@@ -1342,3 +1343,74 @@ helpers). Net bss delta: +64 (44 B overlay state + 20 B buttonHandler state).
   `S066_IMPLEMENTATION_SCHEDULE.md` (12-step implementation, 1720 lines),
   `S066_DYN_P-LOCK_FOLLOW-UP.md` (6 hardware-test fixes),
   `PATTERN_DYNAMIC_STACK.md`, `MODULE_INTERCHANGE_SPEC.md`.
+
+### 067 — Pattern Stack Service + Dtype Offset Bug Fix (2026-09-18)
+Session 067 delivered the Pattern Stack Service (the unified pool mutation dispatcher and defragmentation infrastructure) and fixed the dtype automation value offset bug. Two main parts plus a follow-up bug fix:
+
+**Part B — Pool Usage Monitor.** `pat_poolUsagePercent()` in PatternData.c uses `memcpy`+`popcount` for packed-bitmap-safe access, returning a 0..99 occupancy percentage. A Settings-menu widget shows `pts:NN` format with compute-on-entry (retained static byte), visibility predicate gating it to the Global subpage, `MenuText.h` short/long names, `menuPages.h` Global subpage 2 position 7, and forward declarations. 0 lines of new RAM (retained byte is in `.bss`, counted in the existing menu state).
+
+**Part A — Pattern Stack Service.** New `Core/Bank/Scene/Pattern/PatternStackService.c/h` (1225+106 lines, 2 new files). Unified dispatcher that serializes all pool-mutating operations through a single service tick, guaranteeing one mutation target at a time with instant playback switching. Architecture:
+
+- **64-entry volatile `uint32_t` SPSC ring** (256 B) with PRIMASK-protected enqueue. Each entry packs operation code (3 bits), scene (4 bits), track (3 bits), step (7 bits), target (9 bits), value (7 bits) into 32 bits. Direct-when-idle admission with queued-when-busy fallback.
+- **Service tick priority**: handover → queue drain → bulk barrier → Tier 1 gap → Tier 2 compaction.
+- **Bounded bulk barriers** for track clear (128-step sweep) and pattern clear (7-track × 128-step sweep) with per-tick budgets of 16 steps.
+- **Mutation-target handover state machine**: when filesystem replacement completes (e.g. Scene Load), the service switches its internal scene pointer to the newly loaded scene atomically.
+- **Tier 1 trailing-gap maintenance**: linear scan after each freed block, merging adjacent free chunks up to 16 per tick.
+- **Tier 2 paced compaction**: `PAT_COMPACT_INTERVAL_MS` (100 ms) throttled, `PAT_COMPACT_SCAN_PER_TICK` (16 chunks) budget, reactive compaction when head allocation fails. Relocates live blocks toward pool start, updating address entries under PRIMASK protection.
+- **Elastic gap policy**: `PAT_GAP_REDUCE_THRESHOLD` (60%) triggers gap reduction to maintain contiguous free space at pool tail.
+- **7 new PatternTrace stage codes**: `Q` (queue event), `C` (compaction), `F` (free/gap), `R` (relocation), `M` (mutation), `G` (gap scan), `X` (service state change).
+- **15+ call sites migrated** from `pat_*` to `patSvc_*` across `menu.c`, `copyClearTools.c`, `EuklidGenerator.c`, `sequencer.c`.
+- **Filesystem integration**: `patSvc_idle()` autosave guard in filesystem.c (5 filesystem replacement boundary points), `patSvc_tick()` after `endlessPots_tick()` in timebase.c, `patSvc_init()` in main.c after boot filesystem ladder.
+
+**Gate 1 — Publication Ordering Fix.** Three paths in PatternData.c fixed:
+- `pat_writeDynamic()`: write-new/PRIMASK-swap/free-old pattern with trigger-bit re-read; removed same-size in-place rewrite entirely (unsafe because even removal can compact automation bytes).
+- `pat_eraseStep()`: detach-address-first before freeing pool block.
+- `pat_releaseStepDynamic()` added for trigger-preserving detach+free.
+- `pat_markPoolMutationDirty()` added for narrow dirty-marking boundary.
+- `pat_tryAppendAutomation()` added for Gate 6 in-place growth.
+- `pat_writeSpecials()` and raw setters changed from `void` to `uint8_t` return.
+
+**Dtype Offset Bug Fix.** The MIDI CC-style `/2` (encode) and `*2` (decode) conversions applied to automation values were incorrect: automation targets are instrument descriptor parameters (range ≤127), not `parameter_values[]` entries (0..255). No `DTYPE_0B255` parameter is automatable. Fix: identity mapping (stored 7-bit value = parameter value directly) at four code sites:
+- `va_expand7to8()` renamed to `va_storedToParam()` — identity function (3 call sites in menu.c).
+- `va_writeAutomationFromKnob()` — removed halving, added defensive 127 saturation.
+- `seq_drainPendingAutomation()` — removed doubling, simplified to single variable.
+- `menu_stepAutomationAddDefault()` — removed halving on creation.
+- Five comments updated removing "lossy 8→7→8" language; `va_formatValue3()` comment updated.
+
+**Deviations from schedule** (all improvements): (1) shrink-in-place path removed entirely instead of PRIMASK-fixed; (2) inverted queued clear ordering (enqueue barrier first, then clear triggers) prevents orphaned dynamic blocks on full FIFO; (3) `pat_writeSpecials`/raw setters return success/failure; (4) `pat_releaseStepDynamic` added as a separate trigger-preserving detach; (5) `pat_markPoolMutationDirty` provides a narrow dirty-marking boundary; (6) `pat_tryAppendAutomation` supports Gate 6 in-place growth; (7) `osc2_mod_type=51` anomaly in T1S11 identified as pre-fix artifact.
+
+**Build metrics post-service:** `text=447,644`, `data=412`, `bss=291,140`. Deltas from S066 baseline: +8,248 text, +288 bss. RAM budget: 289 actual vs 282 scheduled, within +300 approved ceiling. **Post-dtype-fix:** `text=447,580`, `data=412`, `bss=291,140` (dtype fix removed code, no RAM change).
+
+**Hardware validation** (both parts):
+- Post-service: 1,539 PatternTrace records (1,283 TIER1_GAP + 256 TIER2_RELOC, zero errors); 78,592 AutoSaveTrace records (zero errors); 3 PAT4 files structural integrity confirmed; relocation chains verified; 2 user-write blocks explained.
+- Post-dtype-fix: 4,633 PatternTrace records (3,902 TIER1_GAP + 731 TIER2_RELOC, zero errors); 78,615 AutoSaveTrace records (zero errors); PAT4 integrity confirmed; automation values confirmed in identity domain.
+
+**Files changed (20 files, ~2,113 insertions):**
+
+| File | Changes |
+|------|---------|
+| `PatternStackService.c` | New: 1,225 lines — complete service dispatcher, queue, bulk barriers, handover, gap maintenance, compaction |
+| `PatternStackService.h` | New: 106 lines — public API declarations |
+| `PatternData.c` | `pat_poolUsagePercent()`, publication ordering fix, `pat_releaseStepDynamic()`, `pat_markPoolMutationDirty()`, `pat_tryAppendAutomation()`, `pat_writeSpecials` return type |
+| `PatternData.h` | `pat_poolUsagePercent()` declaration |
+| `PatternTrace.h` | 7 new trace stage codes (Q/C/F/R/M/G/X) |
+| `menu.c` | Part B widget, dtype fix (va_storedToParam, halving removed, comment updates), 15+ caller migration to patSvc_* |
+| `menu.h` | `TEXT_PAT_STORE_USE`, SHORT/LONG enum entries, `PAR_PAT_STORE_USE` sentinel (0xFFFD) |
+| `MenuText.h` | "pts" short name, "PtrnStoreUse" long name |
+| `menuPages.h` | Global subpage 2 position 7 |
+| `sequencer.c` | Dtype fix, TIM3 live erase → queue event, per-track pattern array definition+init |
+| `sequencer.h` | `extern seq_perTrackPattern[7]` |
+| `copyClearTools.c` | 2 call sites migrated to patSvc_* |
+| `EuklidGenerator.c` | 1 call site migrated to patSvc_* |
+| `timebase.c` | `patSvc_tick()` call after `endlessPots_tick()` |
+| `filesystem.c` | `patSvc_idle()` autosave guard, filesystem replacement boundary (5 points) |
+| `main.c` | `patSvc_init()` after boot filesystem ladder |
+| `Makefile` | Added PatternStackService.c |
+| `config.h` | `PAT_GAP_REDUCE_THRESHOLD` (60u), `PAT_COMPACT_INTERVAL_MS` (100u), `PAT_COMPACT_SCAN_PER_TICK` (16u) |
+
+- **Find here**: [067_SESSION_HANDOFF_LOG.md](067_SESSION_HANDOFF_LOG.md),
+  `S067_STACK_SERVICE_DETAIL_PLAN.md` (962 lines, authoritative design plan),
+  `S067_STACK_SERVICE_IMPLEMENTATION.md` (1826 lines, line-by-line code schedule and post-implementation assessment),
+  `S067_DTYPE_OFFSET_BUG.md` (root cause analysis),
+  `S067_DTYPE_BUG_IMPLEMENTATION.md` (588 lines, implementation schedule and hardware validation),
+  `PATTERN_DYNAMIC_STACK.md`, `MODULE_INTERCHANGE_SPEC.md`, `SRAM_MANIFEST.md`.

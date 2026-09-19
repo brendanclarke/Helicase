@@ -1,10 +1,10 @@
 # SRAM manifest
 
 The detailed section/symbol inventory below was regenerated from the current
-2026-09-16 Session 066 build (detail inventory from Session 064 build at
-`d5af5fd`; Session 065/066 deltas noted below).
-`arm-none-eabi-size build/lxr02.elf` reports `text=439,396`, `data=412`, and
-`bss=290,852`.
+2026-09-18 Session 067 build (detail inventory from Session 064 build at
+`d5af5fd`; Session 065/066/067 deltas noted below).
+`arm-none-eabi-size build/lxr02.elf` reports `text=447,580`, `data=412`, and
+`bss=291,140`.
 The approved 290-byte `fs_resident_source` cache, the one-byte
 `menu_pendingPageSwitch`, and Session 061 boot scratch all share normal SRAM1.
 This remains a linked-image inventory: sizes come from
@@ -40,6 +40,13 @@ timestamp, and tracking fields; verified by `_Static_assert`) and 20 B
 buttonHandler state (held-step timing, overlay routing). 496 B flash font table
 in lcd.c (62 glyphs × 8 bytes, `.rodata`). BSS delta from Session 065: +64 B.
 Text delta from Session 065: +5,360 B.
+Session 067 adds 288 B new BSS in PatternStackService.c: 256 B for the 64-entry
+volatile `uint32_t` SPSC ring buffer (SRAM1) and ~32 B of service state
+variables (scene, open, handover, replace_pending, bulk cursors, logical chunks,
+tier1 scan cursor, reactive state, last compact tick). Text delta: +8,184 B
+(post-service) then −64 B (dtype fix), net +8,184 B from Session 066. BSS delta
+from Session 066: +288 B. The dtype offset bug fix removed code (net −64 text)
+but added no RAM. Final build: text=447,580, data=412, bss=291,140.
 
 `DEV_LOGGING_IWDG`'s retained boot capsule (config.h; see DEV_MODES.md) adds a
 new, separate 12-of-32-approved-byte allocation in previously-unmapped SRAM2
@@ -397,3 +404,27 @@ cache, and 520-byte trace); the remaining 64 bytes are other linked
 filesystem/AutoSave state and layout effects. No second dirty mask or complete
 record-sized SRAM image is linked. DTCM remains unchanged at 12,280 bytes and
 retains its delay-line-only remainder reservation.
+
+## 2026-09-18 Session 067 Pattern Stack Service allocation note
+
+`PatternStackService.c` adds 288 bytes of normal SRAM1 `.bss`, owned by
+PatternStackService for the firmware lifetime:
+
+- 256 B: 64-entry volatile `uint32_t` SPSC ring buffer for queued mutations.
+- ~32 B: service state variables — `service_scene`, `service_open`,
+  `replace_pending`, `bulk_op`/`bulk_track`/`bulk_target`/`bulk_cursor`,
+  `logical_chunks_used`, `tier1_scan_cursor`, `reactive_compact_requested`,
+  `last_compact_tick`, and `handover_phase`.
+
+289 bytes actual vs 282 bytes scheduled; within the +300 approved BSS ceiling
+for this session. The +7 byte delta is attributable to alignment and minor
+state variable additions not in the original schedule.
+
+No DTCM, DMA, or logging-only allocation changed. No reserved SRAM1 Pattern
+capacity or DTCM delay-line capacity was consumed — the service state is
+control overhead, not Pattern data storage.
+
+Build metrics post-service: `text=447,644`, `data=412`, `bss=291,140`.
+Build metrics post-dtype-fix (final): `text=447,580`, `data=412`,
+`bss=291,140`. The dtype fix removed 64 bytes of text (conversion code) and
+added no RAM.

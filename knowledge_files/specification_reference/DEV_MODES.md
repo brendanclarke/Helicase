@@ -10,10 +10,10 @@ AsyncFATFS semantics; those belong to `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`, and
 
 This document describes the Session 048 logging baseline, the Session 051
 Scene-follow-up build, the Session 057 stall-detection expansion
-(`DEV_STALL_DETECTION`, ten `X`/`PHASE_STALL` sites), and Session 061's
-`Q` AutoSave boot-reader decisions. Plans and failed
-working-tree experiments that mention a unified `/devlog.bin` are not
-implemented state.
+(`DEV_STALL_DETECTION`, ten `X`/`PHASE_STALL` sites), Session 061's
+`Q` AutoSave boot-reader decisions, and Session 067's PatternTrace stage codes
+(see PatternTrace section below). Plans and failed working-tree experiments
+that mention a unified `/devlog.bin` are not implemented state.
 
 The build has exactly two development modes:
 
@@ -502,6 +502,31 @@ Do not log every main-loop or filesystem tick. Record transitions, bounded
 milestones, and errors so observing SD pressure does not become the pressure.
 Do not combine a diagnostic change with a behavioral fix unless the evidence
 already identifies that fix and the two cannot be separated safely.
+
+## PatternTrace stage codes (Session 067)
+
+`PatternTrace.h` defines a separate set of single-letter stage codes for the
+Pattern Stack Service's diagnostic trace, written to `/pattrc.bin`. These are
+distinct from the AutoSaveTrace codes in `AutosaveTrace.h` above — they share
+the single-letter convention but have different code-point values, different
+owning files, and different semantic contexts. Some letters overlap
+(e.g. `Q`, `F`, `X`) between the two trace systems; the containing trace file
+determines interpretation.
+
+| Code | Meaning |
+|------|---------|
+| `Q` | Queue event — enqueue, dequeue, or drop (FIFO full) |
+| `C` | Compaction — Tier 2 block relocation cycle |
+| `F` | Free/gap — block freed, gap state change |
+| `R` | Relocation — live block moved during Tier 2 compaction |
+| `M` | Mutation — pool-mutating operation applied |
+| `G` | Gap scan — Tier 1 trailing-gap examination result |
+| `X` | Service state change — handover, mode transition |
+
+These codes use the same 8-byte record format as AutoSaveTrace
+(`stage:u8, flags:u8, tick16:u16, value:u32`, little-endian) but are emitted
+by `PatternStackService.c` through `PatternTrace.h` macros, not through
+`autosaveTrace_record()`.
 
 ## Validation
 

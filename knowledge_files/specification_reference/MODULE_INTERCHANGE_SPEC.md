@@ -1,17 +1,22 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-066, including typed HCNAMES, AutoSave boot restore, typed Instrument-index
+067, including typed HCNAMES, AutoSave boot restore, typed Instrument-index
 repair, AsyncFATFS directory publication, the Phase 4 dynamic Pattern storage
-system, step automation editing/playback (Session 065), and the VOICE-page
-held-step automation overlay (Session 066). Historical migrations belong in
-session logs; this document states which live module owns each call, state
-transition, and retained object.
+system, step automation editing/playback (Session 065), the VOICE-page
+held-step automation overlay (Session 066), and the Pattern Stack Service with
+dtype offset bug fix (Session 067). Historical migrations belong in session
+logs; this document states which live module owns each call, state transition,
+and retained object.
 
 ## Rules
 
 - UI code calls the owner module directly.
-- Pattern/track/step/automation edits go through `pat_*`.
+- Pool-mutating Pattern/track/step/automation edits go through `patSvc_*`
+  (the Pattern Stack Service, Session 067). Direct `pat_*` mutation calls are
+  reserved for PatternData internals and the service itself. Non-mutating
+  reads (e.g. `pat_readStepSpecials`, `pat_readStepAutomations`) remain
+  direct `pat_*` calls.
 - LED rendering goes through `led_*`.
 - Transport/playback timing goes through `seq_*`.
 - Sound parameter application goes through Preset.
@@ -123,7 +128,8 @@ transition, and retained object.
   for instrument file keys. `Step` destinations are already canonical 16-bit
   IDs, but AutomationNode still narrows them to legacy byte CC/CC2 routing;
   descriptor step automation uses canonical 9-bit `instrument_param_id_t`
-  targets and 7-bit pool-packed values (Session 065).
+  targets and 7-bit pool-packed values with identity mapping (stored value =
+  parameter value; Session 065 storage, Session 067 dtype fix).
 - Descriptor-backed velocity/LFO target storage, menu display, and runtime
   application are live after Session 035 for direct descriptor targets,
   voice-local decimation, per-voice Morph, and Scene Decimation. Direct
@@ -180,7 +186,7 @@ Bank Load/Save completion paths. See `058_SESSION_HANDOFF_LOG.md` §5.
 
 ## Core/Bank/Scene/Pattern/PatternData
 
-### Session 064 current contract
+### Session 067 current contract
 
 PatternData owns a three-part dynamic storage system per resident Scene:
 a 1,792-byte static address array (896 × uint16_t), an 8,192-byte event
@@ -194,11 +200,15 @@ bytes for note, velocity, and probability in ascending bit order.
 `pat_readStepSpecials()` is the unified read path for Sequencer playback
 and step-edit menu display; it returns resolved defaults for absent
 specials. `pat_setStepNote/Volume/Probability` perform real pool
-read-modify-write through `pat_writeSpecials`, which handles in-place
-rewrite, reallocation, free, and graceful degradation on alloc failure.
-`pat_eraseStep` and `pat_clearTrack` free pool blocks before clearing
-address entries. Copy operations remain deliberate no-ops pending pool
-block duplication design.
+read-modify-write through `pat_writeSpecials` (returns `uint8_t`
+success/failure since Session 067), which handles reallocation, free, and
+graceful degradation on alloc failure. Session 067 publication ordering fix:
+all address-to-pool transactions use write-new/swap/free-old with PRIMASK
+trigger-bit re-read; in-place same-size rewrite removed entirely.
+`pat_eraseStep` and `pat_clearTrack` detach addresses before freeing pool
+blocks. Copy operations remain deliberate no-ops pending pool block
+duplication design. Since Session 067, all pool-mutating calls from callers
+outside PatternData route through the Pattern Stack Service (`patSvc_*`).
 
 Current Scene/Bank/root Pattern interchange is exact binary PAT4; legacy text
 is import-only and no retained `PatternSet`/discard instance remains. `scene_t`
@@ -264,7 +274,45 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 | `pat_applyStepToMenu(scene, track, step)` | Copy step editable fields into `parameter_values`. | buttonHandler, Menu active-step edits |
 | `pat_applyPatternSettingsToMenu(scene)` | Copy Pattern settings into menu params. | Menu load/apply paths, buttonHandler Pattern view |
 | `pat_applyTrackSettingsToMenu(scene, track)` | Copy track settings into menu params. | buttonHandler, LED follow paths, Menu voice page |
+| `pat_releaseStepDynamic(scene, track, step)` | Trigger-preserving detach+free: clears bit 14 and sets sentinel offset while preserving the trigger bit, then frees pool block. (Session 067) | PatternStackService |
+| `pat_markPoolMutationDirty(scene)` | Narrow dirty-marking boundary for service operations that bypass normal `pat_write*` paths. (Session 067) | PatternStackService |
+| `pat_tryAppendAutomation(scene, track, step, target9, value7)` | In-place growth for adding automation entries when adjacent free space is available. Returns 1 on success. (Session 067) | PatternStackService |
+| `pat_poolUsagePercent(void)` | Return pool occupancy percentage 0..99 via memcpy+popcount of active Scene bitmap. (Session 067) | Menu settings widget |
 | `pat_snapshotScene(scene)` / `pat_autosaveSnapshot()` | Transfer one live Scene into the immutable Pattern AutoSave snapshot/read it during the drain. | filesystem Pattern scheduler/writer |
+
+## Core/Bank/Scene/Pattern/PatternStackService
+
+Affiliate modules: PatternData, Menu, Sequencer, copyClearTools,
+EuklidGenerator, filesystem, timebase.
+
+Purpose: unified pool mutation dispatcher (Session 067). Serializes all
+pool-mutating operations through a single service tick, guaranteeing exactly
+one mutation target at a time. Provides two-tier defragmentation
+(trailing-gap merge and paced compaction), bounded bulk barriers for
+track/pattern clear, filesystem replacement handover, and an elastic gap
+policy. See `PATTERN_DYNAMIC_STACK.md` §12 for the complete specification.
+
+| API | Use | Usual callers / clients |
+|---|---|---|
+| `patSvc_init(void)` | Initialize service state, queue, cursors. | `main.c` after boot filesystem ladder |
+| `patSvc_tick(void)` | Service tick: handover → queue drain → bulk barrier → Tier 1 gap → Tier 2 compaction. | `timebase.c` after `endlessPots_tick()` |
+| `patSvc_idle(void)` | Filesystem replacement handover: complete/abandon bulk barrier, drain queue, switch Scene, clear cursors. | `filesystem.c` at 5 replacement boundary points |
+| `patSvc_writeStepAutomation(scene, track, step, target9, value7)` | Add/update one automation entry via service. Returns 1 on success. | Menu VOICE overlay, step-edit menu |
+| `patSvc_removeStepAutomation(scene, track, step, target9)` | Remove one automation entry via service. Returns 1 if found. | Menu VOICE overlay, step-edit menu |
+| `patSvc_setStepNote(scene, track, step, note)` | Set step note via service. | Menu step edit |
+| `patSvc_setStepVolume(scene, track, step, volume)` | Set step velocity via service. | Menu step edit |
+| `patSvc_setStepProbability(scene, track, step, prob)` | Set step probability via service. | Menu step edit |
+| `patSvc_eraseStep(scene, track, step)` | Erase step via service. | Sequencer erase mode |
+| `patSvc_clearTrack(scene, track)` | Clear track via bounded bulk barrier. | copyClearTools |
+| `patSvc_clearPattern(scene)` | Clear pattern via bounded bulk barrier. | copyClearTools |
+| `patSvc_removeTrackAutomationByTarget(scene, track, target9)` | Remove all entries with a given target from all 128 steps. | Menu VOICE overlay |
+| `patSvc_enqueueErase(scene, track, step)` | Queue erase from TIM3 ISR context (PRIMASK-protected enqueue). | Sequencer live erase |
+
+Caller migration (Session 067): 15+ call sites across `menu.c`,
+`copyClearTools.c`, `EuklidGenerator.c`, and `sequencer.c` changed from
+direct `pat_*` mutation calls to `patSvc_*` routing. TIM3's automation read
+path is not routed through the service — it reads address entries directly,
+which are always consistent due to the publication ordering fix.
 
 ## Core/Bank/Scene/Pattern/EuklidGenerator
 
@@ -467,7 +515,7 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 | `seq_addNote(trackNr, vel, note)` | Record played note into pattern when recording. | MidiParser, roll path |
 | `seq_setRecordingMode(active)` / `seq_setErasingMode(active)` | Recording/erase gates. | buttonHandler |
 | `seq_recordAutomation(voice, dest, value)` | Sequencer-gated and held-step automation recording. | Preset, MidiParser |
-| `seq_drainPendingAutomation(void)` | Foreground drain of debounced pending buffer; calls `instrumentManager_writeRuntime()` and sets dirty bits. Runs inside `audio_check_and_render()` after `voiceControl_processPending()`. | `main.c` render loop |
+| `seq_drainPendingAutomation(void)` | Foreground drain of debounced pending buffer; passes stored 7-bit value directly to `instrumentManager_writeRuntime()` (identity mapping since Session 067 dtype fix; the previous `/2` `*2` conversion is removed) and sets dirty bits. Runs inside `audio_check_and_render()` after `voiceControl_processPending()`. | `main.c` render loop |
 | `seq_restoreAutomatedParameters(voice)` | Restore dirty descriptors from `morph_interpolation[]` on voice retrigger; clears per-slot dirty bitmap. | `voiceControl_triggerNow()` |
 | `seq_midiNoteOff(chan)` / `seq_sendMidiNoteOn(channel, note, veloc)` | MIDI note output ownership. | MidiParser, Sequencer |
 | `seq_offsetTrackStepIndexForRotation(trackNr, oldRot, newRot, len)` | Narrow runtime hook for live rotation compensation. | PatternData only |

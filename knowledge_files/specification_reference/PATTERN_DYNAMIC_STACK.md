@@ -2,9 +2,10 @@
 
 ## Authority and status
 
-This is the authoritative live-memory, allocator, PAT4 interchange, and
-Pattern AutoSave reference through Session 066. Historical Session 062/063/064
-plans describe how the design was reached but do not override this file.
+This is the authoritative live-memory, allocator, PAT4 interchange, Pattern
+Stack Service, and Pattern AutoSave reference through Session 067. Historical
+Session 062/063/064 plans describe how the design was reached but do not
+override this file.
 Filesystem hierarchy and HCNAMES grammar are in `FILESYSTEM_SPEC.md`; scalar
 and Pattern AutoSave scheduling/recovery are in `AUTOSAVE.md`; exact linked
 memory totals are in `SRAM_MANIFEST.md`.
@@ -29,9 +30,10 @@ Implemented and hardware accepted:
 - HCNAMES Pattern identity rows 129..144.
 
 Not implemented: Pattern copy operations (the three APIs are deliberate
-no-ops), live-record capture, allocator compaction/defragmentation, and
-real-time editing guarantees while a snapshot is admitted during record/erase
-(admission is instead deferred while those modes are active).
+no-ops), live-record capture, and real-time editing guarantees while a snapshot
+is admitted during record/erase (admission is instead deferred while those
+modes are active). Allocator compaction/defragmentation is implemented via the
+Pattern Stack Service (Session 067, see §12).
 
 ## 1. Resident object
 
@@ -93,8 +95,10 @@ with `0xff`, permanently reserving the unbacked range. Do not treat the bitmap
 as one byte per chunk or limit the live pool to 1,024 bytes.
 
 Allocation is deterministic first-fit linear search. Blocks are contiguous;
-free clears exactly the occupied span. There is no compaction or
-defragmentation. Allocation failure leaves the old step block/value intact.
+free clears exactly the occupied span. Allocation failure leaves the old step
+block/value intact. The Pattern Stack Service (§12) provides two-tier
+maintenance: Tier 1 trailing-gap merge after frees, and Tier 2 paced
+compaction that relocates live blocks toward pool start.
 
 ## 4. Dynamic block format
 
@@ -121,20 +125,27 @@ Each automation entry's 9-bit target is the canonical `instrument_param_id_t`:
 `slot * INSTRUMENT_PARAM_COUNT + descriptor_index` for voice parameters
 (IDs 0..383), or a Scene target ID (384+). A step must never contain two
 entries with the same 9-bit target (uniqueness invariant, enforced at write
-time). The 7-bit value maps to `instrument_param_value_t` (0..255) via
-`(v == 127) ? 255 : v * 2` (same as MIDI CC); the inverse is
-`(v >= 255) ? 127 : v / 2`.
+time). The 7-bit value is an identity mapping: stored value = parameter value.
+Every automatable descriptor parameter has a range that fits in 7 bits
+(DTYPE_0B127, DTYPE_PM63, DTYPE_MENU, DTYPE_ON_OFF, DTYPE_MIX_FM,
+DTYPE_LFO_POLARITY, DTYPE_NOTE_NAME, DTYPE_1B16). No DTYPE_0B255 parameter
+is currently automatable. If a DTYPE_0B255 parameter becomes automatable in
+the future, its conversion must be handled as a dtype-conditional special case.
 
 Default resolved values when a special is absent are the Pattern default note,
 default velocity, and probability 127. `pat_readStepSpecials()` always returns
 usable values plus flags saying which were explicitly stored.
 
-Writers use read-modify-write semantics. When a new size differs, allocate the
-replacement, write it completely, point the address entry at it, then free the
-old block. Clearing the last special removes the block and bit 14 only when
-no automation entries remain; a block with zero specials but nonzero
-automation count is preserved (flags byte = 0, no special values stored,
-automation entries follow immediately).
+Writers use read-modify-write semantics with publication-safe ordering
+(Session 067): allocate new block, write complete content, PRIMASK-protect the
+address-entry swap (re-read trigger bit to avoid race with TIM3 step advance),
+then free old block. In-place rewrite of same-size blocks is not used: even a
+removal can compact automation bytes, creating a window where TIM3 reads
+partially updated content. Clearing the last special removes the block and
+bit 14 only when no automation entries remain; a block with zero specials but
+nonzero automation count is preserved (flags byte = 0, no special values
+stored, automation entries follow immediately). Erase and clear paths detach
+the address entry before freeing the pool block.
 
 ## 5. Public behavior
 
@@ -169,6 +180,12 @@ All real Pattern mutations converge on PatternData's local dirty helper. It
 invalidates the Bank clean-Scene witness and calls
 `autosave_markPatternDirty(scene)`. Direct mutable-region clients must provide
 equivalent complete-operation marking or they violate AutoSave ownership.
+
+Since Session 067, all pool-mutating operations from Menu, Sequencer,
+copyClearTools, and EuklidGenerator route through the Pattern Stack Service
+(`patSvc_*` API) rather than calling `pat_*` mutation functions directly. The
+service guarantees exactly one mutation target at a time and serializes all
+pool access. See §12.
 
 ## 6. Sequencer and menu integration
 
@@ -357,8 +374,187 @@ cache, editMode bit index, non-numeric dtype display, 'S' glyph, PM63 nibble
 split, diff-based CGRAM transactions with retry bit. Hardware-tested.
 See `../log_archive/066_SESSION_HANDOFF_LOG.md`.
 
+Session 067 implemented the Pattern Stack Service (§12): unified pool mutation
+dispatcher with SPSC queue, two-tier defragmentation (trailing-gap merge and
+paced compaction), bulk barriers for track/pattern clear, filesystem
+replacement handover, pool usage monitor widget, and elastic gap policy.
+Publication ordering fix applied to all address-to-pool transactions
+(write-new/swap/free-old with PRIMASK trigger-bit re-read). Dtype offset bug
+fixed: automation value domain changed from halved MIDI CC-style to identity
+mapping across all four code sites (menu write, menu read, sequencer drain,
+step automation add). Hardware-validated: PatternTrace zero errors across
+6,172 records (5,185 gap + 987 relocation), AutoSaveTrace zero errors across
+157,207 records, PAT4 structural integrity confirmed, automation values
+confirmed in identity domain post-fix. See
+`../log_archive/067_SESSION_HANDOFF_LOG.md` for exact evidence.
+
 Deferred supplemental cases are deterministic mid-write power interruption,
 record/erase admission instrumentation, injected CRC fallback, and performance
 measurement. They do not reopen the functional closeout. Phase 4.5 copy
-operations, live-record capture, and allocator compaction/defragmentation are
-future features.
+operations and live-record capture are future features.
+
+## 12. Pattern Stack Service
+
+### 12.1 Architecture
+
+`PatternStackService.c` (1,225 lines) and `PatternStackService.h` (106 lines)
+implement a unified dispatcher that serializes all pool-mutating operations
+through a single service tick. This guarantees exactly one mutation target at
+a time, preventing concurrent access between foreground callers, the TIM3
+ISR's automation reads, and the filesystem replacement boundary.
+
+Admission policy: direct-when-idle (immediate foreground execution with
+service lock), queued-when-busy (PRIMASK-protected enqueue into the SPSC ring
+for later drain).
+
+### 12.2 Service tick priority order
+
+Evaluated every call to `patSvc_tick()` (called from `timebase.c` after
+`endlessPots_tick()`):
+
+1. **Handover** — check and complete filesystem replacement boundary
+   transitions.
+2. **Queue drain** — dequeue and execute one pending mutation.
+3. **Bulk barrier** — advance one step of a bounded track/pattern clear sweep.
+4. **Tier 1 trailing-gap maintenance** — scan freed region for adjacent free
+   chunks, merge up to 16 per tick.
+5. **Tier 2 paced compaction** — relocate live blocks toward pool start under
+   pacing constraints.
+
+### 12.3 Queue format
+
+64-entry volatile `uint32_t` ring buffer (256 bytes SRAM1). Each entry packs:
+
+```text
+bits 31..29   operation code (3 bits)
+bits 28..25   scene (4 bits)
+bits 24..22   track (3 bits)
+bits 21..15   step (7 bits)
+bits 14..6    target (9 bits) — instrument_param_id_t
+bits 5..0     value (7 bits) — 0..127 instrument_param_value_t
+```
+
+Enqueue uses `__disable_irq()`/`__enable_irq()` (PRIMASK) to protect
+head/tail consistency. Dequeue is foreground-only. Queue full is a silent drop.
+
+### 12.4 Bulk barriers
+
+Track clear and pattern clear are bounded operations, 16 steps per service
+tick:
+
+- **Track clear**: 128-step sweep, completes in 8 ticks.
+- **Pattern clear**: 7-track × 128-step sweep, completes in 56 ticks.
+
+### 12.5 Filesystem replacement handover
+
+`patSvc_idle()` is called from 5 filesystem replacement boundary points in
+`filesystem.c`. When a Scene Load, Bank Load, or Pattern Load completes, the
+service completes or abandons any in-flight bulk barrier, drains remaining
+queue entries for the old Scene, switches `service_scene` to the new target,
+and clears internal gap/compaction cursors.
+
+### 12.6 Tier 1 trailing-gap maintenance
+
+After each freed block, linear scan from the freed offset to find and merge
+adjacent free chunks. Budget: up to 16 chunk examinations per tick. Maintains
+contiguous trailing free space at pool tail for efficient allocation.
+
+### 12.7 Tier 2 paced compaction
+
+Full pool defragmentation that relocates live blocks toward pool start.
+Pacing: `PAT_COMPACT_INTERVAL_MS` (100 ms) minimum between cycles,
+`PAT_COMPACT_SCAN_PER_TICK` (16 chunks) maximum per tick. Reactive
+compaction triggered immediately when head allocation fails and pool occupancy
+is below `PAT_GAP_REDUCE_THRESHOLD`. Each block relocation follows
+write-new/update-address/free-old with PRIMASK around the address-entry swap.
+
+### 12.8 Elastic gap policy
+
+`PAT_GAP_REDUCE_THRESHOLD` (60%, `config.h`) is the pool occupancy above
+which trailing-gap maintenance activates. Below this threshold, gaps are
+tolerable and the service skips gap scanning.
+
+### 12.9 Pool usage monitor
+
+`pat_poolUsagePercent()` in PatternData.c reads the Scene bitmap with
+`memcpy` (packed-bitmap-safe), counts set bits with `__builtin_popcount`
+across 64 words, and returns `(occupied × 100) / 2048` clamped to 99.
+Displayed as `"pts:NN"` on the Settings menu Global subpage, computed once
+on page entry and retained in a static byte.
+
+### 12.10 Publication ordering contract
+
+All address-to-pool transactions follow detach/publish-before-free:
+
+1. **Replace**: allocate new, write content, PRIMASK swap address entry
+   (re-read trigger bit), free old.
+2. **Clear last special**: PRIMASK detach address (clear bit 14, sentinel
+   offset), free old.
+3. **Erase step**: detach entire address word, free old.
+
+In-place rewrite of same-size blocks is not used. All PRIMASK sections are
+under 50 ns: one load, one bit-field insert/clear, one store, no allocation
+or loop.
+
+### 12.11 Config constants
+
+```c
+#define PAT_GAP_REDUCE_THRESHOLD   60u   /* % occupancy for gap maintenance */
+#define PAT_COMPACT_INTERVAL_MS   100u   /* min ms between compaction cycles */
+#define PAT_COMPACT_SCAN_PER_TICK  16u   /* max chunks examined per tick */
+```
+
+### 12.12 Public API
+
+```c
+void     patSvc_init(void);
+void     patSvc_tick(void);
+void     patSvc_idle(void);
+uint8_t  patSvc_writeStepAutomation(scene, track, step, target9, value7);
+uint8_t  patSvc_removeStepAutomation(scene, track, step, target9);
+void     patSvc_setStepNote(scene, track, step, note);
+void     patSvc_setStepVolume(scene, track, step, volume);
+void     patSvc_setStepProbability(scene, track, step, prob);
+void     patSvc_eraseStep(scene, track, step);
+void     patSvc_clearTrack(scene, track);
+void     patSvc_clearPattern(scene);
+void     patSvc_removeTrackAutomationByTarget(scene, track, target9);
+void     patSvc_enqueueErase(scene, track, step);
+```
+
+### 12.13 Integration points
+
+| Location | Call |
+|----------|------|
+| `main.c` | `patSvc_init()` after boot filesystem ladder |
+| `timebase.c` | `patSvc_tick()` after `endlessPots_tick()` |
+| `filesystem.c` | `patSvc_idle()` at 5 replacement boundary points |
+
+### 12.14 Binding constraints
+
+1. No pool mutation path may bypass the service without explicit justification.
+2. Exactly one mutation target Scene at a time.
+3. TIM3 reads address entries directly; they must always point at valid or
+   sentinel data.
+4. PRIMASK sections must stay under 50 ns.
+5. Bulk barriers must be bounded per-tick.
+6. `patSvc_idle()` must be called at every filesystem replacement boundary.
+7. Queue drop on full is the accepted failure mode.
+
+### 12.15 PatternTrace stage codes
+
+Seven stage codes in `PatternTrace.h` for service diagnostics:
+
+| Code | Meaning |
+|------|---------|
+| `Q` | Queue event (enqueue/dequeue/drop) |
+| `C` | Compaction (Tier 2 block relocation) |
+| `F` | Free/gap (block freed, gap state change) |
+| `R` | Relocation (live block moved) |
+| `M` | Mutation (pool-mutating operation applied) |
+| `G` | Gap scan (Tier 1 gap examination result) |
+| `X` | Service state change (handover, mode transition) |
+
+These are PatternTrace codes in `PatternTrace.h`, distinct from the
+AutoSaveTrace codes in `AutosaveTrace.h` that use the same single-letter
+convention.

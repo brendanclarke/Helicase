@@ -17,28 +17,23 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 067 Pattern Stack Service plus the dtype
-offset bug follow-up compiled on branch `dev-ph4-pattern`; hardware validation
-remains pending. The follow-up keeps automation values in the descriptor domain
-through VOICE overlay editing, step-entry seeding, and sequencer playback.
-Session 066 implemented the VOICE-page held-step automation overlay (Method 2)
-from `S065_DYN_PAT_VOICE_PARAM_UX.md`: overlay activation via configurable
-short long-press, four-slot bounded CGRAM underline cache, held-value resolution
-with endpoint fallback, async track-wide search agent, pot/encoder-to-automation
-write with working-value cache, debounced value-underline reapplication, step
-illumination, and Morph integration. Six post-hardware-test fixes applied
-(delta handling, editMode bit index, non-numeric display, 'S' glyph, PM63
-nibble split, diff-based CGRAM transactions with retry bit). Hardware-tested.
-64 B new static SRAM (44 B overlay state + 20 B buttonHandler). Build:
-`text=439,396`, `data=412`, `bss=290,852`.
+**Current working source**: Session 067 complete — Pattern Stack Service plus
+dtype offset bug fix, compiled and hardware-validated on branch
+`dev-ph4-pattern`. The service dispatches all pool mutations through a SPSC
+queue with two-tier defragmentation, bulk barriers, and filesystem handover.
+The dtype fix changed automation values from halved MIDI CC-style to identity
+mapping at all four code sites. Build: `text=447,580`, `data=412`,
+`bss=291,140` (+8,184 text, +288 bss from Session 066). Hardware validation:
+PatternTrace zero errors across 6,172 records, AutoSaveTrace zero errors
+across 157,207 records, PAT4 structural integrity confirmed, automation
+values confirmed in identity domain.
 
-**Next feature step**: Session 067 hardware validation for the Pattern stack
-queueing, playback-safe relocation, filesystem replacement handover, pool
-widget behavior, and the dtype regression checklist in
-`S067_DTYPE_BUG_IMPLEMENTATION.md`. Phase 4.5 copy operations (`pat_copyTrack`,
-`pat_copyPattern`, `pat_copyBar`) with independent pool-block duplication
-remain deferred. Permanent Session 066 authority is
-`knowledge_files/log_archive/066_SESSION_HANDOFF_LOG.md`,
+**Next feature step**: Phase 4.5 copy operations (`pat_copyTrack`,
+`pat_copyPattern`, `pat_copyBar`) with independent pool-block duplication,
+routed through the Pattern Stack Service. Hardware validation of service
+queueing under sustained load is recommended before proceeding. Permanent
+Session 067 authority is
+`knowledge_files/log_archive/067_SESSION_HANDOFF_LOG.md`,
 `PATTERN_DYNAMIC_STACK.md`, `MODULE_INTERCHANGE_SPEC.md`, and
 `SRAM_MANIFEST.md`.
 
@@ -77,7 +72,7 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
   `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`. API
   boundaries and live memory ownership are in `MODULE_INTERCHANGE_SPEC.md` and
-  `SRAM_MANIFEST.md`; the latter records the Session 065 linked allocation
+  `SRAM_MANIFEST.md`; the latter records the Session 067 linked allocation
   and totals. Dynamic Pattern storage is in
   `PATTERN_DYNAMIC_STACK.md`. AutoSave format/reader/writer authority is
   `AUTOSAVE.md`; development-mode and logging authority is `DEV_MODES.md`. Read
