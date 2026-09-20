@@ -1462,6 +1462,7 @@ static void filesystem_autosaveWriterCompleted(void);
 static void filesystem_autosavePatternDrain_tick(void);
 static void filesystem_autosavePatternDrainSchedule_tick(void);
 static void filesystem_autosavePatternDrainCompleted(void);
+static void filesystem_autosaveNonSemanticPatternDrainCompleted(void);
 static void filesystem_autosaveTraceFlushSchedule_tick(void);
 static void filesystem_autosaveTraceFlushCompleted(void);
 static void filesystem_autosaveTraceCaptured(uint8_t budget_exhausted);
@@ -1940,6 +1941,24 @@ static uint8_t op_settings_recovery_terminator_seen = 0u;
  */
 static uint16_t fs_autosave_next_due_tick = 0u;
 static uint8_t fs_autosave_writer_armed = 0u;
+
+/*
+ * Non-semantic Pattern AutoSave arm/due-tick debounce state.
+ *
+ * What: one armed flag and one wrapping millisecond deadline, structurally
+ * identical to the scalar writer's fs_autosave_writer_armed /
+ * fs_autosave_next_due_tick idiom. Why: the non-semantic rung arms once when
+ * its eligibility mask becomes nonzero and all higher-priority work is idle,
+ * then re-checks eligibility at the due tick before starting. This debounce
+ * prevents tight thrash if eligibility flickers across a few ticks and spaces
+ * successive non-semantic writes. Inputs: time_sysTick and the non-semantic
+ * eligibility mask. Outputs: at most one debounced start per eligibility
+ * episode. Lifetime: static filesystem.c-owned; cleared alongside the
+ * existing writer arm flags on AutoSave OFF and Bank-session loss. Affiliate:
+ * filesystem_autosaveNonSemanticPatternDrainSchedule_tick().
+ */
+static uint16_t fs_nonsemantic_pattern_next_due_tick = 0u;
+static uint8_t fs_nonsemantic_pattern_armed = 0u;
 /*
  * Logging-only trace cadence state.
  *
@@ -23212,6 +23231,8 @@ static void filesystem_resetFacadeForBootLogRecovery(void)
     op_autosave_writer.target_file = NULL;
     op_autosave_writer.target_ready = 0u;
     fs_autosave_writer_armed = 0u;
+    /* Card-facade destruction cannot carry a non-semantic debounce forward. */
+    fs_nonsemantic_pattern_armed = 0u;
     fs_autosave_writer_boot_ready = 0u;
     fs_autosave_recovery_pending = 0u;
     /*
@@ -23294,6 +23315,8 @@ void filesystem_initAfterCardReady(void)
     fs_autosave_page_suppressed = 0u;
     fs_autosave_writer_boot_ready = 0u;
     fs_autosave_writer_armed = 0u;
+    /* A fresh card mount starts a new non-semantic AutoSave debounce. */
+    fs_nonsemantic_pattern_armed = 0u;
     fs_autosave_recovery_pending = 0u;
     /*
      * A fresh card mount starts a new winner-identity session. Clear the
@@ -23448,6 +23471,8 @@ void filesystem_setAutosaveEnabled(uint8_t enabled)
         fs_autosave_setup_failed = 0u;
         fs_autosave_recovery_pending = 0u;
         fs_autosave_writer_armed = 0u;
+        /* Policy OFF cancels any pending non-semantic debounce. */
+        fs_nonsemantic_pattern_armed = 0u;
         fs_autosave_writer_boot_ready = 0u;
         /*
          * OFF is a policy boundary: a later ON must establish and validate a
@@ -23776,6 +23801,8 @@ static void filesystem_autosaveWriterCompleted(void)
             fs_autosave_discard_pending = 0u;
         }
         fs_autosave_writer_armed = 0u;
+        /* The terminal OFF boundary must not retain a stale arm. */
+        fs_nonsemantic_pattern_armed = 0u;
         fs_autosave_recovery_pending = 0u;
         fs_autosave_writer_boot_ready = 0u;
         /*
@@ -23873,6 +23900,151 @@ static void filesystem_autosavePatternDrainCompleted(void)
     filesystem_ack();
 }
 
+/*
+ * Terminal callback for a non-semantic Pattern AutoSave drain.
+ *
+ * What: preserves the non-semantic eligibility bit on I/O failure; on
+ * success the bit was already consumed at scheduling time and stays clear.
+ * Why: unlike a failed semantic write, there is no data-loss risk — the
+ * on-card PAT4 remains musically valid regardless of outcome. Failure simply
+ * leaves the bit set for retry on the next opportunity. Input: terminal
+ * status from the shared Pattern drain state machine. Output: the
+ * non-semantic bit is restored on failure and the facade is acknowledged.
+ * Affiliates: filesystem_autosaveNonSemanticPatternDrainSchedule_tick() and
+ * Autosave.c non-semantic mask.
+ */
+static void filesystem_autosaveNonSemanticPatternDrainCompleted(void)
+{
+    if (status != FS_STATUS_DONE)
+        autosave_markNonSemanticPatternDirty(fs_pattern_drain_scene);
+    filesystem_ack();
+}
+
+/*
+ * Admit one per-Scene non-semantic Pattern AutoSave drain when all higher-
+ * priority work declines.
+ *
+ * What: selects the lowest eligible resident Scene from the non-semantic
+ * mask, verifies that no parameter or semantic Pattern work is pending,
+ * applies the arm/due-tick debounce, copies the live Pattern region, advances
+ * the shared A/B generation, and starts the shared whole-file writer. Why:
+ * physical pool relocations change block addresses and bitmap runs but not
+ * musical content; persisting the updated layout is strictly cosmetic
+ * background work that must never contend with real edit persistence. The
+ * non-active-first ordering prefers Scenes other than seq_activePattern,
+ * falling back to the active Scene only when no non-active candidate exists.
+ *
+ * Gate list (shared with the semantic Pattern drain):
+ *   fs_autosave_enabled, fs_autosave_runtime_ready,
+ *   fs_autosave_writer_boot_ready, bank_hasResidentBank(),
+ *   menu_isLoadSaveCommandActive(), LOAD_PAGE/SAVE_PAGE suppression,
+ *   afatfs_getFilesystemState() == AFATFS_FILESYSTEM_STATE_READY,
+ *   seq_recordActive || seq_eraseActive, patSvc_idle().
+ *
+ * Additional gates (non-semantic-specific):
+ *   !autosave_maskHasDirty(), autosave_patternDirtyMask() == 0u, and a
+ *   nonzero non-semantic eligibility mask.
+ *
+ * Debounce: running and stopped playback conditions use the arm/due-tick
+ * idiom (fs_nonsemantic_pattern_armed /
+ * fs_nonsemantic_pattern_next_due_tick). Inputs: Autosave.c's non-semantic
+ * mask, seq_activePattern, and time_sysTick. Outputs: at most one Pattern
+ * drain owns the facade; non-active Scenes are preferred. Affiliates:
+ * pat_snapshotScene(), filesystem_autosavePatternDrain_tick(),
+ * filesystem_autosaveNonSemanticPatternDrainCompleted(), and Autosave.c.
+ */
+static void filesystem_autosaveNonSemanticPatternDrainSchedule_tick(void)
+{
+    uint16_t mask;
+    uint8_t scene;
+    uint8_t active;
+    uint32_t generation;
+    uint16_t now;
+
+    /* ---- shared gate list (identical to semantic Pattern drain) ---- */
+    if (!fs_autosave_enabled || !fs_autosave_runtime_ready ||
+        !fs_autosave_writer_boot_ready || !bank_hasResidentBank())
+        return;
+    if (menu_isLoadSaveCommandActive())
+        return;
+    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)
+        return;
+    if (afatfs_getFilesystemState() != AFATFS_FILESYSTEM_STATE_READY)
+        return;
+    if (seq_recordActive || seq_eraseActive)
+        return;
+    if (!patSvc_idle())
+        return;
+
+    /* ---- non-semantic-specific: nothing higher pending ---- */
+    if (autosave_maskHasDirty() || autosave_patternDirtyMask() != 0u)
+        return;
+
+    mask = autosave_nonSemanticPatternDirtyMask();
+    if (mask == 0u) {
+        fs_nonsemantic_pattern_armed = 0u;
+        return;
+    }
+
+    /* ---- arm/due-tick debounce (both running and stopped conditions) ---- */
+    now = time_sysTick;
+    if (!fs_nonsemantic_pattern_armed) {
+        fs_nonsemantic_pattern_next_due_tick = (uint16_t)(
+            now + AUTOSAVE_WRITER_INTERVAL_MS);
+        fs_nonsemantic_pattern_armed = 1u;
+        return;
+    }
+    if ((uint16_t)(now - fs_nonsemantic_pattern_next_due_tick) >= 0x8000u)
+        return;
+
+    /* ---- non-active-first Scene selection ---- */
+    active = seq_activePattern;
+    scene = SCENE_COUNT;
+
+    /* First pass: prefer any non-active Scene. */
+    {
+        uint8_t s;
+        for (s = 0u; s < SCENE_COUNT && s < 16u; s++) {
+            if (s == active)
+                continue;
+            if ((mask & (uint16_t)(1u << s)) != 0u) {
+                scene = s;
+                break;
+            }
+        }
+    }
+    /* Second pass: fall back to the active Scene. */
+    if (scene >= SCENE_COUNT) {
+        uint8_t s;
+        for (s = 0u; s < SCENE_COUNT && s < 16u; s++) {
+            if ((mask & (uint16_t)(1u << s)) != 0u) {
+                scene = s;
+                break;
+            }
+        }
+    }
+    if (scene >= SCENE_COUNT || scene >= 16u)
+        return;
+
+    /* ---- ownership handoff (same pattern as semantic drain) ---- */
+    autosave_clearNonSemanticPatternDirty(scene);
+    pat_snapshotScene(scene);
+    fs_pattern_drain_scene = scene;
+    generation = fs_pattern_generation[scene] + 1u;
+    if (generation == 0u)
+        generation = 1u;
+    fs_pattern_generation[scene] = generation;
+    if (!filesystem_start(FS_INTERNAL_OP_AUTOSAVE_PATTERN_DRAIN,
+                          FS_FILE_SETTINGS, 0u,
+                          filesystem_autosaveNonSemanticPatternDrainCompleted)) {
+        autosave_markNonSemanticPatternDirty(scene);
+        return;
+    }
+    fs_nonsemantic_pattern_armed = 0u;
+    op_pattern_scene = scene;
+    filesystem_patternAutosaveFilename(op_pattern_filename, scene, generation);
+}
+
 static void filesystem_autosaveSetupCompleted(void)
 {
     uint8_t setup_ok = (uint8_t)(status == FS_STATUS_DONE);
@@ -23899,6 +24071,8 @@ static void filesystem_autosaveSetupCompleted(void)
         fs_autosave_writer_boot_ready = 0u;
         fs_autosave_recovery_pending = 0u;
         fs_autosave_writer_armed = 0u;
+        /* A failed setup abandons any pending non-semantic debounce. */
+        fs_nonsemantic_pattern_armed = 0u;
         /*
          * Setup failure leaves the pair's durable identity unknown. Revoke
          * the continuation cache along with runtime writer authorization.
@@ -23911,6 +24085,8 @@ static void filesystem_autosaveSetupCompleted(void)
     fs_autosave_setup_failed = 0u;
     fs_autosave_recovery_pending = 1u;
     fs_autosave_writer_armed = 0u;
+    /* A successful setup starts a fresh non-semantic AutoSave session. */
+    fs_nonsemantic_pattern_armed = 0u;
     autosave_setMutationTrackingEnabled(1u);
     autosave_markResidentBankDirty();
 }
@@ -23936,6 +24112,8 @@ static void filesystem_autosaveWriterSchedule_tick(void)
         fs_autosave_setup_pending = 0u;
         fs_autosave_setup_failed = 0u;
         fs_autosave_writer_armed = 0u;
+        /* AutoSave OFF must also cancel the lower-priority debounce. */
+        fs_nonsemantic_pattern_armed = 0u;
         fs_autosave_recovery_pending = 0u;
         fs_autosave_writer_boot_ready = 0u;
         /*
@@ -23964,6 +24142,8 @@ static void filesystem_autosaveWriterSchedule_tick(void)
             autosave_setMutationTrackingEnabled(0u);
         }
         fs_autosave_writer_armed = 0u;
+        /* Bank-session loss cannot carry a debounce into a new session. */
+        fs_nonsemantic_pattern_armed = 0u;
         fs_autosave_recovery_pending = 0u;
         fs_autosave_writer_boot_ready = 0u;
         /*
@@ -24637,6 +24817,11 @@ void filesystem_tick(void)
     /* Pattern is the final background claimant after scalar AutoSave work. */
     if (status == FS_STATUS_IDLE)
         filesystem_autosavePatternDrainSchedule_tick();
+    /* Non-semantic Pattern is the final background claimant after semantic
+     * Pattern AutoSave work; it runs only when no higher-priority work is
+     * pending. */
+    if (status == FS_STATUS_IDLE)
+        filesystem_autosaveNonSemanticPatternDrainSchedule_tick();
     if (status != FS_STATUS_BUSY) return;
 
     switch (current_op) {
@@ -25500,6 +25685,8 @@ uint8_t filesystem_ensureAutosaveFilesBlocking(void)
     autosave_setMutationTrackingEnabled(0u);
     fs_autosave_writer_boot_ready = 0u;
     fs_autosave_writer_armed = 0u;
+    /* Boot setup starts with no debounce inherited from an old session. */
+    fs_nonsemantic_pattern_armed = 0u;
     fs_autosave_recovery_pending = 0u;
     /*
      * Boot setup starts a new validation epoch. Discard any continuation
@@ -25556,6 +25743,8 @@ uint8_t filesystem_ensureAutosaveFilesBlocking(void)
      * successful clean completion then disarms all recurring file activity.
      */
     fs_autosave_writer_armed = 0u;
+    /* Successful boot setup also begins a fresh non-semantic session. */
+    fs_nonsemantic_pattern_armed = 0u;
     fs_autosave_setup_failed = 0u;
     fs_autosave_recovery_pending = 1u;
     fs_autosave_writer_boot_ready = 1u;

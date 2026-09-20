@@ -14,6 +14,7 @@
 #include "PatternTrace.h"
 #include "sequencer.h"
 #include "SceneData.h"
+#include "Autosave.h"
 #include "timebase.h"
 #include "config.h"
 
@@ -429,7 +430,16 @@ static uint8_t patSvc_relocateIndex(uint8_t scene, uint16_t address_index,
     for (i = 0u; i < logical_chunks; i++)
         patSvc_bitmapClear(region, (uint16_t)(old_chunk + i));
     memset(&region->pool[old_offset], 0, (size_t)logical_chunks * 4u);
-    pat_markPoolMutationDirty(scene);
+    /*
+     * Publish layout-only maintenance after the relocation is complete.
+     *
+     * What: records physical pool movement without entering the semantic
+     * Pattern dirty boundary. Why: offsets and bitmap runs changed, but the
+     * musical Pattern content did not; card-clean, semantic AutoSave, and the
+     * HCNAMES refreshed witness must remain untouched. Affiliate: the
+     * filesystem non-semantic Pattern AutoSave scheduler.
+     */
+    autosave_markNonSemanticPatternDirty(scene);
     if (old_offset_out)
         *old_offset_out = old_offset;
     if (new_offset_out)

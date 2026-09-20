@@ -163,16 +163,6 @@ void pat_eraseStep(uint8_t scene_index, uint8_t track, uint8_t step);
 void pat_releaseStepDynamic(uint8_t scene_index, uint8_t track,
                             uint8_t step);
 
-/*
- * Mark a service-owned relocation as a resident Pattern mutation.
- *
- * What: expose the established Pattern dirty boundary without exposing the
- * allocator or its bitmap helpers. Why: Tier 1/2 relocation changes live pool
- * offsets and must be included in card-clean and Pattern AutoSave ownership.
- * Inputs: resident Scene index. Output: the existing dirty registers are
- * invalidated. Affiliate: PatternStackService.c relocation executor.
- */
-void pat_markPoolMutationDirty(uint8_t scene_index);
 uint8_t pat_sceneHasActiveSteps(uint8_t scene_index);
 
 /*

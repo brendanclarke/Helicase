@@ -88,6 +88,23 @@ static volatile uint8_t autosave_mutation_tracking_enabled;
  */
 static volatile uint16_t autosave_pattern_dirty_mask;
 
+/*
+ * Per-Scene eligibility indicator for non-semantic Pattern AutoSave.
+ *
+ * What: one bit per Scene, set when a physical pool relocation completes,
+ * cleared when a non-semantic AutoSave drain consumes it. Why: the scheduler
+ * must distinguish a real Pattern edit pending in autosave_pattern_dirty_mask
+ * from a physical relocation that belongs to the lower-priority maintenance
+ * rung. Inputs/outputs: set by autosave_markNonSemanticPatternDirty(), read by
+ * autosave_nonSemanticPatternDirtyMask(), cleared per Scene by
+ * autosave_clearNonSemanticPatternDirty() and wholesale by
+ * autosave_discardDirtyMask(). Lifetime: static SRAM1 .bss, cleared at
+ * processor reset or policy discard. This mask does not clear the HCNAMES
+ * refreshed witness; physical relocation is non-semantic and must never touch
+ * HCNAMES provenance. Affiliate: filesystem.c non-semantic scheduler.
+ */
+static volatile uint16_t autosave_nonsemantic_pattern_dirty_mask;
+
 _Static_assert(sizeof(autosave_dirty_mask) == AUTOSAVE_MASK_BYTES,
                "autosave canonical dirty record must match the wire mask");
 
@@ -169,6 +186,63 @@ void autosave_clearPatternDirty(uint8_t scene_index)
         return;
     primask = autosave_irqSave();
     autosave_pattern_dirty_mask &= (uint16_t)~(1u << scene_index);
+    autosave_irqRestore(primask);
+}
+
+/*
+ * Record one completed physical pool relocation in the non-semantic mask.
+ *
+ * What: sets the Scene's bit in autosave_nonsemantic_pattern_dirty_mask
+ * without touching card-clean, semantic Pattern dirty, or the HCNAMES
+ * refreshed witness. Why: a physical relocation changes pool-block addresses
+ * and bitmap runs but does not change musical content; it must be
+ * distinguishable from a real edit so the scheduler can run it at strictly
+ * lower priority. Input: scene_index 0..15. Output: one atomically set bit
+ * while mutation tracking is enabled; ignored otherwise. Affiliates:
+ * PatternStackService.c relocation executor and filesystem.c scheduler.
+ */
+void autosave_markNonSemanticPatternDirty(uint8_t scene_index)
+{
+    uint32_t primask;
+
+    if (!autosave_mutation_tracking_enabled || scene_index >= SCENE_COUNT)
+        return;
+    primask = autosave_irqSave();
+    autosave_nonsemantic_pattern_dirty_mask |= (uint16_t)(1u << scene_index);
+    autosave_irqRestore(primask);
+}
+
+/*
+ * Read the pending non-semantic Pattern Scene mask without consuming bits.
+ *
+ * Input: none. Output: one bit per Scene requiring a non-semantic Pattern
+ * drain. Why: filesystem.c chooses the next Scene only when no semantic or
+ * parameter work is pending. Affiliate:
+ * filesystem_autosaveNonSemanticPatternDrainSchedule_tick().
+ */
+uint16_t autosave_nonSemanticPatternDirtyMask(void)
+{
+    return autosave_nonsemantic_pattern_dirty_mask;
+}
+
+/*
+ * Clear one non-semantic Pattern dirty bit after its durable transaction.
+ *
+ * Input: scene_index 0..15. Output: one atomically cleared bit; a relocation
+ * arriving after this boundary can set it again for the next drain. Why: the
+ * scheduler consumes one Scene's bit before snapshot and restores it on
+ * failure; on success the bit stays clear until a later relocation. Affiliate:
+ * filesystem.c non-semantic Pattern drain scheduler and completion callback.
+ */
+void autosave_clearNonSemanticPatternDirty(uint8_t scene_index)
+{
+    uint32_t primask;
+
+    if (scene_index >= SCENE_COUNT)
+        return;
+    primask = autosave_irqSave();
+    autosave_nonsemantic_pattern_dirty_mask &=
+        (uint16_t)~(1u << scene_index);
     autosave_irqRestore(primask);
 }
 
@@ -1274,12 +1348,14 @@ void autosave_discardDirtyMask(void)
      *
      * Inputs: filesystem lifecycle has disabled tracking and verified that no
      * autosave operation is consuming mask chunks. Output: every pending
-     * scalar and Pattern bit is discarded in SRAM; SD records remain untouched. Why: stale work from
-     * an intentionally disabled/retired Bank session must not reappear after
-     * re-enable. Affiliates: filesystem's immediate/deferred OFF transition.
+     * scalar, semantic Pattern, and non-semantic Pattern bit is discarded in
+     * SRAM; SD records remain untouched. Why: stale work from an intentionally
+     * disabled/retired Bank session must not reappear after re-enable.
+     * Affiliates: filesystem's immediate/deferred OFF transition.
      */
     memset((void *)autosave_dirty_mask, 0, sizeof(autosave_dirty_mask));
     autosave_pattern_dirty_mask = 0u;
+    autosave_nonsemantic_pattern_dirty_mask = 0u;
 }
 
 void autosave_markBankFieldDirty(autosave_bank_field_t field)

@@ -560,6 +560,24 @@ uint16_t autosave_patternDirtyMask(void);
 void autosave_clearPatternDirty(uint8_t scene_index);
 
 /*
+ * Non-semantic Pattern dirty mask: one bit per Scene for physical-relocation-
+ * only changes that do not represent musical edits.
+ *
+ * What: set, read, and clear one bit per resident Scene. Why: physical pool
+ * relocations change block addresses and bitmap runs but not musical content;
+ * a separate mask lets the scheduler run non-semantic writes at strictly lower
+ * priority than semantic Pattern and parameter AutoSave. The mark function
+ * does not clear the HCNAMES refreshed witness or the Bank card-clean bit —
+ * relocations must never touch those registers. Inputs/outputs: scene_index
+ * 0..15 for set/clear; the getter returns the full 16-bit pending mask.
+ * Affiliates: PatternStackService.c relocation executor and filesystem.c
+ * non-semantic Pattern drain scheduling.
+ */
+void autosave_markNonSemanticPatternDirty(uint8_t scene_index);
+uint16_t autosave_nonSemanticPatternDirtyMask(void);
+void autosave_clearNonSemanticPatternDirty(uint8_t scene_index);
+
+/*
  * Payload-to-resident apply functions (boot reader, §10).
  *
  * What: inverse of autosave_getLivePayloadByte() — writes winner-record

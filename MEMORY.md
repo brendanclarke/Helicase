@@ -30,11 +30,15 @@ chase-light after boot; the sequencer now reads each track's own
 `data=412`, `bss=291,196`. All three verified on hardware — see
 `knowledge_files/log_archive/068_SESSION_HANDOFF_LOG.md`.
 
-**Next feature step**: implement the AutoSave/Pattern-service bounded-CPU
-convergence plan (separate physical pool relocation from semantic AutoSave
-dirtiness; replace the Pattern Stack Service's periodic Tier 1/Tier 2 loop,
-which currently self-chases and self-dirties at idle, with owned trailing-
-slack repair plus reactive-only compaction; remove two O(n) clean-state
+Session 069 has now implemented the first bounded-CPU convergence slice:
+physical Pattern relocation is tracked separately from semantic Pattern
+AutoSave dirtiness, and a lowest-priority debounced PAT4 drain persists that
+layout-only work. Source/build verification passed with `text=448,580`,
+`data=412`, `bss=291,196`; hardware verification is pending. **Next feature
+step**: implement the remaining AutoSave/Pattern-service bounded-CPU
+convergence plan (replace the Pattern Stack Service's periodic Tier 1/Tier 2
+loop, which currently self-chases and self-dirties at idle, with owned
+trailing-slack repair plus reactive-only compaction; remove two O(n) clean-state
 scans; add a background CPU budget; retest AutoSave OFF-to-ON convergence) —
 full plan preserved in `068_SESSION_HANDOFF_LOG.md` §4 and in
 `S069_ATS_PAT_BOUNDED_CPU.md` if still present. Per-track step scale and
@@ -85,7 +89,27 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   is a settled but **unimplemented** plan carried forward as Session 069's
   starting point — do not delete it until that work lands or its content is
   otherwise re-archived; its full substance is also preserved in
-  `068_SESSION_HANDOFF_LOG.md` §4 as a backstop.
+  `068_SESSION_HANDOFF_LOG.md` §4 as a backstop. Session 069 broke out two
+  no-code implementation plans from it, each now with an independent second
+  pass: `S069_NON_SEMANTIC_MAINTENANCE.md` /
+  `S069_NON_SEMANTIC_PAT_MAINT_RESTRICTION_CLAUDE.md` cover "make physical
+  relocation non-semantic" — that slice is implemented in
+  `S069_NON_SEMANTIC_MAINT_IMPLEMENTATION.md` with source/build verification
+  complete and hardware verification pending. The CLAUDE variant follows
+  this session's direct-predicate running/stopped AutoSave policy (no cycle
+  count) and found `pat_markPoolMutationDirty()` had exactly one caller whose
+  dirty helper also clears the HCNAMES Pattern refreshed witness, not just the
+  AutoSave mask and card-clean bit. `S069_SLACK_REACTIVE_COMPACTION.md` /
+  `S069_SLACK_REACTIVE_COMPACTION_CLAUDE.md` cover the one 512-byte slack/
+  reservation image (SRAM1, neither persisted nor duplicated per
+  Pattern/Scene) — the CLAUDE variant settles the size, finds reactive
+  compaction already matches the target shape for the queued path (only the
+  periodic Tier 2 sweep and a direct-path parity gap need to change), and
+  finds `pat_tryAppendAutomation()`'s existing Gate-6 growth fast path is the
+  hook point for owned trailing slack. The CLAUDE documents note physical
+  relocation is scoped to the single active `service_scene` today, so
+  non-active-first ordering is currently near-dormant. The slack/compaction
+  documents remain planning only and are not part of this implementation.
   Per-track step scale and shuffle are still stored/edited/persisted only,
   with no sequencer playback effect — see `PATTERN_DYNAMIC_STACK.md` §6.4 and
   `SCOPING_TARGETS.md` § Session 068 deferred items.

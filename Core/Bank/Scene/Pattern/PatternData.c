@@ -77,23 +77,6 @@ static void pat_markSceneDirty(uint8_t scene_index)
 }
 
 /*
- * Mark a service-owned relocation through PatternData's established dirty
- * boundary.
- *
- * What: keep card-clean invalidation and Pattern AutoSave ownership in this
- * module while allowing PatternStackService.c to publish a completed pool
- * relocation. Why: the service may mutate address offsets/bitmap runs, but it
- * must not duplicate the two existing dirty-register calls. Inputs: a
- * resident Scene index; invalid indices are ignored. Affiliate: the Tier 1/2
- * relocation executor.
- */
-void pat_markPoolMutationDirty(uint8_t scene_index)
-{
-    if (scene_indexValid(scene_index))
-        pat_markSceneDirty(scene_index);
-}
-
-/*
  * Capture one coherent Pattern region for the background writer.
  *
  * Inputs: validated resident Scene index and an idle RECORD/ERASE boundary.
