@@ -2,7 +2,45 @@
 
 Parent plan: `S069_ATS_PAT_BOUNDED_CLAUDE.md` (Pass 1: items 3.1, 3.2, 5).
 
-All line numbers verified against current `dev-ph4-5-fixes` HEAD (`50b88ea`).
+All line numbers were verified against the pre-pass `dev-ph4-5-fixes` HEAD
+(`a174fb6`).
+
+Pass 1 source implementation is complete. Hardware acceptance remains pending.
+
+## Work log
+
+### 2026-09-20 — Pass 1 implementation
+
+- Added the private `autosave_dirty_count` population tracker and 256-byte
+  `popcount8_lut[]`. `autosave_maskByteOr()` counts only fresh 0-to-1 bits;
+  `autosave_maskBitTake()` decrements only a consumed set bit; discard resets
+  the derived count with the canonical mask. `autosave_maskHasDirty()` is now
+  an O(1) count test. The DEV logging build audits the invariant every 1,000
+  calls under a coherent PRIMASK snapshot and emits trace stage `Z` on drift;
+  `tools/decode_devlogs.py` decodes the maintained/full counts.
+- Optimized `patSvc_countUsed()` from 2,048 per-bit reads to 64
+  `memcpy()`/`__builtin_popcount()` word reads. Removed only the clean idle
+  tick-tail recount; all existing mutation/lifecycle reconciliation call sites
+  remain. No Pattern storage or new API was added.
+- Added `AUTOSAVE_PATTERN_QUIET_WINDOW_MS` = 250 and
+  `AUTOSAVE_PATTERN_MAX_LATENCY_MS` = 5,000. Semantic Pattern mutation now
+  records one global TIM2 timestamp. The scheduler captures a dirty epoch,
+  defers until quiet or the deadline, rotates Scene selection for fairness, and
+  resets the epoch when the mask is clean even if policy/card gates suppressed
+  the scheduler. Non-semantic Pattern scheduling is unchanged.
+- The implementation keeps the 11-byte source-level SRAM estimate from the
+  pass plan: 2-byte scalar count, 4-byte semantic timestamp, 4-byte filesystem
+  first-dirty timestamp, and 1-byte Scene cursor. The 256-byte LUT is ROM.
+- Clean verification passed: `make clean && make && make img`; linked sizes
+  are `text=449,476`, `data=404`, `bss=291,724`, and the packaged image is
+  449,896 bytes (449,880-byte firmware payload plus the 16-byte image header).
+  `git diff --check` and Python syntax compilation of
+  `tools/decode_devlogs.py` also pass. Existing compiler/linker warnings are
+  unchanged and unrelated to this pass.
+- Descriptive contract blocks were kept adjacent to the changed declarations
+  and implementations in the AutoSave, PatternStackService, and filesystem
+  `.h`/`.c` surfaces; the new trace stage and timing controls are documented
+  at their owning header/config declarations as well.
 
 ---
 
@@ -926,7 +964,13 @@ Build verification after each item group: `make clean && make && make img`.
 | `Core/Bank/Scene/Autosave.c` | C01, C02, C03, C04, C05+C13, C06, C10, C11, C12, C14 impl |
 | `Core/Bank/Scene/Autosave.h` | C14 decl |
 | `Core/Bank/Scene/AutosaveTrace.h` | A01 |
-| `Core/Bank/Scene/Pattern/PatternStackService.c` | C07, C08, A03 |
-| `Core/Hardware/SD/filesystem.c` | C15, C16 |
+| `Core/Bank/Scene/Pattern/PatternStackService.c/.h` | C07, C08, A03 and adjacent service contract |
+| `Core/Hardware/SD/filesystem.c/.h` | C15, C16 and adjacent scheduler contract |
 | `config.h` | C09 |
 | `tools/decode_devlogs.py` | A02 |
+
+Reference updates: `MEMORY.md`, `S069_ATS_PAT_BOUNDED_CLAUDE.md`,
+`knowledge_files/specification_reference/AUTOSAVE.md`,
+`knowledge_files/specification_reference/PATTERN_DYNAMIC_STACK.md`, and
+`knowledge_files/specification_reference/SRAM_MANIFEST.md` record the landed
+Pass 1 behavior, allocation, and verification status.

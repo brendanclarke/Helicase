@@ -114,6 +114,7 @@ STAGE_ENUM = {
     "E": "AUTOSAVE_TRACE_STAGE_OPERATION_ERROR",
     "Y": "AUTOSAVE_TRACE_STAGE_SCAN_PARENT_DIAG",
     "Q": "AUTOSAVE_TRACE_STAGE_BOOT_READER",
+    "Z": "AUTOSAVE_TRACE_STAGE_DIRTY_COUNT_MISMATCH",
 }
 
 STAGE_PRODUCER = {
@@ -148,6 +149,7 @@ STAGE_PRODUCER = {
          "producer no longer exists (the bug it was diagnosing was fixed "
          "by eliminating the code path), kept only to decode already-"
          "captured Session 054 evidence",
+    "Z": "autosave_maskHasDirty() DEV population audit",
 }
 
 PHASE_STALL_SITES = {
@@ -508,6 +510,12 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
         detail = (f"{enum_name} via {producer}: "
                   f"budget_exhausted={int(bool(flags))}, "
                   f"patch_count={value}")
+    elif ch == "Z":
+        maintained = value & 0xFFFF
+        scanned = (value >> 16) & 0xFFFF
+        detail = (f"{enum_name} via {producer}: maintained_count="
+                  f"{maintained}, full_scan_count={scanned}, "
+                  f"maintained_high_byte=0x{flags:02x}")
     elif ch == "P":
         target = "A (.hcprms1)" if flags == 0 else "B (.hcprms2)"
         detail = (f"{enum_name} via {producer}: newly active target "

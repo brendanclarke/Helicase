@@ -533,6 +533,17 @@ bool filesystem_requestRepairBankNames(uint16_t slot, fs_completion_cb_t cb);
  * empty cache, including an interrupted Kit-quarantine pass.
  */
 uint8_t     filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind);
+/*
+ * Advance the single foreground filesystem scheduler.
+ *
+ * What: pumps AsyncFATFS and admits one eligible background operation after
+ * higher-priority work declines. Semantic Pattern AutoSave admission is
+ * coalesced by the implementation's 250 ms quiet window and 5 s maximum
+ * latency; non-semantic Pattern maintenance remains independently scheduled.
+ * Input: current filesystem/runtime state and owner dirty registers. Output:
+ * bounded progress with no blocking wait or filesystem ownership transfer to
+ * callers. Affiliate: Autosave.c and PatternStackService.c.
+ */
 void        filesystem_tick(void);
 fs_status_t filesystem_status(void);
 const char *filesystem_errorCode(void);

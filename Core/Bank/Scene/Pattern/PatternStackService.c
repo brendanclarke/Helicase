@@ -484,16 +484,32 @@ static uint8_t patSvc_blockChunksFor(uint8_t flags, uint8_t auto_count)
     return (uint8_t)((bytes + 3u) >> 2u);
 }
 
-/* Count occupied logical pool chunks for the current target. */
+/*
+ * Count occupied logical pool chunks for the current service target.
+ *
+ * What: returns the population of the first PATSVC_POOL_CHUNKS bits in the
+ * resident bitmap. Why: occupancy drives density and queue-failure policy,
+ * but it only needs reconciliation at mutation/lifecycle boundaries. The
+ * 256-byte bitmap span is read as 64 unaligned-safe words and popcounted,
+ * matching PatternData.c's established memcpy precedent. Inputs: a resident
+ * Scene region or NULL. Output: 0..PATSVC_POOL_CHUNKS. The idle tick does not
+ * call this helper; retaining the last mutation-boundary value removes a
+ * 1,024,000-bit-tests-per-second clean-idle cost without changing allocation
+ * behavior. Affiliates: patSvc_drainQueue(), patSvc_submit(), bulk/clear
+ * paths, Scene replacement, handover, and the scene-match recheck.
+ */
 static uint16_t patSvc_countUsed(const pat_scene_region_t *region)
 {
-    uint16_t chunk;
     uint16_t used = 0u;
+    uint16_t i;
+    uint32_t word;
 
     if (!region)
         return 0u;
-    for (chunk = 0u; chunk < PATSVC_POOL_CHUNKS; chunk++)
-        used += patSvc_bitmapGet(region, chunk);
+    for (i = 0u; i < (uint16_t)(PATSVC_POOL_CHUNKS / 32u); i++) {
+        memcpy(&word, &region->bitmap[i * 4u], sizeof(word));
+        used = (uint16_t)(used + (uint16_t)__builtin_popcount(word));
+    }
     return used;
 }
 
@@ -1551,9 +1567,19 @@ void patSvc_tick(void)
         return;
     }
 
-    /* Sample pressure and occupancy once per tick before repair work. */
+    /*
+     * Sample pressure once per tick before repair work.
+     *
+     * Why the occupancy recount is intentionally absent: the pool has not
+     * changed after the queue/bulk/clear paths above have declined, so a
+     * full bitmap scan adds no information on a clean idle tick. The cached
+     * logical_chunks_used value remains current from the latest mutation or
+     * lifecycle reconciliation. An in-place append can make it stale by at
+     * most one density step until the next mutation boundary; allocation and
+     * repair ownership do not depend on this diagnostic classification.
+     * Affiliate: patSvc_updateDensityLevel().
+     */
     patSvc_sampleRepairBudget();
-    logical_chunks_used = patSvc_countUsed(patSvc_region(service_scene));
     patSvc_updateDensityLevel();
 
     /* Lifecycle rebuilds wake the same finite epoch as ordinary mutations. */

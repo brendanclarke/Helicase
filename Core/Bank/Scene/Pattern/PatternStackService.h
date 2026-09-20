@@ -30,7 +30,10 @@ void patSvc_init(void);
  * trailing-slack reservations. Why: no pool scan, copy, or relocation is
  * allowed in TIM3 context. Inputs: live service state and seq_activePattern.
  * Output: at most one queue/relocation transaction per foreground pass, with
- * bounded bulk/repair scan work.
+ * bounded bulk/repair scan work. Logical occupancy is reconciled at mutation
+ * and lifecycle boundaries and cached through clean idle ticks, so this pass
+ * does not rescan the unchanged 256-byte backed bitmap. Affiliate:
+ * PatternData.c's direct bitmap authority and patSvc_updateDensityLevel().
  */
 void patSvc_tick(void);
 

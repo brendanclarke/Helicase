@@ -1825,6 +1825,21 @@ static uint8_t op_loaded_active_pattern_running = 0;
  */
 static uint32_t fs_pattern_generation[SCENE_COUNT];
 static uint8_t fs_pattern_drain_scene = 0u;
+/*
+ * Semantic Pattern AutoSave quiet-window and fairness state.
+ *
+ * What: fs_pattern_first_dirty_us records the first dirty-mask observation in
+ * the current semantic drain epoch; fs_pattern_scene_cursor rotates admission
+ * among dirty Scenes. Why: the quiet window coalesces rapid edits, the maximum
+ * latency deadline guarantees convergence under sustained editing, and the
+ * cursor prevents one continuously edited Scene from starving another. Inputs
+ * are autosave_patternDirtyMask(), autosave_lastPatternSemanticUs(), and
+ * TIM2. Outputs govern only semantic Pattern drain admission/selection. The
+ * first-dirty stamp resets after the mask returns to zero. RAM: 5 bytes SRAM1.
+ * Affiliate: filesystem_autosavePatternDrainSchedule_tick().
+ */
+static uint32_t fs_pattern_first_dirty_us;
+static uint8_t fs_pattern_scene_cursor;
 static uint8_t op_file_version = 0;
 static fs_mount_result_t fs_last_mount_result = FS_MOUNT_RESULT_UNKNOWN;
 static uint8_t fs_boot_detected_unsupported_card = 0;
@@ -24288,26 +24303,40 @@ static void filesystem_autosaveWriterSchedule_tick(void)
 }
 
 /*
- * Admit one per-Scene Pattern AutoSave drain when higher-priority work declines.
+ * Admit one semantic Pattern AutoSave drain after edit coalescing.
  *
- * What: selects the lowest dirty resident Scene, verifies that the runtime
- * Bank/session and card gates are open, clears the bit at snapshot ownership,
- * copies the live Pattern region, advances its A/B generation, and starts the
- * dedicated whole-file writer. Why: Pattern is lower priority than settings,
- * trace, and the scalar parameter drain, while the clear-before-copy boundary
- * prevents a mutation made during the long file stream from being erased by a
- * later completion callback. An I/O error restores the bit; a successful
- * transaction leaves it clear unless a later mutation re-set it. Inputs:
- * autosave_patternDirtyMask(), seq_recordActive, seq_eraseActive, and the
- * mounted filesystem. Outputs: at most one Pattern drain owns the facade.
- * Affiliates: pat_snapshotScene(), filesystem_autosavePatternDrain_tick(),
- * and filesystem_autosavePatternDrainCompleted().
+ * What: verifies the runtime/card/service gates, waits for 250 ms of semantic
+ * edit silence unless the five-second first-dirty deadline has elapsed, then
+ * clears one dirty bit at snapshot ownership, copies the live Pattern region,
+ * advances its A/B generation, and starts the dedicated whole-file writer.
+ * Why: rapid edits coalesce into one PAT4 generation, sustained editing still
+ * converges, and the rotating Scene cursor prevents starvation. An I/O error
+ * restores the bit; a successful transaction leaves it clear unless a later
+ * mutation re-set it. Inputs: autosave_patternDirtyMask(),
+ * autosave_lastPatternSemanticUs(), TIM2, seq_recordActive, seq_eraseActive,
+ * and the mounted filesystem. Outputs: at most one semantic Pattern drain
+ * owns the facade. Non-semantic relocation scheduling is independent.
+ * Affiliates: pat_snapshotScene(),
+ * filesystem_autosavePatternDrainCompleted(), and Autosave.c.
  */
 static void filesystem_autosavePatternDrainSchedule_tick(void)
 {
     uint16_t mask;
     uint8_t scene;
+    uint8_t candidate;
+    uint8_t i;
+    uint8_t scene_count;
     uint32_t generation;
+    uint32_t now_us;
+    uint32_t elapsed_us;
+    uint32_t last_semantic_us;
+
+    /* Reset the epoch even while policy/card gates suppress the scheduler. */
+    mask = autosave_patternDirtyMask();
+    if (mask == 0u) {
+        fs_pattern_first_dirty_us = 0u;
+        return;
+    }
 
     if (!fs_autosave_enabled || !fs_autosave_runtime_ready ||
         !fs_autosave_writer_boot_ready || !bank_hasResidentBank())
@@ -24321,27 +24350,39 @@ static void filesystem_autosavePatternDrainSchedule_tick(void)
     if (seq_recordActive || seq_eraseActive)
         return;
 
-    /*
-     * Defer Pattern AutoSave until the unified stack service is quiescent.
-     *
-     * What: prevent a snapshot while queued edits, bulk barriers, reactive
-     * compaction, or mutation-target handover still owns the live Pattern.
-     * Why: a streamed PAT4 snapshot must begin only after all accepted pool
-     * mutations have committed. Inputs: patSvc_idle(); output is a later
-     * scheduler attempt with no new filesystem state. Affiliate:
-     * PatternStackService.c.
-     */
+    /* Defer until queued edits, barriers, recovery, and handover are quiescent. */
     if (!patSvc_idle())
         return;
 
-    mask = autosave_patternDirtyMask();
-    if (mask == 0u)
+    scene_count = (SCENE_COUNT < 16u) ? (uint8_t)SCENE_COUNT : 16u;
+    if (scene_count == 0u)
         return;
-    for (scene = 0u; scene < SCENE_COUNT && scene < 16u; scene++) {
-        if ((mask & (uint16_t)(1u << scene)) != 0u)
-            break;
+
+    /* Capture the start of the current dirty epoch once. */
+    now_us = timebase_tim2Now();
+    if (fs_pattern_first_dirty_us == 0u)
+        fs_pattern_first_dirty_us = now_us;
+
+    /* The hard deadline overrides quiet-window deferral. */
+    elapsed_us = timebase_tim2Delta(now_us, fs_pattern_first_dirty_us);
+    if (elapsed_us < (uint32_t)(AUTOSAVE_PATTERN_MAX_LATENCY_MS * 1000u)) {
+        last_semantic_us = autosave_lastPatternSemanticUs();
+        if (timebase_tim2Delta(now_us, last_semantic_us) <
+            (uint32_t)(AUTOSAVE_PATTERN_QUIET_WINDOW_MS * 1000u)) {
+            return;
+        }
     }
-    if (scene >= SCENE_COUNT || scene >= 16u)
+
+    /* Rotate from the prior successful Scene and select the next dirty bit. */
+    scene = scene_count;
+    for (i = 0u; i < scene_count; i++) {
+        candidate = (uint8_t)((fs_pattern_scene_cursor + i) % scene_count);
+        if ((mask & (uint16_t)(1u << candidate)) != 0u) {
+            scene = candidate;
+            break;
+        }
+    }
+    if (scene >= scene_count)
         return;
 
     /* Move the dirty bit into the in-flight ownership boundary before copy. */
@@ -24361,6 +24402,10 @@ static void filesystem_autosavePatternDrainSchedule_tick(void)
     }
     op_pattern_scene = scene;
     filesystem_patternAutosaveFilename(op_pattern_filename, scene, generation);
+
+    fs_pattern_scene_cursor = (uint8_t)((scene + 1u) % scene_count);
+    if (autosave_patternDirtyMask() == 0u)
+        fs_pattern_first_dirty_us = 0u;
 }
 
 /*

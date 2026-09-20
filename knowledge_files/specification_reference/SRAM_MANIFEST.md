@@ -5,8 +5,8 @@ The detailed section/symbol inventory below was regenerated from the
 `d5af5fd`; Session 065/066/067 deltas noted below); the Session 068 delta is
 noted separately below and is small (front-panel event-ring RAM only). Session
 069's Pattern Stack Service delta is recorded below. The current Session 069
-implementation build (2026-09-20) reports
-`text=449,404`, `data=408`, and `bss=291,708` from
+Pass 1 implementation build (2026-09-20) reports
+`text=449,476`, `data=404`, and `bss=291,724` from
 `arm-none-eabi-size build/lxr02.elf`.
 The approved 290-byte `fs_resident_source` cache, the one-byte
 `menu_pendingPageSwitch`, and Session 061 boot scratch all share normal SRAM1.
@@ -59,8 +59,10 @@ three sub-changes. Final build: text=447,860, data=412, bss=291,196.
 
 Session 069 adds the non-persisted Pattern Stack Service reservation image and
 three one-byte policy/lifecycle flags: 515 B of source-owned SRAM1 `.bss`
-state. The old `tier2_scan_cursor` and `last_compact_tick` state is removed;
-the linked image measures `text=449,404`, `data=408`, `bss=291,708` after
+state. The old `tier2_scan_cursor` and `last_compact_tick` state is removed.
+Pass 1 adds 11 B of source-owned SRAM1 state for the scalar dirty count,
+semantic Pattern timestamp, and Pattern scheduler epoch/cursor; the linked
+image measures `text=449,476`, `data=404`, `bss=291,724` after
 linker alignment. `reservation_image` is 512 B and the three flags are each
 one byte in the link map. The reservation image is neither persisted in PAT4
 nor duplicated per Scene/Pattern.
@@ -102,16 +104,17 @@ read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
 | Section | Address | Size | Region | Contents |
 | --- | ---: | ---: | ---| --- |
-| `.text` | `0x080081c8` | 413,824 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
+| `.text` | `0x080081c8` | 436,544 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
 | `.itcm` | `0x00000000` | 3,768 B | ITCM | Hot code copied from FLASH at reset |
 | `.dtcm` | `0x20000000` | 8,708 B | DTCM | Fast immutable DSP lookup tables |
 | `.dtcmz` | `0x20002204` | 3,572 B | DTCM | Zero-initialized DSP/audio working buffers |
 | `.dma_nocache` | `0x20020000` | 3,100 B | SRAM1 | DMA audio/ADC buffers |
-| `.data` | `0x20020c1c` | 412 B | SRAM1 | Initialized writable globals |
-| `.bss` | `0x20020db8` | 283,292 B | SRAM1 | Normal zero-initialized globals, including Pattern storage/snapshot |
+| `.data` | `0x20020c1c` | 404 B | SRAM1 | Initialized writable globals |
+| `.bss` | `0x20020db0` | 285,052 B | SRAM1 | Normal zero-initialized globals, including Pattern storage/snapshot |
 
 The final FLASH load image remains safely before the reserved sample-FLASH
-boundary `0x08080000`. `build/lxr02.bin` is 427,168 B.
+boundary `0x08080000`. `build/lxr02.bin` is 449,880 B; the packaged
+`LXRV2_lxr02.img` is 449,896 B including its 16-byte image header.
 
 ## Primary SRAM1 owners
 
@@ -121,6 +124,9 @@ boundary `0x08080000`. `build/lxr02.bin` is 427,168 B.
 | `pat_regions` | 168,304 B | 16 × 10,519-B Scene Pattern regions: address array, pool, bitmap, and 23 parameter bytes |
 | `reservation_image` | 512 B | Non-persisted SRAM1 `.bss` bit image owned by PatternStackService.c; trailing-slack reservations for the current service Scene |
 | Reservation density/budget/rebuild flags | 3 B | SRAM1 `.bss` policy latch, adaptive AutoSave-pressure budget flag, and lifecycle rebuild wake owned by PatternStackService.c |
+| `autosave_dirty_count` | 2 B | Exact SRAM1 `.bss` population of set bits in the canonical scalar AutoSave mask |
+| `autosave_last_pattern_semantic_us` | 4 B | TIM2 timestamp of the latest semantic Pattern mutation, owned by Autosave.c |
+| `fs_pattern_first_dirty_us` + `fs_pattern_scene_cursor` | 5 B | Semantic Pattern quiet-window epoch and rotating drain fairness state, owned by filesystem.c |
 | `pat_autosave_snapshot` | 10,519 B | Sole immutable Pattern AutoSave snapshot for one in-flight Scene |
 | `autosave_pattern_dirty_mask` | 2 B | Separate one-bit-per-Scene Pattern work ownership |
 | `fs_pattern_generation` + `fs_pattern_drain_scene` | 65 B | Sixteen hidden-pair generation baselines plus current drain selector |

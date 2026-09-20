@@ -468,6 +468,21 @@
 #define AUTOSAVE_TRACE_FLUSH_INTERVAL_MS 500u
 
 /*
+ * Pattern AutoSave semantic-drain timing.
+ *
+ * What: QUIET_WINDOW_MS is the required silence after the latest semantic
+ * Pattern mutation before a snapshot is admitted; MAX_LATENCY_MS is the hard
+ * ceiling from the first observed dirty-mask transition. Why: rapid editing
+ * bursts should coalesce into one PAT4 generation, while sustained editing
+ * must still converge. Inputs: Autosave.c's TIM2 mutation stamp and
+ * filesystem.c's first-dirty stamp. Outputs: semantic Pattern scheduling
+ * only; non-semantic relocation drains remain independent. These constants
+ * consume no RAM and do not alter PAT4 geometry.
+ */
+#define AUTOSAVE_PATTERN_QUIET_WINDOW_MS  250u
+#define AUTOSAVE_PATTERN_MAX_LATENCY_MS  5000u
+
+/*
  * Session-065 pending automation handoff and PatternTrace geometry.
  *
  * What: reserve one 4-byte pending automation record per queued ISR event and

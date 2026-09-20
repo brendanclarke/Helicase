@@ -427,10 +427,12 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value);
  * mask-relative interval streamed from the selected file; take accepts a
  * payload-relative offset. Outputs: enabled owner mutations may set bits,
  * recovery bits are always ORed into the one 3,856-byte SRAM record, HasDirty
- * reports pending work, and take returns/clears one prior bit atomically. Why:
- * boot initialization must not look like user mutation, while foreground
- * classification must not erase an interrupt-side re-dirty. Affiliates:
- * filesystem boot recovery and drain phases 54-56.
+ * reports pending work through a constant-time maintained-count test, and
+ * take returns/clears one prior bit atomically. Why: boot initialization must
+ * not look like user mutation, while foreground classification must not erase
+ * an interrupt-side re-dirty. The count is private to Autosave.c and has no
+ * wire-format representation. Affiliates: filesystem boot recovery and drain
+ * phases 54-56.
  */
 void autosave_setMutationTrackingEnabled(uint8_t enabled);
 /*
@@ -558,6 +560,18 @@ void autosave_markResidentBankDirty(void);
 void autosave_markPatternDirty(uint8_t scene_index);
 uint16_t autosave_patternDirtyMask(void);
 void autosave_clearPatternDirty(uint8_t scene_index);
+
+/*
+ * Read the latest semantic Pattern mutation timestamp.
+ *
+ * What: returns the TIM2 microsecond stamp captured by the most recent
+ * autosave_markPatternDirty() call, or zero after autosave_discardDirtyMask().
+ * Why: filesystem.c uses the raw value with timebase_tim2Delta() to enforce
+ * the Pattern AutoSave quiet window without owning mutation state. Input:
+ * none. Output: one aligned 32-bit timestamp. Affiliate:
+ * filesystem_autosavePatternDrainSchedule_tick().
+ */
+uint32_t autosave_lastPatternSemanticUs(void);
 
 /*
  * Non-semantic Pattern dirty mask: one bit per Scene for physical-relocation-

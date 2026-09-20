@@ -18,6 +18,8 @@
 #include "InstrumentManager.h"
 /* Reads the filesystem-owned HCNAMES provenance register without doing I/O. */
 #include "filesystem.h"
+/* Supplies the TIM2 microsecond stamp used by Pattern quiet-window policy. */
+#include "timebase.h"
 
 #include <string.h>
 
@@ -63,6 +65,27 @@ _Static_assert(AUTOSAVE_SCENE_PARAM_COUNT -
                "Scene MIDI-note group must cover every track");
 
 /*
+ * Eight-bit Hamming-weight table for atomic dirty-mask accounting.
+ *
+ * What: maps every possible mask byte to its number of set bits. Why: the
+ * canonical mask's OR helper already owns the PRIMASK critical section, so a
+ * lookup keeps the fresh-bit count update bounded without a loop in that
+ * section. Inputs are any uint8_t value; output is 0..8. Owner: Autosave.c.
+ * ROM cost: 256 bytes of read-only storage. Affiliate: autosave_maskByteOr()
+ * and the DEV_MODE_LOGGING audit in autosave_maskHasDirty().
+ */
+static const uint8_t popcount8_lut[256] = {
+    0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4,1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,
+    1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,
+    1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,
+    2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,
+    1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,
+    2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,
+    2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,
+    3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,4,5,5,6,5,6,6,7,5,6,6,7,6,7,7,8
+};
+
+/*
  * Canonical retained autosave dirty record.
  *
  * What: one bit for every byte in the fixed Bank/Scene payload. Why: live SRAM
@@ -74,6 +97,19 @@ _Static_assert(AUTOSAVE_SCENE_PARAM_COUNT -
  * scheduling. Static BSS initialization clears it once at processor reset.
  */
 static volatile uint8_t autosave_dirty_mask[AUTOSAVE_MASK_BYTES];
+/*
+ * Exact population count of autosave_dirty_mask[].
+ *
+ * What: tracks the number of currently set scalar dirty bits, from zero to
+ * AUTOSAVE_MASK_BYTES * 8 (30,848). Why: autosave_maskHasDirty() can answer
+ * the common clean-state query in O(1) instead of rescanning 3,856 bytes.
+ * Inputs: fresh-bit popcount deltas from autosave_maskByteOr() and one-bit
+ * decrements from autosave_maskBitTake(). Output: the maintained dirty-bit
+ * population. Both update sites already run under PRIMASK, so the count and
+ * mask byte change are one atomic ownership boundary. RAM: 2 bytes SRAM1.
+ * Affiliate: filesystem.c scalar AutoSave admission and completion gates.
+ */
+static volatile uint16_t autosave_dirty_count;
 static volatile uint8_t autosave_mutation_tracking_enabled;
 /*
  * Per-Scene dirty register for Pattern AutoSave.
@@ -87,6 +123,19 @@ static volatile uint8_t autosave_mutation_tracking_enabled;
  * Affiliates: PatternData.c mutation funnel and filesystem.c scheduler.
  */
 static volatile uint16_t autosave_pattern_dirty_mask;
+
+/*
+ * TIM2 timestamp of the latest semantic Pattern mutation.
+ *
+ * What: records the global last-edit time used by filesystem.c's Pattern
+ * AutoSave quiet window. Why: only one Scene is the active Pattern mutation
+ * target at a time, so one timestamp coalesces rapid edits without adding a
+ * per-Scene timer array. Input: timebase_tim2Now() at the semantic dirty
+ * funnel. Output: read through autosave_lastPatternSemanticUs(). Lifetime:
+ * static SRAM1 .bss, reset by autosave_discardDirtyMask(). RAM: 4 bytes.
+ * Affiliate: filesystem_autosavePatternDrainSchedule_tick().
+ */
+static volatile uint32_t autosave_last_pattern_semantic_us;
 
 /*
  * Per-Scene eligibility indicator for non-semantic Pattern AutoSave.
@@ -150,8 +199,9 @@ void autosave_markPatternDirty(uint8_t scene_index)
         return;
     primask = autosave_irqSave();
     autosave_pattern_dirty_mask |= (uint16_t)(1u << scene_index);
-    /* Keep the dirty bit and its HCNAMES witness clear in one IRQ-safe
-     * boundary; this marker is reachable from MIDI/recording interrupt work. */
+    autosave_last_pattern_semantic_us = timebase_tim2Now();
+    /* Keep the dirty bit, quiet-window stamp, and HCNAMES witness clear in
+     * one IRQ-safe boundary; recording/MIDI mutation work can reach this API. */
     (void)filesystem_clearResidentRefreshed(
         (uint16_t)(AUTOSAVE_HCNAMES_PATTERN_BASE + scene_index));
     autosave_irqRestore(primask);
@@ -187,6 +237,20 @@ void autosave_clearPatternDirty(uint8_t scene_index)
     primask = autosave_irqSave();
     autosave_pattern_dirty_mask &= (uint16_t)~(1u << scene_index);
     autosave_irqRestore(primask);
+}
+
+/*
+ * Read the latest semantic Pattern mutation timestamp.
+ *
+ * Input: none. Output: the aligned TIM2 microsecond value captured by the
+ * most recent autosave_markPatternDirty() call, or zero after lifecycle
+ * discard. Why: filesystem.c computes wrap-safe quiet-window elapsed time
+ * without exposing the timestamp's storage or taking ownership of it.
+ * Affiliate: filesystem_autosavePatternDrainSchedule_tick().
+ */
+uint32_t autosave_lastPatternSemanticUs(void)
+{
+    return autosave_last_pattern_semantic_us;
 }
 
 /*
@@ -250,16 +314,24 @@ void autosave_clearNonSemanticPatternDirty(uint8_t scene_index)
  * Atomically OR one set of bits into one canonical mask byte.
  *
  * Inputs: bounded mask-byte index and set-bit pattern. Output: those bits are
- * retained without losing concurrent foreground/interrupt producers. Why:
- * every producer, recovery merge, and rollback has identical OR semantics.
- * The caller performs range checks so this helper stays one-byte and bounded.
+ * retained without losing concurrent foreground/interrupt producers, while
+ * autosave_dirty_count increases only for 0-to-1 transitions. Why: every
+ * producer, recovery merge, and rollback has identical OR semantics, and the
+ * count must remain an exact population of the canonical mask. The caller
+ * performs range checks so this helper stays one-byte and bounded. Affiliate:
+ * autosave_maskBitTake() is the balancing consume path.
  */
 static void autosave_maskByteOr(uint16_t mask_byte, uint8_t bits)
 {
+    /* The fresh-bit delta is kept inside the same PRIMASK boundary as the
+     * mask OR, so recovery merge and rollback re-ORs cannot double-count. */
     uint32_t primask = autosave_irqSave();
+    uint8_t old = autosave_dirty_mask[mask_byte];
+    uint8_t fresh = (uint8_t)(bits & (uint8_t)~old);
 
-    autosave_dirty_mask[mask_byte] = (uint8_t)(
-        autosave_dirty_mask[mask_byte] | bits);
+    autosave_dirty_mask[mask_byte] = (uint8_t)(old | bits);
+    autosave_dirty_count = (uint16_t)(
+        autosave_dirty_count + popcount8_lut[fresh]);
     autosave_irqRestore(primask);
 }
 
@@ -1349,11 +1421,15 @@ void autosave_discardDirtyMask(void)
      * Inputs: filesystem lifecycle has disabled tracking and verified that no
      * autosave operation is consuming mask chunks. Output: every pending
      * scalar, semantic Pattern, and non-semantic Pattern bit is discarded in
-     * SRAM; SD records remain untouched. Why: stale work from an intentionally
-     * disabled/retired Bank session must not reappear after re-enable.
+     * SRAM; SD records remain untouched. The derived dirty-bit count and
+     * semantic Pattern timestamp are reset with their source registers. Why:
+     * stale work from an intentionally disabled/retired Bank session must not
+     * reappear after re-enable.
      * Affiliates: filesystem's immediate/deferred OFF transition.
      */
     memset((void *)autosave_dirty_mask, 0, sizeof(autosave_dirty_mask));
+    autosave_dirty_count = 0u;
+    autosave_last_pattern_semantic_us = 0u;
     autosave_pattern_dirty_mask = 0u;
     autosave_nonsemantic_pattern_dirty_mask = 0u;
 }
@@ -1933,22 +2009,50 @@ void autosave_maskMergeChunk(uint16_t mask_byte_offset,
 
 uint8_t autosave_maskHasDirty(void)
 {
-    uint16_t byte_index;
-
     /*
      * Test the canonical SRAM completeness register without changing it.
      *
-     * Input is the retained Autosave-owned record. Output is nonzero on the
-     * first dirty byte, or zero when no mutation requires a parameter get or
-     * ping-pong write. Why: generation/copy work must not run merely to
-     * reproduce an already-empty record. Affiliates: filesystem drain phase 55
+     * Input is the maintained population count for the retained AutoSave
+     * record. Output is nonzero when any scalar mutation requires a parameter
+     * get or ping-pong write. Why: generation/copy work must not run merely to
+     * reproduce an already-empty record, and the common clean-state query no
+     * longer scans all 3,856 mask bytes. Affiliates: filesystem drain phase 55
      * and the autonomous-writer completion callback.
+     *
+     * DEV_MODE_LOGGING audit: every 1,000th call performs a coherent full
+     * popcount while interrupts are masked and emits Z on mismatch. This is a
+     * diagnostic-only drift check; production builds retain the O(1) query.
      */
-    for (byte_index = 0u; byte_index < AUTOSAVE_MASK_BYTES; byte_index++) {
-        if (autosave_dirty_mask[byte_index] != 0u)
-            return 1u;
+#if DEV_MODE_LOGGING
+    {
+        static uint16_t audit_calls;
+
+        if (++audit_calls >= 1000u) {
+            uint16_t byte_index;
+            uint16_t full_count = 0u;
+            uint16_t maintained_count;
+            uint32_t primask;
+
+            audit_calls = 0u;
+            primask = autosave_irqSave();
+            for (byte_index = 0u; byte_index < AUTOSAVE_MASK_BYTES;
+                 byte_index++) {
+                full_count = (uint16_t)(
+                    full_count + popcount8_lut[autosave_dirty_mask[byte_index]]);
+            }
+            maintained_count = autosave_dirty_count;
+            autosave_irqRestore(primask);
+            if (full_count != maintained_count) {
+                autosaveTrace_record(
+                    AUTOSAVE_TRACE_STAGE_DIRTY_COUNT_MISMATCH,
+                    (uint8_t)(maintained_count >> 8u),
+                    (uint32_t)(((uint32_t)full_count << 16u) |
+                               maintained_count));
+            }
+        }
     }
-    return 0u;
+#endif
+    return (uint8_t)(autosave_dirty_count != 0u);
 }
 
 uint8_t autosave_objectFullyCaptured(uint16_t hcnames_row)
@@ -2023,10 +2127,11 @@ uint8_t autosave_maskBitTake(uint16_t payload_offset)
      * Atomically claim one LSB-first dirty cell for foreground classification.
      *
      * Input: payload offset. Output: its prior bit state; a set bit is cleared
-     * in the same one-byte critical section. Why: a later interrupt mutation
-     * re-sets the bit and survives for continuation, eliminating the former
-     * test/get/clear loss window. Parameter get remains outside this section.
-     * Affiliate: filesystem autosave phase 56.
+     * in the same critical section and decrements the exact population count.
+     * Why: a later interrupt mutation re-sets the bit and survives for
+     * continuation, eliminating the former test/get/clear loss window.
+     * Parameter get remains outside this section. Affiliate: filesystem
+     * AutoSave phase 56; counterpart: autosave_maskByteOr().
      */
     if (payload_offset >= AUTOSAVE_PAYLOAD_BYTES)
         return 0u;
@@ -2036,6 +2141,8 @@ uint8_t autosave_maskBitTake(uint16_t payload_offset)
     was_set = (uint8_t)((autosave_dirty_mask[mask_byte] & bit) != 0u);
     autosave_dirty_mask[mask_byte] = (uint8_t)(
         autosave_dirty_mask[mask_byte] & (uint8_t)~bit);
+    if (was_set)
+        autosave_dirty_count = (uint16_t)(autosave_dirty_count - 1u);
     autosave_irqRestore(primask);
     return was_set;
 }

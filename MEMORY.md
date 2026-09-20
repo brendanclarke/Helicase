@@ -34,12 +34,16 @@ Session 069 has now implemented the bounded-CPU convergence plan: physical
 Pattern relocation remains separate from semantic Pattern AutoSave dirtiness;
 the periodic Tier 1/Tier 2 self-chasing loop is replaced by owned trailing
 slack reservations, a finite adaptive repair epoch, reactive-only compaction,
-and direct-path fragmentation retention. The 512-byte non-persisted SRAM1
+and direct-path fragmentation retention. Pass 1 additionally makes scalar
+dirty detection constant-time, removes the clean idle occupancy recount, and
+coalesces semantic Pattern AutoSave behind a 250ms quiet window with a 5s
+maximum latency and fair Scene cursor. The 512-byte non-persisted SRAM1
 reservation image plus three policy/lifecycle bytes is documented in
 `SRAM_MANIFEST.md`. Clean source/build/image verification passed with
-`text=449,404`, `data=408`, `bss=291,708`; hardware verification is pending.
+`text=449,476`, `data=404`, `bss=291,724`; hardware verification is pending.
 The implementation notes and verification table are in
-`S069_SLACK_REACTIVE_COMPACTION_IMPLEMENTATION.md`. Per-track step scale and
+`S069_SLACK_REACTIVE_COMPACTION_IMPLEMENTATION.md` and
+`S069_ATS_PAT_BOUNDED_PASS1_IMPLEMENT.md`. Per-track step scale and
 shuffle sequencer consumption remain separately deferred (see
 `SCOPING_TARGETS.md` § Session 068 deferred items). Phase 4.5 copy operations
 (`pat_copyTrack`, `pat_copyPattern`, `pat_copyBar`) with independent

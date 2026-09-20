@@ -178,6 +178,14 @@ typedef enum {
      * fixed-size trace ring.
      */
     AUTOSAVE_TRACE_STAGE_STEP_TOGGLE = 'K',
+    /*
+     * Z: DEV-only invariant witness for the scalar dirty-bit population.
+     * flags carry the maintained count's high byte; value32 carries the
+     * maintained count in bits 0..15 and the coherent full-scan count in
+     * bits 16..31. This record is diagnostic only and has no production
+     * storage or scheduler effect. Affiliate: Autosave.c.
+     */
+    AUTOSAVE_TRACE_STAGE_DIRTY_COUNT_MISMATCH = 'Z',
 } autosave_trace_stage_t;
 
 /*

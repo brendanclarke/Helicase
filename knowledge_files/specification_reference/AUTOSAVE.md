@@ -27,7 +27,8 @@ Save operations.
 
 Implemented through the Session 048 AutoSave baseline, Session 056 page-exit
 expedite and AsyncFATFS file-size fix, Session 060 writer/HCNAMES/source work,
-the Session 061 boot reader, and Session 064 Pattern AutoSave:
+the Session 061 boot reader, Session 064 Pattern AutoSave, and Session 069's
+bounded-CPU Pass 1:
 
 - persistent `settings.cfg` AutoSave on/off preference;
 - boot/runtime creation and validation of `/.hcprms1` and `/.hcprms2`;
@@ -41,9 +42,9 @@ the Session 061 boot reader, and Session 064 Pattern AutoSave:
 - successful whole-object publication for root Instrument Load, normal Kit
   Load, root Scene Load, and selective Bank Load/Save, with a complete
   committed-hierarchy HCNAMES boundary;
-- one canonical mutation mask, bounded dirty scanning and value capture, A/B
-  transformed copy, CRC32C, commit-last runtime publication, retry, and
-  continuation scheduling;
+- one canonical mutation mask with an exact SRAM bit-population counter,
+  bounded value capture, A/B transformed copy, CRC32C, commit-last runtime
+  publication, retry, and continuation scheduling;
 - a post-drain HCNAMES convergence step that clears a per-row "refreshed"
   witness once that row's autosave object is fully captured, and safe-
   rewrites `/.hcnames` through the same temp-file pattern as the A/B
@@ -587,10 +588,15 @@ acceptance additionally audits address/bitmap/pool consistency.
 
 Autosave owns a separate 16-bit dirty mask. PatternData sets it after every
 live mutation; whole Scene/Bank replacement marks it through
-`autosave_markSceneWithPatternDirty()`. The filesystem admits the lowest dirty
-Scene only while policy/runtime/card/Bank/menu gates are open and neither
-`seq_recordActive` nor `seq_eraseActive` is set. Pattern is the final
-background claimant after settings, diagnostic trace, and scalar HCPR work.
+`autosave_markSceneWithPatternDirty()`. The filesystem records the first dirty
+epoch, waits for 250 ms of silence after the latest semantic Pattern mutation,
+and forces admission after 5 seconds even if editing continues. It rotates the
+Scene cursor for fairness, admits only while policy/runtime/card/Bank/menu
+gates are open and neither `seq_recordActive` nor `seq_eraseActive` is set, and
+keeps Pattern as the final background claimant after settings, diagnostic
+trace, and scalar HCPR work. The quiet window applies only to semantic Pattern
+work; physical relocation-only work uses its independent maintenance
+scheduler.
 
 Admission clears the selected bit before copying the 10,519-byte live region
 into the sole Pattern snapshot. The copy is plain `memcpy` with no interrupt
@@ -775,6 +781,13 @@ mask, scheduling, retained record, or loader result. This terminal summary is
 necessary because the individual dirty-byte records for one Instrument can
 wrap the fixed trace ring. Its exact flags and packing are owned by
 `AutosaveTrace.h` and `DEV_MODES.md`.
+
+The logging build also audits the scalar dirty-count invariant at low cadence.
+Stage `Z` records the maintained bit count in value bits 0..15 and a coherent
+full-mask popcount in bits 16..31; its flags carry the maintained count's high
+byte. A mismatch is diagnostic evidence only and does not change the query
+result or dirty state. Logging-off builds omit the audit and its trace
+allocation.
 
 An `ASENSURE` boot timeout additionally freezes a logging-only diagnostic
 capsule before boot recovery destroys the active filesystem state. It observes

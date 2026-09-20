@@ -8,12 +8,12 @@ Parent plan: `S069_ATS_PAT_BOUNDED_CPU.md` (6 items + AutoSave OFF-to-ON retest)
 |------|-------------|--------|
 | 1 | Non-semantic relocation split | **DONE** — S069_NON_SEMANTIC_PAT_MAINT_RESTRICTION_CLAUDE.md |
 | 2 | Owned slack + reactive compaction | **DONE** — S069_SLACK_REACTIVE_COMPACTION_CLAUDE.md |
-| 3.1 | Scalar dirty predicate | Not started |
-| 3.2 | Pattern logical occupancy (tick-tail removal) | Not started |
+| 3.1 | Scalar dirty predicate | **DONE** — source/build verified; hardware pending |
+| 3.2 | Pattern logical occupancy (tick-tail removal) | **DONE** — source/build verified; hardware pending |
 | 4A | Budget primitive + repair gating | Not started |
 | 4B | Scalar AutoSave drain budgeting | Not started |
 | 4C | Pattern AutoSave drain budgeting | Not started |
-| 5 | Pattern AutoSave quiet window + max latency | Not started |
+| 5 | Pattern AutoSave quiet window + max latency | **DONE** — source/build verified; hardware pending |
 | 6 | Snapshot measurement | Not started (blocked on 1-5) |
 
 Items 1 and 2 are hardware-verified.
@@ -584,3 +584,136 @@ These questions from the initial plan draft are now closed:
 
 10. **Item 3.2 approach**: tick-tail removal only (non-fragile, high-benefit).
     Full incremental delta approach not implemented.
+
+---
+
+## Pass 1 implementation review
+
+Implementation schedule: `S069_ATS_PAT_BOUNDED_PASS1_IMPLEMENT.md`.
+Build: `text=449,476`, `data=404`, `bss=291,724`.
+
+### Item 3.1 — verified
+
+- `popcount8_lut[256]` added at Autosave.c:64 as `static const` ROM. Values
+  verified correct (0 through 8 for all 256 entries).
+- `autosave_dirty_count` declared as `static volatile uint16_t` at :97,
+  placed immediately after `autosave_dirty_mask[]`.
+- `autosave_maskByteOr()`: reads old byte, computes
+  `fresh = bits & (uint8_t)~old`, increments count by `popcount8_lut[fresh]`.
+  All inside the existing PRIMASK section. Recovery merge and rollback re-OR
+  paths produce zero fresh-bit delta for already-set bits — idempotent as
+  required.
+- `autosave_maskBitTake()`: decrements count by 1 when `was_set`, inside the
+  existing PRIMASK section. Balances the OR-side increment.
+- `autosave_discardDirtyMask()`: zeroes `autosave_dirty_count` alongside the
+  memset and Pattern mask clears.
+- `autosave_maskHasDirty()`: body replaced with
+  `return (uint8_t)(autosave_dirty_count != 0u)`. O(1).
+- DEV audit (gated by `DEV_MODE_LOGGING`): every 1,000th call runs a full
+  popcount of all 3,856 mask bytes under a coherent PRIMASK snapshot and
+  compares against the maintained count. On mismatch, emits trace stage `Z`
+  with maintained and scanned counts packed into the value field. The PRIMASK
+  coherence is an improvement over the schedule — prevents a concurrent
+  ISR mutation from causing a false mismatch during the scan.
+- AutosaveTrace.h: `AUTOSAVE_TRACE_STAGE_DIRTY_COUNT_MISMATCH = 'Z'` added
+  with descriptive comment.
+- `tools/decode_devlogs.py`: `Z` stage decoder added — extracts
+  `maintained_count` (bits 0..15) and `full_scan_count` (bits 16..31).
+- Autosave.h: comment block for the mask API section updated to note the
+  constant-time count-based test.
+
+No change to any file format, CRC, wire mask, or recovery behavior.
+
+### Item 3.2 — verified
+
+- `patSvc_countUsed()`: rewritten from 2,048-iteration per-bit loop to
+  64-iteration word-level popcount: `memcpy` + `__builtin_popcount` per
+  `uint32_t`. Matches the established `pat_poolUsagePercent()` precedent in
+  PatternData.c. `PATSVC_POOL_CHUNKS / 32u` = 64 words = 256 bytes, covering
+  exactly the used portion of the 512-byte bitmap.
+- Tick-tail removal: only the `patSvc_countUsed()` call at the former
+  line 1556 is removed. `patSvc_sampleRepairBudget()` and
+  `patSvc_updateDensityLevel()` are retained and use the cached
+  `logical_chunks_used` from the most recent mutation-boundary recount.
+- All 10 mutation-boundary call sites are untouched: drainQueue (success and
+  failure classification), submit, drainBulk, clearTrack, clearPattern
+  (assigns 0 directly), init, finishSceneReplace,
+  removeTrackAutomationByTarget, and scene-match recheck.
+- PatternStackService.h: `patSvc_tick()` comment updated to document the
+  cached-occupancy rationale.
+
+No change to pool behavior, allocation, trace output, or file formats.
+
+### Item 5 — verified
+
+- config.h: `AUTOSAVE_PATTERN_QUIET_WINDOW_MS 250u` and
+  `AUTOSAVE_PATTERN_MAX_LATENCY_MS 5000u` added after the existing
+  AUTOSAVE block, with descriptive comment documenting inputs, outputs, and
+  the non-semantic exclusion.
+- Autosave.c: `#include "timebase.h"` added for `timebase_tim2Now()`.
+- `autosave_last_pattern_semantic_us` declared as `static volatile uint32_t`
+  at :124, placed after `autosave_pattern_dirty_mask`.
+- `autosave_markPatternDirty()`: records `timebase_tim2Now()` inside the
+  existing PRIMASK section, between the mask-bit set and the HCNAMES witness
+  clear. Safe from ISR context.
+- `autosave_discardDirtyMask()`: resets
+  `autosave_last_pattern_semantic_us = 0u` alongside the other clears.
+- `autosave_lastPatternSemanticUs()`: public getter in Autosave.h (with
+  comment) and Autosave.c. Returns the raw TIM2 value.
+- filesystem.c: `fs_pattern_first_dirty_us` (uint32_t) and
+  `fs_pattern_scene_cursor` (uint8_t) added alongside the existing Pattern
+  drain state.
+- `filesystem_autosavePatternDrainSchedule_tick()` rewritten:
+  - Mask-zero check and epoch reset (`fs_pattern_first_dirty_us = 0u`) happen
+    before the policy/card gates, so the epoch resets correctly even when
+    gates suppress the scheduler.
+  - First-dirty timestamp capture happens after gates — the 5s max-latency
+    ceiling starts from when the scheduler is actually eligible to fire, not
+    from when gates blocked it.
+  - Max-latency override: if `elapsed_us >= MAX_LATENCY_MS * 1000u`, the
+    quiet-window check is bypassed entirely.
+  - Quiet-window check: if `timebase_tim2Delta(now, last_semantic_us) <
+    QUIET_WINDOW_MS * 1000u`, the function defers.
+  - Rotating cursor: iterates from `fs_pattern_scene_cursor` modulo
+    `scene_count`, selects the first dirty candidate. Advances past the
+    drained Scene after successful drain.
+  - Post-drain epoch reset: if `autosave_patternDirtyMask() == 0u` after
+    clearing the drained Scene's bit, `fs_pattern_first_dirty_us` resets to
+    zero for a fresh measurement window on the next dirty transition.
+- filesystem.h: `filesystem_tick()` comment updated to note the quiet-window
+  and max-latency coalescing.
+- Non-semantic drain (`filesystem_autosaveNonSemanticPatternDrainSchedule_tick`)
+  is completely unchanged — it retains its independent arm/due-tick debounce
+  and is not affected by the quiet window.
+
+No change to PAT4 file format, CRC, A/B generation protocol, or
+non-semantic scheduling.
+
+### RAM / ROM cost
+
+| Component | RAM | ROM |
+|-----------|-----|-----|
+| `autosave_dirty_count` | 2 B | — |
+| `popcount8_lut[256]` | — | 256 B |
+| `autosave_last_pattern_semantic_us` | 4 B | — |
+| `fs_pattern_first_dirty_us` | 4 B | — |
+| `fs_pattern_scene_cursor` | 1 B | — |
+| **Total** | **11 B** | **256 B + code delta** |
+
+### Pass 1 hardware test — 2026-09-20
+
+**PASS.** No operation problems observed. Items 3.1, 3.2, and 5 are
+hardware-accepted.
+
+Observation: load/save menu responsiveness during playback is noticeably
+improved compared to the pre-pass firmware.
+
+**Investigation**: all five filesystem.c AutoSave/trace schedulers correctly
+suppress themselves when the Load/Save menu is active (`LOAD_PAGE`/
+`SAVE_PAGE` page check and `menu_isLoadSaveCommandActive()` check). However,
+`patSvc_tick()` — called unconditionally at 500 Hz from timebase.c — has
+**no** Load/Save menu gate. Its repair while-loop runs every idle tick
+regardless of menu state. Queue drain and handover also run, but those are
+bounded by edit rate and correct. The repair epoch is the remaining CPU
+consumer during Load/Save browsing. Noted in `SCOPING_TARGETS.md` § Session
+069 deferred items; to be coordinated with Pass 2's budget primitive (4A).

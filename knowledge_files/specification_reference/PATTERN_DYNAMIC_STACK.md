@@ -3,7 +3,7 @@
 ## Authority and status
 
 This is the authoritative live-memory, allocator, PAT4 interchange, Pattern
-Stack Service, and Pattern AutoSave reference through Session 068. Historical
+Stack Service, and Pattern AutoSave reference through Session 069 Pass 1. Historical
 Session 062/063/064 plans describe how the design was reached but do not
 override this file.
 Filesystem hierarchy and HCNAMES grammar are in `FILESYSTEM_SPEC.md`; scalar
@@ -461,6 +461,13 @@ passed; hardware fixtures remain pending. See
 `../../S069_SLACK_REACTIVE_COMPACTION_IMPLEMENTATION.md` and
 `../log_archive/068_SESSION_HANDOFF_LOG.md` §4 for the plan and closeout.
 
+Session 069 Pass 1 also made scalar dirty detection constant-time through a
+maintained population count, removed the clean idle-tick occupancy recount
+while retaining mutation/lifecycle reconciliation, and added semantic Pattern
+AutoSave coalescing (250 ms quiet window, 5 s maximum latency, rotating Scene
+fairness). Source/build verification passed; hardware fixtures remain pending.
+See `../../S069_ATS_PAT_BOUNDED_PASS1_IMPLEMENT.md`.
+
 Deferred supplemental cases are deterministic mid-write power interruption,
 record/erase admission instrumentation, injected CRC fallback, and performance
 measurement. They do not reopen the functional closeout. Phase 4.5 copy
@@ -501,7 +508,9 @@ Evaluated every call to `patSvc_tick()` (called from `timebase.c` after
    creating or verifying one trailing-chunk reservation per occupied block.
    The cursor sleeps at `PATSVC_ADDRESS_COUNT` between epochs and wakes only
    on mutation, reservation consumption, density restore, handover, or
-   filesystem replacement.
+   filesystem replacement. Occupancy is reconciled at those mutation/lifecycle
+   boundaries and cached during clean idle ticks; the service does not rescan
+   the unchanged bitmap on every pass.
 
 ### 12.3 Queue format
 
