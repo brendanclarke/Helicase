@@ -11,8 +11,9 @@ AsyncFATFS semantics; those belong to `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`, and
 This document describes the Session 048 logging baseline, the Session 051
 Scene-follow-up build, the Session 057 stall-detection expansion
 (`DEV_STALL_DETECTION`, ten `X`/`PHASE_STALL` sites), Session 061's
-`Q` AutoSave boot-reader decisions, and Session 067's PatternTrace stage codes
-(see PatternTrace section below). Plans and failed working-tree experiments
+`Q` AutoSave boot-reader decisions, Session 067's PatternTrace stage codes
+(see PatternTrace section below), and Session 068's `U`/`K` AutoSaveTrace
+stage codes. Plans and failed working-tree experiments
 that mention a unified `/devlog.bin` are not implemented state.
 
 The build has exactly two development modes:
@@ -222,8 +223,8 @@ stage:u8, flags:u8, tick16:u16, value:u32
 ```
 
 Integer fields are little-endian. Stage bytes are uppercase
-`D I J N L R W F G B S A V M C P T X O E Q` and their meanings/values are owned
-by `AutosaveTrace.h`. `X`, `O`, and `E` were added in Session 054 while
+`D I J N L R W F G B S A V M C P T X O E Q U K` and their meanings/values are
+owned by `AutosaveTrace.h`. `X`, `O`, and `E` were added in Session 054 while
 chasing the recursive-delete `ScnS05` defect (see
 `knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md`); a fourth stage,
 `Y` (`SCAN_PARENT_DIAG`), was added and then fully retired in the same
@@ -335,6 +336,35 @@ command-active `F`, one page-suppression `W`, then `A/V/M/C/P/T`; `P` reported
 generation 6. The final root-index callback must acknowledge its captured
 terminal result before Menu teardown, otherwise these RAM records and the
 AutoSave writer remain blocked behind a non-idle filesystem facade.
+
+`U` (`EVT_OVERFLOW`, Session 068) is the front-panel button-event-ring
+overflow witness, emitted by `buttonHandler_processEvents()` when
+`evt_overflow_flag` is set. `flags` is the saturating drop count since the
+last emission (0..255, `DEV_MODE_LOGGING`-only counter); `value` is the ring
+depth (`evt_producer - evt_consumer`) at the moment of detection. The ring is
+64 entries, architecturally exceeding the 41-button hardware maximum, so this
+stage should never appear during normal operation — its presence in a trace
+proves a scenario beyond the architectural button-count ceiling, or (before
+the Session 068 fix) the previous 16-entry ring dropping an edge during a
+multi-button gesture. Overflow reconciliation (in the same
+`buttonHandler_processEvents()` call) clears both the VOICE-Scene-mask and
+Load-Scene SEQ press/release pairing masks and cancels the shared hold timer,
+independent of whether logging is enabled.
+
+`K` (`STEP_TOGGLE`, Session 068) is the diagnostic witness emitted by
+`buttonHandler_setRemoveStep()` immediately before it calls
+`pat_toggleStep()`. `flags` is reserved (0). `value` packs `trackNr` (bits
+0..7), absolute step 0..127 (bits 8..15), Pattern/Scene index 0..15 (bits
+16..23), and the trigger state before the toggle (bit 24, 0=was off,
+1=was on). It fires only on actual SEQ taps (bounded by human button-press
+rate) and touches only the static fixed-size address array — no pool,
+allocation, or service interaction. Purpose: a future "step didn't toggle"
+report can distinguish front-panel input delivery never reaching the
+mutation call (no `K` record for that tap) from the Pattern mutation itself
+failing (`K` present, trigger bit unchanged on the next read) without relying
+on LED appearance. See `PATTERN_DYNAMIC_STACK.md` §5 for the call-site
+contract; `K` is an AutoSaveTrace code, unrelated to `PatternTrace.h`'s own
+stage-letter set below despite the shared single-letter convention.
 
 ## Stall detection (`DEV_STALL_DETECTION`)
 

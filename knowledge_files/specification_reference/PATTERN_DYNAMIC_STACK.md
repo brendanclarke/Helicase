@@ -3,7 +3,7 @@
 ## Authority and status
 
 This is the authoritative live-memory, allocator, PAT4 interchange, Pattern
-Stack Service, and Pattern AutoSave reference through Session 067. Historical
+Stack Service, and Pattern AutoSave reference through Session 068. Historical
 Session 062/063/064 plans describe how the design was reached but do not
 override this file.
 Filesystem hierarchy and HCNAMES grammar are in `FILESYSTEM_SPEC.md`; scalar
@@ -18,7 +18,10 @@ Implemented and hardware accepted:
 - per-step automation entries (2-byte LE, 7-bit value + 9-bit target,
   up to 63 per step) with uniqueness invariant and dtype-aware editing;
 - first-fit bit-packed pool allocator and block reclamation;
-- Pattern/track settings and Sequencer probability playback;
+- Pattern/track settings storage, Menu edit, and PAT4 persistence; Sequencer
+  probability playback; per-track step-length playback (Session 068, see
+  §6.4) — per-track step-scale and shuffle are stored/edited/persisted but
+  have no playback effect (deferred, see §6.4);
 - sequencer automation playback: TIM3 copies to 32-entry debounced
   pending buffer, foreground drain via `instrumentManager_writeRuntime()`,
   per-slot dirty bitmap with morph-interpolation restore on voice trigger;
@@ -152,7 +155,15 @@ the address entry before freeing the pool block.
 Core operations validate Scene/track/step coordinates and do no work for an
 invalid coordinate:
 
-- `pat_isStepActive`, `pat_setStepActive`, `pat_toggleStep`, `pat_eraseStep`;
+- `pat_isStepActive`, `pat_setStepActive`, `pat_toggleStep`, `pat_eraseStep`
+  (Session 068: `buttonHandler_setRemoveStep()` emits a `DEV_MODE_LOGGING`-
+  gated `K` witness record, via `AutosaveTrace.h`/`autosaveTrace_record()`,
+  immediately before calling `pat_toggleStep()` — packs track/absolute
+  step/pattern/pre-toggle trigger state, so a future report can distinguish
+  front-panel input delivery failing to reach this call from a failure in
+  the mutation itself. `K` is an AutoSaveTrace stage code, not a
+  PatternTrace one — see `DEV_MODES.md` and note the two trace systems share
+  some letters with different meanings);
 - `pat_clearTrack`, `pat_clearPattern`;
 - `pat_readStepSpecials` and the note/velocity/probability setters;
 - `pat_readStepAutomations` — read decoded entries for one step (returns
@@ -235,6 +246,52 @@ The selected-step edit page reads the live dynamic block. Setting note,
 velocity, or probability performs a tracked pool read-modify-write and repaints
 the menu. Track and Pattern setting pages read/write the fields in the resident
 region; PAT4 persists them.
+
+### 6.4 Per-track length, scale, and shuffle — playback consumption status
+
+`track_length[7]`, `track_scale[7]`, and `track_shuffle[7]` (§1) are all
+correctly stored, Menu-editable, dirty-marked, and PAT4-persisted, but only
+`track_length` currently affects playback. This distinction is not visible
+from the resident-object struct alone and is stated here explicitly because
+it was the source of a Session 068 field report.
+
+**Track length (Session 068, implemented).** `seq_advanceTrackStep()` and
+`seq_realignActivePatternToMasterClock()` (`Core/Sequencer/sequencer.c`) read
+`region->track_length[track]` as each track's independent step-wrap boundary,
+falling back to `NUM_STEPS_PER_BAR` (16) when the region pointer is
+unavailable or the stored value is 0. Each track therefore loops
+independently at its own configured length. The in-memory init default is 16
+(`PatternData.c`), matching historic single-bar playback; the field's valid
+storage range is 1..`NUM_STEPS` (128), but multi-bar lengths (17..128)
+additionally require `menu_currentBar` integration in the chase-LED renderer
+that has not been built — the accepted, tested range is 1..16.
+`seq_handleMasterBoundary()` intentionally remains fixed at
+`NUM_STEPS_PER_BAR`: it detects the master-grid bar boundary (pattern-change
+commit, beat LED, clock output), a bar-level concept independent of any
+individual track's loop length, and must not be changed to track length.
+
+**Track scale (not implemented).** All tracks advance together on one global
+divisor, `SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP` (24 PPQ ticks = 1/16th note,
+in `seq_processSchedulerTick()`). There is no per-track tick accumulator or
+scale-to-ticks lookup. `track_scale[track]` (init default `TRACK_SCALE_OFF`)
+has no playback effect regardless of its stored value. A fix requires
+per-track PPQ tick accumulators (`NUM_TRACKS * 4` bytes of new ISR-static
+state) and a scale-to-ticks mapping table validated against the original
+LXR's documented scale labels; tracked in `SCOPING_TARGETS.md` § Session 068
+deferred items.
+
+**Track shuffle (not implemented).** Every step fires at a uniform tick
+boundary; there is no shuffle-offset calculation in `sequencer.c`.
+`track_shuffle[track]` (init default 0) has no playback effect regardless of
+its stored value. A fix requires sub-step scheduling — either a per-track
+"delay ticks remaining" counter (`NUM_TRACKS` bytes of new ISR-static state)
+or a deferred trigger queue; tracked in `SCOPING_TARGETS.md` § Session 068
+deferred items.
+
+Scale and shuffle are each orthogonal to length and to each other: length
+selects which step indices exist, scale selects how fast steps are visited,
+shuffle offsets timing within a step interval. All three are meant to compose
+independently once scale and shuffle are implemented.
 
 ## 7. PAT4 wire format
 
@@ -388,10 +445,30 @@ step automation add). Hardware-validated: PatternTrace zero errors across
 confirmed in identity domain post-fix. See
 `../log_archive/067_SESSION_HANDOFF_LOG.md` for exact evidence.
 
+Session 068 confirmed the Pattern Stack Service was not implicated in a
+reported VOICE-mode step-toggle failure (the `pattrace.bin` trace showed
+zero error-class records; ordinary trigger toggling never enters the
+service, see §12.14 item 1) — the actual defect was in front-panel event
+delivery (`buttonHandler.c`'s event ring, pairing masks, and hold timer),
+fixed with no Pattern Stack Service changes. The same session implemented
+per-track step-length playback consumption (§6.4) and fixed a
+`menu_playedPattern` UI-mirror desync that suppressed the sequencer chase
+LED after boot (Menu/Sequencer concern, not a Pattern-storage defect). It
+also wrote, but did not implement, a plan to stop Pattern Stack Service
+maintenance from manufacturing continuous semantic Pattern-AutoSave
+dirtiness (physical relocation currently calls the same dirty-marking path
+as a real edit) and to replace Tier 1/Tier 2's periodic chase with owned
+trailing-slack repair plus reactive-only compaction — see
+`../log_archive/068_SESSION_HANDOFF_LOG.md` §4 for the complete plan,
+carried forward as Session 069's starting point.
+
 Deferred supplemental cases are deterministic mid-write power interruption,
 record/erase admission instrumentation, injected CRC fallback, and performance
 measurement. They do not reopen the functional closeout. Phase 4.5 copy
-operations and live-record capture are future features.
+operations and live-record capture are future features. Pattern Stack
+Service maintenance producing continuous, self-generated relocation/dirty
+work at idle (Session 068 §12 finding, not yet fixed) is now also open —
+see `../log_archive/068_SESSION_HANDOFF_LOG.md` §4.
 
 ## 12. Pattern Stack Service
 
@@ -467,6 +544,22 @@ Pacing: `PAT_COMPACT_INTERVAL_MS` (100 ms) minimum between cycles,
 compaction triggered immediately when head allocation fails and pool occupancy
 is below `PAT_GAP_REDUCE_THRESHOLD`. Each block relocation follows
 write-new/update-address/free-old with PRIMASK around the address-entry swap.
+
+**Known open issue (Session 068, not yet fixed).** Proactive Tier 2 packs
+blocks downward with no trailing gap, which removes the gap Tier 1 (§12.6)
+just created for a block it processed earlier, resetting the Tier 1 cursor
+and guaranteeing another sweep — the two tiers chase each other indefinitely
+even with zero user edits. Compounding this, every successful relocation
+(Tier 1 or Tier 2) currently calls `pat_markPoolMutationDirty()`, so a purely
+physical layout move (identical bytes, new pool offset) is indistinguishable
+from a real semantic edit to Pattern AutoSave — self-generating continuous
+AutoSave write work at idle. A hardware capture recorded 4,587 Tier 1 + 958
+Tier 2 relocations with zero user edits in the observed window. The settled
+fix plan (separate physical relocation from semantic dirtiness; replace the
+periodic Tier 1/Tier 2 loop with owned trailing-slack repair plus
+reactive-only compaction) is written but not implemented — see
+`../log_archive/068_SESSION_HANDOFF_LOG.md` §4 and
+`S069_ATS_PAT_BOUNDED_CPU.md` (if still present) for the complete plan.
 
 ### 12.8 Elastic gap policy
 

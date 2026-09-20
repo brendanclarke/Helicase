@@ -31,20 +31,51 @@ Do not recommend bumping `AUTOSAVE_PARAMETER_GETS_PER_WRITE` or adjusting
 capture timing unless the user explicitly asks. The section-based CRC
 format redesign is the chosen path for write performance.
 
-## Current carryover after Session 067
+## Current carryover after Session 068
 
-Session 067 implemented the Pattern Stack Service (unified pool mutation
-dispatcher with SPSC queue, two-tier defragmentation, bulk barriers,
-filesystem replacement handover, pool usage monitor, and elastic gap policy)
-and fixed the dtype automation value offset bug (identity mapping at all
-four code sites). The durable authorities are
-`knowledge_files/log_archive/067_SESSION_HANDOFF_LOG.md`,
-`PATTERN_DYNAMIC_STACK.md`, `MODULE_INTERCHANGE_SPEC.md`, and
-`SRAM_MANIFEST.md`.
-The S067 planning documents (`S067_STACK_SERVICE_DETAIL_PLAN.md`,
-`S067_STACK_SERVICE_IMPLEMENTATION.md`, `S067_DTYPE_OFFSET_BUG.md`,
-`S067_DTYPE_BUG_IMPLEMENTATION.md`) are disposable; their durable facts are
-in the handoff log and spec references.
+Session 068 closed and hardware-accepted three independent bugs: (1) the
+front-panel button-event ring rebuilt as a 64-entry monotonic SPSC ring with
+overflow reconciliation, a physical-held check on the shared hold timer, a
+second bounded main-loop drain, and a `K` diagnostic witness before
+`pat_toggleStep()` — fixes silently-dropped VOICE-mode step-toggle taps that
+were previously being lost in front-panel event delivery, not the Pattern
+Stack Service (which the trace evidence proved healthy throughout); (2) the
+missing chase-light-after-boot bug, fixed with a new side-effect-free
+`menu_setPlayedPattern()` called at all three filesystem Scene/Bank
+realignment sites; (3) per-track sequencer step length now read from
+`pat_scene_region_t.track_length` instead of a hardcoded 16-step wrap.
+`BUTTON_HOLD_DELAY_MS` is now 200ms. Final build `text=447,860`, `data=412`,
+`bss=291,196` (+56 bytes `.bss` in `buttonHandler.c` from the event-ring
+expansion, approved as a front-panel-integrity exception, not drawn from
+either reserved RAM pool). The durable authorities are
+`knowledge_files/log_archive/068_SESSION_HANDOFF_LOG.md`,
+`PATTERN_DYNAMIC_STACK.md` (§6.4 track settings, §12.7 known Tier 1/Tier 2
+oscillation issue), `DEV_MODES.md` (new `U`/`K` AutoSaveTrace stage codes),
+`SRAM_MANIFEST.md`, and `MODULE_INTERCHANGE_SPEC.md`.
+The five S068 planning documents that fed this closeout
+(`S068_PAT_ASSIGN_BUG.md`, `S068_PAT_ASSIGN_BUG_IN_DEPTH.md`,
+`S068_PAT_ASSIGN_BUG_IMPLEMENTATION.md`, `S068_MISSING_CHASELIGHT.md`,
+`S068_TRACK_SETTINGS_IGNORED.md`) are disposable; their durable facts are in
+the handoff log and spec references above.
+
+**Not implemented — Session 069 starting point.**
+`S069_ATS_PAT_BOUNDED_CPU.md` is a fully settled plan (all open questions
+resolved) diagnosing why Pattern Stack Service maintenance manufactures
+continuous, self-generated Pattern-AutoSave dirtiness and CPU work even at
+idle — proactive Tier 2 removes the trailing gap Tier 1 just created
+(perpetual chase), and every relocation (physically identical bytes, new
+pool offset) calls the same dirty-marking path as a real semantic edit. Six
+ordered implementation items are specified (physical/semantic dirty split;
+replace Tier 1/Tier 2 with owned-slack repair + reactive-only compaction;
+remove two O(n) clean-state scans; add a background CPU budget; add Pattern
+quiet-window/max-latency scheduling; only then retest AutoSave OFF-to-ON
+convergence). **Zero `Core/` code was changed for this plan.** It is
+preserved in full in `068_SESSION_HANDOFF_LOG.md` §4 in case the source
+document is deleted before Session 069 begins — read that section (or the
+still-present `S069_ATS_PAT_BOUNDED_CPU.md`) before starting Session 069.
+Per-track step scale and shuffle sequencer consumption are also still
+unimplemented (stored/edited/persisted only) and are ordered after the
+bounded-CPU work — see `SCOPING_TARGETS.md` § Session 068 deferred items.
 
 ### Automation ordering invariant
 
@@ -65,6 +96,17 @@ is the runtime-interpolated value that accounts for Morph position.
 `instrumentManager_writeRuntime()` is NOT ISR-safe. Automation values are
 buffered in the TIM3 ISR pending buffer and drained in the foreground only.
 Do not call `instrumentManager_writeRuntime()` from any interrupt context.
+
+### buttonHandler concurrency model — foreground scan, not ISR
+
+`buttonHandler_buttonPressed()`/`buttonHandler_buttonReleased()` and the
+event ring run from the foreground 500 Hz `din_dout_exchange()` scan via
+`timebase_serviceFrontPanel()`, **not** from an ISR. Comments calling this
+"TIM6 ISR" context were stale through Session 067 and corrected in Session
+068 (`buttonHandler.c`/`.h`). The `volatile` qualifiers on `btn_held[]` and
+the event ring remain correct regardless — the foreground scan and the
+foreground consumer (`buttonHandler_processEvents()`, called twice per
+main-loop pass since Session 068) still interleave around audio rendering.
 
 ### 7-bit automation storage — identity mapping
 

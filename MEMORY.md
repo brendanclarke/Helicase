@@ -17,24 +17,35 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 068 S068 Pattern Trigger Assignment and
-missing chase-light fixes implemented and clean-build verified on top of the
-Session 067 Pattern Stack Service baseline. The front-panel event path now
-uses a 64-entry monotonic SPSC ring with overflow reconciliation, the hold
-timer checks physical state, step toggles emit a logging-only witness, and
-filesystem Scene/Bank realignment now synchronizes the played-Pattern UI
-mirror without runtime side effects. Build: `text=447,772`, `data=412`,
-`bss=291,196`. Hardware acceptance of the VOICE/STEP rapid-tap,
-all-16-button release, and active-Scene chase-light fixtures remains pending.
+**Current working source**: Session 068 closed and hardware-accepted three
+fixes on top of the Session 067 Pattern Stack Service baseline: the
+front-panel event path now uses a 64-entry monotonic SPSC ring with overflow
+reconciliation (fixes silently-dropped VOICE-mode step toggles), the hold
+timer checks physical held state before promoting, step toggles emit a
+logging-only witness, `BUTTON_HOLD_DELAY_MS` is 200ms; filesystem Scene/Bank
+realignment now synchronizes the played-Pattern UI mirror
+(`menu_setPlayedPattern()`) without runtime side effects, fixing missing
+chase-light after boot; the sequencer now reads each track's own
+`track_length` instead of a hardcoded 16-step wrap. Build: `text=447,860`,
+`data=412`, `bss=291,196`. All three verified on hardware — see
+`knowledge_files/log_archive/068_SESSION_HANDOFF_LOG.md`.
 
-**Next feature step**: hardware acceptance of S068, followed by Phase 4.5 copy
-operations (`pat_copyTrack`, `pat_copyPattern`, `pat_copyBar`) with independent
-pool-block duplication routed through the Pattern Stack Service. Permanent
-Session 067 authority remains
-`knowledge_files/log_archive/067_SESSION_HANDOFF_LOG.md`; S068 implementation
-authority is `S068_PAT_ASSIGN_BUG_IMPLEMENTATION.md` together with
-`S068_PAT_ASSIGN_BUG_IN_DEPTH.md`, `PATTERN_DYNAMIC_STACK.md`,
-`MODULE_INTERCHANGE_SPEC.md`, and `SRAM_MANIFEST.md`.
+**Next feature step**: implement the AutoSave/Pattern-service bounded-CPU
+convergence plan (separate physical pool relocation from semantic AutoSave
+dirtiness; replace the Pattern Stack Service's periodic Tier 1/Tier 2 loop,
+which currently self-chases and self-dirties at idle, with owned trailing-
+slack repair plus reactive-only compaction; remove two O(n) clean-state
+scans; add a background CPU budget; retest AutoSave OFF-to-ON convergence) —
+full plan preserved in `068_SESSION_HANDOFF_LOG.md` §4 and in
+`S069_ATS_PAT_BOUNDED_CPU.md` if still present. Per-track step scale and
+shuffle sequencer consumption remain separately deferred (see
+`SCOPING_TARGETS.md` § Session 068 deferred items). Phase 4.5 copy operations
+(`pat_copyTrack`, `pat_copyPattern`, `pat_copyBar`) with independent
+pool-block duplication routed through the Pattern Stack Service remain queued
+behind those. Permanent authority:
+`knowledge_files/log_archive/068_SESSION_HANDOFF_LOG.md` and
+`067_SESSION_HANDOFF_LOG.md`, `PATTERN_DYNAMIC_STACK.md`,
+`MODULE_INTERCHANGE_SPEC.md`, `SRAM_MANIFEST.md`, and `DEV_MODES.md`.
 
 ## RAM Allocation Approval Policy
 
@@ -59,11 +70,25 @@ This section is for short carryover points only. Flush or rewrite it at session
 end; durable facts belong in `knowledge_files/log_archive/` or
 `knowledge_files/specification_reference/`.
 
-- Session 068 code pass is complete and build/image verified. Hardware
-  acceptance is still required before treating the front-panel and
-  missing-chase-light fixes as closed; use the acceptance fixtures recorded
-  in `S068_PAT_ASSIGN_BUG_IMPLEMENTATION.md` and
-  `S068_MISSING_CHASELIGHT.md`.
+- Session 068 is closed and hardware-accepted: front-panel event-ring
+  overflow fix (VOICE-mode step-toggle silent drops), missing chase-light
+  fix (`menu_playedPattern` mirror), and per-track sequencer step-length
+  consumption. Durable authority is
+  `knowledge_files/log_archive/068_SESSION_HANDOFF_LOG.md`; the five S068
+  planning/implementation documents that fed it
+  (`S068_PAT_ASSIGN_BUG.md`, `S068_PAT_ASSIGN_BUG_IN_DEPTH.md`,
+  `S068_PAT_ASSIGN_BUG_IMPLEMENTATION.md`, `S068_MISSING_CHASELIGHT.md`,
+  `S068_TRACK_SETTINGS_IGNORED.md`) are superseded by that log and by the
+  `specification_reference/` updates it made (`PATTERN_DYNAMIC_STACK.md`
+  §6.4/§12.7, `DEV_MODES.md`, `SRAM_MANIFEST.md`,
+  `MODULE_INTERCHANGE_SPEC.md`) and may be deleted. `S069_ATS_PAT_BOUNDED_CPU.md`
+  is a settled but **unimplemented** plan carried forward as Session 069's
+  starting point — do not delete it until that work lands or its content is
+  otherwise re-archived; its full substance is also preserved in
+  `068_SESSION_HANDOFF_LOG.md` §4 as a backstop.
+  Per-track step scale and shuffle are still stored/edited/persisted only,
+  with no sequencer playback effect — see `PATTERN_DYNAMIC_STACK.md` §6.4 and
+  `SCOPING_TARGETS.md` § Session 068 deferred items.
 
 - Read `knowledge_files/log_archive/040_SESSION_HANDOFF_LOG.md` before
   continuing Scene/Bank or filesystem work. It preserves the verified

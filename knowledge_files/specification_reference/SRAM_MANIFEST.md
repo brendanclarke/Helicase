@@ -1,10 +1,11 @@
 # SRAM manifest
 
-The detailed section/symbol inventory below was regenerated from the current
+The detailed section/symbol inventory below was regenerated from the
 2026-09-18 Session 067 build (detail inventory from Session 064 build at
-`d5af5fd`; Session 065/066/067 deltas noted below).
-`arm-none-eabi-size build/lxr02.elf` reports `text=447,580`, `data=412`, and
-`bss=291,140`.
+`d5af5fd`; Session 065/066/067 deltas noted below); the Session 068 delta is
+noted separately below and is small (front-panel event-ring RAM only). As of
+Session 068 (2026-09-19), `arm-none-eabi-size build/lxr02.elf` reports
+`text=447,860`, `data=412`, and `bss=291,196`.
 The approved 290-byte `fs_resident_source` cache, the one-byte
 `menu_pendingPageSwitch`, and Session 061 boot scratch all share normal SRAM1.
 This remains a linked-image inventory: sizes come from
@@ -46,7 +47,13 @@ variables (scene, open, handover, replace_pending, bulk cursors, logical chunks,
 tier1 scan cursor, reactive state, last compact tick). Text delta: +8,184 B
 (post-service) then −64 B (dtype fix), net +8,184 B from Session 066. BSS delta
 from Session 066: +288 B. The dtype offset bug fix removed code (net −64 text)
-but added no RAM. Final build: text=447,580, data=412, bss=291,140.
+but added no RAM. Session 067 final build: text=447,580, data=412, bss=291,140.
+Session 068 adds 56 B new BSS in `buttonHandler.c` (front-panel event-ring
+capacity expansion 16→64 entries plus overflow-detection state; see the dated
+note below) and no other retained allocation — the chase-light fix
+(`menu_setPlayedPattern()`) and the track-length sequencer fix are both
+logic-only with zero new storage. Text delta from Session 067: +280 B across
+three sub-changes. Final build: text=447,860, data=412, bss=291,196.
 
 `DEV_LOGGING_IWDG`'s retained boot capsule (config.h; see DEV_MODES.md) adds a
 new, separate 12-of-32-approved-byte allocation in previously-unmapped SRAM2
@@ -428,3 +435,35 @@ Build metrics post-service: `text=447,644`, `data=412`, `bss=291,140`.
 Build metrics post-dtype-fix (final): `text=447,580`, `data=412`,
 `bss=291,140`. The dtype fix removed 64 bytes of text (conversion code) and
 added no RAM.
+
+## 2026-09-19 Session 068 front-panel event-ring allocation note
+
+`buttonHandler.c` adds 56 bytes of normal SRAM1 `.bss`, owned by
+buttonHandler for the firmware lifetime, fixing a silent front-panel
+button-event-ring overflow (see `068_SESSION_HANDOFF_LOG.md` §1 and
+`PATTERN_DYNAMIC_STACK.md` §5):
+
+- 48 B: `evt_ring[]` capacity expansion from 16 to 64 entries (1 byte per
+  entry; the ring changed from a masked head/tail scheme, which reserved one
+  slot and left 15 usable, to monotonic producer/consumer counters using all
+  64 slots).
+- 1 B: `evt_overflow_flag` (unconditional, set by `evt_push()` on a full
+  ring, cleared by the next `buttonHandler_processEvents()` drain).
+- 1 B: `evt_drop_count` (`DEV_MODE_LOGGING`-only saturating counter).
+
+66 bytes were the approved ceiling (64-byte ring + 2-byte overflow state,
+counting the full 64-byte ring rather than only its 48-byte expansion over
+the prior 16-entry ring); the measured actual delta against the Session 067
+baseline is 56 bytes (291,196 − 291,140), i.e. 6 bytes of alignment/layout
+movement beyond the 50-byte source-level estimate (48 + 1 + 1), consistent
+with the small over-schedule pattern already seen in the Session 067 note
+above. This RAM was explicitly approved as an exception for front-panel
+input-integrity correctness — it is not drawn from either general reserved
+pool (DTCM delay-line headroom, SRAM1 Pattern-data headroom).
+
+No DTCM, DMA, or Pattern-region allocation changed. The Session 068
+chase-light fix (`menu_setPlayedPattern()`, one validated byte assignment, no
+new storage) and the track-length sequencer fix (reads an existing
+`pat_scene_region_t` field, no new storage) both add zero RAM.
+
+Final Session 068 build: `text=447,860`, `data=412`, `bss=291,196`.

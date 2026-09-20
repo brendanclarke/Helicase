@@ -1,13 +1,14 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-067, including typed HCNAMES, AutoSave boot restore, typed Instrument-index
+068, including typed HCNAMES, AutoSave boot restore, typed Instrument-index
 repair, AsyncFATFS directory publication, the Phase 4 dynamic Pattern storage
 system, step automation editing/playback (Session 065), the VOICE-page
-held-step automation overlay (Session 066), and the Pattern Stack Service with
-dtype offset bug fix (Session 067). Historical migrations belong in session
-logs; this document states which live module owns each call, state transition,
-and retained object.
+held-step automation overlay (Session 066), the Pattern Stack Service with
+dtype offset bug fix (Session 067), and the Session 068 front-panel event-ring
+rebuild, played-Pattern mirror fix, and per-track sequencer length fix.
+Historical migrations belong in session logs; this document states which live
+module owns each call, state transition, and retained object.
 
 ## Rules
 
@@ -394,8 +395,8 @@ dispatch to owners.
 
 | API | Use | Usual callers / clients |
 |---|---|---|
-| `buttonHandler_buttonPressed(buttonNr)` / `buttonHandler_buttonReleased(buttonNr)` | ISR-safe event recording. | TIM6/front-panel service |
-| `buttonHandler_processEvents()` | Drain one button event and execute foreground UI actions. | `main.c` |
+| `buttonHandler_buttonPressed(buttonNr)` / `buttonHandler_buttonReleased(buttonNr)` | Scan-safe event recording into the 64-entry monotonic-counter event ring (Session 068; was a 16-entry masked ring, 15 usable, silent-drop on overflow). Runs from the foreground 500 Hz `din_dout_exchange()` scan via `timebase_serviceFrontPanel()`, **not** an ISR — corrected stale comment, Session 068. | Foreground front-panel scan |
+| `buttonHandler_processEvents()` | Drain one button event and execute foreground UI actions; on ring overflow, reconciles the VOICE-Scene/Load-Scene pairing masks and the hold timer (Session 068). Called **twice** per main-loop pass since Session 068 (separated by `audio_check_and_render()`), ~30 events/500 Hz scan interval; must never call `audio_check_and_render()` itself. | `main.c` (2 call sites) |
 | `buttonHandler_tick()` | Long-press timer promotion. | foreground timing path |
 | `buttonHandler_getMode()` | Current SELECT mode. | ledHandler, Menu/UI checks |
 | `buttonHandler_getShift()` | Current shift-held state. | ledHandler, button logic |
@@ -448,6 +449,7 @@ edit dispatch, and post-load operation follow-up.
 | `menu_getActiveVoice()` / `menu_setActiveVoice(voiceNr)` | UI active voice. | buttonHandler, MidiParser, PatternData callers |
 | `menu_areMuteLedsShown()` | Mute LED UI state query. | ledHandler/buttonHandler |
 | `menu_setShownPattern(patternNr)` / `menu_getViewedPattern()` | UI viewed/edited pattern. | buttonHandler, ledHandler, PatternData callers |
+| `menu_setPlayedPattern(patternNr)` | Side-effect-free alignment of the played-Pattern UI mirror (`menu_playedPattern`) the chase renderer compares against the viewed Pattern to gate chase-LED visibility (Session 068). Unlike `led_notifyPatternChanged()` (the runtime writer, with follow/PERF/LED side effects), performs only a validated assignment — safe to call from pre-audio filesystem realignment. | `filesystem.c` Scene/Bank realignment (3 sites) |
 | `menu_voiceAutoOverlayEnter()` / `menu_voiceAutoOverlayExit()` | Enter/exit VOICE-page held-step automation overlay (Session 066). Entry initializes 44-byte state block, starts async search. Exit restores normal VOICE display and clears CGRAM. | buttonHandler SEQ held-step timing |
 | `menu_voiceAutoOverlayHeldChanged()` | Notify overlay that the held-step mask changed. Invalidates working values, restarts async search. | buttonHandler SEQ press/release during overlay |
 | `menu_voiceAutoOverlayPatternDeleted()` | Notify overlay that the current pattern was deleted/cleared. Forces overlay exit. | copyClearTools |
@@ -499,9 +501,9 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 | `seq_tick()` | Advance playback when due. | TIM3 owner |
 | `seq_triggerVoice(voiceNr, vol, note)` | Trigger one voice from Sequencer/SOM. | Sequencer, SOM |
 | `seq_previewVoice(voiceNr)` | Trigger the selected voice while transport is stopped without reading or advancing step state. | buttonHandler selected-voice re-press |
-| Internal scaled scheduler helpers | Compute due events from absolute 96-PPQ tick time, per-track scale, and per-track shuffle. | Sequencer only; reads PatternData track settings |
+| Internal scheduler helpers (`seq_advanceTrackStep()`, `seq_processSchedulerTick()`) | Compute due events from absolute 96-PPQ tick time. Each track wraps independently at its own `track_length` (Session 068; reads `pat_scene_region_t`, falls back to `NUM_STEPS_PER_BAR`=16). `track_scale` and `track_shuffle` are stored/edited/persisted but **not yet consumed** — all tracks still advance on one shared 24-PPQ-tick (1/16th-note) global divisor with no shuffle offset; see `PATTERN_DYNAMIC_STACK.md` §6.4. | Sequencer only; reads PatternData track settings |
 | `seq_resetDeltaAndTick()` / `seq_resetToPatternStart()` / `seq_setDeltaT(delta)` | Clock/reset timing control. | trigger/MIDI sync paths |
-| `seq_realignActivePatternToMasterClock()` | Recalculate per-track runtime positions from the master step clock, length, and scale. | buttonHandler/PERF pattern realign gesture |
+| `seq_realignActivePatternToMasterClock()` | Recalculate per-track runtime step position from the master step clock and each track's own `track_length` (Session 068; scale not yet applied). | buttonHandler/PERF pattern realign gesture |
 | `seq_triggerNextMasterStep(stepSize)` | External clock master-step scheduling. | trigger/MIDI sync paths |
 | `seq_setBpm(bpm)` / `seq_getBpm()` | Tempo. | Menu/global apply |
 | `seq_sync()` | External MIDI clock tick. | MidiParser |
