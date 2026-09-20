@@ -3,9 +3,11 @@
 The detailed section/symbol inventory below was regenerated from the
 2026-09-18 Session 067 build (detail inventory from Session 064 build at
 `d5af5fd`; Session 065/066/067 deltas noted below); the Session 068 delta is
-noted separately below and is small (front-panel event-ring RAM only). As of
-Session 068 (2026-09-19), `arm-none-eabi-size build/lxr02.elf` reports
-`text=447,860`, `data=412`, and `bss=291,196`.
+noted separately below and is small (front-panel event-ring RAM only). Session
+069's Pattern Stack Service delta is recorded below. The current Session 069
+implementation build (2026-09-20) reports
+`text=449,404`, `data=408`, and `bss=291,708` from
+`arm-none-eabi-size build/lxr02.elf`.
 The approved 290-byte `fs_resident_source` cache, the one-byte
 `menu_pendingPageSwitch`, and Session 061 boot scratch all share normal SRAM1.
 This remains a linked-image inventory: sizes come from
@@ -44,7 +46,7 @@ Text delta from Session 065: +5,360 B.
 Session 067 adds 288 B new BSS in PatternStackService.c: 256 B for the 64-entry
 volatile `uint32_t` SPSC ring buffer (SRAM1) and ~32 B of service state
 variables (scene, open, handover, replace_pending, bulk cursors, logical chunks,
-tier1 scan cursor, reactive state, last compact tick). Text delta: +8,184 B
+tier1 scan cursor, reactive state). Text delta: +8,184 B
 (post-service) then −64 B (dtype fix), net +8,184 B from Session 066. BSS delta
 from Session 066: +288 B. The dtype offset bug fix removed code (net −64 text)
 but added no RAM. Session 067 final build: text=447,580, data=412, bss=291,140.
@@ -54,6 +56,14 @@ note below) and no other retained allocation — the chase-light fix
 (`menu_setPlayedPattern()`) and the track-length sequencer fix are both
 logic-only with zero new storage. Text delta from Session 067: +280 B across
 three sub-changes. Final build: text=447,860, data=412, bss=291,196.
+
+Session 069 adds the non-persisted Pattern Stack Service reservation image and
+three one-byte policy/lifecycle flags: 515 B of source-owned SRAM1 `.bss`
+state. The old `tier2_scan_cursor` and `last_compact_tick` state is removed;
+the linked image measures `text=449,404`, `data=408`, `bss=291,708` after
+linker alignment. `reservation_image` is 512 B and the three flags are each
+one byte in the link map. The reservation image is neither persisted in PAT4
+nor duplicated per Scene/Pattern.
 
 `DEV_LOGGING_IWDG`'s retained boot capsule (config.h; see DEV_MODES.md) adds a
 new, separate 12-of-32-approved-byte allocation in previously-unmapped SRAM2
@@ -109,6 +119,8 @@ boundary `0x08080000`. `build/lxr02.bin` is 427,168 B.
 | --- | ---: | --- |
 | `scenes` | 19,200 B | 16 resident `scene_t` values; Pattern storage is external to each Scene |
 | `pat_regions` | 168,304 B | 16 × 10,519-B Scene Pattern regions: address array, pool, bitmap, and 23 parameter bytes |
+| `reservation_image` | 512 B | Non-persisted SRAM1 `.bss` bit image owned by PatternStackService.c; trailing-slack reservations for the current service Scene |
+| Reservation density/budget/rebuild flags | 3 B | SRAM1 `.bss` policy latch, adaptive AutoSave-pressure budget flag, and lifecycle rebuild wake owned by PatternStackService.c |
 | `pat_autosave_snapshot` | 10,519 B | Sole immutable Pattern AutoSave snapshot for one in-flight Scene |
 | `autosave_pattern_dirty_mask` | 2 B | Separate one-bit-per-Scene Pattern work ownership |
 | `fs_pattern_generation` + `fs_pattern_drain_scene` | 65 B | Sixteen hidden-pair generation baselines plus current drain selector |

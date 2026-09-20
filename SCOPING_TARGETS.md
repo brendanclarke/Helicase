@@ -1488,3 +1488,17 @@ items formerly in this section now live in
   give ~4× throughput at +1 KB ROM. Not a performance concern at current
   payload sizes (≤35 KB) but may matter if AutoSave or file payloads grow.
   Evaluate when a CRC caller becomes latency-sensitive.
+
+---
+
+## Session 069 deferred refactor target (2026-09-20)
+
+- **Background CPU budget module extraction from filesystem.c.** The S069
+  elapsed-time budget primitive (refill/charge/query API for bounding background
+  work to a configured CPU percentage) is initially implemented in filesystem.c
+  because the scheduler ladder and the majority of budgeted work live there.
+  PatternStackService.c calls the public API for repair epoch gating. If
+  filesystem.c continues to grow or additional subsystems need budget access,
+  extract the budget primitive into a dedicated `BackgroundBudget.c` module.
+  This is a mechanical refactor with no behavioral change — the API surface
+  already exists as public functions.

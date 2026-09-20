@@ -2,7 +2,7 @@
  * PatternStackService.c — unified dynamic Pattern-pool mutation service.
  *
  * What: owns deferred pool edits, bulk barriers, mutation-target handover,
- * elastic gap maintenance, and paced compaction. Why: TIM3 playback may
+ * owned trailing-slack repair, and reactive compaction. Why: TIM3 playback may
  * publish trigger bits, but all pool bytes, bitmap bits, and dynamic address
  * changes must be serialized by one foreground owner. Inputs arrive through
  * the patSvc_* API or the TIM3 live-erase enqueue hook. Outputs are committed
@@ -94,19 +94,76 @@ static uint8_t bulk_track_cursor;
 /*
  * Bounded maintenance/recovery state.
  *
- * What: cursors split Tier 1/Tier 2 work across service ticks; reactive state
- * retains a blocked queue head while fragmentation is compacted. Why: a
- * failed queue allocation must not permanently block FIFO progress or starve
- * handover/AutoSave. RAM: ten bytes including the running logical occupancy
- * count and last compaction tick. Affiliates: the bitmap/address helpers.
+ * What: the repair cursor advances through one finite reservation epoch while
+ * reactive state retains a blocked queue head during fragmentation recovery.
+ * Why: a failed queue allocation must not permanently block FIFO progress or
+ * starve handover/AutoSave. RAM: nine bytes for cursors, occupancy, and the
+ * reactive size/active state. Affiliates: the bitmap/address helpers and
+ * patSvc_repairStep().
  */
 static uint16_t tier1_scan_cursor;
-static uint16_t tier2_scan_cursor;
 static uint16_t reactive_scan_cursor;
 static uint16_t logical_chunks_used;
-static uint16_t last_compact_tick;
 static uint16_t reactive_required;
 static uint8_t reactive_active;
+
+/*
+ * Slack-reservation bitmap image.
+ *
+ * What: a 512-byte bit-packed image with the same chunk >> 3, chunk & 7
+ * indexing as the occupancy bitmap in pat_scene_region_t.bitmap[]. A set bit
+ * means the corresponding backed, currently-unoccupied chunk is reserved as
+ * trailing slack and must be refused to ordinary allocation and reactive
+ * recovery searches. Why: owned trailing slack lets
+ * pat_tryAppendAutomation() grow a block in place without a pool-wide search.
+ * Inputs: the repair pass sets bits; append consumption and reactive recovery
+ * clear bits. Invariant: a chunk is never simultaneously reserved and
+ * occupied — consuming a reserved chunk clears the reservation bit in the
+ * same transaction that sets the occupancy bit. The upper 256 bytes are never
+ * consulted; reservation-aware helpers bound loops to PATSVC_POOL_CHUNKS.
+ * Lifetime: firmware lifetime, describing only the current service_scene.
+ * Cleared at init, handover completion, and filesystem replacement, then
+ * lazily repopulated by the next bounded repair epoch. RAM: 512 bytes, SRAM1,
+ * .bss. Affiliates: patSvc_reservationGet/Set/Clear,
+ * patSvc_repairStep(), and the public cross-module accessor.
+ */
+static uint8_t reservation_image[512u];
+
+/*
+ * Latchable reservation-density level.
+ *
+ * What: nonzero when pool occupancy is below the reduce threshold and the
+ * repair pass should create trailing reservations; zero when occupancy rises
+ * above it. The reverse transition occurs below the restore threshold. Why:
+ * hysteresis prevents oscillation near a boundary. Inputs:
+ * logical_chunks_used. Output: repair and reactive policy state. RAM: 1 byte,
+ * SRAM1, .bss. Affiliates: patSvc_updateDensityLevel(),
+ * patSvc_repairStep(), and patSvc_reactiveStep().
+ */
+static uint8_t reservation_density_active;
+
+/*
+ * Adaptive repair-budget flag.
+ *
+ * What: nonzero when AutoSave has pending scalar, semantic Pattern,
+ * non-semantic Pattern, or parameter work. Why: repair yields foreground
+ * cycles to the filesystem facade while still making bounded progress. Inputs:
+ * the existing AutoSave dirty predicates. Output: PAT_REPAIR_SCAN_BUSY or
+ * PAT_REPAIR_SCAN_IDLE through patSvc_repairBudget(). RAM: 1 byte, SRAM1,
+ * .bss. Affiliate: patSvc_tick().
+ */
+static uint8_t repair_budget_busy __attribute__((used));
+
+/*
+ * Rebuild-pending flag.
+ *
+ * What: set after a lifecycle boundary clears reservation_image[] so the next
+ * repair epoch restarts at address zero. Why: rebuilding is simply epoch one
+ * from an empty image, but it needs a wake even when no mutation occurs.
+ * Output: one pending rebuild bit. RAM: 1 byte, SRAM1, .bss. Affiliates:
+ * patSvc_clearReservationImage() and patSvc_tick().
+ */
+static uint8_t reservation_rebuild_pending;
 
 /* Return one packed event from operation, step identity, and payload. */
 static uint32_t patSvc_packEvent(uint8_t operation, uint8_t track,
@@ -223,6 +280,148 @@ static void patSvc_bitmapClear(pat_scene_region_t *region, uint16_t chunk)
 }
 
 /*
+ * Read one reservation bit from the service-owned slack image.
+ *
+ * What: use the same chunk >> 3, chunk & 7 indexing as patSvc_bitmapGet but
+ * against reservation_image[]. Why: allocation, repair, and reactive helpers
+ * must distinguish free-and-unreserved from free-but-reserved space. Inputs:
+ * chunk 0..PATSVC_POOL_CHUNKS-1. Output: one when reserved, zero otherwise.
+ * Callers bound the index. Affiliates: patSvc_repairStep(),
+ * patSvc_findFreeRunReclaiming(), and the public query accessor.
+ */
+static uint8_t patSvc_reservationGet(uint16_t chunk)
+{
+    return (uint8_t)((reservation_image[chunk >> 3u] >> (chunk & 7u)) & 1u);
+}
+
+/*
+ * Mark one free chunk as reserved trailing slack.
+ *
+ * What: set one reservation bit for a chunk that the occupancy bitmap shows
+ * free. Why: the repair pass creates one owned trailing reservation per live
+ * block when density policy is active. Inputs: a validated chunk index.
+ * Callers verify that the chunk is free and unreserved first. Affiliate:
+ * patSvc_repairStep().
+ */
+static void patSvc_reservationSet(uint16_t chunk)
+{
+    reservation_image[chunk >> 3u] |= (uint8_t)(1u << (chunk & 7u));
+}
+
+/*
+ * Release one reservation without changing the occupancy bitmap.
+ *
+ * What: clear one reservation bit. Why: append consumption, stale trailing
+ * reservation cleanup, reactive recovery, and lifecycle handling share one
+ * operation. Inputs: a validated chunk index. Output: one bit cleared.
+ * Affiliates: patSvc_consumeReservation(), patSvc_reactiveStep(), and
+ * patSvc_clearReservationImage().
+ */
+static void patSvc_reservationClear(uint16_t chunk)
+{
+    reservation_image[chunk >> 3u] &= (uint8_t)~(1u << (chunk & 7u));
+}
+
+/*
+ * Clear the reservation image and arm a lazy rebuild.
+ *
+ * What: zero all 512 bytes of reservation_image[] and set the pending-rebuild
+ * flag. Why: init, handover completion, and filesystem replacement must start
+ * from a clean image; the next bounded repair epoch repopulates it. Inputs:
+ * none. Outputs: zeroed reservation state and a repair wake. Affiliates:
+ * patSvc_init(), patSvc_finishSceneReplace(), and patSvc_tick().
+ */
+static void patSvc_clearReservationImage(void)
+{
+    memset(reservation_image, 0, sizeof(reservation_image));
+    reservation_rebuild_pending = 1u;
+}
+
+/*
+ * Public reservation query for PatternData's Gate-6 growth path.
+ *
+ * What: read one bit from the service-owned reservation image without exposing
+ * service statics to PatternData.c. Inputs: a chunk index. Output: nonzero
+ * when reserved, zero for an unreserved or out-of-range chunk. Affiliate:
+ * patSvc_consumeReservation().
+ */
+uint8_t patSvc_isChunkReserved(uint16_t chunk)
+{
+    if (chunk >= PATSVC_POOL_CHUNKS)
+        return 0u;
+    return patSvc_reservationGet(chunk);
+}
+
+/*
+ * Public reservation consume for PatternData's Gate-6 growth path.
+ *
+ * What: clear one service-owned reservation bit. Why: the caller sets the
+ * occupancy bit in the same transaction, preserving the invariant that a
+ * chunk is never simultaneously reserved and occupied. Inputs: a chunk index.
+ * Output: reservation bit cleared when the index is backed. Affiliate:
+ * patSvc_isChunkReserved().
+ */
+void patSvc_consumeReservation(uint16_t chunk)
+{
+    if (chunk < PATSVC_POOL_CHUNKS)
+        patSvc_reservationClear(chunk);
+}
+
+/*
+ * Transition the reservation-density latch using occupancy hysteresis.
+ *
+ * What: disable new reservations at or above the reduce threshold and
+ * re-enable them below the restore threshold. Why: the threshold gap prevents
+ * policy oscillation near a boundary. Inputs: logical_chunks_used. Output:
+ * reservation_density_active may change; a restore transition wakes repair by
+ * resetting its sleeping cursor. Affiliate: patSvc_tick().
+ */
+static void patSvc_updateDensityLevel(void)
+{
+    uint32_t percent = ((uint32_t)logical_chunks_used * 100u) /
+                       PATSVC_POOL_CHUNKS;
+
+    if (reservation_density_active) {
+        if (percent >= PAT_RESERVATION_REDUCE_THRESHOLD)
+            reservation_density_active = 0u;
+    } else if (percent < PAT_RESERVATION_RESTORE_THRESHOLD) {
+        reservation_density_active = 1u;
+        if (tier1_scan_cursor >= PATSVC_ADDRESS_COUNT)
+            tier1_scan_cursor = 0u;
+    }
+}
+
+/*
+ * Sample current AutoSave pressure for the next repair tick.
+ *
+ * What: set repair_budget_busy when scalar, semantic Pattern, non-semantic
+ * Pattern, or parameter work is pending. Why: the filesystem facade receives
+ * more foreground time while reservation repair still makes bounded progress.
+ * Inputs: existing AutoSave dirty predicates. Output: one adaptive-budget
+ * flag. Affiliate: patSvc_tick().
+ */
+static void patSvc_sampleRepairBudget(void)
+{
+    repair_budget_busy = (uint8_t)(
+        autosave_maskHasDirty() ||
+        autosave_patternDirtyMask() != 0u ||
+        autosave_nonSemanticPatternDirtyMask() != 0u);
+}
+
+/*
+ * Return the current per-tick repair scan limit.
+ *
+ * What: select the idle or AutoSave-pressure address-entry budget. Why: one
+ * helper keeps the repair epoch bounded without duplicating policy. Inputs:
+ * repair_budget_busy. Output: PAT_REPAIR_SCAN_IDLE or PAT_REPAIR_SCAN_BUSY.
+ * Affiliate: patSvc_tick().
+ */
+static uint8_t patSvc_repairBudget(void)
+{
+    return repair_budget_busy ? PAT_REPAIR_SCAN_BUSY : PAT_REPAIR_SCAN_IDLE;
+}
+
+/*
  * Decode one block's logical chunk count without trusting malformed tails.
  *
  * What: reproduce the public block geometry from its flags/count bytes. Why:
@@ -298,7 +497,7 @@ static uint16_t patSvc_countUsed(const pat_scene_region_t *region)
     return used;
 }
 
-/* Find the largest free bitmap run for allocation-failure classification. */
+/* Find the largest free-and-unreserved run for failure classification. */
 static uint16_t patSvc_largestFreeRun(const pat_scene_region_t *region)
 {
     uint16_t chunk;
@@ -308,7 +507,8 @@ static uint16_t patSvc_largestFreeRun(const pat_scene_region_t *region)
     if (!region)
         return 0u;
     for (chunk = 0u; chunk < PATSVC_POOL_CHUNKS; chunk++) {
-        if (!patSvc_bitmapGet(region, chunk)) {
+        if (!patSvc_bitmapGet(region, chunk) &&
+            !patSvc_reservationGet(chunk)) {
             run++;
             if (run > largest)
                 largest = run;
@@ -319,7 +519,7 @@ static uint16_t patSvc_largestFreeRun(const pat_scene_region_t *region)
     return largest;
 }
 
-/* Find a free run; lower_only is used by bottom-packing compaction. */
+/* Find a free-and-unreserved run; lower_only bounds reactive recovery. */
 static uint16_t patSvc_findFreeRun(const pat_scene_region_t *region,
                                    uint16_t chunks, uint16_t upper_chunk,
                                    uint8_t lower_only)
@@ -334,11 +534,49 @@ static uint16_t patSvc_findFreeRun(const pat_scene_region_t *region,
         if (lower_only && (uint32_t)start + chunks > upper_chunk)
             break;
         for (i = 0u; i < chunks; i++) {
-            if (patSvc_bitmapGet(region, (uint16_t)(start + i)))
+            if (patSvc_bitmapGet(region, (uint16_t)(start + i)) ||
+                patSvc_reservationGet((uint16_t)(start + i)))
                 break;
         }
         if (i == chunks)
             return (uint16_t)(start << 2u);
+    }
+    return PAT_ADDR_SENTINEL;
+}
+
+/*
+ * Find a free run while reclaiming surplus reservations.
+ *
+ * What: search the occupancy bitmap exactly like patSvc_findFreeRun(), but
+ * clear reservation bits in a selected free run before returning it. Why:
+ * reactive allocation pressure may use soft-reserved chunks once density is
+ * latched off. Inputs: region, required chunks, optional lower-only bound.
+ * Output: a free run with reservations cleared, or PAT_ADDR_SENTINEL.
+ * Caller restriction: only patSvc_reactiveStep() calls this when density is
+ * inactive. Affiliate: reactive recovery.
+ */
+static uint16_t patSvc_findFreeRunReclaiming(
+    const pat_scene_region_t *region, uint16_t chunks, uint16_t upper_chunk,
+    uint8_t lower_only)
+{
+    uint16_t start;
+    uint16_t i;
+
+    if (!region || chunks == 0u || chunks > PATSVC_POOL_CHUNKS)
+        return PAT_ADDR_SENTINEL;
+    for (start = 0u; (uint32_t)start + chunks <= PATSVC_POOL_CHUNKS;
+         start++) {
+        if (lower_only && (uint32_t)start + chunks > upper_chunk)
+            break;
+        for (i = 0u; i < chunks; i++) {
+            if (patSvc_bitmapGet(region, (uint16_t)(start + i)))
+                break;
+        }
+        if (i == chunks) {
+            for (i = 0u; i < chunks; i++)
+                patSvc_reservationClear((uint16_t)(start + i));
+            return (uint16_t)(start << 2u);
+        }
     }
     return PAT_ADDR_SENTINEL;
 }
@@ -374,14 +612,32 @@ static uint32_t patSvc_relocationValue(uint16_t step_id,
 }
 
 /*
+ * Resolve one packed address entry without a packed-member pointer warning.
+ *
+ * What: compute the byte offset of a two-byte address entry from the start of
+ * the packed resident region. Why: the address array is intentionally packed
+ * for the PAT4 layout, while publication still needs a pointer for its short
+ * PRIMASK transaction. Inputs: resident region and flat address index. Output:
+ * mutable address-entry pointer. Caller validates the index. Affiliate:
+ * service relocation and repair paths.
+ */
+static uint16_t *patSvc_addressEntry(pat_scene_region_t *region,
+                                     uint16_t address_index)
+{
+    return (uint16_t *)(void *)((uint8_t *)region +
+                                ((size_t)address_index * sizeof(uint16_t)));
+}
+
+/*
  * Relocate one validated address entry to a free run.
  *
  * What: reserve only the logical block chunks, copy complete bytes, publish
- * the new address, then free the old run. A positive gap argument searches a
- * larger free run but deliberately leaves the trailing gap free. Why: this is
- * the common write-new/swap/free-old transaction used by Tier 1 and Tier 2.
- * Inputs: Scene, address index, desired gap, and optional lower-only rule.
- * Output: nonzero when one block moved. Affiliate: patSvc_tick().
+ * the new address, then free the old run. A positive gap argument is retained
+ * for the repair helper's geometry but ordinary reactive recovery passes zero.
+ * Why: this is the write-new/swap/free-old transaction used when a blocked
+ * allocation needs a lower destination. Inputs: Scene, address index, desired
+ * trailing reservation gap, and optional lower-only rule. Output: nonzero
+ * when one block moved. Affiliate: patSvc_reactiveStep().
  */
 static uint8_t patSvc_relocateIndex(uint8_t scene, uint16_t address_index,
                                     uint8_t gap, uint8_t lower_only,
@@ -389,8 +645,6 @@ static uint8_t patSvc_relocateIndex(uint8_t scene, uint16_t address_index,
                                     uint16_t *new_offset_out)
 {
     pat_scene_region_t *region = patSvc_region(scene);
-    uint8_t track;
-    uint8_t step;
     uint16_t *entry;
     uint16_t addr;
     uint16_t old_offset;
@@ -402,9 +656,7 @@ static uint8_t patSvc_relocateIndex(uint8_t scene, uint16_t address_index,
 
     if (!region || address_index >= PATSVC_ADDRESS_COUNT)
         return 0u;
-    track = (uint8_t)(address_index / NUM_STEPS);
-    step = (uint8_t)(address_index % NUM_STEPS);
-    entry = &region->address[track][step];
+    entry = patSvc_addressEntry(region, address_index);
     addr = *entry;
     if ((addr & PAT_ADDR_SPECIALS_BIT) == 0u)
         return 0u;
@@ -430,6 +682,9 @@ static uint8_t patSvc_relocateIndex(uint8_t scene, uint16_t address_index,
     for (i = 0u; i < logical_chunks; i++)
         patSvc_bitmapClear(region, (uint16_t)(old_chunk + i));
     memset(&region->pool[old_offset], 0, (size_t)logical_chunks * 4u);
+    /* The old positional trailing claim no longer belongs to this block. */
+    if ((uint32_t)old_chunk + logical_chunks < PATSVC_POOL_CHUNKS)
+        patSvc_reservationClear((uint16_t)(old_chunk + logical_chunks));
     /*
      * Publish layout-only maintenance after the relocation is complete.
      *
@@ -447,82 +702,105 @@ static uint8_t patSvc_relocateIndex(uint8_t scene, uint16_t address_index,
     return 1u;
 }
 
-/* Calculate the current elastic trailing-gap target. */
-static uint8_t patSvc_gapTarget(void)
-{
-    uint32_t percent = ((uint32_t)logical_chunks_used * 100u) /
-                       PATSVC_POOL_CHUNKS;
-
-    return percent >= PAT_GAP_REDUCE_THRESHOLD ? 1u : 2u;
-}
-
-/* Count free chunks immediately following one logical block. */
-static uint8_t patSvc_trailingGap(const pat_scene_region_t *region,
-                                  uint16_t offset, uint8_t logical_chunks)
-{
-    uint16_t chunk = (uint16_t)((offset >> 2u) + logical_chunks);
-    uint8_t gap = 0u;
-
-    while (chunk < PATSVC_POOL_CHUNKS && !patSvc_bitmapGet(region, chunk)) {
-        if (gap == UINT8_MAX)
-            break;
-        gap++;
-        chunk++;
-    }
-    return gap;
-}
-
 /*
- * Inspect one Tier 1 candidate and create its requested trailing gap.
+ * Inspect one address entry and create or verify its trailing reservation.
  *
- * Output: 1 for a successful relocation, 0 when the address is absent,
- * already has enough gap, or no suitable run exists. The caller owns the M/G
- * trace classification. Affiliate: patSvc_tick() priority 3.
+ * What: for an occupied block, reserve its immediately-following free chunk.
+ * If that chunk is occupied, relocate the block to a free run large enough
+ * for the block plus one reservation chunk. When density policy is inactive,
+ * the cursor still advances but no reservation work is performed. Why: this
+ * replaces the old Tier-1 gap mechanism with explicit owned slack. Inputs:
+ * Scene and address index. Outputs: reservation or relocation status plus
+ * optional old/new offsets. Affiliate: patSvc_tick() repair epoch.
  */
-static uint8_t patSvc_tier1Step(uint8_t scene, uint16_t address_index,
-                                uint8_t *fallback_used,
-                                uint16_t *old_offset_out,
-                                uint16_t *new_offset_out)
+static uint8_t patSvc_repairStep(uint8_t scene, uint16_t address_index,
+                                 uint16_t *old_offset_out,
+                                 uint16_t *new_offset_out)
 {
     pat_scene_region_t *region = patSvc_region(scene);
-    uint8_t track;
-    uint8_t step;
     uint16_t addr;
     uint16_t offset;
     uint8_t logical_chunks;
-    uint8_t target_gap;
-    uint8_t trailing;
+    uint16_t trailing_chunk;
 
-    if (fallback_used)
-        *fallback_used = 0u;
     if (old_offset_out)
         *old_offset_out = 0u;
     if (new_offset_out)
         *new_offset_out = 0u;
-    if (!region || address_index >= PATSVC_ADDRESS_COUNT)
+    if (!region || address_index >= PATSVC_ADDRESS_COUNT ||
+        !reservation_density_active)
         return 0u;
-    track = (uint8_t)(address_index / NUM_STEPS);
-    step = (uint8_t)(address_index % NUM_STEPS);
-    addr = region->address[track][step];
+    addr = *patSvc_addressEntry(region, address_index);
     if ((addr & PAT_ADDR_SPECIALS_BIT) == 0u)
         return 0u;
     offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
     logical_chunks = patSvc_blockChunksAt(region, offset, address_index);
     if (logical_chunks == 0u)
         return 0u;
-    target_gap = patSvc_gapTarget();
-    trailing = patSvc_trailingGap(region, offset, logical_chunks);
-    if (trailing >= target_gap)
+    trailing_chunk = (uint16_t)((offset >> 2u) + logical_chunks);
+    if (trailing_chunk >= PATSVC_POOL_CHUNKS)
         return 0u;
-    if (patSvc_relocateIndex(scene, address_index, target_gap, 0u,
-                             old_offset_out, new_offset_out))
+
+    /* The common case: reserve one free, unreserved trailing chunk in place. */
+    if (!patSvc_bitmapGet(region, trailing_chunk) &&
+        !patSvc_reservationGet(trailing_chunk)) {
+        patSvc_reservationSet(trailing_chunk);
         return 1u;
-    if (target_gap > 1u &&
-        patSvc_relocateIndex(scene, address_index, 1u, 0u,
-                             old_offset_out, new_offset_out)) {
-        if (fallback_used)
-            *fallback_used = 1u;
-        return 1u;
+    }
+
+    /* An existing positional reservation already satisfies this block. */
+    if (!patSvc_bitmapGet(region, trailing_chunk) &&
+        patSvc_reservationGet(trailing_chunk))
+        return 0u;
+
+    /* The trailing chunk is occupied; find block plus one free reservation. */
+    {
+        uint16_t old_chunk = (uint16_t)(offset >> 2u);
+        uint16_t required = (uint16_t)(logical_chunks + 1u);
+        uint16_t new_offset;
+        uint16_t new_trailing;
+        uint16_t i;
+
+        if (required > PATSVC_POOL_CHUNKS)
+            return 0u;
+        for (new_offset = 0u;
+             (uint32_t)(new_offset >> 2u) + required <= PATSVC_POOL_CHUNKS;
+             new_offset = (uint16_t)(new_offset + 4u)) {
+            uint16_t base = (uint16_t)(new_offset >> 2u);
+            uint8_t fits = 1u;
+
+            if (new_offset == offset)
+                continue;
+            for (i = 0u; i < required; i++) {
+                if (patSvc_bitmapGet(region, (uint16_t)(base + i)) ||
+                    patSvc_reservationGet((uint16_t)(base + i))) {
+                    fits = 0u;
+                    break;
+                }
+            }
+            if (!fits)
+                continue;
+            for (i = 0u; i < logical_chunks; i++)
+                patSvc_bitmapSet(region, (uint16_t)(base + i));
+            memmove(&region->pool[new_offset], &region->pool[offset],
+                    (size_t)logical_chunks * 4u);
+            patSvc_publishOffset(patSvc_addressEntry(region, address_index),
+                                 new_offset);
+            for (i = 0u; i < logical_chunks; i++)
+                patSvc_bitmapClear(region, (uint16_t)(old_chunk + i));
+            memset(&region->pool[offset], 0, (size_t)logical_chunks * 4u);
+            if ((uint32_t)old_chunk + logical_chunks < PATSVC_POOL_CHUNKS)
+                patSvc_reservationClear(
+                    (uint16_t)(old_chunk + logical_chunks));
+            autosave_markNonSemanticPatternDirty(scene);
+            new_trailing = (uint16_t)(base + logical_chunks);
+            patSvc_reservationSet(new_trailing);
+            if (old_offset_out)
+                *old_offset_out = offset;
+            if (new_offset_out)
+                *new_offset_out = new_offset;
+            return 1u;
+        }
     }
     return 0u;
 }
@@ -530,9 +808,11 @@ static uint8_t patSvc_tier1Step(uint8_t scene, uint16_t address_index,
 /*
  * Find one lower destination for a blocked queue head.
  *
- * What: inspect at most sixteen address entries from the retained reactive
- * cursor and move one block to a lower free run. Why: a queued allocation can
- * be retried without allowing compaction to starve FIFO progress. Inputs:
+ * What: inspect a bounded set of address entries from the retained reactive
+ * cursor and move one block to a lower free run. The first search respects
+ * reservations; when density is inactive, a second search may reclaim the
+ * soft reservations in its destination. Why: a blocked allocation can be
+ * retried without allowing compaction to starve FIFO progress. Inputs:
  * required destination size and reactive cursor. Output: one improving move
  * or cursor exhaustion. Affiliate: patSvc_drainQueue().
  */
@@ -547,8 +827,6 @@ static uint8_t patSvc_reactiveStep(uint8_t scene, uint16_t required)
            reactive_scan_cursor < PATSVC_ADDRESS_COUNT) {
         uint16_t address_index = reactive_scan_cursor++;
         pat_scene_region_t *region = patSvc_region(scene);
-        uint8_t track = (uint8_t)(address_index / NUM_STEPS);
-        uint8_t step = (uint8_t)(address_index % NUM_STEPS);
         uint16_t addr;
         uint16_t offset;
         uint8_t chunks;
@@ -558,7 +836,7 @@ static uint8_t patSvc_reactiveStep(uint8_t scene, uint16_t required)
         inspected++;
         if (!region)
             continue;
-        addr = region->address[track][step];
+        addr = *patSvc_addressEntry(region, address_index);
         if ((addr & PAT_ADDR_SPECIALS_BIT) == 0u)
             continue;
         offset = (uint16_t)(addr & PAT_ADDR_OFFSET_MASK);
@@ -576,6 +854,39 @@ static uint8_t patSvc_reactiveStep(uint8_t scene, uint16_t required)
             reactive_active = 0u;
             reactive_scan_cursor = 0u;
             return 1u;
+        }
+        if (!reservation_density_active) {
+            uint16_t reclaim_offset = patSvc_findFreeRunReclaiming(
+                region, chunks, (uint16_t)(offset >> 2u), 1u);
+
+            if (reclaim_offset != PAT_ADDR_SENTINEL &&
+                reclaim_offset != offset) {
+                uint16_t base = (uint16_t)(reclaim_offset >> 2u);
+                uint16_t j;
+
+                for (j = 0u; j < chunks; j++)
+                    patSvc_bitmapSet(region, (uint16_t)(base + j));
+                memmove(&region->pool[reclaim_offset],
+                        &region->pool[offset], (size_t)chunks * 4u);
+                patSvc_publishOffset(
+                    patSvc_addressEntry(region, address_index), reclaim_offset);
+                for (j = 0u; j < chunks; j++)
+                    patSvc_bitmapClear(region,
+                                       (uint16_t)((offset >> 2u) + j));
+                memset(&region->pool[offset], 0, (size_t)chunks * 4u);
+                if ((uint32_t)(offset >> 2u) + chunks < PATSVC_POOL_CHUNKS)
+                    patSvc_reservationClear(
+                        (uint16_t)((offset >> 2u) + chunks));
+                autosave_markNonSemanticPatternDirty(scene);
+                patternTrace_record(PAT_TRACE_STAGE_TIER2_RELOC,
+                                    (uint8_t)(scene & 0x0Fu),
+                                    patSvc_relocationValue(
+                                        address_index, offset,
+                                        reclaim_offset));
+                reactive_active = 0u;
+                reactive_scan_cursor = 0u;
+                return 1u;
+            }
         }
     }
     return 0u;
@@ -683,7 +994,14 @@ static void patSvc_beginBulk(uint32_t event)
     bulk_track_cursor = 0u;
 }
 
-/* Drain up to eight steps from the active FIFO barrier. */
+/*
+ * Drain up to eight steps from the active FIFO barrier.
+ *
+ * What: apply one bounded barrier slice and, on completion, recount occupancy
+ * and wake a sleeping reservation-repair epoch. Why: clear operations mutate
+ * the pool just like ordinary queue events and must be followed by repair.
+ * Affiliate: patSvc_tick().
+ */
 static void patSvc_drainBulk(void)
 {
     uint8_t processed = 0u;
@@ -706,6 +1024,8 @@ static void patSvc_drainBulk(void)
         bulk_op = PATSVC_OP_NONE;
         patSvc_consumeHead();
         logical_chunks_used = patSvc_countUsed(patSvc_region(service_scene));
+        if (tier1_scan_cursor >= PATSVC_ADDRESS_COUNT)
+            tier1_scan_cursor = 0u;
     }
 }
 
@@ -713,8 +1033,9 @@ static void patSvc_drainBulk(void)
  * Drain the current queue head or start its barrier.
  *
  * Output: 1 when the head was consumed or a barrier was started, 0 when the
- * event remains blocked for reactive compaction. Capacity/fragmentation
- * classification is intentionally here so FIFO admission remains unchanged.
+ * event remains blocked for reactive recovery. Capacity/fragmentation
+ * classification is intentionally here so FIFO admission remains unchanged;
+ * completed mutations also wake a sleeping repair epoch.
  */
 static uint8_t patSvc_drainQueue(void)
 {
@@ -740,6 +1061,8 @@ static uint8_t patSvc_drainQueue(void)
     if (patSvc_executeEvent(event)) {
         patSvc_consumeHead();
         logical_chunks_used = patSvc_countUsed(patSvc_region(service_scene));
+        if (tier1_scan_cursor >= PATSVC_ADDRESS_COUNT)
+            tier1_scan_cursor = 0u;
         return 1u;
     }
 
@@ -775,7 +1098,9 @@ static uint8_t patSvc_drainQueue(void)
  * Admit one foreground operation, choosing synchronous execution while idle.
  *
  * What: enforce the single mutation target and route busy work to the FIFO.
- * Inputs: validated Scene/track/step and packed event. Output: direct result,
+ * A failed direct execution is classified exactly like a queued failure so a
+ * fragmentation-only failure can be retained for reactive recovery. Inputs:
+ * validated Scene/track/step and packed event. Output: direct result,
  * optimistic queue acceptance, or rejection. Affiliate: public patSvc_* API.
  */
 static uint8_t patSvc_submit(uint8_t scene, uint32_t event,
@@ -785,12 +1110,52 @@ static uint8_t patSvc_submit(uint8_t scene, uint32_t event,
         patSvc_rejectScene(scene, event);
         return 0u;
     }
-    if (direct_allowed && patSvc_queueCount() == 0u && bulk_op == PATSVC_OP_NONE &&
+    if (direct_allowed && patSvc_queueCount() == 0u &&
+        bulk_op == PATSVC_OP_NONE &&
         seq_activePattern == service_scene) {
         uint8_t result = patSvc_executeEvent(event);
 
         logical_chunks_used = patSvc_countUsed(patSvc_region(service_scene));
-        return result;
+        if (tier1_scan_cursor >= PATSVC_ADDRESS_COUNT)
+            tier1_scan_cursor = 0u;
+        patSvc_updateDensityLevel();
+        if (result)
+            return 1u;
+
+        /* Match queued failure classification for the direct idle path. */
+        {
+            uint16_t step_id = patSvc_eventStepId(event);
+            uint8_t operation = patSvc_eventOperation(event);
+            uint8_t track = (uint8_t)(step_id / NUM_STEPS);
+            uint8_t step = (uint8_t)(step_id % NUM_STEPS);
+            uint8_t required = patSvc_requiredChunks(
+                service_scene, operation, track, step,
+                patSvc_eventPayload(event));
+            pat_scene_region_t *region = patSvc_region(service_scene);
+            uint16_t free_chunks = (uint16_t)(PATSVC_POOL_CHUNKS -
+                                              logical_chunks_used);
+            uint16_t largest = patSvc_largestFreeRun(region);
+
+            if (required == 0u || free_chunks < required) {
+                patternTrace_record(PAT_TRACE_STAGE_CAPACITY_DROP,
+                                    (uint8_t)(service_scene & 0x0Fu), event);
+                return 0u;
+            }
+            if (largest < required) {
+                patternTrace_record(PAT_TRACE_STAGE_DIRECT_RETAIN,
+                                    (uint8_t)(service_scene & 0x0Fu), event);
+                if (patSvc_enqueue(event)) {
+                    reactive_active = 1u;
+                    reactive_required = required;
+                    reactive_scan_cursor = 0u;
+                    return 1u;
+                }
+                return 0u;
+            }
+            patternTrace_record(PAT_TRACE_STAGE_FRAG_DROP,
+                                (uint8_t)(service_scene & 0x0Fu), event);
+        }
+        return 0u;
     }
     return patSvc_enqueue(event);
 }
@@ -812,8 +1177,9 @@ static uint8_t patSvc_validStepRequest(uint8_t scene, uint8_t track,
  * Initialize every service-owned byte/cursor after boot Pattern loading.
  *
  * Inputs: seq_activePattern and all resident Pattern regions. Outputs: an open
- * service with an empty FIFO, a reconciled logical occupancy count, and fresh
- * Tier 1/Tier 2 cursors. Affiliate: main.c's pre-audio boot sequence.
+ * service with an empty FIFO, a reconciled logical occupancy count, and a
+ * clean reservation image waiting for its first bounded repair epoch.
+ * Affiliate: main.c's pre-audio boot sequence.
  */
 void patSvc_init(void)
 {
@@ -830,12 +1196,14 @@ void patSvc_init(void)
     bulk_step_cursor = 0u;
     bulk_track_cursor = 0u;
     tier1_scan_cursor = 0u;
-    tier2_scan_cursor = 0u;
     reactive_scan_cursor = 0u;
     reactive_required = 0u;
     reactive_active = 0u;
     logical_chunks_used = patSvc_countUsed(patSvc_region(service_scene));
-    last_compact_tick = time_sysTick;
+    repair_budget_busy = 0u;
+    patSvc_clearReservationImage();
+    reservation_density_active = 1u;
+    patSvc_updateDensityLevel();
 }
 
 /*
@@ -866,11 +1234,12 @@ uint8_t patSvc_prepareSceneReplace(uint8_t scene)
 /*
  * Publish a filesystem-replaced Pattern image as the new service baseline.
  *
- * What: recount live chunks, reset relocation cursors, and reopen admission
- * after all direct resident writes have stopped. Why: the service must never
- * maintain a bitmap or address layout from before the replacement. Inputs: the
- * target Scene whose replacement was prepared; output: ready service state or
- * a normal active-Scene handover if playback changed during I/O. Affiliate:
+ * What: recount live chunks, reset repair/recovery cursors, clear the
+ * reservation image, and reopen admission after all direct resident writes
+ * have stopped. Why: the service must never maintain a bitmap, address layout,
+ * or positional reservation from before the replacement. Inputs: the target
+ * Scene whose replacement was prepared; output: ready service state or a
+ * normal active-Scene handover if playback changed during I/O. Affiliate:
  * filesystem.c Pattern load completion/error paths.
  */
 void patSvc_finishSceneReplace(uint8_t scene)
@@ -879,12 +1248,13 @@ void patSvc_finishSceneReplace(uint8_t scene)
         return;
     logical_chunks_used = patSvc_countUsed(patSvc_region(service_scene));
     tier1_scan_cursor = 0u;
-    tier2_scan_cursor = 0u;
     reactive_scan_cursor = 0u;
     reactive_required = 0u;
     reactive_active = 0u;
     service_replace_pending = 0u;
-    last_compact_tick = time_sysTick;
+    patSvc_clearReservationImage();
+    reservation_density_active = 1u;
+    patSvc_updateDensityLevel();
     if (seq_activePattern == service_scene) {
         service_handover = 0u;
         service_open = 1u;
@@ -983,7 +1353,12 @@ void patSvc_eraseStep(uint8_t scene, uint8_t track, uint8_t step)
     (void)patSvc_submit(scene, event, 1u);
 }
 
-/* Admit the track barrier, then clear triggers immediately on success. */
+/*
+ * Admit the track barrier, then clear triggers immediately on success.
+ *
+ * A synchronous clear recounts occupancy and wakes a sleeping repair epoch;
+ * the queued barrier performs the same wake at completion in patSvc_drainBulk.
+ */
 void patSvc_clearTrack(uint8_t scene, uint8_t track)
 {
     uint8_t step;
@@ -1005,6 +1380,8 @@ void patSvc_clearTrack(uint8_t scene, uint8_t track)
             pat_setStepActive(scene, track, step, 0u);
         pat_clearTrack(scene, track);
         logical_chunks_used = patSvc_countUsed(patSvc_region(service_scene));
+        if (tier1_scan_cursor >= PATSVC_ADDRESS_COUNT)
+            tier1_scan_cursor = 0u;
     } else if (patSvc_enqueue(event)) {
         /* Publish the barrier first; a full FIFO must leave triggers intact. */
         for (step = 0u; step < NUM_STEPS; step++)
@@ -1040,7 +1417,12 @@ void patSvc_clearPattern(uint8_t scene)
     }
 }
 
-/* Queue or synchronously scan all 128 steps for one target. */
+/*
+ * Queue or synchronously scan all 128 steps for one target.
+ *
+ * The synchronous pool mutation recounts occupancy and wakes a sleeping repair
+ * epoch; queued completion uses the common barrier wake path.
+ */
 uint8_t patSvc_removeTrackAutomationByTarget(uint8_t scene, uint8_t track,
                                              uint16_t target)
 {
@@ -1057,6 +1439,8 @@ uint8_t patSvc_removeTrackAutomationByTarget(uint8_t scene, uint8_t track,
         uint8_t removed = pat_removeTrackAutomationByTarget(scene, track,
                                                               target);
         logical_chunks_used = patSvc_countUsed(patSvc_region(service_scene));
+        if (tier1_scan_cursor >= PATSVC_ADDRESS_COUNT)
+            tier1_scan_cursor = 0u;
         return removed;
     }
     return patSvc_enqueue(
@@ -1088,9 +1472,11 @@ void patSvc_enqueueErase(uint8_t scene, uint8_t track, uint8_t step)
 /*
  * Advance one bounded service pass.
  *
- * Priority 0 closes/drains target handover; priority 1 drains one FIFO event
- * or eight barrier steps; priority 2 performs one Tier 1 relocation; priority
- * 3 performs paced Tier 2 scanning. Playback never waits for this function.
+ * Priority 0 closes/drains target handover; priority 1 handles reactive
+ * recovery for a blocked head; priority 2 advances a bulk barrier or drains
+ * one FIFO event; priority 3 runs the finite bounded repair epoch with
+ * adaptive budget. The repair cursor sleeps at PATSVC_ADDRESS_COUNT between
+ * epochs; only wake events reset it. Playback never waits for this function.
  */
 void patSvc_tick(void)
 {
@@ -1131,12 +1517,13 @@ void patSvc_tick(void)
         service_scene = seq_activePattern;
         logical_chunks_used = patSvc_countUsed(patSvc_region(service_scene));
         tier1_scan_cursor = 0u;
-        tier2_scan_cursor = 0u;
         reactive_scan_cursor = 0u;
         reactive_required = 0u;
+        patSvc_clearReservationImage();
+        reservation_density_active = 1u;
+        patSvc_updateDensityLevel();
         service_handover = 0u;
         service_open = 1u;
-        last_compact_tick = time_sysTick;
         return;
     }
 
@@ -1164,72 +1551,43 @@ void patSvc_tick(void)
         return;
     }
 
+    /* Sample pressure and occupancy once per tick before repair work. */
+    patSvc_sampleRepairBudget();
     logical_chunks_used = patSvc_countUsed(patSvc_region(service_scene));
-    if (tier1_scan_cursor < PATSVC_ADDRESS_COUNT) {
-        uint8_t fallback_used = 0u;
-        uint16_t address_index = tier1_scan_cursor++;
+    patSvc_updateDensityLevel();
 
-        uint16_t old_offset = 0u;
-        uint16_t new_offset = 0u;
-
-        if (patSvc_tier1Step(service_scene, address_index, &fallback_used,
-                             &old_offset, &new_offset)) {
-            patternTrace_record(fallback_used ?
-                                PAT_TRACE_STAGE_GAP_FALLBACK :
-                                PAT_TRACE_STAGE_TIER1_GAP,
-                                (uint8_t)(service_scene & 0x0Fu),
-                                patSvc_relocationValue(address_index,
-                                                       old_offset,
-                                                       new_offset));
-        }
-        return;
+    /* Lifecycle rebuilds wake the same finite epoch as ordinary mutations. */
+    if (reservation_rebuild_pending) {
+        tier1_scan_cursor = 0u;
+        reservation_rebuild_pending = 0u;
     }
 
-    if ((uint16_t)(time_sysTick - last_compact_tick) >=
-        PAT_COMPACT_INTERVAL_MS) {
-        uint8_t moved = 0u;
+    /* Inspect a bounded number of address entries, then sleep when done. */
+    if (tier1_scan_cursor < PATSVC_ADDRESS_COUNT) {
+        uint8_t budget = patSvc_repairBudget();
         uint8_t inspected = 0u;
 
-        while (inspected < PAT_COMPACT_SCAN_PER_TICK &&
-               tier2_scan_cursor < PATSVC_ADDRESS_COUNT) {
-            uint16_t address_index = tier2_scan_cursor++;
-            pat_scene_region_t *region = patSvc_region(service_scene);
-            uint8_t track = (uint8_t)(address_index / NUM_STEPS);
-            uint8_t step = (uint8_t)(address_index % NUM_STEPS);
-            uint16_t old_offset;
-            uint16_t new_offset;
-            uint8_t chunks;
-            uint16_t addr;
+        while (inspected < budget &&
+               tier1_scan_cursor < PATSVC_ADDRESS_COUNT) {
+            uint16_t address_index = tier1_scan_cursor++;
+            uint16_t old_offset = 0u;
+            uint16_t new_offset = 0u;
 
             inspected++;
-            if (!region)
-                continue;
-            addr = region->address[track][step];
-            if ((addr & PAT_ADDR_SPECIALS_BIT) == 0u)
-                continue;
-            chunks = patSvc_blockChunksAt(
-                region, (uint16_t)(addr & PAT_ADDR_OFFSET_MASK),
-                address_index);
-            if (chunks == 0u)
-                continue;
-            if (patSvc_relocateIndex(service_scene, address_index, 0u, 1u,
-                                     &old_offset, &new_offset)) {
-                patternTrace_record(PAT_TRACE_STAGE_TIER2_RELOC,
-                                    (uint8_t)(service_scene & 0x0Fu),
-                                    patSvc_relocationValue(address_index,
-                                                            old_offset,
-                                                            new_offset));
-                moved = 1u;
-                break;
+            if (patSvc_repairStep(service_scene, address_index,
+                                  &old_offset, &new_offset)) {
+                if (old_offset != 0u || new_offset != 0u) {
+                    patternTrace_record(
+                        PAT_TRACE_STAGE_REPAIR_RELOC,
+                        (uint8_t)(service_scene & 0x0Fu),
+                        patSvc_relocationValue(address_index,
+                                               old_offset, new_offset));
+                } else {
+                    patternTrace_record(PAT_TRACE_STAGE_REPAIR_RESERVE,
+                                        (uint8_t)(service_scene & 0x0Fu),
+                                        (uint32_t)address_index);
+                }
             }
         }
-        if (moved || tier2_scan_cursor >= PATSVC_ADDRESS_COUNT) {
-            tier2_scan_cursor = 0u;
-            last_compact_tick = time_sysTick;
-            tier1_scan_cursor = 0u;
-        }
-    } else {
-        /* Start a fresh Tier 1 sweep after the completed compaction window. */
-        tier1_scan_cursor = 0u;
     }
 }

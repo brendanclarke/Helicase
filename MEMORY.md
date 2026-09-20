@@ -30,23 +30,21 @@ chase-light after boot; the sequencer now reads each track's own
 `data=412`, `bss=291,196`. All three verified on hardware — see
 `knowledge_files/log_archive/068_SESSION_HANDOFF_LOG.md`.
 
-Session 069 has now implemented the first bounded-CPU convergence slice:
-physical Pattern relocation is tracked separately from semantic Pattern
-AutoSave dirtiness, and a lowest-priority debounced PAT4 drain persists that
-layout-only work. Source/build verification passed with `text=448,580`,
-`data=412`, `bss=291,196`; hardware verification is pending. **Next feature
-step**: implement the remaining AutoSave/Pattern-service bounded-CPU
-convergence plan (replace the Pattern Stack Service's periodic Tier 1/Tier 2
-loop, which currently self-chases and self-dirties at idle, with owned
-trailing-slack repair plus reactive-only compaction; remove two O(n) clean-state
-scans; add a background CPU budget; retest AutoSave OFF-to-ON convergence) —
-full plan preserved in `068_SESSION_HANDOFF_LOG.md` §4 and in
-`S069_ATS_PAT_BOUNDED_CPU.md` if still present. Per-track step scale and
+Session 069 has now implemented the bounded-CPU convergence plan: physical
+Pattern relocation remains separate from semantic Pattern AutoSave dirtiness;
+the periodic Tier 1/Tier 2 self-chasing loop is replaced by owned trailing
+slack reservations, a finite adaptive repair epoch, reactive-only compaction,
+and direct-path fragmentation retention. The 512-byte non-persisted SRAM1
+reservation image plus three policy/lifecycle bytes is documented in
+`SRAM_MANIFEST.md`. Clean source/build/image verification passed with
+`text=449,404`, `data=408`, `bss=291,708`; hardware verification is pending.
+The implementation notes and verification table are in
+`S069_SLACK_REACTIVE_COMPACTION_IMPLEMENTATION.md`. Per-track step scale and
 shuffle sequencer consumption remain separately deferred (see
 `SCOPING_TARGETS.md` § Session 068 deferred items). Phase 4.5 copy operations
 (`pat_copyTrack`, `pat_copyPattern`, `pat_copyBar`) with independent
-pool-block duplication routed through the Pattern Stack Service remain queued
-behind those. Permanent authority:
+pool-block duplication routed through the Pattern Stack Service remain queued.
+Permanent authority:
 `knowledge_files/log_archive/068_SESSION_HANDOFF_LOG.md` and
 `067_SESSION_HANDOFF_LOG.md`, `PATTERN_DYNAMIC_STACK.md`,
 `MODULE_INTERCHANGE_SPEC.md`, `SRAM_MANIFEST.md`, and `DEV_MODES.md`.
@@ -108,8 +106,8 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   finds `pat_tryAppendAutomation()`'s existing Gate-6 growth fast path is the
   hook point for owned trailing slack. The CLAUDE documents note physical
   relocation is scoped to the single active `service_scene` today, so
-  non-active-first ordering is currently near-dormant. The slack/compaction
-  documents remain planning only and are not part of this implementation.
+  non-active-first ordering is currently near-dormant. The implementation
+  schedule is now landed; hardware fixtures remain pending.
   Per-track step scale and shuffle are still stored/edited/persisted only,
   with no sequencer playback effect — see `PATTERN_DYNAMIC_STACK.md` §6.4 and
   `SCOPING_TARGETS.md` § Session 068 deferred items.
@@ -128,7 +126,8 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   boundaries and live memory ownership are in `MODULE_INTERCHANGE_SPEC.md` and
   `SRAM_MANIFEST.md`; the latter records the Session 067 linked allocation
   and totals. Dynamic Pattern storage is in
-  `PATTERN_DYNAMIC_STACK.md`. AutoSave format/reader/writer authority is
+  `PATTERN_DYNAMIC_STACK.md` and its Session-069 reservation/repair update.
+  AutoSave format/reader/writer authority is
   `AUTOSAVE.md`; development-mode and logging authority is `DEV_MODES.md`. Read
   `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS. The complete
   reference set is indexed below, including the historical DSP audit, live

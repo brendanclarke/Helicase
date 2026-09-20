@@ -3,9 +3,68 @@
 ## Authority
 
 Implements `S069_SLACK_REACTIVE_COMPACTION_CLAUDE.md` (all ten follow-ups
-resolved). No code is changed by this document — it specifies every required
-source change by file, line, and add/remove/modify so that each step can be
-applied as a single testable commit.
+resolved). The schedule below specifies the source changes by file, line, and
+add/remove/modify; the implementation notes at the top record the landed
+changes, reconciliations, and verification.
+
+## Implementation notes — 2026-09-20
+
+Source implementation and build verification are complete against the clean
+Session-069 non-semantic baseline. Hardware verification remains pending. The
+source layout matches the schedule, with current line numbers shifted by the
+existing Session-069 comments and the implementation comments below.
+
+- The reservation image remains service-owned SRAM1 state: 512 bytes for the
+  bit image plus three one-byte policy flags.
+- The final repair epoch does not use `patSvc_trailingGap()` or
+  `patSvc_gapTarget()`; both old Tier-1 gap helpers will be removed so the
+  build has no dead static functions. The old gap threshold and free-run
+  threshold macros will likewise be removed as dead policy after the reactive
+  path is updated.
+- Because reservations are positional rather than tagged with an owner, the
+  ordinary PatternData block-free path and service relocation path will clear
+  the freed block's former trailing reservation. This preserves the invariant
+  across erase, replacement, shrink, and relocation mutations without adding
+  RAM.
+- Clean-build and image-generation results are recorded below; hardware
+  observations should be appended here when the fixture is run.
+
+## Implementation notes — source/build pass
+
+The source implementation now covers Steps 0–14, with two invariant-preserving
+details made explicit in code:
+
+- `pat_poolAlloc()` and service free-run classifiers refuse reserved chunks;
+  Gate-6 append consumes its adjacent reservation after setting occupancy.
+- The ordinary PatternData free path and both service relocation paths clear a
+  former positional trailing reservation, preventing stale claims after erase,
+  replacement, shrink, or move.
+- The old periodic Tier-2 cursor/timestamp and Tier-1 gap helpers are gone.
+  Direct idle-path allocation failures now use the same capacity/fragmentation
+  classification as queued failures and emit the new `D` retention witness.
+- `PATTERN_DYNAMIC_STACK.md` §12 and `SRAM_MANIFEST.md` now describe the
+  non-persisted image, density hysteresis, adaptive budget, lifecycle rebuild,
+  and trace stages. The source allocation is 515 bytes; the old four bytes of
+  periodic state are removed.
+
+Schedule reconciliation: Step 4C's reservation-aware `patSvc_trailingGap()`
+edit is superseded by removal of that helper along with the old Tier-1 gap
+algorithm; no final repair path calls it. `PAT_GAP_REDUCE_THRESHOLD` and
+`PAT_COMPACT_FREE_RUN_THRESHOLD` are also removed as dead policy, while
+`PAT_COMPACT_SCAN_PER_TICK` remains the reactive recovery bound. The revised
+Step 5E rule is used: Gate-6 accepts free trailing chunks positionally and
+consumes any reservation only after occupancy is set.
+
+The clean ARM build passes. Current link result:
+`text=449,404`, `data=408`, `bss=291,708`. `nm` shows a 512-byte
+`reservation_image` plus three one-byte policy/lifecycle flags; no references
+remain in source/config for `PAT_COMPACT_INTERVAL_MS`, `tier2_scan_cursor`,
+`last_compact_tick`, `patSvc_tier1Step`, or `patSvc_gapTarget`. The remaining
+compiler/linker warnings are pre-existing project warnings outside this
+change. `make img` generated `build/LXRV2_lxr02.img` at 449,828 bytes.
+Hardware verification of reservation traces, Gate-6 growth, density
+hysteresis, adaptive budgets, and AutoSave OFF-to-ON convergence remains
+pending.
 
 Build baseline: `text=448,580`, `data=412`, `bss=291,196` (Session 069
 non-semantic implementation).

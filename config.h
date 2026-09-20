@@ -257,17 +257,59 @@
 /*
  * Pattern stack service maintenance policy.
  *
- * What: gap reduction selects one trailing free chunk at or above sixty
- * percent logical occupancy; Tier 2 scans sixteen address entries per 500 Hz
- * pass and waits at least 100 ms between background passes. Why: foreground
- * edits and playback retain priority while fragmented free space is repaired
- * cooperatively. Inputs: compile-time service policy. Outputs: bounded
- * PatternStackService.c Tier 1/Tier 2 work. Affiliates: patSvc_tick().
+ * What: owned trailing-slack reservation with a latchable density level that
+ * scales with pool occupancy, plus reactive-only compaction triggered by a
+ * blocked allocation. Why: the former Tier 1/Tier 2 periodic relocation loop
+ * is replaced by a finite bounded repair epoch that sleeps when converged.
+ * Inputs: compile-time service policy. Outputs: bounded
+ * PatternStackService.c repair and reactive work. Affiliates: patSvc_tick(),
+ * patSvc_reactiveStep().
+ *
+ * PAT_COMPACT_SCAN_PER_TICK remains the reactive-recovery scan bound. The
+ * former elastic-gap and periodic-compaction thresholds are retired because
+ * repair now owns explicit trailing reservations and compaction is reactive.
+ * A future resize of PAT_STACK_SIZE beyond 256 changes PATSVC_POOL_CHUNKS and
+ * the backed/unbacked bitmap split. All new thresholds are expressed as
+ * percentages of PATSVC_POOL_CHUNKS, so they remain valid without
+ * re-architecture — only re-tuning. If this ever proves insufficient, add a
+ * comment here and a note to PATTERN_DYNAMIC_STACK.md §12.
  */
-#define PAT_GAP_REDUCE_THRESHOLD   60u
-#define PAT_COMPACT_INTERVAL_MS   100u
 #define PAT_COMPACT_SCAN_PER_TICK  16u
-#define PAT_COMPACT_FREE_RUN_THRESHOLD 8u
+
+/*
+ * Reservation-density policy thresholds (percent of PATSVC_POOL_CHUNKS).
+ *
+ * What: PAT_RESERVATION_REDUCE_THRESHOLD is the pool-occupancy percentage
+ * above which the repair pass stops creating new trailing-chunk reservations.
+ * PAT_RESERVATION_RESTORE_THRESHOLD is the percentage below which
+ * reservations are re-enabled after a reduction. The gap between the two
+ * provides hysteresis, preventing oscillation when occupancy hovers near a
+ * boundary. Why: at high occupancy the pool cannot afford to hold chunks out
+ * of general circulation; at low occupancy one reserved trailing chunk per
+ * block makes in-place growth nearly free. Inputs: compile-time percentage
+ * values. Outputs: PatternStackService.c density-latch transition decisions.
+ * Affiliates: patSvc_updateDensityLevel(), patSvc_tick() repair epoch. A
+ * future pool resize changes PATSVC_POOL_CHUNKS; these percentages remain
+ * valid because the service computes absolute chunk counts at runtime.
+ */
+#define PAT_RESERVATION_REDUCE_THRESHOLD   70u
+#define PAT_RESERVATION_RESTORE_THRESHOLD  50u
+
+/*
+ * Adaptive repair-tick budget bounds.
+ *
+ * What: PAT_REPAIR_SCAN_IDLE is the per-tick address-entry scan limit when no
+ * AutoSave work is pending. PAT_REPAIR_SCAN_BUSY is the reduced limit when
+ * AutoSave has pending semantic, non-semantic, or parameter dirty bits. Why:
+ * yielding foreground cycles to the filesystem facade under AutoSave pressure
+ * keeps file I/O responsive while still making bounded reservation progress.
+ * Inputs: compile-time address-entry limits. Outputs: bounded
+ * PatternStackService.c repair scans. Affiliates: patSvc_repairBudget(),
+ * autosave_maskHasDirty(), autosave_patternDirtyMask(), and
+ * autosave_nonSemanticPatternDirtyMask().
+ */
+#define PAT_REPAIR_SCAN_IDLE   16u
+#define PAT_REPAIR_SCAN_BUSY    4u
 
 
 #define EG_SPEED 	1;//0.04125f

@@ -25,11 +25,12 @@ void patSvc_init(void);
 /*
  * Advance one bounded 500 Hz service pass.
  *
- * What: handles target handover, deferred queue events, bulk barriers, Tier 1
- * gap maintenance, and paced Tier 2 compaction. Why: no pool scan, copy, or
- * relocation is allowed in TIM3 context. Inputs: live service state and
- * seq_activePattern. Output: at most one queue/relocation transaction per
- * foreground pass, with bounded bulk/scan work.
+ * What: handles target handover, deferred queue events, bulk barriers,
+ * reactive recovery, and a finite bounded repair epoch with owned
+ * trailing-slack reservations. Why: no pool scan, copy, or relocation is
+ * allowed in TIM3 context. Inputs: live service state and seq_activePattern.
+ * Output: at most one queue/relocation transaction per foreground pass, with
+ * bounded bulk/repair scan work.
  */
 void patSvc_tick(void);
 
@@ -102,5 +103,19 @@ uint8_t patSvc_removeTrackAutomationByTarget(uint8_t scene, uint8_t track,
  * admission or a traced drop when handover/overflow closes the path.
  */
 void patSvc_enqueueErase(uint8_t scene, uint8_t track, uint8_t step);
+
+/*
+ * Query and consume one chunk's service-owned trailing reservation.
+ *
+ * What: patSvc_isChunkReserved() reports whether a backed pool chunk is
+ * reserved as trailing slack; patSvc_consumeReservation() clears that bit.
+ * Why: PatternData.c's Gate-6 in-place automation append must consume its own
+ * reserved trailing chunk without reaching into service statics. Inputs: a
+ * chunk index bounded by the service pool geometry. Outputs: a reservation
+ * query or a cleared reservation bit. The caller sets the occupancy bitmap in
+ * the same transaction as consumption. Affiliate: pat_tryAppendAutomation().
+ */
+uint8_t patSvc_isChunkReserved(uint16_t chunk);
+void patSvc_consumeReservation(uint16_t chunk);
 
 #endif /* PATTERN_STACK_SERVICE_H_ */

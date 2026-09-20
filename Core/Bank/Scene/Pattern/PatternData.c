@@ -18,6 +18,14 @@
  */
 #include "menu.h"
 
+/*
+ * PatternData's allocator and Gate-6 append path consult the service-owned
+ * trailing-slack image without taking ownership of that image. Inputs/outputs:
+ * declaration visibility only; PatternStackService.c remains the reservation
+ * owner. Affiliate: pat_poolAlloc() and pat_tryAppendAutomation().
+ */
+#include "PatternStackService.h"
+
 #include <string.h>
 
 /*
@@ -214,11 +222,13 @@ static uint8_t pat_poolOffsetValid(uint16_t byte_offset)
  * Allocate a contiguous first-fit run of dynamic-pool chunks.
  *
  * What: scan the free bitmap from chunk zero and reserve `chunks` adjacent
- * four-byte units. Why: menu-paced special edits need a bounded synchronous
- * allocator; defragmentation and relocation are deferred. Inputs: Scene region
- * and a nonzero chunk count. Output: byte offset on success or
- * PAT_ADDR_SENTINEL when the pool has no suitable run. Affiliates:
- * pat_poolFree(), pat_writeSpecials(), and pat_blockChunks().
+ * four-byte units, treating service-owned trailing reservations as unavailable
+ * to new blocks. Why: menu-paced special edits need a bounded synchronous
+ * allocator; defragmentation and relocation are deferred, while reserved slack
+ * remains available to its in-place Gate-6 owner. Inputs: Scene region and a
+ * nonzero chunk count. Output: byte offset on success or PAT_ADDR_SENTINEL
+ * when the pool has no suitable unreserved run. Affiliates: pat_poolFree(),
+ * pat_writeSpecials(), and pat_blockChunks().
  */
 static uint16_t pat_poolAlloc(pat_scene_region_t *r, uint8_t chunks)
 {
@@ -234,7 +244,7 @@ static uint16_t pat_poolAlloc(pat_scene_region_t *r, uint8_t chunks)
     while ((uint32_t)start + chunks <= max_chunk) {
         run = 0u;
         for (i = start; i < (uint16_t)(start + chunks); i++) {
-            if (pat_bitmapGet(r, i)) {
+            if (pat_bitmapGet(r, i) || patSvc_isChunkReserved(i)) {
                 start = (uint16_t)(i + 1u);
                 run = 0u;
                 break;
@@ -253,13 +263,13 @@ static uint16_t pat_poolAlloc(pat_scene_region_t *r, uint8_t chunks)
 /*
  * Release a previously allocated dynamic-pool block.
  *
- * What: clear the block's bitmap run and zero its bytes. Why: erase, clear,
- * and specials reallocation must reclaim storage and prevent stale values from
- * appearing in a later allocation. Inputs: region, original aligned byte
- * offset, and original chunk count. Output: the allocation is free; malformed
- * offsets/runs are ignored. The caller updates its address entry separately.
- * Affiliates: pat_poolAlloc(), pat_eraseStep(), pat_clearTrack(), and
- * pat_writeSpecials().
+ * What: clear the block's bitmap run and zero its bytes, also releasing the
+ * former positional trailing reservation. Why: erase, clear, replacement, and
+ * reallocation must reclaim storage without leaving a stale soft claim in the
+ * service image. Inputs: region, original aligned byte offset, and original
+ * chunk count. Output: the allocation is free; malformed offsets/runs are
+ * ignored. The caller updates its address entry separately. Affiliates:
+ * pat_poolAlloc(), pat_eraseStep(), pat_clearTrack(), and pat_writeSpecials().
  */
 static void pat_poolFree(pat_scene_region_t *r, uint16_t byte_offset,
                          uint8_t chunks)
@@ -276,6 +286,8 @@ static void pat_poolFree(pat_scene_region_t *r, uint16_t byte_offset,
     for (i = base_chunk; i < (uint16_t)(base_chunk + chunks); i++)
         pat_bitmapClear(r, i);
     memset(&r->pool[byte_offset], 0, (size_t)chunks * 4u);
+    if ((uint32_t)base_chunk + chunks < max_chunk)
+        patSvc_consumeReservation((uint16_t)(base_chunk + chunks));
 }
 
 /*
@@ -462,12 +474,14 @@ static uint8_t pat_blockReadAutomations(const pat_scene_region_t *r,
  *
  * What: grow an unchanged-flags block in place only when the new operation is
  * exactly one appended automation and the extra logical chunks are adjacent
- * and free. The new entry is written before the header count is updated.
- * Why: this is the safe Gate-6 growth optimization; existing block bytes are
- * never cleared or rewritten while TIM3 can read them. Inputs: the old block,
- * the complete requested automation list, and its new chunk count. Output:
- * nonzero on an in-place append; zero leaves the block untouched so the normal
- * disjoint write-new/swap/free-old path can run. Affiliate: pat_writeDynamic().
+ * and free. A reserved trailing chunk is accepted here because positional
+ * ownership makes it this block's own slack; new allocations reject it. The
+ * new entry is written before the header count is updated. Why: this is the
+ * safe Gate-6 growth optimization; existing block bytes are never cleared or
+ * rewritten while TIM3 can read them. Inputs: the old block, the complete
+ * requested automation list, and its new chunk count. Output: nonzero on an
+ * in-place append; zero leaves the block untouched so the normal disjoint
+ * write-new/swap/free-old path can run. Affiliate: pat_writeDynamic().
  */
 static uint8_t pat_tryAppendAutomation(pat_scene_region_t *r,
                                        uint16_t old_offset,
@@ -513,6 +527,10 @@ static uint8_t pat_tryAppendAutomation(pat_scene_region_t *r,
     }
     for (i = old_chunks; i < new_chunks; i++)
         pat_bitmapSet(r, (uint16_t)((old_offset >> 2u) + i));
+    /* Occupancy publication consumes any owned reservations in the same
+     * transaction, so no chunk remains both reserved and occupied. */
+    for (i = old_chunks; i < new_chunks; i++)
+        patSvc_consumeReservation((uint16_t)((old_offset >> 2u) + i));
     {
         uint16_t packed = (uint16_t)(
             ((uint16_t)(autos[old_count].value & 0x7Fu) << 9u) |

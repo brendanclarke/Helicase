@@ -453,28 +453,27 @@ delivery (`buttonHandler.c`'s event ring, pairing masks, and hold timer),
 fixed with no Pattern Stack Service changes. The same session implemented
 per-track step-length playback consumption (§6.4) and fixed a
 `menu_playedPattern` UI-mirror desync that suppressed the sequencer chase
-LED after boot (Menu/Sequencer concern, not a Pattern-storage defect). It
-also wrote, but did not implement, a plan to stop Pattern Stack Service
-maintenance from manufacturing continuous semantic Pattern-AutoSave
-dirtiness (physical relocation currently calls the same dirty-marking path
-as a real edit) and to replace Tier 1/Tier 2's periodic chase with owned
-trailing-slack repair plus reactive-only compaction — see
-`../log_archive/068_SESSION_HANDOFF_LOG.md` §4 for the complete plan,
-carried forward as Session 069's starting point.
+LED after boot (Menu/Sequencer concern, not a Pattern-storage defect). Session
+069 then implemented the settled plan: physical relocation is non-semantic
+AutoSave work, and the Tier 1/Tier 2 periodic chase is replaced by owned
+trailing-slack repair plus reactive-only compaction. Source/build verification
+passed; hardware fixtures remain pending. See
+`../../S069_SLACK_REACTIVE_COMPACTION_IMPLEMENTATION.md` and
+`../log_archive/068_SESSION_HANDOFF_LOG.md` §4 for the plan and closeout.
 
 Deferred supplemental cases are deterministic mid-write power interruption,
 record/erase admission instrumentation, injected CRC fallback, and performance
 measurement. They do not reopen the functional closeout. Phase 4.5 copy
-operations and live-record capture are future features. Pattern Stack
-Service maintenance producing continuous, self-generated relocation/dirty
-work at idle (Session 068 §12 finding, not yet fixed) is now also open —
-see `../log_archive/068_SESSION_HANDOFF_LOG.md` §4.
+operations and live-record capture are future features. The Session 068
+self-generated relocation/dirty-work-at-idle finding is closed in source by
+the S069 repair/reactive design; hardware performance measurement remains
+pending.
 
 ## 12. Pattern Stack Service
 
 ### 12.1 Architecture
 
-`PatternStackService.c` (1,225 lines) and `PatternStackService.h` (106 lines)
+`PatternStackService.c` and `PatternStackService.h`
 implement a unified dispatcher that serializes all pool-mutating operations
 through a single service tick. This guarantees exactly one mutation target at
 a time, preventing concurrent access between foreground callers, the TIM3
@@ -491,12 +490,18 @@ Evaluated every call to `patSvc_tick()` (called from `timebase.c` after
 
 1. **Handover** — check and complete filesystem replacement boundary
    transitions.
-2. **Queue drain** — dequeue and execute one pending mutation.
-3. **Bulk barrier** — advance one step of a bounded track/pattern clear sweep.
-4. **Tier 1 trailing-gap maintenance** — scan freed region for adjacent free
-   chunks, merge up to 16 per tick.
-5. **Tier 2 paced compaction** — relocate live blocks toward pool start under
-   pacing constraints.
+2. **Reactive recovery** — when the queue head is blocked by fragmentation,
+   inspect a bounded set of address entries and relocate one live block toward
+   a lower destination; surplus reservations may be reclaimed only when the
+   density latch is inactive.
+3. **Queue/bulk work** — advance one bounded track/pattern clear barrier or
+   dequeue and execute one pending mutation.
+4. **Finite bounded repair** — scan up to `PAT_REPAIR_SCAN_IDLE` (or
+   `PAT_REPAIR_SCAN_BUSY` under AutoSave pressure) address entries per tick,
+   creating or verifying one trailing-chunk reservation per occupied block.
+   The cursor sleeps at `PATSVC_ADDRESS_COUNT` between epochs and wakes only
+   on mutation, reservation consumption, density restore, handover, or
+   filesystem replacement.
 
 ### 12.3 Queue format
 
@@ -528,44 +533,41 @@ tick:
 `filesystem.c`. When a Scene Load, Bank Load, or Pattern Load completes, the
 service completes or abandons any in-flight bulk barrier, drains remaining
 queue entries for the old Scene, switches `service_scene` to the new target,
-and clears internal gap/compaction cursors.
+and clears internal repair/recovery cursors.
+The handover-complete boundary also clears the non-persisted reservation image
+and lazily rebuilds it through the next repair epoch.
 
-### 12.6 Tier 1 trailing-gap maintenance
+### 12.6 Owned trailing-slack reservation
 
-After each freed block, linear scan from the freed offset to find and merge
-adjacent free chunks. Budget: up to 16 chunk examinations per tick. Maintains
-contiguous trailing free space at pool tail for efficient allocation.
+The reservation image is a 512-byte bit-packed array with the same geometry as
+the occupancy bitmap. A set reservation bit means the chunk is reserved as
+trailing slack for the immediately-preceding occupied block and is refused to
+ordinary allocation. The repair pass creates reservations; the Gate-6 growth
+path (`pat_tryAppendAutomation`) consumes them; reactive recovery reclaims
+surplus ones under allocation pressure. The image is not persisted or included
+in PAT4 payloads.
 
-### 12.7 Tier 2 paced compaction
+The density latch disables new reservations at or above
+`PAT_RESERVATION_REDUCE_THRESHOLD` (70% occupancy) and re-enables them below
+`PAT_RESERVATION_RESTORE_THRESHOLD` (50%). Hysteresis prevents oscillation.
+An adaptive per-tick budget (`PAT_REPAIR_SCAN_IDLE` versus
+`PAT_REPAIR_SCAN_BUSY`) yields foreground cycles to AutoSave I/O when dirty
+work is pending.
 
-Full pool defragmentation that relocates live blocks toward pool start.
-Pacing: `PAT_COMPACT_INTERVAL_MS` (100 ms) minimum between cycles,
-`PAT_COMPACT_SCAN_PER_TICK` (16 chunks) maximum per tick. Reactive
-compaction triggered immediately when head allocation fails and pool occupancy
-is below `PAT_GAP_REDUCE_THRESHOLD`. Each block relocation follows
-write-new/update-address/free-old with PRIMASK around the address-entry swap.
+The reservation image is cleared and lazily rebuilt at init, handover
+completion, and filesystem replacement. During the rebuild window, allocation
+falls back to the occupancy bitmap alone. Ordinary block frees and service
+relocations clear the former positional trailing claim so the image cannot
+retain stale reservations after a block changes owner.
 
-**Known open issue (Session 068, not yet fixed).** Proactive Tier 2 packs
-blocks downward with no trailing gap, which removes the gap Tier 1 (§12.6)
-just created for a block it processed earlier, resetting the Tier 1 cursor
-and guaranteeing another sweep — the two tiers chase each other indefinitely
-even with zero user edits. Compounding this, every successful relocation
-(Tier 1 or Tier 2) currently calls `pat_markPoolMutationDirty()`, so a purely
-physical layout move (identical bytes, new pool offset) is indistinguishable
-from a real semantic edit to Pattern AutoSave — self-generating continuous
-AutoSave write work at idle. A hardware capture recorded 4,587 Tier 1 + 958
-Tier 2 relocations with zero user edits in the observed window. The settled
-fix plan (separate physical relocation from semantic dirtiness; replace the
-periodic Tier 1/Tier 2 loop with owned trailing-slack repair plus
-reactive-only compaction) is written but not implemented — see
-`../log_archive/068_SESSION_HANDOFF_LOG.md` §4 and
-`S069_ATS_PAT_BOUNDED_CPU.md` (if still present) for the complete plan.
+Physical relocations are non-semantic AutoSave work. Reactive recovery runs
+only after a blocked allocation; there is no periodic Tier-2 sweep.
 
 ### 12.8 Elastic gap policy
 
-`PAT_GAP_REDUCE_THRESHOLD` (60%, `config.h`) is the pool occupancy above
-which trailing-gap maintenance activates. Below this threshold, gaps are
-tolerable and the service skips gap scanning.
+The former elastic-gap policy is retired. Reservation-density hysteresis now
+controls owned trailing slack, and `PAT_COMPACT_SCAN_PER_TICK` (16 address
+entries) is retained only as the reactive-recovery scan bound.
 
 ### 12.9 Pool usage monitor
 
@@ -592,9 +594,11 @@ or loop.
 ### 12.11 Config constants
 
 ```c
-#define PAT_GAP_REDUCE_THRESHOLD   60u   /* % occupancy for gap maintenance */
-#define PAT_COMPACT_INTERVAL_MS   100u   /* min ms between compaction cycles */
-#define PAT_COMPACT_SCAN_PER_TICK  16u   /* max chunks examined per tick */
+#define PAT_COMPACT_SCAN_PER_TICK          16u /* reactive entries/tick */
+#define PAT_RESERVATION_REDUCE_THRESHOLD   70u /* % occupancy: disable */
+#define PAT_RESERVATION_RESTORE_THRESHOLD  50u /* % occupancy: re-enable */
+#define PAT_REPAIR_SCAN_IDLE               16u /* entries/tick */
+#define PAT_REPAIR_SCAN_BUSY                4u /* entries/tick under AutoSave */
 ```
 
 ### 12.12 Public API
@@ -613,6 +617,8 @@ void     patSvc_clearTrack(scene, track);
 void     patSvc_clearPattern(scene);
 void     patSvc_removeTrackAutomationByTarget(scene, track, target9);
 void     patSvc_enqueueErase(scene, track, step);
+uint8_t  patSvc_isChunkReserved(chunk);
+void     patSvc_consumeReservation(chunk);
 ```
 
 ### 12.13 Integration points
@@ -636,17 +642,21 @@ void     patSvc_enqueueErase(scene, track, step);
 
 ### 12.15 PatternTrace stage codes
 
-Seven stage codes in `PatternTrace.h` for service diagnostics:
+Eleven stage codes in `PatternTrace.h` for service diagnostics:
 
 | Code | Meaning |
 |------|---------|
+| `H` | Pending-buffer overflow witness |
 | `Q` | Queue event (enqueue/dequeue/drop) |
-| `C` | Compaction (Tier 2 block relocation) |
-| `F` | Free/gap (block freed, gap state change) |
-| `R` | Relocation (live block moved) |
-| `M` | Mutation (pool-mutating operation applied) |
-| `G` | Gap scan (Tier 1 gap examination result) |
+| `C` | Capacity drop |
+| `F` | Fragmentation drop |
+| `R` | Reactive relocation (historical enum name: `TIER2_RELOC`) |
+| `M` | Retired Tier-1 gap relocation |
+| `G` | Retired gap fallback |
 | `X` | Service state change (handover, mode transition) |
+| `V` | Repair created an in-place trailing reservation |
+| `L` | Repair relocated a block to create a reservation |
+| `D` | Direct-path mutation retained for reactive recovery |
 
 These are PatternTrace codes in `PatternTrace.h`, distinct from the
 AutoSaveTrace codes in `AutosaveTrace.h` that use the same single-letter
