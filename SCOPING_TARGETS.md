@@ -4,7 +4,7 @@
 
 ## How this document is organized
 
-The work is grouped into six phases, ordered around the trajectory the code is
+The work is grouped into seven phases, ordered around the trajectory the code is
 actually following after Session 039. Phase 1 is complete foundation cleanup.
 Phase 2 landed the first real filesystem/Scene bridge: root Kit directory
 loading into descriptor-backed instrument images. Phase 3 now finishes the
@@ -23,13 +23,14 @@ workspace, compact bitmap Pattern bridge, bounded identity/cache ownership,
 cold-boot tagged-runtime activation, and harmonized root Scene/Bank Load
 completion. Sessions 045-061 completed the accepted AutoSave A/B scalar
 reader/writer, typed HCNAMES provenance, committed Load/Save publication, and
-boot restore. Pattern and Effect data are not yet in HCPR. The remaining Phase
-3 emphasis is descriptor-aware automation and Effect placeholders; Pattern
-storage is the next feature, while the consolidated Load/Save refactor follows
-under `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
-Phase 4 is the dynamic stack Pattern implementation that used to be scoped as
-Phase 3. Phase 5 is user-facing performance workflow, MIDI cleanup, copy/clear
-helpers, and menu controls. Phase 6 is DSP expansion.
+boot restore. Phase 4 subsequently added dynamic Pattern storage and separate
+Pattern AutoSave; the Scene Effect file remains a placeholder. The post-Phase-4
+bugfix/refactor work is tracked in
+`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`. Phase 5 now establishes Effect
+files, the audio bus and shared buffer, its fixed sequencer, and the related
+Scene/Bank fixes. Phase 6 is user-facing performance workflow and MIDI/UI
+cleanup. Phase 7 adds the planned voices, oscillators, and more complex Effect
+processing.
 
 Within each phase, features are grouped by **where they live in the codebase**, per your original request, so a given implementation pass touches a small, coherent set of files.
 
@@ -37,8 +38,9 @@ Within each phase, features are grouped by **where they live in the codebase**, 
 2. **Phase 2 — Directory Kit Loading & Descriptor Scene Bridge** (`Core/Hardware/SD/`, `Core/Bank/Scene/`, `Core/DSP/Instruments/`)
 3. **Phase 3 — Finish Filesystem, Instrument Runtime, Morph & Menus** (`Core/Bank/Scene/`, `Core/Hardware/SD/`, `Core/Menu/`, `Core/Bank/Scene/Preset/`)
 4. **Phase 4 — Dynamic Stack Pattern Implementation** (`Core/Bank/Scene/Pattern/`, dynamic event pool)
-5. **Phase 5 — MIDI, UI & Performance Workflow Cleanup** (`Core/Menu/`, `Core/MIDI/`, `Core/Hardware/frontPanel/`)
-6. **Phase 6 — DSP Expansion** (`Core/DSPAudio/` — new voices, oscillators, FX bus)
+5. **Phase 5 — Effects Foundation & Scene Fixes** (`Core/DSP/Effects/`, `Core/DSPAudio/`, `Core/Bank/`, `Core/Hardware/SD/`, `Core/Menu/`, `Core/Sequencer/`)
+6. **Phase 6 — MIDI, UI & Performance Workflow Cleanup** (`Core/Menu/`, `Core/MIDI/`, `Core/Hardware/frontPanel/`)
+7. **Phase 7 — DSP Expansion** (`Core/DSP/`, `Core/DSPAudio/` — new voices, oscillators, and advanced Effects)
 
 Every phase ends with **Open Engineering Questions** (things that need a decision or a measurement before/during implementation) and **Suggested Complementary Features** (ideas adjacent to what you asked for, flagged clearly as suggestions, not commitments).
 
@@ -722,8 +724,8 @@ Implement load/save operations for the settled file types in
   `Kit <kit name>/`, `pattern.pat`, and `effects.fx` through the Session
   036-039 asyncfatfs foundation. Root `Scene/` load/save is library/pool
   exchange only and is not part of the autosave workspace.
-- Add an FX slot shim so Scene folders can validate/store `effects.fx` before
-  Phase 6 implements full effects.
+- The FX slot shim validates and stores the `effects.fx` placeholder. Phase 5
+  replaces that placeholder with a Scene-owned, multi-type Effect.
 - Bank load/save is implemented for the 16-Scene workspace with SEQ-button
   Scene masks, selected/present child intersection, preservation of unselected
   resident payload/identity, one-child-at-a-time rescan, and shared Scene
@@ -733,8 +735,8 @@ Implement load/save operations for the settled file types in
   format. Session 043's Scene/Bank `pattern.pat` v3 stores exactly the 112-byte
   128x7 on/off bitmap as seven 32-hex-character rows; v1 is accepted empty and
   v2 imports only its final bit field.
-- Effect load/save may initially validate placeholders; real FX parameters land
-  in Phase 6.
+- Effect load/save initially validates placeholders; Phase 5 adds real Effect
+  files, parameters, and a standalone `/Effect/` library operation.
 - `settings.cfg` replaces `glo.cfg` for system settings and active-bank number
   selection. A `.settings.cfg` backer remains target design only; no accepted
   autosave/backer implementation currently updates it.
@@ -943,8 +945,8 @@ Implementation sequencing:
   legacy byte CC/CC2 targets to canonical descriptor/Scene targets, correct
   raw float LFO adapter writes, and make modulation-node enumeration dynamic
   before treating automation as feature-complete.
-- **Effect placeholders:** decide how strict `effects.fx` validation should be
-  before Phase 6 has real FX stacks.
+- **Effect placeholders:** Phase 5 must define how the existing validated
+  placeholder imports into the real Scene-owned Effect format.
 
 ### Suggested Complementary Features
 
@@ -1055,7 +1057,14 @@ Per your framing of what this document is actually for — catching features tha
 
 ### 4.4 Parameter ID space (shared with the FX sequencer)
 
-The 9-bit target parameter ID in each automation entry addresses up to 512 distinct parameters. Your budget: roughly 32 FX parameters plus up to 80 parameters per voice × 6 voices = 480, for a 512 total. Current drum voices sit around 32 parameters, so this leaves real headroom for the new voice types in Phase 6 (which will have more parameters than the current drum/snare/cymbal/hihat set) without running out of address space. This same 9-bit ID space is reused by the FX sequencer's automation encoding (Phase 6), so it's worth fixing this parameter-ID scheme once, here, rather than each subsystem inventing its own.
+The implemented Pattern automation target ID is nine bits, allowing 512 IDs.
+Six voice slots currently reserve 64 descriptor IDs each (384 total), and the
+eight current Scene targets follow them. Phase 5 must assign stable Effect
+parameter targets within the remaining space and define value conversion
+before Pattern steps start saving Effect automation. The dedicated FX sequence
+is separate from the Pattern stack; its 24 values and a type's up to 64
+parameters need their own mapping decision in Phase 5. The older estimate of
+80 parameters per voice is not the implemented encoding.
 
 ### 4.5 Copy operations
 
@@ -1090,7 +1099,7 @@ A borrowed idea worth folding in here since it's sequencer-scale-adjacent: a pat
 
 ### 4.11 Final LED state consolidation pass
 
-As the last Phase 4 subphase before the Phase 5 UI cleanup, consolidate the front-panel LED
+As the last Phase 4 subphase before the Phase 6 UI cleanup, consolidate the front-panel LED
 state rules without changing the public LED API. The current UI work has several
 temporary layers that can overlap: base lit/unlit state, persistent blink,
 group flash, one-shot pulse, and sequencer chase/highlight. The intended
@@ -1110,7 +1119,7 @@ folding it into an existing temporary layer.
 
 ### Open Engineering Questions
 
-- **Manual roll triggering:** you flagged needing "a smart way of triggering manual rolls" now that rolls are decoupled from pattern length — this needs a concrete UI proposal (which button/hold-gesture initiates a manual roll, and at what rate) before Phase 5's UI work can wire it up.
+- **Manual roll triggering:** you flagged needing "a smart way of triggering manual rolls" now that rolls are decoupled from pattern length — this needs a concrete UI proposal (which button/hold-gesture initiates a manual roll, and at what rate) before Phase 6's UI work can wire it up.
 - **Dot/triplet subdivisions for per-track scale:** flagged as "maybe" in the source doc — worth a decision before 4.7 is implemented, since it affects the scale-value encoding (a plain `/2..×16` power-of-two range doesn't accommodate dotted/triplet values without extra encoding bits).
 - **`automation hold` vs. the 4.3a default hold-and-reset behavior:** as flagged in 4.3a, it's not yet clear what the dedicated `hold` flag adds on top of the now-default "holds until next active step" behavior for ordinary automation. Left open deliberately (per your note that this can wait for the implementation session), but worth resolving before both are built as potentially-overlapping mechanisms.
 
@@ -1119,18 +1128,196 @@ folding it into an existing temporary layer.
 - **Pool usage meter.** A percentage-used indicator in the global settings, next to the CPU meter, for the active scene's event pool — you specifically asked for this ("0-99% like there is for cpu use") and it's cheap to compute (pool bytes used ÷ pool size) and genuinely useful for knowing when you're approaching the automation ceiling on a dense pattern.
 - **Per-scene pool high-water mark, not just live usage** — showing "peak used this session" alongside live usage would help catch a scene that briefly spiked into heavy automation and then got scaled back, which a live-only meter would hide.
 
-## Phase 5 — MIDI, UI & Performance Workflow Cleanup
+## Phase 5 — Effects Foundation & Scene Fixes
+
+**Location:** `Core/DSP/Effects/`, `Core/DSPAudio/`, `Core/Bank/`,
+`Core/Hardware/SD/`, `Core/Menu/`, `Core/Sequencer/`
+
+Settle Effect ownership, files, AutoSave, routing, parameter editing, and
+automation before adding the more complex DSP types in Phase 7. This phase
+includes a basic template Effect that actually uses the audio buffer. The
+general menu, MIDI, looper, and performance redesign follows in Phase 6;
+Phase 5 supplies the particular controls needed to operate Effects.
+
+### 5.1 Scene-owned Effect and file format
+
+The Effect slot and its type belong **solely to the Scene**. It can hold
+different Effect types, as an Instrument slot can hold different Instrument
+types. A Kit neither stores an Effect type nor changes the current Effect
+when loaded. Each Scene already contains an `effects.fx` placeholder, and
+`/Effect/` is the standalone library directory. Replace the placeholder
+with a versioned file containing the Effect type, that type's parameter set
+and normal/Morph values, and its own fixed 16-step sequence and settings.
+The Effect sequence is independent of the Pattern stack.
+
+Define each type under `Core/DSP/Effects/<type>/`, with
+`<type>Parameters.c/.h` and `<type>Effect.c/.h` files. Reusable processing
+components belong in `Core/DSPAudio/`, as they do for Instruments. Establish
+the flexible slot and type selection with a basic template Effect that uses
+the shared DTCM buffer. The first complex processing stack remains in Phase 7.
+
+Use the same Effect data rules for Scene/Bank Load and Save and the new
+standalone Effect Load/Save item. Specify how an old placeholder loads, how an
+invalid Effect file fails without partly changing the Scene, and how names
+and sources are tracked. Decide where the planned Effect output assignment
+and level are stored. The per-voice FX send amount and fader mode already
+belong to Scene settings in `sceneset.scg`.
+
+### 5.2 Per-Scene VOICE edit masks in the Bank
+
+Replace the Bank's one 16-bit VOICE edit mask with one 16-bit mask per Scene
+slot: 16 masks, **32 bytes** of retained Bank state, at least 30 bytes more
+than the current two-byte value. Switching Scenes selects that Scene's mask;
+the active Scene remains included in its own edit mask. These masks describe
+relationships among Bank-local Scenes, so they remain Bank properties rather
+than fields of the individual Scene files.
+
+The Bank portion of the current AutoSave file reserves 128 bytes and defines
+only the first 15. Its 113 unused bytes can hold all 32 mask bytes without
+enlarging that portion. This is file space, not free working RAM.
+`bankset.bcg` is a text file with no padding, so its format must be extended
+to save all sixteen masks. Define migration from old Banks that have only
+one mask; assigning it to the old active Scene and initializing the others
+to their own Scene bits is a candidate. Preserve masks for unselected Scenes
+in partial Bank Load/Save, and define what standalone Scene Load does to the
+destination Bank mask. Verify Scene switching, partial operations, and boot
+restore.
+
+### 5.3 Effect Load/Save and AutoSave
+
+AutoSave currently reserves 512 Effect bytes per Scene but persists no live
+Effect values. The planned fixed FX sequence is 16 steps × 24 bytes =
+**384 bytes**; 64 normal plus 64 Morph parameter values take another
+**128 bytes**. That fills 512 bytes before Effect type or settings, so the
+Effect AutoSave storage needs more space or another specified arrangement.
+Set the exact file and AutoSave layouts, their versioning, and import of
+existing placeholders and saved workspaces together.
+
+Add Effect changes to AutoSave, including successful explicit Effect, Scene,
+and Bank loads, and restore them on boot. Keep the current interrupted-write
+protection. Add a root `/Effect/` browser and Effect Load/Save menu item. A
+Scene Save/Load includes its Effect; selected children in a Bank Save/Load
+carry their Effects by the same rules, while unselected Scenes stay intact.
+Complete the necessary Effect name/source handling and error feedback.
+
+### 5.4 FX bus, controls, and template Effect
+
+Provide a stereo send per voice and the planned three fader modes:
+
+- **Pre-FX:** the voice fader attenuates dry and send signals together.
+- **Post-FX:** the fader controls dry output while the send is unaffected.
+- **FX:** the fader controls the send as an additional stage; the voice's
+  normal volume acts as the send-only control to its usual output assignment.
+
+Connect the already stored Scene `fx_send_amount[6]` and `fader_setting[6]`
+values to the audio path. Provide the planned FX output assignment and level,
+specify which signal they control, and define dry/return mixing when they
+share an output. Specify the behavior of
+an empty or bypassed Effect slot. Test routing, clipping, and Scene switching
+with the buffer-using template Effect before the Phase 7 processing stack.
+
+### 5.5 Application flash limit and sine-table move
+
+The linker gives the application `0x08008000..0x0807FFFF`, or **480 KiB**;
+sample flash begins at `0x08080000`. Investigate what happens when the
+linked program and packaged update image approach or exceed this region.
+Check linker checks, image packaging, bootloader/update behavior, and the
+sample-flash boundary together. Establish a tested way to handle further
+growth without assuming application code can occupy sample flash.
+
+Move the 8,194-byte `sine_table` from DTCM into application flash in this
+phase. Test several simultaneous sine-based voices at different high pitches
+for audio and timing regressions, then measure recovered DTCM and additional
+flash use in a clean link. `transientData` has already moved to flash.
+
+### 5.6 Shared DTCM audio buffer
+
+After the sine-table move, target **about 126 kB** of DTCM as one buffer
+allotment shared between the active Effect and instrument DSP. The latest
+linked SRAM ledger reports 118,792 bytes free before that move; releasing
+the sine table projects up to 126,986 bytes before alignment or other code
+changes. Determine the actual safe buffer size from the new link.
+
+An instrument allocation is one 100 ms, mono, 16-bit unit of **8,820 bytes**.
+Allow at most two units per instrument and twelve units across six
+instruments. Twelve units use 105,840 bytes, leaving roughly 20 kB for the
+Effect; with no instrument units, the Effect may use the full buffer
+allotment. Every Effect must work across that range. An Effect may treat its
+share as 8-bit or 16-bit, mono or stereo. Define how shares and buffer
+contents change safely with Scene, Kit, Instrument, or Effect changes. Test
+the template Effect with both minimum and maximum shares.
+
+This shared allotment supersedes the old plan for independent, fixed-size
+advanced-Instrument and FX-delay buffers. Before implementing it, specify
+the exact byte count, memory region, lifetime, and owner and obtain the
+user's allocation acknowledgement under `SRAM_MANIFEST.md`.
+
+### 5.7 FX sequencer and Pattern automation
+
+Add the dedicated, static **16-step × 24-value, 384-byte** FX sequence,
+independent of the Phase 4 dynamic Pattern pool. Keep the planned Off, Fwd,
+Rnd, FirstX, and LastX run modes, plus scale and length. The Effect file,
+Scene/Bank Load/Save, and AutoSave must preserve its settings and steps.
+Decide during Phase 5 how 24 sequence values select from a type's up to 64
+parameters and what happens when Effect type changes.
+
+Regular Pattern steps must also automate Effect parameters through the
+existing parameter-target system. Finish the already exposed Scene target
+path at the same time: Pattern playback currently applies voice-parameter
+automation but ignores Scene targets, including per-voice Morph and the
+generated VOICE7 alternate decay (`7dc`). The latter belongs to the Scene's
+Kit for a non-Choke instrument in slot 6; a Choke instrument's own `_choke`
+decay remains a voice parameter. Define value conversion and priority when
+Pattern and FX-sequencer steps address the same Effect parameter.
+
+### 5.8 Menu, copy, and completion checks
+
+Add focused Effect parameter controls, FX-sequencer editing, and the Effect
+Load/Save item. Define how Scene copy/clear handles its Effect. The wider
+copy/clear gesture and menu redesign remain in Phase 6.
+
+Verify old/new Effect and Bank files, explicit Load/Save, AutoSave on/off,
+reboot, partial Bank operations, and failed or interrupted writes. Confirm
+that one Scene's Effect and edit mask do not alter another's. Hardware-test
+FX routing, the template Effect at both buffer limits, sine-table relocation,
+and Scene/Effect automation. Record the 480 KiB capacity finding and the
+tested growth path. Update the filesystem, AutoSave, and SRAM specifications
+when formats and allocations are implemented.
+
+### Open Engineering Questions to settle during Phase 5
+
+- Are all sixteen FX sequences resident in working memory, and how do their
+  24 values select from up to 64 parameters?
+- How do old Bank masks, Effect placeholders, and AutoSave records migrate?
+- What value conversion and priority apply when Pattern and FX-sequencer
+  automation set the same Effect parameter?
+- What exact shared-buffer size does the post-relocation link permit, and
+  how are shares reassigned without disrupting audio?
+- What tested change permits the application to outgrow the current 480 KiB
+  region while preserving sample storage?
+
+### Suggested Complementary Improvements
+
+- Pattern track scale and shuffle are stored but not yet used by playback.
+  Define how FX sequence scale relates to that clock, and consider finishing
+  the deferred Pattern timing work in this phase.
+- Test recording, playback, display, and reset together for per-voice Morph
+  and the generated VOICE7 decay before adding more Scene automation targets.
+- Make standalone Effect Load report success and failure as clearly as the
+  existing Scene/Bank operations, including placeholders and invalid files.
+
+## Phase 6 — MIDI, UI & Performance Workflow Cleanup
 
 **Location:** `Core/Menu/menu.c`, `Core/MIDI/MidiParser.c`,
 `Core/Hardware/frontPanel/buttonHandler.c`,
 `Core/Hardware/frontPanel/ledHandler.c`, `Core/DSPAudio/lfo.c`
 
 This phase gathers the user-facing and control cleanup after the filesystem,
-Morph, and dynamic Pattern foundations are in place. MIDI rework belongs here,
+Morph, dynamic Pattern, and Phase 5 Effect foundations are in place. MIDI rework belongs here,
 alongside the rest of the performance workflow, copy/paste, clear helpers,
 automation views, load/save UI polish, and front-panel feedback consolidation.
 
-### 5.1 MIDI and External Control Cleanup
+### 6.1 MIDI and External Control Cleanup
 
 `midi_MidiChannels[8]` already exists: one channel per voice plus one global
 channel. Follow-up work:
@@ -1144,7 +1331,7 @@ channel. Follow-up work:
 - Keep MIDI storage ownership aligned with Scene settings, not `kitset.kcg` or
   instrument files.
 
-### 5.2 One-shot LFOs
+### 6.2 One-shot LFOs
 
 Current `lfo.h`/`lfo.c` already has free-running sine, triangle, saw, rect,
 noise, exp-up, and exp-down waveforms with a phase accumulator and an overflow
@@ -1157,7 +1344,7 @@ test. One-shot variants can hook that overflow test:
 - Add an idle/delayed/running state field to `Lfo` and hook retrigger through
   `lfo_retrigger()`.
 
-### 5.3 Automation view redesign
+### 6.3 Automation view redesign
 
 
 This replaces the current step-view automation display (parameter assignment/amount shown under step view) with two connected new views.
@@ -1178,168 +1365,133 @@ This replaces the current step-view automation display (parameter assignment/amo
 - **Knob 1:** cycle voice. **Knob 2:** cycle parameter. Sequence buttons light up for any step that currently has automation for the selected parameter.
 - **Multi-step editing:** holding any combination of the 16 sequence buttons switches the bottom-row readout to `avg:` (average value across the held steps, left side) and `mod:+0` (a running modification delta, right side). Turning the encoder while steps are held does two things at once: (1) it adds automation at the currently-shown average value to any held step that doesn't already have automation for this parameter, and (2) it increments/decrements the automation value of *every* held step by ±1 per detent, updating the displayed average live. You can keep adjusting by continuing to turn the encoder, by changing which steps are held, or by switching bar/track via the bar/track buttons — the temporary working array tracks all of it.
 - **Copy:** from this view you can copy steps, bars, or copy the whole automation lane to another track.
-- **No dedicated clear operation inside this view** — the only ways out are the normal exit (commits) or the `SHIFT+COPY/CLEAR` cancel (discards). Clearing automation is a View-A-and-below operation (per 5.3 View A's "remove" functions, or the step-view `SHIFT+COPY/CLEAR`+button wipe from Phase 4.6).
+- **No dedicated clear operation inside this view** — the only ways out are the normal exit (commits) or the `SHIFT+COPY/CLEAR` cancel (discards). Clearing automation is a View-A-and-below operation (per 6.3 View A's "remove" functions, or the step-view `SHIFT+COPY/CLEAR`+button wipe from Phase 4.6).
 
 This is a genuinely large piece of UI state machine — four knobs with context-dependent meaning in View A, a temporary-array-with-commit-on-exit model in View B, and a multi-step "hold N buttons, turn one knob, average updates live" interaction that doesn't have a close analog elsewhere in the current menu code. Worth prototyping the state machine (what's "current view," "held steps," "working array," "dirty" state) as its own small module before wiring it into `menu.c`'s existing page-dispatch structure, rather than growing it inline.
 
-### 5.4 Morph quick access & automation indicator
+### 6.4 Morph quick access & automation indicator
 
 - While viewing a single parameter in the encoder click-in view, holding `SHIFT` toggles between editing that parameter's normal value and its morph-target value, avoiding a save/reload round trip just to set morph endpoints. A further "lock" mode to keep the whole voice interface showing morph-target values for every parameter (rather than needing to hold `SHIFT` per-parameter) is called out as wanted too.
-- The voice page should **only** service voice and scene editing — no step-editing functions belong there (that's step view's job). On the voice page, the 16 sequence buttons become **scene toggles**: each one toggles whether that scene is included in the current voice-parameter edit, so a parameter change can be applied to all 16 scenes, a subset, or just one, depending on which are toggled on. This is a genuinely different meaning for those 16 buttons than they have anywhere else in the UI (scene *selection* elsewhere, scene *inclusion-in-edit* here) — worth a clear visual distinction (different LED color/blink pattern) so it's not confused with PERF-mode scene switching.
+- The voice page should **only** service voice and scene editing — no step-editing functions belong there (that's step view's job). On the voice page, the 16 sequence buttons become **scene toggles**: each one toggles whether that scene is included in the current voice-parameter edit, so a parameter change can be applied to all 16 scenes, a subset, or just one, depending on which are toggled on. Phase 5 stores this inclusion mask separately for each Scene as a Bank property; the voice page edits the active Scene's mask. This is a genuinely different meaning for those 16 buttons than they have anywhere else in the UI (scene *selection* elsewhere, scene *inclusion-in-edit* here) — worth a clear visual distinction (different LED color/blink pattern) so it's not confused with PERF-mode scene switching.
 - The LXR-02 hardware has dedicated shift-labeled functions already printed on the sequence buttons — new shift functions should avoid piling onto those buttons where another control is reasonably available, per your explicit note.
 - The LCD's underline indicator should show when the currently-displayed parameter is automated anywhere in the currently playing scene/pattern — a quick "is this being moved by something" signal without needing to open the automation view to check.
 
-### 5.5 PERF mode: scene switching & per-track assignment
+### 6.5 PERF mode: scene switching & per-track assignment
 
 - **Instant scene switching:** a global menu option makes scene switching (via `SEQ` buttons or MIDI program change) take effect at the next step rather than waiting for the end of the bar, preserving sequencer position through the switch. This also carries whatever kit/morph/parameter changes the new scene brings, not just pattern data — it's a full scene swap, not just a pattern swap, which is a bigger behavioral change than the pattern-only version originally described in `putting it together`. Default behavior (end-of-bar) is preserved when the option is off.
 - **Per-track scene assignment:** hold a voice button and press a `SEQ` (scene) button to assign that individual track to play from a different scene than the rest — same gesture as the old "per-track pattern assignment" idea, retargeted at scenes.
 - **Per-voice morph in the PERF page:** each voice gets a direct morph control on the PERF page, full 0–255 range. Step automation and velocity automation update it in real time and it's visible; LFO-to-voice-morph modulation does **not** update the displayed value (per Phase 3.3 — it's background-only). Changing global morph updates every per-voice value shown here.
 
-### 5.6 Looper
+### 6.6 Looper
 
 Moves to the `SELECT` buttons (confirmed correction from your round-2 answer — the original `putting it together` draft used `SEQ` 9–16, which conflicts with `SEQ` now meaning scene-select in PERF mode). The original spec describes 8 divisions from a half-bar down to 1/64th note, halving at each button, with holding one additional button ("button 9" in the original 16-button numbering) adding a dotted 50% to whichever other loop button is held, and releasing all loop buttons returning the sequencer to the position it would have reached without looping.
 
 That division range was originally expressed in **sub-step** terms (64 sub-steps = 1/2 bar, down to 1 sub-step = 1/64th), which no longer exists as a unit after the Phase 4 dynamic Pattern rewrite. This needs re-deriving in step/bar terms before it can be implemented — flagged below as an open question, since a naive re-mapping (halving from "1/2 bar" down through 8 buttons) lands on 1/256th at the bottom with no sub-steps to represent it, which doesn't match the original "down to 1/64th" intent.
 
-### 5.7 Load/save UI rework
+### 6.7 Load/save UI rework
 
 Deferred until after Pattern data storage. The current revision risks, UI
 behavioral contract, and explicit test matrix are tracked in
 `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
 
-### 5.8 External MIDI sequencing tracks
+### 6.8 External MIDI sequencing tracks
 
 From "notes from others" in `putting it together`: doubling the sequencer's track count (6 or 7 additional tracks) purely for sequencing external MIDI gear via program-change/CC, using the same UI and workflow as the internal voice tracks, reached through a shift function that opens a second page mirroring the internal-voice page layout. This is naturally deferred until after Phase 4 lands, since it's most straightforward to build as "the same per-track step/automation machinery Phase 4 already built, pointed at a MIDI-out target instead of a DSP voice" rather than a parallel implementation.
 
 ### Open Engineering Questions
 
-- **Looper division mapping without sub-steps.** Needs a concrete answer before 5.6 can be built: is 1/64th represented via a track-scale-style subdivision (Phase 4.7's `/2`..`×16` scale applied to a virtual "loop track"), or is the shortest loop division now coarser (e.g., 1/16th, one full step) given sub-steps no longer exist? This changes both the encoding and the UI.
-- **Manual roll trigger gesture** (carried over from Phase 4) needs a home in this UI redesign — likely a `SHIFT`+something on the step buttons or a dedicated control, per the "try not to put shift functions on the SEQ buttons" constraint from 5.4.
+- **Looper division mapping without sub-steps.** Needs a concrete answer before 6.6 can be built: is 1/64th represented via a track-scale-style subdivision (Phase 4.7's `/2`..`×16` scale applied to a virtual "loop track"), or is the shortest loop division now coarser (e.g., 1/16th, one full step) given sub-steps no longer exist? This changes both the encoding and the UI.
+- **Manual roll trigger gesture** (carried over from Phase 4) needs a home in this UI redesign — likely a `SHIFT`+something on the step buttons or a dedicated control, per the "try not to put shift functions on the SEQ buttons" constraint from 6.4.
 - **Automation view performance:** View B's temporary working array (automation for one parameter, all steps in a track) needs to be read from and written back to the Phase 4 dynamic pool efficiently — worst case, entering the view triggers up to 128 individual pool lookups (one per step) to populate the array, and exiting triggers up to 128 pool writes. Should be fine given the pool is designed for O(1)-ish per-step access, but worth confirming against Phase 4's actual implementation once it exists.
 
 ### Suggested Complementary Features
 
 - **Automation "eraser" mode** (from the earlier draft, still reasonable): a shortcut — e.g., holding `CLEAR` while turning a parameter's knob — that wipes all step automation for that specific parameter across the active track in one gesture, complementing but distinct from View A's per-step "remove" functions.
-- **Scene-inclusion visual on the voice page (5.4):** since toggling scene inclusion for a parameter edit is a new interaction, consider a brief on-screen summary ("editing: 3/16 scenes") when a parameter is touched, so it's obvious at a glance how broad the edit's blast radius is before committing to a knob turn.
+- **Scene-inclusion visual on the voice page (6.4):** since toggling scene inclusion for a parameter edit is a new interaction, consider a brief on-screen summary ("editing: 3/16 scenes") when a parameter is touched, so it's obvious at a glance how broad the edit's blast radius is before committing to a knob turn.
 
-## Phase 6 — DSP Expansion
+## Phase 7 — DSP Expansion
 
-**Location:** `Core/DSPAudio/`
+**Location:** `Core/DSP/`, `Core/DSPAudio/`
 
-**Session 043 correction:** the DTCM figures and transient-relocation proposal
-in the historical Phase 6 discussion below predate the tagged-slot migration
-and implemented FLASH move. Do not use those numbers for allocation. Current
-DTCM use/free/reservation is the Session 043 baseline above and the linked
-`SRAM_MANIFEST.md`; `transientData` is already in FLASH and `sine_table`
-remains DTCM-resident. Any concrete delay/advanced-buffer allocation requires
-the user's explicit byte/region/owner acknowledgement before code is written.
+Phase 5 has established the Effect slot, bus, template type, and shared DTCM
+buffer before this phase adds heavier voices, oscillators, and the first
+multi-stage processing Effect. Use the Phase 5 buffer partition and the
+current linked `SRAM_MANIFEST.md`; the older separate-buffer estimates are
+superseded. Measure CPU cost and exact RAM ownership before adding each type.
 
-The heaviest phase computationally, and the one where the earlier drafts did the most guessing. This version tries to separate what's confirmed by the current code, what's confirmed by your answers, and what genuinely needs a measurement or a decision before implementation — rather than asserting specific byte counts that sound precise but aren't backed by anything.
+### 7.1 Voice tiers
 
-### 6.1 Voice tiers
+Current Instrument types (`DRUM`, `SNARE`, `CYMBAL`, `HIHAT`) can occupy any
+voice slot. The planned types retain three CPU/feature tiers:
 
-Currently: `DRUM`, `SNARE`, `CYMBAL`, `HIHAT` instrument types, freely swappable between any track (tracks 6 and 7 always choke each other, per the existing spec), instrument type itself is not modulatable or morphable. Per your answer, this becomes three CPU/memory tiers rather than a flat list:
+- **Basic:** drum, snare, and similarly inexpensive voices.
+- **Advanced:** cymbal, hi-hat, and other higher-cost voices.
+- **Advanced-buffer:** granular, drone, Karplus-Strong, and convolution
+  chamber. These draw from the shared Phase 5 DTCM buffer in 8,820-byte
+  units, at most two per Instrument and twelve total across six Instruments.
 
-- **Basic** — drum, snare (and similar low-DSP-cost voices).
-- **Advanced** — cymbal, hi-hat, and other voices that need meaningfully more DSP per sample.
-- **Advanced-buffer** — granular, drone, Karplus-Strong, convolution chamber. Per your clarification: **only one instrument in a given kit will ever use this tier**, and that one instrument gets a dedicated **0.25-second, 16-bit, mono buffer in DTCM** (not ITCM — see below). This is a separate, distinct buffer from the FX-stack's BBD delay (6.7, 8-bit stereo, 1.0+ seconds) — the two are unrelated allocations with fixed, static sizes decided once during implementation, not dynamically resized. (A future idea worth remembering but explicitly out of scope now: an instrument that reads the BBD delay's own buffer directly, as an oscillator — a different feature from anything in this phase, not something to design around today.)
+The former one-advanced-buffer-Instrument limit and dedicated 0.25-second
+buffer no longer describe the memory plan. Any remaining limit on the number
+of simultaneously active advanced voices must be justified by measured CPU
+cost, not by the retired separate-buffer allocation. ITCM stays available
+for hot executable code rather than audio-buffer storage.
 
-**ITCM is off the table for this buffer, per your call**, and that's the right decision independent of the reasoning that follows: ITCM is only 16KB total and already holds the oscillator hot-path code (`calcSineBlock`, `calcFmBlock`, and the rest of the dozen or so `INITCM`-tagged functions in `Oscillator.c`) — keeping it reserved for code, as you said, avoids a real resource conflict rather than trying to measure exactly how tight a squeeze it'd be.
-
-**Historical pre-Session-043 DTCM analysis (superseded).** The following
-numbers and proposal are retained only to preserve the design rationale; use
-the Session 043 baseline and linked manifest above for every current decision.
-
-- `sine_table` (`Core/DSPAudio/wavetable.c:43`) is `const int16_t[TABLESIZE+1]` with `TABLESIZE = 4096`, so **4,097 × 2 bytes = 8,194 bytes**.
-- `transientData` (`Core/DSPAudio/transientTables.c:62`) is `const int8_t[NUM_TRANSIENTS][TRANSIENT_SAMPLE_LENGTH]` with `NUM_TRANSIENTS = 12` and `TRANSIENT_SAMPLE_LENGTH = 2205`, so **12 × 2,205 = 26,460 bytes**.
-- Together: **34,654 bytes (~33.85KB)** — right at the top of your own 26–34KB estimate.
-
-Both are currently DTCM-resident via the `INCCM`/`INCCMZ` macros — which, per `config.h`'s own comment, are aliases for `INDTCM`/`INDTCMZ` (a carryover naming convention from the original LXR's CCM-RAM). This is worth flagging on its own: my Phase 6.7 draft below had claimed DTCM was almost entirely free (~3.2KB used) based on grepping only the literal `INDTCM`/`INDTCMZ` token — that missed everything tagged via the `INCCM`/`INCCMZ` alias, which turns out to include not just these two tables but every drum/snare/cymbal/hi-hat voice struct, the six `ModulationNode` velocity modulators, and the mixer's per-voice state arrays. That's corrected below.
-
-Both tables are also good, low-risk candidates for moving to flash specifically because samples already stream from the same internal flash region (`0x08080000+`, per `MEMORY.md`) successfully today — confirming that this part's internal flash, with its ART accelerator prefetch/cache, is fast enough for real-time audio access, at least for the sequential-access pattern sample playback uses:
-
-- **`transientData`** is read sequentially, start to finish, once per transient hit (`transientGenerator.c`'s `phase`-indexed access) — the same access shape as sample playback, which is already proven to work from this exact flash region. High confidence this moves cleanly.
-- **`sine_table`** is read at true audio rate, per-sample, inside the oscillator block-calc functions (`Oscillator.c`), with a phase-accumulator index that's usually local/incrementing but can jump further per sample at high pitch — a somewhat less favorable pattern than `transientData`'s sequential one, and more like the pattern actual *code* execution from flash already relies on (which also works today, on the same ART cache). **Decision: leave it in DTCM.** `transientData` alone frees enough headroom (6.7) without taking on `sine_table`'s less-proven access pattern; if more DTCM room is ever needed later, moving `sine_table` is still there as a lever, with the polyphony stress test below as the thing to check before flipping it.
-- Implementation is likely as simple as removing the `INCCM`/`INCCMZ` tag from `transientData`'s declaration — with no section attribute, `const` data falls through to the linker's default `.rodata` placement in app flash, the same place all the rest of the firmware's constant data and code already lives. No new linker section should be needed, but worth confirming the default `.rodata` target is genuinely the app-flash region (`0x08008000–0x0807FFFF`) and not anywhere near the runtime-erasable sample sectors (6–11), so a future sample write/erase can never touch it.
-- Two smaller `INCCM`-tagged `const` tables exist too (`squareRootLut`, 128 floats = 512 bytes; `transientVolumeTable`, 69 floats = 276 bytes) and are candidates for the same move if a little more headroom is ever wanted, on the same reasoning as `transientData` — not needed for the current target, so not part of the current plan.
-
-**What's actually in DTCM, confirmed by a real build.** The project compiles cleanly with `arm-none-eabi-gcc` (13.2.1) as checked out — `make` succeeds with no errors, only pre-existing minor warnings unrelated to this analysis. The linker's own `.map` file gives the real, no-guessing numbers:
-
-- **`.itcm`** (the `INITCM`-tagged oscillator code from earlier): **3,776 bytes** used of 16,384 total — 12,608 bytes free. Confirms your instinct to keep ITCM code-only was the right call independent of this measurement, and also confirms there was never much pressure there to begin with.
-- **`.dtcm`** (`INDTCM`/`INCCM` — const data loaded from flash at startup): **35,168 bytes**. This is `sine_table` + `transientData` + the two smaller tables (`squareRootLut`, `transientVolumeTable`) + one small static float — matches the source-level tally closely.
-- **`.dtcmz`** (`INDTCMZ`/`INCCMZ` — zero-initialized, runtime-mutable state): **6,092 bytes**. This is the six voice structs, the six `ModulationNode`s, the mixer's per-voice arrays, and the audio/oscillator interpolation buffers — all genuinely small; the six voice structs turned out to be compact (a few hundred bytes each), not the large unknown I'd flagged as needing measurement.
-- **Total DTCM in use today: 41,260 bytes (40.3KB) of 131,072 (128KB) — 89,812 bytes (87.7KB) free before moving anything.**
-
-This resolves the open question from the previous pass at this document: the real total was measurable, and it's good news — DTCM was never close to full, just not fully accounted for by source grepping alone.
-
-### 6.2 Granular instrument
+### 7.2 Granular instrument
 
 Built as a complete instrument (advanced-buffer tier), not an oscillator variant — this was your explicit correction to the initial framing. Reads directly from the internal sample flash region (the same one that already backs regular sample playback, so the flash-read-speed question is answered by "it already works for samples as-is," per your answer). Pitch parameters, per your spec: assign a scale/interval, fine detune, and a "distance" value that moves up/down that scale/interval — rather than free continuous pitch, grain pitch is quantized to a chosen scale and stepped through it.
 
-A feedback path with a short delay/decay is also wanted, using the dedicated 0.25-second buffer from 6.1 — confirmed as its own separate allocation, not routed through the 6.7 FX-stack's BBD delay. Since only one advanced-buffer-tier instrument exists per kit, this buffer is exclusively the active granular (or drone/Karplus/convolution) instrument's own resource.
+A feedback path with a short delay/decay is also wanted. It requests up to two 8,820-byte units from the shared Phase 5 DTCM buffer, according to the type's measured need. Its allocation reduces the space available to the Scene's Effect; it is not a separate permanent buffer.
 
 Grounding from actual granular-synthesis practice, since this is new DSP territory for the project: the standard approach windows each grain with an amplitude envelope to avoid clicks at non-zero-crossing boundaries, and the shape of that window is itself a real timbral control, not just anti-click housekeeping — an equal-power/Hann-style crossfade gives the smoothest, most "fused" texture, while sharper (near-rectangular) windows give a more clicky/metallic character and are cheaper to compute. Grain parameters worth having beyond pitch (standard across granular implementations): grain length, density (grains per second / overlap amount), and position jitter (randomizing the read-start point slightly for a less mechanical texture) — these map naturally onto the existing per-parameter automation/morph infrastructure once they exist as real parameters.
 
-### 6.3 New voices
+### 7.3 New voices
 
 - **West Coast.** Sine/triangle oscillator core, wavefolder (depth + symmetry), FM ratio/index, and an LPG-style decay envelope in place of a standard ADSR. Two pieces of this reuse existing code directly: the sine/triangle core is already `SINE`/`TRI` in `Oscillator.h`, and 2-operator FM already exists (`calcFmSineBlock`/`calcFmBlock` in `Oscillator.c`) — the FM ratio/index parameters are largely exposing controls on code that's already there, not writing new FM synthesis from scratch. The wavefolder and LPG are genuinely new. For the wavefolder: the cheapest embedded-appropriate approach is a triangle-style fold (mirror the signal back down once it crosses a threshold, piecewise-linear, computationally trivial), which is the same family of technique used in Serge/Buchla-style analog wavefolders being modeled in current DSP research — worth noting that any digital wavefolder aliases hard at high fold depth on high-pitched material, and this platform has no spare CPU budget for oversampling the wavefolder stage, so fold depth may need a soft ceiling (or an explicit "this gets aliasy at extreme settings" acceptance, which is arguably in keeping with an intentionally lo-fi/8-bit-adjacent voice anyway). For the LPG: real Buchla-style LPGs are a combined VCA+lowpass filter driven by one control signal with a distinctly *asymmetric* response — fast to open, slow/lazy to close — which is what gives the characteristic percussive "ring." The computationally cheap way to get that same asymmetric behavior digitally is a one-pole smoother on the strike/decay envelope with two different time constants depending on whether the envelope is rising or falling, driving both the VCA gain and the filter cutoff from that single smoothed value simultaneously (rather than two independent envelopes) — this is a well-documented digital model of the real Buchla 292 circuit and is cheap enough to run per-voice on this part.
-- **Drone.** Interacting sub-oscillators, slow chaotic LFOs, internal bit-crush, a short delay/feedback loop (the same dedicated 6.1 buffer as granular — only one advanced-buffer-tier instrument exists per kit, so whichever one is in use owns it exclusively), integrated ring modulation, bit inversion, and some extra pre-wired or limited-selection internal LFOs (i.e., not the full general-purpose LFO routing the main voices get — a smaller, purpose-built set). No transient/envelope in the normal sense — it's meant to sit and drone once triggered.
+- **Drone.** Interacting sub-oscillators, slow chaotic LFOs, internal bit-crush, a short delay/feedback loop using its share of the Phase 5 DTCM buffer, integrated ring modulation, bit inversion, and some extra pre-wired or limited-selection internal LFOs (i.e., not the full general-purpose LFO routing the main voices get — a smaller, purpose-built set). No transient/envelope in the normal sense — it's meant to sit and drone once triggered.
 - **Karplus-Strong.** This is worth calling out as the *cheapest* of the new voices to implement well: the algorithm is a short noise burst fed into a delay line of length `N = Fs / f0` (sample rate over target fundamental), read back through a simple one-pole averaging filter (`y[n] = (y[n-N] + y[n-N-1]) / 2`, or a loss-factor-weighted version for controllable decay time), fed back into the delay line. A single delay line plus a one-pole filter per voice is far cheaper than any of the other new voice types, and the classic extension for better pitch accuracy at higher notes (an allpass filter correcting the fractional part of the delay length that a purely integer-sample delay line can't represent) is a small, well-documented addition if pitch accuracy on higher-pitched plucks turns out to matter.
 - **Convolution chamber.** A pitch-enveloped transient or user sample run through a simulated resonant chamber (spring reverb, cabinet, etc.) via convolution. This is real convolution reverb, which is the most CPU-expensive item in this entire phase — a true convolution against an arbitrary-length impulse response scales with IR length, and even a short IR (a few hundred samples) is meaningfully more expensive per sample than anything else in this document. This needs an explicit CPU budget decision (how long an IR is affordable per voice, whether it's one shared chamber IR set or per-kit-selectable, whether a cheaper structured/algorithmic reverb approximation is an acceptable substitute for true convolution) before committing to "convolution" as the literal implementation rather than as the description of the desired *sound*.
 
-### 6.4 New oscillators
+### 7.4 New oscillators
 
 - **Wavetable.** Reads `.wav` files of any length from numbered folders under root `Wavetable/` (confirmed by your answer — not a fixed single-cycle format, no Serum-style multi-frame container). Morphable (interpolating between two selected waves) but not modulatable directly; scanning through a wavetable set happens via LFO or envelope targeting the wavetable-position parameter, same as any other modulatable parameter.
 - **PWM.** You flagged this as "probably wavetables, but suggest another method if you have one" — a direct suggestion: implementing PWM as a genuine variable-duty-cycle square calculation (compare the oscillator's phase accumulator against a duty-cycle threshold instead of the fixed 50% used by `REC`) is cheaper than storing a set of wavetable frames at different duty cycles, and only needs one new parameter (duty cycle) rather than wavetable memory. The tradeoff is the same aliasing consideration as any hard-edged digital waveform on this platform (no oversampling budget), so it inherits the same character as the existing `SAW`/`REC` waveforms rather than being cleaner than them — which is likely fine, since they're presumably an accepted part of the current sound already.
-- **Buffer oscillator.** Reads directly from the L or R DTCM buffer described in 6.7, using the same scanning parameters as the granular oscillator/instrument (position, loop size, retrigger, rate/sync, retrigger randomization). This is effectively "granular, but reading from the BBD buffer instead of sample flash" and can likely share most of its scanning-parameter code with 6.2's granular instrument rather than being a wholly separate implementation.
+- **Buffer oscillator.** Reads from a defined portion of the shared DTCM buffer described in Phase 5.6, using the same scanning parameters as the granular oscillator/instrument (position, loop size, retrigger, rate/sync, retrigger randomization). Its ownership and read/write relationship with the Effect must be specified so a Scene or Effect change cannot invalidate the Instrument's slice. It can share scanning code with 7.2's granular instrument.
 - **Swarm / hypersaw.** A detune-and-phase-spread oscillator stack (multiple copies of a base waveform, each slightly detuned and phase-offset) — standard "supersaw" technique, computationally is just N oscillator instances summed, so its cost scales linearly with however many stacked voices are budgeted per instance.
-- **Open-ended items from the source doc worth a decision, not an implementation yet:** "some other smart FM arrangements, still keeping the filter" (a natural extension once 2-op FM's existing code, 6.3, gets exposed as a first-class oscillator option — 3-operator or feedback-FM are the obvious next steps) and "other places to put wavefolding" (the FX stack in 6.7 is one obvious answer — wavefolding as an insert effect rather than only an oscillator-stage effect).
+- **Open-ended items from the source doc worth a decision, not an implementation yet:** "some other smart FM arrangements, still keeping the filter" (a natural extension once 2-op FM's existing code, 7.3, gets exposed as a first-class oscillator option — 3-operator or feedback-FM are the obvious next steps) and "other places to put wavefolding" (the FX stack in 7.5 is one obvious answer — wavefolding as an insert effect rather than only an oscillator-stage effect).
 
-### 6.5 FX bus & send routing
+### 7.5 The 8-bit tech demo stack
 
-Currently `mixer.c` has no FX bus or send concept at all — `mixer_audioRouting[6]` is a flat per-voice output-destination array (which of the physical outputs each voice's dry signal goes to), and there's no shared send/return path anywhere in the DSP chain. This entire subsystem is new, not an extension.
+This is the first multi-stage Effect after the Phase 5 buffer-using template.
+The planned chain is bit-off/invert-per-bit sample processing (a literal bit
+mask/toggle, not a generic bit-depth reducer), a wavefolder, an 8-bit stereo
+BBD-style delay, and a selectable 16-bit multimode filter. The filter can
+build on the existing `Core/DSPAudio/ResonantFilter.c` state-variable filter
+and saturation helpers. Type and parameters live in the Scene's Effect file
+and the type implementation lives under `Core/DSP/Effects/<type>/`.
 
-Per your spec: a stereo send per voice, with send amount as a parameter alongside the voice's existing volume parameter. Three selectable fader modes:
-- **Pre-FX (normal):** the voice's main fader attenuates both the dry mix and the FX-send mix together.
-- **Post-FX:** the fader only controls the dry/main-mix amount; the FX send is unaffected by fader position.
-- **FX:** the fader controls FX-send amount as an additional stage after the send point, and the voice's normal volume parameter effectively becomes a send-only control to the voice's usual output assignment rather than controlling a dry signal directly.
+The delay uses the Effect's current share of the Phase 5 DTCM buffer. A
+one-second, stereo, 8-bit delay at the stated 44,108 Hz rate needs about
+88,216 bytes, while the Effect can have as little as roughly 20 kB when all
+twelve instrument units are assigned. Define how maximum delay time and
+other buffer-dependent parameters scale with the available share; this type
+must remain usable at the minimum share. There is no second dedicated BBD
+buffer or assumption that a full one-second delay is always available.
 
-The FX send itself gets its own output assignment (stereo 1/2, L1/L2/R1/R2 — the same destination set voices already route to) and its own output volume, and can be summed back into the main mix if the FX send and a voice share an output destination.
-
-Each FX **stack** (a chain of FX types — the 6.7 tech-demo stack is the first one) is its own file, with up to 64 arbitrary parameters, remembered in both kit and morph endpoints (so FX parameters morph the same way voice parameters do), and tagged with a stack-type identifier so a kit remembers *which* FX stack type it was using even as stacks are swapped between kits — mirroring how instrument type is handled for voices.
-
-### 6.6 FX sequencer
-
-A dedicated 16-step sequencer for FX parameter automation, kept deliberately **static** rather than routed through the Phase 4 dynamic event pool — per your answer, this is small and fixed enough (16 steps × 24 possible automated parameters × 1 byte per automation slot = exactly 384 bytes) that dynamic allocation would be overhead for no benefit. FX parameters are also automatable from the regular track steps, using the same 9-bit parameter ID space from Phase 4.4 (so an FX parameter and a voice parameter are addressed the same way from track-step automation — only the FX sequencer's own dedicated 16-step array is a separate, static structure).
-
-Run modes, per `putting it together`: **Off** (pressing the FX sequencer's `SEQ` button shows its current settings rather than running it), **Fwd** (steps 1–16 straight through), **Rnd** (a random step per division), **FirstX** (the first X steps play in a fixed random order each cycle, the remaining steps run straight), **LastX** (mirror of FirstX — the last X steps are randomized, the preceding steps run straight). Plus a scale and length setting, matching the track-level scale/length concept from Phase 4.7.
-
-### 6.7 The 8-bit tech demo stack
-
-The first real FX stack, meant to double as a proof of concept for the FX bus itself. Three stages: bit-crush (bit-off/invert per bit — a literal bitmask/bit-toggle effect on the sample word, not a bit-depth-reduction crusher), a wavefolder (same technique as 6.3's West Coast wavefolder, available here as an insert effect), and an 8-bit stereo BBD-style delay, followed by a selectable multimode filter at 16-bit resolution — reusing the same filter DSP the voices already use (`Core/DSPAudio/ResonantFilter.c` already has the state-variable filter core — `SVF_recalcFreq`, plus `fastTanh`/`tanhXdX`/`softClipTwo` saturation helpers — tagged `INITCM_EFFECT`, currently disabled by default via `ENABLE_EFFECT_INITCM_CODE 0` in `config.h`; this filter stage is a real, existing, tested building block, not new DSP).
-
-**Memory — now confirmed by a real build, not estimated.** DTCM is 128KB (131,072 bytes) total; a real `make` shows 41,260 bytes already in use (35,168 in `.dtcm`, 6,092 in `.dtcmz` — see 6.1), leaving **89,812 bytes (87.7KB) free today**, before moving anything.
-
-Target sizes: the BBD delay at a full 1 second, stereo, 8-bit is `44,108 × 2 = 88,216 bytes (86.15KB)`; the 6.1 advanced-buffer-tier buffer at 0.25 seconds, mono, 16-bit is `44,108 × 0.25 × 2 = 22,054 bytes (21.54KB)`. Combined target: **110,270 bytes (107.7KB)**.
-
-**That doesn't fit in the 87.7KB free today — it's short by about 20KB.** This is exactly what the 6.1 flash-relocation plan is for: moving `transientData` and `sine_table` out of DTCM frees `26,460 + 8,194 = 34,654 bytes (33.85KB)`, bringing free DTCM to `89,812 + 34,654 = 124,466 bytes (121.6KB)` — **enough for both buffers at their full target sizes, with about 13.9KB left over.** If the two smaller tables (`squareRootLut`, `transientVolumeTable`) move too, that margin grows to roughly 15.2KB.
-
-So the concrete answer: **the flash move isn't optional headroom, it's the difference between the two buffers fitting at their stated sizes or not.** Given the decision to move `transientData` only and leave `sine_table` where it is (6.1 — `sine_table`'s audio-rate access pattern is the riskier one, `transientData`'s sequential pattern is the safe, already-proven one), the real number is: `89,812 + 26,460 = 116,272 bytes (113.55KB)` free against a `110,270-byte (107.69KB)` target — **it fits, with 5,858 bytes (5.86KB) to spare.** That's a real margin, not a rounding error, but it's tighter than moving both tables would give (13.9KB), so it's worth keeping in mind if any other Phase 6 feature also wants a DTCM allocation later.
-
-**A design choice worth surfacing rather than deciding silently:** real BBD hardware pairs its delay line with companding (compress going in, expand coming out) and pre/post low-pass filtering specifically to keep an 8-ish-bit-equivalent signal path usably clean — raw *linear* 8-bit PCM, with no companding, is considerably noisier and more aliased than that. Given this is explicitly framed as an "8-bit tech demo," the gritty raw-linear character might be exactly the point rather than a flaw — worth deciding whether this stack ships as intentionally lo-fi (raw 8-bit, cheapest to implement, matches the "tech demo" framing) or as a more faithful-sounding BBD emulation (adds a compander stage, more DSP cost, cleaner result) — possibly as a toggle, since the compander is a small addition on top of a working raw-8-bit delay rather than a different architecture.
+Decide whether its 8-bit path is intentionally raw and gritty or adds
+companding and pre/post filtering for a more faithful BBD sound. That choice
+changes CPU cost and character, so measure it when implementing this type.
 
 ### Open Engineering Questions
 
-- **`sine_table`-in-flash, if revisited later** — not part of the current plan (6.1: leaving it in DTCM, moving `transientData` only), but if DTCM pressure from some other future feature ever makes it worth reconsidering, the thing to test first is several simultaneous sine-based voices at widely different, high pitches — the access pattern most likely to pressure the ART cache, unlike `transientData`'s already-proven sequential one.
-- **Convolution chamber CPU budget (6.3)** — needs a decision on maximum affordable IR length before "convolution" is locked in as the literal technique rather than a cheaper structured-reverb approximation of the same target sound.
-- **FX stack file format** — 64 arbitrary parameters per stack, remembered in kit and morph endpoints, with a stack-type tag: this needs the same kind of parameter-ID-space decision Phase 4.4 made for step automation (is FX-stack-parameter-64 the same "9-bit ID" space, or a separate per-stack-type namespace?) before the file format can be finalized.
+- **Convolution chamber CPU budget (7.3)** — decide the maximum affordable IR length before committing to true convolution rather than a cheaper structured-reverb approximation.
+- **Shared-buffer demands of later types** — measure each Instrument's requested 8,820-byte units and each Effect's behavior at the resulting buffer size. The slot and partition contract is established in Phase 5; no later type may assume a separate fixed buffer.
 
 ### Suggested Complementary Features
 
-- **Grain windowing (granular, 6.2):** selectable grain envelope shapes — sharp/rectangular (clicky, cheap), Hann/equal-power (smooth, the standard default), and a "windowed/bell" middle ground — as a single parameter, since the window shape is one of the most audible and cheapest-to-implement granular controls available.
-- **LPG "ping" modifier (West Coast, 6.3):** a velocity-sensitive strike control that governs how hard the LPG's envelope is hit, independent of note velocity's usual volume role — since the asymmetric-envelope LPG model in 6.3 is naturally sensitive to how its input transient is shaped, this is a small addition on top of that model rather than new DSP.
-- **Shared wavefolder stage (6.3/6.4/6.7):** since the same triangle-fold technique shows up in the West Coast voice, the "other places to put wavefolding" open question, and the 8-bit FX stack, implementing it once as a shared inline function (gain-in, fold-depth, symmetry parameters) rather than three separate copies keeps behavior consistent and is less to maintain.
-- **BBD compander toggle (6.7):** as discussed above — a cheap way to get both the "authentic-tech-demo-crunch" and "cleaner vintage delay" versions of the same delay line without building two delay effects.
+- **Grain windowing (granular, 7.2):** selectable grain envelope shapes — sharp/rectangular (clicky, cheap), Hann/equal-power (smooth, the standard default), and a "windowed/bell" middle ground — as a single parameter, since the window shape is one of the most audible and cheapest-to-implement granular controls available.
+- **LPG "ping" modifier (West Coast, 7.3):** a velocity-sensitive strike control that governs how hard the LPG's envelope is hit, independent of note velocity's usual volume role — since the asymmetric-envelope LPG model in 7.3 is naturally sensitive to how its input transient is shaped, this is a small addition on top of that model rather than new DSP.
+- **Shared wavefolder stage (7.3/7.4/7.5):** since the same triangle-fold technique shows up in the West Coast voice, the "other places to put wavefolding" open question, and the 8-bit FX stack, implementing it once as a shared inline function (gain-in, fold-depth, symmetry parameters) rather than three separate copies keeps behavior consistent and is less to maintain.
+- **BBD compander toggle (7.5):** as discussed above — a way to offer both the raw and more filtered versions of the same delay without building two Effect types.
 
 ---
 
