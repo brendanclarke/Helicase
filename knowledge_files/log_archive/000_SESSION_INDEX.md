@@ -1473,7 +1473,7 @@ Session 069 implemented the seven-phase bounded-CPU convergence plan from `S069_
 - Non-semantic restriction: PASS. Verified physical relocations no longer trigger semantic Pattern AutoSave dirty events; non-semantic scheduler drains layout-only changes at lowest priority.
 - Slack/reactive compaction: PASS. Verified reservation creation, consumption by Gate-6 growth, reactive recovery under blocked allocation, density hysteresis behavior.
 - Pass 1 (O(1) dirty, quiet window, popcount optimization): PASS (2026-09-20). Zero `Z` audit mismatches. Pattern AutoSave converges to idle within quiet window after last edit. `patSvc_countUsed()` matches brute-force recount at lifecycle boundaries.
-- Pass 2 (CPU budget, Load/Save gate): PENDING.
+- Pass 2 (CPU budget, Load/Save gate): PASS (2026-09-22).
 
 **Files changed (across all phases, ~15 files):**
 
@@ -1491,8 +1491,8 @@ Session 069 implemented the seven-phase bounded-CPU convergence plan from `S069_
 | `timebase.c` | No change (existing `patSvc_tick()` call site) |
 
 **Deferred items carried to Session 070:**
-- Pass 2 hardware validation (CPU budget, Load/Save gate).
-- Background CPU budget module extraction from `filesystem.c` to dedicated `BackgroundBudget.c` if filesystem continues to grow.
+- ~~Pass 2 hardware validation~~ — completed 2026-09-22, PASS.
+- Background CPU budget module extraction from `filesystem.c` to dedicated `BackgroundBudget.c` — deferred review-only, not needed now.
 - AutoSave OFF-to-ON re-enable convergence test matrix (`S070_AUTOSAVE_REENABLE.md`).
 - Gate 1-4 items from `S070_GENERAL_FITNESS_AGENDA.md` not resolved in S069.
 - Per-track scale/shuffle sequencer consumption (S068 deferred).

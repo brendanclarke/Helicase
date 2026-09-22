@@ -2,142 +2,52 @@
 
 Baseline: commit `9627f70` on `dev-ph5-effects` (Session 069 closure,
 2026-09-20). Build: text=450,140, data=416, bss=291,756; image 450,572 bytes.
+Session 069 Pass 2 hardware-validated 2026-09-22 (PASS).
 
 ## Purpose
 
-Bounded systems-level fitness gate before Phase 5 Effects development. This
-session consolidates deferred S069 items, the AutoSave re-enable test matrix,
-the general fitness agenda items not yet resolved, and relevant SCOPING_TARGETS
-Phase 4 remaining work.
+Bounded systems-level fitness pass before Phase 5 Effects development. This
+session works from background infrastructure outward: engineering hygiene first,
+then Load/Save revision, then remaining feature behavior, then a testing
+closeout that validates everything.
 
-## Gate 0 — S069 deferred validation and closure
+---
 
-### 0.1 Pass 2 hardware validation (PENDING from S069)
+## Phase 1 — Engineering hygiene
 
-Confirm the Session 069 Pass 2 implementation on hardware:
+Source: `S070_GENERAL_FITNESS_AGENDA.md` Gate 4.
 
-- Shared background CPU budget enforces 2.5%/5% limits during playback/stopped
-- `H` trace reports (DEV build) show per-class budget accounting with
-  reasonable charged microseconds and denied-slice counts
-- Load/Save repair gate suppresses `patSvc_tick()` repair section when
-  `menu_activePage == LOAD_PAGE || SAVE_PAGE`
-- Pattern quiet window (250 ms `AUTOSAVE_PATTERN_QUIET_WINDOW_MS`) and max
-  latency (5000 ms `AUTOSAVE_PATTERN_MAX_LATENCY_MS`) behave correctly under
-  sustained editing
-- No audio glitches under combined editing with budget active
+### 1.1 Makefile header dependencies
 
-Acceptance: capture card with `H` trace records; verify per-class breakdown
-sums are plausible. Verify repair section is silent during Load/Save page
-presence.
+Add `-MMD -MP` and inclusion of generated `.d` files. At present a `config.h`
+edit can leave stale objects unless the developer remembers `make clean`.
 
-### 0.2 AutoSave OFF-to-ON re-enable test matrix
+### 1.2 Developer mode default
 
-Source: `S070_AUTOSAVE_REENABLE.md` items 1-6. S069 resolved the root cause
-(Pattern maintenance churn creating perpetual layout-only dirty events) but
-the re-enable path itself needs focused hardware testing:
+Developer mode (`DEV_MODE_LOGGING`) remains the default build configuration for
+the foreseeable future. Do not change this default or add trace-ring-size
+revert work to this session. Any future additions to the trace must be gated
+behind the appropriate developer mode flags (`DEV_MODE_LOGGING`,
+`DEV_MODE_PATTERN_TRACE`, etc.) — never unconditionally compiled.
 
-1. **Lifecycle trace stages**: add policy OFF, policy ON, setup admitted, setup
-   success/failure, tracking enabled, full-Bank seed complete, scalar dirty
-   count, and Pattern dirty mask trace stages. Do not use per-byte `D` records
-   for this summary.
-2. **AS-ENABLE matrix**: run the `AS-ENABLE` cases from
-   `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md` with a known change in a low
-   and high Scene. Hash scalar payloads and PAT4 semantic content before OFF,
-   after OFF edits, after ON/setup, after every writer generation, and after
-   reboot.
-3. **Concurrent activity**: verify ON during playback, recording, Load/Save
-   suppression, an active scalar transaction, and an active Pattern transaction
-   separately.
-4. **Item 4 resolved**: layout-only Pattern dirty feedback was fixed in S069
-   (non-semantic separation). Confirm by observing that clean Pattern state
-   produces no file generations after convergence.
-5. **Setup failure retry**: expose or automatically retry
-   `fs_autosave_setup_failed` with a bounded cadence. Preserve the rule that no
-   retry can start while Load/Save owns the facade. Consider a visible "AutoSave
-   error" UI status.
-6. **Active Scene priority**: consider prioritizing the active Scene's Pattern
-   after re-enable while retaining a rotating cursor for fairness. This changes
-   latency, not data or atomicity semantics.
+### 1.3 IWDG — leave inactive
 
-### 0.3 S069 deferred refactor assessment
+`DEV_LOGGING_IWDG` stays present and inactive. **Do not reactivate** without an
+explicit discussion about developer watchdog or active trace logging — prior
+activation caused massive problems (Session 044 boot-hang regression; Session
+054 self-introduced IWDG regression). The define remains in the source for
+future reference; it is not a release blocker and is not part of this session's
+scope.
 
-Review but do not implement unless needed:
+### 1.4 Spec hygiene
 
-- **Budget extraction**: The budget primitive lives in filesystem.c alongside
-  its consumers. If future non-filesystem modules beyond PatternStackService
-  need budget gating, extract to a standalone `BackgroundBudget.c` module.
-  Currently not needed.
-- **Repair gate refinement**: Currently uses `menu_activePage` check. If
-  Load/Save lifecycle becomes more complex, consider a dedicated
-  `filesystem_isLoadSaveActive()` predicate.
+Update specification/backlog after each phase so historical "unresolved" notes
+do not continue to direct work after their implementation has landed. This is
+a rolling obligation, not a phase-terminal task.
 
-## Gate 1 — Pattern persistence boundary validation
+---
 
-Source: `S070_GENERAL_FITNESS_AGENDA.md` Gate 1. The storage choice is resolved
-(separate per-Scene PAT4 A/B files); what remains is validation:
-
-- Root Scene Save/Load round trips
-- Partial Bank Save/Load without modifying unselected resident Patterns
-- Boot restore from every active Scene
-- Active, shown, pending, service-owned, and `menu_playedPattern` alignment
-- Corrupt, missing, truncated, wrong-generation, and power-cut PAT4 cases
-- Edits during Pattern snapshot/write (proving the later edit remains dirty)
-- One-time initialization at every load/retry phase
-- Mixed AutoSave/HCNAMES/explicit Scene fixtures with Pattern rows and `@`
-  provenance
-
-Build reproducible card fixtures and semantic Pattern comparators first. Use
-PAT4 generations, CRCs, decoded addresses/blocks, HCNAMES rows, and runtime
-indices — not FAT timestamps.
-
-## Gate 2 — Phase 4 incomplete behavior
-
-Source: `S070_GENERAL_FITNESS_AGENDA.md` Gate 2 and `SCOPING_TARGETS.md` Phase
-4 remaining items.
-
-### 2.1 Dynamic Pattern copy operations
-
-`pat_copyTrack()`, `pat_copyPattern()`, and `pat_copyBar()` are deliberate
-no-ops. Implement Phase 4.5 before building UI features that assume copy is
-trustworthy:
-
-- Snapshot source semantic blocks; never copy raw destination-owned offsets
-- Preflight required chunks and queue/bulk capacity
-- Define atomicity for partial allocation failure (destination unchanged)
-- Preserve trigger bits, specials, and every automation entry
-- Support overlap safely for same-Pattern bar/track copies
-- Publish one semantic dirty event per completed destination scope
-- Test under playback, Pattern maintenance, AutoSave snapshot, and service
-  target handover
-
-### 2.2 Probability must gate the complete step
-
-`seq_advanceTrackStep()` currently applies probability only around
-`seq_triggerVoice()` and queues step automation afterward regardless. Compute
-one step-play decision and use it to gate both trigger and automation
-publication. Define erase/record and trigger-inactive-but-automated semantics.
-
-### 2.3 Complete automation target runtime ownership
-
-`seq_drainPendingAutomation()` currently applies only Instrument descriptor
-targets and deliberately ignores Scene targets. Add a typed Scene-target
-dispatcher with the same runtime side effects as an ordinary Scene parameter
-edit. Test per-voice Morph, Scene decimation, and the track-7
-choke/base-decay ownership rule.
-
-### 2.4 Final LED state consolidation
-
-Perform Phase 4.11 after the S068 chaselight fix (now resolved). Give
-`ledHandler` one explicit render priority and fallback model, including BAR1
-and chase. Keep the public LED API stable and regression-test mode changes,
-held automation, recording feedback, pulses over blinks, and Scene changes.
-
-### 2.5 Per-track scale and per-track shuffle
-
-Listed in SCOPING_TARGETS as Phase 4 remaining items. Scope and implement if
-time permits.
-
-## Gate 3 — Load/Save revision pass
+## Phase 2 — Load/Save revision pass
 
 Source: `S070_GENERAL_FITNESS_AGENDA.md` Gate 3. Four user-visible items under
 one selection-coordinate architecture:
@@ -152,65 +62,207 @@ one selection-coordinate architecture:
    and optional preview asynchronously, tag results with a generation, and
    discard stale callbacks.
 
+### Risks and open architecture questions
+
+- **HCNAMES mirror lifetime**: the dedicated HCNAMES mirror (Session 058) is a
+  9,000-byte shared buffer. LSR-01 checkpointing would need to snapshot or
+  stage dirty rows without blocking the active mirror. Clarify whether the
+  checkpoint is a separate buffer or a mark-and-flush of the existing one.
+- **Stale callback ordering**: LSR-04's async name requests can return out of
+  order during rapid scrolling. The generation-tag approach is correct in
+  concept but needs explicit handling for the case where the user has already
+  committed a selection before the name arrives — the displayed name must not
+  retroactively change after commit.
+- **Page-exit vs. persistence race**: LSR-02 detaches repaint from storage but
+  the current facade is single-occupancy. If the user exits Load/Save while an
+  HCNAMES write is in flight, the facade must either complete the write before
+  releasing or defer it to the next idle cycle. Which path? The page-exit
+  expedite (Session 056) already handles a similar case for AutoSave; verify
+  whether it covers HCNAMES writes too.
+- **Bank identity agreement**: after any Load/Save, `settings.cfg` HCNAMES
+  row 0, and HCPR must all agree on the active Bank identity. LSR items do not
+  change this invariant but any refactoring of the Load/Save completion path
+  must preserve it. Add explicit assertions or trace checks.
+- **Corrupt/partial Pattern inside Scene loads**: when a Scene file contains an
+  invalid or truncated PAT4 region, the current reader must not fail the entire
+  Scene Load. Verify this is the case and that the HCNAMES Pattern row is not
+  published with `@` provenance for a Pattern that failed validation.
+- **Load/Save exclusion during active AutoSave transaction**: an active
+  scalar or Pattern AutoSave transaction runs to its safe close boundary when
+  Load/Save starts. Verify that HCNAMES publication from the Load/Save side
+  does not race with the drain-completion HCNAMES convergence step.
+
+### Testing
+
 Add missing top-level Load/Save request/refusal and latency observations
 before behavior changes. Run the non-destructive AutoSave/HCNAMES/settings
-matrix, followed by power-cut and failure injection.
+matrix, followed by power-cut and failure injection. Particularly important:
 
-Particularly important cases:
-
-- `AS-ENABLE` complete-current-state capture and OFF during active work
 - HCNAMES publication across Kit/Instrument browser-family changes
 - Active transaction plus Load/Save exclusion and page-exit release
-- Bank identity agreement among `settings.cfg`, HCNAMES row 0, and HCPR
 - Settings/HCNAMES/HCPR/PAT4 later-mutation-wins behavior
-- Corrupt/partial Pattern inside Scene and partial Bank loads
 - Stale callback ownership after rapid reverse scrolling/type changes
 
-## Gate 4 — engineering hygiene
+---
 
-Source: `S070_GENERAL_FITNESS_AGENDA.md` Gate 4.
+## Phase 3 — Remaining Phase 4 feature behavior
 
-- **Makefile header dependencies**: add `-MMD -MP` and inclusion of generated
-  `.d` files. At present a `config.h` edit can leave stale objects.
-- **Trace ring size**: decide and normally revert the temporary 2,048-record
-  AutoSave trace ring to its 64-record default. Keep larger capture builds
-  explicit and short-lived.
-- **Duplicate filenames**: re-check duplicate `bootlog.bin`/`asavetrc.bin`
-  names on hardware now that the earlier LFN fix is present; close if not
-  reproducible.
-- **IWDG**: validate `DEV_LOGGING_IWDG` only in a dedicated diagnostic build.
-  Not a release blocker while disabled.
-- **Spec updates**: update specification/backlog after each gate so historical
-  "unresolved" notes do not continue to direct work after their implementation
-  has landed.
+### 3.1 Probability must gate the complete step
 
-## Gate resolution status
+Source: `SCOPING_TARGETS.md` §4.6, `S070_GENERAL_FITNESS_AGENDA.md` §2.2.
 
-| Gate | Status | Notes |
-|------|--------|-------|
-| 0.1 Pass 2 HW validation | PENDING | Code-complete at `9627f70` |
-| 0.2 AutoSave re-enable | NOT STARTED | Root cause (churn) resolved in S069 |
-| 0.3 Deferred refactor | DEFERRED | Review only; implement if needed |
-| 1 Pattern persistence | NOT STARTED | Validation cases defined |
-| 2.1 Copy operations | NOT STARTED | No-op stubs exist |
-| 2.2 Probability gating | NOT STARTED | Defect from S066 |
-| 2.3 Scene automation targets | NOT STARTED | Descriptor targets only |
-| 2.4 LED consolidation | NOT STARTED | Phase 4.11 |
-| 2.5 Per-track scale/shuffle | NOT STARTED | Phase 4 remaining |
-| 3 Load/Save revision | NOT STARTED | LSR-01 through LSR-04 |
-| 4 Engineering hygiene | NOT STARTED | Makefile deps, trace ring, etc. |
+`seq_advanceTrackStep()` currently applies probability only around
+`seq_triggerVoice()` and queues step automation afterward regardless. Fix:
+compute one step-play decision and use it to gate both trigger and automation
+publication.
 
-## Prioritization guidance
+**Risks and open questions:**
+- What is the correct behavior for a step that fails probability but has
+  automation? Current code queues automation regardless — this is the defect.
+  The fix gates both, but document the decision: a probabilistic step that
+  doesn't fire should not apply its automation either, because the hold model
+  (§4.3a) depends on active steps being the reset boundaries.
+- Erase/record semantics when probability is active: does the sequencer's erase
+  mode respect probability (only erase steps that actually fired) or does it
+  always erase? Document explicitly.
+- Interaction with the automation hold model: a step that is probabilistically
+  skipped should not reset a held parameter value, since it didn't "fire."
+  Verify this falls naturally from the fix.
 
-Gates 0.1 and 0.2 are prerequisites — they validate S069 changes and close the
-AutoSave re-enable question. Gates 1 and 2.1-2.3 are the highest-value
-remaining Phase 4 work. Gate 3 is a significant refactor that can be scoped
-incrementally. Gate 4 items are individually small.
+### 3.2 Complete automation target runtime ownership
 
-Not a pre-feature blocker (from `S070_GENERAL_FITNESS_AGENDA.md`):
+Source: `SCOPING_TARGETS.md` §4.4, `S070_GENERAL_FITNESS_AGENDA.md` §2.3.
 
-- Comprehensive Menu specification sheet
-- Host log conversion while trace formats are still changing
-- Hardware CRC32C/table acceleration at current file sizes
-- Manual roll UI, triplet/dotted scale decisions, looper mapping, external MIDI
-  tracks, and DSP/FX expansion
+`seq_drainPendingAutomation()` (sequencer.c:609) currently handles only
+`instrumentParam_isVoiceParameter(target)` and silently drops Scene targets.
+Fix: add a typed Scene-target dispatcher with the same runtime side effects as
+an ordinary Scene parameter edit.
+
+**Risks and open questions:**
+- Scene target ID space: eight Scene targets currently follow the 384 voice
+  descriptor IDs. Verify the target-to-Scene-parameter mapping is stable and
+  documented in `SCOPING_TARGETS.md` §4.4.
+- Per-voice Morph interaction: automation of a Morph parameter via step
+  automation must go through the same descriptor/runtime path as direct edit.
+  Verify `instrumentManager_writeRuntime()` is the correct entry point for both.
+- Track-7 choke/base-decay ownership rule: automation of choke-group or
+  base-decay Scene parameters from a track that isn't track-7 needs a clear
+  ownership decision. Should it be silently dropped, applied, or rejected?
+- Retrigger restore (`seq_automation_dirty` / `seq_restoreAutomatedParameters`)
+  only covers voice parameters today. Scene-target automation must either
+  participate in retrigger restore or explicitly opt out with documented
+  rationale.
+
+### 3.3 LED state consolidation
+
+Source: `SCOPING_TARGETS.md` §4.11, `S070_GENERAL_FITNESS_AGENDA.md` §2.4.
+
+Give `ledHandler` one explicit render priority and fallback model:
+`base < blink < flash < pulse`, including BAR1 and chase.
+
+**Risks and open questions:**
+- The current layers (base/blink/flash/pulse/chase) restore state independently
+  and are vulnerable to ordering bugs. The fix is a priority-based re-render on
+  layer expiry, but this changes observable behavior for edge cases (e.g., a
+  pulsed LED that was blinking falls back to blink, not base). Audit existing
+  callers to confirm no code depends on the current fall-to-base behavior.
+- Chase LED interaction with the held-step automation overlay (Session 066):
+  the overlay writes LEDs directly. Does it interact with the blink/pulse layers?
+  The overlay should be positioned in the priority stack explicitly.
+- Session 068's second `buttonHandler_processEvents()` drain per main-loop pass
+  changed LED timing. Verify the consolidation doesn't introduce visible
+  flicker from the faster drain rate.
+
+### 3.4 Deferred to later session
+
+Per-track scale/shuffle, copy/paste, clear, live record, roll overhaul,
+Patgen/Euklid revert, and automation hold reconciliation are deferred.
+See `knowledge_files/drafts/PATTERN_TRACK_PROPERTIES_AND_WIDGETS_COMPLETION.md`
+for the consolidated draft.
+
+---
+
+## Phase 4 — Testing closeout
+
+### 4.1 AutoSave OFF-to-ON re-enable test matrix
+
+Source: `S070_AUTOSAVE_REENABLE.md` items 1-6. S069 resolved the root cause
+(Pattern maintenance churn) and Pass 2 confirmed budget enforcement.
+
+1. **Lifecycle trace stages**: add policy OFF/ON, setup admitted/success/failure,
+   tracking enabled, full-Bank seed complete, scalar dirty count, and Pattern
+   dirty mask summary stages.
+2. **AS-ENABLE matrix**: run cases from
+   `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md` with known changes in a low
+   and high Scene. Hash payloads before OFF, after OFF edits, after ON/setup,
+   after each writer generation, and after reboot.
+3. **Concurrent activity**: verify ON during playback, recording, Load/Save
+   suppression, active scalar transaction, and active Pattern transaction.
+4. **Non-semantic separation confirmed**: clean Pattern state produces no file
+   generations after convergence (S069 fix validated in Pass 1/Pass 2).
+5. **Setup failure retry**: expose or automatically retry
+   `fs_autosave_setup_failed` with bounded cadence. Preserve the rule that no
+   retry starts while Load/Save owns the facade. Consider visible "AutoSave
+   error" UI status.
+6. **Active Scene priority**: consider prioritizing the active Scene's Pattern
+   after re-enable while retaining rotating cursor for fairness.
+
+### 4.2 Pattern persistence boundary validation
+
+Source: `S070_GENERAL_FITNESS_AGENDA.md` Gate 1.
+
+- Root Scene Save/Load round trips
+- Partial Bank Save/Load without modifying unselected resident Patterns
+- Boot restore from every active Scene
+- Active, shown, pending, service-owned, and `menu_playedPattern` alignment
+- Corrupt, missing, truncated, wrong-generation, and power-cut PAT4 cases
+- Edits during Pattern snapshot/write (proving the later edit remains dirty)
+- One-time initialization at every load/retry phase
+- Mixed AutoSave/HCNAMES/explicit Scene fixtures with Pattern rows and `@`
+  provenance
+
+Build reproducible card fixtures and semantic Pattern comparators. Use PAT4
+generations, CRCs, decoded addresses/blocks, HCNAMES rows, and runtime
+indices — not FAT timestamps.
+
+### 4.3 Duplicate filename test
+
+Re-check duplicate `bootlog.bin`/`asavetrc.bin` names on hardware now that the
+LFN fix is present. Close the item if not reproducible. This is expected to be
+a non-issue going forward.
+
+### 4.4 Phase 1-3 regression validation
+
+Hardware validation of all changes made in Phases 1-3 of this session.
+Scope depends on what was actually implemented.
+
+---
+
+## Phase resolution status
+
+| Phase | Item | Status | Notes |
+|-------|------|--------|-------|
+| 1.1 | Makefile header deps | NOT STARTED | |
+| 1.2 | DEV mode default | NOTED | Standing policy, no code change |
+| 1.3 | IWDG inactive | NOTED | Standing policy, no code change |
+| 2 | Load/Save revision | NOT STARTED | Risks/questions documented |
+| 3.1 | Probability gating | NOT STARTED | Defect from S066 |
+| 3.2 | Scene automation targets | NOT STARTED | Descriptor targets only today |
+| 3.3 | LED consolidation | NOT STARTED | Phase 4.11 |
+| 3.4 | Track properties deferred | DEFERRED | See drafts/ document |
+| 4.1 | AutoSave re-enable | NOT STARTED | Root cause resolved in S069 |
+| 4.2 | Pattern persistence | NOT STARTED | Validation cases defined |
+| 4.3 | Duplicate filename test | NOT STARTED | Expected non-issue |
+| 4.4 | Regression validation | NOT STARTED | Scope TBD |
+
+## S069 closure status
+
+All Session 069 items are resolved:
+
+- **Pass 2 hardware validation**: PASS (2026-09-22). CPU budget, Load/Save
+  repair gate, quiet window, max latency all confirmed on hardware.
+- **Budget extraction**: deferred review-only. Budget primitive stays in
+  `filesystem.c` until a non-filesystem consumer beyond PatternStackService
+  needs it. No action needed this session.
+- **Load/Save repair gate**: implemented in S069 Pass 2. `patSvc_tick()` repair
+  section suppressed when `menu_activePage == LOAD_PAGE || SAVE_PAGE`.

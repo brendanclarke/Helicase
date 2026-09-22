@@ -1643,32 +1643,26 @@ items formerly in this section now live in
 
 ---
 
-## Session 069 deferred refactor target (2026-09-20)
+## Session 069 deferred refactor target (2026-09-20) — RESOLVED
 
-- **Background CPU budget module extraction from filesystem.c.** The S069
-  elapsed-time budget primitive (refill/charge/query API for bounding background
-  work to a configured CPU percentage) is initially implemented in filesystem.c
-  because the scheduler ladder and the majority of budgeted work live there.
-  PatternStackService.c calls the public API for repair epoch gating. If
-  filesystem.c continues to grow or additional subsystems need budget access,
-  extract the budget primitive into a dedicated `BackgroundBudget.c` module.
-  This is a mechanical refactor with no behavioral change — the API surface
-  already exists as public functions.
+- **Background CPU budget module extraction from filesystem.c.** Deferred
+  review-only. The budget primitive stays in `filesystem.c` alongside its
+  consumers. PatternStackService.c calls the public API. Extract to a standalone
+  `BackgroundBudget.c` only if a non-filesystem consumer beyond
+  PatternStackService needs access in the future. No action taken.
 
-- **Pattern repair epoch runs unconditionally during Load/Save menu.**
-  `patSvc_tick()` is called from the 500 Hz foreground service in timebase.c
-  and has no gate for Load/Save page presence or active commands. Its repair
-  while-loop (the bounded scan at PatternStackService.c:1566–1592) runs every
-  idle tick regardless of menu state. All five filesystem.c AutoSave/trace
-  schedulers suppress themselves when `menu_activePage == LOAD_PAGE ||
-  menu_activePage == SAVE_PAGE` or `menu_isLoadSaveCommandActive()`, but
-  `patSvc_tick()` has zero such checks. This is the likely remaining
-  contributor to Load/Save menu sluggishness during playback — the repair
-  epoch consumes bounded but nonzero CPU on every foreground pass while the
-  user browses. Scope: add a `menu_activePage` or `menu_isLoadSaveCommandActive`
-  gate to the repair section of `patSvc_tick()`, or suppress `patSvc_tick()`
-  entirely while Load/Save is active (queue drain and handover should still
-  run; only repair should be suppressed). This should be coordinated with
-  Pass 2's budget primitive (item 4A), which already plans to gate repair on
-  `filesystem_backgroundBudgetAvailable()` — the menu gate could be folded
-  into the budget's refill/deny logic or added as a separate early return.
+- ~~**Pattern repair epoch runs unconditionally during Load/Save menu.**~~
+  Resolved in Session 069 Pass 2. `patSvc_tick()` repair section is now
+  suppressed when `menu_activePage == LOAD_PAGE || SAVE_PAGE`. Queue drain and
+  handover continue; only repair is suppressed. Hardware-validated 2026-09-22
+  (PASS). Additionally, the shared background CPU budget gates repair admission
+  via `filesystem_backgroundBudgetAvailable()`.
+
+## Session 070 plan reference (2026-09-22)
+
+Session 070 systems general check documented in
+`S070_SYSTEMS_GENERAL_CHECK_AND_REVIEW_PLAN.md`. Phase order: engineering
+hygiene → Load/Save revision → remaining Phase 4 feature behavior → testing
+closeout. Per-track scale/shuffle, copy/paste, clear, live record, and roll
+overhaul deferred to a later session; see
+`knowledge_files/drafts/PATTERN_TRACK_PROPERTIES_AND_WIDGETS_COMPLETION.md`.
