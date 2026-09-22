@@ -242,10 +242,10 @@ Scope depends on what was actually implemented.
 
 | Phase | Item | Status | Notes |
 |-------|------|--------|-------|
-| 1.1 | Makefile header deps | NOT STARTED | |
-| 1.2 | DEV mode default | NOTED | Standing policy, no code change |
-| 1.3 | IWDG inactive | NOTED | Standing policy, no code change |
-| 2 | Load/Save revision | NOT STARTED | Risks/questions documented |
+| 1.1 | Makefile header deps | DONE | `-MMD -MP` + `-include *.d` added |
+| 1.2 | DEV mode default | DONE | Verified: `DEV_MODE_LOGGING 1` (config.h:88) |
+| 1.3 | IWDG inactive | DONE | Verified: `DEV_LOGGING_IWDG 0` (config.h:200) |
+| 2 | Load/Save revision | PLANNING | See `S070_PHASE2_LOAD_SAVE_REVISION.md` |
 | 3.1 | Probability gating | NOT STARTED | Defect from S066 |
 | 3.2 | Scene automation targets | NOT STARTED | Descriptor targets only today |
 | 3.3 | LED consolidation | NOT STARTED | Phase 4.11 |

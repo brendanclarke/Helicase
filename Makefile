@@ -12,6 +12,7 @@ MCU     = -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard
 
 CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -fdata-sections -ffunction-sections \
+          -MMD -MP \
           -I. \
           -ICore \
           -ICore/Hardware \
@@ -148,6 +149,8 @@ CFLAGS_DSP = $(subst -O2,-Ofast,$(CFLAGS))
 
 OBJS = $(patsubst %.c,$(BUILD)/%.o,$(patsubst %.s,$(BUILD)/%.o,$(SRCS))) \
        $(patsubst %.c,$(BUILD)/%.o,$(DSP_SRCS))
+
+-include $(OBJS:.o=.d)
 
 # -----------------------------------------------------------------------
 all: $(BUILD)/$(TARGET).bin
