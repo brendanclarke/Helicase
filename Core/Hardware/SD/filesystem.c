@@ -1840,6 +1840,37 @@ static uint8_t fs_pattern_drain_scene = 0u;
  */
 static uint32_t fs_pattern_first_dirty_us;
 static uint8_t fs_pattern_scene_cursor;
+
+/*
+ * Shared elapsed-time background CPU budget state.
+ *
+ * What: last_refill_us is the TIM2 timestamp of the latest refill;
+ * credit_us is signed microsecond credit, so a long slice can create a deficit
+ * that must be repaid before another background slice is admitted.
+ * Why: scalar AutoSave drain, Pattern AutoSave staging, and Pattern repair
+ * need one aggregate foreground CPU limiter rather than independent quotas.
+ * Inputs: filesystem_backgroundBudgetRefill() adds elapsed-time credit and
+ * filesystem_backgroundBudgetCharge() subtracts measured work. Outputs:
+ * filesystem_backgroundBudgetAvailable() admission. Lifetime: firmware.
+ * Owner: filesystem.c scheduler. RAM: 8 bytes in normal SRAM1 .bss.
+ * Affiliates: config.h budget rates, seq_isRunning(), and PatternStackService.c.
+ * DEV-only fields below add charged microseconds, denied-slice count,
+ * maximum single-slice duration, and report timestamp: 28 bytes in the
+ * current DEV_MODE_LOGGING build. The one struct keeps the approved 36-byte
+ * source allocation exact after linker alignment; logging-off builds retain
+ * only the 8-byte credit state.
+ */
+static struct {
+    uint32_t last_refill_us;
+    int32_t  credit_us;
+#if DEV_MODE_LOGGING
+    uint32_t charged_us[FS_BUDGET_CLASS_COUNT];
+    uint16_t denied_count[FS_BUDGET_CLASS_COUNT];
+    uint16_t max_slice_us[FS_BUDGET_CLASS_COUNT];
+    uint32_t report_last_us;
+#endif
+} budget_state;
+
 static uint8_t op_file_version = 0;
 static fs_mount_result_t fs_last_mount_result = FS_MOUNT_RESULT_UNKNOWN;
 static uint8_t fs_boot_detected_unsupported_card = 0;
@@ -8099,17 +8130,22 @@ static void filesystem_autosaveParameterDrain_tick(void)
     case 56: /* CLASSIFY/CAPTURE A BOUNDED NUMBER OF MASK POSITIONS */
     {
         uint16_t examined = 0u;
+        uint32_t slice_start_us = timebase_tim2Now();
 
         /*
-         * Build one stable sorted patch list without monopolizing a main-loop
-         * pass.
+         * Build one stable sorted patch list within the shared CPU budget.
          *
-         * Inputs: canonical mask and retained payload cursor. Outputs: an
-         * atomic take claims each available bit before its live get; existing
-         * bytes are captured in the transaction cache, nonexistent cells use no
-         * patch, and later cells remain untouched when either bound is reached.
-         * Why: a timer-side mutation after take re-dirties the bit for the next
-         * pass instead of being erased by a later foreground clear.
+         * What: the existing 256-position per-tick bound is supplemented by
+         * an admission check before every classification iteration. If the
+         * shared budget is exhausted, the retained payload_scan_offset lets
+         * this phase resume on the next foreground pass. A timer-side mutation
+         * after take still re-dirties the bit for the next pass.
+         * Why: repair or Pattern work earlier in this same foreground timeline
+         * must not be followed by an unbounded scalar classification slice.
+         * The phase transition at scan completion and all committed I/O/error
+         * paths remain outside this gate.
+         * Affiliate: filesystem_backgroundBudgetCharge() with
+         * FS_BUDGET_CLASS_SCALAR.
          */
         while (op_autosave_writer.payload_scan_offset <
                    AUTOSAVE_PAYLOAD_BYTES &&
@@ -8117,9 +8153,18 @@ static void filesystem_autosaveParameterDrain_tick(void)
             uint16_t payload_offset =
                 op_autosave_writer.payload_scan_offset;
 
+            if (!filesystem_backgroundBudgetAvailable()) {
+                filesystem_backgroundBudgetDeny(FS_BUDGET_CLASS_SCALAR);
+                filesystem_backgroundBudgetCharge(
+                    slice_start_us, FS_BUDGET_CLASS_SCALAR);
+                return;
+            }
+
             if (op_autosave_writer.patch_count >=
                 AUTOSAVE_PARAMETER_GETS_PER_WRITE) {
                 filesystem_autosaveTraceCaptured(1u);
+                filesystem_backgroundBudgetCharge(
+                    slice_start_us, FS_BUDGET_CLASS_SCALAR);
                 op_phase = 10u;
                 return;
             }
@@ -8139,10 +8184,13 @@ static void filesystem_autosaveParameterDrain_tick(void)
             /*
              * Take already closed the claimed bit atomically. A successful get
              * is represented by a stable patch; a failed get proves the format
-             * cell has no current owner. Only successful gets consume budget,
-             * while any later producer remains set for continuation.
+             * cell has no current owner. Only successful gets consume patch-list
+             * capacity, while any later producer remains set for continuation;
+             * the enclosing elapsed-time charge covers the classification slice.
              */
         }
+        filesystem_backgroundBudgetCharge(slice_start_us,
+                                          FS_BUDGET_CLASS_SCALAR);
         if (op_autosave_writer.payload_scan_offset >=
             AUTOSAVE_PAYLOAD_BYTES) {
             filesystem_autosaveTraceCaptured(0u);
@@ -8273,55 +8321,68 @@ static void filesystem_autosaveParameterDrain_tick(void)
             return;
         }
         /*
-         * Read only one shared CRC-work interval before transforming it.
+         * Gate and charge one new CRC-work staging slice.
          *
-         * Input: the remaining winner stream. Output: the transformed-copy
-         * checksum and subsequent write see at most the configured byte cap,
-         * while AsyncFATFS retains its normal asynchronous transfer behavior.
-         * Why: this bounds CPU CRC work without reviving rejected fixed-delay
-         * filesystem pacing or allocating another stream buffer.
+         * What: the read, transform, CRC update, and staging-buffer setup are
+         * admitted only while shared credit is positive and are charged by
+         * elapsed TIM2 time. Partial fwrite resume above and CRC finalization
+         * above are deliberately not gated because they complete already
+         * committed progress.
+         * Why: this bounds the CPU-intensive portion without fixed-delay
+         * filesystem pacing or another stream allocation. A zero-byte async
+         * read still charges the small foreground work used to attempt it.
+         * Affiliate: filesystem_backgroundBudgetCharge() with
+         * FS_BUDGET_CLASS_SCALAR.
          */
-        n = afatfs_fread(
-            op_file, staging_buf, filesystem_autosaveCrcChunkBytes(
-                AUTOSAVE_RECORD_BYTES - op_autosave_writer.stream_offset));
-        if (n == 0u) {
-            if (afatfs_feof(op_file))
-                filesystem_autosaveWriterFinishError();
+        if (!filesystem_backgroundBudgetAvailable()) {
+            filesystem_backgroundBudgetDeny(FS_BUDGET_CLASS_SCALAR);
             return;
         }
-        autosave_transformDrainChunk(
-            staging_buf, op_autosave_writer.stream_offset, (uint16_t)n,
-            op_autosave_writer.winner_generation + 1u,
-            (uint8_t)(op_autosave_writer.winner_probe + 1u),
-            fs_autosave_parameter_cache.payload_offsets,
-            fs_autosave_parameter_cache.payload_values,
-            op_autosave_writer.patch_count,
-            &op_autosave_writer.patch_cursor);
-        /*
-         * Checksum the prospective final bytes, then keep the physical target
-         * invalid while it is under construction.
-         *
-         * Input is the transformed chunk containing final generation, probe,
-         * canonical mask, payload patches, zero CRC field, and logical A5
-         * commit. Output advances CRC from those exact bytes. If this interval
-         * contains the commit cell, only its staged disk value is then cleared;
-         * the calculated CRC continues to describe the later committed image.
-         * Affiliates: post-copy CRC phases and final commit publication.
-         */
-        op_autosave_writer.target_crc32c = autosave_recordCrcUpdate(
-            op_autosave_writer.target_crc32c,
-            op_autosave_writer.stream_offset,
-            staging_buf, (uint16_t)n);
-        if (op_autosave_writer.stream_offset <=
-                AUTOSAVE_HEADER_COMMIT_OFFSET &&
-            op_autosave_writer.stream_offset + n >
-                AUTOSAVE_HEADER_COMMIT_OFFSET) {
-            staging_buf[AUTOSAVE_HEADER_COMMIT_OFFSET -
-                        op_autosave_writer.stream_offset] = 0u;
+        {
+            uint32_t chunk_start_us = timebase_tim2Now();
+
+            n = afatfs_fread(
+                op_file, staging_buf, filesystem_autosaveCrcChunkBytes(
+                    AUTOSAVE_RECORD_BYTES -
+                    op_autosave_writer.stream_offset));
+            if (n == 0u) {
+                filesystem_backgroundBudgetCharge(
+                    chunk_start_us, FS_BUDGET_CLASS_SCALAR);
+                if (afatfs_feof(op_file))
+                    filesystem_autosaveWriterFinishError();
+                return;
+            }
+            autosave_transformDrainChunk(
+                staging_buf, op_autosave_writer.stream_offset, (uint16_t)n,
+                op_autosave_writer.winner_generation + 1u,
+                (uint8_t)(op_autosave_writer.winner_probe + 1u),
+                fs_autosave_parameter_cache.payload_offsets,
+                fs_autosave_parameter_cache.payload_values,
+                op_autosave_writer.patch_count,
+                &op_autosave_writer.patch_cursor);
+            /*
+             * Checksum the prospective final bytes, then keep the physical
+             * target invalid while it is under construction. If this interval
+             * contains the commit cell, only its staged disk value is cleared;
+             * the calculated CRC still describes the later committed image.
+             */
+            op_autosave_writer.target_crc32c = autosave_recordCrcUpdate(
+                op_autosave_writer.target_crc32c,
+                op_autosave_writer.stream_offset,
+                staging_buf, (uint16_t)n);
+            if (op_autosave_writer.stream_offset <=
+                    AUTOSAVE_HEADER_COMMIT_OFFSET &&
+                op_autosave_writer.stream_offset + n >
+                    AUTOSAVE_HEADER_COMMIT_OFFSET) {
+                staging_buf[AUTOSAVE_HEADER_COMMIT_OFFSET -
+                            op_autosave_writer.stream_offset] = 0u;
+            }
+            op_autosave_writer.stream_offset += n;
+            op_autosave_writer.chunk_bytes = (uint16_t)n;
+            op_autosave_writer.chunk_written = 0u;
+            filesystem_backgroundBudgetCharge(
+                chunk_start_us, FS_BUDGET_CLASS_SCALAR);
         }
-        op_autosave_writer.stream_offset += n;
-        op_autosave_writer.chunk_bytes = (uint16_t)n;
-        op_autosave_writer.chunk_written = 0u;
         return;
     }
 
@@ -14556,15 +14617,39 @@ static uint8_t filesystem_patternWriteRegionSection(
     if (op_stream_index >= section_bytes)
         return 1u;
     if (op_bytes_done == 0u) {
-        remaining = section_bytes - op_stream_index;
-        chunk = (remaining > sizeof(staging_buf))
-            ? (uint16_t)sizeof(staging_buf) : (uint16_t)remaining;
-        memcpy(staging_buf, source + op_stream_index, chunk);
-        op_bytes_done = chunk;
-        op_item_offset = 0u;
-        op_pattern_crc = filesystem_patternCrcFeed(
-            op_pattern_crc, section_start + op_stream_index,
-            staging_buf, chunk);
+        /*
+         * Gate and charge the next Pattern staging/CRC slice.
+         *
+         * What: one 512-byte-or-smaller resident memcpy and CRC feed are
+         * admitted from the shared background budget and charged by elapsed
+         * TIM2 time. If denied, op_stream_index and op_bytes_done remain
+         * unchanged so the caller re-enters this same staging boundary.
+         * Why: Pattern AutoSave is lower-priority background work and must
+         * share the aggregate CPU allowance with scalar drain and repair.
+         * The afatfs_fwrite resume path below is not gated because it writes
+         * already-committed staging data; section completion is also ungated.
+         * Affiliate: filesystem_backgroundBudgetCharge() with
+         * FS_BUDGET_CLASS_PATTERN.
+         */
+        if (!filesystem_backgroundBudgetAvailable()) {
+            filesystem_backgroundBudgetDeny(FS_BUDGET_CLASS_PATTERN);
+            return 0u;
+        }
+        {
+            uint32_t staging_start_us = timebase_tim2Now();
+
+            remaining = section_bytes - op_stream_index;
+            chunk = (remaining > sizeof(staging_buf))
+                ? (uint16_t)sizeof(staging_buf) : (uint16_t)remaining;
+            memcpy(staging_buf, source + op_stream_index, chunk);
+            op_bytes_done = chunk;
+            op_item_offset = 0u;
+            op_pattern_crc = filesystem_patternCrcFeed(
+                op_pattern_crc, section_start + op_stream_index,
+                staging_buf, chunk);
+            filesystem_backgroundBudgetCharge(
+                staging_start_us, FS_BUDGET_CLASS_PATTERN);
+        }
     }
     n = afatfs_fwrite(op_file, staging_buf + op_item_offset,
                       op_bytes_done - op_item_offset);
@@ -24744,6 +24829,161 @@ void filesystem_devIwdgBootCheck(void)
 #endif /* DEV_MODE_LOGGING && DEV_LOGGING_IWDG */
 
 /*
+ * Return the current background CPU allowance rate.
+ *
+ * What: selects the configured microseconds-per-millisecond rate from the
+ * live sequencer transport state. Why: playback needs the tighter allowance
+ * while stopped playback can converge background work faster. Inputs:
+ * seq_isRunning() and config.h rates. Output: one compile-time rate; no state
+ * changes. Affiliate: the shared-budget API functions below.
+ */
+static uint32_t filesystem_backgroundBudgetRate(void)
+{
+    return seq_isRunning()
+        ? BACKGROUND_CPU_BUDGET_US_PER_MS_PLAYING
+        : BACKGROUND_CPU_BUDGET_US_PER_MS_STOPPED;
+}
+
+/*
+ * Refill the shared background CPU budget from elapsed wall time.
+ *
+ * What: converts elapsed TIM2 time to milliseconds and adds the selected
+ * transport-rate allowance to signed credit. Positive credit is capped at one
+ * millisecond of allowance, preventing an idle interval from accumulating an
+ * unbounded burst. The first call seeds the timestamp without awarding credit.
+ * Why: the budget is independent of filesystem_tick() call frequency and
+ * carries overshoot deficits across foreground passes. Inputs: TIM2 and
+ * seq_isRunning(). Outputs: budget_state.credit_us and the DEV-only H report.
+ * Caller: filesystem_tick(), once before the budgeted schedulers.
+ */
+void filesystem_backgroundBudgetRefill(void)
+{
+    uint32_t now = timebase_tim2Now();
+
+    if (budget_state.last_refill_us == 0u) {
+        budget_state.last_refill_us = now;
+#if DEV_MODE_LOGGING
+        budget_state.report_last_us = now;
+#endif
+        return;
+    }
+
+    {
+        uint32_t elapsed_us = timebase_tim2Delta(
+            now, budget_state.last_refill_us);
+        uint32_t elapsed_ms = elapsed_us / 1000u;
+        uint32_t rate = filesystem_backgroundBudgetRate();
+
+        budget_state.last_refill_us = now;
+        if (rate != 0u) {
+            if (elapsed_ms != 0u)
+                budget_state.credit_us += (int32_t)(elapsed_ms * rate);
+            if (budget_state.credit_us > (int32_t)rate)
+                budget_state.credit_us = (int32_t)rate;
+        }
+    }
+
+#if DEV_MODE_LOGGING
+    /*
+     * Emit one H record per work class every five seconds, then clear the
+     * interval counters. flags bits 0..1 select class and bits 2..7 carry
+     * charged milliseconds capped at 63; value32 carries denied count and
+     * maximum slice microseconds. This is diagnostic only.
+     */
+    if (timebase_tim2Delta(now, budget_state.report_last_us) >= 5000000u) {
+        uint8_t cls;
+
+        for (cls = 0u; cls < FS_BUDGET_CLASS_COUNT; cls++) {
+            uint8_t charged_ms = (uint8_t)(
+                budget_state.charged_us[cls] / 1000u);
+            uint8_t flags;
+            uint32_t value;
+
+            if (charged_ms > 63u)
+                charged_ms = 63u;
+            flags = (uint8_t)(cls | (uint8_t)(charged_ms << 2u));
+            value = (uint32_t)budget_state.denied_count[cls] |
+                    ((uint32_t)budget_state.max_slice_us[cls] << 16u);
+            autosaveTrace_record(AUTOSAVE_TRACE_STAGE_BUDGET_REPORT,
+                                 flags, value);
+            budget_state.charged_us[cls] = 0u;
+            budget_state.denied_count[cls] = 0u;
+            budget_state.max_slice_us[cls] = 0u;
+        }
+        budget_state.report_last_us = now;
+    }
+#endif
+}
+
+/*
+ * Query shared background CPU budget admission.
+ *
+ * What: returns nonzero only while signed credit is positive. A zero
+ * configured rate is an explicit debugging override and admits work without
+ * consuming credit. Why: every budgeted slice must yield before it begins when
+ * the aggregate allowance is exhausted. Inputs: current credit and selected
+ * transport rate. Output: pure admission predicate; no timestamp or counter
+ * is changed. Affiliates: all scalar, Pattern, and repair gates.
+ */
+uint8_t filesystem_backgroundBudgetAvailable(void)
+{
+    if (filesystem_backgroundBudgetRate() == 0u)
+        return 1u;
+    return (uint8_t)(budget_state.credit_us > 0);
+}
+
+/*
+ * Charge one measured background CPU slice to the shared budget.
+ *
+ * What: computes elapsed TIM2 microseconds from start_us to now and subtracts
+ * them from signed credit. DEV logging accumulates total charged time and the
+ * maximum single-slice duration for the supplied work class. Why: a slice may
+ * overshoot the remaining credit; the signed deficit then suppresses later
+ * work until wall-time refill repays it. Inputs: start_us and work_class.
+ * Outputs: shared credit and optional H-report accounting. Affiliates:
+ * filesystem_backgroundBudgetAvailable() and the four budgeted call sites.
+ */
+void filesystem_backgroundBudgetCharge(uint32_t start_us, uint8_t work_class)
+{
+    uint32_t elapsed = timebase_tim2Delta(timebase_tim2Now(), start_us);
+
+    if (filesystem_backgroundBudgetRate() != 0u)
+        budget_state.credit_us -= (int32_t)elapsed;
+
+#if DEV_MODE_LOGGING
+    if (work_class < FS_BUDGET_CLASS_COUNT) {
+        budget_state.charged_us[work_class] += elapsed;
+        if (elapsed > (uint32_t)budget_state.max_slice_us[work_class])
+            budget_state.max_slice_us[work_class] = (uint16_t)(
+                elapsed > 0xFFFFu ? 0xFFFFu : elapsed);
+    }
+#else
+    (void)work_class;
+#endif
+}
+
+/*
+ * Record a budget-denied work attempt for the next DEV H report.
+ *
+ * What: saturating per-class diagnostic increment with no credit mutation.
+ * Why: a gate can reject a slice before it has a start timestamp to charge,
+ * and PatternStackService.c must report that denial without accessing
+ * filesystem.c's private accounting. Inputs: one shared work class. Output:
+ * DEV-only counter state; production builds compile the function to a no-op.
+ * Affiliate: filesystem_backgroundBudgetAvailable() gates.
+ */
+void filesystem_backgroundBudgetDeny(uint8_t work_class)
+{
+#if DEV_MODE_LOGGING
+    if (work_class < FS_BUDGET_CLASS_COUNT &&
+        budget_state.denied_count[work_class] != 0xFFFFu)
+        budget_state.denied_count[work_class]++;
+#else
+    (void)work_class;
+#endif
+}
+
+/*
  * Normalize the foreground filesystem drain policy.
  *
  * Input: zero for one poll, nonzero for bounded fast drain. Output: only the
@@ -24847,6 +25087,16 @@ void filesystem_tick(void)
     /* PatternTrace is diagnostic-only and runs behind the existing trace gate. */
     if (status == FS_STATUS_IDLE)
         filesystem_patternTraceFlushSchedule_tick();
+    /*
+     * Refill the shared elapsed-time CPU budget before any budgeted
+     * AutoSave scheduler runs. Settings persistence and diagnostic trace
+     * flushes above retain their existing priority and are not charged to
+     * this pool; scalar drain, Pattern drain, and Pattern repair share it.
+     * Input: TIM2 and sequencer transport state. Output: bounded positive
+     * credit for this foreground timeline. Affiliate: the budget API and
+     * PatternStackService.c's repair gate.
+     */
+    filesystem_backgroundBudgetRefill();
     /*
      * Start the durable AutoSave writer only after settings and, when pending,
      * its pre-drain diagnostic witness declined the idle facade.

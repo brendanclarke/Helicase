@@ -32,8 +32,12 @@ void patSvc_init(void);
  * Output: at most one queue/relocation transaction per foreground pass, with
  * bounded bulk/repair scan work. Logical occupancy is reconciled at mutation
  * and lifecycle boundaries and cached through clean idle ticks, so this pass
- * does not rescan the unchanged 256-byte backed bitmap. Affiliate:
- * PatternData.c's direct bitmap authority and patSvc_updateDensityLevel().
+ * does not rescan the unchanged 256-byte backed bitmap. The repair section is
+ * suppressed on LOAD_PAGE/SAVE_PAGE and gated by the shared elapsed-time
+ * filesystem background budget; both gates preserve its cursor. Queue drain
+ * and handover remain active for lifecycle correctness. Affiliate:
+ * PatternData.c's direct bitmap authority, patSvc_updateDensityLevel(), and
+ * filesystem.h's budget API.
  */
 void patSvc_tick(void);
 

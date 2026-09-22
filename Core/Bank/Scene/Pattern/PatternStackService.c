@@ -17,6 +17,8 @@
 #include "Autosave.h"
 #include "timebase.h"
 #include "config.h"
+#include "filesystem.h"
+#include "menu.h"
 
 #include <string.h>
 
@@ -1588,13 +1590,47 @@ void patSvc_tick(void)
         reservation_rebuild_pending = 0u;
     }
 
-    /* Inspect a bounded number of address entries, then sleep when done. */
+    /*
+     * Suppress repair while the Load/Save page owns the user's foreground
+     * attention and SD/name-cache policy.
+     *
+     * What: queue drain and Scene handover above remain active, but the
+     * finite repair epoch returns before scanning address entries while the
+     * active page is LOAD_PAGE or SAVE_PAGE. The repair cursor is retained.
+     * Why: repair is independent background maintenance and competes with the
+     * SD work the user is waiting to see complete in this menu. Affiliates:
+     * filesystem.c's matching Load/Save scheduler gates and SCOPING_TARGETS.md
+     * Session 069 deferred item.
+     */
+    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)
+        return;
+
+    /*
+     * Inspect bounded address entries within the shared elapsed-time budget.
+     *
+     * What: the existing deterministic entry-count limit runs in parallel
+     * with the CPU budget; whichever limit fires first yields the repair
+     * epoch. A denied entry preserves the cursor for the next foreground
+     * pass, while a completed repair step charges its measured elapsed time.
+     * Why: repair must not consume the aggregate background allowance after
+     * scalar or Pattern drain work has already spent it. No-op inspections are
+     * still bounded by PAT_REPAIR_SCAN_IDLE/BUSY and are intentionally not
+     * charged because they perform no relocation or reservation work.
+     * Affiliates: filesystem_backgroundBudgetAvailable(),
+     * filesystem_backgroundBudgetCharge(), patSvc_repairBudget().
+     */
     if (tier1_scan_cursor < PATSVC_ADDRESS_COUNT) {
+        if (!filesystem_backgroundBudgetAvailable()) {
+            filesystem_backgroundBudgetDeny(FS_BUDGET_CLASS_REPAIR);
+            return;
+        }
+
         uint8_t budget = patSvc_repairBudget();
         uint8_t inspected = 0u;
 
         while (inspected < budget &&
                tier1_scan_cursor < PATSVC_ADDRESS_COUNT) {
+            uint32_t step_start_us = timebase_tim2Now();
             uint16_t address_index = tier1_scan_cursor++;
             uint16_t old_offset = 0u;
             uint16_t new_offset = 0u;
@@ -1613,6 +1649,10 @@ void patSvc_tick(void)
                                         (uint8_t)(service_scene & 0x0Fu),
                                         (uint32_t)address_index);
                 }
+                filesystem_backgroundBudgetCharge(step_start_us,
+                                                  FS_BUDGET_CLASS_REPAIR);
+                if (!filesystem_backgroundBudgetAvailable())
+                    break;
             }
         }
     }

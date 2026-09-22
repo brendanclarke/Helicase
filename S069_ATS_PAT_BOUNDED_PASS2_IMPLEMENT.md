@@ -22,18 +22,28 @@ Load/Save menu.
 ## Budget primitive design
 
 State in filesystem.c (owner of the scheduler ladder and majority of budgeted
-work):
+work), grouped into one struct so the approved allocation has no linker-padding
+ambiguity:
 
 ```
-static uint32_t budget_last_refill_us;   // TIM2 timestamp of last refill
-static int32_t  budget_credit_us;        // signed — negative = deficit
+static struct {
+    uint32_t last_refill_us;
+    int32_t  credit_us;
+#if DEV_MODE_LOGGING
+    uint32_t charged_us[3];
+    uint16_t denied_count[3];
+    uint16_t max_slice_us[3];
+    uint32_t report_last_us;
+#endif
+} budget_state;
 ```
 
-Public API (three functions):
+Public API (four functions):
 
 ```
 uint8_t filesystem_backgroundBudgetAvailable(void);
 void    filesystem_backgroundBudgetCharge(uint32_t start_us, uint8_t work_class);
+void    filesystem_backgroundBudgetDeny(uint8_t work_class);
 void    filesystem_backgroundBudgetRefill(void);
 ```
 
@@ -48,7 +58,8 @@ Charge logic: computes `timebase_tim2Delta(now, start_us)`, subtracts from
 credit. Updates per-class accounting (total charged, max single-slice, deny
 count) for periodic diagnostic trace.
 
-Available: returns `(uint8_t)(budget_credit_us > 0)`.
+Available: returns `(uint8_t)(budget_state.credit_us > 0)`; a zero configured
+rate is a debugging override that admits work without consuming credit.
 
 Work classes:
 
@@ -130,8 +141,8 @@ After `fs_pattern_scene_cursor` (line 1842), before `op_file_version`
  * Background CPU budget state.
  *
  * What: elapsed-time budget that bounds aggregate background CPU across
- * all AutoSave drain phases and Pattern repair work. budget_last_refill_us
- * is the TIM2 timestamp of the last refill. budget_credit_us is a signed
+ * all AutoSave drain phases and Pattern repair work. budget_state.last_refill_us
+ * is the TIM2 timestamp of the last refill. budget_state.credit_us is a signed
  * microsecond credit: positive means work is allowed, negative means a
  * previous slice overshot and the deficit must be repaid before new work
  * is admitted.
@@ -141,16 +152,24 @@ After `fs_pattern_scene_cursor` (line 1842), before `op_file_version`
  * without separate deficit state. The one-millisecond cap in the refill
  * function prevents idle accumulation.
  *
- * Inputs: budget_last_refill_us seeded on first refill call;
- * budget_credit_us modified by refill (+) and charge (-).
+ * Inputs: budget_state.last_refill_us seeded on first refill call;
+ * budget_state.credit_us modified by refill (+) and charge (-).
  * Outputs: filesystem_backgroundBudgetAvailable() predicate.
  * Affiliates: filesystem_backgroundBudgetRefill() (called from
  * filesystem_tick()), filesystem_backgroundBudgetCharge() (called from
  * drain phases and PatternStackService.c repair), seq_isRunning()
  * (rate selection), config.h BACKGROUND_CPU_BUDGET_US_PER_MS_*.
  */
-static uint32_t budget_last_refill_us;
-static int32_t  budget_credit_us;
+static struct {
+    uint32_t last_refill_us;
+    int32_t  credit_us;
+#if DEV_MODE_LOGGING
+    uint32_t charged_us[FS_BUDGET_CLASS_COUNT];
+    uint16_t denied_count[FS_BUDGET_CLASS_COUNT];
+    uint16_t max_slice_us[FS_BUDGET_CLASS_COUNT];
+    uint32_t report_last_us;
+#endif
+} budget_state;
 
 /*
  * Per-class budget accounting for diagnostic trace.
@@ -168,17 +187,14 @@ static int32_t  budget_credit_us;
  * Inputs: filesystem_backgroundBudgetCharge() updates charged and max;
  * call sites increment denied on budget exhaustion.
  * Outputs: autosaveTrace_record() with stage 'H' every ~5 seconds.
- * Affiliates: budget_report_last_us, filesystem_backgroundBudgetRefill().
+ * Affiliates: budget_state.report_last_us,
+ * filesystem_backgroundBudgetRefill().
  */
 #define FS_BUDGET_CLASS_REPAIR   0u
 #define FS_BUDGET_CLASS_SCALAR   1u
 #define FS_BUDGET_CLASS_PATTERN  2u
 #define FS_BUDGET_CLASS_COUNT    3u
 
-static uint32_t budget_charged_us[FS_BUDGET_CLASS_COUNT];
-static uint16_t budget_denied_count[FS_BUDGET_CLASS_COUNT];
-static uint16_t budget_max_slice_us[FS_BUDGET_CLASS_COUNT];
-static uint32_t budget_report_last_us;
 ```
 
 RAM: 8 bytes (budget state) + 24 bytes (accounting) + 4 bytes (report
@@ -384,6 +400,7 @@ void        filesystem_backgroundBudgetRefill(void);
 uint8_t     filesystem_backgroundBudgetAvailable(void);
 void        filesystem_backgroundBudgetCharge(uint32_t start_us,
                                               uint8_t work_class);
+void        filesystem_backgroundBudgetDeny(uint8_t work_class);
 ```
 
 ---
@@ -947,7 +964,9 @@ Add after the existing quiet-window/max-latency sentence:
 | A02 | PatternStackService.h | UPDATE | 4A |
 | A03 | filesystem.h | UPDATE | 4A |
 
-16 primary changes + 3 auxiliary = 19 total.
+16 primary changes + 3 auxiliary = 19 total, plus the diagnostic deny-counter
+helper added to the C07 API so PatternStackService.c can report rejected repair
+slices without reaching into filesystem.c private state.
 
 ### RAM / ROM budget
 
@@ -978,4 +997,51 @@ Add after the existing quiet-window/max-latency sentence:
 
 ## Work log
 
-*(To be updated during implementation.)*
+### 2026-09-22 — pre-implementation RAM gate
+
+Read `MEMORY.md`, the parent S069 goal, `S069_ATS_PROBLEMS.md`, and this
+Pass-2 schedule. The proposed budget primitive requires a new persistent
+normal-SRAM1 `.bss` allocation owned by `Core/Hardware/SD/filesystem.c` for
+the firmware lifetime:
+
+- 8 B always-on budget state: `budget_last_refill_us` and
+  `budget_credit_us`.
+- 28 B diagnostic accounting state: three 32-bit charged totals, three
+  16-bit deny counters, three 16-bit maximum-slice values, and one 32-bit
+  report timestamp. This is retained in the current `DEV_MODE_LOGGING=1`
+  build and should be compiled out when logging is disabled.
+- Exact requested allocation in the current development build: **36 B in
+  normal SRAM1 `.bss`, firmware-lifetime, filesystem scheduler owner**.
+
+The linker places ordinary static zero-initialized globals in SRAM1 `.bss`
+(`0x20020000` region; current `.bss` begins at `0x20020dc0`). The project RAM
+policy in `MEMORY.md` and `SRAM_MANIFEST.md` requires user acknowledgement
+of this exact byte count, region, lifetime, and owner before implementing a
+new allocation. The user explicitly approved the 36-byte allocation on
+2026-09-22, so implementation proceeded.
+
+### 2026-09-22 — implementation pass started
+
+Implemented the budget configuration/API surface, shared filesystem-owned
+credit/refill/charge state, DEV-only per-class accounting and `H` trace report,
+Pattern repair Load/Save and budget gates, scalar phases 56/13 gates, Pattern
+staging gate, and the decoder/scoping documentation updates. Added the small
+`filesystem_backgroundBudgetDeny()` API because PatternStackService.c cannot
+otherwise update filesystem.c's private per-class deny counter. This helper
+adds no storage; logging-off builds compile its accounting to a no-op.
+
+### 2026-09-22 — clean-link verification
+
+`make clean && make -j2` passed. The linked symbol
+`budget_state.lto_priv.0` is exactly 36 bytes in normal SRAM1 `.bss`, matching
+the approved allocation: 8 bytes always-on credit state plus 28 bytes of
+DEV-only accounting in the current `DEV_MODE_LOGGING=1` build. The resulting
+image reports `text=450,140`, `data=416`, `bss=291,756`. `git diff --check`
+passed and `tools/decode_devlogs.py` passed `py_compile` with its cache placed
+outside the repository.
+
+The final incremental rebuild and `make img` also passed after the transport-
+rate cap correction. The generated `build/LXRV2_lxr02.img` is 450,572 bytes;
+the H-stage decoder smoke test decoded class, charged milliseconds, deny
+count, and maximum-slice fields correctly. Hardware execution and the Session
+069 CPU snapshot remain pending.

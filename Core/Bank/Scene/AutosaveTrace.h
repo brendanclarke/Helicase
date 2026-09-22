@@ -184,8 +184,16 @@ typedef enum {
      * maintained count in bits 0..15 and the coherent full-scan count in
      * bits 16..31. This record is diagnostic only and has no production
      * storage or scheduler effect. Affiliate: Autosave.c.
-     */
+    */
     AUTOSAVE_TRACE_STAGE_DIRTY_COUNT_MISMATCH = 'Z',
+    /*
+     * H: periodic shared-background-budget report. flags bits 0..1 select
+     * repair/scalar/Pattern and bits 2..7 carry charged milliseconds capped
+     * at 63. value32 bits 0..15 carry denied-slice count and bits 16..31
+     * carry maximum charged slice microseconds. DEV logging only; no product
+     * persistence or scheduler decision depends on this record.
+     */
+    AUTOSAVE_TRACE_STAGE_BUDGET_REPORT = 'H',
 } autosave_trace_stage_t;
 
 /*

@@ -41,6 +41,13 @@ maximum latency and fair Scene cursor. The 512-byte non-persisted SRAM1
 reservation image plus three policy/lifecycle bytes is documented in
 `SRAM_MANIFEST.md`. Clean source/build/image verification passed with
 `text=449,476`, `data=404`, `bss=291,724`; hardware verification is pending.
+Pass 2 now adds the shared elapsed-time background CPU budget across scalar
+AutoSave drain, Pattern AutoSave staging, and Pattern repair, plus the
+Load/Save repair gate and DEV-only H-stage accounting. The approved
+`budget_state` is exactly 36 bytes in normal SRAM1 `.bss`; clean source/build/
+image verification now reports `text=450,140`, `data=416`, `bss=291,756`.
+Pass 2 hardware verification and final snapshot measurement remain pending;
+see `S069_ATS_PAT_BOUNDED_PASS2_IMPLEMENT.md`.
 The implementation notes and verification table are in
 `S069_SLACK_REACTIVE_COMPACTION_IMPLEMENTATION.md` and
 `S069_ATS_PAT_BOUNDED_PASS1_IMPLEMENT.md`. Per-track step scale and

@@ -540,6 +540,9 @@ uint8_t     filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind);
  * higher-priority work declines. Semantic Pattern AutoSave admission is
  * coalesced by the implementation's 250 ms quiet window and 5 s maximum
  * latency; non-semantic Pattern maintenance remains independently scheduled.
+ * The elapsed-time background CPU budget is refilled in this scheduler and is
+ * shared by scalar drain, Pattern drain, and Pattern repair: 2.5% while the
+ * sequencer runs and 5% while stopped.
  * Input: current filesystem/runtime state and owner dirty registers. Output:
  * bounded progress with no blocking wait or filesystem ownership transfer to
  * callers. Affiliate: Autosave.c and PatternStackService.c.
@@ -570,6 +573,37 @@ void        filesystem_ack(void);
  */
 void        filesystem_setFastDrain(uint8_t on);
 uint8_t     filesystem_fastDrainActive(void);
+
+/*
+ * Shared elapsed-time background CPU budget.
+ *
+ * What: filesystem_backgroundBudgetRefill() adds wall-time credit;
+ * filesystem_backgroundBudgetAvailable() reports whether credit is positive;
+ * filesystem_backgroundBudgetCharge() subtracts a measured work slice; and
+ * filesystem_backgroundBudgetDeny() records a skipped slice for diagnostics.
+ *
+ * Why: scalar AutoSave drain, Pattern AutoSave staging, and Pattern repair
+ * share one budget so their aggregate foreground CPU is bounded rather than
+ * each subsystem independently spending the full allowance. The budget is
+ * 2.5% during playback and 5% while stopped, as configured in config.h.
+ *
+ * Inputs: refill reads TIM2 and seq_isRunning(); charge reads TIM2 and takes
+ * a work-class identifier. Outputs: an admission predicate and diagnostic
+ * accounting only; no filesystem I/O is performed.
+ * Work classes: 0 = repair, 1 = scalar drain, 2 = Pattern drain.
+ * Callers: filesystem_tick(), filesystem.c drain phases, and
+ * PatternStackService.c patSvc_tick().
+ */
+#define FS_BUDGET_CLASS_REPAIR   0u
+#define FS_BUDGET_CLASS_SCALAR   1u
+#define FS_BUDGET_CLASS_PATTERN  2u
+#define FS_BUDGET_CLASS_COUNT    3u
+
+void        filesystem_backgroundBudgetRefill(void);
+uint8_t     filesystem_backgroundBudgetAvailable(void);
+void        filesystem_backgroundBudgetCharge(uint32_t start_us,
+                                              uint8_t work_class);
+void        filesystem_backgroundBudgetDeny(uint8_t work_class);
 
 /*
  * Bank operation child-progress query.

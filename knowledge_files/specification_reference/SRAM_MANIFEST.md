@@ -5,8 +5,8 @@ The detailed section/symbol inventory below was regenerated from the
 `d5af5fd`; Session 065/066/067 deltas noted below); the Session 068 delta is
 noted separately below and is small (front-panel event-ring RAM only). Session
 069's Pattern Stack Service delta is recorded below. The current Session 069
-Pass 1 implementation build (2026-09-20) reports
-`text=449,476`, `data=404`, and `bss=291,724` from
+Pass 2 source/build (2026-09-22) reports
+`text=450,140`, `data=416`, and `bss=291,756` from
 `arm-none-eabi-size build/lxr02.elf`.
 The approved 290-byte `fs_resident_source` cache, the one-byte
 `menu_pendingPageSwitch`, and Session 061 boot scratch all share normal SRAM1.
@@ -67,6 +67,14 @@ linker alignment. `reservation_image` is 512 B and the three flags are each
 one byte in the link map. The reservation image is neither persisted in PAT4
 nor duplicated per Scene/Pattern.
 
+Pass 2 adds exactly 36 bytes of source-owned normal-SRAM1 `.bss` in
+`filesystem.c`: 8 bytes of firmware-lifetime shared elapsed-time budget state
+and 28 bytes of `DEV_MODE_LOGGING`-only per-class diagnostic accounting. The
+fields are grouped in one `budget_state` object so the linked symbol remains
+exactly 36 bytes; logging-off builds retain only the 8-byte credit state. User
+approval for this allocation was recorded in
+`S069_ATS_PAT_BOUNDED_PASS2_IMPLEMENT.md` on 2026-09-22.
+
 `DEV_LOGGING_IWDG`'s retained boot capsule (config.h; see DEV_MODES.md) adds a
 new, separate 12-of-32-approved-byte allocation in previously-unmapped SRAM2
 (`0x2007c000`), the `.devwdg_noinit` linker section in
@@ -91,12 +99,12 @@ implementation.
 | --- | ---: | ---: | ---: | --- |
 | DTCM (`.dtcm` + `.dtcmz`) | `0x20000000` | 131,072 B | 12,280 B | 118,792 B — future delay-line buffers only |
 | SRAM1 DMA/no-cache | `0x20020000` | included below | 3,100 B | included in SRAM1 total |
-| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 284,528 B | included in SRAM1 total |
-| **SRAM1 total** | `0x20020000` | **376,832 B** | **287,628 B** | **89,204 B — future Pattern data only** |
-| **All static allocated RAM** | — | — | **299,908 B** | — |
+| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | included below | 285,500 B | included in SRAM1 total |
+| **SRAM1 total** | `0x20020000` | **376,832 B** | **288,600 B** | **88,232 B — future Pattern data only** |
+| **All static allocated RAM** | — | — | **300,880 B** | — |
 
-The image contains 412 B of initialized SRAM1 data and 289,964 B of
-zero-initialized data: 3,100 B in `.dma_nocache`, 283,292 B in normal SRAM1
+The image contains 416 B of initialized SRAM1 data and 291,756 B of
+zero-initialized data: 3,100 B in `.dma_nocache`, 285,084 B in normal SRAM1
 `.bss`, and 3,572 B in DTCM `.dtcmz`. The initialized DTCM `.dtcm` section is
 read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
@@ -104,13 +112,13 @@ read-only table storage at runtime but still consumes 8,708 B of DTCM capacity.
 
 | Section | Address | Size | Region | Contents |
 | --- | ---: | ---: | ---| --- |
-| `.text` | `0x080081c8` | 436,544 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
+| `.text` | `0x080081c8` | 437,208 B | FLASH | Firmware code and ordinary read-only data, including `transientData` |
 | `.itcm` | `0x00000000` | 3,768 B | ITCM | Hot code copied from FLASH at reset |
 | `.dtcm` | `0x20000000` | 8,708 B | DTCM | Fast immutable DSP lookup tables |
 | `.dtcmz` | `0x20002204` | 3,572 B | DTCM | Zero-initialized DSP/audio working buffers |
 | `.dma_nocache` | `0x20020000` | 3,100 B | SRAM1 | DMA audio/ADC buffers |
-| `.data` | `0x20020c1c` | 404 B | SRAM1 | Initialized writable globals |
-| `.bss` | `0x20020db0` | 285,052 B | SRAM1 | Normal zero-initialized globals, including Pattern storage/snapshot |
+| `.data` | `0x20020c1c` | 416 B | SRAM1 | Initialized writable globals |
+| `.bss` | `0x20020dc0` | 285,084 B | SRAM1 | Normal zero-initialized globals, including Pattern storage/snapshot |
 
 The final FLASH load image remains safely before the reserved sample-FLASH
 boundary `0x08080000`. `build/lxr02.bin` is 449,880 B; the packaged
@@ -127,6 +135,7 @@ boundary `0x08080000`. `build/lxr02.bin` is 449,880 B; the packaged
 | `autosave_dirty_count` | 2 B | Exact SRAM1 `.bss` population of set bits in the canonical scalar AutoSave mask |
 | `autosave_last_pattern_semantic_us` | 4 B | TIM2 timestamp of the latest semantic Pattern mutation, owned by Autosave.c |
 | `fs_pattern_first_dirty_us` + `fs_pattern_scene_cursor` | 5 B | Semantic Pattern quiet-window epoch and rotating drain fairness state, owned by filesystem.c |
+| `budget_state` | 36 B | Shared elapsed-time background CPU credit plus DEV-only repair/scalar/Pattern accounting, firmware-lifetime filesystem.c owner |
 | `pat_autosave_snapshot` | 10,519 B | Sole immutable Pattern AutoSave snapshot for one in-flight Scene |
 | `autosave_pattern_dirty_mask` | 2 B | Separate one-bit-per-Scene Pattern work ownership |
 | `fs_pattern_generation` + `fs_pattern_drain_scene` | 65 B | Sixteen hidden-pair generation baselines plus current drain selector |

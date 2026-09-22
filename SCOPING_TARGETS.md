@@ -1503,7 +1503,8 @@ items formerly in this section now live in
   This is a mechanical refactor with no behavioral change — the API surface
   already exists as public functions.
 
-- **Pattern repair epoch runs unconditionally during Load/Save menu.**
+- **Pattern repair epoch ran unconditionally during Load/Save menu (addressed
+  in S069 Pass 2).**
   `patSvc_tick()` is called from the 500 Hz foreground service in timebase.c
   and has no gate for Load/Save page presence or active commands. Its repair
   while-loop (the bounded scan at PatternStackService.c:1566–1592) runs every
@@ -1516,7 +1517,7 @@ items formerly in this section now live in
   user browses. Scope: add a `menu_activePage` or `menu_isLoadSaveCommandActive`
   gate to the repair section of `patSvc_tick()`, or suppress `patSvc_tick()`
   entirely while Load/Save is active (queue drain and handover should still
-  run; only repair should be suppressed). This should be coordinated with
-  Pass 2's budget primitive (item 4A), which already plans to gate repair on
-  `filesystem_backgroundBudgetAvailable()` — the menu gate could be folded
-  into the budget's refill/deny logic or added as a separate early return.
+  run; only repair should be suppressed). **Addressed by S069 Pass 2 item 4A:**
+  `patSvc_tick()` now leaves queue drain and handover active but returns before
+  repair when `menu_activePage` is `LOAD_PAGE` or `SAVE_PAGE`; repair also uses
+  the shared `filesystem_backgroundBudgetAvailable()` gate.

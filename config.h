@@ -483,6 +483,26 @@
 #define AUTOSAVE_PATTERN_MAX_LATENCY_MS  5000u
 
 /*
+ * Background CPU budget for AutoSave drain and Pattern repair work.
+ *
+ * What: BACKGROUND_CPU_BUDGET_US_PER_MS_PLAYING is the microseconds of
+ * background work allowed per millisecond of wall time while the sequencer
+ * transport is running (2.5% CPU). BACKGROUND_CPU_BUDGET_US_PER_MS_STOPPED
+ * is the allowance while stopped (5% CPU). Zero disables the budget
+ * (unlimited -- debugging only).
+ *
+ * Why: bounds aggregate background CPU so audio processing, sequencer timing,
+ * and UI responsiveness are not impacted by AutoSave or Pattern maintenance.
+ * Inputs: compile-time microsecond-per-millisecond rates. Outputs:
+ * filesystem_backgroundBudgetAvailable() admission and
+ * filesystem_backgroundBudgetCharge() accounting. Affiliates: filesystem.c
+ * budget state/refill/drain gates, PatternStackService.c repair gating, and
+ * seq_isRunning(). These constants consume no RAM.
+ */
+#define BACKGROUND_CPU_BUDGET_US_PER_MS_PLAYING  25u
+#define BACKGROUND_CPU_BUDGET_US_PER_MS_STOPPED  50u
+
+/*
  * Session-065 pending automation handoff and PatternTrace geometry.
  *
  * What: reserve one 4-byte pending automation record per queued ISR event and

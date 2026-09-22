@@ -115,6 +115,8 @@ STAGE_ENUM = {
     "Y": "AUTOSAVE_TRACE_STAGE_SCAN_PARENT_DIAG",
     "Q": "AUTOSAVE_TRACE_STAGE_BOOT_READER",
     "Z": "AUTOSAVE_TRACE_STAGE_DIRTY_COUNT_MISMATCH",
+    # H: DEV-only shared background-budget interval summary.
+    "H": "AUTOSAVE_TRACE_STAGE_BUDGET_REPORT",
 }
 
 STAGE_PRODUCER = {
@@ -150,6 +152,7 @@ STAGE_PRODUCER = {
          "by eliminating the code path), kept only to decode already-"
          "captured Session 054 evidence",
     "Z": "autosave_maskHasDirty() DEV population audit",
+    "H": "filesystem_backgroundBudgetRefill()",
 }
 
 PHASE_STALL_SITES = {
@@ -516,6 +519,19 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
         detail = (f"{enum_name} via {producer}: maintained_count="
                   f"{maintained}, full_scan_count={scanned}, "
                   f"maintained_high_byte=0x{flags:02x}")
+    # H packs work class/charged milliseconds in flags and denied/max-slice
+    # accounting in value32, matching AutosaveTrace.h's stage definition.
+    elif ch == "H":
+        work_class = flags & 0x03
+        charged_ms = (flags >> 2) & 0x3F
+        denied = value & 0xFFFF
+        max_slice = (value >> 16) & 0xFFFF
+        class_names = {0: "repair", 1: "scalar", 2: "pattern"}
+        class_name = class_names.get(work_class,
+                                     f"unknown({work_class})")
+        detail = (f"{enum_name} via {producer}: class={class_name}, "
+                  f"charged_ms={charged_ms}, denied_count={denied}, "
+                  f"max_slice_us={max_slice}")
     elif ch == "P":
         target = "A (.hcprms1)" if flags == 0 else "B (.hcprms2)"
         detail = (f"{enum_name} via {producer}: newly active target "
