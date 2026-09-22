@@ -3,9 +3,9 @@
 ## Authority and status
 
 This is the authoritative live-memory, allocator, PAT4 interchange, Pattern
-Stack Service, and Pattern AutoSave reference through Session 069 Pass 1. Historical
-Session 062/063/064 plans describe how the design was reached but do not
-override this file.
+Stack Service, and Pattern AutoSave reference through Session 069 (all phases).
+Historical Session 062/063/064 plans describe how the design was reached but
+do not override this file.
 Filesystem hierarchy and HCNAMES grammar are in `FILESYSTEM_SPEC.md`; scalar
 and Pattern AutoSave scheduling/recovery are in `AUTOSAVE.md`; exact linked
 memory totals are in `SRAM_MANIFEST.md`.
@@ -465,16 +465,21 @@ Session 069 Pass 1 also made scalar dirty detection constant-time through a
 maintained population count, removed the clean idle-tick occupancy recount
 while retaining mutation/lifecycle reconciliation, and added semantic Pattern
 AutoSave coalescing (250 ms quiet window, 5 s maximum latency, rotating Scene
-fairness). Source/build verification passed; hardware fixtures remain pending.
-See `../../S069_ATS_PAT_BOUNDED_PASS1_IMPLEMENT.md`.
+fairness). Hardware-accepted (2026-09-20).
+
+Session 069 Pass 2 added a shared elapsed-time background CPU budget
+(2.5% playback / 5% stopped, signed credit with one-millisecond accumulation
+cap), integrated it into the repair section and both AutoSave drain
+schedulers, added a Load/Save repair gate (`menu_activePage` check suppresses
+repair during Load/Save menu), and added DEV-only per-class `H` trace
+reports. Source/build verified; hardware validation pending.
 
 Deferred supplemental cases are deterministic mid-write power interruption,
 record/erase admission instrumentation, injected CRC fallback, and performance
 measurement. They do not reopen the functional closeout. Phase 4.5 copy
 operations and live-record capture are future features. The Session 068
 self-generated relocation/dirty-work-at-idle finding is closed in source by
-the S069 repair/reactive design; hardware performance measurement remains
-pending.
+the S069 repair/reactive design and confirmed by Pass 1 hardware acceptance.
 
 ## 12. Pattern Stack Service
 
@@ -493,7 +498,11 @@ for later drain).
 ### 12.2 Service tick priority order
 
 Evaluated every call to `patSvc_tick()` (called from `timebase.c` after
-`endlessPots_tick()`):
+`endlessPots_tick()`). The repair section (item 4) is suppressed when
+`menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE` (Session 069
+Pass 2 Load/Save repair gate). All sections are subject to the shared
+elapsed-time background CPU budget (`filesystem_backgroundBudgetAvailable()`,
+Session 069 Pass 2) — the repair section checks budget before proceeding:
 
 1. **Handover** — check and complete filesystem replacement boundary
    transitions.
@@ -649,7 +658,31 @@ void     patSvc_consumeReservation(chunk);
 6. `patSvc_idle()` must be called at every filesystem replacement boundary.
 7. Queue drop on full is the accepted failure mode.
 
-### 12.15 PatternTrace stage codes
+### 12.15 Background CPU budget
+
+Session 069 Pass 2 added a shared elapsed-time budget primitive in
+`filesystem.c` that bounds background work across three consumer classes:
+repair (`patSvc_tick()`), scalar AutoSave drain, and Pattern AutoSave drain.
+
+- **Budget rate**: 2.5% during playback (25µs/ms), 5% stopped (50µs/ms).
+- **Refill**: `filesystem_backgroundBudgetRefill()` adds credit based on
+  wall time elapsed since last refill, capped at one millisecond of
+  accumulated time to prevent idle buildup.
+- **Charge**: `filesystem_backgroundBudgetCharge(start, end)` subtracts
+  elapsed work time. Signed credit allows overshoot tracking.
+- **Query**: `filesystem_backgroundBudgetAvailable()` returns `credit > 0`.
+
+The repair section of `patSvc_tick()` checks budget availability before
+proceeding. The Load/Save repair gate additionally suppresses repair when
+`menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE`.
+
+DEV-only `H` AutosaveTrace reports every ~5 seconds show per-class
+cumulative microseconds (repair, scalar drain, pattern drain).
+
+RAM: 8 bytes always-on (credit + last refill timestamp) + 28 bytes DEV
+accounting.
+
+### 12.16 PatternTrace stage codes
 
 Eleven stage codes in `PatternTrace.h` for service diagnostics:
 

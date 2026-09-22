@@ -1,22 +1,24 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference through Session 064. It includes the Session 058 Bank I/O and
-stopped-playback speedups, the Session 059 typed Instrument-index repair, and
-Session 060's `.hcnames` atomic safe-write/refreshed flag, the boot Instrument
-`.hcindex` generation fix, and system-wide macOS AppleDouble (`._<name>`)
-file filtering. Session 061 adds typed HCNAMES, AutoSave/HCNAMES boot restore,
-complete committed-hierarchy identity publication, and the root-CWD readiness
-contract. Session 063 adds the v4 binary PAT4 Pattern file format,
-`pat_scene_region_t` packed struct, `filesystem_requestLoadPatternForScenes()`
-scene-mask API, Pattern Load fan-out copy, Pattern Save/Load bug fixes, and
-HCNAMES 145-row expansion (Pattern rows 129-144). Session 064 adds the
-per-Scene hidden PAT4 AutoSave pairs, Pattern boot restore, Pattern-only `@`
-provenance, HCPR v2 identity coverage, and complete Bank-child Pattern-name
-publication. Low-level FAT directory
-reservation and lazy
-directory-cluster initialization, and the AppleDouble filter itself, are
-authoritative in `ASYNCFATFS_REFERENCE.md`.
+reference through Session 069 (all phases). It includes the Session 058 Bank
+I/O and stopped-playback speedups, the Session 059 typed Instrument-index
+repair, and Session 060's `.hcnames` atomic safe-write/refreshed flag, the boot
+Instrument `.hcindex` generation fix, and system-wide macOS AppleDouble
+(`._<name>`) file filtering. Session 061 adds typed HCNAMES, AutoSave/HCNAMES
+boot restore, complete committed-hierarchy identity publication, and the
+root-CWD readiness contract. Session 063 adds the v4 binary PAT4 Pattern file
+format, `pat_scene_region_t` packed struct,
+`filesystem_requestLoadPatternForScenes()` scene-mask API, Pattern Load fan-out
+copy, Pattern Save/Load bug fixes, and HCNAMES 145-row expansion (Pattern rows
+129-144). Session 064 adds the per-Scene hidden PAT4 AutoSave pairs, Pattern
+boot restore, Pattern-only `@` provenance, HCPR v2 identity coverage, and
+complete Bank-child Pattern-name publication. Session 069 adds the non-semantic
+Pattern maintenance scheduler rung, the shared elapsed-time background CPU
+budget (`budget_state`), Pattern quiet window / max latency scheduling, the `H`
+budget trace stage, and the Load/Save repair gate. Low-level FAT directory
+reservation and lazy directory-cluster initialization, and the AppleDouble
+filter itself, are authoritative in `ASYNCFATFS_REFERENCE.md`.
 
 AutoSave's hidden-record format, dirty ownership, and background writer are
 authoritative only in `AUTOSAVE.md`. Development flags and diagnostic files are
@@ -2114,19 +2116,28 @@ instrument runtime propagation:
 ## AutoSave boundary
 
 Status: the hidden A/B scalar reader/writer and the implemented retained-owner
-mutation boundaries are complete through Session 061. Session 056 added a page-exit expedite that resets the writer
-deadline to 250 ms after the user leaves the Load/Save page, eliminating
-wasted debounce time. Session 060 added a continuation-cycle winner cache
-(Phase A, roughly 3.1s -> 2.2s steady-state drain), the `.hcnames` atomic
-safe-write and per-row "refreshed" witness with AutoSave-driven post-drain
-convergence (Phase B/B2), and 2-byte HCNAMES source fields for every Scene,
-Kit, and Instrument autosave sub-object absorbed into existing reserved
-space with zero record growth (Phase C). Its complete format, ownership,
-scheduling, power-loss behavior, bounded CRC contract, duplicate rules, and
-extension process live only in `AUTOSAVE.md`. Session 061 added stage-10b
-winner validation, matching-winner restore, the all-refreshed
+mutation boundaries are complete through Session 069. Session 056 added a
+page-exit expedite that resets the writer deadline to 250 ms after the user
+leaves the Load/Save page, eliminating wasted debounce time. Session 060 added
+a continuation-cycle winner cache (Phase A, roughly 3.1s -> 2.2s steady-state
+drain), the `.hcnames` atomic safe-write and per-row "refreshed" witness with
+AutoSave-driven post-drain convergence (Phase B/B2), and 2-byte HCNAMES source
+fields for every Scene, Kit, and Instrument autosave sub-object absorbed into
+existing reserved space with zero record growth (Phase C). Its complete format,
+ownership, scheduling, power-loss behavior, bounded CRC contract, duplicate
+rules, and extension process live only in `AUTOSAVE.md`. Session 061 added
+stage-10b winner validation, matching-winner restore, the all-refreshed
 HCNAMES-authoritative special path, per-row Case 1/2/3 behavior, deferred dirty
 replay/notices, and best-effort Pattern loading from explicit Scene files.
+Session 069 added the shared elapsed-time background CPU budget
+(`budget_state` in `filesystem.c`; 8 bytes always-on, 28 bytes DEV accounting;
+2.5 % during playback, 5 % stopped; signed credit with overshoot tracking),
+the non-semantic Pattern maintenance scheduler rung (lowest priority, eligible
+only when scalar and semantic Pattern masks are both clean), Pattern quiet
+window (250 ms) and max latency (5000 ms) scheduling, the Load/Save repair
+gate (`patSvc_tick()` repair suppressed on Load/Save pages), DEV-only `H`
+budget trace reports every ~5 seconds, and an O(1) `autosave_maskHasDirty()`
+via a maintained `uint16_t` dirty count with DEV `Z` audit.
 
 The obsolete per-Instrument/Scene scalar dot-backer proposal formerly in this section
 was never implemented and is removed to prevent two competing AutoSave

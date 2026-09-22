@@ -4,8 +4,8 @@
 
 This is the authoritative reference for the implemented Helicase AutoSave
 format, ownership, boot restore, mutation tracking, and background writer
-through Session 064. Historical plans and session logs explain how the
-implementation was reached, but they do not override this document.
+through Session 069 (all phases). Historical plans and session logs explain
+how the implementation was reached, but they do not override this document.
 
 Related authority is deliberately separate:
 
@@ -15,7 +15,7 @@ Related authority is deliberately separate:
 - `DEV_MODES.md` owns development-mode selection and diagnostic file output;
 - `ASYNCFATFS_REFERENCE.md` owns low-level AsyncFATFS contracts;
 - `SRAM_MANIFEST.md` owns the binding memory-reservation policy and the current
-  Session 064 linked allocation/capture snapshot;
+  Session 069 linked allocation/capture snapshot;
 - `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md` owns the deferred interaction
   and regression matrix for AutoSave, HCNAMES, `settings.cfg`, and Load/Save.
 
@@ -28,7 +28,9 @@ Save operations.
 Implemented through the Session 048 AutoSave baseline, Session 056 page-exit
 expedite and AsyncFATFS file-size fix, Session 060 writer/HCNAMES/source work,
 the Session 061 boot reader, Session 064 Pattern AutoSave, and Session 069's
-bounded-CPU Pass 1:
+bounded-CPU convergence (all phases — non-semantic maintenance, trailing-slack
+reservation, reactive compaction, bounded repair epoch, O(1) dirty predicate,
+quiet window scheduling, and shared background CPU budget):
 
 - persistent `settings.cfg` AutoSave on/off preference;
 - boot/runtime creation and validation of `/.hcprms1` and `/.hcprms2`;
@@ -42,9 +44,11 @@ bounded-CPU Pass 1:
 - successful whole-object publication for root Instrument Load, normal Kit
   Load, root Scene Load, and selective Bank Load/Save, with a complete
   committed-hierarchy HCNAMES boundary;
-- one canonical mutation mask with an exact SRAM bit-population counter,
-  bounded value capture, A/B transformed copy, CRC32C, commit-last runtime
-  publication, retry, and continuation scheduling;
+- one canonical mutation mask with an exact SRAM bit-population counter
+  (`autosave_dirty_count`, `uint16_t`), bounded value capture, A/B
+  transformed copy, CRC32C, commit-last runtime publication, retry, and
+  continuation scheduling; `autosave_maskHasDirty()` is O(1) via the
+  maintained counter (DEV audit every 1000th call with `Z` trace stage);
 - a post-drain HCNAMES convergence step that clears a per-row "refreshed"
   witness once that row's autosave object is fully captured, and safe-
   rewrites `/.hcnames` through the same temp-file pattern as the A/B
@@ -60,12 +64,28 @@ bounded-CPU Pass 1:
 - HCPR format v2 aligned with the 145-row HCNAMES contract while retaining the
   exact 34,768-byte scalar record geometry; Pattern identity is not embedded;
 - one independent 16-bit Pattern dirty mask, a 10,519-byte immutable Pattern
-  snapshot, and per-Scene whole-PAT4 background drains;
+  snapshot, and per-Scene whole-PAT4 background drains with a 250 ms quiet
+  window (`AUTOSAVE_PATTERN_QUIET_WINDOW_MS`) after the latest semantic
+  mutation and a 5000 ms hard ceiling (`AUTOSAVE_PATTERN_MAX_LATENCY_MS`),
+  with rotating Scene cursor for fairness;
+- a separate 16-bit non-semantic Pattern dirty mask
+  (`autosave_nonsemantic_pattern_dirty_mask`) for physical pool relocation
+  that does not change AutoSave dirtiness, serviced by a lowest-priority
+  scheduler rung in `filesystem.c` with arm/due-tick debounce and
+  non-active-first Scene selection;
 - 32 hidden Pattern candidates (`/.pat00a/b` through `/.pat15a/b`) with
   generation/parity selection, exact-size/stack/CRC validation, retry, and
   boot restore;
 - Pattern-only HCNAMES `@` provenance and refreshed publication on rows
-  129..144.
+  129..144;
+- a shared elapsed-time background CPU budget (`budget_state` in
+  `filesystem.c`, 8 bytes always-on + 28 bytes DEV accounting) gating
+  scalar drain, Pattern drain, and Pattern repair; 2.5 % during playback
+  (`BACKGROUND_CPU_BUDGET_US_PER_MS_PLAYING = 25`), 5 % stopped
+  (`BACKGROUND_CPU_BUDGET_US_PER_MS_STOPPED = 50`), with signed credit and
+  overshoot tracking; DEV-only per-class `H` trace reports every ~5 seconds;
+- Pattern repair suppressed when `menu_activePage == LOAD_PAGE ||
+  SAVE_PAGE` (Load/Save repair gate).
 
 Not implemented and not to be inferred from the reader/writer:
 
@@ -311,6 +331,14 @@ No resident Bank means no AutoSave file activity.
 There is exactly one persistent 3,856-byte canonical dirty mask. Producers OR
 bits into it atomically; they do not enqueue events and do not own files.
 
+A maintained `uint16_t autosave_dirty_count` tracks the total set-bit population
+atomically alongside the mask. `autosave_maskByteOr()` increments by
+`popcount8_lut[fresh]` (256-byte ROM LUT) counting only 0-to-1 transitions.
+`autosave_maskBitTake()` decrements. `autosave_maskHasDirty()` returns
+`count != 0` in O(1). A DEV-mode audit every 1000th `maskHasDirty()` call
+computes the full-mask popcount and emits `Z`-stage trace on mismatch; the
+audit is diagnostic only and does not alter the query result.
+
 Use only the typed API:
 
 - `autosave_markBankFieldDirty()`;
@@ -360,7 +388,10 @@ New dirty work receives a five-second debounce. Repeated changes coalesce into
 the same bits; they do not start one file operation per edit. Load and Save
 pages suppress new background starts, and the single filesystem facade gives
 foreground work priority. An already active transaction runs to its safe
-close/flush boundary.
+close/flush boundary. All background work (scalar drain, Pattern drain, and
+Pattern repair) is additionally gated by the shared elapsed-time CPU budget
+(`filesystem_backgroundBudgetAvailable()`); a denied admission is charged
+nothing and retries on the next scheduler tick after credit accumulates.
 
 When the page guard suppresses the writer, `fs_autosave_page_suppressed` is
 set. On the first scheduler tick after the user leaves the Load/Save page,
@@ -589,14 +620,32 @@ acceptance additionally audits address/bitmap/pool consistency.
 Autosave owns a separate 16-bit dirty mask. PatternData sets it after every
 live mutation; whole Scene/Bank replacement marks it through
 `autosave_markSceneWithPatternDirty()`. The filesystem records the first dirty
-epoch, waits for 250 ms of silence after the latest semantic Pattern mutation,
-and forces admission after 5 seconds even if editing continues. It rotates the
-Scene cursor for fairness, admits only while policy/runtime/card/Bank/menu
-gates are open and neither `seq_recordActive` nor `seq_eraseActive` is set, and
-keeps Pattern as the final background claimant after settings, diagnostic
-trace, and scalar HCPR work. The quiet window applies only to semantic Pattern
-work; physical relocation-only work uses its independent maintenance
-scheduler.
+epoch via `timebase_tim2Now()` in `autosave_markPatternDirty()`, waits for
+`AUTOSAVE_PATTERN_QUIET_WINDOW_MS` (250 ms) of silence after the latest
+semantic Pattern mutation, and forces admission after
+`AUTOSAVE_PATTERN_MAX_LATENCY_MS` (5000 ms) even if editing continues. It
+rotates the Scene cursor for fairness, admits only while
+policy/runtime/card/Bank/menu gates are open and neither `seq_recordActive`
+nor `seq_eraseActive` is set, and keeps Pattern as the final background
+claimant after settings, diagnostic trace, and scalar HCPR work, subject to
+the shared CPU budget. The quiet window applies only to semantic Pattern work;
+physical relocation-only work uses its independent non-semantic maintenance
+scheduler (see below).
+
+**Non-semantic Pattern maintenance scheduler.** Physical pool relocation
+(defragmentation) dirtiness is tracked separately from semantic AutoSave
+dirtiness via `autosave_nonsemantic_pattern_dirty_mask` (16-bit, 2 bytes
+SRAM1 `.bss`). `autosave_markNonSemanticPatternDirty()` sets the Scene's bit;
+`pat_markPoolMutationDirty()` is retired. The non-semantic scheduler
+(`filesystem_autosaveNonSemanticPatternDrainSchedule_tick()`) is the
+lowest-priority rung, eligible only when both the scalar dirty mask and
+semantic Pattern dirty mask are zero. It uses the same gate list as the
+semantic Pattern scheduler but adds its own arm/due-tick debounce
+(`fs_nonsemantic_pattern_armed` / `fs_nonsemantic_pattern_next_due_tick`)
+reusing `AUTOSAVE_WRITER_INTERVAL_MS` as debounce. Scene selection prefers
+non-active Scenes first, falling back to the active Scene only when it is
+the sole dirty candidate. Total additional SRAM: 5 bytes (2-byte mask +
+2-byte due tick + 1-byte armed flag).
 
 Admission clears the selected bit before copying the 10,519-byte live region
 into the sole Pattern snapshot. The copy is plain `memcpy` with no interrupt
@@ -682,7 +731,8 @@ boot, policy, and SD orchestration use `filesystem.h`.
 |---|---|---|
 | `autosave_mark*ParameterDirty()` / `autosave_markSourceDirty()` | Mark one retained scalar/source after its owner commits the value | Producer does no file I/O and never computes a raw wire offset |
 | `autosave_markWholeInstrumentDirty()`, `autosave_markKitDirty()`, `autosave_markSceneWithoutPatternDirty()`, `autosave_markSceneWithPatternDirty()`, `autosave_markResidentBankDirty()` | Mark a completed object/region | Scalar names remain excluded; the WithPattern/Bank forms also set the separate Pattern bit |
-| `autosave_markPatternDirty()`, `autosave_patternDirtyMask()`, `autosave_clearPatternDirty()` | Produce/query/transfer one Scene's Pattern work | Separate 16-bit ownership; never alias it to scalar mask bytes |
+| `autosave_markPatternDirty()`, `autosave_patternDirtyMask()`, `autosave_clearPatternDirty()` | Produce/query/transfer one Scene's semantic Pattern work | Separate 16-bit ownership; never alias it to scalar mask bytes |
+| `autosave_markNonSemanticPatternDirty()`, `autosave_nonSemanticPatternDirtyMask()`, `autosave_clearNonSemanticPatternDirty()` | Produce/query/transfer one Scene's non-semantic (physical relocation) Pattern work | Independent 16-bit mask; lowest-priority scheduler rung |
 | `autosave_mask*()` helpers | Atomic take/merge/restore and writer progress | Filesystem consumes the one canonical mask; no second request mask |
 | `autosave_getLivePayloadByte()` | Serialize one live payload coordinate | Writer-side projection only |
 | validation/CRC/format helpers | Stream-validate and construct HCPR v2 | Exact geometry and commit-last rules remain binding |
@@ -782,12 +832,19 @@ necessary because the individual dirty-byte records for one Instrument can
 wrap the fixed trace ring. Its exact flags and packing are owned by
 `AutosaveTrace.h` and `DEV_MODES.md`.
 
-The logging build also audits the scalar dirty-count invariant at low cadence.
-Stage `Z` records the maintained bit count in value bits 0..15 and a coherent
-full-mask popcount in bits 16..31; its flags carry the maintained count's high
-byte. A mismatch is diagnostic evidence only and does not change the query
-result or dirty state. Logging-off builds omit the audit and its trace
-allocation.
+The logging build also audits the scalar dirty-count invariant at low cadence
+(every 1000th `autosave_maskHasDirty()` call). Stage `Z` records the
+maintained `autosave_dirty_count` in value bits 0..15 and a coherent full-mask
+popcount in bits 16..31; its flags carry the maintained count's high byte. A
+mismatch is diagnostic evidence only and does not change the query result or
+dirty state. Logging-off builds omit the audit and its trace allocation.
+
+The shared background CPU budget emits stage `H` reports every ~5 seconds
+(DEV-only). Each report carries per-class charged microseconds, denied-slice
+counts, and maximum single-slice durations for scalar drain, Pattern drain,
+and Pattern repair. These reports are diagnostic only and do not affect
+scheduling or budget decisions. Logging-off builds omit the per-class
+accounting fields (28 bytes) and the `H` trace.
 
 An `ASENSURE` boot timeout additionally freezes a logging-only diagnostic
 capsule before boot recovery destroys the active filesystem state. It observes

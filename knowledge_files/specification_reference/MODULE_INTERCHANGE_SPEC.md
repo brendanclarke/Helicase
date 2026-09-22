@@ -1,12 +1,16 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-068, including typed HCNAMES, AutoSave boot restore, typed Instrument-index
-repair, AsyncFATFS directory publication, the Phase 4 dynamic Pattern storage
-system, step automation editing/playback (Session 065), the VOICE-page
-held-step automation overlay (Session 066), the Pattern Stack Service with
-dtype offset bug fix (Session 067), and the Session 068 front-panel event-ring
-rebuild, played-Pattern mirror fix, and per-track sequencer length fix.
+069 (all phases), including typed HCNAMES, AutoSave boot restore, typed
+Instrument-index repair, AsyncFATFS directory publication, the Phase 4 dynamic
+Pattern storage system, step automation editing/playback (Session 065), the
+VOICE-page held-step automation overlay (Session 066), the Pattern Stack
+Service with dtype offset bug fix (Session 067), the Session 068 front-panel
+event-ring rebuild, played-Pattern mirror fix, and per-track sequencer length
+fix, and Session 069 bounded CPU convergence (non-semantic maintenance,
+trailing-slack reservation, reactive compaction, bounded repair epoch, O(1)
+dirty predicate, quiet window scheduling, shared background CPU budget, and
+Load/Save repair gate).
 Historical migrations belong in session logs; this document states which live
 module owns each call, state transition, and retained object.
 
@@ -286,12 +290,21 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 Affiliate modules: PatternData, Menu, Sequencer, copyClearTools,
 EuklidGenerator, filesystem, timebase.
 
-Purpose: unified pool mutation dispatcher (Session 067). Serializes all
-pool-mutating operations through a single service tick, guaranteeing exactly
-one mutation target at a time. Provides two-tier defragmentation
-(trailing-gap merge and paced compaction), bounded bulk barriers for
-track/pattern clear, filesystem replacement handover, and an elastic gap
-policy. See `PATTERN_DYNAMIC_STACK.md` §12 for the complete specification.
+Purpose: unified pool mutation dispatcher (Session 067, bounded CPU
+convergence Session 069). Serializes all pool-mutating operations through a
+single service tick, guaranteeing exactly one mutation target at a time.
+Provides owned trailing-slack reservation (512-byte bit-packed reservation
+image), finite bounded repair epoch (cursor sleeps at `PATSVC_ADDRESS_COUNT`;
+wakes only on mutation, reservation consumed, density restore, handover, or
+filesystem replacement), reactive-only compaction (triggered only by blocked
+allocation; periodic sweep deleted), bounded bulk barriers for track/pattern
+clear, filesystem replacement handover, and an elastic gap policy. Direct-path
+parity fix classifies fragmentation failures in `patSvc_submit()` and retains
+events for reactive recovery (`D` trace stage). Load/Save repair gate
+suppresses repair when `menu_activePage == LOAD_PAGE || SAVE_PAGE`. Budget
+integration: repair section queries `filesystem_backgroundBudgetAvailable()`
+and charges elapsed time. See `PATTERN_DYNAMIC_STACK.md` §12 for the complete
+specification.
 
 | API | Use | Usual callers / clients |
 |---|---|---|
@@ -308,6 +321,8 @@ policy. See `PATTERN_DYNAMIC_STACK.md` §12 for the complete specification.
 | `patSvc_clearPattern(scene)` | Clear pattern via bounded bulk barrier. | copyClearTools |
 | `patSvc_removeTrackAutomationByTarget(scene, track, target9)` | Remove all entries with a given target from all 128 steps. | Menu VOICE overlay |
 | `patSvc_enqueueErase(scene, track, step)` | Queue erase from TIM3 ISR context (PRIMASK-protected enqueue). | Sequencer live erase |
+| `patSvc_tryAppendAutomation(scene, track, step, target9, value7)` | Gate-6 growth: try append with reservation consumption. Returns 1 on success, 0 on blocked allocation (retained for reactive recovery). | Menu VOICE overlay, step-edit menu |
+| `patSvc_countUsed(void)` | Popcount of occupancy bitmap (64-word `__builtin_popcount`). | filesystem.c idle tick-tail (removed from tick-tail in S069) |
 
 Caller migration (Session 067): 15+ call sites across `menu.c`,
 `copyClearTools.c`, `EuklidGenerator.c`, and `sequencer.c` changed from
@@ -734,17 +749,21 @@ render boundary. Session 028 removed obsolete front-panel dependency.
 Affiliate modules: BankData, SceneData, Preset, filesystem, config.
 
 Purpose: `Autosave.c/.h` owns the hidden-record wire contract, live-byte
-projection, one canonical dirty mask, atomic dirty operations, typed scalar and
-whole-region marker vocabulary, CRC helpers, and the boot-only inverse
-payload-to-resident projection. It owns no file handle or scheduler.
-`AutosaveTrace.c/.h` is a logging-only observer with no filesystem
-ownership. Exact format and trace-field semantics remain authoritative in
-`AUTOSAVE.md` and `DEV_MODES.md` rather than being duplicated here.
+projection, one canonical dirty mask with maintained O(1) dirty count
+(`autosave_dirty_count`, `uint16_t`), a separate 16-bit non-semantic Pattern
+dirty mask (`autosave_nonsemantic_pattern_dirty_mask`), atomic dirty
+operations, typed scalar and whole-region marker vocabulary, CRC helpers, and
+the boot-only inverse payload-to-resident projection. It owns no file handle
+or scheduler. `AutosaveTrace.c/.h` is a logging-only observer with no
+filesystem ownership. Exact format and trace-field semantics remain
+authoritative in `AUTOSAVE.md` and `DEV_MODES.md` rather than being duplicated
+here.
 
 | API family | Interchange rule | Usual callers / clients |
 | --- | --- | --- |
 | `autosave_mark*Dirty(...)` | Retained owners store/commit first, then mark typed coordinates. Producers perform SRAM-only work and never calculate wire offsets. | BankData, SceneData, Preset, successful whole-object commits |
-| `autosave_maskHasDirty()` / atomic take and merge helpers | One canonical mask coordinates foreground capture and interrupt-reachable producers; filesystem may consume through the documented API but never owns a second mask. | filesystem AutoSave scheduler/writer |
+| `autosave_maskHasDirty()` / atomic take and merge helpers | One canonical mask coordinates foreground capture and interrupt-reachable producers; `maskHasDirty()` is O(1) via maintained dirty count. Filesystem may consume through the documented API but never owns a second mask. | filesystem AutoSave scheduler/writer |
+| `autosave_markNonSemanticPatternDirty()` / `autosave_nonSemanticPatternDirtyMask()` / `autosave_clearNonSemanticPatternDirty()` | Separate 16-bit mask for physical pool relocation dirtiness (no semantic AutoSave implications). | PatternStackService repair; filesystem non-semantic scheduler |
 | `autosave_getLivePayloadByte()` and format/CRC helpers | Project final resident bytes and serialize/validate v1 records without copying C structs as the wire format. | filesystem AutoSave setup/validation/copy |
 | `autosave_applyBankPayload()` / `autosave_applyScenePayload()` / `autosave_applyKitPayload()` / `autosave_applyInstrumentPayload()` | Inverse-project validated winner bytes into retained boot state while tracking is off. Instrument apply rejects unknown three-byte type text. | filesystem matching-winner reader |
 | `autosave_extractPayloadSource()` | Read the two-byte source field used for Case-1 payload/HCNAMES cross-check. | filesystem matching-winner reader |
@@ -761,8 +780,10 @@ through PatternData accessors after Session 028. Normal kit load/save scans,
 opens, and writes root `Kit/NNN Name/` directory-format data, root Instrument
 Load/Save operates on registry-owned `Instrument/<type>/` pools, typed index
 loading owns validation and selected-type repair, HCNAMES owns resident display
-identity/provenance/type authority, boot readers restore the resident Bank, and
-the retired File/Dir compatibility surface performs no work.
+identity/provenance/type authority, boot readers restore the resident Bank, the
+retired File/Dir compatibility surface performs no work, and the shared
+elapsed-time background CPU budget (`budget_state`, Session 069) gates all
+background work (scalar drain, Pattern drain, Pattern repair).
 Storage text parsing/formatting and descriptor-key validation stay in
 `storageTypes.c/h`.
 
@@ -796,6 +817,7 @@ Storage text parsing/formatting and descriptor-key validation stay in
 | `filesystem_setBootLatchBankFallback()` | Record a canonical or HCNAMES-authoritative Bank restore whose dirty mark must replay after tracking enables. | `main.c`, HCNAMES-authoritative reader |
 | `filesystem_bootReaderNoticeSceneMask()` / `filesystem_bootReaderNoticeBankFallback()` | Read and clear Case-3/Bank one-shot notice state after audio starts. | Menu boot-notice sequencer |
 | `filesystem_autosaveTraceFlushBlocking()` | Bench-only durable boundary for currently pending lifecycle records; ordinary runtime trace flushing is autonomous and lower priority. | temporary test harness only |
+| `filesystem_backgroundBudgetRefill()` / `filesystem_backgroundBudgetCharge()` / `filesystem_backgroundBudgetAvailable()` | Shared elapsed-time CPU budget for background work (scalar drain, Pattern drain, repair). Refill adds credit proportional to elapsed wall time; charge subtracts measured work; available is the admission gate. Signed credit tracks overshoot. | filesystem scheduler, PatternStackService repair |
 | `filesystem_markSettingsDirty()` | Increment the keyed-settings change revision; the one-second writer acknowledges only the revision it actually serialized and synced. | Menu settings policy |
 | `filesystem_loadedInstrumentSlot()` | Borrow the validated candidate payload for Preset's ordered commit. Names are exchanged through identity rows, not staged filename/stem accessors. | Preset only |
 | `filesystem_requestLoadName(type, slot, cb)` | Async name load. For `FS_FILE_KIT`, returns the cached directory scan name instead of opening a `.SND` header. | Preset/Menu |
