@@ -619,11 +619,11 @@ Phase 4 of `S070_SYSTEMS_GENERAL_CHECK_AND_REVIEW_PLAN.md`, specifically:
 
 ## Remaining Open Items
 
-One item requires verification during implementation:
-
 1. ~~**R3 — Scene Pattern invalidation path**~~: **VERIFIED SAFE** by code
-   trace (see Appendix A). Hardware validation pending with
-   `SD_CARD/Bank/000 FullBad` test fixture.
+   trace (see Appendix A) and **CONFIRMED on hardware** (see Appendix A
+   Hardware Validation Result). Test fixture `SD_CARD_FULLBAD_TEST/Bank/
+   000 FullBad`: child 03 (corrupt PAT4) correctly invalidated, all 15
+   valid children loaded successfully.
 
 2. **KitMrp / InstrumentMrp entry snapshot**: the existing Kit/Instrument
    Normal entry-snapshot mechanism (`.hctmp` for Instrument, entry cache for
@@ -841,3 +841,48 @@ A test fixture has been prepared to confirm the trace on hardware:
 - **Observation points:** boot log (`bootlog.bin`), autosave trace
   (`asavetrc.bin`), HCNAMES mirror after load, presence mask via
   `bank_scenePresentMask()`.
+
+### Hardware Validation Result (S070)
+
+**Test fixture:** `SD_CARD_FULLBAD_TEST/Bank/000 FullBad` — 16 children with
+valid PAT4 binary `.pat` files (10,656 bytes each), except `03 Pop` whose
+`pattern.pat` is truncated to 10 bytes. All `sceneset.scg` (242–249 bytes),
+`effects.fx` (50 bytes), and `Kit */` directories (7 instruments each) are
+intact across all 16 children.
+
+**Observed behavior:**
+
+1. **Child 03 Pop correctly failed.** Scene empty in PERF — no Kit, no
+   Pattern, not selectable. HCNAMES Scene row 3 is blank with no provenance;
+   Pattern row 3 has `?` (failed) provenance. No `.pat03b` AutoSave file
+   created. This matches the code trace: PAT4 header validation fails at
+   phase 46, routes through phase 52 → 53 → 62 → 72 → Bank phase 20, which
+   clears bit 3 from `op_bank_scene_load_mask` and sets it in
+   `op_bank_scene_failed_mask`.
+
+2. **All other children (00–02, 04–15) loaded successfully.** HCNAMES has
+   correct Kit and Pattern names for all 15 valid scenes. Scenes with
+   populated patterns (steps set) display normally in PERF. Scenes 09 and
+   11–15 are valid but have no steps set in their source patterns — they load
+   correctly but appear empty in the sequencer, which is expected.
+
+3. **AutoSave capture timing.** AutoSave pattern files (`.pat00b` through
+   `.pat06b`, excluding `.pat03b`) were created for scenes 0–6 only at the
+   time of observation. Scenes 07–15 had not yet been captured — their
+   HCNAMES rows carry the `R` (refreshed) flag, indicating names were read
+   from the library but AutoSave convergence had not yet cleared them. This
+   is normal: the AutoSave drain is budget-limited and captures scenes
+   incrementally.
+
+4. **HCNAMES provenance.** Pattern rows for scenes 04–06 show `@` (loaded
+   from library file) provenance; scenes 00–02 show `-` (captured by
+   AutoSave drain). Scene 03 shows `?` (failed). This split confirms the
+   expected lifecycle: AutoSave captured the first few scenes before
+   observation, while the later scenes still carried their library-load
+   provenance.
+
+**Conclusion:** R3 is **CONFIRMED on hardware**. The Scene Load state machine
+correctly invalidates a child with a corrupt PAT4 Pattern file while loading
+all sibling children successfully. The failed child is excluded from the
+presence mask, its HCNAMES rows are not published with `@` provenance, and no
+AutoSave data is captured for it. No code change is needed.
