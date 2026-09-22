@@ -19,9 +19,9 @@ compaction, make scalar dirty detection O(1), add Pattern AutoSave quiet
 window and max latency scheduling, and gate all background work under a
 shared elapsed-time CPU budget.
 
-COMPLETED: All seven phases implemented, source/build verified. Four of
-seven phases hardware-accepted; Pass 2 (CPU budget, Load/Save repair gate)
-hardware validation pending.
+COMPLETED: All seven phases implemented, source/build verified, all
+hardware-accepted. Pass 2 (CPU budget, Load/Save repair gate) validated
+2026-09-22.
 
   Phase 1: Non-semantic Pattern maintenance restriction
   Phase 2: Owned trailing-slack reservation with density hysteresis
@@ -35,7 +35,7 @@ VERIFIED ON HARDWARE:
   Non-semantic restriction: PASS
   Slack/reactive compaction: PASS
   Pass 1 (O(1) dirty, quiet window, popcount): PASS (2026-09-20)
-  Pass 2 (CPU budget, Load/Save gate): PENDING
+  Pass 2 (CPU budget, Load/Save gate): PASS (2026-09-22)
 
 CHANGES THIS SESSION:
 - PatternStackService.c: reservation image, repair epoch rewrite, reactive
@@ -63,11 +63,12 @@ KNOWN ISSUES RESOLVED:
 - Pattern AutoSave writing immediately on every mutation (no coalescing)
 - No CPU budget for background work during playback
 
-NEXT SESSION RECOMMENDED GOAL: Hardware-validate Pass 2 (CPU budget and
-Load/Save gate), then proceed with S070 general systems check and review
-before Phase 5 Effects work.
+NEXT SESSION RECOMMENDED GOAL: S070 general systems check and review
+before Phase 5 Effects work. Item 6 (snapshot measurement of
+pat_snapshotScene()) is not started; blocked on Pass 2 completion, now
+unblocked.
 
-BLOCKERS: Pass 2 hardware test required before closing S069 completely.
+BLOCKERS: None. S069 is fully hardware-validated.
 
 CRITICAL REMINDERS FOR NEXT SESSION:
 - Pass 2 hardware validation is still pending — test CPU budget behavior
@@ -397,8 +398,24 @@ counter, accumulated refill, report cadence).
 
 ### Hardware validation
 
-PENDING. Requires testing CPU budget behavior during playback and
-verifying Load/Save menu responsiveness with repair gate active.
+PASS (2026-09-22). Test card output at `SD_CARD_S069_OUT/`.
+
+Trace: `asavetrc.bin` (978,392 bytes). 222 H budget report records
+across 74 emission periods. Zero `E` error records, zero `Z` dirty-count
+mismatches. 180 `P` published scalar saves.
+
+Budget enforcement confirmed active and binding across all three classes:
+
+| Class | Max slice (µs) | Charged/5s | Denied/5s |
+|-------|---------------|-----------|----------|
+| Repair (0) | 2–9 | 0ms | 0–122 |
+| Scalar (1) | 67–89 | 9–40ms | 6,000–15,500 |
+| Pattern (2) | 143–164 | 1–5ms | 553–2,123 |
+
+Peak aggregate CPU ~0.9% (45ms per 5s window), within the 2.5% playing
+budget. No single slice exceeds 164µs. Concurrent class arbitration
+works: when Pattern drain consumes budget, repair is denied. All three
+plan-required metrics (charged time, denied count, max slice) confirmed.
 
 ---
 
@@ -516,8 +533,7 @@ implemented nor rejected:
    no playback effect. Requires per-track PPQ tick accumulators and
    sub-step scheduling.
 
-5. **Pass 2 hardware validation.** CPU budget and Load/Save repair gate
-   need hardware acceptance testing.
+5. ~~**Pass 2 hardware validation.**~~ Completed 2026-09-22. PASS.
 
 ---
 

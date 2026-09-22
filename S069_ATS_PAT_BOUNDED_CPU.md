@@ -517,3 +517,77 @@ bounded retry or explicit retry action. It is not caused by CPU contention.
   valid Pattern A/B generation for every affected Scene.
 
 No `Core/` product code is changed by this planning revision.
+
+---
+
+## Pass 2 implementation review and hardware test (2026-09-22)
+
+### Implementation
+
+Pass 2 implemented items 4A, 4B, 4C from the authoritative
+`S069_ATS_PAT_BOUNDED_CLAUDE.md` master plan, plus the deferred
+`SCOPING_TARGETS.md` finding that `patSvc_tick()` repair runs during
+Load/Save menu.
+
+19 changes (16 primary C01–C16, 3 auxiliary A01–A03) across 8 files:
+
+| File | Changes | Summary |
+|------|---------|---------|
+| `config.h` | C01 | Budget rate constants: 25µs/ms playing, 50µs/ms stopped |
+| `filesystem.c` | C02–C06, C11–C13 | Budget struct, refill/charge/available/deny API, H trace, phase 56/13/patternWrite budget gates |
+| `filesystem.h` | C07 | Public budget API declarations, work-class constants |
+| `PatternStackService.c` | C08–C10 | Load/Save repair gate, repair budget gate with per-step charge |
+| `PatternStackService.h` | A02 | Comment update for budget + menu gates |
+| `AutosaveTrace.h` | C14 | `AUTOSAVE_TRACE_STAGE_BUDGET_REPORT = 'H'` |
+| `tools/decode_devlogs.py` | C16 | H record decoder |
+| `SCOPING_TARGETS.md` | A01 | Deferred item marked addressed |
+
+Six improvements over the implementation schedule:
+
+1. Struct-based state (`struct budget_state`) instead of flat statics
+2. Rate helper `filesystem_backgroundBudgetRate()` selecting rate from `seq_isRunning()`
+3. Zero-rate bypass: config rate 0 admits all work (debugging override)
+4. Public `filesystem_backgroundBudgetDeny()` for PatternStackService.c cross-module access
+5. Phase 56 charges on patch-count-full exit path, not just loop completion
+6. Phase 13 charges on zero-byte fread (staging still consumed CPU time)
+
+### Hardware test
+
+**PASS** (2026-09-22). Test card output at `SD_CARD_S069_OUT/`.
+
+Trace file: `asavetrc.bin` (978,392 bytes, 222 H budget report records
+across 74 emission periods).
+
+**Error records:** 0 `E` (operation error), 0 `Z` (dirty-count mismatch).
+Pass 1 invariant holds.
+
+**Completed saves:** 180 `P` (published) records — scalar saves converging.
+
+**Budget report summary (H records, per work class):**
+
+| Class | Max slice (µs) | Charged per 5s window | Denied per 5s window |
+|-------|---------------|----------------------|---------------------|
+| Repair (0) | 2–9 | 0ms (rounds down) | 0–122 |
+| Scalar (1) | 67–89 | 9–40ms | 6,000–15,500 |
+| Pattern (2) | 143–164 | 1–5ms | 553–2,123 |
+
+**Aggregate CPU:** Peak ~45ms per 5s window = **0.9% CPU**, well within
+the 2.5% playing budget (25µs/ms) and 5% stopped budget (50µs/ms).
+
+**Budget is binding:** Denied counts across all three classes confirm
+work is being throttled. When Pattern drain is active and consuming
+budget, repair gets denied (visible in periods where repair
+denied_count=25–122 while Pattern denied_count=1,068–2,067). The shared
+pool correctly prevents concurrent classes from exceeding the aggregate
+allowance.
+
+**No single slice exceeds 164µs.** All three budget trace metrics the
+plan required are present and correct:
+
+1. Total charged microseconds per work class — confirmed
+2. Number of denied slices per work class — confirmed
+3. Maximum single-slice duration — confirmed
+
+All saves converge, no errors, no dirty-count mismatches, budget
+enforcement is active and correctly arbitrating between concurrent
+work classes.
