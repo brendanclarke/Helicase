@@ -28,8 +28,10 @@ Pattern AutoSave; the Scene Effect file remains a placeholder. The post-Phase-4
 bugfix/refactor work is tracked in
 `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`. Phase 5 now establishes Effect
 files, the audio bus and shared buffer, its fixed sequencer, and the related
-Scene/Bank fixes. Phase 6 is user-facing performance workflow and MIDI/UI
-cleanup. Phase 7 adds the planned voices, oscillators, and more complex Effect
+Scene/Bank fixes. Phase 6 covers remaining
+user-facing performance workflow and MIDI/UI cleanup; its automation view
+(6.3), morph quick access (6.4), scene instant switching (6.5 partial), and
+load/save UI (6.7) items were completed in Phases 3-4 and relocated there. Phase 7 adds the planned voices, oscillators, and more complex Effect
 processing.
 
 Within each phase, features are grouped by **where they live in the codebase**, per your original request, so a given implementation pass touches a small, coherent set of files.
@@ -659,6 +661,25 @@ Complete the menu path required for descriptor-backed instruments:
   terminal cache work, then always reset to the bracketed type row.
 - Keep scene-level MIDI note/channel and `voice_decimation_all` out of
   `kitset.kcg` and instrument files.
+- **Completed Phase 6 items landed here:**
+  - **6.4 Morph quick access (SHIFT+VOICE):** Session 031 implemented
+    `SHIFT+VOICE` persistent morph endpoint edit mode: SHIFT+MODE_VOICE enters
+    morph view (blink overlay, parameters2[] display), leaving non-VOICE modes
+    clears morph view. Sessions 032-033 refined this for descriptor-backed
+    instrument pages and Scene image morph handling.
+  - **6.4 Scene edit toggles on voice page:** Session 040 implemented
+    `scene_mask_voice_edit` as a `bankset.bcg` v2 field. SEQ buttons on the
+    VOICE page toggle per-Scene inclusion in parameter edits; Kit Load uses SEQ
+    buttons as a 16-bit Scene target mask with per-target blink.
+  - **6.7 Load/Save UI rework:** Completed across Sessions 038-044. Session 038
+    restored Load/Save hardware UI: top-row type selector with brackets (e.g.
+    `Save:[Kit     ]`), hardware pot hierarchy navigation. Session 039 promoted
+    Scene and Bank as top-level Load/Save entries with explicit OK/OW
+    confirmation. Session 044 added the unified OK/OW command lifecycle
+    (`menu_loadSaveCommandActive` ownership, `...` in-progress display, cursor
+    suppression, terminal type-row reset), Bank index-to-child-preview
+    continuation, and input gating during Bank preview. Effect load/save remains
+    Phase 5 work (§5.1).
 
 ### 3.5 Scene and Bank Structures
 
@@ -1074,6 +1095,34 @@ Per your note, the full set: copy scene, copy instrument (single voice part), co
 
 Automation on a step plays back regardless of whether that step has a trigger — this is a change from the old velocity-0-as-automation-only-step model, and 4.2's final storage format makes it a literal, direct consequence of the design rather than a special case to handle: the on/off MSB and the automation offset address are independent fields in the static entry, so a step's trigger state and its automation content were never coupled to begin with. Only steps with bit 15 set light their `SEQ` LED and trigger their note. Pressing a step button in step mode toggles that on/off bit alone — it does **not** touch the step's offset address, automation, has-specials bit, note, velocity, timing, roll, probability, or any other stored data. Automation therefore continues to apply while the step is off, and special assignments persist so they are restored unchanged when the step is turned back on. Additionally: holding `SHIFT+COPY/CLEAR` while the menu is up, then pressing sequence and `SELECT` buttons, clears just a step or just a bar of all automation/settings (distinct from clearing the on/off bit).
 
+**Completed Phase 6 items landed here (Sessions 065-067):**
+
+- **6.3 Automation view redesign:** Sessions 065-066 implemented both views.
+  - **View A (step-edit list menu, S065):** scrollable automation list with
+    cursor navigation, four knobs (parameter cycle, voice cycle, amount, function),
+    detail views, dtype-aware value display and bounds clamping. Pool block
+    read/write/remove APIs, per-slot dirty bitmap, trigger-time restore from
+    `morph_interpolation[]`. Drain co-located with trigger ring in
+    `audio_check_and_render()` to eliminate the 50% ordering race.
+  - **View B (VOICE-page held-step overlay, S066):** overlay activation via
+    configurable 100 ms hold-press, bounded CGRAM underline system (slots 2-5,
+    62-glyph flash font table), step illumination of automated steps, pot-to-
+    automation write with working-value cache, async track-wide search agent
+    (4 steps/pass). 44-byte state block; 6 post-hardware-test fixes applied.
+    Commit `8774cc9`.
+- **6.4 Automation underline indicator (S066):** the CGRAM underline system
+  shows when a currently displayed parameter is automated: Tier 1 (value bar,
+  bottom row all pixels) for the resolved held-step value, Tier 2 (assigned
+  dot, center pixel) when the async search finds any automation for that
+  parameter across the track. Debounced with 100 ms quiet period.
+- **6.5 Scene instant switching:** Session 044 implemented immediate Scene
+  application during Bank Load playback (deferred Scene worker applies the
+  active Scene through the complete clear/image/rebind lifecycle). Session 067's
+  Pattern Stack Service provides instant playback switching via atomic 16-bit
+  pointer swap in the per-track address array, so Scene switches take effect
+  without waiting for the end of the bar. Per-track scene assignment remains
+  Phase 6 work. Per-voice morph in PERF is complete (Phase 3 §3.4).
+
 ### 4.7 Per-track step timing scale
 
 Per-track length (up to 128 steps) and per-track scale, accessible from the second page under the transient-voicing ("click") sub-page. Since there are no sub-steps in this paradigm, scale is expressed relative to the base step (1 step = 1/16th note): scaling a track up to ×16 means 1 step on that track = 1 bar, in `/2` increments down to `/16` (1 step = 1/128th note). Dot and triplet subdivisions are flagged by you as open — see below.
@@ -1308,9 +1357,13 @@ when formats and allocations are implemented.
 `Core/Hardware/frontPanel/ledHandler.c`, `Core/DSPAudio/lfo.c`
 
 This phase gathers the user-facing and control cleanup after the filesystem,
-Morph, dynamic Pattern, and Phase 5 Effect foundations are in place. MIDI rework belongs here,
-alongside the rest of the performance workflow, copy/paste, clear helpers,
-automation views, load/save UI polish, and front-panel feedback consolidation.
+Morph, dynamic Pattern, and Phase 5 Effect foundations are in place. MIDI
+rework belongs here, alongside the remaining performance workflow item
+(per-track scene assignment), looper, one-shot LFOs,
+and external MIDI sequencing tracks. Automation views (6.3), morph quick
+access and automation indicator (6.4), scene instant switching (6.5 partial),
+and load/save UI rework (6.7) were completed in earlier phases and their
+completion records are in §§3.4, 4.6.
 
 ### 6.1 MIDI and External Control Cleanup
 
@@ -1339,43 +1392,27 @@ test. One-shot variants can hook that overflow test:
 - Add an idle/delayed/running state field to `Lfo` and hook retrigger through
   `lfo_retrigger()`.
 
-### 6.3 Automation view redesign
+### ~~6.3 Automation view redesign~~ — COMPLETED
 
+Implemented in Sessions 065-066 as part of Phase 4 dynamic Pattern work.
+See Phase 4 §4.6 completion notes for details (View A step-edit list menu,
+View B VOICE-page held-step overlay). Commits `3ab551e` (S065), `8774cc9`
+(S066).
 
-This replaces the current step-view automation display (parameter assignment/amount shown under step view) with two connected new views.
+### ~~6.4 Morph quick access & automation indicator~~ — COMPLETED
 
-**View A — scrollable automation list**, reachable from step view when editing step automation:
-- A non-looping, scrollable list of `parameter – voice – amount` entries, showing "end" once you scroll past the last entry rather than wrapping.
-- **Knob 1:** cycle the automation parameter (shown as a 3-character short name in the leftmost column).
-- **Knob 2:** cycle by voice (shown as `vo1`–`vo6` in the second column).
-- **Knob 3:** change the amount (third column).
-- **Knob 4:** change the "function" to apply (fourth column) — cycling through: view automation (jumps to View B below), remove just this automation, remove all automation from this step, remove all automation of this type from the track, set all automation of this type on this track to this value, and room for more to be added later.
-- Clicking the encoder **executes** whichever function is showing in the fourth column — for anything mutating (remove/set), that means a confirmation screen first; for "view automation," it jumps straight into View B.
+Implemented across Sessions 031-033 (SHIFT+VOICE morph endpoint editing),
+040 (scene edit toggles on voice page), and 066 (automation underline
+indicator). See Phase 3 §3.4 and Phase 4 §4.6 completion notes for details.
 
-**View B — the automation editor itself**, reachable either from View A or directly from the voice page:
-- On entry, the current automation for the selected parameter, across every step in the track, is copied into a temporary working array. All edits in this view happen against that working copy — nothing is committed to the real pattern data until the view is exited normally.
-- Holding `SHIFT` and pressing `COPY/CLEAR` brings up a "cancel automation edit?" confirmation; confirming discards the working copy entirely, reverting to whatever was there on entry.
-- Screen layout: top line shows the voice (long name) and parameter (long name) being edited. Voice LEDs show the currently selected track but **don't** function as track selectors in this view except as a copy destination — you can't switch which track you're editing automation for mid-view by pressing a voice button, only by copying to a different track. `SELECT` LEDs show the current bar (of the 8); pressing a `SELECT` button switches which bar is shown.
-- Bottom row (16 characters, one per step of the visible bar): blank if the step has no automation for this parameter, otherwise a `0`–`9` digit representing the automation amount on a relative 0–127 scale.
-- **Knob 1:** cycle voice. **Knob 2:** cycle parameter. Sequence buttons light up for any step that currently has automation for the selected parameter.
-- **Multi-step editing:** holding any combination of the 16 sequence buttons switches the bottom-row readout to `avg:` (average value across the held steps, left side) and `mod:+0` (a running modification delta, right side). Turning the encoder while steps are held does two things at once: (1) it adds automation at the currently-shown average value to any held step that doesn't already have automation for this parameter, and (2) it increments/decrements the automation value of *every* held step by ±1 per detent, updating the displayed average live. You can keep adjusting by continuing to turn the encoder, by changing which steps are held, or by switching bar/track via the bar/track buttons — the temporary working array tracks all of it.
-- **Copy:** from this view you can copy steps, bars, or copy the whole automation lane to another track.
-- **No dedicated clear operation inside this view** — the only ways out are the normal exit (commits) or the `SHIFT+COPY/CLEAR` cancel (discards). Clearing automation is a View-A-and-below operation (per 6.3 View A's "remove" functions, or the step-view `SHIFT+COPY/CLEAR`+button wipe from Phase 4.6).
+### 6.5 PERF mode: per-track scene assignment
 
-This is a genuinely large piece of UI state machine — four knobs with context-dependent meaning in View A, a temporary-array-with-commit-on-exit model in View B, and a multi-step "hold N buttons, turn one knob, average updates live" interaction that doesn't have a close analog elsewhere in the current menu code. Worth prototyping the state machine (what's "current view," "held steps," "working array," "dirty" state) as its own small module before wiring it into `menu.c`'s existing page-dispatch structure, rather than growing it inline.
+~~Instant scene switching~~ is complete — see Phase 4 §4.6 completion notes
+(Sessions 044 + 067). ~~Per-voice morph in PERF~~ is complete — see Phase 3
+§3.4 (visible/editable per-voice Morph controls in PERF implemented). The
+remaining item:
 
-### 6.4 Morph quick access & automation indicator
-
-- While viewing a single parameter in the encoder click-in view, holding `SHIFT` toggles between editing that parameter's normal value and its morph-target value, avoiding a save/reload round trip just to set morph endpoints. A further "lock" mode to keep the whole voice interface showing morph-target values for every parameter (rather than needing to hold `SHIFT` per-parameter) is called out as wanted too.
-- The voice page should **only** service voice and scene editing — no step-editing functions belong there (that's step view's job). On the voice page, the 16 sequence buttons become **scene toggles**: each one toggles whether that scene is included in the current voice-parameter edit, so a parameter change can be applied to all 16 scenes, a subset, or just one, depending on which are toggled on. Phase 5 stores this inclusion mask separately for each Scene as a Bank property; the voice page edits the active Scene's mask. This is a genuinely different meaning for those 16 buttons than they have anywhere else in the UI (scene *selection* elsewhere, scene *inclusion-in-edit* here) — worth a clear visual distinction (different LED color/blink pattern) so it's not confused with PERF-mode scene switching.
-- The LXR-02 hardware has dedicated shift-labeled functions already printed on the sequence buttons — new shift functions should avoid piling onto those buttons where another control is reasonably available, per your explicit note.
-- The LCD's underline indicator should show when the currently-displayed parameter is automated anywhere in the currently playing scene/pattern — a quick "is this being moved by something" signal without needing to open the automation view to check.
-
-### 6.5 PERF mode: scene switching & per-track assignment
-
-- **Instant scene switching:** a global menu option makes scene switching (via `SEQ` buttons or MIDI program change) take effect at the next step rather than waiting for the end of the bar, preserving sequencer position through the switch. This also carries whatever kit/morph/parameter changes the new scene brings, not just pattern data — it's a full scene swap, not just a pattern swap, which is a bigger behavioral change than the pattern-only version originally described in `putting it together`. Default behavior (end-of-bar) is preserved when the option is off.
 - **Per-track scene assignment:** hold a voice button and press a `SEQ` (scene) button to assign that individual track to play from a different scene than the rest — same gesture as the old "per-track pattern assignment" idea, retargeted at scenes.
-- **Per-voice morph in the PERF page:** each voice gets a direct morph control on the PERF page, full 0–255 range. Step automation and velocity automation update it in real time and it's visible; LFO-to-voice-morph modulation does **not** update the displayed value (per Phase 3.3 — it's background-only). Changing global morph updates every per-voice value shown here.
 
 ### 6.6 Looper
 
@@ -1383,11 +1420,13 @@ Moves to the `SELECT` buttons (confirmed correction from your round-2 answer —
 
 That division range was originally expressed in **sub-step** terms (64 sub-steps = 1/2 bar, down to 1 sub-step = 1/64th), which no longer exists as a unit after the Phase 4 dynamic Pattern rewrite. This needs re-deriving in step/bar terms before it can be implemented — flagged below as an open question, since a naive re-mapping (halving from "1/2 bar" down through 8 buttons) lands on 1/256th at the bottom with no sub-steps to represent it, which doesn't match the original "down to 1/64th" intent.
 
-### 6.7 Load/save UI rework
+### ~~6.7 Load/save UI rework~~ — COMPLETED
 
-Deferred until after Pattern data storage. The current revision risks, UI
-behavioral contract, and explicit test matrix are tracked in
-`AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
+Implemented across Sessions 038-044 as part of Phase 3 filesystem/menu work.
+See Phase 3 §3.4 completion notes for details (type selector, OK/OW command
+lifecycle, Bank preview, hardware pot navigation). Effect load/save remains
+Phase 5 work (§5.1). The post-Pattern Load/Save revision risks and test
+matrix remain tracked in `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
 
 ### 6.8 External MIDI sequencing tracks
 
@@ -1396,13 +1435,12 @@ From "notes from others" in `putting it together`: doubling the sequencer's trac
 ### Open Engineering Questions
 
 - **Looper division mapping without sub-steps.** Needs a concrete answer before 6.6 can be built: is 1/64th represented via a track-scale-style subdivision (Phase 4.7's `/2`..`×16` scale applied to a virtual "loop track"), or is the shortest loop division now coarser (e.g., 1/16th, one full step) given sub-steps no longer exist? This changes both the encoding and the UI.
-- **Manual roll trigger gesture** (carried over from Phase 4) needs a home in this UI redesign — likely a `SHIFT`+something on the step buttons or a dedicated control, per the "try not to put shift functions on the SEQ buttons" constraint from 6.4.
-- **Automation view performance:** View B's temporary working array (automation for one parameter, all steps in a track) needs to be read from and written back to the Phase 4 dynamic pool efficiently — worst case, entering the view triggers up to 128 individual pool lookups (one per step) to populate the array, and exiting triggers up to 128 pool writes. Should be fine given the pool is designed for O(1)-ish per-step access, but worth confirming against Phase 4's actual implementation once it exists.
+- **Manual roll trigger gesture** (carried over from Phase 4) needs a home in this UI redesign — likely a `SHIFT`+something on the step buttons or a dedicated control.
 
 ### Suggested Complementary Features
 
-- **Automation "eraser" mode** (from the earlier draft, still reasonable): a shortcut — e.g., holding `CLEAR` while turning a parameter's knob — that wipes all step automation for that specific parameter across the active track in one gesture, complementing but distinct from View A's per-step "remove" functions.
-- **Scene-inclusion visual on the voice page (6.4):** since toggling scene inclusion for a parameter edit is a new interaction, consider a brief on-screen summary ("editing: 3/16 scenes") when a parameter is touched, so it's obvious at a glance how broad the edit's blast radius is before committing to a knob turn.
+- **Automation "eraser" mode** (from the earlier draft, still reasonable): a shortcut — e.g., holding `CLEAR` while turning a parameter's knob — that wipes all step automation for that specific parameter across the active track in one gesture, complementing but distinct from the step-edit list menu's per-step "remove" functions.
+- **Scene-inclusion visual on the voice page:** consider a brief on-screen summary ("editing: 3/16 scenes") when a parameter is touched, so it's obvious at a glance how broad the edit's blast radius is before committing to a knob turn.
 
 ## Phase 7 — DSP Expansion
 
