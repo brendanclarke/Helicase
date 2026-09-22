@@ -1123,11 +1123,6 @@ folding it into an existing temporary layer.
 - **Dot/triplet subdivisions for per-track scale:** flagged as "maybe" in the source doc — worth a decision before 4.7 is implemented, since it affects the scale-value encoding (a plain `/2..×16` power-of-two range doesn't accommodate dotted/triplet values without extra encoding bits).
 - **`automation hold` vs. the 4.3a default hold-and-reset behavior:** as flagged in 4.3a, it's not yet clear what the dedicated `hold` flag adds on top of the now-default "holds until next active step" behavior for ordinary automation. Left open deliberately (per your note that this can wait for the implementation session), but worth resolving before both are built as potentially-overlapping mechanisms.
 
-### Suggested Complementary Features
-
-- **Pool usage meter.** A percentage-used indicator in the global settings, next to the CPU meter, for the active scene's event pool — you specifically asked for this ("0-99% like there is for cpu use") and it's cheap to compute (pool bytes used ÷ pool size) and genuinely useful for knowing when you're approaching the automation ceiling on a dense pattern.
-- **Per-scene pool high-water mark, not just live usage** — showing "peak used this session" alongside live usage would help catch a scene that briefly spiked into heavy automation and then got scaled back, which a live-only meter would hide.
-
 ## Phase 5 — Effects Foundation & Scene Fixes
 
 **Location:** `Core/DSP/Effects/`, `Core/DSPAudio/`, `Core/Bank/`,
