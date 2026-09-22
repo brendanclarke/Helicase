@@ -1365,6 +1365,17 @@ access and automation indicator (6.4), scene instant switching (6.5 partial),
 and load/save UI rework (6.7) were completed in earlier phases and their
 completion records are in §§3.4, 4.6.
 
+### 6.0 Deferred Phase 4 completion (first priority)
+
+Before MIDI or other Phase 6 items: finish the remaining Phase 4 open
+engineering questions (§4 Open Engineering Questions: manual roll triggering,
+dot/triplet subdivisions, automation hold reconciliation) and the deferred
+Pattern track properties work documented in
+`knowledge_files/drafts/PATTERN_TRACK_PROPERTIES_AND_WIDGETS_COMPLETION.md`
+(per-track scale/shuffle, copy/paste/clear, live record automation, roll
+overhaul, Patgen/Euklid revert). These are implementation-eligible and should
+land before the MIDI/UI items below.
+
 ### 6.1 MIDI and External Control Cleanup
 
 `midi_MidiChannels[8]` already exists: one channel per voice plus one global
