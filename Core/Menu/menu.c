@@ -6306,6 +6306,13 @@ void menu_loadInstrumentExit(void)
     menu_instrumentSaveMode = 0u;
     menu_loadSaveClearInstrumentVoiceBlinks();
     menu_refreshLoadSceneLeds();
+    /*
+     * LSR-01 user feel: publish the Kit destination before a dirty HCNAMES
+     * flush can return early. Inputs: the completed exit state and LEDs above.
+     * Output: the LCD immediately shows Kit context; the later Kit index load
+     * supplies the definitive name and list frame.
+     */
+    menu_repaintAll();
     if (menu_residentNameDirtySceneMask != 0u &&
         menu_endResidentNameScratchSession())
         return;
@@ -6402,6 +6409,13 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
     menu_instrumentLoadClampIndex();
     menu_setActiveVoice(voiceNr);
     menu_refreshLoadSceneLeds();
+    /*
+     * LSR-01 user feel: publish the newly selected Instrument destination
+     * before any dirty HCNAMES flush can return early. Inputs: the complete
+     * destination state and LEDs above. Output: the LCD immediately reflects
+     * the selected voice/type while the asynchronous cache handoff continues.
+     */
+    menu_repaintAll();
     if (menu_residentNameDirtySceneMask != 0u &&
         menu_endResidentNameScratchSession())
         return 1u;
@@ -6708,6 +6722,13 @@ static void menu_loadSaveEnterInstrumentLoad(uint8_t voice, uint8_t option)
     menu_setActiveVoice(voice);
     menu_loadSaveSetInstrumentVoiceLed(voice);
     menu_refreshLoadSceneLeds();
+    /*
+     * LSR-01 user feel: show the Pot-1 Instrument Load destination before a
+     * dirty-name checkpoint starts. Inputs: the installed page, type, voice,
+     * and LEDs. Output: immediate destination context; the later index load
+     * supplies the definitive list/name frame.
+     */
+    menu_repaintAll();
     if (menu_residentNameDirtySceneMask != 0u &&
         menu_endResidentNameScratchSession())
         return;
@@ -6751,6 +6772,13 @@ static void menu_loadSaveEnterInstrumentSave(uint8_t voice, uint8_t morph)
     menu_setActiveVoice(voice);
     menu_loadSaveSetInstrumentVoiceLed(voice);
     menu_refreshLoadSceneLeds();
+    /*
+     * LSR-01 user feel: show the Pot-1 Instrument Save destination before a
+     * dirty-name checkpoint starts. Inputs: the installed Save page, voice,
+     * Morph row, and LEDs. Output: immediate Save/Instrument context while
+     * the asynchronous name/cache handoff finishes in the background.
+     */
+    menu_repaintAll();
     if (menu_residentNameDirtySceneMask != 0u &&
         menu_endResidentNameScratchSession())
         return;

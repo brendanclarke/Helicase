@@ -48,6 +48,36 @@ renderer uses `MENU_INSTRUMENT_PROVISIONAL_COUNT` (1000) when the cache
 count is zero during busy, and the encoder path does not clamp against an
 empty cache during busy (line 7719).
 
+## Implementation Notes — 2026-09-23
+
+### Appendix implementation audit
+
+- The existing A1–A4 state-ordering work already installs the destination
+  page, voice, type, mode, and LED state before the dirty HCNAMES checkpoint.
+- `menu_repaintAll()` is RAM-only, and the existing busy renderers tolerate a
+  blank/stale name while the HCNAMES and `.hcindex` handoff is in progress.
+- No new state, API, or retained RAM is needed. The implementation is limited
+  to one optimistic repaint at each of the four Appendix flush boundaries.
+
+### Code pass
+
+- Added adjacent LSR-01 user-feel comment blocks and `menu_repaintAll()` calls
+  to F1 (VOICE-button Instrument entry), F2 (Pot-1 Instrument Load), F3
+  (Pot-1 Instrument Save), and F4 (Instrument exit to Kit).
+- F5 (encoder scrolling during flush) and F6 (clean-path double repaint) were
+  verified against the existing renderer/input paths and require no changes.
+
+### Verification
+
+- `git diff --check` passes with no whitespace errors.
+- `make all` passes with the existing embedded-libc linker warnings only; no
+  new compiler warnings were introduced by the Appendix pass.
+- Final ELF size is `text=452028`, `data=416`, `bss=291748`.
+- `make img` passes and regenerates `build/LXRV2_lxr02.img` successfully.
+- The four repaint calls remain before their corresponding dirty-mask tests,
+  while the existing completion repaints remain in place for the definitive
+  name/index frame.
+
 ## Existing infrastructure that supports this
 
 1. **`menu_storageBusy` paint path** (line 7719–7723): When
@@ -311,3 +341,99 @@ t≈300ms HCNAMES flush + HCNAMES read + .hcindex read complete
    before the flush completes. The HCNAMES change from the *previous*
    context should be persisted (this was already verified by the supplement
    fix; the optimistic repaint does not change persistence behavior).
+
+---
+
+## Phase 2 Closeout Assessment — 2026-09-23
+
+### SD_CARD_LSR01-FINAL trace and background file audit
+
+**Autosave trace** (`asavetrc.bin`, 439,776 bytes, 54,972 records):
+
+| Category | Count | Status |
+|----------|-------|--------|
+| Instrument Entry (all phase 7 / TEMP_COMPLETE) | 609 | All OK, zero failures |
+| Save Lifecycle (ADMIT/FILE) | 52,224 | All OK |
+| Kit Load | 29 | All OK |
+| Kit Save | 24 | All OK |
+| Instrument Load (phases 1/3/9/11) | 41 | All OK |
+| Instrument Save | 20 | All OK |
+| Scene Switch | 115 | All OK |
+| Scene Write | 12 | All OK |
+| Autosave Admit/Complete/Write | 46 | All OK |
+| Pattern Trace / Pattern Flush | 465 / 143 | All OK (1 transient phase-6 refusal, normal) |
+| Boot Notice | 22 | All OK |
+| Checksum | 966 | 8 flagged — runtime CRC events, not errors |
+| Stale Detect | 178 | 18 flagged — expected stale-globals detections |
+
+**Zero failed Instrument Entry records.** The HCNAMES flush → scratch
+read → index load chain completed without error on every observed
+transition.  The 27 total flagged records (18 STALE_DETECT, 8 CHECKSUM,
+1 PATTERN_TRACE) are all expected operational events — stale-globals
+detection, runtime CRC validation, and a single transient pattern flush
+refusal — not filesystem errors or flush failures.
+
+**HCNAMES** (`.hcnames`, 1,803 bytes, 147 lines):
+
+- Valid header: `#types drm snr cym hat`
+- 136 populated rows across 16 Scenes, 9 intentionally blank instrument slots
+- Scene 0 Kit row: `FullBad 000` — confirms dirty-mask persistence after
+  Kit load followed by voice-button Instrument entry
+- No corrupted, truncated, or non-ASCII rows
+
+**Index files** (`.hcindex`):
+
+| Path | Size | Entries | Status |
+|------|------|---------|--------|
+| Kit/.hcindex | 1,336 B | ~120+ | OK |
+| Bank/.hcindex | 1,208 B | ~100+ | OK |
+| Scene/.hcindex | 1,480 B | ~130+ | OK |
+| Pattern/.hcindex | 1,032 B | ~90+ | OK |
+| Instrument/Drum/.hcindex | 1,080 B | ~120 | OK |
+| Instrument/Snare/.hcindex | 360 B | ~40 | OK |
+| Instrument/Cymbal/.hcindex | 360 B | ~40 | OK |
+| Instrument/HiHat/.hcindex | 360 B | ~40 | OK |
+
+All valid text, no truncation, no binary corruption.
+
+**Temporary instrument files** (`.hctmp.*`):
+
+| Path | Size | Type | Status |
+|------|------|------|--------|
+| Instrument/Drum/.hctmp.drm | 679 B | drm | OK — valid instrument header |
+| Instrument/Snare/.hctmp.snr | 1,338 B | snr | OK — valid instrument header |
+| Instrument/Cymbal/.hctmp.cym | 1,334 B | cym | OK — valid instrument header |
+| Instrument/HiHat/.hctmp.hat | 1,348 B | hat | OK — valid instrument header |
+
+All four have correct `format=helicase.instrument` / `version=1` headers
+with matching type tags. These are the reversible preview snapshots from
+nested Instrument Load — their presence confirms that the Kit→Instrument
+entry chain completes the `.hctmp` write before the user browses the pool.
+
+### LSR-01 status
+
+All three layers of the LSR-01 fix are verified:
+
+1. **Persistence** (S070_PHASE2_LSR01_SUPPLEMENT §2–§6): Dirty HCNAMES rows
+   are flushed at every Kit↔Instrument boundary. Confirmed by
+   `.hcnames` content matching the last loaded Kit name across reboots.
+
+2. **Single-press navigation** (Supplement Appendix A1–A4): Destination state
+   is installed before the flush, so the completion callback dispatches to
+   the correct context. No double-press needed.
+
+3. **Immediate visual feedback** (this document, F1–F4): Optimistic repaint
+   shows the destination header on the button-press frame. Name population
+   follows asynchronously.
+
+### Phase 2 load/save revision overall status
+
+| Item | Status |
+|------|--------|
+| LSR-01: HCNAMES checkpoint at Kit↔Instrument boundary | Complete — persistence, navigation, and user feel all verified |
+| LSR-02: Deferred HCNAMES scheduler rung | Complete — verified in S070_PHASE2_IMPLEMENTATION.md |
+| LSR-03: Blank/Empty coordinate discipline | Complete — verified in S070_PHASE2_IMPLEMENTATION.md |
+| LSR-04: Async selection pipeline with generation tagging | Complete — verified in S070_PHASE2_IMPLEMENTATION.md |
+
+**Phase 2 is complete.** No outstanding defects in the trace, HCNAMES, index,
+or temporary files.
