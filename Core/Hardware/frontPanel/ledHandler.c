@@ -90,8 +90,9 @@ static volatile uint8_t  led_pulsingLeds;
  * that same group's previous mask and restores those LEDs to their current base
  * state. The new mask then runs through the existing 400 ms / 80 ms temporary
  * output pattern. led_setValue() may still change base LED state while the
- * flash is active; expiry uses led_reset(), so it restores the state that is
- * current at expiry rather than a snapshot taken when the flash began.
+ * flash is active; expiry uses led_renderFromStack(), so it restores the
+ * highest remaining layer or the base state that is current at expiry rather
+ * than a snapshot taken when the flash began.
  */
 static volatile uint16_t led_flashEndTime[NUM_OF_FLASHABLE_LEDS];
 static volatile uint16_t led_flashNextTime[NUM_OF_FLASHABLE_LEDS];
@@ -119,6 +120,37 @@ static volatile uint8_t  led_currentStepLed = 0xFFu;
  */
 static uint8_t           led_sw43State;
 static uint8_t           led_sw43OriginalState;
+
+/*
+ * Per-LED active-layer bitmap for priority-based fallback rendering.
+ *
+ * Inputs: layer start/end functions set and clear bits. Output:
+ * led_renderFromStack() reads this bitmap to determine the highest active
+ * layer when any layer expires, ensuring expiry falls back to the next active
+ * layer rather than unconditionally restoring base state. Index 0..39 maps to
+ * chain LEDs; index 40 maps to LED_BAR1. One byte per LED; bits are layer flags
+ * from the LED_LAYER_* constants below.
+ *
+ * RAM cost: 41 bytes SRAM1 (approved in S070 plan, D11).
+ * Common accessors: led_pulseLed(), led_setBlinkLed(), led_flashGroup(),
+ * led_setActive_step(), led_clearActive_step(), led_renderFromStack().
+ */
+#define LED_LAYER_BLINK  (1u << 0)
+#define LED_LAYER_CHASE  (1u << 1)
+#define LED_LAYER_FLASH  (1u << 2)
+#define LED_LAYER_PULSE  (1u << 3)
+#define LED_LAYER_COUNT  41u
+
+static uint8_t led_activeLayers[LED_LAYER_COUNT];
+
+/*
+ * Flash-group lookup declarations used by led_renderFromStack(). The lookup
+ * bodies remain beside the flash implementation below; these declarations keep
+ * the priority renderer adjacent to its layer contract without reordering the
+ * existing group helpers.
+ */
+static uint8_t led_flashGroupLedCount(LedFlashGroup group);
+static uint8_t led_flashGroupLed(LedFlashGroup group, uint8_t bit);
 
 /*
  * Persistent blink slots.
@@ -230,8 +262,8 @@ static uint8_t led_bitPos(uint8_t ledNr)   { return btn_to_sr[ledNr] % 8; }
  *
  * Input: ledNr is a physical chain index. Output: dout_outputData[] is updated
  * to match led_originalLedState[] for that LED; led_originalLedState[] itself
- * is not changed. This is the subsidiary restore primitive for led_reset(),
- * pulse expiry, blink cancellation, and chase cleanup.
+ * is not changed. This is the subsidiary base-restore primitive for led_reset()
+ * and led_renderFromStack() fallback paths.
  */
 static void led_resetToOriginal(uint8_t ledNr)
 {
@@ -240,6 +272,69 @@ static void led_resetToOriginal(uint8_t ledNr)
         dout_outputData[ap] |=  (uint8_t)(1<<bp);
     else
         dout_outputData[ap] &= (uint8_t)~(1<<bp);
+}
+
+/*
+ * Re-render one LED from the highest active layer in its priority stack.
+ *
+ * Input: logical LED ID. Output: the physical LED output is set to the state
+ * dictated by the highest active layer (pulse > flash > blink/chase > base).
+ * When no temporary layer is active, the LED falls back to its base state from
+ * led_originalLedState[] or led_sw43OriginalState. Pulse and blink/chase keep
+ * the state already written by their owner; flash is re-applied from the
+ * active group's current phase so a higher layer can expire without exposing
+ * the base state.
+ *
+ * Common callers: expiry/cancellation paths that formerly called led_reset().
+ * Affiliates: led_tickHandler(), led_setBlinkLed(), led_flashGroup(),
+ * led_clearAllBlinkLeds(), led_setActive_step(), and led_clearActive_step().
+ */
+static void led_renderFromStack(uint8_t ledNr)
+{
+    uint8_t physLed = led_toPhysicalNumber(ledNr);
+    uint8_t index = (physLed == LED_BAR1) ? 40u : physLed;
+    uint8_t layers;
+
+    if (index >= LED_LAYER_COUNT)
+        return;
+    layers = led_activeLayers[index];
+
+    if (layers & LED_LAYER_PULSE)
+        return;
+
+    if (layers & LED_LAYER_FLASH) {
+        uint8_t group;
+        for (group = 0u; group < NUM_OF_FLASHABLE_LEDS; group++) {
+            if (led_flashingLeds & (uint8_t)(1u << group)) {
+                uint8_t bit;
+                uint8_t count = led_flashGroupLedCount((LedFlashGroup)group);
+                for (bit = 0u; bit < count; bit++) {
+                    if (led_flashGroupLed((LedFlashGroup)group, bit) == ledNr &&
+                        (led_flashMask[group] & (uint16_t)(1u << bit))) {
+                        led_setValueTemp(
+                            (uint8_t)((led_flashPhase[group] & 1u) == 0u),
+                            ledNr);
+                        return;
+                    }
+                }
+            }
+        }
+        /* A stale flash bit is not allowed to mask lower active layers. */
+        led_activeLayers[index] &= (uint8_t)~LED_LAYER_FLASH;
+        layers = led_activeLayers[index];
+    }
+
+    if ((layers & LED_LAYER_CHASE) && !(layers & LED_LAYER_BLINK) &&
+        led_currentStepLed == ledNr) {
+        /* Chase has no periodic owner; reconstruct its inverted base state. */
+        led_reset(ledNr);
+        led_toggleTemp(ledNr);
+        return;
+    }
+    if (layers & (LED_LAYER_BLINK | LED_LAYER_CHASE))
+        return;
+
+    led_reset(ledNr);
 }
 
 /*
@@ -260,6 +355,7 @@ void led_init(void)
     led_sw43State = 0;
     led_sw43OriginalState = 0;
     memset(led_originalLedState, 0, sizeof(led_originalLedState));
+    memset(led_activeLayers, 0, sizeof(led_activeLayers));
 }
 
 /*
@@ -269,7 +365,9 @@ void led_init(void)
  * the physical LED output is changed and the remembered/base state is updated
  * so future temporary effects restore to this value. For LED_BAR1 the GPIO
  * shadow state is updated and dout_setSw43Led() is called directly; for chain
- * LEDs this writes dout_outputData[] plus led_originalLedState[].
+ * LEDs this writes dout_outputData[] plus led_originalLedState[]. If a
+ * temporary layer is active, led_renderFromStack() immediately reasserts that
+ * layer over the new base state.
  *
  * Common callers: mode/page/voice selectors, buttonHandler transport LEDs,
  * sequencer LED foreground drain, and clear helpers. Invalid ledNr is ignored.
@@ -281,6 +379,7 @@ void led_setValue(uint8_t val, uint8_t ledNr)
         led_sw43State = (uint8_t)(val ? 1u : 0u);
         led_sw43OriginalState = led_sw43State;
         dout_setSw43Led(led_sw43State);
+        led_renderFromStack(ledNr);
         return;
     }
     if (physLed >= NUM_OUTS) return;
@@ -288,6 +387,7 @@ void led_setValue(uint8_t val, uint8_t ledNr)
     uint8_t ap = led_arrayPos(physLed), bp = led_bitPos(physLed);
     if (val) { dout_outputData[ap] |=  (uint8_t)(1<<bp); led_originalLedState[ap] |=  (uint8_t)(1<<bp); }
     else      { dout_outputData[ap] &= (uint8_t)~(1<<bp); led_originalLedState[ap] &= (uint8_t)~(1<<bp); }
+    led_renderFromStack(ledNr);
 }
 
 /*
@@ -322,10 +422,11 @@ void led_setValueTemp(uint8_t val, uint8_t ledNr)
  *
  * Input: ledNr is a logical LED ID. Output: the physical output is rewritten to
  * led_originalLedState[] or led_sw43OriginalState. No base state changes. This
- * is used when a temporary effect expires or is cancelled.
+ * is the explicit base-restore primitive; temporary effect expiry/cancellation
+ * uses led_renderFromStack() so lower active layers are preserved.
  *
- * Common callers: led_tickHandler() pulse expiry, blink cancellation,
- * led_clearActive_step(), and led_setActive_step() when moving the chase LED.
+ * Common caller: led_renderFromStack(), plus any public client that explicitly
+ * wants the current logical LED to return to its remembered base state.
  */
 void led_reset(uint8_t ledNr)
 {
@@ -356,6 +457,7 @@ void led_toggle(uint8_t ledNr)
         led_sw43State ^= 1u;
         led_sw43OriginalState = led_sw43State;
         dout_setSw43Led(led_sw43State);
+        led_renderFromStack(ledNr);
         return;
     }
     if (physLed >= NUM_OUTS) return;
@@ -363,6 +465,7 @@ void led_toggle(uint8_t ledNr)
     uint8_t ap = led_arrayPos(physLed), bp = led_bitPos(physLed);
     dout_outputData[ap]      ^= (uint8_t)(1<<bp);
     led_originalLedState[ap] ^= (uint8_t)(1<<bp);
+    led_renderFromStack(ledNr);
 }
 
 /*
@@ -394,8 +497,9 @@ void led_toggleTemp(uint8_t ledNr)
  *
  * Inputs: none. Outputs: all shift-register output bytes and their base-state
  * mirrors are zeroed; the dedicated BAR1 GPIO LED and its base shadow are also
- * cleared. This is a global visual reset, not a temporary-effect cancellation
- * only.
+ * cleared. This is a global visual reset: temporary pulse, blink, flash, and
+ * chase ownership is cancelled along with the visible/base state so a later
+ * tick cannot resurrect an effect after screensaver or page teardown.
  *
  * Common callers: initialization and full-screen/UI reset paths.
  */
@@ -403,8 +507,13 @@ void led_clearAll(void)
 {
     int i;
     for (i=0;i<NUM_OUTS/8;i++) { dout_outputData[i]=0; led_originalLedState[i]=0; }
+    led_pulsingLeds = 0u;
+    led_blinkingLeds = 0u;
+    led_flashingLeds = 0u;
+    led_currentStepLed = 0xFFu;
     led_sw43State = 0;
     led_sw43OriginalState = 0;
+    memset(led_activeLayers, 0, sizeof(led_activeLayers));
     dout_setSw43Led(0);
 }
 
@@ -412,12 +521,13 @@ void led_clearAll(void)
  * Start a one-shot temporary LED inversion.
  *
  * Input: ledNr is a logical LED ID. Output: if a pulse slot is available, the
- * LED is toggled temporarily and scheduled to reset after LED_PULSE_TIME_MS.
- * The base state is not changed. If all slots are busy, the request is dropped.
+ * LED is toggled temporarily, marked with LED_LAYER_PULSE, and scheduled to
+ * render its next active layer after LED_PULSE_TIME_MS. The base state is not
+ * changed. If all slots are busy, the request is dropped.
  *
  * Timing semantics: this is not a repeating pulse train. It is one inversion
  * lasting about 50 ms at the current LED_PULSE_TIME_MS value, after which
- * led_tickHandler() calls led_reset() for the original/base state.
+ * led_tickHandler() clears the pulse layer and calls led_renderFromStack().
  *
  * Common callers: short acknowledgements where "blip the current LED state" is
  * enough. Longer patterned flashes should use a dedicated flash path rather
@@ -435,6 +545,11 @@ void led_pulseLed(uint8_t ledNr)
             led_pulsingLeds |= (uint8_t)(1<<i);
             led_pulseEndTime[i] = (uint16_t)(time_sysTick + LED_PULSE_TIME_MS);
             led_toggleTemp(ledNr);
+            {
+                uint8_t index = (physLed == LED_BAR1) ? 40u : physLed;
+                if (index < LED_LAYER_COUNT)
+                    led_activeLayers[index] |= LED_LAYER_PULSE;
+            }
             break;
         }
     }
@@ -506,12 +621,24 @@ static void led_applyFlashMask(LedFlashGroup group, uint16_t mask, uint8_t value
     for (bit = 0; bit < count; bit++) {
         if (mask & (uint16_t)(1u << bit)) {
             uint8_t ledNr = led_flashGroupLed(group, bit);
-            if (ledNr != 0xFFu)
+            uint8_t physLed = led_toPhysicalNumber(ledNr);
+            uint8_t index = (physLed == LED_BAR1) ? 40u : physLed;
+            if (ledNr != 0xFFu && index < LED_LAYER_COUNT &&
+                !(led_activeLayers[index] & LED_LAYER_PULSE))
                 led_setValueTemp(value, ledNr);
         }
     }
 }
 
+/*
+ * End one flash mask and reveal the next active LED layer.
+ *
+ * Inputs: flash group and its exact logical LED mask. Output: the FLASH bit is
+ * cleared for each affected LED and led_renderFromStack() reveals pulse,
+ * blink/chase, or current base state. The caller removes the group slot from
+ * led_flashingLeds before calling this helper, so replacement/expiry cannot
+ * accidentally reselect the old flash phase.
+ */
 static void led_restoreFlashMask(LedFlashGroup group, uint16_t mask)
 {
     uint8_t bit;
@@ -519,8 +646,13 @@ static void led_restoreFlashMask(LedFlashGroup group, uint16_t mask)
     for (bit = 0; bit < count; bit++) {
         if (mask & (uint16_t)(1u << bit)) {
             uint8_t ledNr = led_flashGroupLed(group, bit);
-            if (ledNr != 0xFFu)
-                led_reset(ledNr);
+            if (ledNr != 0xFFu) {
+                uint8_t physLed = led_toPhysicalNumber(ledNr);
+                uint8_t index = (physLed == LED_BAR1) ? 40u : physLed;
+                if (index < LED_LAYER_COUNT)
+                    led_activeLayers[index] &= (uint8_t)~LED_LAYER_FLASH;
+                led_renderFromStack(ledNr);
+            }
         }
     }
 }
@@ -534,16 +666,17 @@ void led_flashGroup(LedFlashGroup group, uint16_t mask)
      *
      * Inputs: group selects a known LED row/set and mask selects which LEDs in
      * that group should flash. Bits beyond the group width are ignored. Output:
-     * any previous flash for this group is cancelled and restored, then the new
-     * mask is forced into the existing temporary flash pattern. This modifies
-     * the existing flash slot state in place; no parallel flash layer exists.
+     * any previous flash for this group is cancelled and rendered through the
+     * active-layer priority bitmap, then the new mask is forced into the
+     * existing temporary flash pattern. The bitmap records FLASH membership;
+     * the bounded group slots continue to own phase/timing state.
      */
     if (slot >= NUM_OF_FLASHABLE_LEDS)
         return;
 
     if (led_flashingLeds & (uint8_t)(1u << slot)) {
-        led_restoreFlashMask(group, led_flashMask[slot]);
         led_flashingLeds &= (uint8_t)~(uint8_t)(1u << slot);
+        led_restoreFlashMask(group, led_flashMask[slot]);
         led_flashMask[slot] = 0u;
     }
 
@@ -557,6 +690,21 @@ void led_flashGroup(LedFlashGroup group, uint16_t mask)
     led_flashNextTime[slot] = (uint16_t)(time_sysTick + LED_FLASH_CYCLE_TIME_MS);
     led_flashEndTime[slot] = (uint16_t)(time_sysTick + LED_FLASH_DURATION_TIME_MS);
     led_applyFlashMask(group, mask, 1u);
+    {
+        uint8_t bit;
+        uint8_t count = led_flashGroupLedCount(group);
+        for (bit = 0u; bit < count; bit++) {
+            if (mask & (uint16_t)(1u << bit)) {
+                uint8_t flashLed = led_flashGroupLed(group, bit);
+                if (flashLed != 0xFFu) {
+                    uint8_t physLed = led_toPhysicalNumber(flashLed);
+                    uint8_t index = (physLed == LED_BAR1) ? 40u : physLed;
+                    if (index < LED_LAYER_COUNT)
+                        led_activeLayers[index] |= LED_LAYER_FLASH;
+                }
+            }
+        }
+    }
 }
 
 void led_flashLed(uint8_t ledNr)
@@ -598,9 +746,10 @@ void led_flashLed(uint8_t ledNr)
  *
  * Inputs: ledNr is a logical LED ID; onOff nonzero requests blinking, zero
  * cancels blinking. Output on start: a free blink slot stores ledNr and the LED
- * is temporarily toggled immediately. Output on stop: matching blink slots are
- * cleared and the LED is restored to its base state. Full slot allocation drops
- * a new start request silently.
+ * is temporarily toggled immediately and marked as a BLINK layer. Output on
+ * stop: matching blink slots and layer bits are cleared, then the next active
+ * layer or base state is rendered. Full slot allocation drops a new start
+ * request silently.
  *
  * Common callers: buttonHandler mode/step/copy gestures and performance-view
  * pattern indications. This function does not own blink timing; led_tickHandler()
@@ -631,7 +780,15 @@ void led_setBlinkLed(uint8_t ledNr, uint8_t onOff)
         for (i=0;i<NUM_OF_BLINKABLE_LEDS;i++) {
             if (!(led_blinkingLeds & (1<<i))) {
                 led_blinkLedNumber[i] = ledNr; led_blinkingLeds |= (uint8_t)(1<<i);
-                led_toggleTemp(ledNr);
+                {
+                    uint8_t index = (physLed == LED_BAR1) ? 40u : physLed;
+                    if (index < LED_LAYER_COUNT)
+                        led_activeLayers[index] |= LED_LAYER_BLINK;
+                    if (index >= LED_LAYER_COUNT ||
+                        !(led_activeLayers[index] &
+                          (LED_LAYER_PULSE | LED_LAYER_FLASH)))
+                        led_toggleTemp(ledNr);
+                }
                 break;
             }
         }
@@ -639,7 +796,12 @@ void led_setBlinkLed(uint8_t ledNr, uint8_t onOff)
         for (i=0;i<NUM_OF_BLINKABLE_LEDS;i++) {
             if ((led_blinkingLeds & (1<<i)) && led_blinkLedNumber[i]==ledNr) {
                 led_blinkingLeds &= (uint8_t)~(1<<i);
-                led_reset(ledNr);
+                {
+                    uint8_t index = (physLed == LED_BAR1) ? 40u : physLed;
+                    if (index < LED_LAYER_COUNT)
+                        led_activeLayers[index] &= (uint8_t)~LED_LAYER_BLINK;
+                }
+                led_renderFromStack(ledNr);
             }
         }
     }
@@ -649,8 +811,8 @@ void led_setBlinkLed(uint8_t ledNr, uint8_t onOff)
  * Cancel all persistent blinking LEDs.
  *
  * Inputs: none. Outputs: every active blink slot is cleared and every affected
- * LED is restored to its remembered/base state. Pulse slots and the sequencer
- * chase state are not altered.
+ * LED is rendered from the next active layer or remembered/base state. Pulse
+ * slots and the sequencer chase state are not altered.
  *
  * Common callers: mode changes and UI gesture transitions where old blink
  * feedback must be cleared before drawing a new page/state.
@@ -660,7 +822,12 @@ void led_clearAllBlinkLeds(void)
     int i;
     for (i=0;i<NUM_OF_BLINKABLE_LEDS;i++) {
         if (led_blinkingLeds & (1<<i)) {
-            led_reset(led_blinkLedNumber[i]);
+            uint8_t ledNr = led_blinkLedNumber[i];
+            uint8_t physLed = led_toPhysicalNumber(ledNr);
+            uint8_t index = (physLed == LED_BAR1) ? 40u : physLed;
+            if (index < LED_LAYER_COUNT)
+                led_activeLayers[index] &= (uint8_t)~LED_LAYER_BLINK;
+            led_renderFromStack(ledNr);
             led_blinkingLeds &= (uint8_t)~(1<<i);
         }
     }
@@ -671,8 +838,9 @@ void led_clearAllBlinkLeds(void)
  *
  * Why: pulse and blink effects are represented as small slot tables so callers
  * can request visual feedback without blocking. Inputs are implicit global
- * effect state and time_sysTick. Outputs: expired pulse slots restore their
- * LEDs, and active blink slots toggle at LED_BLINK_TIME_MS intervals.
+ * effect state and time_sysTick. Outputs: expired pulse slots clear their
+ * layers and render fallback state, while active blink slots toggle at
+ * LED_BLINK_TIME_MS intervals unless a higher layer owns the LED.
  *
  * Call timing: invoked from the front-panel/timebase service path. It must stay
  * cheap and non-blocking. It does not drain sequencer LED dirty state; that is
@@ -683,8 +851,13 @@ void led_tickHandler(void)
     int i;
     for (i=0;i<NUM_OF_PULSABLE_LEDS;i++) {
         if ((led_pulsingLeds & (1<<i)) && (time_sysTick > led_pulseEndTime[i])) {
+            uint8_t ledNr = led_pulseLedNumber[i];
+            uint8_t physLed = led_toPhysicalNumber(ledNr);
+            uint8_t index = (physLed == LED_BAR1) ? 40u : physLed;
             led_pulsingLeds &= (uint8_t)~(1<<i);
-            led_reset(led_pulseLedNumber[i]);
+            if (index < LED_LAYER_COUNT)
+                led_activeLayers[index] &= (uint8_t)~LED_LAYER_PULSE;
+            led_renderFromStack(ledNr);
         }
     }
     for (i=0;i<NUM_OF_FLASHABLE_LEDS;i++) {
@@ -705,7 +878,13 @@ void led_tickHandler(void)
         led_nextBlinkTime = (uint16_t)(time_sysTick + LED_BLINK_TIME_MS);
         for (i=0;i<NUM_OF_BLINKABLE_LEDS;i++) {
             if (led_blinkingLeds & (1<<i)) {
-                led_toggleTemp(led_blinkLedNumber[i]);
+                uint8_t ledNr = led_blinkLedNumber[i];
+                uint8_t physLed = led_toPhysicalNumber(ledNr);
+                uint8_t index = (physLed == LED_BAR1) ? 40u : physLed;
+                if (index >= LED_LAYER_COUNT ||
+                    !(led_activeLayers[index] &
+                      (LED_LAYER_PULSE | LED_LAYER_FLASH)))
+                    led_toggleTemp(ledNr);
             }
         }
     }
@@ -906,8 +1085,9 @@ void led_clearVoiceLeds(void)
  * Move the temporary sequencer chase LED.
  *
  * Input: stepNr is the currently playing bridge step index 0..127. Output:
- * the previous chase LED is restored, then the STEP LED for stepNr % 16 is
- * temporarily toggled. The base step LED state is not changed.
+ * the previous chase LED is rendered from its next layer, then the STEP LED
+ * for stepNr % 16 is marked with the CHASE layer and temporarily toggled. The
+ * base step LED state is not changed.
  *
  * Common caller: led_updateCurrentStep() during foreground drain of sequencer
  * chase dirty state. The caller has already verified that stepNr is inside
@@ -918,10 +1098,23 @@ void led_setActive_step(uint8_t stepNr)
     uint8_t ledNr = (uint8_t)(LED_STEP1 + (stepNr % NUM_STEPS_PER_BAR));
     if (led_currentStepLed != ledNr) {
         if (led_currentStepLed != 0xFFu) {
-            led_reset(led_currentStepLed);
+            uint8_t oldPhys = led_toPhysicalNumber(led_currentStepLed);
+            if (oldPhys < LED_LAYER_COUNT)
+                led_activeLayers[oldPhys] &= (uint8_t)~LED_LAYER_CHASE;
+            led_renderFromStack(led_currentStepLed);
         }
         led_currentStepLed = ledNr;
-        led_toggleTemp(ledNr);
+        {
+            uint8_t newPhys = led_toPhysicalNumber(ledNr);
+            if (newPhys < LED_LAYER_COUNT) {
+                led_activeLayers[newPhys] |= LED_LAYER_CHASE;
+                if (!(led_activeLayers[newPhys] &
+                      (LED_LAYER_PULSE | LED_LAYER_FLASH)))
+                    led_toggleTemp(ledNr);
+            } else {
+                led_toggleTemp(ledNr);
+            }
+        }
     }
 }
 
@@ -929,13 +1122,17 @@ void led_setActive_step(uint8_t stepNr)
  * Remove any temporary sequencer chase LED.
  *
  * Inputs: none. Output: if a chase LED is active, it is restored to its base
- * state and led_currentStepLed returns to 0xFF. This is used when the UI is not
- * showing the played pattern or when a page uses STEP LEDs for something else.
+ * state and the CHASE bit is cleared before led_currentStepLed returns to 0xFF.
+ * This is used when the UI is not showing the played pattern or when a page
+ * uses STEP LEDs for something else.
  */
 void led_clearActive_step(void)
 {
     if (led_currentStepLed != 0xFFu) {
-        led_reset(led_currentStepLed);
+        uint8_t physLed = led_toPhysicalNumber(led_currentStepLed);
+        if (physLed < LED_LAYER_COUNT)
+            led_activeLayers[physLed] &= (uint8_t)~LED_LAYER_CHASE;
+        led_renderFromStack(led_currentStepLed);
         led_currentStepLed = 0xFFu;
     }
 }

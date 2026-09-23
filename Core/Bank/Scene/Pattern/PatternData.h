@@ -195,6 +195,19 @@ typedef struct {
     uint8_t value;
 } pat_automation_entry_t;
 
+/*
+ * Pattern-only automation-list off sentinel.
+ *
+ * Inputs: Menu's D17 category transition needs a persistent entry whose VOI
+ * category can be changed before a PAR target is selected. Output: this
+ * reserved nine-bit target occupies the pool field without truncating
+ * INSTRUMENT_PARAM_INVALID (0xffff); PatternData and the sequencer treat it
+ * as a no-op. IDs 404..511 are currently outside the canonical voice/Scene
+ * target table, and 0x1ff is reserved here for this purpose.
+ * Affiliate: PatternStackService admission and Menu step-automation editing.
+ */
+#define PAT_AUTOMATION_TARGET_OFF 0x01FFu
+
 pat_step_specials_t pat_readStepSpecials(uint8_t scene_index,
                                          uint8_t track, uint8_t step);
 

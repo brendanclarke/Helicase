@@ -83,6 +83,8 @@ void patSvc_finishSceneReplace(uint8_t scene);
  * FIFO event. A queued foreground mutation returns optimistic acceptance;
  * execution-time allocation failure is traced and dropped by patSvc_tick().
  * These declarations are the only mutation calls Menu and generators use.
+ * `PAT_AUTOMATION_TARGET_OFF` is accepted by the write path as the persistent
+ * Pattern representation of Menu's off state; it is never a runtime target.
  */
 uint8_t patSvc_writeStepAutomation(uint8_t scene, uint8_t track,
                                    uint8_t step, uint16_t target,

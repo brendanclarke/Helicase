@@ -104,6 +104,12 @@ enum LedAliasNumbers {
 void led_init(void);
 void led_setValue(uint8_t val, uint8_t ledNr);
 void led_setValueTemp(uint8_t val, uint8_t ledNr);
+/*
+ * Restore the explicit base state for one logical LED. Temporary effect
+ * cancellation is owned by ledHandler.c's internal layer renderer, so public
+ * callers should use the effect API when they need blink/flash/pulse/chase
+ * priority preserved.
+ */
 void led_reset(uint8_t ledNr);
 void led_toggle(uint8_t ledNr);
 void led_toggleTemp(uint8_t ledNr);

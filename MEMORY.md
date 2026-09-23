@@ -123,6 +123,15 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   with no sequencer playback effect — see `PATTERN_DYNAMIC_STACK.md` §6.4 and
   `SCOPING_TARGETS.md` § Session 068 deferred items.
 
+- Session 070 Phase 3 source implementation is complete in the worktree; the
+  change-by-change record and build verification are in
+  `S070_PHASE3_IMPLEMENTATION.md`. Probability now gates trigger plus
+  automation, Scene targets 384..403 have step-automation runtime ownership,
+  D17 uses the Pattern-only `PAT_AUTOMATION_TARGET_OFF` value `0x1ff`, and LED
+  temporary effects use the approved 41-byte SRAM1 active-layer bitmap (plus
+  one byte of transient Menu category state for the D17 editor). Final
+  source/image build passed; hardware validation remains Phase 4 work.
+
 - Read `knowledge_files/log_archive/040_SESSION_HANDOFF_LOG.md` before
   continuing Scene/Bank or filesystem work. It preserves the verified
   Session 040 implementation, the Bank Load fix, and archived root notes.

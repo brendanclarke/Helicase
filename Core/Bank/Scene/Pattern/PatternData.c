@@ -1223,9 +1223,10 @@ uint8_t pat_readStepAutomations(uint8_t scene_index, uint8_t track,
  *
  * Inputs: resident coordinates, a canonical voice/Scene target ID, and a
  * 7-bit value. Output: nonzero when the validated target is updated or
- * appended; duplicate targets update in place, while a 64th entry or pool
- * exhaustion leaves the existing block unchanged. Affiliate:
- * instrumentManager_targetValid().
+ * appended; the reserved PAT_AUTOMATION_TARGET_OFF entry is also accepted as
+ * a persistent Menu no-op. Duplicate targets update in place, while a 64th
+ * entry or pool exhaustion leaves the existing block unchanged. Affiliate:
+ * instrumentManager_targetValid() and PatternStackService's D17 boundary.
  */
 uint8_t pat_writeStepAutomation(uint8_t scene_index, uint8_t track,
                                 uint8_t step, uint16_t target, uint8_t value)
@@ -1236,9 +1237,11 @@ uint8_t pat_writeStepAutomation(uint8_t scene_index, uint8_t track,
     uint8_t i;
 
     if (!pat_addrPtr(scene_index, track, step) ||
-        target >= INSTRUMENT_TOTAL_ID_COUNT ||
-        !instrumentManager_targetValid(scene_index, target,
-                                       INSTRUMENT_TARGET_AUTOMATION))
+        target > 0x01FFu ||
+        (target != PAT_AUTOMATION_TARGET_OFF &&
+         (target >= INSTRUMENT_TOTAL_ID_COUNT ||
+          !instrumentManager_targetValid(scene_index, target,
+                                         INSTRUMENT_TARGET_AUTOMATION))))
         return 0u;
     count = pat_readStepAutomations(scene_index, track, step, autos,
                                     PAT_BLOCK_AUTO_COUNT_MASK);

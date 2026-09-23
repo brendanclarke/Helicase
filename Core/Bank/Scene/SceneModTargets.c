@@ -19,29 +19,90 @@
  */
 static const scene_mod_target_descriptor_t scene_mod_targets[] = {
     { SCENE_MOD_TARGET_ID(0u), SCENE_MOD_TARGET_KIND_VOICE_MORPH, 0u,
-      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
+      SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "1 Morph", "1vm" },
     { SCENE_MOD_TARGET_ID(1u), SCENE_MOD_TARGET_KIND_VOICE_MORPH, 1u,
-      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
+      SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "2 Morph", "2vm" },
     { SCENE_MOD_TARGET_ID(2u), SCENE_MOD_TARGET_KIND_VOICE_MORPH, 2u,
-      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
+      SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "3 Morph", "3vm" },
     { SCENE_MOD_TARGET_ID(3u), SCENE_MOD_TARGET_KIND_VOICE_MORPH, 3u,
-      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
+      SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "4 Morph", "4vm" },
     { SCENE_MOD_TARGET_ID(4u), SCENE_MOD_TARGET_KIND_VOICE_MORPH, 4u,
-      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
+      SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "5 Morph", "5vm" },
     { SCENE_MOD_TARGET_ID(5u), SCENE_MOD_TARGET_KIND_VOICE_MORPH, 5u,
-      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
+      SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "6 Morph", "6vm" },
     { SCENE_MOD_TARGET_ID(6u), SCENE_MOD_TARGET_KIND_DECIMATION_ALL, 0xffu,
-      0u, 127u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      0u, 127u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
+      SCENE_MOD_TARGET_USE_AUTOMATION,
       "Scene", "SampleRt", "srt" },
     { SCENE_MOD_TARGET_ID(7u), SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY, 5u,
-      0u, 127u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      0u, 127u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
+      SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "7 Decay", "7dc" },
+    /*
+     * Step-only per-voice audio-route targets (IDs 392..397).
+     *
+     * Inputs: seven-bit Pattern values. Output: values are clamped by the
+     * descriptor and applied through the active Scene's Preset route setter.
+     * No velocity/LFO flags are assigned because a six-value route selector
+     * is discrete. Affiliate: seq_applySceneAutomation() and Menu's VOICE
+     * mix Scene-setting cells.
+     */
+    { SCENE_MOD_TARGET_ID(8u), SCENE_MOD_TARGET_KIND_AUDIO_OUT, 0u,
+      0u, 5u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "1 AudOut", "1ou" },
+    { SCENE_MOD_TARGET_ID(9u), SCENE_MOD_TARGET_KIND_AUDIO_OUT, 1u,
+      0u, 5u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "2 AudOut", "2ou" },
+    { SCENE_MOD_TARGET_ID(10u), SCENE_MOD_TARGET_KIND_AUDIO_OUT, 2u,
+      0u, 5u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "3 AudOut", "3ou" },
+    { SCENE_MOD_TARGET_ID(11u), SCENE_MOD_TARGET_KIND_AUDIO_OUT, 3u,
+      0u, 5u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "4 AudOut", "4ou" },
+    { SCENE_MOD_TARGET_ID(12u), SCENE_MOD_TARGET_KIND_AUDIO_OUT, 4u,
+      0u, 5u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "5 AudOut", "5ou" },
+    { SCENE_MOD_TARGET_ID(13u), SCENE_MOD_TARGET_KIND_AUDIO_OUT, 5u,
+      0u, 5u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "6 AudOut", "6ou" },
+    /*
+     * Step-only per-voice FX-send targets (IDs 398..403).
+     *
+     * Inputs: seven-bit Pattern values. Output: Preset retains each value;
+     * the Phase 5 FX bus will attach audible runtime behavior later. Keeping
+     * these entries in the shared table makes Menu, Pattern validation, and
+     * the foreground drain agree on one namespace now.
+     */
+    { SCENE_MOD_TARGET_ID(14u), SCENE_MOD_TARGET_KIND_FX_SEND, 0u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "1 FxSend", "1fx" },
+    { SCENE_MOD_TARGET_ID(15u), SCENE_MOD_TARGET_KIND_FX_SEND, 1u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "2 FxSend", "2fx" },
+    { SCENE_MOD_TARGET_ID(16u), SCENE_MOD_TARGET_KIND_FX_SEND, 2u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "3 FxSend", "3fx" },
+    { SCENE_MOD_TARGET_ID(17u), SCENE_MOD_TARGET_KIND_FX_SEND, 3u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "4 FxSend", "4fx" },
+    { SCENE_MOD_TARGET_ID(18u), SCENE_MOD_TARGET_KIND_FX_SEND, 4u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "5 FxSend", "5fx" },
+    { SCENE_MOD_TARGET_ID(19u), SCENE_MOD_TARGET_KIND_FX_SEND, 5u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "6 FxSend", "6fx" },
 };
 
 static void sceneModTarget_copyPadded(char *dst, const char *src, uint8_t width)

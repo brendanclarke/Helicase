@@ -69,13 +69,13 @@
  * selected voice page.
  *
  * Inputs/outputs: menu_resolveSceneSettingCell() receives only a column-local
- * index 0..2 and derives the slot from menu_activePage via
+ * index 0..3 and derives the slot from menu_activePage via
  * menu_voicePageToSlot(). The math deliberately does not multiply by
  * INSTRUMENT_SLOT_COUNT: each VOICE page shows that voice's audio route, FX
- * send, and fader mode only, leaving column 4 blank. Changing this constant
+ * send, fader mode, and Voice Morph. Changing this constant
  * changes the number of appended Scene-owned cells behind each mix sub-page.
  */
-#define MENU_SCENE_SETTING_COUNT 3u
+#define MENU_SCENE_SETTING_COUNT 4u
 #define MENU_SCENE_SETTING_SCREENS \
     ((MENU_SCENE_SETTING_COUNT + MENU_COMPACT_SCREEN_CELLS - 1u) / \
      MENU_COMPACT_SCREEN_CELLS)
@@ -1181,6 +1181,16 @@ static uint8_t menu_stepAutoDeleteMode = 0u;
 static uint8_t menu_stepAutoActive = 0u;
 static uint8_t menu_stepAutoCursor = 0u;
 static uint8_t menu_stepAutoNumberLocked = 0u;
+/*
+ * Current STEP automation VOI category (+1 B transient Menu state).
+ *
+ * Inputs: field-1 category changes and valid target rows. Output: field-2
+ * movement from the D17 off sentinel knows whether to walk a voice descriptor
+ * table, the Scene target table, or the empty Phase-5 fx namespace. Values
+ * 0..5 are voices 1..6, 6 is `scn`, and 7 is `fx`; it owns no Pattern data.
+ * Affiliate: menu_stepAutomationEdit() and menu_repaintStepAutomation().
+ */
+static uint8_t menu_stepAutoCategory = 0u;
 
 /*
  * VOICE held-step automation overlay state (exactly 44 B static SRAM).
@@ -1609,7 +1619,16 @@ typedef enum {
 typedef enum {
     MENU_SCENE_SETTING_AUDIO_OUT = 0,
     MENU_SCENE_SETTING_FX_SEND_AMOUNT,
-    MENU_SCENE_SETTING_FADER_SETTING
+    MENU_SCENE_SETTING_FADER_SETTING,
+    /*
+     * Per-voice Scene Morph amount on the appended VOICE/mix screen.
+     *
+     * Inputs: the resolved cell carries the zero-based voice slot. Output:
+     * normal Menu edits address the retained Scene Morph byte, while held
+     * step overlay edits resolve to the matching 384..389 Scene target.
+     * Affiliate: sceneModTarget_voiceMorphId().
+     */
+    MENU_SCENE_SETTING_VOICE_MORPH
 } menu_scene_setting_kind_t;
 
 typedef struct {
@@ -1681,6 +1700,10 @@ static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
 static void menu_displayInstrumentTargetFull(uint16_t target);
 static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText);
 static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value);
+static instrument_param_id_t menu_sceneSettingAutomationTarget(
+    const menu_cell_t *cell);
+static uint8_t menu_morphAutomationStore(uint8_t morph_value);
+static uint8_t menu_morphAutomationExpand(uint8_t stored);
 
 /* S066 VOICE overlay helpers. Definitions stay adjacent to their state/logic
  * below; these declarations keep the existing Menu file's forward-reference
@@ -2005,6 +2028,17 @@ static void va_refreshAutomationLeds(void)
             instrumentParam_make(menu_voicePageToSlot(menu_activePage),
                                  cell.descriptor_index),
             va_heldMask);
+    } else if (cell.kind == MENU_CELL_SCENE_SETTING) {
+        instrument_param_id_t target =
+            menu_sceneSettingAutomationTarget(&cell);
+        if (target != INSTRUMENT_PARAM_INVALID) {
+            led_updateAutomationStepView(menu_activeVoice,
+                                         menu_shownPattern, target,
+                                         va_heldMask);
+        } else {
+            led_updatePatternTrackView(menu_activeVoice, menu_shownPattern,
+                                       buttonHandler_selectedStep, 0u);
+        }
     } else {
         led_updatePatternTrackView(menu_activeVoice, menu_shownPattern,
                                    buttonHandler_selectedStep, 0u);
@@ -2225,9 +2259,12 @@ static void va_applyVoiceMarkers(void)
 
     if (editModeActive) {
         menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
-        if (cell.kind == MENU_CELL_INSTRUMENT) {
+        if (cell.kind == MENU_CELL_INSTRUMENT ||
+            cell.kind == MENU_CELL_SCENE_SETTING) {
             instrument_param_id_t target =
-                instrumentParam_make(slot, cell.descriptor_index);
+                (cell.kind == MENU_CELL_INSTRUMENT)
+                    ? instrumentParam_make(slot, cell.descriptor_index)
+                    : menu_sceneSettingAutomationTarget(&cell);
             uint8_t value7;
             uint8_t suppress_bit =
                 (uint8_t)(1u << (activeParameter & 3u));
@@ -2242,6 +2279,10 @@ static void va_applyVoiceMarkers(void)
                     (va_underlineSuppressed & validity_bit)
                         ? va_workingValue[activeParameter & 3u]
                         : va_storedToParam(value7);
+                if (cell.kind == MENU_CELL_SCENE_SETTING &&
+                    cell.scene_setting == MENU_SCENE_SETTING_VOICE_MORPH &&
+                    (va_underlineSuppressed & validity_bit) == 0u)
+                    display_val = menu_morphAutomationExpand(value7);
                 memset(value_field, ' ', 16u);
                 va_formatValue3(&cell, display_val, &value_field[13]);
                 if ((va_underlineSuppressed & suppress_bit) == 0u) {
@@ -2255,7 +2296,8 @@ static void va_applyVoiceMarkers(void)
                         desired_valid = 0x01u;
                     }
                 }
-            } else if (va_searchComplete &&
+            } else if (cell.kind == MENU_CELL_INSTRUMENT &&
+                       va_searchComplete &&
                        va_searchTestBit(cell.descriptor_index)) {
                 int8_t left;
                 for (left = 8; left < 16 &&
@@ -2280,9 +2322,14 @@ static void va_applyVoiceMarkers(void)
         uint8_t value7;
         instrument_param_id_t target;
 
-        if (cell.kind != MENU_CELL_INSTRUMENT)
+        if (cell.kind != MENU_CELL_INSTRUMENT &&
+            cell.kind != MENU_CELL_SCENE_SETTING)
             continue;
-        target = instrumentParam_make(slot, cell.descriptor_index);
+        target = (cell.kind == MENU_CELL_INSTRUMENT)
+            ? instrumentParam_make(slot, cell.descriptor_index)
+            : menu_sceneSettingAutomationTarget(&cell);
+        if (target == INSTRUMENT_PARAM_INVALID)
+            continue;
         if (va_overlayActive && va_resolveHeldValue(target, &value7)) {
             char value_text[3];
             int8_t right;
@@ -2291,6 +2338,10 @@ static void va_applyVoiceMarkers(void)
                 (va_underlineSuppressed & (uint8_t)(0x10u << i))
                     ? va_workingValue[i]
                     : va_storedToParam(value7);
+            if (cell.kind == MENU_CELL_SCENE_SETTING &&
+                cell.scene_setting == MENU_SCENE_SETTING_VOICE_MORPH &&
+                (va_underlineSuppressed & (uint8_t)(0x10u << i)) == 0u)
+                display_val = menu_morphAutomationExpand(value7);
             va_formatValue3(&cell, display_val, value_text);
             memcpy(&editDisplayBuffer[1][4u * i], value_text, 3u);
             if ((va_underlineSuppressed & (uint8_t)(1u << i)) == 0u) {
@@ -2304,7 +2355,8 @@ static void va_applyVoiceMarkers(void)
                     desired_valid |= (uint8_t)(1u << i);
                 }
             }
-        } else if (va_searchComplete &&
+        } else if (cell.kind == MENU_CELL_INSTRUMENT &&
+                   va_searchComplete &&
                    va_searchTestBit(cell.descriptor_index)) {
             int8_t left;
             uint8_t start = (uint8_t)(4u * i);
@@ -2387,18 +2439,27 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
         !va_overlayActive)
         return;
     cell = menu_resolveCell(activePage, knobNr);
-    if (cell.kind != MENU_CELL_INSTRUMENT)
+    if (cell.kind == MENU_CELL_INSTRUMENT) {
+        target = instrumentParam_make(menu_voicePageToSlot(menu_activePage),
+                                      cell.descriptor_index);
+    } else if (cell.kind == MENU_CELL_SCENE_SETTING) {
+        target = menu_sceneSettingAutomationTarget(&cell);
+        if (target == INSTRUMENT_PARAM_INVALID)
+            return;
+    } else {
         return;
-
-    target = instrumentParam_make(menu_voicePageToSlot(menu_activePage),
-                                  cell.descriptor_index);
+    }
 
     /* Seed: working cache if validity bit set, else the stored parameter value,
      * else the read-only displayed endpoint for first creation. */
     if (va_underlineSuppressed & (uint8_t)(0x10u << knobNr))
         value = (uint16_t)va_workingValue[knobNr];
     else if (va_resolveHeldValue(target, &stored7))
-        value = (uint16_t)va_storedToParam(stored7);
+        value = (uint16_t)(
+            (cell.kind == MENU_CELL_SCENE_SETTING &&
+             cell.scene_setting == MENU_SCENE_SETTING_VOICE_MORPH)
+                ? menu_morphAutomationExpand(stored7)
+                : va_storedToParam(stored7));
     else
         value = menu_cellDisplayValue(&cell);
 
@@ -2412,9 +2473,16 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
     /* Cache the clamped parameter-domain value for the next detent. */
     va_workingValue[knobNr] = (value > 255u) ? 255u : (uint8_t)value;
 
-    /* Saturate the parameter-domain value to the 7-bit Pattern storage range;
-     * no MIDI-CC-style division is valid for instrument descriptor values. */
-    stored7 = (value > 127u) ? 127u : (uint8_t)value;
+    /*
+     * Saturate parameter-domain values to Pattern's seven-bit storage. Voice
+     * Morph is the one Scene target whose visible domain is 0..255, so it uses
+     * the explicit endpoint-preserving conversion instead of a plain clamp.
+     */
+    if (cell.kind == MENU_CELL_SCENE_SETTING &&
+        cell.scene_setting == MENU_SCENE_SETTING_VOICE_MORPH)
+        stored7 = menu_morphAutomationStore((uint8_t)value);
+    else
+        stored7 = (value > 127u) ? 127u : (uint8_t)value;
     for (i = 0u; i < va_heldCount; i++) {
         if (patSvc_writeStepAutomation(
                 menu_shownPattern, menu_activeVoice,
@@ -2422,7 +2490,10 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
             wrote = 1u;
     }
     if (wrote) {
-        va_searchSetBit(cell.descriptor_index);
+        /* Pattern-wide name markers remain descriptor-only; Scene-setting
+         * cells use exact held-value markers and need no extra SRAM mask. */
+        if (cell.kind == MENU_CELL_INSTRUMENT)
+            va_searchSetBit(cell.descriptor_index);
         va_underlineSuppressed |= (uint8_t)((1u << knobNr) | (0x10u << knobNr));
         va_lastEditTick = time_sysTick;
         menu_knobs_dirty = 1u;
@@ -2561,10 +2632,9 @@ static menu_cell_t menu_resolveSceneSettingCell(uint8_t index)
      * Inputs: column-local index in the appended one-screen Scene section.
      * Output: a MENU_CELL_SCENE_SETTING with scene_setting equal to the index
      * and slot equal to the current VOICE page's zero-based instrument slot.
-     * This keeps VOICE1/mix on voice 1's audio_out, fx_send_amount, and
-     * fader_setting, while VOICE2/mix edits voice 2's same three fields, and
-     * so on. Column 4 returns MENU_CELL_EMPTY because there are only three
-     * Scene settings per voice.
+     * This keeps VOICE1/mix on voice 1's audio_out, fx_send_amount,
+     * fader_setting, and Voice Morph, while VOICE2/mix edits voice 2's same
+     * four fields, and so on. Positions beyond the four entries return empty.
      *
      * Affiliates: menu_voiceSubPageScreenCount() appends exactly one screen;
      * menu_sceneSettingShortName(), menu_cellDisplayValue(), and
@@ -2814,9 +2884,10 @@ static void menu_sceneSettingShortName(const menu_cell_t *cell, char *dst)
      * Build compact three-character labels for VOICE mix Scene settings.
      *
      * Inputs: Scene-setting cell and three-byte destination. Output examples:
-     * 1ou..6ou for audio routing, 1fx..6fx for retained FX send, and
-     * 1fd..6fd for retained fader mode. The slot number is one-based so the
-     * compact label identifies which voice the Scene setting edits.
+     * 1ou..6ou for audio routing, 1fx..6fx for retained FX send,
+     * 1fd..6fd for retained fader mode, and 1vm..6vm for Voice Morph. The
+     * slot number is one-based so the compact label identifies which voice the
+     * Scene setting edits.
      */
     uint8_t voice = (cell && cell->slot < INSTRUMENT_SLOT_COUNT)
         ? (uint8_t)(cell->slot + 1u) : 1u;
@@ -2830,11 +2901,72 @@ static void menu_sceneSettingShortName(const menu_cell_t *cell, char *dst)
         dst[1] = 'f';
         dst[2] = 'd';
         break;
+    case MENU_SCENE_SETTING_VOICE_MORPH:
+        dst[1] = 'v';
+        dst[2] = 'm';
+        break;
     default:
         dst[1] = 'o';
         dst[2] = 'u';
         break;
     }
+}
+
+/*
+ * Resolve one VOICE mix Scene-setting cell to a step-automation target.
+ *
+ * Inputs: resolved Menu cell and its zero-based voice slot. Output: canonical
+ * Scene target ID for audio_out, fx_send, or Voice Morph; fader_setting and
+ * malformed cells return INSTRUMENT_PARAM_INVALID because fader mode is not
+ * currently automatable. The table offsets are part of SceneModTargets'
+ * documented 384..403 namespace and keep overlay, marker, and LED paths on
+ * the same target identity.
+ * Affiliates: va_writeAutomationFromKnob(), va_applyVoiceMarkers(), and
+ * va_refreshAutomationLeds().
+ */
+static instrument_param_id_t menu_sceneSettingAutomationTarget(
+    const menu_cell_t *cell)
+{
+    if (!cell || cell->kind != MENU_CELL_SCENE_SETTING ||
+        cell->slot >= INSTRUMENT_SLOT_COUNT)
+        return INSTRUMENT_PARAM_INVALID;
+
+    switch (cell->scene_setting) {
+    case MENU_SCENE_SETTING_VOICE_MORPH:
+        return sceneModTarget_voiceMorphId(cell->slot);
+    case MENU_SCENE_SETTING_AUDIO_OUT:
+        return (instrument_param_id_t)(INSTRUMENT_VOICE_ID_COUNT +
+                                       8u + cell->slot);
+    case MENU_SCENE_SETTING_FX_SEND_AMOUNT:
+        return (instrument_param_id_t)(INSTRUMENT_VOICE_ID_COUNT +
+                                       14u + cell->slot);
+    default:
+        return INSTRUMENT_PARAM_INVALID;
+    }
+}
+
+/*
+ * Convert full-range Voice Morph to the seven-bit Pattern value.
+ *
+ * Inputs: 0..255 Scene Morph amount. Output: 0..126 for 0..254 by integer
+ * halving, with 255 preserved as 127 so the runtime endpoint is reachable.
+ * Affiliates: va_writeAutomationFromKnob() and step-editor value writes.
+ */
+static uint8_t menu_morphAutomationStore(uint8_t morph_value)
+{
+    return (morph_value == 255u) ? 127u : (uint8_t)(morph_value / 2u);
+}
+
+/*
+ * Expand the stored Voice Morph automation byte for Menu display/editing.
+ *
+ * Inputs: Pattern value 0..127. Output: 0..252 for 0..126 and 255 for 127.
+ * This is the display-side inverse of menu_morphAutomationStore() and matches
+ * seq_applySceneAutomation()'s runtime conversion.
+ */
+static uint8_t menu_morphAutomationExpand(uint8_t stored)
+{
+    return (stored >= 127u) ? 255u : (uint8_t)(stored * 2u);
 }
 
 static void menu_sceneSettingFaderName(uint8_t value, char *dst)
@@ -2863,6 +2995,8 @@ static uint8_t menu_cellDtype(const menu_cell_t *cell)
             return (uint8_t)((MENU_AUDIO_OUT << 4) | DTYPE_MENU);
         if (cell->scene_setting == MENU_SCENE_SETTING_FADER_SETTING)
             return DTYPE_0B15;
+        if (cell->scene_setting == MENU_SCENE_SETTING_VOICE_MORPH)
+            return DTYPE_0B255;
         return DTYPE_0B127;
     }
     if (cell->kind == MENU_CELL_INSTRUMENT ||
@@ -2921,6 +3055,8 @@ static uint16_t menu_cellDisplayValue(const menu_cell_t *cell)
             return scene_getVoiceFxSendAmount(scene_index, cell->slot);
         case MENU_SCENE_SETTING_FADER_SETTING:
             return scene_getVoiceFaderSetting(scene_index, cell->slot);
+        case MENU_SCENE_SETTING_VOICE_MORPH:
+            return scene_getVoiceMorphAmount(scene_index, cell->slot);
         default:
             return 0u;
         }
@@ -3025,6 +3161,14 @@ static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
                 changed |= preset_setVoiceFaderSetting(scene_index,
                                                        cell->slot,
                                                        (uint8_t)value);
+                break;
+            case MENU_SCENE_SETTING_VOICE_MORPH:
+                if (scene_getVoiceMorphAmount(scene_index, cell->slot) !=
+                    (uint8_t)value) {
+                    preset_morphVoiceScene(scene_index, cell->slot,
+                                           (uint8_t)value);
+                    changed = 1u;
+                }
                 break;
             default:
                 break;
@@ -3676,8 +3820,7 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
          * Clamp Scene-setting cells before generic dtype handling.
          *
          * audio_out uses the six-entry mixer route menu, FX send uses 0..127,
-         * and fader mode uses 0..2 even though it borrows DTYPE_0B15 for basic
-         * numeric editing/display plumbing.
+         * fader mode uses 0..2, and Voice Morph uses its full 0..255 domain.
          */
         if (cell->scene_setting == MENU_SCENE_SETTING_AUDIO_OUT) {
             if (*value > 5u)
@@ -3685,6 +3828,9 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
         } else if (cell->scene_setting == MENU_SCENE_SETTING_FADER_SETTING) {
             if (*value > 2u)
                 *value = 2u;
+        } else if (cell->scene_setting == MENU_SCENE_SETTING_VOICE_MORPH) {
+            if (*value > 255u)
+                *value = 255u;
         } else if (*value > 127u) {
             *value = 127u;
         }
@@ -8048,6 +8194,7 @@ static void menu_stepAutomationReset(void)
     menu_stepAutoActive = 0u;
     menu_stepAutoCursor = 0u;
     menu_stepAutoNumberLocked = 0u;
+    menu_stepAutoCategory = 0u;
 }
 
 /*
@@ -8240,6 +8387,18 @@ static uint8_t menu_stepAutomationReplaceTarget(
     uint8_t scene, uint8_t track, uint8_t step,
     uint16_t old_target, uint16_t new_target, uint8_t value, uint8_t count)
 {
+    /*
+     * Normalize UI's wide invalid value to Pattern's nine-bit off entry.
+     *
+     * Inputs: canonical editor targets, where INSTRUMENT_PARAM_INVALID means
+     * off. Output: all service/data mutations use PAT_AUTOMATION_TARGET_OFF;
+     * no 0xffff value is truncated into a live pool record. This is the D17
+     * storage boundary and is intentionally adjacent to replacement logic.
+     */
+    if (old_target == INSTRUMENT_PARAM_INVALID)
+        old_target = PAT_AUTOMATION_TARGET_OFF;
+    if (new_target == INSTRUMENT_PARAM_INVALID)
+        new_target = PAT_AUTOMATION_TARGET_OFF;
     if (old_target == new_target)
         return 0u;
     if (count < PAT_BLOCK_AUTO_COUNT_MASK) {
@@ -8257,56 +8416,22 @@ static uint8_t menu_stepAutomationReplaceTarget(
 }
 
 /*
- * Return the default target slot for one visible STEP track.
- *
- * Inputs: fixed-grid track index 0..6. Output: matching voice slot 0..5;
- * track 7 (index 6) intentionally shares slot 6's descriptor namespace as
- * required by the fixed-grid hardware mapping. Affiliate: STEP Add behavior.
- */
-static uint8_t menu_stepAutomationSlotForTrack(uint8_t track)
-{
-    return (track < INSTRUMENT_SLOT_COUNT) ? track
-                                           : (INSTRUMENT_SLOT_COUNT - 1u);
-}
-
-/*
  * Add the default automation entry for the selected step.
  *
- * Inputs: current viewed Scene, active track, and decoded existing list.
- * Output: nonzero when the first unused automatable target on the mapped slot
- * is created with the current descriptor-domain parameter image. This is the
- * only implicit creation path used by endless-pot edits on the Add page.
+ * Inputs: current viewed Scene and active track. Output: a persistent row with
+ * the nine-bit Pattern off sentinel and value zero. The user then chooses a
+ * VOI category and PAR target explicitly, so opening/editing Add cannot
+ * silently affect the first descriptor while playback is active. The
+ * sentinel is accepted by PatternData but is skipped by sequencer playback.
+ * Affiliate: PAT_AUTOMATION_TARGET_OFF and patSvc_writeStepAutomation().
  */
 static uint8_t menu_stepAutomationAddDefault(void)
 {
     uint8_t scene = menu_getViewedPattern();
     uint8_t track = menu_getActiveVoice();
-    uint8_t slot = menu_stepAutomationSlotForTrack(track);
-    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
-    instrument_param_id_t target;
-    const kit_instrument_slot_t *instrument;
-    uint8_t count;
-    uint8_t value = 0u;
-    uint8_t local;
-
-    count = pat_readStepAutomations(scene, track,
-                                    parameter_values[PAR_ACTIVE_STEP], autos,
-                                    PAT_BLOCK_AUTO_COUNT_MASK);
-    target = menu_stepAutomationFirstTarget(scene, slot, autos, count);
-    if (target == INSTRUMENT_PARAM_INVALID)
-        return 0u;
-    instrument = scene_instrumentSlotConst(scene, slot);
-    if (instrument && instrumentParam_isVoiceParameter(target)) {
-        local = instrumentParam_local(target);
-        value = instrument->parameter_images.instrument_parameters[local];
-        /* The image is already in descriptor parameter space; only clamp it
-         * defensively to the 7-bit Pattern automation storage domain. */
-        if (value > 127u)
-            value = 127u;
-    }
     return patSvc_writeStepAutomation(scene, track,
-                                   parameter_values[PAR_ACTIVE_STEP], target,
-                                   value);
+                                      parameter_values[PAR_ACTIVE_STEP],
+                                      PAT_AUTOMATION_TARGET_OFF, 0u);
 }
 
 /*
@@ -8334,6 +8459,92 @@ static uint8_t menu_stepAutomationEnsurePage(void)
     if (menu_stepAutoPageIndex >= count)
         menu_stepAutoPageIndex = (uint8_t)(count - 1u);
     return 1u;
+}
+
+/*
+ * Classify one stored STEP automation target for VOI rendering/editing.
+ *
+ * Inputs: Pattern's canonical target or PAT_AUTOMATION_TARGET_OFF. Output:
+ * 0..5 for voice slots, 6 for Scene targets, and 7 for the empty Phase-5 fx
+ * category. The wide invalid sentinel is accepted as an input alias so stale
+ * editor state cannot be mistaken for voice slot zero.
+ */
+static uint8_t menu_stepAutomationCategory(uint16_t target)
+{
+    if (instrumentParam_isVoiceParameter(target))
+        return instrumentParam_slot(target);
+    if (sceneModTarget_isSceneTarget(target))
+        return 6u;
+    return 7u;
+}
+
+/* Return nonzero for either UI off representation. */
+static uint8_t menu_stepAutomationTargetOff(uint16_t target)
+{
+    return (uint8_t)(target == PAT_AUTOMATION_TARGET_OFF ||
+                     target == INSTRUMENT_PARAM_INVALID);
+}
+
+/*
+ * Read the current value for a newly selected step-automation target.
+ *
+ * Inputs: viewed Scene and a valid voice-descriptor or Scene target. Output:
+ * the target's current value in Pattern's 7-bit automation storage domain.
+ * Voice descriptor images and 7-bit Scene values are clamped to 127; Scene
+ * Voice Morph is converted with the same endpoint-preserving halving used by
+ * runtime automation. This keeps PAR selection immediately useful without
+ * changing D17's category-change default of off/zero.
+ */
+static uint8_t menu_stepAutomationCurrentValue(
+    uint8_t scene, instrument_param_id_t target)
+{
+    if (instrumentParam_isVoiceParameter(target) &&
+        instrumentManager_targetValid(scene, target,
+                                      INSTRUMENT_TARGET_AUTOMATION)) {
+        const kit_instrument_slot_t *instrument =
+            scene_instrumentSlotConst(scene, instrumentParam_slot(target));
+        uint8_t value = instrument
+            ? instrument->parameter_images.instrument_parameters[
+                  instrumentParam_local(target)]
+            : 0u;
+        return (value > 127u) ? 127u : value;
+    }
+
+    if (sceneModTarget_isSceneTarget(target)) {
+        const scene_mod_target_descriptor_t *descriptor =
+            sceneModTarget_descriptor(target);
+        uint8_t value = 0u;
+
+        if (!descriptor)
+            return 0u;
+        switch (descriptor->kind) {
+        case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
+            return menu_morphAutomationStore(
+                scene_getVoiceMorphAmount(scene, descriptor->voice_slot));
+        case SCENE_MOD_TARGET_KIND_DECIMATION_ALL: {
+            const scene_t *scene_data = scene_getConst(scene);
+            value = scene_data ? scene_data->settings.voice_decimation_all
+                               : 0u;
+            break;
+        }
+        case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
+            value = scene_getSlot6Track7AmpEnvelopeDecay(scene);
+            break;
+        case SCENE_MOD_TARGET_KIND_AUDIO_OUT:
+            value = scene_getVoiceAudioOut(scene, descriptor->voice_slot);
+            break;
+        case SCENE_MOD_TARGET_KIND_FX_SEND:
+            value = scene_getVoiceFxSendAmount(scene, descriptor->voice_slot);
+            break;
+        default:
+            value = 0u;
+            break;
+        }
+        if (value > (uint8_t)descriptor->max_value)
+            value = (uint8_t)descriptor->max_value;
+        return (value > 127u) ? 127u : value;
+    }
+    return 0u;
 }
 
 /*
@@ -8365,52 +8576,110 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
         return 0u;
 
     if (field == 1u) {
+        /*
+         * Step-edit VOI/category cycling.
+         *
+         * Inputs: signed movement and the current Pattern target. Output:
+         * categories cycle voices 1..6, `scn`, `fx`; every transition writes
+         * D17's off sentinel so PAR selection is explicit. Same-category
+         * target retention is intentionally not attempted: a voice/category
+         * change must never silently retarget a playing step.
+         */
         instrument_param_id_t old_target = autos[page].target;
-        uint8_t old_slot;
-        uint8_t new_slot;
-        uint8_t old_local;
         instrument_param_id_t new_target;
+        uint8_t old_category = menu_stepAutomationTargetOff(old_target)
+            ? menu_stepAutoCategory
+            : menu_stepAutomationCategory(old_target);
+        uint8_t new_category = old_category;
         uint8_t movement = (uint8_t)(inc < 0 ? -inc : inc);
 
-        if (!instrumentParam_isVoiceParameter(old_target))
-            return 0u;
-        old_slot = instrumentParam_slot(old_target);
-        old_local = instrumentParam_local(old_target);
-        new_slot = old_slot;
         while (movement--) {
             if (inc > 0)
-                new_slot = (uint8_t)((new_slot + 1u) % INSTRUMENT_SLOT_COUNT);
+                new_category = (uint8_t)((new_category + 1u) % 8u);
             else
-                new_slot = (new_slot == 0u) ?
-                    (INSTRUMENT_SLOT_COUNT - 1u) : (uint8_t)(new_slot - 1u);
+                new_category = (new_category == 0u) ? 7u
+                    : (uint8_t)(new_category - 1u);
         }
-        new_target = instrumentParam_make(new_slot, old_local);
-        if (!instrumentManager_targetValid(scene, new_target,
-                                           INSTRUMENT_TARGET_AUTOMATION) ||
-            menu_stepAutomationTargetUsed(autos, count, new_target, page))
-            new_target = menu_stepAutomationFirstTarget(scene, new_slot, autos,
-                                                         count);
-        if (new_target == INSTRUMENT_PARAM_INVALID)
+        if (new_category == old_category)
             return 0u;
+        new_target = PAT_AUTOMATION_TARGET_OFF;
+        menu_stepAutoCategory = new_category;
         return menu_stepAutomationReplaceTarget(
-            scene, track, step, old_target, new_target, autos[page].value,
+            scene, track, step, old_target, new_target, 0u,
             count);
     }
 
     if (field == 2u) {
+        /*
+         * Step-edit PAR cycling.
+         *
+         * Inputs: signed movement, current category, and duplicate target
+         * list. Output: descriptor traversal for voice categories, filtered
+         * Scene-target traversal for `scn`, and no mutation for empty `fx`.
+         * Movement from the D17 off sentinel selects the first available
+         * target in the remembered category; movement backward from a first
+         * target returns to the same sentinel.
+         */
         instrument_param_id_t old_target = autos[page].target;
         instrument_param_id_t new_target;
-        uint8_t slot;
+        uint8_t new_value;
 
-        if (!instrumentParam_isVoiceParameter(old_target))
+        if (menu_stepAutomationTargetOff(old_target)) {
+            if (inc < 0)
+                return 0u;
+            if (menu_stepAutoCategory < 6u) {
+                new_target = menu_stepAutomationFirstTarget(
+                    scene, menu_stepAutoCategory, autos, count);
+            } else if (menu_stepAutoCategory == 6u) {
+                new_target = sceneModTarget_step(
+                    INSTRUMENT_PARAM_INVALID, 1,
+                    SCENE_MOD_TARGET_USE_AUTOMATION);
+                while (new_target != INSTRUMENT_PARAM_INVALID &&
+                       menu_stepAutomationTargetUsed(autos, count,
+                                                     new_target, page)) {
+                    instrument_param_id_t next = sceneModTarget_step(
+                        new_target, 1, SCENE_MOD_TARGET_USE_AUTOMATION);
+                    if (next == new_target)
+                        break;
+                    new_target = next;
+                }
+            } else {
+                return 0u;
+            }
+        } else if (instrumentParam_isVoiceParameter(old_target)) {
+            new_target = menu_stepAutomationNextTarget(
+                scene, instrumentParam_slot(old_target), old_target, inc,
+                autos, count, page);
+        } else if (sceneModTarget_isSceneTarget(old_target)) {
+            uint8_t tries;
+            new_target = old_target;
+            for (tries = 0u; tries < sceneModTarget_count(); tries++) {
+                instrument_param_id_t candidate = sceneModTarget_step(
+                    new_target, inc, SCENE_MOD_TARGET_USE_AUTOMATION);
+                if (candidate == new_target)
+                    break;
+                if (candidate == INSTRUMENT_PARAM_INVALID) {
+                    new_target = candidate;
+                    break;
+                }
+                if (!menu_stepAutomationTargetUsed(autos, count,
+                                                   candidate, page)) {
+                    new_target = candidate;
+                    break;
+                }
+                new_target = candidate;
+            }
+        } else {
             return 0u;
-        slot = instrumentParam_slot(old_target);
-        new_target = menu_stepAutomationNextTarget(
-            scene, slot, old_target, inc, autos, count, page);
+        }
+        if (new_target == INSTRUMENT_PARAM_INVALID)
+            new_target = PAT_AUTOMATION_TARGET_OFF;
         if (new_target == old_target)
             return 0u;
+        new_value = menu_stepAutomationTargetOff(new_target)
+            ? 0u : menu_stepAutomationCurrentValue(scene, new_target);
         return menu_stepAutomationReplaceTarget(
-            scene, track, step, old_target, new_target, autos[page].value,
+            scene, track, step, old_target, new_target, new_value,
             count);
     }
 
@@ -8431,7 +8700,17 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
                 desc = instrumentManager_descriptor(
                     inst->type, instrumentParam_local(vt));
         }
+        if (menu_stepAutomationTargetOff(vt))
+            return 0u;
         max_val = menu_automationValueMax(desc);
+        if (sceneModTarget_isSceneTarget(vt)) {
+            const scene_mod_target_descriptor_t *scene_desc =
+                sceneModTarget_descriptor(vt);
+            if (scene_desc)
+                max_val = (scene_desc->kind ==
+                           SCENE_MOD_TARGET_KIND_VOICE_MORPH)
+                    ? 127u : (uint8_t)scene_desc->max_value;
+        }
         next = (int16_t)autos[page].value + inc;
         if (next < 0)
             next = 0;
@@ -8536,13 +8815,30 @@ static void menu_repaintStepAutomation(void)
     if (editModeActive && !on_add && menu_stepAutoCursor >= 2u) {
         uint16_t target = autos[page].target;
 
+        if (sceneModTarget_isSceneTarget(target))
+            menu_stepAutoCategory = 6u;
+        else if (instrumentParam_isVoiceParameter(target))
+            menu_stepAutoCategory = instrumentParam_slot(target);
+
         if (menu_stepAutoCursor == 2u) {
             memcpy(&editDisplayBuffer[0][0], "Target  Voice", 13u);
-            if (instrumentParam_isVoiceParameter(target) &&
+            if (sceneModTarget_isSceneTarget(target)) {
+                menu_copyPaddedField(&editDisplayBuffer[1][2], "scn", 3u);
+            } else if (instrumentParam_isVoiceParameter(target) &&
                 instrumentManager_targetValid(scene, target,
                                               INSTRUMENT_TARGET_AUTOMATION)) {
                 numtostru(&editDisplayBuffer[1][2],
                           (uint8_t)(instrumentParam_slot(target) + 1u));
+            } else if (menu_stepAutomationTargetOff(target) &&
+                       menu_stepAutoCategory < 6u) {
+                numtostru(&editDisplayBuffer[1][2],
+                          (uint8_t)(menu_stepAutoCategory + 1u));
+            } else if (menu_stepAutomationTargetOff(target) &&
+                       menu_stepAutoCategory == 6u) {
+                menu_copyPaddedField(&editDisplayBuffer[1][2], "scn", 3u);
+            } else if (menu_stepAutomationTargetOff(target) &&
+                       menu_stepAutoCategory == 7u) {
+                menu_copyPaddedField(&editDisplayBuffer[1][2], "fx", 3u);
             } else {
                 menu_copyPaddedField(&editDisplayBuffer[1][2],
                                      "Invalid", 7u);
@@ -8552,7 +8848,9 @@ static void menu_repaintStepAutomation(void)
             uint8_t label_width = 0u;
 
             memcpy(&editDisplayBuffer[0][0], "Target  Parametr", 16u);
-            if (sceneModTarget_isSceneTarget(target)) {
+            if (menu_stepAutomationTargetOff(target)) {
+                menu_copyPaddedField(&editDisplayBuffer[1][2], "---", 3u);
+            } else if (sceneModTarget_isSceneTarget(target)) {
                 const scene_mod_target_descriptor_t *scene_descriptor =
                     sceneModTarget_descriptor(target);
                 if (scene_descriptor) {
@@ -8633,7 +8931,19 @@ static void menu_repaintStepAutomation(void)
                         desc = instrumentManager_descriptor(
                             inst->type, instrumentParam_local(target));
                 }
-                menu_formatAutomationValue3(desc, amt_value, amt_out);
+                if (menu_stepAutomationTargetOff(target)) {
+                    menu_copyPaddedField(amt_out, "off", 3u);
+                } else if (sceneModTarget_isSceneTarget(target)) {
+                    const scene_mod_target_descriptor_t *scene_descriptor =
+                        sceneModTarget_descriptor(target);
+                    uint8_t display_value = amt_value;
+                    if (scene_descriptor && scene_descriptor->kind ==
+                            SCENE_MOD_TARGET_KIND_VOICE_MORPH)
+                        display_value = menu_morphAutomationExpand(amt_value);
+                    numtostrpu(amt_out, display_value, ' ');
+                } else {
+                    menu_formatAutomationValue3(desc, amt_value, amt_out);
+                }
             }
         }
         return;
@@ -8664,9 +8974,15 @@ static void menu_repaintStepAutomation(void)
         memcpy(&editDisplayBuffer[1][13], "off", 3u);
     } else {
         uint16_t target = autos[page].target;
-        uint8_t valid = instrumentManager_targetValid(
-            scene, target, INSTRUMENT_TARGET_AUTOMATION);
+        uint8_t valid = (uint8_t)(!menu_stepAutomationTargetOff(target) &&
+            instrumentManager_targetValid(scene, target,
+                                          INSTRUMENT_TARGET_AUTOMATION));
         const ParamDescriptor *descriptor = 0;
+
+        if (sceneModTarget_isSceneTarget(target))
+            menu_stepAutoCategory = 6u;
+        else if (valid && instrumentParam_isVoiceParameter(target))
+            menu_stepAutoCategory = instrumentParam_slot(target);
 
         editDisplayBuffer[0][15] =
             (uint8_t)(page + 1u < count ||
@@ -8696,12 +9012,31 @@ static void menu_repaintStepAutomation(void)
                                      descriptor->short_name, 3u);
             else
                 menu_copyPaddedField(&editDisplayBuffer[1][9], "inv", 3u);
-        } else {
+        } else if (menu_stepAutoCategory < 6u) {
+            numtostru(&editDisplayBuffer[1][5],
+                      (uint8_t)(menu_stepAutoCategory + 1u));
+            menu_copyPaddedField(&editDisplayBuffer[1][9], "off", 3u);
+        } else if (menu_stepAutoCategory == 6u) {
             memcpy(&editDisplayBuffer[1][5], "scn", 3u);
-            menu_copyPaddedField(&editDisplayBuffer[1][9], "inv", 3u);
+            menu_copyPaddedField(&editDisplayBuffer[1][9], "off", 3u);
+        } else {
+            memcpy(&editDisplayBuffer[1][5], "fx ", 3u);
+            menu_copyPaddedField(&editDisplayBuffer[1][9], "---", 3u);
         }
-        menu_formatAutomationValue3(descriptor, autos[page].value,
-                                    &editDisplayBuffer[1][13]);
+        if (menu_stepAutomationTargetOff(target)) {
+            menu_copyPaddedField(&editDisplayBuffer[1][13], "off", 3u);
+        } else if (sceneModTarget_isSceneTarget(target)) {
+            const scene_mod_target_descriptor_t *scene_descriptor =
+                sceneModTarget_descriptor(target);
+            uint8_t display_value = autos[page].value;
+            if (scene_descriptor && scene_descriptor->kind ==
+                    SCENE_MOD_TARGET_KIND_VOICE_MORPH)
+                display_value = menu_morphAutomationExpand(display_value);
+            numtostrpu(&editDisplayBuffer[1][13], display_value, ' ');
+        } else {
+            menu_formatAutomationValue3(descriptor, autos[page].value,
+                                        &editDisplayBuffer[1][13]);
+        }
     }
 }
 
@@ -8786,6 +9121,10 @@ static void menu_repaintGeneric(void)
                 case MENU_SCENE_SETTING_FADER_SETTING:
                     menu_copyPaddedField(&editDisplayBuffer[0][8],
                                          "Fader", 8u);
+                    break;
+                case MENU_SCENE_SETTING_VOICE_MORPH:
+                    menu_copyPaddedField(&editDisplayBuffer[0][8],
+                                         "VcMorph", 8u);
                     break;
                 default:
                     break;
@@ -8981,7 +9320,8 @@ static void menu_encoderChangeParameter(int8_t inc)
      * caller. Affiliate: va_writeAutomationFromKnob().
      */
     if (va_overlayActive && menu_isVoicePage(menu_activePage) &&
-        cell.kind == MENU_CELL_INSTRUMENT) {
+        (cell.kind == MENU_CELL_INSTRUMENT ||
+         cell.kind == MENU_CELL_SCENE_SETTING)) {
         va_writeAutomationFromKnob(activeParameter, inc);
         return;
     }

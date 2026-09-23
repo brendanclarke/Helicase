@@ -59,6 +59,8 @@
 #include "config.h"
 #include "PatternTrace.h"
 #include "PatternStackService.h"
+#include "SceneModTargets.h"
+#include "presetManager.h"
 
 /*
  * Pattern probability uses the existing hardware RNG without new state.
@@ -497,6 +499,9 @@ static void seq_queueStepAutomations(uint8_t track, uint8_t step)
         uint16_t packed = (uint16_t)(block[base + (i * 2u)] |
                                      ((uint16_t)block[base + (i * 2u) + 1u]
                                       << 8u));
+        /* D17's Pattern-only off entry is UI state, not playback work. */
+        if ((packed & 0x01FFu) == PAT_AUTOMATION_TARGET_OFF)
+            continue;
         if (seq_pending_automation_count < SEQ_PENDING_BUF_COUNT) {
             uint8_t pending_index = seq_pending_automation_count;
 
@@ -518,9 +523,10 @@ static void seq_queueStepAutomations(uint8_t track, uint8_t step)
  * Input: track index at a sixteenth-note scheduler boundary. Output: its
  * cursor advances modulo the track's per-track length from PatternData,
  * active steps trigger with PatternData specials, and raw automation is
- * queued for foreground application. Probability gates only the voice
- * trigger; automation publication remains tied to the step visit so
- * descriptor/runtime state follows the authored automation.
+ * queued for foreground application. Probability gates both the voice
+ * trigger and automation publication through one should_play decision. A
+ * skipped probabilistic step therefore behaves as absent under the hold model;
+ * erase remains an edit operation independent of probability.
  *
  * The wrap boundary is region->track_length[track] from the active Scene's
  * pat_scene_region_t, not the compile-time NUM_STEPS_PER_BAR constant.
@@ -570,20 +576,21 @@ static void seq_advanceTrackStep(uint8_t track)
 				pat_step_specials_t sp = pat_readStepSpecials(
 				    seq_activePattern, track,
 				    (uint8_t)seq_stepIndex[track]);
-				uint8_t should_trigger = 1u;
+				uint8_t should_play = 1u;
 
 				if (sp.probability < 127u) {
 					uint8_t rnd = (uint8_t)(((uint16_t)(GetRngValue() & 0x7FFFu) *
 					                         127u) / 32767u);
 					if (rnd >= sp.probability)
-						should_trigger = 0u;
+						should_play = 0u;
 				}
-				if (should_trigger)
+				if (should_play) {
 					seq_triggerVoice(track, sp.velocity, sp.note);
+					seq_queueStepAutomations(
+						track, (uint8_t)seq_stepIndex[track]);
+				}
 			}
 		}
-		if (!seq_eraseActive || track != menu_getActiveVoice())
-			seq_queueStepAutomations(track, (uint8_t)seq_stepIndex[track]);
 	}
 
 	if (seq_rollRate != 0xffu && (seq_rollState & (1u << track))) {
@@ -596,15 +603,61 @@ static void seq_advanceTrackStep(uint8_t track)
 }
 
 /*
- * Apply queued voice automation after front-panel service.
+ * Apply one Scene-target automation value from the pending queue.
+ *
+ * Inputs: canonical Scene target ID and its seven-bit Pattern value. Output:
+ * the owning Preset setter receives a clamped value; Voice Morph expands
+ * stored 0..126 to 0..252 and stored 127 to 255 so the endpoint remains
+ * reachable. Scene targets are retained at Scene level and deliberately do
+ * not participate in seq_automation_dirty[] retrigger restoration. Common
+ * callers: seq_drainPendingAutomation(). Affiliates: SceneModTargets and
+ * presetManager Scene-setting setters.
+ */
+static uint8_t seq_applySceneAutomation(uint16_t target, uint8_t value)
+{
+	const scene_mod_target_descriptor_t *descriptor =
+		sceneModTarget_descriptor(target);
+
+	if (!descriptor)
+		return 0u;
+	if (value > descriptor->max_value)
+		value = (uint8_t)descriptor->max_value;
+
+	switch (descriptor->kind) {
+	case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
+		preset_morphVoice(descriptor->voice_slot,
+					  (value < 127u) ? (uint8_t)(value * 2u) : 255u);
+		return 1u;
+	case SCENE_MOD_TARGET_KIND_DECIMATION_ALL:
+		preset_setVoiceDecimationAll(scene_getActiveIndex(), value);
+		return 1u;
+	case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
+		preset_setSlot6Track7AmpEnvelopeDecay(
+			scene_getActiveIndex(), INSTRUMENT_IMAGE_MAIN, value, 0u);
+		return 1u;
+	case SCENE_MOD_TARGET_KIND_AUDIO_OUT:
+		preset_setVoiceAudioOut(scene_getActiveIndex(),
+							 descriptor->voice_slot, value);
+		return 1u;
+	case SCENE_MOD_TARGET_KIND_FX_SEND:
+		preset_setVoiceFxSendAmount(scene_getActiveIndex(),
+								descriptor->voice_slot, value);
+		return 1u;
+	default:
+		return 0u;
+	}
+}
+
+/*
+ * Apply queued step automation after front-panel service.
  *
  * Inputs: the volatile four-byte queue published by TIM3. Output: valid voice
  * descriptor targets update their owning runtime image through
- * InstrumentManager; Scene targets are deliberately ignored until Session
- * 066 defines their runtime apply boundary. The foreground follows the live
- * producer count and atomically resets only after no append raced the drain,
- * while PatternTrace remains independent of playback. Affiliate: main.c's
- * pre-audio foreground sequence.
+ * InstrumentManager; Scene targets dispatch through seq_applySceneAutomation()
+ * to their Preset/Scene owners and never enter the voice retrigger-restore
+ * bitmap. The foreground follows the live producer count and atomically
+ * resets only after no append raced the drain, while PatternTrace remains
+ * independent of playback. Affiliate: main.c's pre-audio foreground sequence.
  */
 void seq_drainPendingAutomation(void)
 {
@@ -627,23 +680,26 @@ void seq_drainPendingAutomation(void)
              * do not apply MIDI-CC-style 7-bit-to-8-bit expansion here. */
             uint8_t value = (uint8_t)((packed >> 9u) & 0x7Fu);
 
-            if ((identity & SEQ_PENDING_TYPE_AUTOMATION_BIT) != 0u &&
-                instrumentParam_isVoiceParameter(target) &&
-                instrumentManager_targetValid(seq_activePattern, target,
-                                              INSTRUMENT_TARGET_AUTOMATION)) {
-                uint8_t slot = instrumentParam_slot(target);
-                const kit_instrument_slot_t *instrument =
-                    scene_instrumentSlotConst(seq_activePattern, slot);
-                const ParamDescriptor *descriptor = instrument
-                    ? instrumentManager_descriptor(instrument->type,
-                                                   instrumentParam_local(target))
-                    : 0;
+            if ((identity & SEQ_PENDING_TYPE_AUTOMATION_BIT) != 0u) {
+                if (instrumentParam_isVoiceParameter(target) &&
+                    instrumentManager_targetValid(seq_activePattern, target,
+                                                  INSTRUMENT_TARGET_AUTOMATION)) {
+                    uint8_t slot = instrumentParam_slot(target);
+                    const kit_instrument_slot_t *instrument =
+                        scene_instrumentSlotConst(seq_activePattern, slot);
+                    const ParamDescriptor *descriptor = instrument
+                        ? instrumentManager_descriptor(
+                              instrument->type, instrumentParam_local(target))
+                        : 0;
 
-                /* Mark only successful voice runtime overlays for retrigger restore. */
-                if (descriptor &&
-                    instrumentManager_writeRuntime(slot, descriptor, value)) {
-                    uint8_t local = instrumentParam_local(target);
-                    seq_automation_dirty[slot] |= (1ULL << local);
+                    /* Mark only successful voice overlays for retrigger restore. */
+                    if (descriptor &&
+                        instrumentManager_writeRuntime(slot, descriptor, value)) {
+                        uint8_t local = instrumentParam_local(target);
+                        seq_automation_dirty[slot] |= (1ULL << local);
+                    }
+                } else if (sceneModTarget_isSceneTarget(target)) {
+                    (void)seq_applySceneAutomation(target, value);
                 }
             }
             i++;

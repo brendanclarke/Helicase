@@ -19,12 +19,37 @@ typedef enum {
      * value at trigger time.
      */
     SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY,
+    /*
+     * Per-voice audio output route.
+     *
+     * Inputs: voice_slot selects the instrument and the stored value is a
+     * mixer route enum. Output: step automation reaches the retained Scene
+     * route through preset_setVoiceAudioOut(); this discrete selector is not
+     * exposed to velocity or LFO modulation.
+     */
+    SCENE_MOD_TARGET_KIND_AUDIO_OUT,
+    /*
+     * Per-voice FX send amount retained ahead of the Phase 5 FX bus.
+     *
+     * Inputs: voice_slot and a 0..127 stored value. Output: step automation
+     * reaches preset_setVoiceFxSendAmount(); the setter currently retains the
+     * value without an audible bus effect.
+     */
+    SCENE_MOD_TARGET_KIND_FX_SEND,
     SCENE_MOD_TARGET_KIND_EFFECT_PARAMETER
 } scene_mod_target_kind_t;
 
 typedef enum {
-    SCENE_MOD_TARGET_USE_VELOCITY = 1u << 0,
-    SCENE_MOD_TARGET_USE_LFO      = 1u << 1
+    SCENE_MOD_TARGET_USE_VELOCITY   = 1u << 0,
+    SCENE_MOD_TARGET_USE_LFO        = 1u << 1,
+    /*
+     * Step automation eligibility.
+     *
+     * Inputs: picker and Pattern validation paths request this flag. Output:
+     * only targets explicitly owned by the step-automation runtime path are
+     * offered to the `scn` category; velocity/LFO eligibility stays separate.
+     */
+    SCENE_MOD_TARGET_USE_AUTOMATION = 1u << 2
 } scene_mod_target_use_t;
 
 typedef struct {

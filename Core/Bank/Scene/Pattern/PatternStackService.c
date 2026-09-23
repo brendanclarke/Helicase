@@ -1178,7 +1178,14 @@ static uint8_t patSvc_submit(uint8_t scene, uint32_t event,
     return patSvc_enqueue(event);
 }
 
-/* Validate common coordinates and keep malformed events out of the queue. */
+/*
+ * Validate common coordinates and keep malformed events out of the queue.
+ *
+ * Inputs: resident coordinates and an optional nine-bit automation target.
+ * Output: normal targets and PAT_AUTOMATION_TARGET_OFF pass the shared
+ * boundary; the latter is the Pattern-only D17 off sentinel and is validated
+ * by PatternData without entering InstrumentManager's runtime namespace.
+ */
 static uint8_t patSvc_validStepRequest(uint8_t scene, uint8_t track,
                                        uint8_t step, uint16_t target,
                                        uint8_t needs_target)

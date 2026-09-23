@@ -1,8 +1,56 @@
 # S070 Phase 3 — Implementation Schedule
 
 Source: `S070_PHASE3_FEATURE_ADDITIONS.md`. Commit baseline: `98dee1a` on
-`dev-ph5-effects`. No code changes — this document is the complete
-change-by-change implementation guide.
+`dev-ph5-effects`. This document remains the complete change-by-change
+implementation guide and now also records the implementation/verification
+notes below.
+
+## Session implementation notes
+
+### 2026-09-23 — implementation started
+
+- Read `MEMORY.md`, `S070_PHASE3_FEATURE_ADDITIONS.md`, and the Phase 3
+  source/review context. The worktree was clean at the Session 070 baseline.
+- Confirmed the probability defect in `seq_advanceTrackStep()`: automation
+  was queued after the active-step/probability branch.
+- Confirmed Scene automation IDs 384..391 already have velocity/LFO table
+  infrastructure, while the pending-automation drain intentionally drops
+  them. IDs 392..403 and the automation-use flag are still absent.
+- Resolved an implementation boundary in D17: `INSTRUMENT_PARAM_INVALID`
+  (`0xffff`) cannot be packed into the Pattern pool's 9-bit target field.
+  The implementation will use a documented 9-bit Pattern-only off sentinel,
+  preserve it through the service/data owner, and make playback skip it.
+- The LED change adds the plan-approved 41-byte SRAM1 active-layer bitmap;
+  no additional LED state allocation is planned.
+
+### 2026-09-23 — implementation completed and verified
+
+- 3.1 is implemented in `seq_advanceTrackStep()`: one `should_play` decision
+  now gates both voice triggering and step-automation queueing; erase remains
+  independent. Playback explicitly skips the Pattern-only off sentinel.
+- 3.2 is implemented across Scene target metadata, Sequencer drain dispatch,
+  the `1vm`–`6vm` Morph conversion path, the `Nvm` VOICE/mix cell, the VOI
+  `1..6`/`scn`/`fx` editor categories, and held-step overlay target mapping.
+  Scene targets use the approved no-retrigger-restore model. AUDIO_OUT IDs
+  392..397 apply through the Preset route setter; FX_SEND IDs 398..403 retain
+  through the Phase 5 stub setter.
+- D17 category transitions persist `PAT_AUTOMATION_TARGET_OFF` with value zero
+  because the packed Pattern target is nine bits; selecting a PAR target reads
+  its current Scene/descriptor value and stores it in the appropriate 7-bit
+  domain. The sentinel is never queued to runtime playback.
+- 3.3 is implemented with the approved 41-byte per-LED layer bitmap, including
+  BAR1 at index 40. Pulse, flash, blink, and chase start/end paths maintain the
+  bitmap; rendering priority is pulse > flash > blink/chase > base. `led_clearAll()`
+  clears both the bitmap and effect ownership so later ticks cannot resurrect a
+  cancelled layer. The final map confirms `led_activeLayers` is exactly `0x29`
+  (41) bytes; the D17 category tracker is one additional byte of transient
+  Menu state. Public LED APIs remain unchanged.
+- Verification: `make all -j2` and `make img` both pass. Final ELF size is
+  `text=455060`, `data=416`, `bss=291804`; the generated LXR-V2 image is
+  `455492` bytes including its 16-byte wrapper (`455476`-byte payload). The
+  remaining linker messages are the existing nano-libc syscall and serial-LTO
+  warnings; no new compiler warning was emitted by the changed files. Hardware
+  interaction verification remains Phase 4 work.
 
 Each change is cited as `file:line` with an operation (ADD / MODIFY / REMOVE)
 and a comment-block description that serves as documentation-in-place for
