@@ -448,6 +448,14 @@ void menu_serviceKnobRepaint(void);  /* call from main loop after RV1-4 read loo
 void menu_pollPresetStatus(void);   /* call from main loop — handles async SD completion */
 void menu_parseGlobalParam(uint16_t paramNr, uint8_t value);
 void menu_sendAllParameters(void);
+/*
+ * Service foreground runtime display widgets.
+ *
+ * Inputs: current Menu/page state, playback state, and live runtime mirrors.
+ * Output: bounded CPU/Pattern widgets plus playback-time Scene-target repaint
+ * for PERF and VOICE/mix pages. All LCD work remains foreground-only; callers
+ * should invoke this from the main-loop service cadence.
+ */
 void menu_serviceRuntimeWidgets(void);
 uint8_t menu_getActivePage(void);
 /* Use the accepted OK/OW busy window, not mere presence on the Load/Save page. */

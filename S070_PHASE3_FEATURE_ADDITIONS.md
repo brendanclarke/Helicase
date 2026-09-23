@@ -623,14 +623,16 @@ confirm no new warnings. Hardware validation of all three in Phase 4.4.
 
 | Item | Status | Notes |
 |------|--------|-------|
-| 3.1 Probability gating | NOT STARTED | Defect from S066 |
-| 3.2a Scene automation drain | NOT STARTED | Add Scene branch to drain loop |
-| 3.2b Voice Morph value conversion | NOT STARTED | 7-bit ↔ 8-bit for `1vm`–`6vm` |
-| 3.2c Step-edit list `scn`/`fx` cycling | NOT STARTED | Extend VOI field beyond slots 0–5 |
-| 3.2d Mix sub-page voice Morph cell | NOT STARTED | 4th cell: `Nvm` |
-| 3.2e Overlay voice Morph target mapping | NOT STARTED | Held-step pot → Scene target ID |
-| 3.2f Audio_out + fx_send Scene targets | NOT STARTED | 12 entries: IDs 392–403; ou apply, fx stub |
-| 3.3 LED consolidation | NOT STARTED | Phase 4.11, 41 B approved |
+| 3.1 Probability gating | REMEDIATED | Originally implemented wrong (automation inside step-active block). Corrected via `seq_evaluateStepCondition()` — specials read before trigger-active check. See `S070_PHASE3_FUCKUP_REMEDIATION.md`. |
+| 3.2a Scene automation drain | DONE | `seq_applySceneAutomation()` dispatches Scene targets from drain loop |
+| 3.2b Voice Morph value conversion | DONE | `menu_morphAutomationStore()` / `menu_morphAutomationExpand()` |
+| 3.2c Step-edit list `scn`/`fx` cycling | DONE | 8-category VOI stepper, D17 off-default, `PAT_AUTOMATION_TARGET_OFF` sentinel |
+| 3.2d Mix sub-page voice Morph cell | DONE | 4th cell `Nvm`, `MENU_SCENE_SETTING_COUNT` = 4 |
+| 3.2e Overlay voice Morph target mapping | DONE | `menu_sceneSettingAutomationTarget()` handles all 4 Scene setting kinds |
+| 3.2f Audio_out + fx_send Scene targets | DONE | 12 entries added, IDs 392–403, `USE_AUTOMATION` flag |
+| 3.3 LED consolidation | DONE | 41-byte `led_activeLayers[]`, `led_renderFromStack()`, all layer start/end paths |
+| R1 Scene setting underlines | PLANNED | `va_scanService()` ignores Scene targets; needs `va_searchSceneMask`. See remediation. |
+| R2 Live value display refresh | PLANNED | Scene targets not reset on retrigger → display goes stale during playback. Needs 8 Hz periodic repaint. See remediation. |
 
 ---
 
@@ -758,3 +760,69 @@ The overlay's `menu_voiceAutoOverlayPotTarget()` must handle
 `MENU_CELL_SCENE_SETTING` cells by mapping the scene setting kind to the
 appropriate Scene target ID. For non-automatable settings (fader), it
 returns `INSTRUMENT_PARAM_INVALID` so the overlay skips the cell.
+
+---
+
+## Hardware validation results
+
+Post-test output validated from `SD_CARD_PHASE3_OUTPUT/`.
+
+### PatternTrace (`pattrace.bin`)
+
+- 1,528 bytes, 191 records
+- Zero error-class records (no H/C/F)
+- All records are maintenance operations: 152× V (repair reserve), 39× L (repair reloc)
+- Dynamic block allocation healthy under Scene automation load
+
+### AutoSaveTrace (`asavetrc.bin`)
+
+- 556,824 bytes, 69,603 records
+- Zero error-class records (no E/X/Z/U)
+- Pipeline flow: 209 admitted → 206 captured → 206 published
+- 3 admit-only records are normal (dirty marks that resolved before capture window)
+
+### Pattern AutoSave — Scene 5 (`pat05a`, `pat05b`)
+
+- Generation ping-pong: `.pat05a` gen 68, `.pat05b` gen 69 — gen 69 wins
+- CRC32C (Castagnoli) validated on both files
+- 26 active steps, 282 automation entries total
+- 38 Scene target entries across target IDs {384, 389, 392, 397, 403}:
+  - 384 = voice 1 morph (`1vm`)
+  - 389 = voice 6 morph (`6vm`)
+  - 392 = voice 1 audio_out (`1ou`)
+  - 397 = voice 6 audio_out (`6ou`)
+  - 403 = voice 6 fx_send (`6fx`)
+- Scene automation targets survive the full AutoSave pipeline and persist correctly in PAT4 format
+- HCNAMES row 135 confirms source: `Barf	@` (Pattern AutoSave source for Scene 5)
+
+### Assessment
+
+All Phase 3 features are implemented and build-verified. Hardware test confirms:
+
+1. **Dynamic block engine** operates normally under the additional Scene automation load — no fragmentation errors, no capacity drops, repair operations are routine maintenance only.
+2. **AutoSave pipeline** is fully functional — the admit/capture/publish flow completes without error across 206 save cycles.
+3. **Scene automation storage** round-trips correctly through the PAT4 format — all 5 Scene target ID classes (vm, ou, fx) are present in the saved pattern with correct target IDs from the 9-bit address space.
+
+## Open remediation items
+
+Three items identified during post-implementation review are documented in
+`S070_PHASE3_FUCKUP_REMEDIATION.md` and tracked in the phase resolution table above:
+
+1. **Change 3.1-A conditional gate restructuring** — The original probability gating implementation incorrectly placed automation queueing inside the step-active block, breaking non-trigger step automation (the primary mechanism for parameter sweeps). Corrected via `seq_evaluateStepCondition()` with specials read moved before the trigger-active check. Build-verified. The conditional gate function is structured for future expansion beyond probability (track mute combos, loop iteration count, scene chain origin, button state).
+
+2. **R1: Scene setting underlines** — `va_scanService()` only checks `instrumentParam_isVoiceParameter()`, so Scene targets are silently dropped from the search agent. Fix requires `va_searchSceneMask` (1 byte, 3 bits for vm/ou/fx) and extending both the compact-view and edit-mode marker paths in `va_applyVoiceMarkers()`.
+
+3. **R2: Live value display during playback** — Scene targets persist through retrigger (per D3), so displayed values go stale during playback. Fix adds `menu_sceneLiveRefreshService()` at 8 Hz, gated by `seq_isRunning()` and current page identity, with `editModeActive` guard to prevent mid-edit overwrites. 2 bytes SRAM for timer.
+
+## Task handoff closure
+
+Phase 3 (items 3.1, 3.2a–f, 3.3) is complete. The 42 named changes from
+`S070_PHASE3_IMPLEMENTATION.md` are implemented and build-verified. Hardware
+validation confirms correct operation of the dynamic block engine, AutoSave
+pipeline, and Scene automation storage under real sequencer load.
+
+The critical 3.1-A defect has been corrected and the fix build-verified.
+Remediation items R1 and R2 are documented with full implementation plans and
+ready for a future session.
+
+**Session 070 Phase 3 — CLOSED.**

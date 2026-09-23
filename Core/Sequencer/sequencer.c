@@ -518,15 +518,47 @@ static void seq_queueStepAutomations(uint8_t track, uint8_t step)
 }
 
 /*
+ * Evaluate the conditional playback gate for one step.
+ *
+ * Input: resolved PatternData specials read from the dynamic block before the
+ * trigger-active check. Output: 1 when the complete step may participate in
+ * playback, or 0 when both its trigger and automation are suppressed.
+ *
+ * Probability is currently the only conditional special. The PatternData
+ * default (127, including an absent probability special) always passes; lower
+ * values are compared against the same hardware-RNG conversion used by the
+ * former trigger-local implementation. This is the single entry point for
+ * future conditional-trigger evaluations, so named conditions can be added
+ * here without reintroducing trigger-state-dependent automation queueing.
+ *
+ * Common caller: seq_advanceTrackStep() in TIM3 ISR context. Affiliates:
+ * pat_readStepSpecials() and GetRngValue().
+ */
+static uint8_t seq_evaluateStepCondition(const pat_step_specials_t *sp)
+{
+    /* Probability gate. */
+    if (sp->probability < 127u) {
+        uint8_t rnd = (uint8_t)(((uint16_t)(GetRngValue() & 0x7FFFu) *
+                                 127u) / 32767u);
+        if (rnd >= sp->probability)
+            return 0u;
+    }
+
+    /* Future conditional-trigger evaluations belong at this single gate. */
+    return 1u;
+}
+
+/*
  * Advance and service one fixed-grid step for one track.
  *
  * Input: track index at a sixteenth-note scheduler boundary. Output: its
  * cursor advances modulo the track's per-track length from PatternData,
- * active steps trigger with PatternData specials, and raw automation is
- * queued for foreground application. Probability gates both the voice
- * trigger and automation publication through one should_play decision. A
- * skipped probabilistic step therefore behaves as absent under the hold model;
- * erase remains an edit operation independent of probability.
+ * active steps trigger with PatternData specials, and every allowed dynamic
+ * block can queue raw automation even when the step has no trigger bit.
+ * seq_evaluateStepCondition() runs before the trigger-active check and gates
+ * the complete step: trigger and automation together. A failed condition
+ * therefore leaves previously held automation values unchanged. Erase remains
+ * an edit operation independent of the conditional gate.
  *
  * The wrap boundary is region->track_length[track] from the active Scene's
  * pat_scene_region_t, not the compile-time NUM_STEPS_PER_BAR constant.
@@ -561,6 +593,15 @@ static void seq_advanceTrackStep(uint8_t track)
 	}
 
 	if (!(seq_mutedTracks & (1u << track))) {
+		/*
+		 * Resolve specials and evaluate the step gate before checking bit 15.
+		 * Bit 14 owns both conditional values and automation, so a non-trigger
+		 * step is still a complete playback step for automation purposes.
+		 */
+		pat_step_specials_t sp = pat_readStepSpecials(
+		    seq_activePattern, track, (uint8_t)seq_stepIndex[track]);
+		uint8_t step_allowed = seq_evaluateStepCondition(&sp);
+
 		if (pat_isStepActive(track, (uint8_t)seq_stepIndex[track], seq_activePattern)) {
 			if (seq_eraseActive && track == menu_getActiveVoice()) {
 				/*
@@ -572,25 +613,19 @@ static void seq_advanceTrackStep(uint8_t track)
 				                  (uint8_t)seq_stepIndex[track], 0u);
 				patSvc_enqueueErase(seq_activePattern, track,
 				                    (uint8_t)seq_stepIndex[track]);
-			} else {
-				pat_step_specials_t sp = pat_readStepSpecials(
-				    seq_activePattern, track,
-				    (uint8_t)seq_stepIndex[track]);
-				uint8_t should_play = 1u;
-
-				if (sp.probability < 127u) {
-					uint8_t rnd = (uint8_t)(((uint16_t)(GetRngValue() & 0x7FFFu) *
-					                         127u) / 32767u);
-					if (rnd >= sp.probability)
-						should_play = 0u;
-				}
-				if (should_play) {
-					seq_triggerVoice(track, sp.velocity, sp.note);
-					seq_queueStepAutomations(
-						track, (uint8_t)seq_stepIndex[track]);
-				}
+			} else if (step_allowed) {
+				seq_triggerVoice(track, sp.velocity, sp.note);
 			}
 		}
+
+		/*
+		 * Automation follows the conditional gate, not trigger state. Preserve
+		 * the existing live-erase guard so the active edit track does not apply
+		 * a queued automation value while its trigger is being removed.
+		 */
+		if (step_allowed &&
+		    (!seq_eraseActive || track != menu_getActiveVoice()))
+			seq_queueStepAutomations(track, (uint8_t)seq_stepIndex[track]);
 	}
 
 	if (seq_rollRate != 0xffu && (seq_rollState & (1u << track))) {

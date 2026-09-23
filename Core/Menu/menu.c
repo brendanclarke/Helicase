@@ -1193,7 +1193,7 @@ static uint8_t menu_stepAutoNumberLocked = 0u;
 static uint8_t menu_stepAutoCategory = 0u;
 
 /*
- * VOICE held-step automation overlay state (exactly 44 B static SRAM).
+ * VOICE held-step automation overlay state (exactly 45 B static SRAM).
  *
  * What: Menu-owned foreground state for held-step selection, the asynchronous
  * 128-step Pattern search, four CGRAM marker slots, one shared underline
@@ -1211,8 +1211,9 @@ static uint8_t menu_stepAutoCategory = 0u;
  * Affiliates: buttonHandler_seqHeldMask(), buttonHandler_visibleStep(),
  * pat_readStepAutomations(), patSvc_writeStepAutomation(), lcd_underlineGlyph(),
  * led_updateAutomationStepView(), and time_sysTick.
- * Budget: 20 B held + 12 B search + 5 B CGRAM + 3 B debounce + 4 B working.
- * Approved on 2026-09-15 (40 B) and extended +4 B for working values.
+ * Budget: 20 B held + 13 B search + 5 B CGRAM + 3 B debounce + 4 B working.
+ * Approved on 2026-09-15 (40 B), extended +4 B for working values, and
+ * extended +1 B for the Scene-target search mask in S070 remediation.
  */
 static uint16_t va_heldMask = 0u;
 static uint8_t va_heldOrder[16];
@@ -1224,6 +1225,22 @@ static uint8_t va_searchPattern = 0u;
 static uint8_t va_searchCursor = 0u;
 static uint8_t va_searchComplete = 0u;
 static uint8_t va_searchTargetMask[8];
+/*
+ * Pattern-wide Scene-target automation search result (+1 B static SRAM).
+ *
+ * What: one bit each for Voice Morph, Audio Out, and FX Send targets on the
+ * active VOICE slot. Why: Scene target IDs occupy the 384..403 namespace and
+ * cannot be represented by va_searchTargetMask[], whose bits are descriptor
+ * indices 0..63. Inputs: va_scanService() entries from the active track.
+ * Outputs: va_applyVoiceMarkers() can underline the corresponding VOICE/mix
+ * Scene-setting name after the bounded search completes. Lifetime: current
+ * Pattern/track search context; cleared by va_searchRestart(). Affiliate:
+ * sceneModTarget_descriptor().
+ */
+#define VA_SEARCH_SCENE_VOICE_MORPH_BIT 0x01u
+#define VA_SEARCH_SCENE_AUDIO_OUT_BIT   0x02u
+#define VA_SEARCH_SCENE_FX_SEND_BIT     0x04u
+static uint8_t va_searchSceneMask = 0u;
 
 static uint8_t va_cgramBase[4];
 static uint8_t va_cgramValid = 0u;
@@ -1245,10 +1262,11 @@ _Static_assert(
     sizeof(va_overlayActive) + sizeof(va_searchTrack) +
     sizeof(va_searchPattern) + sizeof(va_searchCursor) +
     sizeof(va_searchComplete) + sizeof(va_searchTargetMask) +
+    sizeof(va_searchSceneMask) +
     sizeof(va_cgramBase) + sizeof(va_cgramValid) +
     sizeof(va_lastEditTick) + sizeof(va_underlineSuppressed) +
-    sizeof(va_workingValue) == 44u,
-    "S066 VOICE overlay state must remain exactly 44 bytes");
+    sizeof(va_workingValue) == 45u,
+    "S070 VOICE overlay state must remain exactly 45 bytes");
 
 /* Declared here so a CGRAM/DDRAM transaction can retire a Load/Save hardware
  * cursor before redefining slots; the initialized definitions live beside
@@ -1426,6 +1444,20 @@ static uint8_t  menu_cpuUseSampleCount = 0;
 static uint16_t menu_cpuUseSampleSum = 0;
 static uint8_t  menu_cpuUseAvgPercent = 0;
 static uint16_t menu_cpuUseLastRefresh = 0;
+
+/*
+ * Scene-target live display refresh deadline (+2 B static Menu SRAM).
+ *
+ * What: the last foreground refresh tick for live Scene values. Why: Scene
+ * target automation persists across voice retriggers, so the VOICE/mix and
+ * PERF displays must repaint while playback changes those retained values.
+ * Inputs: time_sysTick and the playback/page guards in
+ * menu_sceneLiveRefreshService(). Output: an approximately 8 Hz repaint on
+ * relevant pages, never from ISR context. Lifetime: Menu session. Affiliate:
+ * menu_serviceRuntimeWidgets() and menu_cellDisplayValue().
+ */
+#define SCENE_LIVE_REFRESH_INTERVAL_MS 125u
+static uint16_t menu_sceneLiveRefreshTick = 0u;
 
 /*
  * Retained active-Scene Pattern pool-use percentage for the Global widget.
@@ -1716,6 +1748,7 @@ static uint8_t va_resolveHeldValue(instrument_param_id_t target,
                                    uint8_t *out_value);
 static uint8_t va_storedToParam(uint8_t value);
 static void va_underlineService(void);
+static void menu_sceneLiveRefreshService(void);
 static void va_refreshAutomationLeds(void);
 static void va_applyVoiceMarkers(void);
 static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta);
@@ -1756,6 +1789,7 @@ static void va_searchRestart(void)
     va_searchCursor = 0u;
     va_searchComplete = 0u;
     memset(va_searchTargetMask, 0, sizeof(va_searchTargetMask));
+    va_searchSceneMask = 0u;
 }
 
 static void va_searchSetBit(uint8_t descriptor_index)
@@ -1774,14 +1808,41 @@ static uint8_t va_searchTestBit(uint8_t descriptor_index)
 }
 
 /*
+ * Resolve the marker bit for one visible Scene-setting cell.
+ *
+ * Input: a resolved VOICE/mix cell. Output: the corresponding bit in
+ * va_searchSceneMask for automatable per-voice Scene targets, or zero for
+ * fader mode and malformed/non-Scene cells. The mapping is shared by the
+ * edit-mode and compact-view underline paths so both surfaces interpret the
+ * search result identically. Affiliate: menu_cell_t Scene-setting identity.
+ */
+static uint8_t va_sceneSearchBitForCell(const menu_cell_t *cell)
+{
+    if (!cell || cell->kind != MENU_CELL_SCENE_SETTING)
+        return 0u;
+
+    switch (cell->scene_setting) {
+    case MENU_SCENE_SETTING_VOICE_MORPH:
+        return VA_SEARCH_SCENE_VOICE_MORPH_BIT;
+    case MENU_SCENE_SETTING_AUDIO_OUT:
+        return VA_SEARCH_SCENE_AUDIO_OUT_BIT;
+    case MENU_SCENE_SETTING_FX_SEND_AMOUNT:
+        return VA_SEARCH_SCENE_FX_SEND_BIT;
+    default:
+        return 0u;
+    }
+}
+
+/*
  * Advance the Pattern-wide search by the configured bounded slice.
  *
  * What: reads at most VOICE_AUTOMATION_SCAN_STEPS_PER_PASS step lists and
- * records only voice targets belonging to the active VOICE page's slot. Why:
- * synchronously scanning 128 steps on every repaint would stall the UI. Inputs:
- * current search context and PatternData pool. Output: a complete 64-bit
- * descriptor mask after 128 steps, with a hard 4*63 comparison ceiling per
- * service pass. Affiliates: instrumentParam_make namespace and PatternData.
+ * records voice descriptor targets and per-voice Scene targets belonging to
+ * the active VOICE page's slot. Why: synchronously scanning 128 steps on every
+ * repaint would stall the UI. Inputs: current search context and PatternData
+ * pool. Output: a complete descriptor mask plus Scene-setting mask after 128
+ * steps, with a hard 4*63 comparison ceiling per service pass. Affiliates:
+ * instrumentParam_make namespace, sceneModTarget_descriptor(), and PatternData.
  */
 static void va_scanService(void)
 {
@@ -1811,6 +1872,26 @@ static void va_scanService(void)
             if (instrumentParam_isVoiceParameter(autos[i].target) &&
                 instrumentParam_slot(autos[i].target) == slot)
                 va_searchSetBit(instrumentParam_local(autos[i].target));
+            else if (sceneModTarget_isSceneTarget(autos[i].target)) {
+                const scene_mod_target_descriptor_t *descriptor =
+                    sceneModTarget_descriptor(autos[i].target);
+
+                if (descriptor && descriptor->voice_slot == slot) {
+                    switch (descriptor->kind) {
+                    case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
+                        va_searchSceneMask |= VA_SEARCH_SCENE_VOICE_MORPH_BIT;
+                        break;
+                    case SCENE_MOD_TARGET_KIND_AUDIO_OUT:
+                        va_searchSceneMask |= VA_SEARCH_SCENE_AUDIO_OUT_BIT;
+                        break;
+                    case SCENE_MOD_TARGET_KIND_FX_SEND:
+                        va_searchSceneMask |= VA_SEARCH_SCENE_FX_SEND_BIT;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            }
         }
     }
     if (va_searchCursor >= NUM_STEPS) {
@@ -2310,6 +2391,21 @@ static void va_applyVoiceMarkers(void)
                     marker_col[0] = (uint8_t)left;
                     desired_valid = 0x01u;
                 }
+            } else if (cell.kind == MENU_CELL_SCENE_SETTING &&
+                       va_searchComplete &&
+                       (va_searchSceneMask &
+                        va_sceneSearchBitForCell(&cell)) != 0u) {
+                int8_t left;
+                for (left = 8; left < 16 &&
+                     editDisplayBuffer[0][left] == ' '; left++)
+                    ;
+                if (left < 16 && lcd_underlineGlyph(
+                        (uint8_t)editDisplayBuffer[0][left], glyph_probe)) {
+                    desired_base[0] = (uint8_t)editDisplayBuffer[0][left];
+                    marker_row[0] = 0u;
+                    marker_col[0] = (uint8_t)left;
+                    desired_valid = 0x01u;
+                }
             }
         }
         va_queueMarkerTransaction(desired_base, desired_valid,
@@ -2371,6 +2467,23 @@ static void va_applyVoiceMarkers(void)
                 marker_col[i] = (uint8_t)(start + left);
                 desired_valid |= (uint8_t)(1u << i);
             }
+        } else if (cell.kind == MENU_CELL_SCENE_SETTING &&
+                   va_searchComplete &&
+                   (va_searchSceneMask &
+                    va_sceneSearchBitForCell(&cell)) != 0u) {
+            int8_t left;
+            uint8_t start = (uint8_t)(4u * i);
+            for (left = 0; left < 3 &&
+                 editDisplayBuffer[0][start + left] == ' '; left++)
+                ;
+            if (left < 3 && lcd_underlineGlyph(
+                    (uint8_t)editDisplayBuffer[0][start + left], glyph_probe)) {
+                desired_base[i] =
+                    (uint8_t)editDisplayBuffer[0][start + left];
+                marker_row[i] = 0u;
+                marker_col[i] = (uint8_t)(start + left);
+                desired_valid |= (uint8_t)(1u << i);
+            }
         }
     }
     va_queueMarkerTransaction(desired_base, desired_valid,
@@ -2404,6 +2517,51 @@ static void va_underlineService(void)
         va_underlineSuppressed &= 0xF0u;
         menu_repaint();
     }
+}
+
+/*
+ * Refresh live Scene-setting values during playback.
+ *
+ * What: repaints the visible PERF Morph cells or VOICE/mix Scene-setting
+ * cells at a bounded foreground cadence. Why: Scene target automation changes
+ * retained Scene values and is intentionally not reset on voice retrigger, so
+ * a display that repaints only on input shows stale values. Inputs:
+ * seq_isRunning(), time_sysTick, current page/cell context, and editModeActive.
+ * Output: one ordinary menu_repaint() approximately every 125 ms on a
+ * relevant page. The service never runs while the user is editing or while a
+ * screensaver owns the LCD. Affiliates: seq_applySceneAutomation(),
+ * menu_cellDisplayValue(), and menu_serviceRuntimeWidgets().
+ */
+static void menu_sceneLiveRefreshService(void)
+{
+    uint8_t activeSubPage;
+    uint8_t i;
+    uint8_t visible = 0u;
+
+    if (!seq_isRunning() || screensaver_isActive() || editModeActive)
+        return;
+
+    if (menu_activePage == PERFORMANCE_PAGE) {
+        visible = 1u;
+    } else if (menu_isVoicePage(menu_activePage)) {
+        activeSubPage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+        for (i = 0u; i < MENU_COMPACT_SCREEN_CELLS; i++) {
+            menu_cell_t cell = menu_resolveCell(activeSubPage, i);
+
+            if (va_sceneSearchBitForCell(&cell) != 0u) {
+                visible = 1u;
+                break;
+            }
+        }
+    }
+
+    if (!visible ||
+        (uint16_t)(time_sysTick - menu_sceneLiveRefreshTick) <
+            SCENE_LIVE_REFRESH_INTERVAL_MS)
+        return;
+
+    menu_sceneLiveRefreshTick = time_sysTick;
+    menu_repaint();
 }
 
 /*
@@ -10598,6 +10756,8 @@ void menu_serviceRuntimeWidgets(void)
             menu_repaint();
         }
     }
+
+    menu_sceneLiveRefreshService();
 
     if ((uint16_t)(now - menu_cpuUseLastRefresh) < MENU_CPU_USE_REFRESH_MS)
         return;

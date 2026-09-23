@@ -131,6 +131,18 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   temporary effects use the approved 41-byte SRAM1 active-layer bitmap (plus
   one byte of transient Menu category state for the D17 editor). Final
   source/image build passed; hardware validation remains Phase 4 work.
+- Session 070 Phase 3 Item 3.1 remediation is implemented and build-verified
+  in `S070_PHASE3_FUCKUP_REMEDIATION.md`: `seq_advanceTrackStep()` now reads
+  dynamic specials and evaluates the shared conditional gate before the
+  trigger-active check, so allowed non-trigger automation reaches the pending
+  queue while probability still gates trigger and automation together. No
+  public `sequencer.h` API changed; hardware validation remains pending.
+- Session 070 Phase 3 remediation Issues 2 and 3 are implemented and
+  build-verified: Menu's bounded VOICE automation search now tracks per-voice
+  Scene targets (Morph, Audio Out, FX Send) for pattern-wide underlines, and a
+  foreground 8 Hz playback service repaints live Scene values on PERF and
+  VOICE/mix pages. Menu state increases by one Scene-mask byte and one
+  16-bit refresh timestamp; hardware validation remains pending.
 
 - Read `knowledge_files/log_archive/040_SESSION_HANDOFF_LOG.md` before
   continuing Scene/Bank or filesystem work. It preserves the verified

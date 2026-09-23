@@ -208,11 +208,28 @@ events remain independent fixed-note behavior.
 
 ### 6.1 Step automation playback
 
+THE DEFAULT FOR ALL AUTOMATION IS THAT IT PLAYS AND AFFECTS SOUND UNTIL THE
+NEXT VOICE TRIGGER. AUTOMATION ON A NON-TRIGGER STEP IS VALID AUDIO
+AUTOMATION DATA, VALUE CHANGES BETWEEN NOTES, AND TIMBRAL MOTION INDEPENDENT
+OF RHYTHM ARE A CRITICAL PRODUCT FEATURE. ANY CHANGE THAT CONDITIONS
+AUTOMATION QUEUEING ON TRIGGER STATE (BIT 15) DESTROYS THIS CAPABILITY AND
+IS UNCONDITIONALLY WRONG.
+
 On each step advance, `seq_advanceTrackStep()` reads automation entries from
 every step that has a pool block (bit 14 set, valid offset), regardless of
 trigger state. Decoded entries are copied into a 32-entry debounced pending
 buffer in `sequencer.c` (192 B static SRAM). Multiple writes to the same
 `(step_id, target)` pair coalesce; the ISR is the sole writer.
+
+Trigger condition including probability gates the complete step: trigger and
+automation together, for any step that has the probability special set,
+whether or not the step has an active trigger (bit 15). The probability
+special is read from the dynamic block before the trigger-active check so it
+applies to non-trigger steps with automation. Default probability (127, or
+absent special) always passes — a step without probability set plays
+unconditionally. A step whose probability roll fails produces no trigger and
+no automation entries; previously held automation values persist through the
+skipped step. Erase is independent of probability.
 
 The foreground drain (`seq_drainPendingAutomation()`) runs inside
 `audio_check_and_render()` immediately after `voiceControl_processPending()`,
