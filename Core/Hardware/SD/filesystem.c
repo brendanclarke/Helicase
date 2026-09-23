@@ -25088,6 +25088,21 @@ void filesystem_tick(void)
     if (status == FS_STATUS_IDLE)
         filesystem_patternTraceFlushSchedule_tick();
     /*
+     * Give deferred Kit/Instrument HCNAMES persistence priority over AutoSave.
+     *
+     * What: once Menu has left Load/Save, its retained dirty Scene mask is
+     * handed to the existing atomic HCNAMES writer at the next idle boundary.
+     * Why: page repaint is independent of identity persistence, but a pending
+     * checkpoint must win the shared facade before a long AutoSave drain. The
+     * Menu bridge retains the mask if the request is refused. Inputs: idle
+     * facade and Menu's read-only dirty query. Outputs: BUSY when a write is
+     * accepted; later scheduler rungs then observe the changed status and do
+     * not claim the facade. Affiliates: menu.h's deferred HCNAMES bridge,
+     * menu_residentNameScratchFlushComplete(), and AutoSave scheduling below.
+     */
+    if (status == FS_STATUS_IDLE && menu_hasResidentNameDirtyMask())
+        menu_triggerDeferredHcnamesFlush();
+    /*
      * Refill the shared elapsed-time CPU budget before any budgeted
      * AutoSave scheduler runs. Settings persistence and diagnostic trace
      * flushes above retain their existing priority and are not charged to
@@ -30644,18 +30659,22 @@ uint8_t filesystem_kitSlotExists(uint16_t zero_based_slot)
 
 /* Return a display name from the active slot-ordered Kit cache.
  *
- * Input: zero-based slot. Output: NUL-terminated eight-character cached name,
- * or "Empty   " for absent/out-of-range slots. Client: menu.c's Load page.
+ * Input: zero-based slot. Output: blank while the Kit cache domain is not
+ * ready, "Empty   " after a valid index proves absence, or the cached name
+ * for a present row. Client: menu.c's Load page.
  */
 const char *filesystem_kitSlotName(uint16_t zero_based_slot)
 {
     const char *name;
 
+    /* A different/absent cache domain means the coordinate is not ready. */
+    if (fs_list_cache_kind != FS_NAME_CACHE_KIT)
+        return "        ";
     if (!filesystem_kitSlotExists(zero_based_slot))
         return "Empty   ";
     name = filesystem_cachedLibraryName(FS_NAME_CACHE_KIT,
                                         zero_based_slot);
-    return name ? name : "Empty   ";
+    return name ? name : "        ";
 }
 
 uint8_t filesystem_sceneSlotExists(uint16_t zero_based_slot)
@@ -30681,10 +30700,13 @@ const char *filesystem_sceneSlotName(uint16_t zero_based_slot)
     /*
      * Return an eight-character root Scene library display name.
      *
-     * Input: zero-based library slot. Output: cached display name for existing
-     * Scenes, or "Empty   " for missing/out-of-range slots. Menu uses this
-     * directly for Load:[Scene] and Save overwrite planning.
+     * Input: zero-based library slot. Output: blank while the Scene cache
+     * domain is unresolved, "Empty   " after a valid index proves absence, or
+     * the cached display name. Menu uses this directly for Load:[Scene] and
+     * Save overwrite planning.
      */
+    if (fs_list_cache_kind != FS_NAME_CACHE_SCENE)
+        return "        ";
     if (zero_based_slot >= STORAGE_SCENE_MAX_SLOTS ||
         !filesystem_librarySlotExists(FS_NAME_CACHE_SCENE,
                                        zero_based_slot)) {
@@ -30692,7 +30714,7 @@ const char *filesystem_sceneSlotName(uint16_t zero_based_slot)
     }
     name = filesystem_cachedLibraryName(FS_NAME_CACHE_SCENE,
                                         zero_based_slot);
-    return name ? name : "Empty   ";
+    return name ? name : "        ";
 }
 
 uint8_t filesystem_bankSlotExists(uint16_t zero_based_slot)
@@ -30715,17 +30737,23 @@ const char *filesystem_bankSlotName(uint16_t zero_based_slot)
     /*
      * Return an eight-character root Bank display name.
      *
-     * Input: root Bank library slot. Output: cached directory-derived display
-     * name or "Empty   ". bankset.bcg is not consulted because files never
-     * store their own object names.
+     * Input: root Bank library slot. Output: blank while the Bank cache domain
+     * is unresolved, "Empty   " after a valid index proves absence, or the
+     * cached directory-derived name. bankset.bcg is not consulted because
+     * files never store their own object names.
      */
+    if (fs_list_cache_kind != FS_NAME_CACHE_BANK)
+        return "        ";
     if (zero_based_slot >= STORAGE_BANK_MAX_SLOTS ||
         !filesystem_librarySlotExists(FS_NAME_CACHE_BANK,
                                        zero_based_slot)) {
         return "Empty   ";
     }
-    return filesystem_cachedLibraryName(FS_NAME_CACHE_BANK,
-                                        zero_based_slot);
+    {
+        const char *name = filesystem_cachedLibraryName(
+            FS_NAME_CACHE_BANK, zero_based_slot);
+        return name ? name : "        ";
+    }
 }
 
 uint8_t filesystem_patternSlotExists(uint16_t zero_based_slot)
@@ -30739,11 +30767,17 @@ uint8_t filesystem_patternSlotExists(uint16_t zero_based_slot)
 
 const char *filesystem_patternSlotName(uint16_t zero_based_slot)
 {
-    /* Return the cached eight-cell Pattern name or the common empty sentinel. */
+    /* Blank means the Pattern cache domain has not resolved this coordinate;
+     * Empty means a valid Pattern index has no file at this slot. */
+    if (fs_list_cache_kind != FS_NAME_CACHE_PATTERN)
+        return "        ";
     if (!filesystem_patternSlotExists(zero_based_slot))
         return "Empty   ";
-    return filesystem_cachedLibraryName(FS_NAME_CACHE_PATTERN,
-                                        zero_based_slot);
+    {
+        const char *name = filesystem_cachedLibraryName(
+            FS_NAME_CACHE_PATTERN, zero_based_slot);
+        return name ? name : "        ";
+    }
 }
 
 uint16_t filesystem_firstKitSlot(void)

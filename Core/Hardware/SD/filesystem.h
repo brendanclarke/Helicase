@@ -913,6 +913,17 @@ bool filesystem_requestUpdateResidentInstrumentNames(
     uint8_t instrument_slot,
     fs_completion_cb_t cb);
 /*
+ * Browser slot-name state uses two explicit outcomes.
+ *
+ * What: a blank eight-cell string means the requested cache domain is not yet
+ * ready; `Empty   ` means a valid loaded index proved that this slot is absent.
+ * Why: UI commit gating must distinguish an unresolved coordinate from a
+ * resolved empty slot. Inputs: the shared cache domain and slot row. Outputs:
+ * the four numbered-library accessors below preserve that distinction.
+ * Affiliates: filesystem_libraryNameCacheLoaded(), Menu's Load/Save renderer,
+ * and the asynchronous index callbacks.
+ */
+/*
  * Borrow the selected eight-cell Instrument name after either request above.
  * The pointer is valid only while HCNAMES owns the shared cache; copy it before
  * requesting a typed `.hcindex`. Blank/invalid rows return `Empty   `.
@@ -1178,9 +1189,8 @@ uint8_t     filesystem_kitSlotExists(uint16_t zero_based_slot);
 /* Return the eight-character name from the shared slot-ordered Kit cache.
  *
  * Input: zero_based_slot as above. Output: filesystem-owned eight printable
- * characters plus NUL for existing kits, or the literal "Empty   " for missing
- * slots. The name is loaded from `/Kit/.hcindex`; the cache row excludes the
- * `NNN ` folder prefix because the slot number is already the array index.
+ * characters plus NUL for existing kits, blank while the Kit cache domain is
+ * unresolved, or the literal "Empty   " after a valid index proves absence.
  * Client: menu_repaintLoadSavePage().
  */
 const char *filesystem_kitSlotName(uint16_t zero_based_slot);
@@ -1193,6 +1203,7 @@ const char *filesystem_kitSlotName(uint16_t zero_based_slot);
  * selected directory, but that alias is not exposed or retained per slot.
  */
 uint8_t     filesystem_sceneSlotExists(uint16_t zero_based_slot);
+/* Blank means unresolved Scene cache; Empty means a loaded index has no row. */
 const char *filesystem_sceneSlotName(uint16_t zero_based_slot);
 /*
  * Root Bank/ shared-cache queries and fallback helpers.
@@ -1204,9 +1215,11 @@ const char *filesystem_sceneSlotName(uint16_t zero_based_slot);
  * and remain operation-local state in the Bank load/save state machines.
  */
 uint8_t     filesystem_bankSlotExists(uint16_t zero_based_slot);
+/* Blank means unresolved Bank cache; Empty means a loaded index has no row. */
 const char *filesystem_bankSlotName(uint16_t zero_based_slot);
 /* Root Pattern slots are numbered files (`NNN <name>.pat`) rather than folders. */
 uint8_t     filesystem_patternSlotExists(uint16_t zero_based_slot);
+/* Blank means unresolved Pattern cache; Empty means a loaded index has no row. */
 const char *filesystem_patternSlotName(uint16_t zero_based_slot);
 uint16_t    filesystem_firstKitSlot(void);
 uint16_t    filesystem_firstSceneSlot(void);

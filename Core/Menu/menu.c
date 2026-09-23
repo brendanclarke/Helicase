@@ -116,6 +116,20 @@ static uint8_t menu_pendingPageSwitch;
  */
 static uint8_t menu_loadSaveCommandActive = 0u;
 static uint8_t menu_deferSelectionRequest = 0;
+/*
+ * Load/Save selection-coordinate generation.
+ *
+ * What: the live generation advances whenever a browser coordinate changes;
+ * the snapshot records the generation captured by the one request currently
+ * owning the facade. Why: asynchronous index, preview, and live-payload
+ * completions must not repaint a coordinate the user has already left.
+ * Inputs: encoder/type/page transitions and request dispatch. Outputs: stale
+ * completion detection with no second cache or payload snapshot. Lifetime:
+ * firmware. RAM: 2 bytes in normal SRAM1 .bss. Affiliates: the Load/Save
+ * request helpers and their terminal callbacks below.
+ */
+static uint8_t menu_selectionGeneration = 0u;
+static uint8_t menu_selectionGenerationSnapshot = 0u;
 static uint8_t menu_deferSelectionLoadKit = 0;
 static uint8_t menu_lcdRefreshPending = 0;
 static uint8_t menu_globalApplyActive = 0;
@@ -691,6 +705,8 @@ static void menu_startInstrumentApply(uint8_t scene_index,
      */
     menu_instrumentApplyActive = 1u;
     menu_instrumentApplySlot = slot;
+    /* The filesystem read was free-scroll; the bounded runtime apply is not. */
+    menu_storageBusy = 1u;
     preset_startInstrumentApply(scene_index, slot,
                                 mark_autosave_whole_instrument);
 }
@@ -3988,11 +4004,15 @@ static void menu_requestTestScan(uint8_t what)
      * This is posted through Preset so completion follows the same poll path as
      * other storage operations. Save pages do not scan before editing because
      * overwrite behavior is intentionally delegated to the exact "w" open.
-     */
+    */
+    uint8_t accepted;
+
     if (menu_activePage != LOAD_PAGE)
         return;
-    if ((what == SAVE_TYPE_FILE && preset_scanTestFiles()) ||
-        (what == SAVE_TYPE_DIR && preset_scanTestDirs())) {
+    accepted = (uint8_t)((what == SAVE_TYPE_FILE && preset_scanTestFiles()) ||
+                         (what == SAVE_TYPE_DIR && preset_scanTestDirs()));
+    if (accepted) {
+        menu_selectionGenerationSnapshot = menu_selectionGeneration;
         menu_storageBusy = 1u;
     } else {
         menu_deferSelectionRequest = 1u;
@@ -4266,7 +4286,7 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
          * the older immutable request drains. Only the short entry/exit window
          * where HCNAMES owns the shared cache leaves the name blank.
          */
-        if (menu_storageBusy) {
+        if (menu_storageBusy || preset_getStatus() != PRESET_IDLE) {
             if (filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_KIT)) {
                 memcpy(preset_currentName,
                        filesystem_kitSlotName(slot), 8u);
@@ -4381,16 +4401,14 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
         menu_repaintAll();
         if (preset_loadKitForScenes(slot, menu_kitLoadSceneMask)) {
             /*
-             * Lock the accepted full-Kit coordinates through payload commit
-             * and runtime apply. Number-only turns may update the separate
-             * desired slot, but they never repost or overwrite this immutable
-             * request's slot/mask. Its changed Scene names are recorded in
-             * scratch after commit and serialized only at menu-family exit.
+             * Keep the encoder responsive while the immutable full-Kit request
+             * drains. Number-only turns update the separate desired slot, but
+             * never repost or overwrite this request's slot/mask. Its changed
+             * Scene names are recorded after commit and serialized at the
+             * menu-family checkpoint. Page exit still waits on Preset status.
             */
-            menu_storageBusy = 1u;
-            /* menu_parseEncoder() intentionally skips its trailing repaint
-             * once storage becomes busy; the pre-request repaint above has
-             * already published the number and `.hcindex` name. */
+            menu_selectionGenerationSnapshot = menu_selectionGeneration;
+            /* The pre-request repaint already published the coordinate/name. */
         } else {
             menu_deferSelectionRequest = 1;
         }
@@ -4401,9 +4419,9 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
         memcpy(preset_currentName, filesystem_kitSlotName(slot), 8u);
         menu_repaintAll();
         if (preset_loadKitMorphForScenes(slot, menu_kitLoadSceneMask)) {
-            /* KitMrp uses the same immutable request boundary even though it
-             * preserves all resident names and therefore skips Kit HCNAMES. */
-            menu_storageBusy = 1u;
+            /* KitMrp uses the same immutable request boundary, while the
+             * encoder remains free to choose the latest desired slot. */
+            menu_selectionGenerationSnapshot = menu_selectionGeneration;
         } else {
             menu_deferSelectionRequest = 1;
         }
@@ -4430,6 +4448,8 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
         preset_loadName(slot, what);
         if (preset_getStatus() != PRESET_LOAD_IN_PROGRESS)
             menu_deferSelectionRequest = 1;
+        else
+            menu_selectionGenerationSnapshot = menu_selectionGeneration;
     }
 }
 
@@ -4468,6 +4488,13 @@ static void menu_instrumentIndexLoadComplete(void)
     menu_traceInstrumentEntry(
         AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_INDEX_COMPLETE,
         (uint8_t)!index_ok);
+    if (menu_pendingPageSwitch != MENU_PENDING_PAGE_NONE) {
+        /* A physical exit owns the next safe boundary; do not reopen `.hcindex`. */
+        filesystem_clearNameCache();
+        menu_deferSelectionRequest = 0u;
+        menu_storageBusy = 0u;
+        return;
+    }
     if (!index_ok) {
         /*
          * Preserve the nested session while making a failed list inert.
@@ -4627,6 +4654,8 @@ static void menu_residentNameScratchFlushComplete(void)
     if (!flush_ok) {
         menu_traceInstrumentEntry(
             AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSHED, 1u);
+        /* A failed deferred write must not strand a queued physical exit. */
+        menu_storageBusy = 0u;
         menu_showFilesystemErrorOverlay();
         return;
     }
@@ -4639,7 +4668,8 @@ static void menu_residentNameScratchFlushComplete(void)
     filesystem_clearNameCache();
     menu_storageBusy = 0u;
 
-    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
+    if (menu_pendingPageSwitch == MENU_PENDING_PAGE_NONE &&
+        (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)) {
         if (menu_instrumentLoadActive) {
             menu_requestInstrumentEntryNames();
         } else if (menu_saveOptions.what == SAVE_TYPE_KIT ||
@@ -4692,10 +4722,40 @@ static uint8_t menu_endResidentNameScratchSession(void)
     return 0u;
 }
 
+uint8_t menu_hasResidentNameDirtyMask(void)
+{
+    /*
+     * What: expose only whether deferred Kit/Instrument HCNAMES rows exist.
+     * Why: filesystem_tick() owns scheduler arbitration, while Menu owns the
+     * dirty mask and its identity semantics. Inputs: existing mask only.
+     * Outputs: nonzero requests one deferred HCNAMES write; no state changes.
+     * Affiliates: menu_triggerDeferredHcnamesFlush() and filesystem_tick().
+     */
+    return (uint8_t)(menu_residentNameDirtySceneMask != 0u);
+}
+
+void menu_triggerDeferredHcnamesFlush(void)
+{
+    /*
+     * What: hand one deferred HCNAMES checkpoint to the filesystem facade.
+     * Why: leaving Load/Save must repaint immediately; the dirty mask survives
+     * until this idle scheduler rung can safely start the existing atomic
+     * writer. Inputs: an idle facade and a nonzero Menu dirty mask. Outputs:
+     * one accepted HCNAMES request, or retained dirty state on refusal.
+     * Affiliates: menu_endResidentNameScratchSession(), filesystem_tick(),
+     * and menu_residentNameScratchFlushComplete().
+     */
+    if (menu_residentNameDirtySceneMask == 0u ||
+        menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)
+        return;
+    (void)menu_endResidentNameScratchSession();
+}
+
 static void menu_residentNameScratchLoaded(void)
 {
     uint8_t slot;
     uint8_t scene = menu_residentNameScratchScene;
+    uint8_t hcnames_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
 
     /*
      * Capture all seven resident rows during the one allowed entry traversal.
@@ -4706,10 +4766,17 @@ static void menu_residentNameScratchLoaded(void)
      * The current Kit or typed Instrument index is then loaded exactly once for
      * fast in-session browsing and payload opens.
      */
-    if (filesystem_status() != FS_STATUS_DONE || scene >= 16u) {
+    filesystem_ack();
+    if (!hcnames_ok || scene >= 16u) {
         menu_traceInstrumentEntry(
             AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_COMPLETE, 1u);
+        menu_storageBusy = 0u;
         menu_showFilesystemErrorOverlay();
+        return;
+    }
+    if (menu_pendingPageSwitch != MENU_PENDING_PAGE_NONE) {
+        /* Let the queued exit consume this completed entry without re-entry. */
+        menu_storageBusy = 0u;
         return;
     }
     menu_traceInstrumentEntry(
@@ -4780,6 +4847,7 @@ static uint8_t menu_requestResidentNameScratch(uint8_t scene)
     menu_residentNameScratchValid = 0u;
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
+    menu_selectionGenerationSnapshot = menu_selectionGeneration;
     if (!filesystem_requestLoadResidentKitName(
             scene, menu_residentNameScratchLoaded)) {
         menu_traceInstrumentEntry(
@@ -4975,6 +5043,8 @@ static uint8_t menu_finishInstrumentApplySession(void)
         menu_instrumentTempOperationPending = 0u;
         return 0u;
     }
+    if (menu_pendingPageSwitch != MENU_PENDING_PAGE_NONE)
+        return 0u;
     if (menu_instrumentLoadActive &&
         !menu_instrumentSaveMode &&
         !menu_instrumentLoadMorphMode &&
@@ -5025,9 +5095,10 @@ static void menu_requestInstrumentIndexLoad(instrument_type_t type)
      * machine has loaded that type's general-purpose name cache. A rejected
      * request is deferred through the existing selection retry path, which
      * handles a still-busy filesystem without inventing a second queue.
-     */
+    */
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
+    menu_selectionGenerationSnapshot = menu_selectionGeneration;
     if (!filesystem_requestLoadInstrumentIndex(
             type, menu_instrumentIndexLoadComplete)) {
         menu_traceInstrumentEntry(
@@ -5109,6 +5180,8 @@ static void menu_requestKitEntryNames(void)
         menu_repaintAll();
         return;
     }
+    /* Branch C is the follow-on request after HCNAMES entry; capture its row. */
+    menu_selectionGenerationSnapshot = menu_selectionGeneration;
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
     {
@@ -5133,6 +5206,9 @@ static void menu_requestKitEntryNames(void)
 
 static void menu_libraryIndexLoadComplete(void)
 {
+    uint8_t index_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+    uint8_t coordinate_current = (uint8_t)(
+        menu_selectionGenerationSnapshot == menu_selectionGeneration);
     uint8_t continue_bank_preview;
 
     /*
@@ -5158,13 +5234,27 @@ static void menu_libraryIndexLoadComplete(void)
      * menu_bankLoadPreviewComplete(), and the later OK handler is the sole
      * caller of preset_loadBank().
      */
+    /* The callback owns a direct filesystem request, not a Preset request. */
+    filesystem_ack();
+    if (!coordinate_current) {
+        /* The index is still useful as a whole domain; resolve the newest row. */
+        filesystem_clearNameCache();
+        menu_storageBusy = 0u;
+        menu_deferSelectionRequest = 1u;
+        menu_deferSelectionLoadKit = (uint8_t)(
+            menu_activePage == LOAD_PAGE &&
+            (menu_saveOptions.what == SAVE_TYPE_KIT ||
+             menu_saveOptions.what == SAVE_TYPE_KIT_MORPH));
+        memset(preset_currentName, ' ', 8u);
+        return;
+    }
     continue_bank_preview = (uint8_t)(
-        filesystem_status() == FS_STATUS_DONE &&
+        index_ok &&
         menu_activePage == LOAD_PAGE &&
         !menu_instrumentLoadActive &&
         menu_saveOptions.what == SAVE_TYPE_BANK &&
         filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_BANK));
-    if (filesystem_status() == FS_STATUS_DONE &&
+    if (index_ok &&
         menu_activePage == LOAD_PAGE &&
         !menu_instrumentLoadActive &&
         (menu_saveOptions.what == SAVE_TYPE_KIT ||
@@ -5195,6 +5285,7 @@ static void menu_libraryIndexLoadComplete(void)
 
 static void menu_sceneResidentNameLoaded(void)
 {
+    uint8_t name_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
     /*
      * Finish the single-name Scene-menu entry read.
      *
@@ -5205,9 +5296,16 @@ static void menu_sceneResidentNameLoaded(void)
      * index intentionally disposes the HCNAMES cache. Affiliates: Save editor
      * seeding and filesystem_residentSceneName().
      */
-    if (filesystem_status() != FS_STATUS_DONE ||
+    filesystem_ack();
+    if (!name_ok ||
         menu_sceneResidentNameScratchScene >= 16u) {
+        menu_storageBusy = 0u;
         menu_showFilesystemErrorOverlay();
+        return;
+    }
+    if (menu_pendingPageSwitch != MENU_PENDING_PAGE_NONE) {
+        /* The queued exit supersedes the follow-on Scene index request. */
+        menu_storageBusy = 0u;
         return;
     }
     filesystem_setIdentityName(
@@ -5215,6 +5313,7 @@ static void menu_sceneResidentNameLoaded(void)
         filesystem_residentSceneName(menu_sceneResidentNameScratchScene));
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
+    menu_selectionGenerationSnapshot = menu_selectionGeneration;
     if (!filesystem_requestLoadSceneIndex(menu_libraryIndexLoadComplete)) {
         menu_storageBusy = 0u;
         menu_deferSelectionRequest = 1u;
@@ -5268,6 +5367,7 @@ static void menu_requestSceneEntryName(void)
     menu_sceneResidentNameScratchScene = menu_loadSaveSourceScene;
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
+    menu_selectionGenerationSnapshot = menu_selectionGeneration;
     if (!filesystem_requestLoadResidentSceneName(
             menu_sceneResidentNameScratchScene,
             menu_sceneResidentNameLoaded)) {
@@ -5306,6 +5406,7 @@ static void menu_requestLibraryIndexLoad(uint8_t what)
         kind = (what == SAVE_TYPE_BANK)
             ? FS_LIBRARY_INDEX_BANK : FS_LIBRARY_INDEX_KIT;
     }
+    menu_selectionGenerationSnapshot = menu_selectionGeneration;
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
     /*
@@ -5382,6 +5483,9 @@ static void menu_refreshSavedLibraryName(uint8_t completed_op)
 static void menu_bankLoadPreviewComplete(void)
 {
     uint16_t slot = menu_currentPresetNr[SAVE_TYPE_BANK];
+    uint8_t preview_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+    uint8_t coordinate_current = (uint8_t)(
+        menu_selectionGenerationSnapshot == menu_selectionGeneration);
 
     /*
      * Apply one completed Load:[Bank] child preview scan.
@@ -5399,12 +5503,22 @@ static void menu_bankLoadPreviewComplete(void)
      * OK/OW command lifecycle remains inactive until preset_loadBank() later
      * accepts an explicit click.
      */
+    filesystem_ack();
     menu_storageBusy = 0u;
+    if (!coordinate_current) {
+        /* A stale child mask must never become the next Bank's LED mask. */
+        menu_bankLoadPreviewValid = 0u;
+        menu_kitLoadSceneMask = 0u;
+        menu_deferSelectionRequest = 1u;
+        menu_deferSelectionLoadKit = 0u;
+        menu_refreshLoadSceneLeds();
+        return;
+    }
     if (menu_activePage != LOAD_PAGE ||
         menu_instrumentLoadActive ||
         menu_saveOptions.what != SAVE_TYPE_BANK ||
         menu_bankLoadPreviewSlot != slot ||
-        filesystem_status() != FS_STATUS_DONE) {
+        !preview_ok) {
         menu_repaintAll();
         return;
     }
@@ -5430,6 +5544,8 @@ static void menu_requestBankLoadPreview(uint16_t slot)
      * menu_loadSaveCommandActive, so `...` remains reserved for an accepted
      * explicit OK/OW operation.
      */
+    /* A child scan is coordinate-specific; tag it before posting the request. */
+    menu_selectionGenerationSnapshot = menu_selectionGeneration;
     menu_bankLoadPreviewSlot = slot;
     menu_bankLoadPreviewMask = 0u;
     menu_bankLoadPreviewValid = 0u;
@@ -5484,6 +5600,7 @@ static void menu_instrumentLoadRequestSelection(void)
 {
     uint16_t count;
     uint16_t index;
+    uint8_t accepted;
 
     /*
      * Immediately load the selected Instrument/ file.
@@ -5496,15 +5613,24 @@ static void menu_instrumentLoadRequestSelection(void)
      * an InstrumentMrp request. The renderer derives the selected `.hcindex`
      * name directly during payload I/O; HCNAMES remains the post-commit
      * resident register and is not overwritten on this preview path.
-     */
+    */
     menu_deferSelectionRequest = 0u;
+    if (menu_storageBusy || preset_getStatus() != PRESET_IDLE) {
+        /* Keep the current Preset request immutable; the latest row is
+         * re-posted after its safe completion boundary. */
+        menu_deferSelectionRequest = 1u;
+        menu_deferSelectionLoadKit = 0u;
+        menu_repaintAll();
+        return;
+    }
     menu_instrumentLoadClampIndex();
     count = filesystem_instrumentCount(menu_instrumentLoadType);
     if (count == 0u)
         return;
     index = menu_instrumentLoadIndex[menu_instrumentLoadType];
     menu_repaintAll();
-    if ((menu_instrumentLoadMorphMode &&
+    accepted = (uint8_t)(
+        (menu_instrumentLoadMorphMode &&
          preset_loadInstrumentMorph(menu_instrumentLoadScene,
                                     menu_instrumentLoadSlot,
                                     menu_instrumentLoadType,
@@ -5513,7 +5639,8 @@ static void menu_instrumentLoadRequestSelection(void)
          preset_loadInstrumentForScenes(menu_kitLoadSceneMask,
                                         menu_instrumentLoadSlot,
                                         menu_instrumentLoadType,
-                                        index))) {
+                                        index)));
+    if (accepted) {
         /*
          * Keep storage coordinates immutable but leave plain number turns
          * available through menu_parseEncoder(). The LCD already shows the
@@ -5522,9 +5649,9 @@ static void menu_instrumentLoadRequestSelection(void)
          * entry/exit cache handoff can blank a desired row; the coalesced retry
          * receives its name when the typed index is restored.
          */
-        menu_storageBusy = 1u;
         /* The explicit pre-request repaint above already queued the selected
          * number and `.hcindex` name before storage became busy. */
+        menu_selectionGenerationSnapshot = menu_selectionGeneration;
     } else {
         /* A transiently busy filesystem retains the latest desired number for
          * the existing deferred retry path instead of losing the encoder turn. */
@@ -5622,6 +5749,10 @@ static void menu_instrumentLoadStepType(int8_t inc)
          * restore semantics. */
         menu_invalidateInstrumentLoadTemp();
         menu_instrumentLoadMorphMode = 1u;
+        menu_selectionGeneration++;
+        if (menu_residentNameDirtySceneMask != 0u &&
+            menu_endResidentNameScratchSession())
+            return;
         menu_requestInstrumentEntryNames();
         return;
     }
@@ -5632,6 +5763,10 @@ static void menu_instrumentLoadStepType(int8_t inc)
          * a fresh normal snapshot before exposing the normal `kit` row again. */
         menu_invalidateInstrumentLoadTemp();
         menu_instrumentLoadMorphMode = 0u;
+        menu_selectionGeneration++;
+        if (menu_residentNameDirtySceneMask != 0u &&
+            menu_endResidentNameScratchSession())
+            return;
         menu_requestInstrumentEntryNames();
         return;
     }
@@ -5665,6 +5800,10 @@ static void menu_instrumentLoadStepType(int8_t inc)
             menu_instrumentLoadMorphMode =
                 (uint8_t)(direction < 0 &&
                           entry->type == menu_instrumentLoadBaseType);
+            menu_selectionGeneration++;
+            if (menu_residentNameDirtySceneMask != 0u &&
+                menu_endResidentNameScratchSession())
+                return;
             menu_instrumentLoadClampIndex();
             if (menu_instrumentLoadMorphMode)
                 menu_requestInstrumentEntryNames();
@@ -6143,8 +6282,22 @@ void menu_loadInstrumentExit(void)
      * one session and one exit boundary. ButtonHandler calls this when the
      * Load/Save mode button is pressed a second time.
      */
-    if (menu_loadInstrumentTransactionBusy())
+    if (menu_loadInstrumentTransactionBusy() ||
+        preset_getStatus() != PRESET_IDLE)
         return;
+    /*
+     * LSR-01: nested Instrument exit is an HCNAMES checkpoint boundary.
+     *
+     * What: advance the generation and tear down the outgoing Instrument
+     * context before flushing dirty Kit/Instrument rows. Why: the completion
+     * callback dispatches from live Menu state, so it must see Kit ownership
+     * and call menu_requestKitEntryNames() after the write. Inputs: existing
+     * dirty Scene mask and Instrument state. Outputs: an accepted flush
+     * returns before cache teardown; its completion reaches the Kit browser
+     * directly. Affiliates: menu_endResidentNameScratchSession(),
+     * menu_residentNameScratchFlushComplete(), and menu_requestKitEntryNames().
+     */
+    menu_selectionGeneration++;
     /* Leaving nested Instrument Load/Save is the final preview boundary.
      * Complete any selected normal pool identity while its `.hcindex` is still
      * active, then restore `/Kit/.hcindex` without an extra name allocation. */
@@ -6152,8 +6305,11 @@ void menu_loadInstrumentExit(void)
     menu_instrumentLoadActive = 0u;
     menu_instrumentSaveMode = 0u;
     menu_loadSaveClearInstrumentVoiceBlinks();
-    menu_requestKitEntryNames();
     menu_refreshLoadSceneLeds();
+    if (menu_residentNameDirtySceneMask != 0u &&
+        menu_endResidentNameScratchSession())
+        return;
+    menu_requestKitEntryNames();
     if (!menu_storageBusy)
         menu_repaintAll();
 }
@@ -6174,7 +6330,8 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
     if ((menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) ||
         voiceNr >= INSTRUMENT_SLOT_COUNT)
         return 0u;
-    if (menu_storageBusy && !menu_instrumentLoadActive &&
+    if ((menu_storageBusy || preset_getStatus() != PRESET_IDLE) &&
+        !menu_instrumentLoadActive &&
         (menu_saveOptions.what == SAVE_TYPE_KIT ||
          menu_saveOptions.what == SAVE_TYPE_KIT_MORPH)) {
         /*
@@ -6184,7 +6341,8 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
          * a payload/apply owns immutable Scene coordinates. Entering nested
          * mode during either interval could replace the shared cache or change
          * Scene/voice ownership too early. Returning handled keeps the gesture
-         * deferred until the current transaction releases menu_storageBusy.
+         * deferred until the current transaction releases Menu/Preset
+         * ownership.
          */
         return 1u;
     }
@@ -6197,6 +6355,21 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
          */
         return 1u;
     }
+    /*
+     * LSR-01: a VOICE press that reaches entry/switch is a domain boundary.
+     *
+     * What: install the destination voice/type/mode context, then advance the
+     * selection generation and checkpoint dirty HCNAMES rows before the next
+     * voice replaces the Instrument coordinate. Why: this ButtonHandler path
+     * bypasses the encoder type-switch flush, and the completion callback
+     * dispatches from live Menu state. Inputs: selected voice, current page,
+     * existing dirty Scene mask, and generation. Outputs: an accepted flush
+     * consumes the press while its completion re-enters this exact Instrument
+     * context; a clean/refused flush falls through to the normal entry read.
+     * Affiliates: menu_endResidentNameScratchSession(),
+     * menu_residentNameScratchFlushComplete(), and menu_setActiveVoice().
+     */
+    menu_selectionGeneration++;
     /* A different VOICE starts a different one-voice preview contract. Finish
      * the prior voice while its typed cache/name context is still valid. */
     menu_invalidateInstrumentLoadTemp();
@@ -6227,6 +6400,11 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
     menu_instrumentLoadMorphMode = 0u;
     menu_invalidateInstrumentLoadTemp();
     menu_instrumentLoadClampIndex();
+    menu_setActiveVoice(voiceNr);
+    menu_refreshLoadSceneLeds();
+    if (menu_residentNameDirtySceneMask != 0u &&
+        menu_endResidentNameScratchSession())
+        return 1u;
     /*
      * The first Kit/Instrument-family entry obtains all seven resident names
      * from HCNAMES. Later voice entries in the same Scene select their own
@@ -6234,8 +6412,6 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
      * active; they never reopen or rewrite the root resident-name file.
      */
     menu_requestInstrumentEntryNames();
-    menu_setActiveVoice(voiceNr);
-    menu_refreshLoadSceneLeds();
     if (!menu_storageBusy)
         menu_repaintAll();
     return 1u;
@@ -6247,11 +6423,14 @@ uint8_t menu_loadInstrumentTransactionBusy(void)
      * Expose the nested Instrument transaction lock to gesture routing.
      *
      * Output is nonzero only when Instrument mode is active and its successful
-     * filesystem request or bounded post-apply still owns menu_storageBusy.
-     * ButtonHandler uses this before preview and mode mutation, which cannot be
-     * protected by the encoder-only guard in menu_parseEncoder().
+     * filesystem request, Preset payload, or bounded post-apply still owns a
+     * transaction. ButtonHandler uses this before preview and mode mutation,
+     * which cannot be protected by the encoder-only guard in
+     * menu_parseEncoder(). The Preset-status check covers LSR-04 free-scroll
+     * loads whose payload is active before Menu raises menu_storageBusy.
      */
-    return (uint8_t)(menu_instrumentLoadActive && menu_storageBusy);
+    return (uint8_t)(menu_instrumentLoadActive &&
+                     (menu_storageBusy || preset_getStatus() != PRESET_IDLE));
 }
 
 /*
@@ -6490,6 +6669,21 @@ static void menu_loadSaveEnterInstrumentLoad(uint8_t voice, uint8_t option)
     instrument_type_t type;
     uint8_t morph;
 
+    /* Pot-1 must not mutate nested ownership while another facade/Preset
+     * transaction is still completing; the next detent can retry the target. */
+    if (menu_storageBusy || preset_getStatus() != PRESET_IDLE)
+        return;
+    /*
+     * LSR-01: Pot-1 entry into nested Instrument Load is a cache-domain
+     * boundary. Install the destination context before flushing so the
+     * completion callback re-enters this Instrument row, not the old Kit row.
+     * Inputs: selected voice/type, dirty mask, and generation. Outputs: an
+     * accepted flush consumes this logical position; a clean/refused flush
+     * falls through to the normal entry names request. Affiliate:
+     * menu_loadInstrumentVoicePressed(), which handles the equivalent button
+     * path.
+     */
+    menu_selectionGeneration++;
     /* Re-entering via Pot-1 may replace another nested Instrument context.
      * End that one first so no snapshot/name row crosses voice/type/mode. */
     menu_invalidateInstrumentLoadTemp();
@@ -6511,17 +6705,33 @@ static void menu_loadSaveEnterInstrumentLoad(uint8_t voice, uint8_t option)
     }
     menu_invalidateInstrumentLoadTemp();
     menu_instrumentLoadClampIndex();
+    menu_setActiveVoice(voice);
+    menu_loadSaveSetInstrumentVoiceLed(voice);
+    menu_refreshLoadSceneLeds();
+    if (menu_residentNameDirtySceneMask != 0u &&
+        menu_endResidentNameScratchSession())
+        return;
     /* Pot-1 follows the same session entry as a VOICE button: read all seven
      * HCNAMES rows only for a new Scene/session, then activate the typed index.
      * Re-entry in the same Scene selects the retained voice row directly. */
     menu_requestInstrumentEntryNames();
-    menu_setActiveVoice(voice);
-    menu_loadSaveSetInstrumentVoiceLed(voice);
-    menu_refreshLoadSceneLeds();
 }
 
 static void menu_loadSaveEnterInstrumentSave(uint8_t voice, uint8_t morph)
 {
+    /* Save entry has the same transaction boundary as Load entry. */
+    if (menu_storageBusy || preset_getStatus() != PRESET_IDLE)
+        return;
+    /*
+     * LSR-01: Pot-1 entry into nested Instrument Save is the same HCNAMES
+     * checkpoint boundary as Instrument Load. Install the destination
+     * page/mode/voice before flushing so completion dispatches to Save's
+     * Instrument context. Inputs: selected voice, Morph row, dirty mask, and
+     * generation. Output: an accepted flush consumes this logical position;
+     * a clean/refused flush follows the normal entry names request. Affiliate:
+     * menu_loadSaveEnterInstrumentLoad().
+     */
+    menu_selectionGeneration++;
     /* Save has no parameter preview. End any preceding nested normal Load
      * before changing page/mode so the selected pool identity is not lost. */
     menu_invalidateInstrumentLoadTemp();
@@ -6538,15 +6748,18 @@ static void menu_loadSaveEnterInstrumentSave(uint8_t voice, uint8_t morph)
     editModeActive = 1u;
     menu_instrumentLoadRefreshBaseType(0u);
     menu_instrumentLoadMorphMode = morph ? 1u : 0u;
+    menu_setActiveVoice(voice);
+    menu_loadSaveSetInstrumentVoiceLed(voice);
+    menu_refreshLoadSceneLeds();
+    if (menu_residentNameDirtySceneMask != 0u &&
+        menu_endResidentNameScratchSession())
+        return;
     /*
      * Save's Pot-1 entry uses the same seven-row scratch as VOICE-button entry.
      * HCNAMES is read only if no session exists for this Scene; otherwise the
      * selected voice's resident seed is already available without card I/O.
      */
     menu_requestInstrumentEntryNames();
-    menu_setActiveVoice(voice);
-    menu_loadSaveSetInstrumentVoiceLed(voice);
-    menu_refreshLoadSceneLeds();
 }
 
 static void menu_loadSaveApplyLogicalPosition(uint16_t target)
@@ -9181,6 +9394,8 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     if (menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_KIT ||
                         menu_instrumentLoadShownType != menu_instrumentLoadType ||
                         (uint16_t)next != menu_instrumentLoadShownIndex) {
+                        /* Every typed browser row is a new coordinate. */
+                        menu_selectionGeneration++;
                         menu_instrumentLoadSource = MENU_INSTRUMENT_SOURCE_POOL;
                         menu_instrumentLoadShownType = menu_instrumentLoadType;
                         menu_instrumentLoadShownIndex = (uint16_t)next;
@@ -9214,6 +9429,44 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 menu_saveOptions.state = SAVE_STATE_EDIT_PRESET_NR;
         }
         return;
+    }
+
+    /*
+     * LSR-03: an all-space Load name is unresolved, not an empty slot.
+     *
+     * The encoder remains free to move to another coordinate, but OK must not
+     * launch a command against a cache domain that has not answered yet. The
+     * Save page is intentionally excluded: its editor is seeded from the
+     * resident identity, so an empty target remains a valid Save destination.
+     */
+    if (btnClicked && menu_activePage == LOAD_PAGE &&
+        menu_saveOptions.what < SAVE_TYPE_GLO) {
+        const char *display_name = preset_currentName;
+        uint8_t name_blank = 1u;
+        uint8_t i;
+
+        if (menu_saveOptions.what == SAVE_TYPE_KIT ||
+            menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
+            display_name = filesystem_kitSlotName(
+                menu_currentPresetNr[menu_saveOptions.what]);
+        } else if (menu_saveOptions.what == SAVE_TYPE_SCENE) {
+            display_name = filesystem_sceneSlotName(
+                menu_currentPresetNr[SAVE_TYPE_SCENE]);
+        } else if (menu_saveOptions.what == SAVE_TYPE_BANK) {
+            display_name = filesystem_bankSlotName(
+                menu_currentPresetNr[SAVE_TYPE_BANK]);
+        } else if (menu_saveOptions.what == SAVE_TYPE_PATTERN) {
+            display_name = filesystem_patternSlotName(
+                menu_currentPresetNr[SAVE_TYPE_PATTERN]);
+        }
+        for (i = 0u; i < 8u; i++) {
+            if (display_name[i] != ' ') {
+                name_blank = 0u;
+                break;
+            }
+        }
+        if (name_blank)
+            btnClicked = 0u;
     }
 
     if (btnClicked) {
@@ -9317,8 +9570,12 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 default: break;
                 }
             }
-            if (commandAccepted)
+            if (commandAccepted) {
+                /* Freeze this committed coordinate against older callbacks. */
+                menu_selectionGeneration++;
+                menu_selectionGenerationSnapshot = menu_selectionGeneration;
                 menu_beginLoadSaveCommand();
+            }
         }
     }
 
@@ -9329,6 +9586,8 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 uint8_t previous_type = menu_saveOptions.what;
                 menu_saveOptions.what =
                     menu_nextRestoredLoadSaveType(menu_saveOptions.what, inc);
+                if (menu_saveOptions.what != previous_type)
+                    menu_selectionGeneration++;
                 /*
                  * A top-level type change is a name-session boundary only when
                  * it leaves Kit/KitMrp. The new type is installed first so an
@@ -9416,6 +9675,8 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     newPreset = maxPreset;
                 menu_currentPresetNr[menu_saveOptions.what] =
                     (uint16_t)newPreset;
+                if (inc != 0)
+                    menu_selectionGeneration++;
                 break;
             }
             /* Settings and Samples are unnumbered Load/Save choices. Keeping
@@ -9438,6 +9699,7 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
             else if (newPreset > maxPreset) newPreset = maxPreset;
             menu_currentPresetNr[menu_saveOptions.what] = (uint16_t)newPreset;
             if (inc != 0) {
+                menu_selectionGeneration++;
                 if (menu_activePage == LOAD_PAGE) {
                     /* Kit load reads the name in its own phase 2 -
                     ** don't post a separate name load that would
@@ -9560,7 +9822,7 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
     uint8_t oldPage = menu_activePage;
     uint8_t oldIndex = menuIndex;
 
-    if (menu_storageBusy) {
+    if (menu_storageBusy || preset_getStatus() != PRESET_IDLE) {
         uint8_t allow_load_number_scroll = (uint8_t)(
             inc != 0 &&
             button == lastEncoderButton &&
@@ -10255,8 +10517,11 @@ void menu_pollPresetStatus(void)
     switch (preset_getCompletedOp()) {
     case PRESET_OP_KIT_LOAD:
     {
+        uint8_t selection_stale = (uint8_t)(
+            menu_selectionGenerationSnapshot != menu_selectionGeneration);
+
         if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
-            !menu_isLoadSaveSelectionCurrent()) {
+            (!menu_isLoadSaveSelectionCurrent() || selection_stale)) {
             /*
              * The encoder selected a newer Kit number while this immutable
              * load was running. Still apply and record the Kit that really
@@ -10283,7 +10548,7 @@ void menu_pollPresetStatus(void)
         menu_storageBusy = 1u;
         menu_refreshResidentNameScratchKit(
             preset_getKitRequestSceneMask());
-        if (!menu_isLoadSaveSelectionCurrent())
+        if (selection_stale || !menu_isLoadSaveSelectionCurrent())
             memset(preset_currentName, ' ', 8u);
         menu_startSoundApply(1u, 0u, 1u, 0u, 0u, 0u, 1u, 0u,
                              FS_STALE_WARNING_NONE);
@@ -10292,8 +10557,11 @@ void menu_pollPresetStatus(void)
 
     case PRESET_OP_KIT_MORPH_LOAD:
     {
+        uint8_t selection_stale = (uint8_t)(
+            menu_selectionGenerationSnapshot != menu_selectionGeneration);
+
         if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
-            !menu_isLoadSaveSelectionCurrent()) {
+            (!menu_isLoadSaveSelectionCurrent() || selection_stale)) {
             /* KitMrp also finishes the accepted endpoint apply and resident-
              * name read before the latest freely-scrolled number is posted. */
             menu_deferSelectionRequest = 1u;
@@ -10544,8 +10812,18 @@ void menu_pollPresetStatus(void)
 
     case PRESET_OP_INSTRUMENT_LOAD:
     {
+        uint8_t selection_stale = (uint8_t)(
+            menu_selectionGenerationSnapshot != menu_selectionGeneration);
         uint8_t mark_autosave_whole_instrument = (uint8_t)(
             !filesystem_loadedInstrumentWasTemporary());
+
+        if (selection_stale && menu_activePage == LOAD_PAGE &&
+            menu_instrumentLoadActive && !menu_instrumentSaveMode) {
+            /* The loaded payload is committed, but its coordinate is no longer
+             * the displayed one; let the latest desired row win next. */
+            menu_deferSelectionRequest = 1u;
+            menu_deferSelectionLoadKit = 1u;
+        }
 
         /*
          * Track whether the resident slot still matches the `kit` snapshot.
@@ -10610,6 +10888,12 @@ void menu_pollPresetStatus(void)
     }
 
     case PRESET_OP_INSTRUMENT_MORPH_LOAD:
+        if (menu_selectionGenerationSnapshot != menu_selectionGeneration &&
+            menu_activePage == LOAD_PAGE && menu_instrumentLoadActive &&
+            !menu_instrumentSaveMode) {
+            menu_deferSelectionRequest = 1u;
+            menu_deferSelectionLoadKit = 1u;
+        }
         /*
          * Single InstrumentMrp completion.
          *
@@ -10981,7 +11265,7 @@ void menu_switchPage(uint8_t pageNr)
     uint8_t old_page = menu_activePage;
     uint8_t was_voice_page = menu_isVoicePage(menu_activePage);
 
-    if (menu_storageBusy) {
+    if (menu_storageBusy || preset_getStatus() != PRESET_IDLE) {
         /*
          * Retain every genuine physical exit requested during busy work.
          * Inputs: a requested page while Load/Save owns a filesystem/apply
@@ -10996,6 +11280,9 @@ void menu_switchPage(uint8_t pageNr)
          */
         if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
             pageNr != LOAD_PAGE) {
+            /* Invalidate any live browser completion before the queued exit. */
+            if (menu_pendingPageSwitch == MENU_PENDING_PAGE_NONE)
+                menu_selectionGeneration++;
             menu_pendingPageSwitch = (uint8_t)(pageNr + 1u);
         }
         return;
@@ -11049,6 +11336,8 @@ void menu_switchPage(uint8_t pageNr)
 
     if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
         pageNr != LOAD_PAGE) {
+        /* The page transition is a coordinate boundary for all callbacks. */
+        menu_selectionGeneration++;
         /*
          * Leaving the Load/Save surface disposes the shared browser names.
          * This covers top-level Kit/Scene/Bank exits as well as nested
@@ -11195,8 +11484,23 @@ void menu_switchPage(uint8_t pageNr)
 
     menu_resetActiveParameter();
     menu_endlessPotMappingChanged();
-    if (end_resident_name_session)
-        (void)menu_endResidentNameScratchSession();
+    if (end_resident_name_session) {
+        /*
+         * Detach page repaint from HCNAMES persistence.
+         *
+         * What: discard only the browser/session view and retain the dirty
+         * Scene mask. Why: the destination page must become visible on this
+         * pass; filesystem_tick() will schedule the existing atomic HCNAMES
+         * rewrite once the facade is idle. Inputs: the pre-switch dirty mask.
+         * Outputs: no new buffer, no identity mutation, and no page-exit wait.
+         * Affiliates: menu_triggerDeferredHcnamesFlush() and the next idle
+         * filesystem scheduler rung.
+         */
+        menu_residentNameScratchValid = 0u;
+        menu_residentNameScratchScene =
+            MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
+        filesystem_clearNameCache();
+    }
     /*
      * Do not paint this frame while an async entry request is still in flight.
      *

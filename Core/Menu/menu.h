@@ -349,12 +349,15 @@ uint8_t menu_loadSaveBarButtonPressed(uint8_t advance);
 /*
  * Report whether nested Instrument Load owns an immutable in-flight transaction.
  *
- * Inputs: Menu's nested-load and storage/apply busy state. Output: nonzero from
- * successful request posting through staged commit, six-slot Morph rebuild,
- * and target rebind completion. This keeps mode/voice/Scene ownership fixed;
- * it does not prohibit the explicit coalesced number-only encoder path described
- * above. Clients: ButtonHandler mode/voice gesture gates and Menu's Scene/exit
- * selectors. This accessor is intentionally narrower than generic storage busy.
+ * Inputs: Menu's nested-load state, storage/apply busy state, and Preset's
+ * terminal status. Output: nonzero from successful request posting through
+ * an in-flight free-scroll Preset payload, staged commit, six-slot Morph
+ * rebuild, and target rebind completion. This keeps mode/voice/Scene
+ * ownership fixed; it does not prohibit the explicit coalesced number-only
+ * encoder path described above. Clients: ButtonHandler mode/voice gesture
+ * gates and Menu's Scene/exit selectors. This accessor is intentionally
+ * narrower than generic storage busy and covers the LSR-01/LSR-04 race where
+ * Preset owns the facade before Menu raises `menu_storageBusy`.
  */
 uint8_t menu_loadInstrumentTransactionBusy(void);
 void menu_loadInstrumentExit(void);
@@ -449,6 +452,20 @@ void menu_serviceRuntimeWidgets(void);
 uint8_t menu_getActivePage(void);
 /* Use the accepted OK/OW busy window, not mere presence on the Load/Save page. */
 uint8_t menu_isLoadSaveCommandActive(void);
+/*
+ * Deferred Kit/Instrument HCNAMES checkpoint bridge.
+ *
+ * What: exposes Menu's existing dirty-mask state to filesystem_tick() and
+ * lets that scheduler start the existing atomic HCNAMES writer after page
+ * exit. Why: page repaint/exit must not wait for HCNAMES persistence, while
+ * the dirty mask must remain owned by Menu until a successful completion.
+ * Inputs: no new storage; the implementation reads Menu's resident-name
+ * session state. Outputs: a read-only dirty query and one deferred flush
+ * request. Affiliates: filesystem_tick(), menu.c's resident-name helpers, and
+ * menu_residentNameScratchFlushComplete().
+ */
+uint8_t menu_hasResidentNameDirtyMask(void);
+void menu_triggerDeferredHcnamesFlush(void);
 uint8_t menu_areMuteLedsShown(void);
 uint8_t menu_getActiveVoice(void);
 void menu_setActiveVoice(uint8_t voiceNr);

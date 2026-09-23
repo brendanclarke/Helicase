@@ -24,15 +24,98 @@ Each change entry specifies: file, line range, operation (ADD/MODIFY/REMOVE),
 what it does, why it exists, inputs/outputs, common accessors, and affiliate
 code.
 
+## Implementation Notes — 2026-09-22
+
+### Audit decisions before code changes
+
+- The repository already implements the Morph entry snapshot through the
+  existing `.hctmp` path: `menu_prepareInstrumentLoadTemp()` dispatches the
+  Morph-specific temporary save, and the corresponding Morph temporary-load
+  completion restores only Morph endpoint data. No additional Morph snapshot
+  buffer or Normal-identity update is required.
+- The two new deferred-HCNAMES scheduler accessors will live in `menu.h`,
+  alongside the other Menu-owned public accessors. `filesystem.c` already
+  includes `menu.h`; this keeps ownership with Menu while still giving the
+  filesystem scheduler a narrow boundary.
+- Live Kit/Instrument payload requests currently set `menu_storageBusy`, and
+  `menu_switchPage()` uses that flag before clearing the shared cache. After
+  removing the input lock, page exit must also test `preset_getStatus()` so an
+  in-flight Preset operation reaches its terminal boundary before cache/domain
+  teardown.
+- Existing normal Instrument and Morph completion paths already distinguish
+  identity mutation: only normal Instrument completion calls
+  `menu_refreshResidentNameScratchInstrument()`. Morph completion routes only
+  through the Morph apply worker.
+
+Implementation is beginning with the selection-generation and blank/Empty
+changes, followed by the HCNAMES scheduler and page-exit detachment. Each
+source change will retain an adjacent contract comment in both the `.c` and
+`.h` boundary where a public API is introduced.
+
+### Code pass 1 — landed before build
+
+- Added the two-byte selection generation/snapshot state and capture points for
+  top-level, Bank-preview, typed-Instrument, HCNAMES, test-scan, and direct
+  Scene/index requests. Numeric Kit/Instrument scrolling increments the live
+  generation; type changes, page exits, and accepted OK commits invalidate
+  older callbacks.
+- Added stale-coordinate handling to the direct library-index and Bank-preview
+  callbacks, including facade acknowledgement and latest-selection retry. The
+  library index remains a domain-wide result, so a stale coordinate causes the
+  cache to be discarded and re-resolved rather than publishing the old row.
+- Removed the Menu input lock from accepted live Kit/KitMrp/Instrument payload
+  selection requests. `menu_parseEncoder()` still admits only numeric live-load
+  turns while Preset is active, preventing cache/type teardown or OK from
+  racing an in-flight payload.
+- Added the blank/`Empty` split to all four numbered-library name accessors and
+  disabled Load-page OK while the displayed coordinate is all-space.
+- Added `menu_hasResidentNameDirtyMask()` and
+  `menu_triggerDeferredHcnamesFlush()` in `menu.c`/`menu.h`, plus the higher-
+  priority idle scheduler rung in `filesystem.c`. Load/Save page exit now
+  tears down the browser immediately and retains the dirty mask for that rung;
+  pending page exits no longer re-enter a browser when the HCNAMES completion
+  callback returns.
+- Added the Preset-status page-exit guard and skipped a new `kit` restore when
+  an exit is already pending, preserving the required in-flight-load → HCNAMES
+  checkpoint → page-transition ordering. Existing Morph temp snapshot and
+  identity isolation paths remain unchanged.
+
+### Code pass 2 — callback/exit hardening
+
+- Captured the generation again at direct Kit/Scene index follow-on requests,
+  so a completed HCNAMES entry cannot reuse an older request tag after the
+  user scrolls during entry.
+- Prevented pending physical exits from re-entering Kit, Scene, or Instrument
+  browser indexes in direct completion callbacks. Terminal HCNAMES errors now
+  release Menu's busy flag while retaining the dirty mask for retry.
+- Added the same safe release to failed HCNAMES entry reads and removed the
+  redundant Bank-preview stale-result comment; these are source-only hygiene
+  changes with no additional RAM.
+
+### Verification — source/build/image
+
+- `git diff --check`: PASS.
+- `make all`: PASS. The explicit `all` target was used because this Makefile's
+  `-include $(OBJS:.o=.d)` appears before `all`, so an unqualified `make`
+  selects the first dependency target (`build/main.o`) instead of the firmware
+  image. The complete link reports `text=451,532`, `data=416`, `bss=291,756`.
+- `make img`: PASS. `build/LXRV2_lxr02.img` was generated successfully at
+  451,964 bytes.
+- No hardware validation has been run in this workspace. The remaining checks
+  are the Load/Save interaction matrix: rapid live Kit/Instrument scrolling,
+  stale Bank preview discard, blank-versus-`Empty` OK behavior, HCNAMES
+  checkpoint timing across Kit/Instrument/type/page transitions, and re-entry
+  before the deferred HCNAMES write completes.
+
 ---
 
 ## RAM Budget
 
 | Item | Size | Region | Owner |
 |------|------|--------|-------|
-| `menu_selectionGeneration` | 1 byte | normal SRAM1 `.bss` | `menu.c` |
+| `menu_selectionGeneration` + request snapshot | 2 bytes | normal SRAM1 `.bss` | `menu.c` |
 
-Total new retained allocation: **1 byte**. No other new globals, buffers,
+Total new retained allocation: **2 bytes**. No other new globals, buffers,
 or retained state. The deferred HCNAMES scheduler reuses the existing
 `menu_residentNameDirtySceneMask` (2 bytes, already allocated) and the
 existing `filesystem_requestUpdateResidentKitNames()` infrastructure. The
@@ -48,7 +131,8 @@ Remaining Open Items §2.
 |------|---------|
 | `Core/Menu/menu.c` | Generation counter, async load dispatch/dispose, blank/Empty discipline, OK disable, flush trigger at domain transitions, page-exit detachment |
 | `Core/Hardware/SD/filesystem.c` | Deferred HCNAMES scheduler rung, slot-name blank/Empty split |
-| `Core/Hardware/SD/filesystem.h` | New public API for deferred HCNAMES dirty-mask check |
+| `Core/Menu/menu.h` | Public bridge for deferred HCNAMES dirty-mask scheduling |
+| `Core/Hardware/SD/filesystem.h` | Blank/`Empty` slot-name contract for numbered caches |
 
 ---
 
@@ -67,16 +151,17 @@ scroll movement and every browser type switch within the Load/Save page.
 Every async filesystem request (index load, Bank preview scan, name lookup,
 Kit/Instrument payload load) captures this value at request time. The
 completion callback compares its captured generation against the current
-value; a mismatch silently discards the result.
+value; a mismatch silently discards the result. The live counter and one
+shared request snapshot are two retained bytes; no per-request buffer exists.
 
 **Why:** Without a generation tag, a stale callback (e.g., a Bank preview
 returning for slot 003 after the user scrolled to slot 007) overwrites the
 current display. The facade's single-owner model prevents concurrent
 filesystem requests, but the completion callback for the *previous* request
 can still arrive after the user has scrolled past. The generation counter
-makes stale detection O(1) with no additional per-request state beyond one
-byte captured into the callback's closure (via a file-scope snapshot
-variable).
+makes stale detection O(1) with no additional per-request state beyond the
+file-scope snapshot variable. The snapshot is valid because the filesystem
+facade admits only one asynchronous owner at a time.
 
 **Inputs:** None (initialised to zero).
 **Outputs:** Incremented by scroll and type-switch sites; captured and
@@ -175,28 +260,34 @@ result belongs to the old domain.
 
 ---
 
-### 1.5 MODIFY: Capture generation snapshot at request time — `menu.c:4252`
+### 1.5 MODIFY: Capture generation at each accepted request site — `menu.c`
 
-**Operation:** MODIFY `menu_requestCurrentLoadSaveSelection()` (line 4247).
-Add one line at the top of the function body, after the existing
-`menu_deferSelectionRequest = 0;` assignment (line 4252):
+**Operation:** MODIFY the accepted-request branches rather than capturing at
+the top of `menu_requestCurrentLoadSaveSelection()`. A top-level helper can
+refuse a request, publish a synchronous name, or enter a direct HCNAMES/index
+chain, so the snapshot is assigned only after the actual Preset/direct request
+is accepted. The direct Kit/Scene follow-on index requests also capture their
+generation immediately before posting.
 
 ```c
     menu_selectionGenerationSnapshot = menu_selectionGeneration;
 ```
 
-**What:** Captures the current generation at the moment a selection request
-is dispatched. Every callback spawned from this function invocation compares
-against this snapshot.
+**What:** Captures the current generation at the moment an asynchronous
+selection request is accepted. Refused/deferred paths do not overwrite the
+snapshot belonging to the in-flight request.
 
-**Why:** The snapshot must be taken at dispatch time, not at callback time,
-because the user may scroll further between dispatch and completion.
+**Why:** The snapshot must be taken at acceptance time, not at callback time,
+because the user may scroll further between dispatch and completion. Capturing
+only after acceptance also prevents a refused retry from changing the tag for
+another request already in flight.
 
 **Inputs:** `menu_selectionGeneration` (live counter).
 **Outputs:** `menu_selectionGenerationSnapshot` (captured value for callbacks).
-**Affiliates:** Every async callback spawned from this function:
-`menu_libraryIndexLoadComplete()`, `menu_bankLoadPreviewComplete()`,
-Kit/Instrument payload completion callbacks in `menu_pollPresetStatus()`.
+**Affiliates:** `menu_requestTestScan()`, the accepted Kit/KitMrp/name-load
+branches, `menu_requestLibraryIndexLoad()`, the direct Kit/Scene follow-on
+index callbacks, `menu_requestBankLoadPreview()`, and the typed Instrument
+payload/index helpers.
 
 ---
 
@@ -931,7 +1022,7 @@ change needed.
 | 1.2 | menu.c | 120 | ADD | `menu_selectionGenerationSnapshot` variable |
 | 1.3 | menu.c | 9440 | MOD | Increment generation on encoder scroll |
 | 1.4 | menu.c | ~9380 | MOD | Increment generation on type switch |
-| 1.5 | menu.c | 4252 | MOD | Capture snapshot at selection request time |
+| 1.5 | menu.c | request sites | MOD | Capture snapshot only after async request acceptance |
 | 1.6 | menu.c | 5433 | MOD | Capture snapshot at Bank preview request time |
 | 1.7 | menu.c | ~5157 | MOD | Check generation in Bank preview completion |
 | 1.8 | menu.c | ~4457 | MOD | Check generation in library index completion |
@@ -944,18 +1035,20 @@ change needed.
 | 2.1 | menu.c | 9338 | VERIFY | Flush dirty mask at all type-switch boundaries |
 | 2.2 | menu.c | 4569 | VERIFY | Morph identity isolation |
 | 2.3 | menu.c | ~10284 | MOD | Exit ordering: in-flight → HCNAMES → exit |
-| 3.1 | filesystem.h | ~943 | ADD | `menu_hasResidentNameDirtyMask()` declaration |
+| 3.1 | menu.h | ~449 | ADD | `menu_hasResidentNameDirtyMask()` declaration |
 | 3.2 | menu.c | ~4694 | ADD | `menu_hasResidentNameDirtyMask()` implementation |
 | 3.3 | menu.c | ~4694 | ADD | `menu_triggerDeferredHcnamesFlush()` implementation |
-| 3.4 | filesystem.h | ~943 | ADD | `menu_triggerDeferredHcnamesFlush()` declaration |
+| 3.4 | menu.h | ~449 | ADD | `menu_triggerDeferredHcnamesFlush()` declaration |
 | 3.5 | filesystem.c | 25089 | ADD | HCNAMES scheduler rung in `filesystem_tick()` |
 | 3.6 | menu.c | 11199 | MOD | Page exit does not block on HCNAMES write |
 | 3.7 | menu.c | 4597 | VERIFY | Deferred flush completion handles non-LS page |
 
 **Total new code:** ~80 lines of implementation, ~50 lines of contract
 comments.
-**Total new RAM:** 1 byte (`menu_selectionGeneration`).
-**Files touched:** 3 (`menu.c`, `filesystem.c`, `filesystem.h`).
+**Total new RAM:** 2 bytes (`menu_selectionGeneration` and its request
+snapshot).
+**Files touched:** 4 source files (`menu.c`, `menu.h`, `filesystem.c`,
+`filesystem.h`), plus this implementation log and the generated firmware image.
 
 ---
 
@@ -963,11 +1056,9 @@ comments.
 
 Per the plan's Remaining Open Items §2:
 
-- **KitMrp / InstrumentMrp entry snapshot for Morph endpoint cells.** The
-  existing `.hctmp` mechanism handles Normal Kit/Instrument restore. Morph
-  endpoint restore requires either reusing `.hctmp` with a Morph projection
-  or a separate RAM snapshot. This is deferred because the existing
-  Kit/Instrument Normal entry snapshot already works, and the Morph
-  extension is a separable feature.
+- **Additional Morph snapshot projection.** The current `.hctmp` path already
+  provides the required Morph entry snapshot and restores only Morph endpoint
+  data, so no new RAM or identity path was needed here. Any future change to
+  broaden that projection remains a separate feature.
 
 - **Test-item fold into Phase 4.** Documentation task, not a code change.

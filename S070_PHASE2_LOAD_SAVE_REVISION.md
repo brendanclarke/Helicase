@@ -886,3 +886,246 @@ correctly invalidates a child with a corrupt PAT4 Pattern file while loading
 all sibling children successfully. The failed child is excluded from the
 presence mask, its HCNAMES rows are not published with `@` provenance, and no
 AutoSave data is captured for it. No code change is needed.
+
+---
+
+## Appendix B: Implementation Assessment (S070)
+
+### Implementation Status
+
+All code changes from `S070_PHASE2_IMPLEMENTATION.md` are in. Build
+succeeded at 451,964 bytes (+1,392 from baseline). Three source files
+changed: `menu.c` (+300 lines net), `filesystem.c` (+64 lines net),
+`filesystem.h` (+19 lines net). Declarations placed in `menu.h` (+14 lines)
+rather than `filesystem.h`, which is architecturally consistent — Menu owns
+the dirty mask and the deferred flush trigger; filesystem.c already includes
+`menu.h`.
+
+### Verified Items
+
+| Schedule § | Item | Status |
+|------------|------|--------|
+| 1.1–1.2 | Generation counter + snapshot | Done. `menu.c:131–132`. |
+| 1.3 | Increment on encoder scroll | Done. Preset-nr row (`menu.c:9625`) and unnumbered row (`menu.c:9607`). |
+| 1.4 | Increment on type switch | Done. Top-level type change (`menu.c:9515`) and Instrument type-step (3 sites in `menu_instrumentLoadStepType`). |
+| 1.5 | Capture snapshot at request time | Done. Multiple sites: Kit/KitMrp index, Scene index, Bank index, Instrument index, HCNAMES entry, Kit entry names. |
+| 1.6 | Capture snapshot at Bank preview | Done. `menu.c:5545`. |
+| 1.7 | Gen check in Bank preview completion | Done. `menu.c:5508`. |
+| 1.8 | Gen check in library index completion | Done. `menu.c:5239`. Stale index is still usable as a cache domain; the stale path clears the cache and defers to resolve the newest row. |
+| 1.9 | Gen check in Kit/KitMrp Load completion | Done. `menu.c:10446` (Kit), `menu.c:10486` (KitMrp). Stale loads defer to the latest desired slot. |
+| 1.10 | Remove input gate on Kit/KitMrp Load scroll | Done. `menu_storageBusy = 1u` removed; snapshot captured instead. |
+| 1.11 | Remove input gate on Instrument Load scroll | Done. Same pattern. Busy gate added to the runtime-apply phase (`menu_startInstrumentApply`, `menu.c:709`) where it is bounded. |
+| 1.12 | Freeze name + increment gen on OK commit | Done. `menu.c:9501–9502`. Snapshot also set so the committed command's own callbacks are not falsely stale. |
+| 1.13 | Blank/Empty split in 4 slot-name accessors | Done. `filesystem.c:30659–30783`. Domain-mismatch check added (returns blank when `fs_list_cache_kind` does not match the requested type). |
+| 1.14 | Disable OK while name is unresolved | Done. `menu.c:9357–9393`. Checks the canonical slot-name accessor, not just `preset_currentName`, so the domain check is authoritative. |
+| 2.1 | Flush at type-switch boundary | Done. Instrument type-step flushes dirty mask before re-entering entry names (3 sites in `menu_instrumentLoadStepType`). |
+| 2.2 | Morph identity isolation | Verified by existing code structure; no change needed. |
+| 2.3 | Exit ordering: in-flight → HCNAMES → exit | Done. `menu_pendingPageSwitch` early-exit checks added to HCNAMES entry callback, Instrument index callback, Scene name callback, and `menu_finishInstrumentApplySession`. |
+| 3.1–3.2 | `menu_hasResidentNameDirtyMask()` | Done. `menu.c:4725`, declared in `menu.h`. |
+| 3.3–3.4 | `menu_triggerDeferredHcnamesFlush()` | Done. `menu.c:4737`, declared in `menu.h`. |
+| 3.5 | HCNAMES scheduler rung in `filesystem_tick()` | Done. `filesystem.c:25103`. Between PatternTrace flush and budget refill. |
+| 3.6 | Page exit does not block on HCNAMES write | Done. `menu.c:11413–11428`. Scratch state cleared, dirty mask retained. |
+| 3.7 | Deferred flush completion handles non-LS page | Done. Existing `menu_residentNameScratchFlushComplete` already correct; `menu_pendingPageSwitch` check added to prevent browser re-entry during deferred context. |
+
+### Beyond-Schedule Changes (Implementation-Driven)
+
+These changes were not in the schedule but are necessary corollaries of the
+scheduled changes:
+
+1. **`preset_getStatus() != PRESET_IDLE` guards** added to
+   `menu_parseEncoder`, `menu_switchPage`, and
+   `menu_instrumentLoadRequestSelection`. With `menu_storageBusy` no longer
+   set during Kit/Instrument filesystem reads, the Preset status is the new
+   busy signal for the facade.
+
+2. **`menu_storageBusy = 1u` in `menu_startInstrumentApply`** (`menu.c:709`).
+   The filesystem read phase is now free-scroll; the bounded runtime apply
+   phase gates input because it mutates DSP state.
+
+3. **`menu_pendingPageSwitch` early-exit checks** in four callbacks
+   (`menu_residentNameScratchLoaded`, `menu_instrumentIndexLoadComplete`,
+   `menu_sceneResidentNameLoaded`, `menu_finishInstrumentApplySession`).
+   These prevent callbacks from re-entering browser state after the user has
+   queued a physical exit.
+
+4. **`filesystem_ack()` hoisted before status checks** in
+   `menu_libraryIndexLoadComplete`, `menu_bankLoadPreviewComplete`,
+   `menu_sceneResidentNameLoaded`, `menu_residentNameScratchLoaded`. These
+   callbacks own direct filesystem requests (not Preset-mediated), so they
+   must ack the facade before the generation/staleness check decides whether
+   to proceed. This prevents facade leaks on stale discards.
+
+5. **Slot-name domain check** (`fs_list_cache_kind != expected`) added to
+   each of the four `filesystem_*SlotName()` accessors. Strengthens LSR-03:
+   even if the slot "exists" in a stale cache domain, the accessor returns
+   blank rather than reading data from the wrong domain's cache rows.
+
+6. **`menu_residentNameScratchFlushComplete` error path** now clears
+   `menu_storageBusy` on failure. Prevents a failed deferred write from
+   permanently stranding the facade.
+
+### RAM Impact
+
+| Item | Size | Region |
+|------|------|--------|
+| `menu_selectionGeneration` | 1 byte | SRAM1 `.bss` |
+| `menu_selectionGenerationSnapshot` | 1 byte | SRAM1 `.bss` |
+
+Total new retained allocation: **2 bytes**. (The implementation schedule
+estimated 1 byte; the snapshot variable was listed separately but not counted
+in the RAM total.)
+
+---
+
+## Appendix C: Test Order of Operations
+
+### Prerequisites
+
+- Hardware target with the current build image (451,964 bytes).
+- SD card with at least: 4+ Kit slots (some occupied, some empty), 4+ Scene
+  slots, 4+ Bank slots (including a multi-child Bank), 4+ Pattern slots, and
+  at least 2 Instrument types with multiple entries each.
+- A Bank with known children for preview verification (e.g., `001 Full`).
+- Boot trace and autosave trace enabled for post-test analysis.
+
+### Phase 1: LSR-03 — Blank/Empty Discipline
+
+**Goal:** Confirm blank vs. Empty display states are visually distinct and
+that OK is correctly disabled during the blank window.
+
+1. **Cold start → Load:[Kit].** On entry, observe the LCD name for the
+   current slot. It should appear blank (spaces) momentarily while the
+   `.hcindex` loads, then resolve to the cached name or `Empty`.
+
+2. **Scroll to an empty Kit slot** (one past the last occupied). Confirm
+   the LCD reads `Empty` (not blank). This is the "proved absent" state.
+
+3. **Scroll to an occupied Kit slot.** Confirm the name resolves from the
+   cache. On a fresh entry where the Kit index is already loaded, this
+   should be instant.
+
+4. **Type switch Kit → Scene.** During the domain transition, the LCD should
+   flash blank while the Scene index loads, then resolve. Confirm blank
+   appears, not `Empty`.
+
+5. **Fast OK press during blank window.** Switch type (e.g., Scene → Bank)
+   and immediately press OK before the index resolves. The OK press should
+   be non-responsive. No command should start, no error overlay. After the
+   index resolves, OK should work normally.
+
+6. **Save page exclusion.** Switch to Save:[Kit]. The name editor should
+   seed from the resident identity regardless of cache state. Confirm the
+   editor is functional even if the Save page is entered before the cache
+   resolves.
+
+### Phase 2: LSR-04 — Async Selection Pipeline
+
+**Goal:** Confirm that scrolling is responsive during payload loads and
+that stale callbacks are discarded.
+
+7. **Kit Load scroll speed.** Enter Load:[Kit]. Scroll rapidly through
+   several occupied Kit slots. The encoder should respond on every detent
+   without visible pause. The LCD should update the slot number and name
+   immediately. The Kit payload should load in the background.
+
+8. **Kit Load supersession.** Scroll from occupied slot A to occupied slot B
+   while A's payload is still loading. Confirm: B's payload loads and
+   applies. A's stale completion is silently discarded (no audible glitch
+   from A's Kit replacing B's).
+
+9. **Kit Load top-slot restore.** From the entry slot, scroll down to an
+   occupied Kit, wait for it to load, then scroll back to the top slot
+   (above 000). Confirm the original Kit settings are restored.
+
+10. **Instrument Load scroll speed.** Enter Load:[Kit] → nested Instrument
+    browser. Scroll rapidly through several occupied Instrument files.
+    The encoder should respond on every detent. Payload loads in background.
+
+11. **Instrument type step with dirty mask.** Load a Kit (dirty HCNAMES).
+    Switch Instrument type (e.g., Drums → FM). Confirm: the dirty mask
+    flushes before the new type's index loads. The type switch should not
+    hang. HCNAMES write should complete via the deferred path or inline
+    flush.
+
+12. **Bank Load preview.** Enter Load:[Bank]. Scroll through occupied Bank
+    slots. The SEQ LED child preview should update after each preview scan
+    completes. Scrolling past an occupied slot before its preview completes
+    should not show stale LEDs — the old preview is discarded.
+
+13. **Scene Load scroll.** Enter Load:[Scene]. Scroll through slots. Confirm
+    name-only display (no payload load on scroll). OK triggers the actual
+    Scene Load.
+
+### Phase 3: LSR-01 — HCNAMES Checkpoint at Domain Transitions
+
+**Goal:** Confirm that dirty Kit/Instrument HCNAMES rows are persisted at
+domain boundaries, not only at page exit.
+
+14. **Kit Load → type switch → power cycle.** Load a Kit on Load:[Kit]
+    (dirties HCNAMES). Switch type to Scene (domain transition). Power
+    cycle. On reboot, confirm the loaded Kit's name appears correctly in
+    HCNAMES. The name should not revert to the pre-load identity.
+
+15. **Instrument Load → type step → power cycle.** Load an Instrument on
+    Load:[Kit]→Instrument. Step Instrument type. Power cycle. Confirm the
+    loaded Instrument's name persists.
+
+16. **Clean browsing — no spurious writes.** Browse Kit slots without
+    loading any (scroll through empty slots or slots where the resident Kit
+    is already loaded). Switch type. Confirm no HCNAMES write occurs (trace
+    should show no HCNAMES scheduler activity).
+
+### Phase 4: LSR-02 — Detached Page Exit
+
+**Goal:** Confirm that the page switch is immediate and HCNAMES persistence
+runs in the background.
+
+17. **Page exit latency.** Load a Kit on Load:[Kit] (dirties HCNAMES). Press
+    a mode button to exit. The destination page should appear within one
+    normal UI refresh cycle (~20ms). The old Load page should not remain
+    visible while HCNAMES writes.
+
+18. **Deferred write completion.** After exiting Load/Save with a dirty
+    mask, observe the filesystem trace or HCNAMES trace to confirm the
+    deferred write runs via the scheduler rung (between PatternTrace and
+    budget refill). The write should complete within a few idle ticks.
+
+19. **Re-entry before deferred write.** Load a Kit, exit to a voice page,
+    then immediately re-enter Load:[Kit] before the deferred write
+    completes. Confirm: the re-entered browser reads HCNAMES from the RAM
+    mirror (correct names), the deferred write completes alongside or after
+    re-entry, and no double-write or mask corruption occurs.
+
+20. **AutoSave interaction.** Load a Kit, exit to a voice page. Observe
+    whether the deferred HCNAMES write wins the facade before the AutoSave
+    250ms expedite fires. The HCNAMES rung has higher priority, so it should
+    complete first. AutoSave should run after.
+
+### Phase 5: Integration and Edge Cases
+
+21. **OK commit with in-flight load.** Start a Kit Load by scrolling to an
+    occupied slot. While the load is in flight, scroll to another slot and
+    immediately press OK. Confirm: the OK commit uses the current (second)
+    slot's identity, not the first slot's stale callback.
+
+22. **Exit with in-flight load.** Start a Kit Load by scrolling to an
+    occupied slot. While the load is in flight, press a mode button to exit.
+    Confirm: the in-flight load completes (facade cannot be abandoned), then
+    HCNAMES checkpoint fires if dirty, then the page switch occurs. The
+    total exit delay should be bounded by one facade operation (~50–200ms).
+
+23. **Power loss recovery.** Load a Kit (dirties HCNAMES). Exit to a voice
+    page. Pull power before the deferred HCNAMES write completes. On
+    reboot, confirm the Kit name recovers via the `R` flag / narrow library
+    load path (Case 2 in the boot reader). The name may show the library
+    name rather than the user's edit, but the source/provenance should be
+    correct.
+
+24. **Bank identity invariant (R2).** Load a Bank. Confirm `settings.cfg`
+    HCNAMES row 0 and HCPR all agree on the active Bank identity. This
+    should be unchanged by the LSR refactoring.
+
+25. **Full session cycle.** Perform a complete session: boot → Load Kit →
+    Load Instrument → type step → Load Bank → Save Kit → exit → re-enter →
+    Load Scene → exit → power cycle. Confirm all identities persist
+    correctly and no trace errors appear.
