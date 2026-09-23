@@ -336,24 +336,53 @@ ENTRY_PHASES = {
 }
 
 # AutoSave payload geometry (payload-relative), from Autosave.h/AUTOSAVE.md.
+# Session 060 Phase C added 2-byte source fields after each 8-byte name,
+# shifting parameters from offset 8 to 10 (Scene/Kit) and 11 to 13
+# (Instrument).
 BANK_BYTES = 128
 SCENE_BYTES = 1920
-SCENE_PARAMS_OFF = 8
+SCENE_NAME_BYTES = 8
+SCENE_SOURCE_OFF = 8
+SCENE_SOURCE_BYTES = 2
+SCENE_PARAMS_OFF = 10
 SCENE_PARAM_COUNT = 40
 EFFECT_OFF = 128
 EFFECT_BYTES = 512
 KIT_OFF = 640
-KIT_PARAMS_OFF = 8
+KIT_NAME_BYTES = 8
+KIT_SOURCE_OFF = 8
+KIT_SOURCE_BYTES = 2
+KIT_PARAMS_OFF = 10
 KIT_PARAM_COUNT = 2
 KIT_INST_OFF = 128
 INST_BYTES = 192
 INST_TYPE_BYTES = 3
 INST_NAME_OFF = 3
 INST_NAME_BYTES = 8
-INST_NORMAL_OFF = 11
+INST_SOURCE_OFF = 11
+INST_SOURCE_BYTES = 2
+INST_NORMAL_OFF = 13
 INST_NORMAL_BYTES = 72
-INST_MORPH_OFF = 83
+INST_MORPH_OFF = 85
 INST_MORPH_BYTES = 72
+
+SCENE_PARAM_NAMES = {
+    0: "mrp",
+    1: "1vm", 2: "2vm", 3: "3vm", 4: "4vm", 5: "5vm", 6: "6vm",
+    7: "srt",
+    8: "1ou", 9: "2ou", 10: "3ou", 11: "4ou", 12: "5ou", 13: "6ou",
+    14: "1fx", 15: "2fx", 16: "3fx", 17: "4fx", 18: "5fx", 19: "6fx",
+    20: "fdr0", 21: "fdr1", 22: "fdr2", 23: "fdr3", 24: "fdr4", 25: "fdr5",
+    26: "mch0", 27: "mch1", 28: "mch2", 29: "mch3", 30: "mch4", 31: "mch5",
+    32: "mch6",
+    33: "mnt0", 34: "mnt1", 35: "mnt2", 36: "mnt3", 37: "mnt4", 38: "mnt5",
+    39: "mnt6",
+}
+
+KIT_PARAM_NAMES = {
+    0: "7dc",
+    1: "7dc_mrp",
+}
 
 
 def u16(data: bytes) -> int:
@@ -398,31 +427,42 @@ def payload_region_text(offset: int) -> str:
     if scene >= 16:
         return f"payload byte {offset} (outside the 16 Scene regions)"
     name = f"Scene{scene}"
-    if rel < 8:
+    if rel < SCENE_NAME_BYTES:
         return f"{name} name byte{rel}"
+    if rel < SCENE_SOURCE_OFF + SCENE_SOURCE_BYTES:
+        return f"{name} source byte{rel - SCENE_SOURCE_OFF}"
     if rel < SCENE_PARAMS_OFF + SCENE_PARAM_COUNT:
-        return f"{name} scene-parameter[{rel - SCENE_PARAMS_OFF}]"
+        idx = rel - SCENE_PARAMS_OFF
+        pname = SCENE_PARAM_NAMES.get(idx, f"[{idx}]")
+        return f"{name} scene-param {pname}"
     if rel < EFFECT_OFF:
         return f"{name} scene reserved byte{rel}"
     if rel < EFFECT_OFF + EFFECT_BYTES:
         return f"{name} effect byte{rel - EFFECT_OFF}"
     if rel < KIT_OFF:
         return f"{name} scene padding byte{rel - EFFECT_OFF}"
-    if rel < KIT_OFF + 8:
-        return f"{name} kit name byte{rel - KIT_OFF}"
-    if rel < KIT_OFF + KIT_PARAMS_OFF + KIT_PARAM_COUNT:
-        return f"{name} kit-parameter[{rel - KIT_OFF - KIT_PARAMS_OFF}]"
-    if rel < KIT_OFF + KIT_INST_OFF:
-        return f"{name} kit reserved byte{rel - KIT_OFF}"
-    slot = (rel - KIT_OFF - KIT_INST_OFF) // INST_BYTES
-    ir = (rel - KIT_OFF - KIT_INST_OFF) % INST_BYTES
+    kit_rel = rel - KIT_OFF
+    if kit_rel < KIT_NAME_BYTES:
+        return f"{name} kit name byte{kit_rel}"
+    if kit_rel < KIT_SOURCE_OFF + KIT_SOURCE_BYTES:
+        return f"{name} kit source byte{kit_rel - KIT_SOURCE_OFF}"
+    if kit_rel < KIT_PARAMS_OFF + KIT_PARAM_COUNT:
+        idx = kit_rel - KIT_PARAMS_OFF
+        pname = KIT_PARAM_NAMES.get(idx, f"[{idx}]")
+        return f"{name} kit-param {pname}"
+    if kit_rel < KIT_INST_OFF:
+        return f"{name} kit reserved byte{kit_rel}"
+    slot = (kit_rel - KIT_INST_OFF) // INST_BYTES
+    ir = (kit_rel - KIT_INST_OFF) % INST_BYTES
     if slot >= 6:
-        return f"{name} kit reserved byte{rel - KIT_OFF}"
+        return f"{name} kit reserved byte{kit_rel}"
     base = f"{name} instrument[{slot}]"
     if ir < INST_TYPE_BYTES:
         return f"{base} type-token byte{ir}"
     if ir < INST_NAME_OFF + INST_NAME_BYTES:
         return f"{base} name byte{ir - INST_NAME_OFF}"
+    if ir < INST_SOURCE_OFF + INST_SOURCE_BYTES:
+        return f"{base} source byte{ir - INST_SOURCE_OFF}"
     if ir < INST_NORMAL_OFF + INST_NORMAL_BYTES:
         return f"{base} normal[{ir - INST_NORMAL_OFF}]"
     if ir < INST_MORPH_OFF + INST_MORPH_BYTES:
