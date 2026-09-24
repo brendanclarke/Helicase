@@ -143,6 +143,13 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   foreground 8 Hz playback service repaints live Scene values on PERF and
   VOICE/mix pages. Menu state increases by one Scene-mask byte and one
   16-bit refresh timestamp; hardware validation remains pending.
+- Session 070 Phase 4 automation-missed source implementation is now present in
+  `Core/Sequencer/sequencer.c` and documented beside its public declaration in
+  `Core/Sequencer/sequencer.h`: grid resets restore dirty runtime overlays from
+  `morph_interpolation[]` before clearing tracking, and transport start/stop
+  closes the `seq_running` preemption window. The implementation record is
+  `S070_PHASE4_AUTOMATION_MISSED_IMPLEMENTATION.md`; build and hardware
+  validation remain pending because this environment lacks the ARM toolchain.
 
 - Read `knowledge_files/log_archive/040_SESSION_HANDOFF_LOG.md` before
   continuing Scene/Bank or filesystem work. It preserves the verified

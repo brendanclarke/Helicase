@@ -153,6 +153,19 @@ void seq_drainPendingAutomation(void);
  * Client: MidiVoiceControl.c's common trigger path.
  */
 void seq_restoreAutomatedParameters(uint8_t trigger_track);
+/*
+ * Start or stop the sequencer transport.
+ *
+ * Inputs: nonzero starts, zero stops. Output: both paths reset the fixed-grid
+ * cursor state through seq_setStepIndexToStart(), which restores any dirty
+ * voice automation to its Scene morph-interpolation base before clearing the
+ * dirty bitmap. The start path publishes seq_running only after that reset so
+ * the TIM3 scheduler cannot process an initial tick against partially reset
+ * state; the stop path publishes the stopped state before teardown.
+ *
+ * Clients: front-panel transport, MIDI realtime/clockSync, and Menu audio
+ * suspend. This call does not alter PatternData or the persisted Scene.
+ */
 void seq_setRunning(uint8_t isRunning);
 uint8_t seq_isRunning(void);
 void seq_armActivePatternReload(void);

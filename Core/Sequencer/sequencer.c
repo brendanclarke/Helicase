@@ -191,6 +191,59 @@ static void seq_clearAutomationDirty(void)
         seq_automation_dirty[slot] = 0u;
 }
 
+/*
+ * Restore every dirty automation overlay to its morph-interpolated base value.
+ *
+ * What: walks all instrument slots and, for each set bit in
+ * seq_automation_dirty[slot], writes the matching morph_interpolation[] value
+ * back into the voice runtime through instrumentManager_writeRuntime(). This
+ * is the all-slot counterpart of seq_restoreAutomatedParameters().
+ *
+ * Why: seq_clearAutomationDirty() only drops the tracking bits. Clearing those
+ * bits first leaves any last automation value in the runtime image, so the
+ * next step-0 trigger has no evidence that it must restore that value. The
+ * restore-before-clear sequence returns every transient overlay to the current
+ * Scene morph base before a transport, Pattern, or external reset re-enters
+ * the fixed grid.
+ *
+ * Inputs: implicit seq_automation_dirty[] state and the active Scene's
+ * instrument images. Outputs: all marked descriptor-local runtime values are
+ * restored; the dirty bitmaps remain unchanged for the caller to clear.
+ * Common caller: seq_setStepIndexToStart(), used by transport start/stop,
+ * Pattern-boundary changes, and external reset. Boot continues to call
+ * seq_clearAutomationDirty() directly because no runtime overlays exist yet.
+ * Affiliates: seq_drainPendingAutomation() publishes the dirty bits,
+ * seq_restoreAutomatedParameters() implements the one-trigger variant,
+ * scene_instrumentSlotConst() resolves the active slot image, and
+ * instrumentManager_descriptor()/instrumentManager_writeRuntime() apply the
+ * descriptor-domain restore.
+ */
+static void seq_restoreAllAutomation(void)
+{
+    uint8_t slot;
+
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        uint64_t mask = seq_automation_dirty[slot];
+        const kit_instrument_slot_t *instrument;
+
+        if (!mask)
+            continue;
+        instrument = scene_instrumentSlotConst(seq_activePattern, slot);
+        if (!instrument)
+            continue;
+        while (mask) {
+            uint8_t local = (uint8_t)__builtin_ctzll(mask);
+            const ParamDescriptor *descriptor =
+                instrumentManager_descriptor(instrument->type, local);
+            if (descriptor)
+                (void)instrumentManager_writeRuntime(
+                    slot, descriptor,
+                    instrument->parameter_images.morph_interpolation[local]);
+            mask &= (mask - 1ULL);
+        }
+    }
+}
+
 static void seq_sendMidi(MidiMsg msg);
 static void seq_sendRealtime(const uint8_t status);
 static void seq_sendProgChg(const uint8_t ptn);
@@ -1075,34 +1128,52 @@ uint8_t seq_isRunning() {
 	return seq_running;
 }
 
-//------------------------------------------------------------------------------
+/*
+ * Start or stop the sequencer transport.
+ *
+ * What: the single entry point for transport state transitions. Both paths
+ * reset the fixed-grid scheduler and converge on seq_setStepIndexToStart(),
+ * which restores transient automation before clearing its dirty tracking and
+ * rewinds every track cursor to one position before step zero.
+ *
+ * Why the assignment of seq_running is branch-specific: TIM3 can preempt this
+ * code at any instruction boundary. The stop path publishes seq_running = 0
+ * before its teardown, so the scheduler returns immediately. The start path
+ * leaves seq_running at 0 until scheduler state, cursors, and automation
+ * restore are complete; the first enabled tick therefore cannot process a
+ * premature step zero and then be reset by the foreground path.
+ *
+ * Inputs: isRunning — nonzero starts transport, zero stops it.
+ * Outputs: stop halts transport, sends MIDI_STOP, silences notes/triggers,
+ * and restores automation; start resets scheduler state, sends MIDI_START,
+ * and enables transport only after the common grid reset is complete.
+ * Common callers: front-panel transport, MIDI realtime, clockSync, and the
+ * Menu audio-suspend path. Affiliates: seq_processSchedulerTick() consumes
+ * seq_running; seq_resetStepScheduler() prepares the first tick;
+ * seq_setStepIndexToStart() performs the restore-before-clear operation;
+ * voiceControl_noteOff(), trigger_reset()/trigger_allOff(), and
+ * midiParser_checkMtc() finish stop-side hardware/MTC cleanup.
+ *
+ * The stop-branch seq_clearAutomationDirty() call intentionally lives only in
+ * seq_setStepIndexToStart(). A separate early clear would erase the dirty bits
+ * before the restore and recreate the missed-automation defect.
+ */
 void seq_setRunning(uint8_t isRunning)
 {
-	seq_running = isRunning;
-	//jump to 1st step if sequencer is stopped
-	if(!seq_running)
+	if (!isRunning)
 	{
-		/*
-		 * Transport stop discards transient automation overlays before any later
-		 * preview or restart can reuse the runtime voice objects.
-		 */
-		seq_clearAutomationDirty();
+		seq_running = 0u;
 
-		//reset song position bar counter
 		seq_barCounter = 0;
 		seq_resetStepScheduler();
-		//so the next seq_tick call will trigger the next step immediately
 		seq_deltaT = 0;
 		seq_sendRealtime(MIDI_STOP);
 
-		//--AS send notes off on all channels that have notes playing and reset our bitmap to reflect that
 		voiceControl_noteOff(0xFF);
 
 		trigger_reset(0);
 		trigger_allOff();
 
-
-		// --AS if mtc was doing it's thing, tell it to stop it.
 		midiParser_checkMtc();
 	} else {
 		seq_resetStepScheduler();
@@ -1110,10 +1181,10 @@ void seq_setRunning(uint8_t isRunning)
 		trigger_reset(1);
 	}
 
-	// set start points back to default (happens on start and stop. needs to happen on start
-	// in case the user has entered a rotate value while stopped)
 	seq_setStepIndexToStart();
 
+	if (isRunning)
+		seq_running = 1u;
 }
 //------------------------------------------------------------------------------
 void seq_setMute(uint8_t trackNr, uint8_t isMuted)
@@ -1448,13 +1519,21 @@ static void seq_setStepIndexToStart()
 	 *
 	 * Input: implicit active Scene/transport state. Output: each track is one
 	 * position before step zero, so the immediate scheduler boundary plays step
-	 * zero. There is no PatternData rotation, length, or event-count affiliate.
+	 * zero. Before the dirty bitmap is cleared, all transient automation overlays
+	 * are restored to each slot's morph_interpolation[] base. There is no
+	 * PatternData rotation, length, or event-count affiliate.
+	 *
+	 * This is the common reset path for transport start/stop, Pattern-boundary
+	 * changes, and external MIDI/sync reset. The restore must precede
+	 * seq_clearAutomationDirty(); otherwise step zero can inherit a runtime value
+	 * from the previous pass after its tracking bit has been discarded.
+	 * Affiliates: seq_restoreAllAutomation() restores the six slot bitmaps;
+	 * seq_clearAutomationDirty() then drops them; seq_init() deliberately calls
+	 * the clear helper directly at boot because no runtime overlay exists.
 	 */
 	uint8_t i;
-	/*
-	 * Fixed-grid restart also drops overlays from the prior step/context; this
-	 * covers both transport restart and active Scene/Pattern realignment.
-	 */
+
+	seq_restoreAllAutomation();
 	seq_clearAutomationDirty();
 	for(i=0;i<NUM_TRACKS;i++) {
 		seq_lastMasterStep[i] = 0u;
