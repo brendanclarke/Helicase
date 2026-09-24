@@ -69,20 +69,39 @@ generation ≥ 2 stays valid. Boot takes the higher valid generation when the ro
 is `@`, restoring the pre-load Pattern. The window lasts until a second drain
 writes the `a` file. This is code reading, not an observed failure.
 
+**F5 — Automation missed on transport restart (observed, ~50% of restarts).**
+`seq_clearAutomationDirty()` (`sequencer.c:186`) zeros the per-slot dirty
+bitmaps at transport stop without restoring voice runtime parameters to their
+morph_interpolation base values. On restart, `seq_restoreAutomatedParameters()`
+finds a zero bitmap and skips the restore, leaving parameters at whatever the
+previous run's automation last wrote. Step 0's automation then applies only its
+own targets; parameters automated by later steps in the previous bar stay at
+their stale values. The automation gesture (sweep from base to target) is absent
+because the starting point is already at or near a previous automation value.
+See `S070_PHASE4_AUTOMATION_MISSED.md` for full analysis and proposed fix.
+
+**F6 — `seq_setRunning(1)` sets `seq_running = 1` before state initialization
+completes.** TIM3 can preempt between `seq_running = 1` (`sequencer.c:1081`)
+and `seq_setStepIndexToStart()` (`sequencer.c:1115`), firing the initial tick
+prematurely and causing a double step-0 trigger. The race window is ~3 µs
+(MIDI sends are non-blocking FIFO pushes), giving ~0.06% probability per
+restart at 120 BPM. Secondary to F5 but should be fixed at the same time.
+See `S070_PHASE4_AUTOMATION_MISSED.md` §3–§4B.
+
 ---
 
 ## 3. Test set
 
-Two device tests. Chosen by risk and coverage gap: these are the two items
-from the Phase 4 plan (§4.1–§4.2) that have never been exercised on hardware.
+Three device tests plus a confirmation test. Chosen by risk and coverage gap.
 
 | ID | What it proves | Bench time |
 |---|---|---|
 | T1 | AutoSave OFF→ON captures complete state and goes quiet; page-exit expedite works; Bank identity agrees across files | ~45 min |
-| T2 | Stale Pattern generation after explicit load (predicted FAIL) | ~15 min |
+| T2 | Stale Pattern generation after explicit load (predicted FAIL); edit-during-snapshot persistence; corrupt/truncated candidate rejection at boot | ~45 min |
+| T3 | Automation restore on transport restart works after F5/F6 fix | ~10 min |
 
-Both block closeout (T2 as a confirmation of a predicted defect that needs
-a code fix).
+T1 and T2 block closeout. T2(a) is a predicted FAIL that opens Q2. T3 runs
+after the F5/F6 code fix.
 
 ### What is not tested and why
 
@@ -101,6 +120,26 @@ a code fix).
   infrastructure or luck. Defer.
 - **Duplicate trace-file directory entries**: expected non-issue after S056
   LFN fix. Defer.
+
+### Deferred test sketches
+
+**D-A — Partial Bank Load/Save.** Generate two 16-child Banks whose Patterns
+encode Bank and child identity (track 1 step NN+1, track 2 step 1 vs 16).
+Load with a mask, Save with a mask, compare trees. Run when Bank Load/Save
+code changes.
+
+**D-B — HCNAMES temp promotion.** `SD_CARD_PHASE3_OUTPUT` is a genuine
+orphan-temp card. Sketch: orphan temp (expect promotion); temp beside live
+(temp wins); truncated temp beside live (temp discarded); orphan temp with
+`autosave=0`. Run when the boot HCNAMES path changes.
+
+**D-C — Phase 2 browser supersession and power loss.** Fast Kit scroll, OK
+after type switch, Kit/Instrument Load → power cut at 0.5/2/10 s. Run when
+Load/Save browser code changes.
+
+**D-D — Duplicate trace-file directory entries.** Prepare card with ≥ 96
+deleted entries before `asavetrc.bin`/`pattrace.bin`, run five boot/flush
+cycles, audit raw root directory. Run if a duplicate is ever observed.
 
 ---
 
@@ -213,7 +252,12 @@ Canonical `SD_CARD/` with:
 
 ---
 
-### T2 — Stale Pattern generation after explicit load
+### T2 — Pattern persistence: stale generation, edit-during-snapshot, corrupt candidates
+
+Three parts. Part (a) is a predicted FAIL (F4). Parts (b) and (c) are
+independent of (a).
+
+#### T2(a) — Stale Pattern generation after explicit load
 
 **Proposition**: after an explicit Pattern load into a Scene, the next boot
 restores the loaded Pattern, not an older hidden AutoSave Pattern.
@@ -228,7 +272,7 @@ rows and hidden A/B files from the ON convergence.
 
 1. Boot, select Scene 5. Load:[Pattern] any library Pattern into Scene 5.
    Exit. Wait 15 s.
-2. Power off. Copy → `P4_T2_1`.
+2. Power off. Copy → `P4_T2_A1`.
 3. Reinsert, boot. Check Scene 5's Pattern — track 1 step LEDs.
 
 **Pass criteria.**
@@ -238,13 +282,90 @@ rows and hidden A/B files from the ON convergence.
   FAIL.** This confirms F4 — the older `.patNNa` with a higher generation
   won over the loaded Pattern's generation-1 `.patNNb`.
 
+#### T2(b) — Edit during Pattern snapshot
+
+**Proposition**: an edit made while a Pattern snapshot is being written is
+not lost: the final hidden winner equals the final edited state.
+
+**Workflow.**
+
+4. Continue on the same card. Select Scene 5 and run the transport. Go to
+   VOICE page, voice 1, pick a 0..127 parameter cell. Hold track 1 step 1
+   (held-step overlay). Turn that pot back and forth continuously for 15 s,
+   never pausing for more than 250 ms. Finish fully clockwise (127), release.
+   Wait 15 s. Stop. Power off. Copy → `P4_T2_B1`.
+
+**Pass criteria.**
+
+- Scene 5 winner has exactly one automation entry for that target on
+  track 1 step 1, with value 127.
+- Winner generation advanced by at least 3 over T2(a). The 5 s max-latency
+  path must have admitted drains while editing continued.
+- `H` groups during the edit window show Pattern-class charge. No `E`/`X`.
+
+#### T2(c) — Ineligible and corrupt candidates
+
+**Proposition**: at boot, a truncated or CRC-bad newer candidate loses to
+its valid peer. Hidden files are ignored unless the Pattern row is `@`.
+
+**Workflow.**
+
+5. Mount the card read-write (indexing off). Generate or manually create
+   the overlay below. Eject.
+
+   | Scene | `.patNNa` | `.patNNb` | Pattern row | Expected |
+   |---|---|---|---|---|
+   | 2 | valid, gen 10 | gen 11, truncated to 5,000 B | `@` | A wins |
+   | 3 | valid, gen 10 | gen 11, one pool byte flipped (CRC bad) | `@` | A wins |
+   | 4 | absent | absent | `@` | Boot completes; record what is resident |
+   | 6 | valid, gen 10 | valid, gen 11 | changed to `-` | Bank child Pattern, not either hidden file |
+
+6. Boot. In PERF, check Scenes 2, 3, 4, and 6: track 3 LEDs, Kit sounds.
+   Power off. Copy → `P4_T2_C1`.
+
+**Pass criteria.**
+
+- Every "Expected" cell holds.
+- Pattern rejection never changes a Scene's Kit or settings.
+- No `E`/`X`. The `Q` records are consistent with the table.
+
+---
+
+### T3 — Automation restore on transport restart
+
+**Proposition**: after the F5/F6 fix (`S070_PHASE4_AUTOMATION_MISSED.md`
+§4A–§4B), automation at the beginning of a pattern fires correctly on every
+transport stop/restart.
+
+**Prerequisite**: apply fixes 4A (restore-before-clear in
+`seq_setStepIndexToStart`) and 4B (defer `seq_running = 1` until after state
+init). Rebuild and flash.
+
+**Workflow.**
+
+1. Load any Scene with automation at step 0 and at least one later step
+   (e.g. Scene 6 from the user's working set).
+2. Play for several bars. Stop playback during a bar where later-step
+   automation has been applied (i.e. not at step 0).
+3. Restart. Listen for step 0's automation gesture.
+4. Repeat 10 times.
+
+**Pass criteria.**
+
+- Step 0 automation is audible and correct on all 10 restarts.
+- No audible double trigger at the start.
+
 ---
 
 ## 6. Execution order
 
-1. **Prerequisites**: card audit tool.
+1. **Prerequisites**: card audit tool, T2(c) overlay script.
 2. **T1**: requires clean fixture card.
-3. **T2**: reuses T1's card state after Part B.
+3. **T2**: (a) reuses T1's card state after Part B; (b) continues on same
+   card; (c) uses host overlay on the card from (b).
+4. **F5/F6 code fix**: apply fixes from `S070_PHASE4_AUTOMATION_MISSED.md`,
+   rebuild, flash.
+5. **T3**: any Scene with step-0 automation.
 
 ---
 
@@ -267,6 +388,12 @@ reader's non-`@` branch, seed from the winner's generation. No extra SD work.
 mounted, never while Load/Save owns the facade), one trace record per failure,
 and a Global-page indication. Implement after T1.
 
+**Q4 — Automation restore at transport boundaries (F5/F6).** Proposed fix
+in `S070_PHASE4_AUTOMATION_MISSED.md`: (4A) restore all dirty voice parameters
+from `morph_interpolation[]` before clearing the bitmap in
+`seq_setStepIndexToStart()`; (4B) defer `seq_running = 1` until state init is
+complete. Recommendation: apply both. Verified by T3.
+
 ---
 
 ## 8. Spec hygiene (rolling item 1.4)
@@ -285,14 +412,20 @@ outcomes:
   from previous card copies. Add to `.gitignore`.
 - Phase-resolution table in `S070_SYSTEMS_GENERAL_CHECK_AND_REVIEW_PLAN.md`
   still shows Phases 2 and 3 as PLANNING/NOT STARTED.
+- `S070_PHASE2_LSR01_MENU_USER_FEEL.md` marks LSR-02/03/04 "verified in
+  `S070_PHASE2_IMPLEMENTATION.md`". That document records source/build
+  verification only, not individual per-scenario hardware results.
+- `PATTERN_DYNAMIC_STACK.md` §11 still says S069 Pass 2 hardware validation
+  is pending. The S070 plan records PASS on 2026-09-22.
 
 ---
 
 ## 9. Exit criteria
 
-- T1 and T2 complete. Any T1 failure gets a fix, a new image, and a rerun
-  including the quiet-tail check. T2 is a predicted FAIL that opens Q2.
-- Q1–Q3 decided (Q2 contingent on T2 result).
+- T1, T2, and T3 complete. Any T1 failure gets a fix, a new image, and a
+  rerun including the quiet-tail check. T2(a) is a predicted FAIL that opens
+  Q2. T3 runs after the F5/F6 code fix.
+- Q1–Q4 decided (Q2 contingent on T2 result; Q4 confirmed by T3).
 - Phase-resolution table updated for Phases 2–4.
 - Session 070 handoff log written per `SESSION_HANDOFF_TEMPLATE.md`.
 
@@ -300,5 +433,8 @@ outcomes:
 
 | Test | Date | Evidence | Result | Notes |
 |---|---|---|---|---|
-| T1 | | | | |
-| T2 | | | | |
+| T1 | 2026-09-24 | `SD_CARD_ATS_OFF_ON` | PASS | No `E`/`X`; `.hcnames` present; both HCPR records valid; all 16 Scenes have Pattern pairs; `settings.cfg` `active_bank=0` agrees with HCNAMES row 0 (`FullBad 000`) |
+| T2(a) | | | | |
+| T2(b) | | | | |
+| T2(c) | | | | |
+| T3 | | | | |
