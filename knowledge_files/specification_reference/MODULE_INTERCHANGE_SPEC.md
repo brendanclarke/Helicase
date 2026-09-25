@@ -1,16 +1,20 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-069 (all phases), including typed HCNAMES, AutoSave boot restore, typed
+070 (all phases), including typed HCNAMES, AutoSave boot restore, typed
 Instrument-index repair, AsyncFATFS directory publication, the Phase 4 dynamic
 Pattern storage system, step automation editing/playback (Session 065), the
 VOICE-page held-step automation overlay (Session 066), the Pattern Stack
 Service with dtype offset bug fix (Session 067), the Session 068 front-panel
 event-ring rebuild, played-Pattern mirror fix, and per-track sequencer length
-fix, and Session 069 bounded CPU convergence (non-semantic maintenance,
+fix, Session 069 bounded CPU convergence (non-semantic maintenance,
 trailing-slack reservation, reactive compaction, bounded repair epoch, O(1)
 dirty predicate, quiet window scheduling, shared background CPU budget, and
-Load/Save repair gate).
+Load/Save repair gate), and Session 070 systems fitness pass (Makefile header
+deps, Load/Save revision LSR-01..04, probability gating, Scene automation
+targets 384..403, LED layer bitmap consolidation, Scene automation runtime
+overlay architecture, Pattern generation fix, transport restart automation
+restore).
 Historical migrations belong in session logs; this document states which live
 module owns each call, state transition, and retained object.
 
@@ -106,10 +110,14 @@ module owns each call, state transition, and retained object.
   Instrument identity/source/refreshed rows as one committed hierarchy. Scene
   Save seeds the child identity store from the source register before writing;
   Bank Save child preparation stages the Kit identity too.
-- Known deferred UI boundary: Kit/Instrument HCNAMES publication normally waits
-  for family/page exit even though a browser item/type switch may dispose the
-  `.hcindex` cache. A later revision must queue the HCNAMES checkpoint without
-  blocking page repaint; see `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`.
+- Session 070 LSR-01 resolved the deferred HCNAMES checkpoint: Kit/Instrument
+  HCNAMES dirty state is now mark-and-flushed at every browser domain transition
+  (Kit↔Instrument, type switches, VOICE button, Pot-1 entries, Instrument exit).
+  Destination state is installed before flush so completion callbacks dispatch
+  correctly. A deferred scheduler rung in `filesystem_tick()` drains retained
+  dirty masks asynchronously after page exit. `menu_selectionGeneration`
+  (`uint8_t`) tags async name/preview callbacks; stale completions are silently
+  discarded. OK commit increments generation to freeze displayed name.
 - asyncfatfs owns exact-case filename behavior. Product code should use
   filesystem/asyncfatfs object/LFN APIs instead of local FAT/LFN reconstruction.
   Dot-prefixed files are ordinary filesystem objects except macOS AppleDouble
@@ -395,9 +403,17 @@ Sequencer LED feedback via `SeqLedState`.
 | `led_notifyTrackRotationReset(rotation)` | Update visible rotation parameter after Sequencer stop reset. | Sequencer |
 | `led_processSeqLedState()` | Foreground drain of Sequencer LED dirty state. | `main.c` |
 | `led_updateAutomationStepView(track, target, scene)` | Light SEQ LEDs for steps with automation matching a target parameter (Session 066). | Menu VOICE overlay |
+| `led_renderFromStack(ledNr)` | Re-render one LED from its active-layer bitmap: pulse > flash > blink/chase > base. Replaces blind `led_reset()` in all layer-expiry paths (Session 070). | ledHandler internals |
 
 Shared object: `SeqLedState seq_ledState` is written by Sequencer and consumed
 by ledHandler in foreground.
+
+LED layer model (Session 070): `led_activeLayers[41]` is a per-LED bitmap
+tracking which layers are currently active. Priority order (highest first):
+pulse, flash, blink/chase, base. On layer expiry, `led_renderFromStack()`
+clears the expired layer's bit and renders the highest remaining active layer.
+Chase runs at blink priority. The held-step automation overlay writes LEDs
+directly and does not participate in the layer system.
 
 ## Core/Hardware/frontPanel/buttonHandler
 
@@ -532,8 +548,11 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 | `seq_addNote(trackNr, vel, note)` | Record played note into pattern when recording. | MidiParser, roll path |
 | `seq_setRecordingMode(active)` / `seq_setErasingMode(active)` | Recording/erase gates. | buttonHandler |
 | `seq_recordAutomation(voice, dest, value)` | Sequencer-gated and held-step automation recording. | Preset, MidiParser |
-| `seq_drainPendingAutomation(void)` | Foreground drain of debounced pending buffer; passes stored 7-bit value directly to `instrumentManager_writeRuntime()` (identity mapping since Session 067 dtype fix; the previous `/2` `*2` conversion is removed) and sets dirty bits. Runs inside `audio_check_and_render()` after `voiceControl_processPending()`. | `main.c` render loop |
+| `seq_drainPendingAutomation(void)` | Foreground drain of debounced pending buffer; passes stored 7-bit value directly to `instrumentManager_writeRuntime()` for voice descriptor targets (identity mapping since Session 067 dtype fix) and dispatches Scene targets (IDs 384+) through `seq_applySceneAutomation()` to runtime-only overlays (Session 070). Sets dirty bits in `seq_automation_dirty[]` (voice) or `seq_scene_automation_dirty` (Scene). Runs inside `audio_check_and_render()` after `voiceControl_processPending()`. | `main.c` render loop |
+| `seq_evaluateStepCondition(track, step)` | Read step specials and evaluate the conditional gate (probability). Returns `step_allowed`. Called before the trigger-active check in `seq_advanceTrackStep()`. Both trigger and automation are gated by the result; erase is independent (Session 070). | Sequencer only |
 | `seq_restoreAutomatedParameters(voice)` | Restore dirty descriptors from `morph_interpolation[]` on voice retrigger; clears per-slot dirty bitmap. | `voiceControl_triggerNow()` |
+| `seq_restoreAllAutomation()` | Walk all 6 slots' 64-bit dirty bitmaps and restore each dirty descriptor index from `morph_interpolation[]` via `instrumentManager_writeRuntime()`. Called from `seq_setStepIndexToStart()` before `seq_clearAutomationDirty()` (Session 070). | Sequencer transport restart |
+| `seq_restoreAllSceneAutomation()` | Walk `seq_scene_automation_dirty` (uint32_t) bitmap and restore each dirty Scene target from its retained SceneData getter. Clears morph step overrides, slot6 decay step state, and audio routing. Called from `seq_setStepIndexToStart()` (Session 070). | Sequencer transport restart |
 | `seq_midiNoteOff(chan)` / `seq_sendMidiNoteOn(channel, note, veloc)` | MIDI note output ownership. | MidiParser, Sequencer |
 | `seq_offsetTrackStepIndexForRotation(trackNr, oldRot, newRot, len)` | Narrow runtime hook for live rotation compensation. | PatternData only |
 
@@ -574,6 +593,7 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_applyKitAudioRouting(scene, slot)` | Apply one Scene kit slot's audio route to mixer routing. | Kit load/apply paths |
 | `preset_applySceneSettings(scene)` | Apply Scene settings/global runtime values. | Boot/load paths |
 | `preset_applyVoiceDecimationAllRuntime(value)` | Apply a transient Scene Decimation value for LFO modulation without changing the retained PERF `srt` setting. | InstrumentManager LFO Scene target path |
+| `preset_applyVoiceAudioOutRuntime(voice, value)` | Apply a transient audio output routing value directly to the mixer routing register, bypassing retained Scene/Kit storage. Used by Scene automation step overlays (Session 070). | Sequencer Scene automation restore, step automation drain |
 | `preset_applyVelocityModTarget(voice, targetParam)` | Direct velocity mod destination update. | Menu, preset load apply |
 | `preset_applyLfoModTarget(lfo, targetParam)` | Direct LFO mod destination update. | Menu, preset load apply |
 | `preset_startDrumsetApply()` / `preset_tickDrumsetApply()` | Clear outgoing modulation, quiet/trigger-time reset and image-apply all six incoming tagged slots, then keep the Scene gate active while the existing Instrument cursor normalizes/rebinds every source's two LFO pairs and velocity against the final type vector. | Menu and `main.c` post-audio boot activation |
@@ -582,6 +602,9 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_startInstrumentMorphApply(scene, slot)` | Copy staged same-type Instrument normal endpoints into the destination morph image, immediately mark only the committed Morphable Morph payload for AutoSave, and refresh active-scene Morph runtime. | Menu InstrumentMrp completion |
 | `preset_morph(morph)` / `preset_morphVoice(slot, morph)` / `preset_morphTick()` / `preset_getMorphValue(index, morph)` | Rate-limited descriptor Morph interpolation/application. Global Morph bulk-sets all six per-voice Morph values; per-voice Morph is the engine input. | Menu, MIDI, velocity modulation, main loop |
 | `presetMorph_setVoiceLfoModulation(source_slot, target_slot, amount, polarity, lfo_value)` / `presetMorph_clearLfoSource(source_slot)` | Maintain the hidden per-voice Morph LFO overlay that is summed around retained per-voice Morph base values. | InstrumentManager/LFO dispatch |
+| `presetMorph_setStepAutomationOverride(slot, amount)` | Set a per-voice Morph step automation override. The morph engine uses this value instead of the retained per-voice amount while active. LFO modulates around the override value (Session 070). | Sequencer Scene automation drain |
+| `presetMorph_clearAllStepAutomationOverrides()` | Clear all per-voice Morph step overrides and restore retained amounts. Called on transport restart (Session 070). | Sequencer Scene automation restore |
+| `presetMorph_getEffectiveVoiceAmount(slot)` | Return the step override when active, else the retained per-voice Morph amount. Single query point for the morph decimation engine (Session 070). | presetMorphEngine internals, morph decimation |
 
 ## Core/Bank/Scene/Preset/ParameterArray
 
@@ -637,6 +660,13 @@ voices, and the Scene namespace.
 | `instrumentManager_writeRuntime()` / target validation/stepping helpers | Apply descriptor/supplemental bindings and validate canonical targets against current slot types. | Preset, Menu, modulation paths |
 | `instrumentManager_updateLfoAdapters(source_slot, pair, lfo, polarity, amount)` | Update InstrumentManager-owned LFO destinations: descriptor-domain adapters, slot decimation, and Scene targets. Descriptor adapters shape in parameter space and then call the normal runtime writer. | `lfo.c` |
 
+Slot-6 track-7 generated decay step automation override (Session 070):
+`slot6_track7_decay_step_active` and `slot6_track7_decay_step_value` in
+InstrumentManager.c provide a runtime-only override for the generated
+`slot6_track7_amp_envelope_decay` Scene parameter. Trigger cascade priority:
+step override > LFO contribution > retained Scene value. The runtime writer
+checks step-active before applying LFO or retained values.
+
 Transaction rule: clear all current owners before changing Scene slot type;
 commit the staged slot; reset the incoming runtime; rebuild retained runtime
 images; then normalize and rebind all sources. Clearing after the type swap
@@ -654,12 +684,20 @@ table, while non-voice sound targets come from this Scene namespace.
 
 Current target order:
 
-- `1vm`, `2vm`, `3vm`, `4vm`, `5vm`, `6vm`
+- `1vm`, `2vm`, `3vm`, `4vm`, `5vm`, `6vm` — per-voice Morph
 - Scene Decimation `srt`
+- Audio Out `1ou`..`6ou` (IDs 392–397, max 5) — Session 070
+- FX Send `1fx`..`6fx` (IDs 398–403, max 127, stubbed apply) — Session 070
 
 Scene Decimation deliberately appears after the six Morph targets so the
 velocity target list does not place it directly beside a voice-local
 `instrument_decimation` row, which also uses short label `srt`.
+
+Session 070 additions: Audio Out and FX Send targets are Scene-level
+parameters with `SCENE_MOD_TARGET_USE_AUTOMATION` flag, reachable from step
+automation but not yet from velocity/LFO modulation pickers. FX Send apply
+is a no-op until the Phase 5 FX bus exists. Step automation uses runtime-only
+overlays; see `070_SESSION_HANDOFF_LOG.md` §10 for the overlay architecture.
 
 | API | Use | Usual callers / clients |
 |---|---|---|

@@ -766,4 +766,12 @@ because the new functions have no callers until Change 7 connects them.
 - Clean source/build/image verification passed with:
   `arm-none-eabi-size`: `text=455804`, `data=416`, `bss=291820`; packaged
   `build/LXRV2_lxr02.img`: 456,236 bytes (456,220-byte firmware payload plus
-  the 16-byte image header). Hardware verification is pending.
+  the 16-byte image header).
+
+### 2026-09-25 — hardware verification PASS
+
+Tested on hardware with `SD_CARD_PH4_Q1_OUTPUT2` AutoSave trace. 160,129
+records, zero E/X errors. Writer converges (charged_ms declines to zero)
+and stays quiet for four consecutive budget groups. Step automation
+produces zero retained dirty marks — runtime overlay validated. See
+`S070_PHASE4_TESTING_FINAL.md` §10 for full trace analysis.

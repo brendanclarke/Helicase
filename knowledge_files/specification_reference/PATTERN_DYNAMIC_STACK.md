@@ -3,7 +3,7 @@
 ## Authority and status
 
 This is the authoritative live-memory, allocator, PAT4 interchange, Pattern
-Stack Service, and Pattern AutoSave reference through Session 069 (all phases).
+Stack Service, and Pattern AutoSave reference through Session 070 (all phases).
 Historical Session 062/063/064 plans describe how the design was reached but
 do not override this file.
 Filesystem hierarchy and HCNAMES grammar are in `FILESYSTEM_SPEC.md`; scalar
@@ -234,12 +234,24 @@ skipped step. Erase is independent of probability.
 The foreground drain (`seq_drainPendingAutomation()`) runs inside
 `audio_check_and_render()` immediately after `voiceControl_processPending()`,
 within the per-chunk render loop. For each entry, it validates the target,
-expands the 7-bit value to 8-bit, and calls
-`instrumentManager_writeRuntime(slot, descriptor, value8)`. On success, it
-sets the corresponding bit in `seq_automation_dirty[slot]` (a `uint64_t`
-per-slot bitmap, 48 B total).
+expands the 7-bit value to 8-bit, and dispatches by target range:
 
-### 6.2 Automation reset on voice retrigger
+- **Voice descriptor targets (IDs 0..383):** calls
+  `instrumentManager_writeRuntime(slot, descriptor, value8)` and sets the
+  corresponding bit in `seq_automation_dirty[slot]` (a `uint64_t` per-slot
+  bitmap, 48 B total).
+- **Scene targets (IDs 384+, Session 070):** calls
+  `seq_applySceneAutomation()` which dispatches to runtime-only overlays —
+  `presetMorph_setStepAutomationOverride()` for Voice Morph (with 7→8 bit
+  expansion via `menu_morphAutomationExpand()`),
+  `slot6_track7_decay_step_value` for generated slot-6 track-7 decay,
+  `preset_applyVoiceAudioOutRuntime()` for Audio Out routing, or no-op for
+  FX Send (pending Phase 5 FX bus). Sets the corresponding bit in
+  `seq_scene_automation_dirty` (`uint32_t`, 4 B). Scene automation never
+  writes retained Scene/Kit setters — this prevents AutoSave thrashing and
+  preserves user-set values.
+
+### 6.2 Automation reset on voice retrigger and transport restart
 
 All trigger sources funnel through `voiceControl_triggerNow()` in
 `MidiVoiceControl.c`. Before `instrumentManager_triggerTrack()`, it calls
@@ -248,6 +260,16 @@ dirty bitmap using `__builtin_ctzll`, writes the `morph_interpolation[]`
 value for each dirty descriptor back to the runtime, and clears the bitmap.
 The dirty bitmap is also cleared on `seq_init()`, transport stop, and
 `seq_setStepIndexToStart()`.
+
+On transport restart (Session 070), `seq_setStepIndexToStart()` calls
+`seq_restoreAllAutomation()` (walks all 6 voice dirty bitmaps and restores
+from `morph_interpolation[]`) and `seq_restoreAllSceneAutomation()` (walks
+`seq_scene_automation_dirty` and restores each Scene target from its retained
+SceneData getter: clears morph step overrides, slot6 decay step state, and
+audio routing overrides). Both restore functions run BEFORE
+`seq_clearAutomationDirty()`. `seq_setRunning()` is structured so stop sets
+`seq_running=0` first (preventing TIM3 ISR from advancing during cleanup)
+and start sets `seq_running=1` last (after all initialization).
 
 ### 6.3 Step-edit automation pages
 

@@ -283,22 +283,6 @@ processing unchanged.
 
 ---
 
-## Files changed
-
-| File | Part | Changes |
-|---|---|---|
-| `Core/Bank/BankData.c` | A | Array storage, init, update all accessors, per-Scene setter/getter (A1–A3) |
-| `Core/Bank/BankData.h` | A | Declare per-Scene setter/getter (A3) |
-| `Core/Bank/Scene/Autosave.h` | A | Width constant (A4) |
-| `Core/Bank/Scene/Autosave.c` | A | Dirty width, live getter, bank apply (A5–A7) |
-| `Core/Hardware/SD/storageTypes.h` | A | Array + bitfield in bankset state (A8) |
-| `Core/Hardware/SD/storageTypes.c` | A | Parse/write per-Scene keys with legacy fallback (A8) |
-| `Core/Hardware/SD/filesystem.c` | A | Per-Scene loop at 4 load + 1 save sites (A9) |
-| `Core/Bank/Scene/Preset/presetManager.c` | A | `presetMorph_rebuildScene()` in `preset_applySceneSettings()` (A10) |
-| `Core/Bank/Scene/Preset/presetMorphEngine.c` | B | Contribution type, resolver, setter (B1–B3) |
-| `Core/Bank/Scene/Preset/presetMorphEngine.h` | B | Direction enum, setter signature (B1, B3) |
-| `Core/DSP/Instruments/InstrumentManager.c` | B | Polarity encoding without base read (B4) |
-
 ## What does not change
 
 - **menu.c**: all fan-out code already calls `bank_sceneMaskVoiceEdit()`.
@@ -338,18 +322,161 @@ persistent format, SceneData field, or public API semantics change beyond
 the setter signature. All existing callers (InstrumentManager and
 `presetMorph_clearLfoSource()`) are updated in this plan.
 
+## Part C — Scene Superpage Live Display and Voice-Edit Mask Boot State
+
+Part C addresses three UI bugs observed during S070 Phase 4 testing.
+These are independent of Parts A and B but should be resolved in S071.
+
+### Open questions (resolve before implementation)
+
+**Q-C1 — Scene superpage live display source.** The Scene superpage
+(VOICE/mix appended screen: `ou`, `fx`, `fd`, `vm`) currently reads all
+values from retained SceneData via `scene_getVoiceMorphAmount()`,
+`scene_getVoiceAudioOut()`, etc. (`menu_cellDisplayValue()`,
+`menu.c:3199–3221`). During step automation playback, the PERF page shows
+live morph because it reads from `parameter_values[PAR_VOICEn_MORPH]`
+(the flat mirror updated by `seq_applySceneAutomation()`), but the
+superpage shows the retained base value.
+
+The fix requires the superpage display to read from the effective runtime
+value (step override active → override, else retained). This currently
+exists for voice morph via `presetMorph_getEffectiveVoiceAmount()` (Q1).
+Audio out and FX send don't have equivalent effective-value getters yet
+because Q1 only implemented runtime getters for morph, decimation, and
+audio out — and the audio out runtime path goes through
+`preset_applyVoiceAudioOutRuntime()` which writes directly to the DSP,
+not to a readable location.
+
+**Decision needed**: should the superpage show the live effective value
+for all automatable Scene settings (morph, audio out, FX send) or only
+for voice morph? If all, new effective-value getters are needed for
+audio out and FX send that return the step-override value when active,
+else the retained Scene value.
+
+**Q-C2 — Underline refresh on Scene-target automation write.** When a
+held-step Scene-target automation entry is written (held step + encoder),
+the underline presence marker does not immediately appear. The
+progressive scan (`va_scanService()`, `menu.c:1847–1901`, 4 steps per
+pass) must complete a full 128-step sweep to discover new Scene targets.
+For instrument parameters, `va_searchSetBit()` is called immediately
+after a write (`menu.c:2654`), but for Scene settings the comment says
+"Scene-setting cells use exact held-value markers and need no extra SRAM
+mask" (`menu.c:2651–2652`) and `va_searchSceneMask` is not updated.
+
+The fix is to set the corresponding `va_searchSceneMask` bit
+(`VA_SEARCH_SCENE_VOICE_MORPH_BIT`, `VA_SEARCH_SCENE_AUDIO_OUT_BIT`,
+`VA_SEARCH_SCENE_FX_SEND_BIT`) immediately when a held-step automation
+write succeeds for a Scene target. This is a one-line fix at
+`menu.c:2654`.
+
+**No decision needed** — this is clearly a bug.
+
+**Q-C3 — Voice-edit mask stale bits after boot.** On first boot, holding
+VOICE MODE can show LEDs for Scenes beyond the active Scene, indicating
+fan-out bits from a prior session persisted via Autosave or bankset.bcg.
+Switching to another Scene and back collapses the mask (the invariant
+enforcer drops the entire mask when the new Scene isn't already in it).
+
+Root cause: `bank_setSceneMaskVoiceEdit()` (`BankData.c:290–308`)
+normalizes the mask to 16 bits and ensures the active Scene is present,
+but does not intersect with the present mask. Both
+`autosave_applyBankPayload()` (`Autosave.c:1198`) and the bankset.bcg
+load paths (`filesystem.c:13907/14090/18726/27385`) restore the prior
+session's mask verbatim.
+
+Part A (per-Scene masks) resolves this by defaulting each Scene's mask
+to just itself on `bank_init()`. No additional fix is needed if Part A
+lands first. If Part A is deferred, an intersect-with-present-mask step
+in `bank_setSceneMaskVoiceEdit()` would prevent stale bits.
+
+**Decision needed**: is Part A sufficient, or should the
+present-mask intersection also be added as a defensive measure?
+
+### C1 — Scene superpage live value display
+
+**Where**: `menu_cellDisplayValue()`, `Core/Menu/menu.c:3199–3221`.
+
+**Current**: reads from retained SceneData (`scene_getVoiceMorphAmount()`,
+`scene_getVoiceAudioOut()`, etc.).
+
+**New**: for `MENU_SCENE_SETTING_VOICE_MORPH`, read from
+`presetMorph_getEffectiveVoiceAmount()` instead of
+`scene_getVoiceMorphAmount()`. For `MENU_SCENE_SETTING_AUDIO_OUT` and
+`MENU_SCENE_SETTING_FX_SEND_AMOUNT`, read from new effective-value
+getters (pending Q-C1 decision).
+
+The existing `menu_sceneLiveRefreshService()` (`menu.c:2535–2564`)
+already triggers ~8 Hz repaints when Scene-setting cells are visible
+during playback, so the display updates automatically.
+
+### C2 — Immediate underline on Scene-target automation write
+
+**Where**: held-step automation write path, `Core/Menu/menu.c:2650–2657`.
+
+**Current**: after a successful `patSvc_writeStepAutomation()` for a
+Scene-setting cell, only `va_searchSetBit()` is called for instrument
+cells; Scene cells skip the immediate search-mask update.
+
+**New**: after the `if (wrote)` block, if the cell is a
+`MENU_CELL_SCENE_SETTING`, set the corresponding `va_searchSceneMask`
+bit via `va_sceneSearchBitForCell()`:
+
+```c
+if (cell.kind == MENU_CELL_SCENE_SETTING) {
+    uint8_t scene_bit = va_sceneSearchBitForCell(&cell);
+    va_searchSceneMask |= scene_bit;
+}
+```
+
+This makes the underline name-marker appear on the next repaint without
+waiting for the progressive scan to rediscover it.
+
+### C3 — Voice-edit mask boot-state cleanup
+
+Resolved by Part A (per-Scene mask defaults to self). If Part A is
+deferred, add a present-mask intersection in
+`bank_setSceneMaskVoiceEdit()`:
+
+```c
+bank_scene_mask_voice_edit =
+    (uint16_t)(bank_normalizeSceneMask(mask) & bank_scene_present_mask);
+```
+
+---
+
+## Files changed (all parts)
+
+| File | Part | Changes |
+|---|---|---|
+| `Core/Bank/BankData.c` | A | Array storage, init, update all accessors, per-Scene setter/getter (A1–A3) |
+| `Core/Bank/BankData.h` | A | Declare per-Scene setter/getter (A3) |
+| `Core/Bank/Scene/Autosave.h` | A | Width constant (A4) |
+| `Core/Bank/Scene/Autosave.c` | A | Dirty width, live getter, bank apply (A5–A7) |
+| `Core/Hardware/SD/storageTypes.h` | A | Array + bitfield in bankset state (A8) |
+| `Core/Hardware/SD/storageTypes.c` | A | Parse/write per-Scene keys with legacy fallback (A8) |
+| `Core/Hardware/SD/filesystem.c` | A | Per-Scene loop at 4 load + 1 save sites (A9) |
+| `Core/Bank/Scene/Preset/presetManager.c` | A | `presetMorph_rebuildScene()` in `preset_applySceneSettings()` (A10) |
+| `Core/Bank/Scene/Preset/presetMorphEngine.c` | B | Contribution type, resolver, setter (B1–B3) |
+| `Core/Bank/Scene/Preset/presetMorphEngine.h` | B | Direction enum, setter signature (B1, B3) |
+| `Core/DSP/Instruments/InstrumentManager.c` | B | Polarity encoding without base read (B4) |
+| `Core/Menu/menu.c` | C | Live value display (C1), immediate underline (C2) |
+
 ## Implementation order
 
 1. A1–A3 (BankData per-Scene storage, accessors, per-Scene setter/getter)
 2. A4–A7 (Autosave format expansion)
 3. A8–A9 (bankset.bcg text format and filesystem load/save)
 4. A10 (morph rebuild on Scene switch)
-5. B1–B3 (contribution type, resolver, setter)
-6. B4 (InstrumentManager polarity encoding)
+5. C2 (immediate underline — independent one-liner)
+6. C1 (live display — depends on Q-C1 decision and possibly new getters)
+7. C3 (boot-state — resolved by step 1 if Part A lands)
+8. B1–B3 (contribution type, resolver, setter)
+9. B4 (InstrumentManager polarity encoding)
 
-Build after step 6. Parts A and B are independent and can be implemented
-in either order. Within Part A, steps 1–3 give correctness; step 4
-improves timing. Within Part B, steps 5–6 must land together.
+Build after step 9. Parts A, B, and C are largely independent. C2 can
+land at any time. C1 depends on Q-C1 for scope. C3 is resolved by A1–A3.
+Within Part A, steps 1–3 give correctness; step 4 improves timing.
+Within Part B, steps 8–9 must land together.
 
 ## Test plan
 
@@ -415,3 +542,25 @@ improves timing. Within Part B, steps 5–6 must land together.
 
 20. Scene 0, add Scene 2 to mask. Edit a VOICE-page instrument parameter.
     Switch to Scene 2: same value applied. Verify morph was NOT copied.
+
+### Scene superpage live automation display (Part C)
+
+21. Program voice-morph step automation on voice 1 (step 0 = 0, step 8 =
+    200). Navigate to VOICE 1 / mix / appended Scene screen. Play. Verify
+    `1vm` value on the superpage changes between 0 and 200 with each step.
+    Compare with PERF page — both should show the same live value.
+
+22. Same setup. Verify `1vm` on the superpage is underlined (indicating
+    automation exists in the pattern). If audio out or FX send is also
+    automated, verify those labels are also underlined.
+
+23. Held-step underline: navigate to the superpage, hold a step that has
+    no Scene-target automation, turn the `1ou` encoder to assign an
+    audio-out automation value. Release step. Verify `1ou` label is now
+    underlined without leaving and returning to the page.
+
+### Voice-edit mask boot state (Part C)
+
+24. Boot fresh with a Bank that has never had the voice-edit mask toggled.
+    Hold VOICE MODE: verify only the active Scene's LED is lit (blinking).
+    No other SEQ LEDs should be steady-on.

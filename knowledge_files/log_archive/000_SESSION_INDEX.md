@@ -84,6 +84,7 @@ it belongs in the summary or the log, not here.
 | 067 | 2026-09-18 | uncommitted on `dev-ph4-pattern` (base `87e275e`) | Pattern Stack Service: unified pool mutation dispatcher, publication ordering fix, dtype offset bug fix |
 | 068 | 2026-09-19 | commit `613f466` on `dev-ph4-5-fixes` | Front-panel event ring rebuild, played-Pattern mirror fix, per-track sequencer length fix |
 | 069 | 2026-09-20 | commit `9627f70` on `dev-ph5-effects` | Pattern Stack Service bounded CPU convergence: non-semantic maintenance, trailing-slack reservation, reactive compaction, finite repair epoch, O(1) dirty predicate, quiet window scheduling, shared background CPU budget |
+| 070 | 2026-09-22/25 | commit `e3ae961` on `dev-ph5-effects` | Systems fitness pass: Makefile `-MMD -MP`, Load/Save revision (LSR-01..04), probability gating, Scene automation targets, LED layer bitmap, Scene automation runtime overlay |
 
 
 ---
@@ -486,6 +487,18 @@ Session 065 delivered the first working end-to-end step automation path: the exi
 | `menu_automationValueMax(descriptor)` returns dtype-aware upper clamp: DTYPE_MENU returns table count−1 (except MENU_WAVEFORM→127), DTYPE_ON_OFF/MIX_FM→1, DTYPE_LFO_POLARITY→2; `menu_formatAutomationValue3(descriptor, value, buf)` formats 3 display chars by dtype | 065 |
 | `numtostrpu(buf, num, pad)` writes exactly 3 characters to `buf[0..2]` — do not point it at a 2-character field or it overflows into the adjacent column | 065 |
 | `getMenuItemNameForValue()` lacks OOB checking for non-waveform menu tables; `menu_formatAutomationValue3()` bounds-checks before calling it | 065 |
+| Makefile now has `-MMD -MP` + `-include $(OBJS:.o=.d)` — header dependency tracking active; the old `make clean` requirement after header edits is obsolete | 070 |
+| HCNAMES flush at browser domain transitions must install destination state BEFORE flush so completion callback dispatches to the correct context (Appendix A1-A4 ordering) | 070 |
+| `menu_selectionGeneration` (`uint8_t`) tags async name/preview callbacks; stale completions (generation mismatch) are silently discarded — Kit/KitMrp/Instrument loads no longer gate via `menu_storageBusy` | 070 |
+| `seq_evaluateStepCondition()` reads specials BEFORE the trigger-active check; `step_allowed` gates both trigger and automation; erase is independent of probability | 070 |
+| Scene automation targets (IDs 384..403) use runtime-only overlays (`morph_step_override[]`, `slot6_track7_decay_step_value`, `preset_applyVoiceAudioOutRuntime()`), NOT retained Scene/Kit setters — prevents AutoSave thrashing and user-value corruption | 070 |
+| `seq_scene_automation_dirty` (`uint32_t`) bitmap + `seq_restoreAllSceneAutomation()` walks bitmap and restores from retained SceneData on transport restart — mirrors the voice-parameter dirty/restore model | 070 |
+| `seq_restoreAllAutomation()` must run in `seq_setStepIndexToStart()` BEFORE `seq_clearAutomationDirty()` — clearing without restoring loses dirty overlays | 070 |
+| `seq_setRunning()`: stop sets `seq_running=0` first, start sets `seq_running=1` last — closes TIM3 preemption window where ISR sees running state before init completes | 070 |
+| `led_activeLayers[41]` per-LED bitmap with priority: pulse > flash > blink/chase > base; `led_renderFromStack()` replaces blind `led_reset()` in all expiry paths; chase at blink priority | 070 |
+| Pattern `fs_pattern_generation[]` must NOT be reset to 0 at load — seed from `winner_generation` (boot) or retain monotonic value (explicit load); zero causes older hidden file to win | 070 |
+| Voice Morph automation 7→8 bit expansion: `menu_morphAutomationStore()` (0..255 → 0..127), `menu_morphAutomationExpand()` (0..126→0..252, 127→255) | 070 |
+| `decode_devlogs.py` offsets shifted by Phase C source bytes: `SCENE_PARAMS_OFF=10`, `KIT_PARAMS_OFF=10`, `INST_NORMAL_OFF=13`, `INST_MORPH_OFF=85` | 070 |
 
 ---
 
@@ -1498,3 +1511,19 @@ Session 069 implemented the seven-phase bounded-CPU convergence plan from `S069_
 - Per-track scale/shuffle sequencer consumption (S068 deferred).
 
 - **Find here**: [069_SESSION_HANDOFF_LOG.md](069_SESSION_HANDOFF_LOG.md), `PATTERN_DYNAMIC_STACK.md` §12, `AUTOSAVE.md`, `SRAM_MANIFEST.md`, `MODULE_INTERCHANGE_SPEC.md`, `SCOPING_TARGETS.md` § Session 069 deferred refactor target.
+
+### 070 — Systems Fitness Pass: Load/Save Revision, Scene Automation, LED Consolidation, Runtime Overlay (2026-09-22/25)
+
+Session 070 executed a four-phase bounded systems-level fitness pass before Phase 5 Effects development, beginning from the Session 069 hardware-accepted baseline at commit `9627f70` (text=450,140, data=416, bss=291,756; image 450,572 bytes) and closing at commit `e3ae961` (text=455,804, data=416, bss=291,820; image 456,236 bytes).
+
+**Phase 1 — Engineering hygiene.** Makefile gained `-MMD -MP` and `-include $(OBJS:.o=.d)` for automatic header dependency tracking; the longstanding `make clean` footgun after header edits is resolved. `DEV_MODE_LOGGING=1` confirmed as default (config.h:88). `DEV_LOGGING_IWDG` stays inactive (config.h:200).
+
+**Phase 2 — Load/Save revision (LSR-01 through LSR-04).** Four-item selection-coordinate architecture: (1) mark-and-flush HCNAMES checkpoint at browser domain transitions (Kit↔Instrument, type switches, VOICE button, Pot-1 entries, Instrument exit) with destination-state-before-flush ordering and optimistic repaint for immediate visual feedback; (2) deferred HCNAMES write via new scheduler rung in `filesystem_tick()` between PatternTrace flush and budget refill, with page-exit browser teardown and retained dirty mask for deferred completion; (3) blank=not-ready / `Empty`=proved-absence display semantics with OK disabled while unresolved, plus domain-mismatch check on all four `filesystem_*SlotName()` accessors; (4) single `uint8_t` generation counter (`menu_selectionGeneration`) with snapshot comparison in callbacks — mismatch is stale discard, Kit/KitMrp/Instrument loads no longer gate via `menu_storageBusy`, and OK commit increments generation to freeze display. Four files changed: menu.c +300 lines, filesystem.c +64, menu.h +14, filesystem.h +19. RAM: 2 bytes. Hardware-tested with SD_CARD_LSR01-FINAL trace (54,972 records, zero failures).
+
+**Phase 3 — Feature behavior.** Three items: (3.1) Probability gating corrected — `seq_evaluateStepCondition()` reads specials before trigger-active check, `step_allowed` gates both trigger and automation, erase is independent. Initially implemented wrong (automation inside step-active block), remediated in `S070_PHASE3_FUCKUP_REMEDIATION.md`. (3.2) Scene automation targets 384–403 — 12 new Scene mod target entries (AUDIO_OUT 392–397, FX_SEND 398–403), `seq_applySceneAutomation()` static function with Voice Morph 7→8 bit expansion, `SCENE_MOD_TARGET_USE_AUTOMATION` flag, step-edit VOI cycles through 8 categories (voices 1–6, scn, fx), D17 category change defaults to `PAT_AUTOMATION_TARGET_OFF` sentinel, `va_scanService()` progressive scan for Scene target underlines (`va_searchSceneMask` 1 byte), `menu_sceneLiveRefreshService()` at 8 Hz during playback. (3.3) LED consolidation — `led_activeLayers[41]` per-LED bitmap, priority pulse > flash > blink/chase > base, `led_renderFromStack()` replaces blind `led_reset()` in all expiry paths, chase at blink priority. Build: 455,980 bytes at Phase 3 closeout (commit `e1a3223`).
+
+**Phase 4 — Testing closeout.** Six findings, three test sets, three architectural decisions resolved. F1: `decode_devlogs.py` offsets shifted (SCENE_PARAMS_OFF 8→10, KIT_PARAMS_OFF 8→10, INST_NORMAL_OFF 11→13, INST_MORPH_OFF 83→85). Q1: `seq_applySceneAutomation()` replaced with runtime-only overlay architecture — `morph_step_override[6]` in presetMorphEngine.c, `slot6_track7_decay_step_active/value` in InstrumentManager.c, `preset_applyVoiceAudioOutRuntime()` in presetManager.c, `seq_scene_automation_dirty` (uint32_t) bitmap with `seq_restoreAllSceneAutomation()` walk from retained SceneData. LFO+step interaction: Morph LFO modulates around step override; decimation last-writer-wins; slot6 decay step>LFO>retained. FX_SEND skipped (no bus). Q2: Pattern generation fix — removed `fs_pattern_generation[si] = 0u` at 3 sites, boot reader seeds from `winner_generation`, renamed `filesystem_resetPatternAutosaveGeneration` → `filesystem_patternAutosaveOnLoad`. Q3: Transport restart automation restore — `seq_restoreAllAutomation()` walks all 6 slots' dirty bitmaps and restores from `morph_interpolation[]`, called from `seq_setStepIndexToStart()` before `seq_clearAutomationDirty()`; `seq_setRunning()` restructured for stop-first/start-last. Tests: T1 PASS (AutoSave OFF→ON), T2a PASS after Q2 fix, T2b PASS, T2c PASS, T3 PASS (automation restart). Q1 hardware verification PASS (160,129 records, zero E/X errors). Final build: 456,236 bytes at commit `e3ae961`.
+
+**S071 carry-over plan:** Part A (per-Scene voice-edit mask A1–A10), Part B (base-independent LFO voice-morph contribution B1–B4), Part C (live Scene display C1, held-step underline C2, boot-state cleanup C3). Open questions Q-C1 and Q-C3 documented.
+
+- **Find here**: [070_SESSION_HANDOFF_LOG.md](070_SESSION_HANDOFF_LOG.md), `PATTERN_DYNAMIC_STACK.md`, `AUTOSAVE.md`, `MODULE_INTERCHANGE_SPEC.md`, `BANK_PRESET_ARCHITECTURE.md`.

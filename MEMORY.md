@@ -17,48 +17,33 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 068 closed and hardware-accepted three
-fixes on top of the Session 067 Pattern Stack Service baseline: the
-front-panel event path now uses a 64-entry monotonic SPSC ring with overflow
-reconciliation (fixes silently-dropped VOICE-mode step toggles), the hold
-timer checks physical held state before promoting, step toggles emit a
-logging-only witness, `BUTTON_HOLD_DELAY_MS` is 200ms; filesystem Scene/Bank
-realignment now synchronizes the played-Pattern UI mirror
-(`menu_setPlayedPattern()`) without runtime side effects, fixing missing
-chase-light after boot; the sequencer now reads each track's own
-`track_length` instead of a hardcoded 16-step wrap. Build: `text=447,860`,
-`data=412`, `bss=291,196`. All three verified on hardware — see
-`knowledge_files/log_archive/068_SESSION_HANDOFF_LOG.md`.
+**Current working source**: Session 070 completed a four-phase systems
+fitness pass before Phase 5 Effects development, closing at commit `e3ae961`
+on `dev-ph5-effects`. Build: `text=455,804`, `data=416`, `bss=291,820`;
+image 456,236 bytes. All phases hardware-verified.
 
-Session 069 has now implemented the bounded-CPU convergence plan: physical
-Pattern relocation remains separate from semantic Pattern AutoSave dirtiness;
-the periodic Tier 1/Tier 2 self-chasing loop is replaced by owned trailing
-slack reservations, a finite adaptive repair epoch, reactive-only compaction,
-and direct-path fragmentation retention. Pass 1 additionally makes scalar
-dirty detection constant-time, removes the clean idle occupancy recount, and
-coalesces semantic Pattern AutoSave behind a 250ms quiet window with a 5s
-maximum latency and fair Scene cursor. The 512-byte non-persisted SRAM1
-reservation image plus three policy/lifecycle bytes is documented in
-`SRAM_MANIFEST.md`. Clean source/build/image verification passed with
-`text=449,476`, `data=404`, `bss=291,724`; hardware verification is pending.
-Pass 2 now adds the shared elapsed-time background CPU budget across scalar
-AutoSave drain, Pattern AutoSave staging, and Pattern repair, plus the
-Load/Save repair gate and DEV-only H-stage accounting. The approved
-`budget_state` is exactly 36 bytes in normal SRAM1 `.bss`; clean source/build/
-image verification now reports `text=450,140`, `data=416`, `bss=291,756`.
-Pass 2 hardware verification and final snapshot measurement remain pending;
-see `S069_ATS_PAT_BOUNDED_PASS2_IMPLEMENT.md`.
-The implementation notes and verification table are in
-`S069_SLACK_REACTIVE_COMPACTION_IMPLEMENTATION.md` and
-`S069_ATS_PAT_BOUNDED_PASS1_IMPLEMENT.md`. Per-track step scale and
-shuffle sequencer consumption remain separately deferred (see
-`SCOPING_TARGETS.md` § Session 068 deferred items). Phase 4.5 copy operations
-(`pat_copyTrack`, `pat_copyPattern`, `pat_copyBar`) with independent
-pool-block duplication routed through the Pattern Stack Service remain queued.
-Permanent authority:
-`knowledge_files/log_archive/068_SESSION_HANDOFF_LOG.md` and
+Phase 1 added Makefile `-MMD -MP` header dependency tracking. Phase 2
+implemented the Load/Save revision (LSR-01..04): HCNAMES checkpoint at
+browser domain transitions, deferred HCNAMES write, blank/Empty display
+semantics, and a selection generation counter for stale callback discard.
+Phase 3 implemented probability gating (`seq_evaluateStepCondition()`),
+Scene automation targets 384..403 with runtime overlay architecture, and LED
+layer bitmap consolidation (`led_activeLayers[41]`). Phase 4 resolved all
+test and architectural decisions: Q1 Scene automation runtime overlay
+(`morph_step_override[]`, slot-6 decay step state, audio-out runtime apply),
+Q2 Pattern generation fix (removed stale `fs_pattern_generation` resets),
+Q3 transport restart automation restore (`seq_restoreAllAutomation()` +
+`seq_restoreAllSceneAutomation()` before clearing, `seq_setRunning()`
+stop-first/start-last). All tests PASS (T1 AutoSave OFF→ON, T2a/b/c
+Pattern persistence, T3 automation restart, Q1 hardware 160,129 records).
+
+Permanent authority: `knowledge_files/log_archive/070_SESSION_HANDOFF_LOG.md`,
+`069_SESSION_HANDOFF_LOG.md`, `068_SESSION_HANDOFF_LOG.md`,
 `067_SESSION_HANDOFF_LOG.md`, `PATTERN_DYNAMIC_STACK.md`,
-`MODULE_INTERCHANGE_SPEC.md`, `SRAM_MANIFEST.md`, and `DEV_MODES.md`.
+`MODULE_INTERCHANGE_SPEC.md`, `AUTOSAVE.md`, `BANK_PRESET_ARCHITECTURE.md`,
+`SRAM_MANIFEST.md`, and `DEV_MODES.md`. Per-track step scale and shuffle
+sequencer consumption remain deferred (see `PATTERN_DYNAMIC_STACK.md` §6.4).
+Phase 4.5 copy operations remain queued.
 
 ## RAM Allocation Approval Policy
 
@@ -83,90 +68,37 @@ This section is for short carryover points only. Flush or rewrite it at session
 end; durable facts belong in `knowledge_files/log_archive/` or
 `knowledge_files/specification_reference/`.
 
-- Session 068 is closed and hardware-accepted: front-panel event-ring
-  overflow fix (VOICE-mode step-toggle silent drops), missing chase-light
-  fix (`menu_playedPattern` mirror), and per-track sequencer step-length
-  consumption. Durable authority is
-  `knowledge_files/log_archive/068_SESSION_HANDOFF_LOG.md`; the five S068
-  planning/implementation documents that fed it
-  (`S068_PAT_ASSIGN_BUG.md`, `S068_PAT_ASSIGN_BUG_IN_DEPTH.md`,
-  `S068_PAT_ASSIGN_BUG_IMPLEMENTATION.md`, `S068_MISSING_CHASELIGHT.md`,
-  `S068_TRACK_SETTINGS_IGNORED.md`) are superseded by that log and by the
-  `specification_reference/` updates it made (`PATTERN_DYNAMIC_STACK.md`
-  §6.4/§12.7, `DEV_MODES.md`, `SRAM_MANIFEST.md`,
-  `MODULE_INTERCHANGE_SPEC.md`) and may be deleted. `S069_ATS_PAT_BOUNDED_CPU.md`
-  is a settled but **unimplemented** plan carried forward as Session 069's
-  starting point — do not delete it until that work lands or its content is
-  otherwise re-archived; its full substance is also preserved in
-  `068_SESSION_HANDOFF_LOG.md` §4 as a backstop. Session 069 broke out two
-  no-code implementation plans from it, each now with an independent second
-  pass: `S069_NON_SEMANTIC_MAINTENANCE.md` /
-  `S069_NON_SEMANTIC_PAT_MAINT_RESTRICTION_CLAUDE.md` cover "make physical
-  relocation non-semantic" — that slice is implemented in
-  `S069_NON_SEMANTIC_MAINT_IMPLEMENTATION.md` with source/build verification
-  complete and hardware verification pending. The CLAUDE variant follows
-  this session's direct-predicate running/stopped AutoSave policy (no cycle
-  count) and found `pat_markPoolMutationDirty()` had exactly one caller whose
-  dirty helper also clears the HCNAMES Pattern refreshed witness, not just the
-  AutoSave mask and card-clean bit. `S069_SLACK_REACTIVE_COMPACTION.md` /
-  `S069_SLACK_REACTIVE_COMPACTION_CLAUDE.md` cover the one 512-byte slack/
-  reservation image (SRAM1, neither persisted nor duplicated per
-  Pattern/Scene) — the CLAUDE variant settles the size, finds reactive
-  compaction already matches the target shape for the queued path (only the
-  periodic Tier 2 sweep and a direct-path parity gap need to change), and
-  finds `pat_tryAppendAutomation()`'s existing Gate-6 growth fast path is the
-  hook point for owned trailing slack. The CLAUDE documents note physical
-  relocation is scoped to the single active `service_scene` today, so
-  non-active-first ordering is currently near-dormant. The implementation
-  schedule is now landed; hardware fixtures remain pending.
-  Per-track step scale and shuffle are still stored/edited/persisted only,
-  with no sequencer playback effect — see `PATTERN_DYNAMIC_STACK.md` §6.4 and
-  `SCOPING_TARGETS.md` § Session 068 deferred items.
-
-- Session 070 Phase 3 source implementation is complete in the worktree; the
-  change-by-change record and build verification are in
-  `S070_PHASE3_IMPLEMENTATION.md`. Probability now gates trigger plus
-  automation, Scene targets 384..403 have step-automation runtime ownership,
-  D17 uses the Pattern-only `PAT_AUTOMATION_TARGET_OFF` value `0x1ff`, and LED
-  temporary effects use the approved 41-byte SRAM1 active-layer bitmap (plus
-  one byte of transient Menu category state for the D17 editor). Final
-  source/image build passed; hardware validation remains Phase 4 work.
-- Session 070 Phase 3 Item 3.1 remediation is implemented and build-verified
-  in `S070_PHASE3_FUCKUP_REMEDIATION.md`: `seq_advanceTrackStep()` now reads
-  dynamic specials and evaluates the shared conditional gate before the
-  trigger-active check, so allowed non-trigger automation reaches the pending
-  queue while probability still gates trigger and automation together. No
-  public `sequencer.h` API changed; hardware validation remains pending.
-- Session 070 Phase 3 remediation Issues 2 and 3 are implemented and
-  build-verified: Menu's bounded VOICE automation search now tracks per-voice
-  Scene targets (Morph, Audio Out, FX Send) for pattern-wide underlines, and a
-  foreground 8 Hz playback service repaints live Scene values on PERF and
-  VOICE/mix pages. Menu state increases by one Scene-mask byte and one
-  16-bit refresh timestamp; hardware validation remains pending.
-- Session 070 Phase 4 automation-missed source implementation is now present in
-  `Core/Sequencer/sequencer.c` and documented beside its public declaration in
-  `Core/Sequencer/sequencer.h`: grid resets restore dirty runtime overlays from
-  `morph_interpolation[]` before clearing tracking, and transport start/stop
-  closes the `seq_running` preemption window. The implementation record is
-  `S070_PHASE4_AUTOMATION_MISSED_IMPLEMENTATION.md`; the current ARM build
-  includes it, and T3 hardware validation is recorded PASS in
-  `S070_PHASE4_TESTING_FINAL.md`.
-- Session 070 Q1 Scene-target automation overlay is now source-implemented in
-  `S070_PHASE4_Q1_SCENE_AUTOMATION_IMPLEMENTATION.md`: Morph, Scene decimation,
-  generated slot-6 track-7 decay, and audio routing no longer use retained
-  Scene/Kit setters during step playback; transport reset restores runtime
-  overlays before clearing the new 32-bit Scene dirty bitmap. FX-send remains
-  a no-op until the Phase 5 bus exists. Clean ARM image verification passed
-  with `text=455,804`, `data=416`, `bss=291,820`, image 456,236 bytes;
-  hardware verification is pending.
-- Session 070 T2(a) Pattern-load generation fix is source- and ARM-build-
-  verified in `S070_T2A_PAT_LOAD.md`: Pattern load paths retain the monotonic
-  hidden-file generation, Scene/Bank load completion invalidates sd-clean
-  authority without resetting it, and the boot reader seeds non-`@` rows from
-  the highest valid hidden candidate while ignoring its payload. The generated
-  image is `build/LXRV2_lxr02.img` (456,084 bytes; `text=455,652`,
-  `data=416`, `bss=291,804`); T2(a) hardware retest and load regressions remain
-  pending.
+- Session 070 is closed and hardware-accepted. Durable authority is
+  `knowledge_files/log_archive/070_SESSION_HANDOFF_LOG.md` and the
+  specification-reference updates it made (`MODULE_INTERCHANGE_SPEC.md`,
+  `PATTERN_DYNAMIC_STACK.md`, `AUTOSAVE.md`, `BANK_PRESET_ARCHITECTURE.md`).
+  The S070 task documents (`S070_SYSTEMS_GENERAL_CHECK_AND_REVIEW_PLAN.md`,
+  `S070_PHASE1_TASK_LOG.md`, `S070_PHASE2_LOAD_SAVE_REVISION.md`,
+  `S070_PHASE2_IMPLEMENTATION.md`, `S070_PHASE2_LSR01_SUPPLEMENT.md`,
+  `S070_PHASE2_LSR01_MENU_USER_FEEL.md`, `S070_PHASE3_FEATURE_ADDITIONS.md`,
+  `S070_PHASE3_IMPLEMENTATION.md`, `S070_PHASE3_FUCKUP_REMEDIATION.md`,
+  `S070_PHASE4_TESTING_FINAL.md`, `S070_T2A_PAT_LOAD.md`,
+  `S070_PHASE4_AUTOMATION_MISSED.md`,
+  `S070_PHASE4_AUTOMATION_MISSED_IMPLEMENTATION.md`,
+  `S070_PHASE4_Q1_SCENE_AUTOMATION_IMPLEMENTATION.md`) are superseded by
+  that log and specification updates and may be deleted.
+- Session 071 plan is in `S071_VOICE_MORPH_AUTOMATION_MODULATION_CLEANUP.md`:
+  Part A (per-Scene voice-edit mask), Part B (base-independent LFO voice-morph
+  contribution), Part C (Scene superpage live display, held-step underline,
+  boot-state cleanup). Open questions Q-C1 and Q-C3.
+- FX_SEND automation (targets 398..403) is wired for editing and storage but
+  the apply path is a no-op until the Phase 5 FX bus is implemented.
+- Per-track step scale and shuffle are stored/edited/persisted only, with no
+  sequencer playback effect — see `PATTERN_DYNAMIC_STACK.md` §6.4.
+- Phase 4.5 copy operations (`pat_copyTrack`, `pat_copyPattern`,
+  `pat_copyBar`) remain queued.
+- S069 planning documents (`S069_ATS_PAT_BOUNDED_CPU.md`,
+  `S069_NON_SEMANTIC_MAINTENANCE.md`, `S069_SLACK_REACTIVE_COMPACTION.md`,
+  and their CLAUDE variants/implementation docs) are superseded by
+  `069_SESSION_HANDOFF_LOG.md` and may be deleted.
+- S068 planning documents (`S068_PAT_ASSIGN_BUG*.md`,
+  `S068_MISSING_CHASELIGHT.md`, `S068_TRACK_SETTINGS_IGNORED.md`) are
+  superseded by `068_SESSION_HANDOFF_LOG.md` and may be deleted.
 
 - Read `knowledge_files/log_archive/040_SESSION_HANDOFF_LOG.md` before
   continuing Scene/Bank or filesystem work. It preserves the verified
@@ -492,13 +424,10 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
   the IWDG has no interrupt line on this part. Full contract in DEV_MODES.md
   and config.h. UNPROVEN on hardware — this has not yet been exercised
   through an actual reproduced hang.
-- **Build-system footgun (found 2026-08-21):** the Makefile has NO header
-  dependency tracking (no `-MMD`/`-MP`/`-include *.d`). Editing `config.h`
-  alone does not rebuild anything, so a flag flip followed by a bare `make`
-  silently produces a binary with the OLD flag value and identical reported
-  sizes. Always `make clean` after editing a header, or add `-MMD -MP` plus
-  `-include $(OBJS:.o=.d)`. This affects every `config.h` experiment
-  (`DEV_MODE_*`, trace sizes, timing constants), not just one feature.
+- **Build-system footgun (resolved Session 070 Phase 1):** the Makefile now
+  has `-MMD -MP` plus `-include $(OBJS:.o=.d)` header dependency tracking.
+  Editing a header correctly triggers recompilation. `make clean` is no
+  longer required after header edits.
 - Session 2026-08-21 Scene-Pattern fix: Pattern is the only Scene payload
   playback/UI address through `seq_activePattern`/`menu_shownPattern` instead
   of `scene_getActiveIndex()`. Bank Load committed a new active Scene without
@@ -932,11 +861,12 @@ and may contain historical snapshots as noted below.
 | File | What it contains | Use it when |
 |------|------------------|------------|
 | `ASYNCFATFS_REFERENCE.md` | Foreground-pumped async FAT32/VFAT contracts: component paths, LFN/SFN identity, object iteration, removal, terminator-aware directory-entry publication, lazy directory-cluster initialization, and flush boundaries. | Changing `Core/Hardware/SD/asyncfatfs/` or adding filesystem operations. |
-| `AUTOSAVE.md` | Implemented scalar HCPR and per-Scene PAT4 hidden A/B formats, boot readers, ownership, dirty masks, writer lifecycle, power-loss behavior, and validation status. | Changing AutoSave format, boot restore, dirty hooks, capture, scheduling, or recovery. |
+| `AUTOSAVE.md` | Implemented scalar HCPR and per-Scene PAT4 hidden A/B formats, boot readers, ownership, dirty masks, writer lifecycle, power-loss behavior, and validation status. Updated through Session 070. | Changing AutoSave format, boot restore, dirty hooks, capture, scheduling, or recovery. |
+| `BANK_PRESET_ARCHITECTURE.md` | Hierarchy overview (Bank → Scene → Kit → Instrument), BankData voice-edit mask, SceneData parameter images, morph engine, runtime overlay architecture, Scene mod targets, `parameter_values[]` legacy bridge, dirty marking, and boot restore order. Written Session 070. | Understanding parameter storage, morph interpolation, runtime overlays, Scene activation, or dirty marking. |
 | `CPU_USE_DSP_AUDIT.md` | Historical DSP performance audit covering render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA, hot-loop costs, and an ordered optimization record. | Investigating audio underruns or changing render placement/optimization. It describes an audited snapshot, not necessarily current ownership. |
 | `DEV_MODES.md` | Screen-only diagnostic versus file-only logging contract, current `bootlog.bin`/`asavetrc.bin` formats, duplicate limitation, and failed unified-log warning. | Adding or interpreting diagnostics, trace, or logging output. |
 | `FILESYSTEM_SPEC.md` | Current product storage specification through Session 064: root layout, typed 145-row HCNAMES, PAT4, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, boot restore, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
-| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 064 for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
+| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 070 for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
 | `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
 | `SRAM_MANIFEST.md` | Current Session 064 logging-on linked snapshot, AutoSave Pattern/reader/trace owners, and binding Pattern/delay reservation policy. | Changing retained state, adding caches/names, or evaluating RAM cost. Regenerate after allocation changes. |
 
@@ -954,16 +884,11 @@ Port LXR 0.37 to the LXR-02 hardware (STM32F765VIH6). Original LXR: STM32F4 audi
 ## General Process Reminders
 
 - Always verify the local working repository directory before writing code.
-- **Always `make clean` after editing `config.h` (or any header).** The Makefile
-  has no header dependency tracking — no `-MMD`, no `-MP`, no `-include *.d` —
-  so editing a header rebuilds *nothing*. A flag flip followed by a bare `make`
-  silently produces a binary containing the OLD value, with byte-identical
-  reported sizes, which makes it look like the change had no effect. This
-  affects every `config.h` experiment (`DEV_MODE_DIAGNOSTIC`,
-  `DEV_MODE_LOGGING`, `DEV_LOGGING_IWDG`, `AUTOSAVE_TRACE_RECORD_COUNT`, the
-  timing constants). Never trust an incremental build across a header edit, and
-  never report build sizes from one. The durable fix is adding `-MMD -MP` to
-  `CFLAGS` plus `-include $(OBJS:.o=.d)` to the Makefile. Confirmed 2026-08-21.
+- **Header dependency tracking is active (Session 070 Phase 1).** The Makefile
+  uses `-MMD -MP` in `CFLAGS` plus `-include $(OBJS:.o=.d)`, so editing a
+  header correctly triggers recompilation of dependent `.o` files on the next
+  `make`. A `make clean` is no longer required after header edits. This was
+  confirmed working 2026-09-18.
 - Blocking for 1ms anywhere in the main loop or any ISR at priority <= 4 is unacceptable.
 - Runtime SD/file work must remain asynchronous; boot-only synchronous polling is allowed before audio starts.
 - New code should be commented at detailed contract level: why the function,

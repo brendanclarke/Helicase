@@ -381,7 +381,7 @@ Options: (a) accept and document; (b) apply as runtime overlay like LFO;
 **Q1 resolution (2026-09-25):** option (b) implemented in
 `S070_PHASE4_Q1_SCENE_AUTOMATION_IMPLEMENTATION.md`. Scene-target step
 automation now uses runtime-only overlays with transport-boundary restore;
-source/build verification passed, and hardware verification remains pending.
+source/build verification passed. Hardware verification PASS — see §10.
 
 **Q2 — Stale Pattern generation after explicit load (F4, if T2 fails).**
 
@@ -439,3 +439,126 @@ outcomes:
 | T2(b) | 2026-09-25 | — | PASS | Held-step value persisted correctly through snapshot writes |
 | T2(c) | 2026-09-25 | `SD_CARD_T2C_STEP3`, `SD_CARD_T2C_STEP6` | PASS | Truncated B rejected (Scene 2), CRC-bad B rejected (Scene 3): valid A loaded in both. Absent files (Scene 4): boot completed, Pattern region empty but selectable. Non-`@` row case dropped — HCNAMES is firmware-internal, fabricating a row/file inconsistency tests the fixture not the product. |
 | T3 | 2026-09-24 | Commit `2f5b3d2` (fixes 4A/4B/4C) | PASS | Step 0 automation fires on all restarts; no double trigger. See `S070_PHASE4_AUTOMATION_MISSED.md` §7 |
+| Q1 hw | 2026-09-25 | `SD_CARD_PH4_Q1_OUTPUT2` | PASS | Trace analysis: 160,129 records, zero E/X errors. Writer converges (charged_ms 28→5→1→0) and stays quiet (four consecutive zero-charge budget reports through tick 44350). No per-step automation dirtying pattern — step automation uses runtime overlay. Remaining D records are from morph worker LFO-resolution commits on Scene 5 (active) and PERF edit fan-out through the global mask (bursts of 16 at each edit tick, expected until per-Scene mask is implemented in S071). |
+
+---
+
+## 10. Q1 hardware verification
+
+**Q1 resolution (2026-09-25)**: option (b) — runtime overlay — implemented
+in `S070_PHASE4_Q1_SCENE_AUTOMATION_IMPLEMENTATION.md`, commit `e3ae961`.
+Hardware-verified with `SD_CARD_PH4_Q1_OUTPUT2` AutoSave trace.
+
+**Trace summary** (160,129 records, `asavetrc.bin`):
+
+| Metric | Value |
+|---|---|
+| Total D records | 151,221 |
+| E/X errors | 0 |
+| Publish/Terminal cycles | 345 / 357 |
+| Budget at convergence | charged_ms=0, denied=0 across all classes |
+| Quiet tail start | tick ~29,345 (4 consecutive zero-charge groups) |
+
+**D record analysis**:
+
+- `6vm` on Scene 5 (active): 7,296 — morph worker LFO-resolution commits +
+  PERF encoder edits.
+- `6vm` on other 15 Scenes: ~2,650 each — PERF edit fan-out through the
+  global voice-edit mask (bursts of exactly 15–16 per tick).
+- Other scene-params (`1vm`, `4vm`, `5vm`, `mrp`, `6fx`, `6ou`, etc.):
+  concentrated on Scene 5 — normal PERF edits to the active Scene.
+- `instrument[5] normal[21/22]` on all Scenes: VOICE-page instrument edits
+  fanning out through the global mask.
+- `Bank active_scene`: 144 — Scene switches.
+
+**Conclusion**: step automation produces zero retained dirty marks. The
+runtime overlay path (Q1) is validated. All remaining D records come from
+intentional user edits (PERF encoder, VOICE page) and morph worker
+resolution commits — both expected and correct. The fan-out to all 16
+Scenes from a single edit is the global-mask behavior addressed by Part A
+of `S071_VOICE_MORPH_AUTOMATION_MODULATION_CLEANUP.md`.
+
+---
+
+## 11. Session 070 closeout
+
+### Decisions
+
+| ID | Decision | Date |
+|---|---|---|
+| Q1 | Runtime overlay for Scene-target step automation (option b) | 2026-09-25 |
+| Q2 | Pattern generation continues from in-RAM value at explicit load (no reset to zero) | 2026-09-25 |
+| Q3 | Restore-before-clear at transport boundaries (fixes 4A/4B/4C) | 2026-09-24 |
+
+### Carry-over to S071
+
+Items deferred to `S071_VOICE_MORPH_AUTOMATION_MODULATION_CLEANUP.md`:
+
+- **Part A (A1–A10)**: per-Scene voice-edit mask — storage, accessors,
+  Autosave format, bankset.bcg format, filesystem load/save, morph rebuild
+  on Scene switch.
+- **Part B (B1–B4)**: base-independent LFO voice-morph contribution
+  representation.
+- **Part C (new)**: Scene superpage live automation display, voice-edit mask
+  boot-state cleanup, and related UI fixes. See S071 plan §Part C for
+  details and open questions.
+
+### Build
+
+Commit `e3ae961` on `dev-ph5-effects`.
+Image: `build/LXRV2_lxr02.img`, 456,236 bytes (+256 from Phase 3
+baseline `e1a3223`).
+
+### Session 070 handoff
+
+```
+DATE: 2026-09-25
+SESSION GOAL: Systems-level fitness pass before Phase 5 Effects development
+COMPLETED:
+  Phase 1: Makefile -MMD -MP, DEV mode default, IWDG inactive (verified)
+  Phase 2: Load/Save revision (LSR-01 through LSR-04), menu user feel
+  Phase 3: Probability gating, Scene automation targets 384-403, LED bitmap
+  Phase 4: AutoSave re-enable testing (T1-T3), Pattern persistence (T2a-c),
+    Q1 runtime overlay for Scene-target step automation,
+    Q2 Pattern generation fix at explicit load,
+    Q3 automation restore at transport boundaries (F5/F6),
+    decode_devlogs.py offset fix (F1)
+VERIFIED ON HARDWARE: yes — T1 (AutoSave OFF/ON), T2a/b/c (Pattern
+  persistence), T3 (automation restart), Q1 (AutoSave trace clean)
+
+CHANGES THIS SESSION:
+- Core/Sequencer/sequencer.c: runtime overlay dispatch, restore-before-clear,
+  deferred seq_running, Scene-target dirty bitmap
+- Core/Bank/Scene/Preset/presetMorphEngine.c: step automation override array,
+  effective-base accessor, clear/restore helpers
+- Core/Bank/Scene/Preset/presetMorphEngine.h: step override and effective-base
+  API declarations
+- Core/Bank/Scene/Preset/presetManager.c: runtime voice decimation and audio
+  out apply functions
+- Core/DSP/Instruments/InstrumentManager.c: slot-6 track-7 decay step override,
+  trigger cascade with step>LFO>retained priority
+- Core/Bank/Scene/Autosave.c: Q3 timing fix (TIM3 race)
+- tools/decode_devlogs.py: payload offset correction (F1)
+- tools/devlog_unpack.py: imported offset tables
+
+KNOWN ISSUES INTRODUCED: none
+KNOWN ISSUES RESOLVED:
+- F1 (decoder offsets), F2 (Q1 automation dirtying), F4 (Q2 stale Pattern),
+  F5/F6 (Q3 automation restore at restart)
+
+NEXT SESSION RECOMMENDED GOAL: S071 — per-Scene voice-edit mask (Part A),
+  base-independent LFO contribution (Part B), Scene superpage live display
+  and voice-edit mask boot-state fixes (Part C)
+BLOCKERS: Part C has open questions requiring user input — see S071 plan
+  §Part C preamble
+
+CRITICAL REMINDERS FOR NEXT SESSION:
+- S070_PH4_MORPH_PER_SCENE_IMPLEMENTATION.md and S071_LFO_VOICE_MORPH.md
+  can be deleted — their content is consolidated in
+  S071_VOICE_MORPH_AUTOMATION_MODULATION_CLEANUP.md
+- The global voice-edit mask fans out every PERF edit to all 16 Scenes.
+  Part A fixes this. Until then, AutoSave trace shows expected bursts of
+  16 D records per edit tick.
+- LFO voice-morph direction+depth (Part B) must land together with the
+  InstrumentManager polarity encoding (B4)
+```

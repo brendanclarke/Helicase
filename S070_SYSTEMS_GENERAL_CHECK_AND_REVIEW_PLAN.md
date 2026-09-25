@@ -245,15 +245,15 @@ Scope depends on what was actually implemented.
 | 1.1 | Makefile header deps | DONE | `-MMD -MP` + `-include *.d` added |
 | 1.2 | DEV mode default | DONE | Verified: `DEV_MODE_LOGGING 1` (config.h:88) |
 | 1.3 | IWDG inactive | DONE | Verified: `DEV_LOGGING_IWDG 0` (config.h:200) |
-| 2 | Load/Save revision | PLANNING | See `S070_PHASE2_LOAD_SAVE_REVISION.md` |
-| 3.1 | Probability gating | NOT STARTED | Defect from S066 |
-| 3.2 | Scene automation targets | NOT STARTED | Descriptor targets only today |
-| 3.3 | LED consolidation | NOT STARTED | Phase 4.11 |
+| 2 | Load/Save revision | DONE | LSR-01 through LSR-04 implemented and hardware-tested. See `S070_PHASE2_LOAD_SAVE_REVISION.md`, `S070_PHASE2_IMPLEMENTATION.md` |
+| 3.1 | Probability gating | DONE | Implemented and hardware-tested at Phase 3 closeout (`e1a3223`) |
+| 3.2 | Scene automation targets | DONE | Targets 384–403 implemented. Hardware-verified in `SD_CARD_PHASE3_OUTPUT` |
+| 3.3 | LED consolidation | DONE | LED layer bitmap implemented at Phase 3 closeout |
 | 3.4 | Track properties deferred | DEFERRED | See drafts/ document |
-| 4.1 | AutoSave re-enable | NOT STARTED | Root cause resolved in S069 |
-| 4.2 | Pattern persistence | NOT STARTED | Validation cases defined |
-| 4.3 | Duplicate filename test | NOT STARTED | Expected non-issue |
-| 4.4 | Regression validation | NOT STARTED | Scope TBD |
+| 4.1 | AutoSave re-enable | DONE | T1 PASS (2026-09-24). Q1 runtime overlay hardware-verified (2026-09-25) |
+| 4.2 | Pattern persistence | DONE | T2(a) confirmed F4, fix applied, retest PASS. T2(b) PASS. T2(c) PASS |
+| 4.3 | Duplicate filename test | DEFERRED | Expected non-issue, deferred to D-D sketch |
+| 4.4 | Regression validation | DONE | T3 PASS (automation restart). Q1 trace clean. No regressions observed |
 
 ## S069 closure status
 

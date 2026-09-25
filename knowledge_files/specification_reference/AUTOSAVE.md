@@ -4,7 +4,7 @@
 
 This is the authoritative reference for the implemented Helicase AutoSave
 format, ownership, boot restore, mutation tracking, and background writer
-through Session 069 (all phases). Historical plans and session logs explain
+through Session 070 (all phases). Historical plans and session logs explain
 how the implementation was reached, but they do not override this document.
 
 Related authority is deliberately separate:
@@ -92,6 +92,16 @@ Not implemented and not to be inferred from the reader/writer:
 - live Effect persistence (`AUTOSAVE_EFFECT_PARAM_COUNT` is zero);
 - crash-recoverable promotion into explicit Bank library files;
 - a second resident Bank, background staging Bank, or general object journal.
+
+Scene automation runtime overlays (`morph_step_override[]`,
+`slot6_track7_decay_step_value`, runtime audio routing) are transient
+playback state and are explicitly excluded from AutoSave dirty marking.
+`seq_scene_automation_dirty` (uint32_t) tracks their runtime presence for
+transport-restart restore only. This separation is architectural (Session
+070 Q1): step automation must never touch retained Scene/Kit setters during
+playback. A deferred HCNAMES scheduler rung in `filesystem_tick()` drains
+HCNAMES dirty masks retained across Load/Save page exit (Session 070
+LSR-02).
 
 `AUTOSAVE_HCNAMES_ROW_COUNT` is 145. HCPR format version 2 is therefore the
 only current scalar record version; version 1 records are not accepted by the
@@ -658,9 +668,14 @@ At boot, both candidates for each present Scene are independently validated.
 The winner applies only when the corresponding HCNAMES Pattern row carries
 the Pattern-only `@` token (`0x1ffc`) and the generation is nonzero. Missing or
 bad Pattern files do not invalidate scalar Scene state. Explicit Pattern
-library and Scene/Bank directory loads reset the destination generation
-baseline to zero. Complete resident layout and PAT4 bytes are authoritative in
-`PATTERN_DYNAMIC_STACK.md`.
+library and Scene/Bank directory loads call `filesystem_patternAutosaveOnLoad()`
+(renamed from `filesystem_resetPatternAutosaveGeneration` in Session 070),
+which invalidates the sd-clean authority for that Scene without resetting the
+monotonic generation counter. The generation must NOT be reset to zero on load:
+a zero generation causes the boot reader to prefer an older hidden file with
+generation > 0 over the just-loaded Pattern (Session 070 Q2 fix). The boot
+reader's non-`@` branch seeds from `winner_generation`. Complete resident
+layout and PAT4 bytes are authoritative in `PATTERN_DYNAMIC_STACK.md`.
 
 ## Power-loss behavior
 

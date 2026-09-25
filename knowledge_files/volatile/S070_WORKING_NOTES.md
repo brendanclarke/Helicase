@@ -1,55 +1,66 @@
-# S070 Inter-Session Working Notes
+# S071 Inter-Session Working Notes
 
-Last updated: 2026-09-22 (Session 069 closure)
+Last updated: 2026-09-25 (Session 070 closure)
 
-## Pass 2 Hardware Validation (PENDING)
+## S071 Plan
 
-Session 069 Pass 2 implementation is code-complete at commit `9627f70` but has
-not been hardware-validated. The validation must confirm:
+`S071_VOICE_MORPH_AUTOMATION_MODULATION_CLEANUP.md` defines three parts:
 
-- Shared background CPU budget enforces 2.5%/5% limits during playback/stopped
-- `H` trace reports show per-class budget accounting (DEV build)
-- Load/Save repair gate suppresses repair on Load/Save pages
-- Pattern quiet window (250 ms) and max latency (5000 ms) behave correctly
-- No audio glitches under sustained editing with budget active
+- **Part A** — Per-Scene voice-edit mask (BankData array, Autosave format
+  expansion, bankset.bcg per-Scene keys with legacy fallback, morph rebuild
+  on Scene switch). 10 implementation items (A1–A10).
+- **Part B** — Base-independent LFO voice-morph contribution (direction+depth
+  representation, resolver rewrite, polarity encoding without base read).
+  4 implementation items (B1–B4).
+- **Part C** — Scene superpage live display, held-step underline, boot-state
+  cleanup. 3 items (C1–C3). C2 is an independent one-liner. C3 is resolved
+  by Part A landing. C1 depends on Q-C1 decision.
 
-## Non-Semantic Maintenance Observations
+Implementation order: A1–A3 → A4–A7 → A8–A9 → A10 → C2 → C1 → C3 → B1–B3 → B4.
 
-The non-semantic scheduler rung was hardware-validated in S069 (PASS). Key
-observation: the arm/due-tick debounce with non-active-first Scene selection
-works correctly. The idle tick-tail `patSvc_countUsed()` call was removed;
-mutation-path recounts are retained.
+## Open Questions
 
-## Reactive Compaction Notes
+**Q-C1**: Should the Scene superpage show live effective values for all
+automatable Scene settings (morph, audio out, FX send) or only for voice
+morph? If all, new effective-value getters are needed for audio out and
+FX send.
 
-Periodic Tier 2 sweep is deleted. Reactive recovery triggers only on blocked
-allocation. Two-pass search: reservation-respecting first, then reclaim surplus
-when density inactive. This was hardware-validated (PASS) in S069.
+**Q-C3**: Is Part A sufficient for boot-state cleanup, or should a
+present-mask intersection also be added as defensive measure in
+`bank_setSceneMaskVoiceEdit()`?
 
-## Known Deferred Items from S069
+## Build Metrics at S070 Closure
 
-1. **Budget extraction**: The budget primitive lives in filesystem.c alongside
-   its only consumers. If future non-filesystem modules need budget gating,
-   extract to a standalone module. Not needed now.
-
-2. **Repair gate during Load/Save**: Currently uses `menu_activePage` check.
-   If Load/Save lifecycle becomes more complex, consider a dedicated
-   `filesystem_isLoadSaveActive()` predicate.
-
-3. **Per-track scale and per-track shuffle**: Listed in SCOPING_TARGETS as
-   Phase 4 remaining items. Not addressed in S069.
-
-## AutoSave Re-Enable Observations
-
-The OFF-to-ON implementation is correct per S070_AUTOSAVE_REENABLE.md
-analysis. The apparent non-convergence was caused by Pattern maintenance churn
-(now fixed by S069 non-semantic separation). Test matrix items 1-6 from that
-document should be exercised in S070.
-
-## Build Metrics at S069 Closure
-
-- text: 450,140 bytes
+- text: 455,804 bytes
 - data: 416 bytes
-- bss: 291,756 bytes
-- image: 450,572 bytes
-- Commit: `9627f70` on `dev-ph5-effects`
+- bss: 291,820 bytes
+- image: 456,236 bytes
+- Commit: `e3ae961` on `dev-ph5-effects`
+
+## Carry-Over From Prior Sessions
+
+1. **FX_SEND automation (targets 398..403)**: wired for editing/storage, apply
+   path is no-op until Phase 5 FX bus.
+2. **Per-track step scale and shuffle**: stored/edited/persisted, no sequencer
+   playback effect. See `PATTERN_DYNAMIC_STACK.md` §6.4.
+3. **Phase 4.5 copy operations**: `pat_copyTrack`, `pat_copyPattern`,
+   `pat_copyBar` remain queued.
+4. **Budget extraction**: filesystem.c budget primitive may need extraction to
+   standalone module if non-filesystem consumers appear.
+5. **Repair gate**: `menu_activePage` check works; consider dedicated
+   `filesystem_isLoadSaveActive()` if Load/Save lifecycle grows complex.
+
+## S070 Session Summary (Reference)
+
+Four-phase systems fitness pass on `dev-ph5-effects`:
+- Phase 1: Makefile `-MMD -MP` header dependency tracking
+- Phase 2 (LSR-01..04): HCNAMES checkpoint, deferred write, blank/empty
+  display, selection generation counter
+- Phase 3: Probability gating, Scene automation targets 384–403, LED layer
+  consolidation
+- Phase 4: Q1 morph/Scene runtime overlay architecture, Q2 Pattern generation
+  fix, Q3 transport restart restore
+
+Durable authority: `070_SESSION_HANDOFF_LOG.md` and specification reference
+updates (`MODULE_INTERCHANGE_SPEC.md`, `PATTERN_DYNAMIC_STACK.md`,
+`AUTOSAVE.md`, `BANK_PRESET_ARCHITECTURE.md`).
