@@ -180,6 +180,15 @@ New:
         : scene->settings.voice_morph_amount[slot];
 ```
 
+**Modify `presetMorph_applyVoiceNow()`**: use the step-automation override
+when a trigger-time synchronous slot apply is required. This keeps the
+deferred worker, priority snapshot, and synchronous Scene-switch path on the
+same effective Morph base.
+
+**Add `presetMorph_getEffectiveVoiceAmount()`**: expose a read-only effective
+base accessor to InstrumentManager so LFO shaping is centered on the active
+step value when Morph step automation and LFO modulation overlap.
+
 **Add new functions** (after `presetMorph_clearLfoSource()`, line 604):
 
 ```c
@@ -666,8 +675,8 @@ restore. This is the primary Scene-switch path during playback.
 
 | File | Changes |
 |---|---|
-| `Core/Bank/Scene/Preset/presetMorphEngine.c` | Add `morph_step_override[]`; modify snapshot/resolve/priority to use override; add set/clear functions |
-| `Core/Bank/Scene/Preset/presetMorphEngine.h` | Declare `presetMorph_setStepAutomationOverride()`, `presetMorph_clearAllStepAutomationOverrides()` |
+| `Core/Bank/Scene/Preset/presetMorphEngine.c` | Add `morph_step_override[]`; modify snapshot/resolve/priority/synchronous apply to use override; add effective-base, set, and clear functions |
+| `Core/Bank/Scene/Preset/presetMorphEngine.h` | Declare effective-base, set, and clear step-automation Morph APIs |
 | `Core/DSP/Instruments/InstrumentManager.c` | Add `slot6_track7_decay_step_active/value`; modify trigger cascade; add set/clear functions |
 | `Core/DSP/Instruments/InstrumentManager.h` | Declare `instrumentManager_setSlot6Track7StepDecayOverride()`, `instrumentManager_clearSlot6Track7StepDecayOverride()` |
 | `Core/Bank/Scene/Preset/presetManager.c` | Add `preset_applyVoiceAudioOutRuntime()` |
@@ -678,7 +687,7 @@ restore. This is the primary Scene-switch path during playback.
 
 ```
 presetMorphEngine.c  ←── Change 1 (override layer, snapshot, resolve, set/clear)
-presetMorphEngine.h  ←── Change 2 (declarations)
+presetMorphEngine.h  ←── Change 2 (effective-base, set/clear declarations)
 InstrumentManager.c  ←── Change 3 (slot6 decay override, trigger cascade, set/clear)
 InstrumentManager.h  ←── Change 4 (declarations)
 presetManager.c      ←── Change 5 (audio out runtime apply)
@@ -733,3 +742,28 @@ because the new functions have no callers until Change 7 connects them.
 2. Play. The Morph gesture should reflect the step value modulated by the
    LFO wobble.
 3. Stop. The Morph value should revert to the user-set base.
+
+## 11. Implementation notes and verification
+
+### 2026-09-25 — source implementation complete
+
+- Implemented the runtime-only Scene-target overlay path in the seven files
+  listed above. Retained Scene/Kit setters are no longer called by
+  `seq_applySceneAutomation()`; Morph, decimation, generated track-7 decay,
+  and audio routing use dedicated runtime owners. FX-send remains a deliberate
+  no-op until its Phase 5 bus exists.
+- Added one 32-bit Scene-target dirty bitmap (+4 B normal SRAM1), six two-byte
+  Morph override records, and two bytes for the generated-decay overlay. No
+  persisted record, Pattern region, DTCM, or delay-line allocation changed.
+- Transport/Pattern reset now restores Scene-target overlays before clearing
+  both Scene and voice automation tracking. Morph restore queues a retained
+  Scene rebuild; decimation and audio routing restore directly from retained
+  Scene settings; generated decay falls back through its existing LFO/Kit
+  priority chain.
+- Added the effective Morph-base accessor so LFO shaping composes around a
+  step-automation value instead of briefly reverting to the retained base.
+  Synchronous trigger-time Morph application also uses the overlay.
+- Clean source/build/image verification passed with:
+  `arm-none-eabi-size`: `text=455804`, `data=416`, `bss=291820`; packaged
+  `build/LXRV2_lxr02.img`: 456,236 bytes (456,220-byte firmware payload plus
+  the 16-byte image header). Hardware verification is pending.

@@ -151,6 +151,14 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `S070_PHASE4_AUTOMATION_MISSED_IMPLEMENTATION.md`; the current ARM build
   includes it, and T3 hardware validation is recorded PASS in
   `S070_PHASE4_TESTING_FINAL.md`.
+- Session 070 Q1 Scene-target automation overlay is now source-implemented in
+  `S070_PHASE4_Q1_SCENE_AUTOMATION_IMPLEMENTATION.md`: Morph, Scene decimation,
+  generated slot-6 track-7 decay, and audio routing no longer use retained
+  Scene/Kit setters during step playback; transport reset restores runtime
+  overlays before clearing the new 32-bit Scene dirty bitmap. FX-send remains
+  a no-op until the Phase 5 bus exists. Clean ARM image verification passed
+  with `text=455,804`, `data=416`, `bss=291,820`, image 456,236 bytes;
+  hardware verification is pending.
 - Session 070 T2(a) Pattern-load generation fix is source- and ARM-build-
   verified in `S070_T2A_PAT_LOAD.md`: Pattern load paths retain the monotonic
   hidden-file generation, Scene/Bank load completion invalidates sd-clean

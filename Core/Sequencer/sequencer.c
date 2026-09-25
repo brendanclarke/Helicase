@@ -60,7 +60,9 @@
 #include "PatternTrace.h"
 #include "PatternStackService.h"
 #include "SceneModTargets.h"
+#include "InstrumentManager.h"
 #include "presetManager.h"
+#include "presetMorphEngine.h"
 
 /*
  * Pattern probability uses the existing hardware RNG without new state.
@@ -177,6 +179,18 @@ static volatile uint8_t seq_pending_automation_drain = 0u;
 static uint64_t seq_automation_dirty[INSTRUMENT_SLOT_COUNT];
 
 /*
+ * Scene-target step-automation restore bitmap (+4 B normal SRAM1).
+ *
+ * What: one bit per current Scene target-table entry. Why: Scene-target step
+ * values are runtime overlays, so transport restore must know which retained
+ * values need to be re-applied without serializing or dirtying them. Lifetime:
+ * static until the next restore/clear. Owner: Sequencer. Affiliates:
+ * seq_applySceneAutomation(), seq_restoreAllSceneAutomation(), and the
+ * kind-specific Preset/InstrumentManager runtime overlays.
+ */
+static uint32_t seq_scene_automation_dirty;
+
+/*
  * Clear all pending transient automation restores.
  *
  * Inputs: none. Output: every voice-slot dirty bitmap is zero. This is used
@@ -189,6 +203,7 @@ static void seq_clearAutomationDirty(void)
 
     for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++)
         seq_automation_dirty[slot] = 0u;
+    seq_scene_automation_dirty = 0u;
 }
 
 /*
@@ -241,6 +256,78 @@ static void seq_restoreAllAutomation(void)
                     instrument->parameter_images.morph_interpolation[local]);
             mask &= (mask - 1ULL);
         }
+    }
+}
+
+/*
+ * Restore every dirty Scene-target step overlay to retained values.
+ *
+ * Inputs: seq_scene_automation_dirty and the active Scene's retained
+ * SceneData/Kit values. Output: Morph, decimation, audio routing, and the
+ * generated slot-6 decay runtime owners return to retained values while
+ * FX_SEND remains a no-op until the Phase 5 FX bus exists. The bitmap remains
+ * set for seq_clearAutomationDirty(), matching the voice-overlay restore
+ * contract. Common caller: seq_setStepIndexToStart() on transport, Pattern,
+ * or external-clock reset.
+ */
+static void seq_restoreAllSceneAutomation(void)
+{
+    uint32_t mask = seq_scene_automation_dirty;
+    uint8_t scene_index = scene_getActiveIndex();
+    const scene_t *scene = scene_getConst(scene_index);
+
+    if (!mask)
+        return;
+
+    /*
+     * Clear unconditional runtime owners first. Each helper is a no-op when
+     * its overlay was not used, while clearing Morph queues a retained-base
+     * rebuild for any slot that was overridden.
+     */
+    presetMorph_clearAllStepAutomationOverrides(scene_index);
+    instrumentManager_clearSlot6Track7StepDecayOverride();
+
+    if (!scene)
+        return;
+
+    while (mask) {
+        uint8_t index = (uint8_t)__builtin_ctz(mask);
+        uint16_t id = sceneModTarget_idFromIndex(index);
+        const scene_mod_target_descriptor_t *descriptor =
+            sceneModTarget_descriptor(id);
+
+        if (descriptor) {
+            switch (descriptor->kind) {
+            case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
+                parameter_values[PAR_VOICE1_MORPH + descriptor->voice_slot] =
+                    scene_getVoiceMorphAmount(scene_index,
+                                              descriptor->voice_slot);
+                /*
+                 * Commit the retained Morph image before a rapid restart can
+                 * trigger this voice. The queued rebuild from
+                 * presetMorph_clearAllStepAutomationOverrides() remains the
+                 * bounded fallback for any other slots that were pending.
+                 */
+                presetMorph_applyVoiceNow(scene_index,
+                                          descriptor->voice_slot);
+                break;
+            case SCENE_MOD_TARGET_KIND_DECIMATION_ALL:
+                parameter_values[PAR_VOICE_DECIMATION_ALL] =
+                    scene->settings.voice_decimation_all;
+                preset_applyVoiceDecimationAllRuntime(
+                    scene->settings.voice_decimation_all);
+                break;
+            case SCENE_MOD_TARGET_KIND_AUDIO_OUT:
+                (void)preset_applyKitAudioRouting(scene_index,
+                                                  descriptor->voice_slot);
+                break;
+            case SCENE_MOD_TARGET_KIND_FX_SEND:
+            case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
+            default:
+                break;
+            }
+        }
+        mask &= (mask - 1u);
     }
 }
 
@@ -691,49 +778,68 @@ static void seq_advanceTrackStep(uint8_t track)
 }
 
 /*
- * Apply one Scene-target automation value from the pending queue.
+ * Apply one Scene-target automation value as a runtime-only overlay.
  *
  * Inputs: canonical Scene target ID and its seven-bit Pattern value. Output:
- * the owning Preset setter receives a clamped value; Voice Morph expands
- * stored 0..126 to 0..252 and stored 127 to 255 so the endpoint remains
- * reachable. Scene targets are retained at Scene level and deliberately do
- * not participate in seq_automation_dirty[] retrigger restoration. Common
- * callers: seq_drainPendingAutomation(). Affiliates: SceneModTargets and
- * presetManager Scene-setting setters.
+ * the owning DSP runtime receives a clamped value, while retained Scene/Kit
+ * data, AutoSave dirty state, and Bank-clean state remain untouched. Voice
+ * Morph expands stored 0..126 to 0..252 and stored 127 to 255 so its endpoint
+ * remains reachable. A successful runtime overlay sets the corresponding bit
+ * for transport-boundary restoration. FX_SEND is accepted as a no-op because
+ * its Phase 5 runtime bus does not exist yet. Common caller:
+ * seq_drainPendingAutomation(). Affiliates: SceneModTargets, Preset, and
+ * InstrumentManager runtime overlay APIs.
  */
 static uint8_t seq_applySceneAutomation(uint16_t target, uint8_t value)
 {
 	const scene_mod_target_descriptor_t *descriptor =
 		sceneModTarget_descriptor(target);
+	uint8_t index;
 
 	if (!descriptor)
 		return 0u;
 	if (value > descriptor->max_value)
 		value = (uint8_t)descriptor->max_value;
+	if (!sceneModTarget_indexFromId(target, &index))
+		return 0u;
 
 	switch (descriptor->kind) {
-	case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
-		preset_morphVoice(descriptor->voice_slot,
-					  (value < 127u) ? (uint8_t)(value * 2u) : 255u);
-		return 1u;
+	case SCENE_MOD_TARGET_KIND_VOICE_MORPH: {
+		uint8_t morph = (value < 127u) ? (uint8_t)(value * 2u) : 255u;
+
+		/*
+		 * Morph is a transient base replacement, not a retained Scene edit.
+		 * parameter_values[] is only the live PERF mirror and is restored from
+		 * SceneData at the same transport boundary as the Morph worker.
+		 */
+		parameter_values[PAR_VOICE1_MORPH + descriptor->voice_slot] = morph;
+		presetMorph_setStepAutomationOverride(
+			scene_getActiveIndex(), descriptor->voice_slot, morph);
+		break;
+	}
 	case SCENE_MOD_TARGET_KIND_DECIMATION_ALL:
-		preset_setVoiceDecimationAll(scene_getActiveIndex(), value);
-		return 1u;
+		/*
+		 * Decimation writes only the mixer runtime; the retained PERF mirror is
+		 * restored from SceneData when the overlay is cleared.
+		 */
+		parameter_values[PAR_VOICE_DECIMATION_ALL] = value;
+		preset_applyVoiceDecimationAllRuntime(value);
+		break;
 	case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
-		preset_setSlot6Track7AmpEnvelopeDecay(
-			scene_getActiveIndex(), INSTRUMENT_IMAGE_MAIN, value, 0u);
-		return 1u;
+		instrumentManager_setSlot6Track7StepDecayOverride(value);
+		break;
 	case SCENE_MOD_TARGET_KIND_AUDIO_OUT:
-		preset_setVoiceAudioOut(scene_getActiveIndex(),
-							 descriptor->voice_slot, value);
-		return 1u;
+		preset_applyVoiceAudioOutRuntime(descriptor->voice_slot, value);
+		break;
 	case SCENE_MOD_TARGET_KIND_FX_SEND:
-		preset_setVoiceFxSendAmount(scene_getActiveIndex(),
-								descriptor->voice_slot, value);
+		/* No FX runtime owner exists yet, so there is no overlay to restore. */
 		return 1u;
 	default:
 		return 0u;
 	}
+
+	seq_scene_automation_dirty |= (1u << index);
+	return 1u;
 }
 
 /*
@@ -1527,12 +1633,15 @@ static void seq_setStepIndexToStart()
 	 * changes, and external MIDI/sync reset. The restore must precede
 	 * seq_clearAutomationDirty(); otherwise step zero can inherit a runtime value
 	 * from the previous pass after its tracking bit has been discarded.
-	 * Affiliates: seq_restoreAllAutomation() restores the six slot bitmaps;
-	 * seq_clearAutomationDirty() then drops them; seq_init() deliberately calls
-	 * the clear helper directly at boot because no runtime overlay exists.
+	 * Affiliates: seq_restoreAllSceneAutomation() restores Scene-target
+	 * overlays, seq_restoreAllAutomation() restores the six slot bitmaps, and
+	 * seq_clearAutomationDirty() then drops both tracking sets; seq_init()
+	 * deliberately calls the clear helper directly at boot because no runtime
+	 * overlay exists.
 	 */
 	uint8_t i;
 
+	seq_restoreAllSceneAutomation();
 	seq_restoreAllAutomation();
 	seq_clearAutomationDirty();
 	for(i=0;i<NUM_TRACKS;i++) {

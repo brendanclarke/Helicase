@@ -378,6 +378,11 @@ scalar writer busy, and makes Scene Save capture whatever automation last wrote.
 Options: (a) accept and document; (b) apply as runtime overlay like LFO;
 (c) suppress AutoSave marking for automation writes. Recommendation: (b).
 
+**Q1 resolution (2026-09-25):** option (b) implemented in
+`S070_PHASE4_Q1_SCENE_AUTOMATION_IMPLEMENTATION.md`. Scene-target step
+automation now uses runtime-only overlays with transport-boundary restore;
+source/build verification passed, and hardware verification remains pending.
+
 **Q2 — Stale Pattern generation after explicit load (F4, if T2 fails).**
 
 Keep each Scene's Pattern generation increasing instead of resetting to zero

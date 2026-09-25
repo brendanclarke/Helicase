@@ -382,6 +382,15 @@ uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
                                            instrument_param_id_t id,
                                            instrument_param_value_t value);
 uint8_t preset_applyKitAudioRouting(uint8_t scene_index, uint8_t slot);
+/*
+ * Apply one voice's output route without retaining it in SceneData.
+ *
+ * Inputs: zero-based instrument slot and mixer route enum value. Output: the
+ * active mixer route is updated without AutoSave or Bank-clean side effects.
+ * Scene-target step automation uses this transient path; restore calls
+ * preset_applyKitAudioRouting() so the retained Scene route remains the base.
+ */
+void preset_applyVoiceAudioOutRuntime(uint8_t slot, uint8_t route);
 void preset_applySceneSettings(uint8_t scene_index);
 /*
  * Scene-owned per-voice mix setting setters.

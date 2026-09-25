@@ -414,6 +414,16 @@ void instrumentManager_updateLfoAdapters(uint8_t source_slot,
                                          uint8_t polarity,
                                          float amount);
 /*
+ * Set/clear the generated slot-6 track-7 decay step overlay.
+ *
+ * Inputs: a seven-bit per-step decay value. Output: the alternate trigger
+ * path uses it without retaining Kit settings; clearing restores priority to
+ * any LFO overlay, then to the retained Kit value. Sequencer owns the call
+ * boundary and clears it at transport/Pattern restore.
+ */
+void instrumentManager_setSlot6Track7StepDecayOverride(uint8_t value);
+void instrumentManager_clearSlot6Track7StepDecayOverride(void);
+/*
  * Dynamic instrument runtime dispatcher.
  *
  * Inputs: logical slot/track numbers from SceneData, MIDI, mixer, and LFO

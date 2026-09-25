@@ -1012,6 +1012,24 @@ uint8_t preset_applyKitAudioRouting(uint8_t scene_index, uint8_t slot)
     return 1u;
 }
 
+void preset_applyVoiceAudioOutRuntime(uint8_t slot, uint8_t route)
+{
+    /*
+     * Apply one voice's output route as a transient runtime overlay.
+     *
+     * Inputs: zero-based instrument slot and route in the mixer enum domain.
+     * Output: active mixer routing changes without a SceneData write, an
+     * AutoSave dirty mark, or Bank-clean invalidation. Client: Scene-target
+     * step automation. Restore affiliate: preset_applyKitAudioRouting()
+     * reads the retained Scene route at the transport boundary.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    if (route > MIXER_ROUTING_DAC2_R)
+        route = MIXER_ROUTING_DAC1_STEREO;
+    mixer_audioRouting[slot] = route;
+}
+
 uint8_t preset_setVoiceAudioOut(uint8_t scene_index, uint8_t slot,
                                 uint8_t route)
 {

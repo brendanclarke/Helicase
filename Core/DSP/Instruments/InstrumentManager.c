@@ -121,6 +121,19 @@ static instrument_lfo_target_adapter_t
     lfo_descriptor_targets[INSTRUMENT_SLOT_COUNT][2u];
 static uint8_t slot6_track7_decay_lfo_active;
 static uint8_t slot6_track7_decay_lfo_value;
+
+/*
+ * Step-automation runtime override for generated slot-6 track-7 decay.
+ *
+ * Inputs: sequencer Scene-target automation supplies a per-step 0..127 value;
+ * transport-boundary restore clears it. Output: the track-7 alternate trigger
+ * path uses this transient value ahead of the continuous LFO override and the
+ * retained Kit setting. Lifetime: static runtime state only; no Kit/Scene
+ * storage or AutoSave marker is touched. Owner: InstrumentManager trigger
+ * backend. Affiliate: Sequencer Scene-automation restore.
+ */
+static uint8_t slot6_track7_decay_step_active;
+static uint8_t slot6_track7_decay_step_value;
 /*
  * Runtime type shadow for deferred Scene switching.
  *
@@ -1614,10 +1627,17 @@ static void instrumentManager_applySlot6AlternateDecay(uint8_t alternate)
     ampEg = instrumentManager_ampEg(5u);
     if (!ampEg)
         return;
+    /*
+     * Specificity order for generated track-7 decay is step automation, then
+     * LFO, then the retained Kit setting. A step value defines the exact
+     * trigger-time target, so it intentionally wins over continuous LFO data.
+     */
     value = alternate
-        ? (slot6_track7_decay_lfo_active
-              ? slot6_track7_decay_lfo_value
-              : scene->kit.settings.slot6_track7_amp_envelope_decay)
+        ? (slot6_track7_decay_step_active
+              ? slot6_track7_decay_step_value
+              : (slot6_track7_decay_lfo_active
+                    ? slot6_track7_decay_lfo_value
+                    : scene->kit.settings.slot6_track7_amp_envelope_decay))
         : slot_state->parameter_images.morph_interpolation[base_index];
     if (value > 127u)
         value = 127u;
@@ -2301,7 +2321,12 @@ static uint8_t instrumentManager_updateLfoSceneDestination(
         return 0u;
     switch (descriptor->kind) {
     case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
-        base = scene->settings.voice_morph_amount[descriptor->voice_slot];
+        /*
+         * Shape LFO motion around the effective step-automation center when
+         * one is active; otherwise use the retained Scene base as before.
+         */
+        base = presetMorph_getEffectiveVoiceAmount(
+            scene_getActiveIndex(), descriptor->voice_slot);
         shaped = modNode_shapeRangeU16(base, descriptor->min_value,
                                        descriptor->max_value,
                                        lfo_value_0_1, amount, polarity);
@@ -2338,6 +2363,35 @@ static uint8_t instrumentManager_updateLfoSceneDestination(
     default:
         return 0u;
     }
+}
+
+void instrumentManager_setSlot6Track7StepDecayOverride(uint8_t value)
+{
+    /*
+     * Set the transient generated track-7 decay used by the next alternate
+     * trigger.
+     *
+     * Inputs: seven-bit step-automation value. Output: the trigger path uses
+     * this value without changing retained Kit settings or AutoSave state.
+     * Client: seq_applySceneAutomation(); restore: clear function below.
+     */
+    if (value > 127u)
+        value = 127u;
+    slot6_track7_decay_step_active = 1u;
+    slot6_track7_decay_step_value = value;
+}
+
+void instrumentManager_clearSlot6Track7StepDecayOverride(void)
+{
+    /*
+     * Clear the transient generated track-7 decay.
+     *
+     * Output: subsequent alternate triggers fall back to the active LFO
+     * override or retained Kit value. Client: transport-boundary Scene
+     * automation restore; no retained data is modified.
+     */
+    slot6_track7_decay_step_active = 0u;
+    slot6_track7_decay_step_value = 0u;
 }
 
 static const ParamDescriptor *instrumentManager_lfoAdapterDescriptor(

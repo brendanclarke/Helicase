@@ -86,4 +86,27 @@ void presetMorph_setVoiceLfoModulation(uint8_t scene_index,
  */
 void presetMorph_clearLfoSource(uint8_t source_slot, uint8_t target_pair);
 
+/*
+ * Read the effective runtime Morph base for one voice.
+ *
+ * Inputs: resident Scene index and zero-based voice slot. Output: the active
+ * step-automation Morph overlay when present, otherwise the retained Scene
+ * amount. This is a read-only bridge for InstrumentManager's LFO shaping;
+ * it never changes SceneData or AutoSave state.
+ */
+uint8_t presetMorph_getEffectiveVoiceAmount(uint8_t scene_index,
+                                             uint8_t slot);
+
+/*
+ * Set/clear step-automation Morph overlays.
+ *
+ * Step automation replaces a retained Morph base only in the runtime worker;
+ * LFO contributions are centered on that transient base. Clearing all
+ * overlays queues restoration from retained Scene values at transport or
+ * Pattern boundaries without marking the Scene dirty.
+ */
+void presetMorph_setStepAutomationOverride(uint8_t scene_index,
+                                           uint8_t slot, uint8_t amount);
+void presetMorph_clearAllStepAutomationOverrides(uint8_t scene_index);
+
 #endif
