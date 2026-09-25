@@ -148,8 +148,17 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `Core/Sequencer/sequencer.h`: grid resets restore dirty runtime overlays from
   `morph_interpolation[]` before clearing tracking, and transport start/stop
   closes the `seq_running` preemption window. The implementation record is
-  `S070_PHASE4_AUTOMATION_MISSED_IMPLEMENTATION.md`; build and hardware
-  validation remain pending because this environment lacks the ARM toolchain.
+  `S070_PHASE4_AUTOMATION_MISSED_IMPLEMENTATION.md`; the current ARM build
+  includes it, and T3 hardware validation is recorded PASS in
+  `S070_PHASE4_TESTING_FINAL.md`.
+- Session 070 T2(a) Pattern-load generation fix is source- and ARM-build-
+  verified in `S070_T2A_PAT_LOAD.md`: Pattern load paths retain the monotonic
+  hidden-file generation, Scene/Bank load completion invalidates sd-clean
+  authority without resetting it, and the boot reader seeds non-`@` rows from
+  the highest valid hidden candidate while ignoring its payload. The generated
+  image is `build/LXRV2_lxr02.img` (456,084 bytes; `text=455,652`,
+  `data=416`, `bss=291,804`); T2(a) hardware retest and load regressions remain
+  pending.
 
 - Read `knowledge_files/log_archive/040_SESSION_HANDOFF_LOG.md` before
   continuing Scene/Bank or filesystem work. It preserves the verified

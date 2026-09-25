@@ -115,7 +115,7 @@ after the F5/F6 code fix.
   sessions. Defer rapid-scroll and power-cut browser edge cases.
 - **Partial Bank Load/Save**: no S070 change touches either path. Defer.
 - **AutoSave setup-failure retry/UI, active-Scene Pattern priority**: these
-  are code changes, not tests. Defer decision (Q3).
+  are code changes, not tests. Defer.
 - **Power-cut injection at exact write phases**: requires precise timing
   infrastructure or luck. Defer.
 - **Duplicate trace-file directory entries**: expected non-issue after S056
@@ -384,11 +384,7 @@ Keep each Scene's Pattern generation increasing instead of resetting to zero
 at load commit. Continue from the in-RAM generation at load; in the boot
 reader's non-`@` branch, seed from the winner's generation. No extra SD work.
 
-**Q3 — AutoSave setup-failure policy.** Add bounded retry (every 30 s while
-mounted, never while Load/Save owns the facade), one trace record per failure,
-and a Global-page indication. Implement after T1.
-
-**Q4 — Automation restore at transport boundaries (F5/F6).** Proposed fix
+**Q3 — Automation restore at transport boundaries (F5/F6).** Proposed fix
 in `S070_PHASE4_AUTOMATION_MISSED.md`: (4A) restore all dirty voice parameters
 from `morph_interpolation[]` before clearing the bitmap in
 `seq_setStepIndexToStart()`; (4B) defer `seq_running = 1` until state init is
@@ -425,7 +421,7 @@ outcomes:
 - T1, T2, and T3 complete. Any T1 failure gets a fix, a new image, and a
   rerun including the quiet-tail check. T2(a) is a predicted FAIL that opens
   Q2. T3 runs after the F5/F6 code fix.
-- Q1–Q4 decided (Q2 contingent on T2 result; Q4 confirmed by T3).
+- Q1–Q3 decided (Q2 contingent on T2 result; Q3 confirmed by T3).
 - Phase-resolution table updated for Phases 2–4.
 - Session 070 handoff log written per `SESSION_HANDOFF_TEMPLATE.md`.
 
@@ -434,7 +430,7 @@ outcomes:
 | Test | Date | Evidence | Result | Notes |
 |---|---|---|---|---|
 | T1 | 2026-09-24 | `SD_CARD_ATS_OFF_ON` | PASS | No `E`/`X`; `.hcnames` present; both HCPR records valid; all 16 Scenes have Pattern pairs; `settings.cfg` `active_bank=0` agrees with HCNAMES row 0 (`FullBad 000`) |
-| T2(a) | | | | |
-| T2(b) | | | | |
-| T2(c) | | | | |
-| T3 | | | | |
+| T2(a) | 2026-09-25 | `SD_CARD_T2A` (FAIL), retest after fix | PASS | Initially confirmed F4: loaded Pattern did not persist (old hidden file with higher generation won). Fix applied per `S070_T2A_PAT_LOAD.md`: generation no longer reset to zero at load. Retest: loaded Pattern persists. |
+| T2(b) | 2026-09-25 | — | PASS | Held-step value persisted correctly through snapshot writes |
+| T2(c) | 2026-09-25 | `SD_CARD_T2C_STEP3`, `SD_CARD_T2C_STEP6` | PASS | Truncated B rejected (Scene 2), CRC-bad B rejected (Scene 3): valid A loaded in both. Absent files (Scene 4): boot completed, Pattern region empty but selectable. Non-`@` row case dropped — HCNAMES is firmware-internal, fabricating a row/file inconsistency tests the fixture not the product. |
+| T3 | 2026-09-24 | Commit `2f5b3d2` (fixes 4A/4B/4C) | PASS | Step 0 automation fires on all restarts; no double trigger. See `S070_PHASE4_AUTOMATION_MISSED.md` §7 |

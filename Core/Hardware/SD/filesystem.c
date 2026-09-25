@@ -14829,10 +14829,12 @@ static void filesystem_loadPattern_tick(void)
                     if (target)
                         memcpy(target, source, sizeof(*target));
                 }
-                /* A root-library Pattern replacement starts a new hidden-file
-                 * generation epoch and must be durably re-captured before its
-                 * old AutoSave pair can be considered authoritative. */
-                fs_pattern_generation[si] = 0u;
+                /* A root-library Pattern replacement must be durably
+                 * re-captured before its old AutoSave pair can be considered
+                 * authoritative. Keep the boot reader's highest valid
+                 * generation so the next drain writes a strictly newer
+                 * candidate; resetting to zero could let an older A/B file
+                 * restore the pre-load Pattern after a single drain. */
                 autosave_markPatternDirty(si);
                 bank_invalidateSdCleanScene(si);
             }
@@ -23524,21 +23526,26 @@ uint8_t filesystem_autosaveEnabled(void)
 }
 
 /*
- * Reset one resident Pattern AutoSave generation after a directory load.
+ * Acknowledge a Pattern replacement for AutoSave continuity.
  *
- * Inputs: a resident Scene index whose PatternData has just been replaced by
- * a successful Scene, Bank, or root Pattern load. Output: the next hidden
- * Pattern drain starts from generation 1 and file A, while the current dirty
- * bit and HCNAMES lifecycle remain owned by the caller. Why: a directory
- * source is authoritative until the newly loaded Pattern is captured by its
- * own AutoSave file; continuing an older hidden-file generation would make
- * the replacement look like a continuation of unrelated Pattern data. No
- * filesystem I/O occurs. Affiliates: Preset load completion and Pattern drain.
+ * What: invalidates the card-clean authority for one resident Scene whose
+ * Pattern was replaced by a successful Scene, Bank, or root Pattern load.
+ * Why: the replacement must be captured by the Pattern AutoSave drain before
+ * the next boot; the caller owns the separate dirty mark. The hidden-file
+ * generation is deliberately unchanged. The boot reader seeded it to the
+ * highest valid candidate, so the next drain produces a strictly newer value
+ * and the loaded Pattern wins over any pre-existing A/B pair. Resetting it to
+ * zero could make generation 1 lose to an older candidate at generation 2 or
+ * higher. No filesystem I/O occurs here.
+ *
+ * Inputs: resident Scene index. Output: sd-clean authority invalidated;
+ * generation unchanged. Affiliates: presetManager.c Scene/Bank load
+ * completion, bank_invalidateSdCleanScene(), and the Pattern drain scheduler.
  */
-void filesystem_resetPatternAutosaveGeneration(uint8_t scene_index)
+void filesystem_patternAutosaveOnLoad(uint8_t scene_index)
 {
     if (scene_index < SCENE_COUNT && scene_index < 16u)
-        fs_pattern_generation[scene_index] = 0u;
+        bank_invalidateSdCleanScene(scene_index);
 }
 
 void filesystem_setAutosaveEnabled(uint8_t enabled)
@@ -27994,12 +28001,14 @@ void filesystem_patternAutosaveBootReaderBlocking(void)
         }
         if (!winner_valid)
             continue;
-        /* A directory/library source deliberately ignores stale hidden files;
-         * also discard their generation so the replacement's next drain
-         * starts a fresh A/B epoch rather than continuing unrelated data. */
+        /* A directory/library source is authoritative: do not load hidden
+         * files, but retain their highest valid generation as the next drain
+         * baseline. Without this seed, a later edit or load can write
+         * generation 1 and then lose to an older hidden candidate after the
+         * HCNAMES row transitions to Pattern AutoSave provenance. */
         if (filesystem_residentSource(filesystem_residentPatternRow(scene)) !=
             FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE) {
-            fs_pattern_generation[scene] = 0u;
+            fs_pattern_generation[scene] = winner_generation;
             continue;
         }
         fs_pattern_generation[scene] = winner_generation;

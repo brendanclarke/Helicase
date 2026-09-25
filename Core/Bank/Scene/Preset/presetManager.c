@@ -490,9 +490,10 @@ static void on_scene_load_complete(void)
              scene_index++) {
             if ((pm_kit_request_scene_mask &
                  (uint16_t)(1u << scene_index)) != 0u) {
-                /* A directory-backed Pattern replacement starts its own
-                 * hidden AutoSave generation epoch before dirty marking. */
-                filesystem_resetPatternAutosaveGeneration(scene_index);
+                /* The loaded directory-backed Pattern must be captured by
+                 * AutoSave, but its generation stays above the existing A/B
+                 * pair so one drain cannot resurrect pre-load content. */
+                filesystem_patternAutosaveOnLoad(scene_index);
                 autosave_markSceneWithPatternDirty(scene_index);
             }
         }
@@ -544,9 +545,10 @@ static void on_bank_load_complete(void)
              scene_index < SCENE_COUNT && scene_index < 16u;
              scene_index++) {
             if ((completed_scene_mask & (uint16_t)(1u << scene_index)) != 0u) {
-                /* The loaded Bank child owns a fresh Pattern source; its next
-                 * AutoSave image must begin at generation 1/file A. */
-                filesystem_resetPatternAutosaveGeneration(scene_index);
+                /* The loaded Bank child owns the new resident Pattern. Mark
+                 * its card-clean authority invalid while preserving the
+                 * monotonic generation seeded from any existing A/B pair. */
+                filesystem_patternAutosaveOnLoad(scene_index);
                 autosave_markSceneWithPatternDirty(scene_index);
             }
         }

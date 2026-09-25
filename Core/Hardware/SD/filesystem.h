@@ -357,23 +357,25 @@ uint8_t filesystem_autosaveBootReaderBlocking(void);
  * and resident Pattern regions already populated by the canonical boot path.
  * Outputs: matching `@`-provenance Scenes update pat_regions[] and their
  * winning generation becomes the next drain baseline; nonmatching or invalid
- * pairs leave the existing directory/default Pattern authoritative and reset
- * the hidden-file baseline.
+ * pairs leave the existing directory/default Pattern authoritative while a
+ * valid nonmatching winner still seeds the next drain baseline.
  * Affiliates: filesystem_autosaveBootReaderBlocking(),
  * filesystem_bootReaderReadPatternFile(), PatternData, and main.c.
  */
 void filesystem_patternAutosaveBootReaderBlocking(void);
 /*
- * Reset one resident Pattern AutoSave generation after a directory-backed
- * Pattern replacement.
+ * Acknowledge a Pattern replacement for AutoSave continuity.
  *
- * What: starts the next hidden-file drain for the selected Scene at
- * generation 1 and target `.pat00a`-style file A. Inputs: a successfully
- * committed library/Scene/Bank Pattern load. Output: one filesystem-owned
- * generation baseline is cleared; no file I/O occurs. Affiliates: Preset
- * Scene/Bank load completion and the Pattern drain scheduler.
+ * What: invalidates sd-clean authority so the drain scheduler knows the
+ * resident Pattern has diverged. The hidden-file generation is NOT reset:
+ * the next drain produces a value one higher than the boot reader's winner,
+ * ensuring the loaded Pattern beats any pre-existing A/B pair. Inputs: a
+ * Scene index whose Pattern was just replaced by a load. Output: sd-clean
+ * invalidated; no generation change and no file I/O. Affiliates: preset
+ * Scene/Bank load completion, bank_invalidateSdCleanScene(), and the Pattern
+ * drain scheduler.
  */
-void filesystem_resetPatternAutosaveGeneration(uint8_t scene_index);
+void filesystem_patternAutosaveOnLoad(uint8_t scene_index);
 /*
  * Boot load driven entirely by .hcnames when it is authoritative.
  *

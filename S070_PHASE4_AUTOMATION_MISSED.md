@@ -304,3 +304,22 @@ After applying fixes 4A and 4B:
 
 Evidence: the T1 test's trace can additionally verify that automation
 entries appear in the pending queue on every first step after restart.
+
+---
+
+## 7. Implementation and result
+
+Fixes 4A, 4B, and 4C applied in commit `2f5b3d2` on branch `dev-ph5-effects`.
+Full change map, code listings, and verification notes in
+`S070_PHASE4_AUTOMATION_MISSED_IMPLEMENTATION.md`.
+
+| Fix | Change | File | Lines |
+|-----|--------|------|-------|
+| 4A  | Added `seq_restoreAllAutomation()` — walks all six slots' dirty bitmaps and restores from `morph_interpolation[]` before the clear | `sequencer.c` | 221–245 |
+| 4A  | `seq_setStepIndexToStart()` calls `seq_restoreAllAutomation()` before `seq_clearAutomationDirty()` | `sequencer.c` | 1536–1537 |
+| 4B  | Stop branch publishes `seq_running = 0` first; start branch defers `seq_running = 1` until after `seq_setStepIndexToStart()` completes | `sequencer.c` | 1161–1188 |
+| 4C  | Removed redundant `seq_clearAutomationDirty()` from stop branch — the authoritative clear now lives only inside `seq_setStepIndexToStart()` | `sequencer.c` | (removed from old line 1089) |
+| —   | Contract block for `seq_setRunning()` in header | `sequencer.h` | 156–168 |
+
+**T3 result — PASS.** Step 0 automation fires correctly on every transport
+restart. No audible double trigger. See `S070_PHASE4_TESTING_FINAL.md` T3 row.
