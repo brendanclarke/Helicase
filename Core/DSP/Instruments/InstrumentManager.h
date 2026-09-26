@@ -515,6 +515,19 @@ void instrumentManager_visitRuntimeLfoNodes(
  * Instrument replacement because reset clears and reinitializes the slot.
  */
 void *instrumentManager_runtimeInstance(uint8_t slot);
+/*
+ * Apply one retained descriptor value to its runtime owner.
+ *
+ * Inputs: active Scene slot, descriptor registry entry, and descriptor-domain
+ * byte value. Output: the corresponding DSP/runtime owner is updated. For
+ * paired LFO target selectors, writing either the voice namespace or parameter
+ * token also reinstalls the pair from the current sibling cell; this clears
+ * stale Scene-target, decimation, or Morph contributions when the namespace
+ * changes without requiring a second UI edit. The caller must have stored the
+ * retained value in SceneData before invoking this active-runtime path.
+ * Clients: Preset supplemental apply, Menu edits, Kit/Scene activation, and
+ * bounded runtime automation.
+ */
 uint8_t instrumentManager_writeRuntime(uint8_t slot,
                                        const ParamDescriptor *descriptor,
                                        instrument_param_value_t value);

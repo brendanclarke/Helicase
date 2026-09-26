@@ -263,12 +263,12 @@ static void seq_restoreAllAutomation(void)
  * Restore every dirty Scene-target step overlay to retained values.
  *
  * Inputs: seq_scene_automation_dirty and the active Scene's retained
- * SceneData/Kit values. Output: Morph, decimation, audio routing, and the
- * generated slot-6 decay runtime owners return to retained values while
- * FX_SEND remains a no-op until the Phase 5 FX bus exists. The bitmap remains
- * set for seq_clearAutomationDirty(), matching the voice-overlay restore
- * contract. Common caller: seq_setStepIndexToStart() on transport, Pattern,
- * or external-clock reset.
+ * SceneData/Kit values. Output: Morph, decimation, audio routing, generated
+ * slot-6 decay, and the readable FX-send overlay return to retained values;
+ * FX_SEND still has no DSP bus owner until Phase 5. The bitmap remains set for
+ * seq_clearAutomationDirty(), matching the voice-overlay restore contract.
+ * Common caller: seq_setStepIndexToStart() on transport, Pattern, or
+ * external-clock reset.
  */
 static void seq_restoreAllSceneAutomation(void)
 {
@@ -286,6 +286,13 @@ static void seq_restoreAllSceneAutomation(void)
      */
     presetMorph_clearAllStepAutomationOverrides(scene_index);
     instrumentManager_clearSlot6Track7StepDecayOverride();
+    /*
+     * Clear the discrete Scene-setting overlays before retained values are
+     * reapplied below. Audio routing is restored through its DSP owner; FX send
+     * has only the readable overlay until the Phase 5 bus exists.
+     */
+    preset_clearAllAudioOutStepOverrides(scene_index);
+    preset_clearAllFxSendStepOverrides();
 
     if (!scene)
         return;
@@ -829,11 +836,14 @@ static uint8_t seq_applySceneAutomation(uint16_t target, uint8_t value)
 		instrumentManager_setSlot6Track7StepDecayOverride(value);
 		break;
 	case SCENE_MOD_TARGET_KIND_AUDIO_OUT:
+		/* Keep the live superpage value aligned with the DSP route. */
 		preset_applyVoiceAudioOutRuntime(descriptor->voice_slot, value);
+		preset_setAudioOutStepOverride(descriptor->voice_slot, value);
 		break;
 	case SCENE_MOD_TARGET_KIND_FX_SEND:
-		/* No FX runtime owner exists yet, so there is no overlay to restore. */
-		return 1u;
+		/* Store a displayable runtime overlay until the FX bus owns the value. */
+		preset_setFxSendStepOverride(descriptor->voice_slot, value);
+		break;
 	default:
 		return 0u;
 	}
@@ -1281,6 +1291,13 @@ void seq_setRunning(uint8_t isRunning)
 		trigger_allOff();
 
 		midiParser_checkMtc();
+
+		/*
+		 * Queue the foreground chase drain after publishing seq_running = 0.
+		 * The last playback position may still own a LED_LAYER_CHASE; the
+		 * drain-side transport guard removes that inversion on its next pass.
+		 */
+		seq_ledState.dirty |= SEQ_LED_DIRTY_CHASE;
 	} else {
 		seq_resetStepScheduler();
 		seq_sendRealtime(MIDI_START);

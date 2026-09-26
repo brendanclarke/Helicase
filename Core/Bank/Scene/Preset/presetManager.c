@@ -153,6 +153,30 @@ enum {
 };
 static uint8_t preset_morph_initialized = 0;
 
+/*
+ * Runtime-only Scene-setting step overlays for the VOICE superpage.
+ *
+ * Inputs: seq_applySceneAutomation() writes one slot's transient audio route
+ * or FX-send amount. Outputs: the effective-value getters expose the overlay
+ * to Menu while the active DSP owner receives its separate runtime update.
+ * Retained SceneData, AutoSave, and Bank-clean state are never changed here.
+ * Each table is six entries of {active,value}, or 12 bytes of normal SRAM.
+ * Transport restore and preset_init() clear both tables.
+ *
+ * Affiliates: preset_applyVoiceAudioOutRuntime() owns the mixer write;
+ * FX-send has no DSP bus owner yet. presetMorphEngine.c owns the equivalent
+ * per-voice Morph overlay and remains separate because Morph has a worker.
+ */
+static struct {
+    uint8_t active;
+    uint8_t route;
+} audio_out_step_override[INSTRUMENT_SLOT_COUNT];
+
+static struct {
+    uint8_t active;
+    uint8_t amount;
+} fx_send_step_override[INSTRUMENT_SLOT_COUNT];
+
 preset_status_t preset_getStatus(void)
 {
     return pm_status;
@@ -727,6 +751,8 @@ void preset_init(void)
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = 0;
     pm_request_type = SAVE_TYPE_KIT;
+    preset_clearAllAudioOutStepOverrides(0u);
+    preset_clearAllFxSendStepOverrides();
     preset_ensureMorphInitialized();
 }
 
@@ -1030,6 +1056,110 @@ void preset_applyVoiceAudioOutRuntime(uint8_t slot, uint8_t route)
     mixer_audioRouting[slot] = route;
 }
 
+void preset_setAudioOutStepOverride(uint8_t slot, uint8_t route)
+{
+    /*
+     * Store one transient audio-out route for effective-value display.
+     *
+     * Inputs: zero-based instrument slot and mixer route. Output: the route is
+     * retained in the runtime overlay without touching SceneData or AutoSave;
+     * preset_applyVoiceAudioOutRuntime() performs the independent mixer write.
+     * Client: sequencer Scene-target automation. Restore: the clear helper.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    if (route > MIXER_ROUTING_DAC2_R)
+        route = MIXER_ROUTING_DAC1_STEREO;
+    audio_out_step_override[slot].active = 1u;
+    audio_out_step_override[slot].route = route;
+}
+
+void preset_clearAllAudioOutStepOverrides(uint8_t scene_index)
+{
+    uint8_t slot;
+
+    /*
+     * Clear every transient audio-out route overlay.
+     *
+     * Input: active Scene index supplied by the transport restore owner; it is
+     * intentionally unused because the retained route restore is performed by
+     * preset_applyKitAudioRouting() per dirty target. Output: all effective
+     * getters fall back to retained SceneData, with no persistence mutation.
+     */
+    (void)scene_index;
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        audio_out_step_override[slot].active = 0u;
+        audio_out_step_override[slot].route = 0u;
+    }
+}
+
+uint8_t preset_getEffectiveAudioOut(uint8_t scene_index, uint8_t slot)
+{
+    /*
+     * Read one voice's effective audio-out route.
+     *
+     * Inputs: resident Scene index and zero-based voice slot. Output: the
+     * active step overlay route when present, otherwise the retained Scene
+     * route. This read-only bridge feeds the live Scene superpage display.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    if (audio_out_step_override[slot].active)
+        return audio_out_step_override[slot].route;
+    return scene_getVoiceAudioOut(scene_index, slot);
+}
+
+void preset_setFxSendStepOverride(uint8_t slot, uint8_t amount)
+{
+    /*
+     * Store one transient FX-send amount for effective-value display.
+     *
+     * Inputs: zero-based voice slot and 0..127 amount. Output: runtime-only
+     * overlay state; no FX DSP write exists until the Phase 5 bus is present,
+     * and retained SceneData/AutoSave remain untouched. Client: sequencer
+     * Scene-target automation. Restore: the clear helper.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    if (amount > 127u)
+        amount = 127u;
+    fx_send_step_override[slot].active = 1u;
+    fx_send_step_override[slot].amount = amount;
+}
+
+void preset_clearAllFxSendStepOverrides(void)
+{
+    uint8_t slot;
+
+    /*
+     * Clear every transient FX-send display overlay.
+     *
+     * Inputs: none. Output: effective-value reads fall back to retained Scene
+     * settings. There is no DSP restore because the FX bus is not implemented;
+     * this helper still owns the runtime lifetime of the display overlay.
+     */
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        fx_send_step_override[slot].active = 0u;
+        fx_send_step_override[slot].amount = 0u;
+    }
+}
+
+uint8_t preset_getEffectiveFxSendAmount(uint8_t scene_index, uint8_t slot)
+{
+    /*
+     * Read one voice's effective FX-send amount.
+     *
+     * Inputs: resident Scene index and zero-based voice slot. Output: the
+     * active step overlay amount when present, otherwise retained SceneData.
+     * This read-only bridge is used by the live Scene superpage display.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    if (fx_send_step_override[slot].active)
+        return fx_send_step_override[slot].amount;
+    return scene_getVoiceFxSendAmount(scene_index, slot);
+}
+
 uint8_t preset_setVoiceAudioOut(uint8_t scene_index, uint8_t slot,
                                 uint8_t route)
 {
@@ -1134,9 +1264,24 @@ void preset_applySceneSettings(uint8_t scene_index)
      * This must not call preset_morph(), because preset_morph() is now the
      * user-facing bulk-set operation and would overwrite distinct per-voice Morph
      * values loaded from future sceneset.scg data.
-     */
+    */
     preset_ensureMorphInitialized();
     preset_syncSceneMorphMirrors(scene);
+    /*
+     * Queue the newly active Scene's per-voice Morph image.
+     *
+     * Inputs: the active Scene whose retained Morph mirrors were just copied.
+     * Output: all six voices enter the bounded Morph worker, closing the gap
+     * between Scene-switch mirror refresh and the deferred per-slot image swap.
+     * The call changes neither retained SceneData nor AutoSave state; the
+     * deferred slot worker still performs the synchronous final apply when a
+     * voice must be committed before its next trigger.
+     *
+     * Affiliate: presetMorph_rebuildScene() reads each Scene's voice-local
+     * amount and preserves the existing one-descriptor-per-foreground-tick
+     * budget.
+     */
+    presetMorph_rebuildScene(scene_index);
     parameter_values[PAR_VOICE_DECIMATION_ALL] =
         scene->settings.voice_decimation_all;
     preset_applyVoiceDecimationAllRuntime(scene->settings.voice_decimation_all);

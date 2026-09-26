@@ -162,6 +162,8 @@ void seq_restoreAutomatedParameters(uint8_t trigger_track);
  * dirty bitmap. The start path publishes seq_running only after that reset so
  * the TIM3 scheduler cannot process an initial tick against partially reset
  * state; the stop path publishes the stopped state before teardown.
+ * The stop path also queues SEQ_LED_DIRTY_CHASE after publishing that state so
+ * the foreground LED drain clears any chase layer left on the last step.
  *
  * Clients: front-panel transport, MIDI realtime/clockSync, and Menu audio
  * suspend. This call does not alter PatternData or the persisted Scene.

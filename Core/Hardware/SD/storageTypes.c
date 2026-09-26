@@ -1173,6 +1173,14 @@ uint8_t storage_formatEffectPlaceholderLine(char *dst, uint16_t capacity,
 
 void storage_banksetInit(storage_bankset_t *state)
 {
+    /*
+     * Clear all Bankset parser staging, including the 16-entry mask array.
+     *
+     * Inputs: caller-owned staging state. Output: no fields are considered
+     * seen and every per-Scene value starts at zero until a legacy or indexed
+     * key is parsed. Filesystem load preserves bank_init() defaults for entries
+     * whose seen bits remain clear.
+     */
     if (state) memset(state, 0, sizeof(*state));
 }
 storage_status_t storage_banksetParseLine(storage_bankset_t *state, const char *line)
@@ -1183,8 +1191,26 @@ storage_status_t storage_banksetParseLine(storage_bankset_t *state, const char *
     if (storage_streq(key,"format")) { if (!storage_streq(value,"helicase.bankset")) return STORAGE_STATUS_INVALID_FORMAT; state->seen_format=1u; }
     else if (storage_streq(key,"version")) { uint8_t v; st=storage_parseU8(value,&v); if(st!=STORAGE_STATUS_OK||v!=2u) return STORAGE_STATUS_UNSUPPORTED_VERSION; state->seen_version=1u; }
     else if (storage_streq(key,"active_scene")) { st=storage_parseU8(value,&state->active_scene); if(st!=STORAGE_STATUS_OK) return st; state->seen_active_scene=1u; }
-    else if (storage_streq(key,"scene_mask_voice_edit")) {
+    else if (storage_streq(key,"scene_mask_voice_edit") ||
+             (strncmp(key, "scene_mask_voice_edit", 21u) == 0 &&
+              key[21] == '_')) {
         uint16_t value16 = 0u; uint8_t n = 0u; uint8_t digits = 0u;
+        uint8_t scene_i;
+        uint8_t is_per_scene = (uint8_t)(key[21] == '_');
+
+        /*
+         * Parse legacy or indexed per-Scene VOICE edit masks.
+         *
+         * Inputs: one bankset key/value pair. Legacy
+         * scene_mask_voice_edit=XXXX seeds every Scene with its self-only
+         * default; scene_mask_voice_edit_NN=XXXX updates only Scene NN.
+         * Outputs: the staging array and one or all seen bits are populated
+         * for the filesystem commit loop. The indexed suffix accepts one or
+         * two decimal digits and is bounds-checked before the array write.
+         *
+         * Affiliate: storage_formatBanksetLine() emits the indexed form;
+         * filesystem.c applies only entries whose seen bit is set.
+         */
         if (value[0] == '0' && (value[1] == 'x' || value[1] == 'X'))
             n = 2u;
         while (value[n] != '\0' && digits < 4u) {
@@ -1194,8 +1220,23 @@ storage_status_t storage_banksetParseLine(storage_bankset_t *state, const char *
             digits++;
         }
         if (value[n] != '\0' || digits == 0u) return STORAGE_STATUS_BAD_VALUE;
-        state->scene_mask_voice_edit = value16;
-        state->seen_scene_mask_voice_edit = 1u;
+        if (is_per_scene) {
+            st = storage_parseU8(&key[22], &scene_i);
+            if (st != STORAGE_STATUS_OK || scene_i >= BANK_SCENE_SLOT_COUNT)
+                return STORAGE_STATUS_BAD_VALUE;
+            state->scene_mask_voice_edit[scene_i] = value16;
+            state->seen_scene_mask_voice_edit |= (uint16_t)(1u << scene_i);
+        } else {
+            /*
+             * Legacy bankset files contain one mask from the old single-Scene
+             * model. Seed each expanded slot with its self bit rather than
+             * broadcasting the legacy value, which could insert Scene 0 into
+             * every Scene's VOICE edit mask on migration.
+             */
+            for (scene_i = 0u; scene_i < BANK_SCENE_SLOT_COUNT; scene_i++)
+                state->scene_mask_voice_edit[scene_i] = (uint16_t)(1u << scene_i);
+            state->seen_scene_mask_voice_edit = 0xffffu;
+        }
     }
     return STORAGE_STATUS_OK;
 }
@@ -1207,14 +1248,42 @@ uint8_t storage_formatBanksetLine(char *dst,uint16_t capacity,const storage_bank
     if(line_index==0u) return storage_formatLiteral(dst,capacity,"format=helicase.bankset\n");
     if(line_index==1u) return storage_formatLiteral(dst,capacity,"version=2\n");
     if(line_index==2u) return storage_formatAssignmentU16(dst,capacity,"active_scene",state->active_scene);
-    if(line_index==3u) {
+    if(line_index >= 3u &&
+       line_index < (uint16_t)(3u + BANK_SCENE_SLOT_COUNT)) {
         static const char hex[]="0123456789abcdef";
-        if (capacity < 28u) return 0u;
-        memcpy(dst,"scene_mask_voice_edit=",22u);
-        dst[22]=hex[(state->scene_mask_voice_edit >> 12u)&15u];
-        dst[23]=hex[(state->scene_mask_voice_edit >> 8u)&15u];
-        dst[24]=hex[(state->scene_mask_voice_edit >> 4u)&15u];
-        dst[25]=hex[state->scene_mask_voice_edit&15u]; dst[26]='\n'; dst[27]='\0'; return 27u;
+        uint8_t scene_i = (uint8_t)(line_index - 3u);
+        uint16_t mask = state->scene_mask_voice_edit[scene_i];
+        uint8_t len;
+
+        /*
+         * Format one indexed per-Scene VOICE edit mask line.
+         *
+         * Inputs: line index 3..18 and the staged Scene mask array. Output:
+         * scene_mask_voice_edit_NN=XXXX\n, with a compact one-digit suffix for
+         * Scenes 0..9 and a two-digit suffix for Scenes 10..15. The writer is
+         * self-terminating through the existing line-index loop, so increasing
+         * the format from one line to 16 needs no filesystem ceiling change.
+         * Affiliate: storage_banksetParseLine() accepts both this form and the
+         * legacy single-key form.
+         */
+        if (capacity < 31u) return 0u;
+        memcpy(dst,"scene_mask_voice_edit_",22u);
+        if (scene_i >= 10u) {
+            dst[22] = (char)('0' + scene_i / 10u);
+            dst[23] = (char)('0' + scene_i % 10u);
+            len = 24u;
+        } else {
+            dst[22] = (char)('0' + scene_i);
+            len = 23u;
+        }
+        dst[len++] = '=';
+        dst[len++] = hex[(mask >> 12u) & 15u];
+        dst[len++] = hex[(mask >> 8u) & 15u];
+        dst[len++] = hex[(mask >> 4u) & 15u];
+        dst[len++] = hex[mask & 15u];
+        dst[len++] = '\n';
+        dst[len] = '\0';
+        return len;
     }
     return 0u;
 }

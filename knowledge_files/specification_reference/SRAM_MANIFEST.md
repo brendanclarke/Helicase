@@ -2,12 +2,15 @@
 
 Current static-memory reference for the STM32F765VIH6 firmware. The baseline is
 the clean Session 069 Pass 1 link at commit `1f7a772` (2026-09-20), recorded in
-`S069_ATS_PAT_BOUNDED_PASS1_IMPLEMENT.md`. The subsequent commit `55fe250`
-changes only a planning document. This checkout has no `build/lxr02.elf` or
-ARM toolchain, so the linked totals below are taken from that recorded build;
-section sizes are reconciled with its `size` result and the current source.
-Per-symbol sizes below come from fixed source geometry or the earlier linked
-symbol inventory. Rebuild before treating them as a new link measurement.
+`S069_ATS_PAT_BOUNDED_PASS1_IMPLEMENT.md`, with Session 070 and Session 071
+deltas applied. Session 071 final build: `text=456,748`, `data=416`,
+`bss=291,900`. Session 071 added +86 bytes bss (+30 BankData per-Scene mask,
++32 `op_bankset_state` staging, +12 audio-out step-override table, +12
+FX-send step-override table). This checkout has no `build/lxr02.elf` or ARM
+toolchain, so the linked totals below are taken from recorded builds; section
+sizes are reconciled with the `size` result and the current source. Per-symbol
+sizes below come from fixed source geometry or the earlier linked symbol
+inventory. Rebuild before treating them as a new link measurement.
 
 Configuration: `DEV_MODE_LOGGING=1`, `DEV_LOGGING_IWDG=0`,
 `DEV_STALL_DETECTION=1`, `AUTOSAVE_TRACE_RECORD_COUNT=2048`,

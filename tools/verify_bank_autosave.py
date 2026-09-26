@@ -18,9 +18,11 @@ from pathlib import Path
 RECORD_BYTES = 34768
 BANK_OFFSET = 3920
 BANK_SECTION_BYTES = 128
+VOICE_EDIT_MASK_OFFSET = 13
 SCENE_OFFSET = 4048
 SCENE_BYTES = 1920
 SCENE_COUNT = 16
+VOICE_EDIT_MASK_BYTES = SCENE_COUNT * 2
 INSTRUMENTS_PER_KIT = 6
 COMMIT_VALID = 0xA5
 
@@ -283,12 +285,17 @@ def main() -> int:
                 winner = candidate
         _, winner_name, record = winner
 
-    raw_bank = record[BANK_OFFSET:BANK_OFFSET + 15]
+    raw_bank = record[BANK_OFFSET:BANK_OFFSET + VOICE_EDIT_MASK_OFFSET +
+                       VOICE_EDIT_MASK_BYTES]
     record_slot = u16(record[BANK_OFFSET:BANK_OFFSET + 2])
     record_name = text8(record[BANK_OFFSET + 2:BANK_OFFSET + 10])
     record_mask = u16(record[BANK_OFFSET + 10:BANK_OFFSET + 12])
     record_active = record[BANK_OFFSET + 12]
-    record_voice_mask = u16(record[BANK_OFFSET + 13:BANK_OFFSET + 15])
+    record_voice_masks = [
+        u16(record[BANK_OFFSET + VOICE_EDIT_MASK_OFFSET + scene * 2:
+                      BANK_OFFSET + VOICE_EDIT_MASK_OFFSET + scene * 2 + 2])
+        for scene in range(SCENE_COUNT)
+    ]
     if record_slot != args.bank_slot:
         add_error(errors, f"{winner_name} Bank restore slot: expected "
                          f"{args.bank_slot}, got {record_slot}")
@@ -301,14 +308,24 @@ def main() -> int:
         try:
             bankset_values = parse_assignments(bank_dir / "bankset.bcg")
             expected_active = int(bankset_values["active_scene"], 0)
-            expected_voice = int(bankset_values["scene_mask_voice_edit"], 16)
+            if any(f"scene_mask_voice_edit_{scene}" in bankset_values
+                   for scene in range(SCENE_COUNT)):
+                expected_voice_masks = [
+                    int(bankset_values[f"scene_mask_voice_edit_{scene}"], 16)
+                    for scene in range(SCENE_COUNT)
+                ]
+            else:
+                # Legacy bankset.bcg carried one mask shared by every Scene.
+                expected_voice = int(bankset_values["scene_mask_voice_edit"], 16)
+                expected_voice_masks = [expected_voice] * SCENE_COUNT
             if record_active != expected_active:
                 add_error(errors, f"{winner_name} active_scene: expected "
                                  f"{expected_active}, got {record_active}")
-            if record_voice_mask != expected_voice:
-                add_error(errors, f"{winner_name} voice edit mask: expected "
-                                 f"0x{expected_voice:04x}, got "
-                                 f"0x{record_voice_mask:04x}")
+            for scene, expected_voice in enumerate(expected_voice_masks):
+                if record_voice_masks[scene] != expected_voice:
+                    add_error(errors, f"{winner_name} Scene {scene:02d} voice "
+                                     f"edit mask: expected 0x{expected_voice:04x}, "
+                                     f"got 0x{record_voice_masks[scene]:04x}")
         except (OSError, KeyError, ValueError) as exc:
             add_error(errors, f"bankset.bcg: {exc}")
     if record_mask != child_mask:
@@ -354,7 +371,7 @@ def main() -> int:
     print(f"  slot={slot_text} winner={winner_name} "
           f"present_mask=0x{record_mask:04x} expected=0x{child_mask:04x}")
     if errors:
-        print("  Bank bytes @3920..3934: " + raw_bank.hex(" "))
+        print("  Bank bytes @3920..3964: " + raw_bank.hex(" "))
         for error in errors:
             print(f"  - {error}")
         return 1

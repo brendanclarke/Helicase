@@ -1,20 +1,16 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-070 (all phases), including typed HCNAMES, AutoSave boot restore, typed
-Instrument-index repair, AsyncFATFS directory publication, the Phase 4 dynamic
-Pattern storage system, step automation editing/playback (Session 065), the
-VOICE-page held-step automation overlay (Session 066), the Pattern Stack
-Service with dtype offset bug fix (Session 067), the Session 068 front-panel
-event-ring rebuild, played-Pattern mirror fix, and per-track sequencer length
-fix, Session 069 bounded CPU convergence (non-semantic maintenance,
-trailing-slack reservation, reactive compaction, bounded repair epoch, O(1)
-dirty predicate, quiet window scheduling, shared background CPU budget, and
-Load/Save repair gate), and Session 070 systems fitness pass (Makefile header
-deps, Load/Save revision LSR-01..04, probability gating, Scene automation
-targets 384..403, LED layer bitmap consolidation, Scene automation runtime
-overlay architecture, Pattern generation fix, transport restart automation
-restore).
+071, including typed HCNAMES, AutoSave boot restore, typed Instrument-index
+repair, AsyncFATFS directory publication, the Phase 4 dynamic Pattern storage
+system, step automation editing/playback (Session 065), the VOICE-page
+held-step automation overlay (Session 066), the Pattern Stack Service with
+dtype offset bug fix (Session 067), the Session 068 front-panel event-ring
+rebuild, played-Pattern mirror fix, and per-track sequencer length fix,
+Session 069 bounded CPU convergence, Session 070 systems fitness pass, and
+Session 071 per-Scene voice-edit mask, base-independent LFO voice-morph
+contribution, Scene superpage live display, LED chase state defect fix, and
+LFO target voice handler fix.
 Historical migrations belong in session logs; this document states which live
 module owns each call, state transition, and retained object.
 
@@ -184,13 +180,14 @@ children that are provably unchanged on the current mounted card.
 
 | API | Use | Usual callers / clients |
 | --- | --- | --- |
-| `bank_init()` | Zero present/edit masks, active Scene, resident-Bank flag, and all Session 058 clean authority. | boot |
+| `bank_init()` | Zero present/edit masks (per-Scene voice-edit masks default to `(1u << i)` self-only since Session 071), active Scene, resident-Bank flag, and all Session 058 clean authority. | boot |
 | `bank_setScenePresentMask()` / `bank_scenePresentMask()` / `bank_scenePresent()` | Present-mask get/set; the setter reports whether it changed (Session 052). | filesystem Bank Load/Save, AutoSave, Preset |
 | `bank_hasResidentBank()` / `bank_setHasResidentBank()` | Resident-Bank presence flag; the empty-Scene/Bank overwrite guard (Session 057) depends on it. | filesystem |
 | `bank_clearSdCleanAuthority()` | Drop every card-clean bit and the identified Bank slot (`BANK_SD_CLEAN_SLOT_NONE = 0xffff`). Called at cold boot and every fresh mount/remount. | filesystem `initAfterCardReady` |
 | `bank_invalidateSdCleanScene(scene_index)` | Clear one resident Scene's card-clean bit and set its mutation-during-save bit. Called by every retained-data mutation funnel (Scene/Kit scalar setters, Instrument endpoint store, KitMrp/InstrumentMrp/whole-Instrument commit, Pattern mutators). Equal-value no-ops never reach it. | SceneData, presetManager, PatternData |
 | `bank_publishSdCleanAuthority(slot, proven_mask)` | Establish/merge clean authority after a completed Bank Load/Save. Same-slot ORs into existing bits; a different slot replaces the old authority. Autosave recovery never calls it. | presetManager `on_bank_load_complete`; filesystem Save completion |
 | `bank_sdCleanMask()` / `bank_sdCleanSlot()` / `bank_sdCleanSlotIsValid()` | Read the clean mask/slot/validity. | filesystem Bank Save skip |
+| `bank_setSceneMaskVoiceEditForScene(scene, mask)` / `bank_sceneMaskVoiceEditForScene(scene)` | Per-Scene indexed voice-edit mask setter/getter for boot restore (Autosave) and bankset load/save (Session 071). | filesystem, Autosave |
 | `bank_resetSdSaveMutationWindow()` / `bank_resetSdSaveMutationScene()` / `bank_sdSaveMutatedMask()` | Own the operation-scoped mutation window across a Bank Save so a child edited while its write was in flight stays non-clean. | filesystem Bank Save |
 
 The clean authority is **never serialized** (not in settings, HCNAMES, Bank, or
@@ -401,7 +398,7 @@ Sequencer LED feedback via `SeqLedState`.
 | `led_setBeatPulse(on)` | Apply beat pulse to START/STOP LED. | `led_processSeqLedState()` |
 | `led_notifyPatternChanged(playedPattern)` | Sequencer pattern-change notification and follow-mode UI refresh. | Sequencer |
 | `led_notifyTrackRotationReset(rotation)` | Update visible rotation parameter after Sequencer stop reset. | Sequencer |
-| `led_processSeqLedState()` | Foreground drain of Sequencer LED dirty state. | `main.c` |
+| `led_processSeqLedState()` | Foreground drain of Sequencer LED dirty state. Session 071 added a transport-aware chase guard: when `seq_isRunning()` is false, `SEQ_LED_DIRTY_CHASE` events clear the chase layer via `led_clearActive_step()` instead of installing it. Includes `sequencer.h` for `seq_isRunning()`. | `main.c` |
 | `led_updateAutomationStepView(track, target, scene)` | Light SEQ LEDs for steps with automation matching a target parameter (Session 066). | Menu VOICE overlay |
 | `led_renderFromStack(ledNr)` | Re-render one LED from its active-layer bitmap: pulse > flash > blink/chase > base. Replaces blind `led_reset()` in all layer-expiry paths (Session 070). | ledHandler internals |
 
@@ -542,7 +539,7 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 | `seq_setQuantisation(value)` | Recording quantization. | Menu |
 | `seq_setNextPattern(patNr)` | Queue next playback pattern. | buttonHandler, MidiParser |
 | `seq_armActivePatternReload()` | Mark active pattern for reload/commit. | filesystem/preset load paths |
-| `seq_setRunning(isRunning)` / `seq_isRunning()` | Transport. | buttonHandler, MidiParser |
+| `seq_setRunning(isRunning)` / `seq_isRunning()` | Transport. Stop branch (Session 071) now queues `SEQ_LED_DIRTY_CHASE` after setting `seq_running = 0u` so the foreground drain clears any retained chase layer. | buttonHandler, MidiParser |
 | `seq_setMute(trackNr, isMuted)` / `seq_isTrackMuted(trackNr)` | Playback mute state. | buttonHandler, MidiParser |
 | `seq_setRoll(voice, onOff)` / `seq_setRollRate(rate)` | Roll performance behavior. | buttonHandler, Menu |
 | `seq_addNote(trackNr, vel, note)` | Record played note into pattern when recording. | MidiParser, roll path |
@@ -601,10 +598,12 @@ prefixes remain `preset_*` for the mechanical move.
 | `filesystem_loadedInstrumentWasTemporary()` plus `preset_startInstrumentApply(scene, slot, mark_autosave_whole_instrument)` / `preset_tickInstrumentApply()` | Filesystem exposes the existing request-local root-pool versus hidden-`kit` origin during completion; Menu passes that immutable result as the mark flag. A root-pool commit immediately marks each destination's type/Normal/Morph payload for AutoSave; hidden restore supplies zero. Active Scene path clears all outgoing modulation owners, commits/resets the incoming runtime, rebuilds all six Morph images, then normalizes/rebinds all six source target relationships. | Filesystem, then Menu Instrument completion |
 | `preset_startInstrumentMorphApply(scene, slot)` | Copy staged same-type Instrument normal endpoints into the destination morph image, immediately mark only the committed Morphable Morph payload for AutoSave, and refresh active-scene Morph runtime. | Menu InstrumentMrp completion |
 | `preset_morph(morph)` / `preset_morphVoice(slot, morph)` / `preset_morphTick()` / `preset_getMorphValue(index, morph)` | Rate-limited descriptor Morph interpolation/application. Global Morph bulk-sets all six per-voice Morph values; per-voice Morph is the engine input. | Menu, MIDI, velocity modulation, main loop |
-| `presetMorph_setVoiceLfoModulation(source_slot, target_slot, amount, polarity, lfo_value)` / `presetMorph_clearLfoSource(source_slot)` | Maintain the hidden per-voice Morph LFO overlay that is summed around retained per-voice Morph base values. | InstrumentManager/LFO dispatch |
+| `presetMorph_setVoiceLfoModulation(scene_index, target_slot, source_slot, target_pair, direction, depth)` / `presetMorph_clearLfoSource(source_slot)` | Maintain the hidden per-voice Morph LFO overlay. Session 071 changed the setter from absolute amount to base-independent direction (`PresetMorphLfoDirection`: NONE/MAIN/MORPH) + normalized depth. The resolver computes signed deltas from the current effective base at resolution time, eliminating stale-base errors when step automation changes the base between LFO sample and resolve. | InstrumentManager/LFO dispatch |
 | `presetMorph_setStepAutomationOverride(slot, amount)` | Set a per-voice Morph step automation override. The morph engine uses this value instead of the retained per-voice amount while active. LFO modulates around the override value (Session 070). | Sequencer Scene automation drain |
 | `presetMorph_clearAllStepAutomationOverrides()` | Clear all per-voice Morph step overrides and restore retained amounts. Called on transport restart (Session 070). | Sequencer Scene automation restore |
-| `presetMorph_getEffectiveVoiceAmount(slot)` | Return the step override when active, else the retained per-voice Morph amount. Single query point for the morph decimation engine (Session 070). | presetMorphEngine internals, morph decimation |
+| `presetMorph_getEffectiveVoiceAmount(slot)` | Return the step override when active, else the retained per-voice Morph amount. Single query point for the morph decimation engine (Session 070). Also used by menu.c for Scene superpage live display (Session 071). | presetMorphEngine internals, morph decimation, Menu |
+| `preset_setAudioOutStepOverride(slot, route)` / `preset_clearAudioOutStepOverride(slot)` / `preset_getEffectiveAudioOut(slot)` | Per-voice audio-out step automation overlay. Route clamped to `MIXER_ROUTING_DAC2_R`. Cleared by `preset_init()` and transport restore (Session 071). | Sequencer Scene automation drain, Menu superpage |
+| `preset_setFxSendStepOverride(slot, amount)` / `preset_clearFxSendStepOverride(slot)` / `preset_getEffectiveFxSend(slot)` | Per-voice FX-send step automation overlay. Amount clamped to 127. Apply path is no-op until Phase 5 FX bus (Session 071). | Sequencer Scene automation drain, Menu superpage |
 
 ## Core/Bank/Scene/Preset/ParameterArray
 
@@ -658,7 +657,8 @@ voices, and the Scene namespace.
 | `instrumentManager_clearAllRuntimeModulationTargets()` | Restore/clear both LFO pairs and velocity target for every outgoing current source before a slot type changes. | Preset staged Instrument commit |
 | `instrumentManager_resetRuntimeSlot(slot)` | Initialize only the incoming committed slot/type runtime object. | Preset staged Instrument commit |
 | `instrumentManager_writeRuntime()` / target validation/stepping helpers | Apply descriptor/supplemental bindings and validate canonical targets against current slot types. | Preset, Menu, modulation paths |
-| `instrumentManager_updateLfoAdapters(source_slot, pair, lfo, polarity, amount)` | Update InstrumentManager-owned LFO destinations: descriptor-domain adapters, slot decimation, and Scene targets. Descriptor adapters shape in parameter space and then call the normal runtime writer. | `lfo.c` |
+| `instrumentManager_updateLfoAdapters(source_slot, pair, lfo, polarity, amount)` | Update InstrumentManager-owned LFO destinations: descriptor-domain adapters, slot decimation, and Scene targets. Descriptor adapters shape in parameter space and then call the normal runtime writer. For voice-morph targets, Session 071 changed encoding to direction+depth without reading the morph base. | `lfo.c` |
+| `INSTRUMENT_BIND_LFO_TARGET_VOICE` / `_VOICE_2` handler | Session 071 fix: changed from store-only validation to full target reinstall via `instrumentManager_installLfoModulationTarget()`. Reads sibling param token via `instrumentManager_descriptorIndexForBinding()` and clears stale morph/decimation/Scene contributions through the existing restore path. | `instrumentManager_writeRuntimeInternal()` |
 
 Slot-6 track-7 generated decay step automation override (Session 070):
 `slot6_track7_decay_step_active` and `slot6_track7_decay_step_value` in
@@ -1012,6 +1012,7 @@ layer use the `storage_` prefix.
 | `storage_instrument_type_t` | Format-level type enum for `.drm`, `.snr`, `.cym`, `.hat`. | kitset/instrument parser |
 | `storage_kitset_t` | Incremental parse state for `kitset.kcg`. | filesystem directory kit loader |
 | `storage_instrument_state_t` | Incremental parse state for one instrument file. | Kit and root-Instrument filesystem loaders |
+| `storage_bankset_t` | Incremental parse state for `bankset.bcg` v2. Session 071 expanded to hold `uint16_t scene_mask_voice_edit[16]` and `uint16_t seen_scene_mask_voice_edit` (one bit per Scene). Parser reads legacy single-key `scene_mask_voice_edit=XXXX` (expands to self-only defaults `(1u << i)`) and per-Scene `scene_mask_voice_edit_NN=XXXX`. Writer emits 3 + 16 = 19 lines. | filesystem bankset load/save |
 | `storage_kitsetInit()` / `storage_kitsetParseLine()` / `storage_kitsetFinalize()` | Validate `kitset.kcg`, collect instrument filenames/types, and retain legacy `audio_out` side data without making it required. | Kit and Scene filesystem loaders |
 | `storage_kitsetHasCompleteLegacyAudioOut()` / `storage_kitsetLegacyAudioOut()` | Expose complete legacy embedded-kit routing only for Scene Load fallback when `sceneset.scg` has no `audio_out`. | `filesystem_loadSceneDirectory_tick()` |
 | `storage_instrumentStateInit()` / `storage_instrumentParseLine()` / `storage_instrumentFinalize()` | Validate one instrument file and write descriptor-indexed `[params]`/`[morph]` values into caller-owned Kit/slot staging. | Kit and root-Instrument loaders |

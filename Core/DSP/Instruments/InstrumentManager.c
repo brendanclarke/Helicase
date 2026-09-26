@@ -2320,21 +2320,70 @@ static uint8_t instrumentManager_updateLfoSceneDestination(
     if (!descriptor || !scene)
         return 0u;
     switch (descriptor->kind) {
-    case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
+    case SCENE_MOD_TARGET_KIND_VOICE_MORPH: {
+        float signed_depth;
+        float magnitude;
+        PresetMorphLfoDirection direction;
+        uint8_t depth;
+
         /*
-         * Shape LFO motion around the effective step-automation center when
-         * one is active; otherwise use the retained Scene base as before.
+         * Encode one voice-Morph LFO sample independently of the Morph base.
+         *
+         * Inputs: normalized source, normalized amount, and the existing LFO
+         * polarity. Output: endpoint direction plus normalized depth for the
+         * hidden Morph contribution table. Positive polarity moves toward
+         * full Morph, negative polarity preserves original-LXR value-relative
+         * motion toward main, and bipolar polarity selects either endpoint by
+         * the sign of the centered source.
+         *
+         * The base is deliberately not read here and no absolute shaped value
+         * is stored. presetMorph_resolveLfoAmount() applies the encoded depth
+         * to the current step-automation-or-retained base, eliminating the
+         * stale-base gap between LFO dispatch and bounded Morph resolution.
+         * Decimation and slot-6 decay below retain their existing shaper path.
          */
-        base = presetMorph_getEffectiveVoiceAmount(
-            scene_getActiveIndex(), descriptor->voice_slot);
-        shaped = modNode_shapeRangeU16(base, descriptor->min_value,
-                                       descriptor->max_value,
-                                       lfo_value_0_1, amount, polarity);
+        if (lfo_value_0_1 < 0.f)
+            lfo_value_0_1 = 0.f;
+        else if (lfo_value_0_1 > 1.f)
+            lfo_value_0_1 = 1.f;
+        if (amount < 0.f)
+            amount = 0.f;
+        else if (amount > 1.f)
+            amount = 1.f;
+
+        switch (polarity) {
+        case MOD_NODE_POLARITY_POSITIVE:
+            signed_depth = amount * lfo_value_0_1;
+            break;
+        case MOD_NODE_POLARITY_BIPOLAR:
+            signed_depth = amount * (2.f * lfo_value_0_1 - 1.f);
+            break;
+        default:
+            signed_depth = -(amount * (1.f - lfo_value_0_1));
+            break;
+        }
+
+        if (signed_depth > 0.f) {
+            direction = PRESET_MORPH_LFO_DIRECTION_MORPH;
+            magnitude = signed_depth;
+        } else if (signed_depth < 0.f) {
+            direction = PRESET_MORPH_LFO_DIRECTION_MAIN;
+            magnitude = -signed_depth;
+        } else {
+            direction = PRESET_MORPH_LFO_DIRECTION_NONE;
+            magnitude = 0.f;
+        }
+        if (magnitude > 1.f)
+            magnitude = 1.f;
+        depth = (uint8_t)(magnitude * 255.f + 0.5f);
+        if (depth == 0u)
+            direction = PRESET_MORPH_LFO_DIRECTION_NONE;
         presetMorph_setVoiceLfoModulation(scene_getActiveIndex(),
                                           descriptor->voice_slot,
                                           source_slot, target_pair,
-                                          1u, (uint8_t)shaped);
+                                          direction, depth);
         return 1u;
+    }
     case SCENE_MOD_TARGET_KIND_DECIMATION_ALL:
         base = scene->settings.voice_decimation_all;
         shaped = modNode_shapeRangeU16(base, descriptor->min_value,
@@ -3010,13 +3059,45 @@ static uint8_t instrumentManager_writeRuntimeInternal(
     case INSTRUMENT_BIND_LFO_TARGET_VOICE:
     case INSTRUMENT_BIND_LFO_TARGET_VOICE_2:
         /*
-         * The selected target voice is stored in its descriptor cell and paired
-         * with the matching lfo_target_param binding when that later binding is
-         * applied. There is no standalone DSP write for this value. Pair 1 and
-         * pair 2 share this validation but keep separate binding identities so
-         * Menu/storage can find the correct sibling descriptor cells.
+         * Reinstall the LFO destination when its target namespace changes.
+         *
+         * The voice cell selects the namespace (voices 1..6 or Scene) under
+         * which the sibling parameter token is interpreted. Changing that
+         * namespace can move the target between disjoint ID spaces. The old
+         * store-only path left the previous install — including any Scene
+         * voice-Morph contribution — active until the parameter cell changed.
+         *
+         * The caller has already stored value in SceneData. Read the matching
+         * sibling parameter cell, expand the new voice/token pair, and use the
+         * normal install path so restoreLfoSupplementalTarget() clears stale
+         * descriptor, decimation, and Morph state before the new target.
          */
-        return instrumentManager_lfoTargetVoiceValid(value);
+        {
+            uint8_t target_pair =
+                (descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_VOICE_2)
+                    ? 1u : 0u;
+            instrument_binding_kind_t param_kind = target_pair
+                ? INSTRUMENT_BIND_LFO_TARGET_PARAM_2
+                : INSTRUMENT_BIND_LFO_TARGET_PARAM;
+            const kit_instrument_slot_t *source =
+                scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+            uint8_t param_index;
+            uint8_t param_token = INSTRUMENT_TARGET_TOKEN_OFF;
+
+            if (!instrumentManager_lfoTargetVoiceValid(value))
+                return 0u;
+            if (source &&
+                instrumentManager_descriptorIndexForBinding(
+                    source->type, param_kind, &param_index)) {
+                param_token =
+                    source->parameter_images.instrument_parameters[param_index];
+            }
+            return instrumentManager_installLfoModulationTarget(
+                slot, target_pair,
+                instrumentManager_lfoTargetIdFromToken(
+                    scene_getActiveIndex(), slot, value, param_token,
+                    INSTRUMENT_TARGET_MODULATION));
+        }
 
     case INSTRUMENT_BIND_LFO_TARGET_PARAM:
     case INSTRUMENT_BIND_LFO_TARGET_PARAM_2:

@@ -13028,8 +13028,9 @@ static void filesystem_loadSceneDirectory_tick(void)
              * Inputs: validated child Scene data and the one-bit destination
              * mask installed by the Bank loader before delegating here. Output:
              * only op_bank_loaded_scene changes. BankData identity, active
-             * Scene, present mask, restore slot, and scene_mask_voice_edit are
-             * committed by the Bank loader after every selected child has
+             * Scene, present mask, restore slot, and per-Scene
+             * scene_mask_voice_edit entries are committed by the Bank loader
+             * after every selected child has
              * finished, so a later child failure cannot leave partially updated
              * Bank metadata.
              */
@@ -13904,7 +13905,25 @@ static void filesystem_loadBankDirectory_tick(void)
                  AUTOSAVE_TRACE_BANK_PRESENT_MASK_SHIFT) |
                     op_bank_scene_load_mask);
             bank_selectActiveSceneForEditMask(op_bank_active_scene);
-            bank_setSceneMaskVoiceEdit(op_bankset_state.scene_mask_voice_edit);
+            /*
+             * Commit only the parsed per-Scene VOICE edit masks.
+             *
+             * Inputs: storageTypes.c staging array and one seen bit per
+             * indexed key. Output: each seen entry is normalized into BankData
+             * without changing the active Scene. A legacy single-key file has
+             * all 16 seen bits set by the parser, so it follows the same loop.
+             * Affiliate: bank_init() defaults unseen entries to self only.
+             */
+            {
+                uint8_t mask_i;
+                for (mask_i = 0u; mask_i < BANK_SCENE_SLOT_COUNT; mask_i++) {
+                    if (op_bankset_state.seen_scene_mask_voice_edit &
+                        (uint16_t)(1u << mask_i))
+                        bank_setSceneMaskVoiceEditForScene(
+                            mask_i,
+                            op_bankset_state.scene_mask_voice_edit[mask_i]);
+                }
+            }
             bank_setRestoreBankSlot(op_slot);
             /*
              * Persist the newly selected boot-restore Bank after a valid
@@ -14087,7 +14106,17 @@ static void filesystem_loadBankDirectory_tick(void)
              AUTOSAVE_TRACE_BANK_PRESENT_MASK_SHIFT) |
                 op_bank_scene_load_mask);
         bank_selectActiveSceneForEditMask(op_bank_active_scene);
-        bank_setSceneMaskVoiceEdit(op_bankset_state.scene_mask_voice_edit);
+        /* Restore each parsed Bank-local Scene mask independently. */
+        {
+            uint8_t mask_i;
+            for (mask_i = 0u; mask_i < BANK_SCENE_SLOT_COUNT; mask_i++) {
+                if (op_bankset_state.seen_scene_mask_voice_edit &
+                    (uint16_t)(1u << mask_i))
+                    bank_setSceneMaskVoiceEditForScene(
+                        mask_i,
+                        op_bankset_state.scene_mask_voice_edit[mask_i]);
+            }
+        }
         bank_setRestoreBankSlot(op_slot);
         /*
          * Persist the newly selected boot-restore Bank after a complete
@@ -18723,7 +18752,17 @@ static void filesystem_saveBankDirectory_tick(void)
         bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
                                              op_bank_scene_save_mask));
         bank_selectActiveSceneForEditMask(op_bank_active_scene);
-        bank_setSceneMaskVoiceEdit(op_bankset_state.scene_mask_voice_edit);
+        /* Restore each parsed Bank-local Scene mask independently. */
+        {
+            uint8_t mask_i;
+            for (mask_i = 0u; mask_i < BANK_SCENE_SLOT_COUNT; mask_i++) {
+                if (op_bankset_state.seen_scene_mask_voice_edit &
+                    (uint16_t)(1u << mask_i))
+                    bank_setSceneMaskVoiceEditForScene(
+                        mask_i,
+                        op_bankset_state.scene_mask_voice_edit[mask_i]);
+            }
+        }
         bank_setRestoreBankSlot(op_slot);
         /*
          * Persist the boot-restore Bank selected by a successful Bank Save.
@@ -27382,7 +27421,17 @@ static uint16_t filesystem_bootNarrowLoadBank(uint16_t bank_slot)
     bank_setDisplayName(hcnames_name_mirror[FS_IDENTITY_BANK_ROW]);
     (void)bank_setScenePresentMask(present_mask);
     bank_selectActiveSceneForEditMask(active_scene);
-    bank_setSceneMaskVoiceEdit(op_bankset_state.scene_mask_voice_edit);
+    /* Restore each parsed Bank-local Scene mask independently. */
+    {
+        uint8_t mask_i;
+        for (mask_i = 0u; mask_i < BANK_SCENE_SLOT_COUNT; mask_i++) {
+            if (op_bankset_state.seen_scene_mask_voice_edit &
+                (uint16_t)(1u << mask_i))
+                bank_setSceneMaskVoiceEditForScene(
+                    mask_i,
+                    op_bankset_state.scene_mask_voice_edit[mask_i]);
+        }
+    }
     bank_setRestoreBankSlot(bank_slot);
     bank_setHasResidentBank(1u);
     /* Reader active-Scene tail: same side-effect-free realignment the winner
@@ -29566,11 +29615,25 @@ bool filesystem_requestSaveBank(uint16_t slot,
         }
     }
     op_bankset_state.active_scene = op_bank_active_scene;
-    op_bankset_state.scene_mask_voice_edit = bank_sceneMaskVoiceEdit();
+    /*
+     * Capture all per-Scene VOICE edit masks for the bankset writer.
+     *
+     * Inputs: indexed BankData entries. Output: the staging array carries the
+     * complete resident mask set and all seen bits are raised, so the writer
+     * emits one line for each Bank-local Scene. This avoids collapsing Scene 0
+     * through Scene 15 into the currently active entry during Bank Save.
+     * Affiliate: storage_formatBanksetLine() streams the indexed lines.
+     */
+    {
+        uint8_t mask_i;
+        for (mask_i = 0u; mask_i < BANK_SCENE_SLOT_COUNT; mask_i++)
+            op_bankset_state.scene_mask_voice_edit[mask_i] =
+                bank_sceneMaskVoiceEditForScene(mask_i);
+    }
     op_bankset_state.seen_format = 1u;
     op_bankset_state.seen_version = 1u;
     op_bankset_state.seen_active_scene = 1u;
-    op_bankset_state.seen_scene_mask_voice_edit = 1u;
+    op_bankset_state.seen_scene_mask_voice_edit = 0xffffu;
     filesystem_makeNumberedDir(op_save_bank_dir_display_name,
                                slot,
                                display_name);

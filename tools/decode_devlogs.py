@@ -340,6 +340,8 @@ ENTRY_PHASES = {
 # shifting parameters from offset 8 to 10 (Scene/Kit) and 11 to 13
 # (Instrument).
 BANK_BYTES = 128
+VOICE_EDIT_MASK_OFFSET = 13
+VOICE_EDIT_MASK_BYTES = 16 * 2
 SCENE_BYTES = 1920
 SCENE_NAME_BYTES = 8
 SCENE_SOURCE_OFF = 8
@@ -419,8 +421,9 @@ def payload_region_text(offset: int) -> str:
             return f"Bank scene_present_mask byte{offset - 10}"
         if offset == 12:
             return "Bank active_scene"
-        if offset < 15:
-            return f"Bank scene_mask_voice_edit byte{offset - 13}"
+        if offset < VOICE_EDIT_MASK_OFFSET + VOICE_EDIT_MASK_BYTES:
+            return (f"Bank scene_mask_voice_edit Scene{(offset - VOICE_EDIT_MASK_OFFSET) // 2} "
+                    f"byte{(offset - VOICE_EDIT_MASK_OFFSET) % 2}")
         return f"Bank reserved byte{offset}"
     scene = (offset - BANK_BYTES) // SCENE_BYTES
     rel = (offset - BANK_BYTES) % SCENE_BYTES

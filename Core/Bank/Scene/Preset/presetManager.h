@@ -391,6 +391,22 @@ uint8_t preset_applyKitAudioRouting(uint8_t scene_index, uint8_t slot);
  * preset_applyKitAudioRouting() so the retained Scene route remains the base.
  */
 void preset_applyVoiceAudioOutRuntime(uint8_t slot, uint8_t route);
+/*
+ * Runtime-only Scene-setting step overlays used by the live VOICE superpage.
+ *
+ * Inputs: setters receive a zero-based voice slot and route/amount. Outputs:
+ * effective getters return the transient step value while active, otherwise
+ * retained SceneData. These APIs never mark AutoSave or alter retained Scene
+ * settings; audio-out DSP restore remains owned by preset_applyKitAudioRouting.
+ * The audio/FX tables are six-entry runtime state and are cleared at transport
+ * restore and preset_init(). FX send has no DSP bus owner yet.
+ */
+void preset_setAudioOutStepOverride(uint8_t slot, uint8_t route);
+void preset_clearAllAudioOutStepOverrides(uint8_t scene_index);
+uint8_t preset_getEffectiveAudioOut(uint8_t scene_index, uint8_t slot);
+void preset_setFxSendStepOverride(uint8_t slot, uint8_t amount);
+void preset_clearAllFxSendStepOverrides(void);
+uint8_t preset_getEffectiveFxSendAmount(uint8_t scene_index, uint8_t slot);
 void preset_applySceneSettings(uint8_t scene_index);
 /*
  * Scene-owned per-voice mix setting setters.

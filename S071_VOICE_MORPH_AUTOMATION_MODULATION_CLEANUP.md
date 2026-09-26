@@ -521,46 +521,279 @@ Within Part B, steps 8–9 must land together.
 
 ### LFO + step automation composition
 
-12. Program alternating voice-morph step values (0, 128, 224) on one voice.
+12. **PASS.** Program alternating voice-morph step values (0, 128, 224) on one voice.
     Route a slow positive LFO to that voice's morph. Play. Verify each step
     changes the LFO's starting point: from step value 128, the LFO moves
     toward 255; from 0, it sweeps from 0 toward 255.
-13. Diagnostic case: retained base 0, step override 128, LFO positive at
+13. **PASS.** Diagnostic case: retained base 0, step override 128, LFO positive at
     half depth. Must produce approximately 192 (not 128).
-14. Stop transport. Verify LFO continues around retained base 0 (step
+14. **PASS.** Stop transport. Verify LFO continues around retained base 0 (step
     overlay cleared).
 
 ### LFO polarity
 
-15. Positive: base toward full-morph endpoint.
-16. Negative: base toward main endpoint.
-17. Bipolar: travel on both sides of base.
-18. Amount zero: base only.
-19. Bases 0 and 255: correct one-sided headroom, no wrap.
+15. **PASS.** Positive: base toward full-morph endpoint.
+16. **PASS.** Negative: base toward main endpoint.
+17. **PASS.** Bipolar: travel on both sides of base.
+18. **PASS.** Amount zero: base only.
+19. **PASS.** Bases 0 and 255: correct one-sided headroom, no wrap.
 
 ### No instrument fan-out regression
 
-20. Scene 0, add Scene 2 to mask. Edit a VOICE-page instrument parameter.
+20. **PASS.** Scene 0, add Scene 2 to mask. Edit a VOICE-page instrument parameter.
     Switch to Scene 2: same value applied. Verify morph was NOT copied.
 
 ### Scene superpage live automation display (Part C)
 
-21. Program voice-morph step automation on voice 1 (step 0 = 0, step 8 =
+21. **PASS.** Program voice-morph step automation on voice 1 (step 0 = 0, step 8 =
     200). Navigate to VOICE 1 / mix / appended Scene screen. Play. Verify
     `1vm` value on the superpage changes between 0 and 200 with each step.
     Compare with PERF page — both should show the same live value.
 
-22. Same setup. Verify `1vm` on the superpage is underlined (indicating
+22. **PASS.** Same setup. Verify `1vm` on the superpage is underlined (indicating
     automation exists in the pattern). If audio out or FX send is also
     automated, verify those labels are also underlined.
 
-23. Held-step underline: navigate to the superpage, hold a step that has
+23. **PASS.** Held-step underline: navigate to the superpage, hold a step that has
     no Scene-target automation, turn the `1ou` encoder to assign an
     audio-out automation value. Release step. Verify `1ou` label is now
     underlined without leaving and returning to the page.
 
 ### Voice-edit mask boot state (Part C)
 
-24. Boot fresh with a Bank that has never had the voice-edit mask toggled.
+24. **PASS.** Boot fresh with a Bank that has never had the voice-edit mask toggled.
     Hold VOICE MODE: verify only the active Scene's LED is lit (blinking).
     No other SEQ LEDs should be steady-on.
+
+---
+
+## Codebase verification and open questions (appended S071 review)
+
+All line references in Parts A, B, and C were verified against the current
+source at commit `7341d3b`. The file layout, function signatures, struct
+definitions, Autosave offsets, and filesystem call sites match the plan.
+Below are the ambiguities, implementation risks, and open questions found
+during review.
+
+### V1 — A7 backward compatibility: old Autosave records have zero bytes
+
+**Resolved**: no backward compatibility with old Autosave records is
+required. Old `.hcprms` files will be disposed. Old `.bcg` files in
+`SD_CARD` will be updated manually. The 16-iteration loop in A7 applies
+unconditionally.
+
+### V2 — A5 dirty marking granularity
+
+Changing the dirty width from 2 to `AUTOSAVE_BANK_VOICE_EDIT_MASK_BYTES`
+(32) means every single-Scene mask change dirties all 32 bytes
+(`autosave_markBankFieldDirty()`, `Autosave.c:1472`). The writer drains
+one byte at a time with copy-forward, so this increases per-edit capture
+cost from 2 to 32 bytes. The Bank section is small (128 bytes total) and
+captures are amortized across the debounce window, so this is functionally
+acceptable. Noted here so the tradeoff is explicit, not discovered later.
+
+### V3 — Q-C1 resolved: all three Scene settings get live display
+
+**Resolved**: implement live effective-value display for all three
+automatable Scene settings (voice morph, audio out, FX send). This
+requires 12 bytes of new persistent SRAM storage: one `uint8_t` per
+voice × 2 settings (audio out and FX send) = 12 bytes. Approved.
+
+Voice morph already has `presetMorph_getEffectiveVoiceAmount()`. Audio
+out and FX send need equivalent step-override tables and effective-value
+getters so the superpage reads the modulated value during step automation
+playback, not the retained Scene base.
+
+### V4 — Q-C3 resolved: per-Scene Bank storage is canonical
+
+**Resolved**: the per-Scene mask array in BankData is the canonical
+storage. No other location stores a voice-edit mask except as staging
+(storageTypes parse state, filesystem load scratch). The SRAM expansion
+from 2 bytes to 32 bytes (one `uint16_t` per Scene) is approved. No
+defensive present-mask intersection is needed — Part A's per-Scene
+defaults are sufficient.
+
+### V5 — B4 polarity-to-direction mapping — accepted
+
+The polarity constants are (`modulationNode.h:67–71`):
+`MOD_NODE_POLARITY_NEGATIVE = 0`, `POSITIVE = 1`, `BIPOLAR = 2`.
+
+The plan's conceptual model maps:
+- positive → toward morph endpoint (255) → `DIRECTION_MORPH`
+- negative → toward main endpoint (0) → `DIRECTION_MAIN`
+- bipolar → both sides
+
+This matches the existing `modNode_shapeRangeU16()` behavior for
+voice-morph targets, where `min_value = 0` and `max_value = 255`. The
+B4 implementation must use the exact same polarity-to-direction mapping
+as the existing shaper, not the general-purpose interpretation of
+"positive = increasing." The integer rounding (`+127 / 255`) in B2 was
+verified correct at the boundary conditions (base 0/128/255, depth 255).
+
+The modulation layer always starts from the currently effective voice
+morph value — set by menu, step automation, or MIDI. It must not block
+or cause the morph drain to run faster; it is purely an additional layer
+in the interpolation calculation.
+
+### V6 — A10 interaction with the deferred Scene-switch worker
+
+`presetMorph_rebuildScene()` queues all 6 slots for the bounded Morph
+worker (`presetMorph_requestAll`). During runtime Scene switching,
+`preset_startDrumsetApply()` calls `preset_applySceneSettings()` — which
+A10 would augment — before the deferred worker begins processing
+individual slot image swaps.
+
+The bounded morph worker reads from `scene->kit.instruments[slot]`, which
+holds the NEW Scene's images (all 16 Scenes are resident in SRAM). But
+`instrumentManager_writeRuntime()` writes to the DSP runtime member,
+which may still be configured for the OLD Scene's instrument type until
+the deferred worker reaches that slot and calls
+`preset_resetAndApplyKitVoiceImage()`.
+
+**Mitigation**: the deferred worker calls `presetMorph_applyVoiceNow()`
+for each committed slot, which does a synchronous full rebuild and
+overrides any incorrect bounded-worker intermediate state. If both Scenes
+use the same instrument type in a slot (common case), the bounded worker's
+writes are correct immediately. The morph worker also gates runtime writes
+on `scene_index == scene_getActiveIndex()` (`presetMorphEngine.c:462`),
+so it never writes to an inactive Scene's DSP state.
+
+This interaction is consistent with the existing architecture and does
+not require additional gating. Noted here for implementation awareness.
+
+### V7 — bankset.bcg writer line count
+
+The current `storage_formatBanksetLine()` (`storageTypes.c:1204`) emits
+exactly 4 lines (format, version, active_scene, scene_mask_voice_edit).
+After A8, it emits 3 + 16 = 19 lines (format, version, active_scene,
+plus 16 per-Scene `scene_mask_voice_edit_NN` lines). The
+`filesystem_nextBanksetLine()` adapter (`filesystem.c:16864`) uses the
+self-terminating `filesystem_writeTextLine()` pattern — the writer calls
+the line function until it returns 0, so no hardcoded ceiling needs
+updating. However, the parser (`storage_banksetParseLine`,
+`storageTypes.c:1186`) needs its key comparison expanded: the current
+parser only matches `"scene_mask_voice_edit"` as a single key. A8 must
+add the `"scene_mask_voice_edit_NN"` per-Scene key match while keeping
+the legacy single-key path for backward compatibility. The `key[32]`
+buffer is large enough for `"scene_mask_voice_edit_15"` (25 characters).
+
+---
+
+## Implementation assessment (2026-09-26)
+
+Code changes reviewed against `S071_VOICE_MORPH_MOD_CLEANUP_IMPLEMENTATION.md`
+and the plan above. 14 source files modified, build image updated, two tool
+scripts updated.
+
+### Part A — per-Scene voice-edit mask
+
+All scheduled changes (A1–A24) are present and correct. Every scalar
+reference to `bank_scene_mask_voice_edit` is replaced with the active-entry
+array access. The indexed setter/getter pair, Autosave region expansion
+(13..44, 32 bytes), bankset parser/writer, and all four filesystem load
+sites plus the save site are implemented as specified. The `bank_init()`
+per-Scene self-only default resolves the C3 boot-state stale-bit bug.
+
+The `bank_selectActiveSceneForEditMask()` comment was updated to reflect
+per-Scene entry semantics (no longer "drops the mask and replaces by new
+active Scene bit"). The `menu_perfModeSceneButtonPressed()` comment in
+`menu.c:6247` was similarly corrected.
+
+The bankset parser uses `strncmp(key, "scene_mask_voice_edit", 21u) == 0
+&& key[21] == '_'` for the per-Scene prefix match, which is the cleaner
+alternative noted in the schedule.
+
+`storageTypes.h` now includes `BankData.h` for `BANK_SCENE_SLOT_COUNT` —
+a header dependency addition required by the array declaration in
+`storage_bankset_t` but not explicitly called out in the schedule.
+
+Scene switch morph rebuild (A24) is in `preset_applySceneSettings()` after
+mirror sync, as specified.
+
+### Part B — base-independent LFO voice-morph contribution
+
+All scheduled changes (B1–B8) are present and correct. The direction enum,
+contribution struct, setter, resolver, init/clear paths, and
+InstrumentManager encoding all match the plan.
+
+**Improvement over schedule**: a new `presetMorph_effectiveVoiceBase()`
+static helper consolidates the step-override-or-retained base selection
+into one call site, used by the resolver, pass snapshot
+(`presetMorph_snapshotPassAmounts`), priority path
+(`presetMorph_prioritizeVoice`), synchronous apply
+(`presetMorph_applyVoiceNow`), and the public effective-amount getter. The
+schedule had this logic duplicated across all those sites. The
+consolidation prevents the base sources from diverging and is a clear net
+improvement.
+
+**InstrumentManager improvements**: the B8 encoding adds explicit
+`lfo_value_0_1` and `amount` clamping to [0, 1] before the polarity math —
+good defensive practice for float inputs from the LFO dispatch path. The
+signed-depth → direction/depth conversion uses exact zero comparison on the
+float followed by a post-quantization `if (depth == 0u) direction = NONE`
+check, which is more robust than the schedule's epsilon-threshold approach.
+
+The `presetMorph_setVoiceLfoModulation()` setter adds a
+`direction > PRESET_MORPH_LFO_DIRECTION_MORPH` bounds check, clamping
+invalid direction values to NONE. Defensive addition not in the schedule.
+
+### Part C — Scene superpage live display, immediate underline
+
+All scheduled changes (C1–C11) are present and correct.
+
+The step-override tables (12 + 12 bytes) are declared at file scope in
+`presetManager.c` with the expected struct layout. The three function pairs
+(set/clear/get) for audio out and FX send match the schedule's API surface.
+
+`preset_setAudioOutStepOverride()` includes route clamping to
+`MIXER_ROUTING_DAC2_R`, matching `preset_applyVoiceAudioOutRuntime()`.
+`preset_setFxSendStepOverride()` clamps to 127. Both are good additions
+not in the schedule pseudocode.
+
+`preset_init()` clears both override tables. Necessary for boot state but
+not explicitly listed in the schedule.
+
+`menu.c` now includes `presetMorphEngine.h` for
+`presetMorph_getEffectiveVoiceAmount()` — required for C9 but not called
+out in the schedule.
+
+The sequencer FX_SEND case changed from `return 1u` to `break`, which now
+falls through to `seq_scene_automation_dirty |= (1u << index)`. This is
+correct: the overlay needs tracking so the restore path can clear it.
+
+The immediate underline fix (C10) uses `else if` rather than a second `if`,
+which is correct since a cell cannot be both `MENU_CELL_INSTRUMENT` and
+`MENU_CELL_SCENE_SETTING`.
+
+### SRAM accounting
+
+The implementation notes record +86 bytes total:
+- BankData mask: +30 bytes (2 → 32)
+- `op_bankset_state` staging struct: +32 bytes (8 → 40)
+- Audio-out overlay: +12 bytes (new)
+- FX-send overlay: +12 bytes (new)
+
+The schedule's SRAM summary listed +54 bytes, omitting the +32-byte
+`op_bankset_state` growth. The staging struct expanded from
+`{u8 seen, u8 active_scene, u16 mask}` to
+`{u16 seen, u8 active_scene, u16 mask[16]}` which is the expected
+consequence of the per-Scene array but was not accounted for. All
+allocations are within approved limits.
+
+### Observations
+
+1. No correctness issues found. The implementation is faithful to the
+   schedule with several defensive improvements (input clamping, bounds
+   checking, helper consolidation).
+
+2. Comment blocks in the applied code are somewhat more concise than the
+   schedule's documentation-in-place templates but contain the same
+   essential information (inputs, outputs, affiliates, clients, lifetime).
+
+3. The build image grew from 456,236 to 457,052 bytes (+816 bytes), which
+   is consistent with the code additions. The `bss` growth of
+   approximately +86 bytes matches the SRAM accounting.
+
+4. Hardware acceptance testing from the test plan (items 1–24) remains
+   pending. The code changes are structurally correct; runtime behavior
+   needs validation on target.

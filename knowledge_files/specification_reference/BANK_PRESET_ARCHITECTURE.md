@@ -4,7 +4,7 @@
 
 This is the authoritative reference for how parameters are stored in resident
 memory across the Bank, Scene, Kit, Instrument, and Effect hierarchy as of
-Session 070. It describes what is stored, where it lives, when it changes,
+Session 071. It describes what is stored, where it lives, when it changes,
 when it becomes visible, and how it is persisted.
 
 Related authority is deliberately separate:
@@ -54,40 +54,56 @@ Scene storage; it is a singleton module.
 |-------|------|---------|
 | `bank_display_name[9]` | char[9] | 8-char display name + NUL, from HCNAMES row 0 |
 | `bank_scene_present_mask` | uint16_t | Which of 16 Scenes are populated |
-| `bank_scene_mask_voice_edit` | uint16_t | Fan-out mask for VOICE-page and Scene-settings edits |
+| `bank_scene_mask_voice_edit[16]` | uint16_t[16] | Per-Scene fan-out mask for VOICE-page and Scene-settings edits |
 | `bank_active_scene_slot` | uint8_t | Currently active Scene index (0..15) |
 | `bank_has_resident_bank` | uint8_t | Whether a Bank is loaded |
 | `bank_restore_slot` | uint16_t | SD library slot for `settings.cfg` persistence |
 | SD-clean authority | ~16 bytes | Session-scoped, never serialized |
 
-### Voice-Edit Fan-Out Mask
+### Voice-Edit Fan-Out Mask (Per-Scene, Session 071)
 
-`bank_scene_mask_voice_edit` controls which resident Scenes receive edits
-made on the VOICE page and Scene settings pages. When the user edits a
-parameter on the VOICE page, the edit is applied to every Scene whose bit
-is set in this mask.
+`bank_scene_mask_voice_edit[16]` is a per-Scene array of fan-out masks. Each
+Scene has its own mask controlling which resident Scenes receive edits made on
+the VOICE page and Scene settings pages. When the user edits a parameter, the
+edit is applied to every Scene whose bit is set in the *active Scene's* mask.
 
-**Invariant:** The active Scene's bit must always be set in the voice-edit
-mask. `bank_ensureActiveInVoiceEditMask()` enforces this: when the new
-active Scene's bit is not already set in the mask, the entire mask is
-dropped to just the active Scene's bit. This prevents edits from silently
-fanning out to Scenes that were selected for a different active Scene
-context.
+**Default:** Each Scene's mask defaults to self-only: `(1u << scene_index)`.
+The user opts into multi-Scene fan-out by toggling Scene bits with VOICE + SEQ.
+
+**Invariant:** The active Scene's bit must always be set in its own mask.
+`bank_ensureActiveInVoiceEditMask()` enforces this: when the new active
+Scene's bit is not already set in the mask, the entire mask is dropped to
+just the active Scene's bit. This prevents edits from silently fanning out to
+Scenes that were selected for a different active Scene context.
 
 **Setting the mask:** `bank_setSceneMaskVoiceEdit(mask)` normalizes to 16
 bits, ensures the active Scene bit is set, but does NOT intersect with the
 present mask. A Scene can be in the voice-edit mask even if not marked
 present — this supports workflows where the user wants to pre-populate a
-Scene before formally activating it.
+Scene before formally activating it. All public accessors read/write
+`bank_scene_mask_voice_edit[bank_active_scene_slot]` transparently.
+
+**Per-Scene accessors:** `bank_setSceneMaskVoiceEditForScene(scene, mask)` and
+`bank_sceneMaskVoiceEditForScene(scene)` provide indexed access for boot
+restore (Autosave) and bankset load/save.
 
 **Active Scene change:** Both `bank_setActiveSceneSlot()` and
 `bank_selectActiveSceneForEditMask()` call the invariant enforcer.
 
+**Scene switch morph rebuild:** `preset_applySceneSettings()` calls
+`presetMorph_rebuildScene(scene_index)` after mirror sync, queuing all 6 slots
+for the bounded morph worker so the DSP converges to the new Scene's per-voice
+morph amounts within the normal foreground budget.
+
 ### Persistence
 
-- `bankset.bcg` v2 stores `active_scene` and `scene_mask_voice_edit`.
+- `bankset.bcg` v2 stores `active_scene` and 16 per-Scene
+  `scene_mask_voice_edit_NN` lines. Legacy single-key
+  `scene_mask_voice_edit=XXXX` is accepted on read and expanded to self-only
+  defaults `(1u << i)`.
 - `settings.cfg` stores `active_bank` (the library slot of the current Bank).
-- AutoSave HCPR captures the Bank-level scalar fields.
+- AutoSave HCPR captures the Bank-level scalar fields (32 bytes for the per-Scene
+  mask array at offsets 13..44).
 - The SD-clean authority is never serialized.
 
 ---
@@ -288,22 +304,33 @@ preserves user-set values during playback.
 | Overlay | Location | Bytes | Scope |
 |---------|----------|-------|-------|
 | `morph_step_override[6]` | presetMorphEngine.c | 12 | Per-voice morph: active flag + amount |
+| `preset_audioout_step_override[6]` | presetManager.c | 12 | Per-voice audio-out route: active + route (Session 071) |
+| `preset_fxsend_step_override[6]` | presetManager.c | 12 | Per-voice FX-send amount: active + amount (Session 071) |
 | `slot6_track7_decay_step_active/value` | InstrumentManager.c | 2 | Slot-6 generated decay |
 | Audio routing | Direct mixer register write | 0 | No retained state |
 | `seq_scene_automation_dirty` | sequencer.c | 4 | Bitmap of active overlays |
 
-### Interaction with LFO
+### Interaction with LFO (Updated Session 071)
 
 **Voice Morph:** `presetMorph_getEffectiveVoiceAmount(slot)` returns step
-override when active, else retained per-voice amount. LFO modulates around
-this effective value: `output = clamp(effective + lfo_delta, 0, 255)`.
+override when active, else retained per-voice amount. LFO stores
+base-independent direction + normalized depth (not an absolute amount).
+The resolver computes signed deltas from the current effective base at
+resolution time: MORPH direction scales toward 255, MAIN direction scales
+toward 0. Multiple source/pair contributions sum as signed deltas and clamp
+to [0, 255].
+
+**Audio Out:** `preset_getEffectiveAudioOut(slot)` returns step override when
+active, else retained Scene value. Session 071 added the step-override table.
+Direct mixer register write for DSP apply.
+
+**FX Send:** `preset_getEffectiveFxSend(slot)` returns step override when
+active, else retained Scene value. Apply path is no-op until Phase 5 FX bus.
 
 **Slot-6 Track-7 Decay:** Trigger cascade priority:
 1. Step override (if `step_active`)
 2. LFO contribution (if LFO active)
 3. Retained Scene value
-
-**Audio Out:** Direct register write, no LFO interaction.
 
 ### Transport restore
 
@@ -342,12 +369,20 @@ active slot's descriptor table — not hardcoded parameter lists.
 
 - **Direct edit:** PERF page morph knobs, MIDI CC1 on global channel.
 - **Velocity modulation:** Velocity morph retained-sets the per-voice value.
-- **LFO overlay:** Hidden per-voice morph LFO value summed around the
-  retained base. Serviced by the morph worker. Does not change retained
-  value.
+- **LFO overlay (updated Session 071):** Base-independent direction + depth
+  stored in `morph_lfo_contributions[6][6][2]` (144 bytes). The resolver
+  computes signed deltas from the current effective base (step override if
+  active, else retained) at resolution time. Direction is NONE (inactive),
+  MAIN (toward 0), or MORPH (toward 255). InstrumentManager encodes polarity
+  to direction+depth without reading the morph base. Serviced by the bounded
+  morph worker. Does not change retained value.
 - **Step automation overlay (Session 070):** Runtime-only override via
   `morph_step_override[]`. LFO modulates around the override. Does not
   change retained value.
+- **Effective base authority (Session 071):**
+  `presetMorph_effectiveVoiceBase()` is the single helper for choosing between
+  step-override and retained base. Used by the resolver, pass snapshot,
+  priority path, synchronous apply, and the public effective-amount getter.
 
 ---
 

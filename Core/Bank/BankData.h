@@ -54,6 +54,18 @@ void bank_setSceneMaskVoiceEdit(uint16_t mask);
 uint16_t bank_sceneMaskVoiceEdit(void);
 uint8_t bank_sceneInVoiceEditMask(uint8_t scene_index);
 void bank_toggleSceneMaskVoiceEdit(uint8_t scene_index);
+/*
+ * Read/write one resident Scene's VOICE edit fan-out mask.
+ *
+ * Inputs: zero-based Scene index and a raw 16-bit mask for the setter. Output:
+ * the indexed entry is normalized, the active-bit invariant is enforced for
+ * the active Scene, and the per-Scene Autosave field is marked on change. The
+ * getter returns the stored entry without changing active-Scene selection.
+ * Clients: Autosave restore/drain and bankset.bcg load/save staging. The
+ * active-entry wrappers above remain the UI/menu API.
+ */
+void bank_setSceneMaskVoiceEditForScene(uint8_t scene_index, uint16_t mask);
+uint16_t bank_sceneMaskVoiceEditForScene(uint8_t scene_index);
 void bank_setHasResidentBank(uint8_t present);
 uint8_t bank_hasResidentBank(void);
 

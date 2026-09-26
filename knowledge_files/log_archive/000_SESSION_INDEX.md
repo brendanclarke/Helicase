@@ -1527,3 +1527,21 @@ Session 070 executed a four-phase bounded systems-level fitness pass before Phas
 **S071 carry-over plan:** Part A (per-Scene voice-edit mask A1–A10), Part B (base-independent LFO voice-morph contribution B1–B4), Part C (live Scene display C1, held-step underline C2, boot-state cleanup C3). Open questions Q-C1 and Q-C3 documented.
 
 - **Find here**: [070_SESSION_HANDOFF_LOG.md](070_SESSION_HANDOFF_LOG.md), `PATTERN_DYNAMIC_STACK.md`, `AUTOSAVE.md`, `MODULE_INTERCHANGE_SPEC.md`, `BANK_PRESET_ARCHITECTURE.md`.
+
+### 071 — Voice Morph Automation/Modulation Cleanup, LED Chase Defect, LFO Target Voice Handler Fix (2026-09-25/26)
+
+Session 071 completed three planned feature items and two defect fixes on `dev-ph5-effects`, advancing from commit `7341d3b` (text=455,804, data=416, bss=291,820; image 456,236 bytes) to the final build at text=456,748, data=416, bss=291,900; image ~457,180 bytes.
+
+**Part A — Per-Scene voice-edit mask (A1–A24).** Replaced the single global `bank_scene_mask_voice_edit` scalar with a 16-entry `uint16_t` array, one per Scene, each defaulting to self-only `(1u << i)`. Autosave Bank region expanded from 2 to 32 bytes (offsets 13..44). `bankset.bcg` parser reads both legacy single-key and new per-Scene `scene_mask_voice_edit_NN` keys; writer emits 16 per-Scene lines. All four filesystem load sites and one save site loop over 16 Scenes. Scene switch now queues `presetMorph_rebuildScene()` for immediate morph convergence. Resolves Q-C3 boot-state stale-bit bug.
+
+**Part B — Base-independent LFO voice-morph contribution (B1–B8).** Reinterpreted the existing 144-byte `morph_lfo_contributions` table from `active+amount` to `direction+depth` (`PresetMorphLfoDirection` enum: NONE/MAIN/MORPH). Resolver computes signed deltas from the current effective base at resolution time, eliminating the stale-base bug when step automation changes the base between LFO sample and resolve. InstrumentManager encodes polarity to direction+depth without reading the morph base. New `presetMorph_effectiveVoiceBase()` helper consolidates base selection across all morph-engine paths. Zero additional SRAM.
+
+**Part C — Scene superpage live display (C1–C11).** Added step-override tables for audio-out (6 bytes) and FX-send (6 bytes) in presetManager.c, with set/clear/get APIs and `preset_init()` clearing. Sequencer FX_SEND case now falls through to dirty-bit tracking. `menu_cellDisplayValue()` reads effective values (step override when active, else retained) for voice morph, audio out, and FX send on the Scene superpage. Immediate underline on held-step Scene-target automation write via `va_sceneSearchBitForCell()`. +12 bytes audio-out overlay, +12 bytes FX-send overlay.
+
+**LED chase defect (Fix 1A/1B/2).** Root cause: spurious `LED_LAYER_CHASE` inversion installed at boot via `seq_realignActivePatternToMasterClock()` unconditionally queuing `SEQ_LED_DIRTY_CHASE` without testing `seq_running`. Three defect paths: boot, transport stop (chase persists), PERF Scene change while stopped. Fix 1A: drain-side chase guard in `led_processSeqLedState()` — branch on `seq_isRunning()`, clear chase when stopped. Fix 1B: `seq_setRunning(0)` queues `SEQ_LED_DIRTY_CHASE` so drain clears the layer. Fix 2: legacy `bankset.bcg` single-key mask migration now expands to `(1u << scene_i)` self-only defaults.
+
+**T12 morph assignment defect.** Root cause: `INSTRUMENT_BIND_LFO_TARGET_VOICE` handler was store-only — changing the voice cell from "scn" left stale `morph_lfo_contributions` active. Fix: voice cell handler now reads sibling param token via `instrumentManager_descriptorIndexForBinding()` and calls `instrumentManager_installLfoModulationTarget()`, clearing stale contributions through the existing restore path.
+
+All 24 tests PASS on hardware. SRAM growth: +86 bytes total (+30 BankData mask, +32 `op_bankset_state` staging, +12 audio-out overlay, +12 FX-send overlay). Parts B and T12 are zero-growth.
+
+- **Find here**: [071_SESSION_HANDOFF_LOG.md](071_SESSION_HANDOFF_LOG.md), `BANK_PRESET_ARCHITECTURE.md`, `MODULE_INTERCHANGE_SPEC.md`, `SRAM_MANIFEST.md`.

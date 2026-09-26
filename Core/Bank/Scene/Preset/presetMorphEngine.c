@@ -19,9 +19,21 @@ typedef struct {
     uint8_t active;
 } preset_morph_worker_t;
 
+/*
+ * One hidden LFO voice-Morph contribution.
+ *
+ * Inputs: InstrumentManager supplies an endpoint direction and normalized
+ * depth for one target/source/pair entry. Output: the bounded Morph resolver
+ * converts that direction/depth into a signed delta from the current effective
+ * base. This keeps the entry at two bytes, exactly matching the former
+ * active+absolute-amount representation, while removing dispatch-time base
+ * capture from the LFO composition contract.
+ */
 typedef struct {
-    uint8_t active;
-    uint8_t amount;
+    /* NONE is inactive; MAIN/MORPH select the endpoint direction. */
+    uint8_t direction;
+    /* Base-independent normalized contribution depth, 0..255. */
+    uint8_t depth;
 } preset_morph_lfo_contribution_t;
 
 static preset_morph_worker_t morph_worker;
@@ -107,6 +119,29 @@ static uint8_t presetMorph_firstQueuedSlot(uint8_t mask)
     return INSTRUMENT_SLOT_COUNT;
 }
 
+static uint8_t presetMorph_effectiveVoiceBase(const scene_t *scene,
+                                              uint8_t slot)
+{
+    /*
+     * Resolve the one authoritative Morph base for every worker path.
+     *
+     * Inputs: resident Scene pointer and zero-based voice slot. Output: the
+     * transient step-automation base when active, otherwise the retained
+     * Scene voice Morph amount. Keeping this choice in one helper prevents
+     * queued, priority, synchronous, and LFO-resolve paths from composing
+     * against different bases. It never writes SceneData or AutoSave.
+     *
+     * Affiliate: morph_step_override[] is the runtime-only Sequencer layer;
+     * callers still decide whether the returned base is later interpolated or
+     * combined with hidden LFO direction/depth contributions.
+     */
+    if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    return morph_step_override[slot].active
+        ? morph_step_override[slot].amount
+        : scene->settings.voice_morph_amount[slot];
+}
+
 static uint8_t presetMorph_voiceHasLfoLayer(uint8_t slot)
 {
     uint8_t source;
@@ -124,7 +159,8 @@ static uint8_t presetMorph_voiceHasLfoLayer(uint8_t slot)
         return 0u;
     for (source = 0u; source < INSTRUMENT_SLOT_COUNT; source++) {
         for (pair = 0u; pair < 2u; pair++) {
-            if (morph_lfo_contributions[slot][source][pair].active)
+            if (morph_lfo_contributions[slot][source][pair].direction !=
+                PRESET_MORPH_LFO_DIRECTION_NONE)
                 return 1u;
         }
     }
@@ -135,17 +171,17 @@ static uint8_t presetMorph_resolveLfoAmount(const scene_t *scene, uint8_t slot)
 {
     uint8_t source;
     uint8_t pair;
-    int32_t base;
+    uint8_t base;
     int32_t effective;
 
     /*
      * Resolve the effective Morph amount for one LFO-modulated voice.
      *
-     * Inputs: current Scene and target voice slot. Output: retained base Morph
-     * plus all active source/pair deltas, clamped to 0..255. Each contribution
-     * stores an already-shaped absolute Morph amount; the resolver converts it
-     * to a delta from the current retained base so menu/velocity/MIDI base
-     * changes remain the center of the hidden LFO layer.
+     * Inputs: current Scene and target voice slot. Output: the current
+     * effective base Morph plus all active direction/depth deltas, clamped to
+     * 0..255. Each contribution is independent of the base that existed when
+     * the LFO sample was dispatched; this resolver computes its endpoint delta
+     * from the current step-automation-or-retained base.
      *
      * This cannot be folded into every descriptor interpolation because that
      * would recalculate the same LFO/base combination for every morphable
@@ -155,23 +191,29 @@ static uint8_t presetMorph_resolveLfoAmount(const scene_t *scene, uint8_t slot)
      */
     if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
         return 0u;
-    /*
-     * Use the automated base when a step overlay is active.
-     *
-     * Inputs: retained Scene Morph amount plus the optional runtime overlay.
-     * Output: LFO deltas are centered on the value the Morph worker is about
-     * to apply, so a step value remains audible when an LFO is also installed.
-     */
-    base = morph_step_override[slot].active
-        ? morph_step_override[slot].amount
-        : scene->settings.voice_morph_amount[slot];
+    base = presetMorph_effectiveVoiceBase(scene, slot);
     effective = base;
     for (source = 0u; source < INSTRUMENT_SLOT_COUNT; source++) {
         for (pair = 0u; pair < 2u; pair++) {
             const preset_morph_lfo_contribution_t *contribution =
                 &morph_lfo_contributions[slot][source][pair];
-            if (contribution->active)
-                effective += (int32_t)contribution->amount - base;
+            /*
+             * Apply one contribution around the current effective base.
+             *
+             * MORPH scales the remaining distance to 255; MAIN scales the
+             * distance to zero. The rounded integer math keeps both endpoints
+             * exact at depth 255 and lets multiple source/pair deltas compose
+             * before the final clamp.
+             */
+            if (contribution->direction ==
+                PRESET_MORPH_LFO_DIRECTION_MORPH) {
+                effective += ((int32_t)(255u - base) *
+                              contribution->depth + 127) / 255;
+            } else if (contribution->direction ==
+                       PRESET_MORPH_LFO_DIRECTION_MAIN) {
+                effective -= ((int32_t)base * contribution->depth + 127) /
+                             255;
+            }
         }
     }
     if (effective < 0)
@@ -204,9 +246,7 @@ static void presetMorph_snapshotPassAmounts(const scene_t *scene)
          * halfway through its descriptor walk.
          */
         morph_worker.pass_amount[slot] =
-            (morph_step_override[slot].active
-                ? morph_step_override[slot].amount
-                : (scene ? scene->settings.voice_morph_amount[slot] : 0u));
+            presetMorph_effectiveVoiceBase(scene, slot);
     }
 }
 
@@ -261,8 +301,9 @@ void presetMorph_init(void)
     for (uint8_t target = 0u; target < INSTRUMENT_SLOT_COUNT; target++) {
         for (uint8_t source = 0u; source < INSTRUMENT_SLOT_COUNT; source++) {
             for (uint8_t pair = 0u; pair < 2u; pair++) {
-                morph_lfo_contributions[target][source][pair].active = 0u;
-                morph_lfo_contributions[target][source][pair].amount = 0u;
+                morph_lfo_contributions[target][source][pair].direction =
+                    PRESET_MORPH_LFO_DIRECTION_NONE;
+                morph_lfo_contributions[target][source][pair].depth = 0u;
             }
         }
     }
@@ -362,9 +403,8 @@ void presetMorph_prioritizeVoice(uint8_t scene_index, uint8_t slot)
      * worker pass. Otherwise a trigger-time synchronous apply could briefly
      * replace a step-automation Morph value with retained Scene data.
      */
-    morph_worker.pass_amount[slot] = morph_step_override[slot].active
-        ? morph_step_override[slot].amount
-        : scene->settings.voice_morph_amount[slot];
+    morph_worker.pass_amount[slot] =
+        presetMorph_effectiveVoiceBase(scene, slot);
     morph_worker.pass_lfo_resolved_mask =
         (uint8_t)(morph_worker.pass_lfo_resolved_mask & ~bit);
 
@@ -537,9 +577,7 @@ void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot)
      * but this guard keeps trigger-time priority behavior consistent if a
      * caller applies a slot while the overlay is still active.
      */
-    amount = morph_step_override[slot].active
-        ? morph_step_override[slot].amount
-        : scene->settings.voice_morph_amount[slot];
+    amount = presetMorph_effectiveVoiceBase(scene, slot);
     if (presetMorph_voiceHasLfoLayer(slot))
         amount = presetMorph_resolveLfoAmount(scene, slot);
 
@@ -608,17 +646,18 @@ void presetMorph_setVoiceLfoModulation(uint8_t scene_index,
                                        uint8_t target_slot,
                                        uint8_t source_slot,
                                        uint8_t target_pair,
-                                       uint8_t active,
-                                       uint8_t amount)
+                                       PresetMorphLfoDirection direction,
+                                       uint8_t depth)
 {
     /*
      * Store one hidden LFO Morph contribution and queue its target voice.
      *
      * Inputs: Scene index, target voice slot, source LFO slot, target pair,
-     * active flag, and shaped 0..255 amount. Output: the contribution table is
-     * updated and the target voice is queued for bounded Morph apply. This does
-     * not touch SceneData or PERF mirrors, preserving the difference between
-     * retained base Morph and the invisible LFO layer.
+     * endpoint direction, and base-independent normalized depth. Output: the
+     * contribution table is updated and the target voice is queued for bounded
+     * Morph apply. This does not touch SceneData or PERF mirrors, preserving
+     * the difference between retained base Morph and the invisible LFO layer.
+     * NONE/0 clears the selected contribution without a separate setter.
      */
     if (!scene_getConst(scene_index) ||
         target_slot >= INSTRUMENT_SLOT_COUNT ||
@@ -626,10 +665,12 @@ void presetMorph_setVoiceLfoModulation(uint8_t scene_index,
         target_pair > 1u) {
         return;
     }
-    morph_lfo_contributions[target_slot][source_slot][target_pair].active =
-        active ? 1u : 0u;
-    morph_lfo_contributions[target_slot][source_slot][target_pair].amount =
-        amount;
+    if (direction > PRESET_MORPH_LFO_DIRECTION_MORPH)
+        direction = PRESET_MORPH_LFO_DIRECTION_NONE;
+    morph_lfo_contributions[target_slot][source_slot][target_pair].direction =
+        (uint8_t)direction;
+    morph_lfo_contributions[target_slot][source_slot][target_pair].depth =
+        depth;
     presetMorph_requestVoice(scene_index, target_slot);
 }
 
@@ -643,16 +684,19 @@ void presetMorph_clearLfoSource(uint8_t source_slot, uint8_t target_pair)
      *
      * Inputs: source slot and pair whose modulation destination was cleared or
      * changed. Output: each affected target voice is queued so the worker
-     * recomputes from remaining contributions or from the retained base. This
+     * recomputes from remaining contributions or from the current effective
+     * base (step override when active, otherwise retained Scene data). This
      * helper exists because install/clear code should not have to remember
      * which voice the old Scene target pointed at.
      */
     if (source_slot >= INSTRUMENT_SLOT_COUNT || target_pair > 1u)
         return;
     for (target = 0u; target < INSTRUMENT_SLOT_COUNT; target++) {
-        if (morph_lfo_contributions[target][source_slot][target_pair].active) {
-            morph_lfo_contributions[target][source_slot][target_pair].active = 0u;
-            morph_lfo_contributions[target][source_slot][target_pair].amount = 0u;
+        if (morph_lfo_contributions[target][source_slot][target_pair].direction !=
+            PRESET_MORPH_LFO_DIRECTION_NONE) {
+            morph_lfo_contributions[target][source_slot][target_pair].direction =
+                PRESET_MORPH_LFO_DIRECTION_NONE;
+            morph_lfo_contributions[target][source_slot][target_pair].depth = 0u;
             presetMorph_requestVoice(scene_index, target);
         }
     }
@@ -664,18 +708,17 @@ uint8_t presetMorph_getEffectiveVoiceAmount(uint8_t scene_index,
     const scene_t *scene = scene_getConst(scene_index);
 
     /*
-     * Read the Morph base used by runtime modulation.
+     * Read the effective Morph base used by the live runtime display.
      *
      * Inputs: resident Scene index and zero-based voice slot. Output: the
      * active step-automation base when present, otherwise the retained Scene
-     * Morph amount. This read-only bridge lets InstrumentManager shape an LFO
-     * around the same transient center without exposing Morph worker storage.
+     * Morph amount. LFO direction/depth composition remains private to the
+     * bounded worker; this bridge exposes only the step-versus-retained base
+     * needed by the live Scene superpage without exposing worker storage.
      */
     if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
         return 0u;
-    return morph_step_override[slot].active
-        ? morph_step_override[slot].amount
-        : scene->settings.voice_morph_amount[slot];
+    return presetMorph_effectiveVoiceBase(scene, slot);
 }
 
 void presetMorph_setStepAutomationOverride(uint8_t scene_index,

@@ -156,6 +156,19 @@
     (AUTOSAVE_BANK_OFFSET + 12u)
 #define AUTOSAVE_BANK_VOICE_EDIT_MASK_OFFSET \
     (AUTOSAVE_BANK_OFFSET + 13u)
+/*
+ * Width of the per-Scene VOICE edit-mask region.
+ *
+ * Inputs: the fixed 16-Scene Bank workspace. Output: 32 little-endian bytes,
+ * two bytes per Scene, at offsets 13..44 within the Bank section. The region
+ * remains inside AUTOSAVE_BANK_SECTION_BYTES (128), so the record allocation
+ * and payload offsets do not change.
+ *
+ * Affiliates: BankData's indexed mask accessors, autosave_getLivePayloadByte(),
+ * autosave_markBankFieldDirty(), and autosave_applyBankPayload().
+ */
+#define AUTOSAVE_BANK_VOICE_EDIT_MASK_BYTES \
+    (BANK_SCENE_SLOT_COUNT * 2u)
 
 /*
  * One Scene's relative regions and explicit parameter allocation.

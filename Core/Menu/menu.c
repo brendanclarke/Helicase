@@ -35,6 +35,7 @@
 #include "MenuText.h"
 #include "ParameterArray.h"
 #include "buttonHandler.h"
+#include "presetMorphEngine.h"
 #include "lcd.h"
 #include "ledHandler.h"
 #include "endlessPots.h"
@@ -2648,10 +2649,19 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
             wrote = 1u;
     }
     if (wrote) {
-        /* Pattern-wide name markers remain descriptor-only; Scene-setting
-         * cells use exact held-value markers and need no extra SRAM mask. */
+        /*
+         * Mark the just-written automation target immediately.
+         *
+         * Instrument cells update the descriptor bitmask used by the
+         * Pattern-wide name markers. Scene-setting cells update the compact
+         * Scene-target mask so the underline appears on the next repaint,
+         * without waiting for va_scanService() to complete its bounded sweep.
+         * Both paths preserve the edit-flash suppression and dirty repaint.
+         */
         if (cell.kind == MENU_CELL_INSTRUMENT)
             va_searchSetBit(cell.descriptor_index);
+        else if (cell.kind == MENU_CELL_SCENE_SETTING)
+            va_searchSceneMask |= va_sceneSearchBitForCell(&cell);
         va_underlineSuppressed |= (uint8_t)((1u << knobNr) | (0x10u << knobNr));
         va_lastEditTick = time_sysTick;
         menu_knobs_dirty = 1u;
@@ -3198,23 +3208,30 @@ static uint16_t menu_cellDisplayValue(const menu_cell_t *cell)
     }
     if (cell->kind == MENU_CELL_SCENE_SETTING) {
         /*
-         * Display retained Scene-owned VOICE mix settings.
+         * Display effective Scene-owned VOICE mix settings.
          *
          * Inputs: active resident Scene and zero-based slot from the resolved
-         * cell. Outputs: scalar value in the same domain used by sceneset.scg
-         * and Preset setters. Morph endpoint display never changes these
-         * values because Scene settings are not instrument morph endpoints.
+         * cell. Outputs: automatable Morph, audio-out, and FX-send cells show
+         * their transient step-automation value while active, otherwise the
+         * retained SceneData value. Fader setting remains retained-only.
+         * menu_sceneLiveRefreshService() repaints this surface during playback,
+         * so the Scene superpage follows the live runtime layer just as PERF
+         * follows its flat Morph mirror.
+         *
+         * Affiliates: the three preset effective-value getters are read-only
+         * bridges; none of them writes SceneData or schedules AutoSave.
          */
         uint8_t scene_index = scene_getActiveIndex();
         switch (cell->scene_setting) {
         case MENU_SCENE_SETTING_AUDIO_OUT:
-            return scene_getVoiceAudioOut(scene_index, cell->slot);
+            return preset_getEffectiveAudioOut(scene_index, cell->slot);
         case MENU_SCENE_SETTING_FX_SEND_AMOUNT:
-            return scene_getVoiceFxSendAmount(scene_index, cell->slot);
+            return preset_getEffectiveFxSendAmount(scene_index, cell->slot);
         case MENU_SCENE_SETTING_FADER_SETTING:
             return scene_getVoiceFaderSetting(scene_index, cell->slot);
         case MENU_SCENE_SETTING_VOICE_MORPH:
-            return scene_getVoiceMorphAmount(scene_index, cell->slot);
+            return presetMorph_getEffectiveVoiceAmount(scene_index,
+                                                       cell->slot);
         default:
             return 0u;
         }
@@ -6230,8 +6247,8 @@ void menu_perfModeSceneButtonPressed(uint8_t scene_index)
      *
      * Input: physical SEQ button index 0..15. Output: SceneData and BankData
      * active Scene records, viewed Pattern, and Sequencer runtime Pattern are
-     * updated together. BankData drops scene_mask_voice_edit to the new active
-     * Scene only when the new active Scene was not already in the edit set, and
+     * updated together. BankData selects the new active Scene's independent
+     * scene_mask_voice_edit entry and repairs only that entry's active bit.
      * Preset starts the bounded DSP apply for the newly audible Scene.
      */
     if (scene_index >= SCENE_COUNT || scene_index >= 16u ||

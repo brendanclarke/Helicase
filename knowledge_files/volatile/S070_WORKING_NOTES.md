@@ -1,41 +1,14 @@
-# S071 Inter-Session Working Notes
+# S072 Inter-Session Working Notes
 
-Last updated: 2026-09-25 (Session 070 closure)
+Last updated: 2026-09-26 (Session 071 closure)
 
-## S071 Plan
+## Build Metrics at S071 Closure
 
-`S071_VOICE_MORPH_AUTOMATION_MODULATION_CLEANUP.md` defines three parts:
-
-- **Part A** — Per-Scene voice-edit mask (BankData array, Autosave format
-  expansion, bankset.bcg per-Scene keys with legacy fallback, morph rebuild
-  on Scene switch). 10 implementation items (A1–A10).
-- **Part B** — Base-independent LFO voice-morph contribution (direction+depth
-  representation, resolver rewrite, polarity encoding without base read).
-  4 implementation items (B1–B4).
-- **Part C** — Scene superpage live display, held-step underline, boot-state
-  cleanup. 3 items (C1–C3). C2 is an independent one-liner. C3 is resolved
-  by Part A landing. C1 depends on Q-C1 decision.
-
-Implementation order: A1–A3 → A4–A7 → A8–A9 → A10 → C2 → C1 → C3 → B1–B3 → B4.
-
-## Open Questions
-
-**Q-C1**: Should the Scene superpage show live effective values for all
-automatable Scene settings (morph, audio out, FX send) or only for voice
-morph? If all, new effective-value getters are needed for audio out and
-FX send.
-
-**Q-C3**: Is Part A sufficient for boot-state cleanup, or should a
-present-mask intersection also be added as defensive measure in
-`bank_setSceneMaskVoiceEdit()`?
-
-## Build Metrics at S070 Closure
-
-- text: 455,804 bytes
+- text: 456,748 bytes
 - data: 416 bytes
-- bss: 291,820 bytes
-- image: 456,236 bytes
-- Commit: `e3ae961` on `dev-ph5-effects`
+- bss: 291,900 bytes
+- image: ~457,180 bytes
+- Branch: `dev-ph5-effects`
 
 ## Carry-Over From Prior Sessions
 
@@ -49,18 +22,32 @@ present-mask intersection also be added as defensive measure in
    standalone module if non-filesystem consumers appear.
 5. **Repair gate**: `menu_activePage` check works; consider dedicated
    `filesystem_isLoadSaveActive()` if Load/Save lifecycle grows complex.
+6. **Fix 3 (optional autosave format guard)**: defensive old-format mask
+   detection not applied. Remains available if non-zero padding found in
+   production autosave files.
 
-## S070 Session Summary (Reference)
+## S071 Session Summary (Reference)
 
-Four-phase systems fitness pass on `dev-ph5-effects`:
-- Phase 1: Makefile `-MMD -MP` header dependency tracking
-- Phase 2 (LSR-01..04): HCNAMES checkpoint, deferred write, blank/empty
-  display, selection generation counter
-- Phase 3: Probability gating, Scene automation targets 384–403, LED layer
-  consolidation
-- Phase 4: Q1 morph/Scene runtime overlay architecture, Q2 Pattern generation
-  fix, Q3 transport restart restore
+Three planned feature items and two defect fixes on `dev-ph5-effects`:
 
-Durable authority: `070_SESSION_HANDOFF_LOG.md` and specification reference
-updates (`MODULE_INTERCHANGE_SPEC.md`, `PATTERN_DYNAMIC_STACK.md`,
-`AUTOSAVE.md`, `BANK_PRESET_ARCHITECTURE.md`).
+- **Part A**: Per-Scene voice-edit mask — 16-entry uint16_t array, Autosave
+  32-byte region, bankset.bcg per-Scene keys, morph rebuild on Scene switch.
+- **Part B**: Base-independent LFO voice-morph contribution — direction+depth
+  reinterpretation, resolver against current effective base, polarity encoding
+  without base read.
+- **Part C**: Scene superpage live display — audio-out/FX-send step-override
+  tables, effective-value getters, immediate underline.
+- **LED chase defect**: drain-side chase guard, transport stop chase dirty,
+  legacy mask migration self-only defaults.
+- **T12 morph assignment**: voice cell handler full reinstall clearing stale
+  contributions.
+
+SRAM growth: +86 bytes. All 24 hardware tests PASS.
+
+Durable authority: `071_SESSION_HANDOFF_LOG.md` and specification reference
+updates (`BANK_PRESET_ARCHITECTURE.md`, `MODULE_INTERCHANGE_SPEC.md`,
+`SRAM_MANIFEST.md`, `FILESYSTEM_SPEC.md`).
+
+## Next Session Recommended Goal
+
+Begin Phase 5 Effects development.

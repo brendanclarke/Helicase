@@ -965,10 +965,24 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
             *value = bank_activeSceneSlot();
             return 1u;
         }
-        if (payload_offset >= 13u && payload_offset < 15u) {
-            bank_value = bank_sceneMaskVoiceEdit();
-            *value = autosave_u16Byte(
-                bank_value, (uint8_t)(payload_offset - 13u));
+        if (payload_offset >= 13u &&
+            payload_offset < (13u + AUTOSAVE_BANK_VOICE_EDIT_MASK_BYTES)) {
+            uint8_t relative = (uint8_t)(payload_offset - 13u);
+
+            /*
+             * Capture one byte from one indexed Scene's VOICE edit mask.
+             *
+             * Inputs: payload-relative offset 13..44. Output: the low/high
+             * byte of Scene ((offset - 13) / 2), matching the expanded dirty
+             * region and the bank payload apply layout. This read is indexed so
+             * capturing one Scene cannot silently duplicate the active entry.
+             * Affiliate: AUTOSAVE_BANK_VOICE_EDIT_MASK_BYTES and
+             * bank_sceneMaskVoiceEditForScene().
+             */
+            bank_value = bank_sceneMaskVoiceEditForScene(
+                (uint8_t)(relative / 2u));
+            *value = autosave_u16Byte(bank_value,
+                                      (uint8_t)(relative % 2u));
             return 1u;
         }
         return 0u;
@@ -1193,9 +1207,27 @@ void autosave_applyBankPayload(const uint8_t *bank_section)
                             ((uint16_t)bank_section[11u] << 8u));
     bank_setScenePresentMask(bank_value);
     bank_setActiveSceneSlot(bank_section[12u]);
-    bank_value = (uint16_t)(bank_section[13u] |
-                            ((uint16_t)bank_section[14u] << 8u));
-    bank_setSceneMaskVoiceEdit(bank_value);
+    /*
+     * Restore all per-Scene VOICE edit masks from the Bank payload.
+     *
+     * Inputs: bytes 13..44, two little-endian bytes for each resident Scene.
+     * Output: each indexed BankData entry is restored independently; the
+     * active Scene was applied immediately before this loop, so its invariant
+     * repair is evaluated against the correct active slot. Old-format records
+     * are intentionally not migrated in this product revision.
+     *
+     * Affiliate: autosave_getLivePayloadByte() emits the same layout and
+     * autosave_markBankFieldDirty() dirties the complete 32-byte region.
+     */
+    {
+        uint8_t scene_i;
+        for (scene_i = 0u; scene_i < BANK_SCENE_SLOT_COUNT; scene_i++) {
+            uint8_t offset = (uint8_t)(13u + scene_i * 2u);
+            bank_value = (uint16_t)(bank_section[offset] |
+                                    ((uint16_t)bank_section[offset + 1u] << 8u));
+            bank_setSceneMaskVoiceEditForScene(scene_i, bank_value);
+        }
+    }
 }
 
 /*
@@ -1472,7 +1504,15 @@ void autosave_markBankFieldDirty(autosave_bank_field_t field)
     case AUTOSAVE_BANK_FIELD_VOICE_EDIT_MASK:
         payload_offset = (uint16_t)(AUTOSAVE_BANK_VOICE_EDIT_MASK_OFFSET -
                                     AUTOSAVE_PAYLOAD_OFFSET);
-        width = 2u;
+        /*
+         * Dirty the complete indexed mask region.
+         *
+         * Inputs: one logical per-Scene mask mutation. Output: all 16 mask
+         * entries are copy-forwarded because the mutation bitmap tracks bytes
+         * rather than individual array entries. The region is still bounded
+         * to 32 bytes inside the existing 128-byte Bank section.
+         */
+        width = AUTOSAVE_BANK_VOICE_EDIT_MASK_BYTES;
         break;
     default:
         return;

@@ -265,7 +265,14 @@ void led_setBeatPulse(uint8_t on);
 /* Update Menu/LED pattern-follow state after Sequencer changes pattern. */
 void led_notifyPatternChanged(uint8_t playedPattern);
 /* Mirror a Sequencer rotation reset into the visible menu parameter. */
-/* Foreground drain for seq_ledState dirty payloads. */
+/*
+ * Foreground drain for seq_ledState dirty payloads.
+ *
+ * The CHASE payload is transport-gated at this ownership boundary: while
+ * seq_isRunning() is zero, the drain clears any retained LED_LAYER_CHASE
+ * rather than installing a playback-position inversion on the STEP row.
+ * This covers boot, transport stop, and stopped Scene/pattern realignment.
+ */
 void led_processSeqLedState(void);
 
 #endif

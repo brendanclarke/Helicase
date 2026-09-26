@@ -47,6 +47,13 @@
 #include <string.h>
 
 /*
+ * The foreground LED drain must consult the Sequencer transport state before
+ * consuming a chase event. A stopped transport has no playback position, so
+ * the drain clears any retained CHASE layer instead of installing one.
+ */
+#include "sequencer.h"
+
+/*
  * Temporary LED effect capacities and periods.
  *
  * Pulsing is a one-shot temporary inversion: led_pulseLed() toggles the
@@ -1439,6 +1446,8 @@ void led_notifyPatternChanged(uint8_t playedPattern)
  * TIM3 playback path, but LED rendering needs Menu/Button state and shift-
  * register writes. This foreground drain is the ownership boundary between
  * timing and physical UI. Common caller: main loop after front-panel services.
+ * Invariant: a CHASE event is rendered only while seq_isRunning() is nonzero;
+ * when transport is stopped, the event clears the retained CHASE layer.
  */
 void led_processSeqLedState(void)
 {
@@ -1487,10 +1496,15 @@ void led_processSeqLedState(void)
     if (d & SEQ_LED_DIRTY_BEAT)
         led_setBeatPulse(seq_ledState.beatPulse);
 
-    /* Chase light: move the temporary current-step LED if the viewed pattern
-     * should show playback chase. */
-    if (d & SEQ_LED_DIRTY_CHASE)
-        led_updateCurrentStep(seq_ledState.chaseStep);
+    /* Chase light: install it only while playback has a valid position. When
+     * stopped, remove any old chase inversion instead of rendering the queued
+     * step; boot, stop, and stopped Scene changes all use this same cleanup. */
+    if (d & SEQ_LED_DIRTY_CHASE) {
+        if (seq_isRunning())
+            led_updateCurrentStep(seq_ledState.chaseStep);
+        else
+            led_clearActive_step();
+    }
 
     /* Recorded step: update STEP1..16 for the visible bar unless performance
      * mode owns those LEDs. */

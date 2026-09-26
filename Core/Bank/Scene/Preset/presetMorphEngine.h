@@ -4,6 +4,25 @@
 #include <stdint.h>
 
 /*
+ * Base-independent direction for one hidden LFO voice-Morph contribution.
+ *
+ * Inputs: InstrumentManager converts LFO polarity/source/amount into this
+ * direction plus a normalized 0..255 depth. Output: the Morph worker computes
+ * the signed delta from the effective base when it resolves the contribution.
+ * NONE is inactive, MAIN moves toward amount 0, and MORPH moves toward amount
+ * 255. The representation replaces the former active+absolute-amount pair
+ * without increasing the contribution table's two-byte entry size.
+ *
+ * Affiliate: presetMorph_resolveLfoAmount() consumes this enum and the depth;
+ * presetMorph_clearLfoSource() writes NONE/0 during route teardown.
+ */
+typedef enum {
+    PRESET_MORPH_LFO_DIRECTION_NONE = 0,
+    PRESET_MORPH_LFO_DIRECTION_MAIN,
+    PRESET_MORPH_LFO_DIRECTION_MORPH
+} PresetMorphLfoDirection;
+
+/*
  * Rate-limited Scene Morph worker.
  *
  * Requests queue dirty instrument slots. tick() does at most one
@@ -57,7 +76,7 @@ void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot);
  * Set the hidden LFO Morph layer for one target voice.
  *
  * Inputs: Scene index, zero-based target voice slot, source LFO slot, target
- * pair index, active flag, and the LFO-shaped Morph amount in the 0..255
+ * pair index, base-independent direction, and normalized depth in the 0..255
  * domain. Output: the Morph worker records that one source contribution and
  * queues the target voice, but it does not mutate
  * SceneData.settings.voice_morph_amount[] and does not update PERF menu
@@ -65,16 +84,17 @@ void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot);
  *
  * This API exists because LFO Morph modulation is not the same operation as
  * preset_morphVoice(). Menu, velocity, and MIDI CC1 set the retained base
- * Morph value. LFO modulation is a secondary layer centered on that base and
- * must be consumed by the bounded Morph worker so it never interpolates an
- * entire voice immediately from the audio/LFO dispatch path.
+ * Morph value. LFO modulation is a secondary layer centered on the current
+ * effective base, including a step-automation base when present, and must be
+ * consumed by the bounded Morph worker so it never interpolates an entire
+ * voice immediately from the audio/LFO dispatch path.
  */
 void presetMorph_setVoiceLfoModulation(uint8_t scene_index,
                                        uint8_t target_slot,
                                        uint8_t source_slot,
                                        uint8_t target_pair,
-                                       uint8_t active,
-                                       uint8_t amount);
+                                       PresetMorphLfoDirection direction,
+                                       uint8_t depth);
 /*
  * Clear one LFO source/pair from every hidden Morph target.
  *
@@ -91,8 +111,9 @@ void presetMorph_clearLfoSource(uint8_t source_slot, uint8_t target_pair);
  *
  * Inputs: resident Scene index and zero-based voice slot. Output: the active
  * step-automation Morph overlay when present, otherwise the retained Scene
- * amount. This is a read-only bridge for InstrumentManager's LFO shaping;
- * it never changes SceneData or AutoSave state.
+ * amount. This is a read-only bridge for Menu's live Scene superpage and
+ * diagnostics; LFO direction/depth resolution remains inside the bounded
+ * Morph worker. It never changes SceneData or AutoSave state.
  */
 uint8_t presetMorph_getEffectiveVoiceAmount(uint8_t scene_index,
                                              uint8_t slot);

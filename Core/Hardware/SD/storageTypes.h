@@ -25,6 +25,7 @@
 #include <stdint.h>
 #include "InstrumentManager.h"
 #include "SceneData.h"
+#include "BankData.h"
 
 /* Public storage constants for the Phase 2 kit directory loader.
  *
@@ -227,18 +228,22 @@ typedef struct {
  * The Bank display name is owned only by the root Bank directory
  * `Bank/NNN <name>/`. bankset.bcg validates the folder and carries Bank-level
  * control values. active_scene is a Bank-local slot number in 00..15, not a
- * root Scene library slot. scene_mask_voice_edit is a 16-bit hex Scene mask
- * used by VOICE-mode edit fan-out. The writer always emits both fields; the
- * parser allows them to be absent and keeps initialized defaults so empty or
- * hand-authored Banks remain loadable.
+ * root Scene library slot. scene_mask_voice_edit[] stores one 16-bit hex Scene
+ * mask per Bank-local Scene slot for VOICE-mode edit fan-out. The parser also
+ * accepts the legacy single scene_mask_voice_edit key and expands it to
+ * self-only defaults, because the old value has no valid per-Scene ownership.
+ * The writer emits one indexed key per Scene; missing fields remain
+ * zero/default staging so hand-authored Banks remain loadable.
  */
 typedef struct {
     uint8_t seen_format;
     uint8_t seen_version;
     uint8_t seen_active_scene;
-    uint8_t seen_scene_mask_voice_edit;
+    /* One seen bit per parsed scene_mask_voice_edit_NN entry. */
+    uint16_t seen_scene_mask_voice_edit;
     uint8_t active_scene;
-    uint16_t scene_mask_voice_edit;
+    /* One normalized-at-load 16-bit mask per resident Scene slot. */
+    uint16_t scene_mask_voice_edit[BANK_SCENE_SLOT_COUNT];
 } storage_bankset_t;
 
 /* Initialize kitset parse state before the first line of kitset.kcg.
@@ -546,9 +551,10 @@ uint8_t storage_formatEffectPlaceholderLine(char *dst,
  *
  * bankset.bcg is a guard/config file only. It never stores a Bank name; the
  * directory name owns identity. active_scene is a Bank-local 00..15 Scene
- * slot. scene_mask_voice_edit is emitted as hex because each nibble maps
- * directly onto four SEQ-button Scene bits. The parser defaults missing
- * active_scene to 0 and missing scene_mask_voice_edit to bit 0.
+ * slot. Each scene_mask_voice_edit_NN value is emitted as four hex digits so
+ * each nibble maps directly onto four SEQ-button Scene bits. Legacy files with
+ * one scene_mask_voice_edit value remain accepted and are expanded to
+ * self-only defaults, one bit per Bank-local Scene slot.
  */
 void storage_banksetInit(storage_bankset_t *state);
 storage_status_t storage_banksetParseLine(storage_bankset_t *state,

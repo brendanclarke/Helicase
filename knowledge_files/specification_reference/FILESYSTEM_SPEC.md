@@ -1649,10 +1649,17 @@ Current LFO modulation behavior:
   filters, pitch, transient, distortion, and LFO-rate writers keep their normal
   scaling and side effects.
 - Voice-local `instrument_decimation` uses the special supplemental binding.
-- Per-voice Morph LFO modulation is a hidden secondary layer centered around
-  the retained per-voice Morph base value. It does not move the PERF menu value.
+- Per-voice Morph LFO modulation is a hidden secondary layer using
+  base-independent direction and normalized depth (Session 071). The
+  InstrumentManager encodes polarity to direction (`NONE`/`MAIN`/`MORPH`) +
+  depth without reading the morph base. The morph engine resolver computes
+  signed deltas from the current effective base (step override if active, else
+  retained) at resolution time: MORPH direction scales `depth` over `(255 - base)`,
+  MAIN direction scales `-depth` over `base`. This eliminates stale-base errors
+  when step automation changes the base between LFO sample and resolve. The
+  layer does not move the PERF menu value.
 - Multiple LFO sources targeting the same voice Morph sum their signed deltas
-  around the retained base value, then clamp to `0..255`.
+  around the effective base value, then clamp to `[0, 255]`.
 - The Morph worker adds one extra foreground pass for each voice whose Morph is
   currently LFO-modulated. It still interpolates one descriptor per pass rather
   than trying to recalculate a whole voice immediately.

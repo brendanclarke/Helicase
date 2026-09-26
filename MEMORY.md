@@ -17,33 +17,29 @@ make && make img   →   build/LXRV2_lxr02.img
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 070 completed a four-phase systems
-fitness pass before Phase 5 Effects development, closing at commit `e3ae961`
-on `dev-ph5-effects`. Build: `text=455,804`, `data=416`, `bss=291,820`;
-image 456,236 bytes. All phases hardware-verified.
+**Current working source**: Session 071 completed voice morph
+automation/modulation cleanup, LED chase state defect fix, and LFO target
+voice handler fix on `dev-ph5-effects`. Final build: `text=456,748`,
+`data=416`, `bss=291,900`. All 24 hardware tests PASS.
 
-Phase 1 added Makefile `-MMD -MP` header dependency tracking. Phase 2
-implemented the Load/Save revision (LSR-01..04): HCNAMES checkpoint at
-browser domain transitions, deferred HCNAMES write, blank/Empty display
-semantics, and a selection generation counter for stale callback discard.
-Phase 3 implemented probability gating (`seq_evaluateStepCondition()`),
-Scene automation targets 384..403 with runtime overlay architecture, and LED
-layer bitmap consolidation (`led_activeLayers[41]`). Phase 4 resolved all
-test and architectural decisions: Q1 Scene automation runtime overlay
-(`morph_step_override[]`, slot-6 decay step state, audio-out runtime apply),
-Q2 Pattern generation fix (removed stale `fs_pattern_generation` resets),
-Q3 transport restart automation restore (`seq_restoreAllAutomation()` +
-`seq_restoreAllSceneAutomation()` before clearing, `seq_setRunning()`
-stop-first/start-last). All tests PASS (T1 AutoSave OFF→ON, T2a/b/c
-Pattern persistence, T3 automation restart, Q1 hardware 160,129 records).
+Session 071 implemented three parts: Part A (per-Scene voice-edit mask: 16-entry
+`uint16_t` array replacing global scalar, Autosave 32-byte region, bankset.bcg
+per-Scene keys with legacy fallback), Part B (base-independent LFO voice-morph
+contribution: direction+depth reinterpretation, resolver against current
+effective base, polarity encoding without base read), Part C (Scene superpage
+live display: audio-out/FX-send step-override tables, effective-value getters,
+immediate underline on Scene-target automation write). Also fixed LED chase
+state defect (drain-side chase guard, transport stop chase dirty, legacy mask
+migration) and T12 morph-assignment defect (voice cell handler full reinstall).
++86 bytes SRAM.
 
-Permanent authority: `knowledge_files/log_archive/070_SESSION_HANDOFF_LOG.md`,
-`069_SESSION_HANDOFF_LOG.md`, `068_SESSION_HANDOFF_LOG.md`,
-`067_SESSION_HANDOFF_LOG.md`, `PATTERN_DYNAMIC_STACK.md`,
-`MODULE_INTERCHANGE_SPEC.md`, `AUTOSAVE.md`, `BANK_PRESET_ARCHITECTURE.md`,
-`SRAM_MANIFEST.md`, and `DEV_MODES.md`. Per-track step scale and shuffle
-sequencer consumption remain deferred (see `PATTERN_DYNAMIC_STACK.md` §6.4).
-Phase 4.5 copy operations remain queued.
+Permanent authority: `knowledge_files/log_archive/071_SESSION_HANDOFF_LOG.md`,
+`070_SESSION_HANDOFF_LOG.md`, `069_SESSION_HANDOFF_LOG.md`,
+`068_SESSION_HANDOFF_LOG.md`, `067_SESSION_HANDOFF_LOG.md`,
+`PATTERN_DYNAMIC_STACK.md`, `MODULE_INTERCHANGE_SPEC.md`, `AUTOSAVE.md`,
+`BANK_PRESET_ARCHITECTURE.md`, `SRAM_MANIFEST.md`, and `DEV_MODES.md`.
+Per-track step scale and shuffle sequencer consumption remain deferred (see
+`PATTERN_DYNAMIC_STACK.md` §6.4). Phase 4.5 copy operations remain queued.
 
 ## RAM Allocation Approval Policy
 
@@ -68,24 +64,19 @@ This section is for short carryover points only. Flush or rewrite it at session
 end; durable facts belong in `knowledge_files/log_archive/` or
 `knowledge_files/specification_reference/`.
 
-- Session 070 is closed and hardware-accepted. Durable authority is
-  `knowledge_files/log_archive/070_SESSION_HANDOFF_LOG.md` and the
-  specification-reference updates it made (`MODULE_INTERCHANGE_SPEC.md`,
-  `PATTERN_DYNAMIC_STACK.md`, `AUTOSAVE.md`, `BANK_PRESET_ARCHITECTURE.md`).
-  The S070 task documents (`S070_SYSTEMS_GENERAL_CHECK_AND_REVIEW_PLAN.md`,
-  `S070_PHASE1_TASK_LOG.md`, `S070_PHASE2_LOAD_SAVE_REVISION.md`,
-  `S070_PHASE2_IMPLEMENTATION.md`, `S070_PHASE2_LSR01_SUPPLEMENT.md`,
-  `S070_PHASE2_LSR01_MENU_USER_FEEL.md`, `S070_PHASE3_FEATURE_ADDITIONS.md`,
-  `S070_PHASE3_IMPLEMENTATION.md`, `S070_PHASE3_FUCKUP_REMEDIATION.md`,
-  `S070_PHASE4_TESTING_FINAL.md`, `S070_T2A_PAT_LOAD.md`,
-  `S070_PHASE4_AUTOMATION_MISSED.md`,
-  `S070_PHASE4_AUTOMATION_MISSED_IMPLEMENTATION.md`,
-  `S070_PHASE4_Q1_SCENE_AUTOMATION_IMPLEMENTATION.md`) are superseded by
-  that log and specification updates and may be deleted.
-- Session 071 plan is in `S071_VOICE_MORPH_AUTOMATION_MODULATION_CLEANUP.md`:
-  Part A (per-Scene voice-edit mask), Part B (base-independent LFO voice-morph
-  contribution), Part C (Scene superpage live display, held-step underline,
-  boot-state cleanup). Open questions Q-C1 and Q-C3.
+- Session 071 is closed and hardware-accepted (all 24 tests PASS). Durable
+  authority is `knowledge_files/log_archive/071_SESSION_HANDOFF_LOG.md` and
+  the specification-reference updates (`BANK_PRESET_ARCHITECTURE.md`,
+  `MODULE_INTERCHANGE_SPEC.md`, `SRAM_MANIFEST.md`, `FILESYSTEM_SPEC.md`).
+  The S071 task documents (`S071_VOICE_MORPH_AUTOMATION_MODULATION_CLEANUP.md`,
+  `S071_VOICE_MORPH_MOD_CLEANUP_IMPLEMENTATION.md`,
+  `S071_LED_STATE_DEFECT.md`, `S071_LED_STATE_DEFECT_REASON.md`,
+  `S071_LED_DEFECT_IMPLEMENTATION.md`, `S071_LFO_VOICE_MORPH.md`,
+  `S071_T12_MORPH_ASSIGN_INVESTIGATION.md`,
+  `S071_T12_MORPH_ASSIGN_IMPLEMENTATION.md`) are superseded by that log and
+  specification updates and may be deleted.
+- S070 task documents are also superseded by `070_SESSION_HANDOFF_LOG.md` and
+  may be deleted.
 - FX_SEND automation (targets 398..403) is wired for editing and storage but
   the apply path is a no-op until the Phase 5 FX bus is implemented.
 - Per-track step scale and shuffle are stored/edited/persisted only, with no
