@@ -182,8 +182,8 @@ Parameters change through these paths:
 - **Step-edit pages:** Reads automation values from the dynamic Pattern pool
   block.
 
-- **Scene settings sub-page (mix):** Reads per-voice audio routing, FX send
-  (stubbed), fader settings, and voice morph from SceneData getters.
+- **Scene settings sub-page (mix):** Reads per-voice audio routing, live FX
+  send, fader settings, and voice morph from SceneData/Preset getters.
 
 ### Scene activation
 
@@ -278,7 +278,7 @@ are NOT parameters of a swappable instrument in a voice slot. These live in
 | 390 | srt | No (global) | 255 | `preset_applyVoiceDecimationAllRuntime()` | Live |
 | 391 | (reserved) | — | — | — | — |
 | 392–397 | 1ou..6ou | Yes | 5 | `preset_applyVoiceAudioOutRuntime()` | Live (Session 070) |
-| 398–403 | 1fx..6fx | Yes | 127 | No-op (Phase 5 FX bus) | Stubbed (Session 070) |
+| 398–403 | 1fx..6fx | Yes | 127 | Effective send pulled by mixer each block | Live (Session 072 Step 5) |
 | 404 | fxm | No (Scene) | 255 | Reserved, no apply path | Reserved (Session 072) |
 
 ### Voice Morph 7↔8 bit conversion
@@ -328,7 +328,8 @@ active, else retained Scene value. Session 071 added the step-override table.
 Direct mixer register write for DSP apply.
 
 **FX Send:** `preset_getEffectiveFxSend(slot)` returns step override when
-active, else retained Scene value. Apply path is no-op until Phase 5 FX bus.
+active, else retained Scene value. The mixer pulls it each block, applies the
+stored PRE/POST/FX fader topology, and ramps the send into the live FX bus.
 
 **Slot-6 Track-7 Decay:** Trigger cascade priority:
 1. Step override (if `step_active`)

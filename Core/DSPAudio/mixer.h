@@ -72,6 +72,26 @@ enum
 	MIXER_ROUTING_DAC2_R,
 };
 
+/*
+ * Per-voice fader modes (Scene setting fader_setting[slot], 0..2; plan §8.3,
+ * user rule A24). Values match the stored byte and the Menu labels
+ * (menu_sceneSettingFaderName: pre / pst / fx).
+ *
+ * The voice signal s (decimated, pre-volume) feeds two parallel taps:
+ *   mix  = s x vol x F_mix  -> pan -> voice route
+ *   send = s x send x F_send -> FX bus
+ * PRE : F_mix = fader, F_send = fader  (fader scales both)
+ * POST: F_mix = fader, F_send = 1      (send ignores the fader)
+ * FX  : F_mix = 1,     F_send = fader  (fader scales only the send; mix level
+ *                                       is vol alone)
+ * The fader never changes the stored FX Send parameter. Consumer:
+ * mixer_calcNextSampleBlock(). Affiliates: SceneData fader_setting,
+ * presetManager fader/send setters, Menu VOICE mix cells.
+ */
+#define MIXER_FADER_PRE   0u
+#define MIXER_FADER_POST  1u
+#define MIXER_FADER_FX    2u
+
 void mixer_init();
 void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2);
 void mixer_moveDataToOutput(uint8_t dest, const float panL, const float panR, sample_mx_t* data,sample_mx_t* outL,sample_mx_t* outR,sample_mx_t* outL2, sample_mx_t* outR2);

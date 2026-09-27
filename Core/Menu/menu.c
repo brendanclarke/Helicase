@@ -3143,8 +3143,8 @@ static void menu_sceneSettingFaderName(uint8_t value, char *dst)
      * Format the retained fader mode domain.
      *
      * Inputs: stored 0..2 fader mode. Output: compact user text. These labels
-     * are storage/UI placeholders until mixer/FX routing implements behavior:
-     * pre = normal/pre-FX, pst = post-FX, fx  = FX-only.
+     * are live mixer behavior: pre = fader before both dry and FX taps, pst =
+     * fader on the dry/post-FX mix only, and fx = fader on the FX send only.
      */
     if (value == 1u)
         memcpy(dst, "pst", 3);

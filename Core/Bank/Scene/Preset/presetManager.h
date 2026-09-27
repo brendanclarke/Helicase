@@ -399,7 +399,8 @@ void preset_applyVoiceAudioOutRuntime(uint8_t slot, uint8_t route);
  * retained SceneData. These APIs never mark AutoSave or alter retained Scene
  * settings; audio-out DSP restore remains owned by preset_applyKitAudioRouting.
  * The audio/FX tables are six-entry runtime state and are cleared at transport
- * restore and preset_init(). FX send has no DSP bus owner yet.
+ * restore and preset_init(). The mixer pulls the effective FX-send getter each
+ * block; the setter remains a retained/overlay storage boundary.
  */
 void preset_setAudioOutStepOverride(uint8_t slot, uint8_t route);
 void preset_clearAllAudioOutStepOverrides(uint8_t scene_index);

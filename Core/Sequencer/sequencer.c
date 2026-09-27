@@ -265,8 +265,9 @@ static void seq_restoreAllAutomation(void)
  * Inputs: seq_scene_automation_dirty and the active Scene's retained
  * SceneData/Kit values. Output: Morph, decimation, audio routing, generated
  * slot-6 decay, and the readable FX-send overlay return to retained values;
- * FX_SEND still has no DSP bus owner until Phase 5. The bitmap remains set for
- * seq_clearAutomationDirty(), matching the voice-overlay restore contract.
+ * the next mixer block therefore ramps back to the retained FX send. The
+ * bitmap remains set for seq_clearAutomationDirty(), matching the voice-
+ * overlay restore contract.
  * Common caller: seq_setStepIndexToStart() on transport, Pattern, or
  * external-clock reset.
  */
@@ -288,8 +289,8 @@ static void seq_restoreAllSceneAutomation(void)
     instrumentManager_clearSlot6Track7StepDecayOverride();
     /*
      * Clear the discrete Scene-setting overlays before retained values are
-     * reapplied below. Audio routing is restored through its DSP owner; FX send
-     * has only the readable overlay until the Phase 5 bus exists.
+     * reapplied below. Audio routing is restored through its DSP owner; the FX
+     * send overlay is consumed by the mixer and ramps back after this clear.
      */
     preset_clearAllAudioOutStepOverrides(scene_index);
     preset_clearAllFxSendStepOverrides();
@@ -792,8 +793,8 @@ static void seq_advanceTrackStep(uint8_t track)
  * data, AutoSave dirty state, and Bank-clean state remain untouched. Voice
  * Morph expands stored 0..126 to 0..252 and stored 127 to 255 so its endpoint
  * remains reachable. A successful runtime overlay sets the corresponding bit
- * for transport-boundary restoration. FX_SEND is accepted as a no-op because
- * its Phase 5 runtime bus does not exist yet. Common caller:
+ * for transport-boundary restoration. FX_SEND updates the transient send
+ * overlay consumed by the mixer on the next block. Common caller:
  * seq_drainPendingAutomation(). Affiliates: SceneModTargets, Preset, and
  * InstrumentManager runtime overlay APIs.
  */
@@ -841,7 +842,7 @@ static uint8_t seq_applySceneAutomation(uint16_t target, uint8_t value)
 		preset_setAudioOutStepOverride(descriptor->voice_slot, value);
 		break;
 	case SCENE_MOD_TARGET_KIND_FX_SEND:
-		/* Store a displayable runtime overlay until the FX bus owns the value. */
+		/* Store the runtime overlay consumed by the mixer on the next block. */
 		preset_setFxSendStepOverride(descriptor->voice_slot, value);
 		break;
 	default:

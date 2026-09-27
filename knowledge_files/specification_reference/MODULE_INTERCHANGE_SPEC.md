@@ -633,25 +633,28 @@ prefixes remain `preset_*` for the mechanical move.
 | `presetMorph_clearAllStepAutomationOverrides()` | Clear all per-voice Morph step overrides and restore retained amounts. Called on transport restart (Session 070). | Sequencer Scene automation restore |
 | `presetMorph_getEffectiveVoiceAmount(slot)` | Return the step override when active, else the retained per-voice Morph amount. Single query point for the morph decimation engine (Session 070). Also used by menu.c for Scene superpage live display (Session 071). | presetMorphEngine internals, morph decimation, Menu |
 | `preset_setAudioOutStepOverride(slot, route)` / `preset_clearAudioOutStepOverride(slot)` / `preset_getEffectiveAudioOut(slot)` | Per-voice audio-out step automation overlay. Route clamped to `MIXER_ROUTING_DAC2_R`. Cleared by `preset_init()` and transport restore (Session 071). | Sequencer Scene automation drain, Menu superpage |
-| `preset_setFxSendStepOverride(slot, amount)` / `preset_clearFxSendStepOverride(slot)` / `preset_getEffectiveFxSend(slot)` | Per-voice FX-send step automation overlay. Amount clamped to 127. Apply path is no-op until Phase 5 FX bus (Session 071). | Sequencer Scene automation drain, Menu superpage |
+| `preset_setFxSendStepOverride(slot, amount)` / `preset_clearFxSendStepOverride(slot)` / `preset_getEffectiveFxSend(slot)` | Per-voice FX-send step automation overlay. Amount clamped to 127. The mixer reads the effective value each block and ramps the live send (Session 072 Step 5). | Sequencer Scene automation drain, Menu superpage, mixer |
 
 ## Core/DSPAudio/mixer
 
-Affiliate modules: InstrumentManager, EffectsManager, voice engines, and the
-future FX bus.
+Affiliate modules: InstrumentManager, EffectsManager, voice engines, SceneData,
+Preset, and the live FX bus.
 
 Purpose: renders the foreground audio block. Voice engines supply pre-volume
 samples; the mixer applies the relocated voice volume after decimation. During
 Step 4 it also calls `effects_service()` once per block so the active Effect
-runtime follows retained Scene values. `effects_process()` and the FX send/
-return path are deliberately deferred to Step 5, so this call alone produces
-no audible Effect output.
+runtime follows retained Scene values. Step 5 taps each decimated voice before
+volume, applies the stored PRE/POST/FX fader mode, sums the send into the
+stereo/mono bus, calls `effects_process()`, and returns the processed block
+through common level/pan and jack-resolved routing.
 
 | API / data | Use | Usual callers / clients |
 |---|---|---|
-| `mixer_decimateBlock()` | Reduce each voice block before final voice-volume application and future send taps. | mixer render path |
+| `mixer_decimateBlock()` | Reduce each voice block before final voice-volume application and the pre-volume FX send tap. | mixer render path |
 | `effects_service()` | Resolve the active Effect's retained parameters between render blocks. | mixer block service |
-| `effects_process()` | Future in-place mono/stereo FX processing hook; not called by the Step 4 mixer path. | Step 5 mixer |
+| `effects_process()` | Process the current mono/stereo normalized FX bus block in place. | Step 5 mixer |
+| `MIXER_FADER_PRE/POST/FX` | Define whether the Scene fader scales both taps, only the dry mix, or only the FX send. | SceneData/Preset, Menu, mixer |
+| `mixer_send_last_gain[]` / `mixer_fx_return_last_gain[]` | Retain block-end send and return gains so automation and common return changes ramp without clicks. | mixer render path |
 
 ## Core/Bank/Scene/Preset/ParameterArray
 
@@ -800,7 +803,8 @@ Current target order:
 - `1vm`, `2vm`, `3vm`, `4vm`, `5vm`, `6vm` — per-voice Morph
 - Scene Decimation `srt`
 - Audio Out `1ou`..`6ou` (IDs 392–397, max 5) — Session 070
-- FX Send `1fx`..`6fx` (IDs 398–403, max 127, stubbed apply) — Session 070
+- FX Send `1fx`..`6fx` (IDs 398–403, max 127, mixer-applied per block) —
+  Session 072 Step 5
 - Effect Morph `fxm` (ID 404, flags 0) — reserved until its apply path exists
 
 Scene Decimation deliberately appears after the six Morph targets so the
@@ -810,8 +814,9 @@ velocity target list does not place it directly beside a voice-local
 Session 070 additions: Audio Out and FX Send targets are Scene-level
 parameters with `SCENE_MOD_TARGET_USE_AUTOMATION` flag, reachable from step
 automation but not yet from velocity/LFO modulation pickers. FX Send apply
-is a no-op until the Phase 5 FX bus exists. Step automation uses runtime-only
-overlays; see `070_SESSION_HANDOFF_LOG.md` §10 for the overlay architecture.
+is consumed by the live mixer on the next block. Step automation uses
+runtime-only overlays; see `070_SESSION_HANDOFF_LOG.md` §10 for the overlay
+architecture.
 The reserved `fxm` descriptor has no automation, velocity, or LFO use flags.
 Scene block 6 is limited to IDs 384..447; Effect parameters use block 7
 IDs 448..511.

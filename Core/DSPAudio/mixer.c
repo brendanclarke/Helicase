@@ -58,6 +58,8 @@
 #include "BufferTools.h"
 #include "squareRootLut.h"
 #include "adcPots.h"
+#include "SceneData.h"
+#include "presetManager.h"
 // TODO DSP_PORT
 // #include "../Hardware/TriggerOut.h"
 //-----------------------------------------------------------------------
@@ -76,6 +78,43 @@ INCCMZ uint8_t mixer_audioRouting[6];
  * instrumentManager_runtimeVolume().
  */
 INCCMZ float mixer_voice_last_gain[6];
+/*
+ * Per-block FX bus storage shared by the voice send accumulation and Effect
+ * processing stages.
+ *
+ * What: two 32-frame channels that are int32 sample_mx_t while voices sum and
+ * float while the Effect runs (256 B DTCM). Why: the union keeps the fixed
+ * bus allocation while making the conversion in-place. Inputs: decimated
+ * voice samples and effective send/fader gains. Output: normalized float
+ * buffers supplied to effects_process(). Affiliates: fxbuf_effectShare(),
+ * EffectsManager, and mixer_addFxReturnToOutput().
+ */
+typedef union {
+	sample_mx_t mx[2][OUTPUT_DMA_SIZE];
+	float f[2][OUTPUT_DMA_SIZE];
+} mixer_fx_bus_t;
+static INDTCMZ mixer_fx_bus_t mixer_fx_bus;
+
+/*
+ * Last effective per-slot FX send gain at the end of the previous block.
+ *
+ * What: send amount x send-side fader, one float per slot (24 B DTCM). Why:
+ * mixer_addVoiceToFxBus() ramps send changes from knobs, automation, and
+ * fader-mode edits without a zipper. Inputs: preset_getEffectiveFxSendAmount()
+ * and SceneData fader_setting. Output: the current block's send ramp state.
+ * Affiliate: mixer_calcNextSampleBlock().
+ */
+static INDTCMZ float mixer_send_last_gain[6];
+
+/*
+ * Last effective left/right FX return gains at the end of the previous block.
+ *
+ * What: level/balance gains for the two return channels (8 B DTCM). Why:
+ * the return must remain click-free when the active Effect level, pan, or
+ * output routing changes. Inputs: effects_commonRuntime(). Output: ramp
+ * origins for mixer_addFxReturnToOutput().
+ */
+static INDTCMZ float mixer_fx_return_last_gain[2];
 static volatile uint8_t mixer_out_l1_available = 1u; /* PD6 */
 static volatile uint8_t mixer_out_r1_available = 1u; /* PD7 */
 static volatile uint8_t mixer_out_l2_available = 1u; /* PB4 */
@@ -460,6 +499,173 @@ static void mixer_addVoiceInt16ToOutput(uint8_t dest,
 		break;
 	}
 }
+
+/*
+ * Resolve the parallel dry-mix and FX-send gains for one voice slot.
+ *
+ * Inputs: zero-based Scene slot, active Scene index, and the retained or
+ * step-overridden fader/send values. Output: mix_gain feeds the normal routed
+ * output and send_gain feeds the pre-volume FX bus. PRE scales both taps,
+ * POST scales only the dry mix, and FX scales only the send. The voice volume
+ * remains on the dry tap for all modes. Affiliate: mixer_calcNextSampleBlock().
+ */
+static void mixer_faderGains(uint8_t slot,
+		uint8_t scene_index,
+		float *mix_gain,
+		float *send_gain)
+{
+	const float fader = slider_vol[slot];
+	const float volume = instrumentManager_runtimeVolume(slot);
+	const float send = (float)preset_getEffectiveFxSendAmount(scene_index, slot)
+			/ 127.0f;
+	const uint8_t mode = scene_getVoiceFaderSetting(scene_index, slot);
+
+	*mix_gain = volume * fader;
+	*send_gain = send * fader;
+	if (mode == MIXER_FADER_POST) {
+		*send_gain = send;
+	} else if (mode == MIXER_FADER_FX) {
+		*mix_gain = volume;
+	}
+}
+
+/*
+ * Add one decimated voice block to the FX bus with a click-free send ramp.
+ *
+ * Inputs: signed int16 decimated samples, current/previous effective send
+ * gains, constant-power pan gains, and the live Effect stereo-input flag.
+ * Output: saturated signed-24 bus samples in mixer_fx_bus.mx. Stereo-input
+ * Effects receive the panned voice on both channels; mono-input Effects use
+ * the unpanned voice on the left channel only. The 256 scale converts the
+ * legacy int16 sample to sample_mx_t without clipping the pre-Effect bus.
+ * Affiliate: mixer_calcNextSampleBlock().
+ */
+static void mixer_addVoiceToFxBus(const int16_t *data,
+		float gain,
+		float lastGain,
+		float panL,
+		float panR,
+		uint8_t stereo)
+{
+	uint8_t i;
+	const float inv_size = 1.f / (OUTPUT_DMA_SIZE - 1.f);
+	const float gain_delta = gain - lastGain;
+
+	for (i = 0u; i < OUTPUT_DMA_SIZE; i++) {
+		const float currentGain = lastGain
+				+ ((float)i * inv_size * gain_delta);
+		const float sample = (float)data[i] * currentGain * 256.0f;
+		if (stereo) {
+			mixer_fx_bus.mx[0][i] = bufferTool_satAdd32(
+					mixer_fx_bus.mx[0][i], (sample_mx_t)(sample * panL));
+			mixer_fx_bus.mx[1][i] = bufferTool_satAdd32(
+					mixer_fx_bus.mx[1][i], (sample_mx_t)(sample * panR));
+		} else {
+			mixer_fx_bus.mx[0][i] = bufferTool_satAdd32(
+					mixer_fx_bus.mx[0][i], (sample_mx_t)sample);
+		}
+	}
+}
+
+/*
+ * Convert one normalized Effect return sample to the mixer's signed-24
+ * representation.
+ *
+ * Inputs: normalized float where 1.0 is int16 full scale. Output: saturated
+ * sample_mx_t with the same 8-bit fractional shift as sampleMix_fromInt16().
+ * The explicit ±255 guard contains Effect overshoot before the float-to-int
+ * conversion and leaves the final output accumulation to satAdd32().
+ * Affiliate: mixer_addFxReturnToOutput().
+ */
+static sample_mx_t mixer_floatToMx(float value)
+{
+	if (value > 255.0f)
+		value = 255.0f;
+	else if (value < -255.0f)
+		value = -255.0f;
+	return (sample_mx_t)(value * 8388352.0f);
+}
+
+/*
+ * Apply, ramp, and route the processed FX return into the selected DAC bus.
+ *
+ * Inputs: jack-resolved destination, optional stereo return buffers, current
+ * left/right return gains, and the four interleaved output buses. Stereo
+ * destinations preserve both Effect channels; mono destinations sum stereo
+ * returns at 0.5 per side and route mono returns from l. Output: saturated
+ * sample_mx_t mix samples and updated two-channel return ramp origins.
+ * Affiliate: mixer_calcNextSampleBlock().
+ */
+static void mixer_addFxReturnToOutput(uint8_t dest,
+		const float *l,
+		const float *r,
+		float gainL,
+		float gainR,
+		sample_mx_t *outL,
+		sample_mx_t *outR,
+		sample_mx_t *outL2,
+		sample_mx_t *outR2)
+{
+	sample_mx_t *mono = 0;
+	sample_mx_t *stereoL = 0;
+	sample_mx_t *stereoR = 0;
+	uint8_t stereo_route = 0u;
+	uint8_t i;
+	const float inv_size = 1.f / (OUTPUT_DMA_SIZE - 1.f);
+	const float deltaL = gainL - mixer_fx_return_last_gain[0];
+	const float deltaR = gainR - mixer_fx_return_last_gain[1];
+
+	switch (dest) {
+	case MIXER_ROUTING_DAC1_STEREO:
+		stereoL = outL2;
+		stereoR = outR2;
+		stereo_route = 1u;
+		break;
+	case MIXER_ROUTING_DAC2_STEREO:
+		stereoL = outL;
+		stereoR = outR;
+		stereo_route = 1u;
+		break;
+	case MIXER_ROUTING_DAC1_L:
+		mono = outL2;
+		break;
+	case MIXER_ROUTING_DAC1_R:
+		mono = outR2;
+		break;
+	case MIXER_ROUTING_DAC2_L:
+		mono = outL;
+		break;
+	case MIXER_ROUTING_DAC2_R:
+		mono = outR;
+		break;
+	default:
+		return;
+	}
+
+	for (i = 0u; i < OUTPUT_DMA_SIZE; i++) {
+		const float currentL = mixer_fx_return_last_gain[0]
+				+ ((float)i * inv_size * deltaL);
+		const float currentR = mixer_fx_return_last_gain[1]
+				+ ((float)i * inv_size * deltaR);
+		if (stereo_route) {
+			*stereoL = bufferTool_satAdd32(*stereoL,
+					mixer_floatToMx(l[i] * currentL));
+			stereoL += 2;
+			*stereoR = bufferTool_satAdd32(*stereoR,
+					mixer_floatToMx((r ? r[i] : l[i]) * currentR));
+			stereoR += 2;
+		} else {
+			const float monoSample = r
+					? (0.5f * (l[i] * currentL
+							+ r[i] * currentR))
+					: (l[i] * currentL);
+			*mono = bufferTool_satAdd32(*mono, mixer_floatToMx(monoSample));
+			mono += 2;
+		}
+	}
+	mixer_fx_return_last_gain[0] = gainL;
+	mixer_fx_return_last_gain[1] = gainR;
+}
 //-----------------------------------------------------------------------
 // Test Stub for Audio DMA
 //-----------------------------------------------------------------------
@@ -531,8 +737,9 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	 *
 	 * Inputs: retained normal/Morph images and the active Scene Effect type.
 	 * Output: common runtime values and type DSP state are current for the
-	 * future FX bus. Step 4 intentionally rescans only the active registry rows;
-	 * Step 5 adds the send/process/return path after the voice loop.
+	 * common runtime values and type DSP state are current for the send/process/
+	 * return path below. The active registry row supplies the live I/O shape;
+	 * EffectsManager owns type handoff and parameter resolution.
 	 */
 	effects_service();
 
@@ -554,6 +761,24 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 
 	bufferTool_clearBuffer32(output,OUTPUT_DMA_SIZE*2);
 	bufferTool_clearBuffer32(output2,OUTPUT_DMA_SIZE*2);
+
+	/*
+	 * Snapshot Effect I/O and return routing once per render block.
+	 *
+	 * Inputs: EffectsManager's active type flags/common runtime and cached jack
+	 * detection. Output: an optional cleared two-channel FX bus and one stable
+	 * resolved destination for the processed return. When the type is off, the
+	 * bus is left untouched and no Effect work is performed. Affiliates:
+	 * mixer_addVoiceToFxBus(), effects_process(), and mixer_addFxReturnToOutput().
+	 */
+	const uint8_t fx_io = effects_activeIoFlags();
+	const uint8_t fx_stereo_in = (uint8_t)((fx_io & EFFECT_IO_STEREO_IN) != 0u);
+	const uint8_t fx_active = (uint8_t)(fx_io != 0u);
+	const uint8_t fx_scene = scene_getActiveIndex();
+	const effects_common_runtime_t *fx_common = effects_commonRuntime();
+	const uint8_t fx_route = mixer_checkOutJackAvailable(fx_common->route);
+	if (fx_active)
+		bufferTool_clearBuffer32(&mixer_fx_bus.mx[0][0], OUTPUT_DMA_SIZE * 2);
 
 	// //---------------------------------------
 	// // TEST BLOCK - Calc and add test sine tone
@@ -586,20 +811,76 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	{
 		uint8_t pan;
 		float voiceGain;
+		float sendGain;
 		instrumentManager_calcSlotSyncBlock(slot, sampleData, OUTPUT_DMA_SIZE);
 		mixer_decimateBlock(slot,sampleData);
 		/*
-		 * sampleData is now the decimated, PRE-VOLUME voice block. Step 5 taps
-		 * the FX send here. Channel volume is applied only through the combined
-		 * output gain below (Session 072 step 2).
+		 * sampleData is the decimated, pre-volume voice block. The fader mode
+		 * creates parallel dry/send gains: PRE scales both, POST scales only the
+		 * dry mix, and FX scales only the send. The send tap is accumulated before
+		 * channel volume, while the normal output keeps the combined voice ramp.
 		 */
-		voiceGain = slider_vol[slot] * instrumentManager_runtimeVolume(slot);
+		mixer_faderGains(slot, fx_scene, &voiceGain, &sendGain);
 		pan = instrumentManager_runtimePan(slot);
+		if (fx_active && (sendGain > 0.0f || mixer_send_last_gain[slot] > 0.0f))
+			mixer_addVoiceToFxBus(sampleData, sendGain,
+					mixer_send_last_gain[slot],
+					squareRootLut[127-pan], squareRootLut[pan], fx_stereo_in);
 		mixer_addVoiceInt16ToOutput(effectiveRouting[slot],
 				squareRootLut[127-pan], squareRootLut[pan],
 				sampleData, voiceGain, mixer_voice_last_gain[slot],
 				&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
 		mixer_voice_last_gain[slot] = voiceGain;
+		mixer_send_last_gain[slot] = sendGain;
+	}
+
+	if (fx_active) {
+		/*
+		 * Convert the accumulated signed-24 bus in place, process one normalized
+		 * block, then return the Effect through its live Scene route. A mono-input
+		 * type has only l input; a mono-input/stereo-output type receives a zeroed
+		 * r output channel so its process callback can write the second return.
+		 */
+		const uint8_t fx_stereo_out =
+				(uint8_t)((fx_io & EFFECT_IO_STEREO_OUT) != 0u);
+		const uint8_t fx_channels_in = fx_stereo_in ? 2u : 1u;
+		const float inv_mx = 1.0f / 8388352.0f;
+		const float fx_level = fx_common->level;
+		const uint8_t fx_pan = fx_common->pan;
+		fx_share_t share;
+		effect_io_t io;
+		float gainL;
+		float gainR;
+
+		for (uint8_t i = 0u; i < OUTPUT_DMA_SIZE; i++) {
+			mixer_fx_bus.f[0][i] = (float)mixer_fx_bus.mx[0][i] * inv_mx;
+			mixer_fx_bus.f[1][i] = (float)mixer_fx_bus.mx[1][i] * inv_mx;
+		}
+		if (!fx_stereo_in && fx_stereo_out)
+			for (uint8_t i = 0u; i < OUTPUT_DMA_SIZE; i++)
+				mixer_fx_bus.f[1][i] = 0.0f;
+
+		fxbuf_effectShare(&share);
+		io.l = mixer_fx_bus.f[0];
+		io.r = (fx_stereo_in || fx_stereo_out) ? mixer_fx_bus.f[1] : 0;
+		io.frames = OUTPUT_DMA_SIZE;
+		io.channels = fx_channels_in;
+		io.share = &share;
+		effects_process(&io);
+
+		if (fx_stereo_out) {
+			gainL = fx_level * ((fx_pan <= 64u) ? 1.0f
+					: (float)(127u - fx_pan) / 63.0f);
+			gainR = fx_level * ((fx_pan >= 64u) ? 1.0f
+					: (float)fx_pan / 64.0f);
+		} else {
+			gainL = fx_level * squareRootLut[127u - fx_pan];
+			gainR = fx_level * squareRootLut[fx_pan];
+		}
+		mixer_addFxReturnToOutput(fx_route, mixer_fx_bus.f[0],
+				fx_stereo_out ? mixer_fx_bus.f[1] : 0,
+				gainL, gainR, &output[pos], &output[pos+1],
+				&output2[pos], &output2[pos+1]);
 	}
 
 }

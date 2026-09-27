@@ -98,9 +98,12 @@ typedef struct {
 /*
  * One block passed to an Effect process operation.
  *
- * Samples are normalized floats where 1.0 is int16 full scale. r is NULL for
- * a mono block. frames is the current render-block length, and share is the
- * current FxBuffer allocation for any buffer-using type.
+ * Samples are normalized floats where 1.0 is int16 full scale. l is always
+ * present; r is supplied when the type has stereo input or stereo output and
+ * may be NULL for a mono-input/mono-output block. For a mono-input/stereo-
+ * output type, r is supplied as a zeroed output channel and channels remains
+ * the input count. frames is the current render-block length, and share is
+ * the current FxBuffer allocation for any buffer-using type.
  */
 typedef struct {
     float *l;

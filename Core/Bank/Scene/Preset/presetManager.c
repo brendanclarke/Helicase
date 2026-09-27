@@ -164,9 +164,10 @@ static uint8_t preset_morph_initialized = 0;
  * Each table is six entries of {active,value}, or 12 bytes of normal SRAM.
  * Transport restore and preset_init() clear both tables.
  *
- * Affiliates: preset_applyVoiceAudioOutRuntime() owns the mixer write;
- * FX-send has no DSP bus owner yet. presetMorphEngine.c owns the equivalent
- * per-voice Morph overlay and remains separate because Morph has a worker.
+ * Affiliates: preset_applyVoiceAudioOutRuntime() owns the mixer route write;
+ * mixer_calcNextSampleBlock() pulls the effective FX-send getter each block.
+ * presetMorphEngine.c owns the equivalent per-voice Morph overlay and remains
+ * separate because Morph has a worker.
  */
 static struct {
     uint8_t active;
@@ -1112,13 +1113,14 @@ uint8_t preset_getEffectiveAudioOut(uint8_t scene_index, uint8_t slot)
 
 void preset_setFxSendStepOverride(uint8_t slot, uint8_t amount)
 {
-    /*
-     * Store one transient FX-send amount for effective-value display.
-     *
-     * Inputs: zero-based voice slot and 0..127 amount. Output: runtime-only
-     * overlay state; no FX DSP write exists until the Phase 5 bus is present,
-     * and retained SceneData/AutoSave remain untouched. Client: sequencer
-     * Scene-target automation. Restore: the clear helper.
+	/*
+	 * Store one transient FX-send amount for the live mixer overlay.
+	 *
+	 * Inputs: zero-based voice slot and 0..127 amount. Output: runtime-only
+	 * overlay state read by preset_getEffectiveFxSendAmount(), then pulled by
+	 * mixer_calcNextSampleBlock() on the next render block; retained
+	 * SceneData/AutoSave remain untouched. Client: sequencer Scene-target
+	 * automation. Restore: the clear helper.
      */
     if (slot >= INSTRUMENT_SLOT_COUNT)
         return;
@@ -1132,12 +1134,13 @@ void preset_clearAllFxSendStepOverrides(void)
 {
     uint8_t slot;
 
-    /*
-     * Clear every transient FX-send display overlay.
-     *
-     * Inputs: none. Output: effective-value reads fall back to retained Scene
-     * settings. There is no DSP restore because the FX bus is not implemented;
-     * this helper still owns the runtime lifetime of the display overlay.
+	/*
+	 * Clear every transient FX-send display overlay.
+	 *
+	 * Inputs: none. Output: effective-value reads fall back to retained Scene
+	 * settings and the mixer send ramp converges to the retained value on its
+	 * next block. This helper owns the runtime lifetime of the sequencer overlay
+	 * while the mixer owns the audible send application.
      */
     for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
         fx_send_step_override[slot].active = 0u;
@@ -1150,9 +1153,10 @@ uint8_t preset_getEffectiveFxSendAmount(uint8_t scene_index, uint8_t slot)
     /*
      * Read one voice's effective FX-send amount.
      *
-     * Inputs: resident Scene index and zero-based voice slot. Output: the
-     * active step overlay amount when present, otherwise retained SceneData.
-     * This read-only bridge is used by the live Scene superpage display.
+	 * Inputs: resident Scene index and zero-based voice slot. Output: the
+	 * active step overlay amount when present, otherwise retained SceneData.
+	 * This read-only bridge is used by the live Scene superpage display and by
+	 * mixer_calcNextSampleBlock() for every FX-send block.
      */
     if (slot >= INSTRUMENT_SLOT_COUNT)
         return 0u;
@@ -1183,13 +1187,14 @@ uint8_t preset_setVoiceAudioOut(uint8_t scene_index, uint8_t slot,
 uint8_t preset_setVoiceFxSendAmount(uint8_t scene_index, uint8_t slot,
                                     uint8_t amount)
 {
-    /*
-     * Retain one Scene FX-send amount without runtime side effects yet.
-     *
-     * Inputs: resident Scene index, zero-based instrument slot, and 0..127
-     * amount. Output: SceneData retains the value. The eventual FX bus should
-     * attach its active-scene runtime write here so Menu/storage callers keep
-     * one owner boundary.
+	/*
+	 * Retain one Scene FX-send amount for the block-rate mixer consumer.
+	 *
+	 * Inputs: resident Scene index, zero-based instrument slot, and 0..127
+	 * amount. Output: SceneData retains the value; the active mixer pulls the
+	 * effective amount on its next block, including any step overlay. Menu and
+	 * storage callers therefore keep one owner boundary without a second runtime
+	 * copy.
      */
     if (!scene_get(scene_index) || slot >= INSTRUMENT_SLOT_COUNT)
         return 0u;
@@ -1202,12 +1207,13 @@ uint8_t preset_setVoiceFxSendAmount(uint8_t scene_index, uint8_t slot,
 uint8_t preset_setVoiceFaderSetting(uint8_t scene_index, uint8_t slot,
                                     uint8_t mode)
 {
-    /*
-     * Retain one Scene fader mode without runtime side effects yet.
-     *
-     * Inputs: resident Scene index, zero-based instrument slot, and 0..2 mode.
-     * Output: SceneData retains the mode. Future fader topology code should
-     * add active-scene apply here instead of teaching Menu about mixer internals.
+	/*
+	 * Retain one Scene fader mode for the block-rate mixer consumer.
+	 *
+	 * Inputs: resident Scene index, zero-based instrument slot, and 0..2 mode.
+	 * Output: SceneData retains the mode; the active mixer pulls it on its next
+	 * block and applies PRE/POST/FX topology beside the voice send tap. Menu and
+	 * storage callers remain independent of mixer internals.
      */
     if (!scene_get(scene_index) || slot >= INSTRUMENT_SLOT_COUNT)
         return 0u;

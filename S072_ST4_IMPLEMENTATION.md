@@ -1838,3 +1838,108 @@ change is expected until Step 5. Before hardware testing, use
 `DEV_MODE_DIAGNOSTIC=1` with `DEV_EFFECT_FORCE_TYPE=1u`, capture the boot
 registry result and AutoSave token, then restore both development knobs to
 their production values.
+
+---
+
+## 18. Review assessment (2026-09-27, post-implementation)
+
+**Verdict:** accepted. The Step 4 source matches this schedule, and the build
+succeeds. **Nothing is audible from this step, by design.**
+`effects_process()` has no caller until the Step 5 bus. The only runtime
+activity is `effects_service()` resolving the `off` type's three common rows
+every block.
+
+### 18.1 Source review (commit `1e47c56`, which contains Steps 1–4)
+
+- **`EffectsManager.h/.c`** matches §2 and §6:
+  - the registry (`off`, `flt`) and lookups;
+  - `effects_paramAutomatable()` rules (local 63; WIDE8 needs expand7);
+  - the self-check codes 1–A;
+  - `effects_switchRuntime()` in handoff order (BeginExit → type/channels →
+    export → zero runtime → init → force);
+  - `effects_activateScene()`, and `effects_changeType()`, which keeps
+    0..2, run/len/scale, and Morph amount, resets 3..63 to defaults, and
+    clears all steps;
+  - the full-rescan `effects_service()` and the accessors;
+  - `effects_interpolate()` is byte-identical in arithmetic to
+    `presetMorph_interpolate()`.
+- **`EffectParamRows.h`, `StereoFilterParameters.c/.h`,
+  `StereoFilterEffect.c/.h`** match §3–§5:
+  - defaults 64/0/0/LP (D1 confirmed);
+  - linked coefficients;
+  - `init` also links the coefficients after `SVF_init` (harmless and
+    correct).
+- **`SVF_calcBlockZDFFloat()`** matches §7:
+  - the invalid-type pass-through is checked before any state update;
+  - the output expressions equal the int16 version without `__SSAT`;
+  - literals are float-suffixed (`1.4f`, where the int16 version has double
+    `1.4`), a negligible difference under -Ofast.
+- **Hooks:**
+  - `preset_sendDrumsetParameters()` (`:1519`) and
+    `preset_startDrumsetApply()` (`:1554`) call `effects_activateScene()`;
+  - `preset_morphScene()` bulk-sets Effect Morph (`:3007`);
+  - `mixer.c:537` calls `effects_service()`;
+  - `main.c:129` calls `effects_init()`;
+  - the diagnostic row 2 has the `r` code (`main.c:314`);
+  - the boot dev hook is at `main.c:1297–1307`.
+- **AutoSave:** the type-token router (`Autosave.c:1088`), and the token
+  marking in `autosave_markEffectDirty()` (`:2011–2018`).
+- **SceneData:** the whole-commit pair (`SceneData.c:667/675`).
+- **`config.h` `DEV_EFFECT_FORCE_TYPE`**, the Makefile (include, `SRCS`,
+  `DSP_SRCS`, -Ofast rule), and the decoder update (`SCENE_PARAM_COUNT 41`,
+  `fxm_amt`, Effect region labels) are all present.
+
+### 18.2 Build
+
+| Measurement | Result | vs Step 3 |
+|---|---|---|
+| `text`/`data`/`bss` | 463,552 / 416 / 425,936 | +4,888 / 0 / +84 |
+| Flash | 463,968 B; **27,552 B headroom** | −4,888 B headroom |
+| DTCM statics | 4,160 B (`effects_runtime` 76 B at `0x20000F30`) | +76 |
+| FX arena | 126,912 B at `0x20001040` (margin 4,032 B) | −64 |
+| `effects_state` | 76 B SRAM1 | new |
+
+The flash growth is above the §17 estimate of 2–4 KiB. Most of it is
+`SVF_calcBlockZDFFloat` at **2,772 B**, which -Ofast unrolls to the same size
+class as the existing int16 `SVF_calcBlockZDF` (~2.9 KB). The rest is spread
+over:
+
+- `effects_service` 404 B;
+- `stereoFilter_writeParam` 316 B;
+- `stereoFilter_descriptors` 252 B;
+- `effects_activateScene` 192 B;
+- the registry 128 B;
+- the `off` descriptors 108 B;
+- the self-check, which is diagnostic-only and absent here.
+
+Headroom is still well above the 16 KiB warning threshold. It is now the
+number to watch through Steps 5–10.
+
+**Build-host note:** the first clean link aborted with `lto1: internal
+compiler error: Bus error: 10` and left an empty `build/lxr02.elf`, so a
+plain rerun then failed at objcopy ("input file is empty"). Deleting the ELF
+and relinking succeeded with no source change. This is a host/toolchain
+fault, consistent with the earlier transient empty-ELF report (ST2 §26.3); it
+most likely happens when two builds share `build/`. If it recurs, delete
+`build/lxr02.elf` before rebuilding.
+
+### 18.3 What can be tested (none of it is audible)
+
+Step 4 changes no sound. Its hardware-observable effects are bookkeeping, as
+listed in §17:
+
+1. **Regression, production build:** normal play, Scene switching, Bank Load,
+   and a `cpu` reading equal to Step 3.
+2. **Global Morph → Scene parameter 40:** moving PERF `mrp` now marks
+   `fxm_amt`, which the updated decoder shows in `asavetrc.bin` and the
+   records.
+3. **Diagnostic build with `DEV_EFFECT_FORCE_TYPE 1u`:**
+   - the boot screen `r0`;
+   - the active Scene's `.hcprms` Effect region reads `66 6C 74` + `00 10 04
+     00 7F 40 40 00 00 00 …`. This also closes ST3 gate 7.
+
+**Recommendation:** don't run a separate Step 4 bench session. Items 2–3 need
+the same diagnostic build and card copy that Step 5's first listening test
+uses (the dev hook selects `flt` and the bus makes it audible). Running both
+checks in the Step 5 session covers Step 4 at no extra cost. Item 1 is only a
+quick flash-and-play check, if wanted now.

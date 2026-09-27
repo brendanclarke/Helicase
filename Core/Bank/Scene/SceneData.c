@@ -453,8 +453,8 @@ void scene_setVoiceFxSendAmount(uint8_t scene_index, uint8_t slot,
      *
      * Inputs: resident Scene index, zero-based instrument slot, and amount.
      * Output: a changed retained 0..127 amount is stored before its named Scene
-     * bit is marked. Runtime FX send is intentionally not applied here; Preset
-     * owns runtime side effects when the FX bus exists.
+     * bit is marked. Runtime FX send is intentionally not written here; the
+     * mixer pulls the effective Scene/Preset value at the next block boundary.
      */
     if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
         return;

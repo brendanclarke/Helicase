@@ -11,7 +11,9 @@ measurements after the arena and `FxBuffer` changes; the exact tool output is
 recorded in `S072_ST1_IMPLEMENTATION.md` §22. Rebuild after later
 header/configuration edits before treating any linked total as current. The
 S072 Step 4 clean link is recorded below: `text=463,552`, `data=416`,
-`bss=425,936`, with `scenes=25,952` (`0x6560`). It adds the
+`bss=425,936`, with `scenes=25,952` (`0x6560`). The S072 Step 5 production
+clean link is `text=465,352`, `data=416`, `bss=425,936`; its flash image uses
+465,768 B and its DTCM ledger is recorded below. Step 5 adds the
 76-byte `effects_state` in SRAM1, the 76-byte `effects_runtime` in DTCM, and
 the one-byte diagnostic registry result; exact section totals are recorded
 below.
@@ -30,15 +32,15 @@ Configuration: `DEV_MODE_LOGGING=1`, `DEV_LOGGING_IWDG=0`,
 | SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | Part of SRAM1 | 292,692 | — |
 | **SRAM1 total** | `0x20020000` | **376,832** | **295,792** | **81,040** |
 | DTCM `.dtcm` | `0x20000000` | Part of DTCM | 512 | — |
-| DTCM `.dtcmz` | `0x20000200` | Part of DTCM | 3,648 | — |
-| DTCM `.dtcm_fxbuf` | `0x20001040` | Part of DTCM | 126,912 | 0 (reserved arena) |
+| DTCM `.dtcmz` | `0x20000200` | Part of DTCM | 3,936 | — |
+| DTCM `.dtcm_fxbuf` | `0x20001160` | Part of DTCM | 126,624 | 0 (reserved arena) |
 | **DTCM total** | `0x20000000` | **131,072** | **131,072** | **0** |
 | ITCM `.itcm` executable code | `0x00000000` | 16,384 | 3,768 | 12,616 |
 | SRAM2 `.devwdg_noinit` | `0x2007c000` | 16,384 | **0** | See stack note |
 
 Static **data** RAM is 426,864 B (SRAM1 + DTCM, including the NOLOAD arena);
 including ITCM code, linked RAM sections occupy 430,632 B. The conventional
-`arm-none-eabi-size` `bss` column includes the 126,912-byte NOLOAD arena and
+`arm-none-eabi-size` `bss` column includes the 126,624-byte NOLOAD arena and
 must not be interpreted as new SRAM1 use. Use the section ledger and the
 separate `tools/link_budget.py` report for DTCM arena accounting. `.dtcm`
 contains only the 512-byte `squareRootLut`; `sine_table` is now ordinary flash
@@ -131,15 +133,19 @@ its condition is `DEV_STALL_DETECTION`, rather than `DEV_MODE_LOGGING` alone.
 | --- | ---: | --- |
 | `squareRootLut` | 512 | DTCM `.dtcm`; `sine_table` moved to flash in S072 Step 1. |
 | `EffectsManager.c`: `effects_runtime` | 76 | DTCM `.dtcmz`; union holding the active type's DSP runtime. |
-| `.dtcm_fxbuf` | 126,912 | DTCM NOLOAD; elastic FX/voice audio arena owned by FxBuffer. |
+| `mixer_fx_bus` | 256 | DTCM `.dtcmz`; two-channel 32-frame union used for saturated voice sends and in-place Effect floats. |
+| `mixer_send_last_gain[6]` | 24 | DTCM `.dtcmz`; per-slot block-end send/fader ramp origins. |
+| `mixer_fx_return_last_gain[2]` | 8 | DTCM `.dtcmz`; left/right Effect return ramp origins. |
+| `.dtcm_fxbuf` | 126,624 | DTCM NOLOAD; elastic FX/voice audio arena owned by FxBuffer after the approved 288-byte Step 5 mixer allocation. |
 | `audioOutBuffer`, `audioOutBuffer2` | 3,072 combined | DTCM `.dtcmz`; oscillator interpolation buffers and other DSP state account for the remainder. |
 | `velocityModulators` | 264 | DTCM `.dtcmz`; six modulation nodes. |
 | `osc_interp_a`, `osc_interp_b` | 128 combined | DTCM `.dtcmz`; two 32-sample interpolation buffers. |
 | `dma_buffer`, `dma_buffer2`, `adc_dma_buf` | 3,072 + 28 | SRAM1 `.dma_nocache`; the entire section must stay within the linker's 4,096 B MPU limit. |
 | `transientData` | 26,460 | FLASH `.text` constant PCM; no DTCM/SRAM shadow. |
 
-The Step 1 link's conventional `bss` figure includes the 126,976-byte NOLOAD
-arena. FLASH and sample-FLASH capacity are not SRAM headroom.
+The current production link's conventional `bss` figure includes the
+126,624-byte NOLOAD arena. FLASH and sample-FLASH capacity are not SRAM
+headroom.
 
 **Reservation policy:** free DTCM, including capacity released by moving
 `transientData` to FLASH, is reserved exclusively for future delay-line

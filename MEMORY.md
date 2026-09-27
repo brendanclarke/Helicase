@@ -84,16 +84,19 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   through SceneData setters, plus `effect_morph_amount` as Scene parameter 40;
   the AutoSave Effect region has 419 live cells and `fxm` ID 404 is reserved
   with zero use flags.
-- S072 Step 4: `EffectsManager` now owns the `off`/`flt` registry, per-block
+- S072 Step 4: `EffectsManager` owns the `off`/`flt` registry, per-block
   resolution, Scene activation/type-change handoff, and the 76-byte runtime
   state/76-byte DTCM StereoFilter runtime. `effects_service()` runs from the
   mixer foreground block; the Effect type token is live in AutoSave;
-  `DEV_EFFECT_FORCE_TYPE` is the diagnostic bench hook. The FX bus remains
-  deferred to Step 5, so Step 4 makes no audible change.
+  `DEV_EFFECT_FORCE_TYPE` is the diagnostic bench hook.
+- S072 Step 5: the mixer now taps each decimated voice before volume, applies
+  PRE/POST/FX fader topology, sums a live mono/stereo FX bus with saturated
+  signed-24 accumulation, calls `effects_process()`, and routes the level- and
+  pan/balance-controlled return through jack fallback. Send and return gains
+  use 32-byte total extra DTCM ramp state beside the approved 256-byte bus;
+  targets 398..403 are audible through the effective-send getter.
 - S070 task documents are also superseded by `070_SESSION_HANDOFF_LOG.md` and
   may be deleted.
-- FX_SEND automation (targets 398..403) is wired for editing and storage but
-  the apply path is a no-op until the Phase 5 FX bus is implemented.
 - Per-track step scale and shuffle are stored/edited/persisted only, with no
   sequencer playback effect — see `PATTERN_DYNAMIC_STACK.md` §6.4.
 - Phase 4.5 copy operations (`pat_copyTrack`, `pat_copyPattern`,

@@ -393,8 +393,10 @@ mix  = s × vol × F_mix  → pan (squareRootLut) → route[n] (jack fallback) �
 send = s × fxSend/127 × F_send → [stereo bus: same pan law] [mono bus: no pan] → satAdd32 into FX bus
 ```
 
-- `F_*` comes from the fader mode (§8.3). The fader uses the existing per-block
-  slider ramp (`mixer_slider_last_gain`).
+- `F_*` comes from the fader mode (§8.3). The dry mix uses the existing
+  per-block voice ramp (`mixer_voice_last_gain`); the parallel send uses
+  `mixer_send_last_gain[6]` so send amount and send-side fader changes are
+  click-free.
 - `fxSend` is `preset_getEffectiveFxSend(slot)`, which honors the step override.
   The fader never changes the stored FX Send parameter.
 - The bus width follows the active type's input flag: stereo `sample_mx_t`
@@ -421,6 +423,11 @@ FX bus → effect.process (in place) → × vol → pan (mono out) / balance (st
 ```
 
 - The return is 100 % wet. Types handle any internal wet/dry (A28).
+- Mono-output returns use the voice constant-power pan law. Stereo-output
+  returns use the resolved common pan as a linear balance with unity at centre:
+  `gL = pan <= 64 ? 1 : (127-pan)/63`, `gR = pan >= 64 ? 1 : pan/64`.
+  The two return gains ramp from `mixer_fx_return_last_gain[2]` across the
+  block before jack-resolved saturated addition.
 - CPU is measured with the `cpu` widget before and after each of steps 2, 4,
   and 5.
 
