@@ -1710,3 +1710,20 @@ hygiene → Load/Save revision → remaining Phase 4 feature behavior → testin
 closeout. Per-track scale/shuffle, copy/paste, clear, live record, and roll
 overhaul deferred to a later session; see
 `knowledge_files/drafts/PATTERN_TRACK_PROPERTIES_AND_WIDGETS_COMPLETION.md`.
+
+## Session 072 deferred bugfix candidate (2026-09-27)
+
+- **Possible blank / space-only filename stem handling (unverified).**
+  Noticed while planning Phase 5 Effect naming; deliberately not investigated
+  or changed during Effects framework work. User rule: a blank object name is
+  a single space, so files such as `' .drm'`, `' .fx'`, or library
+  `'000  .fx'` are valid names. Several filename/HCNAMES paths trim trailing
+  display spaces from stems (`filesystem.c:2280`, `10054`, `10371`, `16516`;
+  `storageTypes.c` `storage_trimRight()`). If such trimming runs on a stem
+  that is only a space, the stem could become empty, so save could produce
+  `.ext` (a dot-prefixed, product-filtered file) and parse/scan/index could
+  treat the row as unusable. Needs a card test: save and reload a single-space
+  Instrument name, then check the library index, HCNAMES row, and reload.
+  Effects inherit whatever Instrument naming does (see
+  `EFFECTS_BUS_FEATURE_PLAN.md` §14.2), so any fix belongs in the shared
+  naming path, in a Load/Save revision pass, not in Phase 5.
