@@ -219,6 +219,42 @@
  */
 #define DEV_LOGGING_IWDG_EXPIRE 120000u
 
+/*
+ * DEV_FXBUF_FORCE_VOICE_UNITS — screen-diagnostic test knob, default 0.
+ *
+ * What: when DEV_MODE_DIAGNOSTIC is 1, fxbuf_init() claims this many 4,416-
+ * byte voice units at boot (two per slot, slots 0..5 in order) so the Effect
+ * share can be exercised at its minimum size before any real voice buffer
+ * user exists. Values 0..12. Ignored entirely when DEV_MODE_DIAGNOSTIC is 0,
+ * so production can never lose arena to a stale test setting.
+ *
+ * Why: Phase 5 guarantees every Effect type works across the whole share
+ * range (full arena down to arena - 12 units). Until Phase 7 voice types
+ * allocate units, this is the only way to present the minimum share.
+ *
+ * Inputs: this constant. Outputs: fxbuf_unitsInUse()/fxbuf_effectShare()
+ * report the reduced share; the FxBf boot diagnostic shows it. Affiliates:
+ * Core/DSP/Effects/FxBuffer.c fxbuf_init(), main.c
+ * boot_showFxBufDiagnostic(), DEV_MODES.md. Units forced here are owned by
+ * the named slots; once Phase 7 voice buffer users exist, a nonzero value
+ * will collide with them — keep 0 outside deliberate share tests.
+ */
+#define DEV_FXBUF_FORCE_VOICE_UNITS 0u
+#if (DEV_FXBUF_FORCE_VOICE_UNITS > 12u)
+#error "DEV_FXBUF_FORCE_VOICE_UNITS must be 0..12 (FXBUF_VOICE_UNIT_COUNT)"
+#endif
+
+/*
+ * DEV_EFFECT_FORCE_TYPE — diagnostic boot type selector, default 0.
+ *
+ * When DEV_MODE_DIAGNOSTIC is enabled and this id is nonzero, main.c commits
+ * it through effects_changeType() immediately after normal boot Scene
+ * activation. Id 1 is StereoFilter (`flt`). Production builds ignore this
+ * hook. It exists so Steps 4–5 can exercise registry, AutoSave token, and DSP
+ * initialization before the Step 7 Effect page supplies a user path.
+ */
+#define DEV_EFFECT_FORCE_TYPE 0u
+
 //if 1 the amp EGs will be calculated on a per sample basis
 //takes too much calcuklation time
 //if 0 they are calculated for each dma buffer once, only a smoothing LP will be calculated in the sync loop

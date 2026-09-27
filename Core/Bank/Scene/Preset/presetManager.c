@@ -48,6 +48,7 @@
 #include "BankData.h"
 #include "Autosave.h"
 #include "AutosaveTrace.h"
+#include "EffectsManager.h"
 #include "mixer.h"
 #include "valueShaper.h"
 #include <string.h>
@@ -1514,6 +1515,8 @@ void preset_sendDrumsetParameters(void)
     instrumentManager_clearAllRuntimeModulationTargets();
     preset_ensureMorphInitialized();
     preset_applySceneSettings(scene_getActiveIndex());
+    /* Activate the retained Effect beside the synchronous Scene settings. */
+    effects_activateScene(scene_getActiveIndex());
     for (voice = 0; voice < 6u; voice++)
         preset_resetAndApplyKitVoiceImage(scene_getActiveIndex(), voice);
 
@@ -1547,6 +1550,8 @@ void preset_startDrumsetApply(void)
     instrumentManager_clearAllRuntimeModulationTargets();
     preset_ensureMorphInitialized();
     preset_applySceneSettings(scene_getActiveIndex());
+    /* The deferred Scene worker uses the same immediate Effect activation. */
+    effects_activateScene(scene_getActiveIndex());
     drumset_apply_scene = scene_getActiveIndex();
     drumset_apply_pending_mask =
         (uint16_t)((1u << INSTRUMENT_SLOT_COUNT) - 1u);
@@ -2998,6 +3003,8 @@ void preset_morphScene(uint8_t scene_index, uint8_t morph)
         return;
     scene_setMorphAmount(scene_index, morph);
     scene_setAllVoiceMorphAmounts(scene_index, morph);
+    /* Global Morph also owns the retained Scene Effect Morph amount. */
+    scene_setEffectMorphAmount(scene_index, morph);
     if (scene_index == scene_getActiveIndex()) {
         preset_syncSceneMorphMirrors(scene);
         presetMorph_requestAll(scene_index);

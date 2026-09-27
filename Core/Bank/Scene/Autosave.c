@@ -16,12 +16,32 @@
 #include "BankData.h"
 #include "SceneData.h"
 #include "InstrumentManager.h"
+#include "EffectsManager.h"
 /* Reads the filesystem-owned HCNAMES provenance register without doing I/O. */
 #include "filesystem.h"
 /* Supplies the TIM2 microsecond stamp used by Pattern quiet-window policy. */
 #include "timebase.h"
 
 #include <string.h>
+
+/*
+ * Cross-check the ordered Effect wire projection against EffectTypes.h.
+ *
+ * Autosave.h owns the storage offsets and SceneData.h supplies the data-only
+ * Effect contract. These assertions keep the two owners synchronized without
+ * making the public AutoSave header depend on DSP Effect definitions.
+ */
+_Static_assert(AUTOSAVE_EFFECT_PARAM_MORPH_BASE ==
+                   AUTOSAVE_EFFECT_PARAM_NORMAL_BASE + EFFECT_PARAM_COUNT,
+               "Effect normal image must contain 64 cells");
+_Static_assert(AUTOSAVE_EFFECT_PARAM_STEPS_BASE ==
+                   AUTOSAVE_EFFECT_PARAM_MORPH_BASE + EFFECT_PARAM_COUNT,
+               "Effect Morph image must contain 64 cells");
+_Static_assert(AUTOSAVE_EFFECT_STEP_BYTES ==
+                   AUTOSAVE_EFFECT_STEP_VALUES_OFFSET + EFFECT_SEQ_LANE_COUNT,
+               "Effect step must contain mask bytes plus 16 lanes");
+_Static_assert(EFFECT_SEQ_STEP_COUNT == 16u,
+               "Effect wire layout assumes 16 sequence steps");
 
 _Static_assert(INSTRUMENT_PARAM_COUNT <=
                    AUTOSAVE_INSTRUMENT_PARAMETER_BYTES,
@@ -60,7 +80,8 @@ _Static_assert(AUTOSAVE_SCENE_PARAM_MIDI_CHANNEL_BASE -
 _Static_assert(AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE -
                    AUTOSAVE_SCENE_PARAM_MIDI_CHANNEL_BASE == NUM_TRACKS,
                "Scene MIDI-channel group must cover every track");
-_Static_assert(AUTOSAVE_SCENE_PARAM_COUNT -
+/* Effect Morph follows, so the MIDI-note group ends at its explicit index. */
+_Static_assert(AUTOSAVE_SCENE_PARAM_EFFECT_MORPH -
                    AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE == NUM_TRACKS,
                "Scene MIDI-note group must cover every track");
 
@@ -874,31 +895,63 @@ static uint8_t autosave_getSceneParameter(const scene_t *scene,
     } else if (parameter_index < AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE) {
         *value = scene->settings.midi_channel[
             parameter_index - AUTOSAVE_SCENE_PARAM_MIDI_CHANNEL_BASE];
-    } else {
+    } else if (parameter_index < AUTOSAVE_SCENE_PARAM_EFFECT_MORPH) {
         *value = scene->settings.midi_note[
             parameter_index - AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE];
+    } else {
+        /* Index 40 is the retained Scene Effect Morph amount. */
+        *value = scene->settings.effect_morph_amount;
     }
     return 1u;
 }
 
 /*
- * Future Effect live-byte owner stub.
+ * Project one live Effect cell into its ordered wire index.
  *
- * Inputs: resident Scene, parameter index, and result cell. Output: zero for
- * every request because Phase 1 has no retained Effect owner and the live
- * count is zero. Why: future Effect fields need an explicit getter append
- * point paired with the Effect marker instead of disappearing into generic
- * padding. Affiliates: Effect parameter geometry in Autosave.h, scene_t's
- * future-owner comment, and autosave_markEffectParameterDirty().
+ * Inputs: resident Scene, Effect-relative parameter index, and result cell.
+ * Output: one byte and success, or 0 for the reserved tail. The 16-bit lock
+ * mask is emitted little-endian. Explicit projection prevents C padding or
+ * field order from becoming a file-format dependency. Affiliate: the
+ * SceneData Effect setters and the later Step 6 boot reader.
  */
 static uint8_t autosave_getEffectParameter(const scene_t *scene,
                                            uint16_t parameter_index,
                                            uint8_t *value)
 {
-    (void)scene;
-    (void)parameter_index;
-    (void)value;
-    return 0u;
+    const effect_record_t *effect;
+
+    if (!scene || !value ||
+        parameter_index >= AUTOSAVE_EFFECT_PARAM_COUNT) {
+        return 0u;
+    }
+    effect = &scene->effect;
+    if (parameter_index == AUTOSAVE_EFFECT_PARAM_SEQ_RUN_MODE) {
+        *value = effect->seq_run_mode;
+    } else if (parameter_index == AUTOSAVE_EFFECT_PARAM_SEQ_LENGTH) {
+        *value = effect->seq_length;
+    } else if (parameter_index == AUTOSAVE_EFFECT_PARAM_SEQ_STEP_SCALE) {
+        *value = effect->seq_step_scale;
+    } else if (parameter_index < AUTOSAVE_EFFECT_PARAM_MORPH_BASE) {
+        *value = effect->normal[
+            parameter_index - AUTOSAVE_EFFECT_PARAM_NORMAL_BASE];
+    } else if (parameter_index < AUTOSAVE_EFFECT_PARAM_STEPS_BASE) {
+        *value = effect->morph[
+            parameter_index - AUTOSAVE_EFFECT_PARAM_MORPH_BASE];
+    } else {
+        uint16_t step_relative = (uint16_t)(
+            parameter_index - AUTOSAVE_EFFECT_PARAM_STEPS_BASE);
+        const effect_seq_step_t *step = &effect->steps[
+            step_relative / AUTOSAVE_EFFECT_STEP_BYTES];
+        uint8_t field = (uint8_t)(step_relative % AUTOSAVE_EFFECT_STEP_BYTES);
+
+        if (field == AUTOSAVE_EFFECT_STEP_MASK_LO_OFFSET)
+            *value = (uint8_t)(step->lock_mask & 0xffu);
+        else if (field == AUTOSAVE_EFFECT_STEP_MASK_HI_OFFSET)
+            *value = (uint8_t)(step->lock_mask >> 8);
+        else
+            *value = step->value[field - AUTOSAVE_EFFECT_STEP_VALUES_OFFSET];
+    }
+    return 1u;
 }
 
 uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
@@ -1026,14 +1079,25 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
     }
 
     /*
-     * Route the reserved Effect parameter interval through its explicit stub.
+     * Project the live Effect type token (Session 072 step 4).
      *
-     * Inputs: Scene-relative bytes 137..639. Output: nonexistent while the
-     * Effect live count is zero. Type/name and Scene name/padding also remain
-     * unavailable because they have no resident owner. Why: adding Effect
-     * ownership later extends one named branch instead of changing writer
-     * classification. Pattern remains outside this wire layout entirely.
+     * Inputs: Scene-relative bytes 128..130. Output: the registry's three
+     * token bytes. The name bytes 131..138 remain absent until Step 6, while
+     * the parameter interval below projects the 419 Step 3 cells.
      */
+    if (relative >= AUTOSAVE_EFFECT_OFFSET + AUTOSAVE_EFFECT_TYPE_OFFSET &&
+        relative < AUTOSAVE_EFFECT_OFFSET + AUTOSAVE_EFFECT_TYPE_OFFSET +
+                   AUTOSAVE_EFFECT_TYPE_BYTES) {
+        const char *token = effects_typeToken(scene->effect.type);
+
+        if (!token)
+            return 0u;
+        *value = (uint8_t)token[relative - AUTOSAVE_EFFECT_OFFSET -
+                                AUTOSAVE_EFFECT_TYPE_OFFSET];
+        return 1u;
+    }
+
+    /* Type/name gaps and the live Effect interval are explicit wire regions. */
     if (relative >= AUTOSAVE_EFFECT_OFFSET +
                         AUTOSAVE_EFFECT_PARAMETERS_OFFSET &&
         relative < AUTOSAVE_EFFECT_OFFSET +
@@ -1297,12 +1361,15 @@ void autosave_applyScenePayload(uint8_t scene_index,
                 (uint8_t)(parameter_index -
                           AUTOSAVE_SCENE_PARAM_MIDI_CHANNEL_BASE),
                 value);
-        } else {
+        } else if (parameter_index < AUTOSAVE_SCENE_PARAM_EFFECT_MORPH) {
             scene_setTrackMidiNote(
                 scene_index,
                 (uint8_t)(parameter_index -
                           AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE),
                 value);
+        } else {
+            /* Index 40 restores the retained Scene Effect Morph amount. */
+            scene_setEffectMorphAmount(scene_index, value);
         }
     }
 }
@@ -1658,13 +1725,12 @@ void autosave_markEffectParameterDirty(uint8_t scene_index,
     uint16_t live_count = AUTOSAVE_EFFECT_PARAM_COUNT;
 
     /*
-     * Preserve the exact single-Effect-parameter append point as a no-op.
+     * Mark one live Effect cell dirty (Session 072 step 3).
      *
-     * Inputs: Scene and future parameter index. Output: no bit in Phase 1
-     * because AUTOSAVE_EFFECT_PARAM_COUNT is zero and no retained owner exists.
-     * Once implemented, a valid parameter maps to SceneBase+128+9+index. Why:
-     * future Effect setters must join the same dirty/get contract immediately.
-     * Affiliates: Effect getter stub and future scene_t Effect ownership.
+     * Inputs: Scene and ordered Effect parameter index. Output: one bit at
+     * SceneBase + Effect offset + 11 + index, when tracking and Scene presence
+     * permit it. Callers are SceneData's scalar setters and whole-record
+     * marker; out-of-range indices are ignored.
      */
     if (parameter_index >= live_count ||
         !autosave_scenePayloadBase(scene_index, &scene_base)) {
@@ -1931,15 +1997,25 @@ void autosave_markEffectDirty(uint8_t scene_index)
 {
     uint16_t parameter_index = 0u;
     uint16_t live_count = AUTOSAVE_EFFECT_PARAM_COUNT;
+    uint16_t scene_base;
+    uint8_t token_byte;
 
     /*
-     * Preserve a future whole-Effect post-copy hook without fake state.
+     * Mark the live Effect token and parameter cells of one Scene (Step 4).
      *
-     * Input: destination Scene. Output: zero parameter bits today because the
-     * live Effect count is zero; future type/name ownership and parameters are
-     * added here. Why: Scene scope must never silently omit Effects once they
-     * exist. Affiliates: future Effect copy and Scene-without-Pattern marker.
+     * Input: destination Scene. Output: the three registry-token bytes plus
+     * all 419 live parameter bits. Effect name ownership joins in Step 6.
+     * Using the same Scene-base gate as scalar markers ensures an Effect token
+     * cannot be captured for an absent Scene or while tracking is disabled.
      */
+    if (autosave_scenePayloadBase(scene_index, &scene_base)) {
+        for (token_byte = 0u; token_byte < AUTOSAVE_EFFECT_TYPE_BYTES;
+             token_byte++) {
+            (void)autosave_markPayloadOffsetDirty((uint16_t)(
+                scene_base + AUTOSAVE_EFFECT_OFFSET +
+                AUTOSAVE_EFFECT_TYPE_OFFSET + token_byte));
+        }
+    }
     while (parameter_index < live_count) {
         autosave_markEffectParameterDirty(scene_index, parameter_index);
         parameter_index++;
@@ -1957,7 +2033,7 @@ void autosave_markSceneWithoutPatternDirty(uint8_t scene_index)
      * Effect scope, and Kit scope become dirty; Scene name and Pattern are
      * excluded. Why: direct Scene replacements bypass scalar setters but must
      * not imply Pattern persistence. Affiliates: successful root Scene
-     * completion, exact-mask Bank completion, future Scene copy, Effect stub,
+     * completion, exact-mask Bank completion, future Scene copy, Effect scope,
      * and Kit marker.
      */
     /* Pack the outer terminal LOAD_MARK in locals only; no persistent state is added. */

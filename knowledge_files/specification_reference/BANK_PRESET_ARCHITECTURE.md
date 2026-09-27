@@ -4,7 +4,7 @@
 
 This is the authoritative reference for how parameters are stored in resident
 memory across the Bank, Scene, Kit, Instrument, and Effect hierarchy as of
-Session 071. It describes what is stored, where it lives, when it changes,
+Session 072. It describes what is stored, where it lives, when it changes,
 when it becomes visible, and how it is persisted.
 
 Related authority is deliberately separate:
@@ -28,6 +28,7 @@ Bank (one resident at a time)
 ├── BankData: present mask, active Scene, voice-edit mask, restore slot
 ├── Scene[0..15] (up to 16 resident)
 │   ├── SceneData: settings, kit slots, descriptor images, MIDI routing
+│   ├── Effect: Scene-owned `effect_record_t` (420 B; runtime from Step 4)
 │   ├── Kit (embedded in SceneData)
 │   │   ├── Kit-level settings (audio routing, morph endpoints per voice)
 │   │   └── Instrument[0..5] (6 voice slots)
@@ -38,7 +39,7 @@ Bank (one resident at a time)
 │   ├── Pattern (owned by PatternData, not embedded in scene_t)
 │   │   └── pat_scene_region_t: addresses, pool, bitmap, track settings
 │   └── Scene settings: decimation, MIDI channels/notes, morph values
-└── Effects (not yet implemented)
+└── Effect runtime (EffectsManager; type-tagged DTCM state)
 ```
 
 ---
@@ -91,9 +92,10 @@ restore (Autosave) and bankset load/save.
 `bank_selectActiveSceneForEditMask()` call the invariant enforcer.
 
 **Scene switch morph rebuild:** `preset_applySceneSettings()` calls
-`presetMorph_rebuildScene(scene_index)` after mirror sync, queuing all 6 slots
+`presetMorph_rebuildScene(scene_index)` after mirror sync, queues all 6 slots
 for the bounded morph worker so the DSP converges to the new Scene's per-voice
-morph amounts within the normal foreground budget.
+morph amounts within the normal foreground budget, and activates the Scene's
+Effect runtime through `effects_activateScene()`.
 
 ### Persistence
 
@@ -268,7 +270,7 @@ Scene-level sound parameters that are modulation/automation targets but
 are NOT parameters of a swappable instrument in a voice slot. These live in
 `Core/Bank/Scene/SceneModTargets.c/h`.
 
-### Current target table (Session 070)
+### Current target table (Session 072)
 
 | ID Range | Short Label | Per-Voice | Max | Apply Path | Status |
 |----------|-------------|-----------|-----|------------|--------|
@@ -277,6 +279,7 @@ are NOT parameters of a swappable instrument in a voice slot. These live in
 | 391 | (reserved) | — | — | — | — |
 | 392–397 | 1ou..6ou | Yes | 5 | `preset_applyVoiceAudioOutRuntime()` | Live (Session 070) |
 | 398–403 | 1fx..6fx | Yes | 127 | No-op (Phase 5 FX bus) | Stubbed (Session 070) |
+| 404 | fxm | No (Scene) | 255 | Reserved, no apply path | Reserved (Session 072) |
 
 ### Voice Morph 7↔8 bit conversion
 
@@ -430,6 +433,7 @@ for PERF display purposes, but it is not the source of truth.
 | Step automation playback (Scene) | Transient runtime overlay | NOT marked dirty |
 | LFO modulation | Transient runtime only | NOT marked dirty |
 | Morph interpolation | Transient runtime only | NOT marked dirty |
+| Effect type change | Retained type token, type-specific defaults, and cleared Effect sequence | Effect-region mask via `scene_finishEffectWholeCommit()` |
 
 ---
 

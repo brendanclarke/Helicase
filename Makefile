@@ -35,6 +35,8 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/DSP/Instruments/Snare \
           -ICore/DSP/Instruments/Cymbal \
           -ICore/DSP/Instruments/HiHat \
+          -ICore/DSP/Effects \
+          -ICore/DSP/Effects/StereoFilter \
           -ICore/Bank/Scene \
           -ICore/Bank/Scene/Pattern \
           -ICore/Sequencer \
@@ -103,6 +105,9 @@ SRCS = \
   Core/DSP/Instruments/Snare/SnareParameters.c \
   Core/DSP/Instruments/Cymbal/CymbalParameters.c \
   Core/DSP/Instruments/HiHat/HiHatParameters.c \
+  Core/DSP/Effects/FxBuffer.c \
+  Core/DSP/Effects/EffectsManager.c \
+  Core/DSP/Effects/StereoFilter/StereoFilterParameters.c \
   Core/MIDI/FIFO.c \
   Core/MIDI/MidiRealtime.c \
   Core/MIDI/Uart.c \
@@ -129,6 +134,7 @@ DSP_SRCS = \
   Core/DSPAudio/dither.c \
   Core/DSP/Instruments/Drum/DrumVoice.c \
   Core/DSP/Instruments/HiHat/HiHat.c \
+  Core/DSP/Effects/StereoFilter/StereoFilterEffect.c \
   Core/DSPAudio/lfo.c \
   Core/DSPAudio/mixer.c \
   Core/DSPAudio/modulationNode.c \
@@ -155,6 +161,10 @@ OBJS = $(patsubst %.c,$(BUILD)/%.o,$(patsubst %.s,$(BUILD)/%.o,$(SRCS))) \
 # -----------------------------------------------------------------------
 all: $(BUILD)/$(TARGET).bin
 	$(SZ) $(BUILD)/$(TARGET).elf
+	# Link budget (Session 072): flash headroom vs the 480 KiB application
+	# region and the DTCM FX arena size. Report only; the linker ASSERTs in
+	# STM32F765VIHx_FLASH.ld are the enforcing guards.
+	python3 tools/link_budget.py $(PREFIX)nm $(BUILD)/$(TARGET).elf
 
 $(BUILD)/$(TARGET).bin: $(BUILD)/$(TARGET).elf
 	$(CP) -O binary -S $< $@
@@ -179,6 +189,12 @@ $(BUILD)/Core/DSP/Instruments/Cymbal/CymbalVoice.o: Core/DSP/Instruments/Cymbal/
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
 $(BUILD)/Core/DSP/Instruments/HiHat/HiHat.o: Core/DSP/Instruments/HiHat/HiHat.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+
+# StereoFilter DSP runs with the fast-math policy; registry/descriptor control
+# sources remain ordinary -O2 sources in SRCS.
+$(BUILD)/Core/DSP/Effects/StereoFilter/StereoFilterEffect.o: Core/DSP/Effects/StereoFilter/StereoFilterEffect.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
 

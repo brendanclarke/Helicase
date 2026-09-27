@@ -318,3 +318,103 @@ INITCM_EFFECT_NOINLINE void SVF_calcBlockZDF(ResonantFilter* filter, const uint8
 	}
 }
 //------------------------------------------------------------------------------------
+/*
+ * Float-I/O counterpart of SVF_calcBlockZDF (Session 072 step 4).
+ *
+ * The state equations intentionally mirror the int16 path above. Inputs are
+ * already normalized, outputs remain float, and the int16 __SSAT conversion is
+ * replaced with normalized scaling. The Effect bus owns final saturation after
+ * processing; voice callers continue using SVF_calcBlockZDF unchanged.
+ */
+#if USE_SHAPER_NONLINEARITY
+#error "SVF_calcBlockZDFFloat mirrors only the non-shaper configuration"
+#endif
+INITCM_EFFECT_NOINLINE void SVF_calcBlockZDFFloat(ResonantFilter* filter,
+                                                  const uint8_t type,
+                                                  float* buf,
+                                                  const uint8_t size)
+{
+    const float out_gain = (float)FILTER_GAIN / 32767.0f;
+    const float f = filter->g;
+    const float R = filter->f >= 0.4499f ? 1.0f : filter->q;
+    const float ff = f * f;
+    uint8_t i;
+
+    /* Unlike the legacy int path, an invalid/off type is true pass-through. */
+    if (type != FILTER_NAIVE_2_POLE &&
+        (type < FILTER_LP || type > FILTER_PEAK))
+        return;
+
+    if (type == FILTER_NAIVE_2_POLE) {
+        const float f_lp2 = filter->f * 2.21f;
+
+        for (i = 0u; i < size; i++) {
+            const float x = softClipTwo(buf[i] * filter->drive);
+            const float q = (1.0f - filter->q) * 1.4f +
+                            (1.0f - filter->q) / (1.0f - f_lp2);
+
+            filter->a += f_lp2 * ((x - filter->a) +
+                                  q * (filter->a - filter->b));
+            if (filter->a > 1.0f)
+                filter->a = 1.0f;
+            else if (filter->a < -1.0f)
+                filter->a = -1.0f;
+            filter->b += f_lp2 * (filter->a - filter->b);
+            if (filter->b > 1.0f)
+                filter->b = 1.0f;
+            else if (filter->b < -1.0f)
+                filter->b = -1.0f;
+            buf[i] = filter->b * out_gain;
+        }
+        return;
+    }
+
+    for (i = 0u; i < size; i++) {
+        const float x = softClipTwo(buf[i] * filter->drive);
+#if ENABLE_NONLINEAR_INTEGRATORS
+        const float ih = 0.5f * (x + filter->zi);
+        filter->zi = x;
+        const float scale = 0.5f;
+        const float t0 = tanhXdX(scale *
+                                 (ih - 2.0f * R * filter->s1 - filter->s2));
+        const float t1 = tanhXdX(scale * filter->s1);
+#else
+        const float t0 = 1.0f;
+        const float t1 = 1.0f;
+#endif
+        const float g0 = 1.0f / (1.0f + f * t0 * 2.0f * R);
+        const float s1 = filter->s1;
+        const float s2 = filter->s2;
+        const float f1 = ff * g0 * t0 * t1;
+        const float y1 = (f1 * x + s2 + f * g0 * t1 * s1) / (f1 + 1.0f);
+        const float xx = t0 * (x - y1);
+        const float y0 = (softClipTwo(s1) + f * xx) * g0;
+
+        filter->s1 = softClipTwo(filter->s1) +
+                     2.0f * f * (xx - t0 * 2.0f * R * y0);
+        filter->s2 += 2.0f * f * t1 * y0;
+
+        switch (type) {
+        case FILTER_LP:
+            buf[i] = fastTanh(y1);
+            break;
+        case FILTER_HP:
+            buf[i] = (x - 2.0f * R * y0 - y1) * out_gain;
+            break;
+        case FILTER_BP:
+            buf[i] = y0 * out_gain;
+            break;
+        case FILTER_UNITY_BP:
+            buf[i] = 2.0f * R * y0 * out_gain;
+            break;
+        case FILTER_NOTCH:
+            buf[i] = (x - 2.0f * R * y0) * out_gain;
+            break;
+        case FILTER_PEAK:
+            buf[i] = (y1 - (x - 2.0f * R * y0 - y1)) * out_gain;
+            break;
+        default:
+            break;
+        }
+    }
+}

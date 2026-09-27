@@ -4,7 +4,7 @@
 
 This is the authoritative reference for the implemented Helicase AutoSave
 format, ownership, boot restore, mutation tracking, and background writer
-through Session 070 (all phases). Historical plans and session logs explain
+through Session 072 (all phases). Historical plans and session logs explain
 how the implementation was reached, but they do not override this document.
 
 Related authority is deliberately separate:
@@ -89,7 +89,9 @@ quiet window scheduling, and shared background CPU budget):
 
 Not implemented and not to be inferred from the reader/writer:
 
-- live Effect persistence (`AUTOSAVE_EFFECT_PARAM_COUNT` is zero);
+- Effect name persistence and the Effect boot reader. The three-byte Effect
+  type token is now live and projected from the Step 4 registry; the 419 live
+  Effect parameter cells remain projected by Session 072 Step 3;
 - crash-recoverable promotion into explicit Bank library files;
 - a second resident Bank, background staging Bank, or general object journal.
 
@@ -150,8 +152,10 @@ Each Scene region reserves:
 
 - eight name bytes;
 - two HCNAMES source bytes immediately after the name;
-- 118 Scene-parameter bytes, currently 40 live;
-- 512 Effect bytes, currently no live parameters;
+- 118 Scene-parameter bytes, currently 41 live (index 40 is Effect Morph
+  amount);
+- 512 Effect bytes: 3 type bytes, 8 name bytes, 419 live parameter cells, and
+  82 reserved bytes;
 - 1,280 Kit bytes containing eight name bytes, a two-byte HCNAMES source
   field, 118 parameter/reserve bytes, and six fixed 192-byte Instrument
   records.
@@ -179,6 +183,26 @@ capture; it uses the existing eight-byte trace ring and adds no production RAM.
 child subset. A partial save therefore cannot shrink the live Bank solely
 because unsaved resident Scenes were outside the save mask. This Session 057
 fix is a prerequisite for correct whole-Bank AutoSave publication.
+
+The relative Effect region is projected without copying the retained C record:
+
+| Relative offset | Bytes | Meaning |
+| ---: | ---: | --- |
+| 0..2 | 3 | Type token; live from the registry token (`off` or `flt`) |
+| 3..10 | 8 | Effect name; not live until the HCNAMES step |
+| 11 | 1 | Sequencer run mode |
+| 12 | 1 | Sequencer length |
+| 13 | 1 | Sequencer step scale |
+| 14..77 | 64 | Normal parameter cells |
+| 78..141 | 64 | Morph parameter cells |
+| 142..429 | 288 | Sixteen steps × (16-bit lock mask + 16 lane values) |
+| 430..511 | 82 | Reserved |
+
+The 419 live Effect cells begin at relative offset 11. Their ordered index
+space is owned by `Autosave.c/.h`; the retained record is owned by SceneData.
+The type bytes are additionally marked by `autosave_markEffectDirty()` and
+project the registry token. Name bytes remain zero/ignored until the later
+HCNAMES/storage step.
 
 Header requirements:
 
@@ -788,7 +812,8 @@ For each new retained scalar:
 8. test mutation, writer error rollback, restart, AutoSave off, and power
    interruption at payload/CRC/commit boundaries appropriate to the change.
 
-Effect support remains a feature extension, not a scalar addition. Any future
+Effect registry, runtime, and boot-reader support remains a feature extension,
+not a scalar addition. Any future
 Pattern wire/schema expansion likewise requires explicit versioning, bounded
 snapshot/read behavior, recovery semantics, and SRAM approval.
 
@@ -802,7 +827,9 @@ and shares the existing scheduler/facade. Do not borrow the 9,000-byte name cach
 Hardware validation is accepted for scalar Scene, Kit, Instrument, MIDI
 channel/note, the root Scene publication boundary, and functional Pattern
 AutoSave across all 16 Scenes. No user-changeable Bank scalar exists for an
-extra direct UI test. Live Effect remains excluded.
+extra direct UI test. The Step 4 Effect type-token projection, Effect Morph
+Scene byte, and registry/runtime hardware behavior remain card-gate pending;
+the FX bus and Effect boot reader are intentionally excluded.
 
 Session 061 hardware-accepted the HCNAMES-authoritative reader with
 `SD_CARD_READER_9`, produced from a Bank 001 Load followed by root Scene 008

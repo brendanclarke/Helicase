@@ -7,7 +7,29 @@
 - the `FxBuffer` API, handoff record, and dev hook;
 - the SCOPING §5.5 flash-growth investigation.
 
-**Status:** schedule only. No source has been changed.
+**Status:** implementation complete for the source/build scope. Clean
+production and diagnostic links passed; hardware listening/boot gates remain
+pending because no hardware run was available in this session.
+
+**Working notes (updated during implementation):**
+
+- 2026-09-27: Confirmed the plan's approved Step 1 allocation before editing:
+  the elastic `.dtcm_fxbuf` span is DTCM-reserved audio capacity; the fixed
+  SRAM1 control state is 28 B for `fxbuf_state` plus 180 B for the handoff,
+  with a 1 B self-test result only in `DEV_MODE_DIAGNOSTIC` builds.
+- 2026-09-27: Moved `sine_table` out of `INCCM`, added the linker arena and
+  startup exclusion comment, added the public `FxBuffer` API/implementation,
+  the diagnostic knob/screen, Makefile integration, and link-budget reporter.
+  All new public declarations and definitions carry adjacent contract
+  comments; the implementation comments record the no-clear and handoff rules.
+- 2026-09-27: The clean build's measured `_eflash_load`, `.dtcm`/`.dtcmz`,
+  arena symbols/section flags, and packaged image size are recorded in §22;
+  no linker-script correction was required by this toolchain.
+- 2026-09-27: Clean production link passed with `text=458,112`, `data=416`,
+  `bss=419,100`; the link-budget report measured 458,528 B flash load,
+  32,992 B headroom, 4,084 B DTCM statics, and a 126,976 B arena at
+  `0x20001000`. The 12-unit diagnostic link also passed; its flash load was
+  460,172 B with 31,348 B headroom and the same arena geometry.
 
 **Authority:** `EFFECTS_BUS_FEATURE_PLAN.md` §12 (buffer), §12.6 (handoff),
 §16 (RAM), §17.1 (order), and the user decisions A29–A32, F6, G7.
@@ -1344,6 +1366,28 @@ commit it. This proves finding 1 on this toolchain.
 5. `make img` produces a `.img` of `.bin` + 16 B.
 6. The local-only oversize-link ASSERT check (§21).
 
+### Step 1 closeout measurements (2026-09-27)
+
+The production build produced `text=458,112`, `data=416`, `bss=419,100`.
+`tools/link_budget.py` reported 458,528 B of the 491,520 B application flash
+region used, 32,992 B headroom, 3,768 B ITCM, 4,084 B DTCM statics, and
+126,976 B of FX arena at `0x20001000` (4,096 B above the approved minimum).
+
+The final ELF symbols are `_sfxbuf=0x20001000`, `_efxbuf=0x20020000`, and
+`sine_table=0x0806B2FC`. `objdump -h` reports `.dtcm_fxbuf` as `0x1F000`
+bytes with `ALLOC` only; it has no `LOAD` or `CONTENTS` flag. The binary is
+458,528 B, exactly the flash load span, and `make img` produced a 458,544 B
+image (16-byte wrapper).
+
+The diagnostic build with `DEV_MODE_DIAGNOSTIC=1` and
+`DEV_FXBUF_FORCE_VOICE_UNITS=12` also linked successfully: `text=459,752`,
+`data=420`, `bss=419,100`, 460,172 B flash load, and 31,348 B headroom. The
+screen and self-test were not hardware-observed in this session.
+
+The host verification does not include the production sine stress test,
+normal Scene/Kit/AutoSave smoke test, or the temporary 40 KiB oversize-link
+experiment; those are retained as hardware/local gates below.
+
 **Hardware, production build** (`DEV_MODE_DIAGNOSTIC 0`):
 
 7. Boot and play normally; there is no diagnostic screen.
@@ -1411,3 +1455,131 @@ written" flag). This is flagged for acknowledgement per the RAM policy.
   committed.
 - **Rollback:** revert the commit. The only runtime-visible change is the sine
   table location. FxBuffer has no consumers until step 4.
+
+---
+
+## 26. Review assessment (2026-09-27, post-implementation)
+
+**Verdict:** the Step 1 source and build changes match this schedule (§1–§20)
+and are accepted for commit. One minor dev-only defect (§26.3 item 1) should be
+fixed in the same commit. The hardware gates (§22 items 7–12) are still open.
+
+### 26.1 What was checked
+
+- **Diff against HEAD `a0531ae`, for every scheduled file.**
+  - `wavetable.c/.h`, `startup_stm32f765xx.s`, `STM32F765VIHx_FLASH.ld`,
+    `config.h`, `Makefile`, and `main.c` match §1–§19. Line anchors and
+    comment blocks are as specified.
+  - `tools/link_budget.py` differs from §15 only in docstring wording and two
+    inline comments; the logic is identical.
+  - `Core/DSP/Effects/FxBuffer.c` matches §11 line for line, including the
+    self-test, init order, and handoff logic. `FxBuffer.h` compiles against it
+    with the specified API.
+- **Clean build** of the working tree (`make all`):
+  - `text=458,112`, `data=416`, `bss=419,100`.
+  - `link_budget.py` reports 458,528 B flash (**32,992 B headroom**),
+    3,768 B ITCM, 4,084 B DTCM statics, and FXBUF 126,976 B at
+    `0x20001000` (margin 4,096 B).
+  - Symbols: `_sfxbuf=0x20001000`, `_efxbuf=0x20020000`, and `sine_table`
+    at `0x0806B2FC` (`T`, flash). `fxbuf_state` is 28 B at `0x2002111C` and
+    `fxbuf_handoffRecord` is 180 B at `0x20021138`.
+  - This independently reproduces the §22 closeout numbers.
+- **Baseline rebuild** of HEAD in a scratch worktree (since removed):
+  `_eflash_load=0x080779CC` (457,164 B), which is identical to the §0
+  baseline. It gives a like-for-like comparison.
+- **Section comparison, baseline → Step 1:**
+  - `.dtcm` 8,708 → 512.
+  - `.dtcmz` 3,572 → 3,572, now at `0x20000200`.
+  - New `.dtcm_fxbuf` of 126,976.
+  - `.bss` 285,228 → 285,452 (**+224 B**).
+  - `.data`, `.dma_nocache`, and `.itcm` unchanged.
+- **Documentation updates** (`SRAM_MANIFEST.md`, `DEV_MODES.md`,
+  `MODULE_INTERCHANGE_SPEC.md`, `MEMORY.md`) match §20 and the measured link.
+  The SRAM1 ledger's previous `.bss` figure (285,052) was stale relative to
+  the actual S071 link (285,228). The new row is measured and correct.
+
+### 26.2 Measured costs versus the schedule
+
+| Item | Scheduled | Measured | Note |
+|---|---|---|---|
+| Flash | "±4 B" (sine move) | **+1,364 B** | See below. 0.28 % of the region; headroom 32,992 B. |
+| SRAM1 `.bss` | 208 B | **+224 B** | 208 B of FxBuffer objects + 16 B layout/alignment shift in `.bss`. Within the approved allocation; recorded for the RAM ledger. |
+| DTCM statics | 4,084 B | 4,084 B | Exact. |
+| Arena | 126,976 B | 126,976 B | Exact. |
+
+**Flash growth attribution** (symbol-size diff, baseline vs Step 1):
+
+- The sine move is flash-neutral as predicted: `sine_table` +8,194 in
+  `.rodata`, and the `.dtcm` load image −8,196.
+- FxBuffer has no out-of-line symbols in production: every `fxbuf_*` function
+  is inlined by LTO.
+- The +1,364 B comes from LTO re-partitioning inlining across the image:
+  - `dsp_init` is now an out-of-line 440 B function (it was inlined into
+    `main`);
+  - `encode_read4` is out-of-line (+308 B);
+  - `filesystem_ensureAutosaveFiles_tick` grew +336 B;
+  - `mixer_calcNextSampleBlock` grew **+208 B**;
+  - many `.lto_priv` renames net to about zero.
+
+**Consequence for the CPU gate:** `mixer_calcNextSampleBlock` changed its
+generated code although its source did not. The §22 item 8 comparison against
+the Session 071 image therefore measures the sine move *and* this codegen
+shift together. If the `cpu` reading changes, compare against a build with
+only the `INCCM` removal reverted before blaming the sine table.
+
+### 26.3 Findings
+
+1. **Minor defect (dev-only, from this schedule's §11): forced dev units show
+   a handoff rate of 0.**
+   - Cause: in `fxbuf_init()`, the forced-unit loop runs before
+     `fxbuf_handoffResetAll()`. The reset zeroes the `unit_rate_hz` that
+     `fxbuf_voiceAcquire()` set for those units, and
+     `fxbuf_handoffBeginExit()` only restores entries of *free* units.
+   - Effect: with `DEV_FXBUF_FORCE_VOICE_UNITS > 0`, the forced units carry
+     `unit_rate_hz = 0` instead of 44,108. There is no reader until step 4, and
+     production is unaffected.
+   - **Fix:** call `fxbuf_handoffResetAll()` immediately after
+     `fxbuf_clearOwners()` in `fxbuf_init()`, before the self-test. Then run
+     the self-test, then the forced-unit loop, then
+     `fxbuf_handoffBeginExit()`. The self-test's claims are released, and
+     `BeginExit` resets the free units' entries, so the "record never
+     reflects test claims" property still holds. Update the §11 note to match.
+2. **Cosmetic: the Makefile recipe comments are echoed on every build.** The
+   three `# Link budget …` lines are TAB-indented recipe lines, so make passes
+   them to the shell and prints them (visible in the build log). **Fix:**
+   prefix them with `@` (`@# …`), or move the comment above the `all:` rule.
+3. **Pre-existing, not a Step 1 change: a bare `make` does not build the
+   firmware in an incremental tree.**
+   - `Makefile` places `-include $(OBJS:.o=.d)` (about line 154) before
+     `all:`. Once `.d` files exist, the first rule they contain
+     (`build/main.o`) becomes make's default goal.
+   - `make` then prints "`build/main.o' is up to date" and stops (observed
+     during this review).
+   - `make img` still builds, because it names its target. But the documented
+     `make && make img` workflow never runs the `all` recipe, so the new
+     link-budget report does **not** print.
+   - The fix is one line (`.DEFAULT_GOAL := all` near the top, or move the
+     `-include` below `all:`). It is outside Effects scope and is reported
+     here for your decision. Until then, use `make all` to see the report.
+4. **Design note, not a defect:** in `fxbuf_voiceAcquire()` the global-capacity
+   refusal can never be the sole reason for a refusal. With 12 units = 6 slots
+   × 2, a full table implies every slot is at its cap, so self-test check 6
+   exercises the per-slot cap. The global check is kept as a guard in case the
+   unit count or cap ever changes independently.
+5. **Still open (unchanged):**
+   - the §22 hardware gates: sine stress/CPU test, smoke test, the
+     diagnostic-build `FxBf` screen at knob 0 and 12;
+   - the local oversize-link ASSERT experiment;
+   - the §24 observations (`modNode_waveInterpGeneration` initializer, and the
+     SRAM1/SRAM2 stack wording).
+
+### 26.4 Hardware result (2026-09-27, user-reported)
+
+- **§22 items 7–9 (production build): PASS.** Normal boot and play worked.
+  The sine stress test showed no appreciable rise on the `cpu` widget and no
+  underruns. The comparison covers the sine move and the §26.2 LTO codegen
+  shift in `mixer_calcNextSampleBlock` together.
+- **§22 items 10–12 (diagnostic `FxBf` screen): waived by the user**
+  (2026-09-27). The system is running correctly. The production build shows no
+  diagnostic screen, as intended, because it is compiled only with
+  `DEV_MODE_DIAGNOSTIC 1`. Step 1 hardware verification is closed.

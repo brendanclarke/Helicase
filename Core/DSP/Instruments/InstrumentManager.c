@@ -1501,6 +1501,35 @@ uint8_t instrumentManager_runtimePan(uint8_t slot)
     }
 }
 
+/*
+ * Read the tagged runtime channel volume for one render slot.
+ *
+ * Mirrors instrumentManager_runtimePan(): resolve the slot's current runtime
+ * type, borrow that engine member, and read its vol field. An unknown type or
+ * missing instance returns 0.0f; such a slot renders silence in
+ * instrumentManager_calcSlotSyncBlock(), so no audible path depends on the
+ * fallback. Contract and clients: InstrumentManager.h.
+ */
+float instrumentManager_runtimeVolume(uint8_t slot)
+{
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? voice->vol : 0.0f; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? voice->vol : 0.0f; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        return voice ? voice->vol : 0.0f; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? voice->vol : 0.0f; }
+    default:
+        return 0.0f;
+    }
+}
+
 void instrumentManager_recalcSlotFilter(uint8_t slot)
 {
     /*
@@ -1567,12 +1596,14 @@ void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
                                          uint8_t size)
 {
     /*
-     * Render the current slot instrument into one mono audio block.
+     * Render the current slot instrument into one mono, pre-volume block.
      *
      * Inputs: zero-based render slot, output buffer, and block size. Output:
-     * the selected engine writes a mono voice block, or silence for unknown
-     * slot/type. Mixer remains responsible for decimation, pan, routing, and
-     * slider interpolation after this call.
+     * the selected engine writes a mono voice block WITHOUT channel volume, or
+     * silence for unknown slot/type. Mixer remains responsible for decimation,
+     * channel volume (instrumentManager_runtimeVolume(), Session 072 step 2),
+     * pan, routing, and slider interpolation after this call. The pre-volume
+     * block is also the FX-send tap point from Phase 5 step 5 onward.
      */
     if (!buf)
         return;

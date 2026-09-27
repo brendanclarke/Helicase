@@ -100,6 +100,19 @@ void SVF_directSetFilterValue(ResonantFilter* filter, float val);
 //------------------------------------------------------------------------------------
 void SVF_calcBlockZDF(ResonantFilter* filter, const uint8_t type, int16_t* buf, const uint8_t size);
 //------------------------------------------------------------------------------------
+/*
+ * Float-I/O ZDF block for Effects only (Session 072 step 4).
+ *
+ * Inputs: the same ResonantFilter state and type domain as SVF_calcBlockZDF,
+ * plus normalized float samples where 1.0 equals int16 full scale. Output:
+ * the filter writes normalized floats without __SSAT, allowing a future FX
+ * bus to preserve summed headroom until its final return saturation. Types
+ * 1..7 filter; other types pass through without advancing state. Keep this
+ * arithmetic synchronized with SVF_calcBlockZDF. Client: StereoFilterEffect.
+ */
+void SVF_calcBlockZDFFloat(ResonantFilter* filter, const uint8_t type,
+                           float* buf, const uint8_t size);
+//------------------------------------------------------------------------------------
 void SVF_recalcFreq(ResonantFilter* filter);
 //------------------------------------------------------------------------------------
 void SVF_reset(ResonantFilter* filter);

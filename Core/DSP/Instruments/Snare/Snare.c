@@ -205,11 +205,20 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
                               const uint8_t size)
 {
 	/*
-	 * Render one snare instance into a mono block.
+	 * Render one snare instance into a mono, PRE-VOLUME block.
 	 *
 	 * Inputs: SnareVoice pointer, destination buffer, and block size. Output:
- * buf receives noise, oscillator, transient, envelope, and distortion for
- * that tagged instance without relying on a fixed snare wrapper.
+	 * buf receives noise, oscillator, transient, amp envelope, optional
+	 * velocity, and distortion for that tagged instance, but NOT the channel
+	 * volume (voice->vol).
+	 *
+	 * Why (Session 072, Effects Phase 5 step 2; volume-order bug fix D1):
+	 * volume used to multiply the signal before calcDistBlock(), so it also
+	 * acted as a hidden drive control (a bug; volume must be the last stage).
+	 * It is now a pure output level applied by the mixer after decimation,
+	 * matching Drum, so the FX send can tap a pre-volume signal that includes
+	 * this voice's distortion. Affiliates:
+	 * instrumentManager_runtimeVolume(), mixer_calcNextSampleBlock().
 	 */
 	if(!voice || !buf)
 		return;
@@ -228,6 +237,7 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 	//--AS apply filter to synthesized sound as well here if desired, or combine code for more efficiency
 
 	uint8_t j;
+	/* Amp EG (and velocity) only; channel volume is applied by the mixer. */
 	if(voice->volumeMod)
 	{
 		for(j=0;j<size;j++)
@@ -235,7 +245,7 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 			//add filter to buffer
 			buf[j] *= voice->mix;
 			buf[j] = bufferTool_satAdd16(buf[j], transBuf[j]);
-			buf[j] *=  voice->velo * voice->vol * voice->egValueOscVol;
+			buf[j] *=  voice->velo * voice->egValueOscVol;
 		}
 	}
 	else
@@ -245,7 +255,7 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 			//add filter to buffer
 			buf[j] *= voice->mix;
 			buf[j] = bufferTool_satAdd16(buf[j], transBuf[j]);
-			buf[j] *=  voice->vol * voice->egValueOscVol;
+			buf[j] *=  voice->egValueOscVol;
 		}
 	}
 

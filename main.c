@@ -77,6 +77,8 @@
 #include "BankData.h"
 #include "SceneData.h"
 #include "InstrumentManager.h"
+#include "FxBuffer.h"
+#include "EffectsManager.h"
 
 #include "memtest.h"
 #include <stdint.h>
@@ -101,14 +103,30 @@ static void dsp_init(void)
 
     initRng();
     /*
+     * Initialise the shared DTCM audio arena bookkeeping before any DSP
+     * runtime exists.
+     *
+     * Inputs: linker symbols _sfxbuf/_efxbuf. Output: all voice units free,
+     * Effect share = whole arena, handoff = "nothing valid". Arena bytes are
+     * not touched (no system-level clear; owners clear what they claim).
+     * Why here: InstrumentManager (Phase 7 buffer voices) and EffectsManager
+     * (Phase 5 step 4) must find valid bookkeeping when they construct.
+     * Pre-audio and foreground only. Affiliates: Core/DSP/Effects/FxBuffer.c,
+     * STM32F765VIHx_FLASH.ld .dtcm_fxbuf, config.h
+     * DEV_FXBUF_FORCE_VOICE_UNITS.
+     */
+    fxbuf_init();
+    /*
      * Initialize InstrumentManager's complete tagged runtime ownership.
      *
      * Inputs: RNG plus the boot-resident active Scene type for each slot.
      * Output: one initialized engine union member per visible slot before any
      * kit/preset value is applied. No engine module owns a permanent native
      * voice, so startup delegates all DSP runtime construction to the manager.
-     */
+    */
     instrumentManager_runtimeInit();
+    /* Build the registry/runtime owner after FxBuffer and before audio. */
+    effects_init();
     mixer_init();
     parameterArray_init();
 
@@ -255,6 +273,57 @@ static void boot_delayMs(uint16_t ms)
     uint16_t t0 = time_sysTick;
     while ((uint16_t)(time_sysTick - t0) < ms) { /* boot-only hold */ }
 }
+
+#if DEV_MODE_DIAGNOSTIC
+/*
+ * FxBf boot diagnostic (DEV_MODE_DIAGNOSTIC only; screen-only, no file I/O).
+ *
+ * What: shows the linked FX arena size, the Effect share after the dev knob,
+ * units in use, and the FxBuffer self-test code for 1.5 s:
+ *   "FxBf 124K u00   "
+ *   "Shr  124K st0 r0"
+ * `r` is the Effect registry self-check code; zero means pass. Why: step 4
+ * adds a runtime registry without changing the screen's existing arena proof.
+ * Inputs: FxBuffer getters and the immutable Effect registry. Output: LCD
+ * rows 1-2 only; no FxBuffer state changes. The hold adds 1.5 s
+ * to diagnostic boots only; production boots compile this out entirely.
+ * Affiliates: DEV_MODES.md diagnostic list, config.h
+ * DEV_FXBUF_FORCE_VOICE_UNITS. libc is discarded by the linker script
+ * (/DISCARD/ libc.a), so digits are formatted by hand.
+ */
+static void boot_formatDec(char *dst, uint32_t value, uint8_t width)
+{
+    while (width--) {
+        dst[width] = (char)('0' + (value % 10u));
+        value /= 10u;
+    }
+}
+
+static void boot_showFxBufDiagnostic(void)
+{
+    fx_share_t share;
+    char row1[17] = "FxBf 000K u00   ";
+    char row2[17] = "Shr  000K st0 r0";
+    uint8_t registry_code;
+
+    fxbuf_effectShare(&share);
+    boot_formatDec(&row1[5], fxbuf_arenaBytes() / 1024u, 3u);
+    boot_formatDec(&row1[11], fxbuf_unitsInUse(), 2u);
+    boot_formatDec(&row2[5], share.bytes / 1024u, 3u);
+    boot_formatDec(&row2[12], fxbuf_devSelfTestResult(), 1u);
+    registry_code = effects_registryCheckResult();
+    if (registry_code < 10u)
+        row2[15] = (char)('0' + (int)registry_code);
+    else
+        row2[15] = (char)('A' + (int)registry_code - 10);
+    lcd_clear();
+    lcd_setcursor(0, 1);
+    lcd_string(row1);
+    lcd_setcursor(0, 2);
+    lcd_string(row2);
+    boot_delayMs(1500u);
+}
+#endif
 
 /*
  * Development-only boot-screen instrumentation.
@@ -464,6 +533,10 @@ int main(void)
     scene_initAll();
     bank_init();
     dsp_init();
+#if DEV_MODE_DIAGNOSTIC
+    /* Screen-only FxBuffer proof; see boot_showFxBufDiagnostic(). */
+    boot_showFxBufDiagnostic();
+#endif
     seq_init();
     euklid_init();
     som_init();
@@ -1219,8 +1292,20 @@ boot_filesystem_done:
      * Affiliates: preset_sendDrumsetParameters(),
      * preset_startDrumsetApply(), preset_tickDrumsetApply(), and
      * menu_pollPresetStatus().
-     */
+    */
     preset_startDrumsetApply();
+#if DEV_MODE_DIAGNOSTIC && (DEV_EFFECT_FORCE_TYPE != 0u)
+    /*
+     * Force a diagnostic Effect type only after normal boot activation.
+     *
+     * Input: the active Scene and a configured registry id. Output: the
+     * regular in-place type-change transaction, including defaults, AutoSave
+     * token marking, and runtime switch. This bench hook is absent from
+     * production builds and exists until the Step 7 Effect page is available.
+     */
+    (void)effects_changeType(scene_getActiveIndex(),
+                             (effect_type_id_t)DEV_EFFECT_FORCE_TYPE);
+#endif
     prevBtn = 0;
     last_repaint_tick = 0;
 

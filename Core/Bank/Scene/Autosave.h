@@ -174,20 +174,23 @@
  * One Scene's relative regions and explicit parameter allocation.
  *
  * Scene source occupies bytes 8..9; parameters occupy bytes 10..127, of
- * which indices 0..39 currently exist. Effects reserve 512 bytes without a
- * live owner. Kit begins at 640: source at 8..9, parameters at 10..127, then
- * six 192-byte Instruments, ending at 1,920.
+ * which indices 0..40 exist (40 = Effect Morph amount, Session 072). The
+ * Effect region (128..639) holds a 3-byte type token, an 8-byte name, and
+ * 419 live parameter bytes from Effect-relative offset 11. Kit begins at
+ * 640: source at 8..9, parameters at 10..127, then six 192-byte Instruments,
+ * ending at 1,920.
  */
 #define AUTOSAVE_SCENE_NAME_OFFSET              0u
 #define AUTOSAVE_SCENE_PARAMETERS_OFFSET       10u
 #define AUTOSAVE_SCENE_PARAMETER_ALLOC_BYTES  118u
-#define AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES    40u
+#define AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES    41u
 #define AUTOSAVE_EFFECT_OFFSET                128u
 #define AUTOSAVE_EFFECT_TYPE_OFFSET             0u
-#define AUTOSAVE_EFFECT_NAME_OFFSET             1u
-#define AUTOSAVE_EFFECT_PARAMETERS_OFFSET        9u
-#define AUTOSAVE_EFFECT_PARAMETER_ALLOC_BYTES  503u
-#define AUTOSAVE_EFFECT_PARAM_COUNT              0u
+#define AUTOSAVE_EFFECT_TYPE_BYTES              3u
+#define AUTOSAVE_EFFECT_NAME_OFFSET             3u
+#define AUTOSAVE_EFFECT_PARAMETERS_OFFSET      11u
+#define AUTOSAVE_EFFECT_PARAMETER_ALLOC_BYTES  501u
+#define AUTOSAVE_EFFECT_PARAM_COUNT            419u
 #define AUTOSAVE_KIT_OFFSET                   640u
 #define AUTOSAVE_KIT_NAME_OFFSET                0u
 #define AUTOSAVE_KIT_PARAMETERS_OFFSET         10u
@@ -198,18 +201,19 @@
 /*
  * Format-owned identifiers for every currently live scalar parameter domain.
  *
- * What: Bank fields select variable-width ranges, while Scene and Kit values
- * select one byte in their ordered allocations; Effect deliberately has a
- * zero live count. Why: retained owners must never repeat wire offsets, and a
- * newly added parameter must extend the same count used by both its getter and
- * dirty marker. Inputs/outputs: owner setters pass these identifiers to the
- * marker API below; Autosave converts them to canonical mask bits. Affiliates:
- * BankData, SceneData, Preset, and autosave_getLivePayloadByte().
+ * What: Bank fields select variable-width ranges, while Scene, Kit, and
+ * Effect values select one byte in their ordered allocations. Effect owns a
+ * uint16_t index space because its 419 live cells exceed one byte. Why:
+ * retained owners must never repeat wire offsets, and a newly added parameter
+ * must extend the same count used by both its getter and dirty marker.
+ * Inputs/outputs: owner setters pass these identifiers to the marker API;
+ * Autosave converts them to canonical mask bits. Affiliates: BankData,
+ * SceneData, Preset, and autosave_getLivePayloadByte().
  *
  * Future-owner rule: a new Bank field needs a field/width mapping and getter;
  * a new Scene or Kit parameter is appended before its COUNT and written only
- * through its owner setter; a future Effect parameter raises the zero live
- * count, adds retained ownership/getter logic, and uses the Effect marker.
+ * through its owner setter; a new Effect cell extends the ordered enum,
+ * getter, and SceneData setter using the Effect marker.
  */
 typedef enum {
     AUTOSAVE_BANK_FIELD_RESTORE_SLOT = 0,
@@ -229,7 +233,9 @@ typedef enum {
     AUTOSAVE_SCENE_PARAM_FADER_BASE = 20,
     AUTOSAVE_SCENE_PARAM_MIDI_CHANNEL_BASE = 26,
     AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE = 33,
-    AUTOSAVE_SCENE_PARAM_COUNT = 40
+    /* Scene Effect Morph amount; appended so earlier wire positions stay fixed. */
+    AUTOSAVE_SCENE_PARAM_EFFECT_MORPH = 40,
+    AUTOSAVE_SCENE_PARAM_COUNT = 41
 } autosave_scene_parameter_t;
 
 typedef enum {
@@ -237,6 +243,32 @@ typedef enum {
     AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_MORPH_DECAY,
     AUTOSAVE_KIT_PARAM_COUNT
 } autosave_kit_parameter_t;
+
+/*
+ * Ordered live cells in the 512-byte Effect region.
+ *
+ * The three sequence settings are followed by normal[64], morph[64], and
+ * sixteen 18-byte steps (mask low, mask high, then 16 lane values). This is
+ * an explicit wire projection rather than a serialized C struct layout.
+ */
+typedef enum {
+    AUTOSAVE_EFFECT_PARAM_SEQ_RUN_MODE = 0,
+    AUTOSAVE_EFFECT_PARAM_SEQ_LENGTH = 1,
+    AUTOSAVE_EFFECT_PARAM_SEQ_STEP_SCALE = 2,
+    AUTOSAVE_EFFECT_PARAM_NORMAL_BASE = 3,
+    AUTOSAVE_EFFECT_PARAM_MORPH_BASE = 67,
+    AUTOSAVE_EFFECT_PARAM_STEPS_BASE = 131
+} autosave_effect_parameter_t;
+
+#define AUTOSAVE_EFFECT_STEP_BYTES              18u
+#define AUTOSAVE_EFFECT_STEP_MASK_LO_OFFSET      0u
+#define AUTOSAVE_EFFECT_STEP_MASK_HI_OFFSET      1u
+#define AUTOSAVE_EFFECT_STEP_VALUES_OFFSET       2u
+
+_Static_assert(AUTOSAVE_EFFECT_PARAM_STEPS_BASE +
+                   16u * AUTOSAVE_EFFECT_STEP_BYTES ==
+                   AUTOSAVE_EFFECT_PARAM_COUNT,
+               "Effect live cells end after the 16th sequence step");
 
 /*
  * One Instrument's fixed 192-byte relative layout.

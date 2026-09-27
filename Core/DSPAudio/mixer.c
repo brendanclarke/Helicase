@@ -54,6 +54,7 @@
 #include "Snare.h"
 #include "HiHat.h"
 #include "InstrumentManager.h"
+#include "EffectsManager.h"
 #include "BufferTools.h"
 #include "squareRootLut.h"
 #include "adcPots.h"
@@ -61,7 +62,20 @@
 // #include "../Hardware/TriggerOut.h"
 //-----------------------------------------------------------------------
 INCCMZ uint8_t mixer_audioRouting[6];
-INCCMZ float mixer_slider_last_gain[6];
+/*
+ * Last applied per-slot output gain = slider_vol[slot] x voice volume.
+ *
+ * What: the gain used at the end of the previous 32-frame block, one float
+ * per render slot (24 B DTCM, unchanged allocation; renamed from
+ * mixer_slider_last_gain in Session 072 step 2 because it now also carries
+ * channel volume). Why: mixer_addVoiceInt16ToOutput() ramps linearly from
+ * this value to the current combined gain across the block, so slider AND
+ * volume changes (knob, LFO, Morph, automation) are click-free. Inputs:
+ * mixer_init() seeds it; mixer_calcNextSampleBlock() updates it after each
+ * slot. Affiliates: adcPots.c slider_vol[],
+ * instrumentManager_runtimeVolume().
+ */
+INCCMZ float mixer_voice_last_gain[6];
 static volatile uint8_t mixer_out_l1_available = 1u; /* PD6 */
 static volatile uint8_t mixer_out_r1_available = 1u; /* PD7 */
 static volatile uint8_t mixer_out_l2_available = 1u; /* PB4 */
@@ -83,7 +97,9 @@ void mixer_init()
 		mixer_decimation_cnt[i] 	= 0;
 		mixer_voice_samples[i] 		= 0;
 		mixer_audioRouting[i]		= 0;
-		mixer_slider_last_gain[i]   = slider_vol[i];
+		/* Seed the ramp at the combined gain so the first block does not fade
+		** in; requires instrumentManager_runtimeInit() first (dsp_init order). */
+		mixer_voice_last_gain[i]    = slider_vol[i] * instrumentManager_runtimeVolume(i);
 	}
 	mixer_decimation_rate[6] 		= 1;
 #endif
@@ -363,7 +379,9 @@ static void mixer_addVoiceInt16ToOutput(uint8_t dest,
 		sample_mx_t* outR2)
 {
 	/* Session 023 fused three formerly separate per-voice passes:
-	**   1. interpolate slider_vol from the previous 32-frame block,
+	**   1. interpolate the output gain from the previous 32-frame block
+	**      (slider_vol x channel volume since Session 072 step 2; `gain` and
+	**      `lastGain` are that combined value),
 	**   2. convert legacy int16 voice output into signed-24 sample_mx_t,
 	**   3. pan/route/add to the four output buses.
 	**
@@ -508,6 +526,16 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	for(uint8_t slot=0u; slot<6u; slot++)
 		instrumentManager_calcSlotAsync(slot);
 
+	/*
+	 * Resolve the active Scene Effect before this block is rendered.
+	 *
+	 * Inputs: retained normal/Morph images and the active Scene Effect type.
+	 * Output: common runtime values and type DSP state are current for the
+	 * future FX bus. Step 4 intentionally rescans only the active registry rows;
+	 * Step 5 adds the send/process/return path after the voice loop.
+	 */
+	effects_service();
+
 	//calculate trigger io phase
 	// TODO DSP_PORT
 	// trigger_tickPhaseCounter();
@@ -547,8 +575,9 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	 * Render each storage slot with its loaded instrument type.
 	 *
 	 * Inputs: slot index chooses SceneData/instrument runtime through
-	 * InstrumentManager; mixer state chooses routing, decimation, pan tables,
-	 * and slider interpolation. Output: each slot contributes one mono block to
+	 * InstrumentManager; mixer state chooses routing, decimation, channel
+	 * volume, pan tables, and the combined slider x volume gain ramp. Output:
+	 * each slot contributes one mono block to
 	 * the routed stereo output pair. This replaces the fixed sequence of three
 	 * drums, one snare, one cymbal, and one hihat without changing mixer-owned
 	 * output behavior.
@@ -556,14 +585,21 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	for(uint8_t slot=0u; slot<6u; slot++)
 	{
 		uint8_t pan;
+		float voiceGain;
 		instrumentManager_calcSlotSyncBlock(slot, sampleData, OUTPUT_DMA_SIZE);
 		mixer_decimateBlock(slot,sampleData);
+		/*
+		 * sampleData is now the decimated, PRE-VOLUME voice block. Step 5 taps
+		 * the FX send here. Channel volume is applied only through the combined
+		 * output gain below (Session 072 step 2).
+		 */
+		voiceGain = slider_vol[slot] * instrumentManager_runtimeVolume(slot);
 		pan = instrumentManager_runtimePan(slot);
 		mixer_addVoiceInt16ToOutput(effectiveRouting[slot],
 				squareRootLut[127-pan], squareRootLut[pan],
-				sampleData, slider_vol[slot], mixer_slider_last_gain[slot],
+				sampleData, voiceGain, mixer_voice_last_gain[slot],
 				&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
-		mixer_slider_last_gain[slot] = slider_vol[slot];
+		mixer_voice_last_gain[slot] = voiceGain;
 	}
 
 }

@@ -62,7 +62,13 @@ typedef struct VoiceStruct
 
 	float		fmModAmount;
 
-	float	 	vol;		// volume of the voice
+	/*
+	 * Channel volume 0..1 (descriptor instrument_vol / 127).
+	 * Written by descriptor apply, LFO, Morph, and step automation; read only
+	 * by instrumentManager_runtimeVolume() for the mixer, which applies it
+	 * after decimation. The render function does not apply it (S072 step 2).
+	 */
+	float	 	vol;
 	float 		velo;
 	uint8_t 	pan;
 	//float 		panModifier;

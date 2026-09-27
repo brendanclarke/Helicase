@@ -284,11 +284,20 @@ void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
 void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 {
 	/*
-	 * Render one drum runtime instance into a mono block.
+	 * Render one drum runtime instance into a mono, PRE-VOLUME block.
 	 *
- * Inputs: DrumVoice pointer, destination buffer, and block size. Output: buf
- * receives one explicit tagged-slot drum block. Mixer selects this object by
- * current runtime type rather than by a hardcoded drum voice index.
+	 * Inputs: DrumVoice pointer, destination buffer, and block size. Output:
+	 * buf receives oscillators, transient, filter, amp EG, velocity, and
+	 * distortion, but NOT the channel volume (voice->vol). Mixer selects this
+	 * object by current runtime type rather than a hardcoded drum index.
+	 *
+	 * Why pre-volume (Session 072, Effects Phase 5 step 2): the mixer applies
+	 * voice->vol after decimation, combined with the slider gain ramp, so that
+	 * the FX send can tap the same decimated signal before volume (user rules
+	 * A24/A25). voice->vol remains the retained runtime value written by the
+	 * descriptor/LFO/Morph/automation paths; it is read by
+	 * instrumentManager_runtimeVolume(). Affiliates: mixer.c
+	 * mixer_calcNextSampleBlock(), InstrumentManager.c.
 	 */
 	if(!voice || !buf)
 		return;
@@ -340,7 +349,11 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 #if (USE_FILTER_DRIVE == 0)
 	calcDistBlock(&voice->distortion,buf,size);
 #endif
-	//channel volume
-	bufferTool_addGain(buf,voice->vol,size);
+	/*
+	 * Channel volume is intentionally not applied here (Session 072 step 2).
+	 * The mixer multiplies the decimated block by voice->vol x slider gain;
+	 * see instrumentManager_runtimeVolume() and mixer_calcNextSampleBlock().
+	 * Re-adding a gain stage here would apply volume twice.
+	 */
 }
 //---------------------------------------------------

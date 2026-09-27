@@ -143,3 +143,8 @@ due to the publication ordering fix. `patSvc_idle()` must be called at all
 `pat_copyTrack`, `pat_copyPattern`, `pat_copyBar` are deliberate no-ops.
 Their implementation requires independent pool-block duplication and must
 route through the Pattern Stack Service.
+
+### Working preference: commits
+
+The user manages commit timing. Do not recommend, schedule, or gate work on
+committing in reviews, implementation schedules, or replies.

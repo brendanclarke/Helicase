@@ -103,7 +103,21 @@ static const scene_mod_target_descriptor_t scene_mod_targets[] = {
     { SCENE_MOD_TARGET_ID(19u), SCENE_MOD_TARGET_KIND_FX_SEND, 5u,
       0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "6 FxSend", "6fx" },
+    /*
+     * Reserve Scene Effect Morph ID 404 without exposing it yet.
+     *
+     * Inputs/outputs: none in Step 3. use_flags stays zero so the existing
+     * scn/LFO/velocity pickers and validators remain unchanged. Reserving the
+     * descriptor now fixes the canonical ID before Step 9 adds apply paths.
+     */
+    { SCENE_MOD_TARGET_ID(20u), SCENE_MOD_TARGET_KIND_EFFECT_MORPH, 0xffu,
+      0u, 255u, 0u,
+      "Effect", "FX Morph", "fxm" },
 };
+
+/* Scene targets occupy block 6, exactly 64 IDs before Effect block 7. */
+_Static_assert(SCENE_MOD_TARGET_COUNT <= 64u,
+               "Scene target table exceeds its 64-ID block");
 
 static void sceneModTarget_copyPadded(char *dst, const char *src, uint8_t width)
 {

@@ -23,7 +23,8 @@ field meanings.
 
 Format authorities: knowledge_files/specification_reference/DEV_MODES.md,
 Core/Bank/Scene/AutosaveTrace.h, Core/Bank/Scene/Autosave.h, and
-Core/Hardware/SD/filesystem.c.
+Core/Hardware/SD/filesystem.c. Session 072 Steps 3–4 add Scene parameter 40,
+the live Effect type-token bytes, and the 419-cell Effect projection.
 """
 
 from __future__ import annotations
@@ -347,7 +348,7 @@ SCENE_NAME_BYTES = 8
 SCENE_SOURCE_OFF = 8
 SCENE_SOURCE_BYTES = 2
 SCENE_PARAMS_OFF = 10
-SCENE_PARAM_COUNT = 40
+SCENE_PARAM_COUNT = 41
 EFFECT_OFF = 128
 EFFECT_BYTES = 512
 KIT_OFF = 640
@@ -379,6 +380,7 @@ SCENE_PARAM_NAMES = {
     32: "mch6",
     33: "mnt0", 34: "mnt1", 35: "mnt2", 36: "mnt3", 37: "mnt4", 38: "mnt5",
     39: "mnt6",
+    40: "fxm_amt",
 }
 
 KIT_PARAM_NAMES = {
@@ -441,7 +443,30 @@ def payload_region_text(offset: int) -> str:
     if rel < EFFECT_OFF:
         return f"{name} scene reserved byte{rel}"
     if rel < EFFECT_OFF + EFFECT_BYTES:
-        return f"{name} effect byte{rel - EFFECT_OFF}"
+        effect_rel = rel - EFFECT_OFF
+        if effect_rel < 3:
+            return f"{name} effect type-token byte{effect_rel}"
+        if effect_rel < 11:
+            return f"{name} effect name byte{effect_rel - 3}"
+        parameter = effect_rel - 11
+        if parameter == 0:
+            return f"{name} effect seq run_mode"
+        if parameter == 1:
+            return f"{name} effect seq length"
+        if parameter == 2:
+            return f"{name} effect seq step_scale"
+        if parameter < 67:
+            return f"{name} effect normal[{parameter - 3}]"
+        if parameter < 131:
+            return f"{name} effect morph[{parameter - 67}]"
+        if parameter < 419:
+            step, field = divmod(parameter - 131, 18)
+            if field == 0:
+                return f"{name} effect step{step} mask_lo"
+            if field == 1:
+                return f"{name} effect step{step} mask_hi"
+            return f"{name} effect step{step} lane{field - 2}"
+        return f"{name} effect reserved byte{effect_rel}"
     if rel < KIT_OFF:
         return f"{name} scene padding byte{rel - EFFECT_OFF}"
     kit_rel = rel - KIT_OFF

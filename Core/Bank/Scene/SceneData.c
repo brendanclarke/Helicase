@@ -3,6 +3,24 @@
 #include "BankData.h"
 #include <string.h>
 
+/*
+ * Guard the packed target-ID boundary at the retained-data owner.
+ *
+ * SceneData sees InstrumentManager's voice range, PatternData's off sentinel,
+ * and EffectTypes' block-7 constants. These assertions turn a future range
+ * change into a build failure instead of silently retargeting stored Patterns.
+ */
+_Static_assert(EFFECT_TARGET_ID_BASE == INSTRUMENT_VOICE_ID_COUNT + 64u,
+               "Scene block must precede the Effect block");
+_Static_assert(EFFECT_TARGET_ID_BASE + EFFECT_TARGET_ID_COUNT ==
+                   INSTRUMENT_TOTAL_ID_COUNT,
+               "Effect block must end the 9-bit target space");
+_Static_assert(PAT_AUTOMATION_TARGET_OFF ==
+                   EFFECT_TARGET_ID_BASE + EFFECT_TARGET_PATTERN_LOCAL_LIMIT,
+               "Effect local 63 must alias the automation-off sentinel");
+_Static_assert(EFFECT_COMMON_PARAM_COUNT < EFFECT_PARAM_COUNT,
+               "common Effect parameters must leave type-specific cells");
+
 scene_t scenes[SCENE_COUNT];
 static uint8_t scene_active_index;
 
@@ -30,7 +48,8 @@ static uint8_t scene_defaultVoiceAudioOut(uint8_t slot)
  * Inputs: owning Scene, address of its scalar byte, named Autosave parameter
  * index, and already-normalized value. Output: storage changes first and then
  * exactly that bit is marked; invalid coordinates/pointers and equal values do
- * nothing. Why: all 40 Scene fields need one future-proof mutation boundary.
+ * nothing. Why: all retained Scene fields need one future-proof mutation
+ * boundary.
  * Affiliates: Scene setters below and Autosave's Scene getter/count contract.
  */
 static void scene_storeParameterByte(uint8_t scene_index,
@@ -79,6 +98,27 @@ static void scene_storeKitParameterByte(uint8_t scene_index,
      * bit, mirroring the Scene-settings funnel above. Same source/authority
      * separation from Autosave; an equal-value no-op never reaches this line.
      */
+    bank_invalidateSdCleanScene(scene_index);
+}
+
+/*
+ * Commit one retained Effect byte and notify its ordered AutoSave cell.
+ *
+ * Inputs: owning Scene, byte address, Effect-relative live index, and an
+ * already-normalized value. Output: storage changes first, then exactly that
+ * Effect bit and the Scene card-clean bit are updated. Invalid pointers and
+ * equal values do nothing. The uint16_t index is required by the 419-cell
+ * Effect wire space; it must never be folded into the Scene byte helper.
+ */
+static void scene_storeEffectByte(uint8_t scene_index,
+                                  uint8_t *storage,
+                                  uint16_t parameter_index,
+                                  uint8_t value)
+{
+    if (!scene_get(scene_index) || !storage || *storage == value)
+        return;
+    *storage = value;
+    autosave_markEffectParameterDirty(scene_index, parameter_index);
     bank_invalidateSdCleanScene(scene_index);
 }
 
@@ -560,6 +600,228 @@ uint8_t scene_getSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index)
                  : 0u;
 }
 
+const effect_record_t *scene_effectConst(uint8_t scene_index)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+
+    /* Read-only Effect view; the retained-record contract is in SceneData.h. */
+    return scene ? &scene->effect : 0;
+}
+
+void scene_effectRecordDefaults(effect_record_t *record)
+{
+    /*
+     * Build the retained `off` Effect defaults without dirty marking.
+     *
+     * Inputs: caller-owned record. Output: zeroed steps/type-specific cells,
+     * fwd/16/1-16 sequence settings, and common out/vol/pan defaults in both
+     * endpoint images. Used during Scene initialization and future type/load
+     * transactions before the record belongs to a resident Scene.
+     */
+    if (!record)
+        return;
+    memset(record, 0, sizeof(*record));
+    record->type = EFFECT_TYPE_OFF;
+    record->seq_run_mode = EFFECT_SEQ_RUN_FWD;
+    record->seq_length = EFFECT_SEQ_LENGTH_DEFAULT;
+    record->seq_step_scale = EFFECT_SEQ_SCALE_DEFAULT;
+    record->normal[EFFECT_COMMON_PARAM_AUDIO_OUT] =
+        EFFECT_COMMON_DEFAULT_AUDIO_OUT;
+    record->normal[EFFECT_COMMON_PARAM_LEVEL] = EFFECT_COMMON_DEFAULT_LEVEL;
+    record->normal[EFFECT_COMMON_PARAM_PAN] = EFFECT_COMMON_DEFAULT_PAN;
+    record->morph[EFFECT_COMMON_PARAM_AUDIO_OUT] =
+        EFFECT_COMMON_DEFAULT_AUDIO_OUT;
+    record->morph[EFFECT_COMMON_PARAM_LEVEL] = EFFECT_COMMON_DEFAULT_LEVEL;
+    record->morph[EFFECT_COMMON_PARAM_PAN] = EFFECT_COMMON_DEFAULT_PAN;
+}
+
+uint8_t scene_commitEffectRecord(uint8_t scene_index,
+                                 const effect_record_t *record)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /*
+     * Replace a complete Effect record (contract in SceneData.h).
+     *
+     * Inputs: resident Scene and caller-validated record. Output: the record
+     * is copied, sequence settings are normalized, and all live Effect cells
+     * are marked. Type validation belongs to the future registry owner; this
+     * boundary only prevents malformed sequence bytes from reaching readers.
+     */
+    if (!scene || !record)
+        return 0u;
+    scene->effect = *record;
+    if (scene->effect.seq_run_mode >= EFFECT_SEQ_RUN_MODE_COUNT)
+        scene->effect.seq_run_mode = EFFECT_SEQ_RUN_FWD;
+    if (scene->effect.seq_length < EFFECT_SEQ_LENGTH_MIN)
+        scene->effect.seq_length = EFFECT_SEQ_LENGTH_MIN;
+    if (scene->effect.seq_length > EFFECT_SEQ_LENGTH_MAX)
+        scene->effect.seq_length = EFFECT_SEQ_LENGTH_MAX;
+    if (scene->effect.seq_step_scale >= EFFECT_SEQ_SCALE_COUNT)
+        scene->effect.seq_step_scale = EFFECT_SEQ_SCALE_DEFAULT;
+    autosave_markEffectDirty(scene_index);
+    bank_invalidateSdCleanScene(scene_index);
+    return 1u;
+}
+
+effect_record_t *scene_effectRecordForWholeCommit(uint8_t scene_index)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /* Return the mutable retained record; the paired close owns marking. */
+    return scene ? &scene->effect : 0;
+}
+
+void scene_finishEffectWholeCommit(uint8_t scene_index)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /* Close the in-place commit with the same normalization as the copy path. */
+    if (!scene)
+        return;
+    if (scene->effect.seq_run_mode >= EFFECT_SEQ_RUN_MODE_COUNT)
+        scene->effect.seq_run_mode = EFFECT_SEQ_RUN_FWD;
+    if (scene->effect.seq_length < EFFECT_SEQ_LENGTH_MIN)
+        scene->effect.seq_length = EFFECT_SEQ_LENGTH_MIN;
+    if (scene->effect.seq_length > EFFECT_SEQ_LENGTH_MAX)
+        scene->effect.seq_length = EFFECT_SEQ_LENGTH_MAX;
+    if (scene->effect.seq_step_scale >= EFFECT_SEQ_SCALE_COUNT)
+        scene->effect.seq_step_scale = EFFECT_SEQ_SCALE_DEFAULT;
+    autosave_markEffectDirty(scene_index);
+    bank_invalidateSdCleanScene(scene_index);
+}
+
+void scene_setEffectNormalParameter(uint8_t scene_index, uint8_t index,
+                                    uint8_t value)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /* Store one normal endpoint cell at its explicit AutoSave index. */
+    if (!scene || index >= EFFECT_PARAM_COUNT)
+        return;
+    scene_storeEffectByte(
+        scene_index, &scene->effect.normal[index],
+        (uint16_t)(AUTOSAVE_EFFECT_PARAM_NORMAL_BASE + index), value);
+}
+
+void scene_setEffectMorphParameter(uint8_t scene_index, uint8_t index,
+                                   uint8_t value)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /* Store one Morph endpoint cell at its explicit AutoSave index. */
+    if (!scene || index >= EFFECT_PARAM_COUNT)
+        return;
+    scene_storeEffectByte(
+        scene_index, &scene->effect.morph[index],
+        (uint16_t)(AUTOSAVE_EFFECT_PARAM_MORPH_BASE + index), value);
+}
+
+void scene_setEffectSeqRunMode(uint8_t scene_index, uint8_t mode)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /* Run mode is an enum; invalid values are ignored instead of remapped. */
+    if (!scene || mode >= EFFECT_SEQ_RUN_MODE_COUNT)
+        return;
+    scene_storeEffectByte(scene_index, &scene->effect.seq_run_mode,
+                          AUTOSAVE_EFFECT_PARAM_SEQ_RUN_MODE, mode);
+}
+
+void scene_setEffectSeqLength(uint8_t scene_index, uint8_t length)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /* Sequence length is saturating in the retained 1..16 domain. */
+    if (!scene)
+        return;
+    if (length < EFFECT_SEQ_LENGTH_MIN)
+        length = EFFECT_SEQ_LENGTH_MIN;
+    if (length > EFFECT_SEQ_LENGTH_MAX)
+        length = EFFECT_SEQ_LENGTH_MAX;
+    scene_storeEffectByte(scene_index, &scene->effect.seq_length,
+                          AUTOSAVE_EFFECT_PARAM_SEQ_LENGTH, length);
+}
+
+void scene_setEffectSeqStepScale(uint8_t scene_index, uint8_t scale)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /* Shared track/Effect scale index; invalid indices are ignored. */
+    if (!scene || scale >= EFFECT_SEQ_SCALE_COUNT)
+        return;
+    scene_storeEffectByte(scene_index, &scene->effect.seq_step_scale,
+                          AUTOSAVE_EFFECT_PARAM_SEQ_STEP_SCALE, scale);
+}
+
+void scene_setEffectSeqLaneValue(uint8_t scene_index, uint8_t step,
+                                 uint8_t lane, uint8_t value)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /* Store one lane value without changing that lane's lock bit. */
+    if (!scene || step >= EFFECT_SEQ_STEP_COUNT ||
+        lane >= EFFECT_SEQ_LANE_COUNT)
+        return;
+    scene_storeEffectByte(
+        scene_index, &scene->effect.steps[step].value[lane],
+        (uint16_t)(AUTOSAVE_EFFECT_PARAM_STEPS_BASE +
+                   step * AUTOSAVE_EFFECT_STEP_BYTES +
+                   AUTOSAVE_EFFECT_STEP_VALUES_OFFSET + lane), value);
+}
+
+void scene_setEffectSeqLaneLocked(uint8_t scene_index, uint8_t step,
+                                  uint8_t lane, uint8_t locked)
+{
+    scene_t *scene = scene_get(scene_index);
+    effect_seq_step_t *entry;
+    uint16_t bit;
+    uint16_t updated;
+
+    /*
+     * Update one serialized little-endian lock-mask byte.
+     *
+     * Only the low or high mask byte is marked, preserving the one-cell dirty
+     * contract even though the retained value is a 16-bit field.
+     */
+    if (!scene || step >= EFFECT_SEQ_STEP_COUNT ||
+        lane >= EFFECT_SEQ_LANE_COUNT)
+        return;
+    entry = &scene->effect.steps[step];
+    bit = (uint16_t)(1u << lane);
+    updated = locked ? (uint16_t)(entry->lock_mask | bit)
+                     : (uint16_t)(entry->lock_mask & (uint16_t)~bit);
+    if (updated == entry->lock_mask)
+        return;
+    entry->lock_mask = updated;
+    autosave_markEffectParameterDirty(
+        scene_index,
+        (uint16_t)(AUTOSAVE_EFFECT_PARAM_STEPS_BASE +
+                   step * AUTOSAVE_EFFECT_STEP_BYTES +
+                   ((lane < 8u) ? AUTOSAVE_EFFECT_STEP_MASK_LO_OFFSET
+                                : AUTOSAVE_EFFECT_STEP_MASK_HI_OFFSET)));
+    bank_invalidateSdCleanScene(scene_index);
+}
+
+void scene_setEffectMorphAmount(uint8_t scene_index, uint8_t amount)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /* Store the Scene parameter through the existing scalar owner funnel. */
+    if (!scene)
+        return;
+    scene_storeParameterByte(scene_index, &scene->settings.effect_morph_amount,
+                             AUTOSAVE_SCENE_PARAM_EFFECT_MORPH, amount);
+}
+
+uint8_t scene_getEffectMorphAmount(uint8_t scene_index)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+
+    /* Return retained Effect Morph amount, or zero for an invalid Scene. */
+    return scene ? scene->settings.effect_morph_amount : 0u;
+}
+
 void scene_initAll(void)
 {
     uint8_t scene_index;
@@ -594,6 +856,8 @@ void scene_initAll(void)
             scenes[scene_index].settings.fx_send_amount[track] = 0u;
             scenes[scene_index].settings.fader_setting[track] = 0u;
         }
+        /* Seed the Scene-owned Effect before any file/runtime apply begins. */
+        scene_effectRecordDefaults(&scenes[scene_index].effect);
         for (track = 0u; track < INSTRUMENT_SLOT_COUNT; track++)
             instrumentManager_resetSlot(
                 &scenes[scene_index].kit.instruments[track],

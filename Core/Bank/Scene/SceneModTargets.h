@@ -36,7 +36,14 @@ typedef enum {
      * value without an audible bus effect.
      */
     SCENE_MOD_TARGET_KIND_FX_SEND,
-    SCENE_MOD_TARGET_KIND_EFFECT_PARAMETER
+    /*
+     * Scene Effect Morph amount, `fxm` (ID 404, reserved in Step 3).
+     *
+     * Effect parameter cells are separate block-7 targets; this kind is only
+     * the Scene-level Morph amount and remains unavailable to pickers until
+     * the later runtime apply paths assign use flags.
+     */
+    SCENE_MOD_TARGET_KIND_EFFECT_MORPH
 } scene_mod_target_kind_t;
 
 typedef enum {

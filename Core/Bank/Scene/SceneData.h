@@ -3,6 +3,7 @@
 
 #include "InstrumentManager.h"
 #include "PatternData.h"
+#include "EffectTypes.h"
 #include <stdint.h>
 
 /*
@@ -180,6 +181,14 @@ typedef struct {
     uint8_t midi_channel[NUM_TRACKS];
     uint8_t midi_note[NUM_TRACKS];
     /*
+     * Scene-level Effect Morph amount, 0..255.
+     *
+     * This is a Scene parameter, not part of the retained Effect record or
+     * future .fx file. AutoSave stores it as Scene parameter 40; SceneData is
+     * the sole writer so the value is always dirty-marked with its owner.
+     */
+    uint8_t effect_morph_amount;
+    /*
      * Autosave extension rule for Scene settings.
      *
      * A future serialized byte is not complete until it has a named index,
@@ -211,19 +220,17 @@ typedef struct {
      * Inputs: filesystem loaders copy validated settings and Kit payload;
      * PatternData owns the separate live Pattern region. Outputs: Menu and Bank name writers use filesystem HCNAMES
      * helpers. Affiliates: filesystem.c and Core/Menu/menu.c.
-     */
+    */
     scene_settings_t settings;
     /*
-     * Future retained Effect ownership belongs semantically here, between
-     * Scene settings and Kit ownership, but Phase 1 allocates no dummy state.
+     * Scene-retained Effect (Session 072, Effects Phase 5 step 3).
      *
-     * When Effects become live, their owner must raise the zero Autosave
-     * parameter count, implement the live getter, and route every scalar setter
-     * through autosave_markEffectParameterDirty(); whole Effect commits use
-     * autosave_markEffectDirty(). Why: Scene copy already contains the Effect
-     * region stub and must not require writer redesign later. Affiliates:
-     * Autosave Effect geometry and the future Effect implementation.
+     * The Effect belongs to this Scene, never to its Kit. SceneData setters
+     * and whole-record commits own all retained writes; each scalar setter
+     * marks its ordered AutoSave Effect cell and whole commits mark the full
+     * live Effect region. Readers use scene_effectConst().
      */
+    effect_record_t effect;
     kit_t kit;
 } scene_t;
 
@@ -392,5 +399,42 @@ uint8_t scene_getSlot6Track7AmpEnvelopeDecay(uint8_t scene_index);
 void scene_setSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index,
                                                uint8_t value);
 uint8_t scene_getSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index);
+
+/*
+ * Scene Effect accessors (Session 072, Effects Phase 5 step 3).
+ *
+ * These declarations define the single mutation boundary for the retained
+ * Effect record and its Scene-level Morph amount. Setters normalize input,
+ * store first, then mark exactly the matching AutoSave cell and invalidate
+ * the card-clean bit; equal values and invalid coordinates are no-ops.
+ */
+const effect_record_t *scene_effectConst(uint8_t scene_index);
+void scene_effectRecordDefaults(effect_record_t *record);
+uint8_t scene_commitEffectRecord(uint8_t scene_index,
+                                 const effect_record_t *record);
+/*
+ * In-place whole-record commit pair (Session 072, Effects Phase 5 step 4).
+ *
+ * EffectsManager obtains the mutable retained record, rewrites it, and must
+ * immediately close the pair with scene_finishEffectWholeCommit(). The close
+ * normalizes sequence fields, marks the type token plus all live Effect cells,
+ * and invalidates the Scene card-clean bit without putting a 420-byte copy on
+ * the caller's stack. No other writer may use the mutable pointer.
+ */
+effect_record_t *scene_effectRecordForWholeCommit(uint8_t scene_index);
+void scene_finishEffectWholeCommit(uint8_t scene_index);
+void scene_setEffectNormalParameter(uint8_t scene_index, uint8_t index,
+                                    uint8_t value);
+void scene_setEffectMorphParameter(uint8_t scene_index, uint8_t index,
+                                   uint8_t value);
+void scene_setEffectSeqRunMode(uint8_t scene_index, uint8_t mode);
+void scene_setEffectSeqLength(uint8_t scene_index, uint8_t length);
+void scene_setEffectSeqStepScale(uint8_t scene_index, uint8_t scale);
+void scene_setEffectSeqLaneValue(uint8_t scene_index, uint8_t step,
+                                 uint8_t lane, uint8_t value);
+void scene_setEffectSeqLaneLocked(uint8_t scene_index, uint8_t step,
+                                  uint8_t lane, uint8_t locked);
+void scene_setEffectMorphAmount(uint8_t scene_index, uint8_t amount);
+uint8_t scene_getEffectMorphAmount(uint8_t scene_index);
 
 #endif

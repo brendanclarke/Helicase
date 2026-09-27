@@ -53,26 +53,31 @@
  *
  * Sections:
  *   .isr_vector  → FLASH @ origin
- *   .text/.rodata → FLASH
+ *   .text/.rodata → FLASH                     — includes sine_table (S072)
  *   .itcm        → ITCM (loaded from FLASH)   — INITCM hot code
  *   .data        → SRAM1 (loaded from FLASH)
  *   .bss         → SRAM1
  *   .dtcm        → DTCM (loaded from FLASH)   — INDTCM data
  *   .dtcmz       → DTCM (NOLOAD, runtime-zero) — INDTCMZ uninitialised
+ *   .dtcm_fxbuf  → DTCM (NOLOAD, never copied or zeroed) — FX/voice audio
+ *                  arena: every DTCM byte after .dtcmz (S072, Phase 5)
  *   .devwdg_noinit → SRAM2 (NOLOAD, never zeroed) — DEV_LOGGING_IWDG capsule
  *
  * .dtcm is intentionally placed BEFORE .dtcmz in the DTCM region so any
  * accidental size growth in .dtcm shows up as a link error rather than
  * silently overlapping zero-init data. ASSERT below catches DTCM overflow.
  *
- * .devwdg_noinit is deliberately NOT referenced by Reset_Handler's
- * LoopCopyDataInit/LoopFillZerobss (Core/Src/startup_stm32f765xx.s), which
- * only walk _sdata.._edata, _sbss.._ebss, _sdtcm.._edtcm, and
- * _sdtcmz.._edtcmz. That omission is what lets it survive a warm/watchdog
- * reset instead of being cleared like .bss; it is lost only on an actual
- * power cycle, which is fine since that is not the failure it exists to
- * catch. It lives in previously-unmapped SRAM2 so it cannot overlap or grow
- * into any existing SRAM1/DTCM allocation.
+ * .devwdg_noinit and .dtcm_fxbuf are deliberately NOT referenced by
+ * Reset_Handler's LoopCopyDataInit/LoopFillZerobss
+ * (Core/Src/startup_stm32f765xx.s), which only walk _sdata.._edata,
+ * _sbss.._ebss, _sdtcm.._edtcm, and _sdtcmz.._edtcmz. For .dtcm_fxbuf this
+ * is the Phase 5 "no system-level buffer clear" rule: each arena owner clears
+ * what it claims, using FxBuffer's handoff state_flags (boot = nothing valid).
+ * The .devwdg_noinit omission lets its contents survive a warm/watchdog reset
+ * instead of being cleared like .bss; it is lost only on an actual power
+ * cycle, which is fine since that is not the failure it exists to catch. It
+ * lives in previously-unmapped SRAM2 so it cannot overlap or grow into any
+ * existing SRAM1/DTCM allocation.
  */
 ENTRY(Reset_Handler)
 _estack = 0x20080000;
@@ -140,8 +145,32 @@ SECTIONS {
         . = ALIGN(4); _edtcmz = .;
     } >DTCM
 
-    /* No ._stack reservation here — main stack lives at _estack (top of
-    ** SRAM1). DTCM is reserved in full for INDTCM/INDTCMZ DSP data. */
+    /* FX/voice audio arena — the whole remainder of DTCM (Session 072).
+    **
+    ** What: a NOLOAD, never-initialised DTCM span from the first 32-byte
+    ** boundary after .dtcmz to the end of DTCM. Core/DSP/Effects/FxBuffer.c
+    ** is its only owner; it hands out one contiguous Effect share (bottom)
+    ** and up to twelve 4,416-byte voice units (top).
+    ** Why: Effects Phase 5 reserves free DTCM exclusively for delay-line/audio
+    ** buffers (RAM Allocation Approval Policy); DTCM is single-cycle,
+    ** uncached, and never touched by DMA.
+    ** Inputs: _edtcmz (end of INDTCMZ statics). Outputs: _sfxbuf/_efxbuf,
+    ** read by FxBuffer.c as extern uint8_t arrays.
+    ** The size is computed outside the section so the arithmetic is absolute.
+    ** Affiliates: FxBuffer.h FXBUF_MIN_ARENA_BYTES (runtime mirror of the
+    ** ASSERT below), tools/link_budget.py (reports the size),
+    ** startup_stm32f765xx.s (never walks this span). */
+    _fxbuf_start = ALIGN(_edtcmz, 32);
+    _fxbuf_size  = ORIGIN(DTCM) + LENGTH(DTCM) - _fxbuf_start;
+    .dtcm_fxbuf _fxbuf_start (NOLOAD) : {
+        _sfxbuf = .;
+        . = . + _fxbuf_size;
+        _efxbuf = .;
+    } >DTCM
+
+    /* No ._stack reservation here — main stack lives at _estack. DTCM holds
+    ** INDTCM/INDTCMZ DSP statics followed by the .dtcm_fxbuf audio arena,
+    ** which takes every remaining DTCM byte. */
 
     /* DEV_LOGGING_IWDG retained capsule — up to 32 approved bytes, currently
     ** 12 bytes, in previously-unmapped SRAM2. NOLOAD and untouched by the
@@ -158,6 +187,17 @@ SECTIONS {
 
     ASSERT(_edtcmz <= ORIGIN(DTCM) + LENGTH(DTCM),
            "DTCM overflow: .dtcm + .dtcmz exceed 128KB")
+    /* FX arena guards (Session 072).
+    ** The minimum is the user-approved 120 KiB (0x1E000): twelve 4,416-byte
+    ** voice units plus at least 64 KiB of Effect share, with margin. Keep in
+    ** sync with FXBUF_MIN_ARENA_BYTES in Core/DSP/Effects/FxBuffer.h; the
+    ** linker cannot read C headers, so FxBuffer.c re-checks at runtime. */
+    ASSERT(_efxbuf <= ORIGIN(DTCM) + LENGTH(DTCM),
+           "FX arena overflows DTCM")
+    ASSERT((_sfxbuf & 31) == 0,
+           "FX arena base is not 32-byte aligned")
+    ASSERT(_efxbuf - _sfxbuf >= 0x1E000,
+           "FX arena below the approved 120 KiB minimum: DTCM statics grew; resize or re-approve")
     ASSERT(_etext <= 0x08080000,
            "Application overlaps sample flash region")
     ASSERT(_eflash_load <= ORIGIN(FLASH) + LENGTH(FLASH),

@@ -1,7 +1,7 @@
 # Effects Bus Feature Plan — Phase 5
 
 Status: **planning draft, revision 4. The user's review answers (A1–A46,
-F1–F6, G1–G7) are folded in; no code has been written.** This document turns Phase 5 of
+F1–F6, G1–G7) are folded in; Steps 1–4 are now implemented in source.** This document turns Phase 5 of
 `SCOPING_TARGETS.md` and the session-072 direction into one implementation plan.
 Where the session direction differs from `SCOPING_TARGETS.md`, the session
 direction wins (§2).
@@ -104,7 +104,7 @@ Branch: `dev-ph5-effects`. Baseline: Session 071 close (`text=456,748`,
 | Fact | Where | Value / note |
 |---|---|---|
 | Automation target packing | `PatternData.h`, `InstrumentManager.h` | 9 bits = 3-bit "voice" block + 6-bit parameter. Blocks 0..5 are voices (0..383) and block 6 is Scene (384..447). **`0x1FF` (511) is `PAT_AUTOMATION_TARGET_OFF`, which falls inside block 7.** |
-| Scene targets in use | `SceneModTargets.c` | 384..403 (20 rows). `SCENE_MOD_TARGET_KIND_EFFECT_PARAMETER` is declared but unused. |
+| Scene targets in use | `SceneModTargets.c` | 384..403 (20 rows). ID 404 is reserved as `fxm` for Effect Morph; Effect parameter cells use block 7 (448..511). |
 | Scene overlay dirty bitmap | `sequencer.c` | 32-bit `seq_scene_automation_dirty` |
 | Voice automation restore | `seq_restoreAutomatedParameters()` via `MidiVoiceControl.c` | Held until the owning track's **next trigger**, then restored from `morph_interpolation[]` |
 | Scene-target automation restore | `seq_restoreAllSceneAutomation()` | Held until **transport reset or Pattern restart** only |
@@ -381,6 +381,9 @@ applied inside each engine, *before* decimation. The plan therefore:
 Volume is a constant gain within a block and decimation is sample-and-hold, so
 moving volume after decimation is sonically equivalent for the dry path. This
 step is verified alone ("sounds identical") before any bus work (§17.1 step 2).
+Decision D1 was resolved on 2026-09-27 as a bug fix: volume is the final
+stage on every engine, including Snare, Cymbal, and HiHat, where the former
+pre-distortion multiply incorrectly changed the effective drive.
 
 ### 8.2 Per-voice path (per 32-frame block)
 
@@ -495,9 +498,12 @@ therefore acts as a **held** value, unlike the other lanes:
   - **Consequence:** because both Morph sources hold until the Scene-rule
     reset, an active Pattern `fxm` overlay masks FX-sequencer Morph locks
     until that reset.
-- **Apply:** `effects_service()` runs once per render block in foreground. It
-  recomputes only dirty indices and calls `write_param` only when the value
-  differs from `last_applied[i]`.
+- **Apply:** `effects_service()` runs once per render block in foreground. The
+  Step 4 implementation rescans the active type's descriptors every block and
+  calls `write_param` only when the effective value differs from
+  `last_applied[i]`; this deliberately supersedes the planned dirty-cell
+  notification requirement until a future heavy type demonstrates a need for
+  finer tracking.
 - Effects do not use the rate-limited voice Morph worker, so voice Morph
   convergence is unaffected.
 
@@ -513,7 +519,7 @@ voices:
 | Block | IDs | Owner |
 |---|---|---|
 | 0..5 | 0..383 | Voice slots 1..6 |
-| 6 | 384..447 | Scene targets. 384..403 are in use. **404 = `fxm` Effect Morph** (new kind; velocity/LFO/automation flags; Morph 7→8 rule). |
+| 6 | 384..447 | Scene targets. 384..403 are in use. **404 = `fxm` Effect Morph** (retained Scene target; its runtime apply/overlay path remains a later step). |
 | 7 | 448..511 | Effect parameters (`448 + local index`), validated against the active Scene's type and AUTO/MOD flags |
 
 **511 stays the off sentinel (F2).** Effect local index 63 therefore cannot be
@@ -541,7 +547,9 @@ bitmap still fits the Scene block's live rows.
 - `instrumentManager_updateLfoAdapters()` gets an Effect adapter. It stores
   direction and depth per source and pair (the S071 Morph resolver pattern),
   and the adapter's output feeds §9.
-- `fxm` is reachable via `scn`.
+- `fxm` remains a retained Scene target with no runtime overlay path until
+  Step 9; the Step 4 manager consumes the retained Effect Morph amount for
+  endpoint interpolation and the PERF global Morph bulk-set.
 - Scene activation's all-source rebind re-validates `fx` targets.
 - Velocity cannot target Effects (A21).
 
@@ -896,20 +904,20 @@ Effect region, 512 B per Scene, at Scene offset 128:
 |---|---|---|
 | 0 | 3 | type token |
 | 3 | 8 | name (mirror of HCNAMES row 145+Scene) |
-| 11 | 4 | run mode, length, step scale, reserved |
-| 15 | 64 | normal |
-| 79 | 64 | Morph |
-| 143 | 288 | steps (mask lo, mask hi, 16 values) × 16 |
-| 431 | 81 | reserved |
+| 11 | 3 | run mode, length, step scale |
+| 14 | 64 | normal |
+| 78 | 64 | Morph |
+| 142 | 288 | steps (mask lo, mask hi, 16 values) × 16 |
+| 430 | 82 | reserved |
 
-- `AUTOSAVE_EFFECT_PARAM_COUNT` goes from 0 to 420. The Scene-parameter live
-  count goes from 40 to 41 (`effect_morph_amount`). The record size is
-  unchanged.
-- **No migration code (A38).** The header format constant is bumped, so old
-  records are rejected. Boot then falls back to the normal file load, which
-  avoids decoding old zero-filled Effect regions as `off`.
-- The reader resolves the type before reading parameters, per the pinned rule.
-- The AutoSave HCNAMES view grows to 161 rows.
+- `AUTOSAVE_EFFECT_PARAM_COUNT` is 419 live cells: three sequence settings,
+  64 normal cells, 64 Morph cells, and 288 step bytes. The Scene-parameter
+  live count is 41, with `effect_morph_amount` at index 40.
+- The three type-token cells are live after the Step 4 registry integration and
+  are projected from the registry token. Name cells remain unavailable until
+  the HCNAMES/storage step. Older records remain safe because an absent or
+  unknown token resolves to `off`.
+- The AutoSave record geometry and HCNAMES row count are unchanged.
 
 ---
 

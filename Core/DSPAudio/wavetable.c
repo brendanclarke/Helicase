@@ -37,10 +37,30 @@
 #include "wavetable.h"
 #include "config.h"
 
-//Saw Table
-//128 Wavetables a 256 Samples
-//Samplerate: 44000
-INCCM const int16_t sine_table[TABLESIZE+1]=
+/*
+ * Full-cycle sine lookup table, 4096 points plus one guard sample.
+ *
+ * What: signed 16-bit sine samples indexed by the top 12 bits of an
+ * oscillator or LFO phase accumulator. The extra final entry lets
+ * interpolating readers fetch table[i+1] at i == TABLESIZE-1 without a wrap.
+ *
+ * Why it is in flash (Session 072, Effects Phase 5 step 1): this table used
+ * to be INCCM (copied into DTCM at boot), occupying 8,194 of the 12,280 DTCM
+ * bytes in use. Phase 5 dedicates the whole remainder of DTCM to the shared
+ * FX/voice audio arena (Core/DSP/Effects/FxBuffer), so the table now lives in
+ * .rodata like sawTable/triTable/recTable, which are already read from flash
+ * at audio rate. Flash use is unchanged in practice: the former .dtcm load
+ * image already stored these bytes in flash.
+ *
+ * Inputs: none (immutable). Output: sample values in -32767..32767.
+ * Readers: Oscillator.c calcSineBlock()/calcSine()/calcFmSineBlock() /
+ * calcFmSine() and lfo.c's sine waveform. Reads go through the Cortex-M7
+ * D-cache (default memory map; no MPU region covers flash).
+ * Affiliates: wavetable.h (extern + TABLESIZE), FxBuffer arena sizing in
+ * STM32F765VIHx_FLASH.ld. Performance gate: the step-1 high-pitch sine stress
+ * test in S072_ST1_IMPLEMENTATION.md §9.
+ */
+const int16_t sine_table[TABLESIZE+1]=
 {
 -32767, -32766, -32766, -32766, -32766, -32766, -32765, -32765,
 -32764, -32763, -32763, -32762, -32761, -32760, -32759, -32758,
@@ -7511,5 +7531,4 @@ const int16_t triTable[11][1024] =
 -32717, -32727, -32736, -32744, -32751,
 -32757, -32761, -32764, -32766}
 };
-
 

@@ -487,6 +487,25 @@ void instrumentManager_calcSlotAsync(uint8_t slot);
 void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
                                          uint8_t size);
 uint8_t instrumentManager_runtimePan(uint8_t slot);
+/*
+ * Read the current slot instrument's channel volume for the mixer.
+ *
+ * Inputs: zero-based render slot 0..5. Output: the tagged runtime member's
+ * vol field (0..1, descriptor instrument_vol / 127, including any live LFO,
+ * Morph, or step-automation value already written to it), or 0.0f for an
+ * unknown/empty slot type, which renders silence anyway.
+ *
+ * Why (Session 072, Effects Phase 5 step 2): the voice engines no longer
+ * apply volume; the mixer applies it after decimation so that the FX send can
+ * tap the decimated, pre-volume signal. Keeping the type switch here, beside
+ * instrumentManager_runtimePan(), preserves InstrumentManager as the only
+ * module that knows which engine struct occupies a slot.
+ *
+ * Clients: mixer.c mixer_init() and mixer_calcNextSampleBlock() (once per
+ * slot per 32-frame block). Foreground render context only. Affiliates:
+ * DrumVoice/SnareVoice/CymbalVoice/HiHatVoice vol members.
+ */
+float instrumentManager_runtimeVolume(uint8_t slot);
 void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
                                     uint8_t velocity);
 /*

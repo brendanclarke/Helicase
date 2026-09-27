@@ -75,6 +75,21 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `S071_T12_MORPH_ASSIGN_INVESTIGATION.md`,
   `S071_T12_MORPH_ASSIGN_IMPLEMENTATION.md`) are superseded by that log and
   specification updates and may be deleted.
+- S072 Step 1: `sine_table` now resides in flash; the remaining DTCM is the
+  NOLOAD `.dtcm_fxbuf` arena owned by `FxBuffer`.
+- S072 Step 2: voice engines render pre-volume; the mixer applies slider x
+  `instrumentManager_runtimeVolume()` after decimation. This fixes the
+  Snare/Cymbal/HiHat bug where `vol` was applied before distortion (D1).
+- S072 Step 3: each resident `scene_t` now owns a 420-byte `effect_record_t`
+  through SceneData setters, plus `effect_morph_amount` as Scene parameter 40;
+  the AutoSave Effect region has 419 live cells and `fxm` ID 404 is reserved
+  with zero use flags.
+- S072 Step 4: `EffectsManager` now owns the `off`/`flt` registry, per-block
+  resolution, Scene activation/type-change handoff, and the 76-byte runtime
+  state/76-byte DTCM StereoFilter runtime. `effects_service()` runs from the
+  mixer foreground block; the Effect type token is live in AutoSave;
+  `DEV_EFFECT_FORCE_TYPE` is the diagnostic bench hook. The FX bus remains
+  deferred to Step 5, so Step 4 makes no audible change.
 - S070 task documents are also superseded by `070_SESSION_HANDOFF_LOG.md` and
   may be deleted.
 - FX_SEND automation (targets 398..403) is wired for editing and storage but

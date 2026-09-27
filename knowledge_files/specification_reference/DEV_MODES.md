@@ -16,6 +16,9 @@ Scene-follow-up build, the Session 057 stall-detection expansion
 stage codes. Plans and failed working-tree experiments
 that mention a unified `/devlog.bin` are not implemented state.
 
+Session 072 Step 4 adds the screen-only EffectsManager registry self-check
+code and the `DEV_EFFECT_FORCE_TYPE` boot test knob described below.
+
 The build has exactly two development modes:
 
 | Flag | Output | Filesystem activity |
@@ -57,6 +60,35 @@ It must not:
 
 Display waits perturb timing. Results obtained with this mode enabled must not
 be represented as timing-neutral.
+
+### FxBuffer boot diagnostic
+
+Session 072 Step 1 adds one screen-only diagnostic at the end of `dsp_init()`
+when `DEV_MODE_DIAGNOSTIC=1`. It performs no filesystem work and holds for
+1.5 seconds so the LCD queue can display the linked arena and allocation state:
+
+```text
+FxBf 124K u00
+Shr  124K st0 r0
+```
+
+`FxBf` is the complete `.dtcm_fxbuf` arena in KiB, `u` is the number of
+diagnostic-forced voice units, `Shr` is the current contiguous Effect share,
+`st` is the allocation self-test result (`0` means pass), and `r` is the
+EffectsManager registry self-check result (`0` means pass). The screen is
+compiled out with the diagnostic mode.
+
+`DEV_FXBUF_FORCE_VOICE_UNITS` is a diagnostic-only test knob with an accepted
+compile-time range of 0..12. It is ignored when `DEV_MODE_DIAGNOSTIC=0` and
+defaults to 0. The self-test result codes are: 0 pass; 1 arena geometry;
+2 empty share; 3 two-unit acquire; 4 per-slot cap; 5 full arena; 6 refill;
+7 non-compacting release; 8 full release; 9 unit pointer bounds.
+
+`DEV_EFFECT_FORCE_TYPE` is a diagnostic-only Effect registry test knob. It is
+ignored when `DEV_MODE_DIAGNOSTIC=0`, defaults to 0, and currently accepts
+`1` to force the `flt` type through the normal SceneData type-change and
+FxBuffer handoff path after boot Scene activation. A zero value leaves the
+retained Scene type unchanged.
 
 ## `DEV_MODE_LOGGING`
 

@@ -6,11 +6,15 @@ the clean Session 069 Pass 1 link at commit `1f7a772` (2026-09-20), recorded in
 deltas applied. Session 071 final build: `text=456,748`, `data=416`,
 `bss=291,900`. Session 071 added +86 bytes bss (+30 BankData per-Scene mask,
 +32 `op_bankset_state` staging, +12 audio-out step-override table, +12
-FX-send step-override table). This checkout has no `build/lxr02.elf` or ARM
-toolchain, so the linked totals below are taken from recorded builds; section
-sizes are reconciled with the `size` result and the current source. Per-symbol
-sizes below come from fixed source geometry or the earlier linked symbol
-inventory. Rebuild before treating them as a new link measurement.
+FX-send step-override table). Step 1 updates below are the first clean-link
+measurements after the arena and `FxBuffer` changes; the exact tool output is
+recorded in `S072_ST1_IMPLEMENTATION.md` §22. Rebuild after later
+header/configuration edits before treating any linked total as current. The
+S072 Step 4 clean link is recorded below: `text=463,552`, `data=416`,
+`bss=425,936`, with `scenes=25,952` (`0x6560`). It adds the
+76-byte `effects_state` in SRAM1, the 76-byte `effects_runtime` in DTCM, and
+the one-byte diagnostic registry result; exact section totals are recorded
+below.
 
 Configuration: `DEV_MODE_LOGGING=1`, `DEV_LOGGING_IWDG=0`,
 `DEV_STALL_DETECTION=1`, `AUTOSAVE_TRACE_RECORD_COUNT=2048`,
@@ -21,22 +25,24 @@ Configuration: `DEV_MODE_LOGGING=1`, `DEV_LOGGING_IWDG=0`,
 | Region and section | Start | Capacity | Static bytes | Capacity after static bytes |
 | --- | ---: | ---: | ---: | ---: |
 | SRAM1 `.dma_nocache` | `0x20020000` | Part of SRAM1 | 3,100 | — |
-| SRAM1 `.data` | `0x20020c1c` | Part of SRAM1 | 404 | — |
-| SRAM1 `.bss` | `0x20020db0` | Part of SRAM1 | 285,052 | — |
-| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | Part of SRAM1 | 285,456 | — |
-| **SRAM1 total** | `0x20020000` | **376,832** | **288,556** | **88,276** |
-| DTCM `.dtcm` | `0x20000000` | Part of DTCM | 8,708 | — |
-| DTCM `.dtcmz` | `0x20002204` | Part of DTCM | 3,572 | — |
-| **DTCM total** | `0x20000000` | **131,072** | **12,280** | **118,792** |
+| SRAM1 `.data` | `0x20020c1c` | Part of SRAM1 | 416 | — |
+| SRAM1 `.bss` | `0x20020dc0` | Part of SRAM1 | 292,276 | — |
+| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | Part of SRAM1 | 292,692 | — |
+| **SRAM1 total** | `0x20020000` | **376,832** | **295,792** | **81,040** |
+| DTCM `.dtcm` | `0x20000000` | Part of DTCM | 512 | — |
+| DTCM `.dtcmz` | `0x20000200` | Part of DTCM | 3,648 | — |
+| DTCM `.dtcm_fxbuf` | `0x20001040` | Part of DTCM | 126,912 | 0 (reserved arena) |
+| **DTCM total** | `0x20000000` | **131,072** | **131,072** | **0** |
 | ITCM `.itcm` executable code | `0x00000000` | 16,384 | 3,768 | 12,616 |
 | SRAM2 `.devwdg_noinit` | `0x2007c000` | 16,384 | **0** | See stack note |
 
-Static **data** RAM is 300,836 B (SRAM1 + DTCM); including ITCM code, linked
-RAM sections occupy 304,604 B. The conventional `arm-none-eabi-size` result is
-`text=449,476`, `data=404`, `bss=291,724`: its `bss` combines SRAM1 `.bss`
-(285,052), SRAM1 `.dma_nocache` (3,100), and DTCM `.dtcmz` (3,572). DTCM
-`.dtcm` contains initialized lookup data copied from FLASH; it consumes DTCM
-even though the tables are read-only at runtime.
+Static **data** RAM is 426,864 B (SRAM1 + DTCM, including the NOLOAD arena);
+including ITCM code, linked RAM sections occupy 430,632 B. The conventional
+`arm-none-eabi-size` `bss` column includes the 126,912-byte NOLOAD arena and
+must not be interpreted as new SRAM1 use. Use the section ledger and the
+separate `tools/link_budget.py` report for DTCM arena accounting. `.dtcm`
+contains only the 512-byte `squareRootLut`; `sine_table` is now ordinary flash
+`.rodata` and is no longer copied to DTCM.
 
 The linker sets `_estack=0x20080000`, the **top of SRAM2**. The stack grows
 downward and has no fixed linker reservation or measured high-water mark; it
@@ -56,7 +62,7 @@ from this owner map.
 
 | Owner / object | Bytes | Allocation and use |
 | --- | ---: | --- |
-| `SceneData.c`: `scenes` | 19,200 | Sixteen resident Scene records; Pattern regions are separate. |
+| `SceneData.c`: `scenes` | 25,952 | Sixteen resident Scene records, 1,622 B each: 41 B settings, one alignment byte, 420 B Scene-owned Effect record, and the existing Kit; Pattern regions are separate. |
 | `PatternData.c`: `pat_regions` | 168,304 | Sixteen packed regions of 10,519 B: each has 1,792 B step addresses, 8,192 B pool, 512 B bitmap, and 23 B Pattern/track settings. |
 | `PatternData.c`: `pat_autosave_snapshot` | 10,519 | One Scene-sized snapshot for an in-flight Pattern AutoSave. |
 | `PatternStackService.c`: `reservation_image` | 512 | One non-persisted bit image for the current service Scene's trailing pool reservations; three separate one-byte policy/rebuild flags accompany it. |
@@ -84,6 +90,9 @@ from this owner map.
 | `MidiParser.c`: `midiParser_originalCcValues` | 255 | Legacy MIDI CC baseline cells. |
 | `buttonHandler.c`: `evt_ring` | 64 | Sixty-four one-byte front-panel events; producer/consumer and overflow state are additional bytes. |
 | `lcd.c`: `lcd_queue` | 384 | LCD command queue. |
+| `FxBuffer.c`: `fxbuf_state` | 28 | Linker arena base/size, twelve unit owners, count, and share callback. |
+| `FxBuffer.c`: `fxbuf_handoffRecord` | 180 | Effect/voice handoff metadata and arena-relative positions. |
+| `EffectsManager.c`: `effects_state` | 76 | Active type/Scene, force flag, 64-byte last-applied image, and common runtime values. |
 
 Other SRAM1 state comprises filesystem operation cursors and text buffers,
 HCNAMES/boot control fields, Menu and front-panel state, sequencer/MIDI state,
@@ -95,10 +104,11 @@ No Pattern storage is embedded in `scene_t`; `PAT_STACK_SIZE=256` reserves
 
 ## Conditional diagnostic SRAM1
 
-These objects are present in this logging-on build and are compiled out with
-their producers when `DEV_MODE_LOGGING=0`. A logging-off section total must be
-measured from a clean rebuild; subtracting this table from the logging-on
-total would miss alignment and other compile-time changes.
+These objects are conditional development allocations. Logging-only rows are
+compiled out with their producers when `DEV_MODE_LOGGING=0`, while the
+FxBuffer self-test row exists only when `DEV_MODE_DIAGNOSTIC=1`. A mode-off
+section total must be measured from a clean rebuild; subtracting this table
+from a mode-on total would miss alignment and other compile-time changes.
 
 | Owner / object | Bytes | Use |
 | --- | ---: | --- |
@@ -109,6 +119,8 @@ total would miss alignment and other compile-time changes.
 | `filesystem.c`: `fs_hcprms_boot_capsule` | 64 | Eight × 8 B frozen boot-ensure failure records; useful for one boot attempt. |
 | `filesystem.c`: trace flush cadence and witness state | 3 | `fs_autosave_trace_next_due_tick` and `fs_trace_suppress_witness`; other logging control is included in the section total. |
 | `buttonHandler.c`: `evt_drop_count` | 1 | Saturating front-panel overflow witness. |
+| `FxBuffer.c`: `fxbuf_selfTestResult` | 1 | Diagnostic-only allocation self-test result; absent when `DEV_MODE_DIAGNOSTIC=0`. |
+| `EffectsManager.c`: `effects_registryCheckCode` | 1 | Diagnostic-only registry invariant result; absent when `DEV_MODE_DIAGNOSTIC=0`. |
 
 `DEV_STALL_DETECTION=1` also retains its separate phase/tick detector state;
 its condition is `DEV_STALL_DETECTION`, rather than `DEV_MODE_LOGGING` alone.
@@ -117,16 +129,17 @@ its condition is `DEV_STALL_DETECTION`, rather than `DEV_MODE_LOGGING` alone.
 
 | Object | Bytes | Placement |
 | --- | ---: | --- |
-| `sine_table`, `squareRootLut` | 8,194 + 512 | DTCM `.dtcm`; the section's other 2 B are alignment. |
+| `squareRootLut` | 512 | DTCM `.dtcm`; `sine_table` moved to flash in S072 Step 1. |
+| `EffectsManager.c`: `effects_runtime` | 76 | DTCM `.dtcmz`; union holding the active type's DSP runtime. |
+| `.dtcm_fxbuf` | 126,912 | DTCM NOLOAD; elastic FX/voice audio arena owned by FxBuffer. |
 | `audioOutBuffer`, `audioOutBuffer2` | 3,072 combined | DTCM `.dtcmz`; oscillator interpolation buffers and other DSP state account for the remainder. |
 | `velocityModulators` | 264 | DTCM `.dtcmz`; six modulation nodes. |
 | `osc_interp_a`, `osc_interp_b` | 128 combined | DTCM `.dtcmz`; two 32-sample interpolation buffers. |
 | `dma_buffer`, `dma_buffer2`, `adc_dma_buf` | 3,072 + 28 | SRAM1 `.dma_nocache`; the entire section must stay within the linker's 4,096 B MPU limit. |
 | `transientData` | 26,460 | FLASH `.text` constant PCM; no DTCM/SRAM shadow. |
 
-The last link's 449,880 B firmware payload (449,476 B `text` + 404 B `data`)
-and 449,896 B packaged image fit before the `0x08080000` sample-FLASH
-boundary. FLASH and sample-FLASH capacity are not SRAM headroom.
+The Step 1 link's conventional `bss` figure includes the 126,976-byte NOLOAD
+arena. FLASH and sample-FLASH capacity are not SRAM headroom.
 
 **Reservation policy:** free DTCM, including capacity released by moving
 `transientData` to FLASH, is reserved exclusively for future delay-line
