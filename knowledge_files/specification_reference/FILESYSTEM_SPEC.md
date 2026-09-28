@@ -916,6 +916,12 @@ Bitmap:     512B (bit-packed chunk occupancy; first 256B cover 2,048 chunks,
 Pool:       8,192B (PAT_STACK_SIZE × 32 bytes)
 ```
 
+In PAT4, each raw `track_scale` byte uses the shared StepScale index order
+(`1/64` through `2 bars`). Existing bytes are preserved on load; an index
+outside 0..13 displays/plays as the `1/16` default without an automatic card
+rewrite. This Step 8 reinterpretation changes the retained meaning and UI
+only: track playback still ignores scale until the joint track-scale pass.
+
 CRC32C is Castagnoli, computed over the entire file while treating the 4 bytes
 at offset 14 as zero. This matches the HCPR AutoSave record CRC contract.
 

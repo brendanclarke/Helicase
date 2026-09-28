@@ -20,10 +20,13 @@ expansion described below. The current ST6 production link is `text=470,208`,
 14-byte `menuEffects` page-state owner; the measured ST7 production link is
 `text=475,592`, `data=416`, `bss=426,144`, with a 476,008-byte flash payload.
 The linker-visible SRAM1 increase rounds to 16 bytes; the page-state object is
-14 bytes. Step 5 adds the
-76-byte `effects_state` in SRAM1, the 76-byte `effects_runtime` in DTCM, and
-the one-byte diagnostic registry result; exact section totals are recorded
-below.
+14 bytes. Step 8 adds 8 bytes to `effects_state`, one SRAM1 FX-event latch,
+and 7 bytes of `menuEffects` hold/LED state. The current ST8 production link
+is `text=478,720`, `data=416`, `bss=426,160`, with a 479,136-byte flash
+payload. Step 5 adds the
+76-byte `effects_state` in SRAM1 (expanded to 84 bytes by Step 8), the
+76-byte `effects_runtime` in DTCM, and the one-byte diagnostic registry result;
+exact section totals are recorded below.
 
 Configuration: `DEV_MODE_LOGGING=1`, `DEV_LOGGING_IWDG=0`,
 `DEV_STALL_DETECTION=1`, `AUTOSAVE_TRACE_RECORD_COUNT=2048`,
@@ -35,9 +38,9 @@ Configuration: `DEV_MODE_LOGGING=1`, `DEV_LOGGING_IWDG=0`,
 | --- | ---: | ---: | ---: | ---: |
 | SRAM1 `.dma_nocache` | `0x20020000` | Part of SRAM1 | 3,100 | — |
 | SRAM1 `.data` | `0x20020c1c` | Part of SRAM1 | 416 | — |
-| SRAM1 `.bss` | `0x20020dc0` | Part of SRAM1 | 292,276 | — |
-| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | Part of SRAM1 | 292,692 | — |
-| **SRAM1 total** | `0x20020000` | **376,832** | **295,792** | **81,040** |
+| SRAM1 `.bss` | `0x20020dc0` | Part of SRAM1 | 292,500 | — |
+| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | Part of SRAM1 | 292,916 | — |
+| **SRAM1 total** | `0x20020000` | **376,832** | **296,016** | **80,816** |
 | DTCM `.dtcm` | `0x20000000` | Part of DTCM | 512 | — |
 | DTCM `.dtcmz` | `0x20000200` | Part of DTCM | 3,936 | — |
 | DTCM `.dtcm_fxbuf` | `0x20001160` | Part of DTCM | 126,624 | 0 (reserved arena) |
@@ -45,8 +48,8 @@ Configuration: `DEV_MODE_LOGGING=1`, `DEV_LOGGING_IWDG=0`,
 | ITCM `.itcm` executable code | `0x00000000` | 16,384 | 3,768 | 12,616 |
 | SRAM2 `.devwdg_noinit` | `0x2007c000` | 16,384 | **0** | See stack note |
 
-Static **data** RAM is 426,864 B (SRAM1 + DTCM, including the NOLOAD arena);
-including ITCM code, linked RAM sections occupy 430,632 B. The conventional
+Static **data** RAM is 427,088 B (SRAM1 + DTCM, including the NOLOAD arena);
+including ITCM code, linked RAM sections occupy 430,856 B. The conventional
 `arm-none-eabi-size` `bss` column includes the 126,624-byte NOLOAD arena and
 must not be interpreted as new SRAM1 use. Use the section ledger and the
 separate `tools/link_budget.py` report for DTCM arena accounting. `.dtcm`
@@ -103,8 +106,9 @@ from this owner map.
 | `lcd.c`: `lcd_queue` | 384 | LCD command queue. |
 | `FxBuffer.c`: `fxbuf_state` | 28 | Linker arena base/size, twelve unit owners, count, and share callback. |
 | `FxBuffer.c`: `fxbuf_handoffRecord` | 180 | Effect/voice handoff metadata and arena-relative positions. |
-| `EffectsManager.c`: `effects_state` | 76 | Active type/Scene, force flag, 64-byte last-applied image, and common runtime values. |
-| `menuEffects.c`: page state | 14 | Eight SELECT screen cells, Morph-view flag, `typ` transaction state, and last Scene/type tracking; SRAM1, foreground UI lifetime. |
+| `EffectsManager.c`: `effects_state` | 84 | Active type/Scene, force flag, 64-byte last-applied image, FX step/selection/held-Morph state, sequence signature, and common runtime values. |
+| `sequencer.c`: `seq_fxEvent` | 1 | TIM3-to-foreground newest-wins RESET/STEP latch; no Scene, DSP, or LED work occurs in the ISR. |
+| `menuEffects.c`: page state | 21 | Eight SELECT screen cells, Morph-view flag, `typ` transaction state, last Scene/type tracking, SEQ hold mask, and LED repaint signature; SRAM1, foreground UI lifetime. |
 
 Other SRAM1 state comprises filesystem operation cursors and text buffers,
 HCNAMES/boot control fields, Menu and front-panel state, sequencer/MIDI state,

@@ -175,6 +175,19 @@ void seq_setMute(uint8_t trackNr, uint8_t isMuted);
 uint8_t seq_isTrackMuted(uint8_t trackNr);
 void seq_setRoll(uint8_t voice, uint8_t onOff);
 void seq_setRollRate(uint8_t rate);
+
+/*
+ * TIM3-to-foreground FX-sequencer latch (Session 072 step 8; plan §11.1).
+ *
+ * TIM3 publishes only RESET/STEP plus a 0..15 position. EffectsManager takes
+ * the newest byte from foreground `effects_service()` and performs all Scene,
+ * Morph, DSP, and LED-facing work there. A RESET and first STEP may share one
+ * byte. The latch is one byte of SRAM1 and is not a general event queue.
+ */
+#define SEQ_FX_EVENT_STEP  0x80u
+#define SEQ_FX_EVENT_RESET 0x40u
+#define SEQ_FX_EVENT_INDEX 0x0Fu
+uint8_t seq_fxTakeEvent(void);
 /*
  * Record a live MIDI/roll event as one quantized fixed-grid trigger bit.
  * Input is the track; output is an on-bit only when recording is active.

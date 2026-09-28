@@ -63,6 +63,7 @@
 #include "InstrumentManager.h"
 #include "presetManager.h"
 #include "presetMorphEngine.h"
+#include "StepScale.h"
 
 /*
  * Pattern probability uses the existing hardware RNG without new state.
@@ -84,6 +85,50 @@ static uint16_t seq_masterStepClock = 0;    /**< fixed-grid sixteenth-note clock
 static uint32_t seq_elapsedPpqTicks = 0;    /**< 96 PPQ ticks elapsed since the current pattern/start reset */
 static uint8_t seq_initialSchedulerTick = 1;/**< nonzero until the immediate step at PPQ tick 0 has been processed */
 static uint8_t seq_internalMidiClockPhase = 0;
+
+/*
+ * FX-sequencer timing latch (Session 072 step 8; plan §11.1).
+ *
+ * TIM3 writes one RESET/STEP byte and foreground EffectsManager consumes it.
+ * The short PRIMASK transaction prevents a foreground read/clear from
+ * tearing a simultaneous scheduler publication; a newer step replaces an
+ * older pending step by design.
+ */
+static volatile uint8_t seq_fxEvent = 0u;
+
+/* Publish one FX step while preserving a pending reset marker. */
+static void seq_fxPublishStep(uint8_t index)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    seq_fxEvent = (uint8_t)((seq_fxEvent & SEQ_FX_EVENT_RESET) |
+                            SEQ_FX_EVENT_STEP |
+                            (index & SEQ_FX_EVENT_INDEX));
+    __set_PRIMASK(primask);
+}
+
+/* Publish a foreground reset for the next FX boundary. */
+static void seq_fxPublishReset(void)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    seq_fxEvent = SEQ_FX_EVENT_RESET;
+    __set_PRIMASK(primask);
+}
+
+uint8_t seq_fxTakeEvent(void)
+{
+    uint8_t event;
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    event = seq_fxEvent;
+    seq_fxEvent = 0u;
+    __set_PRIMASK(primask);
+    return event;
+}
 uint8_t seq_rollRate = 0x08;				//start with roll rate = 1/16
 uint8_t seq_rollState = 0;					/**< each bit represents a voice. if bit is set, roll is active*/
 
@@ -345,6 +390,54 @@ static void seq_sendProgChg(const uint8_t ptn);
 static void seq_processSchedulerTick(void);
 static void seq_setStepIndexToStart();
 static void seq_queueStepAutomations(uint8_t track, uint8_t step);
+
+/*
+ * Publish one FX-sequencer position from the pure master-clock timeline.
+ *
+ * Inputs: current elapsed 96-PPQ ticks and the active Scene's retained FX
+ * run/length/scale settings. Output: one newest-position latch event at each
+ * scale boundary for fwd, rev, pip, or rnd. `sel` intentionally publishes no
+ * clock event because its selected step is foreground-owned. No Scene, DSP,
+ * or LED access occurs in this TIM3 path.
+ */
+static void seq_fxClockTick(void)
+{
+    const effect_record_t *record = scene_effectConst(scene_getActiveIndex());
+    uint16_t ticks;
+    uint8_t len;
+    uint8_t index;
+    uint32_t n;
+
+    if (!record || record->seq_run_mode >= EFFECT_SEQ_RUN_MODE_COUNT ||
+        record->seq_run_mode == EFFECT_SEQ_RUN_SEL)
+        return;
+    ticks = stepScale_ticks(record->seq_step_scale);
+    if ((seq_elapsedPpqTicks % ticks) != 0u)
+        return;
+    len = record->seq_length;
+    if (len < EFFECT_SEQ_LENGTH_MIN || len > EFFECT_SEQ_LENGTH_MAX)
+        len = EFFECT_SEQ_LENGTH_DEFAULT;
+    n = seq_elapsedPpqTicks / ticks;
+    switch (record->seq_run_mode) {
+    case EFFECT_SEQ_RUN_REV:
+        index = (uint8_t)(len - 1u - (n % len));
+        break;
+    case EFFECT_SEQ_RUN_PIP: {
+        uint32_t p = n % ((uint32_t)len * 2u);
+
+        index = (uint8_t)(p < len ? p : ((uint32_t)len * 2u - 1u - p));
+        break; }
+    case EFFECT_SEQ_RUN_RND:
+        index = (uint8_t)(((uint16_t)GetRngValue() & 0x7FFFu) % len);
+        break;
+    case EFFECT_SEQ_RUN_FWD:
+    default:
+        index = (uint8_t)(n % len);
+        break;
+    }
+    seq_fxPublishStep(index);
+}
+
 //------------------------------------------------------------------------------
 void seq_init()
 {
@@ -1062,16 +1155,24 @@ static void seq_processSchedulerTick(void)
 		seq_initialSchedulerTick = 0u;
 		seq_masterStepClock = 0u;
 		seq_masterStepCnt = 0u;
-		if (seq_handleMasterBoundary())
+		if (seq_handleMasterBoundary()) {
+			/* Pattern switching must not suppress the independent FX boundary. */
+			seq_fxClockTick();
+			midiParser_checkMtc();
 			return;
+		}
 	} else {
 		seq_elapsedPpqTicks++;
 		if ((seq_elapsedPpqTicks % SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP) == 0u) {
 			seq_masterStepClock =
 				(uint16_t)(seq_elapsedPpqTicks / SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP);
 			seq_masterStepCnt = (uint8_t)seq_masterStepClock;
-			if (seq_handleMasterBoundary())
+			if (seq_handleMasterBoundary()) {
+				/* Pattern switching must not suppress the independent FX boundary. */
+				seq_fxClockTick();
+				midiParser_checkMtc();
 				return;
+			}
 		}
 	}
 
@@ -1082,12 +1183,14 @@ static void seq_processSchedulerTick(void)
 		anyAdvanced = 1u;
 	}
 
-	if (anyAdvanced) {
-		seq_ledState.chaseStep = seq_stepIndex[menu_getActiveVoice()];
-		seq_ledState.dirty |= SEQ_LED_DIRTY_CHASE;
-	}
+    if (anyAdvanced) {
+        seq_ledState.chaseStep = seq_stepIndex[menu_getActiveVoice()];
+        seq_ledState.dirty |= SEQ_LED_DIRTY_CHASE;
+    }
 
-	midiParser_checkMtc();
+    /* FX sequencer follows the same master PPQ clock, independent of Pattern. */
+    seq_fxClockTick();
+    midiParser_checkMtc();
 }
 //------------------------------------------------------------------------------
 uint8_t seq_getExtSync()
@@ -1659,6 +1762,8 @@ static void seq_setStepIndexToStart()
 	 */
 	uint8_t i;
 
+	/* Reset FX position/held Morph before the next foreground boundary. */
+	seq_fxPublishReset();
 	seq_restoreAllSceneAutomation();
 	seq_restoreAllAutomation();
 	seq_clearAutomationDirty();

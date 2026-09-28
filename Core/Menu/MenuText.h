@@ -120,12 +120,6 @@ static const char midiFilterNames[][16] = {
     {"off"},{"N"},{"R"},{"RN"},{"C"},{"CN"},{"CR"},{"CRN"},
     {"P"},{"PN"},{"PR"},{"PRN"},{"PC"},{"PCN"},{"PCR"},{"all"},
 };
-static const char trackScaleNames[][4] = {
-    {21},
-    {"/8"},{"/7"},{"/6"},{"/5"},{"/4"},{"/3"},{"/25"},{"/2"},{"/.6"},{"/.3"},
-    {"off"},{"x.3"},{"x.6"},{"x2"},{"x25"},{"x3"},{"x4"},{"x5"},{"x6"},{"x7"},{"x8"},
-};
-
 static const char shortNames[][4] = {
     {""}, {"coa"},{"fin"},{"atk"},{"dec"},{"eg2"},{"mod"},{"amt"},
     {"frq"},{"drv"},{"vol"},{"pan"},{"noi"},{"rpt"},{"mix"},

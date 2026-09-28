@@ -1179,6 +1179,13 @@ void led_updateCurrentStep(uint8_t step)
      * SEQ_LED_DIRTY_CHASE. The sequencer only knows the playback step; this
      * LED owner decides whether that chase light should be visible on the
      * current page and pattern. */
+    /*
+     * The Effect page owns the FX-sequencer chase layer. Pattern chase must
+     * neither draw nor clear that layer during each sixteenth-note drain.
+     */
+    if (menu_activePage == EFFECT_PAGE)
+        return;
+
     uint8_t shownPattern;
     uint8_t playedPattern;
 

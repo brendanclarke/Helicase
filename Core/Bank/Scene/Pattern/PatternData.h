@@ -8,6 +8,7 @@
 #define PATTERNDATA_H_
 
 #include <stdint.h>
+#include "StepScale.h"
 #include "globals.h"
 #include "InstrumentManager.h"
 
@@ -233,7 +234,8 @@ void pat_copyBar(uint8_t scene_index, uint8_t track, uint8_t src_bar,
  * the shared menu parameter buffer. The selected-step special setters below
  * continue to own their dynamic-pool read/modify/write behavior.
  */
-#define TRACK_SCALE_OFF 10u
+/* Shared sequencer scale default: a new track displays/stores 1/16. */
+#define TRACK_SCALE_DEFAULT STEP_SCALE_DEFAULT
 void pat_applyPatternSettingsToMenu(uint8_t scene_index);
 void pat_applyTrackSettingsToMenu(uint8_t scene_index, uint8_t track);
 void pat_setTrackLength(uint8_t scene_index, uint8_t track, uint8_t value);

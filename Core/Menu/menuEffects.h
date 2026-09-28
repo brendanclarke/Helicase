@@ -91,4 +91,20 @@ uint8_t menuEffects_hookTrack(uint8_t track, uint8_t shift, uint8_t pressed);
 uint8_t menuEffects_hookBar(uint8_t bar, uint8_t shift, uint8_t pressed);
 void menuEffects_renderLeds(void);
 
+/*
+ * FX-sequencer hold gestures and row rendering (Session 072 step 8; plan
+ * §13.4). SEQ presses jump immediately in `sel`; the shared ButtonHandler
+ * hold threshold calls menuEffects_seqHoldExpired(), after which sequenceable
+ * cells write lane locks across the physically held steps. Non-sequenceable
+ * manager cells are ignored while held. The display and LED helpers are
+ * foreground-only and keep all Scene writes inside EffectsManager.
+ */
+void menuEffects_seqButtonPressed(uint8_t step);
+void menuEffects_seqHoldExpired(void);
+uint8_t menuEffects_seqHoldActive(void);
+uint8_t menuEffects_holdEdit(const menuEffects_cell_t *cell, int16_t delta);
+uint8_t menuEffects_holdDisplay(const menuEffects_cell_t *cell,
+                                uint8_t *value, uint8_t *locked);
+void menuEffects_renderSeqLeds(void);
+
 #endif /* MENU_EFFECTS_H_ */

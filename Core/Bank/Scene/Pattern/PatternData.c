@@ -775,12 +775,12 @@ void pat_initScene(uint8_t scene_index)
      * and wraps independently per track; valid range is 1–NUM_STEPS (128).
      *
      * track_scale and track_shuffle: stored and persisted but not yet consumed
-     * by the sequencer — deferred for future implementation. Defaults are
-     * TRACK_SCALE_OFF (no per-track rate override) and 0 (no shuffle offset).
+     * by playback. The scale index uses StepScale's shared table; the default
+     * is 1/16 and 0 remains the no-shuffle offset.
      */
     for (track = 0u; track < NUM_TRACKS; track++) {
         region->track_length[track] = NUM_STEPS_PER_BAR;
-        region->track_scale[track] = TRACK_SCALE_OFF;
+        region->track_scale[track] = TRACK_SCALE_DEFAULT;
         region->track_shuffle[track] = 0u;
     }
     region->pattern_change_bar = 0u;

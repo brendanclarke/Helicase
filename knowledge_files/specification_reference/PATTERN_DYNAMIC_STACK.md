@@ -309,15 +309,14 @@ that has not been built — the accepted, tested range is 1..16.
 commit, beat LED, clock output), a bar-level concept independent of any
 individual track's loop length, and must not be changed to track length.
 
-**Track scale (not implemented).** All tracks advance together on one global
-divisor, `SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP` (24 PPQ ticks = 1/16th note,
-in `seq_processSchedulerTick()`). There is no per-track tick accumulator or
-scale-to-ticks lookup. `track_scale[track]` (init default `TRACK_SCALE_OFF`)
-has no playback effect regardless of its stored value. A fix requires
-per-track PPQ tick accumulators (`NUM_TRACKS * 4` bytes of new ISR-static
-state) and a scale-to-ticks mapping table validated against the original
-LXR's documented scale labels; tracked in `SCOPING_TARGETS.md` § Session 068
-deferred items.
+**Track scale (stored/displayed; playback not implemented).** Step 8 moves
+`track_scale[track]` to the shared StepScale index table, with init default
+`TRACK_SCALE_DEFAULT` (index 4, `1/16`). All tracks still advance together on
+one global divisor, `SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP` (24 PPQ ticks =
+1/16th note, in `seq_processSchedulerTick()`), so the retained scale has no
+playback effect regardless of its stored value. A future playback pass requires
+per-track PPQ tick accumulators and must consume the same StepScale ticks used
+by the FX sequencer; it must not introduce a second scale index order.
 
 **Track shuffle (not implemented).** Every step fires at a uniform tick
 boundary; there is no shuffle-offset calculation in `sequencer.c`.

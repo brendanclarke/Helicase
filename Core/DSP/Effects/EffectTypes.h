@@ -38,6 +38,7 @@
 #define EFFECT_TYPES_H_
 
 #include <stdint.h>
+#include "StepScale.h"
 
 /*
  * Effect data contract shared by SceneData, AutoSave, and the future
@@ -87,9 +88,9 @@ typedef enum {
     EFFECT_SEQ_RUN_MODE_COUNT
 } effect_seq_run_mode_t;
 
-/* Shared track/Effect step-scale index. Index 4 is the current 1/16 entry. */
-#define EFFECT_SEQ_SCALE_COUNT           14u
-#define EFFECT_SEQ_SCALE_DEFAULT         4u
+/* Compatibility names for Effect callers; StepScale owns the shared values. */
+#define EFFECT_SEQ_SCALE_COUNT           STEP_SCALE_COUNT
+#define EFFECT_SEQ_SCALE_DEFAULT         STEP_SCALE_DEFAULT
 
 /*
  * One FX-sequencer step.

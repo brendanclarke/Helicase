@@ -26,6 +26,9 @@
 #include "MenuText.h"
 #include "SceneData.h"
 #include "buttonHandler.h"
+#include "ledHandler.h"
+#include "sequencer.h"
+#include "StepScale.h"
 #include <string.h>
 
 #define MENU_FX_SELECT_COUNT          8u
@@ -48,22 +51,26 @@ static uint8_t menuEffects_typeScene;
 static uint8_t menuEffects_lastScene;
 static effect_type_id_t menuEffects_lastType;
 
+/*
+ * FX-sequencer page state (Session 072 step 8; +7 B, S072_ST8 D5).
+ *
+ * hold_active/hold_mask own the SEQ hold-edit gesture and the physically held
+ * steps it last observed. The LED signature fields avoid repainting the FX
+ * row when neither the active step nor retained sequence state changed.
+ */
+static uint8_t menuEffects_holdActive;
+static uint16_t menuEffects_holdMask;
+static uint8_t menuEffects_ledSerial;
+static uint8_t menuEffects_ledLen;
+static uint8_t menuEffects_ledMode;
+static uint8_t menuEffects_ledRunning;
+
 /* Run-mode labels in effect_seq_run_mode_t order: compact / full view. */
 static const char menuEffects_runShort[EFFECT_SEQ_RUN_MODE_COUNT][4] = {
     "fwd", "rev", "pip", "rnd", "sel"
 };
 static const char *const menuEffects_runLong[EFFECT_SEQ_RUN_MODE_COUNT] = {
     "forward", "reverse", "pingpong", "random", "select"
-};
-
-/* Provisional Step 7 scale labels; Step 8 moves them to shared ownership. */
-static const char menuEffects_scaleShort[EFFECT_SEQ_SCALE_COUNT][4] = {
-    "/64", "32t", "/32", "16t", "/16", "/8t", "16.",
-    "/8 ", "/4t", "/8.", "/4 ", "/2 ", "1br", "2br"
-};
-static const char *const menuEffects_scaleLong[EFFECT_SEQ_SCALE_COUNT] = {
-    "1/64", "1/32T", "1/32", "1/16T", "1/16", "1/8T", "1/16.",
-    "1/8", "1/4T", "1/8.", "1/4", "1/2", "1 bar", "2 bars"
 };
 
 /* Active Scene's retained record and registry row (`off` fallback). */
@@ -192,6 +199,12 @@ void menuEffects_enter(uint8_t *sub_page, uint8_t *column)
     menuEffects_showMorphFlag = 0u;
     menuEffects_lastScene = scene_getActiveIndex();
     menuEffects_lastType = record ? record->type : EFFECT_TYPE_OFF;
+    menuEffects_holdActive = 0u;
+    menuEffects_holdMask = 0u;
+    menuEffects_ledSerial = (uint8_t)(effects_seqSerial() - 1u);
+    menuEffects_ledLen = 0u;
+    menuEffects_ledMode = 0u;
+    menuEffects_ledRunning = 0u;
     *sub_page = 0u;
     *column = 0u;
 }
@@ -205,11 +218,18 @@ void menuEffects_toggleFirstScreen(uint8_t *sub_page, uint8_t *column)
     *column = 0u;
 }
 
-/* Leaving the page discards an open `typ` candidate and Morph view. */
+/* Leaving the page discards the type candidate, Morph view, and FX LED layer. */
 void menuEffects_leave(void)
 {
+    uint8_t step;
+
     menuEffects_typeEdit = 0u;
     menuEffects_showMorphFlag = 0u;
+    menuEffects_holdActive = 0u;
+    menuEffects_holdMask = 0u;
+    led_clearActive_step();
+    for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++)
+        led_setBlinkLed((uint8_t)(LED_STEP1 + step), 0u);
 }
 
 /* Resolve a visible column on the remembered screen of one SELECT button. */
@@ -385,7 +405,7 @@ void menuEffects_clampValue(const menuEffects_cell_t *cell, uint16_t *value)
         max = EFFECT_SEQ_LENGTH_MAX;
         break;
     case MENU_FX_CELL_SCALE:
-        max = (uint16_t)(EFFECT_SEQ_SCALE_COUNT - 1u);
+        max = (uint16_t)(STEP_SCALE_COUNT - 1u);
         break;
     case MENU_FX_CELL_MORPH_AMOUNT:
         max = 255u;
@@ -444,8 +464,9 @@ uint8_t menuEffects_formatValue3(const menuEffects_cell_t *cell, char *dst)
         memcpy(dst, menuEffects_runShort[value], 3u);
         return 1u;
     }
-    if (cell->kind == MENU_FX_CELL_SCALE && value < EFFECT_SEQ_SCALE_COUNT) {
-        memcpy(dst, menuEffects_scaleShort[value], 3u);
+    if (cell->kind == MENU_FX_CELL_SCALE) {
+        /* Labels come from the sequencer-owned shared StepScale table. */
+        memcpy(dst, stepScale_shortName((uint8_t)value), 3u);
         return 1u;
     }
     return 0u;
@@ -524,9 +545,8 @@ uint8_t menuEffects_paintEditView(const menuEffects_cell_t *cell)
     case MENU_FX_CELL_SCALE:
         menuEffects_copyField(&editDisplayBuffer[0][0], "FX Seq", 8u);
         menuEffects_copyField(&editDisplayBuffer[0][8], "StepScal", 8u);
-        if (value < EFFECT_SEQ_SCALE_COUNT)
-            menuEffects_copyField(&editDisplayBuffer[1][0],
-                                  menuEffects_scaleLong[value], 8u);
+        menuEffects_copyField(&editDisplayBuffer[1][0],
+                              stepScale_longName((uint8_t)value), 8u);
         (void)menuEffects_formatValue3(cell, &editDisplayBuffer[1][13]);
         break;
     case MENU_FX_CELL_MORPH_AMOUNT:
@@ -627,6 +647,37 @@ uint8_t menuEffects_service(void)
             actions |= MENU_FX_ACT_EXIT_EDIT;
         }
     }
+    /*
+     * Lock-edit hold follows the physical SEQ mask. Newly seen steps flash;
+     * releasing every SEQ button ends the lock editor and requests one repaint.
+     */
+    if (menuEffects_holdActive) {
+        uint16_t mask = buttonHandler_seqHeldMask();
+
+        if (mask == 0u) {
+            menuEffects_holdActive = 0u;
+            menuEffects_holdMask = 0u;
+            actions |= MENU_FX_ACT_REPAINT;
+        } else if (mask != menuEffects_holdMask) {
+            led_flashGroup(LED_FLASH_GROUP_SEQ,
+                           (uint16_t)(mask & (uint16_t)~menuEffects_holdMask));
+            menuEffects_holdMask = mask;
+            actions |= MENU_FX_ACT_REPAINT;
+        }
+    }
+    /* Repaint the row once per step/record/transport signature change. */
+    if (record &&
+        (effects_seqSerial() != menuEffects_ledSerial ||
+         record->seq_length != menuEffects_ledLen ||
+         record->seq_run_mode != menuEffects_ledMode ||
+         seq_isRunning() != menuEffects_ledRunning ||
+         (actions & MENU_FX_ACT_REPAIR) != 0u)) {
+        menuEffects_ledSerial = effects_seqSerial();
+        menuEffects_ledLen = record->seq_length;
+        menuEffects_ledMode = record->seq_run_mode;
+        menuEffects_ledRunning = seq_isRunning();
+        menuEffects_renderSeqLeds();
+    }
     return actions;
 }
 
@@ -664,4 +715,137 @@ void menuEffects_renderLeds(void)
     const effect_ui_hooks_t *hooks = menuEffects_hooks();
     if (hooks && hooks->render_leds)
         hooks->render_leds();
+}
+
+/* Resolve a visible Effect cell to Morph lane zero or a registry lane. */
+static uint8_t menuEffects_cellLane(const menuEffects_cell_t *cell,
+                                    uint8_t *lane)
+{
+    const effect_record_t *record = menuEffects_record();
+
+    if (!cell || !record)
+        return 0u;
+    if (cell->kind == MENU_FX_CELL_MORPH_AMOUNT) {
+        *lane = EFFECT_SEQ_LANE_MORPH;
+        return 1u;
+    }
+    if (cell->kind != MENU_FX_CELL_PARAM)
+        return 0u;
+    return effects_laneOfParam(record->type, cell->index, lane);
+}
+
+/* Return the lowest physically held SEQ step, or 0xFF when none is held. */
+static uint8_t menuEffects_firstHeldStep(void)
+{
+    uint8_t step;
+
+    for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++) {
+        if ((menuEffects_holdMask & (uint16_t)(1u << step)) != 0u)
+            return step;
+    }
+    return 0xFFu;
+}
+
+/* `sel` jumps on the press edge; other modes wait for the common hold timer. */
+void menuEffects_seqButtonPressed(uint8_t step)
+{
+    const effect_record_t *record = menuEffects_record();
+
+    if (record && record->seq_run_mode == EFFECT_SEQ_RUN_SEL)
+        effects_seqSelect(step);
+}
+
+/* Open FX lock editing after the shared VOICE hold threshold. */
+void menuEffects_seqHoldExpired(void)
+{
+    menuEffects_holdActive = 1u;
+    menuEffects_holdMask = 0u;
+}
+
+uint8_t menuEffects_seqHoldActive(void)
+{
+    return menuEffects_holdActive;
+}
+
+/*
+ * Edit one sequenceable cell across all held steps.
+ *
+ * The first held step seeds from its lock value when locked, otherwise from
+ * the ordinary cell display. The resulting value is clamped by the cell
+ * domain and EffectsManager writes/locks every held lane. Manager cells such
+ * as typ/run/len/scl are deliberately ignored while holding (D2).
+ */
+uint8_t menuEffects_holdEdit(const menuEffects_cell_t *cell, int16_t delta)
+{
+    uint8_t lane;
+    uint8_t first = menuEffects_firstHeldStep();
+    uint8_t stored;
+    int32_t next;
+    uint16_t value;
+
+    if (!menuEffects_holdActive || first == 0xFFu ||
+        !menuEffects_cellLane(cell, &lane))
+        return 0u;
+    next = effects_getLaneLock(scene_getActiveIndex(), first, lane, &stored)
+        ? (int32_t)stored : (int32_t)menuEffects_cellValue(cell);
+    next += delta;
+    value = (next < 0) ? 0u : (uint16_t)((next > 255) ? 255 : next);
+    menuEffects_clampValue(cell, &value);
+    return effects_setSeqLaneLock(scene_getActiveIndex(), menuEffects_holdMask,
+                                  lane, (uint8_t)value);
+}
+
+/* Show the first held step's lane value and report whether that lane is locked. */
+uint8_t menuEffects_holdDisplay(const menuEffects_cell_t *cell,
+                                uint8_t *value, uint8_t *locked)
+{
+    uint8_t lane;
+    uint8_t first = menuEffects_firstHeldStep();
+    uint8_t stored;
+
+    if (!value || !locked || !menuEffects_holdActive || first == 0xFFu ||
+        !menuEffects_cellLane(cell, &lane))
+        return 0u;
+    *locked = effects_getLaneLock(scene_getActiveIndex(), first, lane,
+                                  &stored);
+    *value = *locked ? stored : (uint8_t)menuEffects_cellValue(cell);
+    return 1u;
+}
+
+/*
+ * Paint the Effect page's SEQ row and then the active type hook.
+ *
+ * Locked steps inside the retained length are lit; steps beyond the length
+ * are dark. `sel` blinks its selected step, while fwd/rev/pip/rnd install the
+ * foreground FX chase layer. Stopped non-SEL modes have no active chase.
+ */
+void menuEffects_renderSeqLeds(void)
+{
+    const effect_record_t *record = menuEffects_record();
+    uint8_t len;
+    uint8_t active;
+    uint8_t step;
+
+    if (!record)
+        return;
+    len = record->seq_length;
+    if (len < EFFECT_SEQ_LENGTH_MIN || len > EFFECT_SEQ_LENGTH_MAX)
+        len = EFFECT_SEQ_LENGTH_DEFAULT;
+    for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++) {
+        uint8_t led = (uint8_t)(LED_STEP1 + step);
+        uint8_t lit = (uint8_t)(step < len &&
+                                record->steps[step].lock_mask != 0u);
+
+        led_setValue(lit, led);
+        led_setBlinkLed(led, (uint8_t)(
+            record->seq_run_mode == EFFECT_SEQ_RUN_SEL &&
+            step == effects_seqSelectedStep()));
+    }
+    active = effects_seqActiveStep();
+    if (record->seq_run_mode != EFFECT_SEQ_RUN_SEL &&
+        active != EFFECT_SEQ_STEP_NONE)
+        led_setActive_step(active);
+    else
+        led_clearActive_step();
+    menuEffects_renderLeds();
 }

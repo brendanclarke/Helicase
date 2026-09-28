@@ -599,6 +599,9 @@ boundary of `n`, which is 8 more sixteenths.
   gate already does.
 - Foreground consumes the latch, re-resolves changed lanes, and drives the
   chase.
+- The clock publication is placed after the fixed-grid Pattern work and is
+  still emitted on the Pattern-boundary early-return path; Scene activation
+  clears the prior FX step/held Morph state until the next boundary (D3).
 
 ### 11.2 Transport and `sel` (A11, A12)
 
@@ -766,9 +769,10 @@ typedef struct {
   re-pressing the current SELECT cycles its screens (S072_ST7 D1). The four
   endless pots edit the visible cells. An encoder click opens the full view.
 
-The provisional Step 7 `scl` labels are `/64`, `32t`, `/32`, `16t`, `/16`,
-`/8t`, `16.`, `/8`, `/4t`, `/8.`, `/4`, `/2`, `1br`, and `2br`. Step 8 moves
-the table to shared sequencer ownership.
+The Step 8 `scl` labels come from the shared sequencer-owned StepScale table:
+`/64`, `32t`, `/32`, `16t`, `/16`, `/8t`, `16.`, `/8`, `/4t`, `/8.`, `/4`,
+`/2`, `1br`, and `2br`. Track scale and FX scale therefore share one index
+meaning, with stale values displayed as the `/16` default without rewriting.
 
 ### 13.3 `typ` (F3)
 
@@ -786,6 +790,10 @@ the table to shared sequencer ownership.
   is written into every held step and the lock bits are set. Holding uses the
   same threshold as the VOICE View-B overlay. The display shows the first held
   step's value, with the Tier-1 underline when that lane is locked.
+- **D1:** an unlocked held lane displays the ordinary cell value; a locked
+  lane displays its held-step value with the underline marker.
+- **D2:** `typ`, `run`, `len`, `scl`, and non-sequenceable cells are inert while
+  a SEQ hold is active; normal editing resumes after release.
 - **`sel` mode:** a tap or a hold jumps to the step.
 - **No lock removal yet** (A15).
 - **LEDs:** steps with any lock (within the length) are lit. The FX chase
@@ -945,12 +953,12 @@ Effect region, 512 B per Scene, at Scene offset 128:
 | 1 | `effect_record_t` × 16 in `scene_t` (19,200 → 25,920) | SRAM1 | 6,720 | SceneData |
 | 2 | `effect_morph_amount` × 16 | SRAM1 | 16 (+pad) | SceneData |
 | 3 | HCNAMES growth: name mirror +16 × 9, source register +16 × 2 | SRAM1 | about 176 (exact at link) | filesystem |
-| 4 | Resolution state: interpolation, Pattern overlay values, overlay mask, **overlay owning track (64 B, F1)**, last-applied, held Morph-lane value, sequencer runtime, flags | SRAM1 | about 282 | EffectsManager |
+| 4 | Resolution state: interpolation, Pattern overlay values, overlay mask, **overlay owning track (64 B, F1)**, last-applied, held Morph-lane value, sequencer runtime, flags | SRAM1 | `effects_state_t` 84 | EffectsManager |
 | 4b | `fxbuf_handoff_t` (§12.6) | SRAM1 | about 176 | FxBuffer |
 | 5 | LFO → `fx` contributions | SRAM1 | about 48 | EffectsManager |
 | 6 | Voice-unit table and share bounds | SRAM1 | about 24 | FxBuffer |
-| 7 | `seq_effect_automation_dirty` and step latch | SRAM1 | 9 | sequencer |
-| 8 | FX page state | SRAM1 | about 16 | menuEffects |
+| 7 | `seq_effect_automation_dirty` and FX event latch | SRAM1 | 9 | sequencer |
+| 8 | FX page state, including held-step mask and LED signature | SRAM1 | 21 | menuEffects |
 | 9 | Effect runtime instance: a union of every type's runtime struct, sized automatically (about 96 B today) | DTCM `.dtcmz` | about 96 | EffectsManager |
 | 10 | FX bus: `sample_mx_t` L/R × 32, processed in place | DTCM `.dtcmz` | 256 | mixer |
 | 11 | Arena `.dtcm_fxbuf` | DTCM | the rest, about 126,600 | FxBuffer |
@@ -1011,7 +1019,7 @@ next. If a regression appears, only one step touched that area.
 | 5 | FX bus: sends, fader modes, mono/stereo bus, return routing, audible FX_SEND | Needs steps 2 and 4 | Listening test in all three fader modes; jack fallback; CPU |
 | 6 | Storage: `.fx` v2 parse/write; HCNAMES 161 rows with Effect provenance; Scene/Bank `<name>.fx` load/save; `sceneset.scg` key; AutoSave v3 and Effect reader | HCNAMES and AutoSave both carry the 145-row assumption and name mirror, so they change together | Hand-written fixture card: legacy, v2, missing, malformed, and a partial Bank; reboot restore |
 | 7 | `menuEffects.c`: pages, default SELECT layout, `typ`, SHIFT Morph view, TRACK/SHIFT+TRACK, Euklid disabled | UI over frozen setters | Implemented; hardware UI walk-through pending |
-| 8 | FX sequencer: TIM3 latch, modes, shared scale table (including the track-scale UI switch), transport rules, lock editing, LEDs | Needs the page (step 7) for editing | Every mode × length × scale; the Scene-switch alignment example; `sel` stopped |
+| 8 | FX sequencer: TIM3 latch, modes, shared scale table (including the track-scale UI switch), transport rules, lock editing, LEDs | Needs the page (step 7) for editing | Built/clean-link verified; hardware matrix pending |
 | 9 | Automation and LFO: `fx` category, overlay apply/restore, priority (§9), LFO `fx` namespace, rebind | Needs both overlay producers (steps 4 and 8) | Automate, sequence, and LFO one parameter together |
 | 10 | Edit-mask selection gate and Effect fan-out | Needs every type-changing commit path to exist | Mismatch rejection; fan-out correctness |
 | 11 | `EFFECTS_BUS_REFERENCE.md` and spec updates; handoff | Written against the built code | Docs match the code |

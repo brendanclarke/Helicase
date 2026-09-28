@@ -38,7 +38,8 @@ stale `typ` candidate) and `S072_ST6_IMPLEMENTATION.md` §12.3 Findings 1–2. T
 walk-through exercises SELECT, Scene Save and Kit Save paths that those fixes
 touch.
 
-**Status:** schedule only. No source has been changed.
+**Status:** implementation complete in the working tree; clean production build
+passes. Hardware acceptance gates remain pending.
 
 **Line numbers** refer to the Step 7 working tree reviewed in
 `S072_ST7_IMPLEMENTATION.md` §13.
@@ -1344,3 +1345,191 @@ on the transport change.
 
 Revert the change set. There is no file-format change. The track-scale index
 reinterpretation only affects display.
+
+---
+
+## 11. Implementation notes
+
+### 11.1 Source changes completed
+
+- Added `Core/Sequencer/StepScale.c/.h` as the single fourteen-entry, 96-PPQ
+  scale table. Pattern track defaults and Menu formatting now use the shared
+  index order; stale PAT4 values display as `/16` without being rewritten.
+- Added the one-byte TIM3 FX RESET/STEP latch in `sequencer.c`. The ISR-side
+  path computes `fwd`, `rev`, `pip`, and `rnd` from `seq_elapsedPpqTicks` and
+  publishes only the compact event. `effects_service()` consumes it in
+  foreground. Pattern-boundary early returns still publish the independent FX
+  boundary.
+- Expanded EffectsManager's retained resolution state to 84 bytes and added
+  selected/active-step, lane lookup, lock inspection, and held-step lock-write
+  APIs. Scene activation invalidates the prior step and held Morph value;
+  `sel` becomes valid immediately on a SEQ selection, including while stopped.
+- Added FX SEQ hold/tap routing to ButtonHandler/Menu. Sequenceable StereoFilter
+  lanes and Morph locks write through EffectsManager; `typ`, `run`, `len`,
+  `scl`, and other non-sequenceable cells remain inert during a hold. The
+  Effect page owns lock/chase/selected-step LEDs and suppresses the Pattern
+  chase layer while visible.
+- Added the missing PRIMASK compatibility intrinsics to the project CMSIS shim
+  so the latch's short atomic take/publish transaction uses the existing target
+  compatibility boundary.
+
+### 11.2 SRAM and link measurement
+
+The clean ST8 production link on 2026-09-28 is:
+
+```text
+text 478720   data 416   bss 426160   dec 905296
+Flash 479,136 / 491,520 B; headroom 12,384 B
+ITCM 3,768 / 16,384 B
+DTCM statics 4,448 B
+FXBUF 126,624 B at 0x20001160; margin 3,744 B
+```
+
+The approved ST8 SRAM additions are `effects_state_t` 76→84 bytes (+8 after
+alignment), `seq_fxEvent` +1 byte, and `menuEffects` +7 bytes, for a
+linker-visible +16 bytes in SRAM1. DTCM and the FX arena are unchanged.
+
+### 11.3 Verification status
+
+- `make clean` followed by `make -j2 all`: passed.
+- `git diff --check`: passed after the implementation edits.
+- Existing warnings remain in unrelated filesystem, packed USB, splash, and
+  nano-libc/linker code; no new ST8 warning was introduced by the final build.
+- Hardware gates in §10 remain unexecuted: mode × length × scale, Scene A17
+  alignment, stopped `sel`, Morph hold, persistence, and CPU measurement.
+
+---
+
+## 12. Assessment (2026-09-28)
+
+### 12.1 Result
+
+**Accepted, with one functional finding (F1) to fix before or with Step 9.**
+The user confirmed on hardware (with `flt`) that the firmware runs and the
+five test points pass.
+
+### 12.2 Build
+
+Clean rebuild (`make clean && make all`), exit 0:
+
+```text
+text 478720   data 416   bss 426160   dec 905296
+Flash 479,136 / 491,520 B   headroom 12,384 B   (Step 7 → Step 8: about +3.1 KB)
+DTCM statics 4,448 B        FXBUF 126,624 B at 0x20001160, margin 3,744 B
+```
+
+- **Warnings.** There are 20 warning lines, all pre-existing:
+  - filesystem unused statics;
+  - USB `packed`;
+  - splash constants;
+  - EuklidGenerator sign-compare;
+  - asyncfatfs unused parameter;
+  - `PatternData.c:160` packed-member address (`pat_addrPtr`, not in the ST8
+    diff);
+  - nano-libc stubs;
+  - the LTO serial note.
+
+  No warning comes from StepScale, sequencer, EffectsManager, menuEffects,
+  menu, buttonHandler, ledHandler or the CMSIS shim.
+- **Flash.** Headroom is now 12,384 B, below `link_budget.py`'s 16 KiB soft
+  warning. Every later step must estimate its flash cost against this figure.
+  Step 9's estimate is in `S072_ST9_IMPLEMENTATION.md` §0.
+
+### 12.3 Code against schedule
+
+| Area | Status | Notes |
+|---|---|---|
+| `StepScale.c/.h` | ✔ | 14 entries, default 4 (`/16`). The `_shortName`/`_longName` fallback to the default covers stale PAT4 values. |
+| `sequencer.c` latch | ✔ | `seq_fxPublishStep` keeps RESET and ORs in STEP + index; `seq_fxPublishReset` overwrites. Take/publish sit under PRIMASK. |
+| `seq_fxClockTick` | ✔ + guard | Adds a `run_mode >= COUNT` guard (good; retained data is untrusted). `rnd` uses the masked `GetRngValue()`. |
+| FX tick on Pattern-boundary returns | ✔ deviation, accepted | Both `seq_handleMasterBoundary()` early returns now call `seq_fxClockTick()` + `midiParser_checkMtc()` before returning. Each path still publishes exactly once per PPQ tick (the returns skip the tail call), so there is no double publish. This fixes a real hole: the Pattern switch bar would otherwise have dropped the FX boundary. |
+| RESET in `seq_setStepIndexToStart` | ✔ | Published before the Scene/voice restores. |
+| `cmsis_intrinsics.h` | ✔ | `__get_PRIMASK`/`__set_PRIMASK`/`__disable_irq` added to the compat shim. This is required for the host/compat build and is in scope. |
+| `EffectTypes.h` | ✔ | `EFFECT_SEQ_SCALE_*` aliases to `STEP_SCALE_*`. A `_Static_assert` in EffectsManager pins them equal. |
+| PatternData / MenuText / menu.c track scale | ✔ | `TRACK_SCALE_DEFAULT`; the `trackScaleNames` table is gone. The `MENU_TRACK_SCALE` count (14) bounds encoder edits. The display falls back to `/16` for stale values. `pat_applyTrackSettingsToMenu` passes the raw byte through: no clamp was added, and none is needed (display- and encoder-bounded; storage is not rewritten, which matches the rollback note). |
+| EffectsManager state/API | ✔ | 84 B `_Static_assert`; consume, active step, override, held Morph, `activateScene`/`changeType` resets as scheduled. |
+| menuEffects hold / lock edit / LEDs | ✔ | As scheduled. See F2 for Morph display. |
+| buttonHandler / ledHandler | ✔ | SEQ press/release and hold expiry. `led_updateCurrentStep` returns early on `EFFECT_PAGE`. |
+
+### 12.4 Findings
+
+**F1 (medium, functional): the `sel` selection is lost on every RESET.**
+`seq_step_valid` serves two purposes:
+
+- it validates the clock step (set by `effects_seqConsume` STEP);
+- it validates the `sel` cursor (set by `effects_seqSelect`).
+
+RESET clears it in `effects_seqConsume`. `seq_setStepIndexToStart()`
+publishes RESET on:
+
+- transport start;
+- transport stop;
+- every Pattern-boundary switch (`sequencer.c` ~1086);
+- external reset.
+
+In `sel` mode, `seq_fxClockTick` publishes no STEP, so nothing sets the flag
+again. The result:
+
+- Select step 5 while stopped (it applies, which passes gate 7), then press
+  play. `sel` now applies **no** locks until SEQ is tapped again.
+- A Pattern change drops the selection in the same way.
+- After a Scene switch, `effects_seqSelectedStep()` returns NONE, so the
+  selected-step LED also disappears.
+
+This contradicts D3/A-plan (`sel` holds the selected step through transport)
+and gate 7 "Running: sel stays on the selected step".
+
+*Fix (no RAM cost; restores the scheduled §4 behavior):* `sel` needs no
+validity flag, because A12 says "`sel` always applies".
+
+1. The `effects_seqStepFor()` `sel` branch returns
+   `seq_sel_step % len` unconditionally.
+2. `effects_seqSelectedStep()` returns `seq_sel_step` unconditionally.
+3. `effects_seqSelect()` stops setting `seq_step_valid`, which again belongs
+   only to the clock step.
+4. In `sel`, `effects_service()` re-latches the selected step's Morph lock
+   whenever no held value is valid (after a RESET or a Scene switch). The
+   Morph lane then keeps applying, as "`sel` always applies" requires.
+
+The cursor carries across a Scene switch and is bounded by the new Scene's
+`len`. That was the scheduled D3 behavior ("in `sel` the selected step
+applies immediately").
+
+Step 9 §3.1 schedules this fix, because Step 9 edits the same functions.
+
+**F2 (low, display): a held `mrp` lock does not show its lock value.**
+`menu_applyEffectMarkers()` (`menu.c` ~2559–2562) formats non-PARAM manager
+cells through `menuEffects_formatValue3()`. That function writes nothing for
+`MENU_FX_CELL_MORPH_AMOUNT`: it returns 0 and only handles TYPE/RUN/SCALE. The
+field therefore keeps the normally rendered retained `mrp` value, while the
+underline correctly marks it as locked.
+
+*Fix:* in `menu_applyEffectMarkers()`, format `MENU_FX_CELL_MORPH_AMOUNT` with
+`numtostrpu(field, value, ' ')`, the same 0..255 numeric form the normal cell
+uses. Step 9 §7.8 schedules this, because Step 9 touches the same marker
+function.
+
+**F3 (note): the track-scale clamp was not added in
+`pat_applyTrackSettingsToMenu`.** This is acceptable, as the table row above
+explains. No action is needed.
+
+### 12.5 Prerequisite fixes from earlier steps: still not applied
+
+These are still absent from the tree and still need applying:
+
+- **ST6 F1.** Blank-name Scene Save must write `"        "` rather than
+  `fx_stem` (`filesystem.c` ~19657–19661 and ~19886–19890).
+- **ST6 F2.** Remove the Effect-row lines from
+  `filesystem_saveKitDirectory_tick` (Kit Save must not write Effect rows).
+- **ST7 F1.** Add `menuEffects_typeEdit = 0u;` at the top of
+  `menuEffects_selectPressed()` (`menuEffects.c` ~299).
+
+The Step 9 schedule relists them in its change index (§1, rows P1–P3) so they
+land with the Step 9 change set.
+
+### 12.6 Hardware
+
+The user reports hardware OK, and the five test points confirmed with `flt`.
+Gates 7 (after transport start) and 8 (the `mrp` display) will show F1/F2
+until those fixes are applied. The remaining §10 gates (6 mode × scale sweep,
+9 A17 alignment, 12 persistence, 13 CPU) roll into Step 9's regression list.

@@ -494,6 +494,14 @@ static void buttonHandler_armTimerActionStep(int8_t stepNr)
         menu_voiceAutoOverlayHoldExpired();
         return;
     }
+    if (bh_state.selectButtonMode == SELECT_MODE_FX) {
+        /*
+         * Effect page: the common VOICE hold threshold opens FX lane-lock
+         * editing. The timer sentinel consumes the matching release.
+         */
+        menuEffects_seqHoldExpired();
+        return;
+    }
 
     buttonHandler_armedAutomationStep = stepNr;
     led_setBlinkLed((uint8_t)(LED_STEP1 + ((uint8_t)stepNr % NUM_STEPS_PER_BAR)), 1);
@@ -747,6 +755,17 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
         case SELECT_MODE_PERF:
             menu_perfModeSceneButtonPressed(seqButtonPressed);
             break;
+        case SELECT_MODE_FX:
+            /*
+             * FX SEQ press: `sel` jumps immediately; all modes arm the
+             * common hold timer unless an existing lock hold owns the row.
+             */
+            menuEffects_seqButtonPressed(seqButtonPressed);
+            if (menuEffects_seqHoldActive())
+                buttonHandler_buttonTimerStepNr = TIMER_ACTION_OCCURED;
+            else
+                buttonHandler_setTimeraction(seqButtonPressed);
+            break;
         default:
             break;
         }
@@ -778,6 +797,15 @@ static void buttonHandler_seqButtonReleased(uint8_t seqButtonPressed)
         break;
 
     case SELECT_MODE_PERF:
+        break;
+
+    case SELECT_MODE_FX:
+        /* Hold-owned releases are consumed; a short tap only clears its timer. */
+        if (menuEffects_seqHoldActive()) {
+            buttonHandler_buttonTimerStepNr = TIMER_ACTION_OCCURED;
+            return;
+        }
+        (void)buttonHandler_TimerActionOccured();
         break;
 
     default:

@@ -101,8 +101,11 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   sequencer playback effect — see `PATTERN_DYNAMIC_STACK.md` §6.4.
 - S072 Step 7: SHIFT+PERF now opens the live Effect page owned by
   `Core/Menu/menuEffects.c`; edits affect only the active Scene until Step 10,
-  SEQ buttons remain inert until Step 8, and the retired Euklid UI is compiled
-  out behind `ENABLE_EUKLID_PAGE=0`.
+  and the retired Euklid UI is compiled out behind `ENABLE_EUKLID_PAGE=0`.
+- S072 Step 8: the FX sequencer is live: TIM3 publishes a compact FX step/reset
+  latch, `effects_service()` applies active lane locks in foreground, SEQ hold
+  editing and FX-row LEDs are page-owned, and Pattern track scale shares the
+  fourteen-entry StepScale table while playback remains unchanged.
 - Phase 4.5 copy operations (`pat_copyTrack`, `pat_copyPattern`,
   `pat_copyBar`) remain queued.
 - S069 planning documents (`S069_ATS_PAT_BOUNDED_CPU.md`,

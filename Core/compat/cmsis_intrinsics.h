@@ -220,4 +220,29 @@ __STATIC_FORCEINLINE uint32_t __get_APSR(void)
     return result;
 }
 
+/*
+ * PRIMASK interrupt-control intrinsics used by the one-byte FX event latch.
+ *
+ * These are the small CMSIS-Core wrappers needed by foreground/TIM3 handoff
+ * code in this port. Saving and restoring the caller's mask preserves a
+ * critical section when the publisher or consumer is nested under an already
+ * disabled interrupt context.
+ */
+__STATIC_FORCEINLINE uint32_t __get_PRIMASK(void)
+{
+    uint32_t result;
+    __asm volatile ("mrs %0, primask" : "=r" (result));
+    return result;
+}
+
+__STATIC_FORCEINLINE void __set_PRIMASK(uint32_t value)
+{
+    __asm volatile ("msr primask, %0" : : "r" (value) : "memory");
+}
+
+__STATIC_FORCEINLINE void __disable_irq(void)
+{
+    __asm volatile ("cpsid i" : : : "memory");
+}
+
 #endif /* CMSIS_INTRINSICS_H_ */

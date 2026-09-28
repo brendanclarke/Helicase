@@ -192,6 +192,14 @@ Parameters change through these paths:
    type-specific defaults and clearing the sequence. Step 10 adds the edit-mask
    type-matching gate and fan-out inside that API.
 
+9. **FX sequencer edit/playback (S072 Step 8):** the active Scene's FX run,
+   length, scale, per-step values, and lane locks remain in its retained
+   Effect record. `menuEffects` writes lock edits through EffectsManager for
+   the physically held steps, while the TIM3 latch and foreground service
+   apply them without changing the Pattern automation layer. Track scale uses
+   the shared StepScale index table and defaults to `1/16`; track playback
+   remains unchanged until the joint track-scale pass.
+
 ### When parameters become visible
 
 - **VOICE page:** Reads from the active Scene's descriptor image for the

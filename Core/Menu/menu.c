@@ -45,6 +45,7 @@
 #include "filesystem.h"
 #include "SampleMemory.h"
 #include "sequencer.h"
+#include "StepScale.h"
 #include "PatternData.h"
 #include "PatternStackService.h"
 #include "SceneData.h"
@@ -1763,6 +1764,7 @@ static void va_underlineService(void);
 static void menu_sceneLiveRefreshService(void);
 static void va_refreshAutomationLeds(void);
 static void va_applyVoiceMarkers(void);
+static void menu_applyEffectMarkers(void);
 static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta);
 static void va_formatValue3(const menu_cell_t *cell, uint8_t value, char out[3]);
 
@@ -2508,6 +2510,67 @@ static void va_applyVoiceMarkers(void)
                 marker_col[i] = (uint8_t)(start + left);
                 desired_valid |= (uint8_t)(1u << i);
             }
+        }
+    }
+    va_queueMarkerTransaction(desired_base, desired_valid,
+                              marker_row, marker_col);
+}
+
+/*
+ * Apply held FX-lane value markers after the ordinary Effect frame is formed.
+ *
+ * While a SEQ hold is active, sequenceable cells display the first held
+ * step's value. Locked lanes underline the rightmost value glyph, reusing the
+ * existing CGRAM transaction so LCD queue ownership remains centralized.
+ */
+static void menu_applyEffectMarkers(void)
+{
+    uint8_t glyph_probe[8];
+    uint8_t desired_base[4] = { 0u, 0u, 0u, 0u };
+    uint8_t marker_row[4] = { 0u, 0u, 0u, 0u };
+    uint8_t marker_col[4] = { 0u, 0u, 0u, 0u };
+    uint8_t desired_valid = 0u;
+    uint8_t activePage;
+    uint8_t activeParameter;
+    uint8_t first;
+    uint8_t count;
+    uint8_t i;
+
+    if (menu_activePage != EFFECT_PAGE)
+        return;
+    activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    activeParameter = (uint8_t)(menuIndex & MASK_PARAMETER);
+    first = editModeActive ? activeParameter : 0u;
+    count = editModeActive ? 1u : 4u;
+    for (i = 0u; i < count; i++) {
+        uint8_t column = (uint8_t)(first + i);
+        menu_cell_t cell = menu_resolveCell(activePage, column);
+        uint8_t value;
+        uint8_t locked;
+        char *field;
+        int8_t right;
+        uint8_t slot = editModeActive ? 0u : i;
+
+        if (cell.kind != MENU_CELL_EFFECT ||
+            !menuEffects_holdDisplay(&cell.fx, &value, &locked))
+            continue;
+        field = editModeActive ? &editDisplayBuffer[1][13]
+                               : &editDisplayBuffer[1][4u * i];
+        if (cell.fx.kind == MENU_FX_CELL_PARAM)
+            va_formatValue3(&cell, value, field);
+        else
+            (void)menuEffects_formatValue3(&cell.fx, field);
+        if (!locked)
+            continue;
+        for (right = 2; right >= 0 && field[right] == ' '; right--)
+            ;
+        if (right >= 0 && lcd_underlineGlyph((uint8_t)field[right],
+                                             glyph_probe)) {
+            desired_base[slot] = (uint8_t)field[right];
+            marker_row[slot] = 1u;
+            marker_col[slot] = (uint8_t)((editModeActive ? 13u : 4u * i) +
+                                         (uint8_t)right);
+            desired_valid |= (uint8_t)(1u << slot);
         }
     }
     va_queueMarkerTransaction(desired_base, desired_valid,
@@ -7469,7 +7532,7 @@ static uint8_t getMaxEntriesForMenu(uint8_t menuId)
     case MENU_MIDI_FILTERING:return (uint8_t)midiFilterNames[0][0];
     case MENU_PPQ:           return (uint8_t)ppqNames[0][0];
     case MENU_EXT_SYNC:      return (uint8_t)extSyncNames[0][0];
-    case MENU_TRACK_SCALE:    return (uint8_t)trackScaleNames[0][0];
+    case MENU_TRACK_SCALE:    return (uint8_t)STEP_SCALE_COUNT;
     default: return 0;
     }
 }
@@ -7515,7 +7578,7 @@ static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *bu
     case MENU_MIDI_FILTERING: p = midiFilterNames[curParmVal+1];    break;
     case MENU_PPQ:            p = ppqNames[curParmVal+1];           break;
     case MENU_EXT_SYNC:       p = extSyncNames[curParmVal+1];       break;
-    case MENU_TRACK_SCALE:    p = trackScaleNames[curParmVal+1];    break;
+    case MENU_TRACK_SCALE:    p = stepScale_shortName((uint8_t)curParmVal); break;
     default: break;
     }
     buf[0]=p[0]; buf[1]=p[1]?p[1]:' '; buf[2]=p[2]?p[2]:' ';
@@ -9301,8 +9364,10 @@ static void menu_repaintGeneric(void)
         /* Effect manager cells paint their own full view; PARAM cells fall
          * through to Menu's descriptor renderer below. */
         if (cell.kind == MENU_CELL_EFFECT &&
-            menuEffects_paintEditView(&cell.fx))
+            menuEffects_paintEditView(&cell.fx)) {
+            menu_applyEffectMarkers();
             return;
+        }
         if (cell.kind == MENU_CELL_STATIC &&
             cell.static_param == PAR_RUNTIME_CPU_USE) {
             menu_displayCpuUseEdit();
@@ -9518,6 +9583,7 @@ static void menu_repaintGeneric(void)
     /* S066 markers are applied only after the ordinary VOICE frame is fully
      * formatted, including the active-parameter capitalization above. */
     va_applyVoiceMarkers();
+    menu_applyEffectMarkers();
 }
 
 /* -----------------------------------------------------------------------
@@ -9578,6 +9644,12 @@ static void menu_encoderChangeParameter(int8_t inc)
         (cell.static_param == PAR_RUNTIME_CPU_USE ||
          cell.static_param == PAR_PAT_STORE_USE))
         return;
+
+    /* Held SEQ steps write lane locks, never retained menu values (D2). */
+    if (cell.kind == MENU_CELL_EFFECT && menuEffects_seqHoldActive()) {
+        (void)menuEffects_holdEdit(&cell.fx, inc);
+        return;
+    }
 
     /* `typ` changes only through its full view; turning browses candidates. */
     if (cell.kind == MENU_CELL_EFFECT &&
@@ -10755,6 +10827,12 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
     /* The endless pot over `typ` is intentionally inert. */
     if (cell.kind == MENU_CELL_EFFECT && cell.fx.kind == MENU_FX_CELL_TYPE)
         return;
+    /* Held SEQ steps write lane locks, never retained menu values (D2). */
+    if (cell.kind == MENU_CELL_EFFECT && menuEffects_seqHoldActive()) {
+        if (menuEffects_holdEdit(&cell.fx, delta))
+            menu_knobs_dirty = 1u;
+        return;
+    }
     if (cell.kind == MENU_CELL_STATIC &&
         (cell.static_param == PAR_RUNTIME_CPU_USE ||
          cell.static_param == PAR_PAT_STORE_USE)) return;
@@ -12189,10 +12267,10 @@ void menu_switchPage(uint8_t pageNr)
         buttonHandler_showMuteLEDs();
         menu_refreshPerfSceneLeds();
     } else if (pageNr == EFFECT_PAGE) {
-        /* Effect page owns mute/SELECT LEDs; FX step LEDs arrive in Step 8. */
+        /* Effect page owns mute/SELECT LEDs and the FX-sequencer row. */
         buttonHandler_showMuteLEDs();
         led_setActiveSelectButton(menu_getSubPage());
-        menuEffects_renderLeds();
+        menuEffects_renderSeqLeds();
     } else {
         led_setActiveVoiceLeds((uint8_t)(1 << menu_getActiveVoice()));
         menu_muteModeActive = 0;
@@ -12984,7 +13062,7 @@ void menu_init(void)
     parameter_values[PAR_EUKLID_STEPS]  = 16;
     parameter_values[PAR_ROLL]          = 8;
     parameter_values[PAR_BPM]           = 120;
-    parameter_values[PAR_TRACK_SCALE]   = TRACK_SCALE_OFF;
+    parameter_values[PAR_TRACK_SCALE]   = TRACK_SCALE_DEFAULT;
     parameter_values[PAR_OSC_WAVE_INTERP] = 0;
     /*
      * Default AutoSave ON even when no settings file/card can be loaded.

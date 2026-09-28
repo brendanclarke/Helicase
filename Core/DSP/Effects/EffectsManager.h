@@ -257,6 +257,27 @@ uint8_t effects_setSeqLength(uint8_t scene_index, uint8_t length);
 uint8_t effects_setSeqStepScale(uint8_t scene_index, uint8_t scale);
 uint8_t effects_setMorphAmount(uint8_t scene_index, uint8_t amount);
 
+/*
+ * Live FX-sequencer state and lock API (Session 072 step 8; plan §11/§13.4).
+ *
+ * EFFECT_SEQ_STEP_NONE is returned when a non-SEL sequence is stopped, has
+ * not yet consumed a boundary, or has no valid active step. The remaining
+ * functions are foreground-only: EffectsManager consumes the TIM3 latch,
+ * `sel` selects a retained step immediately, and lane helpers translate the
+ * registry's descriptor lanes for the Effect page's hold editor.
+ */
+#define EFFECT_SEQ_STEP_NONE 0xFFu
+uint8_t effects_seqActiveStep(void);
+uint8_t effects_seqSelectedStep(void);
+void effects_seqSelect(uint8_t step);
+uint8_t effects_seqSerial(void);
+uint8_t effects_laneOfParam(effect_type_id_t type, uint8_t index,
+                             uint8_t *lane_out);
+uint8_t effects_getLaneLock(uint8_t scene_index, uint8_t step, uint8_t lane,
+                            uint8_t *value_out);
+uint8_t effects_setSeqLaneLock(uint8_t scene_index, uint16_t step_mask,
+                               uint8_t lane, uint8_t value);
+
 #if DEV_MODE_DIAGNOSTIC
 /* 0 means the immutable registry passed its runtime self-check. */
 uint8_t effects_registryCheckResult(void);

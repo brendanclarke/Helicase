@@ -14,6 +14,8 @@
 #include "MenuText.h"
 #include "EffectParamRows.h"
 #include "SceneData.h"
+#include "sequencer.h"
+#include "StepScale.h"
 #include "StereoFilterParameters.h"
 #include "StereoFilterEffect.h"
 #include <string.h>
@@ -94,9 +96,10 @@ _Static_assert(sizeof(StereoFilterRuntime) <= sizeof(effects_runtime_t),
 /*
  * Manager-owned runtime state.
  *
- * The state is SRAM1-resident and exactly 76 bytes: active runtime type and
- * Scene, a force-write flag, one last-applied byte per common type domain, and
- * the common return settings consumed by the later FX bus.
+ * The state is SRAM1-resident and exactly 84 bytes: active runtime type and
+ * Scene, a force-write flag, one last-applied byte per common type domain,
+ * live FX step/selection state, the held Morph lock, and the common return
+ * settings consumed by the later FX bus.
  */
 typedef struct {
     effect_type_id_t runtime_type;
@@ -104,11 +107,20 @@ typedef struct {
     uint8_t force_all;
     uint8_t reserved;
     uint8_t last_applied[EFFECT_PARAM_COUNT];
+    uint8_t seq_step;
+    uint8_t seq_step_valid;
+    uint8_t seq_sel_step;
+    uint8_t held_morph;
+    uint8_t held_morph_valid;
+    uint8_t seq_serial;
     effects_common_runtime_t common;
 } effects_state_t;
 
-_Static_assert(sizeof(effects_state_t) == 76u,
+_Static_assert(sizeof(effects_state_t) == 84u,
                "effects_state_t size is recorded in SRAM_MANIFEST.md");
+_Static_assert(STEP_SCALE_COUNT == EFFECT_SEQ_SCALE_COUNT &&
+               STEP_SCALE_DEFAULT == EFFECT_SEQ_SCALE_DEFAULT,
+               "Pattern and FX scale contracts must remain identical");
 
 static effects_state_t effects_state;
 
@@ -430,6 +442,194 @@ uint8_t effects_setMorphAmount(uint8_t scene_index, uint8_t amount)
     return (uint8_t)(scene_getEffectMorphAmount(scene_index) != before);
 }
 
+/* Clamp a retained FX sequence length into the live 1..16 domain. */
+static uint8_t effects_seqLength(const effect_record_t *record)
+{
+    uint8_t len = record->seq_length;
+
+    return (len < EFFECT_SEQ_LENGTH_MIN || len > EFFECT_SEQ_LENGTH_MAX)
+        ? EFFECT_SEQ_LENGTH_DEFAULT : len;
+}
+
+/* Latch a Morph-lane lock as the held Effect Morph base (plan §9). */
+static void effects_seqLatchMorph(const effect_record_t *record, uint8_t step)
+{
+    const effect_seq_step_t *entry = &record->steps[step];
+
+    if ((entry->lock_mask & (uint16_t)(1u << EFFECT_SEQ_LANE_MORPH)) != 0u) {
+        effects_state.held_morph = entry->value[EFFECT_SEQ_LANE_MORPH];
+        effects_state.held_morph_valid = 1u;
+    }
+}
+
+/*
+ * Consume the one-byte TIM3 FX latch in foreground context.
+ *
+ * RESET invalidates the previous step and clears the held Morph lane. STEP
+ * records the newest position and latches its Morph lock. RESET and STEP may
+ * be combined by a start/reset boundary, so RESET is intentionally handled
+ * first. No DSP, LCD, or physical LED work is performed here.
+ */
+static void effects_seqConsume(const effect_record_t *record)
+{
+    uint8_t event = seq_fxTakeEvent();
+
+    if (event == 0u)
+        return;
+    if ((event & SEQ_FX_EVENT_RESET) != 0u) {
+        effects_state.seq_step_valid = 0u;
+        effects_state.held_morph_valid = 0u;
+    }
+    if ((event & SEQ_FX_EVENT_STEP) != 0u) {
+        /* A queued clock event cannot create a selection after a mode change. */
+        if (record->seq_run_mode != EFFECT_SEQ_RUN_SEL) {
+            effects_state.seq_step = (uint8_t)(event & SEQ_FX_EVENT_INDEX);
+            effects_state.seq_step_valid = 1u;
+            effects_seqLatchMorph(record,
+                                   (uint8_t)(effects_state.seq_step %
+                                             effects_seqLength(record)));
+        }
+    }
+    effects_state.seq_serial++;
+}
+
+/* Return the active retained step, or the public NONE sentinel. */
+static uint8_t effects_seqStepFor(const effect_record_t *record)
+{
+    uint8_t len = effects_seqLength(record);
+
+    if (record->seq_run_mode == EFFECT_SEQ_RUN_SEL)
+        return effects_state.seq_step_valid
+            ? (uint8_t)(effects_state.seq_sel_step % len)
+            : EFFECT_SEQ_STEP_NONE;
+    if (!seq_isRunning() || !effects_state.seq_step_valid)
+        return EFFECT_SEQ_STEP_NONE;
+    return (uint8_t)(effects_state.seq_step % len);
+}
+
+/* Replace a descriptor value with a locked value from the active step. */
+static uint8_t effects_seqOverride(const effect_registry_entry_t *entry,
+                                   const effect_seq_step_t *step,
+                                   uint8_t index, uint8_t *value)
+{
+    uint8_t lane;
+
+    for (lane = 1u; lane < EFFECT_SEQ_LANE_COUNT; lane++) {
+        if (entry->lanes[lane] == index &&
+            (step->lock_mask & (uint16_t)(1u << lane)) != 0u) {
+            *value = step->value[lane];
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+uint8_t effects_seqActiveStep(void)
+{
+    const effect_record_t *record =
+        scene_effectConst(effects_state.scene_index);
+
+    return record ? effects_seqStepFor(record) : EFFECT_SEQ_STEP_NONE;
+}
+
+uint8_t effects_seqSelectedStep(void)
+{
+    /* No selected step is valid until the user selects one for this Scene. */
+    return effects_state.seq_step_valid
+        ? effects_state.seq_sel_step : EFFECT_SEQ_STEP_NONE;
+}
+
+/* Select one retained step immediately; `sel` uses it while stopped too. */
+void effects_seqSelect(uint8_t step)
+{
+    const effect_record_t *record =
+        scene_effectConst(effects_state.scene_index);
+
+    if (!record || step >= effects_seqLength(record))
+        return;
+    effects_state.seq_sel_step = step;
+    effects_state.seq_step_valid = 1u;
+    if (record->seq_run_mode == EFFECT_SEQ_RUN_SEL)
+        effects_seqLatchMorph(record, step);
+    effects_state.seq_serial++;
+}
+
+/* Return the foreground-visible sequence signature generation. */
+uint8_t effects_seqSerial(void)
+{
+    return effects_state.seq_serial;
+}
+
+/* Resolve one type-specific descriptor index to its retained lane number. */
+uint8_t effects_laneOfParam(effect_type_id_t type, uint8_t index,
+                            uint8_t *lane_out)
+{
+    const effect_registry_entry_t *entry = effects_registryEntry(type);
+    uint8_t lane;
+
+    if (!entry)
+        return 0u;
+    for (lane = 1u; lane < EFFECT_SEQ_LANE_COUNT; lane++) {
+        if (entry->lanes[lane] == index) {
+            if (lane_out)
+                *lane_out = lane;
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+/* Read one retained lane value and whether its lock bit is set. */
+uint8_t effects_getLaneLock(uint8_t scene_index, uint8_t step, uint8_t lane,
+                            uint8_t *value_out)
+{
+    const effect_record_t *record = scene_effectConst(scene_index);
+
+    if (!record || step >= EFFECT_SEQ_STEP_COUNT ||
+        lane >= EFFECT_SEQ_LANE_COUNT)
+        return 0u;
+    if (value_out)
+        *value_out = record->steps[step].value[lane];
+    return (uint8_t)((record->steps[step].lock_mask &
+                      (uint16_t)(1u << lane)) != 0u);
+}
+
+/* Write-and-lock one lane across the physically held steps. */
+uint8_t effects_setSeqLaneLock(uint8_t scene_index, uint16_t step_mask,
+                               uint8_t lane, uint8_t value)
+{
+    const effect_record_t *record = scene_effectConst(scene_index);
+    uint8_t step;
+    uint8_t changed = 0u;
+
+    if (!record || lane >= EFFECT_SEQ_LANE_COUNT ||
+        !effects_laneFileKey(record->type, lane))
+        return 0u;
+    if (lane != EFFECT_SEQ_LANE_MORPH) {
+        const effect_registry_entry_t *entry =
+            effects_registryEntry(record->type);
+        const effect_param_descriptor_t *descriptor = entry
+            ? effects_descriptor(record->type, entry->lanes[lane]) : NULL;
+
+        if (descriptor && value > descriptor->max_value)
+            value = descriptor->max_value;
+    }
+    for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++) {
+        const effect_seq_step_t *entry = &record->steps[step];
+        uint16_t bit = (uint16_t)(1u << lane);
+
+        if ((step_mask & (uint16_t)(1u << step)) == 0u)
+            continue;
+        if (entry->value[lane] != value || (entry->lock_mask & bit) == 0u)
+            changed = 1u;
+        scene_setEffectSeqLaneValue(scene_index, step, lane, value);
+        scene_setEffectSeqLaneLocked(scene_index, step, lane, 1u);
+    }
+    if (changed)
+        effects_state.seq_serial++;
+    return changed;
+}
+
 #if DEV_MODE_DIAGNOSTIC
 /*
  * Validate registry invariants that the compiler cannot express.
@@ -582,6 +782,13 @@ void effects_activateScene(uint8_t scene_index)
     effects_state.scene_index = scene_index;
     if (type != effects_state.runtime_type)
         effects_switchRuntime(type);
+    /*
+     * Scene rule (S072_ST8 D3): the new Scene's lane locks begin at its next
+     * FX boundary; the held Morph lane never carries across a Scene switch.
+     */
+    effects_state.seq_step_valid = 0u;
+    effects_state.held_morph_valid = 0u;
+    effects_state.seq_serial++;
     effects_state.force_all = 1u;
 }
 
@@ -607,6 +814,11 @@ uint8_t effects_changeType(uint8_t scene_index, effect_type_id_t type)
     }
     memset(record->steps, 0, sizeof(record->steps));
     scene_finishEffectWholeCommit(scene_index);
+    /* Type change clears every lock, including the held Morph lane (F3). */
+    if (scene_index == effects_state.scene_index) {
+        effects_state.held_morph_valid = 0u;
+        effects_state.seq_serial++;
+    }
     if (scene_index == effects_state.scene_index)
         effects_switchRuntime(type);
     return 1u;
@@ -620,12 +832,25 @@ void effects_service(void)
         effects_registryEntry(effects_state.runtime_type);
     fx_share_t share;
     uint8_t morph;
+    uint8_t active_step;
     uint8_t index;
+    const effect_seq_step_t *step;
 
     /* Full descriptor rescan avoids requiring every retained writer to notify. */
     if (!record || !entry)
         return;
-    morph = scene_getEffectMorphAmount(effects_state.scene_index);
+    /*
+     * FX-sequencer layer (S072 step 8; plan §9): consume the TIM3 latch in
+     * foreground context, then resolve the held Morph base and active step.
+     * The Pattern automation overlay is added ahead of this layer in Step 9.
+     */
+    effects_seqConsume(record);
+    active_step = effects_seqStepFor(record);
+    step = (active_step != EFFECT_SEQ_STEP_NONE)
+        ? &record->steps[active_step] : NULL;
+    morph = effects_state.held_morph_valid
+        ? effects_state.held_morph
+        : scene_getEffectMorphAmount(effects_state.scene_index);
     fxbuf_effectShare(&share);
     for (index = 0u; index < entry->descriptor_count; index++) {
         const effect_param_descriptor_t *descriptor =
@@ -635,7 +860,9 @@ void effects_service(void)
             effects_interpolate(record->normal[index], record->morph[index], morph) :
             record->normal[index];
 
-        /* Pattern, sequence-lock, and LFO layers are added in later steps. */
+        /* A locked lane replaces the Morph-interpolated menu value (A16). */
+        if (step && (step->lock_mask & 0xFFFEu) != 0u)
+            (void)effects_seqOverride(entry, step, index, &value);
         if (value > descriptor->max_value)
             value = descriptor->max_value;
         if ((descriptor->effect_flags & EFFECT_PARAM_FLAG_BUFFER_DEPENDENT) != 0u &&

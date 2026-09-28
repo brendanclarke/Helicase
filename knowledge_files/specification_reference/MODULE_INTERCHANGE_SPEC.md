@@ -465,7 +465,7 @@ dispatch to owners.
 | `buttonHandler_showMuteLEDs()` | Show mute-state LEDs. | Menu/voice/performance paths |
 | `buttonHandler_muteVoice(voice, isMuted)` | Update front-panel mute shadow. | buttonHandler local, MIDI/UI paths if needed |
 | `SELECT_MODE_FX` / FX dispatch | SHIFT+PERF owns the Effect page; SELECT/TRACK/BAR gestures first offer the active type's `effect_ui_hooks_t`, while default TRACK/SELECT behavior remains in buttonHandler/Menu. | `menuEffects`, EffectsManager registry |
-| `seqHeldMask()` | Return the current held-step bitmask for VOICE overlay (Session 066). | Menu overlay |
+| `seqHeldMask()` | Return the current held-step bitmask for the VOICE overlay or active FX lock editor (Session 066/ST8). | Menu overlay, `menuEffects` |
 | `visibleStep()` | Return the visible step index accounting for bar offset (Session 066, promoted to extern). | Menu, ledHandler |
 
 Public state used by other modules:
@@ -538,7 +538,8 @@ click-in/turn/click-out transaction, and the momentary SHIFT Morph view.
 through `MENU_CELL_EFFECT`; `menuEffects` never calls SceneData Effect setters
 directly. All retained UI writes use the EffectsManager edit API, so Step 10
 can add edit-mask fan-out without changing callers. Step 7 writes the active
-Scene only. SEQ buttons and FX-step LEDs remain Step 8 work.
+Scene only. Step 8 adds foreground lock editing, shared track/FX scale labels,
+and page-owned SEQ LEDs; the Pattern chase yields to this LED layer.
 
 | API / data | Use | Usual callers / clients |
 |---|---|---|
@@ -546,6 +547,8 @@ Scene only. SEQ buttons and FX-step LEDs remain Step 8 work.
 | `menuEffects_resolveCell()` / `menuEffects_move()` / `menuEffects_selectPressed()` | Resolve the current registry-driven cell and navigate screens/SELECT buttons. | `menu.c`, buttonHandler |
 | `menuEffects_cellCommit()` / `menuEffects_typeBrowse()` / `menuEffects_editModeChanged()` | Commit retained edits or run the `typ` transaction through EffectsManager. | `menu.c` |
 | `menuEffects_hookSelect()` / `menuEffects_hookTrack()` / `menuEffects_hookBar()` / `menuEffects_renderLeds()` | Dispatch optional type UI hooks. | buttonHandler, Menu |
+| `menuEffects_seqButtonPressed()` / `menuEffects_seqHoldExpired()` / `menuEffects_holdEdit()` / `menuEffects_holdDisplay()` | Own FX SEQ tap/hold routing, held-step lock writes, and locked/unlocked display values. Non-sequenceable cells are inert during a hold. | buttonHandler, Menu |
+| `menuEffects_renderSeqLeds()` | Paint lock LEDs, selected-step blink, and running FX chase, then dispatch the type hook. | Menu foreground |
 
 ## Core/Menu/copyClearTools
 
@@ -607,6 +610,24 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 | `seq_restoreAllSceneAutomation()` | Walk `seq_scene_automation_dirty` (uint32_t) bitmap and restore each dirty Scene target from its retained SceneData getter. Clears morph step overrides, slot6 decay step state, and audio routing. Called from `seq_setStepIndexToStart()` (Session 070). | Sequencer transport restart |
 | `seq_midiNoteOff(chan)` / `seq_sendMidiNoteOn(channel, note, veloc)` | MIDI note output ownership. | MidiParser, Sequencer |
 | `seq_offsetTrackStepIndexForRotation(trackNr, oldRot, newRot, len)` | Narrow runtime hook for live rotation compensation. | PatternData only |
+
+### Shared StepScale contract
+
+`Core/Sequencer/StepScale.h/.c` owns the fourteen-entry, 96-PPQ scale table
+used by both Pattern track-scale display/storage and the FX sequencer clock.
+The order is `6, 8, 12, 16, 24, 32, 36, 48, 64, 72, 96, 192, 384, 768`
+ticks, with index 4 (`1/16`) as the default. `stepScale_ticks()` clamps stale
+retained bytes for playback; the short/long label accessors clamp them for
+display without rewriting the card. Track playback continues to ignore scale
+until the joint track-scale pass.
+
+The FX clock runs in TIM3 from `seq_elapsedPpqTicks`, publishing only
+`SEQ_FX_EVENT_RESET`/`SEQ_FX_EVENT_STEP` plus a 0..15 index through
+`seq_fxTakeEvent()`. `effects_service()` consumes the newest event in
+foreground, resolves run-mode/length/scale position, and applies retained
+lane locks after Morph interpolation. `effects_seqSelect()` is the immediate
+stopped/running `sel` path; Scene activation invalidates the old position and
+held Morph state until the next boundary or selection.
 
 ## Core/Bank/Scene/Preset/presetManager
 
@@ -736,10 +757,12 @@ not own retained Scene bytes, filesystem parsing, UI, or the FX audio bus.
 | `effects_paramAutomatable()` / `effects_paramModulatable()` | Enforce descriptor capability flags and the local-index-63 automation boundary. | future sequencer/LFO/UI |
 | `effects_paramMorphable()` / `effects_getParameter()` | Query Morph capability and resolve the visible normal/Morph endpoint for the Effect page. | `menuEffects` |
 | `effects_setParameter()` / `effects_setSeqRunMode()` / `effects_setSeqLength()` / `effects_setSeqStepScale()` / `effects_setMorphAmount()` | Single retained mutation boundary for Effect UI/hooks; clamps/normalizes through SceneData and returns a changed flag. Step 10 adds edit-mask fan-out here. | `menuEffects`, future FX sequencer/type hooks |
+| `effects_seqActiveStep()` / `effects_seqSelectedStep()` / `effects_seqSelect()` / `effects_seqSerial()` | Foreground-visible FX position/selection signature. `sel` selection applies while stopped; an activated Scene starts without a valid prior step. | `menuEffects` |
+| `effects_laneOfParam()` / `effects_getLaneLock()` / `effects_setSeqLaneLock()` | Resolve sequenceable descriptor lanes, inspect a held-step lock, or write one clamped value/lock across a physical step mask through SceneData. | `menuEffects`, future automation |
 | `effects_init()` | Initialize manager state and install the FxBuffer share-change callback after `fxbuf_init()`. | `main.c` |
 | `effects_activateScene(scene)` | Select a Scene's retained Effect type; different types switch immediately through the FxBuffer handoff, while same-type activation preserves tails. | Preset Scene/Bank apply paths |
 | `effects_changeType(scene, type)` | Commit type-specific defaults and clear the sequence in place while preserving common rows, sequence settings, and Effect Morph. | diagnostic hook, future Effect UI |
-| `effects_service()` | Resolve retained endpoints and common `out`/`vol`/`pan` once per render block; calls type-specific `write_param` only for changes. | mixer foreground render block |
+| `effects_service()` | Consume the TIM3 FX latch, resolve retained endpoints and common `out`/`vol`/`pan` once per render block, apply active step locks after Morph interpolation, and call type-specific `write_param` only for changes. | mixer foreground render block |
 | `effects_process()` / `effects_commonRuntime()` | Future Step 5 bus process hook and current common return settings. `off` has no process operation. | mixer Step 5 |
 | `effects_registryCheckResult()` | Diagnostic-only immutable registry self-check result. | diagnostic boot screen |
 
