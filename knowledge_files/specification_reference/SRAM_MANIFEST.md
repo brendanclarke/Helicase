@@ -13,7 +13,10 @@ header/configuration edits before treating any linked total as current. The
 S072 Step 4 clean link is recorded below: `text=463,552`, `data=416`,
 `bss=425,936`, with `scenes=25,952` (`0x6560`). The S072 Step 5 production
 clean link is `text=465,352`, `data=416`, `bss=425,936`; its flash image uses
-465,768 B and its DTCM ledger is recorded below. Step 5 adds the
+465,768 B and its DTCM ledger is recorded below. Step 6 adds 16 Effect
+HCNAMES rows, the `.fx` parser/writer and boot reader, and the approved SRAM1
+expansion described below. The current ST6 production link is `text=470,208`,
+`data=408`, `bss=426,128`; its generated flash payload is 470,616 B. Step 5 adds the
 76-byte `effects_state` in SRAM1, the 76-byte `effects_runtime` in DTCM, and
 the one-byte diagnostic registry result; exact section totals are recorded
 below.
@@ -74,10 +77,12 @@ from this owner map.
 | `Autosave.c`: `autosave_dirty_count`, `autosave_last_pattern_semantic_us` | 6 | Exact scalar dirty-bit count and latest semantic Pattern edit timestamp. |
 | `filesystem.c`: `fs_pattern_generation`, `fs_pattern_drain_scene`, `fs_pattern_first_dirty_us`, `fs_pattern_scene_cursor` | 70 | Sixteen Pattern generation baselines, drain selector, first-dirty timestamp, and fair Scene cursor. |
 | `filesystem.c`: `fs_autosave_parameter_cache` | 4,608 | Bounded scalar AutoSave patch offsets and values. |
-| `filesystem.c`: `fs_stage_workspace` | 2,048 | One union shared by Kit, Instrument, Scene, AutoSave writer, and HCNAMES regeneration staging. Union members are not additive. |
+| `filesystem.c`: `fs_stage_workspace` | 2,048 | One union shared by Kit, Instrument, Scene+Effect, AutoSave writer, and HCNAMES regeneration staging. The Scene+Effect peak is 1,621 B; union members are not additive. |
 | `filesystem.c`: `staging_buf` | 512 | Shared streaming and trace-batch buffer. |
 | `filesystem.c`: `fs_list_cache_name` | 9,000 | One 1,000 × 9 browser/index name cache. |
-| `filesystem.c`: `hcnames_name_mirror`, `fs_resident_source` | 1,595 | Separate 145 × 9 HCNAMES names and 145 × 2 provenance sources. |
+| `filesystem.c`: `hcnames_name_mirror`, `fs_resident_source` | 1,771 | Separate 161 × 9 HCNAMES names and 161 × 2 provenance sources; Effect rows are 145..160. |
+| `filesystem.c`: `op_effect_display_name` | 9 | Cached Effect filename stem for the current Scene/Bank child save. |
+| `filesystem.c`: `op_effect_state` | 7 | Bounded `.fx` parser state retained across async file-reader passes. |
 | `filesystem.c`: `fs_identity_name`, `fs_identity_valid_mask` | 74 | Eight × 9 Scene/Kit/Instrument identity strings plus a 16-bit validity mask; the Bank's nine-byte name is held separately by BankData. |
 | `filesystem.c`: `op_bank_child_scratch` | 144 | One union: 16 × 9 Bank-child names or 16 × 6 boot-reader Instrument types, with disjoint lifetimes. |
 | `asyncfatfs.c`: `afatfs` | 6,984 | FAT state, caches, and five file handles in one owner. |

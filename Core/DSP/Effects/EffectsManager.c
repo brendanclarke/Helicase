@@ -232,6 +232,85 @@ uint8_t effects_paramModulatable(effect_type_id_t type, uint8_t index)
         descriptor->base.mod_domain.flags != INSTRUMENT_MOD_DOMAIN_NONE);
 }
 
+/*
+ * Build one complete type-default Effect record for a storage transaction.
+ *
+ * Inputs: caller-owned record and registry id. Output: SceneData's `off`
+ * defaults, then this type's token and type-specific defaults in both normal
+ * and Morph images; unused descriptor cells remain zero. Unknown ids leave
+ * the valid `off` record. No resident Scene or AutoSave state is touched.
+ * Affiliates: storageTypes `.fx` parsing, AutoSave, and the boot reader.
+ */
+void effects_recordDefaultsForType(effect_record_t *record,
+                                   effect_type_id_t type)
+{
+    const effect_registry_entry_t *entry = effects_registryEntry(type);
+    uint8_t index;
+
+    if (!record)
+        return;
+    scene_effectRecordDefaults(record);
+    if (!entry)
+        return;
+    record->type = type;
+    for (index = EFFECT_COMMON_PARAM_COUNT; index < EFFECT_PARAM_COUNT;
+         index++) {
+        uint8_t value = (index < entry->descriptor_count) ?
+                        entry->descriptors[index].default_value : 0u;
+
+        record->normal[index] = value;
+        record->morph[index] = value;
+    }
+}
+
+/*
+ * Resolve one retained FX-sequence lane to its `.fx` file key.
+ *
+ * Inputs: registry type and lane number. Output: the fixed Effect Morph key,
+ * a descriptor key, or NULL for an unused lane. The registry remains the only
+ * owner of lane meaning, so storage and future UI cannot drift apart.
+ */
+const char *effects_laneFileKey(effect_type_id_t type, uint8_t lane)
+{
+    const effect_registry_entry_t *entry = effects_registryEntry(type);
+    uint8_t index;
+
+    if (!entry || lane >= EFFECT_SEQ_LANE_COUNT)
+        return NULL;
+    index = entry->lanes[lane];
+    if (index == EFFECT_LANE_MORPH_SOURCE)
+        return EFFECT_LANE_MORPH_FILE_KEY;
+    if (index == EFFECT_LANE_NONE || index >= entry->descriptor_count)
+        return NULL;
+    return entry->descriptors[index].base.file_key;
+}
+
+/*
+ * Resolve a `.fx` lane key to the registry's retained lane number.
+ *
+ * Inputs: registry type, key after the `lane.` prefix, and optional output
+ * pointer. Output: nonzero on a named lane match; unused lanes and unknown
+ * keys return zero. The bounded 16-entry scan runs only during file parsing.
+ */
+uint8_t effects_laneByFileKey(effect_type_id_t type, const char *file_key,
+                              uint8_t *lane_out)
+{
+    uint8_t lane;
+
+    if (!file_key)
+        return 0u;
+    for (lane = 0u; lane < EFFECT_SEQ_LANE_COUNT; lane++) {
+        const char *key = effects_laneFileKey(type, lane);
+
+        if (key && strcmp(key, file_key) == 0) {
+            if (lane_out)
+                *lane_out = lane;
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
 #if DEV_MODE_DIAGNOSTIC
 /*
  * Validate registry invariants that the compiler cannot express.

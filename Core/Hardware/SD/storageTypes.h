@@ -208,18 +208,27 @@ typedef struct {
 } storage_sceneset_t;
 
 /*
- * Incremental validation state for placeholder effect files.
+ * Incremental parse state for one `.fx` Effect file (Session 072 step 6).
  *
- * Real effect storage is future DSP work. Scene folders still always contain
- * an effect file, so the first pass accepts a tiny guarded placeholder:
- * format=helicase.effect, version=1, placeholder=1. Inputs are text lines from
- * filesystem.c; outputs are validation bits used to accept or reject the first
- * discovered .fx file.
+ * Version 2 is the live format: top-level format/version/type followed by
+ * optional [params], [morph], and [sequence] sections. Version 1 with
+ * placeholder=1 is the legacy Scene placeholder and loads as `off`. The type
+ * must precede sections because parameter and lane keys are registry-owned.
+ * Inputs arrive one line at a time; output is a validated caller-owned
+ * effect_record_t, with no resident mutation until filesystem.c commits it.
+ * The parser is strict about required guards and value domains, while unknown
+ * registry keys remain forward-compatible in the same way as Instrument
+ * files. The writer emits one bounded line per call for asynchronous SD
+ * streaming, including the 16-step lane masks and values.
  */
 typedef struct {
+    effect_type_id_t type;
+    uint8_t current_section;
+    uint8_t version;
     uint8_t seen_format;
-    uint8_t seen_version;
+    uint8_t seen_type;
     uint8_t seen_placeholder;
+    uint8_t seen_morph_section;
 } storage_effect_state_t;
 
 /*
@@ -538,14 +547,31 @@ uint8_t storage_formatInstrumentLineView(
     uint16_t capacity,
     const storage_instrument_write_view_t *view,
     uint16_t line_index);
-void storage_effectStateInit(storage_effect_state_t *state);
+/*
+ * `.fx` v2 parser/writer and filename helper.
+ *
+ * Inputs are caller-owned line/record buffers; outputs are staged Effect
+ * values or one bounded text line for asynchronous streaming. The parser
+ * accepts legacy v1 `placeholder=1` as `off`, requires v2 registry type and
+ * section ordering, and leaves unknown descriptor/lane keys forward-compatible.
+ * `storage_makeSavedEffectDisplayFilename()` reuses the Instrument stem path
+ * and changes only the extension to `.fx`; a blank stem is handled by the
+ * filesystem caller as the `none.fx` fallback.
+ */
+void storage_effectStateInit(storage_effect_state_t *state,
+                             effect_record_t *target);
 storage_status_t storage_effectParseLine(storage_effect_state_t *state,
-                                         const char *line);
-storage_status_t storage_effectFinalize(const storage_effect_state_t *state);
-/* Pattern files use the fixed binary v4 stream owned by filesystem.c. */
-uint8_t storage_formatEffectPlaceholderLine(char *dst,
-                                            uint16_t capacity,
-                                            uint16_t line_index);
+                                         const char *line,
+                                         effect_record_t *target);
+storage_status_t storage_effectFinalize(const storage_effect_state_t *state,
+                                        effect_record_t *target);
+uint8_t storage_formatEffectLine(char *dst,
+                                 uint16_t capacity,
+                                 const effect_record_t *record,
+                                 uint16_t line_index);
+void storage_makeSavedEffectDisplayFilename(char *dst,
+                                            uint8_t capacity,
+                                            const char *stem);
 /*
  * Initialize/parse/finalize and stream the Bank-level config file.
  *

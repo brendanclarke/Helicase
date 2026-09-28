@@ -1,7 +1,7 @@
 # Effects Bus Feature Plan — Phase 5
 
 Status: **planning draft, revision 4. The user's review answers (A1–A46,
-F1–F6, G1–G7) are folded in; Steps 1–4 are now implemented in source.** This document turns Phase 5 of
+F1–F6, G1–G7) are folded in; Steps 1–6 are now implemented in source.** This document turns Phase 5 of
 `SCOPING_TARGETS.md` and the session-072 direction into one implementation plan.
 Where the session direction differs from `SCOPING_TARGETS.md`, the session
 direction wins (§2).
@@ -117,8 +117,8 @@ Branch: `dev-ph5-effects`. Baseline: Session 071 close (`text=456,748`,
 | DTCM (*measured*) | `.elf` | 12,280 B used, of which 8,194 B is `sine_table` |
 | Flash (*measured*) | `.elf` | 457,164 of 491,520 B: **34,356 B headroom** |
 | AutoSave Effect region | `Autosave.h` | 512 B per Scene. No live bytes yet. The mask already covers it. |
-| HCNAMES resident arrays | `filesystem.c` | `hcnames_name_mirror[145][9]` and `fs_resident_source[145]` (uint16) |
-| Scene loader | `filesystem.c` | Takes the first `*.fx` child. The placeholder parser is strict, and a missing file fails the Scene. |
+| HCNAMES resident arrays | `filesystem.c` | `hcnames_name_mirror[161][9]` and `fs_resident_source[161]` (uint16) |
+| Scene loader | `filesystem.c` | Takes the first optional `*.fx` child. The v2 parser is strict; a missing file supplies the `off` default. |
 | Staging union | `filesystem.c` | 2,048 B. The Scene+Kit stage is about 1.2 KB. |
 
 ---
@@ -879,7 +879,9 @@ lane.filter_freq=0x1111,200,0,0,0,180,0,0,0,160,0,0,0,140,0,0,0
 - A `placeholder=1` legacy file, or a missing `.fx`, loads as `off` (A37).
   The name comes from the placeholder file's stem. A missing file gets a blank
   (single-space) name (G6).
-- A malformed v2 file fails that Scene's load.
+- A malformed v2 file fails that Scene's load. A missing file is valid and
+  supplies `off` with a blank name; legacy v1 `placeholder=1` also maps to
+  `off`.
 
 ### 14.4 Save
 
@@ -910,7 +912,7 @@ Effect region, 512 B per Scene, at Scene offset 128:
 | Offset | Bytes | Field |
 |---|---|---|
 | 0 | 3 | type token |
-| 3 | 8 | name (mirror of HCNAMES row 145+Scene) |
+| 3 | 8 | name (baseline mirror of HCNAMES row 145+Scene; not a live scalar cell) |
 | 11 | 3 | run mode, length, step scale |
 | 14 | 64 | normal |
 | 78 | 64 | Morph |
@@ -1001,7 +1003,7 @@ next. If a regression appears, only one step touched that area.
 | 3 | Data model: `effect_record_t`, `effect_morph_amount`, SceneData setters, AutoSave geometry and markers, the ID block-7 constant, the `fxm` Scene target | Freezes the data every later step reads and writes, so setters are complete (AutoSave-marked) from the start | Build; AutoSave marks on test writes |
 | 4 | EffectsManager, registry (`off`, `flt`), StereoFilter DSP, resolution service, Scene-activation integration | Consumes the step-3 data only | A hard-coded Scene selects `flt` from a dev hook |
 | 5 | FX bus: sends, fader modes, mono/stereo bus, return routing, audible FX_SEND | Needs steps 2 and 4 | Listening test in all three fader modes; jack fallback; CPU |
-| 6 | Storage: `.fx` v2 parse/write; HCNAMES 161 rows with Effect provenance; Scene/Bank `<name>.fx` load/save; `sceneset.scg` key; AutoSave header bump and Effect reader | HCNAMES and AutoSave both carry the 145-row assumption and name mirror, so they change together | Hand-written fixture card: legacy, v2, missing, malformed, and a partial Bank; reboot restore |
+| 6 | Storage: `.fx` v2 parse/write; HCNAMES 161 rows with Effect provenance; Scene/Bank `<name>.fx` load/save; `sceneset.scg` key; AutoSave v3 and Effect reader | HCNAMES and AutoSave both carry the 145-row assumption and name mirror, so they change together | Hand-written fixture card: legacy, v2, missing, malformed, and a partial Bank; reboot restore |
 | 7 | `menuEffects.c`: pages, default SELECT layout, `typ`, SHIFT Morph view, TRACK/SHIFT+TRACK, Euklid disabled | UI over frozen setters | Hardware UI walk-through |
 | 8 | FX sequencer: TIM3 latch, modes, shared scale table (including the track-scale UI switch), transport rules, lock editing, LEDs | Needs the page (step 7) for editing | Every mode × length × scale; the Scene-switch alignment example; `sel` stopped |
 | 9 | Automation and LFO: `fx` category, overlay apply/restore, priority (§9), LFO `fx` namespace, rebind | Needs both overlay producers (steps 4 and 8) | Automate, sequence, and LFO one parameter together |
@@ -1104,7 +1106,7 @@ Update `FILESYSTEM_SPEC.md`, `AUTOSAVE.md`, `SRAM_MANIFEST.md`,
 | A35 | Library UI later; hand-made test files. |
 | A36 | Lane-major keyed lines. |
 | A37 | Missing or placeholder file loads as `off`, and `off` is in `typ`. |
-| A38 | No version compatibility work. |
+| A38 | No automatic migration: old 145-row HCNAMES and HCPR v1/v2 records are rejected or regenerated; first ST6 card preparation may delete them. |
 | A39 | Default SELECT layout per §13.2; types may define up to 4 screens. |
 | A40 | Roll untouched. |
 | A41 | SHIFT+TRACK selects the track; LEDs keep showing mute. |

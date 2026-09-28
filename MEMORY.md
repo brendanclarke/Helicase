@@ -132,7 +132,10 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 - Session 061 historical reader authority is
   `knowledge_files/log_archive/061_SESSION_HANDOFF_LOG.md` plus the updated
   specs. Its then-current HCNAMES covered rows 0..128; Session 064 authority
-  expands the live schema to 145 rows with Pattern rows 129..144.
+  expands the live schema to 161 rows with Pattern rows 129..144 and Effect
+  rows 145..160. ST6 uses HCPR v3 and strictly rejects the old 145-row/v2
+  card state; first-card preparation may delete `.hcnames`, `.hcnamtmp`,
+  `.hcprms1`, and `.hcprms2`.
   Instrument rows require their type field. Boot uses matching HCPR winner,
   all-refreshed settings-Bank-matching HCNAMES, then canonical fallback in that
   order. Case 3 always empties the whole Scene. Preserve all 96 HCNAMES types
@@ -204,24 +207,26 @@ end; durable facts belong in `knowledge_files/log_archive/` or
 - Instrument, Kit, root Scene, and root Bank Load/Save now share exactly one
   `fs_list_cache_name[1000][9]` display-name cache (9,000 bytes). Instrument
   rows are sorted; numbered-library rows are direct `000..999` slot rows with
-  blank rows preserved. HCNAMES has its separate 145-by-9 mirror and never
+  blank rows preserved. HCNAMES has its separate 161-by-9 mirror and never
   borrows this disposable browser cache. Menu entry/type changes and exit
   dispose or reload the same browser cache; no per-instrument or per-library
   name cache is allowed.
 - Root `/.hcnames` is the authoritative active identity **and provenance**
   register: row 0 Bank; rows 1..16 Scene; rows 17..32 Kit; rows 33..128 six
-  Instruments per Scene; rows 129..144 one Pattern per Scene. Its physical schema is one
-  `#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat` header plus 145 rows.
+  Instruments per Scene; rows 129..144 one Pattern per Scene; rows 145..160
+  one Effect per Scene. Its physical schema is one
+  `#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat` header plus 161 rows.
   Bank/Scene/Kit rows are `name<TAB>source[<TAB>R]`; Instrument rows are
   `name<TAB>source<TAB>type[<TAB>R]`; Pattern rows use the non-Instrument form.
   `-`, `?`, `000..999`, and `@` are its only source tokens. Pattern `@`
   (`0x1ffc`) is distinct in RAM from Instrument-direct `@` (`0x1ffd`). The
-  290-byte filesystem-owned source
+  322-byte filesystem-owned source
   register survives name-cache reuse and replaces the retired 32-byte
-  SceneData source array. Runtime holds exactly 81 bytes of musical identity:
-  one Bank, one Scene, one Kit, and six Instrument names. `scene_t` and `kit_t`
+SceneData source array. Runtime holds 90 bytes of active identity: one Bank,
+  one Scene, one Kit, six Instrument names, and one Effect filename stem.
+  `scene_t` and `kit_t`
   contain no display names or retained filename stems. Because text rows have
-  variable length, a targeted update reads the header and all 145 paired rows, overlays only
+  variable length, a targeted update reads the header and all 161 paired rows, overlays only
   its owned rows, and rewrites the file.
 - HCNAMES paired source correction: a successful non-empty root Bank Load must
   stage row 0 to its direct `op_slot` before the Bank-owned HCNAMES close gate,
@@ -313,7 +318,7 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   accepted baseline, not rejected work: exact 34,768-byte A/B records, one 3,856-byte
   canonical mutation mask, bounded mask/value capture with atomic
   take/re-dirty behavior, typed scalar markers, source-free v1 settings, and
-  the AutoSave lifecycle trace, typed 145-row HCNAMES, scalar and Pattern boot
+  the AutoSave lifecycle trace, typed 161-row HCNAMES, scalar/Effect and Pattern boot
   readers, and per-Scene Pattern A/B files.
   Available scalar controls are accepted as
   hardware tested: Scene; Kit/Instrument; and MIDI channel/note, which are
@@ -510,9 +515,9 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
     failure path nobody thought to instrument still gets caught by
     construction. All documented in `DEV_MODES.md`'s stage-letter list.
   - Card damage found and repaired along the way: six root Scene folders were
-    missing `effects.fx` and/or their embedded Kit contents, all consistent
+  missing legacy `effects.fx` and/or their embedded Kit contents, all consistent
     with an *earlier* interrupted, non-atomic Scene Save (the old tree is
-    deleted first, and `effects.fx` is written last of ~12 sequential file
+    deleted first, and the legacy `effects.fx` was written last of ~12 sequential file
     operations, so an interruption anywhere in between leaves a stub that
     Load's current all-or-nothing child check permanently rejects). Repaired
     on-card; **no save-path hardening was implemented** — four ranked options
@@ -874,7 +879,7 @@ and may contain historical snapshots as noted below.
 | `BANK_PRESET_ARCHITECTURE.md` | Hierarchy overview (Bank → Scene → Kit → Instrument), BankData voice-edit mask, SceneData parameter images, morph engine, runtime overlay architecture, Scene mod targets, `parameter_values[]` legacy bridge, dirty marking, and boot restore order. Written Session 070. | Understanding parameter storage, morph interpolation, runtime overlays, Scene activation, or dirty marking. |
 | `CPU_USE_DSP_AUDIT.md` | Historical DSP performance audit covering render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA, hot-loop costs, and an ordered optimization record. | Investigating audio underruns or changing render placement/optimization. It describes an audited snapshot, not necessarily current ownership. |
 | `DEV_MODES.md` | Screen-only diagnostic versus file-only logging contract, current `bootlog.bin`/`asavetrc.bin` formats, duplicate limitation, and failed unified-log warning. | Adding or interpreting diagnostics, trace, or logging output. |
-| `FILESYSTEM_SPEC.md` | Current product storage specification through Session 064: root layout, typed 145-row HCNAMES, PAT4, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, boot restore, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
+| `FILESYSTEM_SPEC.md` | Current product storage specification through Session 072 ST6: root layout, typed 161-row HCNAMES, PAT4, `.fx` v2 Effect children, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, boot restore, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
 | `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 070 for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
 | `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
 | `SRAM_MANIFEST.md` | Current Session 064 logging-on linked snapshot, AutoSave Pattern/reader/trace owners, and binding Pattern/delay reservation policy. | Changing retained state, adding caches/names, or evaluating RAM cost. Regenerate after allocation changes. |
@@ -1080,7 +1085,8 @@ Core/Bank/Scene/Preset/presetManager.c / Menu
   directory shape and writes the current interpolated Morph state into both
   normal and morph endpoint sections.
 - Scene Load/Save uses root `Scene/NNN Name/` folders with `sceneset.scg`,
-  embedded `Kit <name>/`, exactly one named PAT4 file, and placeholder `effects.fx`.
+  embedded `Kit <name>/`, exactly one named PAT4 file, and an optional named
+  `.fx` v2 child (blank name saves as `none.fx`).
   `sceneset.scg` never stores `name`.
 - Bank Load/Save uses root Bank/NNN Name/ folders with bankset.bcg and
   Bank-local two-digit Scene children 00..15. It loads/saves the selected set

@@ -558,6 +558,18 @@ static uint8_t autosave_initialRecordByte(
                 resident_names[AUTOSAVE_HCNAMES_KIT_BASE + scene],
                 (uint8_t)(record_offset - kit_name_offset));
         }
+        /* Effect names are baseline-only identity cells (Session 072 ST6). */
+        {
+            uint32_t effect_name_offset = scene_offset +
+                AUTOSAVE_EFFECT_OFFSET + AUTOSAVE_EFFECT_NAME_OFFSET;
+
+            if (record_offset >= effect_name_offset &&
+                record_offset < effect_name_offset + AUTOSAVE_NAME_BYTES) {
+                return autosave_nameByte(
+                    resident_names[AUTOSAVE_HCNAMES_EFFECT_BASE + scene],
+                    (uint8_t)(record_offset - effect_name_offset));
+            }
+        }
         for (instrument = 0u;
              instrument < AUTOSAVE_INSTRUMENTS_PER_KIT;
              instrument++) {
@@ -1082,8 +1094,8 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
      * Project the live Effect type token (Session 072 step 4).
      *
      * Inputs: Scene-relative bytes 128..130. Output: the registry's three
-     * token bytes. The name bytes 131..138 remain absent until Step 6, while
-     * the parameter interval below projects the 419 Step 3 cells.
+     * token bytes. The name bytes 131..138 are baseline-only, like every
+     * identity name; the source at Scene-relative 558..559 is projected below.
      */
     if (relative >= AUTOSAVE_EFFECT_OFFSET + AUTOSAVE_EFFECT_TYPE_OFFSET &&
         relative < AUTOSAVE_EFFECT_OFFSET + AUTOSAVE_EFFECT_TYPE_OFFSET +
@@ -1097,12 +1109,23 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value)
         return 1u;
     }
 
+    /* Effect source is a live provenance witness after the 419 cells. */
+    if (relative >= AUTOSAVE_EFFECT_OFFSET + AUTOSAVE_EFFECT_SOURCE_OFFSET &&
+        relative < AUTOSAVE_EFFECT_OFFSET + AUTOSAVE_EFFECT_SOURCE_OFFSET +
+                   AUTOSAVE_SOURCE_BYTES) {
+        return autosave_getSourceByte(
+            (uint16_t)(AUTOSAVE_HCNAMES_EFFECT_BASE + scene_index),
+            (uint8_t)(relative - AUTOSAVE_EFFECT_OFFSET -
+                      AUTOSAVE_EFFECT_SOURCE_OFFSET),
+            value);
+    }
+
     /* Type/name gaps and the live Effect interval are explicit wire regions. */
     if (relative >= AUTOSAVE_EFFECT_OFFSET +
                         AUTOSAVE_EFFECT_PARAMETERS_OFFSET &&
         relative < AUTOSAVE_EFFECT_OFFSET +
                        AUTOSAVE_EFFECT_PARAMETERS_OFFSET +
-                       AUTOSAVE_EFFECT_PARAMETER_ALLOC_BYTES) {
+                       AUTOSAVE_EFFECT_PARAM_COUNT) {
         return autosave_getEffectParameter(
             scene,
             (uint16_t)(relative - AUTOSAVE_EFFECT_OFFSET -
@@ -1374,6 +1397,68 @@ void autosave_applyScenePayload(uint8_t scene_index,
     }
 }
 
+/* Write one ordered Effect wire cell into a retained record. */
+static void autosave_setEffectParameter(effect_record_t *record,
+                                        uint16_t parameter_index,
+                                        uint8_t value)
+{
+    if (parameter_index == AUTOSAVE_EFFECT_PARAM_SEQ_RUN_MODE) {
+        record->seq_run_mode = value;
+    } else if (parameter_index == AUTOSAVE_EFFECT_PARAM_SEQ_LENGTH) {
+        record->seq_length = value;
+    } else if (parameter_index == AUTOSAVE_EFFECT_PARAM_SEQ_STEP_SCALE) {
+        record->seq_step_scale = value;
+    } else if (parameter_index < AUTOSAVE_EFFECT_PARAM_MORPH_BASE) {
+        record->normal[parameter_index -
+                       AUTOSAVE_EFFECT_PARAM_NORMAL_BASE] = value;
+    } else if (parameter_index < AUTOSAVE_EFFECT_PARAM_STEPS_BASE) {
+        record->morph[parameter_index -
+                      AUTOSAVE_EFFECT_PARAM_MORPH_BASE] = value;
+    } else if (parameter_index < AUTOSAVE_EFFECT_PARAM_COUNT) {
+        uint16_t step_relative = (uint16_t)(
+            parameter_index - AUTOSAVE_EFFECT_PARAM_STEPS_BASE);
+        effect_seq_step_t *step =
+            &record->steps[step_relative / AUTOSAVE_EFFECT_STEP_BYTES];
+        uint8_t field = (uint8_t)(step_relative % AUTOSAVE_EFFECT_STEP_BYTES);
+
+        if (field == AUTOSAVE_EFFECT_STEP_MASK_LO_OFFSET)
+            step->lock_mask = (uint16_t)((step->lock_mask & 0xff00u) | value);
+        else if (field == AUTOSAVE_EFFECT_STEP_MASK_HI_OFFSET)
+            step->lock_mask = (uint16_t)((step->lock_mask & 0x00ffu) |
+                                         ((uint16_t)value << 8));
+        else
+            step->value[field - AUTOSAVE_EFFECT_STEP_VALUES_OFFSET] = value;
+    }
+}
+
+/* Apply one validated winner-record Effect region while boot tracking is off. */
+void autosave_applyEffectPayload(uint8_t scene_index,
+                                 const uint8_t *effect_section)
+{
+    effect_record_t *record;
+    effect_type_id_t type;
+    uint16_t index;
+
+    if (!effect_section || scene_index >= AUTOSAVE_SCENE_COUNT)
+        return;
+    record = scene_effectRecordForWholeCommit(scene_index);
+    if (!record)
+        return;
+    if (!effects_typeFromToken(
+            (const char *)(effect_section + AUTOSAVE_EFFECT_TYPE_OFFSET),
+            &type)) {
+        effects_recordDefaultsForType(record, EFFECT_TYPE_OFF);
+    } else {
+        record->type = type;
+        for (index = 0u; index < AUTOSAVE_EFFECT_PARAM_COUNT; index++) {
+            autosave_setEffectParameter(
+                record, index,
+                effect_section[AUTOSAVE_EFFECT_PARAMETERS_OFFSET + index]);
+        }
+    }
+    scene_finishEffectWholeCommit(scene_index);
+}
+
 /*
  * Apply a validated winner record's Kit parameters to resident SceneData.
  *
@@ -1474,20 +1559,21 @@ uint8_t autosave_applyInstrumentPayload(uint8_t scene_index,
  * Extract the embedded Phase C source value from a payload section.
  *
  * What: reads the 2-byte LE source field at a known offset within a Scene,
- * Kit, or Instrument sub-section. Inputs: pointer to section start,
+ * Kit, Instrument, or Effect sub-section. Inputs: pointer to section start,
  * section-relative source offset (AUTOSAVE_SCENE_SOURCE_OFFSET = 8,
  * AUTOSAVE_KIT_SOURCE_OFFSET = 8, or AUTOSAVE_INSTRUMENT_SOURCE_OFFSET
- * = 11). Output: 16-bit source value (value bits only; flag bits are not
+ * = 11, or AUTOSAVE_EFFECT_SOURCE_OFFSET = 430). Output: 16-bit source value
+ * (value bits only; flag bits are not
  * stored in the payload). Why: boot reader cross-checks this against
  * .hcnames' live source column for Case 1 defense-in-depth (§5.2).
  * Affiliates: autosave_getSourceByte() (the getter inverse), Phase C
  * source geometry in Autosave.h.
  */
 uint16_t autosave_extractPayloadSource(const uint8_t *section,
-                                       uint8_t source_offset)
+                                       uint16_t source_offset)
 {
-    if (!section || source_offset >=
-        (uint8_t)(AUTOSAVE_INSTRUMENT_RECORD_BYTES - AUTOSAVE_SOURCE_BYTES)) {
+    if (!section || source_offset + AUTOSAVE_SOURCE_BYTES >
+        AUTOSAVE_EFFECT_SECTION_BYTES) {
         return FS_RESIDENT_SOURCE_UNKNOWN;
     }
     return (uint16_t)(section[source_offset] |
@@ -1744,8 +1830,8 @@ void autosave_markEffectParameterDirty(uint8_t scene_index,
 /*
  * Mark the source bytes belonging to one HCNAMES row.
  *
- * Input: fixed row 0..144. Output: both source bytes for a present Scene,
- * Kit, or Instrument are sent through the canonical tracking/range funnel;
+ * Input: fixed row 0..160. Output: both source bytes for a present Scene,
+ * Kit, Instrument, or Effect are sent through the canonical tracking/range funnel;
  * Bank row zero and invalid/absent rows are no-ops. Why: source ownership
  * stays in filesystem.c, while the autosave record needs the same atomic dirty
  * semantics as retained parameter bytes. The row arithmetic mirrors
@@ -1780,6 +1866,17 @@ void autosave_markSourceDirty(uint16_t hcnames_row)
         payload_base = (uint16_t)(
             payload_base + AUTOSAVE_KIT_OFFSET +
             AUTOSAVE_KIT_SOURCE_OFFSET);
+    } else if (hcnames_row >= AUTOSAVE_HCNAMES_EFFECT_BASE &&
+               hcnames_row < AUTOSAVE_HCNAMES_ROW_COUNT) {
+        /* Effect provenance lives in the Scene's Effect region (step 6). */
+        uint8_t scene_index = (uint8_t)(
+            hcnames_row - AUTOSAVE_HCNAMES_EFFECT_BASE);
+
+        if (!autosave_scenePayloadBase(scene_index, &payload_base))
+            return;
+        payload_base = (uint16_t)(
+            payload_base + AUTOSAVE_EFFECT_OFFSET +
+            AUTOSAVE_EFFECT_SOURCE_OFFSET);
     } else if (hcnames_row >= AUTOSAVE_HCNAMES_PATTERN_BASE) {
         /* Pattern provenance is carried by its separate PAT4 file. */
         return;
@@ -2004,7 +2101,8 @@ void autosave_markEffectDirty(uint8_t scene_index)
      * Mark the live Effect token and parameter cells of one Scene (Step 4).
      *
      * Input: destination Scene. Output: the three registry-token bytes plus
-     * all 419 live parameter bits. Effect name ownership joins in Step 6.
+     * all 419 live parameter bits plus the Effect source bytes. Names remain
+     * baseline-only identity cells.
      * Using the same Scene-base gate as scalar markers ensures an Effect token
      * cannot be captured for an absent Scene or while tracking is disabled.
      */
@@ -2015,6 +2113,8 @@ void autosave_markEffectDirty(uint8_t scene_index)
                 scene_base + AUTOSAVE_EFFECT_OFFSET +
                 AUTOSAVE_EFFECT_TYPE_OFFSET + token_byte));
         }
+        autosave_markSourceDirty(
+            (uint16_t)(AUTOSAVE_HCNAMES_EFFECT_BASE + scene_index));
     }
     while (parameter_index < live_count) {
         autosave_markEffectParameterDirty(scene_index, parameter_index);
@@ -2201,6 +2301,14 @@ uint8_t autosave_objectFullyCaptured(uint16_t hcnames_row)
             ((uint32_t)(hcnames_row - AUTOSAVE_HCNAMES_KIT_BASE) *
              AUTOSAVE_SCENE_SECTION_BYTES) + AUTOSAVE_KIT_OFFSET;
         payload_end = payload_start + AUTOSAVE_KIT_SECTION_BYTES;
+    } else if (hcnames_row >= AUTOSAVE_HCNAMES_EFFECT_BASE) {
+        /* Effect rows own the complete scalar Effect wire region. */
+        if (hcnames_row >= AUTOSAVE_HCNAMES_ROW_COUNT)
+            return 0u;
+        payload_start = AUTOSAVE_BANK_SECTION_BYTES +
+            ((uint32_t)(hcnames_row - AUTOSAVE_HCNAMES_EFFECT_BASE) *
+             AUTOSAVE_SCENE_SECTION_BYTES) + AUTOSAVE_EFFECT_OFFSET;
+        payload_end = payload_start + AUTOSAVE_EFFECT_SECTION_BYTES;
     } else if (hcnames_row >= AUTOSAVE_HCNAMES_PATTERN_BASE) {
         /* Pattern provenance has no scalar-record payload interval. */
         return 1u;

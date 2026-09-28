@@ -20,8 +20,9 @@ Related authority is deliberately separate:
   and regression matrix for AutoSave, HCNAMES, `settings.cfg`, and Load/Save.
 
 AutoSave currently persists the active resident Bank's implemented scalar
-state into two hidden root records and each present Scene's Pattern into its
-own hidden PAT4 A/B pair. It does not modify root `Bank/`, `Scene/`,
+state, including each resident Scene's Effect record, into two hidden root
+records and each present Scene's Pattern into its own hidden PAT4 A/B pair.
+It does not modify root `Bank/`, `Scene/`,
 `Kit/`, or `Instrument/` library objects and does not replace explicit Load or
 Save operations.
 
@@ -59,10 +60,11 @@ quiet window scheduling, and shared background CPU budget):
 - per-row Case 1 payload application, Case 2 narrow library reload, and Case 3
   all-or-nothing Scene invalidation, including deferred dirty replay and
   non-blocking notices;
-- an all-145-rows-refreshed HCNAMES-authoritative boot path for a newer
+- an all-161-rows-refreshed HCNAMES-authoritative boot path for a newer
   Load/Save session that the page guard prevented HCPR from capturing;
-- HCPR format v2 aligned with the 145-row HCNAMES contract while retaining the
-  exact 34,768-byte scalar record geometry; Pattern identity is not embedded;
+- HCPR format v3 aligned with the 161-row HCNAMES contract while retaining the
+  exact 34,768-byte scalar record geometry; Pattern and Effect identity are
+  not embedded;
 - one independent 16-bit Pattern dirty mask, a 10,519-byte immutable Pattern
   snapshot, and per-Scene whole-PAT4 background drains with a 250 ms quiet
   window (`AUTOSAVE_PATTERN_QUIET_WINDOW_MS`) after the latest semantic
@@ -89,9 +91,9 @@ quiet window scheduling, and shared background CPU budget):
 
 Not implemented and not to be inferred from the reader/writer:
 
-- Effect name persistence and the Effect boot reader. The three-byte Effect
-  type token is now live and projected from the Step 4 registry; the 419 live
-  Effect parameter cells remain projected by Session 072 Step 3;
+- Root Effect library promotion and the Effect UI remain deferred. Scene/Bank
+  Effect name persistence, the 512-byte Effect payload projection, and the
+  narrow Effect boot reader are implemented by Session 072 ST6.
 - crash-recoverable promotion into explicit Bank library files;
 - a second resident Bank, background staging Bank, or general object journal.
 
@@ -105,10 +107,16 @@ playback. A deferred HCNAMES scheduler rung in `filesystem_tick()` drains
 HCNAMES dirty masks retained across Load/Save page exit (Session 070
 LSR-02).
 
-`AUTOSAVE_HCNAMES_ROW_COUNT` is 145. HCPR format version 2 is therefore the
-only current scalar record version; version 1 records are not accepted by the
-Pattern-aware reader. HCPR embeds scalar hierarchy identity rows 0..128 only;
-Pattern rows 129..144 and Pattern payload bytes never enter HCPR.
+`AUTOSAVE_HCNAMES_ROW_COUNT` is 161. HCPR format version 3 is therefore the
+only current scalar record version; version 1 and version 2 records are
+strictly rejected by the Effect-aware reader. HCPR embeds scalar hierarchy
+identity rows 0..128 only; Pattern rows 129..144, Effect rows 145..160, and
+their child payloads never enter HCPR.
+
+The first card using Session 072 ST6 should delete stale `.hcnames`,
+`.hcnamtmp`, `.hcprms1`, and `.hcprms2` before boot. Firmware will create a
+fresh v3 baseline; it does not reinterpret a 145-row register or v2 scalar
+record as a current-format object.
 
 ## Ownership
 
@@ -129,7 +137,7 @@ Pattern rows 129..144 and Pattern payload bytes never enter HCPR.
 - `settings.cfg` and `filesystem_setAutosaveEnabled()` own policy. A trace or
   diagnostic must never change that policy or dirty state.
 
-## On-card HCPR v2 scalar record contract
+## On-card HCPR v3 scalar record contract
 
 The two singleton names are:
 
@@ -201,13 +209,14 @@ The relative Effect region is projected without copying the retained C record:
 The 419 live Effect cells begin at relative offset 11. Their ordered index
 space is owned by `Autosave.c/.h`; the retained record is owned by SceneData.
 The type bytes are additionally marked by `autosave_markEffectDirty()` and
-project the registry token. Name bytes remain zero/ignored until the later
-HCNAMES/storage step.
+project the registry token. The Effect source is projected at relative bytes
+430..431 from HCNAMES row `145 + scene`; Effect name bytes 3..10 are a
+baseline mirror only and are not live dirty-mask payload.
 
 Header requirements:
 
 - magic `HCPR`;
-- format version 2;
+- format version 3;
 - valid commit byte `0xa5`;
 - wrapping 32-bit generation;
 - Castagnoli CRC32C over the complete record while treating stored CRC bytes
@@ -275,8 +284,11 @@ fields, with all rows marked refreshed. A true read/I/O failure remains a
 failure; invalid content does not authorize arbitrary creation unless the
 validated-winner regeneration rule applies.
 
-The reader applies the winner Bank section, then evaluates the eight identity
-rows for every present Scene in this order: Scene, Kit, Instruments 0..5.
+The reader applies the winner Bank section, then evaluates the nine identity
+rows for every present Scene in this order: Scene, Kit, Instruments 0..5,
+Effect. Effect Case 1 applies the 512-byte Effect region through
+`autosave_applyEffectPayload()`; Effect Case 2 narrow-loads the named Scene
+`.fx` child and commits it atomically with the Scene settings/Kit stage.
 
 - **Case 1 — row has no `R`:** the HCPR object is caught up. Apply its payload
   through `autosave_applyScenePayload()`, `autosave_applyKitPayload()`, or
@@ -290,7 +302,7 @@ rows for every present Scene in this order: Scene, Kit, Instruments 0..5.
   mutations into an independent child row. A successful row emits Q/`0x04`.
 - **Case 3 — row has `R` but cannot be resolved/loaded, or a Case-1 Instrument
   type token is invalid:** empty the entire Scene, stop evaluating that Scene,
-  rewrite all eight rows to `?|R`, and emit Q/`0x02`. Never leave a partial
+  rewrite all nine rows to `?|R`, and emit Q/`0x02`. Never leave a partial
   Scene available to later Save.
 
 Source inheritance is Instrument -> Kit -> Scene -> Bank. A numeric source is
@@ -303,8 +315,9 @@ present Scene independently. It applies the newest format/size/CRC-valid hidden
 PAT4 candidate only when that Scene's Pattern HCNAMES row has Pattern-AutoSave
 `@` provenance and a nonzero generation. Otherwise the initialized or
 explicitly loaded Pattern remains authoritative. A missing/corrupt Pattern
-never empties otherwise valid scalar Scene state. Effects remain zero/live
-placeholder state because their format live count is zero.
+never empties otherwise valid scalar Scene state. A missing `.fx` child is a
+valid Effect Case-2 result and commits the `off` default; malformed `.fx`
+content still invalidates that Scene transaction.
 
 ### HCNAMES-authoritative reader
 
@@ -314,11 +327,12 @@ HCPR writer while HCNAMES already records every committed source. It may run
 only when:
 
 1. HCNAMES row 0 is a direct Bank slot equal to `settings.cfg`'s active Bank;
-2. every one of the 145 data rows has `R`.
+2. every one of the 161 data rows has `R`.
 
 It never uses or regenerates from HCPR. It loads the Bank container from the
-Bank tree, narrow-loads all eight scalar hierarchy rows of each present Scene
-with the same source resolver and all-or-nothing Scene rule, then lets the
+Bank tree, narrow-loads all nine Scene identity rows (including the named
+Effect child) of each present Scene with the same source resolver and
+all-or-nothing Scene rule, then lets the
 Pattern reader apply eligible hidden PAT4 winners.
 Any failed gate or hard failure declines to canonical fallback. Do not weaken
 the two gates: partial refreshed state is handled by the matching-winner reader,
@@ -547,10 +561,11 @@ mechanics and its interaction with AutoSave's dirty mask are specified here
 because the writer that clears the flag is the AutoSave drain itself.
 
 The current physical schema is one exact
-`#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat` header plus 145 data rows.
+`#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat` header plus 161 data rows.
 Bank/Scene/Kit rows are `name<TAB>source[<TAB>R]`; Instrument rows are
 `name<TAB>source<TAB>type[<TAB>R]`, where type is mandatory. The complete
-Pattern rows 129..144 use the non-Instrument grammar and have no type field.
+Pattern rows 129..144 and Effect rows 145..160 use the non-Instrument grammar
+and have no type field.
 The complete parser/source grammar belongs to `FILESYSTEM_SPEC.md`.
 
 **Atomic safe-write.** Every HCNAMES rewrite — boot full-write, runtime
@@ -558,12 +573,12 @@ targeted update, Bank Load, Bank Save, and the drain post-commit convergence
 below — now follows the same temp-file pattern already used for
 `settings.cfg` and the `.hcprms` pair: open `.hcnamtmp`
 (`FS_RESIDENT_NAMES_TEMP_FILENAME`), stream the `#types` header line plus all
-145 rows, close, `afatfs_sync()` to make the temp durable, remove the old live
+161 rows, close, `afatfs_sync()` to make the temp durable, remove the old live
 `.hcnames`, rename the temp into place, then take the final flush-gate sync.
 The live file is untouched until the remove step; a power loss at any point
 leaves either the intact old register or a recoverable `.hcnamtmp` that a boot
 recovery prelude in `filesystem_ensureAutosaveFiles_tick()` validates (a
-current `#types` header plus 145 parseable rows) and either promotes or
+  current `#types` header plus 161 parseable rows) and either promotes or
 discards before any code path opens `.hcnames` for read.
 `hcnames_mirror_valid` is demoted to `INVALID` before every write-capable
 open, set to `PUBLISH_PENDING` only after the rename succeeds (not after
@@ -774,8 +789,8 @@ boot, policy, and SD orchestration use `filesystem.h`.
 | `autosave_markNonSemanticPatternDirty()`, `autosave_nonSemanticPatternDirtyMask()`, `autosave_clearNonSemanticPatternDirty()` | Produce/query/transfer one Scene's non-semantic (physical relocation) Pattern work | Independent 16-bit mask; lowest-priority scheduler rung |
 | `autosave_mask*()` helpers | Atomic take/merge/restore and writer progress | Filesystem consumes the one canonical mask; no second request mask |
 | `autosave_getLivePayloadByte()` | Serialize one live payload coordinate | Writer-side projection only |
-| validation/CRC/format helpers | Stream-validate and construct HCPR v2 | Exact geometry and commit-last rules remain binding |
-| `autosave_applyBankPayload()`, `autosave_applyScenePayload()`, `autosave_applyKitPayload()`, `autosave_applyInstrumentPayload()` | Apply validated HCPR bytes at boot | Tracking must be off; Instrument apply can reject unknown three-byte type text |
+| validation/CRC/format helpers | Stream-validate and construct HCPR v3 | Exact geometry and commit-last rules remain binding |
+| `autosave_applyBankPayload()`, `autosave_applyScenePayload()`, `autosave_applyKitPayload()`, `autosave_applyInstrumentPayload()`, `autosave_applyEffectPayload()` | Apply validated HCPR bytes at boot | Tracking must be off; Effect and Instrument applies reject unknown registry/type tokens |
 | `autosave_extractPayloadSource()` | Read the two-byte source from a validated section | Used for Case-1 defense-in-depth comparison |
 
 ### Filesystem AutoSave API (`filesystem.h`)
@@ -787,7 +802,7 @@ boot, policy, and SD orchestration use `filesystem.h`.
 | `filesystem_validateAutosaveWinnerBlocking()` / `filesystem_hasBootWinner()` | Stage-10b streaming validation and the stage-11 Bank-match gate |
 | `filesystem_autosaveBootReaderBlocking()` | Restore a validated Bank-matching winner with per-row Cases 1/2/3 |
 | `filesystem_regenerateHcnamesFromWinnerBlocking()` | Recover missing/invalid HCNAMES from a validated winner; internal boot orchestration is the normal caller |
-| `filesystem_bootHcnamesAuthoritativeLoad()` | Restore the all-145-rows-refreshed, settings-Bank-matching special state without using HCPR |
+| `filesystem_bootHcnamesAuthoritativeLoad()` | Restore the all-161-rows-refreshed, settings-Bank-matching special state without using HCPR |
 | `filesystem_patternAutosaveBootReaderBlocking()` | Validate/apply eligible per-Scene hidden PAT4 winners after scalar restore |
 | `filesystem_setBootLatchBankFallback()` | Defer whole-Bank dirty publication until tracking becomes live; `main.c` only |
 | `filesystem_bootReaderNoticeSceneMask()` / `filesystem_bootReaderNoticeBankFallback()` | Menu read-and-clear access to one-shot post-boot notices |
@@ -827,9 +842,10 @@ and shares the existing scheduler/facade. Do not borrow the 9,000-byte name cach
 Hardware validation is accepted for scalar Scene, Kit, Instrument, MIDI
 channel/note, the root Scene publication boundary, and functional Pattern
 AutoSave across all 16 Scenes. No user-changeable Bank scalar exists for an
-extra direct UI test. The Step 4 Effect type-token projection, Effect Morph
-Scene byte, and registry/runtime hardware behavior remain card-gate pending;
-the FX bus and Effect boot reader are intentionally excluded.
+extra direct UI test. ST6's Effect registry projection, Scene Morph byte,
+`.fx` load/save, and Effect boot-reader behavior are implemented but remain
+card-gate pending; the root Effect browser and full FX UI are intentionally
+excluded.
 
 Session 061 hardware-accepted the HCNAMES-authoritative reader with
 `SD_CARD_READER_9`, produced from a Bank 001 Load followed by root Scene 008

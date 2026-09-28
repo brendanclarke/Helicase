@@ -2185,3 +2185,173 @@ Revert the change set. On the card, restore the backed-up `.hcnames` and
 `.hcprms*`, or delete them again. v2 `.fx` files are ignored by older
 firmware's strict placeholder parser: such Scenes fail to load there, so keep
 the backup.
+
+## Implementation notes (2026-09-28)
+
+### Code completed
+
+- Added registry-backed Effect storage helpers in `EffectsManager`, including
+  default construction, descriptor key lookup, and reverse key lookup.
+- Replaced the Effect storage placeholder with a strict streaming `.fx` v2
+  parser/writer. It accepts legacy v1 `placeholder=1` as `off`, resolves
+  parameters and lanes through the registry, applies `[morph]`/`[sequence]`
+  defaults, and writes bounded lines for asynchronous SD streaming.
+- Connected the optional named `.fx` child through Scene and Bank load/save.
+  The Effect is staged with Scene settings and Kit before commit, so malformed
+  files do not partially replace a resident Scene. A missing child is a valid
+  `off` default; a blank identity uses `none.fx` on save.
+- Expanded HCNAMES from 145 to 161 rows. Effect rows are 145..160, use the
+  non-Instrument grammar, inherit through the owning Scene, and carry no direct
+  root Effect source. Scene/Bank save, AutoSave refresh tracking, regeneration,
+  and both boot readers now include the Effect row.
+- Bumped the scalar AutoSave header to v3. Effect source bytes are projected at
+  relative bytes 430..431; Effect name bytes remain a baseline mirror rather
+  than live mask cells. `autosave_applyEffectPayload()` restores the complete
+  512-byte Effect region during Case 1 boot restore.
+- Added the narrow boot Effect reader for Case 2 and updated the Scene-set
+  schema with optional `effect_morph_amount`.
+- Updated the adjacent `.c`/`.h` descriptive blocks and the filesystem,
+  AutoSave, SRAM, module-boundary, Bank/Preset, feature-plan, and project-memory
+  references to describe the implemented ST6 contract.
+
+### Decision and memory record
+
+- D1: the Effect record is staged atomically with Scene settings and Kit in the
+  existing 2,048-byte union; the peak Scene stage is 1,621 bytes.
+- D2: Effect source is stored in the first reserved Effect bytes, relative
+  430..431, without changing the 512-byte per-Scene region.
+- D3: the `.fx` schema uses the approved 13 step-scale tokens and
+  `fwd/rev/pip/rnd/sel` run tokens; the default step scale is `1/16`.
+- D4: blank Effect identity uses the existing Instrument-name formatting path;
+  the saved fallback filename is `none.fx` while the HCNAMES name remains
+  blank.
+- D5: old 145-row HCNAMES and AutoSave v1/v2 records are not migrated. The
+  first ST6 card should remove `.hcnames`, `.hcnamtmp`, `.hcprms1`, and
+  `.hcprms2` so firmware can establish a clean v3 baseline.
+- D6: the approved SRAM1 expansion is 32 bytes for the source register,
+  144 bytes for the HCNAMES mirror, 9 bytes for the Effect display stem, and
+  7 bytes for the Effect parser state. DTCM allocation is unchanged.
+
+### Verification status
+
+The final clean production build completed with
+`text=470,208`, `data=408`, and `bss=426,128`; the flash payload was
+470,616 bytes and the packaged `LXRV2_lxr02.img` is 470,632 bytes including
+its 16-byte image header. The link-budget report showed 470,616 of 491,520 flash bytes
+used (20,904 bytes remaining), 3,768 ITCM bytes, unchanged 4,448 DTCM
+statics, and the approved 126,624-byte FX buffer arena. Compiler output had
+only the existing packed-member/unused-static and linker syscall warnings.
+
+The hand-written fixture/card and hardware gates remain pending in this
+workspace: no SD-card hardware is attached for F1–F5, Bank round-trip, or
+reboot Case-1/Case-2 acceptance. The clean production build and image
+regeneration are complete.
+
+---
+
+## 12. Assessment (review of the implemented Step 6 tree)
+
+Reviewed on 2026-09-28. I read the full working-tree diff for `storageTypes`,
+`EffectsManager`, `Autosave`, `filesystem`, `presetManager` and the headers,
+then did an independent clean rebuild.
+
+### 12.1 Build
+
+- **Clean rebuild:** `make clean && make all`, exit 0.
+  - `text=470,208`, `data=408`, `bss=426,128`.
+  - `link_budget.py`: flash 470,616 / 491,520 B, headroom **20,904 B**
+    (+4,848 B against Step 5, inside the +4 to +6 KB estimate).
+  - DTCM statics 4,448 B and FXBUF 126,624 B are unchanged.
+- **RAM (`nm`):** `fs_resident_source` 322 B, `hcnames_name_mirror` 1,449 B,
+  `op_effect_display_name` 9 B, `op_effect_state` 7 B. `.bss` grew by 192 B
+  (189 B plus alignment), matching D6.
+- **Warnings:** 20 in total. The only ones from touched files are the
+  pre-existing unused-function warnings in `filesystem.c`; no new warning.
+
+### 12.2 Code against schedule
+
+| § | Item | Result |
+|---|---|---|
+| 2–3 | EffectsManager helpers | Match. |
+| 4.1–4.2 | Parser state and API | Match. Header comment blocks are condensed but accurate. |
+| 4.4–4.5 | sceneset comments and `effect_morph_amount` | Match. |
+| 4.6 | Parser, writer, filename helper | Match. The lane parser adds a `'\0'` guard in the hex loop; that improves on the schedule. |
+| 5 | `Autosave.h` | Match. `autosave_extractPayloadSource()` now takes a `uint16_t` offset bounded by the 512 B Effect region, so the Effect source at 430 can use the common cross-check. This is equivalent and acceptable. |
+| 6 | `Autosave.c` | Match. The live Effect parameter window is narrowed to the 419 cells, so the source bytes are never reported as parameters. |
+| 7.1–7.10 | Row layout, predicates, row-class sites, refresh sweeps, asserts | Match. |
+| 7.11 | Scene Load phases | Match: 16 → 56, 60 → 17, 53 → 61, phase 11 no longer requires `.fx`, and the Effect row is staged `-`. One deviation: phase 9 takes the display stem through `filesystem_patternDisplayFromFilename()` instead of `filesystem_copyInstrumentStemDisplay()`. Output is identical (first eight cells before the first `.`), so no behavior change. |
+| 7.12–7.13 | Stage defaults, commit, resets; sceneset line 10; writer adapter | Match. The adapter takes the `scene_t` pointer and projects `&scene->effect`, which is equivalent. |
+| 7.14 | Scene Save | See **Finding 1**. |
+| 7.16–7.20 | Regeneration, narrow loader, EmptyScene, numeric guard, nine-row readers | Match. |
+| 8–9 | `filesystem.h` and `presetManager.c` comments | Match. |
+
+### 12.3 Findings
+
+1. **Blank-name Scene Save can write `inst.fx` instead of `none.fx`
+   (defect, low impact).**
+   - **Where:** Scene Save phase 82 (`filesystem.c` ~19884) and the
+     unreachable phase 33 (~19655).
+   - **What happens:** both call
+     `storage_makeSavedEffectDisplayFilename(…, fx_stem)` with the raw mirror
+     cell, even when `filesystem_residentNameIsBlank(fx_stem)` is true.
+   - A blank HCNAMES row read back from the card is stored in the mirror as
+     all-NUL: `filesystem_cacheResidentRecord()` copies only a non-empty name
+     (`filesystem.c:6064`).
+   - The Instrument helper maps an empty stem to `inst`
+     (`storageTypes.c:762`). The file therefore becomes `inst.fx`, which
+     reloads with the non-blank name `inst`.
+   - Within one session, a blank row cached from `op_effect_display_name` is
+     all spaces and correctly gives `none.fx`. The result therefore depends on
+     whether `.hcnames` has been re-read.
+   - **Knock-on:** the boot narrow loader maps a blank row to `none.fx`. Case 2
+     would then miss an `inst.fx` on the card and restore `off`.
+   - **Fix (schedule §7.14, as written):** in both places, pass
+     `blank ? "        " : fx_stem` to
+     `storage_makeSavedEffectDisplayFilename()`. This is a two-line change.
+2. **Kit Save now writes the Effect row (unscheduled; conflicts with plan
+   §7.3).**
+   - **Where:** `filesystem_saveKitDirectory_tick()` phase 21
+     (`filesystem.c:17960-17964`) sets the Effect row source to `-` and marks
+     its AutoSave source bytes dirty.
+   - Kit operations must not touch the Effect: the adjacent comment still says
+     "seven dirty source cells".
+   - It is harmless while every Effect row is already `-`. It is wrong for a
+     row left at `?` by boot Case 3 (`EmptyScene`): a later Kit Save would
+     silently make that Effect resolvable through the Scene folder.
+   - **Fix:** remove those five lines.
+3. **Record inaccuracy in the implementation notes (documentation).**
+   - The notes above say "13 step-scale tokens". The code (correctly) has
+     **14** (`EFFECT_SEQ_SCALE_COUNT`, statically asserted).
+4. **Condensed comment blocks (cosmetic).**
+   - Several scheduled comment blocks were shortened, for example
+     `storage_effectStateInit`, `storage_effectParseLine`,
+     `autosave_applyEffectPayload` and `filesystem_bootReaderNarrowLoadEffect`.
+   - The shortened versions are accurate. The fuller rationale lives in the
+     updated FILESYSTEM_SPEC and AUTOSAVE docs. No action is required.
+
+I found no other correctness defects.
+
+- **Staging overlap:** the staged Effect sits at offsets 1,201..1,620 of the
+  2,048 B union. The Kit stage (`kit_t`, 0..1,159) and the Instrument stage
+  do not overlap it, and the Scene loader writes only
+  `scene_stage.kit/settings/effect`. The Effect record therefore survives the
+  Kit phases that now run after it.
+
+### 12.4 Fixture-gate expectation to note before the bench run
+
+A malformed `.fx` (F4) in a **root** Scene fails with
+`FS_LOAD_INVALID_SCENE`.
+
+- The existing quarantine path (phase 62 → 68) then **renames that root Scene
+  folder** with the quarantine prefix. The resident Scene is untouched (D1
+  holds), but the fixture folder name changes on the card.
+- Bank-local children skip the rename (phase 62 → 72) and clear their present
+  bit instead.
+- This is the existing behavior for any invalid Scene child. Use a disposable
+  copy for F4.
+
+### 12.5 Hardware status
+
+Not yet run: the fixture card, card preparation (D5), and gates 3–13 are
+pending. I recommend applying Findings 1 and 2 before the bench session so
+gate 8 (blank name) and Kit Save regression are tested on the final code.

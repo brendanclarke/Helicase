@@ -1,7 +1,7 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-072 Step 4, including typed HCNAMES, AutoSave boot restore, typed Instrument-index
+072 Step 6, including typed HCNAMES, `.fx` Effect storage, AutoSave boot restore, typed Instrument-index
 repair, AsyncFATFS directory publication, the Phase 4 dynamic Pattern storage
 system, step automation editing/playback (Session 065), the VOICE-page
 held-step automation overlay (Session 066), the Pattern Stack Service with
@@ -56,11 +56,12 @@ module owns each call, state transition, and retained object.
   genuine FAT/SD failures remain terminal errors.
 - Root `/.hcnames` is the authoritative fixed-order resident identity and
   provenance register. A dedicated 1,305-byte name mirror and the
-  filesystem-owned 290-byte source register retain its 145 rows independently
+  filesystem-owned 322-byte source register retain its 161 rows independently
   of the browser cache.
   Its physical file is a mandatory `#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat`
-  header plus 145 rows; Instrument rows carry a mandatory three-byte type
-  column and rows 129..144 own Pattern identity. Load/Save commits publish
+  header plus 161 rows; Instrument rows carry a mandatory three-byte type
+  column, rows 129..144 own Pattern identity, and rows 145..160 own Effect
+  identity. Load/Save commits publish
   name, source, and refreshed state for the complete hierarchy they committed.
   The sole active identity block is 81 bytes: BankData's Bank row plus
   filesystem's Scene, Kit, and six Instrument rows. SceneData stores no name or
@@ -958,8 +959,8 @@ Storage text parsing/formatting and descriptor-key validation stay in
 | `filesystem_requestLoadKitForScenes(slot, scene_mask, cb)` | Parse one direct Kit library slot `000..999` into staging and fan the completed Kit payload into selected resident Scenes. | Preset/Menu Kit Load |
 | `filesystem_requestLoadKitMorphForScenes(slot, scene_mask, cb)` | Parse one Kit directory into staging only so Preset can copy matching source normal endpoints into resident morph endpoints. | Preset/Menu KitMrp Load |
 | `filesystem_requestSaveKitDirectory(slot, source_scene, display_name, morph_projection, cb)` | Create/open visible `Kit/<NNN Name>/` with asyncfatfs LFN creation, stream six descriptor-keyed instrument files with visible LFN stems, then stream `kitset.kcg` with returned 8.3 aliases. `morph_projection` writes current interpolated values into both endpoint sections. | Preset/Menu Kit Save |
-| `filesystem_requestLoadSceneForScenes(slot, scene_mask, cb)` | Parse `sceneset.scg` plus embedded Kit into the independent non-Pattern stage, commit them after validation, then read/validate PAT4 into final Pattern storage and validate the Effect placeholder. Successful terminal completion marks Scene-with-Pattern AutoSave scope. | Preset/Menu Scene Load, boot |
-| `filesystem_requestSaveSceneDirectory(slot, source_scene, display_name, cb)` | Replace one root Scene slot and stream `sceneset.scg`, embedded `Kit <name>/`, six Instrument files, one named PAT4 file, and placeholder `effects.fx` from a resident Scene. | Preset/Menu Scene Save |
+| `filesystem_requestLoadSceneForScenes(slot, scene_mask, cb)` | Parse `sceneset.scg` plus embedded Kit and the optional named `.fx` child into the independent non-Pattern stage, commit them after validation, then read/validate PAT4 into final Pattern storage. Missing `.fx` supplies the `off` Effect default; malformed `.fx` rejects the Scene. | Preset/Menu Scene Load, boot |
+| `filesystem_requestSaveSceneDirectory(slot, source_scene, display_name, cb)` | Replace one root Scene slot and stream `sceneset.scg`, embedded `Kit <name>/`, six Instrument files, one named PAT4 file, and named `.fx` v2 content from a resident Scene. | Preset/Menu Scene Save |
 | `filesystem_requestLoadPatternForScenes(slot, scene_mask, cb)` | Validate one root-library PAT4 into the first selected Scene, fan out the complete region to the remaining selected Scenes, publish Pattern identity, and reset hidden-generation baselines. | Preset/Menu Pattern Load |
 | `filesystem_requestLoadInstrumentIndex(type, cb)` | Directly open and validate the registered type's `.hcindex` into the shared compact cache. Missing, empty, or structurally invalid metadata transfers the same accepted request into selected-type scan/write/sync recovery; fatal FAT/SD/read/scan/close/write faults return ERROR. The callback runs once. | Nested Instrument Load, InstrumentMrp, and Instrument Save type transitions |
 | `filesystem_requestScanInstruments(cb)` / `filesystem_instrumentCount()` / `filesystem_instrumentName()` / `filesystem_instrumentDisplayIndex()` | Scan/query the single shared 1,000-entry root Instrument browser cache for the currently loaded type. | Menu Instrument Load; boot uses one type-at-a-time scan/index passes |
@@ -970,10 +971,10 @@ Storage text parsing/formatting and descriptor-key validation stay in
 | `filesystem_loadedInstrumentWasMorphTemporary()` | Query whether the staged hidden Instrument load is the InstrumentMrp Morph-only baseline, valid beside the staged Instrument until the next request reuses operation scratch. | Preset Morph-apply origin dispatch |
 | `filesystem_ensureAutosaveFilesBlocking()` / `filesystem_setAutosaveEnabled(enabled)` / `filesystem_autosaveEnabled()` | Establish the hidden pair at boot, apply runtime policy, and authorize mutation tracking/background work only after successful setup. Format and failure rules are in `AUTOSAVE.md`. | `main.c`, Menu/settings policy |
 | `filesystem_validateAutosaveWinnerBlocking()` / `filesystem_hasBootWinner()` | Stream-validate both HCPR candidates after settings/index boot and expose only a valid active-Bank match to stage 11. | `main.c` boot stage 10b/11 |
-| `filesystem_autosaveBootReaderBlocking()` | Apply a validated matching HCPR v2 winner and evaluate scalar Scene rows as Case 1 payload, Case 2 narrow load, or Case 3 whole-Scene invalidation. | `main.c` boot stage 11 |
+| `filesystem_autosaveBootReaderBlocking()` | Apply a validated matching HCPR v3 winner and evaluate Scene/Effect/Kit/Instrument rows as Case 1 payload, Case 2 narrow load, or Case 3 whole-Scene invalidation. | `main.c` boot stage 11 |
 | `filesystem_patternAutosaveBootReaderBlocking()` | Validate each present Scene's PAT4 A/B pair and apply the eligible newest Pattern-AutoSave winner. | `main.c` after scalar restore |
 | `filesystem_regenerateHcnamesFromWinnerBlocking()` | Atomically rebuild absent/corrupt typed HCNAMES from a validated winner before its reader proceeds. | boot reader orchestration |
-| `filesystem_bootHcnamesAuthoritativeLoad()` | Load the settings-Bank-matching, all-145-rows-refreshed special state entirely from HCNAMES/library sources; decline on failed gates/hard error. | `main.c` boot stage 11 |
+| `filesystem_bootHcnamesAuthoritativeLoad()` | Load the settings-Bank-matching, all-161-rows-refreshed special state entirely from HCNAMES/library sources, including each named Effect child; decline on failed gates/hard error. | `main.c` boot stage 11 |
 | `filesystem_setBootLatchBankFallback()` | Record a canonical or HCNAMES-authoritative Bank restore whose dirty mark must replay after tracking enables. | `main.c`, HCNAMES-authoritative reader |
 | `filesystem_bootReaderNoticeSceneMask()` / `filesystem_bootReaderNoticeBankFallback()` | Read and clear Case-3/Bank one-shot notice state after audio starts. | Menu boot-notice sequencer |
 | `filesystem_autosaveTraceFlushBlocking()` | Bench-only durable boundary for currently pending lifecycle records; ordinary runtime trace flushing is autonomous and lower priority. | temporary test harness only |
@@ -985,7 +986,7 @@ Storage text parsing/formatting and descriptor-key validation stay in
 | `filesystem_requestReloadLibraryIndex(kind, cb)` / domain-specific Kit/Scene/Bank wrappers | Read an existing slot-ordered root `.hcindex` into the one shared cache; blank rows remain slot positions. This is read-only cache restoration and never scans or rewrites the namespace. The accepted root Scene/Bank terminal callback acknowledges its captured result before Menu teardown. | Menu entry/type changes and post-DSP root Scene/Bank Load terminal work |
 | `filesystem_createLibraryIndexBlocking(kind)` | Boot-only repair/scan and slot-ordered `.hcindex` rebuild for one root library. Runtime numbered-root Saves use the common asynchronous scan/rebuild continuation instead. | boot |
 | `filesystem_clearNameCache()` / `filesystem_libraryNameCacheLoaded(kind)` | Dispose/query the one active Instrument/Kit/Scene/Bank browser-name cache. | Menu lifecycle and index gating |
-| `filesystem_setIdentityName(row, name)` / `filesystem_identityName(row)` / `filesystem_identityNameMutable(row)` / `filesystem_clearIdentityNames()` | Own the logical Bank/Scene/Kit/six-Instrument identity interface. Bank aliases BankData; the other eight rows occupy 72 bytes. | Menu and filesystem HCNAMES/load/save completion |
+| `filesystem_setIdentityName(row, name)` / `filesystem_identityName(row)` / `filesystem_identityNameMutable(row)` / `filesystem_clearIdentityNames()` | Own the logical Bank/Scene/Kit/six-Instrument/Effect identity interface. Bank aliases BankData; the nine non-Bank rows occupy 81 bytes per Scene. | Menu and filesystem HCNAMES/load/save completion |
 | `filesystem_residentSource(row)` / `filesystem_setResidentSource(row, source)` / `filesystem_resolveResidentSource(row, resolved_row)` | Read, stage, and resolve the paired HCNAMES provenance token. The resolver follows Instrument -> Kit -> Scene -> Bank and does no I/O; boot readers own target opens and Case-2/3 decisions. | filesystem successful-load boundaries and AutoSave boot readers |
 | `filesystem_requestLoadResidentKitName()` / `filesystem_requestUpdateResidentKitNames()` | Borrow HCNAMES for one Scene's Kit-plus-six block or preserve/overlay full seven-row blocks for a dirty Scene mask. | combined Kit/Instrument Menu session |
 | `filesystem_requestLoadResidentInstrumentName()` / `filesystem_requestUpdateResidentInstrumentNames()` | Legacy/narrow one-Instrument HCNAMES row operations; the combined Menu entry normally loads the seven-row Kit block. | Menu/filesystem compatibility paths |
@@ -1042,12 +1043,12 @@ Important private Phase 2 kit helpers:
   Session 038 Kit Save no longer relies on leaving stale unreferenced files in
   place.
 - `filesystem_loadSceneDirectory_tick()` validates complete Scene folders in
-  the Scene settings-plus-Kit stage, commits that non-Pattern payload, then
-  reads Pattern directly into final Scene SRAM. It imports legacy embedded-kit
+  the Scene settings-plus-Kit-plus-Effect stage, commits that non-Pattern
+  payload, then reads Pattern directly into final Scene SRAM. It imports legacy embedded-kit
   `audio_out` only when `sceneset.scg` lacks Scene-owned `audio_out`.
 - `filesystem_saveSceneDirectory_tick()` writes the current Scene folder shape:
-  `sceneset.scg`, embedded Kit without `audio_out`, six instruments, thin
-  `pattern.pat`, and placeholder `effects.fx`.
+  `sceneset.scg`, embedded Kit without `audio_out`, six instruments, PAT4
+  `pattern.pat`, and named `.fx` v2 content.
 - `filesystem_saveBankDirectory_tick()` (rewritten Session 057): scans and
   reuses the root Bank directory itself (open-or-rename-then-open if a match
   for the target slot exists, create only if absent) rather than deleting and
@@ -1143,8 +1144,9 @@ layer use the `storage_` prefix.
 | `storage_instrumentTypeToText()` / `storage_instrumentTypeExtension()` | Convert type enum back into schema token/extension for save. | Kit Save writer |
 | `storage_formatKitsetLine()` / `storage_formatInstrumentLine()` | Emit one bounded schema line at a time for streaming Kit Save and root Instrument Save. Instrument emission writes `self` for own-slot LFO voice selectors. | filesystem Kit/Instrument Save |
 | `storage_makeSavedInstrumentDisplayFilename()` | Generate one visible Instrument component from the active fixed-width identity stem, slot type, and optional voice suffix. No Scene-retained stem exists; asyncfatfs returns any required short alias. | filesystem Kit/Instrument Save |
-| `storage_patternStubStateInit()` / `storage_patternStubParseLine()` / `storage_patternStubFinalize()` | Validate thin Scene `pattern.pat` placeholders. | Scene Load |
-| `storage_formatPatternStubLine()` / `storage_formatEffectPlaceholderLine()` | Emit thin Scene placeholder child files one line at a time. | Scene Save |
+| `storage_patternStubStateInit()` / `storage_patternStubParseLine()` / `storage_patternStubFinalize()` | Validate legacy thin Scene `pattern.pat` placeholders. | Scene Load compatibility |
+| `storage_formatPatternStubLine()` | Emit legacy Pattern placeholder lines when compatibility output is requested. | Scene Save compatibility |
+| `storage_effectStateInit()` / `storage_effectParseLine()` / `storage_effectFinalize()` / `storage_formatEffectLine()` | Stream-validate or emit `.fx` v2; accept legacy v1 `placeholder=1` as `off`, reject malformed v2, and use registry descriptors for parameter/lane keys. | Scene/Bank Effect Load/Save |
 | `storage_parseNumberedFolder()` | Parse visible numbered folders `NNN Name` or `NNN_Name` into direct `000..999` slot plus eight-character display name. Slot `000` is real. | Kit/Scene/Bank scan |
 | `storage_copyDisplayName()` / `storage_copyFilename()` | Fixed-width display-name normalization and short filename copying. | filesystem/parser code |
 

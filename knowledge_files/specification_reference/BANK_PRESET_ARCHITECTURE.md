@@ -28,7 +28,7 @@ Bank (one resident at a time)
 ├── BankData: present mask, active Scene, voice-edit mask, restore slot
 ├── Scene[0..15] (up to 16 resident)
 │   ├── SceneData: settings, kit slots, descriptor images, MIDI routing
-│   ├── Effect: Scene-owned `effect_record_t` (420 B; runtime from Step 4)
+│   ├── Effect: Scene-owned `effect_record_t` (420 B; `.fx` v2 child storage)
 │   ├── Kit (embedded in SceneData)
 │   │   ├── Kit-level settings (audio routing, morph endpoints per voice)
 │   │   └── Instrument[0..5] (6 voice slots)
@@ -129,6 +129,17 @@ contains everything except Pattern data, which lives in
 | Scene Morph | Per-voice morph amount (0..255) | 6 values |
 | Scene Decimation | Global `srt` value | 1 byte |
 | Audio routing | Per-voice output assignment (0..5) | 6 bytes |
+| Effect | Type, 64 normal cells, 64 Morph cells, 16-step sequence | 420-byte Scene-owned record; saved as named `.fx` v2 child |
+| Effect Morph | Scene `effect_morph_amount` | AutoSave Scene setting index 40; serialized in `sceneset.scg` when present |
+
+The Effect record is initialized to the registry's `off` defaults and is
+replaced only through a complete SceneData transaction. EffectsManager owns
+the runtime type dispatch; it does not own retained bytes. Scene and Bank
+filesystem loads parse the optional first `<name>.fx` child into the shared
+2,048-byte stage, then commit the Effect together with Scene settings and
+Kit. Scene and Bank saves stream the corresponding named `.fx` v2 child. A
+blank HCNAMES Effect name uses `none.fx` on card while preserving a blank
+resident name cell.
 
 ### Parameter value domain
 
@@ -165,10 +176,13 @@ Parameters change through these paths:
    images.
 
 6. **Kit/Instrument/Scene/Bank Load:** Commits validated data from staging
-   into resident storage. Triggers full morph rebuild and modulation rebind.
+   into resident storage. Scene/Bank loads stage the Effect atomically with
+   Scene settings and Kit; a missing `.fx` child uses the `off` default.
+   Triggers full morph rebuild, Effect activation, and modulation rebind.
 
 7. **AutoSave boot restore:** Overwrites resident values from the validated
-   HCPR winner at boot.
+   HCPR v3 winner at boot, including each Scene's 512-byte Effect region; a
+   refreshed Effect row can instead narrow-load its named `.fx` child.
 
 ### When parameters become visible
 
@@ -447,7 +461,8 @@ AutoSave boot restore applies data in a specific order to maintain invariants:
 3. **Scene present mask** — from HCPR Bank section
 4. **Active Scene** — from HCPR Bank section
 5. **Voice-edit mask** — from HCPR Bank section
-6. **Per-Scene scalars** — Scene/Kit/Instrument values from HCPR
+6. **Per-Scene scalars and Effects** — Scene/Kit/Instrument values plus the
+   512-byte Effect regions from HCPR v3, subject to refreshed-row narrow loads
 7. **Per-Scene Patterns** — from hidden `.patNNa`/`.patNNb` PAT4 files
 
 The voice-edit mask is restored after the active Scene is set, ensuring the

@@ -35,17 +35,17 @@
 /* One-byte writer witness; generation, not this wrapping byte, selects A/B. */
 #define AUTOSAVE_HEADER_PROBE_COUNTER_OFFSET 16u
 /*
- * S064 format version for the scalar AutoSave record.
+ * Session 072 step 6 format version for the scalar AutoSave record.
  *
- * What: identifies the 145-row HCNAMES identity image carried by the
- * record. Why: the previous version serialized only rows 0..128, so its
- * payload must not be interpreted as a complete Pattern-aware identity
- * image. Inputs/outputs: compile-time format tag consumed by the writer and
- * boot validator; the scalar record byte geometry remains unchanged.
- * Affiliates: autosave_streamValidationUpdate(),
- * filesystem_autosaveBootReaderBlocking(), and HCNAMES Pattern provenance.
+ * What: identifies the 161-row HCNAMES identity image (Pattern rows 129..144
+ * plus Effect rows 145..160), the Effect source field at Effect-relative
+ * 430..431, and a live Effect reader. Why: version 2 records carry no Effect
+ * provenance and a 145-row identity image, so they must not be interpreted;
+ * they are rejected and a fresh baseline is created. Affiliates:
+ * autosave_streamValidationUpdate(), filesystem_autosaveBootReaderBlocking(),
+ * and HCNAMES Pattern/Effect provenance.
  */
-#define AUTOSAVE_HEADER_FORMAT_VERSION        2u
+#define AUTOSAVE_HEADER_FORMAT_VERSION        3u
 #define AUTOSAVE_HEADER_COMMIT_VALID        0xa5u
 
 /*
@@ -100,7 +100,7 @@
  * Affiliates: filesystem.c's FS_RESIDENT_NAMES_ROW_COUNT and the Pattern
  * dirty/HNAMES lifecycle.
  */
-#define AUTOSAVE_HCNAMES_ROW_COUNT           145u
+#define AUTOSAVE_HCNAMES_ROW_COUNT           161u
 #define AUTOSAVE_HCNAMES_ROW_BYTES             9u
 
 /* HCNAMES' fixed Bank / Scene / Kit / Instrument row ownership. */
@@ -125,6 +125,10 @@
 #define AUTOSAVE_HCNAMES_PATTERN_BASE \
     (AUTOSAVE_HCNAMES_INSTRUMENT_BASE + \
      (AUTOSAVE_SCENE_COUNT * AUTOSAVE_INSTRUMENTS_PER_KIT))
+
+/* Effect provenance rows follow the sixteen resident Pattern rows. */
+#define AUTOSAVE_HCNAMES_EFFECT_BASE \
+    (AUTOSAVE_HCNAMES_PATTERN_BASE + AUTOSAVE_SCENE_COUNT)
 
 /*
  * Absolute top-level offsets.
@@ -191,6 +195,8 @@
 #define AUTOSAVE_EFFECT_PARAMETERS_OFFSET      11u
 #define AUTOSAVE_EFFECT_PARAMETER_ALLOC_BYTES  501u
 #define AUTOSAVE_EFFECT_PARAM_COUNT            419u
+#define AUTOSAVE_EFFECT_SOURCE_OFFSET \
+    (AUTOSAVE_EFFECT_PARAMETERS_OFFSET + AUTOSAVE_EFFECT_PARAM_COUNT)
 #define AUTOSAVE_KIT_OFFSET                   640u
 #define AUTOSAVE_KIT_NAME_OFFSET                0u
 #define AUTOSAVE_KIT_PARAMETERS_OFFSET         10u
@@ -315,6 +321,11 @@ _Static_assert(AUTOSAVE_EFFECT_PARAMETERS_OFFSET +
 _Static_assert(AUTOSAVE_EFFECT_PARAM_COUNT <=
                    AUTOSAVE_EFFECT_PARAMETER_ALLOC_BYTES,
                "live Effect parameters must fit their reserved cells");
+_Static_assert(AUTOSAVE_EFFECT_SOURCE_OFFSET == 430u,
+               "Effect source must remain at relative bytes 430..431");
+_Static_assert(AUTOSAVE_EFFECT_SOURCE_OFFSET + AUTOSAVE_SOURCE_BYTES <=
+                   AUTOSAVE_EFFECT_SECTION_BYTES,
+               "Effect source must fit the reserved Effect section");
 _Static_assert(AUTOSAVE_KIT_OFFSET + AUTOSAVE_KIT_SECTION_BYTES ==
                    AUTOSAVE_SCENE_SECTION_BYTES,
                "Kit must end at the Scene boundary");
@@ -342,6 +353,8 @@ _Static_assert(AUTOSAVE_KIT_PARAMETERS_OFFSET +
                    AUTOSAVE_KIT_INSTRUMENTS_OFFSET,
                "Kit parameter allocation must end at Instruments");
 _Static_assert(AUTOSAVE_HCNAMES_PATTERN_BASE + AUTOSAVE_SCENE_COUNT ==
+                   AUTOSAVE_HCNAMES_EFFECT_BASE &&
+               AUTOSAVE_HCNAMES_EFFECT_BASE + AUTOSAVE_SCENE_COUNT ==
                    AUTOSAVE_HCNAMES_ROW_COUNT,
                "autosave name mapping must consume all HCNAMES rows");
 _Static_assert(AUTOSAVE_SCENE_PARAM_COUNT ==
@@ -649,13 +662,16 @@ void autosave_clearNonSemanticPatternDirty(uint8_t scene_index);
 void autosave_applyBankPayload(const uint8_t *bank_section);
 void autosave_applyScenePayload(uint8_t scene_index,
                                 const uint8_t *scene_section);
+/* Apply one validated Effect wire region while autosave tracking is off. */
+void autosave_applyEffectPayload(uint8_t scene_index,
+                                 const uint8_t *effect_section);
 void autosave_applyKitPayload(uint8_t scene_index,
                               const uint8_t *kit_section);
 uint8_t autosave_applyInstrumentPayload(uint8_t scene_index,
                                         uint8_t instrument_slot,
                                         const uint8_t *instrument_record);
 uint16_t autosave_extractPayloadSource(const uint8_t *section,
-                                       uint8_t source_offset);
+                                       uint16_t source_offset);
 
 /*
  * Restore captured live offsets after an unsuccessful target transaction.

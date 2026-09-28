@@ -334,7 +334,7 @@ uint8_t filesystem_regenerateHcnamesFromWinnerBlocking(void);
  * Replaces the canonical preset_loadBank() when stage 10b proved a valid
  * Bank-matching winner: reads .hcnames (regenerating it from the record
  * when corrupt), applies the winner's Bank payload, then evaluates each
- * present Scene's eight identity rows independently — Case 1 applies the
+ * present Scene's nine identity rows independently — Case 1 applies the
  * winner payload, Case 2 narrow-loads a resolvable row from its library
  * source, and Case 3 empties the whole Scene when a refreshed row cannot
  * be resolved (P1). Returns nonzero when the winner restore completed;
@@ -382,10 +382,10 @@ void filesystem_patternAutosaveOnLoad(uint8_t scene_index);
  * What: parses .hcnames (temp-file prelude first, then the register),
  * then requires the two special-case checks — the register Bank row is a
  * direct numeric slot equal to bank_restoreBankSlot() (the settings.cfg
- * boot Bank), and all 145 HCNAMES rows carry the refreshed witness. When both
+ * boot Bank), and all 161 HCNAMES rows carry the refreshed witness. When both
  * hold, the register is authoritative: this function constructs the
  * whole resident state from it — the Bank container via
- * filesystem_bootNarrowLoadBank(), then every present Scene's eight rows
+ * filesystem_bootNarrowLoadBank(), then every present Scene's nine rows
  * via resolve-plus-narrow-load, Bank-inherited rows from the Bank tree
  * and direct rows from their Scene/Kit/Instrument libraries, then the
  * v4 `<name>.pat` Pattern child per non-emptied Scene. Any unresolvable child of a Scene
@@ -680,7 +680,7 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot,
  * name, and completion callback. Output: asynchronous replacement scoped to
  * same-number children under /Scene/: Scene/<NNN Name>/ with sceneset.scg,
  * embedded Kit directory, six instrument files, a named v4 Pattern child, and
- * effects.fx placeholder. The Pattern child stores the complete dynamic
+ * named `.fx` v2 Effect content. The Pattern child stores the complete dynamic
  * address/pool/bitmap payload and its per-track settings. Other
  * numbered Scene directories must not be removed, regardless of how many nested
  * children they contain. The resident Scene display name updates only after the
@@ -936,7 +936,7 @@ const char *filesystem_residentInstrumentName(uint8_t scene_index,
  * Resident Kit name-register access.
  *
  * The load request mirrors Instrument menu entry: it borrows the generalized
- * cache for all 145 root HCNAMES rows so Menu can copy one resident Scene's Kit
+ * cache for all 161 root HCNAMES rows so Menu can copy one resident Scene's Kit
  * name plus all six Instrument names before `/Kit/.hcindex` replaces that same
  * allocation. Menu retains those seven rows for the complete combined
  * Kit/Instrument session. Loads and saves only update the Menu scratch and an
@@ -1029,7 +1029,7 @@ bool filesystem_requestLoadPatternIndex(fs_completion_cb_t cb);
 /* True when the requested root library currently owns the shared cache. */
 bool filesystem_libraryNameCacheLoaded(fs_library_index_kind_t kind);
 /* Dispose the single shared Instrument/Kit/Scene/Bank/Pattern browser cache or its
- * temporary 145-row HCNAMES view; no second name allocation exists. */
+ * temporary 161-row HCNAMES view; no second name allocation exists. */
 void filesystem_clearNameCache(void);
 /* Compatibility spelling retained for existing Instrument menu callers. */
 void filesystem_clearInstrumentCache(void);

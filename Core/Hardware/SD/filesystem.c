@@ -130,25 +130,29 @@
  * Fixed logical row coordinates inside the variable-length `/.hcnames` file.
  *
  * What: the register contains one Bank row, sixteen Scene rows, sixteen Kit
- * rows, six Instrument rows, and one Pattern row for each resident Scene.
+ * rows, six Instrument rows, one Pattern row, and one Effect row for each
+ * resident Scene.
  * Why: runtime Instrument and Pattern lookup/update must compute one stable
  * Scene/slot coordinate without retaining another mapping table. The physical
  * text rows remain trimmed and variable length; these constants describe row
  * identity, not byte offsets. The physical file also carries one `#types`
  * header line before row 0 (see FS_RESIDENT_NAMES_TYPE_HEADER), so a complete
- * v4 register has 146 lines while FS_RESIDENT_NAMES_ROW_COUNT stays 145: data
- * rows only. AutoSave's independent wire image is also 145 rows in S064;
- * Pattern payload bytes remain in separate per-Scene PAT4 files.
+ * v4 register has 162 lines while FS_RESIDENT_NAMES_ROW_COUNT stays 161: data
+ * rows only. AutoSave's identity image is also 161 rows in format version 3;
+ * Pattern payload bytes remain in separate per-Scene PAT4 files while Effect
+ * payload is carried by the scalar record.
  */
 #define FS_RESIDENT_NAMES_INSTRUMENT_BASE \
     (1u + STORAGE_BANK_SCENE_MAX_SLOTS + STORAGE_BANK_SCENE_MAX_SLOTS)
 #define FS_RESIDENT_NAMES_PATTERN_BASE \
     (FS_RESIDENT_NAMES_INSTRUMENT_BASE + \
      (STORAGE_BANK_SCENE_MAX_SLOTS * STORAGE_KIT_SLOT_COUNT))
+#define FS_RESIDENT_NAMES_EFFECT_BASE \
+    (FS_RESIDENT_NAMES_PATTERN_BASE + STORAGE_BANK_SCENE_MAX_SLOTS)
 #define FS_RESIDENT_NAMES_KIT_BASE \
     (1u + STORAGE_BANK_SCENE_MAX_SLOTS)
 #define FS_RESIDENT_NAMES_ROW_COUNT \
-    (FS_RESIDENT_NAMES_PATTERN_BASE + STORAGE_BANK_SCENE_MAX_SLOTS)
+    (FS_RESIDENT_NAMES_EFFECT_BASE + STORAGE_BANK_SCENE_MAX_SLOTS)
 /*
  * Instrument-type vocabulary header on the first `.hcnames` line.
  *
@@ -191,7 +195,7 @@
  * The generalized browser cache has one physical name array for every
  * numbered or typed library. Kit, root Scene, and root Bank indexes use the
  * slot number as the array index, while an Instrument index uses the first N
- * sorted rows. HCNAMES now has its own 145-row mirror, so this allocation can
+ * sorted rows. HCNAMES now has its own 161-row mirror, so this allocation can
  * remain a valid Bank index across resident-name transactions. Keeping this
  * maximum at the largest numbered library lets one SRAM object be disposed and
  * reused instead of allocating one name array per library or Instrument type.
@@ -871,17 +875,20 @@ static void on_delete_tree_complete(afatfsResultCode_t result)
 /*
  * Non-Pattern Scene stage shape.
  *
- * What: one load-time Scene settings image plus its embedded Kit; PatternData
+ * What: one load-time Scene settings image plus its embedded Kit and Effect;
+ * PatternData
  * is deliberately absent. Why: Scene settings/Kit validate atomically before
  * Pattern streams directly to final Scene SRAM under the agreed non-atomic
  * Pattern policy. Inputs: sceneset, kitset, and Instrument file parsers.
  * Outputs: filesystem_commitSceneStage() copies the validated image to the
  * selected resident Scene(s). Affiliates: Kit/Instrument stage members below,
- * Pattern loader phases, and the later Effect payload design.
+ * Pattern loader phases, and Effect phases 56..60, which run before the Kit.
  */
 typedef struct {
     scene_settings_t settings;
     kit_t kit;
+    /* Staged `.fx` record; committed with settings and Kit. */
+    effect_record_t effect;
 } filesystem_scene_stage_t;
 
 /*
@@ -971,8 +978,8 @@ typedef struct {
  * cache only; sharing it with parser staging erased active `.hcindex` rows
  * during Load scrolling. 512 parameter cells require three endpoint images
  * (main, morph, interpolation), or 1,536 bytes because values are uint8_t.
- * The remaining budget covers current Scene/Kit metadata and reserves 384
- * bytes for a future non-Pattern Effect stage. Inputs: mutually exclusive
+ * The remaining budget covers current Scene/Kit metadata and reserves 420
+ * bytes for the staged non-Pattern Effect record. Inputs: mutually exclusive
  * typed parsers. Outputs: one validated payload for commit; Pattern is never
  * placed here. Affiliates: filesystem_loadKitDirectory_tick(),
  * filesystem_loadInstrument_tick(), filesystem_loadSceneDirectory_tick(),
@@ -980,7 +987,7 @@ typedef struct {
  */
 #define FS_STAGE_PARAMETER_CAPACITY   512u
 #define FS_STAGE_PARAMETER_IMAGE_COUNT 3u
-#define FS_STAGE_EFFECT_RESERVE_BYTES 384u
+#define FS_STAGE_EFFECT_RESERVE_BYTES 420u
 #define FS_STAGE_CACHE_BYTES          2048u
 
 /*
@@ -1013,7 +1020,8 @@ static char fs_list_cache_name[FS_LIBRARY_NAME_CACHE_MAX]
                               [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 /*
  * Persistent HCNAMES provenance register: one two-byte source per logical
- * Bank/Scene/Kit/Instrument row.  This is the user-approved 258-byte cache;
+ * Bank/Scene/Kit/Instrument/Pattern/Effect row. This is the user-approved
+ * 322-byte cache, grown by 32 bytes for Effect rows;
  * it replaces SceneData's former 32-byte settings provenance array and never
  * belongs to playable Scene/Kit data or Menu scratch.
  */
@@ -1021,7 +1029,7 @@ static uint16_t fs_resident_source[FS_RESIDENT_NAMES_ROW_COUNT];
 /*
  * Option 1C: dedicated HCNAMES name mirror.
  *
- * 145 rows x 9 bytes = 1,305 bytes.  HCNAMES readers and writers use this
+ * 161 rows x 9 bytes = 1,449 bytes. HCNAMES readers and writers use this
  * mirror instead of borrowing fs_list_cache_name, so a normal Bank Load/Save
  * no longer destroys a valid .hcindex cache in the 9,000-byte shared storage.
  *
@@ -1073,10 +1081,10 @@ _Static_assert(sizeof(fs_list_cache_name) ==
                    (FS_LIBRARY_NAME_CACHE_MAX *
                     (STORAGE_KIT_DISPLAY_NAME_LEN + 1u)),
                "the index/HCNAMES cache must remain exactly 9000 bytes");
-_Static_assert(sizeof(fs_resident_source) == 290u,
-               "HCNAMES provenance register must remain 145 x uint16_t");
-_Static_assert(sizeof(hcnames_name_mirror) == 1305u,
-               "Option 1C: HCNAMES mirror must remain exactly 145 x 9 bytes");
+_Static_assert(sizeof(fs_resident_source) == 322u,
+               "HCNAMES provenance register must remain 161 x uint16_t");
+_Static_assert(sizeof(hcnames_name_mirror) == 1449u,
+               "Option 1C: HCNAMES mirror must remain exactly 161 x 9 bytes");
 _Static_assert(sizeof(fs_identity_name) + BANK_DISPLAY_NAME_LEN + 1u == 81u,
                "one Bank plus one Scene, Kit, and six Instrument names is 81 bytes");
 _Static_assert(INSTRUMENT_SLOT_COUNT * INSTRUMENT_PARAM_COUNT <=
@@ -1226,7 +1234,7 @@ static uint16_t op_kit_load_scene_mask = 0u;
  * Staged Scene payload and Scene-specific operation scratch.
  *
  * Scene Load validates every child before writing resident memory: sceneset,
- * embedded Kit, bridge Pattern, and placeholder Effect. The same staging Scene
+ * embedded Kit, optional named Effect, and Pattern. The same staging Scene
  * is also reused by save helpers that need a source Scene pointer stable across
  * asynchronous phases. op_scene_display_name is the eight-character Scene
  * directory name captured from the root Scene scan cache. sceneset.scg never
@@ -1240,6 +1248,8 @@ static char op_scene_child_open_name[STORAGE_KIT_FILENAME_MAX];
 static char op_scene_child_display_name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 static char op_scene_pattern_open_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_scene_effect_open_name[STORAGE_KIT_FILENAME_MAX];
+/* Cached visible Effect stem used to publish the appended HCNAMES row. */
+static char op_effect_display_name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
 /* Pattern identity/source captured while a Scene or root Pattern operation
  * is in flight; the HCNAMES update uses these bytes after payload close. */
 static char op_pattern_display_name[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
@@ -1471,7 +1481,12 @@ static void filesystem_patternTraceFlushSchedule_tick(void);
 static void filesystem_patternTraceFlushCompleted(void);
 static void filesystem_autosaveSetupCompleted(void);
 static void filesystem_clearResidentSourceDirtyFlags(void);
-/* Boot Pattern restore resolves the 145-row HCNAMES hierarchy below. */
+/* Boot Pattern/Effect restore resolves the 161-row HCNAMES hierarchy below. */
+static uint16_t filesystem_residentEffectRow(uint8_t scene_index);
+static uint8_t filesystem_residentRowIsPattern(uint16_t row);
+static uint8_t filesystem_residentRowIsEffect(uint16_t row);
+static uint8_t filesystem_bootReaderNarrowLoadEffect(
+    uint8_t scene_index, uint16_t source_slot, uint16_t resolved_row);
 static uint16_t filesystem_bootReaderResolveResidentRow(
     uint16_t row, uint16_t *resolved_row);
 static void filesystem_setResidentRefreshed(uint16_t row);
@@ -1586,8 +1601,8 @@ static uint8_t filesystem_nextKitsetLine(char *dst, uint16_t cap,
                                          void *raw);
 static uint8_t filesystem_nextScenesetLine(char *dst, uint16_t cap,
                                            void *raw);
-static uint8_t filesystem_nextEffectPlaceholderLine(char *dst, uint16_t cap,
-                                                    void *raw);
+static uint8_t filesystem_nextEffectLine(char *dst, uint16_t cap,
+                                          void *raw);
 static uint8_t filesystem_nextBanksetLine(char *dst, uint16_t cap,
                                           void *raw);
 static uint8_t filesystem_appendChar(char *dst, uint16_t cap,
@@ -1616,7 +1631,7 @@ static uint8_t filesystem_patternHeaderValid(const uint8_t *header,
  * Kit, root Scene, root Bank, and root Pattern rows occupy their direct
  * 000..999 slot
  * positions so an index line can be turned back into `NNN ` + name without
- * sorting. HCNAMES temporarily occupies its fixed 145 logical rows during
+ * sorting. HCNAMES temporarily occupies its fixed 161 logical rows during
  * Instrument menu entry or targeted post-action update.
  * Why: this is the one SRAM name cache. A type/library transition disposes it
  * and the newly selected `.hcindex` repopulates it, so no per-Instrument,
@@ -5635,6 +5650,27 @@ static uint16_t filesystem_residentPatternRow(uint8_t scene_index)
     return (uint16_t)(FS_RESIDENT_NAMES_PATTERN_BASE + scene_index);
 }
 
+/* Convert one resident Scene coordinate into its appended Effect row. */
+static uint16_t filesystem_residentEffectRow(uint8_t scene_index)
+{
+    if (scene_index >= STORAGE_BANK_SCENE_MAX_SLOTS)
+        return FS_RESIDENT_NAMES_ROW_COUNT;
+    return (uint16_t)(FS_RESIDENT_NAMES_EFFECT_BASE + scene_index);
+}
+
+/* Keep Pattern and Effect row classes disjoint for provenance dispatch. */
+static uint8_t filesystem_residentRowIsPattern(uint16_t row)
+{
+    return (uint8_t)(row >= FS_RESIDENT_NAMES_PATTERN_BASE &&
+                     row < FS_RESIDENT_NAMES_EFFECT_BASE);
+}
+
+static uint8_t filesystem_residentRowIsEffect(uint16_t row)
+{
+    return (uint8_t)(row >= FS_RESIDENT_NAMES_EFFECT_BASE &&
+                     row < FS_RESIDENT_NAMES_ROW_COUNT);
+}
+
 static const char *filesystem_cachedResidentName(uint16_t row)
 {
     /*
@@ -5667,7 +5703,7 @@ static uint8_t filesystem_residentSourceValid(uint16_t row, uint16_t source)
         return (uint8_t)(row >= FS_RESIDENT_NAMES_INSTRUMENT_BASE &&
                          row < FS_RESIDENT_NAMES_PATTERN_BASE);
     return (uint8_t)(source == FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE &&
-                     row >= FS_RESIDENT_NAMES_PATTERN_BASE);
+                     filesystem_residentRowIsPattern(row));
 }
 
 uint16_t filesystem_residentSource(uint16_t row)
@@ -5724,7 +5760,7 @@ uint16_t filesystem_resolveResidentSource(uint16_t row,
     while (row < FS_RESIDENT_NAMES_ROW_COUNT) {
         uint16_t source = filesystem_residentSource(row);
 
-        if (row >= FS_RESIDENT_NAMES_PATTERN_BASE &&
+        if (filesystem_residentRowIsPattern(row) &&
             source == FS_RESIDENT_SOURCE_PATTERN_AUTOSAVE) {
             /* Pattern `@` is a terminal hidden-file provenance, not a
              * hierarchy edge to the resident Scene's directory child. */
@@ -5738,7 +5774,11 @@ uint16_t filesystem_resolveResidentSource(uint16_t row,
                 *resolved_row = row;
             return source;
         }
-        if (row >= FS_RESIDENT_NAMES_PATTERN_BASE) {
+        if (filesystem_residentRowIsEffect(row)) {
+            /* Effect rows inherit through their resident Scene. */
+            row = (uint16_t)(1u +
+                             (row - FS_RESIDENT_NAMES_EFFECT_BASE));
+        } else if (filesystem_residentRowIsPattern(row)) {
             /* Pattern rows are direct library identities or inherit through
              * their resident Scene; they do not carry Instrument type text. */
             row = (uint16_t)(1u +
@@ -6108,6 +6148,7 @@ static void filesystem_setResidentSceneRefreshed(uint8_t scene_index)
     filesystem_setResidentRefreshed(filesystem_residentSceneRow(scene_index));
     filesystem_setResidentRefreshed(filesystem_residentKitRow(scene_index));
     filesystem_setResidentRefreshed(filesystem_residentPatternRow(scene_index));
+    filesystem_setResidentRefreshed(filesystem_residentEffectRow(scene_index));
     for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++)
         filesystem_setResidentRefreshed(
             filesystem_residentInstrumentRow(scene_index, slot));
@@ -6300,6 +6341,13 @@ static void filesystem_cacheCurrentResidentSceneChildNames(void)
             filesystem_cacheResidentName(row, op_pattern_display_name);
             (void)filesystem_setResidentSource(row, op_pattern_source);
         }
+        /* Scene Save/Load publishes the optional named Effect child beside PAT4. */
+        row = filesystem_residentEffectRow(scene_index);
+        if (row < FS_RESIDENT_NAMES_ROW_COUNT) {
+            filesystem_cacheResidentName(row, op_effect_display_name);
+            (void)filesystem_setResidentSource(row,
+                                               FS_RESIDENT_SOURCE_INHERIT);
+        }
     }
 }
 
@@ -6391,6 +6439,15 @@ static void filesystem_cacheCurrentBankSceneNameBlock(uint8_t scene_index)
             filesystem_cacheResidentName(pat_row, op_pattern_display_name);
             (void)filesystem_setResidentSource(pat_row,
                                                FS_RESIDENT_SOURCE_INHERIT);
+        }
+    }
+    /* Bank-local Scene children inherit the named Effect child from the Bank tree. */
+    {
+        uint16_t effect_row = filesystem_residentEffectRow(scene_index);
+        if (effect_row < FS_RESIDENT_NAMES_ROW_COUNT) {
+            filesystem_cacheResidentName(effect_row, op_effect_display_name);
+            (void)filesystem_setResidentSource(
+                effect_row, FS_RESIDENT_SOURCE_INHERIT);
         }
     }
 }
@@ -6987,14 +7044,14 @@ static void filesystem_ensureAutosaveFiles_tick(void)
          * Recover a durable HCNAMES temp file before reading the live file.
          *
          * Inputs: the optional synced `.hcnamtmp` left by an interrupted
-         * rewrite. Output: a temp containing exactly 145 parseable rows is
+         * rewrite. Output: a temp containing exactly 161 parseable rows is
          * promoted with remove-old/rename; an invalid temp is removed; a
          * missing temp falls through to the existing live-register read. The
          * row counter and parser use operation scratch, so boot recovery adds
          * no SRAM or filesystem handle. `op_file_version` is borrowed only as
          * the one-bit prelude state until normal A/B ensure begins. A temp is
          * current only when it begins with the #types header line (validated
-         * in phase 21) followed by exactly 145 parseable data rows.
+         * in phase 21) followed by exactly 161 parseable data rows.
          */
         if (op_file_version == 0u) {
             if (!afatfs_chdir(NULL))
@@ -7457,7 +7514,7 @@ static void filesystem_ensureAutosaveFiles_tick(void)
         return;
     }
 
-    case 16: /* VALIDATE ALL 145 TEMP HCNAMES DATA ROWS AFTER THE HEADER */
+    case 16: /* VALIDATE ALL 161 TEMP HCNAMES DATA ROWS AFTER THE HEADER */
     {
         uint8_t line_ready = 0u;
         uint8_t eof = 0u;
@@ -7502,7 +7559,7 @@ static void filesystem_ensureAutosaveFiles_tick(void)
         op_file = NULL;
         /* A complete row count is necessary but not sufficient: a parser or
          * close error must also force discard, otherwise a partial temp can be
-         * promoted merely because its last readable row happened to be 145. */
+         * promoted merely because its last readable row happened to be 161. */
         op_stream_index = (uint32_t)(
             op_file_version == 2u &&
             op_item_offset == FS_RESIDENT_NAMES_ROW_COUNT &&
@@ -7653,7 +7710,7 @@ static uint8_t filesystem_autosaveDrainHasRefreshWork(void)
      *
      * Inputs: the durable in-session HCNAMES mirror, bit-13 refresh witnesses,
      * and Autosave.c's canonical scalar dirty mask. Output: one boolean
-     * deciding whether this successful scalar drain needs a full 145-row
+     * deciding whether this successful scalar drain needs a full 161-row
      * HCNAMES rewrite. Pattern rows are owned by the separate Pattern drain
      * and are therefore not candidates for this scalar convergence pass.
      * Invalid mirror state fails closed: a stale/empty image must never be
@@ -7662,7 +7719,9 @@ static uint8_t filesystem_autosaveDrainHasRefreshWork(void)
      */
     if (hcnames_mirror_valid != FS_HCNAMES_MIRROR_VALID)
         return 0u;
-    for (row = 0u; row < FS_RESIDENT_NAMES_PATTERN_BASE; row++) {
+    for (row = 0u; row < FS_RESIDENT_NAMES_ROW_COUNT; row++) {
+        if (filesystem_residentRowIsPattern(row))
+            continue;
         if ((fs_resident_source[row] & FS_RESIDENT_SOURCE_REFRESHED_FLAG) !=
                 0u && autosave_objectFullyCaptured(row)) {
             return 1u;
@@ -7681,11 +7740,14 @@ static void filesystem_clearResidentRefreshedCaptured(void)
      * post-rename source register and canonical autosave mask; output clears
      * bit 13 while source values and any still-dirty object's witness remain
      * intact. Pattern rows are excluded because their independent whole-file
-     * transaction owns their refreshed witness. This is the
+     * transaction owns their refreshed witness; Effect rows are scalar-owned.
+     * This is the
      * final in-RAM half of the autosave convergence boundary and allocates no
      * per-row bookkeeping.
      */
-    for (row = 0u; row < FS_RESIDENT_NAMES_PATTERN_BASE; row++) {
+    for (row = 0u; row < FS_RESIDENT_NAMES_ROW_COUNT; row++) {
+        if (filesystem_residentRowIsPattern(row))
+            continue;
         if ((fs_resident_source[row] & FS_RESIDENT_SOURCE_REFRESHED_FLAG) !=
                 0u && autosave_objectFullyCaptured(row)) {
             fs_resident_source[row] &= (uint16_t)~
@@ -11012,8 +11074,8 @@ _Static_assert(sizeof(text_buf_pos) + sizeof(text_buf_len) == 4u,
 _Static_assert(sizeof(hcnames_name_mirror) + sizeof(hcnames_mirror_valid) +
                sizeof(op_bank_child_scratch) +
                sizeof(text_buf_pos) + sizeof(text_buf_len) +
-               sizeof(op_bank_cwd_at_parent) == 1455u,
-               "Option 1 total SRAM1 must be exactly 1455 bytes (within the S063 reservation)");
+               sizeof(op_bank_cwd_at_parent) == 1599u,
+               "Effect rows add 16 x 9 mirror bytes to the SRAM1 reservation");
 
 static void filesystem_resetTextReader(void)
 {
@@ -12042,6 +12104,8 @@ static void filesystem_loadSceneDirectory_tick(void)
                                                    ".fx")) {
                 storage_copyFilename(op_scene_effect_open_name,
                                      op_object.id.shortName);
+                filesystem_patternDisplayFromFilename(
+                    op_effect_display_name, op_object.id.displayName);
             }
         }
         return;
@@ -12058,8 +12122,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_kit_slot_dir = NULL;
         if (op_close_status != FS_STATUS_DONE ||
             op_scene_child_open_name[0] == '\0' ||
-            op_scene_pattern_open_name[0] == '\0' ||
-            op_scene_effect_open_name[0] == '\0') {
+            op_scene_pattern_open_name[0] == '\0') {
             filesystem_setPresetNameInvalid();
             op_close_status = FS_STATUS_ERROR;
             op_load_invalid_layer = FS_LOAD_INVALID_SCENE;
@@ -12147,7 +12210,7 @@ static void filesystem_loadSceneDirectory_tick(void)
             op_phase = 62;
             return;
         }
-        op_phase = 17;
+        op_phase = (op_scene_effect_open_name[0] != '\0') ? 56u : 17u;
         return;
 
     case 17: /* OPEN embedded Kit directory */
@@ -12345,6 +12408,9 @@ static void filesystem_loadSceneDirectory_tick(void)
                                 ? op_slot : FS_RESIDENT_SOURCE_INHERIT);
                         (void)filesystem_setResidentSource(
                             filesystem_residentKitRow(source_scene),
+                            FS_RESIDENT_SOURCE_INHERIT);
+                        (void)filesystem_setResidentSource(
+                            filesystem_residentEffectRow(source_scene),
                             FS_RESIDENT_SOURCE_INHERIT);
                         for (identity_slot = 0u;
                              identity_slot < STORAGE_KIT_SLOT_COUNT;
@@ -12548,7 +12614,7 @@ static void filesystem_loadSceneDirectory_tick(void)
              *
              * Inputs: current directory is the embedded Kit child. Output:
              * one parent step returns to the Bank-local Scene folder so the
-             * already-scanned named Pattern and `effects.fx` children open relative to
+             * already-scanned named Pattern and optional `.fx` children open relative to
              * `SS Scene/`. The root Scene path below must not run here,
              * because it would leave the Bank and reopen `/Scene/NNN`, which is
              * a different library namespace.
@@ -12663,19 +12729,16 @@ static void filesystem_loadSceneDirectory_tick(void)
         return;
 
     /*
-     * Unregistered Effect child (future HCNAMES row).
+     * Effect child and Pattern child completion boundary.
      *
-     * What: the unregistered `effects.fx` placeholder is committed by this
-     * Scene action; the named v4 Pattern child already has a /.hcnames row.
-     * Effect remains a validation-only placeholder with zero live parameters.
-     * Why: the Session 061 invariant requires every Load/Save to mark all
-     * committed children; the named Pattern child is already included in the
-     * Scene action's marked-children block and only the Effect placeholder
-     * lacks a durable identity row. The Effect row can join the same update
-     * when its schema becomes loadable.
-     * Affiliates: 061_READER_LOADED_SCENES_INVALID.md §11.2,
-     * filesystem_cacheCurrentResidentSceneChildNames(), and the boot
-     * reader's Case-2 narrow loaders.
+     * What: the optional named `.fx` v2 child is now staged and committed
+     * before this terminal Scene action boundary; the named v4 Pattern child
+     * remains the final streamed child. Why: Scene/Bank Load and Save publish
+     * the Scene, Effect, Pattern, Kit, and Instrument identity rows together,
+     * so no partially committed child can become the next boot source.
+     * Affiliates: storage_effectParseLine(),
+     * filesystem_cacheCurrentResidentSceneChildNames(), and the boot reader's
+     * Case-2 narrow loaders.
      */
     case 44: /* OPEN v4 Pattern file */
         if (filesystem_bankPayloadDetailActive())
@@ -12918,14 +12981,16 @@ static void filesystem_loadSceneDirectory_tick(void)
             op_phase = 62u;
             return;
         }
-        op_phase = 56u;
+        /* Effect was staged before Kit; Pattern close now reaches publish. */
+        op_phase = 61u;
         return;
 
-    case 56: /* OPEN effect placeholder */
-        storage_effectStateInit(&op_effect_state);
+    case 56: /* OPEN optional v2 Effect file before embedded Kit */
+        storage_effectStateInit(&op_effect_state,
+                                 &fs_stage_workspace.scene_stage.effect);
         op_line_len = 0u;
         if (filesystem_bankPayloadDetailActive())
-            filesystem_bootLoggingSetBankSceneDetail('P');
+            filesystem_bootLoggingSetBankSceneDetail('K');
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen(op_scene_effect_open_name, "r", on_file_opened))
@@ -12933,7 +12998,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_phase = 57;
         return;
 
-    case 57: /* WAIT effect placeholder */
+    case 57: /* WAIT Effect file */
         if (!op_file_ready) return;
         if (!op_file) {
             filesystem_setPresetNameInvalid();
@@ -12945,7 +13010,7 @@ static void filesystem_loadSceneDirectory_tick(void)
         op_phase = 58;
         return;
 
-    case 58: /* READ effect placeholder */
+    case 58: /* READ Effect file */
         st = filesystem_readTextLine(op_file, op_line_buf, &op_line_len,
                                      sizeof(op_line_buf), &line_ready, &eof);
         if (st == STORAGE_STATUS_WAIT)
@@ -12958,7 +13023,9 @@ static void filesystem_loadSceneDirectory_tick(void)
             return;
         }
         if (line_ready) {
-            st = storage_effectParseLine(&op_effect_state, op_line_buf);
+            st = storage_effectParseLine(
+                &op_effect_state, op_line_buf,
+                &fs_stage_workspace.scene_stage.effect);
             if (st != STORAGE_STATUS_OK) {
                 filesystem_setPresetNameInvalid();
                 op_close_status = FS_STATUS_ERROR;
@@ -12968,7 +13035,8 @@ static void filesystem_loadSceneDirectory_tick(void)
             return;
         }
         if (eof) {
-            st = storage_effectFinalize(&op_effect_state);
+            st = storage_effectFinalize(
+                &op_effect_state, &fs_stage_workspace.scene_stage.effect);
             op_close_status = (st == STORAGE_STATUS_OK)
                 ? FS_STATUS_DONE
                 : FS_STATUS_ERROR;
@@ -12980,22 +13048,22 @@ static void filesystem_loadSceneDirectory_tick(void)
         }
         return;
 
-    case 59: /* CLOSE effect placeholder */
+    case 59: /* CLOSE Effect file */
         if (filesystem_bankPayloadDetailActive())
-            filesystem_bootLoggingSetBankSceneDetail('P');
+            filesystem_bootLoggingSetBankSceneDetail('K');
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
             op_phase = 60;
         return;
 
-    case 60: /* WAIT effect placeholder close */
+    case 60: /* WAIT Effect close */
         if (!op_close_done) return;
         op_file = NULL;
         if (op_close_status != FS_STATUS_DONE) {
             op_phase = 62;
             return;
         }
-        op_phase = 61;
+        op_phase = 17;
         return;
 
     case 61: /* Publish the validated v4 Pattern and Scene payload */
@@ -13336,7 +13404,7 @@ static void filesystem_loadBankDirectory_tick(void)
          * only after request validation and Bank-name repair have consumed the
          * browser row. Inputs: selected Bank display retained in
          * op_bank_display_name and mask captured by filesystem_requestLoadBank.
-         * Output: a 145-row HCNAMES image whose unselected Scene blocks remain
+         * Output: a 161-row HCNAMES image whose unselected Scene blocks remain
          * untouched while selected Bank children overlay their rows at commit.
          * The final writer restores `/Bank/.hcindex`, so this cache borrowing
          * adds no persistent SRAM allocation or browser-state ambiguity.
@@ -16248,6 +16316,7 @@ static void filesystem_initSceneStage(filesystem_scene_stage_t *stage)
     if (!stage)
         return;
     memset(stage, 0, sizeof(*stage));
+    scene_effectRecordDefaults(&stage->effect);
     stage->settings.voice_decimation_all = 127u;
     for (track = 0u; track < NUM_TRACKS; track++) {
         stage->settings.midi_channel[track] = (uint8_t)(track + 1u);
@@ -16276,8 +16345,8 @@ static uint8_t filesystem_commitSceneStage(void)
     uint8_t scene_index;
 
     /*
-     * Commit validated general Scene settings and embedded Kit before Pattern
-     * I/O starts.
+     * Commit validated general Scene settings, Effect, and embedded Kit before
+     * Pattern I/O starts.
      *
      * Why: Pattern is intentionally non-atomic for the current format work;
      * excluding the live Pattern payload from staging keeps validation inside the separate
@@ -16298,6 +16367,7 @@ static uint8_t filesystem_commitSceneStage(void)
         if (!target)
             continue;
         target->settings = fs_stage_workspace.scene_stage.settings;
+        target->effect = fs_stage_workspace.scene_stage.effect;
         target->kit = fs_stage_workspace.scene_stage.kit;
         pat_initScene(scene_index);
         /*
@@ -16339,6 +16409,8 @@ static void filesystem_resetSceneLoadChildDiscovery(void)
            sizeof(op_scene_child_display_name));
     memset(op_scene_pattern_open_name, 0, sizeof(op_scene_pattern_open_name));
     memset(op_scene_effect_open_name, 0, sizeof(op_scene_effect_open_name));
+    memset(op_effect_display_name, ' ', STORAGE_KIT_DISPLAY_NAME_LEN);
+    op_effect_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
     memset(op_pattern_display_name, 0, sizeof(op_pattern_display_name));
     op_pattern_source = FS_RESIDENT_SOURCE_UNKNOWN;
 }
@@ -16870,23 +16942,22 @@ static uint8_t filesystem_nextScenesetLine(char *dst, uint16_t cap,
         return filesystem_formatAssignmentCsvU8Line(
             dst, cap, "fader_setting", scene->settings.fader_setting,
             INSTRUMENT_SLOT_COUNT);
+    case 10u:
+        return filesystem_formatAssignmentU16Line(
+            dst, cap, "effect_morph_amount",
+            scene->settings.effect_morph_amount);
     default:
         return 0u;
     }
 }
 
-static uint8_t filesystem_nextEffectPlaceholderLine(char *dst, uint16_t cap,
-                                                    void *raw)
+static uint8_t filesystem_nextEffectLine(char *dst, uint16_t cap, void *raw)
 {
-    /*
-     * Adapt storageTypes' effect placeholder writer to filesystem_writeTextLine.
-     *
-     * The raw context is unused because effects.fx currently has no runtime
-     * payload. op_write_line_index is the only input, and storageTypes owns the
-     * exact emitted schema.
-     */
-    (void)raw;
-    return storage_formatEffectPlaceholderLine(dst, cap, op_write_line_index);
+    const scene_t *scene = (const scene_t *)raw;
+
+    /* Stream one complete v2 `.fx` line from the retained Scene Effect. */
+    return scene ? storage_formatEffectLine(dst, cap, &scene->effect,
+                                            op_write_line_index) : 0u;
 }
 
 
@@ -17886,6 +17957,11 @@ static void filesystem_saveKitDirectory_tick(void)
              * old source bytes. */
             autosave_markSourceDirty(
                 filesystem_residentKitRow(op_kit_save_source_scene));
+            (void)filesystem_setResidentSource(
+                filesystem_residentEffectRow(op_kit_save_source_scene),
+                FS_RESIDENT_SOURCE_INHERIT);
+            autosave_markSourceDirty(
+                filesystem_residentEffectRow(op_kit_save_source_scene));
             for (instrument_slot = 0u;
                  instrument_slot < STORAGE_KIT_SLOT_COUNT;
                  instrument_slot++) {
@@ -18720,7 +18796,7 @@ static void filesystem_saveBankDirectory_tick(void)
          * was prepared by prepareBankSceneSaveSource() at phase 20; the old
          * child was deleted by phases 20-21. Outputs: the Scene writer creates
          * `SS Name/` with sceneset.scg, embedded Kit directory, instruments,
-         * the named v4 Pattern child, and effects.fx. When the Scene writer completes, it
+         * the named v4 Pattern child, and the named `.fx` v2 child. When the Scene writer completes, it
          * returns to Bank Save phase 12 to advance the cursor. Affiliates:
          * filesystem_saveSceneDirectory_tick() phase 8..37,
          * op_bank_payload_active dispatch at top of this function.
@@ -19061,12 +19137,12 @@ static void filesystem_saveSceneDirectory_tick(void)
      * root Scene slot, source resident Scene, display Scene name, embedded Kit
      * directory name, and six generated member filenames. Outputs are a clean
      * Scene/<NNN Name>/ tree containing sceneset.scg, Kit <name>/kitset.kcg,
-     * six Instrument files, the named v4 Pattern child, and effects.fx.
+     * six Instrument files, the named v4 Pattern child, and named `.fx` v2 content.
      *
      * The state machine intentionally mirrors Kit Save where possible. The
      * important extra loop is the child-file sequence after sceneset.scg: write
      * the embedded Kit while chdir'd into its directory, climb back to the
-     * Scene directory, then write the two placeholder files.
+     * Scene directory, then write the Effect and Pattern child files.
      */
     switch (op_phase) {
     case 0:
@@ -19450,19 +19526,16 @@ static void filesystem_saveSceneDirectory_tick(void)
     }
 
     /*
-     * Unregistered Effect child (future HCNAMES row).
+     * Effect child and Pattern child completion boundary.
      *
-     * What: the unregistered `effects.fx` placeholder is committed by this
-     * Scene action; the named v4 Pattern child already has a /.hcnames row.
-     * Effect remains a validation-only placeholder with zero live parameters.
-     * Why: the Session 061 invariant requires every Load/Save to mark all
-     * committed children; the named Pattern child is already included in the
-     * Scene action's marked-children block and only the Effect placeholder
-     * lacks a durable identity row. The Effect row can join the same update
-     * when its schema becomes loadable.
-     * Affiliates: 061_READER_LOADED_SCENES_INVALID.md §11.2,
-     * filesystem_cacheCurrentResidentSceneChildNames(), and the boot
-     * reader's Case-2 narrow loaders.
+     * What: the optional named `.fx` v2 child is staged and committed before
+     * this terminal Scene action boundary; the named v4 Pattern child remains
+     * the final streamed child. Why: Scene/Bank Load and Save publish the
+     * Scene, Effect, Pattern, Kit, and Instrument identity rows together, so
+     * no partially committed child can become the next boot source.
+     * Affiliates: storage_effectParseLine(),
+     * filesystem_cacheCurrentResidentSceneChildNames(), and the boot reader's
+     * Case-2 narrow loaders.
      */
     case 29: /* OPEN named v4 Pattern child */
         filesystem_makePatternChildFilename(
@@ -19572,28 +19645,30 @@ static void filesystem_saveSceneDirectory_tick(void)
         return;
     }
 
-    /*
-     * Unregistered Effect child (future HCNAMES row).
-     *
-     * What: the unregistered `effects.fx` placeholder is committed by this
-     * Scene action; the named v4 Pattern child already has a /.hcnames row.
-     * Effect remains a validation-only placeholder with zero live parameters.
-     * Why: the Session 061 invariant requires every Load/Save to mark all
-     * committed children; the named Pattern child is already included in the
-     * Scene action's marked-children block and only the Effect placeholder
-     * lacks a durable identity row. The Effect row can join the same update
-     * when its schema becomes loadable.
-     * Affiliates: 061_READER_LOADED_SCENES_INVALID.md §11.2,
-     * filesystem_cacheCurrentResidentSceneChildNames(), and the boot
-     * reader's Case-2 narrow loaders.
-     */
     case 33:
         if (!op_close_done)
             return;
         op_file = NULL;
         op_file_ready = false;
         op_file = NULL;
-        if (!afatfs_fopen_lfn("effects.fx",
+        {
+            const char *fx_stem = filesystem_cachedResidentName(
+                filesystem_residentEffectRow(op_kit_save_source_scene));
+            uint8_t blank = filesystem_residentNameIsBlank(fx_stem);
+
+            storage_makeSavedEffectDisplayFilename(
+                op_scene_effect_open_name, sizeof(op_scene_effect_open_name),
+                fx_stem);
+            if (blank) {
+                memset(op_effect_display_name, ' ',
+                       STORAGE_KIT_DISPLAY_NAME_LEN);
+                op_effect_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+            } else {
+                filesystem_copyInstrumentStemDisplay(
+                    op_effect_display_name, op_scene_effect_open_name);
+            }
+        }
+        if (!afatfs_fopen_lfn(op_scene_effect_open_name,
                               "w",
                               AFATFS_MATCH_CASE_INSENSITIVE,
                               op_root_open_name,
@@ -19617,7 +19692,8 @@ static void filesystem_saveSceneDirectory_tick(void)
         return;
 
     case 35:
-        if (filesystem_writeTextLine(filesystem_nextEffectPlaceholderLine, NULL))
+        if (filesystem_writeTextLine(filesystem_nextEffectLine,
+                                     (void *)scene))
             return;
         op_phase = 36u;
         return;
@@ -19715,11 +19791,16 @@ static void filesystem_saveSceneDirectory_tick(void)
                 }
             }
             /* Scene Save replaces the Scene payload, embedded Kit hierarchy,
-             * and named Pattern child. Stage the Pattern source in the
-             * expanded 145-row HCNAMES register; Pattern payload bytes remain
-             * outside the fixed scalar AutoSave payload and are handled by
-             * the separate Pattern AutoSave file.
+             * named Effect child, and named Pattern child. Stage both child
+             * sources in the expanded 161-row HCNAMES register; Pattern
+             * payload bytes remain outside the fixed scalar AutoSave payload
+             * and are handled by the separate Pattern AutoSave file.
              */
+            (void)filesystem_setResidentSource(
+                filesystem_residentEffectRow(op_kit_save_source_scene),
+                FS_RESIDENT_SOURCE_INHERIT);
+            autosave_markSourceDirty(
+                filesystem_residentEffectRow(op_kit_save_source_scene));
             (void)filesystem_setResidentSource(
                 filesystem_residentPatternRow(op_kit_save_source_scene),
                 op_pattern_source);
@@ -19794,12 +19875,29 @@ static void filesystem_saveSceneDirectory_tick(void)
             op_phase = 82u;
         return;
 
-    case 82: /* WAIT Pattern close, then open effects */
+    case 82: /* WAIT Pattern close, then open the named Effect file */
         if (!op_close_done)
             return;
         op_file = NULL;
         op_file_ready = false;
-        if (!afatfs_fopen_lfn("effects.fx", "w",
+        {
+            const char *fx_stem = filesystem_cachedResidentName(
+                filesystem_residentEffectRow(op_kit_save_source_scene));
+            uint8_t blank = filesystem_residentNameIsBlank(fx_stem);
+
+            storage_makeSavedEffectDisplayFilename(
+                op_scene_effect_open_name, sizeof(op_scene_effect_open_name),
+                fx_stem);
+            if (blank) {
+                memset(op_effect_display_name, ' ',
+                       STORAGE_KIT_DISPLAY_NAME_LEN);
+                op_effect_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
+            } else {
+                filesystem_copyInstrumentStemDisplay(
+                    op_effect_display_name, op_scene_effect_open_name);
+            }
+        }
+        if (!afatfs_fopen_lfn(op_scene_effect_open_name, "w",
                               AFATFS_MATCH_CASE_INSENSITIVE,
                               op_root_open_name, on_file_opened))
             return;
@@ -19819,9 +19917,9 @@ static void filesystem_saveSceneDirectory_tick(void)
         op_phase = 84u;
         return;
 
-    case 84: /* WRITE effects placeholder */
-        if (filesystem_writeTextLine(filesystem_nextEffectPlaceholderLine,
-                                     NULL))
+    case 84: /* WRITE Effect v2 */
+        if (filesystem_writeTextLine(filesystem_nextEffectLine,
+                                     (void *)scene))
             return;
         op_close_done = false;
         if (afatfs_fclose(op_file, on_file_closed))
@@ -25549,6 +25647,8 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
            sizeof(op_scene_child_display_name));
     memset(op_scene_pattern_open_name, 0, sizeof(op_scene_pattern_open_name));
     memset(op_scene_effect_open_name, 0, sizeof(op_scene_effect_open_name));
+    memset(op_effect_display_name, ' ', STORAGE_KIT_DISPLAY_NAME_LEN);
+    op_effect_display_name[STORAGE_KIT_DISPLAY_NAME_LEN] = '\0';
     memset(&op_bankset_state, 0, sizeof(op_bankset_state));
     memset(op_bank_display_name, 0, sizeof(op_bank_display_name));
     memset(op_save_bank_dir_display_name, 0,
@@ -26412,6 +26512,23 @@ static uint8_t filesystem_regenClassifyPayloadByte(uint32_t payload_relative,
         *byte_index = (uint8_t)(r - AUTOSAVE_NAME_BYTES);
         return 2u;
     }
+    /* Effect identity: name 3..10 and source 430..431 (Session 072 ST6). */
+    if (r >= AUTOSAVE_EFFECT_OFFSET + AUTOSAVE_EFFECT_NAME_OFFSET &&
+        r < AUTOSAVE_EFFECT_OFFSET + AUTOSAVE_EFFECT_NAME_OFFSET +
+                AUTOSAVE_NAME_BYTES) {
+        *row = (uint16_t)(FS_RESIDENT_NAMES_EFFECT_BASE + scene_index);
+        *byte_index = (uint8_t)(r - AUTOSAVE_EFFECT_OFFSET -
+                                AUTOSAVE_EFFECT_NAME_OFFSET);
+        return 1u;
+    }
+    if (r >= AUTOSAVE_EFFECT_OFFSET + AUTOSAVE_EFFECT_SOURCE_OFFSET &&
+        r < AUTOSAVE_EFFECT_OFFSET + AUTOSAVE_EFFECT_SOURCE_OFFSET +
+                AUTOSAVE_SOURCE_BYTES) {
+        *row = (uint16_t)(FS_RESIDENT_NAMES_EFFECT_BASE + scene_index);
+        *byte_index = (uint8_t)(r - AUTOSAVE_EFFECT_OFFSET -
+                                AUTOSAVE_EFFECT_SOURCE_OFFSET);
+        return 2u;
+    }
     if (r >= AUTOSAVE_KIT_OFFSET &&
         r < AUTOSAVE_KIT_OFFSET + 10u) {
         r = (uint16_t)(r - AUTOSAVE_KIT_OFFSET);
@@ -26466,9 +26583,9 @@ static uint8_t filesystem_regenClassifyPayloadByte(uint32_t payload_relative,
 /*
  * Regenerate .hcnames from a validated winner record's identity fields.
  *
- * What: rebuilds the expanded 145-row .hcnames file from the winner's 129
- * AutoSave-wire identity fields, using embedded name bytes and Phase C source
- * fields plus the Bank identity
+ * What: rebuilds the expanded 161-row .hcnames file from the winner's 129
+ * AutoSave-wire identity fields plus the Effect source bytes, using embedded
+ * name bytes and Phase C source fields plus the Bank identity
  * from the record's Bank section. The #types header is emitted first via
  * filesystem_formatHcnamesHeader(). Inputs: the validated winner record,
  * read in bounded chunks from the card. Outputs: a new .hcnames written
@@ -27742,6 +27859,66 @@ static uint8_t filesystem_bootReaderNarrowLoadInstrument(
     return 1u;
 }
 
+/* Boot-time narrow Effect reload for Case 2 Scene evaluation (ST6). */
+static uint8_t filesystem_bootReaderNarrowLoadEffect(
+    uint8_t scene_index, uint16_t source_slot, uint16_t resolved_row)
+{
+    uint16_t effect_row = filesystem_residentEffectRow(scene_index);
+    char file_name[STORAGE_KIT_FILENAME_MAX];
+    const char *stem;
+    afatfsFilePtr_t file;
+    effect_record_t *staged = &fs_stage_workspace.scene_stage.effect;
+    uint8_t len = 0u;
+    uint8_t ready = 0u;
+    uint8_t eof = 0u;
+    uint8_t ok = 0u;
+    scene_t *scene = scene_get(scene_index);
+
+    /* Effect library sources are not supported; resolve through Scene/Bank. */
+    if (!scene || effect_row >= FS_RESIDENT_NAMES_ROW_COUNT ||
+        resolved_row == effect_row)
+        return 0u;
+    if (!filesystem_bootReaderEnterSceneFolder(
+            scene_index, source_slot, resolved_row))
+        return 0u;
+    stem = hcnames_name_mirror[effect_row];
+    if (filesystem_residentNameIsBlank(stem))
+        stem = "        ";
+    storage_makeSavedEffectDisplayFilename(file_name, sizeof(file_name), stem);
+    storage_effectStateInit(&op_effect_state, staged);
+    filesystem_resetTextReader();
+    file = filesystem_blockOpenLfn(file_name);
+    if (!file) {
+        /* Missing `.fx` is a valid `off` Effect. */
+        scene->effect = *staged;
+        return 1u;
+    }
+    for (;;) {
+        storage_status_t st = filesystem_bootReadLineBlocking(
+            file, op_line_buf, &len, sizeof(op_line_buf), &ready, &eof);
+
+        if (st != STORAGE_STATUS_OK)
+            break;
+        if (ready) {
+            if (storage_effectParseLine(&op_effect_state, op_line_buf,
+                                        staged) != STORAGE_STATUS_OK)
+                break;
+            ready = 0u;
+            continue;
+        }
+        if (eof) {
+            ok = (uint8_t)(storage_effectFinalize(&op_effect_state, staged) ==
+                           STORAGE_STATUS_OK);
+            break;
+        }
+    }
+    (void)filesystem_blockClose(file);
+    if (!ok)
+        return 0u;
+    scene->effect = *staged;
+    return 1u;
+}
+
 /*
  * Read one complete v4 Pattern file from the current directory.
  *
@@ -27850,7 +28027,7 @@ close:
  * What: resolves the Pattern HCNAMES row either to a numbered root
  * `/Pattern/NNN name.pat` source, to a hidden Pattern AutoSave `@` baseline,
  * or through the resident Scene/Bank source to a named child inside that
- * Scene directory. Inputs: parsed 145-row HCNAMES mirror and a resident Scene
+ * Scene directory. Inputs: parsed 161-row HCNAMES mirror and a resident Scene
  * index. Output: the complete Pattern region is restored, or left at
  * pat_initScene() defaults when the source/file is missing or invalid. Why:
  * Pattern payload bytes remain outside the scalar AutoSave record, so the
@@ -28145,7 +28322,7 @@ static uint8_t filesystem_bootReaderApplyRowType(uint16_t row,
 }
 
 /*
- * Parse one complete .hcnames image (header plus 145 rows) into the cache.
+ * Parse one complete .hcnames image (header plus 161 rows) into the cache.
  *
  * What: blocking version of the register read used by the runtime
  * machines: validates the #types header, streams every data row through
@@ -28273,6 +28450,7 @@ static void filesystem_bootReaderEmptyScene(uint8_t scene_index)
         instrumentManager_resetSlot(&scene->kit.instruments[slot],
                                     initial_types[slot]);
     }
+    scene_effectRecordDefaults(&scene->effect);
     pat_initScene(scene_index);
     row = filesystem_residentSceneRow(scene_index);
     fs_resident_source[row] = (uint16_t)(
@@ -28281,6 +28459,9 @@ static void filesystem_bootReaderEmptyScene(uint8_t scene_index)
     fs_resident_source[row] = (uint16_t)(
         FS_RESIDENT_SOURCE_UNKNOWN | FS_RESIDENT_SOURCE_REFRESHED_FLAG);
     row = filesystem_residentPatternRow(scene_index);
+    fs_resident_source[row] = (uint16_t)(
+        FS_RESIDENT_SOURCE_UNKNOWN | FS_RESIDENT_SOURCE_REFRESHED_FLAG);
+    row = filesystem_residentEffectRow(scene_index);
     fs_resident_source[row] = (uint16_t)(
         FS_RESIDENT_SOURCE_UNKNOWN | FS_RESIDENT_SOURCE_REFRESHED_FLAG);
     for (slot = 0u; slot < STORAGE_KIT_SLOT_COUNT; slot++) {
@@ -28322,15 +28503,21 @@ static uint16_t filesystem_bootReaderResolveResidentRow(
          * inherited from a parent) is unresolvable. */
         resolved = FS_RESIDENT_SOURCE_UNKNOWN;
     }
+    if (resolved < FS_RESIDENT_SOURCE_DIRECT_SLOT_LIMIT &&
+        filesystem_residentRowIsEffect(row) &&
+        resolved_row && *resolved_row == row) {
+        /* No root Effect library is exposed yet; direct Effect sources are invalid. */
+        resolved = FS_RESIDENT_SOURCE_UNKNOWN;
+    }
     return resolved;
 }
 
 /*
- * Evaluate the eight identity rows of one present Scene (Case 1/2/3).
+ * Evaluate the nine identity rows of one present Scene (Case 1/2/3).
  *
  * What: reads the Scene's 1,920-byte winner payload section once and
- * evaluates Scene-own, Kit, and six Instrument rows in fixed order using
- * their refreshed flags and resolved sources. Case 1 (not refreshed)
+ * evaluates Scene-own, Kit, six Instrument, and Effect rows in fixed order
+ * using their refreshed flags and resolved sources. Case 1 (not refreshed)
  * applies the winner payload section and cross-checks the embedded Phase C
  * source byte; Case 2 (refreshed + resolvable) dispatches the matching
  * narrow single-level loader; Case 3 (refreshed + unresolvable, or an
@@ -28367,7 +28554,7 @@ static uint8_t filesystem_bootReaderEvaluateScene(
             sizeof(scene_section)) {
         return 0u;
     }
-    for (index = 0u; index < 8u; index++) {
+    for (index = 0u; index < 9u; index++) {
         uint16_t row;
         uint16_t source;
 
@@ -28375,16 +28562,18 @@ static uint8_t filesystem_bootReaderEvaluateScene(
             row = filesystem_residentSceneRow(scene_index);
         else if (index == 1u)
             row = filesystem_residentKitRow(scene_index);
-        else
+        else if (index < 8u)
             row = filesystem_residentInstrumentRow(
                 scene_index, (uint8_t)(index - 2u));
+        else
+            row = filesystem_residentEffectRow(scene_index);
         if (row >= FS_RESIDENT_NAMES_ROW_COUNT)
             return 0u;
         source = fs_resident_source[row];
         if ((source & FS_RESIDENT_SOURCE_REFRESHED_FLAG) == 0u) {
             /* Case 1: autosave has proven this row; apply the payload. */
             const uint8_t *section;
-            uint8_t embedded_offset;
+            uint16_t embedded_offset;
             uint16_t embedded;
             uint16_t live;
 
@@ -28397,6 +28586,13 @@ static uint8_t filesystem_bootReaderEvaluateScene(
                     scene_index, scene_section + AUTOSAVE_KIT_OFFSET);
                 section = scene_section + AUTOSAVE_KIT_OFFSET;
                 embedded_offset = AUTOSAVE_KIT_SOURCE_OFFSET;
+            } else if (index == 8u) {
+                const uint8_t *effect_section =
+                    scene_section + AUTOSAVE_EFFECT_OFFSET;
+
+                autosave_applyEffectPayload(scene_index, effect_section);
+                section = effect_section;
+                embedded_offset = AUTOSAVE_EFFECT_SOURCE_OFFSET;
             } else {
                 uint8_t slot = (uint8_t)(index - 2u);
                 const uint8_t *instrument_section = scene_section +
@@ -28452,6 +28648,9 @@ static uint8_t filesystem_bootReaderEvaluateScene(
                 } else if (index == 1u) {
                     load_ok = filesystem_bootReaderNarrowLoadKit(
                         scene_index, resolved, resolved_row);
+                } else if (index == 8u) {
+                    load_ok = filesystem_bootReaderNarrowLoadEffect(
+                        scene_index, resolved, resolved_row);
                 } else {
                     uint8_t slot = (uint8_t)(index - 2u);
                     instrument_type_t type = (instrument_type_t)
@@ -28498,8 +28697,8 @@ static uint8_t filesystem_bootReaderEvaluateScene(
  *
  * What: the central orchestrator (§4-§10, S061_AUTOSAVE_READER.md). Called
  * from main.c stage 11 when a valid Bank-matching winner exists. Reads
- * .hcnames and the winner record, then evaluates each of up to 8 identity
- * rows per Scene independently:
+ * .hcnames and the winner record, then evaluates each of 9 identity rows per
+ * Scene independently (Scene, Kit, six Instruments, and Effect):
  *
  *   Case 1 (not refreshed): trust the winner's payload. Apply via
  *     autosave_apply*() functions. Cross-check embedded source vs .hcnames;
@@ -28666,10 +28865,10 @@ uint8_t filesystem_autosaveBootReaderBlocking(void)
  * What: parses .hcnames (temp-file prelude first, then the register),
  * then requires the two special-case checks — the register Bank row is a
  * direct numeric slot equal to bank_restoreBankSlot() (the settings.cfg
- * boot Bank), and all 145 rows carry the refreshed witness. When both
+ * boot Bank), and all 161 rows carry the refreshed witness. When both
  * hold, the register is authoritative: this function constructs the
  * whole resident state from it — the Bank container via
- * filesystem_bootNarrowLoadBank(), then every present Scene's eight rows
+ * filesystem_bootNarrowLoadBank(), then every present Scene's nine rows
  * via resolve-plus-narrow-load, Bank-inherited rows from the Bank tree
  * and direct rows from their Scene/Kit/Instrument libraries, then the named
  * v4 Pattern child per non-emptied Scene. Any unresolvable child of a Scene
@@ -28744,7 +28943,7 @@ uint8_t filesystem_bootHcnamesAuthoritativeLoad(void)
      * poisoning every subsequent relative open. */
     if (!filesystem_blockChdir(NULL))
         return 0u;
-    /* Step 4: per-Scene resolution of the eight rows in fixed order.
+    /* Step 4: per-Scene resolution of the nine rows in fixed order.
      * Every row is refreshed by check 2, so this is Case 2/3 only. The full
      * immutable type image was captured before the Bank or child loads. */
     for (scene_index = 0u; scene_index < AUTOSAVE_SCENE_COUNT;
@@ -28753,7 +28952,7 @@ uint8_t filesystem_bootHcnamesAuthoritativeLoad(void)
 
         if ((present_mask & (uint16_t)(1u << scene_index)) == 0u)
             continue;
-        for (index = 0u; index < 8u; index++) {
+        for (index = 0u; index < 9u; index++) {
             uint16_t row;
             uint16_t resolved_row = FS_RESIDENT_NAMES_ROW_COUNT;
             uint16_t resolved;
@@ -28763,9 +28962,11 @@ uint8_t filesystem_bootHcnamesAuthoritativeLoad(void)
                 row = filesystem_residentSceneRow(scene_index);
             else if (index == 1u)
                 row = filesystem_residentKitRow(scene_index);
-            else
+            else if (index < 8u)
                 row = filesystem_residentInstrumentRow(
                     scene_index, (uint8_t)(index - 2u));
+            else
+                row = filesystem_residentEffectRow(scene_index);
             if (row >= FS_RESIDENT_NAMES_ROW_COUNT)
                 return 0u;
             resolved = filesystem_bootReaderResolveResidentRow(
@@ -28777,6 +28978,9 @@ uint8_t filesystem_bootHcnamesAuthoritativeLoad(void)
                         scene_index, resolved, resolved_row);
                 } else if (index == 1u) {
                     load_ok = filesystem_bootReaderNarrowLoadKit(
+                        scene_index, resolved, resolved_row);
+                } else if (index == 8u) {
+                    load_ok = filesystem_bootReaderNarrowLoadEffect(
                         scene_index, resolved, resolved_row);
                 } else {
                     uint8_t slot = (uint8_t)(index - 2u);

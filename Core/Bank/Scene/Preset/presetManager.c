@@ -533,7 +533,8 @@ static void on_scene_save_complete(void)
      * Complete one root Scene directory save.
      *
      * Filesystem has already serialized sceneset.scg, the embedded Kit
-     * directory, pattern stub, and effect placeholder. Preset reports only the
+     * directory, named v4 Pattern child, and named `.fx` v2 Effect child.
+     * Preset reports only the
      * operation identity so Menu can clear Save busy state without starting any
      * runtime sound-apply work.
      */

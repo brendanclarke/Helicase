@@ -182,6 +182,32 @@ const effect_param_descriptor_t *effects_descriptorByKey(
 uint8_t effects_paramAutomatable(effect_type_id_t type, uint8_t index);
 uint8_t effects_paramModulatable(effect_type_id_t type, uint8_t index);
 
+/*
+ * `.fx` storage helpers (Session 072 step 6; plan §14.1).
+ *
+ * effects_recordDefaultsForType() builds one complete, unowned record for a
+ * registered type: SceneData's `off` defaults (common out/vol/pan, fwd /
+ * length 16 / 1/16, no locks), then the type id and every type-specific index
+ * 3..63 set to that type's single default in BOTH endpoint images (0 where the
+ * type has no row), the same values effects_changeType() installs.
+ * Unknown types build `off`. It never marks AutoSave and never touches a
+ * resident Scene: the caller owns the commit. Clients: the `.fx` parser,
+ * AutoSave's Effect reader, and the boot narrow Effect loader.
+ *
+ * effects_laneFileKey() / effects_laneByFileKey() translate FX-sequence lane
+ * numbers to and from their `.fx` `[sequence]` key (after the `lane.` prefix).
+ * Lane 0 is always EFFECT_LANE_MORPH_FILE_KEY; other lanes use the descriptor
+ * file_key the registry lane table names. EFFECT_LANE_NONE lanes have no key
+ * (NULL / not found), so a file cannot address an unused lane. Why here: the
+ * registry owns lane meaning; storage must not duplicate that table.
+ */
+#define EFFECT_LANE_MORPH_FILE_KEY "effect_morph"
+void effects_recordDefaultsForType(effect_record_t *record,
+                                   effect_type_id_t type);
+const char *effects_laneFileKey(effect_type_id_t type, uint8_t lane);
+uint8_t effects_laneByFileKey(effect_type_id_t type, const char *file_key,
+                              uint8_t *lane_out);
+
 #if DEV_MODE_DIAGNOSTIC
 /* 0 means the immutable registry passed its runtime self-check. */
 uint8_t effects_registryCheckResult(void);

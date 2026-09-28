@@ -16,6 +16,7 @@
  * must remain aligned with the descriptor keys.
  */
 #include "storageTypes.h"
+#include "EffectsManager.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -625,11 +626,12 @@ storage_status_t storage_scenesetParseLine(
         state->seen_audio_out = 1u;
     } else if (storage_streq(key, "fx_send_amount")) {
         /*
-         * Parse retained future FX-send amounts.
+         * Parse retained per-voice FX-send amounts.
          *
          * Inputs: six comma-separated 0..127 values, one per instrument slot.
-         * Output: staged Scene settings update; runtime FX routing is not
-         * applied by storage.
+         * Output: staged Scene settings; the mixer pulls the effective amount
+         * every block (Session 072 Step 5), so storage applies nothing at
+         * runtime.
          */
         if (!target_settings)
             return STORAGE_STATUS_BAD_VALUE;
@@ -642,11 +644,11 @@ storage_status_t storage_scenesetParseLine(
         state->seen_fx_send_amount = 1u;
     } else if (storage_streq(key, "fader_setting")) {
         /*
-         * Parse retained future fader topology modes.
+         * Parse retained per-voice fader modes.
          *
-         * Inputs: six comma-separated values in the current 0..2 mode domain.
-         * Output: staged Scene settings update; runtime behavior is future
-         * mixer/FX work.
+         * Inputs: six comma-separated values in the 0..2 domain
+         * (mixer.h MIXER_FADER_*). Output: staged Scene settings; the mixer
+         * reads the mode every block (Session 072 Step 5).
          */
         if (!target_settings)
             return STORAGE_STATUS_BAD_VALUE;
@@ -657,6 +659,20 @@ storage_status_t storage_scenesetParseLine(
         if (st != STORAGE_STATUS_OK)
             return st;
         state->seen_fader_setting = 1u;
+    } else if (storage_streq(key, "effect_morph_amount")) {
+        /*
+         * Parse the Scene-level Effect Morph amount (Session 072 Step 6).
+         *
+         * Input: one 0..255 value. Output: staged Scene settings. The key is
+         * optional for older sceneset files and is deliberately absent from
+         * `.fx`, so Scene Load carries it while an Effect file does not.
+         */
+        if (!target_settings)
+            return STORAGE_STATUS_BAD_VALUE;
+        st = storage_parseU8(value, &parsed);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        target_settings->effect_morph_amount = parsed;
     }
     return STORAGE_STATUS_OK;
 }
@@ -1079,79 +1095,6 @@ uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
     return storage_formatInstrumentLineView(dst, capacity, &view, line_index);
 }
 
-void storage_effectStateInit(storage_effect_state_t *state)
-{
-    /*
-     * Clear placeholder effect validation bits.
-     *
-     * Effect files have no runtime payload yet, but Scene load still requires
-     * a guarded .fx file so the folder contract stays stable before Phase 6.
-     */
-    if (state)
-        memset(state, 0, sizeof(*state));
-}
-
-storage_status_t storage_effectParseLine(storage_effect_state_t *state,
-                                         const char *line)
-{
-    char key[24];
-    const char *value;
-    storage_status_t st;
-    uint8_t parsed;
-
-    /*
-     * Parse one placeholder .fx line.
-     *
-     * Unknown keys are ignored for forward compatibility with future effect
-     * schemas, but the v1 placeholder guard must be present for this first
-     * implementation to accept the file as a valid Scene effect.
-     */
-    if (!state || !line)
-        return STORAGE_STATUS_BAD_VALUE;
-    line = storage_trimLeft(line);
-    if (*line == '\0' || *line == '#')
-        return STORAGE_STATUS_OK;
-    st = storage_splitKeyValue(line, key, sizeof(key), &value);
-    if (st != STORAGE_STATUS_OK)
-        return st;
-    if (storage_streq(key, "format")) {
-        if (!storage_streq(value, "helicase.effect"))
-            return STORAGE_STATUS_INVALID_FORMAT;
-        state->seen_format = 1u;
-    } else if (storage_streq(key, "version")) {
-        st = storage_parseU8(value, &parsed);
-        if (st != STORAGE_STATUS_OK)
-            return st;
-        if (parsed != 1u)
-            return STORAGE_STATUS_UNSUPPORTED_VERSION;
-        state->seen_version = 1u;
-    } else if (storage_streq(key, "placeholder")) {
-        st = storage_parseU8(value, &parsed);
-        if (st != STORAGE_STATUS_OK)
-            return st;
-        if (parsed != 1u)
-            return STORAGE_STATUS_BAD_VALUE;
-        state->seen_placeholder = 1u;
-    }
-    return STORAGE_STATUS_OK;
-}
-
-storage_status_t storage_effectFinalize(const storage_effect_state_t *state)
-{
-    /*
-     * Validate the first-pass effect file.
-     *
-     * Until real FX data exists, requiring placeholder=1 prevents arbitrary
-     * .fx files from being mistaken for loadable effect state.
-     */
-    if (!state || !state->seen_format || !state->seen_version ||
-        !state->seen_placeholder) {
-        return STORAGE_STATUS_MISSING_REQUIRED;
-    }
-    return STORAGE_STATUS_OK;
-}
-
-
 /* Bankset's hexadecimal mask parser remains shared with the Bank schema. */
 static int8_t storage_patternHex(char c)
 {
@@ -1161,14 +1104,458 @@ static int8_t storage_patternHex(char c)
     return -1;
 }
 
-/* The effect and Bank directory schemas remain independent of Step storage. */
-uint8_t storage_formatEffectPlaceholderLine(char *dst, uint16_t capacity,
-                                            uint16_t line_index)
+/* ---------------------------------------------------------------------------
+ * `.fx` Effect files (Session 072 step 6; plan §14.1).
+ *
+ * Grammar (v2):
+ *   format=helicase.effect
+ *   version=2
+ *   type=<token3>
+ *   [params]    <descriptor file_key>=<0..255>   (clamped to max_value)
+ *   [morph]     same keys, Morphable rows only; absent section = copy [params]
+ *   [sequence]  run_mode=<fwd|rev|pip|rnd|sel>
+ *               length=<1..16>
+ *               step_scale=<token, S072_ST6 D3>
+ *               lane.<lane key>=0x<mask>,<16 values 0..255>
+ * Legacy (v1): format/version=1/placeholder=1 -> `off`.
+ * The file never carries its own name: the filename stem is the Effect name.
+ * --------------------------------------------------------------------------- */
+
+#define STORAGE_SECTION_SEQUENCE   3u
+#define STORAGE_SECTION_UNKNOWN    0xffu
+#define STORAGE_EFFECT_KEY_MAX     40u
+#define STORAGE_EFFECT_LANE_PREFIX "lane."
+#define STORAGE_EFFECT_LANE_PREFIX_LEN 5u
+
+static const char *const storage_effectRunModeTokens[EFFECT_SEQ_RUN_MODE_COUNT] = {
+    "fwd", "rev", "pip", "rnd", "sel"
+};
+
+static const char *const storage_effectStepScaleTokens[EFFECT_SEQ_SCALE_COUNT] = {
+    "1/64", "1/32t", "1/32", "1/16t", "1/16", "1/8t", "1/16.",
+    "1/8", "1/4t", "1/8.", "1/4", "1/2", "1bar", "2bar"
+};
+
+_Static_assert(sizeof(storage_effectStepScaleTokens) /
+                   sizeof(storage_effectStepScaleTokens[0]) ==
+                   EFFECT_SEQ_SCALE_COUNT,
+               "one .fx step_scale token per shared scale index");
+
+static uint8_t storage_effectTokenIndex(const char *const *tokens,
+                                        uint8_t count,
+                                        const char *text,
+                                        uint8_t *index_out)
 {
-    if (line_index == 0u) return storage_formatLiteral(dst, capacity, "format=helicase.effect\n");
-    if (line_index == 1u) return storage_formatLiteral(dst, capacity, "version=1\n");
-    if (line_index == 2u) return storage_formatLiteral(dst, capacity, "placeholder=1\n");
+    uint8_t i;
+
+    for (i = 0u; i < count; i++) {
+        if (storage_streq(tokens[i], text)) {
+            *index_out = i;
+            return 1u;
+        }
+    }
     return 0u;
+}
+
+static uint8_t storage_effectAppendText(char *dst, uint16_t capacity,
+                                        uint16_t *len, const char *text)
+{
+    while (*text != '\0') {
+        if (*len + 1u >= capacity)
+            return 0u;
+        dst[(*len)++] = *text++;
+    }
+    return 1u;
+}
+
+static uint8_t storage_effectAppendU8(char *dst, uint16_t capacity,
+                                      uint16_t *len, uint8_t value)
+{
+    char digits[4];
+    uint8_t count = 0u;
+
+    do {
+        digits[count++] = (char)('0' + (value % 10u));
+        value = (uint8_t)(value / 10u);
+    } while (value != 0u);
+    while (count > 0u) {
+        if (*len + 1u >= capacity)
+            return 0u;
+        dst[(*len)++] = digits[--count];
+    }
+    return 1u;
+}
+
+static storage_status_t storage_effectParseLane(effect_record_t *target,
+                                                uint8_t lane,
+                                                const char *value)
+{
+    uint8_t values[EFFECT_SEQ_STEP_COUNT];
+    uint16_t mask = 0u;
+    uint16_t lane_bit = (uint16_t)(1u << lane);
+    uint8_t digits = 0u;
+    uint8_t step;
+    storage_status_t st;
+
+    if (value[0] != '0' || (value[1] != 'x' && value[1] != 'X'))
+        return STORAGE_STATUS_BAD_VALUE;
+    value += 2;
+    while (*value != ',' && *value != '\0') {
+        int8_t nibble = storage_patternHex(*value);
+
+        if (nibble < 0 || digits >= 4u)
+            return STORAGE_STATUS_BAD_VALUE;
+        mask = (uint16_t)((mask << 4) | (uint16_t)nibble);
+        digits++;
+        value++;
+    }
+    if (digits == 0u || *value == '\0')
+        return STORAGE_STATUS_BAD_VALUE;
+    st = storage_parseCsvU8(value + 1, values, EFFECT_SEQ_STEP_COUNT, 255u);
+    if (st != STORAGE_STATUS_OK)
+        return st;
+    for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++) {
+        target->steps[step].value[lane] = values[step];
+        if ((mask & (uint16_t)(1u << step)) != 0u)
+            target->steps[step].lock_mask |= lane_bit;
+        else
+            target->steps[step].lock_mask &= (uint16_t)~lane_bit;
+    }
+    return STORAGE_STATUS_OK;
+}
+
+void storage_effectStateInit(storage_effect_state_t *state,
+                             effect_record_t *target)
+{
+    /* Reset parser state and the staged record before a `.fx` file. */
+    if (state) {
+        memset(state, 0, sizeof(*state));
+        state->type = EFFECT_TYPE_OFF;
+        state->current_section = STORAGE_SECTION_TOP;
+    }
+    if (target)
+        effects_recordDefaultsForType(target, EFFECT_TYPE_OFF);
+}
+
+storage_status_t storage_effectParseLine(storage_effect_state_t *state,
+                                         const char *line,
+                                         effect_record_t *target)
+{
+    char key[STORAGE_EFFECT_KEY_MAX];
+    const char *value;
+    storage_status_t st;
+    uint8_t parsed;
+    uint8_t index;
+
+    /* Parse one `.fx` line; unknown keys remain forward-compatible. */
+    if (!state || !line || !target)
+        return STORAGE_STATUS_BAD_VALUE;
+    line = storage_trimLeft(line);
+    if (*line == '\0' || *line == '#')
+        return STORAGE_STATUS_OK;
+    if (*line == '[') {
+        strncpy(key, line, sizeof(key) - 1u);
+        key[sizeof(key) - 1u] = '\0';
+        storage_trimRight(key);
+        if (state->version != 2u || !state->seen_type)
+            return STORAGE_STATUS_MISSING_REQUIRED;
+        if (storage_streq(key, "[params]")) {
+            state->current_section = STORAGE_SECTION_PARAMS;
+        } else if (storage_streq(key, "[morph]")) {
+            state->current_section = STORAGE_SECTION_MORPH;
+            state->seen_morph_section = 1u;
+        } else if (storage_streq(key, "[sequence]")) {
+            state->current_section = STORAGE_SECTION_SEQUENCE;
+        } else {
+            state->current_section = STORAGE_SECTION_UNKNOWN;
+        }
+        return STORAGE_STATUS_OK;
+    }
+    st = storage_splitKeyValue(line, key, sizeof(key), &value);
+    if (st != STORAGE_STATUS_OK)
+        return st;
+    if (state->current_section == STORAGE_SECTION_TOP) {
+        if (storage_streq(key, "format")) {
+            if (!storage_streq(value, "helicase.effect"))
+                return STORAGE_STATUS_INVALID_FORMAT;
+            state->seen_format = 1u;
+        } else if (storage_streq(key, "version")) {
+            st = storage_parseU8(value, &parsed);
+            if (st != STORAGE_STATUS_OK)
+                return st;
+            if (parsed != 1u && parsed != 2u)
+                return STORAGE_STATUS_UNSUPPORTED_VERSION;
+            state->version = parsed;
+        } else if (storage_streq(key, "placeholder")) {
+            st = storage_parseU8(value, &parsed);
+            if (st != STORAGE_STATUS_OK)
+                return st;
+            if (parsed != 1u)
+                return STORAGE_STATUS_BAD_VALUE;
+            state->seen_placeholder = 1u;
+        } else if (storage_streq(key, "type")) {
+            effect_type_id_t type;
+
+            if (state->seen_type || strlen(value) != 3u ||
+                !effects_typeFromToken(value, &type))
+                return STORAGE_STATUS_BAD_TYPE;
+            state->type = type;
+            state->seen_type = 1u;
+            effects_recordDefaultsForType(target, type);
+        }
+        return STORAGE_STATUS_OK;
+    }
+    if (state->current_section == STORAGE_SECTION_PARAMS ||
+        state->current_section == STORAGE_SECTION_MORPH) {
+        const effect_param_descriptor_t *descriptor =
+            effects_descriptorByKey(state->type, key, &index);
+
+        if (!descriptor)
+            return STORAGE_STATUS_OK;
+        st = storage_parseU8(value, &parsed);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        if (parsed > descriptor->max_value)
+            parsed = descriptor->max_value;
+        if (state->current_section == STORAGE_SECTION_PARAMS) {
+            target->normal[index] = parsed;
+        } else if ((descriptor->base.flags &
+                    INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u) {
+            target->morph[index] = parsed;
+        }
+        return STORAGE_STATUS_OK;
+    }
+    if (state->current_section == STORAGE_SECTION_SEQUENCE) {
+        if (storage_streq(key, "run_mode")) {
+            if (!storage_effectTokenIndex(storage_effectRunModeTokens,
+                                          EFFECT_SEQ_RUN_MODE_COUNT,
+                                          value, &parsed))
+                return STORAGE_STATUS_BAD_VALUE;
+            target->seq_run_mode = parsed;
+        } else if (storage_streq(key, "length")) {
+            st = storage_parseU8(value, &parsed);
+            if (st != STORAGE_STATUS_OK)
+                return st;
+            if (parsed < EFFECT_SEQ_LENGTH_MIN ||
+                parsed > EFFECT_SEQ_LENGTH_MAX)
+                return STORAGE_STATUS_BAD_VALUE;
+            target->seq_length = parsed;
+        } else if (storage_streq(key, "step_scale")) {
+            if (!storage_effectTokenIndex(storage_effectStepScaleTokens,
+                                          EFFECT_SEQ_SCALE_COUNT,
+                                          value, &parsed))
+                return STORAGE_STATUS_BAD_VALUE;
+            target->seq_step_scale = parsed;
+        } else if (strncmp(key, STORAGE_EFFECT_LANE_PREFIX,
+                           STORAGE_EFFECT_LANE_PREFIX_LEN) == 0) {
+            uint8_t lane;
+
+            if (!effects_laneByFileKey(
+                    state->type, key + STORAGE_EFFECT_LANE_PREFIX_LEN,
+                    &lane))
+                return STORAGE_STATUS_OK;
+            return storage_effectParseLane(target, lane, value);
+        }
+    }
+    return STORAGE_STATUS_OK;
+}
+
+storage_status_t storage_effectFinalize(const storage_effect_state_t *state,
+                                        effect_record_t *target)
+{
+    const effect_registry_entry_t *entry;
+    uint8_t index;
+
+    /* Validate v1 placeholders or complete v2 effect state. */
+    if (!state || !target || !state->seen_format || state->version == 0u)
+        return STORAGE_STATUS_MISSING_REQUIRED;
+    if (state->version == 1u) {
+        if (!state->seen_placeholder)
+            return STORAGE_STATUS_MISSING_REQUIRED;
+        effects_recordDefaultsForType(target, EFFECT_TYPE_OFF);
+        return STORAGE_STATUS_OK;
+    }
+    if (!state->seen_type)
+        return STORAGE_STATUS_MISSING_REQUIRED;
+    if (!state->seen_morph_section) {
+        entry = effects_registryEntry(state->type);
+        for (index = 0u; entry && index < entry->descriptor_count; index++) {
+            if ((entry->descriptors[index].base.flags &
+                 INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u)
+                target->morph[index] = target->normal[index];
+        }
+    }
+    return STORAGE_STATUS_OK;
+}
+
+static uint8_t storage_effectMorphRow(const effect_registry_entry_t *entry,
+                                      uint8_t ordinal, uint8_t *index_out)
+{
+    uint8_t index;
+    uint8_t seen = 0u;
+
+    for (index = 0u; index < entry->descriptor_count; index++) {
+        if ((entry->descriptors[index].base.flags &
+             INSTRUMENT_PARAM_FLAG_MORPHABLE) == 0u)
+            continue;
+        if (index_out && seen == ordinal) {
+            *index_out = index;
+            return 1u;
+        }
+        seen++;
+    }
+    return index_out ? 0u : seen;
+}
+
+static uint8_t storage_effectNamedLane(effect_type_id_t type,
+                                       uint8_t ordinal, uint8_t *lane_out)
+{
+    uint8_t lane;
+    uint8_t seen = 0u;
+
+    for (lane = 0u; lane < EFFECT_SEQ_LANE_COUNT; lane++) {
+        if (!effects_laneFileKey(type, lane))
+            continue;
+        if (seen == ordinal) {
+            *lane_out = lane;
+            return 1u;
+        }
+        seen++;
+    }
+    return 0u;
+}
+
+static uint8_t storage_formatEffectLaneLine(char *dst, uint16_t capacity,
+                                            const effect_record_t *record,
+                                            uint8_t lane, const char *key)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    uint16_t len = 0u;
+    uint16_t mask = 0u;
+    uint8_t step;
+    char mask_text[5];
+
+    for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++) {
+        if ((record->steps[step].lock_mask & (uint16_t)(1u << lane)) != 0u)
+            mask |= (uint16_t)(1u << step);
+    }
+    mask_text[0] = hex[(mask >> 12) & 0xfu];
+    mask_text[1] = hex[(mask >> 8) & 0xfu];
+    mask_text[2] = hex[(mask >> 4) & 0xfu];
+    mask_text[3] = hex[mask & 0xfu];
+    mask_text[4] = '\0';
+    if (!storage_effectAppendText(dst, capacity, &len,
+                                  STORAGE_EFFECT_LANE_PREFIX) ||
+        !storage_effectAppendText(dst, capacity, &len, key) ||
+        !storage_effectAppendText(dst, capacity, &len, "=0x") ||
+        !storage_effectAppendText(dst, capacity, &len, mask_text))
+        return 0u;
+    for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++) {
+        if (!storage_effectAppendText(dst, capacity, &len, ",") ||
+            !storage_effectAppendU8(dst, capacity, &len,
+                                    record->steps[step].value[lane]))
+            return 0u;
+    }
+    if (!storage_effectAppendText(dst, capacity, &len, "\n"))
+        return 0u;
+    dst[len] = '\0';
+    return (uint8_t)len;
+}
+
+uint8_t storage_formatEffectLine(char *dst, uint16_t capacity,
+                                 const effect_record_t *record,
+                                 uint16_t line_index)
+{
+    const effect_registry_entry_t *entry;
+    effect_type_id_t type;
+    uint8_t param_count;
+    uint8_t morph_count;
+    uint8_t index;
+
+    /* Stream the v2 header, params, morph, and sequence sections. */
+    if (!dst || capacity == 0u || !record)
+        return 0u;
+    type = effects_registryEntry(record->type) ? record->type
+                                               : EFFECT_TYPE_OFF;
+    entry = effects_registryEntry(type);
+    param_count = entry->descriptor_count;
+    morph_count = storage_effectMorphRow(entry, 0u, NULL);
+    if (line_index == 0u)
+        return storage_formatLiteral(dst, capacity, "format=helicase.effect\n");
+    if (line_index == 1u)
+        return storage_formatLiteral(dst, capacity, "version=2\n");
+    if (line_index == 2u)
+        return storage_formatAssignmentText(dst, capacity, "type",
+                                            entry->token3);
+    if (line_index == 3u)
+        return storage_formatLiteral(dst, capacity, "\n");
+    if (line_index == 4u)
+        return storage_formatLiteral(dst, capacity, "[params]\n");
+    line_index = (uint16_t)(line_index - 5u);
+    if (line_index < param_count)
+        return storage_formatAssignmentU16(
+            dst, capacity, entry->descriptors[line_index].base.file_key,
+            record->normal[line_index]);
+    line_index = (uint16_t)(line_index - param_count);
+    if (line_index == 0u)
+        return storage_formatLiteral(dst, capacity, "\n");
+    if (line_index == 1u)
+        return storage_formatLiteral(dst, capacity, "[morph]\n");
+    line_index = (uint16_t)(line_index - 2u);
+    if (line_index < morph_count) {
+        if (!storage_effectMorphRow(entry, (uint8_t)line_index, &index))
+            return 0u;
+        return storage_formatAssignmentU16(
+            dst, capacity, entry->descriptors[index].base.file_key,
+            record->morph[index]);
+    }
+    line_index = (uint16_t)(line_index - morph_count);
+    if (line_index == 0u)
+        return storage_formatLiteral(dst, capacity, "\n");
+    if (line_index == 1u)
+        return storage_formatLiteral(dst, capacity, "[sequence]\n");
+    if (line_index == 2u)
+        return storage_formatAssignmentText(
+            dst, capacity, "run_mode",
+            storage_effectRunModeTokens[
+                record->seq_run_mode < EFFECT_SEQ_RUN_MODE_COUNT
+                    ? record->seq_run_mode : EFFECT_SEQ_RUN_FWD]);
+    if (line_index == 3u)
+        return storage_formatAssignmentU16(dst, capacity, "length",
+                                           record->seq_length);
+    if (line_index == 4u)
+        return storage_formatAssignmentText(
+            dst, capacity, "step_scale",
+            storage_effectStepScaleTokens[
+                record->seq_step_scale < EFFECT_SEQ_SCALE_COUNT
+                    ? record->seq_step_scale : EFFECT_SEQ_SCALE_DEFAULT]);
+    line_index = (uint16_t)(line_index - 5u);
+    if (line_index >= EFFECT_SEQ_LANE_COUNT ||
+        !storage_effectNamedLane(type, (uint8_t)line_index, &index))
+        return 0u;
+    return storage_formatEffectLaneLine(dst, capacity, record, index,
+                                        effects_laneFileKey(type, index));
+}
+
+void storage_makeSavedEffectDisplayFilename(char *dst, uint8_t capacity,
+                                            const char *stem)
+{
+    uint8_t len = 0u;
+
+    /* Reuse Instrument stem normalization, then replace `.drm` with `.fx`. */
+    if (!dst || capacity == 0u)
+        return;
+    storage_makeSavedInstrumentDisplayFilename(dst, capacity, stem,
+                                               STORAGE_INSTRUMENT_DRM,
+                                               0u, 0u);
+    while (dst[len] != '\0')
+        len++;
+    if (len >= 4u && dst[len - 4u] == '.' && dst[len - 3u] == 'd' &&
+        dst[len - 2u] == 'r' && dst[len - 1u] == 'm') {
+        dst[len - 3u] = 'f';
+        dst[len - 2u] = 'x';
+        dst[len - 1u] = '\0';
+    }
 }
 
 void storage_banksetInit(storage_bankset_t *state)
