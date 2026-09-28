@@ -113,8 +113,25 @@ typedef struct {
     const fx_share_t *share;
 } effect_io_t;
 
-/* Step 7 UI layout placeholder; registry rows remain NULL until then. */
-struct effect_ui_hooks;
+/*
+ * Optional per-type Effect-page hooks (Session 072 step 7; plan §13.6).
+ *
+ * What: lets a type take over SELECT, TRACK, or BAR gestures and add LED
+ * rendering on the Effect page. Each input hook receives the zero-based
+ * button, the SHIFT state, and pressed (1) / released (0), and returns
+ * nonzero when it handled the gesture; zero falls back to the default page
+ * behavior. render_leds runs after the page has drawn its own LEDs.
+ * Rules: hooks run in foreground, must not block, must write retained data
+ * only through the EffectsManager edit API, and never touch the filesystem.
+ * Any member may be NULL. Affiliates: menuEffects_hook*(), buttonHandler FX
+ * mode branches, and the registry's ui field.
+ */
+struct effect_ui_hooks {
+    uint8_t (*select)(uint8_t button, uint8_t shift, uint8_t pressed);
+    uint8_t (*track)(uint8_t track, uint8_t shift, uint8_t pressed);
+    uint8_t (*bar)(uint8_t bar, uint8_t shift, uint8_t pressed);
+    void (*render_leds)(void);
+};
 typedef struct effect_ui_hooks effect_ui_hooks_t;
 
 /* Optional four-cell SELECT layout for future Effect pages. */
@@ -207,6 +224,38 @@ void effects_recordDefaultsForType(effect_record_t *record,
 const char *effects_laneFileKey(effect_type_id_t type, uint8_t lane);
 uint8_t effects_laneByFileKey(effect_type_id_t type, const char *file_key,
                               uint8_t *lane_out);
+
+/*
+ * Retained Effect edit API (Session 072 step 7).
+ *
+ * What: the single mutation boundary for user-facing Effect edits: the
+ * Effect page now, type UI hooks, and the Step 8 lock editor later. Each
+ * setter validates against the Scene's current type, clamps to the
+ * descriptor maximum, writes through SceneData's change-aware setter (which
+ * marks AutoSave and clears the card-clean bit), and returns nonzero only
+ * when a byte changed. Runtime needs no call: effects_service() rescans every
+ * block.
+ * Why here: plan §13.6 requires edits to flow through EffectsManager so Step
+ * 10 can add edit-mask fan-out inside these functions without touching any
+ * caller (S072_ST7 D3). Step 7 writes the given Scene only.
+ * Image rule: EFFECT_IMAGE_MORPH addresses the Morph endpoint for Morphable
+ * rows only. For a non-Morphable row it reads and writes the single normal
+ * value, so cells without a Morph endpoint show their single value.
+ */
+typedef enum {
+    EFFECT_IMAGE_NORMAL = 0,
+    EFFECT_IMAGE_MORPH
+} effect_image_t;
+
+uint8_t effects_paramMorphable(effect_type_id_t type, uint8_t index);
+uint8_t effects_getParameter(uint8_t scene_index, uint8_t index,
+                             effect_image_t image);
+uint8_t effects_setParameter(uint8_t scene_index, uint8_t index,
+                             effect_image_t image, uint8_t value);
+uint8_t effects_setSeqRunMode(uint8_t scene_index, uint8_t mode);
+uint8_t effects_setSeqLength(uint8_t scene_index, uint8_t length);
+uint8_t effects_setSeqStepScale(uint8_t scene_index, uint8_t scale);
+uint8_t effects_setMorphAmount(uint8_t scene_index, uint8_t amount);
 
 #if DEV_MODE_DIAGNOSTIC
 /* 0 means the immutable registry passed its runtime self-check. */

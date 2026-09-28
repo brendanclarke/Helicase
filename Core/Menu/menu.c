@@ -54,6 +54,7 @@
 #include "AutosaveTrace.h"
 #include "EuklidGenerator.h"
 #include "SomGenerator.h"
+#include "menuEffects.h"
 #include "triggerJacks.h"
 #include "MidiParser.h"
 #include "modulationNode.h"
@@ -1641,7 +1642,13 @@ typedef enum {
     MENU_CELL_STATIC,
     MENU_CELL_INSTRUMENT,
     MENU_CELL_KIT_SETTING,
-    MENU_CELL_SCENE_SETTING
+    MENU_CELL_SCENE_SETTING,
+    /*
+     * Effect page cell (Session 072 step 7). Value, dtype, format, clamp,
+     * and commit delegate to menuEffects.c through cell.fx; PARAM cells also
+     * set cell.descriptor so the generic descriptor name/dtype code applies.
+     */
+    MENU_CELL_EFFECT
 } menu_cell_kind_t;
 
 typedef enum {
@@ -1673,6 +1680,8 @@ typedef struct {
     uint8_t slot;
     uint8_t descriptor_index;
     const ParamDescriptor *descriptor;
+    /* Effect page cell identity; meaningful only for MENU_CELL_EFFECT. */
+    menuEffects_cell_t fx;
 } menu_cell_t;
 
 typedef struct {
@@ -1691,6 +1700,8 @@ typedef struct {
 } menu_lfo_target_context_t;
 
 static uint8_t menu_isVoicePage(uint8_t page);
+/* Compact four-cell screen pages use position 0..3 for the current screen. */
+static uint8_t menu_isScreenPage(uint8_t page);
 static uint8_t menu_voicePageToSlot(uint8_t page);
 static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position);
 static menu_cell_t menu_resolveVoiceCellAtScreen(uint8_t subPage,
@@ -1758,6 +1769,18 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value, char out[3])
 static uint8_t menu_isVoicePage(uint8_t page)
 {
     return (uint8_t)(page <= VOICE7_PAGE);
+}
+
+/*
+ * Pages that use the four-cell compact screen model (Session 072 step 7).
+ *
+ * Output: nonzero for VOICE1..7 and EFFECT_PAGE. Used where old static-page
+ * second-half arithmetic must be disabled; VOICE-only overlays and Scene
+ * settings still test menu_isVoicePage() directly.
+ */
+static uint8_t menu_isScreenPage(uint8_t page)
+{
+    return (uint8_t)(menu_isVoicePage(page) || page == EFFECT_PAGE);
 }
 
 static uint8_t menu_voicePageToSlot(uint8_t page)
@@ -2920,6 +2943,21 @@ static menu_cell_t menu_resolveVoiceCellAtScreen(uint8_t subPage,
 
 static menu_cell_t menu_resolveCell(uint8_t subPage, uint8_t position)
 {
+    if (menu_activePage == EFFECT_PAGE) {
+        menu_cell_t cell;
+
+        /* Effect cells come from menuEffects' registry-driven layout. */
+        memset(&cell, 0, sizeof(cell));
+        cell.kind = MENU_CELL_EMPTY;
+        cell.static_param = PAR_NONE;
+        cell.text_id = TEXT_EMPTY;
+        cell.descriptor_index = INSTRUMENT_MENU_EMPTY;
+        if (menuEffects_resolveCell(subPage, position, &cell.fx)) {
+            cell.kind = MENU_CELL_EFFECT;
+            cell.descriptor = cell.fx.descriptor;
+        }
+        return cell;
+    }
     if (menu_isVoicePage(menu_activePage)) {
         uint8_t screen;
         if (subPage >= NUM_SUB_PAGES)
@@ -3158,6 +3196,9 @@ static uint8_t menu_cellDtype(const menu_cell_t *cell)
 {
     if (!cell)
         return DTYPE_0B127;
+    /* Effect page cells are owned by menuEffects.c (Session 072 step 7). */
+    if (cell->kind == MENU_CELL_EFFECT)
+        return menuEffects_cellDtype(&cell->fx);
     if (cell->kind == MENU_CELL_SCENE_SETTING) {
         if (cell->scene_setting == MENU_SCENE_SETTING_AUDIO_OUT)
             return (uint8_t)((MENU_AUDIO_OUT << 4) | DTYPE_MENU);
@@ -3179,6 +3220,9 @@ static uint16_t menu_cellDisplayValue(const menu_cell_t *cell)
 {
     if (!cell)
         return 0u;
+    /* Effect page cells are owned by menuEffects.c (Session 072 step 7). */
+    if (cell->kind == MENU_CELL_EFFECT)
+        return menuEffects_cellValue(&cell->fx);
     if (cell->kind == MENU_CELL_KIT_SETTING) {
         /*
          * Display generated kit-setting cells.
@@ -3245,6 +3289,9 @@ static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
 {
     if (!cell)
         return 0u;
+    /* Effect page cells are owned by menuEffects.c (Session 072 step 7). */
+    if (cell->kind == MENU_CELL_EFFECT)
+        return menuEffects_cellCommit(&cell->fx, value);
     if (cell->kind == MENU_CELL_KIT_SETTING) {
         uint16_t edit_mask = bank_sceneMaskVoiceEdit();
         uint8_t scene_index;
@@ -3886,6 +3933,11 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
     uint16_t raw = menu_cellDisplayValue(cell);
     uint8_t value = (raw > 255u) ? 255u : (uint8_t)raw;
 
+    /* Effect page cells are owned by menuEffects.c (Session 072 step 7). */
+    if (cell && cell->kind == MENU_CELL_EFFECT &&
+        menuEffects_formatValue3(&cell->fx, valueAsText))
+        return;
+
     /*
      * Format one cell value for the compact four-column view. Instrument cells
      * share the same dtype vocabulary as static cells, but target cells may
@@ -3989,6 +4041,12 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
     uint8_t dtype;
     if (!cell || !value)
         return;
+
+    /* Effect page cells are owned by menuEffects.c (Session 072 step 7). */
+    if (cell->kind == MENU_CELL_EFFECT) {
+        menuEffects_clampValue(&cell->fx, value);
+        return;
+    }
 
     if (cell->kind == MENU_CELL_SCENE_SETTING) {
         /*
@@ -7657,6 +7715,10 @@ static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter)
 {
     const uint8_t is2ndPage = (uint8_t)(activeParameter > 3);
 
+    /* Effect page: per-SELECT screen marker from menuEffects (step 7). */
+    if (menu_activePage == EFFECT_PAGE)
+        return menuEffects_scrollSign(activePage);
+
     if (menu_isVoicePage(menu_activePage)) {
         uint8_t screen;
         uint8_t hasNext;
@@ -9236,6 +9298,11 @@ static void menu_repaintGeneric(void)
 
         if (menu_cellIsEmpty(&cell))
             return;
+        /* Effect manager cells paint their own full view; PARAM cells fall
+         * through to Menu's descriptor renderer below. */
+        if (cell.kind == MENU_CELL_EFFECT &&
+            menuEffects_paintEditView(&cell.fx))
+            return;
         if (cell.kind == MENU_CELL_STATIC &&
             cell.static_param == PAR_RUNTIME_CPU_USE) {
             menu_displayCpuUseEdit();
@@ -9305,7 +9372,8 @@ static void menu_repaintGeneric(void)
                     break;
                 }
             } else if (cell.kind == MENU_CELL_INSTRUMENT ||
-                       cell.kind == MENU_CELL_KIT_SETTING) {
+                       cell.kind == MENU_CELL_KIT_SETTING ||
+                       cell.kind == MENU_CELL_EFFECT) {
                 menu_copyPaddedField(&editDisplayBuffer[0][0],
                                      cell.descriptor->category, 8u);
                 menu_copyPaddedField(&editDisplayBuffer[0][8],
@@ -9398,7 +9466,7 @@ static void menu_repaintGeneric(void)
          */
         memset(editDisplayBuffer[0], ' ', 16u);
         memset(editDisplayBuffer[1], ' ', 16u);
-        const uint8_t is2ndPage = menu_isVoicePage(menu_activePage)
+        const uint8_t is2ndPage = menu_isScreenPage(menu_activePage)
             ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
         uint8_t i;
 
@@ -9410,6 +9478,9 @@ static void menu_repaintGeneric(void)
             } else if (cell.kind == MENU_CELL_SCENE_SETTING) {
                 menu_sceneSettingShortName(&cell,
                                            &editDisplayBuffer[0][4u * i]);
+            } else if (cell.kind == MENU_CELL_EFFECT) {
+                menuEffects_shortName(&cell.fx,
+                                      &editDisplayBuffer[0][4u * i]);
             } else if (cell.kind == MENU_CELL_INSTRUMENT ||
                        cell.kind == MENU_CELL_KIT_SETTING) {
                 menu_copyPaddedField(&editDisplayBuffer[0][4u * i],
@@ -9507,6 +9578,13 @@ static void menu_encoderChangeParameter(int8_t inc)
         (cell.static_param == PAR_RUNTIME_CPU_USE ||
          cell.static_param == PAR_PAT_STORE_USE))
         return;
+
+    /* `typ` changes only through its full view; turning browses candidates. */
+    if (cell.kind == MENU_CELL_EFFECT &&
+        cell.fx.kind == MENU_FX_CELL_TYPE) {
+        menuEffects_typeBrowse(inc);
+        return;
+    }
 
     value = menu_cellDisplayValue(&cell);
 
@@ -9620,6 +9698,18 @@ static void menu_moveToMenuItem(int8_t inc)
             menu_stepAutoActive = 0u;
             menu_stepAutoNumberLocked = 0u;
             menuIndex = (uint8_t)((1u << PAGE_SHIFT) | 2u);
+        }
+        return;
+    }
+
+    if (menu_activePage == EFFECT_PAGE) {
+        uint8_t sub_page = (uint8_t)activePage;
+        uint8_t column = (uint8_t)activeParameter;
+
+        /* Effect navigation crosses screens and SELECT buttons without wrap. */
+        if (menuEffects_move(inc, &sub_page, &column)) {
+            menuIndex = (uint8_t)((sub_page << PAGE_SHIFT) | column);
+            led_setActiveSelectButton(sub_page);
         }
         return;
     }
@@ -10458,6 +10548,19 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
     if (btnClicked)
         editModeActive = (uint8_t)(1 - editModeActive);
 
+    if (btnClicked && menu_activePage == EFFECT_PAGE) {
+        menu_cell_t fx_cell = menu_resolveCell(
+            menu_getSubPage(), menuIndex & MASK_PARAMETER);
+
+        /* `typ` click-in browses; click-out commits the type transaction. */
+        if (menuEffects_editModeChanged(
+                editModeActive,
+                fx_cell.kind == MENU_CELL_EFFECT ? &fx_cell.fx : NULL)) {
+            menu_resetActiveParameter();
+            menu_endlessPotMappingChanged();
+        }
+    }
+
     if (btnClicked && menu_isVoicePage(menu_activePage) &&
         va_overlayActive) {
         /* Entering/leaving the clicked-in view changes marker/LED geometry;
@@ -10533,7 +10636,7 @@ static uint8_t menu_paramVisible(uint16_t paramNr)
         return (uint8_t)(cell.kind == MENU_CELL_STATIC &&
                          cell.static_param == paramNr);
     } else {
-        const uint8_t is2ndPage = menu_isVoicePage(menu_activePage)
+        const uint8_t is2ndPage = menu_isScreenPage(menu_activePage)
             ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
         uint8_t i;
 
@@ -10580,7 +10683,7 @@ static void menu_updateEndlessPotScales(void)
 {
     uint8_t activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
     uint8_t activeParameter = menuIndex & MASK_PARAMETER;
-    uint8_t is2ndPage = menu_isVoicePage(menu_activePage)
+    uint8_t is2ndPage = menu_isScreenPage(menu_activePage)
         ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
 
     for (uint8_t knobNr = 0; knobNr < ENDLESS_POT_COUNT; knobNr++) {
@@ -10590,6 +10693,9 @@ static void menu_updateEndlessPotScales(void)
                 menu_resolveCell(activePage, (uint8_t)(knobNr + is2ndPage));
             useDouble = (uint8_t)(cell.kind == MENU_CELL_STATIC &&
                                   menu_paramIsMorphAmount(cell.static_param));
+            /* Effect 0..255 cells (Morph amount and wide rows) use double rate. */
+            if (cell.kind == MENU_CELL_EFFECT)
+                useDouble = menuEffects_cellWantsDoublePot(&cell.fx);
         }
         endlessPots_setDouble(knobNr, useDouble);
     }
@@ -10638,7 +10744,7 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
 
     const uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
     const uint8_t activeParameter = menuIndex & MASK_PARAMETER;
-    const uint8_t is2ndPage       = menu_isVoicePage(menu_activePage)
+    const uint8_t is2ndPage       = menu_isScreenPage(menu_activePage)
         ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
     menu_cell_t cell =
         menu_resolveCell(activePage, (uint8_t)(knobNr + is2ndPage));
@@ -10646,6 +10752,9 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
     int32_t next;
 
     if (menu_cellIsEmpty(&cell)) return;
+    /* The endless pot over `typ` is intentionally inert. */
+    if (cell.kind == MENU_CELL_EFFECT && cell.fx.kind == MENU_FX_CELL_TYPE)
+        return;
     if (cell.kind == MENU_CELL_STATIC &&
         (cell.static_param == PAR_RUNTIME_CPU_USE ||
          cell.static_param == PAR_PAT_STORE_USE)) return;
@@ -10772,6 +10881,20 @@ void menu_serviceRuntimeWidgets(void)
             lcd_queueFree() >= 72u) {
             menu_repaint();
         }
+    }
+
+    if (menu_activePage == EFFECT_PAGE) {
+        uint8_t fx_actions = menuEffects_service();
+
+        /* Follow Scene switches and external type changes on the FX page. */
+        if (fx_actions & MENU_FX_ACT_EXIT_EDIT)
+            editModeActive = 0u;
+        if (fx_actions & MENU_FX_ACT_REPAIR) {
+            menu_resetActiveParameter();
+            menu_endlessPotMappingChanged();
+        }
+        if (fx_actions & MENU_FX_ACT_REPAINT)
+            menu_repaintAll();
     }
 
     menu_sceneLiveRefreshService();
@@ -11691,6 +11814,17 @@ void menu_switchSubPage(uint8_t subPageNr)
     uint8_t activeParameter = menuIndex & MASK_PARAMETER;
     uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
 
+    if (menu_activePage == EFFECT_PAGE) {
+        /* Effect SELECT presses choose/cycle menuEffects screens. */
+        uint8_t sub_page = activePage;
+        uint8_t column = activeParameter;
+
+        if (menuEffects_selectPressed(subPageNr, &sub_page, &column))
+            menuIndex = (uint8_t)((sub_page << PAGE_SHIFT) | column);
+        menu_endlessPotMappingChanged();
+        return;
+    }
+
     if (menu_isVoicePage(menu_activePage)) {
         /*
          * Voice SELECT buttons choose a sub-page and cycle its four-parameter screens.
@@ -11775,6 +11909,16 @@ void menu_switchSubPage(uint8_t subPageNr)
 void menu_resetActiveParameter(void)
 {
     uint8_t activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    if (menu_activePage == EFFECT_PAGE) {
+        uint8_t sub_page = activePage;
+        uint8_t column = menuIndex & MASK_PARAMETER;
+
+        /* Repair the Effect cursor after registry/layout changes. */
+        menuEffects_repairCursor(&sub_page, &column);
+        menuIndex = (uint8_t)((sub_page << PAGE_SHIFT) | column);
+        led_setActiveSelectButton(sub_page);
+        return;
+    }
     if (menu_isVoicePage(menu_activePage)) {
         /*
          * Repair a remembered voice screen after instrument/page changes.
@@ -11844,6 +11988,10 @@ void menu_switchPage(uint8_t pageNr)
 
     if (was_voice_page && !menu_isVoicePage(pageNr))
         va_resetOverlay();
+
+    /* Leaving the Effect page discards an open type candidate and Morph view. */
+    if (menu_activePage == EFFECT_PAGE && pageNr != EFFECT_PAGE)
+        menuEffects_leave();
 
     /*
      * Capture the old context before page mutation. Pressing the Load/Save
@@ -11955,6 +12103,24 @@ void menu_switchPage(uint8_t pageNr)
         }
         break;
 
+    case EFFECT_PAGE: {
+        uint8_t sub_page;
+        uint8_t column;
+
+        /* Enter Effect at SELECT 1 `typ`; repeated entry toggles its screen. */
+        menu_instrumentLoadActive = 0u;
+        menu_setVoiceModeShowMorph(0u);
+        if (menu_activePage == EFFECT_PAGE)
+            menuEffects_toggleFirstScreen(&sub_page, &column);
+        else
+            menuEffects_enter(&sub_page, &column);
+        menuEffects_setShowMorph(buttonHandler_getShift());
+        menu_activePage = EFFECT_PAGE;
+        editModeActive = 0u;
+        lockPotentiometerFetch();
+        menuIndex = (uint8_t)((sub_page << PAGE_SHIFT) | column);
+        break; }
+
     case LOAD_PAGE:
         menu_setVoiceModeShowMorph(0u);
         if (menu_activePage == LOAD_PAGE) {
@@ -12022,6 +12188,11 @@ void menu_switchPage(uint8_t pageNr)
          */
         buttonHandler_showMuteLEDs();
         menu_refreshPerfSceneLeds();
+    } else if (pageNr == EFFECT_PAGE) {
+        /* Effect page owns mute/SELECT LEDs; FX step LEDs arrive in Step 8. */
+        buttonHandler_showMuteLEDs();
+        led_setActiveSelectButton(menu_getSubPage());
+        menuEffects_renderLeds();
     } else {
         led_setActiveVoiceLeds((uint8_t)(1 << menu_getActiveVoice()));
         menu_muteModeActive = 0;
@@ -12642,6 +12813,23 @@ void menu_setVoiceModeShowMorph(uint8_t onOff)
      * no-match parameter switches endpoints immediately. */
     if (menu_isVoicePage(menu_activePage))
         menu_repaint();
+}
+
+/*
+ * Set the momentary Effect-page Morph endpoint view.
+ *
+ * Input: physical SHIFT state. Output: Morphable FX cells resolve against the
+ * requested endpoint, while non-Morphable cells keep their normal value.
+ * Endless-pot snapshots and the visible LCD are refreshed only when the FX
+ * page owns the current display; VOICE morph state is independent.
+ */
+void menu_setEffectShowMorph(uint8_t onOff)
+{
+    menuEffects_setShowMorph(onOff);
+    if (menu_activePage != EFFECT_PAGE)
+        return;
+    menu_endlessPotMappingChanged();
+    menu_repaint();
 }
 
 void menu_showStepTrackSettingsFirstHalf(void)

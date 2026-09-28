@@ -74,6 +74,12 @@ enum PageNames {
     PATTERN_SETTINGS_PAGE,
     RECORDING_PAGE,
     SOM_PAGE,
+    /*
+     * Effect page (SHIFT+PERF, Session 072 step 7). Cells are resolved by
+     * menuEffects.c, not by menuPages[][]; the table row exists only so the
+     * page-indexed array stays dense. Appended so earlier page ids keep values.
+     */
+    EFFECT_PAGE,
     NUM_PAGES
 };
 
@@ -399,6 +405,16 @@ uint8_t menu_voiceHeldSceneButtonPressed(uint8_t scene_index);
  * encoder, and endless-pot code uses the matching parameter buffer.
  */
 void menu_setVoiceModeShowMorph(uint8_t onOff);
+
+/*
+ * Effect-page SHIFT Morph view (Session 072 step 7; plan §13.5).
+ *
+ * Input: SHIFT held (1) or released (0) while SELECT_MODE_FX is active.
+ * Output: Morphable Effect cells display/edit their Morph endpoint while on;
+ * endless-pot snapshots refresh and the page repaints. Separate from
+ * voiceModeShowMorph so VOICE's persistent Morph mode is never affected.
+ */
+void menu_setEffectShowMorph(uint8_t onOff);
 
 /*
  * VOICE held-step automation overlay bridge.

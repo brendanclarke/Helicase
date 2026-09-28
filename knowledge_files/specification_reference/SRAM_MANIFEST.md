@@ -16,7 +16,11 @@ clean link is `text=465,352`, `data=416`, `bss=425,936`; its flash image uses
 465,768 B and its DTCM ledger is recorded below. Step 6 adds 16 Effect
 HCNAMES rows, the `.fx` parser/writer and boot reader, and the approved SRAM1
 expansion described below. The current ST6 production link is `text=470,208`,
-`data=408`, `bss=426,128`; its generated flash payload is 470,616 B. Step 5 adds the
+`data=408`, `bss=426,128`; its generated flash payload is 470,616 B. Step 7 adds the
+14-byte `menuEffects` page-state owner; the measured ST7 production link is
+`text=475,592`, `data=416`, `bss=426,144`, with a 476,008-byte flash payload.
+The linker-visible SRAM1 increase rounds to 16 bytes; the page-state object is
+14 bytes. Step 5 adds the
 76-byte `effects_state` in SRAM1, the 76-byte `effects_runtime` in DTCM, and
 the one-byte diagnostic registry result; exact section totals are recorded
 below.
@@ -100,6 +104,7 @@ from this owner map.
 | `FxBuffer.c`: `fxbuf_state` | 28 | Linker arena base/size, twelve unit owners, count, and share callback. |
 | `FxBuffer.c`: `fxbuf_handoffRecord` | 180 | Effect/voice handoff metadata and arena-relative positions. |
 | `EffectsManager.c`: `effects_state` | 76 | Active type/Scene, force flag, 64-byte last-applied image, and common runtime values. |
+| `menuEffects.c`: page state | 14 | Eight SELECT screen cells, Morph-view flag, `typ` transaction state, and last Scene/type tracking; SRAM1, foreground UI lifetime. |
 
 Other SRAM1 state comprises filesystem operation cursors and text buffers,
 HCNAMES/boot control fields, Menu and front-panel state, sequencer/MIDI state,

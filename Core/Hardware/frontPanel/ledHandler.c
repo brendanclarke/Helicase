@@ -1197,8 +1197,8 @@ void led_updateCurrentStep(uint8_t step)
         (step >= (uint8_t)(menu_currentBar * NUM_STEPS_PER_BAR)) &&
         (step < (uint8_t)((menu_currentBar + 1u) * NUM_STEPS_PER_BAR))) {
         /* Show chase on voice, sequencer, and Euklid pages. PERF owns the SEQ
-         * row as a Scene selector/status surface, so current-step feedback is
-         * suppressed there even when the viewed Pattern matches playback. */
+         * row as a Scene selector/status surface, and EFFECT owns it for the
+         * future FX-step view, so current-step feedback is suppressed there. */
         if ((menu_activePage < MENU_MIDI_PAGE) ||
             (menu_activePage == SEQ_PAGE) ||
             (menu_activePage == EUKLID_PAGE)) {
@@ -1240,7 +1240,8 @@ void led_updateRecordedMainStep(uint8_t activeTrack,
 
     /* Performance page STEP LEDs select rotation/performance actions rather than
      * edit track step state, so recording feedback must not overwrite them. */
-    if (menu_activePage == PERFORMANCE_PAGE)
+    if (menu_activePage == PERFORMANCE_PAGE ||
+        menu_activePage == EFFECT_PAGE)
         return;
     /* subStep is expected to be 0..127; modulo maps it into STEP1..16. Keep the
      * guard because seq_ledState is shared state. */
@@ -1423,8 +1424,12 @@ void led_notifyPatternChanged(uint8_t playedPattern)
 
     if (parameter_values[PAR_FOLLOW]) {
         menu_setShownPattern(patNr);
-        led_clearSequencerLeds();
-        led_updatePatternTrack(menu_getActiveVoice(), patNr, buttonHandler_selectedStep);
+        /* Effect page's SEQ row is not a Pattern view (Session 072 step 7). */
+        if (menu_activePage != EFFECT_PAGE) {
+            led_clearSequencerLeds();
+            led_updatePatternTrack(menu_getActiveVoice(), patNr,
+                                   buttonHandler_selectedStep);
+        }
     }
 
     if (buttonHandler_getMode() == SELECT_MODE_PERF) {

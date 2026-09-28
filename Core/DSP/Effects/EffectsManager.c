@@ -311,6 +311,125 @@ uint8_t effects_laneByFileKey(effect_type_id_t type, const char *file_key,
     return 0u;
 }
 
+/*
+ * Report whether one descriptor row owns a Morph endpoint.
+ *
+ * Inputs: registry type and descriptor index. Output: nonzero for rows with
+ * INSTRUMENT_PARAM_FLAG_MORPHABLE. Clients: the edit API image rule and the
+ * Effect page's SHIFT Morph view.
+ */
+uint8_t effects_paramMorphable(effect_type_id_t type, uint8_t index)
+{
+    const effect_param_descriptor_t *descriptor =
+        effects_descriptor(type, index);
+
+    return (uint8_t)(descriptor &&
+        (descriptor->base.flags & INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u);
+}
+
+/*
+ * Read one retained Effect endpoint (contract in EffectsManager.h).
+ *
+ * Output: the Morph cell for a Morphable row in the Morph image, otherwise
+ * the normal cell; 0 for an invalid Scene. Indices beyond the type's rows
+ * read their stored unused byte, which remains a valid 0..255 value.
+ */
+uint8_t effects_getParameter(uint8_t scene_index, uint8_t index,
+                             effect_image_t image)
+{
+    const effect_record_t *record = scene_effectConst(scene_index);
+
+    if (!record || index >= EFFECT_PARAM_COUNT)
+        return 0u;
+    if (image == EFFECT_IMAGE_MORPH &&
+        effects_paramMorphable(record->type, index))
+        return record->morph[index];
+    return record->normal[index];
+}
+
+/*
+ * Write one retained Effect endpoint (contract in EffectsManager.h).
+ *
+ * Inputs: Scene, descriptor index, image, and value. Output: nonzero when the
+ * retained byte changed. Rows outside the Scene's type are rejected, values
+ * clamp to the descriptor maximum, and non-Morphable Morph writes land on
+ * the single normal value. Step 10 adds edit-mask fan-out here.
+ */
+uint8_t effects_setParameter(uint8_t scene_index, uint8_t index,
+                             effect_image_t image, uint8_t value)
+{
+    const effect_record_t *record = scene_effectConst(scene_index);
+    const effect_param_descriptor_t *descriptor;
+    uint8_t before;
+
+    if (!record)
+        return 0u;
+    descriptor = effects_descriptor(record->type, index);
+    if (!descriptor)
+        return 0u;
+    if (value > descriptor->max_value)
+        value = descriptor->max_value;
+    if (image == EFFECT_IMAGE_MORPH &&
+        (descriptor->base.flags & INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u) {
+        before = record->morph[index];
+        scene_setEffectMorphParameter(scene_index, index, value);
+        return (uint8_t)(record->morph[index] != before);
+    }
+    before = record->normal[index];
+    scene_setEffectNormalParameter(scene_index, index, value);
+    return (uint8_t)(record->normal[index] != before);
+}
+
+/*
+ * Sequence-setting and Effect Morph setters (contract in EffectsManager.h).
+ *
+ * Each compares the retained byte around SceneData's normalizing setter, so
+ * callers learn whether a repaint or LED refresh is needed.
+ */
+uint8_t effects_setSeqRunMode(uint8_t scene_index, uint8_t mode)
+{
+    const effect_record_t *record = scene_effectConst(scene_index);
+    uint8_t before;
+
+    if (!record)
+        return 0u;
+    before = record->seq_run_mode;
+    scene_setEffectSeqRunMode(scene_index, mode);
+    return (uint8_t)(record->seq_run_mode != before);
+}
+
+uint8_t effects_setSeqLength(uint8_t scene_index, uint8_t length)
+{
+    const effect_record_t *record = scene_effectConst(scene_index);
+    uint8_t before;
+
+    if (!record)
+        return 0u;
+    before = record->seq_length;
+    scene_setEffectSeqLength(scene_index, length);
+    return (uint8_t)(record->seq_length != before);
+}
+
+uint8_t effects_setSeqStepScale(uint8_t scene_index, uint8_t scale)
+{
+    const effect_record_t *record = scene_effectConst(scene_index);
+    uint8_t before;
+
+    if (!record)
+        return 0u;
+    before = record->seq_step_scale;
+    scene_setEffectSeqStepScale(scene_index, scale);
+    return (uint8_t)(record->seq_step_scale != before);
+}
+
+uint8_t effects_setMorphAmount(uint8_t scene_index, uint8_t amount)
+{
+    uint8_t before = scene_getEffectMorphAmount(scene_index);
+
+    scene_setEffectMorphAmount(scene_index, amount);
+    return (uint8_t)(scene_getEffectMorphAmount(scene_index) != before);
+}
+
 #if DEV_MODE_DIAGNOSTIC
 /*
  * Validate registry invariants that the compiler cannot express.

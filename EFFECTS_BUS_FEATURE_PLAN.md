@@ -1,7 +1,8 @@
 # Effects Bus Feature Plan — Phase 5
 
 Status: **planning draft, revision 4. The user's review answers (A1–A46,
-F1–F6, G1–G7) are folded in; Steps 1–6 are now implemented in source.** This document turns Phase 5 of
+F1–F6, G1–G7) are folded in; Steps 1–7 are now implemented in source, with
+the Step 7 hardware walk-through pending.** This document turns Phase 5 of
 `SCOPING_TARGETS.md` and the session-072 direction into one implementation plan.
 Where the session direction differs from `SCOPING_TARGETS.md`, the session
 direction wins (§2).
@@ -761,8 +762,13 @@ typedef struct {
 - A type may define its own layout of up to 4 screens per SELECT button, or
   take SELECT for a UI hook.
 - **Navigation:** the encoder scrolls linearly through every screen, and the
-  SELECT LED follows. Pressing SELECT n jumps to its first screen. The four
+  SELECT LED follows. Pressing a different SELECT n jumps to its first screen;
+  re-pressing the current SELECT cycles its screens (S072_ST7 D1). The four
   endless pots edit the visible cells. An encoder click opens the full view.
+
+The provisional Step 7 `scl` labels are `/64`, `32t`, `/32`, `16t`, `/16`,
+`/8t`, `16.`, `/8`, `/4t`, `/8.`, `/4`, `/2`, `1br`, and `2br`. Step 8 moves
+the table to shared sequencer ownership.
 
 ### 13.3 `typ` (F3)
 
@@ -1004,7 +1010,7 @@ next. If a regression appears, only one step touched that area.
 | 4 | EffectsManager, registry (`off`, `flt`), StereoFilter DSP, resolution service, Scene-activation integration | Consumes the step-3 data only | A hard-coded Scene selects `flt` from a dev hook |
 | 5 | FX bus: sends, fader modes, mono/stereo bus, return routing, audible FX_SEND | Needs steps 2 and 4 | Listening test in all three fader modes; jack fallback; CPU |
 | 6 | Storage: `.fx` v2 parse/write; HCNAMES 161 rows with Effect provenance; Scene/Bank `<name>.fx` load/save; `sceneset.scg` key; AutoSave v3 and Effect reader | HCNAMES and AutoSave both carry the 145-row assumption and name mirror, so they change together | Hand-written fixture card: legacy, v2, missing, malformed, and a partial Bank; reboot restore |
-| 7 | `menuEffects.c`: pages, default SELECT layout, `typ`, SHIFT Morph view, TRACK/SHIFT+TRACK, Euklid disabled | UI over frozen setters | Hardware UI walk-through |
+| 7 | `menuEffects.c`: pages, default SELECT layout, `typ`, SHIFT Morph view, TRACK/SHIFT+TRACK, Euklid disabled | UI over frozen setters | Implemented; hardware UI walk-through pending |
 | 8 | FX sequencer: TIM3 latch, modes, shared scale table (including the track-scale UI switch), transport rules, lock editing, LEDs | Needs the page (step 7) for editing | Every mode × length × scale; the Scene-switch alignment example; `sel` stopped |
 | 9 | Automation and LFO: `fx` category, overlay apply/restore, priority (§9), LFO `fx` namespace, rebind | Needs both overlay producers (steps 4 and 8) | Automate, sequence, and LFO one parameter together |
 | 10 | Edit-mask selection gate and Effect fan-out | Needs every type-changing commit path to exist | Mismatch rejection; fan-out correctness |

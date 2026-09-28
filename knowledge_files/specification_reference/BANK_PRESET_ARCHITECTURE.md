@@ -184,6 +184,14 @@ Parameters change through these paths:
    HCPR v3 winner at boot, including each Scene's 512-byte Effect region; a
    refreshed Effect row can instead narrow-load its named `.fx` child.
 
+8. **User edit (Effect page):** `menuEffects.c` resolves the registry-driven
+   `EFFECT_PAGE` and sends parameter, sequence-setting, Morph amount, and type
+   changes through the EffectsManager edit API. Step 7 writes the active Scene
+   only; the `typ` click-out invokes `effects_changeType()` and therefore
+   preserves common rows, sequence settings, and Effect Morph while restoring
+   type-specific defaults and clearing the sequence. Step 10 adds the edit-mask
+   type-matching gate and fan-out inside that API.
+
 ### When parameters become visible
 
 - **VOICE page:** Reads from the active Scene's descriptor image for the

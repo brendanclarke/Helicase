@@ -24,7 +24,10 @@
 #include "timebase.h"
 #include "copyClearTools.h"
 #include "PatternData.h"
+#include "menuEffects.h"
+#if ENABLE_EUKLID_PAGE
 #include "EuklidGenerator.h"
+#endif
 #include "sequencer.h"
 #include "presetManager.h"
 #include <string.h>
@@ -424,6 +427,8 @@ static void buttonHandler_updateSubSteps(void)
     }
 }
 
+#if ENABLE_EUKLID_PAGE
+/* Euklid UI compiled out (Session 072 step 7; plan §13.1). */
 static void buttonHandler_applyEuklidParamsToMenu(uint8_t track)
 {
     /*
@@ -437,6 +442,7 @@ static void buttonHandler_applyEuklidParamsToMenu(uint8_t track)
     parameter_values[PAR_EUKLID_STEPS] = euklid_getSteps(track);
     parameter_values[PAR_EUKLID_ROTATION] = euklid_getRotation(track);
 }
+#endif
 
 static void buttonHandler_enterSeqModeStepMode(void)
 {
@@ -873,17 +879,11 @@ static void handleModeButtons(uint8_t mode)
         menu_switchPage(MENU_MIDI_PAGE);
         break;
 
-    case SELECT_MODE_PAT_GEN:
-        /*
-         * Entering the Euclidean generator page needs the active track's
-         * generator state visible in the menu immediately.
-         *
-         * Old behavior: the menu requested this through frontPanelParser.
-         * New behavior: buttonHandler reads EuklidGenerator directly because
-         * Euklid data now lives with Pattern under Core/Bank/Scene/Pattern.
-         */
-        buttonHandler_applyEuklidParamsToMenu(menu_getActiveVoice());
-        menu_switchPage(EUKLID_PAGE);
+    case SELECT_MODE_FX:
+        /* SHIFT+PERF enters the Effect page and clears stale Pattern LEDs. */
+        led_clearSequencerLeds();
+        led_clearSelectLeds();
+        menu_switchPage(EFFECT_PAGE);
         break;
 
     case SELECT_MODE_SOM_GEN:
@@ -904,8 +904,9 @@ static void handleSelectButton(uint8_t selectNr)
             buttonHandler_selectBar(selectNr);
             break;
 
-        case SELECT_MODE_PAT_GEN:
-            buttonHandler_selectBar(selectNr);
+        case SELECT_MODE_FX:
+            /* SHIFT+SELECT is reserved for optional type UI hooks. */
+            (void)menuEffects_hookSelect(selectNr, 1u, 1u);
             break;
 
         case SELECT_MODE_PERF:
@@ -929,8 +930,13 @@ static void handleSelectButton(uint8_t selectNr)
         menu_repaintAll();
         break;
 
-    case SELECT_MODE_PAT_GEN:
-        buttonHandler_selectBar(selectNr);
+    case SELECT_MODE_FX:
+        /* Let the active Effect type consume SELECT before default navigation. */
+        if (menuEffects_hookSelect(selectNr, 0u, 1u))
+            break;
+        menu_switchSubPage(selectNr);
+        led_setActiveSelectButton(menu_getSubPage());
+        menu_repaintAll();
         break;
 
     case SELECT_MODE_PERF:
@@ -1101,8 +1107,13 @@ static void handleVoiceButton(uint8_t voiceNr)
 
     {
         uint8_t muteModeActive = buttonHandler_getShift();
-        if (bh_state.selectButtonMode == SELECT_MODE_PERF)
+        if (bh_state.selectButtonMode == SELECT_MODE_PERF ||
+            bh_state.selectButtonMode == SELECT_MODE_FX)
             muteModeActive = (uint8_t)(1u - muteModeActive);
+
+        if (bh_state.selectButtonMode == SELECT_MODE_FX &&
+            menuEffects_hookTrack(voiceNr, buttonHandler_getShift(), 1u))
+            return;
 
         if (muteModeActive) {
             /*
@@ -1141,6 +1152,16 @@ static void handleVoiceButton(uint8_t voiceNr)
             return;
         }
 
+        if (bh_state.selectButtonMode == SELECT_MODE_FX) {
+            /* SHIFT+TRACK selects the active track without leaving FX mode. */
+            menu_setActiveVoice(voiceNr);
+            buttonHandler_showMuteLEDs();
+            led_flashLed((uint8_t)(LED_VOICE1 + voiceNr));
+            if (shouldPreviewVoice)
+                seq_previewVoice(voiceNr);
+            return;
+        }
+
         menu_setActiveVoice(voiceNr);
         led_setActiveVoice(voiceNr);
         if (bh_state.selectButtonMode == SELECT_MODE_VOICE) {
@@ -1153,7 +1174,9 @@ static void handleVoiceButton(uint8_t voiceNr)
          * Euklid params are then pulled directly from the Pattern generator
          * module so the generator page is correct if the user switches there.
          */
+#if ENABLE_EUKLID_PAGE
         buttonHandler_applyEuklidParamsToMenu(voiceNr);
+#endif
 
         if (bh_state.selectButtonMode == SELECT_MODE_STEP ||
             menu_activePage == SEQ_PAGE) {
@@ -1175,9 +1198,12 @@ static void handleVoiceButton(uint8_t voiceNr)
             menu_switchPage(SEQ_PAGE);
             buttonHandler_updateSubSteps();
             led_setBlinkLed(selectedStepLed, 1);
-        } else if (menu_activePage == EUKLID_PAGE) {
+        }
+#if ENABLE_EUKLID_PAGE
+        if (menu_activePage == EUKLID_PAGE) {
             menu_repaintAll();
         }
+#endif
 
         if (shouldPreviewVoice)
             seq_previewVoice(voiceNr);
@@ -1314,6 +1340,11 @@ static void processPress(uint8_t buttonNr)
          */
         if (menu_loadSaveBarButtonPressed(0u))
             break;
+        if (bh_state.selectButtonMode == SELECT_MODE_FX) {
+            /* FX BAR1 is inert unless an active type hook handles it. */
+            (void)menuEffects_hookBar(0u, buttonHandler_getShift(), 1u);
+            break;
+        }
         if (menu_currentBar > 0u)
             buttonHandler_selectBar((uint8_t)(menu_currentBar - 1u));
         else
@@ -1328,6 +1359,11 @@ static void processPress(uint8_t buttonNr)
          */
         if (menu_loadSaveBarButtonPressed(1u))
             break;
+        if (bh_state.selectButtonMode == SELECT_MODE_FX) {
+            /* FX BAR2 is inert unless an active type hook handles it. */
+            (void)menuEffects_hookBar(1u, buttonHandler_getShift(), 1u);
+            break;
+        }
         if (menu_currentBar < (NUM_BARS - 1u))
             buttonHandler_selectBar((uint8_t)(menu_currentBar + 1u));
         else
@@ -1352,41 +1388,38 @@ static void processPress(uint8_t buttonNr)
              */
             return;
 
+        case SELECT_MODE_FX:
+            /* Holding SHIFT displays/edits Morph endpoints on the FX page. */
+            menu_setEffectShowMorph(1u);
+            break;
+
         case SELECT_MODE_PERF:
-        case SELECT_MODE_PAT_GEN:
+#if ENABLE_EUKLID_PAGE
         {
             uint8_t trackNr;
             uint8_t patternNr;
 
+            /* Legacy pattern-settings layer retained only for diagnostics. */
             menu_switchPage(PATTERN_SETTINGS_PAGE);
             led_clearSelectLeds();
             led_clearAllBlinkLeds();
-
-            if (bh_state.selectButtonMode == SELECT_MODE_PAT_GEN) {
-                led_setBlinkLed(LED_MODE2, 1);
-            } else {
-                led_setBlinkLed((uint8_t)(LED_STEP1 + parameter_values[PAR_TRACK_ROTATION]), 1);
-            }
-
-            if (bh_state.selectButtonMode == SELECT_MODE_PAT_GEN && parameter_values[PAR_FOLLOW]) {
-                /*
-                 * Follow mode means the viewed pattern should snap back to the
-                 * sequencer-followed pattern when entering the shift layer.
-                 *
-                 * After changing the shown pattern, the UI must explicitly
-                 * reload LEDs plus PatternData-backed pattern/track params.
-                 * This used to be hidden behind parser query opcodes.
-                 */
+            led_setBlinkLed((uint8_t)(LED_STEP1 +
+                                       parameter_values[PAR_TRACK_ROTATION]), 1);
+            if (parameter_values[PAR_FOLLOW]) {
                 menu_setShownPattern(menu_shownPattern);
                 led_clearSequencerLeds();
                 trackNr = menu_getActiveVoice();
                 patternNr = menu_getViewedPattern();
-                led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
+                led_updatePatternTrack(trackNr, patternNr,
+                                       buttonHandler_selectedStep);
             }
-
-            led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + menu_getViewedPattern()), 1);
+            led_setBlinkLed((uint8_t)(LED_PART_SELECT1 +
+                                      menu_getViewedPattern()), 1);
             break;
         }
+#endif
+            /* PERF remains visible when the retired SHIFT layer is disabled. */
+            break;
 
         case SELECT_MODE_STEP:
             buttonHandler_leaveSeqModeStepMode();
@@ -1519,11 +1552,11 @@ static void processRelease(uint8_t buttonNr)
             led_initPerformanceLeds();
             return;
 
-        case SELECT_MODE_PAT_GEN:
-            led_clearSelectLeds();
-            led_setValue(1, (uint8_t)(menu_getViewedPattern() + LED_PART_SELECT1));
-            menu_switchPage(EUKLID_PAGE);
-            break;
+        case SELECT_MODE_FX:
+            /* End the momentary Morph view while keeping FX mute LEDs. */
+            menu_setEffectShowMorph(0u);
+            buttonHandler_showMuteLEDs();
+            return;
 
         case SELECT_MODE_STEP:
             buttonHandler_enterSeqModeStepMode();

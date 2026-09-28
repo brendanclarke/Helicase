@@ -30,7 +30,8 @@
 **Prerequisite:** apply Step 6 Findings 1 and 2 (`S072_ST6_IMPLEMENTATION.md`
 §12.3) first, so the Step 7 walk-through saves through the final Step 6 code.
 
-**Status:** schedule only. No source has been changed.
+**Status:** source implementation complete; the hardware UI walk-through gate is
+pending.
 
 **Line numbers** refer to the Step 6 working tree reviewed in
 `S072_ST6_IMPLEMENTATION.md` §12.
@@ -1921,7 +1922,7 @@ with:
 - **`EFFECTS_BUS_FEATURE_PLAN.md`:**
   - §13.2: record D1 (re-press cycles) and D2 (provisional labels);
   - §13.1: `ENABLE_EUKLID_PAGE`, `SELECT_MODE_FX`, D4;
-  - §17.1: mark Step 7 as scheduled.
+  - §17.1: mark Step 7 implemented with the hardware gate pending.
 - **`MEMORY.md` volatile note:** "S072 Step 7: SHIFT+PERF Effect page live
   (`menuEffects.c`). Edits active Scene only until Step 10; SEQ buttons inert
   until Step 8."
@@ -1999,3 +2000,153 @@ with:
 ### Rollback
 
 Revert the change set. There is no data or file-format change.
+
+---
+
+## 12. Implementation notes (2026-09-28)
+
+### Completed source work
+
+- Added `Core/Menu/menuEffects.c/.h` with the registry-driven Effect page:
+  SELECT screen memory, default/custom layouts, linear navigation, compact and
+  full views, `typ` candidate browsing/transaction, Morph endpoint display,
+  sequence-setting cells, and optional type gesture/LED hooks.
+- Added the EffectsManager retained-edit boundary for parameters, sequence
+  settings, and Scene Effect Morph amount. Step 7 writes the active Scene only;
+  Step 10 can add edit-mask fan-out inside this boundary.
+- Added `EFFECT_PAGE` and `MENU_CELL_EFFECT` delegation in `menu.c`, including
+  encoder click/turn/click-out, endless pots, cursor repair, Scene/type-change
+  service, Morph setter, and SELECT LED tracking.
+- Reassigned select mode 5 to `SELECT_MODE_FX`, routed SHIFT+PERF, SELECT,
+  TRACK, BAR, and SHIFT gestures, and suppressed Pattern recording/follow/chase
+  painting on the Effect page. The Euklid UI helper/include and retired SHIFT
+  paths are guarded by `ENABLE_EUKLID_PAGE=0`.
+- Updated the Effects Bus plan, `MEMORY.md`, module interchange contract,
+  SRAM ledger, and Bank/Preset parameter-change notes. New and modified code
+  paths retain adjacent descriptive comment blocks in both source and header
+  interfaces.
+
+### Design decisions applied
+
+- D1: re-pressing the current SELECT cycles its screens; pressing a different
+  SELECT starts at screen 0.
+- D2: Step 7 owns provisional compact/full `scl` labels; Step 8 will move them
+  to shared sequencer ownership.
+- D3: Effect edits are active-Scene-only until Step 10.
+- D4: PERF SHIFT no longer enters the empty Pattern Settings page when the
+  Euklid page switch is disabled.
+- D5: the 14-byte `menuEffects` state block is in SRAM1; all RAM expansion is
+  approved for this session.
+
+### Build verification
+
+`git diff --check` passed. A clean `make -j2 all` passed with the existing
+toolchain warnings only (legacy unused filesystem helpers, USB `packed`
+diagnostics, libc syscall stubs, and LTO serial-job notice). The resulting
+link is:
+
+```text
+text=475,592  data=416  bss=426,144  dec=902,152
+Flash payload: 476,008 / 491,520 B, headroom 15,512 B
+ITCM: 3,768 / 16,384 B
+DTCM statics: 4,448 B
+FXBUF: 126,624 B at 0x20001160, margin 3,744 B
+```
+
+The production image was generated at `build/LXRV2_lxr02.img` (476,024 bytes
+including its 16-byte wrapper). The hardware UI walk-through remains to be
+completed on the device. Step 8 SEQ lock/LED behavior, Step 9 automation/LFO,
+and Step 10 fan-out remain intentionally out of scope.
+
+---
+
+## 13. Assessment (review of the implemented Step 7 tree)
+
+Reviewed on 2026-09-28. I read the full working-tree diff of `menuEffects.c/.h`,
+`menu.c/.h`, `menuPages.h`, `buttonHandler.c/.h`, `ledHandler.c`,
+`EffectsManager.c/.h`, `config.h` and the `Makefile`, and did an independent
+clean rebuild.
+
+### 13.1 Build
+
+- **Clean rebuild:** `make clean && make all`, exit 0. `text=475,592`,
+  `data=416`, `bss=426,144`, matching §12.
+- **Warnings:** 20 in total. None is new: the only `Core/Menu` warnings are
+  the pre-existing unused `splashAnimation_restore*` constants.
+- **`nm`:** the menuEffects state is exactly 14 B (8 + six 1-byte cells), as
+  in D5.
+- **Flash: 476,008 / 491,520 B, headroom 15,512 B** (−5,392 B against
+  Step 6).
+  - This is about 900 B above the §0 D5 estimate.
+  - **`link_budget.py` now prints its below-16 KiB warning.**
+  - See §13.4.
+
+### 13.2 Code against schedule
+
+| § | Item | Result |
+|---|---|---|
+| 2 | UI hooks struct; edit API decl + impl | Match. |
+| 3–4 | `menuEffects.h/.c` | Match. The file includes `buttonHandler.h` instead of `ledHandler.h`; this is harmless because no LED call is made. `menuEffects_enter()` also clears the Morph flag, and `menu_switchPage()` then re-reads SHIFT, which is equivalent. |
+| 5 | Makefile, `ENABLE_EUKLID_PAGE`, `DEV_EFFECT_FORCE_TYPE` comment | Match. |
+| 6 | `EFFECT_PAGE`, `menu_setEffectShowMorph()`, menuPages row | Match. |
+| 7.1–7.17 | menu.c dispatch, navigation, click, pots, service, switchPage, LEDs | Match. |
+| 8 | ledHandler recording and follow guards | Match. The chase comment is updated. |
+| 9 | buttonHandler FX mode, SELECT, TRACK, BAR, SHIFT; Euklid guards | Match. The old `#define SELECT_MODE_PAT_GEN` alias was not added, and none is needed: the only surviving guarded Euklid block no longer names the mode. The PERF SHIFT block, when re-enabled, is simplified to its PERF (rotation) form. |
+
+### 13.3 Findings
+
+1. **A stale `typ` candidate can be committed from another cell (defect;
+   schedule gap).**
+   - **Cause:** `menu_switchSubPage()` clears `editModeActive` on every SELECT
+     press (`menu.c:11812`), but its Effect branch does not end menuEffects'
+     `typ` transaction.
+   - **Sequence:**
+     1. Click in on `typ` and turn to `Off` (candidate `off`, `*` shown).
+     2. Press SELECT 2, then SELECT 1. The compact `typ` cell now shows the
+        uncommitted `off`, because `menuEffects_cellValue()` still returns
+        the candidate.
+     3. Click in on `vol` (no effect on the flag), then click out.
+     4. `menuEffects_editModeChanged(0, …)` sees `menuEffects_typeEdit == 1`
+        and **commits `off`**. The type is lost, parameters 3..63 reset, and
+        the sequence is cleared.
+   - The schedule (§4.2 `menuEffects_selectPressed`, §7.14) missed this path;
+     `menu_switchPage()` and the service path already discard the candidate
+     correctly.
+   - **Fix:** at the top of `menuEffects_selectPressed()`, before the
+     empty-button return, add `menuEffects_typeEdit = 0u;` with the comment
+     "A SELECT press leaves any full view (menu.c clears editModeActive), so an
+     open `typ` candidate is discarded, never committed later." One line.
+2. **Flash headroom below the 16 KiB warning line (budget).**
+   - Steps 8 (FX sequencer), 9 (automation + LFO) and 10 (fan-out + gate)
+     still add code. At the observed rate this is about 3, 5 and 2 KB, which
+     leaves roughly 5 KB after Step 10.
+   - Nothing is needed now, but each remaining schedule must state a flash
+     estimate and prefer table-driven code.
+   - Candidate recoveries, if needed later:
+     - retiring the compiled-in Euklid generator and SOM page code that is no
+       longer reachable from the UI;
+     - the unused `filesystem.c` static helpers flagged by `-Wunused-function`
+       (dropped by LTO already, so likely small);
+     - the large constant tables (ST1 §21 finding 6).
+   - This is a decision for later, not a Step 7 defect.
+3. **Step 6 Findings 1 and 2 are still open.**
+   - The blank Effect name at Scene Save phases 82/33 still passes the raw
+     cell (`filesystem.c:19659-19661`, `19888-19890`), so a blank name can
+     still save as `inst.fx`.
+   - Kit Save still writes the Effect row (`filesystem.c` in
+     `filesystem_saveKitDirectory_tick()`, the two `residentEffectRow` lines
+     after the Kit-row source).
+   - These are the prerequisites stated at the top of this schedule. Apply
+     them with Finding 1.
+
+No other defects were found.
+
+- Hook dispatch, Morph image rules, `typ` inertness on pots and generic
+  commits, the Scene-switch service and the LED ownership all read correctly.
+- VOICE screen code is untouched: only the four `is2ndPage` predicates moved
+  to `menu_isScreenPage()`.
+
+### 13.4 Hardware status
+
+The §11 walk-through (gates 3–16) is pending. Apply Finding 1 before running
+gate 9 (the `typ` gesture), and repeat gate 9 with an intervening SELECT press.

@@ -445,8 +445,9 @@ directly and does not participate in the layer system.
 
 ## Core/Hardware/frontPanel/buttonHandler
 
-Affiliate modules: ledHandler, Menu, PatternData, EuklidGenerator, Sequencer,
-Preset, MidiParser, copyClearTools.
+Affiliate modules: ledHandler, Menu, `menuEffects`, PatternData,
+EuklidGenerator, Sequencer, Preset, MidiParser, copyClearTools, and
+EffectsManager.
 
 Purpose: owns physical button event queue, select modes, shift state, selected
 step UI state, held-step automation gesture, mute UI shadow, and direct button
@@ -463,6 +464,7 @@ dispatch to owners.
 | `buttonHandler_setRunStopState(running)` | Sync UI transport bit and START/STOP LED. | MidiParser, local button path |
 | `buttonHandler_showMuteLEDs()` | Show mute-state LEDs. | Menu/voice/performance paths |
 | `buttonHandler_muteVoice(voice, isMuted)` | Update front-panel mute shadow. | buttonHandler local, MIDI/UI paths if needed |
+| `SELECT_MODE_FX` / FX dispatch | SHIFT+PERF owns the Effect page; SELECT/TRACK/BAR gestures first offer the active type's `effect_ui_hooks_t`, while default TRACK/SELECT behavior remains in buttonHandler/Menu. | `menuEffects`, EffectsManager registry |
 | `seqHeldMask()` | Return the current held-step bitmask for VOICE overlay (Session 066). | Menu overlay |
 | `visibleStep()` | Return the visible step index accounting for bar offset (Session 066, promoted to extern). | Menu, ledHandler |
 
@@ -497,6 +499,7 @@ edit dispatch, and post-load operation follow-up.
 | `menu_switchPage(pageNr)` / `menu_switchSubPage(subPageNr)` | Page navigation and direct Pattern/LED refresh. | buttonHandler/Menu |
 | `menu_resetActiveParameter()` | Keep active parameter valid for page. | buttonHandler/Menu |
 | `menu_setVoiceModeShowMorph(onOff)` | Toggle VOICE-page morph endpoint overlay for descriptor-backed instrument cells; repaint/edit helpers resolve the active slot's main or morph image through InstrumentManager. | buttonHandler `SHIFT+VOICE` mode |
+| `menu_setEffectShowMorph(onOff)` | Toggle the momentary SHIFT Morph endpoint view on `EFFECT_PAGE`; refreshes Effect pot snapshots and repaint without touching VOICE morph state. | buttonHandler FX SHIFT press/release |
 | `menu_loadInstrumentVoicePressed(voice)` / `menu_loadInstrumentExit()` | Enter/select or leave nested Instrument Load/Save. Entry establishes the combined Kit/Instrument HCNAMES identity session; normal Instrument Load also writes the current voice to `.hctmp.<ext>`. Voice/exit boundaries invalidate that temporary session. | buttonHandler Load/Save VOICE gestures |
 | `menu_loadSceneButtonPressed(scene)` | Consume Load/Save-context SEQ presses as Kit target toggles, Instrument Load one-Scene selection, or Instrument Save source-Scene selection. | buttonHandler SEQ press/release routing |
 | `menu_loadInstrumentTransactionBusy()` | Report read/save-plus-commit Instrument transaction ownership. Accepted request coordinates remain immutable; number-only scrolling may coalesce the newest pool row, while Scene/voice/type/mode changes are boundaries rather than retargeting. | buttonHandler/Menu gates |
@@ -522,6 +525,27 @@ Shared state used by clients:
 - `modTargets[]`, `paramToModTarget[]` for legacy/static target naming.
   Descriptor and Scene target cells display labels through InstrumentManager
   and SceneModTargets, with no hardcoded per-instrument target lists in Menu.
+
+## Core/Menu/menuEffects
+
+Affiliate modules: Menu, buttonHandler, EffectsManager, SceneData, and
+ledHandler.
+
+Purpose: owns the registry-driven `EFFECT_PAGE`: SELECT screen memory and
+layout, linear cursor navigation, compact/full cell formatting, the `typ`
+click-in/turn/click-out transaction, and the momentary SHIFT Morph view.
+`menu.c` delegates generic cell rendering, encoder, and endless-pot plumbing
+through `MENU_CELL_EFFECT`; `menuEffects` never calls SceneData Effect setters
+directly. All retained UI writes use the EffectsManager edit API, so Step 10
+can add edit-mask fan-out without changing callers. Step 7 writes the active
+Scene only. SEQ buttons and FX-step LEDs remain Step 8 work.
+
+| API / data | Use | Usual callers / clients |
+|---|---|---|
+| `menuEffects_enter()` / `menuEffects_leave()` | Initialize or discard page-local screen, type-candidate, and Morph-view state. | `menu_switchPage()` |
+| `menuEffects_resolveCell()` / `menuEffects_move()` / `menuEffects_selectPressed()` | Resolve the current registry-driven cell and navigate screens/SELECT buttons. | `menu.c`, buttonHandler |
+| `menuEffects_cellCommit()` / `menuEffects_typeBrowse()` / `menuEffects_editModeChanged()` | Commit retained edits or run the `typ` transaction through EffectsManager. | `menu.c` |
+| `menuEffects_hookSelect()` / `menuEffects_hookTrack()` / `menuEffects_hookBar()` / `menuEffects_renderLeds()` | Dispatch optional type UI hooks. | buttonHandler, Menu |
 
 ## Core/Menu/copyClearTools
 
@@ -710,6 +734,8 @@ not own retained Scene bytes, filesystem parsing, UI, or the FX audio bus.
 | `effects_registryEntry()` / `effects_typeToken()` / `effects_typeFromToken()` | Resolve the append-only type id and its three-byte persisted token. Unknown ids/tokens are rejected by the registry and runtime activation falls back to `off`. | AutoSave, Preset, future storage/Menu |
 | `effects_descriptor()` / `effects_descriptorByKey()` | Resolve common/type-specific descriptor rows and their stored domain. | future Effect UI/storage/automation |
 | `effects_paramAutomatable()` / `effects_paramModulatable()` | Enforce descriptor capability flags and the local-index-63 automation boundary. | future sequencer/LFO/UI |
+| `effects_paramMorphable()` / `effects_getParameter()` | Query Morph capability and resolve the visible normal/Morph endpoint for the Effect page. | `menuEffects` |
+| `effects_setParameter()` / `effects_setSeqRunMode()` / `effects_setSeqLength()` / `effects_setSeqStepScale()` / `effects_setMorphAmount()` | Single retained mutation boundary for Effect UI/hooks; clamps/normalizes through SceneData and returns a changed flag. Step 10 adds edit-mask fan-out here. | `menuEffects`, future FX sequencer/type hooks |
 | `effects_init()` | Initialize manager state and install the FxBuffer share-change callback after `fxbuf_init()`. | `main.c` |
 | `effects_activateScene(scene)` | Select a Scene's retained Effect type; different types switch immediately through the FxBuffer handoff, while same-type activation preserves tails. | Preset Scene/Bank apply paths |
 | `effects_changeType(scene, type)` | Commit type-specific defaults and clear the sequence in place while preserving common rows, sequence settings, and Effect Morph. | diagnostic hook, future Effect UI |

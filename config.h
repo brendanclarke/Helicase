@@ -250,10 +250,23 @@
  * When DEV_MODE_DIAGNOSTIC is enabled and this id is nonzero, main.c commits
  * it through effects_changeType() immediately after normal boot Scene
  * activation. Id 1 is StereoFilter (`flt`). Production builds ignore this
- * hook. It exists so Steps 4–5 can exercise registry, AutoSave token, and DSP
- * initialization before the Step 7 Effect page supplies a user path.
+ * hook. It exists so Steps 4–5 could exercise registry, AutoSave token, and
+ * DSP initialization before a user path existed. From Step 7 the Effect
+ * page's `typ` view is the normal path; the hook remains for bench diagnostics.
  */
 #define DEV_EFFECT_FORCE_TYPE 0u
+
+/*
+ * ENABLE_EUKLID_PAGE — keep the retired Euklid/rotation UI compiled out.
+ *
+ * What: SHIFT+PERF (select mode 5) is the Effect page from Session 072 step 7.
+ * The Euklid generator page, its SHIFT paths, and the empty
+ * PATTERN_SETTINGS_PAGE/rotation entry are compiled out behind this switch;
+ * their source, page tables, and EuklidGenerator stay in the tree. Setting it
+ * to 1 is not supported without first giving Euklid another select mode,
+ * because mode 5 now belongs to SELECT_MODE_FX.
+ */
+#define ENABLE_EUKLID_PAGE 0
 
 //if 1 the amp EGs will be calculated on a per sample basis
 //takes too much calcuklation time
