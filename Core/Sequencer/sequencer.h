@@ -189,6 +189,14 @@ void seq_setRollRate(uint8_t rate);
 #define SEQ_FX_EVENT_INDEX 0x0Fu
 uint8_t seq_fxTakeEvent(void);
 /*
+ * Effect-overlay owner tracks (Session 072 step 9; plan §9 third rule).
+ *
+ * EffectsManager publishes one bit per track that owns an Effect Pattern
+ * overlay. TIM3 reads the byte to decide whether an advancing track needs an
+ * FX step marker in the pending automation queue. It is a single byte store.
+ */
+void seq_setEffectAutomationTracks(uint8_t mask);
+/*
  * Record a live MIDI/roll event as one quantized fixed-grid trigger bit.
  * Input is the track; output is an on-bit only when recording is active.
  * Note and velocity are not recorded here; they are assigned separately as

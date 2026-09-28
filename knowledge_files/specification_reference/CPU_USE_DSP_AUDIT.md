@@ -27,6 +27,220 @@ reservation policy, use `SRAM_MANIFEST.md`; free DTCM is delay-line-reserved
 and free normal SRAM1 is Pattern-reserved. The historical recommendations
 below must not be read as live placement or cache facts.
 
+## Session 073 current-state audit (2026-09-28)
+
+This section is the current DSP CPU audit. It supersedes the cost picture in
+the 2026-05 sections below, which remain as the record of the platform work
+that has already been done (caches, MPU, LTO, `-Ofast`, ITCM oscillators,
+DTCM output buffers, NVIC order). The reduction plan built on it is
+`S073_CPU_USE_DSP_REDUCTION_REFACTOR.md` in the project root.
+
+### Method and limits
+
+- **Source read:** the full per-block render path on `dev-ph5-effects` after
+  S072 Step 9: `main.c` render loop, `mixer.c`, `InstrumentManager.c`
+  dispatch, the four voice engines, `Oscillator.c`, `ResonantFilter.c`,
+  `distortion.c`, `BufferTools.c`, `transientGenerator.c`, the envelope
+  helpers, `lfo.c`, `modulationNode.c`, `EffectsManager.c`,
+  `StereoFilterEffect.c`, and the DMA pack in `AudioCodecManager.c`.
+- **Build evidence:** disassembly of `build/lxr02.elf` (GCC 14.2.1,
+  `text=482,632`, `data=416`, `bss=426,336`, 8,472 B free in the 480 KiB
+  application window, ITCM 3,768 / 16,384 B). Division counts, inlining and call chains quoted below
+  come from that image, not from reading the source.
+- **Not measured on hardware.** Cycle figures are static estimates from
+  instruction counts and Cortex-M7 latencies (`VDIV.F32` about 14 cycles,
+  dependent `VFMA` about 3 cycles). Treat them as ±50 % until the S073 Step 0
+  profiler measures them. The existing `cpu` widget
+  (`audioCodec_getQueueFreePercent()`) shows audio-queue pressure. It cannot
+  attribute cost to individual stages.
+
+### Render structure today
+
+- `audio_check_and_render()` (`main.c:204`) fills each free 96-frame DMA slot
+  with three 32-frame `mixer_calcNextSampleBlock()` calls under a BASEPRI
+  mask. The budget is **4,897 cycles per output frame** (216 MHz / 44,108 Hz),
+  or about 156,700 cycles per 32-frame block.
+- Control rate is one pass per 32-frame block, **1,378 Hz**:
+  `modNode_resetTargets()`, `modNode_reassignVeloMod()`, six LFO dispatches,
+  six `SVF_recalcFreq()`, six async voice updates, and `effects_service()`
+  (`mixer.c:717-744`).
+- Audio rate, per slot (`mixer.c:810-835`): voice render → decimate → FX
+  send (when the Effect is active) → dry gain/pan/route. The four voice
+  render functions and the inline copies of `calcDistBlock()` are all inlined
+  by LTO into `mixer_calcNextSampleBlock` (7.8 KB).
+- The Effect, currently `StereoFilter`, runs two float ZDF filter instances
+  on the bus (`StereoFilterEffect.c:95`). The DMA HT/TC ISR then packs the
+  finished slot into the strongly-ordered DMA buffers
+  (`AudioCodecManager.c:382`).
+- **No voice ever skips rendering.** A slot whose amplitude envelope has
+  reached zero still runs its oscillators, filter, transient and distortion,
+  and then multiplies the result by zero. This is why cost stays flat as the
+  pattern gets busier. It is also why the worst case, where every voice is
+  sounding, is always paid.
+
+### Estimated worst-case cost per output frame
+
+Worst case here means two Advanced plus four Basic voices, all sounding,
+filters in ZDF modes with drive, distortion on, 12 LFO targets on instrument
+descriptors, two waveform-interpolated oscillators, and StereoFilter active
+with every send open.
+
+| Stage | Cycles/frame (est.) | Share of 4,897 |
+|---|---|---|
+| 6 × voice ZDF filter (`SVF_calcBlockZDF`) | 600–780 | 12–16 % |
+| FX StereoFilter, 2 × `SVF_calcBlockZDFFloat` | 200–260 | 4–5 % |
+| Oscillators (≈14, plus 2 with wave interpolation) | 200–300 | 4–6 % |
+| Distortion × 6 (one `VDIV` per sample) | 130–150 | ~3 % |
+| Transient, amp EG, velocity and mix passes × 6 | 150–200 | 3–4 % |
+| Mixer dry path × 6, decimation | 120–160 | 2.5–3 % |
+| FX send × 6, bus conversion, return | 100–150 | 2–3 % |
+| Control rate, amortised (LFO writes, restores, EGs, `effects_service`) | 120–300 | 2.5–6 % |
+| DMA `pack_half()` ISR | 40–80 | 1–1.6 % |
+| **Total audio work** | **≈1,650–2,400** | **≈34–49 %** |
+
+This excludes the TIM3 sequencer ISR, UI ISRs and foreground work, which
+also compete for the main loop. The S073 profiler must measure those too.
+
+### Findings
+
+**F1. The ZDF filter is the largest single cost (≈16–21 % with the FX
+filter).** Each sample of every non-naive type runs 5 `VDIV.F32` (6 for LP).
+They are the input `softClipTwo`, `tanhXdX` for t0, `tanhXdX` for t1, g0,
+and y1, plus LP's output `fastTanh`. In the current image the unswitched
+`SVF_calcBlockZDF.constprop.0` holds 38 `vdiv` and `SVF_calcBlockZDFFloat`
+holds 38. Four of those divisions sit on one dependent chain
+(x → t0 → g0 → y1), so they cannot overlap. GCC already notices that
+`softClipTwo(s1) == s1 * t1` and shares that work, and it already hoists the
+naive 2-pole `q` division out of the loop. What remains is algebraic. The
+three reciprocals in stage B (t0, g0, y1) and the two in stage A (input clip,
+t1) can each be batched into one division. A host sweep of 28,800
+configurations (276 M samples, all six ZDF types, f/reso/drive/signal grid)
+compared the batched form with today's code. 99.77 % of samples are
+identical, and the signal-to-difference ratio is 81 dB. Larger deviations
+occur only in 56 self-oscillating high-resonance configurations. Rebuilding
+today's code with a different FMA-contraction setting diverges in 54 of
+those same configurations. So the batched form changes the output only as
+much as a compiler flag does. For ARM `-Ofast` the batched loop compiles to
+2 divisions per sample (3 for LP) instead of 6. It is about 340 B larger per
+variant.
+
+**F2. Every LFO write to an instrument parameter searches by string, every
+block.** `lfo_dispatchNextValue()` (`lfo.c:134`) →
+`instrumentManager_updateLfoAdapters()` → `applyLfoDescriptorTarget()` →
+`instrumentManager_writeRuntimeInternal()` →
+`instrumentManager_writeSpecialRuntime()` (`InstrumentManager.c:2917`). The
+disassembly of that path contains 20 `strcmp`, 2 `strstr`, and 7 `strncmp`
+through `instrumentManager_osc()`. Most of it runs before a plain
+instance-offset target falls through to its ordinary write. Estimated cost is
+200–600 cycles per write, and 12 LFO targets run 1,378 times a second. That
+is about 1.5–4.5 % of the CPU for a descriptor-LFO-heavy Scene. The same
+writer serves the foreground Morph worker (`presetMorph_tick()`,
+`presetMorphEngine.c:439`), one parameter per pass. An LFO aimed at a voice
+Morph re-queues a full pass of every Morphable parameter every block
+(`presetMorph_setVoiceLfoModulation()`, `presetMorphEngine.c:645`), so this
+cost also reaches the foreground continuously. The key-to-writer mapping is
+fixed per descriptor row and can be resolved at compile time.
+`instrument_runtime_binding_t` has one padding byte after `parameter_type`,
+so an ID fits there without growing the descriptor tables.
+
+**F3. Distortion costs one division per sample per voice.**
+`calcDistBlock()` (`distortion.c:61`) computes
+`(1+k)x/(1+k|x|)` even when `k == 0`, where the curve is the identity. It is
+also a separate pass with its own int16 round trip after the amp and
+velocity stages.
+
+**F4. Voice post-chains make several int16 passes.** Drum runs
+`bufferTool_addGainInterpolated()` (amp EG), then `bufferTool_addGain()`
+(velocity), then `calcDistBlock()` (`DrumVoice.c:340-350`). That is three
+loads, three conversions and three truncating stores per sample.
+Snare/Cymbal/HiHat already fuse mix × EG × velocity but keep distortion as a
+separate pass (`Snare.c:262`, `CymbalVoice.c:272`, `HiHat.c:291`).
+
+**F5. The mixer reads each voice block twice when the Effect is active.**
+`mixer_addVoiceToFxBus()` (`mixer.c:543`) and
+`mixer_addVoiceInt16ToOutput()` (`mixer.c:409`) each reload the samples and
+recompute a gain ramp.
+
+**F6. The DMA pack writes one halfword at a time to strongly-ordered
+memory.** `pack_half()` (`AudioCodecManager.c:382`) issues four 16-bit
+stores per stereo frame per DAC. That is 768 non-bufferable stores per ISR,
+into MPU region 1, which `clocks.c:187-193` sets to TEX=0 C=0 B=0. The DMA
+consumes halfwords, but the layout can be written as one rotated 32-bit
+store per channel. A Normal non-cacheable attribute (TEX=1 C=0 B=0) would
+let the write buffer absorb those stores and still stay coherent with DMA.
+The output bits would be unchanged.
+
+**F7. `log2f()` still runs at control rate during pitch sweeps.**
+`osc_setFreq()` (`Oscillator.c:918`) caches by effective frequency. A pitch
+envelope changes that frequency every block, so each wavetable oscillator
+calls `freqToTableIndex()` → `log2f()` (`Oscillator.c:63`) once per block
+while a drum sweeps. The octave index can be found by comparing against 11
+precomputed frequency thresholds. This is small (≈0.5 %).
+
+**F8. Oscillators are already efficient.** The ITCM wavetable loop is about
+20 instructions per sample, with phase kept in a register and one store. No
+further work is recommended beyond F7.
+
+**F9. Audio-rate noise reads the RNG peripheral directly.**
+`calcNoiseBlock()` (`Oscillator.c:499`) calls `GetRngValue()`
+(`random.c:62`) on each phase wrap. That is an AHB2 peripheral read without
+a DRDY check. The F765 RNG delivers a new word about every 0.83 µs, and the
+render produces samples faster than that, so high noise frequencies re-read
+stale values. A software xorshift would be cheaper and would give fresh
+values, but it changes the noise statistics slightly. It is optional.
+
+**F10. Idle voices cost as much as sounding ones.** When the amp EG is in
+decay or stopped at value ≤ 0 and the previous gain is zero, every
+engine's output block is exactly zero. For Drum the transient and filter
+are gated by the EG. For Snare/Cymbal/HiHat the EG multiplies the summed
+signal, and distortion of 0 is 0. Skipping the render for such blocks leaves
+the output identical. It changes only the oscillator phase and filter state
+that the next trigger sees. Drum already resets its filter and phase on
+trigger (`DrumVoice.c:216`); the other three do not. This lowers the
+**average** load a lot but leaves the **worst case**, and so the underrun
+threshold, unchanged.
+
+### Corrections to the historical sections
+
+- §9 below says double-precision arithmetic is "software emulation" on this
+  part. That is wrong for the STM32F765. Its Cortex-M7 has a
+  double-precision FPU, and `-mfpu=fpv5-d16` executes doubles in hardware.
+  The current image contains `vfma.f64`. Double literals cost conversions
+  and slower DP operations, not library calls. The promotions listed in §9
+  are fixed. The one remaining double literal in the filter,
+  `(1-filter->q) *1.4` at `ResonantFilter.c:172`, is loop-invariant, and GCC
+  hoists it.
+- §4/§6 figures that assume `sine_table` in DTCM are superseded. S072 Step 1
+  moved it to flash, and D-cache now serves it.
+
+### Checked and rejected
+
+| Idea | Why not |
+|---|---|
+| ITCM for the filter or distortion | Tried in Session 023. Measured worse, because the forced out-of-line call costs more than it saves once I-cache is on. |
+| Filter state kept in locals | GCC already keeps `s1/s2/zi` and the oscillator phase in registers across the loop and writes them back once. |
+| Skip `SVF_recalcFreq()` when f is unchanged | About 0.1 % (six `fastTan` per block). Not worth the state. |
+| Write-back instead of write-through SRAM cache | Hot loops keep state in registers, so the gain is small, while the coherency and ownership review would be large. |
+| Voice runtime slots in DTCM | Free DTCM is the reserved FX arena under `SRAM_MANIFEST.md` policy. |
+| Morph "skip unchanged value" cache | A listed Failed Approach (Session 16): it skipped required DSP restores. |
+| Larger `OUTPUT_DMA_SIZE` (control block) | Envelope and LFO increments are per block, so every decay time would change. It also breaks the LXR-master cadence rule. |
+| Decimator short-circuit at rate 1.0 | Already declined (item 11): tiny, and it hides the real budget. |
+| Disable nonlinear integrators or halve LFO rate | Saves CPU, but the change is audible (resonance character, LFO stepping). Keep only as an explicit user-chosen "eco" option. |
+
+### Sound-impact classes used by the S073 plan
+
+- **S0, bit-identical.** Same output bits.
+- **S1, rounding-level.** Only float rounding differs. That is the same
+  class of difference as changing a compiler flag, and a host harness checks
+  it.
+- **S2, requantisation-level.** An intermediate int16 truncation moves. The
+  change is at most 1 LSB before distortion. Distortion can amplify that LSB
+  at low levels, but it amplifies the existing quantisation noise equally,
+  so the noise floor stays the same and only its pattern changes.
+- **S3, subtle behavioural.** State or noise differences meant to be
+  inaudible. These need a listening A/B.
+- **S4, audible.** A character change. S073 does not recommend these.
+
 Audited: 2026-05-08. Firmware: LXR-02 Open Firmware (branch: LXR02Open-prime).
 Problem statement: DSP render does not always complete within the 2.18ms
 budget (96 samples at 44108Hz), causing audible underruns.
@@ -255,6 +469,11 @@ HT, `pack_audio_half(1)` fills the second half on TC. No issues here.
 
 ## 9. Is the FPU enabled and are float constants marked correctly?
 
+> **Session 073 correction:** the "software emulation" statement in this
+> section is wrong for the STM32F765. Its FPU is double-precision, and doubles
+> execute in hardware, only more slowly. The promotions listed here are fixed.
+> See the Session 073 section at the top of this document.
+
 **FPU is enabled.** `clocks.c:88` (called first in `main()`):
 ```c
 *((volatile uint32_t *)0xE000ED88UL) |= (0xFUL << 20);  // CP10+CP11 full access
@@ -437,3 +656,37 @@ which correctly remain in SRAM1.
     to 2.9ms (+33%). Increases total audio latency from ~4.35ms to ~5.8ms
     (imperceptible for a drum machine). Straightforward config.h change, but
     audit all `uint8_t` loop counters first (128 still fits in uint8_t).
+
+### Session 073 additions (planned in `S073_CPU_USE_DSP_REDUCTION_REFACTOR.md`)
+
+Estimates are static and cover the worst case. Class is the sound-impact
+class defined in the Session 073 section above.
+
+16. **PLANNED (S073 Step 0): per-stage DWT profiler, worst-case stress
+    Scene, and host golden harness.** This is a prerequisite for everything
+    below. The profiler is diagnostic-only, and its RAM needs user
+    acknowledgement.
+17. **PLANNED (S073 Step 1): batch the ZDF filter divisions**, for both the
+    voice int16 path and the Effect float path. 6 → 2 divisions per sample
+    (LP 6 → 3). Class S1, host-verified. Saves about 6–7 % of the CPU.
+18. **PLANNED (S073 Step 2): string-free descriptor special writers.** Fix
+    each descriptor's writer ID at compile time instead of running the
+    strcmp/strstr chain on every LFO, Morph and velocity write. Class S0.
+    Saves about 1.5–4.5 % in LFO-heavy Scenes, plus foreground Morph time.
+19. **PLANNED (S073 Step 3): DMA pack as rotated 32-bit stores, with MPU
+    region 1 changed to Normal non-cacheable.** Class S0. Saves about 1 % and
+    shortens the ISR.
+20. **PLANNED (S073 Step 4): fused voice post-chain, with distortion bypassed
+    when shape is 0.** Class S2. Saves about 1.5–3 %, more when drive is off.
+21. **PLANNED (S073 Step 5): dry path and FX send in one mixer pass.**
+    Class S0. Saves about 1 % when the Effect is active.
+22. **PLANNED (S073 Step 6): wavetable octave selection by threshold table
+    instead of `log2f()`.** Class S0 except exactly at a boundary. Saves
+    about 0.5 %.
+23. **OPTIONAL (S073 Step 7): silence gating for idle voices.** Class S3.
+    Large average saving, no worst-case saving. Off by default so the render
+    budget stays known (see item 11).
+24. **OPTIONAL (S073 Step 8): software PRNG for audio-rate noise.**
+    Class S3. Small saving; needs 4 B of RAM.
+25. **NOT RECOMMENDED:** the items in the Session 073 "Checked and rejected"
+    table.

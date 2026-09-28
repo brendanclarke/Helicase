@@ -3,7 +3,8 @@
 ## Authority and status
 
 This is the authoritative live-memory, allocator, PAT4 interchange, Pattern
-Stack Service, and Pattern AutoSave reference through Session 070 (all phases).
+Stack Service, and Pattern AutoSave reference through Session 072 Step 9 (all
+implemented Pattern phases).
 Historical Session 062/063/064 plans describe how the design was reached but
 do not override this file.
 Filesystem hierarchy and HCNAMES grammar are in `FILESYSTEM_SPEC.md`; scalar
@@ -126,7 +127,8 @@ inconsistent back-reference makes a block invalid.
 
 Each automation entry's 9-bit target is the canonical `instrument_param_id_t`:
 `slot * INSTRUMENT_PARAM_COUNT + descriptor_index` for voice parameters
-(IDs 0..383), or a Scene target ID (384+). A step must never contain two
+(IDs 0..383), a Scene target ID (384+), or an Effect parameter ID 448..510
+(block 7, Session 072 step 9). A step must never contain two
 entries with the same 9-bit target (uniqueness invariant, enforced at write
 time). The 7-bit value is an identity mapping: stored value = parameter value.
 Every automatable descriptor parameter has a range that fits in 7 bits
@@ -240,7 +242,7 @@ expands the 7-bit value to 8-bit, and dispatches by target range:
   `instrumentManager_writeRuntime(slot, descriptor, value8)` and sets the
   corresponding bit in `seq_automation_dirty[slot]` (a `uint64_t` per-slot
   bitmap, 48 B total).
-- **Scene targets (IDs 384+, Session 070):** calls
+- **Scene targets (IDs 384+, Session 070; `fxm` is ID 404):** calls
   `seq_applySceneAutomation()` which dispatches to runtime-only overlays —
   `presetMorph_setStepAutomationOverride()` for Voice Morph (with 7→8 bit
   expansion via `menu_morphAutomationExpand()`),
@@ -250,6 +252,15 @@ expands the 7-bit value to 8-bit, and dispatches by target range:
   `seq_scene_automation_dirty` (`uint32_t`, 4 B). Scene automation never
   writes retained Scene/Kit setters — this prevents AutoSave thrashing and
   preserves user-set values.
+- **Effect targets (IDs 448..510, Session 072 step 9):** the foreground drain
+  brackets entries with FX step markers (identity bit 11) and calls
+  `effects_applyAutomation(track, local, value7)`. EffectsManager owns the
+  value, owner track, and pending-end mask. An overlay ends when its writing
+  track advances to an automation step that does not rewrite that parameter;
+  a failed-probability or muted step queues no marker and therefore holds it.
+  The common reset latch clears all Effect overlays and `fxm` before the new
+  pass's records apply. `fxm` follows the reset rule rather than the
+  per-parameter end rule.
 
 ### 6.2 Automation reset on voice retrigger and transport restart
 
@@ -270,6 +281,13 @@ audio routing overrides). Both restore functions run BEFORE
 `seq_clearAutomationDirty()`. `seq_setRunning()` is structured so stop sets
 `seq_running=0` first (preventing TIM3 ISR from advancing during cleanup)
 and start sets `seq_running=1` last (after all initialization).
+
+Effect step markers are queued immediately before the owning track's
+automation entries on the same conditional playback gate. The marker's
+payload-free identity keeps the track/step ID in bits 0..9 and sets identity
+bit 11. Entries after a marker can re-hold a pending parameter; the next
+marker or end-of-drain flush ends candidates not rewritten. This preserves
+last-writer ownership when multiple tracks write the same Effect row.
 
 ### 6.3 Step-edit automation pages
 

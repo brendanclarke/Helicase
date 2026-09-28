@@ -43,18 +43,19 @@
 #include "FxBuffer.h"
 
 /*
- * Effect registry and runtime manager (Session 072, Effects Phase 5 step 4).
+ * Effect registry and runtime manager (Session 072, Effects Phase 5).
  *
  * What: owns the immutable Effect registry and the active Scene's runtime
  * state. It resolves retained endpoint images, selects type operations,
  * switches types through FxBuffer's handoff contract, and publishes the
- * common return settings used by the later FX bus.
+ * common return settings consumed by the mixer's FX return.
  * Why: only this module knows a type's descriptor layout; SceneData owns the
  * retained bytes and FxBuffer owns the shared audio arena independently.
  * Context: foreground only. It is called by boot, Preset, and the render
  * block; it must not be called from an ISR.
- * Affiliates: SceneData, FxBuffer, Preset, mixer, AutoSave, Menu, and the
- * later sequencer/LFO and FX-bus steps.
+ * Affiliates: SceneData, FxBuffer, Preset, mixer, AutoSave, Menu, Sequencer
+ * (FX latch, automation drain), InstrumentManager (LFO adapters), and the
+ * mixer FX bus.
  */
 
 /* Registry ids are append-only; persisted identity is the three-byte token. */
@@ -69,7 +70,7 @@
 #define EFFECT_LANE_MORPH_SOURCE         0xFEu
 #define EFFECT_LANE_NONE                 0xFFu
 
-/* Runtime I/O shape flags used by the future mixer bus. */
+/* Runtime I/O shape flags; the mixer sizes the FX bus from them (0 = off). */
 #define EFFECT_IO_MONO_IN                0x01u
 #define EFFECT_IO_STEREO_IN              0x02u
 #define EFFECT_IO_MONO_OUT               0x04u
@@ -134,7 +135,7 @@ struct effect_ui_hooks {
 };
 typedef struct effect_ui_hooks effect_ui_hooks_t;
 
-/* Optional four-cell SELECT layout for future Effect pages. */
+/* Optional per-type SELECT layout for the Effect page (NULL = default, §13.2). */
 typedef struct {
     uint8_t screen_count[8];
     uint8_t cells[8][4][4];
@@ -235,9 +236,13 @@ uint8_t effects_laneByFileKey(effect_type_id_t type, const char *file_key,
  * marks AutoSave and clears the card-clean bit), and returns nonzero only
  * when a byte changed. Runtime needs no call: effects_service() rescans every
  * block.
- * Why here: plan §13.6 requires edits to flow through EffectsManager so Step
- * 10 can add edit-mask fan-out inside these functions without touching any
- * caller (S072_ST7 D3). Step 7 writes the given Scene only.
+ * Why here: plan §13.6 requires edits to flow through EffectsManager so the
+ * edit-mask fan-out lives in one place without touching callers (S072_ST7 D3).
+ * Fan-out (S072 Step 10; plan §7.4, A44): an active-Scene edit reaches every
+ * Scene in its VOICE edit mask. Parameter, lock, and sequence edits require
+ * the target Effect type to equal the origin's; Effect Morph and type changes
+ * reach every masked Scene. Inactive-Scene edits remain local. Setters return
+ * nonzero when any reached Scene changed.
  * Image rule: EFFECT_IMAGE_MORPH addresses the Morph endpoint for Morphable
  * rows only. For a non-Morphable row it reads and writes the single normal
  * value, so cells without a Morph endpoint show their single value.
@@ -265,6 +270,8 @@ uint8_t effects_setMorphAmount(uint8_t scene_index, uint8_t amount);
  * functions are foreground-only: EffectsManager consumes the TIM3 latch,
  * `sel` selects a retained step immediately, and lane helpers translate the
  * registry's descriptor lanes for the Effect page's hold editor.
+ * effects_setSeqLaneLock() uses the same held-step mask and lane for every
+ * same-type masked Scene.
  */
 #define EFFECT_SEQ_STEP_NONE 0xFFu
 uint8_t effects_seqActiveStep(void);
@@ -277,6 +284,59 @@ uint8_t effects_getLaneLock(uint8_t scene_index, uint8_t step, uint8_t lane,
                             uint8_t *value_out);
 uint8_t effects_setSeqLaneLock(uint8_t scene_index, uint16_t step_mask,
                                uint8_t lane, uint8_t value);
+
+/*
+ * Pattern automation and LFO on Effects (Session 072 step 9; plan §9, §10).
+ *
+ * Target identity: block-7 IDs 448 + local (EffectTypes.h).
+ * - Pattern automation accepts AUTOMATABLE locals 0..62. Local 63 aliases the
+ *   Pattern off sentinel, and WIDE8 rows require expand7.
+ * - LFO accepts MODULATABLE locals that have a modulation domain.
+ *
+ * Validation is always against a Scene's retained Effect type:
+ * - pickers and the Pattern writer pass the viewed Scene;
+ * - runtime apply checks the active runtime type on every call, so a stale
+ *   entry (for example after `typ`) is ignored rather than misapplied.
+ *
+ * Overlay lifetime (third restore rule, F1/G3): a Pattern value replaces the
+ * FX-sequencer/menu value of one parameter. It lasts until the writing track
+ * plays an automation step that does not carry that parameter. The Sequencer
+ * queues an FX step marker ahead of each owning track's step entries, and
+ * seq_drainPendingAutomation() brackets them with StepBegin, apply and
+ * StepFlush.
+ *
+ * effects_automationReset() clears every overlay plus the `fxm` Morph
+ * override. It runs from the drain on the common sequencer reset path and
+ * from Scene activation. LFO contributions are base-independent direction /
+ * depth entries per source slot and pair; effects_service() resolves them
+ * around the current held value every render block.
+ *
+ * Context: foreground only. The only TIM3-visible state is the owner-track
+ * byte, published to the Sequencer through seq_setEffectAutomationTracks().
+ */
+#define EFFECT_LFO_TARGET_MORPH      0xFEu
+#define EFFECT_LFO_TARGET_NONE       0xFFu
+#define EFFECT_LFO_DIRECTION_NONE    0u
+#define EFFECT_LFO_DIRECTION_DOWN    1u
+#define EFFECT_LFO_DIRECTION_UP      2u
+
+uint8_t effects_targetValid(uint8_t scene_index, uint16_t id,
+                            instrument_target_use_t use);
+const effect_param_descriptor_t *effects_targetDescriptor(
+    uint8_t scene_index, uint16_t id, instrument_target_use_t use);
+uint16_t effects_stepTarget(uint8_t scene_index, uint16_t current,
+                            int8_t direction, instrument_target_use_t use);
+
+void effects_automationReset(void);
+void effects_automationStepBegin(uint8_t track);
+uint8_t effects_applyAutomation(uint8_t track, uint8_t local, uint8_t value7);
+void effects_automationStepFlush(void);
+void effects_setMorphAutomation(uint8_t amount);
+
+void effects_setLfoContribution(uint8_t source_slot, uint8_t pair,
+                                uint8_t target, uint8_t direction,
+                                uint8_t depth);
+void effects_clearLfoSource(uint8_t source_slot, uint8_t pair);
 
 #if DEV_MODE_DIAGNOSTIC
 /* 0 means the immutable registry passed its runtime self-check. */

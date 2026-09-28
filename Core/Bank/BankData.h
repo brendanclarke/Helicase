@@ -55,6 +55,20 @@ uint16_t bank_sceneMaskVoiceEdit(void);
 uint8_t bank_sceneInVoiceEditMask(uint8_t scene_index);
 void bank_toggleSceneMaskVoiceEdit(uint8_t scene_index);
 /*
+ * Drop VOICE edit-mask members whose layout no longer matches (plan §7.4).
+ *
+ * For each owner Scene, every member bit other than the owner itself is kept
+ * only while scene_editLayoutMatches(owner, member) holds. Changed entries
+ * are stored through bank_setSceneMaskVoiceEditForScene(), which marks the
+ * Bank VOICE-mask AutoSave field only on change; the active-bit invariant is
+ * preserved because an owner always matches itself.
+ *
+ * Menu load-completion funnels, boot restore, and effects_changeType() call
+ * this foreground-only repair after retained types may have changed. It costs
+ * at most 16 x 15 layout comparisons and allocates no additional SRAM.
+ */
+void bank_revalidateVoiceEditMasks(void);
+/*
  * Read/write one resident Scene's VOICE edit fan-out mask.
  *
  * Inputs: zero-based Scene index and a raw 16-bit mask for the setter. Output:

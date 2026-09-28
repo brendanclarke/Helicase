@@ -159,9 +159,8 @@ typedef struct {
      *
      * fx_send_amount and fader_setting are retained now for the Scene file/UI
      * contract. FX send is 0..127. Fader mode is 0..2, currently interpreted
-     * as normal/pre-FX, post-FX, and FX-only by future mixer/FX work. Until
-     * that backend exists, Preset setters store the values and intentionally
-     * no-op runtime apply.
+     * as normal/pre-FX, post-FX, and FX-only by the mixer FX path. Preset
+     * setters store the values and the live mixer applies the selected mode.
      *
      * These fields are indexed by instrument slot, not by track. Track 7
      * continues to share slot 6's voice/mix identity.
@@ -184,7 +183,7 @@ typedef struct {
      * Scene-level Effect Morph amount, 0..255.
      *
      * This is a Scene parameter, not part of the retained Effect record or
-     * future .fx file. AutoSave stores it as Scene parameter 40; SceneData is
+     * the `.fx` file. AutoSave stores it as Scene parameter 40; SceneData is
      * the sole writer so the value is always dirty-marked with its owner.
      */
     uint8_t effect_morph_amount;
@@ -303,6 +302,21 @@ kit_instrument_slot_t *scene_instrumentSlot(uint8_t scene_index, uint8_t slot);
  */
 const kit_instrument_slot_t *scene_instrumentSlotConst(uint8_t scene_index,
                                                        uint8_t slot);
+/*
+ * Report whether two resident Scenes share one edit layout (plan §7.4).
+ *
+ * Inputs: two Scene indices. Output: nonzero when both exist, their Effect
+ * record types are equal, and all six Kit instrument slot types are equal
+ * slot by slot.
+ *
+ * Why: a VOICE edit-mask fan-out writes the same descriptor or lane index into
+ * every masked Scene. That index names the same parameter only when layouts
+ * match, so this is the rule behind the selection gate and re-validation
+ * (S072 Step 10, A44, F5). The raw Effect type byte is compared; SceneData
+ * stays independent of EffectsManager. Clients: Menu and BankData. Read-only;
+ * no AutoSave side effect.
+ */
+uint8_t scene_editLayoutMatches(uint8_t scene_a, uint8_t scene_b);
 /*
  * Store one track's MIDI channel setting.
  *

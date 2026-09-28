@@ -219,6 +219,33 @@ const kit_instrument_slot_t *scene_instrumentSlotConst(uint8_t scene_index,
     return &scene->kit.instruments[slot];
 }
 
+/*
+ * Compare the retained Effect and six Instrument types used by edit masks.
+ *
+ * Inputs: two resident Scene indices. Output: nonzero only when both records
+ * exist and their local parameter/target layouts match. This read-only
+ * predicate is the shared rule for Menu's mask-selection gate and BankData's
+ * post-load/type-change repair; it intentionally does not mark AutoSave.
+ */
+uint8_t scene_editLayoutMatches(uint8_t scene_a, uint8_t scene_b)
+{
+    const scene_t *a = scene_getConst(scene_a);
+    const scene_t *b = scene_getConst(scene_b);
+    uint8_t slot;
+
+    if (!a || !b)
+        return 0u;
+    if (scene_a == scene_b)
+        return 1u;
+    if (a->effect.type != b->effect.type)
+        return 0u;
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        if (a->kit.instruments[slot].type != b->kit.instruments[slot].type)
+            return 0u;
+    }
+    return 1u;
+}
+
 void scene_setTrackMidiChannel(uint8_t scene_index, uint8_t track,
                                uint8_t channel)
 {
@@ -493,8 +520,8 @@ void scene_setVoiceFaderSetting(uint8_t scene_index, uint8_t slot,
      * Inputs: resident Scene index, zero-based instrument slot, and mode in
      * the current Scene file domain: 0 normal/pre-FX, 1 post-FX, 2 FX-only.
      * Output: a changed retained mode is stored before its named Scene bit is
-     * marked. Runtime behavior is intentionally deferred to Preset/future mixer
-     * code rather than being hidden in SceneData.
+     * marked. Runtime behavior is applied by Preset and the mixer rather than
+     * being hidden in SceneData.
      */
     if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
         return;

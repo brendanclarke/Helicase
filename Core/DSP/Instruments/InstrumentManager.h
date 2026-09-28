@@ -51,13 +51,14 @@ typedef uint8_t instrument_target_token_t;
  * LFO target namespace values stored in lfo_target_voice cells.
  *
  * Values 1..6 select instrument voices. Value 7 selects the Scene namespace
- * shown by Menu as `scn`; future values above the instrument voice range can
- * select effects or other target tables while lfo_target_param remains a local
- * byte token.
+ * shown by Menu as `scn`. Value 8 selects the active Scene's Effect namespace
+ * shown as `fx`; lfo_target_param is then an Effect-local byte token.
  */
 #define INSTRUMENT_TARGET_VOICE_FIRST 1u
 #define INSTRUMENT_TARGET_VOICE_LAST  INSTRUMENT_SLOT_COUNT
 #define INSTRUMENT_TARGET_VOICE_SCENE ((uint8_t)(INSTRUMENT_SLOT_COUNT + 1u))
+#define INSTRUMENT_TARGET_VOICE_EFFECT ((uint8_t)(INSTRUMENT_SLOT_COUNT + 2u))
+#define INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST INSTRUMENT_TARGET_VOICE_EFFECT
 
 typedef enum {
     INSTRUMENT_TYPE_DRM = 0,

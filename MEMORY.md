@@ -12,34 +12,56 @@ Update it whenever something is confirmed, fixed, or decided.
 # Repository root is the working tree root
 
 # Build
-make && make img   →   build/LXRV2_lxr02.img
+make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make`
+# can stop at build/main.o in an incremental tree; see SCOPING S072 carried debt)
 
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
-**Current working source**: Session 071 completed voice morph
-automation/modulation cleanup, LED chase state defect fix, and LFO target
-voice handler fix on `dev-ph5-effects`. Final build: `text=456,748`,
-`data=416`, `bss=291,900`. All 24 hardware tests PASS.
+**Current working source**: Session 072 implemented Phase 5, the Effects
+bus (`EFFECTS_BUS_FEATURE_PLAN.md` Steps 1–11), on `dev-ph5-effects`.
 
-Session 071 implemented three parts: Part A (per-Scene voice-edit mask: 16-entry
-`uint16_t` array replacing global scalar, Autosave 32-byte region, bankset.bcg
-per-Scene keys with legacy fallback), Part B (base-independent LFO voice-morph
-contribution: direction+depth reinterpretation, resolver against current
-effective base, polarity encoding without base read), Part C (Scene superpage
-live display: audio-out/FX-send step-override tables, effective-value getters,
-immediate underline on Scene-target automation write). Also fixed LED chase
-state defect (drain-side chase guard, transport stop chase dirty, legacy mask
-migration) and T12 morph-assignment defect (voice cell handler full reinstall).
-+86 bytes SRAM.
+- **Commits:** HEAD `58569ae` holds Steps 1–8; Steps 9–11 are uncommitted in
+  the working tree.
+- **Final build:** `text=483,024`, `data=416`, `bss=426,336`. The flash
+  payload is 483,440 B, leaving **8,080 B** of headroom in the 480 KiB
+  application window.
+- **Hardware:** Steps 1, 2 and 5 production checks and the Step 8 test points
+  passed. The Phase 5 acceptance checklist for Steps 6–10 is pending
+  (`072_SESSION_HANDOFF_LOG.md` §11).
 
-Permanent authority: `knowledge_files/log_archive/071_SESSION_HANDOFF_LOG.md`,
-`070_SESSION_HANDOFF_LOG.md`, `069_SESSION_HANDOFF_LOG.md`,
-`068_SESSION_HANDOFF_LOG.md`, `067_SESSION_HANDOFF_LOG.md`,
-`PATTERN_DYNAMIC_STACK.md`, `MODULE_INTERCHANGE_SPEC.md`, `AUTOSAVE.md`,
-`BANK_PRESET_ARCHITECTURE.md`, `SRAM_MANIFEST.md`, and `DEV_MODES.md`.
-Per-track step scale and shuffle sequencer consumption remain deferred (see
-`PATTERN_DYNAMIC_STACK.md` §6.4). Phase 4.5 copy operations remain queued.
+Phase 5 in one paragraph:
+
+- `sine_table` moved to flash. The rest of DTCM is the 126,624 B
+  `.dtcm_fxbuf` arena (`FxBuffer`).
+- Voice volume moved to the mixer (engines render pre-volume).
+- Each Scene owns a 420 B `effect_record_t` (`off`/`flt`, 64+64 parameters,
+  and a 16×16 FX sequence), plus Effect Morph as Scene parameter 40.
+- `EffectsManager` resolves every render block. The mixer runs a pre-volume
+  send bus with `pre`/`pst`/`fx` fader modes and a routed return.
+- Storage: `.fx` v2 files, HCNAMES 161 rows, AutoSave HCPR v3.
+- UI: the SHIFT+PERF Effect page (`menuEffects.c`) and the TIM3-clocked FX
+  sequencer with the shared StepScale table.
+- Modulation: `fx` step automation (IDs 448..510), live `fxm` (404), and the
+  LFO `fx` namespace (8).
+- Masks: the VOICE edit-mask layout gate, with Effect edit fan-out.
+
+**Permanent authority:**
+
+- `knowledge_files/log_archive/072_SESSION_HANDOFF_LOG.md`;
+- `knowledge_files/specification_reference/EFFECTS_BUS_REFERENCE.md` (as
+  built);
+- `EFFECTS_BUS_FEATURE_PLAN.md` (design record);
+- the updated `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`,
+  `MODULE_INTERCHANGE_SPEC.md`, `BANK_PRESET_ARCHITECTURE.md`,
+  `PATTERN_DYNAMIC_STACK.md`, `SRAM_MANIFEST.md` and `DEV_MODES.md`.
+
+**Next session (073):** `S073_FLASH_EXPANSION.md`, then
+`S073_CPU_USE_DSP_REDUCTION_REFACTOR.md`. Start from
+`S073_SESSION_STARTUP.md`.
+
+Still deferred: per-track step scale/shuffle playback (`PATTERN_DYNAMIC_STACK.md`
+§6.4) and the Phase 4.5 copy operations.
 
 ## RAM Allocation Approval Policy
 
@@ -64,48 +86,44 @@ This section is for short carryover points only. Flush or rewrite it at session
 end; durable facts belong in `knowledge_files/log_archive/` or
 `knowledge_files/specification_reference/`.
 
-- Session 071 is closed and hardware-accepted (all 24 tests PASS). Durable
-  authority is `knowledge_files/log_archive/071_SESSION_HANDOFF_LOG.md` and
-  the specification-reference updates (`BANK_PRESET_ARCHITECTURE.md`,
-  `MODULE_INTERCHANGE_SPEC.md`, `SRAM_MANIFEST.md`, `FILESYSTEM_SPEC.md`).
-  The S071 task documents (`S071_VOICE_MORPH_AUTOMATION_MODULATION_CLEANUP.md`,
-  `S071_VOICE_MORPH_MOD_CLEANUP_IMPLEMENTATION.md`,
-  `S071_LED_STATE_DEFECT.md`, `S071_LED_STATE_DEFECT_REASON.md`,
-  `S071_LED_DEFECT_IMPLEMENTATION.md`, `S071_LFO_VOICE_MORPH.md`,
-  `S071_T12_MORPH_ASSIGN_INVESTIGATION.md`,
-  `S071_T12_MORPH_ASSIGN_IMPLEMENTATION.md`) are superseded by that log and
-  specification updates and may be deleted.
-- S072 Step 1: `sine_table` now resides in flash; the remaining DTCM is the
-  NOLOAD `.dtcm_fxbuf` arena owned by `FxBuffer`.
-- S072 Step 2: voice engines render pre-volume; the mixer applies slider x
-  `instrumentManager_runtimeVolume()` after decimation. This fixes the
-  Snare/Cymbal/HiHat bug where `vol` was applied before distortion (D1).
-- S072 Step 3: each resident `scene_t` now owns a 420-byte `effect_record_t`
-  through SceneData setters, plus `effect_morph_amount` as Scene parameter 40;
-  the AutoSave Effect region has 419 live cells and `fxm` ID 404 is reserved
-  with zero use flags.
-- S072 Step 4: `EffectsManager` owns the `off`/`flt` registry, per-block
-  resolution, Scene activation/type-change handoff, and the 76-byte runtime
-  state/76-byte DTCM StereoFilter runtime. `effects_service()` runs from the
-  mixer foreground block; the Effect type token is live in AutoSave;
-  `DEV_EFFECT_FORCE_TYPE` is the diagnostic bench hook.
-- S072 Step 5: the mixer now taps each decimated voice before volume, applies
-  PRE/POST/FX fader topology, sums a live mono/stereo FX bus with saturated
-  signed-24 accumulation, calls `effects_process()`, and routes the level- and
-  pan/balance-controlled return through jack fallback. Send and return gains
-  use 32-byte total extra DTCM ramp state beside the approved 256-byte bus;
-  targets 398..403 are audible through the effective-send getter.
-- S070 task documents are also superseded by `070_SESSION_HANDOFF_LOG.md` and
-  may be deleted.
-- Per-track step scale and shuffle are stored/edited/persisted only, with no
-  sequencer playback effect — see `PATTERN_DYNAMIC_STACK.md` §6.4.
-- S072 Step 7: SHIFT+PERF now opens the live Effect page owned by
-  `Core/Menu/menuEffects.c`; edits affect only the active Scene until Step 10,
-  and the retired Euklid UI is compiled out behind `ENABLE_EUKLID_PAGE=0`.
-- S072 Step 8: the FX sequencer is live: TIM3 publishes a compact FX step/reset
-  latch, `effects_service()` applies active lane locks in foreground, SEQ hold
-  editing and FX-row LEDs are page-owned, and Pattern track scale shares the
-  fourteen-entry StepScale table while playback remains unchanged.
+- **Session 072 (Phase 5 Effects bus) is closed in source.**
+  - Durable authority: `072_SESSION_HANDOFF_LOG.md` and
+    `EFFECTS_BUS_REFERENCE.md`.
+  - The step documents `S072_ST1..ST11_IMPLEMENTATION.md` may be deleted.
+    Everything durable is in the log, the reference and the specs.
+    `S072_ST1_IMPLEMENTATION.md` §21 (the flash-growth findings) is preserved
+    in log §5 and in `S073_SESSION_STARTUP.md`.
+- **Phase 5 hardware acceptance is pending** for Steps 6–10: the storage
+  fixtures, the Effect page walk-through, the FX sequencer remainder, the
+  automation/LFO matrix, and the gate/fan-out matrix. The checklist is in
+  `072_SESSION_HANDOFF_LOG.md` §11.
+- **Flash headroom is 8,080 B.** `link_budget.py` warns below 16 KiB (it has
+  since ST7). Measure every change with
+  `python3 tools/link_budget.py arm-none-eabi-nm build/lxr02.elf`. Use
+  `make all`: bare `make` can stop at `build/main.o` in an incremental tree.
+- **Effect invariants.**
+  - SceneData is the only writer of `scene_t.effect`.
+  - UI and type hooks write through the EffectsManager edit API, which fans
+    out and marks AutoSave.
+  - EffectsManager and FxBuffer are foreground-only.
+  - The DTCM arena is never cleared by the system ("clear unless you
+    adopt").
+  - Local Effect indices are type-relative, and the mask gate keeps fan-out
+    safe.
+- **Blank names** save as `none.drm`/`none.fx` (all-space stem); an empty
+  stem becomes `inst`. Pass explicit spaces for blank rows.
+- **Card preparation for older cards:** HCPR v2 and 145-row HCNAMES are
+  rejected. Delete root `.hcnames`, `.hcnamtmp`, `.hcprms1` and `.hcprms2`
+  once, and firmware rebuilds them.
+- **Carried small debt** (SCOPING_TARGETS "Session 072 carried debt"):
+  - `fxbuf_init()` handoff-reset order (diagnostic only);
+  - Makefile echoed comments and the default goal;
+  - `modNode_waveInterpGeneration` initializer;
+  - the SRAM1/SRAM2 stack wording;
+  - the `mixer.c` duplicated comment;
+  - stale `verify_bank_autosave.py`.
+- S070 and S071 task documents are superseded by their handoff logs and may
+  be deleted.
 - Phase 4.5 copy operations (`pat_copyTrack`, `pat_copyPattern`,
   `pat_copyBar`) remain queued.
 - S069 planning documents (`S069_ATS_PAT_BOUNDED_CPU.md`,
@@ -808,6 +826,7 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
     │   ├── Cc2Text.c                ← modTargets[] 205 entries
     │   ├── CcNr2Text.h
     │   ├── copyClearTools.c/h       ← copy/clear UI; pattern mutation through PatternData
+    │   ├── menuEffects.c/h          ← SHIFT+PERF Effect page: SELECT layout, `typ` transaction, SHIFT Morph view, SEQ lock editing/LEDs
     │   └── screensaver.c/h          ← screensaver with explicit LCD off/on phases
     ├── MIDI/
     │   ├── Uart.c/h                 ← USART3, 31250 baud, interrupt-driven dual FIFO (realtime + normal)
@@ -823,7 +842,7 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
     │   ├── BankData.c/h             ← resident Bank display name, active Bank-local Scene slot, loaded-bank flag
     │   └── Scene/
     │       ├── SceneData.c/h        ← Scene-owned settings, kit slots, descriptor images, MIDI routing
-    │       ├── SceneModTargets.c/h  ← Scene-level modulation target namespace: 1vm..6vm plus Scene srt
+    │       ├── SceneModTargets.c/h  ← Scene-level target namespace: 1vm..6vm, srt, 1ou..6ou, 1fx..6fx, fxm (404)
     │       ├── Pattern/
     │       │   ├── PatternData.c/h      ← pattern/track/step storage and edit API
     │       │   ├── EuklidGenerator.c/h  ← pattern generator
@@ -833,6 +852,12 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
     │           ├── ParameterArray.h/c   ← supersedes Parameters.h; NUM_PARAMS=275
     │           └── presetManager.c/h    ← typed load/save for kit, morph, pattern, performance, all, globals
     ├── DSP/
+    │   ├── Effects/
+    │   │   ├── EffectTypes.h          ← retained 420 B Effect record contract, block-7 target IDs
+    │   │   ├── EffectsManager.c/h     ← registry (off/flt), per-block resolution, edit API + fan-out, FX-seq, automation/LFO overlays
+    │   │   ├── EffectParamRows.h      ← common/type descriptor row macros
+    │   │   ├── FxBuffer.c/h           ← DTCM `.dtcm_fxbuf` arena, voice units, Effect share, handoff record
+    │   │   └── StereoFilter/          ← `flt` descriptors (…Parameters.c/h) and runtime/ops (…Effect.c/h, -Ofast)
     │   └── Instruments/
     │       ├── InstrumentManager.c/h ← descriptor registry, VOICE menu lookup, Scene-to-DSP apply bridge
     │       ├── Drum/                 ← Drum descriptor keys, flags, menu layout, runtime metadata
@@ -844,7 +869,8 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
     │   └── sampleFlash.c/h          ← guarded F765 sector 6-11 erase/program helpers
     ├── Sequencer/
     │   ├── sequencerTimer.c/h       ← TIM3 4kHz sequencer timing owner (IRQ29, priority 2) — Session 019
-    │   ├── sequencer.c/h            ← original LXR sequencer source (driven by TIM3_IRQHandler)
+    │   ├── sequencer.c/h            ← original LXR sequencer source (driven by TIM3_IRQHandler); FX step latch, Effect automation markers
+    │   ├── StepScale.c/h            ← shared 14-entry 96-PPQ step-scale table (tracks + FX sequencer)
     │   ├── clockSync.c/h
     ├── DSPAudio/
     │   ├── random.c/h               ← F765 RNG port (PLL48CLK, bare register)
@@ -864,13 +890,14 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
 | Current AutoSave format, ownership, writer, and limitations? | `knowledge_files/specification_reference/AUTOSAVE.md` |
 | Development screen diagnostics and file logging? | `knowledge_files/specification_reference/DEV_MODES.md` |
 | Current module/API ownership boundaries? | `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md` |
+| Effect system (types, FX bus, FX sequencer, Effect automation/LFO, adding a type)? | `knowledge_files/specification_reference/EFFECTS_BUS_REFERENCE.md` |
 | Confirmed pin assignments / IRQs? | `knowledge_files/hardware_archive/HARDWARE_MAP.md` |
 | Sequencer / DSP architecture plans? | `knowledge_files/hardware_archive/AVR_TO_F765_MIGRATION.md` |
 | Current known issues and reminders? | `MEMORY.md` |
 
 ### Specification-reference index
 
-These are the eight authoritative/reference documents under
+These are the eleven authoritative/reference documents under
 `knowledge_files/specification_reference/`. `FILESYSTEM_SPEC.md` is the
 product-level source of truth; `ASYNCFATFS_REFERENCE.md` is its low-level
 filesystem implementation companion. For AutoSave specifically,
@@ -882,14 +909,16 @@ and may contain historical snapshots as noted below.
 | File | What it contains | Use it when |
 |------|------------------|------------|
 | `ASYNCFATFS_REFERENCE.md` | Foreground-pumped async FAT32/VFAT contracts: component paths, LFN/SFN identity, object iteration, removal, terminator-aware directory-entry publication, lazy directory-cluster initialization, and flush boundaries. | Changing `Core/Hardware/SD/asyncfatfs/` or adding filesystem operations. |
-| `AUTOSAVE.md` | Implemented scalar HCPR and per-Scene PAT4 hidden A/B formats, boot readers, ownership, dirty masks, writer lifecycle, power-loss behavior, and validation status. Updated through Session 070. | Changing AutoSave format, boot restore, dirty hooks, capture, scheduling, or recovery. |
-| `BANK_PRESET_ARCHITECTURE.md` | Hierarchy overview (Bank → Scene → Kit → Instrument), BankData voice-edit mask, SceneData parameter images, morph engine, runtime overlay architecture, Scene mod targets, `parameter_values[]` legacy bridge, dirty marking, and boot restore order. Written Session 070. | Understanding parameter storage, morph interpolation, runtime overlays, Scene activation, or dirty marking. |
-| `CPU_USE_DSP_AUDIT.md` | Historical DSP performance audit covering render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA, hot-loop costs, and an ordered optimization record. | Investigating audio underruns or changing render placement/optimization. It describes an audited snapshot, not necessarily current ownership. |
+| `AUTOSAVE.md` | Implemented scalar HCPR and per-Scene PAT4 hidden A/B formats, boot readers, ownership, dirty masks, writer lifecycle, power-loss behavior, and validation status, including the S072 v3 Effect region. Updated through Session 072. | Changing AutoSave format, boot restore, dirty hooks, capture, scheduling, or recovery. |
+| `BANK_PRESET_ARCHITECTURE.md` | Hierarchy overview (Bank → Scene → Kit → Instrument), BankData voice-edit mask, SceneData parameter images, morph engine, runtime overlay architecture, Scene mod targets, `parameter_values[]` legacy bridge, dirty marking, boot restore order, the Scene target table (incl. `fxm`), Effect overlays, and the S072 edit-mask layout gate. Updated through Session 072. | Understanding parameter storage, morph interpolation, runtime overlays, Scene activation, or dirty marking. |
+| `CPU_USE_DSP_AUDIT.md` | Historical DSP performance audit covering render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA, hot-loop costs, and an ordered optimization record. | Investigating audio underruns or changing render placement/optimization. It describes an audited snapshot, not necessarily current ownership. The Session 073 section is the authority for `S073_CPU_USE_DSP_REDUCTION_REFACTOR.md`. |
 | `DEV_MODES.md` | Screen-only diagnostic versus file-only logging contract, current `bootlog.bin`/`asavetrc.bin` formats, duplicate limitation, and failed unified-log warning. | Adding or interpreting diagnostics, trace, or logging output. |
-| `FILESYSTEM_SPEC.md` | Current product storage specification through Session 072 ST6: root layout, typed 161-row HCNAMES, PAT4, `.fx` v2 Effect children, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, boot restore, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
-| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 070 for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
+| `EFFECTS_BUS_REFERENCE.md` | As-built Phase 5 Effect system: module map, signal flow and fader modes, type contract and registry self-check codes, retained data and type change, resolution order, DTCM arena and handoff, Effect page, fan-out and layout gate, FX sequencer, IDs/automation/LFO, `.fx`/HCNAMES/AutoSave, lifecycle, design rationale, debugging, and the add-a-type tutorial. | Adding an Effect type or changing anything in the Effect/bus/FX-sequencer path. |
+| `FILESYSTEM_SPEC.md` | Current product storage specification through Session 072: root layout, typed 161-row HCNAMES, PAT4, `.fx` v2 Effect children, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, boot restore, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
+| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 072 (including EffectsManager, FxBuffer, menuEffects, StepScale) for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
 | `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
-| `SRAM_MANIFEST.md` | Current Session 064 logging-on linked snapshot, AutoSave Pattern/reader/trace owners, and binding Pattern/delay reservation policy. | Changing retained state, adding caches/names, or evaluating RAM cost. Regenerate after allocation changes. |
+| `PATTERN_DYNAMIC_STACK.md` | Dynamic Pattern storage (address array, pool, bitmap), PAT4, Pattern Stack Service, step automation encoding and drain, including S072 Effect targets and Effect step markers. | Changing Pattern storage, step automation, or the automation drain. |
+| `SRAM_MANIFEST.md` | Current linked snapshot (through S072 ST11), Phase 5 ledger, AutoSave Pattern/reader/trace owners, and binding Pattern/delay reservation policy. | Changing retained state, adding caches/names, or evaluating RAM cost. Regenerate after allocation changes. |
 
 ---
 

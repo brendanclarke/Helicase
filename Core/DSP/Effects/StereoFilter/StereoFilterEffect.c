@@ -88,9 +88,9 @@ static void stereoFilter_writeParam(void *rt_void, uint8_t index,
  * Process one normalized stereo block in place.
  *
  * Inputs: manager-owned runtime and an Effect bus block. Output: float ZDF
- * filtering without int16 input saturation; the later mixer return performs
- * the one final bus saturation. A missing right channel is accepted so the
- * operation remains safe when the Step 5 bus negotiates mono input.
+ * filtering without int16 input saturation; the mixer return performs the one
+ * final bus saturation. A missing right channel is accepted so the operation
+ * stays safe if the registry row is ever changed to mono input.
  */
 static void stereoFilter_process(void *rt_void, effect_io_t *io)
 {

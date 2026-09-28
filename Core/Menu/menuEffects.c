@@ -298,6 +298,8 @@ uint8_t menuEffects_selectPressed(uint8_t button, uint8_t *sub_page,
 {
     uint8_t count;
 
+    /* Any SELECT press abandons an unconfirmed `typ` transaction. */
+    menuEffects_typeEdit = 0u;
     if (button >= MENU_FX_SELECT_COUNT)
         return 0u;
     count = menuEffects_screenCount(button);

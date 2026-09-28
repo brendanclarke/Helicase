@@ -1292,7 +1292,15 @@ boot_filesystem_done:
      * Affiliates: preset_sendDrumsetParameters(),
      * preset_startDrumsetApply(), preset_tickDrumsetApply(), and
      * menu_pollPresetStatus().
-    */
+     */
+    /*
+     * Boot has restored Scene types and VOICE edit masks through AutoSave,
+     * bankset.bcg, or Scene/Kit fallback. Repair any directional members whose
+     * layouts diverged before the first live edit can fan out (S072 Step 10
+     * F5). The deterministic RAM repair repeats next boot if tracking was not
+     * yet enabled for this restore path.
+     */
+    bank_revalidateVoiceEditMasks();
     preset_startDrumsetApply();
 #if DEV_MODE_DIAGNOSTIC && (DEV_EFFECT_FORCE_TYPE != 0u)
     /*
@@ -1301,7 +1309,10 @@ boot_filesystem_done:
      * Input: the active Scene and a configured registry id. Output: the
      * regular in-place type-change transaction, including defaults, AutoSave
      * token marking, and runtime switch. This bench hook is absent from
-     * production builds and exists until the Step 7 Effect page is available.
+     * production builds. Since Step 10 the change fans out through the active
+     * VOICE edit mask like a `typ` edit (masks are self-only at boot unless
+     * restored), and it clears the forced Scenes' FX sequences (F3). Keep
+     * DEV_EFFECT_FORCE_TYPE at 0 outside deliberate registry bench tests.
      */
     (void)effects_changeType(scene_getActiveIndex(),
                              (effect_type_id_t)DEV_EFFECT_FORCE_TYPE);

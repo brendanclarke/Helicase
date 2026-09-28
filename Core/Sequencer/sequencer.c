@@ -64,6 +64,7 @@
 #include "presetManager.h"
 #include "presetMorphEngine.h"
 #include "StepScale.h"
+#include "EffectsManager.h"
 
 /*
  * Pattern probability uses the existing hardware RNG without new state.
@@ -96,6 +97,10 @@ static uint8_t seq_internalMidiClockPhase = 0;
  */
 static volatile uint8_t seq_fxEvent = 0u;
 
+/* Effect automation handshake: owner mask and reset latch are SRAM1 bytes. */
+static volatile uint8_t seq_effectAutomationTracks = 0u;
+static volatile uint8_t seq_effectAutomationReset = 0u;
+
 /* Publish one FX step while preserving a pending reset marker. */
 static void seq_fxPublishStep(uint8_t index)
 {
@@ -108,13 +113,15 @@ static void seq_fxPublishStep(uint8_t index)
     __set_PRIMASK(primask);
 }
 
-/* Publish a foreground reset for the next FX boundary. */
+/* Publish a foreground reset for the next FX boundary and Effect overlays. */
 static void seq_fxPublishReset(void)
 {
     uint32_t primask = __get_PRIMASK();
 
     __disable_irq();
     seq_fxEvent = SEQ_FX_EVENT_RESET;
+    /* The same boundary ends every Effect Pattern overlay and `fxm`. */
+    seq_effectAutomationReset = 1u;
     __set_PRIMASK(primask);
 }
 
@@ -128,6 +135,12 @@ uint8_t seq_fxTakeEvent(void)
     seq_fxEvent = 0u;
     __set_PRIMASK(primask);
     return event;
+}
+
+void seq_setEffectAutomationTracks(uint8_t mask)
+{
+    /* Single-byte store; TIM3 reads it before queueing an FX marker. */
+    seq_effectAutomationTracks = mask;
 }
 uint8_t seq_rollRate = 0x08;				//start with roll rate = 1/16
 uint8_t seq_rollState = 0;					/**< each bit represents a voice. if bit is set, roll is active*/
@@ -206,6 +219,9 @@ typedef struct {
 _Static_assert(sizeof(seq_pending_automation_t) == 4u,
                "pending automation record must remain four bytes");
 #define SEQ_PENDING_TYPE_AUTOMATION_BIT (1u << 10u)
+/* Bit 11 marks a payload-free Effect step boundary; bits 0..9 keep step id. */
+#define SEQ_PENDING_TYPE_FX_STEP_BIT    (1u << 11u)
+#define SEQ_PENDING_STEP_ID_MASK        0x03FFu
 static volatile seq_pending_automation_t
     seq_pending_automation[SEQ_PENDING_BUF_COUNT];
 static volatile uint8_t seq_pending_automation_count = 0u;
@@ -376,6 +392,8 @@ static void seq_restoreAllSceneAutomation(void)
                 break;
             case SCENE_MOD_TARGET_KIND_FX_SEND:
             case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
+            /* `fxm` is cleared by the foreground FX reset latch, not in TIM3. */
+            case SCENE_MOD_TARGET_KIND_EFFECT_MORPH:
             default:
                 break;
             }
@@ -759,6 +777,34 @@ static void seq_queueStepAutomations(uint8_t track, uint8_t step)
 }
 
 /*
+ * Queue one Effect-overlay step boundary for a track (Session 072 step 9).
+ *
+ * The marker uses the same gate as step automation and precedes that step's
+ * entries. The foreground drain turns it into StepBegin, so parameters not
+ * rewritten by the owning track end their overlay. A full queue records the
+ * same PatternTrace overflow witness as automation entries.
+ */
+static void seq_queueEffectStepMarker(uint8_t track, uint8_t step)
+{
+    uint16_t step_id = (uint16_t)(track * NUM_STEPS + step);
+
+    if ((seq_effectAutomationTracks & (uint8_t)(1u << track)) == 0u)
+        return;
+    if (seq_pending_automation_count < SEQ_PENDING_BUF_COUNT) {
+        uint8_t pending_index = seq_pending_automation_count;
+
+        seq_pending_automation[pending_index].identity =
+            (uint16_t)(step_id | SEQ_PENDING_TYPE_FX_STEP_BIT);
+        seq_pending_automation[pending_index].payload = 0u;
+        seq_pending_automation_count = (uint8_t)(pending_index + 1u);
+        seq_pending_automation_drain = 1u;
+    } else {
+        patternTrace_recordOverflow(
+            (uint16_t)(step_id | SEQ_PENDING_TYPE_FX_STEP_BIT), 0u);
+    }
+}
+
+/*
  * Evaluate the conditional playback gate for one step.
  *
  * Input: resolved PatternData specials read from the dynamic block before the
@@ -808,7 +854,8 @@ static uint8_t seq_evaluateStepCondition(const pat_step_specials_t *sp)
  * uninitialized region never causes a stuck or runaway cursor.
  *
  * Affiliates: PatternData (region ownership, step trigger/automation data),
- * seq_drainPendingAutomation() (foreground consumer of queued automation).
+ * seq_drainPendingAutomation() (foreground consumer of queued automation and
+ * Effect overlay markers).
  */
 static void seq_advanceTrackStep(uint8_t track)
 {
@@ -864,9 +911,13 @@ static void seq_advanceTrackStep(uint8_t track)
 		 * the existing live-erase guard so the active edit track does not apply
 		 * a queued automation value while its trigger is being removed.
 		 */
-		if (step_allowed &&
-		    (!seq_eraseActive || track != menu_getActiveVoice()))
-			seq_queueStepAutomations(track, (uint8_t)seq_stepIndex[track]);
+        if (step_allowed &&
+            (!seq_eraseActive || track != menu_getActiveVoice())) {
+            /* Marker first; a same-step entry then re-holds its parameter. */
+            seq_queueEffectStepMarker(track,
+                                      (uint8_t)seq_stepIndex[track]);
+            seq_queueStepAutomations(track, (uint8_t)seq_stepIndex[track]);
+        }
 	}
 
 	if (seq_rollRate != 0xffu && (seq_rollState & (1u << track))) {
@@ -938,6 +989,10 @@ static uint8_t seq_applySceneAutomation(uint16_t target, uint8_t value)
 		/* Store the runtime overlay consumed by the mixer on the next block. */
 		preset_setFxSendStepOverride(descriptor->voice_slot, value);
 		break;
+	case SCENE_MOD_TARGET_KIND_EFFECT_MORPH:
+		/* `fxm` expands like voice Morph and stays runtime-only until reset. */
+		effects_setMorphAutomation(effect_expand7Linear(value));
+		break;
 	default:
 		return 0u;
 	}
@@ -953,13 +1008,25 @@ static uint8_t seq_applySceneAutomation(uint16_t target, uint8_t value)
  * descriptor targets update their owning runtime image through
  * InstrumentManager; Scene targets dispatch through seq_applySceneAutomation()
  * to their Preset/Scene owners and never enter the voice retrigger-restore
- * bitmap. The foreground follows the live producer count and atomically
- * resets only after no append raced the drain, while PatternTrace remains
- * independent of playback. Affiliate: main.c's pre-audio foreground sequence.
+ * bitmap. FX reset is taken before this pass; FX step markers bracket Effect
+ * overlay end candidates, and the final marker group is flushed after the
+ * queue handoff. The foreground follows the live producer count and atomically
+ * resets only after no append raced the drain. Affiliate: main.c's pre-audio
+ * foreground sequence.
  */
 void seq_drainPendingAutomation(void)
 {
     uint8_t i = 0u;
+
+    /* Reset Effect overlays before any records from the new pass apply. */
+    if (seq_effectAutomationReset) {
+        uint32_t primask = __get_PRIMASK();
+
+        __disable_irq();
+        seq_effectAutomationReset = 0u;
+        __set_PRIMASK(primask);
+        effects_automationReset();
+    }
 
     if (!seq_pending_automation_drain)
         return;
@@ -978,7 +1045,11 @@ void seq_drainPendingAutomation(void)
              * do not apply MIDI-CC-style 7-bit-to-8-bit expansion here. */
             uint8_t value = (uint8_t)((packed >> 9u) & 0x7Fu);
 
-            if ((identity & SEQ_PENDING_TYPE_AUTOMATION_BIT) != 0u) {
+            if ((identity & SEQ_PENDING_TYPE_FX_STEP_BIT) != 0u) {
+                /* One owning track's step boundary precedes its entries. */
+                effects_automationStepBegin((uint8_t)(
+                    (identity & SEQ_PENDING_STEP_ID_MASK) / NUM_STEPS));
+            } else if ((identity & SEQ_PENDING_TYPE_AUTOMATION_BIT) != 0u) {
                 if (instrumentParam_isVoiceParameter(target) &&
                     instrumentManager_targetValid(seq_activePattern, target,
                                                   INSTRUMENT_TARGET_AUTOMATION)) {
@@ -998,6 +1069,12 @@ void seq_drainPendingAutomation(void)
                     }
                 } else if (sceneModTarget_isSceneTarget(target)) {
                     (void)seq_applySceneAutomation(target, value);
+                } else if (effectTarget_isEffectId(target)) {
+                    /* Block-7 entries are owned by the writing track. */
+                    (void)effects_applyAutomation(
+                        (uint8_t)((identity & SEQ_PENDING_STEP_ID_MASK) /
+                                  NUM_STEPS),
+                        effectTarget_local(target), value);
                 }
             }
             i++;
@@ -1013,6 +1090,8 @@ void seq_drainPendingAutomation(void)
                 seq_pending_automation_drain = 0u;
                 __asm volatile("msr primask, %0" :: "r"(primask)
                                : "memory");
+                /* Close the last FX marker group after the producer lock ends. */
+                effects_automationStepFlush();
                 return;
             }
             __asm volatile("msr primask, %0" :: "r"(primask)

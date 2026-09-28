@@ -171,8 +171,8 @@ typedef struct {
  * What: called synchronously after an acquire/release changes the Effect
  * share. Why: the active Effect must re-seat its positions and re-clamp any
  * BUFFER_DEPENDENT parameters before the next render block. The callback must
- * not call back into acquire/release. It is registered by EffectsManager in a
- * later Phase 5 step and is NULL during Step 1.
+ * not call back into acquire/release. It is registered by effects_init(); it
+ * is NULL only before that call.
  */
 typedef void (*fxbuf_share_changed_fn)(const fx_share_t *share);
 

@@ -241,7 +241,7 @@ static void presetMorph_snapshotPassAmounts(const scene_t *scene)
          * Snapshot the effective base for this bounded pass.
          *
          * Inputs: retained Scene amount or an active step-automation
-         * override. Output: a stable pass amount; a later step request is
+         * override. Output: a stable pass amount; a new step request is
          * queued for the next complete pass rather than changing this pass
          * halfway through its descriptor walk.
          */

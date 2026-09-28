@@ -23,10 +23,38 @@ The linker-visible SRAM1 increase rounds to 16 bytes; the page-state object is
 14 bytes. Step 8 adds 8 bytes to `effects_state`, one SRAM1 FX-event latch,
 and 7 bytes of `menuEffects` hold/LED state. The current ST8 production link
 is `text=478,720`, `data=416`, `bss=426,160`, with a 479,136-byte flash
-payload. Step 5 adds the
-76-byte `effects_state` in SRAM1 (expanded to 84 bytes by Step 8), the
+payload. Step 9 adds the 184-byte `effects_automation` owner block and two
+Sequencer handshake bytes. The final ST9 production link is `text=482,632`,
+`data=416`, `bss=426,336`; its generated flash payload is 483,048 B. The
+Step 10 adds the layout predicate, mask revalidation, and EffectsManager
+fan-out wrappers with no SRAM allocation. The final ST10 production link is
+`text=483,024`, `data=416`, `bss=426,336`; its generated flash payload is
+483,440 B, leaving 8,080 B of flash headroom. The
+76-byte `effects_state` in SRAM1 was expanded to 84 bytes by Step 8, alongside the
 76-byte `effects_runtime` in DTCM, and the one-byte diagnostic registry result;
 exact section totals are recorded below.
+
+Step 11 is documentation and comment-only; the production link remains
+byte-identical to Step 10 (`text=483,024`, `data=416`, `bss=426,336`).
+
+The Phase 5 ledger is:
+
+- **SRAM1:**
+  - Scene records +6,752 B (a 420-byte Effect record, one settings byte and
+    one pad byte per Scene);
+  - HCNAMES growth +176 B (161×9 names, 161×2 sources), plus the 9-byte
+    `op_effect_display_name` and the 7-byte `op_effect_state`;
+  - 84-byte `effects_state` and 184-byte `effects_automation`;
+  - 180-byte FxBuffer handoff record (`fxbuf_handoffRecord`) and 28-byte
+    `fxbuf_state`;
+  - 3-byte sequencer FX latch and handshake;
+  - 21-byte `menuEffects` state.
+- **DTCM:**
+  - 76-byte `effects_runtime` union;
+  - 256-byte FX bus plus 32 bytes of send/return ramp state;
+  - the `.dtcm_fxbuf` arena of 126,624 bytes, after the 8,194-byte
+    `sine_table` moved to flash. The as-built ownership and address details are in
+`EFFECTS_BUS_REFERENCE.md` §7.
 
 Configuration: `DEV_MODE_LOGGING=1`, `DEV_LOGGING_IWDG=0`,
 `DEV_STALL_DETECTION=1`, `AUTOSAVE_TRACE_RECORD_COUNT=2048`,
@@ -38,9 +66,9 @@ Configuration: `DEV_MODE_LOGGING=1`, `DEV_LOGGING_IWDG=0`,
 | --- | ---: | ---: | ---: | ---: |
 | SRAM1 `.dma_nocache` | `0x20020000` | Part of SRAM1 | 3,100 | — |
 | SRAM1 `.data` | `0x20020c1c` | Part of SRAM1 | 416 | — |
-| SRAM1 `.bss` | `0x20020dc0` | Part of SRAM1 | 292,500 | — |
-| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | Part of SRAM1 | 292,916 | — |
-| **SRAM1 total** | `0x20020000` | **376,832** | **296,016** | **80,816** |
+| SRAM1 `.bss` | `0x20020dc0` | Part of SRAM1 | 292,676 | — |
+| SRAM1 normal (`.data` + `.bss`) | `0x20020c1c` | Part of SRAM1 | 293,092 | — |
+| **SRAM1 total** | `0x20020000` | **376,832** | **296,192** | **80,640** |
 | DTCM `.dtcm` | `0x20000000` | Part of DTCM | 512 | — |
 | DTCM `.dtcmz` | `0x20000200` | Part of DTCM | 3,936 | — |
 | DTCM `.dtcm_fxbuf` | `0x20001160` | Part of DTCM | 126,624 | 0 (reserved arena) |
@@ -107,7 +135,9 @@ from this owner map.
 | `FxBuffer.c`: `fxbuf_state` | 28 | Linker arena base/size, twelve unit owners, count, and share callback. |
 | `FxBuffer.c`: `fxbuf_handoffRecord` | 180 | Effect/voice handoff metadata and arena-relative positions. |
 | `EffectsManager.c`: `effects_state` | 84 | Active type/Scene, force flag, 64-byte last-applied image, FX step/selection/held-Morph state, sequence signature, and common runtime values. |
+| `EffectsManager.c`: `effects_automation` | 184 | Effect Pattern overlays, owner/end masks, `fxm` override, and 6 × 2 base-independent LFO contribution entries. |
 | `sequencer.c`: `seq_fxEvent` | 1 | TIM3-to-foreground newest-wins RESET/STEP latch; no Scene, DSP, or LED work occurs in the ISR. |
+| `sequencer.c`: `seq_effectAutomationTracks` / `seq_effectAutomationReset` | 2 | Owner-track publication and reset latch for the foreground Effect overlay drain. |
 | `menuEffects.c`: page state | 21 | Eight SELECT screen cells, Morph-view flag, `typ` transaction state, last Scene/type tracking, SEQ hold mask, and LED repaint signature; SRAM1, foreground UI lifetime. |
 
 Other SRAM1 state comprises filesystem operation cursors and text buffers,

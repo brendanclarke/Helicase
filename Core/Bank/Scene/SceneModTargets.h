@@ -29,19 +29,19 @@ typedef enum {
      */
     SCENE_MOD_TARGET_KIND_AUDIO_OUT,
     /*
-     * Per-voice FX send amount retained ahead of the Phase 5 FX bus.
+     * Per-voice FX send amount.
      *
      * Inputs: voice_slot and a 0..127 stored value. Output: step automation
-     * reaches preset_setVoiceFxSendAmount(); the setter currently retains the
-     * value without an audible bus effect.
+     * sets the runtime send overlay; the mixer applies the effective send to
+     * the live FX bus each block (Session 072 step 5).
      */
     SCENE_MOD_TARGET_KIND_FX_SEND,
     /*
-     * Scene Effect Morph amount, `fxm` (ID 404, reserved in Step 3).
+     * Scene Effect Morph amount, `fxm` (ID 404).
      *
      * Effect parameter cells are separate block-7 targets; this kind is only
-     * the Scene-level Morph amount and remains unavailable to pickers until
-     * the later runtime apply paths assign use flags.
+     * the Scene-level Morph amount. Step automation and LFO apply runtime
+     * overlays through EffectsManager; velocity is not offered.
      */
     SCENE_MOD_TARGET_KIND_EFFECT_MORPH
 } scene_mod_target_kind_t;
@@ -76,7 +76,8 @@ typedef struct {
  * instrument descriptor table. Voice descriptor targets stay in
  * InstrumentManager so swappable instruments keep their own parameter lists;
  * this module owns only Scene-level targets such as per-voice Morph, global
- * decimation, and future effects parameters.
+ * decimation, audio routing, FX sends, and Effect Morph (`fxm`). Effect
+ * parameters are block-7 IDs owned by EffectsManager.
  *
  * Inputs to the helpers are stored target IDs from menu/Scene parameter cells.
  * Outputs are validation, display text, and decoded range/kind metadata used by

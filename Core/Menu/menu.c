@@ -46,6 +46,7 @@
 #include "SampleMemory.h"
 #include "sequencer.h"
 #include "StepScale.h"
+#include "EffectsManager.h"
 #include "PatternData.h"
 #include "PatternStackService.h"
 #include "SceneData.h"
@@ -519,6 +520,13 @@ static void menu_startSoundApply(uint8_t updateGap,
                                  uint8_t showStaleWarning,
                                  fs_stale_warning_source_t staleWarning)
 {
+    /*
+     * Kit/Scene/Bank/All/Performance Load has committed retained types into
+     * one or more Scenes. Repair directional VOICE masks before any later
+     * edit can fan out through a stale layout (plan §7.4 F5; S072 Step 10).
+     * This also covers the pre-audio boot-synchronous path.
+     */
+    bank_revalidateVoiceEditMasks();
     if (audioCodec_renderCount == 0u) {
         uint8_t final_index_pending = 0u;
 
@@ -712,6 +720,12 @@ static void menu_startInstrumentApply(uint8_t scene_index,
     menu_storageBusy = 1u;
     preset_startInstrumentApply(scene_index, slot,
                                 mark_autosave_whole_instrument);
+    /*
+     * The staged Instrument commit can change one slot's layout. Drop stale
+     * members from every directional VOICE mask before the next edit
+     * (S072 Step 10 F5); the repair is foreground-only and allocation-free.
+     */
+    bank_revalidateVoiceEditMasks();
 }
 
 static void menu_startKitMorphApply(void)
@@ -2558,6 +2572,9 @@ static void menu_applyEffectMarkers(void)
                                : &editDisplayBuffer[1][4u * i];
         if (cell.fx.kind == MENU_FX_CELL_PARAM)
             va_formatValue3(&cell, value, field);
+        else if (cell.fx.kind == MENU_FX_CELL_MORPH_AMOUNT)
+            /* Held `mrp` is a plain number, so show its lock value directly. */
+            numtostrpu(field, value, ' ');
         else
             (void)menuEffects_formatValue3(&cell.fx, field);
         if (!locked)
@@ -3238,6 +3255,15 @@ static uint8_t menu_morphAutomationExpand(uint8_t stored)
     return (stored >= 127u) ? 255u : (uint8_t)(stored * 2u);
 }
 
+/* Scene Morph automation uses the same seven-bit storage as voice Morph. */
+static uint8_t menu_sceneTargetIsMorph(
+    const scene_mod_target_descriptor_t *descriptor)
+{
+    return (uint8_t)(descriptor &&
+        (descriptor->kind == SCENE_MOD_TARGET_KIND_VOICE_MORPH ||
+         descriptor->kind == SCENE_MOD_TARGET_KIND_EFFECT_MORPH));
+}
+
 static void menu_sceneSettingFaderName(uint8_t value, char *dst)
 {
     /*
@@ -3554,12 +3580,13 @@ static uint8_t menu_lfoTargetContext(const menu_cell_t *cell,
     ctx->raw_target_voice = raw_voice;
     if (raw_voice < INSTRUMENT_TARGET_VOICE_FIRST)
         ctx->target_voice = 1u;
-    else if (raw_voice > INSTRUMENT_TARGET_VOICE_SCENE)
-        ctx->target_voice = INSTRUMENT_TARGET_VOICE_SCENE;
+    else if (raw_voice > INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST)
+        ctx->target_voice = INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST;
     else
         ctx->target_voice = raw_voice;
+    /* Non-voice namespaces (`scn`, `fx`) have no target slot. */
     ctx->target_is_scene =
-        (uint8_t)(ctx->target_voice == INSTRUMENT_TARGET_VOICE_SCENE);
+        (uint8_t)(ctx->target_voice > INSTRUMENT_TARGET_VOICE_LAST);
     ctx->target_slot = ctx->target_is_scene
         ? 0xffu
         : (uint8_t)(ctx->target_voice - 1u);
@@ -3637,8 +3664,8 @@ static uint8_t menu_lfoTargetCommitVoiceAndReconcile(
         return 0u;
     if (raw_voice < INSTRUMENT_TARGET_VOICE_FIRST)
         voice = INSTRUMENT_TARGET_VOICE_FIRST;
-    else if (raw_voice > INSTRUMENT_TARGET_VOICE_SCENE)
-        voice = INSTRUMENT_TARGET_VOICE_SCENE;
+    else if (raw_voice > INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST)
+        voice = INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST;
     else
         voice = (uint8_t)raw_voice;
 
@@ -3648,8 +3675,9 @@ static uint8_t menu_lfoTargetCommitVoiceAndReconcile(
         menu_lfo_target_context_t next = *ctx;
         next.raw_target_voice = voice;
         next.target_voice = voice;
+        /* Both `scn` and `fx` are non-voice namespaces. */
         next.target_is_scene =
-            (uint8_t)(voice == INSTRUMENT_TARGET_VOICE_SCENE);
+            (uint8_t)(voice > INSTRUMENT_TARGET_VOICE_LAST);
         next.target_slot = next.target_is_scene
             ? 0xffu
             : (uint8_t)(voice - 1u);
@@ -3673,8 +3701,8 @@ static uint8_t menu_lfoTargetEditVoice(const menu_cell_t *cell, int16_t delta)
      *
      * Inputs: the resolved voice target cell and signed movement delta from
      * either the main encoder or an endless pot. Outputs: the target voice is
-     * clamped to 1..INSTRUMENT_TARGET_VOICE_SCENE, where the final value is
-     * displayed as `scn`, and the sibling target parameter is reconciled against the new
+     * clamped to 1..INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST (`scn` = 7,
+     * `fx` = 8), and the sibling target parameter is reconciled against the new
      * selected namespace.
      *
      * Why this is a separate edit helper: encoder and knob paths previously
@@ -3691,8 +3719,8 @@ static uint8_t menu_lfoTargetEditVoice(const menu_cell_t *cell, int16_t delta)
     next = (int16_t)ctx.target_voice + delta;
     if (next < (int16_t)INSTRUMENT_TARGET_VOICE_FIRST)
         next = INSTRUMENT_TARGET_VOICE_FIRST;
-    else if (next > (int16_t)INSTRUMENT_TARGET_VOICE_SCENE)
-        next = INSTRUMENT_TARGET_VOICE_SCENE;
+    else if (next > (int16_t)INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST)
+        next = INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST;
     return menu_lfoTargetCommitVoiceAndReconcile(cell, &ctx, (uint16_t)next);
 }
 
@@ -3913,6 +3941,19 @@ static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
      * this renderer descriptor-only prevents redundant voice text from leaking
      * into any current or future descriptor-target browser.
      */
+    /* Effect destinations use the active Scene's registry descriptor. */
+    if (effectTarget_isEffectId(target)) {
+        const effect_param_descriptor_t *effect_descriptor =
+            effects_targetDescriptor(scene_getActiveIndex(), target,
+                                     INSTRUMENT_TARGET_MODULATION);
+
+        if (effect_descriptor)
+            menu_copyPaddedField(valueAsText,
+                                 effect_descriptor->base.short_name, 3u);
+        else
+            memcpy(valueAsText, menuText_off, 3);
+        return;
+    }
     if (target == INSTRUMENT_PARAM_INVALID ||
         (!instrumentParam_isVoiceParameter(target) &&
          !sceneModTarget_isSceneTarget(target))) {
@@ -3946,6 +3987,22 @@ static void menu_displayInstrumentTargetFull(uint16_t target)
     const kit_instrument_slot_t *instrument;
     const ParamDescriptor *descriptor;
 
+    /* Effect destination: category and long name, like descriptor rows. */
+    if (effectTarget_isEffectId(target)) {
+        const effect_param_descriptor_t *effect_descriptor =
+            effects_targetDescriptor(scene_getActiveIndex(), target,
+                                     INSTRUMENT_TARGET_MODULATION);
+
+        if (!effect_descriptor) {
+            memcpy(&editDisplayBuffer[1][0], menuText_off, 3);
+            return;
+        }
+        menu_copyPaddedField(&editDisplayBuffer[1][0],
+                             effect_descriptor->base.category, 8u);
+        menu_copyPaddedField(&editDisplayBuffer[1][8],
+                             effect_descriptor->base.long_name, 8u);
+        return;
+    }
     if (target == INSTRUMENT_PARAM_INVALID ||
         (!instrumentParam_isVoiceParameter(target) &&
          !sceneModTarget_isSceneTarget(target))) {
@@ -4019,8 +4076,8 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
     } else if (dtype == DTYPE_VOICE_LFO && menu_cellIsLfoTargetVoice(cell)) {
         if (raw < INSTRUMENT_TARGET_VOICE_FIRST)
             raw = INSTRUMENT_TARGET_VOICE_FIRST;
-        else if (raw > INSTRUMENT_TARGET_VOICE_SCENE)
-            raw = INSTRUMENT_TARGET_VOICE_SCENE;
+        else if (raw > INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST)
+            raw = INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST;
         value = (uint8_t)raw;
     }
 
@@ -4092,6 +4149,10 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         if (menu_cellIsLfoTargetVoice(cell) &&
             value == INSTRUMENT_TARGET_VOICE_SCENE) {
             memcpy(valueAsText, "scn", 3);
+        } else if (menu_cellIsLfoTargetVoice(cell) &&
+                   value == INSTRUMENT_TARGET_VOICE_EFFECT) {
+            /* Effect parameter namespace (Session 072 step 9). */
+            memcpy(valueAsText, "fx ", 3);
         } else {
             numtostrpu(valueAsText, value, ' ');
         }
@@ -4205,8 +4266,8 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
     if (menu_cellIsLfoTargetVoice(cell)) {
         if (*value < INSTRUMENT_TARGET_VOICE_FIRST)
             *value = INSTRUMENT_TARGET_VOICE_FIRST;
-        else if (*value > INSTRUMENT_TARGET_VOICE_SCENE)
-            *value = INSTRUMENT_TARGET_VOICE_SCENE;
+        else if (*value > INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST)
+            *value = INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST;
     }
 }
 
@@ -6427,13 +6488,19 @@ uint8_t menu_voiceHeldSceneButtonPressed(uint8_t scene_index)
      *
      * Input: physical SEQ button index while VOICE is held. Output: BankData's
      * scene_mask_voice_edit flips that Scene bit when the Scene is present.
-     * The active Scene cannot be removed because BankData normalizes the mask
-     * after every toggle. The function returns nonzero when it consumes the
-     * button so ButtonHandler does not reinterpret the press as step editing.
+     * Turning a bit on additionally requires the same Effect type and all six
+     * Instrument slot types as the active Scene. A mismatch is consumed with
+     * no toggle or flash, while turning a bit off remains allowed. The active
+     * Scene cannot be removed because BankData normalizes the mask after every
+     * toggle. The function returns nonzero when it consumes the button so
+     * ButtonHandler does not reinterpret the press as step editing.
      */
     if (scene_index >= SCENE_COUNT || scene_index >= 16u)
         return 0u;
     if (!bank_scenePresent(scene_index))
+        return 1u;
+    if (!bank_sceneInVoiceEditMask(scene_index) &&
+        !scene_editLayoutMatches(scene_getActiveIndex(), scene_index))
         return 1u;
     bank_toggleSceneMaskVoiceEdit(scene_index);
     menu_refreshVoiceHeldSceneLeds();
@@ -8605,6 +8672,97 @@ static uint8_t menu_stepAutomationTargetUsed(
 }
 
 /*
+ * `fx` step-automation helpers (Session 072 step 9; plan §10.2, View A).
+ *
+ * Category 7 lists the viewed Scene's AUTOMATABLE Effect rows in registry
+ * order. WIDE8 rows display their expanded value; Pattern still stores seven
+ * bits. The Pattern off sentinel is excluded before every block-7 test.
+ */
+static uint8_t menu_stepAutomationIsEffect(uint16_t target)
+{
+    return (uint8_t)(target != PAT_AUTOMATION_TARGET_OFF &&
+                     effectTarget_isEffectId(target));
+}
+
+static const effect_param_descriptor_t *menu_stepAutomationEffectDescriptor(
+    uint8_t scene, uint16_t target)
+{
+    return menu_stepAutomationIsEffect(target)
+        ? effects_targetDescriptor(scene, target, INSTRUMENT_TARGET_AUTOMATION)
+        : 0;
+}
+
+static uint8_t menu_effectAutomationIsWide(
+    const effect_param_descriptor_t *descriptor)
+{
+    return (uint8_t)(descriptor &&
+                     (descriptor->effect_flags & EFFECT_PARAM_FLAG_WIDE8) != 0u &&
+                     descriptor->expand7);
+}
+
+static void menu_formatEffectAutomationValue3(
+    const effect_param_descriptor_t *descriptor, uint8_t value, char *buf)
+{
+    if (menu_effectAutomationIsWide(descriptor))
+        numtostrpu(buf, descriptor->expand7(value), ' ');
+    else
+        menu_formatAutomationValue3(descriptor ? &descriptor->base : 0,
+                                    value, buf);
+}
+
+static uint8_t menu_effectAutomationMax(
+    const effect_param_descriptor_t *descriptor)
+{
+    uint8_t max_val;
+
+    if (!descriptor || menu_effectAutomationIsWide(descriptor))
+        return 127u;
+    max_val = menu_automationValueMax(&descriptor->base);
+    return (descriptor->max_value < max_val) ? descriptor->max_value : max_val;
+}
+
+/* Step the valid Effect target list while skipping duplicate page entries. */
+static instrument_param_id_t menu_stepAutomationEffectNext(
+    uint8_t scene, instrument_param_id_t current, int8_t direction,
+    const pat_automation_entry_t *autos, uint8_t count, uint8_t exclude)
+{
+    instrument_param_id_t candidate = menu_stepAutomationIsEffect(current)
+        ? current : INSTRUMENT_PARAM_INVALID;
+    uint8_t i;
+
+    for (i = 0u; i < EFFECT_PARAM_COUNT; i++) {
+        instrument_param_id_t next = effects_stepTarget(
+            scene, candidate, direction, INSTRUMENT_TARGET_AUTOMATION);
+
+        if (next == candidate)
+            return current;
+        if (next == INSTRUMENT_PARAM_INVALID)
+            return (direction < 0) ? INSTRUMENT_PARAM_INVALID : current;
+        if (!menu_stepAutomationTargetUsed(autos, count, next, exclude))
+            return next;
+        candidate = next;
+    }
+    return current;
+}
+
+/* Render an Effect category and long name into the detail target row. */
+static void menu_stepAutomationEffectLabel(
+    const effect_param_descriptor_t *descriptor)
+{
+    uint8_t i = 0u;
+    uint8_t j = 0u;
+
+    while (i < 14u && descriptor->base.category &&
+           descriptor->base.category[i]) {
+        editDisplayBuffer[1][2u + i] = descriptor->base.category[i];
+        i++;
+    }
+    while (i < 14u && descriptor->base.long_name &&
+           descriptor->base.long_name[j])
+        editDisplayBuffer[1][2u + i++] = descriptor->base.long_name[j++];
+}
+
+/*
  * Find the first unused automatable descriptor for one target slot.
  *
  * Inputs: viewed Scene, zero-based slot, and current step list. Output: the
@@ -8765,9 +8923,10 @@ static uint8_t menu_stepAutomationEnsurePage(void)
  * Classify one stored STEP automation target for VOI rendering/editing.
  *
  * Inputs: Pattern's canonical target or PAT_AUTOMATION_TARGET_OFF. Output:
- * 0..5 for voice slots, 6 for Scene targets, and 7 for the empty Phase-5 fx
- * category. The wide invalid sentinel is accepted as an input alias so stale
- * editor state cannot be mistaken for voice slot zero.
+ * 0..5 for voice slots, 6 for Scene targets, and 7 for the `fx` Effect
+ * category (block 7, Session 072 step 9). The wide invalid sentinel and the
+ * Pattern off value are accepted as aliases so stale editor state cannot be
+ * mistaken for voice slot zero.
  */
 static uint8_t menu_stepAutomationCategory(uint16_t target)
 {
@@ -8798,6 +8957,22 @@ static uint8_t menu_stepAutomationTargetOff(uint16_t target)
 static uint8_t menu_stepAutomationCurrentValue(
     uint8_t scene, instrument_param_id_t target)
 {
+    /* Effect rows use seven-bit storage, with WIDE8 inverse expansion. */
+    if (menu_stepAutomationIsEffect(target)) {
+        const effect_param_descriptor_t *descriptor =
+            menu_stepAutomationEffectDescriptor(scene, target);
+        uint8_t value;
+
+        if (!descriptor)
+            return 0u;
+        value = effects_getParameter(scene, effectTarget_local(target),
+                                     EFFECT_IMAGE_NORMAL);
+        if (menu_effectAutomationIsWide(descriptor))
+            return menu_morphAutomationStore(value);
+        if (value > descriptor->max_value)
+            value = descriptor->max_value;
+        return (value > 127u) ? 127u : value;
+    }
     if (instrumentParam_isVoiceParameter(target) &&
         instrumentManager_targetValid(scene, target,
                                       INSTRUMENT_TARGET_AUTOMATION)) {
@@ -8836,6 +9011,9 @@ static uint8_t menu_stepAutomationCurrentValue(
         case SCENE_MOD_TARGET_KIND_FX_SEND:
             value = scene_getVoiceFxSendAmount(scene, descriptor->voice_slot);
             break;
+        case SCENE_MOD_TARGET_KIND_EFFECT_MORPH:
+            /* `fxm` stores seven bits like voice Morph. */
+            return menu_morphAutomationStore(scene_getEffectMorphAmount(scene));
         default:
             value = 0u;
             break;
@@ -8915,7 +9093,8 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
          *
          * Inputs: signed movement, current category, and duplicate target
          * list. Output: descriptor traversal for voice categories, filtered
-         * Scene-target traversal for `scn`, and no mutation for empty `fx`.
+         * Scene-target traversal for `scn`, and registry-ordered Effect
+         * traversal for `fx`.
          * Movement from the D17 off sentinel selects the first available
          * target in the remembered category; movement backward from a first
          * target returns to the same sentinel.
@@ -8943,6 +9122,10 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
                         break;
                     new_target = next;
                 }
+            } else if (menu_stepAutoCategory == 7u) {
+                /* `fx`: first unused AUTOMATABLE Effect row. */
+                new_target = menu_stepAutomationEffectNext(
+                    scene, INSTRUMENT_PARAM_INVALID, 1, autos, count, page);
             } else {
                 return 0u;
             }
@@ -8969,6 +9152,9 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
                 }
                 new_target = candidate;
             }
+        } else if (menu_stepAutomationIsEffect(old_target)) {
+            new_target = menu_stepAutomationEffectNext(
+                scene, old_target, inc, autos, count, page);
         } else {
             return 0u;
         }
@@ -9007,9 +9193,12 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
             const scene_mod_target_descriptor_t *scene_desc =
                 sceneModTarget_descriptor(vt);
             if (scene_desc)
-                max_val = (scene_desc->kind ==
-                           SCENE_MOD_TARGET_KIND_VOICE_MORPH)
+                max_val = menu_sceneTargetIsMorph(scene_desc)
                     ? 127u : (uint8_t)scene_desc->max_value;
+        } else if (menu_stepAutomationIsEffect(vt)) {
+            /* Effect Pattern values remain seven-bit. */
+            max_val = menu_effectAutomationMax(
+                menu_stepAutomationEffectDescriptor(scene, vt));
         }
         next = (int16_t)autos[page].value + inc;
         if (next < 0)
@@ -9117,6 +9306,8 @@ static void menu_repaintStepAutomation(void)
 
         if (sceneModTarget_isSceneTarget(target))
             menu_stepAutoCategory = 6u;
+        else if (menu_stepAutomationIsEffect(target))
+            menu_stepAutoCategory = 7u;
         else if (instrumentParam_isVoiceParameter(target))
             menu_stepAutoCategory = instrumentParam_slot(target);
 
@@ -9124,6 +9315,8 @@ static void menu_repaintStepAutomation(void)
             memcpy(&editDisplayBuffer[0][0], "Target  Voice", 13u);
             if (sceneModTarget_isSceneTarget(target)) {
                 menu_copyPaddedField(&editDisplayBuffer[1][2], "scn", 3u);
+            } else if (menu_stepAutomationIsEffect(target)) {
+                menu_copyPaddedField(&editDisplayBuffer[1][2], "fx", 3u);
             } else if (instrumentParam_isVoiceParameter(target) &&
                 instrumentManager_targetValid(scene, target,
                                               INSTRUMENT_TARGET_AUTOMATION)) {
@@ -9205,6 +9398,16 @@ static void menu_repaintStepAutomation(void)
                     label = "Invalid";
                     label_width = 7u;
                 }
+            } else if (menu_stepAutomationIsEffect(target)) {
+                const effect_param_descriptor_t *effect_descriptor =
+                    menu_stepAutomationEffectDescriptor(scene, target);
+
+                if (effect_descriptor)
+                    menu_stepAutomationEffectLabel(effect_descriptor);
+                else {
+                    label = "Invalid";
+                    label_width = 7u;
+                }
             } else {
                 label = "Invalid";
                 label_width = 7u;
@@ -9237,10 +9440,14 @@ static void menu_repaintStepAutomation(void)
                     const scene_mod_target_descriptor_t *scene_descriptor =
                         sceneModTarget_descriptor(target);
                     uint8_t display_value = amt_value;
-                    if (scene_descriptor && scene_descriptor->kind ==
-                            SCENE_MOD_TARGET_KIND_VOICE_MORPH)
+                    if (scene_descriptor && menu_sceneTargetIsMorph(
+                            scene_descriptor))
                         display_value = menu_morphAutomationExpand(amt_value);
                     numtostrpu(amt_out, display_value, ' ');
+                } else if (menu_stepAutomationIsEffect(target)) {
+                    menu_formatEffectAutomationValue3(
+                        menu_stepAutomationEffectDescriptor(scene, target),
+                        amt_value, amt_out);
                 } else {
                     menu_formatAutomationValue3(desc, amt_value, amt_out);
                 }
@@ -9281,6 +9488,8 @@ static void menu_repaintStepAutomation(void)
 
         if (sceneModTarget_isSceneTarget(target))
             menu_stepAutoCategory = 6u;
+        else if (menu_stepAutomationIsEffect(target))
+            menu_stepAutoCategory = 7u;
         else if (valid && instrumentParam_isVoiceParameter(target))
             menu_stepAutoCategory = instrumentParam_slot(target);
 
@@ -9312,6 +9521,16 @@ static void menu_repaintStepAutomation(void)
                                      descriptor->short_name, 3u);
             else
                 menu_copyPaddedField(&editDisplayBuffer[1][9], "inv", 3u);
+        } else if (menu_stepAutomationIsEffect(target)) {
+            /* View A `fx` row: category plus the Effect row short label. */
+            const effect_param_descriptor_t *effect_descriptor =
+                menu_stepAutomationEffectDescriptor(scene, target);
+
+            memcpy(&editDisplayBuffer[1][5], "fx ", 3u);
+            menu_copyPaddedField(&editDisplayBuffer[1][9],
+                                 effect_descriptor
+                                     ? effect_descriptor->base.short_name
+                                     : "inv", 3u);
         } else if (menu_stepAutoCategory < 6u) {
             numtostru(&editDisplayBuffer[1][5],
                       (uint8_t)(menu_stepAutoCategory + 1u));
@@ -9329,10 +9548,13 @@ static void menu_repaintStepAutomation(void)
             const scene_mod_target_descriptor_t *scene_descriptor =
                 sceneModTarget_descriptor(target);
             uint8_t display_value = autos[page].value;
-            if (scene_descriptor && scene_descriptor->kind ==
-                    SCENE_MOD_TARGET_KIND_VOICE_MORPH)
+            if (scene_descriptor && menu_sceneTargetIsMorph(scene_descriptor))
                 display_value = menu_morphAutomationExpand(display_value);
             numtostrpu(&editDisplayBuffer[1][13], display_value, ' ');
+        } else if (menu_stepAutomationIsEffect(target)) {
+            menu_formatEffectAutomationValue3(
+                menu_stepAutomationEffectDescriptor(scene, target),
+                autos[page].value, &editDisplayBuffer[1][13]);
         } else {
             menu_formatAutomationValue3(descriptor, autos[page].value,
                                         &editDisplayBuffer[1][13]);
@@ -9391,8 +9613,8 @@ static void menu_repaintGeneric(void)
                    menu_cellIsLfoTargetVoice(&cell)) {
             if (curParmVal < INSTRUMENT_TARGET_VOICE_FIRST)
                 curParmVal = INSTRUMENT_TARGET_VOICE_FIRST;
-            else if (curParmVal > INSTRUMENT_TARGET_VOICE_SCENE)
-                curParmVal = INSTRUMENT_TARGET_VOICE_SCENE;
+            else if (curParmVal > INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST)
+                curParmVal = INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST;
         }
 
         memset(&editDisplayBuffer[0][0], ' ', 16);
@@ -9518,6 +9740,10 @@ static void menu_repaintGeneric(void)
                 if (menu_cellIsLfoTargetVoice(&cell) &&
                     value == INSTRUMENT_TARGET_VOICE_SCENE) {
                     memcpy(&editDisplayBuffer[1][13], "scn", 3);
+                } else if (menu_cellIsLfoTargetVoice(&cell) &&
+                           value == INSTRUMENT_TARGET_VOICE_EFFECT) {
+                    /* Effect parameter namespace (Session 072 step 9). */
+                    memcpy(&editDisplayBuffer[1][13], "fx ", 3);
                 } else {
                     numtostrpu(&editDisplayBuffer[1][13], value, ' ');
                 }
@@ -11405,6 +11631,12 @@ void menu_pollPresetStatus(void)
          */
         if (!preset_completedBankLoadedScene()) {
             preset_ackStatus();
+            /*
+             * Empty-Bank loading restored bankset.bcg masks without a Scene
+             * commit. Validate them before the fallback Scene/Kit ladder can
+             * expose the mask to edits (S072 Step 10 F5).
+             */
+            bank_revalidateVoiceEditMasks();
             if (preset_loadFirstAvailableSceneOrKit()) {
                 menu_storageBusy = 1u;
             } else {

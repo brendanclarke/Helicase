@@ -91,9 +91,11 @@ quiet window scheduling, and shared background CPU budget):
 
 Not implemented and not to be inferred from the reader/writer:
 
-- Root Effect library promotion and the Effect UI remain deferred. Scene/Bank
-  Effect name persistence, the 512-byte Effect payload projection, and the
-  narrow Effect boot reader are implemented by Session 072 ST6.
+- Root Effect library promotion (the `/Effect/` browser and Effect Load/Save
+  item) remains deferred. Scene/Bank Effect name persistence, the 512-byte
+  Effect payload projection, the narrow Effect boot reader (ST6), and the
+  Effect page, FX sequencer, automation and fan-out edits (ST7–ST10) are
+  implemented. Every Effect edit is marked through SceneData.
 - crash-recoverable promotion into explicit Bank library files;
 - a second resident Bank, background staging Bank, or general object journal.
 
@@ -162,8 +164,8 @@ Each Scene region reserves:
 - two HCNAMES source bytes immediately after the name;
 - 118 Scene-parameter bytes, currently 41 live (index 40 is Effect Morph
   amount);
-- 512 Effect bytes: 3 type bytes, 8 name bytes, 419 live parameter cells, and
-  82 reserved bytes;
+  - 512 Effect bytes: 3 type bytes, 8 name bytes, 419 live parameter cells, and
+    80 reserved bytes;
 - 1,280 Kit bytes containing eight name bytes, a two-byte HCNAMES source
   field, 118 parameter/reserve bytes, and six fixed 192-byte Instrument
   records.
@@ -197,21 +199,21 @@ The relative Effect region is projected without copying the retained C record:
 | Relative offset | Bytes | Meaning |
 | ---: | ---: | --- |
 | 0..2 | 3 | Type token; live from the registry token (`off` or `flt`) |
-| 3..10 | 8 | Effect name; not live until the HCNAMES step |
+| 3..10 | 8 | Effect name; baseline mirror of HCNAMES row `145 + scene`, not a live dirty cell |
 | 11 | 1 | Sequencer run mode |
 | 12 | 1 | Sequencer length |
 | 13 | 1 | Sequencer step scale |
 | 14..77 | 64 | Normal parameter cells |
 | 78..141 | 64 | Morph parameter cells |
 | 142..429 | 288 | Sixteen steps × (16-bit lock mask + 16 lane values) |
-| 430..511 | 82 | Reserved |
+| 430..431 | 2 | Effect source, projected from HCNAMES row `145 + scene` |
+| 432..511 | 80 | Reserved |
 
 The 419 live Effect cells begin at relative offset 11. Their ordered index
 space is owned by `Autosave.c/.h`; the retained record is owned by SceneData.
 The type bytes are additionally marked by `autosave_markEffectDirty()` and
-project the registry token. The Effect source is projected at relative bytes
-430..431 from HCNAMES row `145 + scene`; Effect name bytes 3..10 are a
-baseline mirror only and are not live dirty-mask payload.
+project the registry token. Effect name bytes 3..10 are a baseline mirror only
+and are not live dirty-mask payload.
 
 Header requirements:
 
@@ -394,9 +396,11 @@ Use only the typed API:
 - `autosave_markKitParameterDirty()`;
 - `autosave_markInstrumentNormalParameterDirty()`;
 - `autosave_markInstrumentMorphParameterDirty()`;
-- `autosave_markSourceDirty()` for one HCNAMES-addressed Scene, Kit, or
+  - `autosave_markSourceDirty()` for one HCNAMES-addressed Scene, Kit, or
   Instrument source field;
-- future Effect marker functions only after Effect ownership exists.
+- `autosave_markEffectParameterDirty()` / `autosave_markEffectDirty()` for one
+  Effect cell or the whole Effect region (SceneData Effect setters and
+  whole-record commits).
 
 Whole-object helpers mark currently gettable cells but do not copy data.
 Successful root Instrument Load marks that slot's three type bytes, two source
@@ -827,8 +831,9 @@ For each new retained scalar:
 8. test mutation, writer error rollback, restart, AutoSave off, and power
    interruption at payload/CRC/commit boundaries appropriate to the change.
 
-Effect registry, runtime, and boot-reader support remains a feature extension,
-not a scalar addition. Any future
+Adding an Effect **type** needs no AutoSave change: the region is
+registry-projected (see `EFFECTS_BUS_REFERENCE.md` §12.3). A new Effect
+**region field** is a format change and follows the steps above. Any future
 Pattern wire/schema expansion likewise requires explicit versioning, bounded
 snapshot/read behavior, recovery semantics, and SRAM approval.
 
@@ -842,10 +847,10 @@ and shares the existing scheduler/facade. Do not borrow the 9,000-byte name cach
 Hardware validation is accepted for scalar Scene, Kit, Instrument, MIDI
 channel/note, the root Scene publication boundary, and functional Pattern
 AutoSave across all 16 Scenes. No user-changeable Bank scalar exists for an
-extra direct UI test. ST6's Effect registry projection, Scene Morph byte,
-`.fx` load/save, and Effect boot-reader behavior are implemented but remain
-card-gate pending; the root Effect browser and full FX UI are intentionally
-excluded.
+extra direct UI test. The S072 Effect projection, Scene Morph byte, `.fx`
+load/save and Effect boot reader are implemented; their card gates are part of
+the Phase 5 acceptance checklist (`072_SESSION_HANDOFF_LOG.md`). The root
+Effect browser remains deferred.
 
 Session 061 hardware-accepted the HCNAMES-authoritative reader with
 `SD_CARD_READER_9`, produced from a Bank 001 Load followed by root Scene 008

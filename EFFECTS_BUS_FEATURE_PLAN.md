@@ -1,11 +1,13 @@
 # Effects Bus Feature Plan — Phase 5
 
-Status: **planning draft, revision 4. The user's review answers (A1–A46,
-F1–F6, G1–G7) are folded in; Steps 1–7 are now implemented in source, with
-the Step 7 hardware walk-through pending.** This document turns Phase 5 of
-`SCOPING_TARGETS.md` and the session-072 direction into one implementation plan.
-Where the session direction differs from `SCOPING_TARGETS.md`, the session
-direction wins (§2).
+Status: **implemented (Session 072, Steps 1–11), revision 5.** This document
+is the design record: decisions A1–A46, F1–F6 and G1–G7 and their reasons.
+The as-built reference is
+`knowledge_files/specification_reference/EFFECTS_BUS_REFERENCE.md`; where they
+differ, the reference describes the code (its §13 lists the differences).
+Hardware acceptance is tracked in
+`knowledge_files/log_archive/072_SESSION_HANDOFF_LOG.md`. Where the session
+direction differs from `SCOPING_TARGETS.md`, the session direction wins (§2).
 
 Numbers marked *measured* were checked against the current source or
 `build/lxr02.elf`; numbers marked *proposed* are design values. §18.4 lists the
@@ -100,7 +102,7 @@ Branch: `dev-ph5-effects`. Baseline: Session 071 close (`text=456,748`,
 
 ---
 
-## 3. Verified baseline facts
+## 3. Verified baseline facts (Session 071 baseline, historical)
 
 | Fact | Where | Value / note |
 |---|---|---|
@@ -352,6 +354,10 @@ discarded.
   rejected and the SEQ LED stays unlit. This applies to the mask as a whole,
   not only to Effect edits. It goes in `menu_voiceHeldSceneButtonPressed()` via
   a BankData/SceneData predicate.
+- Implemented in Step 10 as `scene_editLayoutMatches()` and
+  `bank_revalidateVoiceEditMasks()`. Re-validation runs at Menu's
+  load-completion funnels, at the end of boot, and after `effects_changeType()`
+  (S072 Step 10, F5).
 - **After divergence** (F5): an Effect type change fans out, so masked Scenes
   stay matched. Every other type-changing commit (Instrument, Kit, Scene, or
   Bank Load, and boot or AutoSave restore of masks) re-validates all 16 Scenes'
@@ -527,14 +533,15 @@ voices:
 | Block | IDs | Owner |
 |---|---|---|
 | 0..5 | 0..383 | Voice slots 1..6 |
-| 6 | 384..447 | Scene targets. 384..403 are in use. **404 = `fxm` Effect Morph** (retained Scene target; its runtime apply/overlay path remains a later step). |
+| 6 | 384..447 | Scene targets. 384..403 are in use. **404 = `fxm` Effect Morph** (Pattern automation and LFO live since Step 9; Scene rule). |
 | 7 | 448..511 | Effect parameters (`448 + local index`), validated against the active Scene's type and AUTO/MOD flags |
 
 **511 stays the off sentinel (F2).** Effect local index 63 therefore cannot be
 a Pattern automation target. Pattern-automatable Effect parameters are local
 0..62, IDs 448..510: 63 parameters (G2).
 
-`seq_effect_automation_dirty` (u64) tracks Effect overlays. The 32-bit Scene
+Effect overlays are realized in Step 9 as EffectsManager's
+`effects_automation.active` (single owner, S072_ST9 D1). The 32-bit Scene
 bitmap still fits the Scene block's live rows.
 
 ### 10.2 Pattern automation
@@ -542,7 +549,8 @@ bitmap still fits the Scene block's live rows.
 - The `fx` category walks the active type's AUTOMATABLE rows. It skips `WIDE8`
   rows that lack `expand7`.
 - `seq_drainPendingAutomation()` gains an Effect branch. It expands `WIDE8`
-  values and sets the overlay, its owning track, and the dirty bit.
+  values and sets the single-owner overlay; marker groups end values whose
+  writing track no longer carries them.
 - The track step-advance path clears Effect overlays whose automation has
   ended (§9, third rule).
 - Automation View A shows `fx` plus the short label, and expanded values for
@@ -555,9 +563,10 @@ bitmap still fits the Scene block's live rows.
 - `instrumentManager_updateLfoAdapters()` gets an Effect adapter. It stores
   direction and depth per source and pair (the S071 Morph resolver pattern),
   and the adapter's output feeds §9.
-- `fxm` remains a retained Scene target with no runtime overlay path until
-  Step 9; the Step 4 manager consumes the retained Effect Morph amount for
-  endpoint interpolation and the PERF global Morph bulk-set.
+- `fxm` is a live Scene target: Pattern automation expands its seven-bit value
+  into an EffectsManager Morph-base overlay, and the `scn` LFO namespace uses
+  the same base-independent direction/depth resolver. Both follow the Scene
+  reset rule; retained Effect Morph remains owned by SceneData.
 - Scene activation's all-source rebind re-validates `fx` targets.
 - Velocity cannot target Effects (A21).
 
@@ -686,7 +695,8 @@ effective (clamped) value.
 
 There is no system-wide buffer disposal, not even on an Effect type change.
 Buffer contents persist until an owner overwrites or clears them under its own
-rules.
+rules. *(As built, the handoff is refreshed only on a type change; see
+`EFFECTS_BUS_REFERENCE.md` §13.)*
 
 To let the next owner decide, FxBuffer keeps one handoff record describing how
 the arena was being used at the last exit:
@@ -877,7 +887,9 @@ lane.filter_freq=0x1111,200,0,0,0,180,0,0,0,160,0,0,0,140,0,0,0
   formatting, trimming, and parsing for `<name>.fx` reuse exactly the helpers
   and rules Instrument names use for `<name>.drm`. There is no Effect-specific
   name handling and no substitution characters. Whatever `' .drm'` does today,
-  `' .fx'` does the same.
+  `' .fx'` does the same. *(As built: that path saves an all-space stem as
+  `none`, so a blank Effect is written as `none.fx`; see
+  `EFFECTS_BUS_REFERENCE.md` §12.2.)*
 - Code outside the Effects framework is not modified for naming.
 - A possible general problem with blank or space-only stems (trailing-space
   trimming at `filesystem.c:2280`, `10054`, `10371`, `16516`) is **recorded as
@@ -931,15 +943,15 @@ Effect region, 512 B per Scene, at Scene offset 128:
 | 14 | 64 | normal |
 | 78 | 64 | Morph |
 | 142 | 288 | steps (mask lo, mask hi, 16 values) × 16 |
-| 430 | 82 | reserved |
+| 430 | 2 | Effect source (HCNAMES row 145+Scene) |
+| 432 | 80 | reserved |
 
 - `AUTOSAVE_EFFECT_PARAM_COUNT` is 419 live cells: three sequence settings,
   64 normal cells, 64 Morph cells, and 288 step bytes. The Scene-parameter
   live count is 41, with `effect_morph_amount` at index 40.
-- The three type-token cells are live after the Step 4 registry integration and
-  are projected from the registry token. Name cells remain unavailable until
-  the HCNAMES/storage step. Older records remain safe because an absent or
-  unknown token resolves to `off`.
+- The type-token cells are live and projected from the registry token. The
+  eight name cells are a baseline mirror of HCNAMES row 145+Scene (not live
+  dirty cells). An absent or unknown token resolves to `off`.
 - The AutoSave record geometry and HCNAMES row count are unchanged.
 
 ---
@@ -952,16 +964,16 @@ Effect region, 512 B per Scene, at Scene offset 128:
 |---|---|---|---|---|
 | 1 | `effect_record_t` × 16 in `scene_t` (19,200 → 25,920) | SRAM1 | 6,720 | SceneData |
 | 2 | `effect_morph_amount` × 16 | SRAM1 | 16 (+pad) | SceneData |
-| 3 | HCNAMES growth: name mirror +16 × 9, source register +16 × 2 | SRAM1 | about 176 (exact at link) | filesystem |
-| 4 | Resolution state: interpolation, Pattern overlay values, overlay mask, **overlay owning track (64 B, F1)**, last-applied, held Morph-lane value, sequencer runtime, flags | SRAM1 | `effects_state_t` 84 | EffectsManager |
-| 4b | `fxbuf_handoff_t` (§12.6) | SRAM1 | about 176 | FxBuffer |
-| 5 | LFO → `fx` contributions | SRAM1 | about 48 | EffectsManager |
-| 6 | Voice-unit table and share bounds | SRAM1 | about 24 | FxBuffer |
-| 7 | `seq_effect_automation_dirty` and FX event latch | SRAM1 | 9 | sequencer |
+| 3 | HCNAMES growth: name mirror +16 × 9, source register +16 × 2 | SRAM1 | about 176 (1,771 B total measured) | filesystem |
+| 4 | Resolution state: interpolation, Pattern overlay values, overlay mask, **overlay owning track (64 B, F1)**, pending end group, `fxm`, and LFO entries | SRAM1 | `effects_automation` 184 + `effects_state_t` 84 | EffectsManager |
+| 4b | `fxbuf_handoff_t` (§12.6) | SRAM1 | 180 | FxBuffer |
+| 5 | LFO → `fx` contributions | SRAM1 | 36 B inside `effects_automation` item 4 | EffectsManager |
+| 6 | Voice-unit table and share bounds | SRAM1 | 28 (`fxbuf_state`, measured) | FxBuffer |
+| 7 | Effect owner-track/reset latches and FX event latch | SRAM1 | 3 | sequencer |
 | 8 | FX page state, including held-step mask and LED signature | SRAM1 | 21 | menuEffects |
-| 9 | Effect runtime instance: a union of every type's runtime struct, sized automatically (about 96 B today) | DTCM `.dtcmz` | about 96 | EffectsManager |
-| 10 | FX bus: `sample_mx_t` L/R × 32, processed in place | DTCM `.dtcmz` | 256 | mixer |
-| 11 | Arena `.dtcm_fxbuf` | DTCM | the rest, about 126,600 | FxBuffer |
+| 9 | Effect runtime instance: a union of every type's runtime struct, sized automatically (about 96 B today) | DTCM `.dtcmz` | 76 | EffectsManager |
+| 10 | FX bus: `sample_mx_t` L/R × 32, processed in place | DTCM `.dtcmz` | 256 (+32 ramp state) | mixer |
+| 11 | Arena `.dtcm_fxbuf` | DTCM | 126,624 | FxBuffer |
 | — | `sine_table` release | DTCM | −8,194 | — |
 
 - SRAM1 total: about +7.5 KB, taken from the Pattern reserve. Revision 3
@@ -1020,13 +1032,14 @@ next. If a regression appears, only one step touched that area.
 | 6 | Storage: `.fx` v2 parse/write; HCNAMES 161 rows with Effect provenance; Scene/Bank `<name>.fx` load/save; `sceneset.scg` key; AutoSave v3 and Effect reader | HCNAMES and AutoSave both carry the 145-row assumption and name mirror, so they change together | Hand-written fixture card: legacy, v2, missing, malformed, and a partial Bank; reboot restore |
 | 7 | `menuEffects.c`: pages, default SELECT layout, `typ`, SHIFT Morph view, TRACK/SHIFT+TRACK, Euklid disabled | UI over frozen setters | Implemented; hardware UI walk-through pending |
 | 8 | FX sequencer: TIM3 latch, modes, shared scale table (including the track-scale UI switch), transport rules, lock editing, LEDs | Needs the page (step 7) for editing | Built/clean-link verified; hardware matrix pending |
-| 9 | Automation and LFO: `fx` category, overlay apply/restore, priority (§9), LFO `fx` namespace, rebind | Needs both overlay producers (steps 4 and 8) | Automate, sequence, and LFO one parameter together |
-| 10 | Edit-mask selection gate and Effect fan-out | Needs every type-changing commit path to exist | Mismatch rejection; fan-out correctness |
-| 11 | `EFFECTS_BUS_REFERENCE.md` and spec updates; handoff | Written against the built code | Docs match the code |
+| 9 | Automation and LFO: `fx` category, overlay apply/restore, priority (§9), LFO `fx` namespace, rebind | Needs both overlay producers (steps 4 and 8) | Built/clean-link verified; hardware matrix pending |
+| 10 | Edit-mask selection gate and Effect fan-out | Needs every type-changing commit path to exist | Built/clean-link verified; hardware matrix pending |
+| 11 | `EFFECTS_BUS_REFERENCE.md` and spec updates; handoff | Written against the built code | Docs match the code (ST11 §11) |
 
 ### 17.2 Risks
 
 1. **Flash:** 34 KB of headroom. The §5.5 investigation belongs in step 1.
+   *(Measured after Step 10: 8,080 B headroom; see `S073_FLASH_EXPANSION.md`.)*
 2. **Elastic DTCM:** future statics shrink the arena. The ASSERT guards this.
 3. **Sine table in flash:** D-cache contention. Measure; the fallback is DTCM.
 4. **Voice-volume move:** any engine-specific volume path missed changes the
@@ -1137,7 +1150,7 @@ Update `FILESYSTEM_SPEC.md`, `AUTOSAVE.md`, `SRAM_MANIFEST.md`,
 | F1 | Third restore rule: Effect-parameter overlays are restored when the automation ends. Voices restore on the next trigger. Scene parameters, including `fxm`, restore at Scene change, and so do FX-sequencer Morph-lane values (§9). |
 | F2 | 511 stays the off sentinel. Index 63 is not Pattern-automatable. |
 | F3 | A type change resets parameters 3..63 to the single type default (0 if none) and clears the whole sequence, including the Morph lane. `typ` changes only via encoder click-in, turn, click-out, and all actions run between click-out and repaint (§7.2, §13.3). |
-| F4 | An Effect always has a name, which is its filename stem. A blank name is a single space (`' .fx'`, library `'000  .fx'`), via the unchanged Instrument naming path. The `_` substitution is withdrawn (G5). |
+| F4 | An Effect always has a name, which is its filename stem. A blank name is a single space (`' .fx'`, library `'000  .fx'`), via the unchanged Instrument naming path. The `_` substitution is withdrawn (G5). *As built (S072 ST6 D4):* the unchanged Instrument path saves an all-space stem as `none`, so a blank Effect is written as `none.fx` and reloads as a blank HCNAMES row. |
 | F5 | The edit-mask gate plus re-validation, as in §7.4. |
 | F6 | Same-type switches keep running. There is no system buffer disposal. The handoff record in §12.6 is the exchange. |
 
@@ -1155,5 +1168,13 @@ Update `FILESYSTEM_SPEC.md`, `AUTOSAVE.md`, `SRAM_MANIFEST.md`,
 
 ### 18.4 Open follow-ups
 
-None for the general plan. Remaining detail questions are implementation-level
-and will be raised per step as they come up.
+Deferred and follow-up items, carried to later sessions:
+- root `/Effect/` browser and Effect Load/Save item (A35, §14.5);
+- a buffer-using test type (A8), together with the same-type handoff refresh
+  (reference §13 item 1);
+- FX lock removal (A15) and Scene copy/clear of the Effect (§7.3), with the
+  copy pass;
+- MIDI mapping (A20) and live record (A22);
+- track step-scale playback (A10);
+- the blank-stem naming defect (G5), logged in `SCOPING_TARGETS.md`;
+- the Phase 5 hardware acceptance checklist (handoff log).

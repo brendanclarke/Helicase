@@ -17957,11 +17957,6 @@ static void filesystem_saveKitDirectory_tick(void)
              * old source bytes. */
             autosave_markSourceDirty(
                 filesystem_residentKitRow(op_kit_save_source_scene));
-            (void)filesystem_setResidentSource(
-                filesystem_residentEffectRow(op_kit_save_source_scene),
-                FS_RESIDENT_SOURCE_INHERIT);
-            autosave_markSourceDirty(
-                filesystem_residentEffectRow(op_kit_save_source_scene));
             for (instrument_slot = 0u;
                  instrument_slot < STORAGE_KIT_SLOT_COUNT;
                  instrument_slot++) {
@@ -19658,7 +19653,9 @@ static void filesystem_saveSceneDirectory_tick(void)
 
             storage_makeSavedEffectDisplayFilename(
                 op_scene_effect_open_name, sizeof(op_scene_effect_open_name),
-                fx_stem);
+                /* A blank HCNAMES row may be cached as NUL bytes; explicit
+                 * spaces produce the blank-name file instead of `inst`. */
+                blank ? "        " : fx_stem);
             if (blank) {
                 memset(op_effect_display_name, ' ',
                        STORAGE_KIT_DISPLAY_NAME_LEN);
@@ -19887,7 +19884,9 @@ static void filesystem_saveSceneDirectory_tick(void)
 
             storage_makeSavedEffectDisplayFilename(
                 op_scene_effect_open_name, sizeof(op_scene_effect_open_name),
-                fx_stem);
+                /* A blank HCNAMES row may be cached as NUL bytes; explicit
+                 * spaces produce the blank-name file instead of `inst`. */
+                blank ? "        " : fx_stem);
             if (blank) {
                 memset(op_effect_display_name, ' ',
                        STORAGE_KIT_DISPLAY_NAME_LEN);

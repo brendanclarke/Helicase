@@ -21,7 +21,7 @@
  * as the voice filter rows. Frequency, resonance, and drive are Morphable,
  * LFO-modulatable, and automatable. Type is Morphable/automatable but not an
  * LFO destination. Audio out is step-automatable only. The frequency default
- * is 64 so the diagnostic filter bench has an audible cutoff in Step 5.
+ * is 64, so a freshly selected `flt` is audibly filtered at mid cutoff.
  */
 const char stereoFilter_token3[] = "flt";
 const char stereoFilter_abbrev5[] = "StFlt";

@@ -923,8 +923,9 @@ static uint8_t autosave_getSceneParameter(const scene_t *scene,
  * Inputs: resident Scene, Effect-relative parameter index, and result cell.
  * Output: one byte and success, or 0 for the reserved tail. The 16-bit lock
  * mask is emitted little-endian. Explicit projection prevents C padding or
- * field order from becoming a file-format dependency. Affiliate: the
- * SceneData Effect setters and the later Step 6 boot reader.
+ * field order from becoming a file-format dependency. Affiliates: the
+ * SceneData Effect setters and autosave_applyEffectPayload()
+ * (the boot reader).
  */
 static uint8_t autosave_getEffectParameter(const scene_t *scene,
                                            uint16_t parameter_index,

@@ -411,8 +411,9 @@ void bank_toggleSceneMaskVoiceEdit(uint8_t scene_index)
      * Inputs: physical SEQ button index while VOICE is held. Output:
      * scene_mask_voice_edit gains or loses that Scene bit, except the active
      * Scene can never be removed because bank_ensureActiveInVoiceEditMask()
-     * immediately restores it. Menu owns compatibility checks before allowing
-     * a Scene to be toggled on. Output compares the final invariant-safe mask
+     * immediately restores it. Menu owns the layout gate before allowing a
+     * Scene to be toggled on; restore paths use the indexed setter and remain
+     * policy-free. Output compares the final invariant-safe mask
      * with entry state, stores first, and marks its Autosave field only when the
      * toggle survives normalization.
      */
@@ -423,6 +424,37 @@ void bank_toggleSceneMaskVoiceEdit(uint8_t scene_index)
     (void)bank_ensureActiveInVoiceEditMask();
     if (bank_scene_mask_voice_edit[bank_active_scene_slot] != previous_mask)
         autosave_markBankFieldDirty(AUTOSAVE_BANK_FIELD_VOICE_EDIT_MASK);
+}
+
+/*
+ * Revalidate every directional VOICE edit-mask entry after layout changes.
+ *
+ * Inputs: resident Scene Effect/Instrument types. Output: mismatched member
+ * bits are removed and changed owner entries pass through the indexed setter,
+ * preserving the active-bit invariant and marking the Bank mask field. This
+ * is the shared F5 repair for load completion and Effect type-change paths;
+ * it runs in foreground context and uses no extra storage.
+ */
+void bank_revalidateVoiceEditMasks(void)
+{
+    uint8_t owner;
+
+    for (owner = 0u; owner < BANK_SCENE_SLOT_COUNT; owner++) {
+        uint16_t mask = bank_scene_mask_voice_edit[owner];
+        uint16_t kept = mask;
+        uint8_t member;
+
+        for (member = 0u; member < BANK_SCENE_SLOT_COUNT; member++) {
+            uint16_t bit = bank_sceneBit(member);
+
+            if (member == owner || (mask & bit) == 0u)
+                continue;
+            if (!scene_editLayoutMatches(owner, member))
+                kept = (uint16_t)(kept & (uint16_t)~bit);
+        }
+        if (kept != mask)
+            bank_setSceneMaskVoiceEditForScene(owner, kept);
+    }
 }
 
 void bank_setHasResidentBank(uint8_t present)

@@ -260,8 +260,9 @@ Current bridges and limitations:
 - `AutomationNode` and the current step automation storage/playback path still
   use legacy/narrow target IDs and must be rebuilt for descriptor and Scene
   modulation targets.
-- New Scene modulation target IDs are runtime/menu IDs; current Scene files
-  persist Scene mix/routing settings but not the future full effect stack.
+- New Scene modulation target IDs are runtime/menu IDs. Scene folders persist
+  Scene mix/routing settings in `sceneset.scg` and the Scene-owned Effect in
+  one `<name>.fx` child (v2, Session 072).
 - The 16-Scene workspace, present/edit masks, and linked Scene/Pattern PERF
   selection are implemented. The hidden A/B scalar AutoSave reader/writer and
   committed Load/Save publication exist as specified in `AUTOSAVE.md`;
@@ -979,6 +980,9 @@ legacy import.
 `.fx` Scene children use the v2 Effect schema described below. A missing child
 loads `off` with a blank Effect name; a v1 `placeholder=1` file remains a
 legacy `off` source.
+The as-built `.fx` grammar and naming are summarized in
+`EFFECTS_BUS_REFERENCE.md` §12; this section remains the authoritative storage
+contract.
 
 ### Effect child `.fx` v2 (Session 072 ST6)
 
@@ -1243,9 +1247,11 @@ Section rules:
   compact byte selector domain; they are not packed 16-bit parameter IDs.
 - `lfo_target_voice` and `lfo_target_voice_2` are menu/runtime destination
   selectors. Voices `1..6` select voice slots and the special display value
-  `scn` selects the Scene modulation target namespace. The associated
-  parameter value is a compact token: a local descriptor index, a Scene
-  target index when the voice is scn, or 0xff for off. Runtime code resolves
+  `scn` selects the Scene modulation target namespace and `fx` (value 8)
+  selects the active Scene's Effect namespace. The associated parameter value
+  is a compact token: a local descriptor index, a Scene target index when the
+  voice is scn, an Effect-local row index when the voice is fx, or 0xff for
+  off. Runtime code resolves
   that token to a wide descriptor/Scene identity only at the apply boundary.
 - `self` is accepted only for `lfo_target_voice` and `lfo_target_voice_2`.
   It is a storage-only relocation alias resolved by the parser with
@@ -1422,10 +1428,12 @@ Current bounds:
 - `INSTRUMENT_SLOT_COUNT`: 6.
 - `INSTRUMENT_PARAM_COUNT`: 64.
 - Voice parameter IDs: `0..383`.
-- Scene modulation IDs start at `INSTRUMENT_VOICE_ID_COUNT` (`384`) and
-  currently occupy `384..390` for `1vm..6vm` plus Scene Decimation `srt`.
-- Remaining higher IDs remain reserved for later FX/general parameter address
-  space.
+- Scene modulation IDs occupy block 6 from `INSTRUMENT_VOICE_ID_COUNT`
+  (`384`): `384..389` `1vm..6vm`, `390` `srt`, `392..397` `1ou..6ou`,
+  `398..403` `1fx..6fx`, `404` `fxm` (Effect Morph).
+- Block 7 `448..510` addresses Effect-local parameters `0..62` of the
+  Scene's Effect type; `511` is the Pattern off sentinel. See
+  `EFFECTS_BUS_REFERENCE.md` §11.
 
 `morph_interpolation[]` is runtime-derived state and is not serialized.
 
@@ -1648,14 +1656,19 @@ Current working target state:
 - Off targets use `INSTRUMENT_TARGET_TOKEN_OFF` (`0xff`).
 - Target menu display expands compact local or Scene tokens to names only for
   presentation; SceneData stores the byte token.
-- InstrumentManager validates resolved targets by descriptor/Scene flags.
+- InstrumentManager validates resolved targets by descriptor/Scene flags. LFO
+  namespace value 8 is `fx`: its parameter token is an Effect-local row index
+  normalized against the Scene's current Effect type during rebind.
 - The velocity target picker is self-scoped: it offers one `off`, modulatable
   descriptors for the source voice's current Instrument, and the source-voice
   Morph token 0x40 where applicable. It does not browse arbitrary other voices
   or the general Scene namespace.
-- The LFO target picker shows self, voice destinations `1..6`, and `scn`. For
-  a voice destination, the compact parameter picker shows modulatable local
-  descriptors; for scn it uses the Scene modulation target token domain.
+- The LFO target picker shows self, voice destinations `1..6`, `scn`, and `fx`.
+  Namespace value 8 (`fx`) stores an Effect-local row index and revalidates it
+  against the Scene's current Effect type during rebind. For a voice
+  destination, the compact parameter picker shows modulatable local
+  descriptors; `scn` uses the Scene target token domain and `fx` uses the
+  Effect-local token domain.
 - The parameter picker skips non-modulatable descriptor rows. It does not show
   repeated `off` placeholders for skipped rows.
 - If the selected target voice changes and the previous target parameter is not

@@ -24,7 +24,10 @@ cold-boot tagged-runtime activation, and harmonized root Scene/Bank Load
 completion. Sessions 045-061 completed the accepted AutoSave A/B scalar
 reader/writer, typed HCNAMES provenance, committed Load/Save publication, and
 boot restore. Phase 4 subsequently added dynamic Pattern storage and separate
-Pattern AutoSave; the Scene Effect file remains a placeholder. The post-Phase-4
+Pattern AutoSave. Phase 5 (Session 072) then implemented Scene-owned Effects:
+`.fx` v2 files, the FX bus and fader modes, the shared DTCM arena, the FX
+sequencer, Effect automation/LFO, and edit-mask fan-out. See
+`EFFECTS_BUS_FEATURE_PLAN.md` and `EFFECTS_BUS_REFERENCE.md`. The post-Phase-4
 bugfix/refactor work is tracked in
 `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`. Phase 5 now establishes Effect
 files, the audio bus and shared buffer, its fixed sequencer, and the related
@@ -40,7 +43,7 @@ Within each phase, features are grouped by **where they live in the codebase**, 
 2. **Phase 2 — Directory Kit Loading & Descriptor Scene Bridge** (`Core/Hardware/SD/`, `Core/Bank/Scene/`, `Core/DSP/Instruments/`)
 3. **Phase 3 — Finish Filesystem, Instrument Runtime, Morph & Menus** (`Core/Bank/Scene/`, `Core/Hardware/SD/`, `Core/Menu/`, `Core/Bank/Scene/Preset/`)
 4. **Phase 4 — Dynamic Stack Pattern Implementation** (`Core/Bank/Scene/Pattern/`, dynamic event pool)
-5. **Phase 5 — Effects Foundation & Scene Fixes** (`Core/DSP/Effects/`, `Core/DSPAudio/`, `Core/Bank/`, `Core/Hardware/SD/`, `Core/Menu/`, `Core/Sequencer/`)
+5. **Phase 5 — Effects Foundation & Scene Fixes — implemented (S072)** (`Core/DSP/Effects/`, `Core/DSPAudio/`, `Core/Bank/`, `Core/Hardware/SD/`, `Core/Menu/`, `Core/Sequencer/`)
 6. **Phase 6 — MIDI, UI & Performance Workflow Cleanup** (`Core/Menu/`, `Core/MIDI/`, `Core/Hardware/frontPanel/`)
 7. **Phase 7 — DSP Expansion** (`Core/DSP/`, `Core/DSPAudio/` — new voices, oscillators, and advanced Effects)
 
@@ -745,8 +748,8 @@ Implement load/save operations for the settled file types in
   `Kit <kit name>/`, `pattern.pat`, and `effects.fx` through the Session
   036-039 asyncfatfs foundation. Root `Scene/` load/save is library/pool
   exchange only and is not part of the autosave workspace.
-- The FX slot shim validates and stores the `effects.fx` placeholder. Phase 5
-  replaces that placeholder with a Scene-owned, multi-type Effect.
+- The FX slot now stores one Scene-owned `<name>.fx` Effect (v2); a legacy
+  `effects.fx` placeholder loads as `off`. Phase 5 implements this format.
 - Bank load/save is implemented for the 16-Scene workspace with SEQ-button
   Scene masks, selected/present child intersection, preservation of unselected
   resident payload/identity, one-child-at-a-time rescan, and shared Scene
@@ -756,8 +759,8 @@ Implement load/save operations for the settled file types in
   format. Session 043's Scene/Bank `pattern.pat` v3 stores exactly the 112-byte
   128x7 on/off bitmap as seven 32-hex-character rows; v1 is accepted empty and
   v2 imports only its final bit field.
-- Effect load/save initially validates placeholders; Phase 5 adds real Effect
-  files, parameters, and a standalone `/Effect/` library operation.
+- Effect load/save is implemented for Scene/Bank children; the standalone
+  `/Effect/` library operation remains deferred (A35).
 - `settings.cfg` replaces `glo.cfg` for system settings and active-bank number
   selection. A `.settings.cfg` backer remains target design only; no accepted
   autosave/backer implementation currently updates it.
@@ -966,8 +969,8 @@ Implementation sequencing:
   legacy byte CC/CC2 targets to canonical descriptor/Scene targets, correct
   raw float LFO adapter writes, and make modulation-node enumeration dynamic
   before treating automation as feature-complete.
-- **Effect placeholders:** Phase 5 must define how the existing validated
-  placeholder imports into the real Scene-owned Effect format.
+- **Effect placeholders:** resolved in Session 072. `placeholder=1` files and
+  missing `.fx` load as `off` (FILESYSTEM_SPEC).
 
 ### Suggested Complementary Features
 
@@ -1079,13 +1082,12 @@ Per your framing of what this document is actually for — catching features tha
 ### 4.4 Parameter ID space (shared with the FX sequencer)
 
 The implemented Pattern automation target ID is nine bits, allowing 512 IDs.
-Six voice slots currently reserve 64 descriptor IDs each (384 total), and the
-eight current Scene targets follow them. Phase 5 must assign stable Effect
-parameter targets within the remaining space and define value conversion
-before Pattern steps start saving Effect automation. The dedicated FX sequence
-is separate from the Pattern stack; its 24 values and a type's up to 64
-parameters need their own mapping decision in Phase 5. The older estimate of
-80 parameters per voice is not the implemented encoding.
+Six voice slots reserve 64 descriptor IDs each (384 total), Scene targets use
+block 6, and Session 072 assigns block 7 (448..510) to Effect-local parameters
+0..62 while 511 remains the off sentinel; Scene target 404 is `fxm`. The FX
+sequence uses 16 registry lanes per step (lane 0 = Effect Morph), not 24 free
+values. See `EFFECTS_BUS_REFERENCE.md` §10–§11. The older estimate of 80
+parameters per voice is not the implemented encoding.
 
 ### 4.5 Copy operations
 
@@ -1174,6 +1176,25 @@ folding it into an existing temporary layer.
 
 ## Phase 5 — Effects Foundation & Scene Fixes
 
+**Status: implemented in Session 072.** The plan
+(`EFFECTS_BUS_FEATURE_PLAN.md`) superseded several details below (§2 of the
+plan):
+- a 288-byte sequence of 16 lanes instead of 16 × 24 values;
+- `fwd/rev/pip/rnd/sel` run modes;
+- 4,416-byte buffer units;
+- the first type is a stereo filter without a buffer.
+
+The as-built behavior is in `EFFECTS_BUS_REFERENCE.md`. **Carried forward:**
+- `/Effect/` browser and Effect Load/Save item (A35);
+- buffer-using template type (A8);
+- Scene copy/clear of the Effect and FX lock removal (copy pass);
+- MIDI mapping of Effect parameters (A20);
+- live record of FX moves (A22);
+- track step-scale/shuffle playback (A10).
+
+The 480 KiB flash finding is in `S072_ST1_IMPLEMENTATION.md` §21; the growth
+path is planned in `S073_FLASH_EXPANSION.md`.
+
 **Location:** `Core/DSP/Effects/`, `Core/DSPAudio/`, `Core/Bank/`,
 `Core/Hardware/SD/`, `Core/Menu/`, `Core/Sequencer/`
 
@@ -1188,21 +1209,22 @@ Phase 5 supplies the particular controls needed to operate Effects.
 The Effect slot and its type belong **solely to the Scene**. It can hold
 different Effect types, as an Instrument slot can hold different Instrument
 types. A Kit neither stores an Effect type nor changes the current Effect
-when loaded. Each Scene already contains an `effects.fx` placeholder, and
-`/Effect/` is the standalone library directory. Replace the placeholder
-with a versioned file containing the Effect type, that type's parameter set
-and normal/Morph values, and its own fixed 16-step sequence and settings.
+when loaded. Each Scene holds one `<name>.fx` child (v2), and `/Effect/` is
+the deferred standalone library directory. The file contains the Effect type,
+that type's parameter set and normal/Morph values, and its fixed 16-step
+sequence and settings.
 The Effect sequence is independent of the Pattern stack.
 
 Define each type under `Core/DSP/Effects/<type>/`, with
 `<type>Parameters.c/.h` and `<type>Effect.c/.h` files. Reusable processing
 components belong in `Core/DSPAudio/`, as they do for Instruments. Establish
-the flexible slot and type selection with a basic template Effect that uses
-the shared DTCM buffer. The first complex processing stack remains in Phase 7.
+the flexible slot and type selection with the initial stereo-filter type, which
+does not use the shared DTCM buffer. The first buffer-using processing stack
+remains in Phase 7.
 
-Use the same Effect data rules for Scene/Bank Load and Save and the new
-standalone Effect Load/Save item. Specify how an old placeholder loads, how an
-invalid Effect file fails without partly changing the Scene, and how names
+Use the same Effect data rules for Scene/Bank Load and Save. Specify how an
+old placeholder loads, how an invalid Effect file fails without partly
+changing the Scene, and how names
 and sources are tracked. Decide where the planned Effect output assignment
 and level are stored. The per-voice FX send amount and fader mode already
 belong to Scene settings in `sceneset.scg`.
@@ -1328,17 +1350,17 @@ and Scene/Effect automation. Record the 480 KiB capacity finding and the
 tested growth path. Update the filesystem, AutoSave, and SRAM specifications
 when formats and allocations are implemented.
 
-### Open Engineering Questions to settle during Phase 5
+### Open Engineering Questions settled during Phase 5
 
-- Are all sixteen FX sequences resident in working memory, and how do their
-  24 values select from up to 64 parameters?
-- How do old Bank masks, Effect placeholders, and AutoSave records migrate?
-- What value conversion and priority apply when Pattern and FX-sequencer
-  automation set the same Effect parameter?
-- What exact shared-buffer size does the post-relocation link permit, and
-  how are shares reassigned without disrupting audio?
-- What tested change permits the application to outgrow the current 480 KiB
-  region while preserving sample storage?
+- **Resident/24 values:** all 16 Effect sequences are resident; each step has
+  16 registry lanes, with lane 0 as Effect Morph (plan §7.1).
+- **Migration:** no migration is required (A38); placeholders and missing
+  `.fx` children resolve to `off`.
+- **Priority:** Pattern overlay > FX lock > menu; LFO applies on top (plan §9).
+- **Buffer size:** 126,624 B measured for the shared arena; ownership uses the
+  FxBuffer handoff contract (plan §12).
+- **Flash:** growth beyond the 480 KiB application region is covered by the
+  `S073_FLASH_EXPANSION.md` plan.
 
 ### Suggested Complementary Improvements
 
@@ -1457,7 +1479,8 @@ From "notes from others" in `putting it together`: doubling the sequencer's trac
 
 **Location:** `Core/DSP/`, `Core/DSPAudio/`
 
-Phase 5 has established the Effect slot, bus, template type, and shared DTCM
+Phase 5 has established the Effect slot, bus, stereo-filter type (no buffer use
+yet), and shared DTCM
 buffer before this phase adds heavier voices, oscillators, and the first
 multi-stage processing Effect. Use the Phase 5 buffer partition and the
 current linked `SRAM_MANIFEST.md`; the older separate-buffer estimates are
@@ -1471,7 +1494,7 @@ voice slot. The planned types retain three CPU/feature tiers:
 - **Basic:** drum, snare, and similarly inexpensive voices.
 - **Advanced:** cymbal, hi-hat, and other higher-cost voices.
 - **Advanced-buffer:** granular, drone, Karplus-Strong, and convolution
-  chamber. These draw from the shared Phase 5 DTCM buffer in 8,820-byte
+  chamber. These draw from the shared Phase 5 DTCM buffer in 4,416-byte
   units, at most two per Instrument and twelve total across six Instruments.
 
 The former one-advanced-buffer-Instrument limit and dedicated 0.25-second
@@ -1484,7 +1507,10 @@ for hot executable code rather than audio-buffer storage.
 
 Built as a complete instrument (advanced-buffer tier), not an oscillator variant — this was your explicit correction to the initial framing. Reads directly from the internal sample flash region (the same one that already backs regular sample playback, so the flash-read-speed question is answered by "it already works for samples as-is," per your answer). Pitch parameters, per your spec: assign a scale/interval, fine detune, and a "distance" value that moves up/down that scale/interval — rather than free continuous pitch, grain pitch is quantized to a chosen scale and stepped through it.
 
-A feedback path with a short delay/decay is also wanted. It requests up to two 8,820-byte units from the shared Phase 5 DTCM buffer, according to the type's measured need. Its allocation reduces the space available to the Scene's Effect; it is not a separate permanent buffer.
+A feedback path with a short delay/decay is also wanted. It requests up to two
+4,416-byte units from the shared Phase 5 DTCM buffer, according to the type's
+measured need. Its allocation reduces the space available to the Scene's
+Effect; it is not a separate permanent buffer.
 
 Grounding from actual granular-synthesis practice, since this is new DSP territory for the project: the standard approach windows each grain with an amplitude envelope to avoid clicks at non-zero-crossing boundaries, and the shape of that window is itself a real timbral control, not just anti-click housekeeping — an equal-power/Hann-style crossfade gives the smoothest, most "fused" texture, while sharper (near-rectangular) windows give a more clicky/metallic character and are cheaper to compute. Grain parameters worth having beyond pitch (standard across granular implementations): grain length, density (grains per second / overlap amount), and position jitter (randomizing the read-start point slightly for a less mechanical texture) — these map naturally onto the existing per-parameter automation/morph infrastructure once they exist as real parameters.
 
@@ -1528,7 +1554,10 @@ changes CPU cost and character, so measure it when implementing this type.
 ### Open Engineering Questions
 
 - **Convolution chamber CPU budget (7.3)** — decide the maximum affordable IR length before committing to true convolution rather than a cheaper structured-reverb approximation.
-- **Shared-buffer demands of later types** — measure each Instrument's requested 8,820-byte units and each Effect's behavior at the resulting buffer size. The slot and partition contract is established in Phase 5; no later type may assume a separate fixed buffer.
+- **Shared-buffer demands of later types** — measure each Instrument's requested
+  4,416-byte units and each Effect's behavior at the resulting buffer size.
+  The slot and partition contract is established in Phase 5; no later type may
+  assume a separate fixed buffer.
 
 ### Suggested Complementary Features
 
@@ -1713,7 +1742,7 @@ overhaul deferred to a later session; see
 
 ## Session 072 deferred bugfix candidate (2026-09-27)
 
-- **Possible blank / space-only filename stem handling (unverified).**
+- **Blank/space-only name stems (logged per S072 G5; unverified).**
   Noticed while planning Phase 5 Effect naming; deliberately not investigated
   or changed during Effects framework work. User rule: a blank object name is
   a single space, so files such as `' .drm'`, `' .fx'`, or library
@@ -1721,9 +1750,41 @@ overhaul deferred to a later session; see
   display spaces from stems (`filesystem.c:2280`, `10054`, `10371`, `16516`;
   `storageTypes.c` `storage_trimRight()`). If such trimming runs on a stem
   that is only a space, the stem could become empty, so save could produce
-  `.ext` (a dot-prefixed, product-filtered file) and parse/scan/index could
-  treat the row as unusable. Needs a card test: save and reload a single-space
-  Instrument name, then check the library index, HCNAMES row, and reload.
-  Effects inherit whatever Instrument naming does (see
-  `EFFECTS_BUS_FEATURE_PLAN.md` §14.2), so any fix belongs in the shared
-  naming path, in a Load/Save revision pass, not in Phase 5.
+  `.ext` and parse/scan/index could treat the row as unusable. Effects inherit
+  the same behavior through the shared name path. Investigate as a general
+  naming bugfix; it is out of Phase 5 scope.
+  *As built (verified Session 072):* the save-side name builder
+  (`storage_makeSavedInstrumentDisplayFilename()`, reused for `.fx`) maps an
+  all-space stem to `none`, so blank Instruments and Effects are written as
+  `none.drm` / `none.fx` and reload as blank HCNAMES rows. An empty (NUL)
+  stem becomes `inst` instead, so callers must pass explicit spaces for a
+  blank row. The user's single-space rule is therefore not what the firmware
+  writes today. Decide which one is intended before fixing.
+
+## Session 072 carried debt (2026-09-28)
+
+Small items found during the Phase 5 reviews. All are outside Effects
+behaviour and none blocks Session 073. Details are in
+`knowledge_files/log_archive/072_SESSION_HANDOFF_LOG.md` §10.2.
+
+- **`fxbuf_init()` order.** `fxbuf_handoffResetAll()` runs after the
+  diagnostic forced-unit loop, so forced units carry handoff rate 0.
+  Diagnostic-only. Move the reset right after `fxbuf_clearOwners()`.
+- **Makefile hygiene.**
+  - The link-budget recipe comments are echoed every build (prefix `@#`).
+  - A bare `make` in an incremental tree stops at `build/main.o`, because
+    `-include $(OBJS:.o=.d)` precedes `all:`. Add `.DEFAULT_GOAL := all`.
+    Use `make all` until then.
+- **`modNode_waveInterpGeneration`** (`modulationNode.c:67`) is `INCCMZ` with
+  an `= 1u` initializer that the zero-filled `.dtcmz` discards. Verify
+  whether generation 0 is special.
+- **Stack wording.** The linker comment (and MEMORY.md) says the stack is at
+  the top of SRAM1. `0x20080000` is the top of SRAM2.
+- **Cosmetic.** A duplicated comment line in `mixer_calcNextSampleBlock()`
+  (`mixer.c` ~739); mixed tab/space indentation in five `presetManager.c`
+  FX-send comment blocks.
+- **FX return ramp.** It is not reset while the Effect is `off`. Revisit when
+  a type outputs sound immediately on `init`.
+- **Stale tool.** `tools/verify_bank_autosave.py` still expects 129 HCNAMES
+  rows (current: 161).
+- **Dead code.** Scene Save phases 33–36 in `filesystem.c` are unreachable.

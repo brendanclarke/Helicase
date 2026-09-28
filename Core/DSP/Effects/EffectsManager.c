@@ -14,6 +14,7 @@
 #include "MenuText.h"
 #include "EffectParamRows.h"
 #include "SceneData.h"
+#include "BankData.h"
 #include "sequencer.h"
 #include "StepScale.h"
 #include "StereoFilterParameters.h"
@@ -99,7 +100,8 @@ _Static_assert(sizeof(StereoFilterRuntime) <= sizeof(effects_runtime_t),
  * The state is SRAM1-resident and exactly 84 bytes: active runtime type and
  * Scene, a force-write flag, one last-applied byte per common type domain,
  * live FX step/selection state, the held Morph lock, and the common return
- * settings consumed by the later FX bus.
+ * settings consumed by the mixer's FX return. The spare `reserved` byte keeps
+ * the 84-byte layout.
  */
 typedef struct {
     effect_type_id_t runtime_type;
@@ -123,6 +125,43 @@ _Static_assert(STEP_SCALE_COUNT == EFFECT_SEQ_SCALE_COUNT &&
                "Pattern and FX scale contracts must remain identical");
 
 static effects_state_t effects_state;
+
+/*
+ * Pattern-automation and LFO overlay state (Session 072 step 9; plan §9,
+ * §10.2-10.3, §16.1 items 4-5).
+ *
+ * active/value/owner hold one Pattern overlay per Effect-local parameter.
+ * pending_end/pending_track bracket the open FX step-marker group. owner_tracks
+ * is mirrored to Sequencer so TIM3 queues markers only for owning tracks.
+ * morph_override is the Pattern `fxm` base layer. lfo stores one
+ * base-independent direction/depth contribution per source slot and pair.
+ * Lifetime: SRAM1, foreground-only writers; retained SceneData is untouched.
+ */
+typedef struct {
+    uint8_t target;
+    uint8_t direction;
+    uint8_t depth;
+} effects_lfo_entry_t;
+
+#define EFFECT_AUTOMATION_TRACK_NONE  0xFFu
+#define EFFECT_AUTOMATION_TRACK_LIMIT 8u
+
+typedef struct {
+    uint64_t active;
+    uint64_t pending_end;
+    uint8_t value[EFFECT_PARAM_COUNT];
+    uint8_t owner[EFFECT_PARAM_COUNT];
+    effects_lfo_entry_t lfo[INSTRUMENT_SLOT_COUNT][2];
+    uint8_t pending_track;
+    uint8_t owner_tracks;
+    uint8_t morph_override;
+    uint8_t morph_override_valid;
+} effects_automation_t;
+
+_Static_assert(sizeof(effects_automation_t) == 184u,
+               "effects_automation_t size is recorded in SRAM_MANIFEST.md");
+
+static effects_automation_t effects_automation;
 
 #if DEV_MODE_DIAGNOSTIC
 static uint8_t effects_registryCheckCode;
@@ -244,6 +283,73 @@ uint8_t effects_paramModulatable(effect_type_id_t type, uint8_t index)
         descriptor->base.mod_domain.flags != INSTRUMENT_MOD_DOMAIN_NONE);
 }
 
+/* Resolve the retained Effect type of one resident Scene. */
+static effect_type_id_t effects_sceneType(uint8_t scene_index)
+{
+    const effect_record_t *record = scene_effectConst(scene_index);
+
+    return (record && effects_registryEntry(record->type))
+        ? record->type : EFFECT_TYPE_OFF;
+}
+
+/* Apply the use-specific capability rule to one Effect-local index. */
+static uint8_t effects_localValid(effect_type_id_t type, uint8_t local,
+                                  instrument_target_use_t use)
+{
+    return (use == INSTRUMENT_TARGET_AUTOMATION)
+        ? effects_paramAutomatable(type, local)
+        : effects_paramModulatable(type, local);
+}
+
+/* Validate one block-7 target against a viewed Scene's Effect type. */
+uint8_t effects_targetValid(uint8_t scene_index, uint16_t id,
+                            instrument_target_use_t use)
+{
+    if (!effectTarget_isEffectId(id))
+        return 0u;
+    return effects_localValid(effects_sceneType(scene_index),
+                              effectTarget_local(id), use);
+}
+
+/* Return a valid Effect descriptor for display/edit clients. */
+const effect_param_descriptor_t *effects_targetDescriptor(
+    uint8_t scene_index, uint16_t id, instrument_target_use_t use)
+{
+    if (!effects_targetValid(scene_index, id, use))
+        return NULL;
+    return effects_descriptor(effects_sceneType(scene_index),
+                              effectTarget_local(id));
+}
+
+/* Walk a Scene's valid Effect targets in registry descriptor order. */
+uint16_t effects_stepTarget(uint8_t scene_index, uint16_t current,
+                            int8_t direction, instrument_target_use_t use)
+{
+    effect_type_id_t type = effects_sceneType(scene_index);
+    const effect_registry_entry_t *entry = effects_registryEntry(type);
+    int16_t local;
+
+    if (!entry || direction == 0)
+        return current;
+    if (!effectTarget_isEffectId(current)) {
+        if (direction < 0)
+            return INSTRUMENT_PARAM_INVALID;
+        local = -1;
+    } else {
+        local = (int16_t)effectTarget_local(current);
+    }
+    for (;;) {
+        local = (int16_t)(local + ((direction > 0) ? 1 : -1));
+        if (local < 0)
+            return INSTRUMENT_PARAM_INVALID;
+        if (local >= (int16_t)entry->descriptor_count)
+            return effectTarget_isEffectId(current)
+                ? current : INSTRUMENT_PARAM_INVALID;
+        if (effects_localValid(type, (uint8_t)local, use))
+            return effectTarget_id((uint8_t)local);
+    }
+}
+
 /*
  * Build one complete type-default Effect record for a storage transaction.
  *
@@ -360,14 +466,49 @@ uint8_t effects_getParameter(uint8_t scene_index, uint8_t index,
 }
 
 /*
+ * Resolve which resident Scenes one Effect edit reaches (plan §7.4, A44).
+ *
+ * An active-Scene edit adds that Scene's VOICE edit mask and always keeps the
+ * origin. Parameter, sequence, and lane edits then remove masked Scenes whose
+ * Effect type differs, protecting local descriptor/lane indices until the
+ * layout gate and revalidation have repaired every mask. Inactive edits reach
+ * only their origin, matching VOICE editing. Foreground-only; no SRAM.
+ */
+static uint16_t effects_fanoutMask(uint8_t scene_index, uint8_t match_type)
+{
+    const effect_record_t *origin = scene_effectConst(scene_index);
+    uint16_t mask;
+    uint8_t s;
+
+    if (!origin || scene_index >= SCENE_COUNT)
+        return 0u;
+    mask = (uint16_t)(1u << scene_index);
+    if (scene_index == scene_getActiveIndex())
+        mask = (uint16_t)(mask | bank_sceneMaskVoiceEdit());
+    if (!match_type)
+        return mask;
+    for (s = 0u; s < SCENE_COUNT; s++) {
+        const effect_record_t *record;
+
+        if (s == scene_index || (mask & (uint16_t)(1u << s)) == 0u)
+            continue;
+        record = scene_effectConst(s);
+        if (!record || record->type != origin->type)
+            mask = (uint16_t)(mask & (uint16_t)~(1u << s));
+    }
+    return mask;
+}
+
+/*
  * Write one retained Effect endpoint (contract in EffectsManager.h).
  *
  * Inputs: Scene, descriptor index, image, and value. Output: nonzero when the
  * retained byte changed. Rows outside the Scene's type are rejected, values
  * clamp to the descriptor maximum, and non-Morphable Morph writes land on
- * the single normal value. Step 10 adds edit-mask fan-out here.
+ * the single normal value. Single-Scene worker; the public wrapper below
+ * performs the edit-mask fan-out.
  */
-uint8_t effects_setParameter(uint8_t scene_index, uint8_t index,
+static uint8_t effects_setParameterScene(uint8_t scene_index, uint8_t index,
                              effect_image_t image, uint8_t value)
 {
     const effect_record_t *record = scene_effectConst(scene_index);
@@ -392,13 +533,32 @@ uint8_t effects_setParameter(uint8_t scene_index, uint8_t index,
     return (uint8_t)(record->normal[index] != before);
 }
 
+uint8_t effects_setParameter(uint8_t scene_index, uint8_t index,
+                             effect_image_t image, uint8_t value)
+{
+    uint16_t mask = effects_fanoutMask(scene_index, 1u);
+    uint8_t changed = 0u;
+    uint8_t s;
+
+    /*
+     * Fan out one retained row to every same-type masked Scene. Each worker
+     * clamps against its own descriptor and SceneData marks its own AutoSave
+     * cell/card-clean state; the active runtime is rescanned by service.
+     */
+    for (s = 0u; s < SCENE_COUNT; s++) {
+        if ((mask & (uint16_t)(1u << s)) != 0u)
+            changed |= effects_setParameterScene(s, index, image, value);
+    }
+    return changed;
+}
+
 /*
  * Sequence-setting and Effect Morph setters (contract in EffectsManager.h).
  *
  * Each compares the retained byte around SceneData's normalizing setter, so
  * callers learn whether a repaint or LED refresh is needed.
  */
-uint8_t effects_setSeqRunMode(uint8_t scene_index, uint8_t mode)
+static uint8_t effects_setSeqRunModeScene(uint8_t scene_index, uint8_t mode)
 {
     const effect_record_t *record = scene_effectConst(scene_index);
     uint8_t before;
@@ -410,7 +570,7 @@ uint8_t effects_setSeqRunMode(uint8_t scene_index, uint8_t mode)
     return (uint8_t)(record->seq_run_mode != before);
 }
 
-uint8_t effects_setSeqLength(uint8_t scene_index, uint8_t length)
+static uint8_t effects_setSeqLengthScene(uint8_t scene_index, uint8_t length)
 {
     const effect_record_t *record = scene_effectConst(scene_index);
     uint8_t before;
@@ -422,7 +582,7 @@ uint8_t effects_setSeqLength(uint8_t scene_index, uint8_t length)
     return (uint8_t)(record->seq_length != before);
 }
 
-uint8_t effects_setSeqStepScale(uint8_t scene_index, uint8_t scale)
+static uint8_t effects_setSeqStepScaleScene(uint8_t scene_index, uint8_t scale)
 {
     const effect_record_t *record = scene_effectConst(scene_index);
     uint8_t before;
@@ -434,12 +594,66 @@ uint8_t effects_setSeqStepScale(uint8_t scene_index, uint8_t scale)
     return (uint8_t)(record->seq_step_scale != before);
 }
 
-uint8_t effects_setMorphAmount(uint8_t scene_index, uint8_t amount)
+static uint8_t effects_setMorphAmountScene(uint8_t scene_index, uint8_t amount)
 {
     uint8_t before = scene_getEffectMorphAmount(scene_index);
 
     scene_setEffectMorphAmount(scene_index, amount);
     return (uint8_t)(scene_getEffectMorphAmount(scene_index) != before);
+}
+
+/* Sequence-setting fan-out: run, length, and scale share the same-type mask. */
+uint8_t effects_setSeqRunMode(uint8_t scene_index, uint8_t mode)
+{
+    uint16_t mask = effects_fanoutMask(scene_index, 1u);
+    uint8_t changed = 0u;
+    uint8_t s;
+
+    for (s = 0u; s < SCENE_COUNT; s++) {
+        if ((mask & (uint16_t)(1u << s)) != 0u)
+            changed |= effects_setSeqRunModeScene(s, mode);
+    }
+    return changed;
+}
+
+uint8_t effects_setSeqLength(uint8_t scene_index, uint8_t length)
+{
+    uint16_t mask = effects_fanoutMask(scene_index, 1u);
+    uint8_t changed = 0u;
+    uint8_t s;
+
+    for (s = 0u; s < SCENE_COUNT; s++) {
+        if ((mask & (uint16_t)(1u << s)) != 0u)
+            changed |= effects_setSeqLengthScene(s, length);
+    }
+    return changed;
+}
+
+uint8_t effects_setSeqStepScale(uint8_t scene_index, uint8_t scale)
+{
+    uint16_t mask = effects_fanoutMask(scene_index, 1u);
+    uint8_t changed = 0u;
+    uint8_t s;
+
+    for (s = 0u; s < SCENE_COUNT; s++) {
+        if ((mask & (uint16_t)(1u << s)) != 0u)
+            changed |= effects_setSeqStepScaleScene(s, scale);
+    }
+    return changed;
+}
+
+/* Effect Morph is type-agnostic, so its retained amount reaches the mask. */
+uint8_t effects_setMorphAmount(uint8_t scene_index, uint8_t amount)
+{
+    uint16_t mask = effects_fanoutMask(scene_index, 0u);
+    uint8_t changed = 0u;
+    uint8_t s;
+
+    for (s = 0u; s < SCENE_COUNT; s++) {
+        if ((mask & (uint16_t)(1u << s)) != 0u)
+            changed |= effects_setMorphAmountScene(s, amount);
+    }
+    return changed;
 }
 
 /* Clamp a retained FX sequence length into the live 1..16 domain. */
@@ -498,10 +712,9 @@ static uint8_t effects_seqStepFor(const effect_record_t *record)
 {
     uint8_t len = effects_seqLength(record);
 
+    /* `sel` always applies; seq_step_valid belongs to the clock step only. */
     if (record->seq_run_mode == EFFECT_SEQ_RUN_SEL)
-        return effects_state.seq_step_valid
-            ? (uint8_t)(effects_state.seq_sel_step % len)
-            : EFFECT_SEQ_STEP_NONE;
+        return (uint8_t)(effects_state.seq_sel_step % len);
     if (!seq_isRunning() || !effects_state.seq_step_valid)
         return EFFECT_SEQ_STEP_NONE;
     return (uint8_t)(effects_state.seq_step % len);
@@ -534,12 +747,12 @@ uint8_t effects_seqActiveStep(void)
 
 uint8_t effects_seqSelectedStep(void)
 {
-    /* No selected step is valid until the user selects one for this Scene. */
-    return effects_state.seq_step_valid
-        ? effects_state.seq_sel_step : EFFECT_SEQ_STEP_NONE;
+    /* The `sel` cursor is always defined; LED callers gate on run mode. */
+    return effects_state.seq_sel_step;
 }
 
-/* Select one retained step immediately; `sel` uses it while stopped too. */
+/* Select one retained step immediately; `sel` applies it whether or not the
+ * transport runs. The clock-step validity flag is not touched. */
 void effects_seqSelect(uint8_t step)
 {
     const effect_record_t *record =
@@ -548,7 +761,11 @@ void effects_seqSelect(uint8_t step)
     if (!record || step >= effects_seqLength(record))
         return;
     effects_state.seq_sel_step = step;
-    effects_state.seq_step_valid = 1u;
+    /*
+     * An unlocked selection keeps the held Morph value; a Morph lock on the
+     * selected step replaces it. Service still re-latches after RESET/Scene
+     * switch, so this path preserves the held-lane rule in `sel`.
+     */
     if (record->seq_run_mode == EFFECT_SEQ_RUN_SEL)
         effects_seqLatchMorph(record, step);
     effects_state.seq_serial++;
@@ -594,8 +811,8 @@ uint8_t effects_getLaneLock(uint8_t scene_index, uint8_t step, uint8_t lane,
                       (uint16_t)(1u << lane)) != 0u);
 }
 
-/* Write-and-lock one lane across the physically held steps. */
-uint8_t effects_setSeqLaneLock(uint8_t scene_index, uint16_t step_mask,
+/* Write-and-lock one lane across the physically held steps of one Scene. */
+static uint8_t effects_setSeqLaneLockScene(uint8_t scene_index, uint16_t step_mask,
                                uint8_t lane, uint8_t value)
 {
     const effect_record_t *record = scene_effectConst(scene_index);
@@ -628,6 +845,207 @@ uint8_t effects_setSeqLaneLock(uint8_t scene_index, uint16_t step_mask,
     if (changed)
         effects_state.seq_serial++;
     return changed;
+}
+
+uint8_t effects_setSeqLaneLock(uint8_t scene_index, uint16_t step_mask,
+                               uint8_t lane, uint8_t value)
+{
+    uint16_t mask = effects_fanoutMask(scene_index, 1u);
+    uint8_t changed = 0u;
+    uint8_t s;
+
+    /*
+     * Fan out the held-step mask, lane, and value to same-type Scenes. Registry
+     * lane meaning is shared by equal types, while each worker applies its own
+     * descriptor clamp and retained SceneData dirty markers.
+     */
+    for (s = 0u; s < SCENE_COUNT; s++) {
+        if ((mask & (uint16_t)(1u << s)) != 0u)
+            changed |= effects_setSeqLaneLockScene(s, step_mask, lane, value);
+    }
+    return changed;
+}
+
+/* Publish the tracks that own at least one Effect overlay. */
+static void effects_automationPublishOwners(void)
+{
+    uint64_t mask = effects_automation.active;
+    uint8_t tracks = 0u;
+
+    while (mask) {
+        uint8_t local = (uint8_t)__builtin_ctzll(mask);
+
+        tracks |= (uint8_t)(1u << effects_automation.owner[local]);
+        mask &= (mask - 1ULL);
+    }
+    if (tracks != effects_automation.owner_tracks) {
+        effects_automation.owner_tracks = tracks;
+        seq_setEffectAutomationTracks(tracks);
+    }
+}
+
+/* Clear parameter overlays, with optional clearing of the Scene-level fxm. */
+static void effects_automationClear(uint8_t include_morph)
+{
+    effects_automation.active = 0u;
+    effects_automation.pending_end = 0u;
+    effects_automation.pending_track = EFFECT_AUTOMATION_TRACK_NONE;
+    if (include_morph)
+        effects_automation.morph_override_valid = 0u;
+    effects_automationPublishOwners();
+}
+
+void effects_automationReset(void)
+{
+    /* Common reset path and Scene activation clear all transient Effect layers. */
+    effects_automationClear(1u);
+}
+
+void effects_automationStepFlush(void)
+{
+    /* End owner-track candidates not rewritten by the completed FX step group. */
+    if (effects_automation.pending_end != 0u) {
+        effects_automation.active &= ~effects_automation.pending_end;
+        effects_automation.pending_end = 0u;
+        effects_automationPublishOwners();
+    }
+    effects_automation.pending_track = EFFECT_AUTOMATION_TRACK_NONE;
+}
+
+void effects_automationStepBegin(uint8_t track)
+{
+    uint64_t mask;
+    uint64_t owned = 0u;
+
+    /* The marker precedes this step's entries, so a later entry re-holds a bit. */
+    effects_automationStepFlush();
+    if (track >= EFFECT_AUTOMATION_TRACK_LIMIT)
+        return;
+    mask = effects_automation.active;
+    while (mask) {
+        uint8_t local = (uint8_t)__builtin_ctzll(mask);
+
+        if (effects_automation.owner[local] == track)
+            owned |= (1ULL << local);
+        mask &= (mask - 1ULL);
+    }
+    effects_automation.pending_end = owned;
+    effects_automation.pending_track = track;
+}
+
+uint8_t effects_applyAutomation(uint8_t track, uint8_t local, uint8_t value7)
+{
+    const effect_param_descriptor_t *descriptor;
+    uint64_t bit;
+    uint8_t value;
+
+    /* Apply one validated Pattern Effect entry as a runtime-only overlay. */
+    if (track >= EFFECT_AUTOMATION_TRACK_LIMIT ||
+        !effects_paramAutomatable(effects_state.runtime_type, local))
+        return 0u;
+    descriptor = effects_descriptor(effects_state.runtime_type, local);
+    value = (uint8_t)(value7 & 0x7Fu);
+    if ((descriptor->effect_flags & EFFECT_PARAM_FLAG_WIDE8) != 0u)
+        value = descriptor->expand7(value);
+    if (value > descriptor->max_value)
+        value = descriptor->max_value;
+    bit = 1ULL << local;
+    effects_automation.value[local] = value;
+    effects_automation.owner[local] = track;
+    effects_automation.active |= bit;
+    effects_automation.pending_end &= ~bit;
+    effects_automationPublishOwners();
+    return 1u;
+}
+
+void effects_setMorphAutomation(uint8_t amount)
+{
+    /* Pattern `fxm` is a runtime-only expanded Morph-base override. */
+    effects_automation.morph_override = amount;
+    effects_automation.morph_override_valid = 1u;
+}
+
+void effects_setLfoContribution(uint8_t source_slot, uint8_t pair,
+                                uint8_t target, uint8_t direction,
+                                uint8_t depth)
+{
+    effects_lfo_entry_t *entry;
+
+    /* Store one base-independent Effect LFO direction/depth contribution. */
+    if (source_slot >= INSTRUMENT_SLOT_COUNT || pair > 1u)
+        return;
+    entry = &effects_automation.lfo[source_slot][pair];
+    if (direction > EFFECT_LFO_DIRECTION_UP || depth == 0u)
+        direction = EFFECT_LFO_DIRECTION_NONE;
+    entry->target = target;
+    entry->direction = direction;
+    entry->depth = (direction == EFFECT_LFO_DIRECTION_NONE) ? 0u : depth;
+}
+
+void effects_clearLfoSource(uint8_t source_slot, uint8_t pair)
+{
+    /* Clear one Effect LFO source; the next service pass returns to its base. */
+    if (source_slot >= INSTRUMENT_SLOT_COUNT || pair > 1u)
+        return;
+    effects_automation.lfo[source_slot][pair].target = EFFECT_LFO_TARGET_NONE;
+    effects_automation.lfo[source_slot][pair].direction =
+        EFFECT_LFO_DIRECTION_NONE;
+    effects_automation.lfo[source_slot][pair].depth = 0u;
+}
+
+/* Resolve all matching LFO entries around a held base and clamp the domain. */
+static uint8_t effects_lfoResolve(uint8_t target, uint8_t base,
+                                  uint8_t min_value, uint8_t max_value)
+{
+    int32_t effective;
+    uint8_t source;
+    uint8_t pair;
+
+    if (base < min_value)
+        base = min_value;
+    else if (base > max_value)
+        base = max_value;
+    effective = base;
+    for (source = 0u; source < INSTRUMENT_SLOT_COUNT; source++) {
+        for (pair = 0u; pair < 2u; pair++) {
+            const effects_lfo_entry_t *entry =
+                &effects_automation.lfo[source][pair];
+
+            if (entry->target != target)
+                continue;
+            if (entry->direction == EFFECT_LFO_DIRECTION_UP)
+                effective += ((int32_t)(max_value - base) * entry->depth +
+                              127) / 255;
+            else if (entry->direction == EFFECT_LFO_DIRECTION_DOWN)
+                effective -= ((int32_t)(base - min_value) * entry->depth +
+                              127) / 255;
+        }
+    }
+    if (effective < (int32_t)min_value)
+        effective = min_value;
+    else if (effective > (int32_t)max_value)
+        effective = max_value;
+    return (uint8_t)effective;
+}
+
+/* Build a bit mask of active local Effect LFO destinations. */
+static uint64_t effects_lfoTargetMask(void)
+{
+    uint64_t mask = 0u;
+    uint8_t source;
+    uint8_t pair;
+
+    for (source = 0u; source < INSTRUMENT_SLOT_COUNT; source++) {
+        for (pair = 0u; pair < 2u; pair++) {
+            const effects_lfo_entry_t *entry =
+                &effects_automation.lfo[source][pair];
+
+            if (entry->direction != EFFECT_LFO_DIRECTION_NONE &&
+                entry->target < EFFECT_PARAM_COUNT)
+                mask |= (1ULL << entry->target);
+        }
+    }
+    return mask;
 }
 
 #if DEV_MODE_DIAGNOSTIC
@@ -758,6 +1176,17 @@ void effects_init(void)
 {
     /* Boot init runs after FxBuffer and InstrumentManager, before activation. */
     memset(&effects_state, 0, sizeof(effects_state));
+    /* Step 9 overlay/LFO state starts empty; LFO entries target nothing. */
+    memset(&effects_automation, 0, sizeof(effects_automation));
+    effects_automation.pending_track = EFFECT_AUTOMATION_TRACK_NONE;
+    {
+        uint8_t source;
+
+        for (source = 0u; source < INSTRUMENT_SLOT_COUNT; source++) {
+            effects_clearLfoSource(source, 0u);
+            effects_clearLfoSource(source, 1u);
+        }
+    }
     effects_state.runtime_type = EFFECT_TYPE_OFF;
     effects_state.scene_index = scene_getActiveIndex();
     effects_state.common.route = EFFECT_COMMON_DEFAULT_AUDIO_OUT;
@@ -784,15 +1213,22 @@ void effects_activateScene(uint8_t scene_index)
         effects_switchRuntime(type);
     /*
      * Scene rule (S072_ST8 D3): the new Scene's lane locks begin at its next
-     * FX boundary; the held Morph lane never carries across a Scene switch.
+     * FX boundary; the held Morph lane and Pattern automation overlays never
+     * carry across a Scene switch.
      */
     effects_state.seq_step_valid = 0u;
     effects_state.held_morph_valid = 0u;
+    effects_automationReset();
     effects_state.seq_serial++;
     effects_state.force_all = 1u;
 }
 
-uint8_t effects_changeType(uint8_t scene_index, effect_type_id_t type)
+/*
+ * One-Scene type-change transaction. The public wrapper below fans the change
+ * out and revalidates directional VOICE masks, while this worker preserves the
+ * existing common-row, sequence, AutoSave, and active-runtime behavior.
+ */
+static uint8_t effects_changeTypeScene(uint8_t scene_index, effect_type_id_t type)
 {
     const effect_registry_entry_t *entry = effects_registryEntry(type);
     effect_record_t *record;
@@ -817,11 +1253,37 @@ uint8_t effects_changeType(uint8_t scene_index, effect_type_id_t type)
     /* Type change clears every lock, including the held Morph lane (F3). */
     if (scene_index == effects_state.scene_index) {
         effects_state.held_morph_valid = 0u;
+        /* Old-type local overlays are meaningless; fxm is Scene-level. */
+        effects_automationClear(0u);
         effects_state.seq_serial++;
     }
     if (scene_index == effects_state.scene_index)
         effects_switchRuntime(type);
     return 1u;
+}
+
+uint8_t effects_changeType(uint8_t scene_index, effect_type_id_t type)
+{
+    uint16_t mask;
+    uint8_t changed = 0u;
+    uint8_t s;
+
+    /*
+     * Type changes restore the layout match, so no type filter is applied to
+     * the active edit mask. Directional masks owned by other Scenes are then
+     * repaired by BankData, dropping members made incompatible by the change.
+     * Unknown types are rejected before any resident Scene is touched.
+     */
+    if (!effects_registryEntry(type))
+        return 0u;
+    mask = effects_fanoutMask(scene_index, 0u);
+    for (s = 0u; s < SCENE_COUNT; s++) {
+        if ((mask & (uint16_t)(1u << s)) != 0u)
+            changed |= effects_changeTypeScene(s, type);
+    }
+    if (changed)
+        bank_revalidateVoiceEditMasks();
+    return changed;
 }
 
 void effects_service(void)
@@ -831,6 +1293,7 @@ void effects_service(void)
     const effect_registry_entry_t *entry =
         effects_registryEntry(effects_state.runtime_type);
     fx_share_t share;
+    uint64_t lfo_mask;
     uint8_t morph;
     uint8_t active_step;
     uint8_t index;
@@ -840,17 +1303,26 @@ void effects_service(void)
     if (!record || !entry)
         return;
     /*
-     * FX-sequencer layer (S072 step 8; plan §9): consume the TIM3 latch in
-     * foreground context, then resolve the held Morph base and active step.
-     * The Pattern automation overlay is added ahead of this layer in Step 9.
+     * Plan §9 resolution (S072 steps 8-9), once per render block: consume the
+     * FX latch, resolve Morph base priority and LFO, then apply menu, FX lock,
+     * Pattern overlay, and LFO layers before the existing runtime clamps.
      */
     effects_seqConsume(record);
     active_step = effects_seqStepFor(record);
     step = (active_step != EFFECT_SEQ_STEP_NONE)
         ? &record->steps[active_step] : NULL;
-    morph = effects_state.held_morph_valid
-        ? effects_state.held_morph
-        : scene_getEffectMorphAmount(effects_state.scene_index);
+    /* `sel` always applies, so its Morph lock re-latches after RESET/switch. */
+    if (record->seq_run_mode == EFFECT_SEQ_RUN_SEL && step &&
+        !effects_state.held_morph_valid)
+        effects_seqLatchMorph(record, active_step);
+    if (effects_automation.morph_override_valid)
+        morph = effects_automation.morph_override;
+    else if (effects_state.held_morph_valid)
+        morph = effects_state.held_morph;
+    else
+        morph = scene_getEffectMorphAmount(effects_state.scene_index);
+    morph = effects_lfoResolve(EFFECT_LFO_TARGET_MORPH, morph, 0u, 255u);
+    lfo_mask = effects_lfoTargetMask();
     fxbuf_effectShare(&share);
     for (index = 0u; index < entry->descriptor_count; index++) {
         const effect_param_descriptor_t *descriptor =
@@ -863,6 +1335,16 @@ void effects_service(void)
         /* A locked lane replaces the Morph-interpolated menu value (A16). */
         if (step && (step->lock_mask & 0xFFFEu) != 0u)
             (void)effects_seqOverride(entry, step, index, &value);
+        /* Pattern automation is held ahead of the FX lock (A18). */
+        if ((effects_automation.active & (1ULL << index)) != 0u)
+            value = effects_automation.value[index];
+        /* LFO resolves around the held value within its modulation domain. */
+        if ((lfo_mask & (1ULL << index)) != 0u &&
+            (descriptor->base.flags & INSTRUMENT_PARAM_FLAG_MODULATABLE) != 0u &&
+            descriptor->base.mod_domain.flags != INSTRUMENT_MOD_DOMAIN_NONE)
+            value = effects_lfoResolve(index, value,
+                                       descriptor->base.mod_domain.min_value,
+                                       descriptor->base.mod_domain.max_value);
         if (value > descriptor->max_value)
             value = descriptor->max_value;
         if ((descriptor->effect_flags & EFFECT_PARAM_FLAG_BUFFER_DEPENDENT) != 0u &&
@@ -893,7 +1375,8 @@ void effects_process(effect_io_t *io)
     const effect_registry_entry_t *entry =
         effects_registryEntry(effects_state.runtime_type);
 
-    /* Step 5 calls this after effects_service(); `off` has no process hook. */
+    /* The mixer calls this after effects_service() in the same block; `off` has
+     * no process hook and the mixer skips the bus entirely for it. */
     if (entry && entry->ops && entry->ops->process && io)
         entry->ops->process(effects_runtimeMember(), io);
 }

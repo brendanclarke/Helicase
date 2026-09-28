@@ -88,7 +88,11 @@ defaults to 0. The self-test result codes are: 0 pass; 1 arena geometry;
 ignored when `DEV_MODE_DIAGNOSTIC=0`, defaults to 0, and currently accepts
 `1` to force the `flt` type through the normal SceneData type-change and
 FxBuffer handoff path after boot Scene activation. A zero value leaves the
-retained Scene type unchanged.
+retained Scene type unchanged. Since Session 072 Step 10, a forced type
+change follows the normal `typ` edit path: it fans out through the active
+VOICE edit mask (self-only at boot unless the mask was restored), clears the
+FX sequence for every changed Scene, and marks AutoSave. Keep the knob at zero
+for ordinary diagnostic runs.
 
 ## `DEV_MODE_LOGGING`
 

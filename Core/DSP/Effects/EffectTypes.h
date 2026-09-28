@@ -41,12 +41,12 @@
 #include "StepScale.h"
 
 /*
- * Effect data contract shared by SceneData, AutoSave, and the future
- * EffectsManager registry, storage, Menu, and sequencer.
+ * Effect data contract shared by SceneData, AutoSave, EffectsManager,
+ * `.fx` storage, menuEffects, and the FX sequencer.
  *
  * What: constants, enums, and the retained per-Scene Effect record layout,
  * with no runtime or module dependencies. Why a separate header: SceneData.h
- * embeds effect_record_t while EffectsManager.c will include SceneData.h;
+ * embeds effect_record_t while EffectsManager.c includes SceneData.h;
  * keeping this contract data-only avoids a header cycle. Authority:
  * EFFECTS_BUS_FEATURE_PLAN.md sections 7, 10, and 11.
  */
@@ -78,7 +78,7 @@ typedef uint8_t effect_type_id_t;
 #define EFFECT_SEQ_LENGTH_MAX            16u
 #define EFFECT_SEQ_LENGTH_DEFAULT        16u
 
-/* Stored run modes; text tokens are introduced by the later file/UI steps. */
+/* Stored run modes. `.fx` and the Effect page use fwd/rev/pip/rnd/sel. */
 typedef enum {
     EFFECT_SEQ_RUN_FWD = 0,
     EFFECT_SEQ_RUN_REV,
@@ -110,7 +110,7 @@ typedef struct {
  * The record belongs solely to one Scene: Kit loads never alter it. It stores
  * the type, sequence settings, normal/Morph parameter images, and 16 steps.
  * Effect Morph amount is deliberately a separate Scene setting, not part of
- * this record or the future .fx file. SceneData owns all retained writes.
+ * this record or the `.fx` file. SceneData owns all retained writes.
  */
 typedef struct {
     effect_type_id_t type;
@@ -133,7 +133,7 @@ _Static_assert(sizeof(effect_record_t) == 420u,
  * Pattern targets use a 3-bit block plus a 6-bit local parameter. Blocks 0..5
  * are voices, block 6 is Scene, and block 7 is Effect. Local 63 aliases the
  * 9-bit automation-off sentinel, so Pattern automation accepts 0..62 while
- * future LFO/FX paths may still address local 63.
+ * FX-sequencer lanes and the LFO `fx` namespace may still address local 63.
  */
 #define EFFECT_TARGET_ID_BASE               448u
 #define EFFECT_TARGET_ID_COUNT               64u

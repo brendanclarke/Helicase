@@ -53,7 +53,7 @@ _______
 ## Toolchain
 ```
 arm-none-eabi-gcc -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard
-make && make img  → build/LXRV2_lxr02.img
+make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build/main.o in an incremental tree)
 ```
 
 ## Directory Structure
@@ -128,6 +128,7 @@ make && make img  → build/LXRV2_lxr02.img
     │   ├── Cc2Text.c                ← modTargets[] 205 entries
     │   ├── CcNr2Text.h
     │   ├── copyClearTools.c/h       ← copy/clear UI; pattern mutation through PatternData
+    │   ├── menuEffects.c/h          ← SHIFT+PERF Effect page (Phase 5)
     │   └── screensaver.c/h          ← screensaver with explicit LCD off/on phases
     ├── MIDI/
     │   ├── Uart.c/h                 ← USART3, 31250 baud, interrupt-driven dual FIFO (realtime + normal)
@@ -155,6 +156,10 @@ make && make img  → build/LXRV2_lxr02.img
     │   ├── sequencerTimer.c/h       ← TIM3 4kHz sequencer timing owner (IRQ29, priority 2) — Session 019
     │   ├── sequencer.c/h            ← original LXR sequencer source (driven by TIM3_IRQHandler)
     │   ├── clockSync.c/h
+    │   ├── StepScale.c/h            ← shared track/FX step-scale table (Phase 5)
+    ├── DSP/
+    │   ├── Effects/                 ← Phase 5: EffectsManager (registry/resolution), FxBuffer (DTCM arena), EffectTypes.h, StereoFilter/
+    │   └── Instruments/             ← InstrumentManager + Drum/Snare/Cymbal/HiHat descriptor tables
     ├── DSPAudio/
     │   ├── random.c/h               ← F765 RNG port (PLL48CLK, bare register)
     │   └── [all DSP voice files]    ← ported; mixer_calcNextSampleBlock wired to AudioCodecManager
@@ -172,6 +177,8 @@ make && make img  → build/LXRV2_lxr02.img
 | Confirmed pin assignments / IRQs? | `knowledge_files/hardware_archive/HARDWARE_MAP.md` |
 | Sequencer / DSP architecture plans? | `knowledge_files/hardware_archive/AVR_TO_F765_MIGRATION.md` |
 | Current known issues and reminders? | `MEMORY.md` |
+| Effect system (FX bus, Effect types, FX sequencer)? | `knowledge_files/specification_reference/EFFECTS_BUS_REFERENCE.md` |
+| Module/API ownership and specifications? | `knowledge_files/specification_reference/` (indexed in `MEMORY.md`) |
 
 ## Confirmed Working Hardware
 - LCD 4-bit parallel (PE7-PE12), TIM7 async driver

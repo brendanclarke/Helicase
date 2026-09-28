@@ -84,6 +84,18 @@ present — this supports workflows where the user wants to pre-populate a
 Scene before formally activating it. All public accessors read/write
 `bank_scene_mask_voice_edit[bank_active_scene_slot]` transparently.
 
+Turning a Scene bit on through the VOICE-held SEQ view additionally requires
+the target Scene to have the same Effect type and the same six Instrument slot
+types as the active Scene. A mismatch is rejected without toggling or flashing;
+turning a bit off remains allowed. The shared predicate is
+`scene_editLayoutMatches()`.
+
+After a retained type can change, `bank_revalidateVoiceEditMasks()` walks all
+16 directional owner entries and drops members whose layout no longer matches,
+while preserving each owner bit. Menu load-completion funnels, the end of boot,
+and `effects_changeType()` invoke this repair. Dropped bits mark the Bank
+VOICE-mask AutoSave field through the indexed setter.
+
 **Per-Scene accessors:** `bank_setSceneMaskVoiceEditForScene(scene, mask)` and
 `bank_sceneMaskVoiceEditForScene(scene)` provide indexed access for boot
 restore (Autosave) and bankset load/save.
@@ -186,11 +198,14 @@ Parameters change through these paths:
 
 8. **User edit (Effect page):** `menuEffects.c` resolves the registry-driven
    `EFFECT_PAGE` and sends parameter, sequence-setting, Morph amount, and type
-   changes through the EffectsManager edit API. Step 7 writes the active Scene
-   only; the `typ` click-out invokes `effects_changeType()` and therefore
+   changes through the EffectsManager edit API. Step 10 fans active-Scene
+   Effect parameters, Morph endpoints, sequence run/length/scale, lane locks,
+   Effect Morph amount, and type changes through the active VOICE edit mask;
+   parameter/lock/sequence writes retain a same-Effect-type guard. The `typ`
+   click-out invokes `effects_changeType()` and therefore
    preserves common rows, sequence settings, and Effect Morph while restoring
-   type-specific defaults and clearing the sequence. Step 10 adds the edit-mask
-   type-matching gate and fan-out inside that API.
+   type-specific defaults and clearing the sequence. The edit-mask gate and
+   fan-out are part of that EffectsManager boundary.
 
 9. **FX sequencer edit/playback (S072 Step 8):** the active Scene's FX run,
    length, scale, per-step values, and lane locks remain in its retained
@@ -309,7 +324,7 @@ are NOT parameters of a swappable instrument in a voice slot. These live in
 | 391 | (reserved) | — | — | — | — |
 | 392–397 | 1ou..6ou | Yes | 5 | `preset_applyVoiceAudioOutRuntime()` | Live (Session 070) |
 | 398–403 | 1fx..6fx | Yes | 127 | Effective send pulled by mixer each block | Live (Session 072 Step 5) |
-| 404 | fxm | No (Scene) | 255 | Reserved, no apply path | Reserved (Session 072) |
+| 404 | fxm | No (Scene) | 127 stored / 255 expanded | `effects_setMorphAutomation()` overlay; LFO via EffectsManager | Live (Session 072 Step 9) |
 
 ### Voice Morph 7↔8 bit conversion
 
@@ -360,6 +375,12 @@ Direct mixer register write for DSP apply.
 **FX Send:** `preset_getEffectiveFxSend(slot)` returns step override when
 active, else retained Scene value. The mixer pulls it each block, applies the
 stored PRE/POST/FX fader topology, and ramps the send into the live FX bus.
+
+**Effect parameters and `fxm`:** EffectsManager owns these overlays
+(`effects_automation`). Parameter overlays end when the writing track's
+automation ends (Effect step markers), and all of them clear on the common
+reset path and at Scene activation. `fxm` is the first Effect Morph base
+source. See `EFFECTS_BUS_REFERENCE.md` §6 and §11.
 
 **Slot-6 Track-7 Decay:** Trigger cascade priority:
 1. Step override (if `step_active`)

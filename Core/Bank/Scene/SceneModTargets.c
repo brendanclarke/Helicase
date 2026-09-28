@@ -80,10 +80,12 @@ static const scene_mod_target_descriptor_t scene_mod_targets[] = {
     /*
      * Step-only per-voice FX-send targets (IDs 398..403).
      *
-     * Inputs: seven-bit Pattern values. Output: Preset retains each value;
-     * the Phase 5 FX bus will attach audible runtime behavior later. Keeping
-     * these entries in the shared table makes Menu, Pattern validation, and
-     * the foreground drain agree on one namespace now.
+     * Inputs: seven-bit Pattern values. Output: a runtime-only send overlay
+     * (preset_setFxSendStepOverride()) that the mixer reads each block
+     * through preset_getEffectiveFxSendAmount(), so the send is audible on
+     * the live FX bus (Session 072 step 5). Keeping these entries in the
+     * shared table makes Menu, Pattern validation, and the foreground drain
+     * agree on one namespace.
      */
     { SCENE_MOD_TARGET_ID(14u), SCENE_MOD_TARGET_KIND_FX_SEND, 0u,
       0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
@@ -104,14 +106,14 @@ static const scene_mod_target_descriptor_t scene_mod_targets[] = {
       0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "6 FxSend", "6fx" },
     /*
-     * Reserve Scene Effect Morph ID 404 without exposing it yet.
+     * Scene Effect Morph `fxm` (ID 404; Session 072 step 9).
      *
-     * Inputs/outputs: none in Step 3. use_flags stays zero so the existing
-     * scn/LFO/velocity pickers and validators remain unchanged. Reserving the
-     * descriptor now fixes the canonical ID before Step 9 adds apply paths.
+     * Pattern automation and LFO (`scn` namespace) reach EffectsManager as
+     * runtime-only Morph-base layers following the Scene rule. Velocity is
+     * deliberately absent; retained edits stay on the Effect page `mrp`.
      */
     { SCENE_MOD_TARGET_ID(20u), SCENE_MOD_TARGET_KIND_EFFECT_MORPH, 0xffu,
-      0u, 255u, 0u,
+      0u, 255u, SCENE_MOD_TARGET_USE_LFO | SCENE_MOD_TARGET_USE_AUTOMATION,
       "Effect", "FX Morph", "fxm" },
 };
 
@@ -185,8 +187,9 @@ uint8_t sceneModTarget_valid(uint16_t id, scene_mod_target_use_t use)
      *
      * Inputs: stored target ID and requested use flag. Output: nonzero only
      * when the ID belongs to the Scene namespace and the target opts into that
-     * use. Future effects can be added to the table without changing Menu or
-     * InstrumentManager traversal logic.
+     * use. Scene-level targets (including Effect Morph `fxm`) are added to the
+     * table without changing traversal logic; Effect parameters are the
+     * separate block-7 namespace owned by EffectsManager.
      */
     return (uint8_t)(descriptor &&
                      ((descriptor->use_flags & (uint8_t)use) != 0u));

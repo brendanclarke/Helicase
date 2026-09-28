@@ -2213,5 +2213,162 @@ Revert the change set. No retained format changes:
 
 ## 11. Implementation notes
 
-*(For the implementer: record deviations, the measured link, and hardware
-results here.)*
+### 11.1 Code checkpoint
+
+- Implemented EffectsManager's 184-byte `effects_automation` owner block:
+  Effect Pattern overlays, owner-track end candidates, `fxm` reset overlay,
+  and 6 × 2 base-independent LFO entries.
+- Implemented block-7 validation/traversal, `fxm` Scene automation, the
+  Sequencer FX step-marker/reset handshake, and foreground overlay drain.
+- Added InstrumentManager's namespace value 8 (`fx`) and Effect LFO adapter;
+  moved voice/Effect Morph direction-depth encoding into one helper.
+- Added Menu `fx` category editing/display, WIDE8-aware seven-bit handling,
+  `fxm` Morph display handling, storage clamp, and P1–P3 prerequisite fixes.
+- All new public/private runtime additions carry adjacent descriptive
+  comments in their `.c`/`.h` locations. Existing ST8 changes were preserved.
+
+### 11.2 First link measurement
+
+`make all` completed successfully after the ST9 source changes. The final
+clean link is `text=482,632`, `data=416`, `bss=426,336`, with a 483,048-byte
+flash payload. `tools/link_budget.py` reports 483,048 / 491,520 bytes used and
+8,472 bytes headroom; ITCM is 3,768 bytes, DTCM statics are 4,448 bytes, and
+the FXBUF is unchanged at 126,624 bytes with a 3,744-byte margin. The first
+incremental build exposed one new `-Wsequence-point` warning in the Menu
+Effect-label helper; that expression was corrected before the final clean
+verification pass.
+
+Hardware acceptance remains pending; the matrix in §10 is the next check.
+
+### 11.3 Final verification
+
+- `git diff --check` is clean.
+- Required clean `make clean && make all` completed; the final build produced
+  `build/lxr02.elf`, `build/lxr02.bin`, and `build/LXRV2_lxr02.img`.
+- `make img` wrapped the final payload successfully at 483,048 bytes.
+- No new compiler warning remains from the ST9 changes; remaining build
+  warnings are pre-existing project/toolchain warnings.
+
+---
+
+## 12. Assessment (2026-09-28)
+
+### 12.1 Result
+
+**Accepted for hardware testing.** One low-severity behavioral deviation
+(F1) should be fixed; it is a one-line change. The rest are cosmetic or
+notes. The code follows the schedule closely, and prerequisites P1–P3 and the
+ST8 F1/F2 fixes are all in.
+
+### 12.2 Build
+
+I ran a clean rebuild (`make clean && make all`) independently; it exited 0.
+
+```text
+text 482632   data 416   bss 426336   dec 909384
+Flash 483,048 / 491,520 B   headroom 8,472 B   (Step 8 → Step 9: +3,912 B)
+ITCM 3,768 / 16,384 B       DTCM statics 4,448 B
+FXBUF 126,624 B at 0x20001160, margin 3,744 B (unchanged)
+```
+
+- **Warnings:** the same 20 pre-existing lines as Step 8, and nothing from
+  any file this step touched. The `-Wsequence-point` noted in §11.2 is gone.
+- **Flash:** +3,912 B is about 300 B above the §0.3 upper estimate (3.6 KB).
+  Headroom is now **8,472 B**. Step 10 (fan-out, estimated 1 to 1.5 KB) fits,
+  but every later step should be sized against this figure.
+- **`.bss`:** +176 B, against the expected +186 B. The difference is
+  alignment padding absorbed by neighboring objects. The `_Static_assert` pins
+  `effects_automation_t` at 184 B.
+
+### 12.3 Code against schedule
+
+| § | Area | Status | Notes |
+|---|---|---|---|
+| 2 | P1 blank-name `.fx` stem (both phases) | ✔ | |
+| 2 | P2 Kit Save no longer touches the Effect row | ✔ | The five lines are removed. |
+| 2 | P3 SELECT abandons `typ` | ✔ | |
+| 3.1 | ST8 F1: `sel` always applies | ✔ with deviation | See **F1**. |
+| 3.2–3.3 | API and the 184 B state struct | ✔ | As scheduled. The long comment blocks are condensed to one-liners (F4). |
+| 3.4 | `effects_targetValid/Descriptor/stepTarget` | ✔ | Walk semantics match `instrumentManager_stepTargetForSlot()`. |
+| 3.5 | Overlay API (publish owners, clear, StepBegin/Flush, apply, `fxm`) | ✔ | WIDE8 expand, `max_value` clamp, last-writer ownership, and candidate removal are all correct. |
+| 3.6 | LFO table, resolver, mask | ✔ | The resolver is the S071 integer math with the min generalization. |
+| 3.7 | init / activateScene / changeType hooks | ✔ | Type change keeps the `fxm` override (D4). |
+| 3.8 | `effects_service()` §9 order | ✔ | Order: Morph base (Pattern `fxm` > held lane > retained) → LFO `fxm` → interpolate → FX lock → Pattern overlay → LFO within the domain → `max_value` → buffer clamp. The `sel` Morph re-latch is present. |
+| 4 | `fxm` flags LFO + AUTOMATION, no velocity | ✔ | |
+| 5.1–5.2 | Owner/reset latches, reset set inside `seq_fxPublishReset` PRIMASK | ✔ | |
+| 5.3 | Marker producer; marker before entries on the automation gate | ✔ | The modified `if` block is space-indented inside a tab-indented function (cosmetic). |
+| 5.4 | `fxm` apply (`effect_expand7Linear`), no-op restore case | ✔ | |
+| 5.5 | Drain: reset before the early return, marker branch, Effect branch, flush after PRIMASK | ✔ | The track decode `(identity & 0x3FF) / NUM_STEPS` is correct for tracks 0..6. |
+| 6.1–6.6 | Namespace 8, AUTOMATION-only `targetValid` branch, three token functions, shared encoder, `fxm` case, restore clear, install, adapter | ✔ | The voice-Morph case is the old body moved verbatim, and the `_Static_assert` ties the encodings together. |
+| 7.1–7.2 | LFO clamps, `fx` labels, short/full renderers | ✔ | The only remaining `INSTRUMENT_TARGET_VOICE_SCENE` uses are equality tests, which is correct. |
+| 7.3–7.7 | `fx` category helpers, current value, fields 2 and 3, render | ✔ | `fxm` shares voice-Morph 7-bit storage, max and display through `menu_sceneTargetIsMorph()`. See F2. |
+| 7.8 | ST8 F2: held `mrp` display | ✔ | |
+| 8 | Kit parser clamp to 8 | ✔ | |
+| 9 | Docs (plan, SRAM_MANIFEST, PATTERN_DYNAMIC_STACK, FILESYSTEM_SPEC, MEMORY) | ✔ | |
+
+`presetManager.c` and `PatternData.c` are untouched, as planned. The
+Scene-activation rebind validates `fx` tokens through the extended
+`instrumentManager_lfoTargetIdFromToken()`.
+
+### 12.4 Findings
+
+**F1 (low, behavior): selecting an unlocked step in `sel` drops the held
+Morph.**
+
+- **Where:** `effects_seqSelect()` (`EffectsManager.c` ~654).
+- **What changed:** the function now clears `held_morph_valid` and leaves
+  `effects_service()` to re-latch the Morph lock. The Step 8 code and the §3.1
+  schedule called `effects_seqLatchMorph(record, step)` instead.
+- **Effect:**
+  - Selecting a step **with** a Morph lock behaves as before.
+  - Selecting a step **without** one now returns Effect Morph to the retained
+    `mrp`. Plan §9 says a Morph-lane lock "holds through later unlocked steps
+    … until another Morph lock replaces it, or until the Scene-rule restore".
+  - In `sel`, choosing an unlocked step is the equivalent of playing one, so
+    the previous lock should hold.
+- **Fix:** replace `effects_state.held_morph_valid = 0u;` with
+  `effects_seqLatchMorph(record, step);`. That function writes only when the
+  selected step has a Morph lock. Keep the `effects_service()` re-latch, which
+  still covers RESET and Scene switches.
+
+**F2 (cosmetic): `fx` detail labels truncate.**
+
+- **Where:** `menu_stepAutomationEffectLabel()`.
+- **What happens:** it inserts a space between the category and the long name
+  (Scene style). The field is 14 characters, so `Filter Frequncy` shows as
+  `Filter Frequnc` and `Effect AudioOut` as `Effect AudioOu`.
+- **Why:** the schedule used the voice-row style with no separator, where both
+  fit.
+- **Fix:** drop the `if (i < 14u) … = ' ';` line, or accept the truncation.
+
+**F3 (note): flash.** The measured +3,912 B leaves **8,472 B**. See §12.2.
+
+**F4 (cosmetic): condensed comment blocks.** Most scheduled comment blocks
+became one-line summaries. Examples:
+
+- `effects_applyAutomation`;
+- `effects_automationStepBegin`;
+- the Step 9 state struct;
+- the `lfoDirectionDepth` rationale;
+- the drain header.
+
+They are accurate. The fuller rationale lives in this document and in the
+updated PATTERN_DYNAMIC_STACK / SRAM_MANIFEST text. No action is required
+unless you want the full blocks in the source.
+
+I found no correctness defects in these areas:
+
+- the marker/entry ordering;
+- the reset-latch ordering;
+- the owner-byte publication;
+- the WIDE8 path;
+- the namespace clamps;
+- the Pattern-writer validation, which is AUTOMATION-only, so modulation
+  backends are unaffected.
+
+### 12.5 Hardware status
+
+The §10 hardware matrix (gates 3–18) is pending. Gate 15 (`sel` after play,
+held `mrp` display) now exercises the ST8 fixes. With F1 unfixed, one extra
+case in gate 15 will show the deviation: select a Morph-locked step, then an
+unlocked one, and Morph returns to the retained `mrp`.

@@ -7,6 +7,7 @@
 #include "SceneModTargets.h"
 #include "presetManager.h"
 #include "presetMorphEngine.h"
+#include "EffectsManager.h"
 #include "DrumVoice.h"
 #include "Snare.h"
 #include "CymbalVoice.h"
@@ -76,7 +77,9 @@ typedef struct {
 typedef enum {
     INSTALLED_MOD_TARGET_NONE = 0,
     INSTALLED_MOD_TARGET_SLOT_DECIMATION,
-    INSTALLED_MOD_TARGET_SCENE_TARGET
+    INSTALLED_MOD_TARGET_SCENE_TARGET,
+    /* Effect parameter LFO destinations use EffectsManager's held-value path. */
+    INSTALLED_MOD_TARGET_EFFECT
 } installed_mod_target_kind_t;
 
 typedef struct {
@@ -747,11 +750,16 @@ uint8_t instrumentManager_targetValid(uint8_t scene_index,
      * Inputs: a canonical target ID and requested use. Voice IDs continue
      * through the registry-driven descriptor checks below; Scene IDs are
      * validated by the Scene-target table because they have no instrument
-     * descriptor. Output: Scene targets are legal for automation when present
-     * in that table, while all other non-voice IDs remain invalid. Affiliate:
-     * PatternData's packed automation writer and the STEP target picker.
+     * descriptor. Output: Scene targets and Effect block-7 targets are legal
+     * for automation when their owners mark them valid; other non-voice IDs
+     * remain invalid. Affiliate: PatternData's packed automation writer and
+     * the STEP target picker.
      */
     if (!instrumentParam_isVoiceParameter(id)) {
+        /* Effect automation is validated by the active Scene's registry. */
+        if (use == INSTRUMENT_TARGET_AUTOMATION &&
+            effectTarget_isEffectId(id))
+            return effects_targetValid(scene_index, id, use);
         if (use == INSTRUMENT_TARGET_AUTOMATION &&
             id >= INSTRUMENT_VOICE_ID_COUNT &&
             id < INSTRUMENT_TOTAL_ID_COUNT)
@@ -927,12 +935,11 @@ uint8_t instrumentManager_lfoTargetVoiceValid(uint8_t voice)
     /*
      * Validate the retained LFO target namespace byte.
      *
-     * Values 1..6 address instrument slots and value 7 is the Scene namespace
-     * displayed by Menu as `scn`. Future effect namespaces can be added above
-     * this value without widening lfo_target_param.
+     * Values 1..6 address instrument slots, 7 is `scn`, and 8 is the Effect
+     * namespace displayed as `fx` (Session 072 step 9).
      */
     return (uint8_t)(voice >= INSTRUMENT_TARGET_VOICE_FIRST &&
-                     voice <= INSTRUMENT_TARGET_VOICE_SCENE);
+                     voice <= INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST);
 }
 
 instrument_param_id_t instrumentManager_lfoTargetIdFromToken(
@@ -948,9 +955,9 @@ instrument_param_id_t instrumentManager_lfoTargetIdFromToken(
      * Expand an LFO target pair into a canonical runtime target.
      *
      * lfo_target_voice chooses the namespace. Voice namespaces interpret the
-     * parameter byte as a local descriptor index; the Scene namespace
-     * interprets it as a Scene target-table index. Off and invalid tokens
-     * always expand to INSTRUMENT_PARAM_INVALID.
+     * parameter byte as a local descriptor index; `scn` uses a Scene target
+     * index and `fx` uses an Effect-local descriptor index. Off and invalid
+     * tokens always expand to INSTRUMENT_PARAM_INVALID.
      */
     if (token == INSTRUMENT_TARGET_TOKEN_OFF ||
         !instrumentManager_lfoTargetVoiceValid(target_voice)) {
@@ -959,6 +966,16 @@ instrument_param_id_t instrumentManager_lfoTargetIdFromToken(
     if (target_voice == INSTRUMENT_TARGET_VOICE_SCENE) {
         uint16_t id = sceneModTarget_idFromIndex(token);
         return sceneModTarget_valid(id, SCENE_MOD_TARGET_USE_LFO)
+            ? id : INSTRUMENT_PARAM_INVALID;
+    }
+    if (target_voice == INSTRUMENT_TARGET_VOICE_EFFECT) {
+        /* `fx` accepts only current-Scene MODULATABLE Effect rows. */
+        uint16_t id;
+
+        if (token >= EFFECT_TARGET_ID_COUNT)
+            return INSTRUMENT_PARAM_INVALID;
+        id = effectTarget_id(token);
+        return effects_targetValid(scene_index, id, use)
             ? id : INSTRUMENT_PARAM_INVALID;
     }
     return instrumentManager_targetIdFromTokenForSlot(
@@ -974,9 +991,9 @@ instrument_target_token_t instrumentManager_lfoTargetTokenFromId(
     /*
      * Collapse a canonical LFO target ID into the selected namespace token.
      *
-     * Scene IDs become Scene target-table indices only when target_voice is
-     * the `scn` namespace. Instrument IDs become local descriptor indices only
-     * when they belong to the selected voice namespace.
+     * Scene IDs become Scene target-table indices only in `scn`; Effect IDs
+     * become local descriptor indices only in `fx`; instrument IDs become
+     * local descriptor indices only in the selected voice namespace.
      */
     if (id == INSTRUMENT_PARAM_INVALID ||
         !instrumentManager_lfoTargetVoiceValid(target_voice)) {
@@ -987,6 +1004,12 @@ instrument_target_token_t instrumentManager_lfoTargetTokenFromId(
         return (sceneModTarget_indexFromId(id, &index) &&
                 sceneModTarget_valid(id, SCENE_MOD_TARGET_USE_LFO))
             ? (instrument_target_token_t)index
+            : INSTRUMENT_TARGET_TOKEN_OFF;
+    }
+    if (target_voice == INSTRUMENT_TARGET_VOICE_EFFECT) {
+        /* Effect IDs collapse to local indices only in the `fx` namespace. */
+        return effects_targetValid(scene_index, id, use)
+            ? (instrument_target_token_t)effectTarget_local(id)
             : INSTRUMENT_TARGET_TOKEN_OFF;
     }
     return instrumentManager_targetTokenFromIdForSlot(
@@ -1003,9 +1026,9 @@ instrument_target_token_t instrumentManager_stepLfoTargetToken(
     /*
      * Walk an LFO destination list in the selected namespace.
      *
-     * Voice namespaces reuse descriptor-token stepping. The Scene namespace
-     * walks SceneModTargets and stores only the resulting local Scene index in
-     * lfo_target_param.
+     * Voice namespaces reuse descriptor-token stepping. `scn` walks
+     * SceneModTargets and `fx` walks the current Effect registry, storing only
+     * the resulting local token in lfo_target_param.
      */
     if (!instrumentManager_lfoTargetVoiceValid(target_voice) || direction == 0)
         return current;
@@ -1014,6 +1037,15 @@ instrument_target_token_t instrumentManager_stepLfoTargetToken(
             scene_index, 0u, target_voice, current, use);
         uint16_t next_id = sceneModTarget_step(current_id, direction,
                                                SCENE_MOD_TARGET_USE_LFO);
+        return instrumentManager_lfoTargetTokenFromId(scene_index, target_voice,
+                                                      next_id, use);
+    }
+    if (target_voice == INSTRUMENT_TARGET_VOICE_EFFECT) {
+        /* Registry-ordered walk of the Scene's MODULATABLE Effect rows. */
+        uint16_t current_id = instrumentManager_lfoTargetIdFromToken(
+            scene_index, 0u, target_voice, current, use);
+        uint16_t next_id = effects_stepTarget(scene_index, current_id,
+                                              direction, use);
         return instrumentManager_lfoTargetTokenFromId(scene_index, target_voice,
                                                       next_id, use);
     }
@@ -2330,6 +2362,65 @@ static uint8_t instrumentManager_applyVelocitySceneTarget(
     }
 }
 
+_Static_assert(EFFECT_LFO_DIRECTION_NONE == PRESET_MORPH_LFO_DIRECTION_NONE &&
+               EFFECT_LFO_DIRECTION_DOWN == PRESET_MORPH_LFO_DIRECTION_MAIN &&
+               EFFECT_LFO_DIRECTION_UP == PRESET_MORPH_LFO_DIRECTION_MORPH,
+               "Effect and voice-Morph LFO directions share one encoding");
+
+/*
+ * Encode one LFO sample as a base-independent endpoint direction and depth.
+ *
+ * Positive polarity moves toward the maximum; negative polarity preserves
+ * original-LXR motion toward the minimum; bipolar polarity selects the
+ * endpoint from the centered source. The base is deliberately not read:
+ * each owner resolves the depth around its own current held value.
+ */
+static PresetMorphLfoDirection instrumentManager_lfoDirectionDepth(
+    float lfo_value_0_1, uint8_t polarity, float amount, uint8_t *depth_out)
+{
+    float signed_depth;
+    float magnitude;
+    PresetMorphLfoDirection direction;
+    uint8_t depth;
+
+    if (lfo_value_0_1 < 0.f)
+        lfo_value_0_1 = 0.f;
+    else if (lfo_value_0_1 > 1.f)
+        lfo_value_0_1 = 1.f;
+    if (amount < 0.f)
+        amount = 0.f;
+    else if (amount > 1.f)
+        amount = 1.f;
+    switch (polarity) {
+    case MOD_NODE_POLARITY_POSITIVE:
+        signed_depth = amount * lfo_value_0_1;
+        break;
+    case MOD_NODE_POLARITY_BIPOLAR:
+        signed_depth = amount * (2.f * lfo_value_0_1 - 1.f);
+        break;
+    default:
+        signed_depth = -(amount * (1.f - lfo_value_0_1));
+        break;
+    }
+    if (signed_depth > 0.f) {
+        direction = PRESET_MORPH_LFO_DIRECTION_MORPH;
+        magnitude = signed_depth;
+    } else if (signed_depth < 0.f) {
+        direction = PRESET_MORPH_LFO_DIRECTION_MAIN;
+        magnitude = -signed_depth;
+    } else {
+        direction = PRESET_MORPH_LFO_DIRECTION_NONE;
+        magnitude = 0.f;
+    }
+    if (magnitude > 1.f)
+        magnitude = 1.f;
+    depth = (uint8_t)(magnitude * 255.f + 0.5f);
+    if (depth == 0u)
+        direction = PRESET_MORPH_LFO_DIRECTION_NONE;
+    *depth_out = depth;
+    return direction;
+}
+
 static uint8_t instrumentManager_updateLfoSceneDestination(
     uint16_t target_id, uint8_t source_slot, uint8_t target_pair,
     float lfo_value_0_1, uint8_t polarity, float amount)
@@ -2352,67 +2443,28 @@ static uint8_t instrumentManager_updateLfoSceneDestination(
         return 0u;
     switch (descriptor->kind) {
     case SCENE_MOD_TARGET_KIND_VOICE_MORPH: {
-        float signed_depth;
-        float magnitude;
-        PresetMorphLfoDirection direction;
+        /* Voice Morph keeps the S071 direction/depth contract unchanged. */
         uint8_t depth;
+        PresetMorphLfoDirection direction =
+            instrumentManager_lfoDirectionDepth(lfo_value_0_1, polarity,
+                                                amount, &depth);
 
-        /*
-         * Encode one voice-Morph LFO sample independently of the Morph base.
-         *
-         * Inputs: normalized source, normalized amount, and the existing LFO
-         * polarity. Output: endpoint direction plus normalized depth for the
-         * hidden Morph contribution table. Positive polarity moves toward
-         * full Morph, negative polarity preserves original-LXR value-relative
-         * motion toward main, and bipolar polarity selects either endpoint by
-         * the sign of the centered source.
-         *
-         * The base is deliberately not read here and no absolute shaped value
-         * is stored. presetMorph_resolveLfoAmount() applies the encoded depth
-         * to the current step-automation-or-retained base, eliminating the
-         * stale-base gap between LFO dispatch and bounded Morph resolution.
-         * Decimation and slot-6 decay below retain their existing shaper path.
-         */
-        if (lfo_value_0_1 < 0.f)
-            lfo_value_0_1 = 0.f;
-        else if (lfo_value_0_1 > 1.f)
-            lfo_value_0_1 = 1.f;
-        if (amount < 0.f)
-            amount = 0.f;
-        else if (amount > 1.f)
-            amount = 1.f;
-
-        switch (polarity) {
-        case MOD_NODE_POLARITY_POSITIVE:
-            signed_depth = amount * lfo_value_0_1;
-            break;
-        case MOD_NODE_POLARITY_BIPOLAR:
-            signed_depth = amount * (2.f * lfo_value_0_1 - 1.f);
-            break;
-        default:
-            signed_depth = -(amount * (1.f - lfo_value_0_1));
-            break;
-        }
-
-        if (signed_depth > 0.f) {
-            direction = PRESET_MORPH_LFO_DIRECTION_MORPH;
-            magnitude = signed_depth;
-        } else if (signed_depth < 0.f) {
-            direction = PRESET_MORPH_LFO_DIRECTION_MAIN;
-            magnitude = -signed_depth;
-        } else {
-            direction = PRESET_MORPH_LFO_DIRECTION_NONE;
-            magnitude = 0.f;
-        }
-        if (magnitude > 1.f)
-            magnitude = 1.f;
-        depth = (uint8_t)(magnitude * 255.f + 0.5f);
-        if (depth == 0u)
-            direction = PRESET_MORPH_LFO_DIRECTION_NONE;
         presetMorph_setVoiceLfoModulation(scene_getActiveIndex(),
                                           descriptor->voice_slot,
                                           source_slot, target_pair,
                                           direction, depth);
+        return 1u;
+    }
+    case SCENE_MOD_TARGET_KIND_EFFECT_MORPH: {
+        /* Effect Morph resolves this same encoding around its live base. */
+        uint8_t depth;
+        PresetMorphLfoDirection direction =
+            instrumentManager_lfoDirectionDepth(lfo_value_0_1, polarity,
+                                                amount, &depth);
+
+        effects_setLfoContribution(source_slot, target_pair,
+                                   EFFECT_LFO_TARGET_MORPH,
+                                   (uint8_t)direction, depth);
         return 1u;
     }
     case SCENE_MOD_TARGET_KIND_DECIMATION_ALL:
@@ -2604,6 +2656,8 @@ static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
         break;
     }
     presetMorph_clearLfoSource(source_slot, target_pair);
+    /* Effect `fx`/`fxm` contributions from this pair end too (Step 9). */
+    effects_clearLfoSource(source_slot, target_pair);
     installed->kind = INSTALLED_MOD_TARGET_NONE;
     installed->target_id = INSTRUMENT_PARAM_INVALID;
 }
@@ -2658,6 +2712,17 @@ static uint8_t instrumentManager_installLfoModulationTarget(
     instrumentManager_restoreLfoSupplementalTarget(source_slot, target_index);
     if (target_id == INSTRUMENT_PARAM_INVALID) {
         modNode_clearDestination(node);
+        return 1u;
+    }
+    if (effectTarget_isEffectId(target_id)) {
+        /* Effect LFO targets resolve around the held value in EffectsManager. */
+        modNode_clearDestination(node);
+        if (!effects_targetValid(scene_getActiveIndex(), target_id,
+                                 INSTRUMENT_TARGET_MODULATION))
+            return 0u;
+        lfo_installed_targets[source_slot][target_index].kind =
+            INSTALLED_MOD_TARGET_EFFECT;
+        lfo_installed_targets[source_slot][target_index].target_id = target_id;
         return 1u;
     }
     if (instrumentManager_isSlotDecimationTarget(scene_getActiveIndex(),
@@ -2832,6 +2897,18 @@ void instrumentManager_updateLfoAdapters(uint8_t source_slot,
             installed->target_id, source_slot, target_pair,
             lfo_value_0_1, polarity, amount);
         break;
+    case INSTALLED_MOD_TARGET_EFFECT: {
+        /* Encode only; EffectsManager resolves the Effect parameter base. */
+        uint8_t depth;
+        PresetMorphLfoDirection direction =
+            instrumentManager_lfoDirectionDepth(lfo_value_0_1, polarity,
+                                                amount, &depth);
+
+        effects_setLfoContribution(source_slot, target_pair,
+                                   effectTarget_local(installed->target_id),
+                                   (uint8_t)direction, depth);
+        break;
+    }
     default:
         break;
     }

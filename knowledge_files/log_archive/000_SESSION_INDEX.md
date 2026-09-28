@@ -85,6 +85,8 @@ it belongs in the summary or the log, not here.
 | 068 | 2026-09-19 | commit `613f466` on `dev-ph4-5-fixes` | Front-panel event ring rebuild, played-Pattern mirror fix, per-track sequencer length fix |
 | 069 | 2026-09-20 | commit `9627f70` on `dev-ph5-effects` | Pattern Stack Service bounded CPU convergence: non-semantic maintenance, trailing-slack reservation, reactive compaction, finite repair epoch, O(1) dirty predicate, quiet window scheduling, shared background CPU budget |
 | 070 | 2026-09-22/25 | commit `e3ae961` on `dev-ph5-effects` | Systems fitness pass: Makefile `-MMD -MP`, Load/Save revision (LSR-01..04), probability gating, Scene automation targets, LED layer bitmap, Scene automation runtime overlay |
+| 071 | 2026-09-25/26 | `dev-ph5-effects` (S071 closeout) | Per-Scene voice-edit masks, base-independent LFO voice-Morph, Scene superpage live display, LED chase and LFO target-voice fixes |
+| 072 | 2026-09-27/28 | `dev-ph5-effects`, HEAD `58569ae` + uncommitted Steps 9–11 | Phase 5 Effects bus: registry, `flt`, FX bus/fader modes, `.fx` v2 + HCNAMES 161, Effect page, FX sequencer, Effect automation/LFO, edit-mask gate/fan-out |
 
 
 ---
@@ -499,6 +501,16 @@ Session 065 delivered the first working end-to-end step automation path: the exi
 | Pattern `fs_pattern_generation[]` must NOT be reset to 0 at load — seed from `winner_generation` (boot) or retain monotonic value (explicit load); zero causes older hidden file to win | 070 |
 | Voice Morph automation 7→8 bit expansion: `menu_morphAutomationStore()` (0..255 → 0..127), `menu_morphAutomationExpand()` (0..126→0..252, 127→255) | 070 |
 | `decode_devlogs.py` offsets shifted by Phase C source bytes: `SCENE_PARAMS_OFF=10`, `KIT_PARAMS_OFF=10`, `INST_NORMAL_OFF=13`, `INST_MORPH_OFF=85` | 070 |
+| HCNAMES is **161** rows since S072 (supersedes the 145-row fact): rows 145..160 are one Effect name/source per Scene (`name<TAB>source[<TAB>R]`); HCPR AutoSave header is **v3** (v2 rejected, no migration) | 072 |
+| Voice engines render **pre-volume**; the mixer applies `slider × instrumentManager_runtimeVolume()` after decimation (`mixer_voice_last_gain[]`). Volume is the last stage on every engine (S072 D1 bug fix: Snare/Cymbal/HiHat used to apply `vol` before distortion) | 072 |
+| `sine_table` lives in flash; the rest of DTCM is the NOLOAD `.dtcm_fxbuf` arena (126,624 B, ASSERT ≥ 120 KiB) owned by `FxBuffer`; never zeroed by the system — "clear unless you adopt" | 072 |
+| Only SceneData writes `scene_t.effect`; UI/hook Effect writes go only through the EffectsManager edit API, which fans out through the active VOICE edit mask | 072 |
+| Effect target IDs: block 7 = 448 + local (0..62 automatable; 511 stays the off sentinel); `fxm` Effect Morph = Scene target 404; LFO namespace byte 8 = `fx` | 072 |
+| `effects_service()` runs every render block and rescans all descriptors (no dirty notifications): Morph base (Pattern `fxm` > held FX Morph lane > retained) → interpolate → FX lock → Pattern overlay → LFO → clamps → `write_param` on change | 072 |
+| Effect Pattern overlays end when the writing track plays an automation step without that parameter: TIM3 queues an Effect step marker (pending identity bit 11) before an owning track's entries; the drain's reset latch clears all overlays before a new pass | 072 |
+| VOICE edit-mask gate: a Scene can join the active mask only with the same Effect type and six Instrument types (`scene_editLayoutMatches()`); `bank_revalidateVoiceEditMasks()` runs at every load-completion funnel, end of boot, and after `effects_changeType()` | 072 |
+| Blank Effect/Instrument names save as `none.fx`/`none.drm` (all-space stem → `none`); an empty (NUL) stem becomes `inst` — pass explicit spaces for a blank HCNAMES row | 072 |
+| Flash headroom after S072: **8,080 B** of the 480 KiB window (`python3 tools/link_budget.py arm-none-eabi-nm build/lxr02.elf`); growth path planned in `S073_FLASH_EXPANSION.md` | 072 |
 
 ---
 
@@ -1545,3 +1557,47 @@ Session 071 completed three planned feature items and two defect fixes on `dev-p
 All 24 tests PASS on hardware. SRAM growth: +86 bytes total (+30 BankData mask, +32 `op_bankset_state` staging, +12 audio-out overlay, +12 FX-send overlay). Parts B and T12 are zero-growth.
 
 - **Find here**: [071_SESSION_HANDOFF_LOG.md](071_SESSION_HANDOFF_LOG.md), `BANK_PRESET_ARCHITECTURE.md`, `MODULE_INTERCHANGE_SPEC.md`, `SRAM_MANIFEST.md`.
+
+### 072 — Phase 5 Effects Bus (2026-09-27/28)
+
+Session 072 implemented `EFFECTS_BUS_FEATURE_PLAN.md` Steps 1–11 on
+`dev-ph5-effects`, from the S071 close (text 456,748; flash headroom
+34,356 B) to text 483,024 / data 416 / bss 426,336 (flash payload 483,440 B;
+headroom 8,080 B).
+
+- **Steps 1–2:** the sine table moved to flash, and the rest of DTCM became
+  the 126,624 B `.dtcm_fxbuf` arena with the `FxBuffer` API and handoff
+  record. Voice volume moved out of the engines into the mixer. This also
+  fixed Snare/Cymbal/HiHat applying `vol` before distortion.
+- **Steps 3–5:**
+  - a 420 B `effect_record_t` in every Scene, and Effect Morph as Scene
+    parameter 40;
+  - `EffectsManager` with the `off`/`flt` registry and per-block
+    resolution; the float SVF;
+  - the FX bus: pre-volume sends, `pre`/`pst`/`fx` fader modes, and a
+    routed return with balance/pan.
+- **Step 6:** `.fx` v2 files, HCNAMES 145 → 161 rows, AutoSave v3 with the
+  Effect region and boot readers, and an atomic Scene+Kit+Effect staging.
+- **Steps 7–8:** the SHIFT+PERF Effect page (`menuEffects.c`; Euklid
+  compiled out). The FX sequencer adds a TIM3 latch, `fwd/rev/pip/rnd/sel`,
+  lock editing and page-owned LEDs. The shared StepScale table is also used
+  by the track-scale UI.
+- **Step 9:**
+  - `fx` step-automation category (IDs 448..510), with end-of-automation
+    markers and a reset latch;
+  - live `fxm` (404);
+  - LFO `fx` namespace (8) with base-independent entries.
+- **Step 10:** the VOICE edit-mask layout gate, re-validation, and Effect
+  edit fan-out.
+- **Step 11:** `EFFECTS_BUS_REFERENCE.md`, spec and comment closeout
+  (byte-identical build).
+
+Hardware: Step 1/2/5 production checks and the Step 8 test points (with
+`flt`) passed. The Step 6–10 acceptance matrices are pending; see the
+checklist in the log.
+
+- **Find here**: [072_SESSION_HANDOFF_LOG.md](072_SESSION_HANDOFF_LOG.md),
+  `EFFECTS_BUS_REFERENCE.md`, `EFFECTS_BUS_FEATURE_PLAN.md`, `AUTOSAVE.md`,
+  `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`,
+  `BANK_PRESET_ARCHITECTURE.md`, `PATTERN_DYNAMIC_STACK.md`,
+  `SRAM_MANIFEST.md`, `DEV_MODES.md`, `S073_SESSION_STARTUP.md`.

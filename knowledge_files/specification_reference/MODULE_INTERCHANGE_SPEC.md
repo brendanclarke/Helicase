@@ -161,9 +161,12 @@ module owns each call, state transition, and retained object.
   Scene-owned descriptor images and the active slot's descriptor table instead
   of hardcoded parameter lists.
 - Scene-level sound modulation targets live in
-  `Core/Bank/Scene/SceneModTargets.c/h`. The first target set is `1vm..6vm` plus
-  Scene Decimation `srt`; future FX parameters join that namespace instead of
-  being inserted into per-instrument descriptor tables.
+  `Core/Bank/Scene/SceneModTargets.c/h`: `1vm..6vm`, Scene Decimation `srt`,
+  `1ou..6ou`, `1fx..6fx`, and Effect Morph `fxm` (404). Effect **parameters**
+  do not join that namespace. They are block-7 IDs `448 + local`, owned and
+  validated by EffectsManager (`effects_targetValid()`), and selected in the
+  LFO `fx` namespace (byte 8) or the `fx` step-automation category. See
+  `EFFECTS_BUS_REFERENCE.md` §11.
 - Live Pattern storage is the dynamic address-array + pool + bit-packed bitmap
   system in `pat_regions`. PAT4 persists the complete object, including
   dynamic note/velocity/probability specials and current track/Pattern
@@ -189,6 +192,8 @@ children that are provably unchanged on the current mounted card.
 | `bank_publishSdCleanAuthority(slot, proven_mask)` | Establish/merge clean authority after a completed Bank Load/Save. Same-slot ORs into existing bits; a different slot replaces the old authority. Autosave recovery never calls it. | presetManager `on_bank_load_complete`; filesystem Save completion |
 | `bank_sdCleanMask()` / `bank_sdCleanSlot()` / `bank_sdCleanSlotIsValid()` | Read the clean mask/slot/validity. | filesystem Bank Save skip |
 | `bank_setSceneMaskVoiceEditForScene(scene, mask)` / `bank_sceneMaskVoiceEditForScene(scene)` | Per-Scene indexed voice-edit mask setter/getter for boot restore (Autosave) and bankset load/save (Session 071). | filesystem, Autosave |
+| `bank_toggleSceneMaskVoiceEdit(scene)` | Toggle one Scene in the active mask. Menu applies the layout gate before turning a bit on; the active bit cannot be removed. | Menu VOICE-held SEQ |
+| `bank_revalidateVoiceEditMasks()` | Drop mask members whose Effect/Instrument layout no longer matches their owner; changed entries mark AutoSave (S072 Step 10). | Menu load-completion funnels, `main.c` boot, `effects_changeType()` |
 | `bank_resetSdSaveMutationWindow()` / `bank_resetSdSaveMutationScene()` / `bank_sdSaveMutatedMask()` | Own the operation-scoped mutation window across a Bank Save so a child edited while its write was in flight stays non-clean. | filesystem Bank Save |
 
 The clean authority is **never serialized** (not in settings, HCNAMES, Bank, or
@@ -205,25 +210,26 @@ Purpose: owns retained Scene settings and the Scene-owned Effect record. The
 sole mutation boundary and performs the retained write, typed AutoSave dirty
 mark, and card-clean invalidation in that order.
 
-The Session 072 Effect record remains a retained data contract whose
-common/type-specific meaning is supplied by the registry. Step 4 adds the
-foreground EffectsManager runtime; its ordered live wire projection is still
-defined by `Autosave.h`, rather than by C-struct layout.
+The Effect record's meaning is supplied by the EffectsManager registry; its
+ordered AutoSave projection is defined by `Autosave.h`, not by the C-struct
+layout.
 
 | API / data | Use | Usual callers / clients |
 |---|---|---|
 | `scene_effectConst(scene)` | Read-only access to a retained Effect record. | AutoSave, EffectsManager |
-| `scene_effectRecordDefaults(record)` | Build the `off` Effect record and common defaults without dirty marking. | Scene initialization, future loaders |
+| `scene_effectRecordDefaults(record)` | Build the `off` Effect record and common defaults without dirty marking. | Scene initialization, `.fx` parser, AutoSave reader |
 | `scene_commitEffectRecord(scene, record)` | Replace a complete record, normalize sequence fields, and mark all live Effect cells. | Effect loader/editor transaction |
-| `scene_effectRecordForWholeCommit(scene)` / `scene_finishEffectWholeCommit(scene)` | Open the resident record for a validated in-place whole-record transaction, then normalize, mark all Effect cells including the live type token, and invalidate the Scene's card-clean authority. | EffectsManager type change, future Effect loader/editor |
-| `scene_setEffectNormalParameter()` / `scene_setEffectMorphParameter()` | Store one 0..255 parameter cell and mark its ordered live cell. | Future Effect editor/runtime bridge |
-| `scene_setEffectSeqRunMode()` / `scene_setEffectSeqLength()` / `scene_setEffectSeqStepScale()` | Store normalized sequencer settings and mark the corresponding live cell. | Future Effect sequencer |
-| `scene_setEffectSeqLaneValue()` / `scene_setEffectSeqLaneLocked()` | Store one sequencer lane value or lock bit and mark only its live cell. | Future Effect sequencer |
-| `scene_setEffectMorphAmount()` / `scene_getEffectMorphAmount()` | Retained Scene parameter 40, separate from the Effect record. | Future Effect modulation/apply path |
+| `scene_effectRecordForWholeCommit(scene)` / `scene_finishEffectWholeCommit(scene)` | Open the resident record for a validated in-place whole-record transaction, then normalize, mark all Effect cells including the live type token, and invalidate the Scene's card-clean authority. | EffectsManager type change |
+| `scene_setEffectNormalParameter()` / `scene_setEffectMorphParameter()` | Store one 0..255 parameter cell and mark its ordered live cell. | EffectsManager edit API (fan-out workers) |
+| `scene_setEffectSeqRunMode()` / `scene_setEffectSeqLength()` / `scene_setEffectSeqStepScale()` | Store normalized sequencer settings and mark the corresponding live cell. | EffectsManager edit API |
+| `scene_setEffectSeqLaneValue()` / `scene_setEffectSeqLaneLocked()` | Store one sequencer lane value or lock bit and mark only its live cell. | EffectsManager lock editor |
+| `scene_setEffectMorphAmount()` / `scene_getEffectMorphAmount()` | Retained Scene parameter 40, separate from the Effect record. | EffectsManager, `preset_morphScene()` (PERF `mrp`), AutoSave |
+| `scene_editLayoutMatches(a, b)` | Same Effect type and six Instrument types; read-only. | Menu mask gate, BankData re-validation |
 
 The 420-byte record and the 16-record SRAM1 allocation are firmware-lifetime
-SceneData storage. EffectsManager owns the 76-byte SRAM1 resolution state and
-the type-tagged DTCM runtime. The DSP bus remains a later-phase mixer owner.
+SceneData storage. EffectsManager owns 84 B of resolution state and 184 B of
+overlay/LFO state in SRAM1, plus the 76-byte DTCM type runtime; the mixer owns
+the FX bus.
 
 ## Core/Bank/Scene/Pattern/PatternData
 
@@ -422,7 +428,7 @@ Sequencer LED feedback via `SeqLedState`.
 | `led_clearSelectLeds()` / `led_clearVoiceLeds()` | Clear select/voice LED groups. | buttonHandler, Menu |
 | `led_setActive_step(stepNr)` / `led_clearActive_step()` | Chase/current-step display helpers. | ledHandler internals/future callers |
 | `led_initPerformanceLeds()` | Performance LED layout. | buttonHandler, pattern change notification |
-| `led_updateCurrentStep(step)` | Repaint chase LED from Sequencer payload. | `led_processSeqLedState()` |
+| `led_updateCurrentStep(step)` | Repaint chase LED from Sequencer payload. Returns early on `EFFECT_PAGE`, which owns the SEQ row (lock LEDs, FX chase, `sel` blink) through `menuEffects_renderSeqLeds()` (Session 072 step 8). | `led_processSeqLedState()` |
 | `led_updateRecordedMainStep(activeTrack, shownPattern, subStep)` | Repaint recorded main step if visible. | `led_processSeqLedState()` |
 | `led_updateRecordedSubStep(activeTrack, shownPattern, step, selectedStepBase, shiftHeld, selectMode)` | Repaint recorded sub-step if visible. | `led_processSeqLedState()` |
 | `led_updatePatternTrack(track, pattern, selectedStepBase)` | Repaint all visible step/select LEDs from PatternData. | buttonHandler, Menu, pattern follow |
@@ -500,6 +506,11 @@ edit dispatch, and post-load operation follow-up.
 | `menu_resetActiveParameter()` | Keep active parameter valid for page. | buttonHandler/Menu |
 | `menu_setVoiceModeShowMorph(onOff)` | Toggle VOICE-page morph endpoint overlay for descriptor-backed instrument cells; repaint/edit helpers resolve the active slot's main or morph image through InstrumentManager. | buttonHandler `SHIFT+VOICE` mode |
 | `menu_setEffectShowMorph(onOff)` | Toggle the momentary SHIFT Morph endpoint view on `EFFECT_PAGE`; refreshes Effect pot snapshots and repaint without touching VOICE morph state. | buttonHandler FX SHIFT press/release |
+| `MENU_CELL_EFFECT` delegation (internal) | Effect page cells resolve, format, clamp and commit through `menuEffects_*`; early `EFFECT_PAGE` branches in navigation/encoder/pots/service hand the cursor to menuEffects (Session 072 step 7). `menu_isScreenPage()` covers the four-cell compact model for VOICE and EFFECT. | Menu internals |
+| `fx` step-automation category (internal) | Category 7 of the STEP automation page lists the viewed Scene's AUTOMATABLE Effect rows (`effects_stepTarget()`); WIDE8 rows display the `expand7` value; `menu_stepAutomationIsEffect()` excludes the 511 off sentinel. `fxm` in `scn` stores seven bits like voice Morph (`menu_sceneTargetIsMorph()`). | Menu STEP page |
+| LFO `fx` namespace display (internal) | `lfo_target_voice` clamps to `INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST` (8); value 8 displays `fx`; Effect targets render the active Scene's descriptor short/long labels or `off` when not modulatable. | Menu VOICE LFO cells |
+| `menu_voiceHeldSceneButtonPressed(scene)` | VOICE-held SEQ mask toggle. Turning a Scene **on** requires `scene_editLayoutMatches(active, scene)` (same Effect type and six Instrument types); a mismatch is consumed silently. Turning off is always allowed (Session 072 step 10). | buttonHandler |
+| `menu_startSoundApply()` / `menu_startInstrumentApply()` (internal) | Post-load apply funnels. Both call `bank_revalidateVoiceEditMasks()` after the retained commit; the empty-Bank branch of Bank Load does too. | `menu_pollPresetStatus()` |
 | `menu_loadInstrumentVoicePressed(voice)` / `menu_loadInstrumentExit()` | Enter/select or leave nested Instrument Load/Save. Entry establishes the combined Kit/Instrument HCNAMES identity session; normal Instrument Load also writes the current voice to `.hctmp.<ext>`. Voice/exit boundaries invalidate that temporary session. | buttonHandler Load/Save VOICE gestures |
 | `menu_loadSceneButtonPressed(scene)` | Consume Load/Save-context SEQ presses as Kit target toggles, Instrument Load one-Scene selection, or Instrument Save source-Scene selection. | buttonHandler SEQ press/release routing |
 | `menu_loadInstrumentTransactionBusy()` | Report read/save-plus-commit Instrument transaction ownership. Accepted request coordinates remain immutable; number-only scrolling may coalesce the newest pool row, while Scene/voice/type/mode changes are boundaries rather than retargeting. | buttonHandler/Menu gates |
@@ -536,9 +547,9 @@ layout, linear cursor navigation, compact/full cell formatting, the `typ`
 click-in/turn/click-out transaction, and the momentary SHIFT Morph view.
 `menu.c` delegates generic cell rendering, encoder, and endless-pot plumbing
 through `MENU_CELL_EFFECT`; `menuEffects` never calls SceneData Effect setters
-directly. All retained UI writes use the EffectsManager edit API, so Step 10
-can add edit-mask fan-out without changing callers. Step 7 writes the active
-Scene only. Step 8 adds foreground lock editing, shared track/FX scale labels,
+directly. All retained UI writes use the EffectsManager edit API, which fans
+them out through the active VOICE edit mask (Step 10). Step 8 adds foreground
+lock editing, shared track/FX scale labels,
 and page-owned SEQ LEDs; the Pattern chase yields to this LED layer.
 
 | API / data | Use | Usual callers / clients |
@@ -603,7 +614,9 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 | `seq_addNote(trackNr, vel, note)` | Record played note into pattern when recording. | MidiParser, roll path |
 | `seq_setRecordingMode(active)` / `seq_setErasingMode(active)` | Recording/erase gates. | buttonHandler |
 | `seq_recordAutomation(voice, dest, value)` | Sequencer-gated and held-step automation recording. | Preset, MidiParser |
-| `seq_drainPendingAutomation(void)` | Foreground drain of debounced pending buffer; passes stored 7-bit value directly to `instrumentManager_writeRuntime()` for voice descriptor targets (identity mapping since Session 067 dtype fix) and dispatches Scene targets (IDs 384+) through `seq_applySceneAutomation()` to runtime-only overlays (Session 070). Sets dirty bits in `seq_automation_dirty[]` (voice) or `seq_scene_automation_dirty` (Scene). Runs inside `audio_check_and_render()` after `voiceControl_processPending()`. | `main.c` render loop |
+| `seq_drainPendingAutomation(void)` | Foreground drain. It first takes the Effect reset latch (clearing Effect overlays and `fxm`). Voice targets write `instrumentManager_writeRuntime()` and set `seq_automation_dirty[]`; Scene targets (384..404) go through `seq_applySceneAutomation()` (`fxm` → `effects_setMorphAutomation()`); Effect targets (448..510) go to `effects_applyAutomation()`. Effect step markers (identity bit 11) open `effects_automationStepBegin()` groups, and the pass ends with `effects_automationStepFlush()`. | `main.c` render loop |
+| `seq_fxTakeEvent()` | Take the newest FX RESET/STEP latch byte. | `effects_service()` |
+| `seq_setEffectAutomationTracks(mask)` | Publish the tracks owning Effect overlays; TIM3 queues step markers only for them. | EffectsManager |
 | `seq_evaluateStepCondition(track, step)` | Read step specials and evaluate the conditional gate (probability). Returns `step_allowed`. Called before the trigger-active check in `seq_advanceTrackStep()`. Both trigger and automation are gated by the result; erase is independent (Session 070). | Sequencer only |
 | `seq_restoreAutomatedParameters(voice)` | Restore dirty descriptors from `morph_interpolation[]` on voice retrigger; clears per-slot dirty bitmap. | `voiceControl_triggerNow()` |
 | `seq_restoreAllAutomation()` | Walk all 6 slots' 64-bit dirty bitmaps and restore each dirty descriptor index from `morph_interpolation[]` via `instrumentManager_writeRuntime()`. Called from `seq_setStepIndexToStart()` before `seq_clearAutomationDirty()` (Session 070). | Sequencer transport restart |
@@ -625,9 +638,10 @@ The FX clock runs in TIM3 from `seq_elapsedPpqTicks`, publishing only
 `SEQ_FX_EVENT_RESET`/`SEQ_FX_EVENT_STEP` plus a 0..15 index through
 `seq_fxTakeEvent()`. `effects_service()` consumes the newest event in
 foreground, resolves run-mode/length/scale position, and applies retained
-lane locks after Morph interpolation. `effects_seqSelect()` is the immediate
-stopped/running `sel` path; Scene activation invalidates the old position and
-held Morph state until the next boundary or selection.
+lane locks after Morph interpolation. `effects_seqSelect()` sets the `sel`
+cursor, which always applies and survives RESET and Scene switches. Scene
+activation invalidates only the clock position and held Morph until the next
+boundary.
 
 ## Core/Bank/Scene/Preset/presetManager
 
@@ -687,18 +701,17 @@ Affiliate modules: InstrumentManager, EffectsManager, voice engines, SceneData,
 Preset, and the live FX bus.
 
 Purpose: renders the foreground audio block. Voice engines supply pre-volume
-samples; the mixer applies the relocated voice volume after decimation. During
-Step 4 it also calls `effects_service()` once per block so the active Effect
-runtime follows retained Scene values. Step 5 taps each decimated voice before
-volume, applies the stored PRE/POST/FX fader mode, sums the send into the
-stereo/mono bus, calls `effects_process()`, and returns the processed block
-through common level/pan and jack-resolved routing.
+samples; the mixer applies the relocated voice volume after decimation. Each
+block it calls `effects_service()`, taps each decimated voice before volume,
+applies the PRE/POST/FX fader mode, sums the send into the mono/stereo FX bus,
+calls `effects_process()`, and returns the processed block through common
+level/pan and jack-resolved routing. See `EFFECTS_BUS_REFERENCE.md` §3.
 
 | API / data | Use | Usual callers / clients |
 |---|---|---|
 | `mixer_decimateBlock()` | Reduce each voice block before final voice-volume application and the pre-volume FX send tap. | mixer render path |
 | `effects_service()` | Resolve the active Effect's retained parameters between render blocks. | mixer block service |
-| `effects_process()` | Process the current mono/stereo normalized FX bus block in place. | Step 5 mixer |
+| `effects_process()` | Process the current mono/stereo normalized FX bus block in place. | mixer |
 | `MIXER_FADER_PRE/POST/FX` | Define whether the Scene fader scales both taps, only the dry mix, or only the FX send. | SceneData/Preset, Menu, mixer |
 | `mixer_send_last_gain[]` / `mixer_fx_return_last_gain[]` | Retain block-end send and return gains so automation and common return changes ramp without clicks. | mixer render path |
 
@@ -739,31 +752,34 @@ reserved as the automation-off alias. Scene target IDs remain in block 6
 
 ## Core/DSP/Effects/EffectsManager
 
-Affiliate modules: SceneData, FxBuffer, Preset, AutoSave, mixer, and the
-per-type `StereoFilter` implementation.
+Affiliate modules: SceneData, BankData, FxBuffer, Preset, AutoSave, mixer,
+Sequencer, InstrumentManager, menuEffects/Menu, and the per-type
+implementations.
 
 Purpose: owns the immutable `off`/`flt` registry and the active Effect runtime.
 It resolves retained normal/Morph endpoint images, switches type instances
 through FxBuffer's foreground handoff, publishes common return settings, and
-calls the active type's parameter writer once per changed effective value.
-Step 4 deliberately rescans the active descriptor table once per render block
-so retained writers do not need a separate dirty notification path. It does
-not own retained Scene bytes, filesystem parsing, UI, or the FX audio bus.
+calls the active type's parameter writer once per changed effective value. It
+rescans the active descriptor table once per render block (no dirty
+notifications). It does not own retained Scene bytes, filesystem parsing, UI,
+or the FX audio bus.
 
 | API / data | Use | Usual callers / clients |
 |---|---|---|
-| `effects_registryEntry()` / `effects_typeToken()` / `effects_typeFromToken()` | Resolve the append-only type id and its three-byte persisted token. Unknown ids/tokens are rejected by the registry and runtime activation falls back to `off`. | AutoSave, Preset, future storage/Menu |
-| `effects_descriptor()` / `effects_descriptorByKey()` | Resolve common/type-specific descriptor rows and their stored domain. | future Effect UI/storage/automation |
-| `effects_paramAutomatable()` / `effects_paramModulatable()` | Enforce descriptor capability flags and the local-index-63 automation boundary. | future sequencer/LFO/UI |
+| `effects_registryEntry()` / `effects_registryCount()` / `effects_typeToken()` / `effects_typeFromToken()` | Append-only type registry and persisted tokens; unknown → rejected (runtime falls back to `off`). | AutoSave, storageTypes, menuEffects |
+| `effects_descriptor()` / `effects_descriptorByKey()` / `effects_paramMorphable()` / `effects_paramAutomatable()` / `effects_paramModulatable()` | Descriptor lookup and capability rules (local 63, WIDE8 + `expand7`, modulation domain). | storage, Menu, automation/LFO |
 | `effects_paramMorphable()` / `effects_getParameter()` | Query Morph capability and resolve the visible normal/Morph endpoint for the Effect page. | `menuEffects` |
-| `effects_setParameter()` / `effects_setSeqRunMode()` / `effects_setSeqLength()` / `effects_setSeqStepScale()` / `effects_setMorphAmount()` | Single retained mutation boundary for Effect UI/hooks; clamps/normalizes through SceneData and returns a changed flag. Step 10 adds edit-mask fan-out here. | `menuEffects`, future FX sequencer/type hooks |
-| `effects_seqActiveStep()` / `effects_seqSelectedStep()` / `effects_seqSelect()` / `effects_seqSerial()` | Foreground-visible FX position/selection signature. `sel` selection applies while stopped; an activated Scene starts without a valid prior step. | `menuEffects` |
-| `effects_laneOfParam()` / `effects_getLaneLock()` / `effects_setSeqLaneLock()` | Resolve sequenceable descriptor lanes, inspect a held-step lock, or write one clamped value/lock across a physical step mask through SceneData. | `menuEffects`, future automation |
+| `effects_recordDefaultsForType()` / `effects_laneFileKey()` / `effects_laneByFileKey()` | Unowned default record and lane ↔ `.fx` key mapping. | `.fx` parser, AutoSave reader, boot loader |
+| `effects_getParameter()` | Read a normal/Morph endpoint. | `menuEffects`, step-automation current value |
+| `effects_setParameter()` / `effects_setSeqRunMode()` / `effects_setSeqLength()` / `effects_setSeqStepScale()` / `effects_setMorphAmount()` / `effects_setSeqLaneLock()` / `effects_changeType()` | Retained edit API. Each fans out through the active VOICE edit mask (same-type guard for rows/locks/sequence; `mrp` and `typ` reach all masked Scenes); `changeType` then re-validates masks. Returns nonzero if any reached Scene changed. | `menuEffects`, type UI hooks, DEV hook |
+| `effects_seqActiveStep()` / `effects_seqSelectedStep()` / `effects_seqSelect()` / `effects_seqSerial()` / `effects_laneOfParam()` / `effects_getLaneLock()` | FX position/selection and lock inspection. | `menuEffects` |
 | `effects_init()` | Initialize manager state and install the FxBuffer share-change callback after `fxbuf_init()`. | `main.c` |
 | `effects_activateScene(scene)` | Select a Scene's retained Effect type; different types switch immediately through the FxBuffer handoff, while same-type activation preserves tails. | Preset Scene/Bank apply paths |
-| `effects_changeType(scene, type)` | Commit type-specific defaults and clear the sequence in place while preserving common rows, sequence settings, and Effect Morph. | diagnostic hook, future Effect UI |
-| `effects_service()` | Consume the TIM3 FX latch, resolve retained endpoints and common `out`/`vol`/`pan` once per render block, apply active step locks after Morph interpolation, and call type-specific `write_param` only for changes. | mixer foreground render block |
-| `effects_process()` / `effects_commonRuntime()` | Future Step 5 bus process hook and current common return settings. `off` has no process operation. | mixer Step 5 |
+| `effects_targetValid()` / `effects_targetDescriptor()` / `effects_stepTarget()` | Validate/describe/walk block-7 targets for a Scene's type and use. | InstrumentManager, Menu |
+| `effects_automationReset()` / `effects_automationStepBegin()` / `effects_applyAutomation()` / `effects_automationStepFlush()` / `effects_setMorphAutomation()` | Pattern overlay lifecycle and the `fxm` override (third restore rule). | Sequencer drain, `seq_applySceneAutomation()` |
+| `effects_setLfoContribution()` / `effects_clearLfoSource()` | Base-independent LFO entries per source/pair. | InstrumentManager |
+| `effects_init()` / `effects_activateScene()` | Boot init (share callback); Scene activation (type switch through the handoff, clears FX position/held Morph/overlays). | `main.c`, Preset |
+| `effects_service()` / `effects_process()` / `effects_commonRuntime()` / `effects_activeType()` / `effects_activeIoFlags()` | Per-block resolution, process and return settings. | mixer |
 | `effects_registryCheckResult()` | Diagnostic-only immutable registry self-check result. | diagnostic boot screen |
 
 All calls are foreground-only and must occur between render blocks; no Effect
@@ -787,7 +803,7 @@ slots. All calls are foreground-only and occur between audio render blocks.
 | `fxbuf_effectShare()` | Return the current bottom-contiguous Effect share. | EffectsManager, Effect types, diagnostics |
 | `fxbuf_voiceAcquire()` / `fxbuf_voiceRelease()` | Claim/release 1..2 units for a slot; share changes synchronously notify the registered callback. Release never clears contents. | Phase 7 voice buffer owners, diagnostic boot hook |
 | `fxbuf_voiceUnit()` / `fxbuf_voiceUnitCount()` / `fxbuf_unitsInUse()` | Access an owned aligned unit or inspect allocation counts. | Phase 7 voices, diagnostics |
-| `fxbuf_handoffBeginExit()` / `fxbuf_handoffSetVoiceUnit()` / `fxbuf_handoff()` | Exchange arena-relative positions, rates, ownership, and written-content flags between exiting and entering owners. The entering owner adopts or disposes of persistent contents. | EffectsManager, future voice types |
+| `fxbuf_handoffBeginExit()` / `fxbuf_handoffSetVoiceUnit()` / `fxbuf_handoff()` | Exchange arena-relative positions, rates, ownership, and written-content flags between exiting and entering owners. The entering owner adopts or disposes of persistent contents. A same-type Scene switch does not currently refresh the record (`EFFECTS_BUS_REFERENCE.md` §13). | EffectsManager, future voice types |
 | `fxbuf_handoff_t` / `fx_share_t` | Retained SRAM1 control records; audio storage remains in `.dtcm_fxbuf`. | FxBuffer API clients |
 
 The linker ASSERT keeps the arena at or above the approved 120 KiB minimum,
@@ -812,7 +828,7 @@ Resident Instrument parameter values use the byte
 Scene IDs are resolved only for validation, display, or runtime dispatch; they
 are not the stored selector representation. Velocity target selection is
 self-scoped plus its source-voice Morph token; LFO selection supports self,
-voices, and the Scene namespace.
+voices, the Scene namespace, and the Effect namespace (`fx`, value 8).
 
 | API | Use | Usual callers / clients |
 |---|---|---|
@@ -823,7 +839,9 @@ voices, and the Scene namespace.
 | `instrumentManager_clearAllRuntimeModulationTargets()` | Restore/clear both LFO pairs and velocity target for every outgoing current source before a slot type changes. | Preset staged Instrument commit |
 | `instrumentManager_resetRuntimeSlot(slot)` | Initialize only the incoming committed slot/type runtime object. | Preset staged Instrument commit |
 | `instrumentManager_writeRuntime()` / target validation/stepping helpers | Apply descriptor/supplemental bindings and validate canonical targets against current slot types. | Preset, Menu, modulation paths |
-| `instrumentManager_updateLfoAdapters(source_slot, pair, lfo, polarity, amount)` | Update InstrumentManager-owned LFO destinations: descriptor-domain adapters, slot decimation, and Scene targets. Descriptor adapters shape in parameter space and then call the normal runtime writer. For voice-morph targets, Session 071 changed encoding to direction+depth without reading the morph base. | `lfo.c` |
+| `instrumentManager_updateLfoAdapters(source_slot, pair, lfo, polarity, amount)` | Update InstrumentManager-owned LFO destinations: descriptor-domain adapters, slot decimation, and Scene targets. Descriptor adapters shape in parameter space and then call the normal runtime writer. For voice-morph targets, Session 071 changed encoding to direction+depth without reading the morph base; Effect parameter and `fxm` destinations are encoded to direction/depth by the shared `instrumentManager_lfoDirectionDepth()` and stored in EffectsManager. | `lfo.c` |
+| `INSTRUMENT_TARGET_VOICE_EFFECT` / `INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST` | LFO namespace byte 8 (`fx`); the upper clamp for every picker/parser. | Menu, storageTypes |
+| `instrumentManager_targetValid()` (block 7) | AUTOMATION validation of Effect IDs via `effects_targetValid()`; MODULATION stays voice-only. | PatternData writer, Menu |
 | `INSTRUMENT_BIND_LFO_TARGET_VOICE` / `_VOICE_2` handler | Session 071 fix: changed from store-only validation to full target reinstall via `instrumentManager_installLfoModulationTarget()`. Reads sibling param token via `instrumentManager_descriptorIndexForBinding()` and clears stale morph/decimation/Scene contributions through the existing restore path. | `instrumentManager_writeRuntimeInternal()` |
 
 Slot-6 track-7 generated decay step automation override (Session 070):
@@ -840,7 +858,7 @@ cannot recover a dynamic-pool source owned by the outgoing identity.
 
 ## Core/Bank/Scene/SceneModTargets
 
-Affiliate modules: Menu, InstrumentManager, Preset/Morph, future FX modules.
+Affiliate modules: Menu, InstrumentManager, Preset/Morph, EffectsManager (`fxm`).
 
 Purpose: owns the canonical ID/name/range list for Scene-level sound
 parameters that are modulation targets but are not parameters of a swappable
@@ -855,7 +873,8 @@ Current target order:
 - Audio Out `1ou`..`6ou` (IDs 392–397, max 5) — Session 070
 - FX Send `1fx`..`6fx` (IDs 398–403, max 127, mixer-applied per block) —
   Session 072 Step 5
-- Effect Morph `fxm` (ID 404, flags 0) — reserved until its apply path exists
+- Effect Morph `fxm` (ID 404; LFO + automation, no velocity) — EffectsManager
+  Morph-base overlay (Session 072 Step 9)
 
 Scene Decimation deliberately appears after the six Morph targets so the
 velocity target list does not place it directly beside a voice-local
@@ -867,7 +886,8 @@ automation but not yet from velocity/LFO modulation pickers. FX Send apply
 is consumed by the live mixer on the next block. Step automation uses
 runtime-only overlays; see `070_SESSION_HANDOFF_LOG.md` §10 for the overlay
 architecture.
-The reserved `fxm` descriptor has no automation, velocity, or LFO use flags.
+`fxm` carries `USE_LFO | USE_AUTOMATION`; its Pattern value expands like voice
+Morph and follows the Scene reset rule.
 Scene block 6 is limited to IDs 384..447; Effect parameters use block 7
 IDs 448..511.
 

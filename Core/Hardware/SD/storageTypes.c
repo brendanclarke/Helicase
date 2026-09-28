@@ -2100,9 +2100,9 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
              * parser's one-based destination slot. Output: the ordinary
              * numeric selector stored in SceneData. The self token is not a
              * Menu value, descriptor sentinel, or DSP runtime state. Numeric
-             * value 7 is retained as the Scene namespace displayed by Menu as
-             * `scn`; values outside the supported namespace clamp to a valid
-             * byte before Preset normalizes the paired target token.
+             * value 7 is the Scene namespace (`scn`) and 8 the Effect
+             * namespace (`fx`, Session 072 step 9); values outside the
+             * supported namespace clamp before paired-token normalization.
              */
             if (storage_streq(value, "self")) {
                 if (state->expected_slot < 1u ||
@@ -2116,8 +2116,8 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
                     return st;
                 if (parsed < INSTRUMENT_TARGET_VOICE_FIRST)
                     parsed = INSTRUMENT_TARGET_VOICE_FIRST;
-                else if (parsed > INSTRUMENT_TARGET_VOICE_SCENE)
-                    parsed = INSTRUMENT_TARGET_VOICE_SCENE;
+                else if (parsed > INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST)
+                    parsed = INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST;
             }
         } else {
             /*
