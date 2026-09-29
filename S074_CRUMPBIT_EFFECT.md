@@ -1,9 +1,10 @@
 # S074 — CrumpBit (`cbt`): the first buffer-using Effect
 
-**Status:** specification, final for v1 (draft 3, 2026-09-29). Every
-decision is settled (§11): the answers to Q1, Q5, Q7, Q13 and Q24, and the
-follow-ups F1–F6. The line-level schedule is
-`S074_CRUMPBIT_IMPLEMENTATION.md`. No code has been written.
+**Status:** implemented (commit `1dbdd70`) and **accepted on hardware by the
+user (2026-09-29)** as the v1 baseline; further additions and changes are
+expected (§12). The specification is final for v1 (draft 3). Every decision
+is settled (§11): the answers to Q1, Q5, Q7, Q13 and Q24, and the follow-ups
+F1–F6. The line-level schedule is `S074_CRUMPBIT_IMPLEMENTATION.md`.
 
 **Goal (user, 2026-09-29):** an Effect type that converts the stereo FX send
 to 8 bits, manipulates the bits, and feeds a mono 8-bit tape-style delay that
@@ -389,7 +390,7 @@ col:  0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
 | SELECT *n* (1..8) | Bit *n−1* moves normal → off → invert → normal (an old off+invert state counts as invert, so the next press gives normal). Written through `effects_setParameter()` on rows 3–4 (normal image; fans out to same-type masked Scenes and marks AutoSave). Then the page **jumps to the overlay**: it leaves the full view, abandons an open `typ` browse (**Q17**), and repaints with `menu_repaint()` (not `repaintAll`, per the S074 marker-ordering rule). |
 | SELECT *n* while SEQ steps are held (**Q13 and F3, answered**) | Writes FX locks on the held steps instead of the retained masks. The screen and the LEDs show the **last step held** (the most recently pressed SEQ button that is still down): its lane 1–2 locks where locked, otherwise the retained masks. SELECT cycles bit *n−1* of those shown masks, and the resulting **whole `bit off` and `bit invert` values go to every held step**, so all held steps end up the same. Both mask lanes are locked on every held step. The page stays on (or jumps to) the overlay. |
 | SHIFT+SELECT *n* (**Q14**) | Proposed: reset bit *n−1* to normal. |
-| SELECT LEDs (**Q13 answered; Q18**) | LED *n* on when bit *n−1* is off or inverted, always, while `cbt` is on the Effect page. Source: the retained masks, or the first held step's (locked) masks while SEQ steps are held; not the live per-step value during playback (Q18 default). They are re-rendered on every hold transition and after every SELECT edit. |
+| SELECT LEDs (**Q13 answered; Q18**) | LED *n* on when bit *n−1* is off or inverted, always, while `cbt` is on the Effect page. Source: the retained masks, or the last step held's (locked) masks while SEQ steps are held (F3); not the live per-step value during playback (Q18 default). They are re-rendered on every hold transition and after every SELECT edit. |
 
 ### 5.4 Framework changes the page needs (**Q24**)
 
@@ -512,8 +513,8 @@ Each stage builds, runs and can be tested on its own.
      `DEV_FXBUF_FORCE_VOICE_UNITS 12` (Stage 0 made that valid).
 5. **Stage 4: records.** Documentation, link numbers, hardware results.
 
-The line-level schedule (file, line, add/modify, comment blocks, as for the
-underline fix) is written once §11.2 F1–F5 are answered.
+The line-level schedule is `S074_CRUMPBIT_IMPLEMENTATION.md`; §12 records
+the hardware acceptance.
 
 ---
 
@@ -761,3 +762,40 @@ settled or replaced (§11.1, §11.2).
   image and plan the first flash of Stage 1 as its own test?
 - **Q29 — The common rows stay on SELECT 1 screen 0** (`out vol pan`),
   unchanged. Confirm.
+
+---
+
+## 12. Hardware acceptance (user, 2026-09-29)
+
+**Result: accepted.** The user has tested the implementation on hardware and
+accepts it as the v1 baseline ("pretty happy with the implementation for
+now"). Additions and changes will follow in later sessions. The individual
+checks in §9 and in `S074_CRUMPBIT_IMPLEMENTATION.md` §9 were not reported
+one by one.
+
+**Build record (tree at `1dbdd70`, image built 2026-09-29 18:22):**
+
+| Item | Value |
+|---|---|
+| `size` | `text=499,144`, `data=416`, `bss=426,336` |
+| RAM against the S073 close | **unchanged** (`data`, `bss`, ITCM 4,168 B, DTCM statics 4,448 B, FX arena 126,624 B) |
+| Flash | 499,560 / 753,664 B, headroom 254,104 B (+11,600 B over the underline-fix build) |
+| Image end | `_eflash_load` = `0x08081F68`, **8,040 B into sector 6** |
+| `LXRV2_lxr02.img` | 499,576 B, SHA-256 `ae8ba9c0bcf966c48ce96c7c37f2e3b7564666316d920cb78d018a0e00205d8b` |
+
+**Notes:**
+
+- **Sector 6 (R1).** This image reaches past `0x08080000`. If it is the image
+  that was accepted, the LXRV2 bootloader has written sector 6 and the boot
+  image check passed. That would be the first such image, resolving R1 and
+  the S073 open question. To be confirmed by the user.
+- **Flash is larger than estimated** (+11.6 KB against the schedule's 3–4 KB).
+  Most of it is `-Ofast` unrolling: `crumpBit_process` is 4,804 B, with the
+  32-frame loop unrolled, and `crumpBit_syncDivision` is 3,684 B (the
+  14-step walk unrolled, with `expf` inlined). It costs no RAM or CPU. It
+  can be trimmed later if flash gets tight (for example
+  `#pragma GCC unroll 1` on those loops), which would need a listening
+  check.
+- **Carried to the follow-up work:** the user's planned additions; logging
+  the `DTYPE_PM63` pan display quirk (§4) in `SCOPING_TARGETS.md`; the §10
+  documentation updates of `S074_CRUMPBIT_IMPLEMENTATION.md`.
