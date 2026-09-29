@@ -650,8 +650,22 @@ uint8_t menuEffects_service(void)
         }
     }
     /*
-     * Lock-edit hold follows the physical SEQ mask. Newly seen steps flash;
-     * releasing every SEQ button ends the lock editor and requests one repaint.
+     * Lock-edit hold follows the physical SEQ mask.
+     *
+     * What: the first pass after menuEffects_seqHoldExpired() (held mask
+     * 0 -> nonzero) starts the held view; newly seen steps flash; releasing
+     * every SEQ button ends the lock editor. Each of these transitions
+     * requests one MENU_FX_ACT_HOLD_REPAINT.
+     * Why not MENU_FX_ACT_REPAINT (S074): the redraw can move a cell's
+     * underline between its name (row 0) and its held value (row 1) on the
+     * same CGRAM slot. Only menu_repaint() keeps the LCD shadow that lets
+     * va_queueMarkerTransaction() order the move: restore the old cell to its
+     * plain character, redefine the slot, then write the new cell. The VOICE
+     * overlay has used menu_repaint() for the same transitions since S066
+     * Fix 5.
+     * Inputs: buttonHandler_seqHeldMask(), menuEffects_holdActive/holdMask.
+     * Outputs: updated hold state, SEQ LED flashes, and the action bit.
+     * Consumer: menu_serviceRuntimeWidgets().
      */
     if (menuEffects_holdActive) {
         uint16_t mask = buttonHandler_seqHeldMask();
@@ -659,12 +673,12 @@ uint8_t menuEffects_service(void)
         if (mask == 0u) {
             menuEffects_holdActive = 0u;
             menuEffects_holdMask = 0u;
-            actions |= MENU_FX_ACT_REPAINT;
+            actions |= MENU_FX_ACT_HOLD_REPAINT;
         } else if (mask != menuEffects_holdMask) {
             led_flashGroup(LED_FLASH_GROUP_SEQ,
                            (uint16_t)(mask & (uint16_t)~menuEffects_holdMask));
             menuEffects_holdMask = mask;
-            actions |= MENU_FX_ACT_REPAINT;
+            actions |= MENU_FX_ACT_HOLD_REPAINT;
         }
     }
     /* Repaint the row once per step/record/transport signature change. */
@@ -812,6 +826,36 @@ uint8_t menuEffects_holdDisplay(const menuEffects_cell_t *cell,
                                   &stored);
     *value = *locked ? stored : (uint8_t)menuEffects_cellValue(cell);
     return 1u;
+}
+
+/*
+ * Report an FX-sequence lock on the cell's lane on any step (S074).
+ *
+ * What: scans all 16 steps of the active Scene's record for the cell's lane
+ * bit. The retained length is deliberately not consulted: a lock on a step
+ * beyond `len` is still stored automation and still underlines the name
+ * (user rule, 2026-09-29). The SEQ LEDs, which show what plays, keep their
+ * own within-length rule in menuEffects_renderSeqLeds().
+ * Why: an FX lock is one of the two sources of the Effect-page name
+ * underline. Input: a resolved Effect cell. Output: 0/1; zero for cells
+ * without a lane and when no record exists. Caller: menu_effectCellAutomated()
+ * (menu.c). Affiliates: menuEffects_cellLane(), effects_getLaneLock().
+ */
+uint8_t menuEffects_cellSeqLocked(const menuEffects_cell_t *cell)
+{
+    const effect_record_t *record = menuEffects_record();
+    uint16_t bit;
+    uint8_t lane;
+    uint8_t step;
+
+    if (!record || !menuEffects_cellLane(cell, &lane))
+        return 0u;
+    bit = (uint16_t)(1u << lane);
+    for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++) {
+        if ((record->steps[step].lock_mask & bit) != 0u)
+            return 1u;
+    }
+    return 0u;
 }
 
 /*

@@ -432,7 +432,22 @@ uint8_t menu_voiceAutoOverlayActive(void);
 
 /* Re-evaluate overlay LEDs/display after a visible bar change. */
 void menu_voiceAutoOverlayBarChanged(void);
-/* Notify the VOICE search after an in-place Pattern/track clear. */
+/*
+ * Invalidate the automation-presence search after an in-place Pattern/track
+ * clear.
+ *
+ * What: restarts the bounded search shared by the VOICE pages (active track)
+ * and the Effect page (all seven tracks, S074), then repaints, so a name
+ * underline whose last target was cleared disappears once the rescan
+ * completes. Why: a cleared target cannot be proven absent from the rest of
+ * the Pattern without a full rescan, and the SHIFT+COPY clear is not
+ * page-gated. Inputs: none; call after the PatternData clear has been
+ * submitted. Outputs: a cleared search and a repaint on VOICE and Effect
+ * pages; nothing on other pages, whose next VOICE/Effect entry restarts the
+ * search anyway. Callers: copyClear_clearCurrentPattern(),
+ * copyClear_clearCurrentTrack(). Affiliates: va_searchRestart() and
+ * va_scanService() in menu.c.
+ */
 void menu_voiceAutoOverlayPatternDeleted(void);
 /*
  * STEP front-page half navigation.

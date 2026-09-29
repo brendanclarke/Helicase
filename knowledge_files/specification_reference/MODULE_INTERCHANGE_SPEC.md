@@ -1277,7 +1277,7 @@ Relevant interchange points:
   runs after `din_init()`/`time_initTimer()` and before `sampleMemory_init()`,
   DSP and storage. It checks the stamped per-sector CRC32s and, on a
   mismatch, holds an LCD report until BAR1. It owns no RAM. Its only affiliates
-  are the linker's `.image_check` block and `tools/stamp_image_check.py`
+  are the linker's `.image_check` block and `tools/build_lxrv2_img.py`
   (`STORAGE_SRAM_MANIFEST.md` §3.4).
 - Sample flash writes go only through `sampleFlash.c`, which refuses any
   sector below `SAMPLE_FIRST_SECTOR` (7) and any operation when

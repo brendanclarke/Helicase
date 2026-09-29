@@ -48,7 +48,7 @@ _______
 3. Image format: `[8B magic "LXRV2IMG"][4B payload size LE][4B checksum LE][payload]`
 4. App loaded at 0x08008000 (window 0x08008000–0x080BFFFF, 736 KiB, since Session 073), SP=0x20080000
 5. Boot by holding main encoder button while powering on
-6. Packager: `tools/build_lxrv2_img.py`; the `.bin` rule stamps per-sector CRCs (`tools/stamp_image_check.py`) that the firmware checks at every boot (`Img BAD s:…` names a bad sector)
+6. Packager: `tools/build_lxrv2_img.py` (`make img`) is the only image script: it stamps the per-sector CRCs that the firmware checks at every boot (`Img BAD s:…` names a bad sector) and writes the LXRV2 header
 7. User samples live in on-chip flash sectors 7–11 (`0x080C0000`), installed with Load:[Samples]
 
 ## Toolchain
@@ -68,8 +68,7 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
 ├── STM32F765VIHx_FLASH.ld
 ├── requirements.txt
 ├── tools/
-│   ├── build_lxrv2_img.py          ← packages the .bin → LXRV2_lxr02.img
-│   ├── stamp_image_check.py        ← stamps per-sector CRCs into lxr02.bin (S073)
+│   ├── build_lxrv2_img.py          ← stamps the boot image check and packages the .bin → LXRV2_lxr02.img
 │   ├── link_budget.py              ← flash/ITCM/DTCM/arena report after every build
 │   ├── decode_devlogs.py           ← decodes /bootlog.bin and /asavetrc.bin
 │   └── dsp_test/                   ← host DSP test bench (DSP_TEST.md, S073)

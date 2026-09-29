@@ -128,7 +128,7 @@ void flashImage_verifyAtBoot(void)
 
     for (uint8_t i = 0; i < FLASH_IMAGE_SECTORS; i++) {
         /* This sector's share of the image, split around the check block
-        ** (same arithmetic as tools/stamp_image_check.py). */
+        ** (same arithmetic as tools/build_lxrv2_img.py). */
         uint32_t sector_end = flashImage_sectorEnd[i];
         uint32_t hi = (sector_end < image_end) ? sector_end : image_end;
         uint32_t a_hi, b_lo, crc;

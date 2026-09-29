@@ -40,7 +40,7 @@
  * What: flashImage_verifyAtBoot() recomputes a CRC32 for each application
  * flash sector (1..6) over its share of the load image and compares it with
  * the words the build stamped into the 32-byte image check block in sector 1
- * (STM32F765VIHx_FLASH.ld .image_check, tools/stamp_image_check.py). The
+ * (STM32F765VIHx_FLASH.ld .image_check, tools/build_lxrv2_img.py). The
  * block's own bytes are skipped, and it also records the image length.
  *
  * Why: Session 073 grew the application window from 480 KB (sectors 1-5) to
@@ -59,8 +59,8 @@
  *
  * Invocation: main.c after din_init() (PB7/BAR1 configured) and
  * time_initTimer(), before any flash-resident sample or DSP use.
- * Affiliates: STM32F765VIHx_FLASH.ld (_simage_check), Makefile .bin rule,
- * tools/stamp_image_check.py (must compute the same CRC32 as this file:
+ * Affiliates: STM32F765VIHx_FLASH.ld (_simage_check), Makefile img rule,
+ * tools/build_lxrv2_img.py (must compute the same CRC32 as this file:
  * standard reflected CRC-32, poly 0xEDB88320, init/final 0xFFFFFFFF, as
  * Python zlib.crc32).
  */

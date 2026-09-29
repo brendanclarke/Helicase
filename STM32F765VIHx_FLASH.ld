@@ -68,7 +68,7 @@
  *                  arena: every DTCM byte after .dtcmz (S072, Phase 5)
  *   .devwdg_noinit → SRAM2 (NOLOAD, never zeroed) — DEV_LOGGING_IWDG capsule
  *   .image_check → FLASH, 32 bytes after .isr_vector — per-sector CRC32
- *                  words stamped after link by tools/stamp_image_check.py
+ *                  words stamped into the .img by tools/build_lxrv2_img.py
  *
  * .dtcm is intentionally placed BEFORE .dtcmz in the DTCM region so any
  * accidental size growth in .dtcm shows up as a link error rather than
@@ -115,11 +115,12 @@ SECTIONS {
     ** instead of silent code corruption. The block lives in sector 1, which
     ** every update already rewrites, so a bad high sector cannot damage the
     ** words that report it.
-    ** The link emits placeholders ("IMC?", 0xFFFFFFFF); the .bin rule in the
-    ** Makefile stamps "IMCK", the CRCs and the length into lxr02.bin with
-    ** tools/stamp_image_check.py, so the ELF keeps the placeholders.
+    ** The link emits placeholders ("IMC?", 0xFFFFFFFF); `make img` stamps
+    ** "IMCK", the CRCs and the length into the payload of LXRV2_lxr02.img with
+    ** tools/build_lxrv2_img.py (S074: one script), so the ELF and lxr02.bin
+    ** keep the placeholders.
     ** READONLY keeps it out of `size`'s data column: it is flash, not RAM.
-    ** Affiliates: Core/Hardware/flashImage.c, tools/stamp_image_check.py. */
+    ** Affiliates: Core/Hardware/flashImage.c, tools/build_lxrv2_img.py. */
     .image_check (READONLY) : {
         . = ALIGN(4);
         _simage_check = .;

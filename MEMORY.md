@@ -44,7 +44,7 @@ Session 073 in one paragraph:
 - **Program flash 480 → 736 KiB.** Sector 6 moved from samples to the
   application; samples start at sector 7 (`0x080C0000`, 1,308,320 B of
   audio). `Reset_Handler` is linked first. Every boot checks a stamped CRC32
-  per application sector (`flashImage.c`, `tools/stamp_image_check.py`). The
+  per application sector (`flashImage.c`; stamped by `tools/build_lxrv2_img.py`). The
   bootloader is still unproven past `0x08080000` (Phases A/B skipped by user
   decision).
 - **Load:[Samples] restored** (it had been missing from the Load whitelist
@@ -142,7 +142,8 @@ end; durable facts belong in `knowledge_files/log_archive/` or
     pre-S073 sample install plays program code as audio. Reinstall samples at
     low volume before rolling back past S073.
   - Every boot checks a stamped CRC32 per application sector
-    (`flashImage.c`; `tools/stamp_image_check.py` runs in the `.bin` rule).
+    (`flashImage.c`; since S074 `tools/build_lxrv2_img.py` stamps it in
+    `make img`, the only image script; `lxr02.bin` stays unstamped).
     A mismatch shows `Img BAD s:…` and waits for BAR1.
   - The LXRV2 bootloader is still unproven past `0x08080000`. The factory
     app is 275,832 B and has no flash-writing code. Normal-size updates
@@ -822,8 +823,7 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
 ├── STM32F765VIHx_FLASH.ld
 ├── requirements.txt
 ├── tools/
-│   ├── build_lxrv2_img.py          ← packages the .bin → LXRV2_lxr02.img
-│   ├── stamp_image_check.py        ← stamps per-sector CRCs into lxr02.bin (S073)
+│   ├── build_lxrv2_img.py          ← stamps the boot image check and packages the .bin → LXRV2_lxr02.img
 │   ├── link_budget.py              ← flash/ITCM/DTCM/arena report after every build
 │   ├── decode_devlogs.py           ← decodes /bootlog.bin and /asavetrc.bin
 │   └── dsp_test/                   ← host DSP test bench (DSP_TEST.md, S073)

@@ -169,12 +169,10 @@ all: $(BUILD)/$(TARGET).bin
 	# in STM32F765VIHx_FLASH.ld are the enforcing guards.
 	python3 tools/link_budget.py $(PREFIX)nm $(BUILD)/$(TARGET).elf
 
-# The stamp step (S073) writes the per-sector CRCs that flashImage.c checks
-# at boot; if the layout is not what the linker script promises, the binary
-# is deleted so no unstamped image can be packaged.
+# The .bin is the raw objcopy output. `make img` stamps the image check and
+# packages it (tools/build_lxrv2_img.py).
 $(BUILD)/$(TARGET).bin: $(BUILD)/$(TARGET).elf
 	$(CP) -O binary -S $< $@
-	python3 tools/stamp_image_check.py $(PREFIX)nm $< $@ || { rm -f $@; exit 1; }
 
 # The linker script is a prerequisite so layout edits relink without a clean.
 $(BUILD)/$(TARGET).elf: $(OBJS) STM32F765VIHx_FLASH.ld
@@ -217,8 +215,13 @@ $(BUILD)/%.o: %.s | $(BUILD)
 $(BUILD):
 	mkdir -p $(BUILD)
 
+# One script builds the card image: it stamps the per-sector CRCs that
+# flashImage.c checks at every boot (S073) and writes the LXRV2 header. If the
+# layout is not what the linker script promises it fails and leaves no image,
+# so no unstamped or stale image can be copied to the card (S074).
 img: $(BUILD)/$(TARGET).bin
-	python3 tools/build_lxrv2_img.py \
+	python3 tools/build_lxrv2_img.py $(PREFIX)nm \
+	    $(BUILD)/$(TARGET).elf \
 	    $(BUILD)/$(TARGET).bin \
 	    $(BUILD)/LXRV2_$(TARGET).img
 	@echo ">>> Copy $(BUILD)/LXRV2_$(TARGET).img to SD card root"

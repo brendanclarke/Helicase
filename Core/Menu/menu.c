@@ -1249,6 +1249,15 @@ static uint8_t menu_stepAutoCategory = 0u;
  * Budget: 20 B held + 13 B search + 5 B CGRAM + 3 B debounce + 4 B working.
  * Approved on 2026-09-15 (40 B), extended +4 B for working values, and
  * extended +1 B for the Scene-target search mask in S070 remediation.
+ *
+ * Effect-page sharing (S074, +0 B): the Effect page (SHIFT+PERF) reuses the
+ * 13 search bytes for its seven-track automation-presence search, and the
+ * 5 CGRAM bytes for its markers (the CGRAM bytes have been shared since
+ * S072 through menu_applyEffectMarkers()). The pages are mutually exclusive
+ * and every entry to either page restarts the search, so a result never
+ * crosses pages; va_searchRestart() selects the page's scan geometry. The
+ * held, debounce, and working-value bytes remain VOICE-only (the Effect SEQ
+ * hold lives in menuEffects.c).
  */
 static uint16_t va_heldMask = 0u;
 static uint8_t va_heldOrder[16];
@@ -1261,20 +1270,43 @@ static uint8_t va_searchCursor = 0u;
 static uint8_t va_searchComplete = 0u;
 static uint8_t va_searchTargetMask[8];
 /*
+ * Pattern-wide automation-presence search (13 B with va_searchSceneMask).
+ *
+ * va_searchPattern: the Pattern the result belongs to (menu_shownPattern at
+ *   restart); a mismatch restarts the search.
+ * va_searchTrack: VOICE pages - the scanned track (menu_activeVoice at
+ *   restart; a mismatch restarts). Effect page - the 0..6 track cursor of the
+ *   seven-track scan (S074).
+ * va_searchCursor: next step 0..127 on va_searchTrack; NUM_STEPS on the last
+ *   track to scan means every step has been read.
+ * va_searchComplete: nonzero once the search has read every step; markers
+ *   use the masks only then, so a partial result never shows.
+ * va_searchTargetMask[8]: one bit per local 0..63 - the VOICE slot's
+ *   descriptor index, or the Effect local of block-7 target 448 + local.
+ * Writers: va_searchRestart(), va_scanService(),
+ * va_searchRecordEffectTarget(), and (VOICE held-step writes)
+ * va_writeAutomationFromKnob(). Readers: va_applyVoiceMarkers() and
+ * menu_effectCellAutomated().
+ */
+/*
  * Pattern-wide Scene-target automation search result (+1 B static SRAM).
  *
- * What: one bit each for Voice Morph, Audio Out, and FX Send targets on the
- * active VOICE slot. Why: Scene target IDs occupy the 384..403 namespace and
- * cannot be represented by va_searchTargetMask[], whose bits are descriptor
- * indices 0..63. Inputs: va_scanService() entries from the active track.
- * Outputs: va_applyVoiceMarkers() can underline the corresponding VOICE/mix
- * Scene-setting name after the bounded search completes. Lifetime: current
- * Pattern/track search context; cleared by va_searchRestart(). Affiliate:
+ * What: on VOICE pages, one bit each for the Voice Morph, Audio Out, and FX
+ * Send targets of the active VOICE slot; on the Effect page (S074), one bit
+ * for the Scene Effect Morph target `fxm` (ID 404), shown on the `mrp` cell.
+ * Why: Scene target IDs occupy block 6 (384..447) and cannot be represented
+ * by va_searchTargetMask[], whose bits are locals 0..63. Inputs:
+ * va_scanService() entries (VOICE: the active track; Effect: all tracks).
+ * Outputs: va_applyVoiceMarkers() and menu_effectCellAutomated() underline
+ * the matching name after the bounded search completes. Lifetime: the current
+ * search context; cleared by va_searchRestart(). Affiliate:
  * sceneModTarget_descriptor().
  */
 #define VA_SEARCH_SCENE_VOICE_MORPH_BIT 0x01u
 #define VA_SEARCH_SCENE_AUDIO_OUT_BIT   0x02u
 #define VA_SEARCH_SCENE_FX_SEND_BIT     0x04u
+/* Effect page only: `fxm` Pattern automation for the `mrp` cell (S074). */
+#define VA_SEARCH_SCENE_EFFECT_MORPH_BIT 0x08u
 static uint8_t va_searchSceneMask = 0u;
 
 static uint8_t va_cgramBase[4];
@@ -1831,18 +1863,29 @@ static uint8_t menu_voicePageToSlot(uint8_t page)
 #define VA_MARKER_RETRY_BIT 0x10u
 
 /*
- * Restart the asynchronous track-wide automation search.
+ * Restart the asynchronous automation-presence search.
  *
- * What: records the current viewed Pattern/track context, clears the
- * descriptor-presence mask, and resumes at absolute step zero. Why: a result
- * from another Pattern, track, or voice slot must never produce a stale name
- * underline. Inputs: Menu's current Pattern and active track. Output: partial
- * results are cleared and markers remain absent until step 127 completes.
- * Affiliates: va_scanService(), va_searchSetBit(), and page/context changes.
+ * What: records the viewed Pattern, sets the track context, clears both
+ * presence masks and the completion flag, and resumes at step zero. VOICE
+ * pages record menu_activeVoice as the one track to scan; the Effect page
+ * (S074) starts its seven-track cursor at track 0.
+ * Why: a result from another Pattern, track, voice slot, or page must never
+ * produce a stale name underline. VOICE and Effect share this state (0 B),
+ * so the restart is the single place that selects the page's scan geometry;
+ * callers must therefore set menu_activePage before calling it.
+ * Inputs: menu_activePage, menu_shownPattern, menu_activeVoice. Outputs:
+ * cleared va_search* state; markers from the search stay absent until
+ * va_scanService() completes the new search (FX-lock underlines on the Effect
+ * page do not depend on it). Callers: VOICE and Effect entry in
+ * menu_switchPage(), menu_setActiveVoice() (not on the Effect page),
+ * menu_setShownPattern(), menu_voiceAutoOverlayPatternDeleted(), the STEP
+ * automation deletes, and va_scanService() on a context mismatch.
+ * Affiliates: va_scanService(), va_searchSetBit(), va_applyVoiceMarkers(),
+ * menu_effectCellAutomated().
  */
 static void va_searchRestart(void)
 {
-    va_searchTrack = menu_activeVoice;
+    va_searchTrack = (menu_activePage == EFFECT_PAGE) ? 0u : menu_activeVoice;
     va_searchPattern = menu_shownPattern;
     va_searchCursor = 0u;
     va_searchComplete = 0u;
@@ -1892,26 +1935,77 @@ static uint8_t va_sceneSearchBitForCell(const menu_cell_t *cell)
 }
 
 /*
- * Advance the Pattern-wide search by the configured bounded slice.
+ * Record one Pattern automation entry for the Effect-page search (S074).
  *
- * What: reads at most VOICE_AUTOMATION_SCAN_STEPS_PER_PASS step lists and
- * records voice descriptor targets and per-voice Scene targets belonging to
- * the active VOICE page's slot. Why: synchronously scanning 128 steps on every
- * repaint would stall the UI. Inputs: current search context and PatternData
- * pool. Output: a complete descriptor mask plus Scene-setting mask after 128
- * steps, with a hard 4*63 comparison ceiling per service pass. Affiliates:
- * instrumentParam_make namespace, sceneModTarget_descriptor(), and PatternData.
+ * What: sets the presence bit for an Effect parameter target (block 7, IDs
+ * 448..510 = locals 0..62) or for the Scene Effect Morph target `fxm`. Every
+ * other target (voice descriptors, other Scene targets, the automation-off
+ * sentinel) is ignored.
+ * Why: Effect targets are Scene-wide and may be written on any of the seven
+ * tracks (the STEP page `fx` category), so the Effect page classifies entries
+ * differently from a VOICE page, which keeps only its own slot's targets.
+ * Local 63 must be rejected explicitly: PAT_AUTOMATION_TARGET_OFF (0x1FF) is
+ * a valid stored entry (a STEP-page Add still set to `off`) and decodes as
+ * Effect local 63, which Pattern automation never addresses.
+ * Input: one stored 9-bit target. Output: bit `local` in
+ * va_searchTargetMask[], or VA_SEARCH_SCENE_EFFECT_MORPH_BIT in
+ * va_searchSceneMask. The result is type-independent (raw locals) and the
+ * underline applies no type filter (any stored automation counts, S074 rule),
+ * so an Effect type change needs no rescan. Caller: va_scanService() on
+ * EFFECT_PAGE. Affiliates: effectTarget_isEffectId() and effectTarget_local()
+ * (EffectTypes.h), sceneModTarget_descriptor(), and
+ * seq_drainPendingAutomation() (the playback decoding of the same IDs).
+ */
+static void va_searchRecordEffectTarget(uint16_t target)
+{
+    if (effectTarget_isEffectId(target)) {
+        uint8_t local = effectTarget_local(target);
+
+        if (local < EFFECT_TARGET_PATTERN_LOCAL_LIMIT)
+            va_searchSetBit(local);
+    } else if (sceneModTarget_isSceneTarget(target)) {
+        const scene_mod_target_descriptor_t *descriptor =
+            sceneModTarget_descriptor(target);
+
+        if (descriptor &&
+            descriptor->kind == SCENE_MOD_TARGET_KIND_EFFECT_MORPH)
+            va_searchSceneMask |= VA_SEARCH_SCENE_EFFECT_MORPH_BIT;
+    }
+}
+
+/*
+ * Advance the automation-presence search by the configured bounded slice.
+ *
+ * What: reads at most VOICE_AUTOMATION_SCAN_STEPS_PER_PASS step lists of the
+ * viewed Pattern and records the targets that the current page underlines.
+ *   - VOICE page: the active track only; voice descriptor targets and
+ *     per-voice Scene targets owned by the page's slot. Done after 128 steps
+ *     (32 passes).
+ *   - Effect page (S074): all seven tracks, one after another through
+ *     va_searchTrack; Effect parameter targets and `fxm`, classified by
+ *     va_searchRecordEffectTarget(). Done after 896 steps (224 passes).
+ * Why: scanning a Pattern synchronously on every repaint would stall the UI.
+ * One function serves both pages so the 252-byte entry buffer exists once on
+ * the stack (S074 adds no stack). Inputs: the current search context,
+ * menu_activePage, and the PatternData pool. Output: complete presence masks
+ * and one menu_repaint() when the last step is read, with a hard 4*63
+ * comparison ceiling per service pass on either page. A Pattern change (and,
+ * on VOICE pages, a track change) restarts the search. Caller:
+ * menu_serviceRuntimeWidgets() on VOICE and Effect pages. Affiliates:
+ * instrumentParam namespace, sceneModTarget_descriptor(),
+ * va_searchRecordEffectTarget(), and PatternData.
  */
 static void va_scanService(void)
 {
     pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+    uint8_t effect_page = (uint8_t)(menu_activePage == EFFECT_PAGE);
     uint8_t slot;
     uint8_t budget;
 
     if (va_searchComplete)
         return;
-    if (va_searchTrack != menu_activeVoice ||
-        va_searchPattern != menu_shownPattern) {
+    if (va_searchPattern != menu_shownPattern ||
+        (!effect_page && va_searchTrack != menu_activeVoice)) {
         va_searchRestart();
         return;
     }
@@ -1920,13 +2014,17 @@ static void va_scanService(void)
     for (budget = 0u;
          budget < VOICE_AUTOMATION_SCAN_STEPS_PER_PASS &&
          va_searchCursor < NUM_STEPS;
-         budget++, va_searchCursor++) {
+         budget++) {
         uint8_t count = pat_readStepAutomations(
             va_searchPattern, va_searchTrack, va_searchCursor,
             autos, PAT_BLOCK_AUTO_COUNT_MASK);
         uint8_t i;
 
         for (i = 0u; i < count; i++) {
+            if (effect_page) {
+                va_searchRecordEffectTarget(autos[i].target);
+                continue;
+            }
             if (instrumentParam_isVoiceParameter(autos[i].target) &&
                 instrumentParam_slot(autos[i].target) == slot)
                 va_searchSetBit(instrumentParam_local(autos[i].target));
@@ -1950,6 +2048,17 @@ static void va_scanService(void)
                     }
                 }
             }
+        }
+        va_searchCursor++;
+        /*
+         * Effect page: step 127 of tracks 0..5 continues at step 0 of the
+         * next track. Track 6 leaves the cursor at NUM_STEPS, which ends the
+         * loop and completes the search below. VOICE pages never advance.
+         */
+        if (effect_page && va_searchCursor >= NUM_STEPS &&
+            (uint8_t)(va_searchTrack + 1u) < NUM_TRACKS) {
+            va_searchCursor = 0u;
+            va_searchTrack++;
         }
     }
     if (va_searchCursor >= NUM_STEPS) {
@@ -2125,18 +2234,23 @@ void menu_voiceAutoOverlayBarChanged(void)
 }
 
 /*
- * Invalidate the track-wide marker result after a destructive Pattern clear.
+ * Invalidate the automation-presence result after a destructive Pattern clear.
  *
- * What: restarts the bounded search and cancels any pending value-marker
- * debounce while retaining the current held-step context. Why: removing one
- * target cannot be proven absent from the remaining 128 steps without a full
- * rescan. Inputs: an already-completed copy/clear PatternData mutation.
- * Outputs: cleared search result and refreshed VOICE frame. Affiliate:
- * copyClearTools.c.
+ * What: restarts the bounded search, cancels any pending VOICE value-marker
+ * debounce while keeping the held-step context, and repaints. Runs on VOICE
+ * pages (active-track search) and, since S074, on the Effect page
+ * (seven-track search). Why: removing a target cannot be proven absent from
+ * the remaining steps without a full rescan, and the SHIFT+COPY clear gesture
+ * is not page-gated, so it can run while the Effect page is visible. Inputs:
+ * an already-submitted copy/clear PatternData mutation. Outputs: a cleared
+ * search result and a refreshed frame; other pages return at once because
+ * their next VOICE/Effect entry restarts the search anyway. Callers:
+ * copyClear_clearCurrentPattern(), copyClear_clearCurrentTrack().
+ * Affiliates: va_searchRestart(), va_scanService(), copyClearTools.c.
  */
 void menu_voiceAutoOverlayPatternDeleted(void)
 {
-    if (!menu_isVoicePage(menu_activePage))
+    if (!menu_isScreenPage(menu_activePage))
         return;
     va_searchRestart();
     va_underlineSuppressed = 0u;
@@ -2549,11 +2663,70 @@ static void va_applyVoiceMarkers(void)
 }
 
 /*
- * Apply held FX-lane value markers after the ordinary Effect frame is formed.
+ * Report whether one Effect cell's name takes the automation underline (S074).
  *
- * While a SEQ hold is active, sequenceable cells display the first held
- * step's value. Locked lanes underline the rightmost value glyph, reusing the
- * existing CGRAM transaction so LCD queue ownership remains centralized.
+ * What: nonzero when any stored automation addresses the cell's parameter:
+ *   - Pattern automation: once the shared search is complete, a PARAM cell
+ *     has its local bit set in va_searchTargetMask[], or the `mrp` cell has
+ *     VA_SEARCH_SCENE_EFFECT_MORPH_BIT (`fxm`) set. The search covers every
+ *     step of every track of the viewed Pattern;
+ *   - FX-sequence locks: the cell's lane is locked on any of the 16 steps
+ *     (menuEffects_cellSeqLocked()). This is read live from the active
+ *     Scene's record, so it needs no search and no restart after lock edits.
+ * `typ`, `run`, `len`, and `scl` are never automated and return zero.
+ * Why: the S074 rule (user, 2026-09-29) - if there is any automation on a
+ * parameter, in the FX sequence or the Scene's Pattern, its name is
+ * underlined in both views, whether or not that automation would play with
+ * the current settings (FX length, run mode, track length, mute, trigger,
+ * probability, or the current type's AUTOMATABLE flags). The underline
+ * reports stored data, not audible effect.
+ * Input: one resolved menu cell. Output: 0/1. Caller:
+ * menu_applyEffectMarkers(). Affiliates: va_scanService(),
+ * va_searchTestBit(), menuEffects_cellSeqLocked().
+ */
+static uint8_t menu_effectCellAutomated(const menu_cell_t *cell)
+{
+    if (!cell || cell->kind != MENU_CELL_EFFECT)
+        return 0u;
+    if (va_searchComplete) {
+        if (cell->fx.kind == MENU_FX_CELL_MORPH_AMOUNT &&
+            (va_searchSceneMask & VA_SEARCH_SCENE_EFFECT_MORPH_BIT) != 0u)
+            return 1u;
+        if (cell->fx.kind == MENU_FX_CELL_PARAM &&
+            va_searchTestBit(cell->fx.index))
+            return 1u;
+    }
+    return menuEffects_cellSeqLocked(&cell->fx);
+}
+
+/*
+ * Apply Effect-page automation markers after the ordinary Effect frame is
+ * formed (S072 held-value marker; S074 name marker).
+ *
+ * What: chooses at most one underline per visible cell, in this order:
+ *   1. Held-step value (row 1). While SEQ steps are held, a sequenceable
+ *      cell (a PARAM row with a lane, or `mrp`) shows the first held step's
+ *      lane value. If that lane is locked on that step, the value's
+ *      rightmost glyph is underlined and the cell takes no other marker.
+ *   2. Parameter name (row 0). Otherwise, when menu_effectCellAutomated()
+ *      reports any Pattern automation (any step of any track of the viewed
+ *      Pattern) or any FX-sequence lock (any of the 16 steps, whether or not
+ *      it plays), the first non-space character of the name is underlined:
+ *      the 3-character short name at columns 4*i..4*i+2 in the compact view,
+ *      or the 8-character long name at columns 8..15 in the full view.
+ * Why: the VOICE pages follow this convention (va_applyVoiceMarkers()); until
+ * S074 the Effect page drew only step 1, so automated parameter names were
+ * never underlined.
+ * Inputs: menuIndex, editModeActive, the resolved Effect cells, the SEQ hold
+ * (menuEffects_holdDisplay()), the shared search result, and the active
+ * Scene's FX sequence. Outputs: held values written into editDisplayBuffer
+ * row 1 and one CGRAM marker transaction (marker slots 0..3 = CGRAM 2..5,
+ * one per visible cell; slot 0 only in the full view). No retained state
+ * changes. Callers: menu_repaintGeneric() - after menuEffects_paintEditView()
+ * for the manager full views (typ/run/len/scl/mrp), and at its common tail for
+ * PARAM full views and the compact view. Affiliates: menu_effectCellAutomated(),
+ * va_formatValue3(), menuEffects_formatValue3(),
+ * va_queueMarkerTransaction(), lcd_underlineGlyph().
  */
 static void menu_applyEffectMarkers(void)
 {
@@ -2578,33 +2751,54 @@ static void menu_applyEffectMarkers(void)
         uint8_t column = (uint8_t)(first + i);
         menu_cell_t cell = menu_resolveCell(activePage, column);
         uint8_t value;
-        uint8_t locked;
-        char *field;
-        int8_t right;
+        uint8_t locked = 0u;
         uint8_t slot = editModeActive ? 0u : i;
+        uint8_t name_start = editModeActive ? 8u : (uint8_t)(4u * i);
+        uint8_t name_width = editModeActive ? 8u : 3u;
+        uint8_t left;
 
-        if (cell.kind != MENU_CELL_EFFECT ||
-            !menuEffects_holdDisplay(&cell.fx, &value, &locked))
+        if (cell.kind != MENU_CELL_EFFECT)
             continue;
-        field = editModeActive ? &editDisplayBuffer[1][13]
-                               : &editDisplayBuffer[1][4u * i];
-        if (cell.fx.kind == MENU_FX_CELL_PARAM)
-            va_formatValue3(&cell, value, field);
-        else if (cell.fx.kind == MENU_FX_CELL_MORPH_AMOUNT)
-            /* Held `mrp` is a plain number, so show its lock value directly. */
-            numtostrpu(field, value, ' ');
-        else
-            (void)menuEffects_formatValue3(&cell.fx, field);
-        if (!locked)
+        if (menuEffects_holdDisplay(&cell.fx, &value, &locked)) {
+            char *field = editModeActive ? &editDisplayBuffer[1][13]
+                                         : &editDisplayBuffer[1][4u * i];
+            int8_t right;
+
+            if (cell.fx.kind == MENU_FX_CELL_PARAM)
+                va_formatValue3(&cell, value, field);
+            else if (cell.fx.kind == MENU_FX_CELL_MORPH_AMOUNT)
+                /* Held `mrp` is a plain number, so show its lock value directly. */
+                numtostrpu(field, value, ' ');
+            else
+                (void)menuEffects_formatValue3(&cell.fx, field);
+            if (locked) {
+                for (right = 2; right >= 0 && field[right] == ' '; right--)
+                    ;
+                if (right >= 0 && lcd_underlineGlyph((uint8_t)field[right],
+                                                     glyph_probe)) {
+                    desired_base[slot] = (uint8_t)field[right];
+                    marker_row[slot] = 1u;
+                    marker_col[slot] = (uint8_t)(
+                        (editModeActive ? 13u : 4u * i) + (uint8_t)right);
+                    desired_valid |= (uint8_t)(1u << slot);
+                }
+                /* The held step's locked value owns this cell (VOICE rule). */
+                continue;
+            }
+        }
+        /* Unheld, or held but unlocked: fall back to the name marker. */
+        if (!menu_effectCellAutomated(&cell))
             continue;
-        for (right = 2; right >= 0 && field[right] == ' '; right--)
+        for (left = 0u; left < name_width &&
+             editDisplayBuffer[0][name_start + left] == ' '; left++)
             ;
-        if (right >= 0 && lcd_underlineGlyph((uint8_t)field[right],
-                                             glyph_probe)) {
-            desired_base[slot] = (uint8_t)field[right];
-            marker_row[slot] = 1u;
-            marker_col[slot] = (uint8_t)((editModeActive ? 13u : 4u * i) +
-                                         (uint8_t)right);
+        if (left < name_width && lcd_underlineGlyph(
+                (uint8_t)editDisplayBuffer[0][name_start + left],
+                glyph_probe)) {
+            desired_base[slot] =
+                (uint8_t)editDisplayBuffer[0][name_start + left];
+            marker_row[slot] = 0u;
+            marker_col[slot] = (uint8_t)(name_start + left);
             desired_valid |= (uint8_t)(1u << slot);
         }
     }
@@ -11192,20 +11386,13 @@ void menu_serviceRuntimeWidgets(void)
      * VOICE overlay services run every foreground pass, independently of the
      * slower CPU-use widget cadence. Held-state polling is first so scan/value
      * resolution sees the latest raw SEQ mask; all LCD work remains foreground
-     * only. Pattern-wide scans are four steps per pass by configuration.
+     * only. Pattern-wide scans are four step reads per pass by configuration
+     * (VOICE and Effect pages).
      */
     if (menu_isVoicePage(menu_activePage)) {
         va_updateHeldState();
         va_scanService();
         va_underlineService();
-        /* Retry a deferred marker transaction once the queue has drained.
-         * The retry bit survives sendDisplayBuffer() clearing
-         * menu_lcdRefreshPending, ensuring underlines recover after a
-         * burst of rapid encoder events. */
-        if ((va_cgramValid & VA_MARKER_RETRY_BIT) &&
-            lcd_queueFree() >= 72u) {
-            menu_repaint();
-        }
     }
 
     if (menu_activePage == EFFECT_PAGE) {
@@ -11218,8 +11405,67 @@ void menu_serviceRuntimeWidgets(void)
             menu_resetActiveParameter();
             menu_endlessPotMappingChanged();
         }
-        if (fx_actions & MENU_FX_ACT_REPAINT)
+        /*
+         * Redraw after this pass's Effect state changes (S074 ordering fix).
+         *
+         * What: a SEQ hold transition (MENU_FX_ACT_HOLD_REPAINT) redraws with
+         * menu_repaint(); a Scene or type change alone
+         * (MENU_FX_ACT_REPAINT) keeps its forced full menu_repaintAll().
+         * Why: menu_repaintAll() overwrites currentDisplayBuffer with 0x7F,
+         * so va_queueMarkerTransaction() cannot find the LCD cell that still
+         * shows a CGRAM marker slot. It then redefines the slot while that
+         * cell still references it: on a hold, the new underlined value glyph
+         * flashes in the name row; on release, the underlined name glyph
+         * flashes in the value row, until the frame write reaches them.
+         * menu_repaint() keeps the shadow equal to the LCD, so the transaction
+         * restores the old cell to its plain character first, then redefines
+         * the slot, then writes the new cell and the rest of the frame (row 0,
+         * then row 1). A pass that reports both bits uses menu_repaint():
+         * menu_repaintGeneric() rebuilds both rows of the Effect frame in
+         * every view, so menu_repaintAll() would add only the forced resend
+         * that breaks the ordering.
+         * Inputs: fx_actions from menuEffects_service(). Output: at most one
+         * repaint. Affiliates: va_queueMarkerTransaction(),
+         * menu_applyEffectMarkers(), and va_updateHeldState() (the VOICE
+         * precedent, S066 Fix 5).
+         */
+        if (fx_actions & MENU_FX_ACT_HOLD_REPAINT)
+            menu_repaint();
+        else if (fx_actions & MENU_FX_ACT_REPAINT)
             menu_repaintAll();
+        /*
+         * Effect-page automation-presence search (S074).
+         *
+         * What: advances the search shared with the VOICE pages, here over
+         * all seven tracks of the viewed Pattern, four step reads per pass.
+         * Why: the Effect page underlines parameter names automated in the
+         * Pattern; the result feeds menu_effectCellAutomated() through
+         * menu_applyEffectMarkers(). It runs after menuEffects_service() so
+         * that pass's Scene/type handling comes first. Output: one
+         * menu_repaint() when the search completes. Affiliates:
+         * va_scanService(), va_searchRestart().
+         */
+        va_scanService();
+    }
+
+    /*
+     * Retry a deferred marker transaction once the LCD queue has drained.
+     *
+     * What: repaints once when va_queueMarkerTransaction() had to defer its
+     * CGRAM work (VA_MARKER_RETRY_BIT) and the queue has room again. Why:
+     * the retry bit survives sendDisplayBuffer() clearing
+     * menu_lcdRefreshPending, so underlines recover after a burst of rapid
+     * encoder/pot events. The VOICE and Effect pages share the transaction,
+     * so both need the retry; before S074 only VOICE had it, and a deferred
+     * Effect marker stayed missing until an unrelated repaint. Inputs:
+     * menu_activePage, va_cgramValid, lcd_queueFree(). Output: at most one
+     * menu_repaint() per pass. Affiliates: va_queueMarkerTransaction(),
+     * va_applyVoiceMarkers(), menu_applyEffectMarkers().
+     */
+    if (menu_isScreenPage(menu_activePage) &&
+        (va_cgramValid & VA_MARKER_RETRY_BIT) &&
+        lcd_queueFree() >= 72u) {
+        menu_repaint();
     }
 
     menu_sceneLiveRefreshService();
@@ -12447,6 +12693,23 @@ void menu_switchPage(uint8_t pageNr)
             menuEffects_enter(&sub_page, &column);
         menuEffects_setShowMorph(buttonHandler_getShift());
         menu_activePage = EFFECT_PAGE;
+        /*
+         * Effect-page automation-presence search (S074).
+         *
+         * What: a fresh entry restarts the search shared with the VOICE pages
+         * in Effect mode (seven-track cursor from track 0, empty masks). Why:
+         * the shared va_search* bytes may still hold a completed VOICE result,
+         * which would mark the wrong Effect names. The restart runs after
+         * menu_activePage is set because va_searchRestart() selects the scan
+         * geometry from the page. A repeated SHIFT+PERF (screen toggle,
+         * old_page == EFFECT_PAGE) keeps the running search. Input: old_page
+         * (captured at the top of menu_switchPage()). Output: a restarted
+         * search that va_scanService() completes and repaints. Affiliates:
+         * va_searchRestart(), menuEffects_enter(),
+         * menu_serviceRuntimeWidgets().
+         */
+        if (old_page != EFFECT_PAGE)
+            va_searchRestart();
         editModeActive = 0u;
         lockPotentiometerFetch();
         menuIndex = (uint8_t)((sub_page << PAGE_SHIFT) | column);
@@ -13111,14 +13374,29 @@ uint8_t menu_getActivePage(void)   { return menu_activePage; }
 /* Expose only the accepted-command busy window needed by filesystem tracing. */
 uint8_t menu_isLoadSaveCommandActive(void) { return menu_loadSaveCommandActive; }
 uint8_t menu_getActiveVoice(void)  { return menu_activeVoice; }
-/* Track changes restart the custom STEP automation cursor at page zero. */
+/*
+ * Set the active track (voice) shown by Menu.
+ *
+ * What: a change restarts the custom STEP automation cursor at page zero,
+ * releases the VOICE held-step overlay, and restarts the VOICE
+ * automation-presence search for the new track. Why: those views are
+ * track-scoped. The Effect page (reached here by SHIFT+TRACK) keeps its
+ * search, which already covers all seven tracks; a restart would only blank
+ * its Pattern underlines until a redundant 224-pass rescan completed (S074).
+ * The next VOICE entry restarts the search regardless. Input: track 0..6.
+ * Output: menu_activeVoice and the dependent transient state. Callers:
+ * buttonHandler voice/track presses, menu_switchPage() voice entry.
+ * Affiliates: menu_stepAutomationReset(), va_resetOverlay(),
+ * va_searchRestart().
+ */
 void menu_setActiveVoice(uint8_t v)
 {
     if (menu_activeVoice != v) {
         menu_stepAutomationReset();
         va_resetOverlay();
         menu_activeVoice = v;
-        va_searchRestart();
+        if (menu_activePage != EFFECT_PAGE)
+            va_searchRestart();
         return;
     }
     menu_activeVoice = v;
@@ -13225,7 +13503,9 @@ void    menu_setShownPattern(uint8_t p)
      * Input: p is the viewed pattern index supplied by button/menu navigation.
      * Output: the UI Pattern index follows the resident Scene/Pattern slot when
      * valid, otherwise it falls back to Scene 0. A VOICE context change also
-     * invalidates the held-step/search view before repainting it.
+     * invalidates the held-step/search view before repainting it; on the
+     * Effect page (S074) the automation-presence search restarts and the
+     * page repaints.
      */
     {
         uint8_t next = pat_patternValid(p) ? p : 0u;
@@ -13237,6 +13517,18 @@ void    menu_setShownPattern(uint8_t p)
             va_searchRestart();
             led_updatePatternTrack(menu_activeVoice, menu_shownPattern,
                                    buttonHandler_selectedStep);
+            menu_repaint();
+        } else if (menu_activePage == EFFECT_PAGE) {
+            /*
+             * Effect page (S074): the Pattern-wide presence result belongs to
+             * the old Pattern. Restart at once so that no repaint before the
+             * next service pass shows its underlines, then repaint (FX-lock
+             * underlines are read live and stay correct). The Pattern check
+             * in va_scanService() is the backstop, and its completion
+             * repaints again. No Pattern LED update: the SEQ row belongs to
+             * the FX sequencer on this page.
+             */
+            va_searchRestart();
             menu_repaint();
         }
     }

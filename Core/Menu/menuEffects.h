@@ -50,10 +50,33 @@ typedef struct {
     const ParamDescriptor *descriptor;
 } menuEffects_cell_t;
 
-/* menuEffects_service() action bits consumed by menu.c. */
+/*
+ * menuEffects_service() action bits, consumed by menu_serviceRuntimeWidgets().
+ *
+ * MENU_FX_ACT_REPAINT: the active Scene or its Effect type changed. The page
+ *   is redrawn with menu_repaintAll() (forced full resend) unless the same
+ *   pass also reports MENU_FX_ACT_HOLD_REPAINT.
+ * MENU_FX_ACT_REPAIR: the layout may have changed; menu.c repairs the cursor
+ *   (menu_resetActiveParameter()) and the endless-pot mapping.
+ * MENU_FX_ACT_EXIT_EDIT: an open `typ` transaction was abandoned; menu.c
+ *   leaves the full view.
+ * MENU_FX_ACT_HOLD_REPAINT (S074): the SEQ lock-edit hold started, changed
+ *   its held steps, or ended. A visible cell keeps its CGRAM marker slot while
+ *   its underline moves between the name (row 0) and the held value (row 1),
+ *   so menu.c redraws with menu_repaint(). That keeps currentDisplayBuffer
+ *   equal to the LCD, and va_queueMarkerTransaction() can restore the old
+ *   cell to its plain character before it redefines the slot and writes the
+ *   new cell. menu_repaintAll() would erase that knowledge and flash the new
+ *   glyph in the old row (the S066 Fix 5 defect). It takes precedence over
+ *   MENU_FX_ACT_REPAINT in the same pass.
+ * Producer: menuEffects_service(). Consumer: the EFFECT_PAGE branch of
+ * menu_serviceRuntimeWidgets(). Affiliates: menu_applyEffectMarkers(),
+ * va_queueMarkerTransaction().
+ */
 #define MENU_FX_ACT_REPAINT    0x01u
 #define MENU_FX_ACT_REPAIR     0x02u
 #define MENU_FX_ACT_EXIT_EDIT  0x04u
+#define MENU_FX_ACT_HOLD_REPAINT 0x08u
 
 /* Page lifecycle and cursor (menuIndex = subPage << 3 | column). */
 void menuEffects_enter(uint8_t *sub_page, uint8_t *column);
@@ -105,6 +128,24 @@ uint8_t menuEffects_seqHoldActive(void);
 uint8_t menuEffects_holdEdit(const menuEffects_cell_t *cell, int16_t delta);
 uint8_t menuEffects_holdDisplay(const menuEffects_cell_t *cell,
                                 uint8_t *value, uint8_t *locked);
+
+/*
+ * FX-sequence lock presence for the Effect-page name underline (S074).
+ *
+ * What: nonzero when the cell's FX-sequence lane is locked on any of the 16
+ * retained steps, whether or not that step plays (FX length, run mode, `sel`
+ * step and transport are ignored). Lane 0 is Effect Morph (`mrp`); PARAM
+ * cells use the active type's registry lane map; cells without a lane
+ * (typ/run/len/scl and lane-less rows such as `out`) return zero.
+ * Why: the S074 rule (user, 2026-09-29) - any stored automation on a
+ * parameter underlines its name. It reads the active Scene's retained record
+ * directly (16 mask reads), so it is always current and keeps no cache.
+ * Input: a resolved Effect cell. Output: 0/1. Foreground-only and read-only;
+ * it allocates nothing. Caller: menu_effectCellAutomated() in menu.c.
+ * Affiliates: menuEffects_cellLane(), effects_laneOfParam(), and
+ * SceneData's effect_record_t.
+ */
+uint8_t menuEffects_cellSeqLocked(const menuEffects_cell_t *cell);
 void menuEffects_renderSeqLeds(void);
 
 #endif /* MENU_EFFECTS_H_ */

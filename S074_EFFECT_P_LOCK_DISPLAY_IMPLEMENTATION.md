@@ -1,11 +1,13 @@
 # S074 — Effect-page automation underline: implementation schedule
 
-**Status:** schedule only. No code has been changed.
+**Status:** implemented; hardware test PASS (user, 2026-09-29). Assessment
+and build record in §12.
 
-**Base:** branch `dev-ph5-effects`, HEAD `ca77891`, clean tree. Every line
-number below is a HEAD `ca77891` line number **before any edit**. Apply the
-changes in each file **from the highest line number down** (§6.1 gives the
-order) so the cited numbers stay valid while you work.
+**Base:** branch `dev-ph5-effects`, HEAD `223abdc` before this implementation.
+The working tree was clean at the start of the implementation. The line
+numbers below are the original schedule's reference numbers, not current
+post-edit locations. The implementation was applied in the documented
+highest-line-first order.
 
 **Goal (user, 2026-09-29):** on the Effect page (SHIFT+PERF), underline a
 parameter's name when it is automated in the FX sequencer **or** in the
@@ -20,6 +22,31 @@ the sequencer or any DSP/ISR path.
 
 **Cost:** 0 B of RAM (static and stack), no DSP or ISR work, and an estimated
 few hundred bytes of flash.
+
+### Implementation log (2026-09-29)
+
+- Confirmed the current source matches the schedule's S072 Effect-page
+  integration points. The referenced `S072_ST5_IMPLEMENTATION.md` tab is not
+  present in this checkout; the durable S072/S073 references and current code
+  were used instead.
+- Applied C1–C17: the shared VOICE search now supports the Effect page's
+  seven-track Pattern scan; `fxm` and Effect locals 0..62 are recorded; local
+  63/off is rejected; FX locks are read across all 16 retained steps; compact
+  and full Effect names use the shared CGRAM marker transaction; and deferred
+  marker retry covers both screen-page families.
+- Preserved the existing 45-byte `_Static_assert`; no new static or stack
+  state was introduced. The buffer-using Effect goal in
+  `S074_EFFECT_BUGS_BUFFER_USE.md` is intentionally not part of this change.
+- Verification: `git diff --check` passed; `make all` and `make img` passed;
+  the existing 45-byte `_Static_assert` compiled; and the structural checks
+  confirmed the local-63 guard, Effect entry/Pattern-change restarts, and one
+  shared deferred-marker retry test.
+- Measured output: `text=487,384`, `data=416`, `bss=426,336`; flash payload
+  `487,800 / 753,664 B` with `265,864 B` headroom; ITCM `4,168 B`, DTCM
+  statics `4,448 B`, and FX arena `126,624 B`. The generated image is
+  `build/LXRV2_lxr02.img` (`487,800 B`).
+- Hardware behavior checks in §8 remain for the user to run; no device was
+  flashed from this session.
 
 ---
 
@@ -1228,3 +1255,468 @@ These are outside this fix. The working rule is to log unrelated findings in
   the hardware checks pass, and log §9 items 1–2 if you want them tracked.
 - `074_SESSION_HANDOFF_LOG.md`: the changes, the U-decisions and the link
   numbers.
+
+---
+
+## 11. Follow-up fix: underline ordering on SEQ hold and release
+
+**Status:** schedule only. No code has been changed.
+
+**Base:** the working tree with C1–C17 applied (uncommitted on top of HEAD
+`223abdc`). Every line number in this section is a **current working-tree**
+line number. Each file gets exactly one change here, so the numbers stay
+valid in any order. Apply F1 first, because F2 and F3 use its define.
+
+### 11.1 Symptom (hardware, 2026-09-29)
+
+The underlines now appear on the right parameters, but the change is drawn
+in the wrong order when a SEQ hold starts or ends:
+
+- **Hold:** the underlined held-value character flashes briefly in the
+  **name row** (row 0) before it appears in the value row (row 1).
+- **Release:** the underlined name character flashes briefly in the **value
+  row** before it appears in the name row.
+
+This is the defect the VOICE overlay had in S066
+(`066_SESSION_HANDOFF_LOG.md`, "Fix 5 — Overlay Exit CGRAM Ordering Glitch").
+
+### 11.2 Root cause
+
+A visible cell keeps the same CGRAM marker slot (slot `i` for compact cell
+`i`, slot 0 in the full view) whether its underline is on the name or on the
+held value. A hold start or release therefore **moves** a slot from one LCD
+cell to another and **redefines** its glyph.
+
+`va_queueMarkerTransaction()` (`menu.c:2313`) orders that move correctly,
+but only if `currentDisplayBuffer` matches the LCD:
+
+1. **Stale restore:** every cell whose shadow still holds a changed slot's
+   code (2..5) is rewritten with its plain ROM character.
+2. **Define:** the slot is redefined with the new underlined glyph. No cell
+   references it at this point, so nothing visible changes.
+3. **Frame diff:** changed cells are written, row 0 then row 1, including the
+   slot code at its new cell.
+
+On the Effect page every hold transition is redrawn with `menu_repaintAll()`:
+
+- `menuEffects_service()` sets `MENU_FX_ACT_REPAINT` for the hold start (the
+  held mask goes from 0 to nonzero on the first pass after
+  `menuEffects_seqHoldExpired()`), for a held-mask change (`menuEffects.c:667`)
+  and for the release (`menuEffects.c:662`).
+- `menu_serviceRuntimeWidgets()` turns that bit into `menu_repaintAll()`
+  (`menu.c:11408–11409`).
+
+`menu_repaintAll()` (`menu.c:8240`) fills `currentDisplayBuffer` with `0x7F`.
+Step 1 then finds nothing to restore, and step 2 redefines the slot while
+the old cell on the LCD still references it. The new glyph shows in the old
+row until step 3's full-frame write reaches that cell. That is exactly the
+reported flash, in both directions.
+
+The VOICE overlay already avoids this. Its hold start
+(`menu_voiceAutoOverlayHoldExpired()`, `menu.c:2202`), held-mask change and
+release (`va_updateHeldState()`, comment at `menu.c:2166`) all use
+`menu_repaint()`.
+
+Neither the SEQ press nor the release path in `buttonHandler.c` (FX branches
+at lines 758–763 and 802–808) repaints the LCD. The service pass is the only
+repaint on these transitions, so fixing it covers every hold transition.
+
+### 11.3 Fix
+
+Mirror the VOICE rule: the Effect hold transitions redraw with
+`menu_repaint()`, which keeps the LCD shadow.
+
+- **F1:** a new action bit, `MENU_FX_ACT_HOLD_REPAINT` (`0x08`), with the
+  action-bit contract documented.
+- **F2:** `menuEffects_service()` reports hold start, held-mask change and
+  release with the new bit instead of `MENU_FX_ACT_REPAINT`.
+- **F3:** `menu_serviceRuntimeWidgets()` answers the new bit with
+  `menu_repaint()`.
+  - A Scene or type change alone keeps its `menu_repaintAll()`.
+  - If one pass reports both bits, `menu_repaint()` is used.
+    `menu_repaintGeneric()` rebuilds both rows of the Effect frame in every
+    view: the compact view clears both rows (`menu.c` compact branch), the
+    PARAM full view clears both rows, and `menuEffects_paintEditView()`
+    clears both rows for manager cells. The only thing `menu_repaintAll()`
+    adds is the forced resend, and that is what breaks the ordering.
+
+The resulting LCD queue order (compact view; cell 1 `frq` with a name
+underline; the first held step locks `frq` at 90; normal value 64):
+
+| Step | On hold (F applied) | On release (F applied) |
+|---|---|---|
+| 1. Stale restore | `[0][4]` ← plain `f` (top row un-underlined) | `[1][6]` ← plain `0` (bottom row un-underlined) |
+| 2. Define CGRAM slot 1 | underlined `0` (no cell references it) | underlined `f` (no cell references it) |
+| 3. Frame diff | `[1][5]` ← `9`, `[1][6]` ← slot 1 (underlined `0` appears on the bottom row) | `[0][4]` ← slot 1 (underlined `f` appears on the top row), then `[1][5]` ← `6`, `[1][6]` ← `4` |
+
+This is the order you asked for:
+
+- **On hold:** restore the plain character on the top row, change the
+  glyph, then write the underline and update the bottom row.
+- **On release:** the same steps in reverse.
+
+The queue-full fallback also stays clean. When the transaction does not fit,
+it reverts the marker cells to ROM characters and sets the retry bit, so
+`sendDisplayBuffer()` replaces the old slot reference with its plain
+character before the retry defines the new glyph.
+
+**Cost:** 0 B of RAM, no new state, a few bytes of flash. The LCD queue cost
+of a hold transition falls: a diff-based write (typically 2 + 10 per changed
+slot + 2 per changed cell) replaces the forced 64-op frame. The forced frame
+also made the transaction fall back to the retry more often.
+
+### 11.4 Change schedule
+
+| ID | File | Lines (working tree) | Action | What |
+|---|---|---|---|---|
+| F1 | `Core/Menu/menuEffects.h` | 53–56 | MODIFY comment, ADD define | `MENU_FX_ACT_HOLD_REPAINT` and the action-bit contract |
+| F2 | `Core/Menu/menuEffects.c` | 652–668 | MODIFY | Hold transitions report `MENU_FX_ACT_HOLD_REPAINT` |
+| F3 | `Core/Menu/menu.c` | 11408–11409 | MODIFY | `menu_repaint()` for hold transitions |
+
+---
+
+#### F1 — `Core/Menu/menuEffects.h` L53–56 — MODIFY comment, ADD define
+
+**Current (L53–56):**
+
+```c
+/* menuEffects_service() action bits consumed by menu.c. */
+#define MENU_FX_ACT_REPAINT    0x01u
+#define MENU_FX_ACT_REPAIR     0x02u
+#define MENU_FX_ACT_EXIT_EDIT  0x04u
+```
+
+**New:** the three existing `#define` lines are unchanged; the comment is
+replaced and one define is added.
+
+```c
+/*
+ * menuEffects_service() action bits, consumed by menu_serviceRuntimeWidgets().
+ *
+ * MENU_FX_ACT_REPAINT: the active Scene or its Effect type changed. The page
+ *   is redrawn with menu_repaintAll() (forced full resend) unless the same
+ *   pass also reports MENU_FX_ACT_HOLD_REPAINT.
+ * MENU_FX_ACT_REPAIR: the layout may have changed; menu.c repairs the cursor
+ *   (menu_resetActiveParameter()) and the endless-pot mapping.
+ * MENU_FX_ACT_EXIT_EDIT: an open `typ` transaction was abandoned; menu.c
+ *   leaves the full view.
+ * MENU_FX_ACT_HOLD_REPAINT (S074): the SEQ lock-edit hold started, changed
+ *   its held steps, or ended. A visible cell keeps its CGRAM marker slot while
+ *   its underline moves between the name (row 0) and the held value (row 1),
+ *   so menu.c redraws with menu_repaint(). That keeps currentDisplayBuffer
+ *   equal to the LCD, and va_queueMarkerTransaction() can restore the old
+ *   cell to its plain character before it redefines the slot and writes the
+ *   new cell. menu_repaintAll() would erase that knowledge and flash the new
+ *   glyph in the old row (the S066 Fix 5 defect). It takes precedence over
+ *   MENU_FX_ACT_REPAINT in the same pass.
+ * Producer: menuEffects_service(). Consumer: the EFFECT_PAGE branch of
+ * menu_serviceRuntimeWidgets(). Affiliates: menu_applyEffectMarkers(),
+ * va_queueMarkerTransaction().
+ */
+#define MENU_FX_ACT_REPAINT    0x01u
+#define MENU_FX_ACT_REPAIR     0x02u
+#define MENU_FX_ACT_EXIT_EDIT  0x04u
+#define MENU_FX_ACT_HOLD_REPAINT 0x08u
+```
+
+---
+
+#### F2 — `Core/Menu/menuEffects.c` L652–668 — MODIFY hold tracking in `menuEffects_service()`
+
+**Current (L652–668):**
+
+```c
+    /*
+     * Lock-edit hold follows the physical SEQ mask. Newly seen steps flash;
+     * releasing every SEQ button ends the lock editor and requests one repaint.
+     */
+    if (menuEffects_holdActive) {
+        uint16_t mask = buttonHandler_seqHeldMask();
+
+        if (mask == 0u) {
+            menuEffects_holdActive = 0u;
+            menuEffects_holdMask = 0u;
+            actions |= MENU_FX_ACT_REPAINT;
+        } else if (mask != menuEffects_holdMask) {
+            led_flashGroup(LED_FLASH_GROUP_SEQ,
+                           (uint16_t)(mask & (uint16_t)~menuEffects_holdMask));
+            menuEffects_holdMask = mask;
+            actions |= MENU_FX_ACT_REPAINT;
+        }
+    }
+```
+
+**New:**
+
+```c
+    /*
+     * Lock-edit hold follows the physical SEQ mask.
+     *
+     * What: the first pass after menuEffects_seqHoldExpired() (held mask
+     * 0 -> nonzero) starts the held view; newly seen steps flash; releasing
+     * every SEQ button ends the lock editor. Each of these transitions
+     * requests one MENU_FX_ACT_HOLD_REPAINT.
+     * Why not MENU_FX_ACT_REPAINT (S074): the redraw can move a cell's
+     * underline between its name (row 0) and its held value (row 1) on the same
+     * CGRAM slot. Only menu_repaint() keeps the LCD shadow that lets
+     * va_queueMarkerTransaction() order the move: restore the old cell to its
+     * plain character, redefine the slot, then write the new cell. The VOICE
+     * overlay has used menu_repaint() for the same transitions since S066
+     * Fix 5.
+     * Inputs: buttonHandler_seqHeldMask(), menuEffects_holdActive/holdMask.
+     * Outputs: updated hold state, SEQ LED flashes, and the action bit.
+     * Consumer: menu_serviceRuntimeWidgets().
+     */
+    if (menuEffects_holdActive) {
+        uint16_t mask = buttonHandler_seqHeldMask();
+
+        if (mask == 0u) {
+            menuEffects_holdActive = 0u;
+            menuEffects_holdMask = 0u;
+            actions |= MENU_FX_ACT_HOLD_REPAINT;
+        } else if (mask != menuEffects_holdMask) {
+            led_flashGroup(LED_FLASH_GROUP_SEQ,
+                           (uint16_t)(mask & (uint16_t)~menuEffects_holdMask));
+            menuEffects_holdMask = mask;
+            actions |= MENU_FX_ACT_HOLD_REPAINT;
+        }
+    }
+```
+
+The code is unchanged apart from the two `actions |=` lines (L662 and L667).
+The Scene/type branch at L643–651 keeps `MENU_FX_ACT_REPAINT`. The SEQ LED
+block at L670–682 tests only `MENU_FX_ACT_REPAIR`, so it is unaffected.
+
+---
+
+#### F3 — `Core/Menu/menu.c` L11408–11409 — MODIFY the Effect-branch repaint in `menu_serviceRuntimeWidgets()`
+
+**Current (L11408–11409):**
+
+```c
+        if (fx_actions & MENU_FX_ACT_REPAINT)
+            menu_repaintAll();
+```
+
+**New:**
+
+```c
+        /*
+         * Redraw after this pass's Effect state changes (S074 ordering fix).
+         *
+         * What: a SEQ hold transition (MENU_FX_ACT_HOLD_REPAINT) redraws with
+         * menu_repaint(); a Scene or type change alone (MENU_FX_ACT_REPAINT)
+         * keeps its forced full menu_repaintAll().
+         * Why: menu_repaintAll() overwrites currentDisplayBuffer with 0x7F, so
+         * va_queueMarkerTransaction() cannot find the LCD cell that still
+         * shows a CGRAM marker slot. It then redefines the slot while that
+         * cell still references it: on a hold, the new underlined value glyph
+         * flashes in the name row; on release, the underlined name glyph
+         * flashes in the value row, until the frame write reaches them.
+         * menu_repaint() keeps the shadow equal to the LCD, so the transaction
+         * restores the old cell to its plain character first, then redefines
+         * the slot, then writes the new cell and the rest of the frame (row 0,
+         * then row 1). A pass that reports both bits uses menu_repaint():
+         * menu_repaintGeneric() rebuilds both rows of the Effect frame in
+         * every view, so menu_repaintAll() would add only the forced resend
+         * that breaks the ordering.
+         * Inputs: fx_actions from menuEffects_service(). Output: at most one
+         * repaint. Affiliates: va_queueMarkerTransaction(),
+         * menu_applyEffectMarkers(), and va_updateHeldState() (the VOICE
+         * precedent, S066 Fix 5).
+         */
+        if (fx_actions & MENU_FX_ACT_HOLD_REPAINT)
+            menu_repaint();
+        else if (fx_actions & MENU_FX_ACT_REPAINT)
+            menu_repaintAll();
+```
+
+The surrounding lines (the `MENU_FX_ACT_EXIT_EDIT` and `MENU_FX_ACT_REPAIR`
+handling before it, and the C12 `va_scanService()` call after it) are
+unchanged. Cursor repair still runs before the repaint.
+
+### 11.5 Build and verification gates
+
+1. `make all && make img`, one build at a time. Expect no new warnings.
+2. `python3 tools/link_budget.py arm-none-eabi-nm build/lxr02.elf`:
+   - `data=416` and `bss=426,336`: unchanged;
+   - ITCM, DTCM statics and the FX arena: unchanged;
+   - `text` within a few bytes of the C1–C17 build (`487,384`).
+3. Read-through checks:
+   - `grep -n "MENU_FX_ACT_HOLD_REPAINT" Core/Menu/*.c Core/Menu/*.h`: one
+     define (F1), two sets in `menuEffects.c` (F2) and one test in `menu.c`
+     (F3).
+   - `grep -n "MENU_FX_ACT_REPAINT" Core/Menu/menuEffects.c`: only the
+     Scene/type line (L646).
+
+### 11.6 Hardware checks (yours)
+
+1. **Compact view:** a cell whose name is underlined and whose lane is
+   locked on a step. Hold that step: the name loses its underline and the
+   value appears underlined in the bottom row, with **no** underlined value
+   glyph flashing in the name row.
+2. **Release:** the value loses its underline and the name is underlined
+   again, with **no** underlined name glyph flashing in the value row.
+3. **Full view:** click into `frq` (long name) and repeat checks 1–2.
+4. **`mrp`** (lane 0): repeat checks 1–2.
+5. **Held-mask change:** hold a second step whose lock value differs. The
+   value underline changes in place, with no flash elsewhere.
+6. **Four cells at once:** all four names underlined, and a held step that
+   locks only two of them. Only those two move; the other two keep their
+   name underlines and do not flicker.
+7. **Held but unlocked:** an automated cell that is not locked on the held
+   step keeps its name underline through hold and release.
+8. **Rapid hold and release:** the markers always end correct (the retry
+   recovers a deferred transaction).
+9. **Scene switch and `typ` change:** still redraw the page completely
+   (regression).
+10. **VOICE pages:** hold and release unchanged (regression).
+
+### 11.7 Not changed
+
+These `menu_repaintAll()` paths can still redefine a marker slot whose
+position changes. Each redraws the whole frame, so any transient sits inside
+a full redraw. None has been reported, and the VOICE pages share them. Log
+them in `SCOPING_TARGETS.md` if they are ever seen.
+
+- An encoder click in or out (`menu.c:11107–11108`, `if (btnClicked)
+  menu_repaintAll();`). Slot 0 moves between compact cell 0 and the full
+  view's name or value.
+- A SELECT press (Effect: `buttonHandler.c:967`; VOICE/STEP:
+  `buttonHandler.c:957`) while a marker changes row between screens.
+- A Scene or type change while a hold stays on screen, with no hold
+  transition in the same pass.
+
+This section supersedes §9 item 3 for the SEQ hold and release transitions.
+
+### 11.8 Follow-up implementation log (2026-09-29)
+
+- Applied F1–F3: added `MENU_FX_ACT_HOLD_REPAINT`, made hold start/mask
+  changes/release report it, and gave it precedence over the forced full
+  repaint in the Effect-page service.
+- Kept Scene/type changes on `MENU_FX_ACT_REPAINT` and `menu_repaintAll()`;
+  no new state, RAM allocation, DSP work, or ISR path was added.
+- Verification: `make all` and `make img` passed; the F1/F2/F3 code-line
+  action-flow checks passed; and `git diff --check` passed. The final link is
+  `text=487,544`, `data=416`, `bss=426,336`; flash payload
+  `487,960 / 753,664 B` with `265,704 B` headroom; ITCM `4,168 B`, DTCM
+  statics `4,448 B`, and FX arena `126,624 B`. The generated image is
+  `build/LXRV2_lxr02.img` (`487,960 B`).
+- Hardware display checks in §11.6 remain for the user to run; no device was
+  flashed from this session.
+
+---
+
+## 12. Implementation assessment and test result (2026-09-29)
+
+### 12.1 Result
+
+**PASS.** The implemented code matches this schedule (C1–C17 and F1–F3),
+with one cosmetic deviation (§12.3). The user reports the changes complete
+and tested OK on hardware:
+
+- automated Effect parameters show the name underline;
+- the SEQ hold and release ordering defect (§11) is fixed.
+
+The §8 and §11.6 checks were not reported one by one.
+
+### 12.2 What was reviewed
+
+`git diff HEAD` (`223abdc`) for `Core/Menu/menu.c`, `menu.h`,
+`menuEffects.c`, `menuEffects.h` and `config.h`, compared change by change
+with this document.
+
+| Change | Status | Notes |
+|---|---|---|
+| C1 `config.h` comment | as scheduled | |
+| C2 `menu.h` contract | as scheduled | |
+| C3 sharing paragraph | as scheduled | |
+| C4 search-field comment | **placed differently** | See §12.3 |
+| C5 `VA_SEARCH_SCENE_EFFECT_MORPH_BIT` | as scheduled | Existing defines untouched |
+| C6 `va_searchRestart()` | as scheduled | |
+| C7 `va_searchRecordEffectTarget()` | as scheduled | Local-63 guard present |
+| C8 `va_scanService()` | as scheduled | The VOICE classification lines are unchanged; for VOICE the only change is where the cursor increment sits (same behaviour) |
+| C9 Pattern-clear restart | as scheduled | `menu_isScreenPage()` gate |
+| C10 `menu_effectCellAutomated()` | as scheduled | No type filter (U3) |
+| C11 `menu_applyEffectMarkers()` | as scheduled | |
+| C12 Effect scan and shared retry | as scheduled | Exactly one `VA_MARKER_RETRY_BIT` test remains |
+| C13 Effect-entry restart | as scheduled | |
+| C14 `menu_setActiveVoice()` | as scheduled | |
+| C15 `menu_setShownPattern()` | as scheduled | |
+| C16/C17 `menuEffects_cellSeqLocked()` | as scheduled | All 16 steps |
+| F1 `MENU_FX_ACT_HOLD_REPAINT` | as scheduled | |
+| F2 hold transitions use the new bit | as scheduled | The Scene/type branch keeps `MENU_FX_ACT_REPAINT` |
+| F3 `menu_repaint()` for hold transitions | as scheduled | The hold bit takes precedence |
+
+### 12.3 Findings
+
+1. **C4 placement (cosmetic).** The per-field search comment sits *after*
+   `va_searchTargetMask[8]` (`menu.c:1272–1291`), directly before the C5
+   comment for `va_searchSceneMask`. The schedule put it above
+   `va_searchTrack`. The text is correct, but two comment blocks now sit
+   back to back, and the first one describes the lines above it.
+   Recommendation: move it above `static uint8_t va_searchTrack` (line
+   1267). There is no functional effect.
+2. **No functional defects found.** Specifically:
+   - the scan keeps one entry buffer (no stack growth);
+   - `va_searchRestart()` runs after `menu_activePage` is set at Effect
+     entry;
+   - the local-63 guard is present;
+   - hold transitions never reach `menu_repaintAll()`;
+   - the VOICE retry behaves as before.
+
+### 12.4 Build verification (2026-09-29)
+
+These are after the F1–F3 build, and after the image-script fold in §12.5.
+
+| Gate | Result |
+|---|---|
+| `make all` (Menu sources and `flashImage.c` forced to recompile) | **PASS.** No warnings from project sources. The only warnings are newlib's `_close`/`_lseek`/`_read`/`_write` stubs (`-specs=nosys.specs`) and the LTO serial-compilation note, which appear at every relink and are unrelated. |
+| `size` | `text=487,544`, `data=416`, `bss=426,336` |
+| `link_budget.py` | Flash 487,960 / 753,664 B, headroom 265,704 B; ITCM 4,168 B; DTCM statics 4,448 B; FX arena 126,624 B (margin 3,744) |
+| RAM against the S073 close | **unchanged** (`data`, `bss`, ITCM, DTCM, arena). The 45 B `_Static_assert` compiles. |
+| Flash against the S073 close | payload 487,104 → 487,960 B (+856 B for C1–C17 and F1–F3) |
+| `git diff --check` | clean |
+| Image | `build/LXRV2_lxr02.img`, 487,976 B; SHA-256 `0e004720767220d9ab7fc7589691314c2526e899f0cbd9a903fcffaacd0ddeea` |
+
+**Headroom note:** the image now ends at `0x0807F218`, 3,560 B below sector
+6 (`0x08080000`). The next change of that size will be the first image the
+bootloader has to write past `0x08080000`. The boot image check exists to
+report a failure there.
+
+### 12.5 Build tooling change made in the same session (user request)
+
+The image check stamp was folded into `tools/build_lxrv2_img.py`, so one
+script now produces the card image. `tools/stamp_image_check.py` is deleted,
+and its cosmetic "Image check: stamped at …" line is gone. Details:
+
+- **Makefile:** the `.bin` rule is objcopy only. The `img` rule calls
+  `build_lxrv2_img.py <nm> <elf> <bin> <img>`.
+- **Unstamped `.bin`:** `lxr02.bin` now stays the raw, unstamped objcopy
+  output. The stamped payload exists only inside the `.img`. **Record the
+  `.img` SHA-256 from now on, not the `.bin`.**
+- **Failure handling:** the script checks the layout exactly as before. On
+  any failure it prints the reason to stderr, deletes any previous `.img`,
+  and exits non-zero.
+- **Verified:**
+  - the new `.img` is **byte-identical** to the image built with the old
+    two-script flow (same SHA-256 as above);
+  - re-stamping an already stamped `.bin` gives the same image;
+  - a truncated `.bin` and a missing check block each fail and leave no
+    image.
+- **References updated:** comments in `STM32F765VIHx_FLASH.ld` and
+  `flashImage.c/h`; `README.md`, `MEMORY.md`, `STORAGE_SRAM_MANIFEST.md`
+  §3.4–§3.5 and `MODULE_INTERCHANGE_SPEC.md`. The session logs are history
+  and were left as they are.
+
+### 12.6 Still open
+
+- §12.3 item 1 (comment placement).
+- §9 items 1–2 and §11.7: log them in `SCOPING_TARGETS.md` if you want them
+  tracked.
+- The §10 documentation follow-ups (`EFFECTS_BUS_REFERENCE.md` §8.3,
+  `MODULE_INTERCHANGE_SPEC.md`, the `SCOPING_TARGETS.md` closeout, the 074
+  handoff log).
+- An existing inaccurate comment, not part of S074: `main.c:532` says the
+  stamped CRCs are "at the end of the load image". They are in sector 1,
+  right after the vector table.

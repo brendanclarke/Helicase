@@ -134,11 +134,13 @@ edit relinks without `make clean`.
   `[0x08008000, _eflash_load)` with the block's own bytes skipped, word 7
   the image length. Sectors the image does not reach hold the CRC of nothing
   (0).
-- **Stamping:** `tools/stamp_image_check.py` rewrites the block in
-  `lxr02.bin` during the Makefile `.bin` rule (Python `zlib.crc32`:
-  reflected CRC-32, polynomial `0xEDB88320`, init and final `0xFFFFFFFF`).
-  If the binary does not have the promised layout the tool fails and the
-  Makefile deletes the `.bin`, so no unstamped image can be packaged.
+- **Stamping:** `tools/build_lxrv2_img.py` (`make img`) rewrites the block
+  in the image payload (Python `zlib.crc32`: reflected CRC-32, polynomial
+  `0xEDB88320`, init and final `0xFFFFFFFF`). Since S074 it is the only image
+  script (the separate `stamp_image_check.py` was folded in) and `lxr02.bin`
+  stays the raw, unstamped objcopy output. If the binary does not have the
+  promised layout the script fails, deletes any previous `.img` and exits
+  non-zero, so no unstamped or stale image can be copied to the card.
 - **Checking:** `flashImage_verifyAtBoot()` (`Core/Hardware/flashImage.c`)
   runs in `main.c` after `din_init()` and `time_initTimer()`, before any
   sample, DSP or storage code. It uses a 16-entry nibble table, no RAM
@@ -149,14 +151,15 @@ edit relinks without `make clean`.
   - Unstamped image: `Img unstamped`.
   - After a report, boot waits for a BAR1 (PB7) press and release, then
     continues, so a checker fault can never stop a good image.
-- **Keep in sync:** the sector table appears in the tool (`SECTOR_ENDS`) and
+- **Keep in sync:** the sector table appears in the script (`SECTOR_ENDS`) and
   in `flashImage.c` (`flashImage_sectorEnd`).
 - **Open decision (D-C1):** whether to keep the check permanently. It is
   kept for now.
 
 ### 3.5 Image packaging and the bootloader
 
-- `make img` runs `tools/build_lxrv2_img.py`: a 16-byte header (`LXRV2IMG`
+- `make img` runs `tools/build_lxrv2_img.py`: the image check stamp (§3.4),
+  then a 16-byte header (`LXRV2IMG`
   magic, payload size little-endian, an **8-bit** additive checksum as a
   32-bit word) and the payload. The packer has no size check; the linker
   ASSERTs are the guard.
