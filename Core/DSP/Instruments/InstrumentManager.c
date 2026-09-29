@@ -16,6 +16,7 @@
 #include "modulationNode.h"
 #include "menu.h"
 #include "valueShaper.h"
+#include "config.h"
 #include "globals.h"
 #include <string.h>
 
@@ -1852,6 +1853,54 @@ static OscInfo *instrumentManager_osc(uint8_t slot, const char *key)
     return 0;
 }
 
+/*
+ * Resolve a tagged oscillator selector to the live runtime member (S073 Step 2).
+ *
+ * What:       maps IM_SPECIAL_OSC_* to the oscillator that the old key-prefix
+ *             search would have selected for the slot's live instrument type.
+ * Why:        the runtime writer must preserve type-handoff behaviour without
+ *             rediscovering the fixed mapping with strncmp().
+ * Inputs:     slot and the selector bits from a descriptor tag.
+ * Outputs:    borrowed OscInfo pointer, or NULL when that oscillator is not
+ *             present on the live runtime type.
+ * Accessors:  instrumentManager_writeSpecialRuntime().
+ * Affiliates: instrumentManager_osc(), which remains for modulation binding,
+ *             and the four tagged parameter tables.
+ */
+static OscInfo *instrumentManager_oscBySelector(uint8_t slot, uint8_t selector)
+{
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        if (!voice) return 0;
+        if (selector == IM_SPECIAL_OSC1) return &voice->osc;
+        if (selector == IM_SPECIAL_OSC2) return &voice->modOsc;
+        return 0; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        if (!voice) return 0;
+        if (selector == IM_SPECIAL_OSC1) return &voice->osc;
+        if (selector == IM_SPECIAL_OSC_NOISE) return &voice->noiseOsc;
+        return 0; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        if (!voice) return 0;
+        if (selector == IM_SPECIAL_OSC1) return &voice->osc;
+        if (selector == IM_SPECIAL_OSC2) return &voice->modOsc;
+        if (selector == IM_SPECIAL_OSC3) return &voice->modOsc2;
+        return 0; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        if (!voice) return 0;
+        if (selector == IM_SPECIAL_OSC1) return &voice->osc;
+        if (selector == IM_SPECIAL_OSC2) return &voice->modOsc;
+        if (selector == IM_SPECIAL_OSC3) return &voice->modOsc2;
+        return 0; }
+    default:
+        return 0;
+    }
+}
+
 static ResonantFilter *instrumentManager_filter(uint8_t slot)
 {
     switch (instrumentManager_slotType(slot)) {
@@ -2918,184 +2967,259 @@ static uint8_t instrumentManager_writeSpecialRuntime(
     uint8_t slot, const ParamDescriptor *descriptor,
     instrument_param_value_t value)
 {
-    const char *key = descriptor ? descriptor->file_key : 0;
-    OscInfo *osc;
-    ResonantFilter *filter;
-    SlopeEg2 *ampEg;
-    DecayEg *pitchEg;
-    TransientGenerator *transient;
-    Distortion *distortion;
-    uint8_t byteValue = value;
-
     /*
-     * Descriptor-owned shaper bridge.
+     * Tagged descriptor special writer (S073 Step 2).
      *
-     * The storage address is still slot+descriptor_index. This function only
-     * restores the old DSP-side meaning for rows whose runtime update was more
-     * than a plain normalized float write in MidiParser.c: oscillator tuning,
-     * filter shapers, envelope setters, transient setters, and distortion
-     * curves. It intentionally keys from descriptor->file_key so no flat PAR_*
-     * identity layer comes back.
+     * What:       dispatches directly on the immutable row tag and performs
+     *             the same DSP setter math as the pre-S073 key-string chain.
+     * Why:        the fixed row mapping no longer pays strcmp/strstr/strncmp
+     *             work on every modulation, Morph, velocity or Scene write.
+     *             Every row still takes the same tag switch; no render work is
+     *             skipped by a control value.
+     * Inputs:     slot, descriptor tag and descriptor-domain byte value.
+     * Outputs:    DSP runtime state; 1 when a special writer consumed the
+     *             value, 0 for generic offset handling.
+     * Accessors:  instrumentManager_writeRuntimeInternal().
+     * Affiliates: InstrumentManager.h tags, the four parameter tables,
+     *             instrumentManager_oscBySelector(), and the diagnostic
+     *             classifier below.
      */
-    if (!key)
-        return 0u;
+    const uint8_t special = descriptor ? descriptor->runtime.special
+                                       : (uint8_t)IM_SPECIAL_NONE;
+    const uint8_t byteValue = value;
 
-    osc = instrumentManager_osc(slot, key);
-    if (osc) {
-        if (strcmp(key, "noise_freq") == 0) {
-            osc->freq = byteValue / 127.0f * 22000.0f;
-            return 1u;
-        }
-        if (strstr(key, "pitch_coarse")) {
-            osc->midiFreq = (uint16_t)((osc->midiFreq & 0x00ffu) |
-                                       ((uint16_t)byteValue << 8));
-            osc_recalcFreq(osc);
-            return 1u;
-        }
-        if (strstr(key, "pitch_fine")) {
-            osc->midiFreq = (uint16_t)((osc->midiFreq & 0xff00u) |
-                                       byteValue);
-            osc_recalcFreq(osc);
-            return 1u;
-        }
-    }
-
-    filter = instrumentManager_filter(slot);
-    if (filter) {
-        if (strcmp(key, "filter_freq") == 0) {
-            SVF_directSetFilterValue(filter,
-                valueShaperF2F(byteValue / 127.0f, FILTER_SHAPER));
-            return 1u;
-        }
-        if (strcmp(key, "filter_reso") == 0) {
-            SVF_setReso(filter, byteValue / 127.0f);
-            return 1u;
-        }
-        if (strcmp(key, "filter_drive") == 0) {
+    switch (special & IM_SPECIAL_WRITER_MASK) {
+    case IM_SPECIAL_NOISE_FREQ: {
+        OscInfo *osc = instrumentManager_oscBySelector(
+            slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
+        if (!osc) return 0u;
+        osc->freq = byteValue / 127.0f * 22000.0f;
+        return 1u; }
+    case IM_SPECIAL_PITCH_COARSE: {
+        OscInfo *osc = instrumentManager_oscBySelector(
+            slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
+        if (!osc) return 0u;
+        osc->midiFreq = (uint16_t)((osc->midiFreq & 0x00ffu) |
+                                   ((uint16_t)byteValue << 8));
+        osc_recalcFreq(osc);
+        return 1u; }
+    case IM_SPECIAL_PITCH_FINE: {
+        OscInfo *osc = instrumentManager_oscBySelector(
+            slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
+        if (!osc) return 0u;
+        osc->midiFreq = (uint16_t)((osc->midiFreq & 0xff00u) | byteValue);
+        osc_recalcFreq(osc);
+        return 1u; }
+    case IM_SPECIAL_FILTER_FREQ: {
+        ResonantFilter *filter = instrumentManager_filter(slot);
+        if (!filter) return 0u;
+        SVF_directSetFilterValue(filter,
+            valueShaperF2F(byteValue / 127.0f, FILTER_SHAPER));
+        return 1u; }
+    case IM_SPECIAL_FILTER_RESO: {
+        ResonantFilter *filter = instrumentManager_filter(slot);
+        if (!filter) return 0u;
+        SVF_setReso(filter, byteValue / 127.0f);
+        return 1u; }
+    case IM_SPECIAL_FILTER_DRIVE: {
+        ResonantFilter *filter = instrumentManager_filter(slot);
+        if (!filter) return 0u;
 #if UNIT_GAIN_DRIVE
-            filter->drive = byteValue / 127.0f;
+        filter->drive = byteValue / 127.0f;
 #else
-            SVF_setDrive(filter, byteValue);
+        SVF_setDrive(filter, byteValue);
 #endif
-            return 1u;
-        }
-        if (strcmp(key, "filter_type") == 0) {
-            instrumentManager_writeParameter(
-                (Parameter){ (void *)((uint8_t *)instrumentManager_runtimeInstance(slot) +
-                                      descriptor->runtime.offset),
-                             descriptor->runtime.parameter_type },
-                (uint8_t)(byteValue + 1u));
-            return 1u;
-        }
-    }
-
-    ampEg = instrumentManager_ampEg(slot);
-    if (ampEg) {
-        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_HAT &&
-            strcmp(key, "amp_envelope_decay") == 0) {
+        return 1u; }
+    case IM_SPECIAL_FILTER_TYPE:
+        if (!instrumentManager_filter(slot)) return 0u;
+        instrumentManager_writeParameter(
+            (Parameter){ (void *)((uint8_t *)instrumentManager_runtimeInstance(slot) +
+                                  descriptor->runtime.offset),
+                         descriptor->runtime.parameter_type },
+            (uint8_t)(byteValue + 1u));
+        return 1u;
+    case IM_SPECIAL_AMP_ATTACK: {
+        SlopeEg2 *ampEg = instrumentManager_ampEg(slot);
+        if (!ampEg) return 0u;
+        slopeEg2_setAttack(ampEg, byteValue,
+                           (uint8_t)(instrumentManager_slotType(slot) ==
+                                     INSTRUMENT_TYPE_DRM ? AMP_EG_SYNC : 0u));
+        return 1u; }
+    case IM_SPECIAL_AMP_DECAY: {
+        SlopeEg2 *ampEg = instrumentManager_ampEg(slot);
+        if (!ampEg) return 0u;
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_HAT) {
             HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
-            /*
-             * HiHat base decay keeps its dedicated closed-hat cache.
-             *
-             * Inputs: canonical base amp_envelope_decay descriptor value for a
-             * HiHat slot. Output: the slot hihat decayClosed receives the shaped
-             * SlopeEg2 decay value used when slot 6 is triggered from track 6.
-             * This must precede the generic amp_envelope_decay branch because
-             * HiHat stores closed/open decay in separate cached floats rather
-             * than only in oscVolEg.decay.
-             */
             if (voice)
                 voice->decayClosed = slopeEg2_calcDecay(byteValue);
             return 1u;
         }
-        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_HAT &&
-            strcmp(key, "amp_envelope_decay_choke") == 0) {
-            HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
-            /*
-             * HiHat choke decay keeps the former open-hat runtime cache.
-             *
-             * Inputs: canonical amp_envelope_decay_choke descriptor value.
-             * Output: the slot hihat decayOpen receives the shaped value used
-             * when the shared hihat slot is triggered from track 7. The descriptor
-             * remains separately mod-targetable because it is a normal
-             * descriptor row, not a hidden menu-only alternate.
-             */
-            if (voice)
-                voice->decayOpen = slopeEg2_calcDecay(byteValue);
-            return 1u;
-        }
-        if (strcmp(key, "amp_envelope_attack") == 0) {
-            slopeEg2_setAttack(ampEg, byteValue,
-                               (uint8_t)(instrumentManager_slotType(slot) ==
-                                         INSTRUMENT_TYPE_DRM ? AMP_EG_SYNC : 0u));
-            return 1u;
-        }
-        if (strcmp(key, "amp_envelope_decay") == 0) {
-            slopeEg2_setDecay(ampEg, byteValue,
-                              (uint8_t)(instrumentManager_slotType(slot) ==
-                                        INSTRUMENT_TYPE_DRM ? AMP_EG_SYNC : 0u));
-            return 1u;
-        }
-        if (strcmp(key, "amp_envelope_slope") == 0) {
-            slopeEg2_setSlope(ampEg, byteValue);
-            return 1u;
-        }
-    }
-
-    pitchEg = instrumentManager_pitchEg(slot);
-    if (pitchEg) {
-        if (strcmp(key, "pitch_envelope_decay") == 0) {
-            DecayEg_setDecay(pitchEg, byteValue);
-            return 1u;
-        }
-        if (strcmp(key, "pitch_envelope_slope") == 0) {
-            DecayEg_setSlope(pitchEg, byteValue);
-            return 1u;
-        }
-        if (strcmp(key, "pitch_envelope_amount") == 0) {
-            if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_DRM) {
-                DrumVoice *voice = instrumentManager_drumRuntime(slot);
-                if (voice)
-                    voice->egPitchModAmount =
-                        instrumentManager_pitchModAmount(byteValue);
-            } else if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_SNR) {
-                SnareVoice *voice = instrumentManager_snareRuntime(slot);
-                if (voice)
-                    voice->egPitchModAmount =
-                        instrumentManager_pitchModAmount(byteValue);
-            }
-            return 1u;
-        }
-    }
-
-    transient = instrumentManager_transient(slot);
-    if (transient) {
-        if (strcmp(key, "transient_wave") == 0) {
-            transient_setWaveform(transient, byteValue);
-            return 1u;
-        }
-        if (strcmp(key, "transient_freq") == 0) {
-            transient->pitch = 1.0f + ((byteValue / 33.9f) - 0.75f);
-            return 1u;
-        }
-    }
-
-    distortion = instrumentManager_distortion(slot);
-    if (distortion && strcmp(key, "instrument_drive") == 0) {
-        setDistortionShape(distortion, byteValue);
-        return 1u;
-    }
-
-    if (strcmp(key, "lfo_rate") == 0) {
-        Lfo *lfo = instrumentManager_runtimeLfo(slot);
-        if (!lfo)
+        slopeEg2_setDecay(ampEg, byteValue,
+                          (uint8_t)(instrumentManager_slotType(slot) ==
+                                    INSTRUMENT_TYPE_DRM ? AMP_EG_SYNC : 0u));
+        return 1u; }
+    case IM_SPECIAL_HAT_DECAY_CHOKE: {
+        HiHatVoice *voice;
+        if (!instrumentManager_ampEg(slot) ||
+            instrumentManager_slotType(slot) != INSTRUMENT_TYPE_HAT)
             return 0u;
-        lfo_setFreq(lfo, byteValue);
+        voice = instrumentManager_hihatRuntime(slot);
+        if (voice)
+            voice->decayOpen = slopeEg2_calcDecay(byteValue);
+        return 1u; }
+    case IM_SPECIAL_AMP_SLOPE: {
+        SlopeEg2 *ampEg = instrumentManager_ampEg(slot);
+        if (!ampEg) return 0u;
+        slopeEg2_setSlope(ampEg, byteValue);
+        return 1u; }
+    case IM_SPECIAL_PITCH_EG_DECAY: {
+        DecayEg *pitchEg = instrumentManager_pitchEg(slot);
+        if (!pitchEg) return 0u;
+        DecayEg_setDecay(pitchEg, byteValue);
+        return 1u; }
+    case IM_SPECIAL_PITCH_EG_SLOPE: {
+        DecayEg *pitchEg = instrumentManager_pitchEg(slot);
+        if (!pitchEg) return 0u;
+        DecayEg_setSlope(pitchEg, byteValue);
+        return 1u; }
+    case IM_SPECIAL_PITCH_EG_AMOUNT:
+        if (!instrumentManager_pitchEg(slot)) return 0u;
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_DRM) {
+            DrumVoice *voice = instrumentManager_drumRuntime(slot);
+            if (voice) voice->egPitchModAmount =
+                instrumentManager_pitchModAmount(byteValue);
+        } else if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_SNR) {
+            SnareVoice *voice = instrumentManager_snareRuntime(slot);
+            if (voice) voice->egPitchModAmount =
+                instrumentManager_pitchModAmount(byteValue);
+        }
         return 1u;
+    case IM_SPECIAL_TRANSIENT_WAVE: {
+        TransientGenerator *transient = instrumentManager_transient(slot);
+        if (!transient) return 0u;
+        transient_setWaveform(transient, byteValue);
+        return 1u; }
+    case IM_SPECIAL_TRANSIENT_FREQ: {
+        TransientGenerator *transient = instrumentManager_transient(slot);
+        if (!transient) return 0u;
+        transient->pitch = 1.0f + ((byteValue / 33.9f) - 0.75f);
+        return 1u; }
+    case IM_SPECIAL_INSTRUMENT_DRIVE: {
+        Distortion *distortion = instrumentManager_distortion(slot);
+        if (!distortion) return 0u;
+        setDistortionShape(distortion, byteValue);
+        return 1u; }
+    case IM_SPECIAL_LFO_RATE: {
+        Lfo *lfo = instrumentManager_runtimeLfo(slot);
+        if (!lfo) return 0u;
+        lfo_setFreq(lfo, byteValue);
+        return 1u; }
+    case IM_SPECIAL_NONE:
+    default:
+        return 0u;
     }
-
-    return 0u;
 }
+
+#if DEV_MODE_DIAGNOSTIC
+/*
+ * Original key classifier for the special-tag diagnostic (S073 Step 2).
+ *
+ * What:       returns the writer tag selected by the pre-S073 key-string
+ *             chain for a registry type and file key.
+ * Why:        the boot diagnostic compares this independent classifier with
+ *             the flash tag on every descriptor row.
+ * Inputs:     instrument type and a nullable file key.
+ * Outputs:    IM_SPECIAL_* plus an oscillator selector where applicable.
+ * Accessors:  instrumentManager_specialTagSelfCheck().
+ * Affiliates: tools/dsp_golden/check_special_tags.py and the four table files.
+ */
+static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
+                                                    const char *key)
+{
+    uint8_t osc = 0xFFu;
+
+    if (!key)
+        return IM_SPECIAL_NONE;
+    if (strncmp(key, "osc1_", 5) == 0)
+        osc = IM_SPECIAL_OSC1;
+    else if (strncmp(key, "osc2_", 5) == 0 &&
+             (type == INSTRUMENT_TYPE_DRM || type == INSTRUMENT_TYPE_CYM ||
+              type == INSTRUMENT_TYPE_HAT))
+        osc = IM_SPECIAL_OSC2;
+    else if (strncmp(key, "osc3_", 5) == 0 &&
+             (type == INSTRUMENT_TYPE_CYM || type == INSTRUMENT_TYPE_HAT))
+        osc = IM_SPECIAL_OSC3;
+    else if (strncmp(key, "noise_", 6) == 0 && type == INSTRUMENT_TYPE_SNR)
+        osc = IM_SPECIAL_OSC_NOISE;
+    if (osc != 0xFFu) {
+        if (strcmp(key, "noise_freq") == 0)
+            return IM_SPECIAL_NOISE_FREQ | osc;
+        if (strstr(key, "pitch_coarse"))
+            return IM_SPECIAL_PITCH_COARSE | osc;
+        if (strstr(key, "pitch_fine"))
+            return IM_SPECIAL_PITCH_FINE | osc;
+    }
+    if (strcmp(key, "filter_freq") == 0) return IM_SPECIAL_FILTER_FREQ;
+    if (strcmp(key, "filter_reso") == 0) return IM_SPECIAL_FILTER_RESO;
+    if (strcmp(key, "filter_drive") == 0) return IM_SPECIAL_FILTER_DRIVE;
+    if (strcmp(key, "filter_type") == 0) return IM_SPECIAL_FILTER_TYPE;
+    if (type == INSTRUMENT_TYPE_HAT &&
+        strcmp(key, "amp_envelope_decay_choke") == 0)
+        return IM_SPECIAL_HAT_DECAY_CHOKE;
+    if (strcmp(key, "amp_envelope_attack") == 0) return IM_SPECIAL_AMP_ATTACK;
+    if (strcmp(key, "amp_envelope_decay") == 0) return IM_SPECIAL_AMP_DECAY;
+    if (strcmp(key, "amp_envelope_slope") == 0) return IM_SPECIAL_AMP_SLOPE;
+    if (type == INSTRUMENT_TYPE_DRM || type == INSTRUMENT_TYPE_SNR) {
+        if (strcmp(key, "pitch_envelope_decay") == 0)
+            return IM_SPECIAL_PITCH_EG_DECAY;
+        if (strcmp(key, "pitch_envelope_slope") == 0)
+            return IM_SPECIAL_PITCH_EG_SLOPE;
+        if (strcmp(key, "pitch_envelope_amount") == 0)
+            return IM_SPECIAL_PITCH_EG_AMOUNT;
+    }
+    if (strcmp(key, "transient_wave") == 0) return IM_SPECIAL_TRANSIENT_WAVE;
+    if (strcmp(key, "transient_freq") == 0) return IM_SPECIAL_TRANSIENT_FREQ;
+    if (strcmp(key, "instrument_drive") == 0)
+        return IM_SPECIAL_INSTRUMENT_DRIVE;
+    if (strcmp(key, "lfo_rate") == 0) return IM_SPECIAL_LFO_RATE;
+    return IM_SPECIAL_NONE;
+}
+
+/*
+ * Compare all flash special tags with the original key rules (S073 Step 2).
+ *
+ * What:       walks the immutable instrument registry and counts tag/classifier
+ *             mismatches, without allocating a table or retaining state.
+ * Why:        gives the diagnostic boot screen an on-device proof of the
+ *             descriptor migration.
+ * Inputs:     registry entries and descriptor rows.
+ * Outputs:    mismatch count clamped to 9; zero is pass.
+ * Accessors:  main.c boot_showFxBufDiagnostic().
+ * Affiliates: instrumentManager_classifySpecialKey() and the host checker.
+ */
+uint8_t instrumentManager_specialTagSelfCheck(void)
+{
+    uint8_t mismatches = 0u;
+    uint8_t e;
+
+    for (e = 0u; e < instrumentManager_registryCount(); e++) {
+        const instrument_registry_entry_t *entry =
+            instrumentManager_registryEntryAt(e);
+        uint8_t i;
+
+        if (!entry)
+            continue;
+        for (i = 0u; i < entry->descriptor_count; i++) {
+            const ParamDescriptor *d = &entry->descriptors[i];
+            if (d->runtime.special !=
+                instrumentManager_classifySpecialKey(entry->type, d->file_key) &&
+                mismatches < 9u)
+                mismatches++;
+        }
+    }
+    return mismatches;
+}
+#endif
 
 static uint8_t instrumentManager_writeRuntimeInternal(
     uint8_t slot, const ParamDescriptor *descriptor,

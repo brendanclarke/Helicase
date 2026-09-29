@@ -151,6 +151,47 @@ INITCM_EFFECT float softClipTwo(float in)
 	return in;
 }
 //------------------------------------------------------------------------------------
+/*
+ * Normalised Padé pieces of tanhXdX() for the batched ZDF solver (S073 Step 1).
+ *
+ * What:       rewrites tanhXdX(v) as N/D with a=v*v, N=(a/945+105/945)*a+1
+ *             and D=(15a/945+420/945)*a+1. Both pieces are at least one.
+ * Why:        the batched solver multiplies denominators and inverts the
+ *             product once; normalisation keeps that algebra range-safe
+ *             without a data-dependent path.
+ * Inputs:     a, the squared saturator argument.
+ * Outputs:    one normalised numerator or denominator.
+ * Accessors:  SVF_calcBlockZDF() and SVF_calcBlockZDFFloat().
+ * Affiliates: tanhXdX()/softClipTwo() remain for the naive path and the
+ *             tools/dsp_golden filter comparison checks the S1 equivalence.
+ */
+static inline float svf_padeNum(const float a)
+{
+	return (a * (1.0f / 945.0f) + (105.0f / 945.0f)) * a + 1.0f;
+}
+
+static inline float svf_padeDen(const float a)
+{
+	return (a * (15.0f / 945.0f) + (420.0f / 945.0f)) * a + 1.0f;
+}
+
+/*
+ * Configuration guard for the batched ZDF solver (S073 Step 1).
+ *
+ * What:       rejects filter configurations for which the derived solver is
+ *             not valid.
+ * Why:        the algebra below is for nonlinear integrators without the
+ *             optional output shaper; silently compiling another configuration
+ *             would make the sound and CPU contract ambiguous.
+ * Inputs:     ResonantFilter.h configuration switches.
+ * Outputs:    a compile-time error for unsupported configurations.
+ * Accessors:  the preprocessor.
+ * Affiliates: SVF_calcBlockZDFFloat() retains its own shaper guard.
+ */
+#if !ENABLE_NONLINEAR_INTEGRATORS || USE_SHAPER_NONLINEARITY
+#error "Batched ZDF solver (S073 Step 1) requires nonlinear integrators and no shaper"
+#endif
+//------------------------------------------------------------------------------------
 INITCM_EFFECT_NOINLINE void SVF_calcBlockZDF(ResonantFilter* filter, const uint8_t type, int16_t* buf, const uint8_t size)
 {
 	uint8_t i;
@@ -185,136 +226,114 @@ INITCM_EFFECT_NOINLINE void SVF_calcBlockZDF(ResonantFilter* filter, const uint8
 		}
 
 	} else {
+		/*
+		 * Batched ZDF solver: two divisions per sample (S073 Step 1).
+		 *
+		 * What:       computes the nonlinear trapezoidal SVF with two reciprocal
+		 *             divisions: Stage A shares the input and t1 denominator;
+		 *             Stage B shares t0, g0 and y1. The output switch and all
+		 *             int16 saturation points remain unchanged.
+		 * Why:        audit F1. Exact algebra lowers the dependent VDIV chain;
+		 *             only float rounding changes (class S1).
+		 * Inputs:     input block, filter coefficients, drive and s1/s2/zi state.
+		 * Outputs:    buf plus s1/s2/zi, written back once after the loop.
+		 * Accessors:  DrumVoice.c, Snare.c, CymbalVoice.c and HiHat.c.
+		 * Affiliates: the float twin below, svf_padeNum()/svf_padeDen(),
+		 *             StereoFilterEffect.c coefficient linking, and the golden
+		 *             filter harness.
+		 */
+		const float drive = filter->drive;
+		float s1 = filter->s1;
+		float s2 = filter->s2;
+		float zi = filter->zi;
 
 		for(i=0;i<size;i++)
 		{
-	#if USE_SHAPER_NONLINEARITY
-			const float x = (buf[i]/((float)0x7fff));
-	#else
-			const float x = softClipTwo((buf[i]/((float)0x7fff))*filter->drive);
-	#endif
+			const float u    = (buf[i]/((float)0x7fff))*drive;
+			const float ax   = 0.25f*u*u;
+			const float a1   = 0.25f*s1*s1;
+			const float Nx   = svf_padeNum(ax);
+			const float Dx   = svf_padeDen(ax);
+			const float N1   = svf_padeNum(a1);
+			const float D1   = svf_padeDen(a1);
+			const float invA = 1.f / (Dx*D1);
+			const float x    = u*Nx*D1*invA;
+			const float t1   = N1*Dx*invA;
 
-	#if ENABLE_NONLINEAR_INTEGRATORS
-			// input with half sample delay, for non-linearities
-			float ih = 0.5f * (x + filter->zi);
-			filter->zi = x;
-	#endif
+			/* input with half sample delay, for non-linearities */
+			const float ih = 0.5f * (x + zi);
+			zi = x;
 
-			// evaluate the non-linear gains
-			/*
-			You can travially remove any saturator by setting the corresponding gain t0,...,t1 to 1. Also, you can simply scale any saturator (i.e. change clipping threshold) to 1/a*tanh(a*x) by writing
-			double t1 = tanhXdX(a*s[0]);
-			*/
-	#if ENABLE_NONLINEAR_INTEGRATORS
-			const float scale = 0.5f;
-			const float t0 = tanhXdX(scale* (ih - 2*R*filter->s1 - filter->s2 ) );
-			const float t1 = tanhXdX(scale* (filter->s1 ) );
-	#else
-			const float t0 = 1;
-			const float t1 = 1;
-	#endif
+			const float v0   = 0.5f * (ih - 2*R*s1 - s2);
+			const float a0   = v0*v0;
+			const float N0   = svf_padeNum(a0);
+			const float D0   = svf_padeDen(a0);
+			const float E    = D0 + f*2*R*N0;
+			const float P    = ff*N0*t1;
+			const float F    = P + E;
+			const float Q    = P*x + s2*E + f*D0*t1*s1;
+			const float invB = 1.f / (D0*E*F);
+			const float t0   = N0*E*F*invB;
+			const float g0   = D0*D0*F*invB;
+			const float y1   = Q*D0*E*invB;
 
-			// g# the denominators for solutions of individual stages
-			const float g0 = 1.f / (1.f + f*t0*2*R);
-
-			const float s1 = filter->s1;
-			const float s2 = filter->s2;
-
-			// solve feedback
-			const float f1 = ff*g0*t0*t1;
-			float y1=(f1*x+s2+f*g0*t1*s1)/(f1+1);
-
-
-			// solve the remaining stages with nonlinear gain
-			 const float xx = t0*(x - y1);
-			 const float y0 = (softClipTwo(s1) + f*xx)*g0;
-
-			filter->s1   = softClipTwo(filter->s1) + 2*f*(xx - t0*2*R*y0);
-			filter->s2   = (filter->s2)    + 2*f* t1*y0;
-
+			const float s1t1 = s1*t1;
+			const float xx   = t0*(x - y1);
+			const float y0   = (s1t1 + f*xx)*g0;
+			s1 = s1t1 + 2*f*(xx - t0*2*R*y0);
+			s2 = s2 + 2*f*t1*y0;
 
 			int32_t tmp;
 			switch(type)
 			{
 			default:
+				filter->s1 = s1;
+				filter->s2 = s2;
+				filter->zi = zi;
 				return;
-				break;
 			case FILTER_LP:
-	#if USE_SHAPER_NONLINEARITY
-
-				buf[i] = FILTER_GAIN * fastTanh( distortion_calcSampleFloat(&filter->shaper, y1));
-	#else
-				tmp = fastTanh(y1) * 0x7fff ;//FILTER_GAIN;
+				tmp = fastTanh(y1) * 0x7fff;
 				buf[i] = __SSAT(tmp,16);
-	#endif
 				break;
-
 			case FILTER_HP:
 			{
 				const float ugb = 2*R*y0;
 				const float h = x - ugb - y1;
-	#if USE_SHAPER_NONLINEARITY
-
-				buf[i] = FILTER_GAIN * distortion_calcSampleFloat(&filter->shaper, h);
-	#else
 				tmp = h * FILTER_GAIN;
 				buf[i] = __SSAT(tmp,16);
-	#endif
 			}
 				break;
-
 			case FILTER_BP:
-	#if USE_SHAPER_NONLINEARITY
-
-				buf[i] = FILTER_GAIN * distortion_calcSampleFloat(&filter->shaper, y0);
-	#else
 				tmp = y0 * FILTER_GAIN;
 				buf[i] = __SSAT(tmp,16);
-	#endif
 				break;
-
 			case FILTER_UNITY_BP:
 			{
 				const float ugb = 2*R*y0;
-	#if USE_SHAPER_NONLINEARITY
-
-				buf[i] = FILTER_GAIN * distortion_calcSampleFloat(&filter->shaper, ugb);
-	#else
 				tmp = ugb * FILTER_GAIN;
 				buf[i] = __SSAT(tmp,16);
-	#endif
 			}
 				break;
-
 			case FILTER_NOTCH:
 			{
 				const float ugb = 2*R*y0;
-	#if USE_SHAPER_NONLINEARITY
-
-				buf[i] = FILTER_GAIN * distortion_calcSampleFloat(&filter->shaper, (x-ugb));
-	#else
 				tmp = (x-ugb) * FILTER_GAIN;
 				buf[i] = __SSAT(tmp,16);
-	#endif
 			}
 				break;
-
 			case FILTER_PEAK:
 			{
 				const float ugb = 2*R*y0;
 				const float h = x - ugb - y1;
-	#if USE_SHAPER_NONLINEARITY
-
-				buf[i] = FILTER_GAIN * distortion_calcSampleFloat(&filter->shaper, (y1-h));
-	#else
 				tmp = (y1-h) * FILTER_GAIN;
 				buf[i] = __SSAT(tmp,16);
-	#endif
 			}
 				break;
-
-				}
 			}
+		}
+		filter->s1 = s1;
+		filter->s2 = s2;
+		filter->zi = zi;
 	}
 }
 //------------------------------------------------------------------------------------
@@ -369,52 +388,82 @@ INITCM_EFFECT_NOINLINE void SVF_calcBlockZDFFloat(ResonantFilter* filter,
         return;
     }
 
-    for (i = 0u; i < size; i++) {
-        const float x = softClipTwo(buf[i] * filter->drive);
-#if ENABLE_NONLINEAR_INTEGRATORS
-        const float ih = 0.5f * (x + filter->zi);
-        filter->zi = x;
-        const float scale = 0.5f;
-        const float t0 = tanhXdX(scale *
-                                 (ih - 2.0f * R * filter->s1 - filter->s2));
-        const float t1 = tanhXdX(scale * filter->s1);
-#else
-        const float t0 = 1.0f;
-        const float t1 = 1.0f;
-#endif
-        const float g0 = 1.0f / (1.0f + f * t0 * 2.0f * R);
-        const float s1 = filter->s1;
-        const float s2 = filter->s2;
-        const float f1 = ff * g0 * t0 * t1;
-        const float y1 = (f1 * x + s2 + f * g0 * t1 * s1) / (f1 + 1.0f);
-        const float xx = t0 * (x - y1);
-        const float y0 = (softClipTwo(s1) + f * xx) * g0;
+    /*
+     * Batched ZDF solver, float I/O twin (S073 Step 1).
+     *
+     * What:       mirrors the int16 two-division solver for normalized float
+     *             samples and retains the existing out_gain output scaling.
+     * Why:        StereoFilter runs two instances per block; it must receive
+     *             the same constant-cost division reduction (class S1).
+     * Inputs:     float block, coefficients, drive and filter state.
+     * Outputs:    float block and s1/s2/zi written back once after the loop.
+     * Accessors:  StereoFilterEffect.c left/right filter instances.
+     * Affiliates: SVF_calcBlockZDF(), svf_padeNum()/svf_padeDen(), and the
+     *             golden float filter comparison.
+     */
+    {
+        const float drive = filter->drive;
+        float s1 = filter->s1;
+        float s2 = filter->s2;
+        float zi = filter->zi;
 
-        filter->s1 = softClipTwo(filter->s1) +
-                     2.0f * f * (xx - t0 * 2.0f * R * y0);
-        filter->s2 += 2.0f * f * t1 * y0;
+        for (i = 0u; i < size; i++) {
+            const float u    = buf[i] * drive;
+            const float ax   = 0.25f * u * u;
+            const float a1   = 0.25f * s1 * s1;
+            const float Nx   = svf_padeNum(ax);
+            const float Dx   = svf_padeDen(ax);
+            const float N1   = svf_padeNum(a1);
+            const float D1   = svf_padeDen(a1);
+            const float invA = 1.0f / (Dx * D1);
+            const float x    = u * Nx * D1 * invA;
+            const float t1   = N1 * Dx * invA;
+            const float ih   = 0.5f * (x + zi);
+            zi = x;
+            const float v0   = 0.5f * (ih - 2.0f * R * s1 - s2);
+            const float a0   = v0 * v0;
+            const float N0   = svf_padeNum(a0);
+            const float D0   = svf_padeDen(a0);
+            const float E    = D0 + f * 2.0f * R * N0;
+            const float P    = ff * N0 * t1;
+            const float F    = P + E;
+            const float Q    = P * x + s2 * E + f * D0 * t1 * s1;
+            const float invB = 1.0f / (D0 * E * F);
+            const float t0   = N0 * E * F * invB;
+            const float g0   = D0 * D0 * F * invB;
+            const float y1   = Q * D0 * E * invB;
+            const float s1t1 = s1 * t1;
+            const float xx   = t0 * (x - y1);
+            const float y0   = (s1t1 + f * xx) * g0;
 
-        switch (type) {
-        case FILTER_LP:
-            buf[i] = fastTanh(y1);
-            break;
-        case FILTER_HP:
-            buf[i] = (x - 2.0f * R * y0 - y1) * out_gain;
-            break;
-        case FILTER_BP:
-            buf[i] = y0 * out_gain;
-            break;
-        case FILTER_UNITY_BP:
-            buf[i] = 2.0f * R * y0 * out_gain;
-            break;
-        case FILTER_NOTCH:
-            buf[i] = (x - 2.0f * R * y0) * out_gain;
-            break;
-        case FILTER_PEAK:
-            buf[i] = (y1 - (x - 2.0f * R * y0 - y1)) * out_gain;
-            break;
-        default:
-            break;
+            s1 = s1t1 + 2.0f * f * (xx - t0 * 2.0f * R * y0);
+            s2 += 2.0f * f * t1 * y0;
+
+            switch (type) {
+            case FILTER_LP:
+                buf[i] = fastTanh(y1);
+                break;
+            case FILTER_HP:
+                buf[i] = (x - 2.0f * R * y0 - y1) * out_gain;
+                break;
+            case FILTER_BP:
+                buf[i] = y0 * out_gain;
+                break;
+            case FILTER_UNITY_BP:
+                buf[i] = 2.0f * R * y0 * out_gain;
+                break;
+            case FILTER_NOTCH:
+                buf[i] = (x - 2.0f * R * y0) * out_gain;
+                break;
+            case FILTER_PEAK:
+                buf[i] = (y1 - (x - 2.0f * R * y0 - y1)) * out_gain;
+                break;
+            default:
+                break;
+            }
         }
+        filter->s1 = s1;
+        filter->s2 = s2;
+        filter->zi = zi;
     }
 }

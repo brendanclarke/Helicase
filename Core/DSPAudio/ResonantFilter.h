@@ -108,7 +108,9 @@ void SVF_calcBlockZDF(ResonantFilter* filter, const uint8_t type, int16_t* buf, 
  * the filter writes normalized floats without __SSAT, allowing a future FX
  * bus to preserve summed headroom until its final return saturation. Types
  * 1..7 filter; other types pass through without advancing state. Keep this
- * arithmetic synchronized with SVF_calcBlockZDF. Client: StereoFilterEffect.
+ * arithmetic synchronized with SVF_calcBlockZDF. S073 Step 1 uses the same
+ * batched two-division solver in both twins; the golden harness compares them
+ * against the frozen pre-S073 code. Client: StereoFilterEffect.
  */
 void SVF_calcBlockZDFFloat(ResonantFilter* filter, const uint8_t type,
                            float* buf, const uint8_t size);

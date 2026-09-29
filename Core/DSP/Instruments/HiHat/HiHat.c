@@ -52,6 +52,7 @@
 #include "squareRootLut.h"
 #include "modulationNode.h"
 #include "InstrumentManager.h"
+#include "voicePostChain.h"
 // TODO DSP_PORT
 // #include "TriggerOut.h"
 
@@ -267,27 +268,22 @@ void HiHat_calcSyncBlockVoice(HiHatVoice *voice, int16_t* buf,
 	//calc transient sample
 	transient_calcBlock(&voice->transGen,mod1,size);
 
-	uint8_t j;
-	/* Amp EG (and velocity) only; channel volume is applied by the mixer. */
-	if(voice->volumeMod)
+	/*
+	 * Fused HiHat post-chain (S073 Step 4).
+	 *
+	 * What:       saturating add, amp gain and distortion in one pass.
+	 * Why:        removes an intermediate post-chain pass while preserving the
+	 *             old int16 conversion/saturation points and constant cost (S0).
+	 * Inputs:     filtered buf, mod1, volumeMod/velo/EG and distortion.
+	 * Outputs:    pre-volume buf.
+	 * Accessors:  this render function.
+	 * Affiliates: voicePostChain.h and the Step 4 host/ARM checks.
+	 */
 	{
-		for(j=0;j<size;j++)
-		{
-			//add filter to buffer
-			buf[j] = bufferTool_satAdd16(buf[j], mod1[j]);
-			buf[j] *= voice->velo * voice->egValueOscVol;
-		}
+		const float ampGain = voice->volumeMod
+			? voice->velo * voice->egValueOscVol
+			: voice->egValueOscVol;
+		voicePost_addGainDist(buf, mod1, ampGain, &voice->distortion, size);
 	}
-	else
-	{
-		for(j=0;j<size;j++)
-		{
-			//add filter to buffer
-			buf[j] = bufferTool_satAdd16(buf[j], mod1[j]);
-			buf[j] *= voice->egValueOscVol;
-		}
-	}
-
-	calcDistBlock(&voice->distortion,buf,size);
 }
 //---------------------------------------------------

@@ -948,6 +948,24 @@ static void menu_loadSamplesModal(void)
         /* One-second suspend/resume hardware test window. */
     }
 
+    /*
+     * Let an already-running storage operation finish before installing.
+     *
+     * The installer refuses a busy facade. Once OK is accepted no background
+     * writer can start (the command gate and the Load page hold them off), but
+     * one started just before OK may still own the facade, and this modal
+     * blocks the main loop that would normally finish it. Audio is already
+     * suspended, so pump the facade here, bounded to 10 s; on timeout the
+     * installer refuses and the normal failure text is shown.
+     */
+    if (filesystem_status() == FS_STATUS_BUSY) {
+        menu_setStorageMessage("Sample upload", "Waiting SD...");
+        t0 = time_sysTick;
+        while (filesystem_status() == FS_STATUS_BUSY &&
+               (uint16_t)(time_sysTick - t0) < 10000u)
+            filesystem_tick();
+    }
+
     menu_setStorageMessage("Sample upload", "Writing flash");
     samplesOk = filesystem_installSamplesBlocking();
     menu_setStorageMessage("Loop upload", "Writing flash");
@@ -4413,7 +4431,10 @@ static const uint8_t menu_loadSaveLoadTypes[] = {
     SAVE_TYPE_KIT_MORPH,
     SAVE_TYPE_SCENE,
     SAVE_TYPE_BANK,
-    SAVE_TYPE_PATTERN
+    SAVE_TYPE_PATTERN,
+    /* Load-only modal install of /samples then /loops (S073: missing from
+     * this list since it was introduced). Save has no Samples action. */
+    SAVE_TYPE_SAMPLES
 };
 
 static const uint8_t menu_loadSaveSaveTypes[] = {

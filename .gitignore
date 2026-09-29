@@ -54,3 +54,6 @@
 *.res
 *.dep
 *.htm
+
+# S073 golden harness build products (generated fragments and binaries)
+tools/dsp_golden/build/

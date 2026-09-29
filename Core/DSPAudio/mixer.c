@@ -99,7 +99,7 @@ static INDTCMZ mixer_fx_bus_t mixer_fx_bus;
  * Last effective per-slot FX send gain at the end of the previous block.
  *
  * What: send amount x send-side fader, one float per slot (24 B DTCM). Why:
- * mixer_addVoiceToFxBus() ramps send changes from knobs, automation, and
+ * mixer_addVoiceInt16ToOutputAndFx() ramps send changes from knobs, automation, and
  * fader-mode edits without a zipper. Inputs: preset_getEffectiveFxSendAmount()
  * and SceneData fader_setting. Output: the current block's send ramp state.
  * Affiliate: mixer_calcNextSampleBlock().
@@ -530,41 +530,155 @@ static void mixer_faderGains(uint8_t slot,
 }
 
 /*
- * Add one decimated voice block to the FX bus with a click-free send ramp.
+ * Dry output and FX send in one pass (S073 Step 5).
  *
- * Inputs: signed int16 decimated samples, current/previous effective send
- * gains, constant-power pan gains, and the live Effect stereo-input flag.
- * Output: saturated signed-24 bus samples in mixer_fx_bus.mx. Stereo-input
- * Effects receive the panned voice on both channels; mono-input Effects use
- * the unpanned voice on the left channel only. The 256 scale converts the
- * legacy int16 sample to sample_mx_t without clipping the pre-Effect bus.
- * Affiliate: mixer_calcNextSampleBlock().
+ * What:       for one decimated voice block, produces exactly what
+ *             mixer_addVoiceInt16ToOutput() and the pre-S073
+ *             mixer_addVoiceToFxBus() produced when both ran, reading each
+ *             sample once:
+ *             - dry: the voice gain ramp, int16 truncation, sample_mx_t
+ *               conversion, pan/route/saturating add to the routed DAC
+ *               pair;
+ *             - send: its own ramp, float x 256 straight to sample_mx_t
+ *               without the int16 truncation (on purpose), stereo-input
+ *               types panned into bus L/R, mono-input types unpanned into L
+ *               only, saturating adds. This is the click-free send ramp
+ *               the removed mixer_addVoiceToFxBus() provided.
+ *             Each expression keeps its original operand order.
+ * Why:        audit F5: the send pass re-read every sample and recomputed
+ *             a ramp. The user requires unchanged functionality (S0).
+ * Inputs:     dest (jack-resolved routing), panL/panR (squareRootLut),
+ *             data (decimated pre-volume block), gain/lastGain (dry ramp:
+ *             vol x mix fader), sendGain/sendLastGain (send ramp:
+ *             fxSend/127 x send fader), stereo (live Effect stereo-input
+ *             flag), and the four interleaved output buses.
+ * Outputs:    the output buses and mixer_fx_bus.mx[0..1].
+ * Accessors:  mixer_calcNextSampleBlock(), only when the send is active
+ *             (fx_active and either send gain > 0: the existing kept path).
+ *             Otherwise the dry-only function runs unchanged.
+ * Affiliates: mixer_addVoiceInt16ToOutput() (the dry-only path, whose dry
+ *             expressions this copies exactly); the former
+ *             mixer_addVoiceToFxBus(), removed in S073 Step 5, whose send
+ *             expressions this copies exactly (its pre-S073 text is kept in
+ *             tools/dsp_golden/frozen/Core/DSPAudio/mixer.c as the test
+ *             reference); the mixer_send_last_gain / mixer_voice_last_gain
+ *             updates in the caller (unchanged); mixer_faderGains();
+ *             tools/dsp_golden/test_mixer.c.
  */
-static void mixer_addVoiceToFxBus(const int16_t *data,
-		float gain,
-		float lastGain,
-		float panL,
-		float panR,
-		uint8_t stereo)
+static void mixer_addVoiceInt16ToOutputAndFx(uint8_t dest,
+		const float panL,
+		const float panR,
+		const int16_t* data,
+		const float gain,
+		const float lastGain,
+		const float sendGain,
+		const float sendLastGain,
+		const uint8_t stereo,
+		sample_mx_t* outL,
+		sample_mx_t* outR,
+		sample_mx_t* outL2,
+		sample_mx_t* outR2)
 {
 	uint8_t i;
 	const float inv_size = 1.f / (OUTPUT_DMA_SIZE - 1.f);
 	const float gain_delta = gain - lastGain;
+	const float send_delta = sendGain - sendLastGain;
 
-	for (i = 0u; i < OUTPUT_DMA_SIZE; i++) {
-		const float currentGain = lastGain
-				+ ((float)i * inv_size * gain_delta);
-		const float sample = (float)data[i] * currentGain * 256.0f;
-		if (stereo) {
-			mixer_fx_bus.mx[0][i] = bufferTool_satAdd32(
-					mixer_fx_bus.mx[0][i], (sample_mx_t)(sample * panL));
-			mixer_fx_bus.mx[1][i] = bufferTool_satAdd32(
-					mixer_fx_bus.mx[1][i], (sample_mx_t)(sample * panR));
-		} else {
-			mixer_fx_bus.mx[0][i] = bufferTool_satAdd32(
-					mixer_fx_bus.mx[0][i], (sample_mx_t)sample);
+/* The send half of one sample, identical to mixer_addVoiceToFxBus(). The
+** stereo test is loop-invariant; GCC -Ofast unswitches it. */
+#define MIXER_FX_SEND_SAMPLE()                                                \
+	do {                                                                      \
+		const float sendCurrentGain = sendLastGain                            \
+				+ ((float)i * inv_size * send_delta);                         \
+		const float sample = (float)data[i] * sendCurrentGain * 256.0f;       \
+		if (stereo) {                                                         \
+			mixer_fx_bus.mx[0][i] = bufferTool_satAdd32(                      \
+					mixer_fx_bus.mx[0][i], (sample_mx_t)(sample * panL));     \
+			mixer_fx_bus.mx[1][i] = bufferTool_satAdd32(                      \
+					mixer_fx_bus.mx[1][i], (sample_mx_t)(sample * panR));     \
+		} else {                                                              \
+			mixer_fx_bus.mx[0][i] = bufferTool_satAdd32(                      \
+					mixer_fx_bus.mx[0][i], (sample_mx_t)sample);              \
+		}                                                                     \
+	} while (0)
+
+	switch(dest)
+	{
+	case MIXER_ROUTING_DAC1_STEREO:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
+			const sample_mx_t sm = sampleMix_fromInt16(s16);
+			MIXER_FX_SEND_SAMPLE();
+			*outL2 = bufferTool_satAdd32(*outL2, (sample_mx_t)((float)sm * panL));
+			outL2 += 2;
+			*outR2 = bufferTool_satAdd32(*outR2, (sample_mx_t)((float)sm * panR));
+			outR2 += 2;
 		}
+		break;
+	case MIXER_ROUTING_DAC2_STEREO:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
+			const sample_mx_t sm = sampleMix_fromInt16(s16);
+			MIXER_FX_SEND_SAMPLE();
+			*outL = bufferTool_satAdd32(*outL, (sample_mx_t)((float)sm * panL));
+			outL += 2;
+			*outR = bufferTool_satAdd32(*outR, (sample_mx_t)((float)sm * panR));
+			outR += 2;
+		}
+		break;
+	case MIXER_ROUTING_DAC1_L:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
+			MIXER_FX_SEND_SAMPLE();
+			*outL2 = bufferTool_satAdd32(*outL2, sampleMix_fromInt16(s16));
+			outL2 += 2;
+		}
+		break;
+	case MIXER_ROUTING_DAC1_R:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
+			MIXER_FX_SEND_SAMPLE();
+			*outR2 = bufferTool_satAdd32(*outR2, sampleMix_fromInt16(s16));
+			outR2 += 2;
+		}
+		break;
+	case MIXER_ROUTING_DAC2_L:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
+			MIXER_FX_SEND_SAMPLE();
+			*outL = bufferTool_satAdd32(*outL, sampleMix_fromInt16(s16));
+			outL += 2;
+		}
+		break;
+	case MIXER_ROUTING_DAC2_R:
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+		{
+			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
+			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
+			MIXER_FX_SEND_SAMPLE();
+			*outR = bufferTool_satAdd32(*outR, sampleMix_fromInt16(s16));
+			outR += 2;
+		}
+		break;
+	default:
+		/* An unknown routing adds no dry signal (as the dry-only function's
+		** switch falls through), but the send must still accumulate exactly
+		** as mixer_addVoiceToFxBus() would. */
+		for(i=0;i<OUTPUT_DMA_SIZE;i++)
+			MIXER_FX_SEND_SAMPLE();
+		break;
 	}
+#undef MIXER_FX_SEND_SAMPLE
 }
 
 /*
@@ -769,7 +883,8 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	 * detection. Output: an optional cleared two-channel FX bus and one stable
 	 * resolved destination for the processed return. When the type is off, the
 	 * bus is left untouched and no Effect work is performed. Affiliates:
-	 * mixer_addVoiceToFxBus(), effects_process(), and mixer_addFxReturnToOutput().
+	 * mixer_addVoiceInt16ToOutputAndFx(), effects_process(), and
+	 * mixer_addFxReturnToOutput().
 	 */
 	const uint8_t fx_io = effects_activeIoFlags();
 	const uint8_t fx_stereo_in = (uint8_t)((fx_io & EFFECT_IO_STEREO_IN) != 0u);
@@ -822,14 +937,34 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		 */
 		mixer_faderGains(slot, fx_scene, &voiceGain, &sendGain);
 		pan = instrumentManager_runtimePan(slot);
+		/*
+		 * One-pass dry + send when the send is active (S073 Step 5).
+		 *
+		 * What:       with an active send (the existing condition, kept by
+		 *             user decision), the combined function produces the dry
+		 *             output and the FX bus contribution in one read of
+		 *             sampleData. Otherwise the dry-only function runs as
+		 *             before.
+		 * Why:        audit F5; S0 (see the combined function's contract).
+		 * Inputs:     the per-slot gains, pan and routing resolved above.
+		 * Outputs:    the output buses and mixer_fx_bus; the last-gain
+		 *             updates below are unchanged and still run every block.
+		 * Accessors:  this loop.
+		 * Affiliates: mixer_addVoiceInt16ToOutputAndFx(),
+		 *             mixer_addVoiceInt16ToOutput(); the send-only
+		 *             mixer_addVoiceToFxBus() was removed in this step.
+		 */
 		if (fx_active && (sendGain > 0.0f || mixer_send_last_gain[slot] > 0.0f))
-			mixer_addVoiceToFxBus(sampleData, sendGain,
-					mixer_send_last_gain[slot],
-					squareRootLut[127-pan], squareRootLut[pan], fx_stereo_in);
-		mixer_addVoiceInt16ToOutput(effectiveRouting[slot],
-				squareRootLut[127-pan], squareRootLut[pan],
+			mixer_addVoiceInt16ToOutputAndFx(effectiveRouting[slot],
+					squareRootLut[127-pan], squareRootLut[pan],
+					sampleData, voiceGain, mixer_voice_last_gain[slot],
+					sendGain, mixer_send_last_gain[slot], fx_stereo_in,
+					&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
+		else
+			mixer_addVoiceInt16ToOutput(effectiveRouting[slot],
+					squareRootLut[127-pan], squareRootLut[pan],
 				sampleData, voiceGain, mixer_voice_last_gain[slot],
-				&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
+					&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
 		mixer_voice_last_gain[slot] = voiceGain;
 		mixer_send_last_gain[slot] = sendGain;
 	}

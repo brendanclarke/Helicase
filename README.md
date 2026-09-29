@@ -97,6 +97,7 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
     │   ├── AudioCodecManager.c/h    ← consolidated audio: DMA ISRs, I2S/GPIO/DMA init, SPSC queue
     │   ├── triggerJacks.c/h         ← CLK OUT/IN, RST IN; OUT jack detect is foreground-polled
     │   ├── memtest.c/h              ← flash sector probe (boot-time, MEMTEST_ENABLED gate)
+    │   ├── flashImage.c/h           ← boot-time per-sector CRC32 check of the app image (S073)
     │   ├── frontPanel/
     │   │   ├── buttonHandler.c/h    ← ISR-safe event ring, main-loop processEvents()
     │   │   ├── lcd.c/h              ← TIM7-driven async queue, 128-entry SPSC ring
@@ -151,7 +152,7 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
     │       └── presetManager.c/h    ← typed load/save for kit, morph, pattern, performance, all, globals
     ├── SampleRom/
     │   ├── SampleMemory.c/h         ← sample flash metadata/runtime cache, 120 entries, loop flags
-    │   └── sampleFlash.c/h          ← guarded F765 sector 6-11 erase/program helpers
+    │   └── sampleFlash.c/h          ← guarded F765 sector 7-11 erase/program helpers
     ├── Sequencer/
     │   ├── sequencerTimer.c/h       ← TIM3 4kHz sequencer timing owner (IRQ29, priority 2) — Session 019
     │   ├── sequencer.c/h            ← original LXR sequencer source (driven by TIM3_IRQHandler)

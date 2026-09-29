@@ -448,3 +448,358 @@ These are the growth paths already ranked in `S072_ST1_IMPLEMENTATION.md`
 | T3 | | 753,664 | | | | | | |
 | T4 | | 483,048 | | | — | — | — | |
 | T4r | | normal | | | S6 DATA/BLANK | — | — | |
+
+---
+
+## 10. Pre-implementation review (S073)
+
+This section reviews the plan against the tree at `05bbd83` (clean) and the
+current `build/lxr02.elf`. Each item needs a decision or a plan edit before
+the tooling is written. Nothing here is implemented yet.
+
+### 10.1 Stale or incorrect facts in this plan
+
+| Where | Plan says | Current tree |
+|---|---|---|
+| §1, §4.5, T4 | Payload 483,048 B; 8,472 B free | 483,440 B; 8,080 B free (`_eflash_load` = `0x0807E070`) |
+| §1 | `Reset_Handler` at `0x0805392C` | `0x08053AB0` (sector 5) |
+| Header, §7.3, §8 | Cites `S072_ST1_IMPLEMENTATION.md` §21 | Now in `S073_SESSION_STARTUP.md` §2 and `072_SESSION_HANDOFF_LOG.md` §5. Drop the §7.3 edit if the ST1 file is deleted. |
+| Startup §1; `MEMORY.md` Quick Start | HEAD `58569ae`; Steps 9–11 uncommitted | HEAD `05bbd83`; tree clean. Fix `MEMORY.md` at closeout. |
+| §4.1 | "Sub-knob of the existing boot-time test `MEMTEST_ENABLED` (already 1)" | `memtest_run()` is commented out (`main.c:550`), so `MEMTEST_ENABLED 1` only compiles code that nothing calls. The new screens need their own call site, as §4.2 already implies. |
+| §4.2 | "Next to the FxBf diagnostic" | `boot_showFxBufDiagnostic()` sits inside `#if DEV_MODE_DIAGNOSTIC` (`main.c:536–539`), which is 0. Put the new call after that block, under its own `#if`. |
+| §5 A1 | Sectors 6–11 read DATA | Only sectors that hold sample bytes read DATA. With the `SD_CARD` fixture (about 416 KB of loops): S6–S7 DATA, S8–S10 BLANK, S11 DATA (index at the top). |
+| memtest helpers | Reuse memtest's helpers | `app_highest_flash_addr()` ignores the `.itcm`/`.dtcm` load images. It reports `0x0807DE70`, which is 512 B short of the image end. Use `_eflash_load`, as §4.2 does; do not reuse that helper. |
+
+### 10.2 Checked during review; these hold
+
+- **`--gap-fill 0xFF` works.**
+  - Test: a copy of the current ELF with a 4 KiB loadable section added at
+    `0x08080000`, converted by `objcopy` 2.43.1.
+  - Result: exactly 495,616 B (T1's size). The 8,080 B gap is all `0xFF`,
+    and the first 483,440 B are byte-identical to `lxr02.bin`.
+  - Without `--gap-fill`, the gap is `0x00`.
+  - The NOLOAD `.bss` has a flash LMA (`0x0807DE70`, 292 KB long) that
+    overlaps `PROBE`. It does not disturb the output.
+- **Gate C3 holds** (an old install shows zero samples).
+  `sampleMemory_refresh()` stops at the first invalid entry, and entry 0 is
+  always at `SAMPLE_ROM_START_ADDRESS + 4`, for both fresh and append
+  installs.
+- **The floor is enforced only at** `SampleMemory.h:75`, `sampleFlash.c:170`,
+  `:202`, `:217` and `memtest.c:136`.
+  - Playback uses the absolute `SampleInfo.offset`.
+  - The installer uses the address macros.
+  - `sampleMemory_setNumSamples()`, which programs the count word at the
+    floor, has no callers.
+- **Boot-logging deadline.** The mount disarms its 10 s deadline when it
+  completes, so CPU-only pauses between operations (the prompt, the erase)
+  cannot trip it. The dump is its own operation with its own deadline.
+- **`afatfs_fwrite()` copies synchronously** (`memcpy` into the sector
+  buffer). Memory-mapped flash and a stack buffer are both valid sources.
+- **A diagnostic build fits today.** `DEV_MODE_DIAGNOSTIC 1` links at
+  485,508 B, leaving 6,012 B. This was built in a scratch copy; see §10.7.
+
+### 10.3 Decisions needed before implementation
+
+**E5. How is the probe image assembled?**
+
+- **(a) As planned:** `flashProbeData.S` plus `.incbin`, and a `PROBE` region
+  and section in the production linker script.
+- **(b) On the host:**
+  - compile T0 with the five `-D` values;
+  - a script pads `lxr02.bin` with `0xFF` to `0x78000`, appends the probe
+    words, and packs the result with `build_lxrv2_img.build()`;
+  - the firmware verifies `0x08080000 … + FLASH_PROBE_BYTES` using the `-D`
+    values.
+- **Recommendation: (b).**
+  - The Makefile has no `%.S` rule, only `%.s`, which is not preprocessed.
+    `.incbin` would also need an explicit prerequisite on
+    `build/flash_probe.bin`. Option (a) therefore needs new build rules.
+  - Option (a) edits the production linker script, and Phase C must then
+    undo it.
+  - Option (b) leaves the linker script and compile rules untouched, and
+    Phase C's "remove `PROBE`" step disappears.
+  - Option (b) also allows a **verify-only T4r**: seed `0x33`, nothing
+    appended. It reports, word for word, whether a normal image left
+    sector 6 alone.
+  - One target, `make probe-img TAG=… SEED=… BYTES=…`, passes the same values
+    to the compile and to the script.
+
+**E6. One dump file or two (`/s0dump.bin` and `/flashopt.bin`)?**
+
+- **Recommendation: one file,** `/s0dump.bin`:
+  - 32,768 B of sector 0;
+  - then a 16 B trailer: `OPTCR`, `OPTCR1`, `OPTCR2`, and the flash-size
+    register zero-extended.
+- `filesystem_writeBootLog_tick()` handles exactly one file, so the dump
+  stays a straight clone of it.
+- Copy the registers into a 16 B local buffer on each tick. Never pass a
+  peripheral address to `afatfs_fwrite()`: newlib's `memcpy` may use byte
+  loads.
+
+**E7. Where does the erase prompt run?**
+
+- **Recommendation: before the SD block,** directly after the report
+  screens:
+  - it needs no card;
+  - it stays outside the boot-logging window;
+  - it runs even if the mount fails.
+- Only the dump needs the mount.
+- In either position it must come before `menu_setNumSamples()`
+  (`main.c:598`).
+
+**E8. Which tooling is kept after Phase C?**
+
+- **Recommendation:**
+  - keep the report screens and the dump behind `MEMTEST_FLASH_EXPANSION`
+    (default 0), and document them in `DEV_MODES.md`;
+  - remove the probe verifier, the erase prompt, and the probe build target.
+
+**E9. Fix the Makefile default goal in the same edit?** (Startup §6.)
+
+- **Recommendation: yes.** E5 (b) adds a Makefile target anyway, and the fix
+  is one line: `.DEFAULT_GOAL := all`.
+
+### 10.4 Additions to the implementation
+
+- **K0, before A1: flash the known-good image through the bootloader and
+  boot it.**
+  - "Known-good" must mean an image that has booted on this unit, not just a
+    build.
+  - If samples are installed at that moment, this normal-size update also
+    answers A0: check whether they still list and play. A1 then repeats the
+    check with T0.
+- **Production image gate.**
+  - Keep every `main.c` edit inside `#if MEMTEST_FLASH_EXPANSION`.
+  - With the knob at 0 and no probe variables, `lxr02.bin` should have the
+    same SHA-256 as before the tooling landed.
+  - If it differs, explain why before continuing. The `bss`/`data` gate
+    remains the minimum.
+- **Probe-image gate** (applies to either E5 option):
+  - the `.img` length is 16 + `0x78000` + `BYTES`;
+  - bytes `_eflash_load − 0x08008000` up to `0x78000` are all `0xFF`;
+  - the first and last probe words match the generator.
+- **Every photo identifies its image.**
+  - T0 and the probe builds show `TAG`, `SEED`, `PREV_SEED` and the expected
+    word at `0x08080000` on the count screen.
+  - The generator prints the same word, which cross-checks the C and Python
+    `probe_word()` on hardware.
+- **Generator self-checks:**
+  - assert that no word for the chosen seeds equals `0xFFFFFFFF` (that would
+    be a false BK);
+  - print how many T3 words satisfy `new & prev == new` (hidden AN words;
+    about 6 expected).
+- **Seeds.** `PREV_SEED = 0` means "none", so real seeds must be non-zero.
+- **Classification order:** OK → BK → AN → ST → OT.
+- **`#error` rules:**
+  - `MEMTEST_FLASH_EXPANSION && !MEMTEST_ENABLED`;
+  - `MEMTEST_FLASH_EXPANSION && !DEV_MODE_LOGGING` (already planned);
+  - any `FLASH_PROBE_*` define without the knob.
+- **B0 audio guard.** A probe build holds on `B0 NOT DONE` when
+  `sampleMemory_getNumSamples() != 0`. See R5.
+- **LCD during the erase.**
+  - Call `lcd_waitForIdle()` before each blocking erase, so that
+    `Erasing S6..S11` is on screen. The TIM7 LCD driver stops while
+    interrupts are off.
+  - Allow up to about 24 s: the datasheet maximum is 4 s per 256 KiB
+    sector.
+- **Option bytes.** No code path may write `FLASH_OPTKEYR` or `OPTCR*`. Make
+  this an explicit review check on the diff.
+- **Phase C details:**
+  - `tools/link_budget.py` should read `__sample_flash_start` from the ELF,
+    not hard-code a second copy of the limit.
+  - `Reset_Handler` is `.weak` in `.text.Reset_Handler`
+    (`startup_stm32f765xx.s:47`). The planned `KEEP` line therefore places it
+    at `0x080081C8`, directly after the `0x1C8`-byte vector table.
+
+### 10.5 Additions to the A3 checklist
+
+- **File lookup.**
+  - Does the bootloader match the long name `LXRV2_lxr02.img`, the 8.3 alias
+    (`LXRV2_~1.IMG`), or the first `*.IMG` it finds?
+  - Does it rename or delete the file after flashing?
+  - See R1.
+- **Order of operations.**
+  - Does it check the magic and checksum *before* erasing?
+  - If it erases first, a truncated read (the RAM-buffer case) leaves no
+    app. That is still recoverable, but it changes what a T2 failure looks
+    like.
+- **Size source:** the header's size field, or the FAT file size?
+- **Destination-address arithmetic.**
+  - Look for masks, modulo or wrap on the write address (for example
+    `& 0x7FFFF`).
+  - Extend Gate A's stop rule to any path that can produce a destination
+    below `0x08008000`.
+- **Watchdog.**
+  - Look for writes to `IWDG_KR` (`0x40003000`: `0xCCCC`, `0xAAAA`,
+    `0x5555`) and for time budgets in the programming loop.
+  - A 736 KiB image takes about 1.5× today's write time.
+  - Partial evidence against a watchdog on the normal boot path: the
+    `DEV_LOGGING_IWDG` work found the LSI not running at app start.
+- **Jump checks.** Record the exact SP/PC validation masks. SP `0x20080000`
+  passes whatever check exists today.
+
+### 10.6 Risks
+
+| # | Risk | Mitigation |
+|---|---|---|
+| R1 | **Wrong image flashed.** Tagged archive copies in the card root can take the `~1` 8.3 alias. macOS writes `._LXRV2_lxr02.img` (AppleDouble), which also ends in `.img`. A bootloader that matches the 8.3 alias or the first `*.IMG` could flash the wrong image, and the results would be attributed to the wrong test. | Keep exactly one `.img` in the card root, and archive copies on the computer only. Remove `._*` files after each copy (`dot_clean`, or delete them by hand). Record each image's SHA-256. The on-screen `TAG` proves which image ran. |
+| R2 | **A bootloader watchdog or timeout fires during the longer write**, leaving a half-programmed app. | Recover by holding the encoder with the known-good image. A3 looks for IWDG writes. |
+| R3 | **Address wrap in the bootloader.** The overflow data is written over the start of the app. For T1 that is the vector table: the app does not boot, which is recoverable. In the worst case it is written toward sector 0. | A3 checks the address arithmetic. T1's minimal 4 KiB overflow limits the damage. E1 (SWD) is the only recovery for sector 0. |
+| R4 | **PCROP on sector 0.** A D-bus read of a PCROP sector sets `RDERR`. Check in RM0410 whether it also faults. | The report screens (with `OPTCR2`) run before the dump, so photograph them first. If T0 hangs at the dump, re-flash the known-good image and treat the result as PCROP. |
+| R5 | **Probe data played as audio.** If B0 is skipped, the old index in S11 still points into S6. The probe builds overwrite S6 with pseudo-random words, which would play at full scale. | The `B0 NOT DONE` hold (§10.4). Keep the volume low throughout Phase B. |
+| R6 | **Rolling back past Phase C.** A pre-C sample install, then a grown Phase C image (code in S6), then a pre-C image without reinstalling: the old firmware accepts the old index and plays program code as audio. The other two directions are safe. A pre-C install under Phase C shows 0 samples. A Phase C install under pre-C firmware plays correctly. | Phase C already reinstalls samples (C4) before the growth drill (C5). Rule: never roll back past Phase C onto a pre-C sample install without first running Load:[Samples] at low volume. |
+| R7 | **Accidental commit of the vendor binary.** `*.bin` is ignored, but `*.dis` is not. `!build/*.img` un-ignores images, so tagged probe images in `build/` appear as untracked files. | Keep `s0dump.*` and its disassembly outside the repository. Write probe images outside `build/`, or add an ignore rule for them. |
+
+### 10.7 Cross-plan considerations (CPU refactor)
+
+- **Diagnostic-build headroom.**
+  - CPU Step 0's profiler (D1) exists only in `DEV_MODE_DIAGNOSTIC` builds,
+    which have 6,012 B free today.
+  - CPU Steps 1 and 5 (about +1.7 KB), plus the profiler and its widget,
+    would leave about 3 KB in diagnostic builds if Gate B fails.
+  - Keep the session order (flash plan first). If Gate B fails, apply §8
+    fallback 1 (`-Os` for cold modules) before the CPU plan.
+- **Take the CPU baseline profile on the post-Phase-C image.**
+  - Phase C moves `Reset_Handler` and re-lays out `.text`.
+  - Wait states are the same in every flash sector, but alignment and
+    I-cache effects can shift cycle counts slightly.
+  - A baseline taken before Phase C would blame that shift on Step 1.
+- **The two plans touch disjoint files.**
+  - Phase C: the linker script, `SampleMemory`, `sampleFlash`, `memtest`,
+    and tools.
+  - CPU steps: the DSP sources.
+  - They share the Makefile only if E5 is (a).
+
+### 10.8 Open questions for you
+
+1. **A0.** Do you already know whether installed samples survive a normal
+   firmware update? If not, K0 and A1 answer it.
+2. **Factory image.** Do you have Erica's factory LXR-02 `.img`? Its header
+   size field (bytes 8–11), and any sample-flash addresses in its code, are
+   free evidence for Q1 and Q2. They also show the sector plan the
+   bootloader was designed around.
+3. **E1.** Does the PCB have SWD pads, and do you have an ST-Link?
+4. **E5–E9** in §10.3.
+
+---
+
+## 11. Implementation record (S073)
+
+### 11.1 Decision and evidence
+
+- **Phases A and B were skipped by user decision.** The goal went straight
+  to Phase C: build with `make clean` + `make img` and test on the device.
+- **A0 is answered by the user:** installed samples generally survive a
+  normal firmware update. So the bootloader does not erase sectors 6–11 for
+  a normal-size image.
+- **Factory image (`LXRV2_update_v1.70.img`):**
+  - payload 275,832 B (ends at `0x0804B578`);
+  - SP `0x20080000`;
+  - no `FLASH_KEYR`, `FLASH_CR` or key literals, so it has no flash writing
+    and no sample storage.
+  - It gives no evidence about payloads over 480 KiB. Our 483 KB images
+    are the largest the bootloader has handled.
+  - Keep it out of commits: `*.img` is not git-ignored.
+- **Consequence:** it is still unknown whether the bootloader erases by
+  size or always erases a fixed range (sectors 1–5). The first image that
+  reaches sector 6 settles it. §11.2 item 2 makes that result visible on
+  the device.
+
+### 11.2 What changed
+
+1. **Phase C as planned (§7.1).**
+   - Linker: `FLASH` is 736 KiB, and `__sample_flash_start = 0x080C0000`
+     has ASSERTs on `_etext`, `_eflash_load` and the region end.
+     `Reset_Handler` is `KEEP`-first in `.text` (now `0x080081E8`), with an
+     ASSERT that it stays in sector 1.
+   - `SampleMemory.h`: `SAMPLE_ROM_START_ADDRESS 0x080C0000` and
+     `SAMPLE_FIRST_SECTOR 7u`.
+   - `sampleFlash.c`:
+     - the floor is now `SAMPLE_FIRST_SECTOR`;
+     - `_Static_assert`s tie the address to the sector;
+     - a runtime interlock refuses every erase and write if the macro and
+       the linker symbol differ.
+   - `memtest.c/h`: the floor, the labels, and the scope check (now
+     sector 6).
+   - `filesystem.c`: the "five sectors" comment.
+   - `link_budget.py` reads the limit from `__sample_flash_start`.
+2. **New: boot-time image check** (`Core/Hardware/flashImage.c/h`), in
+   production.
+   - A 32-byte `.image_check` block sits in sector 1, directly after the
+     vector table. It holds the magic `IMCK`, a CRC32 for each of sectors
+     1–6 (skipping the block itself), and the image length.
+   - `tools/stamp_image_check.py` stamps it into `lxr02.bin` in the
+     Makefile `.bin` rule. It deletes the `.bin` if the layout is wrong.
+   - At boot, after `din_init()`/`time_initTimer()`, the firmware recomputes
+     the CRCs (about 20 ms, no RAM).
+   - On a mismatch it shows `Img BAD s:<bad sectors>` / `Reflash. BAR1=go`,
+     or `Img unstamped`, and waits for a BAR1 press. A checker fault can
+     therefore never brick a good image.
+   - The block is in sector 1, which every update rewrites, so a bad
+     sector 6 cannot corrupt the words that report it.
+3. **New: `FLASH_GROWTH_DRILL_KB`** in `config.h` (default 0). A nonzero
+   value links a constant table of that many KiB and shows
+   `Img OK <end>` / `drill <addr>` for 3 s when the check passes.
+4. **Makefile:** `flashImage.c` is added to `SRCS`; the linker script is now
+   a prerequisite of the ELF; the stamp step is added.
+5. **Comments:** the linker stack comment is corrected (SRAM2).
+
+### 11.3 Gates run on the host
+
+| Gate | Result |
+|---|---|
+| Clean build (`make clean`, `make img`) | Links; no new warnings. `text=483,744` (+720 over S072), `data=416`, `bss=426,336` unchanged. ITCM 3,768 B, DTCM statics 4,448 B and FXBUF 126,624 B unchanged. |
+| Link budget | 484,160 / 753,664 B; headroom **269,504 B** |
+| Image | `LXRV2_lxr02.img`: 484,176 B, checksum OK, header size = `.bin` = `_eflash_load − origin`; reset vector `0x080081E9`. SHA-256 `71612518d14c…11ecd`. |
+| Check code vs stamp | `flashImage.c`'s own CRC and sector code, compiled on the host and run on the `.bin`, matches all six stamped words. |
+| Negative cases (host) | One flipped byte in S5 → `s:....5.`. Placeholder magic → `Img unstamped`. |
+| 64 KiB drill (scratch build) | Links; image ends at `0x0808E3E0` (sector 6); `_etext` `0x0808D188` (code/rodata in sector 6); table at `0x08056324`; `Reset_Handler` still `0x080081E8`; passes. |
+| Drill, S6 programmed without erase (simulated AND with old data) | `Img BAD s:.....6` |
+| Drill, truncated at 480 KiB (simulated) | `Img BAD s:.....6` |
+| Gate C3 logic | `sampleMemory_refresh()` stops at entry 0 (`0x08080004` < new floor), so an old install shows 0 samples. |
+
+Not run: the §7.2 C2 one-off hardware floor call (the guards are compile-time
+and interlock-checked), and anything on hardware.
+
+### 11.4 Hardware test (you)
+
+1. **Card:** keep exactly one `.img` in the card root. Delete any `._*` files
+   macOS created. Copy `build/LXRV2_lxr02.img` and flash it as usual
+   (hold the encoder at power-on).
+2. **Boot.**
+   - Expect a normal boot; the check is silent when it passes.
+   - `Img BAD s:…` or `Img unstamped`: note the text exactly, then press
+     BAR1 to continue.
+3. **At low volume:** the old sample install should show 0 samples, and
+   sample waveforms should be silent (Gate C3).
+4. **Load:[Samples]:**
+   - it erases sectors 7–11 (five sectors now);
+   - samples and loops install and play;
+   - bytes free is about 1,308,320 B minus what was installed.
+5. **Regression:**
+   - Scene/Bank load and save, AutoSave restore, and an audio check;
+   - the Phase 5 FX checks from `S073_SESSION_STARTUP.md` §3.
+6. **Optional: the growth drill.** This is the first image over 480 KiB the
+   bootloader will ever see, and the only step that tests the bootloader.
+   1. Set `FLASH_GROWTH_DRILL_KB 64`, then `make clean` + `make img`, and
+      flash.
+      - Sector 6 still holds old sample data, because the new firmware
+        never erases it. The drill therefore also tests whether the
+        bootloader erases sector 6.
+   2. **Pass:** `Img OK  0808E3E0` / `drill   08056324` for 3 s, then a
+      normal boot.
+   3. **Fail:** `Img BAD s:.....6`, or a hang before any screen. Reflash the
+      normal image, which does not use sector 6.
+   4. Either way, set the knob back to 0 and reflash the normal image.
+
+### 11.5 Hardware results
+
+| Step | Date | Result | Notes |
+|---|---|---|---|
+| 1–2 Boot / image check | 2026-09-28 | **PASS** | The S073 image loads through the bootloader and boots. No image-check screen was reported. |
+| 3 Old install → 0 samples | 2026-09-28 | Not reported | |
+| 4 Load:[Samples] | 2026-09-28 | **PASS** (after fix) | At first the item was missing from the Load menu: `SAVE_TYPE_SAMPLES` had not been in `menu_loadSaveLoadTypes[]` since July (`a62221f`). Restored in `S073_POST_FLASH_MENU_BUGFIXES.md` §2. Sample loading now works, which is the first install at the sector-7 floor (Gate C4, functional). |
+| 5 Regression | 2026-09-28 | **FAIL** | Switching between Load menu types takes several seconds. The screen is often blank for many seconds while the `.hcindex` loads. The cause is not yet determined, and it is not yet known whether S073 or an earlier change introduced it. |
+| 6 Growth drill | — | Not run | The user did not ask for this step. The `FLASH_GROWTH_DRILL_KB` knob was added without a request and is scheduled for removal. |
+
+Both defects are handled in `S073_POST_FLASH_MENU_BUGFIXES.md`.

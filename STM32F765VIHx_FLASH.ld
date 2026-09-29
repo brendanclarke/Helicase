@@ -38,22 +38,27 @@
  * STM32F765VIH6 — application linker script for LXR-02
  *
  * Memory layout:
- *   FLASH  0x08008000-0x0807FFFF (480 KB)   app starts after 32KB bootloader
- *   SAMPLE 0x08080000-0x081FFFFF (1536 KB)  reserved for user samples
+ *   FLASH  0x08008000-0x080BFFFF (736 KB)   app, sectors 1-6, after the
+ *                                           32KB bootloader (S073: was
+ *                                           480 KB, sectors 1-5)
+ *   SAMPLE 0x080C0000-0x081FFFFF (1280 KB)  user samples, sectors 7-11
+ *                                           (__sample_flash_start below;
+ *                                           SampleMemory.h mirrors it)
  *   ITCM   0x00000000-0x00003FFF (16 KB)    tightly-coupled instruction RAM
  *   DTCM   0x20000000-0x2001FFFF (128 KB)   tightly-coupled SRAM, no DMA access
  *   SRAM1  0x20020000–0x2007BFFF (368 KB)   regular SRAM, DMA accessible
  *   SRAM2  0x2007C000–0x2007FFFF (16 KB)    shared SRAM (not currently mapped)
  *
- * Stack lives at top of SRAM1 (_estack = 0x20080000) — 16 KB SRAM2 is left
- * unmapped for now. Stack does NOT live in DTCM because the original LXR
+ * Stack starts at the top of SRAM2 (_estack = 0x20080000) and grows down.
+ * Stack does NOT live in DTCM because the original LXR
  * AVR/STM32 firmware places hot DSP state there via INCCM/INCCMZ
  * (mapped here as INDTCM/INDTCMZ in config.h). We need contiguous DTCM
  * for that.
  *
  * Sections:
  *   .isr_vector  → FLASH @ origin
- *   .text/.rodata → FLASH                     — includes sine_table (S072)
+ *   .text/.rodata → FLASH                     — includes sine_table (S072);
+ *                  Reset_Handler first, so it stays in sector 1 (S073)
  *   .itcm        → ITCM (loaded from FLASH)   — INITCM hot code
  *   .data        → SRAM1 (loaded from FLASH)
  *   .bss         → SRAM1
@@ -62,6 +67,8 @@
  *   .dtcm_fxbuf  → DTCM (NOLOAD, never copied or zeroed) — FX/voice audio
  *                  arena: every DTCM byte after .dtcmz (S072, Phase 5)
  *   .devwdg_noinit → SRAM2 (NOLOAD, never zeroed) — DEV_LOGGING_IWDG capsule
+ *   .image_check → FLASH, 32 bytes after .isr_vector — per-sector CRC32
+ *                  words stamped after link by tools/stamp_image_check.py
  *
  * .dtcm is intentionally placed BEFORE .dtcmz in the DTCM region so any
  * accidental size growth in .dtcm shows up as a link error rather than
@@ -81,17 +88,53 @@
  */
 ENTRY(Reset_Handler)
 _estack = 0x20080000;
+/* First sample-flash byte (sector 7 base). The FLASH region below must end
+** here; SampleMemory.h SAMPLE_ROM_START_ADDRESS must equal it (sampleFlash.c
+** refuses every erase/write at runtime if they differ). tools/link_budget.py
+** reads it as the application limit. */
+__sample_flash_start = 0x080C0000;
 MEMORY {
     ITCM  (rx)  : ORIGIN = 0x00000000, LENGTH = 0x4000
-    FLASH (rx)  : ORIGIN = 0x08008000, LENGTH = 0x78000
+    FLASH (rx)  : ORIGIN = 0x08008000, LENGTH = 0xB8000
     DTCM  (xrw) : ORIGIN = 0x20000000, LENGTH = 0x20000
     SRAM1 (xrw) : ORIGIN = 0x20020000, LENGTH = 0x5C000
     SRAM2 (xrw) : ORIGIN = 0x2007C000, LENGTH = 0x4000
 }
 SECTIONS {
     .isr_vector : { . = ALIGN(4); KEEP(*(.isr_vector)) . = ALIGN(4); } >FLASH
+
+    /* Image check block — 32 bytes in sector 1, right after the vector
+    ** table (S073).
+    **
+    ** What: word 0 magic, words 1..6 one CRC32 per application sector 1..6
+    ** over that sector's share of [ORIGIN(FLASH), _eflash_load) with this
+    ** block's own bytes skipped, word 7 the image length in bytes.
+    ** Why: the closed LXRV2 bootloader has never been shown to erase or
+    ** program past 0x08080000 (the factory app is 270 KB). A boot-time
+    ** compare turns an unerased or truncated sector into a named error
+    ** instead of silent code corruption. The block lives in sector 1, which
+    ** every update already rewrites, so a bad high sector cannot damage the
+    ** words that report it.
+    ** The link emits placeholders ("IMC?", 0xFFFFFFFF); the .bin rule in the
+    ** Makefile stamps "IMCK", the CRCs and the length into lxr02.bin with
+    ** tools/stamp_image_check.py, so the ELF keeps the placeholders.
+    ** READONLY keeps it out of `size`'s data column: it is flash, not RAM.
+    ** Affiliates: Core/Hardware/flashImage.c, tools/stamp_image_check.py. */
+    .image_check (READONLY) : {
+        . = ALIGN(4);
+        _simage_check = .;
+        LONG(0x3F434D49)
+        LONG(0xFFFFFFFF) LONG(0xFFFFFFFF) LONG(0xFFFFFFFF)
+        LONG(0xFFFFFFFF) LONG(0xFFFFFFFF) LONG(0xFFFFFFFF)
+        LONG(0xFFFFFFFF)
+        _eimage_check = .;
+    } >FLASH
     .text : {
         . = ALIGN(4);
+        /* Reset_Handler directly after the vector table: however far the
+        ** image grows, the reset vector the bootloader jumps to stays in
+        ** sector 1. */
+        KEEP(*(.text.Reset_Handler))
         *(.text) *(.text*)
         *(.rodata) *(.rodata*)
         *(.ARM.extab* .gnu.linkonce.armextab.*)
@@ -110,8 +153,9 @@ SECTIONS {
            "ITCM overflow: .itcm exceeds 16KB")
 
     /* DMA buffers — non-cacheable region at start of SRAM1.
-    ** MPU region 1 marks this 4KB as Device memory so D-cache
-    ** never caches DMA-visible data. Must stay ≤ 4KB total. */
+    ** MPU region 1 marks this 4KB as Normal non-cacheable (S073 Step 3b;
+    ** Strongly-Ordered before), so D-cache never caches DMA-visible data.
+    ** Must stay ≤ 4KB total. */
     .dma_nocache (NOLOAD) : {
         . = ALIGN(4);
         _sdma_nocache = .;
@@ -135,6 +179,7 @@ SECTIONS {
         *(.dtcm) *(.dtcm.*)
         . = ALIGN(4); _edtcm = .;
     } >DTCM AT> FLASH
+
     _eflash_load = LOADADDR(.dtcm) + SIZEOF(.dtcm);
 
     /* INDTCMZ — zero-initialised data in DTCM, NOLOAD (no flash image).
@@ -198,10 +243,16 @@ SECTIONS {
            "FX arena base is not 32-byte aligned")
     ASSERT(_efxbuf - _sfxbuf >= 0x1E000,
            "FX arena below the approved 120 KiB minimum: DTCM statics grew; resize or re-approve")
-    ASSERT(_etext <= 0x08080000,
+    ASSERT(ORIGIN(FLASH) + LENGTH(FLASH) == __sample_flash_start,
+           "FLASH region must end exactly at __sample_flash_start")
+    ASSERT(_etext <= __sample_flash_start,
            "Application overlaps sample flash region")
-    ASSERT(_eflash_load <= ORIGIN(FLASH) + LENGTH(FLASH),
+    ASSERT(_eflash_load <= __sample_flash_start,
            "Application load image overlaps sample flash region")
+    ASSERT(_eimage_check - _simage_check == 32 && _eimage_check <= 0x08010000,
+           "Image check block must be 32 bytes in sector 1")
+    ASSERT(Reset_Handler < 0x08010000,
+           "Reset_Handler must stay in sector 1")
 
     /DISCARD/ : { libc.a(*) libm.a(*) libgcc.a(*) }
     .ARM.attributes 0 : { *(.ARM.attributes) }

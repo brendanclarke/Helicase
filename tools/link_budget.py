@@ -3,8 +3,9 @@
 Link budget report for the LXR-02 application image (Session 072).
 
 What: reads linker symbols from the ELF via arm-none-eabi-nm and prints flash
-use vs the 480 KiB application region, ITCM use, DTCM statics, and the size of
-the .dtcm_fxbuf FX/voice audio arena.
+use vs the application region (736 KiB since S073; its end is the linker's
+__sample_flash_start), ITCM use, DTCM statics, and the size of the
+.dtcm_fxbuf FX/voice audio arena.
 
 Why: every Phase 5 step must be measured, and flash headroom is the tightest
 Phase 5 risk. `size` alone cannot show headroom, and its Berkeley `bss` column
@@ -20,7 +21,7 @@ import subprocess
 import sys
 
 FLASH_ORIGIN = 0x08008000
-FLASH_LIMIT = 0x08080000
+FLASH_LIMIT_DEFAULT = 0x080C0000   # used only if the ELF lacks the symbol
 ITCM_BYTES = 16 * 1024
 DTCM_ORIGIN = 0x20000000
 FXBUF_MIN = 122880
@@ -44,13 +45,14 @@ def main():
     s = symbols(sys.argv[1], sys.argv[2])
     warn = int(os.environ.get("LINK_BUDGET_WARN_FLASH", "16384"))
 
+    flash_limit = s.get("__sample_flash_start", FLASH_LIMIT_DEFAULT)
     used = s["_eflash_load"] - FLASH_ORIGIN
-    limit = FLASH_LIMIT - FLASH_ORIGIN
-    head = FLASH_LIMIT - s["_eflash_load"]
+    limit = flash_limit - FLASH_ORIGIN
+    head = flash_limit - s["_eflash_load"]
     print(f"Flash : {used:,} / {limit:,} B used, headroom {head:,} B")
     if head < warn:
         print(f"WARNING: flash headroom {head:,} B < {warn:,} B threshold "
-              "(see S072_ST1_IMPLEMENTATION.md §16 growth paths)")
+              "(see MEMORY.md Flash Sector Layout)")
 
     print(f"ITCM  : {s['_eitcm']:,} / {ITCM_BYTES:,} B")
     print(f"DTCM  : statics {s['_edtcmz'] - DTCM_ORIGIN:,} B")

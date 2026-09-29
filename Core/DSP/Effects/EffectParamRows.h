@@ -24,7 +24,8 @@
  * implementation. Affiliates: EffectTypes.h and InstrumentManager.h.
  */
 
-#define EFFECT_BIND_NONE  { INSTRUMENT_BIND_NONE, 0u, 0u }
+/* S073 Step 2: Effect rows never use instrument special writers. */
+#define EFFECT_BIND_NONE  { INSTRUMENT_BIND_NONE, 0u, 0u, IM_SPECIAL_NONE }
 #define EFFECT_MOD_NONE   { 0u, 0u, INSTRUMENT_MOD_DOMAIN_NONE }
 #define EFFECT_MOD_0_127  { 0u, 127u, INSTRUMENT_MOD_DOMAIN_CONTINUOUS }
 

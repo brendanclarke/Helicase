@@ -18,14 +18,18 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 # Flash: copy LXRV2_lxr02.img to SD card root, hold main encoder, power on
 ```
 
+**Commits belong to the user.** Do not suggest or prompt when to commit.
+
 **Current working source**: Session 072 implemented Phase 5, the Effects
 bus (`EFFECTS_BUS_FEATURE_PLAN.md` Steps 1–11), on `dev-ph5-effects`.
 
-- **Commits:** HEAD `58569ae` holds Steps 1–8; Steps 9–11 are uncommitted in
-  the working tree.
-- **Final build:** `text=483,024`, `data=416`, `bss=426,336`. The flash
-  payload is 483,440 B, leaving **8,080 B** of headroom in the 480 KiB
-  application window.
+- **Commits:** all of Session 072 is committed (HEAD `05bbd83`). The S073
+  flash expansion is uncommitted in the working tree.
+- **Session 072 final build:** `text=483,024`, `data=416`, `bss=426,336`,
+  payload 483,440 B in the old 480 KiB window.
+- **Session 073 build (flash expansion):** `text=483,744`, `data=416`,
+  `bss=426,336`, payload 484,160 B in the 736 KiB window, leaving
+  **269,504 B** of headroom.
 - **Hardware:** Steps 1, 2 and 5 production checks and the Step 8 test points
   passed. The Phase 5 acceptance checklist for Steps 6–10 is pending
   (`072_SESSION_HANDOFF_LOG.md` §11).
@@ -56,9 +60,18 @@ Phase 5 in one paragraph:
   `MODULE_INTERCHANGE_SPEC.md`, `BANK_PRESET_ARCHITECTURE.md`,
   `PATTERN_DYNAMIC_STACK.md`, `SRAM_MANIFEST.md` and `DEV_MODES.md`.
 
-**Next session (073):** `S073_FLASH_EXPANSION.md`, then
-`S073_CPU_USE_DSP_REDUCTION_REFACTOR.md`. Start from
-`S073_SESSION_STARTUP.md`.
+**Session 073 (in progress):**
+
+- The flash-expansion image boots on hardware (2026-09-28;
+  `S073_FLASH_EXPANSION.md` §11.5).
+- Load:[Samples] is restored and hardware-verified: it had been missing from
+  the Load whitelist since July.
+- Slow Load type switching is **deferred**, because the trace logger stays on
+  for now. See `knowledge_files/drafts/MENU_LOAD_SPEEDUP_SMOOTHNESS.md`
+  and `S073_POST_FLASH_MENU_BUGFIXES.md`.
+- The drill knob removal (item C) is still open.
+- **Next:** `S073_CPU_USE_DSP_REDUCTION_REFACTOR.md`, revised on 2026-09-28
+  under the user's constant-CPU rule. Start from `S073_SESSION_STARTUP.md`.
 
 Still deferred: per-track step scale/shuffle playback (`PATTERN_DYNAMIC_STACK.md`
 §6.4) and the Phase 4.5 copy operations.
@@ -80,6 +93,20 @@ Logging/trace allocations are approved only while `DEV_MODE_LOGGING` is
 enabled and the corresponding logging path is compiled. A logging-off build
 must not allocate those rings, cursors, or timing records.
 
+## DSP CPU Policy: constant, predictable cost (user, 2026-09-28)
+
+- **Never save CPU by skipping, bypassing or switching off DSP work** because
+  an element is currently inactive, silent, or set to zero (distortion at 0,
+  a silent voice, a send at 0, and so on).
+- **Why:** freed CPU gets filled by other features. Then, when everything is
+  requested at once, the result is underruns or features dropped at random.
+- **Headroom is only the worst case with everything active** (the stress
+  Scene peak), never the average.
+- **Any proposal** that turns processing off for a feature that can be active
+  must be raised with the user specifically. The expected answer is no.
+- **CPU reductions must also meet the sound rules** agreed for each change.
+  For S073 these are in `S073_CPU_USE_DSP_REDUCTION_REFACTOR.md` §0.
+
 ## Volatile Notes
 
 This section is for short carryover points only. Flush or rewrite it at session
@@ -97,8 +124,21 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   fixtures, the Effect page walk-through, the FX sequencer remainder, the
   automation/LFO matrix, and the gate/fan-out matrix. The checklist is in
   `072_SESSION_HANDOFF_LOG.md` §11.
-- **Flash headroom is 8,080 B.** `link_budget.py` warns below 16 KiB (it has
-  since ST7). Measure every change with
+- **S073 flash expansion (implemented; hardware test pending).**
+  - The application window is `0x08008000–0x080BFFFF` (736 KiB, sectors 1–6).
+    Samples start at sector 7 (`0x080C0000`, 1,308,320 B of audio).
+  - After S073 the image is 484,160 B, leaving **269,504 B** of headroom.
+  - Every boot checks a stamped CRC32 per application sector
+    (`flashImage.c`; `tools/stamp_image_check.py` runs in the `.bin` rule).
+    A mismatch shows `Img BAD s:…` and waits for BAR1.
+  - The LXRV2 bootloader is still unproven past `0x08080000`. The factory
+    app is 275,832 B and has no flash-writing code. Normal-size updates
+    leave sectors 6–11 intact.
+  - The first image that reaches sector 6 is the real test. The
+    `FLASH_GROWTH_DRILL_KB` knob in `config.h` (default 0) builds one on
+    purpose.
+- **Measuring flash.** `link_budget.py` warns below 16 KiB. Measure every
+  change with
   `python3 tools/link_budget.py arm-none-eabi-nm build/lxr02.elf`. Use
   `make all`: bare `make` can stop at `build/main.o` in an incremental tree.
 - **Effect invariants.**
@@ -794,6 +834,7 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
     │   ├── AudioCodecManager.c/h    ← consolidated audio: DMA ISRs, I2S/GPIO/DMA init, SPSC queue
     │   ├── triggerJacks.c/h         ← CLK OUT/IN, RST IN; OUT jack detect is foreground-polled
     │   ├── memtest.c/h              ← flash sector probe (boot-time, MEMTEST_ENABLED gate)
+    │   ├── flashImage.c/h           ← boot-time per-sector CRC32 check of the app image (S073)
     │   ├── frontPanel/
     │   │   ├── buttonHandler.c/h    ← ISR-safe event ring, main-loop processEvents()
     │   │   ├── lcd.c/h              ← TIM7-driven async queue, 128-entry SPSC ring
@@ -866,7 +907,7 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
     │       └── HiHat/                ← HiHat/open-hat descriptor keys, flags, menu layout, runtime metadata
     ├── SampleRom/
     │   ├── SampleMemory.c/h         ← sample flash metadata/runtime cache, 120 entries, loop flags
-    │   └── sampleFlash.c/h          ← guarded F765 sector 6-11 erase/program helpers
+    │   └── sampleFlash.c/h          ← guarded F765 sector 7-11 erase/program helpers
     ├── Sequencer/
     │   ├── sequencerTimer.c/h       ← TIM3 4kHz sequencer timing owner (IRQ29, priority 2) — Session 019
     │   ├── sequencer.c/h            ← original LXR sequencer source (driven by TIM3_IRQHandler); FX step latch, Effect automation markers
@@ -964,8 +1005,10 @@ Port LXR 0.37 to the LXR-02 hardware (STM32F765VIH6). Original LXR: STM32F4 audi
 - Stack top (SP): **0x20080000**
 - DTCM 128KB (not DMA-accessible) + SRAM1 368KB + SRAM2 16KB
 - I-Cache enabled (16KB, ICIALLU invalidate) — Session 13.
-- D-Cache enabled (16KB) with MPU (WT for SRAM, SO for DMA buffers) — Session 13.
-- DMA buffers live in the `.dma_nocache` linker section, marked Strongly-Ordered via MPU.
+- D-Cache enabled (16KB) with MPU (WT for SRAM, Normal non-cacheable for DMA
+  buffers) — Session 13/S073.
+- DMA buffers live in the `.dma_nocache` linker section, marked Normal
+  non-cacheable via MPU region 1 (S073).
 - `audioOutBuffer` lives in DTCM (`INDTCMZ`) for single-cycle access.
 
 ### Flash Sector Layout (single-bank, confirmed via memtest)
@@ -973,10 +1016,14 @@ Port LXR 0.37 to the LXR-02 hardware (STM32F765VIH6). Original LXR: STM32F4 audi
 | Sector | Range | Size | Use |
 |--------|-------|------|-----|
 | 0 | 0x08000000–0x08007FFF | 32KB | LXRV2 Bootloader |
-| 1–5 | 0x08008000–0x0807FFFF | — | Application |
-| 6–11 | 0x08080000–0x081FFFFF | 6×256KB | Sample storage, implemented Session 18 |
+| 1–6 | 0x08008000–0x080BFFFF | 736KB | Application (sector 6 added in Session 073) |
+| 7–11 | 0x080C0000–0x081FFFFF | 5×256KB | Sample storage (Session 18; sectors 6–11 until S073) |
 
-**Erase floor: sector 6.** `sampleFlash.c` must hard-reject any erase below sector 6.
+**Erase floor: sector 7** (`SAMPLE_FIRST_SECTOR`). `sampleFlash.c` must
+hard-reject any erase or write below sector 7. It also refuses every erase and
+write if `SAMPLE_ROM_START_ADDRESS` differs from the linker's
+`__sample_flash_start`. `Reset_Handler` is linked first in `.text`, so the
+reset vector stays in sector 1.
 
 ### Confirmed GPIO
 
@@ -1226,23 +1273,23 @@ Core/Bank/Scene/Preset/presetManager.c / Menu
 
 User samples are installed with explicit modal operations from the Load page:
 
-- `Load:[Samples ]` reads `/samples`, erases sectors 6-11, installs the accepted files, then reads `/loops`, preserves the normal samples, appends as many looped samples as fit, and skips the rest.
+- `Load:[Samples ]` reads `/samples`, erases sectors 7-11, installs the accepted files, then reads `/loops`, preserves the normal samples, appends as many looped samples as fit, and skips the rest.
 - The separate visible `SampLoop` menu item was removed in Session 023; the two existing loaders still run sequentially under the single Samples operation.
 - Both loaders accept only mono PCM 16-bit 44.1kHz WAV files. Unsupported files are silently skipped.
 - Directory entries are sorted lexicographic by the full long filename when LFN data is present, with ASCII case folded for sort. This is not natural numeric sort; e.g. `Loop 10.wav` sorts before `Loop 2.wav`.
 - Installed sample menu labels are compact waveform names: `s01` through `s99`, then `sA0` upward.
 - The full encoder-click parameter display shows the filename-derived 8-character display name. Stems longer than 8 characters are compressed as first 4 chars, CGRAM char `0x00`, last 3 chars, preserving case.
 - `SampleInfo.size` is now `uint32_t`; the high bit is currently used as `SAMPLE_INFO_LOOP_FLAG`, leaving 31 bits for frame count.
-- Metadata and display-name tables live at the top of sample flash; audio payload grows up from `0x08080000`.
-- Flash writes use `sampleFlash.c/h`, which hard-rejects sectors below 6 and invalidates D-cache after erase/program.
+- Metadata and display-name tables live at the top of sample flash; audio payload grows up from `0x080C0000` (sector 7, since Session 073). Installs made before S073 are rejected (0 samples) because their first entry lies below the new floor.
+- Flash writes use `sampleFlash.c/h`, which hard-rejects sectors below 7 and invalidates D-cache after erase/program.
 - Audio is suspended before flash writes and fully reinitialized after. Hardware testing confirmed audio now comes back without reboot after sample load.
 
 Sample flash map:
 
 | Region | Range |
 |--------|-------|
-| App flash | `0x08008000-0x0807FFFF` |
-| Sample data | `0x08080000-0x081FF69F` |
+| App flash | `0x08008000-0x080BFFFF` |
+| Sample data | `0x080C0000-0x081FF69F` |
 | `SampleInfo[120]` | `0x081FF6A0-0x081FFC3F` |
 | Display names[120][8] | `0x081FFC40-0x081FFFFF` |
 
@@ -1808,7 +1855,7 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 
 ### Resolved in Session 18
 - ~~SampleMemory.c no-op stub~~ — **RESOLVED**. SampleMemory now validates/caches flash metadata and display names for up to 120 installed samples.
-- ~~Sample flash region only proposed~~ — **RESOLVED**. Linker caps app flash at `0x0807FFFF`; sectors 6-11 are reserved for sample storage.
+- ~~Sample flash region only proposed~~ — **RESOLVED**. Linker caps app flash at `0x080BFFFF` (Session 073; `0x0807FFFF` before); sectors 7-11 are reserved for sample storage.
 - ~~Load:[Samples] no-op~~ — **RESOLVED**. `/samples` full reinstall and `/loops` append-loop installer are wired through the Load page.
 - ~~Audio resume after modal sample writes failed~~ — **RESOLVED**. `audioCodec_suspend()`/`audioCodec_resume()` now fully stop/reset/restart DMA, I2S, and PLLI2S.
 

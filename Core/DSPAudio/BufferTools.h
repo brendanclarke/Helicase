@@ -66,6 +66,40 @@ static inline int16_t bufferTool_satSub16(int16_t a, int16_t b)
 	return (int16_t)__SSAT((int32_t)a - (int32_t)b, 16);
 }
 
+/*
+ * Register form of an int16 float store (S073 Step 4).
+ *
+ * What:       performs the existing float-to-int32 conversion and narrowing.
+ * Why:        fused post-chains keep every old int16 truncation point without
+ *             an intermediate memory round trip.
+ * Inputs:     one float expression.
+ * Outputs:    the int16 value that the old store would hold.
+ * Accessors:  voicePostChain.h and the gain helpers.
+ * Affiliates: distortion_curveSample16() and the Step 4 golden/ARM checks.
+ */
+static inline int16_t bufferTool_floatToInt16Store(const float x)
+{
+	return (int16_t)(int32_t)x;
+}
+
+/*
+ * Shared per-sample gain ramp (S073 Step 4).
+ *
+ * What:       computes the existing lastGain + frac*(gain-lastGain) ramp.
+ * Why:        keeps the standalone helper and fused Drum loop's operand order
+ *             identical for the S0 comparison.
+ * Inputs:     sample index, 1/(size-1), current gain and previous gain.
+ * Outputs:    gain for that sample.
+ * Accessors:  bufferTool_addGainInterpolated() and voicePost_drum().
+ * Affiliates: DrumVoice.c gain bookkeeping and the Step 4 harness.
+ */
+static inline float bufferTool_interpolatedGain(const uint8_t i,
+		const float inv_size, const float gain, const float lastGain)
+{
+	const float frac = i * inv_size;
+	return lastGain + frac*(gain - lastGain);
+}
+
 static inline sample_mx_t bufferTool_satAdd32(sample_mx_t a, sample_mx_t b)
 {
 	int64_t acc = (int64_t)a + (int64_t)b;

@@ -108,10 +108,68 @@ typedef enum {
     INSTRUMENT_BIND_LFO_TARGET_PARAM_2
 } instrument_binding_kind_t;
 
+/*
+ * Descriptor special-writer tags (S073 Step 2).
+ *
+ * What:       names the fixed DSP setter associated with a descriptor row;
+ *             bits 5-6 select its oscillator where applicable.
+ * Why:        replaces repeated file_key string searches in the LFO, Morph,
+ *             velocity and Scene activation paths with a flash-stored tag.
+ * Inputs:     compile-time table constants.
+ * Outputs:    instrument_runtime_binding_t.special values.
+ * Accessors:  the four instrument parameter tables and the runtime writer.
+ * Affiliates: tools/dsp_golden/check_special_tags.py and the diagnostic
+ *             self-check; Effect rows explicitly use IM_SPECIAL_NONE.
+ */
+typedef enum {
+    IM_SPECIAL_NONE = 0u,
+    IM_SPECIAL_NOISE_FREQ,
+    IM_SPECIAL_PITCH_COARSE,
+    IM_SPECIAL_PITCH_FINE,
+    IM_SPECIAL_FILTER_FREQ,
+    IM_SPECIAL_FILTER_RESO,
+    IM_SPECIAL_FILTER_DRIVE,
+    IM_SPECIAL_FILTER_TYPE,
+    IM_SPECIAL_AMP_ATTACK,
+    IM_SPECIAL_AMP_DECAY,
+    IM_SPECIAL_HAT_DECAY_CHOKE,
+    IM_SPECIAL_AMP_SLOPE,
+    IM_SPECIAL_PITCH_EG_DECAY,
+    IM_SPECIAL_PITCH_EG_SLOPE,
+    IM_SPECIAL_PITCH_EG_AMOUNT,
+    IM_SPECIAL_TRANSIENT_WAVE,
+    IM_SPECIAL_TRANSIENT_FREQ,
+    IM_SPECIAL_INSTRUMENT_DRIVE,
+    IM_SPECIAL_LFO_RATE,
+    IM_SPECIAL_WRITER_COUNT
+} instrument_special_writer_t;
+
+#define IM_SPECIAL_WRITER_MASK  0x1Fu
+#define IM_SPECIAL_OSC_MASK     0x60u
+#define IM_SPECIAL_OSC1         0x00u
+#define IM_SPECIAL_OSC2         0x20u
+#define IM_SPECIAL_OSC3         0x40u
+#define IM_SPECIAL_OSC_NOISE    0x60u
+_Static_assert(IM_SPECIAL_WRITER_COUNT <= (IM_SPECIAL_WRITER_MASK + 1u),
+               "special writer IDs must fit bits 0-4");
+
 typedef struct {
     instrument_binding_kind_t kind;
     uint16_t offset;
     uint8_t parameter_type;
+    /*
+     * Special DSP writer tag (S073 Step 2).
+     *
+     * What:       IM_SPECIAL_* writer ID | IM_SPECIAL_OSC_* selector, or 0
+     *             for generic offset writes.
+     * Why:        stores the fixed row-to-setter mapping once and avoids the
+     *             runtime key-string search.
+     * Inputs:     BIND_SPECIAL() in the instrument tables.
+     * Outputs:    read by instrumentManager_writeSpecialRuntime().
+     * Accessors:  InstrumentManager.c.
+     * Affiliates: the layout guards below and EffectParamRows.h.
+     */
+    uint8_t special;
 } instrument_runtime_binding_t;
 
 #define INSTRUMENT_PARAM_FLAG_MORPHABLE       0x01u
@@ -155,6 +213,23 @@ typedef struct {
     instrument_mod_domain_t mod_domain;
     instrument_runtime_binding_t runtime;
 } ParamDescriptor;
+
+/*
+ * Descriptor layout guards (S073 Step 2).
+ *
+ * What:       pins the binding and descriptor sizes so the new tag consumes
+ *             existing padding rather than growing every flash table.
+ * Why:        a silent table-size increase would invalidate the S0/flash
+ *             budget claim.
+ * Inputs:     compiler ABI layout.
+ * Outputs:    compile-time errors when the layout changes.
+ * Accessors:  the compiler.
+ * Affiliates: instrument_runtime_binding_t.special.
+ */
+_Static_assert(sizeof(instrument_runtime_binding_t) == 6u,
+               "instrument_runtime_binding_t must stay 6 bytes");
+_Static_assert(sizeof(ParamDescriptor) == 28u,
+               "ParamDescriptor must stay 28 bytes");
 
 #define INSTRUMENT_MENU_EMPTY 0xffu
 #define INSTRUMENT_MENU_SKIP  0xfeu
@@ -551,5 +626,17 @@ void *instrumentManager_runtimeInstance(uint8_t slot);
 uint8_t instrumentManager_writeRuntime(uint8_t slot,
                                        const ParamDescriptor *descriptor,
                                        instrument_param_value_t value);
+
+/*
+ * Diagnostic proof of special-writer tags (S073 Step 2).
+ *
+ * What:       compares every descriptor tag with the original key classifier.
+ * Why:        proves the flash tags reproduce the pre-S073 writer mapping.
+ * Inputs:     the immutable instrument registry.
+ * Outputs:    mismatch count, clamped to 9; zero is pass.
+ * Accessors:  main.c's existing DEV_MODE_DIAGNOSTIC boot screen.
+ * Affiliates: check_special_tags.py and the tagged parameter tables.
+ */
+uint8_t instrumentManager_specialTagSelfCheck(void);
 
 #endif

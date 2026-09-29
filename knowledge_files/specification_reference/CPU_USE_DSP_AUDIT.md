@@ -657,36 +657,40 @@ which correctly remain in SRAM1.
     (imperceptible for a drum machine). Straightforward config.h change, but
     audit all `uint8_t` loop counters first (128 still fits in uint8_t).
 
-### Session 073 additions (planned in `S073_CPU_USE_DSP_REDUCTION_REFACTOR.md`)
+### Session 073 additions (implemented 2026-09-28; see `S073_CPU_REDUCTION_IMPLEMENTATION.md`)
 
 Estimates are static and cover the worst case. Class is the sound-impact
 class defined in the Session 073 section above.
 
-16. **PLANNED (S073 Step 0): per-stage DWT profiler, worst-case stress
-    Scene, and host golden harness.** This is a prerequisite for everything
-    below. The profiler is diagnostic-only, and its RAM needs user
-    acknowledgement.
-17. **PLANNED (S073 Step 1): batch the ZDF filter divisions**, for both the
-    voice int16 path and the Effect float path. 6 → 2 divisions per sample
-    (LP 6 → 3). Class S1, host-verified. Saves about 6–7 % of the CPU.
-18. **PLANNED (S073 Step 2): string-free descriptor special writers.** Fix
-    each descriptor's writer ID at compile time instead of running the
-    strcmp/strstr chain on every LFO, Morph and velocity write. Class S0.
-    Saves about 1.5–4.5 % in LFO-heavy Scenes, plus foreground Morph time.
-19. **PLANNED (S073 Step 3): DMA pack as rotated 32-bit stores, with MPU
-    region 1 changed to Normal non-cacheable.** Class S0. Saves about 1 % and
-    shortens the ISR.
-20. **PLANNED (S073 Step 4): fused voice post-chain, with distortion bypassed
-    when shape is 0.** Class S2. Saves about 1.5–3 %, more when drive is off.
-21. **PLANNED (S073 Step 5): dry path and FX send in one mixer pass.**
-    Class S0. Saves about 1 % when the Effect is active.
-22. **PLANNED (S073 Step 6): wavetable octave selection by threshold table
-    instead of `log2f()`.** Class S0 except exactly at a boundary. Saves
-    about 0.5 %.
-23. **OPTIONAL (S073 Step 7): silence gating for idle voices.** Class S3.
-    Large average saving, no worst-case saving. Off by default so the render
-    budget stays known (see item 11).
-24. **OPTIONAL (S073 Step 8): software PRNG for audio-rate noise.**
-    Class S3. Small saving; needs 4 B of RAM.
+16. **DONE (S073 Step 0): host golden harness and ARM codegen checks.** The
+    per-stage DWT profiler was not built per F-5; the worst-case Scene and
+    hardware measurements remain user-owned.
+17. **DONE (S073 Step 1): batched ZDF divisions** for both the voice int16
+    path and Effect float path. The full host grid covers 276,480,000 samples
+    per variant; S1 passed at 91.69 dB int16 / 86.55 dB float, with all >16-LSB
+    cases confined to the cutoff 0.8/resonance 0.98 self-oscillating family.
+    ARM object `vdiv` count is 81 → 39.
+18. **DONE (S073 Step 2): string-free descriptor special writers.** The
+    compile-time tags classify 155 registry rows with zero mismatches against
+    the old classifier. Class S0.
+19. **DONE (S073 Step 3): DMA pack as rotated 32-bit stores, with MPU region
+    1 changed to Normal non-cacheable.** The host pack comparison reports zero
+    differing bytes. Class S0; hardware ordering and audio regression remain
+    user-owned.
+20. **DONE (S073 Step 4): fused voice post-chain.** The constant-cost fused
+    paths preserve the distortion calculation and report zero differing host
+    samples; ARM operation-sequence checks MATCH. Class S0.
+21. **DONE (S073 Step 5): dry path and FX send in one mixer pass.** The host
+    comparison reports zero differing samples. ARM value-operation multisets
+    MATCH after accounting for the one shared input conversion; the selected
+    DAC1-stereo loop reports 55 old versus 44 combined instructions. Class S0.
+22. **DONE (S073 Step 6): wavetable octave selection by threshold table
+    instead of `log2f()`.** The exhaustive host check reports 16 mismatches,
+    all within 2 ulps and 0.000404 cents of an octave edge. Class S0 except
+    those boundary choices.
+23. **REJECTED (S073 Step 7): silence gating for idle voices.** It violates
+    the constant-CPU policy and was not implemented.
+24. **REJECTED (S073 Step 8): software PRNG for audio-rate noise.** It would
+    change the noise character and add state; the hardware RNG remains in use.
 25. **NOT RECOMMENDED:** the items in the Session 073 "Checked and rejected"
     table.

@@ -40,6 +40,7 @@
 #include "squareRootLut.h"
 #include "modulationNode.h"
 #include "InstrumentManager.h"
+#include "voicePostChain.h"
 // #include "TriggerOut.h"
 
 
@@ -236,29 +237,23 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 	calcNextOscSampleBlock(&voice->osc,transBuf,size,(1.f-voice->mix));
 	//--AS apply filter to synthesized sound as well here if desired, or combine code for more efficiency
 
-	uint8_t j;
-	/* Amp EG (and velocity) only; channel volume is applied by the mixer. */
-	if(voice->volumeMod)
+	/*
+	 * Fused Snare post-chain (S073 Step 4).
+	 *
+	 * What:       mix gain, saturating add, amp gain and distortion in one pass.
+	 * Why:        removes one intermediate post-chain pass while preserving
+	 *             the old int16 conversion and saturation points (S0).
+	 * Inputs:     filtered buf, transBuf, mix, volumeMod/velo/EG and distortion.
+	 * Outputs:    pre-volume buf.
+	 * Accessors:  this render function.
+	 * Affiliates: voicePostChain.h and the Step 4 host/ARM checks.
+	 */
 	{
-		for(j=0;j<size;j++)
-		{
-			//add filter to buffer
-			buf[j] *= voice->mix;
-			buf[j] = bufferTool_satAdd16(buf[j], transBuf[j]);
-			buf[j] *=  voice->velo * voice->egValueOscVol;
-		}
+		const float ampGain = voice->volumeMod
+			? voice->velo * voice->egValueOscVol
+			: voice->egValueOscVol;
+		voicePost_mixAddGainDist(buf, transBuf, voice->mix, ampGain,
+		                         &voice->distortion, size);
 	}
-	else
-	{
-		for(j=0;j<size;j++)
-		{
-			//add filter to buffer
-			buf[j] *= voice->mix;
-			buf[j] = bufferTool_satAdd16(buf[j], transBuf[j]);
-			buf[j] *=  voice->egValueOscVol;
-		}
-	}
-
-	calcDistBlock(&voice->distortion,buf,size);
 }
 //------------------------------------------------------------------------

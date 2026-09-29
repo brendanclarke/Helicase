@@ -38,6 +38,8 @@
 #define DISTORTION_H_
 //--------------------------------------------------
 #include "stm32f4xx.h"
+#include <math.h>
+#include <stdint.h>
 //--------------------------------------------------
 typedef struct DistStruct
 {
@@ -50,5 +52,25 @@ void setDistortionShape(Distortion *dist, uint8_t shape);
 void calcDistBlock(const Distortion *dist, int16_t* buf, const uint8_t size);
 //--------------------------------------------------
 float distortion_calcSampleFloat(const Distortion *dist, float x);
+//--------------------------------------------------
+/*
+ * Distortion curve for one int16 sample (S073 Step 4).
+ *
+ * What:       evaluates the existing (1+k)x/(1+k|x|) curve and preserves its
+ *             final int16 conversion, without a shape-zero bypass.
+ * Why:        fused voice post-chains need identical sound and constant cost;
+ *             the division is intentionally retained.
+ * Inputs:     distortion shape and one int16 sample.
+ * Outputs:    distorted int16 sample.
+ * Accessors:  calcDistBlock() and voicePostChain.h.
+ * Affiliates: BufferTools.h and the Step 4 golden/ARM checks.
+ */
+static inline int16_t distortion_curveSample16(const Distortion *dist,
+										const int16_t in)
+{
+	float x = in/32767.f;
+	x = (1+dist->shape)*x/(1+dist->shape*fabsf(x));
+	return (int16_t)(int32_t)(x*32767);
+}
 //--------------------------------------------------
 #endif /* DISTORTION_H_ */

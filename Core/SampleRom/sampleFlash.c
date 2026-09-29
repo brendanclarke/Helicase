@@ -128,6 +128,32 @@ static int flash_wait(uint32_t timeout_units)
     return (FLASH_SR & FLASH_SR_ERR_MSK) ? 2 : 0;
 }
 
+/*
+ * Sample-flash floor (S073: sector 7; sectors 1..6 are the application).
+ *
+ * SAMPLE_FIRST_SECTOR and SAMPLE_ROM_START_ADDRESS (SampleMemory.h) must name
+ * the same place, and the linker's __sample_flash_start must equal both: it is
+ * where the linker stops the application image. The static assert ties the
+ * two macros together (F765 single bank: sectors 5..11 are 256 KB from
+ * 0x08040000). floor_matches_linker() is the runtime interlock: if the
+ * macro and the linker symbol ever drift apart, every erase and write is
+ * refused rather than risking application code. It is a compare of two
+ * constants and needs no RAM.
+ */
+_Static_assert(SAMPLE_FIRST_SECTOR >= 6u && SAMPLE_FIRST_SECTOR <= 11u,
+               "sample floor must be a 256 KB sector above the application");
+_Static_assert(SAMPLE_ROM_START_ADDRESS ==
+               0x08040000UL + (SAMPLE_FIRST_SECTOR - 5u) * 0x40000UL,
+               "SAMPLE_ROM_START_ADDRESS must be the base of SAMPLE_FIRST_SECTOR");
+
+extern const uint8_t __sample_flash_start[];
+
+static int floor_matches_linker(void)
+{
+    return (uint32_t)__sample_flash_start == SAMPLE_ROM_START_ADDRESS &&
+           sample_flash_sectors[SAMPLE_FIRST_SECTOR].base == SAMPLE_ROM_START_ADDRESS;
+}
+
 static uint8_t sector_for_addr(uint32_t addr)
 {
     for (int i = 11; i >= 0; i--) {
@@ -167,7 +193,9 @@ void sampleFlash_invalidateRange(uint32_t address, uint32_t bytes)
 
 static int sampleFlash_eraseSector(uint8_t sector)
 {
-    if (sector < 6u || sector > 11u)
+    if (!floor_matches_linker())
+        return -1;
+    if (sector < SAMPLE_FIRST_SECTOR || sector > 11u)
         return -1;
 
     uint32_t primask = irq_save();
@@ -199,7 +227,7 @@ static int sampleFlash_eraseSector(uint8_t sector)
 
 int sampleFlash_eraseAllSamples(void)
 {
-    for (uint8_t sector = 6; sector <= 11; sector++) {
+    for (uint8_t sector = SAMPLE_FIRST_SECTOR; sector <= 11; sector++) {
         int rc = sampleFlash_eraseSector(sector);
         if (rc != 0)
             return rc;
@@ -211,10 +239,12 @@ int sampleFlash_writeWord(uint32_t address, uint32_t data)
 {
     uint8_t sector;
 
+    if (!floor_matches_linker())
+        return -1;
     if ((address & 3u) != 0 || !addr_in_sample_region(address))
         return -1;
     sector = sector_for_addr(address);
-    if (sector < 6u || sector > 11u)
+    if (sector < SAMPLE_FIRST_SECTOR || sector > 11u)
         return -1;
 
     uint32_t primask = irq_save();

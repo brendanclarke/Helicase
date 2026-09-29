@@ -81,6 +81,7 @@
 #include "EffectsManager.h"
 
 #include "memtest.h"
+#include "flashImage.h"
 #include <stdint.h>
 
 
@@ -302,13 +303,26 @@ static void boot_formatDec(char *dst, uint32_t value, uint8_t width)
 static void boot_showFxBufDiagnostic(void)
 {
     fx_share_t share;
-    char row1[17] = "FxBf 000K u00   ";
+    char row1[17] = "FxBf 000K u00 s0";
     char row2[17] = "Shr  000K st0 r0";
     uint8_t registry_code;
 
     fxbuf_effectShare(&share);
     boot_formatDec(&row1[5], fxbuf_arenaBytes() / 1024u, 3u);
     boot_formatDec(&row1[11], fxbuf_unitsInUse(), 2u);
+    /*
+     * S073 Step 2 special-tag self-check digit.
+     *
+     * What:       displays s<n>, where n is the clamped count of descriptor
+     *             rows whose flash tag differs from the old key rules.
+     * Why:        gives diagnostic boots an on-device proof of the stringless
+     *             writer migration without adding a screen or RAM allocation.
+     * Inputs:     instrumentManager_specialTagSelfCheck().
+     * Outputs:    row1[15].
+     * Accessors:  DEV_MODE_DIAGNOSTIC boot path only.
+     * Affiliates: the tagged parameter tables and host tag checker.
+     */
+    row1[15] = (char)('0' + (int)instrumentManager_specialTagSelfCheck());
     boot_formatDec(&row2[5], share.bytes / 1024u, 3u);
     boot_formatDec(&row2[12], fxbuf_devSelfTestResult(), 1u);
     registry_code = effects_registryCheckResult();
@@ -512,6 +526,16 @@ int main(void)
     adc_init();
     led_init();
     time_initTimer();
+
+    /*
+     * Verify the flash image before anything else depends on it (S073).
+     *
+     * Inputs: the stamped per-sector CRCs at the end of the load image.
+     * Output: silent on success; otherwise an LCD report held until BAR1.
+     * Why here: LCD, TIM6 ticks and PB7 (din_init) are live, and no sample,
+     * DSP or storage code has run yet. Affiliates: flashImage.h.
+     */
+    flashImage_verifyAtBoot();
 
     triggerJacks_init();
     sampleMemory_init();

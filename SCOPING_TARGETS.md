@@ -1291,6 +1291,21 @@ Check linker checks, image packaging, bootloader/update behavior, and the
 sample-flash boundary together. Establish a tested way to handle further
 growth without assuming application code can occupy sample flash.
 
+**Session 073 resolution (implemented; hardware test pending).**
+
+- Sector 6 moved from samples to the application. The window is now
+  `0x08008000..0x080BFFFF` (736 KiB), and samples start at `0x080C0000`.
+- The bootloader study and probe tests were skipped by user decision.
+  Evidence in hand:
+  - normal-size updates leave sample sectors intact;
+  - the factory app is 275,832 B and contains no flash-writing code.
+- Protection for the untested case: every boot checks a stamped CRC32 per
+  application sector. An unerased or truncated sector is reported by
+  number (`Img BAD s:.....6`).
+- `FLASH_GROWTH_DRILL_KB` in `config.h` builds an image that deliberately
+  reaches sector 6.
+- Details: `S073_FLASH_EXPANSION.md` §11.
+
 Move the 8,194-byte `sine_table` from DTCM into application flash in this
 phase. Test several simultaneous sine-based voices at different high pitches
 for audio and timing regressions, then measure recovered DTCM and additional

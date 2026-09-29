@@ -21248,7 +21248,7 @@ static void filesystem_blockPoll(void)
      * (filesystem_installSampleFolderBlocking() -> filesystem_blockOpen/
      * blockChdir/installOneSample) runs entirely through this path and can
      * legitimately take far longer than the IWDG's ~32.8 s period while it
-     * erases six 256 KB flash sectors and streams megabytes over bit-bang SPI.
+     * erases five 256 KB flash sectors and streams megabytes over bit-bang SPI.
      * Without a feed here that operation would be reset part-way through a
      * sampleFlash erase/program, which risks corrupting the sample-FLASH
      * region rather than merely rebooting. Feeding here keeps the watchdog

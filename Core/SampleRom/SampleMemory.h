@@ -22,13 +22,15 @@
  *      SAMPLE_PAGE_SIZE         = 0x00020000 (128 KB / sector)
  *
  *    Ours (F765, 2MB, validated by memtest in Session 6):
- *      SAMPLE_ROM_START_ADDRESS = 0x08080000   (start of sector 6)
+ *      SAMPLE_ROM_START_ADDRESS = 0x080C0000   (start of sector 7, S073)
  *      SAMPLE_INFO_START_ADDRESS = metadata area below top of sector 11
- *      SAMPLE_ROM_SIZE          = ~1.5 MB minus info/name tables
+ *      SAMPLE_ROM_SIZE          = ~1.25 MB minus info/name tables
  *      SAMPLE_PAGE_SIZE         = 0x00040000   (256 KB / sector)
  *
- *    Sector 6 happens to start at 0x08080000 on F765 — the original
- *    constant is preserved by coincidence. Everything else changes.
+ *    Until Session 073 samples started at sector 6 (0x08080000, the
+ *    original constant by coincidence). S073 gave sector 6 to the
+ *    application; old installs are rejected by sampleMemory_infoValid()
+ *    because their first entry sits below the new floor.
  *
  * 2. REAL IMPLEMENTATION with guarded silence fallback.
  *
@@ -68,11 +70,15 @@
 #include <stdint.h>
 
 /* ---- Flash layout for F765VI single-bank 2MB ----
- * Sectors 6..11 (6 × 256KB = 1.5 MB) reserved for sample storage.
- * Sample audio data starts at sector 6 base. Info table sits at the
- * top of sector 11 so it's adjacent to the audio data — same single-
- * sector-update optimization the original used. */
-#define SAMPLE_ROM_START_ADDRESS    ((uint32_t)0x08080000)   /* sector 6 base */
+ * Sectors 7..11 (5 × 256KB = 1.25 MB) reserved for sample storage; sectors
+ * 1..6 are the application (S073). Sample audio data starts at sector 7
+ * base. Info table sits at the top of sector 11 so it's adjacent to the
+ * audio data — same single-sector-update optimization the original used.
+ * SAMPLE_ROM_START_ADDRESS must equal the linker's __sample_flash_start
+ * (STM32F765VIHx_FLASH.ld); sampleFlash.c refuses to erase or write if they
+ * differ, and asserts that it is the base of SAMPLE_FIRST_SECTOR. */
+#define SAMPLE_ROM_START_ADDRESS    ((uint32_t)0x080C0000)   /* sector 7 base */
+#define SAMPLE_FIRST_SECTOR         7u   /* lowest sector sample code may erase */
 #define SAMPLE_PAGE_SIZE            ((uint32_t)0x00040000)   /* 256 KB / sector on F765 */
 #define SAMPLE_MAX_COUNT            120u
 #define SAMPLE_DISPLAY_NAME_LEN     8u
@@ -89,7 +95,7 @@
 #define SAMPLE_NAME_START_ADDRESS   ((uint32_t)(0x08200000 - SAMPLE_NAME_SIZE))
 #define SAMPLE_INFO_START_ADDRESS   ((uint32_t)(SAMPLE_NAME_START_ADDRESS - SAMPLE_INFO_SIZE))
 
-/* Audio region runs from sector 6 base to just below the info table. */
+/* Audio region runs from sector 7 base to just below the info table. */
 #define SAMPLE_ROM_SIZE             ((uint32_t)(SAMPLE_INFO_START_ADDRESS - SAMPLE_ROM_START_ADDRESS))
 
 #define SAMPLE_INFO_LOOP_FLAG       ((uint32_t)0x80000000)

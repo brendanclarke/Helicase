@@ -56,6 +56,7 @@ SRCS = \
   main.c \
   Core/Hardware/AudioCodecManager.c \
   Core/Hardware/memtest.c \
+  Core/Hardware/flashImage.c \
   Core/Hardware/triggerJacks.c \
   Core/Hardware/clocks.c \
   Core/Hardware/timebase.c \
@@ -163,15 +164,20 @@ OBJS = $(patsubst %.c,$(BUILD)/%.o,$(patsubst %.s,$(BUILD)/%.o,$(SRCS))) \
 # -----------------------------------------------------------------------
 all: $(BUILD)/$(TARGET).bin
 	$(SZ) $(BUILD)/$(TARGET).elf
-	# Link budget (Session 072): flash headroom vs the 480 KiB application
-	# region and the DTCM FX arena size. Report only; the linker ASSERTs in
-	# STM32F765VIHx_FLASH.ld are the enforcing guards.
+	# Link budget (Session 072): flash headroom vs the 736 KiB application
+	# region (S073) and the DTCM FX arena size. Report only; the linker ASSERTs
+	# in STM32F765VIHx_FLASH.ld are the enforcing guards.
 	python3 tools/link_budget.py $(PREFIX)nm $(BUILD)/$(TARGET).elf
 
+# The stamp step (S073) writes the per-sector CRCs that flashImage.c checks
+# at boot; if the layout is not what the linker script promises, the binary
+# is deleted so no unstamped image can be packaged.
 $(BUILD)/$(TARGET).bin: $(BUILD)/$(TARGET).elf
 	$(CP) -O binary -S $< $@
+	python3 tools/stamp_image_check.py $(PREFIX)nm $< $@ || { rm -f $@; exit 1; }
 
-$(BUILD)/$(TARGET).elf: $(OBJS)
+# The linker script is a prerequisite so layout edits relink without a clean.
+$(BUILD)/$(TARGET).elf: $(OBJS) STM32F765VIHx_FLASH.ld
 	$(CC) $(OBJS) $(LDFLAGS) -o $@
 
 # DSP sources compiled with -Ofast (more specific rule wins over the generic one below)
