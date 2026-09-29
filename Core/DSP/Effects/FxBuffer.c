@@ -54,7 +54,7 @@ _Static_assert(FXBUF_VOICE_UNIT_COUNT ==
                    FXBUF_VOICE_SLOT_COUNT * FXBUF_VOICE_UNITS_PER_SLOT,
                "12 units = 6 slots x 2 (user decision A29)");
 _Static_assert(sizeof(fxbuf_handoff_t) == 180u,
-               "handoff size is recorded in SRAM_MANIFEST.md; update both");
+               "handoff size is recorded in STORAGE_SRAM_MANIFEST.md; update both");
 
 /*
  * FxBuffer resident bookkeeping (SRAM1 .bss, 28 B including padding).

@@ -7,7 +7,7 @@
  * Why:        Step 4 is S0: every stored int16 sample must be identical.
  * Inputs:     generated frozen/current fragments from the Makefile target.
  * Outputs:    differing sample count; nonzero on any mismatch.
- * Accessors:  tools/dsp_golden/Makefile postchain.
+ * Accessors:  tools/dsp_test/Makefile postchain.
  * Affiliates: voicePostChain.h, BufferTools.h and distortion.h.
  */
 #include <stdint.h>

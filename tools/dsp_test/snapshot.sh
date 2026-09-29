@@ -2,16 +2,16 @@
 # Freeze the pre-change DSP sources for the S073 golden harness (Step 0).
 #
 # What:       copies every source file the CPU steps will edit into
-#             tools/dsp_golden/frozen/, preserving the relative path.
+#             tools/dsp_test/frozen/, preserving the relative path.
 # Why:        the old side must remain the exact pre-change source text,
 #             independent of commits and later working-tree edits.
 # Inputs:     the working tree before Step 1. Run once from the repository root.
-# Outputs:    tools/dsp_golden/frozen/<same relative paths>.
+# Outputs:    tools/dsp_test/frozen/<same relative paths>.
 # Accessors:  the implementer or user, once, at Step 0.
 # Affiliates: extract.py and the Makefile harness targets.
 set -eu
 cd "$(dirname "$0")/../.."
-DEST=tools/dsp_golden/frozen
+DEST=tools/dsp_test/frozen
 [ -e "$DEST" ] && { echo "snapshot exists: $DEST (delete it deliberately to refreeze)"; exit 1; }
 for f in \
   Core/DSPAudio/ResonantFilter.c Core/DSPAudio/ResonantFilter.h \

@@ -4,12 +4,12 @@
 
 This is the authoritative live-memory, allocator, PAT4 interchange, Pattern
 Stack Service, and Pattern AutoSave reference through Session 072 Step 9 (all
-implemented Pattern phases).
+implemented Pattern phases; unchanged by Session 073).
 Historical Session 062/063/064 plans describe how the design was reached but
 do not override this file.
 Filesystem hierarchy and HCNAMES grammar are in `FILESYSTEM_SPEC.md`; scalar
 and Pattern AutoSave scheduling/recovery are in `AUTOSAVE.md`; exact linked
-memory totals are in `SRAM_MANIFEST.md`.
+memory totals are in `STORAGE_SRAM_MANIFEST.md`.
 
 Implemented and hardware accepted:
 

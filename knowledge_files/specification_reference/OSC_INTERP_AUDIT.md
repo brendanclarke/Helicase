@@ -5,6 +5,11 @@ interpolation. Its persistence note was updated in Session 040: oscillator
 interpolation is an allowlisted root settings.cfg value, not a legacy glo.cfg
 dependency. Current filesystem policy lives in FILESYSTEM_SPEC.md.
 
+Session 073 note: the oscillator as a whole (waveforms, octave selection,
+frequency cache, FM, noise, ITCM placement, costs) is described in
+`INSTRUMENTS_DSP_REFERENCE.md` §6.1. Interpolation itself is unchanged; the
+per-block limit is `OSC_WAVE_INTERP_MAX_ACTIVE` (2).
+
 ## Goal
 Add simple/fast/dirty oscillator waveform interpolation for modulation-driven waveform automation, with a global ON/OFF setting that persists in global save/load.
 

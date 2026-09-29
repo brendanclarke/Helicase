@@ -46,9 +46,10 @@ _______
 1. LXR-02 bootloader (LXRV2) loads from flash
 2. Bootloader reads SD card for `LXRV2_lxr02.img`
 3. Image format: `[8B magic "LXRV2IMG"][4B payload size LE][4B checksum LE][payload]`
-4. App loaded at 0x08008000, SP=0x20080000
+4. App loaded at 0x08008000 (window 0x08008000–0x080BFFFF, 736 KiB, since Session 073), SP=0x20080000
 5. Boot by holding main encoder button while powering on
-6. Packager: `tools/build_lxrv2_img.py`
+6. Packager: `tools/build_lxrv2_img.py`; the `.bin` rule stamps per-sector CRCs (`tools/stamp_image_check.py`) that the firmware checks at every boot (`Img BAD s:…` names a bad sector)
+7. User samples live in on-chip flash sectors 7–11 (`0x080C0000`), installed with Load:[Samples]
 
 ## Toolchain
 ```
@@ -67,7 +68,11 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
 ├── STM32F765VIHx_FLASH.ld
 ├── requirements.txt
 ├── tools/
-│   └── build_lxrv2_img.py          ← packages ELF → LXRV2_lxr02.img
+│   ├── build_lxrv2_img.py          ← packages the .bin → LXRV2_lxr02.img
+│   ├── stamp_image_check.py        ← stamps per-sector CRCs into lxr02.bin (S073)
+│   ├── link_budget.py              ← flash/ITCM/DTCM/arena report after every build
+│   ├── decode_devlogs.py           ← decodes /bootlog.bin and /asavetrc.bin
+│   └── dsp_test/                   ← host DSP test bench (DSP_TEST.md, S073)
 ├── build/                          ← generated, not in VCS
 ├── knowledge_files/
 │   ├── SESSION_HANDOFF_TEMPLATE.md ← template for writing new session handoff logs
@@ -179,6 +184,10 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
 | Sequencer / DSP architecture plans? | `knowledge_files/hardware_archive/AVR_TO_F765_MIGRATION.md` |
 | Current known issues and reminders? | `MEMORY.md` |
 | Effect system (FX bus, Effect types, FX sequencer)? | `knowledge_files/specification_reference/EFFECTS_BUS_REFERENCE.md` |
+| How the instrument DSP and modulation work, what they cost, how to extend them? | `knowledge_files/specification_reference/INSTRUMENTS_DSP_REFERENCE.md` |
+| Mixer, FX bus and Effect DSP, output pipeline, costs? | `knowledge_files/specification_reference/EFFECTS_MIXER_DSP_REFERENCE.md` |
+| Flash, sample flash and RAM layout? | `knowledge_files/specification_reference/STORAGE_SRAM_MANIFEST.md` |
+| Testing a DSP change on the host? | `tools/dsp_test/DSP_TEST.md` |
 | Module/API ownership and specifications? | `knowledge_files/specification_reference/` (indexed in `MEMORY.md`) |
 
 ## Confirmed Working Hardware
@@ -200,10 +209,10 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
 - OUT1 L/R jack detect (PD6/PD7, input pull-up, no plug=LOW, plug inserted=HIGH, sampled by foreground service)
 - OUT2 L/R jack detect (PB4/PB6, no plug=LOW, plug inserted=HIGH, sampled by foreground service)
 - I-Cache enabled (16KB, ICIALLU invalidate)
-- D-Cache enabled (16KB) with MPU (WT for SRAM, SO for DMA buffers)
-- DMA buffers in `.dma_nocache` linker section (Strongly-Ordered via MPU)
+- D-Cache enabled (16KB) with MPU (WT for SRAM, Normal non-cacheable for DMA buffers since Session 073)
+- DMA buffers in `.dma_nocache` linker section (MPU region 1, Normal non-cacheable; the DMA pack ISR ends with `DSB`)
 - `audioOutBuffer` in DTCM (INDTCMZ, single-cycle access)
-- Flash sector layout probed: sectors 5-11 blank, app in sector 2, single-bank confirmed
+- Flash sector layout probed (Session 007): single-bank confirmed. Current layout: bootloader sector 0, application sectors 1–6, samples sectors 7–11 (`knowledge_files/specification_reference/STORAGE_SRAM_MANIFEST.md`)
 
 ### Clock Configuration (confirmed)
 - HSE = 16MHz (ZQ1 crystal confirmed)

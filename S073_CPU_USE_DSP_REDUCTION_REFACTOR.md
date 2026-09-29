@@ -82,6 +82,14 @@ checked with what the project already has.
     profiler (F-5).
   - **D4** (a 4 B DTCM PRNG) is **not needed**: Step 8 is rejected.
 - Every step's gate confirms that `bss`/`data` are unchanged.
+- **Recorded after implementation (2026-09-29): ITCM +400 B of code.**
+  After Step 6, `osc_setFreq()` (`INITCM`) is linked as its own function in
+  ITCM. Before, it was inlined into its callers in flash.
+  - Size: 400 B, plus an 8 B flash veneer.
+  - Region: ITCM, 3,768 → 4,168 / 16,384 B.
+  - Lifetime: static code.
+  - Owner: `Oscillator.c`.
+  - `bss`/`data` are unchanged (§13.1, §13.6).
 
 ---
 
@@ -136,7 +144,7 @@ These exist today and are kept by user decision. The plan adds none.
 | Path | Where | Cheap state |
 |---|---|---|
 | FX bus off | `mixer.c` FX path (S072) | Effect `off`: no bus clear, sum, convert or process |
-| Per-voice send skip | `mixer_addVoiceToFxBus()` | `!fx_active`, or both send gains 0 |
+| Per-voice send skip | `mixer_calcNextSampleBlock()` slot loop (it was in `mixer_addVoiceToFxBus()`, which Step 5 removed) | `!fx_active`, or both send gains 0. Then the dry-only function runs instead of the combined dry + send function. The condition is unchanged. |
 | Effect coefficient recompute | `effects_service()` → `stereoFilter_writeParam()` | parameter unchanged |
 | Algorithm choice | filter type, oscillator waveform, Effect type | naive 2-pole filter; cheaper waveforms |
 
@@ -620,3 +628,154 @@ It would have changed the noise character. The hardware RNG read in
   Steps 7 and 8 as rejected, and Step 4 as S0 without the bypass.
 - Write the `073_SESSION_HANDOFF_LOG.md`.
 - This plan is then superseded by that log and the audit.
+
+---
+
+## 13. Implementation review (commit `692abf8`, 2026-09-29)
+
+**Verdict:** the code matches `S073_CPU_REDUCTION_IMPLEMENTATION.md` step by
+step, and every host and ARM codegen gate passes. The user's hardware test
+passed (2026-09-29, §13.7).
+
+### 13.1 Build and memory
+
+| Item | Baseline | After | Delta |
+|---|---|---|---|
+| `text` | 483,936 | 486,688 | +2,752 |
+| `data` / `bss` | 416 / 426,336 | 416 / 426,336 | 0 (§0.4 holds) |
+| Flash payload (736 KiB window) | 484,352 | 487,104 of 753,664 | +2,752 (266,560 B free) |
+| ITCM | 3,768 / 16,384 | 4,168 / 16,384 | **+400** (§13.4, finding 2) |
+| DTCM statics | 4,448 | 4,448 | 0 |
+
+- The build (`make clean` + `make all`) finishes with no new warnings.
+- The `DEV_MODE_DIAGNOSTIC` build also compiles and links. Its only warning
+  is the unused `boot_showHcnamesDiagnostic`, which was there before.
+- Per-function flash deltas, measured against a scratch build of the
+  pre-change tree:
+  - `mixer_calcNextSampleBlock`: +3,060 B (LTO inlines the combined mixer
+    loop and the fused post-chains into it);
+  - `SVF_calcBlockZDF`: +416 B;
+  - `SVF_calcBlockZDFFloat`: +304 B;
+  - the runtime writer (`writeRuntimeInternal`): +352 B;
+  - `pack_half`: −16 B;
+  - `log2f`: −208 B, because it is gone from the image;
+  - the descriptor tables are unchanged in size.
+
+### 13.2 Results per step
+
+All results come from the `tools/dsp_golden` targets. `selftest` (frozen
+code against itself) reports identical output, so the harness is valid.
+The 14 frozen files are byte-identical to `05bbd83`.
+
+| Step | Target(s) | Result | Class |
+|---|---|---|---|
+| 1. ZDF filter, batched divisions | `filter`, `armcheck-filter` | S1 PASS. int16 SDR 91.69 dB, float 86.55 dB. Every case over 16 LSB is in the self-oscillating family (cutoff 0.8, resonance 0.98). `vdiv` count 81 → 39. | S1, as approved |
+| 2. Descriptor special writers | `special_tags` | 155 rows, 0 mismatches against the old classifier. The `_Static_assert`s hold (binding 6 B, `ParamDescriptor` 28 B). `strcmp`/`strstr`/`strncmp` calls in the writer path: 22 → 0. | S0 |
+| 3. DMA word stores + MPU | `pack` | 0 differing bytes. The final ELF's `pack_half` has 2 `str` + 2 `ror` and no `strh`. `dsb` ends `pack_audio_half`. The buffers are 4-byte aligned (`0x2002001c`, `0x2002061c`). MPU region 1 is TEX=001, C=0, B=0, S=1, XN=1. | S0 |
+| 4. Fused voice post-chain | `postchain`, `armcheck-postchain` | 0 differing samples. ARM MATCH for Drum, Snare, and Cymbal/HiHat. The distortion division stays (`mixer_calcNextSampleBlock` `vdiv` 7 → 7). `strh` 26 → 18. | S0 |
+| 5. Mixer dry + send in one pass | `mixer`, `armcheck-mixer` | 0 differing samples. ARM MATCH for all four dry × send combinations and for the default (send-only) case (§13.6). Instructions per sample, dry + send against the combined loop: single-output dry 55 → 44 (mono-input send) and 69 → 59 (stereo-input send); stereo dry 73 → 63 and 87 → 78. `mixer_addVoiceToFxBus()` is removed; the `default` routing case is reproduced. | S0 |
+| 6. Octave selection by table | `octave` | Exhaustive check: 16 mismatches, all within 2 ulps of an edge (0.000404 cents). The acceptance target was ≤ 8 ulps; it is met. `log2f` is gone from the image. | S0 except those edge choices, as approved |
+
+### 13.3 §0.1 code review (constant CPU)
+
+- **No new data- or parameter-dependent skip, bypass or early-out.**
+- The Drum velocity stage is now constant-cost: `volumeMod ? velo : 1.0f`
+  goes into a multiply that always runs. The conditional
+  `if (voice->volumeMod)` stage is gone.
+- The only conditional at the mixer call site is the existing send condition
+  (`fx_active` and a non-zero send ramp), kept by user decision (§3.1, F-2).
+  The combined function runs exactly when the old send used to run.
+  `mixer_voice_last_gain` and `mixer_send_last_gain` still update every
+  block.
+- The filter's type switch is the existing algorithm choice (§3.1).
+- Steps 7 and 8 are not implemented.
+
+### 13.4 Findings
+
+1. **DONE (§13.6): audit item 21 had the wrong label.**
+   `CPU_USE_DSP_AUDIT.md` item 21 calls the "55 old versus 44 combined" pair
+   the "DAC1-stereo loop". The loops it measured (`old_dry:1` +
+   `old_send:0` against `new_combined:0`) are a single-output routing: the
+   dry loop has one pan multiply. A later check found that this pair also
+   has a mono-input send. The full set of four combinations is in §13.6.
+2. **DONE (§13.6): ITCM +400 B.** `osc_setFreq` (placed in ITCM) now has a standalone copy
+   instead of being inlined into every caller. §12 expected ITCM to be
+   unchanged. Details for the RAM Allocation Approval Policy:
+   - 400 B;
+   - region: ITCM;
+   - lifetime: static code;
+   - owner: `Oscillator.c` `osc_setFreq()`.
+
+   That leaves 12,216 B of ITCM free.
+3. **DONE (§13.6). Cosmetic:** at `mixer.c:966`, the `sampleData` argument
+   line was one tab short of its neighbours.
+4. **Tracked binaries:** `LXRV2_update_v1.70.img` (the Erica factory
+   firmware) is tracked by git. `build/LXRV2_lxr02.img` is also tracked,
+   and it is currently deleted in the working tree.
+5. **DONE (§13.6): `fpseq.py --shared-op`.** The implementation added this option. It
+   removes named conversions from the reference multiset before the
+   comparison. It is used only for the mixer, for one `vcvt.f32.s32` and one
+   `vcvt.f32.u32`. The old dry and send functions each converted the same
+   input sample and the same loop index; the combined loop converts them
+   once. This is legitimate, because the conversions are exact and
+   identical, but it does loosen that one check.
+
+### 13.5 User-owned hardware gates (result in §13.7)
+
+- **Step 1:** worst-case Scene for 10 minutes with no new underruns; kit
+  listening, plus a high-resonance self-oscillating patch.
+- **Step 2:** the diagnostic self-check on hardware (the `s` digit on the
+  `FxBf` row); Instrument Load, Kit Load, Scene switch, LFO rebind,
+  per-voice Morph, the HiHat closed/choke decay pair, and the slot-6 track-7
+  alternate decay.
+- **Step 3:** sliders and endless pots after the MPU change (the ADC DMA
+  shares the region); audio unchanged by ear.
+- **Step 4:** kit listening at drive 0 and drive max.
+- **Step 5:** the manual FX check (send and return in all fader modes, stereo
+  send panning, `flt` at high resonance and drive, Scene switch to `off`)
+  and the Effect budget.
+- **Step 6:** a pitch-sweep listening check.
+- **Closeout (§12):** write `073_SESSION_HANDOFF_LOG.md`. The audit item
+  21 correction and the ITCM record are done (§13.6).
+- **Outside this plan:** the `FLASH_GROWTH_DRILL_KB` knob is removed
+  (§13.6).
+
+### 13.6 Corrections done (2026-09-29)
+
+Findings 1, 2, 3 and 5, the send-condition documentation, and the drill
+knob. Finding 4 (tracked binaries) is unchanged.
+
+| Item | What was wrong | Correction |
+|---|---|---|
+| Finding 1: mixer instruction counts | The audit and the implementation notes called the measured pair "DAC1-stereo". It was a single-output routing with a mono-input send. The gate also checked only that one combination. | `CPU_USE_DSP_AUDIT.md` item 21 now has a table of all four combinations: single-output dry 55 → 44 / 69 → 59 and stereo dry 73 → 63 / 87 → 78 (mono / stereo-input send). The Makefile `armcheck-mixer` target now gates one loop of each combination plus the default case, 6 MATCH lines, and reports the four instruction counts. Its comment names each loop index. `S073_CPU_REDUCTION_IMPLEMENTATION.md` has corrections in its progress notes and in §9.4. |
+| Finding 2: ITCM +400 B | §0.4, the implementation notes ("No RAM was added") and the audit did not record it. | Recorded in §0.4, in audit item 22 (with the 8 B veneer and the before/after ITCM totals), and in the implementation notes. The cause is confirmed from the symbol tables: the baseline has no `osc_setFreq` symbol, and the new image has `osc_setFreq` at ITCM `0x00000000`, 400 B. |
+| Finding 3: indentation | `mixer.c:966` was one tab short. | Fixed. |
+| Finding 5: `--shared-op` | The allowance removed a named operation whenever the combined reference had one, even if only one old loop performed it. | `fpseq.py` now removes a shared operation only while at least one other `--ref` loop still performs it. Misuse exits with an error, which was tested with a send-only reference and with a doubled flag. The header and the in-code comment say that operand identity is the caller's claim, backed by the host harness. `armcheck-postchain` (3 MATCH) and `armcheck-filter` (`vdiv` 81 → 39) still pass. |
+| Send condition | §3.1 named the removed `mixer_addVoiceToFxBus()` as the location of the per-voice send skip. | §3.1 now names the slot loop in `mixer_calcNextSampleBlock()`. The condition itself is unchanged and existing (F-2). |
+| Drill knob | `FLASH_GROWTH_DRILL_KB` was still in `config.h`. | Removed from `config.h`, `flashImage.c` (the table, the hex helper and the OK screen) and the `flashImage.h` contract. `MEMORY.md`, `SCOPING_TARGETS.md`, `S073_FLASH_EXPANSION.md` §11 and `S073_POST_FLASH_MENU_BUGFIXES.md` (item C done) are updated. D-C1 (the boot image check) has not been decided; the check is left in place. |
+| Also | The `freqToTableIndex()` comment gave a stale line number (`Oscillator.c:904`). | The line number is removed. |
+
+**Verification:**
+
+- `make clean` + `make all`: the same 20 warnings as before, none from the
+  edited files.
+- Sizes: `text=486,688`, `data=416`, `bss=426,336`; flash 487,104 /
+  753,664 B; ITCM 4,168 B; DTCM statics 4,448 B.
+- `lxr02.bin` is byte-identical to the reviewed `692abf8` build (SHA-256
+  `1bd8be52…5fc82`). None of these edits changes the firmware image.
+- `make -C tools/dsp_golden armcheck-mixer`: host mixer 0 differing
+  samples, and 6 MATCH.
+
+### 13.7 Hardware test result (user, 2026-09-29)
+
+- **Result: OK.** The user's words: the hardware test "seems ok".
+- **CPU:** about **10 % less CPU use** on the user's worst-case Scene with
+  the dual-filter Effect (StereoFilter: two float ZDF instances, L/R).
+- The §1 estimate for Steps 1–6 was 9–14 % of the whole CPU recovered in the
+  worst case.
+- The saving comes from doing the same work with fewer operations, not from
+  skipping work (§0.1, §13.3). It therefore holds with every voice, send and
+  Effect active.
+- **Image:** the §13.6 corrections leave `lxr02.bin` byte-identical to the
+  `692abf8` build, so the result covers both trees.
+- **Still open:** the closeout (§12): write `073_SESSION_HANDOFF_LOG.md`.

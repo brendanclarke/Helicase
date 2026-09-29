@@ -6,7 +6,9 @@ What:       disassembles an ARM object and compares backward-branch loop
 Why:        an S0 host result must also retain the target's per-sample float
             operation sequence under -Ofast.
 Inputs:     --obj, repeated --ref/--new function[:loop], optional --report and
-            --all, and explicit --shared-op allowances for fused inputs.
+            --all, and explicit --shared-op allowances for fused inputs (each
+            removes one instance of an operation that at least two --ref
+            loops perform; see main()).
 Outputs:    loop multisets and MATCH/DIFF; DIFF exits 1 unless --report.
 Accessors:  the armcheck targets in the harness Makefile.
 Affiliates: each armcheck translation unit and the frozen source snapshot.
@@ -65,14 +67,18 @@ def loop_counters(rows, count_all):
 
 def total(text, items, count_all, label):
     acc = collections.Counter()
+    per_item = []
     for item in items:
         name, _, k = item.partition(':')
         loops = loop_counters(function_rows(text, name), count_all)
         chosen = [loops[int(k)]] if k else loops
+        item_acc = collections.Counter()
         for i, (c, narrow) in enumerate(chosen):
             print(f'{label} {item} loop{i}: {dict(sorted(c.items()))} narrowing {dict(narrow)}')
-            acc += c
-    return acc
+            item_acc += c
+        acc += item_acc
+        per_item.append(item_acc)
+    return acc, per_item
 
 
 def main():
@@ -85,16 +91,23 @@ def main():
     ap.add_argument('--shared-op', action='append', default=[])
     a = ap.parse_args()
     text = disasm(a.obj)
-    ref = total(text, a.ref, a.all, 'ref')
-    new = total(text, a.new, a.all, 'new')
+    ref, ref_items = total(text, a.ref, a.all, 'ref')
+    new, _ = total(text, a.new, a.all, 'new')
     # A fused loop can share an input conversion that two old loops performed
-    # independently. The mixer gate subtracts those explicitly named shared
-    # value operations before comparing; --report remains unadjusted so it
-    # still exposes the total loop-instruction saving.
-    for op in a.shared_op:
-        if ref[op] == 0:
-            sys.exit(f'fpseq.py: shared op {op} absent from reference')
-        ref[op] -= 1
+    # independently (the mixer: the input sample and the loop index, each
+    # converted once instead of twice). Each --shared-op removes one instance
+    # of the named operation from the reference, and only while at least one
+    # other --ref loop still performs it, so an allowance can never hide an
+    # operation that only one old loop had. The multisets carry no operands:
+    # that the shared conversions read the same value is the caller's claim,
+    # backed by the host harness. --report remains unadjusted so it still
+    # exposes the total loop-instruction saving.
+    for op, n in collections.Counter(a.shared_op).items():
+        users = sum(1 for c in ref_items if c[op] > 0)
+        if n > users - 1:
+            sys.exit(f'fpseq.py: shared op {op} x{n} needs {n + 1} reference '
+                     f'loops performing it; {users} do')
+        ref[op] -= n
     print(f'ref total {sum(ref.values())}  new total {sum(new.values())}')
     if a.report:
         return 0

@@ -8,7 +8,7 @@
  *             confined to a few ulps of an octave edge.
  * Inputs:     generated oct_old.c and oct_new.c from the Makefile target.
  * Outputs:    mismatch count, edge distance and maximum cent error.
- * Accessors:  make -C tools/dsp_golden octave.
+ * Accessors:  make -C tools/dsp_test octave.
  * Affiliates: Oscillator.c freqToTableIndex() and osc_octaveEdgeHz[].
  */
 #include <float.h>

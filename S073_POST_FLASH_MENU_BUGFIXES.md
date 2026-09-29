@@ -14,7 +14,9 @@
     assessment is kept in
     `knowledge_files/drafts/MENU_LOAD_SPEEDUP_SMOOTHNESS.md` for when the
     logging is deactivated.
-  - **C: still open.** The drill knob has not been removed yet.
+  - **C: done (2026-09-29).** The drill knob is removed (§4). D-C1 (keep
+    or remove the boot image check) has not been decided. The check is
+    left in place, which is the recommendation.
   - Line numbers are from the S073 working tree.
 - **RAM policy:** A and C add no RAM. B's instrumentation (§3.5) needs your
   acknowledgement.
@@ -342,6 +344,22 @@ make the storage work small and fast.
     scope.
 - Gate: normal image `bss`/`data` unchanged. With D-C1 = keep, the payload is
   unchanged except for the removed drill code, which is inert at 0 anyway.
+
+**Done (2026-09-29):**
+
+- `config.h`: the `FLASH_GROWTH_DRILL_KB` block is removed.
+- `Core/Hardware/flashImage.c`: the drill table, `flashImage_hex8()` and the
+  `Img OK` / `drill` screen are removed. A passing check returns silently,
+  as it did with the knob at 0.
+- `Core/Hardware/flashImage.h`: the contract no longer mentions the drill.
+- `MEMORY.md`, `SCOPING_TARGETS.md` §5.5 and `S073_FLASH_EXPANSION.md`
+  §11.2/§11.3/§11.4/§11.5 are updated.
+- D-C1 has not been decided. The boot image check, the `.image_check` block
+  and `tools/stamp_image_check.py` are left unchanged.
+- Gate: `make clean` + `make all` links with the same 20 warnings as before,
+  none from the edited files. `text=486,688`, `data=416`, `bss=426,336`.
+  `lxr02.bin` is byte-identical to the pre-removal build (SHA-256
+  `1bd8be52…5fc82`).
 
 ---
 

@@ -74,7 +74,7 @@
  * Inputs:     none (flash constants, 40 B).
  * Outputs:    read by freqToTableIndex().
  * Accessors:  freqToTableIndex().
- * Affiliates: tools/dsp_golden/test_octave.c reports every input where the
+ * Affiliates: tools/dsp_test/test_octave.c reports every input where the
  *             old and new index differ (only within a few ulps of an edge).
  */
 static const float osc_octaveEdgeHz[10] = {
@@ -92,7 +92,7 @@ static const float osc_octaveEdgeHz[10] = {
  *             run (no early exit), so the cost does not depend on pitch.
  * Inputs:     f, the effective oscillator frequency in Hz.
  * Outputs:    the table index 0..10.
- * Accessors:  osc_calcWavetableFreqValue() (Oscillator.c:904).
+ * Accessors:  osc_calcWavetableFreqValue().
  * Affiliates: osc_setFreq()'s frequency cache (existing, kept); wavetable.c
  *             table layout (11 octaves).
  */

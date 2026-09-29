@@ -8,7 +8,7 @@
  *             generation for the S0 mixer refactor.
  * Inputs:     generated ARM fragments from the Makefile target.
  * Outputs:    build/ac_mixer.o, consumed by fpseq.py.
- * Accessors:  make -C tools/dsp_golden armcheck-mixer.
+ * Accessors:  make -C tools/dsp_test armcheck-mixer.
  * Affiliates: mixer.c, BufferTools.h and fpseq.py.
  */
 #include "config.h"

@@ -737,9 +737,12 @@ the tooling is written. Nothing here is implemented yet.
      therefore never brick a good image.
    - The block is in sector 1, which every update rewrites, so a bad
      sector 6 cannot corrupt the words that report it.
-3. **New: `FLASH_GROWTH_DRILL_KB`** in `config.h` (default 0). A nonzero
-   value links a constant table of that many KiB and shows
-   `Img OK <end>` / `drill <addr>` for 3 s when the check passes.
+3. **Removed 2026-09-29: `FLASH_GROWTH_DRILL_KB`** in `config.h` (default
+   0). A nonzero value linked a constant table of that many KiB and showed
+   `Img OK <end>` / `drill <addr>` for 3 s when the check passed. It was
+   added without a request. The knob, the table, the hex helper and the OK
+   screen are gone from `config.h` and `flashImage.c`
+   (`S073_POST_FLASH_MENU_BUGFIXES.md` §4).
 4. **Makefile:** `flashImage.c` is added to `SRCS`; the linker script is now
    a prerequisite of the ELF; the stamp step is added.
 5. **Comments:** the linker stack comment is corrected (SRAM2).
@@ -753,7 +756,7 @@ the tooling is written. Nothing here is implemented yet.
 | Image | `LXRV2_lxr02.img`: 484,176 B, checksum OK, header size = `.bin` = `_eflash_load − origin`; reset vector `0x080081E9`. SHA-256 `71612518d14c…11ecd`. |
 | Check code vs stamp | `flashImage.c`'s own CRC and sector code, compiled on the host and run on the `.bin`, matches all six stamped words. |
 | Negative cases (host) | One flipped byte in S5 → `s:....5.`. Placeholder magic → `Img unstamped`. |
-| 64 KiB drill (scratch build) | Links; image ends at `0x0808E3E0` (sector 6); `_etext` `0x0808D188` (code/rodata in sector 6); table at `0x08056324`; `Reset_Handler` still `0x080081E8`; passes. |
+| 64 KiB drill (scratch build; knob removed 2026-09-29) | Links; image ends at `0x0808E3E0` (sector 6); `_etext` `0x0808D188` (code/rodata in sector 6); table at `0x08056324`; `Reset_Handler` still `0x080081E8`; passes. |
 | Drill, S6 programmed without erase (simulated AND with old data) | `Img BAD s:.....6` |
 | Drill, truncated at 480 KiB (simulated) | `Img BAD s:.....6` |
 | Gate C3 logic | `sampleMemory_refresh()` stops at entry 0 (`0x08080004` < new floor), so an old install shows 0 samples. |
@@ -779,18 +782,10 @@ and interlock-checked), and anything on hardware.
 5. **Regression:**
    - Scene/Bank load and save, AutoSave restore, and an audio check;
    - the Phase 5 FX checks from `S073_SESSION_STARTUP.md` §3.
-6. **Optional: the growth drill.** This is the first image over 480 KiB the
-   bootloader will ever see, and the only step that tests the bootloader.
-   1. Set `FLASH_GROWTH_DRILL_KB 64`, then `make clean` + `make img`, and
-      flash.
-      - Sector 6 still holds old sample data, because the new firmware
-        never erases it. The drill therefore also tests whether the
-        bootloader erases sector 6.
-   2. **Pass:** `Img OK  0808E3E0` / `drill   08056324` for 3 s, then a
-      normal boot.
-   3. **Fail:** `Img BAD s:.....6`, or a hang before any screen. Reflash the
-      normal image, which does not use sector 6.
-   4. Either way, set the knob back to 0 and reflash the normal image.
+6. **Withdrawn: the growth drill.** It was not requested, and its
+   `FLASH_GROWTH_DRILL_KB` knob was removed on 2026-09-29. The first image
+   that grows into sector 6 will be the bootloader test. The boot image
+   check reports it (`Img BAD s:.....6`) if the bootloader fails.
 
 ### 11.5 Hardware results
 
@@ -800,6 +795,6 @@ and interlock-checked), and anything on hardware.
 | 3 Old install → 0 samples | 2026-09-28 | Not reported | |
 | 4 Load:[Samples] | 2026-09-28 | **PASS** (after fix) | At first the item was missing from the Load menu: `SAVE_TYPE_SAMPLES` had not been in `menu_loadSaveLoadTypes[]` since July (`a62221f`). Restored in `S073_POST_FLASH_MENU_BUGFIXES.md` §2. Sample loading now works, which is the first install at the sector-7 floor (Gate C4, functional). |
 | 5 Regression | 2026-09-28 | **FAIL** | Switching between Load menu types takes several seconds. The screen is often blank for many seconds while the `.hcindex` loads. The cause is not yet determined, and it is not yet known whether S073 or an earlier change introduced it. |
-| 6 Growth drill | — | Not run | The user did not ask for this step. The `FLASH_GROWTH_DRILL_KB` knob was added without a request and is scheduled for removal. |
+| 6 Growth drill | — | Not run; withdrawn | The user did not ask for this step. The `FLASH_GROWTH_DRILL_KB` knob was added without a request and was removed on 2026-09-29. |
 
 Both defects are handled in `S073_POST_FLASH_MENU_BUGFIXES.md`.

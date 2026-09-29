@@ -163,7 +163,7 @@ INITCM_EFFECT float softClipTwo(float in)
  * Outputs:    one normalised numerator or denominator.
  * Accessors:  SVF_calcBlockZDF() and SVF_calcBlockZDFFloat().
  * Affiliates: tanhXdX()/softClipTwo() remain for the naive path and the
- *             tools/dsp_golden filter comparison checks the S1 equivalence.
+ *             tools/dsp_test filter comparison checks the S1 equivalence.
  */
 static inline float svf_padeNum(const float a)
 {

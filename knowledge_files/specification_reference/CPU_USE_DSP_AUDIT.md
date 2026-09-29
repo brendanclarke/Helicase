@@ -1,5 +1,12 @@
 # LXR-02 DSP Performance Audit
 
+> **Where to start (Session 073 close).** This document is the cost audit and
+> the record of every DSP optimisation (the priority list at the end). For
+> how the DSP works today, what each stage costs and how to change it, read
+> `INSTRUMENTS_DSP_REFERENCE.md` and `EFFECTS_MIXER_DSP_REFERENCE.md`. The
+> S073 refactor's full record is `073_SESSION_HANDOFF_LOG.md` §6; the host
+> test bench is `tools/dsp_test/DSP_TEST.md`.
+
 Session 033 note: this audit was moved into `specification_reference/` as a
 historical DSP/performance snapshot. In the remainder of this document,
 references to current code mean the audited snapshot, not a Session 040
@@ -23,7 +30,7 @@ fixed voice globals are retired in favour of six 1,176-B tagged runtime slots
 in SRAM1. The slider taper is a 1,024-entry native-float LUT (4,096 B, raw
 `>> 2`, no LUT interpolation), and `transientData` is now a 26,460-B internal
 FLASH ROM rather than DTCM data. For actual current memory placement and the
-reservation policy, use `SRAM_MANIFEST.md`; free DTCM is delay-line-reserved
+reservation policy, use `STORAGE_SRAM_MANIFEST.md`; free DTCM is delay-line-reserved
 and free normal SRAM1 is Pattern-reserved. The historical recommendations
 below must not be read as live placement or cache facts.
 
@@ -32,8 +39,11 @@ below must not be read as live placement or cache facts.
 This section is the current DSP CPU audit. It supersedes the cost picture in
 the 2026-05 sections below, which remain as the record of the platform work
 that has already been done (caches, MPU, LTO, `-Ofast`, ITCM oscillators,
-DTCM output buffers, NVIC order). The reduction plan built on it is
-`S073_CPU_USE_DSP_REDUCTION_REFACTOR.md` in the project root.
+DTCM output buffers, NVIC order). The reduction plan built on it was
+implemented in Session 073 (items 16–25 below; record in
+`073_SESSION_HANDOFF_LOG.md` §6). The figures in this section describe the
+tree **before** that refactor; the measured after-state is in items 16–22 and
+in the two DSP references.
 
 ### Method and limits
 
@@ -49,8 +59,8 @@ DTCM output buffers, NVIC order). The reduction plan built on it is
   come from that image, not from reading the source.
 - **Not measured on hardware.** Cycle figures are static estimates from
   instruction counts and Cortex-M7 latencies (`VDIV.F32` about 14 cycles,
-  dependent `VFMA` about 3 cycles). Treat them as ±50 % until the S073 Step 0
-  profiler measures them. The existing `cpu` widget
+  dependent `VFMA` about 3 cycles). Treat them as ±50 %. The per-stage
+  profiler proposed for S073 was declined by the user (F-5). The existing `cpu` widget
   (`audioCodec_getQueueFreePercent()`) shows audio-queue pressure. It cannot
   attribute cost to individual stages.
 
@@ -99,7 +109,7 @@ with every send open.
 | **Total audio work** | **≈1,650–2,400** | **≈34–49 %** |
 
 This excludes the TIM3 sequencer ISR, UI ISRs and foreground work, which
-also compete for the main loop. The S073 profiler must measure those too.
+also compete for the main loop.
 
 ### Findings
 
@@ -221,7 +231,7 @@ threshold, unchanged.
 | Filter state kept in locals | GCC already keeps `s1/s2/zi` and the oscillator phase in registers across the loop and writes them back once. |
 | Skip `SVF_recalcFreq()` when f is unchanged | About 0.1 % (six `fastTan` per block). Not worth the state. |
 | Write-back instead of write-through SRAM cache | Hot loops keep state in registers, so the gain is small, while the coherency and ownership review would be large. |
-| Voice runtime slots in DTCM | Free DTCM is the reserved FX arena under `SRAM_MANIFEST.md` policy. |
+| Voice runtime slots in DTCM | Free DTCM is the reserved FX arena under `STORAGE_SRAM_MANIFEST.md` policy. |
 | Morph "skip unchanged value" cache | A listed Failed Approach (Session 16): it skipped required DSP restores. |
 | Larger `OUTPUT_DMA_SIZE` (control block) | Envelope and LFO increments are per block, so every decay time would change. It also breaks the LXR-master cadence rule. |
 | Decimator short-circuit at rate 1.0 | Already declined (item 11): tiny, and it hides the real budget. |
@@ -657,7 +667,7 @@ which correctly remain in SRAM1.
     (imperceptible for a drum machine). Straightforward config.h change, but
     audit all `uint8_t` loop counters first (128 still fits in uint8_t).
 
-### Session 073 additions (implemented 2026-09-28; see `S073_CPU_REDUCTION_IMPLEMENTATION.md`)
+### Session 073 additions (implemented 2026-09-28/29; record in `073_SESSION_HANDOFF_LOG.md` §6)
 
 Estimates are static and cover the worst case. Class is the sound-impact
 class defined in the Session 073 section above.
@@ -682,15 +692,33 @@ class defined in the Session 073 section above.
     samples; ARM operation-sequence checks MATCH. Class S0.
 21. **DONE (S073 Step 5): dry path and FX send in one mixer pass.** The host
     comparison reports zero differing samples. ARM value-operation multisets
-    MATCH after accounting for the one shared input conversion; the selected
-    DAC1-stereo loop reports 55 old versus 44 combined instructions. Class S0.
+    MATCH for every dry routing × send type combination and for the
+    send-only default case, after removing the input-sample and loop-index
+    conversions the combined loop shares. Loop instructions per sample, old
+    dry + send against combined:
+
+    | Dry routing | Mono-input send | Stereo-input send |
+    |---|---|---|
+    | Single output (DAC1/DAC2 L or R) | 55 → 44 | 69 → 59 |
+    | Stereo (DAC1/DAC2 stereo) | 73 → 63 | 87 → 78 |
+
+    These are static counts from `make -C tools/dsp_test armcheck-mixer`.
+    Class S0.
 22. **DONE (S073 Step 6): wavetable octave selection by threshold table
     instead of `log2f()`.** The exhaustive host check reports 16 mismatches,
     all within 2 ulps and 0.000404 cents of an octave edge. Class S0 except
-    those boundary choices.
+    those boundary choices. **ITCM +400 B:** after this change (the only
+    S073 edit to `Oscillator.c`), `osc_setFreq()` (`INITCM`) is linked as
+    its own 400 B function in ITCM. Before, it was inlined into its callers
+    in flash and had no ITCM copy. Callers now reach it through an 8 B flash
+    veneer. ITCM is 4,168 / 16,384 B (was 3,768).
 23. **REJECTED (S073 Step 7): silence gating for idle voices.** It violates
     the constant-CPU policy and was not implemented.
 24. **REJECTED (S073 Step 8): software PRNG for audio-rate noise.** It would
     change the noise character and add state; the hardware RNG remains in use.
 25. **NOT RECOMMENDED:** the items in the Session 073 "Checked and rejected"
     table.
+26. **Hardware result (user, 2026-09-29):** items 17–22 together gave about
+    10 % less CPU on the user's worst-case Scene with the StereoFilter Effect
+    (the plan estimated 9–14 %). Nothing was skipped to get it, so the saving
+    holds with everything active.

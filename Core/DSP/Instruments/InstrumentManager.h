@@ -118,7 +118,7 @@ typedef enum {
  * Inputs:     compile-time table constants.
  * Outputs:    instrument_runtime_binding_t.special values.
  * Accessors:  the four instrument parameter tables and the runtime writer.
- * Affiliates: tools/dsp_golden/check_special_tags.py and the diagnostic
+ * Affiliates: tools/dsp_test/check_special_tags.py and the diagnostic
  *             self-check; Effect rows explicitly use IM_SPECIAL_NONE.
  */
 typedef enum {

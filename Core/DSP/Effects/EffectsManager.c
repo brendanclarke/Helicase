@@ -119,7 +119,7 @@ typedef struct {
 } effects_state_t;
 
 _Static_assert(sizeof(effects_state_t) == 84u,
-               "effects_state_t size is recorded in SRAM_MANIFEST.md");
+               "effects_state_t size is recorded in STORAGE_SRAM_MANIFEST.md");
 _Static_assert(STEP_SCALE_COUNT == EFFECT_SEQ_SCALE_COUNT &&
                STEP_SCALE_DEFAULT == EFFECT_SEQ_SCALE_DEFAULT,
                "Pattern and FX scale contracts must remain identical");
@@ -159,7 +159,7 @@ typedef struct {
 } effects_automation_t;
 
 _Static_assert(sizeof(effects_automation_t) == 184u,
-               "effects_automation_t size is recorded in SRAM_MANIFEST.md");
+               "effects_automation_t size is recorded in STORAGE_SRAM_MANIFEST.md");
 
 static effects_automation_t effects_automation;
 

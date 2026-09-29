@@ -75,11 +75,17 @@ underrun, DMA-ordering, and control-regression checks.
   2 ulps and a maximum `0.000403883111` cents of an octave edge.
 - Step 5: the mixer comparison reports `0` differing samples. The ARM value
   operation multisets MATCH after subtracting the two input conversions that
-  the fused loop shares; the selected DAC1-stereo report is 55 old versus 44
-  combined instructions.
+  the fused loop shares. *Corrected 2026-09-29:* the pair first reported
+  here as "DAC1-stereo" (55 old versus 44 combined) is a single-output
+  routing with a mono-input send. `armcheck-mixer` now gates all four
+  dry × send combinations plus the default case. The counts are single
+  output 55 → 44 / 69 → 59 and stereo 73 → 63 / 87 → 78 (mono / stereo
+  send). See the audit, item 21.
 - Firmware link after all source changes: `text=486688`, `data=416`,
-  `bss=426336`, flash `487104 / 753664 B`, headroom `266560 B`. No RAM was
-  added by S073.
+  `bss=426336`, flash `487104 / 753664 B`, headroom `266560 B`. No `data`
+  or `bss` was added by S073. *Corrected 2026-09-29:* ITCM grew by 400 B,
+  from 3,768 to 4,168 / 16,384 B: `osc_setFreq()` is now linked as its own
+  ITCM function (audit item 22).
 
 **Unchanged by design:**
 - the hardware RNG noise (Step 8 rejected);
@@ -3016,7 +3022,9 @@ including `mx_old.c` and `mx_new.c`.
  * What:       compiles the frozen dry and send functions and the new combined
  *             function with the firmware's DSP flags, so fpseq.py can:
  *             - confirm the VFP/saturation multiset of the combined
- *               DAC1_STEREO loop equals dry + send;
+ *               DAC1_STEREO loop equals dry + send (corrected 2026-09-29:
+ *               the landed target checks every dry x send combination;
+ *               see the notes after the Makefile block);
  *             - report total loop instruction counts, recorded in the
  *               audit as Step 5's measured saving (D-5 is decided:
  *               implement).
@@ -3069,6 +3077,16 @@ armcheck-mixer: mixer
   and mono send variants may be separate loops, so the implementer confirms
   which index is the stereo variant from the printed multisets, and adjusts
   `:K` if needed.
+- **Corrected 2026-09-29.** Loop order in the object does not follow the
+  switch order, and loop rotation gives several backward branches per
+  case. `old_dry:0` is not a routing loop. The landed target first compared
+  `old_dry:1` + `old_send:0` against `new_combined:0`: a single-output
+  routing with a mono-input send, not DAC1_STEREO. The target now gates
+  one loop of each combination, identified by its multiset:
+  `old_dry:1`/`:4` (single/stereo dry), `old_send:0`/`:3` (mono/stereo
+  send) against `new_combined:0`, `:22`, `:2` and `:27`, plus the default
+  case (`old_send:0` → `new_combined:87`, `old_send:3` → `:12`). All
+  MATCH.
 - The `--report --all` line gives the measured saving for the audit: total
   instructions per sample for dry + send today against the combined loop.
 

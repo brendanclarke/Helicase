@@ -889,7 +889,7 @@ typedef struct afatfs_t {
  * Accessors: sizeof() is the sole compile-time accessor.
  *
  * Affiliates: AFATFS_MAX_OPEN_FILES, afatfsFileOperation_t, afatfs_t,
- * afatfsExtendSubdirectory_t, and SRAM_MANIFEST.md.
+ * afatfsExtendSubdirectory_t, and STORAGE_SRAM_MANIFEST.md.
  */
 _Static_assert(sizeof(afatfsCreateFile_t) == 144u,
                "S059 create state must remain 144 bytes");

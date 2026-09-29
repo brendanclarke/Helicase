@@ -7,7 +7,7 @@
  *             conversion and saturation sequences for S0.
  * Inputs:     generated frozen pass fragments and current headers.
  * Outputs:    one ARM object consumed by armcheck-postchain.
- * Accessors:  tools/dsp_golden/Makefile armcheck-postchain.
+ * Accessors:  tools/dsp_test/Makefile armcheck-postchain.
  * Affiliates: voicePostChain.h, BufferTools.h, distortion.h and fpseq.py.
  */
 #include "config.h"

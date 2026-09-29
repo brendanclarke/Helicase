@@ -125,7 +125,7 @@ typedef struct {
 _Static_assert(sizeof(effect_seq_step_t) == 18u,
                "FX sequence step is 16 values plus a 16-bit mask");
 _Static_assert(sizeof(effect_record_t) == 420u,
-               "effect_record_t size is recorded in SRAM_MANIFEST.md");
+               "effect_record_t size is recorded in STORAGE_SRAM_MANIFEST.md");
 
 /* Automation / modulation target IDs (block 7) ------------------------ */
 

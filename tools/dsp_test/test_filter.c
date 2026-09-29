@@ -12,7 +12,7 @@
  * Inputs:     --expect-identical, --baseline-out FILE, or --s1-report FILE.
  * Outputs:    differing samples, max delta, SDR, >16-LSB configuration IDs,
  *             and an S1 acceptance result.
- * Accessors:  tools/dsp_golden/Makefile selftest and filter.
+ * Accessors:  tools/dsp_test/Makefile selftest and filter.
  * Affiliates: ResonantFilter.c, prelude.h and the frozen snapshot.
  */
 #include <float.h>

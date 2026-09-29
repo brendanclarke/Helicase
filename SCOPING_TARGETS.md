@@ -27,7 +27,10 @@ boot restore. Phase 4 subsequently added dynamic Pattern storage and separate
 Pattern AutoSave. Phase 5 (Session 072) then implemented Scene-owned Effects:
 `.fx` v2 files, the FX bus and fader modes, the shared DTCM arena, the FX
 sequencer, Effect automation/LFO, and edit-mask fan-out. See
-`EFFECTS_BUS_FEATURE_PLAN.md` and `EFFECTS_BUS_REFERENCE.md`. The post-Phase-4
+`EFFECTS_BUS_FEATURE_PLAN.md` and `EFFECTS_BUS_REFERENCE.md`. Session 073
+then grew program flash to 736 KiB (§5.5), restored Load:[Samples], and cut
+worst-case DSP CPU by about 10 % without skipping any work (see "Session 073
+carry-forward" at the end). The post-Phase-4
 bugfix/refactor work is tracked in
 `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`. Phase 5 now establishes Effect
 files, the audio bus and shared buffer, its fixed sequencer, and the related
@@ -145,7 +148,7 @@ be treated as the current baseline, superseding older roadmap estimates:
   future RAM increase requires the user's byte/region/owner acknowledgement.
 - The flash transient placement is build/ELF verified; its full hardware audio
   stress matrix remains pending. The complete measured baseline is in
-  `knowledge_files/specification_reference/SRAM_MANIFEST.md` and the durable
+  `knowledge_files/specification_reference/STORAGE_SRAM_MANIFEST.md` and the durable
   decisions are in Session 043's handoff.
 
 ## Session 044 Phase 3 load/runtime baseline (2026-07-28)
@@ -1184,16 +1187,21 @@ plan):
 - 4,416-byte buffer units;
 - the first type is a stereo filter without a buffer.
 
-The as-built behavior is in `EFFECTS_BUS_REFERENCE.md`. **Carried forward:**
+The as-built behavior is in `EFFECTS_BUS_REFERENCE.md` (control, storage,
+UI) and `EFFECTS_MIXER_DSP_REFERENCE.md` (signal path and DSP). **Carried
+forward:**
+- **Effect-page automation underlines (bug, Session 074):** see "Session 073
+  carry-forward";
+- buffer-using template type (A8) — **Session 074**, with the two as-built
+  gaps it must close (same-type Scene switch handoff refresh; FX return ramp
+  while `off`);
 - `/Effect/` browser and Effect Load/Save item (A35);
-- buffer-using template type (A8);
 - Scene copy/clear of the Effect and FX lock removal (copy pass);
 - MIDI mapping of Effect parameters (A20);
 - live record of FX moves (A22);
 - track step-scale/shuffle playback (A10).
 
-The 480 KiB flash finding is in `S072_ST1_IMPLEMENTATION.md` §21; the growth
-path is planned in `S073_FLASH_EXPANSION.md`.
+The 480 KiB flash limit was resolved in Session 073 (§5.5).
 
 **Location:** `Core/DSP/Effects/`, `Core/DSPAudio/`, `Core/Bank/`,
 `Core/Hardware/SD/`, `Core/Menu/`, `Core/Sequencer/`
@@ -1291,7 +1299,7 @@ Check linker checks, image packaging, bootloader/update behavior, and the
 sample-flash boundary together. Establish a tested way to handle further
 growth without assuming application code can occupy sample flash.
 
-**Session 073 resolution (implemented; hardware test pending).**
+**Session 073 resolution (implemented; the image boots on hardware).**
 
 - Sector 6 moved from samples to the application. The window is now
   `0x08008000..0x080BFFFF` (736 KiB), and samples start at `0x080C0000`.
@@ -1302,9 +1310,14 @@ growth without assuming application code can occupy sample flash.
 - Protection for the untested case: every boot checks a stamped CRC32 per
   application sector. An unerased or truncated sector is reported by
   number (`Img BAD s:.....6`).
-- `FLASH_GROWTH_DRILL_KB` in `config.h` builds an image that deliberately
-  reaches sector 6.
-- Details: `S073_FLASH_EXPANSION.md` §11.
+- The `FLASH_GROWTH_DRILL_KB` test knob was removed on 2026-09-29. It had
+  been added without a request. The first image that reaches sector 6
+  will be the test.
+- Details: `073_SESSION_HANDOFF_LOG.md` §4 and
+  `STORAGE_SRAM_MANIFEST.md` §3–§4.
+- Still open: the bootloader has not yet written an image past
+  `0x08080000`; decision D-C1 (keep the boot image check) is undecided, and
+  the check stays.
 
 Move the 8,194-byte `sine_table` from DTCM into application flash in this
 phase. Test several simultaneous sine-based voices at different high pitches
@@ -1331,7 +1344,7 @@ the template Effect with both minimum and maximum shares.
 This shared allotment supersedes the old plan for independent, fixed-size
 advanced-Instrument and FX-delay buffers. Before implementing it, specify
 the exact byte count, memory region, lifetime, and owner and obtain the
-user's allocation acknowledgement under `SRAM_MANIFEST.md`.
+user's allocation acknowledgement under `STORAGE_SRAM_MANIFEST.md`.
 
 ### 5.7 FX sequencer and Pattern automation
 
@@ -1374,8 +1387,7 @@ when formats and allocations are implemented.
 - **Priority:** Pattern overlay > FX lock > menu; LFO applies on top (plan §9).
 - **Buffer size:** 126,624 B measured for the shared arena; ownership uses the
   FxBuffer handoff contract (plan §12).
-- **Flash:** growth beyond the 480 KiB application region is covered by the
-  `S073_FLASH_EXPANSION.md` plan.
+- **Flash:** the application region grew to 736 KiB in Session 073 (§5.5).
 
 ### Suggested Complementary Improvements
 
@@ -1498,8 +1510,24 @@ Phase 5 has established the Effect slot, bus, stereo-filter type (no buffer use
 yet), and shared DTCM
 buffer before this phase adds heavier voices, oscillators, and the first
 multi-stage processing Effect. Use the Phase 5 buffer partition and the
-current linked `SRAM_MANIFEST.md`; the older separate-buffer estimates are
+current linked `STORAGE_SRAM_MANIFEST.md`; the older separate-buffer estimates are
 superseded. Measure CPU cost and exact RAM ownership before adding each type.
+
+**Before designing a Phase 7 type (Session 073):**
+
+- **Constant-CPU rule** (`MEMORY.md`, DSP CPU Policy): a new voice or Effect
+  must cost the same whatever its parameter values; no skipping work because
+  something is silent or at zero. Budget the worst case with everything
+  active.
+- **Cost references:** per-sample instruction counts for every existing
+  stage are in `INSTRUMENTS_DSP_REFERENCE.md` §8 and
+  `EFFECTS_MIXER_DSP_REFERENCE.md` §6. After S073 the worst-case Scene with
+  the stereo filter Effect runs about 10 % lower than before.
+- **How to add a type:** `INSTRUMENTS_DSP_REFERENCE.md` §9 (instruments,
+  oscillators, filter types, distortion modes) and
+  `EFFECTS_MIXER_DSP_REFERENCE.md` §5 and §7 (Effects, the DTCM arena).
+- **Testing on the host** before flashing: `tools/dsp_test/DSP_TEST.md` §6.
+- **Flash** is no longer a constraint (about 266 KB free at the S073 close).
 
 ### 7.1 Voice tiers
 
@@ -1790,16 +1818,75 @@ behaviour and none blocks Session 073. Details are in
   - A bare `make` in an incremental tree stops at `build/main.o`, because
     `-include $(OBJS:.o=.d)` precedes `all:`. Add `.DEFAULT_GOAL := all`.
     Use `make all` until then.
-- **`modNode_waveInterpGeneration`** (`modulationNode.c:67`) is `INCCMZ` with
-  an `= 1u` initializer that the zero-filled `.dtcmz` discards. Verify
-  whether generation 0 is special.
-- **Stack wording.** The linker comment (and MEMORY.md) says the stack is at
-  the top of SRAM1. `0x20080000` is the top of SRAM2.
+- ~~**`modNode_waveInterpGeneration`**~~ — **verified harmless (S073).** The
+  `= 1u` initializer on an `INCCMZ` variable is discarded, but
+  `modNode_resetTargets()` increments it before the first render and skips 0,
+  so oscillators never compare against 0.
+- ~~**Stack wording.**~~ — **resolved (S073):** the linker comment now says
+  the stack starts at the top of SRAM2.
 - **Cosmetic.** A duplicated comment line in `mixer_calcNextSampleBlock()`
-  (`mixer.c` ~739); mixed tab/space indentation in five `presetManager.c`
-  FX-send comment blocks.
+  (`mixer.c`, near the `effects_service()` call, about line 853); mixed
+  tab/space indentation in five `presetManager.c` FX-send comment blocks; and
+  (S073) a duplicated line in the batched-filter guard comment in
+  `ResonantFilter.c`.
 - **FX return ramp.** It is not reset while the Effect is `off`. Revisit when
-  a type outputs sound immediately on `init`.
+  a type outputs sound immediately on `init` — the Session 074 buffer type.
 - **Stale tool.** `tools/verify_bank_autosave.py` still expects 129 HCNAMES
   rows (current: 161).
 - **Dead code.** Scene Save phases 33–36 in `filesystem.c` are unreachable.
+
+## Session 073 carry-forward (2026-09-29)
+
+Session 073 record: `knowledge_files/log_archive/073_SESSION_HANDOFF_LOG.md`.
+Session 074 startup: `S074_EFFECT_BUGS_BUFFER_USE.md` (root).
+
+### Next session (074)
+
+1. **Bug — Effect-page parameter names are not underlined when automated.**
+   - **Report (user):** on the Effect page (SHIFT+PERF), the character
+     underline on a parameter name does not appear when that parameter is
+     automated in the current Pattern. It should appear for automation in the
+     current Pattern **and** for locks in the Effect's FX sequence ("it should
+     be both").
+   - **Current code:** the VOICE pages have this: `va_scanService()` scans
+     the shown Pattern's active track four steps per pass and records the
+     viewed voice's descriptor targets and per-voice Scene targets;
+     `va_applyVoiceMarkers()` then underlines the first letter of each
+     automated parameter's name through the shared CGRAM marker transaction
+     (`va_queueMarkerTransaction()`). The Effect page has no presence scan:
+     `menu_applyEffectMarkers()` only underlines the held step's value on a
+     locked lane while a SEQ hold is active, and `menu_serviceRuntimeWidgets()`
+     runs the scan only on VOICE pages.
+   - **Scope:** Pattern automation targets 448..510 (Effect local 0..62)
+     and `fxm` (Scene target 404, shown as `mrp`); FX-sequence lane locks
+     within the sequence (lane 0 = Effect Morph, lanes 1..15 = the registry's
+     lane-to-descriptor map). Design questions (which Pattern tracks to scan,
+     whether locks beyond the sequence length count, how the two sources
+     combine) are listed in the S074 startup document.
+2. **First Effect type that uses the shared DTCM buffer** (Phase 5 A8).
+   See §5.4/§5.6 above, `EFFECTS_MIXER_DSP_REFERENCE.md` §5, and the S074
+   startup document.
+
+### Deferred
+
+- **Slow Load type switching** (hardware, 2026-09-28): switching between
+  Load types takes seconds and the name row is often blank. The user's
+  requirement is an instant switch with names within tens of milliseconds.
+  Deferred while the trace logger stays on. Analysis and fix directions:
+  `knowledge_files/drafts/MENU_LOAD_SPEEDUP_SMOOTHNESS.md` and
+  `073_SESSION_HANDOFF_LOG.md` §5.2.
+- **The bootloader past `0x08080000`** is unproven. The first image that
+  grows into sector 6 is the test; the boot image check reports a failure as
+  `Img BAD s:.....6`. Decision D-C1 (keep the check) is open; it stays.
+- **Phase 5 hardware acceptance** for S072 Steps 6–10
+  (`072_SESSION_HANDOFF_LOG.md` §11) has not been reported as run.
+- **Not reported individually from S073:** a pre-S073 sample install shows 0
+  samples (Gate C3); bytes free after an install; an install while the
+  sequencer plays.
+- **Suspected, not verified: the LFO noise waveform range.** `lfo_calc()`
+  returns `GetRngValue()/32767` for `LFO_NOISE`, which is −1..1 because
+  `GetRngValue()` is signed (the old `& 0x7FFF` mask is commented out). Every
+  other waveform is 0..1, and the descriptor LFO shaper clamps its source to
+  0..1, so about half the noise steps may land on the clamp. Found while
+  writing the S073 DSP reference; check on hardware before changing it
+  (changing it would change the sound).

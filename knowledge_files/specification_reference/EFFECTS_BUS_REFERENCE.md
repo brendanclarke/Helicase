@@ -1,10 +1,14 @@
 # Effects Bus Reference
 
-As-built reference for the Phase 5 Effect system (Session 072, Steps 1–11).
-It describes what the firmware does and how to extend it. The design history
-and every decision (A1–A46, F1–F6, G1–G7) are in
-`EFFECTS_BUS_FEATURE_PLAN.md`. **Where the two disagree, this document
-describes the code**; §13 lists the known differences.
+As-built reference for the Phase 5 Effect system (Session 072, Steps 1–11;
+signal-path updates from Session 073). It describes what the firmware does
+and how to extend it. The design history and every decision (A1–A46, F1–F6,
+G1–G7) are in `EFFECTS_BUS_FEATURE_PLAN.md`. **Where the two disagree, this
+document describes the code**; §13 lists the known differences.
+
+The DSP side (number formats, the mixer and bus arithmetic, the Effect
+filter, the output pipeline, costs, and the rules for buffer-using types) is
+in `EFFECTS_MIXER_DSP_REFERENCE.md`.
 
 ---
 
@@ -78,11 +82,16 @@ mixer_calcNextSampleBlock():
   for each voice slot:
       render (pre-volume) → mixer_decimateBlock()
       mixer_faderGains(): mix = vol · F_mix     send = fxSend/127 · F_send
-      dry:  × mix, pan, route (jack fallback) → satAdd32 into DAC buses
-      send: mixer_addVoiceToFxBus(), ramped from mixer_send_last_gain[slot]
-            stereo-in type: panned voice into L and R
-            mono-in type:   unpanned voice into L
-            int16 × 256 → sample_mx_t, satAdd32
+      if fx_active and the send ramp is non-zero (this or last block):
+         mixer_addVoiceInt16ToOutputAndFx()   one pass (S073):
+            dry:  × mix ramp, int16, pan, route (jack fallback) → satAdd32
+            send: ramp from mixer_send_last_gain[slot], int16 × 256 →
+                  sample_mx_t (no int16 truncation), satAdd32 into the bus
+                  stereo-in type: panned voice into L and R
+                  mono-in type:   unpanned voice into L
+      else:
+         mixer_addVoiceInt16ToOutput()        dry only
+      mixer_voice_last_gain / mixer_send_last_gain updated every block
   if fx_active:
       bus → float (× 1/8388352), R zeroed for mono-in/stereo-out
       effects_process(io)                       in place; io.share = current share
@@ -560,7 +569,7 @@ This checklist uses `flt` as the worked example.
    - `<Type>Effect.c` goes into `DSP_SRCS` (fast-math); `<Type>Parameters.c`
      into the normal sources; add `-ICore/DSP/Effects/<Type>`.
    - Run `link_budget.py` and record the flash, DTCM and FXBUF sizes in
-     `SRAM_MANIFEST.md` (RAM approval policy in `MEMORY.md`).
+     `STORAGE_SRAM_MANIFEST.md` (RAM approval policy in `MEMORY.md`).
 7. **Verify.**
    - Build with `DEV_MODE_DIAGNOSTIC=1` and check that the registry
      self-check (`FxBf` screen) is 0.
@@ -585,8 +594,9 @@ all registry-driven.
 - **`INITCM_EFFECT` / `INITCM_EFFECT_NOINLINE`** (config/DSP placement macros)
   mean "place hot filter/distortion DSP in ITCM". They are unrelated to these
   Effects.
-- **Flash is tight.** Measure every addition with `link_budget.py`.
-  `S073_FLASH_EXPANSION.md` covers growth beyond 480 KiB.
+- **Measure flash.** Run `link_budget.py` after every addition. Since
+  Session 073 the application window is 736 KiB (about 266 KB free at the
+  S073 close; `STORAGE_SRAM_MANIFEST.md` §3).
 - **Bus headroom.** The bus is `sample_mx_t` with saturation only at the
   int32 limit. Types must process in float and must not truncate to int16
   (this is why `SVF_calcBlockZDFFloat()` exists).

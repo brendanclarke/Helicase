@@ -73,14 +73,6 @@ static const uint32_t flashImage_crcNibble[16] = {
     0x9B64C2B0UL, 0x86D3D2D4UL, 0xA00AE278UL, 0xBDBDF21CUL,
 };
 
-#if FLASH_GROWTH_DRILL_KB
-/* Growth drill (config.h): pads the image past 0x08080000 into sector 6.
-** Its address is shown at boot, which also keeps it linked. */
-static const uint32_t flashImage_drillTable[FLASH_GROWTH_DRILL_KB * 256u] = {
-    [0 ... (FLASH_GROWTH_DRILL_KB * 256u) - 1u] = 0x5AC3A53CUL
-};
-#endif
-
 /* Continue a CRC-32 (running form, start 0xFFFFFFFF, final ~) over the
 ** bytes in [start, end), both word aligned. Reflected CRC-32 is linear, so
 ** XORing a whole little-endian word and shifting it out as eight nibbles
@@ -97,17 +89,6 @@ static uint32_t flashImage_crc32Update(uint32_t crc, uint32_t start, uint32_t en
     }
     return crc;
 }
-
-#if FLASH_GROWTH_DRILL_KB
-static void flashImage_hex8(char *out, uint32_t v)
-{
-    for (int8_t i = 7; i >= 0; i--) {
-        uint8_t n = (uint8_t)(v & 0xFu);
-        out[i] = (n < 10u) ? (char)('0' + n) : (char)('A' + (n - 10u));
-        v >>= 4;
-    }
-}
-#endif
 
 static void flashImage_show(const char row1[17], const char row2[17])
 {
@@ -170,18 +151,8 @@ void flashImage_verifyAtBoot(void)
         lo = sector_end;
     }
 
-    if (stamped && bad == 0u) {
-#if FLASH_GROWTH_DRILL_KB
-        /* "Img OK  <image end>" / "drill   <table address>" */
-        char ok1[17] = "Img OK  ........";
-        char ok2[17] = "drill   ........";
-        flashImage_hex8(&ok1[8], image_end);
-        flashImage_hex8(&ok2[8], (uint32_t)flashImage_drillTable);
-        flashImage_show(ok1, ok2);
-        flashImage_delayMs(3000u);
-#endif
+    if (stamped && bad == 0u)
         return;
-    }
 
     if (!stamped) {
         const char unstamped[17] = "Img unstamped   ";

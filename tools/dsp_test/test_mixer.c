@@ -8,7 +8,7 @@
  *             bus sample while reading each voice sample once.
  * Inputs:     generated mx_sat.c, mx_lut.c, mx_old.c and mx_new.c.
  * Outputs:    differing sample count; nonzero on any mismatch.
- * Accessors:  make -C tools/dsp_golden mixer.
+ * Accessors:  make -C tools/dsp_test mixer.
  * Affiliates: mixer.c mixer_addVoiceInt16ToOutputAndFx(), sample_mix.h and
  *             bufferTool_satAdd32().
  */

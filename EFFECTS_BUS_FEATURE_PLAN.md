@@ -1084,7 +1084,7 @@ next. If a regression appears, only one step touched that area.
   worked example);
 - pitfalls.
 
-Update `FILESYSTEM_SPEC.md`, `AUTOSAVE.md`, `SRAM_MANIFEST.md`,
+Update `FILESYSTEM_SPEC.md`, `AUTOSAVE.md`, `STORAGE_SRAM_MANIFEST.md`,
 `MODULE_INTERCHANGE_SPEC.md`, `BANK_PRESET_ARCHITECTURE.md`, and the
 `SCOPING_TARGETS.md` Phase 5 pointer.
 

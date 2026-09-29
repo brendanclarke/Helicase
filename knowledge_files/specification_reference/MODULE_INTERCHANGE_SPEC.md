@@ -1,7 +1,7 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-072 Step 6, including typed HCNAMES, `.fx` Effect storage, AutoSave boot restore, typed Instrument-index
+073, including typed HCNAMES, `.fx` Effect storage, AutoSave boot restore, typed Instrument-index
 repair, AsyncFATFS directory publication, the Phase 4 dynamic Pattern storage
 system, step automation editing/playback (Session 065), the VOICE-page
 held-step automation overlay (Session 066), the Pattern Stack Service with
@@ -10,7 +10,10 @@ rebuild, played-Pattern mirror fix, and per-track sequencer length fix,
 Session 069 bounded CPU convergence, Session 070 systems fitness pass, and
 Session 071 per-Scene voice-edit mask, base-independent LFO voice-morph
 contribution, Scene superpage live display, LED chase state defect fix, and
-LFO target voice handler fix.
+LFO target voice handler fix, the Session 072 Effects bus, and the Session 073
+changes (boot image check, sample floor, special-writer tags, one-pass mixer
+dry + send). The DSP internals behind these APIs are described in
+`INSTRUMENTS_DSP_REFERENCE.md` and `EFFECTS_MIXER_DSP_REFERENCE.md`.
 Historical migrations belong in session logs; this document states which live
 module owns each call, state transition, and retained object.
 
@@ -261,7 +264,7 @@ Current Scene/Bank/root Pattern interchange is exact binary PAT4; legacy text
 is import-only and no retained `PatternSet`/discard instance remains. `scene_t`
 does not contain Pattern data. Affiliates are SceneData, Sequencer,
 UI/LED/copy-clear, Euklid/SOM, and filesystem; none may add a parallel
-Pattern owner. See `SRAM_MANIFEST.md` for linked sizes and
+Pattern owner. See `STORAGE_SRAM_MANIFEST.md` for linked sizes and
 `PATTERN_DYNAMIC_STACK.md` for the complete specification.
 
 Affiliate modules: Menu, buttonHandler, ledHandler, copyClearTools, filesystem,
@@ -710,6 +713,7 @@ level/pan and jack-resolved routing. See `EFFECTS_BUS_REFERENCE.md` §3.
 | API / data | Use | Usual callers / clients |
 |---|---|---|
 | `mixer_decimateBlock()` | Reduce each voice block before final voice-volume application and the pre-volume FX send tap. | mixer render path |
+| `mixer_addVoiceInt16ToOutputAndFx()` (static, S073) | One pass per slot for the dry output and the FX send when the Effect is active and the send ramp is non-zero; replaces the removed `mixer_addVoiceToFxBus()`. Otherwise `mixer_addVoiceInt16ToOutput()` does the dry path alone. | mixer render path |
 | `effects_service()` | Resolve the active Effect's retained parameters between render blocks. | mixer block service |
 | `effects_process()` | Process the current mono/stereo normalized FX bus block in place. | mixer |
 | `MIXER_FADER_PRE/POST/FX` | Define whether the Scene fader scales both taps, only the dry mix, or only the FX send. | SceneData/Preset, Menu, mixer |
@@ -838,7 +842,8 @@ voices, the Scene namespace, and the Effect namespace (`fx`, value 8).
 | `instrumentManager_runtimeInstance()` / trigger/filter/async/sync/pan/volume/LFO dispatch family | Resolve the runtime object for the current active Scene slot type. Engines render pre-volume; `instrumentManager_runtimeVolume()` supplies the channel volume that the mixer applies after decimation (Session 072 step 2). | mixer, MIDI/Sequencer trigger paths, Preset |
 | `instrumentManager_clearAllRuntimeModulationTargets()` | Restore/clear both LFO pairs and velocity target for every outgoing current source before a slot type changes. | Preset staged Instrument commit |
 | `instrumentManager_resetRuntimeSlot(slot)` | Initialize only the incoming committed slot/type runtime object. | Preset staged Instrument commit |
-| `instrumentManager_writeRuntime()` / target validation/stepping helpers | Apply descriptor/supplemental bindings and validate canonical targets against current slot types. | Preset, Menu, modulation paths |
+| `instrumentManager_writeRuntime()` / target validation/stepping helpers | Apply descriptor/supplemental bindings and validate canonical targets against current slot types. Special conversions are chosen by the row's flash tag (`runtime.special`, `IM_SPECIAL_*`, S073) in `instrumentManager_writeSpecialRuntime()`, not by the key string. | Preset, Menu, modulation paths |
+| `instrumentManager_specialTagSelfCheck()` (diagnostic builds) | Compare every row's tag with the old key rules; shown as the `s` digit on the `FxBf` boot screen. Host twin: `tools/dsp_test/check_special_tags.py`. | `main.c` diagnostic screen |
 | `instrumentManager_updateLfoAdapters(source_slot, pair, lfo, polarity, amount)` | Update InstrumentManager-owned LFO destinations: descriptor-domain adapters, slot decimation, and Scene targets. Descriptor adapters shape in parameter space and then call the normal runtime writer. For voice-morph targets, Session 071 changed encoding to direction+depth without reading the morph base; Effect parameter and `fxm` destinations are encoded to direction/depth by the shared `instrumentManager_lfoDirectionDepth()` and stored in EffectsManager. | `lfo.c` |
 | `INSTRUMENT_TARGET_VOICE_EFFECT` / `INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST` | LFO namespace byte 8 (`fx`); the upper clamp for every picker/parser. | Menu, storageTypes |
 | `instrumentManager_targetValid()` (block 7) | AUTOMATION validation of Effect IDs via `effects_targetValid()`; MODULATION stays voice-only. | PatternData writer, Menu |
@@ -1268,6 +1273,15 @@ Relevant interchange points:
   side-effect-free observer of the existing `audio_hw_suspended` hardware flag;
   Menu pairs it with `filesystem_setFastDrain()` for eligible stopped-playback
   Load/Save commands.
+- `flashImage_verifyAtBoot()` (Session 073, `Core/Hardware/flashImage.c`)
+  runs after `din_init()`/`time_initTimer()` and before `sampleMemory_init()`,
+  DSP and storage. It checks the stamped per-sector CRC32s and, on a
+  mismatch, holds an LCD report until BAR1. It owns no RAM. Its only affiliates
+  are the linker's `.image_check` block and `tools/stamp_image_check.py`
+  (`STORAGE_SRAM_MANIFEST.md` §3.4).
+- Sample flash writes go only through `sampleFlash.c`, which refuses any
+  sector below `SAMPLE_FIRST_SECTOR` (7) and any operation when
+  `SAMPLE_ROM_START_ADDRESS` differs from the linker's `__sample_flash_start`.
 - `timebase_holdPreAudioMs()` is used only for the current SD pre-init,
   post-mount, and pre-Bank pacing experiment. It must not be used after audio
   startup, from an ISR, or as runtime filesystem pacing. The intermittent hang

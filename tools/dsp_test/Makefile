@@ -4,7 +4,7 @@
 # Why:        the plan permits only the existing cc and arm-none-eabi tools.
 # Inputs:     frozen snapshot, current sources, extract.py and test files.
 # Outputs:    generated fragments and binaries under build/.
-# Accessors:  make -C tools/dsp_golden <target>.
+# Accessors:  make -C tools/dsp_test <target>.
 # Affiliates: fpseq.py, armcheck/, and the per-step test programs.
 ROOT   := ../..
 FROZEN := frozen
@@ -47,7 +47,7 @@ clean:
 
 # Step 2 host proof: tagged rows equal the pre-S073 key classifier.
 special_tags:
-	cd $(ROOT) && python3 tools/dsp_golden/check_special_tags.py
+	cd $(ROOT) && python3 tools/dsp_test/check_special_tags.py
 
 # Step 3a gate: old and word-store packers must produce identical bytes.
 pack: | $(GEN)
@@ -154,7 +154,18 @@ mixer: | $(GEN)
 	$(HOSTCC) $(HOSTFLAGS) test_mixer.c -o build/mixer -lm
 	./build/mixer
 
-# Step 5 ARM gate: compare the DAC1-stereo loops and report all loop counts.
+# Step 5 ARM gate: one loop of each dry x send combination, plus the default
+# (send-only) case, and the D-5 instruction counts for each combination.
+# Loop indices were chosen from their printed multisets (fpseq.py prints one
+# line per backward branch; loop rotation gives several per case):
+#   old_dry:1 single-output routing   old_dry:4  stereo routing
+#   old_send:0 mono-input send        old_send:3 stereo-input send
+#   new_combined:0 / 22 / 2 / 27      the four combinations, in that order
+#   new_combined:87 / 12              default case, mono / stereo send
+# A code change that moves a loop makes its line DIFF rather than pass.
+# The combined loop converts the input sample and the loop index once, where
+# the old dry and send loops each converted them (see fpseq.py --shared-op).
+MX_SHARED = --shared-op vcvt.f32.s32 --shared-op vcvt.f32.u32
 armcheck-mixer: mixer
 	$(EX) --src $(FROZEN)/Core/DSPAudio/mixer.c --func mixer_addVoiceInt16ToOutput \
 	  --func mixer_addVoiceToFxBus --rename mixer_addVoiceInt16ToOutput=old_dry \
@@ -165,6 +176,20 @@ armcheck-mixer: mixer
 	  --rename mixer_fx_bus=new_bus --rename static= --out $(GEN)/mx_new_arm.c
 	$(ARMCC) $(ARMFLAGS) -c armcheck/mixer.c -o build/ac_mixer.o
 	$(FP) --obj build/ac_mixer.o --ref old_dry:1 --ref old_send:0 \
-	  --new new_combined:0 --shared-op vcvt.f32.s32 --shared-op vcvt.f32.u32
+	  --new new_combined:0 $(MX_SHARED)
+	$(FP) --obj build/ac_mixer.o --ref old_dry:1 --ref old_send:3 \
+	  --new new_combined:22 $(MX_SHARED)
+	$(FP) --obj build/ac_mixer.o --ref old_dry:4 --ref old_send:0 \
+	  --new new_combined:2 $(MX_SHARED)
+	$(FP) --obj build/ac_mixer.o --ref old_dry:4 --ref old_send:3 \
+	  --new new_combined:27 $(MX_SHARED)
+	$(FP) --obj build/ac_mixer.o --ref old_send:0 --new new_combined:87
+	$(FP) --obj build/ac_mixer.o --ref old_send:3 --new new_combined:12
 	$(FP) --obj build/ac_mixer.o --ref old_dry:1 --ref old_send:0 --new new_combined:0 \
+	  --report --all
+	$(FP) --obj build/ac_mixer.o --ref old_dry:1 --ref old_send:3 --new new_combined:22 \
+	  --report --all
+	$(FP) --obj build/ac_mixer.o --ref old_dry:4 --ref old_send:0 --new new_combined:2 \
+	  --report --all
+	$(FP) --obj build/ac_mixer.o --ref old_dry:4 --ref old_send:3 --new new_combined:27 \
 	  --report --all

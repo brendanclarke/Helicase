@@ -1,7 +1,8 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference through Session 069 (all phases). It includes the Session 058 Bank
+reference through Session 073 (Session 069 for every phase before Phase 5;
+the Session 072 and 073 additions are noted below). It includes the Session 058 Bank
 I/O and stopped-playback speedups, the Session 059 typed Instrument-index
 repair, and Session 060's `.hcnames` atomic safe-write/refreshed flag, the boot
 Instrument `.hcindex` generation fix, and system-wide macOS AppleDouble
@@ -22,6 +23,11 @@ filter itself, are authoritative in `ASYNCFATFS_REFERENCE.md`.
 
 Session 072 ST6 adds `.fx` v2 Scene/Bank child storage, Effect HCNAMES rows
 145..160, and the AutoSave v3 Effect source/live-reader contract.
+
+Session 073 restores `Load:[Samples]` to the Load page (see "Current
+Load/Save Menu Reachability") and moves the on-chip sample flash floor to
+sector 7. The on-chip flash layout, the sample index and the install guards
+are in `STORAGE_SRAM_MANIFEST.md` §4; nothing on the card changed.
 
 AutoSave's hidden-record format, dirty ownership, and background writer are
 authoritative only in `AUTOSAVE.md`. Development flags and diagnostic files are
@@ -1881,8 +1887,12 @@ Initial recognized instrument types:
 
 ## Current Load/Save Menu Reachability
 
-Status through Session 061:
+Status through Session 073. The type rows each page cycles through are the
+whitelists `menu_loadSaveLoadTypes[]` and `menu_loadSaveSaveTypes[]` in
+`menu.c`:
 
+- Load: Kit, KitMrp, Scene, Bank, Pattern, Samples.
+- Save: Kit, KitMrp, Scene, Bank, Pattern.
 - `Load:[Kit     ]`, `Load:[KitMrp  ]`, `Load:[Scene   ]`, and
   `Load:[Bank    ]` are promoted top-level entries.
 - `Save:[Kit     ]`, `Save:[KitMrp  ]`, `Save:[Scene   ]`, and
@@ -1920,11 +1930,18 @@ Status through Session 061:
   Scene Load actions accumulate their destination mask; leaving the family
   performs at most one HCNAMES rewrite.
 
+- **`Load:[Samples]`** (Load page only; restored in Session 073, missing
+  from `menu_loadSaveLoadTypes[]` since July): OK runs the modal
+  `menu_loadSamplesModal()`. It first waits up to 10 s (`Waiting SD...`) for
+  a storage operation that was already running, suspends audio, erases
+  on-chip sample sectors 7–11, installs the card's `/samples` folder, then
+  appends `/loops`, and reinitialises audio. Only mono 16-bit 44.1 kHz PCM
+  WAV files are accepted; files are taken in whole-filename order with ASCII
+  case folded. Save has no Samples action.
+
 Still compiled but intentionally gated from the normal type cycler:
 
 - `Settings` / Globals
-- `Samples`
-- Pattern
 - All
 - Performance
 - legacy Morph

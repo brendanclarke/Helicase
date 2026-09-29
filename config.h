@@ -372,17 +372,6 @@
 ** production builds. */
 #define MEMTEST_ENABLED      1
 
-/* FLASH_GROWTH_DRILL_KB: one-off hardware test of the S073 736 KB
-** application window (sectors 1-6). 0 = off, the production setting. When
-** nonzero, flashImage.c links a constant table of this many KiB (64 moves the
-** image end about 56 KiB past 0x08080000, into sector 6), and a passing boot
-** image check shows "Img OK <image end>" / "drill <table address>" for 3 s.
-** Flashing it over a sector 6 that still holds old sample data shows whether
-** the LXRV2 bootloader erases and programs sector 6: pass = OK screen;
-** fail = "Img BAD s:.....6" or a hang before it. Either way, reflash a
-** normal image afterwards. Affiliates: Core/Hardware/flashImage.c. */
-#define FLASH_GROWTH_DRILL_KB 0
-
 /* -----------------------------------------------------------------------
 ** Firmware version
 ** ----------------------------------------------------------------------- */

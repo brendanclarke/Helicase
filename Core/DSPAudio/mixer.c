@@ -560,10 +560,10 @@ static void mixer_faderGains(uint8_t slot,
  *             expressions this copies exactly); the former
  *             mixer_addVoiceToFxBus(), removed in S073 Step 5, whose send
  *             expressions this copies exactly (its pre-S073 text is kept in
- *             tools/dsp_golden/frozen/Core/DSPAudio/mixer.c as the test
+ *             tools/dsp_test/frozen/Core/DSPAudio/mixer.c as the test
  *             reference); the mixer_send_last_gain / mixer_voice_last_gain
  *             updates in the caller (unchanged); mixer_faderGains();
- *             tools/dsp_golden/test_mixer.c.
+ *             tools/dsp_test/test_mixer.c.
  */
 static void mixer_addVoiceInt16ToOutputAndFx(uint8_t dest,
 		const float panL,
@@ -963,7 +963,7 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		else
 			mixer_addVoiceInt16ToOutput(effectiveRouting[slot],
 					squareRootLut[127-pan], squareRootLut[pan],
-				sampleData, voiceGain, mixer_voice_last_gain[slot],
+					sampleData, voiceGain, mixer_voice_last_gain[slot],
 					&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
 		mixer_voice_last_gain[slot] = voiceGain;
 		mixer_send_last_gain[slot] = sendGain;

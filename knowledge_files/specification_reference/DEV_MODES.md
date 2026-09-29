@@ -17,7 +17,13 @@ stage codes. Plans and failed working-tree experiments
 that mention a unified `/devlog.bin` are not implemented state.
 
 Session 072 Step 4 adds the screen-only EffectsManager registry self-check
-code and the `DEV_EFFECT_FORCE_TYPE` boot test knob described below.
+code and the `DEV_EFFECT_FORCE_TYPE` boot test knob described below. Session
+073 adds the instrument special-writer tag self-check digit to the same
+screen.
+
+The boot image check (`flashImage.c`, Session 073) is **not** a development
+mode: it is production code that runs on every boot and is silent unless the
+flash image is damaged (`STORAGE_SRAM_MANIFEST.md` §3.4).
 
 The build has exactly two development modes:
 
@@ -68,15 +74,22 @@ when `DEV_MODE_DIAGNOSTIC=1`. It performs no filesystem work and holds for
 1.5 seconds so the LCD queue can display the linked arena and allocation state:
 
 ```text
-FxBf 124K u00
-Shr  124K st0 r0
+FxBf 123K u00 s0
+Shr  123K st0 r0
 ```
 
 `FxBf` is the complete `.dtcm_fxbuf` arena in KiB, `u` is the number of
-diagnostic-forced voice units, `Shr` is the current contiguous Effect share,
-`st` is the allocation self-test result (`0` means pass), and `r` is the
-EffectsManager registry self-check result (`0` means pass). The screen is
-compiled out with the diagnostic mode.
+diagnostic-forced voice units, `s` is the instrument special-writer tag
+self-check (Session 073: the number of descriptor rows, clamped to 9, whose
+flash `IM_SPECIAL_*` tag differs from the pre-S073 key-string rules; `0`
+means pass), `Shr` is the current contiguous Effect share, `st` is the
+allocation self-test result (`0` means pass), and `r` is the EffectsManager
+registry self-check result (`0` means pass). The screen is compiled out with
+the diagnostic mode.
+
+The `s` check (`instrumentManager_specialTagSelfCheck()`) keeps the old key
+classifier compiled only in diagnostic builds and uses no RAM. Its host twin
+is `make -C tools/dsp_test special_tags` (`tools/dsp_test/DSP_TEST.md`).
 
 `DEV_FXBUF_FORCE_VOICE_UNITS` is a diagnostic-only test knob with an accepted
 compile-time range of 0..12. It is ignored when `DEV_MODE_DIAGNOSTIC=0` and
@@ -109,7 +122,7 @@ When the flag is zero:
 - the boot-timeout diagnostic write path is compiled out.
 
 Any future retained logging allocation requires exact bytes, region, lifetime,
-and owner in `SRAM_MANIFEST.md` before implementation.
+and owner in `STORAGE_SRAM_MANIFEST.md` before implementation.
 
 ## Current logging files
 
@@ -250,7 +263,7 @@ DEV_MODE_LOGGING-and-DEV_LOGGING_IWDG-gated only, filesystem.c.
 default is 64 records (512 bytes); the current approved diagnostic build sets
 `AUTOSAVE_TRACE_RECORD_COUNT` to 2,048 records (16,384 bytes). Producers append
 RAM records; `filesystem.c` owns the AsyncFATFS append/close/flush operation.
-The exact logging-only allocation is recorded in `SRAM_MANIFEST.md`.
+The exact logging-only allocation is recorded in `STORAGE_SRAM_MANIFEST.md`.
 
 Each record is eight bytes:
 

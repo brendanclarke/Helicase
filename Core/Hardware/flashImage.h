@@ -53,8 +53,7 @@
  * Result: silent on success. On a mismatch, or an unstamped image, rows 1-2
  * show the bad sectors and "Reflash. BAR1=go"; boot waits for a BAR1
  * press-and-release, then continues (so a checker fault can never brick a
- * unit). With config.h FLASH_GROWTH_DRILL_KB nonzero, it also shows the
- * result and the drill table address for 3 s on success.
+ * unit).
  *
  * Cost: no RAM (locals only), ~0.5 KB flash, ~20 ms of boot time.
  *

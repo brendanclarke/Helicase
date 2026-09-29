@@ -6,7 +6,7 @@ What:       classifies each descriptor key with the pre-S073 string rules and
 Why:        host proof that the flash tags preserve every old writer mapping.
 Inputs:     the four parameter tables in the repository root.
 Outputs:    a row count and mismatch diagnostics; failure exits 1.
-Accessors:  make -C tools/dsp_golden special_tags.
+Accessors:  make -C tools/dsp_test special_tags.
 Affiliates: InstrumentManager.c's diagnostic classifier.
 """
 import re

@@ -4,7 +4,9 @@
 
 This is the authoritative reference for how parameters are stored in resident
 memory across the Bank, Scene, Kit, Instrument, and Effect hierarchy as of
-Session 072. It describes what is stored, where it lives, when it changes,
+Session 072 (unchanged by Session 073). How a stored value reaches the DSP
+(descriptor writers, special-writer tags, LFO adapters) is in
+`INSTRUMENTS_DSP_REFERENCE.md`. It describes what is stored, where it lives, when it changes,
 when it becomes visible, and how it is persisted.
 
 Related authority is deliberately separate:
@@ -16,7 +18,7 @@ Related authority is deliberately separate:
 - `FILESYSTEM_SPEC.md` owns product SD layout, instrument file schemas,
   Scene/Bank directory structure, and HCNAMES grammar.
 - `MODULE_INTERCHANGE_SPEC.md` owns the live direct-call ownership map.
-- `SRAM_MANIFEST.md` owns the binding memory-reservation policy and linked
+- `STORAGE_SRAM_MANIFEST.md` owns the binding memory-reservation policy and linked
   allocation snapshot.
 
 ---

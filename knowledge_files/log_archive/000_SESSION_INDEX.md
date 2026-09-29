@@ -87,6 +87,7 @@ it belongs in the summary or the log, not here.
 | 070 | 2026-09-22/25 | commit `e3ae961` on `dev-ph5-effects` | Systems fitness pass: Makefile `-MMD -MP`, Load/Save revision (LSR-01..04), probability gating, Scene automation targets, LED layer bitmap, Scene automation runtime overlay |
 | 071 | 2026-09-25/26 | `dev-ph5-effects` (S071 closeout) | Per-Scene voice-edit masks, base-independent LFO voice-Morph, Scene superpage live display, LED chase and LFO target-voice fixes |
 | 072 | 2026-09-27/28 | `dev-ph5-effects`, HEAD `58569ae` + uncommitted Steps 9–11 | Phase 5 Effects bus: registry, `flt`, FX bus/fader modes, `.fx` v2 + HCNAMES 161, Effect page, FX sequencer, Effect automation/LFO, edit-mask gate/fan-out |
+| 073 | 2026-09-28/29 | `dev-ph5-effects`, HEAD `692abf8` + uncommitted closeout edits | Program flash 480 → 736 KiB, Load:[Samples] restored, DSP CPU refactor (about 10 % worst case), `tools/dsp_test` bench |
 
 
 ---
@@ -510,7 +511,14 @@ Session 065 delivered the first working end-to-end step automation path: the exi
 | Effect Pattern overlays end when the writing track plays an automation step without that parameter: TIM3 queues an Effect step marker (pending identity bit 11) before an owning track's entries; the drain's reset latch clears all overlays before a new pass | 072 |
 | VOICE edit-mask gate: a Scene can join the active mask only with the same Effect type and six Instrument types (`scene_editLayoutMatches()`); `bank_revalidateVoiceEditMasks()` runs at every load-completion funnel, end of boot, and after `effects_changeType()` | 072 |
 | Blank Effect/Instrument names save as `none.fx`/`none.drm` (all-space stem → `none`); an empty (NUL) stem becomes `inst` — pass explicit spaces for a blank HCNAMES row | 072 |
-| Flash headroom after S072: **8,080 B** of the 480 KiB window (`python3 tools/link_budget.py arm-none-eabi-nm build/lxr02.elf`); growth path planned in `S073_FLASH_EXPANSION.md` | 072 |
+| Flash headroom after S072: 8,080 B of the old 480 KiB window. **S073 moved sector 6 to the application:** window `0x08008000–0x080BFFFF` (736 KiB), samples from sector 7 (`0x080C0000`); headroom 266,560 B at S073 close | 072, 073 |
+| Sample flash floor is **sector 7** (`SAMPLE_FIRST_SECTOR`). `sampleFlash.c` refuses any erase/write if `SAMPLE_ROM_START_ADDRESS` differs from the linker's `__sample_flash_start`. Installs made before S073 read as 0 samples. Never roll a pre-S073 image back over a grown image without reinstalling samples | 073 |
+| Every boot checks a stamped CRC32 per application sector (`flashImage.c`, `.image_check` in sector 1, `tools/stamp_image_check.py`). `Img BAD s:…` names a sector the bootloader failed to write. The bootloader is still unproven past `0x08080000` | 073 |
+| **Constant-CPU rule:** never save CPU by skipping DSP work because something is inactive, silent or at zero; budget the worst case with everything active | 073 |
+| Instrument descriptor rows carry a flash `special` writer tag (`IM_SPECIAL_*`); `instrumentManager_writeSpecialRuntime()` switches on it. Tag new rows and run `make -C tools/dsp_test special_tags` | 073 |
+| DMA buffers (`.dma_nocache`, MPU region 1) are **Normal non-cacheable** (was Strongly-Ordered); `pack_audio_half()` must end with `DSB` | 073 |
+| DSP refactors are proved on the host with `tools/dsp_test/` (host comparison + ARM `fpseq.py` check; `DSP_TEST.md`) | 073 |
+| `SRAM_MANIFEST.md` is now `STORAGE_SRAM_MANIFEST.md` (flash, sample flash and RAM in one place) | 073 |
 
 ---
 
@@ -1601,3 +1609,38 @@ checklist in the log.
   `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`,
   `BANK_PRESET_ARCHITECTURE.md`, `PATTERN_DYNAMIC_STACK.md`,
   `SRAM_MANIFEST.md`, `DEV_MODES.md`, `S073_SESSION_STARTUP.md`.
+
+### 073 — Program Flash Expansion, Load Samples Restore, DSP CPU Refactor (2026-09-28/29)
+
+Session 073 ran on `dev-ph5-effects` from the S072 close (`05bbd83`; text
+483,024, payload 483,440 B, 8,080 B free in 480 KiB) to HEAD `692abf8` plus
+uncommitted closeout edits (text 486,688, data 416, bss 426,336; payload
+487,104 B of 753,664; ITCM 4,168 B).
+
+- **Flash expansion.** The bootloader study and probe tests were skipped by
+  user decision. Sector 6 moved from samples to the application (736 KiB
+  window, samples from sector 7), `Reset_Handler` is linked first, and every
+  boot checks a stamped per-sector CRC32. The image boots on hardware. The
+  bootloader stays unproven past `0x08080000`.
+- **Post-flash bugfixes.** Load:[Samples] had been missing from the Load
+  whitelist since July; restored with a wait-for-idle, hardware PASS. Slow
+  Load type switching was analysed and deferred (trace logger stays on).
+  The unrequested growth-drill knob was removed.
+- **DSP CPU refactor** under the new constant-CPU rule: batched ZDF filter
+  divisions (S1), string-free descriptor writer tags, word-store DMA pack with
+  a Normal non-cacheable MPU region, fused voice post-chains, one-pass mixer
+  dry + send, and an octave edge table instead of `log2f()` (all S0 except
+  the approved S1/edge cases). Silence gating and a software noise PRNG were
+  rejected. Hardware: about 10 % less CPU on the worst-case Scene with the
+  stereo filter Effect.
+- **Tools and docs.** `tools/dsp_test/` host bench (`DSP_TEST.md`); new
+  `INSTRUMENTS_DSP_REFERENCE.md` and `EFFECTS_MIXER_DSP_REFERENCE.md`;
+  `SRAM_MANIFEST.md` renamed `STORAGE_SRAM_MANIFEST.md` with the flash
+  material.
+
+- **Find here**: [073_SESSION_HANDOFF_LOG.md](073_SESSION_HANDOFF_LOG.md),
+  `STORAGE_SRAM_MANIFEST.md`, `INSTRUMENTS_DSP_REFERENCE.md`,
+  `EFFECTS_MIXER_DSP_REFERENCE.md`, `CPU_USE_DSP_AUDIT.md`,
+  `tools/dsp_test/DSP_TEST.md`,
+  `knowledge_files/drafts/MENU_LOAD_SPEEDUP_SMOOTHNESS.md`,
+  `S074_EFFECT_BUGS_BUFFER_USE.md`.

@@ -31,28 +31,53 @@ Do not recommend bumping `AUTOSAVE_PARAMETER_GETS_PER_WRITE` or adjusting
 capture timing unless the user explicitly asks. The section-based CRC
 format redesign is the chosen path for write performance.
 
-## Current carryover after Session 072
+## Current carryover after Session 073
 
-Session 072 implemented Phase 5, the Effects bus (`EFFECTS_BUS_FEATURE_PLAN.md`
-Steps 1–11), on `dev-ph5-effects`.
+Session 073 (2026-09-28/29, `dev-ph5-effects`) grew program flash to 736 KiB,
+restored Load:[Samples], and cut worst-case DSP CPU by about 10 %.
 
-- **Commits:** HEAD `58569ae` = Steps 1–8; Steps 9–11 are uncommitted. You
-  manage commits.
-- **Final link:** `text=483,024`, `data=416`, `bss=426,336`; flash payload
-  483,440 B; **8,080 B flash headroom**.
-- **Durable authorities:**
-  `knowledge_files/log_archive/072_SESSION_HANDOFF_LOG.md` (step record,
-  RAM ledger, carried debt, and the §11 Phase 5 hardware acceptance
-  checklist) and
-  `knowledge_files/specification_reference/EFFECTS_BUS_REFERENCE.md` (as
-  built).
-- **Disposable:** the `S072_ST1..ST11_IMPLEMENTATION.md` step documents.
-- **Next session (073):** `S073_FLASH_EXPANSION.md`, then
-  `S073_CPU_USE_DSP_REDUCTION_REFACTOR.md`. Read `S073_SESSION_STARTUP.md`
-  first.
-- **Hardware still pending:** the Step 6–10 matrices. Run the checklist when
-  the hardware is available. It does not block the S073 flash work, but S073
-  test images must keep Effect behaviour intact.
+- **Commits:** HEAD `692abf8` holds the S073 code. The closeout edits
+  (post-review corrections, drill-knob removal, the `tools/dsp_golden` →
+  `tools/dsp_test` rename staged by `git mv`, and all documentation) are
+  uncommitted. The user manages commits.
+- **Final link:** `text=486,688`, `data=416`, `bss=426,336`; payload
+  487,104 B of 753,664 (266,560 B free); ITCM 4,168 B. `lxr02.bin` SHA-256
+  `1bd8be52…5fc82`.
+- **Durable authorities:** `073_SESSION_HANDOFF_LOG.md`;
+  `STORAGE_SRAM_MANIFEST.md` (renamed from `SRAM_MANIFEST.md`);
+  `INSTRUMENTS_DSP_REFERENCE.md` and `EFFECTS_MIXER_DSP_REFERENCE.md` (new);
+  `tools/dsp_test/DSP_TEST.md`.
+- **Disposable:** the five root `S073_*.md` documents (and still the
+  `S072_ST*_IMPLEMENTATION.md` set).
+- **Next session (074):** `S074_EFFECT_BUGS_BUFFER_USE.md`: the Effect-page
+  automation-underline bug first, then the first Effect type that uses the
+  DTCM arena. The startup document lists the decisions the user must make.
+- **Hardware still pending from S072:** the Phase 5 Step 6–10 matrices
+  (`072_SESSION_HANDOFF_LOG.md` §11).
+- **Deferred:** slow Load type switching (trace logger stays on;
+  `knowledge_files/drafts/MENU_LOAD_SPEEDUP_SMOOTHNESS.md`); the bootloader
+  past `0x08080000`; D-C1 (keep the boot image check).
+- **Suspected, unverified:** LFO noise spans −1..1 (`SCOPING_TARGETS.md`,
+  Session 073 carry-forward). Do not change it without the user.
+
+### Working preferences confirmed in Session 073
+
+- **Constant CPU.** Never propose saving CPU by skipping DSP work when
+  something is inactive, silent or at zero. If an idea does, raise it
+  specifically; the expected answer is no (`MEMORY.md`, DSP CPU Policy).
+- **No new utilities, no profiler, no extra CPU widgets.** Prove DSP changes
+  with `tools/dsp_test/` (host `cc`, `python3` standard library, the ARM
+  toolchain).
+- **Do not add unrequested features, knobs or test builds.** The S073 growth
+  drill knob was added without a request and had to be removed ("i never
+  asked for that"). Ask before adding anything outside the request.
+- **Hardware checks are the user's** (listening, the worst-case Scene,
+  controls, the Effect budget). Hand over the list; do not claim them.
+- **Big refactors:** the assistant writes a line-level implementation
+  schedule; the user implements; the assistant reviews the diff, reruns every
+  gate, reports concisely, and corrects documentation that misstates things.
+- **Report RAM changes of every kind,** including ITCM code growth, with
+  byte count, region, lifetime and owner.
 
 ### Effect-system invariants (Session 072)
 

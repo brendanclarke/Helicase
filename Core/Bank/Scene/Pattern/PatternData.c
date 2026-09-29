@@ -37,7 +37,7 @@
  * 112-byte bridge bitmap to disappear without embedding a much larger payload
  * in every Scene record. Inputs: NUM_TRACKS, NUM_STEPS, and PAT_STACK_SIZE.
  * Outputs: one fixed region that pat_* functions index by Scene. Affiliates:
- * pat_initScene(), the Session-062 C allocator, and SRAM_MANIFEST.md.
+ * pat_initScene(), the Session-062 C allocator, and STORAGE_SRAM_MANIFEST.md.
  */
 _Static_assert(PAT_STACK_SIZE > 0u && PAT_STACK_SIZE <= 512u,
                "PAT_STACK_SIZE must fit the 14-bit pool bitmap");

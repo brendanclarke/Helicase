@@ -7,7 +7,7 @@
  *             is byte-identical.
  * Inputs:     generated old_pack_half/new_pack_half fragments.
  * Outputs:    differing byte count; nonzero on failure.
- * Accessors:  tools/dsp_golden/Makefile pack target.
+ * Accessors:  tools/dsp_test/Makefile pack target.
  * Affiliates: AudioCodecManager.c sampleMix_toS24(), pack_half().
  */
 #include <stdint.h>

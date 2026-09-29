@@ -3131,7 +3131,7 @@ static uint8_t instrumentManager_writeSpecialRuntime(
  * Inputs:     instrument type and a nullable file key.
  * Outputs:    IM_SPECIAL_* plus an oscillator selector where applicable.
  * Accessors:  instrumentManager_specialTagSelfCheck().
- * Affiliates: tools/dsp_golden/check_special_tags.py and the four table files.
+ * Affiliates: tools/dsp_test/check_special_tags.py and the four table files.
  */
 static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
                                                     const char *key)

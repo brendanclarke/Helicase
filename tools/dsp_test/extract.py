@@ -6,7 +6,7 @@ Why:        the golden harness must compile the real old and new source text,
             not a transcription of DSP expressions.
 Inputs:     --src, --func/--object/--lines, --rename, --out.
 Outputs:    one generated C fragment; missing selectors fail the command.
-Accessors:  tools/dsp_golden/Makefile.
+Accessors:  tools/dsp_test/Makefile.
 Affiliates: snapshot.sh and the generated frozen/current fragments.
 """
 import argparse

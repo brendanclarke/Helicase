@@ -4,7 +4,7 @@
 
 This is the authoritative reference for the implemented Helicase AutoSave
 format, ownership, boot restore, mutation tracking, and background writer
-through Session 072 (all phases). Historical plans and session logs explain
+through Session 072 (all phases). Session 073 changed nothing in AutoSave. Historical plans and session logs explain
 how the implementation was reached, but they do not override this document.
 
 Related authority is deliberately separate:
@@ -14,8 +14,8 @@ Related authority is deliberately separate:
   rejected pre-Session-045 per-file dot-backer design is not a current spec;
 - `DEV_MODES.md` owns development-mode selection and diagnostic file output;
 - `ASYNCFATFS_REFERENCE.md` owns low-level AsyncFATFS contracts;
-- `SRAM_MANIFEST.md` owns the binding memory-reservation policy and the current
-  Session 069 linked allocation/capture snapshot;
+- `STORAGE_SRAM_MANIFEST.md` owns the binding memory-reservation policy and the current
+  linked allocation snapshot (on-chip flash and RAM);
 - `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md` owns the deferred interaction
   and regression matrix for AutoSave, HCNAMES, `settings.cfg`, and Load/Save.
 
