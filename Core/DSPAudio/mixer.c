@@ -1016,6 +1016,25 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 				fx_stereo_out ? mixer_fx_bus.f[1] : 0,
 				gainL, gainR, &output[pos], &output[pos+1],
 				&output2[pos], &output2[pos+1]);
+	} else {
+		/*
+		 * Reset the FX return ramp origin while no Effect runs (S072 debt 8,
+		 * closed in S074).
+		 *
+		 * What: holds both return gains' previous-block origin at 0 on every
+		 * `off` block. Why: mixer_addFxReturnToOutput() ramps from
+		 * mixer_fx_return_last_gain[] to the new gains. While `off` it is
+		 * not called, so the origin kept the last active Effect's gains, and a
+		 * type that outputs on its first block after init (CrumpBit's AC
+		 * coupled 8-bit output is never silent) started from those stale gains,
+		 * a click. From 0 the return fades in over one block. Cost: two stores
+		 * per `off` block, unconditional. Inputs: fx_active == 0. Output:
+		 * mixer_fx_return_last_gain[0..1] = 0. Affiliates:
+		 * mixer_addFxReturnToOutput(), effects_activeIoFlags(),
+		 * EFFECTS_MIXER_DSP_REFERENCE.md §5.3 item 2.
+		 */
+		mixer_fx_return_last_gain[0] = 0.0f;
+		mixer_fx_return_last_gain[1] = 0.0f;
 	}
 
 }

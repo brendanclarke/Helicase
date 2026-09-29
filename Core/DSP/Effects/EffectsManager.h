@@ -58,9 +58,14 @@
  * mixer FX bus.
  */
 
-/* Registry ids are append-only; persisted identity is the three-byte token. */
+/*
+ * Registry ids are append-only; persisted identity is the three-byte token.
+ * EFFECT_TYPE_CRUMPBIT (S074): the first buffer-using type (`cbt`, 8-bit
+ * data lines and an 8-bit tape delay in the FxBuffer share).
+ */
 #define EFFECT_TYPE_STEREO_FILTER        1u
-#define EFFECT_TYPE_COUNT                2u
+#define EFFECT_TYPE_CRUMPBIT             2u
+#define EFFECT_TYPE_COUNT                3u
 
 /* Extra descriptor capability flags used by Effect-specific owners. */
 #define EFFECT_PARAM_FLAG_WIDE8              0x01u
@@ -115,30 +120,73 @@ typedef struct {
 } effect_io_t;
 
 /*
- * Optional per-type Effect-page hooks (Session 072 step 7; plan §13.6).
+ * Optional per-type Effect-page hooks (Session 072 step 7; plan §13.6;
+ * extended in S074 for CrumpBit).
  *
- * What: lets a type take over SELECT, TRACK, or BAR gestures and add LED
- * rendering on the Effect page. Each input hook receives the zero-based
- * button, the SHIFT state, and pressed (1) / released (0), and returns
- * nonzero when it handled the gesture; zero falls back to the default page
- * behavior. render_leds runs after the page has drawn its own LEDs.
+ * What: lets a type take over SELECT, TRACK or BAR gestures, add LED
+ * rendering, paint a type-owned top row, and label its own values on the
+ * Effect page.
+ * - select/track/bar(button, shift, pressed) return nonzero when handled;
+ *   zero falls back to the default page behaviour. select may return
+ *   EFFECT_UI_SHOW_HOME: handled, and the page shows the layout's home
+ *   screen. Any nonzero select return abandons an open `typ` browse (S074).
+ * - render_leds() runs after the page has drawn its own LEDs. With
+ *   EFFECT_UI_FLAG_OWNS_SELECT_LEDS it is also the only writer of the SELECT
+ *   LED row while the type is on the page: the page's active SELECT LED is
+ *   suppressed, and menuEffects_renderSelectLeds() calls this instead.
+ * - paint_row0(sub_page, screen, row0) writes columns 0..14 of the compact
+ *   top row for screens flagged in select_layout->custom_row0; column 15
+ *   keeps the page's scroll marker. Those screens show no automation name
+ *   markers.
+ * - format_value3(index, value, out) may replace the 3-character value text
+ *   of a type row on the Effect page only: compact cells, the full view, and
+ *   held-step values. Storage and the STEP automation page show raw values.
+ * - flags (S074): EFFECT_UI_FLAG_*.
  * Rules: hooks run in foreground, must not block, must write retained data
- * only through the EffectsManager edit API, and never touch the filesystem.
- * Any member may be NULL. Affiliates: menuEffects_hook*(), buttonHandler FX
- * mode branches, and the registry's ui field.
+ * only through the EffectsManager edit API (menuEffects_editParam() for
+ * held-aware writes), and never touch the filesystem. Any member may be NULL.
+ * Affiliates: menuEffects_hook*(), _renderLeds(), _renderSelectLeds(),
+ * _paintRow0(), _formatParamValue3(), _liveRefreshWanted(), buttonHandler FX
+ * branches, and the registry's ui field.
  */
+#define EFFECT_UI_HANDLED                 1u
+#define EFFECT_UI_SHOW_HOME               2u
+#define EFFECT_UI_FLAG_OWNS_SELECT_LEDS   0x01u
+
 struct effect_ui_hooks {
     uint8_t (*select)(uint8_t button, uint8_t shift, uint8_t pressed);
     uint8_t (*track)(uint8_t track, uint8_t shift, uint8_t pressed);
     uint8_t (*bar)(uint8_t bar, uint8_t shift, uint8_t pressed);
     void (*render_leds)(void);
+    void (*paint_row0)(uint8_t sub_page, uint8_t screen, char *row0);
+    uint8_t (*format_value3)(uint8_t index, uint8_t value, char *out);
+    uint8_t flags;
 };
 typedef struct effect_ui_hooks effect_ui_hooks_t;
 
-/* Optional per-type SELECT layout for the Effect page (NULL = default, §13.2). */
+/*
+ * Optional per-type SELECT layout for the Effect page (NULL = default, §13.2;
+ * extended in S074).
+ *
+ * screen_count[b], cells[b][screen][column]: the screens behind SELECT b+1
+ * (up to 4). A cell holds a descriptor index, EFFECT_LANE_NONE (empty), or
+ * EFFECT_LAYOUT_CELL_MORPH (the manager `mrp` cell). Index 0 (SELECT 1) is
+ * always manager-owned and ignored here.
+ * custom_row0[b]: bit s set = screen s of SELECT b+1 has a type-painted top
+ * row (ui->paint_row0) instead of names.
+ * home_sub_page/home_screen: the screen a hooked SELECT shows when it returns
+ * EFFECT_UI_SHOW_HOME.
+ * Affiliates: menuEffects_cellAt(), _screenCount(), _screenHasCustomRow0(),
+ * _home(), and crumpBit_layout.
+ */
+#define EFFECT_LAYOUT_CELL_MORPH         0xFDu
+
 typedef struct {
     uint8_t screen_count[8];
     uint8_t cells[8][4][4];
+    uint8_t custom_row0[8];
+    uint8_t home_sub_page;
+    uint8_t home_screen;
 } effect_select_layout_t;
 
 /*

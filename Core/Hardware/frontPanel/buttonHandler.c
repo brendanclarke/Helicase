@@ -933,8 +933,14 @@ static void handleSelectButton(uint8_t selectNr)
             break;
 
         case SELECT_MODE_FX:
-            /* SHIFT+SELECT is reserved for optional type UI hooks. */
-            (void)menuEffects_hookSelect(selectNr, 1u, 1u);
+            /*
+             * SHIFT+SELECT is reserved for optional type UI hooks. S074:
+             * CrumpBit resets that data line to normal and asks for its home
+             * screen.
+             */
+            if (menuEffects_hookSelect(selectNr, 1u, 1u) ==
+                EFFECT_UI_SHOW_HOME)
+                menu_effectShowHome();
             break;
 
         case SELECT_MODE_PERF:
@@ -958,14 +964,27 @@ static void handleSelectButton(uint8_t selectNr)
         menu_repaintAll();
         break;
 
-    case SELECT_MODE_FX:
-        /* Let the active Effect type consume SELECT before default navigation. */
-        if (menuEffects_hookSelect(selectNr, 0u, 1u))
+    case SELECT_MODE_FX: {
+        /*
+         * Let the active Effect type consume SELECT before default
+         * navigation. S074: EFFECT_UI_SHOW_HOME means the type handled the
+         * press and the page must show its home screen (CrumpBit toggles a
+         * data line, then shows the overlay). menu_effectShowHome() repaints
+         * and re-renders the LEDs. Default navigation routes through the type
+         * owner check, which is the active SELECT LED for other types.
+         */
+        const uint8_t fx_action =
+            menuEffects_hookSelect(selectNr, 0u, 1u);
+
+        if (fx_action != 0u) {
+            if (fx_action == EFFECT_UI_SHOW_HOME)
+                menu_effectShowHome();
             break;
+        }
         menu_switchSubPage(selectNr);
-        led_setActiveSelectButton(menu_getSubPage());
+        menuEffects_renderSelectLeds(menu_getSubPage());
         menu_repaintAll();
-        break;
+        break; }
 
     case SELECT_MODE_PERF:
         /*

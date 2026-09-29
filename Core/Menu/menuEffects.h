@@ -115,11 +115,41 @@ uint8_t menuEffects_hookBar(uint8_t bar, uint8_t shift, uint8_t pressed);
 void menuEffects_renderLeds(void);
 
 /*
+ * Type page extensions (S074; used by CrumpBit through EffectsManager's
+ * select_layout and effect_ui_hooks_t).
+ *
+ * menuEffects_screenHasCustomRow0(sub_page): nonzero when the remembered
+ * screen of that SELECT is flagged in select_layout->custom_row0 and the type
+ * has paint_row0. Caller: menu_applyEffectMarkers().
+ * menuEffects_paintRow0(sub_page, row0): lets the type paint columns 0..14 of
+ * the compact top row on such a screen. Caller: menu_repaintGeneric().
+ * menuEffects_formatParamValue3(cell, value, dst): the type's value text for
+ * an explicit PARAM value. Caller: compact/full/held Effect rendering.
+ * menuEffects_renderSelectLeds(sub_page): the SELECT LED row for the page;
+ * the type owns it when requested, otherwise the active SELECT LED is shown.
+ * menuEffects_home(sub_page, column): moves page memory to a type home screen.
+ * menuEffects_liveRefreshWanted(): nonzero when type-labelled values may
+ * depend on live state such as tempo. All are foreground-only and
+ * allocation-free; only _home() changes page memory.
+ */
+uint8_t menuEffects_screenHasCustomRow0(uint8_t sub_page);
+void menuEffects_paintRow0(uint8_t sub_page, char *row0);
+uint8_t menuEffects_formatParamValue3(const menuEffects_cell_t *cell,
+                                      uint8_t value, char *dst);
+void menuEffects_renderSelectLeds(uint8_t sub_page);
+uint8_t menuEffects_home(uint8_t *sub_page, uint8_t *column);
+uint8_t menuEffects_liveRefreshWanted(void);
+
+/*
  * FX-sequencer hold gestures and row rendering (Session 072 step 8; plan
- * §13.4). SEQ presses jump immediately in `sel`; the shared ButtonHandler
- * hold threshold calls menuEffects_seqHoldExpired(), after which sequenceable
- * cells write lane locks across the physically held steps. Non-sequenceable
- * manager cells are ignored while held. The display and LED helpers are
+ * §13.4; S074). SEQ presses jump immediately in `sel`; the shared
+ * ButtonHandler hold threshold calls menuEffects_seqHoldExpired(), after
+ * which sequenceable cells write lane locks across the physically held steps.
+ * Non-sequenceable manager cells are ignored while held. S074: the displayed
+ * and seeding step is the last step held (the most recently pressed SEQ
+ * button still down; if it is released while others stay down, the highest
+ * numbered remaining step), so the whole page shows one step. Every held edit
+ * writes one value to every held step. The display and LED helpers are
  * foreground-only and keep all Scene writes inside EffectsManager.
  */
 void menuEffects_seqButtonPressed(uint8_t step);
@@ -128,6 +158,20 @@ uint8_t menuEffects_seqHoldActive(void);
 uint8_t menuEffects_holdEdit(const menuEffects_cell_t *cell, int16_t delta);
 uint8_t menuEffects_holdDisplay(const menuEffects_cell_t *cell,
                                 uint8_t *value, uint8_t *locked);
+
+/*
+ * Held-aware row access for type hooks (S074).
+ *
+ * menuEffects_shownParam(index): the value the page shows for a row of the
+ * active Scene's Effect: the last step held's lane lock when that row has a
+ * lane locked there, otherwise the retained value.
+ * menuEffects_editParam(index, value): writes a row the way the page edits;
+ * during a SEQ hold it locks the row's lane on every held step with value;
+ * otherwise it sets the retained value through effects_setParameter().
+ * Returns nonzero if a byte changed. Callers: CrumpBit's UI hooks.
+ */
+uint8_t menuEffects_shownParam(uint8_t index);
+uint8_t menuEffects_editParam(uint8_t index, uint8_t value);
 
 /*
  * FX-sequence lock presence for the Effect-page name underline (S074).

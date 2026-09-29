@@ -225,6 +225,22 @@ void fxbuf_init(void)
     fxbuf_state.bytes = (uint32_t)(_efxbuf - _sfxbuf);
     fxbuf_state.on_share_changed = NULL;
     fxbuf_clearOwners();
+    /*
+     * Reset the handoff record before any unit is claimed (S072 debt 1,
+     * closed in S074).
+     *
+     * What: clears the handoff snapshot to "nothing valid" immediately after
+     * the owner table. Why: fxbuf_voiceAcquire() stamps each claimed unit's
+     * default store rate into the handoff record. With the reset after the
+     * diagnostic forced-unit loop, those units were left with rate 0, and the
+     * minimum-share test (DEV_FXBUF_FORCE_VOICE_UNITS 12) that the first
+     * buffer-using Effect needs ran against a malformed record. Inputs: none.
+     * Output: a zeroed record whose pointers are FXBUF_OFFSET_NONE. The
+     * self-test and forced claims below now write valid unit rates, and
+     * fxbuf_handoffBeginExit() at the end clears free units. Affiliates:
+     * fxbuf_handoffResetAll(), fxbuf_voiceAcquire(), DEV_MODES.md.
+     */
+    fxbuf_handoffResetAll();
 
 #if DEV_MODE_DIAGNOSTIC
     fxbuf_selfTestResult = fxbuf_selfTest();
@@ -234,7 +250,6 @@ void fxbuf_init(void)
             (void)fxbuf_voiceAcquire((uint8_t)(n / FXBUF_VOICE_UNITS_PER_SLOT), 1u);
     }
 #endif
-    fxbuf_handoffResetAll();
     (void)fxbuf_handoffBeginExit();
 }
 

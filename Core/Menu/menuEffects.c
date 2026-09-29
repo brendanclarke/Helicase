@@ -20,6 +20,11 @@
  * Navigation: the encoder walks every populated cell linearly across screens
  * AND SELECT buttons, without wrapping; SELECT n lands on its first screen,
  * and a re-press cycles its screens (S072_ST7 D1).
+ * Type-owned pages (S074): a layout may place the manager `mrp` cell
+ * (EFFECT_LAYOUT_CELL_MORPH), flag screens whose top row the type paints
+ * (custom_row0), and name a home screen. A type's hooks may take the SELECT
+ * buttons and the SELECT LED row, and label its own values (format_value3).
+ * CrumpBit (`cbt`) is the first user.
  */
 #include "menuEffects.h"
 #include "menu.h"
@@ -52,13 +57,22 @@ static uint8_t menuEffects_lastScene;
 static effect_type_id_t menuEffects_lastType;
 
 /*
- * FX-sequencer page state (Session 072 step 8; +7 B, S072_ST8 D5).
+ * FX-sequencer page state (Session 072 step 8; +7 B, S072_ST8 D5; S074
+ * repacks the hold byte at no size change).
  *
- * hold_active/hold_mask own the SEQ hold-edit gesture and the physically held
- * steps it last observed. The LED signature fields avoid repainting the FX
- * row when neither the active step nor retained sequence state changed.
+ * holdState (was holdActive) packs the SEQ hold-edit gesture into one byte:
+ * MENU_FX_HOLD_ACTIVE means the lock editor is open;
+ * MENU_FX_HOLD_LAST_VALID means the last-held field below is meaningful;
+ * MENU_FX_HOLD_LAST_MASK stores the most recently pressed SEQ button still
+ * down (0..15). holdMask is the physically held steps the service last
+ * observed. The LED signature fields avoid repainting the FX row when neither
+ * the active step nor retained sequence state changed.
  */
-static uint8_t menuEffects_holdActive;
+#define MENU_FX_HOLD_ACTIVE      0x80u
+#define MENU_FX_HOLD_LAST_VALID  0x40u
+#define MENU_FX_HOLD_LAST_MASK   0x0Fu
+#define MENU_FX_STEP_NONE        0xFFu
+static uint8_t menuEffects_holdState;
 static uint16_t menuEffects_holdMask;
 static uint8_t menuEffects_ledSerial;
 static uint8_t menuEffects_ledLen;
@@ -159,6 +173,16 @@ static uint8_t menuEffects_cellAt(uint8_t sub_page, uint8_t screen,
         index = (uint8_t)(column - 1u);
     } else if (entry->select_layout) {
         index = entry->select_layout->cells[sub_page][screen][column];
+        /*
+         * A layout may place the manager `mrp` cell (S074; CrumpBit's
+         * overlay shows Effect Morph at the right). It resolves exactly like
+         * SELECT 1 screen 1's `mrp`: value, clamp, commit, lane 0 and the
+         * double-rate pot all follow the MENU_FX_CELL_MORPH_AMOUNT paths.
+         */
+        if (index == EFFECT_LAYOUT_CELL_MORPH) {
+            out->kind = MENU_FX_CELL_MORPH_AMOUNT;
+            return 1u;
+        }
     } else {
         uint8_t rows = menuEffects_typeRowCount(entry);
         uint8_t ordinal = (uint8_t)(
@@ -199,7 +223,7 @@ void menuEffects_enter(uint8_t *sub_page, uint8_t *column)
     menuEffects_showMorphFlag = 0u;
     menuEffects_lastScene = scene_getActiveIndex();
     menuEffects_lastType = record ? record->type : EFFECT_TYPE_OFF;
-    menuEffects_holdActive = 0u;
+    menuEffects_holdState = 0u;
     menuEffects_holdMask = 0u;
     menuEffects_ledSerial = (uint8_t)(effects_seqSerial() - 1u);
     menuEffects_ledLen = 0u;
@@ -218,15 +242,22 @@ void menuEffects_toggleFirstScreen(uint8_t *sub_page, uint8_t *column)
     *column = 0u;
 }
 
-/* Leaving the page discards the type candidate, Morph view, and FX LED layer. */
+/*
+ * Leaving the page discards the type candidate, Morph view, hold and FX LED
+ * layer. S074: a type that owns the SELECT LED row leaves it dark, because
+ * the next mode may not repaint that row itself.
+ */
 void menuEffects_leave(void)
 {
+    const effect_ui_hooks_t *hooks = menuEffects_entry()->ui;
     uint8_t step;
 
     menuEffects_typeEdit = 0u;
     menuEffects_showMorphFlag = 0u;
-    menuEffects_holdActive = 0u;
+    menuEffects_holdState = 0u;
     menuEffects_holdMask = 0u;
+    if (hooks && (hooks->flags & EFFECT_UI_FLAG_OWNS_SELECT_LEDS) != 0u)
+        led_clearSelectLeds();
     led_clearActive_step();
     for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++)
         led_setBlinkLed((uint8_t)(LED_STEP1 + step), 0u);
@@ -449,7 +480,12 @@ uint8_t menuEffects_cellCommit(const menuEffects_cell_t *cell, uint16_t value)
     }
 }
 
-/* Format manager-owned tokens; return zero for generic descriptor formatting. */
+/*
+ * Format manager-owned tokens and type-labelled rows; return zero for generic
+ * descriptor formatting. S074: a PARAM cell goes to the type's
+ * format_value3 hook with its shown value, which covers compact cells and
+ * type-specific labels such as CrumpBit's Sync division.
+ */
 uint8_t menuEffects_formatValue3(const menuEffects_cell_t *cell, char *dst)
 {
     uint16_t value;
@@ -471,6 +507,8 @@ uint8_t menuEffects_formatValue3(const menuEffects_cell_t *cell, char *dst)
         memcpy(dst, stepScale_shortName((uint8_t)value), 3u);
         return 1u;
     }
+    if (cell->kind == MENU_FX_CELL_PARAM)
+        return menuEffects_formatParamValue3(cell, (uint8_t)value, dst);
     return 0u;
 }
 
@@ -632,6 +670,45 @@ uint8_t menuEffects_showMorph(void)
     return menuEffects_showMorphFlag;
 }
 
+/*
+ * Return the highest-numbered step in a SEQ mask, or MENU_FX_STEP_NONE.
+ *
+ * What: scans steps 15..0. Why: when several SEQ buttons are first seen in
+ * one service pass, or the last step held is released while others stay down,
+ * the page needs one deterministic step to show (S074 F3). Input: a 16-bit
+ * step mask. Output: 0..15 or MENU_FX_STEP_NONE. Caller:
+ * menuEffects_service().
+ */
+static uint8_t menuEffects_highestStep(uint16_t mask)
+{
+    uint8_t step;
+
+    for (step = EFFECT_SEQ_STEP_COUNT; step > 0u; step--) {
+        if ((mask & (uint16_t)(1u << (step - 1u))) != 0u)
+            return (uint8_t)(step - 1u);
+    }
+    return MENU_FX_STEP_NONE;
+}
+
+/*
+ * Return the last step held, or MENU_FX_STEP_NONE (S074 F3).
+ *
+ * What: decodes holdState. Valid only while the lock editor is open and the
+ * service has seen the held mask at least once. Why: one step is used for
+ * every held display and edit on the page. Inputs: menuEffects_holdState.
+ * Output: 0..15 or MENU_FX_STEP_NONE. Callers: _service(), _holdEdit(),
+ * _holdDisplay(), _shownParam().
+ */
+static uint8_t menuEffects_heldStep(void)
+{
+    const uint8_t need = (uint8_t)(MENU_FX_HOLD_ACTIVE |
+                                   MENU_FX_HOLD_LAST_VALID);
+
+    if ((menuEffects_holdState & need) != need)
+        return MENU_FX_STEP_NONE;
+    return (uint8_t)(menuEffects_holdState & MENU_FX_HOLD_LAST_MASK);
+}
+
 /* Detect a Scene/type change while the Effect page remains visible. */
 uint8_t menuEffects_service(void)
 {
@@ -656,31 +733,48 @@ uint8_t menuEffects_service(void)
      * 0 -> nonzero) starts the held view; newly seen steps flash; releasing
      * every SEQ button ends the lock editor. Each of these transitions
      * requests one MENU_FX_ACT_HOLD_REPAINT.
-     * Why not MENU_FX_ACT_REPAINT (S074): the redraw can move a cell's
-     * underline between its name (row 0) and its held value (row 1) on the
-     * same CGRAM slot. Only menu_repaint() keeps the LCD shadow that lets
-     * va_queueMarkerTransaction() order the move: restore the old cell to its
-     * plain character, redefine the slot, then write the new cell. The VOICE
-     * overlay has used menu_repaint() for the same transitions since S066
-     * Fix 5.
-     * Inputs: buttonHandler_seqHeldMask(), menuEffects_holdActive/holdMask.
-     * Outputs: updated hold state, SEQ LED flashes, and the action bit.
-     * Consumer: menu_serviceRuntimeWidgets().
+     * S074: the pass also records the last step held. It is the newly pressed
+     * step (the highest if several appear in one pass), or, when the last step
+     * held was released while others stay down, the highest remaining step. A
+     * type that owns the SELECT LEDs re-renders them because they show that
+     * step's values.
+     * Why not MENU_FX_ACT_REPAINT: the redraw can move a cell's underline
+     * between its name and held value on the same CGRAM slot. Only
+     * menu_repaint() keeps the LCD shadow that lets the marker transaction
+     * order the move.
+     * Inputs: buttonHandler_seqHeldMask(), menuEffects_holdState/holdMask.
+     * Outputs: updated hold state, SEQ LED flashes, owned SELECT LEDs, and
+     * the action bit. Consumer: menu_serviceRuntimeWidgets().
      */
-    if (menuEffects_holdActive) {
+    if ((menuEffects_holdState & MENU_FX_HOLD_ACTIVE) != 0u) {
         uint16_t mask = buttonHandler_seqHeldMask();
 
         if (mask == 0u) {
-            menuEffects_holdActive = 0u;
+            menuEffects_holdState = 0u;
             menuEffects_holdMask = 0u;
             actions |= MENU_FX_ACT_HOLD_REPAINT;
         } else if (mask != menuEffects_holdMask) {
-            led_flashGroup(LED_FLASH_GROUP_SEQ,
-                           (uint16_t)(mask & (uint16_t)~menuEffects_holdMask));
+            const uint16_t added =
+                (uint16_t)(mask & (uint16_t)~menuEffects_holdMask);
+            uint8_t last = menuEffects_heldStep();
+
+            led_flashGroup(LED_FLASH_GROUP_SEQ, added);
+            if (added != 0u)
+                last = menuEffects_highestStep(added);
+            else if (last == MENU_FX_STEP_NONE ||
+                     (mask & (uint16_t)(1u << last)) == 0u)
+                last = menuEffects_highestStep(mask);
             menuEffects_holdMask = mask;
+            menuEffects_holdState = (uint8_t)(MENU_FX_HOLD_ACTIVE |
+                MENU_FX_HOLD_LAST_VALID | (last & MENU_FX_HOLD_LAST_MASK));
             actions |= MENU_FX_ACT_HOLD_REPAINT;
         }
     }
+    if ((actions & MENU_FX_ACT_HOLD_REPAINT) != 0u &&
+        menuEffects_entry()->ui &&
+        (menuEffects_entry()->ui->flags &
+         EFFECT_UI_FLAG_OWNS_SELECT_LEDS) != 0u)
+        menuEffects_renderLeds();
     /* Repaint the row once per step/record/transport signature change. */
     if (record &&
         (effects_seqSerial() != menuEffects_ledSerial ||
@@ -703,12 +797,24 @@ static const effect_ui_hooks_t *menuEffects_hooks(void)
     return menuEffects_entry()->ui;
 }
 
-/* Dispatch SELECT hooks; zero falls back to the default page behavior. */
+/*
+ * Dispatch SELECT hooks; zero falls back to the default page behaviour.
+ *
+ * S074: the hook's return passes through (EFFECT_UI_HANDLED or
+ * EFFECT_UI_SHOW_HOME; buttonHandler acts on the latter), and any consumed
+ * SELECT abandons an unconfirmed `typ` browse, as a default SELECT press does.
+ */
 uint8_t menuEffects_hookSelect(uint8_t button, uint8_t shift, uint8_t pressed)
 {
     const effect_ui_hooks_t *hooks = menuEffects_hooks();
-    return (hooks && hooks->select) ? hooks->select(button, shift, pressed)
-                                    : 0u;
+    uint8_t action;
+
+    if (!hooks || !hooks->select)
+        return 0u;
+    action = hooks->select(button, shift, pressed);
+    if (action != 0u)
+        menuEffects_typeEdit = 0u;
+    return action;
 }
 
 /* Dispatch TRACK hooks; zero falls back to mute/select behavior. */
@@ -733,6 +839,124 @@ void menuEffects_renderLeds(void)
         hooks->render_leds();
 }
 
+/*
+ * Report a type-painted top row on the remembered screen of one SELECT.
+ *
+ * What: nonzero when the active type has a select_layout whose custom_row0
+ * flags that SELECT's remembered screen and a paint_row0 hook. SELECT 1 is
+ * never custom. Input: sub-page 0..7. Output: 0/1. Caller: menu.c.
+ * Affiliates: effect_select_layout_t.custom_row0.
+ */
+uint8_t menuEffects_screenHasCustomRow0(uint8_t sub_page)
+{
+    const effect_registry_entry_t *entry = menuEffects_entry();
+    const effect_ui_hooks_t *hooks = entry->ui;
+    uint8_t screen;
+
+    if (sub_page == 0u || sub_page >= MENU_FX_SELECT_COUNT ||
+        !entry->select_layout || !hooks || !hooks->paint_row0)
+        return 0u;
+    screen = menuEffects_screen[sub_page];
+    return (uint8_t)((entry->select_layout->custom_row0[sub_page] &
+                      (uint8_t)(1u << screen)) != 0u);
+}
+
+/*
+ * Let the type paint the compact top row of a flagged screen.
+ *
+ * What: calls ui->paint_row0 for the remembered screen when
+ * menuEffects_screenHasCustomRow0() allows it; column 15 remains the page's
+ * scroll marker. Inputs: sub-page and the 16-byte top row. Output: row0[0..14].
+ * Caller: menu_repaintGeneric() compact branch. Affiliates:
+ * crumpBit_uiPaintRow0().
+ */
+void menuEffects_paintRow0(uint8_t sub_page, char *row0)
+{
+    if (!row0 || !menuEffects_screenHasCustomRow0(sub_page))
+        return;
+    menuEffects_entry()->ui->paint_row0(sub_page,
+                                        menuEffects_screen[sub_page], row0);
+}
+
+/*
+ * Type value text for one explicit PARAM value.
+ *
+ * What: forwards the row index and explicit value to ui->format_value3. Why:
+ * compact cells, full views and held steps can show different values of the
+ * same row, and all must use one type label. Inputs: a resolved PARAM cell,
+ * value, and destination. Output: nonzero when dst[0..2] was written.
+ * Caller: menuEffects_formatValue3(), menu.c full/held rendering.
+ */
+uint8_t menuEffects_formatParamValue3(const menuEffects_cell_t *cell,
+                                      uint8_t value, char *dst)
+{
+    const effect_ui_hooks_t *hooks = menuEffects_hooks();
+
+    if (!cell || !dst || cell->kind != MENU_FX_CELL_PARAM ||
+        !hooks || !hooks->format_value3)
+        return 0u;
+    return hooks->format_value3(cell->index, value, dst);
+}
+
+/*
+ * Draw the SELECT LED row for the Effect page.
+ *
+ * What: a type with EFFECT_UI_FLAG_OWNS_SELECT_LEDS renders the row itself;
+ * every other type gets the page's active SELECT LED for sub_page. Why: all
+ * Effect-page writers route through this owner check. Input: current
+ * sub-page. Output: SELECT LED row. Callers: menu.c and buttonHandler.
+ */
+void menuEffects_renderSelectLeds(uint8_t sub_page)
+{
+    const effect_ui_hooks_t *hooks = menuEffects_hooks();
+
+    if (hooks && hooks->render_leds &&
+        (hooks->flags & EFFECT_UI_FLAG_OWNS_SELECT_LEDS) != 0u)
+        hooks->render_leds();
+    else
+        led_setActiveSelectButton(sub_page);
+}
+
+/*
+ * Move the page memory to the type layout's home screen.
+ *
+ * What: validates home_sub_page/home_screen, remembers that screen for the
+ * SELECT, abandons any open `typ` browse, and returns the sub-page and its
+ * first selectable column. Input/output: output coordinates, or zero when
+ * the type has no valid home. Caller: menu_effectShowHome().
+ */
+uint8_t menuEffects_home(uint8_t *sub_page, uint8_t *column)
+{
+    const effect_select_layout_t *layout = menuEffects_entry()->select_layout;
+    uint8_t sp;
+
+    if (!sub_page || !column || !layout)
+        return 0u;
+    sp = layout->home_sub_page;
+    if (sp == 0u || sp >= MENU_FX_SELECT_COUNT ||
+        layout->home_screen >= menuEffects_screenCount(sp))
+        return 0u;
+    menuEffects_typeEdit = 0u;
+    menuEffects_screen[sp] = layout->home_screen;
+    *sub_page = sp;
+    *column = menuEffects_firstColumn(sp, layout->home_screen);
+    return 1u;
+}
+
+/*
+ * Ask Menu's live-refresh cadence for a type-labelled Effect page.
+ *
+ * What: nonzero when the active type labels values through format_value3.
+ * Why: CrumpBit's Sync division depends on tempo, which may change without
+ * page input. Caller: menu_sceneLiveRefreshService(). Output: 0/1.
+ */
+uint8_t menuEffects_liveRefreshWanted(void)
+{
+    const effect_ui_hooks_t *hooks = menuEffects_hooks();
+
+    return (uint8_t)(hooks && hooks->format_value3);
+}
+
 /* Resolve a visible Effect cell to Morph lane zero or a registry lane. */
 static uint8_t menuEffects_cellLane(const menuEffects_cell_t *cell,
                                     uint8_t *lane)
@@ -750,18 +974,6 @@ static uint8_t menuEffects_cellLane(const menuEffects_cell_t *cell,
     return effects_laneOfParam(record->type, cell->index, lane);
 }
 
-/* Return the lowest physically held SEQ step, or 0xFF when none is held. */
-static uint8_t menuEffects_firstHeldStep(void)
-{
-    uint8_t step;
-
-    for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++) {
-        if ((menuEffects_holdMask & (uint16_t)(1u << step)) != 0u)
-            return step;
-    }
-    return 0xFFu;
-}
-
 /* `sel` jumps on the press edge; other modes wait for the common hold timer. */
 void menuEffects_seqButtonPressed(uint8_t step)
 {
@@ -771,38 +983,38 @@ void menuEffects_seqButtonPressed(uint8_t step)
         effects_seqSelect(step);
 }
 
-/* Open FX lock editing after the shared VOICE hold threshold. */
+/* Open FX lock editing after the shared VOICE hold threshold (S074). */
 void menuEffects_seqHoldExpired(void)
 {
-    menuEffects_holdActive = 1u;
+    menuEffects_holdState = MENU_FX_HOLD_ACTIVE;
     menuEffects_holdMask = 0u;
 }
 
 uint8_t menuEffects_seqHoldActive(void)
 {
-    return menuEffects_holdActive;
+    return (uint8_t)((menuEffects_holdState & MENU_FX_HOLD_ACTIVE) != 0u);
 }
 
 /*
  * Edit one sequenceable cell across all held steps.
  *
- * The first held step seeds from its lock value when locked, otherwise from
- * the ordinary cell display. The resulting value is clamped by the cell
- * domain and EffectsManager writes/locks every held lane. Manager cells such
- * as typ/run/len/scl are deliberately ignored while holding (D2).
+ * The last step held (S074; S072 used the lowest-numbered held step) seeds
+ * from its lock value when locked, otherwise from the ordinary cell display.
+ * The result is clamped by the cell domain, and EffectsManager writes/locks
+ * every held lane so all held steps end up equal. Manager cells such as
+ * typ/run/len/scl are deliberately ignored while holding (D2).
  */
 uint8_t menuEffects_holdEdit(const menuEffects_cell_t *cell, int16_t delta)
 {
     uint8_t lane;
-    uint8_t first = menuEffects_firstHeldStep();
+    uint8_t held = menuEffects_heldStep();
     uint8_t stored;
     int32_t next;
     uint16_t value;
 
-    if (!menuEffects_holdActive || first == 0xFFu ||
-        !menuEffects_cellLane(cell, &lane))
+    if (held == MENU_FX_STEP_NONE || !menuEffects_cellLane(cell, &lane))
         return 0u;
-    next = effects_getLaneLock(scene_getActiveIndex(), first, lane, &stored)
+    next = effects_getLaneLock(scene_getActiveIndex(), held, lane, &stored)
         ? (int32_t)stored : (int32_t)menuEffects_cellValue(cell);
     next += delta;
     value = (next < 0) ? 0u : (uint16_t)((next > 255) ? 255 : next);
@@ -811,21 +1023,84 @@ uint8_t menuEffects_holdEdit(const menuEffects_cell_t *cell, int16_t delta)
                                   lane, (uint8_t)value);
 }
 
-/* Show the first held step's lane value and report whether that lane is locked. */
+/* Show the last held step's lane value and report whether that lane is locked. */
 uint8_t menuEffects_holdDisplay(const menuEffects_cell_t *cell,
                                 uint8_t *value, uint8_t *locked)
 {
     uint8_t lane;
-    uint8_t first = menuEffects_firstHeldStep();
+    uint8_t held = menuEffects_heldStep();
     uint8_t stored;
 
-    if (!value || !locked || !menuEffects_holdActive || first == 0xFFu ||
+    if (!value || !locked || held == MENU_FX_STEP_NONE ||
         !menuEffects_cellLane(cell, &lane))
         return 0u;
-    *locked = effects_getLaneLock(scene_getActiveIndex(), first, lane,
+    *locked = effects_getLaneLock(scene_getActiveIndex(), held, lane,
                                   &stored);
     *value = *locked ? stored : (uint8_t)menuEffects_cellValue(cell);
     return 1u;
+}
+
+/*
+ * Return the value shown for one active Effect row.
+ *
+ * What: resolves the retained normal/Morph value, then replaces it with the
+ * last held step's lane lock when that row is locked there. Why: a type-owned
+ * Effect page must never mix two held steps between its row, LEDs and SELECT
+ * gestures. Inputs: local descriptor index and page Morph state. Output: one
+ * byte. Caller: CrumpBit UI hooks. Affiliates: effects_getParameter(),
+ * effects_getLaneLock(), menuEffects_heldStep().
+ */
+uint8_t menuEffects_shownParam(uint8_t index)
+{
+    const effect_record_t *record = menuEffects_record();
+    const uint8_t scene_index = scene_getActiveIndex();
+    const uint8_t held = menuEffects_heldStep();
+    uint8_t value;
+    uint8_t lane;
+    uint8_t stored;
+
+    if (!record)
+        return 0u;
+    value = effects_getParameter(scene_index, index,
+                                 menuEffects_showMorphFlag
+                                     ? EFFECT_IMAGE_MORPH
+                                     : EFFECT_IMAGE_NORMAL);
+    if (held != MENU_FX_STEP_NONE &&
+        effects_laneOfParam(record->type, index, &lane) &&
+        effects_getLaneLock(scene_index, held, lane, &stored))
+        value = stored;
+    return value;
+}
+
+/*
+ * Edit one active Effect row through the normal or held-aware boundary.
+ *
+ * What: without a hold, calls effects_setParameter(); during a hold, writes
+ * the row's lane lock on every physically held step. Inputs: local index and
+ * value. Output: nonzero if a retained byte or lock changed. Callers:
+ * CrumpBit SELECT hooks. Affiliates: effects_setParameter(),
+ * effects_setSeqLaneLock().
+ */
+uint8_t menuEffects_editParam(uint8_t index, uint8_t value)
+{
+    const effect_record_t *record = menuEffects_record();
+    const uint8_t scene_index = scene_getActiveIndex();
+    uint8_t lane;
+
+    if (!record)
+        return 0u;
+    if ((menuEffects_holdState & MENU_FX_HOLD_ACTIVE) != 0u) {
+        if (menuEffects_holdMask == 0u ||
+            !effects_laneOfParam(record->type, index, &lane))
+            return 0u;
+        return effects_setSeqLaneLock(scene_index, menuEffects_holdMask,
+                                      lane, value);
+    }
+    return effects_setParameter(scene_index, index,
+                                menuEffects_showMorphFlag
+                                    ? EFFECT_IMAGE_MORPH
+                                    : EFFECT_IMAGE_NORMAL,
+                                value);
 }
 
 /*

@@ -19,6 +19,9 @@
 #include "StepScale.h"
 #include "StereoFilterParameters.h"
 #include "StereoFilterEffect.h"
+/* S074: CrumpBit (`cbt`), the first buffer-using Effect type. */
+#include "CrumpBitParameters.h"
+#include "CrumpBitEffect.h"
 #include <string.h>
 
 _Static_assert(EFFECT_TYPE_OFF == FXBUF_EFFECT_TYPE_NONE,
@@ -48,6 +51,8 @@ static const effect_param_descriptor_t effects_off_descriptors[] = {
  */
 typedef union {
     StereoFilterRuntime stereo_filter;
+    /* S074: 56 B. Its audio lives in the FxBuffer share, not in this union. */
+    CrumpBitRuntime crump_bit;
 } effects_runtime_t;
 
 static INDTCMZ effects_runtime_t effects_runtime;
@@ -89,10 +94,42 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
         NULL, &stereoFilter_ops, NULL,
         (uint16_t)sizeof(StereoFilterRuntime), 0u, 0u
     },
+    /*
+     * CrumpBit (`cbt`, S074): stereo in and out. The 8-bit mono tape loop
+     * uses CRUMPBIT_BUFFER_BYTES of the FxBuffer Effect share (min = pref;
+     * the fixed range fits the minimum share). Lanes 1..9: bit off, bit
+     * invert, mix, feedback, rate, sync, vol, pan, delay pan. Lane 0 is
+     * Effect Morph.
+     */
+    {
+        crumpBit_token3, crumpBit_abbrev5, crumpBit_full8,
+        EFFECT_IO_STEREO_IN | EFFECT_IO_STEREO_OUT,
+        crumpBit_descriptors, CRUMPBIT_PARAM_COUNT,
+        { EFFECT_LANE_MORPH_SOURCE,
+          CRUMPBIT_PARAM_BIT_OFF, CRUMPBIT_PARAM_BIT_INVERT,
+          CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_FEEDBACK,
+          CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SYNC,
+          CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN,
+          CRUMPBIT_PARAM_DLY_PAN,
+          EFFECT_LANE_NONE, EFFECT_LANE_NONE, EFFECT_LANE_NONE,
+          EFFECT_LANE_NONE, EFFECT_LANE_NONE, EFFECT_LANE_NONE },
+        &crumpBit_layout, &crumpBit_ops, &crumpBit_ui,
+        (uint16_t)sizeof(CrumpBitRuntime),
+        CRUMPBIT_BUFFER_BYTES, CRUMPBIT_BUFFER_BYTES
+    },
 };
 
 _Static_assert(sizeof(StereoFilterRuntime) <= sizeof(effects_runtime_t),
                "Effect runtime union must hold StereoFilter");
+_Static_assert(sizeof(CrumpBitRuntime) <= sizeof(effects_runtime_t),
+               "Effect runtime union must hold CrumpBit");
+/*
+ * RAM guard (S074): the DTCM union is 76 B (STORAGE_SRAM_MANIFEST.md). A
+ * larger member grows .dtcmz and shrinks the FxBuffer arena by the same
+ * amount, which needs RAM approval before it is merged.
+ */
+_Static_assert(sizeof(effects_runtime_t) == 76u,
+               "Effect runtime union size changed: RAM approval required");
 
 /*
  * Manager-owned runtime state.
@@ -1130,6 +1167,33 @@ static void *effects_runtimeMember(void)
 }
 
 /*
+ * Export the live type's arena description into a fresh handoff snapshot.
+ *
+ * What: begins a new FxBuffer handoff record (share bounds and unit owners
+ * refreshed, Effect fields reset), stamps the live type and its io-derived
+ * channel count, and lets the type describe its arena use through
+ * export_handoff. Why: the handoff must be current both when a type exits
+ * (type switch) and when a same-type Scene switch keeps the runtime alive
+ * (S074 gap 1). Inputs: effects_state.runtime_type and the runtime union.
+ * Output: the handoff record. No runtime or arena byte changes. Callers:
+ * effects_switchRuntime(), effects_activateScene(). Affiliates:
+ * fxbuf_handoffBeginExit(), crumpBit_exportHandoff().
+ */
+static void effects_exportHandoff(void)
+{
+    const effect_registry_entry_t *entry =
+        effects_registryEntry(effects_state.runtime_type);
+    fxbuf_handoff_t *handoff = fxbuf_handoffBeginExit();
+
+    handoff->effect_type = effects_state.runtime_type;
+    handoff->effect_channels = (entry &&
+        (entry->io_flags & EFFECT_IO_STEREO_OUT) != 0u) ? 2u :
+        ((entry && entry->io_flags != 0u) ? 1u : 0u);
+    if (entry && entry->ops && entry->ops->export_handoff)
+        entry->ops->export_handoff(effects_runtimeMember(), handoff);
+}
+
+/*
  * Switch the live runtime type through the FxBuffer handoff.
  *
  * The outgoing type exports its arena state, the manager clears only its
@@ -1138,22 +1202,14 @@ static void *effects_runtimeMember(void)
  */
 static void effects_switchRuntime(effect_type_id_t incoming)
 {
-    const effect_registry_entry_t *old_entry =
-        effects_registryEntry(effects_state.runtime_type);
     const effect_registry_entry_t *new_entry = effects_registryEntry(incoming);
-    fxbuf_handoff_t *handoff;
 
     if (!new_entry) {
         incoming = EFFECT_TYPE_OFF;
         new_entry = effects_registryEntry(EFFECT_TYPE_OFF);
     }
-    handoff = fxbuf_handoffBeginExit();
-    handoff->effect_type = effects_state.runtime_type;
-    handoff->effect_channels = (old_entry &&
-        (old_entry->io_flags & EFFECT_IO_STEREO_OUT) != 0u) ? 2u :
-        ((old_entry && old_entry->io_flags != 0u) ? 1u : 0u);
-    if (old_entry && old_entry->ops && old_entry->ops->export_handoff)
-        old_entry->ops->export_handoff(effects_runtimeMember(), handoff);
+    /* The outgoing type describes its arena use before the union clears. */
+    effects_exportHandoff();
     memset(&effects_runtime, 0, sizeof(effects_runtime));
     effects_state.runtime_type = incoming;
     if (new_entry && new_entry->ops && new_entry->ops->init)
@@ -1209,8 +1265,17 @@ void effects_activateScene(uint8_t scene_index)
         return;
     type = effects_registryEntry(record->type) ? record->type : EFFECT_TYPE_OFF;
     effects_state.scene_index = scene_index;
-    if (type != effects_state.runtime_type)
+    if (type != effects_state.runtime_type) {
         effects_switchRuntime(type);
+    } else {
+        /*
+         * Same-type Scene switch (S074 gap 1): the runtime and its arena
+         * content stay live, so a CrumpBit tail keeps ringing into the new
+         * Scene's settings. The handoff is refreshed without init, so share
+         * bounds, unit owners and type positions describe the arena as it is.
+         */
+        effects_exportHandoff();
+    }
     /*
      * Scene rule (S072_ST8 D3): the new Scene's lane locks begin at its next
      * FX boundary; the held Morph lane and Pattern automation overlays never

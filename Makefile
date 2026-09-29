@@ -37,6 +37,7 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/DSP/Instruments/HiHat \
           -ICore/DSP/Effects \
           -ICore/DSP/Effects/StereoFilter \
+          -ICore/DSP/Effects/CrumpBit \
           -ICore/Bank/Scene \
           -ICore/Bank/Scene/Pattern \
           -ICore/Sequencer \
@@ -111,6 +112,7 @@ SRCS = \
   Core/DSP/Effects/FxBuffer.c \
   Core/DSP/Effects/EffectsManager.c \
   Core/DSP/Effects/StereoFilter/StereoFilterParameters.c \
+  Core/DSP/Effects/CrumpBit/CrumpBitParameters.c \
   Core/MIDI/FIFO.c \
   Core/MIDI/MidiRealtime.c \
   Core/MIDI/Uart.c \
@@ -138,6 +140,7 @@ DSP_SRCS = \
   Core/DSP/Instruments/Drum/DrumVoice.c \
   Core/DSP/Instruments/HiHat/HiHat.c \
   Core/DSP/Effects/StereoFilter/StereoFilterEffect.c \
+  Core/DSP/Effects/CrumpBit/CrumpBitEffect.c \
   Core/DSPAudio/lfo.c \
   Core/DSPAudio/mixer.c \
   Core/DSPAudio/modulationNode.c \
@@ -201,6 +204,12 @@ $(BUILD)/Core/DSP/Instruments/HiHat/HiHat.o: Core/DSP/Instruments/HiHat/HiHat.c 
 # StereoFilter DSP runs with the fast-math policy; registry/descriptor control
 # sources remain ordinary -O2 sources in SRCS.
 $(BUILD)/Core/DSP/Effects/StereoFilter/StereoFilterEffect.o: Core/DSP/Effects/StereoFilter/StereoFilterEffect.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+
+# CrumpBit DSP (S074) runs with the fast-math policy like StereoFilter; its
+# descriptor, layout and page-hook source stays an ordinary -O2 source in SRCS.
+$(BUILD)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.o: Core/DSP/Effects/CrumpBit/CrumpBitEffect.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
 

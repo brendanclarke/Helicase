@@ -1,6 +1,7 @@
 # S074 — CrumpBit (`cbt`) implementation schedule
 
-**Status:** schedule only. No code has been changed.
+**Status:** implementation in progress (Stage 0 and Stage 1 source/build
+wiring applied; Stage 2 page framework and hardware verification remain).
 
 **Specification:** `S074_CRUMPBIT_EFFECT.md` (draft 3, every decision
 settled). This document lists every code change that plan needs.
@@ -14,6 +15,49 @@ in each file **from the highest line number down** so the numbers stay valid
 **Stages:** each change is tagged with the stage it belongs to (§1.2).
 Stage 1 is a complete, listenable build on the default Effect page. Stage 2
 adds the custom page.
+
+### Work notes (2026-09-29)
+
+- Read `MEMORY.md`, this schedule, and `S074_CRUMPBIT_EFFECT.md` before
+  editing. The current tree matches the schedule's pre-S074 Effect registry
+  and menu contracts.
+- Applied Stage 0: moved `fxbuf_handoffResetAll()` before diagnostic forced
+  voice-unit claims and reset the FX return ramp origin on every `off` block.
+  Both changes retain the existing production DSP path except for the
+  intentional two-store `off` reset.
+- Added the four CrumpBit sources. Stage 1 uses the full registry descriptor,
+  8-bit ADC/data-line/DAC/AC-coupled tape-loop DSP, and the Stage 2 layout and
+  hooks are present behind the new framework fields for the same build.
+  `CrumpBitRuntime` is asserted at 56 B and the existing runtime union at
+  76 B; the loop reserves 70,592 B in the Effect share and allocates no new
+  static RAM. Added registry id 2, the `cbt` row, CrumpBit include
+  paths/sources, and its explicit `-Ofast` DSP rule.
+- The complete page path is now wired: `mrp` sentinel resolution, custom row
+  painting, type value formatting, owned SELECT LEDs, home-screen returns,
+  tempo live refresh, last-held-step display/seeding, and the SELECT/SHIFT+
+  SELECT button actions. The framework keeps `flt` on NULL hooks and routes
+  its existing active-SELECT LED behavior through the same owner check.
+- `make all` and `make img` pass. Current host build evidence is `text=499,144`,
+  `data=416`, `bss=426,336`, ITCM 4,168 B, DTCM statics 4,448 B, FX arena
+  126,624 B, and 254,104 B flash headroom. `effects_runtime` is 0x4c (76 B);
+  the image is `build/LXRV2_lxr02.img`, SHA-256
+  `ae8ba9c0bcf966c48ce96c7c37f2e3b7564666316d920cb78d018a0e00205d8b`.
+  Existing filesystem/pattern warnings and newlib linker notes are unchanged;
+  no S074 compiler warning was emitted.
+- Remaining verification is the diagnostic registry/minimum-share build and
+  the hardware/listening matrix in §9. No hardware result is claimed here.
+- The diagnostic build was run with the existing `DEV_MODE_DIAGNOSTIC=1` and
+  `DEV_FXBUF_FORCE_VOICE_UNITS=12` settings, then both settings were restored
+  to their production values and the normal build/image was regenerated. The
+  diagnostic link also passed the 76 B runtime guard and minimum-share linker
+  geometry (`FXBUF 126,624 B`, 3,744 B above the 122,880 B minimum). The
+  `FxBf` runtime self-check itself is a boot-screen result and remains a
+  hardware/boot observation, not claimed from compilation alone.
+- Final source checks pass: `git diff --check`, normal `make all`, normal
+  `make img`, link-budget output, and the 76 B `effects_runtime` symbol check.
+  No temporary configuration change remains. This implementation handoff is
+  ready for the §9 hardware/listening matrix; the schedule remains open until
+  those user-observed results are recorded.
 
 ---
 

@@ -2764,8 +2764,11 @@ static void menu_applyEffectMarkers(void)
                                          : &editDisplayBuffer[1][4u * i];
             int8_t right;
 
-            if (cell.fx.kind == MENU_FX_CELL_PARAM)
-                va_formatValue3(&cell, value, field);
+            if (cell.fx.kind == MENU_FX_CELL_PARAM) {
+                /* S074: the type's label for the held value (Sync division). */
+                if (!menuEffects_formatParamValue3(&cell.fx, value, field))
+                    va_formatValue3(&cell, value, field);
+            }
             else if (cell.fx.kind == MENU_FX_CELL_MORPH_AMOUNT)
                 /* Held `mrp` is a plain number, so show its lock value directly. */
                 numtostrpu(field, value, ' ');
@@ -2787,6 +2790,14 @@ static void menu_applyEffectMarkers(void)
             }
         }
         /* Unheld, or held but unlocked: fall back to the name marker. */
+        /*
+         * S074: a type-painted row 0 (CrumpBit's data-line overlay) holds no
+         * names, and its `0` characters are underline-able, so a name marker
+         * there would mark a bit. Those parameters show underlines on the
+         * type's named screens instead (Q16).
+         */
+        if (!editModeActive && menuEffects_screenHasCustomRow0(activePage))
+            continue;
         if (!menu_effectCellAutomated(&cell))
             continue;
         for (left = 0u; left < name_width &&
@@ -2838,10 +2849,12 @@ static void va_underlineService(void)
 /*
  * Refresh live Scene-setting values during playback.
  *
- * What: repaints the visible PERF Morph cells or VOICE/mix Scene-setting
- * cells at a bounded foreground cadence. Why: Scene target automation changes
- * retained Scene values and is intentionally not reset on voice retrigger, so
- * a display that repaints only on input shows stale values. Inputs:
+ * What: repaints the visible PERF Morph cells, VOICE/mix Scene-setting cells,
+ * or an Effect page whose type labels values from live state, at a bounded
+ * foreground cadence. Why: Scene target automation changes retained Scene
+ * values and is intentionally not reset on voice retrigger, while CrumpBit's
+ * Sync label follows tempo, so a display that repaints only on input shows
+ * stale values. Inputs:
  * seq_isRunning(), time_sysTick, current page/cell context, and editModeActive.
  * Output: one ordinary menu_repaint() approximately every 125 ms on a
  * relevant page. The service never runs while the user is editing or while a
@@ -2869,6 +2882,9 @@ static void menu_sceneLiveRefreshService(void)
                 break;
             }
         }
+    } else if (menu_activePage == EFFECT_PAGE) {
+        /* S074: CrumpBit's Sync division follows the live tempo. */
+        visible = menuEffects_liveRefreshWanted();
     }
 
     if (!visible ||
@@ -9965,6 +9981,23 @@ static void menu_repaintGeneric(void)
                 break;
             }
         }
+        /*
+         * Type value text in the full view (S074; Effect page only).
+         *
+         * What: after generic dtype text, an Effect PARAM row may be
+         * relabelled by its format_value3 hook (CrumpBit: `sub` -> `dly`;
+         * `rte` -> the Sync division while Sync is on). The raw value remains
+         * unchanged. Inputs: the cell and displayed value. Output:
+         * editDisplayBuffer[1][13..15] when the hook handles the row.
+         * Affiliates: menuEffects_formatParamValue3(), held rendering.
+         */
+        if (cell.kind == MENU_CELL_EFFECT) {
+            const uint8_t effect_value =
+                (curParmVal > 255u) ? 255u : (uint8_t)curParmVal;
+
+            (void)menuEffects_formatParamValue3(
+                &cell.fx, effect_value, &editDisplayBuffer[1][13]);
+        }
     } else {
         /*
          * Clear stale text left by custom renderers before overview redraw.
@@ -10001,6 +10034,19 @@ static void menu_repaintGeneric(void)
 
         upr_three(&editDisplayBuffer[0][(activeParameter % 4) * 4]);
         editDisplayBuffer[0][15] = (char)checkScrollSign(activePage, activeParameter);
+
+        /*
+         * Type-painted top row (S074; CrumpBit's data-line overlay).
+         *
+         * What: on a screen flagged in the type's select_layout->custom_row0,
+         * the type replaces columns 0..14 (names and the uppercase cue) with
+         * its own row; column 15 keeps the scroll marker written above. Why:
+         * the overlay shows bit states instead of names. Inputs: sub-page and
+         * editDisplayBuffer[0]. Output: row 0. Affiliates:
+         * menuEffects_paintRow0(), menu_applyEffectMarkers().
+         */
+        if (menu_activePage == EFFECT_PAGE)
+            menuEffects_paintRow0(activePage, editDisplayBuffer[0]);
 
         for (i = 0u; i < 4u; i++) {
             menu_cell_t cell = menu_resolveCell(activePage,
@@ -10222,7 +10268,8 @@ static void menu_moveToMenuItem(int8_t inc)
         /* Effect navigation crosses screens and SELECT buttons without wrap. */
         if (menuEffects_move(inc, &sub_page, &column)) {
             menuIndex = (uint8_t)((sub_page << PAGE_SHIFT) | column);
-            led_setActiveSelectButton(sub_page);
+            /* S074: a type may own the SELECT row (CrumpBit's data lines). */
+            menuEffects_renderSelectLeds(sub_page);
         }
         return;
     }
@@ -12493,7 +12540,8 @@ void menu_resetActiveParameter(void)
         /* Repair the Effect cursor after registry/layout changes. */
         menuEffects_repairCursor(&sub_page, &column);
         menuIndex = (uint8_t)((sub_page << PAGE_SHIFT) | column);
-        led_setActiveSelectButton(sub_page);
+        /* S074: a type may own the SELECT row (CrumpBit's data lines). */
+        menuEffects_renderSelectLeds(sub_page);
         return;
     }
     if (menu_isVoicePage(menu_activePage)) {
@@ -12785,7 +12833,8 @@ void menu_switchPage(uint8_t pageNr)
     } else if (pageNr == EFFECT_PAGE) {
         /* Effect page owns mute/SELECT LEDs and the FX-sequencer row. */
         buttonHandler_showMuteLEDs();
-        led_setActiveSelectButton(menu_getSubPage());
+        /* S074: a type may own the SELECT row (CrumpBit's data lines). */
+        menuEffects_renderSelectLeds(menu_getSubPage());
         menuEffects_renderSeqLeds();
     } else {
         led_setActiveVoiceLeds((uint8_t)(1 << menu_getActiveVoice()));
@@ -13438,6 +13487,31 @@ void menu_setEffectShowMorph(uint8_t onOff)
     if (menu_activePage != EFFECT_PAGE)
         return;
     menu_endlessPotMappingChanged();
+    menu_repaint();
+}
+
+/*
+ * Show the Effect type's home screen after a hooked SELECT (S074).
+ *
+ * What: leaves the full view, moves the cursor to the type layout's home
+ * screen, refreshes the pot mapping, re-renders the SELECT LEDs through the
+ * type owner, and repaints with menu_repaint(), which preserves the LCD shadow
+ * for ordered marker moves. Without a valid home it only re-renders and
+ * repaints. Caller: buttonHandler FX SELECT paths.
+ */
+void menu_effectShowHome(void)
+{
+    uint8_t sub_page;
+    uint8_t column;
+
+    if (menu_activePage != EFFECT_PAGE)
+        return;
+    if (menuEffects_home(&sub_page, &column)) {
+        editModeActive = 0u;
+        menuIndex = (uint8_t)((sub_page << PAGE_SHIFT) | column);
+        menu_endlessPotMappingChanged();
+    }
+    menuEffects_renderSelectLeds(menu_getSubPage());
     menu_repaint();
 }
 

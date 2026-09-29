@@ -417,6 +417,16 @@ void menu_setVoiceModeShowMorph(uint8_t onOff);
 void menu_setEffectShowMorph(uint8_t onOff);
 
 /*
+ * Show the Effect type's home screen after a hooked SELECT (S074).
+ *
+ * What: on the Effect page, leaves the full view, moves the cursor to the
+ * type layout's home screen, refreshes pot mapping, re-renders the SELECT
+ * LEDs through the type owner, and repaints with menu_repaint(). Without a
+ * valid home it only re-renders and repaints. Caller: buttonHandler FX SELECT.
+ */
+void menu_effectShowHome(void);
+
+/*
  * VOICE held-step automation overlay bridge.
  *
  * What: ButtonHandler calls menu_voiceAutoOverlayHoldExpired() when the common

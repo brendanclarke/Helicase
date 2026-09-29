@@ -20,8 +20,8 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
-**Current working source**: Session 073 closed on `dev-ph5-effects`
-(2026-09-29).
+**Current working source**: Session 074 CrumpBit implementation in progress
+on `dev-ph5-effects` (2026-09-29).
 
 - **Commits:** HEAD `692abf8` ("dsp refactor") holds the S073 flash
   expansion, the Load:[Samples] fix and the DSP CPU refactor. The closeout
@@ -35,9 +35,9 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
   refactor "seems ok" with about **10 % less CPU** on the worst-case Scene
   with the StereoFilter Effect. The S072 Phase 5 acceptance matrices for
   Steps 6–10 (`072_SESSION_HANDOFF_LOG.md` §11) are still not reported.
-- **Next session (074):** `S074_EFFECT_BUGS_BUFFER_USE.md` (root): the
-  Effect-page automation-underline bug, then the first Effect type that uses
-  the shared DTCM buffer.
+- **Current session (074):** `S074_CRUMPBIT_IMPLEMENTATION.md`: the
+  Effect-page automation-underline follow-up and the first Effect type that
+  uses the shared DTCM buffer.
 
 Session 073 in one paragraph:
 
@@ -121,6 +121,12 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `S073_POST_FLASH_MENU_BUGFIXES.md`, `S073_CPU_USE_DSP_REDUCTION_REFACTOR.md`
   and `S073_CPU_REDUCTION_IMPLEMENTATION.md` are superseded and may be
   deleted. Next: `S074_EFFECT_BUGS_BUFFER_USE.md`.
+- **S074 CrumpBit is in progress.** `cbt` is implemented through the DSP,
+  FxBuffer share, Effect registry and custom Effect page; the normal build and
+  image pass with `data=416`, `bss=426,336`, a 76 B runtime union, and 254,104
+  B flash headroom. The diagnostic/minimum-share build also links cleanly.
+  Hardware/listening acceptance remains pending; durable implementation notes
+  are in `S074_CRUMPBIT_IMPLEMENTATION.md`.
 - **Session 072 (Phase 5 Effects bus) is closed in source.**
   - Durable authority: `072_SESSION_HANDOFF_LOG.md` and
     `EFFECTS_BUS_REFERENCE.md`.
