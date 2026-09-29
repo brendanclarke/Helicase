@@ -178,7 +178,8 @@
  * One Scene's relative regions and explicit parameter allocation.
  *
  * Scene source occupies bytes 8..9; parameters occupy bytes 10..127, of
- * which indices 0..40 exist (40 = Effect Morph amount, Session 072). The
+ * which indices 0..44 exist (40 = Effect Morph amount, Session 072; 41..44 =
+ * the bus compressor's cmp/cam/ctm/csc, S074). The
  * Effect region (128..639) holds a 3-byte type token, an 8-byte name, and
  * 419 live parameter bytes from Effect-relative offset 11. Kit begins at
  * 640: source at 8..9, parameters at 10..127, then six 192-byte Instruments,
@@ -187,7 +188,7 @@
 #define AUTOSAVE_SCENE_NAME_OFFSET              0u
 #define AUTOSAVE_SCENE_PARAMETERS_OFFSET       10u
 #define AUTOSAVE_SCENE_PARAMETER_ALLOC_BYTES  118u
-#define AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES    41u
+#define AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES    45u  /* S074: +4 bus compressor */
 #define AUTOSAVE_EFFECT_OFFSET                128u
 #define AUTOSAVE_EFFECT_TYPE_OFFSET             0u
 #define AUTOSAVE_EFFECT_TYPE_BYTES              3u
@@ -241,7 +242,13 @@ typedef enum {
     AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE = 33,
     /* Scene Effect Morph amount; appended so earlier wire positions stay fixed. */
     AUTOSAVE_SCENE_PARAM_EFFECT_MORPH = 40,
-    AUTOSAVE_SCENE_PARAM_COUNT = 41
+    /*
+     * S074 bus compressor Scene bytes in scene_bus_comp_field_t order:
+     * cmp, cam, ctm, csc. They occupy previously reserved cells, so the
+     * AutoSave record layout, masks and format version remain unchanged.
+     */
+    AUTOSAVE_SCENE_PARAM_BUS_COMP_BASE = 41,
+    AUTOSAVE_SCENE_PARAM_COUNT = 45
 } autosave_scene_parameter_t;
 
 typedef enum {

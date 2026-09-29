@@ -512,6 +512,49 @@ void storage_scenesetInit(storage_sceneset_t *state)
         memset(state, 0, sizeof(*state));
 }
 
+/*
+ * S074 bus compressor sceneset keys, in scene_bus_comp_field_t order.
+ *
+ * What:       the four permanent sceneset.scg keys. Why: one table serves
+ *             both the parser and filesystem.c's Scene writer, while older
+ *             firmware can ignore these optional unknown keys.
+ * Affiliates: storage_busCompKey(), storage_busCompFieldForKey().
+ */
+static const char *const storage_busCompKeys[SCENE_BUS_COMP_FIELD_COUNT] = {
+    "bus_comp_mode",
+    "bus_comp_amount",
+    "bus_comp_time",
+    "bus_comp_sidechain",
+};
+
+const char *storage_busCompKey(uint8_t field)
+{
+    /* Contract in storageTypes.h. */
+    return (field < SCENE_BUS_COMP_FIELD_COUNT) ? storage_busCompKeys[field]
+                                                : NULL;
+}
+
+/*
+ * Match one sceneset key against the S074 bus compressor key table.
+ *
+ * Inputs: parsed key and an output field pointer. Output: 1 and the matched
+ * field, or 0 with *field unchanged. Caller: storage_scenesetParseLine().
+ */
+static uint8_t storage_busCompFieldForKey(const char *key, uint8_t *field)
+{
+    uint8_t i;
+
+    if (!key || !field)
+        return 0u;
+    for (i = 0u; i < SCENE_BUS_COMP_FIELD_COUNT; i++) {
+        if (storage_streq(key, storage_busCompKeys[i])) {
+            *field = i;
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
 storage_status_t storage_scenesetParseLine(
     storage_sceneset_t *state,
     const char *line,
@@ -522,6 +565,8 @@ storage_status_t storage_scenesetParseLine(
     const char *value;
     storage_status_t st;
     uint8_t parsed;
+    /* S074: matched bus_comp_* key writes this enum-order field. */
+    uint8_t field = 0u;
 
     /*
      * Parse one sceneset.scg line.
@@ -646,16 +691,19 @@ storage_status_t storage_scenesetParseLine(
         /*
          * Parse retained per-voice fader modes.
          *
-         * Inputs: six comma-separated values in the 0..2 domain
-         * (mixer.h MIXER_FADER_*). Output: staged Scene settings; the mixer
-         * reads the mode every block (Session 072 Step 5).
+         * Inputs: six comma-separated values in the
+         * 0..SCENE_FADER_SETTING_MAX domain (0..3; mixer.h MIXER_FADER_*,
+         * 3 = xfd since S074). Output: staged Scene settings; the mixer reads
+         * the mode every block (Session 072 Step 5). A value above the
+         * domain rejects the file, as before. Firmware older than S074
+         * therefore rejects a Scene that uses xfd (downgrade only).
          */
         if (!target_settings)
             return STORAGE_STATUS_BAD_VALUE;
         st = storage_parseCsvU8(value,
                                 target_settings->fader_setting,
                                 INSTRUMENT_SLOT_COUNT,
-                                2u);
+                                SCENE_FADER_SETTING_MAX);
         if (st != STORAGE_STATUS_OK)
             return st;
         state->seen_fader_setting = 1u;
@@ -673,6 +721,19 @@ storage_status_t storage_scenesetParseLine(
         if (st != STORAGE_STATUS_OK)
             return st;
         target_settings->effect_morph_amount = parsed;
+    } else if (storage_busCompFieldForKey(key, &field)) {
+        /*
+         * Parse one S074 bus compressor setting into staged SceneData.
+         * Inputs are one 0..255 byte; output is the field-clamped domain
+         * (mode 0..2, amount/time 0..127, sidechain 0..6). Missing keys keep
+         * filesystem_initSceneStage()'s shared defaults.
+         */
+        if (!target_settings)
+            return STORAGE_STATUS_BAD_VALUE;
+        st = storage_parseU8(value, &parsed);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        target_settings->bus_comp[field] = scene_busCompClamp(field, parsed);
     }
     return STORAGE_STATUS_OK;
 }

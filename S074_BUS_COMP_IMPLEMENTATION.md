@@ -1,6 +1,7 @@
 # S074 — Master bus compressor (`cmp`) implementation schedule
 
-**Status:** schedule only. No source file has been changed.
+**Status:** implemented in source and production image; hardware/listening
+acceptance remains pending.
 
 **Specification:** `S074_BUS_COMP.md` (draft 2, every decision settled).
 This document lists every code change that specification needs.
@@ -11,8 +12,50 @@ uncommitted documentation only (`S074_CRUMPBIT_EFFECT.md`,
 tree, before any edit. Apply the changes in each file **from the highest line
 number down** so the numbers stay valid (§1.3 gives the order).
 
-**Stages:** each change is tagged with its stage (§1.2). Every stage builds
-on its own.
+**Stages:** the change list retains its design tags for traceability, but this
+implementation request treats the feature as one complete change set.
+
+### Work notes (2026-09-29)
+
+- Read `MEMORY.md`, `S074_BUS_COMP.md`, and this complete implementation
+  schedule before editing. The current tree already contains the accepted
+  CrumpBit/S073 work and starts from a clean worktree.
+- The implementation will preserve the S074 data ownership rules: SceneData
+  owns retained bytes, Preset owns mirrors/fan-out, storage owns the text keys,
+  and the mixer/trigger funnel are the only Bus Comp DSP callers.
+- Hardware and listening checks will remain explicitly pending until the user
+  runs them; source/build verification will be recorded here as it lands.
+- Added `BusCompressor.c/.h` with the approved 24 B DTCM state, linked stereo
+  detector, optical cell, trigger sidechain, one-block transitions, cubic
+  saturator, and constant-cost-on/zero-cost-off behavior.
+- Added the full SceneData/AutoSave/sceneset/Preset ownership path, including
+  the four-byte `bus_comp[]` array, live AutoSave cells 41..44, shared storage
+  keys, defaults in resident/staged/empty Scene paths, and active-Scene page
+  mirrors with VOICE edit-mask fan-out.
+- Added the complete settings-menu page (`cmp cam ctm csc`), Scene labels and
+  values, field-specific clamps, scroll cues, bulk-apply refresh guard, and
+  the diagnostic BC18 last-page check.
+- `make all && make img` passes in production configuration
+  (`DEV_MODE_DIAGNOSTIC=0`, forced FX units `0`): `text=501,920`, `data=416`,
+  `bss=426,384`, ITCM 4,168 B, DTCM statics 4,472 B, and FXBUF 126,592 B at
+  `0x20001180` (3,712 B above the 122,880 B minimum). Flash headroom is
+  251,328 B. The packaged image SHA-256 is
+  `94893da8c3d0ee30432de11f04f0b445a3fc839d9da96165d23a18ddb98948a8`.
+- `arm-none-eabi-nm -S` confirms `busComp` is `0x18` bytes in DTCM and the
+  existing `effects_runtime` union remains `0x4c` (76 B). The AutoSave record
+  remains fixed-size; compile-time group asserts and the filesystem stage
+  cache assert pass.
+- The diagnostic build passes with BC18 compiled and the expected existing
+  diagnostic-only warnings. Arithmetic checks match the specification:
+  makeup at cam 48/64/96/127 is about +1.24/+3.14/+9.13/+15.75 dB,
+  default-cam duck at velocity 127 is −12.40 dB, and `k(5 ms)`/`k(60 ms)` is
+  0.13528/0.01202.
+- Remaining acceptance is hardware/listening matrix H1..H19 in §9.3,
+  especially track-7-as-voice-6 (BC11), Scene/file/AutoSave round trips, and
+  worst-case CPU measurement. No hardware result is claimed here.
+- Final source integrity pass: `git diff --check` passes, the production
+  config is restored (`DEV_MODE_DIAGNOSTIC=0`, `DEV_FXBUF_FORCE_VOICE_UNITS=0`),
+  and no temporary configuration changes remain.
 
 ---
 

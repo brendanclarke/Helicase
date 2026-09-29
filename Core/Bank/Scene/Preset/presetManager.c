@@ -1211,15 +1211,18 @@ uint8_t preset_setVoiceFaderSetting(uint8_t scene_index, uint8_t slot,
 	/*
 	 * Retain one Scene fader mode for the block-rate mixer consumer.
 	 *
-	 * Inputs: resident Scene index, zero-based instrument slot, and 0..2 mode.
-	 * Output: SceneData retains the mode; the active mixer pulls it on its next
-	 * block and applies PRE/POST/FX topology beside the voice send tap. Menu and
-	 * storage callers remain independent of mixer internals.
+	 * Inputs: resident Scene index, zero-based instrument slot, and a
+	 * 0..SCENE_FADER_SETTING_MAX mode (0..3). Output: SceneData retains the
+	 * mode; the active mixer pulls it on its next block and applies the
+	 * PRE/POST/FX/XFD topology beside the voice send tap (XFD, S074: the
+	 * fader crossfades from the FX send at the bottom to the dry output at
+	 * the top). Menu and storage callers remain independent of mixer
+	 * internals.
      */
     if (!scene_get(scene_index) || slot >= INSTRUMENT_SLOT_COUNT)
         return 0u;
-    if (mode > 2u)
-        mode = 2u;
+    if (mode > SCENE_FADER_SETTING_MAX)
+        mode = SCENE_FADER_SETTING_MAX;
     scene_setVoiceFaderSetting(scene_index, slot, mode);
     return 1u;
 }
@@ -1293,6 +1296,8 @@ void preset_applySceneSettings(uint8_t scene_index)
     parameter_values[PAR_VOICE_DECIMATION_ALL] =
         scene->settings.voice_decimation_all;
     preset_applyVoiceDecimationAllRuntime(scene->settings.voice_decimation_all);
+    /* S074: page mirrors follow the newly active Scene. */
+    preset_syncBusCompMirrors();
 }
 
 static void preset_storeSupplementalCell(uint8_t scene_index,
@@ -3094,6 +3099,50 @@ void preset_setVoiceDecimationAll(uint8_t scene_index, uint8_t value)
     parameter_values[PAR_VOICE_DECIMATION_ALL] = value;
     if (scene_index == scene_getActiveIndex())
         preset_applyVoiceDecimationAllRuntime(value);
+}
+
+/*
+ * Keep SceneData and the four S074 page mirrors on the same field order.
+ *
+ * A compile-time failure here means ParameterArray and SceneData no longer
+ * describe the same contiguous cmp/cam/ctm/csc group.
+ */
+_Static_assert(PAR_BUS_COMP_SIDECHAIN - PAR_BUS_COMP_MODE + 1 ==
+                   SCENE_BUS_COMP_FIELD_COUNT,
+               "bus compressor mirrors must match SceneData field order");
+
+void preset_setBusCompSetting(uint8_t scene_index, uint8_t field,
+                              uint8_t value)
+{
+    /*
+     * Retain one S074 bus compressor setting for one Scene.
+     *
+     * Inputs: Scene index, field, and any byte. Outputs: clamped SceneData
+     * storage plus AutoSave/card-clean ownership; the active Scene's mirror
+     * is updated only when this Scene is active, so a fan-out never displays a
+     * non-active Scene's value. No runtime push is needed.
+     */
+    if (!scene_get(scene_index) || field >= SCENE_BUS_COMP_FIELD_COUNT)
+        return;
+    value = scene_busCompClamp(field, value);
+    scene_setBusCompSetting(scene_index, field, value);
+    if (scene_index == scene_getActiveIndex())
+        parameter_values[PAR_BUS_COMP_MODE + field] = value;
+}
+
+void preset_syncBusCompMirrors(void)
+{
+    const uint8_t scene_index = scene_getActiveIndex();
+    uint8_t field;
+
+    /*
+     * Copy the active Scene's retained cmp/cam/ctm/csc values into the flat
+     * page mirrors. Callers are Scene activation, page edits and the Global
+     * bulk-apply guard; SceneData is read-only in this helper.
+     */
+    for (field = 0u; field < SCENE_BUS_COMP_FIELD_COUNT; field++)
+        parameter_values[PAR_BUS_COMP_MODE + field] =
+            scene_getBusCompSetting(scene_index, field);
 }
 
 void preset_morphTick(void)

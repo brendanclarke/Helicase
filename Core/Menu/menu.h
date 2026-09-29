@@ -28,6 +28,17 @@
 #define MASK_PAGE       0xf8
 #define PAGE_SHIFT      3
 
+/*
+ * S074 Scene-owned bus compressor page.
+ *
+ * It is deliberately the last populated settings sub-page. New global pages
+ * go before it and move this constant; menu cues and the diagnostic check use
+ * the named boundary rather than a duplicated literal.
+ */
+#define MENU_GLOBAL_SCENE_SUBPAGE 2u
+_Static_assert(MENU_GLOBAL_SCENE_SUBPAGE < NUM_SUB_PAGES,
+               "Scene-owned settings page must be a real sub-page");
+
 extern uint8_t menu_activePage;
 extern uint8_t menu_activeVoice;
 extern uint8_t menu_playedPattern;
@@ -133,6 +144,9 @@ enum NamesEnum {
     TEXT_PAT_STORE_USE,
     /* Global AutoSave cell; parallel short/long enums below stay aligned. */
     TEXT_AUTOSAVE,
+    /* S074 Scene-owned bus compressor page: cmp, cam, ctm, csc. */
+    TEXT_BUS_COMP_MODE, TEXT_BUS_COMP_AMOUNT,
+    TEXT_BUS_COMP_TIME, TEXT_BUS_COMP_SIDECHAIN,
     NUM_NAMES
 };
 
@@ -142,7 +156,9 @@ enum catNamesEnum {
     CAT_MOD_OSC, CAT_LFO, CAT_TRANS, CAT_EQ,
     CAT_PATTERN, CAT_SOUND, CAT_STEP, CAT_EUKLID,
     CAT_GLOBAL, CAT_VELOCITY, CAT_PARAMETER, CAT_SEQUENCER,
-    CAT_GENERATOR, CAT_MIDI, CAT_TRIGGER
+    CAT_GENERATOR, CAT_MIDI, CAT_TRIGGER,
+    /* S074: Scene-owned static cells on the bus compressor page. */
+    CAT_SCENE
 };
 
 enum longNamesEnum {
@@ -173,6 +189,9 @@ enum longNamesEnum {
     LONG_PAT_STORE_USE,
     /* Long label for PAR_AUTOSAVE_ENABLED's Global edit view. */
     LONG_AUTOSAVE,
+    /* S074 bus compressor long names. */
+    LONG_BUS_COMP_MODE, LONG_BUS_COMP_AMOUNT,
+    LONG_BUS_COMP_TIME, LONG_BUS_COMP_SIDECHAIN,
 };
 
 enum shortNamesEnum {
@@ -200,7 +219,10 @@ enum shortNamesEnum {
     /* Read-only three-character label for Pattern pool occupancy. */
     SHORT_PAT_STORE_USE,
     /* Three-cell Global-page label for PAR_AUTOSAVE_ENABLED. */
-    SHORT_AUTOSAVE
+    SHORT_AUTOSAVE,
+    /* S074 bus compressor compact labels: cmp, cam, ctm, csc. */
+    SHORT_BUS_COMP_MODE, SHORT_BUS_COMP_AMOUNT,
+    SHORT_BUS_COMP_TIME, SHORT_BUS_COMP_SIDECHAIN
 };
 
 #define PAR_RUNTIME_CPU_USE 0xFFFEu

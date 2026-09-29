@@ -72,6 +72,24 @@ void adc_checkPots(void);
 ** Updated by adc_checkPots(). */
 extern float slider_vol[ADC_POT_COUNT];
 
+/*
+ * Slider gain at the mirrored fader position (S074, the xfd fader mode).
+ *
+ * What:     for a slider_vol[] gain g = taper(x), returns taper(1 - x)
+ *           exactly, where x is the deadzone-normalized fader position and
+ *           taper() is the SLIDER_LOG_TAPER_DB curve the LUT is built from.
+ * How:      with m = 10^(-D/20) and P = m + g(1 - m), the mirrored gain is
+ *           m(1 - P) / (P(1 - m)): one division, no logarithm; m folds at
+ *           compile time. A linear taper (D <= 0) returns 1 - g.
+ * Inputs:   g in [0, 1] (a slider_vol[] value).
+ * Outputs:  [0, 1]; exactly 1 for g <= 0 and exactly 0 for g >= 1, so the
+ *           fader's end deadzones give exact endpoints.
+ * Why here: adcPots owns the taper (slider_raw_to_float()), so the inverse
+ *           lives beside it and follows any change to SLIDER_LOG_TAPER_DB.
+ * Callers:  mixer_faderGains() (xfd), once per xfd slot per block.
+ */
+float adc_sliderGainMirrored(float gain);
+
 /* Raw 12-bit ADC reading for slider i (0=RV5 .. 5=RV10). */
 uint16_t adc_getPotRaw(uint8_t i);
 

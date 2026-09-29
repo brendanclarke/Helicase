@@ -16338,6 +16338,12 @@ static void filesystem_initSceneStage(filesystem_scene_stage_t *stage)
         instrumentManager_resetSlot(&stage->kit.instruments[slot],
                                     initial_types[slot]);
     }
+    /*
+     * S074: stage bus compressor defaults (off, 48, 48, off) through the
+     * shared SceneData helper, so optional sceneset keys behave like a fresh
+     * resident Scene.
+     */
+    scene_busCompDefaults(&stage->settings);
 }
 
 static uint8_t filesystem_commitSceneStage(void)
@@ -16946,6 +16952,20 @@ static uint8_t filesystem_nextScenesetLine(char *dst, uint16_t cap,
         return filesystem_formatAssignmentU16Line(
             dst, cap, "effect_morph_amount",
             scene->settings.effect_morph_amount);
+    case 11u:
+    case 12u:
+    case 13u:
+    case 14u: {
+        /*
+         * S074 bus compressor: one line per field in enum order. The shared
+         * storageTypes key table keeps writer and parser spellings identical.
+         */
+        const uint8_t field = (uint8_t)(op_write_line_index - 11u);
+
+        return filesystem_formatAssignmentU16Line(
+            dst, cap, storage_busCompKey(field),
+            scene->settings.bus_comp[field]);
+    }
     default:
         return 0u;
     }
@@ -28438,6 +28458,8 @@ static void filesystem_bootReaderEmptyScene(uint8_t scene_index)
         return;
     memset(scene, 0, sizeof(*scene));
     scene->settings.voice_decimation_all = 127u;
+    /* S074: emptied Scenes use the same bus compressor defaults as fresh ones. */
+    scene_busCompDefaults(&scene->settings);
     for (track = 0u; track < NUM_TRACKS; track++) {
         scene->settings.midi_channel[track] = (uint8_t)(track + 1u);
     }

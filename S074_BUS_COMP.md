@@ -1,8 +1,8 @@
 # S074 — Master bus compressor (`cmp`): general specification
 
-**Status:** draft 2 (2026-09-29). Every question is settled (§11). Your
-answers to the draft-1 follow-ups are folded in. The line-level schedule is
-`S074_BUS_COMP_IMPLEMENTATION.md`. No code has been written.
+**Status:** draft 2 implemented in source (2026-09-29); hardware/listening
+acceptance remains pending. Every question is settled (§11). The line-level
+record is `S074_BUS_COMP_IMPLEMENTATION.md`.
 
 **Goal (user, 2026-09-29):** a master bus compressor with a trigger
 sidechain:
@@ -186,21 +186,23 @@ the effective ratio rises with level.
 
 - **Threshold:** `T = −3 − 27·a` dBFS, so −3 at `cam` 0 and −30 at `cam` 127.
 - **Ratio:** `R = 1 + 3a + 4a³`, so 1:1 at `cam` 0 and 8:1 at `cam` 127.
-- **Makeup (answer 6):** `M = −GR(L_ref)`, with `L_ref = −12 dBFS RMS` (a
-  moderately full bus). A steady input at `L_ref` therefore leaves at about
-  `L_ref` at every `cam` setting. Louder inputs are compressed down towards
-  it. Quieter inputs are raised by up to `M`.
-- **Saturation drive:** `d = 1 + 0.4·a²` (§4.5).
+- **Makeup (answer 6, tuning revision 1):** `M = −GR(L_ref) · (1 − 0.3·a)`,
+  with `L_ref = −12 dBFS RMS` (a moderately full bus). At low `cam` a steady
+  input at `L_ref` leaves at about `L_ref`. Towards the top the level rise
+  tapers off progressively: a −18 dBFS RMS bus leaves at about −17.5 dBFS at
+  `cam` 127 (it was −12.8 before the revision).
+- **Saturation drive (tuning revision 1):** `d = 1 + 0.5·a²` (was `0.4·a²`)
+  (§4.5).
 
 Worked values at `L_ref`:
 
-| `cam` | `T` (dBFS) | `R` | Static GR at −12 dBFS | Makeup `M` | `d` |
+| `cam` | `T` (dBFS) | `R` | Static GR at −12 dBFS | Makeup `M` (was) | `d` (was) |
 |---:|---:|---:|---:|---:|---:|
 | 0 | −3.0 | 1.00 | 0 | 0 dB | 1.00 |
-| 48 (default) | −13.2 | 2.35 | −1.2 dB (in the knee) | +1.2 dB | 1.06 |
-| 64 | −16.6 | 3.02 | −3.1 dB | +3.1 dB | 1.10 |
-| 96 | −23.4 | 5.00 | −9.1 dB | +9.1 dB | 1.23 |
-| 127 | −30.0 | 8.00 | −15.8 dB | +15.8 dB | 1.40 |
+| 48 (default) | −13.2 | 2.35 | −1.2 dB (in the knee) | +1.1 dB (+1.2) | 1.07 (1.06) |
+| 64 | −16.6 | 3.02 | −3.1 dB | +2.7 dB (+3.1) | 1.13 (1.10) |
+| 96 | −23.4 | 5.00 | −9.1 dB | +7.1 dB (+9.1) | 1.29 (1.23) |
+| 127 | −30.0 | 8.00 | −15.8 dB | +11.0 dB (+15.8) | 1.50 (1.40) |
 
 At `cam` 0 the compressor applies no gain change (ratio 1:1, makeup 0). Only
 the sidechain duck (§4.4) and the saturation ceiling at full scale (§4.5)
@@ -239,16 +241,17 @@ towards the static target `GR`:
 - **Depth (answer 5):** `duck = −D(a) · f(v)` dB:
   - `f(v) = (v/127)³`: velocity 127 always gives the full depth, and most of
     the range lies between velocity 64 and 127;
-  - `D(a) = 9 + 9·a` dB: 9 dB at `cam` 0, 12.4 dB at the default, 18 dB at
-    `cam` 127.
+  - `D(a) = 2 + 19·a` dB (tuning revision 1; was `9 + 9·a`): extremely mild
+    at low `cam` (2 dB at `cam` 0), 9.2 dB at the default, and fairly extreme
+    at the top (21 dB at `cam` 127, was 18).
 
   | Velocity | `f(v)` | Duck at `cam` 0 | at `cam` 48 | at `cam` 127 |
   |---:|---:|---:|---:|---:|
-  | 127 | 1.00 | −9.0 dB | −12.4 dB | −18.0 dB |
-  | 100 | 0.49 | −4.4 | −6.1 | −8.8 |
-  | 80 | 0.25 | −2.3 | −3.1 | −4.5 |
-  | 64 | 0.13 | −1.2 | −1.6 | −2.3 |
-  | 30 | 0.01 | −0.1 | −0.2 | −0.2 |
+  | 127 | 1.00 | −2.0 dB | −9.2 dB | −21.0 dB |
+  | 100 | 0.49 | −1.0 | −4.5 | −10.3 |
+  | 80 | 0.25 | −0.5 | −2.3 | −5.3 |
+  | 64 | 0.13 | −0.3 | −1.2 | −2.7 |
+  | 30 | 0.01 | −0.0 | −0.1 | −0.3 |
 
 - **How it acts:** in the block after the trigger, the fast stage is set to
   `min(G_f, GR + duck)`. It then releases through the `ctm` ballistics, as if
@@ -280,10 +283,11 @@ towards the static target `GR`:
   - `h = u − u³/3`;
   - `out = 1.5·h/d`.
 - **Small signals** keep unity gain, because `1.5/d · d/1.5 = 1`. The
-  ceiling is `1/d`: 0 dBFS at `cam` 0 and −2.9 dBFS at `cam` 127.
+  ceiling is `1/d`: 0 dBFS at `cam` 0 and −3.5 dBFS at `cam` 127 (−2.9
+  before tuning revision 1).
 - **Gentleness:**
   - at `cam` 0 a −6 dBFS peak loses 0.3 dB, and full scale loses 1.4 dB;
-  - at `cam` 127 a −6 dBFS peak loses 0.65 dB;
+  - at `cam` 127 a −6 dBFS peak loses 0.76 dB (0.65 before revision 1);
   - on a moderately full, compressed bus the RMS falls by a few tenths of a
     dB, within "approximately the same level".
 - **It is also the soft ceiling:** makeup can never drive this pair into the
@@ -298,9 +302,9 @@ towards the static target `GR`:
   target, the cell state continues and the gain ramps, so a change of `cam`
   or `ctm` is smooth.
 - **Turning on (`off` → `St1`/`St2`):** the cell is seeded as if the bus sat
-  at `L_ref`: `P = L_ref`, `G_f = −M`, `G_m = 0`, `g = 1`. The output
-  therefore starts at unity gain and settles from there with no
-  makeup-driven jump. It crossfades from dry to wet over one block
+  at `L_ref`: `P = L_ref`, `G_f = GR(L_ref)`, `G_m = 0`, and the ramp starts
+  from `g = 1`. The output therefore starts from the cell's steady state for a
+  reference-level bus and settles from there with no makeup-driven jump. It crossfades from dry to wet over one block
   (`out = dry + w·(wet − dry)`, with `w` ramping 0 → 1).
 - **Turning off:** the processed pair crossfades from wet back to dry over
   one block. From the next block no work is done.

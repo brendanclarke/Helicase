@@ -137,6 +137,8 @@ static const char shortNames[][4] = {
     {"pts"},
     /* Requested short label for the persistent Global AutoSave switch. */
     {"ats"},
+    /* S074 bus compressor compact labels. */
+    {"cmp"},{"cam"},{"ctm"},{"csc"},
 };
 
 static const char catNames[][16] = {
@@ -146,6 +148,8 @@ static const char catNames[][16] = {
     {"Pattern"},{"Sound"},{"Step"},{"Euklid"},
     {"Global"},{"Velocity"},{"Parametr"},{"Sequencr"},
     {"Generatr"},{"MIDI"},{"Trigger"},
+    /* S074: CAT_SCENE, the full-view category of Scene-owned cells. */
+    {"Scene"},
 };
 
 static const char longNames[][16] = {
@@ -170,6 +174,8 @@ static const char longNames[][16] = {
     {"PtrnStoreUse"},
     /* Requested long label; valueNames assigns it to category Global. */
     {"AutoSave"},
+    /* S074 bus compressor long names. */
+    {"BusComp"},{"CompAmt"},{"CompTime"},{"CompSC"},
 };
 
 #endif /* MENUTEXT_H_ */

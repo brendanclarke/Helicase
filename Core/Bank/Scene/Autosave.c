@@ -86,6 +86,20 @@ _Static_assert(AUTOSAVE_SCENE_PARAM_EFFECT_MORPH -
                "Scene MIDI-note group must cover every track");
 
 /*
+ * The S074 bus compressor group follows Effect Morph and closes the Scene
+ * list. These asserts keep the AutoSave wire order aligned with SceneData.
+ * Affiliates: autosave_getSceneParameter(), autosave_applyScenePayload(),
+ * scene_setBusCompSetting().
+ */
+_Static_assert(AUTOSAVE_SCENE_PARAM_BUS_COMP_BASE ==
+                   AUTOSAVE_SCENE_PARAM_EFFECT_MORPH + 1u,
+               "Scene Effect Morph must remain one cell");
+_Static_assert(AUTOSAVE_SCENE_PARAM_COUNT -
+                   AUTOSAVE_SCENE_PARAM_BUS_COMP_BASE ==
+                   SCENE_BUS_COMP_FIELD_COUNT,
+               "Scene bus compressor group must cover every field");
+
+/*
  * Eight-bit Hamming-weight table for atomic dirty-mask accounting.
  *
  * What: maps every possible mask byte to its number of set bits. Why: the
@@ -910,9 +924,13 @@ static uint8_t autosave_getSceneParameter(const scene_t *scene,
     } else if (parameter_index < AUTOSAVE_SCENE_PARAM_EFFECT_MORPH) {
         *value = scene->settings.midi_note[
             parameter_index - AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE];
-    } else {
+    } else if (parameter_index == AUTOSAVE_SCENE_PARAM_EFFECT_MORPH) {
         /* Index 40 is the retained Scene Effect Morph amount. */
         *value = scene->settings.effect_morph_amount;
+    } else {
+        /* Indices 41..44 are the S074 bus compressor settings (cmp..csc). */
+        *value = scene->settings.bus_comp[
+            parameter_index - AUTOSAVE_SCENE_PARAM_BUS_COMP_BASE];
     }
     return 1u;
 }
@@ -1321,13 +1339,14 @@ void autosave_applyBankPayload(const uint8_t *bank_section)
 /*
  * Apply a validated winner record's Scene parameters to resident SceneData.
  *
- * What: the inverse of autosave_getSceneParameter(). Reads the 40 live
+ * What: the inverse of autosave_getSceneParameter(). Reads the 45 live
  * Scene-parameter bytes from the payload and writes them into
  * scene->settings through SceneData's change-aware setters (their dirty
  * notifications no-op while boot tracking is disabled). Inputs: scene_index
  * (0..15), pointer to the 1920-byte Scene section. Outputs: morph_amount,
  * voice_morph_amount[6], voice_decimation_all, audio_out[6], fx_send_amount[6],
- * fader_setting[6], midi_channel[7], midi_note[7] all updated in
+ * fader_setting[6], midi_channel[7], midi_note[7], effect_morph_amount and
+ * the S074 bus_comp[4] all updated in
  * scene_get(scene_index)->settings. Why: each field's payload index must
  * mirror the getter's autosave_scene_parameter_t enum chain. Affiliates:
  * autosave_getSceneParameter() line 634, autosave_scene_parameter_t,
@@ -1391,9 +1410,20 @@ void autosave_applyScenePayload(uint8_t scene_index,
                 (uint8_t)(parameter_index -
                           AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE),
                 value);
-        } else {
+        } else if (parameter_index == AUTOSAVE_SCENE_PARAM_EFFECT_MORPH) {
             /* Index 40 restores the retained Scene Effect Morph amount. */
             scene_setEffectMorphAmount(scene_index, value);
+        } else {
+            /*
+             * Indices 41..44 restore the S074 bus compressor through its
+             * clamping, change-aware setter. A pre-S074 record's zero-filled
+             * reserved cells therefore restore a safe off/cam0/ctm0/csc off.
+             */
+            scene_setBusCompSetting(
+                scene_index,
+                (uint8_t)(parameter_index -
+                          AUTOSAVE_SCENE_PARAM_BUS_COMP_BASE),
+                value);
         }
     }
 }

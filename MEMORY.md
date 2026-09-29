@@ -20,8 +20,10 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
-**Current working source**: Session 074 CrumpBit implementation in progress
-on `dev-ph5-effects` (2026-09-29).
+**Current working source**: Session 074 Bus Comp and fourth fader mode (`xfd`)
+implementations complete in source; hardware acceptance pending on
+`dev-ph5-effects` (2026-09-29).
+CrumpBit is already present in the tree.
 
 - **Commits:** HEAD `692abf8` ("dsp refactor") holds the S073 flash
   expansion, the Load:[Samples] fix and the DSP CPU refactor. The closeout
@@ -35,9 +37,9 @@ on `dev-ph5-effects` (2026-09-29).
   refactor "seems ok" with about **10 % less CPU** on the worst-case Scene
   with the StereoFilter Effect. The S072 Phase 5 acceptance matrices for
   Steps 6–10 (`072_SESSION_HANDOFF_LOG.md` §11) are still not reported.
-- **Current session (074):** `S074_CRUMPBIT_IMPLEMENTATION.md`: the
-  Effect-page automation-underline follow-up and the first Effect type that
-  uses the shared DTCM buffer.
+- **Current session (074):** `S074_BUS_COMP_IMPLEMENTATION.md` and
+  `S074_FADER_XFD.md`: the complete Scene-owned master bus compressor plus the
+  fourth `xfd` fader mode, its mirrored taper, and persistence/menu path.
 
 Session 073 in one paragraph:
 
@@ -121,12 +123,21 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   `S073_POST_FLASH_MENU_BUGFIXES.md`, `S073_CPU_USE_DSP_REDUCTION_REFACTOR.md`
   and `S073_CPU_REDUCTION_IMPLEMENTATION.md` are superseded and may be
   deleted. Next: `S074_EFFECT_BUGS_BUFFER_USE.md`.
-- **S074 CrumpBit is in progress.** `cbt` is implemented through the DSP,
-  FxBuffer share, Effect registry and custom Effect page; the normal build and
-  image pass with `data=416`, `bss=426,336`, a 76 B runtime union, and 254,104
-  B flash headroom. The diagnostic/minimum-share build also links cleanly.
-  Hardware/listening acceptance remains pending; durable implementation notes
-  are in `S074_CRUMPBIT_IMPLEMENTATION.md`.
+- **S074 Bus Comp is implemented in source.** `cmp` is wired through the
+  SceneData/AutoSave/sceneset/Preset ownership path, the final settings page,
+  the trigger funnel, and the mixer after the FX return. The production build
+  and image pass with `text=501,920`, `data=416`, `bss=426,384`, 4,472 B DTCM
+  statics, a 24 B compressor state, and a 126,592 B FX arena (3,712 B above
+  minimum). The diagnostic build also links with BC18 compiled. Hardware and
+  listening acceptance remain pending; durable notes are in
+  `S074_BUS_COMP_IMPLEMENTATION.md`.
+- **S074 XFD is implemented in source.** `MIXER_FADER_XFD` is mode 3 with dry
+  gain `volume × fader` and FX send `send × mirrored_fader`; the closed-form
+  mirror uses one division and no new RAM. SceneData/Preset/Menu/sceneset all
+  accept and retain 0..3, with the existing AutoSave byte unchanged. `make
+  all && make img` passes at `text=502,072`, `data=416`, `bss=426,384`,
+  251,176 B application flash headroom, 4,472 B DTCM statics, and a 126,592 B
+  FX arena. Hardware checks H1–H9 in `S074_FADER_XFD.md` remain pending.
 - **Session 072 (Phase 5 Effects bus) is closed in source.**
   - Durable authority: `072_SESSION_HANDOFF_LOG.md` and
     `EFFECTS_BUS_REFERENCE.md`.

@@ -117,6 +117,35 @@ typedef struct {
      */
 } kit_t;
 
+/*
+ * S074 master bus compressor settings: one byte each, in wire order.
+ *
+ * What:       indexes scene_settings_t::bus_comp[] and, in the same order,
+ *             AutoSave Scene parameters 41..44, the sceneset.scg keys
+ *             bus_comp_mode/amount/time/sidechain, and the PAR_BUS_COMP_*
+ *             page mirrors (PAR_BUS_COMP_MODE + field).
+ * Domains:    MODE 0 off, 1 St1 (DAC1: MAIN), 2 St2 (DAC2: OUT2); AMOUNT
+ *             and TIME 0..127; SIDECHAIN 0 off or voice 1..6 (track 7
+ *             counts as 6).
+ * Why an array: one clamp table, one default table and one setter keep the
+ *             four fields on the same owner path and wire order.
+ * Affiliates: BusCompressor.c, Preset, Autosave, storageTypes.c, menu.c.
+ */
+typedef enum {
+    SCENE_BUS_COMP_MODE = 0,
+    SCENE_BUS_COMP_AMOUNT,
+    SCENE_BUS_COMP_TIME,
+    SCENE_BUS_COMP_SIDECHAIN,
+    SCENE_BUS_COMP_FIELD_COUNT
+} scene_bus_comp_field_t;
+
+#define SCENE_BUS_COMP_MODE_OFF        0u
+#define SCENE_BUS_COMP_MODE_ST1        1u
+#define SCENE_BUS_COMP_MODE_ST2        2u
+#define SCENE_BUS_COMP_SIDECHAIN_OFF   0u
+#define SCENE_BUS_COMP_DEFAULT_AMOUNT 48u
+#define SCENE_BUS_COMP_DEFAULT_TIME   48u
+
 typedef struct {
     /*
      * Scene-level global Morph amount, 0..255.
@@ -158,8 +187,9 @@ typedef struct {
      * writing mixer_audioRouting[], keeping SceneData free of mixer includes.
      *
      * fx_send_amount and fader_setting are retained now for the Scene file/UI
-     * contract. FX send is 0..127. Fader mode is 0..2, currently interpreted
-     * as normal/pre-FX, post-FX, and FX-only by the mixer FX path. Preset
+     * contract. FX send is 0..127. Fader mode is 0..SCENE_FADER_SETTING_MAX
+     * (0..3): pre (normal/pre-FX), pst (post-FX), fx (FX-only) and xfd (dry
+     * to FX crossfade, S074), interpreted by the mixer FX path. Preset
      * setters store the values and the live mixer applies the selected mode.
      *
      * These fields are indexed by instrument slot, not by track. Track 7
@@ -187,6 +217,17 @@ typedef struct {
      * the sole writer so the value is always dirty-marked with its owner.
      */
     uint8_t effect_morph_amount;
+    /*
+     * S074 master bus compressor: cmp, cam, ctm, csc, indexed by
+     * scene_bus_comp_field_t.
+     *
+     * These are Scene settings, not Kit or Effect data: they travel with
+     * Scene and Bank save/load, sceneset.scg (bus_comp_* keys) and AutoSave
+     * (Scene parameters 41..44). Written through scene_setBusCompSetting()
+     * except during validated initialization/whole-Scene staging.
+     * +4 B per Scene, +64 B SRAM1 in scenes[16] (approved 2026-09-29).
+     */
+    uint8_t bus_comp[SCENE_BUS_COMP_FIELD_COUNT];
     /*
      * Autosave extension rule for Scene settings.
      *
@@ -393,6 +434,16 @@ uint8_t scene_getVoiceAudioOut(uint8_t scene_index, uint8_t slot);
 void scene_setVoiceFxSendAmount(uint8_t scene_index, uint8_t slot,
                                 uint8_t amount);
 uint8_t scene_getVoiceFxSendAmount(uint8_t scene_index, uint8_t slot);
+/*
+ * Largest stored fader mode (S074): 0 pre, 1 pst, 2 fx, 3 xfd.
+ *
+ * What: the single domain limit for fader_setting[]. The SceneData setter
+ * and getter, Preset's setter, the sceneset.scg parser and the Menu clamp
+ * all use it. mixer.c asserts that it equals MIXER_FADER_XFD, so SceneData
+ * stays free of mixer includes while the two cannot drift. A future mode
+ * raises this value and adds a mixer branch and a Menu label.
+ */
+#define SCENE_FADER_SETTING_MAX 3u
 void scene_setVoiceFaderSetting(uint8_t scene_index, uint8_t slot,
                                 uint8_t mode);
 uint8_t scene_getVoiceFaderSetting(uint8_t scene_index, uint8_t slot);
@@ -450,5 +501,23 @@ void scene_setEffectSeqLaneLocked(uint8_t scene_index, uint8_t step,
                                   uint8_t lane, uint8_t locked);
 void scene_setEffectMorphAmount(uint8_t scene_index, uint8_t amount);
 uint8_t scene_getEffectMorphAmount(uint8_t scene_index);
+
+/*
+ * S074 master bus compressor accessors (cmp, cam, ctm, csc).
+ *
+ * scene_busCompDefaults() writes off, 48, 48, off into a settings image for
+ * every fresh/staged/emptied Scene path. scene_busCompClamp() applies the
+ * field domain (mode 0..2, amount/time 0..127, sidechain 0..6), returning 0
+ * for an invalid field. scene_setBusCompSetting() clamps and commits through
+ * the change-aware Scene store; scene_getBusCompSetting() returns the retained
+ * byte or 0 for an invalid Scene/field. No runtime push is performed: the
+ * compressor reads the active Scene every block.
+ * Affiliates: Preset, Autosave, storageTypes.c, BusCompressor.c, menu.c.
+ */
+void scene_busCompDefaults(scene_settings_t *settings);
+uint8_t scene_busCompClamp(uint8_t field, uint8_t value);
+void scene_setBusCompSetting(uint8_t scene_index, uint8_t field,
+                             uint8_t value);
+uint8_t scene_getBusCompSetting(uint8_t scene_index, uint8_t field);
 
 #endif

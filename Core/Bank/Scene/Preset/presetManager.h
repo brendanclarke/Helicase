@@ -415,7 +415,7 @@ void preset_applySceneSettings(uint8_t scene_index);
  * Inputs: resident Scene index, zero-based instrument slot, and a value in the
  * UI/storage domain. Outputs: retained SceneData updates; audio_out also
  * applies the active Scene's mixer route immediately. FX send and fader mode
- * deliberately have no runtime output until the FX/fader backend exists.
+ * (pre/pst/fx/xfd) have no push step: the mixer reads both every block.
  *
  * Clients: VOICE mix Scene-setting cells, sceneset load/apply follow-up, and
  * future MIDI/Bank Scene setting mutation.
@@ -528,6 +528,19 @@ void    preset_morphVoiceScene(uint8_t scene_index, uint8_t slot,
                                uint8_t morph);
 void    preset_rebuildMorph(void);
 void    preset_setVoiceDecimationAll(uint8_t scene_index, uint8_t value);
+/*
+ * S074 master bus compressor Scene settings (cmp, cam, ctm, csc).
+ *
+ * preset_setBusCompSetting() clamps and commits one field of one Scene through
+ * SceneData, then refreshes that field's active-page mirror. The setter is
+ * used by the VOICE edit-mask fan-out; preset_syncBusCompMirrors() copies the
+ * active Scene's four retained values into parameter_values[]. Neither path
+ * pushes runtime DSP state because BusCompressor reads SceneData per block.
+ * Affiliates: menu.c and preset_applySceneSettings().
+ */
+void    preset_setBusCompSetting(uint8_t scene_index, uint8_t field,
+                                 uint8_t value);
+void    preset_syncBusCompMirrors(void);
 /*
  * Apply Scene-wide decimation to runtime without changing retained Scene/Menu
  * state.

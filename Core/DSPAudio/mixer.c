@@ -60,6 +60,8 @@
 #include "adcPots.h"
 #include "SceneData.h"
 #include "presetManager.h"
+/* S074 master bus compressor: final stage of mixer_calcNextSampleBlock(). */
+#include "BusCompressor.h"
 // TODO DSP_PORT
 // #include "../Hardware/TriggerOut.h"
 //-----------------------------------------------------------------------
@@ -506,9 +508,14 @@ static void mixer_addVoiceInt16ToOutput(uint8_t dest,
  * Inputs: zero-based Scene slot, active Scene index, and the retained or
  * step-overridden fader/send values. Output: mix_gain feeds the normal routed
  * output and send_gain feeds the pre-volume FX bus. PRE scales both taps,
- * POST scales only the dry mix, and FX scales only the send. The voice volume
- * remains on the dry tap for all modes. Affiliate: mixer_calcNextSampleBlock().
+ * POST scales only the dry mix, FX scales only the send, and XFD (S074)
+ * crossfades: the dry tap follows the fader and the send follows the mirrored
+ * fader. The voice volume remains on the dry tap for all modes. Affiliate:
+ * mixer_calcNextSampleBlock().
  */
+/* The Scene domain limit and the last mixer mode must agree (S074). */
+_Static_assert(MIXER_FADER_XFD == SCENE_FADER_SETTING_MAX,
+		"fader modes: SceneData domain and mixer modes differ");
 static void mixer_faderGains(uint8_t slot,
 		uint8_t scene_index,
 		float *mix_gain,
@@ -526,6 +533,22 @@ static void mixer_faderGains(uint8_t slot,
 		*send_gain = send;
 	} else if (mode == MIXER_FADER_FX) {
 		*mix_gain = volume;
+	} else if (mode == MIXER_FADER_XFD) {
+		/*
+		 * xfd: crossfade between the FX bus (fader down) and the voice's
+		 * normal output (fader up) (S074).
+		 *
+		 * The dry tap keeps the default volume x fader: at the bottom nothing
+		 * reaches the output whatever the volume, and at the top the voice is
+		 * at its normal level. The send uses the slider gain at the mirrored
+		 * position: at the bottom it equals FX mode at full fader (send x 1,
+		 * no volume, as in FX mode); moving the fader down raises it exactly
+		 * as moving it up does in FX mode; at the top it is exactly 0. Both
+		 * taps keep their existing per-block ramps, so fader moves and mode
+		 * changes are click-free. Cost: one division per xfd slot per block.
+		 * Affiliates: adc_sliderGainMirrored(), MIXER_FADER_XFD.
+		 */
+		*send_gain = send * adc_sliderGainMirrored(fader);
 	}
 }
 
@@ -1036,5 +1059,17 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		mixer_fx_return_last_gain[0] = 0.0f;
 		mixer_fx_return_last_gain[1] = 0.0f;
 	}
+
+	/*
+	 * Master bus compressor (S074), after all voices and the FX return.
+	 *
+	 * Mapping: St1 = DAC1 = output2 (MAIN/headphones); St2 = DAC2 = output
+	 * (OUT2). No jack fallback is applied: the compressor stays on the Scene's
+	 * selected physical pair. Cost is zero while cmp is off.
+	 * Inputs: both summed output buffers and the active Scene snapshot.
+	 * Output: only the selected buffer is compressed in place.
+	 * Affiliate: BusCompressor.h and voiceControl_triggerNow().
+	 */
+	busComp_processBlock(&output2[pos], &output[pos], fx_scene);
 
 }

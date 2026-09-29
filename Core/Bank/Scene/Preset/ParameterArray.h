@@ -170,11 +170,25 @@ enum ParamEnums
 	 */
 	PAR_AUTOSAVE_ENABLED,
 
+	/*
+	 * S074 bus compressor page mirrors (cmp, cam, ctm, csc).
+	 *
+	 * These ids are active-Scene display/edit mirrors in the same order as
+	 * scene_settings_t::bus_comp[] and AutoSave 41..44. They consume existing
+	 * parameter_values[] capacity and are never serialized as Globals.
+	 */
+	PAR_BUS_COMP_MODE,
+	PAR_BUS_COMP_AMOUNT,
+	PAR_BUS_COMP_TIME,
+	PAR_BUS_COMP_SIDECHAIN,
+
 	NUM_PARAMS = 384,
 };
 
 _Static_assert(PAR_AUTOSAVE_ENABLED < NUM_PARAMS,
 	"AutoSave parameter must fit the fixed flat parameter allocation");
+_Static_assert(PAR_BUS_COMP_SIDECHAIN < NUM_PARAMS,
+	"S074 bus compressor mirrors must fit the fixed flat parameter allocation");
 
 #include "stm32f4xx.h"
 

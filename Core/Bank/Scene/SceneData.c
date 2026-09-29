@@ -518,15 +518,17 @@ void scene_setVoiceFaderSetting(uint8_t scene_index, uint8_t slot,
      * Store one future per-voice fader mode.
      *
      * Inputs: resident Scene index, zero-based instrument slot, and mode in
-     * the current Scene file domain: 0 normal/pre-FX, 1 post-FX, 2 FX-only.
-     * Output: a changed retained mode is stored before its named Scene bit is
-     * marked. Runtime behavior is applied by Preset and the mixer rather than
-     * being hidden in SceneData.
+     * the current Scene file domain: 0 normal/pre-FX, 1 post-FX, 2 FX-only,
+     * 3 xfd dry/FX crossfade (S074); larger values clamp to
+     * SCENE_FADER_SETTING_MAX. Output: a changed retained mode is stored
+     * before its named Scene bit is marked. Runtime behavior is applied by
+     * Preset and the mixer rather than being hidden in SceneData. AutoSave
+     * restore also enters here, so a restored byte is always in domain.
      */
     if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
         return;
-    if (mode > 2u)
-        mode = 2u;
+    if (mode > SCENE_FADER_SETTING_MAX)
+        mode = SCENE_FADER_SETTING_MAX;
     scene_storeParameterByte(
         scene_index, &scene->settings.fader_setting[slot],
         (uint8_t)(AUTOSAVE_SCENE_PARAM_FADER_BASE + slot), mode);
@@ -540,10 +542,11 @@ uint8_t scene_getVoiceFaderSetting(uint8_t scene_index, uint8_t slot)
      * Read one retained fader mode.
      *
      * Inputs: resident Scene index and zero-based instrument slot. Output:
-     * retained 0..2 mode, or 0 for invalid coordinates/stale storage.
+     * retained 0..SCENE_FADER_SETTING_MAX mode (0..3, S074 adds xfd), or 0
+     * for invalid coordinates/stale storage.
      */
     if (!scene || slot >= INSTRUMENT_SLOT_COUNT ||
-        scene->settings.fader_setting[slot] > 2u) {
+        scene->settings.fader_setting[slot] > SCENE_FADER_SETTING_MAX) {
         return 0u;
     }
     return scene->settings.fader_setting[slot];
@@ -849,6 +852,72 @@ uint8_t scene_getEffectMorphAmount(uint8_t scene_index)
     return scene ? scene->settings.effect_morph_amount : 0u;
 }
 
+/*
+ * S074 bus compressor domain/default tables, in scene_bus_comp_field_t order.
+ *
+ * What:       maxima (St2, 127, 127, voice 6) and defaults (off, 48, 48,
+ *             off). Why: parser, menu, AutoSave restore and Scene setter all
+ *             use the same clamp boundary, so no path stores an unreachable
+ *             value. Affiliates: storageTypes.c, presetManager.c, menu.c.
+ */
+static const uint8_t scene_busCompMax[SCENE_BUS_COMP_FIELD_COUNT] = {
+    SCENE_BUS_COMP_MODE_ST2, 127u, 127u, INSTRUMENT_SLOT_COUNT
+};
+static const uint8_t scene_busCompDefault[SCENE_BUS_COMP_FIELD_COUNT] = {
+    SCENE_BUS_COMP_MODE_OFF, SCENE_BUS_COMP_DEFAULT_AMOUNT,
+    SCENE_BUS_COMP_DEFAULT_TIME, SCENE_BUS_COMP_SIDECHAIN_OFF
+};
+
+void scene_busCompDefaults(scene_settings_t *settings)
+{
+    uint8_t field;
+
+    /* Initialization/staging may seed the complete settings image directly. */
+    if (!settings)
+        return;
+    for (field = 0u; field < SCENE_BUS_COMP_FIELD_COUNT; field++)
+        settings->bus_comp[field] = scene_busCompDefault[field];
+}
+
+uint8_t scene_busCompClamp(uint8_t field, uint8_t value)
+{
+    /* Contract in SceneData.h; invalid fields normalize to the safe off byte. */
+    if (field >= SCENE_BUS_COMP_FIELD_COUNT)
+        return 0u;
+    return (value > scene_busCompMax[field]) ? scene_busCompMax[field]
+                                             : value;
+}
+
+void scene_setBusCompSetting(uint8_t scene_index, uint8_t field,
+                             uint8_t value)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /*
+     * Store one bus compressor byte through the scalar owner funnel.
+     *
+     * Inputs: resident Scene, field, and any byte. Output: clamped storage is
+     * written before AutoSave parameter 41+field and card-clean invalidation;
+     * equal values and invalid coordinates are no-ops.
+     */
+    if (!scene || field >= SCENE_BUS_COMP_FIELD_COUNT)
+        return;
+    scene_storeParameterByte(
+        scene_index, &scene->settings.bus_comp[field],
+        (uint8_t)(AUTOSAVE_SCENE_PARAM_BUS_COMP_BASE + field),
+        scene_busCompClamp(field, value));
+}
+
+uint8_t scene_getBusCompSetting(uint8_t scene_index, uint8_t field)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+
+    /* Return the retained byte, or off for an invalid Scene/field. */
+    if (!scene || field >= SCENE_BUS_COMP_FIELD_COUNT)
+        return 0u;
+    return scene->settings.bus_comp[field];
+}
+
 void scene_initAll(void)
 {
     uint8_t scene_index;
@@ -869,6 +938,8 @@ void scene_initAll(void)
     scene_active_index = 0u;
     for (scene_index = 0u; scene_index < SCENE_COUNT; scene_index++) {
         scenes[scene_index].settings.voice_decimation_all = 127u;
+        /* S074: bus compressor defaults are off, 48, 48, off. */
+        scene_busCompDefaults(&scenes[scene_index].settings);
         for (track = 0u; track < NUM_TRACKS; track++)
             scenes[scene_index].settings.midi_channel[track] =
                 (uint8_t)(track + 1u);

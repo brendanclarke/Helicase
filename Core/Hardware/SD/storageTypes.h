@@ -386,6 +386,16 @@ storage_status_t storage_scenesetParseLine(
     char display[STORAGE_SCENE_DISPLAY_NAME_LEN]);
 storage_status_t storage_scenesetFinalize(const storage_sceneset_t *state);
 
+/*
+ * Return the permanent sceneset.scg key for one S074 bus compressor field.
+ *
+ * Input: field in scene_bus_comp_field_t order. Output: one of
+ * bus_comp_mode/amount/time/sidechain, or NULL for an invalid field. The
+ * parser and filesystem writer share this table so the wire spelling cannot
+ * drift between load and save.
+ */
+const char *storage_busCompKey(uint8_t field);
+
 /* Parse a numbered folder name like "000 Slak" into internal slot/name data.
  *
  * Inputs: display/LFN folder name, slot output pointer, and an eight-char

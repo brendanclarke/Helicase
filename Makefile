@@ -133,6 +133,7 @@ SRCS = \
 DSP_SRCS = \
   Core/DSPAudio/1PoleLp.c \
   Core/DSPAudio/BufferTools.c \
+  Core/DSPAudio/BusCompressor.c \
   Core/DSP/Instruments/Cymbal/CymbalVoice.c \
   Core/DSPAudio/Decay.c \
   Core/DSPAudio/distortion.c \

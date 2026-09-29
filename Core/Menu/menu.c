@@ -1029,6 +1029,12 @@ const enum Datatypes parameter_dtypes[NUM_PARAMS] = {
     /* Global `ats` is a stored boolean; filesystem policy is applied only at
      * the explicit user/boot lifecycle boundaries documented below. */
     [PAR_AUTOSAVE_ENABLED] = DTYPE_ON_OFF,
+    /* S074 bus compressor mirrors use generic numeric dtype; Menu supplies
+     * field-specific clamp and cmp/csc value text below. */
+    [PAR_BUS_COMP_MODE] = DTYPE_0B127,
+    [PAR_BUS_COMP_AMOUNT] = DTYPE_0B127,
+    [PAR_BUS_COMP_TIME] = DTYPE_0B127,
+    [PAR_BUS_COMP_SIDECHAIN] = DTYPE_0B127,
     [PAR_ACTIVE_STEP] = DTYPE_0B127,
     [PAR_STEP_VOLUME] = DTYPE_0B127,
     [PAR_STEP_PROB] = DTYPE_0B127,
@@ -1179,6 +1185,11 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_PAT_STORE_USE,CAT_PATTERN,LONG_PAT_STORE_USE},
     /* Requested `ats` / Global / `AutoSave` metadata triplet. */
     {SHORT_AUTOSAVE,CAT_GLOBAL,LONG_AUTOSAVE},
+    /* S074 bus compressor: cmp/cam/ctm/csc, Scene, BusComp.. */
+    {SHORT_BUS_COMP_MODE,CAT_SCENE,LONG_BUS_COMP_MODE},
+    {SHORT_BUS_COMP_AMOUNT,CAT_SCENE,LONG_BUS_COMP_AMOUNT},
+    {SHORT_BUS_COMP_TIME,CAT_SCENE,LONG_BUS_COMP_TIME},
+    {SHORT_BUS_COMP_SIDECHAIN,CAT_SCENE,LONG_BUS_COMP_SIDECHAIN},
 };
 
 /* -----------------------------------------------------------------------
@@ -1809,6 +1820,11 @@ static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
 static void menu_displayInstrumentTargetFull(uint16_t target);
 static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText);
 static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value);
+/* S074 bus compressor helpers; definitions stay with display/commit logic. */
+static uint8_t menu_paramIsBusComp(uint16_t paramNr);
+static uint8_t menu_busCompValueText(uint16_t paramNr, uint8_t value,
+                                     char *dst);
+static uint8_t menu_commitBusCompParam(uint16_t paramNr, uint8_t value);
 static instrument_param_id_t menu_sceneSettingAutomationTarget(
     const menu_cell_t *cell);
 static uint8_t menu_morphAutomationStore(uint8_t morph_value);
@@ -3497,14 +3513,18 @@ static void menu_sceneSettingFaderName(uint8_t value, char *dst)
     /*
      * Format the retained fader mode domain.
      *
-     * Inputs: stored 0..2 fader mode. Output: compact user text. These labels
+     * Inputs: stored 0..3 fader mode. Output: compact user text. These labels
      * are live mixer behavior: pre = fader before both dry and FX taps, pst =
-     * fader on the dry/post-FX mix only, and fx = fader on the FX send only.
+     * fader on the dry/post-FX mix only, fx = fader on the FX send only, and
+     * xfd (S074) = fader crossfades from the FX send (bottom) to the dry
+     * output (top). Used by both the compact row and the full edit view.
      */
     if (value == 1u)
         memcpy(dst, "pst", 3);
     else if (value == 2u)
         memcpy(dst, "fx ", 3);
+    else if (value == 3u)
+        memcpy(dst, "xfd", 3);
     else
         memcpy(dst, "pre", 3);
 }
@@ -3715,6 +3735,14 @@ static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
         }
         return changed;
     }
+    /*
+     * S074 bus compressor cells are Scene-owned, not Global-owned mirrors.
+     * Fan out the clamped value through Preset and refresh from the active
+     * Scene; this prevents settings.cfg bulk apply from writing SceneData.
+     */
+    if (cell->kind == MENU_CELL_STATIC &&
+        menu_paramIsBusComp(cell->static_param))
+        return menu_commitBusCompParam(cell->static_param, (uint8_t)value);
     if (cell->kind == MENU_CELL_STATIC) {
         uint8_t *paramValue = menu_getParameterEditPtr(cell->static_param);
         uint8_t old_value;
@@ -4321,6 +4349,10 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         menu_sceneSettingFaderName(value, valueAsText);
         return;
     }
+    /* S074 custom compact text: cmp off/St1/St2 and csc off/1..6. */
+    if (cell && cell->kind == MENU_CELL_STATIC &&
+        menu_busCompValueText(cell->static_param, value, valueAsText))
+        return;
 
     switch (dtype) {
     case DTYPE_TARGET_SELECTION_VELO:
@@ -4405,20 +4437,34 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
          * Clamp Scene-setting cells before generic dtype handling.
          *
          * audio_out uses the six-entry mixer route menu, FX send uses 0..127,
-         * fader mode uses 0..2, and Voice Morph uses its full 0..255 domain.
+         * fader mode uses 0..SCENE_FADER_SETTING_MAX (pre/pst/fx/xfd, S074),
+         * and Voice Morph uses its full 0..255 domain.
          */
         if (cell->scene_setting == MENU_SCENE_SETTING_AUDIO_OUT) {
             if (*value > 5u)
                 *value = 5u;
         } else if (cell->scene_setting == MENU_SCENE_SETTING_FADER_SETTING) {
-            if (*value > 2u)
-                *value = 2u;
+            if (*value > SCENE_FADER_SETTING_MAX)
+                *value = SCENE_FADER_SETTING_MAX;
         } else if (cell->scene_setting == MENU_SCENE_SETTING_VOICE_MORPH) {
             if (*value > 255u)
                 *value = 255u;
         } else if (*value > 127u) {
             *value = 127u;
         }
+        return;
+    }
+
+    /*
+     * S074 bus compressor domains are narrower than the generic 0..127 dtype:
+     * cmp is 0..2 and csc is 0..6, both defined by SceneData's clamp table.
+     */
+    if (cell->kind == MENU_CELL_STATIC &&
+        menu_paramIsBusComp(cell->static_param)) {
+        const uint8_t max = scene_busCompClamp(
+            (uint8_t)(cell->static_param - PAR_BUS_COMP_MODE), 255u);
+        if (*value > max)
+            *value = max;
         return;
     }
 
@@ -8131,6 +8177,14 @@ static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter)
     }
 
     if (menu_activePage == MENU_MIDI_PAGE) {
+        /*
+         * S074 settings cues: the Scene-owned compressor page is the last
+         * populated sub-page. The first settings screen points to it with
+         * '^', the compressor page identifies Scene ownership with '+', and
+         * the page before it becomes '*' through the existing next-page test.
+         */
+        if (activePage == MENU_GLOBAL_SCENE_SUBPAGE && !is2ndPage)
+            return '+';
         if (is2ndPage) {
             if ((activePage < NUM_SUB_PAGES-1) &&
                 (menuPages[MENU_MIDI_PAGE][activePage+1].top1 != TEXT_EMPTY))
@@ -8140,7 +8194,7 @@ static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter)
         } else {
             if (has2ndPage(activePage)) {
                 if (activePage > 0) return '*';
-                else return '>';
+                else return '^';
             } else {
                 if (activePage > 0) return '<';
                 else return 0;
@@ -9998,6 +10052,18 @@ static void menu_repaintGeneric(void)
             (void)menuEffects_formatParamValue3(
                 &cell.fx, effect_value, &editDisplayBuffer[1][13]);
         }
+        /*
+         * S074 bus compressor full-view value text: cmp becomes off/St1/St2
+         * and csc becomes off/1..6. cam/ctm retain generic numeric text;
+         * valueNames supplies their Scene category and long names.
+         */
+        if (cell.kind == MENU_CELL_STATIC) {
+            const uint8_t bus_value =
+                (curParmVal > 255u) ? 255u : (uint8_t)curParmVal;
+
+            (void)menu_busCompValueText(
+                cell.static_param, bus_value, &editDisplayBuffer[1][13]);
+        }
     } else {
         /*
          * Clear stale text left by custom renderers before overview redraw.
@@ -11237,6 +11303,66 @@ static uint8_t menu_paramIsMorphAmount(uint16_t paramNr)
         return 1u;
     return (uint8_t)(paramNr >= PAR_VOICE1_MORPH &&
                      paramNr <= PAR_VOICE6_MORPH);
+}
+
+/*
+ * S074 bus compressor cell helpers.
+ *
+ * menu_paramIsBusComp() identifies the four static page mirrors.
+ * menu_busCompValueText() owns cmp/csc three-character labels while cam/ctm
+ * use the generic numeric renderer. menu_commitBusCompParam() fans an edit to
+ * every Scene in the VOICE edit mask and then resynchronizes the mirrors.
+ * Affiliates: menu_cellCommitValue(), menu_clampCellValue(), Preset.
+ */
+static uint8_t menu_paramIsBusComp(uint16_t paramNr)
+{
+    return (uint8_t)(paramNr >= PAR_BUS_COMP_MODE &&
+                     paramNr <= PAR_BUS_COMP_SIDECHAIN);
+}
+
+static uint8_t menu_busCompValueText(uint16_t paramNr, uint8_t value,
+                                     char *dst)
+{
+    if (!dst)
+        return 0u;
+    if (paramNr == PAR_BUS_COMP_MODE) {
+        if (value == SCENE_BUS_COMP_MODE_ST1)
+            memcpy(dst, "St1", 3);
+        else if (value == SCENE_BUS_COMP_MODE_ST2)
+            memcpy(dst, "St2", 3);
+        else
+            memcpy(dst, menuText_off, 3);
+        return 1u;
+    }
+    if (paramNr == PAR_BUS_COMP_SIDECHAIN) {
+        if (value == SCENE_BUS_COMP_SIDECHAIN_OFF)
+            memcpy(dst, menuText_off, 3);
+        else
+            numtostrpu(dst, value, ' ');
+        return 1u;
+    }
+    return 0u;
+}
+
+static uint8_t menu_commitBusCompParam(uint16_t paramNr, uint8_t value)
+{
+    const uint8_t field = (uint8_t)(paramNr - PAR_BUS_COMP_MODE);
+    const uint16_t edit_mask = bank_sceneMaskVoiceEdit();
+    uint8_t scene_index;
+
+    /*
+     * Commit one page edit to every masked Scene, then show the active Scene.
+     * The active Scene may be outside the mask, so refreshing all mirrors is
+     * required for a truthful page after a fan-out edit.
+     */
+    for (scene_index = 0u;
+         scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        if ((edit_mask & (uint16_t)(1u << scene_index)) != 0u)
+            preset_setBusCompSetting(scene_index, field, value);
+    }
+    preset_syncBusCompMirrors();
+    return 1u;
 }
 
 static void menu_updateEndlessPotScales(void)
@@ -13201,6 +13327,19 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
         break;
     }
 
+    case PAR_BUS_COMP_MODE:
+    case PAR_BUS_COMP_AMOUNT:
+    case PAR_BUS_COMP_TIME:
+    case PAR_BUS_COMP_SIDECHAIN:
+        /*
+         * S074 bus compressor mirrors are refresh-only in Global apply.
+         * Settings/legacy loads replay this range, but these ids must never
+         * write SceneData or settings.cfg; restore the active Scene values
+         * instead so a load cannot leave the page showing reset zeros.
+         */
+        preset_syncBusCompMirrors();
+        break;
+
     case PAR_ROLL:
         /*
          * Roll rate controls Sequencer performance behavior. It is not Pattern
@@ -13652,6 +13791,45 @@ void menu_setPlayedPattern(uint8_t patternNr)
 
 uint8_t menu_getViewedPattern(void) { return menu_shownPattern; }
 
+#if DEV_MODE_DIAGNOSTIC
+/*
+ * BC18 diagnostic check: the Scene-owned compressor page stays last.
+ *
+ * What: verifies the named page contains cmp first, has an empty second half,
+ * and has no populated settings page after it. Why: menu cues and SELECT
+ * traversal rely on the append-only placement rule. Output: silent success;
+ * on failure, a 1.5 s LCD notice before boot continues. Production compiles
+ * the check out. Affiliate: menuPages.h and MENU_GLOBAL_SCENE_SUBPAGE.
+ */
+static void menu_devCheckGlobalSceneSubPage(void)
+{
+    const Page *scene_page =
+        &menuPages[MENU_MIDI_PAGE][MENU_GLOBAL_SCENE_SUBPAGE];
+    uint8_t bad = (uint8_t)(scene_page->top1 != TEXT_BUS_COMP_MODE ||
+                            scene_page->top5 != TEXT_EMPTY);
+    uint8_t sub_page;
+    uint16_t t0;
+
+    for (sub_page = (uint8_t)(MENU_GLOBAL_SCENE_SUBPAGE + 1u);
+         sub_page < NUM_SUB_PAGES; sub_page++) {
+        if (menuPages[MENU_MIDI_PAGE][sub_page].top1 != TEXT_EMPTY)
+            bad = 1u;
+    }
+    if (!bad)
+        return;
+    lcd_clear();
+    lcd_setcursor(0, 1);
+    lcd_string("Menu: cmp page  ");
+    lcd_setcursor(0, 2);
+    lcd_string("not last (BC18) ");
+    lcd_waitForIdle();
+    t0 = time_sysTick;
+    while ((uint16_t)(time_sysTick - t0) < 1500u) {
+        /* diagnostic hold */
+    }
+}
+#endif
+
 /* -----------------------------------------------------------------------
 ** menu_init — exact port
 ** ----------------------------------------------------------------------- */
@@ -13704,6 +13882,9 @@ void menu_init(void)
      * mirror's undefined/startup value aligned with the Scene default.
      */
     parameter_values[PAR_VOICE_DECIMATION_ALL] = 127u;
+    /* S074 mirrors start at the Scene defaults until Scene apply runs. */
+    parameter_values[PAR_BUS_COMP_AMOUNT] = SCENE_BUS_COMP_DEFAULT_AMOUNT;
+    parameter_values[PAR_BUS_COMP_TIME] = SCENE_BUS_COMP_DEFAULT_TIME;
     /*
      * Wave interpolation is a sound-engine global that is applied immediately
      * at boot because there is no parser/global-apply pass between zeroed menu
@@ -13716,6 +13897,10 @@ void menu_init(void)
     // menu_switchPage(VOICE1_PAGE);
     menu_shownPattern = 0;
     menu_activeVoice = 0;
+#if DEV_MODE_DIAGNOSTIC
+    /* S074 BC18: verify the Scene-owned compressor page is still last. */
+    menu_devCheckGlobalSceneSubPage();
+#endif
     // lcd_clear();
     // led_setActiveVoice(0);
 
