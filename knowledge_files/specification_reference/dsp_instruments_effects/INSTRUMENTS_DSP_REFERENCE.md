@@ -4,7 +4,9 @@ How the six instrument voices are rendered, how their parameters reach the
 DSP, how modulation (LFO, velocity, Morph, step automation) works, what each
 part costs, and how to change or extend it.
 
-- **Current as of:** Session 073 close (2026-09-29).
+- **Current as of:** Session 074 close (2026-09-30). S074 changed nothing
+  in the voice engines; it added a sidechain tap in the trigger funnel
+  (§2) and a mirrored fader gain used by the mixer's `xfd` mode.
 - **Related documents:**
   - `EFFECTS_MIXER_DSP_REFERENCE.md`: what happens to a voice block after it
     leaves the instrument (decimation, mixer, FX bus, output);
@@ -91,6 +93,15 @@ note, velocity)`. Tracks 0..5 trigger slots 0..5. Track 6 (visible track 7)
 triggers slot 6 as its alternate: a Choke instrument (HiHat) gets the open
 variant; any other instrument borrows a hidden Scene decay value for that hit
 (step automation, then LFO, then the retained Kit setting, in that priority).
+
+**Sidechain tap (S074).** `voiceControl_triggerNow()` (`MidiVoiceControl.c`),
+the single trigger funnel for the sequencer, rolls, MIDI and front-panel
+previews, also calls `busComp_sidechainTrigger(track, velocity)`. The master
+bus compressor records the largest `(velocity/127)³` weight for the track
+selected by the active Scene's `csc` and applies it in the next block
+(`EFFECTS_MIXER_DSP_REFERENCE.md` §5A). Track 6 (visible track 7) counts as
+voice 6, a working assumption not yet confirmed on hardware (BC11). The
+tap is foreground-only, like the rest of the funnel.
 
 ---
 
@@ -730,3 +741,5 @@ fields from `ModulationNode`.
 - Session 072: engines render pre-volume; the LFO `fx` namespace.
 - Session 073: batched ZDF divisions, special-writer tags, fused post-chains,
   octave edge table (`073_SESSION_HANDOFF_LOG.md` §6).
+- Session 074: no engine change; the bus-compressor sidechain tap in the
+  trigger funnel (`074_SESSION_HANDOFF_LOG.md` §8).

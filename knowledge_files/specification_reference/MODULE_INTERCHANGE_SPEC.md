@@ -1,7 +1,7 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-073, including typed HCNAMES, `.fx` Effect storage, AutoSave boot restore, typed Instrument-index
+074, including typed HCNAMES, `.fx` Effect storage, AutoSave boot restore, typed Instrument-index
 repair, AsyncFATFS directory publication, the Phase 4 dynamic Pattern storage
 system, step automation editing/playback (Session 065), the VOICE-page
 held-step automation overlay (Session 066), the Pattern Stack Service with
@@ -10,9 +10,15 @@ rebuild, played-Pattern mirror fix, and per-track sequencer length fix,
 Session 069 bounded CPU convergence, Session 070 systems fitness pass, and
 Session 071 per-Scene voice-edit mask, base-independent LFO voice-morph
 contribution, Scene superpage live display, LED chase state defect fix, and
-LFO target voice handler fix, the Session 072 Effects bus, and the Session 073
+LFO target voice handler fix, the Session 072 Effects bus, the Session 073
 changes (boot image check, sample floor, special-writer tags, one-pass mixer
-dry + send). The DSP internals behind these APIs are described in
+dry + send), and the Session 074 additions:
+
+- the CrumpBit Effect type and the Effect-page hook/layout extensions;
+- the Effect-page automation underlines;
+- the master bus compressor (`Core/DSPAudio/BusCompressor`);
+- the `xfd` fader mode;
+- the AutoSave torn-record validation step. The DSP internals behind these APIs are described in
 `INSTRUMENTS_DSP_REFERENCE.md` and `EFFECTS_MIXER_DSP_REFERENCE.md`.
 Historical migrations belong in session logs; this document states which live
 module owns each call, state transition, and retained object.
@@ -228,9 +234,11 @@ layout.
 | `scene_setEffectSeqLaneValue()` / `scene_setEffectSeqLaneLocked()` | Store one sequencer lane value or lock bit and mark only its live cell. | EffectsManager lock editor |
 | `scene_setEffectMorphAmount()` / `scene_getEffectMorphAmount()` | Retained Scene parameter 40, separate from the Effect record. | EffectsManager, `preset_morphScene()` (PERF `mrp`), AutoSave |
 | `scene_editLayoutMatches(a, b)` | Same Effect type and six Instrument types; read-only. | Menu mask gate, BankData re-validation |
+| `scene_busCompDefaults(settings)` / `scene_busCompClamp(field, value)` / `scene_setBusCompSetting(scene, field, value)` / `scene_getBusCompSetting(scene, field)` | S074 master bus compressor bytes `bus_comp[4]` (MODE 0..2, AMOUNT 0..127, TIME 0..127, SIDECHAIN 0..6; defaults off/48/48/off). The setter clamps, stores change-aware and marks AutoSave Scene parameter 41 + field. | Preset (menu commit, fan-out), `.scg` parser, AutoSave reader, BusCompressor (reads per block) |
+| `scene_setVoiceFaderSetting()` / `scene_getVoiceFaderSetting()` | Per-voice fader mode 0..`SCENE_FADER_SETTING_MAX` (3 = `xfd` since S074; equal to `MIXER_FADER_XFD`, asserted in `mixer.c`). | Preset, `.scg` parser, AutoSave, mixer |
 
-The 420-byte record and the 16-record SRAM1 allocation are firmware-lifetime
-SceneData storage. EffectsManager owns 84 B of resolution state and 184 B of
+The 420-byte record and the 16-record SRAM1 allocation (`scenes`, 26,016 B:
+1,626 B per Scene since S074) are firmware-lifetime SceneData storage. EffectsManager owns 84 B of resolution state and 184 B of
 overlay/LFO state in SRAM1, plus the 76-byte DTCM type runtime; the mixer owns
 the FX bus.
 
@@ -528,7 +536,10 @@ edit dispatch, and post-load operation follow-up.
 | `menu_setPlayedPattern(patternNr)` | Side-effect-free alignment of the played-Pattern UI mirror (`menu_playedPattern`) the chase renderer compares against the viewed Pattern to gate chase-LED visibility (Session 068). Unlike `led_notifyPatternChanged()` (the runtime writer, with follow/PERF/LED side effects), performs only a validated assignment — safe to call from pre-audio filesystem realignment. | `filesystem.c` Scene/Bank realignment (3 sites) |
 | `menu_voiceAutoOverlayEnter()` / `menu_voiceAutoOverlayExit()` | Enter/exit VOICE-page held-step automation overlay (Session 066). Entry initializes 44-byte state block, starts async search. Exit restores normal VOICE display and clears CGRAM. | buttonHandler SEQ held-step timing |
 | `menu_voiceAutoOverlayHeldChanged()` | Notify overlay that the held-step mask changed. Invalidates working values, restarts async search. | buttonHandler SEQ press/release during overlay |
-| `menu_voiceAutoOverlayPatternDeleted()` | Notify overlay that the current pattern was deleted/cleared. Forces overlay exit. | copyClearTools |
+| `menu_voiceAutoOverlayPatternDeleted()` | Invalidate the automation-presence search after an in-place Pattern/track clear: restart and repaint on VOICE pages and, since S074, the Effect page (`menu_isScreenPage()`); other pages return (their next entry restarts the search). | copyClearTools |
+| Automation-presence search (internal, S066/S074) | `va_searchRestart()`, `va_scanService()` (4 step reads per pass; VOICE: the active track; Effect page: all 7 tracks of the viewed Pattern), `va_searchRecordEffectTarget()` (block-7 locals 0..62 and `fxm`; rejects local 63/`0x1FF`), `menu_effectCellAutomated()`, `menu_applyEffectMarkers()`. 13 shared bytes; every entry to a VOICE or Effect page restarts it. | Menu internals |
+| `menu_effectShowHome()` | S074: jump the Effect page to the active type's layout home screen, leaving any full view (used when a type's SELECT hook returns `EFFECT_UI_SHOW_HOME`). | buttonHandler FX SELECT paths |
+| Bus compressor settings page (internal, S074) | `MENU_MIDI_PAGE` sub-page `MENU_GLOBAL_SCENE_SUBPAGE` (2), always last. Cells `cmp cam ctm csc` mirror the active Scene through `PAR_BUS_COMP_*` (58..61). Commits go through a dedicated `menu_cellCommitValue()` branch into `preset_setBusCompSetting()` for every VOICE-edit-masked Scene; `menu_parseGlobalParam()` only refreshes the mirrors for these ids, so a Settings Load can never write Scenes. Cues `^` (first screen) and `+` (this page) in `checkScrollSign()`. BC18 diagnostic boot check. | Menu internals, Preset |
 
 Shared state used by clients:
 
@@ -563,6 +574,13 @@ and page-owned SEQ LEDs; the Pattern chase yields to this LED layer.
 | `menuEffects_hookSelect()` / `menuEffects_hookTrack()` / `menuEffects_hookBar()` / `menuEffects_renderLeds()` | Dispatch optional type UI hooks. | buttonHandler, Menu |
 | `menuEffects_seqButtonPressed()` / `menuEffects_seqHoldExpired()` / `menuEffects_holdEdit()` / `menuEffects_holdDisplay()` | Own FX SEQ tap/hold routing, held-step lock writes, and locked/unlocked display values. Non-sequenceable cells are inert during a hold. | buttonHandler, Menu |
 | `menuEffects_renderSeqLeds()` | Paint lock LEDs, selected-step blink, and running FX chase, then dispatch the type hook. | Menu foreground |
+| `menuEffects_service()` action bits | `MENU_FX_ACT_REPAINT` (Scene/type change → `menu_repaintAll()`), `_REPAIR`, `_EXIT_EDIT`, and S074 `MENU_FX_ACT_HOLD_REPAINT` (hold start/change/release → `menu_repaint()`, taking precedence so CGRAM markers move in order). | `menu_serviceRuntimeWidgets()` |
+| `menuEffects_cellSeqLocked(cell)` | S074: nonzero if the cell's lane is locked on any of the 16 steps of the active Scene (ignores `len`). | `menu_effectCellAutomated()` |
+| `menuEffects_screenHasCustomRow0()` / `menuEffects_paintRow0()` | S074: a type-painted compact top row for flagged layout screens (columns 0..14). | `menu_repaintGeneric()` compact branch |
+| `menuEffects_formatValue3()` / `menuEffects_formatParamValue3(cell, value, dst)` | Value text; S074 routes type rows through the type's `format_value3` hook first (Effect page only). | Menu compact/full view, held values |
+| `menuEffects_renderSelectLeds(sub_page)` | S074: the only Effect-page SELECT LED writer: the type's `render_leds` when it owns the SELECT LEDs, else `led_setActiveSelectButton()`. | Menu page entry, cursor repair, encoder; buttonHandler |
+| `menuEffects_home()` / `menuEffects_liveRefreshWanted()` | S074: the layout home screen; whether the page needs the live-refresh cadence (a `format_value3` hook is present). | `menu_effectShowHome()`, `menu_sceneLiveRefreshService()` |
+| `menuEffects_shownParam(index)` / `menuEffects_editParam(index, value)` | S074: the value a row shows (the last held step's lock where locked, else retained); a held-aware write (retained edit with no hold, locks on every held step during a hold). | Type UI hooks (CrumpBit) |
 
 ## Core/Menu/copyClearTools
 
@@ -697,6 +715,8 @@ prefixes remain `preset_*` for the mechanical move.
 | `presetMorph_getEffectiveVoiceAmount(slot)` | Return the step override when active, else the retained per-voice Morph amount. Single query point for the morph decimation engine (Session 070). Also used by menu.c for Scene superpage live display (Session 071). | presetMorphEngine internals, morph decimation, Menu |
 | `preset_setAudioOutStepOverride(slot, route)` / `preset_clearAudioOutStepOverride(slot)` / `preset_getEffectiveAudioOut(slot)` | Per-voice audio-out step automation overlay. Route clamped to `MIXER_ROUTING_DAC2_R`. Cleared by `preset_init()` and transport restore (Session 071). | Sequencer Scene automation drain, Menu superpage |
 | `preset_setFxSendStepOverride(slot, amount)` / `preset_clearFxSendStepOverride(slot)` / `preset_getEffectiveFxSend(slot)` | Per-voice FX-send step automation overlay. Amount clamped to 127. The mixer reads the effective value each block and ramps the live send (Session 072 Step 5). | Sequencer Scene automation drain, Menu superpage, mixer |
+| `preset_setBusCompSetting(scene, field, value)` / `preset_syncBusCompMirrors()` | S074: clamp and commit one bus compressor field of one Scene through SceneData (the VOICE edit-mask fan-out calls it per Scene), and copy the active Scene's four values into the `PAR_BUS_COMP_*` page mirrors (also on every Scene apply, `preset_applySceneSettings()`). No runtime push: BusCompressor reads SceneData per block. | Menu bus compressor page, Scene apply |
+| `preset_setVoiceFaderSetting(scene, slot, mode)` | Clamp to 0..`SCENE_FADER_SETTING_MAX` (3 since S074, `xfd`) and store through SceneData. | Menu VOICE mix page |
 
 ## Core/DSPAudio/mixer
 
@@ -706,9 +726,12 @@ Preset, and the live FX bus.
 Purpose: renders the foreground audio block. Voice engines supply pre-volume
 samples; the mixer applies the relocated voice volume after decimation. Each
 block it calls `effects_service()`, taps each decimated voice before volume,
-applies the PRE/POST/FX fader mode, sums the send into the mono/stereo FX bus,
-calls `effects_process()`, and returns the processed block through common
-level/pan and jack-resolved routing. See `EFFECTS_BUS_REFERENCE.md` §3.
+applies the PRE/POST/FX/XFD fader mode, sums the send into the mono/stereo FX
+bus, calls `effects_process()`, and returns the processed block through common
+level/pan and jack-resolved routing. While the Effect is `off` it zeroes the
+return ramp origin (S074). Its last stage is the master bus compressor
+(`busComp_processBlock(output2, output, scene)`). See
+`EFFECTS_BUS_REFERENCE.md` §3 and `EFFECTS_MIXER_DSP_REFERENCE.md` §3, §5A.
 
 | API / data | Use | Usual callers / clients |
 |---|---|---|
@@ -716,8 +739,26 @@ level/pan and jack-resolved routing. See `EFFECTS_BUS_REFERENCE.md` §3.
 | `mixer_addVoiceInt16ToOutputAndFx()` (static, S073) | One pass per slot for the dry output and the FX send when the Effect is active and the send ramp is non-zero; replaces the removed `mixer_addVoiceToFxBus()`. Otherwise `mixer_addVoiceInt16ToOutput()` does the dry path alone. | mixer render path |
 | `effects_service()` | Resolve the active Effect's retained parameters between render blocks. | mixer block service |
 | `effects_process()` | Process the current mono/stereo normalized FX bus block in place. | mixer |
-| `MIXER_FADER_PRE/POST/FX` | Define whether the Scene fader scales both taps, only the dry mix, or only the FX send. | SceneData/Preset, Menu, mixer |
+| `MIXER_FADER_PRE/POST/FX/XFD` | Define whether the Scene fader scales both taps, only the dry mix, only the FX send, or (S074 `xfd`, 3) crossfades dry (fader) against send (the mirrored fader from `adc_sliderGainMirrored()` in `adcPots.c`). | SceneData/Preset, Menu, mixer |
 | `mixer_send_last_gain[]` / `mixer_fx_return_last_gain[]` | Retain block-end send and return gains so automation and common return changes ramp without clicks. | mixer render path |
+
+## Core/DSPAudio/BusCompressor (Session 074)
+
+Affiliate modules: mixer, MidiVoiceControl, SceneData, Preset, Menu.
+
+Purpose: the Scene-owned master bus compressor. It is not an Effect type (no
+registry row, send, lanes or arena). It reads the active Scene's four
+settings each block; nothing pushes settings into it. It owns its 32 B DTCM
+state (`busComp`). Full model: `EFFECTS_MIXER_DSP_REFERENCE.md` §5A.
+
+| API | Use | Usual callers / clients |
+|---|---|---|
+| `busComp_processBlock(st1, st2, scene_index)` | Process one 32-frame block of the selected pair in place (St1 = the mixer's `output2`/DAC1, St2 = `output`/DAC2). One-block fades on every target change. With `cmp` off and no fade pending it clears any pending sidechain weight and returns: no DSP work. | `mixer_calcNextSampleBlock()`, last stage, once per block |
+| `busComp_sidechainTrigger(track, velocity)` | Record the largest `(velocity/127)³` since the last block when `track` matches the active Scene's `csc` (track index 6 counts as voice 6, BC11). Velocity 0 and `csc off` are ignored. Foreground only. | `voiceControl_triggerNow()` |
+
+Retained settings live in SceneData (`bus_comp[4]`); the Menu edits them
+only through `preset_setBusCompSetting()`. Nothing else may keep a pointer
+into `busComp`.
 
 ## Core/Bank/Scene/Preset/ParameterArray
 
@@ -760,7 +801,8 @@ Affiliate modules: SceneData, BankData, FxBuffer, Preset, AutoSave, mixer,
 Sequencer, InstrumentManager, menuEffects/Menu, and the per-type
 implementations.
 
-Purpose: owns the immutable `off`/`flt` registry and the active Effect runtime.
+Purpose: owns the immutable `off`/`flt`/`cbt` registry (CrumpBit added in
+S074) and the active Effect runtime.
 It resolves retained normal/Morph endpoint images, switches type instances
 through FxBuffer's foreground handoff, publishes common return settings, and
 calls the active type's parameter writer once per changed effective value. It
@@ -782,13 +824,17 @@ or the FX audio bus.
 | `effects_targetValid()` / `effects_targetDescriptor()` / `effects_stepTarget()` | Validate/describe/walk block-7 targets for a Scene's type and use. | InstrumentManager, Menu |
 | `effects_automationReset()` / `effects_automationStepBegin()` / `effects_applyAutomation()` / `effects_automationStepFlush()` / `effects_setMorphAutomation()` | Pattern overlay lifecycle and the `fxm` override (third restore rule). | Sequencer drain, `seq_applySceneAutomation()` |
 | `effects_setLfoContribution()` / `effects_clearLfoSource()` | Base-independent LFO entries per source/pair. | InstrumentManager |
-| `effects_init()` / `effects_activateScene()` | Boot init (share callback); Scene activation (type switch through the handoff, clears FX position/held Morph/overlays). | `main.c`, Preset |
+| `effects_init()` / `effects_activateScene()` | Boot init (share callback); Scene activation (type switch through the handoff, clears FX position/held Morph/overlays). Since S074 a same-type activation refreshes the handoff (`effects_exportHandoff()`, internal) without `init`. | `main.c`, Preset |
+| `effect_ui_hooks_t` / `effect_select_layout_t` (registry contract, extended S074) | Per-type page hooks (`select`/`track`/`bar`, `render_leds`, `paint_row0`, `format_value3`, `flags` with `EFFECT_UI_FLAG_OWNS_SELECT_LEDS`; returns `EFFECT_UI_HANDLED`/`EFFECT_UI_SHOW_HOME`) and layouts (`custom_row0`, home screen, the `EFFECT_LAYOUT_CELL_MORPH` sentinel). Contract in `EFFECTS_BUS_REFERENCE.md` §8.4. | menuEffects, buttonHandler, type Parameters files |
 | `effects_service()` / `effects_process()` / `effects_commonRuntime()` / `effects_activeType()` / `effects_activeIoFlags()` | Per-block resolution, process and return settings. | mixer |
 | `effects_registryCheckResult()` | Diagnostic-only immutable registry self-check result. | diagnostic boot screen |
 
 All calls are foreground-only and must occur between render blocks; no Effect
-manager API is ISR-safe. `StereoFilter` owns its descriptors and runtime ops,
-while `EffectsManager` owns the runtime union and dispatch boundary.
+manager API is ISR-safe. `StereoFilter` and `CrumpBit` own their descriptors,
+runtime ops and (CrumpBit) page hooks, while `EffectsManager` owns the runtime
+union (76 B) and dispatch boundary. CrumpBit's DSP helpers
+`crumpBit_rateSamples()` and `crumpBit_syncDivision()` are shared by its DSP
+and its Sync label so the page shows exactly the division the DSP plays.
 
 ## Core/DSP/Effects/FxBuffer
 
@@ -977,6 +1023,7 @@ render boundary. Session 028 removed obsolete front-panel dependency.
 | `voiceControl_noteOn(voice, note, vel)` | Trigger/queue voice-on behavior. | Sequencer, MidiParser |
 | `voiceControl_noteOff(voice)` | Stop one voice or all voices with `0xff`. | Sequencer, MidiParser |
 | `voiceControl_processPending()` | Drain pending triggers at audio render boundary. | `audio_check_and_render()` |
+| `voiceControl_triggerNow()` (the trigger funnel) | Apply one trigger in the foreground. Since S074 it also calls `busComp_sidechainTrigger(track, velocity)`, so every trigger source (sequencer, rolls, MIDI, previews) can duck the bus compressor. | `voiceControl_processPending()`, previews |
 | `voiceControl_isVoicePlaying(voice)` | Query voice state. | clients/future UI |
 
 ## Core/Bank/Scene/Autosave and AutosaveTrace
@@ -1045,6 +1092,7 @@ Storage text parsing/formatting and descriptor-key validation stay in
 | `filesystem_loadedInstrumentWasMorphTemporary()` | Query whether the staged hidden Instrument load is the InstrumentMrp Morph-only baseline, valid beside the staged Instrument until the next request reuses operation scratch. | Preset Morph-apply origin dispatch |
 | `filesystem_ensureAutosaveFilesBlocking()` / `filesystem_setAutosaveEnabled(enabled)` / `filesystem_autosaveEnabled()` | Establish the hidden pair at boot, apply runtime policy, and authorize mutation tracking/background work only after successful setup. Format and failure rules are in `AUTOSAVE.md`. | `main.c`, Menu/settings policy |
 | `filesystem_validateAutosaveWinnerBlocking()` / `filesystem_hasBootWinner()` | Stream-validate both HCPR candidates after settings/index boot and expose only a valid active-Bank match to stage 11. | `main.c` boot stage 10b/11 |
+| `filesystem_autosaveValidateCandidateStep()` (static, S074) | One bounded validation step shared by the runtime drain's and the boot validator's phase 3: 128 B CRC chunks, then exactly one extra byte. Data there means overlong (torn), so the candidate is invalid and its `overlong_mask` bit is set (reported as `V` bits 4..5); end-of-file lets the header/commit/CRC verdict stand. At most 273 reads per candidate. | drain and boot validator |
 | `filesystem_autosaveBootReaderBlocking()` | Apply a validated matching HCPR v3 winner and evaluate Scene/Effect/Kit/Instrument rows as Case 1 payload, Case 2 narrow load, or Case 3 whole-Scene invalidation. | `main.c` boot stage 11 |
 | `filesystem_patternAutosaveBootReaderBlocking()` | Validate each present Scene's PAT4 A/B pair and apply the eligible newest Pattern-AutoSave winner. | `main.c` after scalar restore |
 | `filesystem_regenerateHcnamesFromWinnerBlocking()` | Atomically rebuild absent/corrupt typed HCNAMES from a validated winner before its reader proceeds. | boot reader orchestration |
@@ -1221,6 +1269,7 @@ layer use the `storage_` prefix.
 | `storage_patternStubStateInit()` / `storage_patternStubParseLine()` / `storage_patternStubFinalize()` | Validate legacy thin Scene `pattern.pat` placeholders. | Scene Load compatibility |
 | `storage_formatPatternStubLine()` | Emit legacy Pattern placeholder lines when compatibility output is requested. | Scene Save compatibility |
 | `storage_effectStateInit()` / `storage_effectParseLine()` / `storage_effectFinalize()` / `storage_formatEffectLine()` | Stream-validate or emit `.fx` v2; accept legacy v1 `placeholder=1` as `off`, reject malformed v2, and use registry descriptors for parameter/lane keys. | Scene/Bank Effect Load/Save |
+| `storage_busCompKey(field)` | S074: the permanent `sceneset.scg` key for one bus compressor field (`bus_comp_mode`, `_amount`, `_time`, `_sidechain`), shared by the parser and the Scene writer. The parser clamps values through `scene_busCompClamp()`; `fader_setting` accepts 0..`SCENE_FADER_SETTING_MAX`. | filesystem Scene writer, `storage_scenesetParseLine()` |
 | `storage_parseNumberedFolder()` | Parse visible numbered folders `NNN Name` or `NNN_Name` into direct `000..999` slot plus eight-character display name. Slot `000` is real. | Kit/Scene/Bank scan |
 | `storage_copyDisplayName()` / `storage_copyFilename()` | Fixed-width display-name normalization and short filename copying. | filesystem/parser code |
 

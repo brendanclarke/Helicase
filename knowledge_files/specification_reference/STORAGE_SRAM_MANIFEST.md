@@ -4,9 +4,15 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 073 close (2026-09-29), `dev-ph5-effects`, HEAD
-  `692abf8` plus uncommitted closeout edits. Link: `text=486,688`,
-  `data=416`, `bss=426,336`; flash payload 487,104 B.
+- **Current as of:** Session 074 close (2026-09-30), `dev-ph5-effects`, HEAD
+  `50610dd`. Link: `text=502,512`, `data=416`, `bss=426,392`; flash payload
+  502,928 B; `LXRV2_lxr02.img` 502,944 B, SHA-256
+  `63eec2a602d80f54ea122a7977eb214c178f115be6c7e6a4117b02940663aeb0`.
+- **S074 changes:** +64 B SRAM1 (Scene settings for the bus compressor);
+  +32 B DTCM `.dtcmz` (bus compressor state), so the FX arena is −32 B;
+  CrumpBit uses 0 B of static RAM (56 B inside the existing 76 B union)
+  and 70,592 B of the arena share at run time; the image grew into sector 6
+  (§3.2a).
 - **Renamed in Session 073** from `SRAM_MANIFEST.md`. The flash and sample
   flash material came from the Session 073 flash expansion
   (`073_SESSION_HANDOFF_LOG.md` §4).
@@ -23,10 +29,10 @@ changing any of it.
   `python3 tools/link_budget.py arm-none-eabi-nm build/lxr02.elf`
 
   ```
-  Flash : 487,104 / 753,664 B used, headroom 266,560 B
+  Flash : 502,928 / 753,664 B used, headroom 250,736 B
   ITCM  : 4,168 / 16,384 B
-  DTCM  : statics 4,448 B
-  FXBUF : 126,624 B at 0x20001160 (min 122,880, margin 3,744)
+  DTCM  : statics 4,480 B
+  FXBUF : 126,592 B at 0x20001180 (min 122,880, margin 3,712)
   ```
 
   It warns when flash headroom falls below `LINK_BUDGET_WARN_FLASH`
@@ -35,8 +41,11 @@ changing any of it.
 - Sections: `arm-none-eabi-size -A build/lxr02.elf`. Symbols:
   `arm-none-eabi-nm -S --size-sort build/lxr02.elf`. Segments:
   `arm-none-eabi-readelf -l -W build/lxr02.elf`.
-- **The `bss` column of `arm-none-eabi-size` includes the 126,624 B NOLOAD
+- **The `bss` column of `arm-none-eabi-size` includes the 126,592 B NOLOAD
   DTCM arena.** It is not SRAM1 use. Use the section ledger (§5).
+- **Record the `.img` hash, not the `.bin`.** Since S074 `lxr02.bin` is the
+  raw, unstamped objcopy output; the stamped payload exists only inside
+  `build/LXRV2_lxr02.img` (§3.4).
 - Individual C objects can be merged, removed or padded by LTO and
   alignment. Use section totals for capacity.
 
@@ -65,10 +74,11 @@ is 128 KiB, sectors 5–11 are 256 KiB.
 
 - **Window:** `0x08008000–0x080BFFFF` (753,664 B), sectors 1–6. Session 073
   added sector 6 (it was sample storage before); the window was 480 KiB.
-- **Use at S073 close:** 487,104 B; **headroom 266,560 B**.
+- **Use at S074 close:** 502,928 B; **headroom 250,736 B**.
 - **History:** 34,356 B free at S072 Step 1; 8,080 B at the S072 close;
   269,504 B after the S073 expansion; 266,560 B after the S073 DSP
-  refactor.
+  refactor; 250,736 B at the S074 close. S074 added +15,824 B, of which
+  CrumpBit was 11,600 B.
 
 ### 3.2 Image layout
 
@@ -78,7 +88,7 @@ The linker script is `STM32F765VIHx_FLASH.ld`. The image is, in order:
 |---|---:|---|
 | `.isr_vector` | 456 B | At `0x08008000`; VTOR is set at startup |
 | `.image_check` | 32 B | Per-sector CRC block (§3.4); `(READONLY)`, so `size` does not count it as data |
-| `.text` | 481,520 B | `Reset_Handler` first (`KEEP(*(.text.Reset_Handler))`), then code and `.rodata` |
+| `.text` | 497,344 B (S074; 481,520 at S073) | `Reset_Handler` first (`KEEP(*(.text.Reset_Handler))`), then code and `.rodata` |
 | `.itcm` load image | 4,168 B | Copied to ITCM by `Reset_Handler` |
 | `.data` load image | 416 B | Copied to SRAM1 |
 | `.dtcm` load image | 512 B | Copied to DTCM (`squareRootLut`) |
@@ -89,19 +99,39 @@ The linker script is `STM32F765VIHx_FLASH.ld`. The image is, in order:
   (`.dtcmz`, `.dtcm_fxbuf`, `.bss`) never enter the image.
 - **`Reset_Handler`** stays at `0x080081E8`, in sector 1, however large the
   image grows.
-- **Largest flash objects** (S073):
+- **Largest flash objects** (S074 close):
 
   | Object | Bytes |
   |---|---:|
   | `crashSample` | 32,768 |
   | `transientData` | 26,460 |
   | `sawTable`, `triTable`, `recTable` | 22,528 each |
-  | `mixer_calcNextSampleBlock` (all four voice renders and the mixer inlined by LTO) | 10,836 |
-  | `main` | 9,222 |
-  | `menu_repaintGeneric` | 9,180 |
+  | `mixer_calcNextSampleBlock` (all four voice renders, the mixer and the bus compressor inlined by LTO) | 12,204 |
+  | `menu_repaintGeneric` | 9,508 |
+  | `main` | 9,048 |
   | `sine_table` (in flash since S072) | 8,194 |
   | `filesystem_tick` | 7,924 |
-  | Scene/Bank load/save ticks, AutoSave drain | 4,264–7,868 each |
+  | `filesystem_loadSceneDirectory_tick`, `filesystem_autosaveParameterDrain_tick` | 7,872 / 7,612 |
+  | `crumpBit_process` / `crumpBit_syncDivision` (S074, `-Ofast` unrolled) | 4,804 / 3,684 |
+
+### 3.2a What lives in sector 6 (S074)
+
+The application reached sector 6 (`0x08080000`) for the first time with
+CrumpBit (`_eflash_load` `0x08081F68`, 8,040 B in). At the S074 close
+`_eflash_load` is **`0x08082C90`, 11,408 B into sector 6**:
+
+| Range | Content |
+|---|---|
+| `0x08080000–0x080818A7` | the last 6,312 B of `.text`: libm tables (`__exp2f_data`, `__log2f_data`, `__powf_log2_data`), `_ctype_`, `atan` tables, `_init`/`_fini`, and the flash veneers into ITCM |
+| `0x080818A8–0x080828EF` | the `.itcm` load image (4,168 B of oscillator code) |
+| `0x080828F0–0x08082A8F` | the `.data` load image (416 B) |
+| `0x08082A90–0x08082C8F` | the `.dtcm` load image (`squareRootLut`, 512 B) |
+
+Every S074 image has booted and played, with the boot image check silent,
+so **the LXRV2 bootloader erases and programs sector 6**. If it did not,
+the oscillators, initialised data and pan law would be corrupt, and the
+check would report `Img BAD s:.....6`. The user did not run a separate
+test.
 
 ### 3.3 Linker guards
 
@@ -170,10 +200,11 @@ edit relinks without `make clean`.
 - **Known:** a normal-size update leaves sample sectors intact. The Erica
   factory application (`LXRV2_update_v1.70.img`, 275,832 B) has no
   flash-writing code, so it tells nothing about larger images.
-- **Unknown:** whether the bootloader erases by image size or a fixed range
-  (sectors 1–5). The first image that grows past `0x08080000` is the test,
-  and the boot image check reports a failure by sector. The test plan that
-  was designed but not run is in `073_SESSION_HANDOFF_LOG.md` Appendix A.
+- **Settled in practice (S074):** the bootloader writes images that reach
+  sector 6 (§3.2a). Whether it erases by image size or a fixed range is
+  still not known in detail, and it does not matter while images keep
+  booting. The boot image check stays as the guard. The unexecuted test plan
+  is in `073_SESSION_HANDOFF_LOG.md` Appendix A.
 - **Recovery:** power on holding the encoder with a known-good image on the
   card. It depends on sector 0 staying intact.
 
@@ -242,17 +273,25 @@ only works while sector 6 holds no code.
 |---|---|---:|---:|---:|
 | SRAM1 `.dma_nocache` | `0x20020000` | part of SRAM1 | 3,100 | — |
 | SRAM1 `.data` | `0x20020c1c` | part of SRAM1 | 416 | — |
-| SRAM1 `.bss` | `0x20020dc0` | part of SRAM1 | 292,676 | — |
-| **SRAM1 total** | `0x20020000` | **376,832** | **296,192** | **80,640** |
+| SRAM1 `.bss` | `0x20020dc0` | part of SRAM1 | 292,732 | — |
+| **SRAM1 total** | `0x20020000` | **376,832** | **296,248** | **80,584** |
 | DTCM `.dtcm` | `0x20000000` | part of DTCM | 512 | — |
-| DTCM `.dtcmz` | `0x20000200` | part of DTCM | 3,936 | — |
-| DTCM `.dtcm_fxbuf` (arena) | `0x20001160` | part of DTCM | 126,624 | 0 (reserved arena) |
+| DTCM `.dtcmz` | `0x20000200` | part of DTCM | 3,968 | — |
+| DTCM `.dtcm_fxbuf` (arena) | `0x20001180` | part of DTCM | 126,592 | 0 (reserved arena) |
 | **DTCM total** | `0x20000000` | **131,072** | **131,072** | **0** |
 | ITCM `.itcm` (code) | `0x00000000` | 16,384 | **4,168** | 12,216 |
 | SRAM2 `.devwdg_noinit` | `0x2007c000` | 16,384 | 0 | see stack note |
 
-- Static data RAM (SRAM1 + DTCM including the arena) is 427,264 B;
-  including ITCM code, 431,432 B.
+- Static data RAM (SRAM1 + DTCM including the arena) is 427,320 B;
+  including ITCM code, 431,488 B.
+- **Session 074 changes (all approved):**
+  - SRAM1 `.bss` +56 B. `scenes` grew +64 B (`scene_settings_t` 41 → 45 B
+    for `bus_comp[4]`); the section total moved 56 B after alignment
+    and LTO placement.
+  - DTCM `.dtcmz` +32 B (`busComp`, 24 B then 32 B with the saturation
+    crossover state); `_edtcmz` `0x20001160` → `0x20001180`, so the arena
+    shrank by 32 B.
+  - ITCM unchanged.
 - **Session 073 changes:** ITCM +400 B (`osc_setFreq()` is now its own ITCM
   function; before it was inlined into its callers in flash). SRAM1 and DTCM
   unchanged.
@@ -299,22 +338,27 @@ DTCM is single-cycle, uncached, and not reachable by DMA.
 | `audioOutBuffer`, `audioOutBuffer2` | 1,536 each | `.dtcmz`; the two render slots per DAC, `sample_mx_t`, written by the mixer and read by the DMA ISR's pack |
 | `velocityModulators` | 264 | `.dtcmz`; six velocity modulation nodes |
 | `mixer_fx_bus` | 256 | `.dtcmz`; two 32-frame channels, `sample_mx_t` while voices sum, float while the Effect runs |
-| `effects_runtime` | 76 | `.dtcmz`; union holding the active Effect type's DSP state (StereoFilter: two filter states) |
+| `effects_runtime` | 76 | `.dtcmz`; union holding the active Effect type's DSP state (StereoFilter 76 B: two filter states; CrumpBit 56 B, S074). Only 20 B spare before the union grows. |
+| `busComp` | 32 | `.dtcmz` (S074); master bus compressor state: smoothed power, fast and memory gain reduction, previous gain, pending sidechain weight, crossover low-pass per channel, active pair. Approved up to 32 B; `_Static_assert(<= 32)`. Owner `BusCompressor.c`. |
 | `osc_interp_a`, `osc_interp_b` | 64 each | `.dtcmz`; waveform-interpolation scratch |
 | `mixer_decimation_rate` [7], `mixer_decimation_cnt` [6], `mixer_voice_samples` [6] | 28 + 24 + 12 | `.dtcmz`; per-slot decimators |
 | `mixer_voice_last_gain`, `mixer_send_last_gain` | 24 each | `.dtcmz`; per-slot dry and send ramp origins |
 | `mixer_fx_return_last_gain` | 8 | `.dtcmz`; Effect return ramp origins |
 | `mixer_audioRouting` | 6 | `.dtcmz` |
 | `modNode_waveInterp*` | 6 | `.dtcmz` |
-| **`.dtcm_fxbuf` arena** | **126,624** | NOLOAD, never copied or zeroed; owned by `FxBuffer` |
+| **`.dtcm_fxbuf` arena** | **126,592** | NOLOAD, never copied or zeroed; owned by `FxBuffer` |
 
 - **The arena** is every DTCM byte after `.dtcmz`, 32-byte aligned. A linker
-  ASSERT keeps it at least 120 KiB (122,880 B); the margin is 3,744 B.
-  **Any new `INDTCM`/`INDTCMZ` static shrinks it.**
+  ASSERT keeps it at least 120 KiB (122,880 B); the margin is 3,712 B.
+  **Any new `INDTCM`/`INDTCMZ` static shrinks it**, in 32-byte steps (the
+  arena base is 32-byte aligned). The S074 bus compressor state is the
+  example: 24 B cost 32 B of arena, and the later +8 B cost nothing, because
+  `_edtcmz` was already at a 32-byte boundary.
 - **Arena ownership:** `FxBuffer` hands out one contiguous Effect share from
   the bottom and up to twelve 4,416 B voice units (2,208 16-bit samples,
   50.06 ms at 44,108 Hz; at most two per Instrument slot) from the top. The
-  Effect share is at least about 73.6 KB with all twelve units claimed. The
+  Effect share is at least 73,600 B with all twelve units claimed. CrumpBit
+  (S074), the first arena user, takes 70,592 B of it. The
   system never clears the arena: an owner clears what it reads unless it
   adopts content the handoff record marks valid. Details:
   `EFFECTS_BUS_REFERENCE.md` §7 and `EFFECTS_MIXER_DSP_REFERENCE.md`.
@@ -348,7 +392,7 @@ byte, including alignment and small variables omitted here.
 
 | Owner / object | Bytes | Allocation and use |
 | --- | ---: | --- |
-| `SceneData.c`: `scenes` | 25,952 | Sixteen resident Scene records, 1,622 B each: 41 B settings, one alignment byte, 420 B Scene-owned Effect record, and the existing Kit; Pattern regions are separate. |
+| `SceneData.c`: `scenes` | 26,016 | Sixteen resident Scene records, 1,626 B each: 45 B settings (41 + the S074 bus compressor's 4), one alignment byte, 420 B Scene-owned Effect record, and the 1,160 B Kit; Pattern regions are separate. |
 | `PatternData.c`: `pat_regions` | 168,304 | Sixteen packed regions of 10,519 B: each has 1,792 B step addresses, 8,192 B pool, 512 B bitmap, and 23 B Pattern/track settings. |
 | `PatternData.c`: `pat_autosave_snapshot` | 10,519 | One Scene-sized snapshot for an in-flight Pattern AutoSave. |
 | `PatternStackService.c`: `reservation_image` | 512 | One non-persisted bit image for the current service Scene's trailing pool reservations; three separate one-byte policy/rebuild flags accompany it. |
@@ -358,7 +402,7 @@ byte, including alignment and small variables omitted here.
 | `Autosave.c`: `autosave_dirty_count`, `autosave_last_pattern_semantic_us` | 6 | Exact scalar dirty-bit count and latest semantic Pattern edit timestamp. |
 | `filesystem.c`: `fs_pattern_generation`, `fs_pattern_drain_scene`, `fs_pattern_first_dirty_us`, `fs_pattern_scene_cursor` | 70 | Sixteen Pattern generation baselines, drain selector, first-dirty timestamp, and fair Scene cursor. |
 | `filesystem.c`: `fs_autosave_parameter_cache` | 4,608 | Bounded scalar AutoSave patch offsets and values. |
-| `filesystem.c`: `fs_stage_workspace` | 2,048 | One union shared by Kit, Instrument, Scene+Effect, AutoSave writer, and HCNAMES regeneration staging. The Scene+Effect peak is 1,621 B; union members are not additive. |
+| `filesystem.c`: `fs_stage_workspace` | 2,048 | One union shared by Kit, Instrument, Scene+Effect, AutoSave writer, and HCNAMES regeneration staging. The Scene+Effect peak is 1,625 B (the typed-load assert sums to 2,009 of 2,048 since S074); union members are not additive. The AutoSave writer member gained the 1-byte `overlong_mask` in S074 (0 B: inside the union). |
 | `filesystem.c`: `staging_buf` | 512 | Shared streaming and trace-batch buffer. |
 | `filesystem.c`: `fs_list_cache_name` | 9,000 | One 1,000 × 9 browser/index name cache. |
 | `filesystem.c`: `hcnames_name_mirror`, `fs_resident_source` | 1,771 | Separate 161 × 9 HCNAMES names and 161 × 2 provenance sources; Effect rows are 145..160. |
@@ -384,7 +428,7 @@ byte, including alignment and small variables omitted here.
 | `EffectsManager.c`: `effects_automation` | 184 | Effect Pattern overlays, owner/end masks, `fxm` override, and 6 × 2 base-independent LFO contribution entries. |
 | `sequencer.c`: `seq_fxEvent` | 1 | TIM3-to-foreground newest-wins RESET/STEP latch; no Scene, DSP, or LED work occurs in the ISR. |
 | `sequencer.c`: `seq_effectAutomationTracks` / `seq_effectAutomationReset` | 2 | Owner-track publication and reset latch for the foreground Effect overlay drain. |
-| `menuEffects.c`: page state | 21 | Eight SELECT screen cells, Morph-view flag, `typ` transaction state, last Scene/type tracking, SEQ hold mask, and LED repaint signature; SRAM1, foreground UI lifetime. |
+| `menuEffects.c`: page state | 21 | Eight SELECT screen cells, Morph-view flag, `typ` transaction state, last Scene/type tracking, SEQ hold mask, and LED repaint signature; SRAM1, foreground UI lifetime. S074 repacked the hold flag byte as `holdState` (active bit, last-held-valid bit, 4-bit last step held): 0 B change. |
 
 Other SRAM1 state comprises filesystem operation cursors and text buffers,
 HCNAMES/boot control fields, Menu and front-panel state, sequencer/MIDI state,
@@ -416,7 +460,10 @@ misses alignment and other compile-time changes.
 | `EffectsManager.c`: `effects_registryCheckCode` | 1 | Diagnostic-only registry invariant result. |
 
 `DEV_STALL_DETECTION=1` also keeps its phase/tick detector state; its
-condition is `DEV_STALL_DETECTION`, not `DEV_MODE_LOGGING` alone. The S073
+condition is `DEV_STALL_DETECTION`, not `DEV_MODE_LOGGING` alone. The runtime
+AutoSave drain's observer is 5 B: `op_autosave_drain_last_phase` (u8),
+`op_autosave_drain_stall_ticks` (u16) and `op_autosave_drain_last_progress`
+(u16). That is the same total as its pre-S074 `u8` + `u32`. The S073
 special-tag self-check (`instrumentManager_specialTagSelfCheck()`) uses no
 RAM.
 
@@ -454,8 +501,9 @@ not describe it in detail.
   not authorise its reuse by another subsystem.
 - **Logging allocations** require their logging code to be compiled and must
   disappear from a logging-off build.
-- **Flash** is no longer tight (266,560 B free), but every change is still
-  measured with `link_budget.py` and recorded in the session log.
+- **Flash** is no longer tight (250,736 B free at the S074 close), but every
+  change is still measured with `link_budget.py` and recorded in the session
+  log.
 - **Record every change here** in the same change that makes it.
 
 ---
@@ -477,3 +525,13 @@ not describe it in detail.
 - **S073:** program flash 480 → 736 KiB (sector 6), sample floor sector 7,
   boot image check (`.image_check` 32 B flash), DMA region Normal
   non-cacheable, ITCM +400 B (`osc_setFreq`). No SRAM1 or DTCM change.
+- **S074:**
+  - `scenes` +64 B (bus compressor settings);
+  - DTCM `busComp` 32 B, so the arena is 126,592 B at `0x20001180`;
+  - CrumpBit: 0 B static, 56 B in the union, 70,592 B arena share at run
+    time;
+  - the image reaches sector 6 (the bootloader handles it);
+  - `stamp_image_check.py` folded into `build_lxrv2_img.py` (the `.bin` is
+    unstamped);
+  - final link `text=502,512`, `data=416`, `bss=426,392`; payload
+    502,928 B.

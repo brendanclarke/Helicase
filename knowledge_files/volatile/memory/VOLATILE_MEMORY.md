@@ -31,40 +31,59 @@ Do not recommend bumping `AUTOSAVE_PARAMETER_GETS_PER_WRITE` or adjusting
 capture timing unless the user explicitly asks. The section-based CRC
 format redesign is the chosen path for write performance.
 
-## Current carryover after Session 073
+## Current carryover after Session 074
 
-Session 073 (2026-09-28/29, `dev-ph5-effects`) grew program flash to 736 KiB,
-restored Load:[Samples], and cut worst-case DSP CPU by about 10 %.
+Session 074 (2026-09-29/30, `dev-ph5-effects`) largely completed Phase 5:
+Effect-page automation underlines, CrumpBit (the first arena Effect), the
+master bus compressor, the `xfd` fader mode, and the AutoSave torn-record
+fix. All were accepted on hardware by the user.
 
-- **Commits:** HEAD `692abf8` holds the S073 code. The closeout edits
-  (post-review corrections, drill-knob removal, the `tools/dsp_golden` →
-  `tools/dsp_test` rename staged by `git mv`, and all documentation) are
+- **Commits:** HEAD `50610dd` holds every S074 code change. The closeout
+  docs and the user's move of the four DSP specs into
+  `knowledge_files/specification_reference/dsp_instruments_effects/` are
   uncommitted. The user manages commits.
-- **Final link:** `text=486,688`, `data=416`, `bss=426,336`; payload
-  487,104 B of 753,664 (266,560 B free); ITCM 4,168 B. `lxr02.bin` SHA-256
-  `1bd8be52…5fc82`.
-- **Durable authorities:** `073_SESSION_HANDOFF_LOG.md`;
-  `STORAGE_SRAM_MANIFEST.md` (renamed from `SRAM_MANIFEST.md`);
-  `INSTRUMENTS_DSP_REFERENCE.md` and `EFFECTS_MIXER_DSP_REFERENCE.md` (new);
-  `tools/dsp_test/DSP_TEST.md`.
-- **Disposable:** the five root `S073_*.md` documents (and still the
-  `S072_ST*_IMPLEMENTATION.md` set).
-- **Next session (074):** `S074_EFFECT_BUGS_BUFFER_USE.md`: the Effect-page
-  automation-underline bug first, then the first Effect type that uses the
-  DTCM arena. The startup document lists the decisions the user must make.
-- **Hardware still pending from S072:** the Phase 5 Step 6–10 matrices
-  (`072_SESSION_HANDOFF_LOG.md` §11).
-- **Deferred:** slow Load type switching (trace logger stays on;
-  `knowledge_files/drafts/MENU_LOAD_SPEEDUP_SMOOTHNESS.md`); the bootloader
-  past `0x08080000`; D-C1 (keep the boot image check).
-- **Suspected, unverified:** LFO noise spans −1..1 (`SCOPING_TARGETS.md`,
-  Session 073 carry-forward). Do not change it without the user.
+- **Final link:** `text=502,512`, `data=416`, `bss=426,392`; payload
+  502,928 B of 753,664 (250,736 B free); ITCM 4,168 B; DTCM statics 4,480 B;
+  FX arena 126,592 B. `LXRV2_lxr02.img` SHA-256 `63eec2a6…aeb0` (record the
+  `.img`, not the unstamped `.bin`).
+- **Durable authorities:** `074_SESSION_HANDOFF_LOG.md`; the
+  `dsp_instruments_effects/` references; `AUTOSAVE.md`; `DEV_MODES.md`;
+  `ASYNCFATFS_REFERENCE.md`; `STORAGE_SRAM_MANIFEST.md`.
+- **Disposable:** the ten root `S074_*.md` documents.
+- **Next session (075):** `S075_PH6_COPY_CLEAR.md`, Phase 6 copy/clear. It
+  opens with decisions; do not start implementing before the user answers.
+- **Open (details in `knowledge_files/volatile/S070_WORKING_NOTES.md`):** the
+  boot timeout; the `cpu` widget with `cmp` on; BC11; O1; the `PM63` pan
+  display; F4 trace priorities; stale tools and comments.
+- **Hardware still pending from S072:** the Phase 5 Step 6–10 matrices.
+
+### Working preferences confirmed in Session 074
+
+- **"Do not change code files yourself this turn"** means schedule only;
+  the user (or an implementing agent they direct) applies it. The assistant
+  wrote code directly only when asked (the compressor tuning and the
+  saturator).
+- **No user error screens for failures that recover by themselves**; log
+  them in the trace instead (AutoSave torn-record policy).
+- **RAM approvals are explicit and scoped** ("ram expansions approved" for
+  the saturator's +8 B). Still state bytes, region, lifetime and owner.
+- **Tuning requests are relative and smooth across the range** ("just
+  slightly more", "extremely mild at low values to fairly extreme at the
+  top"). Implement them as curves over the control, show before/after tables,
+  and keep the change small.
+- **Correct your own earlier numbers visibly** when evidence contradicts
+  them (the drain poll counts, the validation count, the CPU estimate).
+- **Keep documents consistent with the code at every step:** status lines,
+  work notes and acceptance sections were updated in each S074 document as
+  work landed.
 
 ### Working preferences confirmed in Session 073
 
 - **Constant CPU.** Never propose saving CPU by skipping DSP work when
   something is inactive, silent or at zero. If an idea does, raise it
-  specifically; the expected answer is no (`MEMORY.md`, DSP CPU Policy).
+  specifically; the expected answer is no (`MEMORY.md`, DSP CPU Policy). The
+  bus compressor's "no work while off" is the one user-approved exception
+  (S074).
 - **No new utilities, no profiler, no extra CPU widgets.** Prove DSP changes
   with `tools/dsp_test/` (host `cc`, `python3` standard library, the ARM
   toolchain).
@@ -156,9 +175,13 @@ working value validity.
 ### CGRAM underline cache
 
 Four-slot bounded cache in CGRAM slots 2..5. Each slot holds a 5×8 underline
-glyph for one of the 4 voice automation parameters. Diff-based CGRAM
-transactions with retry bit (`VA_MARKER_RETRY_BIT = 0x10`) prevent redundant
-LCD writes. Slot allocation is deterministic (voice parameter index + 2).
+glyph for one of the 4 visible cells (VOICE and, since S072/S074, Effect
+page). Diff-based CGRAM transactions with retry bit
+(`VA_MARKER_RETRY_BIT = 0x10`) prevent redundant LCD writes; one shared retry
+serves both page families since S074. Slot allocation is deterministic (cell
+index + 2). **A redraw that can move a marker between cells must use
+`menu_repaint()`**, not `menu_repaintAll()`, or the new glyph flashes in the
+old cell (S066 Fix 5; S074 Effect hold/release fix).
 
 ### Pattern Stack Service routing
 
@@ -169,11 +192,13 @@ directly (not through the service) — address entries are always consistent
 due to the publication ordering fix. `patSvc_idle()` must be called at all
 5 filesystem replacement boundary points.
 
-### Next feature: Phase 4.5 copy operations
+### Next feature: Phase 6 copy/clear (Session 075)
 
 `pat_copyTrack`, `pat_copyPattern`, `pat_copyBar` are deliberate no-ops.
 Their implementation requires independent pool-block duplication and must
-route through the Pattern Stack Service.
+route through the Pattern Stack Service. `S075_PH6_COPY_CLEAR.md` (root)
+widens this to step, bar, track, automation, Instrument, Scene and Scene
+components, and lists the decisions to take first.
 
 ### Working preference: commits
 

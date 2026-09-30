@@ -1644,3 +1644,58 @@ uncommitted closeout edits (text 486,688, data 416, bss 426,336; payload
   `tools/dsp_test/DSP_TEST.md`,
   `knowledge_files/drafts/MENU_LOAD_SPEEDUP_SMOOTHNESS.md`,
   `S074_EFFECT_BUGS_BUFFER_USE.md`.
+
+### 074 — Effect Underlines, CrumpBit, Bus Compressor, `xfd` Fader, AutoSave Torn-Record Fix (2026-09-29/30)
+
+Session 074 ran on `dev-ph5-effects` from the S073 close (`692abf8`; text
+486,688, payload 487,104 B) to HEAD `50610dd` (text 502,512, data 416, bss
+426,392; payload 502,928 B of 753,664; ITCM 4,168 B; DTCM statics 4,480 B;
+FX arena 126,592 B). Every item below is committed and accepted on hardware
+by the user. **Phase 5 (Effects bus, initial pass) is largely complete.**
+
+- **Effect-page automation underlines.** Parameter names are underlined for
+  any stored Pattern automation (all 7 tracks of the viewed Pattern) or FX
+  lock (any of the 16 steps). The VOICE search state is reused (0 B RAM). A
+  follow-up fixed the underline flash on SEQ hold/release
+  (`MENU_FX_ACT_HOLD_REPAINT`).
+- **Image script fold.** `tools/build_lxrv2_img.py` now stamps the boot image
+  check. `stamp_image_check.py` is deleted, `lxr02.bin` stays unstamped, and
+  the `.img` SHA-256 is the one to record.
+- **CrumpBit (`cbt`, registry id 2).** The first buffer-using Effect: an
+  8-bit offset-binary ADC → data-line bit masks (off/invert) → DAC → 10 Hz AC
+  coupling, feeding a mono 8-bit tape-style delay (20 ms–1.60 s, 150 ms
+  glide, tempo Sync) in 70,592 B of the arena.
+  - The Effect-page framework gained type-painted rows, value-format hooks,
+    SELECT-LED ownership and a home screen.
+  - It closed the three arena gaps: the same-type handoff refresh, the return
+    ramp while `off`, and the `fxbuf_init()` order.
+  - The runtime is 56 B inside the unchanged 76 B union.
+  - It is the first image past `0x08080000`: the bootloader writes sector 6.
+- **Master bus compressor (`cmp cam ctm csc`).** A Scene-owned, LA-2A-like
+  soft-knee RMS optical compressor on St1 or St2, with a velocity³ trigger
+  sidechain. It is not an Effect type.
+  - It has tuning revision 1, then band-split saturation (a 2 kHz one-pole
+    split, α 0.25, a C1 knee to full scale).
+  - Storage: AutoSave Scene params 41–44, four `sceneset.scg` keys, +64 B
+    SRAM1 and 32 B DTCM.
+  - The settings page is always last (cues `^`/`+`, BC18 diagnostic check).
+- **Fourth fader mode `xfd` (3).** Dry = vol × fader; send = send × the
+  mirrored fader, using a closed-form taper inverse with one division.
+  Stored values are 0..3; older firmware rejects `3`.
+- **AutoSave torn-record fix.** A publication cut by power loss left
+  `.hcprms1` at AsyncFATFS's cluster-rounded 65,536 B.
+  - The validators read the tail one byte per poll; the DEV stall observer
+    aborted every drain, so nothing published from then on (663 drains over
+    10 boots) and the boot reloaded the whole Bank.
+  - Fix: a one-byte EOF probe shared by both validators, `V` flag bits 4..5,
+    and a progress-aware drain observer. No UI, per user policy.
+  - Hardware: the card repaired itself (generations 101 → 144, boot reader
+    1,383 ms).
+
+- **Find here**: [074_SESSION_HANDOFF_LOG.md](074_SESSION_HANDOFF_LOG.md),
+  `dsp_instruments_effects/EFFECTS_BUS_REFERENCE.md`,
+  `dsp_instruments_effects/EFFECTS_MIXER_DSP_REFERENCE.md`,
+  `dsp_instruments_effects/CPU_USE_DSP_AUDIT.md`, `AUTOSAVE.md`,
+  `DEV_MODES.md`, `ASYNCFATFS_REFERENCE.md`, `STORAGE_SRAM_MANIFEST.md`,
+  `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`,
+  `S075_PH6_COPY_CLEAR.md`.

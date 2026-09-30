@@ -1,8 +1,8 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference through Session 073 (Session 069 for every phase before Phase 5;
-the Session 072 and 073 additions are noted below). It includes the Session 058 Bank
+reference through Session 074 (Session 069 for every phase before Phase 5;
+the Session 072, 073 and 074 additions are noted below). It includes the Session 058 Bank
 I/O and stopped-playback speedups, the Session 059 typed Instrument-index
 repair, and Session 060's `.hcnames` atomic safe-write/refreshed flag, the boot
 Instrument `.hcindex` generation fix, and system-wide macOS AppleDouble
@@ -28,6 +28,19 @@ Session 073 restores `Load:[Samples]` to the Load page (see "Current
 Load/Save Menu Reachability") and moves the on-chip sample flash floor to
 sector 7. The on-chip flash layout, the sample index and the install guards
 are in `STORAGE_SRAM_MANIFEST.md` §4; nothing on the card changed.
+
+Session 074 adds four optional `sceneset.scg` keys for the Scene-owned master
+bus compressor (`bus_comp_mode`, `bus_comp_amount`, `bus_comp_time`,
+`bus_comp_sidechain`). It widens `fader_setting` to 0..3 (the fourth mode,
+`xfd`), and adds the Effect type token `cbt` (CrumpBit) to `.fx`. Nothing
+else on the card changed. Two AutoSave facts relevant to every file on the
+card were learned in S074:
+
+- AsyncFATFS stores a cluster-rounded size while a file is open for writing,
+  so an interrupted write leaves an overlong file;
+- validators must therefore prove the exact length with a one-byte
+  end-of-file probe (`ASYNCFATFS_REFERENCE.md`, "Open-file size on the
+  card"; `AUTOSAVE.md`).
 
 AutoSave's hidden-record format, dirty ownership, and background writer are
 authoritative only in `AUTOSAVE.md`. Development flags and diagnostic files are
@@ -887,9 +900,42 @@ pattern.pat
 
 `sceneset.scg` stores scene-level metadata/configuration and validates the
 folder as a scene. Current v1 Scene settings include global/per-voice Morph
-values, `voice_decimation_all`, seven MIDI channel/note values, and the
+values, `voice_decimation_all`, seven MIDI channel/note values, the
 Scene-owned per-voice mix settings `audio_out[6]`, `fx_send_amount[6]`, and
-`fader_setting[6]`.
+`fader_setting[6]`, the optional `effect_morph_amount`, and (S074) the four
+optional bus compressor keys.
+
+The writer emits one `key=value` line per field, in this order:
+
+| Line | Key | Domain | Notes |
+|---:|---|---|---|
+| 0 | `format` | `helicase.sceneset` | identifies the file |
+| 1 | `version` | `1` | |
+| 2 | `morph_amount` | 0..255 | |
+| 3 | `voice_morph_amount` | 6 × 0..255, comma-separated | |
+| 4 | `voice_decimation_all` | 0..127 | |
+| 5 | `midi_channel` | 7 values | |
+| 6 | `midi_note` | 7 values | |
+| 7 | `audio_out` | 6 × 0..5 | |
+| 8 | `fx_send_amount` | 6 × 0..127 | |
+| 9 | `fader_setting` | 6 × 0..3 (`pre pst fx xfd`) | **3 = `xfd` since S074.** A value above the domain rejects the file, so firmware older than S074 rejects a Scene that uses `xfd` (downgrade only). |
+| 10 | `effect_morph_amount` | 0..255 | optional on load (S072) |
+| 11 | `bus_comp_mode` | 0..2 (`off`, `St1`, `St2`) | S074; optional on load |
+| 12 | `bus_comp_amount` | 0..127 (`cam`) | S074; optional |
+| 13 | `bus_comp_time` | 0..127 (`ctm`) | S074; optional |
+| 14 | `bus_comp_sidechain` | 0..6 (`off`, voice 1..6) | S074; optional |
+
+- **Bus compressor keys (S074):**
+  - The four keys come from one table shared by the writer and parser
+    (`storage_busCompKey()`), so the spellings cannot drift.
+  - A parsed value is **clamped** to its field's domain
+    (`scene_busCompClamp()`), not rejected.
+  - A missing key keeps the defaults (`off`, 48, 48, `off`), which all three
+    Scene stage-default paths set.
+  - Older firmware ignores the keys as unknown.
+  - The values are per Scene and travel with Scene and Bank load/save.
+- Parsing is key-based, so line order does not matter on load; the writer
+  is `filesystem_nextScenesetLine()` in `filesystem.c`.
 
 `Kit <kit name>/` is the scene's embedded kit directory. It works like a kit
 folder but is named without a numeric slot prefix because it belongs to the
@@ -1016,6 +1062,13 @@ step_scale=1/64|1/32t|1/32|1/16t|1/16|1/8t|1/16.|1/8|1/4t|1/8.|1/4|1/2|1bar|2bar
 lane.<key>=0x<16-bit-lock-mask>,<16 values 0..255>
 ```
 
+Registered `type` tokens are `off`, `flt` (StereoFilter) and `cbt`
+(CrumpBit, S074). A `cbt` file's `[params]` use the common keys plus
+`crump_bit_off`, `crump_bit_invert` (0..255 masks), `crump_mix`,
+`crump_feedback`, `crump_rate`, `crump_subtype` (0 only), `crump_sync` and
+`crump_dly_pan`. Its lanes are written as `lane.<key>=` with the same keys.
+Keys and tokens are permanent once saved (`EFFECTS_BUS_REFERENCE.md` §4.2a).
+
 The parser clamps descriptor values to their registry maxima, copies `[params]`
 into Morphable `[morph]` cells when `[morph]` is absent, and rejects unknown
 types or malformed lane CSV. Scene Load stages Effect before Kit and commits
@@ -1045,7 +1098,10 @@ Current `scene_settings_t` fields:
 - `midi_note[NUM_TRACKS]`
 - `audio_out[INSTRUMENT_SLOT_COUNT]`
 - `fx_send_amount[INSTRUMENT_SLOT_COUNT]`
-- `fader_setting[INSTRUMENT_SLOT_COUNT]`
+- `fader_setting[INSTRUMENT_SLOT_COUNT]` (0..`SCENE_FADER_SETTING_MAX` = 3)
+- `effect_morph_amount` (0..255, Session 072)
+- `bus_comp[SCENE_BUS_COMP_FIELD_COUNT]` (mode, amount, time, sidechain;
+  Session 074)
 
 Scene file work stores scene-level metadata and settings in `sceneset.scg`.
 These do not belong in `kitset.kcg` or instrument files.

@@ -4,7 +4,9 @@
 
 This is the authoritative reference for how parameters are stored in resident
 memory across the Bank, Scene, Kit, Instrument, and Effect hierarchy as of
-Session 072 (unchanged by Session 073). How a stored value reaches the DSP
+Session 074. S073 changed nothing here. S074 added the bus compressor Scene
+settings and the fourth fader mode, and corrected the Scene storage sizes
+below. How a stored value reaches the DSP
 (descriptor writers, special-writer tags, LFO adapters) is in
 `INSTRUMENTS_DSP_REFERENCE.md`. It describes what is stored, where it lives, when it changes,
 when it becomes visible, and how it is persisted.
@@ -126,9 +128,11 @@ Effect runtime through `effects_activateScene()`.
 
 ## 3. SceneData — `Core/Bank/Scene/SceneData.c/h`
 
-`scenes[16]` is 19,200 bytes total (1,200 bytes per Scene). Scene storage
-contains everything except Pattern data, which lives in
-`pat_regions[16]` (168,304 bytes) in PatternData.
+`scenes[16]` is 26,016 bytes total (1,626 bytes per Scene since S074:
+45 B settings, one alignment byte, the 420 B Effect record, and the 1,160 B
+Kit). The figure of 1,200 B per Scene in earlier revisions predates the
+Session 072 Effect record. Scene storage contains everything except Pattern
+data, which lives in `pat_regions[16]` (168,304 bytes) in PatternData.
 
 ### Per-Scene contents
 
@@ -143,6 +147,9 @@ contains everything except Pattern data, which lives in
 | Scene Morph | Per-voice morph amount (0..255) | 6 values |
 | Scene Decimation | Global `srt` value | 1 byte |
 | Audio routing | Per-voice output assignment (0..5) | 6 bytes |
+| FX send | Per-voice send amount (0..127) | 6 bytes; the mixer reads the effective value (step override first) each block |
+| Fader mode | Per-voice `pre`/`pst`/`fx`/`xfd` (0..3) | 6 bytes; `xfd` (3) added in S074 (`SCENE_FADER_SETTING_MAX`) |
+| Bus compressor (S074) | `bus_comp[4]`: `cmp` 0..2 (off/St1/St2), `cam` 0..127, `ctm` 0..127, `csc` 0..6 | 4 bytes; defaults off/48/48/off; AutoSave Scene parameters 41..44; `sceneset.scg` `bus_comp_*` keys; edited on the last settings page and fanned out to the VOICE edit mask; not modulatable |
 | Effect | Type, 64 normal cells, 64 Morph cells, 16-step sequence | 420-byte Scene-owned record; saved as named `.fx` v2 child |
 | Effect Morph | Scene `effect_morph_amount` | AutoSave Scene setting index 40; serialized in `sceneset.scg` when present |
 
@@ -445,7 +452,8 @@ active slot's descriptor table — not hardcoded parameter lists.
 
 ## 9. `parameter_values[]` and the Legacy Bridge
 
-`parameter_values[275]` remains the legacy/global/menu byte store. It is
+`parameter_values[NUM_PARAMS]` (384 bytes) remains the legacy/global/menu
+byte store. It is
 the bridge for non-instrument sound parameters (globals, MIDI config,
 sequencer settings) and the flat mirror for PERF display.
 
@@ -460,6 +468,21 @@ for PERF display purposes, but it is not the source of truth.
 - MIDI channel/note assignments
 - Sequencer runtime values
 - PERF display mirror of Scene settings (morph, decimation, routing)
+- the bus compressor page mirrors `PAR_BUS_COMP_MODE..SIDECHAIN` (ids
+  58..61, S074). They are refreshed from the active Scene by
+  `preset_syncBusCompMirrors()` and never serialized as Globals.
+
+**Bulk Global apply hazard (S074 observation O1, not fixed).**
+`menu_tickGlobalApply()` and `menu_sendAllGlobals()` replay
+`menu_parseGlobalParam()` for every id from `PAR_BEGINNING_OF_GLOBALS` up,
+after a Settings Load or a legacy `.all` load. That range includes the PERF
+mirrors `PAR_VOICE1_MORPH..PAR_VOICE6_MORPH` and `PAR_VOICE_DECIMATION_ALL`,
+whose handlers write the mirrored (active-Scene) value into **every Scene of
+the VOICE edit mask** and mark AutoSave. So a Settings Load equalises
+per-voice Morph and `srt` across the mask. The legacy paths zero the mirrors
+first, so `srt` 0 would be written. The bus compressor ids avoid this by
+design: in `menu_parseGlobalParam()` they only refresh their mirrors. A fix
+for the older ids could use the same refresh-only pattern.
 
 ### What does NOT live in `parameter_values[]`
 
@@ -488,6 +511,8 @@ for PERF display purposes, but it is not the source of truth.
 | LFO modulation | Transient runtime only | NOT marked dirty |
 | Morph interpolation | Transient runtime only | NOT marked dirty |
 | Effect type change | Retained type token, type-specific defaults, and cleared Effect sequence | Effect-region mask via `scene_finishEffectWholeCommit()` |
+| Bus compressor edit (S074) | Scene parameter 41 + field, for every Scene in the VOICE edit mask | Scalar HCPR mask (`scene_setBusCompSetting()`) |
+| Fader mode edit (incl. `xfd`) | Scene parameter 20 + slot | Scalar HCPR mask |
 
 ---
 

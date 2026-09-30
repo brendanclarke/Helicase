@@ -4,7 +4,14 @@
 
 This is the authoritative live-memory, allocator, PAT4 interchange, Pattern
 Stack Service, and Pattern AutoSave reference through Session 072 Step 9 (all
-implemented Pattern phases; unchanged by Session 073).
+implemented Pattern phases). Session 073 changed nothing. Session 074 changed
+no Pattern storage or allocator code. It added a second reader of step
+automation: the Effect-page underline search reads every step of every track
+of the viewed Pattern through `pat_readStepAutomations()`, 4 steps per
+foreground pass. The S074 AutoSave investigation also saw a torn PAT4 file
+repair itself exactly as designed (§9).
+**Phase 6 (Session 075) starts with the copy operations** that are still
+no-ops here (§5; `S075_PH6_COPY_CLEAR.md`).
 Historical Session 062/063/064 plans describe how the design was reached but
 do not override this file.
 Filesystem hierarchy and HCNAMES grammar are in `FILESYSTEM_SPEC.md`; scalar
@@ -57,7 +64,7 @@ typedef struct __attribute__((packed)) {
 ```
 
 `pat_regions[16]` is exactly 168,304 bytes. Pattern storage is not embedded in
-`scene_t`; `scenes[16]` remains 19,200 bytes. `pat_sceneRegion(scene)` returns
+`scene_t`; `scenes[16]` is a separate 26,016-byte SceneData object (S074). `pat_sceneRegion(scene)` returns
 read-only access and `pat_sceneRegionMut(scene)` is reserved for bounded owner
 paths such as validated filesystem application. Ordinary clients use the
 public operations so mutation tracking cannot be bypassed.
@@ -433,6 +440,16 @@ must survive the in-flight completion. An admission/write/close/sync error
 re-arms the bit. Successful durable completion publishes the Pattern row as
 `name<TAB>@<TAB>R`, but the completion may set `R` only if no post-snapshot
 edit made the Pattern dirty again.
+
+**Torn files.** A Pattern write interrupted before its first close leaves
+the target at AsyncFATFS's cluster-rounded size: 32,768 B instead of
+10,656 B (`ASYNCFATFS_REFERENCE.md`, "Open-file size on the card").
+`filesystem_patternAutosaveCandidateValid()` reads one byte past the payload
+and rejects the candidate unless that read returns end-of-file. The next
+Pattern generation for that Scene recreates the file with `"w"`. The S074
+card showed this: `.pat06b` was 32,768 B, was rejected, and was rewritten at
+10,656 B. The scalar HCPR validators were brought in line with this probe in
+S074 (`AUTOSAVE.md`).
 
 At boot the Pattern reader evaluates present Scenes independently after the
 scalar Bank/Scene restore. It applies the winning hidden candidate only when

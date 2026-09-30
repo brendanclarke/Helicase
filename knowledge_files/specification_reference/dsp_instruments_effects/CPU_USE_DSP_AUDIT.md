@@ -1,11 +1,13 @@
 # LXR-02 DSP Performance Audit
 
-> **Where to start (Session 073 close).** This document is the cost audit and
-> the record of every DSP optimisation (the priority list at the end). For
-> how the DSP works today, what each stage costs and how to change it, read
-> `INSTRUMENTS_DSP_REFERENCE.md` and `EFFECTS_MIXER_DSP_REFERENCE.md`. The
-> S073 refactor's full record is `073_SESSION_HANDOFF_LOG.md` §6; the host
-> test bench is `tools/dsp_test/DSP_TEST.md`.
+> **Where to start (Session 074 close).** This document is the cost audit and
+> the record of every DSP optimisation and cost addition (the priority list
+> at the end; S074 added items 27–31). For how the DSP works today, what each
+> stage costs and how to change it, read `INSTRUMENTS_DSP_REFERENCE.md` and
+> `EFFECTS_MIXER_DSP_REFERENCE.md` (both in this folder). The S073
+> refactor's full record is `073_SESSION_HANDOFF_LOG.md` §6; the S074 DSP
+> additions are in `074_SESSION_HANDOFF_LOG.md` §7–§10; the host test bench
+> is `tools/dsp_test/DSP_TEST.md`.
 
 Session 033 note: this audit was moved into `specification_reference/` as a
 historical DSP/performance snapshot. In the remainder of this document,
@@ -722,3 +724,46 @@ class defined in the Session 073 section above.
     10 % less CPU on the user's worst-case Scene with the StereoFilter Effect
     (the plan estimated 9–14 %). Nothing was skipped to get it, so the saving
     holds with everything active.
+
+### Session 074 additions (2026-09-29/30; record in `074_SESSION_HANDOFF_LOG.md` §7–§10)
+
+These items **add** cost, so the worst case to budget against grows. All
+of it is constant work except item 28, which is the one user-approved
+exception to the constant-CPU rule: the compressor does nothing while `cmp`
+is off.
+
+27. **ADDED (S074): CrumpBit Effect (`cbt`).** When CrumpBit is the active
+    Effect it runs on the FX bus instead of StereoFilter:
+    - per sample, for both channels: an 8-bit ADC, the data-line masks, the
+      DAC and the AC coupling;
+    - per sample, the tape loop: glide, interpolated read, re-quantised
+      write, ramped mix;
+    - estimated 75–95 instructions per sample in total, against 160–206
+      for StereoFilter's two ZDF channels;
+    - per block: one `expf`, a 14-step StepScale walk and one divide;
+    - no per-sample division or transcendental.
+
+    Every stage runs whatever the settings. Not measured separately on
+    hardware; the user accepted the type on listening. Flash 11.6 KB
+    (`-Ofast` unrolled the 32-frame loop: `crumpBit_process` 4,804 B,
+    `crumpBit_syncDivision` 3,684 B).
+28. **ADDED (S074): master bus compressor, while `cmp` is on.** Per block,
+    one `log2f`, one `exp2f`, the knee, the two-stage cell and a few
+    divisions (about 350–450 cycles). Per sample, the detector, the ramped
+    gain, the cubic and the fade (34 instructions per stereo frame
+    initially). Estimated 0.8–1 % of 216 MHz. **0 while off** (user
+    decision; the stage returns after one settings read).
+29. **ADDED (S074): compressor band-split saturation + full-scale knee.**
+    This fixes HF harshness (aliased 3rd harmonic and kick–hat IMD).
+    - The loop grew from 34 to 71 instructions per stereo frame (63
+      floating point), so the compressor is about **1.4–1.8 %** while on.
+    - The planning estimate was +0.45 %; the measured increase is +0.6–0.8 %
+      (the knee's sign handling and FMA register copies).
+    - The knee is branchless (`copysignf` → `vabs` + predicated `vneglt`).
+    - The worst-case `cpu` widget reading with `cmp` on against off has not
+      been taken yet.
+30. **ADDED (S074): `xfd` fader mode.** One division per `xfd` slot per
+    block (`adc_sliderGainMirrored()`). Otherwise the same as `fx`; the
+    worst case is unchanged.
+31. **ADDED (S074): mixer `off` branch.** Two stores per block while the
+    Effect is `off` (the return-ramp reset). Negligible.

@@ -21,6 +21,17 @@ code and the `DEV_EFFECT_FORCE_TYPE` boot test knob described below. Session
 073 adds the instrument special-writer tag self-check digit to the same
 screen.
 
+Session 074 adds:
+
+- the BC18 settings-page check under `DEV_MODE_DIAGNOSTIC`;
+- the progress-aware rule for the runtime AutoSave drain's stall observer;
+- the `V` (VALIDATED) flag bits 4..5 for torn records;
+- the decoder fixes in `tools/decode_devlogs.py` (the 4-bit `X` site field,
+  all ten site names, `V` bits 2..5).
+
+The diagnostic `fxbuf_init()` order was also fixed, so
+`DEV_FXBUF_FORCE_VOICE_UNITS` now yields valid handoff rates.
+
 The boot image check (`flashImage.c`, Session 073) is **not** a development
 mode: it is production code that runs on every boot and is silent unless the
 flash image is damaged (`STORAGE_SRAM_MANIFEST.md` §3.4).
@@ -92,7 +103,10 @@ classifier compiled only in diagnostic builds and uses no RAM. Its host twin
 is `make -C tools/dsp_test special_tags` (`tools/dsp_test/DSP_TEST.md`).
 
 `DEV_FXBUF_FORCE_VOICE_UNITS` is a diagnostic-only test knob with an accepted
-compile-time range of 0..12. It is ignored when `DEV_MODE_DIAGNOSTIC=0` and
+compile-time range of 0..12. With 12 it presents the minimum Effect share
+(73,600 B since S074), which is how a buffer-using Effect such as CrumpBit is
+tested at its minimum. Since S074 `fxbuf_init()` resets the handoff record
+before the forced units are claimed, so they carry valid rates. It is ignored when `DEV_MODE_DIAGNOSTIC=0` and
 defaults to 0. The self-test result codes are: 0 pass; 1 arena geometry;
 2 empty share; 3 two-unit acquire; 4 per-slot cap; 5 full arena; 6 refill;
 7 non-compacting release; 8 full release; 9 unit pointer bounds.
@@ -106,6 +120,24 @@ change follows the normal `typ` edit path: it fans out through the active
 VOICE edit mask (self-only at boot unless the mask was restored), clears the
 FX sequence for every changed Scene, and marks AutoSave. Keep the knob at zero
 for ordinary diagnostic runs.
+
+### Settings-page placement check (BC18, Session 074)
+
+With `DEV_MODE_DIAGNOSTIC=1`, boot runs a screen-only check. It verifies
+that the Scene-owned bus compressor page (`cmp cam ctm csc`) is still the
+last populated settings sub-page:
+
+- `menuPages[MENU_MIDI_PAGE][MENU_GLOBAL_SCENE_SUBPAGE]` is the compressor
+  page;
+- its second half is empty;
+- no later global sub-page is populated.
+
+It is silent on success. On failure it shows `not last (BC18)` for 1.5 s.
+It does no filesystem work and is compiled out of production builds. The
+rule it guards: new global settings pages go **before** the compressor
+page, and `MENU_GLOBAL_SCENE_SUBPAGE` (`menu.h`) moves with them. To test
+the check, temporarily populate the sub-page after it; the message must
+appear.
 
 ## `DEV_MODE_LOGGING`
 
@@ -272,8 +304,11 @@ stage:u8, flags:u8, tick16:u16, value:u32
 ```
 
 Integer fields are little-endian. Stage bytes are uppercase
-`D I J N L R W F G B S A V M C P T X O E Q U K` and their meanings/values are
-owned by `AutosaveTrace.h`. `X`, `O`, and `E` were added in Session 054 while
+`D I J N L R W F G B S A V M C P T X O E Q U K Z H` (plus the retired `Y`),
+and their meanings/values are owned by `AutosaveTrace.h`. **All 26 uppercase
+letters are now taken**, so a new event must extend an existing stage's flag
+bits rather than add a letter. S074 did exactly that for torn records
+(`V` bits 4..5, below). `X`, `O`, and `E` were added in Session 054 while
 chasing the recursive-delete `ScnS05` defect (see
 `knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md`); a fourth stage,
 `Y` (`SCAN_PARENT_DIAG`), was added and then fully retired in the same
@@ -302,6 +337,29 @@ CRC — decode with that call site in mind). Instrument's `CREATE_RESULT`
 additionally packs a raw (unfinished, not `~crc32c`-complemented) CRC32C
 content fingerprint, comparable only against another value produced the same
 way.
+
+`V` (`VALIDATED`) is one record per complete A/B candidate decision, from
+the runtime drain (phase 5, or phase 0 on the continuation path) and from
+the boot validator (phase 5). `value32` is the winner's generation (0
+without a winner). Flags (`AUTOSAVE_TRACE_VALIDATED_*`):
+
+- bit 0: a winner exists;
+- bit 1: the winner index (0 = A `.hcprms1`, 1 = B `.hcprms2`);
+- bit 2: the winner's Bank identity does not match (runtime: slot and
+  display name; boot: the `settings.cfg` slot only);
+- bit 3: continuation path (validation skipped, the winner restored from the
+  previous drain);
+- **bit 4: A rejected as overlong; bit 5: B rejected as overlong (S074).**
+  That is the trace-only evidence of a publication torn by power loss; the
+  next drain republishes into it;
+- bits 6..7: reserved zero.
+
+Examples from the S074 cards:
+
+- `0x07`: winner B, Bank mismatch (the old firmware could not set bit 4);
+- `0x17`: the same with a torn A;
+- `0x03`: winner B with the Bank matching;
+- `0x09`/`0x0b`: continuation-path winners A/B.
 
 `E` (`OPERATION_ERROR`) is a universal backstop: both of filesystem.c's
 shared terminal-completion functions (`filesystem_complete()` and
@@ -431,7 +489,7 @@ delta when disabled: -840 bytes text, -56 bytes BSS.
 |---|---|---|---|---|
 | Delete-slot resolver | `filesystem_deleteSlotDirectory_tick()` | 50,000 polls | `TDel`/`TOut` | Partial abort — cannot abort a native `deleteTree()` in progress; only the pre-delete scan phases can abort |
 | Bank Save entry/metadata | `filesystem_saveBankDirectory_tick()` | 20,000 polls | `BkSt` | **Observe only (Session 057)** — see below |
-| AutoSave parameter drain | `filesystem_autosaveParameterDrain_tick()` | 30,000 polls | `DrSt` | Abort |
+| AutoSave parameter drain | `filesystem_autosaveParameterDrain_tick()` | 30,000 polls **with no phase change and no cursor progress** (S074) | `DrSt` | Abort; the writer retries after 5 s with the dirty mask restored |
 | Kit Save | `filesystem_saveKitDirectory_tick()` | 20,000 polls | `KtSv` | Abort (added Session 057) |
 | Scene Save | `filesystem_saveSceneDirectory_tick()` | 20,000 polls | `ScSv` | **Observe only (Session 057)** — see below |
 | Kit Load | `filesystem_loadKitDirectory_tick()` | 20,000 polls | `KtLd` | Abort (added Session 057) |
@@ -439,6 +497,28 @@ delta when disabled: -840 bytes text, -56 bytes BSS.
 | Bank Load entry | `filesystem_loadBankDirectory_tick()` | 20,000 polls | `BkLd` | Abort (added Session 057) |
 | Settings write | `filesystem_saveGlobals_tick()` | 30,000 polls | `StWr` | Abort (added Session 057) |
 | Flush Finish | `filesystem_flushFinish_tick()` | 50,000 polls | `Flsh` | Abort (added Session 057) — shared completion gate for every successful operation |
+
+**The drain is progress-aware since S074; every other site is not.**
+
+- **Why:** the old observer counted polls with an unchanged `op_phase` even
+  while bytes were moving. A long but progressing phase could therefore be
+  killed, and was: the S074 torn-record case read a 30,768-byte overlong
+  tail one byte per poll (`AUTOSAVE.md`, "Resolved: a torn record stopped
+  AutoSave").
+- **How it works:** `filesystem_autosaveDrainStalled()` resets its count
+  whenever the phase *or* a 16-bit progress word changes. The word is the
+  modulo-65,536 sum of `op_bytes_done`, `op_item_offset`, `stream_offset`,
+  `chunk_written`, `mask_bytes_read`, `payload_scan_offset` and
+  `patch_count`. The observer fires once, on poll 30,001 without either
+  changing.
+- **Storage:** 5 B, the same as before (`u8` phase, `u16` count, `u16`
+  progress instead of `u8` + `u32`), in `DEV_STALL_DETECTION` builds only.
+- **What it still catches:** a wedged read, a removed card, or a close that
+  is never accepted. For site 2 the `X` value's extra field carries
+  `stream_offset / 16`.
+- The other nine observers still use `filesystem_pollPhaseStall()`. The
+  Bank-save and delete-slot observers share the old poll-count rule and could
+  in principle kill a long progressing phase; no case is known.
 
 The Scene Save and Scene Load detectors each cover both their standalone
 root operation and the equivalent path delegated from Bank Save/Load
@@ -623,7 +703,17 @@ For the current baseline:
   power-interruption cases before declaring any future singleton repair done.
 
 `tools/decode_devlogs.py` is the decoder for ordinary boot tokens, the
-conditional `ASENSURE` capsule, and `/asavetrc.bin` records. It does not
+conditional `ASENSURE` capsule, and `/asavetrc.bin` records. Since S074:
+
+- it decodes `V` bits 2..5 (`bank_mismatch=`, `cached=`, "overlong candidate
+  rejected: …");
+- it reads the `X` site from 4 bits and the native-delete flag from bit 4.
+  Before S074 it used the pre-Session-057 3-bit layout, so sites 3..9 and
+  native-delete records were misread;
+- it names all ten stall sites with their behaviour (abort or observe).
+
+Known decoder gaps: it misreads `/pattrace.bin` as the AutoSave format, and
+it labels boot-reader `Q` records "unknown producer" (cosmetic). It does not
 decode AutoSave record payloads or replace the later, intentionally deferred
 general development-log converter. Its `FS_INTERNAL_OPS` table is positional
 and must exactly match `fs_internal_op_t` in `filesystem.c`; Session 064

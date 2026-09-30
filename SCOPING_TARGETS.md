@@ -1179,9 +1179,13 @@ folding it into an existing temporary layer.
 
 ## Phase 5 — Effects Foundation & Scene Fixes
 
-**Status: implemented in Session 072.** The plan
-(`EFFECTS_BUS_FEATURE_PLAN.md`) superseded several details below (§2 of the
-plan):
+**Status: implemented in Session 072; largely complete after Session 074.**
+S074 added the Effect-page automation underlines, the buffer-using template
+type (CrumpBit, `cbt`), the fourth fader mode `xfd` and the master bus
+compressor (a Scene setting, not an Effect type). It also closed the arena
+gaps (`074_SESSION_HANDOFF_LOG.md`). The plan (`EFFECTS_BUS_FEATURE_PLAN.md`,
+deleted in `ca77891`; `git show f3a3105:EFFECTS_BUS_FEATURE_PLAN.md`)
+superseded several details below (§2 of the plan):
 - a 288-byte sequence of 16 lanes instead of 16 × 24 values;
 - `fwd/rev/pip/rnd/sel` run modes;
 - 4,416-byte buffer units;
@@ -1190,13 +1194,13 @@ plan):
 The as-built behavior is in `EFFECTS_BUS_REFERENCE.md` (control, storage,
 UI) and `EFFECTS_MIXER_DSP_REFERENCE.md` (signal path and DSP). **Carried
 forward:**
-- **Effect-page automation underlines (bug, Session 074):** see "Session 073
-  carry-forward";
-- buffer-using template type (A8) — **Session 074**, with the two as-built
-  gaps it must close (same-type Scene switch handoff refresh; FX return ramp
-  while `off`);
+- ~~Effect-page automation underlines~~ — **done (S074)**;
+- ~~buffer-using template type (A8)~~ — **done (S074): CrumpBit**, with the
+  same-type handoff refresh, the FX return ramp while `off` and the
+  `fxbuf_init()` order closed;
 - `/Effect/` browser and Effect Load/Save item (A35);
-- Scene copy/clear of the Effect and FX lock removal (copy pass);
+- Scene copy/clear of the Effect and FX lock removal (Phase 6 copy/clear,
+  `S075_PH6_COPY_CLEAR.md`);
 - MIDI mapping of Effect parameters (A20);
 - live record of FX moves (A22);
 - track step-scale/shuffle playback (A10).
@@ -1413,6 +1417,11 @@ and external MIDI sequencing tracks. Automation views (6.3), morph quick
 access and automation indicator (6.4), scene instant switching (6.5 partial),
 and load/save UI rework (6.7) were completed in earlier phases and their
 completion records are in §§3.4, 4.6.
+
+**Session 075 starts Phase 6 with copy and clear** for step, bar, track,
+automation, Instrument, Scene and Scene components (the §4.5 copy
+operations, §5.8's Effect copy/clear, FX lock removal). The startup overview
+and decisions are in `S075_PH6_COPY_CLEAR.md`.
 
 ### 6.0 Deferred Phase 4 completion (first priority)
 
@@ -1810,9 +1819,8 @@ Small items found during the Phase 5 reviews. All are outside Effects
 behaviour and none blocks Session 073. Details are in
 `knowledge_files/log_archive/072_SESSION_HANDOFF_LOG.md` §10.2.
 
-- **`fxbuf_init()` order.** `fxbuf_handoffResetAll()` runs after the
-  diagnostic forced-unit loop, so forced units carry handoff rate 0.
-  Diagnostic-only. Move the reset right after `fxbuf_clearOwners()`.
+- ~~**`fxbuf_init()` order.**~~ — **resolved (S074):** the reset runs
+  right after `fxbuf_clearOwners()`.
 - **Makefile hygiene.**
   - The link-budget recipe comments are echoed every build (prefix `@#`).
   - A bare `make` in an incremental tree stops at `build/main.o`, because
@@ -1829,8 +1837,8 @@ behaviour and none blocks Session 073. Details are in
   tab/space indentation in five `presetManager.c` FX-send comment blocks; and
   (S073) a duplicated line in the batched-filter guard comment in
   `ResonantFilter.c`.
-- **FX return ramp.** It is not reset while the Effect is `off`. Revisit when
-  a type outputs sound immediately on `init` — the Session 074 buffer type.
+- ~~**FX return ramp.**~~ — **resolved (S074):** the mixer's `off` branch
+  zeroes `mixer_fx_return_last_gain[]` every block.
 - **Stale tool.** `tools/verify_bank_autosave.py` still expects 129 HCNAMES
   rows (current: 161).
 - **Dead code.** Scene Save phases 33–36 in `filesystem.c` are unreachable.
@@ -1840,9 +1848,10 @@ behaviour and none blocks Session 073. Details are in
 Session 073 record: `knowledge_files/log_archive/073_SESSION_HANDOFF_LOG.md`.
 Session 074 startup: `S074_EFFECT_BUGS_BUFFER_USE.md` (root).
 
-### Next session (074)
+### Next session (074) — both items done in Session 074
 
 1. **Bug — Effect-page parameter names are not underlined when automated.**
+   **Done (S074, hardware PASS).**
    - **Report (user):** on the Effect page (SHIFT+PERF), the character
      underline on a parameter name does not appear when that parameter is
      automated in the current Pattern. It should appear for automation in the
@@ -1864,8 +1873,7 @@ Session 074 startup: `S074_EFFECT_BUGS_BUFFER_USE.md` (root).
      whether locks beyond the sequence length count, how the two sources
      combine) are listed in the S074 startup document.
 2. **First Effect type that uses the shared DTCM buffer** (Phase 5 A8).
-   See §5.4/§5.6 above, `EFFECTS_MIXER_DSP_REFERENCE.md` §5, and the S074
-   startup document.
+   **Done (S074): CrumpBit, accepted on hardware as v1.**
 
 ### Deferred
 
@@ -1875,9 +1883,9 @@ Session 074 startup: `S074_EFFECT_BUGS_BUFFER_USE.md` (root).
   Deferred while the trace logger stays on. Analysis and fix directions:
   `knowledge_files/drafts/MENU_LOAD_SPEEDUP_SMOOTHNESS.md` and
   `073_SESSION_HANDOFF_LOG.md` §5.2.
-- **The bootloader past `0x08080000`** is unproven. The first image that
-  grows into sector 6 is the test; the boot image check reports a failure as
-  `Img BAD s:.....6`. Decision D-C1 (keep the check) is open; it stays.
+- ~~**The bootloader past `0x08080000`** is unproven.~~ **Settled in
+  practice (S074):** every image from CrumpBit on reaches sector 6 and boots.
+  Decision D-C1 (keep the check) is still open; it stays.
 - **Phase 5 hardware acceptance** for S072 Steps 6–10
   (`072_SESSION_HANDOFF_LOG.md` §11) has not been reported as run.
 - **Not reported individually from S073:** a pre-S073 sample install shows 0
@@ -1890,3 +1898,60 @@ Session 074 startup: `S074_EFFECT_BUGS_BUFFER_USE.md` (root).
   0..1, so about half the noise steps may land on the clamp. Found while
   writing the S073 DSP reference; check on hardware before changing it
   (changing it would change the sound).
+
+## Session 074 carry-forward (2026-09-30)
+
+Session 074 record: `knowledge_files/log_archive/074_SESSION_HANDOFF_LOG.md`.
+Session 075 startup: `S075_PH6_COPY_CLEAR.md` (root).
+
+### Next session (075)
+
+- **Phase 6 begins: copy and clear operations.** Step, bar, track,
+  automation, Instrument, Scene and Scene components. The overview, a
+  proposed operation model and the decisions to take first are in
+  `S075_PH6_COPY_CLEAR.md`.
+
+### Open from Session 074
+
+- **Boot timeout (unexplained).** Seen once around the AutoSave incident;
+  not captured; no link to the torn record was shown. Reproduce with
+  `SD_CARD_ATS_BOOT_BUG/` and `DEV_MODE_DIAGNOSTIC 1` (then
+  `DEV_LOGGING_IWDG 1` if it hangs); `074_SESSION_HANDOFF_LOG.md` §11.5.
+- **Bus compressor measurements.** The `cpu` widget with `cmp` on against
+  off on the worst-case Scene; BC11 (track 7 as sidechain voice 6); an A/B
+  of the saturator's α 0.35.
+- **O1 — Settings Load equalises per-voice Morph and `srt` across the VOICE
+  edit mask (existing behaviour).** `menu_tickGlobalApply()` /
+  `menu_sendAllGlobals()` replay `menu_parseGlobalParam()` for every id from
+  `PAR_BEGINNING_OF_GLOBALS` up. The `PAR_VOICE1..6_MORPH` and
+  `PAR_VOICE_DECIMATION_ALL` handlers then write the mirrored value into
+  every masked Scene and mark AutoSave; the legacy paths zero the mirrors
+  first, so `srt` 0 would be written. Fix with the bus compressor's
+  refresh-only pattern. Unverified on hardware.
+- **Effect pan display.** Effect pan rows (`pan`, CrumpBit `dpn`) store 64 as
+  centre (the mixer law), but `DTYPE_PM63` displays `value − 63`, so centre
+  shows `1`.
+- **AutoSave trace ring priorities (F4).** Whole-object dirty bursts
+  (2,000–15,000 `D` records) push out lifecycle records; they hid the torn
+  publication and the first repaired drain's `A`/`V`. Collapse bursts into
+  the `L` summary or flush lifecycle stages first.
+- **Underline limitations** (shared with VOICE): live erase while recording
+  does not restart the presence search; a deferred Pattern/track clear can
+  race the restarted search; the Effect held-value marker has no
+  quiet-period debounce; the 224-pass search latency is unmeasured.
+- **Tools:** `tools/verify_bank_autosave.py` expects 129 HCNAMES rows (161
+  now); `tools/decode_devlogs.py` misreads `pattrace.bin` and labels `Q`
+  records "unknown producer".
+- **Cosmetic comments:** `BusCompressor.h` (state "24 B", now 32 B);
+  `BusCompressor.c` loop comment ("~+0.45 %", measured +0.6–0.8 %);
+  `CrumpBitEffect.h` (minimum share "73,632 B", now 73,600 B); the S074 C4
+  search comment sits after its fields in `menu.c`; `main.c` about 532 says
+  the stamped CRCs are "at the end of the load image" (they follow the
+  vector table in sector 1).
+- **CrumpBit follow-ups:** the user expects further additions and changes.
+  The design leaves room for more sub-types (each adds its own rows) and an
+  input-gain row (spec Q3). Flash can be trimmed with `#pragma GCC unroll 1` on
+  `crumpBit_process`/`crumpBit_syncDivision` after a listening check. The
+  runtime union has 20 B left.
+- **Repository hygiene:** the card copies `SD_CARD_ATS_BOOT_BUG/` and
+  `SD_CARD_ATS_CORRECTION_OUTPUT/` (with `.Spotlight-V100`) are committed.

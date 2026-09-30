@@ -4,8 +4,23 @@
 
 This is the authoritative reference for the implemented Helicase AutoSave
 format, ownership, boot restore, mutation tracking, and background writer
-through Session 072 (all phases). Session 073 changed nothing in AutoSave. Historical plans and session logs explain
-how the implementation was reached, but they do not override this document.
+through Session 074. Session 073 changed nothing in AutoSave. Session 074
+made two changes:
+
+- it made Scene parameters 41..44 live for the master bus compressor, using
+  reserved cells with no format-version change;
+- it fixed a failure in which a record torn by power loss stopped
+  publication permanently: a one-byte end-of-file probe in both validators,
+  a progress-aware drain stall observer, and `V` trace bits 4..5. See
+  "Resolved: a torn record stopped AutoSave (Session 074)" below.
+
+Historical plans and session logs explain how the implementation was
+reached, but they do not override this document.
+
+**New here?** Read "On-card HCPR v3 scalar record contract", "Boot restore
+and policy lifecycle", "Dirty marking rules", "Background writer" and
+"Power-loss behavior" in that order. The two "Resolved" sections are worked
+examples of how on-card evidence was used to find a defect.
 
 Related authority is deliberately separate:
 
@@ -88,6 +103,10 @@ quiet window scheduling, and shared background CPU budget):
   overshoot tracking; DEV-only per-class `H` trace reports every ~5 seconds;
 - Pattern repair suppressed when `menu_activePage == LOAD_PAGE ||
   SAVE_PAGE` (Load/Save repair gate).
+- exact-length validation by a one-byte end-of-file probe in both scalar
+  validators, silent self-repair of a torn record by the next drain, `V`
+  trace bits 4..5, and a progress-aware drain stall observer (Session 074);
+- Scene parameters 41..44 for the master bus compressor (Session 074).
 
 Not implemented and not to be inferred from the reader/writer:
 
@@ -162,8 +181,23 @@ Each Scene region reserves:
 
 - eight name bytes;
 - two HCNAMES source bytes immediately after the name;
-- 118 Scene-parameter bytes, currently 41 live (index 40 is Effect Morph
-  amount);
+- 118 Scene-parameter bytes, currently 45 live
+  (`AUTOSAVE_SCENE_PARAM_COUNT`):
+
+  | Index | Meaning |
+  |---:|---|
+  | 0 | Scene Morph amount |
+  | 1..6 | per-voice Morph amount |
+  | 7 | voice decimation (`srt`) |
+  | 8..13 | per-voice audio out |
+  | 14..19 | per-voice FX send |
+  | 20..25 | per-voice fader mode (0..3 since S074: `pre pst fx xfd`) |
+  | 26..32 | MIDI channel per track |
+  | 33..39 | MIDI note per track |
+  | 40 | Effect Morph amount (S072) |
+  | 41..44 | bus compressor `cmp`, `cam`, `ctm`, `csc` (S074) |
+  | 45..117 | reserved (zero) |
+
   - 512 Effect bytes: 3 type bytes, 8 name bytes, 419 live parameter cells, and
     80 reserved bytes;
 - 1,280 Kit bytes containing eight name bytes, a two-byte HCNAMES source
@@ -198,7 +232,7 @@ The relative Effect region is projected without copying the retained C record:
 
 | Relative offset | Bytes | Meaning |
 | ---: | ---: | --- |
-| 0..2 | 3 | Type token; live from the registry token (`off` or `flt`) |
+| 0..2 | 3 | Type token; live from the registry token (`off`, `flt` or `cbt`) |
 | 3..10 | 8 | Effect name; baseline mirror of HCNAMES row `145 + scene`, not a live dirty cell |
 | 11 | 1 | Sequencer run mode |
 | 12 | 1 | Sequencer length |
@@ -229,6 +263,13 @@ Header requirements:
 Phase C is the documented exception to the general reserved-cell rule: its
 source fields use previously reserved bytes without a version bump because the
 record, mask, payload, section boundaries, and validation size are unchanged.
+The same reasoning covers appending a **Scene parameter** into the reserved
+tail of the 118-byte allocation. That was done for Effect Morph (index 40,
+S072) and for the bus compressor (41..44, S074). The condition: zero, which
+every older record holds there, must be a safe value to restore. The first
+restore after the S074 upgrade therefore reads `cmp off`, `cam 0`, `ctm 0`,
+`csc off` (not the 48/48 defaults). That is harmless because the compressor
+stays off, and the values persist once set.
 The first complete drain rewrites all present resident payload scopes in the
 new internal layout, upgrading old-format parameter positions in place. Any
 future change to offsets, widths, ordering, or interpretation outside this
@@ -484,7 +525,13 @@ running.
 One transaction:
 
 1. validates both candidates and chooses the newest valid record matching the
-   current Bank identity;
+   current Bank identity. Each candidate is streamed in 128-byte CRC chunks,
+   then **exactly one more byte** is read. Any data there means the file is
+   longer than the record (a torn write), and the candidate is invalid at
+   once. Only end-of-file lets the header, commit and CRC verdict stand.
+   This is `filesystem_autosaveValidateCandidateStep()`, shared by the drain
+   and the boot validator: at most 273 reads per candidate, whatever the file
+   size;
 2. imports the winner's on-card mutation mask once for interrupted-work
    recovery;
 3. examines at most `AUTOSAVE_MASK_BITS_PER_TICK` mask positions per service
@@ -728,7 +775,26 @@ therefore leave:
 
 - the previous winner valid and the target invalid;
 - both records valid, with generation selecting the newer;
-- an incomplete target that fails size/header/CRC/commit validation.
+- an incomplete target that fails size/header/CRC/commit validation;
+- **a torn target that is longer than a record.** The drain creates the
+  target with `"w"` and streams the record before its first close. While a
+  file is open for writing, AsyncFATFS stores its *allocated*,
+  cluster-rounded size in the directory entry (`ASYNCFATFS_REFERENCE.md`,
+  "Open-file size on the card"). A power loss before that close leaves a
+  65,536-byte `.hcprmsN` (32,768 B for a PAT4 file) with commit byte 0, the
+  record's first bytes, and stale cluster data after it.
+
+How each case recovers, with no user action:
+
+- A torn target is rejected by the one-byte end-of-file probe after 273
+  reads, and the peer stays the winner. The next drain publishes into the
+  torn slot: phase 11 removes it, and phase 24 recreates it with `"w"` at the
+  exact size. The boot validator uses the same probe.
+- The event is recorded only in the trace, as `V` flag bit 4 (A) or 5 (B)
+  (user policy: log it, no error screen).
+- A torn Pattern file is handled the same way by
+  `filesystem_patternAutosaveCandidateValid()` and the next Pattern
+  generation for that Scene.
 
 Power loss while writing the runtime target's CRC does not invalidate the
 previous winner. Initial creation is different: an interrupted newly-created
@@ -778,6 +844,88 @@ The Session 047 logging-only 64-byte `ASENSURE` boot-deadline diagnostic
 capsule remains in place for any future lower-layer failures.
 `DEV_MODES.md` owns its exact 72-byte bootlog envelope.
 
+## Resolved: a torn record stopped AutoSave (Session 074)
+
+**Symptoms (hardware, 2026-09-29):**
+
+- edits (including Effect type changes) did not survive a reboot;
+- after a Bank save to a new slot, every boot reloaded the whole Bank from the
+  library instead of restoring AutoSave;
+- nothing was shown to the user.
+
+**Evidence** (`SD_CARD_ATS_BOOT_BUG/`, committed):
+
+- `.hcprms2` was valid (generation 100, Bank 25);
+- `.hcprms1` was **65,536 B**: a torn generation 101 with commit 0 and CRC 0,
+  and 30,768 B of stale cluster data;
+- `settings.cfg` named Bank 27;
+- the trace held 20 boot sessions. From the tenth on: **663 drains admitted,
+  662 aborted, 1 cut off by power-off, 0 published**.
+
+**Cause chain:**
+
+1. An interrupted publication, most likely the 250 ms continuation drain
+   right after an edit, left A open for writing, so AsyncFATFS had stored its
+   cluster-rounded size.
+2. Both validators read past the record **one byte per poll until
+   end-of-file**: 272 chunk reads plus 30,768 single-byte reads = 31,040
+   polls in one phase. The first extra byte had already invalidated the
+   candidate, so the other reads proved nothing.
+3. The DEV stall observer on the runtime drain counted polls with an
+   unchanged phase even while bytes were moving, and aborted at 30,000. That
+   was about 1,040 polls short of end-of-file, every time.
+4. Each error cleared the continuation cache, so every retry (5 s later)
+   re-validated A first and aborted again. The repair step (remove and
+   recreate A) was never reached, and the scalar drain's spinning starved
+   the Pattern drain.
+5. After the user saved the Bank to slot 27, the only valid record still
+   belonged to Bank 25, so every boot saw a Bank mismatch (`V 0x07`) and ran a
+   Case-2 reload of all 16 Scenes (+3.2 s per boot). A working drain would
+   have re-identified the record with Bank 27 on its first run.
+
+**Fix** (commit `50610dd`; `074_SESSION_HANDOFF_LOG.md` §11):
+
+- one validation step shared by the drain and boot validators, with the
+  one-byte end-of-file probe (see "Background writer" step 1);
+- `overlong_mask` in the drain workspace (inside the 2,048 B stage union, so
+  0 B of RAM), reported as `V` flag bits 4..5 by both emitters;
+- the drain's stall observer now counts only polls with **no phase change
+  and no cursor progress**. The progress word is the 16-bit sum of the
+  drain's byte and item cursors. The observer storage stays 5 B, DEV-only
+  (`DEV_MODES.md`, "Stall detection");
+- `tools/decode_devlogs.py` decodes `V` bits 2..5, the 4-bit `X` site field,
+  and names all ten stall sites;
+- **no user error screen**, by user policy, because recovery is automatic.
+
+**Hardware result (2026-09-30, `SD_CARD_ATS_CORRECTION_OUTPUT/`):**
+
+- The first fixed boot showed `V 0x17` at 1,227 ms: winner B, Bank
+  mismatch, A overlong.
+- The first drain published generation 101 into A; that session then
+  published generations 101 → 144 with no stall.
+- The next boot restored from AutoSave (`V 0x03`, generation 144, Bank
+  match), and the reader finished at 1,383 ms with no reload.
+- Both records are 34,768 B and valid, and the torn `.pat06b` was rewritten
+  at 10,656 B.
+
+**Still open:**
+
+- The boot timeout the user also saw was not captured, and no link to this
+  defect was shown. A bench reproduction with `DEV_MODE_DIAGNOSTIC 1` (and
+  if needed `DEV_LOGGING_IWDG 1`) is the next step.
+- A deliberate torn-write reproduction and a card pull mid-drain were not
+  run as separate tests.
+
+**Rules this adds:**
+
+- Every validator proves exact length with a one-byte end-of-file probe.
+  Never stream an overlong tail.
+- Never skip or trust-by-default a candidate after repeated errors (it
+  could be the newer valid record).
+- Do not pre-truncate or size-check records at boot: the publication path
+  already deletes and recreates the inactive record.
+- Do not add a user error screen for failures that recover by themselves.
+
 ## Public API guide
 
 The public boundary is split deliberately. Retained owners use `Autosave.h`;
@@ -820,6 +968,12 @@ asynchronous request/status/ack facade.
 
 For each new retained scalar:
 
+0. check whether a reserved cell can take it without a format change. A new
+   Scene parameter can be appended into the reserved tail of the 118-byte
+   Scene allocation when zero is a safe restore value for old records (the
+   S072 Effect Morph and S074 bus compressor precedent: extend
+   `AUTOSAVE_SCENE_PARAM_COUNT` and `AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES`,
+   add the getter and reader branches, and assert the group geometry);
 1. identify the owning Bank/Scene/Kit/Instrument/Effect domain;
 2. append or explicitly version its format identifier and live-count contract;
    Phase C source fields are the one documented reserved-space migration;
@@ -869,6 +1023,11 @@ interaction/failure matrix is in
 `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; it is not a claim that already
 accepted writer cases are unverified.
 
+Session 074 hardware-verified torn-record recovery on a real torn card (see
+"Resolved: a torn record stopped AutoSave (Session 074)"). It also added the
+bus compressor Scene cells 41..44. Their round trip is covered by the user's
+report that the compressor works; the per-item matrix was not reported.
+
 Session 064 hardware-accepted Pattern AutoSave. The full Card B capture had 19
 valid hidden PAT4 candidates, a changed winner for every Scene, correct
 generation parity/CRC/allocator structure, 145 valid HCNAMES rows with every
@@ -915,6 +1074,24 @@ creation only and neither changes record validity nor retries, truncates,
 repairs, or accepts either hidden record. Its exact `/bootlog.bin` envelope is
 owned by `DEV_MODES.md`; this specification deliberately does not duplicate
 the diagnostic wire layout.
+
+Both validators emit one `V` (VALIDATED) record per complete A/B decision:
+the runtime drain (phase 5, or phase 0 on the continuation path) and the
+boot validator (phase 5). `value32` is the winner's generation. Flags
+(`AUTOSAVE_TRACE_VALIDATED_*`, `AutosaveTrace.h`):
+
+- bit 0: a winner exists;
+- bit 1: the winner (0 = A, 1 = B);
+- bit 2: Bank identity mismatch (runtime: slot and name; boot: settings
+  slot only);
+- bit 3: continuation cache (validation skipped);
+- bit 4: A rejected as overlong; bit 5: B rejected as overlong (S074);
+- bits 6..7: reserved zero.
+
+So `0x17` means winner B with a Bank mismatch and a torn A, and `0x03` means
+winner B with the Bank matching. The runtime drain's `X` (PHASE_STALL)
+record is site 2; since S074 it fires only after 30,000 polls with no
+progress (`DEV_MODES.md`).
 
 The reader emits `AUTOSAVE_TRACE_STAGE_BOOT_READER` (`Q`): flags `0x01` mean a
 Case-1 embedded-source mismatch, `0x02` a Case-3 Scene invalidation, `0x04` a

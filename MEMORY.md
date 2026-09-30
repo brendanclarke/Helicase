@@ -20,62 +20,72 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
-**Current working source**: Session 074 Bus Comp and fourth fader mode (`xfd`)
-implementations complete in source; hardware acceptance pending on
-`dev-ph5-effects` (2026-09-29).
-CrumpBit is already present in the tree.
+**Current working source**: Session 074 is closed on `dev-ph5-effects`
+(2026-09-30). **Phase 5 (the Effects bus and modular Effect system, initial
+pass) is largely complete.** Next: Session 075 starts **Phase 6** with copy
+and clear operations (`S075_PH6_COPY_CLEAR.md`, root).
 
-- **Commits:** HEAD `692abf8` ("dsp refactor") holds the S073 flash
-  expansion, the Load:[Samples] fix and the DSP CPU refactor. The closeout
-  edits (post-review corrections, drill-knob removal, the
-  `tools/dsp_golden` → `tools/dsp_test` rename, and the documentation) are
-  uncommitted. The user manages commits.
-- **Build at S073 close:** `text=486,688`, `data=416`, `bss=426,336`; flash
-  payload 487,104 B of 753,664 (**266,560 B free**); ITCM 4,168 / 16,384 B;
-  DTCM statics 4,448 B; FX arena 126,624 B.
-- **Hardware (user):** the S073 image boots; Load:[Samples] works; the DSP
-  refactor "seems ok" with about **10 % less CPU** on the worst-case Scene
-  with the StereoFilter Effect. The S072 Phase 5 acceptance matrices for
-  Steps 6–10 (`072_SESSION_HANDOFF_LOG.md` §11) are still not reported.
-- **Current session (074):** `S074_BUS_COMP_IMPLEMENTATION.md` and
-  `S074_FADER_XFD.md`: the complete Scene-owned master bus compressor plus the
-  fourth `xfd` fader mode, its mirrored taper, and persistence/menu path.
+- **Commits:** HEAD `50610dd` holds every S074 code change. The S074 closeout
+  documentation and the user's move of the four DSP/Effects specifications
+  into `knowledge_files/specification_reference/dsp_instruments_effects/`
+  are uncommitted. The user manages commits.
+- **Build at S074 close:** `text=502,512`, `data=416`, `bss=426,392`; flash
+  payload 502,928 B of 753,664 (**250,736 B free**); ITCM 4,168 / 16,384 B;
+  DTCM statics 4,480 B; FX arena 126,592 B at `0x20001180` (margin 3,712 B).
+  `LXRV2_lxr02.img` 502,944 B, SHA-256 `63eec2a6…aeb0` (record the `.img`
+  hash: the `.bin` is unstamped since S074).
+- **Hardware (user):** every S074 item accepted: Effect-page underlines,
+  CrumpBit (v1 baseline), bus compressor with tuning revision 1 and the
+  band-split saturator, `xfd`, and the AutoSave torn-record fix (card
+  self-repaired, generations 101 → 144, boot reader 1,383 ms).
 
-Session 073 in one paragraph:
+Session 074 in one paragraph:
 
-- **Program flash 480 → 736 KiB.** Sector 6 moved from samples to the
-  application; samples start at sector 7 (`0x080C0000`, 1,308,320 B of
-  audio). `Reset_Handler` is linked first. Every boot checks a stamped CRC32
-  per application sector (`flashImage.c`; stamped by `tools/build_lxrv2_img.py`). The
-  bootloader is still unproven past `0x08080000` (Phases A/B skipped by user
-  decision).
-- **Load:[Samples] restored** (it had been missing from the Load whitelist
-  since July); the modal waits for a running storage operation.
-- **Slow Load type switching** analysed and deferred (the trace logger stays
-  on): `knowledge_files/drafts/MENU_LOAD_SPEEDUP_SMOOTHNESS.md`.
-- **DSP CPU refactor** under the constant-CPU rule: batched ZDF divisions
-  (5 → 2 per sample, rounding-level only), string-free descriptor writer tags,
-  word-store DMA pack into a Normal non-cacheable MPU region with `DSB`,
-  fused voice post-chains, one-pass mixer dry + send, octave edge table
-  instead of `log2f()`. Silence gating and a software noise PRNG were
-  rejected.
-- **`tools/dsp_test/`**: the host DSP test bench (`DSP_TEST.md`).
+- **Effect-page automation underlines.** Names are underlined for any stored
+  Pattern automation (all 7 tracks of the viewed Pattern) or FX lock (any of
+  16 steps). The VOICE search is reused (0 B). Hold/release redraws use
+  `menu_repaint()` (`MENU_FX_ACT_HOLD_REPAINT`).
+- **Image script fold.** `tools/build_lxrv2_img.py` stamps and packages;
+  `stamp_image_check.py` is gone; `lxr02.bin` stays unstamped.
+- **CrumpBit (`cbt`, id 2).** The first arena Effect: an 8-bit offset-binary
+  ADC, data-line off/invert masks, DAC and 10 Hz AC coupling, then a mono
+  8-bit tape delay (20 ms – 1.60 s, 150 ms glide, tempo Sync) in 70,592 B of
+  the arena share.
+  - Effect-page framework: type-painted row 0, value-format hooks,
+    SELECT-LED ownership, home screen, the last-step-held hold rule.
+  - The three arena gaps are closed.
+  - It was the first image into sector 6: **the bootloader writes sector 6.**
+- **Master bus compressor (`cmp cam ctm csc`).** Scene-owned, LA-2A-like, on
+  St1 (`output2`) or St2 (`output`), with a velocity³ trigger sidechain.
+  - Band-split saturation plus a full-scale knee.
+  - No work while off: the one user-approved constant-CPU exception.
+  - Storage: AutoSave Scene params 41..44, `sceneset.scg` `bus_comp_*`;
+    +64 B SRAM1, 32 B DTCM.
+- **`xfd` fader mode (3).** Dry = vol × fader; send = send × mirrored fader
+  (closed-form taper inverse).
+- **AutoSave torn-record fix.** AsyncFATFS leaves a cluster-rounded size on
+  an interrupted write. The validators now prove exact length with a
+  one-byte EOF probe, the drain stall observer is progress-aware, and
+  `V` bits 4..5 log it. Recovery is silent (no UI, per user policy).
 
 **Permanent authority:**
 
-- `knowledge_files/log_archive/073_SESSION_HANDOFF_LOG.md` and
-  `072_SESSION_HANDOFF_LOG.md`;
-- `knowledge_files/specification_reference/`: `EFFECTS_BUS_REFERENCE.md`,
-  `EFFECTS_MIXER_DSP_REFERENCE.md` (new), `INSTRUMENTS_DSP_REFERENCE.md`
-  (new), `STORAGE_SRAM_MANIFEST.md` (renamed from `SRAM_MANIFEST.md`),
-  `CPU_USE_DSP_AUDIT.md`, `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`,
-  `MODULE_INTERCHANGE_SPEC.md`, `BANK_PRESET_ARCHITECTURE.md`,
-  `PATTERN_DYNAMIC_STACK.md`, `DEV_MODES.md`;
-- `EFFECTS_BUS_FEATURE_PLAN.md` (Phase 5 design record);
-- `tools/dsp_test/DSP_TEST.md`.
+- `knowledge_files/log_archive/074_SESSION_HANDOFF_LOG.md` (and 073, 072);
+- `knowledge_files/specification_reference/dsp_instruments_effects/`:
+  `EFFECTS_BUS_REFERENCE.md`, `EFFECTS_MIXER_DSP_REFERENCE.md`,
+  `INSTRUMENTS_DSP_REFERENCE.md`, `CPU_USE_DSP_AUDIT.md`;
+- `knowledge_files/specification_reference/`: `AUTOSAVE.md`,
+  `ASYNCFATFS_REFERENCE.md`, `DEV_MODES.md`, `STORAGE_SRAM_MANIFEST.md`,
+  `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`,
+  `BANK_PRESET_ARCHITECTURE.md`, `PATTERN_DYNAMIC_STACK.md`,
+  `OSC_INTERP_AUDIT.md`;
+- `tools/dsp_test/DSP_TEST.md`;
+- `EFFECTS_BUS_FEATURE_PLAN.md` (the Phase 5 design record) was deleted in
+  `ca77891`; read it with `git show f3a3105:EFFECTS_BUS_FEATURE_PLAN.md`.
 
 Still deferred: per-track step scale/shuffle playback (`PATTERN_DYNAMIC_STACK.md`
-§6.4) and the Phase 4.5 copy operations.
+§6.4). The copy operations (`pat_copyTrack/Pattern/Bar` are no-ops) open
+Phase 6 in Session 075.
 
 ## RAM Allocation Approval Policy
 
@@ -111,6 +121,10 @@ must not allocate those rings, cursors, or timing records.
 - **How to prove a DSP change:** `tools/dsp_test/` (host comparison plus the
   ARM `fpseq.py` check; `DSP_TEST.md`). No new utilities are installed for
   testing, and no per-stage profiler or extra CPU widgets (user).
+- **The one approved exception (S074):** the master bus compressor does no
+  work while `cmp` is off. With it on, its cost (about 1.4–1.8 %) counts
+  against the worst-case Scene; the user accounts for it on the `cpu`
+  widget. Do not generalise this exception to anything else.
 
 ## Volatile Notes
 
@@ -118,56 +132,53 @@ This section is for short carryover points only. Flush or rewrite it at session
 end; durable facts belong in `knowledge_files/log_archive/` or
 `knowledge_files/specification_reference/`.
 
-- **Session 073 is closed.** Durable record: `073_SESSION_HANDOFF_LOG.md`.
-  The root documents `S073_SESSION_STARTUP.md`, `S073_FLASH_EXPANSION.md`,
-  `S073_POST_FLASH_MENU_BUGFIXES.md`, `S073_CPU_USE_DSP_REDUCTION_REFACTOR.md`
-  and `S073_CPU_REDUCTION_IMPLEMENTATION.md` are superseded and may be
-  deleted. Next: `S074_EFFECT_BUGS_BUFFER_USE.md`.
-- **S074 Bus Comp is implemented in source.** `cmp` is wired through the
-  SceneData/AutoSave/sceneset/Preset ownership path, the final settings page,
-  the trigger funnel, and the mixer after the FX return. The production build
-  and image pass with `text=501,920`, `data=416`, `bss=426,384`, 4,472 B DTCM
-  statics, a 24 B compressor state, and a 126,592 B FX arena (3,712 B above
-  minimum). The diagnostic build also links with BC18 compiled. Hardware and
-  listening acceptance remain pending; durable notes are in
-  `S074_BUS_COMP_IMPLEMENTATION.md`.
-- **S074 XFD is implemented in source.** `MIXER_FADER_XFD` is mode 3 with dry
-  gain `volume × fader` and FX send `send × mirrored_fader`; the closed-form
-  mirror uses one division and no new RAM. SceneData/Preset/Menu/sceneset all
-  accept and retain 0..3, with the existing AutoSave byte unchanged. `make
-  all && make img` passes at `text=502,072`, `data=416`, `bss=426,384`,
-  251,176 B application flash headroom, 4,472 B DTCM statics, and a 126,592 B
-  FX arena. Hardware checks H1–H9 in `S074_FADER_XFD.md` remain pending.
-- **Session 072 (Phase 5 Effects bus) is closed in source.**
-  - Durable authority: `072_SESSION_HANDOFF_LOG.md` and
-    `EFFECTS_BUS_REFERENCE.md`.
-  - The step documents `S072_ST1..ST11_IMPLEMENTATION.md` may be deleted.
-    Everything durable is in the log, the reference and the specs.
-    `S072_ST1_IMPLEMENTATION.md` §21 (the flash-growth findings) is preserved
-    in log §5, `073_SESSION_HANDOFF_LOG.md` §14 and `STORAGE_SRAM_MANIFEST.md`
-    §3.6.
-- **Phase 5 hardware acceptance is pending** for Steps 6–10: the storage
-  fixtures, the Effect page walk-through, the FX sequencer remainder, the
-  automation/LFO matrix, and the gate/fan-out matrix. The checklist is in
-  `072_SESSION_HANDOFF_LOG.md` §11.
-- **S073 flash expansion (implemented; boots on hardware).**
-  - The application window is `0x08008000–0x080BFFFF` (736 KiB, sectors 1–6).
-    Samples start at sector 7 (`0x080C0000`, 1,308,320 B of audio).
-  - At the S073 close the image is 487,104 B, leaving **266,560 B** of
-    headroom. Layout and guards: `STORAGE_SRAM_MANIFEST.md` §3–§4.
+- **Session 074 is closed.** Durable record: `074_SESSION_HANDOFF_LOG.md`.
+  The ten root `S074_*.md` documents are superseded (the user deletes them).
+  Next: `S075_PH6_COPY_CLEAR.md` (Phase 6: copy/clear).
+- **S074 open items** (details in the log §13 and `SCOPING_TARGETS.md`
+  "Session 074 carry-forward"):
+  - the boot timeout the user saw is unexplained; reproduce on the bench with
+    `DEV_MODE_DIAGNOSTIC 1` (then `DEV_LOGGING_IWDG 1` if it hangs);
+  - `cpu` widget reading with `cmp` on against off not taken;
+  - BC11 (track 7 counts as compressor sidechain voice 6) unconfirmed;
+  - O1: a Settings Load bulk apply equalises per-voice Morph and `srt`
+    across the VOICE edit mask (existing, not fixed);
+  - `DTYPE_PM63` Effect pan rows show centre (64) as `1`;
+  - F4 trace-ring priorities (lifecycle records drop under dirty bursts);
+  - saturator α 0.35 not A/B tested; CrumpBit minimum-share run not reported;
+  - stale comments: `BusCompressor.h` (24 B), the `BusCompressor.c` loop
+    comment (+0.45 %), `CrumpBitEffect.h` (73,632 B; now 73,600), the C4
+    comment placement in `menu.c`, `main.c` about 532.
+- **AutoSave rule (S074):** every validator proves exact length with a
+  one-byte end-of-file probe. AsyncFATFS stores a cluster-rounded size while
+  a file is open for writing, so an interrupted write leaves an overlong
+  file. The drain's stall observer counts only polls without progress.
+  Self-recovering failures get trace records, not user screens (user
+  policy).
+- **Bus compressor rules (S074):** St1 = `output2`, St2 = `output`; the
+  settings page stays last (`MENU_GLOBAL_SCENE_SUBPAGE`; new global pages go
+  before it); the four `PAR_BUS_COMP_*` ids never commit through
+  `menu_parseGlobalParam()` (refresh-only there).
+- **Effect page (S074):** type UI lives in the registry (layout +
+  `effect_ui_hooks_t`), never in `menu.c` branches; every SELECT LED write
+  goes through `menuEffects_renderSelectLeds()`; any redraw that can move an
+  underline between rows uses `menu_repaint()`; held values come from the
+  last step held; the runtime union has 20 B spare.
+- **Phase 5 hardware acceptance** for S072 Steps 6–10 is still not reported
+  (`072_SESSION_HANDOFF_LOG.md` §11).
+- **Flash and image.**
+  - The window is `0x08008000–0x080BFFFF` (736 KiB); samples start at sector
+    7 (`0x080C0000`, 1,308,320 B of audio).
+  - At the S074 close the image ends at `0x08082C90`, 11,408 B into sector 6.
+    Every S074 image booted: **the LXRV2 bootloader writes sector 6.** Its
+    contents are in `STORAGE_SRAM_MANIFEST.md` §3.2a.
   - **Rollback hazard:** a pre-S073 firmware over a grown image with a
-    pre-S073 sample install plays program code as audio. Reinstall samples at
-    low volume before rolling back past S073.
-  - Every boot checks a stamped CRC32 per application sector
-    (`flashImage.c`; since S074 `tools/build_lxrv2_img.py` stamps it in
-    `make img`, the only image script; `lxr02.bin` stays unstamped).
-    A mismatch shows `Img BAD s:…` and waits for BAR1.
-  - The LXRV2 bootloader is still unproven past `0x08080000`. The factory
-    app is 275,832 B and has no flash-writing code. Normal-size updates
-    leave sectors 6–11 intact.
-  - The first image that reaches sector 6 is the real test. No test build
-    for it exists: the unrequested `FLASH_GROWTH_DRILL_KB` knob was removed
-    on 2026-09-29.
+    pre-S073 sample install plays program code as audio. Reinstall samples
+    at low volume before rolling back past S073.
+  - Every boot checks a stamped CRC32 per application sector (`flashImage.c`;
+    `tools/build_lxrv2_img.py` stamps it in `make img`; `lxr02.bin` stays
+    unstamped). A mismatch shows `Img BAD s:…` and waits for BAR1. D-C1
+    (keep the check permanently) is still undecided; it stays.
 - **S073 DSP refactor invariants.**
   - New instrument descriptor rows need the right `IM_SPECIAL_*` tag
     (`ROW_SPECIAL`); run `make -C tools/dsp_test special_tags`.
@@ -177,8 +188,7 @@ end; durable facts belong in `knowledge_files/log_archive/` or
     point; the distortion division stays (no bypass at drive 0).
   - The DMA region is Normal non-cacheable; `pack_audio_half()` ends with
     `DSB`.
-  - ITCM grew 400 B (`osc_setFreq` standalone); ITCM growth is RAM under the
-    approval policy.
+  - ITCM growth is RAM under the approval policy.
 - **Measuring flash.** `link_budget.py` warns below 16 KiB. Measure every
   change with
   `python3 tools/link_budget.py arm-none-eabi-nm build/lxr02.elf`. Use
@@ -189,7 +199,7 @@ end; durable facts belong in `knowledge_files/log_archive/` or
     out and marks AutoSave.
   - EffectsManager and FxBuffer are foreground-only.
   - The DTCM arena is never cleared by the system ("clear unless you
-    adopt").
+    adopt"; masking unwritten reads, as CrumpBit does, counts as clearing).
   - Local Effect indices are type-relative, and the mask gate keeps fan-out
     safe.
 - **Blank names** save as `none.drm`/`none.fx` (all-space stem); an empty
@@ -198,18 +208,22 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   rejected. Delete root `.hcnames`, `.hcnamtmp`, `.hcprms1` and `.hcprms2`
   once, and firmware rebuilds them.
 - **Carried small debt** (SCOPING_TARGETS "Session 072 carried debt"; status
-  in `073_SESSION_HANDOFF_LOG.md` §9.3):
-  - `fxbuf_init()` handoff-reset order (diagnostic only);
+  in `074_SESSION_HANDOFF_LOG.md` §13.3):
   - Makefile echoed comments and the default goal;
-  - the `mixer.c` and (S073) `ResonantFilter.c` duplicated comment lines;
-  - the FX return ramp while `off` (Session 074's buffer type);
-  - stale `verify_bank_autosave.py`.
-  - Closed in S073: the stack wording (resolved) and the
-    `modNode_waveInterpGeneration` initializer (verified harmless).
+  - the `mixer.c` and `ResonantFilter.c` duplicated comment lines;
+  - `presetManager.c` comment indentation;
+  - stale `verify_bank_autosave.py` (129 rows; 161 now);
+  - unreachable Scene Save phases 33–36.
+  - Closed in S074: the `fxbuf_init()` order and the FX return ramp while
+    `off`.
+- **Repository hygiene:** the card copies `SD_CARD_ATS_BOOT_BUG/` and
+  `SD_CARD_ATS_CORRECTION_OUTPUT/` (with macOS `.Spotlight-V100`) are
+  committed; they are the evidence for the S074 AutoSave fix.
 - S070 and S071 task documents are superseded by their handoff logs and may
   be deleted.
 - Phase 4.5 copy operations (`pat_copyTrack`, `pat_copyPattern`,
-  `pat_copyBar`) remain queued.
+  `pat_copyBar`) are still no-ops; they open Phase 6 in Session 075
+  (`S075_PH6_COPY_CLEAR.md`).
 - S069 planning documents (`S069_ATS_PAT_BOUNDED_CPU.md`,
   `S069_NON_SEMANTIC_MAINTENANCE.md`, `S069_SLACK_REACTIVE_COMPACTION.md`,
   and their CLAUDE variants/implementation docs) are superseded by
@@ -983,9 +997,11 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
 | Current AutoSave format, ownership, writer, and limitations? | `knowledge_files/specification_reference/AUTOSAVE.md` |
 | Development screen diagnostics and file logging? | `knowledge_files/specification_reference/DEV_MODES.md` |
 | Current module/API ownership boundaries? | `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md` |
-| Effect system (types, FX bus, FX sequencer, Effect automation/LFO, adding a type)? | `knowledge_files/specification_reference/EFFECTS_BUS_REFERENCE.md` |
-| Instrument DSP, modulation/LFO, their costs, adding parameters or types? | `knowledge_files/specification_reference/INSTRUMENTS_DSP_REFERENCE.md` |
-| Mixer, FX bus and Effect DSP, output pipeline, buffer-using Effects? | `knowledge_files/specification_reference/EFFECTS_MIXER_DSP_REFERENCE.md` |
+| Master bus compressor, `xfd` fader mode, CrumpBit DSP? | `knowledge_files/specification_reference/dsp_instruments_effects/EFFECTS_MIXER_DSP_REFERENCE.md` (§3.2, §4.4, §5A) |
+| Phase 6 copy/clear starting point? | `S075_PH6_COPY_CLEAR.md` (root) |
+| Effect system (types, FX bus, FX sequencer, Effect automation/LFO, adding a type)? | `knowledge_files/specification_reference/dsp_instruments_effects/EFFECTS_BUS_REFERENCE.md` |
+| Instrument DSP, modulation/LFO, their costs, adding parameters or types? | `knowledge_files/specification_reference/dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md` |
+| Mixer, FX bus and Effect DSP, output pipeline, buffer-using Effects? | `knowledge_files/specification_reference/dsp_instruments_effects/EFFECTS_MIXER_DSP_REFERENCE.md` |
 | Flash, sample flash and RAM layout; allocation rules? | `knowledge_files/specification_reference/STORAGE_SRAM_MANIFEST.md` |
 | Proving a DSP change on the host? | `tools/dsp_test/DSP_TEST.md` |
 | Confirmed pin assignments / IRQs? | `knowledge_files/hardware_archive/HARDWARE_MAP.md` |
@@ -995,7 +1011,10 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
 ### Specification-reference index
 
 These are the thirteen authoritative/reference documents under
-`knowledge_files/specification_reference/`. `FILESYSTEM_SPEC.md` is the
+`knowledge_files/specification_reference/`. Since Session 074 the four DSP
+and Effects documents (`EFFECTS_BUS_REFERENCE.md`,
+`EFFECTS_MIXER_DSP_REFERENCE.md`, `INSTRUMENTS_DSP_REFERENCE.md`,
+`CPU_USE_DSP_AUDIT.md`) live in its `dsp_instruments_effects/` subfolder. `FILESYSTEM_SPEC.md` is the
 product-level source of truth; `ASYNCFATFS_REFERENCE.md` is its low-level
 filesystem implementation companion. For AutoSave specifically,
 `AUTOSAVE.md` is authoritative and `FILESYSTEM_SPEC.md` contains only the
@@ -1005,19 +1024,19 @@ and may contain historical snapshots as noted below.
 
 | File | What it contains | Use it when |
 |------|------------------|------------|
-| `ASYNCFATFS_REFERENCE.md` | Foreground-pumped async FAT32/VFAT contracts: component paths, LFN/SFN identity, object iteration, removal, terminator-aware directory-entry publication, lazy directory-cluster initialization, and flush boundaries. | Changing `Core/Hardware/SD/asyncfatfs/` or adding filesystem operations. |
-| `AUTOSAVE.md` | Implemented scalar HCPR and per-Scene PAT4 hidden A/B formats, boot readers, ownership, dirty masks, writer lifecycle, power-loss behavior, and validation status, including the S072 v3 Effect region. Updated through Session 072. | Changing AutoSave format, boot restore, dirty hooks, capture, scheduling, or recovery. |
-| `BANK_PRESET_ARCHITECTURE.md` | Hierarchy overview (Bank → Scene → Kit → Instrument), BankData voice-edit mask, SceneData parameter images, morph engine, runtime overlay architecture, Scene mod targets, `parameter_values[]` legacy bridge, dirty marking, boot restore order, the Scene target table (incl. `fxm`), Effect overlays, and the S072 edit-mask layout gate. Updated through Session 072. | Understanding parameter storage, morph interpolation, runtime overlays, Scene activation, or dirty marking. |
-| `CPU_USE_DSP_AUDIT.md` | DSP performance audit: the Session 073 cost audit (findings F1–F10, sound classes S0–S4, checked-and-rejected ideas) above the 2026-05 historical audit (render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA), and the ordered optimization record (items 1–26, including the S073 results). | Investigating audio underruns or planning an optimization. For how the DSP works now, use the two DSP references. |
-| `DEV_MODES.md` | Screen-only diagnostic versus file-only logging contract, current `bootlog.bin`/`asavetrc.bin` formats, duplicate limitation, and failed unified-log warning. | Adding or interpreting diagnostics, trace, or logging output. |
-| `EFFECTS_BUS_REFERENCE.md` | As-built Phase 5 Effect system: module map, signal flow and fader modes, type contract and registry self-check codes, retained data and type change, resolution order, DTCM arena and handoff, Effect page, fan-out and layout gate, FX sequencer, IDs/automation/LFO, `.fx`/HCNAMES/AutoSave, lifecycle, design rationale, debugging, and the add-a-type tutorial. | Adding an Effect type or changing anything in the Effect/bus/FX-sequencer path. |
-| `FILESYSTEM_SPEC.md` | Current product storage specification through Session 072: root layout, typed 161-row HCNAMES, PAT4, `.fx` v2 Effect children, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, boot restore, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
-| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 072 (including EffectsManager, FxBuffer, menuEffects, StepScale) for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
+| `ASYNCFATFS_REFERENCE.md` | Foreground-pumped async FAT32/VFAT contracts: component paths, LFN/SFN identity, object iteration, removal, terminator-aware directory-entry publication, lazy directory-cluster initialization, flush boundaries, and (S074) the cluster-rounded size of a file open for writing and the one-byte length-probe rule. | Changing `Core/Hardware/SD/asyncfatfs/` or adding filesystem operations. |
+| `AUTOSAVE.md` | Implemented scalar HCPR and per-Scene PAT4 hidden A/B formats, boot readers, ownership, dirty masks, writer lifecycle, power-loss behavior (including torn records), and validation status, including the S072 v3 Effect region, the S074 bus compressor cells 41..44, the S074 torn-record fix and the `V` flag layout. Updated through Session 074. | Changing AutoSave format, boot restore, dirty hooks, capture, scheduling, or recovery. |
+| `BANK_PRESET_ARCHITECTURE.md` | Hierarchy overview (Bank → Scene → Kit → Instrument), BankData voice-edit mask, SceneData parameter images, morph engine, runtime overlay architecture, Scene mod targets, `parameter_values[]` legacy bridge, dirty marking, boot restore order, the Scene target table (incl. `fxm`), Effect overlays, the S072 edit-mask layout gate, the S074 bus compressor settings and the Settings-Load bulk-apply hazard (O1). Updated through Session 074. | Understanding parameter storage, morph interpolation, runtime overlays, Scene activation, or dirty marking. |
+| `dsp_instruments_effects/CPU_USE_DSP_AUDIT.md` | DSP performance audit (S074 cost additions items 27–31): the Session 073 cost audit (findings F1–F10, sound classes S0–S4, checked-and-rejected ideas) above the 2026-05 historical audit (render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA), and the ordered optimization record (items 1–26, including the S073 results). | Investigating audio underruns or planning an optimization. For how the DSP works now, use the two DSP references. |
+| `DEV_MODES.md` | Screen-only diagnostic versus file-only logging contract, current `bootlog.bin`/`asavetrc.bin` formats (including the S074 `V` flag layout), the stall-detection sites (the drain is progress-aware since S074), the BC18 settings-page check, duplicate limitation, and failed unified-log warning. | Adding or interpreting diagnostics, trace, or logging output. |
+| `dsp_instruments_effects/EFFECTS_BUS_REFERENCE.md` | As-built Phase 5 Effect system through S074 (registry `off/flt/cbt`, the page hook/layout contract, the automation-underline rule, CrumpBit's page): module map, signal flow and fader modes, type contract and registry self-check codes, retained data and type change, resolution order, DTCM arena and handoff, Effect page, fan-out and layout gate, FX sequencer, IDs/automation/LFO, `.fx`/HCNAMES/AutoSave, lifecycle, design rationale, debugging, and the add-a-type tutorial. | Adding an Effect type or changing anything in the Effect/bus/FX-sequencer path. |
+| `FILESYSTEM_SPEC.md` | Current product storage specification through Session 074 (the `sceneset.scg` line table with the `bus_comp_*` keys and `fader_setting` 0..3; the `cbt` `.fx` keys): root layout, typed 161-row HCNAMES, PAT4, `.fx` v2 Effect children, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, boot restore, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
+| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 074 (including EffectsManager, FxBuffer, menuEffects and its S074 page extensions, BusCompressor, StepScale) for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
 | `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
 | `PATTERN_DYNAMIC_STACK.md` | Dynamic Pattern storage (address array, pool, bitmap), PAT4, Pattern Stack Service, step automation encoding and drain, including S072 Effect targets and Effect step markers. | Changing Pattern storage, step automation, or the automation drain. |
-| `STORAGE_SRAM_MANIFEST.md` | On-chip storage map (renamed from `SRAM_MANIFEST.md` in S073): program flash window, image layout, linker guards, boot image check, bootloader facts and growth paths; sample flash layout and guards; the static RAM ledger (SRAM1, DTCM and the FX arena, ITCM contents, DMA region); SRAM1 owners; the reservation and approval policy. SD card storage is only referenced. | Changing retained state, flash layout or sample storage, adding caches/names, or evaluating memory cost. Update it in the same change. |
-| `INSTRUMENTS_DSP_REFERENCE.md` | Instrument DSP (S073): timing model and constant-CPU rule, per-block sequence, tagged runtime slots, descriptors and the write path (special-writer tags), the four voice engines, oscillator/filter/envelope/transient/distortion building blocks, LFO/velocity/Morph/automation modulation, measured costs, and how to add parameters, writers, modes and instrument types. | Changing or extending voices, parameters, modulation or their cost. |
-| `EFFECTS_MIXER_DSP_REFERENCE.md` | Mixer and Effect DSP (S073): number formats and headroom, jack routing, fader modes, dry/send arithmetic, the FX bus and return, output buffers, DMA pack and MPU, the StereoFilter DSP, the DTCM arena contract for buffer-using Effects, measured costs, and how to add Effect DSP or change the mixer and output pipeline. | Changing the mixer, the FX bus, an Effect's DSP, or the output path. |
+| `STORAGE_SRAM_MANIFEST.md` | On-chip storage map (renamed from `SRAM_MANIFEST.md` in S073; S074 ledger, sector 6 contents): program flash window, image layout, linker guards, boot image check, bootloader facts and growth paths; sample flash layout and guards; the static RAM ledger (SRAM1, DTCM and the FX arena, ITCM contents, DMA region); SRAM1 owners; the reservation and approval policy. SD card storage is only referenced. | Changing retained state, flash layout or sample storage, adding caches/names, or evaluating memory cost. Update it in the same change. |
+| `dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md` | Instrument DSP (S073; S074 sidechain tap in the trigger funnel): timing model and constant-CPU rule, per-block sequence, tagged runtime slots, descriptors and the write path (special-writer tags), the four voice engines, oscillator/filter/envelope/transient/distortion building blocks, LFO/velocity/Morph/automation modulation, measured costs, and how to add parameters, writers, modes and instrument types. | Changing or extending voices, parameters, modulation or their cost. |
+| `dsp_instruments_effects/EFFECTS_MIXER_DSP_REFERENCE.md` | Mixer and Effect DSP (S073, S074: CrumpBit DSP, the master bus compressor, `xfd`): number formats and headroom, jack routing, fader modes, dry/send arithmetic, the FX bus and return, output buffers, DMA pack and MPU, the StereoFilter DSP, the DTCM arena contract for buffer-using Effects, measured costs, and how to add Effect DSP or change the mixer and output pipeline. | Changing the mixer, the FX bus, an Effect's DSP, or the output path. |
 
 ---
 
@@ -1153,6 +1172,11 @@ while (audioCodec_queueFreeSlots() > 0) {
 channel frame (`pack_frameWord()`), same memory image as the old two
 halfwords, into the Normal non-cacheable `.dma_nocache` region, and ends with
 `DSB`. Full signal path and costs: `EFFECTS_MIXER_DSP_REFERENCE.md`.
+
+**Mixer output names (S074, easy to get wrong):** `mixer_calcNextSampleBlock(output, output2)`:
+`output` = `audioOutBuffer` = DAC2 = **St2** (OUT2); `output2` = `audioOutBuffer2` =
+DAC1 = **St1** (MAIN jacks and headphones). The master bus compressor runs last
+in the mixer, on one of these pairs, before the pack.
 
 **OUTPUT_DMA_SIZE = 32** is the effective LXR-master DSP/control block (confirmed correct in Session 019 — do NOT revert to 16).
 **AUDIO_DMA_FRAMES = 96** is the hardware DMA half; render budget per queued hardware slot is **2.18ms** = 471,288 cycles at 216MHz.

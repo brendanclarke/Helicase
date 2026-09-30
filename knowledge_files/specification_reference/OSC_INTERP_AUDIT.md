@@ -10,6 +10,9 @@ frequency cache, FM, noise, ITCM placement, costs) is described in
 `INSTRUMENTS_DSP_REFERENCE.md` §6.1. Interpolation itself is unchanged; the
 per-block limit is `OSC_WAVE_INTERP_MAX_ACTIVE` (2).
 
+Session 074 note: unchanged. The DSP references now live in
+`knowledge_files/specification_reference/dsp_instruments_effects/`.
+
 ## Goal
 Add simple/fast/dirty oscillator waveform interpolation for modulation-driven waveform automation, with a global ON/OFF setting that persists in global save/load.
 

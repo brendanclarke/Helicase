@@ -70,7 +70,7 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
 ├── tools/
 │   ├── build_lxrv2_img.py          ← stamps the boot image check and packages the .bin → LXRV2_lxr02.img
 │   ├── link_budget.py              ← flash/ITCM/DTCM/arena report after every build
-│   ├── decode_devlogs.py           ← decodes /bootlog.bin and /asavetrc.bin
+│   ├── decode_devlogs.py           ← decodes /bootlog.bin and /asavetrc.bin (V/X layouts updated S074)
 │   └── dsp_test/                   ← host DSP test bench (DSP_TEST.md, S073)
 ├── build/                          ← generated, not in VCS
 ├── knowledge_files/
@@ -163,10 +163,11 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
     │   ├── clockSync.c/h
     │   ├── StepScale.c/h            ← shared track/FX step-scale table (Phase 5)
     ├── DSP/
-    │   ├── Effects/                 ← Phase 5: EffectsManager (registry/resolution), FxBuffer (DTCM arena), EffectTypes.h, StereoFilter/
+    │   ├── Effects/                 ← Phase 5: EffectsManager (registry/resolution), FxBuffer (DTCM arena), EffectTypes.h, StereoFilter/, CrumpBit/ (S074)
     │   └── Instruments/             ← InstrumentManager + Drum/Snare/Cymbal/HiHat descriptor tables
     ├── DSPAudio/
     │   ├── random.c/h               ← F765 RNG port (PLL48CLK, bare register)
+    │   ├── BusCompressor.c/h        ← Scene-owned master bus compressor on St1/St2 (S074)
     │   └── [all DSP voice files]    ← ported; mixer_calcNextSampleBlock wired to AudioCodecManager
     └── compat/
         ├── stm32f4xx.h              ← vestigial-include shim via <stdint.h>
@@ -182,9 +183,9 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
 | Confirmed pin assignments / IRQs? | `knowledge_files/hardware_archive/HARDWARE_MAP.md` |
 | Sequencer / DSP architecture plans? | `knowledge_files/hardware_archive/AVR_TO_F765_MIGRATION.md` |
 | Current known issues and reminders? | `MEMORY.md` |
-| Effect system (FX bus, Effect types, FX sequencer)? | `knowledge_files/specification_reference/EFFECTS_BUS_REFERENCE.md` |
-| How the instrument DSP and modulation work, what they cost, how to extend them? | `knowledge_files/specification_reference/INSTRUMENTS_DSP_REFERENCE.md` |
-| Mixer, FX bus and Effect DSP, output pipeline, costs? | `knowledge_files/specification_reference/EFFECTS_MIXER_DSP_REFERENCE.md` |
+| Effect system (FX bus, Effect types, FX sequencer)? | `knowledge_files/specification_reference/dsp_instruments_effects/EFFECTS_BUS_REFERENCE.md` |
+| How the instrument DSP and modulation work, what they cost, how to extend them? | `knowledge_files/specification_reference/dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md` |
+| Mixer, FX bus and Effect DSP, output pipeline, costs? | `knowledge_files/specification_reference/dsp_instruments_effects/EFFECTS_MIXER_DSP_REFERENCE.md` |
 | Flash, sample flash and RAM layout? | `knowledge_files/specification_reference/STORAGE_SRAM_MANIFEST.md` |
 | Testing a DSP change on the host? | `tools/dsp_test/DSP_TEST.md` |
 | Module/API ownership and specifications? | `knowledge_files/specification_reference/` (indexed in `MEMORY.md`) |
