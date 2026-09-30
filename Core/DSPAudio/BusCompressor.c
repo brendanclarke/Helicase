@@ -44,14 +44,50 @@
 #define BUS_COMP_SAT_SPAN          1.5f
 
 /*
- * Compressor runtime state (24 B DTCM; approved up to 32 B, S074).
+ * Band-split saturation and output ceiling constants (S074_COMP_SAT_UPDATE.md).
+ *
+ * What:       BUS_COMP_SPLIT_HZ is the one-pole crossover that divides each
+ *             channel into a low band L = LP(x) and its exact complement
+ *             H = x - L. BUS_COMP_HF_SAT_SHARE (alpha) is the share of H that
+ *             passes through the cubic saturator together with all of L; the
+ *             rest, (1 - alpha)·H, bypasses it linearly. BUS_COMP_CEIL_START
+ *             is where the full-scale safety knee begins, as a fraction of
+ *             full scale; the knee reaches full scale with zero slope.
+ * Why:        the cubic runs at the base rate, so the 3rd harmonic of any
+ *             content above fs/6 (~7.35 kHz: hi-hats, cymbals) folds back as
+ *             an inharmonic tone, and the kick's waveform intermodulates the
+ *             hats through the same curve. That is the "harsh" top end the
+ *             user heard at high cam. Saturating the lows fully and only a
+ *             quarter of the highs lowers those products by about 10-14 dB on
+ *             kick-plus-hat mixes (26 dB on a folded hat 3rd harmonic), and
+ *             leaves low-end saturation unchanged. The bypassed highs skip
+ *             the cubic's 1/d ceiling, so the knee restores the guarantee
+ *             that this stage never drives the DMA pack into its hard 24-bit
+ *             clip.
+ * Inputs:     REAL_FS; the coefficient is folded at compile time (expf of a
+ *             constant), so no transcendental function runs per block.
+ * Affiliates: busComp_processBlock() per-sample loop,
+ *             busComp_ceilingKnee(), bus_comp_state_t::split_lp[].
+ */
+#define BUS_COMP_SPLIT_HZ          2000.0f
+#define BUS_COMP_SPLIT_COEF \
+    (1.0f - expf(-2.0f * 3.14159265f * BUS_COMP_SPLIT_HZ / REAL_FS))
+#define BUS_COMP_HF_SAT_SHARE      0.25f
+#define BUS_COMP_CEIL_START        0.75f
+
+/*
+ * Compressor runtime state (32 B DTCM; approved up to 32 B, S074).
  *
  * What:       smoothed mean-square power, fast and memory gain reduction in
  *             dB, previous linear gain as the ramp origin, pending sidechain
- *             weight, and the active output pair.
+ *             weight, the band-split crossover's low-pass state per channel
+ *             (split_lp[0] = L, [1] = R, int32-unit floats; added by the
+ *             saturation update, +8 B, user-approved 2026-09-30), and the
+ *             active output pair.
  * Why DTCM:   read and written every block beside mixer state.
  * Lifetime:   static and zeroed at startup; each fade-in reseeds it, so an
- *             off period cannot leak stale cell state into a new target.
+ *             off period cannot leak stale cell or crossover state into a new
+ *             target.
  * Owner:      this file. Writers are the foreground block and trigger paths.
  */
 typedef struct {
@@ -60,6 +96,7 @@ typedef struct {
     float gr_memory_db;
     float gain_prev;
     float sc_pending;
+    float split_lp[2];
     uint8_t active;
 } bus_comp_state_t;
 
@@ -104,6 +141,40 @@ static inline float busComp_staticGainDb(float level_db, float threshold_db,
         return -slope * over;
     x = over + 0.5f * BUS_COMP_KNEE_DB;
     return -slope * x * x * (0.5f / BUS_COMP_KNEE_DB);
+}
+
+/*
+ * Full-scale safety knee on the wet output (S074_COMP_SAT_UPDATE.md §3.3).
+ *
+ * What:       a C1 quadratic knee in int32-unit floats. Identity below
+ *             T0 = BUS_COMP_CEIL_START x full scale (-2.5 dBFS); from T0 it
+ *             bends smoothly to reach exactly full scale with zero slope at
+ *             an input of 2·FS - T0 (1.25 FS); above that it holds at full
+ *             scale. The sign is preserved.
+ * Why:        with band-split saturation, 75 % of the high band bypasses the
+ *             cubic and therefore its 1/d ceiling. Without a ceiling on the
+ *             sum, loud hat peaks after makeup could reach the DMA pack's
+ *             hard 24-bit clip, which is harsher than any saturation. The
+ *             knee restores the stage's "never hard-clips" guarantee while
+ *             leaving everything below -2.5 dBFS untouched.
+ * Cost:       branchless and constant (abs, two clamps, one multiply-add, one
+ *             min, copysign), per the DSP CPU policy: no work is skipped
+ *             because the knee is currently inactive.
+ * Inputs:     one wet sample in int32 units (1.0 FS = 8,388,352).
+ * Outputs:    the same sample limited to |v| <= full scale.
+ * Caller:     busComp_processBlock() per-sample loop, both channels.
+ * Affiliates: BUS_COMP_CEIL_START, BUS_COMP_FULL_SCALE, the DMA pack's 24-bit
+ *             clamp (AudioCodecManager).
+ */
+static inline float busComp_ceilingKnee(float v)
+{
+    const float t0 = BUS_COMP_CEIL_START * BUS_COMP_FULL_SCALE;
+    const float span = 2.0f * (BUS_COMP_FULL_SCALE - t0);
+    const float k = 1.0f / (4.0f * (BUS_COMP_FULL_SCALE - t0));
+    const float a = fabsf(v);
+    const float over = fminf(fmaxf(a - t0, 0.0f), span);
+
+    return copysignf(fminf(a - over * over * k, BUS_COMP_FULL_SCALE), v);
 }
 
 void busComp_sidechainTrigger(uint8_t track, uint8_t velocity)
@@ -155,6 +226,9 @@ void busComp_processBlock(sample_mx_t *st1, sample_mx_t *st2,
     float c_in;
     float c_out;
     float c_out3;
+    float c_hf;
+    float lp_l;
+    float lp_r;
     float sum;
     uint8_t fade_out = 0u;
     uint8_t i;
@@ -203,6 +277,9 @@ void busComp_processBlock(sample_mx_t *st1, sample_mx_t *st2,
         busComp.gr_fast_db = ref_gr_db;
         busComp.gr_memory_db = 0.0f;
         busComp.gain_prev = 1.0f;
+        /* The crossover low-pass settles in ~4 samples, inside this fade. */
+        busComp.split_lp[0] = 0.0f;
+        busComp.split_lp[1] = 0.0f;
         w = 0.0f;
         w_step = 1.0f / (float)OUTPUT_DMA_SIZE;
     } else if (mode != busComp.active) {
@@ -250,34 +327,70 @@ void busComp_processBlock(sample_mx_t *st1, sample_mx_t *st2,
                   makeup_db) * BUS_COMP_LOG2_PER_DB_GAIN);
 
     /*
-     * Per-sample feed-forward detector, gain ramp, cubic saturator, and fade.
-     * c_in/c_out fold the full-scale and drive constants so small-signal gain
-     * stays equal to the ramped compressor gain while the cubic remains a soft
-     * ceiling at 1/drive. The sum is the selected pair's input power.
+     * Per-sample feed-forward detector, gain ramp, band-split saturation,
+     * full-scale knee, and fade (S074_COMP_SAT_UPDATE.md §3).
+     *
+     * What:       each channel is split by a one-pole crossover into
+     *             L = LP(x) and H = x - L (L + H = x exactly). The cubic
+     *             saturates s = L + alpha·H; the remaining (1 - alpha)·H is
+     *             added back linearly at the compressor gain; the sum passes
+     *             the branchless full-scale knee; then the one-block dry/wet
+     *             fade as before.
+     * Why:        the cubic's 3rd harmonic of hat and cymbal content above
+     *             ~7.35 kHz folds back inharmonically at the base rate, and the
+     *             kick intermodulates the hats through the same curve. Passing
+     *             most of the high band around the curve removes most of that
+     *             harshness while low-end saturation is unchanged.
+     * Scaling:    c_in/c_out fold the full-scale and drive constants, so the
+     *             cubic's small-signal gain equals the ramped compressor gain
+     *             g; c_hf = (1 - alpha)·c_out gives g_hf = gk·c_hf =
+     *             (1 - alpha)·g in int units for the bypass. Where the cubic is
+     *             linear, wet = (L + alpha·H + (1 - alpha)·H)·g = x·g: the
+     *             split is inaudible on clean material.
+     * State:      the crossover states live in locals for the block and are
+     *             stored back to busComp.split_lp[] afterwards.
+     * Detector:   unchanged; sum is the selected pair's input power.
+     * Cost:       about 25 extra float operations per stereo frame (~+0.45 %
+     *             CPU while on), constant.
      */
     c_in = drive * (1.0f / BUS_COMP_SAT_SPAN) * BUS_COMP_INV_FULL_SCALE;
     c_out = (BUS_COMP_SAT_SPAN * BUS_COMP_FULL_SCALE) / drive;
     c_out3 = c_out * (-1.0f / 3.0f);
+    c_hf = c_out * (1.0f - BUS_COMP_HF_SAT_SHARE);
     gk = busComp.gain_prev * c_in;
     gk_step = (gain - busComp.gain_prev) * c_in *
               (1.0f / (float)OUTPUT_DMA_SIZE);
+    lp_l = busComp.split_lp[0];
+    lp_r = busComp.split_lp[1];
     sum = 0.0f;
     for (i = 0u; i < OUTPUT_DMA_SIZE; i++) {
         const float xl = (float)buf[2u * i];
         const float xr = (float)buf[2u * i + 1u];
+        float hl;
+        float hr;
         float ul;
         float ur;
+        float g_hf;
 
         gk += gk_step;
         w += w_step;
+        g_hf = gk * c_hf;
         sum += xl * xl + xr * xr;
-        ul = fminf(fmaxf(xl * gk, -1.0f), 1.0f);
-        ur = fminf(fmaxf(xr * gk, -1.0f), 1.0f);
-        ul *= c_out + c_out3 * ul * ul;
-        ur *= c_out + c_out3 * ur * ur;
+        lp_l += BUS_COMP_SPLIT_COEF * (xl - lp_l);
+        lp_r += BUS_COMP_SPLIT_COEF * (xr - lp_r);
+        hl = xl - lp_l;
+        hr = xr - lp_r;
+        ul = fminf(fmaxf((lp_l + BUS_COMP_HF_SAT_SHARE * hl) * gk, -1.0f),
+                   1.0f);
+        ur = fminf(fmaxf((lp_r + BUS_COMP_HF_SAT_SHARE * hr) * gk, -1.0f),
+                   1.0f);
+        ul = busComp_ceilingKnee(ul * (c_out + c_out3 * ul * ul) + hl * g_hf);
+        ur = busComp_ceilingKnee(ur * (c_out + c_out3 * ur * ur) + hr * g_hf);
         buf[2u * i] = (sample_mx_t)(xl + w * (ul - xl));
         buf[2u * i + 1u] = (sample_mx_t)(xr + w * (ur - xr));
     }
+    busComp.split_lp[0] = lp_l;
+    busComp.split_lp[1] = lp_r;
     busComp.gain_prev = gain;
 
     /* The detector smooths this block's mean (L^2 + R^2)/2 over 5 ms. */

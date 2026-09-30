@@ -41,8 +41,12 @@
  *             Both hold signed 24-bit scale in int32 (1.0 = 8,388,352)
  *             after every voice and the FX return are summed.
  *             scene_index = the active Scene.
- * Outputs:    the selected pair is compressed, made up and soft-limited in
- *             place; the other pair is untouched. With cmp off and no fade
+ * Outputs:    the selected pair is compressed, made up, saturated and
+ *             soft-limited in place: the cubic saturates the low band plus a
+ *             quarter of the high band (crossover ~2 kHz), the rest of the
+ *             highs bypass it, and a smooth knee from -2.5 dBFS holds the sum
+ *             at or below full scale (S074_COMP_SAT_UPDATE.md). The other
+ *             pair is untouched. With cmp off and no fade
  *             pending the call returns after one settings read and clears
  *             any pending sidechain weight.
  * Transitions: off/on and target changes fade over one block; St1<->St2

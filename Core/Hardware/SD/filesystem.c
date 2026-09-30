@@ -925,6 +925,25 @@ typedef struct {
     uint8_t target_ready;
     uint8_t recovery_target_index;
     uint8_t recovery_using_names;
+    /*
+     * Candidates rejected as overlong during this validation pass (S074).
+     *
+     * What:       bit n set = candidate n (0 = A `.hcprms1`, 1 = B
+     *             `.hcprms2`) continued past AUTOSAVE_RECORD_BYTES, the
+     *             signature of a publication interrupted while its target was
+     *             open for writing (AsyncFATFS stores the cluster-rounded
+     *             size until close).
+     * Why:        the trace must show that a torn record was found and
+     *             rejected, although no error follows: the drain republishes
+     *             into it (user policy: log only, no error screen).
+     * Lifetime:   zeroed with the whole workspace at phase 0 of both
+     *             validators (memset of op_autosave_writer); lives in the
+     *             existing 2,048-byte operation union, so it adds no RAM.
+     * Writers:    filesystem_autosaveValidateCandidateStep().
+     * Readers:    the two VALIDATED emitters (flags bits 4..5,
+     *             AUTOSAVE_TRACE_VALIDATED_OVERLONG_SHIFT).
+     */
+    uint8_t overlong_mask;
 } filesystem_autosave_writer_state_t;
 
 /*
@@ -7783,6 +7802,106 @@ static uint32_t filesystem_autosaveRecoveryGeneration(void)
     return (op_autosave_writer.recovery_target_index == 0u) ? 1u : 0u;
 }
 
+/*
+ * Result of one bounded AutoSave candidate-validation step (S074).
+ *
+ * PENDING: the caller returns and polls the same phase again (one chunk was
+ * consumed, or an asynchronous sector read is outstanding). DECIDED:
+ * op_autosave_writer.candidate_valid holds the final verdict; the caller
+ * applies its own Bank-match rule and closes the candidate.
+ * Accessors: filesystem_autosaveValidateCandidateStep() and phase 3 of both
+ * validators.
+ */
+#define FS_AUTOSAVE_CANDIDATE_PENDING  0u
+#define FS_AUTOSAVE_CANDIDATE_DECIDED  1u
+
+/*
+ * Advance the open AutoSave candidate's streaming validation by one read.
+ *
+ * What:       while fewer than AUTOSAVE_RECORD_BYTES have been validated,
+ *             reads the next CRC-budgeted chunk (AUTOSAVE_CRC_BYTES_PER_TICK)
+ *             into Autosave.c's streaming validator. Once the whole record
+ *             has been consumed, reads exactly one more byte:
+ *             - data: the file continues past the record, so the candidate is
+ *               invalid at once and its bit is set in overlong_mask;
+ *             - end-of-file: the length is exact, and the header, commit and
+ *               CRC verdict from autosave_streamValidationFinish() stands.
+ *             A file that ends early is rejected by the same Finish call
+ *             (its byte count is not the record's).
+ * Why:        a publication interrupted while its target was open for writing
+ *             leaves AsyncFATFS's cluster-rounded size on the card (asyncfatfs.c
+ *             afatfs_saveDirectoryEntry(), NORMAL mode "exaggerates the
+ *             length"): 65,536 B for this 34,768 B record. The previous loop
+ *             read that 30,768-byte tail one byte per poll. At runtime that
+ *             was about 31,040 polls in one phase, so the drain's stall
+ *             observer aborted every attempt before the publication that
+ *             deletes and recreates the torn file, and AutoSave stopped
+ *             permanently (S074_AUTOSAVE_BOOT_BUG.md). The first byte past
+ *             the record already invalidates the candidate, so no later read
+ *             can change the verdict.
+ * Inputs:     op_file (the open candidate), op_bytes_done (validated bytes,
+ *             zeroed at the candidate's open), op_autosave_writer.validation,
+ *             and op_autosave_writer.candidate_index.
+ * Outputs:    FS_AUTOSAVE_CANDIDATE_PENDING, or FS_AUTOSAVE_CANDIDATE_DECIDED
+ *             with candidate_valid set. An overlong candidate also gets bit
+ *             candidate_index in overlong_mask. Once DECIDED, a refused close
+ *             may re-enter this phase; the stored overlong bit preserves the
+ *             same invalid verdict on that retry.
+ * Cost:       at most ceil(34,768 / 128) + 1 = 273 reads per candidate,
+ *             whatever the file's size.
+ * Accessors:  filesystem_autosaveParameterDrain_tick() phase 3 (runtime) and
+ *             filesystem_validateAutosaveWinner_tick() phase 3 (boot).
+ * Affiliates: autosave_streamValidationUpdate()/Finish() (Autosave.c),
+ *             filesystem_patternAutosaveCandidateValid() (the same one-byte
+ *             end-of-file probe for PAT4 records), AUTOSAVE_TRACE_VALIDATED_*,
+ *             drain phases 11 and 24 (which repair the torn file once
+ *             validation completes).
+ */
+static uint8_t filesystem_autosaveValidateCandidateStep(void)
+{
+    uint32_t n;
+
+    /* Preserve a decided overlong result if asynchronous close needs a retry. */
+    if ((op_autosave_writer.overlong_mask &
+         (uint8_t)(1u << op_autosave_writer.candidate_index)) != 0u) {
+        op_autosave_writer.candidate_valid = 0u;
+        return FS_AUTOSAVE_CANDIDATE_DECIDED;
+    }
+
+    if (op_bytes_done < AUTOSAVE_RECORD_BYTES) {
+        n = afatfs_fread(op_file, staging_buf,
+                         filesystem_autosaveCrcChunkBytes(
+                             AUTOSAVE_RECORD_BYTES - op_bytes_done));
+        if (n != 0u) {
+            autosave_streamValidationUpdate(&op_autosave_writer.validation,
+                                            op_bytes_done, staging_buf,
+                                            (uint16_t)n);
+            op_bytes_done += n;
+            return FS_AUTOSAVE_CANDIDATE_PENDING;
+        }
+        if (!afatfs_feof(op_file))
+            return FS_AUTOSAVE_CANDIDATE_PENDING;
+        /* Short file: Finish rejects any byte count but the record's. */
+        op_autosave_writer.candidate_valid =
+            autosave_streamValidationFinish(&op_autosave_writer.validation);
+        return FS_AUTOSAVE_CANDIDATE_DECIDED;
+    }
+
+    /* The whole record is validated; one byte decides overlong vs exact. */
+    n = afatfs_fread(op_file, staging_buf, 1u);
+    if (n != 0u) {
+        op_autosave_writer.candidate_valid = 0u;
+        op_autosave_writer.overlong_mask |=
+            (uint8_t)(1u << op_autosave_writer.candidate_index);
+        return FS_AUTOSAVE_CANDIDATE_DECIDED;
+    }
+    if (!afatfs_feof(op_file))
+        return FS_AUTOSAVE_CANDIDATE_PENDING;
+    op_autosave_writer.candidate_valid =
+        autosave_streamValidationFinish(&op_autosave_writer.validation);
+    return FS_AUTOSAVE_CANDIDATE_DECIDED;
+}
+
 /* -----------------------------------------------------------------------
 ** RUNTIME AUTOSAVE PARAMETER-DRAIN state machine
 **
@@ -7803,9 +7922,91 @@ static uint32_t filesystem_autosaveRecoveryGeneration(void)
 ** CRC and final commit marker through one open/close/sync publication path.
 ** ----------------------------------------------------------------------- */
 #if DEV_STALL_DETECTION
-/* Diagnostic-only phase observer for the runtime AutoSave drain. */
+/*
+ * Progress-aware stall observer for the runtime AutoSave drain (S074).
+ *
+ * What:       the phase and 16-bit progress word seen on the previous poll,
+ *             and the number of consecutive polls on which neither changed.
+ *             The drain aborts after FS_AUTOSAVE_DRAIN_STALL_POLLS such polls.
+ * Why:        the former observer counted polls with an unchanged phase even
+ *             while bytes were moving, so any long but progressing phase
+ *             (phase 3 reading a torn file's tail was the S074 case) was
+ *             killed. A true stall — a wedged read, a card removed, a close
+ *             that is never accepted — shows no progress and is still caught.
+ * Storage:    uint8_t + uint16_t + uint16_t = 5 B, the same as the former
+ *             uint8_t + uint32_t (RAM policy: no growth). It exists in
+ *             DEV_STALL_DETECTION builds only; the threshold fits 16 bits.
+ * Lifetime:   static; self-resets whenever the phase or progress changes, so
+ *             no explicit reset is needed at drain start (phase 0 differs from
+ *             the previous drain's terminal phase).
+ * Accessors:  filesystem_autosaveDrainStalled() only.
+ * Affiliates: filesystem_autosaveDrainProgress(), the X record (site 2), and
+ *             filesystem_pollPhaseStall(), which the other nine sites keep.
+ */
+#define FS_AUTOSAVE_DRAIN_STALL_POLLS 30000u
+_Static_assert(FS_AUTOSAVE_DRAIN_STALL_POLLS < UINT16_MAX,
+               "drain stall threshold must fit the 16-bit observer counter");
 static uint8_t op_autosave_drain_last_phase = 0u;
-static uint32_t op_autosave_drain_stall_ticks = 0u;
+static uint16_t op_autosave_drain_stall_ticks = 0u;
+static uint16_t op_autosave_drain_last_progress = 0u;
+
+/*
+ * Fold every drain cursor into one 16-bit progress word.
+ *
+ * What:       the modulo-65,536 sum of the cursors the drain phases advance:
+ *             op_bytes_done (validation, HCNAMES line writes), op_item_offset
+ *             (HCNAMES rows), stream_offset and chunk_written (copy, recovery
+ *             baseline, CRC write), mask_bytes_read (winner mask),
+ *             payload_scan_offset and patch_count (classification).
+ * Why:        each cursor only increases within its phase, so a changed sum is
+ *             proof of progress. A momentarily equal sum costs one poll of
+ *             count, never a false abort. The truncation is harmless: per-poll
+ *             advances are at most a few hundred.
+ * Inputs:     the file-scope cursors above. Output: the progress word.
+ * Accessors:  filesystem_autosaveDrainStalled().
+ * Affiliates: every drain phase that moves one of these cursors.
+ */
+static uint16_t filesystem_autosaveDrainProgress(void)
+{
+    return (uint16_t)(op_bytes_done + op_item_offset +
+                      op_autosave_writer.stream_offset +
+                      op_autosave_writer.chunk_written +
+                      op_autosave_writer.mask_bytes_read +
+                      op_autosave_writer.payload_scan_offset +
+                      op_autosave_writer.patch_count);
+}
+
+/*
+ * Report a true drain stall, once, at the threshold.
+ *
+ * What:       resets the count whenever op_phase or the progress word differs
+ *             from the previous poll; otherwise counts (saturating) and
+ *             returns nonzero exactly once on the threshold crossing.
+ * Why:        a long progressing validation/copy phase must not look wedged,
+ *             while a card or asynchronous operation that stops advancing
+ *             still needs the existing error close-down and retry.
+ * Inputs:     op_phase and filesystem_autosaveDrainProgress().
+ * Outputs:    nonzero once per stall; updates the three observer statics.
+ * Accessors:  filesystem_autosaveParameterDrain_tick() (first statement).
+ * Affiliates: filesystem_autosaveWriterFinishError(),
+ *             filesystem_autosaveWriterCompleted() (the retry).
+ */
+static uint8_t filesystem_autosaveDrainStalled(void)
+{
+    const uint16_t progress = filesystem_autosaveDrainProgress();
+
+    if (op_phase != op_autosave_drain_last_phase ||
+        progress != op_autosave_drain_last_progress) {
+        op_autosave_drain_last_phase = op_phase;
+        op_autosave_drain_last_progress = progress;
+        op_autosave_drain_stall_ticks = 0u;
+        return 0u;
+    }
+    if (op_autosave_drain_stall_ticks < UINT16_MAX)
+        op_autosave_drain_stall_ticks++;
+    return (uint8_t)(op_autosave_drain_stall_ticks ==
+                     FS_AUTOSAVE_DRAIN_STALL_POLLS + 1u);
+}
 #endif
 
 static void filesystem_autosaveParameterDrain_tick(void)
@@ -7814,19 +8015,20 @@ static void filesystem_autosaveParameterDrain_tick(void)
     /*
      * Observe and recover a true cooperative drain stall.
      *
-     * What: records one PHASE_STALL after 30,000 unchanged polls and routes
-     * the operation through the existing asynchronous writer error close-down.
-     * Why: unlike the delete and Bank observers, this state machine previously
-     * had no bounded escape from a soft SD stall. Inputs: op_phase and the
-     * current streamed byte offset. Outputs: one trace record and ERROR
-     * completion; no blocking close, remount, or new storage. Affiliates:
-     * filesystem_pollPhaseStall(), filesystem_autosaveWriterFinishError(),
-     * and op_autosave_writer.stream_offset.
+     * What: records one PHASE_STALL after FS_AUTOSAVE_DRAIN_STALL_POLLS
+     * (30,000) consecutive polls with neither a phase change nor cursor
+     * progress, then routes the operation through the existing asynchronous
+     * writer error close-down. Why: a long but advancing phase is valid work,
+     * while this state machine still needs a bounded escape from a soft SD
+     * stall. Inputs: op_phase, the drain progress word, and the current
+     * streamed byte offset. Outputs: one X record (site 2), the named code
+     * `DrSt<phase>`, and ERROR completion; the writer retries after five
+     * seconds with the dirty mask restored. No blocking close, remount, user
+     * screen, or new storage. Affiliates: filesystem_autosaveDrainStalled(),
+     * filesystem_autosaveWriterFinishError(), and
+     * op_autosave_writer.stream_offset.
      */
-    if (filesystem_pollPhaseStall(op_phase,
-                                  &op_autosave_drain_last_phase,
-                                  &op_autosave_drain_stall_ticks,
-                                  30000u)) {
+    if (filesystem_autosaveDrainStalled()) {
         uint32_t value = (uint32_t)op_phase <<
                          AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT;
 
@@ -7941,36 +8143,26 @@ static void filesystem_autosaveParameterDrain_tick(void)
         return;
 
     case 3: /* STREAM ONE BOUNDED CANDIDATE INTERVAL THROUGH VALIDATION */
-    {
-        uint16_t read_bytes;
-        uint32_t n;
-
         /*
-         * Limit every CRC-bearing candidate read to the shared work budget.
+         * Validate the open candidate through the shared bounded step (S074).
          *
-         * Inputs: op_bytes_done is the next validation offset until the exact
-         * record end. Output: no more than AUTOSAVE_CRC_BYTES_PER_TICK reaches
-         * Autosave.c per filesystem pass; one later single-byte read detects a
-         * trailing overlong record without adding CRC work. Why: validation is
-         * a foreground CRC producer just like initial creation and copy.
+         * What: one CRC-budgeted chunk per poll, then a single-byte end-of-file
+         * probe that rejects an overlong (torn) record at once and marks it in
+         * overlong_mask for the VALIDATED record. Why: reading an overlong
+         * tail to end-of-file one byte per poll tripped this drain's stall
+         * observer on every attempt, so the drain never reached the
+         * publication (phases 11/24) that deletes and recreates the torn file.
+         * Inputs/outputs: see filesystem_autosaveValidateCandidateStep(). On a
+         * verdict the runtime Bank rule (slot and display name) is applied and
+         * the candidate is closed (phase 4). A refused close repeats this phase
+         * and the helper preserves an overlong verdict. Affiliates: phase 5
+         * winner selection and VALIDATED record;
+         * filesystem_validateAutosaveWinner_tick() (the boot twin of this
+         * phase).
          */
-        read_bytes = (op_bytes_done < AUTOSAVE_RECORD_BYTES)
-            ? filesystem_autosaveCrcChunkBytes(
-                  AUTOSAVE_RECORD_BYTES - op_bytes_done)
-            : 1u;
-        n = afatfs_fread(op_file, staging_buf, read_bytes);
-
-        if (n != 0u) {
-            autosave_streamValidationUpdate(&op_autosave_writer.validation,
-                                            op_bytes_done, staging_buf,
-                                            (uint16_t)n);
-            op_bytes_done += n;
+        if (filesystem_autosaveValidateCandidateStep() ==
+            FS_AUTOSAVE_CANDIDATE_PENDING)
             return;
-        }
-        if (!afatfs_feof(op_file))
-            return;
-        op_autosave_writer.candidate_valid =
-            autosave_streamValidationFinish(&op_autosave_writer.validation);
         op_autosave_writer.candidate_bank_match = (uint8_t)(
             op_autosave_writer.candidate_valid &&
             autosave_streamValidationMatchesBank(
@@ -7980,7 +8172,6 @@ static void filesystem_autosaveParameterDrain_tick(void)
         if (afatfs_fclose(op_file, on_file_closed))
             op_phase = 4u;
         return;
-    }
 
     case 4: /* WAIT CANDIDATE CLOSE */
         if (!op_close_done)
@@ -8025,8 +8216,13 @@ static void filesystem_autosaveParameterDrain_tick(void)
          * recovery or copy-forward work begins. flags bit 0 says a winner
          * exists; bit 1 is its A/B index when present; bit 2 indicates the
          * winner's Bank identity does not match the current resident Bank
-         * (a legitimate Bank-session transition, not corruption). value is its
-         * generation (zero without a winner).
+         * (a legitimate Bank-session transition, not corruption); bits 4..5
+         * (S074) mark candidate A/B rejected as overlong, a publication torn
+         * by power loss. No error follows that rejection: the copy-forward
+         * below republishes into the inactive target, deleting and recreating
+         * the torn file, so the bits are the only record of it (user policy:
+         * trace only). value is the winner's generation (zero without a
+         * winner). Layout: AUTOSAVE_TRACE_VALIDATED_* in AutosaveTrace.h.
          */
         autosaveTrace_record(
             AUTOSAVE_TRACE_STAGE_VALIDATED,
@@ -8035,7 +8231,9 @@ static void filesystem_autosaveParameterDrain_tick(void)
                            ? (uint8_t)(op_autosave_writer.winner_index << 1u)
                            : 0u) |
                       (op_autosave_writer.have_winner &&
-                       !op_autosave_writer.winner_bank_match ? 4u : 0u)),
+                       !op_autosave_writer.winner_bank_match ? 4u : 0u) |
+                      (uint8_t)(op_autosave_writer.overlong_mask <<
+                                AUTOSAVE_TRACE_VALIDATED_OVERLONG_SHIFT)),
             op_autosave_writer.have_winner
                 ? op_autosave_writer.winner_generation : 0u);
         if (op_autosave_writer.have_winner &&
@@ -24518,21 +24716,22 @@ static void filesystem_autosaveWriterSchedule_tick(void)
         /*
          * Rearm the runtime drain's stall observer for this fresh admission.
          *
-         * What: forces filesystem_pollPhaseStall()'s first call for this
-         * drain to see a "changed" phase, the same way Bank Save's request
-         * function rearms its own observer. Why: unlike the two
-         * purely-diagnostic stall sites, a stall here forces a real
-         * FS_STATUS_ERROR completion (see filesystem_autosaveParameterDrain_tick());
-         * a stale near-threshold count carried over from an earlier,
-         * unrelated drain admission could otherwise make a healthy drain fail
-         * earlier than the intended ~30,000-poll budget if both happened to
-         * linger at the same early phase. Inputs: none. Outputs: two
-         * statics; no file I/O. Affiliates: filesystem_pollPhaseStall(),
+         * What: forces filesystem_autosaveDrainStalled()'s first call for this
+         * drain to see a changed phase and clears its no-progress count, the
+         * same way Bank Save's request function rearms its own observer. Why:
+         * unlike the two purely-diagnostic stall sites, a stall here forces a
+         * real FS_STATUS_ERROR completion (see
+         * filesystem_autosaveParameterDrain_tick()); a stale near-threshold
+         * count carried over from an earlier, unrelated drain admission could
+         * otherwise make a healthy drain fail earlier than the intended
+         * ~30,000-poll budget. Inputs: none. Outputs: three statics; no file
+         * I/O. Affiliates: filesystem_autosaveDrainStalled(),
          * filesystem_autosaveParameterDrain_tick().
          */
 #if DEV_STALL_DETECTION
         op_autosave_drain_last_phase = 0xffu;
         op_autosave_drain_stall_ticks = 0u;
+        op_autosave_drain_last_progress = 0u;
 #endif
         /*
          * Retain active transform ownership across the later generic FLUSH op.
@@ -26015,26 +26214,25 @@ static void filesystem_validateAutosaveWinner_tick(void)
         return;
 
     case 3: /* STREAM ONE BOUNDED CANDIDATE INTERVAL THROUGH VALIDATION */
-    {
-        uint16_t read_bytes;
-        uint32_t n;
-
-        read_bytes = (op_bytes_done < AUTOSAVE_RECORD_BYTES)
-            ? filesystem_autosaveCrcChunkBytes(
-                  AUTOSAVE_RECORD_BYTES - op_bytes_done)
-            : 1u;
-        n = afatfs_fread(op_file, staging_buf, read_bytes);
-        if (n != 0u) {
-            autosave_streamValidationUpdate(&op_autosave_writer.validation,
-                                            op_bytes_done, staging_buf,
-                                            (uint16_t)n);
-            op_bytes_done += n;
+        /*
+         * Validate the open candidate through the shared bounded step (S074).
+         *
+         * What: the same chunked read and single-byte end-of-file probe as the
+         * runtime drain, so an overlong (torn) record costs one extra read at
+         * boot instead of about 31,000 (about 0.4 s of pre-audio boot time on
+         * the S074 card). Why: boot and runtime validation must reach the same
+         * verdict by the same rule; the shared helper removes the duplicated
+         * loop that let them diverge. Inputs/outputs: see
+         * filesystem_autosaveValidateCandidateStep(). On a verdict the boot
+         * Bank rule is applied — slot agreement only, because BankData's
+         * display name is not loaded yet at boot stage 10b — and the candidate
+         * is closed (phase 4). Affiliates: this function's phase 5 winner
+         * selection and VALIDATED record, main.c stage 10b,
+         * filesystem_autosaveParameterDrain_tick() phase 3.
+         */
+        if (filesystem_autosaveValidateCandidateStep() ==
+            FS_AUTOSAVE_CANDIDATE_PENDING)
             return;
-        }
-        if (!afatfs_feof(op_file))
-            return;
-        op_autosave_writer.candidate_valid =
-            autosave_streamValidationFinish(&op_autosave_writer.validation);
         /* Boot gate: slot agreement only (BankData name not yet loaded). */
         op_autosave_writer.candidate_bank_match = (uint8_t)(
             op_autosave_writer.candidate_valid &&
@@ -26044,7 +26242,6 @@ static void filesystem_validateAutosaveWinner_tick(void)
         if (afatfs_fclose(op_file, on_file_closed))
             op_phase = 4u;
         return;
-    }
 
     case 4: /* WAIT CANDIDATE CLOSE */
         if (!op_close_done)
@@ -26082,7 +26279,11 @@ static void filesystem_validateAutosaveWinner_tick(void)
         /*
          * VALIDATED mirrors the drain's trace: bit 0 says a winner exists,
          * bit 1 is its A/B index, bit 2 marks a winner whose Bank slot does
-         * not match settings.cfg's active_bank.
+         * not match settings.cfg's active_bank, and bits 4..5 (S074) mark
+         * candidate A/B rejected as overlong (a publication torn by power
+         * loss). A torn candidate needs no boot action: the first runtime
+         * drain republishes into it. The bits are the trace-only record of the
+         * event. Layout: AUTOSAVE_TRACE_VALIDATED_* in AutosaveTrace.h.
          */
         autosaveTrace_record(
             AUTOSAVE_TRACE_STAGE_VALIDATED,
@@ -26091,7 +26292,9 @@ static void filesystem_validateAutosaveWinner_tick(void)
                            ? (uint8_t)(op_autosave_writer.winner_index << 1u)
                            : 0u) |
                       (op_autosave_writer.have_winner &&
-                       !op_autosave_writer.winner_bank_match ? 4u : 0u)),
+                       !op_autosave_writer.winner_bank_match ? 4u : 0u) |
+                      (uint8_t)(op_autosave_writer.overlong_mask <<
+                                AUTOSAVE_TRACE_VALIDATED_OVERLONG_SHIFT)),
             op_autosave_writer.have_winner
                 ? op_autosave_writer.winner_generation : 0u);
         fs_boot_winner.valid = op_autosave_writer.have_winner;

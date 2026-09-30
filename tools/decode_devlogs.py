@@ -156,10 +156,38 @@ STAGE_PRODUCER = {
     "H": "filesystem_backgroundBudgetRefill()",
 }
 
+# AUTOSAVE_TRACE_PHASE_STALL_SITE_* (AutosaveTrace.h). Session 057 widened the
+# site field to four bits and added sites 3..9; this table lagged behind until
+# S074. PHASE_STALL_BEHAVIOUR records what each observer does when it fires
+# (DEV_MODES.md "Stall detection" table), so a decoded X record states whether
+# the operation was aborted or only observed.
 PHASE_STALL_SITES = {
     0: "delete-slot resolver (filesystem_deleteSlotDirectory_tick)",
     1: "Bank Save entry (filesystem_saveBankDirectory_tick)",
     2: "runtime AutoSave drain (filesystem_autosaveParameterDrain_tick)",
+    3: "Kit Save (filesystem_saveKitDirectory_tick)",
+    4: "Scene Save (filesystem_saveSceneDirectory_tick)",
+    5: "Kit Load (filesystem_loadKitDirectory_tick)",
+    6: "Scene Load (filesystem_loadSceneDirectory_tick)",
+    7: "Bank Load entry (filesystem_loadBankDirectory_tick)",
+    8: "settings write (filesystem_saveGlobals_tick)",
+    9: "flush finish (filesystem_flushFinish_tick)",
+}
+
+PHASE_STALL_BEHAVIOUR = {
+    0: ("partial abort: only the pre-delete scan phases abort; a native "
+        "deleteTree() in progress is observed only"),
+    1: "observation only (Session 057)",
+    2: ("abort: 30,000 consecutive polls with no phase change and no cursor "
+        "progress (progress-aware since S074) force FS_STATUS_ERROR; the "
+        "writer retries after five seconds with the dirty mask intact"),
+    3: "abort (FS_STATUS_ERROR)",
+    4: "observation only (Session 057)",
+    5: "abort (FS_STATUS_ERROR)",
+    6: "abort (FS_STATUS_ERROR)",
+    7: "abort (FS_STATUS_ERROR)",
+    8: "abort (FS_STATUS_ERROR)",
+    9: "abort (FS_STATUS_ERROR)",
 }
 
 SAVE_LIFECYCLE_TYPES = {0: "Kit", 1: "Scene", 2: "Bank", 3: "Instrument"}
@@ -567,12 +595,28 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
         detail = (f"{enum_name} via {producer}: parameter drain admitted; "
                   f"the transform now owns the facade")
     elif ch == "V":
+        # AUTOSAVE_TRACE_VALIDATED_* (AutosaveTrace.h): bit 0 winner exists,
+        # bit 1 winner A/B, bit 2 winner Bank identity mismatch, bit 3
+        # continuation cache (validation skipped), bits 4..5 candidate A/B
+        # rejected as overlong - a publication torn by power loss; the next
+        # drain republishes into it (S074). Records written before S074 never
+        # set bits 4..5.
         has_winner = bool(flags & 0x01)
         winner = "A (.hcprms1)" if (flags & 0x02) == 0 else "B (.hcprms2)"
         detail = (f"{enum_name} via {producer}: "
                   f"winner_exists={int(has_winner)}, "
                   f"winner={winner if has_winner else 'none'}, "
-                  f"winner generation={value}")
+                  f"winner generation={value}, "
+                  f"bank_mismatch={int(bool(flags & 0x04))}, "
+                  f"cached={int(bool(flags & 0x08))}")
+        torn = [name for bit, name in ((0x10, "A (.hcprms1)"),
+                                       (0x20, "B (.hcprms2)"))
+                if flags & bit]
+        if torn:
+            detail += ("; overlong candidate rejected: " + ", ".join(torn) +
+                       " (publication torn by power loss; AsyncFATFS left the "
+                       "cluster-rounded size; the next drain republishes "
+                       "into it)")
     elif ch == "M":
         dirty = bool(flags)
         detail = (f"{enum_name} via {producer}: post-merge canonical mask "
@@ -639,8 +683,13 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
                       f"{scene_mask_text(resident)}, effective load mask "
                       f"0x{low:04x} {scene_mask_text(low)}")
     elif ch == "X":
-        site = flags & 0x07
-        in_native_delete = bool(flags & 0x08)
+        # AUTOSAVE_TRACE_PHASE_STALL_* (AutosaveTrace.h): flags bits 0..3 are
+        # the observer site and bit 4 marks a stall inside native recursive
+        # delete (Session 057 layout; this decoder read the pre-057 3-bit
+        # layout until S074). value32: phase bits 0..7, slot bits 8..17,
+        # site-specific extra bits 18..31.
+        site = flags & 0x0F
+        in_native_delete = bool(flags & 0x10)
         site_name = PHASE_STALL_SITES.get(site, f"unknown site {site}")
         phase = value & 0xFF
         slot = (value >> 8) & 0x3FF
@@ -652,8 +701,8 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
             detail += f", afatfs_getDeleteTreePhase() subphase={extra & 0xFF}"
         elif site == 2:
             detail += f", stream_offset~={extra * 16} bytes"
-        detail += (". Observation only unless site is the runtime drain, "
-                   "where a stall also forces FS_STATUS_ERROR completion.")
+        detail += ". " + PHASE_STALL_BEHAVIOUR.get(
+            site, "behaviour unknown for this site") + "."
     elif ch == "O":
         elem_type = SAVE_LIFECYCLE_TYPES.get(flags & 0x03,
                                              f"unknown type {flags & 0x03}")
