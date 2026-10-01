@@ -132,6 +132,17 @@ This section is for short carryover points only. Flush or rewrite it at session
 end; durable facts belong in `knowledge_files/log_archive/` or
 `knowledge_files/specification_reference/`.
 
+- **Active Scene (user definition, S075):** active means the Scene being
+  viewed and written to, not playback. Any Scene and track may be read; only
+  one Scene's Pattern is modified at a time. Today a PERF Scene press selects
+  the viewed and played Scene together, and the Pattern Stack Service target
+  follows `seq_activePattern`; if viewing and playback are ever split, the
+  write target must follow the active Scene.
+- **Edit-mask intent (user, S075):** parameters and FX settings of Scenes in
+  one VOICE edit mask are meant to match, so edits, pastes and clears of Scene
+  children (Instrument, Effect, FX sequence, mix settings) fan out;
+  Pattern data never does. Phase 6 copy/clear spec:
+  `S075_PH6_COPY_CLEAR_FULL_SPEC.md` (root).
 - **Session 074 is closed.** Durable record: `074_SESSION_HANDOFF_LOG.md`.
   The ten root `S074_*.md` documents are superseded (the user deletes them).
   Next: `S075_PH6_COPY_CLEAR.md` (Phase 6: copy/clear).

@@ -1955,3 +1955,14 @@ Session 075 startup: `S075_PH6_COPY_CLEAR.md` (root).
   runtime union has 20 B left.
 - **Repository hygiene:** the card copies `SD_CARD_ATS_BOOT_BUG/` and
   `SD_CARD_ATS_CORRECTION_OUTPUT/` (with `.Spotlight-V100`) are committed.
+
+## Session 075 findings (2026-10-01)
+
+- **Pattern Load fan-out can tear one playback tick (found while specifying
+  copy/clear; not fixed).** Scene/Pattern Load phase 51 (`filesystem.c`)
+  `memcpy`s the loaded region over every selected resident Scene. When a
+  destination is the playing Scene, TIM3 can read a new address entry that
+  points into old pool bytes during the copy. A sentinel-first order (publish
+  all entries empty, copy pool/bitmap/parameters, copy the address array last)
+  avoids it; `S075_PH6_COPY_CLEAR_FULL_SPEC.md` §9.5 specifies that order for
+  whole-Pattern copy and finding F1.
