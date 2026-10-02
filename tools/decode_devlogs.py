@@ -8,6 +8,9 @@ The firmware can produce these root *.bin traces:
   64-byte HCPRMS capsule when the token is ASENSURE;
 - /asavetrc.bin - a stream of eight-byte AutoSave lifecycle records
   (stage, flags, tick16, value32).
+  Stage 'c' records (S075) witness Phase 6 copy/clear operations, jobs,
+  drops, anomalies, early trigger writes and restores, trickle-rate work,
+  suspension edges and the name-buffer loan.
 
 With no arguments the decoder scans the repository-root SD_CARD/ for every
 *.bin trace file, creates SD_CARD/logs/ when missing, and writes one
@@ -118,6 +121,8 @@ STAGE_ENUM = {
     "Z": "AUTOSAVE_TRACE_STAGE_DIRTY_COUNT_MISMATCH",
     # H: DEV-only shared background-budget interval summary.
     "H": "AUTOSAVE_TRACE_STAGE_BUDGET_REPORT",
+    # c: S075 Phase 6 copy/clear lifecycle and risk witness.
+    "c": "AUTOSAVE_TRACE_STAGE_COPY_CLEAR",
 }
 
 STAGE_PRODUCER = {
@@ -154,6 +159,7 @@ STAGE_PRODUCER = {
          "captured Session 054 evidence",
     "Z": "autosave_maskHasDirty() DEV population audit",
     "H": "filesystem_backgroundBudgetRefill()",
+    "c": "Core/Menu/CopyClear/* and filesystem suspension/loan witnesses",
 }
 
 # AUTOSAVE_TRACE_PHASE_STALL_SITE_* (AutosaveTrace.h). Session 057 widened the
@@ -526,6 +532,130 @@ def payload_region_text(offset: int) -> str:
     return f"{base} padding byte{ir - INST_MORPH_OFF - INST_MORPH_BYTES}"
 
 
+# AUTOSAVE_TRACE_CC_* (AutosaveTrace.h; S075 trace debug).
+CC_EVENTS = {
+    0x01: "OP_START", 0x02: "OP_REFUSED", 0x03: "SOURCE_SET",
+    0x04: "OP_RELEASE", 0x05: "OP_FINISH", 0x10: "JOB_START",
+    0x11: "JOB_STATS", 0x12: "JOB_END", 0x13: "JOB_STALL",
+    0x14: "CHECK_FAIL", 0x15: "QUEUE_FULL", 0x16: "PASTE_NOOP",
+    0x17: "JOB_TRICKLE", 0x18: "ANOMALY", 0x19: "EARLY_RESTORED",
+    0x20: "REG_ADD", 0x21: "REG_REFUSED", 0x22: "REG_DONE",
+    0x23: "FX_CLEAR", 0x24: "EARLY_TRIG", 0x30: "FANOUT",
+    0x31: "MASK_SET", 0x40: "SCRATCH", 0x41: "FS_REFUSED",
+    0x42: "NAMES", 0x50: "SUSPEND",
+}
+CC_KINDS = {1: "step", 2: "bar", 3: "track", 4: "scene", 5: "fx-step"}
+CC_DROP = {0: "none", 1: "NO_ROOM", 2: "EVACUATE_FAILED",
+           3: "ADVANCED_LIMIT", 4: "FX_TYPE_MISMATCH", 5: "NO_SOURCE",
+           6: "NO_SCRATCH", 7: "BAD_SELECTION", 8: "BAD_GEOMETRY"}
+CC_ANOMALY = {1: "GROW_UNPLACEABLE", 2: "SWAP_RETURN_ABANDONED",
+              3: "SWAP_OCCUPIED", 4: "REGION_REWRITE_GREW",
+              5: "CLAIM_OTHER_SCENE", 6: "TEARDOWN_CLAIM_HELD",
+              9: "STALL_PHASE"}
+CC_REFUSAL = ["recording", "erasing", "storage busy",
+              "Instrument transaction", "mode", "previous jobs queued"]
+CC_FANOUT = {1: "copy instrument", 2: "copy kit", 3: "copy effect",
+             4: "clear send", 5: "clear fx", 6: "FX step paste"}
+
+
+def cc_job_text(v: int) -> str:
+    """Decode a copy/clear job descriptor (JD)."""
+    op = v & 0xFF
+    cls = "paste" if (op & 0xF0) == 0x10 else (
+        "clear" if (op & 0xF0) == 0x20 else f"class0x{op & 0xF0:02x}")
+    kind = CC_KINDS.get((v >> 8) & 0x7, f"kind{(v >> 8) & 0x7}")
+    track = (v >> 15) & 0x7
+    return (f"{cls} sel={op & 0xF} {kind} Scene{(v >> 11) & 0xF} "
+            f"track={'-' if track == 7 else track + 1} "
+            f"start={(v >> 18) & 0x7F} end={(v >> 25) & 0x7F}")
+
+
+def cc_record_text(flags: int, v: int) -> str:
+    """Decode one stage-'c' value32 by its event (flags)."""
+    ev = CC_EVENTS.get(flags, f"event0x{flags:02x}")
+    if flags in (0x10, 0x13, 0x15, 0x16):
+        return f"{ev}: {cc_job_text(v)}"
+    if flags == 0x01:
+        return (f"{ev}: phase={(v & 3)} mode={(v >> 2) & 7} "
+                f"op#{(v >> 8) & 0xF} queued={(v >> 16) & 0xFF}")
+    if flags == 0x02:
+        why = [n for i, n in enumerate(CC_REFUSAL) if v & (1 << i)]
+        return (f"{ev}: {', '.join(why) or 'none'} mode={(v >> 8) & 7} "
+                f"queued={(v >> 16) & 0xFF}")
+    if flags == 0x03:
+        return (f"{ev}: {CC_KINDS.get(v & 7, v & 7)} Scene{(v >> 3) & 0xF} "
+                f"track={((v >> 7) & 7) + 1} start={(v >> 10) & 0x7F} "
+                f"end={(v >> 17) & 0x7F} mode={(v >> 24) & 7}")
+    if flags == 0x04:
+        return (f"{ev}: started={v & 1} menu={(v >> 1) & 1} "
+                f"queued={(v >> 8) & 0xFF}")
+    if flags == 0x05:
+        names = ["none", "written", "error", "gave up"][(v >> 28) & 3]
+        return (f"{ev}: done={v & 0xFF} dropped={(v >> 8) & 0xFF} "
+                f"register passes={(v >> 16) & 0xFF} op#{(v >> 24) & 0xF} "
+                f"names={names}")
+    if flags == 0x11:
+        return (f"{ev}: slides={v & 0xFF} swap rewrites={(v >> 8) & 0xFF} "
+                f"retarget dropped={(v >> 16) & 0xFF} "
+                f"evacuations={(v >> 24) & 0xF} claim wait={(v >> 28) & 0xF}")
+    if flags == 0x12:
+        res = {0: "DONE", 2: "DROP"}.get(v & 3, f"result{v & 3}")
+        return (f"{ev}: {res} reason={CC_DROP.get((v >> 2) & 0x3F, '?')} "
+                f"detail=0x{(v >> 8) & 0xFF:02x} ticks={(v >> 16) & 0xFFFF}")
+    if flags == 0x14:
+        return (f"{ev}: free={v & 0x7FF} step#{(v >> 11) & 0x7F} "
+                f"new={(v >> 18) & 0x3F} old={(v >> 24) & 0x3F} chunks")
+    if flags == 0x17:
+        return f"{ev}: trickle ticks={v & 0xFFFF} calls={(v >> 16) & 0xFFFF}"
+    if flags == 0x18:
+        return (f"{ev}: {CC_ANOMALY.get(v & 0xFF, v & 0xFF)} "
+                f"Scene{(v >> 12) & 0xF} track={(v >> 8) & 0xF} "
+                f"step={(v >> 16) & 0xFF} extra=0x{(v >> 24) & 0xFF:02x}")
+    if flags == 0x19:
+        return (f"{ev}: restored={v & 0xFF} left alone={(v >> 8) & 0xFF} "
+                f"slot={(v >> 16) & 3}")
+    if flags in (0x20, 0x21):
+        tail = (f"count={(v >> 20) & 0xF} lane={(v >> 24) & 0xF}"
+                if flags == 0x20 else
+                f"reason={['', 'full', 'other Scene', 'pending', 'no target'][(v >> 20) & 0xF] if ((v >> 20) & 0xF) < 5 else '?'}")
+        return f"{ev}: target={v & 0xFFFF} Scene{(v >> 16) & 0xF} {tail}"
+    if flags == 0x22:
+        return (f"{ev}: target={v & 0xFFFF} steps={(v >> 16) & 0x3FF} "
+                f"swap rewrites={(v >> 26) & 0x1F} dropped={(v >> 31) & 1}")
+    if flags == 0x23:
+        return (f"{ev}: mask=0x{v & 0xFFFF:04x} {scene_mask_text(v & 0xFFFF)} "
+                f"Scene{(v >> 16) & 0xF} step={(v >> 20) & 0xF} "
+                f"lane={(v >> 24) & 0xF} changed={(v >> 28) & 1}")
+    if flags == 0x24:
+        what = "paste" if (v >> 8) & 1 else "clear"
+        return (f"{ev}: {what} steps={v & 0xFF} src mask={(v >> 9) & 1} "
+                f"{CC_KINDS.get((v >> 16) & 7, '?')} Scene{(v >> 19) & 0xF} "
+                f"track={((v >> 23) & 7) + 1} slot={(v >> 26) & 3}")
+    if flags == 0x30:
+        return (f"{ev}: {CC_FANOUT.get((v >> 20) & 0xF, '?')} "
+                f"dst Scene{(v >> 16) & 0xF} mask=0x{v & 0xFFFF:04x} "
+                f"{scene_mask_text(v & 0xFFFF)} active={(v >> 24) & 1} "
+                f"slot={(v >> 25) & 0xF}")
+    if flags == 0x31:
+        how = "reset" if (v >> 20) & 1 else f"exchange from Scene{(v >> 21) & 0xF}"
+        return (f"{ev}: Scene{(v >> 16) & 0xF} entry=0x{v & 0xFFFF:04x} "
+                f"{scene_mask_text(v & 0xFFFF)} ({how})")
+    if flags == 0x40:
+        return f"{ev}: {'return' if v & 1 else 'borrow'} waited={(v >> 8) & 0xFFFF} ticks"
+    if flags == 0x41:
+        return f"{ev}: refused op={v & 0xFF} current op={(v >> 8) & 0xFF}"
+    if flags == 0x42:
+        what = ["requested", "written", "error", "gave up"][v & 3]
+        extra = (f" reserved=0x{(v >> 16) & 0xFF:02x}"
+                 if (v >> 16) & 0xFF else "")
+        return (f"{ev}: {what} copied rows={(v >> 8) & 0xFF}{extra} "
+                f"refusals={(v >> 24) & 0xFF}")
+    if flags == 0x50:
+        return (f"{ev}: {'end' if v & 1 else 'begin'} facade busy={(v >> 1) & 1} "
+                f"current op={(v >> 8) & 0xFF}")
+    return f"{ev}: raw value"
+
+
 def trace_record_text(index: int, stage: int, flags: int, tick: int,
                       value: int) -> str:
     """Decode one eight-byte AutoSave trace record into one text line."""
@@ -798,6 +928,8 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
                     "case2 reload completed" if case2 else "reader event")
             detail = (f"{enum_name} via {producer}: {kind}, Scene{scene}, "
                       f"hcnames row {row}, source=0x{source:04x}")
+    elif ch == "c":
+        detail = f"{enum_name} via {producer}: {cc_record_text(flags, value)}"
     else:
         detail = f"{enum_name}: no decoder for this stage"
 

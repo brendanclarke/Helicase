@@ -592,7 +592,8 @@ and page-owned SEQ LEDs; the Pattern chase yields to this LED layer.
 
 Affiliate modules: buttonHandler, Menu, ledHandler, PatternData,
 PatternStackService, SceneData, BankData, presetManager, EffectsManager,
-filesystem, Autosave. Spec: `S075_PH6_COPY_CLEAR_FULL_SPEC.md`; schedule and
+filesystem, Autosave. Spec: `S075_PH6_COPY_CLEAR_FULL_SPEC.md`; F1/trace
+implementation record: `S075_PH6_COPYCLEAR_F1_AND_TRACE_IMPLEMENTATION.md`;
 implementation log: `S075_PH6_COPYCLEAR_IMPLEMENTATION.md`.
 
 Purpose: Phase 6 copy and clear of Pattern data (step, range, bar, track) and
@@ -604,20 +605,22 @@ Pattern), with pot clears of automation. Four file pairs:
 | `copyClearSession.c/h` | operation phase, source and range rule, menus and selection, button routing and edge pairing, LEDs, the suspension predicate |
 | `copyOps.c/h` | copy menus, paste requests, retargeting, merge rules, Scene-level paste executors |
 | `clearOps.c/h` | clear menus, clear requests, EFFECTS SEQ clear, pot-clear front end, Scene-level clear executors |
-| `copyClearService.c/h` | queue (4), run state, Pattern paste/clear engines, whole-region copy/reset, pot-clear register (8), borrowed 9 kB name buffer, name remap and HCNAMES write |
+| `copyClearService.c/h` | queue (4), run state, Pattern paste/clear engines, whole-region copy/reset, pot-clear register (8), lazy borrowed 9 kB name buffer, early trigger masks/restore, trickle governor, name remap and HCNAMES write, DEV stage-`c` trace feeds |
 
 | API | Use | Usual callers / clients |
 |---|---|---|
 | `copyClear_init()` | Boot reset (calls `ccSvc_init()`). | `main.c` after `patSvc_init()` |
 | `copyClear_copyPressed(shift)` / `copyClear_copyReleased()` | Start an operation (copy, or clear with SHIFT); end menu interaction. | buttonHandler `BUT_COPY` |
 | `copyClear_buttonPressed(btn)` / `copyClear_buttonReleased(btn)` | Route SEQ/SELECT/TRACK/BAR/MODE edges first; nonzero = consumed. | buttonHandler `processPress/Release()` |
-| `copyClear_postEvent()` / `copyClear_eventOverflow()` | Re-assert LEDs and source blink after each event; reset pairing on ring overflow. | `buttonHandler_processEvents()` |
+| `copyClear_postEvent()` / `copyClear_eventOverflow()` | Re-assert operation LEDs after each event; reset pairing on ring overflow. Source-row blink is not owned by copy/clear. | `buttonHandler_processEvents()` |
 | `copyClear_menuVisible()` / `copyClear_formatMenu(r0, r1)` | Menu overlay. | `menu_repaint()`, `va_queueMarkerTransaction()` |
 | `copyClear_ownsEncoder()` / `copyClear_encoderTurned(inc)` | Encoder ownership while held (clicks ignored). | `menu_parseEncoder()` |
 | `copyClear_ownsPots()` / `copyClear_potTurned(target)` | Pot ownership; pot clear in a clear operation. | `menu_parseKnobDelta()` |
 | `copyClear_backgroundSuspended()` | AutoSave/maintenance suspension predicate. | `filesystem_tick()` gates, `patSvc_tick()` repair gate |
 | `ccSvc_tick()` | One bounded service step at 500 Hz. | `timebase.c` after `patSvc_tick()` |
 | `ccSvc_targetPending(target)` | Underline filter for targets waiting in the register. | `va_scanService()` |
+| `ccSvc_pasteTriggersNow(slot)` / `ccSvc_triggersChangedUi()` | Capture/write early trigger masks for an accepted replace/merge paste and notify the visible Pattern UI. | `copyOps`, Menu |
+| `ccSvc_traceRetargetDropped()` / `ccSvc_traceDropReason()` / `ccSvc_traceOpSequence()` | DEV-only stage-`c` summary feeds; production calls are no-ops. | `copyOps`, `clearOps`, session |
 
 Calls out: `patSvc_beginExclusive/endExclusive/exclusiveCompactStep/
 exclusiveEvacuateSwapStep`, the PatternData raw block API,
@@ -629,7 +632,7 @@ revalidateVoiceEditMasks`, `preset_startInstrumentCopy/applyWorkersIdle/
 tickInstrumentApply/startDrumsetApply/applySceneSettings`,
 `effects_pasteRecord/resetRecord/pasteSeqStep/clearSeqLanes`,
 `menu_copyClearMenuChanged/Closed`, `menu_patternContentChanged`,
-`menu_automationTargetCleared`, `led_setBlinkGroup/setBlinkLed/flashGroup`.
+`menu_automationTargetCleared`, `led_setBlinkLed/flashGroup`.
 
 ## Core/Sequencer/sequencer
 
@@ -1068,7 +1071,9 @@ dirty mask (`autosave_nonsemantic_pattern_dirty_mask`), atomic dirty
 operations, typed scalar and whole-region marker vocabulary, CRC helpers, and
 the boot-only inverse payload-to-resident projection. It owns no file handle
 or scheduler. `AutosaveTrace.c/.h` is a logging-only observer with no
-filesystem ownership. Exact format and trace-field semantics remain
+filesystem ownership. Stage `c` is the S075 copy/clear lifecycle/risk witness;
+its event and value vocabulary is authoritative in `AutosaveTrace.h` and
+`DEV_MODES.md`. Exact format and other trace-field semantics remain
 authoritative in `AUTOSAVE.md` and `DEV_MODES.md` rather than being duplicated
 here.
 

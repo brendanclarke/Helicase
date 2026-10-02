@@ -1,13 +1,14 @@
 # S075 — Phase 6 Copy and Clear — Follow-up F1 (hardware feedback, 2026-10-02)
 
 Plan for the changes requested after the first hardware test of copy/clear.
-**Plan only; no code is changed by this document.** Line numbers refer to the
+Implemented together with the trace schedule on 2026-10-02; the decision
+sections remain the behavioral authority. Line numbers refer to the
 current working tree of `dev-ph6-copyclear` (after the S075 implementation
 pass) and are given with a function anchor.
 
 Related: spec `S075_PH6_COPY_CLEAR_FULL_SPEC.md`, implementation schedule and
 log `S075_PH6_COPYCLEAR_IMPLEMENTATION.md` (§14), trace plan
-`S075_PH6_COPYCLEAR_TRACE_DEBUG_IMPLEMENTATION.md` (not yet implemented).
+`S075_PH6_COPYCLEAR_TRACE_DEBUG_IMPLEMENTATION.md`.
 
 **Revision 2 (2026-10-02):** the user's answers to the first round of
 follow-ups (Q1–Q7) are folded in; §16.1 records them.

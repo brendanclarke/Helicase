@@ -98,8 +98,9 @@ void copyClear_init(void);
  * operation was armed (copy) or a clear operation began; zero when refused
  * silently (recording/erasing, Load/Save or Instrument Load busy, LOAD/SAVE,
  * MENU or SOM mode, or pastes/clears of the previous operation still queued:
- * they read that operation's source). LEDs: copy -> copy/clear LED steady;
- * clear -> SHIFT and copy/clear blink, latched until release (spec §3, §8.2).
+ * they read that operation's source). LEDs: copy -> copy/clear LED steady
+ * until its menu opens, then blinking; clear -> SHIFT and copy/clear blink,
+ * latched until release (F1-B). Refusals are silent and traced in DEV builds.
  * Affiliates: buttonHandler.c processPress() case BUT_COPY.
  */
 uint8_t copyClear_copyPressed(uint8_t shift_held);
@@ -128,9 +129,9 @@ uint8_t copyClear_buttonReleased(uint8_t buttonNr);
 
 /*
  * After every processed button event (consumed or not).
- * Output: re-asserts copy/clear and SHIFT LED blinks (a mode change clears
- * blink slots) and recomputes the source group blink for the now-visible
- * bar/track/Scene. Cheap and idempotent. Caller: buttonHandler_processEvents().
+ * Output: re-asserts the copy/clear and SHIFT LED blinks because a mode change
+ * clears blink slots. No source-row LED is owned; the menu indicator carries
+ * the source. Cheap and idempotent. Caller: buttonHandler_processEvents().
  */
 void copyClear_postEvent(void);
 
@@ -141,10 +142,11 @@ void copyClear_postEvent(void);
 uint8_t copyClear_eventOverflow(void);
 
 /*
- * Menu drawing. copyClear_menuVisible() is nonzero while a copy menu (source
- * set) or a clear menu (object pressed) is shown; copyClear_formatMenu()
- * fills two 16-character rows (NUL at index 16): row 0 "COPY "/"CLR  " plus
- * the source indicator (spec §8.1), row 1 the bracketed selection label.
+ * Menu drawing. copyClear_menuVisible() is nonzero while a menu is set in any
+ * held phase: copy from the first provisional source press, and clear from
+ * the first object press until release. copyClear_formatMenu() fills two
+ * 16-character rows (NUL at index 16): row 0 `COPY`/`CLR` at column 0 and the
+ * source indicator at column 9, row 1 the bracketed selection label.
  * Callers: menu_repaint(), va_queueMarkerTransaction().
  */
 uint8_t copyClear_menuVisible(void);
@@ -157,8 +159,9 @@ void copyClear_formatMenu(char row0[17], char row1[17]);
  * moves the selection (clamped, no wrap) when a menu is shown and does
  * nothing otherwise; encoder clicks are ignored (user, B18) and never reach
  * this module. copyClear_potTurned() starts a pot clear in a clear operation
- * when no menu is shown (spec §6) and does nothing otherwise; it returns
- * nonzero when something was cleared or registered. Callers:
+ * when no menu is shown (spec §6) and does nothing otherwise; once a clear
+ * object menu is open, pots do nothing until copy/clear release (F1-G). It
+ * returns nonzero when something was cleared or registered. Callers:
  * menu_parseEncoder(), menu_parseKnobDelta().
  */
 uint8_t copyClear_ownsEncoder(void);

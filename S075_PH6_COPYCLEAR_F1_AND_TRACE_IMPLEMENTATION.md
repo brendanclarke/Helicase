@@ -3,7 +3,8 @@
 Combined code schedule for
 `S075_PH6_COPYCLEAR_FOLLOWUP_F1.md` (revision 4, all decisions closed) and
 `S075_PH6_COPYCLEAR_TRACE_DEBUG_IMPLEMENTATION.md` (decisions D1–D5, as
-amended by F1 §13.1). **Schedule only; no code is changed by this document.**
+amended by F1 §13.1). This document is the implementation record as well as
+the schedule; code and verification notes are appended to §15.
 
 - Baseline: working tree of `dev-ph6-copyclear` after the S075 implementation
   pass. Every line number below was read from that tree on 2026-10-02 and is
@@ -2757,3 +2758,28 @@ Per operation frame ≈ 10 records; per paste/clear job 3–5 (`EARLY_TRIG`,
 2–3. A typical operation (one source, eight pastes) ≈ 50 records; a heavy one
 (30 pastes, 8 pot clears) ≈ 180. Both fit the 2,048-record ring kept for
 testing (user D2).
+
+## 15. Work log
+
+- 2026-10-02: Read `MEMORY.md`, the F1 follow-up, the trace plan, and this
+  combined schedule. The working tree is the pre-F1 baseline at `b1216db`;
+  implementation and hardware verification are still pending.
+- 2026-10-02: Began implementation from the schedule's Stage A/B order; the
+  completed pass and compiler-driven corrections are recorded below.
+- 2026-10-02: Completed Stages A–J. The source group-blink state was removed;
+  stage `c` and the event/drop/anomaly layouts were added; the service now has
+  lazy scratch use, live non-overlap paste reads, early trigger capture and
+  restore, and the whole-call trickle governor; the session, copy, and clear
+  layers implement the F1 gesture, LED, label, notes/probability, and
+  selection decisions; exclusive-move tracing is summary-only; filesystem
+  suspension/refusal witnesses and the decoder were added.
+- 2026-10-02: Stage K updated the full spec, F1/trace plans, SRAM/DEV mode,
+  module, Pattern stack, scoping, and memory records. DEV and production
+  builds both passed. Production (`DEV_MODE_LOGGING=0`) measured
+  `text=516688`, `data=408`, `bss=409840`, and no trace-state symbols;
+  DEV (`=1`) measured `text=530592`, `data=416`, `bss=426616`, flash used
+  531008 B with 222656 B headroom. Hardware verification is still pending.
+- 2026-10-02: Compile review found the Kit executor could finish before its
+  lazy HCNAMES phase; it now advances through the worker phase to phase 2 and
+  waits for `ccSvc_namesReady()` before completing. Both configurations were
+  rebuilt after that correction and the DEV image was repackaged.

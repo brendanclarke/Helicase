@@ -26,11 +26,12 @@
 
 /* ---- menus (spec §4.1, §8.1) ------------------------------------------- */
 
+/* Step and bar selections: replace/merge all or automation. */
 static const char *const ccCopy_stepLabels[] = {
-    "step all", "merge all", "automation", "merge auto"
+    "step -> repl", "step -> merge", "auto -> repl", "auto -> merge"
 };
 static const char *const ccCopy_barLabels[] = {
-    "bar all", "merge all", "automation", "merge auto"
+    "bar -> repl", "bar -> merge", "auto -> repl", "auto -> merge"
 };
 static const char *const ccCopy_trackLabels[] = { "track", "instrument" };
 static const char *const ccCopy_sceneLabels[] = {
@@ -90,6 +91,8 @@ uint8_t ccCopy_requestPaste(const cc_source_t *src, uint8_t selection,
                             uint8_t dst_start)
 {
     cc_job_t job;
+    uint8_t identical = 0u;
+    uint8_t slot;
 
     if (!src || src->kind == CC_KIND_NONE)
         return 0u;
@@ -97,25 +100,24 @@ uint8_t ccCopy_requestPaste(const cc_source_t *src, uint8_t selection,
     switch (src->kind) {
     case CC_KIND_STEP:
     case CC_KIND_BAR:
-        if (dst_scene == src->scene && dst_track == src->track &&
-            dst_start == src->start && src->start <= src->end)
-            return 0u;
+        identical = (uint8_t)(dst_scene == src->scene &&
+                              dst_track == src->track &&
+                              dst_start == src->start &&
+                              src->start <= src->end);
         break;
     case CC_KIND_TRACK:
-        if (dst_scene == src->scene &&
+        identical = (uint8_t)(dst_scene == src->scene &&
             ((selection == CC_COPY_TRACK && dst_track == src->track) ||
              (selection == CC_COPY_INSTRUMENT &&
-              ccCopy_slotOf(dst_track) == ccCopy_slotOf(src->track))))
-            return 0u;
+              ccCopy_slotOf(dst_track) == ccCopy_slotOf(src->track))));
         break;
     case CC_KIND_SCENE:
-        if (dst_scene == src->scene)
-            return 0u;
+        identical = (uint8_t)(dst_scene == src->scene);
         break;
     case CC_KIND_FX_STEP:
-        if (dst_scene == src->scene && dst_start == src->start &&
-            src->start <= src->end)
-            return 0u;
+        identical = (uint8_t)(dst_scene == src->scene &&
+                              dst_start == src->start &&
+                              src->start <= src->end);
         break;
     default:
         return 0u;
@@ -126,7 +128,15 @@ uint8_t ccCopy_requestPaste(const cc_source_t *src, uint8_t selection,
     job.track = dst_track;
     job.start = dst_start;
     job.end = dst_start;
-    return ccSvc_enqueue(&job);
+    if (identical) {
+        ccTrace(AUTOSAVE_TRACE_CC_EVT_PASTE_NOOP, ccTrace_job(&job));
+        return 0u;
+    }
+    slot = ccSvc_enqueue(&job);
+    if (slot == 0u)
+        return 0u;
+    (void)ccSvc_pasteTriggersNow((uint8_t)(slot - 1u));
+    return 1u;
 }
 
 /* ---- retargeting (spec §9.7) -------------------------------------------- */
@@ -467,12 +477,17 @@ uint8_t ccCopy_buildStep(uint8_t selection, const uint8_t *src_block,
         return pat_rawEncode(out, flags, ss.note, ss.velocity, ss.probability,
                              sa, sc);
     case CC_COPY_AUTO:
-        if (sc == 0u && dc == 0u) {
+        /* Source automation and probability replace the destination's. */
+        flags = (uint8_t)((ds.flags & (uint8_t)~PAT_SPECIAL_PROB_BIT) |
+                          (ss.flags & PAT_SPECIAL_PROB_BIT));
+        if (sc == 0u && dc == 0u && flags == ds.flags &&
+            ((flags & PAT_SPECIAL_PROB_BIT) == 0u ||
+             ss.probability == ds.probability)) {
             *skip = 1u;
             return 0u;
         }
-        return pat_rawEncode(out, ds.flags, ds.note, ds.velocity,
-                             ds.probability, sa, sc);
+        return pat_rawEncode(out, flags, ds.note, ds.velocity,
+                             ss.probability, sa, sc);
     case CC_COPY_MERGE_AUTO:
     default:
         if (sc == 0u) {
@@ -530,8 +545,8 @@ static void ccCopy_nameKit(uint8_t dst, uint8_t src)
  * destination Scene and every Scene in its edit mask; fails silently when any
  * of them would exceed two Advanced Instruments; track 7 acts as slot 6 and
  * the Kit-owned slot-6/track-7 decay pair travels only slot 6 -> slot 6.
- * Phases: 0 check, wait for idle workers, commit, names; 1 drive the bounded
- * Instrument apply (Menu does not tick copy-started applies).
+ * Phases: 0 check/commit, 1 drive the bounded Instrument apply, 2 record
+ * names after the lazy scratch loan is available.
  */
 static uint8_t ccCopy_runInstrument(const cc_job_t *job)
 {
@@ -543,19 +558,34 @@ static uint8_t ccCopy_runInstrument(const cc_job_t *job)
     uint16_t mask;
     uint8_t m;
 
+    if (run->phase == 2u) {
+        if (!ccSvc_namesReady())
+            return CC_RUN_WAIT;
+        for (m = 0u; m < SCENE_COUNT; m++)
+            if ((run->aux & ccCopy_bit(m)) != 0u)
+                (void)ccSvc_nameCopy(
+                    filesystem_identityRow(FS_ROW_INSTRUMENT, m, d_slot),
+                    filesystem_identityRow(FS_ROW_INSTRUMENT, src->scene,
+                                           s_slot));
+        return CC_RUN_DONE;
+    }
     if (run->phase == 1u) {
         if (preset_tickInstrumentApply())
             return CC_RUN_WAIT;
         menu_repaintAll();
-        return CC_RUN_DONE;
+        run->phase = 2u;
+        return CC_RUN_WAIT;
     }
     if (src->scene == job->scene && s_slot == d_slot)
         return CC_RUN_DONE;
     mask = bank_sceneFanoutMask(job->scene);
     for (m = 0u; m < SCENE_COUNT; m++)
         if ((mask & ccCopy_bit(m)) != 0u &&
-            !instrumentManager_typeSelectableForSceneSlot(m, d_slot, type))
+            !instrumentManager_typeSelectableForSceneSlot(m, d_slot, type)) {
+            ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_ADVANCED_LIMIT,
+                                  (uint8_t)((m & 0x0Fu) | (d_slot << 4u)));
             return CC_RUN_DROP;
+        }
     if (!preset_applyWorkersIdle())
         return CC_RUN_WAIT;
     preset_startInstrumentCopy(src->scene, s_slot, mask, d_slot);
@@ -569,21 +599,21 @@ static uint8_t ccCopy_runInstrument(const cc_job_t *job)
             scene_setSlot6Track7MorphAmpEnvelopeDecay(
                 m, scene_getSlot6Track7MorphAmpEnvelopeDecay(src->scene));
         }
-        ccSvc_nameCopy(filesystem_identityRow(FS_ROW_INSTRUMENT, m, d_slot),
-                       filesystem_identityRow(FS_ROW_INSTRUMENT, src->scene,
-                                              s_slot));
     }
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_FANOUT,
+            (uint32_t)mask | ((uint32_t)(job->scene & 0xFu) << 16u) |
+            (1u << 20u) | ((uint32_t)ccCopy_activeIn(mask) << 24u) |
+            ((uint32_t)(d_slot & 0xFu) << 25u));
     bank_revalidateVoiceEditMasks();
+    run->aux = mask;
     run->phase = 1u;
     return CC_RUN_WAIT;
 }
 
 /*
- * Paste a whole Kit with edit-mask fan-out (spec §4.4). Same retained and
- * runtime path as Kit Load: whole-Kit AutoSave marker, Bank-present, Scene
- * worker for the active Scene, mask revalidation; a Scene that becomes
- * present gets a whole-Scene marker so settings/Effect pasted while it had no
- * Kit are captured (spec §9.9).
+ * Paste a whole Kit with edit-mask fan-out. Phase 0 commits retained data,
+ * phase 1 drives the active Scene worker, and phase 2 records names after the
+ * lazy scratch loan is available.
  */
 static uint8_t ccCopy_runKit(const cc_job_t *job)
 {
@@ -593,15 +623,27 @@ static uint8_t ccCopy_runKit(const cc_job_t *job)
     uint16_t mask;
     uint8_t m;
 
+    if (run->phase == 2u) {
+        if (!ccSvc_namesReady())
+            return CC_RUN_WAIT;
+        for (m = 0u; m < SCENE_COUNT; m++)
+            if ((run->aux & ccCopy_bit(m)) != 0u)
+                ccCopy_nameKit(m, src->scene);
+        return CC_RUN_DONE;
+    }
     if (run->phase == 1u) {
         if (!preset_applyWorkersIdle())
             return CC_RUN_WAIT;
         ccSvc_patternChangedUi(job->scene, NUM_TRACKS);
         menu_repaintAll();
-        return CC_RUN_DONE;
+        /* The retained Kit commit is complete; names are the lazy final phase. */
+        run->phase = 2u;
+        return CC_RUN_WAIT;
     }
-    if (!source)
+    if (!source) {
+        ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_NO_SOURCE, 0u);
         return CC_RUN_DROP;
+    }
     mask = bank_sceneFanoutMask(job->scene);
     if (ccCopy_activeIn(mask) && !preset_applyWorkersIdle())
         return CC_RUN_WAIT;
@@ -616,37 +658,56 @@ static uint8_t ccCopy_runKit(const cc_job_t *job)
             (uint16_t)(bank_scenePresentMask() | ccCopy_bit(m)));
         if (!was_present)
             autosave_markSceneWithPatternDirty(m);
-        ccCopy_nameKit(m, src->scene);
     }
     if (ccCopy_activeIn(mask) && scene_getActiveIndex() != src->scene)
         preset_startDrumsetApply();
     bank_revalidateVoiceEditMasks();
+    run->aux = (uint16_t)(mask & (uint16_t)~ccCopy_bit(src->scene));
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_FANOUT,
+            (uint32_t)run->aux | ((uint32_t)(job->scene & 0xFu) << 16u) |
+            (2u << 20u) | ((uint32_t)ccCopy_activeIn(mask) << 24u));
     run->phase = 1u;
     return CC_RUN_WAIT;
 }
 
-/* Paste a whole Effect record with edit-mask fan-out (spec §4.4). */
+/*
+ * Paste a whole Effect record with edit-mask fan-out. Phase 1 records names
+ * after the data commit once the scratch loan is available.
+ */
 static uint8_t ccCopy_runEffect(const cc_job_t *job)
 {
+    cc_run_t *run = ccSvc_run();
     const cc_source_t *src = copyClear_source();
     const effect_record_t *record = scene_effectConst(src->scene);
     uint16_t written;
     uint8_t m;
 
-    if (!record)
+    if (run->phase == 1u) {
+        if (!ccSvc_namesReady())
+            return CC_RUN_WAIT;
+        for (m = 0u; m < SCENE_COUNT; m++)
+            if ((run->aux & ccCopy_bit(m)) != 0u)
+                (void)ccSvc_nameCopy(
+                    filesystem_identityRow(FS_ROW_EFFECT, m, 0u),
+                    filesystem_identityRow(FS_ROW_EFFECT, src->scene, 0u));
+        return CC_RUN_DONE;
+    }
+    if (!record) {
+        ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_NO_SOURCE, 0u);
         return CC_RUN_DROP;
+    }
     if (ccCopy_activeIn(bank_sceneFanoutMask(job->scene)) &&
         !preset_applyWorkersIdle())
         return CC_RUN_WAIT;
     written = effects_pasteRecord(job->scene, record);
-    for (m = 0u; m < SCENE_COUNT; m++)
-        if ((written & ccCopy_bit(m)) != 0u && m != src->scene)
-            ccSvc_nameCopy(filesystem_identityRow(FS_ROW_EFFECT, m, 0u),
-                           filesystem_identityRow(FS_ROW_EFFECT, src->scene,
-                                                  0u));
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_FANOUT,
+            (uint32_t)written | ((uint32_t)(job->scene & 0xFu) << 16u) |
+            (3u << 20u) | ((uint32_t)ccCopy_activeIn(written) << 24u));
     if (ccCopy_activeIn(written))
         menu_repaintAll();
-    return CC_RUN_DONE;
+    run->aux = (uint16_t)(written & (uint16_t)~ccCopy_bit(src->scene));
+    run->phase = 1u;
+    return CC_RUN_WAIT;
 }
 
 /*
@@ -659,12 +720,18 @@ static uint8_t ccCopy_runSceneSettings(const cc_job_t *job)
     const scene_t *source = scene_getConst(src->scene);
     uint8_t active = (uint8_t)(job->scene == scene_getActiveIndex());
 
-    if (!source)
+    if (!source) {
+        ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_NO_SOURCE, 0u);
         return CC_RUN_DROP;
+    }
     if (active && !preset_applyWorkersIdle())
         return CC_RUN_WAIT;
     (void)scene_commitSettings(job->scene, &source->settings);
     bank_exchangeVoiceEditMask(src->scene, job->scene);
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_MASK_SET,
+            (uint32_t)bank_sceneMaskVoiceEditForScene(job->scene) |
+            ((uint32_t)(job->scene & 0xFu) << 16u) |
+            ((uint32_t)(src->scene & 0xFu) << 21u));
     bank_revalidateVoiceEditMasks();
     if (active)
         ccCopy_applyActiveSettings();
@@ -672,9 +739,8 @@ static uint8_t ccCopy_runSceneSettings(const cc_job_t *job)
 }
 
 /*
- * Paste a whole Scene (settings, Effect, Kit, Pattern) without fan-out
- * (spec §4.4, §9.8). Phases: 0 retained commits and names; 1 whole-Pattern
- * copy (literal: the types now match); 2 one Scene activation if active.
+ * Paste a whole Scene (settings, Effect, Kit, Pattern) without fan-out.
+ * Phases: 0 retained commits, 1 whole-Pattern copy, 2 activation, 3 names.
  */
 static uint8_t ccCopy_runScene(const cc_job_t *job)
 {
@@ -684,27 +750,26 @@ static uint8_t ccCopy_runScene(const cc_job_t *job)
     uint8_t dst = job->scene;
     uint8_t r;
 
-    if (!source)
+    if (!source) {
+        ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_NO_SOURCE, 0u);
         return CC_RUN_DROP;
+    }
     switch (run->phase) {
     case 0u:
         if (!preset_applyWorkersIdle())
             return CC_RUN_WAIT;
         (void)scene_commitSettings(dst, &source->settings);
         bank_exchangeVoiceEditMask(src->scene, dst);
+        ccTrace(AUTOSAVE_TRACE_CC_EVT_MASK_SET,
+                (uint32_t)bank_sceneMaskVoiceEditForScene(dst) |
+                ((uint32_t)(dst & 0xFu) << 16u) |
+                ((uint32_t)(src->scene & 0xFu) << 21u));
         (void)scene_commitEffectRecord(dst, &source->effect);
         (void)scene_commitKit(dst, &source->kit);
         (void)bank_setScenePresentMask(
             (uint16_t)(bank_scenePresentMask() | ccCopy_bit(dst)));
         autosave_markSceneWithPatternDirty(dst);
         autosave_markEffectDirty(dst);
-        ccSvc_nameCopy(filesystem_identityRow(FS_ROW_SCENE, dst, 0u),
-                       filesystem_identityRow(FS_ROW_SCENE, src->scene, 0u));
-        ccCopy_nameKit(dst, src->scene);
-        ccSvc_nameCopy(filesystem_identityRow(FS_ROW_PATTERN, dst, 0u),
-                       filesystem_identityRow(FS_ROW_PATTERN, src->scene, 0u));
-        ccSvc_nameCopy(filesystem_identityRow(FS_ROW_EFFECT, dst, 0u),
-                       filesystem_identityRow(FS_ROW_EFFECT, src->scene, 0u));
         run->phase = 1u;
         run->sub = 0u;
         return CC_RUN_WAIT;
@@ -716,27 +781,50 @@ static uint8_t ccCopy_runScene(const cc_job_t *job)
             preset_startDrumsetApply();
         run->phase = 2u;
         return CC_RUN_WAIT;
-    default:
+    case 2u:
         if (!preset_applyWorkersIdle())
             return CC_RUN_WAIT;
         bank_revalidateVoiceEditMasks();
         ccSvc_patternChangedUi(dst, NUM_TRACKS);
         if (dst == scene_getActiveIndex())
             menu_repaintAll();
+        run->phase = 3u;
+        return CC_RUN_WAIT;
+    default:
+        if (!ccSvc_namesReady())
+            return CC_RUN_WAIT;
+        (void)ccSvc_nameCopy(filesystem_identityRow(FS_ROW_SCENE, dst, 0u),
+                             filesystem_identityRow(FS_ROW_SCENE, src->scene,
+                                                    0u));
+        ccCopy_nameKit(dst, src->scene);
+        (void)ccSvc_nameCopy(filesystem_identityRow(FS_ROW_PATTERN, dst, 0u),
+                             filesystem_identityRow(FS_ROW_PATTERN, src->scene,
+                                                    0u));
+        (void)ccSvc_nameCopy(filesystem_identityRow(FS_ROW_EFFECT, dst, 0u),
+                             filesystem_identityRow(FS_ROW_EFFECT, src->scene,
+                                                    0u));
         return CC_RUN_DONE;
     }
 }
 
-/* `copy pattern`: whole region, retargeted when types differ (spec §9.8). */
+/* `copy pattern`: region first, Pattern-row name in a final lazy phase. */
 static uint8_t ccCopy_runPatternOnly(const cc_job_t *job)
 {
+    cc_run_t *run = ccSvc_run();
     const cc_source_t *src = copyClear_source();
-    uint8_t r = ccSvc_runRegionCopy(src->scene, job->scene);
+    uint8_t r;
 
-    if (r == CC_RUN_DONE)
-        ccSvc_nameCopy(filesystem_identityRow(FS_ROW_PATTERN, job->scene, 0u),
-                       filesystem_identityRow(FS_ROW_PATTERN, src->scene, 0u));
-    return r;
+    if (run->phase == 0u) {
+        r = ccSvc_runRegionCopy(src->scene, job->scene);
+        if (r != CC_RUN_DONE)
+            return r;
+        run->phase = 1u;
+    }
+    if (!ccSvc_namesReady())
+        return CC_RUN_WAIT;
+    (void)ccSvc_nameCopy(filesystem_identityRow(FS_ROW_PATTERN, job->scene, 0u),
+                         filesystem_identityRow(FS_ROW_PATTERN, src->scene, 0u));
+    return CC_RUN_DONE;
 }
 
 /*
@@ -745,9 +833,9 @@ static uint8_t ccCopy_runPatternOnly(const cc_job_t *job)
  * What: copies each source step's lock mask and lane values onto the
  * destination steps in range order with wrap, fanning out to same-type Scenes
  * in the destination's edit mask; a destination whose Effect type differs
- * from the source's is dropped silently. The source range is snapshotted into
- * the name buffer first (≤ 288 B) so overlapping ranges on one Scene are
- * safe. Why: user rules B9, F3. Output: DONE or DROP.
+ * from the source's is dropped silently. The source range is snapshotted on
+ * the stack (≤ 288 B) so overlapping ranges need no name-buffer loan. Why:
+ * user rules B9, F3. Output: DONE or DROP.
  * Affiliates: effects_pasteSeqStep().
  */
 static uint8_t ccCopy_runFxSteps(const cc_job_t *job)
@@ -755,8 +843,7 @@ static uint8_t ccCopy_runFxSteps(const cc_job_t *job)
     const cc_source_t *src = copyClear_source();
     const effect_record_t *s = scene_effectConst(src->scene);
     const effect_record_t *d = scene_effectConst(job->scene);
-    uint8_t *scratch = ccSvc_scratch();
-    effect_seq_step_t *snap;
+    effect_seq_step_t snap[EFFECT_SEQ_STEP_COUNT];
     uint8_t lo = (src->start < src->end) ? src->start : src->end;
     uint8_t hi = (src->start < src->end) ? src->end : src->start;
     uint8_t count = (uint8_t)(hi - lo + 1u);
@@ -764,10 +851,17 @@ static uint8_t ccCopy_runFxSteps(const cc_job_t *job)
     uint16_t mask;
     uint8_t i;
 
-    if (!s || !d || !scratch || s->type != d->type ||
-        src->start >= EFFECT_SEQ_STEP_COUNT || src->end >= EFFECT_SEQ_STEP_COUNT)
+    if (!s || !d || src->start >= EFFECT_SEQ_STEP_COUNT ||
+        src->end >= EFFECT_SEQ_STEP_COUNT) {
+        ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_NO_SOURCE, 0u);
         return CC_RUN_DROP;
-    snap = (effect_seq_step_t *)(void *)&scratch[CC_SCRATCH_BLOCK_OFFSET];
+    }
+    if (s->type != d->type) {
+        ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_FX_TYPE_MISMATCH,
+                              (uint8_t)((s->type & 0x0Fu) |
+                                        ((d->type & 0x0Fu) << 4u)));
+        return CC_RUN_DROP;
+    }
     for (i = 0u; i < count; i++)
         snap[i] = s->steps[(uint8_t)((int8_t)src->start + dir * (int8_t)i)];
     for (i = 0u; i < count; i++)
@@ -776,6 +870,9 @@ static uint8_t ccCopy_runFxSteps(const cc_job_t *job)
                                              EFFECT_SEQ_STEP_COUNT),
                                    &snap[i]);
     mask = bank_sceneFanoutMask(job->scene);
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_FANOUT,
+            (uint32_t)mask | ((uint32_t)(job->scene & 0xFu) << 16u) |
+            (6u << 20u) | ((uint32_t)ccCopy_activeIn(mask) << 24u));
     for (i = 0u; i < SCENE_COUNT; i++)
         if ((mask & ccCopy_bit(i)) != 0u)
             ccSvc_nameContentChanged(
@@ -791,8 +888,10 @@ uint8_t ccCopy_runJob(const cc_job_t *job)
 {
     uint8_t sel;
 
-    if (!job)
+    if (!job) {
+        ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_BAD_SELECTION, 0u);
         return CC_RUN_DROP;
+    }
     sel = (uint8_t)(job->op & CC_JOB_SEL_MASK);
     switch (job->kind) {
     case CC_KIND_STEP:
@@ -808,11 +907,14 @@ uint8_t ccCopy_runJob(const cc_job_t *job)
         case CC_COPY_KIT:            return ccCopy_runKit(job);
         case CC_COPY_EFFECT:         return ccCopy_runEffect(job);
         case CC_COPY_PATTERN:        return ccCopy_runPatternOnly(job);
-        default:                     return CC_RUN_DROP;
+        default:
+            ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_BAD_SELECTION, sel);
+            return CC_RUN_DROP;
         }
     case CC_KIND_FX_STEP:
         return ccCopy_runFxSteps(job);
     default:
+        ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_BAD_SELECTION, sel);
         return CC_RUN_DROP;
     }
 }

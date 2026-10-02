@@ -838,6 +838,14 @@ whose new size fits the free chunks always finds its run.
 block (or clears orphan swap bits); if a full pool makes that impossible the
 copy/clear job that needed the swap block is dropped.
 
+Copy/clear emits only service-level relocation summaries to the S075 stage-`c`
+trace; `patSvc_exclusiveCompactStep()` and
+`patSvc_exclusiveEvacuateSwapStep()` do not emit one record per moved block.
+Pattern paste selections that change triggers capture the source and previous
+destination trigger masks at button time, before the queued exclusive job,
+and restore only entries still containing the service's write if the job is
+dropped.
+
 **Suspension.** While a copy/clear operation runs, the repair epoch does not
 start (`copyClear_backgroundSuspended()` gate beside the Load/Save gate);
 queue drain, barriers and handover continue.

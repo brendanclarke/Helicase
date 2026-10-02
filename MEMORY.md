@@ -23,10 +23,11 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 **Current working source**: Session 074 is closed on `dev-ph5-effects`
 (2026-09-30). **Phase 5 (the Effects bus and modular Effect system, initial
 pass) is largely complete.** **Session 075 (`dev-ph6-copyclear`, in
-progress):** Phase 6 copy/clear is implemented and builds; hardware
-verification is pending. Spec `S075_PH6_COPY_CLEAR_FULL_SPEC.md`, schedule
-and implementation log `S075_PH6_COPYCLEAR_IMPLEMENTATION.md` (§14: changes,
-deviations, build/RAM results, open checks), both in the root.
+progress):** Phase 6 copy/clear F1 and the DEV stage-`c` trace are implemented
+and both DEV/production builds pass; hardware verification is pending. Spec
+`S075_PH6_COPY_CLEAR_FULL_SPEC.md`, combined implementation schedule
+`S075_PH6_COPYCLEAR_F1_AND_TRACE_IMPLEMENTATION.md`, and implementation log
+`S075_PH6_COPYCLEAR_IMPLEMENTATION.md` (§14) are in the root.
 
 - **Commits:** HEAD `50610dd` holds every S074 code change. The S074 closeout
   documentation and the user's move of the four DSP/Effects specifications
@@ -145,16 +146,17 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   children (Instrument, Effect, FX sequence, mix settings) fan out;
   Pattern data never does. Phase 6 copy/clear spec:
   `S075_PH6_COPY_CLEAR_FULL_SPEC.md` (root).
-- **S075 state (copy/clear implemented, unverified on hardware):**
+- **S075 state (F1 and stage-`c` trace implemented, unverified on hardware):**
   `Core/Menu/CopyClear/` (four file pairs) replaces `copyClearTools`. Global
   `srt` is retired (PERF `fxm` = Effect Morph in its cell; AutoSave Scene
   cell 7 reserved, written 127; Scene target 390 a retired placeholder).
   Every Pattern pool keeps a permanent 132 B swap block (8,060 B usable).
   The 9 kB name cache is lent to copy/clear during an operation; while lent
   other filesystem ops are refused. AutoSave, trace, settings and Pattern
-  repair do not start while an operation runs. SRAM1 +92 B net (approved
-  ≤ +100 B). Deviations from the schedule and open hardware checks:
-  `S075_PH6_COPYCLEAR_IMPLEMENTATION.md` §14.3, §14.5.
+  repair do not start while an operation runs. The F1 pass adds +124 B
+  production SRAM1 net; DEV adds 24 B of trace/latch state. Deviations,
+  verification and open hardware checks: `S075_PH6_COPYCLEAR_IMPLEMENTATION.md`
+  §14.3, §14.5, §14.7.
 - **Session 074 is closed.** Durable record: `074_SESSION_HANDOFF_LOG.md`.
   The ten root `S074_*.md` documents are superseded (the user deletes them).
   Next was Session 075 (Phase 6 copy/clear; see the current-state note).

@@ -162,9 +162,11 @@ sets `fs_autosave_page_suppressed`, which shortens the next deadline to the
 ### 3.1 Copy operation
 
 1. Copy/clear pressed and held (SHIFT not held): **its LED lights steady.**
-2. A copy object button (§4.1) sets the source and starts the operation:
-   **the LED flashes** from then until release. The copy menu opens with the
-   source indicator. AutoSave and Pattern maintenance are suspended (§9.2).
+2. The first copy object button (§4.1) opens that object's menu provisionally
+   and shows its source indicator. The row source is committed when the last
+   held row button is released; track and Scene sources commit on press. Once
+   the menu is open, the copy LED flashes until release. AutoSave and Pattern
+   maintenance are suspended (§9.2).
 3. The encoder changes the selection; the encoder click does nothing.
 4. The user navigates (§7) and presses destinations. Each press queues a paste
    with the selection shown at that moment. Up to 4 may wait; a further press
@@ -187,7 +189,8 @@ mode).
 4. A copy object button opens its clear menu at `cancel`. The encoder chooses.
    On release of the object button(s) the clear is queued unless `cancel` is
    shown.
-5. The menu stays up while copy/clear is held. Each menu opening starts at
+5. The menu stays up while copy/clear is held. Re-selecting another object in
+   the same object group keeps the current selection; a new group starts at
    `cancel`. While a clear menu is shown, pot turns are ignored.
 6. EFFECTS-mode SEQ clears and pot clears act at once, with no menu.
 7. Releasing copy/clear ends menu interaction; an object button still held at
@@ -210,16 +213,20 @@ at the head of the queue until the worker is idle.
 
 | Mode | Copy object gesture | Source | Copy menu (default first) |
 |---|---|---|---|
-| VOICE, STEP | SEQ press and release | step | `copy step all`, `merge step all`, `copy automation`, `merge automation` |
+| VOICE, STEP | SEQ press and release | step | `step -> repl`, `step -> merge`, `auto -> repl`, `auto -> merge` |
 | VOICE, STEP | SEQ range (§4.2) | step range | as step |
-| STEP | SELECT press and release | bar | `copy bar all`, `merge bar all`, `copy bar automation`, `merge automation` |
+| STEP | SELECT press and release | bar | `bar -> repl`, `bar -> merge`, `auto -> repl`, `auto -> merge` |
 | STEP | SELECT range (§4.2) | bar range | as bar |
 | VOICE, STEP, PERF, EFFECTS | TRACK press | track | `copy track`, `copy instrument` |
 | PERF | SEQ (Scene) press and release | Scene | `copy scene`, `copy scene settings`, `copy kit`, `copy effect`, `copy pattern` |
 | EFFECTS | SEQ press and release, or range | FX step / FX step range | `copy step` |
 
 Step and bar sources are set when the last held button of that row is
-released; track and Scene sources on press. Every menu opens at its default.
+released; track and Scene sources on press. The first step/bar/FX-row press
+opens its menu provisionally, and the final row release commits the source
+without resetting the menu selection. Row stacks retain raw button indices and
+convert them to absolute steps at the press, so ranges remain correct across
+the visible-bar offset.
 
 ### 4.2 Ranges
 
@@ -257,13 +264,17 @@ switch). A paste identical to its source does nothing.
 
 | Selection | Trigger | Specials | Automation |
 |---|---|---|---|
-| `copy … all` | := source | := source | := source |
-| `merge … all` | destination OR source | source wins per field; fields only the destination has are kept | union; source wins on the same target; beyond 63, destination entries are dropped silently |
-| `copy … automation` | unchanged | unchanged | := source |
-| `merge automation` | unchanged | unchanged | union as above |
+| `… -> repl` | := source | := source | := source |
+| `… -> merge` | destination OR source | source wins per field; fields only the destination has are kept | union; source wins on the same target; beyond 63, destination entries are dropped silently |
+| `auto -> repl` | unchanged | unchanged except source probability replaces destination probability | := source |
+| `auto -> merge` | unchanged, including probability | unchanged | union as above |
 
-- An empty source step under `copy … all` empties the destination step; under a
+- An empty source step under `… -> repl` empties the destination step; under a
   merge it changes nothing.
+- For `… -> repl` and `… -> merge`, the trigger result is written at paste
+  press time. If the queued paste later drops, the service restores its early
+  trigger write only where the user has not changed that step since; a clear
+  similarly turns final-state-off triggers off before its background job.
 - **Length extension:** `max(length, 16·(highest written bar + 1))`; a paste
   never shortens a track.
 - Automation targets follow the destination when the track or Scene differs
@@ -330,7 +341,8 @@ revalidated after any type change. Names follow every fanned-out destination.
 
 ## 5. Clear behaviour by mode
 
-Every clear menu opens at `cancel`.
+The first clear object in a group opens at `cancel`; another object in the
+same group keeps the current selection.
 
 | Mode | Copy object | Clear menu | Applied |
 |---|---|---|---|
@@ -347,7 +359,7 @@ Every clear menu opens at `cancel`.
 | `clear step` / `clear bar` | trigger off, block released | no |
 | `clear track` | as above for 128 steps; length, scale, shuffle to defaults (16, default scale, 0) | no |
 | `… automation` | automation removed; trigger and specials kept | no |
-| `… notes` | trigger off, specials removed; automation kept | no |
+| `… notes` | trigger off, note/velocity specials removed; probability and automation kept | no |
 | `clear send` | the track's slot (track 7 → slot 6): FX send 0, fader `pre` | yes |
 | `clear scene` on the active Scene | everything except the Kit to defaults (settings, Effect `off`, FX sequence, Pattern); the Scene's edit mask reset to itself | no |
 | `clear scene` on another Scene | emptied, Kit included; Bank-present off; edit mask reset to itself | no |
@@ -359,6 +371,10 @@ Every clear menu opens at `cancel`.
 
 Names stay on every clear (§9.10). There is no Instrument clear.
 
+Clear order for trigger-off selections is visible immediately: the destination
+LED flash is followed by the trigger-bit write, then the queued pool rewrite.
+If the queued clear later drops, the accepted trigger-off state may remain.
+
 ---
 
 ## 6. Endless-pot parameter clear
@@ -368,6 +384,9 @@ Names stay on every clear (§9.10). There is no Instrument clear.
   value never changes. Over a non-automatable parameter (including PERF `mrp`)
   nothing happens. In a copy operation pots do nothing. While a clear menu is
   shown, pots are ignored.
+- Pot clears take effect at acceptance and their background register drains
+  through the same whole-call trickle governor while an older filesystem
+  writer is busy.
 - The Pattern part covers the active Scene, all 7 tracks × 128 steps, and never
   fans out:
 
@@ -438,8 +457,8 @@ While a menu is up, page repaints draw the menu, underline (CGRAM) updates are
 held, and pot repaints do not draw the page.
 
 ```
-COPY 03T2s005           CLR  S03T2
-[merge all     ]        [track notes   ]
+COPY    03T2s005        CLR     S03T2
+[step -> merge ]        [track notes   ]
 ```
 
 | Source | Indicator | Example |
@@ -455,25 +474,22 @@ COPY 03T2s005           CLR  S03T2
 One-based numbers: Scenes 01..16, tracks 1..7, steps 001..128, bars 1..8, FX
 steps 01..16. Clear menus show the same indicator for the pressed object.
 
-Selection labels: `step all`, `bar all`, `merge all`, `automation`,
-`merge auto`, `track`, `instrument`, `scene`, `settings`, `kit`, `effect`,
+Selection labels: `step -> repl`, `step -> merge`, `bar -> repl`, `bar -> merge`,
+`auto -> repl`, `auto -> merge`, `track`, `instrument`, `scene`, `settings`, `kit`, `effect`,
 `pattern`, `step` (FX); clears: `cancel`, `step`, `step auto`, `step notes`,
 `bar`, `bar auto`, `bar notes`, `track`, `track auto`, `track notes`, `send`,
 `scene`, `settings`, `pattern`, `automation`, `notes`, `fx`, `fx sequence`.
 
 ### 8.2 LEDs
 
-- Copy: copy/clear LED steady when pressed; flashing from the source selection
-  until release.
+- Copy: copy/clear LED steady when pressed; the first row/object opens the
+  menu and then the copy LED flashes until release. There is no source-row LED
+  blink.
 - Clear: SHIFT as normal; once copy/clear is pressed, SHIFT and copy/clear
   flash, latched until copy/clear is released.
-- The source flashes when visible (step LEDs, TRACK LED, PERF Scene LED); a
-  destination flashes once after a paste or clear; Pattern changes repaint the
-  visible track.
-- **LED consolidation** (`SCOPING_TARGETS.md` §4.11): the priority stack
-  `base < blink < flash < pulse`, with expiry re-rendering the next active
-  layer, implemented for the copy/clear, SHIFT, SEQ (including the chase),
-  SELECT and VOICE LEDs. Public LED API unchanged.
+- A paste or clear flashes every visible LED in the affected destination
+  object, including a full range; Pattern changes repaint the visible track.
+  The old source group-blink layer is not used.
 
 ---
 
@@ -522,16 +538,17 @@ every change, so AutoSave sees everything afterwards.
 - `filesystem_borrowNameCacheScratch()` succeeds only while the facade is idle.
   It tags the cache with a new domain so every browser accessor reports "not
   loaded". `filesystem_returnNameCacheScratch()` clears it.
-- Borrowed for the first paste or clear; returned after the name write.
-  Load/Save reloads its index on the next entry (the slow Load type switch from
-  S073 applies).
+- Borrowed lazily only for an overlapping Pattern paste that needs a source
+  snapshot, or for the final HCNAMES read/write. Non-overlapping Pattern
+  pastes read the live source and do not need the loan. Load/Save reloads its
+  index on the next entry (the slow Load type switch from S073 applies).
 
 | Use | Lifetime | Bytes |
 |---|---|---:|
 | HCNAMES row remap (§9.10) | operation | 161 |
 | source address entries of the running paste | paste | ≤ 256 |
-| source blocks, retargeted (one track's blocks cannot exceed one pool) | paste | ≤ 8,192 |
-| **worst case** | | **8,609** |
+| source blocks, retargeted (one track's blocks cannot exceed one usable pool) | paste | ≤ 8,060 |
+| **worst case** | | **8,572** |
 
 The paste region also holds Kit (1,160 B), Effect (420 B) and FX-range (288 B)
 copies, and at the end the original names and sources for the name write
@@ -558,10 +575,11 @@ copies, and at the end the original names and sources for the name write
 
 ### 9.5 Pastes: step by step
 
-1. **Snapshot** the source into the 9 kB name buffer: address entries and
-   blocks, with automation retargeted for the destination (§9.7) and blocks
-   resized for dropped entries. Reversal, overlap and wrap then need no special
-   care.
+1. **Choose the source path.** A non-overlapping paste reads the live source;
+   an overlapping paste snapshots address entries and blocks into the 9 kB
+   name buffer, with automation retargeted for the destination (§9.7).
+   Early-trigger paste selections write their source and destination trigger
+   masks at button time, before the queued job runs.
 2. **Check room.** Walk the destination steps in paste order, adding each
    step's new size minus its old size. If the largest running total exceeds
    the free chunks (outside the swap block, counting reclaimable
@@ -576,10 +594,14 @@ copies, and at the end the original names and sources for the name write
      new size exists, copy the block there, publish, and the swap block is
      empty again.
 4. **Finish:** length extension or track settings, dirty mark, presence-search
-   restart, LED and STEP page refresh.
+   restart, LED and STEP page refresh. In trickle mode the governor admits a
+   whole bounded engine call only while its measured credit is positive. A
+   dropped paste restores only early-trigger steps that still contain the
+   service's write; user changes made after the press are preserved.
 
 Merges decode the destination's automation into one 63-entry stack buffer
-(252 B, as `pat_writeSpecials()` does) and read the source from the snapshot.
+(252 B, as `pat_writeSpecials()` does) and read the source from the live path
+or the overlap snapshot selected above.
 
 ### 9.6 The swap block
 

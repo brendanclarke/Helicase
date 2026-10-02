@@ -1393,8 +1393,8 @@ static uint16_t patSvc_ownerOfOffset(pat_scene_region_t *region,
  * Inputs: Scene, region, owning address index, old/new byte offsets (the two
  * runs must not overlap) and the logical chunk count. Output: new bits set,
  * bytes copied, entry published with the live trigger, old bits cleared and
- * old bytes zeroed; layout-only AutoSave dirty mark and a relocation trace
- * record. Musical content is unchanged.
+ * old bytes zeroed; layout-only AutoSave dirty mark. Musical content is
+ * unchanged. Copy/clear callers aggregate move counts in their own trace.
  */
 static void patSvc_exclusiveMove(uint8_t scene, pat_scene_region_t *region,
                                  uint16_t address_index, uint16_t old_offset,
@@ -1412,9 +1412,12 @@ static void patSvc_exclusiveMove(uint8_t scene, pat_scene_region_t *region,
         patSvc_bitmapClear(region, (uint16_t)((old_offset >> 2u) + i));
     memset(&region->pool[old_offset], 0, (size_t)chunks * 4u);
     autosave_markNonSemanticPatternDirty(scene);
-    patternTrace_record(PAT_TRACE_STAGE_TIER2_RELOC, (uint8_t)(scene & 0x0Fu),
-                        patSvc_relocationValue(address_index, old_offset,
-                                               new_offset));
+    /*
+     * S075 trace debug (user D4): no per-move PatternTrace record. Copy/clear
+     * moves run while trace flushes are suspended, and one fragmented paste
+     * can make hundreds of moves; JOB_STATS/REG_DONE carry the aggregate.
+     * Reactive and repair relocations keep their R/L records.
+     */
 }
 
 /* Nonzero when every swap-block chunk is free in the bitmap. */

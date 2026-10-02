@@ -1673,6 +1673,14 @@ static uint8_t filesystem_patternHeaderValid(const uint8_t *header,
 static fs_name_cache_kind_t fs_list_cache_kind = FS_NAME_CACHE_NONE;
 /* S075: nonzero while copy/clear holds fs_list_cache_name (1 B SRAM). */
 static uint8_t fs_name_cache_borrowed;
+#if DEV_MODE_LOGGING
+/*
+ * S075 trace debug (DEV only, 2 B): suspension edge state and one refusal
+ * witness per name-cache loan. Production keeps neither latch.
+ */
+static uint8_t fs_cc_suspended_prev;
+static uint8_t fs_cc_refusal_reported;
+#endif
 static instrument_type_t fs_list_cache_type = INSTRUMENT_TYPE_UNKNOWN;
 static uint16_t fs_list_cache_count;
 static uint8_t op_instrument_load_destination_slot = 0u;
@@ -1788,6 +1796,9 @@ uint8_t *filesystem_borrowNameCacheScratch(void)
     filesystem_clearNameCacheStorage();
     fs_list_cache_kind = FS_NAME_CACHE_COPYCLEAR;
     fs_name_cache_borrowed = 1u;
+#if DEV_MODE_LOGGING
+    fs_cc_refusal_reported = 0u;
+#endif
     return (uint8_t *)fs_list_cache_name;
 }
 
@@ -25552,6 +25563,18 @@ void filesystem_tick(void)
      */
     const uint8_t cc_suspended = copyClear_backgroundSuspended();
 
+#if DEV_MODE_LOGGING
+    /* Record each copy/clear suspension edge and the facade owner at it. */
+    if (cc_suspended != fs_cc_suspended_prev) {
+        autosaveTrace_record(
+            AUTOSAVE_TRACE_STAGE_COPY_CLEAR, AUTOSAVE_TRACE_CC_EVT_SUSPEND,
+            (uint32_t)(cc_suspended ? 0u : 1u) |
+            ((uint32_t)(status == FS_STATUS_BUSY ? 1u : 0u) << 1u) |
+            ((uint32_t)(current_op & 0xFFu) << 8u));
+        fs_cc_suspended_prev = cc_suspended;
+    }
+#endif
+
     if (cc_suspended)
         fs_autosave_page_suppressed = 1u;
     if (status == FS_STATUS_IDLE && !cc_suspended)
@@ -25916,8 +25939,19 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
      * its name write have finished. Affiliate:
      * filesystem_borrowNameCacheScratch().
      */
-    if (fs_name_cache_borrowed && op != FS_INTERNAL_OP_UPDATE_HCNAMES_COPY)
+    if (fs_name_cache_borrowed && op != FS_INTERNAL_OP_UPDATE_HCNAMES_COPY) {
+#if DEV_MODE_LOGGING
+        /* First operation refused during this loan; callers retry. */
+        if (!fs_cc_refusal_reported) {
+            fs_cc_refusal_reported = 1u;
+            autosaveTrace_record(AUTOSAVE_TRACE_STAGE_COPY_CLEAR,
+                                 AUTOSAVE_TRACE_CC_EVT_FS_REFUSED,
+                                 (uint32_t)(op & 0xFFu) |
+                                 ((uint32_t)(current_op & 0xFFu) << 8u));
+        }
+#endif
         return false;
+    }
     /*
      * Arm before publishing BUSY so the complete operation owns its code.
      *

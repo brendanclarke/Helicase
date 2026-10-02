@@ -151,28 +151,6 @@ static uint8_t           led_sw43OriginalState;
 static uint8_t led_activeLayers[LED_LAYER_COUNT];
 
 /*
- * Persistent group-blink masks and the shared blink phase (S075).
- *
- * What: one 16-bit mask per LED row that can blink as a set (SELECT, SEQ,
- * VOICE), plus a one-bit phase flipped at every LED_BLINK_TIME_MS tick. A set
- * bit makes that LED blink until the mask is changed; the LED carries the
- * LED_LAYER_BLINK bit while it is a member. Why: the eight blink slots cannot
- * show a 16-step copy source. Group members are rendered absolutely (base XOR
- * phase) so an LED that is also in a blink slot cannot double-toggle. Inputs:
- * led_setBlinkGroup(). Outputs: temporary LED output each blink tick and on
- * every led_renderFromStack() for a member. Lifetime: firmware. RAM: 7 B
- * SRAM1 (S075 ledger). Affiliates: copyClearSession.c.
- */
-typedef enum {
-    LED_BLINK_GROUP_SELECT = 0,
-    LED_BLINK_GROUP_SEQ,
-    LED_BLINK_GROUP_VOICE,
-    LED_BLINK_GROUP_COUNT
-} led_blink_group_index_t;
-static uint16_t led_blinkGroupMask[LED_BLINK_GROUP_COUNT];
-static uint8_t led_blinkPhase;
-
-/*
  * Flash-group lookup declarations used by led_renderFromStack(). The lookup
  * bodies remain beside the flash implementation below; these declarations keep
  * the priority renderer adjacent to its layer contract without reordering the
@@ -180,9 +158,6 @@ static uint8_t led_blinkPhase;
  */
 static uint8_t led_flashGroupLedCount(LedFlashGroup group);
 static uint8_t led_flashGroupLed(LedFlashGroup group, uint8_t bit);
-static uint8_t led_blinkGroupMember(uint8_t ledNr);
-static uint8_t led_blinkSlotMember(uint8_t ledNr);
-static uint8_t led_baseValue(uint8_t ledNr);
 
 /*
  * Persistent blink slots.
@@ -356,20 +331,6 @@ static void led_renderFromStack(uint8_t ledNr)
         layers = led_activeLayers[index];
     }
 
-    /*
-     * Group-blink members re-render to their absolute phase value (S075).
-     *
-     * A slot blink owns its own toggled output, so the early return below
-     * keeps it. A group member has no per-LED toggle history: when a higher
-     * layer (pulse or flash) expires, the member must show base XOR the shared
-     * phase, or it would stay on the expired layer's value until the next tick.
-     */
-    if (led_blinkGroupMember(ledNr)) {
-        led_setValueTemp((uint8_t)(led_baseValue(ledNr) ^ led_blinkPhase),
-                         ledNr);
-        return;
-    }
-
     if ((layers & LED_LAYER_CHASE) && !(layers & LED_LAYER_BLINK) &&
         led_currentStepLed == ledNr) {
         /* Chase has no periodic owner; reconstruct its inverted base state. */
@@ -400,8 +361,6 @@ void led_init(void)
     led_currentStepLed = 0xFFu;
     led_sw43State = 0;
     led_sw43OriginalState = 0;
-    memset(led_blinkGroupMask, 0, sizeof(led_blinkGroupMask));
-    led_blinkPhase = 0u;
     memset(led_originalLedState, 0, sizeof(led_originalLedState));
     memset(led_activeLayers, 0, sizeof(led_activeLayers));
 }
@@ -561,8 +520,6 @@ void led_clearAll(void)
     led_currentStepLed = 0xFFu;
     led_sw43State = 0;
     led_sw43OriginalState = 0;
-    memset(led_blinkGroupMask, 0, sizeof(led_blinkGroupMask));
-    led_blinkPhase = 0u;
     memset(led_activeLayers, 0, sizeof(led_activeLayers));
     dout_setSw43Led(0);
 }
@@ -654,71 +611,7 @@ static uint8_t led_flashGroupLed(LedFlashGroup group, uint8_t bit)
     }
 }
 
-/*
- * Map a public flash group to a group-blink slot, and read one base bit.
- *
- * led_blinkGroupIndex() accepts only SELECT, SEQ and VOICE and returns 0xFF
- * for other groups. led_blinkGroupMember() tests logical LED membership, and
- * led_baseValue() reads the remembered base state without touching output.
- * Group rendering is absolute (base XOR phase), so it must not use toggle
- * history. Affiliates: led_setBlinkGroup(), led_tickHandler(), and
- * led_renderFromStack().
- */
-static uint8_t led_blinkGroupIndex(LedFlashGroup group)
-{
-    switch (group) {
-    case LED_FLASH_GROUP_SELECT: return LED_BLINK_GROUP_SELECT;
-    case LED_FLASH_GROUP_SEQ:    return LED_BLINK_GROUP_SEQ;
-    case LED_FLASH_GROUP_VOICE:  return LED_BLINK_GROUP_VOICE;
-    default:                     return 0xFFu;
-    }
-}
-
-static uint8_t led_blinkGroupMember(uint8_t ledNr)
-{
-    if (ledNr >= LED_PART_SELECT1 && ledNr <= LED_PART_SELECT8)
-        return (uint8_t)((led_blinkGroupMask[LED_BLINK_GROUP_SELECT] &
-                          (uint16_t)(1u << (ledNr - LED_PART_SELECT1))) != 0u);
-    if (ledNr >= LED_STEP1 && ledNr <= LED_STEP16)
-        return (uint8_t)((led_blinkGroupMask[LED_BLINK_GROUP_SEQ] &
-                          (uint16_t)(1u << (ledNr - LED_STEP1))) != 0u);
-    if (ledNr >= LED_VOICE1 && ledNr <= LED_VOICE7)
-        return (uint8_t)((led_blinkGroupMask[LED_BLINK_GROUP_VOICE] &
-                          (uint16_t)(1u << (ledNr - LED_VOICE1))) != 0u);
-    return 0u;
-}
-
-static uint8_t led_baseValue(uint8_t ledNr)
-{
-    uint8_t physLed = led_toPhysicalNumber(ledNr);
-    if (physLed == LED_BAR1)
-        return led_sw43OriginalState;
-    if (physLed >= NUM_OUTS)
-        return 0u;
-    return (uint8_t)((led_originalLedState[led_arrayPos(physLed)] &
-                      (uint8_t)(1u << led_bitPos(physLed))) != 0u);
-}
-
-/*
- * Report whether one logical LED currently occupies a persistent blink slot.
- *
- * What: scans the eight led_setBlinkLed() slots. Why: removing an LED from a
- * group blink must keep LED_LAYER_BLINK when a slot still blinks it (for
- * example the selected-step LED), otherwise the slot blink would stop
- * rendering. Input: logical LED id. Output: nonzero when a slot owns it.
- * Caller: led_setBlinkGroup(). Affiliate: led_blinkLedNumber[].
- */
-static uint8_t led_blinkSlotMember(uint8_t ledNr)
-{
-    uint8_t i;
-
-    for (i = 0u; i < NUM_OF_BLINKABLE_LEDS; i++)
-        if ((led_blinkingLeds & (uint8_t)(1u << i)) &&
-            led_blinkLedNumber[i] == ledNr)
-            return 1u;
-    return 0u;
-}
-
+/* Clean a public flash-group mask to the number of LEDs in that group. */
 static uint16_t led_cleanFlashMask(LedFlashGroup group, uint16_t mask)
 {
     uint8_t count = led_flashGroupLedCount(group);
@@ -940,56 +833,11 @@ void led_clearAllBlinkLeds(void)
             uint8_t ledNr = led_blinkLedNumber[i];
             uint8_t physLed = led_toPhysicalNumber(ledNr);
             uint8_t index = (physLed == LED_BAR1) ? 40u : physLed;
-            if (index < LED_LAYER_COUNT && !led_blinkGroupMember(ledNr))
+            if (index < LED_LAYER_COUNT)
                 led_activeLayers[index] &= (uint8_t)~LED_LAYER_BLINK;
             led_renderFromStack(ledNr);
             led_blinkingLeds &= (uint8_t)~(1<<i);
         }
-    }
-}
-
-/*
- * Set or replace one row's persistent group blink (S075).
- *
- * What: makes exactly the LEDs in mask blink as a set until the next call for
- * the same group; mask zero stops it. Why: copy/clear source ranges can span
- * all 16 SEQ LEDs, beyond the eight individual blink slots. Inputs: SELECT,
- * SEQ or VOICE and a row bit mask; other groups are ignored. Output: BLINK
- * layer membership and rendered output for changed LEDs. Affiliates:
- * led_clearAllBlinkLeds(), led_tickHandler(), copyClearSession.c.
- */
-void led_setBlinkGroup(LedFlashGroup group, uint16_t mask)
-{
-    uint8_t group_index = led_blinkGroupIndex(group);
-    uint16_t old_mask;
-    uint16_t changed;
-    uint8_t bit;
-    uint8_t count;
-
-    if (group_index == 0xFFu)
-        return;
-    old_mask = led_blinkGroupMask[group_index];
-    mask = led_cleanFlashMask(group, mask);
-    led_blinkGroupMask[group_index] = mask;
-    changed = (uint16_t)(old_mask ^ mask);
-    count = led_flashGroupLedCount(group);
-    for (bit = 0u; bit < count; bit++) {
-        uint8_t ledNr;
-        uint8_t physLed;
-        uint8_t index;
-
-        if ((changed & (uint16_t)(1u << bit)) == 0u)
-            continue;
-        ledNr = led_flashGroupLed(group, bit);
-        physLed = led_toPhysicalNumber(ledNr);
-        index = (physLed == LED_BAR1) ? 40u : physLed;
-        if (index >= LED_LAYER_COUNT)
-            continue;
-        if (mask & (uint16_t)(1u << bit))
-            led_activeLayers[index] |= LED_LAYER_BLINK;
-        else if (!led_blinkSlotMember(ledNr))
-            led_activeLayers[index] &= (uint8_t)~LED_LAYER_BLINK;
-        led_renderFromStack(ledNr);
     }
 }
 
@@ -1045,40 +893,6 @@ void led_tickHandler(void)
                     !(led_activeLayers[index] &
                       (LED_LAYER_PULSE | LED_LAYER_FLASH)))
                     led_toggleTemp(ledNr);
-            }
-        }
-        /*
-         * Advance the shared blink phase and render group-blink members (S075).
-         *
-         * Slots keep their relative toggle above; groups are written after the
-         * slots as an absolute value (base XOR phase), so an LED in both sets
-         * ends each tick in the group's phase. Pulse and flash layers keep
-         * priority exactly as for slot blinks. Affiliate: led_setBlinkGroup().
-         */
-        led_blinkPhase ^= 1u;
-        for (i = 0; i < LED_BLINK_GROUP_COUNT; i++) {
-            uint8_t bit;
-            for (bit = 0u; bit < 16u; bit++) {
-                if (led_blinkGroupMask[i] & (uint16_t)(1u << bit)) {
-                    uint8_t ledNr;
-                    uint8_t physLed;
-                    uint8_t index;
-                    ledNr = (i == LED_BLINK_GROUP_SELECT)
-                        ? (uint8_t)(LED_PART_SELECT1 + bit)
-                        : (i == LED_BLINK_GROUP_SEQ)
-                            ? (uint8_t)(LED_STEP1 + bit)
-                            : (uint8_t)(LED_VOICE1 + bit);
-                    if ((i == LED_BLINK_GROUP_SELECT && bit >= 8u) ||
-                        (i == LED_BLINK_GROUP_VOICE && bit >= 7u))
-                        continue;
-                    physLed = led_toPhysicalNumber(ledNr);
-                    index = (physLed == LED_BAR1) ? 40u : physLed;
-                    if (index < LED_LAYER_COUNT &&
-                        !(led_activeLayers[index] &
-                          (LED_LAYER_PULSE | LED_LAYER_FLASH)))
-                        led_setValueTemp((uint8_t)(led_baseValue(ledNr) ^
-                                                   led_blinkPhase), ledNr);
-                }
             }
         }
     }

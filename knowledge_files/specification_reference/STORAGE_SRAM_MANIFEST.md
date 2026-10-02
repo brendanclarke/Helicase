@@ -4,18 +4,15 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 074 close (2026-09-30), `dev-ph5-effects`, HEAD
-  `50610dd`. Link: `text=502,512`, `data=416`, `bss=426,392`; flash payload
-  502,928 B; `LXRV2_lxr02.img` 502,944 B, SHA-256
-  `63eec2a602d80f54ea122a7977eb214c178f115be6c7e6a4117b02940663aeb0`.
-- **S075 (Phase 6 copy/clear, `dev-ph6-copyclear`, uncommitted at this
-  update):** link `text=527,392`, `data=412`, `bss=426,480`;
-  `LXRV2_lxr02.img` 527,820 B. SRAM1 net +92 B (approved up to +100 B):
-  copy/clear state +84 B, released `srt` bytes −32 B in `scenes`, `.data`
-  −4 B; DTCM `.dtcmz` −8 B (`mixer_decimation_rate[]` 7 → 6 floats plus
-  alignment). The 9,000 B name cache doubles as copy/clear working storage
-  while an operation runs (§8.2). Every Scene pool keeps a permanent 132 B
-  swap block (§8.2).
+- **Current as of:** Session 075 F1/trace implementation (2026-10-02),
+  `dev-ph6-copyclear`, uncommitted. DEV link: `text=530,592`, `data=416`,
+  `bss=426,616`; binary 531,008 B. Production (`DEV_MODE_LOGGING=0`) link:
+  `text=516,688`, `data=408`, `bss=409,840`; binary 517,096 B. The F1 pass
+  adds +124 B production SRAM1 net: early source masks +64 B, restore masks
+  +64 B, early flags +1 B and governor credit +2 B, offset by the removed
+  group-blink state −7 B. The 9,000 B name cache doubles as copy/clear
+  working storage only during an intentional lazy loan (§8.2). Every Scene
+  pool keeps a permanent 132 B swap block (§8.2).
 - **S074 changes:** +64 B SRAM1 (Scene settings for the bus compressor);
   +32 B DTCM `.dtcmz` (bus compressor state), so the FX arena is −32 B;
   CrumpBit uses 0 B of static RAM (56 B inside the existing 76 B union)
@@ -423,7 +420,7 @@ byte, including alignment and small variables omitted here.
 | `filesystem.c`: `fs_stage_workspace` | 2,048 | One union shared by Kit, Instrument, Scene+Effect, AutoSave writer, and HCNAMES regeneration staging. The Scene+Effect peak is 1,625 B (the typed-load assert sums to 2,009 of 2,048 since S074); union members are not additive. The AutoSave writer member gained the 1-byte `overlong_mask` in S074 (0 B: inside the union). |
 | `filesystem.c`: `staging_buf` | 512 | Shared streaming and trace-batch buffer. |
 | `filesystem.c`: `fs_list_cache_name` | 9,000 | One 1,000 × 9 browser/index name cache. Since S075 it is also lent to copy/clear as working storage while an operation runs (`filesystem_borrowNameCacheScratch()`; tag `FS_NAME_CACHE_COPYCLEAR`): [0..160] HCNAMES row remap, [256..511] paste source table, [512..] source blocks (≤ 8,060 B), Kit/Effect/FX-range copies, and at the end the original HCNAMES names/sources (1,771 B at 256). Worst case 8,572 B. While lent, cache disposal is ignored and other filesystem ops are refused; the cache is cleared on return and Load/Save reloads its index. |
-| `copyClearSession.c` / `copyClearService.c` | 84 | Copy/clear operation state, source, press stack, edge masks; queue of four 6 B jobs, eight-entry pot-clear register, run state, flags, name-buffer pointer (S075). |
+| `copyClearSession.c` / `copyClearService.c` | 215 | Copy/clear operation state, source, raw-index press stack, edge masks; queue of four 6 B jobs, eight-entry pot-clear register, run state, early-trigger masks, trickle credit and name-buffer pointer (S075 F1). The +131 B F1 owner delta is separate from the −7 B retired LED state in the net ledger. |
 | `filesystem.c`: `hcnames_name_mirror`, `fs_resident_source` | 1,771 | Separate 161 × 9 HCNAMES names and 161 × 2 provenance sources; Effect rows are 145..160. |
 | `filesystem.c`: `op_effect_display_name` | 9 | Cached Effect filename stem for the current Scene/Bank child save. |
 | `filesystem.c`: `op_effect_state` | 7 | Bounded `.fx` parser state retained across async file-reader passes. |
@@ -477,6 +474,8 @@ misses alignment and other compile-time changes.
 | `buttonHandler.c`: `evt_drop_count` | 1 | Saturating front-panel overflow witness. |
 | `FxBuffer.c`: `fxbuf_selfTestResult` | 1 | Diagnostic-only allocation self-test result. |
 | `EffectsManager.c`: `effects_registryCheckCode` | 1 | Diagnostic-only registry invariant result. |
+| `copyClearService.c`: `ccSvc_traceState` | 22 | Packed DEV-only copy/clear operation, queue, scratch, drop, register and name counters. |
+| `filesystem.c`: `fs_cc_suspended_prev`, `fs_cc_refusal_reported` | 2 | DEV-only suspension-edge and first-refusal latches for stage `c`. |
 
 `DEV_STALL_DETECTION=1` also keeps its phase/tick detector state; its
 condition is `DEV_STALL_DETECTION`, not `DEV_MODE_LOGGING` alone. The runtime
@@ -547,8 +546,10 @@ not describe it in detail.
 - **S075:** copy/clear +84 B SRAM1, `srt` retired (−32 B `scenes`; DTCM
   `mixer_decimation_rate` −4 B), +2 B claim/borrow flags; permanent 132 B swap
   block per Scene pool (inside the existing pool); the 9,000 B name cache
-  becomes copy/clear working storage during an operation. Link
-  `text=527,392`, `data=412`, `bss=426,480`.
+  becomes copy/clear working storage during an operation. F1 adds +124 B
+  production SRAM1 net and DEV adds 24 B for trace state/latches. DEV link
+  `text=530,592`, `data=416`, `bss=426,616`; production link
+  `text=516,688`, `data=408`, `bss=409,840`.
 - **S074:**
   - `scenes` +64 B (bus compressor settings);
   - DTCM `busComp` 32 B, so the arena is 126,592 B at `0x20001180`;

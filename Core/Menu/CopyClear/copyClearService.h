@@ -19,6 +19,8 @@
 #define COPY_CLEAR_SERVICE_H_
 
 #include <stdint.h>
+#include "config.h"
+#include "AutosaveTrace.h"
 #include "copyClearSession.h"
 
 /* Job classes (high nibble of cc_job_t.op); the low nibble is the selection. */
@@ -64,7 +66,15 @@ typedef struct {
 void ccSvc_init(void);
 void ccSvc_tick(void);
 
-/* Queue one job; zero when the queue already holds four (dropped, spec §3.1). */
+/*
+ * Queue one paste or clear (spec §3.1).
+ *
+ * Inputs: a job. Output: queue slot index + 1 (1..4) when queued, 0 when the
+ * queue already holds four jobs (dropped silently; a QUEUE_FULL trace record
+ * is written). The slot index lets the caller attach early-trigger state to
+ * the job (ccSvc_pasteTriggersNow()). Callers: ccCopy_requestPaste(),
+ * ccClear_requestClear().
+ */
 uint8_t ccSvc_enqueue(const cc_job_t *job);
 /* Number of queued or running jobs (0..4). */
 uint8_t ccSvc_jobCount(void);
@@ -78,11 +88,20 @@ void ccSvc_interactionStarted(void);
 /* Run state of the job at the queue head (valid only inside an executor). */
 cc_run_t *ccSvc_run(void);
 /*
- * Borrowed 9 kB name buffer (NULL until the first job or register entry).
- * Layout (spec §9.3): [0..160] HCNAMES row remap; [256..511] Pattern paste
- * source table; [512..] snapshot blocks, or Kit/Effect/FX-range copies.
+ * Borrowed 9 kB name buffer (S075, F1-I).
+ *
+ * What: the filesystem's name cache, lent to copy/clear only when it is used:
+ * by a step/bar paste that overlaps its own source (snapshot), and by the
+ * name remap and its end-of-operation HCNAMES write. Clears, pot clears,
+ * whole-Pattern copy/reset, non-overlapping pastes and Scene-level data
+ * commits never wait for it. ccSvc_scratch() returns NULL while not borrowed.
+ * Layout (spec §9.3): [0..160] HCNAMES row remap (0xFF = unchanged);
+ * [256..511] paste source table; [512..] source blocks. Accessors:
+ * copyClearService.c, copyOps.c.
  */
 uint8_t *ccSvc_scratch(void);
+/* Borrow scratch for the final name phase; zero while filesystem is busy. */
+uint8_t ccSvc_namesReady(void);
 #define CC_SCRATCH_REMAP_OFFSET   0u
 #define CC_SCRATCH_TABLE_OFFSET   256u
 #define CC_SCRATCH_BLOCK_OFFSET   512u
@@ -113,18 +132,33 @@ uint8_t ccSvc_registerFull(void);
 uint8_t ccSvc_registerScene(void);
 uint8_t ccSvc_targetPending(uint16_t target);
 
+/* Number of targets waiting in the pot-clear register (0..8; trace use). */
+uint8_t ccSvc_registerCount(void);
+
 /*
- * Name remap for copy/clear (spec §9.10).
+ * Early trigger bits for pastes (F1-I §11.4; user Q4, A2, A3, B1).
  *
- * ccSvc_nameCopy(): remap[dst] = the original row whose name/source the
- * destination takes; chained pastes resolve to the first source (a paste of
- * B after A->B uses A's row). ccSvc_nameContentChanged(): the row keeps its
- * name but its content changed, so its refreshed flag is cleared now. Both
- * arm the one HCNAMES write at the end of the operation
- * (filesystem_requestCopyResidentNames()). Rows are FS_HCNAMES rows; invalid
- * rows are ignored.
+ * What: ccSvc_pasteTriggersNow() writes destination trigger bits for an
+ * accepted step/bar/track paste at the press; `... -> repl` sets each bit to
+ * the source's and `... -> merge` ORs it in. Automation pastes write nothing.
+ * The slot retains press-time source and previous-destination masks so the
+ * job is exact even when a later early paste changes the live source, and a
+ * dropped job restores only steps the user has not changed since.
  */
-void ccSvc_nameCopy(uint16_t dst_row, uint16_t src_row);
+uint8_t ccSvc_pasteTriggersNow(uint8_t slot);
+
+/* Repaint step LEDs after foreground trigger changes for one Scene. */
+void ccSvc_triggersChangedUi(uint8_t scene);
+
+/*
+ * Name remap for copy/clear (spec §9.10, F1-I).
+ *
+ * ccSvc_nameCopy() returns 0 when the scratch buffer is not borrowed; callers
+ * wait on ccSvc_namesReady() before recording names. Chained pastes resolve
+ * to the original source row. ccSvc_nameContentChanged() only clears the
+ * resident refreshed flag and arms the final HCNAMES write; it never borrows.
+ */
+uint8_t ccSvc_nameCopy(uint16_t dst_row, uint16_t src_row);
 void ccSvc_nameContentChanged(uint16_t row);
 
 /*
@@ -133,5 +167,48 @@ void ccSvc_nameContentChanged(uint16_t row);
  * Scene is viewed (or in PERF). Used by the engines and executors.
  */
 void ccSvc_patternChangedUi(uint8_t scene, uint8_t track);
+
+/*
+ * Copy/clear diagnostic trace (S075 trace debug; DEV_MODE_LOGGING only).
+ *
+ * What: ccTrace() writes one stage-'c' AutoSave trace record; its helpers pack
+ * jobs and guarded anomalies. In production every call is a no-op. Callers:
+ * copyClearSession.c, copyOps.c, clearOps.c, copyClearService.c.
+ */
+static inline void ccTrace(uint8_t event, uint32_t value)
+{
+#if DEV_MODE_LOGGING
+    autosaveTrace_record(AUTOSAVE_TRACE_STAGE_COPY_CLEAR, event, value);
+#else
+    (void)event;
+    (void)value;
+#endif
+}
+
+static inline uint32_t ccTrace_job(const cc_job_t *job)
+{
+    if (!job)
+        return 0u;
+    return (uint32_t)job->op |
+           ((uint32_t)(job->kind & 0x07u) << 8u) |
+           ((uint32_t)(job->scene & 0x0Fu) << 11u) |
+           ((uint32_t)((job->track < 7u) ? job->track : 7u) << 15u) |
+           ((uint32_t)(job->start & 0x7Fu) << 18u) |
+           ((uint32_t)(job->end & 0x7Fu) << 25u);
+}
+
+static inline void ccTrace_anomaly(uint8_t code, uint8_t scene, uint8_t track,
+                                   uint8_t step, uint8_t extra)
+{
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_ANOMALY,
+            (uint32_t)code | ((uint32_t)(track & 0x0Fu) << 8u) |
+            ((uint32_t)(scene & 0x0Fu) << 12u) | ((uint32_t)step << 16u) |
+            ((uint32_t)extra << 24u));
+}
+
+/* Per-job feeds; empty in production. */
+void ccSvc_traceRetargetDropped(uint8_t count);
+void ccSvc_traceDropReason(uint8_t reason, uint8_t detail);
+uint8_t ccSvc_traceOpSequence(void);
 
 #endif /* COPY_CLEAR_SERVICE_H_ */

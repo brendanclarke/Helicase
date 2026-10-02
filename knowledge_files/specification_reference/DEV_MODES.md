@@ -321,6 +321,34 @@ session once its root cause was fixed outright — its layout stays documented
 below only so any `asavetrc.bin` already captured during that window still
 decodes; it has no live producer.
 
+S075 adds stage `c` (`AUTOSAVE_TRACE_STAGE_COPY_CLEAR`) for bounded Phase 6
+copy/clear witnesses. Its flags byte is one
+`AUTOSAVE_TRACE_CC_EVT_*` event; the value layout is event-specific and is
+owned by `Core/Bank/Scene/AutosaveTrace.h`. Live producers record operation
+start/refusal/source/release/finish, queue and paste outcomes, early trigger
+writes/restores, register and fan-out summaries, scratch/name-buffer loans,
+filesystem refusals, and suspension edges. It deliberately does not record
+individual Pattern moves or every tick. The decoder's stage-`c` branch is
+`tools/decode_devlogs.py`; production builds compile the copy/clear trace
+state and filesystem latches out when `DEV_MODE_LOGGING=0`.
+
+The S075 value vocabulary is:
+
+| Group | Codes |
+|---|---|
+| lifecycle/queue | `OP_START`, `OP_REFUSED`, `SOURCE_SET`, `OP_RELEASE`, `OP_FINISH`, `JOB_START`, `JOB_STATS`, `JOB_END`, `JOB_STALL`, `QUEUE_FULL`, `PASTE_NOOP`, `JOB_TRICKLE` |
+| checks/trigger | `CHECK_FAIL`, `EARLY_TRIG`, `EARLY_RESTORED` |
+| register/fan-out | `REG_ADD`, `REG_REFUSED`, `REG_DONE`, `FX_CLEAR`, `FANOUT`, `MASK_SET` |
+| scratch/filesystem/names | `SCRATCH`, `FS_REFUSED`, `NAMES`, `SUSPEND` |
+| guarded anomaly | `GROW_UNPLACEABLE`, `SWAP_RETURN_ABANDONED`, `SWAP_OCCUPIED`, `REGION_REWRITE_GREW`, `CLAIM_OTHER_SCENE`, `TEARDOWN_CLAIM_HELD`, `STALL_PHASE` |
+
+Drop reasons are `NO_ROOM`, `EVACUATE_FAILED`, `ADVANCED_LIMIT`,
+`FX_TYPE_MISMATCH`, `NO_SOURCE`, `NO_SCRATCH`, `BAD_SELECTION`, and
+`BAD_GEOMETRY`. `OP_REFUSED` values identify recording, erasing, storage
+busy, Instrument transaction, mode, and a previous queued operation. The
+exclusive Pattern mover is intentionally absent from PatternTrace per move;
+the copy/clear stage records aggregate job statistics instead.
+
 `X` (`PHASE_STALL`) is an edge-triggered "this cooperative state machine's
 phase stopped advancing" observer (`filesystem_pollPhaseStall()`). Through
 Session 056 it existed at three sites; **Session 057 widened the site field

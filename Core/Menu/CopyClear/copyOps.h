@@ -51,7 +51,9 @@ const char *ccCopy_label(cc_menu_t menu, uint8_t selection);
  * the press, and the destination Scene/track/start (absolute step, bar,
  * track, Scene or FX step as the source kind requires). Output: nonzero when
  * the job was queued; zero when it was a no-op (identical to the source) or
- * the queue was full (dropped silently, spec §3.1). Caller: the router.
+ * the queue was full (dropped silently, spec §3.1). Accepted step/bar/track
+ * replace and merge-all pastes write trigger bits immediately; an identical
+ * paste is traced as PASTE_NOOP in DEV builds. Caller: the router.
  */
 uint8_t ccCopy_requestPaste(const cc_source_t *src, uint8_t selection,
                             uint8_t dst_scene, uint8_t dst_track,
@@ -100,14 +102,12 @@ uint8_t ccCopy_sceneTypesDiffer(uint8_t scene_a, uint8_t scene_b);
  * destination-only specials, and forms the automation union with the source
  * winning on equal targets, source entries first, destination entries beyond
  * 63 dropped silently; `copy … automation` keeps the destination specials and
- * trigger and takes the source automation; `merge automation` keeps the
- * destination specials and trigger and forms the union. An empty source step
- * under a merge changes nothing. Inputs: selection, the (already retargeted)
- * source block or NULL, the source trigger, the live destination block or
- * NULL. Outputs: encoded block bytes in out (0 = no block), *trigger_mode
- * (PAT_RAW_TRIGGER_*), and *skip = 1 when the destination step must not be
- * touched. Uses two 63-entry stack lists (~504 B). Caller: copyClearService.c
- * check and place phases. Affiliates: pat_rawDecode(), pat_rawEncode().
+ * trigger and takes the source automation and probability special; `merge
+ * automation` keeps all destination specials and forms the union. An empty
+ * source step under a merge changes nothing. Inputs: selection, the (already
+ * retargeted) source block or NULL, the source trigger, the live destination
+ * block or NULL. Outputs: encoded block bytes, *trigger_mode and *skip. Uses
+ * two 63-entry stack lists (~504 B). Caller: copyClearService.c check/place.
  */
 uint8_t ccCopy_buildStep(uint8_t selection, const uint8_t *src_block,
                          uint8_t src_trigger, const uint8_t *dst_block,
@@ -124,6 +124,8 @@ uint8_t ccCopy_buildStep(uint8_t selection, const uint8_t *src_block,
  * preset_applyWorkersIdle() is zero before writing anything that touches the
  * active Scene, and after starting an apply keep waiting until it is done.
  * Fan-out uses bank_sceneFanoutMask() of the destination Scene (user F3/F5).
+ * Scene-level data commits precede a final name-remap phase, which waits for
+ * ccSvc_namesReady() and therefore never delays the data commit.
  */
 uint8_t ccCopy_runJob(const cc_job_t *job);
 

@@ -1,9 +1,8 @@
 # S075 — Phase 6 Copy and Clear — Trace Debug Implementation Schedule
 
 Diagnostic trace hook points around the copy/clear risks, for hardware testing
-of the S075 implementation. **Plan only; no code is changed by this
-document.** Decisions D1–D5 were answered by the user on 2026-10-01 and are
-folded in below (§14).
+of the S075 implementation. Implemented on 2026-10-02; Decisions D1–D5 were
+answered by the user on 2026-10-01 and remain folded in below (§14).
 
 - Baseline: working tree of `dev-ph6-copyclear` after the S075 implementation
   pass (`S075_PH6_COPYCLEAR_IMPLEMENTATION.md` §14). Line numbers below are

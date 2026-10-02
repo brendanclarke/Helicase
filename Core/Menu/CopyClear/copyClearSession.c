@@ -53,9 +53,10 @@ static struct {
 static cc_source_t cc_source;
 
 /*
- * Press-order stack for the held row (9 B): 16 four-bit button indices,
- * oldest first, plus a count. Top = most recent button still held. Used only
- * for SEQ and SELECT rows. Accessors: cc_rowPush/cc_rowRemove/cc_rowTop.
+ * Press-order stack for the held row (9 B): 16 four-bit row indices (SEQ,
+ * SELECT and FX), oldest first, plus a count. Absolute steps are formed at
+ * each press because four bits cannot represent bars 2..8. Accessors:
+ * cc_rowPush/cc_rowRemove/cc_rowTop.
  */
 static uint8_t cc_rowStack[8];
 static uint8_t cc_rowCount;
@@ -92,21 +93,28 @@ static uint8_t cc_rowTop(void)
     return cc_rowCount ? cc_rowGet((uint8_t)(cc_rowCount - 1u)) : 0u;
 }
 
+/* Absolute coordinate for the current source kind and a raw row index. */
+static uint8_t cc_rowAbsolute(uint8_t index)
+{
+    return (cc_source.kind == CC_KIND_STEP)
+               ? (uint8_t)buttonHandler_visibleStep(index)
+               : index;
+}
+
 /*
  * Range rule, press side: a press while another button of the same row is
  * held makes a pair (start = most recent still-held button, end = this one);
- * later pairs replace earlier ones. The first press of a hold is the single
- * object until a pair exists.
+ * later pairs replace earlier ones. The stack stores raw row indices.
  */
 static void cc_rowPush(uint8_t index)
 {
     if (cc_rowCount == 0u) {
-        cc_source.start = index;
-        cc_source.end = index;
+        cc_source.start = cc_rowAbsolute(index);
+        cc_source.end = cc_source.start;
         cc_state.flags = (uint8_t)(cc_state.flags & (uint8_t)~CC_FLAG_PAIR);
     } else {
-        cc_source.start = cc_rowTop();
-        cc_source.end = index;
+        cc_source.start = cc_rowAbsolute(cc_rowTop());
+        cc_source.end = cc_rowAbsolute(index);
         cc_state.flags = (uint8_t)(cc_state.flags | CC_FLAG_PAIR);
     }
     if (cc_rowCount < 16u) {
@@ -153,6 +161,23 @@ static void cc_start(void)
     cc_state.started = 1u;
 }
 
+/*
+ * Drive only the copy/clear and SHIFT LEDs from operation state (F1-B).
+ * Source indication is the menu's text; no source-row LED is owned here.
+ */
+static void cc_applyButtonLeds(void)
+{
+    if (cc_state.phase == CC_OP_CLEAR) {
+        led_setBlinkLed(LED_SHIFT, 1u);
+        led_setBlinkLed(LED_COPY, 1u);
+    } else if (cc_state.menu != CC_MENU_NONE) {
+        led_setBlinkLed(LED_COPY, 1u);
+    } else {
+        led_setBlinkLed(LED_COPY, 0u);
+        led_setValue(1u, LED_COPY);
+    }
+}
+
 /* Mode reached by a MODE button press, exactly as handleModeButtons(). */
 static uint8_t cc_modeForButton(uint8_t buttonNr)
 {
@@ -169,11 +194,12 @@ static uint8_t cc_modeAllowed(uint8_t mode)
                      mode == SELECT_MODE_PERF || mode == SELECT_MODE_FX);
 }
 
-/* Open or refresh the menu for the current source/object at its default. */
+/* Open a copy/clear menu at its default selection. */
 static void cc_openMenu(cc_menu_t menu)
 {
     cc_state.menu = (uint8_t)menu;
     cc_state.selection = 0u;
+    cc_applyButtonLeds();
     menu_copyClearMenuChanged();
 }
 
@@ -184,22 +210,120 @@ static uint8_t cc_selectionCount(void)
     return ccCopy_selectionCount((cc_menu_t)cc_state.menu);
 }
 
-/* Commit the copy source and start the operation (spec §3.1 step 2). */
+/*
+ * Commit the copy source (F1-C); row menus stay open with their selection.
+ */
 static void cc_commitSource(void)
 {
     cc_state.phase = CC_OP_COPY;
     cc_start();
-    led_setBlinkLed(LED_COPY, 1u);
-    cc_openMenu(ccCopy_menuForSource(&cc_source));
+    if (cc_state.menu == CC_MENU_NONE)
+        cc_openMenu(ccCopy_menuForSource(&cc_source));
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_SOURCE_SET,
+            (uint32_t)(cc_source.kind & 0x7u) |
+            ((uint32_t)(cc_source.scene & 0xFu) << 3u) |
+            ((uint32_t)(cc_source.track & 0x7u) << 7u) |
+            ((uint32_t)(cc_source.start & 0x7Fu) << 10u) |
+            ((uint32_t)(cc_source.end & 0x7Fu) << 17u) |
+            ((uint32_t)(buttonHandler_getMode() & 0x7u) << 24u));
 }
 
-/* Flash the destination LED once after a paste or clear (spec §8.2). */
-static void cc_flashDestination(LedFlashGroup group, uint8_t index)
+/*
+ * Flash every visible LED of a paste destination or clear object once (F1-F).
+ * A range flashes the full visible object, not only its final button.
+ */
+static void cc_flashObject(cc_kind_t kind, uint8_t scene, uint8_t track,
+                           uint8_t first, uint8_t count)
 {
-    led_flashGroup(group, (uint16_t)(1u << index));
+    uint8_t mode = buttonHandler_getMode();
+    uint8_t viewed = (uint8_t)(scene == cc_activeScene());
+    uint16_t seq = 0u;
+    uint8_t sel = 0u;
+    uint8_t voice = 0u;
+    uint8_t i;
+
+    switch (kind) {
+    case CC_KIND_STEP:
+        if ((mode == SELECT_MODE_VOICE || mode == SELECT_MODE_STEP) &&
+            viewed && track == menu_getActiveVoice())
+            for (i = 0u; i < count; i++) {
+                uint8_t s = (uint8_t)((first + i) & (NUM_STEPS - 1u));
+
+                if ((uint8_t)(s / NUM_STEPS_PER_BAR) == menu_currentBar)
+                    seq = (uint16_t)(seq | (uint16_t)(1u << (s % 16u)));
+            }
+        break;
+    case CC_KIND_BAR:
+        if (mode == SELECT_MODE_STEP && viewed)
+            for (i = 0u; i < count; i++) {
+                uint8_t b = (uint8_t)((first + i) & (NUM_BARS - 1u));
+
+                sel = (uint8_t)(sel | (uint8_t)(1u << b));
+                if (b == menu_currentBar && track == menu_getActiveVoice())
+                    seq = 0xFFFFu;
+            }
+        break;
+    case CC_KIND_TRACK:
+        if (viewed)
+            voice = (uint8_t)(1u << (track & 7u));
+        break;
+    case CC_KIND_SCENE:
+        if (mode == SELECT_MODE_PERF)
+            seq = (uint16_t)(1u << (scene & 15u));
+        break;
+    case CC_KIND_FX_STEP:
+        if (mode == SELECT_MODE_FX && viewed)
+            for (i = 0u; i < count; i++)
+                seq = (uint16_t)(seq | (uint16_t)(1u << ((first + i) & 15u)));
+        break;
+    default:
+        break;
+    }
+    if (seq)
+        led_flashGroup(LED_FLASH_GROUP_SEQ, seq);
+    if (sel)
+        led_flashGroup(LED_FLASH_GROUP_SELECT, sel);
+    if (voice)
+        led_flashGroup(LED_FLASH_GROUP_VOICE, voice);
+}
+
+static uint8_t cc_sourceLength(void)
+{
+    uint8_t lo = (cc_source.start < cc_source.end) ? cc_source.start
+                                                   : cc_source.end;
+    uint8_t hi = (cc_source.start < cc_source.end) ? cc_source.end
+                                                   : cc_source.start;
+
+    return (uint8_t)(hi - lo + 1u);
 }
 
 /* ---- copy routing (spec §7.1) ----------------------------------------- */
+
+/*
+ * One copy-source row press: open the menu provisionally on the first press,
+ * then keep the most recent held row as the range anchor. Other row families
+ * are consumed while a family is held.
+ */
+static uint8_t cc_copyRowPress(uint8_t row, cc_kind_t kind, uint8_t track,
+                               uint8_t index)
+{
+    if (cc_state.row != CC_ROW_NONE && cc_state.row != row)
+        return 1u;
+    if (cc_rowCount == 0u) {
+        cc_source.kind = (uint8_t)kind;
+        cc_source.scene = cc_activeScene();
+        cc_source.track = track;
+    }
+    cc_state.row = row;
+    cc_rowPush(index);
+    if (cc_state.menu == CC_MENU_NONE) {
+        cc_start();
+        cc_openMenu(ccCopy_menuForSource(&cc_source));
+    } else {
+        menu_copyClearMenuChanged();
+    }
+    return 1u;
+}
 
 static uint8_t cc_copySeq(uint8_t index)
 {
@@ -207,23 +331,17 @@ static uint8_t cc_copySeq(uint8_t index)
     uint8_t has_source = (uint8_t)(cc_state.phase == CC_OP_COPY);
 
     if (mode == SELECT_MODE_VOICE || mode == SELECT_MODE_STEP) {
-        if (!has_source) {
-            if (cc_state.row != CC_ROW_NONE && cc_state.row != CC_ROW_SEQ)
-                return 1u;
-            if (cc_rowCount == 0u) {
-                cc_source.kind = CC_KIND_STEP;
-                cc_source.scene = cc_activeScene();
-                cc_source.track = menu_getActiveVoice();
-            }
-            cc_state.row = CC_ROW_SEQ;
-            cc_rowPush((uint8_t)buttonHandler_visibleStep(index));
-            return 1u;
-        }
+        if (!has_source)
+            return cc_copyRowPress(CC_ROW_SEQ, CC_KIND_STEP,
+                                   menu_getActiveVoice(), index);
         if (cc_source.kind == CC_KIND_STEP) {
             if (ccCopy_requestPaste(&cc_source, cc_state.selection,
                                     cc_activeScene(), menu_getActiveVoice(),
                                     buttonHandler_visibleStep(index)))
-                cc_flashDestination(LED_FLASH_GROUP_SEQ, index);
+                cc_flashObject(CC_KIND_STEP, cc_activeScene(),
+                               menu_getActiveVoice(),
+                               buttonHandler_visibleStep(index),
+                               cc_sourceLength());
         }
         return 1u;
     }
@@ -241,29 +359,20 @@ static uint8_t cc_copySeq(uint8_t index)
         if (cc_source.kind == CC_KIND_SCENE) {
             if (ccCopy_requestPaste(&cc_source, cc_state.selection, index, 0u,
                                     index))
-                cc_flashDestination(LED_FLASH_GROUP_SEQ, index);
+                cc_flashObject(CC_KIND_SCENE, index, 0u, index, 1u);
             return 1u;
         }
         /* Other sources: PERF SEQ selects the active Scene (navigation). */
         return 0u;
     }
     if (mode == SELECT_MODE_FX) {
-        if (!has_source) {
-            if (cc_state.row != CC_ROW_NONE && cc_state.row != CC_ROW_SEQ)
-                return 1u;
-            if (cc_rowCount == 0u) {
-                cc_source.kind = CC_KIND_FX_STEP;
-                cc_source.scene = cc_activeScene();
-                cc_source.track = 0u;
-            }
-            cc_state.row = CC_ROW_SEQ;
-            cc_rowPush(index);
-            return 1u;
-        }
+        if (!has_source)
+            return cc_copyRowPress(CC_ROW_SEQ, CC_KIND_FX_STEP, 0u, index);
         if (cc_source.kind == CC_KIND_FX_STEP) {
             if (ccCopy_requestPaste(&cc_source, cc_state.selection,
                                     cc_activeScene(), 0u, index))
-                cc_flashDestination(LED_FLASH_GROUP_SEQ, index);
+                cc_flashObject(CC_KIND_FX_STEP, cc_activeScene(), 0u, index,
+                               cc_sourceLength());
         }
         return 1u;
     }
@@ -276,18 +385,9 @@ static uint8_t cc_copySelect(uint8_t index)
 
     if (buttonHandler_getMode() != SELECT_MODE_STEP)
         return 0u;
-    if (!has_source) {
-        if (cc_state.row != CC_ROW_NONE && cc_state.row != CC_ROW_SELECT)
-            return 1u;
-        if (cc_rowCount == 0u) {
-            cc_source.kind = CC_KIND_BAR;
-            cc_source.scene = cc_activeScene();
-            cc_source.track = menu_getActiveVoice();
-        }
-        cc_state.row = CC_ROW_SELECT;
-        cc_rowPush(index);
-        return 1u;
-    }
+    if (!has_source)
+        return cc_copyRowPress(CC_ROW_SELECT, CC_KIND_BAR,
+                               menu_getActiveVoice(), index);
     switch (cc_source.kind) {
     case CC_KIND_STEP:
     case CC_KIND_TRACK:
@@ -296,7 +396,8 @@ static uint8_t cc_copySelect(uint8_t index)
         if (ccCopy_requestPaste(&cc_source, cc_state.selection,
                                 cc_activeScene(), menu_getActiveVoice(),
                                 index))
-            cc_flashDestination(LED_FLASH_GROUP_SELECT, index);
+            cc_flashObject(CC_KIND_BAR, cc_activeScene(),
+                           menu_getActiveVoice(), index, cc_sourceLength());
         return 1u;
     default:
         return 1u;
@@ -328,7 +429,7 @@ static uint8_t cc_copyTrack(uint8_t index)
     case CC_KIND_TRACK:
         if (ccCopy_requestPaste(&cc_source, cc_state.selection,
                                 cc_activeScene(), index, index))
-            cc_flashDestination(LED_FLASH_GROUP_VOICE, index);
+            cc_flashObject(CC_KIND_TRACK, cc_activeScene(), index, index, 1u);
         return 1u;
     default:
         return 1u;
@@ -337,10 +438,16 @@ static uint8_t cc_copyTrack(uint8_t index)
 
 /* ---- clear routing (spec §7.2) ---------------------------------------- */
 
-/* Capture a clear object and open its menu at `cancel`. */
+/*
+ * Capture a clear object and show its menu. Keep the previous selection for
+ * another object in the same button group; a new group starts at cancel.
+ */
 static void cc_clearObject(cc_kind_t kind, uint8_t scene, uint8_t track,
                            uint8_t index)
 {
+    cc_kind_t previous_kind = (cc_kind_t)cc_source.kind;
+    cc_menu_t menu = ccClear_menuForObject(buttonHandler_getMode(), kind);
+
     cc_source.kind = (uint8_t)kind;
     cc_source.scene = scene;
     cc_source.track = track;
@@ -348,7 +455,12 @@ static void cc_clearObject(cc_kind_t kind, uint8_t scene, uint8_t track,
     cc_source.end = index;
     cc_state.flags = (uint8_t)(cc_state.flags | CC_FLAG_OBJECT);
     cc_start();
-    cc_openMenu(ccClear_menuForObject(buttonHandler_getMode(), kind));
+    if (kind != previous_kind ||
+        cc_state.selection >= ccClear_selectionCount(menu))
+        cc_state.selection = 0u;
+    cc_state.menu = (uint8_t)menu;
+    cc_applyButtonLeds();
+    menu_copyClearMenuChanged();
 }
 
 static uint8_t cc_clearPress(uint8_t row, uint8_t index)
@@ -361,15 +473,14 @@ static uint8_t cc_clearPress(uint8_t row, uint8_t index)
             return 1u;
         ccClear_fxStepNow(cc_activeScene(), index);
         cc_start();
-        cc_flashDestination(LED_FLASH_GROUP_SEQ, index);
+        cc_flashObject(CC_KIND_FX_STEP, cc_activeScene(), 0u, index, 1u);
         return 1u;
     }
     if ((cc_state.flags & CC_FLAG_OBJECT) != 0u) {
         /* One object at a time; a second press of the same row is a range. */
         if (cc_state.row == row && row != CC_ROW_NONE &&
             (cc_source.kind == CC_KIND_STEP || cc_source.kind == CC_KIND_BAR)) {
-            cc_rowPush(row == CC_ROW_SEQ ?
-                           (uint8_t)buttonHandler_visibleStep(index) : index);
+            cc_rowPush(index);
             menu_copyClearMenuChanged();
         }
         return 1u;
@@ -380,7 +491,7 @@ static uint8_t cc_clearPress(uint8_t row, uint8_t index)
         cc_state.row = CC_ROW_SEQ;
         cc_clearObject(CC_KIND_STEP, cc_activeScene(), menu_getActiveVoice(),
                        0u);
-        cc_rowPush((uint8_t)buttonHandler_visibleStep(index));
+        cc_rowPush(index);
         menu_copyClearMenuChanged();
         return 1u;
     }
@@ -405,6 +516,8 @@ static uint8_t cc_clearPress(uint8_t row, uint8_t index)
 /* Queue the clear for the released object unless `cancel` is shown. */
 static void cc_clearReleaseObject(void)
 {
+    uint8_t lo;
+
     if ((cc_state.flags & CC_FLAG_OBJECT) == 0u)
         return;
     cc_state.flags = (uint8_t)(cc_state.flags & (uint8_t)~CC_FLAG_OBJECT);
@@ -412,19 +525,11 @@ static void cc_clearReleaseObject(void)
         return;
     if (!ccClear_requestClear(&cc_source, cc_state.selection))
         return;
-    switch (cc_source.kind) {
-    case CC_KIND_TRACK:
-        cc_flashDestination(LED_FLASH_GROUP_VOICE, cc_source.track);
-        break;
-    case CC_KIND_SCENE:
-        cc_flashDestination(LED_FLASH_GROUP_SEQ, cc_source.scene);
-        break;
-    case CC_KIND_BAR:
-        cc_flashDestination(LED_FLASH_GROUP_SELECT, cc_source.end);
-        break;
-    default:
-        break;
-    }
+    lo = (cc_source.start < cc_source.end) ? cc_source.start : cc_source.end;
+    cc_flashObject((cc_kind_t)cc_source.kind, cc_source.scene,
+                   cc_source.track,
+                   (cc_source.kind == CC_KIND_TRACK) ? cc_source.track : lo,
+                   cc_sourceLength());
 }
 
 /* ---- public API -------------------------------------------------------- */
@@ -442,25 +547,35 @@ void copyClear_init(void)
 
 uint8_t copyClear_copyPressed(uint8_t shift_held)
 {
-    /* Refusals are silent (spec §3.3). */
-    if (seq_recordActive || seq_eraseActive || menu_isStorageBusy() ||
-        menu_loadInstrumentTransactionBusy() ||
-        !cc_modeAllowed(buttonHandler_getMode()) || ccSvc_jobCount() != 0u)
+    uint8_t mode = buttonHandler_getMode();
+    uint32_t refused = 0u;
+
+    /* Refusals remain silent; DEV trace records every applicable reason. */
+    if (seq_recordActive)                      refused |= 1u << 0u;
+    if (seq_eraseActive)                       refused |= 1u << 1u;
+    if (menu_isStorageBusy())                  refused |= 1u << 2u;
+    if (menu_loadInstrumentTransactionBusy())  refused |= 1u << 3u;
+    if (!cc_modeAllowed(mode))                 refused |= 1u << 4u;
+    if (ccSvc_jobCount() != 0u)                refused |= 1u << 5u;
+    if (refused != 0u) {
+        ccTrace(AUTOSAVE_TRACE_CC_EVT_OP_REFUSED,
+                refused | ((uint32_t)(mode & 0x7u) << 8u) |
+                ((uint32_t)ccSvc_jobCount() << 16u));
         return 0u;
+    }
     cc_rowReset();
     cc_state.menu = CC_MENU_NONE;
     cc_state.selection = 0u;
     cc_state.flags = 0u;
     memset(&cc_source, 0, sizeof(cc_source));
     ccSvc_interactionStarted();
-    if (shift_held) {
-        cc_state.phase = CC_OP_CLEAR;
-        led_setBlinkLed(LED_SHIFT, 1u);
-        led_setBlinkLed(LED_COPY, 1u);
-    } else {
-        cc_state.phase = CC_OP_ARMED_COPY;
-        led_setValue(1u, LED_COPY);
-    }
+    cc_state.phase = shift_held ? CC_OP_CLEAR : CC_OP_ARMED_COPY;
+    cc_applyButtonLeds();
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_OP_START,
+            (uint32_t)(cc_state.phase & 0x3u) |
+            ((uint32_t)(mode & 0x7u) << 2u) |
+            ((uint32_t)ccSvc_traceOpSequence() << 8u) |
+            ((uint32_t)ccSvc_jobCount() << 16u));
     return 1u;
 }
 
@@ -481,11 +596,12 @@ void copyClear_copyReleased(void)
     led_setBlinkLed(LED_SHIFT, 0u);
     led_setValue(0u, LED_COPY);
     led_setValue(buttonHandler_getShift(), LED_SHIFT);
-    led_setBlinkGroup(LED_FLASH_GROUP_SEQ, 0u);
-    led_setBlinkGroup(LED_FLASH_GROUP_SELECT, 0u);
-    led_setBlinkGroup(LED_FLASH_GROUP_VOICE, 0u);
     if (menu_was_visible)
         menu_copyClearMenuClosed();
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_OP_RELEASE,
+            (uint32_t)(cc_state.started ? 1u : 0u) |
+            ((uint32_t)(menu_was_visible ? 1u : 0u) << 1u) |
+            ((uint32_t)ccSvc_jobCount() << 8u));
     ccSvc_interactionEnded();
     if (!cc_state.started)
         memset(&cc_source, 0, sizeof(cc_source));
@@ -581,12 +697,8 @@ uint8_t copyClear_buttonReleased(uint8_t buttonNr)
         return 1u;    /* interaction ended: the release only pairs its press */
 
     if (cc_state.row == row && row != CC_ROW_NONE) {
-        uint8_t stored = (row == CC_ROW_SEQ &&
-                          cc_source.kind != CC_KIND_FX_STEP)
-                             ? (uint8_t)buttonHandler_visibleStep(index)
-                             : index;
-
-        if (!cc_rowRemove(stored))
+        /* The row stack stores raw row indices, not absolute steps. */
+        if (!cc_rowRemove(index))
             return 1u;
         cc_state.row = CC_ROW_NONE;
         /* Last button of the row released: the source/object is final. */
@@ -604,69 +716,9 @@ uint8_t copyClear_buttonReleased(uint8_t buttonNr)
 
 void copyClear_postEvent(void)
 {
-    uint8_t mode;
-    uint16_t seq_mask = 0u;
-    uint8_t select_mask = 0u;
-    uint8_t voice_mask = 0u;
-
     if (cc_state.phase == CC_OP_NONE)
         return;
-    /* Re-assert the latched blinks (a mode change clears blink slots). */
-    if (cc_state.phase == CC_OP_CLEAR) {
-        led_setBlinkLed(LED_SHIFT, 1u);
-        led_setBlinkLed(LED_COPY, 1u);
-    } else if (cc_state.phase == CC_OP_COPY) {
-        led_setBlinkLed(LED_COPY, 1u);
-    } else {
-        led_setValue(1u, LED_COPY);
-    }
-
-    /* Source indication on the visible LEDs (spec §8.2). */
-    mode = buttonHandler_getMode();
-    if (cc_state.phase == CC_OP_COPY) {
-        uint8_t lo = (cc_source.start < cc_source.end) ? cc_source.start
-                                                       : cc_source.end;
-        uint8_t hi = (cc_source.start < cc_source.end) ? cc_source.end
-                                                       : cc_source.start;
-        uint8_t i;
-
-        switch (cc_source.kind) {
-        case CC_KIND_STEP:
-            if ((mode == SELECT_MODE_VOICE || mode == SELECT_MODE_STEP) &&
-                cc_source.scene == cc_activeScene() &&
-                cc_source.track == menu_getActiveVoice()) {
-                for (i = lo; i <= hi; i++) {
-                    if ((uint8_t)(i / NUM_STEPS_PER_BAR) == menu_currentBar)
-                        seq_mask = (uint16_t)(seq_mask |
-                                              (uint16_t)(1u << (i % 16u)));
-                }
-            }
-            break;
-        case CC_KIND_BAR:
-            if (mode == SELECT_MODE_STEP && cc_source.scene == cc_activeScene())
-                for (i = lo; i <= hi && i < 8u; i++)
-                    select_mask = (uint8_t)(select_mask | (uint8_t)(1u << i));
-            break;
-        case CC_KIND_TRACK:
-            if (cc_source.scene == cc_activeScene())
-                voice_mask = (uint8_t)(1u << cc_source.track);
-            break;
-        case CC_KIND_SCENE:
-            if (mode == SELECT_MODE_PERF)
-                seq_mask = (uint16_t)(1u << cc_source.scene);
-            break;
-        case CC_KIND_FX_STEP:
-            if (mode == SELECT_MODE_FX && cc_source.scene == cc_activeScene())
-                for (i = lo; i <= hi && i < 16u; i++)
-                    seq_mask = (uint16_t)(seq_mask | (uint16_t)(1u << i));
-            break;
-        default:
-            break;
-        }
-    }
-    led_setBlinkGroup(LED_FLASH_GROUP_SEQ, seq_mask);
-    led_setBlinkGroup(LED_FLASH_GROUP_SELECT, select_mask);
-    led_setBlinkGroup(LED_FLASH_GROUP_VOICE, voice_mask);
+    cc_applyButtonLeds();
 }
 
 uint8_t copyClear_eventOverflow(void)
@@ -682,11 +734,8 @@ uint8_t copyClear_eventOverflow(void)
 
 uint8_t copyClear_menuVisible(void)
 {
-    if (cc_state.phase == CC_OP_COPY)
-        return (uint8_t)(cc_state.menu != CC_MENU_NONE);
-    if (cc_state.phase == CC_OP_CLEAR)
-        return (uint8_t)(cc_state.menu != CC_MENU_NONE);
-    return 0u;
+    return (uint8_t)(cc_state.phase != CC_OP_NONE &&
+                     cc_state.menu != CC_MENU_NONE);
 }
 
 /* Append text to a fixed row at *pos, never past 16 characters. */
@@ -804,7 +853,8 @@ void copyClear_formatMenu(char row0[17], char row1[17])
     memset(row1, ' ', 16u);
     row0[16] = '\0';
     row1[16] = '\0';
-    cc_put(row0, &pos, (cc_state.phase == CC_OP_CLEAR) ? "CLR  " : "COPY ");
+    cc_put(row0, &pos, (cc_state.phase == CC_OP_CLEAR) ? "CLR" : "COPY");
+    pos = 8u;
     cc_formatIndicator(row0, &pos);
     label = (cc_state.phase == CC_OP_CLEAR)
                 ? ccClear_label((cc_menu_t)cc_state.menu, cc_state.selection)
@@ -848,7 +898,7 @@ uint8_t copyClear_ownsPots(void)
 
 uint8_t copyClear_potTurned(const cc_pot_target_t *target)
 {
-    /* Pots do nothing in a copy operation or while a clear menu is shown. */
+    /* Pots never run while a clear object menu is visible. */
     if (cc_state.phase != CC_OP_CLEAR || copyClear_menuVisible() || !target)
         return 0u;
     if (!ccClear_potTurned(target))
@@ -869,9 +919,6 @@ void copyClear_serviceFinished(void)
         return;
     memset(&cc_source, 0, sizeof(cc_source));
     cc_state.started = 0u;
-    led_setBlinkGroup(LED_FLASH_GROUP_SEQ, 0u);
-    led_setBlinkGroup(LED_FLASH_GROUP_SELECT, 0u);
-    led_setBlinkGroup(LED_FLASH_GROUP_VOICE, 0u);
 }
 
 const cc_source_t *copyClear_source(void)

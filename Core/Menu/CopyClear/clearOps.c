@@ -7,7 +7,8 @@
  * mask and do not fan out; `clear send`, `clear fx`, `clear fx sequence`, the
  * EFFECTS SEQ clear and the FX-lane part of a pot clear fan out through the
  * edit mask (user, confirm 1). Names stay on every clear; changed rows lose
- * their refreshed flag.
+ * their refreshed flag. `notes` turns triggers off, removes note/velocity
+ * specials, and keeps probability plus automation (F1-J, user A5).
  */
 
 #include "clearOps.h"
@@ -78,6 +79,9 @@ const char *ccClear_label(cc_menu_t menu, uint8_t selection)
     }
 }
 
+static void ccClear_triggersOffNow(const cc_source_t *object,
+                                   uint8_t selection);
+
 uint8_t ccClear_requestClear(const cc_source_t *object, uint8_t selection)
 {
     cc_job_t job;
@@ -90,7 +94,10 @@ uint8_t ccClear_requestClear(const cc_source_t *object, uint8_t selection)
     job.track = object->track;
     job.start = object->start;
     job.end = object->end;
-    return ccSvc_enqueue(&job);
+    if (!ccSvc_enqueue(&job))
+        return 0u;
+    ccClear_triggersOffNow(object, selection);
+    return 1u;
 }
 
 /* ---- helpers ------------------------------------------------------------ */
@@ -134,15 +141,84 @@ static void ccClear_applyActiveSettings(void)
     menu_repaintAll();
 }
 
+/*
+ * Turn trigger bits off at acceptance for clear selections whose final state
+ * is trigger-off (F1-H). Pool work later republishes the same state; if that
+ * work is dropped, the accepted foreground trigger edit remains.
+ */
+static void ccClear_triggersOffNow(const cc_source_t *object,
+                                   uint8_t selection)
+{
+    uint8_t lo = (object->start < object->end) ? object->start : object->end;
+    uint8_t hi = (object->start < object->end) ? object->end : object->start;
+    uint8_t t_first = object->track;
+    uint8_t t_last = object->track;
+    uint8_t s_first = 0u;
+    uint8_t s_last = NUM_STEPS - 1u;
+    uint16_t written = 0u;
+    uint8_t t;
+    uint16_t s;
+
+    if (object->kind == CC_KIND_SCENE) {
+        if (selection != CC_CLEAR_SCENE_ALL &&
+            selection != CC_CLEAR_SCENE_PATTERN &&
+            selection != CC_CLEAR_SCENE_NOTES)
+            return;
+        t_first = 0u;
+        t_last = NUM_TRACKS - 1u;
+    } else {
+        if (selection != CC_CLEAR_ALL && selection != CC_CLEAR_NOTES)
+            return;
+        if (object->kind == CC_KIND_STEP) {
+            s_first = lo;
+            s_last = hi;
+        } else if (object->kind == CC_KIND_BAR) {
+            s_first = (uint8_t)(lo * NUM_STEPS_PER_BAR);
+            s_last = (uint8_t)(hi * NUM_STEPS_PER_BAR +
+                               NUM_STEPS_PER_BAR - 1u);
+        } else if (object->kind != CC_KIND_TRACK) {
+            return;
+        }
+    }
+    for (t = t_first; t <= t_last; t++)
+        for (s = s_first; s <= s_last; s++) {
+            pat_setStepActive(object->scene, t, (uint8_t)s, 0u);
+            written++;
+        }
+    ccSvc_triggersChangedUi(object->scene);
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_EARLY_TRIG,
+            (uint32_t)((written > 255u) ? 255u : written) |
+            ((uint32_t)(object->kind & 7u) << 16u) |
+            ((uint32_t)(object->scene & 0xFu) << 19u) |
+            ((uint32_t)(object->track & 7u) << 23u));
+}
+
 /* ---- immediate clears ---------------------------------------------------- */
 
 void ccClear_fxStepNow(uint8_t scene, uint8_t step)
 {
+    uint8_t changed;
+
     if (step >= EFFECT_SEQ_STEP_COUNT)
         return;
-    if (effects_clearSeqLanes(scene, (uint16_t)(1u << step), 0xFFFFu))
+    changed = effects_clearSeqLanes(scene, (uint16_t)(1u << step), 0xFFFFu);
+    if (changed)
         ccClear_effectRowsChanged(bank_sceneFanoutMask(scene));
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_FX_CLEAR,
+            (uint32_t)bank_sceneFanoutMask(scene) |
+            ((uint32_t)(scene & 0xFu) << 16u) |
+            ((uint32_t)(step & 0xFu) << 20u) | (0xFu << 24u) |
+            ((uint32_t)(changed ? 1u : 0u) << 28u));
     ccClear_effectUi();
+}
+
+/* Trace one pot-register refusal (R9). */
+static void ccClear_traceRegRefused(uint16_t target, uint8_t scene,
+                                    uint8_t reason)
+{
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_REG_REFUSED,
+            (uint32_t)target | ((uint32_t)(scene & 0xFu) << 16u) |
+            ((uint32_t)(reason & 0xFu) << 20u));
 }
 
 uint8_t ccClear_potTurned(const cc_pot_target_t *target)
@@ -155,23 +231,45 @@ uint8_t ccClear_potTurned(const cc_pot_target_t *target)
         return 0u;
     has_pattern = (uint8_t)(target->pattern_target != INSTRUMENT_PARAM_INVALID);
     has_lane = (uint8_t)(target->fx_lane < EFFECT_SEQ_LANE_COUNT);
-    if (!has_pattern && !has_lane)
+    if (!has_pattern && !has_lane) {
+        ccClear_traceRegRefused(target ? target->pattern_target : 0u, scene, 4u);
         return 0u;
-    if (has_pattern && ccSvc_targetPending(target->pattern_target))
+    }
+    if (has_pattern && ccSvc_targetPending(target->pattern_target)) {
+        ccClear_traceRegRefused(target->pattern_target, scene, 3u);
         return 1u;
+    }
     /* A ninth turn, or another Scene's register, does nothing (spec §6). */
-    if (has_pattern &&
-        (ccSvc_registerFull() ||
-         (ccSvc_registerScene() != 0xFFu && ccSvc_registerScene() != scene)))
+    if (has_pattern && ccSvc_registerFull()) {
+        ccClear_traceRegRefused(target->pattern_target, scene, 1u);
         return 0u;
+    }
+    if (has_pattern && ccSvc_registerScene() != 0xFFu &&
+        ccSvc_registerScene() != scene) {
+        ccClear_traceRegRefused(target->pattern_target, scene, 2u);
+        return 0u;
+    }
     if (has_lane) {
-        if (effects_clearSeqLanes(scene, 0xFFFFu,
-                                  (uint16_t)(1u << target->fx_lane)))
+        uint8_t changed = effects_clearSeqLanes(
+            scene, 0xFFFFu, (uint16_t)(1u << target->fx_lane));
+
+        if (changed)
             ccClear_effectRowsChanged(bank_sceneFanoutMask(scene));
+        ccTrace(AUTOSAVE_TRACE_CC_EVT_FX_CLEAR,
+                (uint32_t)bank_sceneFanoutMask(scene) |
+                ((uint32_t)(scene & 0xFu) << 16u) | (0xFu << 20u) |
+                ((uint32_t)(target->fx_lane & 0xFu) << 24u) |
+                ((uint32_t)(changed ? 1u : 0u) << 28u));
         ccClear_effectUi();
     }
-    if (has_pattern && ccSvc_registerAdd(target->pattern_target, scene))
+    if (has_pattern && ccSvc_registerAdd(target->pattern_target, scene)) {
         menu_automationTargetCleared(target->pattern_target);
+        ccTrace(AUTOSAVE_TRACE_CC_EVT_REG_ADD,
+                (uint32_t)target->pattern_target |
+                ((uint32_t)(scene & 0xFu) << 16u) |
+                ((uint32_t)(ccSvc_registerCount() & 0xFu) << 20u) |
+                ((uint32_t)(has_lane ? target->fx_lane : 0xFu) << 24u));
+    }
     return 1u;
 }
 
@@ -192,6 +290,9 @@ static uint8_t ccClear_runSend(const cc_job_t *job)
         (void)preset_setVoiceFxSendAmount(m, slot, 0u);
         (void)preset_setVoiceFaderSetting(m, slot, 0u);
     }
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_FANOUT,
+            (uint32_t)mask | ((uint32_t)(job->scene & 0xFu) << 16u) |
+            (4u << 20u) | ((uint32_t)(slot & 0xFu) << 25u));
     menu_repaint();
     return CC_RUN_DONE;
 }
@@ -207,6 +308,9 @@ static uint8_t ccClear_runSceneSettings(const cc_job_t *job)
     scene_settingsDefaults(&defaults);
     (void)scene_commitSettings(job->scene, &defaults);
     bank_resetVoiceEditMaskToSelf(job->scene);
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_MASK_SET,
+            (uint32_t)bank_sceneMaskVoiceEditForScene(job->scene) |
+            ((uint32_t)(job->scene & 0xFu) << 16u) | (1u << 20u));
     ccSvc_nameContentChanged(filesystem_identityRow(FS_ROW_SCENE, job->scene,
                                                     0u));
     if (active)
@@ -253,6 +357,9 @@ static uint8_t ccClear_runScene(const cc_job_t *job)
                     filesystem_identityRow(FS_ROW_INSTRUMENT, scene, slot));
         }
         bank_resetVoiceEditMaskToSelf(scene);
+        ccTrace(AUTOSAVE_TRACE_CC_EVT_MASK_SET,
+                (uint32_t)bank_sceneMaskVoiceEditForScene(scene) |
+                ((uint32_t)(scene & 0xFu) << 16u) | (1u << 20u));
         bank_revalidateVoiceEditMasks();
         ccSvc_nameContentChanged(filesystem_identityRow(FS_ROW_SCENE, scene,
                                                         0u));
@@ -280,6 +387,9 @@ static uint8_t ccClear_runFx(const cc_job_t *job)
         return CC_RUN_WAIT;
     written = effects_resetRecord(job->scene);
     ccClear_effectRowsChanged(written);
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_FANOUT,
+            (uint32_t)written | ((uint32_t)(job->scene & 0xFu) << 16u) |
+            (5u << 20u));
     if ((written & ccClear_bit(scene_getActiveIndex())) != 0u)
         menu_repaintAll();
     return CC_RUN_DONE;
@@ -288,8 +398,14 @@ static uint8_t ccClear_runFx(const cc_job_t *job)
 /* `clear fx sequence`: all 16 steps empty; settings stay; fanned out. */
 static uint8_t ccClear_runFxSequence(const cc_job_t *job)
 {
-    if (effects_clearSeqLanes(job->scene, 0xFFFFu, 0xFFFFu))
+    uint8_t changed = effects_clearSeqLanes(job->scene, 0xFFFFu, 0xFFFFu);
+
+    if (changed)
         ccClear_effectRowsChanged(bank_sceneFanoutMask(job->scene));
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_FX_CLEAR,
+            (uint32_t)bank_sceneFanoutMask(job->scene) |
+            ((uint32_t)(job->scene & 0xFu) << 16u) | (0xFu << 20u) |
+            (0xFu << 24u) | ((uint32_t)(changed ? 1u : 0u) << 28u));
     ccClear_effectUi();
     return CC_RUN_DONE;
 }
@@ -299,8 +415,10 @@ uint8_t ccClear_runJob(const cc_job_t *job)
     uint8_t sel;
     uint8_t r;
 
-    if (!job)
+    if (!job) {
+        ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_BAD_SELECTION, 0u);
         return CC_RUN_DROP;
+    }
     sel = (uint8_t)(job->op & CC_JOB_SEL_MASK);
     switch (job->kind) {
     case CC_KIND_STEP:
@@ -323,9 +441,12 @@ uint8_t ccClear_runJob(const cc_job_t *job)
         case CC_CLEAR_SCENE_NOTES:       return ccSvc_runPatternClear(job);
         case CC_CLEAR_SCENE_FX:          return ccClear_runFx(job);
         case CC_CLEAR_SCENE_FX_SEQUENCE: return ccClear_runFxSequence(job);
-        default:                         return CC_RUN_DROP;
+        default:
+            ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_BAD_SELECTION, sel);
+            return CC_RUN_DROP;
         }
     default:
+        ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_BAD_SELECTION, sel);
         return CC_RUN_DROP;
     }
 }

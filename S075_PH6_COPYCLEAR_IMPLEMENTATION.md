@@ -2896,3 +2896,33 @@ All of §13.2. Points that need particular attention:
 | `tools/verify_bank_autosave.py` | Scene cell 7 is the constant 127. |
 | `tools/populate_scene_directory.py` | `voice_decimation_all` no longer written. |
 | `tools/convert_legacy_kits.py` | Comment on the legacy `PAR_VOICE_DECIMATION_ALL` position. |
+
+### 14.7 F1 follow-up and trace debug, 2026-10-02
+
+Implemented from `S075_PH6_COPYCLEAR_F1_AND_TRACE_IMPLEMENTATION.md` in the
+combined Stage A–K order. The pass reverted the source group-blink layer,
+added provisional row menus/raw-index range handling, destination-object
+flashes, retained-selection clear menus, the revised step labels and
+probability/notes rules, live non-overlap pastes, overlap-only scratch loans,
+early trigger capture/restore, the whole-call trickle governor, lazy final
+HCNAMES phases, and the approved `c`-stage copy/clear trace witnesses. The
+Pattern exclusive move no longer emits a per-move trace record; summary
+records remain at the copy/clear service boundaries.
+
+The production SRAM ledger for this pass is +124 B: early source masks +64 B,
+restore masks +64 B, early flags +1 B, governor credit +2 B, offset by the
+removed group-blink state −7 B. DEV logging adds the approved 22 B packed
+copy/clear trace state and 2 B filesystem edge/refusal latches.
+
+Verification on 2026-10-02:
+
+- `make all` with `DEV_MODE_LOGGING=0`: passed; `text=516,688`, `data=408`,
+  `bss=409,840`, flash used 517,096 B, no `ccSvc_traceState` or `fs_cc_*`
+  symbols.
+- `make all` with `DEV_MODE_LOGGING=1`: passed; `text=530,592`, `data=416`,
+  `bss=426,616`, flash used 531,008 B, headroom 222,656 B; ITCM 4,168 B and
+  FXBUF margin 3,712 B.
+- `python3 -m py_compile tools/decode_devlogs.py`, a synthetic stage-`c`
+  decode, `git diff --check`, and the forbidden-symbol grep passed.
+- Hardware F1/trace verification remains pending; the exact witness matrix is
+  in the combined schedule's build-and-verification section.

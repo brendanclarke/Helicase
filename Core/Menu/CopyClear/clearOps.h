@@ -1,7 +1,8 @@
 /*
  * clearOps.h — clear rules for Phase 6 clear (spec §5, §6).
  *
- * What: the clear menus (labels, counts; every menu opens at `cancel`), the
+ * What: the clear menus (labels, counts; first object of a group opens at
+ * `cancel`), the
  * object-to-menu mapping per mode, turning a released object into a queued
  * clear, the immediate EFFECTS SEQ clear, the pot-clear front end, and the
  * Scene-level clear executors (Scene, Scene settings, Effect, FX sequence,
@@ -18,7 +19,9 @@
 #include "copyClearSession.h"
 #include "copyClearService.h"
 
-/* Step, bar and track clear selections (`send` only in EFFECTS TRACK). */
+/* Step, bar and track clear selections (`send` only in EFFECTS TRACK). NOTES
+ * turns triggers off, removes note/velocity specials, and keeps probability
+ * plus automation (F1-J). */
 typedef enum {
     CC_CLEAR_CANCEL = 0u,
     CC_CLEAR_ALL,
@@ -52,7 +55,8 @@ const char *ccClear_label(cc_menu_t menu, uint8_t selection);
  * Queue one clear for a released object (spec §5).
  * Inputs: the held object and the selection shown at release. Output:
  * nonzero when queued; zero for `cancel` or a full queue (dropped silently).
- * Caller: the router.
+ * On acceptance, trigger bits are turned off immediately for selections whose
+ * final state is trigger-off, and step LEDs repaint (F1-H). Caller: router.
  */
 uint8_t ccClear_requestClear(const cc_source_t *object, uint8_t selection);
 

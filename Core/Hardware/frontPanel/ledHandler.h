@@ -138,17 +138,6 @@ void led_flashGroup(LedFlashGroup group, uint16_t mask);
 void led_flashLed(uint8_t ledNr);
 void led_setBlinkLed(uint8_t ledNr, uint8_t onOff);
 void led_clearAllBlinkLeds(void);
-/*
- * Persistent group blink for one LED row (S075).
- *
- * Inputs: LED_FLASH_GROUP_SELECT, LED_FLASH_GROUP_SEQ or
- * LED_FLASH_GROUP_VOICE and a row bit mask; other groups are ignored. Output:
- * the masked LEDs blink in the shared phase until the next call for that
- * group. Unlike led_setBlinkLed() there is no slot limit, and
- * led_clearAllBlinkLeds() does not cancel a group. Client: copy/clear source
- * indication.
- */
-void led_setBlinkGroup(LedFlashGroup group, uint16_t mask);
 
 /* High-level voice/mode LED control — matches original API */
 /*
