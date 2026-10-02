@@ -8,6 +8,14 @@ changing any of it.
   `50610dd`. Link: `text=502,512`, `data=416`, `bss=426,392`; flash payload
   502,928 B; `LXRV2_lxr02.img` 502,944 B, SHA-256
   `63eec2a602d80f54ea122a7977eb214c178f115be6c7e6a4117b02940663aeb0`.
+- **S075 (Phase 6 copy/clear, `dev-ph6-copyclear`, uncommitted at this
+  update):** link `text=527,392`, `data=412`, `bss=426,480`;
+  `LXRV2_lxr02.img` 527,820 B. SRAM1 net +92 B (approved up to +100 B):
+  copy/clear state +84 B, released `srt` bytes −32 B in `scenes`, `.data`
+  −4 B; DTCM `.dtcmz` −8 B (`mixer_decimation_rate[]` 7 → 6 floats plus
+  alignment). The 9,000 B name cache doubles as copy/clear working storage
+  while an operation runs (§8.2). Every Scene pool keeps a permanent 132 B
+  swap block (§8.2).
 - **S074 changes:** +64 B SRAM1 (Scene settings for the bus compressor);
   +32 B DTCM `.dtcmz` (bus compressor state), so the FX arena is −32 B;
   CrumpBit uses 0 B of static RAM (56 B inside the existing 76 B union)
@@ -284,6 +292,16 @@ only works while sector 6 holds no code.
 
 - Static data RAM (SRAM1 + DTCM including the arena) is 427,320 B;
   including ITCM code, 431,488 B.
+- **Session 075 changes (approved: up to +100 B SRAM1):** `.bss`
+  292,732 → 292,828 B (+96), `.data` 416 → 412 (−4), DTCM `.dtcmz`
+  3,968 → 3,960 (−8, arena unchanged). Owners: `copyClearSession.c` 25 B
+  (`cc_state` 6, `cc_source` 6, `cc_rowStack` 8, row count 1, edge masks 4);
+  `copyClearService.c` 59 B (queue 24 + head/count 2, register 16 + count/Scene
+  2, run state 6, flags/claim 2, retry counter 2, name-buffer pointer 4);
+  `service_exclusive_scene` 1 B; `fs_name_cache_borrowed` 1 B; `scenes` −32 B
+  (`voice_decimation_all` removed: settings 45 → 44 B, 2 B per record with
+  alignment). `mixer_decimation_rate[]` (DTCM, 28 → 24 B) accounts for the
+  `.dtcmz` change. The remainder is LTO placement and alignment.
 - **Session 074 changes (all approved):**
   - SRAM1 `.bss` +56 B. `scenes` grew +64 B (`scene_settings_t` 41 → 45 B
     for `bus_comp[4]`); the section total moved 56 B after alignment
@@ -392,8 +410,8 @@ byte, including alignment and small variables omitted here.
 
 | Owner / object | Bytes | Allocation and use |
 | --- | ---: | --- |
-| `SceneData.c`: `scenes` | 26,016 | Sixteen resident Scene records, 1,626 B each: 45 B settings (41 + the S074 bus compressor's 4), one alignment byte, 420 B Scene-owned Effect record, and the 1,160 B Kit; Pattern regions are separate. |
-| `PatternData.c`: `pat_regions` | 168,304 | Sixteen packed regions of 10,519 B: each has 1,792 B step addresses, 8,192 B pool, 512 B bitmap, and 23 B Pattern/track settings. |
+| `SceneData.c`: `scenes` | 25,984 | Sixteen resident Scene records, 1,624 B each: 44 B settings (41 + the S074 bus compressor's 4 − the S075-retired `voice_decimation_all`), 420 B Scene-owned Effect record, and the 1,160 B Kit; Pattern regions are separate. |
+| `PatternData.c`: `pat_regions` | 168,304 | Sixteen packed regions of 10,519 B: each has 1,792 B step addresses, 8,192 B pool, 512 B bitmap, and 23 B Pattern/track settings. Since S075 the top 132 B of each pool (33 chunks) is a permanent swap block outside normal allocation (8,060 B usable), kept as a guaranteed rewrite area for copy/clear and later features (`PATTERN_DYNAMIC_STACK.md` §3, §12.17). |
 | `PatternData.c`: `pat_autosave_snapshot` | 10,519 | One Scene-sized snapshot for an in-flight Pattern AutoSave. |
 | `PatternStackService.c`: `reservation_image` | 512 | One non-persisted bit image for the current service Scene's trailing pool reservations; three separate one-byte policy/rebuild flags accompany it. |
 | `PatternStackService.c`: `service_queue` | 256 | Sixty-four 32-bit mutation entries; cursors and repair/handover state are additional small SRAM1 objects. |
@@ -404,7 +422,8 @@ byte, including alignment and small variables omitted here.
 | `filesystem.c`: `fs_autosave_parameter_cache` | 4,608 | Bounded scalar AutoSave patch offsets and values. |
 | `filesystem.c`: `fs_stage_workspace` | 2,048 | One union shared by Kit, Instrument, Scene+Effect, AutoSave writer, and HCNAMES regeneration staging. The Scene+Effect peak is 1,625 B (the typed-load assert sums to 2,009 of 2,048 since S074); union members are not additive. The AutoSave writer member gained the 1-byte `overlong_mask` in S074 (0 B: inside the union). |
 | `filesystem.c`: `staging_buf` | 512 | Shared streaming and trace-batch buffer. |
-| `filesystem.c`: `fs_list_cache_name` | 9,000 | One 1,000 × 9 browser/index name cache. |
+| `filesystem.c`: `fs_list_cache_name` | 9,000 | One 1,000 × 9 browser/index name cache. Since S075 it is also lent to copy/clear as working storage while an operation runs (`filesystem_borrowNameCacheScratch()`; tag `FS_NAME_CACHE_COPYCLEAR`): [0..160] HCNAMES row remap, [256..511] paste source table, [512..] source blocks (≤ 8,060 B), Kit/Effect/FX-range copies, and at the end the original HCNAMES names/sources (1,771 B at 256). Worst case 8,572 B. While lent, cache disposal is ignored and other filesystem ops are refused; the cache is cleared on return and Load/Save reloads its index. |
+| `copyClearSession.c` / `copyClearService.c` | 84 | Copy/clear operation state, source, press stack, edge masks; queue of four 6 B jobs, eight-entry pot-clear register, run state, flags, name-buffer pointer (S075). |
 | `filesystem.c`: `hcnames_name_mirror`, `fs_resident_source` | 1,771 | Separate 161 × 9 HCNAMES names and 161 × 2 provenance sources; Effect rows are 145..160. |
 | `filesystem.c`: `op_effect_display_name` | 9 | Cached Effect filename stem for the current Scene/Bank child save. |
 | `filesystem.c`: `op_effect_state` | 7 | Bounded `.fx` parser state retained across async file-reader passes. |
@@ -525,6 +544,11 @@ not describe it in detail.
 - **S073:** program flash 480 → 736 KiB (sector 6), sample floor sector 7,
   boot image check (`.image_check` 32 B flash), DMA region Normal
   non-cacheable, ITCM +400 B (`osc_setFreq`). No SRAM1 or DTCM change.
+- **S075:** copy/clear +84 B SRAM1, `srt` retired (−32 B `scenes`; DTCM
+  `mixer_decimation_rate` −4 B), +2 B claim/borrow flags; permanent 132 B swap
+  block per Scene pool (inside the existing pool); the 9,000 B name cache
+  becomes copy/clear working storage during an operation. Link
+  `text=527,392`, `data=412`, `bss=426,480`.
 - **S074:**
   - `scenes` +64 B (bus compressor settings);
   - DTCM `busComp` 32 B, so the arena is 126,592 B at `0x20001180`;

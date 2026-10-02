@@ -216,6 +216,11 @@ compact line per record instead of prose; it does not change the on-card
 format. Update either only if the documented input schema or invocation
 changes.
 
+Operation codes come from `filesystem_bootLogCodeForOperation()`. Session
+075 added `HNcU` for the copy/clear HCNAMES update
+(`FS_INTERNAL_OP_UPDATE_HCNAMES_COPY`); it runs only at run time, after a
+copy/clear operation, so it never appears in a pre-audio boot record.
+
 ### DEV_LOGGING_IWDG — genuine pre-audio hard-lockup backstop
 
 Every case above still depends on the foreground making it back to a

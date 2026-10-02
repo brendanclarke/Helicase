@@ -986,6 +986,33 @@ bool filesystem_requestUpdateResidentSceneNames(
     uint16_t scene_mask,
     const char name[8],
     fs_completion_cb_t cb);
+
+/*
+ * Copy/clear identity publication (S075).
+ *
+ * filesystem_identityRow(): fixed HCNAMES row of one Scene/Kit/Instrument/
+ * Pattern/Effect identity (slot is used only for FS_ROW_INSTRUMENT), or
+ * FS_HCNAMES_ROW_COUNT when invalid.
+ * filesystem_requestCopyResidentNames(): one asynchronous HCNAMES rewrite
+ * that reads `/.hcnames`, applies the copy/clear remap held at offset 0 of
+ * the borrowed name buffer (remap[row] = original row whose name and source
+ * the row takes, 0xFF = unchanged; copied rows lose their refreshed flag),
+ * writes `.hcnamtmp` and swaps it in, then calls cb. Refused (false) while
+ * the facade is busy or when the buffer is not borrowed. On failure the
+ * previous `.hcnames` stays intact. Client: copyClearService.c. Affiliates:
+ * filesystem_borrowNameCacheScratch(), the shared HCNAMES update transaction.
+ */
+#define FS_HCNAMES_ROW_COUNT 161u
+typedef enum {
+    FS_ROW_SCENE = 0u,
+    FS_ROW_KIT,
+    FS_ROW_INSTRUMENT,
+    FS_ROW_PATTERN,
+    FS_ROW_EFFECT
+} fs_identity_row_class_t;
+uint16_t filesystem_identityRow(fs_identity_row_class_t cls, uint8_t scene,
+                                uint8_t slot);
+bool filesystem_requestCopyResidentNames(fs_completion_cb_t cb);
 /* Borrow the requested Scene row while HCNAMES owns the shared cache. */
 const char *filesystem_residentSceneName(uint8_t scene_index);
 /* Borrow the appended Pattern row for one resident Scene. */
@@ -1031,6 +1058,27 @@ bool filesystem_libraryNameCacheLoaded(fs_library_index_kind_t kind);
 /* Dispose the single shared Instrument/Kit/Scene/Bank/Pattern browser cache or its
  * temporary 161-row HCNAMES view; no second name allocation exists. */
 void filesystem_clearNameCache(void);
+
+/*
+ * Lend the 9,000 B name cache to copy/clear as working storage (S075).
+ *
+ * What: hands out the whole browser name array while a copy/clear operation
+ * runs, tagged so every browser accessor reports "not loaded" and Load/Save
+ * reloads its index on the next entry. Why: during an operation AutoSave, the
+ * deferred HCNAMES flush and the Load/Save pages cannot run (suspension,
+ * routing), so the cache is idle; copy/clear needs it for source snapshots
+ * and the identity-row remap (user, 2026-10-01: the 9 kB name buffer is
+ * multi-use scratch during an operation). Inputs: none. Output: a pointer to
+ * FS_NAME_SCRATCH_BYTES bytes, or NULL while the facade is busy or the buffer
+ * is already lent. Return clears the bytes and the domain. While lent, name
+ * cache disposal requests are ignored and every filesystem operation except
+ * the copy/clear name write is refused like a busy facade. Clients:
+ * copyClearService.c only. Affiliates: filesystem_requestCopyResidentNames()
+ * reads the remap at offset 0 and uses offsets 256.. during its own request.
+ */
+#define FS_NAME_SCRATCH_BYTES 9000u
+uint8_t *filesystem_borrowNameCacheScratch(void);
+void filesystem_returnNameCacheScratch(void);
 /* Compatibility spelling retained for existing Instrument menu callers. */
 void filesystem_clearInstrumentCache(void);
 /*

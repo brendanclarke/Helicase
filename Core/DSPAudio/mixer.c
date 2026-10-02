@@ -123,7 +123,7 @@ static volatile uint8_t mixer_out_l2_available = 1u; /* PB4 */
 static volatile uint8_t mixer_out_r2_available = 1u; /* PB6 */
 //-----------------------------------------------------------------------
 #if USE_DECIMATOR
-INCCMZ float mixer_decimation_rate[7];		/**<sets the sample rate decimation. 0..1 = full rate*/
+INCCMZ float mixer_decimation_rate[6];		/**<sets the per-voice sample rate decimation. 0..1 = full rate*/
 INCCMZ float mixer_decimation_cnt[6];		/**<s'n'h counter for decimator*/
 INCCMZ int16_t mixer_voice_samples[6];		/**< stores the last outputted sample of the 6 voices*/
 #endif
@@ -142,7 +142,6 @@ void mixer_init()
 		** in; requires instrumentManager_runtimeInit() first (dsp_init order). */
 		mixer_voice_last_gain[i]    = slider_vol[i] * instrumentManager_runtimeVolume(i);
 	}
-	mixer_decimation_rate[6] 		= 1;
 #endif
 }
 //-----------------------------------------------------------------------
@@ -151,7 +150,8 @@ void mixer_decimateBlock(const uint8_t voiceNr, int16_t* buffer)
 	uint8_t i;
 	for(i=0;i<OUTPUT_DMA_SIZE;i++)
 	{
-		mixer_decimation_cnt[voiceNr] += mixer_decimation_rate[voiceNr]*mixer_decimation_rate[6];
+		/* S075: the retired global multiplier (former rate[6]) is gone. */
+		mixer_decimation_cnt[voiceNr] += mixer_decimation_rate[voiceNr];
 		if(mixer_decimation_cnt[voiceNr] >= 1.f)
 		{
 			mixer_decimation_cnt[voiceNr] -= 1.f;

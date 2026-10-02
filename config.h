@@ -300,6 +300,21 @@
  * Affiliates: PatternData.c and sequencer.c.
  */
 #define PAT_STACK_SIZE           256u
+/*
+ * Permanent Pattern pool swap block (S075).
+ *
+ * What: the top 33 chunks (132 B, one maximum dynamic block) of every Scene
+ * pool are kept out of ordinary allocation. Why: a copy/clear paste can
+ * always place one maximum block even into a full pool (place via swap, free
+ * the old run, compact, return), and the block is reserved for future uses.
+ * Inputs: PAT_STACK_SIZE. Outputs: allocator bound (PAT_POOL_ALLOC_CHUNKS),
+ * swap byte offset, and the usage-percent denominator. Affiliates:
+ * PatternData.c pat_poolAlloc()/pat_raw*, PatternStackService.c bounds.
+ */
+#define PAT_POOL_SWAP_CHUNKS      33u
+#define PAT_POOL_SWAP_BYTES      (PAT_POOL_SWAP_CHUNKS * 4u)
+#define PAT_POOL_ALLOC_CHUNKS    ((uint16_t)(PAT_STACK_SIZE * 8u - PAT_POOL_SWAP_CHUNKS))
+#define PAT_POOL_SWAP_OFFSET     ((uint16_t)(PAT_POOL_ALLOC_CHUNKS * 4u))
 #define PAT_DEFAULT_NOTE          63u
 #define PAT_DEFAULT_VELOCITY     100u
 

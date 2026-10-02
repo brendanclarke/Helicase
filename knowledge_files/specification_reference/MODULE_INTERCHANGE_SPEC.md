@@ -170,7 +170,7 @@ module owns each call, state transition, and retained object.
   Scene-owned descriptor images and the active slot's descriptor table instead
   of hardcoded parameter lists.
 - Scene-level sound modulation targets live in
-  `Core/Bank/Scene/SceneModTargets.c/h`: `1vm..6vm`, Scene Decimation `srt`,
+  `Core/Bank/Scene/SceneModTargets.c/h`: `1vm..6vm`, the retired `srt` row (ID 390, S075 placeholder),
   `1ou..6ou`, `1fx..6fx`, and Effect Morph `fxm` (404). Effect **parameters**
   do not join that namespace. They are block-7 IDs `448 + local`, owned and
   validated by EffectsManager (`effects_targetValid()`), and selected in the
@@ -203,6 +203,7 @@ children that are provably unchanged on the current mounted card.
 | `bank_setSceneMaskVoiceEditForScene(scene, mask)` / `bank_sceneMaskVoiceEditForScene(scene)` | Per-Scene indexed voice-edit mask setter/getter for boot restore (Autosave) and bankset load/save (Session 071). | filesystem, Autosave |
 | `bank_toggleSceneMaskVoiceEdit(scene)` | Toggle one Scene in the active mask. Menu applies the layout gate before turning a bit on; the active bit cannot be removed. | Menu VOICE-held SEQ |
 | `bank_revalidateVoiceEditMasks()` | Drop mask members whose Effect/Instrument layout no longer matches their owner; changed entries mark AutoSave (S072 Step 10). | Menu load-completion funnels, `main.c` boot, `effects_changeType()` |
+| `bank_sceneFanoutMask(scene)` / `bank_exchangeVoiceEditMask(src, dst)` / `bank_resetVoiceEditMaskToSelf(scene)` | Copy/clear fan-out set (the Scene's own entry, present and layout-matching members), the `copy scene` / `copy scene settings` mask exchange, and the `clear scene` / `clear scene settings` reset. (S075) | CopyClear |
 | `bank_resetSdSaveMutationWindow()` / `bank_resetSdSaveMutationScene()` / `bank_sdSaveMutatedMask()` | Own the operation-scoped mutation window across a Bank Save so a child edited while its write was in flight stays non-clean. | filesystem Bank Save |
 
 The clean authority is **never serialized** (not in settings, HCNAMES, Bank, or
@@ -236,6 +237,7 @@ layout.
 | `scene_editLayoutMatches(a, b)` | Same Effect type and six Instrument types; read-only. | Menu mask gate, BankData re-validation |
 | `scene_busCompDefaults(settings)` / `scene_busCompClamp(field, value)` / `scene_setBusCompSetting(scene, field, value)` / `scene_getBusCompSetting(scene, field)` | S074 master bus compressor bytes `bus_comp[4]` (MODE 0..2, AMOUNT 0..127, TIME 0..127, SIDECHAIN 0..6; defaults off/48/48/off). The setter clamps, stores change-aware and marks AutoSave Scene parameter 41 + field. | Preset (menu commit, fan-out), `.scg` parser, AutoSave reader, BusCompressor (reads per block) |
 | `scene_setVoiceFaderSetting()` / `scene_getVoiceFaderSetting()` | Per-voice fader mode 0..`SCENE_FADER_SETTING_MAX` (3 = `xfd` since S074; equal to `MIXER_FADER_XFD`, asserted in `mixer.c`). | Preset, `.scg` parser, AutoSave, mixer |
+| `scene_settingsDefaults(out)` / `scene_commitSettings(scene, src)` / `scene_commitKit(scene, kit)` / `scene_resetKitToDefaults(scene)` | Whole-settings defaults and field-by-field commit through the change-aware setters; whole-Kit commit and fresh-Kit reset with the Kit AutoSave marker and card-clean invalidation. No runtime apply. (S075) | CopyClear |
 
 The 420-byte record and the 16-record SRAM1 allocation (`scenes`, 26,016 B:
 1,626 B per Scene since S074) are firmware-lifetime SceneData storage. EffectsManager owns 84 B of resolution state and 184 B of
@@ -275,7 +277,7 @@ UI/LED/copy-clear, Euklid/SOM, and filesystem; none may add a parallel
 Pattern owner. See `STORAGE_SRAM_MANIFEST.md` for linked sizes and
 `PATTERN_DYNAMIC_STACK.md` for the complete specification.
 
-Affiliate modules: Menu, buttonHandler, ledHandler, copyClearTools, filesystem,
+Affiliate modules: Menu, buttonHandler, ledHandler, CopyClear, filesystem,
 Sequencer, EuklidGenerator, Preset/MidiParser indirectly through Sequencer
 automation.
 
@@ -321,9 +323,9 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 | `pat_setTrackMidiChannel(pattern, track, channel)` / `pat_getTrackMidiChannel(pattern, track)` | Store/read per-track MIDI output channel in menu form (`1..16`). | `menu_parseGlobalParam(PAR_TRACK_MIDI_CHAN)`, Sequencer MIDI output/input matching |
 | `pat_setTrackMidiNote(pattern, track, note)` / `pat_getTrackMidiNote(pattern, track)` | Store/read per-track MIDI note override (`0` means fallback/default). | `menu_parseGlobalParam(PAR_TRACK_MIDI_NOTE)`, Sequencer trigger/preview/MIDI output |
 | `pat_setTrackShuffle(pattern, track, shuffle)` / `pat_getTrackShuffle(pattern, track)` | Store/read per-track shuffle amount (`0..127`); no legacy all-track shuffle import/export remains. | `menu_parseGlobalParam(PAR_SHUFFLE)`, filesystem per-track shuffle extension, Sequencer scheduler |
-| `pat_clearTrack(scene, track)` | Free dynamic blocks and reset one track. | copyClearTools, `pat_clearPattern()` |
-| `pat_clearPattern(scene)` | Free dynamic blocks and reset all tracks in one Scene Pattern. | copyClearTools, initialization |
-| `pat_copyTrack(scene, src, dst)` / `pat_copyPattern(src_scene, dst_scene)` / `pat_copyBar(scene, track, src, dst)` | Reserved public copy surface. | Deliberate no-ops pending Phase 4.5 pool duplication |
+| `pat_clearTrack(scene, track)` | Free dynamic blocks and reset one track. | PatternStackService barrier, `pat_clearPattern()` |
+| `pat_clearPattern(scene)` | Free dynamic blocks and reset all tracks in one Scene Pattern. | PatternStackService barrier, initialization |
+| Raw block API: `pat_rawReadBlock`, `pat_rawBlockBytes`, `pat_rawDecode`, `pat_rawEncode`, `pat_rawPlace`, `pat_rawPlaceViaSwap`, `pat_rawSwapReturn`, `pat_rawPublishEmpty`, `pat_rawFreeChunks`, `pat_rawSwapFree`, `pat_rawRegionSilence/CopyBody/PublishSteps/CopiedBlock/PublishRewritten/Reset` | Whole-step and whole-region reads, placements and publications in publication order, including the permanent swap block (S075; `PATTERN_DYNAMIC_STACK.md` §12.17). Legal only under `patSvc_beginExclusive()`. The S062 no-op `pat_copy*` surface is removed. | `copyClearService.c` only |
 | `pat_setSelectedStep(step)` | Keep active step mirror in `PAR_ACTIVE_STEP`; `seq_selectedStep` no longer exists. | PatternData menu-apply and automation destination edit |
 | `pat_setActiveAutomationTrack(track)` / `pat_getActiveAutomationTrack(void)` | Select automation lane. | Menu; future UI clients |
 | `pat_armAutomationStep(step, track, armed)` | Arm/disarm held-step automation recording target. | buttonHandler long-press path |
@@ -340,7 +342,7 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 
 ## Core/Bank/Scene/Pattern/PatternStackService
 
-Affiliate modules: PatternData, Menu, Sequencer, copyClearTools,
+Affiliate modules: PatternData, Menu, Sequencer, CopyClear,
 EuklidGenerator, filesystem, timebase.
 
 Purpose: unified pool mutation dispatcher (Session 067, bounded CPU
@@ -370,15 +372,17 @@ specification.
 | `patSvc_setStepVolume(scene, track, step, volume)` | Set step velocity via service. | Menu step edit |
 | `patSvc_setStepProbability(scene, track, step, prob)` | Set step probability via service. | Menu step edit |
 | `patSvc_eraseStep(scene, track, step)` | Erase step via service. | Sequencer erase mode |
-| `patSvc_clearTrack(scene, track)` | Clear track via bounded bulk barrier. | copyClearTools |
-| `patSvc_clearPattern(scene)` | Clear pattern via bounded bulk barrier. | copyClearTools |
+| `patSvc_clearTrack(scene, track)` | Clear track via bounded bulk barrier. | (no current caller; copy/clear uses its own engine) |
+| `patSvc_clearPattern(scene)` | Clear pattern via bounded bulk barrier. | (no current caller; copy/clear uses its own engine) |
+| `patSvc_beginExclusive(scene)` / `patSvc_endExclusive(scene)` | Exclusive write access to one Scene's Pattern region (any Scene); begin returns 1 once queued work drained. (S075) | `copyClearService.c` |
+| `patSvc_exclusiveCompactStep(scene)` / `patSvc_exclusiveEvacuateSwapStep(scene)` | One sliding-compaction move / move a pre-S075 block out of the swap block, for the exclusive holder. (S075) | `copyClearService.c` |
 | `patSvc_removeTrackAutomationByTarget(scene, track, target9)` | Remove all entries with a given target from all 128 steps. | Menu VOICE overlay |
 | `patSvc_enqueueErase(scene, track, step)` | Queue erase from TIM3 ISR context (PRIMASK-protected enqueue). | Sequencer live erase |
 | `patSvc_tryAppendAutomation(scene, track, step, target9, value7)` | Gate-6 growth: try append with reservation consumption. Returns 1 on success, 0 on blocked allocation (retained for reactive recovery). | Menu VOICE overlay, step-edit menu |
 | `patSvc_countUsed(void)` | Popcount of occupancy bitmap (64-word `__builtin_popcount`). | filesystem.c idle tick-tail (removed from tick-tail in S069) |
 
 Caller migration (Session 067): 15+ call sites across `menu.c`,
-`copyClearTools.c`, `EuklidGenerator.c`, and `sequencer.c` changed from
+`copyClearTools.c` (removed in S075), `EuklidGenerator.c`, and `sequencer.c` changed from
 direct `pat_*` mutation calls to `patSvc_*` routing. TIM3's automation read
 path is not routed through the service — it reads address entries directly,
 which are always consistent due to the publication ordering fix.
@@ -435,7 +439,7 @@ Sequencer LED feedback via `SeqLedState`.
 | `led_setActiveVoice(voiceNr)` / `led_setActiveVoiceLeds(pattern)` | Voice LED display. | buttonHandler, Menu |
 | `led_setActiveSelectButton(butNr)` | SELECT LED display. | buttonHandler, Menu |
 | `led_setMode2Leds(value)` / `led_setMode2(status)` | Mode LED display. | buttonHandler |
-| `led_clearSequencerLeds()` / `led_clearSequencerLeds1_8()` / `led_clearSequencerLeds9_16()` | Clear step LEDs. | buttonHandler, Menu, copyClearTools |
+| `led_clearSequencerLeds()` / `led_clearSequencerLeds1_8()` / `led_clearSequencerLeds9_16()` | Clear step LEDs. | buttonHandler, Menu |
 | `led_clearSelectLeds()` / `led_clearVoiceLeds()` | Clear select/voice LED groups. | buttonHandler, Menu |
 | `led_setActive_step(stepNr)` / `led_clearActive_step()` | Chase/current-step display helpers. | ledHandler internals/future callers |
 | `led_initPerformanceLeds()` | Performance LED layout. | buttonHandler, pattern change notification |
@@ -463,7 +467,7 @@ directly and does not participate in the layer system.
 ## Core/Hardware/frontPanel/buttonHandler
 
 Affiliate modules: ledHandler, Menu, `menuEffects`, PatternData,
-EuklidGenerator, Sequencer, Preset, MidiParser, copyClearTools, and
+EuklidGenerator, Sequencer, Preset, MidiParser, CopyClear, and
 EffectsManager.
 
 Purpose: owns physical button event queue, select modes, shift state, selected
@@ -536,7 +540,9 @@ edit dispatch, and post-load operation follow-up.
 | `menu_setPlayedPattern(patternNr)` | Side-effect-free alignment of the played-Pattern UI mirror (`menu_playedPattern`) the chase renderer compares against the viewed Pattern to gate chase-LED visibility (Session 068). Unlike `led_notifyPatternChanged()` (the runtime writer, with follow/PERF/LED side effects), performs only a validated assignment — safe to call from pre-audio filesystem realignment. | `filesystem.c` Scene/Bank realignment (3 sites) |
 | `menu_voiceAutoOverlayEnter()` / `menu_voiceAutoOverlayExit()` | Enter/exit VOICE-page held-step automation overlay (Session 066). Entry initializes 44-byte state block, starts async search. Exit restores normal VOICE display and clears CGRAM. | buttonHandler SEQ held-step timing |
 | `menu_voiceAutoOverlayHeldChanged()` | Notify overlay that the held-step mask changed. Invalidates working values, restarts async search. | buttonHandler SEQ press/release during overlay |
-| `menu_voiceAutoOverlayPatternDeleted()` | Invalidate the automation-presence search after an in-place Pattern/track clear: restart and repaint on VOICE pages and, since S074, the Effect page (`menu_isScreenPage()`); other pages return (their next entry restarts the search). | copyClearTools |
+| `menu_patternContentChanged()` (renamed from `menu_voiceAutoOverlayPatternDeleted()`, S075) | Restart the automation-presence search after any Pattern paste or clear and repaint on VOICE pages and the Effect page (`menu_isScreenPage()`); other pages return (their next entry restarts the search). | copyClearService |
+| `menu_automationTargetCleared(target)` | Drop one target's underline at a pot clear without restarting the search. (S075) | clearOps |
+| `menu_copyClearMenuChanged()` / `menu_copyClearMenuClosed()` / `menu_isStorageBusy()` | Copy/clear menu repaint, close (CGRAM cache invalidation + full repaint), storage-lock view. (S075) | copyClearSession |
 | Automation-presence search (internal, S066/S074) | `va_searchRestart()`, `va_scanService()` (4 step reads per pass; VOICE: the active track; Effect page: all 7 tracks of the viewed Pattern), `va_searchRecordEffectTarget()` (block-7 locals 0..62 and `fxm`; rejects local 63/`0x1FF`), `menu_effectCellAutomated()`, `menu_applyEffectMarkers()`. 13 shared bytes; every entry to a VOICE or Effect page restarts it. | Menu internals |
 | `menu_effectShowHome()` | S074: jump the Effect page to the active type's layout home screen, leaving any full view (used when a type's SELECT hook returns `EFFECT_UI_SHOW_HOME`). | buttonHandler FX SELECT paths |
 | Bus compressor settings page (internal, S074) | `MENU_MIDI_PAGE` sub-page `MENU_GLOBAL_SCENE_SUBPAGE` (2), always last. Cells `cmp cam ctm csc` mirror the active Scene through `PAR_BUS_COMP_*` (58..61). Commits go through a dedicated `menu_cellCommitValue()` branch into `preset_setBusCompSetting()` for every VOICE-edit-masked Scene; `menu_parseGlobalParam()` only refreshes the mirrors for these ids, so a Settings Load can never write Scenes. Cues `^` (first screen) and `+` (this page) in `checkScrollSign()`. BC18 diagnostic boot check. | Menu internals, Preset |
@@ -582,25 +588,48 @@ and page-owned SEQ LEDs; the Pattern chase yields to this LED layer.
 | `menuEffects_home()` / `menuEffects_liveRefreshWanted()` | S074: the layout home screen; whether the page needs the live-refresh cadence (a `format_value3` hook is present). | `menu_effectShowHome()`, `menu_sceneLiveRefreshService()` |
 | `menuEffects_shownParam(index)` / `menuEffects_editParam(index, value)` | S074: the value a row shows (the last held step's lock where locked, else retained); a held-aware write (retained edit with no hold, locks on every held step during a hold). | Type UI hooks (CrumpBit) |
 
-## Core/Menu/copyClearTools
+## Core/Menu/CopyClear (S075; replaces copyClearTools)
 
-Affiliate modules: Menu, ledHandler, PatternData, buttonHandler.
+Affiliate modules: buttonHandler, Menu, ledHandler, PatternData,
+PatternStackService, SceneData, BankData, presetManager, EffectsManager,
+filesystem, Autosave. Spec: `S075_PH6_COPY_CLEAR_FULL_SPEC.md`; schedule and
+implementation log: `S075_PH6_COPYCLEAR_IMPLEMENTATION.md`.
 
-Purpose: owns copy/clear UI mode state and delegates actual pattern mutation to
-PatternData.
+Purpose: Phase 6 copy and clear of Pattern data (step, range, bar, track) and
+of Scenes and Scene children (Instrument, Kit, Effect, FX sequence, settings,
+Pattern), with pot clears of automation. Four file pairs:
+
+| File pair | Owns |
+|---|---|
+| `copyClearSession.c/h` | operation phase, source and range rule, menus and selection, button routing and edge pairing, LEDs, the suspension predicate |
+| `copyOps.c/h` | copy menus, paste requests, retargeting, merge rules, Scene-level paste executors |
+| `clearOps.c/h` | clear menus, clear requests, EFFECTS SEQ clear, pot-clear front end, Scene-level clear executors |
+| `copyClearService.c/h` | queue (4), run state, Pattern paste/clear engines, whole-region copy/reset, pot-clear register (8), borrowed 9 kB name buffer, name remap and HCNAMES write |
 
 | API | Use | Usual callers / clients |
 |---|---|---|
-| `copyClear_executeClear()` | Execute current clear target. | buttonHandler |
-| `copyClear_clearCurrentTrack()` | Clear active voice in viewed pattern. | `copyClear_executeClear()` |
-| `copyClear_clearCurrentPattern()` | Clear viewed pattern. | `copyClear_executeClear()` |
-| `copyClear_copyTrack()` | Copy selected source track to destination track. | buttonHandler |
-| `copyClear_copyPattern()` | Copy selected source pattern to destination pattern. | buttonHandler |
-| `copyClear_getClearTarget()` / `copyClear_setClearTarget(mode)` | Clear target UI selection. | Menu encoder clear mode |
-| `copyClear_isClearModeActive()` | Query clear mode. | Menu |
-| `copyClear_armClearMenu(isShown)` | Show/hide clear confirmation UI. | buttonHandler/Menu |
-| `copyClear_srcSet()` / `copyClear_setSrc(src, type)` / `copyClear_setDst(dst, type)` | Copy gesture source/destination state. | buttonHandler |
-| `copyClear_reset()` | Leave copy/clear UI mode. | buttonHandler |
+| `copyClear_init()` | Boot reset (calls `ccSvc_init()`). | `main.c` after `patSvc_init()` |
+| `copyClear_copyPressed(shift)` / `copyClear_copyReleased()` | Start an operation (copy, or clear with SHIFT); end menu interaction. | buttonHandler `BUT_COPY` |
+| `copyClear_buttonPressed(btn)` / `copyClear_buttonReleased(btn)` | Route SEQ/SELECT/TRACK/BAR/MODE edges first; nonzero = consumed. | buttonHandler `processPress/Release()` |
+| `copyClear_postEvent()` / `copyClear_eventOverflow()` | Re-assert LEDs and source blink after each event; reset pairing on ring overflow. | `buttonHandler_processEvents()` |
+| `copyClear_menuVisible()` / `copyClear_formatMenu(r0, r1)` | Menu overlay. | `menu_repaint()`, `va_queueMarkerTransaction()` |
+| `copyClear_ownsEncoder()` / `copyClear_encoderTurned(inc)` | Encoder ownership while held (clicks ignored). | `menu_parseEncoder()` |
+| `copyClear_ownsPots()` / `copyClear_potTurned(target)` | Pot ownership; pot clear in a clear operation. | `menu_parseKnobDelta()` |
+| `copyClear_backgroundSuspended()` | AutoSave/maintenance suspension predicate. | `filesystem_tick()` gates, `patSvc_tick()` repair gate |
+| `ccSvc_tick()` | One bounded service step at 500 Hz. | `timebase.c` after `patSvc_tick()` |
+| `ccSvc_targetPending(target)` | Underline filter for targets waiting in the register. | `va_scanService()` |
+
+Calls out: `patSvc_beginExclusive/endExclusive/exclusiveCompactStep/
+exclusiveEvacuateSwapStep`, the PatternData raw block API,
+`filesystem_borrowNameCacheScratch/returnNameCacheScratch/identityRow/
+requestCopyResidentNames/clearResidentRefreshed`, `scene_commitSettings/
+commitKit/commitEffectRecord/settingsDefaults/resetKitToDefaults`,
+`bank_sceneFanoutMask/exchangeVoiceEditMask/resetVoiceEditMaskToSelf/
+revalidateVoiceEditMasks`, `preset_startInstrumentCopy/applyWorkersIdle/
+tickInstrumentApply/startDrumsetApply/applySceneSettings`,
+`effects_pasteRecord/resetRecord/pasteSeqStep/clearSeqLanes`,
+`menu_copyClearMenuChanged/Closed`, `menu_patternContentChanged`,
+`menu_automationTargetCleared`, `led_setBlinkGroup/setBlinkLed/flashGroup`.
 
 ## Core/Sequencer/sequencer
 
@@ -707,6 +736,7 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_startDrumsetApply()` / `preset_tickDrumsetApply()` | Clear outgoing modulation, quiet/trigger-time reset and image-apply all six incoming tagged slots, activate the selected Scene's Effect runtime, then keep the Scene gate active while the existing Instrument cursor normalizes/rebinds every source's two LFO pairs and velocity against the final type vector. | Menu and `main.c` post-audio boot activation |
 | `preset_startKitMorphApply()` | Drain same-type KitMrp endpoint copies and refresh active-scene Morph runtime images without replacing kit membership or routing. | Menu KitMrp completion |
 | `filesystem_loadedInstrumentWasTemporary()` plus `preset_startInstrumentApply(scene, slot, mark_autosave_whole_instrument)` / `preset_tickInstrumentApply()` | Filesystem exposes the existing request-local root-pool versus hidden-`kit` origin during completion; Menu passes that immutable result as the mark flag. A root-pool commit immediately marks each destination's type/Normal/Morph payload for AutoSave; hidden restore supplies zero. Active Scene path clears all outgoing modulation owners, commits/resets the incoming runtime, rebuilds all six Morph images, then normalizes/rebinds all six source target relationships. | Filesystem, then Menu Instrument completion |
+| `preset_startInstrumentCopy(src_scene, src_slot, dst_mask, dst_slot)` / `preset_applyWorkersIdle()` | Resident Instrument copy through the Instrument Load commit path (`source_slot` parameter moves `self` LFO selectors); idle test of the Scene and Instrument apply workers. (S075) | CopyClear |
 | `preset_startInstrumentMorphApply(scene, slot)` | Copy staged same-type Instrument normal endpoints into the destination morph image, immediately mark only the committed Morphable Morph payload for AutoSave, and refresh active-scene Morph runtime. | Menu InstrumentMrp completion |
 | `preset_morph(morph)` / `preset_morphVoice(slot, morph)` / `preset_morphTick()` / `preset_getMorphValue(index, morph)` | Rate-limited descriptor Morph interpolation/application. Global Morph bulk-sets all six per-voice Morph values and the active Scene's Effect Morph amount; per-voice/Effect retained Morph values are the engine inputs. | Menu, MIDI, velocity modulation, main loop |
 | `presetMorph_setVoiceLfoModulation(scene_index, target_slot, source_slot, target_pair, direction, depth)` / `presetMorph_clearLfoSource(source_slot)` | Maintain the hidden per-voice Morph LFO overlay. Session 071 changed the setter from absolute amount to base-independent direction (`PresetMorphLfoDirection`: NONE/MAIN/MORPH) + normalized depth. The resolver computes signed deltas from the current effective base at resolution time, eliminating stale-base errors when step automation changes the base between LFO sample and resolve. | InstrumentManager/LFO dispatch |
@@ -817,7 +847,8 @@ or the FX audio bus.
 | `effects_paramMorphable()` / `effects_getParameter()` | Query Morph capability and resolve the visible normal/Morph endpoint for the Effect page. | `menuEffects` |
 | `effects_recordDefaultsForType()` / `effects_laneFileKey()` / `effects_laneByFileKey()` | Unowned default record and lane ↔ `.fx` key mapping. | `.fx` parser, AutoSave reader, boot loader |
 | `effects_getParameter()` | Read a normal/Morph endpoint. | `menuEffects`, step-automation current value |
-| `effects_setParameter()` / `effects_setSeqRunMode()` / `effects_setSeqLength()` / `effects_setSeqStepScale()` / `effects_setMorphAmount()` / `effects_setSeqLaneLock()` / `effects_changeType()` | Retained edit API. Each fans out through the active VOICE edit mask (same-type guard for rows/locks/sequence; `mrp` and `typ` reach all masked Scenes); `changeType` then re-validates masks. Returns nonzero if any reached Scene changed. | `menuEffects`, type UI hooks, DEV hook |
+| `effects_setParameter()` / `effects_setSeqRunMode()` / `effects_setSeqLength()` / `effects_setSeqStepScale()` / `effects_setMorphAmount()` / `effects_setSeqLaneLock()` / `effects_changeType()` | Retained edit API. Each fans out through the origin Scene's own VOICE edit-mask entry (S075; the active Scene uses the self-repairing getter), with a same-type guard for rows/locks/sequence; `mrp` and `typ` reach all masked Scenes; `changeType` then re-validates masks. Returns nonzero if any reached Scene changed. | `menuEffects`, type UI hooks, DEV hook |
+| `effects_pasteRecord(dst, src)` / `effects_resetRecord(dst)` / `effects_pasteSeqStep(dst, step, src)` / `effects_clearSeqLanes(scene, step_mask, lane_mask)` | Copy/clear record and FX-sequence operations fanned out through the destination Scene's own edit-mask entry (same type as the destination's current type); a record paste may change the type. Lock removal (A15) is now possible. (S075) | CopyClear |
 | `effects_seqActiveStep()` / `effects_seqSelectedStep()` / `effects_seqSelect()` / `effects_seqSerial()` / `effects_laneOfParam()` / `effects_getLaneLock()` | FX position/selection and lock inspection. | `menuEffects` |
 | `effects_init()` | Initialize manager state and install the FxBuffer share-change callback after `fxbuf_init()`. | `main.c` |
 | `effects_activateScene(scene)` | Select a Scene's retained Effect type; different types switch immediately through the FxBuffer handoff, while same-type activation preserves tails. | Preset Scene/Bank apply paths |
@@ -1074,6 +1105,7 @@ Storage text parsing/formatting and descriptor-key validation stay in
 | `filesystem_initCardAndMountBlocking()` / `filesystem_initAfterCardReady()` | Boot card init/mount. | `main.c` |
 | `filesystem_bootLoggingBegin()` / `filesystem_bootLoggingArm()` / `filesystem_bootLoggingTimedOut()` / `filesystem_writeBootFailureLogBlocking()` / `filesystem_bootLoggingEnd()` | Own the pre-audio ten-second filesystem deadline and one bounded best-effort retained-code recovery write. Private detail hooks may change only the label inside an armed deadline. | `main.c`; filesystem boot operations under `DEV_MODE_LOGGING` |
 | `filesystem_tick()` | Pump asyncfatfs work. While the Session 058 fast drain is active, the BUSY/non-READY branch runs four consecutive `afatfs_poll()` calls instead of one; idle polling keeps its rate limit. | main loop |
+| Copy/clear support (S075): `filesystem_borrowNameCacheScratch()` / `filesystem_returnNameCacheScratch()`, `filesystem_identityRow(cls, scene, slot)`, `filesystem_requestCopyResidentNames(cb)` | Lend the 9,000 B name cache as copy/clear working storage (while lent: disposal requests ignored, every op except the copy/clear name write refused like a busy facade); fixed HCNAMES row of a Scene/Kit/Instrument/Pattern/Effect identity; one HCNAMES rewrite (`HNcU`) applying the copy/clear row remap. `filesystem_tick()` admits no background writer (settings, both trace flushes, deferred HCNAMES flush, scalar and both Pattern AutoSave drains) while `copyClear_backgroundSuspended()`. | CopyClear |
 | `filesystem_setFastDrain(on)` / `filesystem_fastDrainActive()` | Select/observe the Session 058 foreground fast-drain policy. Foreground-only, not reference-counted, no retained payload. Menu is the sole setter: it enables only after verified codec suspend and clears before resume. | Menu no-playback lifecycle |
 | `filesystem_status()` / `filesystem_ack()` | Operation status protocol. A direct Menu callback must snapshot its terminal result before acknowledging it; if it does not immediately post another filesystem request, it must acknowledge `DONE`/`ERROR` before releasing its UI owner so autonomous idle-only schedulers can run. | Preset/Menu |
 | `filesystem_requestLoad(type, slot, cb)` / `filesystem_requestSave(type, slot, cb)` | Async typed load/save. For `FS_FILE_KIT`, load is `Kit/NNN Name/kitset.kcg` plus instruments and save routes to the new Kit directory writer. For `FS_FILE_MORPH`, load/save remains legacy `.SND`. | Preset |

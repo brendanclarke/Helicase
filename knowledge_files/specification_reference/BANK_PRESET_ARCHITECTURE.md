@@ -104,6 +104,26 @@ VOICE-mask AutoSave field through the indexed setter.
 `bank_sceneMaskVoiceEditForScene(scene)` provide indexed access for boot
 restore (Autosave) and bankset load/save.
 
+**Copy/clear (Session 075).** The edit mask locks Scenes together for
+everything except the Pattern:
+
+- Pastes and clears of Scene children fan out through the **destination
+  Scene's own entry** (the active Scene's entry for VOICE/STEP/EFFECTS
+  pastes; the pressed Scene's entry for PERF Scene pastes, even when it is not
+  active): `copy instrument`, `copy kit`, `copy effect`, FX step pastes,
+  `clear fx`, `clear fx sequence`, the EFFECTS SEQ clear, the FX-lane part of
+  a pot clear, and `clear send`. `bank_sceneFanoutMask(scene)` returns the
+  Scene plus the present, layout-matching members of its entry; Effect
+  operations use `effects_fanoutMask()` with the same entry and the
+  same-type guard. Effect fan-out from a non-active origin now uses the
+  origin's own entry.
+- `copy scene` and `copy scene settings` do not fan out; the destination's
+  entry becomes the source's entry with the two Scenes' bits exchanged
+  (`bank_exchangeVoiceEditMask()`), then masks are revalidated.
+- `clear scene` and `clear scene settings` do not fan out and reset the
+  Scene's entry to itself (`bank_resetVoiceEditMaskToSelf()`).
+- Pattern pastes and clears never fan out.
+
 **Active Scene change:** Both `bank_setActiveSceneSlot()` and
 `bank_selectActiveSceneForEditMask()` call the invariant enforcer.
 
@@ -145,7 +165,6 @@ data, which lives in `pat_regions[16]` (168,304 bytes) in PatternData.
 | Target selections | Velocity target, LFO target × 2 pairs, per voice | byte tokens, 0xff = off |
 | MIDI routing | Channel and note per track | 7 tracks |
 | Scene Morph | Per-voice morph amount (0..255) | 6 values |
-| Scene Decimation | Global `srt` value | 1 byte |
 | Audio routing | Per-voice output assignment (0..5) | 6 bytes |
 | FX send | Per-voice send amount (0..127) | 6 bytes; the mixer reads the effective value (step override first) each block |
 | Fader mode | Per-voice `pre`/`pst`/`fx`/`xfd` (0..3) | 6 bytes; `xfd` (3) added in S074 (`SCENE_FADER_SETTING_MAX`) |
@@ -329,7 +348,7 @@ are NOT parameters of a swappable instrument in a voice slot. These live in
 | ID Range | Short Label | Per-Voice | Max | Apply Path | Status |
 |----------|-------------|-----------|-----|------------|--------|
 | 384–389 | 1vm..6vm | Yes | 127 (stored) / 255 (expanded) | Runtime morph overlay | Live |
-| 390 | srt | No (global) | 255 | `preset_applyVoiceDecimationAllRuntime()` | Live |
+| 390 | (retired `srt`) | — | — | none; `SCENE_MOD_TARGET_KIND_RETIRED` placeholder keeps later IDs fixed; pickers skip it, validation rejects it, old Pattern entries and LFO tokens do nothing | Retired (Session 075) |
 | 391 | (reserved) | — | — | — | — |
 | 392–397 | 1ou..6ou | Yes | 5 | `preset_applyVoiceAudioOutRuntime()` | Live (Session 070) |
 | 398–403 | 1fx..6fx | Yes | 127 | Effective send pulled by mixer each block | Live (Session 072 Step 5) |
@@ -467,7 +486,10 @@ for PERF display purposes, but it is not the source of truth.
 - Global settings (BPM, ext sync, etc.)
 - MIDI channel/note assignments
 - Sequencer runtime values
-- PERF display mirror of Scene settings (morph, decimation, routing)
+- PERF display mirror of Scene settings (morph, routing) and, since S075,
+  `PAR_EFFECT_MORPH` (`fxm`, the active Scene's Effect Morph, in the slot of
+  the retired `PAR_VOICE_DECIMATION_ALL`; refresh-only in Global apply,
+  synced by `preset_syncEffectMorphMirror()`)
 - the bus compressor page mirrors `PAR_BUS_COMP_MODE..SIDECHAIN` (ids
   58..61, S074). They are refreshed from the active Scene by
   `preset_syncBusCompMirrors()` and never serialized as Globals.
@@ -476,11 +498,11 @@ for PERF display purposes, but it is not the source of truth.
 `menu_tickGlobalApply()` and `menu_sendAllGlobals()` replay
 `menu_parseGlobalParam()` for every id from `PAR_BEGINNING_OF_GLOBALS` up,
 after a Settings Load or a legacy `.all` load. That range includes the PERF
-mirrors `PAR_VOICE1_MORPH..PAR_VOICE6_MORPH` and `PAR_VOICE_DECIMATION_ALL`,
-whose handlers write the mirrored (active-Scene) value into **every Scene of
-the VOICE edit mask** and mark AutoSave. So a Settings Load equalises
-per-voice Morph and `srt` across the mask. The legacy paths zero the mirrors
-first, so `srt` 0 would be written. The bus compressor ids avoid this by
+mirrors `PAR_VOICE1_MORPH..PAR_VOICE6_MORPH`, whose handlers write the
+mirrored (active-Scene) value into **every Scene of the VOICE edit mask** and
+mark AutoSave. So a Settings Load equalises per-voice Morph across the mask.
+(The `srt` part of O1 is gone since S075: `PAR_EFFECT_MORPH` in that slot is
+refresh-only.) The bus compressor ids avoid this by
 design: in `menu_parseGlobalParam()` they only refresh their mirrors. A fix
 for the older ids could use the same refresh-only pattern.
 

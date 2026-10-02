@@ -59,6 +59,7 @@
 #include "sequencer.h"
 #include "sequencerTimer.h"
 #include "PatternStackService.h"
+#include "copyClearSession.h"
 #include "EuklidGenerator.h"
 #include "SomGenerator.h"
 
@@ -1288,6 +1289,14 @@ boot_filesystem_done:
      * PatternStackService.c.
      */
     patSvc_init();
+
+    /*
+     * Initialize the S075 held-COPY owner after Pattern boot loading.
+     *
+     * Inputs: initialized Pattern/Scene state. Output: the bounded gesture
+     * queue and session ledger are ready before front-panel service begins.
+     */
+    copyClear_init();
 
     /* Initialise audio path: PLLI2S, GPIO, DMA circular streams, I2S.
     ** AFTER all blocking SD operations. From this point forward, SD

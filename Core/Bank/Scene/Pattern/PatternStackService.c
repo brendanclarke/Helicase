@@ -19,6 +19,7 @@
 #include "config.h"
 #include "filesystem.h"
 #include "menu.h"
+#include "copyClearSession.h"
 
 #include <string.h>
 
@@ -27,6 +28,7 @@
 #define PATSVC_STEP_MASK        0x03FFu
 #define PATSVC_OPERATION_MASK   0x3Fu
 #define PATSVC_POOL_CHUNKS      (PAT_STACK_SIZE * 8u)
+#define PATSVC_ALLOC_CHUNKS     PAT_POOL_ALLOC_CHUNKS
 #define PATSVC_POOL_BYTES       (PAT_STACK_SIZE * 32u)
 #define PATSVC_ADDRESS_COUNT    PAT_STEPS_PER_SCENE
 #define PATSVC_BULK_STEPS       8u
@@ -78,6 +80,15 @@ static uint8_t service_scene;
 static uint8_t service_open;
 static uint8_t service_handover;
 static uint8_t service_replace_pending;
+/*
+ * Exclusive copy/clear claim (S075; one byte, 0xFF means none).
+ *
+ * The claim closes service admission while the foreground owner writes one
+ * Scene's address/pool image. A claim on another Scene also holds handover so
+ * playback cannot adopt that Scene midway through a multi-step paste.
+ */
+#define PATSVC_NO_SCENE 0xFFu
+static uint8_t service_exclusive_scene = PATSVC_NO_SCENE;
 
 /*
  * Bulk barrier cursor state.
@@ -524,7 +535,8 @@ static uint16_t patSvc_largestFreeRun(const pat_scene_region_t *region)
 
     if (!region)
         return 0u;
-    for (chunk = 0u; chunk < PATSVC_POOL_CHUNKS; chunk++) {
+    /* S075: free-run searches stop below the permanent swap reserve. */
+    for (chunk = 0u; chunk < PATSVC_ALLOC_CHUNKS; chunk++) {
         if (!patSvc_bitmapGet(region, chunk) &&
             !patSvc_reservationGet(chunk)) {
             run++;
@@ -545,9 +557,9 @@ static uint16_t patSvc_findFreeRun(const pat_scene_region_t *region,
     uint16_t start;
     uint16_t i;
 
-    if (!region || chunks == 0u || chunks > PATSVC_POOL_CHUNKS)
+    if (!region || chunks == 0u || chunks > PATSVC_ALLOC_CHUNKS)
         return PAT_ADDR_SENTINEL;
-    for (start = 0u; (uint32_t)start + chunks <= PATSVC_POOL_CHUNKS;
+    for (start = 0u; (uint32_t)start + chunks <= PATSVC_ALLOC_CHUNKS;
          start++) {
         if (lower_only && (uint32_t)start + chunks > upper_chunk)
             break;
@@ -580,9 +592,9 @@ static uint16_t patSvc_findFreeRunReclaiming(
     uint16_t start;
     uint16_t i;
 
-    if (!region || chunks == 0u || chunks > PATSVC_POOL_CHUNKS)
+    if (!region || chunks == 0u || chunks > PATSVC_ALLOC_CHUNKS)
         return PAT_ADDR_SENTINEL;
-    for (start = 0u; (uint32_t)start + chunks <= PATSVC_POOL_CHUNKS;
+    for (start = 0u; (uint32_t)start + chunks <= PATSVC_ALLOC_CHUNKS;
          start++) {
         if (lower_only && (uint32_t)start + chunks > upper_chunk)
             break;
@@ -684,7 +696,7 @@ static uint8_t patSvc_relocateIndex(uint8_t scene, uint16_t address_index,
         return 0u;
     old_chunk = (uint16_t)(old_offset >> 2u);
     required = (uint16_t)logical_chunks + gap;
-    if (required > PATSVC_POOL_CHUNKS)
+    if (required > PATSVC_ALLOC_CHUNKS)
         return 0u;
     new_offset = patSvc_findFreeRun(region, required, old_chunk,
                                     lower_only);
@@ -756,7 +768,7 @@ static uint8_t patSvc_repairStep(uint8_t scene, uint16_t address_index,
     if (logical_chunks == 0u)
         return 0u;
     trailing_chunk = (uint16_t)((offset >> 2u) + logical_chunks);
-    if (trailing_chunk >= PATSVC_POOL_CHUNKS)
+    if (trailing_chunk >= PATSVC_ALLOC_CHUNKS)
         return 0u;
 
     /* The common case: reserve one free, unreserved trailing chunk in place. */
@@ -782,7 +794,7 @@ static uint8_t patSvc_repairStep(uint8_t scene, uint16_t address_index,
         if (required > PATSVC_POOL_CHUNKS)
             return 0u;
         for (new_offset = 0u;
-             (uint32_t)(new_offset >> 2u) + required <= PATSVC_POOL_CHUNKS;
+             (uint32_t)(new_offset >> 2u) + required <= PATSVC_ALLOC_CHUNKS;
              new_offset = (uint16_t)(new_offset + 4u)) {
             uint16_t base = (uint16_t)(new_offset >> 2u);
             uint8_t fits = 1u;
@@ -1090,7 +1102,7 @@ static uint8_t patSvc_drainQueue(void)
             patSvc_eventPayload(event));
         pat_scene_region_t *region = patSvc_region(service_scene);
         uint16_t used = patSvc_countUsed(region);
-        uint16_t free_chunks = (uint16_t)(PATSVC_POOL_CHUNKS - used);
+        uint16_t free_chunks = (uint16_t)(PATSVC_ALLOC_CHUNKS - used);
         uint16_t largest = patSvc_largestFreeRun(region);
 
         if (required == 0u || free_chunks < required) {
@@ -1150,7 +1162,7 @@ static uint8_t patSvc_submit(uint8_t scene, uint32_t event,
                 service_scene, operation, track, step,
                 patSvc_eventPayload(event));
             pat_scene_region_t *region = patSvc_region(service_scene);
-            uint16_t free_chunks = (uint16_t)(PATSVC_POOL_CHUNKS -
+            uint16_t free_chunks = (uint16_t)(PATSVC_ALLOC_CHUNKS -
                                               logical_chunks_used);
             uint16_t largest = patSvc_largestFreeRun(region);
 
@@ -1215,6 +1227,7 @@ void patSvc_init(void)
     service_open = 1u;
     service_handover = 0u;
     service_replace_pending = 0u;
+    service_exclusive_scene = PATSVC_NO_SCENE;
     bulk_op = PATSVC_OP_NONE;
     bulk_track = 0u;
     bulk_target = 0u;
@@ -1290,6 +1303,238 @@ void patSvc_finishSceneReplace(uint8_t scene)
 }
 
 /*
+ * Exclusive Pattern access for copy/clear (S075, spec §9.4).
+ *
+ * What: grants one caller sole write access to one Scene's Pattern region
+ * (address array, pool, bitmap, track settings) between begin and end. Begin
+ * records the claim first, then closes admission on the service Scene (the
+ * playback Scene) the same way a filesystem replacement does; it returns 1
+ * once the FIFO, the bulk barrier and reactive recovery have drained, and
+ * clears the positional reservation image so copy/clear may use every free
+ * chunk below the swap block. While the claim exists no queued edit, barrier,
+ * repair or reactive step touches any pool, and the handover branch of
+ * patSvc_tick() neither reopens admission nor adopts the claimed Scene.
+ * Why: copy/clear pastes and clears run over many ticks with the raw block API
+ * and must be the only writer, on any Scene (the active Scene may differ from
+ * the playback Scene). Inputs: a resident Scene. Outputs: begin returns 1 when
+ * the caller may write and 0 while it must call again next tick (or when a
+ * filesystem replacement or another claim is pending). A caller that gives up
+ * after a 0 still calls patSvc_endExclusive() to release the claim. End
+ * recounts the service Scene's occupancy, restarts the repair epoch (the
+ * reservation image is rebuilt once suspension ends), and reopens admission or
+ * resumes the handover. Clients: copyClearService.c. Affiliates:
+ * patSvc_prepareSceneReplace(), patSvc_finishSceneReplace(), patSvc_tick(),
+ * the raw block API in PatternData.h.
+ */
+uint8_t patSvc_beginExclusive(uint8_t scene)
+{
+    if (!scene_indexValid(scene) || service_replace_pending ||
+        (service_exclusive_scene != PATSVC_NO_SCENE &&
+         service_exclusive_scene != scene))
+        return 0u;
+    if (service_exclusive_scene == PATSVC_NO_SCENE)
+        service_exclusive_scene = scene;
+    if (service_open) {
+        service_open = 0u;
+        service_handover = 1u;
+    }
+    if (patSvc_queueCount() != 0u || bulk_op != PATSVC_OP_NONE ||
+        reactive_active)
+        return 0u;
+    patSvc_clearReservationImage();
+    return 1u;
+}
+
+void patSvc_endExclusive(uint8_t scene)
+{
+    if (service_exclusive_scene == PATSVC_NO_SCENE ||
+        scene != service_exclusive_scene)
+        return;
+    if (scene == service_scene) {
+        logical_chunks_used = patSvc_countUsed(patSvc_region(service_scene));
+        reactive_scan_cursor = 0u;
+        reactive_required = 0u;
+        reactive_active = 0u;
+        reservation_density_active = 1u;
+        patSvc_updateDensityLevel();
+    }
+    /* Every claim may have moved blocks: restart the repair epoch. */
+    tier1_scan_cursor = 0u;
+    service_exclusive_scene = PATSVC_NO_SCENE;
+    service_open = (uint8_t)(seq_activePattern == service_scene);
+    service_handover = (uint8_t)(!service_open);
+}
+
+/*
+ * Find the address entry that owns a block starting at one pool offset.
+ *
+ * Inputs: resident region and byte offset. Output: flat address index, or
+ * PATSVC_ADDRESS_COUNT when no entry references that offset (orphan bits).
+ * Scans all 896 entries; exclusive-holder helpers only.
+ */
+static uint16_t patSvc_ownerOfOffset(pat_scene_region_t *region,
+                                     uint16_t offset)
+{
+    uint16_t i;
+
+    for (i = 0u; i < PATSVC_ADDRESS_COUNT; i++) {
+        uint16_t entry = *patSvc_addressEntry(region, i);
+
+        if ((entry & PAT_ADDR_SPECIALS_BIT) != 0u &&
+            (entry & PAT_ADDR_OFFSET_MASK) == offset)
+            return i;
+    }
+    return PATSVC_ADDRESS_COUNT;
+}
+
+/*
+ * Move one owned block to a disjoint free run in publication order.
+ *
+ * Inputs: Scene, region, owning address index, old/new byte offsets (the two
+ * runs must not overlap) and the logical chunk count. Output: new bits set,
+ * bytes copied, entry published with the live trigger, old bits cleared and
+ * old bytes zeroed; layout-only AutoSave dirty mark and a relocation trace
+ * record. Musical content is unchanged.
+ */
+static void patSvc_exclusiveMove(uint8_t scene, pat_scene_region_t *region,
+                                 uint16_t address_index, uint16_t old_offset,
+                                 uint16_t new_offset, uint8_t chunks)
+{
+    uint16_t i;
+
+    for (i = 0u; i < chunks; i++)
+        patSvc_bitmapSet(region, (uint16_t)((new_offset >> 2u) + i));
+    memcpy(&region->pool[new_offset], &region->pool[old_offset],
+           (size_t)chunks * 4u);
+    patSvc_publishOffset(patSvc_addressEntry(region, address_index),
+                         new_offset);
+    for (i = 0u; i < chunks; i++)
+        patSvc_bitmapClear(region, (uint16_t)((old_offset >> 2u) + i));
+    memset(&region->pool[old_offset], 0, (size_t)chunks * 4u);
+    autosave_markNonSemanticPatternDirty(scene);
+    patternTrace_record(PAT_TRACE_STAGE_TIER2_RELOC, (uint8_t)(scene & 0x0Fu),
+                        patSvc_relocationValue(address_index, old_offset,
+                                               new_offset));
+}
+
+/* Nonzero when every swap-block chunk is free in the bitmap. */
+static uint8_t patSvc_swapChunksFree(const pat_scene_region_t *region)
+{
+    uint16_t i;
+
+    for (i = PATSVC_ALLOC_CHUNKS; i < PATSVC_POOL_CHUNKS; i++)
+        if (patSvc_bitmapGet(region, i))
+            return 0u;
+    return 1u;
+}
+
+/*
+ * Bounded sliding compaction for the exclusive holder (S075).
+ *
+ * What: one slide per call. Find the lowest free chunk f below the swap block
+ * and the first occupied chunk c above it; the block that starts at c moves
+ * down to f. When it fits in the gap (size <= c - f) it moves directly;
+ * otherwise it moves into the empty swap block and then down to f, so every
+ * move is write-new / publish / free-old into a disjoint run. Repeated calls
+ * leave every block packed from chunk 0 and all free space as one run just
+ * below the swap block. Why: a paste whose new block is larger than the old
+ * one needs a contiguous run of the new size while the old block still
+ * exists; the paste check guarantees enough total free space, and sliding
+ * compaction turns total free space into one run without ever exposing a
+ * partial block to playback. Inputs: the claimed Scene; the swap block must be
+ * empty for an overlapping slide. Output: 1 when a block moved, 0 when the
+ * pool is already packed or cannot move (swap block occupied, or an orphan
+ * run without an owning entry). Clients: copyClearService.c paste/clear
+ * place phases. Affiliates: patSvc_exclusiveMove(), PatternData.h raw API.
+ */
+uint8_t patSvc_exclusiveCompactStep(uint8_t scene)
+{
+    pat_scene_region_t *region = patSvc_region(scene);
+    uint16_t free_chunk;
+    uint16_t used_chunk;
+    uint16_t owner;
+    uint8_t chunks;
+
+    if (!region || scene != service_exclusive_scene)
+        return 0u;
+    for (free_chunk = 0u; free_chunk < PATSVC_ALLOC_CHUNKS; free_chunk++)
+        if (!patSvc_bitmapGet(region, free_chunk))
+            break;
+    for (used_chunk = (uint16_t)(free_chunk + 1u);
+         used_chunk < PATSVC_ALLOC_CHUNKS; used_chunk++)
+        if (patSvc_bitmapGet(region, used_chunk))
+            break;
+    if (used_chunk >= PATSVC_ALLOC_CHUNKS)
+        return 0u;
+    owner = patSvc_ownerOfOffset(region, (uint16_t)(used_chunk << 2u));
+    if (owner >= PATSVC_ADDRESS_COUNT)
+        return 0u;
+    chunks = patSvc_blockChunksAt(region, (uint16_t)(used_chunk << 2u), owner);
+    if (chunks == 0u)
+        return 0u;
+    if (chunks <= (uint16_t)(used_chunk - free_chunk)) {
+        patSvc_exclusiveMove(scene, region, owner,
+                             (uint16_t)(used_chunk << 2u),
+                             (uint16_t)(free_chunk << 2u), chunks);
+        return 1u;
+    }
+    if (!patSvc_swapChunksFree(region))
+        return 0u;
+    patSvc_exclusiveMove(scene, region, owner, (uint16_t)(used_chunk << 2u),
+                         PAT_POOL_SWAP_OFFSET, chunks);
+    patSvc_exclusiveMove(scene, region, owner, PAT_POOL_SWAP_OFFSET,
+                         (uint16_t)(free_chunk << 2u), chunks);
+    return 1u;
+}
+
+/*
+ * Empty the swap block before first use (S075).
+ *
+ * What: one call moves the first block that overlaps chunks
+ * PATSVC_ALLOC_CHUNKS..PATSVC_POOL_CHUNKS-1 (possible only in Patterns saved
+ * before S075) into a free run below the swap block. When no entry owns the
+ * occupied swap bits, those orphan bits are cleared and their bytes zeroed
+ * (nothing can reference them). Why: the swap block must be empty before the
+ * paste/clear engine or sliding compaction uses it. Inputs: the claimed
+ * Scene. Output: 1 moved (call again), 0 swap block empty, 2 an overlapping
+ * block cannot move (no run; the caller drops the job). Clients:
+ * copyClearService.c claim phase. Affiliates: patSvc_findFreeRun(),
+ * patSvc_exclusiveMove().
+ */
+uint8_t patSvc_exclusiveEvacuateSwapStep(uint8_t scene)
+{
+    pat_scene_region_t *region = patSvc_region(scene);
+    uint16_t i;
+
+    if (!region || scene != service_exclusive_scene)
+        return 0u;
+    if (patSvc_swapChunksFree(region))
+        return 0u;
+    for (i = 0u; i < PATSVC_ADDRESS_COUNT; i++) {
+        uint16_t entry = *patSvc_addressEntry(region, i);
+        uint16_t offset = (uint16_t)(entry & PAT_ADDR_OFFSET_MASK);
+        uint16_t new_offset;
+        uint8_t chunks;
+
+        if ((entry & PAT_ADDR_SPECIALS_BIT) == 0u)
+            continue;
+        chunks = patSvc_blockChunksAt(region, offset, i);
+        if (chunks == 0u ||
+            (uint32_t)(offset >> 2u) + chunks <= PATSVC_ALLOC_CHUNKS)
+            continue;
+        new_offset = patSvc_findFreeRun(region, chunks, 0u, 0u);
+        if (new_offset == PAT_ADDR_SENTINEL)
+            return 2u;
+        patSvc_exclusiveMove(scene, region, i, offset, new_offset, chunks);
+        return 1u;
+    }
+    for (i = PATSVC_ALLOC_CHUNKS; i < PATSVC_POOL_CHUNKS; i++)
+        patSvc_bitmapClear(region, i);
+    memset(&region->pool[PAT_POOL_SWAP_OFFSET], 0, PAT_POOL_SWAP_BYTES);
+    return 0u;
+}
+
+/*
  * Report whether queued Pattern mutations and target handover are quiescent.
  *
  * Output: nonzero only for the currently playing service Scene when no FIFO,
@@ -1298,7 +1543,8 @@ void patSvc_finishSceneReplace(uint8_t scene)
  */
 uint8_t patSvc_idle(void)
 {
-    return (uint8_t)(service_open && !service_handover &&
+    return (uint8_t)(service_open && service_exclusive_scene == PATSVC_NO_SCENE &&
+                     !service_handover &&
                      seq_activePattern == service_scene &&
                      patSvc_queueCount() == 0u &&
                      bulk_op == PATSVC_OP_NONE && !reactive_active);
@@ -1539,6 +1785,10 @@ void patSvc_tick(void)
         }
         if (service_replace_pending)
             return;
+        if (service_exclusive_scene != PATSVC_NO_SCENE) {
+            /* S075: do not reopen/adopt a Scene while copy/clear owns it. */
+            return;
+        }
         service_scene = seq_activePattern;
         logical_chunks_used = patSvc_countUsed(patSvc_region(service_scene));
         tier1_scan_cursor = 0u;
@@ -1610,6 +1860,16 @@ void patSvc_tick(void)
      * Session 069 deferred item.
      */
     if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)
+        return;
+
+    /*
+     * S075: the repair epoch (reservations, repair relocations) is Pattern
+     * maintenance and does not start while a copy/clear operation runs. The
+     * cursor is kept; queue drain, barriers and handover continue, so an
+     * already-queued edit completes cleanly. Affiliate:
+     * copyClear_backgroundSuspended().
+     */
+    if (copyClear_backgroundSuspended())
         return;
 
     /*

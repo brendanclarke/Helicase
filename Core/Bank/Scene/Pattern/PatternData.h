@@ -213,18 +213,146 @@ pat_step_specials_t pat_readStepSpecials(uint8_t scene_index,
                                          uint8_t track, uint8_t step);
 
 /*
- * Range operations for UI and generators. Clear operations reset address
- * entries; copy operations are deliberate no-ops in Session 062 because
- * duplicating pool blocks is deferred to the later copy-operations design.
- * Inputs are validated Scene/track/bar coordinates and invalid calls do no
- * work.
+ * Whole-track and whole-Pattern clear primitives (legacy direct form).
+ *
+ * Inputs are validated Scene/track coordinates; invalid calls do no work.
+ * Output: address entries reset with detach-before-free order. S075 removed
+ * the Session 062 no-op copy stubs (pat_copyTrack/Pattern/Bar) and the
+ * interim pat_copyStep(); every copy now runs through the raw block API below
+ * under the copy/clear exclusive claim (Core/Menu/CopyClear/).
  */
 void pat_clearTrack(uint8_t scene_index, uint8_t track);
 void pat_clearPattern(uint8_t scene_index);
-void pat_copyTrack(uint8_t scene_index, uint8_t src_track, uint8_t dst_track);
-void pat_copyPattern(uint8_t src_scene, uint8_t dst_scene);
-void pat_copyBar(uint8_t scene_index, uint8_t track, uint8_t src_bar,
-                 uint8_t dst_bar);
+
+/*
+ * Raw block API for the exclusive copy/clear holder (S075).
+ *
+ * Restriction: callers must hold patSvc_beginExclusive(scene) == 1 through
+ * patSvc_endExclusive(scene); no other pool writer runs in that window and
+ * TIM3/audio never calls these functions. Publication order is kept for every
+ * step: new bytes are written into unreferenced pool space, the complete
+ * address halfword is published in one PRIMASK store, and only then is the
+ * old run freed. PAT_RAW_BLOCK_MAX is the largest encoded block (2-byte
+ * header, flags, three specials, 63 automation entries, rounded to 33
+ * chunks); caller buffers of that size hold any block. Trigger policies:
+ * KEEP re-reads the live trigger bit inside the critical section (paste of
+ * automation/specials only), OFF publishes trigger clear, ON publishes trigger
+ * set (merge and replace pastes resolve the trigger before publishing).
+ */
+#define PAT_RAW_BLOCK_MAX   132u
+#define PAT_RAW_TRIGGER_KEEP 0u
+#define PAT_RAW_TRIGGER_OFF  1u
+#define PAT_RAW_TRIGGER_ON   2u
+
+/*
+ * Copy one live block into a caller buffer.
+ *
+ * Inputs: resident Scene/track/step and a PAT_RAW_BLOCK_MAX buffer.
+ * Output: block byte size (chunks*4) or 0 when the step holds no block;
+ * *entry_out (optional) always receives the live address entry, so the
+ * caller can read the trigger bit of a block-less step. Always the live
+ * source (spec: source reads are live).
+ */
+uint8_t pat_rawReadBlock(uint8_t scene_index, uint8_t track, uint8_t step,
+                         uint8_t out[PAT_RAW_BLOCK_MAX],
+                         uint16_t *entry_out);
+
+/*
+ * Allocated byte size of an encoded block (header count + flags), or 0 for
+ * NULL/oversized input.
+ */
+uint8_t pat_rawBlockBytes(const uint8_t *block);
+
+/*
+ * Decode a caller-held block.
+ *
+ * Inputs: block (NULL = no block), optional specials output, optional
+ * automation output and its capacity. Output: specials with defaults for
+ * absent fields; return value is the number of automation entries copied
+ * (or the encoded count when autos is NULL).
+ */
+uint8_t pat_rawDecode(const uint8_t *block, pat_step_specials_t *specials,
+                      pat_automation_entry_t *autos, uint8_t capacity);
+
+/*
+ * Encode a block into a caller buffer.
+ *
+ * Inputs: special flags/values and up to 63 automation entries (merge pastes
+ * drop entries past 63 before calling). Output: allocated byte size, or 0
+ * when the block would be empty (no specials and no automation) or invalid.
+ * The back-reference field is left zero; placement stamps it.
+ */
+uint8_t pat_rawEncode(uint8_t out[PAT_RAW_BLOCK_MAX], uint8_t flags,
+                      uint8_t note, uint8_t velocity, uint8_t probability,
+                      const pat_automation_entry_t *autos, uint8_t count);
+
+/*
+ * Place an encoded block below the swap block and publish it.
+ *
+ * Output: 1 after allocate/write/publish/free-old; 0 when no contiguous free
+ * run below PAT_POOL_SWAP_OFFSET exists (nothing changed; the caller
+ * compacts, or places via the swap block).
+ */
+uint8_t pat_rawPlace(uint8_t scene_index, uint8_t track, uint8_t step,
+                     const uint8_t *block, uint8_t trigger_mode);
+
+/*
+ * Place an encoded block in the permanent swap block and publish it.
+ *
+ * Output: 1 when the swap block was free; 0 when it is occupied. The step
+ * must later be moved below the reserve with pat_rawSwapReturn() before the
+ * exclusive claim ends (copy/clear never ends a claim with the swap block in
+ * use).
+ */
+uint8_t pat_rawPlaceViaSwap(uint8_t scene_index, uint8_t track, uint8_t step,
+                            const uint8_t *block, uint8_t trigger_mode);
+
+/*
+ * Move a swap-resident step below the reserve.
+ *
+ * Output: 1 after allocate/copy/publish (trigger kept) and the swap block is
+ * free again; 0 when the step is not in the swap block or no run exists yet.
+ */
+uint8_t pat_rawSwapReturn(uint8_t scene_index, uint8_t track, uint8_t step);
+
+/*
+ * Publish "no block" for one step: one PRIMASK store of trigger|0x3FFF using
+ * the trigger policy, then the old block is freed.
+ */
+void pat_rawPublishEmpty(uint8_t scene_index, uint8_t track, uint8_t step,
+                         uint8_t trigger_mode);
+
+/* Free chunks below the swap block (paste planning and compaction gate). */
+uint16_t pat_rawFreeChunks(uint8_t scene_index);
+
+/* Nonzero when every swap-block chunk is free. */
+uint8_t pat_rawSwapFree(uint8_t scene_index);
+
+/*
+ * Whole-Pattern copy and clear (Scene-level paste, `clear pattern`).
+ *
+ * Order for a literal copy: pat_rawRegionSilence(dst) publishes the sentinel
+ * into every destination entry (no entry references the pool any more), then
+ * pat_rawRegionCopyBody(src, dst) copies pool, bitmap, track settings and
+ * Pattern globals, then pat_rawRegionPublishSteps() publishes the source
+ * entries in slices (flat index = track*128 + step). For a retargeting copy
+ * the caller instead walks every index with pat_rawRegionCopiedBlock() to read
+ * the copied block, rewrites its targets (drop or rename, never grow), and
+ * pat_rawRegionPublishRewritten() overwrites the still-unreferenced copy in
+ * place, frees its tail chunks, then publishes the entry. A rewrite that would
+ * grow the block returns 0 and publishes the copied block unchanged.
+ * pat_rawRegionReset() rebuilds an empty region with sentinels written first.
+ */
+void pat_rawRegionSilence(uint8_t scene_index);
+void pat_rawRegionCopyBody(uint8_t src_scene, uint8_t dst_scene);
+void pat_rawRegionPublishSteps(uint8_t src_scene, uint8_t dst_scene,
+                               uint16_t first, uint16_t count);
+uint8_t pat_rawRegionCopiedBlock(uint8_t src_scene, uint8_t dst_scene,
+                                 uint16_t index,
+                                 uint8_t out[PAT_RAW_BLOCK_MAX]);
+uint8_t pat_rawRegionPublishRewritten(uint8_t src_scene, uint8_t dst_scene,
+                                      uint16_t index, const uint8_t *block);
+void pat_rawRegionReset(uint8_t scene_index);
 
 /*
  * Menu synchronization and resident Pattern parameter setters.

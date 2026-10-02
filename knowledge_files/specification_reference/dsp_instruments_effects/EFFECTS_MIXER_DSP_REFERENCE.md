@@ -108,9 +108,11 @@ Policy).
 1. **Render** (`instrumentManager_calcSlotSyncBlock()`): 32 pre-volume int16
    samples.
 2. **Decimate** (`mixer_decimateBlock()`): a sample-and-hold counter adds
-   `rate[slot] × rate[6]` per sample and takes a new sample when it passes
-   1.0. `rate[slot]` comes from the instrument's `instrument_decimation`
-   (`valueShaperI2F(v, −0.7)`); `rate[6]` is the Scene-wide decimation. At
+   `rate[slot]` per sample and takes a new sample when it passes 1.0.
+   `rate[slot]` comes from the instrument's `instrument_decimation`
+   (`valueShaperI2F(v, −0.7)`). The Scene-wide multiplier `rate[6]` (global
+   `srt`) was removed in S075; `mixer_decimation_rate[]` has six entries, and
+   a Scene at the former neutral 127 is bit-identical (×1.0f is exact). At
    rate 1.0 every sample passes (the loop still runs: the constant-CPU rule
    and audit item 11).
 3. **Fader gains** (`mixer_faderGains()`):

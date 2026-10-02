@@ -74,6 +74,7 @@
 #include "presetManager.h"
 #include "ParameterArray.h"
 #include "menu.h"
+#include "copyClearSession.h"
 #include "SampleMemory.h"
 #include "sequencer.h"
 #include "PatternData.h"
@@ -207,6 +208,12 @@ typedef enum {
     FS_NAME_CACHE_SCENE,
     FS_NAME_CACHE_BANK,
     FS_NAME_CACHE_PATTERN,
+    /*
+     * S075: the array is lent to copy/clear as working storage
+     * (filesystem_borrowNameCacheScratch()); no browser accessor treats this
+     * domain as loaded, so Load/Save reloads its index on the next entry.
+     */
+    FS_NAME_CACHE_COPYCLEAR,
     /* Legacy tag retained for compatibility checks; HCNAMES storage is now dedicated. */
     FS_NAME_CACHE_HCNAMES,
     /* Rebuild-chain selector only: write the retained Bank cache directly.
@@ -343,6 +350,8 @@ typedef enum {
     FS_INTERNAL_OP_LOAD_HCNAMES_SCENE,
     FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE,
     FS_INTERNAL_OP_UPDATE_HCNAMES_PATTERN,
+    /* S075: copy/clear end-of-operation name/source overlay (remap table). */
+    FS_INTERNAL_OP_UPDATE_HCNAMES_COPY,
     FS_INTERNAL_OP_LOAD_KIT,
     FS_INTERNAL_OP_LOAD_KIT_MORPH,
     FS_INTERNAL_OP_LOAD_SCENE,
@@ -1662,6 +1671,8 @@ static uint8_t filesystem_patternHeaderValid(const uint8_t *header,
  * Menu and Preset access them only through filesystem accessors.
  */
 static fs_name_cache_kind_t fs_list_cache_kind = FS_NAME_CACHE_NONE;
+/* S075: nonzero while copy/clear holds fs_list_cache_name (1 B SRAM). */
+static uint8_t fs_name_cache_borrowed;
 static instrument_type_t fs_list_cache_type = INSTRUMENT_TYPE_UNKNOWN;
 static uint16_t fs_list_cache_count;
 static uint8_t op_instrument_load_destination_slot = 0u;
@@ -1742,11 +1753,50 @@ static void filesystem_clearNameCacheStorage(void)
      * Inputs: callers select a new cache domain. Output: index/HCNAMES rows
      * are cleared without modifying the separate typed stage. Affiliates:
      * HCNAMES, `.hcindex`, menu browse state machines, and typed load stages.
+     *
+     * S075: while the array is lent to copy/clear it is not a browser cache;
+     * a disposal request (Menu lifecycle, a refused request's cleanup) must
+     * not wipe the working storage, so it is ignored. The lender's return
+     * path clears the array after it has released the loan.
      */
+    if (fs_name_cache_borrowed)
+        return;
     fs_list_cache_kind = FS_NAME_CACHE_NONE;
     fs_list_cache_type = INSTRUMENT_TYPE_UNKNOWN;
     fs_list_cache_count = 0u;
     memset(fs_list_cache_name, 0, sizeof(fs_list_cache_name));
+}
+
+_Static_assert(FS_HCNAMES_ROW_COUNT == FS_RESIDENT_NAMES_ROW_COUNT,
+               "public HCNAMES row count must match the register");
+_Static_assert(sizeof(fs_list_cache_name) == FS_NAME_SCRATCH_BYTES,
+               "copy/clear scratch size must match the name cache");
+
+/*
+ * Lend the 9,000 B name cache to copy/clear as working storage (S075).
+ *
+ * Contract in filesystem.h. Borrow refuses while the facade is not idle (an
+ * index read or HCNAMES transaction may be using the array) or while already
+ * lent; otherwise the array is cleared, tagged FS_NAME_CACHE_COPYCLEAR and
+ * handed out. Return clears it again (domain NONE) so no stale scratch bytes
+ * can ever be read as names.
+ */
+uint8_t *filesystem_borrowNameCacheScratch(void)
+{
+    if (status != FS_STATUS_IDLE || fs_name_cache_borrowed)
+        return 0;
+    filesystem_clearNameCacheStorage();
+    fs_list_cache_kind = FS_NAME_CACHE_COPYCLEAR;
+    fs_name_cache_borrowed = 1u;
+    return (uint8_t *)fs_list_cache_name;
+}
+
+void filesystem_returnNameCacheScratch(void)
+{
+    if (!fs_name_cache_borrowed)
+        return;
+    fs_name_cache_borrowed = 0u;
+    filesystem_clearNameCacheStorage();
 }
 
 /*
@@ -1773,6 +1823,9 @@ static void filesystem_clearInstrumentCacheStorage(void)
  */
 static void filesystem_prepareLibraryNameCache(fs_name_cache_kind_t kind)
 {
+    /* S075: never retag the array while copy/clear holds it. */
+    if (fs_name_cache_borrowed)
+        return;
     filesystem_clearNameCacheStorage();
     fs_list_cache_kind = kind;
     fs_list_cache_count = (kind == FS_NAME_CACHE_KIT)
@@ -3518,6 +3571,7 @@ static const char *filesystem_errorPrefix(fs_internal_op_t op)
     case FS_INTERNAL_OP_UPDATE_HCNAMES_KIT:    return "HNkU";
     case FS_INTERNAL_OP_LOAD_HCNAMES_SCENE:    return "HNsL";
     case FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE:  return "HNsU";
+    case FS_INTERNAL_OP_UPDATE_HCNAMES_COPY:   return "HNcU";
     case FS_INTERNAL_OP_LOAD_KIT:              return "KitL";
     case FS_INTERNAL_OP_LOAD_KIT_MORPH:        return "KMrL";
     case FS_INTERNAL_OP_LOAD_SCENE:            return "ScnL";
@@ -6400,6 +6454,58 @@ static void filesystem_cacheCurrentResidentPatternName(void)
     }
 }
 
+/*
+ * Overlay copy/clear identity changes onto the freshly read register (S075).
+ *
+ * What: applies the session's row remap (destination row <- source row) from
+ * the borrowed name buffer to the HCNAMES mirror and source register, using
+ * a copy of the original rows so chained or swapped pastes resolve to the
+ * pre-operation names. Copied rows take the source's name and source token;
+ * their refreshed flag is cleared so the boot reader never reloads a library
+ * object over pasted content (spec §9.10). Instrument type tokens are
+ * formatted from the resident slot and follow automatically. Rows changed only
+ * by clears already had their refreshed flag cleared in RAM and are written
+ * as they are (names kept on clear, user).
+ * Inputs: remap[161] at offset 0 of the borrowed buffer (0xFF = unchanged).
+ * Scratch: original names at offset 256 (1,449 B) and original sources at
+ * offset 1,705 (322 B) of the same buffer. Output: mirror and register rows;
+ * the shared writer then rewrites `.hcnamtmp` and swaps it in. Caller:
+ * filesystem_residentNames_tick() phases 3 and 7.
+ */
+#define FS_COPY_REMAP_OFFSET        0u
+#define FS_COPY_NAMES_OFFSET        256u
+#define FS_COPY_SOURCES_OFFSET      (FS_COPY_NAMES_OFFSET + \
+                                     sizeof(hcnames_name_mirror))
+_Static_assert(FS_COPY_SOURCES_OFFSET + sizeof(fs_resident_source) <=
+                   FS_NAME_SCRATCH_BYTES,
+               "copy/clear HCNAMES scratch must fit the name buffer");
+static void filesystem_cacheCopyClearRemap(void)
+{
+    uint8_t *scratch = (uint8_t *)fs_list_cache_name;
+    const uint8_t *remap = &scratch[FS_COPY_REMAP_OFFSET];
+    char (*names)[STORAGE_KIT_DISPLAY_NAME_LEN + 1u] =
+        (char (*)[STORAGE_KIT_DISPLAY_NAME_LEN + 1u])
+            (void *)&scratch[FS_COPY_NAMES_OFFSET];
+    uint16_t *sources = (uint16_t *)(void *)&scratch[FS_COPY_SOURCES_OFFSET];
+    uint16_t row;
+
+    if (!fs_name_cache_borrowed)
+        return;
+    memcpy(names, hcnames_name_mirror, sizeof(hcnames_name_mirror));
+    memcpy(sources, fs_resident_source, sizeof(fs_resident_source));
+    for (row = 0u; row < FS_RESIDENT_NAMES_ROW_COUNT; row++) {
+        uint8_t from = remap[row];
+
+        if (from == 0xFFu || from >= FS_RESIDENT_NAMES_ROW_COUNT ||
+            from == row)
+            continue;
+        filesystem_cacheResidentName(row, names[from]);
+        (void)filesystem_setResidentSource(
+            row, (uint16_t)(sources[from] & FS_RESIDENT_SOURCE_VALUE_MASK));
+        (void)filesystem_clearResidentRefreshed(row);
+    }
+}
+
 /* Hand a completed root Pattern payload to the shared HCNAMES transaction.
  * Inputs: op_pattern_scene/display/source and the root Pattern owner. Output:
  * the appended resident row is published through the normal read/merge/temp/
@@ -6477,7 +6583,8 @@ static void filesystem_residentNames_tick(void)
         current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT ||
         current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_KIT ||
         current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE ||
-        current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_PATTERN);
+        current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_PATTERN ||
+        current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_COPY);
     fs_hcnames_probe_result_t probe_result;
 
     /*
@@ -6610,6 +6717,9 @@ static void filesystem_residentNames_tick(void)
             filesystem_cacheCurrentResidentSceneChildNames();
         } else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_PATTERN) {
             filesystem_cacheCurrentResidentPatternName();
+        } else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_COPY) {
+            /* S075: apply the copy/clear row remap (borrowed buffer). */
+            filesystem_cacheCopyClearRemap();
         } else
             filesystem_cacheCurrentResidentInstrumentNames();
         /* The source image was read successfully, but the writer below must
@@ -6831,6 +6941,9 @@ static void filesystem_residentNames_tick(void)
             filesystem_cacheCurrentResidentSceneChildNames();
         } else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_PATTERN) {
             filesystem_cacheCurrentResidentPatternName();
+        } else if (current_op == FS_INTERNAL_OP_UPDATE_HCNAMES_COPY) {
+            /* S075: apply the copy/clear row remap (borrowed buffer). */
+            filesystem_cacheCopyClearRemap();
         } else
             filesystem_cacheCurrentResidentInstrumentNames();
         op_file_ready = false;
@@ -16515,7 +16628,6 @@ static void filesystem_initSceneStage(filesystem_scene_stage_t *stage)
         return;
     memset(stage, 0, sizeof(*stage));
     scene_effectRecordDefaults(&stage->effect);
-    stage->settings.voice_decimation_all = 127u;
     for (track = 0u; track < NUM_TRACKS; track++) {
         stage->settings.midi_channel[track] = (uint8_t)(track + 1u);
         stage->settings.midi_note[track] = MIDI_DEFAULT_TRIGGER_NOTE;
@@ -17123,42 +17235,39 @@ static uint8_t filesystem_nextScenesetLine(char *dst, uint16_t cap,
         return filesystem_formatAssignmentCsvU8Line(
             dst, cap, "voice_morph_amount",
             scene->settings.voice_morph_amount, INSTRUMENT_SLOT_COUNT);
+    /* S075: line 4 (voice_decimation_all) is no longer written. */
     case 4u:
-        return filesystem_formatAssignmentU16Line(
-            dst, cap, "voice_decimation_all",
-            scene->settings.voice_decimation_all);
-    case 5u:
         return filesystem_formatAssignmentCsvU8Line(
             dst, cap, "midi_channel", scene->settings.midi_channel,
             NUM_TRACKS);
-    case 6u:
+    case 5u:
         return filesystem_formatAssignmentCsvU8Line(
             dst, cap, "midi_note", scene->settings.midi_note, NUM_TRACKS);
-    case 7u:
+    case 6u:
         return filesystem_formatAssignmentCsvU8Line(
             dst, cap, "audio_out", scene->settings.audio_out,
             INSTRUMENT_SLOT_COUNT);
-    case 8u:
+    case 7u:
         return filesystem_formatAssignmentCsvU8Line(
             dst, cap, "fx_send_amount", scene->settings.fx_send_amount,
             INSTRUMENT_SLOT_COUNT);
-    case 9u:
+    case 8u:
         return filesystem_formatAssignmentCsvU8Line(
             dst, cap, "fader_setting", scene->settings.fader_setting,
             INSTRUMENT_SLOT_COUNT);
-    case 10u:
+    case 9u:
         return filesystem_formatAssignmentU16Line(
             dst, cap, "effect_morph_amount",
             scene->settings.effect_morph_amount);
+    case 10u:
     case 11u:
     case 12u:
-    case 13u:
-    case 14u: {
+    case 13u: {
         /*
          * S074 bus compressor: one line per field in enum order. The shared
          * storageTypes key table keeps writer and parser spellings identical.
          */
-        const uint8_t field = (uint8_t)(op_write_line_index - 11u);
+        const uint8_t field = (uint8_t)(op_write_line_index - 10u);
 
         return filesystem_formatAssignmentU16Line(
             dst, cap, storage_busCompKey(field),
@@ -25425,7 +25534,27 @@ void filesystem_tick(void)
      * the trace remains behind settings because it is diagnostic-only.
      * Affiliates: both autonomous completion callbacks and the trace scheduler.
      */
-    if (status == FS_STATUS_IDLE)
+    /*
+     * S075 copy/clear suspension (spec §9.2).
+     *
+     * What: while a copy or clear operation runs (from its first copy object
+     * press until every paste, clear, apply and name write has finished), no
+     * background writer is admitted: settings.cfg, both trace flushes, the
+     * deferred Load/Save HCNAMES flush (it would also use the borrowed 9 kB
+     * name buffer), scalar AutoSave, and both Pattern AutoSave drains. A
+     * writer already running finishes normally; nothing is pre-empted. While
+     * suspended, the scalar writer is treated like the Load/Save page guard so
+     * its first drain afterwards uses the continuation deadline.
+     * Why: user requirement; it also frees the name buffer for copy/clear.
+     * Inputs: copyClear_backgroundSuspended(). Output: scheduler admission
+     * only; dirty marks keep accumulating and are written afterwards.
+     * Affiliates: copyClearService.c, patSvc_tick() repair gate.
+     */
+    const uint8_t cc_suspended = copyClear_backgroundSuspended();
+
+    if (cc_suspended)
+        fs_autosave_page_suppressed = 1u;
+    if (status == FS_STATUS_IDLE && !cc_suspended)
         filesystem_settingsWriterSchedule_tick();
     /*
      * Persist a pending diagnostic batch before an eligible AutoSave drain
@@ -25444,10 +25573,10 @@ void filesystem_tick(void)
      * Affiliates: filesystem_autosaveTraceFlushSchedule_tick(),
      * filesystem_autosaveWriterSchedule_tick(), and AutosaveTrace.c.
      */
-    if (status == FS_STATUS_IDLE)
+    if (status == FS_STATUS_IDLE && !cc_suspended)
         filesystem_autosaveTraceFlushSchedule_tick();
     /* PatternTrace is diagnostic-only and runs behind the existing trace gate. */
-    if (status == FS_STATUS_IDLE)
+    if (status == FS_STATUS_IDLE && !cc_suspended)
         filesystem_patternTraceFlushSchedule_tick();
     /*
      * Give deferred Kit/Instrument HCNAMES persistence priority over AutoSave.
@@ -25462,7 +25591,8 @@ void filesystem_tick(void)
      * not claim the facade. Affiliates: menu.h's deferred HCNAMES bridge,
      * menu_residentNameScratchFlushComplete(), and AutoSave scheduling below.
      */
-    if (status == FS_STATUS_IDLE && menu_hasResidentNameDirtyMask())
+    if (status == FS_STATUS_IDLE && !cc_suspended &&
+        menu_hasResidentNameDirtyMask())
         menu_triggerDeferredHcnamesFlush();
     /*
      * Refill the shared elapsed-time CPU budget before any budgeted
@@ -25484,15 +25614,15 @@ void filesystem_tick(void)
      * Why: the trace's J/I batch must become durable before a long first drain
      * can be interrupted by power removal. Affiliate: the scheduler above.
      */
-    if (status == FS_STATUS_IDLE)
+    if (status == FS_STATUS_IDLE && !cc_suspended)
         filesystem_autosaveWriterSchedule_tick();
     /* Pattern is the final background claimant after scalar AutoSave work. */
-    if (status == FS_STATUS_IDLE)
+    if (status == FS_STATUS_IDLE && !cc_suspended)
         filesystem_autosavePatternDrainSchedule_tick();
     /* Non-semantic Pattern is the final background claimant after semantic
      * Pattern AutoSave work; it runs only when no higher-priority work is
      * pending. */
-    if (status == FS_STATUS_IDLE)
+    if (status == FS_STATUS_IDLE && !cc_suspended)
         filesystem_autosaveNonSemanticPatternDrainSchedule_tick();
     if (status != FS_STATUS_BUSY) return;
 
@@ -25543,6 +25673,7 @@ void filesystem_tick(void)
     case FS_INTERNAL_OP_LOAD_HCNAMES_SCENE:
     case FS_INTERNAL_OP_UPDATE_HCNAMES_SCENE:
     case FS_INTERNAL_OP_UPDATE_HCNAMES_PATTERN:
+    case FS_INTERNAL_OP_UPDATE_HCNAMES_COPY:
         filesystem_residentNames_tick();
         break;
     case FS_INTERNAL_OP_LOAD_KIT:
@@ -25777,6 +25908,16 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     const char *boot_code;
 
     if (status == FS_STATUS_BUSY) return false;
+    /*
+     * S075: while copy/clear holds the 9 kB name buffer, no operation that
+     * could read or write browser names may start; only the copy/clear name
+     * write itself is admitted. Callers see the same refusal as a busy
+     * facade and retry; the loan lasts only until queued copy/clear work and
+     * its name write have finished. Affiliate:
+     * filesystem_borrowNameCacheScratch().
+     */
+    if (fs_name_cache_borrowed && op != FS_INTERNAL_OP_UPDATE_HCNAMES_COPY)
+        return false;
     /*
      * Arm before publishing BUSY so the complete operation owns its code.
      *
@@ -28660,7 +28801,6 @@ static void filesystem_bootReaderEmptyScene(uint8_t scene_index)
     if (!scene)
         return;
     memset(scene, 0, sizeof(*scene));
-    scene->settings.voice_decimation_all = 127u;
     /* S074: emptied Scenes use the same bus compressor defaults as fresh ones. */
     scene_busCompDefaults(&scene->settings);
     for (track = 0u; track < NUM_TRACKS; track++) {
@@ -30340,6 +30480,37 @@ bool filesystem_requestLoadResidentSceneName(uint8_t scene_index,
         return false;
     }
     return true;
+}
+
+/*
+ * Copy/clear identity publication (S075; contract in filesystem.h).
+ *
+ * filesystem_identityRow() maps one identity class/Scene/slot to its fixed
+ * row through the private row helpers. filesystem_requestCopyResidentNames()
+ * starts the shared HCNAMES update transaction with the remap overlay; unlike
+ * the other update requests it never clears the name cache on a refused
+ * start, because the cache is the borrowed buffer holding the remap.
+ */
+uint16_t filesystem_identityRow(fs_identity_row_class_t cls, uint8_t scene,
+                                uint8_t slot)
+{
+    switch (cls) {
+    case FS_ROW_SCENE:      return filesystem_residentSceneRow(scene);
+    case FS_ROW_KIT:        return filesystem_residentKitRow(scene);
+    case FS_ROW_INSTRUMENT: return filesystem_residentInstrumentRow(scene, slot);
+    case FS_ROW_PATTERN:    return filesystem_residentPatternRow(scene);
+    case FS_ROW_EFFECT:     return filesystem_residentEffectRow(scene);
+    default:                return FS_RESIDENT_NAMES_ROW_COUNT;
+    }
+}
+
+bool filesystem_requestCopyResidentNames(fs_completion_cb_t cb)
+{
+    if (status == FS_STATUS_BUSY || !fs_name_cache_borrowed)
+        return false;
+    filesystem_prepareResidentNamesCache();
+    return filesystem_start(FS_INTERNAL_OP_UPDATE_HCNAMES_COPY,
+                            FS_FILE_SETTINGS, 0u, cb);
 }
 
 bool filesystem_requestUpdateResidentSceneNames(

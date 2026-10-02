@@ -12,10 +12,9 @@
  * Scene target metadata.
  *
  * Inputs: none at runtime; this immutable table defines the Scene-target
- * namespace. Output: the table order is also picker order. Per-voice Morph
- * targets intentionally come before global Scene Decimation so the velocity
- * list does not show voice-local instrument_decimation "srt" immediately
- * beside Scene Decimation "srt" after the voice descriptor portion.
+ * namespace. Output: the table order is also picker order. Row 6 is the
+ * retired `srt` placeholder (S075); its ID stays reserved so later IDs do not
+ * move.
  */
 static const scene_mod_target_descriptor_t scene_mod_targets[] = {
     { SCENE_MOD_TARGET_ID(0u), SCENE_MOD_TARGET_KIND_VOICE_MORPH, 0u,
@@ -42,10 +41,8 @@ static const scene_mod_target_descriptor_t scene_mod_targets[] = {
       0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
       SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "6 Morph", "6vm" },
-    { SCENE_MOD_TARGET_ID(6u), SCENE_MOD_TARGET_KIND_DECIMATION_ALL, 0xffu,
-      0u, 127u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
-      SCENE_MOD_TARGET_USE_AUTOMATION,
-      "Scene", "SampleRt", "srt" },
+    { SCENE_MOD_TARGET_ID(6u), SCENE_MOD_TARGET_KIND_RETIRED, 0xffu,
+      0u, 0u, 0u, "Scene", "--------", "---" },
     { SCENE_MOD_TARGET_ID(7u), SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY, 5u,
       0u, 127u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
       SCENE_MOD_TARGET_USE_AUTOMATION,
@@ -213,6 +210,41 @@ uint16_t sceneModTarget_voiceMorphId(uint8_t voice_slot)
             return scene_mod_targets[i].id;
         }
     }
+    return INSTRUMENT_PARAM_INVALID;
+}
+
+/*
+ * Resolve the Scene target ID of Effect Morph `fxm` (S075).
+ *
+ * Output: the canonical ID found by kind, so callers do not depend on table
+ * order. Client: Menu's pot-clear target resolver.
+ */
+uint16_t sceneModTarget_effectMorphId(void)
+{
+    uint8_t i;
+
+    for (i = 0u; i < SCENE_MOD_TARGET_COUNT; i++)
+        if (scene_mod_targets[i].kind == SCENE_MOD_TARGET_KIND_EFFECT_MORPH)
+            return scene_mod_targets[i].id;
+    return INSTRUMENT_PARAM_INVALID;
+}
+
+/*
+ * Resolve the generated slot-6/track-7 decay target (S075).
+ *
+ * Output: the canonical Scene target ID for the generated kit setting, or
+ * INSTRUMENT_PARAM_INVALID when the immutable target table does not contain
+ * it. Client: Menu's clear-mode pot resolver; keeping the lookup here avoids
+ * exposing the append-only Scene target row number to Menu.
+ */
+uint16_t sceneModTarget_slot6DecayId(void)
+{
+    uint8_t i;
+
+    for (i = 0u; i < SCENE_MOD_TARGET_COUNT; i++)
+        if (scene_mod_targets[i].kind ==
+            SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY)
+            return scene_mod_targets[i].id;
     return INSTRUMENT_PARAM_INVALID;
 }
 

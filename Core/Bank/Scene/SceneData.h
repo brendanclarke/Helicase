@@ -172,14 +172,6 @@ typedef struct {
      */
     uint8_t voice_morph_amount[INSTRUMENT_SLOT_COUNT];
     /*
-     * Scene-level global sample-rate decimation, 0..127.
-     *
-     * This is PERF `srt`, stored once per Scene. It is intentionally separate
-     * from voice-local instrument_decimation descriptor rows, which are stored
-     * inside each instrument slot's descriptor images.
-     */
-    uint8_t voice_decimation_all;
-    /*
      * Per-voice Scene mix settings.
      *
      * audio_out is retained per instrument slot in the current mixer route
@@ -392,16 +384,14 @@ void scene_setTrackMidiNote(uint8_t scene_index, uint8_t track, uint8_t note);
  */
 uint8_t scene_getTrackMidiNote(uint8_t scene_index, uint8_t track);
 /*
- * Store the two Scene-wide scalar settings through their retained owner.
+ * Store the Scene-wide Morph amount through its retained owner.
  *
- * Inputs: resident Scene plus 0..255 Morph or normalized 0..127 decimation.
- * Outputs: changed storage is committed before its named Autosave bit; equal
- * values and invalid Scenes do nothing. Runtime Morph/decimation apply remains
- * Preset-owned. Why: callers must not directly assign these serialized fields.
- * Affiliates: preset_morphScene() and preset_setVoiceDecimationAll().
+ * Inputs: resident Scene plus a 0..255 amount. Outputs: changed storage is
+ * committed before its named AutoSave bit; equal values and invalid Scenes do
+ * nothing. Runtime Morph apply remains Preset-owned. S075 removed the former
+ * global decimation setter with the parameter.
  */
 void scene_setMorphAmount(uint8_t scene_index, uint8_t amount);
-void scene_setVoiceDecimationAll(uint8_t scene_index, uint8_t value);
 /*
  * Scene-retained per-slot Morph accessors.
  *
@@ -519,5 +509,49 @@ uint8_t scene_busCompClamp(uint8_t field, uint8_t value);
 void scene_setBusCompSetting(uint8_t scene_index, uint8_t field,
                              uint8_t value);
 uint8_t scene_getBusCompSetting(uint8_t scene_index, uint8_t field);
+
+/*
+ * Whole-settings defaults and commit for copy/clear (S075).
+ *
+ * scene_settingsDefaults(): the settings of a fresh Scene (as Scene Load's
+ * stage defaults: MIDI channel track+1, note MIDI_DEFAULT_TRIGGER_NOTE,
+ * default audio route per slot, FX send 0, fader pre, Morph amounts 0, Effect
+ * Morph 0, bus compressor off/48/48/off). scene_commitSettings(): copies a
+ * complete settings image into one Scene field by field through the
+ * change-aware setters, so every changed byte marks its own AutoSave cell and
+ * the card-clean bit; no runtime apply (Preset owns that). Why: `copy scene
+ * settings`, `copy scene`, `clear scene` and `clear scene settings` replace
+ * all `sceneset.scg` fields without a second writer of retained Scene data.
+ * Inputs: Scene index and a source image (which may be another Scene's live
+ * settings). Output: nonzero when any byte changed. Clients: copyOps.c,
+ * clearOps.c. Affiliates: Autosave Scene cells, preset_applySceneSettings().
+ */
+void scene_settingsDefaults(scene_settings_t *out);
+uint8_t scene_commitSettings(uint8_t scene_index, const scene_settings_t *src);
+
+/*
+ * Reset one Scene's Kit to the fresh-Scene Kit (S075, `clear scene` on a
+ * Scene that is not active).
+ *
+ * Output: the six slots hold the default types (DRM, DRM, DRM, SNR, CYM, HAT)
+ * with descriptor defaults, the slot-6/track-7 decay pair is 0, the whole Kit
+ * is marked for AutoSave and the card-clean bit is cleared. Never called for
+ * the active Scene (its Kit is kept, user B11); no runtime apply. Client:
+ * clearOps.c.
+ */
+void scene_resetKitToDefaults(uint8_t scene_index);
+
+/*
+ * Replace one Scene's whole Kit (S075, `copy kit` and `copy scene`).
+ *
+ * What: copies the six Instrument slots and the Kit settings (including the
+ * slot-6/track-7 decay pair) from a resident source Kit, marks the whole Kit
+ * for AutoSave and clears the card-clean bit. Why: SceneData is the only
+ * writer of retained Scene data; copy/clear must not assign scene_t fields
+ * itself. Inputs: destination Scene and a source Kit (another Scene's live
+ * Kit). Output: nonzero when committed. No runtime apply and no Bank-present
+ * change (the caller owns both). Client: copyOps.c.
+ */
+uint8_t scene_commitKit(uint8_t scene_index, const kit_t *kit);
 
 #endif

@@ -727,23 +727,6 @@ static void preset_syncSceneMorphMirrors(const scene_t *scene)
             scene->settings.voice_morph_amount[slot];
 }
 
-void preset_applyVoiceDecimationAllRuntime(uint8_t value)
-{
-    /*
-     * Apply the Scene-wide decimation multiplier to the mixer runtime.
-     *
-     * Inputs: retained PERF `srt` value in the existing 0..127 menu domain.
-     * Output: mixer_decimation_rate[6] receives the same tapered value used by
-     * the legacy VOICE_DECIMATION_ALL MIDI CC path. This stays separate from
-     * preset_setVoiceDecimationAll() so Scene apply can mirror already-retained
-     * settings without pretending the user edited the parameter again.
-     */
-    if (value > 127u)
-        value = 127u;
-    mixer_decimation_rate[INSTRUMENT_SLOT_COUNT] =
-        valueShaperI2F(value, -0.7f);
-}
-
 /* -----------------------------------------------------------------------
 ** preset_init — reset Preset async state and initialize Scene-owned morph
 ** application helpers. Filesystem mount is still handled by asyncfatfs.
@@ -1266,7 +1249,7 @@ void preset_applySceneSettings(uint8_t scene_index)
      * Apply immediate Scene-wide settings that still have legacy mirrors.
      *
      * Inputs: active Scene index. Outputs: flat PERF mirrors are synchronized
-     * from retained Scene settings and global decimation is applied. Instrument
+     * from retained Scene settings and the PERF `fxm` mirror is refreshed. Instrument
      * runtime parameters, voice LFO slots/targets, audio out, future FX sends,
      * and fader assignments are deliberately excluded; the deferred slot worker
      * commits those per-instrument affiliates only when the old envelope is quiet
@@ -1293,11 +1276,9 @@ void preset_applySceneSettings(uint8_t scene_index)
      * budget.
      */
     presetMorph_rebuildScene(scene_index);
-    parameter_values[PAR_VOICE_DECIMATION_ALL] =
-        scene->settings.voice_decimation_all;
-    preset_applyVoiceDecimationAllRuntime(scene->settings.voice_decimation_all);
     /* S074: page mirrors follow the newly active Scene. */
     preset_syncBusCompMirrors();
+    preset_syncEffectMorphMirror();
 }
 
 static void preset_storeSupplementalCell(uint8_t scene_index,
@@ -1571,6 +1552,16 @@ void preset_startDrumsetApply(void)
     drumset_apply_voice = 0u;
     /* A new Scene worker must not inherit non-progress from its predecessor. */
     drumset_apply_stall_ticks = 0u;
+}
+
+/*
+ * Report whether the Scene and Instrument apply workers are idle (S075).
+ *
+ * Contract in presetManager.h; reads the two worker flags only.
+ */
+uint8_t preset_applyWorkersIdle(void)
+{
+    return (uint8_t)(!drumset_apply_active && !instrument_apply_active);
 }
 
 uint8_t preset_tickDrumsetApply(void)
@@ -1981,9 +1972,49 @@ void preset_startInstrumentMorphApply(uint8_t scene_index, uint8_t slot)
     }
 }
 
+/*
+ * Move `self` LFO voice selectors of a copied Instrument to its new slot.
+ *
+ * Inputs: destination image, its type, the one-based source and destination
+ * slot numbers. Output: every LFO voice-selector cell (both LFOs) in the
+ * Normal, Morph and interpolation images that held the source slot now holds
+ * the destination slot; every other selector (other voices, `scn`, `fx`) is
+ * unchanged. Why: Kit/Instrument Save writes `self` for a selector equal to
+ * the own slot, and a resident copy must keep the same meaning (S075, spec
+ * §4.4 `copy instrument`). Caller: preset_startInstrumentApplyImage().
+ */
+static void preset_retargetSelfLfoVoice(kit_instrument_slot_t *slot_image,
+                                        uint8_t source_voice,
+                                        uint8_t dest_voice)
+{
+    instrument_parameter_images_t *images;
+    uint8_t i;
+
+    if (!slot_image || source_voice == dest_voice)
+        return;
+    images = &slot_image->parameter_images;
+    for (i = 0u; i < INSTRUMENT_PARAM_COUNT; i++) {
+        const ParamDescriptor *descriptor =
+            instrumentManager_descriptor(slot_image->type, i);
+
+        if (!descriptor)
+            break;
+        if (descriptor->runtime.kind != INSTRUMENT_BIND_LFO_TARGET_VOICE &&
+            descriptor->runtime.kind != INSTRUMENT_BIND_LFO_TARGET_VOICE_2)
+            continue;
+        if (images->instrument_parameters[i] == source_voice)
+            images->instrument_parameters[i] = dest_voice;
+        if (images->morph_instrument_parameters[i] == source_voice)
+            images->morph_instrument_parameters[i] = dest_voice;
+        if (images->morph_interpolation[i] == source_voice)
+            images->morph_interpolation[i] = dest_voice;
+    }
+}
+
 static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged,
                                              uint16_t destination_mask,
                                              uint8_t slot,
+                                             uint8_t source_slot,
                                              instrument_type_t expected_type,
                                              uint8_t mark_autosave_whole_instrument)
 {
@@ -2006,6 +2037,11 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
      * Affiliates: preset_startInstrumentApply(),
      * preset_loadInstrumentTemp(), filesystem_loadedInstrumentSlot(),
      * and filesystem_instrumentLoadPreviewOriginal().
+     *
+     * S075: source_slot names the slot the image came from. Loads pass
+     * source_slot == slot (unchanged behaviour); preset_startInstrumentCopy()
+     * passes the resident source slot so `self` LFO selectors are moved to
+     * the destination slot after the assignment below.
      */
     instrument_apply_active = 0u;
     if (!staged || slot >= INSTRUMENT_SLOT_COUNT ||
@@ -2044,6 +2080,18 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
         bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
                                             (uint16_t)(1u << target_scene_index)));
         scene->kit.instruments[slot] = *staged;
+        /*
+         * S075: an Instrument copied from another slot keeps "self" LFO
+         * targets pointing at itself. Kit Save writes `self` for a selector
+         * equal to the own slot; a resident copy applies the same rule by
+         * moving source_slot+1 selectors to slot+1 in the Normal, Morph and
+         * interpolation images before the runtime binds them. Loads pass
+         * source_slot == slot and are unchanged.
+         */
+        if (source_slot != slot && source_slot < INSTRUMENT_SLOT_COUNT)
+            preset_retargetSelfLfoVoice(&scene->kit.instruments[slot],
+                                        (uint8_t)(source_slot + 1u),
+                                        (uint8_t)(slot + 1u));
         /*
          * Option 2: a root Instrument Load or reversible kit restore replaces
          * the resident instrument image from a source other than the exact Bank
@@ -2128,9 +2176,31 @@ void preset_startInstrumentApply(uint8_t scene_index,
      * retained Instrument payload for AutoSave. Affiliates:
      * on_instrument_load_complete() and Menu completion polling.
      */
-    preset_startInstrumentApplyImage(staged, destination_mask, slot,
+    preset_startInstrumentApplyImage(staged, destination_mask, slot, slot,
                                      (instrument_type_t)pm_instrument_request_type,
                                      mark_autosave_whole_instrument);
+}
+
+/*
+ * Commit one resident Instrument slot onto a slot in a set of Scenes (S075).
+ *
+ * Contract in presetManager.h. The source image is read live from the
+ * resident source Scene (user: source reads are live); it is never modified
+ * because a destination equal to the source coordinates assigns identical
+ * bytes and the `self` retarget only touches destination copies.
+ */
+void preset_startInstrumentCopy(uint8_t src_scene, uint8_t src_slot,
+                                uint16_t dst_mask, uint8_t dst_slot)
+{
+    const scene_t *source = scene_getConst(src_scene);
+
+    if (!source || src_slot >= INSTRUMENT_SLOT_COUNT ||
+        dst_slot >= INSTRUMENT_SLOT_COUNT || dst_mask == 0u)
+        return;
+    preset_startInstrumentApplyImage(&source->kit.instruments[src_slot],
+                                     dst_mask, dst_slot, src_slot,
+                                     source->kit.instruments[src_slot].type,
+                                     1u);
 }
 
 uint8_t preset_saveInstrumentTemp(uint8_t source_scene, uint8_t source_slot)
@@ -3075,31 +3145,7 @@ void preset_rebuildMorph(void)
     presetMorph_rebuildScene(scene_index);
 }
 
-void preset_setVoiceDecimationAll(uint8_t scene_index, uint8_t value)
-{
-    scene_t *scene = scene_get(scene_index);
-
-    /*
-     * Retain and apply Scene global decimation.
-     *
-     * Inputs: Scene index and PERF `srt` value in the 0..127 menu domain.
-     * Outputs: scene_settings_t::voice_decimation_all is retained,
-     * parameter_values[] is mirrored for the PERF page, and the active Scene's
-     * mixer global decimation multiplier is updated. This function is separate
-     * from the MIDI CC handler so future sceneset.scg load/save has one owner
-     * for the retained setting and runtime side effect. The normalized byte is
-     * committed through SceneData's changed-value Autosave boundary before the
-     * runtime mirrors below are updated.
-     */
-    if (!scene)
-        return;
-    if (value > 127u)
-        value = 127u;
-    scene_setVoiceDecimationAll(scene_index, value);
-    parameter_values[PAR_VOICE_DECIMATION_ALL] = value;
-    if (scene_index == scene_getActiveIndex())
-        preset_applyVoiceDecimationAllRuntime(value);
-}
+/* S075: the former global `srt` setter was retired with its Scene field. */
 
 /*
  * Keep SceneData and the four S074 page mirrors on the same field order.
@@ -3143,6 +3189,21 @@ void preset_syncBusCompMirrors(void)
     for (field = 0u; field < SCENE_BUS_COMP_FIELD_COUNT; field++)
         parameter_values[PAR_BUS_COMP_MODE + field] =
             scene_getBusCompSetting(scene_index, field);
+}
+
+/*
+ * Copy the active Scene's Effect Morph amount into the PERF `fxm` mirror.
+ *
+ * What: read-only refresh of parameter_values[PAR_EFFECT_MORPH] from
+ * SceneData. Why: retained Effect Morph changes on the Effect page, through
+ * edit-mask fan-out, Scene activation, and copy/clear. Output: one mirror byte;
+ * no retained write and no AutoSave mark. Affiliates: Scene apply, Menu's
+ * `fxm` commit path, and EffectsManager.
+ */
+void preset_syncEffectMorphMirror(void)
+{
+    parameter_values[PAR_EFFECT_MORPH] =
+        scene_getEffectMorphAmount(scene_getActiveIndex());
 }
 
 void preset_morphTick(void)

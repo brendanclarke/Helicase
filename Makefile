@@ -26,6 +26,7 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/Hardware/USB/App \
           -ICore/Hardware/USB/OTG_Driver/src \
           -ICore/Menu \
+          -ICore/Menu/CopyClear \
           -ICore/Bank \
           -ICore/Bank/Scene/Preset \
           -ICore/MIDI \
@@ -92,7 +93,10 @@ SRCS = \
   Core/Menu/menuEffects.c \
   Core/Sequencer/StepScale.c \
   Core/Menu/Cc2Text.c \
-  Core/Menu/copyClearTools.c \
+  Core/Menu/CopyClear/copyClearSession.c \
+  Core/Menu/CopyClear/copyOps.c \
+  Core/Menu/CopyClear/clearOps.c \
+  Core/Menu/CopyClear/copyClearService.c \
   Core/Menu/screensaver.c \
   Core/Menu/SplashAnimation.c \
   Core/Bank/Scene/Preset/presetManager.c \

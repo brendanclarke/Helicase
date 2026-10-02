@@ -1199,8 +1199,8 @@ forward:**
   same-type handoff refresh, the FX return ramp while `off` and the
   `fxbuf_init()` order closed;
 - `/Effect/` browser and Effect Load/Save item (A35);
-- Scene copy/clear of the Effect and FX lock removal (Phase 6 copy/clear,
-  `S075_PH6_COPY_CLEAR.md`);
+- ~~Scene copy/clear of the Effect and FX lock removal (A15)~~ — **done
+  (S075, Phase 6 copy/clear; hardware verification pending);**
 - MIDI mapping of Effect parameters (A20);
 - live record of FX moves (A22);
 - track step-scale/shuffle playback (A10).
@@ -1418,10 +1418,15 @@ access and automation indicator (6.4), scene instant switching (6.5 partial),
 and load/save UI rework (6.7) were completed in earlier phases and their
 completion records are in §§3.4, 4.6.
 
-**Session 075 starts Phase 6 with copy and clear** for step, bar, track,
-automation, Instrument, Scene and Scene components (the §4.5 copy
-operations, §5.8's Effect copy/clear, FX lock removal). The startup overview
-and decisions are in `S075_PH6_COPY_CLEAR.md`.
+**Session 075 implemented Phase 6 copy and clear** for step, step range,
+bar, bar range, track, automation (pot clears), Instrument, Kit, Effect, FX
+sequence, Scene settings, Pattern and whole Scenes (the §4.5 copy operations,
+§5.8's Effect copy/clear, FX lock removal A15), with global `srt` retired and
+Effect Morph `fxm` in its PERF cell. Spec:
+`S075_PH6_COPY_CLEAR_FULL_SPEC.md`; schedule and implementation log:
+`S075_PH6_COPYCLEAR_IMPLEMENTATION.md` (§14). Status: builds; hardware
+verification (§13.2 of the schedule) pending. The §4.11 LED priority stack
+was implemented for the copy/clear LEDs (group blink, S075 Stage 1).
 
 ### 6.0 Deferred Phase 4 completion (first priority)
 

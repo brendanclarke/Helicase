@@ -1091,7 +1091,13 @@ void midiParser_ccHandler(MidiMsg msg, uint8_t updateOriginalValue)
 				case VOICE_DECIMATION4:
 				case VOICE_DECIMATION5:
 				case VOICE_DECIMATION6:
-				case VOICE_DECIMATION_ALL:
+					/*
+					 * Per-voice decimation CCs (voices 1..6) still drive the
+					 * per-voice rate. S075 removed only the global
+					 * VOICE_DECIMATION_ALL case: its rate[6] multiplier no
+					 * longer exists, so that CC is unassigned and falls to the
+					 * default branch (writing index 6 would be out of bounds).
+					 */
 					mixer_decimation_rate[msg.data1-VOICE_DECIMATION1] = valueShaperI2F(msg.data2,-0.7f);
 					break;
 

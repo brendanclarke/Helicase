@@ -22,8 +22,11 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Current working source**: Session 074 is closed on `dev-ph5-effects`
 (2026-09-30). **Phase 5 (the Effects bus and modular Effect system, initial
-pass) is largely complete.** Next: Session 075 starts **Phase 6** with copy
-and clear operations (`S075_PH6_COPY_CLEAR.md`, root).
+pass) is largely complete.** **Session 075 (`dev-ph6-copyclear`, in
+progress):** Phase 6 copy/clear is implemented and builds; hardware
+verification is pending. Spec `S075_PH6_COPY_CLEAR_FULL_SPEC.md`, schedule
+and implementation log `S075_PH6_COPYCLEAR_IMPLEMENTATION.md` (§14: changes,
+deviations, build/RAM results, open checks), both in the root.
 
 - **Commits:** HEAD `50610dd` holds every S074 code change. The S074 closeout
   documentation and the user's move of the four DSP/Effects specifications
@@ -84,8 +87,7 @@ Session 074 in one paragraph:
   `ca77891`; read it with `git show f3a3105:EFFECTS_BUS_FEATURE_PLAN.md`.
 
 Still deferred: per-track step scale/shuffle playback (`PATTERN_DYNAMIC_STACK.md`
-§6.4). The copy operations (`pat_copyTrack/Pattern/Bar` are no-ops) open
-Phase 6 in Session 075.
+§6.4). Phase 6 copy/clear is implemented in Session 075 (below).
 
 ## RAM Allocation Approval Policy
 
@@ -143,9 +145,19 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   children (Instrument, Effect, FX sequence, mix settings) fan out;
   Pattern data never does. Phase 6 copy/clear spec:
   `S075_PH6_COPY_CLEAR_FULL_SPEC.md` (root).
+- **S075 state (copy/clear implemented, unverified on hardware):**
+  `Core/Menu/CopyClear/` (four file pairs) replaces `copyClearTools`. Global
+  `srt` is retired (PERF `fxm` = Effect Morph in its cell; AutoSave Scene
+  cell 7 reserved, written 127; Scene target 390 a retired placeholder).
+  Every Pattern pool keeps a permanent 132 B swap block (8,060 B usable).
+  The 9 kB name cache is lent to copy/clear during an operation; while lent
+  other filesystem ops are refused. AutoSave, trace, settings and Pattern
+  repair do not start while an operation runs. SRAM1 +92 B net (approved
+  ≤ +100 B). Deviations from the schedule and open hardware checks:
+  `S075_PH6_COPYCLEAR_IMPLEMENTATION.md` §14.3, §14.5.
 - **Session 074 is closed.** Durable record: `074_SESSION_HANDOFF_LOG.md`.
   The ten root `S074_*.md` documents are superseded (the user deletes them).
-  Next: `S075_PH6_COPY_CLEAR.md` (Phase 6: copy/clear).
+  Next was Session 075 (Phase 6 copy/clear; see the current-state note).
 - **S074 open items** (details in the log §13 and `SCOPING_TARGETS.md`
   "Session 074 carry-forward"):
   - the boot timeout the user saw is unexplained; reproduce on the bench with
@@ -232,9 +244,9 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   committed; they are the evidence for the S074 AutoSave fix.
 - S070 and S071 task documents are superseded by their handoff logs and may
   be deleted.
-- Phase 4.5 copy operations (`pat_copyTrack`, `pat_copyPattern`,
-  `pat_copyBar`) are still no-ops; they open Phase 6 in Session 075
-  (`S075_PH6_COPY_CLEAR.md`).
+- The Phase 4.5 no-op copy surface (`pat_copyTrack/Pattern/Bar`) and
+  `copyClearTools.c/h` were removed in Session 075 and replaced by
+  `Core/Menu/CopyClear/`.
 - S069 planning documents (`S069_ATS_PAT_BOUNDED_CPU.md`,
   `S069_NON_SEMANTIC_MAINTENANCE.md`, `S069_SLACK_REACTIVE_COMPACTION.md`,
   and their CLAUDE variants/implementation docs) are superseded by
@@ -943,7 +955,7 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
     │   ├── MenuText.h               ← all label strings
     │   ├── Cc2Text.c                ← modTargets[] 205 entries
     │   ├── CcNr2Text.h
-    │   ├── copyClearTools.c/h       ← copy/clear UI; pattern mutation through PatternData
+    │   ├── CopyClear/               ← S075 Phase 6 copy/clear: session (routing, range rule, menus, LEDs, suspension), copyOps, clearOps, copyClearService (queue, Pattern engines, register, name buffer, HCNAMES write)
     │   ├── menuEffects.c/h          ← SHIFT+PERF Effect page: SELECT layout, `typ` transaction, SHIFT Morph view, SEQ lock editing/LEDs
     │   └── screensaver.c/h          ← screensaver with explicit LCD off/on phases
     ├── MIDI/
@@ -1009,7 +1021,7 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
 | Development screen diagnostics and file logging? | `knowledge_files/specification_reference/DEV_MODES.md` |
 | Current module/API ownership boundaries? | `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md` |
 | Master bus compressor, `xfd` fader mode, CrumpBit DSP? | `knowledge_files/specification_reference/dsp_instruments_effects/EFFECTS_MIXER_DSP_REFERENCE.md` (§3.2, §4.4, §5A) |
-| Phase 6 copy/clear starting point? | `S075_PH6_COPY_CLEAR.md` (root) |
+| Phase 6 copy/clear spec and state? | `S075_PH6_COPY_CLEAR_FULL_SPEC.md` (spec), `S075_PH6_COPYCLEAR_IMPLEMENTATION.md` (schedule; §14 implementation log); `S075_PH6_COPY_CLEAR.md` was the startup brief |
 | Effect system (types, FX bus, FX sequencer, Effect automation/LFO, adding a type)? | `knowledge_files/specification_reference/dsp_instruments_effects/EFFECTS_BUS_REFERENCE.md` |
 | Instrument DSP, modulation/LFO, their costs, adding parameters or types? | `knowledge_files/specification_reference/dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md` |
 | Mixer, FX bus and Effect DSP, output pipeline, buffer-using Effects? | `knowledge_files/specification_reference/dsp_instruments_effects/EFFECTS_MIXER_DSP_REFERENCE.md` |

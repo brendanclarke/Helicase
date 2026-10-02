@@ -68,6 +68,7 @@
 #include "endlessPots.h"
 #include "mixer.h"
 #include "PatternStackService.h"
+#include "copyClearService.h"
 
 /* -----------------------------------------------------------------------
 ** TIM6 registers (APB1, base 0x40001000)
@@ -198,6 +199,15 @@ void timebase_serviceFrontPanel(void)
      * Affiliate: PatternStackService.c.
      */
     patSvc_tick();
+
+    /*
+     * Advance one bounded held-COPY job after PatternStackService.
+     *
+     * Inputs: the fixed Copy/Clear queue. Output: one foreground operation at
+     * most; audio/TIM3 never enters this service. Affiliate: S075 session and
+     * copyClearService.c.
+     */
+    ccSvc_tick();
 }
 
 /* -----------------------------------------------------------------------

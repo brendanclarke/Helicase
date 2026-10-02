@@ -487,7 +487,7 @@ local token in that namespace. Install:
 |---|---|
 | Instrument descriptor parameter (any slot) | **Descriptor adapter** (`lfo_descriptor_targets[6][2]`): each block the LFO value is shaped in descriptor units (`modNode_shapeParameterU16()`, clamped to the row's `mod_domain`) around the adapter's base value, and written through the normal writer with notification off. So an LFO on filter cutoff goes through the same `valueShaperF2F()` and `SVF_directSetFilterValue()` as a knob. |
 | Slot decimation | Supplemental write to `mixer_decimation_rate[slot]` |
-| Scene target (`instrumentManager_updateLfoSceneDestination()`) | Voice Morph: a base-independent direction + depth entry that the Morph engine resolves around the current base (S071). Effect Morph (`fxm`): the same encoding, resolved by EffectsManager. Scene decimation (`srt`) and the slot-6 track-7 decay: shaped around the retained value and applied as runtime-only overrides, so the saved value never moves. |
+| Scene target (`instrumentManager_updateLfoSceneDestination()`) | Voice Morph: a base-independent direction + depth entry that the Morph engine resolves around the current base (S071). Effect Morph (`fxm`): the same encoding, resolved by EffectsManager. The slot-6 track-7 decay: shaped around the retained value and applied as runtime-only overrides, so the saved value never moves. The retired `srt` target (390, S075) does nothing. |
 | Effect parameter or `fxm` | Direction + depth entry in EffectsManager (`effects_setLfoContribution()`), resolved around the Effect's current held value |
 
 - **Base and restore:** the adapter's base is the parameter's current

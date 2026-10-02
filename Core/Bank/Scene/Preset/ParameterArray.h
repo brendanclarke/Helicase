@@ -146,8 +146,13 @@ enum ParamEnums
 	 * PAR_MORPH remains the overall bulk-set control near the legacy PERF ids.
 	 * These six voice Morph ids are contiguous so Preset/Menu can map
 	 * PAR_VOICE1_MORPH + slot without hardcoding per-instrument parameter
-	 * lists. PAR_VOICE_DECIMATION_ALL is the Scene-retained global decimation
-	 * value shown as PERF "srt".
+	 * lists. PAR_EFFECT_MORPH (S075) occupies the slot of the retired global
+	 * decimation id: it is the flat PERF mirror of the active Scene's Effect
+	 * Morph amount (scene_settings_t::effect_morph_amount, 0..255), shown as
+	 * PERF "fxm". It is refresh-only in menu_parseGlobalParam(); page edits
+	 * commit through menu_commitEffectMorphParam() -> effects_setMorphAmount(),
+	 * which fans out through the edit mask. Keeping the position means no later
+	 * flat id is renumbered.
 	 */
 	PAR_VOICE1_MORPH,
 	PAR_VOICE2_MORPH,
@@ -155,7 +160,7 @@ enum ParamEnums
 	PAR_VOICE4_MORPH,
 	PAR_VOICE5_MORPH,
 	PAR_VOICE6_MORPH,
-	PAR_VOICE_DECIMATION_ALL,
+	PAR_EFFECT_MORPH,
 
 	/*
 	 * Persistent Global AutoSave policy byte.

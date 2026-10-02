@@ -22,7 +22,7 @@
 #include "screensaver.h"
 #include "ledHandler.h"
 #include "timebase.h"
-#include "copyClearTools.h"
+#include "copyClearSession.h"
 #include "PatternData.h"
 #include "menuEffects.h"
 #if ENABLE_EUKLID_PAGE
@@ -346,6 +346,17 @@ static int8_t btn_to_voice(uint8_t buttonNr)
     default: return -1;
     }
 }
+
+/*
+ * Copy/Clear row-decoding bridge.
+ *
+ * Inputs: physical button number. Outputs: the existing private mapping
+ * result, exposed read-only to copyClearSession.c so normal routing and held
+ * gestures share one hardware map.
+ */
+int8_t buttonHandler_seqIndex(uint8_t buttonNr)  { return btn_to_seq(buttonNr); }
+int8_t buttonHandler_selectIndex(uint8_t buttonNr) { return btn_to_select(buttonNr); }
+int8_t buttonHandler_voiceIndex(uint8_t buttonNr) { return btn_to_voice(buttonNr); }
 
 
 static uint8_t buttonHandler_barStartStep(void)
@@ -1016,34 +1027,12 @@ static void handleSelectButton(uint8_t selectNr)
 
 static void buttonHandler_partButtonPressed(uint8_t partNr)
 {
-    if (copyClear_Mode >= MODE_COPY_PATTERN) {
-        if (copyClear_srcSet()) {
-            uint8_t trackNr;
-            uint8_t patternNr;
-
-            copyClear_setDst((int8_t)partNr, MODE_COPY_PATTERN);
-            copyClear_copyBar();
-            led_clearAllBlinkLeds();
-
-            trackNr = menu_getActiveVoice();
-            patternNr = menu_getViewedPattern();
-            led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
-        } else {
-            copyClear_setSrc((int8_t)partNr, MODE_COPY_PATTERN);
-            led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + partNr), 1);
-        }
-    } else {
-        handleSelectButton(partNr);
-    }
+    handleSelectButton(partNr);
 }
 
 static void buttonHandler_partButtonReleased(uint8_t partNr)
 {
     (void)partNr;
-
-    if (copyClear_Mode >= MODE_COPY_PATTERN) {
-        return;
-    }
 
     if (buttonHandler_TimerActionOccured())
         return;
@@ -1066,36 +1055,6 @@ static void handleVoiceButton(uint8_t voiceNr)
          * reset and rebuilt over bounded foreground ticks before it is valid to
          * audition.
          */
-        return;
-    }
-
-    if (copyClear_Mode >= MODE_COPY_PATTERN) {
-        if (copyClear_srcSet()) {
-            /*
-             * Finish track copy.
-             *
-             * PatternData copies between tracks inside the viewed pattern. The
-             * button layer then repaints the front-panel LEDs and reloads
-             * track-scoped menu parameters for the active voice.
-             *
-             * Risk: copy source/destination are stored as button indices and
-             * masked in copyClearTools. Validation still belongs in PatternData
-             * for the actual mutation.
-             */
-            uint8_t trackNr;
-            uint8_t patternNr;
-
-            copyClear_setDst((int8_t)voiceNr, MODE_COPY_TRACK);
-            copyClear_copyTrack();
-            led_clearAllBlinkLeds();
-
-            trackNr = menu_getActiveVoice();
-            patternNr = menu_getViewedPattern();
-            led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
-        } else {
-            copyClear_setSrc((int8_t)voiceNr, MODE_COPY_TRACK);
-            led_setBlinkLed((uint8_t)(LED_VOICE1 + voiceNr), 1);
-        }
         return;
     }
 
@@ -1260,6 +1219,14 @@ static void handleVoiceButton(uint8_t voiceNr)
 /* Process one press event */
 static void processPress(uint8_t buttonNr)
 {
+    /*
+     * Held-COPY owns its complete button gesture before ordinary row routing.
+     * Inputs: one foreground event. Output: nonzero consumption prevents a
+     * source or destination edge from leaking into normal Menu/Sequencer UI.
+     */
+    if (copyClear_buttonPressed(buttonNr))
+        return;
+
     int8_t seq = btn_to_seq(buttonNr);
     if (seq >= 0) {
         if (menu_loadSceneButtonPressed((uint8_t)seq)) {
@@ -1350,6 +1317,14 @@ static void processPress(uint8_t buttonNr)
         break;
 
     case BUT_COPY:
+        /*
+         * SHIFT + copy/clear while recording and running keeps its erase
+         * meaning. Every other press arms a copy operation, or a clear
+         * operation when SHIFT is held (S075, spec §3); refusals are silent.
+         * The release ends menu interaction; queued pastes/clears keep
+         * running in the background. Affiliates: copyClear_copyPressed()/
+         * copyClear_copyReleased().
+         */
         if (buttonHandler_getShift()) {
             if (bh_state.seqRecording && bh_state.seqRunning) {
                 /*
@@ -1360,18 +1335,10 @@ static void processPress(uint8_t buttonNr)
                 bh_state.seqErasing = 1;
                 seq_setErasingMode((uint8_t)bh_state.seqErasing);
             } else {
-                if (copyClear_Mode == MODE_CLEAR) {
-                    copyClear_executeClear();
-                } else {
-                    copyClear_Mode = MODE_CLEAR;
-                    copyClear_armClearMenu(1);
-                }
+                (void)copyClear_copyPressed(1u);
             }
         } else {
-            copyClear_Mode = MODE_COPY_TRACK;
-            led_setBlinkLed(LED_COPY, 1);
-            led_clearSelectLeds();
-            led_clearVoiceLeds();
+            (void)copyClear_copyPressed(0u);
         }
         break;
 
@@ -1486,6 +1453,23 @@ static void processPress(uint8_t buttonNr)
 
 static void processRelease(uint8_t buttonNr)
 {
+    if (buttonNr == BUT_COPY) {
+        /*
+         * COPY release ends the held session after Sequencer erase unwinds.
+         * Inputs: physical COPY release. Output: one owner performs the
+         * release cleanup; no legacy global Copy/Clear state remains.
+         */
+        if (bh_state.seqErasing) {
+            bh_state.seqErasing = 0u;
+            seq_setErasingMode((uint8_t)bh_state.seqErasing);
+        } else {
+            copyClear_copyReleased();
+        }
+        return;
+    }
+    if (copyClear_buttonReleased(buttonNr))
+        return;
+
     int8_t seq = btn_to_seq(buttonNr);
     if (seq >= 0) {
         uint16_t bit = (uint16_t)(1u << (uint8_t)seq);
@@ -1554,26 +1538,11 @@ static void processRelease(uint8_t buttonNr)
         led_setValue(0, LED_BAR2);
         break;
 
-    case BUT_COPY:
-        /* _SEQUENCER_ADD_SPIKE_: restore erase exit + copy-mode reset on release. */
-        if (bh_state.seqErasing) {
-            bh_state.seqErasing = 0;
-            seq_setErasingMode((uint8_t)bh_state.seqErasing);
-        } else if (!buttonHandler_getShift()) {
-            copyClear_reset();
-        }
-        break;
-
     case BUT_SHIFT:
         /* _SEQUENCER_ADD_SPIKE_: restore shift-release unwind flow from AVR. */
         if (bh_state.seqErasing) {
             bh_state.seqErasing = 0;
             seq_setErasingMode((uint8_t)bh_state.seqErasing);
-        }
-
-        if (copyClear_Mode == MODE_CLEAR && !btn_held[BUT_COPY]) {
-            copyClear_armClearMenu(0);
-            copyClear_Mode = MODE_NONE;
         }
 
         led_setValue(0, LED_SHIFT);
@@ -1649,6 +1618,12 @@ void buttonHandler_processEvents(void)
 {
     if (evt_overflow_flag) {
         evt_overflow_flag = 0;
+        /*
+         * Reconcile a dropped edge in the held-COPY owner before ordinary
+         * pairing masks are reset. Inputs: event-ring overflow. Output: the
+         * Copy/Clear source/row ledger cannot remain half armed.
+         */
+        (void)copyClear_eventOverflow();
         buttonHandler_voiceSceneSeqPressedMask = 0u;
         buttonHandler_loadSceneSeqPressedMask = 0u;
         buttonHandler_buttonTimerStepNr = NO_STEP_SELECTED;
@@ -1676,5 +1651,6 @@ void buttonHandler_processEvents(void)
             processPress(buttonNr);
         else
             processRelease(buttonNr);
+        copyClear_postEvent();
     }
 }

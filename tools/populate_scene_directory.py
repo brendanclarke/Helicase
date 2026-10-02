@@ -81,7 +81,6 @@ def make_sceneset(scene_name: str, audio_out: list[int]) -> str:
             "version=1",
             "morph_amount=0",
             "voice_morph_amount=0,0,0,0,0,0",
-            "voice_decimation_all=127",
             "midi_channel=1,2,3,4,5,6,7",
             "midi_note=63,63,63,63,63,63,63",
             "audio_out=" + ",".join(str(value) for value in audio_out),

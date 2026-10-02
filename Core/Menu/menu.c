@@ -7,7 +7,6 @@
  *   - local controls call owning modules directly; no front-panel protocol shim
  *   - parameters2[] morph buffer declared here
  *   - screensaver_touch() → stub
- *   - copyClear_isClearModeActive() → always returns 0
  *   - lockPotentiometerFetch() → stub (no pot fetch locking needed)
  *   - All sequencer-specific logic (led_setActive_step etc.) → stub
  *
@@ -30,7 +29,8 @@
 #include "menu.h"
 #include "CcNr2Text.h"
 #include "screensaver.h"
-#include "copyClearTools.h"
+#include "copyClearSession.h"
+#include "copyClearService.h"
 #include "menuPages.h"
 #include "MenuText.h"
 #include "ParameterArray.h"
@@ -86,7 +86,6 @@
 
 /* ---- stubs for original calls we haven't ported yet ---- */
 // static inline void screensaver_touch(void){}
-// static inline uint8_t copyClear_isClearModeActive(void){return 0;}
 static inline void lockPotentiometerFetch(void){}
 
 static uint8_t menu_TargetVoiceGapIndex = 0xFF;
@@ -1025,7 +1024,8 @@ const enum Datatypes parameter_dtypes[NUM_PARAMS] = {
     [PAR_VOICE4_MORPH] = DTYPE_0B255,
     [PAR_VOICE5_MORPH] = DTYPE_0B255,
     [PAR_VOICE6_MORPH] = DTYPE_0B255,
-    [PAR_VOICE_DECIMATION_ALL] = DTYPE_0B127,
+    /* S075: PERF `fxm` shows the full 0..255 Effect Morph amount. */
+    [PAR_EFFECT_MORPH] = DTYPE_0B255,
     /* Global `ats` is a stored boolean; filesystem policy is applied only at
      * the explicit user/boot lifecycle boundaries documented below. */
     [PAR_AUTOSAVE_ENABLED] = DTYPE_ON_OFF,
@@ -1140,7 +1140,8 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_SYNC,CAT_GLOBAL,LONG_EXTERNAL_SYNC},
     {SHORT_CHANNEL,CAT_VOICE,LONG_MIDI_CHANNEL},
     {SHORT_OUT,CAT_VOICE,LONG_AUDIO_OUT},
-    {SHORT_SR,CAT_VOICE,LONG_SAMPLE_RATE},
+    /* S075 PERF `fxm`: Scene-owned Effect Morph (was global `srt`). */
+    {SHORT_EFFECT_MORPH,CAT_SCENE,LONG_EFFECT_MORPH},
     {SHORT_REPEAT,CAT_PATTERN,LONG_REPEAT_CNT},
     {SHORT_NXT,CAT_PATTERN,LONG_NEXT_PAT},
     {SHORT_MODE,CAT_OSC,LONG_MODE},
@@ -1825,6 +1826,7 @@ static uint8_t menu_paramIsBusComp(uint16_t paramNr);
 static uint8_t menu_busCompValueText(uint16_t paramNr, uint8_t value,
                                      char *dst);
 static uint8_t menu_commitBusCompParam(uint16_t paramNr, uint8_t value);
+static uint8_t menu_commitEffectMorphParam(uint8_t value);
 static instrument_param_id_t menu_sceneSettingAutomationTarget(
     const menu_cell_t *cell);
 static uint8_t menu_morphAutomationStore(uint8_t morph_value);
@@ -1894,7 +1896,7 @@ static uint8_t menu_voicePageToSlot(uint8_t page)
  * va_scanService() completes the new search (FX-lock underlines on the Effect
  * page do not depend on it). Callers: VOICE and Effect entry in
  * menu_switchPage(), menu_setActiveVoice() (not on the Effect page),
- * menu_setShownPattern(), menu_voiceAutoOverlayPatternDeleted(), the STEP
+ * menu_setShownPattern(), menu_patternContentChanged(), the STEP
  * automation deletes, and va_scanService() on a context mismatch.
  * Affiliates: va_scanService(), va_searchSetBit(), va_applyVoiceMarkers(),
  * menu_effectCellAutomated().
@@ -2037,6 +2039,10 @@ static void va_scanService(void)
         uint8_t i;
 
         for (i = 0u; i < count; i++) {
+            /* S075: do not redraw an underline while its target is being
+             * removed by the bounded pot-clear register. */
+            if (ccSvc_targetPending(autos[i].target))
+                continue;
             if (effect_page) {
                 va_searchRecordEffectTarget(autos[i].target);
                 continue;
@@ -2261,16 +2267,112 @@ void menu_voiceAutoOverlayBarChanged(void)
  * an already-submitted copy/clear PatternData mutation. Outputs: a cleared
  * search result and a refreshed frame; other pages return at once because
  * their next VOICE/Effect entry restarts the search anyway. Callers:
- * copyClear_clearCurrentPattern(), copyClear_clearCurrentTrack().
- * Affiliates: va_searchRestart(), va_scanService(), copyClearTools.c.
+ * copyClearService.c after a Pattern paste or clear. Affiliates:
+ * va_searchRestart() and va_scanService().
  */
-void menu_voiceAutoOverlayPatternDeleted(void)
+void menu_patternContentChanged(void)
 {
     if (!menu_isScreenPage(menu_activePage))
         return;
     va_searchRestart();
     va_underlineSuppressed = 0u;
     menu_repaint();
+}
+
+/*
+ * Drop one automation target's underline immediately after pot clear.
+ *
+ * Inputs: canonical Pattern target. Output: only the matching VOICE/Effect
+ * presence bit is cleared; the bounded search continues for all other
+ * targets, and Menu repaints without changing the target value.
+ */
+void menu_automationTargetCleared(uint16_t target)
+{
+    if (menu_isVoicePage(menu_activePage)) {
+        uint8_t slot = menu_voicePageToSlot(menu_activePage);
+        if (instrumentParam_isVoiceParameter(target) &&
+            instrumentParam_slot(target) == slot) {
+            uint8_t local = instrumentParam_local(target);
+            if (local < 64u)
+                va_searchTargetMask[local >> 3u] &=
+                    (uint8_t)~(1u << (local & 7u));
+        } else if (sceneModTarget_isSceneTarget(target)) {
+            const scene_mod_target_descriptor_t *descriptor =
+                sceneModTarget_descriptor(target);
+            if (descriptor && descriptor->voice_slot == slot) {
+                switch (descriptor->kind) {
+                case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
+                    va_searchSceneMask &=
+                        (uint8_t)~VA_SEARCH_SCENE_VOICE_MORPH_BIT;
+                    break;
+                case SCENE_MOD_TARGET_KIND_AUDIO_OUT:
+                    va_searchSceneMask &=
+                        (uint8_t)~VA_SEARCH_SCENE_AUDIO_OUT_BIT;
+                    break;
+                case SCENE_MOD_TARGET_KIND_FX_SEND:
+                    va_searchSceneMask &=
+                        (uint8_t)~VA_SEARCH_SCENE_FX_SEND_BIT;
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+    } else if (menu_activePage == EFFECT_PAGE) {
+        if (effectTarget_isEffectId(target)) {
+            uint8_t local = effectTarget_local(target);
+            if (local < EFFECT_TARGET_PATTERN_LOCAL_LIMIT)
+                va_searchTargetMask[local >> 3u] &=
+                    (uint8_t)~(1u << (local & 7u));
+        } else if (sceneModTarget_isSceneTarget(target)) {
+            const scene_mod_target_descriptor_t *descriptor =
+                sceneModTarget_descriptor(target);
+            if (descriptor &&
+                descriptor->kind == SCENE_MOD_TARGET_KIND_EFFECT_MORPH)
+                va_searchSceneMask &=
+                    (uint8_t)~VA_SEARCH_SCENE_EFFECT_MORPH_BIT;
+        }
+    }
+    menu_repaint();
+}
+
+/*
+ * Repaint the active Copy/Clear overlay through Menu's existing LCD owner.
+ *
+ * Inputs: none; Copy/Clear has already updated its compact session ledger.
+ * Output: the overlay is painted over the current Menu shadow without a
+ * second display buffer. Client: copyClearSession.c encoder/source edges.
+ */
+void menu_copyClearMenuChanged(void)
+{
+    menu_repaint();
+}
+
+/*
+ * Close the Copy/Clear overlay and invalidate transient Menu marker state.
+ *
+ * Why: a held-copy frame may have borrowed the current LCD rows while VOICE
+ * CGRAM markers were valid. Clearing those caches before the ordinary repaint
+ * prevents stale underline glyph references after the overlay releases.
+ * Client: copyClearSession.c when COPY is released.
+ */
+void menu_copyClearMenuClosed(void)
+{
+    va_cgramValid = 0u;
+    va_underlineSuppressed = 0u;
+    menu_repaintAll();
+}
+
+/*
+ * Expose Menu's storage busy gate to Copy/Clear routing.
+ *
+ * Output: nonzero while an accepted Load/Save or resident storage operation
+ * owns the Menu surface. Copy/Clear uses this read-only bridge to reject new
+ * gestures without reaching Menu's private state.
+ */
+uint8_t menu_isStorageBusy(void)
+{
+    return menu_storageBusy;
 }
 
 /*
@@ -2339,6 +2441,10 @@ static void va_queueMarkerTransaction(const uint8_t desired_base[4],
     uint8_t row;
     uint8_t col;
     uint8_t needed;
+
+    /* Copy/Clear owns the two LCD rows while its action menu is visible. */
+    if (copyClear_menuVisible())
+        return;
 
     for (i = 0u; i < VA_CGRAM_SLOT_COUNT; i++) {
         uint8_t valid = (uint8_t)(desired_valid & (uint8_t)(1u << i));
@@ -3743,6 +3849,9 @@ static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
     if (cell->kind == MENU_CELL_STATIC &&
         menu_paramIsBusComp(cell->static_param))
         return menu_commitBusCompParam(cell->static_param, (uint8_t)value);
+    if (cell->kind == MENU_CELL_STATIC &&
+        cell->static_param == PAR_EFFECT_MORPH)
+        return menu_commitEffectMorphParam((uint8_t)value);
     if (cell->kind == MENU_CELL_STATIC) {
         uint8_t *paramValue = menu_getParameterEditPtr(cell->static_param);
         uint8_t old_value;
@@ -8323,6 +8432,21 @@ void menu_repaint(void)
         menu_repaintLoadSavePage();
     else
         menu_repaintGeneric();
+    /*
+     * S075 copy/clear menu overlay.
+     *
+     * What: while copy/clear shows a menu, every repaint replaces both LCD
+     * shadow rows with the two menu rows after the page renderer ran (the
+     * page state underneath is untouched). Why: page repaints (knob service,
+     * search completion, mode changes) keep happening during an operation and
+     * must not paint over the menu; the old menu wrote the LCD directly and
+     * was overwritten. Inputs: copyClear_menuVisible(),
+     * copyClear_formatMenu(). Output: two overlay rows without allocating
+     * another frame. Affiliates: menu_copyClearMenuChanged()/Closed(),
+     * va_queueMarkerTransaction().
+     */
+    if (copyClear_menuVisible())
+        copyClear_formatMenu(editDisplayBuffer[0], editDisplayBuffer[1]);
     if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
         !menu_loadSaveCursorVisible()) {
         uint8_t row;
@@ -9281,12 +9405,6 @@ static uint8_t menu_stepAutomationCurrentValue(
         case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
             return menu_morphAutomationStore(
                 scene_getVoiceMorphAmount(scene, descriptor->voice_slot));
-        case SCENE_MOD_TARGET_KIND_DECIMATION_ALL: {
-            const scene_t *scene_data = scene_getConst(scene);
-            value = scene_data ? scene_data->settings.voice_decimation_all
-                               : 0u;
-            break;
-        }
         case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
             value = scene_getSlot6Track7AmpEnvelopeDecay(scene);
             break;
@@ -11121,29 +11239,15 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
 
     screensaver_touch();
 
-    /* Clear mode owns both encoder turn and encoder click.
-    ** - Turn: select clear target.
-    ** - Click: execute selected clear operation.
-    ** While active, do NOT toggle regular menu edit mode. */
-    if (copyClear_isClearModeActive()) {
-        if (btnClicked) {
-            copyClear_executeClear();
-            return;
-        }
-
-        if (inc != 0) {
-            uint8_t target = copyClear_getClearTarget();
-            if (inc < 0) {
-                if (target != CLEAR_TRACK) {
-                    target--;
-                }
-            } else if (inc > 0) {
-                if (target != CLEAR_AUTOMATION2) {
-                    target++;
-                }
-            }
-            copyClear_setClearTarget(target);
-        }
+    /*
+     * S075: while the copy/clear button is held, copy/clear owns the encoder.
+     * A turn changes the menu selection when a menu is shown; clicks are
+     * ignored (user, B18); no parameter value or edit mode changes.
+     * Affiliates: copyClear_ownsEncoder(), copyClear_encoderTurned().
+     */
+    if (copyClear_ownsEncoder()) {
+        if (!btnClicked && inc != 0)
+            copyClear_encoderTurned(inc);
         return;
     }
 
@@ -11301,6 +11405,8 @@ static uint8_t menu_paramIsMorphAmount(uint16_t paramNr)
      */
     if (paramNr == PAR_MORPH)
         return 1u;
+    if (paramNr == PAR_EFFECT_MORPH)
+        return 1u;
     return (uint8_t)(paramNr >= PAR_VOICE1_MORPH &&
                      paramNr <= PAR_VOICE6_MORPH);
 }
@@ -11365,6 +11471,22 @@ static uint8_t menu_commitBusCompParam(uint16_t paramNr, uint8_t value)
     return 1u;
 }
 
+/*
+ * Commit one PERF `fxm` edit (S075).
+ *
+ * What: writes the active Scene's Effect Morph through EffectsManager, which
+ * fans the value out through the edit mask and marks retained Scene AutoSave,
+ * then refreshes the flat PERF mirror. Settings Load replays the corresponding
+ * flat id through the refresh-only path. Input: clamped 0..255 value. Output:
+ * repaint requested. Affiliate: effects_setMorphAmount().
+ */
+static uint8_t menu_commitEffectMorphParam(uint8_t value)
+{
+    (void)effects_setMorphAmount(scene_getActiveIndex(), value);
+    preset_syncEffectMorphMirror();
+    return 1u;
+}
+
 static void menu_updateEndlessPotScales(void)
 {
     uint8_t activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
@@ -11393,9 +11515,101 @@ static void menu_endlessPotMappingChanged(void)
     endlessPots_snapshotAll();
 }
 
+/*
+ * Resolve one visible endless-pot column to the canonical clear target.
+ *
+ * Inputs: physical pot number and output record. Output: Pattern target and,
+ * for Effect cells, the optional FX-sequence lane; zero means this column has
+ * no automatable owner. Clear mode calls this before consuming a delta so the
+ * normal value-edit path is never entered. Affiliates: Menu cell resolution,
+ * SceneModTargets, EffectsManager, and copyClearSession.
+ */
+static uint8_t menu_knobClearTarget(uint8_t knobNr, cc_pot_target_t *out)
+{
+    const uint8_t active_page =
+        (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    const uint8_t active_parameter = (uint8_t)(menuIndex & MASK_PARAMETER);
+    const uint8_t second_page = menu_isScreenPage(menu_activePage)
+        ? 0u : (uint8_t)((active_parameter > 3u) ? 4u : 0u);
+    menu_cell_t cell;
+
+    if (!out || knobNr >= ENDLESS_POT_COUNT)
+        return 0u;
+    out->pattern_target = 0xffffu;
+    out->fx_lane = 0xffu;
+    cell = menu_resolveCell(active_page, (uint8_t)(knobNr + second_page));
+
+    if (cell.kind == MENU_CELL_INSTRUMENT) {
+        if (!cell.descriptor ||
+            (cell.descriptor->flags & INSTRUMENT_PARAM_FLAG_AUTOMATABLE) == 0u)
+            return 0u;
+        out->pattern_target = instrumentParam_make(
+            menu_voicePageToSlot(menu_activePage), cell.descriptor_index);
+        return 1u;
+    }
+    if (cell.kind == MENU_CELL_SCENE_SETTING) {
+        instrument_param_id_t target =
+            menu_sceneSettingAutomationTarget(&cell);
+        if (target == INSTRUMENT_PARAM_INVALID)
+            return 0u;
+        out->pattern_target = target;
+        return 1u;
+    }
+    if (cell.kind == MENU_CELL_KIT_SETTING) {
+        if (cell.kit_setting != MENU_KIT_SETTING_SLOT6_TRACK7_AMP_DECAY)
+            return 0u;
+        out->pattern_target = sceneModTarget_slot6DecayId();
+        return (uint8_t)(out->pattern_target != INSTRUMENT_PARAM_INVALID);
+    }
+    if (cell.kind == MENU_CELL_STATIC) {
+        if (cell.static_param >= PAR_VOICE1_MORPH &&
+            cell.static_param <= PAR_VOICE6_MORPH) {
+            out->pattern_target = sceneModTarget_voiceMorphId(
+                (uint8_t)(cell.static_param - PAR_VOICE1_MORPH));
+            return (uint8_t)(out->pattern_target != INSTRUMENT_PARAM_INVALID);
+        }
+        if (cell.static_param == PAR_EFFECT_MORPH) {
+            out->pattern_target = sceneModTarget_effectMorphId();
+            out->fx_lane = EFFECT_SEQ_LANE_MORPH;
+            return (uint8_t)(out->pattern_target != INSTRUMENT_PARAM_INVALID);
+        }
+        return 0u;
+    }
+    if (cell.kind != MENU_CELL_EFFECT)
+        return 0u;
+
+    if (cell.fx.kind == MENU_FX_CELL_MORPH_AMOUNT) {
+        out->pattern_target = sceneModTarget_effectMorphId();
+        out->fx_lane = EFFECT_SEQ_LANE_MORPH;
+        return (uint8_t)(out->pattern_target != INSTRUMENT_PARAM_INVALID);
+    }
+    if (cell.fx.kind != MENU_FX_CELL_PARAM ||
+        !effects_paramAutomatable(effects_activeType(), cell.fx.index))
+        return 0u;
+    out->pattern_target = effectTarget_id(cell.fx.index);
+    (void)effects_laneOfParam(effects_activeType(), cell.fx.index,
+                               &out->fx_lane);
+    return 1u;
+}
+
 void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
 {
     if (menu_storageBusy) return;
+
+    /*
+     * S075: while the copy/clear button is held, no pot changes a value.
+     * In a clear operation with no menu shown, the turn is a pot clear of the
+     * parameter under the pot (menu_knobClearTarget()); in a copy operation,
+     * over a non-automatable cell, or while a clear menu is shown it does
+     * nothing (spec §6). Affiliates: copyClear_ownsPots(),
+     * copyClear_potTurned().
+     */
+    if (copyClear_ownsPots()) {
+        cc_pot_target_t target;
+        if (delta != 0 && menu_knobClearTarget(knobNr, &target))
+            (void)copyClear_potTurned(&target);
+        return;
+    }
 
     if (knobNr >= ENDLESS_POT_COUNT) return;
     if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
@@ -12840,6 +13054,10 @@ void menu_switchPage(uint8_t pageNr)
         menu_activePage = pageNr;
         editModeActive = 0;
         lockPotentiometerFetch();
+        if (pageNr == PERFORMANCE_PAGE) {
+            /* S075: refresh PERF `fxm` after Effect/copy/clear changes. */
+            preset_syncEffectMorphMirror();
+        }
         if (pageNr == SEQ_PAGE) {
             /*
              * STEP mode's front page is a track-settings view.
@@ -13305,27 +13523,14 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
         break;
     }
 
-    case PAR_VOICE_DECIMATION_ALL:
+    case PAR_EFFECT_MORPH:
         /*
-         * Scene global decimation is retained with other Scene settings.
-         *
-         * Inputs: PERF "srt" value 0..127. Output: Preset stores the setting
-         * and applies mixer_decimation_rate[6] using the same taper as the
-         * legacy VOICE_DECIMATION_ALL MIDI CC. Keeping the write behind Preset
-         * gives future sceneset.scg load/save one owner boundary.
+         * S075 PERF `fxm` is refresh-only here. Settings/legacy loads replay
+         * this id range; they must not write SceneData. Page edits commit via
+         * menu_commitEffectMorphParam().
          */
-    {
-        uint16_t edit_mask = bank_sceneMaskVoiceEdit();
-        uint8_t scene_index;
-
-        for (scene_index = 0u;
-             scene_index < SCENE_COUNT && scene_index < 16u;
-             scene_index++) {
-            if ((edit_mask & (uint16_t)(1u << scene_index)) != 0u)
-                preset_setVoiceDecimationAll(scene_index, value);
-        }
+        preset_syncEffectMorphMirror();
         break;
-    }
 
     case PAR_BUS_COMP_MODE:
     case PAR_BUS_COMP_AMOUNT:
@@ -13871,17 +14076,6 @@ void menu_init(void)
      * post-settings autosave policy application.
      */
     parameter_values[PAR_AUTOSAVE_ENABLED] = 1u;
-    /*
-     * Scene global sample-rate/decimation must default to full rate.
-     *
-     * SceneData also initializes voice_decimation_all to 127, but Menu's flat
-     * parameter mirror is memset to zero above and can be used by early global
-     * apply paths before a Scene settings apply has mirrored the retained
-     * value. A zero here shapes mixer_decimation_rate[6] to 0, so the decimator
-     * never refreshes voice samples and the unit presents as silent. Keep the
-     * mirror's undefined/startup value aligned with the Scene default.
-     */
-    parameter_values[PAR_VOICE_DECIMATION_ALL] = 127u;
     /* S074 mirrors start at the Scene defaults until Scene apply runs. */
     parameter_values[PAR_BUS_COMP_AMOUNT] = SCENE_BUS_COMP_DEFAULT_AMOUNT;
     parameter_values[PAR_BUS_COMP_TIME] = SCENE_BUS_COMP_DEFAULT_TIME;

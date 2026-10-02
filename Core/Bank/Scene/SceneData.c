@@ -1,6 +1,7 @@
 #include "SceneData.h"
 #include "Autosave.h"
 #include "BankData.h"
+#include "MidiNoteNumbers.h"
 #include <string.h>
 
 /*
@@ -347,25 +348,6 @@ void scene_setMorphAmount(uint8_t scene_index, uint8_t amount)
     scene_storeParameterByte(
         scene_index, &scene->settings.morph_amount,
         AUTOSAVE_SCENE_PARAM_MORPH_AMOUNT, amount);
-}
-
-void scene_setVoiceDecimationAll(uint8_t scene_index, uint8_t value)
-{
-    scene_t *scene = scene_get(scene_index);
-
-    /*
-     * Store Scene-wide decimation through its serialized owner boundary.
-     *
-     * Inputs: resident Scene and already-clamped 0..127 value. Output: changed
-     * retained state and the decimation dirty bit; DSP/mirror apply stays in
-     * Preset. Why: direct Preset assignment was the other Scene scalar hole.
-     * Affiliate: preset_setVoiceDecimationAll().
-     */
-    if (!scene)
-        return;
-    scene_storeParameterByte(
-        scene_index, &scene->settings.voice_decimation_all,
-        AUTOSAVE_SCENE_PARAM_DECIMATION_ALL, value);
 }
 
 void scene_setVoiceMorphAmount(uint8_t scene_index, uint8_t slot,
@@ -918,14 +900,121 @@ uint8_t scene_getBusCompSetting(uint8_t scene_index, uint8_t field)
     return scene->settings.bus_comp[field];
 }
 
+/*
+ * Default Instrument types of a fresh or emptied Scene (DRM, DRM, DRM, SNR,
+ * CYM, HAT). Shared by scene_initAll() and scene_resetKitToDefaults() (S075)
+ * so both produce the same Kit. filesystem_initSceneStage() keeps its own
+ * identical table for the Scene Load stage.
+ */
+static const instrument_type_t
+    scene_initialInstrumentTypes[INSTRUMENT_SLOT_COUNT] = {
+        INSTRUMENT_TYPE_DRM, INSTRUMENT_TYPE_DRM, INSTRUMENT_TYPE_DRM,
+        INSTRUMENT_TYPE_SNR, INSTRUMENT_TYPE_CYM, INSTRUMENT_TYPE_HAT
+    };
+
+/*
+ * Whole-settings defaults and commit for copy/clear (S075).
+ *
+ * Contract in SceneData.h. scene_settingsDefaults() reproduces the Scene Load
+ * stage defaults (filesystem_initSceneStage()). scene_commitSettings() writes
+ * every field through its change-aware setter, so each changed byte marks its
+ * own AutoSave cell and the card-clean bit; the before/after comparison runs
+ * on a stack copy (sizeof(scene_settings_t), under 64 B) because the setters
+ * do not report change. `src` may be another Scene's live settings.
+ */
+void scene_settingsDefaults(scene_settings_t *out)
+{
+    uint8_t i;
+
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    for (i = 0u; i < NUM_TRACKS; i++) {
+        out->midi_channel[i] = (uint8_t)(i + 1u);
+        out->midi_note[i] = MIDI_DEFAULT_TRIGGER_NOTE;
+    }
+    for (i = 0u; i < INSTRUMENT_SLOT_COUNT; i++)
+        out->audio_out[i] = scene_defaultVoiceAudioOut(i);
+    scene_busCompDefaults(out);
+}
+
+uint8_t scene_commitSettings(uint8_t scene_index, const scene_settings_t *src)
+{
+    scene_t *scene = scene_get(scene_index);
+    scene_settings_t before;
+    scene_settings_t image;
+    uint8_t i;
+
+    if (!scene || !src)
+        return 0u;
+    image = *src;
+    before = scene->settings;
+    scene_setMorphAmount(scene_index, image.morph_amount);
+    for (i = 0u; i < INSTRUMENT_SLOT_COUNT; i++) {
+        scene_setVoiceMorphAmount(scene_index, i, image.voice_morph_amount[i]);
+        scene_setVoiceAudioOut(scene_index, i, image.audio_out[i]);
+        scene_setVoiceFxSendAmount(scene_index, i, image.fx_send_amount[i]);
+        scene_setVoiceFaderSetting(scene_index, i, image.fader_setting[i]);
+    }
+    for (i = 0u; i < NUM_TRACKS; i++) {
+        scene_setTrackMidiChannel(scene_index, i, image.midi_channel[i]);
+        scene_setTrackMidiNote(scene_index, i, image.midi_note[i]);
+    }
+    scene_setEffectMorphAmount(scene_index, image.effect_morph_amount);
+    for (i = 0u; i < SCENE_BUS_COMP_FIELD_COUNT; i++)
+        scene_setBusCompSetting(scene_index, i, image.bus_comp[i]);
+    return (uint8_t)(memcmp(&before, &scene->settings, sizeof(before)) != 0);
+}
+
+/*
+ * Reset one Scene's Kit to the fresh-Scene Kit (contract in SceneData.h).
+ *
+ * Whole-Kit commit: each slot is reset through its descriptors, the slot-6 /
+ * track-7 decay pair returns to 0 through its own setters, then the Kit
+ * region marker and the card-clean bit are set (the direct slot assignment is
+ * the validated whole-commit exception of the AutoSave extension rule).
+ */
+void scene_resetKitToDefaults(uint8_t scene_index)
+{
+    scene_t *scene = scene_get(scene_index);
+    uint8_t slot;
+
+    if (!scene)
+        return;
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++)
+        instrumentManager_resetSlot(&scene->kit.instruments[slot],
+                                    scene_initialInstrumentTypes[slot]);
+    scene_setSlot6Track7AmpEnvelopeDecay(scene_index, 0u);
+    scene_setSlot6Track7MorphAmpEnvelopeDecay(scene_index, 0u);
+    bank_invalidateSdCleanScene(scene_index);
+    autosave_markKitDirty(scene_index);
+}
+
+/*
+ * Replace one Scene's whole Kit (contract in SceneData.h).
+ *
+ * Whole-Kit commit: the six slots and the Kit settings are copied, then the
+ * Kit region marker and the card-clean bit are set. `kit` may be another
+ * Scene's live Kit (never this Scene's own; that is a no-op).
+ */
+uint8_t scene_commitKit(uint8_t scene_index, const kit_t *kit)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    if (!scene || !kit)
+        return 0u;
+    if (&scene->kit == kit)
+        return 0u;
+    scene->kit = *kit;
+    bank_invalidateSdCleanScene(scene_index);
+    autosave_markKitDirty(scene_index);
+    return 1u;
+}
+
 void scene_initAll(void)
 {
     uint8_t scene_index;
     uint8_t track;
-    static const instrument_type_t initial_types[INSTRUMENT_SLOT_COUNT] = {
-        INSTRUMENT_TYPE_DRM, INSTRUMENT_TYPE_DRM, INSTRUMENT_TYPE_DRM,
-        INSTRUMENT_TYPE_SNR, INSTRUMENT_TYPE_CYM, INSTRUMENT_TYPE_HAT
-    };
 
     /*
      * Initialize each complete resident owner.
@@ -937,7 +1026,6 @@ void scene_initAll(void)
     memset(scenes, 0, sizeof(scenes));
     scene_active_index = 0u;
     for (scene_index = 0u; scene_index < SCENE_COUNT; scene_index++) {
-        scenes[scene_index].settings.voice_decimation_all = 127u;
         /* S074: bus compressor defaults are off, 48, 48, off. */
         scene_busCompDefaults(&scenes[scene_index].settings);
         for (track = 0u; track < NUM_TRACKS; track++)
@@ -959,7 +1047,7 @@ void scene_initAll(void)
         for (track = 0u; track < INSTRUMENT_SLOT_COUNT; track++)
             instrumentManager_resetSlot(
                 &scenes[scene_index].kit.instruments[track],
-                initial_types[track]);
+                scene_initialInstrumentTypes[track]);
         pat_initScene(scene_index);
     }
 }

@@ -115,7 +115,7 @@ enum NamesEnum {
     TEXT_PAT_LENGTH, TEXT_NUM_STEPS, TEXT_ROTATION,
     TEXT_BPM, TEXT_EXT_SYNC,
     TEXT_MIDI_CHANNEL, TEXT_AUDIO_OUT,          /* 50 */
-    TEXT_SAMPLE_RATE, TEXT_PATTERN_BEAT, TEXT_PATTERN_NEXT,
+    TEXT_EFFECT_MORPH, TEXT_PATTERN_BEAT, TEXT_PATTERN_NEXT,
     TEXT_MODE, TEXT_OSC_VOLUME, TEXT_FILTER_DRIVE,
     TEXT_VEL_DEST, TEXT_VEL_AMT, TEXT_VEL_MOD_VOL,
     TEXT_FETCH,                                 /* 60 */
@@ -169,7 +169,7 @@ enum longNamesEnum {
     LONG_DEST_VOICE, LONG_SLOPE, LONG_DECAY_CLOSED, LONG_DECAY_OPEN,
     LONG_ROLLRATE, LONG_MORPH, LONG_NOTE, LONG_PROBABILITY,
     LONG_NUMBER, LONG_LENGTH, LONG_STEPS, LONG_ROTATION,
-    LONG_TEMPO, LONG_EXTERNAL_SYNC, LONG_AUDIO_OUT, LONG_MIDI_CHANNEL, LONG_SAMPLE_RATE,
+    LONG_TEMPO, LONG_EXTERNAL_SYNC, LONG_AUDIO_OUT, LONG_MIDI_CHANNEL, LONG_EFFECT_MORPH,
     LONG_NEXT_PAT, LONG_PHASE, LONG_MODE, LONG_VOLUME_MOD,
     LONG_FETCH, LONG_FOLLOW, LONG_QUANTISATION,
     LONG_AUTOMATION_TRACK, LONG_AUTOMATION_DEST, LONG_AUTOMATION_VAL,
@@ -206,7 +206,7 @@ enum shortNamesEnum {
     SHORT_EQ_GAIN, SHORT_EQ_FREQ,
     SHORT_ROLL, SHORT_MORPH, SHORT_NOTE, SHORT_PROBABILITY,
     SHORT_STEP, SHORT_LENGTH, SHORT_ROTATION,
-    SHORT_BPM, SHORT_CHANNEL, SHORT_OUT, SHORT_SR, SHORT_NXT,
+    SHORT_BPM, SHORT_CHANNEL, SHORT_OUT, SHORT_EFFECT_MORPH, SHORT_NXT,
     SHORT_MODE, SHORT_VELOCITY, SHORT_FETCH, SHORT_FOLLOW, SHORT_QUANT,
     SHORT_TRACK, SHORT_VALUE, SHORT_SHUFFLE, SHORT_SCREEN_SAVER,
     SHORT_X, SHORT_Y, SHORT_FLUX, SHORT_MIDI, SHORT_MIDI_ROUTING,
@@ -465,22 +465,47 @@ uint8_t menu_voiceAutoOverlayActive(void);
 /* Re-evaluate overlay LEDs/display after a visible bar change. */
 void menu_voiceAutoOverlayBarChanged(void);
 /*
- * Invalidate the automation-presence search after an in-place Pattern/track
- * clear.
+ * Restart the automation-presence search after Pattern content changed (S075;
+ * formerly menu_voiceAutoOverlayPatternDeleted()).
  *
  * What: restarts the bounded search shared by the VOICE pages (active track)
- * and the Effect page (all seven tracks, S074), then repaints, so a name
- * underline whose last target was cleared disappears once the rescan
- * completes. Why: a cleared target cannot be proven absent from the rest of
- * the Pattern without a full rescan, and the SHIFT+COPY clear is not
- * page-gated. Inputs: none; call after the PatternData clear has been
- * submitted. Outputs: a cleared search and a repaint on VOICE and Effect
- * pages; nothing on other pages, whose next VOICE/Effect entry restarts the
- * search anyway. Callers: copyClear_clearCurrentPattern(),
- * copyClear_clearCurrentTrack(). Affiliates: va_searchRestart() and
- * va_scanService() in menu.c.
+ * and the Effect page (all seven tracks, S074), then repaints, so underlines
+ * follow the new content once the rescan completes. Why: a paste or clear can
+ * add or remove automation anywhere in the viewed Pattern, and a removed
+ * target cannot be proven absent without a full rescan. Inputs: none; call
+ * after Pattern content has been changed. Outputs: a cleared search and a
+ * repaint on VOICE and Effect pages; nothing on other pages, whose next
+ * VOICE/Effect entry restarts the search anyway. Callers: copyClearService.c
+ * after every Pattern paste/clear on the viewed Scene. Affiliates:
+ * va_searchRestart() and va_scanService() in menu.c.
  */
-void menu_voiceAutoOverlayPatternDeleted(void);
+void menu_patternContentChanged(void);
+/*
+ * Drop one target's underline now, without restarting the search (S075).
+ *
+ * What: clears the presence bit for one target in the current search result
+ * and repaints. Why: a pot clear removes the underline at the turn (spec §6)
+ * while the background removal runs; restarting the whole search would make
+ * every other underline vanish until the rescan completes. The search loop
+ * filters targets waiting in the register (ccSvc_targetPending()), so the
+ * bit cannot come back before the removal finishes. Inputs: Pattern target
+ * ID. Output: repaint. Caller: ccClear_potTurned().
+ */
+void menu_automationTargetCleared(uint16_t target);
+/*
+ * Copy/clear menu bridge (S075).
+ *
+ * menu_copyClearMenuChanged(): repaint after the copy/clear menu opened or
+ * its selection changed. menu_copyClearMenuClosed(): the menu closed; drop
+ * the CGRAM marker cache (the menu frame overwrote every marker cell) and
+ * repaint the page in full. menu_isStorageBusy(): read-only view of the
+ * Load/Save/Instrument storage lock, used to refuse an operation.
+ * Clients: copyClearSession.c. Affiliates: menu_repaint() overlay branch,
+ * va_queueMarkerTransaction().
+ */
+void menu_copyClearMenuChanged(void);
+void menu_copyClearMenuClosed(void);
+uint8_t menu_isStorageBusy(void);
 /*
  * STEP front-page half navigation.
  *

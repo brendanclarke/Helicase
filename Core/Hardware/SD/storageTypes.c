@@ -624,13 +624,12 @@ storage_status_t storage_scenesetParseLine(
                                   INSTRUMENT_SLOT_COUNT,
                                   255u);
     } else if (storage_streq(key, "voice_decimation_all")) {
-        if (!target_settings)
-            return STORAGE_STATUS_BAD_VALUE;
-        st = storage_parseU8(value, &parsed);
-        if (st != STORAGE_STATUS_OK)
-            return st;
-        target_settings->voice_decimation_all =
-            (parsed > 127u) ? 127u : parsed;
+        /*
+         * S075: global decimation was removed. Scenes saved before S075 still
+         * carry this key; consume it so the file remains valid and ignore it.
+         */
+        (void)value;
+        return STORAGE_STATUS_OK;
     } else if (storage_streq(key, "midi_channel")) {
         if (!target_settings)
             return STORAGE_STATUS_BAD_VALUE;
@@ -1880,7 +1879,7 @@ void storage_kitsetInit(storage_kitset_t *kit)
  * [slot1]..[slot6] sections collect instrument type and filename for each
  * voice. Legacy audio_out lines are accepted into side storage only; routing
  * is now Scene-owned and lives in sceneset.scg. The kit display name is owned
- * by the folder name, and performance controls such as voice_decimation_all
+ * by the folder name, and performance controls such as Effect Morph
  * are not stored in kitset.kcg.
  */
 storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,

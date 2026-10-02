@@ -76,6 +76,42 @@ uint8_t patSvc_prepareSceneReplace(uint8_t scene);
 void patSvc_finishSceneReplace(uint8_t scene);
 
 /*
+ * Exclusive Pattern access for copy/clear (S075, spec §9.4).
+ *
+ * What: grants one caller sole write access to one Scene's Pattern region
+ * (address array, pool, bitmap, track settings) between begin and end, on any
+ * resident Scene. While the claim exists no queued edit, barrier, repair or
+ * reactive step touches any pool, and playback handover does not reopen
+ * admission or adopt the claimed Scene. Inputs: a resident Scene. Outputs:
+ * begin returns 1 when the caller may write and 0 while queued work still
+ * drains (call again next tick) or a filesystem replacement / other claim is
+ * pending; a caller that gives up still calls end. End recounts occupancy,
+ * restarts the repair epoch and reopens admission or resumes the handover.
+ * The raw block API in PatternData.h is legal only inside this window.
+ * Clients: copyClearService.c.
+ */
+uint8_t patSvc_beginExclusive(uint8_t scene);
+void patSvc_endExclusive(uint8_t scene);
+
+/*
+ * Bounded pool maintenance for the exclusive holder (S075).
+ *
+ * patSvc_exclusiveCompactStep(): one sliding-compaction move per call (the
+ * block just above the lowest free chunk moves down, through the empty swap
+ * block when the runs overlap). Output: 1 moved, 0 already packed or cannot
+ * move. Repeated calls make all free space one run below the swap block.
+ *
+ * patSvc_exclusiveEvacuateSwapStep(): moves one pre-S075 block that overlaps
+ * the swap block below it, or clears orphan swap bits. Output: 1 moved, 0 swap
+ * block empty, 2 cannot move (caller drops the job).
+ *
+ * Both require the caller's claim on `scene`; every move keeps publication
+ * order and marks only the layout-only (non-semantic) AutoSave state dirty.
+ */
+uint8_t patSvc_exclusiveCompactStep(uint8_t scene);
+uint8_t patSvc_exclusiveEvacuateSwapStep(uint8_t scene);
+
+/*
  * Foreground dynamic-pool mutation entrypoints.
  *
  * Each function rejects a non-service Scene or closed admission, executes

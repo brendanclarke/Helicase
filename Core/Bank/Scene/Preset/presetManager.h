@@ -460,6 +460,16 @@ uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
  */
 void    preset_startDrumsetApply(void);
 uint8_t preset_tickDrumsetApply(void);
+/*
+ * Report whether the Scene and Instrument apply workers are idle (S075).
+ *
+ * Output: nonzero when neither the Scene (drumset) worker nor the Instrument
+ * apply worker is active. Why: a Scene-level paste or clear touching the
+ * active Scene waits at the head of the copy/clear queue until the previous
+ * apply (for example after a PERF Scene switch) has finished, so it never
+ * starts a second apply over a running one. Client: copyClearService.c.
+ */
+uint8_t preset_applyWorkersIdle(void);
 void    preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track);
 /*
  * Commit and start bounded runtime application for one staged Instrument slot.
@@ -481,6 +491,24 @@ void    preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track);
 void    preset_startInstrumentApply(uint8_t scene_index,
                                     uint8_t slot,
                                     uint8_t mark_autosave_whole_instrument);
+/*
+ * Commit one resident Instrument slot onto a slot in a set of Scenes (S075).
+ *
+ * What: copies type, Normal and Morph images from a resident source slot to
+ * dst_slot of every Scene in dst_mask through the same commit path as
+ * Instrument Load (Bank-present publication, whole-Instrument AutoSave
+ * marker, card-clean invalidation, runtime modulation clear and bounded
+ * apply when the active Scene is touched), with `self` LFO selectors moved
+ * from the source slot to the destination slot. Why: `copy instrument` (with
+ * edit-mask fan-out, user F3) must behave exactly like a load of that
+ * Instrument. Inputs: source Scene/slot, destination mask (the caller has
+ * checked the Advanced limit) and slot. Output: none; when the active Scene
+ * is in dst_mask, drive preset_tickInstrumentApply() until it returns 0.
+ * The slot-6/track-7 Kit decay pair is not part of the image (the caller
+ * copies it only slot 6 -> slot 6). Client: copyOps.c.
+ */
+void    preset_startInstrumentCopy(uint8_t src_scene, uint8_t src_slot,
+                                   uint16_t dst_mask, uint8_t dst_slot);
 /*
  * Commit staged KitMrp or InstrumentMrp endpoints and drain the bounded Morph
  * worker without replacing identity, Normal images, routing, or modulation
@@ -512,10 +540,10 @@ uint8_t preset_tickInstrumentApply(void);
  * Scene global mirror and all six per-slot Morph amounts. preset_morphVoice()
  * changes one slot only. preset_rebuildMorph() requeues the descriptor-driven
  * worker from retained Scene values without changing any Morph amounts, which
- * is required after endpoint loads/edits. preset_setVoiceDecimationAll()
- * retains and applies the Scene-wide decimation multiplier used by PERF "srt".
+ * is required after endpoint loads/edits. The former global `srt` control was
+ * retired in S075; the PERF slot now mirrors Effect Morph.
  *
- * Serialized-owner rule: overall Morph and decimation are committed through
+ * Serialized-owner rule: overall Morph is committed through
  * SceneData's change-aware setters before runtime mirrors/work are updated.
  * Inputs and runtime outputs remain unchanged; equal retained values create no
  * autosave mutation. Affiliates: SceneData's named Scene parameter boundary
@@ -527,7 +555,6 @@ void    preset_morphScene(uint8_t scene_index, uint8_t morph);
 void    preset_morphVoiceScene(uint8_t scene_index, uint8_t slot,
                                uint8_t morph);
 void    preset_rebuildMorph(void);
-void    preset_setVoiceDecimationAll(uint8_t scene_index, uint8_t value);
 /*
  * S074 master bus compressor Scene settings (cmp, cam, ctm, csc).
  *
@@ -541,16 +568,8 @@ void    preset_setVoiceDecimationAll(uint8_t scene_index, uint8_t value);
 void    preset_setBusCompSetting(uint8_t scene_index, uint8_t field,
                                  uint8_t value);
 void    preset_syncBusCompMirrors(void);
-/*
- * Apply Scene-wide decimation to runtime without changing retained Scene/Menu
- * state.
- *
- * Inputs: value in the 0..127 PERF `srt` domain. Output:
- * mixer_decimation_rate[6] receives the shaped multiplier. LFO modulation uses
- * this runtime-only path so Scene Decimation can be a Scene mod target without
- * causing the displayed PERF setting to move every LFO block.
- */
-void    preset_applyVoiceDecimationAllRuntime(uint8_t value);
+/* Refresh the PERF `fxm` mirror from the active Scene's Effect Morph (S075). */
+void    preset_syncEffectMorphMirror(void);
 void    preset_morphTick(void);
 uint8_t preset_getMorphValue(uint16_t index, uint8_t morph);
 

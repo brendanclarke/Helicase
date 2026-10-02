@@ -103,6 +103,17 @@ quiet window scheduling, and shared background CPU budget):
   overshoot tracking; DEV-only per-class `H` trace reports every ~5 seconds;
 - Pattern repair suppressed when `menu_activePage == LOAD_PAGE ||
   SAVE_PAGE` (Load/Save repair gate).
+- copy/clear suspension (Session 075): while
+  `copyClear_backgroundSuspended()` is nonzero (from the start of a copy or
+  clear operation until its queued pastes/clears, pot-clear register, apply
+  workers and name write have all finished), `filesystem_tick()` admits no
+  scalar drain or runtime ensure, no semantic or non-semantic Pattern drain,
+  no AutoSave/Pattern trace flush, no `settings.cfg` write and no deferred
+  HCNAMES flush, and the Pattern repair epoch does not start. A writer that
+  is already running finishes. The scalar writer keeps
+  `fs_autosave_page_suppressed` set while suspended, so its first drain
+  afterwards uses the 250 ms continuation deadline. Dirty marks are made at
+  every change and are written afterwards.
 - exact-length validation by a one-byte end-of-file probe in both scalar
   validators, silent self-repair of a torn record by the next drain, `V`
   trace bits 4..5, and a progress-aware drain stall observer (Session 074);
@@ -188,7 +199,7 @@ Each Scene region reserves:
   |---:|---|
   | 0 | Scene Morph amount |
   | 1..6 | per-voice Morph amount |
-  | 7 | voice decimation (`srt`) |
+  | 7 | reserved since S075 (former `srt`): always written as 127, the value older firmware treats as neutral; ignored on restore. Record layout, mask and format version unchanged. |
   | 8..13 | per-voice audio out |
   | 14..19 | per-voice FX send |
   | 20..25 | per-voice fader mode (0..3 since S074: `pre pst fx xfd`) |

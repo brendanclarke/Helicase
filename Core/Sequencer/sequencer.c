@@ -380,12 +380,6 @@ static void seq_restoreAllSceneAutomation(void)
                 presetMorph_applyVoiceNow(scene_index,
                                           descriptor->voice_slot);
                 break;
-            case SCENE_MOD_TARGET_KIND_DECIMATION_ALL:
-                parameter_values[PAR_VOICE_DECIMATION_ALL] =
-                    scene->settings.voice_decimation_all;
-                preset_applyVoiceDecimationAllRuntime(
-                    scene->settings.voice_decimation_all);
-                break;
             case SCENE_MOD_TARGET_KIND_AUDIO_OUT:
                 (void)preset_applyKitAudioRouting(scene_index,
                                                   descriptor->voice_slot);
@@ -969,14 +963,6 @@ static uint8_t seq_applySceneAutomation(uint16_t target, uint8_t value)
 			scene_getActiveIndex(), descriptor->voice_slot, morph);
 		break;
 	}
-	case SCENE_MOD_TARGET_KIND_DECIMATION_ALL:
-		/*
-		 * Decimation writes only the mixer runtime; the retained PERF mirror is
-		 * restored from SceneData when the overlay is cleared.
-		 */
-		parameter_values[PAR_VOICE_DECIMATION_ALL] = value;
-		preset_applyVoiceDecimationAllRuntime(value);
-		break;
 	case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
 		instrumentManager_setSlot6Track7StepDecayOverride(value);
 		break;

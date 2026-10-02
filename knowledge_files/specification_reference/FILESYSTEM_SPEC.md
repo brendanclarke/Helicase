@@ -122,7 +122,8 @@ Implemented through Session 064:
 - LFO and velocity modulation can target active-slot descriptor parameters
   without hardcoded per-instrument parameter lists.
 - LFO and velocity modulation can target the shared Scene modulation namespace:
-  per-voice Morph targets `1vm..6vm` and Scene Decimation `srt`.
+  per-voice Morph targets `1vm..6vm` and Effect Morph `fxm` (Scene
+  Decimation `srt` was retired in S075).
 - Per-instrument `instrument_decimation` is a voice-local descriptor target and
   is morphable, modulatable, and marked automatable for the future automation
   pass.
@@ -641,6 +642,37 @@ AutoSave's `.hcprms1/2` already use.
 Root-level entries outside the recognized list are ignored by normal
 loader/browser code.
 
+### Copy/clear: name-buffer loan and the `HNcU` update (S075)
+
+- **Name-buffer loan.** `filesystem_borrowNameCacheScratch()` lends the whole
+  9,000 B `.hcindex` name cache to copy/clear while an operation runs (only
+  when the facade is idle). It is tagged `FS_NAME_CACHE_COPYCLEAR`, so every
+  browser accessor reports "not loaded". While it is lent, cache disposal
+  requests are ignored and `filesystem_start()` refuses every operation except
+  the copy/clear name write (callers see the normal busy refusal).
+  `filesystem_returnNameCacheScratch()` clears it; Load/Save reloads its index
+  on the next entry.
+- **Suspension.** While `copyClear_backgroundSuspended()` is nonzero,
+  `filesystem_tick()` admits no background writer: `settings.cfg`, both trace
+  flushes, the deferred Load/Save HCNAMES flush, scalar AutoSave, and both
+  Pattern AutoSave drains. A writer already running finishes; dirty marks keep
+  accumulating; the scalar writer resumes on its 250 ms continuation deadline.
+- **`FS_INTERNAL_OP_UPDATE_HCNAMES_COPY` (`HNcU`).**
+  `filesystem_requestCopyResidentNames(cb)` runs the shared resident-name
+  update transaction: read `/.hcnames`, then (phase 3, or phase 7 for the
+  failed-read bootstrap) `filesystem_cacheCopyClearRemap()` copies the
+  original 161 names and sources to offsets 256 and 1,705 of the lent buffer
+  and applies the remap held at offset 0 (`remap[row]` = original row whose
+  name and source token the row takes; 0xFF unchanged; 0xFE content changed,
+  name kept). Copied rows lose their refreshed flag `R`, so the boot reader
+  never reloads a library object over pasted content. The register is then
+  written to `.hcnamtmp` and swapped in as for every other update. Instrument
+  type tokens are formatted from the resident slot and follow automatically.
+  On a card error the previous `.hcnames` stays.
+- `filesystem_identityRow(cls, scene, slot)` exposes the fixed row of a
+  Scene/Kit/Instrument/Pattern/Effect identity; `FS_HCNAMES_ROW_COUNT` (161)
+  is asserted against `FS_RESIDENT_NAMES_ROW_COUNT`.
+
 ## AsyncFATFS Directory Navigation
 
 The underlying asyncfatfs layer uses a state-machine approach to navigate directories and open files. When writing filesystem traversal logic, several critical rules apply:
@@ -900,7 +932,7 @@ pattern.pat
 
 `sceneset.scg` stores scene-level metadata/configuration and validates the
 folder as a scene. Current v1 Scene settings include global/per-voice Morph
-values, `voice_decimation_all`, seven MIDI channel/note values, the
+values, seven MIDI channel/note values, the
 Scene-owned per-voice mix settings `audio_out[6]`, `fx_send_amount[6]`, and
 `fader_setting[6]`, the optional `effect_morph_amount`, and (S074) the four
 optional bus compressor keys.
@@ -913,17 +945,23 @@ The writer emits one `key=value` line per field, in this order:
 | 1 | `version` | `1` | |
 | 2 | `morph_amount` | 0..255 | |
 | 3 | `voice_morph_amount` | 6 × 0..255, comma-separated | |
-| 4 | `voice_decimation_all` | 0..127 | |
-| 5 | `midi_channel` | 7 values | |
-| 6 | `midi_note` | 7 values | |
-| 7 | `audio_out` | 6 × 0..5 | |
-| 8 | `fx_send_amount` | 6 × 0..127 | |
-| 9 | `fader_setting` | 6 × 0..3 (`pre pst fx xfd`) | **3 = `xfd` since S074.** A value above the domain rejects the file, so firmware older than S074 rejects a Scene that uses `xfd` (downgrade only). |
-| 10 | `effect_morph_amount` | 0..255 | optional on load (S072) |
-| 11 | `bus_comp_mode` | 0..2 (`off`, `St1`, `St2`) | S074; optional on load |
-| 12 | `bus_comp_amount` | 0..127 (`cam`) | S074; optional |
-| 13 | `bus_comp_time` | 0..127 (`ctm`) | S074; optional |
-| 14 | `bus_comp_sidechain` | 0..6 (`off`, voice 1..6) | S074; optional |
+| 4 | `midi_channel` | 7 values | |
+| 5 | `midi_note` | 7 values | |
+| 6 | `audio_out` | 6 × 0..5 | |
+| 7 | `fx_send_amount` | 6 × 0..127 | |
+| 8 | `fader_setting` | 6 × 0..3 (`pre pst fx xfd`) | **3 = `xfd` since S074.** A value above the domain rejects the file, so firmware older than S074 rejects a Scene that uses `xfd` (downgrade only). |
+| 9 | `effect_morph_amount` | 0..255 | optional on load (S072) |
+| 10 | `bus_comp_mode` | 0..2 (`off`, `St1`, `St2`) | S074; optional on load |
+| 11 | `bus_comp_amount` | 0..127 (`cam`) | S074; optional |
+| 12 | `bus_comp_time` | 0..127 (`ctm`) | S074; optional |
+| 13 | `bus_comp_sidechain` | 0..6 (`off`, voice 1..6) | S074; optional |
+
+- **`voice_decimation_all` retired (S075).** Global `srt` is no longer a
+  parameter: the key is not written, and an existing file that contains it
+  loads with the key accepted and ignored. Lines after `voice_morph_amount`
+  moved up by one (line numbers are the writer's order, not a file
+  contract; the parser is key-based). Firmware older than S075 defaults a
+  missing key to 127, its neutral value.
 
 - **Bus compressor keys (S074):**
   - The four keys come from one table shared by the writer and parser
@@ -1093,7 +1131,6 @@ Current `scene_settings_t` fields:
 
 - `morph_amount`
 - `voice_morph_amount[INSTRUMENT_SLOT_COUNT]`
-- `voice_decimation_all`
 - `midi_channel[NUM_TRACKS]`
 - `midi_note[NUM_TRACKS]`
 - `audio_out[INSTRUMENT_SLOT_COUNT]`
@@ -1257,7 +1294,6 @@ Validation rules:
 - MIDI channel or MIDI note.
 - Scene settings.
 - Per-voice audio routing, FX send amount, or fader mode.
-- `voice_decimation_all`.
 - Instrument parameter values.
 - Instrument morph endpoint values.
 
@@ -1491,7 +1527,8 @@ Current bounds:
 - `INSTRUMENT_PARAM_COUNT`: 64.
 - Voice parameter IDs: `0..383`.
 - Scene modulation IDs occupy block 6 from `INSTRUMENT_VOICE_ID_COUNT`
-  (`384`): `384..389` `1vm..6vm`, `390` `srt`, `392..397` `1ou..6ou`,
+  (`384`): `384..389` `1vm..6vm`, `390` retired `srt` placeholder (S075;
+  rejected by validation, existing entries do nothing), `392..397` `1ou..6ou`,
   `398..403` `1fx..6fx`, `404` `fxm` (Effect Morph).
 - Block 7 `448..510` addresses Effect-local parameters `0..62` of the
   Scene's Effect type; `511` is the Pattern off sentinel. See
@@ -1702,10 +1739,10 @@ Current descriptor Morph state after Session 033:
   table, so instrument swapping remains dynamic and the Morph engine does not
   own hardcoded parameter lists.
 - Per-voice Morph amounts live in `scene_settings_t.voice_morph_amount[6]`.
-- PERF shows two four-cell screens: `mrp 1vm 2vm 3vm` and `4vm 5vm 6vm srt`.
+- PERF shows two four-cell screens: `mrp 1vm 2vm 3vm` and `4vm 5vm 6vm fxm`
+  (S075: `fxm` is the active Scene's Effect Morph, committed like the Effect
+  page's `mrp` and fanned out through the edit mask, double pot speed).
 - Setting global `mrp` bulk-sets all six per-voice Morph values.
-- Setting `srt` controls Scene/global decimation and defaults to `127` when
-  Scene state has no explicit value yet.
 - Per-voice Morph is the actual Morph-engine control. Global Morph is only a
   convenience set operation.
 
@@ -1761,8 +1798,6 @@ Current velocity modulation behavior:
 - Scene per-voice Morph targets are retained set operations on
   `voice_morph_amount[slot]`, scaled by velocity and amount, and update the
   PERF menu value.
-- Scene Decimation is a retained set operation on `voice_decimation_all` and
-  updates the PERF menu value.
 
 Current LFO modulation behavior:
 
@@ -1787,8 +1822,7 @@ Current LFO modulation behavior:
 - The Morph worker adds one extra foreground pass for each voice whose Morph is
   currently LFO-modulated. It still interpolates one descriptor per pass rather
   than trying to recalculate a whole voice immediately.
-- Scene Decimation LFO modulation is runtime-only; it does not move the retained
-  `voice_decimation_all` menu value.
+- The retired `srt` target (S075) does nothing as an LFO destination.
 
 Current target limitations:
 

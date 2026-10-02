@@ -58,12 +58,12 @@ _Static_assert(SCENE_COUNT == AUTOSAVE_SCENE_COUNT,
  * Scene/track/slot counts; output is a build failure on ordering drift.
  * Affiliates: autosave_getSceneParameter() and SceneData scalar setters.
  */
-_Static_assert(AUTOSAVE_SCENE_PARAM_DECIMATION_ALL -
+_Static_assert(AUTOSAVE_SCENE_PARAM_RESERVED_7 -
                    AUTOSAVE_SCENE_PARAM_VOICE_MORPH_BASE ==
                    INSTRUMENT_SLOT_COUNT,
                "Scene voice Morph group must cover every instrument slot");
 _Static_assert(AUTOSAVE_SCENE_PARAM_AUDIO_OUT_BASE ==
-                   AUTOSAVE_SCENE_PARAM_DECIMATION_ALL + 1u,
+                   AUTOSAVE_SCENE_PARAM_RESERVED_7 + 1u,
                "Scene audio group must follow decimation");
 _Static_assert(AUTOSAVE_SCENE_PARAM_FX_SEND_BASE -
                    AUTOSAVE_SCENE_PARAM_AUDIO_OUT_BASE ==
@@ -904,11 +904,12 @@ static uint8_t autosave_getSceneParameter(const scene_t *scene,
     if (parameter_index == AUTOSAVE_SCENE_PARAM_MORPH_AMOUNT) {
         *value = scene->settings.morph_amount;
     } else if (parameter_index >= AUTOSAVE_SCENE_PARAM_VOICE_MORPH_BASE &&
-               parameter_index < AUTOSAVE_SCENE_PARAM_DECIMATION_ALL) {
+               parameter_index < AUTOSAVE_SCENE_PARAM_RESERVED_7) {
         *value = scene->settings.voice_morph_amount[
             parameter_index - AUTOSAVE_SCENE_PARAM_VOICE_MORPH_BASE];
-    } else if (parameter_index == AUTOSAVE_SCENE_PARAM_DECIMATION_ALL) {
-        *value = scene->settings.voice_decimation_all;
+    } else if (parameter_index == AUTOSAVE_SCENE_PARAM_RESERVED_7) {
+        /* S075: retired global decimation; neutral constant for old readers. */
+        *value = 127u;
     } else if (parameter_index < AUTOSAVE_SCENE_PARAM_FX_SEND_BASE) {
         *value = scene->settings.audio_out[
             parameter_index - AUTOSAVE_SCENE_PARAM_AUDIO_OUT_BASE];
@@ -1344,7 +1345,7 @@ void autosave_applyBankPayload(const uint8_t *bank_section)
  * scene->settings through SceneData's change-aware setters (their dirty
  * notifications no-op while boot tracking is disabled). Inputs: scene_index
  * (0..15), pointer to the 1920-byte Scene section. Outputs: morph_amount,
- * voice_morph_amount[6], voice_decimation_all, audio_out[6], fx_send_amount[6],
+ * voice_morph_amount[6], reserved cell 7, audio_out[6], fx_send_amount[6],
  * fader_setting[6], midi_channel[7], midi_note[7], effect_morph_amount and
  * the S074 bus_comp[4] all updated in
  * scene_get(scene_index)->settings. Why: each field's payload index must
@@ -1369,15 +1370,15 @@ void autosave_applyScenePayload(uint8_t scene_index,
             scene_setMorphAmount(scene_index, value);
         } else if (parameter_index >=
                        AUTOSAVE_SCENE_PARAM_VOICE_MORPH_BASE &&
-                   parameter_index < AUTOSAVE_SCENE_PARAM_DECIMATION_ALL) {
+                   parameter_index < AUTOSAVE_SCENE_PARAM_RESERVED_7) {
             scene_setVoiceMorphAmount(
                 scene_index,
                 (uint8_t)(parameter_index -
                           AUTOSAVE_SCENE_PARAM_VOICE_MORPH_BASE),
                 value);
         } else if (parameter_index ==
-                   AUTOSAVE_SCENE_PARAM_DECIMATION_ALL) {
-            scene_setVoiceDecimationAll(scene_index, value);
+                   AUTOSAVE_SCENE_PARAM_RESERVED_7) {
+            /* S075: retired global decimation byte; ignored on restore. */
         } else if (parameter_index < AUTOSAVE_SCENE_PARAM_FX_SEND_BASE) {
             scene_setVoiceAudioOut(
                 scene_index,

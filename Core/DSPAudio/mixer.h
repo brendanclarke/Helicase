@@ -57,7 +57,7 @@
 #define USE_DECIMATOR 1
 
 #if USE_DECIMATOR
-extern float mixer_decimation_rate[7];		/**<sets the sample rate decimation. 0..1 = full rate*/
+extern float mixer_decimation_rate[6];		/**<sets the per-voice sample rate decimation. 0..1 = full rate*/
 #endif
 
 extern uint8_t mixer_audioRouting[6];

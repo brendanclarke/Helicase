@@ -2399,9 +2399,6 @@ static uint8_t instrumentManager_applyVelocitySceneTarget(
     case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
         preset_morphVoice(descriptor->voice_slot, (uint8_t)value);
         return 1u;
-    case SCENE_MOD_TARGET_KIND_DECIMATION_ALL:
-        preset_setVoiceDecimationAll(scene_getActiveIndex(), (uint8_t)value);
-        return 1u;
     case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
         preset_setSlot6Track7AmpEnvelopeDecay(scene_getActiveIndex(), 0u,
                                               (uint8_t)value, 0u);
@@ -2516,13 +2513,6 @@ static uint8_t instrumentManager_updateLfoSceneDestination(
                                    (uint8_t)direction, depth);
         return 1u;
     }
-    case SCENE_MOD_TARGET_KIND_DECIMATION_ALL:
-        base = scene->settings.voice_decimation_all;
-        shaped = modNode_shapeRangeU16(base, descriptor->min_value,
-                                       descriptor->max_value,
-                                       lfo_value_0_1, amount, polarity);
-        preset_applyVoiceDecimationAllRuntime((uint8_t)shaped);
-        return 1u;
     case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
         base = scene->kit.settings.slot6_track7_amp_envelope_decay;
         shaped = modNode_shapeRangeU16(base, descriptor->min_value,
@@ -2665,7 +2655,6 @@ static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
                                                            uint8_t target_pair)
 {
     installed_mod_target_t *installed;
-    const scene_t *scene;
 
     /*
      * Restore the base value for one installed supplemental LFO target.
@@ -2680,7 +2669,6 @@ static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
     if (source_slot >= INSTRUMENT_SLOT_COUNT || target_pair > 1u)
         return;
     installed = &lfo_installed_targets[source_slot][target_pair];
-    scene = scene_getConst(scene_getActiveIndex());
     switch (installed->kind) {
     case INSTALLED_MOD_TARGET_SLOT_DECIMATION:
         (void)instrumentManager_applySlotDecimationTarget(
@@ -2690,12 +2678,6 @@ static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
     case INSTALLED_MOD_TARGET_SCENE_TARGET: {
         const scene_mod_target_descriptor_t *descriptor =
             sceneModTarget_descriptor(installed->target_id);
-        if (descriptor &&
-            descriptor->kind == SCENE_MOD_TARGET_KIND_DECIMATION_ALL &&
-            scene) {
-            preset_applyVoiceDecimationAllRuntime(
-                scene->settings.voice_decimation_all);
-        }
         if (descriptor &&
             descriptor->kind == SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY) {
             slot6_track7_decay_lfo_active = 0u;

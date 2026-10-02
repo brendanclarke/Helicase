@@ -120,7 +120,9 @@ def parse_scene_values(path: Path) -> list[int]:
 
     result[0] = int(values.get("morph_amount", "0"), 0)
     result[1:7] = list_values("voice_morph_amount", 6)
-    result[7] = int(values.get("voice_decimation_all", "127"), 0)
+    # S075: Scene cell 7 (former `srt`, voice_decimation_all) is reserved;
+    # firmware always writes 127 and no longer reads or writes the sceneset key.
+    result[7] = 127
     result[8:14] = list_values("audio_out", 6)
     result[14:20] = list_values("fx_send_amount", 6)
     result[20:26] = list_values("fader_setting", 6)

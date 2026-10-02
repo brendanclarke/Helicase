@@ -520,8 +520,16 @@ static uint16_t effects_fanoutMask(uint8_t scene_index, uint8_t match_type)
     if (!origin || scene_index >= SCENE_COUNT)
         return 0u;
     mask = (uint16_t)(1u << scene_index);
+    /*
+     * S075: every Scene owns a directional VOICE edit-mask entry. The active
+     * Scene keeps the self-repairing UI accessor; an inactive Scene must use
+     * its indexed entry so an Effect paste cannot collapse to the audible
+     * Scene.
+     */
     if (scene_index == scene_getActiveIndex())
         mask = (uint16_t)(mask | bank_sceneMaskVoiceEdit());
+    else
+        mask = (uint16_t)(mask | bank_sceneMaskVoiceEditForScene(scene_index));
     if (!match_type)
         return mask;
     for (s = 0u; s < SCENE_COUNT; s++) {
@@ -899,6 +907,182 @@ uint8_t effects_setSeqLaneLock(uint8_t scene_index, uint16_t step_mask,
     for (s = 0u; s < SCENE_COUNT; s++) {
         if ((mask & (uint16_t)(1u << s)) != 0u)
             changed |= effects_setSeqLaneLockScene(s, step_mask, lane, value);
+    }
+    return changed;
+}
+
+/*
+ * Fan-out Effect record and FX sequence operations for copy/clear (S075).
+ *
+ * Contract in EffectsManager.h. effects_pasteRecord(): the mask is computed
+ * against the destination's *current* Effect type (members share it through
+ * the layout gate), then every member receives the whole source record, so a
+ * paste may change the type of the destination and its members (`copy
+ * effect` copies the record, user B10). A member whose record is the source
+ * itself is skipped (the source is read live, never copied onto itself).
+ */
+uint16_t effects_pasteRecord(uint8_t dst_scene, const effect_record_t *src)
+{
+    const effect_record_t *dst = scene_effectConst(dst_scene);
+    uint16_t mask;
+    uint8_t member;
+
+    if (!dst || !src || dst_scene >= SCENE_COUNT)
+        return 0u;
+    mask = effects_fanoutMask(dst_scene, 1u);
+    for (member = 0u; member < SCENE_COUNT; member++) {
+        if ((mask & (uint16_t)(1u << member)) == 0u ||
+            scene_effectConst(member) == src)
+            continue;
+        (void)scene_commitEffectRecord(member, src);
+    }
+    if ((mask & (uint16_t)(1u << scene_getActiveIndex())) != 0u)
+        effects_activateScene(scene_getActiveIndex());
+    bank_revalidateVoiceEditMasks();
+    return mask;
+}
+
+/*
+ * Reset an Effect record to its registered off defaults with fan-out.
+ *
+ * Inputs: destination Scene. Output: same-type edit-mask members are reset in
+ * place, AutoSave-marked by SceneData, and the active runtime is reactivated.
+ * No 420-byte temporary is allocated; each member uses the retained whole-
+ * record commit pair directly.
+ */
+uint16_t effects_resetRecord(uint8_t dst_scene)
+{
+    const effect_record_t *dst = scene_effectConst(dst_scene);
+    uint16_t mask;
+    uint8_t member;
+
+    if (!dst || dst_scene >= SCENE_COUNT)
+        return 0u;
+    mask = effects_fanoutMask(dst_scene, 1u);
+    for (member = 0u; member < SCENE_COUNT; member++) {
+        effect_record_t *record;
+
+        if ((mask & (uint16_t)(1u << member)) == 0u)
+            continue;
+        record = scene_effectRecordForWholeCommit(member);
+        if (!record)
+            continue;
+        scene_effectRecordDefaults(record);
+        scene_finishEffectWholeCommit(member);
+    }
+    if ((mask & (uint16_t)(1u << scene_getActiveIndex())) != 0u)
+        effects_activateScene(scene_getActiveIndex());
+    bank_revalidateVoiceEditMasks();
+    return mask;
+}
+
+/*
+ * Paste one retained FX-sequence step across same-type edit-mask members.
+ *
+ * Inputs: destination Scene, 0..15 step, and an 18-byte step image. Output:
+ * nonzero when at least one retained lane or lock changed. Active Morph-lane
+ * changes invalidate the held Morph latch and advance the UI serial.
+ */
+uint8_t effects_pasteSeqStep(uint8_t dst_scene, uint8_t step,
+                             const effect_seq_step_t *src)
+{
+    const effect_record_t *dst = scene_effectConst(dst_scene);
+    uint16_t mask;
+    uint8_t member;
+    uint8_t lane;
+    uint8_t changed = 0u;
+    uint8_t active_changed_morph = 0u;
+
+    if (!dst || !src || dst_scene >= SCENE_COUNT ||
+        step >= EFFECT_SEQ_STEP_COUNT)
+        return 0u;
+    mask = effects_fanoutMask(dst_scene, 1u);
+    for (member = 0u; member < SCENE_COUNT; member++) {
+        const effect_record_t *record;
+
+        if ((mask & (uint16_t)(1u << member)) == 0u)
+            continue;
+        record = scene_effectConst(member);
+        if (!record)
+            continue;
+        for (lane = 0u; lane < EFFECT_SEQ_LANE_COUNT; lane++) {
+            uint16_t bit = (uint16_t)(1u << lane);
+            uint8_t old_value = record->steps[step].value[lane];
+            uint8_t old_locked = (uint8_t)((record->steps[step].lock_mask &
+                                            bit) != 0u);
+            uint8_t new_locked = (uint8_t)((src->lock_mask & bit) != 0u);
+
+            if (old_value != src->value[lane] || old_locked != new_locked)
+                changed = 1u;
+            if (member == scene_getActiveIndex() &&
+                lane == EFFECT_SEQ_LANE_MORPH &&
+                (old_value != src->value[lane] || old_locked != new_locked))
+                active_changed_morph = 1u;
+            scene_setEffectSeqLaneValue(member, step, lane, src->value[lane]);
+            scene_setEffectSeqLaneLocked(member, step, lane, new_locked);
+        }
+    }
+    if (active_changed_morph) {
+        effects_state.seq_serial++;
+        effects_state.held_morph_valid = 0u;
+    }
+    return changed;
+}
+
+/*
+ * Clear retained FX-sequence lanes across a same-type edit-mask fan-out.
+ *
+ * Inputs: destination Scene, step mask, and lane mask. Output: selected lane
+ * values become zero and unlocked; parameters and sequence settings stay
+ * intact. Active Morph-lane changes invalidate the held latch and increment
+ * the sequence serial consumed by Menu.
+ */
+uint8_t effects_clearSeqLanes(uint8_t scene_index, uint16_t step_mask,
+                              uint16_t lane_mask)
+{
+    const effect_record_t *dst = scene_effectConst(scene_index);
+    uint16_t mask;
+    uint8_t member;
+    uint8_t step;
+    uint8_t lane;
+    uint8_t changed = 0u;
+    uint8_t active_changed_morph = 0u;
+
+    if (!dst || scene_index >= SCENE_COUNT)
+        return 0u;
+    mask = effects_fanoutMask(scene_index, 1u);
+    for (member = 0u; member < SCENE_COUNT; member++) {
+        const effect_record_t *record;
+
+        if ((mask & (uint16_t)(1u << member)) == 0u)
+            continue;
+        record = scene_effectConst(member);
+        if (!record)
+            continue;
+        for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++) {
+            if ((step_mask & (uint16_t)(1u << step)) == 0u)
+                continue;
+            for (lane = 0u; lane < EFFECT_SEQ_LANE_COUNT; lane++) {
+                uint16_t bit = (uint16_t)(1u << lane);
+
+                if ((lane_mask & bit) == 0u)
+                    continue;
+                if (record->steps[step].value[lane] != 0u ||
+                    (record->steps[step].lock_mask & bit) != 0u)
+                    changed = 1u;
+                if (member == scene_getActiveIndex() &&
+                    lane == EFFECT_SEQ_LANE_MORPH &&
+                    (record->steps[step].value[lane] != 0u ||
+                     (record->steps[step].lock_mask & bit) != 0u))
+                    active_changed_morph = 1u;
+                scene_setEffectSeqLaneValue(member, step, lane, 0u);
+                scene_setEffectSeqLaneLocked(member, step, lane, 0u);
+            }
+        }
+    }
+    if (active_changed_morph) {
+        effects_state.seq_serial++;
+        effects_state.held_morph_valid = 0u;
     }
     return changed;
 }

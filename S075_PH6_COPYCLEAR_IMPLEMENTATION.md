@@ -2762,3 +2762,137 @@ checklist.
 | Names | HCNAMES rows after each kind, fanned-out and chained pastes; refreshed flags; card removed during the name write ends the operation |
 | `srt` retirement | PERF `fxm` edits and fans out; Scenes saved with `srt` load; old `srt` automation and LFO targets do nothing; AutoSave round trip |
 | Regression | Load/Save; Pattern service under playback and Scene switching; VOICE and Effect underlines; AutoSave power cycle |
+
+---
+
+## 14. Implementation log
+
+Notes taken while implementing. The working tree baseline for this pass is
+commit `00bd078` ("s075 copyclear pre-implement") plus an uncommitted partial
+implementation. Line numbers in §3–§12 still refer to `b33c94e`; anchors are
+used where they have moved.
+
+### 14.1 Review of the partial implementation (2026-10-01)
+
+| Stage | State found | Action |
+|---|---|---|
+| 1 LED | Group blink implemented. Bug: `led_setBlinkGroup()` cleared `LED_LAYER_BLINK` on a removed member even when a blink slot still owned that LED. One comment line lost its indent. | Fix (§14.2). |
+| 2 `srt` | Done as scheduled. Bug: `MidiParser.c` removed the per-voice `VOICE_DECIMATION1..6` CC assignment together with the global case, so per-voice decimation CCs did nothing. `copyClearTools.c/h` still on disk (not built). | Fix MIDI; delete the old files. |
+| 3 Session | `copyClearSession.c` departed from the spec: OK/CANCEL menus instead of the selection lists, sources set on press (no range rule), MODE/BAR/SHIFT all consumed (no navigation possible), copy LED blinking at press, clears queued on copy/clear release, encoder click posting a clear, suspension active from the press, register wiped on release. Filesystem suspension gates, the name-buffer borrow API and the repair-epoch gate were missing. | Rewrite the four CopyClear pairs to the schedule; add the gates and borrow. |
+| 4 Pattern | Reserve constants, allocator bounds, in-place append bound, service bounds and exclusive begin/end done. `pat_copyStep/Track/Pattern/Bar` were made into real copies (erase-then-write, unbounded) instead of removed; `pat_rawReadBlock()` returned 1 for an empty step; `pat_rawPublishEmpty()` published twice; `pat_rawRegionRewriteBlock()` read the silenced destination and could never work; compaction and swap evacuation were stubs. No paste engine. | Remove the copies; correct the raw API; implement compaction/evacuation and the engine. |
+| 5–6 | Pot-target resolver, underline hooks and register shell present; register drain used queued single-step removals and was cleared on release. | Re-implement in the service. |
+| 7 FX | Fan-out mask change and the four functions present. Bug: `effects_pasteRecord()` refused a paste across Effect types, so `copy effect` could never change type. No header prototypes. | Fix; add prototypes. |
+| 8–9 | Not started (BankData/SceneData/Preset helpers, executors, HCNAMES op). | Implement. |
+| 10 Docs | Not started. | Update. |
+
+### 14.2 Changes made in this pass (2026-10-01)
+
+Every changed function carries its contract block beside the code in the
+`.c` file and beside the prototype in the `.h` file.
+
+| Stage | File(s) | Change |
+|---|---|---|
+| 1 | `ledHandler.c` | `led_setBlinkGroup()` keeps `LED_LAYER_BLINK` on a removed group member while a blink slot still owns that LED (new `led_blinkSlotMember()`); comment indent fixed; S075 block before the shared blink-phase toggle. |
+| 2 | `MidiParser.c` | Per-voice `VOICE_DECIMATION1..6` CC assignment restored; only the global case stays removed. |
+| 3 | `copyClearTools.c/h` | Deleted (`git rm`). |
+| 3 | `CopyClear/copyClearSession.c/h` | Rewritten to spec §3, §4.1–§4.3, §7, §8: range rule with a 16-entry nibble press stack; sources on release (SEQ/SELECT rows) or press (TRACK, PERF SEQ); copy menus at the default, clear menus at `cancel`; per-mode routing tables; MODE to LOAD/SAVE, MENU or SOM consumed; BAR consumed while a row is held or for FX sources; SHIFT passes through; edge masks pair consumed presses with releases; source group blink recomputed after every event; encoder turns only (clicks ignored); pots only in a clear operation with no menu shown. |
+| 3 | `menu.c/h` | Encoder block ignores clicks; overlay, pot-ownership and bridge comment blocks updated in both files. |
+| 3 | `buttonHandler.c` | `case BUT_COPY` block per S3-23. |
+| 3 | `filesystem.c/h` | Suspension gates on all seven background admissions (`cc_suspended`, page-suppressed flag held while suspended); `FS_NAME_CACHE_COPYCLEAR`, `fs_name_cache_borrowed`, `filesystem_borrowNameCacheScratch()` / `filesystem_returnNameCacheScratch()`, `FS_NAME_SCRATCH_BYTES` with static assert. |
+| 3 | `PatternStackService.c` | Repair-epoch gate `copyClear_backgroundSuspended()`. |
+| 4 | `config.h` | `PAT_COPY_SWAP_*` renamed to `PAT_POOL_SWAP_CHUNKS` / `PAT_POOL_SWAP_BYTES`; contract block. |
+| 4 | `PatternData.c/h` | `pat_copyStep/Track/Pattern/Bar` and `pat_rawWriteBlock` removed. Raw API rewritten at the end of the file: `pat_rawReadBlock` (0 for no block), `pat_rawPlace`, `pat_rawPlaceViaSwap`, `pat_rawSwapReturn`, `pat_rawPublishEmpty` (one PRIMASK publish, then free), `pat_rawFreeChunks`, `pat_rawSwapFree`, region silence/copy-body/publish/reset, and `pat_rawRegionCopiedBlock` + `pat_rawRegionPublishRewritten` replacing `pat_rawRegionRewriteBlock`. `pat_poolAlloc()` bound is `PAT_POOL_ALLOC_CHUNKS`. Stale `copyClearTools` comment fixed. |
+| 4 | `PatternStackService.c/h` | `patSvc_beginExclusive()` also refuses while a filesystem replacement is pending; `patSvc_endExclusive()` restarts the repair epoch. `patSvc_exclusiveCompactStep()` (sliding compaction, see §14.3) and `patSvc_exclusiveEvacuateSwapStep()` (moves a pre-S075 block out of the swap block, clears orphan swap bits) implemented. |
+| 4–6, 9 | `CopyClear/copyClearService.c/h` | Queue (4), run state, claim helper, name-buffer borrow; Pattern paste engine (claim + evacuate, snapshot with retargeting, check, place, finish); Pattern clear engine; whole-region copy (literal one pass, retargeting 32 entries per tick) and reset; register drain (one target per pass); name remap, HCNAMES write with a 2 s retry window, buffer return, `copyClear_serviceFinished()`. |
+| 4, 8 | `CopyClear/copyOps.c/h` | Menus, `ccCopy_requestPaste()`, retargeting (§9.7), `ccCopy_buildStep()` (merge rules), executors for Instrument, Kit, Effect, Scene settings, Scene, Pattern and FX steps. |
+| 5–8 | `CopyClear/clearOps.c/h` | Menus, `ccClear_requestClear()`, EFFECTS SEQ clear, pot clear front end, executors for `clear send`, `clear scene`, `clear scene settings`, `clear pattern`, `clear fx`, `clear fx sequence`. |
+| 6 | `SceneModTargets.h` | Full contract blocks for `sceneModTarget_effectMorphId()` / `sceneModTarget_slot6DecayId()`. |
+| 7 | `EffectsManager.c/h` | `effects_pasteRecord()` no longer requires equal types (mask on the destination's current type; a member equal to the source is skipped); the four prototypes added with their block. |
+| 8 | `BankData.c/h` | `bank_sceneFanoutMask()`, `bank_exchangeVoiceEditMask()`, `bank_resetVoiceEditMaskToSelf()`. |
+| 8 | `SceneData.c/h` | `scene_initialInstrumentTypes[]` at file scope; `scene_settingsDefaults()`, `scene_commitSettings()`, `scene_resetKitToDefaults()`, and `scene_commitKit()` (added, see §14.3). |
+| 8 | `presetManager.c/h` | `source_slot` parameter and `preset_retargetSelfLfoVoice()`; `preset_startInstrumentCopy()`; `preset_applyWorkersIdle()`. |
+| 9 | `filesystem.c/h` | `FS_INTERNAL_OP_UPDATE_HCNAMES_COPY` (`HNcU`), update predicate, phase 3/7 overlay hook, dispatch; `filesystem_cacheCopyClearRemap()`; `filesystem_identityRow()` with `fs_identity_row_class_t`; `filesystem_requestCopyResidentNames()`; `FS_HCNAMES_ROW_COUNT` with static assert. |
+
+### 14.3 Deviations from the schedule (decided while implementing)
+
+1. **Growing pastes and compaction.** The schedule placed a growing step in
+   the swap block and then compacted. A block in the swap block cannot also
+   serve as the scratch area for compaction, and compaction that only moves
+   blocks into lower disjoint runs is not guaranteed to produce a run of a
+   given size. Implemented instead:
+   - `patSvc_exclusiveCompactStep()` is a sliding compaction: the block just
+     above the lowest free chunk moves down into it, through the empty swap
+     block when the two runs overlap. Repeated calls always end with all free
+     space as one run below the swap block.
+   - The paste check requires, for each step whose block grows, that the free
+     chunks before that step are at least the new size (old and new blocks
+     coexist until publication). Steps that do not grow always fit through
+     the swap block (place, publish, free the old run, return).
+   - Effect: a paste into a nearly full pool can be dropped where the
+     schedule's net-growth check would have accepted it, by at most one block
+     (≤ 132 B of 8,060 B). The paste still completes whole or is dropped whole.
+2. **New operation while work is queued.** A copy/clear press is refused
+   silently while a previous operation's pastes or clears are still queued
+   (they read that operation's source). A pending register drain or name
+   write does not block a new operation.
+3. **Name write and jobs.** Jobs do not start while the HCNAMES write is in
+   flight (it uses the same scratch offsets as a paste snapshot).
+4. **Name-buffer protection.** While lent, `filesystem_clearNameCacheStorage()`
+   and `filesystem_prepareLibraryNameCache()` do nothing and
+   `filesystem_start()` refuses every operation except the copy/clear name
+   write (callers see a busy facade). This covers the case of entering
+   LOAD/SAVE right after releasing copy/clear while background work runs.
+5. **`scene_commitKit()`.** Added to SceneData so Kit pastes do not assign
+   `scene_t` fields outside SceneData (project rule).
+6. **Remap value 0xFE.** Marks a row whose content changed but whose name is
+   kept, so the end-of-operation write also marks its source bytes for
+   AutoSave. `filesystem_cacheCopyClearRemap()` ignores it.
+7. **SHIFT.** SHIFT edges are not consumed (they keep their MODE-modifier and
+   LED roles and their mode-specific press/release pairing); only its LED is
+   latched to blink during a clear operation.
+8. **Menu overlay.** The existing overlay draws after the page renderer in
+   `menu_repaint()` (instead of returning before it); both rows are fully
+   replaced, so the result is the same.
+
+### 14.4 Build results (2026-10-01)
+
+- `make all && make img`: no new warnings (the remaining ones are newlib stubs,
+  `EuklidGenerator.c`, `PatternData.c:161` and unused filesystem helpers, all
+  present before this pass). Image 527,804 B.
+- Against a build of `HEAD` (`00bd078`): `.bss` +96 B, `.data` −4 B,
+  `.dtcmz` −8 B (SRAM1 net +92 B, inside the approved +100 B). Owners:
+  session 25 B, service 59 B (queue 26, register 18, run 6, flags/claim/retry
+  4, buffer pointer 4, alignment), `service_exclusive_scene` 1 B,
+  `fs_name_cache_borrowed` 1 B; offset by the retired `srt` bytes.
+- `link_budget.py`: Flash 527,804 / 753,664 B; ITCM unchanged.
+- §13.1 grep: only the accepted tombstones (`storageTypes.c` ignore branch,
+  `MidiMessages.h` enum) and comments remain.
+
+### 14.5 Open items for hardware verification
+
+All of §13.2. Points that need particular attention:
+- full-pool pastes (growing steps) and the time sliding compaction takes on a
+  fragmented pool (one slide per tick);
+- whole-Pattern copy with retargeting into the playing Scene (destination
+  entries are silent for up to 28 ticks);
+- entering LOAD/SAVE immediately after a long pot-clear register drain (the
+  browser waits until the name buffer is returned).
+
+### 14.6 Stage 10 (documentation and tools), 2026-10-01
+
+| File | Change |
+|---|---|
+| `PATTERN_DYNAMIC_STACK.md` | §3 swap block; §5 copy no-ops removed note; §12.9 usage denominator 2,015; §12.12 new service calls; §12.13 `ccSvc_tick()`; new §12.17 (exclusive boundary, raw API, region-copy order, sliding compaction, evacuation, suspension, append bound) and §12.18 (Pattern Load fan-out finding). |
+| `MODULE_INTERCHANGE_SPEC.md` | `copyClearTools` section replaced by `Core/Menu/CopyClear`; PatternData raw API row; PatternStackService exclusive rows; BankData, SceneData, EffectsManager, Preset, filesystem and Menu rows; affiliate lists; `srt` placeholder. |
+| `STORAGE_SRAM_MANIFEST.md` | Header S075 line; §5 Session 075 ledger; §8.2 `scenes`, `pat_regions` (swap block), `fs_list_cache_name` (loan and layout), copy/clear owners; §11 history. |
+| `FILESYSTEM_SPEC.md` | `sceneset.scg` table renumbered and `voice_decimation_all` retirement; settings field list; Scene target list; PERF `fxm`; LFO note; new "Copy/clear: name-buffer loan and the `HNcU` update". |
+| `AUTOSAVE.md` | Scene cell 7 reserved; copy/clear suspension gates. |
+| `BANK_PRESET_ARCHITECTURE.md` | Copy/clear edit-mask rules (fan-out, exchange, reset); `srt` row removed from Scene contents; target 390 retired; PERF `fxm` mirror; O1 note. |
+| `EFFECTS_BUS_REFERENCE.md` | A15 closed; §9 non-active origin and copy/clear functions; Session 075 history entry. |
+| `EFFECTS_MIXER_DSP_REFERENCE.md`, `INSTRUMENTS_DSP_REFERENCE.md` | Global decimation multiplier removed; `srt` target retired. |
+| `DEV_MODES.md` | `HNcU` op code note. |
+| `MEMORY.md` | Current state; S075 volatile note; no-op copy notes removed; module tree; FAQ row. |
+| `SCOPING_TARGETS.md` | Phase 6 status; A15 closed. Historical S074 "next session" notes left as written. |
+| `tools/verify_bank_autosave.py` | Scene cell 7 is the constant 127. |
+| `tools/populate_scene_directory.py` | `voice_decimation_all` no longer written. |
+| `tools/convert_legacy_kits.py` | Comment on the legacy `PAR_VOICE_DECIMATION_ALL` position. |

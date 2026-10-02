@@ -8,7 +8,8 @@ typedef uint16_t scene_mod_target_id_t;
 
 typedef enum {
     SCENE_MOD_TARGET_KIND_VOICE_MORPH = 0,
-    SCENE_MOD_TARGET_KIND_DECIMATION_ALL,
+    /* Retired `srt` placeholder; ID 390 remains reserved (S075). */
+    SCENE_MOD_TARGET_KIND_RETIRED,
     /*
      * Generated slot-6 alternate decay.
      *
@@ -75,8 +76,8 @@ typedef struct {
  * Scene mod targets are sound-affecting destinations that are not owned by an
  * instrument descriptor table. Voice descriptor targets stay in
  * InstrumentManager so swappable instruments keep their own parameter lists;
- * this module owns only Scene-level targets such as per-voice Morph, global
- * decimation, audio routing, FX sends, and Effect Morph (`fxm`). Effect
+ * this module owns only Scene-level targets such as per-voice Morph, audio
+ * routing, FX sends, and Effect Morph (`fxm`). Effect
  * parameters are block-7 IDs owned by EffectsManager.
  *
  * Inputs to the helpers are stored target IDs from menu/Scene parameter cells.
@@ -112,6 +113,23 @@ uint8_t sceneModTarget_valid(uint16_t id, scene_mod_target_use_t use);
  * ordering of the Scene target table.
  */
 uint16_t sceneModTarget_voiceMorphId(uint8_t voice_slot);
+/*
+ * Resolve the Scene target ID of the Effect Morph amount `fxm` (S075).
+ *
+ * Output: the canonical ID (404 today) found by kind, so callers do not depend
+ * on table order; INSTRUMENT_PARAM_INVALID if the row is missing. Clients:
+ * Menu's pot-clear target resolver (PERF `fxm`, Effect page `mrp`).
+ */
+uint16_t sceneModTarget_effectMorphId(void);
+/*
+ * Resolve the Scene target ID of the generated slot-6/track-7 decay `7dc`
+ * (S075).
+ *
+ * Output: the canonical ID found by kind, or INSTRUMENT_PARAM_INVALID.
+ * Clients: Menu's pot-clear target resolver (VOICE7 generated decay cell) and
+ * copy/clear retargeting of track-7 alternates (copyOps.c).
+ */
+uint16_t sceneModTarget_slot6DecayId(void);
 /*
  * Convert Scene target IDs to compact Scene-namespace indices and back.
  *

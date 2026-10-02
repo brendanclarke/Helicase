@@ -334,6 +334,35 @@ uint8_t effects_setSeqLaneLock(uint8_t scene_index, uint16_t step_mask,
                                uint8_t lane, uint8_t value);
 
 /*
+ * Fan-out Effect record and FX sequence operations for copy/clear (S075).
+ *
+ * What: paste or reset a whole Effect record, paste one FX step (lock mask
+ * and 16 lane values), or clear lanes on steps, applying the same change to
+ * every Scene in the destination's edit mask that shares the destination's
+ * current Effect type (the active Scene uses the self-repairing mask getter,
+ * any other Scene its own indexed entry, user F5). effects_pasteRecord() may
+ * change the type of the destination and its members; effects_resetRecord()
+ * returns them to registered defaults (type `off`). Why: user rule F3 /
+ * confirm 1 — Effect pastes and FX sequence pastes and clears fan out; the
+ * existing lock setter could only set locks. Inputs: destination Scene and
+ * data (src may point at a live record; a member that is the source itself is
+ * skipped). Outputs: SceneData commits (each marks its AutoSave cells and
+ * card-clean bit), runtime activation or sequence-serial bump / held-Morph
+ * invalidation for the active Scene, mask revalidation after type changes.
+ * Record functions return the written Scene mask (identity names follow it);
+ * sequence functions return nonzero when any lane or lock changed.
+ * Clients: copyOps.c, clearOps.c. Affiliates: scene_commitEffectRecord(),
+ * scene_setEffectSeqLane*(), effects_activateScene(),
+ * bank_revalidateVoiceEditMasks().
+ */
+uint16_t effects_pasteRecord(uint8_t dst_scene, const effect_record_t *src);
+uint16_t effects_resetRecord(uint8_t dst_scene);
+uint8_t effects_pasteSeqStep(uint8_t dst_scene, uint8_t step,
+                             const effect_seq_step_t *src);
+uint8_t effects_clearSeqLanes(uint8_t scene_index, uint16_t step_mask,
+                              uint16_t lane_mask);
+
+/*
  * Pattern automation and LFO on Effects (Session 072 step 9; plan §9, §10).
  *
  * Target identity: block-7 IDs 448 + local (EffectTypes.h).

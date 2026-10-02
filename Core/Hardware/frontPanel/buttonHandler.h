@@ -96,6 +96,17 @@ uint16_t buttonHandler_seqHeldMask(void);
  */
 uint8_t buttonHandler_visibleStep(uint8_t seqButtonPressed);
 
+/*
+ * Expose physical-row decoding to the held-COPY session.
+ *
+ * Inputs: raw button number. Outputs: zero-based row index or -1 when the
+ * button is outside that family. The mappings remain owned by ButtonHandler
+ * so Copy/Clear cannot drift from normal front-panel routing.
+ */
+int8_t buttonHandler_seqIndex(uint8_t buttonNr);
+int8_t buttonHandler_selectIndex(uint8_t buttonNr);
+int8_t buttonHandler_voiceIndex(uint8_t buttonNr);
+
 uint8_t buttonHandler_getMode(void);
 uint8_t buttonHandler_getShift(void);
 int8_t  buttonHandler_getArmedAutomationStep(void);

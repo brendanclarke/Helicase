@@ -413,7 +413,10 @@ Everything is foreground-only.
   - the FX chase runs while playing (not in `sel`);
   - the `sel` step blinks;
   - the Pattern chase is suppressed on this page.
-- Locks cannot be removed yet (A15).
+- Locks are removed by copy/clear (S075, closes A15): SHIFT + copy/clear +
+  SEQ clears that step's locks and values at once, `clear fx sequence` clears
+  all 16 steps, and a pot clear over an Effect parameter or `mrp` clears its
+  lane on every step. All fan out through the edit mask (§9).
 
 ### 8.4 TRACK, BAR, SELECT hooks and custom layouts
 
@@ -565,6 +568,19 @@ underline reports stored data, not what is audible.
   - lane locks;
   - `mrp`;
   - `typ`.
+- **Non-active origin (S075).** `effects_fanoutMask()` uses the origin
+  Scene's own directional entry: the active Scene through the self-repairing
+  getter, any other Scene through `bank_sceneMaskVoiceEditForScene()`, so a
+  PERF paste onto a Scene that is not active reaches that Scene's members.
+- **Copy/clear (S075).** `effects_pasteRecord(dst, src)` (whole record; may
+  change the destination's type; the mask is taken on the destination's
+  current type), `effects_resetRecord(dst)` (`off` defaults),
+  `effects_pasteSeqStep(dst, step, src)` (lock mask and 16 lane values) and
+  `effects_clearSeqLanes(scene, step_mask, lane_mask)` (values 0, unlocked)
+  fan out like edits. Record functions return the written Scene mask;
+  sequence functions bump the sequence serial and drop the held Morph latch
+  when the active Scene's Morph lane changed. An FX step paste whose
+  destination type differs from the source is dropped.
 - **Same-type guard.** Parameter, lock and sequence edits skip any masked
   Scene of a different Effect type. `mrp` and `typ` reach all masked Scenes.
 - **Gate.** In VOICE-held SEQ, adding a Scene to the mask requires
@@ -1015,7 +1031,9 @@ Pattern (44–53) → publish (61).
     branch);
   - the `xfd` fader mode.
   - This largely completes Phase 5. Still deferred: the `/Effect/` browser
-    and Load/Save item (A35), FX lock removal (A15), Scene copy/clear of the
-    Effect (planned with Phase 6 copy/clear, `S075_PH6_COPY_CLEAR.md`), MIDI
+    and Load/Save item (A35), MIDI
     mapping (A20), live record of FX moves (A22), and track
     step-scale/shuffle playback (A10).
+- **Session 075** (Phase 6 copy/clear, `S075_PH6_COPY_CLEAR_FULL_SPEC.md`):
+  FX lock removal (A15 closed), Effect and FX-sequence copy/clear with
+  fan-out (§9), PERF `fxm` cell for Effect Morph in the former `srt` slot.

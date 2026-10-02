@@ -97,7 +97,18 @@ pool end.
 
 `PAT_STACK_SIZE == 256` is a historical sizing unit, not the number of
 allocatable chunks. It creates an 8,192-byte pool (`256 × 32`). Allocation is
-in 4-byte chunks, so the pool contains 2,048 allocatable chunks.
+in 4-byte chunks, so the pool contains 2,048 chunks.
+
+**Swap block (S075).** The top 33 chunks (132 B, bytes 8,060..8,191,
+`PAT_POOL_SWAP_OFFSET`) of every Scene's pool are permanently reserved: normal
+allocation (`pat_poolAlloc()`), service searches, repair and reservations stop
+at `PAT_POOL_ALLOC_CHUNKS` (2,015 chunks, 8,060 B usable). The block holds one
+maximum dynamic block and is a guaranteed rewrite area: a step can be
+republished without free pool space while its old block is still live.
+Copy/clear is its first user; the reserve is kept for any later feature that
+needs the same guarantee. PAT4 is unchanged (the reserve is free space);
+Patterns saved before S075 may have blocks there, which copy/clear moves
+below the reserve before first use (§12.17).
 
 The 512-byte bitmap is bit-packed: bit `chunk & 7` of byte `chunk >> 3` owns
 one 4-byte chunk. Only its first 256 bytes correspond to the 2,048 backed
@@ -191,10 +202,10 @@ invalid coordinate:
 specials-only edits. `pat_eraseStep` and `pat_clearTrack` include automation
 entries in block-size calculations when freeing pool chunks.
 
-`pat_copyTrack`, `pat_copyPattern`, and `pat_copyBar` intentionally do nothing.
-Their future implementation must duplicate live pool blocks (including
-automation entries) and rebuild destination address offsets/bitmap ownership;
-it must never alias one Scene's or step's pool allocation from another.
+The Session 062 no-op copy surface (`pat_copyTrack`, `pat_copyPattern`,
+`pat_copyBar`) was removed in S075. Copies are made by the copy/clear service
+(`Core/Menu/CopyClear/`) through the raw block API (§12.17), which duplicates
+pool blocks and never aliases one Scene's or step's allocation from another.
 
 All real Pattern mutations converge on PatternData's local dirty helper. It
 invalidates the Bank clean-Scene witness and calls
@@ -202,10 +213,12 @@ invalidates the Bank clean-Scene witness and calls
 equivalent complete-operation marking or they violate AutoSave ownership.
 
 Since Session 067, all pool-mutating operations from Menu, Sequencer,
-copyClearTools, and EuklidGenerator route through the Pattern Stack Service
+and EuklidGenerator route through the Pattern Stack Service
 (`patSvc_*` API) rather than calling `pat_*` mutation functions directly. The
 service guarantees exactly one mutation target at a time and serializes all
-pool access. See §12.
+pool access. See §12. The S075 copy/clear service is the one exception: it
+writes through the raw block API only while it holds the service's exclusive
+boundary (§12.17).
 
 ## 6. Sequencer and menu integration
 
@@ -664,7 +677,8 @@ entries) is retained only as the reactive-recovery scan bound.
 
 `pat_poolUsagePercent()` in PatternData.c reads the Scene bitmap with
 `memcpy` (packed-bitmap-safe), counts set bits with `__builtin_popcount`
-across 64 words, and returns `(occupied × 100) / 2048` clamped to 99.
+across 64 words, and returns `(occupied × 100) / 2015` (usable chunks below
+the swap block, S075) clamped to 99.
 Displayed as `"pts:NN"` on the Settings menu Global subpage, computed once
 on page entry and retained in a static byte.
 
@@ -710,6 +724,11 @@ void     patSvc_removeTrackAutomationByTarget(scene, track, target9);
 void     patSvc_enqueueErase(scene, track, step);
 uint8_t  patSvc_isChunkReserved(chunk);
 void     patSvc_consumeReservation(chunk);
+/* S075 copy/clear holder (§12.17) */
+uint8_t  patSvc_beginExclusive(scene);
+void     patSvc_endExclusive(scene);
+uint8_t  patSvc_exclusiveCompactStep(scene);
+uint8_t  patSvc_exclusiveEvacuateSwapStep(scene);
 ```
 
 ### 12.13 Integration points
@@ -719,6 +738,7 @@ void     patSvc_consumeReservation(chunk);
 | `main.c` | `patSvc_init()` after boot filesystem ladder |
 | `timebase.c` | `patSvc_tick()` after `endlessPots_tick()` |
 | `filesystem.c` | `patSvc_idle()` at 5 replacement boundary points |
+| `timebase.c` | `ccSvc_tick()` (copy/clear service) right after `patSvc_tick()` (S075) |
 
 ### 12.14 Binding constraints
 
@@ -776,3 +796,57 @@ Eleven stage codes in `PatternTrace.h` for service diagnostics:
 These are PatternTrace codes in `PatternTrace.h`, distinct from the
 AutoSaveTrace codes in `AutosaveTrace.h` that use the same single-letter
 convention.
+
+### 12.17 Copy/clear: exclusive boundary, raw block API, compaction (S075)
+
+**Exclusive boundary.** `patSvc_beginExclusive(scene)` /
+`patSvc_endExclusive(scene)` give one caller sole write access to one Scene's
+Pattern region, on any resident Scene (the active Scene may differ from the
+playback Scene). Begin records the claim, closes admission on the service
+Scene and returns 1 once the FIFO, bulk barrier and reactive recovery have
+drained (0 while a filesystem replacement or another claim is pending); it
+clears the reservation image. While the claim exists the handover branch of
+`patSvc_tick()` neither reopens admission nor adopts the claimed Scene. End
+recounts occupancy, restarts the repair epoch and reopens admission or
+resumes the handover. One holder at a time.
+
+**Raw block API** (`PatternData.h`, legal only inside the boundary):
+`pat_rawReadBlock`, `pat_rawBlockBytes`, `pat_rawDecode`, `pat_rawEncode`,
+`pat_rawPlace`, `pat_rawPlaceViaSwap`, `pat_rawSwapReturn`,
+`pat_rawPublishEmpty`, `pat_rawFreeChunks`, `pat_rawSwapFree`, and the
+whole-region set `pat_rawRegionSilence`, `pat_rawRegionCopyBody`,
+`pat_rawRegionPublishSteps`, `pat_rawRegionCopiedBlock`,
+`pat_rawRegionPublishRewritten`, `pat_rawRegionReset`. Every step write keeps
+§12.10: new bytes into unreferenced space, one PRIMASK store of the complete
+address entry (trigger policy KEEP re-reads the live trigger bit), then free
+the old run. A step rewrite that does not grow goes through the swap block:
+place there, publish, free the old run, then `pat_rawSwapReturn()` moves it
+into the freed run and publishes again.
+
+**Whole-region copy order** (`copy pattern`, `copy scene`): publish every
+destination entry as empty (trigger off), copy pool, bitmap, track settings
+and Pattern globals, rewrite retargeted blocks in place while still
+unreferenced (they only shrink; freed tail chunks return to the bitmap), and
+publish the address entries last.
+
+**Compaction for the holder.** `patSvc_exclusiveCompactStep()` is a sliding
+compaction: one call moves the block just above the lowest free chunk down
+into it, through the empty swap block when the runs overlap. Repeated calls
+leave all free space as one run below the swap block, so a growing step
+whose new size fits the free chunks always finds its run.
+`patSvc_exclusiveEvacuateSwapStep()` moves a pre-S075 block out of the swap
+block (or clears orphan swap bits); if a full pool makes that impossible the
+copy/clear job that needed the swap block is dropped.
+
+**Suspension.** While a copy/clear operation runs, the repair epoch does not
+start (`copyClear_backgroundSuspended()` gate beside the Load/Save gate);
+queue drain, barriers and handover continue.
+
+**In-place append bound.** `pat_tryAppendAutomation()` never grows a block
+into the swap block.
+
+### 12.18 Session 075 finding: Pattern Load fan-out
+
+Pattern Load's fan-out `memcpy` into Scenes other than the loaded one is not
+publication-ordered and can tear one playback tick of a playing destination.
+Logged in `SCOPING_TARGETS.md` ("Session 075 findings"); not changed in S075.

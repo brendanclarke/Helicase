@@ -80,6 +80,29 @@ void bank_revalidateVoiceEditMasks(void);
  */
 void bank_setSceneMaskVoiceEditForScene(uint8_t scene_index, uint16_t mask);
 uint16_t bank_sceneMaskVoiceEditForScene(uint8_t scene_index);
+
+/*
+ * Edit-mask helpers for copy/clear (S075, spec §4.4, §4.5, §5).
+ *
+ * bank_sceneFanoutMask(): the Scenes a paste or clear of a Scene child
+ * (Instrument, Kit, Effect, FX sequence, `clear send`) must reach: the Scene
+ * itself plus the members of its own directional entry that are present and
+ * pass scene_editLayoutMatches(scene, member), so fan-out never writes a
+ * mismatched Scene. The pressed Scene's own entry is used even when it is not
+ * active (user, F5); the active Scene's entry is read through the
+ * self-repairing getter.
+ * bank_exchangeVoiceEditMask(): `copy scene` / `copy scene settings` give the
+ * destination the source's entry with the two Scenes' bits exchanged
+ *   m' = (m & ~(src|dst)) | (m & src ? dst : 0) | (m & dst ? src : 0).
+ * bank_resetVoiceEditMaskToSelf(): `clear scene` / `clear scene settings`.
+ * Writers go through bank_setSceneMaskVoiceEditForScene(), which normalizes,
+ * keeps the active-bit invariant and marks the Bank AutoSave field; callers
+ * run bank_revalidateVoiceEditMasks() after any type change.
+ * Clients: copyOps.c, clearOps.c. Foreground only; no SRAM.
+ */
+uint16_t bank_sceneFanoutMask(uint8_t scene);
+void bank_exchangeVoiceEditMask(uint8_t src, uint8_t dst);
+void bank_resetVoiceEditMaskToSelf(uint8_t scene);
 void bank_setHasResidentBank(uint8_t present);
 uint8_t bank_hasResidentBank(void);
 

@@ -457,6 +457,69 @@ void bank_revalidateVoiceEditMasks(void)
     }
 }
 
+/*
+ * Edit-mask helpers for copy/clear (S075, spec §4.4, §4.5, §5).
+ *
+ * Contract in BankData.h. bank_sceneFanoutMask() reads the Scene's own
+ * directional entry (the active Scene through the self-repairing getter) and
+ * keeps the Scene itself plus every present member whose layout matches.
+ * bank_exchangeVoiceEditMask() applies the spec §4.4 formula to the source
+ * entry and stores it as the destination entry. bank_resetVoiceEditMaskToSelf()
+ * stores bit(scene). Both writers use the indexed setter (normalize, active
+ * bit invariant, Bank AutoSave field mark on change).
+ */
+uint16_t bank_sceneFanoutMask(uint8_t scene)
+{
+    uint16_t mask;
+    uint16_t out;
+    uint8_t member;
+
+    if (scene >= BANK_SCENE_SLOT_COUNT)
+        return 0u;
+    mask = (scene == bank_active_scene_slot) ?
+               bank_sceneMaskVoiceEdit() :
+               bank_sceneMaskVoiceEditForScene(scene);
+    out = bank_sceneBit(scene);
+    for (member = 0u; member < BANK_SCENE_SLOT_COUNT; member++) {
+        uint16_t bit = bank_sceneBit(member);
+
+        if (member == scene || (mask & bit) == 0u ||
+            !bank_scenePresent(member) ||
+            !scene_editLayoutMatches(scene, member))
+            continue;
+        out = (uint16_t)(out | bit);
+    }
+    return out;
+}
+
+void bank_exchangeVoiceEditMask(uint8_t src, uint8_t dst)
+{
+    uint16_t m;
+    uint16_t src_bit;
+    uint16_t dst_bit;
+    uint16_t exchanged;
+
+    if (src >= BANK_SCENE_SLOT_COUNT || dst >= BANK_SCENE_SLOT_COUNT ||
+        src == dst)
+        return;
+    m = bank_sceneMaskVoiceEditForScene(src);
+    src_bit = bank_sceneBit(src);
+    dst_bit = bank_sceneBit(dst);
+    exchanged = (uint16_t)(m & (uint16_t)~(src_bit | dst_bit));
+    if ((m & src_bit) != 0u)
+        exchanged = (uint16_t)(exchanged | dst_bit);
+    if ((m & dst_bit) != 0u)
+        exchanged = (uint16_t)(exchanged | src_bit);
+    bank_setSceneMaskVoiceEditForScene(dst, exchanged);
+}
+
+void bank_resetVoiceEditMaskToSelf(uint8_t scene)
+{
+    if (scene >= BANK_SCENE_SLOT_COUNT)
+        return;
+    bank_setSceneMaskVoiceEditForScene(scene, bank_sceneBit(scene));
+}
+
 void bank_setHasResidentBank(uint8_t present)
 {
     bank_has_resident_bank = present ? 1u : 0u;
