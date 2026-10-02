@@ -9,6 +9,23 @@ Related: spec `S075_PH6_COPY_CLEAR_FULL_SPEC.md`, implementation schedule and
 log `S075_PH6_COPYCLEAR_IMPLEMENTATION.md` (§14), trace plan
 `S075_PH6_COPYCLEAR_TRACE_DEBUG_IMPLEMENTATION.md` (not yet implemented).
 
+**Revision 2 (2026-10-02):** the user's answers to the first round of
+follow-ups (Q1–Q7) are folded in; §16.1 records them.
+**Revision 3 (2026-10-02):** the answers to A1–A5 are folded in (§16.1):
+`clear track` blinks the TRACK LED only and darkens the current track's steps
+at once; early-trigger storage O1 (+64 B) and trigger restore on a dropped
+paste (+64 B) approved; +4 B DEV trace RAM approved; `clear … notes` clears
+every special except probability (new change F1-J); a clear dropped in low
+storage may leave its triggers off (accepted).
+**Revision 4 (2026-10-02):** B1 (restore skips steps the user toggled since)
+confirmed; B2 decided: `auto -> repl` also replaces the probability special
+with the source's, `auto -> merge` leaves probability alone (new change F1-K,
+§10). The combined implementation schedule is
+`S075_PH6_COPYCLEAR_F1_AND_TRACE_IMPLEMENTATION.md`. The next request
+implements this document **and** the trace plan together; §13.1 lists every
+trace-plan hook that this document moves or changes, so the two can be
+applied as one pass (F1 first, then the trace hooks by function anchor).
+
 ## Contents
 
 1. Feedback summary
@@ -17,11 +34,14 @@ log `S075_PH6_COPYCLEAR_IMPLEMENTATION.md` (§14), trace plan
 4. Change F1-B — copy and clear button LEDs
 5. Change F1-C — row gestures: menu on first press, range rule, bar fix
 6. Change F1-D — source indicator at column 9
-7. Change F1-E — step copy labels
+7. Change F1-E — step and bar copy labels
 8. Change F1-F — destination blink covers every visible pasted/cleared LED
-9. Change F1-G — clear selection kept between objects
-10. Change F1-H — clear order: blink, trigger bits, then the pool work
-11. Change F1-I — start latency: no wait for the name buffer, trickle rate
+9. Change F1-G — clear selection kept per button group
+10. Change F1-H — clear order: blink, trigger bits, then the pool work;
+    F1-J — `clear … notes` keeps probability;
+    F1-K — `auto -> repl` carries probability
+11. Change F1-I — start latency: no wait for the name buffer, trickle rate,
+    early trigger bits for pastes
 12. Other copy/clear operations: same concerns and conflicts
 13. Spec, schedule and trace-plan updates
 14. Resources
@@ -269,7 +289,7 @@ The indicator is at most 8 characters (spec §8.1), so it always fits columns
 
 ---
 
-## 7. Change F1-E — step copy labels
+## 7. Change F1-E — step and bar copy labels
 
 `copyOps.c` `ccCopy_stepLabels[]` (line ~29):
 
@@ -280,10 +300,19 @@ static const char *const ccCopy_stepLabels[] = {
 };
 ```
 
-Mapping is unchanged: `step -> repl` = copy all, `step -> merge` = merge all,
-`auto -> repl` = copy automation, `auto -> merge` = merge automation. Bar
-labels: see §16, Q1 (proposed `bar -> repl`, `bar -> merge`,
-`auto -> repl`, `auto -> merge`). Labels are ≤ 14 characters.
+`copyOps.c` `ccCopy_barLabels[]` (line ~32), approved (Q1):
+
+```c
+/* F1-E (user, Q1): bar copy selections, default first. */
+static const char *const ccCopy_barLabels[] = {
+    "bar -> repl", "bar -> merge", "auto -> repl", "auto -> merge"
+};
+```
+
+Mapping is unchanged: `… -> repl` (step/bar) = copy all, `… -> merge` =
+merge all, `auto -> repl` = copy automation, `auto -> merge` = merge
+automation. Track (`track`, `instrument`), Scene and FX (`step`) labels are
+unchanged. Labels are ≤ 14 characters.
 
 ---
 
@@ -297,13 +326,13 @@ flash.
 |---|---|---|---|
 | step / step-range paste (VOICE, STEP) | every destination step `(dst + i) % 128` whose bar is the visible bar; destination is always the viewed Scene and active track | — | — |
 | bar / bar-range paste (STEP) | all 16 if the visible bar is one of the destination bars | destination bars `(dst + i) % 8` | — |
-| `copy track` | all 16 if the destination track is the active track | — | destination track |
+| `copy track` | — | — | destination track only (Q7) |
 | `copy instrument` | — | — | destination track |
 | Scene paste (PERF) | pressed Scene | — | — |
 | FX step / range paste (EFFECTS) | destination FX steps `(dst + i) % 16` | — | — |
 | clear step / range | object steps in the visible bar | — | — |
 | clear bar / range | all 16 if the visible bar is in the range | object bars | — |
-| clear track | all 16 if the track is the active track | — | the track |
+| clear track | — (the current track's steps go dark at once through F1-H; A1) | — | the track |
 | PERF Scene clears | the Scene | — | — |
 | EFFECTS SEQ clear | the FX step (as now) | — | — |
 
@@ -336,43 +365,71 @@ static void cc_flashObject(cc_kind_t kind, uint8_t scene, uint8_t track,
 
 ---
 
-## 9. Change F1-G — clear selection kept between objects
+## 9. Change F1-G — clear selection kept per button group
 
-**Rule (user):** the clear menu returns to `cancel` only when copy/clear is
-released or a different type of clear is chosen. A different type = a
-different clear menu (step, bar, track, track-in-EFFECTS, Scene). Within one
-type, every further object is a real clear with the selection shown.
+**Rule (user, Q2/Q6):** the clear menu returns to `cancel` only when
+copy/clear is released or the user presses an object in a **different button
+group**. The groups are: SEQ steps (VOICE/STEP), SELECT bars (STEP), TRACK
+buttons (any mode), and SEQ Scenes (PERF). Within one group every further
+object is a real clear with the selection shown — for every group, including
+TRACK and PERF Scene clears (`clear scene` included). EFFECTS SEQ clears have
+no menu and do not change the group. A mode change that keeps the same
+group (for example steps in VOICE and in STEP) keeps the selection.
+
+Each object kind maps to exactly one group (`CC_KIND_STEP` = SEQ steps,
+`CC_KIND_BAR` = SELECT, `CC_KIND_TRACK` = TRACK, `CC_KIND_SCENE` = PERF SEQ),
+so the previous object's kind (still in `cc_source.kind` after its release)
+identifies the previous group; no new state is needed.
 
 ### F1-G-01 `copyClearSession.c` `cc_clearObject()` (line 341)
 
-Replace `cc_openMenu(ccClear_menuForObject(...))` with:
+Read the previous kind before `cc_source` is overwritten, then replace
+`cc_openMenu(ccClear_menuForObject(...))` with:
 
 ```c
     /*
-     * F1-G (user): keep the selection while the clear type stays the same;
-     * only a different clear menu (or releasing copy/clear) starts at
-     * `cancel` again.
+     * F1-G (user, Q2/Q6): the selection is kept while the user stays in one
+     * button group (SEQ steps, SELECT bars, TRACK, PERF SEQ Scenes); a press
+     * in another group, or releasing copy/clear, starts at `cancel` again.
+     * The TRACK menu has an extra `send` entry in EFFECTS mode: a kept
+     * selection that does not exist in the new menu falls back to `cancel`.
      */
     {
         cc_menu_t menu = ccClear_menuForObject(buttonHandler_getMode(), kind);
 
-        if (menu != (cc_menu_t)cc_state.menu) {
-            cc_state.menu = (uint8_t)menu;
+        if (kind != previous_kind ||
+            cc_state.selection >= ccClear_selectionCount(menu))
             cc_state.selection = 0u;
-        }
+        cc_state.menu = (uint8_t)menu;
         cc_applyButtonLeds();
         menu_copyClearMenuChanged();
     }
 ```
 
-`cc_openMenu()` (always resets) stays for copy menus. `copyClear_copyReleased()`
-already resets menu and selection.
+`previous_kind` is `CC_KIND_NONE` after `copyClear_copyPressed()` (which
+clears `cc_source`), so the first object of an operation always opens at
+`cancel`. `cc_openMenu()` (always resets) stays for copy menus.
 
-Contract block (`copyClearSession.h`, file-level types block for `cc_menu_t`)
-gains: "Clear menus open at `cancel` once per type; the selection is kept for
-further objects of the same type until copy/clear is released (F1-G)."
+Contract block (`copyClearSession.h`, the `cc_menu_t` block) gains:
 
----
+```c
+ * Clear menus (F1-G): a menu opens at `cancel` for the first object of a
+ * button group (SEQ steps, SELECT bars, TRACK, PERF SEQ Scenes); further
+ * objects of the same group keep the selection, so each is a real clear,
+ * until copy/clear is released or another group is pressed.
+```
+
+### F1-G-02 Pot clears (Q3, confirmed rule — no code change)
+
+- A clear operation opened with SHIFT + copy/clear shows **no menu** until an
+  object button is pressed; pot turns in that state are pot clears.
+- Pot clears never open a menu. A turn removes the underline (`_` marker) at
+  once (`menu_automationTargetCleared()`) and the automation is removed in
+  the background (register, F1-I).
+- Once an object button has opened a clear menu, the menu stays up until
+  copy/clear is released, and pot turns do nothing (`copyClear_potTurned()`
+  already returns 0 while a menu is visible). To clear by pot again, release
+  copy/clear and hold SHIFT + copy/clear again.
 
 ## 10. Change F1-H — clear order: blink, trigger bits, then the pool work
 
@@ -408,12 +465,82 @@ static void ccClear_triggersOffNow(const cc_source_t *object,
 
 - LED repaint: `led_updatePatternTrack(menu_getActiveVoice(),
   menu_getViewedPattern(), buttonHandler_selectedStep)` in VOICE/STEP when the
-  object Scene is viewed; `menu_refreshPerfSceneLeds()` in PERF.
+  object Scene is viewed; `menu_refreshPerfSceneLeds()` in PERF. For `clear
+  track` on the current (active) track this is what makes its step LEDs go
+  dark at once (A1); the blink itself is the TRACK LED only.
+- **A clear dropped after its early write (user, A5 clarification):** a clear
+  job can be dropped only by `EVACUATE_FAILED` (a block from a pre-S075
+  Pattern in the swap block cannot move in a nearly full pool), and only for
+  selections that rewrite blocks (`… notes`, `… automation`). The triggers
+  written off at the press then stay off; that is accepted. No restore
+  storage for clears.
 - Order in `cc_clearReleaseObject()`: `ccClear_requestClear()` (enqueue +
   trigger bits) then `cc_flashObject()`; the flash layer renders above the
   repainted base, so the user sees the blink first and dark steps after it.
 - AutoSave: `pat_setStepActive()` marks the Pattern dirty (written after the
   suspension, as everything else).
+
+### F1-J — `clear … notes` clears everything except automation and probability (A5)
+
+**Rule (user, A5):** the purpose of `… notes` is to clear everything except
+automation. It turns the trigger off and removes the note and velocity
+specials, but keeps the probability special when it is set, because
+probability gates the step's automation. Automation is kept. Applies to
+`clear step notes`, `clear bar notes`, `clear track notes` and PERF
+`clear notes`.
+
+`copyClearService.c` `ccSvc_clearStep()` (line 530), notes branch — replace
+`pat_rawEncode(block, 0u, 0u, 0u, 0u, autos, count)` with:
+
+```c
+    /*
+     * notes (F1-J, user A5): everything except automation goes, but the
+     * probability special stays when set, because it gates this step's
+     * automation. Trigger off; the block shrinks or empties (swap path).
+     */
+    bytes = pat_rawEncode(block,
+                          (uint8_t)(sp.flags & PAT_SPECIAL_PROB_BIT),
+                          0u, 0u, sp.probability, autos, count);
+```
+
+The `ccSvc_clearStep()` contract block (`notes` sentence) and the
+`clearOps.h`/`clearOps.c` file blocks are updated to "trigger off, note and
+velocity specials removed; probability and automation kept". A step with no
+block keeps the existing path (trigger off when on).
+
+Spec §5 table: `… notes` → "trigger off, specials removed except
+probability; automation kept".
+
+### F1-K — `auto -> repl` carries the probability special (B2)
+
+**Rule (user, B2):** probability belongs with the automation (F1-J). A
+**replace** automation paste (`auto -> repl`) therefore replaces the
+destination's probability special with the source's: when the source step
+has probability set, the destination gets that value; when it has none, the
+destination's probability special is removed. Note and velocity specials and
+the trigger of the destination are kept. A **merge** automation paste
+(`auto -> merge`) does not touch probability (destination specials kept, as
+today). `step -> repl` / `step -> merge` (and the bar forms) are unchanged:
+they already carry or merge all specials.
+
+`copyOps.c` `ccCopy_buildStep()` (line 426), `CC_COPY_AUTO` branch — the
+encode becomes:
+
+```c
+        /*
+         * auto -> repl (F1-K, user B2): automation and the probability special
+         * come from the source; note/velocity specials and the trigger stay.
+         */
+        flags = (uint8_t)((ds.flags & (uint8_t)~PAT_SPECIAL_PROB_BIT) |
+                          (ss.flags & PAT_SPECIAL_PROB_BIT));
+        return pat_rawEncode(out, flags, ds.note, ds.velocity,
+                             ss.probability, sa, sc);
+```
+
+The skip test (`sc == 0u && dc == 0u`) also requires both probability flags
+to be equal, otherwise a probability-only difference must still be written.
+Spec §4.4 table row `copy … automation`: specials "unchanged except
+probability := source".
 
 ---
 
@@ -505,27 +632,133 @@ static int16_t ccSvc_trickleCredit;
 ### 11.3 What still waits
 
 - A step/bar paste that overlaps its own source waits for the buffer (the
-  in-flight writer); its destination blink is immediate.
+  in-flight writer; accepted, Q4). Its destination blink is immediate and all
+  its trigger bits are written at once (§11.4, O1).
 - The end-of-operation name write waits for the facade (unchanged).
+
+### 11.4 Early trigger bits for pastes (Q4, A2 = O1, A3 = restore)
+
+**Rule:** like clears (F1-H), a paste writes its destination trigger bits at
+acceptance (the press), repaints the visible step LEDs, and leaves the block
+(specials and automation) to the background job. It applies to step, step
+range, bar, bar range and `copy track` pastes with `… -> repl` (trigger :=
+source) and `… -> merge` (trigger := destination OR source). `auto -> repl`
+and `auto -> merge` keep the destination triggers, so they write nothing
+early. Scene-level and FX pastes are unaffected.
+
+**Overlap (O1, approved).** A paste that overlaps its own source (same Scene
+and track, destination steps intersect source steps) would overwrite source
+triggers that its job has not read yet. At the press, the source trigger bits
+of the whole paste (≤ 128 steps, range order) are kept in a 128-bit mask in
+the job's queue slot; the job's snapshot takes its trigger bits from that
+mask. Every overlapping paste, step or bar range, therefore lights all of its
+destination steps at the press.
+
+**Restore on drop (A3, approved).** A paste can still be dropped by its job
+(`NO_ROOM`, `EVACUATE_FAILED`). At the press, the previous destination trigger
+bits (≤ 128 steps, destination order) are kept in a second 128-bit mask in
+the slot. When the job is dropped, each destination step whose live trigger
+still equals the value the early write gave it is restored from the mask; a
+step the user has toggled since (after releasing copy/clear) is left as the
+user set it (B1). The paste is then fully undone (its blocks were never
+written), which keeps "a paste completes or is dropped whole".
+
+**SRAM:** 2 × 16 B per slot × 4 slots + 1 B flags = **129 B** (64 B source
+masks, O1; 64 B restore masks and the flags byte, A3). Approved.
+
+**Implementation steps:**
+
+1. `copyClearService.c` — ADD after `ccSvc_queue[]` (line ~47):
+
+```c
+/*
+ * Early-trigger masks per queue slot (F1-I §11.4; 129 B SRAM1, approved
+ * 2026-10-02: O1 +64 B, A3 restore storage).
+ *
+ * What: for each queued step/bar/track paste that wrote its destination
+ * trigger bits at the press, src[i] bit n is the source trigger of the
+ * paste's n-th step (range order) as read before the early write (used only
+ * when the paste overlaps its own source), and prev[i] bit n is the
+ * destination trigger of the n-th destination step before the early write.
+ * flags bit i = slot i has early triggers; bit 4+i = slot i uses src[i].
+ * Why: pasted steps light at once (user, Q4); the job must still copy the
+ * pre-paste source triggers when the paste overlaps its source, and a
+ * dropped paste must be undone whole (user, A3). Lifetime: written by
+ * ccSvc_setEarlyTriggers() at the press, read by the snapshot phase and the
+ * drop path, dead when the slot's job ends. Accessors:
+ * ccSvc_setEarlyTriggers(), ccSvc_runPatternPaste(), ccSvc_tick().
+ */
+static uint8_t ccSvc_earlySrc[CC_QUEUE_SIZE][16];
+static uint8_t ccSvc_earlyPrev[CC_QUEUE_SIZE][16];
+static uint8_t ccSvc_earlyFlags;
+```
+
+2. `ccSvc_enqueue()` returns the slot index + 1 (0 = refused) so the request
+   can attach the masks; callers that only test success are unchanged.
+3. `copyOps.c` `ccCopy_requestPaste()` (line 88) — after a successful enqueue,
+   `ccCopy_triggersNow(src, &job, slot)`:
+
+```c
+/*
+ * Write a paste's destination trigger bits at acceptance (F1-I §11.4).
+ *
+ * What: for `… -> repl` and `… -> merge` step/bar/track pastes: (1) reads
+ * the source trigger of every pasted step (live) into a 128-bit stack mask,
+ * (2) reads the previous destination triggers into the slot's restore mask,
+ * (3) if the paste overlaps its own source, stores the source mask in the
+ * slot, (4) writes each destination trigger (repl := source; merge := OR)
+ * with pat_setStepActive(), (5) repaints the visible step LEDs. Why: user
+ * rule (Q4) — SEQ LEDs and triggers update at once even when the job waits
+ * for the name buffer or runs at the trickle rate; the job later publishes
+ * the same trigger bits with the blocks. Cost: ≤ 3 × 128 halfword accesses.
+ * Caller: ccCopy_requestPaste(). Affiliates: ccSvc_setEarlyTriggers().
+ */
+```
+
+4. `copyClearService.c` snapshot phase (`ccSvc_runPatternPaste()`, case 1):
+   when the slot uses its source mask, the table entry's trigger bit comes
+   from the mask instead of the live entry.
+5. Drop path (`ccSvc_tick()`, job end with `CC_RUN_DROP`): when the slot has
+   early triggers, call `ccSvc_restoreEarlyTriggers(job, slot)`, repaint the
+   step LEDs if visible, then release the claim and pop the slot.
+
+```c
+/*
+ * Undo a dropped paste's early trigger writes (F1-I §11.4, user A3).
+ *
+ * What: for each destination step of the dropped job, if its live trigger
+ * still equals the value written at the press, restores the previous value
+ * from the slot's restore mask; a step changed since (user toggle) is left
+ * alone. The written value is recomputed from the slot's source mask (an
+ * overlapping paste) or from the live source (unchanged since the press for
+ * a non-overlapping paste), with the restore mask for `merge`. Why: a paste
+ * completes or is dropped whole. Caller: ccSvc_tick() on CC_RUN_DROP.
+ * Affiliates: ccCopy_triggersNow().
+ */
+static void ccSvc_restoreEarlyTriggers(const cc_job_t *job, uint8_t slot);
+```
 
 ---
 
 ## 12. Other copy/clear operations: same concerns and conflicts
 
-| Operation | Affected by | Concern / conflict |
+| Operation | Affected by | Concern / conflict (after the Q1–Q7 decisions) |
 |---|---|---|
-| Bar source/range (STEP SELECT) | F1-A, F1-C, F1-F | Same gesture change (menu on first press). Bars fit 4 bits, so no truncation bug. Labels: Q1. |
-| FX step source/range (EFFECTS) | F1-A, F1-C, F1-F, F1-I | Same gesture change; FX steps 0..15 fit, no truncation bug. Paste blink now covers the whole destination range. |
-| Track source (TRACK) | F1-A, F1-F | Source is a single press, menu on press (unchanged). The source track LED no longer blinks. |
-| Scene source (PERF SEQ) | F1-A | The source Scene LED no longer blinks; PERF Scene LEDs show the normal Pattern/active state only. |
-| `clear track` | F1-F, F1-G, F1-H | With F1-G, after one track clear every further TRACK press clears that track at release. **Q2**. |
-| PERF `clear scene` / `clear pattern` / `clear automation` / `clear notes` / `clear fx` | F1-G, F1-H | With F1-G, every further Scene press repeats a destructive clear on that Scene. `clear scene` on another Scene also removes it from the Bank. **Q2**. |
-| Pot clears in a clear operation | F1-G | Spec §3.2: pots are ignored while a clear menu is shown. With the selection kept, the menu stays up for the rest of the hold after the first object press, so pot clears are blocked until copy/clear is released. **Q3**. |
-| Copy: encoder during a provisional source | F1-C | The menu is visible while steps are still held, so the selection can be changed before the source is set — intended (it is the selection used by the later paste). |
-| Clears queued behind pastes | F1-H | A paste queued earlier that writes the same steps can briefly re-light a step that F1-H turned off; the clear's own job runs after it and leaves it off. Visible only if the queue is long. |
-| Overlapping pastes | F1-I | Still wait for an in-flight writer (seconds at worst). **Q4**. |
-| Trace plan (not implemented) | F1-A, F1-C, F1-I | `SOURCE_SET` stays at commit; add a provisional event or not (Q5); NAMES "changed rows" (0xFE) disappears; add trickle-mode ticks to `JOB_STATS` (§13). |
-| Spec text | all | Conflicts listed in §13. |
+| Bar source/range (STEP SELECT) | F1-A, F1-C, F1-E, F1-F, §11.4 | Same gesture change (menu on first press). Bars fit 4 bits, so no truncation bug. Labels decided (Q1). Early triggers for all bar pastes, overlapping ones included (O1). |
+| FX step source/range (EFFECTS) | F1-A, F1-C, F1-F, F1-I | Same gesture change; FX steps 0..15 fit. Paste blink covers the destination range. No trigger bits (FX locks). |
+| Track source (TRACK) | F1-A, F1-F, §11.4 | Source on press (unchanged), source LED no longer blinks; paste blinks only the destination TRACK LED (Q7); `copy track` triggers written early (never overlaps: same Scene and track is an identical paste). |
+| Scene source (PERF SEQ) | F1-A | Source Scene LED no longer blinks. |
+| `clear track` | F1-F, F1-G, F1-H, F1-J | Kept selection applies (Q2): after one track clear, each further TRACK press clears that track at release. Blink: TRACK LED; the current track's steps go dark at once (A1). `track notes` keeps probability (F1-J). |
+| PERF Scene clears | F1-G, F1-H | Kept selection applies (Q2), including `clear scene` (another Scene: emptied and no longer Bank-present). Trigger bits off at once for `clear scene`, `clear pattern`, `clear notes`. |
+| Pot clears | F1-G-02, F1-I | Confirmed rule (Q3); now start at once (no buffer wait, trickle rate). |
+| TRACK clear menu in EFFECTS vs other modes | F1-G | Same group, different menu length (`send`): a kept `send` falls back to `cancel` outside EFFECTS. |
+| Copy: encoder during a provisional source | F1-C | The menu is visible while steps are held; a changed selection is the one the later paste uses. Intended. |
+| `auto -> repl` pastes | F1-K | The destination's probability special follows the source (set, changed or removed). |
+| Pastes and clears queued behind each other | F1-H, §11.4 | Early trigger writes happen in press order while jobs run in queue order; a step can briefly show an intermediate state (for example a clear's dark steps re-lit by an earlier queued paste's job, then dark again when the clear's job runs). Final state is correct. |
+| Early triggers and drops | §11.4, F1-H | A dropped paste restores its previous triggers (A3), except steps the user toggled since (B1). A dropped clear leaves its triggers off (accepted). |
+| `… notes` clears | F1-J | Probability special kept with the automation; the block shrinks rather than empties when probability is set. |
+| Trace plan | all | See §13.1. |
+| Spec text | all | See §13. |
 
 ---
 
@@ -544,10 +777,41 @@ static int16_t ccSvc_trickleCredit;
 | | §9.3 | Name-buffer use: overlapping pastes and names only. |
 | | §9.5 | Live-source path for non-overlapping pastes; trickle governor. |
 | `S075_PH6_COPYCLEAR_IMPLEMENTATION.md` | §14 | New "14.7 F1 follow-up" entry when implemented (changes, RAM, build). |
-| `S075_PH6_COPYCLEAR_TRACE_DEBUG_IMPLEMENTATION.md` | §2.2, T2-06, T2-13, T2-16, T7 | `SCRATCH` borrow becomes rare (overlap/names only); NAMES "changed rows" field always 0 → remove; `JOB_STATS` gains trickle-mode ticks (replace claim-wait nibble or add an event); `SOURCE_SET` unchanged. Line anchors move. |
+| `S075_PH6_COPYCLEAR_TRACE_DEBUG_IMPLEMENTATION.md` | see §13.1 | Amendments applied in the same implementation pass. |
 | `knowledge_files/specification_reference/STORAGE_SRAM_MANIFEST.md` | §5, §8.2 | LED group blink bytes released; governor 2 B. |
 | `MODULE_INTERCHANGE_SPEC.md` | ledHandler, CopyClear | `led_setBlinkGroup()` removed. |
 | `SCOPING_TARGETS.md` | Phase 6 note | Remove "§4.11 LED priority stack implemented for copy/clear LEDs (group blink)". |
+| spec | §3.2, §6 | Pot clears: no menu ever; once an object opened a menu it stays until release and pots do nothing (F1-G-02). Kept selection per button group (F1-G). |
+| spec | §4.4, §5 | Early trigger bits for pastes (§11.4) and clears (F1-H). |
+
+### 13.1 Trace plan compatibility (for the combined implementation)
+
+The next request implements this document and
+`S075_PH6_COPYCLEAR_TRACE_DEBUG_IMPLEMENTATION.md` together. Order: apply F1
+first, then the trace hooks, using the trace plan's **function anchors**
+(its line numbers will have moved). Hooks affected by F1:
+
+| Trace plan item | Effect of F1 | Amendment |
+|---|---|---|
+| §2.2 `SOURCE_SET`, T3-02 (`cc_commitSource()`) | The menu opens at the first press; `cc_commitSource()` still runs once, when the row is released (or on press for TRACK/Scene). | Keep: one record per final source (Q5). No record for provisional range updates. |
+| T3-01 `OP_START` | LED code moves into `cc_applyButtonLeds()` (F1-B). | Record placement unchanged (after arming). |
+| T2-06 `SCRATCH` borrow (`ccSvc_ensureScratch()`) | Borrowing becomes lazy: overlapping pastes and names only (F1-I). | Hook unchanged; it now fires rarely. `scratch_wait` counts only when a job actually waits. |
+| T2-16 job start (`ccSvc_tick()`) | Jobs start without `ccSvc_ensureScratch()`. | Keep the `JOB_START` hook at the job start; remove nothing else. |
+| T2-10 snapshot retarget count | A non-overlapping paste retargets live in **both** the check and the place phases. | Count retarget drops only in the phase that publishes (place, or snapshot for the overlap path) so each entry is counted once. |
+| T2-10 `CHECK_FAIL` | The check phase also runs on the live path. | Same record, both paths. |
+| T2-10 `GROW_UNPLACEABLE`, T2-07/T2-08 swap anomalies | Unchanged code paths. | Unchanged. |
+| T2-13/T2-16 `NAMES` | `ccSvc_nameContentChanged()` no longer writes 0xFE (F1-I). | `NAMES` bits 16..23 ("rows changed only") become reserved 0; the request loop counts only remapped rows. Decoder prints the field only when nonzero. |
+| §2.2 `JOB_STATS` | Trickle mode added (F1-I). | ADD event `0x17 JOB_TRICKLE`: bits 0..15 ticks spent in trickle mode, bits 16..31 units executed in trickle mode (each sat 65,535); emitted at job end and at register-pass end only when nonzero. Needs `ccSvc_traceState.trickle_ticks` and `trickle_units` (+4 B DEV-only; A4). |
+| New: early triggers (F1-H, §11.4) | Trigger bits written at acceptance. | ADD event `0x24 EARLY_TRIG`: bits 0..7 steps written (sat 255), bit 8 paste (0 clear), bit 9 source mask used (overlap), bits 16..18 kind, bits 19..22 Scene, bits 23..25 track, bits 26..27 queue slot. One record per accepted paste/clear that wrote triggers. |
+| New: drop after early triggers | §11.4 / A3 | ADD event `0x19 EARLY_RESTORED`: bits 0..7 steps restored, bits 8..15 steps left alone (changed by the user since), bits 16..17 queue slot; emitted right before a dropped paste's `JOB_END`. A dropped clear needs no record beyond its `JOB_END`. |
+| New: F1-J | `notes` keeps probability | No new record. |
+| T4-11 pot clears | Rule confirmed (F1-G-02), start latency changes only. | Unchanged. |
+| T4-10..T4-16 Scene-level clears | Name calls move to a final phase that may WAIT on the buffer (F1-I step 3). | `FANOUT`/`MASK_SET` hooks stay with the data commit (first phase), not the name phase. |
+| T5-01 | Unchanged. | Unchanged (D4). |
+| T6-03/T6-04 | Unchanged. | Unchanged; `SUSPEND` begin edges now usually precede the first job by one tick instead of seconds. |
+| T7 decoder | New events `0x17`, `0x19`, `0x24`; `NAMES` field change. | Add to `CC_EVENTS` and `cc_record_text()`. |
+| §12 DEV RAM | +4 B (trickle counters). | 20 B → 24 B DEV-only (approved, A4). |
+| Manifest / ledger | Production RAM of F1 | The 129 B early-trigger masks and the 2 B governor belong to the F1 manifest entry, not to the trace plan. |
 
 ---
 
@@ -555,7 +819,8 @@ static int16_t ccSvc_trickleCredit;
 
 | Item | Change |
 |---|---|
-| SRAM1 | −7 B (`led_blinkGroupMask[3]`, `led_blinkPhase` removed) +2 B (trickle credit) = **−5 B** (net S075 becomes about +87 B of the approved +100 B) |
+| SRAM1 (production) | −7 B (`led_blinkGroupMask[3]`, `led_blinkPhase` removed) +2 B (trickle credit) +129 B (early-trigger masks: 64 B source O1, 64 B restore + 1 B flags A3) = **+124 B**. S075 net becomes about **+216 B**: +100 B approved originally, plus O1 (+64 B) and the A3 restore storage approved 2026-10-02. |
+| SRAM1 (DEV only) | trace state 24 B (20 B D1 + 4 B A4, approved) and filesystem trace latches 2 B, as in the trace plan. 0 B in production. |
 | Stack | +288 B peak in `ccCopy_runFxSteps()` (FX snapshot), +~400 B in the live-source paste path (two block buffers + decode list), foreground only |
 | Flash | small net decrease (group blink removed) plus the live-source path and governor (estimate +0.5–1 KB) |
 | CPU | unchanged in full mode; ≤ 0.1 % average in trickle mode |
@@ -577,43 +842,47 @@ static int16_t ccSvc_trickleCredit;
 | Destination blink | all visible destination steps/bars/FX steps blink once per accepted paste/clear |
 | Clear feedback | steps blink and go dark at once, even while an AutoSave drain is running |
 | Pot clear during a running AutoSave drain | removal starts at once (trickle), speeds up when the drain ends |
-| Overlapping paste during a running drain | waits for the drain; destination blinks at the press |
+| Overlapping paste during a running drain | waits for the drain; destination blinks and all of its triggers/LEDs update at the press (O1) |
+| Paste dropped for lack of pool space (nearly full Pattern) | triggers lit at the press return to their previous state; a step toggled by the user in between keeps the user's state |
+| `clear track` on the current track | TRACK LED blinks; the track's step LEDs go dark at once |
+| `clear step notes` on a step with note, velocity, probability and automation | trigger off; note and velocity gone; probability and automation kept |
+| Paste `step -> repl` / `step -> merge` | destination triggers and SEQ LEDs update at the press |
+| `auto -> repl` from a step with probability onto a step with a different probability | destination probability becomes the source's; note/velocity/trigger kept |
+| `auto -> merge` | destination probability unchanged |
+| Clear selection per group: `step` chosen, then another step | clears; menu stays on `step` |
+| Group change: step clear, then TRACK | TRACK menu opens at `cancel` |
+| Group kept across modes: step clear in VOICE, switch to STEP, press a step | selection kept |
+| Pot clear | no menu; underline gone at the turn; automation removed in the background |
+| Pot after an object menu | does nothing until copy/clear is released and re-held |
+| Bar labels | `bar -> repl`, `bar -> merge`, `auto -> repl`, `auto -> merge` |
+| `copy track` paste | only the destination TRACK LED blinks |
 
 ---
 
-## 16. Follow-ups: open questions and concerns
+## 16. Follow-ups
 
-- **Q1 — Bar copy labels.** Use the same pattern as steps: `bar -> repl`,
-  `bar -> merge`, `auto -> repl`, `auto -> merge`? (FX `step` and the track
-  and Scene labels unchanged?)
-- **Q2 — Kept selection for destructive objects.** F1-G makes every further
-  object of the same type a real clear. For steps and bars that is what you
-  described. Should it also apply to TRACK clears and to PERF Scene clears
-  (`clear scene` on another Scene empties it and removes it from the Bank)?
-  Options: (a) same rule everywhere; (b) TRACK and PERF Scene clears return to
-  `cancel` after each applied clear; (c) only `clear scene` returns to
-  `cancel`.
-- **Q3 — Pot clears while a clear menu is up.** With the menu now staying up
-  for the rest of the hold, pot clears are blocked after the first object
-  press until copy/clear is released (spec §3.2 step 5). Keep that, or let pot
-  turns act while no object button is held (the menu stays as it is)?
-- **Q4 — Overlapping pastes.** A paste that overlaps its own source (same
-  Scene, track, intersecting steps) still needs the name buffer and so waits
-  for an in-flight writer. Acceptable, or should the engine order the copy
-  (forward/backward, like `memmove`) and drop the snapshot for this case too?
-  Reversed ranges and wrap make the ordering more involved; I recommend
-  keeping the snapshot unless the wait shows up in testing.
-- **Q5 — Provisional source in the trace.** Should the trace plan add a
-  record for the provisional source (each range update while held), or keep
-  only the final `SOURCE_SET`? Recommendation: final only.
-- **Q6 — "Different type of clear".** I read this as a different clear menu
-  (step, bar, track, track in EFFECTS, Scene). Is a mode change between VOICE
-  and STEP with the same object kind (steps) the same type? (Proposed: yes —
-  the menu is the same.)
-- **Q7 — Track paste blink.** For `copy track`, flash the 16 visible steps
-  when the destination is the active track, in addition to its TRACK LED?
-  (Proposed: yes.)
-- **Concern — trickle throughput.** At 0.1 % CPU the pool work of a large
-  clear can still take a second or two while a drain finishes; the immediate
-  blink and dark steps (F1-F, F1-H) are what tells the user it was accepted.
-  The trace plan's job ticks will show the real numbers.
+### 16.1 Decisions (user, 2026-10-02)
+
+| # | Question | Decision | Applied in |
+|---|---|---|---|
+| Q1 | Bar copy labels | `bar -> repl`, `bar -> merge`, `auto -> repl`, `auto -> merge` | F1-E |
+| Q2 | When does the clear selection return to `cancel`? | Only on copy/clear release or when the user presses a different **button group**: TRACK, SEQ steps, SELECT bars, PERF SEQ Scenes. Applies to every group, including destructive Scene clears. | F1-G |
+| Q3 | Pot clears while a clear menu is up | A menu opened by an object button stays until copy/clear is released; pots do nothing then. Pot clears happen in a fresh SHIFT + copy/clear hold, never open a menu, drop the `_` underline at once and remove the automation in the background. | F1-G-02 |
+| Q4 | Overlapping pastes waiting for the buffer | Accepted, but SEQ LEDs/triggers must update quickly. SRAM options given. | §11.4, A2 |
+| Q5 | Provisional source in the trace | Final source only. | §13.1 |
+| Q6 | Same type across modes | Yes (same button group). | F1-G |
+| Q7 | `copy track` blink | Destination TRACK LED only. | F1-F |
+| A1 | `clear track` blink | TRACK LED only; the current track's step LEDs are cleared at once. | F1-F, F1-H |
+| A2 | Early-trigger storage | O1, +64 B approved. | §11.4 |
+| A3 | Paste dropped after early triggers | Restore; any extra RAM O1 needs is approved (+64 B restore masks, +1 B flags). | §11.4 |
+| A4 | Trace DEV RAM +4 B | Approved. | §13.1 |
+| A5 | `clear … notes` and dropped clears | A clear dropped in low storage may leave its triggers off (accepted). Independently, `… notes` clears every special except probability (when set), keeps automation, trigger off. | F1-H, F1-J |
+| B1 | Restore when the user toggled a step meanwhile | Confirmed: such steps keep the user's state. | §11.4 |
+| B2 | Automation pastes and probability | `auto -> repl` replaces probability with the source's; `auto -> merge` does not touch it. | F1-K |
+
+### 16.2 Additional follow-ups
+
+None open. Concern carried forward: at 0.1 % CPU the pool work of a large
+clear can take a second or two while an earlier drain finishes; the
+immediate blink and trigger bits are the user's acceptance signal, and the
+trace plan's `JOB_TRICKLE` record will show the real numbers.
