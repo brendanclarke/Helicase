@@ -49,7 +49,7 @@ For clear, it's pretty much the same, except the clear operation won't actually 
     - Linux: sudo parted -s /dev/sd<X> mklabel msdos mkpart primary fat32 1MiB <32GiB> 100% && sudo mkfs.vfat -F 32 -n "LXR" /dev/sd<X>1
     - Mac: 'diskutil partitionDisk disk3 MBR FAT32 "LXR" <R *if 32G or less, otherwise* 32G>'
     - Win: "select disk <X>", "clean", "convert mbr", "create partition primary <size=32768>", "format fs=fat32 quick label=LXR", "assign" | diskpart
-- **The original 0.37 kits and SD card files from here**: http://sonic-potions.com/public/SdCardImage.zip
+- **Use the content from the 'SD_CARD' sub-directory to start with**
 #### Samples
 Memory mapping is updated - the program uses ~500kB now so there is a slight reduction in sample storage, about 1.4MB available for sample storage in flash, or about 14 seconds.
 #### Compressor
