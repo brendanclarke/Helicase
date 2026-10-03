@@ -1,8 +1,8 @@
 # LXR-02 DSP Performance Audit
 
-> **Where to start (Session 074 close).** This document is the cost audit and
+> **Where to start (Session 075 close).** This document is the cost audit and
 > the record of every DSP optimisation and cost addition (the priority list
-> at the end; S074 added items 27–31). For how the DSP works today, what each
+> at the end; S074 added items 27–31, S075 items 32–35). For how the DSP works today, what each
 > stage costs and how to change it, read `INSTRUMENTS_DSP_REFERENCE.md` and
 > `EFFECTS_MIXER_DSP_REFERENCE.md` (both in this folder). The S073
 > refactor's full record is `073_SESSION_HANDOFF_LOG.md` §6; the S074 DSP
@@ -767,3 +767,31 @@ is off.
     worst case is unchanged.
 31. **ADDED (S074): mixer `off` branch.** Two stores per block while the
     Effect is `off` (the return-ramp reset). Negligible.
+
+### Session 075 additions (2026-10-01/03; record in `075_SESSION_HANDOFF_LOG.md` §7, §10, §11)
+
+S075 changed no voice engine or Effect DSP. Its audio-path changes are tiny;
+the new copy/clear work is foreground-only and bounded.
+
+32. **REMOVED (S075): global `srt` multiplier.** `mixer_decimation_rate[6]`
+    and the `* rate[6]` multiply per voice decimation step are gone (DTCM
+    −8 B). A Scene at 127 is bit-identical (×1.0f is exact): sound class S0.
+33. **ADDED (S075 F2): FX-send Normal/Morph interpolation.**
+    `preset_getEffectiveFxSendAmount()` runs six times per block (from
+    `mixer_faderGains()`): one byte compare per voice when the endpoints are
+    equal (every Scene without a Morph send); otherwise one LFO-layer scan
+    (6 × 2 contributions), one integer lerp and, with an active LFO layer,
+    one 12-step resolver pass. Under 1 µs per block at 216 MHz. Budget the
+    worst case (all six voices with different endpoints and an LFO on their
+    Morph); the equal-endpoint fast path returns the same value and is
+    control-rate work, not a DSP bypass. There is no skip on send 0.
+34. **CHANGED (S075 F2): Effect stereo pan law centred on 63** in the mixer
+    return and the CrumpBit delay; same operation count.
+35. **ADDED (S075): copy/clear service and the automation guard
+    (foreground).** `ccSvc_tick()` at 500 Hz: at most 8 step placements, 16
+    snapshot reads or 32 region entries per tick, and ≤ 0.1 % CPU on
+    average while an older filesystem writer still runs (trickle governor).
+    Nothing runs while no operation is pending. The F3 guard adds one bit
+    test per Morph-worker parameter write; a menu edit now does one
+    interpolation instead of queueing up to 64 parameter writes (less
+    foreground work).

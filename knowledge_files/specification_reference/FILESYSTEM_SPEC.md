@@ -1,8 +1,8 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference through Session 074 (Session 069 for every phase before Phase 5;
-the Session 072, 073 and 074 additions are noted below). It includes the Session 058 Bank
+reference through Session 075 (Session 069 for every phase before Phase 5;
+the Session 072, 073, 074 and 075 additions are noted below). It includes the Session 058 Bank
 I/O and stopped-playback speedups, the Session 059 typed Instrument-index
 repair, and Session 060's `.hcnames` atomic safe-write/refreshed flag, the boot
 Instrument `.hcindex` generation fix, and system-wide macOS AppleDouble
@@ -36,10 +36,19 @@ bus compressor (`bus_comp_mode`, `bus_comp_amount`, `bus_comp_time`,
 else on the card changed. Two AutoSave facts relevant to every file on the
 card were learned in S074:
 
-Session 075 F2 adds the keyed `fx_send_morph` line (six 0..127 Morph send
-endpoints) after the bus compressor lines. A missing key loads zero. Fresh or
-cleared Scene voice routes default to St1, and bus compressor defaults are
-`off`, 0, 0, `off`.
+Session 075 (Phase 6 copy/clear, `COPYCLEAR_UTILITIES.md`):
+
+- the base pass retires `voice_decimation_all` (no longer written; accepted
+  and ignored on load), adds the copy/clear HCNAMES rewrite `HNcU` and lends
+  the 9,000 B name cache to copy/clear during an operation ("Copy/clear:
+  name-buffer loan and the `HNcU` update");
+- F2 adds the keyed `fx_send_morph` line (six 0..127 Morph send endpoints)
+  after the bus compressor lines. A missing key loads zero (no migration,
+  user). Fresh or cleared Scene voice routes default to St1, and bus
+  compressor defaults are `off`, 0, 0, `off`;
+- F3 makes external MIDI CC/NRPN a retained endpoint entry (saved with the
+  Scene, AutoSave-marked, clamped to the menu domain) instead of a
+  runtime-only write ("Morph, Modulation, and Automation").
 
 - AsyncFATFS stores a cluster-rounded size while a file is open for writing,
   so an interrupted write leaves an overlong file;

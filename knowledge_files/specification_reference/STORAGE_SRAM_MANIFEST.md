@@ -4,11 +4,12 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 075 F2 implementation (2026-10-03),
-  `dev-ph6-copyclear`, uncommitted. DEV link: `text=531,936`, `data=416`,
-  `bss=426,712`; raw binary 532,352 B and stamped image 532,368 B.
-  Production (`DEV_MODE_LOGGING=0`) remains at the F1 snapshot until the
-  production configuration is rebuilt. The F1 pass
+- **Current as of:** Session 075 close (2026-10-03), `dev-ph6-copyclear`,
+  HEAD `76aef20` (F3). DEV link: `text=532,408`, `data=416`, `bss=426,712`;
+  raw binary 532,824 B and stamped image 532,840 B (SHA-256
+  `d1c0aac2…9ceb`). F3 added code only; the RAM ledger is unchanged since
+  F2. Production (`DEV_MODE_LOGGING=0`) was last measured at F1 and needs a
+  rebuild. The F1 pass
   adds +124 B production SRAM1 net: early source masks +64 B, restore masks
   +64 B, early flags +1 B and governor credit +2 B, offset by the removed
   group-blink state −7 B. The 9,000 B name cache doubles as copy/clear
@@ -38,7 +39,7 @@ changing any of it.
   `python3 tools/link_budget.py arm-none-eabi-nm build/lxr02.elf`
 
   ```
-  Flash : 532,352 / 753,664 B used, headroom 221,312 B
+  Flash : 532,824 / 753,664 B used, headroom 220,840 B
   ITCM  : 4,168 / 16,384 B
   DTCM  : statics 4,472 B
   FXBUF : 126,592 B at 0x20001180 (min 122,880, margin 3,712)
@@ -83,21 +84,23 @@ is 128 KiB, sectors 5–11 are 256 KiB.
 
 - **Window:** `0x08008000–0x080BFFFF` (753,664 B), sectors 1–6. Session 073
   added sector 6 (it was sample storage before); the window was 480 KiB.
-- **Use at S075 F2 DEV link:** 532,352 B; **headroom 221,312 B**.
+- **Use at the S075 close DEV link:** 532,824 B; **headroom 220,840 B**.
 - **History:** 34,356 B free at S072 Step 1; 8,080 B at the S072 close;
   269,504 B after the S073 expansion; 266,560 B after the S073 DSP
-  refactor; 250,736 B at the S074 close; 221,312 B at the S075 F2 DEV link.
+  refactor; 250,736 B at the S074 close; 221,312 B at the S075 F2 DEV link;
+  220,840 B at the S075 close (F3). S075 added +29,896 B in total
+  (copy/clear about 25 KB with the DEV trace).
   S074 added +15,824 B, of which CrumpBit was 11,600 B.
 
 ### 3.2 Image layout
 
 The linker script is `STM32F765VIHx_FLASH.ld`. The image is, in order:
 
-| Section | Size (S075 F2 DEV) | Notes |
+| Section | Size (S075 close DEV) | Notes |
 |---|---:|---|
 | `.isr_vector` | 456 B | At `0x08008000`; VTOR is set at startup |
 | `.image_check` | 32 B | Per-sector CRC block (§3.4); `(READONLY)`, so `size` does not count it as data |
-| `.text` | 526,768 B (S075 F2 DEV; 497,344 at S074) | `Reset_Handler` first (`KEEP(*(.text.Reset_Handler))`), then code and `.rodata` |
+| `.text` | 527,240 B (S075 close DEV; 526,768 at S075 F2; 497,344 at S074) | `Reset_Handler` first (`KEEP(*(.text.Reset_Handler))`), then code and `.rodata` |
 | `.itcm` load image | 4,168 B | Copied to ITCM by `Reset_Handler` |
 | `.data` load image | 416 B | Copied to SRAM1 |
 | `.dtcm` load image | 512 B | Copied to DTCM (`squareRootLut`) |
@@ -127,7 +130,10 @@ The linker script is `STM32F765VIHx_FLASH.ld`. The image is, in order:
 
 The application reached sector 6 (`0x08080000`) for the first time with
 CrumpBit (`_eflash_load` `0x08081F68`, 8,040 B in). At the S074 close
-`_eflash_load` is **`0x08082C90`, 11,408 B into sector 6**:
+`_eflash_load` was **`0x08082C90`, 11,408 B into sector 6**, laid out as
+below. **At the S075 close it is `0x0808A158`, 41,304 B into sector 6**
+(sector 6 is 256 KiB); the same tail order applies, shifted up by the S075
+code growth. The S074 table:
 
 | Range | Content |
 |---|---|
@@ -276,7 +282,7 @@ only works while sector 6 holds no code.
 
 ---
 
-## 5. Static RAM ledger (Session 075 F2 DEV link)
+## 5. Static RAM ledger (Session 075 close DEV link; unchanged since F2)
 
 | Region and section | Start | Capacity | Static bytes | Free |
 |---|---|---:|---:|---:|

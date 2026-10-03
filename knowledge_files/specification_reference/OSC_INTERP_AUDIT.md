@@ -13,6 +13,8 @@ per-block limit is `OSC_WAVE_INTERP_MAX_ACTIVE` (2).
 Session 074 note: unchanged. The DSP references now live in
 `knowledge_files/specification_reference/dsp_instruments_effects/`.
 
+Session 075 note: unchanged.
+
 ## Goal
 Add simple/fast/dirty oscillator waveform interpolation for modulation-driven waveform automation, with a global ON/OFF setting that persists in global save/load.
 

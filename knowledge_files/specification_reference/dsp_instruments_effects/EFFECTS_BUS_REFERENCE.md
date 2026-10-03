@@ -4,6 +4,10 @@ As-built reference for the Phase 5 Effect system: Session 072 Steps 1–11,
 signal-path updates from Session 073, and the Session 074 additions. S074
 added the second real type (CrumpBit, the first to use the DTCM arena), the
 Effect-page framework extensions it needed, and the automation underlines.
+Session 075 added Effect and FX-sequence copy/clear with fan-out (A15
+closed, §8.3, §9), the PERF `fxm` cell, the one pan rule (§8.6), the
+long-name-only full views (§8.1) and the SHIFT+TRACK voice-mix overlay
+(§8.4).
 It describes what the firmware does and how to extend it. **Where any plan or
 log disagrees, this document describes the code**; §13 lists the known
 differences from the plan.
@@ -379,12 +383,19 @@ Everything is foreground-only.
   `ceil(N/28)` screens per button.
 - Re-pressing the current SELECT cycles its screens.
 - The encoder scrolls through every screen; a click opens the full view.
+- **Full views (S075 F2):** a full view never shows two forms of one value.
+  Named values (`typ`, `run`, `scl`) show only their long name from column 0
+  of row 1; numeric values (`len`, `mrp`) show only the number at column 13.
+  `menuEffects_copyField()` stops at a string's terminator and pads with
+  spaces (it used to read past short strings into flash, which showed
+  "Off 1 Mo").
 - A type may supply `select_layout` instead (§8.4); CrumpBit does (§8.6).
 
 ### 8.2 Editing
 
 - **`typ`** changes only through the encoder: click in, turn to browse, click
-  out to commit. The pots are inert on it.
+  out to commit. The pots are inert on it. There is no "changed" mark while
+  browsing (S075 F2): the click is the gate.
 - **SHIFT** shows and edits Morph endpoints; single-valued cells ignore it.
 - `scl` labels: `/64 32t /32 16t /16 /8t 16. /8 /4t /8. /4 /2 1br 2br`.
 
@@ -420,7 +431,23 @@ Everything is foreground-only.
 
 ### 8.4 TRACK, BAR, SELECT hooks and custom layouts
 
-- **TRACK** mutes; **SHIFT+TRACK** selects the track.
+- **TRACK** mutes; **SHIFT+TRACK** selects the track **and, since S075 F2,
+  shows that voice's VOICE mix Scene-setting screen** (`+`: out, FX send,
+  fader, voice Morph) for as long as TRACK is held:
+  - a type's own SHIFT+TRACK hook takes priority (nothing below happens);
+  - while any such TRACK is held, every TRACK press (with or without SHIFT)
+    moves the screen to that track and **no TRACK press mutes**; the last
+    release restores the Effect page exactly (sub-page, screen, cursor, full
+    view);
+  - SHIFT held = the voice Morph view (FX-send Morph endpoint); released =
+    Normal view;
+  - the Effect LEDs stay and stay live (`menuEffects_service()` keeps
+    running; Pattern chase is held off the SEQ row);
+  - type SELECT hooks keep working; default SELECT navigation and a hook's
+    "show home" screen change are suppressed until TRACK is released;
+  - a real mode/page change ends it without restoring.
+  Implementation: `menu_fxVoiceMixOverlayBegin/End/Active()` (`menu.c`),
+  `buttonHandler_fxVoiceMixTrackMask` (`buttonHandler.c`).
 - **SELECT/BAR with SHIFT, and BAR alone,** do nothing unless the type has a
   hook.
 - **`effect_ui_hooks_t`** (`EffectsManager.h`; extended in S074). Any member
@@ -1038,6 +1065,13 @@ Pattern (44–53) → publish (61).
     and Load/Save item (A35), MIDI
     mapping (A20), live record of FX moves (A22), and track
     step-scale/shuffle playback (A10).
-- **Session 075** (Phase 6 copy/clear, `S075_PH6_COPY_CLEAR_FULL_SPEC.md`):
-  FX lock removal (A15 closed), Effect and FX-sequence copy/clear with
-  fan-out (§9), PERF `fxm` cell for Effect Morph in the former `srt` slot.
+- **Session 075** (Phase 6 copy/clear, `COPYCLEAR_UTILITIES.md`; log
+  `075_SESSION_HANDOFF_LOG.md`):
+  - FX lock removal (A15 closed), Effect and FX-sequence copy/clear with
+    fan-out from any origin Scene (§9), PERF `fxm` cell for Effect Morph in
+    the former `srt` slot;
+  - F2: one pan rule (stored 63 = centre = `0`; stereo balance laws centred
+    on 63; Effect/CrumpBit pan defaults 63), CrumpBit defaults (mix 0, fbk
+    64, rte 64, dpn 63) and the `snc` label, long-name-only full views and
+    the `copyField` overread fix, no `typ` `*` mark, the SHIFT+TRACK
+    voice-mix overlay (§8.4).

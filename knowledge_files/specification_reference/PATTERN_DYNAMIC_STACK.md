@@ -3,15 +3,27 @@
 ## Authority and status
 
 This is the authoritative live-memory, allocator, PAT4 interchange, Pattern
-Stack Service, and Pattern AutoSave reference through Session 072 Step 9 (all
-implemented Pattern phases). Session 073 changed nothing. Session 074 changed
-no Pattern storage or allocator code. It added a second reader of step
-automation: the Effect-page underline search reads every step of every track
-of the viewed Pattern through `pat_readStepAutomations()`, 4 steps per
-foreground pass. The S074 AutoSave investigation also saw a torn PAT4 file
-repair itself exactly as designed (§9).
-**Phase 6 (Session 075) starts with the copy operations** that are still
-no-ops here (§5; `S075_PH6_COPY_CLEAR.md`).
+Stack Service, and Pattern AutoSave reference, **current as of the Session 075
+close** (2026-10-03, `dev-ph6-copyclear`, HEAD `76aef20`). Session 073 changed
+nothing. Session 074 changed no Pattern storage or allocator code; it added a
+second reader of step automation (the Effect-page underline search reads every
+step of every track of the viewed Pattern through
+`pat_readStepAutomations()`, 4 steps per foreground pass) and saw a torn PAT4
+file repair itself exactly as designed (§9).
+
+**Session 075 (Phase 6) changed this area in three ways:**
+
+- **Copy/clear** (`Core/Menu/CopyClear/`, reference `COPYCLEAR_UTILITIES.md`)
+  replaced the Session 062 no-op copy APIs. It adds a permanent 132 B swap
+  block to every pool (§3), an exclusive per-Scene write boundary for any
+  resident Scene, a raw block API and sliding compaction (§12.17).
+- **Automation priority** (§6.2a): a held step-automation value is never
+  overwritten before the voice's next trigger; menu edits apply only their
+  own parameter's interpolation; external MIDI is lowest priority.
+- **Documentation corrections** found while closing S075: the block header is
+  big-endian (§4), the pending queue is a 128-record append queue (§6.1), and
+  the drain writes voice values without 7→8-bit expansion (§6.1).
+
 Historical Session 062/063/064 plans describe how the design was reached but
 do not override this file.
 Filesystem hierarchy and HCNAMES grammar are in `FILESYSTEM_SPEC.md`; scalar
@@ -38,13 +50,17 @@ Implemented and hardware accepted:
 - exact binary PAT4 Scene/Bank/root Pattern Load and Save;
 - scene-mask Pattern Load fan-out;
 - per-Scene hidden A/B Pattern AutoSave and boot restore;
-- HCNAMES Pattern identity rows 129..144.
+- HCNAMES Pattern identity rows 129..144;
+- Phase 6 copy and clear of steps, ranges, bars, tracks, automation and whole
+  Patterns (Session 075; partly hardware-tested by the user, see
+  `COPYCLEAR_UTILITIES.md` §16).
 
-Not implemented: Pattern copy operations (the three APIs are deliberate
-no-ops), live-record capture, and real-time editing guarantees while a snapshot
-is admitted during record/erase (admission is instead deferred while those
-modes are active). Allocator compaction/defragmentation is implemented via the
-Pattern Stack Service (Session 067, see §12).
+Not implemented: live-record capture of automation, and real-time editing
+guarantees while a snapshot is admitted during record/erase (admission is
+instead deferred while those modes are active). Allocator
+compaction/defragmentation is implemented via the Pattern Stack Service
+(Session 067, see §12) and, for the copy/clear holder, as sliding compaction
+(§12.17).
 
 ## 1. Resident object
 
@@ -64,7 +80,8 @@ typedef struct __attribute__((packed)) {
 ```
 
 `pat_regions[16]` is exactly 168,304 bytes. Pattern storage is not embedded in
-`scene_t`; `scenes[16]` is a separate 26,016-byte SceneData object (S074). `pat_sceneRegion(scene)` returns
+`scene_t`; `scenes[16]` is a separate 26,080-byte SceneData object (S075 F2:
+1,630 B per Scene). `pat_sceneRegion(scene)` returns
 read-only access and `pat_sceneRegionMut(scene)` is reserved for bounded owner
 paths such as validated filesystem application. Ordinary clients use the
 public operations so mutation tracking cannot be bypassed.
@@ -127,9 +144,9 @@ compaction that relocates live blocks toward pool start.
 A block starts at a 4-byte-aligned pool offset:
 
 ```text
-bytes 0..1  little-endian header
+bytes 0..1  big-endian header (byte 0 = bits 15..8, byte 1 = bits 7..0)
              bits 15..6: track * 128 + step (10-bit back-reference)
-             bits 5..0: automation count (0..63)
+             bits 5..0: automation count (0..63), so byte 1 & 0x3F
 byte 2      special flags: bit0 note, bit1 velocity, bit2 probability
 bytes 3..   present values in note, velocity, probability order
 next bytes  automation entries, 2 bytes each, auto_count entries:
@@ -239,9 +256,13 @@ IS UNCONDITIONALLY WRONG.
 
 On each step advance, `seq_advanceTrackStep()` reads automation entries from
 every step that has a pool block (bit 14 set, valid offset), regardless of
-trigger state. Decoded entries are copied into a 32-entry debounced pending
-buffer in `sequencer.c` (192 B static SRAM). Multiple writes to the same
-`(step_id, target)` pair coalesce; the ISR is the sole writer.
+trigger state. Each entry (except the Pattern-only off target `0x1FF`) is
+appended to the TIM3-to-foreground queue `seq_pending_automation[]`:
+`SEQ_PENDING_BUF_COUNT` (128) four-byte records (identity = step id | type
+bit, payload = the packed entry) plus two publication bytes (+514 B SRAM1).
+There is no coalescing; a full queue drops the entry and records a
+PatternTrace overflow witness (`H`). Effect step markers (identity bit 11)
+share the queue. The ISR is the sole writer.
 
 Trigger condition including probability gates the complete step: trigger and
 automation together, for any step that has the probability special set,
@@ -255,20 +276,25 @@ skipped step. Erase is independent of probability.
 
 The foreground drain (`seq_drainPendingAutomation()`) runs inside
 `audio_check_and_render()` immediately after `voiceControl_processPending()`,
-within the per-chunk render loop. For each entry, it validates the target,
-expands the 7-bit value to 8-bit, and dispatches by target range:
+within the per-chunk render loop. For each entry, it validates the target and
+dispatches by target range. Values stay in descriptor space (identity
+mapping, no MIDI-CC-style 7→8-bit expansion); only voice Morph Scene targets
+expand to 0..255:
 
 - **Voice descriptor targets (IDs 0..383):** calls
-  `instrumentManager_writeRuntime(slot, descriptor, value8)` and sets the
+  `instrumentManager_writeRuntime(slot, descriptor, value)` and sets the
   corresponding bit in `seq_automation_dirty[slot]` (a `uint64_t` per-slot
-  bitmap, 48 B total).
+  bitmap, 48 B total). That bit is the "automation holds this value" record
+  (§6.2a).
 - **Scene targets (IDs 384+, Session 070; `fxm` is ID 404):** calls
   `seq_applySceneAutomation()` which dispatches to runtime-only overlays —
   `presetMorph_setStepAutomationOverride()` for Voice Morph (with 7→8 bit
   expansion via `menu_morphAutomationExpand()`),
   `slot6_track7_decay_step_value` for generated slot-6 track-7 decay,
-  `preset_applyVoiceAudioOutRuntime()` for Audio Out routing, or no-op for
-  FX Send (pending Phase 5 FX bus). Sets the corresponding bit in
+  `preset_applyVoiceAudioOutRuntime()` plus `preset_setAudioOutStepOverride()`
+  for Audio Out routing, `preset_setFxSendStepOverride()` for FX Send (the
+  mixer reads the effective send each block; the override beats the
+  Normal/Morph send endpoints), or `effects_setMorphAutomation()` for `fxm`. Sets the corresponding bit in
   `seq_scene_automation_dirty` (`uint32_t`, 4 B). Scene automation never
   writes retained Scene/Kit setters — this prevents AutoSave thrashing and
   preserves user-set values.
@@ -308,6 +334,29 @@ payload-free identity keeps the track/step ID in bits 0..9 and sets identity
 bit 11. Entries after a marker can re-hold a pending parameter; the next
 marker or end-of-drain flush ends candidates not rewritten. This preserves
 last-writer ownership when multiple tracks write the same Effect row.
+
+### 6.2a Automation priority: automation, then menu edits, then MIDI (S075 F3)
+
+**Rule (user):** a voice-parameter automation value written by the drain
+holds until that voice's next trigger. Nothing else may change that
+parameter's runtime value before then.
+
+| Writer | What it does to a held parameter | Mechanism |
+|---|---|---|
+| Morph sweep (`presetMorph_tick()`), synchronous voice apply (`presetMorph_applyVoiceNow()`) | updates `morph_interpolation[local]` only; the runtime value is left alone | every Morph-base runtime write goes through `presetMorph_writeRuntimeBase()`, which skips an inactive Scene and any parameter for which `seq_automationHoldsParameter(slot, local)` is set |
+| Menu edit of any instrument endpoint (`preset_setInstrumentParameter()`) | stores the endpoint; re-interpolates **only that parameter** at the voice's resolved Morph amount (`presetMorph_applyParameterNow()`), so a held parameter changes at its next trigger | no whole-voice queue; the runtime never receives the raw edited value |
+| External MIDI CC/NRPN (`midiParser_enterTaggedParameter()` → `preset_setInstrumentParameterFromMidi()`) | stores the active Scene's clamped Normal endpoint and queues the voice for the Morph sweep (lowest priority) | the sweep's guarded write applies it when it gets there |
+
+At the trigger, `seq_restoreAutomatedParameters()` writes
+`morph_interpolation[local]` — which by then holds every edit and Morph
+change made while the value was held — and clears the bitmap. Before S075 F3
+a menu edit queued the whole voice and the worker overwrote every held
+parameter mid-note; the same happened on Morph changes, an LFO on a voice's
+Morph, `Nvm` automation and Instrument/Kit applies. Effect parameters and the
+Scene targets (`Nfx`, `Nou`, `Nvm`, `fxm`, `7dc`) were never affected: they
+are layered overlays read every block. An Instrument type change while values
+are held is out of scope (a held bit may name the old type's descriptor until
+the next trigger). Details: `075_SESSION_HANDOFF_LOG.md` §11.
 
 ### 6.3 Step-edit automation pages
 
@@ -562,8 +611,16 @@ reports. Source/build verified; hardware validation pending.
 
 Deferred supplemental cases are deterministic mid-write power interruption,
 record/erase admission instrumentation, injected CRC fallback, and performance
-measurement. They do not reopen the functional closeout. Phase 4.5 copy
-operations and live-record capture are future features. The Session 068
+measurement. They do not reopen the functional closeout. Live-record capture
+is a future feature.
+
+Session 075 implemented Phase 6 copy and clear (`COPYCLEAR_UTILITIES.md`):
+the swap block (§3), the exclusive boundary, raw block API and sliding
+compaction (§12.17), whole-Pattern copy with the sentinel-first publication
+order, early trigger writes and Pattern clears; and the automation-priority
+fix (§6.2a). The user tested the base pass, F1 and F2 on hardware and fed back
+each round; the remaining case list is `COPYCLEAR_UTILITIES.md` §16. See
+`../log_archive/075_SESSION_HANDOFF_LOG.md`. The Session 068
 self-generated relocation/dirty-work-at-idle finding is closed in source by
 the S069 repair/reactive design and confirmed by Pass 1 hardware acceptance.
 
@@ -844,7 +901,15 @@ trace; `patSvc_exclusiveCompactStep()` and
 Pattern paste selections that change triggers capture the source and previous
 destination trigger masks at button time, before the queued exclusive job,
 and restore only entries still containing the service's write if the job is
-dropped.
+dropped. Clears that end trigger-off write those bits at acceptance too. These
+early writes are ordinary foreground trigger edits (`pat_setStepActive()`, one
+halfword RMW each) outside the claim; the job later publishes the same
+trigger state with its blocks.
+
+**Rates.** The copy/clear engines do at most 8 step placements, 16 snapshot
+reads or 32 region entries per 2 ms tick. While a filesystem writer that
+started before the operation is still running, a whole-call governor limits
+them to 0.1 % CPU on average (`COPYCLEAR_UTILITIES.md` §11.5).
 
 **Suspension.** While a copy/clear operation runs, the repair epoch does not
 start (`copyClear_backgroundSuspended()` gate beside the Load/Save gate);
@@ -852,6 +917,9 @@ queue drain, barriers and handover continue.
 
 **In-place append bound.** `pat_tryAppendAutomation()` never grows a block
 into the swap block.
+
+Full behaviour, engine phases and trace layouts:
+`COPYCLEAR_UTILITIES.md` §12 and §15.
 
 ### 12.18 Session 075 finding: Pattern Load fan-out
 

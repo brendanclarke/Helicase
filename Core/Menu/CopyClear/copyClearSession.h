@@ -11,7 +11,8 @@
  * mode/bar/track/Scene context from Menu and buttonHandler. Outputs: queued
  * pastes and clears (copyClearService.h), LED state, the menu text drawn by
  * Menu. Affiliates: copyOps.h, clearOps.h, copyClearService.h, menu.c,
- * buttonHandler.c, ledHandler.c. Spec: S075_PH6_COPY_CLEAR_FULL_SPEC.md.
+ * buttonHandler.c, ledHandler.c. Reference: knowledge_files/
+ * specification_reference/COPYCLEAR_UTILITIES.md.
  */
 #ifndef COPY_CLEAR_SESSION_H_
 #define COPY_CLEAR_SESSION_H_

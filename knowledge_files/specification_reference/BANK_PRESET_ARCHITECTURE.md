@@ -3,10 +3,20 @@
 ## Authority and scope
 
 This is the authoritative reference for how parameters are stored in resident
-memory across the Bank, Scene, Kit, Instrument, and Effect hierarchy as of
-Session 074. S073 changed nothing here. S074 added the bus compressor Scene
-settings and the fourth fader mode, and corrected the Scene storage sizes
-below. How a stored value reaches the DSP
+memory across the Bank, Scene, Kit, Instrument, and Effect hierarchy, current
+as of the **Session 075 close** (2026-10-03). S073 changed nothing here. S074
+added the bus compressor Scene settings and the fourth fader mode. S075
+added:
+
+- copy/clear of Scenes and Scene children, with the edit-mask fan-out,
+  exchange and reset rules in §2 (behaviour reference: `COPYCLEAR_UTILITIES.md`);
+- the retirement of global `srt` (PERF `fxm` in its cell, §9);
+- new Scene defaults: every voice routes to St1, the bus compressor is
+  off/0/0/off (§3);
+- the FX-send Morph endpoint (`fx_send_morph[6]`, §3, §7);
+- the VOICE hold-SHIFT Morph view and the Effect-page SHIFT+TRACK voice-mix
+  overlay (§5);
+- the automation-priority rules (§3 "When parameters change", §8). How a stored value reaches the DSP
 (descriptor writers, special-writer tags, LFO adapters) is in
 `INSTRUMENTS_DSP_REFERENCE.md`. It describes what is stored, where it lives, when it changes,
 when it becomes visible, and how it is persisted.
@@ -34,7 +44,7 @@ Bank (one resident at a time)
 │   ├── SceneData: settings, kit slots, descriptor images, MIDI routing
 │   ├── Effect: Scene-owned `effect_record_t` (420 B; `.fx` v2 child storage)
 │   ├── Kit (embedded in SceneData)
-│   │   ├── Kit-level settings (audio routing, morph endpoints per voice)
+│   │   ├── Kit-level settings (the slot-6/track-7 generated decay pair)
 │   │   └── Instrument[0..5] (6 voice slots)
 │   │       ├── Normal parameter image (byte array, descriptor-indexed)
 │   │       ├── Morph parameter image (byte array, descriptor-indexed)
@@ -42,7 +52,8 @@ Bank (one resident at a time)
 │   │       └── Runtime targets (velocity, LFO × 2 pairs)
 │   ├── Pattern (owned by PatternData, not embedded in scene_t)
 │   │   └── pat_scene_region_t: addresses, pool, bitmap, track settings
-│   └── Scene settings: decimation, MIDI channels/notes, morph values
+│   └── Scene settings: Morph amounts, Effect Morph, routes, FX-send Normal/Morph,
+│       faders, MIDI channels/notes, bus compressor (no global decimation since S075)
 └── Effect runtime (EffectsManager; type-tagged DTCM state)
 ```
 
@@ -148,9 +159,11 @@ Effect runtime through `effects_activateScene()`.
 
 ## 3. SceneData — `Core/Bank/Scene/SceneData.c/h`
 
-`scenes[16]` is 26,016 bytes total (1,626 bytes per Scene since S074:
-45 B settings, one alignment byte, the 420 B Effect record, and the 1,160 B
-Kit). The figure of 1,200 B per Scene in earlier revisions predates the
+`scenes[16]` is 26,080 bytes total (1,630 bytes per Scene since S075 F2:
+50 B settings, the 420 B Effect record, and the 1,160 B Kit; `scene_t` has
+2-byte alignment, measured). S074 had 1,626 B (45 B settings + one alignment
+byte); the S075 base pass removed `voice_decimation_all` (1,624 B, the
+alignment byte went with it) and F2 added `fx_send_morph[6]` (+6 B). The figure of 1,200 B per Scene in earlier revisions predates the
 Session 072 Effect record. Scene storage contains everything except Pattern
 data, which lives in `pat_regions[16]` (168,304 bytes) in PatternData.
 
@@ -165,12 +178,19 @@ data, which lives in `pat_regions[16]` (168,304 bytes) in PatternData.
 | Target selections | Velocity target, LFO target × 2 pairs, per voice | byte tokens, 0xff = off |
 | MIDI routing | Channel and note per track | 7 tracks |
 | Scene Morph | Per-voice morph amount (0..255) | 6 values |
-| Audio routing | Per-voice output assignment (0..5) | 6 bytes |
+| Audio routing | Per-voice output assignment (0..5: St1, St2, L1, R1, L2, R2) | 6 bytes; default St1 (route 0) for every voice since S075 F2 (was L1 for voice 1 and St2 for voice 6) |
 | FX send | Per-voice Normal and Morph send endpoints (0..127) | 12 bytes; the mixer reads the step override, otherwise interpolates the endpoints by the voice's resolved Morph amount each block (S075 F2) |
 | Fader mode | Per-voice `pre`/`pst`/`fx`/`xfd` (0..3) | 6 bytes; `xfd` (3) added in S074 (`SCENE_FADER_SETTING_MAX`) |
 | Bus compressor (S074) | `bus_comp[4]`: `cmp` 0..2 (off/St1/St2), `cam` 0..127, `ctm` 0..127, `csc` 0..6 | 4 bytes; defaults off/0/0/off; AutoSave Scene parameters 41..44; `sceneset.scg` `bus_comp_*` keys; edited on the last settings page and fanned out to the VOICE edit mask; not modulatable |
 | Effect | Type, 64 normal cells, 64 Morph cells, 16-step sequence | 420-byte Scene-owned record; saved as named `.fx` v2 child |
-| Effect Morph | Scene `effect_morph_amount` | AutoSave Scene setting index 40; serialized in `sceneset.scg` when present |
+| Effect Morph | Scene `effect_morph_amount` | AutoSave Scene setting index 40; serialized in `sceneset.scg` when present; edited on PERF as `fxm` (S075) and on the Effect page as `mrp` |
+
+Fresh, cleared and default-staged Scenes (`scene_initAll()`,
+`scene_settingsDefaults()` used by `clear scene` / `clear scene settings`,
+`filesystem_initSceneStage()`, the boot empty-Scene reset) all use the same
+defaults: MIDI channel track + 1, note 63, St1 routes, FX send Normal and
+Morph 0, fader `pre`, Morph amounts 0, Effect Morph 0, compressor
+off/0/0/off.
 
 The Effect record is initialized to the registry's `off` defaults and is
 replaced only through a complete SceneData transaction. EffectsManager owns
@@ -199,9 +219,10 @@ Parameters change through these paths:
    value until the next trigger. Fan-out: written to every Scene in
    `bank_scene_mask_voice_edit`.
 
-2. **User edit (Scene settings/PERF page):** Scene-level values (morph,
-   decimation, audio routing) written through SceneData setters. Fan-out
-   same as VOICE page.
+2. **User edit (Scene settings/PERF page):** Scene-level values (Scene and
+   per-voice Morph, Effect Morph `fxm`, audio routing, FX-send endpoints,
+   fader mode, compressor) written through SceneData setters. Fan-out same
+   as VOICE page. (Global decimation `srt` was retired in S075.)
 
 3. **Morph interpolation:** The morph engine interpolates between normal and
    morph images at the current per-voice morph amount. Result stored in
@@ -217,11 +238,23 @@ Parameters change through these paths:
    use runtime-only overlays (Session 070). Neither path changes stored
    images.
 
-   **S075 F3 priority:** step automation wins until the voice's next trigger;
-   a menu edit changes an endpoint and applies only that parameter's
-   interpolation at once; external MIDI is lowest priority, storing the
-   active Scene's Normal endpoint for the Morph worker to apply. Morph-base
-   writers never overwrite a held automation runtime value.
+   **S075 F3 priority (user): automation, then menu edits, then MIDI.**
+   - A voice-parameter automation value holds until the voice's next
+     trigger. `seq_automationHoldsParameter(slot, local)` reports it; every
+     Morph-base runtime write goes through `presetMorph_writeRuntimeBase()`,
+     which skips a held parameter (the base still lands in
+     `morph_interpolation[]`, which the trigger restore applies).
+   - A menu edit only sets an endpoint: `preset_setInstrumentParameter()`
+     re-interpolates that one parameter at the voice's resolved Morph amount
+     (`presetMorph_applyParameterNow()`); with Morph above 0 the sound
+     changes by less than the edit (correct). The whole voice is not queued.
+   - External MIDI CC/NRPN is lowest priority:
+     `preset_setInstrumentParameterFromMidi()` stores the active Scene's
+     clamped Normal endpoint (retained and AutoSaved, no fan-out) and queues
+     the voice; the Morph sweep applies it when it gets there.
+   - Before S075 F3 a menu edit queued the whole voice and the worker
+     overwrote held automation mid-note (also on Morph changes, LFO on
+     Morph, `Nvm` and Kit/Instrument applies).
 
 6. **Kit/Instrument/Scene/Bank Load:** Commits validated data from staging
    into resident storage. Scene/Bank loads stage the Effect atomically with
@@ -257,7 +290,8 @@ Parameters change through these paths:
   active voice slot. Descriptor layouts come from the installed instrument
   type's `*Parameters.c` file.
 
-- **PERF page:** Reads from Scene settings (morph, decimation, audio routing)
+- **PERF page:** Reads from Scene settings (Scene Morph, per-voice Morph,
+  Effect Morph `fxm`)
   and `parameter_values[]` for legacy/global parameters.
 
 - **Step-edit pages:** Reads automation values from the dynamic Pattern pool
@@ -318,8 +352,17 @@ AutoSave restore.
 ### Morph image
 
 Byte array indexed by descriptor index. Contains the "B" endpoint for morph
-interpolation. Written by SHIFT+VOICE morph-edit mode, KitMrp/InstrumentMrp
-loads, and AutoSave restore.
+interpolation. Written by VOICE-page edits in the Morph view, KitMrp/
+InstrumentMrp loads, and AutoSave restore.
+
+**Morph view (S075 F2).** The VOICE page shows and edits Morph endpoints
+while `voiceModeShowMorph` is set: latched by SHIFT+MODE VOICE, or
+momentarily while SHIFT is held in VOICE mode (release returns to the latch
+state). The FX-send cell follows the same view (Morph endpoint in the Morph
+view; step override or Normal endpoint in the Normal view); the other Scene
+setting cells (out, fader, voice Morph) have one value. On the Effect page,
+SHIFT+TRACK shows that voice's mix Scene-setting screen while TRACK is held
+(`menu_fxVoiceMixOverlayBegin()`); SHIFT there selects the Morph view too.
 
 ### Supplemental parameters
 
@@ -408,9 +451,12 @@ to [0, 255].
 active, else retained Scene value. Session 071 added the step-override table.
 Direct mixer register write for DSP apply.
 
-**FX Send:** `preset_getEffectiveFxSend(slot)` returns the step override when
-active, otherwise Normal/Morph endpoints interpolated by the resolved voice
-Morph amount (including active-Scene LFO contributions). The VOICE Normal view
+**FX Send:** `preset_getEffectiveFxSendAmount(scene, slot)` returns the step
+override when active, otherwise the Normal/Morph endpoints interpolated by the
+resolved voice Morph amount (`presetMorph_getResolvedVoiceAmount()`: step
+override or retained base, plus active-Scene LFO contributions):
+`round(normal + (morph − normal) · amount / 255)`; equal endpoints return at
+once. The VOICE Normal view
 shows the override or Normal endpoint; Morph view shows the Morph endpoint.
 The mixer pulls the audible value each block, applies the stored PRE/POST/FX
 fader topology, and ramps the send into the live FX bus.

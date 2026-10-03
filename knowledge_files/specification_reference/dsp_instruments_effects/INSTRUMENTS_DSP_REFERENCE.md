@@ -4,9 +4,12 @@ How the six instrument voices are rendered, how their parameters reach the
 DSP, how modulation (LFO, velocity, Morph, step automation) works, what each
 part costs, and how to change or extend it.
 
-- **Current as of:** Session 074 close (2026-09-30). S074 changed nothing
+- **Current as of:** Session 075 close (2026-10-03). S074 changed nothing
   in the voice engines; it added a sidechain tap in the trigger funnel
-  (§2) and a mirrored fader gain used by the mixer's `xfd` mode.
+  (§2) and a mirrored fader gain used by the mixer's `xfd` mode. S075
+  changed no engine either: it retired the global `srt` LFO/automation
+  target and fixed **who may write a voice parameter's runtime value
+  when** (§4.3, §7.5: automation, then menu edits, then MIDI).
 - **Related documents:**
   - `EFFECTS_MIXER_DSP_REFERENCE.md`: what happens to a voice block after it
     leaves the instrument (decimation, mixer, FX bus, output);
@@ -201,8 +204,12 @@ parameter cell (Drum 39 rows, Snare 38, Cymbal 39, HiHat 39):
 
 `instrumentManager_writeRuntime(slot, descriptor, value)` is the one way a
 retained value reaches the DSP. Its callers: Preset (Kit/Scene/Instrument
-apply), Menu edits, the Morph worker, step automation drain and restore, and
-Scene activation.
+apply, supplemental edits), the Morph worker and the one-parameter menu
+apply (both through the guarded `presetMorph_writeRuntimeBase()`), step
+automation drain and restore, Scene activation, and the legacy internal CC
+path (`midiParser_writeTaggedRuntime()`). Since S075 F3 **external MIDI no
+longer writes the runtime**: it stores an endpoint and the Morph sweep
+applies it (§7.5).
 
 1. `instrumentManager_writeSpecialRuntime()` switches on the row's special
    tag (§4.4). If the row has a special writer, it converts the byte and calls
@@ -256,8 +263,10 @@ write (up to 20 `strcmp`, 2 `strstr` and 7 `strncmp`).
 
 Retained values live in the Scene's Kit images: `instrument_parameters[]`
 (normal), the Morph endpoint image, and `morph_interpolation[]` (the current
-interpolated value that the runtime should hold). Menu edits, loads and the
-Morph worker write the images and then call `instrumentManager_writeRuntime()`.
+interpolated value that the runtime should hold). Menu edits, loads, MIDI and
+the Morph worker write the images; the runtime then receives
+`morph_interpolation[]`, never a raw endpoint, unless step automation holds
+that parameter (§7.5).
 See `BANK_PRESET_ARCHITECTURE.md` for the images, the Morph worker and dirty
 marking.
 
@@ -524,17 +533,31 @@ local token in that namespace. Install:
 - **Step automation:** TIM3 queues values; the foreground drain
   (`seq_drainPendingAutomation()`, after trigger processing in the render
   loop) writes voice targets with `instrumentManager_writeRuntime()` and
-  marks them dirty. Transport restart and Pattern changes restore dirty
-  parameters from `morph_interpolation[]` (not from the normal image).
+  marks them dirty. The voice's next trigger
+  (`seq_restoreAutomatedParameters()` in the trigger funnel), transport
+  restart and Pattern changes restore dirty parameters from
+  `morph_interpolation[]` (not from the normal image).
   Values are stored 7-bit with an identity mapping.
 - **Morph:** the Morph worker (`presetMorph_tick()`, foreground, one
   parameter per pass) interpolates normal → Morph images and writes
   `morph_interpolation[]` through `instrumentManager_writeRuntime()`. An LFO
   aimed at a voice Morph re-queues a pass of every Morphable parameter every
   block, which is foreground cost.
-- **Priority:** step automation and Morph set the base; the LFO modulates
-  around it. Details and the Scene-target rules:
-  `BANK_PRESET_ARCHITECTURE.md` and `PATTERN_DYNAMIC_STACK.md`.
+- **Priority (S075 F3, user): automation, then menu edits, then MIDI.**
+  A voice-parameter automation value holds until the voice's next trigger:
+  `seq_automationHoldsParameter(slot, local)` reports it, and every
+  Morph-base runtime write (`presetMorph_tick()`,
+  `presetMorph_applyVoiceNow()`, `presetMorph_applyParameterNow()`) goes
+  through `presetMorph_writeRuntimeBase()`, which skips a held parameter
+  while still updating `morph_interpolation[]`. A menu edit re-interpolates
+  only its own parameter at the resolved Morph amount (it no longer queues
+  the whole voice). External MIDI CC/NRPN stores the active Scene's clamped
+  Normal endpoint and lets the Morph sweep apply it. Before S075 F3 a menu
+  edit, a Morph change, an LFO on Morph, `Nvm` automation or a Kit apply
+  reset automated parameters mid-note.
+- **LFO:** step automation and Morph set the base; the LFO modulates around
+  it. Details and the Scene-target rules: `BANK_PRESET_ARCHITECTURE.md` and
+  `PATTERN_DYNAMIC_STACK.md` §6.2a.
 
 ### 7.6 Target IDs
 
@@ -743,3 +766,6 @@ fields from `ModulationNode`.
   octave edge table (`073_SESSION_HANDOFF_LOG.md` §6).
 - Session 074: no engine change; the bus-compressor sidechain tap in the
   trigger funnel (`074_SESSION_HANDOFF_LOG.md` §8).
+- Session 075: no engine change; global `srt` retired (target 390 a
+  placeholder); runtime-write priority fixed (§4.3, §7.5;
+  `075_SESSION_HANDOFF_LOG.md` §11).

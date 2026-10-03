@@ -6,7 +6,8 @@ the master bus compressor, and the path to the two DACs. It covers the
 arithmetic, the number formats, what each stage costs, and how to change or
 extend it.
 
-- **Current as of:** Session 075 F2 (2026-10-03). S074 added CrumpBit
+- **Current as of:** Session 075 close (2026-10-03; F3 changed nothing in
+  the mixer or Effect DSP). S074 added CrumpBit
   (§4.4, the first type using the arena), the master bus compressor (§5A),
   the `xfd` fader mode (§3.2) and the closure of the arena gaps (§5.3).
 - **Scope split with `EFFECTS_BUS_REFERENCE.md`:** that document is the
@@ -117,7 +118,11 @@ Policy).
    and audit item 11).
 3. **Fader gains** (`mixer_faderGains()`):
    - `volume` = the instrument's `vol` (0..1); `fader` = the slider;
-     `send` = the effective FX send amount / 127;
+     `send` = the effective FX send amount / 127
+     (`preset_getEffectiveFxSendAmount()`: the step override, else, since
+     S075 F2, the voice's Normal and Morph send endpoints interpolated by
+     its resolved Morph amount, `round(n + (m − n)·a/255)`; read every
+     block);
    - mode `pre`: dry = volume × fader, send = send × fader;
    - mode `pst`: dry = volume × fader, send = send;
    - mode `fx`: dry = volume, send = send × fader;

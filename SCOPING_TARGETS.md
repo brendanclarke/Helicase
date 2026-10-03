@@ -1422,13 +1422,14 @@ completion records are in §§3.4, 4.6.
 bar, bar range, track, automation (pot clears), Instrument, Kit, Effect, FX
 sequence, Scene settings, Pattern and whole Scenes (the §4.5 copy operations,
 §5.8's Effect copy/clear, FX lock removal A15), with global `srt` retired and
-Effect Morph `fxm` in its PERF cell. Spec:
-`S075_PH6_COPY_CLEAR_FULL_SPEC.md`; implementation record and schedule:
-`S075_PH6_COPYCLEAR_F1_AND_TRACE_IMPLEMENTATION.md`; implementation log:
-`S075_PH6_COPYCLEAR_IMPLEMENTATION.md` (§14). Status: DEV and production
-builds pass; hardware verification remains pending. F1 intentionally removed
-the copy/clear source group blink; copy/clear now owns only operation LEDs and
-full destination-object flashes.
+Effect Morph `fxm` in its PERF cell. Reference:
+`knowledge_files/specification_reference/COPYCLEAR_UTILITIES.md`; record:
+`knowledge_files/log_archive/075_SESSION_HANDOFF_LOG.md`. Status: the user
+tested the base pass, F1 and F2 on hardware and fed back each round (F1, F2,
+F3 are those rounds); the remaining case list is `COPYCLEAR_UTILITIES.md`
+§16. S075 also added the morphable FX send, the VOICE hold-SHIFT Morph view,
+the Effect-page SHIFT+TRACK voice-mix overlay and the automation-priority
+fix (log §10–§11).
 
 ### 6.0 Deferred Phase 4 completion (first priority)
 
@@ -1909,14 +1910,14 @@ Session 074 startup: `S074_EFFECT_BUGS_BUFFER_USE.md` (root).
 ## Session 074 carry-forward (2026-09-30)
 
 Session 074 record: `knowledge_files/log_archive/074_SESSION_HANDOFF_LOG.md`.
-Session 075 startup: `S075_PH6_COPY_CLEAR.md` (root).
+Session 075 startup: `S075_PH6_COPY_CLEAR.md` (root; deleted at the S075
+close, its content is in `075_SESSION_HANDOFF_LOG.md` §4).
 
 ### Next session (075)
 
 - **Phase 6 begins: copy and clear operations.** Step, bar, track,
-  automation, Instrument, Scene and Scene components. The overview, a
-  proposed operation model and the decisions to take first are in
-  `S075_PH6_COPY_CLEAR.md`.
+  automation, Instrument, Scene and Scene components. **Done in S075**
+  (`075_SESSION_HANDOFF_LOG.md`).
 
 ### Open from Session 074
 
@@ -1946,9 +1947,10 @@ Session 075 startup: `S075_PH6_COPY_CLEAR.md` (root).
   does not restart the presence search; a deferred Pattern/track clear can
   race the restarted search; the Effect held-value marker has no
   quiet-period debounce; the 224-pass search latency is unmeasured.
-- **Tools:** `tools/verify_bank_autosave.py` expects 129 HCNAMES rows (161
-  now); `tools/decode_devlogs.py` misreads `pattrace.bin` and labels `Q`
-  records "unknown producer".
+- **Tools:** ~~`tools/verify_bank_autosave.py` expects 129 HCNAMES rows~~
+  (fixed in S075 F2: format 3, 161 rows, 51 Scene cells);
+  `tools/decode_devlogs.py` misreads `pattrace.bin` and labels `Q` records
+  "unknown producer".
 - **Cosmetic comments:** `BusCompressor.h` (state "24 B", now 32 B);
   `BusCompressor.c` loop comment ("~+0.45 %", measured +0.6–0.8 %);
   `CrumpBitEffect.h` (minimum share "73,632 B", now 73,600 B); the S074 C4
@@ -1971,5 +1973,34 @@ Session 075 startup: `S075_PH6_COPY_CLEAR.md` (root).
   destination is the playing Scene, TIM3 can read a new address entry that
   points into old pool bytes during the copy. A sentinel-first order (publish
   all entries empty, copy pool/bitmap/parameters, copy the address array last)
-  avoids it; `S075_PH6_COPY_CLEAR_FULL_SPEC.md` §9.5 specifies that order for
-  whole-Pattern copy and finding F1.
+  avoids it; copy/clear's whole-Pattern copy already uses that order
+  (`COPYCLEAR_UTILITIES.md` §12.8).
+
+## Session 075 carry-forward (2026-10-03)
+
+Session 075 record: `knowledge_files/log_archive/075_SESSION_HANDOFF_LOG.md`
+(§13 lists everything open). Copy/clear reference: `COPYCLEAR_UTILITIES.md`.
+
+### Next session (076)
+
+- User hardware checks still open: the SHIFT+TRACK overlay follow-up
+  (last TRACK pressed, no mutes while held), the combined case list in
+  `COPYCLEAR_UTILITIES.md` §16, a `verify_bank_autosave.py` PASS on a card
+  written by this firmware (delete `.hcprms1/2` and other temporary records
+  first: no AutoSave migration for the F2 cells).
+- Re-measure the production build (`DEV_MODE_LOGGING 0`), last measured at
+  F1.
+- Then the next Phase 6 item with the user (§6.0 deferred Phase 4 items first).
+
+### Open from Session 075
+
+- **Pattern Load fan-out tear** (Session 075 findings, above): not fixed.
+- **O1** (Settings Load equalises per-voice Morph across the edit mask): the
+  `srt` part is gone; per-voice Morph remains.
+- **MIDI:** CC-entered values show on the LCD only at the next repaint; the
+  legacy internal CC path (`preset_applySoundParameter()`) stays
+  runtime-only.
+- **Effects saved at pan 64** show `1` (no migration, user).
+- **Copy/clear known limits** (by design): `COPYCLEAR_UTILITIES.md` §18.
+- **Trace ring** still at the temporary 2,048 records (D2).
+

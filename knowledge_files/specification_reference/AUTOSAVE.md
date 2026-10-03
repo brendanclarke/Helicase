@@ -4,8 +4,20 @@
 
 This is the authoritative reference for the implemented Helicase AutoSave
 format, ownership, boot restore, mutation tracking, and background writer
-through Session 074. Session 073 changed nothing in AutoSave. Session 074
-made two changes:
+through Session 075. Session 073 changed nothing in AutoSave. Session 075
+made three changes (details below; history in `075_SESSION_HANDOFF_LOG.md`):
+
+- Scene cell 7 (the retired global `srt`) is reserved: written as 127,
+  ignored on restore;
+- Scene cells 45..50 hold the per-voice FX-send Morph endpoint (F2); the
+  Scene parameter count is 51. **No migration** (user): records written
+  before F2 hold zero there, so delete `.hcprms1`/`.hcprms2` before the
+  first boot of this firmware on an older card;
+- while a copy/clear operation runs, the scalar drain, both Pattern AutoSave
+  schedulers and the trace flush do not start (`copyClear_backgroundSuspended()`,
+  `COPYCLEAR_UTILITIES.md` §11.6).
+
+Session 074 made two changes:
 
 - it made Scene parameters 41..44 live for the master bus compressor, using
   reserved cells with no format-version change;

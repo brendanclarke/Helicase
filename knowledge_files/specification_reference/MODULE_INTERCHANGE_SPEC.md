@@ -1,7 +1,7 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-074, including typed HCNAMES, `.fx` Effect storage, AutoSave boot restore, typed Instrument-index
+075, including typed HCNAMES, `.fx` Effect storage, AutoSave boot restore, typed Instrument-index
 repair, AsyncFATFS directory publication, the Phase 4 dynamic Pattern storage
 system, step automation editing/playback (Session 065), the VOICE-page
 held-step automation overlay (Session 066), the Pattern Stack Service with
@@ -18,7 +18,22 @@ dry + send), and the Session 074 additions:
 - the Effect-page automation underlines;
 - the master bus compressor (`Core/DSPAudio/BusCompressor`);
 - the `xfd` fader mode;
-- the AutoSave torn-record validation step. The DSP internals behind these APIs are described in
+- the AutoSave torn-record validation step;
+
+and the Session 075 additions:
+
+- Phase 6 copy/clear (`Core/Menu/CopyClear/`, reference
+  `COPYCLEAR_UTILITIES.md`) with the PatternData raw block API, the
+  PatternStackService exclusive boundary, the BankData/SceneData/Preset/
+  EffectsManager whole-object helpers and the filesystem name-buffer loan;
+- the retirement of global `srt` (PERF `fxm` in its cell);
+- the FX-send Morph endpoint, the VOICE hold-SHIFT Morph view and the
+  Effect-page SHIFT+TRACK voice-mix overlay (F2);
+- the automation-priority fix: `seq_automationHoldsParameter()`, the guarded
+  Morph-base write, one-parameter menu edits and the external-MIDI endpoint
+  entry (F3).
+
+The DSP internals behind these APIs are described in
 `INSTRUMENTS_DSP_REFERENCE.md` and `EFFECTS_MIXER_DSP_REFERENCE.md`.
 Historical migrations belong in session logs; this document states which live
 module owns each call, state transition, and retained object.
@@ -235,12 +250,14 @@ layout.
 | `scene_setEffectSeqLaneValue()` / `scene_setEffectSeqLaneLocked()` | Store one sequencer lane value or lock bit and mark only its live cell. | EffectsManager lock editor |
 | `scene_setEffectMorphAmount()` / `scene_getEffectMorphAmount()` | Retained Scene parameter 40, separate from the Effect record. | EffectsManager, `preset_morphScene()` (PERF `mrp`), AutoSave |
 | `scene_editLayoutMatches(a, b)` | Same Effect type and six Instrument types; read-only. | Menu mask gate, BankData re-validation |
-| `scene_busCompDefaults(settings)` / `scene_busCompClamp(field, value)` / `scene_setBusCompSetting(scene, field, value)` / `scene_getBusCompSetting(scene, field)` | S074 master bus compressor bytes `bus_comp[4]` (MODE 0..2, AMOUNT 0..127, TIME 0..127, SIDECHAIN 0..6; defaults off/48/48/off). The setter clamps, stores change-aware and marks AutoSave Scene parameter 41 + field. | Preset (menu commit, fan-out), `.scg` parser, AutoSave reader, BusCompressor (reads per block) |
+| `scene_busCompDefaults(settings)` / `scene_busCompClamp(field, value)` / `scene_setBusCompSetting(scene, field, value)` / `scene_getBusCompSetting(scene, field)` | S074 master bus compressor bytes `bus_comp[4]` (MODE 0..2, AMOUNT 0..127, TIME 0..127, SIDECHAIN 0..6; defaults off/0/0/off since S075 F2). The setter clamps, stores change-aware and marks AutoSave Scene parameter 41 + field. | Preset (menu commit, fan-out), `.scg` parser, AutoSave reader, BusCompressor (reads per block) |
 | `scene_setVoiceFaderSetting()` / `scene_getVoiceFaderSetting()` | Per-voice fader mode 0..`SCENE_FADER_SETTING_MAX` (3 = `xfd` since S074; equal to `MIXER_FADER_XFD`, asserted in `mixer.c`). | Preset, `.scg` parser, AutoSave, mixer |
 | `scene_settingsDefaults(out)` / `scene_commitSettings(scene, src)` / `scene_commitKit(scene, kit)` / `scene_resetKitToDefaults(scene)` | Whole-settings defaults and field-by-field commit through the change-aware setters; whole-Kit commit and fresh-Kit reset with the Kit AutoSave marker and card-clean invalidation. No runtime apply. (S075) | CopyClear |
+| `scene_setVoiceAudioOut()` / `scene_getVoiceAudioOut()` | Per-voice route 0..5 (0 St1, 1 St2, 2 L1, 3 R1, 4 L2, 5 R2). The default for every slot, and the fallback for an invalid byte, is St1 (route 0) since S075 F2 (`scene_defaultVoiceAudioOut()`). | Preset, `.scg` parser, AutoSave |
+| `scene_setVoiceFxSendAmount()` / `scene_getVoiceFxSendAmount()` / `scene_setVoiceFxSendMorph()` / `scene_getVoiceFxSendMorph()` | Normal and Morph endpoints of the per-voice FX send (0..127; AutoSave Scene cells 14..19 and 45..50). Change-aware; no runtime push: the mixer interpolates every block through `preset_getEffectiveFxSendAmount()`. (Morph endpoint: S075 F2) | Preset, `.scg` parser/writer, AutoSave, CopyClear |
 
-The 420-byte record and the 16-record SRAM1 allocation (`scenes`, 26,016 B:
-1,626 B per Scene since S074) are firmware-lifetime SceneData storage. EffectsManager owns 84 B of resolution state and 184 B of
+The 420-byte record and the 16-record SRAM1 allocation (`scenes`, 26,080 B:
+1,630 B per Scene since S075 F2) are firmware-lifetime SceneData storage. EffectsManager owns 84 B of resolution state and 184 B of
 overlay/LFO state in SRAM1, plus the 76-byte DTCM type runtime; the mixer owns
 the FX bus.
 
@@ -443,7 +460,7 @@ Sequencer LED feedback via `SeqLedState`.
 | `led_clearSelectLeds()` / `led_clearVoiceLeds()` | Clear select/voice LED groups. | buttonHandler, Menu |
 | `led_setActive_step(stepNr)` / `led_clearActive_step()` | Chase/current-step display helpers. | ledHandler internals/future callers |
 | `led_initPerformanceLeds()` | Performance LED layout. | buttonHandler, pattern change notification |
-| `led_updateCurrentStep(step)` | Repaint chase LED from Sequencer payload. Returns early on `EFFECT_PAGE`, which owns the SEQ row (lock LEDs, FX chase, `sel` blink) through `menuEffects_renderSeqLeds()` (Session 072 step 8). | `led_processSeqLedState()` |
+| `led_updateCurrentStep(step)` | Repaint chase LED from Sequencer payload. Returns early on `EFFECT_PAGE` — and, since S075 F2, while the SHIFT+TRACK voice-mix overlay is shown over it (`menu_fxVoiceMixOverlayActive()`) — because the Effect page owns the SEQ row (lock LEDs, FX chase, `sel` blink) through `menuEffects_renderSeqLeds()`. `led_updateRecordedMainStep()` and the follow-mode repaint in `led_notifyPatternChanged()` use the same gate. | `led_processSeqLedState()` |
 | `led_updateRecordedMainStep(activeTrack, shownPattern, subStep)` | Repaint recorded main step if visible. | `led_processSeqLedState()` |
 | `led_updateRecordedSubStep(activeTrack, shownPattern, step, selectedStepBase, shiftHeld, selectMode)` | Repaint recorded sub-step if visible. | `led_processSeqLedState()` |
 | `led_updatePatternTrack(track, pattern, selectedStepBase)` | Repaint all visible step/select LEDs from PatternData. | buttonHandler, Menu, pattern follow |
@@ -488,6 +505,9 @@ dispatch to owners.
 | `SELECT_MODE_FX` / FX dispatch | SHIFT+PERF owns the Effect page; SELECT/TRACK/BAR gestures first offer the active type's `effect_ui_hooks_t`, while default TRACK/SELECT behavior remains in buttonHandler/Menu. | `menuEffects`, EffectsManager registry |
 | `seqHeldMask()` | Return the current held-step bitmask for the VOICE overlay or active FX lock editor (Session 066/ST8). | Menu overlay, `menuEffects` |
 | `visibleStep()` | Return the visible step index accounting for bar offset (Session 066, promoted to extern). | Menu, ledHandler |
+| Copy/clear router (S075) | `processPress()`/`processRelease()` offer every edge to `copyClear_buttonPressed/Released()` first (nonzero = consumed); `case BUT_COPY` calls `copyClear_copyPressed(shift)` except SHIFT+COPY while recording and running (erase); the event loop calls `copyClear_postEvent()` and, on ring overflow, `copyClear_eventOverflow()`. | CopyClear |
+| VOICE hold-SHIFT Morph view (S075 F2) | SHIFT press in VOICE mode → `menu_setVoiceModeShowMorph(1)`; release → back to the SHIFT+MODE VOICE latch (`buttonHandler_morphVoiceModeActive`). | Menu |
+| Effect-page SHIFT+TRACK voice-mix overlay (S075 F2) | After the type's TRACK hook declines, SHIFT+TRACK in FX mode selects the track and calls `menu_fxVoiceMixOverlayBegin()`; `buttonHandler_fxVoiceMixTrackMask` (1 B) holds the TRACKs keeping it up. While the mask is nonzero every TRACK press joins it and moves the overlay to that track; **no TRACK press mutes**. The last release calls `menu_fxVoiceMixOverlayEnd()` (release consumed before copy/clear routing). SHIFT under the overlay switches the voice Morph view; default SELECT navigation is skipped (type SELECT hooks still run); overflow clears the mask and ends the overlay. | Menu, ledHandler |
 
 Public state used by other modules:
 
@@ -519,7 +539,10 @@ edit dispatch, and post-load operation follow-up.
 | `menu_serviceRuntimeWidgets()` | Runtime UI widgets such as CPU. | main loop |
 | `menu_switchPage(pageNr)` / `menu_switchSubPage(subPageNr)` | Page navigation and direct Pattern/LED refresh. | buttonHandler/Menu |
 | `menu_resetActiveParameter()` | Keep active parameter valid for page. | buttonHandler/Menu |
-| `menu_setVoiceModeShowMorph(onOff)` | Toggle VOICE-page morph endpoint overlay for descriptor-backed instrument cells; repaint/edit helpers resolve the active slot's main or morph image through InstrumentManager. | buttonHandler `SHIFT+VOICE` mode |
+| `menu_setVoiceModeShowMorph(onOff)` | Set the VOICE-page Morph endpoint view for descriptor-backed instrument cells and the FX-send cell; repaint/edit helpers resolve the main or Morph image. Driven by the SHIFT+MODE VOICE latch, by SHIFT held in VOICE mode (S075 F2) and by SHIFT under the Effect-page overlay. | buttonHandler |
+| `menu_fxVoiceMixOverlayBegin(track)` / `menu_fxVoiceMixOverlayEnd()` / `menu_fxVoiceMixOverlayActive()` | S075 F2 Effect-page SHIFT+TRACK overlay: Begin saves the Effect position in a 4-byte record and shows VOICE `track`'s mix sub-page on its first Scene-setting screen (a second call moves it); End restores the Effect page, applies latched `menuEffects_service()` actions and repaints. Does **not** go through `menu_switchPage()` (which would run `menuEffects_leave()`); a real page switch ends it without restore. `menu_serviceRuntimeWidgets()` keeps running `menuEffects_service()` under it so the Effect LEDs stay live. | buttonHandler, ledHandler |
+| VOICE mix FX-send cell (internal, S075 F2) | Normal view shows the step override or the Normal endpoint (`preset_getFxSendDisplayAmount()`); Morph view shows and edits the Morph endpoint (`scene_getVoiceFxSendMorph()` / `preset_setVoiceFxSendMorph()`); never the interpolated send. Edits fan out over the edit mask. | Menu internals |
+| `menu_clampInstrumentValue(slot, descriptor_index, value)` | S075 F3: the VOICE-page descriptor-domain clamp (`menu_clampCellValue()` on a transient instrument cell) for one parameter of the active Scene, so external MIDI never stores an out-of-domain byte. | MidiParser |
 | `menu_setEffectShowMorph(onOff)` | Toggle the momentary SHIFT Morph endpoint view on `EFFECT_PAGE`; refreshes Effect pot snapshots and repaint without touching VOICE morph state. | buttonHandler FX SHIFT press/release |
 | `MENU_CELL_EFFECT` delegation (internal) | Effect page cells resolve, format, clamp and commit through `menuEffects_*`; early `EFFECT_PAGE` branches in navigation/encoder/pots/service hand the cursor to menuEffects (Session 072 step 7). `menu_isScreenPage()` covers the four-cell compact model for VOICE and EFFECT. | Menu internals |
 | `fx` step-automation category (internal) | Category 7 of the STEP automation page lists the viewed Scene's AUTOMATABLE Effect rows (`effects_stepTarget()`); WIDE8 rows display the `expand7` value; `menu_stepAutomationIsEffect()` excludes the 511 off sentinel. `fxm` in `scn` stores seven bits like voice Morph (`menu_sceneTargetIsMorph()`). | Menu STEP page |
@@ -544,7 +567,7 @@ edit dispatch, and post-load operation follow-up.
 | `menu_automationTargetCleared(target)` | Drop one target's underline at a pot clear without restarting the search. (S075) | clearOps |
 | `menu_copyClearMenuChanged()` / `menu_copyClearMenuClosed()` / `menu_isStorageBusy()` | Copy/clear menu repaint, close (CGRAM cache invalidation + full repaint), storage-lock view. (S075) | copyClearSession |
 | Automation-presence search (internal, S066/S074) | `va_searchRestart()`, `va_scanService()` (4 step reads per pass; VOICE: the active track; Effect page: all 7 tracks of the viewed Pattern), `va_searchRecordEffectTarget()` (block-7 locals 0..62 and `fxm`; rejects local 63/`0x1FF`), `menu_effectCellAutomated()`, `menu_applyEffectMarkers()`. 13 shared bytes; every entry to a VOICE or Effect page restarts it. | Menu internals |
-| `menu_effectShowHome()` | S074: jump the Effect page to the active type's layout home screen, leaving any full view (used when a type's SELECT hook returns `EFFECT_UI_SHOW_HOME`). | buttonHandler FX SELECT paths |
+| `menu_effectShowHome()` | S074: jump the Effect page to the active type's layout home screen, leaving any full view (used when a type's SELECT hook returns `EFFECT_UI_SHOW_HOME`). Under the S075 overlay it only re-renders the SELECT LEDs for the saved Effect sub-page (no screen change while TRACK is held). | buttonHandler FX SELECT paths |
 | Bus compressor settings page (internal, S074) | `MENU_MIDI_PAGE` sub-page `MENU_GLOBAL_SCENE_SUBPAGE` (2), always last. Cells `cmp cam ctm csc` mirror the active Scene through `PAR_BUS_COMP_*` (58..61). Commits go through a dedicated `menu_cellCommitValue()` branch into `preset_setBusCompSetting()` for every VOICE-edit-masked Scene; `menu_parseGlobalParam()` only refreshes the mirrors for these ids, so a Settings Load can never write Scenes. Cues `^` (first screen) and `+` (this page) in `checkScrollSign()`. BC18 diagnostic boot check. | Menu internals, Preset |
 
 Shared state used by clients:
@@ -592,9 +615,9 @@ and page-owned SEQ LEDs; the Pattern chase yields to this LED layer.
 
 Affiliate modules: buttonHandler, Menu, ledHandler, PatternData,
 PatternStackService, SceneData, BankData, presetManager, EffectsManager,
-filesystem, Autosave. Spec: `S075_PH6_COPY_CLEAR_FULL_SPEC.md`; F1/trace
-implementation record: `S075_PH6_COPYCLEAR_F1_AND_TRACE_IMPLEMENTATION.md`;
-implementation log: `S075_PH6_COPYCLEAR_IMPLEMENTATION.md`.
+filesystem, Autosave. Reference: `COPYCLEAR_UTILITIES.md` (behaviour,
+architecture, engines, trace layouts); history:
+`../log_archive/075_SESSION_HANDOFF_LOG.md` §4–§10.
 
 Purpose: Phase 6 copy and clear of Pattern data (step, range, bar, track) and
 of Scenes and Scene children (Instrument, Kit, Effect, FX sequence, settings,
@@ -671,7 +694,8 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 | `seq_fxTakeEvent()` | Take the newest FX RESET/STEP latch byte. | `effects_service()` |
 | `seq_setEffectAutomationTracks(mask)` | Publish the tracks owning Effect overlays; TIM3 queues step markers only for them. | EffectsManager |
 | `seq_evaluateStepCondition(track, step)` | Read step specials and evaluate the conditional gate (probability). Returns `step_allowed`. Called before the trigger-active check in `seq_advanceTrackStep()`. Both trigger and automation are gated by the result; erase is independent (Session 070). | Sequencer only |
-| `seq_restoreAutomatedParameters(voice)` | Restore dirty descriptors from `morph_interpolation[]` on voice retrigger; clears per-slot dirty bitmap. | `voiceControl_triggerNow()` |
+| `seq_restoreAutomatedParameters(voice)` | Restore dirty descriptors from `morph_interpolation[]` on voice retrigger; clears per-slot dirty bitmap. `morph_interpolation[]` holds every endpoint edit and Morph change made while the value was held (S075 F3). | `voiceControl_triggerNow()` |
+| `seq_automationHoldsParameter(slot, local)` | S075 F3: nonzero while step automation holds that descriptor's runtime value (its `seq_automation_dirty[slot]` bit). Read-only; foreground only. The guard behind "automation always wins". | `presetMorph_writeRuntimeBase()` |
 | `seq_restoreAllAutomation()` | Walk all 6 slots' 64-bit dirty bitmaps and restore each dirty descriptor index from `morph_interpolation[]` via `instrumentManager_writeRuntime()`. Called from `seq_setStepIndexToStart()` before `seq_clearAutomationDirty()` (Session 070). | Sequencer transport restart |
 | `seq_restoreAllSceneAutomation()` | Walk `seq_scene_automation_dirty` (uint32_t) bitmap and restore each dirty Scene target from its retained SceneData getter. Clears morph step overrides, slot6 decay step state, and audio routing. Called from `seq_setStepIndexToStart()` (Session 070). | Sequencer transport restart |
 | `seq_midiNoteOff(chan)` / `seq_sendMidiNoteOn(channel, note, veloc)` | MIDI note output ownership. | MidiParser, Sequencer |
@@ -727,12 +751,12 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_loadFirstAvailableSceneOrKit()` | Fallback after absent/empty Bank: lowest root Scene, then lowest root Kit, then defaults. | boot, Bank Load completion |
 | `preset_sendDrumsetParameters()` | Synchronous pre-audio clear plus six-slot tagged reset/routing/descriptor-image apply. It intentionally leaves target installation to the exact ordinary Scene worker started after audio initialization. | Menu boot/load path |
 | `preset_applySoundParameter(paramNr, value, recordAutomation)` | Direct legacy/static sound parameter application and optional automation recording. | Menu, morph, reset-lock |
-| `preset_setInstrumentParameter(scene, slot, descriptor_index, image, value, recordAutomation)` | Store one descriptor-backed instrument main/morph value and apply/record when appropriate. | Menu dynamic VOICE cells, storage |
+| `preset_setInstrumentParameter(scene, slot, descriptor_index, image, value)` | Store one descriptor-backed Normal or Morph endpoint (AutoSave marker, card-clean bit). On the active Scene re-interpolate **only that parameter** at the resolved Morph amount (`presetMorph_applyParameterNow()`); a parameter held by step automation keeps its value until the next trigger. The runtime never receives the raw edited value. (`record_automation` removed in S075 F3.) | Menu dynamic VOICE cells |
+| `preset_setInstrumentParameterFromMidi(slot, descriptor_index, value)` | S075 F3, lowest priority: store the active Scene's Normal endpoint (value already clamped) and queue the voice for the Morph sweep (`presetMorph_requestVoice()`); no runtime write. Non-morphable descriptors go through `preset_setSupplementalParameter()`. No edit-mask fan-out. | MidiParser external CC/NRPN |
 | `preset_setSupplementalParameter(scene, slot, descriptor_index, value)` | Store one single-endpoint supplemental descriptor value. | Menu dynamic VOICE cells, storage |
 | `preset_applyInstrumentRuntimeValue(scene, id, value)` | Apply one descriptor-backed instrument value to the DSP runtime through InstrumentManager. | Menu, morph/runtime apply |
 | `preset_applyKitAudioRouting(scene, slot)` | Apply one Scene kit slot's audio route to mixer routing. | Kit load/apply paths |
 | `preset_applySceneSettings(scene)` | Apply Scene settings/global runtime values and synchronously activate the Scene's Effect runtime. | Boot/load paths |
-| `preset_applyVoiceDecimationAllRuntime(value)` | Apply a transient Scene Decimation value for LFO modulation without changing the retained PERF `srt` setting. | InstrumentManager LFO Scene target path |
 | `preset_applyVoiceAudioOutRuntime(voice, value)` | Apply a transient audio output routing value directly to the mixer routing register, bypassing retained Scene/Kit storage. Used by Scene automation step overlays (Session 070). | Sequencer Scene automation restore, step automation drain |
 | `preset_applyVelocityModTarget(voice, targetParam)` | Direct velocity mod destination update. | Menu, preset load apply |
 | `preset_applyLfoModTarget(lfo, targetParam)` | Direct LFO mod destination update. | Menu, preset load apply |
@@ -742,12 +766,14 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_startInstrumentCopy(src_scene, src_slot, dst_mask, dst_slot)` / `preset_applyWorkersIdle()` | Resident Instrument copy through the Instrument Load commit path (`source_slot` parameter moves `self` LFO selectors); idle test of the Scene and Instrument apply workers. (S075) | CopyClear |
 | `preset_startInstrumentMorphApply(scene, slot)` | Copy staged same-type Instrument normal endpoints into the destination morph image, immediately mark only the committed Morphable Morph payload for AutoSave, and refresh active-scene Morph runtime. | Menu InstrumentMrp completion |
 | `preset_morph(morph)` / `preset_morphVoice(slot, morph)` / `preset_morphTick()` / `preset_getMorphValue(index, morph)` | Rate-limited descriptor Morph interpolation/application. Global Morph bulk-sets all six per-voice Morph values and the active Scene's Effect Morph amount; per-voice/Effect retained Morph values are the engine inputs. | Menu, MIDI, velocity modulation, main loop |
-| `presetMorph_setVoiceLfoModulation(scene_index, target_slot, source_slot, target_pair, direction, depth)` / `presetMorph_clearLfoSource(source_slot)` | Maintain the hidden per-voice Morph LFO overlay. Session 071 changed the setter from absolute amount to base-independent direction (`PresetMorphLfoDirection`: NONE/MAIN/MORPH) + normalized depth. The resolver computes signed deltas from the current effective base at resolution time, eliminating stale-base errors when step automation changes the base between LFO sample and resolve. | InstrumentManager/LFO dispatch |
-| `presetMorph_setStepAutomationOverride(slot, amount)` | Set a per-voice Morph step automation override. The morph engine uses this value instead of the retained per-voice amount while active. LFO modulates around the override value (Session 070). | Sequencer Scene automation drain |
-| `presetMorph_clearAllStepAutomationOverrides()` | Clear all per-voice Morph step overrides and restore retained amounts. Called on transport restart (Session 070). | Sequencer Scene automation restore |
-| `presetMorph_getEffectiveVoiceAmount(slot)` | Return the step override when active, else the retained per-voice Morph amount. Single query point for the morph decimation engine (Session 070). Also used by menu.c for Scene superpage live display (Session 071). | presetMorphEngine internals, morph decimation, Menu |
-| `preset_setAudioOutStepOverride(slot, route)` / `preset_clearAudioOutStepOverride(slot)` / `preset_getEffectiveAudioOut(slot)` | Per-voice audio-out step automation overlay. Route clamped to `MIXER_ROUTING_DAC2_R`. Cleared by `preset_init()` and transport restore (Session 071). | Sequencer Scene automation drain, Menu superpage |
-| `preset_setFxSendStepOverride(slot, amount)` / `preset_clearFxSendStepOverride(slot)` / `preset_getEffectiveFxSend(slot)` | Per-voice FX-send step automation overlay. Amount clamped to 127. The mixer reads the effective value each block and ramps the live send (Session 072 Step 5). | Sequencer Scene automation drain, Menu superpage, mixer |
+| `presetMorph_setVoiceLfoModulation(scene_index, target_slot, source_slot, target_pair, direction, depth)` / `presetMorph_clearLfoSource(source_slot, target_pair)` | Maintain the hidden per-voice Morph LFO overlay. Session 071 changed the setter from absolute amount to base-independent direction (`PresetMorphLfoDirection`: NONE/MAIN/MORPH) + normalized depth. The resolver computes signed deltas from the current effective base at resolution time, eliminating stale-base errors when step automation changes the base between LFO sample and resolve. | InstrumentManager/LFO dispatch |
+| `presetMorph_getResolvedVoiceAmount(scene, slot)` / `presetMorph_applyParameterNow(scene, slot, local)` | S075: the amount the Morph worker uses (step override or retained base, plus active-Scene LFO contributions); re-interpolate one parameter now, store `morph_interpolation[local]` and write the runtime through the guarded `presetMorph_writeRuntimeBase()` (skips held automation). | `preset_getEffectiveFxSendAmount()`, `preset_setInstrumentParameter()` |
+| `presetMorph_setStepAutomationOverride(scene, slot, amount)` | Set a per-voice Morph step automation override. The morph engine uses this value instead of the retained per-voice amount while active. LFO modulates around the override value (Session 070). | Sequencer Scene automation drain |
+| `presetMorph_clearAllStepAutomationOverrides(scene)` | Clear all per-voice Morph step overrides and restore retained amounts. Called on transport restart (Session 070). | Sequencer Scene automation restore |
+| `presetMorph_getEffectiveVoiceAmount(scene, slot)` | Return the step override when active, else the retained per-voice Morph amount. Single query point for the morph decimation engine (Session 070). Also used by menu.c for Scene superpage live display (Session 071). | presetMorphEngine internals, morph decimation, Menu |
+| `preset_setAudioOutStepOverride(slot, route)` / `preset_clearAllAudioOutStepOverrides(scene)` / `preset_getEffectiveAudioOut(scene, slot)` | Per-voice audio-out step automation overlay. Route clamped to `MIXER_ROUTING_DAC2_R`. Cleared by `preset_init()` and transport restore (Session 071). | Sequencer Scene automation drain, Menu superpage |
+| `preset_setFxSendStepOverride(slot, amount)` / `preset_clearAllFxSendStepOverrides()` / `preset_getEffectiveFxSendAmount(scene, slot)` | Per-voice FX-send step automation overlay (clamped to 127). The effective (audible) send is the override, else the Normal/Morph endpoints interpolated by `presetMorph_getResolvedVoiceAmount()` (equal endpoints return at once; S075 F2). The mixer reads it each block and ramps the live send. | Sequencer Scene automation drain, mixer |
+| `preset_getFxSendDisplayAmount(scene, slot)` / `preset_setVoiceFxSendAmount(scene, slot, amount)` / `preset_setVoiceFxSendMorph(scene, slot, amount)` | S075 F2: the Normal-view cell value (override else Normal endpoint); retain the Normal or Morph endpoint through SceneData (no runtime push). | Menu VOICE mix cell, CopyClear `clear send` |
 | `preset_setBusCompSetting(scene, field, value)` / `preset_syncBusCompMirrors()` | S074: clamp and commit one bus compressor field of one Scene through SceneData (the VOICE edit-mask fan-out calls it per Scene), and copy the active Scene's four values into the `PAR_BUS_COMP_*` page mirrors (also on every Scene apply, `preset_applySceneSettings()`). No runtime push: BusCompressor reads SceneData per block. | Menu bus compressor page, Scene apply |
 | `preset_setVoiceFaderSetting(scene, slot, mode)` | Clamp to 0..`SCENE_FADER_SETTING_MAX` (3 since S074, `xfd`) and store through SceneData. | Menu VOICE mix page |
 
@@ -774,6 +800,8 @@ return ramp origin (S074). Its last stage is the master bus compressor
 | `effects_process()` | Process the current mono/stereo normalized FX bus block in place. | mixer |
 | `MIXER_FADER_PRE/POST/FX/XFD` | Define whether the Scene fader scales both taps, only the dry mix, only the FX send, or (S074 `xfd`, 3) crossfades dry (fader) against send (the mirrored fader from `adc_sliderGainMirrored()` in `adcPots.c`). | SceneData/Preset, Menu, mixer |
 | `mixer_send_last_gain[]` / `mixer_fx_return_last_gain[]` | Retain block-end send and return gains so automation and common return changes ramp without clicks. | mixer render path |
+| `mixer_faderGains()` (static) | Reads `preset_getEffectiveFxSendAmount()` per voice per block (S075 F2: Normal/Morph send interpolation). | mixer render path |
+| Effect return pan (internal) | Stereo output: balance law centred on stored 63 (`gL = p ≤ 63 ? 1 : (127−p)/64`, `gR = p ≥ 63 ? 1 : p/63`, S075 F2); mono output: `squareRootLut` constant power. `mixer_decimation_rate[]` has six entries (the global `srt` multiplier is gone, S075). | mixer render path |
 
 ## Core/DSPAudio/BusCompressor (Session 074)
 
@@ -997,7 +1025,8 @@ automation recording, MTC behavior, and CC application to the sound engine.
 | `midiParser_parseUartData(data)` | Parse DIN byte stream. | Uart |
 | `midiParser_parseMidiMessage(msg)` | Parse complete USB/DIN MIDI message. | main MIDI service, Uart |
 | `midiParser_processRealtimeEvents()` | Drain timestamped realtime ring. | TIM3 |
-| `midiParser_ccHandler(msg, updateOriginalValue)` | Apply sound/internal CC messages. | Preset, MidiParser |
+| `midiParser_ccHandler(msg, updateOriginalValue)` | Internal CC entry for the legacy flat sound parameters: instrument keys get a **runtime-only** write (`midiParser_writeTaggedRuntime()`). Wraps `midiParser_ccDispatch(msg, update, 0)`. | `preset_applySoundParameter()` (Menu, buttonHandler armed-step reset) |
+| `midiParser_ccDispatch(msg, update, external)` (static, S075 F3) | Shared CC/NRPN dispatcher. The global-channel CC entry in `midiParser_parseMidiMessage()` and NRPN data entry pass `external = 1`: instrument keys go to `midiParser_enterTaggedParameter()` (key on the active Scene's slot type → `menu_clampInstrumentValue()` → `preset_setInstrumentParameterFromMidi()`), so external MIDI is the lowest priority and never overrides automation or the Morph interpolation. | MidiParser |
 | `midiParser_triggerVoice(voice, note, vel, do_rec)` | Trigger one voice through MIDI note path. | external clients |
 | `midiParser_playVoiceMidiNote(voice, vel)` | BAR1/BAR2 voice note path. | buttonHandler |
 | `midiParser_getVoiceMidiNote(voice)` | Resolve default/override voice note. | MidiParser, clients |

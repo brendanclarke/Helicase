@@ -198,19 +198,18 @@ typedef enum {
      * c: Phase 6 copy/clear lifecycle and risk witness (S075 trace debug).
      *
      * What: flags carries one AUTOSAVE_TRACE_CC_EVT_* event; value32 carries
-     * that event's layout (S075_PH6_COPYCLEAR_F1_AND_TRACE_IMPLEMENTATION.md
-     * Stage B). Records are bounded per operation and per job (no per-step or
-     * per-tick records). Why: copy/clear drops pastes and clears silently by
-     * design and runs after the button is released, so hardware tests need a
-     * durable witness of drops, stalls, guarded "cannot happen" paths,
-     * suspension edges, early trigger writes, trickle-rate work and the name
-     * write. While an operation runs the trace flush is suspended (user rule),
-     * so these records reach the card after it ends. Inputs: producer events.
-     * Outputs: one 8-byte record each. DEV logging only; no product state
-     * depends on them (user D5: kept after S075 testing). Producers:
-     * Core/Menu/CopyClear sources and filesystem.c. Consumer:
-     * tools/decode_devlogs.py
-     * ('c' branch).
+     * that event's layout (knowledge_files/specification_reference/
+     * COPYCLEAR_UTILITIES.md §15). Records are bounded per operation and per
+     * job (no per-step or per-tick records). Why: copy/clear drops pastes
+     * and clears silently by design and runs after the button is released,
+     * so hardware tests need a durable witness of drops, stalls, guarded
+     * "cannot happen" paths, suspension edges, early trigger writes,
+     * trickle-rate work and the name write. While an operation runs the
+     * trace flush is suspended (user rule), so these records reach the card
+     * after it ends. Inputs: producer events. Outputs: one 8-byte record
+     * each. DEV logging only; no product state depends on them (user D5:
+     * kept after S075 testing). Producers: Core/Menu/CopyClear sources and
+     * filesystem.c. Consumer: tools/decode_devlogs.py ('c' branch).
      */
     AUTOSAVE_TRACE_STAGE_COPY_CLEAR = 'c',
 } autosave_trace_stage_t;
@@ -497,9 +496,10 @@ typedef enum {
  * c (COPY_CLEAR) events, drop reasons and anomaly codes (S075 trace debug).
  *
  * What: the flags byte of a 'c' record selects the event; value32 layouts are
- * documented in S075_PH6_COPYCLEAR_F1_AND_TRACE_IMPLEMENTATION.md Stage B and
- * mirrored by tools/decode_devlogs.py. JD = job descriptor: op 0..7, kind
- * 8..10, Scene 11..14, track 15..17 (7 = none), start 18..24, end 25..31.
+ * documented in knowledge_files/specification_reference/
+ * COPYCLEAR_UTILITIES.md §15 and mirrored by tools/decode_devlogs.py.
+ * JD = job descriptor: op 0..7, kind 8..10, Scene 11..14, track 15..17
+ * (7 = none), start 18..24, end 25..31.
  * Why fixed codes: a raw dump stays readable and the decoder needs no
  * firmware symbols. Producers: copyClearSession.c, copyOps.c, clearOps.c,
  * copyClearService.c, filesystem.c. Consumer: tools/decode_devlogs.py.

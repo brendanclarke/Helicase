@@ -12,8 +12,9 @@ This document describes the Session 048 logging baseline, the Session 051
 Scene-follow-up build, the Session 057 stall-detection expansion
 (`DEV_STALL_DETECTION`, ten `X`/`PHASE_STALL` sites), Session 061's
 `Q` AutoSave boot-reader decisions, Session 067's PatternTrace stage codes
-(see PatternTrace section below), and Session 068's `U`/`K` AutoSaveTrace
-stage codes. Plans and failed working-tree experiments
+(see PatternTrace section below), Session 068's `U`/`K` AutoSaveTrace
+stage codes, and Session 075's copy/clear stage `c` (layouts in
+`COPYCLEAR_UTILITIES.md` §15). Plans and failed working-tree experiments
 that mention a unified `/devlog.bin` are not implemented state.
 
 Session 072 Step 4 adds the screen-only EffectsManager registry self-check
@@ -348,6 +349,15 @@ Drop reasons are `NO_ROOM`, `EVACUATE_FAILED`, `ADVANCED_LIMIT`,
 busy, Instrument transaction, mode, and a previous queued operation. The
 exclusive Pattern mover is intentionally absent from PatternTrace per move;
 the copy/clear stage records aggregate job statistics instead.
+
+The numeric event codes (0x01…0x50), every `value32` bit layout, the drop
+reasons with their detail byte, the anomaly codes, the volume budget and the
+expected record sequences for common cases are in `COPYCLEAR_UTILITIES.md`
+§15 (moved there from the S075 trace plan). `AutosaveTrace.h` and
+`tools/decode_devlogs.py` mirror those tables; change all three together.
+Copy/clear records accumulate in the ring while an operation runs (trace
+flushes are suspended) and reach the card afterwards. The ring stays at the
+temporary 2,048 records while copy/clear is being tested (user D2).
 
 `X` (`PHASE_STALL`) is an edge-triggered "this cooperative state machine's
 phase stopped advancing" observer (`filesystem_pollPhaseStall()`). Through

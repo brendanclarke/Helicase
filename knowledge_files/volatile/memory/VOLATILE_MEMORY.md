@@ -31,31 +31,69 @@ Do not recommend bumping `AUTOSAVE_PARAMETER_GETS_PER_WRITE` or adjusting
 capture timing unless the user explicitly asks. The section-based CRC
 format redesign is the chosen path for write performance.
 
-## Current carryover after Session 074
+## Current carryover after Session 075
 
-Session 074 (2026-09-29/30, `dev-ph5-effects`) largely completed Phase 5:
-Effect-page automation underlines, CrumpBit (the first arena Effect), the
-master bus compressor, the `xfd` fader mode, and the AutoSave torn-record
-fix. All were accepted on hardware by the user.
+Session 075 (2026-10-01/03, `dev-ph6-copyclear`) started Phase 6: copy and
+clear of Pattern data, Scenes and Scene children (`Core/Menu/CopyClear/`),
+global `srt` retired (PERF `fxm`), the DEV trace stage `c`, two hardware
+follow-up rounds (F1, F2: defaults, pan rule, morphable FX send, VOICE
+hold-SHIFT Morph, Effect-page SHIFT+TRACK overlay) and the automation
+priority fix (F3).
 
-- **Commits:** HEAD `50610dd` holds every S074 code change. The closeout
-  docs and the user's move of the four DSP specs into
-  `knowledge_files/specification_reference/dsp_instruments_effects/` are
-  uncommitted. The user manages commits.
-- **Final link:** `text=502,512`, `data=416`, `bss=426,392`; payload
-  502,928 B of 753,664 (250,736 B free); ITCM 4,168 B; DTCM statics 4,480 B;
-  FX arena 126,592 B. `LXRV2_lxr02.img` SHA-256 `63eec2a6…aeb0` (record the
-  `.img`, not the unstamped `.bin`).
-- **Durable authorities:** `074_SESSION_HANDOFF_LOG.md`; the
-  `dsp_instruments_effects/` references; `AUTOSAVE.md`; `DEV_MODES.md`;
-  `ASYNCFATFS_REFERENCE.md`; `STORAGE_SRAM_MANIFEST.md`.
-- **Disposable:** the ten root `S074_*.md` documents.
-- **Next session (075):** `S075_PH6_COPY_CLEAR.md`, Phase 6 copy/clear. It
-  opens with decisions; do not start implementing before the user answers.
-- **Open (details in `knowledge_files/volatile/S070_WORKING_NOTES.md`):** the
-  boot timeout; the `cpu` widget with `cmp` on; BC11; O1; the `PM63` pan
-  display; F4 trace priorities; stale tools and comments.
+- **Commits:** HEAD `76aef20` holds every S075 code change. The closeout docs
+  and three comment-only pointer edits are uncommitted. The user manages
+  commits.
+- **Final link (DEV):** `text=532,408`, `data=416`, `bss=426,712`; payload
+  532,824 B of 753,664 (220,840 B free); ITCM 4,168 B; DTCM statics 4,472 B;
+  FX arena 126,592 B; `scenes` `0x65E0`. `LXRV2_lxr02.img` SHA-256
+  `d1c0aac2…9ceb`. Production build last measured at F1.
+- **Durable authorities:** `075_SESSION_HANDOFF_LOG.md`;
+  `COPYCLEAR_UTILITIES.md` (new); `PATTERN_DYNAMIC_STACK.md` §6.2a and §12.17;
+  `MODULE_INTERCHANGE_SPEC.md`; `BANK_PRESET_ARCHITECTURE.md`.
+- **Disposable:** the ten root `S075_*.md` documents.
+- **Next session (076):** user hardware checks (overlay follow-up, the
+  `COPYCLEAR_UTILITIES.md` §16 list, an F2-card validator run after deleting
+  old AutoSave records), production build measurement, then the next Phase 6
+  item chosen with the user.
+- **Open (details in `knowledge_files/volatile/S070_WORKING_NOTES.md` and the
+  log §13):** Pattern Load fan-out tear; O1 per-voice Morph equalisation;
+  MIDI-entered values reach the LCD only at the next repaint; Effects saved at
+  pan 64 show `1`; the S074 items (boot timeout, `cpu` with `cmp`, BC11, F4
+  trace priorities, stale comments).
 - **Hardware still pending from S072:** the Phase 5 Step 6–10 matrices.
+
+### Working preferences confirmed in Session 075
+
+- **Use the user's terms.** Do not introduce new semantic terms the user has
+  not used; when a code name is needed, mark it as a code name. (The S075
+  spec carried a terms table for this reason.)
+- **Comment blocks beside every change in both `.c` and `.h`,** at detailed
+  contract level (what, why, inputs, outputs, accessors, affiliates); schedules
+  give the exact block for each change.
+- **"No code change this turn"** means a schedule only. When the user says
+  "implement this yourself", implement directly (the S075 overlay
+  follow-up).
+- **Decision rounds:** each plan lists numbered questions with a
+  recommendation; the user answers tersely (e.g. "Q1: yes 2: approve"); fold
+  the answers into the plan, then report any further follow-ups before
+  scheduling.
+- **The user rejects workarounds that feel hacky** (an inert SELECT block
+  under the overlay) and asks for the behaviour to be stated as a rule
+  ("type SELECT functions keep working; only screen changes are
+  suppressed").
+- **No backward compatibility** when the user will wipe temporary records:
+  do not add migration code for AutoSave or sceneset changes unless asked.
+- **One UX for one concept** (all pans display and default the same; maths
+  may differ).
+- **Automation always wins**, menu edits only set endpoints, MIDI is lowest
+  priority (binding product rule).
+- **Hardware feedback arrives as numbered lists;** treat each item as a rule
+  to restate in the plan's feedback table, find the root cause in code before
+  proposing a change, and keep a verification table per item.
+- **Session closeout:** terse index entry, verbose handoff log, spec updates
+  (new reference documents only when the user names them), `MEMORY.md`,
+  volatile notes; preserve every detail of the root task documents because
+  the user deletes them.
 
 ### Working preferences confirmed in Session 074
 
@@ -185,20 +223,29 @@ old cell (S066 Fix 5; S074 Effect hold/release fix).
 
 ### Pattern Stack Service routing
 
-All pool-mutating operations from Menu, Sequencer, copyClearTools, and
-EuklidGenerator route through `patSvc_*` (PatternStackService), not direct
-`pat_*` mutation calls. TIM3's automation read path reads address entries
+All pool-mutating operations from Menu, Sequencer and EuklidGenerator route
+through `patSvc_*` (PatternStackService), not direct `pat_*` mutation calls.
+The one exception (S075) is copy/clear's service, which writes through the
+PatternData raw block API only while it holds `patSvc_beginExclusive()`. TIM3's automation read path reads address entries
 directly (not through the service) — address entries are always consistent
 due to the publication ordering fix. `patSvc_idle()` must be called at all
 5 filesystem replacement boundary points.
 
-### Next feature: Phase 6 copy/clear (Session 075)
+### Phase 6 copy/clear (Session 075, implemented)
 
-`pat_copyTrack`, `pat_copyPattern`, `pat_copyBar` are deliberate no-ops.
-Their implementation requires independent pool-block duplication and must
-route through the Pattern Stack Service. `S075_PH6_COPY_CLEAR.md` (root)
-widens this to step, bar, track, automation, Instrument, Scene and Scene
-components, and lists the decisions to take first.
+The Session 062 no-op copy APIs are gone. Copy/clear lives in
+`Core/Menu/CopyClear/` and is documented in `COPYCLEAR_UTILITIES.md`. Pastes
+duplicate pool blocks step by step through the swap block (never alias
+another step's block) and publish before free.
+
+### Automation priority (Session 075 F3)
+
+Automation, then menu edits, then MIDI. Every Morph-base runtime write goes
+through `presetMorph_writeRuntimeBase()`, which skips a parameter while
+`seq_automationHoldsParameter()` reports it held; the trigger restore then
+applies the latest `morph_interpolation[]`. Menu edits call
+`presetMorph_applyParameterNow()` for one parameter only; external MIDI
+stores an endpoint (`preset_setInstrumentParameterFromMidi()`).
 
 ### Working preference: commits
 

@@ -88,6 +88,8 @@ it belongs in the summary or the log, not here.
 | 071 | 2026-09-25/26 | `dev-ph5-effects` (S071 closeout) | Per-Scene voice-edit masks, base-independent LFO voice-Morph, Scene superpage live display, LED chase and LFO target-voice fixes |
 | 072 | 2026-09-27/28 | `dev-ph5-effects`, HEAD `58569ae` + uncommitted Steps 9–11 | Phase 5 Effects bus: registry, `flt`, FX bus/fader modes, `.fx` v2 + HCNAMES 161, Effect page, FX sequencer, Effect automation/LFO, edit-mask gate/fan-out |
 | 073 | 2026-09-28/29 | `dev-ph5-effects`, HEAD `692abf8` + uncommitted closeout edits | Program flash 480 → 736 KiB, Load:[Samples] restored, DSP CPU refactor (about 10 % worst case), `tools/dsp_test` bench |
+| 074 | 2026-09-29/30 | `dev-ph5-effects`, HEAD `50610dd` | Effect-page underlines, CrumpBit (first arena Effect), master bus compressor, `xfd` fader mode, AutoSave torn-record fix |
+| 075 | 2026-10-01/03 | `dev-ph6-copyclear`, HEAD `76aef20` | Phase 6 copy/clear (`Core/Menu/CopyClear/`), `srt` retired, F1/F2 hardware follow-ups, morphable FX send, automation-priority fix |
 
 
 ---
@@ -519,6 +521,13 @@ Session 065 delivered the first working end-to-end step automation path: the exi
 | DMA buffers (`.dma_nocache`, MPU region 1) are **Normal non-cacheable** (was Strongly-Ordered); `pack_audio_half()` must end with `DSB` | 073 |
 | DSP refactors are proved on the host with `tools/dsp_test/` (host comparison + ARM `fpseq.py` check; `DSP_TEST.md`) | 073 |
 | `SRAM_MANIFEST.md` is now `STORAGE_SRAM_MANIFEST.md` (flash, sample flash and RAM in one place) | 073 |
+| Copy/clear lives in `Core/Menu/CopyClear/` (session, copyOps, clearOps, copyClearService); reference `COPYCLEAR_UTILITIES.md`. Pattern data never fans out; Scene children (Instrument, Kit, Effect, FX sequence, `send`) fan out through the destination's edit mask | 075 |
+| Every Scene pool keeps a permanent **132 B swap block** (top 33 chunks); usable pool is **8,060 B** (2,015 chunks). Only the exclusive holder (`patSvc_beginExclusive()`) may use the raw block API | 075 |
+| While a copy/clear operation runs, AutoSave, Pattern AutoSave, trace, settings writers and the Pattern repair epoch do not start (`copyClear_backgroundSuspended()`); the 9 kB name cache is lent lazily and other filesystem ops are refused while lent | 075 |
+| Global `srt` is retired: AutoSave Scene cell 7 reserved (written 127), Scene target 390 a placeholder, PERF cell is `fxm` (Effect Morph) | 075 |
+| **Automation always wins** until the voice's next trigger: every Morph-base runtime write is guarded by `seq_automationHoldsParameter()`; a menu edit applies only that parameter's interpolation; external MIDI CC is lowest priority (stores the clamped Normal endpoint; the Morph sweep applies it) | 075 |
+| One pan rule: stored 0..127, **63 = centre = display `0`** (`DTYPE_PM63`); Effect stereo balance laws are centred on 63; mono laws unchanged | 075 |
+| FX send has Normal/Morph endpoints (`fx_send_morph[6]`, AutoSave Scene cells 45..50, `sceneset.scg` `fx_send_morph`); Scene parameter count is **51** | 075 |
 
 ---
 
@@ -1699,3 +1708,54 @@ by the user. **Phase 5 (Effects bus, initial pass) is largely complete.**
   `DEV_MODES.md`, `ASYNCFATFS_REFERENCE.md`, `STORAGE_SRAM_MANIFEST.md`,
   `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`,
   `S075_PH6_COPY_CLEAR.md`.
+
+### 075 — Phase 6 Copy/Clear, `srt` Retired, F1/F2 Follow-ups, Copy/Clear Trace, Automation Priority Fix (2026-10-01/03)
+
+Session 075 ran on `dev-ph6-copyclear` from the S074 close (`50610dd` /
+`b33c94e`; text 502,512, bss 426,392) to HEAD `76aef20` (text 532,408, data
+416, bss 426,712; payload 532,824 B of 753,664, headroom 220,840 B; ITCM
+4,168 B; DTCM statics 4,472 B; FX arena 126,592 B; `.img` SHA-256
+`d1c0aac2…9ceb`). The user tested the first pass, F1 and F2 on hardware and
+fed back each round; F3 "seems ok". **Phase 6 has started.**
+
+- **Copy/clear (`Core/Menu/CopyClear/`, four file pairs; replaces
+  `copyClearTools`).** COPY held + an object copies; SHIFT + COPY clears.
+  - Sources: step, step range, bar, bar range (STEP), track, Scene (PERF),
+    FX step/range (EFFECTS). Menus: `step|bar -> repl/merge`,
+    `auto -> repl/merge`, `track`/`instrument`, Scene
+    `scene/settings/kit/effect/pattern`, FX `step`.
+  - Clears: step/bar/track (`… auto`, `… notes`, `send` in EFFECTS), PERF
+    Scene clears, EFFECTS SEQ clear, endless-pot clears of automation
+    (8-entry register).
+  - Background service: queue of 4, per-Scene exclusive Pattern boundary,
+    permanent 132 B swap block per pool (8,060 B usable), raw block API,
+    sliding compaction, automation retargeting, early trigger bits with
+    drop-restore, 0.1 % trickle governor, lazy 9 kB name-buffer loan, one
+    HCNAMES rewrite (`HNcU`). AutoSave/maintenance suspended per operation.
+  - Scene children fan out through the edit mask; Pattern data never does.
+- **Global `srt` retired;** PERF `fxm` (Effect Morph) takes its cell. AutoSave
+  Scene cell 7 reserved (written 127); Scene target 390 a placeholder.
+- **F1:** source blink removed, menu on first row press, bar 2–8 range bug
+  (4-bit press stack) fixed, kept clear selection per button group, `Copy`
+  indicator at column 9, `notes` keeps probability, `auto -> repl` carries
+  probability; DEV stage-`c` trace.
+- **F2:** St1 route and compressor off/0/0/off defaults, `Copy`/`Clear`
+  header, Effect full views long-name only (`copyField` overread fix), one
+  pan rule (stored 63 = centre = `0`), CrumpBit defaults and `snc`,
+  morphable FX send (`fx_send_morph[6]`, AutoSave cells 45..50), VOICE
+  hold-SHIFT Morph view, Effect-page SHIFT+TRACK voice-mix overlay (last
+  TRACK pressed, no mutes while held), `verify_bank_autosave.py` rebuilt.
+- **F3 automation priority fix:** a menu edit no longer resets automated
+  parameters mid-note. Automation always wins until the voice's next trigger
+  (`seq_automationHoldsParameter()` guard on every Morph-base write); a menu
+  edit applies only that parameter's interpolation; external MIDI CC/NRPN is
+  lowest priority (stores the clamped Normal endpoint, Morph sweep applies).
+- RAM (all approved): F2 +101 B; F1 net +124 B; base pass +92 B net; DEV
+  trace +24 B.
+
+- **Find here**: [075_SESSION_HANDOFF_LOG.md](075_SESSION_HANDOFF_LOG.md),
+  `COPYCLEAR_UTILITIES.md`, `PATTERN_DYNAMIC_STACK.md` (§3, §6, §12.17),
+  `MODULE_INTERCHANGE_SPEC.md`, `BANK_PRESET_ARCHITECTURE.md`,
+  `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`, `DEV_MODES.md`,
+  `STORAGE_SRAM_MANIFEST.md`, `dsp_instruments_effects/EFFECTS_BUS_REFERENCE.md`,
+  `dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md`.
