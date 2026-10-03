@@ -3,6 +3,12 @@
 ### Introduction
 The LXR02 is a digital drum synthesizer produced in collaboration with Sonic Potions and Erica Synths. It is based on a 32-bit Cortex-M7 processor. The 'Helicase' firmware is a complete rewrite of the firmware from the bare cortex register definitions up, using the native bootloader so that it can be loaded without a debugger and can be freely swapped with the stock Erica Synths firmware through the standard update process. If you want to go straight to the firmware and try it, it is './build/LXRV2_lxr02.img'. Put this in the root directory of the SD card and power on while pressing the encoder, as you would for any firmware update. You can switch between this and the Erica Synths firmware any time with this same method. If you use the Helicase firmware, it's recommended to also put the contents of the **'SD_CARD'** directory in the root directory of your micro SD card. This will be the same as my current testing files and it will probably be kinda random, but it will give you some content to start with. I'm not taking bug reports yet, there is still too much missing for that to be useful, but I'm open to general discussion. When I feel like this is good enough to actually use and I want to accept reports, I'll increment to 0.01 :)
 
+### Stuff that's missing, might not work, or should be treated as suspicious:
+- MIDI
+- Live record with the 'rec' button
+- Track scale, shuffle (length in steps works)
+- If you've used LXR Catalyst, there's no looper yet, no 1-shot lfos, no background bank load, and no per-track switching yet, those will go in later. 
+
 ### How to use - Quickstart
 The Helicase firmware uses the LXR UX as a starting point, but is almost entirely new code now. A full manual will be written when things are reasonably complete, but here are some pointers to get you started:
 - The four mode buttons are used in the old 'LXR' format. From left to right these are: **VOICE**, **PERF**, **STEP**, and **LOAD/SAVE**. This means 'Load' on the LXR02 is mislabeled - it is 'Step' editing mode in Helicase. The 'Save' button is pushed once to get to the Load menu, and again to get to the 'Save' menu.
