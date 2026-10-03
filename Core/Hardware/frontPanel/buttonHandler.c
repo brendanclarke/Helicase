@@ -207,9 +207,12 @@ static uint16_t buttonHandler_loadSceneSeqPressedMask = 0u;
  * TRACK buttons holding the Effect-page voice mix overlay (S075 F2-F; +1 B
  * SRAM1, approved F2-Q5).
  *
- * Bit n is set when SHIFT+TRACK n opens or moves the overlay. The release
- * edge clears it even if SHIFT was released first; the last clear restores the
- * Effect page. Overflow reconciliation clears this mask and ends the overlay.
+ * Bit n is set when SHIFT+TRACK n opens the overlay, and by every later TRACK
+ * press while any bit is set (with or without SHIFT): the overlay shows the
+ * track pressed last. The release edge clears the bit even if SHIFT was
+ * released first; the last clear restores the Effect page. While any bit is
+ * set no TRACK press mutes (handleVoiceButton()). Overflow reconciliation
+ * clears this mask and ends the overlay.
  */
 static uint8_t buttonHandler_fxVoiceMixTrackMask = 0u;
 
@@ -1134,6 +1137,38 @@ static void handleVoiceButton(uint8_t voiceNr)
         if (bh_state.selectButtonMode == SELECT_MODE_FX &&
             menuEffects_hookTrack(voiceNr, buttonHandler_getShift(), 1u))
             return;
+
+        if (buttonHandler_fxVoiceMixTrackMask != 0u) {
+            /*
+             * TRACK press while the Effect-page voice mix overlay is held
+             * (S075 F2-F follow-up, user).
+             *
+             * What: once SHIFT+TRACK has opened the overlay, every TRACK
+             * press (with or without SHIFT) joins the held set, and on the
+             * Effect page the Scene-settings screen switches to the track
+             * pressed last; the active track follows it, as SHIFT+TRACK does.
+             * No TRACK press mutes until every held TRACK is released and the
+             * overlay is gone, so this branch runs before the mute path and
+             * consumes the press in every mode (a mode switch while TRACKs
+             * are held ends the overlay, but the held TRACKs still block mute
+             * until released). The Effect type's TRACK hook above keeps
+             * priority. Inputs: voiceNr, the held mask, SHIFT. Outputs: mask
+             * bit set (its release is consumed in processRelease()), overlay
+             * moved, active voice and LEDs. Affiliates:
+             * menu_fxVoiceMixOverlayBegin(), processRelease().
+             */
+            buttonHandler_fxVoiceMixTrackMask = (uint8_t)(
+                buttonHandler_fxVoiceMixTrackMask | (uint8_t)(1u << voiceNr));
+            if (bh_state.selectButtonMode == SELECT_MODE_FX) {
+                menu_setActiveVoice(voiceNr);
+                buttonHandler_showMuteLEDs();
+                led_flashLed((uint8_t)(LED_VOICE1 + voiceNr));
+                (void)menu_fxVoiceMixOverlayBegin(voiceNr);
+                if (shouldPreviewVoice)
+                    seq_previewVoice(voiceNr);
+            }
+            return;
+        }
 
         if (muteModeActive) {
             /*

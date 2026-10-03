@@ -1778,3 +1778,22 @@ deviations, hardware results.)
 - Re-ran `git diff --check`, both Python syntax checks, and the mixer/special-
   tag DSP harness; all passed. The final build and image measurements above
   are unchanged.
+
+### 2026-10-03 — Overlay follow-up: last TRACK pressed, no mutes while held (user)
+
+- Rule: after SHIFT+TRACK opens the voice mix overlay on the Effect page,
+  every TRACK press (with or without SHIFT) joins the held set and switches
+  the Scene-settings screen to the track pressed last (the active track
+  follows). The overlay stays while at least one TRACK is held. No TRACK
+  press mutes until every held TRACK is released and the overlay is gone.
+- `buttonHandler.c` `handleVoiceButton()`: new branch after the Effect type's
+  TRACK hook and before the mute path. While `buttonHandler_fxVoiceMixTrackMask`
+  is nonzero the press sets its bit (so `processRelease()` consumes its
+  release); in FX mode it selects the voice, flashes its LED and calls
+  `menu_fxVoiceMixOverlayBegin(voiceNr)` (which already moves an active
+  overlay). In any other mode (MODE pressed while TRACKs were held) the press
+  is consumed with no action, so it cannot mute or clear mutes. The mask's
+  block comment is updated. No RAM change.
+- `make all`: clean apart from the existing newlib/LTO warnings;
+  `text=532,096` (+160), `data=416`, `bss=426,712` (unchanged).
+- Hardware: pending (user re-test).
