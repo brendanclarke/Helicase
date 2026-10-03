@@ -7,6 +7,7 @@ The LXR02 is a digital drum synthesizer produced in collaboration with Sonic Pot
 - MIDI
 - Live record with the 'rec' button
 - Track scale, shuffle (length in steps works)
+- Chain/repeat patterns
 - If you've used LXR Catalyst, there's no looper yet, no 1-shot lfos, no background bank load, and no per-track switching yet, those will go in later. 
 
 ### How to use - Quickstart
@@ -48,7 +49,7 @@ The global settings, like on the LXR. I won't go through all of them here, but y
 
 ### Other stuff
 #### Copy and Clear
-There is a new copy/clear utility. In general, for copy, hold 'copy', select what you want, keep holding 'copy', move to the scene/track/etc you want (you can navigate though PERF mode to copy/paste) and press again where you want to paste it. You can select different paste modes from the encoder in the meantime before you press to paste. You can also copy and paste different sub-objects of Scenes (like the effect) in the PERF mode. The new thing is you can select a range of steps (or range of bars in STEP mode): hold a step, press another step. 
+There is a new copy/clear utility. In general, for copy, hold 'copy', select what you want, keep holding 'copy', move to the scene/track/etc you want (you can navigate though PERF mode to copy/paste) and press again where you want to paste it. You can select different paste modes from the encoder in the meantime before you press to paste. The screen also gives you a little abbreviated reminder in the upper-right of what you've copied. You can also copy and paste different sub-objects of Scenes (like the effect) in the PERF mode. The new thing is you can select a range of steps (or range of bars in STEP mode): hold a step, press another step. 
 For clear, it's pretty much the same, except the clear operation won't actually happen until you scroll off 'cancel' onto one of the clear modes, and then press again what you want to clear. You can also clear a parameter's automation across an entire pattern: hold shift+clear, keep holding 'clear', turn the knob for an automated parameter. *poof*, automation gone. 
 #### Card format
 **USE A FAT32 FORMATTED CARD, MBR partition**. FAT16 also works, but MBR-FAT32 is the recommended cross-compatible format. FAT12 and exFAT are not supported; if one is detected at boot, the firmware shows `Unsupported card` / `use MBR-FAT32` and does not mount or load from it. On my mac this is just MBR partition, MS-DOS(FAT), but I'm including the terminal commands for future-proofing. If you are using an SD >32GB you may need to manually create a partition that is smaller, those options are included below, just remove/edit the <options> for your system and card. In your respective terminal, for disk <X>:
