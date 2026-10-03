@@ -120,12 +120,6 @@ static const char midiFilterNames[][16] = {
     {"off"},{"N"},{"R"},{"RN"},{"C"},{"CN"},{"CR"},{"CRN"},
     {"P"},{"PN"},{"PR"},{"PRN"},{"PC"},{"PCN"},{"PCR"},{"all"},
 };
-static const char trackScaleNames[][4] = {
-    {21},
-    {"/8"},{"/7"},{"/6"},{"/5"},{"/4"},{"/3"},{"/25"},{"/2"},{"/.6"},{"/.3"},
-    {"off"},{"x.3"},{"x.6"},{"x2"},{"x25"},{"x3"},{"x4"},{"x5"},{"x6"},{"x7"},{"x8"},
-};
-
 static const char shortNames[][4] = {
     {""}, {"coa"},{"fin"},{"atk"},{"dec"},{"eg2"},{"mod"},{"amt"},
     {"frq"},{"drv"},{"vol"},{"pan"},{"noi"},{"rpt"},{"mix"},
@@ -133,7 +127,7 @@ static const char shortNames[][4] = {
     {"snc"},{"rtg"},{"ofs"},{"voi"},{"slp"},{"d1"},{"d2"},
     {"eqg"},{"eqf"},
     {"rol"},{"mrp"},{"nte"},{"prb"},{"stp"},{"len"},{"rot"},
-    {"bpm"},{"ch"},{"out"},{"srt"},{"nxt"},{"mod"},{"vel"},
+    {"bpm"},{"ch"},{"out"},{"fxm"},{"nxt"},{"mod"},{"vel"},
     {"fch"},{"flw"},{"qnt"},{"trk"},{"val"},{"shu"},{"ssv"},
     {"x"},{"y"},{"flx"},{"mid"},{"mrt"},{"txf"},{"rxf"},
     {"cki"},{"co1"},{"co2"},{"pcr"},{"cpu"},{"oit"},{"sca"},
@@ -143,6 +137,8 @@ static const char shortNames[][4] = {
     {"pts"},
     /* Requested short label for the persistent Global AutoSave switch. */
     {"ats"},
+    /* S074 bus compressor compact labels. */
+    {"cmp"},{"cam"},{"ctm"},{"csc"},
 };
 
 static const char catNames[][16] = {
@@ -152,6 +148,8 @@ static const char catNames[][16] = {
     {"Pattern"},{"Sound"},{"Step"},{"Euklid"},
     {"Global"},{"Velocity"},{"Parametr"},{"Sequencr"},
     {"Generatr"},{"MIDI"},{"Trigger"},
+    /* S074: CAT_SCENE, the full-view category of Scene-owned cells. */
+    {"Scene"},
 };
 
 static const char longNames[][16] = {
@@ -162,7 +160,7 @@ static const char longNames[][16] = {
     {"DstVoice"},{"Slope"},{"Dcy Clsd"},{"Dcy Open"},
     {"RollRate"},{"Morph"},{"Note"},{"Prbablty"},{"Number"},
     {"Length"},{"Steps"},{"Rotation"},{"Tempo"},{"SyncInpt"},
-    {"AudioOut"},{"Channel"},{"SampleRt"},{"NextPatt"},{"Phase"},{"Mode"},
+    {"AudioOut"},{"Channel"},{"FX Morph"},{"NextPatt"},{"Phase"},{"Mode"},
     {"Vol mod"},{"Fetch"},{"Follow"},{"Quantize"},{"AutTrack"},
     {"Aut Dest"},{"AutValue"},{"Shuffle"},{"Screensv"},
     {"X Positn"},{"Y Positn"},{"Flux"},{"Velocity"},
@@ -176,6 +174,8 @@ static const char longNames[][16] = {
     {"PtrnStoreUse"},
     /* Requested long label; valueNames assigns it to category Global. */
     {"AutoSave"},
+    /* S074 bus compressor long names. */
+    {"BusComp"},{"CompAmt"},{"CompTime"},{"CompSC"},
 };
 
 #endif /* MENUTEXT_H_ */

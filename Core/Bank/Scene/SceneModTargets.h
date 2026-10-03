@@ -8,7 +8,8 @@ typedef uint16_t scene_mod_target_id_t;
 
 typedef enum {
     SCENE_MOD_TARGET_KIND_VOICE_MORPH = 0,
-    SCENE_MOD_TARGET_KIND_DECIMATION_ALL,
+    /* Retired `srt` placeholder; ID 390 remains reserved (S075). */
+    SCENE_MOD_TARGET_KIND_RETIRED,
     /*
      * Generated slot-6 alternate decay.
      *
@@ -19,12 +20,44 @@ typedef enum {
      * value at trigger time.
      */
     SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY,
-    SCENE_MOD_TARGET_KIND_EFFECT_PARAMETER
+    /*
+     * Per-voice audio output route.
+     *
+     * Inputs: voice_slot selects the instrument and the stored value is a
+     * mixer route enum. Output: step automation reaches the retained Scene
+     * route through preset_setVoiceAudioOut(); this discrete selector is not
+     * exposed to velocity or LFO modulation.
+     */
+    SCENE_MOD_TARGET_KIND_AUDIO_OUT,
+    /*
+     * Per-voice FX send amount.
+     *
+     * Inputs: voice_slot and a 0..127 stored value. Output: step automation
+     * sets the runtime send overlay; the mixer applies the effective send to
+     * the live FX bus each block (Session 072 step 5).
+     */
+    SCENE_MOD_TARGET_KIND_FX_SEND,
+    /*
+     * Scene Effect Morph amount, `fxm` (ID 404).
+     *
+     * Effect parameter cells are separate block-7 targets; this kind is only
+     * the Scene-level Morph amount. Step automation and LFO apply runtime
+     * overlays through EffectsManager; velocity is not offered.
+     */
+    SCENE_MOD_TARGET_KIND_EFFECT_MORPH
 } scene_mod_target_kind_t;
 
 typedef enum {
-    SCENE_MOD_TARGET_USE_VELOCITY = 1u << 0,
-    SCENE_MOD_TARGET_USE_LFO      = 1u << 1
+    SCENE_MOD_TARGET_USE_VELOCITY   = 1u << 0,
+    SCENE_MOD_TARGET_USE_LFO        = 1u << 1,
+    /*
+     * Step automation eligibility.
+     *
+     * Inputs: picker and Pattern validation paths request this flag. Output:
+     * only targets explicitly owned by the step-automation runtime path are
+     * offered to the `scn` category; velocity/LFO eligibility stays separate.
+     */
+    SCENE_MOD_TARGET_USE_AUTOMATION = 1u << 2
 } scene_mod_target_use_t;
 
 typedef struct {
@@ -43,8 +76,9 @@ typedef struct {
  * Scene mod targets are sound-affecting destinations that are not owned by an
  * instrument descriptor table. Voice descriptor targets stay in
  * InstrumentManager so swappable instruments keep their own parameter lists;
- * this module owns only Scene-level targets such as per-voice Morph, global
- * decimation, and future effects parameters.
+ * this module owns only Scene-level targets such as per-voice Morph, audio
+ * routing, FX sends, and Effect Morph (`fxm`). Effect
+ * parameters are block-7 IDs owned by EffectsManager.
  *
  * Inputs to the helpers are stored target IDs from menu/Scene parameter cells.
  * Outputs are validation, display text, and decoded range/kind metadata used by
@@ -79,6 +113,23 @@ uint8_t sceneModTarget_valid(uint16_t id, scene_mod_target_use_t use);
  * ordering of the Scene target table.
  */
 uint16_t sceneModTarget_voiceMorphId(uint8_t voice_slot);
+/*
+ * Resolve the Scene target ID of the Effect Morph amount `fxm` (S075).
+ *
+ * Output: the canonical ID (404 today) found by kind, so callers do not depend
+ * on table order; INSTRUMENT_PARAM_INVALID if the row is missing. Clients:
+ * Menu's pot-clear target resolver (PERF `fxm`, Effect page `mrp`).
+ */
+uint16_t sceneModTarget_effectMorphId(void);
+/*
+ * Resolve the Scene target ID of the generated slot-6/track-7 decay `7dc`
+ * (S075).
+ *
+ * Output: the canonical ID found by kind, or INSTRUMENT_PARAM_INVALID.
+ * Clients: Menu's pot-clear target resolver (VOICE7 generated decay cell) and
+ * copy/clear retargeting of track-7 alternates (copyOps.c).
+ */
+uint16_t sceneModTarget_slot6DecayId(void);
 /*
  * Convert Scene target IDs to compact Scene-namespace indices and back.
  *

@@ -369,19 +369,80 @@ void    preset_applySoundParameter(uint16_t paramNr, uint8_t value,
  *   rebuilds morph_interpolation[].
  * - future Menu/MIDI descriptor editors should call the setters instead of
  *   touching SceneData arrays directly.
+ *
+ * Runtime contract (S075 F3): an endpoint edit on the active Scene applies
+ * only the edited parameter's interpolation at the voice's resolved Morph
+ * amount (presetMorph_applyParameterNow()), never the raw value, and never
+ * over a parameter held by step automation (automation always wins; the next
+ * trigger applies the new interpolation).
  */
 uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
                                       uint8_t descriptor_index,
                                       instrument_image_select_t image,
-                                      uint8_t value,
-                                      uint8_t record_automation);
+                                      uint8_t value);
 uint8_t preset_setSupplementalParameter(uint8_t scene_index, uint8_t slot,
                                         uint8_t descriptor_index,
                                         instrument_param_value_t value);
+/*
+ * Enter one instrument parameter from external MIDI (S075 F3, user P1:
+ * MIDI takes the lowest priority).
+ *
+ * What: stores `value` as the active Scene's Normal endpoint of one
+ * descriptor and queues that voice for the Morph sweep. Nothing is written
+ * to the runtime here: the sweep applies the new interpolation whenever it
+ * reaches the parameter, and skips it while step automation holds it.
+ * Non-morphable parameters (never automatable, never swept) go through
+ * preset_setSupplementalParameter(), which stores and applies them as a menu
+ * edit does.
+ * Why: automation wins, then menu edits, then MIDI. A CC is an endpoint entry,
+ * not a runtime override, so it can override neither automation nor the Morph
+ * interpolation.
+ * Inputs: slot 0..5, descriptor-local index for the active Scene's slot type,
+ * and a value already clamped to the descriptor domain
+ * (menu_clampInstrumentValue()). Output: 1 when stored/queued, 0 for an
+ * invalid slot/descriptor. Retention: a changed byte marks its AutoSave
+ * Normal cell and clears the Scene's card-clean bit, like a menu edit.
+ * Active Scene only (no edit-mask fan-out). Caller: MidiParser.c
+ * midiParser_enterTaggedParameter(). Affiliates:
+ * preset_storeInstrumentEndpoint(), presetMorph_requestVoice(),
+ * seq_automationHoldsParameter().
+ */
+uint8_t preset_setInstrumentParameterFromMidi(uint8_t slot,
+                                              uint8_t descriptor_index,
+                                              uint8_t value);
 uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
                                            instrument_param_id_t id,
                                            instrument_param_value_t value);
 uint8_t preset_applyKitAudioRouting(uint8_t scene_index, uint8_t slot);
+/*
+ * Apply one voice's output route without retaining it in SceneData.
+ *
+ * Inputs: zero-based instrument slot and mixer route enum value. Output: the
+ * active mixer route is updated without AutoSave or Bank-clean side effects.
+ * Scene-target step automation uses this transient path; restore calls
+ * preset_applyKitAudioRouting() so the retained Scene route remains the base.
+ */
+void preset_applyVoiceAudioOutRuntime(uint8_t slot, uint8_t route);
+/*
+ * Runtime-only Scene-setting step overlays used by the live VOICE superpage.
+ *
+ * Inputs: setters receive a zero-based voice slot and route/amount. Outputs:
+ * effective getters return the transient step value while active, otherwise
+ * retained SceneData. These APIs never mark AutoSave or alter retained Scene
+ * settings; audio-out DSP restore remains owned by preset_applyKitAudioRouting.
+ * The audio/FX tables are six-entry runtime state and are cleared at transport
+ * restore and preset_init(). The mixer pulls the effective FX-send getter each
+ * block; it reads the step override, otherwise the Normal/Morph endpoints
+ * interpolated by the voice's resolved Morph amount (S075 F2-H). The display
+ * getter returns the step override or Normal endpoint, never interpolation.
+ */
+void preset_setAudioOutStepOverride(uint8_t slot, uint8_t route);
+void preset_clearAllAudioOutStepOverrides(uint8_t scene_index);
+uint8_t preset_getEffectiveAudioOut(uint8_t scene_index, uint8_t slot);
+void preset_setFxSendStepOverride(uint8_t slot, uint8_t amount);
+void preset_clearAllFxSendStepOverrides(void);
+uint8_t preset_getEffectiveFxSendAmount(uint8_t scene_index, uint8_t slot);
+uint8_t preset_getFxSendDisplayAmount(uint8_t scene_index, uint8_t slot);
 void preset_applySceneSettings(uint8_t scene_index);
 /*
  * Scene-owned per-voice mix setting setters.
@@ -389,15 +450,19 @@ void preset_applySceneSettings(uint8_t scene_index);
  * Inputs: resident Scene index, zero-based instrument slot, and a value in the
  * UI/storage domain. Outputs: retained SceneData updates; audio_out also
  * applies the active Scene's mixer route immediately. FX send and fader mode
- * deliberately have no runtime output until the FX/fader backend exists.
+ * (pre/pst/fx/xfd) have no push step: the mixer reads both every block.
  *
  * Clients: VOICE mix Scene-setting cells, sceneset load/apply follow-up, and
- * future MIDI/Bank Scene setting mutation.
+ * future MIDI/Bank Scene setting mutation. FX send has two endpoints: the
+ * Normal setter below and the Morph setter (S075 F2-H); both are retained in
+ * SceneData.
  */
 uint8_t preset_setVoiceAudioOut(uint8_t scene_index, uint8_t slot,
                                 uint8_t route);
 uint8_t preset_setVoiceFxSendAmount(uint8_t scene_index, uint8_t slot,
                                     uint8_t amount);
+uint8_t preset_setVoiceFxSendMorph(uint8_t scene_index, uint8_t slot,
+                                   uint8_t amount);
 uint8_t preset_setVoiceFaderSetting(uint8_t scene_index, uint8_t slot,
                                     uint8_t mode);
 uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
@@ -434,6 +499,16 @@ uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
  */
 void    preset_startDrumsetApply(void);
 uint8_t preset_tickDrumsetApply(void);
+/*
+ * Report whether the Scene and Instrument apply workers are idle (S075).
+ *
+ * Output: nonzero when neither the Scene (drumset) worker nor the Instrument
+ * apply worker is active. Why: a Scene-level paste or clear touching the
+ * active Scene waits at the head of the copy/clear queue until the previous
+ * apply (for example after a PERF Scene switch) has finished, so it never
+ * starts a second apply over a running one. Client: copyClearService.c.
+ */
+uint8_t preset_applyWorkersIdle(void);
 void    preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track);
 /*
  * Commit and start bounded runtime application for one staged Instrument slot.
@@ -455,6 +530,24 @@ void    preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track);
 void    preset_startInstrumentApply(uint8_t scene_index,
                                     uint8_t slot,
                                     uint8_t mark_autosave_whole_instrument);
+/*
+ * Commit one resident Instrument slot onto a slot in a set of Scenes (S075).
+ *
+ * What: copies type, Normal and Morph images from a resident source slot to
+ * dst_slot of every Scene in dst_mask through the same commit path as
+ * Instrument Load (Bank-present publication, whole-Instrument AutoSave
+ * marker, card-clean invalidation, runtime modulation clear and bounded
+ * apply when the active Scene is touched), with `self` LFO selectors moved
+ * from the source slot to the destination slot. Why: `copy instrument` (with
+ * edit-mask fan-out, user F3) must behave exactly like a load of that
+ * Instrument. Inputs: source Scene/slot, destination mask (the caller has
+ * checked the Advanced limit) and slot. Output: none; when the active Scene
+ * is in dst_mask, drive preset_tickInstrumentApply() until it returns 0.
+ * The slot-6/track-7 Kit decay pair is not part of the image (the caller
+ * copies it only slot 6 -> slot 6). Client: copyOps.c.
+ */
+void    preset_startInstrumentCopy(uint8_t src_scene, uint8_t src_slot,
+                                   uint16_t dst_mask, uint8_t dst_slot);
 /*
  * Commit staged KitMrp or InstrumentMrp endpoints and drain the bounded Morph
  * worker without replacing identity, Normal images, routing, or modulation
@@ -486,10 +579,10 @@ uint8_t preset_tickInstrumentApply(void);
  * Scene global mirror and all six per-slot Morph amounts. preset_morphVoice()
  * changes one slot only. preset_rebuildMorph() requeues the descriptor-driven
  * worker from retained Scene values without changing any Morph amounts, which
- * is required after endpoint loads/edits. preset_setVoiceDecimationAll()
- * retains and applies the Scene-wide decimation multiplier used by PERF "srt".
+ * is required after endpoint loads/edits. The former global `srt` control was
+ * retired in S075; the PERF slot now mirrors Effect Morph.
  *
- * Serialized-owner rule: overall Morph and decimation are committed through
+ * Serialized-owner rule: overall Morph is committed through
  * SceneData's change-aware setters before runtime mirrors/work are updated.
  * Inputs and runtime outputs remain unchanged; equal retained values create no
  * autosave mutation. Affiliates: SceneData's named Scene parameter boundary
@@ -501,17 +594,21 @@ void    preset_morphScene(uint8_t scene_index, uint8_t morph);
 void    preset_morphVoiceScene(uint8_t scene_index, uint8_t slot,
                                uint8_t morph);
 void    preset_rebuildMorph(void);
-void    preset_setVoiceDecimationAll(uint8_t scene_index, uint8_t value);
 /*
- * Apply Scene-wide decimation to runtime without changing retained Scene/Menu
- * state.
+ * S074 master bus compressor Scene settings (cmp, cam, ctm, csc).
  *
- * Inputs: value in the 0..127 PERF `srt` domain. Output:
- * mixer_decimation_rate[6] receives the shaped multiplier. LFO modulation uses
- * this runtime-only path so Scene Decimation can be a Scene mod target without
- * causing the displayed PERF setting to move every LFO block.
+ * preset_setBusCompSetting() clamps and commits one field of one Scene through
+ * SceneData, then refreshes that field's active-page mirror. The setter is
+ * used by the VOICE edit-mask fan-out; preset_syncBusCompMirrors() copies the
+ * active Scene's four retained values into parameter_values[]. Neither path
+ * pushes runtime DSP state because BusCompressor reads SceneData per block.
+ * Affiliates: menu.c and preset_applySceneSettings().
  */
-void    preset_applyVoiceDecimationAllRuntime(uint8_t value);
+void    preset_setBusCompSetting(uint8_t scene_index, uint8_t field,
+                                 uint8_t value);
+void    preset_syncBusCompMirrors(void);
+/* Refresh the PERF `fxm` mirror from the active Scene's Effect Morph (S075). */
+void    preset_syncEffectMorphMirror(void);
 void    preset_morphTick(void);
 uint8_t preset_getMorphValue(uint16_t index, uint8_t morph);
 

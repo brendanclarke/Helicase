@@ -254,7 +254,7 @@ enum
 	VOICE_DECIMATION4,
 	VOICE_DECIMATION5,
 	VOICE_DECIMATION6,
-	VOICE_DECIMATION_ALL,
+	VOICE_DECIMATION_ALL, /* S075: unassigned; later CC numbers stay stable. */
 
 	FREQ_LFO1,	//todo rename cc and cc2 according to their new position
 	FREQ_LFO2,

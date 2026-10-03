@@ -28,6 +28,17 @@
 #define MASK_PAGE       0xf8
 #define PAGE_SHIFT      3
 
+/*
+ * S074 Scene-owned bus compressor page.
+ *
+ * It is deliberately the last populated settings sub-page. New global pages
+ * go before it and move this constant; menu cues and the diagnostic check use
+ * the named boundary rather than a duplicated literal.
+ */
+#define MENU_GLOBAL_SCENE_SUBPAGE 2u
+_Static_assert(MENU_GLOBAL_SCENE_SUBPAGE < NUM_SUB_PAGES,
+               "Scene-owned settings page must be a real sub-page");
+
 extern uint8_t menu_activePage;
 extern uint8_t menu_activeVoice;
 extern uint8_t menu_playedPattern;
@@ -74,6 +85,12 @@ enum PageNames {
     PATTERN_SETTINGS_PAGE,
     RECORDING_PAGE,
     SOM_PAGE,
+    /*
+     * Effect page (SHIFT+PERF, Session 072 step 7). Cells are resolved by
+     * menuEffects.c, not by menuPages[][]; the table row exists only so the
+     * page-indexed array stays dense. Appended so earlier page ids keep values.
+     */
+    EFFECT_PAGE,
     NUM_PAGES
 };
 
@@ -98,7 +115,7 @@ enum NamesEnum {
     TEXT_PAT_LENGTH, TEXT_NUM_STEPS, TEXT_ROTATION,
     TEXT_BPM, TEXT_EXT_SYNC,
     TEXT_MIDI_CHANNEL, TEXT_AUDIO_OUT,          /* 50 */
-    TEXT_SAMPLE_RATE, TEXT_PATTERN_BEAT, TEXT_PATTERN_NEXT,
+    TEXT_EFFECT_MORPH, TEXT_PATTERN_BEAT, TEXT_PATTERN_NEXT,
     TEXT_MODE, TEXT_OSC_VOLUME, TEXT_FILTER_DRIVE,
     TEXT_VEL_DEST, TEXT_VEL_AMT, TEXT_VEL_MOD_VOL,
     TEXT_FETCH,                                 /* 60 */
@@ -127,6 +144,9 @@ enum NamesEnum {
     TEXT_PAT_STORE_USE,
     /* Global AutoSave cell; parallel short/long enums below stay aligned. */
     TEXT_AUTOSAVE,
+    /* S074 Scene-owned bus compressor page: cmp, cam, ctm, csc. */
+    TEXT_BUS_COMP_MODE, TEXT_BUS_COMP_AMOUNT,
+    TEXT_BUS_COMP_TIME, TEXT_BUS_COMP_SIDECHAIN,
     NUM_NAMES
 };
 
@@ -136,7 +156,9 @@ enum catNamesEnum {
     CAT_MOD_OSC, CAT_LFO, CAT_TRANS, CAT_EQ,
     CAT_PATTERN, CAT_SOUND, CAT_STEP, CAT_EUKLID,
     CAT_GLOBAL, CAT_VELOCITY, CAT_PARAMETER, CAT_SEQUENCER,
-    CAT_GENERATOR, CAT_MIDI, CAT_TRIGGER
+    CAT_GENERATOR, CAT_MIDI, CAT_TRIGGER,
+    /* S074: Scene-owned static cells on the bus compressor page. */
+    CAT_SCENE
 };
 
 enum longNamesEnum {
@@ -147,7 +169,7 @@ enum longNamesEnum {
     LONG_DEST_VOICE, LONG_SLOPE, LONG_DECAY_CLOSED, LONG_DECAY_OPEN,
     LONG_ROLLRATE, LONG_MORPH, LONG_NOTE, LONG_PROBABILITY,
     LONG_NUMBER, LONG_LENGTH, LONG_STEPS, LONG_ROTATION,
-    LONG_TEMPO, LONG_EXTERNAL_SYNC, LONG_AUDIO_OUT, LONG_MIDI_CHANNEL, LONG_SAMPLE_RATE,
+    LONG_TEMPO, LONG_EXTERNAL_SYNC, LONG_AUDIO_OUT, LONG_MIDI_CHANNEL, LONG_EFFECT_MORPH,
     LONG_NEXT_PAT, LONG_PHASE, LONG_MODE, LONG_VOLUME_MOD,
     LONG_FETCH, LONG_FOLLOW, LONG_QUANTISATION,
     LONG_AUTOMATION_TRACK, LONG_AUTOMATION_DEST, LONG_AUTOMATION_VAL,
@@ -167,6 +189,9 @@ enum longNamesEnum {
     LONG_PAT_STORE_USE,
     /* Long label for PAR_AUTOSAVE_ENABLED's Global edit view. */
     LONG_AUTOSAVE,
+    /* S074 bus compressor long names. */
+    LONG_BUS_COMP_MODE, LONG_BUS_COMP_AMOUNT,
+    LONG_BUS_COMP_TIME, LONG_BUS_COMP_SIDECHAIN,
 };
 
 enum shortNamesEnum {
@@ -181,7 +206,7 @@ enum shortNamesEnum {
     SHORT_EQ_GAIN, SHORT_EQ_FREQ,
     SHORT_ROLL, SHORT_MORPH, SHORT_NOTE, SHORT_PROBABILITY,
     SHORT_STEP, SHORT_LENGTH, SHORT_ROTATION,
-    SHORT_BPM, SHORT_CHANNEL, SHORT_OUT, SHORT_SR, SHORT_NXT,
+    SHORT_BPM, SHORT_CHANNEL, SHORT_OUT, SHORT_EFFECT_MORPH, SHORT_NXT,
     SHORT_MODE, SHORT_VELOCITY, SHORT_FETCH, SHORT_FOLLOW, SHORT_QUANT,
     SHORT_TRACK, SHORT_VALUE, SHORT_SHUFFLE, SHORT_SCREEN_SAVER,
     SHORT_X, SHORT_Y, SHORT_FLUX, SHORT_MIDI, SHORT_MIDI_ROUTING,
@@ -194,7 +219,10 @@ enum shortNamesEnum {
     /* Read-only three-character label for Pattern pool occupancy. */
     SHORT_PAT_STORE_USE,
     /* Three-cell Global-page label for PAR_AUTOSAVE_ENABLED. */
-    SHORT_AUTOSAVE
+    SHORT_AUTOSAVE,
+    /* S074 bus compressor compact labels: cmp, cam, ctm, csc. */
+    SHORT_BUS_COMP_MODE, SHORT_BUS_COMP_AMOUNT,
+    SHORT_BUS_COMP_TIME, SHORT_BUS_COMP_SIDECHAIN
 };
 
 #define PAR_RUNTIME_CPU_USE 0xFFFEu
@@ -349,12 +377,15 @@ uint8_t menu_loadSaveBarButtonPressed(uint8_t advance);
 /*
  * Report whether nested Instrument Load owns an immutable in-flight transaction.
  *
- * Inputs: Menu's nested-load and storage/apply busy state. Output: nonzero from
- * successful request posting through staged commit, six-slot Morph rebuild,
- * and target rebind completion. This keeps mode/voice/Scene ownership fixed;
- * it does not prohibit the explicit coalesced number-only encoder path described
- * above. Clients: ButtonHandler mode/voice gesture gates and Menu's Scene/exit
- * selectors. This accessor is intentionally narrower than generic storage busy.
+ * Inputs: Menu's nested-load state, storage/apply busy state, and Preset's
+ * terminal status. Output: nonzero from successful request posting through
+ * an in-flight free-scroll Preset payload, staged commit, six-slot Morph
+ * rebuild, and target rebind completion. This keeps mode/voice/Scene
+ * ownership fixed; it does not prohibit the explicit coalesced number-only
+ * encoder path described above. Clients: ButtonHandler mode/voice gesture
+ * gates and Menu's Scene/exit selectors. This accessor is intentionally
+ * narrower than generic storage busy and covers the LSR-01/LSR-04 race where
+ * Preset owns the facade before Menu raises `menu_storageBusy`.
  */
 uint8_t menu_loadInstrumentTransactionBusy(void);
 void menu_loadInstrumentExit(void);
@@ -398,6 +429,58 @@ uint8_t menu_voiceHeldSceneButtonPressed(uint8_t scene_index);
 void menu_setVoiceModeShowMorph(uint8_t onOff);
 
 /*
+ * Effect-page SHIFT Morph view (Session 072 step 7; plan §13.5).
+ *
+ * Input: SHIFT held (1) or released (0) while SELECT_MODE_FX is active.
+ * Output: Morphable Effect cells display/edit their Morph endpoint while on;
+ * endless-pot snapshots refresh and the page repaints. Separate from
+ * voiceModeShowMorph so VOICE's persistent Morph mode is never affected.
+ */
+void menu_setEffectShowMorph(uint8_t onOff);
+
+/*
+ * Show the Effect type's home screen after a hooked SELECT (S074).
+ *
+ * What: on the Effect page, leaves the full view, moves the cursor to the
+ * type layout's home screen, refreshes pot mapping, re-renders the SELECT
+ * LEDs through the type owner, and repaints with menu_repaint(). Without a
+ * valid home it only re-renders and repaints. Caller: buttonHandler FX SELECT.
+ */
+void menu_effectShowHome(void);
+
+/*
+ * Effect-page voice mix overlay (S075 F2-F, approved +4 B SRAM1).
+ *
+ * SHIFT+TRACK shows the selected VOICE mix Scene-setting screen (`+`) over
+ * the Effect page while preserving its sub-page, cursor, edit state and live
+ * Effect LEDs. Begin moves/reselects the overlay; end restores the saved
+ * Effect position and applies any latched Effect service actions. A real page
+ * switch abandons the overlay and does not restore the Effect page.
+ * Affiliates: buttonHandler.c and ledHandler.c.
+ */
+uint8_t menu_fxVoiceMixOverlayBegin(uint8_t track);
+void menu_fxVoiceMixOverlayEnd(void);
+uint8_t menu_fxVoiceMixOverlayActive(void);
+
+/*
+ * Clamp one value to an instrument parameter's menu domain (S075 F3).
+ *
+ * What: applies the same descriptor-domain clamp as a VOICE-page edit
+ * (menu_clampCellValue() for an instrument cell: dtype ranges, list sizes,
+ * on/off, target-selector tokens, and LFO target voice range) to one
+ * parameter of the active Scene's slot.
+ * Why: external MIDI now enters values into the Scene (stored, saved); a raw
+ * 0..127 CC must not persist an out-of-domain byte, for example 127 on an
+ * on/off parameter. The clamp rules live in Menu; this wrapper keeps one copy.
+ * Inputs: slot 0..5, descriptor-local index, raw value 0..255. Output: the
+ * clamped value, or the input unchanged when the slot/descriptor is invalid.
+ * Caller: MidiParser.c midiParser_enterTaggedParameter(). Affiliates:
+ * menu_clampCellValue(), menu_cellDtype().
+ */
+uint8_t menu_clampInstrumentValue(uint8_t slot, uint8_t descriptor_index,
+                                  uint8_t value);
+
+/*
  * VOICE held-step automation overlay bridge.
  *
  * What: ButtonHandler calls menu_voiceAutoOverlayHoldExpired() when the common
@@ -413,8 +496,48 @@ uint8_t menu_voiceAutoOverlayActive(void);
 
 /* Re-evaluate overlay LEDs/display after a visible bar change. */
 void menu_voiceAutoOverlayBarChanged(void);
-/* Notify the VOICE search after an in-place Pattern/track clear. */
-void menu_voiceAutoOverlayPatternDeleted(void);
+/*
+ * Restart the automation-presence search after Pattern content changed (S075;
+ * formerly menu_voiceAutoOverlayPatternDeleted()).
+ *
+ * What: restarts the bounded search shared by the VOICE pages (active track)
+ * and the Effect page (all seven tracks, S074), then repaints, so underlines
+ * follow the new content once the rescan completes. Why: a paste or clear can
+ * add or remove automation anywhere in the viewed Pattern, and a removed
+ * target cannot be proven absent without a full rescan. Inputs: none; call
+ * after Pattern content has been changed. Outputs: a cleared search and a
+ * repaint on VOICE and Effect pages; nothing on other pages, whose next
+ * VOICE/Effect entry restarts the search anyway. Callers: copyClearService.c
+ * after every Pattern paste/clear on the viewed Scene. Affiliates:
+ * va_searchRestart() and va_scanService() in menu.c.
+ */
+void menu_patternContentChanged(void);
+/*
+ * Drop one target's underline now, without restarting the search (S075).
+ *
+ * What: clears the presence bit for one target in the current search result
+ * and repaints. Why: a pot clear removes the underline at the turn (spec §6)
+ * while the background removal runs; restarting the whole search would make
+ * every other underline vanish until the rescan completes. The search loop
+ * filters targets waiting in the register (ccSvc_targetPending()), so the
+ * bit cannot come back before the removal finishes. Inputs: Pattern target
+ * ID. Output: repaint. Caller: ccClear_potTurned().
+ */
+void menu_automationTargetCleared(uint16_t target);
+/*
+ * Copy/clear menu bridge (S075).
+ *
+ * menu_copyClearMenuChanged(): repaint after the copy/clear menu opened or
+ * its selection changed. menu_copyClearMenuClosed(): the menu closed; drop
+ * the CGRAM marker cache (the menu frame overwrote every marker cell) and
+ * repaint the page in full. menu_isStorageBusy(): read-only view of the
+ * Load/Save/Instrument storage lock, used to refuse an operation.
+ * Clients: copyClearSession.c. Affiliates: menu_repaint() overlay branch,
+ * va_queueMarkerTransaction().
+ */
+void menu_copyClearMenuChanged(void);
+void menu_copyClearMenuClosed(void);
+uint8_t menu_isStorageBusy(void);
 /*
  * STEP front-page half navigation.
  *
@@ -445,10 +568,32 @@ void menu_serviceKnobRepaint(void);  /* call from main loop after RV1-4 read loo
 void menu_pollPresetStatus(void);   /* call from main loop — handles async SD completion */
 void menu_parseGlobalParam(uint16_t paramNr, uint8_t value);
 void menu_sendAllParameters(void);
+/*
+ * Service foreground runtime display widgets.
+ *
+ * Inputs: current Menu/page state, playback state, and live runtime mirrors.
+ * Output: bounded CPU/Pattern widgets plus playback-time Scene-target repaint
+ * for PERF and VOICE/mix pages. All LCD work remains foreground-only; callers
+ * should invoke this from the main-loop service cadence.
+ */
 void menu_serviceRuntimeWidgets(void);
 uint8_t menu_getActivePage(void);
 /* Use the accepted OK/OW busy window, not mere presence on the Load/Save page. */
 uint8_t menu_isLoadSaveCommandActive(void);
+/*
+ * Deferred Kit/Instrument HCNAMES checkpoint bridge.
+ *
+ * What: exposes Menu's existing dirty-mask state to filesystem_tick() and
+ * lets that scheduler start the existing atomic HCNAMES writer after page
+ * exit. Why: page repaint/exit must not wait for HCNAMES persistence, while
+ * the dirty mask must remain owned by Menu until a successful completion.
+ * Inputs: no new storage; the implementation reads Menu's resident-name
+ * session state. Outputs: a read-only dirty query and one deferred flush
+ * request. Affiliates: filesystem_tick(), menu.c's resident-name helpers, and
+ * menu_residentNameScratchFlushComplete().
+ */
+uint8_t menu_hasResidentNameDirtyMask(void);
+void menu_triggerDeferredHcnamesFlush(void);
 uint8_t menu_areMuteLedsShown(void);
 uint8_t menu_getActiveVoice(void);
 void menu_setActiveVoice(uint8_t voiceNr);

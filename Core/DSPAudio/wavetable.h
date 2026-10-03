@@ -43,6 +43,14 @@
 #define TABLESIZE 4096
 #define TABLES 128
 
+/*
+ * Sine lookup table (TABLESIZE+1 samples), resident in application flash.
+ *
+ * Placement contract: .rodata (flash), never INCCM/INDTCM. Session 072 moved
+ * it out of DTCM so DTCM's remainder can be the FX/voice audio arena. Callers
+ * must treat it as ordinary const data and must not take its address for DMA
+ * or assume single-cycle access. Definition and full rationale: wavetable.c.
+ */
 extern const int16_t sine_table[TABLESIZE+1];
 
 /*the midi note numbers for the 11 wavetables are

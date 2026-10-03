@@ -3,6 +3,7 @@
 
 #include "InstrumentManager.h"
 #include "PatternData.h"
+#include "EffectTypes.h"
 #include <stdint.h>
 
 /*
@@ -116,6 +117,42 @@ typedef struct {
      */
 } kit_t;
 
+/*
+ * S074 master bus compressor settings: one byte each, in wire order.
+ *
+ * What:       indexes scene_settings_t::bus_comp[] and, in the same order,
+ *             AutoSave Scene parameters 41..44, the sceneset.scg keys
+ *             bus_comp_mode/amount/time/sidechain, and the PAR_BUS_COMP_*
+ *             page mirrors (PAR_BUS_COMP_MODE + field).
+ * Domains:    MODE 0 off, 1 St1 (DAC1: MAIN), 2 St2 (DAC2: OUT2); AMOUNT
+ *             and TIME 0..127; SIDECHAIN 0 off or voice 1..6 (track 7
+ *             counts as 6).
+ * Why an array: one clamp table, one default table and one setter keep the
+ *             four fields on the same owner path and wire order.
+ * Affiliates: BusCompressor.c, Preset, Autosave, storageTypes.c, menu.c.
+ */
+typedef enum {
+    SCENE_BUS_COMP_MODE = 0,
+    SCENE_BUS_COMP_AMOUNT,
+    SCENE_BUS_COMP_TIME,
+    SCENE_BUS_COMP_SIDECHAIN,
+    SCENE_BUS_COMP_FIELD_COUNT
+} scene_bus_comp_field_t;
+
+#define SCENE_BUS_COMP_MODE_OFF        0u
+#define SCENE_BUS_COMP_MODE_ST1        1u
+#define SCENE_BUS_COMP_MODE_ST2        2u
+#define SCENE_BUS_COMP_SIDECHAIN_OFF   0u
+/*
+ * Bus compressor defaults (S075 F2-B, user decision F2-Q2): mode off,
+ * amount 0, time 0, sidechain off. A fresh, cleared or default-staged Scene
+ * has no compression and neutral values. Used only through
+ * scene_busCompDefault[] in SceneData.c, which feeds scene_busCompDefaults()
+ * for every default path.
+ */
+#define SCENE_BUS_COMP_DEFAULT_AMOUNT  0u
+#define SCENE_BUS_COMP_DEFAULT_TIME    0u
+
 typedef struct {
     /*
      * Scene-level global Morph amount, 0..255.
@@ -142,31 +179,27 @@ typedef struct {
      */
     uint8_t voice_morph_amount[INSTRUMENT_SLOT_COUNT];
     /*
-     * Scene-level global sample-rate decimation, 0..127.
-     *
-     * This is PERF `srt`, stored once per Scene. It is intentionally separate
-     * from voice-local instrument_decimation descriptor rows, which are stored
-     * inside each instrument slot's descriptor images.
-     */
-    uint8_t voice_decimation_all;
-    /*
      * Per-voice Scene mix settings.
      *
      * audio_out is retained per instrument slot in the current mixer route
      * domain 0..5. Preset clamps it against the DSP mixer constants before
      * writing mixer_audioRouting[], keeping SceneData free of mixer includes.
      *
-     * fx_send_amount and fader_setting are retained now for the Scene file/UI
-     * contract. FX send is 0..127. Fader mode is 0..2, currently interpreted
-     * as normal/pre-FX, post-FX, and FX-only by future mixer/FX work. Until
-     * that backend exists, Preset setters store the values and intentionally
-     * no-op runtime apply.
+     * fx_send_amount and fx_send_morph are the Normal and Morph endpoints of
+     * the per-voice FX send (0..127; Morph endpoint S075 F2-H). The live send
+     * is interpolated by the voice's resolved Morph amount each audio block;
+     * step automation overrides both endpoints while its step plays.
+     * fader_setting is 0..SCENE_FADER_SETTING_MAX
+     * (0..3): pre (normal/pre-FX), pst (post-FX), fx (FX-only) and xfd (dry
+     * to FX crossfade, S074), interpreted by the mixer FX path. Preset
+     * setters store the values and the live mixer applies the selected mode.
      *
      * These fields are indexed by instrument slot, not by track. Track 7
      * continues to share slot 6's voice/mix identity.
-     */
+    */
     uint8_t audio_out[INSTRUMENT_SLOT_COUNT];
     uint8_t fx_send_amount[INSTRUMENT_SLOT_COUNT];
+    uint8_t fx_send_morph[INSTRUMENT_SLOT_COUNT];
     uint8_t fader_setting[INSTRUMENT_SLOT_COUNT];
     /*
      * Per-track MIDI assignment settings retained with the Scene.
@@ -179,6 +212,25 @@ typedef struct {
      */
     uint8_t midi_channel[NUM_TRACKS];
     uint8_t midi_note[NUM_TRACKS];
+    /*
+     * Scene-level Effect Morph amount, 0..255.
+     *
+     * This is a Scene parameter, not part of the retained Effect record or
+     * the `.fx` file. AutoSave stores it as Scene parameter 40; SceneData is
+     * the sole writer so the value is always dirty-marked with its owner.
+     */
+    uint8_t effect_morph_amount;
+    /*
+     * S074 master bus compressor: cmp, cam, ctm, csc, indexed by
+     * scene_bus_comp_field_t.
+     *
+     * These are Scene settings, not Kit or Effect data: they travel with
+     * Scene and Bank save/load, sceneset.scg (bus_comp_* keys) and AutoSave
+     * (Scene parameters 41..44). Written through scene_setBusCompSetting()
+     * except during validated initialization/whole-Scene staging.
+     * +4 B per Scene, +64 B SRAM1 in scenes[16] (approved 2026-09-29).
+     */
+    uint8_t bus_comp[SCENE_BUS_COMP_FIELD_COUNT];
     /*
      * Autosave extension rule for Scene settings.
      *
@@ -211,19 +263,17 @@ typedef struct {
      * Inputs: filesystem loaders copy validated settings and Kit payload;
      * PatternData owns the separate live Pattern region. Outputs: Menu and Bank name writers use filesystem HCNAMES
      * helpers. Affiliates: filesystem.c and Core/Menu/menu.c.
-     */
+    */
     scene_settings_t settings;
     /*
-     * Future retained Effect ownership belongs semantically here, between
-     * Scene settings and Kit ownership, but Phase 1 allocates no dummy state.
+     * Scene-retained Effect (Session 072, Effects Phase 5 step 3).
      *
-     * When Effects become live, their owner must raise the zero Autosave
-     * parameter count, implement the live getter, and route every scalar setter
-     * through autosave_markEffectParameterDirty(); whole Effect commits use
-     * autosave_markEffectDirty(). Why: Scene copy already contains the Effect
-     * region stub and must not require writer redesign later. Affiliates:
-     * Autosave Effect geometry and the future Effect implementation.
+     * The Effect belongs to this Scene, never to its Kit. SceneData setters
+     * and whole-record commits own all retained writes; each scalar setter
+     * marks its ordered AutoSave Effect cell and whole commits mark the full
+     * live Effect region. Readers use scene_effectConst().
      */
+    effect_record_t effect;
     kit_t kit;
 } scene_t;
 
@@ -297,6 +347,21 @@ kit_instrument_slot_t *scene_instrumentSlot(uint8_t scene_index, uint8_t slot);
 const kit_instrument_slot_t *scene_instrumentSlotConst(uint8_t scene_index,
                                                        uint8_t slot);
 /*
+ * Report whether two resident Scenes share one edit layout (plan §7.4).
+ *
+ * Inputs: two Scene indices. Output: nonzero when both exist, their Effect
+ * record types are equal, and all six Kit instrument slot types are equal
+ * slot by slot.
+ *
+ * Why: a VOICE edit-mask fan-out writes the same descriptor or lane index into
+ * every masked Scene. That index names the same parameter only when layouts
+ * match, so this is the rule behind the selection gate and re-validation
+ * (S072 Step 10, A44, F5). The raw Effect type byte is compared; SceneData
+ * stays independent of EffectsManager. Clients: Menu and BankData. Read-only;
+ * no AutoSave side effect.
+ */
+uint8_t scene_editLayoutMatches(uint8_t scene_a, uint8_t scene_b);
+/*
  * Store one track's MIDI channel setting.
  *
  * Inputs: Scene index, track index, and requested channel. Output: the channel
@@ -330,16 +395,14 @@ void scene_setTrackMidiNote(uint8_t scene_index, uint8_t track, uint8_t note);
  */
 uint8_t scene_getTrackMidiNote(uint8_t scene_index, uint8_t track);
 /*
- * Store the two Scene-wide scalar settings through their retained owner.
+ * Store the Scene-wide Morph amount through its retained owner.
  *
- * Inputs: resident Scene plus 0..255 Morph or normalized 0..127 decimation.
- * Outputs: changed storage is committed before its named Autosave bit; equal
- * values and invalid Scenes do nothing. Runtime Morph/decimation apply remains
- * Preset-owned. Why: callers must not directly assign these serialized fields.
- * Affiliates: preset_morphScene() and preset_setVoiceDecimationAll().
+ * Inputs: resident Scene plus a 0..255 amount. Outputs: changed storage is
+ * committed before its named AutoSave bit; equal values and invalid Scenes do
+ * nothing. Runtime Morph apply remains Preset-owned. S075 removed the former
+ * global decimation setter with the parameter.
  */
 void scene_setMorphAmount(uint8_t scene_index, uint8_t amount);
-void scene_setVoiceDecimationAll(uint8_t scene_index, uint8_t value);
 /*
  * Scene-retained per-slot Morph accessors.
  *
@@ -372,6 +435,29 @@ uint8_t scene_getVoiceAudioOut(uint8_t scene_index, uint8_t slot);
 void scene_setVoiceFxSendAmount(uint8_t scene_index, uint8_t slot,
                                 uint8_t amount);
 uint8_t scene_getVoiceFxSendAmount(uint8_t scene_index, uint8_t slot);
+/*
+ * Morph endpoint of one voice's FX send (S075 F2-H).
+ *
+ * What: stores/returns the retained 0..127 Morph endpoint through the
+ * change-aware Scene owner. The setter marks AutoSave cell
+ * AUTOSAVE_SCENE_PARAM_FX_SEND_MORPH_BASE + slot only when the byte changes;
+ * invalid Scene/slot reads return 0. Clients: Preset, Menu, copy/clear and
+ * AutoSave restore. Affiliate: the Normal endpoint above and `fx_send_morph`
+ * in sceneset.scg.
+ */
+void scene_setVoiceFxSendMorph(uint8_t scene_index, uint8_t slot,
+                               uint8_t amount);
+uint8_t scene_getVoiceFxSendMorph(uint8_t scene_index, uint8_t slot);
+/*
+ * Largest stored fader mode (S074): 0 pre, 1 pst, 2 fx, 3 xfd.
+ *
+ * What: the single domain limit for fader_setting[]. The SceneData setter
+ * and getter, Preset's setter, the sceneset.scg parser and the Menu clamp
+ * all use it. mixer.c asserts that it equals MIXER_FADER_XFD, so SceneData
+ * stays free of mixer includes while the two cannot drift. A future mode
+ * raises this value and adds a mixer branch and a Menu label.
+ */
+#define SCENE_FADER_SETTING_MAX 3u
 void scene_setVoiceFaderSetting(uint8_t scene_index, uint8_t slot,
                                 uint8_t mode);
 uint8_t scene_getVoiceFaderSetting(uint8_t scene_index, uint8_t slot);
@@ -392,5 +478,105 @@ uint8_t scene_getSlot6Track7AmpEnvelopeDecay(uint8_t scene_index);
 void scene_setSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index,
                                                uint8_t value);
 uint8_t scene_getSlot6Track7MorphAmpEnvelopeDecay(uint8_t scene_index);
+
+/*
+ * Scene Effect accessors (Session 072, Effects Phase 5 step 3).
+ *
+ * These declarations define the single mutation boundary for the retained
+ * Effect record and its Scene-level Morph amount. Setters normalize input,
+ * store first, then mark exactly the matching AutoSave cell and invalidate
+ * the card-clean bit; equal values and invalid coordinates are no-ops.
+ */
+const effect_record_t *scene_effectConst(uint8_t scene_index);
+void scene_effectRecordDefaults(effect_record_t *record);
+uint8_t scene_commitEffectRecord(uint8_t scene_index,
+                                 const effect_record_t *record);
+/*
+ * In-place whole-record commit pair (Session 072, Effects Phase 5 step 4).
+ *
+ * EffectsManager obtains the mutable retained record, rewrites it, and must
+ * immediately close the pair with scene_finishEffectWholeCommit(). The close
+ * normalizes sequence fields, marks the type token plus all live Effect cells,
+ * and invalidates the Scene card-clean bit without putting a 420-byte copy on
+ * the caller's stack. No other writer may use the mutable pointer.
+ */
+effect_record_t *scene_effectRecordForWholeCommit(uint8_t scene_index);
+void scene_finishEffectWholeCommit(uint8_t scene_index);
+void scene_setEffectNormalParameter(uint8_t scene_index, uint8_t index,
+                                    uint8_t value);
+void scene_setEffectMorphParameter(uint8_t scene_index, uint8_t index,
+                                   uint8_t value);
+void scene_setEffectSeqRunMode(uint8_t scene_index, uint8_t mode);
+void scene_setEffectSeqLength(uint8_t scene_index, uint8_t length);
+void scene_setEffectSeqStepScale(uint8_t scene_index, uint8_t scale);
+void scene_setEffectSeqLaneValue(uint8_t scene_index, uint8_t step,
+                                 uint8_t lane, uint8_t value);
+void scene_setEffectSeqLaneLocked(uint8_t scene_index, uint8_t step,
+                                  uint8_t lane, uint8_t locked);
+void scene_setEffectMorphAmount(uint8_t scene_index, uint8_t amount);
+uint8_t scene_getEffectMorphAmount(uint8_t scene_index);
+
+/*
+ * S074 master bus compressor accessors (cmp, cam, ctm, csc).
+ *
+ * scene_busCompDefaults() writes off, 0, 0, off (S075 F2-B) into a settings
+ * image for every fresh/staged/emptied Scene path. scene_busCompClamp() applies the
+ * field domain (mode 0..2, amount/time 0..127, sidechain 0..6), returning 0
+ * for an invalid field. scene_setBusCompSetting() clamps and commits through
+ * the change-aware Scene store; scene_getBusCompSetting() returns the retained
+ * byte or 0 for an invalid Scene/field. No runtime push is performed: the
+ * compressor reads the active Scene every block.
+ * Affiliates: Preset, Autosave, storageTypes.c, BusCompressor.c, menu.c.
+ */
+void scene_busCompDefaults(scene_settings_t *settings);
+uint8_t scene_busCompClamp(uint8_t field, uint8_t value);
+void scene_setBusCompSetting(uint8_t scene_index, uint8_t field,
+                             uint8_t value);
+uint8_t scene_getBusCompSetting(uint8_t scene_index, uint8_t field);
+
+/*
+ * Whole-settings defaults and commit for copy/clear (S075).
+ *
+ * scene_settingsDefaults(): the settings of a fresh Scene (as Scene Load's
+ * stage defaults: MIDI channel track+1, note MIDI_DEFAULT_TRIGGER_NOTE,
+ * default audio route per slot, FX send Normal and Morph endpoints 0, fader
+ * pre, Morph amounts 0, Effect
+ * Morph 0, bus compressor off/0/0/off). scene_commitSettings(): copies a
+ * complete settings image into one Scene field by field through the
+ * change-aware setters, so every changed byte marks its own AutoSave cell and
+ * the card-clean bit; no runtime apply (Preset owns that). Why: `copy scene
+ * settings`, `copy scene`, `clear scene` and `clear scene settings` replace
+ * all `sceneset.scg` fields without a second writer of retained Scene data.
+ * Inputs: Scene index and a source image (which may be another Scene's live
+ * settings). Output: nonzero when any byte changed. Clients: copyOps.c,
+ * clearOps.c. Affiliates: Autosave Scene cells, preset_applySceneSettings().
+ */
+void scene_settingsDefaults(scene_settings_t *out);
+uint8_t scene_commitSettings(uint8_t scene_index, const scene_settings_t *src);
+
+/*
+ * Reset one Scene's Kit to the fresh-Scene Kit (S075, `clear scene` on a
+ * Scene that is not active).
+ *
+ * Output: the six slots hold the default types (DRM, DRM, DRM, SNR, CYM, HAT)
+ * with descriptor defaults, the slot-6/track-7 decay pair is 0, the whole Kit
+ * is marked for AutoSave and the card-clean bit is cleared. Never called for
+ * the active Scene (its Kit is kept, user B11); no runtime apply. Client:
+ * clearOps.c.
+ */
+void scene_resetKitToDefaults(uint8_t scene_index);
+
+/*
+ * Replace one Scene's whole Kit (S075, `copy kit` and `copy scene`).
+ *
+ * What: copies the six Instrument slots and the Kit settings (including the
+ * slot-6/track-7 decay pair) from a resident source Kit, marks the whole Kit
+ * for AutoSave and clears the card-clean bit. Why: SceneData is the only
+ * writer of retained Scene data; copy/clear must not assign scene_t fields
+ * itself. Inputs: destination Scene and a source Kit (another Scene's live
+ * Kit). Output: nonzero when committed. No runtime apply and no Bank-present
+ * change (the caller owns both). Client: copyOps.c.
+ */
+uint8_t scene_commitKit(uint8_t scene_index, const kit_t *kit);
 
 #endif

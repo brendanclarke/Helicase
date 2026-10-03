@@ -57,7 +57,7 @@
 #define USE_DECIMATOR 1
 
 #if USE_DECIMATOR
-extern float mixer_decimation_rate[7];		/**<sets the sample rate decimation. 0..1 = full rate*/
+extern float mixer_decimation_rate[6];		/**<sets the per-voice sample rate decimation. 0..1 = full rate*/
 #endif
 
 extern uint8_t mixer_audioRouting[6];
@@ -71,6 +71,31 @@ enum
 	MIXER_ROUTING_DAC2_L,
 	MIXER_ROUTING_DAC2_R,
 };
+
+/*
+ * Per-voice fader modes (Scene setting fader_setting[slot], 0..3; plan §8.3,
+ * user rule A24). Values match the stored byte and the Menu labels
+ * (menu_sceneSettingFaderName: pre / pst / fx / xfd). S074 adds xfd, a dry ↔
+ * FX crossfade with the same logarithmic taper mirrored around the fader.
+ *
+ * The voice signal s (decimated, pre-volume) feeds two parallel taps:
+ *   mix  = s x vol x F_mix  -> pan -> voice route
+ *   send = s x send x F_send -> FX bus
+ * PRE : F_mix = fader, F_send = fader  (fader scales both)
+ * POST: F_mix = fader, F_send = 1      (send ignores the fader)
+ * FX  : F_mix = 1,     F_send = fader  (fader scales only the send; mix level
+ *                                       is vol alone)
+ * XFD : F_mix = fader, F_send = fader' (mirrored taper; bottom is FX send
+ *                                       only at full send, top is dry
+ *                                       only at vol)
+ * The fader never changes the stored FX Send parameter. Consumer:
+ * mixer_calcNextSampleBlock(). Affiliates: SceneData fader_setting,
+ * presetManager fader/send setters, Menu VOICE mix cells.
+ */
+#define MIXER_FADER_PRE   0u
+#define MIXER_FADER_POST  1u
+#define MIXER_FADER_FX    2u
+#define MIXER_FADER_XFD   3u
 
 void mixer_init();
 void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2);

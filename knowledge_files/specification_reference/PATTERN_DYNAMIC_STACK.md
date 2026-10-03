@@ -3,12 +3,32 @@
 ## Authority and status
 
 This is the authoritative live-memory, allocator, PAT4 interchange, Pattern
-Stack Service, and Pattern AutoSave reference through Session 067. Historical
-Session 062/063/064 plans describe how the design was reached but do not
-override this file.
+Stack Service, and Pattern AutoSave reference, **current as of the Session 075
+close** (2026-10-03, `dev-ph6-copyclear`, HEAD `76aef20`). Session 073 changed
+nothing. Session 074 changed no Pattern storage or allocator code; it added a
+second reader of step automation (the Effect-page underline search reads every
+step of every track of the viewed Pattern through
+`pat_readStepAutomations()`, 4 steps per foreground pass) and saw a torn PAT4
+file repair itself exactly as designed (§9).
+
+**Session 075 (Phase 6) changed this area in three ways:**
+
+- **Copy/clear** (`Core/Menu/CopyClear/`, reference `COPYCLEAR_UTILITIES.md`)
+  replaced the Session 062 no-op copy APIs. It adds a permanent 132 B swap
+  block to every pool (§3), an exclusive per-Scene write boundary for any
+  resident Scene, a raw block API and sliding compaction (§12.17).
+- **Automation priority** (§6.2a): a held step-automation value is never
+  overwritten before the voice's next trigger; menu edits apply only their
+  own parameter's interpolation; external MIDI is lowest priority.
+- **Documentation corrections** found while closing S075: the block header is
+  big-endian (§4), the pending queue is a 128-record append queue (§6.1), and
+  the drain writes voice values without 7→8-bit expansion (§6.1).
+
+Historical Session 062/063/064 plans describe how the design was reached but
+do not override this file.
 Filesystem hierarchy and HCNAMES grammar are in `FILESYSTEM_SPEC.md`; scalar
 and Pattern AutoSave scheduling/recovery are in `AUTOSAVE.md`; exact linked
-memory totals are in `SRAM_MANIFEST.md`.
+memory totals are in `STORAGE_SRAM_MANIFEST.md`.
 
 Implemented and hardware accepted:
 
@@ -18,7 +38,10 @@ Implemented and hardware accepted:
 - per-step automation entries (2-byte LE, 7-bit value + 9-bit target,
   up to 63 per step) with uniqueness invariant and dtype-aware editing;
 - first-fit bit-packed pool allocator and block reclamation;
-- Pattern/track settings and Sequencer probability playback;
+- Pattern/track settings storage, Menu edit, and PAT4 persistence; Sequencer
+  probability playback; per-track step-length playback (Session 068, see
+  §6.4) — per-track step-scale and shuffle are stored/edited/persisted but
+  have no playback effect (deferred, see §6.4);
 - sequencer automation playback: TIM3 copies to 32-entry debounced
   pending buffer, foreground drain via `instrumentManager_writeRuntime()`,
   per-slot dirty bitmap with morph-interpolation restore on voice trigger;
@@ -27,13 +50,17 @@ Implemented and hardware accepted:
 - exact binary PAT4 Scene/Bank/root Pattern Load and Save;
 - scene-mask Pattern Load fan-out;
 - per-Scene hidden A/B Pattern AutoSave and boot restore;
-- HCNAMES Pattern identity rows 129..144.
+- HCNAMES Pattern identity rows 129..144;
+- Phase 6 copy and clear of steps, ranges, bars, tracks, automation and whole
+  Patterns (Session 075; partly hardware-tested by the user, see
+  `COPYCLEAR_UTILITIES.md` §16).
 
-Not implemented: Pattern copy operations (the three APIs are deliberate
-no-ops), live-record capture, and real-time editing guarantees while a snapshot
-is admitted during record/erase (admission is instead deferred while those
-modes are active). Allocator compaction/defragmentation is implemented via the
-Pattern Stack Service (Session 067, see §12).
+Not implemented: live-record capture of automation, and real-time editing
+guarantees while a snapshot is admitted during record/erase (admission is
+instead deferred while those modes are active). Allocator
+compaction/defragmentation is implemented via the Pattern Stack Service
+(Session 067, see §12) and, for the copy/clear holder, as sliding compaction
+(§12.17).
 
 ## 1. Resident object
 
@@ -53,7 +80,8 @@ typedef struct __attribute__((packed)) {
 ```
 
 `pat_regions[16]` is exactly 168,304 bytes. Pattern storage is not embedded in
-`scene_t`; `scenes[16]` remains 19,200 bytes. `pat_sceneRegion(scene)` returns
+`scene_t`; `scenes[16]` is a separate 26,080-byte SceneData object (S075 F2:
+1,630 B per Scene). `pat_sceneRegion(scene)` returns
 read-only access and `pat_sceneRegionMut(scene)` is reserved for bounded owner
 paths such as validated filesystem application. Ordinary clients use the
 public operations so mutation tracking cannot be bypassed.
@@ -86,7 +114,18 @@ pool end.
 
 `PAT_STACK_SIZE == 256` is a historical sizing unit, not the number of
 allocatable chunks. It creates an 8,192-byte pool (`256 × 32`). Allocation is
-in 4-byte chunks, so the pool contains 2,048 allocatable chunks.
+in 4-byte chunks, so the pool contains 2,048 chunks.
+
+**Swap block (S075).** The top 33 chunks (132 B, bytes 8,060..8,191,
+`PAT_POOL_SWAP_OFFSET`) of every Scene's pool are permanently reserved: normal
+allocation (`pat_poolAlloc()`), service searches, repair and reservations stop
+at `PAT_POOL_ALLOC_CHUNKS` (2,015 chunks, 8,060 B usable). The block holds one
+maximum dynamic block and is a guaranteed rewrite area: a step can be
+republished without free pool space while its old block is still live.
+Copy/clear is its first user; the reserve is kept for any later feature that
+needs the same guarantee. PAT4 is unchanged (the reserve is free space);
+Patterns saved before S075 may have blocks there, which copy/clear moves
+below the reserve before first use (§12.17).
 
 The 512-byte bitmap is bit-packed: bit `chunk & 7` of byte `chunk >> 3` owns
 one 4-byte chunk. Only its first 256 bytes correspond to the 2,048 backed
@@ -105,9 +144,9 @@ compaction that relocates live blocks toward pool start.
 A block starts at a 4-byte-aligned pool offset:
 
 ```text
-bytes 0..1  little-endian header
+bytes 0..1  big-endian header (byte 0 = bits 15..8, byte 1 = bits 7..0)
              bits 15..6: track * 128 + step (10-bit back-reference)
-             bits 5..0: automation count (0..63)
+             bits 5..0: automation count (0..63), so byte 1 & 0x3F
 byte 2      special flags: bit0 note, bit1 velocity, bit2 probability
 bytes 3..   present values in note, velocity, probability order
 next bytes  automation entries, 2 bytes each, auto_count entries:
@@ -123,7 +162,8 @@ inconsistent back-reference makes a block invalid.
 
 Each automation entry's 9-bit target is the canonical `instrument_param_id_t`:
 `slot * INSTRUMENT_PARAM_COUNT + descriptor_index` for voice parameters
-(IDs 0..383), or a Scene target ID (384+). A step must never contain two
+(IDs 0..383), a Scene target ID (384+), or an Effect parameter ID 448..510
+(block 7, Session 072 step 9). A step must never contain two
 entries with the same 9-bit target (uniqueness invariant, enforced at write
 time). The 7-bit value is an identity mapping: stored value = parameter value.
 Every automatable descriptor parameter has a range that fits in 7 bits
@@ -152,7 +192,15 @@ the address entry before freeing the pool block.
 Core operations validate Scene/track/step coordinates and do no work for an
 invalid coordinate:
 
-- `pat_isStepActive`, `pat_setStepActive`, `pat_toggleStep`, `pat_eraseStep`;
+- `pat_isStepActive`, `pat_setStepActive`, `pat_toggleStep`, `pat_eraseStep`
+  (Session 068: `buttonHandler_setRemoveStep()` emits a `DEV_MODE_LOGGING`-
+  gated `K` witness record, via `AutosaveTrace.h`/`autosaveTrace_record()`,
+  immediately before calling `pat_toggleStep()` — packs track/absolute
+  step/pattern/pre-toggle trigger state, so a future report can distinguish
+  front-panel input delivery failing to reach this call from a failure in
+  the mutation itself. `K` is an AutoSaveTrace stage code, not a
+  PatternTrace one — see `DEV_MODES.md` and note the two trace systems share
+  some letters with different meanings);
 - `pat_clearTrack`, `pat_clearPattern`;
 - `pat_readStepSpecials` and the note/velocity/probability setters;
 - `pat_readStepAutomations` — read decoded entries for one step (returns
@@ -171,10 +219,10 @@ invalid coordinate:
 specials-only edits. `pat_eraseStep` and `pat_clearTrack` include automation
 entries in block-size calculations when freeing pool chunks.
 
-`pat_copyTrack`, `pat_copyPattern`, and `pat_copyBar` intentionally do nothing.
-Their future implementation must duplicate live pool blocks (including
-automation entries) and rebuild destination address offsets/bitmap ownership;
-it must never alias one Scene's or step's pool allocation from another.
+The Session 062 no-op copy surface (`pat_copyTrack`, `pat_copyPattern`,
+`pat_copyBar`) was removed in S075. Copies are made by the copy/clear service
+(`Core/Menu/CopyClear/`) through the raw block API (§12.17), which duplicates
+pool blocks and never aliases one Scene's or step's allocation from another.
 
 All real Pattern mutations converge on PatternData's local dirty helper. It
 invalidates the Bank clean-Scene witness and calls
@@ -182,10 +230,12 @@ invalidates the Bank clean-Scene witness and calls
 equivalent complete-operation marking or they violate AutoSave ownership.
 
 Since Session 067, all pool-mutating operations from Menu, Sequencer,
-copyClearTools, and EuklidGenerator route through the Pattern Stack Service
+and EuklidGenerator route through the Pattern Stack Service
 (`patSvc_*` API) rather than calling `pat_*` mutation functions directly. The
 service guarantees exactly one mutation target at a time and serializes all
-pool access. See §12.
+pool access. See §12. The S075 copy/clear service is the one exception: it
+writes through the raw block API only while it holds the service's exclusive
+boundary (§12.17).
 
 ## 6. Sequencer and menu integration
 
@@ -197,21 +247,68 @@ events remain independent fixed-note behavior.
 
 ### 6.1 Step automation playback
 
+THE DEFAULT FOR ALL AUTOMATION IS THAT IT PLAYS AND AFFECTS SOUND UNTIL THE
+NEXT VOICE TRIGGER. AUTOMATION ON A NON-TRIGGER STEP IS VALID AUDIO
+AUTOMATION DATA, VALUE CHANGES BETWEEN NOTES, AND TIMBRAL MOTION INDEPENDENT
+OF RHYTHM ARE A CRITICAL PRODUCT FEATURE. ANY CHANGE THAT CONDITIONS
+AUTOMATION QUEUEING ON TRIGGER STATE (BIT 15) DESTROYS THIS CAPABILITY AND
+IS UNCONDITIONALLY WRONG.
+
 On each step advance, `seq_advanceTrackStep()` reads automation entries from
 every step that has a pool block (bit 14 set, valid offset), regardless of
-trigger state. Decoded entries are copied into a 32-entry debounced pending
-buffer in `sequencer.c` (192 B static SRAM). Multiple writes to the same
-`(step_id, target)` pair coalesce; the ISR is the sole writer.
+trigger state. Each entry (except the Pattern-only off target `0x1FF`) is
+appended to the TIM3-to-foreground queue `seq_pending_automation[]`:
+`SEQ_PENDING_BUF_COUNT` (128) four-byte records (identity = step id | type
+bit, payload = the packed entry) plus two publication bytes (+514 B SRAM1).
+There is no coalescing; a full queue drops the entry and records a
+PatternTrace overflow witness (`H`). Effect step markers (identity bit 11)
+share the queue. The ISR is the sole writer.
+
+Trigger condition including probability gates the complete step: trigger and
+automation together, for any step that has the probability special set,
+whether or not the step has an active trigger (bit 15). The probability
+special is read from the dynamic block before the trigger-active check so it
+applies to non-trigger steps with automation. Default probability (127, or
+absent special) always passes — a step without probability set plays
+unconditionally. A step whose probability roll fails produces no trigger and
+no automation entries; previously held automation values persist through the
+skipped step. Erase is independent of probability.
 
 The foreground drain (`seq_drainPendingAutomation()`) runs inside
 `audio_check_and_render()` immediately after `voiceControl_processPending()`,
-within the per-chunk render loop. For each entry, it validates the target,
-expands the 7-bit value to 8-bit, and calls
-`instrumentManager_writeRuntime(slot, descriptor, value8)`. On success, it
-sets the corresponding bit in `seq_automation_dirty[slot]` (a `uint64_t`
-per-slot bitmap, 48 B total).
+within the per-chunk render loop. For each entry, it validates the target and
+dispatches by target range. Values stay in descriptor space (identity
+mapping, no MIDI-CC-style 7→8-bit expansion); only voice Morph Scene targets
+expand to 0..255:
 
-### 6.2 Automation reset on voice retrigger
+- **Voice descriptor targets (IDs 0..383):** calls
+  `instrumentManager_writeRuntime(slot, descriptor, value)` and sets the
+  corresponding bit in `seq_automation_dirty[slot]` (a `uint64_t` per-slot
+  bitmap, 48 B total). That bit is the "automation holds this value" record
+  (§6.2a).
+- **Scene targets (IDs 384+, Session 070; `fxm` is ID 404):** calls
+  `seq_applySceneAutomation()` which dispatches to runtime-only overlays —
+  `presetMorph_setStepAutomationOverride()` for Voice Morph (with 7→8 bit
+  expansion via `menu_morphAutomationExpand()`),
+  `slot6_track7_decay_step_value` for generated slot-6 track-7 decay,
+  `preset_applyVoiceAudioOutRuntime()` plus `preset_setAudioOutStepOverride()`
+  for Audio Out routing, `preset_setFxSendStepOverride()` for FX Send (the
+  mixer reads the effective send each block; the override beats the
+  Normal/Morph send endpoints), or `effects_setMorphAutomation()` for `fxm`. Sets the corresponding bit in
+  `seq_scene_automation_dirty` (`uint32_t`, 4 B). Scene automation never
+  writes retained Scene/Kit setters — this prevents AutoSave thrashing and
+  preserves user-set values.
+- **Effect targets (IDs 448..510, Session 072 step 9):** the foreground drain
+  brackets entries with FX step markers (identity bit 11) and calls
+  `effects_applyAutomation(track, local, value7)`. EffectsManager owns the
+  value, owner track, and pending-end mask. An overlay ends when its writing
+  track advances to an automation step that does not rewrite that parameter;
+  a failed-probability or muted step queues no marker and therefore holds it.
+  The common reset latch clears all Effect overlays and `fxm` before the new
+  pass's records apply. `fxm` follows the reset rule rather than the
+  per-parameter end rule.
+
+### 6.2 Automation reset on voice retrigger and transport restart
 
 All trigger sources funnel through `voiceControl_triggerNow()` in
 `MidiVoiceControl.c`. Before `instrumentManager_triggerTrack()`, it calls
@@ -220,6 +317,46 @@ dirty bitmap using `__builtin_ctzll`, writes the `morph_interpolation[]`
 value for each dirty descriptor back to the runtime, and clears the bitmap.
 The dirty bitmap is also cleared on `seq_init()`, transport stop, and
 `seq_setStepIndexToStart()`.
+
+On transport restart (Session 070), `seq_setStepIndexToStart()` calls
+`seq_restoreAllAutomation()` (walks all 6 voice dirty bitmaps and restores
+from `morph_interpolation[]`) and `seq_restoreAllSceneAutomation()` (walks
+`seq_scene_automation_dirty` and restores each Scene target from its retained
+SceneData getter: clears morph step overrides, slot6 decay step state, and
+audio routing overrides). Both restore functions run BEFORE
+`seq_clearAutomationDirty()`. `seq_setRunning()` is structured so stop sets
+`seq_running=0` first (preventing TIM3 ISR from advancing during cleanup)
+and start sets `seq_running=1` last (after all initialization).
+
+Effect step markers are queued immediately before the owning track's
+automation entries on the same conditional playback gate. The marker's
+payload-free identity keeps the track/step ID in bits 0..9 and sets identity
+bit 11. Entries after a marker can re-hold a pending parameter; the next
+marker or end-of-drain flush ends candidates not rewritten. This preserves
+last-writer ownership when multiple tracks write the same Effect row.
+
+### 6.2a Automation priority: automation, then menu edits, then MIDI (S075 F3)
+
+**Rule (user):** a voice-parameter automation value written by the drain
+holds until that voice's next trigger. Nothing else may change that
+parameter's runtime value before then.
+
+| Writer | What it does to a held parameter | Mechanism |
+|---|---|---|
+| Morph sweep (`presetMorph_tick()`), synchronous voice apply (`presetMorph_applyVoiceNow()`) | updates `morph_interpolation[local]` only; the runtime value is left alone | every Morph-base runtime write goes through `presetMorph_writeRuntimeBase()`, which skips an inactive Scene and any parameter for which `seq_automationHoldsParameter(slot, local)` is set |
+| Menu edit of any instrument endpoint (`preset_setInstrumentParameter()`) | stores the endpoint; re-interpolates **only that parameter** at the voice's resolved Morph amount (`presetMorph_applyParameterNow()`), so a held parameter changes at its next trigger | no whole-voice queue; the runtime never receives the raw edited value |
+| External MIDI CC/NRPN (`midiParser_enterTaggedParameter()` → `preset_setInstrumentParameterFromMidi()`) | stores the active Scene's clamped Normal endpoint and queues the voice for the Morph sweep (lowest priority) | the sweep's guarded write applies it when it gets there |
+
+At the trigger, `seq_restoreAutomatedParameters()` writes
+`morph_interpolation[local]` — which by then holds every edit and Morph
+change made while the value was held — and clears the bitmap. Before S075 F3
+a menu edit queued the whole voice and the worker overwrote every held
+parameter mid-note; the same happened on Morph changes, an LFO on a voice's
+Morph, `Nvm` automation and Instrument/Kit applies. Effect parameters and the
+Scene targets (`Nfx`, `Nou`, `Nvm`, `fxm`, `7dc`) were never affected: they
+are layered overlays read every block. An Instrument type change while values
+are held is out of scope (a held bit may name the old type's descriptor until
+the next trigger). Details: `075_SESSION_HANDOFF_LOG.md` §11.
 
 ### 6.3 Step-edit automation pages
 
@@ -235,6 +372,51 @@ The selected-step edit page reads the live dynamic block. Setting note,
 velocity, or probability performs a tracked pool read-modify-write and repaints
 the menu. Track and Pattern setting pages read/write the fields in the resident
 region; PAT4 persists them.
+
+### 6.4 Per-track length, scale, and shuffle — playback consumption status
+
+`track_length[7]`, `track_scale[7]`, and `track_shuffle[7]` (§1) are all
+correctly stored, Menu-editable, dirty-marked, and PAT4-persisted, but only
+`track_length` currently affects playback. This distinction is not visible
+from the resident-object struct alone and is stated here explicitly because
+it was the source of a Session 068 field report.
+
+**Track length (Session 068, implemented).** `seq_advanceTrackStep()` and
+`seq_realignActivePatternToMasterClock()` (`Core/Sequencer/sequencer.c`) read
+`region->track_length[track]` as each track's independent step-wrap boundary,
+falling back to `NUM_STEPS_PER_BAR` (16) when the region pointer is
+unavailable or the stored value is 0. Each track therefore loops
+independently at its own configured length. The in-memory init default is 16
+(`PatternData.c`), matching historic single-bar playback; the field's valid
+storage range is 1..`NUM_STEPS` (128), but multi-bar lengths (17..128)
+additionally require `menu_currentBar` integration in the chase-LED renderer
+that has not been built — the accepted, tested range is 1..16.
+`seq_handleMasterBoundary()` intentionally remains fixed at
+`NUM_STEPS_PER_BAR`: it detects the master-grid bar boundary (pattern-change
+commit, beat LED, clock output), a bar-level concept independent of any
+individual track's loop length, and must not be changed to track length.
+
+**Track scale (stored/displayed; playback not implemented).** Step 8 moves
+`track_scale[track]` to the shared StepScale index table, with init default
+`TRACK_SCALE_DEFAULT` (index 4, `1/16`). All tracks still advance together on
+one global divisor, `SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP` (24 PPQ ticks =
+1/16th note, in `seq_processSchedulerTick()`), so the retained scale has no
+playback effect regardless of its stored value. A future playback pass requires
+per-track PPQ tick accumulators and must consume the same StepScale ticks used
+by the FX sequencer; it must not introduce a second scale index order.
+
+**Track shuffle (not implemented).** Every step fires at a uniform tick
+boundary; there is no shuffle-offset calculation in `sequencer.c`.
+`track_shuffle[track]` (init default 0) has no playback effect regardless of
+its stored value. A fix requires sub-step scheduling — either a per-track
+"delay ticks remaining" counter (`NUM_TRACKS` bytes of new ISR-static state)
+or a deferred trigger queue; tracked in `SCOPING_TARGETS.md` § Session 068
+deferred items.
+
+Scale and shuffle are each orthogonal to length and to each other: length
+selects which step indices exist, scale selects how fast steps are visited,
+shuffle offsets timing within a step interval. All three are meant to compose
+independently once scale and shuffle are implemented.
 
 ## 7. PAT4 wire format
 
@@ -321,6 +503,16 @@ re-arms the bit. Successful durable completion publishes the Pattern row as
 `name<TAB>@<TAB>R`, but the completion may set `R` only if no post-snapshot
 edit made the Pattern dirty again.
 
+**Torn files.** A Pattern write interrupted before its first close leaves
+the target at AsyncFATFS's cluster-rounded size: 32,768 B instead of
+10,656 B (`ASYNCFATFS_REFERENCE.md`, "Open-file size on the card").
+`filesystem_patternAutosaveCandidateValid()` reads one byte past the payload
+and rejects the candidate unless that read returns end-of-file. The next
+Pattern generation for that Scene recreates the file with `"w"`. The S074
+card showed this: `.pat06b` was 32,768 B, was rejected, and was rewritten at
+10,656 B. The scalar HCPR validators were brought in line with this probe in
+S074 (`AUTOSAVE.md`).
+
 At boot the Pattern reader evaluates present Scenes independently after the
 scalar Bank/Scene restore. It applies the winning hidden candidate only when
 the HCNAMES Pattern row is Pattern-AutoSave `@` and generation is nonzero.
@@ -388,16 +580,55 @@ step automation add). Hardware-validated: PatternTrace zero errors across
 confirmed in identity domain post-fix. See
 `../log_archive/067_SESSION_HANDOFF_LOG.md` for exact evidence.
 
+Session 068 confirmed the Pattern Stack Service was not implicated in a
+reported VOICE-mode step-toggle failure (the `pattrace.bin` trace showed
+zero error-class records; ordinary trigger toggling never enters the
+service, see §12.14 item 1) — the actual defect was in front-panel event
+delivery (`buttonHandler.c`'s event ring, pairing masks, and hold timer),
+fixed with no Pattern Stack Service changes. The same session implemented
+per-track step-length playback consumption (§6.4) and fixed a
+`menu_playedPattern` UI-mirror desync that suppressed the sequencer chase
+LED after boot (Menu/Sequencer concern, not a Pattern-storage defect). Session
+069 then implemented the settled plan: physical relocation is non-semantic
+AutoSave work, and the Tier 1/Tier 2 periodic chase is replaced by owned
+trailing-slack repair plus reactive-only compaction. Source/build verification
+passed; hardware fixtures remain pending. See
+`../../S069_SLACK_REACTIVE_COMPACTION_IMPLEMENTATION.md` and
+`../log_archive/068_SESSION_HANDOFF_LOG.md` §4 for the plan and closeout.
+
+Session 069 Pass 1 also made scalar dirty detection constant-time through a
+maintained population count, removed the clean idle-tick occupancy recount
+while retaining mutation/lifecycle reconciliation, and added semantic Pattern
+AutoSave coalescing (250 ms quiet window, 5 s maximum latency, rotating Scene
+fairness). Hardware-accepted (2026-09-20).
+
+Session 069 Pass 2 added a shared elapsed-time background CPU budget
+(2.5% playback / 5% stopped, signed credit with one-millisecond accumulation
+cap), integrated it into the repair section and both AutoSave drain
+schedulers, added a Load/Save repair gate (`menu_activePage` check suppresses
+repair during Load/Save menu), and added DEV-only per-class `H` trace
+reports. Source/build verified; hardware validation pending.
+
 Deferred supplemental cases are deterministic mid-write power interruption,
 record/erase admission instrumentation, injected CRC fallback, and performance
-measurement. They do not reopen the functional closeout. Phase 4.5 copy
-operations and live-record capture are future features.
+measurement. They do not reopen the functional closeout. Live-record capture
+is a future feature.
+
+Session 075 implemented Phase 6 copy and clear (`COPYCLEAR_UTILITIES.md`):
+the swap block (§3), the exclusive boundary, raw block API and sliding
+compaction (§12.17), whole-Pattern copy with the sentinel-first publication
+order, early trigger writes and Pattern clears; and the automation-priority
+fix (§6.2a). The user tested the base pass, F1 and F2 on hardware and fed back
+each round; the remaining case list is `COPYCLEAR_UTILITIES.md` §16. See
+`../log_archive/075_SESSION_HANDOFF_LOG.md`. The Session 068
+self-generated relocation/dirty-work-at-idle finding is closed in source by
+the S069 repair/reactive design and confirmed by Pass 1 hardware acceptance.
 
 ## 12. Pattern Stack Service
 
 ### 12.1 Architecture
 
-`PatternStackService.c` (1,225 lines) and `PatternStackService.h` (106 lines)
+`PatternStackService.c` and `PatternStackService.h`
 implement a unified dispatcher that serializes all pool-mutating operations
 through a single service tick. This guarantees exactly one mutation target at
 a time, preventing concurrent access between foreground callers, the TIM3
@@ -410,16 +641,28 @@ for later drain).
 ### 12.2 Service tick priority order
 
 Evaluated every call to `patSvc_tick()` (called from `timebase.c` after
-`endlessPots_tick()`):
+`endlessPots_tick()`). The repair section (item 4) is suppressed when
+`menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE` (Session 069
+Pass 2 Load/Save repair gate). All sections are subject to the shared
+elapsed-time background CPU budget (`filesystem_backgroundBudgetAvailable()`,
+Session 069 Pass 2) — the repair section checks budget before proceeding:
 
 1. **Handover** — check and complete filesystem replacement boundary
    transitions.
-2. **Queue drain** — dequeue and execute one pending mutation.
-3. **Bulk barrier** — advance one step of a bounded track/pattern clear sweep.
-4. **Tier 1 trailing-gap maintenance** — scan freed region for adjacent free
-   chunks, merge up to 16 per tick.
-5. **Tier 2 paced compaction** — relocate live blocks toward pool start under
-   pacing constraints.
+2. **Reactive recovery** — when the queue head is blocked by fragmentation,
+   inspect a bounded set of address entries and relocate one live block toward
+   a lower destination; surplus reservations may be reclaimed only when the
+   density latch is inactive.
+3. **Queue/bulk work** — advance one bounded track/pattern clear barrier or
+   dequeue and execute one pending mutation.
+4. **Finite bounded repair** — scan up to `PAT_REPAIR_SCAN_IDLE` (or
+   `PAT_REPAIR_SCAN_BUSY` under AutoSave pressure) address entries per tick,
+   creating or verifying one trailing-chunk reservation per occupied block.
+   The cursor sleeps at `PATSVC_ADDRESS_COUNT` between epochs and wakes only
+   on mutation, reservation consumption, density restore, handover, or
+   filesystem replacement. Occupancy is reconciled at those mutation/lifecycle
+   boundaries and cached during clean idle ticks; the service does not rescan
+   the unchanged bitmap on every pass.
 
 ### 12.3 Queue format
 
@@ -451,34 +694,48 @@ tick:
 `filesystem.c`. When a Scene Load, Bank Load, or Pattern Load completes, the
 service completes or abandons any in-flight bulk barrier, drains remaining
 queue entries for the old Scene, switches `service_scene` to the new target,
-and clears internal gap/compaction cursors.
+and clears internal repair/recovery cursors.
+The handover-complete boundary also clears the non-persisted reservation image
+and lazily rebuilds it through the next repair epoch.
 
-### 12.6 Tier 1 trailing-gap maintenance
+### 12.6 Owned trailing-slack reservation
 
-After each freed block, linear scan from the freed offset to find and merge
-adjacent free chunks. Budget: up to 16 chunk examinations per tick. Maintains
-contiguous trailing free space at pool tail for efficient allocation.
+The reservation image is a 512-byte bit-packed array with the same geometry as
+the occupancy bitmap. A set reservation bit means the chunk is reserved as
+trailing slack for the immediately-preceding occupied block and is refused to
+ordinary allocation. The repair pass creates reservations; the Gate-6 growth
+path (`pat_tryAppendAutomation`) consumes them; reactive recovery reclaims
+surplus ones under allocation pressure. The image is not persisted or included
+in PAT4 payloads.
 
-### 12.7 Tier 2 paced compaction
+The density latch disables new reservations at or above
+`PAT_RESERVATION_REDUCE_THRESHOLD` (70% occupancy) and re-enables them below
+`PAT_RESERVATION_RESTORE_THRESHOLD` (50%). Hysteresis prevents oscillation.
+An adaptive per-tick budget (`PAT_REPAIR_SCAN_IDLE` versus
+`PAT_REPAIR_SCAN_BUSY`) yields foreground cycles to AutoSave I/O when dirty
+work is pending.
 
-Full pool defragmentation that relocates live blocks toward pool start.
-Pacing: `PAT_COMPACT_INTERVAL_MS` (100 ms) minimum between cycles,
-`PAT_COMPACT_SCAN_PER_TICK` (16 chunks) maximum per tick. Reactive
-compaction triggered immediately when head allocation fails and pool occupancy
-is below `PAT_GAP_REDUCE_THRESHOLD`. Each block relocation follows
-write-new/update-address/free-old with PRIMASK around the address-entry swap.
+The reservation image is cleared and lazily rebuilt at init, handover
+completion, and filesystem replacement. During the rebuild window, allocation
+falls back to the occupancy bitmap alone. Ordinary block frees and service
+relocations clear the former positional trailing claim so the image cannot
+retain stale reservations after a block changes owner.
+
+Physical relocations are non-semantic AutoSave work. Reactive recovery runs
+only after a blocked allocation; there is no periodic Tier-2 sweep.
 
 ### 12.8 Elastic gap policy
 
-`PAT_GAP_REDUCE_THRESHOLD` (60%, `config.h`) is the pool occupancy above
-which trailing-gap maintenance activates. Below this threshold, gaps are
-tolerable and the service skips gap scanning.
+The former elastic-gap policy is retired. Reservation-density hysteresis now
+controls owned trailing slack, and `PAT_COMPACT_SCAN_PER_TICK` (16 address
+entries) is retained only as the reactive-recovery scan bound.
 
 ### 12.9 Pool usage monitor
 
 `pat_poolUsagePercent()` in PatternData.c reads the Scene bitmap with
 `memcpy` (packed-bitmap-safe), counts set bits with `__builtin_popcount`
-across 64 words, and returns `(occupied × 100) / 2048` clamped to 99.
+across 64 words, and returns `(occupied × 100) / 2015` (usable chunks below
+the swap block, S075) clamped to 99.
 Displayed as `"pts:NN"` on the Settings menu Global subpage, computed once
 on page entry and retained in a static byte.
 
@@ -499,9 +756,11 @@ or loop.
 ### 12.11 Config constants
 
 ```c
-#define PAT_GAP_REDUCE_THRESHOLD   60u   /* % occupancy for gap maintenance */
-#define PAT_COMPACT_INTERVAL_MS   100u   /* min ms between compaction cycles */
-#define PAT_COMPACT_SCAN_PER_TICK  16u   /* max chunks examined per tick */
+#define PAT_COMPACT_SCAN_PER_TICK          16u /* reactive entries/tick */
+#define PAT_RESERVATION_REDUCE_THRESHOLD   70u /* % occupancy: disable */
+#define PAT_RESERVATION_RESTORE_THRESHOLD  50u /* % occupancy: re-enable */
+#define PAT_REPAIR_SCAN_IDLE               16u /* entries/tick */
+#define PAT_REPAIR_SCAN_BUSY                4u /* entries/tick under AutoSave */
 ```
 
 ### 12.12 Public API
@@ -520,6 +779,13 @@ void     patSvc_clearTrack(scene, track);
 void     patSvc_clearPattern(scene);
 void     patSvc_removeTrackAutomationByTarget(scene, track, target9);
 void     patSvc_enqueueErase(scene, track, step);
+uint8_t  patSvc_isChunkReserved(chunk);
+void     patSvc_consumeReservation(chunk);
+/* S075 copy/clear holder (§12.17) */
+uint8_t  patSvc_beginExclusive(scene);
+void     patSvc_endExclusive(scene);
+uint8_t  patSvc_exclusiveCompactStep(scene);
+uint8_t  patSvc_exclusiveEvacuateSwapStep(scene);
 ```
 
 ### 12.13 Integration points
@@ -529,6 +795,7 @@ void     patSvc_enqueueErase(scene, track, step);
 | `main.c` | `patSvc_init()` after boot filesystem ladder |
 | `timebase.c` | `patSvc_tick()` after `endlessPots_tick()` |
 | `filesystem.c` | `patSvc_idle()` at 5 replacement boundary points |
+| `timebase.c` | `ccSvc_tick()` (copy/clear service) right after `patSvc_tick()` (S075) |
 
 ### 12.14 Binding constraints
 
@@ -541,20 +808,121 @@ void     patSvc_enqueueErase(scene, track, step);
 6. `patSvc_idle()` must be called at every filesystem replacement boundary.
 7. Queue drop on full is the accepted failure mode.
 
-### 12.15 PatternTrace stage codes
+### 12.15 Background CPU budget
 
-Seven stage codes in `PatternTrace.h` for service diagnostics:
+Session 069 Pass 2 added a shared elapsed-time budget primitive in
+`filesystem.c` that bounds background work across three consumer classes:
+repair (`patSvc_tick()`), scalar AutoSave drain, and Pattern AutoSave drain.
+
+- **Budget rate**: 2.5% during playback (25µs/ms), 5% stopped (50µs/ms).
+- **Refill**: `filesystem_backgroundBudgetRefill()` adds credit based on
+  wall time elapsed since last refill, capped at one millisecond of
+  accumulated time to prevent idle buildup.
+- **Charge**: `filesystem_backgroundBudgetCharge(start, end)` subtracts
+  elapsed work time. Signed credit allows overshoot tracking.
+- **Query**: `filesystem_backgroundBudgetAvailable()` returns `credit > 0`.
+
+The repair section of `patSvc_tick()` checks budget availability before
+proceeding. The Load/Save repair gate additionally suppresses repair when
+`menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE`.
+
+DEV-only `H` AutosaveTrace reports every ~5 seconds show per-class
+cumulative microseconds (repair, scalar drain, pattern drain).
+
+RAM: 8 bytes always-on (credit + last refill timestamp) + 28 bytes DEV
+accounting.
+
+### 12.16 PatternTrace stage codes
+
+Eleven stage codes in `PatternTrace.h` for service diagnostics:
 
 | Code | Meaning |
 |------|---------|
+| `H` | Pending-buffer overflow witness |
 | `Q` | Queue event (enqueue/dequeue/drop) |
-| `C` | Compaction (Tier 2 block relocation) |
-| `F` | Free/gap (block freed, gap state change) |
-| `R` | Relocation (live block moved) |
-| `M` | Mutation (pool-mutating operation applied) |
-| `G` | Gap scan (Tier 1 gap examination result) |
+| `C` | Capacity drop |
+| `F` | Fragmentation drop |
+| `R` | Reactive relocation (historical enum name: `TIER2_RELOC`) |
+| `M` | Retired Tier-1 gap relocation |
+| `G` | Retired gap fallback |
 | `X` | Service state change (handover, mode transition) |
+| `V` | Repair created an in-place trailing reservation |
+| `L` | Repair relocated a block to create a reservation |
+| `D` | Direct-path mutation retained for reactive recovery |
 
 These are PatternTrace codes in `PatternTrace.h`, distinct from the
 AutoSaveTrace codes in `AutosaveTrace.h` that use the same single-letter
 convention.
+
+### 12.17 Copy/clear: exclusive boundary, raw block API, compaction (S075)
+
+**Exclusive boundary.** `patSvc_beginExclusive(scene)` /
+`patSvc_endExclusive(scene)` give one caller sole write access to one Scene's
+Pattern region, on any resident Scene (the active Scene may differ from the
+playback Scene). Begin records the claim, closes admission on the service
+Scene and returns 1 once the FIFO, bulk barrier and reactive recovery have
+drained (0 while a filesystem replacement or another claim is pending); it
+clears the reservation image. While the claim exists the handover branch of
+`patSvc_tick()` neither reopens admission nor adopts the claimed Scene. End
+recounts occupancy, restarts the repair epoch and reopens admission or
+resumes the handover. One holder at a time.
+
+**Raw block API** (`PatternData.h`, legal only inside the boundary):
+`pat_rawReadBlock`, `pat_rawBlockBytes`, `pat_rawDecode`, `pat_rawEncode`,
+`pat_rawPlace`, `pat_rawPlaceViaSwap`, `pat_rawSwapReturn`,
+`pat_rawPublishEmpty`, `pat_rawFreeChunks`, `pat_rawSwapFree`, and the
+whole-region set `pat_rawRegionSilence`, `pat_rawRegionCopyBody`,
+`pat_rawRegionPublishSteps`, `pat_rawRegionCopiedBlock`,
+`pat_rawRegionPublishRewritten`, `pat_rawRegionReset`. Every step write keeps
+§12.10: new bytes into unreferenced space, one PRIMASK store of the complete
+address entry (trigger policy KEEP re-reads the live trigger bit), then free
+the old run. A step rewrite that does not grow goes through the swap block:
+place there, publish, free the old run, then `pat_rawSwapReturn()` moves it
+into the freed run and publishes again.
+
+**Whole-region copy order** (`copy pattern`, `copy scene`): publish every
+destination entry as empty (trigger off), copy pool, bitmap, track settings
+and Pattern globals, rewrite retargeted blocks in place while still
+unreferenced (they only shrink; freed tail chunks return to the bitmap), and
+publish the address entries last.
+
+**Compaction for the holder.** `patSvc_exclusiveCompactStep()` is a sliding
+compaction: one call moves the block just above the lowest free chunk down
+into it, through the empty swap block when the runs overlap. Repeated calls
+leave all free space as one run below the swap block, so a growing step
+whose new size fits the free chunks always finds its run.
+`patSvc_exclusiveEvacuateSwapStep()` moves a pre-S075 block out of the swap
+block (or clears orphan swap bits); if a full pool makes that impossible the
+copy/clear job that needed the swap block is dropped.
+
+Copy/clear emits only service-level relocation summaries to the S075 stage-`c`
+trace; `patSvc_exclusiveCompactStep()` and
+`patSvc_exclusiveEvacuateSwapStep()` do not emit one record per moved block.
+Pattern paste selections that change triggers capture the source and previous
+destination trigger masks at button time, before the queued exclusive job,
+and restore only entries still containing the service's write if the job is
+dropped. Clears that end trigger-off write those bits at acceptance too. These
+early writes are ordinary foreground trigger edits (`pat_setStepActive()`, one
+halfword RMW each) outside the claim; the job later publishes the same
+trigger state with its blocks.
+
+**Rates.** The copy/clear engines do at most 8 step placements, 16 snapshot
+reads or 32 region entries per 2 ms tick. While a filesystem writer that
+started before the operation is still running, a whole-call governor limits
+them to 0.1 % CPU on average (`COPYCLEAR_UTILITIES.md` §11.5).
+
+**Suspension.** While a copy/clear operation runs, the repair epoch does not
+start (`copyClear_backgroundSuspended()` gate beside the Load/Save gate);
+queue drain, barriers and handover continue.
+
+**In-place append bound.** `pat_tryAppendAutomation()` never grows a block
+into the swap block.
+
+Full behaviour, engine phases and trace layouts:
+`COPYCLEAR_UTILITIES.md` §12 and §15.
+
+### 12.18 Session 075 finding: Pattern Load fan-out
+
+Pattern Load's fan-out `memcpy` into Scenes other than the loaded one is not
+publication-ordered and can tear one playback tick of a playing destination.
+Logged in `SCOPING_TARGETS.md` ("Session 075 findings"); not changed in S075.

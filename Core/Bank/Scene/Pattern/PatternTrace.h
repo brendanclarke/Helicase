@@ -33,8 +33,9 @@
  * Inputs: producer-side event kind and optional flags/value. Output: a stable
  * one-byte stage in each eight-byte diagnostic record. H identifies a
  * pending-buffer overflow witness; Q/C/F/R/M/G/X identify S067 queue,
- * capacity, fragmentation, relocation, gap, and scene-admission outcomes
- * without changing the on-card record geometry.
+ * capacity, fragmentation, relocation, retired gap, and scene-admission
+ * outcomes. V/L/D identify S069 reservation repair, repair relocation, and
+ * direct-path retention without changing the on-card record geometry.
  */
 typedef enum {
     PAT_TRACE_STAGE_PENDING_OVERFLOW = 'H',
@@ -45,7 +46,10 @@ typedef enum {
     PAT_TRACE_STAGE_TIER2_RELOC = 'R',
     PAT_TRACE_STAGE_TIER1_GAP = 'M',
     PAT_TRACE_STAGE_GAP_FALLBACK = 'G',
-    PAT_TRACE_STAGE_WRONG_SCENE = 'X'
+    PAT_TRACE_STAGE_WRONG_SCENE = 'X',
+    PAT_TRACE_STAGE_REPAIR_RESERVE = 'V',
+    PAT_TRACE_STAGE_REPAIR_RELOC = 'L',
+    PAT_TRACE_STAGE_DIRECT_RETAIN = 'D'
 } pat_trace_stage_t;
 
 /* Record one timestamped event. Safe to call from TIM3/foreground context. */

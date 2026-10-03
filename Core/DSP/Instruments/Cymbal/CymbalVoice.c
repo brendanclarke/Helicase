@@ -39,6 +39,7 @@
 #include "squareRootLut.h"
 #include "modulationNode.h"
 #include "InstrumentManager.h"
+#include "voicePostChain.h"
 // TODO DSP_PORT
 // #include "TriggerOut.h"
 #include "config.h"
@@ -213,11 +214,19 @@ void Cymbal_calcSyncBlockVoice(CymbalVoice *voice, int16_t* buf,
                                const uint8_t size)
 {
 	/*
-	 * Render one cymbal instance into a mono block.
+	 * Render one cymbal instance into a mono, PRE-VOLUME block.
 	 *
 	 * Inputs: CymbalVoice pointer, destination buffer, and block size. Output:
- * buf receives the FM cymbal, transient, envelope, and distortion output for
- * that tagged instance. InstrumentManager selects it through the runtime tag.
+	 * buf receives the FM cymbal, transient, amp envelope, optional velocity,
+	 * and distortion for that tagged instance, but NOT the channel volume
+	 * (voice->vol). InstrumentManager selects it through the runtime tag.
+	 *
+	 * Why (Session 072, Effects Phase 5 step 2; volume-order bug fix D1):
+	 * volume is the last stage, a pure output level applied by the mixer
+	 * after decimation. It previously multiplied the signal before
+	 * calcDistBlock() and so also set the drive (a bug). The FX send taps the
+	 * pre-volume signal including distortion. Affiliates:
+	 * instrumentManager_runtimeVolume(), mixer_calcNextSampleBlock().
 	 */
 	if(!voice || !buf)
 		return;
@@ -241,25 +250,22 @@ void Cymbal_calcSyncBlockVoice(CymbalVoice *voice, int16_t* buf,
 	//calc transient sample
 	transient_calcBlock(&voice->transGen,mod,size);
 
-	uint8_t j;
-	if(voice->volumeMod)
+	/*
+	 * Fused Cymbal post-chain (S073 Step 4).
+	 *
+	 * What:       saturating add, amp gain and distortion in one pass.
+	 * Why:        removes an intermediate post-chain pass while preserving the
+	 *             old int16 conversion/saturation points and constant cost (S0).
+	 * Inputs:     filtered buf, mod, volumeMod/velo/EG and distortion.
+	 * Outputs:    pre-volume buf.
+	 * Accessors:  this render function.
+	 * Affiliates: voicePostChain.h and the Step 4 host/ARM checks.
+	 */
 	{
-		for(j=0;j<size;j++)
-		{
-			//add filter to buffer
-			buf[j] = bufferTool_satAdd16(buf[j], mod[j]);
-			buf[j] *=  voice->velo * voice->vol * voice->egValueOscVol;
-		}
+		const float ampGain = voice->volumeMod
+			? voice->velo * voice->egValueOscVol
+			: voice->egValueOscVol;
+		voicePost_addGainDist(buf, mod, ampGain, &voice->distortion, size);
 	}
-	else
-	{
-		for(j=0;j<size;j++)
-		{
-			//add filter to buffer
-			buf[j] = bufferTool_satAdd16(buf[j], mod[j]);
-			buf[j] *=  voice->vol * voice->egValueOscVol;
-		}
-	}
-	calcDistBlock(&voice->distortion,buf,size);
 }
 //---------------------------------------------------

@@ -45,6 +45,7 @@
 
 #include "lcd.h"
 #include "timebase.h"    /* time_sysTick */
+#include "SampleMemory.h" /* SAMPLE_FIRST_SECTOR */
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
@@ -120,20 +121,20 @@ static const sector_info_t f765_sectors_singlebank[12] = {
     { 0x08010000UL,  32 * 1024 },  /* 2  app                      */
     { 0x08018000UL,  32 * 1024 },  /* 3  app                      */
     { 0x08020000UL, 128 * 1024 },  /* 4  app                      */
-    { 0x08040000UL, 256 * 1024 },  /* 5  app reserve              */
-    { 0x08080000UL, 256 * 1024 },  /* 6  proposed sample storage  */
-    { 0x080C0000UL, 256 * 1024 },  /* 7  proposed sample storage  */
-    { 0x08100000UL, 256 * 1024 },  /* 8  proposed sample storage  */
-    { 0x08140000UL, 256 * 1024 },  /* 9  proposed sample storage  */
-    { 0x08180000UL, 256 * 1024 },  /* 10 proposed sample storage  */
-    { 0x081C0000UL, 256 * 1024 },  /* 11 proposed sample storage  */
+    { 0x08040000UL, 256 * 1024 },  /* 5  app                      */
+    { 0x08080000UL, 256 * 1024 },  /* 6  app reserve (S073)       */
+    { 0x080C0000UL, 256 * 1024 },  /* 7  sample storage           */
+    { 0x08100000UL, 256 * 1024 },  /* 8  sample storage           */
+    { 0x08140000UL, 256 * 1024 },  /* 9  sample storage           */
+    { 0x08180000UL, 256 * 1024 },  /* 10 sample storage           */
+    { 0x081C0000UL, 256 * 1024 },  /* 11 sample storage           */
 };
 
 /* The destructive write probe targets sector 11 ONLY. Any other sector
 ** number passed to memtest_erase_sector() is rejected at the gate. */
 #define WRITE_PROBE_SECTOR  11
 #define APP_SECTOR_FLOOR    1   /* sectors 0 (bootloader) and below: never touched */
-#define ERASE_SECTOR_FLOOR  6   /* erase blocked unless sector >= this */
+#define ERASE_SECTOR_FLOOR  SAMPLE_FIRST_SECTOR   /* erase blocked below this (7) */
 
 /* --------------------------------------------------------------------
 ** LCD helpers — short, blocking-on-queue
@@ -292,7 +293,7 @@ static void dcache_invalidate(uint32_t addr, uint32_t length)
 /* --------------------------------------------------------------------
 ** memtest_erase_sector — erase ONLY allowed sectors
 **
-** GUARD: rejects any sector < ERASE_SECTOR_FLOOR (6). This is the
+** GUARD: rejects any sector < ERASE_SECTOR_FLOOR (7). This is the
 ** load-bearing safety check — even if a caller bug passes sector 0,
 ** this returns -1 without ever touching FLASH_CR.SER. We never erase
 ** application code or the bootloader.
@@ -303,8 +304,8 @@ static int memtest_erase_sector(uint8_t sector_nr)
 
     /* IRQs off for the duration. Without this, TIM6 ISR could fire
     ** mid-erase, attempt a code fetch from the sector being erased,
-    ** and hard-fault. (Our application is in sectors 1-5, sample
-    ** sectors are 6-11 — different sectors, so cross-sector fetches
+    ** and hard-fault. (Our application is in sectors 1-6, sample
+    ** sectors are 7-11 — different sectors, so cross-sector fetches
     ** during erase do work BSY-stalled, but disabling IRQs gives us
     ** a clean atomic operation either way.) */
     __asm volatile("cpsid i" ::: "memory");
@@ -493,9 +494,10 @@ static void test_write_pass(void)
 
     show_test("5 WRITE PROBE", "Erasing s.11... ", 600);
 
-    /* Read sector 5 first word — we'll re-check after erase to confirm
-    ** the erase scope is correctly limited to sector 11. */
-    uint32_t s5_before = sector_first_word(&f765_sectors_singlebank[5]);
+    /* Read sector 6 (the last application sector) first word — we'll
+    ** re-check after erase to confirm the erase scope is correctly limited
+    ** to sector 11. */
+    uint32_t s6_before = sector_first_word(&f765_sectors_singlebank[6]);
 
     int rc = memtest_erase_sector(sec);
     if (rc != 0) {
@@ -512,13 +514,13 @@ static void test_write_pass(void)
     }
     show_test("5 WRITE PROBE", "Erase OK -> 0xFF", 800);
 
-    /* Confirm sector 5 unchanged — proves erase scope was limited */
-    uint32_t s5_after = sector_first_word(&f765_sectors_singlebank[5]);
-    if (s5_after != s5_before) {
-        show_test("5 SCOPE FAIL!!! ", "S5 changed!     ", 4000);
+    /* Confirm sector 6 unchanged — proves erase scope was limited */
+    uint32_t s6_after = sector_first_word(&f765_sectors_singlebank[6]);
+    if (s6_after != s6_before) {
+        show_test("5 SCOPE FAIL!!! ", "S6 changed!     ", 4000);
         return;
     }
-    show_test("5 Scope check", "S5 unchanged OK ", 800);
+    show_test("5 Scope check", "S6 unchanged OK ", 800);
 
     /* Program three test words */
     rc = memtest_program_word(addr_lo,  0xCAFEBABEUL);

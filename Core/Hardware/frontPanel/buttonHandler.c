@@ -22,9 +22,12 @@
 #include "screensaver.h"
 #include "ledHandler.h"
 #include "timebase.h"
-#include "copyClearTools.h"
+#include "copyClearSession.h"
 #include "PatternData.h"
+#include "menuEffects.h"
+#if ENABLE_EUKLID_PAGE
 #include "EuklidGenerator.h"
+#endif
 #include "sequencer.h"
 #include "presetManager.h"
 #include <string.h>
@@ -200,6 +203,19 @@ static uint16_t buttonHandler_voiceSceneSeqPressedMask = 0u;
  */
 static uint16_t buttonHandler_loadSceneSeqPressedMask = 0u;
 
+/*
+ * TRACK buttons holding the Effect-page voice mix overlay (S075 F2-F; +1 B
+ * SRAM1, approved F2-Q5).
+ *
+ * Bit n is set when SHIFT+TRACK n opens the overlay, and by every later TRACK
+ * press while any bit is set (with or without SHIFT): the overlay shows the
+ * track pressed last. The release edge clears the bit even if SHIFT was
+ * released first; the last clear restores the Effect page. While any bit is
+ * set no TRACK press mutes (handleVoiceButton()). Overflow reconciliation
+ * clears this mask and ends the overlay.
+ */
+static uint8_t buttonHandler_fxVoiceMixTrackMask = 0u;
+
 /* -----------------------------------------------------------------------
 ** Helpers
 ** ----------------------------------------------------------------------- */
@@ -344,6 +360,17 @@ static int8_t btn_to_voice(uint8_t buttonNr)
     }
 }
 
+/*
+ * Copy/Clear row-decoding bridge.
+ *
+ * Inputs: physical button number. Outputs: the existing private mapping
+ * result, exposed read-only to copyClearSession.c so normal routing and held
+ * gestures share one hardware map.
+ */
+int8_t buttonHandler_seqIndex(uint8_t buttonNr)  { return btn_to_seq(buttonNr); }
+int8_t buttonHandler_selectIndex(uint8_t buttonNr) { return btn_to_select(buttonNr); }
+int8_t buttonHandler_voiceIndex(uint8_t buttonNr) { return btn_to_voice(buttonNr); }
+
 
 static uint8_t buttonHandler_barStartStep(void)
 {
@@ -424,6 +451,8 @@ static void buttonHandler_updateSubSteps(void)
     }
 }
 
+#if ENABLE_EUKLID_PAGE
+/* Euklid UI compiled out (Session 072 step 7; plan §13.1). */
 static void buttonHandler_applyEuklidParamsToMenu(uint8_t track)
 {
     /*
@@ -437,6 +466,7 @@ static void buttonHandler_applyEuklidParamsToMenu(uint8_t track)
     parameter_values[PAR_EUKLID_STEPS] = euklid_getSteps(track);
     parameter_values[PAR_EUKLID_ROTATION] = euklid_getRotation(track);
 }
+#endif
 
 static void buttonHandler_enterSeqModeStepMode(void)
 {
@@ -486,6 +516,14 @@ static void buttonHandler_armTimerActionStep(int8_t stepNr)
          * PatternData. The timer sentinel then suppresses the matching release.
          */
         menu_voiceAutoOverlayHoldExpired();
+        return;
+    }
+    if (bh_state.selectButtonMode == SELECT_MODE_FX) {
+        /*
+         * Effect page: the common VOICE hold threshold opens FX lane-lock
+         * editing. The timer sentinel consumes the matching release.
+         */
+        menuEffects_seqHoldExpired();
         return;
     }
 
@@ -741,6 +779,17 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
         case SELECT_MODE_PERF:
             menu_perfModeSceneButtonPressed(seqButtonPressed);
             break;
+        case SELECT_MODE_FX:
+            /*
+             * FX SEQ press: `sel` jumps immediately; all modes arm the
+             * common hold timer unless an existing lock hold owns the row.
+             */
+            menuEffects_seqButtonPressed(seqButtonPressed);
+            if (menuEffects_seqHoldActive())
+                buttonHandler_buttonTimerStepNr = TIMER_ACTION_OCCURED;
+            else
+                buttonHandler_setTimeraction(seqButtonPressed);
+            break;
         default:
             break;
         }
@@ -772,6 +821,15 @@ static void buttonHandler_seqButtonReleased(uint8_t seqButtonPressed)
         break;
 
     case SELECT_MODE_PERF:
+        break;
+
+    case SELECT_MODE_FX:
+        /* Hold-owned releases are consumed; a short tap only clears its timer. */
+        if (menuEffects_seqHoldActive()) {
+            buttonHandler_buttonTimerStepNr = TIMER_ACTION_OCCURED;
+            return;
+        }
+        (void)buttonHandler_TimerActionOccured();
         break;
 
     default:
@@ -873,17 +931,11 @@ static void handleModeButtons(uint8_t mode)
         menu_switchPage(MENU_MIDI_PAGE);
         break;
 
-    case SELECT_MODE_PAT_GEN:
-        /*
-         * Entering the Euclidean generator page needs the active track's
-         * generator state visible in the menu immediately.
-         *
-         * Old behavior: the menu requested this through frontPanelParser.
-         * New behavior: buttonHandler reads EuklidGenerator directly because
-         * Euklid data now lives with Pattern under Core/Bank/Scene/Pattern.
-         */
-        buttonHandler_applyEuklidParamsToMenu(menu_getActiveVoice());
-        menu_switchPage(EUKLID_PAGE);
+    case SELECT_MODE_FX:
+        /* SHIFT+PERF enters the Effect page and clears stale Pattern LEDs. */
+        led_clearSequencerLeds();
+        led_clearSelectLeds();
+        menu_switchPage(EFFECT_PAGE);
         break;
 
     case SELECT_MODE_SOM_GEN:
@@ -904,8 +956,17 @@ static void handleSelectButton(uint8_t selectNr)
             buttonHandler_selectBar(selectNr);
             break;
 
-        case SELECT_MODE_PAT_GEN:
-            buttonHandler_selectBar(selectNr);
+        case SELECT_MODE_FX:
+            /*
+             * SHIFT+SELECT is reserved for optional type UI hooks. S074:
+             * CrumpBit resets that data line to normal and asks for its home
+             * screen. Under the voice-mix overlay the hook still owns the press,
+             * but default Effect screen navigation is suppressed until TRACK
+             * release.
+             */
+            if (menuEffects_hookSelect(selectNr, 1u, 1u) ==
+                EFFECT_UI_SHOW_HOME)
+                menu_effectShowHome();
             break;
 
         case SELECT_MODE_PERF:
@@ -929,9 +990,29 @@ static void handleSelectButton(uint8_t selectNr)
         menu_repaintAll();
         break;
 
-    case SELECT_MODE_PAT_GEN:
-        buttonHandler_selectBar(selectNr);
-        break;
+    case SELECT_MODE_FX: {
+        /*
+         * Let the active Effect type consume SELECT before default
+         * navigation. S074: EFFECT_UI_SHOW_HOME means the type handled the
+         * press and the page must show its home screen (CrumpBit toggles a
+         * data line, then shows the overlay). menu_effectShowHome() repaints
+         * and re-renders the LEDs. Default navigation routes through the type
+         * owner check, which is the active SELECT LED for other types.
+         */
+        const uint8_t fx_action =
+            menuEffects_hookSelect(selectNr, 0u, 1u);
+
+        if (fx_action != 0u) {
+            if (fx_action == EFFECT_UI_SHOW_HOME)
+                menu_effectShowHome();
+            break;
+        }
+        if (menu_fxVoiceMixOverlayActive())
+            break;
+        menu_switchSubPage(selectNr);
+        menuEffects_renderSelectLeds(menu_getSubPage());
+        menu_repaintAll();
+        break; }
 
     case SELECT_MODE_PERF:
         /*
@@ -963,34 +1044,12 @@ static void handleSelectButton(uint8_t selectNr)
 
 static void buttonHandler_partButtonPressed(uint8_t partNr)
 {
-    if (copyClear_Mode >= MODE_COPY_PATTERN) {
-        if (copyClear_srcSet()) {
-            uint8_t trackNr;
-            uint8_t patternNr;
-
-            copyClear_setDst((int8_t)partNr, MODE_COPY_PATTERN);
-            copyClear_copyBar();
-            led_clearAllBlinkLeds();
-
-            trackNr = menu_getActiveVoice();
-            patternNr = menu_getViewedPattern();
-            led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
-        } else {
-            copyClear_setSrc((int8_t)partNr, MODE_COPY_PATTERN);
-            led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + partNr), 1);
-        }
-    } else {
-        handleSelectButton(partNr);
-    }
+    handleSelectButton(partNr);
 }
 
 static void buttonHandler_partButtonReleased(uint8_t partNr)
 {
     (void)partNr;
-
-    if (copyClear_Mode >= MODE_COPY_PATTERN) {
-        return;
-    }
 
     if (buttonHandler_TimerActionOccured())
         return;
@@ -1013,36 +1072,6 @@ static void handleVoiceButton(uint8_t voiceNr)
          * reset and rebuilt over bounded foreground ticks before it is valid to
          * audition.
          */
-        return;
-    }
-
-    if (copyClear_Mode >= MODE_COPY_PATTERN) {
-        if (copyClear_srcSet()) {
-            /*
-             * Finish track copy.
-             *
-             * PatternData copies between tracks inside the viewed pattern. The
-             * button layer then repaints the front-panel LEDs and reloads
-             * track-scoped menu parameters for the active voice.
-             *
-             * Risk: copy source/destination are stored as button indices and
-             * masked in copyClearTools. Validation still belongs in PatternData
-             * for the actual mutation.
-             */
-            uint8_t trackNr;
-            uint8_t patternNr;
-
-            copyClear_setDst((int8_t)voiceNr, MODE_COPY_TRACK);
-            copyClear_copyTrack();
-            led_clearAllBlinkLeds();
-
-            trackNr = menu_getActiveVoice();
-            patternNr = menu_getViewedPattern();
-            led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
-        } else {
-            copyClear_setSrc((int8_t)voiceNr, MODE_COPY_TRACK);
-            led_setBlinkLed((uint8_t)(LED_VOICE1 + voiceNr), 1);
-        }
         return;
     }
 
@@ -1101,8 +1130,45 @@ static void handleVoiceButton(uint8_t voiceNr)
 
     {
         uint8_t muteModeActive = buttonHandler_getShift();
-        if (bh_state.selectButtonMode == SELECT_MODE_PERF)
+        if (bh_state.selectButtonMode == SELECT_MODE_PERF ||
+            bh_state.selectButtonMode == SELECT_MODE_FX)
             muteModeActive = (uint8_t)(1u - muteModeActive);
+
+        if (bh_state.selectButtonMode == SELECT_MODE_FX &&
+            menuEffects_hookTrack(voiceNr, buttonHandler_getShift(), 1u))
+            return;
+
+        if (buttonHandler_fxVoiceMixTrackMask != 0u) {
+            /*
+             * TRACK press while the Effect-page voice mix overlay is held
+             * (S075 F2-F follow-up, user).
+             *
+             * What: once SHIFT+TRACK has opened the overlay, every TRACK
+             * press (with or without SHIFT) joins the held set, and on the
+             * Effect page the Scene-settings screen switches to the track
+             * pressed last; the active track follows it, as SHIFT+TRACK does.
+             * No TRACK press mutes until every held TRACK is released and the
+             * overlay is gone, so this branch runs before the mute path and
+             * consumes the press in every mode (a mode switch while TRACKs
+             * are held ends the overlay, but the held TRACKs still block mute
+             * until released). The Effect type's TRACK hook above keeps
+             * priority. Inputs: voiceNr, the held mask, SHIFT. Outputs: mask
+             * bit set (its release is consumed in processRelease()), overlay
+             * moved, active voice and LEDs. Affiliates:
+             * menu_fxVoiceMixOverlayBegin(), processRelease().
+             */
+            buttonHandler_fxVoiceMixTrackMask = (uint8_t)(
+                buttonHandler_fxVoiceMixTrackMask | (uint8_t)(1u << voiceNr));
+            if (bh_state.selectButtonMode == SELECT_MODE_FX) {
+                menu_setActiveVoice(voiceNr);
+                buttonHandler_showMuteLEDs();
+                led_flashLed((uint8_t)(LED_VOICE1 + voiceNr));
+                (void)menu_fxVoiceMixOverlayBegin(voiceNr);
+                if (shouldPreviewVoice)
+                    seq_previewVoice(voiceNr);
+            }
+            return;
+        }
 
         if (muteModeActive) {
             /*
@@ -1141,6 +1207,24 @@ static void handleVoiceButton(uint8_t voiceNr)
             return;
         }
 
+        if (bh_state.selectButtonMode == SELECT_MODE_FX) {
+            /*
+             * SHIFT+TRACK selects the active track without leaving FX mode and
+             * shows its VOICE mix screen while TRACK is held (S075 F2-F).
+             * The Effect type hook above already has priority.
+             */
+            menu_setActiveVoice(voiceNr);
+            buttonHandler_showMuteLEDs();
+            led_flashLed((uint8_t)(LED_VOICE1 + voiceNr));
+            if (buttonHandler_getShift() && menu_fxVoiceMixOverlayBegin(voiceNr))
+                buttonHandler_fxVoiceMixTrackMask = (uint8_t)(
+                    buttonHandler_fxVoiceMixTrackMask |
+                    (uint8_t)(1u << voiceNr));
+            if (shouldPreviewVoice)
+                seq_previewVoice(voiceNr);
+            return;
+        }
+
         menu_setActiveVoice(voiceNr);
         led_setActiveVoice(voiceNr);
         if (bh_state.selectButtonMode == SELECT_MODE_VOICE) {
@@ -1153,7 +1237,9 @@ static void handleVoiceButton(uint8_t voiceNr)
          * Euklid params are then pulled directly from the Pattern generator
          * module so the generator page is correct if the user switches there.
          */
+#if ENABLE_EUKLID_PAGE
         buttonHandler_applyEuklidParamsToMenu(voiceNr);
+#endif
 
         if (bh_state.selectButtonMode == SELECT_MODE_STEP ||
             menu_activePage == SEQ_PAGE) {
@@ -1175,9 +1261,12 @@ static void handleVoiceButton(uint8_t voiceNr)
             menu_switchPage(SEQ_PAGE);
             buttonHandler_updateSubSteps();
             led_setBlinkLed(selectedStepLed, 1);
-        } else if (menu_activePage == EUKLID_PAGE) {
+        }
+#if ENABLE_EUKLID_PAGE
+        if (menu_activePage == EUKLID_PAGE) {
             menu_repaintAll();
         }
+#endif
 
         if (shouldPreviewVoice)
             seq_previewVoice(voiceNr);
@@ -1187,6 +1276,14 @@ static void handleVoiceButton(uint8_t voiceNr)
 /* Process one press event */
 static void processPress(uint8_t buttonNr)
 {
+    /*
+     * Held-COPY owns its complete button gesture before ordinary row routing.
+     * Inputs: one foreground event. Output: nonzero consumption prevents a
+     * source or destination edge from leaking into normal Menu/Sequencer UI.
+     */
+    if (copyClear_buttonPressed(buttonNr))
+        return;
+
     int8_t seq = btn_to_seq(buttonNr);
     if (seq >= 0) {
         if (menu_loadSceneButtonPressed((uint8_t)seq)) {
@@ -1277,6 +1374,14 @@ static void processPress(uint8_t buttonNr)
         break;
 
     case BUT_COPY:
+        /*
+         * SHIFT + copy/clear while recording and running keeps its erase
+         * meaning. Every other press arms a copy operation, or a clear
+         * operation when SHIFT is held (S075, spec §3); refusals are silent.
+         * The release ends menu interaction; queued pastes/clears keep
+         * running in the background. Affiliates: copyClear_copyPressed()/
+         * copyClear_copyReleased().
+         */
         if (buttonHandler_getShift()) {
             if (bh_state.seqRecording && bh_state.seqRunning) {
                 /*
@@ -1287,18 +1392,10 @@ static void processPress(uint8_t buttonNr)
                 bh_state.seqErasing = 1;
                 seq_setErasingMode((uint8_t)bh_state.seqErasing);
             } else {
-                if (copyClear_Mode == MODE_CLEAR) {
-                    copyClear_executeClear();
-                } else {
-                    copyClear_Mode = MODE_CLEAR;
-                    copyClear_armClearMenu(1);
-                }
+                (void)copyClear_copyPressed(1u);
             }
         } else {
-            copyClear_Mode = MODE_COPY_TRACK;
-            led_setBlinkLed(LED_COPY, 1);
-            led_clearSelectLeds();
-            led_clearVoiceLeds();
+            (void)copyClear_copyPressed(0u);
         }
         break;
 
@@ -1314,6 +1411,11 @@ static void processPress(uint8_t buttonNr)
          */
         if (menu_loadSaveBarButtonPressed(0u))
             break;
+        if (bh_state.selectButtonMode == SELECT_MODE_FX) {
+            /* FX BAR1 is inert unless an active type hook handles it. */
+            (void)menuEffects_hookBar(0u, buttonHandler_getShift(), 1u);
+            break;
+        }
         if (menu_currentBar > 0u)
             buttonHandler_selectBar((uint8_t)(menu_currentBar - 1u));
         else
@@ -1328,6 +1430,11 @@ static void processPress(uint8_t buttonNr)
          */
         if (menu_loadSaveBarButtonPressed(1u))
             break;
+        if (bh_state.selectButtonMode == SELECT_MODE_FX) {
+            /* FX BAR2 is inert unless an active type hook handles it. */
+            (void)menuEffects_hookBar(1u, buttonHandler_getShift(), 1u);
+            break;
+        }
         if (menu_currentBar < (NUM_BARS - 1u))
             buttonHandler_selectBar((uint8_t)(menu_currentBar + 1u));
         else
@@ -1341,52 +1448,56 @@ static void processPress(uint8_t buttonNr)
         switch (bh_state.selectButtonMode) {
         case SELECT_MODE_VOICE:
             /*
-             * Holding SHIFT in VOICE mode no longer enters a temporary STEP
-             * overlay.
+             * Hold SHIFT in VOICE mode to show and edit Morph endpoints
+             * (S075 F2-G). The existing VOICE page and parameter buffer remain
+             * active; only Menu's endpoint resolver changes. Release restores
+             * the SHIFT+MODE VOICE latch state in processRelease(), while
+             * SHIFT combinations continue to reach their normal handlers.
              *
-             * Why: SHIFT+MODE_VOICE is now the persistent morph voice mode
-             * gesture. A plain SHIFT press must not steal the UI away from
-             * voice pages, because morph endpoint editing uses the same pages,
-             * SELECT subpages, encoder, and endless pots as normal voice mode.
-             * Output: only the physical SHIFT LED changes for this gesture.
+             * Output: Menu's voiceModeShowMorph = 1; the next repaint/edit
+             * resolves instrument and FX-send endpoint cells against Morph.
              */
+            menu_setVoiceModeShowMorph(1u);
             return;
 
+        case SELECT_MODE_FX:
+            /*
+             * Holding SHIFT displays/edits Morph endpoints on the FX page;
+             * under the voice-mix overlay it selects the VOICE Morph view
+             * while preserving Effect Morph state for return (S075 F2-Q6 c).
+             */
+            menu_setEffectShowMorph(1u);
+            if (menu_fxVoiceMixOverlayActive())
+                menu_setVoiceModeShowMorph(1u);
+            break;
+
         case SELECT_MODE_PERF:
-        case SELECT_MODE_PAT_GEN:
+#if ENABLE_EUKLID_PAGE
         {
             uint8_t trackNr;
             uint8_t patternNr;
 
+            /* Legacy pattern-settings layer retained only for diagnostics. */
             menu_switchPage(PATTERN_SETTINGS_PAGE);
             led_clearSelectLeds();
             led_clearAllBlinkLeds();
-
-            if (bh_state.selectButtonMode == SELECT_MODE_PAT_GEN) {
-                led_setBlinkLed(LED_MODE2, 1);
-            } else {
-                led_setBlinkLed((uint8_t)(LED_STEP1 + parameter_values[PAR_TRACK_ROTATION]), 1);
-            }
-
-            if (bh_state.selectButtonMode == SELECT_MODE_PAT_GEN && parameter_values[PAR_FOLLOW]) {
-                /*
-                 * Follow mode means the viewed pattern should snap back to the
-                 * sequencer-followed pattern when entering the shift layer.
-                 *
-                 * After changing the shown pattern, the UI must explicitly
-                 * reload LEDs plus PatternData-backed pattern/track params.
-                 * This used to be hidden behind parser query opcodes.
-                 */
+            led_setBlinkLed((uint8_t)(LED_STEP1 +
+                                       parameter_values[PAR_TRACK_ROTATION]), 1);
+            if (parameter_values[PAR_FOLLOW]) {
                 menu_setShownPattern(menu_shownPattern);
                 led_clearSequencerLeds();
                 trackNr = menu_getActiveVoice();
                 patternNr = menu_getViewedPattern();
-                led_updatePatternTrack(trackNr, patternNr, buttonHandler_selectedStep);
+                led_updatePatternTrack(trackNr, patternNr,
+                                       buttonHandler_selectedStep);
             }
-
-            led_setBlinkLed((uint8_t)(LED_PART_SELECT1 + menu_getViewedPattern()), 1);
+            led_setBlinkLed((uint8_t)(LED_PART_SELECT1 +
+                                      menu_getViewedPattern()), 1);
             break;
         }
+#endif
+            /* PERF remains visible when the retired SHIFT layer is disabled. */
+            break;
 
         case SELECT_MODE_STEP:
             buttonHandler_leaveSeqModeStepMode();
@@ -1406,6 +1517,41 @@ static void processPress(uint8_t buttonNr)
 
 static void processRelease(uint8_t buttonNr)
 {
+    if (buttonNr == BUT_COPY) {
+        /*
+         * COPY release ends the held session after Sequencer erase unwinds.
+         * Inputs: physical COPY release. Output: one owner performs the
+         * release cleanup; no legacy global Copy/Clear state remains.
+         */
+        if (bh_state.seqErasing) {
+            bh_state.seqErasing = 0u;
+            seq_setErasingMode((uint8_t)bh_state.seqErasing);
+        } else {
+            copyClear_copyReleased();
+        }
+        return;
+    }
+    {
+        /*
+         * Consume release of an overlay TRACK before copy/clear routing
+         * (S075 F2-F). The overlay remains while any paired TRACK is held;
+         * releasing the last one restores the saved Effect page.
+         */
+        int8_t voice = btn_to_voice(buttonNr);
+        if (voice >= 0) {
+            const uint8_t bit = (uint8_t)(1u << (uint8_t)voice);
+            if ((buttonHandler_fxVoiceMixTrackMask & bit) != 0u) {
+                buttonHandler_fxVoiceMixTrackMask = (uint8_t)(
+                    buttonHandler_fxVoiceMixTrackMask & (uint8_t)~bit);
+                if (buttonHandler_fxVoiceMixTrackMask == 0u)
+                    menu_fxVoiceMixOverlayEnd();
+                return;
+            }
+        }
+    }
+    if (copyClear_buttonReleased(buttonNr))
+        return;
+
     int8_t seq = btn_to_seq(buttonNr);
     if (seq >= 0) {
         uint16_t bit = (uint16_t)(1u << (uint8_t)seq);
@@ -1474,16 +1620,6 @@ static void processRelease(uint8_t buttonNr)
         led_setValue(0, LED_BAR2);
         break;
 
-    case BUT_COPY:
-        /* _SEQUENCER_ADD_SPIKE_: restore erase exit + copy-mode reset on release. */
-        if (bh_state.seqErasing) {
-            bh_state.seqErasing = 0;
-            seq_setErasingMode((uint8_t)bh_state.seqErasing);
-        } else if (!buttonHandler_getShift()) {
-            copyClear_reset();
-        }
-        break;
-
     case BUT_SHIFT:
         /* _SEQUENCER_ADD_SPIKE_: restore shift-release unwind flow from AVR. */
         if (bh_state.seqErasing) {
@@ -1491,22 +1627,17 @@ static void processRelease(uint8_t buttonNr)
             seq_setErasingMode((uint8_t)bh_state.seqErasing);
         }
 
-        if (copyClear_Mode == MODE_CLEAR && !btn_held[BUT_COPY]) {
-            copyClear_armClearMenu(0);
-            copyClear_Mode = MODE_NONE;
-        }
-
         led_setValue(0, LED_SHIFT);
 
         switch (bh_state.selectButtonMode) {
         case SELECT_MODE_VOICE:
             /*
-             * VOICE-mode SHIFT release pairs with the no-op SHIFT press above.
+             * End the momentary VOICE Morph view (S075 F2-G).
              *
-             * Output: restore the selected voice LEDs only. Do not call
-             * buttonHandler_leaveSeqMode(), because SHIFT no longer entered
-             * the STEP overlay in VOICE mode.
+             * Output: return to the SHIFT+MODE VOICE latch state and restore
+             * selected voice/latch LED feedback. Do not enter STEP mode.
              */
+            menu_setVoiceModeShowMorph(buttonHandler_morphVoiceModeActive);
             led_setActiveVoice(menu_getActiveVoice());
             if (buttonHandler_morphVoiceModeActive)
                 led_setBlinkLed(LED_MODE1, 1u);
@@ -1519,11 +1650,17 @@ static void processRelease(uint8_t buttonNr)
             led_initPerformanceLeds();
             return;
 
-        case SELECT_MODE_PAT_GEN:
-            led_clearSelectLeds();
-            led_setValue(1, (uint8_t)(menu_getViewedPattern() + LED_PART_SELECT1));
-            menu_switchPage(EUKLID_PAGE);
-            break;
+        case SELECT_MODE_FX:
+            /*
+             * End the momentary Morph view while keeping FX mute LEDs. Under
+             * the overlay only the VOICE endpoint view changes; TRACK keeps
+             * the overlay up (S075 F2-Q6 c).
+             */
+            menu_setEffectShowMorph(0u);
+            if (menu_fxVoiceMixOverlayActive())
+                menu_setVoiceModeShowMorph(0u);
+            buttonHandler_showMuteLEDs();
+            return;
 
         case SELECT_MODE_STEP:
             buttonHandler_enterSeqModeStepMode();
@@ -1569,8 +1706,17 @@ void buttonHandler_processEvents(void)
 {
     if (evt_overflow_flag) {
         evt_overflow_flag = 0;
+        /*
+         * Reconcile a dropped edge in the held-COPY owner before ordinary
+         * pairing masks are reset. Inputs: event-ring overflow. Output: the
+         * Copy/Clear source/row ledger cannot remain half armed.
+         */
+        (void)copyClear_eventOverflow();
         buttonHandler_voiceSceneSeqPressedMask = 0u;
         buttonHandler_loadSceneSeqPressedMask = 0u;
+        /* S075 F2-F: a lost TRACK release must not strand the overlay. */
+        buttonHandler_fxVoiceMixTrackMask = 0u;
+        menu_fxVoiceMixOverlayEnd();
         buttonHandler_buttonTimerStepNr = NO_STEP_SELECTED;
 #if DEV_MODE_LOGGING
         {
@@ -1596,5 +1742,6 @@ void buttonHandler_processEvents(void)
             processPress(buttonNr);
         else
             processRelease(buttonNr);
+        copyClear_postEvent();
     }
 }

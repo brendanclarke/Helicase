@@ -178,7 +178,80 @@ typedef enum {
      * fixed-size trace ring.
      */
     AUTOSAVE_TRACE_STAGE_STEP_TOGGLE = 'K',
+    /*
+     * Z: DEV-only invariant witness for the scalar dirty-bit population.
+     * flags carry the maintained count's high byte; value32 carries the
+     * maintained count in bits 0..15 and the coherent full-scan count in
+     * bits 16..31. This record is diagnostic only and has no production
+     * storage or scheduler effect. Affiliate: Autosave.c.
+    */
+    AUTOSAVE_TRACE_STAGE_DIRTY_COUNT_MISMATCH = 'Z',
+    /*
+     * H: periodic shared-background-budget report. flags bits 0..1 select
+     * repair/scalar/Pattern and bits 2..7 carry charged milliseconds capped
+     * at 63. value32 bits 0..15 carry denied-slice count and bits 16..31
+     * carry maximum charged slice microseconds. DEV logging only; no product
+     * persistence or scheduler decision depends on this record.
+     */
+    AUTOSAVE_TRACE_STAGE_BUDGET_REPORT = 'H',
+    /*
+     * c: Phase 6 copy/clear lifecycle and risk witness (S075 trace debug).
+     *
+     * What: flags carries one AUTOSAVE_TRACE_CC_EVT_* event; value32 carries
+     * that event's layout (knowledge_files/specification_reference/
+     * COPYCLEAR_UTILITIES.md §15). Records are bounded per operation and per
+     * job (no per-step or per-tick records). Why: copy/clear drops pastes
+     * and clears silently by design and runs after the button is released,
+     * so hardware tests need a durable witness of drops, stalls, guarded
+     * "cannot happen" paths, suspension edges, early trigger writes,
+     * trickle-rate work and the name write. While an operation runs the
+     * trace flush is suspended (user rule), so these records reach the card
+     * after it ends. Inputs: producer events. Outputs: one 8-byte record
+     * each. DEV logging only; no product state depends on them (user D5:
+     * kept after S075 testing). Producers: Core/Menu/CopyClear sources and
+     * filesystem.c. Consumer: tools/decode_devlogs.py ('c' branch).
+     */
+    AUTOSAVE_TRACE_STAGE_COPY_CLEAR = 'c',
 } autosave_trace_stage_t;
+
+/*
+ * V (VALIDATED) flags layout.
+ *
+ * What:      one record per complete A/B candidate decision, from the runtime
+ *            drain (filesystem_autosaveParameterDrain_tick() phase 5, or
+ *            phase 0 on the continuation path) and from the boot validator
+ *            (filesystem_validateAutosaveWinner_tick() phase 5). value32 is
+ *            the winner's generation, or 0 without a winner.
+ * flags:     bit 0 WINNER          a valid winner exists;
+ *            bit 1 winner index    0 = A (.hcprms1), 1 = B (.hcprms2), when
+ *                                  bit 0 is set;
+ *            bit 2 BANK_MISMATCH   the winner's Bank identity does not match
+ *                                  (runtime: slot and display name; boot:
+ *                                  settings.cfg slot only);
+ *            bit 3 CACHED          continuation path: validation skipped, the
+ *                                  winner restored from the previous drain;
+ *            bit 4 A_OVERLONG      candidate A was rejected because its file
+ *                                  continues past the 34,768-byte record;
+ *            bit 5 B_OVERLONG      the same for candidate B (S074).
+ * Why 4..5:  a publication interrupted while its target was open for writing
+ *            leaves AsyncFATFS's cluster-rounded file size on the card. The
+ *            record is invalid (commit byte 0) and the next drain republishes
+ *            into it, so recovery needs no user action. These bits are the
+ *            trace-only evidence that it happened (user policy: log, no error
+ *            screen). Bits 6..7 are reserved as zero.
+ * Producers: the two VALIDATED emitters in filesystem.c.
+ * Consumers: tools/decode_devlogs.py (V branch). Bits 0..3 keep their
+ *            pre-S074 meaning and numeric use at both emitters.
+ * Affiliates: filesystem_autosaveValidateCandidateStep() (sets the
+ *             per-candidate overlong bit), S074_AUTOSAVE_BOOT_BUG.md.
+ */
+#define AUTOSAVE_TRACE_VALIDATED_FLAG_WINNER         (1u << 0u)
+#define AUTOSAVE_TRACE_VALIDATED_WINNER_INDEX_SHIFT  1u
+#define AUTOSAVE_TRACE_VALIDATED_FLAG_BANK_MISMATCH  (1u << 2u)
+#define AUTOSAVE_TRACE_VALIDATED_FLAG_CACHED         (1u << 3u)
+#define AUTOSAVE_TRACE_VALIDATED_OVERLONG_SHIFT      4u
+#define AUTOSAVE_TRACE_VALIDATED_FLAG_A_OVERLONG     (1u << 4u)
+#define AUTOSAVE_TRACE_VALIDATED_FLAG_B_OVERLONG     (1u << 5u)
 
 /*
  * X (PHASE_STALL) flags/value layout. Bits 0..3 select the observer site;
@@ -187,6 +260,12 @@ typedef enum {
  * data in bits 18..31. Why widened from 3 to 4 bits: §8.7 stall evidence
  * policy requires every state machine to carry its own stall detector, and
  * 3 bits (8 values) was insufficient for the full set of observers.
+ *
+ * Site 2 (runtime AutoSave drain) is progress-aware since S074: it fires
+ * after 30,000 consecutive polls on which neither op_phase nor the drain's
+ * progress word changed (filesystem_autosaveDrainStalled()). Every other site
+ * still counts polls with an unchanged phase (filesystem_pollPhaseStall()).
+ * For site 2, the extra field carries stream_offset / 16.
  */
 #define AUTOSAVE_TRACE_PHASE_STALL_SITE_MASK 0x0Fu
 #define AUTOSAVE_TRACE_PHASE_STALL_SITE_DELETE_SLOT 0u
@@ -412,6 +491,63 @@ typedef enum {
 #define AUTOSAVE_TRACE_STEP_TOGGLE_STEP_SHIFT     8u
 #define AUTOSAVE_TRACE_STEP_TOGGLE_PATTERN_SHIFT  16u
 #define AUTOSAVE_TRACE_STEP_TOGGLE_TRIGGER_SHIFT  24u
+
+/*
+ * c (COPY_CLEAR) events, drop reasons and anomaly codes (S075 trace debug).
+ *
+ * What: the flags byte of a 'c' record selects the event; value32 layouts are
+ * documented in knowledge_files/specification_reference/
+ * COPYCLEAR_UTILITIES.md §15 and mirrored by tools/decode_devlogs.py.
+ * JD = job descriptor: op 0..7, kind 8..10, Scene 11..14, track 15..17
+ * (7 = none), start 18..24, end 25..31.
+ * Why fixed codes: a raw dump stays readable and the decoder needs no
+ * firmware symbols. Producers: copyClearSession.c, copyOps.c, clearOps.c,
+ * copyClearService.c, filesystem.c. Consumer: tools/decode_devlogs.py.
+ */
+#define AUTOSAVE_TRACE_CC_EVT_OP_START       0x01u
+#define AUTOSAVE_TRACE_CC_EVT_OP_REFUSED     0x02u
+#define AUTOSAVE_TRACE_CC_EVT_SOURCE_SET     0x03u
+#define AUTOSAVE_TRACE_CC_EVT_OP_RELEASE     0x04u
+#define AUTOSAVE_TRACE_CC_EVT_OP_FINISH      0x05u
+#define AUTOSAVE_TRACE_CC_EVT_JOB_START      0x10u
+#define AUTOSAVE_TRACE_CC_EVT_JOB_STATS      0x11u
+#define AUTOSAVE_TRACE_CC_EVT_JOB_END        0x12u
+#define AUTOSAVE_TRACE_CC_EVT_JOB_STALL      0x13u
+#define AUTOSAVE_TRACE_CC_EVT_CHECK_FAIL     0x14u
+#define AUTOSAVE_TRACE_CC_EVT_QUEUE_FULL     0x15u
+#define AUTOSAVE_TRACE_CC_EVT_PASTE_NOOP     0x16u
+#define AUTOSAVE_TRACE_CC_EVT_JOB_TRICKLE    0x17u
+#define AUTOSAVE_TRACE_CC_EVT_ANOMALY        0x18u
+#define AUTOSAVE_TRACE_CC_EVT_EARLY_RESTORED 0x19u
+#define AUTOSAVE_TRACE_CC_EVT_REG_ADD        0x20u
+#define AUTOSAVE_TRACE_CC_EVT_REG_REFUSED    0x21u
+#define AUTOSAVE_TRACE_CC_EVT_REG_DONE       0x22u
+#define AUTOSAVE_TRACE_CC_EVT_FX_CLEAR       0x23u
+#define AUTOSAVE_TRACE_CC_EVT_EARLY_TRIG     0x24u
+#define AUTOSAVE_TRACE_CC_EVT_FANOUT         0x30u
+#define AUTOSAVE_TRACE_CC_EVT_MASK_SET       0x31u
+#define AUTOSAVE_TRACE_CC_EVT_SCRATCH        0x40u
+#define AUTOSAVE_TRACE_CC_EVT_FS_REFUSED     0x41u
+#define AUTOSAVE_TRACE_CC_EVT_NAMES          0x42u
+#define AUTOSAVE_TRACE_CC_EVT_SUSPEND        0x50u
+
+#define AUTOSAVE_TRACE_CC_DROP_NONE             0u
+#define AUTOSAVE_TRACE_CC_DROP_NO_ROOM          1u
+#define AUTOSAVE_TRACE_CC_DROP_EVACUATE_FAILED  2u
+#define AUTOSAVE_TRACE_CC_DROP_ADVANCED_LIMIT   3u
+#define AUTOSAVE_TRACE_CC_DROP_FX_TYPE_MISMATCH 4u
+#define AUTOSAVE_TRACE_CC_DROP_NO_SOURCE        5u
+#define AUTOSAVE_TRACE_CC_DROP_NO_SCRATCH       6u
+#define AUTOSAVE_TRACE_CC_DROP_BAD_SELECTION    7u
+#define AUTOSAVE_TRACE_CC_DROP_BAD_GEOMETRY     8u
+
+#define AUTOSAVE_TRACE_CC_ANOM_GROW_UNPLACEABLE      1u
+#define AUTOSAVE_TRACE_CC_ANOM_SWAP_RETURN_ABANDONED 2u
+#define AUTOSAVE_TRACE_CC_ANOM_SWAP_OCCUPIED         3u
+#define AUTOSAVE_TRACE_CC_ANOM_REGION_REWRITE_GREW   4u
+#define AUTOSAVE_TRACE_CC_ANOM_CLAIM_OTHER_SCENE     5u
+#define AUTOSAVE_TRACE_CC_ANOM_TEARDOWN_CLAIM_HELD   6u
+#define AUTOSAVE_TRACE_CC_ANOM_STALL_PHASE           9u
 
 /* Append one timestamped stage record without performing filesystem I/O. */
 void autosaveTrace_record(autosave_trace_stage_t stage, uint8_t flags,

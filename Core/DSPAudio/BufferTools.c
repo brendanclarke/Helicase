@@ -131,10 +131,11 @@ void bufferTool_clearBuffer(int16_t* buf, const uint8_t size)
 //---------------------------------------------------
 void bufferTool_addGain(int16_t* buf, const float gain, const uint8_t size)
 {
+	/* S073 Step 4: use the shared register conversion; output is unchanged. */
 	uint8_t i;
 	for(i=0;i<size;i++)
 	{
-		buf[i] *= gain;
+		buf[i] = bufferTool_floatToInt16Store(buf[i] * gain);
 	}
 }
 //---------------------------------------------------
@@ -149,13 +150,13 @@ void bufferTool_addGainDithered(Dither* dither, int16_t* buf, const float gain, 
 //---------------------------------------------------
 void bufferTool_addGainInterpolated(int16_t* buf, const float gain, const float lastGain, const uint8_t size)
 {
+	/* S073 Step 4: use the shared ramp and conversion used by voicePost_drum(). */
 	uint8_t i;
 	const float inv_size = 1.f/(size-1.f);
 	for(i=0;i<size;i++)
 	{
-		const float frac = i * inv_size;
-		const float currentGain = lastGain + frac*(gain - lastGain);
-		buf[i] = buf[i] * currentGain;
+		buf[i] = bufferTool_floatToInt16Store(
+			buf[i] * bufferTool_interpolatedGain(i, inv_size, gain, lastGain));
 	}
 }
 //---------------------------------------------------

@@ -126,6 +126,14 @@ LoopFillZeroDtcmz:
   cmp   r2, r3
   bcc   FillZeroDtcmz
 
+  /* .dtcm_fxbuf (FX/voice audio arena, _sfxbuf.._efxbuf) is deliberately
+  ** neither copied nor zeroed here. Phase 5 rule: there is no system-level
+  ** buffer clear; each arena owner (Effect type or voice buffer user) clears
+  ** what it claims, guided by FxBuffer's handoff record, whose state_flags
+  ** start at 0 ("nothing valid") on every boot. Zeroing ~124 KiB here would
+  ** also add boot latency for no consumer. See STM32F765VIHx_FLASH.ld and
+  ** Core/DSP/Effects/FxBuffer.h. */
+
   bl    main
   bx    lr
 .size Reset_Handler, .-Reset_Handler

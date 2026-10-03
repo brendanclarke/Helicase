@@ -45,12 +45,12 @@
  *   2. FLASH_OPTCR.nDBANK option byte — single vs dual bank mode
  *   3. Application reach: highest address in .text/.data, and the
  *      sector that contains it
- *   4. Read-only contents probe of sectors 5 (proposed app reserve)
- *      and 6-11 (proposed sample region) — first/last/middle word
+ *   4. Read-only contents probe of sectors 5-6 (application; sector 6
+ *      since S073) and 7-11 (sample region) — first/last/middle word
  *      sampled, blank-erased status reported
  *   5. (Optional, BAR1 held at boot) Erase + program + verify probe
  *      of sector 11 only — proves erase/program path works AND that
- *      erase scope is correctly limited (sector 5 unchanged after
+ *      erase scope is correctly limited (sector 6 unchanged after
  *      sector 11 erase)
  *
  * Why this exists: deciding the sample-storage region requires knowing

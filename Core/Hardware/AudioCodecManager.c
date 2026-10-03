@@ -212,8 +212,19 @@
 ** the Cortex-M7 DTCM region.
 */
 
-volatile int16_t dma_buffer  [AUDIO_DMA_FRAMES * 8] __attribute__((section(".dma_nocache")));
-volatile int16_t dma_buffer2 [AUDIO_DMA_FRAMES * 8] __attribute__((section(".dma_nocache")));
+/*
+ * DMA output buffers, word-aligned (S073 Step 3a).
+ *
+ * What:       preserves the buffer sizes and .dma_nocache placement while
+ *             guaranteeing 32-bit alignment for pack_half() word stores.
+ * Why:        one 32-bit store replaces the old two halfword stores per
+ *             24-bit-in-32 channel frame.
+ * Inputs/Outputs: written by pack_audio_half() and read by the halfword DMA.
+ * Accessors:  DMA setup, pack_audio_half(), and codec suspend/resume clears.
+ * Affiliates: AudioCodecManager.h externs and the linker .dma_nocache region.
+ */
+volatile int16_t dma_buffer  [AUDIO_DMA_FRAMES * 8] __attribute__((section(".dma_nocache"), aligned(4)));
+volatile int16_t dma_buffer2 [AUDIO_DMA_FRAMES * 8] __attribute__((section(".dma_nocache"), aligned(4)));
 
 INDTCMZ sample_mx_t audioOutBuffer  [2][AUDIO_DMA_FRAMES * 2];
 INDTCMZ sample_mx_t audioOutBuffer2 [2][AUDIO_DMA_FRAMES * 2];
@@ -379,18 +390,44 @@ static inline int32_t sampleMix_toS24(sample_mx_t x)
     return (int32_t)s;
 }
 
+/*
+ * One 32-bit DMA word per channel frame (S073 Step 3a).
+ *
+ * What:       rotates the 24-bit-in-32 sample so its little-endian memory
+ *             image is exactly the former MSW/LSW halfword sequence.
+ * Why:        halves the ISR's DMA-buffer stores while preserving every bit.
+ * Inputs:     signed, clamped 24-bit sample from sampleMix_toS24().
+ * Outputs:    packed 32-bit frame word.
+ * Accessors:  pack_half().
+ * Affiliates: I2S halfword-mode DMA and the golden pack test.
+ */
+static inline uint32_t pack_frameWord(int32_t s24)
+{
+    const uint32_t frame = ((uint32_t)(s24 & 0x00FFFFFF)) << 8;
+    return (frame >> 16) | (frame << 16);
+}
+
+/* The buffers are int16_t arrays, so may_alias keeps this word view legal. */
+typedef uint32_t __attribute__((may_alias)) dma_word_t;
+
+/*
+ * Pack one DMA half with constant-cost word stores (S073 Step 3a).
+ *
+ * What:       writes one 32-bit word for each left and right channel frame.
+ * Why:        replaces four halfword stores per frame without changing the
+ *             DMA-visible memory image.
+ * Inputs:     aligned destination half and rendered stereo sample block.
+ * Outputs:    AUDIO_DMA_FRAMES*2 packed words in dst.
+ * Accessors:  pack_audio_half() from the DMA ISR.
+ * Affiliates: pack_frameWord(), sampleMix_toS24(), and the golden pack test.
+ */
 static void pack_half(volatile int16_t *dst, const sample_mx_t *src)
 {
-    for (uint32_t i = 0; i < AUDIO_DMA_FRAMES; i++) {
-        int32_t left = sampleMix_toS24(src[2*i + 0]);
-        int32_t right = sampleMix_toS24(src[2*i + 1]);
-        uint32_t left_frame = ((uint32_t)(left & 0x00FFFFFF)) << 8;
-        uint32_t right_frame = ((uint32_t)(right & 0x00FFFFFF)) << 8;
+    volatile dma_word_t *dstw = (volatile dma_word_t *)dst;
 
-        dst[4*i + 0] = (int16_t)(left_frame >> 16);   /* MSW left  */
-        dst[4*i + 1] = (int16_t)(left_frame & 0xFFFF); /* LSW left  */
-        dst[4*i + 2] = (int16_t)(right_frame >> 16);  /* MSW right */
-        dst[4*i + 3] = (int16_t)(right_frame & 0xFFFF); /* LSW right */
+    for (uint32_t i = 0; i < AUDIO_DMA_FRAMES; i++) {
+        dstw[2*i + 0] = pack_frameWord(sampleMix_toS24(src[2*i + 0]));
+        dstw[2*i + 1] = pack_frameWord(sampleMix_toS24(src[2*i + 1]));
     }
 }
 
@@ -412,6 +449,19 @@ static void pack_audio_half(uint8_t half)
     last_played_slot = slot;
     pack_half(dst1, audioOutBuffer [slot]);
     pack_half(dst2, audioOutBuffer2[slot]);
+    /*
+     * Complete the packed half before the ISR returns (S073 Step 3b).
+     *
+     * What:       orders all Normal non-cacheable DMA-buffer stores before
+     *             the next DMA event can consume the completed half.
+     * Why:        the MPU region is now bufferable; the barrier preserves the
+     *             old completion guarantee without making every store
+     *             Strongly-Ordered.
+     * Inputs/Outputs: none.
+     * Accessors:  DMA1_Stream4_IRQHandler() through pack_audio_half().
+     * Affiliates: clocks.c MPU region 1 and .dma_nocache in the linker script.
+     */
+    __asm volatile("dsb" ::: "memory");
 }
 
 /* =========================================================================

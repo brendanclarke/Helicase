@@ -60,12 +60,11 @@ __inline void setDistortionShape(Distortion *dist, uint8_t shape)
 //--------------------------------------------------
 INITCM_EFFECT_NOINLINE void calcDistBlock(const Distortion *dist, int16_t* buf, const uint8_t size)
 {
+	/* S073 Step 4: share one curve definition with the fused voice loops. */
 	uint8_t i;
 	for(i=0;i<size;i++)
 	{
-			float x = buf[i]/32767.f;
-			x = (1+dist->shape)*x/(1+dist->shape*fabsf(x));
-			buf[i] = (x*32767);
+		buf[i] = distortion_curveSample16(dist, buf[i]);
 	}
 }
 //--------------------------------------------------

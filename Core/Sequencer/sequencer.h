@@ -153,6 +153,42 @@ void seq_drainPendingAutomation(void);
  * Client: MidiVoiceControl.c's common trigger path.
  */
 void seq_restoreAutomatedParameters(uint8_t trigger_track);
+/*
+ * Report whether step automation currently holds one voice parameter
+ * (S075 F3).
+ *
+ * What: nonzero when seq_automation_dirty[slot] has bit `local` set, that is,
+ * seq_drainPendingAutomation() wrote a step value into this descriptor's
+ * runtime and the voice has not been triggered since.
+ * Why: automation always wins (user rule). The overlay lasts until the next
+ * trigger, so writers of the Morph base update morph_interpolation[] but
+ * leave a held runtime value alone; seq_restoreAutomatedParameters() then
+ * applies the new base at the trigger.
+ * Inputs: instrument slot 0..5 (track 7 uses slot 5), descriptor-local index
+ * 0..INSTRUMENT_PARAM_COUNT-1. Output: 0/1; 0 for out-of-range input.
+ * Context: foreground only. The drain, the trigger funnel
+ * (voiceControl_processPending()), the transport restores and the Morph sweep
+ * all run in the main loop, so the 64-bit bitmap is never read half-written.
+ * Client: presetMorph_writeRuntimeBase() (presetMorphEngine.c).
+ * Affiliates: seq_drainPendingAutomation(), seq_restoreAutomatedParameters(),
+ * seq_restoreAllAutomation().
+ */
+uint8_t seq_automationHoldsParameter(uint8_t slot, uint8_t local);
+/*
+ * Start or stop the sequencer transport.
+ *
+ * Inputs: nonzero starts, zero stops. Output: both paths reset the fixed-grid
+ * cursor state through seq_setStepIndexToStart(), which restores any dirty
+ * voice automation to its Scene morph-interpolation base before clearing the
+ * dirty bitmap. The start path publishes seq_running only after that reset so
+ * the TIM3 scheduler cannot process an initial tick against partially reset
+ * state; the stop path publishes the stopped state before teardown.
+ * The stop path also queues SEQ_LED_DIRTY_CHASE after publishing that state so
+ * the foreground LED drain clears any chase layer left on the last step.
+ *
+ * Clients: front-panel transport, MIDI realtime/clockSync, and Menu audio
+ * suspend. This call does not alter PatternData or the persisted Scene.
+ */
 void seq_setRunning(uint8_t isRunning);
 uint8_t seq_isRunning(void);
 void seq_armActivePatternReload(void);
@@ -160,6 +196,27 @@ void seq_setMute(uint8_t trackNr, uint8_t isMuted);
 uint8_t seq_isTrackMuted(uint8_t trackNr);
 void seq_setRoll(uint8_t voice, uint8_t onOff);
 void seq_setRollRate(uint8_t rate);
+
+/*
+ * TIM3-to-foreground FX-sequencer latch (Session 072 step 8; plan §11.1).
+ *
+ * TIM3 publishes only RESET/STEP plus a 0..15 position. EffectsManager takes
+ * the newest byte from foreground `effects_service()` and performs all Scene,
+ * Morph, DSP, and LED-facing work there. A RESET and first STEP may share one
+ * byte. The latch is one byte of SRAM1 and is not a general event queue.
+ */
+#define SEQ_FX_EVENT_STEP  0x80u
+#define SEQ_FX_EVENT_RESET 0x40u
+#define SEQ_FX_EVENT_INDEX 0x0Fu
+uint8_t seq_fxTakeEvent(void);
+/*
+ * Effect-overlay owner tracks (Session 072 step 9; plan §9 third rule).
+ *
+ * EffectsManager publishes one bit per track that owns an Effect Pattern
+ * overlay. TIM3 reads the byte to decide whether an advancing track needs an
+ * FX step marker in the pending automation queue. It is a single byte store.
+ */
+void seq_setEffectAutomationTracks(uint8_t mask);
 /*
  * Record a live MIDI/roll event as one quantized fixed-grid trigger bit.
  * Input is the track; output is an on-bit only when recording is active.

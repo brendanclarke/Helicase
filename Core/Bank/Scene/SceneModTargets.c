@@ -12,37 +12,111 @@
  * Scene target metadata.
  *
  * Inputs: none at runtime; this immutable table defines the Scene-target
- * namespace. Output: the table order is also picker order. Per-voice Morph
- * targets intentionally come before global Scene Decimation so the velocity
- * list does not show voice-local instrument_decimation "srt" immediately
- * beside Scene Decimation "srt" after the voice descriptor portion.
+ * namespace. Output: the table order is also picker order. Row 6 is the
+ * retired `srt` placeholder (S075); its ID stays reserved so later IDs do not
+ * move.
  */
 static const scene_mod_target_descriptor_t scene_mod_targets[] = {
     { SCENE_MOD_TARGET_ID(0u), SCENE_MOD_TARGET_KIND_VOICE_MORPH, 0u,
-      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
+      SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "1 Morph", "1vm" },
     { SCENE_MOD_TARGET_ID(1u), SCENE_MOD_TARGET_KIND_VOICE_MORPH, 1u,
-      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
+      SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "2 Morph", "2vm" },
     { SCENE_MOD_TARGET_ID(2u), SCENE_MOD_TARGET_KIND_VOICE_MORPH, 2u,
-      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
+      SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "3 Morph", "3vm" },
     { SCENE_MOD_TARGET_ID(3u), SCENE_MOD_TARGET_KIND_VOICE_MORPH, 3u,
-      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
+      SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "4 Morph", "4vm" },
     { SCENE_MOD_TARGET_ID(4u), SCENE_MOD_TARGET_KIND_VOICE_MORPH, 4u,
-      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
+      SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "5 Morph", "5vm" },
     { SCENE_MOD_TARGET_ID(5u), SCENE_MOD_TARGET_KIND_VOICE_MORPH, 5u,
-      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      0u, 255u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
+      SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "6 Morph", "6vm" },
-    { SCENE_MOD_TARGET_ID(6u), SCENE_MOD_TARGET_KIND_DECIMATION_ALL, 0xffu,
-      0u, 127u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
-      "Scene", "SampleRt", "srt" },
+    { SCENE_MOD_TARGET_ID(6u), SCENE_MOD_TARGET_KIND_RETIRED, 0xffu,
+      0u, 0u, 0u, "Scene", "--------", "---" },
     { SCENE_MOD_TARGET_ID(7u), SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY, 5u,
-      0u, 127u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO,
+      0u, 127u, SCENE_MOD_TARGET_USE_VELOCITY | SCENE_MOD_TARGET_USE_LFO |
+      SCENE_MOD_TARGET_USE_AUTOMATION,
       "Voice", "7 Decay", "7dc" },
+    /*
+     * Step-only per-voice audio-route targets (IDs 392..397).
+     *
+     * Inputs: seven-bit Pattern values. Output: values are clamped by the
+     * descriptor and applied through the active Scene's Preset route setter.
+     * No velocity/LFO flags are assigned because a six-value route selector
+     * is discrete. Affiliate: seq_applySceneAutomation() and Menu's VOICE
+     * mix Scene-setting cells.
+     */
+    { SCENE_MOD_TARGET_ID(8u), SCENE_MOD_TARGET_KIND_AUDIO_OUT, 0u,
+      0u, 5u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "1 AudOut", "1ou" },
+    { SCENE_MOD_TARGET_ID(9u), SCENE_MOD_TARGET_KIND_AUDIO_OUT, 1u,
+      0u, 5u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "2 AudOut", "2ou" },
+    { SCENE_MOD_TARGET_ID(10u), SCENE_MOD_TARGET_KIND_AUDIO_OUT, 2u,
+      0u, 5u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "3 AudOut", "3ou" },
+    { SCENE_MOD_TARGET_ID(11u), SCENE_MOD_TARGET_KIND_AUDIO_OUT, 3u,
+      0u, 5u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "4 AudOut", "4ou" },
+    { SCENE_MOD_TARGET_ID(12u), SCENE_MOD_TARGET_KIND_AUDIO_OUT, 4u,
+      0u, 5u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "5 AudOut", "5ou" },
+    { SCENE_MOD_TARGET_ID(13u), SCENE_MOD_TARGET_KIND_AUDIO_OUT, 5u,
+      0u, 5u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "6 AudOut", "6ou" },
+    /*
+     * Step-only per-voice FX-send targets (IDs 398..403).
+     *
+     * Inputs: seven-bit Pattern values. Output: a runtime-only send overlay
+     * (preset_setFxSendStepOverride()) that the mixer reads each block
+     * through preset_getEffectiveFxSendAmount(), so the send is audible on
+     * the live FX bus (Session 072 step 5). Keeping these entries in the
+     * shared table makes Menu, Pattern validation, and the foreground drain
+     * agree on one namespace.
+     */
+    { SCENE_MOD_TARGET_ID(14u), SCENE_MOD_TARGET_KIND_FX_SEND, 0u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "1 FxSend", "1fx" },
+    { SCENE_MOD_TARGET_ID(15u), SCENE_MOD_TARGET_KIND_FX_SEND, 1u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "2 FxSend", "2fx" },
+    { SCENE_MOD_TARGET_ID(16u), SCENE_MOD_TARGET_KIND_FX_SEND, 2u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "3 FxSend", "3fx" },
+    { SCENE_MOD_TARGET_ID(17u), SCENE_MOD_TARGET_KIND_FX_SEND, 3u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "4 FxSend", "4fx" },
+    { SCENE_MOD_TARGET_ID(18u), SCENE_MOD_TARGET_KIND_FX_SEND, 4u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "5 FxSend", "5fx" },
+    { SCENE_MOD_TARGET_ID(19u), SCENE_MOD_TARGET_KIND_FX_SEND, 5u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Voice", "6 FxSend", "6fx" },
+    /*
+     * Scene Effect Morph `fxm` (ID 404; Session 072 step 9).
+     *
+     * Pattern automation and LFO (`scn` namespace) reach EffectsManager as
+     * runtime-only Morph-base layers following the Scene rule. Velocity is
+     * deliberately absent; retained edits stay on the Effect page `mrp`.
+     */
+    { SCENE_MOD_TARGET_ID(20u), SCENE_MOD_TARGET_KIND_EFFECT_MORPH, 0xffu,
+      0u, 255u, SCENE_MOD_TARGET_USE_LFO | SCENE_MOD_TARGET_USE_AUTOMATION,
+      "Effect", "FX Morph", "fxm" },
 };
+
+/* Scene targets occupy block 6, exactly 64 IDs before Effect block 7. */
+_Static_assert(SCENE_MOD_TARGET_COUNT <= 64u,
+               "Scene target table exceeds its 64-ID block");
 
 static void sceneModTarget_copyPadded(char *dst, const char *src, uint8_t width)
 {
@@ -110,8 +184,9 @@ uint8_t sceneModTarget_valid(uint16_t id, scene_mod_target_use_t use)
      *
      * Inputs: stored target ID and requested use flag. Output: nonzero only
      * when the ID belongs to the Scene namespace and the target opts into that
-     * use. Future effects can be added to the table without changing Menu or
-     * InstrumentManager traversal logic.
+     * use. Scene-level targets (including Effect Morph `fxm`) are added to the
+     * table without changing traversal logic; Effect parameters are the
+     * separate block-7 namespace owned by EffectsManager.
      */
     return (uint8_t)(descriptor &&
                      ((descriptor->use_flags & (uint8_t)use) != 0u));
@@ -135,6 +210,41 @@ uint16_t sceneModTarget_voiceMorphId(uint8_t voice_slot)
             return scene_mod_targets[i].id;
         }
     }
+    return INSTRUMENT_PARAM_INVALID;
+}
+
+/*
+ * Resolve the Scene target ID of Effect Morph `fxm` (S075).
+ *
+ * Output: the canonical ID found by kind, so callers do not depend on table
+ * order. Client: Menu's pot-clear target resolver.
+ */
+uint16_t sceneModTarget_effectMorphId(void)
+{
+    uint8_t i;
+
+    for (i = 0u; i < SCENE_MOD_TARGET_COUNT; i++)
+        if (scene_mod_targets[i].kind == SCENE_MOD_TARGET_KIND_EFFECT_MORPH)
+            return scene_mod_targets[i].id;
+    return INSTRUMENT_PARAM_INVALID;
+}
+
+/*
+ * Resolve the generated slot-6/track-7 decay target (S075).
+ *
+ * Output: the canonical Scene target ID for the generated kit setting, or
+ * INSTRUMENT_PARAM_INVALID when the immutable target table does not contain
+ * it. Client: Menu's clear-mode pot resolver; keeping the lookup here avoids
+ * exposing the append-only Scene target row number to Menu.
+ */
+uint16_t sceneModTarget_slot6DecayId(void)
+{
+    uint8_t i;
+
+    for (i = 0u; i < SCENE_MOD_TARGET_COUNT; i++)
+        if (scene_mod_targets[i].kind ==
+            SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY)
+            return scene_mod_targets[i].id;
     return INSTRUMENT_PARAM_INVALID;
 }
 

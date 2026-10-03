@@ -58,7 +58,14 @@ typedef struct SnareStruct
 
 
 	uint8_t		filterType; // bit 0 = lp, bit 1 = hp, bit 3 = bp on/off
-	float	 	vol;		// volume of the voice
+	/*
+	 * Channel volume 0..1 (descriptor instrument_vol / 127).
+	 * Written by descriptor apply, LFO, Morph, and step automation; read only
+	 * by instrumentManager_runtimeVolume() for the mixer, which applies it
+	 * after decimation. Snare_calcSyncBlockVoice() leaves it unapplied so
+	 * volume is the final shared mixer stage (S072 step 2).
+	 */
+	float	 	vol;
 	//float		panL;		// [0:1]
 	//float		panR;		// [0:1]
 	uint8_t pan;

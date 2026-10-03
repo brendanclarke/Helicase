@@ -5,7 +5,20 @@
 static char bank_display_name[BANK_DISPLAY_NAME_LEN + 1u];
 static uint16_t bank_restore_bank_slot;
 static uint16_t bank_scene_mask_present;
-static uint16_t bank_scene_mask_voice_edit;
+/*
+ * Per-Scene VOICE edit fan-out masks.
+ *
+ * Inputs: bank_init(), VOICE+SEQ toggles, bankset.bcg, and Autosave restore.
+ * Output: the active Scene's entry controls which resident Scenes receive a
+ * VOICE-page or Scene-setting edit. Each entry defaults to its own Scene bit;
+ * multi-Scene fan-out is therefore explicit and does not leak across Scene
+ * switches. The 16-entry array is 32 bytes of BankData SRAM.
+ *
+ * Affiliates: bank_sceneMaskVoiceEdit() is the active-entry accessor,
+ * bank_sceneMaskVoiceEditForScene() is the indexed storage accessor, and the
+ * Autosave/bankset writers serialize the same per-Scene layout.
+ */
+static uint16_t bank_scene_mask_voice_edit[BANK_SCENE_SLOT_COUNT];
 static uint8_t bank_active_scene_slot;
 static uint8_t bank_has_resident_bank;
 /*
@@ -67,7 +80,8 @@ static uint16_t bank_normalizeSceneMask(uint16_t mask)
 static uint8_t bank_ensureActiveInVoiceEditMask(void)
 {
     uint16_t active_bit = bank_sceneBit(bank_active_scene_slot);
-    uint16_t previous_mask = bank_scene_mask_voice_edit;
+    uint16_t previous_mask =
+        bank_scene_mask_voice_edit[bank_active_scene_slot];
 
     /*
      * Enforce the core Scene-edit invariant.
@@ -82,11 +96,13 @@ static uint8_t bank_ensureActiveInVoiceEditMask(void)
      */
     if (active_bit == 0u)
         active_bit = 1u;
-    bank_scene_mask_voice_edit =
-        bank_normalizeSceneMask(bank_scene_mask_voice_edit);
-    if ((bank_scene_mask_voice_edit & active_bit) == 0u)
-        bank_scene_mask_voice_edit = active_bit;
-    return (uint8_t)(bank_scene_mask_voice_edit != previous_mask);
+    bank_scene_mask_voice_edit[bank_active_scene_slot] =
+        bank_normalizeSceneMask(bank_scene_mask_voice_edit[
+            bank_active_scene_slot]);
+    if ((bank_scene_mask_voice_edit[bank_active_scene_slot] & active_bit) == 0u)
+        bank_scene_mask_voice_edit[bank_active_scene_slot] = active_bit;
+    return (uint8_t)(bank_scene_mask_voice_edit[bank_active_scene_slot] !=
+                     previous_mask);
 }
 
 static uint8_t bank_copyDisplayName(char dst[BANK_DISPLAY_NAME_LEN + 1u],
@@ -132,7 +148,18 @@ void bank_init(void)
     bank_display_name[BANK_DISPLAY_NAME_LEN] = '\0';
     bank_restore_bank_slot = 0u;
     bank_scene_mask_present = 1u;
-    bank_scene_mask_voice_edit = 1u;
+    /*
+     * Seed each Scene's VOICE edit mask to self only.
+     *
+     * Inputs: none. Output: Scene i starts with bit i set, so a clean boot
+     * cannot display or apply stale fan-out bits from a prior resident session.
+     * The user opts into multi-Scene editing explicitly with VOICE+SEQ.
+     */
+    {
+        uint8_t i;
+        for (i = 0u; i < BANK_SCENE_SLOT_COUNT; i++)
+            bank_scene_mask_voice_edit[i] = (uint16_t)(1u << i);
+    }
     bank_active_scene_slot = 0u;
     bank_has_resident_bank = 0u;
     /*
@@ -270,12 +297,12 @@ void bank_selectActiveSceneForEditMask(uint8_t slot)
      * Select a new active Scene while preserving the edit-mask invariant.
      *
      * Inputs: PERF-mode Scene switch or Bank Load active_scene field. Output:
-     * bank_active_scene_slot changes to the bounded Scene index. If the new
-     * active Scene was already inside scene_mask_voice_edit, the multi-Scene
-     * edit set is preserved; if not, the previous mask is dropped and replaced
-     * by the new active Scene bit. Changed final active/mask fields are stored
-     * before their independent Autosave notifications; unchanged selection
-     * produces neither bit. Affiliates: PERF Scene switching and VOICE fan-out.
+     * bank_active_scene_slot changes to the bounded Scene index and the active
+     * VOICE mask view selects that Scene's independent stored entry. If that
+     * entry lacks its active bit, only that entry is repaired to self; masks
+     * owned by other Scenes are untouched. Changed final active/mask fields are
+     * stored before their independent Autosave notifications. Affiliates: PERF
+     * Scene switching and VOICE fan-out.
      */
     normalized_slot = (slot < BANK_SCENE_SLOT_COUNT) ? slot : 0u;
     if (normalized_slot != bank_active_scene_slot) {
@@ -289,7 +316,8 @@ void bank_selectActiveSceneForEditMask(uint8_t slot)
 
 void bank_setSceneMaskVoiceEdit(uint16_t mask)
 {
-    uint16_t previous_mask = bank_scene_mask_voice_edit;
+    uint16_t previous_mask =
+        bank_scene_mask_voice_edit[bank_active_scene_slot];
 
     /*
      * Set the Scene fan-out mask used by VOICE-mode edits.
@@ -302,10 +330,52 @@ void bank_setSceneMaskVoiceEdit(uint16_t mask)
      * compared with entry state and marked, avoiding a false mutation when an
      * invalid intermediate mask normalizes back to the retained value.
      */
-    bank_scene_mask_voice_edit = bank_normalizeSceneMask(mask);
+    bank_scene_mask_voice_edit[bank_active_scene_slot] =
+        bank_normalizeSceneMask(mask);
     (void)bank_ensureActiveInVoiceEditMask();
-    if (bank_scene_mask_voice_edit != previous_mask)
+    if (bank_scene_mask_voice_edit[bank_active_scene_slot] != previous_mask)
         autosave_markBankFieldDirty(AUTOSAVE_BANK_FIELD_VOICE_EDIT_MASK);
+}
+
+void bank_setSceneMaskVoiceEditForScene(uint8_t scene_index, uint16_t mask)
+{
+    uint16_t previous_mask;
+
+    /*
+     * Set one indexed Scene's VOICE edit fan-out mask.
+     *
+     * Inputs: zero-based Scene index and raw 16-bit mask from Autosave or
+     * bankset.bcg. Output: the indexed entry is normalized; the active-bit
+     * invariant is enforced when it is the active Scene; and the complete
+     * per-Scene Autosave region is dirtied only when the final value changes.
+     * This indexed path never changes which Scene is active.
+     *
+     * Affiliates: bank_setSceneMaskVoiceEdit() is the active-Scene wrapper;
+     * bank_sceneMaskVoiceEditForScene() is the read counterpart.
+     */
+    if (scene_index >= BANK_SCENE_SLOT_COUNT)
+        return;
+    previous_mask = bank_scene_mask_voice_edit[scene_index];
+    bank_scene_mask_voice_edit[scene_index] = bank_normalizeSceneMask(mask);
+    if (scene_index == bank_active_scene_slot)
+        (void)bank_ensureActiveInVoiceEditMask();
+    if (bank_scene_mask_voice_edit[scene_index] != previous_mask)
+        autosave_markBankFieldDirty(AUTOSAVE_BANK_FIELD_VOICE_EDIT_MASK);
+}
+
+uint16_t bank_sceneMaskVoiceEditForScene(uint8_t scene_index)
+{
+    /*
+     * Read one indexed Scene's stored VOICE edit fan-out mask.
+     *
+     * Input: zero-based Scene index. Output: the normalized stored mask, or
+     * zero for an invalid index. Unlike the active-entry getter this accessor
+     * does not repair or dirty state; Autosave and Bank Save must capture each
+     * indexed entry without changing it as a side effect of the read.
+     */
+    if (scene_index >= BANK_SCENE_SLOT_COUNT)
+        return 0u;
+    return bank_scene_mask_voice_edit[scene_index];
 }
 
 uint16_t bank_sceneMaskVoiceEdit(void)
@@ -320,7 +390,7 @@ uint16_t bank_sceneMaskVoiceEdit(void)
      */
     if (bank_ensureActiveInVoiceEditMask())
         autosave_markBankFieldDirty(AUTOSAVE_BANK_FIELD_VOICE_EDIT_MASK);
-    return bank_scene_mask_voice_edit;
+    return bank_scene_mask_voice_edit[bank_active_scene_slot];
 }
 
 uint8_t bank_sceneInVoiceEditMask(uint8_t scene_index)
@@ -332,7 +402,8 @@ uint8_t bank_sceneInVoiceEditMask(uint8_t scene_index)
 void bank_toggleSceneMaskVoiceEdit(uint8_t scene_index)
 {
     uint16_t bit = bank_sceneBit(scene_index);
-    uint16_t previous_mask = bank_scene_mask_voice_edit;
+    uint16_t previous_mask =
+        bank_scene_mask_voice_edit[bank_active_scene_slot];
 
     /*
      * Toggle one resident Scene in the VOICE edit fan-out set.
@@ -340,18 +411,113 @@ void bank_toggleSceneMaskVoiceEdit(uint8_t scene_index)
      * Inputs: physical SEQ button index while VOICE is held. Output:
      * scene_mask_voice_edit gains or loses that Scene bit, except the active
      * Scene can never be removed because bank_ensureActiveInVoiceEditMask()
-     * immediately restores it. Menu owns compatibility checks before allowing
-     * a Scene to be toggled on. Output compares the final invariant-safe mask
+     * immediately restores it. Menu owns the layout gate before allowing a
+     * Scene to be toggled on; restore paths use the indexed setter and remain
+     * policy-free. Output compares the final invariant-safe mask
      * with entry state, stores first, and marks its Autosave field only when the
      * toggle survives normalization.
      */
     if (bit == 0u)
         return;
-    bank_scene_mask_voice_edit =
-        (uint16_t)(bank_scene_mask_voice_edit ^ bit);
+    bank_scene_mask_voice_edit[bank_active_scene_slot] =
+        (uint16_t)(bank_scene_mask_voice_edit[bank_active_scene_slot] ^ bit);
     (void)bank_ensureActiveInVoiceEditMask();
-    if (bank_scene_mask_voice_edit != previous_mask)
+    if (bank_scene_mask_voice_edit[bank_active_scene_slot] != previous_mask)
         autosave_markBankFieldDirty(AUTOSAVE_BANK_FIELD_VOICE_EDIT_MASK);
+}
+
+/*
+ * Revalidate every directional VOICE edit-mask entry after layout changes.
+ *
+ * Inputs: resident Scene Effect/Instrument types. Output: mismatched member
+ * bits are removed and changed owner entries pass through the indexed setter,
+ * preserving the active-bit invariant and marking the Bank mask field. This
+ * is the shared F5 repair for load completion and Effect type-change paths;
+ * it runs in foreground context and uses no extra storage.
+ */
+void bank_revalidateVoiceEditMasks(void)
+{
+    uint8_t owner;
+
+    for (owner = 0u; owner < BANK_SCENE_SLOT_COUNT; owner++) {
+        uint16_t mask = bank_scene_mask_voice_edit[owner];
+        uint16_t kept = mask;
+        uint8_t member;
+
+        for (member = 0u; member < BANK_SCENE_SLOT_COUNT; member++) {
+            uint16_t bit = bank_sceneBit(member);
+
+            if (member == owner || (mask & bit) == 0u)
+                continue;
+            if (!scene_editLayoutMatches(owner, member))
+                kept = (uint16_t)(kept & (uint16_t)~bit);
+        }
+        if (kept != mask)
+            bank_setSceneMaskVoiceEditForScene(owner, kept);
+    }
+}
+
+/*
+ * Edit-mask helpers for copy/clear (S075, spec §4.4, §4.5, §5).
+ *
+ * Contract in BankData.h. bank_sceneFanoutMask() reads the Scene's own
+ * directional entry (the active Scene through the self-repairing getter) and
+ * keeps the Scene itself plus every present member whose layout matches.
+ * bank_exchangeVoiceEditMask() applies the spec §4.4 formula to the source
+ * entry and stores it as the destination entry. bank_resetVoiceEditMaskToSelf()
+ * stores bit(scene). Both writers use the indexed setter (normalize, active
+ * bit invariant, Bank AutoSave field mark on change).
+ */
+uint16_t bank_sceneFanoutMask(uint8_t scene)
+{
+    uint16_t mask;
+    uint16_t out;
+    uint8_t member;
+
+    if (scene >= BANK_SCENE_SLOT_COUNT)
+        return 0u;
+    mask = (scene == bank_active_scene_slot) ?
+               bank_sceneMaskVoiceEdit() :
+               bank_sceneMaskVoiceEditForScene(scene);
+    out = bank_sceneBit(scene);
+    for (member = 0u; member < BANK_SCENE_SLOT_COUNT; member++) {
+        uint16_t bit = bank_sceneBit(member);
+
+        if (member == scene || (mask & bit) == 0u ||
+            !bank_scenePresent(member) ||
+            !scene_editLayoutMatches(scene, member))
+            continue;
+        out = (uint16_t)(out | bit);
+    }
+    return out;
+}
+
+void bank_exchangeVoiceEditMask(uint8_t src, uint8_t dst)
+{
+    uint16_t m;
+    uint16_t src_bit;
+    uint16_t dst_bit;
+    uint16_t exchanged;
+
+    if (src >= BANK_SCENE_SLOT_COUNT || dst >= BANK_SCENE_SLOT_COUNT ||
+        src == dst)
+        return;
+    m = bank_sceneMaskVoiceEditForScene(src);
+    src_bit = bank_sceneBit(src);
+    dst_bit = bank_sceneBit(dst);
+    exchanged = (uint16_t)(m & (uint16_t)~(src_bit | dst_bit));
+    if ((m & src_bit) != 0u)
+        exchanged = (uint16_t)(exchanged | dst_bit);
+    if ((m & dst_bit) != 0u)
+        exchanged = (uint16_t)(exchanged | src_bit);
+    bank_setSceneMaskVoiceEditForScene(dst, exchanged);
+}
+
+void bank_resetVoiceEditMaskToSelf(uint8_t scene)
+{
+    if (scene >= BANK_SCENE_SLOT_COUNT)
+        return;
+    bank_setSceneMaskVoiceEditForScene(scene, bank_sceneBit(scene));
 }
 
 void bank_setHasResidentBank(uint8_t present)

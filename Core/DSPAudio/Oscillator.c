@@ -60,24 +60,50 @@
 
 //TODO die phaseInc berechnung kann man doch sicher per LUT machen!
 //-----------------------------------------------------------
+/*
+ * Wavetable octave edges (S073 Step 6).
+ *
+ * What:       T_k = 440 * 2^(k - 5.75) Hz for k = 1..10 (C0 ... C9), stored
+ *             as the nearest floats. The table index is the number of edges
+ *             at or below f.
+ * Why:        the old index, (int)((69 + 12*log2f(f/440))/12) clamped to
+ *             0..10, is floor(5.75 + log2(f/440)): the same count, up to
+ *             float and log2f rounding at each edge. Comparing against 10
+ *             constants removes a log2f() per wavetable oscillator per block
+ *             during pitch sweeps (audit F7).
+ * Inputs:     none (flash constants, 40 B).
+ * Outputs:    read by freqToTableIndex().
+ * Accessors:  freqToTableIndex().
+ * Affiliates: tools/dsp_test/test_octave.c reports every input where the
+ *             old and new index differ (only within a few ulps of an edge).
+ */
+static const float osc_octaveEdgeHz[10] = {
+	16.3515987f,   32.7031975f,   65.406395f,   130.81279f,   261.62558f,
+	523.25116f,  1046.50232f,  2093.00464f,  4186.00928f,  8372.01855f,
+};
+
+/*
+ * Band-limited wavetable octave for a frequency (S073 Step 6).
+ *
+ * What:       counts the octave edges <= f with ten branch-free compares.
+ *             NaN and f <= 0 give 0 (every compare is false); +inf gives 10.
+ *             This matches the old expression's results for those inputs.
+ * Why:        see osc_octaveEdgeHz. Constant cost: all ten compares always
+ *             run (no early exit), so the cost does not depend on pitch.
+ * Inputs:     f, the effective oscillator frequency in Hz.
+ * Outputs:    the table index 0..10.
+ * Accessors:  osc_calcWavetableFreqValue().
+ * Affiliates: osc_setFreq()'s frequency cache (existing, kept); wavetable.c
+ *             table layout (11 octaves).
+ */
 static inline uint8_t freqToTableIndex(const float f)
 {
-	if (f <= 0.f) {
-		return 0;
-	}
+	uint8_t index = 0u;
+	uint8_t k;
 
-	// Use a real Hz->MIDI mapping so frequencies below 440Hz don't collapse
-	// to a bogus table index due to integer truncation.
-	const float midi = 69.f + (12.f * log2f(f / 440.f));
-	int tableIndex = (int)(midi / 12.f);
-
-	if (tableIndex < 0) {
-		tableIndex = 0;
-	} else if (tableIndex > 10) {
-		tableIndex = 10;
-	}
-
-	return (uint8_t)tableIndex;
+	for (k = 0u; k < 10u; k++)
+		index = (uint8_t)(index + (uint8_t)(f >= osc_octaveEdgeHz[k]));
+	return index;
 }
 //-----------------------------------------------------------
 static inline uint32_t freq2PhaseIncr(const float f) //4096
@@ -919,8 +945,9 @@ static void osc_calcUserSampleFreqValue(OscInfo* osc, const float currentFreq)
  {
 		const float currentFreq = osc->freq*osc->pitchMod*osc->modNodeValue;
 		/* osc_setFreq() is called frequently by the block dispatcher. Cache the
-		** effective frequency+waveform tuple so unchanged blocks skip log2f(),
-		** phase-increment recalculation, and wavetable octave selection. */
+		** effective frequency+waveform tuple so unchanged blocks skip the
+		** phase-increment recalculation and wavetable octave selection
+		** (S073 Step 6: octave selection is now an edge count, not log2f()). */
 		if (osc->freqCacheValid &&
 			osc->freqCacheWaveform == osc->waveform &&
 			osc->freqCacheValue == currentFreq) {

@@ -145,3 +145,29 @@ uint8_t adc_getPotValue(uint8_t i)
     if (i >= ADC_POT_COUNT) return 0;
     return (uint8_t)(slider_vol[i] * 100.0f);
 }
+
+float adc_sliderGainMirrored(float gain)
+{
+    /*
+     * Mirror a tapered slider gain (contract in adcPots.h).
+     *
+     * Derivation: slider_raw_to_float() gives g = (R - m) / (1 - m) with
+     * R = 10^((x - 1)D/20), so R = P = m + g(1 - m). At 1 - x the raw gain is
+     * 10^(-xD/20) = m / P, and the same normalization gives
+     * (m/P - m) / (1 - m) = m(1 - P) / (P(1 - m)). The endpoint guards make
+     * the ends exact regardless of float rounding, so an xfd voice at the top
+     * of its fader sends exactly nothing and leaves the send path idle.
+     */
+    if (gain <= 0.0f)
+        return 1.0f;
+    if (gain >= 1.0f)
+        return 0.0f;
+    if (SLIDER_LOG_TAPER_DB <= 0.0f)
+        return 1.0f - gain;
+    {
+        const float m = powf(10.0f, -SLIDER_LOG_TAPER_DB / 20.0f);
+        const float p = m + gain * (1.0f - m);
+
+        return (m / (1.0f - m)) * (1.0f - p) / p;
+    }
+}

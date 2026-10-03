@@ -334,7 +334,7 @@ uint8_t filesystem_regenerateHcnamesFromWinnerBlocking(void);
  * Replaces the canonical preset_loadBank() when stage 10b proved a valid
  * Bank-matching winner: reads .hcnames (regenerating it from the record
  * when corrupt), applies the winner's Bank payload, then evaluates each
- * present Scene's eight identity rows independently — Case 1 applies the
+ * present Scene's nine identity rows independently — Case 1 applies the
  * winner payload, Case 2 narrow-loads a resolvable row from its library
  * source, and Case 3 empties the whole Scene when a refreshed row cannot
  * be resolved (P1). Returns nonzero when the winner restore completed;
@@ -357,33 +357,35 @@ uint8_t filesystem_autosaveBootReaderBlocking(void);
  * and resident Pattern regions already populated by the canonical boot path.
  * Outputs: matching `@`-provenance Scenes update pat_regions[] and their
  * winning generation becomes the next drain baseline; nonmatching or invalid
- * pairs leave the existing directory/default Pattern authoritative and reset
- * the hidden-file baseline.
+ * pairs leave the existing directory/default Pattern authoritative while a
+ * valid nonmatching winner still seeds the next drain baseline.
  * Affiliates: filesystem_autosaveBootReaderBlocking(),
  * filesystem_bootReaderReadPatternFile(), PatternData, and main.c.
  */
 void filesystem_patternAutosaveBootReaderBlocking(void);
 /*
- * Reset one resident Pattern AutoSave generation after a directory-backed
- * Pattern replacement.
+ * Acknowledge a Pattern replacement for AutoSave continuity.
  *
- * What: starts the next hidden-file drain for the selected Scene at
- * generation 1 and target `.pat00a`-style file A. Inputs: a successfully
- * committed library/Scene/Bank Pattern load. Output: one filesystem-owned
- * generation baseline is cleared; no file I/O occurs. Affiliates: Preset
- * Scene/Bank load completion and the Pattern drain scheduler.
+ * What: invalidates sd-clean authority so the drain scheduler knows the
+ * resident Pattern has diverged. The hidden-file generation is NOT reset:
+ * the next drain produces a value one higher than the boot reader's winner,
+ * ensuring the loaded Pattern beats any pre-existing A/B pair. Inputs: a
+ * Scene index whose Pattern was just replaced by a load. Output: sd-clean
+ * invalidated; no generation change and no file I/O. Affiliates: preset
+ * Scene/Bank load completion, bank_invalidateSdCleanScene(), and the Pattern
+ * drain scheduler.
  */
-void filesystem_resetPatternAutosaveGeneration(uint8_t scene_index);
+void filesystem_patternAutosaveOnLoad(uint8_t scene_index);
 /*
  * Boot load driven entirely by .hcnames when it is authoritative.
  *
  * What: parses .hcnames (temp-file prelude first, then the register),
  * then requires the two special-case checks — the register Bank row is a
  * direct numeric slot equal to bank_restoreBankSlot() (the settings.cfg
- * boot Bank), and all 145 HCNAMES rows carry the refreshed witness. When both
+ * boot Bank), and all 161 HCNAMES rows carry the refreshed witness. When both
  * hold, the register is authoritative: this function constructs the
  * whole resident state from it — the Bank container via
- * filesystem_bootNarrowLoadBank(), then every present Scene's eight rows
+ * filesystem_bootNarrowLoadBank(), then every present Scene's nine rows
  * via resolve-plus-narrow-load, Bank-inherited rows from the Bank tree
  * and direct rows from their Scene/Kit/Instrument libraries, then the
  * v4 `<name>.pat` Pattern child per non-emptied Scene. Any unresolvable child of a Scene
@@ -533,6 +535,20 @@ bool filesystem_requestRepairBankNames(uint16_t slot, fs_completion_cb_t cb);
  * empty cache, including an interrupted Kit-quarantine pass.
  */
 uint8_t     filesystem_createLibraryIndexBlocking(fs_library_index_kind_t kind);
+/*
+ * Advance the single foreground filesystem scheduler.
+ *
+ * What: pumps AsyncFATFS and admits one eligible background operation after
+ * higher-priority work declines. Semantic Pattern AutoSave admission is
+ * coalesced by the implementation's 250 ms quiet window and 5 s maximum
+ * latency; non-semantic Pattern maintenance remains independently scheduled.
+ * The elapsed-time background CPU budget is refilled in this scheduler and is
+ * shared by scalar drain, Pattern drain, and Pattern repair: 2.5% while the
+ * sequencer runs and 5% while stopped.
+ * Input: current filesystem/runtime state and owner dirty registers. Output:
+ * bounded progress with no blocking wait or filesystem ownership transfer to
+ * callers. Affiliate: Autosave.c and PatternStackService.c.
+ */
 void        filesystem_tick(void);
 fs_status_t filesystem_status(void);
 const char *filesystem_errorCode(void);
@@ -559,6 +575,37 @@ void        filesystem_ack(void);
  */
 void        filesystem_setFastDrain(uint8_t on);
 uint8_t     filesystem_fastDrainActive(void);
+
+/*
+ * Shared elapsed-time background CPU budget.
+ *
+ * What: filesystem_backgroundBudgetRefill() adds wall-time credit;
+ * filesystem_backgroundBudgetAvailable() reports whether credit is positive;
+ * filesystem_backgroundBudgetCharge() subtracts a measured work slice; and
+ * filesystem_backgroundBudgetDeny() records a skipped slice for diagnostics.
+ *
+ * Why: scalar AutoSave drain, Pattern AutoSave staging, and Pattern repair
+ * share one budget so their aggregate foreground CPU is bounded rather than
+ * each subsystem independently spending the full allowance. The budget is
+ * 2.5% during playback and 5% while stopped, as configured in config.h.
+ *
+ * Inputs: refill reads TIM2 and seq_isRunning(); charge reads TIM2 and takes
+ * a work-class identifier. Outputs: an admission predicate and diagnostic
+ * accounting only; no filesystem I/O is performed.
+ * Work classes: 0 = repair, 1 = scalar drain, 2 = Pattern drain.
+ * Callers: filesystem_tick(), filesystem.c drain phases, and
+ * PatternStackService.c patSvc_tick().
+ */
+#define FS_BUDGET_CLASS_REPAIR   0u
+#define FS_BUDGET_CLASS_SCALAR   1u
+#define FS_BUDGET_CLASS_PATTERN  2u
+#define FS_BUDGET_CLASS_COUNT    3u
+
+void        filesystem_backgroundBudgetRefill(void);
+uint8_t     filesystem_backgroundBudgetAvailable(void);
+void        filesystem_backgroundBudgetCharge(uint32_t start_us,
+                                              uint8_t work_class);
+void        filesystem_backgroundBudgetDeny(uint8_t work_class);
 
 /*
  * Bank operation child-progress query.
@@ -633,7 +680,7 @@ bool filesystem_requestSaveKitDirectory(uint16_t slot,
  * name, and completion callback. Output: asynchronous replacement scoped to
  * same-number children under /Scene/: Scene/<NNN Name>/ with sceneset.scg,
  * embedded Kit directory, six instrument files, a named v4 Pattern child, and
- * effects.fx placeholder. The Pattern child stores the complete dynamic
+ * named `.fx` v2 Effect content. The Pattern child stores the complete dynamic
  * address/pool/bitmap payload and its per-track settings. Other
  * numbered Scene directories must not be removed, regardless of how many nested
  * children they contain. The resident Scene display name updates only after the
@@ -868,6 +915,17 @@ bool filesystem_requestUpdateResidentInstrumentNames(
     uint8_t instrument_slot,
     fs_completion_cb_t cb);
 /*
+ * Browser slot-name state uses two explicit outcomes.
+ *
+ * What: a blank eight-cell string means the requested cache domain is not yet
+ * ready; `Empty   ` means a valid loaded index proved that this slot is absent.
+ * Why: UI commit gating must distinguish an unresolved coordinate from a
+ * resolved empty slot. Inputs: the shared cache domain and slot row. Outputs:
+ * the four numbered-library accessors below preserve that distinction.
+ * Affiliates: filesystem_libraryNameCacheLoaded(), Menu's Load/Save renderer,
+ * and the asynchronous index callbacks.
+ */
+/*
  * Borrow the selected eight-cell Instrument name after either request above.
  * The pointer is valid only while HCNAMES owns the shared cache; copy it before
  * requesting a typed `.hcindex`. Blank/invalid rows return `Empty   `.
@@ -878,7 +936,7 @@ const char *filesystem_residentInstrumentName(uint8_t scene_index,
  * Resident Kit name-register access.
  *
  * The load request mirrors Instrument menu entry: it borrows the generalized
- * cache for all 145 root HCNAMES rows so Menu can copy one resident Scene's Kit
+ * cache for all 161 root HCNAMES rows so Menu can copy one resident Scene's Kit
  * name plus all six Instrument names before `/Kit/.hcindex` replaces that same
  * allocation. Menu retains those seven rows for the complete combined
  * Kit/Instrument session. Loads and saves only update the Menu scratch and an
@@ -928,6 +986,33 @@ bool filesystem_requestUpdateResidentSceneNames(
     uint16_t scene_mask,
     const char name[8],
     fs_completion_cb_t cb);
+
+/*
+ * Copy/clear identity publication (S075).
+ *
+ * filesystem_identityRow(): fixed HCNAMES row of one Scene/Kit/Instrument/
+ * Pattern/Effect identity (slot is used only for FS_ROW_INSTRUMENT), or
+ * FS_HCNAMES_ROW_COUNT when invalid.
+ * filesystem_requestCopyResidentNames(): one asynchronous HCNAMES rewrite
+ * that reads `/.hcnames`, applies the copy/clear remap held at offset 0 of
+ * the borrowed name buffer (remap[row] = original row whose name and source
+ * the row takes, 0xFF = unchanged; copied rows lose their refreshed flag),
+ * writes `.hcnamtmp` and swaps it in, then calls cb. Refused (false) while
+ * the facade is busy or when the buffer is not borrowed. On failure the
+ * previous `.hcnames` stays intact. Client: copyClearService.c. Affiliates:
+ * filesystem_borrowNameCacheScratch(), the shared HCNAMES update transaction.
+ */
+#define FS_HCNAMES_ROW_COUNT 161u
+typedef enum {
+    FS_ROW_SCENE = 0u,
+    FS_ROW_KIT,
+    FS_ROW_INSTRUMENT,
+    FS_ROW_PATTERN,
+    FS_ROW_EFFECT
+} fs_identity_row_class_t;
+uint16_t filesystem_identityRow(fs_identity_row_class_t cls, uint8_t scene,
+                                uint8_t slot);
+bool filesystem_requestCopyResidentNames(fs_completion_cb_t cb);
 /* Borrow the requested Scene row while HCNAMES owns the shared cache. */
 const char *filesystem_residentSceneName(uint8_t scene_index);
 /* Borrow the appended Pattern row for one resident Scene. */
@@ -971,8 +1056,29 @@ bool filesystem_requestLoadPatternIndex(fs_completion_cb_t cb);
 /* True when the requested root library currently owns the shared cache. */
 bool filesystem_libraryNameCacheLoaded(fs_library_index_kind_t kind);
 /* Dispose the single shared Instrument/Kit/Scene/Bank/Pattern browser cache or its
- * temporary 145-row HCNAMES view; no second name allocation exists. */
+ * temporary 161-row HCNAMES view; no second name allocation exists. */
 void filesystem_clearNameCache(void);
+
+/*
+ * Lend the 9,000 B name cache to copy/clear as working storage (S075).
+ *
+ * What: hands out the whole browser name array while a copy/clear operation
+ * runs, tagged so every browser accessor reports "not loaded" and Load/Save
+ * reloads its index on the next entry. Why: during an operation AutoSave, the
+ * deferred HCNAMES flush and the Load/Save pages cannot run (suspension,
+ * routing), so the cache is idle; copy/clear needs it for source snapshots
+ * and the identity-row remap (user, 2026-10-01: the 9 kB name buffer is
+ * multi-use scratch during an operation). Inputs: none. Output: a pointer to
+ * FS_NAME_SCRATCH_BYTES bytes, or NULL while the facade is busy or the buffer
+ * is already lent. Return clears the bytes and the domain. While lent, name
+ * cache disposal requests are ignored and every filesystem operation except
+ * the copy/clear name write is refused like a busy facade. Clients:
+ * copyClearService.c only. Affiliates: filesystem_requestCopyResidentNames()
+ * reads the remap at offset 0 and uses offsets 256.. during its own request.
+ */
+#define FS_NAME_SCRATCH_BYTES 9000u
+uint8_t *filesystem_borrowNameCacheScratch(void);
+void filesystem_returnNameCacheScratch(void);
 /* Compatibility spelling retained for existing Instrument menu callers. */
 void filesystem_clearInstrumentCache(void);
 /*
@@ -1133,9 +1239,8 @@ uint8_t     filesystem_kitSlotExists(uint16_t zero_based_slot);
 /* Return the eight-character name from the shared slot-ordered Kit cache.
  *
  * Input: zero_based_slot as above. Output: filesystem-owned eight printable
- * characters plus NUL for existing kits, or the literal "Empty   " for missing
- * slots. The name is loaded from `/Kit/.hcindex`; the cache row excludes the
- * `NNN ` folder prefix because the slot number is already the array index.
+ * characters plus NUL for existing kits, blank while the Kit cache domain is
+ * unresolved, or the literal "Empty   " after a valid index proves absence.
  * Client: menu_repaintLoadSavePage().
  */
 const char *filesystem_kitSlotName(uint16_t zero_based_slot);
@@ -1148,6 +1253,7 @@ const char *filesystem_kitSlotName(uint16_t zero_based_slot);
  * selected directory, but that alias is not exposed or retained per slot.
  */
 uint8_t     filesystem_sceneSlotExists(uint16_t zero_based_slot);
+/* Blank means unresolved Scene cache; Empty means a loaded index has no row. */
 const char *filesystem_sceneSlotName(uint16_t zero_based_slot);
 /*
  * Root Bank/ shared-cache queries and fallback helpers.
@@ -1159,9 +1265,11 @@ const char *filesystem_sceneSlotName(uint16_t zero_based_slot);
  * and remain operation-local state in the Bank load/save state machines.
  */
 uint8_t     filesystem_bankSlotExists(uint16_t zero_based_slot);
+/* Blank means unresolved Bank cache; Empty means a loaded index has no row. */
 const char *filesystem_bankSlotName(uint16_t zero_based_slot);
 /* Root Pattern slots are numbered files (`NNN <name>.pat`) rather than folders. */
 uint8_t     filesystem_patternSlotExists(uint16_t zero_based_slot);
+/* Blank means unresolved Pattern cache; Empty means a loaded index has no row. */
 const char *filesystem_patternSlotName(uint16_t zero_based_slot);
 uint16_t    filesystem_firstKitSlot(void);
 uint16_t    filesystem_firstSceneSlot(void);

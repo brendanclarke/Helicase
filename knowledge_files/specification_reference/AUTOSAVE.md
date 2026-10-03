@@ -4,8 +4,35 @@
 
 This is the authoritative reference for the implemented Helicase AutoSave
 format, ownership, boot restore, mutation tracking, and background writer
-through Session 064. Historical plans and session logs explain how the
-implementation was reached, but they do not override this document.
+through Session 075. Session 073 changed nothing in AutoSave. Session 075
+made three changes (details below; history in `075_SESSION_HANDOFF_LOG.md`):
+
+- Scene cell 7 (the retired global `srt`) is reserved: written as 127,
+  ignored on restore;
+- Scene cells 45..50 hold the per-voice FX-send Morph endpoint (F2); the
+  Scene parameter count is 51. **No migration** (user): records written
+  before F2 hold zero there, so delete `.hcprms1`/`.hcprms2` before the
+  first boot of this firmware on an older card;
+- while a copy/clear operation runs, the scalar drain, both Pattern AutoSave
+  schedulers and the trace flush do not start (`copyClear_backgroundSuspended()`,
+  `COPYCLEAR_UTILITIES.md` §11.6).
+
+Session 074 made two changes:
+
+- it made Scene parameters 41..44 live for the master bus compressor, using
+  reserved cells with no format-version change;
+- it fixed a failure in which a record torn by power loss stopped
+  publication permanently: a one-byte end-of-file probe in both validators,
+  a progress-aware drain stall observer, and `V` trace bits 4..5. See
+  "Resolved: a torn record stopped AutoSave (Session 074)" below.
+
+Historical plans and session logs explain how the implementation was
+reached, but they do not override this document.
+
+**New here?** Read "On-card HCPR v3 scalar record contract", "Boot restore
+and policy lifecycle", "Dirty marking rules", "Background writer" and
+"Power-loss behavior" in that order. The two "Resolved" sections are worked
+examples of how on-card evidence was used to find a defect.
 
 Related authority is deliberately separate:
 
@@ -14,20 +41,24 @@ Related authority is deliberately separate:
   rejected pre-Session-045 per-file dot-backer design is not a current spec;
 - `DEV_MODES.md` owns development-mode selection and diagnostic file output;
 - `ASYNCFATFS_REFERENCE.md` owns low-level AsyncFATFS contracts;
-- `SRAM_MANIFEST.md` owns the binding memory-reservation policy and the current
-  Session 064 linked allocation/capture snapshot;
+- `STORAGE_SRAM_MANIFEST.md` owns the binding memory-reservation policy and the current
+  linked allocation snapshot (on-chip flash and RAM);
 - `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md` owns the deferred interaction
   and regression matrix for AutoSave, HCNAMES, `settings.cfg`, and Load/Save.
 
 AutoSave currently persists the active resident Bank's implemented scalar
-state into two hidden root records and each present Scene's Pattern into its
-own hidden PAT4 A/B pair. It does not modify root `Bank/`, `Scene/`,
+state, including each resident Scene's Effect record, into two hidden root
+records and each present Scene's Pattern into its own hidden PAT4 A/B pair.
+It does not modify root `Bank/`, `Scene/`,
 `Kit/`, or `Instrument/` library objects and does not replace explicit Load or
 Save operations.
 
 Implemented through the Session 048 AutoSave baseline, Session 056 page-exit
 expedite and AsyncFATFS file-size fix, Session 060 writer/HCNAMES/source work,
-the Session 061 boot reader, and Session 064 Pattern AutoSave:
+the Session 061 boot reader, Session 064 Pattern AutoSave, and Session 069's
+bounded-CPU convergence (all phases — non-semantic maintenance, trailing-slack
+reservation, reactive compaction, bounded repair epoch, O(1) dirty predicate,
+quiet window scheduling, and shared background CPU budget):
 
 - persistent `settings.cfg` AutoSave on/off preference;
 - boot/runtime creation and validation of `/.hcprms1` and `/.hcprms2`;
@@ -41,9 +72,11 @@ the Session 061 boot reader, and Session 064 Pattern AutoSave:
 - successful whole-object publication for root Instrument Load, normal Kit
   Load, root Scene Load, and selective Bank Load/Save, with a complete
   committed-hierarchy HCNAMES boundary;
-- one canonical mutation mask, bounded dirty scanning and value capture, A/B
+- one canonical mutation mask with an exact SRAM bit-population counter
+  (`autosave_dirty_count`, `uint16_t`), bounded value capture, A/B
   transformed copy, CRC32C, commit-last runtime publication, retry, and
-  continuation scheduling;
+  continuation scheduling; `autosave_maskHasDirty()` is O(1) via the
+  maintained counter (DEV audit every 1000th call with `Z` trace stage);
 - a post-drain HCNAMES convergence step that clears a per-row "refreshed"
   witness once that row's autosave object is fully captured, and safe-
   rewrites `/.hcnames` through the same temp-file pattern as the A/B
@@ -54,28 +87,80 @@ the Session 061 boot reader, and Session 064 Pattern AutoSave:
 - per-row Case 1 payload application, Case 2 narrow library reload, and Case 3
   all-or-nothing Scene invalidation, including deferred dirty replay and
   non-blocking notices;
-- an all-145-rows-refreshed HCNAMES-authoritative boot path for a newer
+- an all-161-rows-refreshed HCNAMES-authoritative boot path for a newer
   Load/Save session that the page guard prevented HCPR from capturing;
-- HCPR format v2 aligned with the 145-row HCNAMES contract while retaining the
-  exact 34,768-byte scalar record geometry; Pattern identity is not embedded;
+- HCPR format v3 aligned with the 161-row HCNAMES contract while retaining the
+  exact 34,768-byte scalar record geometry; Pattern and Effect identity are
+  not embedded;
 - one independent 16-bit Pattern dirty mask, a 10,519-byte immutable Pattern
-  snapshot, and per-Scene whole-PAT4 background drains;
+  snapshot, and per-Scene whole-PAT4 background drains with a 250 ms quiet
+  window (`AUTOSAVE_PATTERN_QUIET_WINDOW_MS`) after the latest semantic
+  mutation and a 5000 ms hard ceiling (`AUTOSAVE_PATTERN_MAX_LATENCY_MS`),
+  with rotating Scene cursor for fairness;
+- a separate 16-bit non-semantic Pattern dirty mask
+  (`autosave_nonsemantic_pattern_dirty_mask`) for physical pool relocation
+  that does not change AutoSave dirtiness, serviced by a lowest-priority
+  scheduler rung in `filesystem.c` with arm/due-tick debounce and
+  non-active-first Scene selection;
 - 32 hidden Pattern candidates (`/.pat00a/b` through `/.pat15a/b`) with
   generation/parity selection, exact-size/stack/CRC validation, retry, and
   boot restore;
 - Pattern-only HCNAMES `@` provenance and refreshed publication on rows
-  129..144.
+  129..144;
+- a shared elapsed-time background CPU budget (`budget_state` in
+  `filesystem.c`, 8 bytes always-on + 28 bytes DEV accounting) gating
+  scalar drain, Pattern drain, and Pattern repair; 2.5 % during playback
+  (`BACKGROUND_CPU_BUDGET_US_PER_MS_PLAYING = 25`), 5 % stopped
+  (`BACKGROUND_CPU_BUDGET_US_PER_MS_STOPPED = 50`), with signed credit and
+  overshoot tracking; DEV-only per-class `H` trace reports every ~5 seconds;
+- Pattern repair suppressed when `menu_activePage == LOAD_PAGE ||
+  SAVE_PAGE` (Load/Save repair gate).
+- copy/clear suspension (Session 075): while
+  `copyClear_backgroundSuspended()` is nonzero (from the start of a copy or
+  clear operation until its queued pastes/clears, pot-clear register, apply
+  workers and name write have all finished), `filesystem_tick()` admits no
+  scalar drain or runtime ensure, no semantic or non-semantic Pattern drain,
+  no AutoSave/Pattern trace flush, no `settings.cfg` write and no deferred
+  HCNAMES flush, and the Pattern repair epoch does not start. A writer that
+  is already running finishes. The scalar writer keeps
+  `fs_autosave_page_suppressed` set while suspended, so its first drain
+  afterwards uses the 250 ms continuation deadline. Dirty marks are made at
+  every change and are written afterwards.
+- exact-length validation by a one-byte end-of-file probe in both scalar
+  validators, silent self-repair of a torn record by the next drain, `V`
+  trace bits 4..5, and a progress-aware drain stall observer (Session 074);
+- Scene parameters 41..44 for the master bus compressor (Session 074).
 
 Not implemented and not to be inferred from the reader/writer:
 
-- live Effect persistence (`AUTOSAVE_EFFECT_PARAM_COUNT` is zero);
+- Root Effect library promotion (the `/Effect/` browser and Effect Load/Save
+  item) remains deferred. Scene/Bank Effect name persistence, the 512-byte
+  Effect payload projection, the narrow Effect boot reader (ST6), and the
+  Effect page, FX sequencer, automation and fan-out edits (ST7–ST10) are
+  implemented. Every Effect edit is marked through SceneData.
 - crash-recoverable promotion into explicit Bank library files;
 - a second resident Bank, background staging Bank, or general object journal.
 
-`AUTOSAVE_HCNAMES_ROW_COUNT` is 145. HCPR format version 2 is therefore the
-only current scalar record version; version 1 records are not accepted by the
-Pattern-aware reader. HCPR embeds scalar hierarchy identity rows 0..128 only;
-Pattern rows 129..144 and Pattern payload bytes never enter HCPR.
+Scene automation runtime overlays (`morph_step_override[]`,
+`slot6_track7_decay_step_value`, runtime audio routing) are transient
+playback state and are explicitly excluded from AutoSave dirty marking.
+`seq_scene_automation_dirty` (uint32_t) tracks their runtime presence for
+transport-restart restore only. This separation is architectural (Session
+070 Q1): step automation must never touch retained Scene/Kit setters during
+playback. A deferred HCNAMES scheduler rung in `filesystem_tick()` drains
+HCNAMES dirty masks retained across Load/Save page exit (Session 070
+LSR-02).
+
+`AUTOSAVE_HCNAMES_ROW_COUNT` is 161. HCPR format version 3 is therefore the
+only current scalar record version; version 1 and version 2 records are
+strictly rejected by the Effect-aware reader. HCPR embeds scalar hierarchy
+identity rows 0..128 only; Pattern rows 129..144, Effect rows 145..160, and
+their child payloads never enter HCPR.
+
+The first card using Session 072 ST6 should delete stale `.hcnames`,
+`.hcnamtmp`, `.hcprms1`, and `.hcprms2` before boot. Firmware will create a
+fresh v3 baseline; it does not reinterpret a 145-row register or v2 scalar
+record as a current-format object.
 
 ## Ownership
 
@@ -96,7 +181,7 @@ Pattern rows 129..144 and Pattern payload bytes never enter HCPR.
 - `settings.cfg` and `filesystem_setAutosaveEnabled()` own policy. A trace or
   diagnostic must never change that policy or dirty state.
 
-## On-card HCPR v2 scalar record contract
+## On-card HCPR v3 scalar record contract
 
 The two singleton names are:
 
@@ -119,8 +204,26 @@ Each Scene region reserves:
 
 - eight name bytes;
 - two HCNAMES source bytes immediately after the name;
-- 118 Scene-parameter bytes, currently 40 live;
-- 512 Effect bytes, currently no live parameters;
+- 118 Scene-parameter bytes, currently 51 live
+  (`AUTOSAVE_SCENE_PARAM_COUNT`):
+
+  | Index | Meaning |
+  |---:|---|
+  | 0 | Scene Morph amount |
+  | 1..6 | per-voice Morph amount |
+  | 7 | reserved since S075 (former `srt`): always written as 127, the value older firmware treats as neutral; ignored on restore. Record layout, mask and format version unchanged. |
+  | 8..13 | per-voice audio out |
+  | 14..19 | per-voice FX send |
+  | 20..25 | per-voice fader mode (0..3 since S074: `pre pst fx xfd`) |
+  | 26..32 | MIDI channel per track |
+  | 33..39 | MIDI note per track |
+  | 40 | Effect Morph amount (S072) |
+  | 41..44 | bus compressor `cmp`, `cam`, `ctm`, `csc` (S074) |
+  | 45..50 | per-voice FX-send Morph endpoint (S075 F2) |
+  | 51..117 | reserved (zero) |
+
+  - 512 Effect bytes: 3 type bytes, 8 name bytes, 419 live parameter cells, and
+    80 reserved bytes;
 - 1,280 Kit bytes containing eight name bytes, a two-byte HCNAMES source
   field, 118 parameter/reserve bytes, and six fixed 192-byte Instrument
   records.
@@ -149,10 +252,31 @@ child subset. A partial save therefore cannot shrink the live Bank solely
 because unsaved resident Scenes were outside the save mask. This Session 057
 fix is a prerequisite for correct whole-Bank AutoSave publication.
 
+The relative Effect region is projected without copying the retained C record:
+
+| Relative offset | Bytes | Meaning |
+| ---: | ---: | --- |
+| 0..2 | 3 | Type token; live from the registry token (`off`, `flt` or `cbt`) |
+| 3..10 | 8 | Effect name; baseline mirror of HCNAMES row `145 + scene`, not a live dirty cell |
+| 11 | 1 | Sequencer run mode |
+| 12 | 1 | Sequencer length |
+| 13 | 1 | Sequencer step scale |
+| 14..77 | 64 | Normal parameter cells |
+| 78..141 | 64 | Morph parameter cells |
+| 142..429 | 288 | Sixteen steps × (16-bit lock mask + 16 lane values) |
+| 430..431 | 2 | Effect source, projected from HCNAMES row `145 + scene` |
+| 432..511 | 80 | Reserved |
+
+The 419 live Effect cells begin at relative offset 11. Their ordered index
+space is owned by `Autosave.c/.h`; the retained record is owned by SceneData.
+The type bytes are additionally marked by `autosave_markEffectDirty()` and
+project the registry token. Effect name bytes 3..10 are a baseline mirror only
+and are not live dirty-mask payload.
+
 Header requirements:
 
 - magic `HCPR`;
-- format version 2;
+- format version 3;
 - valid commit byte `0xa5`;
 - wrapping 32-bit generation;
 - Castagnoli CRC32C over the complete record while treating stored CRC bytes
@@ -163,11 +287,25 @@ Header requirements:
 Phase C is the documented exception to the general reserved-cell rule: its
 source fields use previously reserved bytes without a version bump because the
 record, mask, payload, section boundaries, and validation size are unchanged.
+The same reasoning covers appending a **Scene parameter** into the reserved
+tail of the 118-byte allocation. That was done for Effect Morph (index 40,
+S072), the bus compressor (41..44, S074), and FX-send Morph (45..50, S075 F2).
+The condition: zero, which
+every older record holds there, must be a safe value to restore. The first
+restore after the S074 upgrade therefore reads `cmp off`, `cam 0`, `ctm 0`,
+`csc off` (not the 48/48 defaults). That is harmless because the compressor
+stays off, and the values persist once set.
 The first complete drain rewrites all present resident payload scopes in the
 new internal layout, upgrading old-format parameter positions in place. Any
 future change to offsets, widths, ordering, or interpretation outside this
 explicit Phase C migration still requires a format-version decision and an
 explicit migration/rejection policy.
+
+S075 F2's deployment policy is the user-approved no-backward-compatibility
+exception: before first boot, delete the old .hcprms1, .hcprms2, and other
+temporary records. F2 adds Scene cells 45..50 without a marker or restore
+migration; records written before F2 are not migrated and are deleted with the
+F2 update.
 
 ## Boot restore and policy lifecycle
 
@@ -220,8 +358,11 @@ fields, with all rows marked refreshed. A true read/I/O failure remains a
 failure; invalid content does not authorize arbitrary creation unless the
 validated-winner regeneration rule applies.
 
-The reader applies the winner Bank section, then evaluates the eight identity
-rows for every present Scene in this order: Scene, Kit, Instruments 0..5.
+The reader applies the winner Bank section, then evaluates the nine identity
+rows for every present Scene in this order: Scene, Kit, Instruments 0..5,
+Effect. Effect Case 1 applies the 512-byte Effect region through
+`autosave_applyEffectPayload()`; Effect Case 2 narrow-loads the named Scene
+`.fx` child and commits it atomically with the Scene settings/Kit stage.
 
 - **Case 1 — row has no `R`:** the HCPR object is caught up. Apply its payload
   through `autosave_applyScenePayload()`, `autosave_applyKitPayload()`, or
@@ -235,7 +376,7 @@ rows for every present Scene in this order: Scene, Kit, Instruments 0..5.
   mutations into an independent child row. A successful row emits Q/`0x04`.
 - **Case 3 — row has `R` but cannot be resolved/loaded, or a Case-1 Instrument
   type token is invalid:** empty the entire Scene, stop evaluating that Scene,
-  rewrite all eight rows to `?|R`, and emit Q/`0x02`. Never leave a partial
+  rewrite all nine rows to `?|R`, and emit Q/`0x02`. Never leave a partial
   Scene available to later Save.
 
 Source inheritance is Instrument -> Kit -> Scene -> Bank. A numeric source is
@@ -248,8 +389,9 @@ present Scene independently. It applies the newest format/size/CRC-valid hidden
 PAT4 candidate only when that Scene's Pattern HCNAMES row has Pattern-AutoSave
 `@` provenance and a nonzero generation. Otherwise the initialized or
 explicitly loaded Pattern remains authoritative. A missing/corrupt Pattern
-never empties otherwise valid scalar Scene state. Effects remain zero/live
-placeholder state because their format live count is zero.
+never empties otherwise valid scalar Scene state. A missing `.fx` child is a
+valid Effect Case-2 result and commits the `off` default; malformed `.fx`
+content still invalidates that Scene transaction.
 
 ### HCNAMES-authoritative reader
 
@@ -259,11 +401,12 @@ HCPR writer while HCNAMES already records every committed source. It may run
 only when:
 
 1. HCNAMES row 0 is a direct Bank slot equal to `settings.cfg`'s active Bank;
-2. every one of the 145 data rows has `R`.
+2. every one of the 161 data rows has `R`.
 
 It never uses or regenerates from HCPR. It loads the Bank container from the
-Bank tree, narrow-loads all eight scalar hierarchy rows of each present Scene
-with the same source resolver and all-or-nothing Scene rule, then lets the
+Bank tree, narrow-loads all nine Scene identity rows (including the named
+Effect child) of each present Scene with the same source resolver and
+all-or-nothing Scene rule, then lets the
 Pattern reader apply eligible hidden PAT4 winners.
 Any failed gate or hard failure declines to canonical fallback. Do not weaken
 the two gates: partial refreshed state is handled by the matching-winner reader,
@@ -310,6 +453,14 @@ No resident Bank means no AutoSave file activity.
 There is exactly one persistent 3,856-byte canonical dirty mask. Producers OR
 bits into it atomically; they do not enqueue events and do not own files.
 
+A maintained `uint16_t autosave_dirty_count` tracks the total set-bit population
+atomically alongside the mask. `autosave_maskByteOr()` increments by
+`popcount8_lut[fresh]` (256-byte ROM LUT) counting only 0-to-1 transitions.
+`autosave_maskBitTake()` decrements. `autosave_maskHasDirty()` returns
+`count != 0` in O(1). A DEV-mode audit every 1000th `maskHasDirty()` call
+computes the full-mask popcount and emits `Z`-stage trace on mismatch; the
+audit is diagnostic only and does not alter the query result.
+
 Use only the typed API:
 
 - `autosave_markBankFieldDirty()`;
@@ -317,9 +468,11 @@ Use only the typed API:
 - `autosave_markKitParameterDirty()`;
 - `autosave_markInstrumentNormalParameterDirty()`;
 - `autosave_markInstrumentMorphParameterDirty()`;
-- `autosave_markSourceDirty()` for one HCNAMES-addressed Scene, Kit, or
+  - `autosave_markSourceDirty()` for one HCNAMES-addressed Scene, Kit, or
   Instrument source field;
-- future Effect marker functions only after Effect ownership exists.
+- `autosave_markEffectParameterDirty()` / `autosave_markEffectDirty()` for one
+  Effect cell or the whole Effect region (SceneData Effect setters and
+  whole-record commits).
 
 Whole-object helpers mark currently gettable cells but do not copy data.
 Successful root Instrument Load marks that slot's three type bytes, two source
@@ -359,7 +512,10 @@ New dirty work receives a five-second debounce. Repeated changes coalesce into
 the same bits; they do not start one file operation per edit. Load and Save
 pages suppress new background starts, and the single filesystem facade gives
 foreground work priority. An already active transaction runs to its safe
-close/flush boundary.
+close/flush boundary. All background work (scalar drain, Pattern drain, and
+Pattern repair) is additionally gated by the shared elapsed-time CPU budget
+(`filesystem_backgroundBudgetAvailable()`); a denied admission is charged
+nothing and retries on the next scheduler tick after credit accumulates.
 
 When the page guard suppresses the writer, `fs_autosave_page_suppressed` is
 set. On the first scheduler tick after the user leaves the Load/Save page,
@@ -400,7 +556,13 @@ running.
 One transaction:
 
 1. validates both candidates and chooses the newest valid record matching the
-   current Bank identity;
+   current Bank identity. Each candidate is streamed in 128-byte CRC chunks,
+   then **exactly one more byte** is read. Any data there means the file is
+   longer than the record (a torn write), and the candidate is invalid at
+   once. Only end-of-file lets the header, commit and CRC verdict stand.
+   This is `filesystem_autosaveValidateCandidateStep()`, shared by the drain
+   and the boot validator: at most 273 reads per candidate, whatever the file
+   size;
 2. imports the winner's on-card mutation mask once for interrupted-work
    recovery;
 3. examines at most `AUTOSAVE_MASK_BITS_PER_TICK` mask positions per service
@@ -481,10 +643,11 @@ mechanics and its interaction with AutoSave's dirty mask are specified here
 because the writer that clears the flag is the AutoSave drain itself.
 
 The current physical schema is one exact
-`#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat` header plus 145 data rows.
+`#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat` header plus 161 data rows.
 Bank/Scene/Kit rows are `name<TAB>source[<TAB>R]`; Instrument rows are
 `name<TAB>source<TAB>type[<TAB>R]`, where type is mandatory. The complete
-Pattern rows 129..144 use the non-Instrument grammar and have no type field.
+Pattern rows 129..144 and Effect rows 145..160 use the non-Instrument grammar
+and have no type field.
 The complete parser/source grammar belongs to `FILESYSTEM_SPEC.md`.
 
 **Atomic safe-write.** Every HCNAMES rewrite — boot full-write, runtime
@@ -492,12 +655,12 @@ targeted update, Bank Load, Bank Save, and the drain post-commit convergence
 below — now follows the same temp-file pattern already used for
 `settings.cfg` and the `.hcprms` pair: open `.hcnamtmp`
 (`FS_RESIDENT_NAMES_TEMP_FILENAME`), stream the `#types` header line plus all
-145 rows, close, `afatfs_sync()` to make the temp durable, remove the old live
+161 rows, close, `afatfs_sync()` to make the temp durable, remove the old live
 `.hcnames`, rename the temp into place, then take the final flush-gate sync.
 The live file is untouched until the remove step; a power loss at any point
 leaves either the intact old register or a recoverable `.hcnamtmp` that a boot
 recovery prelude in `filesystem_ensureAutosaveFiles_tick()` validates (a
-current `#types` header plus 145 parseable rows) and either promotes or
+  current `#types` header plus 161 parseable rows) and either promotes or
 discards before any code path opens `.hcnames` for read.
 `hcnames_mirror_valid` is demoted to `INVALID` before every write-capable
 open, set to `PUBLISH_PENDING` only after the rename succeeds (not after
@@ -587,10 +750,33 @@ acceptance additionally audits address/bitmap/pool consistency.
 
 Autosave owns a separate 16-bit dirty mask. PatternData sets it after every
 live mutation; whole Scene/Bank replacement marks it through
-`autosave_markSceneWithPatternDirty()`. The filesystem admits the lowest dirty
-Scene only while policy/runtime/card/Bank/menu gates are open and neither
-`seq_recordActive` nor `seq_eraseActive` is set. Pattern is the final
-background claimant after settings, diagnostic trace, and scalar HCPR work.
+`autosave_markSceneWithPatternDirty()`. The filesystem records the first dirty
+epoch via `timebase_tim2Now()` in `autosave_markPatternDirty()`, waits for
+`AUTOSAVE_PATTERN_QUIET_WINDOW_MS` (250 ms) of silence after the latest
+semantic Pattern mutation, and forces admission after
+`AUTOSAVE_PATTERN_MAX_LATENCY_MS` (5000 ms) even if editing continues. It
+rotates the Scene cursor for fairness, admits only while
+policy/runtime/card/Bank/menu gates are open and neither `seq_recordActive`
+nor `seq_eraseActive` is set, and keeps Pattern as the final background
+claimant after settings, diagnostic trace, and scalar HCPR work, subject to
+the shared CPU budget. The quiet window applies only to semantic Pattern work;
+physical relocation-only work uses its independent non-semantic maintenance
+scheduler (see below).
+
+**Non-semantic Pattern maintenance scheduler.** Physical pool relocation
+(defragmentation) dirtiness is tracked separately from semantic AutoSave
+dirtiness via `autosave_nonsemantic_pattern_dirty_mask` (16-bit, 2 bytes
+SRAM1 `.bss`). `autosave_markNonSemanticPatternDirty()` sets the Scene's bit;
+`pat_markPoolMutationDirty()` is retired. The non-semantic scheduler
+(`filesystem_autosaveNonSemanticPatternDrainSchedule_tick()`) is the
+lowest-priority rung, eligible only when both the scalar dirty mask and
+semantic Pattern dirty mask are zero. It uses the same gate list as the
+semantic Pattern scheduler but adds its own arm/due-tick debounce
+(`fs_nonsemantic_pattern_armed` / `fs_nonsemantic_pattern_next_due_tick`)
+reusing `AUTOSAVE_WRITER_INTERVAL_MS` as debounce. Scene selection prefers
+non-active Scenes first, falling back to the active Scene only when it is
+the sole dirty candidate. Total additional SRAM: 5 bytes (2-byte mask +
+2-byte due tick + 1-byte armed flag).
 
 Admission clears the selected bit before copying the 10,519-byte live region
 into the sole Pattern snapshot. The copy is plain `memcpy` with no interrupt
@@ -603,9 +789,14 @@ At boot, both candidates for each present Scene are independently validated.
 The winner applies only when the corresponding HCNAMES Pattern row carries
 the Pattern-only `@` token (`0x1ffc`) and the generation is nonzero. Missing or
 bad Pattern files do not invalidate scalar Scene state. Explicit Pattern
-library and Scene/Bank directory loads reset the destination generation
-baseline to zero. Complete resident layout and PAT4 bytes are authoritative in
-`PATTERN_DYNAMIC_STACK.md`.
+library and Scene/Bank directory loads call `filesystem_patternAutosaveOnLoad()`
+(renamed from `filesystem_resetPatternAutosaveGeneration` in Session 070),
+which invalidates the sd-clean authority for that Scene without resetting the
+monotonic generation counter. The generation must NOT be reset to zero on load:
+a zero generation causes the boot reader to prefer an older hidden file with
+generation > 0 over the just-loaded Pattern (Session 070 Q2 fix). The boot
+reader's non-`@` branch seeds from `winner_generation`. Complete resident
+layout and PAT4 bytes are authoritative in `PATTERN_DYNAMIC_STACK.md`.
 
 ## Power-loss behavior
 
@@ -615,7 +806,26 @@ therefore leave:
 
 - the previous winner valid and the target invalid;
 - both records valid, with generation selecting the newer;
-- an incomplete target that fails size/header/CRC/commit validation.
+- an incomplete target that fails size/header/CRC/commit validation;
+- **a torn target that is longer than a record.** The drain creates the
+  target with `"w"` and streams the record before its first close. While a
+  file is open for writing, AsyncFATFS stores its *allocated*,
+  cluster-rounded size in the directory entry (`ASYNCFATFS_REFERENCE.md`,
+  "Open-file size on the card"). A power loss before that close leaves a
+  65,536-byte `.hcprmsN` (32,768 B for a PAT4 file) with commit byte 0, the
+  record's first bytes, and stale cluster data after it.
+
+How each case recovers, with no user action:
+
+- A torn target is rejected by the one-byte end-of-file probe after 273
+  reads, and the peer stays the winner. The next drain publishes into the
+  torn slot: phase 11 removes it, and phase 24 recreates it with `"w"` at the
+  exact size. The boot validator uses the same probe.
+- The event is recorded only in the trace, as `V` flag bit 4 (A) or 5 (B)
+  (user policy: log it, no error screen).
+- A torn Pattern file is handled the same way by
+  `filesystem_patternAutosaveCandidateValid()` and the next Pattern
+  generation for that Scene.
 
 Power loss while writing the runtime target's CRC does not invalidate the
 previous winner. Initial creation is different: an interrupted newly-created
@@ -665,6 +875,88 @@ The Session 047 logging-only 64-byte `ASENSURE` boot-deadline diagnostic
 capsule remains in place for any future lower-layer failures.
 `DEV_MODES.md` owns its exact 72-byte bootlog envelope.
 
+## Resolved: a torn record stopped AutoSave (Session 074)
+
+**Symptoms (hardware, 2026-09-29):**
+
+- edits (including Effect type changes) did not survive a reboot;
+- after a Bank save to a new slot, every boot reloaded the whole Bank from the
+  library instead of restoring AutoSave;
+- nothing was shown to the user.
+
+**Evidence** (`SD_CARD_ATS_BOOT_BUG/`, committed):
+
+- `.hcprms2` was valid (generation 100, Bank 25);
+- `.hcprms1` was **65,536 B**: a torn generation 101 with commit 0 and CRC 0,
+  and 30,768 B of stale cluster data;
+- `settings.cfg` named Bank 27;
+- the trace held 20 boot sessions. From the tenth on: **663 drains admitted,
+  662 aborted, 1 cut off by power-off, 0 published**.
+
+**Cause chain:**
+
+1. An interrupted publication, most likely the 250 ms continuation drain
+   right after an edit, left A open for writing, so AsyncFATFS had stored its
+   cluster-rounded size.
+2. Both validators read past the record **one byte per poll until
+   end-of-file**: 272 chunk reads plus 30,768 single-byte reads = 31,040
+   polls in one phase. The first extra byte had already invalidated the
+   candidate, so the other reads proved nothing.
+3. The DEV stall observer on the runtime drain counted polls with an
+   unchanged phase even while bytes were moving, and aborted at 30,000. That
+   was about 1,040 polls short of end-of-file, every time.
+4. Each error cleared the continuation cache, so every retry (5 s later)
+   re-validated A first and aborted again. The repair step (remove and
+   recreate A) was never reached, and the scalar drain's spinning starved
+   the Pattern drain.
+5. After the user saved the Bank to slot 27, the only valid record still
+   belonged to Bank 25, so every boot saw a Bank mismatch (`V 0x07`) and ran a
+   Case-2 reload of all 16 Scenes (+3.2 s per boot). A working drain would
+   have re-identified the record with Bank 27 on its first run.
+
+**Fix** (commit `50610dd`; `074_SESSION_HANDOFF_LOG.md` §11):
+
+- one validation step shared by the drain and boot validators, with the
+  one-byte end-of-file probe (see "Background writer" step 1);
+- `overlong_mask` in the drain workspace (inside the 2,048 B stage union, so
+  0 B of RAM), reported as `V` flag bits 4..5 by both emitters;
+- the drain's stall observer now counts only polls with **no phase change
+  and no cursor progress**. The progress word is the 16-bit sum of the
+  drain's byte and item cursors. The observer storage stays 5 B, DEV-only
+  (`DEV_MODES.md`, "Stall detection");
+- `tools/decode_devlogs.py` decodes `V` bits 2..5, the 4-bit `X` site field,
+  and names all ten stall sites;
+- **no user error screen**, by user policy, because recovery is automatic.
+
+**Hardware result (2026-09-30, `SD_CARD_ATS_CORRECTION_OUTPUT/`):**
+
+- The first fixed boot showed `V 0x17` at 1,227 ms: winner B, Bank
+  mismatch, A overlong.
+- The first drain published generation 101 into A; that session then
+  published generations 101 → 144 with no stall.
+- The next boot restored from AutoSave (`V 0x03`, generation 144, Bank
+  match), and the reader finished at 1,383 ms with no reload.
+- Both records are 34,768 B and valid, and the torn `.pat06b` was rewritten
+  at 10,656 B.
+
+**Still open:**
+
+- The boot timeout the user also saw was not captured, and no link to this
+  defect was shown. A bench reproduction with `DEV_MODE_DIAGNOSTIC 1` (and
+  if needed `DEV_LOGGING_IWDG 1`) is the next step.
+- A deliberate torn-write reproduction and a card pull mid-drain were not
+  run as separate tests.
+
+**Rules this adds:**
+
+- Every validator proves exact length with a one-byte end-of-file probe.
+  Never stream an overlong tail.
+- Never skip or trust-by-default a candidate after repeated errors (it
+  could be the newer valid record).
+- Do not pre-truncate or size-check records at boot: the publication path
+  already deletes and recreates the inactive record.
+- Do not add a user error screen for failures that recover by themselves.
+
 ## Public API guide
 
 The public boundary is split deliberately. Retained owners use `Autosave.h`;
@@ -676,11 +968,12 @@ boot, policy, and SD orchestration use `filesystem.h`.
 |---|---|---|
 | `autosave_mark*ParameterDirty()` / `autosave_markSourceDirty()` | Mark one retained scalar/source after its owner commits the value | Producer does no file I/O and never computes a raw wire offset |
 | `autosave_markWholeInstrumentDirty()`, `autosave_markKitDirty()`, `autosave_markSceneWithoutPatternDirty()`, `autosave_markSceneWithPatternDirty()`, `autosave_markResidentBankDirty()` | Mark a completed object/region | Scalar names remain excluded; the WithPattern/Bank forms also set the separate Pattern bit |
-| `autosave_markPatternDirty()`, `autosave_patternDirtyMask()`, `autosave_clearPatternDirty()` | Produce/query/transfer one Scene's Pattern work | Separate 16-bit ownership; never alias it to scalar mask bytes |
+| `autosave_markPatternDirty()`, `autosave_patternDirtyMask()`, `autosave_clearPatternDirty()` | Produce/query/transfer one Scene's semantic Pattern work | Separate 16-bit ownership; never alias it to scalar mask bytes |
+| `autosave_markNonSemanticPatternDirty()`, `autosave_nonSemanticPatternDirtyMask()`, `autosave_clearNonSemanticPatternDirty()` | Produce/query/transfer one Scene's non-semantic (physical relocation) Pattern work | Independent 16-bit mask; lowest-priority scheduler rung |
 | `autosave_mask*()` helpers | Atomic take/merge/restore and writer progress | Filesystem consumes the one canonical mask; no second request mask |
 | `autosave_getLivePayloadByte()` | Serialize one live payload coordinate | Writer-side projection only |
-| validation/CRC/format helpers | Stream-validate and construct HCPR v2 | Exact geometry and commit-last rules remain binding |
-| `autosave_applyBankPayload()`, `autosave_applyScenePayload()`, `autosave_applyKitPayload()`, `autosave_applyInstrumentPayload()` | Apply validated HCPR bytes at boot | Tracking must be off; Instrument apply can reject unknown three-byte type text |
+| validation/CRC/format helpers | Stream-validate and construct HCPR v3 | Exact geometry and commit-last rules remain binding |
+| `autosave_applyBankPayload()`, `autosave_applyScenePayload()`, `autosave_applyKitPayload()`, `autosave_applyInstrumentPayload()`, `autosave_applyEffectPayload()` | Apply validated HCPR bytes at boot | Tracking must be off; Effect and Instrument applies reject unknown registry/type tokens |
 | `autosave_extractPayloadSource()` | Read the two-byte source from a validated section | Used for Case-1 defense-in-depth comparison |
 
 ### Filesystem AutoSave API (`filesystem.h`)
@@ -692,7 +985,7 @@ boot, policy, and SD orchestration use `filesystem.h`.
 | `filesystem_validateAutosaveWinnerBlocking()` / `filesystem_hasBootWinner()` | Stage-10b streaming validation and the stage-11 Bank-match gate |
 | `filesystem_autosaveBootReaderBlocking()` | Restore a validated Bank-matching winner with per-row Cases 1/2/3 |
 | `filesystem_regenerateHcnamesFromWinnerBlocking()` | Recover missing/invalid HCNAMES from a validated winner; internal boot orchestration is the normal caller |
-| `filesystem_bootHcnamesAuthoritativeLoad()` | Restore the all-145-rows-refreshed, settings-Bank-matching special state without using HCPR |
+| `filesystem_bootHcnamesAuthoritativeLoad()` | Restore the all-161-rows-refreshed, settings-Bank-matching special state without using HCPR |
 | `filesystem_patternAutosaveBootReaderBlocking()` | Validate/apply eligible per-Scene hidden PAT4 winners after scalar restore |
 | `filesystem_setBootLatchBankFallback()` | Defer whole-Bank dirty publication until tracking becomes live; `main.c` only |
 | `filesystem_bootReaderNoticeSceneMask()` / `filesystem_bootReaderNoticeBankFallback()` | Menu read-and-clear access to one-shot post-boot notices |
@@ -706,6 +999,12 @@ asynchronous request/status/ack facade.
 
 For each new retained scalar:
 
+0. check whether a reserved cell can take it without a format change. A new
+   Scene parameter can be appended into the reserved tail of the 118-byte
+   Scene allocation when zero is a safe restore value for old records (the
+   S072 Effect Morph and S074 bus compressor precedent: extend
+   `AUTOSAVE_SCENE_PARAM_COUNT` and `AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES`,
+   add the getter and reader branches, and assert the group geometry);
 1. identify the owning Bank/Scene/Kit/Instrument/Effect domain;
 2. append or explicitly version its format identifier and live-count contract;
    Phase C source fields are the one documented reserved-space migration;
@@ -717,7 +1016,9 @@ For each new retained scalar:
 8. test mutation, writer error rollback, restart, AutoSave off, and power
    interruption at payload/CRC/commit boundaries appropriate to the change.
 
-Effect support remains a feature extension, not a scalar addition. Any future
+Adding an Effect **type** needs no AutoSave change: the region is
+registry-projected (see `EFFECTS_BUS_REFERENCE.md` §12.3). A new Effect
+**region field** is a format change and follows the steps above. Any future
 Pattern wire/schema expansion likewise requires explicit versioning, bounded
 snapshot/read behavior, recovery semantics, and SRAM approval.
 
@@ -731,7 +1032,10 @@ and shares the existing scheduler/facade. Do not borrow the 9,000-byte name cach
 Hardware validation is accepted for scalar Scene, Kit, Instrument, MIDI
 channel/note, the root Scene publication boundary, and functional Pattern
 AutoSave across all 16 Scenes. No user-changeable Bank scalar exists for an
-extra direct UI test. Live Effect remains excluded.
+extra direct UI test. The S072 Effect projection, Scene Morph byte, `.fx`
+load/save and Effect boot reader are implemented; their card gates are part of
+the Phase 5 acceptance checklist (`072_SESSION_HANDOFF_LOG.md`). The root
+Effect browser remains deferred.
 
 Session 061 hardware-accepted the HCNAMES-authoritative reader with
 `SD_CARD_READER_9`, produced from a Bank 001 Load followed by root Scene 008
@@ -749,6 +1053,11 @@ to exercise the mixed matching-winner Case-1/Case-2 path. The full later
 interaction/failure matrix is in
 `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`; it is not a claim that already
 accepted writer cases are unverified.
+
+Session 074 hardware-verified torn-record recovery on a real torn card (see
+"Resolved: a torn record stopped AutoSave (Session 074)"). It also added the
+bus compressor Scene cells 41..44. Their round trip is covered by the user's
+report that the compressor works; the per-item matrix was not reported.
 
 Session 064 hardware-accepted Pattern AutoSave. The full Card B capture had 19
 valid hidden PAT4 candidates, a changed winner for every Scene, correct
@@ -776,12 +1085,44 @@ necessary because the individual dirty-byte records for one Instrument can
 wrap the fixed trace ring. Its exact flags and packing are owned by
 `AutosaveTrace.h` and `DEV_MODES.md`.
 
+The logging build also audits the scalar dirty-count invariant at low cadence
+(every 1000th `autosave_maskHasDirty()` call). Stage `Z` records the
+maintained `autosave_dirty_count` in value bits 0..15 and a coherent full-mask
+popcount in bits 16..31; its flags carry the maintained count's high byte. A
+mismatch is diagnostic evidence only and does not change the query result or
+dirty state. Logging-off builds omit the audit and its trace allocation.
+
+The shared background CPU budget emits stage `H` reports every ~5 seconds
+(DEV-only). Each report carries per-class charged microseconds, denied-slice
+counts, and maximum single-slice durations for scalar drain, Pattern drain,
+and Pattern repair. These reports are diagnostic only and do not affect
+scheduling or budget decisions. Logging-off builds omit the per-class
+accounting fields (28 bytes) and the `H` trace.
+
 An `ASENSURE` boot timeout additionally freezes a logging-only diagnostic
 capsule before boot recovery destroys the active filesystem state. It observes
 creation only and neither changes record validity nor retries, truncates,
 repairs, or accepts either hidden record. Its exact `/bootlog.bin` envelope is
 owned by `DEV_MODES.md`; this specification deliberately does not duplicate
 the diagnostic wire layout.
+
+Both validators emit one `V` (VALIDATED) record per complete A/B decision:
+the runtime drain (phase 5, or phase 0 on the continuation path) and the
+boot validator (phase 5). `value32` is the winner's generation. Flags
+(`AUTOSAVE_TRACE_VALIDATED_*`, `AutosaveTrace.h`):
+
+- bit 0: a winner exists;
+- bit 1: the winner (0 = A, 1 = B);
+- bit 2: Bank identity mismatch (runtime: slot and name; boot: settings
+  slot only);
+- bit 3: continuation cache (validation skipped);
+- bit 4: A rejected as overlong; bit 5: B rejected as overlong (S074);
+- bits 6..7: reserved zero.
+
+So `0x17` means winner B with a Bank mismatch and a torn A, and `0x03` means
+winner B with the Bank matching. The runtime drain's `X` (PHASE_STALL)
+record is site 2; since S074 it fires only after 30,000 polls with no
+progress (`DEV_MODES.md`).
 
 The reader emits `AUTOSAVE_TRACE_STAGE_BOOT_READER` (`Q`): flags `0x01` mean a
 Case-1 embedded-source mismatch, `0x02` a Case-3 Scene invalidation, `0x04` a

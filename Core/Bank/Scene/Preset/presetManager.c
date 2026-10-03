@@ -48,6 +48,7 @@
 #include "BankData.h"
 #include "Autosave.h"
 #include "AutosaveTrace.h"
+#include "EffectsManager.h"
 #include "mixer.h"
 #include "valueShaper.h"
 #include <string.h>
@@ -152,6 +153,31 @@ enum {
     INSTRUMENT_APPLY_PHASE_TARGET_REBIND
 };
 static uint8_t preset_morph_initialized = 0;
+
+/*
+ * Runtime-only Scene-setting step overlays for the VOICE superpage.
+ *
+ * Inputs: seq_applySceneAutomation() writes one slot's transient audio route
+ * or FX-send amount. Outputs: the effective-value getters expose the overlay
+ * to Menu while the active DSP owner receives its separate runtime update.
+ * Retained SceneData, AutoSave, and Bank-clean state are never changed here.
+ * Each table is six entries of {active,value}, or 12 bytes of normal SRAM.
+ * Transport restore and preset_init() clear both tables.
+ *
+ * Affiliates: preset_applyVoiceAudioOutRuntime() owns the mixer route write;
+ * mixer_calcNextSampleBlock() pulls the effective FX-send getter each block.
+ * presetMorphEngine.c owns the equivalent per-voice Morph overlay and remains
+ * separate because Morph has a worker.
+ */
+static struct {
+    uint8_t active;
+    uint8_t route;
+} audio_out_step_override[INSTRUMENT_SLOT_COUNT];
+
+static struct {
+    uint8_t active;
+    uint8_t amount;
+} fx_send_step_override[INSTRUMENT_SLOT_COUNT];
 
 preset_status_t preset_getStatus(void)
 {
@@ -490,9 +516,10 @@ static void on_scene_load_complete(void)
              scene_index++) {
             if ((pm_kit_request_scene_mask &
                  (uint16_t)(1u << scene_index)) != 0u) {
-                /* A directory-backed Pattern replacement starts its own
-                 * hidden AutoSave generation epoch before dirty marking. */
-                filesystem_resetPatternAutosaveGeneration(scene_index);
+                /* The loaded directory-backed Pattern must be captured by
+                 * AutoSave, but its generation stays above the existing A/B
+                 * pair so one drain cannot resurrect pre-load content. */
+                filesystem_patternAutosaveOnLoad(scene_index);
                 autosave_markSceneWithPatternDirty(scene_index);
             }
         }
@@ -506,7 +533,8 @@ static void on_scene_save_complete(void)
      * Complete one root Scene directory save.
      *
      * Filesystem has already serialized sceneset.scg, the embedded Kit
-     * directory, pattern stub, and effect placeholder. Preset reports only the
+     * directory, named v4 Pattern child, and named `.fx` v2 Effect child.
+     * Preset reports only the
      * operation identity so Menu can clear Save busy state without starting any
      * runtime sound-apply work.
      */
@@ -544,9 +572,10 @@ static void on_bank_load_complete(void)
              scene_index < SCENE_COUNT && scene_index < 16u;
              scene_index++) {
             if ((completed_scene_mask & (uint16_t)(1u << scene_index)) != 0u) {
-                /* The loaded Bank child owns a fresh Pattern source; its next
-                 * AutoSave image must begin at generation 1/file A. */
-                filesystem_resetPatternAutosaveGeneration(scene_index);
+                /* The loaded Bank child owns the new resident Pattern. Mark
+                 * its card-clean authority invalid while preserving the
+                 * monotonic generation seeded from any existing A/B pair. */
+                filesystem_patternAutosaveOnLoad(scene_index);
                 autosave_markSceneWithPatternDirty(scene_index);
             }
         }
@@ -698,23 +727,6 @@ static void preset_syncSceneMorphMirrors(const scene_t *scene)
             scene->settings.voice_morph_amount[slot];
 }
 
-void preset_applyVoiceDecimationAllRuntime(uint8_t value)
-{
-    /*
-     * Apply the Scene-wide decimation multiplier to the mixer runtime.
-     *
-     * Inputs: retained PERF `srt` value in the existing 0..127 menu domain.
-     * Output: mixer_decimation_rate[6] receives the same tapered value used by
-     * the legacy VOICE_DECIMATION_ALL MIDI CC path. This stays separate from
-     * preset_setVoiceDecimationAll() so Scene apply can mirror already-retained
-     * settings without pretending the user edited the parameter again.
-     */
-    if (value > 127u)
-        value = 127u;
-    mixer_decimation_rate[INSTRUMENT_SLOT_COUNT] =
-        valueShaperI2F(value, -0.7f);
-}
-
 /* -----------------------------------------------------------------------
 ** preset_init — reset Preset async state and initialize Scene-owned morph
 ** application helpers. Filesystem mount is still handled by asyncfatfs.
@@ -725,6 +737,8 @@ void preset_init(void)
     pm_completed_op = PRESET_OP_NONE;
     pm_request_slot = 0;
     pm_request_type = SAVE_TYPE_KIT;
+    preset_clearAllAudioOutStepOverrides(0u);
+    preset_clearAllFxSendStepOverrides();
     preset_ensureMorphInitialized();
 }
 
@@ -892,8 +906,7 @@ static void preset_storeInstrumentEndpoint(uint8_t scene_index,
 uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
                                       uint8_t descriptor_index,
                                       instrument_image_select_t image,
-                                      uint8_t value,
-                                      uint8_t record_automation)
+                                      uint8_t value)
 {
     kit_instrument_slot_t *instrument = scene_instrumentSlot(scene_index, slot);
     const ParamDescriptor *descriptor;
@@ -913,8 +926,9 @@ uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
      * import should not write the Scene arrays directly. The setter enforces
      * descriptor ownership/range, chooses the persisted endpoint, commits only
      * a changed byte through the generic endpoint/Autosave boundary, and
-     * schedules Morph interpolation so the runtime image and DSP backend follow
-     * the Scene state. Affiliate code: presetMorphEngine owns
+     * re-interpolates only the edited parameter so the runtime image and DSP
+     * backend follow the Scene state. A parameter held by step automation keeps
+     * its runtime value until the next trigger. Affiliate code: presetMorphEngine owns
      * morph_interpolation[], while preset_applyInstrumentRuntimeValueInternal()
      * owns the temporary legacy DSP mirror.
      */
@@ -924,26 +938,21 @@ uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
     if (scene_index == scene_getActiveIndex()) {
         scene_t *scene = scene_get(scene_index);
         preset_ensureMorphInitialized();
-        if (record_automation && image == INSTRUMENT_IMAGE_MAIN &&
-            scene && scene_getVoiceMorphAmount(scene_index, slot) == 0u) {
-            (void)preset_applyInstrumentRuntimeValueInternal(
-                scene_index,
-                instrumentParam_make(slot, descriptor_index),
-                value,
-                1u);
-        }
         /*
-         * Endpoint edits are slot-local under per-voice Morph.
+         * Apply the edited endpoint's interpolation now (S075 F3).
          *
-         * Inputs: the edited slot/descriptor endpoint and the retained
-         * per-slot Morph amount in SceneData. Output: only that slot is queued
-         * for interpolation; other voices keep their current Morph positions.
-         * This preserves dynamic instrument membership because the worker will
-         * still ask InstrumentManager which descriptors are morphable for the
-         * slot's current type.
+         * Inputs: the endpoint stored above. Output: morph_interpolation[] and,
+         * unless automation holds the parameter, the runtime value of this one
+         * parameter at the voice's resolved Morph amount. The former raw write
+         * ignored the automation overlay and a `Nvm`/LFO Morph amount. The whole
+         * voice is no longer queued, so no other parameter's interpolation
+         * changes and automated parameters are not rewritten.
+         * Affiliates: presetMorph_applyParameterNow(),
+         * seq_restoreAutomatedParameters().
          */
         if (scene)
-            presetMorph_requestVoice(scene_index, slot);
+            presetMorph_applyParameterNow(scene_index, slot,
+                                          descriptor_index);
     }
     return 1u;
 }
@@ -984,6 +993,58 @@ uint8_t preset_setSupplementalParameter(uint8_t scene_index, uint8_t slot,
     return 1u;
 }
 
+/*
+ * Enter one instrument parameter from external MIDI (S075 F3, user P1:
+ * MIDI takes the lowest priority).
+ *
+ * What: stores `value` as the active Scene's Normal endpoint of one descriptor
+ * and queues that voice for the Morph sweep. Nothing is written to the runtime
+ * here: the sweep applies the new interpolation whenever it reaches the
+ * parameter, and skips it while step automation holds it. Non-morphable
+ * parameters go through preset_setSupplementalParameter(), the same path as a
+ * menu edit.
+ * Why: automation wins, then menu edits, then MIDI. A CC is an endpoint entry,
+ * not a runtime override, so it can override neither automation nor the Morph
+ * interpolation.
+ * Inputs: slot 0..5, descriptor-local index for the active Scene's slot type,
+ * and a value already clamped to the descriptor domain.
+ * Output: 1 when stored/queued, 0 for an invalid slot/descriptor. Retention: a
+ * changed byte marks its AutoSave Normal cell and clears the Scene card-clean
+ * bit, like a menu edit. Active Scene only (no edit-mask fan-out).
+ * Client: MidiParser.c midiParser_enterTaggedParameter(). Affiliates:
+ * preset_storeInstrumentEndpoint(), presetMorph_requestVoice(),
+ * seq_automationHoldsParameter().
+ */
+uint8_t preset_setInstrumentParameterFromMidi(uint8_t slot,
+                                              uint8_t descriptor_index,
+                                              uint8_t value)
+{
+    const uint8_t scene_index = scene_getActiveIndex();
+    const kit_instrument_slot_t *instrument =
+        scene_instrumentSlotConst(scene_index, slot);
+    const ParamDescriptor *descriptor;
+
+    /*
+     * Contract in presetManager.h. Lowest priority: store and queue only.
+     * The sweep's guarded write (presetMorph_writeRuntimeBase()) decides when,
+     * and whether, the runtime changes.
+     */
+    if (!instrument)
+        return 0u;
+    descriptor = instrumentManager_descriptor(instrument->type,
+                                              descriptor_index);
+    if (!descriptor)
+        return 0u;
+    if (!(descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE))
+        return preset_setSupplementalParameter(scene_index, slot,
+                                               descriptor_index, value);
+    preset_storeInstrumentEndpoint(scene_index, slot, descriptor_index,
+                                   INSTRUMENT_IMAGE_MAIN, value);
+    preset_ensureMorphInitialized();
+    presetMorph_requestVoice(scene_index, slot);
+    return 1u;
+}
+
 uint8_t preset_applyKitAudioRouting(uint8_t scene_index, uint8_t slot)
 {
     const scene_t *scene = scene_getConst(scene_index);
@@ -1010,6 +1071,161 @@ uint8_t preset_applyKitAudioRouting(uint8_t scene_index, uint8_t slot)
     return 1u;
 }
 
+void preset_applyVoiceAudioOutRuntime(uint8_t slot, uint8_t route)
+{
+    /*
+     * Apply one voice's output route as a transient runtime overlay.
+     *
+     * Inputs: zero-based instrument slot and route in the mixer enum domain.
+     * Output: active mixer routing changes without a SceneData write, an
+     * AutoSave dirty mark, or Bank-clean invalidation. Client: Scene-target
+     * step automation. Restore affiliate: preset_applyKitAudioRouting()
+     * reads the retained Scene route at the transport boundary.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    if (route > MIXER_ROUTING_DAC2_R)
+        route = MIXER_ROUTING_DAC1_STEREO;
+    mixer_audioRouting[slot] = route;
+}
+
+void preset_setAudioOutStepOverride(uint8_t slot, uint8_t route)
+{
+    /*
+     * Store one transient audio-out route for effective-value display.
+     *
+     * Inputs: zero-based instrument slot and mixer route. Output: the route is
+     * retained in the runtime overlay without touching SceneData or AutoSave;
+     * preset_applyVoiceAudioOutRuntime() performs the independent mixer write.
+     * Client: sequencer Scene-target automation. Restore: the clear helper.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    if (route > MIXER_ROUTING_DAC2_R)
+        route = MIXER_ROUTING_DAC1_STEREO;
+    audio_out_step_override[slot].active = 1u;
+    audio_out_step_override[slot].route = route;
+}
+
+void preset_clearAllAudioOutStepOverrides(uint8_t scene_index)
+{
+    uint8_t slot;
+
+    /*
+     * Clear every transient audio-out route overlay.
+     *
+     * Input: active Scene index supplied by the transport restore owner; it is
+     * intentionally unused because the retained route restore is performed by
+     * preset_applyKitAudioRouting() per dirty target. Output: all effective
+     * getters fall back to retained SceneData, with no persistence mutation.
+     */
+    (void)scene_index;
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        audio_out_step_override[slot].active = 0u;
+        audio_out_step_override[slot].route = 0u;
+    }
+}
+
+uint8_t preset_getEffectiveAudioOut(uint8_t scene_index, uint8_t slot)
+{
+    /*
+     * Read one voice's effective audio-out route.
+     *
+     * Inputs: resident Scene index and zero-based voice slot. Output: the
+     * active step overlay route when present, otherwise the retained Scene
+     * route. This read-only bridge feeds the live Scene superpage display.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    if (audio_out_step_override[slot].active)
+        return audio_out_step_override[slot].route;
+    return scene_getVoiceAudioOut(scene_index, slot);
+}
+
+void preset_setFxSendStepOverride(uint8_t slot, uint8_t amount)
+{
+	/*
+	 * Store one transient FX-send amount for the live mixer overlay.
+	 *
+	 * Inputs: zero-based voice slot and 0..127 amount. Output: runtime-only
+	 * overlay state read by preset_getEffectiveFxSendAmount(), then pulled by
+	 * mixer_calcNextSampleBlock() on the next render block; retained
+	 * SceneData/AutoSave remain untouched. Client: sequencer Scene-target
+	 * automation. Restore: the clear helper.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    if (amount > 127u)
+        amount = 127u;
+    fx_send_step_override[slot].active = 1u;
+    fx_send_step_override[slot].amount = amount;
+}
+
+void preset_clearAllFxSendStepOverrides(void)
+{
+    uint8_t slot;
+
+	/*
+	 * Clear every transient FX-send display overlay.
+	 *
+	 * Inputs: none. Output: effective-value reads fall back to retained Scene
+	 * settings and the mixer send ramp converges to the retained value on its
+	 * next block. This helper owns the runtime lifetime of the sequencer overlay
+	 * while the mixer owns the audible send application.
+     */
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        fx_send_step_override[slot].active = 0u;
+        fx_send_step_override[slot].amount = 0u;
+    }
+}
+
+uint8_t preset_getEffectiveFxSendAmount(uint8_t scene_index, uint8_t slot)
+{
+    uint8_t normal;
+    uint8_t morph;
+    uint8_t amount;
+
+    /*
+     * Read one voice's effective (audible) FX-send amount.
+     *
+     * Inputs: resident Scene index and zero-based voice slot. Output: the
+     * active step overlay while present; otherwise the Normal/Morph endpoints
+     * interpolated by the voice's resolved Morph amount (S075 F2-H):
+     * normal + (morph - normal) * amount / 255, rounded. Equal endpoints
+     * return without resolving Morph. Caller: mixer, every block. Menu uses
+     * preset_getFxSendDisplayAmount() for endpoint display.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    if (fx_send_step_override[slot].active)
+        return fx_send_step_override[slot].amount;
+    normal = scene_getVoiceFxSendAmount(scene_index, slot);
+    morph = scene_getVoiceFxSendMorph(scene_index, slot);
+    if (normal == morph)
+        return normal;
+    amount = presetMorph_getResolvedVoiceAmount(scene_index, slot);
+    /* 127 * 255 + 127 fits uint16_t. */
+    return (uint8_t)(((uint16_t)normal * (uint16_t)(255u - amount) +
+                      (uint16_t)morph * amount + 127u) / 255u);
+}
+
+uint8_t preset_getFxSendDisplayAmount(uint8_t scene_index, uint8_t slot)
+{
+    /*
+     * Value shown by the VOICE mix FX-send cell in Normal view (S075 F2-H).
+     *
+     * Output: active step override while one plays, otherwise the retained
+     * Normal endpoint. Never the interpolated send; Morph view reads the
+     * retained Morph endpoint directly, like instrument endpoint images.
+     * Caller: menu_cellDisplayValue().
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    if (fx_send_step_override[slot].active)
+        return fx_send_step_override[slot].amount;
+    return scene_getVoiceFxSendAmount(scene_index, slot);
+}
+
 uint8_t preset_setVoiceAudioOut(uint8_t scene_index, uint8_t slot,
                                 uint8_t route)
 {
@@ -1032,13 +1248,14 @@ uint8_t preset_setVoiceAudioOut(uint8_t scene_index, uint8_t slot,
 uint8_t preset_setVoiceFxSendAmount(uint8_t scene_index, uint8_t slot,
                                     uint8_t amount)
 {
-    /*
-     * Retain one Scene FX-send amount without runtime side effects yet.
-     *
-     * Inputs: resident Scene index, zero-based instrument slot, and 0..127
-     * amount. Output: SceneData retains the value. The eventual FX bus should
-     * attach its active-scene runtime write here so Menu/storage callers keep
-     * one owner boundary.
+	/*
+	 * Retain one Scene FX-send amount for the block-rate mixer consumer.
+	 *
+	 * Inputs: resident Scene index, zero-based instrument slot, and 0..127
+	 * amount. Output: SceneData retains the value; the active mixer pulls the
+	 * effective amount on its next block, including any step overlay. Menu and
+	 * storage callers therefore keep one owner boundary without a second runtime
+	 * copy.
      */
     if (!scene_get(scene_index) || slot >= INSTRUMENT_SLOT_COUNT)
         return 0u;
@@ -1048,20 +1265,43 @@ uint8_t preset_setVoiceFxSendAmount(uint8_t scene_index, uint8_t slot,
     return 1u;
 }
 
-uint8_t preset_setVoiceFaderSetting(uint8_t scene_index, uint8_t slot,
-                                    uint8_t mode)
+uint8_t preset_setVoiceFxSendMorph(uint8_t scene_index, uint8_t slot,
+                                   uint8_t amount)
 {
     /*
-     * Retain one Scene fader mode without runtime side effects yet.
+     * Retain one Scene FX-send Morph endpoint (S075 F2-H).
      *
-     * Inputs: resident Scene index, zero-based instrument slot, and 0..2 mode.
-     * Output: SceneData retains the mode. Future fader topology code should
-     * add active-scene apply here instead of teaching Menu about mixer internals.
+     * Inputs: resident Scene index, zero-based instrument slot, and 0..127
+     * amount. Output: SceneData retains the value and marks its AutoSave cell;
+     * the mixer reads it on the next block. Client: Menu Morph view and
+     * clearOps.c `clear send`.
      */
     if (!scene_get(scene_index) || slot >= INSTRUMENT_SLOT_COUNT)
         return 0u;
-    if (mode > 2u)
-        mode = 2u;
+    if (amount > 127u)
+        amount = 127u;
+    scene_setVoiceFxSendMorph(scene_index, slot, amount);
+    return 1u;
+}
+
+uint8_t preset_setVoiceFaderSetting(uint8_t scene_index, uint8_t slot,
+                                    uint8_t mode)
+{
+	/*
+	 * Retain one Scene fader mode for the block-rate mixer consumer.
+	 *
+	 * Inputs: resident Scene index, zero-based instrument slot, and a
+	 * 0..SCENE_FADER_SETTING_MAX mode (0..3). Output: SceneData retains the
+	 * mode; the active mixer pulls it on its next block and applies the
+	 * PRE/POST/FX/XFD topology beside the voice send tap (XFD, S074: the
+	 * fader crossfades from the FX send at the bottom to the dry output at
+	 * the top). Menu and storage callers remain independent of mixer
+	 * internals.
+     */
+    if (!scene_get(scene_index) || slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    if (mode > SCENE_FADER_SETTING_MAX)
+        mode = SCENE_FADER_SETTING_MAX;
     scene_setVoiceFaderSetting(scene_index, slot, mode);
     return 1u;
 }
@@ -1105,7 +1345,7 @@ void preset_applySceneSettings(uint8_t scene_index)
      * Apply immediate Scene-wide settings that still have legacy mirrors.
      *
      * Inputs: active Scene index. Outputs: flat PERF mirrors are synchronized
-     * from retained Scene settings and global decimation is applied. Instrument
+     * from retained Scene settings and the PERF `fxm` mirror is refreshed. Instrument
      * runtime parameters, voice LFO slots/targets, audio out, future FX sends,
      * and fader assignments are deliberately excluded; the deferred slot worker
      * commits those per-instrument affiliates only when the old envelope is quiet
@@ -1114,12 +1354,27 @@ void preset_applySceneSettings(uint8_t scene_index)
      * This must not call preset_morph(), because preset_morph() is now the
      * user-facing bulk-set operation and would overwrite distinct per-voice Morph
      * values loaded from future sceneset.scg data.
-     */
+    */
     preset_ensureMorphInitialized();
     preset_syncSceneMorphMirrors(scene);
-    parameter_values[PAR_VOICE_DECIMATION_ALL] =
-        scene->settings.voice_decimation_all;
-    preset_applyVoiceDecimationAllRuntime(scene->settings.voice_decimation_all);
+    /*
+     * Queue the newly active Scene's per-voice Morph image.
+     *
+     * Inputs: the active Scene whose retained Morph mirrors were just copied.
+     * Output: all six voices enter the bounded Morph worker, closing the gap
+     * between Scene-switch mirror refresh and the deferred per-slot image swap.
+     * The call changes neither retained SceneData nor AutoSave state; the
+     * deferred slot worker still performs the synchronous final apply when a
+     * voice must be committed before its next trigger.
+     *
+     * Affiliate: presetMorph_rebuildScene() reads each Scene's voice-local
+     * amount and preserves the existing one-descriptor-per-foreground-tick
+     * budget.
+     */
+    presetMorph_rebuildScene(scene_index);
+    /* S074: page mirrors follow the newly active Scene. */
+    preset_syncBusCompMirrors();
+    preset_syncEffectMorphMirror();
 }
 
 static void preset_storeSupplementalCell(uint8_t scene_index,
@@ -1349,6 +1604,8 @@ void preset_sendDrumsetParameters(void)
     instrumentManager_clearAllRuntimeModulationTargets();
     preset_ensureMorphInitialized();
     preset_applySceneSettings(scene_getActiveIndex());
+    /* Activate the retained Effect beside the synchronous Scene settings. */
+    effects_activateScene(scene_getActiveIndex());
     for (voice = 0; voice < 6u; voice++)
         preset_resetAndApplyKitVoiceImage(scene_getActiveIndex(), voice);
 
@@ -1382,6 +1639,8 @@ void preset_startDrumsetApply(void)
     instrumentManager_clearAllRuntimeModulationTargets();
     preset_ensureMorphInitialized();
     preset_applySceneSettings(scene_getActiveIndex());
+    /* The deferred Scene worker uses the same immediate Effect activation. */
+    effects_activateScene(scene_getActiveIndex());
     drumset_apply_scene = scene_getActiveIndex();
     drumset_apply_pending_mask =
         (uint16_t)((1u << INSTRUMENT_SLOT_COUNT) - 1u);
@@ -1389,6 +1648,16 @@ void preset_startDrumsetApply(void)
     drumset_apply_voice = 0u;
     /* A new Scene worker must not inherit non-progress from its predecessor. */
     drumset_apply_stall_ticks = 0u;
+}
+
+/*
+ * Report whether the Scene and Instrument apply workers are idle (S075).
+ *
+ * Contract in presetManager.h; reads the two worker flags only.
+ */
+uint8_t preset_applyWorkersIdle(void)
+{
+    return (uint8_t)(!drumset_apply_active && !instrument_apply_active);
 }
 
 uint8_t preset_tickDrumsetApply(void)
@@ -1799,9 +2068,49 @@ void preset_startInstrumentMorphApply(uint8_t scene_index, uint8_t slot)
     }
 }
 
+/*
+ * Move `self` LFO voice selectors of a copied Instrument to its new slot.
+ *
+ * Inputs: destination image, its type, the one-based source and destination
+ * slot numbers. Output: every LFO voice-selector cell (both LFOs) in the
+ * Normal, Morph and interpolation images that held the source slot now holds
+ * the destination slot; every other selector (other voices, `scn`, `fx`) is
+ * unchanged. Why: Kit/Instrument Save writes `self` for a selector equal to
+ * the own slot, and a resident copy must keep the same meaning (S075, spec
+ * §4.4 `copy instrument`). Caller: preset_startInstrumentApplyImage().
+ */
+static void preset_retargetSelfLfoVoice(kit_instrument_slot_t *slot_image,
+                                        uint8_t source_voice,
+                                        uint8_t dest_voice)
+{
+    instrument_parameter_images_t *images;
+    uint8_t i;
+
+    if (!slot_image || source_voice == dest_voice)
+        return;
+    images = &slot_image->parameter_images;
+    for (i = 0u; i < INSTRUMENT_PARAM_COUNT; i++) {
+        const ParamDescriptor *descriptor =
+            instrumentManager_descriptor(slot_image->type, i);
+
+        if (!descriptor)
+            break;
+        if (descriptor->runtime.kind != INSTRUMENT_BIND_LFO_TARGET_VOICE &&
+            descriptor->runtime.kind != INSTRUMENT_BIND_LFO_TARGET_VOICE_2)
+            continue;
+        if (images->instrument_parameters[i] == source_voice)
+            images->instrument_parameters[i] = dest_voice;
+        if (images->morph_instrument_parameters[i] == source_voice)
+            images->morph_instrument_parameters[i] = dest_voice;
+        if (images->morph_interpolation[i] == source_voice)
+            images->morph_interpolation[i] = dest_voice;
+    }
+}
+
 static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged,
                                              uint16_t destination_mask,
                                              uint8_t slot,
+                                             uint8_t source_slot,
                                              instrument_type_t expected_type,
                                              uint8_t mark_autosave_whole_instrument)
 {
@@ -1824,6 +2133,11 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
      * Affiliates: preset_startInstrumentApply(),
      * preset_loadInstrumentTemp(), filesystem_loadedInstrumentSlot(),
      * and filesystem_instrumentLoadPreviewOriginal().
+     *
+     * S075: source_slot names the slot the image came from. Loads pass
+     * source_slot == slot (unchanged behaviour); preset_startInstrumentCopy()
+     * passes the resident source slot so `self` LFO selectors are moved to
+     * the destination slot after the assignment below.
      */
     instrument_apply_active = 0u;
     if (!staged || slot >= INSTRUMENT_SLOT_COUNT ||
@@ -1862,6 +2176,18 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
         bank_setScenePresentMask((uint16_t)(bank_scenePresentMask() |
                                             (uint16_t)(1u << target_scene_index)));
         scene->kit.instruments[slot] = *staged;
+        /*
+         * S075: an Instrument copied from another slot keeps "self" LFO
+         * targets pointing at itself. Kit Save writes `self` for a selector
+         * equal to the own slot; a resident copy applies the same rule by
+         * moving source_slot+1 selectors to slot+1 in the Normal, Morph and
+         * interpolation images before the runtime binds them. Loads pass
+         * source_slot == slot and are unchanged.
+         */
+        if (source_slot != slot && source_slot < INSTRUMENT_SLOT_COUNT)
+            preset_retargetSelfLfoVoice(&scene->kit.instruments[slot],
+                                        (uint8_t)(source_slot + 1u),
+                                        (uint8_t)(slot + 1u));
         /*
          * Option 2: a root Instrument Load or reversible kit restore replaces
          * the resident instrument image from a source other than the exact Bank
@@ -1946,9 +2272,31 @@ void preset_startInstrumentApply(uint8_t scene_index,
      * retained Instrument payload for AutoSave. Affiliates:
      * on_instrument_load_complete() and Menu completion polling.
      */
-    preset_startInstrumentApplyImage(staged, destination_mask, slot,
+    preset_startInstrumentApplyImage(staged, destination_mask, slot, slot,
                                      (instrument_type_t)pm_instrument_request_type,
                                      mark_autosave_whole_instrument);
+}
+
+/*
+ * Commit one resident Instrument slot onto a slot in a set of Scenes (S075).
+ *
+ * Contract in presetManager.h. The source image is read live from the
+ * resident source Scene (user: source reads are live); it is never modified
+ * because a destination equal to the source coordinates assigns identical
+ * bytes and the `self` retarget only touches destination copies.
+ */
+void preset_startInstrumentCopy(uint8_t src_scene, uint8_t src_slot,
+                                uint16_t dst_mask, uint8_t dst_slot)
+{
+    const scene_t *source = scene_getConst(src_scene);
+
+    if (!source || src_slot >= INSTRUMENT_SLOT_COUNT ||
+        dst_slot >= INSTRUMENT_SLOT_COUNT || dst_mask == 0u)
+        return;
+    preset_startInstrumentApplyImage(&source->kit.instruments[src_slot],
+                                     dst_mask, dst_slot, src_slot,
+                                     source->kit.instruments[src_slot].type,
+                                     1u);
 }
 
 uint8_t preset_saveInstrumentTemp(uint8_t source_scene, uint8_t source_slot)
@@ -2833,6 +3181,8 @@ void preset_morphScene(uint8_t scene_index, uint8_t morph)
         return;
     scene_setMorphAmount(scene_index, morph);
     scene_setAllVoiceMorphAmounts(scene_index, morph);
+    /* Global Morph also owns the retained Scene Effect Morph amount. */
+    scene_setEffectMorphAmount(scene_index, morph);
     if (scene_index == scene_getActiveIndex()) {
         preset_syncSceneMorphMirrors(scene);
         presetMorph_requestAll(scene_index);
@@ -2891,30 +3241,65 @@ void preset_rebuildMorph(void)
     presetMorph_rebuildScene(scene_index);
 }
 
-void preset_setVoiceDecimationAll(uint8_t scene_index, uint8_t value)
+/* S075: the former global `srt` setter was retired with its Scene field. */
+
+/*
+ * Keep SceneData and the four S074 page mirrors on the same field order.
+ *
+ * A compile-time failure here means ParameterArray and SceneData no longer
+ * describe the same contiguous cmp/cam/ctm/csc group.
+ */
+_Static_assert(PAR_BUS_COMP_SIDECHAIN - PAR_BUS_COMP_MODE + 1 ==
+                   SCENE_BUS_COMP_FIELD_COUNT,
+               "bus compressor mirrors must match SceneData field order");
+
+void preset_setBusCompSetting(uint8_t scene_index, uint8_t field,
+                              uint8_t value)
 {
-    scene_t *scene = scene_get(scene_index);
+    /*
+     * Retain one S074 bus compressor setting for one Scene.
+     *
+     * Inputs: Scene index, field, and any byte. Outputs: clamped SceneData
+     * storage plus AutoSave/card-clean ownership; the active Scene's mirror
+     * is updated only when this Scene is active, so a fan-out never displays a
+     * non-active Scene's value. No runtime push is needed.
+     */
+    if (!scene_get(scene_index) || field >= SCENE_BUS_COMP_FIELD_COUNT)
+        return;
+    value = scene_busCompClamp(field, value);
+    scene_setBusCompSetting(scene_index, field, value);
+    if (scene_index == scene_getActiveIndex())
+        parameter_values[PAR_BUS_COMP_MODE + field] = value;
+}
+
+void preset_syncBusCompMirrors(void)
+{
+    const uint8_t scene_index = scene_getActiveIndex();
+    uint8_t field;
 
     /*
-     * Retain and apply Scene global decimation.
-     *
-     * Inputs: Scene index and PERF `srt` value in the 0..127 menu domain.
-     * Outputs: scene_settings_t::voice_decimation_all is retained,
-     * parameter_values[] is mirrored for the PERF page, and the active Scene's
-     * mixer global decimation multiplier is updated. This function is separate
-     * from the MIDI CC handler so future sceneset.scg load/save has one owner
-     * for the retained setting and runtime side effect. The normalized byte is
-     * committed through SceneData's changed-value Autosave boundary before the
-     * runtime mirrors below are updated.
+     * Copy the active Scene's retained cmp/cam/ctm/csc values into the flat
+     * page mirrors. Callers are Scene activation, page edits and the Global
+     * bulk-apply guard; SceneData is read-only in this helper.
      */
-    if (!scene)
-        return;
-    if (value > 127u)
-        value = 127u;
-    scene_setVoiceDecimationAll(scene_index, value);
-    parameter_values[PAR_VOICE_DECIMATION_ALL] = value;
-    if (scene_index == scene_getActiveIndex())
-        preset_applyVoiceDecimationAllRuntime(value);
+    for (field = 0u; field < SCENE_BUS_COMP_FIELD_COUNT; field++)
+        parameter_values[PAR_BUS_COMP_MODE + field] =
+            scene_getBusCompSetting(scene_index, field);
+}
+
+/*
+ * Copy the active Scene's Effect Morph amount into the PERF `fxm` mirror.
+ *
+ * What: read-only refresh of parameter_values[PAR_EFFECT_MORPH] from
+ * SceneData. Why: retained Effect Morph changes on the Effect page, through
+ * edit-mask fan-out, Scene activation, and copy/clear. Output: one mirror byte;
+ * no retained write and no AutoSave mark. Affiliates: Scene apply, Menu's
+ * `fxm` commit path, and EffectsManager.
+ */
+void preset_syncEffectMorphMirror(void)
+{
+    parameter_values[PAR_EFFECT_MORPH] =
+        scene_getEffectMorphAmount(scene_getActiveIndex());
 }
 
 void preset_morphTick(void)

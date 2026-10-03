@@ -8,6 +8,9 @@ The firmware can produce these root *.bin traces:
   64-byte HCPRMS capsule when the token is ASENSURE;
 - /asavetrc.bin - a stream of eight-byte AutoSave lifecycle records
   (stage, flags, tick16, value32).
+  Stage 'c' records (S075) witness Phase 6 copy/clear operations, jobs,
+  drops, anomalies, early trigger writes and restores, trickle-rate work,
+  suspension edges and the name-buffer loan.
 
 With no arguments the decoder scans the repository-root SD_CARD/ for every
 *.bin trace file, creates SD_CARD/logs/ when missing, and writes one
@@ -23,7 +26,8 @@ field meanings.
 
 Format authorities: knowledge_files/specification_reference/DEV_MODES.md,
 Core/Bank/Scene/AutosaveTrace.h, Core/Bank/Scene/Autosave.h, and
-Core/Hardware/SD/filesystem.c.
+Core/Hardware/SD/filesystem.c. Session 072 Steps 3–4 add Scene parameter 40,
+the live Effect type-token bytes, and the 419-cell Effect projection.
 """
 
 from __future__ import annotations
@@ -114,6 +118,11 @@ STAGE_ENUM = {
     "E": "AUTOSAVE_TRACE_STAGE_OPERATION_ERROR",
     "Y": "AUTOSAVE_TRACE_STAGE_SCAN_PARENT_DIAG",
     "Q": "AUTOSAVE_TRACE_STAGE_BOOT_READER",
+    "Z": "AUTOSAVE_TRACE_STAGE_DIRTY_COUNT_MISMATCH",
+    # H: DEV-only shared background-budget interval summary.
+    "H": "AUTOSAVE_TRACE_STAGE_BUDGET_REPORT",
+    # c: S075 Phase 6 copy/clear lifecycle and risk witness.
+    "c": "AUTOSAVE_TRACE_STAGE_COPY_CLEAR",
 }
 
 STAGE_PRODUCER = {
@@ -148,12 +157,43 @@ STAGE_PRODUCER = {
          "producer no longer exists (the bug it was diagnosing was fixed "
          "by eliminating the code path), kept only to decode already-"
          "captured Session 054 evidence",
+    "Z": "autosave_maskHasDirty() DEV population audit",
+    "H": "filesystem_backgroundBudgetRefill()",
+    "c": "Core/Menu/CopyClear/* and filesystem suspension/loan witnesses",
 }
 
+# AUTOSAVE_TRACE_PHASE_STALL_SITE_* (AutosaveTrace.h). Session 057 widened the
+# site field to four bits and added sites 3..9; this table lagged behind until
+# S074. PHASE_STALL_BEHAVIOUR records what each observer does when it fires
+# (DEV_MODES.md "Stall detection" table), so a decoded X record states whether
+# the operation was aborted or only observed.
 PHASE_STALL_SITES = {
     0: "delete-slot resolver (filesystem_deleteSlotDirectory_tick)",
     1: "Bank Save entry (filesystem_saveBankDirectory_tick)",
     2: "runtime AutoSave drain (filesystem_autosaveParameterDrain_tick)",
+    3: "Kit Save (filesystem_saveKitDirectory_tick)",
+    4: "Scene Save (filesystem_saveSceneDirectory_tick)",
+    5: "Kit Load (filesystem_loadKitDirectory_tick)",
+    6: "Scene Load (filesystem_loadSceneDirectory_tick)",
+    7: "Bank Load entry (filesystem_loadBankDirectory_tick)",
+    8: "settings write (filesystem_saveGlobals_tick)",
+    9: "flush finish (filesystem_flushFinish_tick)",
+}
+
+PHASE_STALL_BEHAVIOUR = {
+    0: ("partial abort: only the pre-delete scan phases abort; a native "
+        "deleteTree() in progress is observed only"),
+    1: "observation only (Session 057)",
+    2: ("abort: 30,000 consecutive polls with no phase change and no cursor "
+        "progress (progress-aware since S074) force FS_STATUS_ERROR; the "
+        "writer retries after five seconds with the dirty mask intact"),
+    3: "abort (FS_STATUS_ERROR)",
+    4: "observation only (Session 057)",
+    5: "abort (FS_STATUS_ERROR)",
+    6: "abort (FS_STATUS_ERROR)",
+    7: "abort (FS_STATUS_ERROR)",
+    8: "abort (FS_STATUS_ERROR)",
+    9: "abort (FS_STATUS_ERROR)",
 }
 
 SAVE_LIFECYCLE_TYPES = {0: "Kit", 1: "Scene", 2: "Bank", 3: "Instrument"}
@@ -331,24 +371,56 @@ ENTRY_PHASES = {
 }
 
 # AutoSave payload geometry (payload-relative), from Autosave.h/AUTOSAVE.md.
+# Session 060 Phase C added 2-byte source fields after each 8-byte name,
+# shifting parameters from offset 8 to 10 (Scene/Kit) and 11 to 13
+# (Instrument).
 BANK_BYTES = 128
+VOICE_EDIT_MASK_OFFSET = 13
+VOICE_EDIT_MASK_BYTES = 16 * 2
 SCENE_BYTES = 1920
-SCENE_PARAMS_OFF = 8
-SCENE_PARAM_COUNT = 40
+SCENE_NAME_BYTES = 8
+SCENE_SOURCE_OFF = 8
+SCENE_SOURCE_BYTES = 2
+SCENE_PARAMS_OFF = 10
+SCENE_PARAM_COUNT = 41
 EFFECT_OFF = 128
 EFFECT_BYTES = 512
 KIT_OFF = 640
-KIT_PARAMS_OFF = 8
+KIT_NAME_BYTES = 8
+KIT_SOURCE_OFF = 8
+KIT_SOURCE_BYTES = 2
+KIT_PARAMS_OFF = 10
 KIT_PARAM_COUNT = 2
 KIT_INST_OFF = 128
 INST_BYTES = 192
 INST_TYPE_BYTES = 3
 INST_NAME_OFF = 3
 INST_NAME_BYTES = 8
-INST_NORMAL_OFF = 11
+INST_SOURCE_OFF = 11
+INST_SOURCE_BYTES = 2
+INST_NORMAL_OFF = 13
 INST_NORMAL_BYTES = 72
-INST_MORPH_OFF = 83
+INST_MORPH_OFF = 85
 INST_MORPH_BYTES = 72
+
+SCENE_PARAM_NAMES = {
+    0: "mrp",
+    1: "1vm", 2: "2vm", 3: "3vm", 4: "4vm", 5: "5vm", 6: "6vm",
+    7: "srt",
+    8: "1ou", 9: "2ou", 10: "3ou", 11: "4ou", 12: "5ou", 13: "6ou",
+    14: "1fx", 15: "2fx", 16: "3fx", 17: "4fx", 18: "5fx", 19: "6fx",
+    20: "fdr0", 21: "fdr1", 22: "fdr2", 23: "fdr3", 24: "fdr4", 25: "fdr5",
+    26: "mch0", 27: "mch1", 28: "mch2", 29: "mch3", 30: "mch4", 31: "mch5",
+    32: "mch6",
+    33: "mnt0", 34: "mnt1", 35: "mnt2", 36: "mnt3", 37: "mnt4", 38: "mnt5",
+    39: "mnt6",
+    40: "fxm_amt",
+}
+
+KIT_PARAM_NAMES = {
+    0: "7dc",
+    1: "7dc_mrp",
+}
 
 
 def u16(data: bytes) -> int:
@@ -385,44 +457,203 @@ def payload_region_text(offset: int) -> str:
             return f"Bank scene_present_mask byte{offset - 10}"
         if offset == 12:
             return "Bank active_scene"
-        if offset < 15:
-            return f"Bank scene_mask_voice_edit byte{offset - 13}"
+        if offset < VOICE_EDIT_MASK_OFFSET + VOICE_EDIT_MASK_BYTES:
+            return (f"Bank scene_mask_voice_edit Scene{(offset - VOICE_EDIT_MASK_OFFSET) // 2} "
+                    f"byte{(offset - VOICE_EDIT_MASK_OFFSET) % 2}")
         return f"Bank reserved byte{offset}"
     scene = (offset - BANK_BYTES) // SCENE_BYTES
     rel = (offset - BANK_BYTES) % SCENE_BYTES
     if scene >= 16:
         return f"payload byte {offset} (outside the 16 Scene regions)"
     name = f"Scene{scene}"
-    if rel < 8:
+    if rel < SCENE_NAME_BYTES:
         return f"{name} name byte{rel}"
+    if rel < SCENE_SOURCE_OFF + SCENE_SOURCE_BYTES:
+        return f"{name} source byte{rel - SCENE_SOURCE_OFF}"
     if rel < SCENE_PARAMS_OFF + SCENE_PARAM_COUNT:
-        return f"{name} scene-parameter[{rel - SCENE_PARAMS_OFF}]"
+        idx = rel - SCENE_PARAMS_OFF
+        pname = SCENE_PARAM_NAMES.get(idx, f"[{idx}]")
+        return f"{name} scene-param {pname}"
     if rel < EFFECT_OFF:
         return f"{name} scene reserved byte{rel}"
     if rel < EFFECT_OFF + EFFECT_BYTES:
-        return f"{name} effect byte{rel - EFFECT_OFF}"
+        effect_rel = rel - EFFECT_OFF
+        if effect_rel < 3:
+            return f"{name} effect type-token byte{effect_rel}"
+        if effect_rel < 11:
+            return f"{name} effect name byte{effect_rel - 3}"
+        parameter = effect_rel - 11
+        if parameter == 0:
+            return f"{name} effect seq run_mode"
+        if parameter == 1:
+            return f"{name} effect seq length"
+        if parameter == 2:
+            return f"{name} effect seq step_scale"
+        if parameter < 67:
+            return f"{name} effect normal[{parameter - 3}]"
+        if parameter < 131:
+            return f"{name} effect morph[{parameter - 67}]"
+        if parameter < 419:
+            step, field = divmod(parameter - 131, 18)
+            if field == 0:
+                return f"{name} effect step{step} mask_lo"
+            if field == 1:
+                return f"{name} effect step{step} mask_hi"
+            return f"{name} effect step{step} lane{field - 2}"
+        return f"{name} effect reserved byte{effect_rel}"
     if rel < KIT_OFF:
         return f"{name} scene padding byte{rel - EFFECT_OFF}"
-    if rel < KIT_OFF + 8:
-        return f"{name} kit name byte{rel - KIT_OFF}"
-    if rel < KIT_OFF + KIT_PARAMS_OFF + KIT_PARAM_COUNT:
-        return f"{name} kit-parameter[{rel - KIT_OFF - KIT_PARAMS_OFF}]"
-    if rel < KIT_OFF + KIT_INST_OFF:
-        return f"{name} kit reserved byte{rel - KIT_OFF}"
-    slot = (rel - KIT_OFF - KIT_INST_OFF) // INST_BYTES
-    ir = (rel - KIT_OFF - KIT_INST_OFF) % INST_BYTES
+    kit_rel = rel - KIT_OFF
+    if kit_rel < KIT_NAME_BYTES:
+        return f"{name} kit name byte{kit_rel}"
+    if kit_rel < KIT_SOURCE_OFF + KIT_SOURCE_BYTES:
+        return f"{name} kit source byte{kit_rel - KIT_SOURCE_OFF}"
+    if kit_rel < KIT_PARAMS_OFF + KIT_PARAM_COUNT:
+        idx = kit_rel - KIT_PARAMS_OFF
+        pname = KIT_PARAM_NAMES.get(idx, f"[{idx}]")
+        return f"{name} kit-param {pname}"
+    if kit_rel < KIT_INST_OFF:
+        return f"{name} kit reserved byte{kit_rel}"
+    slot = (kit_rel - KIT_INST_OFF) // INST_BYTES
+    ir = (kit_rel - KIT_INST_OFF) % INST_BYTES
     if slot >= 6:
-        return f"{name} kit reserved byte{rel - KIT_OFF}"
+        return f"{name} kit reserved byte{kit_rel}"
     base = f"{name} instrument[{slot}]"
     if ir < INST_TYPE_BYTES:
         return f"{base} type-token byte{ir}"
     if ir < INST_NAME_OFF + INST_NAME_BYTES:
         return f"{base} name byte{ir - INST_NAME_OFF}"
+    if ir < INST_SOURCE_OFF + INST_SOURCE_BYTES:
+        return f"{base} source byte{ir - INST_SOURCE_OFF}"
     if ir < INST_NORMAL_OFF + INST_NORMAL_BYTES:
         return f"{base} normal[{ir - INST_NORMAL_OFF}]"
     if ir < INST_MORPH_OFF + INST_MORPH_BYTES:
         return f"{base} morph[{ir - INST_MORPH_OFF}]"
     return f"{base} padding byte{ir - INST_MORPH_OFF - INST_MORPH_BYTES}"
+
+
+# AUTOSAVE_TRACE_CC_* (AutosaveTrace.h; S075 trace debug).
+CC_EVENTS = {
+    0x01: "OP_START", 0x02: "OP_REFUSED", 0x03: "SOURCE_SET",
+    0x04: "OP_RELEASE", 0x05: "OP_FINISH", 0x10: "JOB_START",
+    0x11: "JOB_STATS", 0x12: "JOB_END", 0x13: "JOB_STALL",
+    0x14: "CHECK_FAIL", 0x15: "QUEUE_FULL", 0x16: "PASTE_NOOP",
+    0x17: "JOB_TRICKLE", 0x18: "ANOMALY", 0x19: "EARLY_RESTORED",
+    0x20: "REG_ADD", 0x21: "REG_REFUSED", 0x22: "REG_DONE",
+    0x23: "FX_CLEAR", 0x24: "EARLY_TRIG", 0x30: "FANOUT",
+    0x31: "MASK_SET", 0x40: "SCRATCH", 0x41: "FS_REFUSED",
+    0x42: "NAMES", 0x50: "SUSPEND",
+}
+CC_KINDS = {1: "step", 2: "bar", 3: "track", 4: "scene", 5: "fx-step"}
+CC_DROP = {0: "none", 1: "NO_ROOM", 2: "EVACUATE_FAILED",
+           3: "ADVANCED_LIMIT", 4: "FX_TYPE_MISMATCH", 5: "NO_SOURCE",
+           6: "NO_SCRATCH", 7: "BAD_SELECTION", 8: "BAD_GEOMETRY"}
+CC_ANOMALY = {1: "GROW_UNPLACEABLE", 2: "SWAP_RETURN_ABANDONED",
+              3: "SWAP_OCCUPIED", 4: "REGION_REWRITE_GREW",
+              5: "CLAIM_OTHER_SCENE", 6: "TEARDOWN_CLAIM_HELD",
+              9: "STALL_PHASE"}
+CC_REFUSAL = ["recording", "erasing", "storage busy",
+              "Instrument transaction", "mode", "previous jobs queued"]
+CC_FANOUT = {1: "copy instrument", 2: "copy kit", 3: "copy effect",
+             4: "clear send", 5: "clear fx", 6: "FX step paste"}
+
+
+def cc_job_text(v: int) -> str:
+    """Decode a copy/clear job descriptor (JD)."""
+    op = v & 0xFF
+    cls = "paste" if (op & 0xF0) == 0x10 else (
+        "clear" if (op & 0xF0) == 0x20 else f"class0x{op & 0xF0:02x}")
+    kind = CC_KINDS.get((v >> 8) & 0x7, f"kind{(v >> 8) & 0x7}")
+    track = (v >> 15) & 0x7
+    return (f"{cls} sel={op & 0xF} {kind} Scene{(v >> 11) & 0xF} "
+            f"track={'-' if track == 7 else track + 1} "
+            f"start={(v >> 18) & 0x7F} end={(v >> 25) & 0x7F}")
+
+
+def cc_record_text(flags: int, v: int) -> str:
+    """Decode one stage-'c' value32 by its event (flags)."""
+    ev = CC_EVENTS.get(flags, f"event0x{flags:02x}")
+    if flags in (0x10, 0x13, 0x15, 0x16):
+        return f"{ev}: {cc_job_text(v)}"
+    if flags == 0x01:
+        return (f"{ev}: phase={(v & 3)} mode={(v >> 2) & 7} "
+                f"op#{(v >> 8) & 0xF} queued={(v >> 16) & 0xFF}")
+    if flags == 0x02:
+        why = [n for i, n in enumerate(CC_REFUSAL) if v & (1 << i)]
+        return (f"{ev}: {', '.join(why) or 'none'} mode={(v >> 8) & 7} "
+                f"queued={(v >> 16) & 0xFF}")
+    if flags == 0x03:
+        return (f"{ev}: {CC_KINDS.get(v & 7, v & 7)} Scene{(v >> 3) & 0xF} "
+                f"track={((v >> 7) & 7) + 1} start={(v >> 10) & 0x7F} "
+                f"end={(v >> 17) & 0x7F} mode={(v >> 24) & 7}")
+    if flags == 0x04:
+        return (f"{ev}: started={v & 1} menu={(v >> 1) & 1} "
+                f"queued={(v >> 8) & 0xFF}")
+    if flags == 0x05:
+        names = ["none", "written", "error", "gave up"][(v >> 28) & 3]
+        return (f"{ev}: done={v & 0xFF} dropped={(v >> 8) & 0xFF} "
+                f"register passes={(v >> 16) & 0xFF} op#{(v >> 24) & 0xF} "
+                f"names={names}")
+    if flags == 0x11:
+        return (f"{ev}: slides={v & 0xFF} swap rewrites={(v >> 8) & 0xFF} "
+                f"retarget dropped={(v >> 16) & 0xFF} "
+                f"evacuations={(v >> 24) & 0xF} claim wait={(v >> 28) & 0xF}")
+    if flags == 0x12:
+        res = {0: "DONE", 2: "DROP"}.get(v & 3, f"result{v & 3}")
+        return (f"{ev}: {res} reason={CC_DROP.get((v >> 2) & 0x3F, '?')} "
+                f"detail=0x{(v >> 8) & 0xFF:02x} ticks={(v >> 16) & 0xFFFF}")
+    if flags == 0x14:
+        return (f"{ev}: free={v & 0x7FF} step#{(v >> 11) & 0x7F} "
+                f"new={(v >> 18) & 0x3F} old={(v >> 24) & 0x3F} chunks")
+    if flags == 0x17:
+        return f"{ev}: trickle ticks={v & 0xFFFF} calls={(v >> 16) & 0xFFFF}"
+    if flags == 0x18:
+        return (f"{ev}: {CC_ANOMALY.get(v & 0xFF, v & 0xFF)} "
+                f"Scene{(v >> 12) & 0xF} track={(v >> 8) & 0xF} "
+                f"step={(v >> 16) & 0xFF} extra=0x{(v >> 24) & 0xFF:02x}")
+    if flags == 0x19:
+        return (f"{ev}: restored={v & 0xFF} left alone={(v >> 8) & 0xFF} "
+                f"slot={(v >> 16) & 3}")
+    if flags in (0x20, 0x21):
+        tail = (f"count={(v >> 20) & 0xF} lane={(v >> 24) & 0xF}"
+                if flags == 0x20 else
+                f"reason={['', 'full', 'other Scene', 'pending', 'no target'][(v >> 20) & 0xF] if ((v >> 20) & 0xF) < 5 else '?'}")
+        return f"{ev}: target={v & 0xFFFF} Scene{(v >> 16) & 0xF} {tail}"
+    if flags == 0x22:
+        return (f"{ev}: target={v & 0xFFFF} steps={(v >> 16) & 0x3FF} "
+                f"swap rewrites={(v >> 26) & 0x1F} dropped={(v >> 31) & 1}")
+    if flags == 0x23:
+        return (f"{ev}: mask=0x{v & 0xFFFF:04x} {scene_mask_text(v & 0xFFFF)} "
+                f"Scene{(v >> 16) & 0xF} step={(v >> 20) & 0xF} "
+                f"lane={(v >> 24) & 0xF} changed={(v >> 28) & 1}")
+    if flags == 0x24:
+        what = "paste" if (v >> 8) & 1 else "clear"
+        return (f"{ev}: {what} steps={v & 0xFF} src mask={(v >> 9) & 1} "
+                f"{CC_KINDS.get((v >> 16) & 7, '?')} Scene{(v >> 19) & 0xF} "
+                f"track={((v >> 23) & 7) + 1} slot={(v >> 26) & 3}")
+    if flags == 0x30:
+        return (f"{ev}: {CC_FANOUT.get((v >> 20) & 0xF, '?')} "
+                f"dst Scene{(v >> 16) & 0xF} mask=0x{v & 0xFFFF:04x} "
+                f"{scene_mask_text(v & 0xFFFF)} active={(v >> 24) & 1} "
+                f"slot={(v >> 25) & 0xF}")
+    if flags == 0x31:
+        how = "reset" if (v >> 20) & 1 else f"exchange from Scene{(v >> 21) & 0xF}"
+        return (f"{ev}: Scene{(v >> 16) & 0xF} entry=0x{v & 0xFFFF:04x} "
+                f"{scene_mask_text(v & 0xFFFF)} ({how})")
+    if flags == 0x40:
+        return f"{ev}: {'return' if v & 1 else 'borrow'} waited={(v >> 8) & 0xFFFF} ticks"
+    if flags == 0x41:
+        return f"{ev}: refused op={v & 0xFF} current op={(v >> 8) & 0xFF}"
+    if flags == 0x42:
+        what = ["requested", "written", "error", "gave up"][v & 3]
+        extra = (f" reserved=0x{(v >> 16) & 0xFF:02x}"
+                 if (v >> 16) & 0xFF else "")
+        return (f"{ev}: {what} copied rows={(v >> 8) & 0xFF}{extra} "
+                f"refusals={(v >> 24) & 0xFF}")
+    if flags == 0x50:
+        return (f"{ev}: {'end' if v & 1 else 'begin'} facade busy={(v >> 1) & 1} "
+                f"current op={(v >> 8) & 0xFF}")
+    return f"{ev}: raw value"
 
 
 def trace_record_text(index: int, stage: int, flags: int, tick: int,
@@ -494,12 +725,28 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
         detail = (f"{enum_name} via {producer}: parameter drain admitted; "
                   f"the transform now owns the facade")
     elif ch == "V":
+        # AUTOSAVE_TRACE_VALIDATED_* (AutosaveTrace.h): bit 0 winner exists,
+        # bit 1 winner A/B, bit 2 winner Bank identity mismatch, bit 3
+        # continuation cache (validation skipped), bits 4..5 candidate A/B
+        # rejected as overlong - a publication torn by power loss; the next
+        # drain republishes into it (S074). Records written before S074 never
+        # set bits 4..5.
         has_winner = bool(flags & 0x01)
         winner = "A (.hcprms1)" if (flags & 0x02) == 0 else "B (.hcprms2)"
         detail = (f"{enum_name} via {producer}: "
                   f"winner_exists={int(has_winner)}, "
                   f"winner={winner if has_winner else 'none'}, "
-                  f"winner generation={value}")
+                  f"winner generation={value}, "
+                  f"bank_mismatch={int(bool(flags & 0x04))}, "
+                  f"cached={int(bool(flags & 0x08))}")
+        torn = [name for bit, name in ((0x10, "A (.hcprms1)"),
+                                       (0x20, "B (.hcprms2)"))
+                if flags & bit]
+        if torn:
+            detail += ("; overlong candidate rejected: " + ", ".join(torn) +
+                       " (publication torn by power loss; AsyncFATFS left the "
+                       "cluster-rounded size; the next drain republishes "
+                       "into it)")
     elif ch == "M":
         dirty = bool(flags)
         detail = (f"{enum_name} via {producer}: post-merge canonical mask "
@@ -508,6 +755,25 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
         detail = (f"{enum_name} via {producer}: "
                   f"budget_exhausted={int(bool(flags))}, "
                   f"patch_count={value}")
+    elif ch == "Z":
+        maintained = value & 0xFFFF
+        scanned = (value >> 16) & 0xFFFF
+        detail = (f"{enum_name} via {producer}: maintained_count="
+                  f"{maintained}, full_scan_count={scanned}, "
+                  f"maintained_high_byte=0x{flags:02x}")
+    # H packs work class/charged milliseconds in flags and denied/max-slice
+    # accounting in value32, matching AutosaveTrace.h's stage definition.
+    elif ch == "H":
+        work_class = flags & 0x03
+        charged_ms = (flags >> 2) & 0x3F
+        denied = value & 0xFFFF
+        max_slice = (value >> 16) & 0xFFFF
+        class_names = {0: "repair", 1: "scalar", 2: "pattern"}
+        class_name = class_names.get(work_class,
+                                     f"unknown({work_class})")
+        detail = (f"{enum_name} via {producer}: class={class_name}, "
+                  f"charged_ms={charged_ms}, denied_count={denied}, "
+                  f"max_slice_us={max_slice}")
     elif ch == "P":
         target = "A (.hcprms1)" if flags == 0 else "B (.hcprms2)"
         detail = (f"{enum_name} via {producer}: newly active target "
@@ -547,8 +813,13 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
                       f"{scene_mask_text(resident)}, effective load mask "
                       f"0x{low:04x} {scene_mask_text(low)}")
     elif ch == "X":
-        site = flags & 0x07
-        in_native_delete = bool(flags & 0x08)
+        # AUTOSAVE_TRACE_PHASE_STALL_* (AutosaveTrace.h): flags bits 0..3 are
+        # the observer site and bit 4 marks a stall inside native recursive
+        # delete (Session 057 layout; this decoder read the pre-057 3-bit
+        # layout until S074). value32: phase bits 0..7, slot bits 8..17,
+        # site-specific extra bits 18..31.
+        site = flags & 0x0F
+        in_native_delete = bool(flags & 0x10)
         site_name = PHASE_STALL_SITES.get(site, f"unknown site {site}")
         phase = value & 0xFF
         slot = (value >> 8) & 0x3FF
@@ -560,8 +831,8 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
             detail += f", afatfs_getDeleteTreePhase() subphase={extra & 0xFF}"
         elif site == 2:
             detail += f", stream_offset~={extra * 16} bytes"
-        detail += (". Observation only unless site is the runtime drain, "
-                   "where a stall also forces FS_STATUS_ERROR completion.")
+        detail += ". " + PHASE_STALL_BEHAVIOUR.get(
+            site, "behaviour unknown for this site") + "."
     elif ch == "O":
         elem_type = SAVE_LIFECYCLE_TYPES.get(flags & 0x03,
                                              f"unknown type {flags & 0x03}")
@@ -657,6 +928,8 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
                     "case2 reload completed" if case2 else "reader event")
             detail = (f"{enum_name} via {producer}: {kind}, Scene{scene}, "
                       f"hcnames row {row}, source=0x{source:04x}")
+    elif ch == "c":
+        detail = f"{enum_name} via {producer}: {cc_record_text(flags, value)}"
     else:
         detail = f"{enum_name}: no decoder for this stage"
 

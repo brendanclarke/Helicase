@@ -52,6 +52,7 @@
 #include "squareRootLut.h"
 #include "modulationNode.h"
 #include "InstrumentManager.h"
+#include "voicePostChain.h"
 // TODO DSP_PORT
 // #include "TriggerOut.h"
 
@@ -232,11 +233,20 @@ void HiHat_calcSyncBlockVoice(HiHatVoice *voice, int16_t* buf,
                               const uint8_t size)
 {
 	/*
-	 * Render one hihat instance into a mono block.
+	 * Render one hihat instance into a mono, PRE-VOLUME block.
 	 *
 	 * Inputs: HiHatVoice pointer, destination buffer, and block size. Output:
- * buf receives the hihat FM, transient, envelope, and distortion output for
- * that tagged instance selected by InstrumentManager.
+	 * buf receives the hihat FM, transient, amp envelope (open or closed decay
+	 * as triggered), optional velocity, and distortion for that tagged
+	 * instance, but NOT the channel volume (voice->vol).
+	 *
+	 * Why (Session 072, Effects Phase 5 step 2; volume-order bug fix D1):
+	 * volume is the last stage, a pure output level applied by the mixer
+	 * after decimation. It previously multiplied the signal before
+	 * calcDistBlock() and so also set the drive (a bug). The FX send taps the
+	 * pre-volume signal including distortion. Track 7 (the shared slot-6
+	 * voice) uses this same instance and volume. Affiliates:
+	 * instrumentManager_runtimeVolume(), mixer_calcNextSampleBlock().
 	 */
 	if(!voice || !buf)
 		return;
@@ -258,26 +268,22 @@ void HiHat_calcSyncBlockVoice(HiHatVoice *voice, int16_t* buf,
 	//calc transient sample
 	transient_calcBlock(&voice->transGen,mod1,size);
 
-	uint8_t j;
-	if(voice->volumeMod)
+	/*
+	 * Fused HiHat post-chain (S073 Step 4).
+	 *
+	 * What:       saturating add, amp gain and distortion in one pass.
+	 * Why:        removes an intermediate post-chain pass while preserving the
+	 *             old int16 conversion/saturation points and constant cost (S0).
+	 * Inputs:     filtered buf, mod1, volumeMod/velo/EG and distortion.
+	 * Outputs:    pre-volume buf.
+	 * Accessors:  this render function.
+	 * Affiliates: voicePostChain.h and the Step 4 host/ARM checks.
+	 */
 	{
-		for(j=0;j<size;j++)
-		{
-			//add filter to buffer
-			buf[j] = bufferTool_satAdd16(buf[j], mod1[j]);
-			buf[j] *= voice->velo * voice->vol * voice->egValueOscVol;
-		}
+		const float ampGain = voice->volumeMod
+			? voice->velo * voice->egValueOscVol
+			: voice->egValueOscVol;
+		voicePost_addGainDist(buf, mod1, ampGain, &voice->distortion, size);
 	}
-	else
-	{
-		for(j=0;j<size;j++)
-		{
-			//add filter to buffer
-			buf[j] = bufferTool_satAdd16(buf[j], mod1[j]);
-			buf[j] *= voice->vol * voice->egValueOscVol;
-		}
-	}
-
-	calcDistBlock(&voice->distortion,buf,size);
 }
 //---------------------------------------------------

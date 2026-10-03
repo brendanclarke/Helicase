@@ -3,8 +3,9 @@
 
 The validator checks the selected Bank tree against /.hcnames, settings.cfg,
 and the newer valid .hcprms A/B record. It never writes the card root. The
-wire offsets intentionally mirror Autosave.h so a failure prints the raw Bank
-section needed to distinguish a bad field from a bad offset.
+wire offsets intentionally mirror Autosave.h as of S075 F2 (format 3, 161
+HCNAMES rows, 51 Scene cells) so a failure prints the raw Bank section needed
+to distinguish a bad field from a bad offset.
 """
 
 from __future__ import annotations
@@ -18,11 +19,23 @@ from pathlib import Path
 RECORD_BYTES = 34768
 BANK_OFFSET = 3920
 BANK_SECTION_BYTES = 128
+VOICE_EDIT_MASK_OFFSET = 13
 SCENE_OFFSET = 4048
 SCENE_BYTES = 1920
 SCENE_COUNT = 16
+VOICE_EDIT_MASK_BYTES = SCENE_COUNT * 2
 INSTRUMENTS_PER_KIT = 6
 COMMIT_VALID = 0xA5
+FORMAT_VERSION = 3
+HCNAMES_ROW_COUNT = 161
+INSTRUMENT_ROW_FIRST = 33
+INSTRUMENT_ROW_END = 129
+SCENE_PARAMETERS_OFFSET = 10
+SCENE_PARAM_COUNT = 51
+MIDI_DEFAULT_TRIGGER_NOTE = 63
+BUS_COMP_MAX = (2, 127, 127, 6)
+BUS_COMP_KEYS = ("bus_comp_mode", "bus_comp_amount",
+                 "bus_comp_time", "bus_comp_sidechain")
 
 
 def crc32c(data: bytes) -> int:
@@ -76,11 +89,14 @@ def parse_hcnames(path: Path) -> list[tuple[str, str, str]]:
         row_index = len(rows)
         if not 2 <= len(fields) <= 4:
             raise ValueError(f"HCNAMES malformed row {row_index}: {line!r}")
-        if row_index >= 33 and len(fields) == 2:
+        if (INSTRUMENT_ROW_FIRST <= row_index < INSTRUMENT_ROW_END and
+                len(fields) == 2):
             raise ValueError(f"HCNAMES Instrument row {row_index} lacks a type column: {line!r}")
         name = fields[0].strip()
         source = fields[1].strip()
-        type_text = fields[2].strip() if row_index >= 33 else ""
+        type_text = (fields[2].strip()
+                     if INSTRUMENT_ROW_FIRST <= row_index < INSTRUMENT_ROW_END
+                     else "")
         rows.append((name, source, type_text))
     return rows
 
@@ -106,24 +122,40 @@ def parse_kitset(path: Path) -> dict[int, tuple[str, str]]:
 
 
 def parse_scene_values(path: Path) -> list[int]:
-    values = parse_assignments(path)
-    result = [0] * 40
+    """Expected AutoSave Scene cells 0..50 for one sceneset.scg.
 
-    def list_values(key: str, count: int) -> list[int]:
-        raw = values.get(key, "")
-        parsed = [int(item.strip(), 0) for item in raw.split(",") if item.strip()]
+    Missing optional keys retain the firmware Scene Load stage defaults:
+    routes St1, sends and Morph endpoints 0, fader pre, MIDI channel track+1,
+    note 63, Effect Morph 0, and bus compressor off/0/0/off.
+    """
+    values = parse_assignments(path)
+    result = [0] * SCENE_PARAM_COUNT
+
+    def list_values(key: str, count: int, default: list[int]) -> list[int]:
+        if key not in values:
+            return default
+        parsed = [int(item.strip(), 0)
+                  for item in values[key].split(",") if item.strip()]
         if len(parsed) != count:
             raise ValueError(f"{path}: {key} expected {count} values")
         return parsed
 
     result[0] = int(values.get("morph_amount", "0"), 0)
-    result[1:7] = list_values("voice_morph_amount", 6)
-    result[7] = int(values.get("voice_decimation_all", "127"), 0)
-    result[8:14] = list_values("audio_out", 6)
-    result[14:20] = list_values("fx_send_amount", 6)
-    result[20:26] = list_values("fader_setting", 6)
-    result[26:33] = list_values("midi_channel", 7)
-    result[33:40] = list_values("midi_note", 7)
+    result[1:7] = list_values("voice_morph_amount", 6, [0] * 6)
+    # S075: Scene cell 7 (former `srt`, voice_decimation_all) is reserved;
+    # firmware always writes 127 and no longer reads or writes the sceneset key.
+    result[7] = 127
+    result[8:14] = list_values("audio_out", 6, [0] * 6)
+    result[14:20] = list_values("fx_send_amount", 6, [0] * 6)
+    result[20:26] = list_values("fader_setting", 6, [0] * 6)
+    result[26:33] = list_values("midi_channel", 7, list(range(1, 8)))
+    result[33:40] = list_values("midi_note", 7,
+                                [MIDI_DEFAULT_TRIGGER_NOTE] * 7)
+    result[40] = int(values.get("effect_morph_amount", "0"), 0)
+    for field, key in enumerate(BUS_COMP_KEYS):
+        result[41 + field] = min(int(values.get(key, "0"), 0),
+                                 BUS_COMP_MAX[field])
+    result[45:51] = list_values("fx_send_morph", 6, [0] * 6)
     return result
 
 
@@ -131,7 +163,8 @@ def valid_record(path: Path) -> tuple[int, bytes] | None:
     data = path.read_bytes()
     if len(data) != RECORD_BYTES:
         return None
-    if data[0:4] != b"HCPR" or data[4] != 1 or data[5] != COMMIT_VALID:
+    if (data[0:4] != b"HCPR" or data[4] != FORMAT_VERSION or
+            data[5] != COMMIT_VALID):
         return None
     expected = int.from_bytes(data[12:16], "little")
     crc_data = data[:12] + b"\0\0\0\0" + data[16:]
@@ -167,8 +200,8 @@ def main() -> int:
     except (OSError, ValueError) as exc:
         add_error(errors, str(exc))
         rows = []
-    if len(rows) != 129:
-        add_error(errors, f"HCNAMES row count: expected 129, got {len(rows)}")
+    if len(rows) != HCNAMES_ROW_COUNT:
+        add_error(errors, f"HCNAMES row count: expected {HCNAMES_ROW_COUNT}, got {len(rows)}")
 
     bank_dirs = [
         item for item in (root / "Bank").iterdir()
@@ -283,12 +316,17 @@ def main() -> int:
                 winner = candidate
         _, winner_name, record = winner
 
-    raw_bank = record[BANK_OFFSET:BANK_OFFSET + 15]
+    raw_bank = record[BANK_OFFSET:BANK_OFFSET + VOICE_EDIT_MASK_OFFSET +
+                       VOICE_EDIT_MASK_BYTES]
     record_slot = u16(record[BANK_OFFSET:BANK_OFFSET + 2])
     record_name = text8(record[BANK_OFFSET + 2:BANK_OFFSET + 10])
     record_mask = u16(record[BANK_OFFSET + 10:BANK_OFFSET + 12])
     record_active = record[BANK_OFFSET + 12]
-    record_voice_mask = u16(record[BANK_OFFSET + 13:BANK_OFFSET + 15])
+    record_voice_masks = [
+        u16(record[BANK_OFFSET + VOICE_EDIT_MASK_OFFSET + scene * 2:
+                      BANK_OFFSET + VOICE_EDIT_MASK_OFFSET + scene * 2 + 2])
+        for scene in range(SCENE_COUNT)
+    ]
     if record_slot != args.bank_slot:
         add_error(errors, f"{winner_name} Bank restore slot: expected "
                          f"{args.bank_slot}, got {record_slot}")
@@ -301,14 +339,24 @@ def main() -> int:
         try:
             bankset_values = parse_assignments(bank_dir / "bankset.bcg")
             expected_active = int(bankset_values["active_scene"], 0)
-            expected_voice = int(bankset_values["scene_mask_voice_edit"], 16)
+            if any(f"scene_mask_voice_edit_{scene}" in bankset_values
+                   for scene in range(SCENE_COUNT)):
+                expected_voice_masks = [
+                    int(bankset_values[f"scene_mask_voice_edit_{scene}"], 16)
+                    for scene in range(SCENE_COUNT)
+                ]
+            else:
+                # Legacy bankset.bcg carried one mask shared by every Scene.
+                expected_voice = int(bankset_values["scene_mask_voice_edit"], 16)
+                expected_voice_masks = [expected_voice] * SCENE_COUNT
             if record_active != expected_active:
                 add_error(errors, f"{winner_name} active_scene: expected "
                                  f"{expected_active}, got {record_active}")
-            if record_voice_mask != expected_voice:
-                add_error(errors, f"{winner_name} voice edit mask: expected "
-                                 f"0x{expected_voice:04x}, got "
-                                 f"0x{record_voice_mask:04x}")
+            for scene, expected_voice in enumerate(expected_voice_masks):
+                if record_voice_masks[scene] != expected_voice:
+                    add_error(errors, f"{winner_name} Scene {scene:02d} voice "
+                                     f"edit mask: expected 0x{expected_voice:04x}, "
+                                     f"got 0x{record_voice_masks[scene]:04x}")
         except (OSError, KeyError, ValueError) as exc:
             add_error(errors, f"bankset.bcg: {exc}")
     if record_mask != child_mask:
@@ -330,8 +378,9 @@ def main() -> int:
                              f"does not match sceneset.scg directory")
         try:
             values = parse_scene_values(child / "sceneset.scg")
-            actual = list(record[scene_base + 8:scene_base + 48])
-            if actual[:40] != values:
+            params = scene_base + SCENE_PARAMETERS_OFFSET
+            actual = list(record[params:params + SCENE_PARAM_COUNT])
+            if actual != values:
                 add_error(errors, f"{winner_name} Scene {scene:02d} settings "
                                  f"payload does not match sceneset.scg")
         except (OSError, ValueError) as exc:
@@ -354,7 +403,7 @@ def main() -> int:
     print(f"  slot={slot_text} winner={winner_name} "
           f"present_mask=0x{record_mask:04x} expected=0x{child_mask:04x}")
     if errors:
-        print("  Bank bytes @3920..3934: " + raw_bank.hex(" "))
+        print("  Bank bytes @3920..3964: " + raw_bank.hex(" "))
         for error in errors:
             print(f"  - {error}")
         return 1

@@ -45,6 +45,7 @@
 #include "ParameterArray.h"
 #include "modulationNode.h"
 #include "InstrumentManager.h"
+#include "voicePostChain.h"
 // TODO DSP_PORT
 // #include "TriggerOut.h"
 
@@ -284,11 +285,20 @@ void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
 void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 {
 	/*
-	 * Render one drum runtime instance into a mono block.
+	 * Render one drum runtime instance into a mono, PRE-VOLUME block.
 	 *
- * Inputs: DrumVoice pointer, destination buffer, and block size. Output: buf
- * receives one explicit tagged-slot drum block. Mixer selects this object by
- * current runtime type rather than by a hardcoded drum voice index.
+	 * Inputs: DrumVoice pointer, destination buffer, and block size. Output:
+	 * buf receives oscillators, transient, filter, amp EG, velocity, and
+	 * distortion, but NOT the channel volume (voice->vol). Mixer selects this
+	 * object by current runtime type rather than a hardcoded drum index.
+	 *
+	 * Why pre-volume (Session 072, Effects Phase 5 step 2): the mixer applies
+	 * voice->vol after decimation, combined with the slider gain ramp, so that
+	 * the FX send can tap the same decimated signal before volume (user rules
+	 * A24/A25). voice->vol remains the retained runtime value written by the
+	 * descriptor/LFO/Morph/automation paths; it is read by
+	 * instrumentManager_runtimeVolume(). Affiliates: mixer.c
+	 * mixer_calcNextSampleBlock(), InstrumentManager.c.
 	 */
 	if(!voice || !buf)
 		return;
@@ -324,23 +334,40 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	//calc filter block
 	SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);
 
-	//attentuate main OSCs by amp EG
-#ifdef USE_AMP_FILTER
+	#if defined(USE_AMP_FILTER) || (USE_FILTER_DRIVE != 0)
+	/* Non-default legacy configurations retain their separate passes. */
+	#ifdef USE_AMP_FILTER
 	bufferTool_multiplyWithFloatBufferDithered(&voice->dither, buf,voice->volEgValueBlock,size);
-#else
+	#else
 	bufferTool_addGainInterpolated(buf,voice->ampFilterInput, voice->lastGain, size);
-#endif
-
-	//MIDI velocity
+	#endif
 	if(voice->volumeMod)
-	{
 		bufferTool_addGain(buf,voice->velo,size);
-	}
-	//distortion
-#if (USE_FILTER_DRIVE == 0)
+	#if (USE_FILTER_DRIVE == 0)
 	calcDistBlock(&voice->distortion,buf,size);
-#endif
-	//channel volume
-	bufferTool_addGain(buf,voice->vol,size);
+	#endif
+	#else
+	/*
+	 * Fused Drum post-chain (S073 Step 4).
+	 *
+	 * What:       amp EG ramp, velocity gain and distortion in one pass.
+	 * Why:        removes two intermediate int16 load/store passes while
+	 *             preserving all truncation points (S0). The velocity multiply
+	 *             always runs; its selected 1.0 gain is not a bypass.
+	 * Inputs:     filtered buf, amp gain endpoints, volumeMod/velo and dist.
+	 * Outputs:    pre-volume buf; the mixer still owns channel volume.
+	 * Accessors:  this render function through InstrumentManager.
+	 * Affiliates: voicePostChain.h, Drum gain bookkeeping and the Step 4 tests.
+	 */
+	voicePost_drum(buf, voice->ampFilterInput, voice->lastGain,
+	               voice->volumeMod ? voice->velo : 1.0f,
+	               &voice->distortion, size);
+	#endif
+	/*
+	 * Channel volume is intentionally not applied here (Session 072 step 2).
+	 * The mixer multiplies the decimated block by voice->vol x slider gain;
+	 * see instrumentManager_runtimeVolume() and mixer_calcNextSampleBlock().
+	 * Re-adding a gain stage here would apply volume twice.
+	 */
 }
 //---------------------------------------------------

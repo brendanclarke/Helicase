@@ -1,22 +1,60 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference through Session 064. It includes the Session 058 Bank I/O and
-stopped-playback speedups, the Session 059 typed Instrument-index repair, and
-Session 060's `.hcnames` atomic safe-write/refreshed flag, the boot Instrument
-`.hcindex` generation fix, and system-wide macOS AppleDouble (`._<name>`)
-file filtering. Session 061 adds typed HCNAMES, AutoSave/HCNAMES boot restore,
-complete committed-hierarchy identity publication, and the root-CWD readiness
-contract. Session 063 adds the v4 binary PAT4 Pattern file format,
-`pat_scene_region_t` packed struct, `filesystem_requestLoadPatternForScenes()`
-scene-mask API, Pattern Load fan-out copy, Pattern Save/Load bug fixes, and
-HCNAMES 145-row expansion (Pattern rows 129-144). Session 064 adds the
-per-Scene hidden PAT4 AutoSave pairs, Pattern boot restore, Pattern-only `@`
-provenance, HCPR v2 identity coverage, and complete Bank-child Pattern-name
-publication. Low-level FAT directory
-reservation and lazy
-directory-cluster initialization, and the AppleDouble filter itself, are
-authoritative in `ASYNCFATFS_REFERENCE.md`.
+reference through Session 075 (Session 069 for every phase before Phase 5;
+the Session 072, 073, 074 and 075 additions are noted below). It includes the Session 058 Bank
+I/O and stopped-playback speedups, the Session 059 typed Instrument-index
+repair, and Session 060's `.hcnames` atomic safe-write/refreshed flag, the boot
+Instrument `.hcindex` generation fix, and system-wide macOS AppleDouble
+(`._<name>`) file filtering. Session 061 adds typed HCNAMES, AutoSave/HCNAMES
+boot restore, complete committed-hierarchy identity publication, and the
+root-CWD readiness contract. Session 063 adds the v4 binary PAT4 Pattern file
+format, `pat_scene_region_t` packed struct,
+`filesystem_requestLoadPatternForScenes()` scene-mask API, Pattern Load fan-out
+copy, Pattern Save/Load bug fixes, and HCNAMES 145-row expansion (Pattern rows
+129-144). Session 064 adds the per-Scene hidden PAT4 AutoSave pairs, Pattern
+boot restore, Pattern-only `@` provenance, HCPR v2 identity coverage, and
+complete Bank-child Pattern-name publication. Session 069 adds the non-semantic
+Pattern maintenance scheduler rung, the shared elapsed-time background CPU
+budget (`budget_state`), Pattern quiet window / max latency scheduling, the `H`
+budget trace stage, and the Load/Save repair gate. Low-level FAT directory
+reservation and lazy directory-cluster initialization, and the AppleDouble
+filter itself, are authoritative in `ASYNCFATFS_REFERENCE.md`.
+
+Session 072 ST6 adds `.fx` v2 Scene/Bank child storage, Effect HCNAMES rows
+145..160, and the AutoSave v3 Effect source/live-reader contract.
+
+Session 073 restores `Load:[Samples]` to the Load page (see "Current
+Load/Save Menu Reachability") and moves the on-chip sample flash floor to
+sector 7. The on-chip flash layout, the sample index and the install guards
+are in `STORAGE_SRAM_MANIFEST.md` §4; nothing on the card changed.
+
+Session 074 adds four optional `sceneset.scg` keys for the Scene-owned master
+bus compressor (`bus_comp_mode`, `bus_comp_amount`, `bus_comp_time`,
+`bus_comp_sidechain`). It widens `fader_setting` to 0..3 (the fourth mode,
+`xfd`), and adds the Effect type token `cbt` (CrumpBit) to `.fx`. Nothing
+else on the card changed. Two AutoSave facts relevant to every file on the
+card were learned in S074:
+
+Session 075 (Phase 6 copy/clear, `COPYCLEAR_UTILITIES.md`):
+
+- the base pass retires `voice_decimation_all` (no longer written; accepted
+  and ignored on load), adds the copy/clear HCNAMES rewrite `HNcU` and lends
+  the 9,000 B name cache to copy/clear during an operation ("Copy/clear:
+  name-buffer loan and the `HNcU` update");
+- F2 adds the keyed `fx_send_morph` line (six 0..127 Morph send endpoints)
+  after the bus compressor lines. A missing key loads zero (no migration,
+  user). Fresh or cleared Scene voice routes default to St1, and bus
+  compressor defaults are `off`, 0, 0, `off`;
+- F3 makes external MIDI CC/NRPN a retained endpoint entry (saved with the
+  Scene, AutoSave-marked, clamped to the menu domain) instead of a
+  runtime-only write ("Morph, Modulation, and Automation").
+
+- AsyncFATFS stores a cluster-rounded size while a file is open for writing,
+  so an interrupted write leaves an overlong file;
+- validators must therefore prove the exact length with a one-byte
+  end-of-file probe (`ASYNCFATFS_REFERENCE.md`, "Open-file size on the
+  card"; `AUTOSAVE.md`).
 
 AutoSave's hidden-record format, dirty ownership, and background writer are
 authoritative only in `AUTOSAVE.md`. Development flags and diagnostic files are
@@ -34,13 +72,14 @@ Use this document to distinguish three things:
   Scene, and Bank, root `/.hcnames`, canonical eight-character name repair, a
   separate 2,048-byte non-Pattern validation stage, the reversible Instrument
   Load and InstrumentMrp `kit` rows backed by `.hctmp.<ext>`, and the root
-  `/.hcprms1`/`/.hcprms2` AutoSave pair and boot readers, and the 16 hidden
-  Pattern A/B pairs specified in `AUTOSAVE.md`.
+  `/.hcprms1`/`/.hcprms2` AutoSave pair and boot readers, the 16 hidden
+  Pattern A/B pairs specified in `AUTOSAVE.md`, and `.fx` v2 Scene/Bank Effect
+  storage.
 - Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
   Instrument, and `settings.cfg` filesystem layout.
-- Not implemented yet: AutoSave Effect persistence,
-  crash-recoverable promotion into explicit Bank library files, real Effect
-  load/save, descriptor-backed step automation playback,
+- Not implemented yet: Effect library/browser persistence,
+  crash-recoverable promotion into explicit Bank library files,
+  descriptor-backed step automation playback,
   versioned/recoverable HCNAMES, and `/.hcrepair` roll-forward. The legacy
   `kitBrowser` map and File/Dir diagnostic caches are retired.
 
@@ -97,7 +136,8 @@ Implemented through Session 064:
 - LFO and velocity modulation can target active-slot descriptor parameters
   without hardcoded per-instrument parameter lists.
 - LFO and velocity modulation can target the shared Scene modulation namespace:
-  per-voice Morph targets `1vm..6vm` and Scene Decimation `srt`.
+  per-voice Morph targets `1vm..6vm` and Effect Morph `fxm` (Scene
+  Decimation `srt` was retired in S075).
 - Per-instrument `instrument_decimation` is a voice-local descriptor target and
   is morphable, modulatable, and marked automatable for the future automation
   pass.
@@ -159,7 +199,8 @@ Implemented through Session 064:
   `audio_out=` lines are parse-only side data for old embedded Kits.
 - Root Scene Load/Save is implemented for `Scene/NNN Name/` folders containing
   `sceneset.scg`, embedded `Kit <name>/`, exactly one `<Pattern name>.pat`,
-  and `effects.fx`.
+  and the first optional `<Effect name>.fx` child. `effect_morph_amount` is
+  optional in `sceneset.scg`.
   `sceneset.scg` never stores the Scene name.
 - Root Scene and embedded Kit names originate in directory names, not fields of
   `scene_t` or `kit_t`. A successful root Scene Load publishes its Scene row
@@ -243,9 +284,9 @@ Current bridges and limitations:
 - `FS_FILE_MORPH` load/save still uses the legacy `.SND` morph-kit path.
 - Globals load/save through root keyed-text `settings.cfg` version 1. Legacy
   `glo.cfg` is retired and is not a fallback input.
-- Effect, Wavetable-pool, and final dynamic Pattern-pool load/save operations
-  are not implemented/promoted yet. Root Instrument, root Scene, and
-  16-Scene root Bank load/save exist.
+- Root Effect library-pool browsing remains deferred; Scene/Bank Effect child
+  load/save is implemented by the Session 072 ST6 `.fx` path. Root
+  Instrument, root Scene, and 16-Scene root Bank load/save exist.
 - Descriptor-backed LFO and velocity modulation runtime paths are in place for
   direct descriptor targets, voice-local decimation, per-voice Morph, and Scene
   Decimation. LFO direct descriptor overlays now go through descriptor-domain
@@ -253,13 +294,14 @@ Current bridges and limitations:
 - `AutomationNode` and the current step automation storage/playback path still
   use legacy/narrow target IDs and must be rebuilt for descriptor and Scene
   modulation targets.
-- New Scene modulation target IDs are runtime/menu IDs; current Scene files
-  persist Scene mix/routing settings but not the future full effect stack.
+- New Scene modulation target IDs are runtime/menu IDs. Scene folders persist
+  Scene mix/routing settings in `sceneset.scg` and the Scene-owned Effect in
+  one `<name>.fx` child (v2, Session 072).
 - The 16-Scene workspace, present/edit masks, and linked Scene/Pattern PERF
   selection are implemented. The hidden A/B scalar AutoSave reader/writer and
   committed Load/Save publication exist as specified in `AUTOSAVE.md`;
-  Pattern/Effect persistence, explicit-Bank promotion, and a separate
-  background staging Scene remain future work.
+  explicit-Bank promotion, root Effect browsing, and a separate background
+  staging Scene remain future work.
 
 ## Root Layout
 
@@ -315,7 +357,7 @@ three-digit slot prefix when Load/Save reconstructs `NNN Name`.
 `fs_list_cache_name[1000][9]` is the one 9,000-byte browser-index cache. Its
 active domain tag and count are separate small fields; it contains one typed
 Instrument or numbered-library `.hcindex` domain. HCNAMES uses the dedicated
-`hcnames_name_mirror[145][9]`, not this browser cache. No per-instrument-type,
+`hcnames_name_mirror[161][9]`, not this browser cache. No per-instrument-type,
 per-library, presence, or open-alias cache is permitted. The legacy
 `kitBrowser` compatibility map was retired in Session 042; Kit occupancy is
 the active slot cache/index row.
@@ -370,8 +412,8 @@ future boot-index failure is observable instead of silent. See
 
 ### Root resident-name register: `/.hcnames`
 
-HCNAMES is resident identity, not a directory browser. It has 145 fixed
-logical rows (expanded from 129 in Session 063):
+HCNAMES is resident identity, not a directory browser. It has 161 fixed
+logical rows (expanded from 145 in Session 072 ST6):
 
 ```text
 row 0          Bank
@@ -381,9 +423,11 @@ rows 33..128   six Instruments per Scene
                 row = 33 + scene * 6 + voice
 rows 129..144  Pattern for resident Scene 0..15
                 row = 129 + scene
+rows 145..160  Effect for resident Scene 0..15
+                row = 145 + scene
 ```
 
-`FS_RESIDENT_NAMES_ROW_COUNT` and `AUTOSAVE_HCNAMES_ROW_COUNT` are both 145.
+`FS_RESIDENT_NAMES_ROW_COUNT` and `AUTOSAVE_HCNAMES_ROW_COUNT` are both 161.
 HCPR format v2 aligns its APIs/reader with this schema without changing its
 34,768-byte scalar geometry; Pattern identity remains in HCNAMES rather than
 HCPR payload cells. `filesystem_residentPatternRow(scene_index)`
@@ -394,7 +438,7 @@ The first line is a header declaring the instrument type vocabulary:
 extensions in instrument_type_t enum order. If the header does not match the
 firmware's registry, the file is invalid and must be regenerated.
 
-Data rows follow (145 rows, 0..144):
+Data rows follow (161 rows, 0..160):
 Bank/Scene/Kit rows (0..32) use `name<TAB>source[<TAB>R]\n`.
 Instrument rows (33..128) use `name<TAB>source<TAB>type[<TAB>R]\n`,
 where `type` is a mandatory three-character token (drm/snr/cym/hat)
@@ -402,6 +446,8 @@ identifying the Instrument's typed directory. A missing or unrecognized
 type token on an Instrument row fails the read.
 Pattern rows (129..144) use `name<TAB>source[<TAB>R]\n` — the same format as
 Bank/Scene/Kit rows, with no type field. One row per resident Scene.
+Effect rows (145..160) use the same non-Instrument format and inherit through
+the owning Scene; Effect rows do not accept the Pattern-only `@` source.
 
 `name` is at most eight printable characters and may be empty; `source` is
 `-` (inherit), `?` (unknown), `000` through `999` (direct root slot), or `@`
@@ -411,7 +457,7 @@ rows, fourth field for Instrument rows): exactly the byte `R`; its presence
 marks the row "refreshed" — see `AUTOSAVE.md` "HCNAMES atomic safe-write and
 the refreshed flag" for what sets and clears it and why. Its absence is
 backward compatible with every pre-Session-060 file. The fixed row class
-supplies the namespace for a numeric slot. The 145-by-`uint16_t`
+supplies the namespace for a numeric slot. The 161-by-`uint16_t`
 filesystem-owned source register follows Instrument -> Kit -> Scene -> Bank
 until it finds a direct
 source or reaches ordinary boot fallback. A legacy name-only line remains
@@ -419,7 +465,7 @@ readable as unknown; malformed extended records fail the read rather than
 silently inheriting. The name cache remains space-padded and NUL-terminated.
 
 Changing a row can change its physical byte length. Every targeted update
-therefore reads all 145 name/source pairs into the shared cache/register,
+therefore reads all 161 name/source pairs into the shared cache/register,
 overlays only the rows owned by the successful action, rewrites the complete
 file, closes, and uses the normal flush gate. A staged source survives that
 reread until the close succeeds, preventing stale on-card provenance from
@@ -432,7 +478,7 @@ error and authorize no creation or automatic repair.
 
 As of Session 060, "rewrites the complete file" means the same atomic
 temp-file safe-write `settings.cfg` and `.hcprms1/2` already use: stream all
-145 rows to `.hcnamtmp` (`FS_RESIDENT_NAMES_TEMP_FILENAME`), close, sync the
+161 rows to `.hcnamtmp` (`FS_RESIDENT_NAMES_TEMP_FILENAME`), close, sync the
 temp durable, remove the old live `.hcnames`, rename the temp into place,
 then take the final flush-gate sync. Every write path was converted — boot
 full-write, runtime targeted update, Bank Load, Bank Save, and the new
@@ -441,7 +487,7 @@ loss during any HCNAMES rewrite leaves either the intact prior register or a
 recoverable `.hcnamtmp`. A boot recovery prelude inside
 `filesystem_ensureAutosaveFiles_tick()` runs before any code path opens
 `.hcnames` for read: it validates a leftover `.hcnamtmp` (the exact `#types`
-header plus exactly 145 parseable rows) and either promotes or discards it, mirroring the
+header plus exactly 161 parseable rows) and either promotes or discards it, mirroring the
 `settings.tmp` recovery prelude below.
 
 A `.hcnamtmp` is current only when it starts with the `#types` header line
@@ -483,9 +529,8 @@ destination.**
 
 - **Bank Load/Save** — the Bank row and, for every child Scene, the Scene
   row, its Kit row, and all six Instrument rows.
-- **Scene Load/Save** — the Scene row, its Kit row, and all six Instrument
-  rows of every destination Scene. Its Effect and Pattern children have no
-  `.hcnames` rows today; they are noted as future work below.
+- **Scene Load/Save** — the Scene row, its Kit row, all six Instrument rows,
+  the Pattern row, and the Effect row of every destination Scene.
 - **Kit Load/Save** — the Kit row and all six Instrument rows of every
   destination Scene.
 - **Instrument Load/Save** — its own Instrument row.
@@ -515,12 +560,10 @@ source staging. This closes the Session 061 failure in which a root Scene
 Load published only Scene-row names, leaving a previous Bank-embedded Kit
 name in the Kit row; the boot reader's Case-2 narrow Kit path then built a
 folder that did not exist in the library Scene and invalidated it
-(`knowledge_files/log_archive/061_SESSION_HANDOFF_LOG.md`). Effect/Pattern rows remain future
-work: `pattern.pat` and `effects.fx` are committed by every Scene action but
-cannot be marked until they gain durable identity rows (Pattern format is
-not final; Effect is a validation-only placeholder with zero live
-parameters). When they do, they must join the Scene action's
-marked-children block in the same change that introduces their rows.
+(`knowledge_files/log_archive/061_SESSION_HANDOFF_LOG.md`). Pattern and Effect
+rows are now part of the Scene action's marked-children block. Pattern rows
+use the PAT4 child identity and Effect rows use the named `.fx` child identity;
+both are refreshed together with the Scene/Kit/Instrument hierarchy.
 
 **Session 061 matching-winner boot load.** With AutoSave ON, boot stage 10b
 validates both HCPR candidates before the canonical Bank request. If the
@@ -545,7 +588,7 @@ special-case checks hold:
 
 1. **Bank agreement:** the register Bank row (row 0) carries a direct
    numeric slot equal to the settings.cfg boot Bank (`bank_restoreBankSlot()`).
-2. **All refreshed:** every one of the 145 register rows carries the `R`
+2. **All refreshed:** every one of the 161 register rows carries the `R`
    witness.
 
 This is the state "load a Bank in the menu, load more library items into
@@ -555,7 +598,7 @@ rewritten synchronously by every completed action). The authoritative
 path never consults `.hcprms`. It narrow-loads the Bank container
 (`filesystem_bootNarrowLoadBank()`: child scan builds the 00..15 present
 mask, `bankset.bcg` supplies active Scene and voice-edit mask, BankData
-is committed), then resolves every present Scene's eight rows in order
+is committed), then resolves every present Scene's nine rows in order
 (Scene -> Kit -> six Instruments) with the same shared resolver the
 winner reader uses (`filesystem_bootReaderResolveResidentRow()`): a row
 whose source lands on the Bank row loads from `Bank/NNN/NN name/`, any
@@ -612,6 +655,37 @@ AutoSave's `.hcprms1/2` already use.
 
 Root-level entries outside the recognized list are ignored by normal
 loader/browser code.
+
+### Copy/clear: name-buffer loan and the `HNcU` update (S075)
+
+- **Name-buffer loan.** `filesystem_borrowNameCacheScratch()` lends the whole
+  9,000 B `.hcindex` name cache to copy/clear while an operation runs (only
+  when the facade is idle). It is tagged `FS_NAME_CACHE_COPYCLEAR`, so every
+  browser accessor reports "not loaded". While it is lent, cache disposal
+  requests are ignored and `filesystem_start()` refuses every operation except
+  the copy/clear name write (callers see the normal busy refusal).
+  `filesystem_returnNameCacheScratch()` clears it; Load/Save reloads its index
+  on the next entry.
+- **Suspension.** While `copyClear_backgroundSuspended()` is nonzero,
+  `filesystem_tick()` admits no background writer: `settings.cfg`, both trace
+  flushes, the deferred Load/Save HCNAMES flush, scalar AutoSave, and both
+  Pattern AutoSave drains. A writer already running finishes; dirty marks keep
+  accumulating; the scalar writer resumes on its 250 ms continuation deadline.
+- **`FS_INTERNAL_OP_UPDATE_HCNAMES_COPY` (`HNcU`).**
+  `filesystem_requestCopyResidentNames(cb)` runs the shared resident-name
+  update transaction: read `/.hcnames`, then (phase 3, or phase 7 for the
+  failed-read bootstrap) `filesystem_cacheCopyClearRemap()` copies the
+  original 161 names and sources to offsets 256 and 1,705 of the lent buffer
+  and applies the remap held at offset 0 (`remap[row]` = original row whose
+  name and source token the row takes; 0xFF unchanged; 0xFE content changed,
+  name kept). Copied rows lose their refreshed flag `R`, so the boot reader
+  never reloads a library object over pasted content. The register is then
+  written to `.hcnamtmp` and swapped in as for every other update. Instrument
+  type tokens are formatted from the resident slot and follow automatically.
+  On a card error the previous `.hcnames` stays.
+- `filesystem_identityRow(cls, scene, slot)` exposes the fixed row of a
+  Scene/Kit/Instrument/Pattern/Effect identity; `FS_HCNAMES_ROW_COUNT` (161)
+  is asserted against `FS_RESIDENT_NAMES_ROW_COUNT`.
 
 ## AsyncFATFS Directory Navigation
 
@@ -867,14 +941,55 @@ A scene folder contains:
 sceneset.scg
 Kit <kit name>/
 pattern.pat
-effects.fx
+<effect name>.fx
 ```
 
 `sceneset.scg` stores scene-level metadata/configuration and validates the
 folder as a scene. Current v1 Scene settings include global/per-voice Morph
-values, `voice_decimation_all`, seven MIDI channel/note values, and the
-Scene-owned per-voice mix settings `audio_out[6]`, `fx_send_amount[6]`, and
-`fader_setting[6]`.
+values, seven MIDI channel/note values, the
+Scene-owned per-voice mix settings `audio_out[6]`, Normal/Morph FX-send
+endpoints `fx_send_amount[6]`/`fx_send_morph[6]`, and `fader_setting[6]`, the
+optional `effect_morph_amount`, and (S074) the four optional bus compressor
+keys.
+
+The writer emits one `key=value` line per field, in this order:
+
+| Line | Key | Domain | Notes |
+|---:|---|---|---|
+| 0 | `format` | `helicase.sceneset` | identifies the file |
+| 1 | `version` | `1` | |
+| 2 | `morph_amount` | 0..255 | |
+| 3 | `voice_morph_amount` | 6 × 0..255, comma-separated | |
+| 4 | `midi_channel` | 7 values | |
+| 5 | `midi_note` | 7 values | |
+| 6 | `audio_out` | 6 × 0..5 | |
+| 7 | `fx_send_amount` | 6 × 0..127 | |
+| 8 | `fader_setting` | 6 × 0..3 (`pre pst fx xfd`) | **3 = `xfd` since S074.** A value above the domain rejects the file, so firmware older than S074 rejects a Scene that uses `xfd` (downgrade only). |
+| 9 | `effect_morph_amount` | 0..255 | optional on load (S072) |
+| 10 | `bus_comp_mode` | 0..2 (`off`, `St1`, `St2`) | S074; optional on load |
+| 11 | `bus_comp_amount` | 0..127 (`cam`) | S074; optional |
+| 12 | `bus_comp_time` | 0..127 (`ctm`) | S074; optional |
+| 13 | `bus_comp_sidechain` | 0..6 (`off`, voice 1..6) | S074; optional |
+| 14 | `fx_send_morph` | 6 × 0..127 | S075 F2; missing loads 0 |
+
+- **`voice_decimation_all` retired (S075).** Global `srt` is no longer a
+  parameter: the key is not written, and an existing file that contains it
+  loads with the key accepted and ignored. Lines after `voice_morph_amount`
+  moved up by one (line numbers are the writer's order, not a file
+  contract; the parser is key-based). Firmware older than S075 defaults a
+  missing key to 127, its neutral value.
+
+- **Bus compressor keys (S074):**
+  - The four keys come from one table shared by the writer and parser
+    (`storage_busCompKey()`), so the spellings cannot drift.
+  - A parsed value is **clamped** to its field's domain
+    (`scene_busCompClamp()`), not rejected.
+  - A missing key keeps the defaults (`off`, 0, 0, `off`), which all three
+    Scene stage-default paths set.
+  - Older firmware ignores the keys as unknown.
+  - The values are per Scene and travel with Scene and Bank load/save.
+- Parsing is key-based, so line order does not matter on load; the writer
+  is `filesystem_nextScenesetLine()` in `filesystem.c`.
 
 `Kit <kit name>/` is the scene's embedded kit directory. It works like a kit
 folder but is named without a numeric slot prefix because it belongs to the
@@ -907,6 +1022,12 @@ Bitmap:     512B (bit-packed chunk occupancy; first 256B cover 2,048 chunks,
             upper 256B are 0xFF reserved)
 Pool:       8,192B (PAT_STACK_SIZE × 32 bytes)
 ```
+
+In PAT4, each raw `track_scale` byte uses the shared StepScale index order
+(`1/64` through `2 bars`). Existing bytes are preserved on load; an index
+outside 0..13 displays/plays as the `1/16` default without an automatic card
+rewrite. This Step 8 reinterpretation changes the retained meaning and UI
+only: track playback still ignores scale until the joint track-scale pass.
 
 CRC32C is Castagnoli, computed over the entire file while treating the 4 bytes
 at offset 14 as zero. This matches the HCPR AutoSave record CRC contract.
@@ -962,12 +1083,59 @@ of persistent on/off Pattern state and no timing or per-step metadata. The v3
 format is no longer written by Scene/Bank saves; it is accepted only for
 legacy import.
 
-`effects.fx` currently stores a guarded placeholder until real effect storage
-exists.
+`.fx` Scene children use the v2 Effect schema described below. A missing child
+loads `off` with a blank Effect name; a v1 `placeholder=1` file remains a
+legacy `off` source.
+The as-built `.fx` grammar and naming are summarized in
+`EFFECTS_BUS_REFERENCE.md` §12; this section remains the authoritative storage
+contract.
+
+### Effect child `.fx` v2 (Session 072 ST6)
+
+```text
+format=helicase.effect
+version=2
+type=flt
+
+[params]
+effect_audio_out=0
+effect_level=127
+effect_pan=63
+filter_freq=40
+filter_reso=90
+filter_drive=0
+filter_type=0
+
+[morph]
+...
+
+[sequence]
+run_mode=fwd|rev|pip|rnd|sel
+length=1..16
+step_scale=1/64|1/32t|1/32|1/16t|1/16|1/8t|1/16.|1/8|1/4t|1/8.|1/4|1/2|1bar|2bar
+lane.<key>=0x<16-bit-lock-mask>,<16 values 0..255>
+```
+
+Registered `type` tokens are `off`, `flt` (StereoFilter) and `cbt`
+(CrumpBit, S074). A `cbt` file's `[params]` use the common keys plus
+`crump_bit_off`, `crump_bit_invert` (0..255 masks), `crump_mix`,
+`crump_feedback`, `crump_rate`, `crump_subtype` (0 only), `crump_sync` and
+`crump_dly_pan`. Its lanes are written as `lane.<key>=` with the same keys.
+Keys and tokens are permanent once saved (`EFFECTS_BUS_REFERENCE.md` §4.2a).
+
+The parser clamps descriptor values to their registry maxima, copies `[params]`
+into Morphable `[morph]` cells when `[morph]` is absent, and rejects unknown
+types or malformed lane CSV. Scene Load stages Effect before Kit and commits
+both atomically with Scene settings/Kit; a missing `.fx` is valid `off` state.
+Scene and Bank Save write the HCNAMES Effect stem as `<name>.fx`; a blank stem
+uses `none.fx` on card while the HCNAMES name cell remains blank. The
+`sceneset.scg` key `effect_morph_amount=0..255` stores the Scene-level Effect
+Morph amount separately from the `.fx` endpoint file.
 
 Current `scene_t` ownership:
 
 - `scene_settings_t settings`
+- `effect_record_t effect` (retained `.fx` v2 record)
 - `kit_t kit`
 
 Pattern data is stored separately in `pat_scene_region_t` (one per Scene,
@@ -979,12 +1147,15 @@ Current `scene_settings_t` fields:
 
 - `morph_amount`
 - `voice_morph_amount[INSTRUMENT_SLOT_COUNT]`
-- `voice_decimation_all`
 - `midi_channel[NUM_TRACKS]`
 - `midi_note[NUM_TRACKS]`
 - `audio_out[INSTRUMENT_SLOT_COUNT]`
 - `fx_send_amount[INSTRUMENT_SLOT_COUNT]`
-- `fader_setting[INSTRUMENT_SLOT_COUNT]`
+- `fx_send_morph[INSTRUMENT_SLOT_COUNT]` (Morph endpoint of the FX send)
+- `fader_setting[INSTRUMENT_SLOT_COUNT]` (0..`SCENE_FADER_SETTING_MAX` = 3)
+- `effect_morph_amount` (0..255, Session 072)
+- `bus_comp[SCENE_BUS_COMP_FIELD_COUNT]` (mode, amount, time, sidechain;
+  Session 074)
 
 Scene file work stores scene-level metadata and settings in `sceneset.scg`.
 These do not belong in `kitset.kcg` or instrument files.
@@ -1128,7 +1299,8 @@ Validation rules:
   preference. A source tool must reject or deliberately rename an overlength
   stem and update every reference; firmware must not silently truncate it.
 - File extension must match declared type: `.drm`, `.snr`, `.cym`, or `.hat`.
-- Legacy `audio_out=<0..5>` lines may still be parsed as compatibility side
+- A missing `audio_out` line defaults every voice to St1 (stored route 0;
+  S075 F2). Legacy `audio_out=<0..5>` lines may still be parsed as compatibility side
   data. Scene Load imports them only when loading an embedded Kit inside an old
   Scene folder whose `sceneset.scg` lacks an `audio_out` line. Root Kit Load
   ignores them and preserves current Scene routing.
@@ -1140,7 +1312,6 @@ Validation rules:
 - MIDI channel or MIDI note.
 - Scene settings.
 - Per-voice audio routing, FX send amount, or fader mode.
-- `voice_decimation_all`.
 - Instrument parameter values.
 - Instrument morph endpoint values.
 
@@ -1192,9 +1363,11 @@ Section rules:
   compact byte selector domain; they are not packed 16-bit parameter IDs.
 - `lfo_target_voice` and `lfo_target_voice_2` are menu/runtime destination
   selectors. Voices `1..6` select voice slots and the special display value
-  `scn` selects the Scene modulation target namespace. The associated
-  parameter value is a compact token: a local descriptor index, a Scene
-  target index when the voice is scn, or 0xff for off. Runtime code resolves
+  `scn` selects the Scene modulation target namespace and `fx` (value 8)
+  selects the active Scene's Effect namespace. The associated parameter value
+  is a compact token: a local descriptor index, a Scene target index when the
+  voice is scn, an Effect-local row index when the voice is fx, or 0xff for
+  off. Runtime code resolves
   that token to a wide descriptor/Scene identity only at the apply boundary.
 - `self` is accepted only for `lfo_target_voice` and `lfo_target_voice_2`.
   It is a storage-only relocation alias resolved by the parser with
@@ -1371,10 +1544,13 @@ Current bounds:
 - `INSTRUMENT_SLOT_COUNT`: 6.
 - `INSTRUMENT_PARAM_COUNT`: 64.
 - Voice parameter IDs: `0..383`.
-- Scene modulation IDs start at `INSTRUMENT_VOICE_ID_COUNT` (`384`) and
-  currently occupy `384..390` for `1vm..6vm` plus Scene Decimation `srt`.
-- Remaining higher IDs remain reserved for later FX/general parameter address
-  space.
+- Scene modulation IDs occupy block 6 from `INSTRUMENT_VOICE_ID_COUNT`
+  (`384`): `384..389` `1vm..6vm`, `390` retired `srt` placeholder (S075;
+  rejected by validation, existing entries do nothing), `392..397` `1ou..6ou`,
+  `398..403` `1fx..6fx`, `404` `fxm` (Effect Morph).
+- Block 7 `448..510` addresses Effect-local parameters `0..62` of the
+  Scene's Effect type; `511` is the Pattern off sentinel. See
+  `EFFECTS_BUS_REFERENCE.md` §11.
 
 `morph_interpolation[]` is runtime-derived state and is not serialized.
 
@@ -1580,11 +1756,16 @@ Current descriptor Morph state after Session 033:
 - The worker uses the active slot's current instrument type and descriptor
   table, so instrument swapping remains dynamic and the Morph engine does not
   own hardcoded parameter lists.
+- **S075 F3 priority:** step automation wins until the voice's next trigger;
+  a menu edit changes an endpoint and applies that parameter's resolved Morph
+  interpolation immediately; external MIDI is lowest priority and stores the
+  active Scene's Normal endpoint for the Morph worker. Held automation is not
+  overwritten by a Morph-base runtime write.
 - Per-voice Morph amounts live in `scene_settings_t.voice_morph_amount[6]`.
-- PERF shows two four-cell screens: `mrp 1vm 2vm 3vm` and `4vm 5vm 6vm srt`.
+- PERF shows two four-cell screens: `mrp 1vm 2vm 3vm` and `4vm 5vm 6vm fxm`
+  (S075: `fxm` is the active Scene's Effect Morph, committed like the Effect
+  page's `mrp` and fanned out through the edit mask, double pot speed).
 - Setting global `mrp` bulk-sets all six per-voice Morph values.
-- Setting `srt` controls Scene/global decimation and defaults to `127` when
-  Scene state has no explicit value yet.
 - Per-voice Morph is the actual Morph-engine control. Global Morph is only a
   convenience set operation.
 
@@ -1597,14 +1778,19 @@ Current working target state:
 - Off targets use `INSTRUMENT_TARGET_TOKEN_OFF` (`0xff`).
 - Target menu display expands compact local or Scene tokens to names only for
   presentation; SceneData stores the byte token.
-- InstrumentManager validates resolved targets by descriptor/Scene flags.
+- InstrumentManager validates resolved targets by descriptor/Scene flags. LFO
+  namespace value 8 is `fx`: its parameter token is an Effect-local row index
+  normalized against the Scene's current Effect type during rebind.
 - The velocity target picker is self-scoped: it offers one `off`, modulatable
   descriptors for the source voice's current Instrument, and the source-voice
   Morph token 0x40 where applicable. It does not browse arbitrary other voices
   or the general Scene namespace.
-- The LFO target picker shows self, voice destinations `1..6`, and `scn`. For
-  a voice destination, the compact parameter picker shows modulatable local
-  descriptors; for scn it uses the Scene modulation target token domain.
+- The LFO target picker shows self, voice destinations `1..6`, `scn`, and `fx`.
+  Namespace value 8 (`fx`) stores an Effect-local row index and revalidates it
+  against the Scene's current Effect type during rebind. For a voice
+  destination, the compact parameter picker shows modulatable local
+  descriptors; `scn` uses the Scene target token domain and `fx` uses the
+  Effect-local token domain.
 - The parameter picker skips non-modulatable descriptor rows. It does not show
   repeated `off` placeholders for skipped rows.
 - If the selected target voice changes and the previous target parameter is not
@@ -1635,8 +1821,6 @@ Current velocity modulation behavior:
 - Scene per-voice Morph targets are retained set operations on
   `voice_morph_amount[slot]`, scaled by velocity and amount, and update the
   PERF menu value.
-- Scene Decimation is a retained set operation on `voice_decimation_all` and
-  updates the PERF menu value.
 
 Current LFO modulation behavior:
 
@@ -1647,15 +1831,21 @@ Current LFO modulation behavior:
   filters, pitch, transient, distortion, and LFO-rate writers keep their normal
   scaling and side effects.
 - Voice-local `instrument_decimation` uses the special supplemental binding.
-- Per-voice Morph LFO modulation is a hidden secondary layer centered around
-  the retained per-voice Morph base value. It does not move the PERF menu value.
+- Per-voice Morph LFO modulation is a hidden secondary layer using
+  base-independent direction and normalized depth (Session 071). The
+  InstrumentManager encodes polarity to direction (`NONE`/`MAIN`/`MORPH`) +
+  depth without reading the morph base. The morph engine resolver computes
+  signed deltas from the current effective base (step override if active, else
+  retained) at resolution time: MORPH direction scales `depth` over `(255 - base)`,
+  MAIN direction scales `-depth` over `base`. This eliminates stale-base errors
+  when step automation changes the base between LFO sample and resolve. The
+  layer does not move the PERF menu value.
 - Multiple LFO sources targeting the same voice Morph sum their signed deltas
-  around the retained base value, then clamp to `0..255`.
+  around the effective base value, then clamp to `[0, 255]`.
 - The Morph worker adds one extra foreground pass for each voice whose Morph is
   currently LFO-modulated. It still interpolates one descriptor per pass rather
   than trying to recalculate a whole voice immediately.
-- Scene Decimation LFO modulation is runtime-only; it does not move the retained
-  `voice_decimation_all` menu value.
+- The retired `srt` target (S075) does nothing as an LFO destination.
 
 Current target limitations:
 
@@ -1664,6 +1854,11 @@ Current target limitations:
 - `preset_applyInstrumentRuntimeValueInternal()` currently ignores its
   `recordAutomation` argument.
 - `seq_recordAutomation()` still accepts/narrows destination as `uint8_t`.
+
+External MIDI CC descriptor edits are now retained endpoint entries: the value
+is clamped to the same menu domain as a VOICE edit, marked for AutoSave, and
+saved with the active Scene. The bounded Morph worker applies the endpoint's
+interpolation and skips any descriptor currently held by step automation.
 
 Therefore, the remaining descriptor target follow-up is step automation:
 `AutomationNode`, step target storage, automation recording, and automation
@@ -1722,7 +1917,8 @@ not a directory-level distinction.
 
 ## Wavetable
 
-Status: settled target, not implemented.
+Status: settled target; the library/browser remains deferred, while Scene and
+Bank child `.fx` v2 storage is implemented in Session 072 ST6.
 
 `Wavetable/` contains numbered wavetable folders:
 
@@ -1750,7 +1946,8 @@ used by the oscillator.
 
 ## Effect
 
-Status: settled target, not implemented.
+Status: Scene/Bank child storage implemented in Session 072 ST6; root library
+browser remains deferred.
 
 `Effect/` is a root-level pool of effect files:
 
@@ -1759,12 +1956,12 @@ Effect/
   <effect name>.fx
 ```
 
-Files are browsed alphanumerically. An effect file can be loaded into a scene.
-Users may copy a scene's `effects.fx` into this pool, and may copy a pool
-effect into a scene if they rename it to `effects.fx`.
+Files are browsed alphanumerically when the Effect library is implemented. An
+effect file can be loaded into a scene. Scene children use `<name>.fx`; the
+blank-name fallback is `none.fx` while the HCNAMES cell stays blank.
 
-Scene `effects.fx` stores the scene's effect settings and effect automation
-sequence. Effects and effect file formats are future DSP work.
+Scene `<name>.fx` stores the scene's retained Effect settings and sequence in
+the v2 schema. The library/browser and step automation UI remain future work.
 
 ## Instrument
 
@@ -1808,8 +2005,12 @@ Initial recognized instrument types:
 
 ## Current Load/Save Menu Reachability
 
-Status through Session 061:
+Status through Session 073. The type rows each page cycles through are the
+whitelists `menu_loadSaveLoadTypes[]` and `menu_loadSaveSaveTypes[]` in
+`menu.c`:
 
+- Load: Kit, KitMrp, Scene, Bank, Pattern, Samples.
+- Save: Kit, KitMrp, Scene, Bank, Pattern.
 - `Load:[Kit     ]`, `Load:[KitMrp  ]`, `Load:[Scene   ]`, and
   `Load:[Bank    ]` are promoted top-level entries.
 - `Save:[Kit     ]`, `Save:[KitMrp  ]`, `Save:[Scene   ]`, and
@@ -1847,11 +2048,18 @@ Status through Session 061:
   Scene Load actions accumulate their destination mask; leaving the family
   performs at most one HCNAMES rewrite.
 
+- **`Load:[Samples]`** (Load page only; restored in Session 073, missing
+  from `menu_loadSaveLoadTypes[]` since July): OK runs the modal
+  `menu_loadSamplesModal()`. It first waits up to 10 s (`Waiting SD...`) for
+  a storage operation that was already running, suspends audio, erases
+  on-chip sample sectors 7–11, installs the card's `/samples` folder, then
+  appends `/loops`, and reinitialises audio. Only mono 16-bit 44.1 kHz PCM
+  WAV files are accepted; files are taken in whole-filename order with ASCII
+  case folded. Save has no Samples action.
+
 Still compiled but intentionally gated from the normal type cycler:
 
 - `Settings` / Globals
-- `Samples`
-- Pattern
 - All
 - Performance
 - legacy Morph
@@ -1879,9 +2087,10 @@ Implemented:
   rename the resident kit or instruments.
 - Scene Save writes a root `Scene/<NNN Name>/` directory. The writer streams
   `sceneset.scg`, creates `Kit <kit name>/`, streams embedded `kitset.kcg`
-  without `audio_out`, writes six embedded Instrument files, writes draft text
-  `pattern.pat`, and writes placeholder `effects.fx`. Scene and embedded Kit
-  names are directory-owned.
+  without `audio_out`, writes six embedded Instrument files, writes the named
+  v4 Pattern child, and writes `<effect name>.fx` v2 (blank uses `none.fx`).
+  Scene and embedded Kit names are directory-owned; the Effect name is its
+  independent HCNAMES filename stem.
 - Bank Save writes bankset.bcg version 2 and one local `SS <scene name>/`
   payload for every selected Scene bit, minus any Option 2 clean-Scene skip
   (Session 058). A zero child-scene mask is valid and creates an empty Bank.
@@ -2114,25 +2323,34 @@ instrument runtime propagation:
 ## AutoSave boundary
 
 Status: the hidden A/B scalar reader/writer and the implemented retained-owner
-mutation boundaries are complete through Session 061. Session 056 added a page-exit expedite that resets the writer
-deadline to 250 ms after the user leaves the Load/Save page, eliminating
-wasted debounce time. Session 060 added a continuation-cycle winner cache
-(Phase A, roughly 3.1s -> 2.2s steady-state drain), the `.hcnames` atomic
-safe-write and per-row "refreshed" witness with AutoSave-driven post-drain
-convergence (Phase B/B2), and 2-byte HCNAMES source fields for every Scene,
-Kit, and Instrument autosave sub-object absorbed into existing reserved
-space with zero record growth (Phase C). Its complete format, ownership,
-scheduling, power-loss behavior, bounded CRC contract, duplicate rules, and
-extension process live only in `AUTOSAVE.md`. Session 061 added stage-10b
-winner validation, matching-winner restore, the all-refreshed
+mutation boundaries are complete through Session 069. Session 056 added a
+page-exit expedite that resets the writer deadline to 250 ms after the user
+leaves the Load/Save page, eliminating wasted debounce time. Session 060 added
+a continuation-cycle winner cache (Phase A, roughly 3.1s -> 2.2s steady-state
+drain), the `.hcnames` atomic safe-write and per-row "refreshed" witness with
+AutoSave-driven post-drain convergence (Phase B/B2), and 2-byte HCNAMES source
+fields for every Scene, Kit, and Instrument autosave sub-object absorbed into
+existing reserved space with zero record growth (Phase C). Its complete format,
+ownership, scheduling, power-loss behavior, bounded CRC contract, duplicate
+rules, and extension process live only in `AUTOSAVE.md`. Session 061 added
+stage-10b winner validation, matching-winner restore, the all-refreshed
 HCNAMES-authoritative special path, per-row Case 1/2/3 behavior, deferred dirty
 replay/notices, and best-effort Pattern loading from explicit Scene files.
+Session 069 added the shared elapsed-time background CPU budget
+(`budget_state` in `filesystem.c`; 8 bytes always-on, 28 bytes DEV accounting;
+2.5 % during playback, 5 % stopped; signed credit with overshoot tracking),
+the non-semantic Pattern maintenance scheduler rung (lowest priority, eligible
+only when scalar and semantic Pattern masks are both clean), Pattern quiet
+window (250 ms) and max latency (5000 ms) scheduling, the Load/Save repair
+gate (`patSvc_tick()` repair suppressed on Load/Save pages), DEV-only `H`
+budget trace reports every ~5 seconds, and an O(1) `autosave_maskHasDirty()`
+via a maintained `uint16_t` dirty count with DEV `Z` audit.
 
 The obsolete per-Instrument/Scene scalar dot-backer proposal formerly in this section
 was never implemented and is removed to prevent two competing AutoSave
 specifications. Current firmware writes the root `/.hcprms1`/`/.hcprms2`
 scalar pair plus 16 Pattern A/B pairs; it does not create `.sceneset.scg`, `.kitset.kcg`,
-`.pattern.pat`, `.effects.fx`, `.bankset.bcg`, or `.settings.cfg` backers.
+`.pattern.pat`, named `.fx` children, `.bankset.bcg`, or `.settings.cfg` backers.
 Explicit Bank/Scene/Kit/Instrument Load and Save continue to use the ordinary
 product objects specified above.
 
@@ -2161,7 +2379,7 @@ Bank/
         metal.cym
         tight.hat
       pattern.pat
-      effects.fx
+      <effect name>.fx
 Scene/
   000 Loose Jam/
     sceneset.scg
@@ -2169,7 +2387,7 @@ Scene/
       kitset.kcg
       ...
     pattern.pat
-    effects.fx
+    <effect name>.fx
 Kit/
   000 909ish/
     kitset.kcg

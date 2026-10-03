@@ -594,7 +594,7 @@ Don't:
   files but filters `._*` AppleDouble entries before callbacks.
 - Kit/Scene/Bank `.hcindex` rows and typed Instrument rows reuse one
   1,000-by-9-byte cache in `filesystem.c`. HCNAMES uses its dedicated
-  145-by-9 mirror. Both are above asyncfatfs and do not alter object iteration
+  161-by-9 mirror (145 until Session 072 added the Effect rows). Both are above asyncfatfs and do not alter object iteration
   semantics.
 - File/Dir/sDir diagnostic menu entries and their list caches are retired.
   Compatibility facade calls perform no asyncfatfs operation. A total of 107
@@ -619,6 +619,49 @@ instead of the true 34,768 bytes for an AutoSave record.
 
 Do not remove the `afatfs_fileUpdateFilesize()` call from either seek path.
 
+## Open-file size on the card (Session 074)
+
+While a file is open for writing, the size in its FAT directory entry is
+**not** its written length. `afatfs_saveDirectoryEntry()` has three modes:
+
+| Mode | Size written to the directory entry | When |
+|---|---|---|
+| `AFATFS_SAVE_DIRECTORY_NORMAL` | `physicalSize`: the allocated, **cluster-rounded** size | during writes, whenever a cluster is allocated |
+| `AFATFS_SAVE_DIRECTORY_FOR_CLOSE` | `logicalSize`: the true length | on `fclose()` |
+| `AFATFS_SAVE_DIRECTORY_DELETED` | `logicalSize`, plus the deleted marker | on removal |
+
+The upstream comment explains the choice: "We exaggerate the length of the
+written file so that if power is lost, the end of the file will still be
+readable (though the very tail of the file will be uninitialized data)."
+It saves directory-entry writes during long `fwrite()` sequences.
+
+**Consequence.** If power is lost, or the device resets, between creating a
+file and its completed `fclose()`, the card keeps the rounded size. The file
+reads back as the written prefix followed by stale data from the rest of the
+cluster. Clusters on the product card are 32 KiB, so:
+
+- a 34,768-byte AutoSave record becomes 65,536 B;
+- a 10,656-byte PAT4 file becomes 32,768 B.
+
+**Rules for callers:**
+
+- **Never trust a directory size for a file that may have been interrupted.**
+  Prove the length from the content: read the expected number of bytes, then
+  exactly one more. Data there means the file is overlong (torn); a 0-byte
+  read with `afatfs_feof()` true means the length is exact. Both AutoSave
+  validators (`filesystem_autosaveValidateCandidateStep()`) and the Pattern
+  validator (`filesystem_patternAutosaveCandidateValid()`) do this.
+- **Never stream an overlong tail to find end-of-file**, especially one byte
+  per poll. In Session 074 that turned a torn record into a 31,040-poll phase
+  that the DEV stall observer aborted forever (`AUTOSAVE.md`, "Resolved: a
+  torn record stopped AutoSave").
+- **Replacing an interrupted file:** remove it, then create it with `"w"`,
+  which truncates. The AutoSave drain's phases 11/24 and the Pattern writer
+  already do this, so a torn file is repaired by its next ordinary
+  publication.
+- AsyncFATFS has no public file-size accessor; the one-byte probe is the
+  cheapest exact-length test available.
+
 ## AsyncFATFS work still required
 
 - Parent-relative lookup/open/create with explicit collision policy and copied
@@ -633,4 +676,6 @@ Do not remove the `afatfs_fileUpdateFilesize()` call from either seek path.
   exercised as dedicated fixtures — only encountered incidentally through
   ordinary product use. Do not claim that matrix closed from product-level
   testing alone.
-- Effect storage and any feature that needs durable replacement/promotion.
+- Durable replacement/promotion (crash-recoverable library writes). Scene and
+  Bank `.fx` children are implemented (Session 072) through the ordinary
+  delete/rewrite paths; the root `/Effect/` library is deferred.

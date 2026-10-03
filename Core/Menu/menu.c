@@ -7,7 +7,6 @@
  *   - local controls call owning modules directly; no front-panel protocol shim
  *   - parameters2[] morph buffer declared here
  *   - screensaver_touch() → stub
- *   - copyClear_isClearModeActive() → always returns 0
  *   - lockPotentiometerFetch() → stub (no pot fetch locking needed)
  *   - All sequencer-specific logic (led_setActive_step etc.) → stub
  *
@@ -30,11 +29,13 @@
 #include "menu.h"
 #include "CcNr2Text.h"
 #include "screensaver.h"
-#include "copyClearTools.h"
+#include "copyClearSession.h"
+#include "copyClearService.h"
 #include "menuPages.h"
 #include "MenuText.h"
 #include "ParameterArray.h"
 #include "buttonHandler.h"
+#include "presetMorphEngine.h"
 #include "lcd.h"
 #include "ledHandler.h"
 #include "endlessPots.h"
@@ -44,6 +45,8 @@
 #include "filesystem.h"
 #include "SampleMemory.h"
 #include "sequencer.h"
+#include "StepScale.h"
+#include "EffectsManager.h"
 #include "PatternData.h"
 #include "PatternStackService.h"
 #include "SceneData.h"
@@ -53,6 +56,7 @@
 #include "AutosaveTrace.h"
 #include "EuklidGenerator.h"
 #include "SomGenerator.h"
+#include "menuEffects.h"
 #include "triggerJacks.h"
 #include "MidiParser.h"
 #include "modulationNode.h"
@@ -69,20 +73,19 @@
  * selected voice page.
  *
  * Inputs/outputs: menu_resolveSceneSettingCell() receives only a column-local
- * index 0..2 and derives the slot from menu_activePage via
+ * index 0..3 and derives the slot from menu_activePage via
  * menu_voicePageToSlot(). The math deliberately does not multiply by
  * INSTRUMENT_SLOT_COUNT: each VOICE page shows that voice's audio route, FX
- * send, and fader mode only, leaving column 4 blank. Changing this constant
+ * send, fader mode, and Voice Morph. Changing this constant
  * changes the number of appended Scene-owned cells behind each mix sub-page.
  */
-#define MENU_SCENE_SETTING_COUNT 3u
+#define MENU_SCENE_SETTING_COUNT 4u
 #define MENU_SCENE_SETTING_SCREENS \
     ((MENU_SCENE_SETTING_COUNT + MENU_COMPACT_SCREEN_CELLS - 1u) / \
      MENU_COMPACT_SCREEN_CELLS)
 
 /* ---- stubs for original calls we haven't ported yet ---- */
 // static inline void screensaver_touch(void){}
-// static inline uint8_t copyClear_isClearModeActive(void){return 0;}
 static inline void lockPotentiometerFetch(void){}
 
 static uint8_t menu_TargetVoiceGapIndex = 0xFF;
@@ -116,6 +119,20 @@ static uint8_t menu_pendingPageSwitch;
  */
 static uint8_t menu_loadSaveCommandActive = 0u;
 static uint8_t menu_deferSelectionRequest = 0;
+/*
+ * Load/Save selection-coordinate generation.
+ *
+ * What: the live generation advances whenever a browser coordinate changes;
+ * the snapshot records the generation captured by the one request currently
+ * owning the facade. Why: asynchronous index, preview, and live-payload
+ * completions must not repaint a coordinate the user has already left.
+ * Inputs: encoder/type/page transitions and request dispatch. Outputs: stale
+ * completion detection with no second cache or payload snapshot. Lifetime:
+ * firmware. RAM: 2 bytes in normal SRAM1 .bss. Affiliates: the Load/Save
+ * request helpers and their terminal callbacks below.
+ */
+static uint8_t menu_selectionGeneration = 0u;
+static uint8_t menu_selectionGenerationSnapshot = 0u;
 static uint8_t menu_deferSelectionLoadKit = 0;
 static uint8_t menu_lcdRefreshPending = 0;
 static uint8_t menu_globalApplyActive = 0;
@@ -502,6 +519,13 @@ static void menu_startSoundApply(uint8_t updateGap,
                                  uint8_t showStaleWarning,
                                  fs_stale_warning_source_t staleWarning)
 {
+    /*
+     * Kit/Scene/Bank/All/Performance Load has committed retained types into
+     * one or more Scenes. Repair directional VOICE masks before any later
+     * edit can fan out through a stale layout (plan §7.4 F5; S072 Step 10).
+     * This also covers the pre-audio boot-synchronous path.
+     */
+    bank_revalidateVoiceEditMasks();
     if (audioCodec_renderCount == 0u) {
         uint8_t final_index_pending = 0u;
 
@@ -691,8 +715,16 @@ static void menu_startInstrumentApply(uint8_t scene_index,
      */
     menu_instrumentApplyActive = 1u;
     menu_instrumentApplySlot = slot;
+    /* The filesystem read was free-scroll; the bounded runtime apply is not. */
+    menu_storageBusy = 1u;
     preset_startInstrumentApply(scene_index, slot,
                                 mark_autosave_whole_instrument);
+    /*
+     * The staged Instrument commit can change one slot's layout. Drop stale
+     * members from every directional VOICE mask before the next edit
+     * (S072 Step 10 F5); the repair is foreground-only and allocation-free.
+     */
+    bank_revalidateVoiceEditMasks();
 }
 
 static void menu_startKitMorphApply(void)
@@ -915,6 +947,24 @@ static void menu_loadSamplesModal(void)
         /* One-second suspend/resume hardware test window. */
     }
 
+    /*
+     * Let an already-running storage operation finish before installing.
+     *
+     * The installer refuses a busy facade. Once OK is accepted no background
+     * writer can start (the command gate and the Load page hold them off), but
+     * one started just before OK may still own the facade, and this modal
+     * blocks the main loop that would normally finish it. Audio is already
+     * suspended, so pump the facade here, bounded to 10 s; on timeout the
+     * installer refuses and the normal failure text is shown.
+     */
+    if (filesystem_status() == FS_STATUS_BUSY) {
+        menu_setStorageMessage("Sample upload", "Waiting SD...");
+        t0 = time_sysTick;
+        while (filesystem_status() == FS_STATUS_BUSY &&
+               (uint16_t)(time_sysTick - t0) < 10000u)
+            filesystem_tick();
+    }
+
     menu_setStorageMessage("Sample upload", "Writing flash");
     samplesOk = filesystem_installSamplesBlocking();
     menu_setStorageMessage("Loop upload", "Writing flash");
@@ -974,10 +1024,17 @@ const enum Datatypes parameter_dtypes[NUM_PARAMS] = {
     [PAR_VOICE4_MORPH] = DTYPE_0B255,
     [PAR_VOICE5_MORPH] = DTYPE_0B255,
     [PAR_VOICE6_MORPH] = DTYPE_0B255,
-    [PAR_VOICE_DECIMATION_ALL] = DTYPE_0B127,
+    /* S075: PERF `fxm` shows the full 0..255 Effect Morph amount. */
+    [PAR_EFFECT_MORPH] = DTYPE_0B255,
     /* Global `ats` is a stored boolean; filesystem policy is applied only at
      * the explicit user/boot lifecycle boundaries documented below. */
     [PAR_AUTOSAVE_ENABLED] = DTYPE_ON_OFF,
+    /* S074 bus compressor mirrors use generic numeric dtype; Menu supplies
+     * field-specific clamp and cmp/csc value text below. */
+    [PAR_BUS_COMP_MODE] = DTYPE_0B127,
+    [PAR_BUS_COMP_AMOUNT] = DTYPE_0B127,
+    [PAR_BUS_COMP_TIME] = DTYPE_0B127,
+    [PAR_BUS_COMP_SIDECHAIN] = DTYPE_0B127,
     [PAR_ACTIVE_STEP] = DTYPE_0B127,
     [PAR_STEP_VOLUME] = DTYPE_0B127,
     [PAR_STEP_PROB] = DTYPE_0B127,
@@ -1083,7 +1140,8 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_SYNC,CAT_GLOBAL,LONG_EXTERNAL_SYNC},
     {SHORT_CHANNEL,CAT_VOICE,LONG_MIDI_CHANNEL},
     {SHORT_OUT,CAT_VOICE,LONG_AUDIO_OUT},
-    {SHORT_SR,CAT_VOICE,LONG_SAMPLE_RATE},
+    /* S075 PERF `fxm`: Scene-owned Effect Morph (was global `srt`). */
+    {SHORT_EFFECT_MORPH,CAT_SCENE,LONG_EFFECT_MORPH},
     {SHORT_REPEAT,CAT_PATTERN,LONG_REPEAT_CNT},
     {SHORT_NXT,CAT_PATTERN,LONG_NEXT_PAT},
     {SHORT_MODE,CAT_OSC,LONG_MODE},
@@ -1128,6 +1186,11 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_PAT_STORE_USE,CAT_PATTERN,LONG_PAT_STORE_USE},
     /* Requested `ats` / Global / `AutoSave` metadata triplet. */
     {SHORT_AUTOSAVE,CAT_GLOBAL,LONG_AUTOSAVE},
+    /* S074 bus compressor: cmp/cam/ctm/csc, Scene, BusComp.. */
+    {SHORT_BUS_COMP_MODE,CAT_SCENE,LONG_BUS_COMP_MODE},
+    {SHORT_BUS_COMP_AMOUNT,CAT_SCENE,LONG_BUS_COMP_AMOUNT},
+    {SHORT_BUS_COMP_TIME,CAT_SCENE,LONG_BUS_COMP_TIME},
+    {SHORT_BUS_COMP_SIDECHAIN,CAT_SCENE,LONG_BUS_COMP_SIDECHAIN},
 };
 
 /* -----------------------------------------------------------------------
@@ -1148,6 +1211,28 @@ static uint8_t menuIndex = 0;
 static uint8_t menu_voiceSubPageScreen[NUM_SUB_PAGES];
 
 /*
+ * Effect-page voice mix overlay record (S075 F2-F; +4 B SRAM1, approved
+ * F2-Q5).
+ *
+ * What: while SHIFT+TRACK holds a VOICE mix screen over the Effect page, this
+ * saves the Effect menu position/edit mode and the replaced mix screen. Why:
+ * the overlay swaps page state directly so menu_switchPage() does not clear
+ * Effect LEDs, hold state or Morph view. Lifetime: begin to end, or a real
+ * menu_switchPage() that abandons the overlay. The flags also latch Effect
+ * service actions until the Effect page returns.
+ */
+#define MENU_FX_OVERLAY_ACTIVE     0x01u
+#define MENU_FX_OVERLAY_REPAIR     0x02u
+#define MENU_FX_OVERLAY_EXIT_EDIT  0x04u
+typedef struct {
+    uint8_t flags;
+    uint8_t fx_menu_index;
+    uint8_t fx_edit_mode;
+    uint8_t mix_screen;
+} menu_fx_voice_mix_overlay_t;
+static menu_fx_voice_mix_overlay_t menu_fxVoiceMixOverlay;
+
+/*
  * STEP automation editor state (+5 B static Menu state).
  *
  * What: the selected automation page, DELETE/CLEAR action, activation flag,
@@ -1165,9 +1250,19 @@ static uint8_t menu_stepAutoDeleteMode = 0u;
 static uint8_t menu_stepAutoActive = 0u;
 static uint8_t menu_stepAutoCursor = 0u;
 static uint8_t menu_stepAutoNumberLocked = 0u;
+/*
+ * Current STEP automation VOI category (+1 B transient Menu state).
+ *
+ * Inputs: field-1 category changes and valid target rows. Output: field-2
+ * movement from the D17 off sentinel knows whether to walk a voice descriptor
+ * table, the Scene target table, or the empty Phase-5 fx namespace. Values
+ * 0..5 are voices 1..6, 6 is `scn`, and 7 is `fx`; it owns no Pattern data.
+ * Affiliate: menu_stepAutomationEdit() and menu_repaintStepAutomation().
+ */
+static uint8_t menu_stepAutoCategory = 0u;
 
 /*
- * VOICE held-step automation overlay state (exactly 44 B static SRAM).
+ * VOICE held-step automation overlay state (exactly 45 B static SRAM).
  *
  * What: Menu-owned foreground state for held-step selection, the asynchronous
  * 128-step Pattern search, four CGRAM marker slots, one shared underline
@@ -1185,8 +1280,18 @@ static uint8_t menu_stepAutoNumberLocked = 0u;
  * Affiliates: buttonHandler_seqHeldMask(), buttonHandler_visibleStep(),
  * pat_readStepAutomations(), patSvc_writeStepAutomation(), lcd_underlineGlyph(),
  * led_updateAutomationStepView(), and time_sysTick.
- * Budget: 20 B held + 12 B search + 5 B CGRAM + 3 B debounce + 4 B working.
- * Approved on 2026-09-15 (40 B) and extended +4 B for working values.
+ * Budget: 20 B held + 13 B search + 5 B CGRAM + 3 B debounce + 4 B working.
+ * Approved on 2026-09-15 (40 B), extended +4 B for working values, and
+ * extended +1 B for the Scene-target search mask in S070 remediation.
+ *
+ * Effect-page sharing (S074, +0 B): the Effect page (SHIFT+PERF) reuses the
+ * 13 search bytes for its seven-track automation-presence search, and the
+ * 5 CGRAM bytes for its markers (the CGRAM bytes have been shared since
+ * S072 through menu_applyEffectMarkers()). The pages are mutually exclusive
+ * and every entry to either page restarts the search, so a result never
+ * crosses pages; va_searchRestart() selects the page's scan geometry. The
+ * held, debounce, and working-value bytes remain VOICE-only (the Effect SEQ
+ * hold lives in menuEffects.c).
  */
 static uint16_t va_heldMask = 0u;
 static uint8_t va_heldOrder[16];
@@ -1198,6 +1303,45 @@ static uint8_t va_searchPattern = 0u;
 static uint8_t va_searchCursor = 0u;
 static uint8_t va_searchComplete = 0u;
 static uint8_t va_searchTargetMask[8];
+/*
+ * Pattern-wide automation-presence search (13 B with va_searchSceneMask).
+ *
+ * va_searchPattern: the Pattern the result belongs to (menu_shownPattern at
+ *   restart); a mismatch restarts the search.
+ * va_searchTrack: VOICE pages - the scanned track (menu_activeVoice at
+ *   restart; a mismatch restarts). Effect page - the 0..6 track cursor of the
+ *   seven-track scan (S074).
+ * va_searchCursor: next step 0..127 on va_searchTrack; NUM_STEPS on the last
+ *   track to scan means every step has been read.
+ * va_searchComplete: nonzero once the search has read every step; markers
+ *   use the masks only then, so a partial result never shows.
+ * va_searchTargetMask[8]: one bit per local 0..63 - the VOICE slot's
+ *   descriptor index, or the Effect local of block-7 target 448 + local.
+ * Writers: va_searchRestart(), va_scanService(),
+ * va_searchRecordEffectTarget(), and (VOICE held-step writes)
+ * va_writeAutomationFromKnob(). Readers: va_applyVoiceMarkers() and
+ * menu_effectCellAutomated().
+ */
+/*
+ * Pattern-wide Scene-target automation search result (+1 B static SRAM).
+ *
+ * What: on VOICE pages, one bit each for the Voice Morph, Audio Out, and FX
+ * Send targets of the active VOICE slot; on the Effect page (S074), one bit
+ * for the Scene Effect Morph target `fxm` (ID 404), shown on the `mrp` cell.
+ * Why: Scene target IDs occupy block 6 (384..447) and cannot be represented
+ * by va_searchTargetMask[], whose bits are locals 0..63. Inputs:
+ * va_scanService() entries (VOICE: the active track; Effect: all tracks).
+ * Outputs: va_applyVoiceMarkers() and menu_effectCellAutomated() underline
+ * the matching name after the bounded search completes. Lifetime: the current
+ * search context; cleared by va_searchRestart(). Affiliate:
+ * sceneModTarget_descriptor().
+ */
+#define VA_SEARCH_SCENE_VOICE_MORPH_BIT 0x01u
+#define VA_SEARCH_SCENE_AUDIO_OUT_BIT   0x02u
+#define VA_SEARCH_SCENE_FX_SEND_BIT     0x04u
+/* Effect page only: `fxm` Pattern automation for the `mrp` cell (S074). */
+#define VA_SEARCH_SCENE_EFFECT_MORPH_BIT 0x08u
+static uint8_t va_searchSceneMask = 0u;
 
 static uint8_t va_cgramBase[4];
 static uint8_t va_cgramValid = 0u;
@@ -1219,10 +1363,11 @@ _Static_assert(
     sizeof(va_overlayActive) + sizeof(va_searchTrack) +
     sizeof(va_searchPattern) + sizeof(va_searchCursor) +
     sizeof(va_searchComplete) + sizeof(va_searchTargetMask) +
+    sizeof(va_searchSceneMask) +
     sizeof(va_cgramBase) + sizeof(va_cgramValid) +
     sizeof(va_lastEditTick) + sizeof(va_underlineSuppressed) +
-    sizeof(va_workingValue) == 44u,
-    "S066 VOICE overlay state must remain exactly 44 bytes");
+    sizeof(va_workingValue) == 45u,
+    "S070 VOICE overlay state must remain exactly 45 bytes");
 
 /* Declared here so a CGRAM/DDRAM transaction can retire a Load/Save hardware
  * cursor before redefining slots; the initialized definitions live beside
@@ -1400,6 +1545,20 @@ static uint8_t  menu_cpuUseSampleCount = 0;
 static uint16_t menu_cpuUseSampleSum = 0;
 static uint8_t  menu_cpuUseAvgPercent = 0;
 static uint16_t menu_cpuUseLastRefresh = 0;
+
+/*
+ * Scene-target live display refresh deadline (+2 B static Menu SRAM).
+ *
+ * What: the last foreground refresh tick for live Scene values. Why: Scene
+ * target automation persists across voice retriggers, so the VOICE/mix and
+ * PERF displays must repaint while playback changes those retained values.
+ * Inputs: time_sysTick and the playback/page guards in
+ * menu_sceneLiveRefreshService(). Output: an approximately 8 Hz repaint on
+ * relevant pages, never from ISR context. Lifetime: Menu session. Affiliate:
+ * menu_serviceRuntimeWidgets() and menu_cellDisplayValue().
+ */
+#define SCENE_LIVE_REFRESH_INTERVAL_MS 125u
+static uint16_t menu_sceneLiveRefreshTick = 0u;
 
 /*
  * Retained active-Scene Pattern pool-use percentage for the Global widget.
@@ -1582,7 +1741,13 @@ typedef enum {
     MENU_CELL_STATIC,
     MENU_CELL_INSTRUMENT,
     MENU_CELL_KIT_SETTING,
-    MENU_CELL_SCENE_SETTING
+    MENU_CELL_SCENE_SETTING,
+    /*
+     * Effect page cell (Session 072 step 7). Value, dtype, format, clamp,
+     * and commit delegate to menuEffects.c through cell.fx; PARAM cells also
+     * set cell.descriptor so the generic descriptor name/dtype code applies.
+     */
+    MENU_CELL_EFFECT
 } menu_cell_kind_t;
 
 typedef enum {
@@ -1593,7 +1758,16 @@ typedef enum {
 typedef enum {
     MENU_SCENE_SETTING_AUDIO_OUT = 0,
     MENU_SCENE_SETTING_FX_SEND_AMOUNT,
-    MENU_SCENE_SETTING_FADER_SETTING
+    MENU_SCENE_SETTING_FADER_SETTING,
+    /*
+     * Per-voice Scene Morph amount on the appended VOICE/mix screen.
+     *
+     * Inputs: the resolved cell carries the zero-based voice slot. Output:
+     * normal Menu edits address the retained Scene Morph byte, while held
+     * step overlay edits resolve to the matching 384..389 Scene target.
+     * Affiliate: sceneModTarget_voiceMorphId().
+     */
+    MENU_SCENE_SETTING_VOICE_MORPH
 } menu_scene_setting_kind_t;
 
 typedef struct {
@@ -1605,6 +1779,8 @@ typedef struct {
     uint8_t slot;
     uint8_t descriptor_index;
     const ParamDescriptor *descriptor;
+    /* Effect page cell identity; meaningful only for MENU_CELL_EFFECT. */
+    menuEffects_cell_t fx;
 } menu_cell_t;
 
 typedef struct {
@@ -1623,6 +1799,8 @@ typedef struct {
 } menu_lfo_target_context_t;
 
 static uint8_t menu_isVoicePage(uint8_t page);
+/* Compact four-cell screen pages use position 0..3 for the current screen. */
+static uint8_t menu_isScreenPage(uint8_t page);
 static uint8_t menu_voicePageToSlot(uint8_t page);
 static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position);
 static menu_cell_t menu_resolveVoiceCellAtScreen(uint8_t subPage,
@@ -1665,6 +1843,16 @@ static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
 static void menu_displayInstrumentTargetFull(uint16_t target);
 static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText);
 static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value);
+/* S074 bus compressor helpers; definitions stay with display/commit logic. */
+static uint8_t menu_paramIsBusComp(uint16_t paramNr);
+static uint8_t menu_busCompValueText(uint16_t paramNr, uint8_t value,
+                                     char *dst);
+static uint8_t menu_commitBusCompParam(uint16_t paramNr, uint8_t value);
+static uint8_t menu_commitEffectMorphParam(uint8_t value);
+static instrument_param_id_t menu_sceneSettingAutomationTarget(
+    const menu_cell_t *cell);
+static uint8_t menu_morphAutomationStore(uint8_t morph_value);
+static uint8_t menu_morphAutomationExpand(uint8_t stored);
 
 /* S066 VOICE overlay helpers. Definitions stay adjacent to their state/logic
  * below; these declarations keep the existing Menu file's forward-reference
@@ -1677,14 +1865,28 @@ static uint8_t va_resolveHeldValue(instrument_param_id_t target,
                                    uint8_t *out_value);
 static uint8_t va_storedToParam(uint8_t value);
 static void va_underlineService(void);
+static void menu_sceneLiveRefreshService(void);
 static void va_refreshAutomationLeds(void);
 static void va_applyVoiceMarkers(void);
+static void menu_applyEffectMarkers(void);
 static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta);
 static void va_formatValue3(const menu_cell_t *cell, uint8_t value, char out[3]);
 
 static uint8_t menu_isVoicePage(uint8_t page)
 {
     return (uint8_t)(page <= VOICE7_PAGE);
+}
+
+/*
+ * Pages that use the four-cell compact screen model (Session 072 step 7).
+ *
+ * Output: nonzero for VOICE1..7 and EFFECT_PAGE. Used where old static-page
+ * second-half arithmetic must be disabled; VOICE-only overlays and Scene
+ * settings still test menu_isVoicePage() directly.
+ */
+static uint8_t menu_isScreenPage(uint8_t page)
+{
+    return (uint8_t)(menu_isVoicePage(page) || page == EFFECT_PAGE);
 }
 
 static uint8_t menu_voicePageToSlot(uint8_t page)
@@ -1701,22 +1903,34 @@ static uint8_t menu_voicePageToSlot(uint8_t page)
 #define VA_MARKER_RETRY_BIT 0x10u
 
 /*
- * Restart the asynchronous track-wide automation search.
+ * Restart the asynchronous automation-presence search.
  *
- * What: records the current viewed Pattern/track context, clears the
- * descriptor-presence mask, and resumes at absolute step zero. Why: a result
- * from another Pattern, track, or voice slot must never produce a stale name
- * underline. Inputs: Menu's current Pattern and active track. Output: partial
- * results are cleared and markers remain absent until step 127 completes.
- * Affiliates: va_scanService(), va_searchSetBit(), and page/context changes.
+ * What: records the viewed Pattern, sets the track context, clears both
+ * presence masks and the completion flag, and resumes at step zero. VOICE
+ * pages record menu_activeVoice as the one track to scan; the Effect page
+ * (S074) starts its seven-track cursor at track 0.
+ * Why: a result from another Pattern, track, voice slot, or page must never
+ * produce a stale name underline. VOICE and Effect share this state (0 B),
+ * so the restart is the single place that selects the page's scan geometry;
+ * callers must therefore set menu_activePage before calling it.
+ * Inputs: menu_activePage, menu_shownPattern, menu_activeVoice. Outputs:
+ * cleared va_search* state; markers from the search stay absent until
+ * va_scanService() completes the new search (FX-lock underlines on the Effect
+ * page do not depend on it). Callers: VOICE and Effect entry in
+ * menu_switchPage(), menu_setActiveVoice() (not on the Effect page),
+ * menu_setShownPattern(), menu_patternContentChanged(), the STEP
+ * automation deletes, and va_scanService() on a context mismatch.
+ * Affiliates: va_scanService(), va_searchSetBit(), va_applyVoiceMarkers(),
+ * menu_effectCellAutomated().
  */
 static void va_searchRestart(void)
 {
-    va_searchTrack = menu_activeVoice;
+    va_searchTrack = (menu_activePage == EFFECT_PAGE) ? 0u : menu_activeVoice;
     va_searchPattern = menu_shownPattern;
     va_searchCursor = 0u;
     va_searchComplete = 0u;
     memset(va_searchTargetMask, 0, sizeof(va_searchTargetMask));
+    va_searchSceneMask = 0u;
 }
 
 static void va_searchSetBit(uint8_t descriptor_index)
@@ -1735,25 +1949,103 @@ static uint8_t va_searchTestBit(uint8_t descriptor_index)
 }
 
 /*
- * Advance the Pattern-wide search by the configured bounded slice.
+ * Resolve the marker bit for one visible Scene-setting cell.
  *
- * What: reads at most VOICE_AUTOMATION_SCAN_STEPS_PER_PASS step lists and
- * records only voice targets belonging to the active VOICE page's slot. Why:
- * synchronously scanning 128 steps on every repaint would stall the UI. Inputs:
- * current search context and PatternData pool. Output: a complete 64-bit
- * descriptor mask after 128 steps, with a hard 4*63 comparison ceiling per
- * service pass. Affiliates: instrumentParam_make namespace and PatternData.
+ * Input: a resolved VOICE/mix cell. Output: the corresponding bit in
+ * va_searchSceneMask for automatable per-voice Scene targets, or zero for
+ * fader mode and malformed/non-Scene cells. The mapping is shared by the
+ * edit-mode and compact-view underline paths so both surfaces interpret the
+ * search result identically. Affiliate: menu_cell_t Scene-setting identity.
+ */
+static uint8_t va_sceneSearchBitForCell(const menu_cell_t *cell)
+{
+    if (!cell || cell->kind != MENU_CELL_SCENE_SETTING)
+        return 0u;
+
+    switch (cell->scene_setting) {
+    case MENU_SCENE_SETTING_VOICE_MORPH:
+        return VA_SEARCH_SCENE_VOICE_MORPH_BIT;
+    case MENU_SCENE_SETTING_AUDIO_OUT:
+        return VA_SEARCH_SCENE_AUDIO_OUT_BIT;
+    case MENU_SCENE_SETTING_FX_SEND_AMOUNT:
+        return VA_SEARCH_SCENE_FX_SEND_BIT;
+    default:
+        return 0u;
+    }
+}
+
+/*
+ * Record one Pattern automation entry for the Effect-page search (S074).
+ *
+ * What: sets the presence bit for an Effect parameter target (block 7, IDs
+ * 448..510 = locals 0..62) or for the Scene Effect Morph target `fxm`. Every
+ * other target (voice descriptors, other Scene targets, the automation-off
+ * sentinel) is ignored.
+ * Why: Effect targets are Scene-wide and may be written on any of the seven
+ * tracks (the STEP page `fx` category), so the Effect page classifies entries
+ * differently from a VOICE page, which keeps only its own slot's targets.
+ * Local 63 must be rejected explicitly: PAT_AUTOMATION_TARGET_OFF (0x1FF) is
+ * a valid stored entry (a STEP-page Add still set to `off`) and decodes as
+ * Effect local 63, which Pattern automation never addresses.
+ * Input: one stored 9-bit target. Output: bit `local` in
+ * va_searchTargetMask[], or VA_SEARCH_SCENE_EFFECT_MORPH_BIT in
+ * va_searchSceneMask. The result is type-independent (raw locals) and the
+ * underline applies no type filter (any stored automation counts, S074 rule),
+ * so an Effect type change needs no rescan. Caller: va_scanService() on
+ * EFFECT_PAGE. Affiliates: effectTarget_isEffectId() and effectTarget_local()
+ * (EffectTypes.h), sceneModTarget_descriptor(), and
+ * seq_drainPendingAutomation() (the playback decoding of the same IDs).
+ */
+static void va_searchRecordEffectTarget(uint16_t target)
+{
+    if (effectTarget_isEffectId(target)) {
+        uint8_t local = effectTarget_local(target);
+
+        if (local < EFFECT_TARGET_PATTERN_LOCAL_LIMIT)
+            va_searchSetBit(local);
+    } else if (sceneModTarget_isSceneTarget(target)) {
+        const scene_mod_target_descriptor_t *descriptor =
+            sceneModTarget_descriptor(target);
+
+        if (descriptor &&
+            descriptor->kind == SCENE_MOD_TARGET_KIND_EFFECT_MORPH)
+            va_searchSceneMask |= VA_SEARCH_SCENE_EFFECT_MORPH_BIT;
+    }
+}
+
+/*
+ * Advance the automation-presence search by the configured bounded slice.
+ *
+ * What: reads at most VOICE_AUTOMATION_SCAN_STEPS_PER_PASS step lists of the
+ * viewed Pattern and records the targets that the current page underlines.
+ *   - VOICE page: the active track only; voice descriptor targets and
+ *     per-voice Scene targets owned by the page's slot. Done after 128 steps
+ *     (32 passes).
+ *   - Effect page (S074): all seven tracks, one after another through
+ *     va_searchTrack; Effect parameter targets and `fxm`, classified by
+ *     va_searchRecordEffectTarget(). Done after 896 steps (224 passes).
+ * Why: scanning a Pattern synchronously on every repaint would stall the UI.
+ * One function serves both pages so the 252-byte entry buffer exists once on
+ * the stack (S074 adds no stack). Inputs: the current search context,
+ * menu_activePage, and the PatternData pool. Output: complete presence masks
+ * and one menu_repaint() when the last step is read, with a hard 4*63
+ * comparison ceiling per service pass on either page. A Pattern change (and,
+ * on VOICE pages, a track change) restarts the search. Caller:
+ * menu_serviceRuntimeWidgets() on VOICE and Effect pages. Affiliates:
+ * instrumentParam namespace, sceneModTarget_descriptor(),
+ * va_searchRecordEffectTarget(), and PatternData.
  */
 static void va_scanService(void)
 {
     pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
+    uint8_t effect_page = (uint8_t)(menu_activePage == EFFECT_PAGE);
     uint8_t slot;
     uint8_t budget;
 
     if (va_searchComplete)
         return;
-    if (va_searchTrack != menu_activeVoice ||
-        va_searchPattern != menu_shownPattern) {
+    if (va_searchPattern != menu_shownPattern ||
+        (!effect_page && va_searchTrack != menu_activeVoice)) {
         va_searchRestart();
         return;
     }
@@ -1762,16 +2054,55 @@ static void va_scanService(void)
     for (budget = 0u;
          budget < VOICE_AUTOMATION_SCAN_STEPS_PER_PASS &&
          va_searchCursor < NUM_STEPS;
-         budget++, va_searchCursor++) {
+         budget++) {
         uint8_t count = pat_readStepAutomations(
             va_searchPattern, va_searchTrack, va_searchCursor,
             autos, PAT_BLOCK_AUTO_COUNT_MASK);
         uint8_t i;
 
         for (i = 0u; i < count; i++) {
+            /* S075: do not redraw an underline while its target is being
+             * removed by the bounded pot-clear register. */
+            if (ccSvc_targetPending(autos[i].target))
+                continue;
+            if (effect_page) {
+                va_searchRecordEffectTarget(autos[i].target);
+                continue;
+            }
             if (instrumentParam_isVoiceParameter(autos[i].target) &&
                 instrumentParam_slot(autos[i].target) == slot)
                 va_searchSetBit(instrumentParam_local(autos[i].target));
+            else if (sceneModTarget_isSceneTarget(autos[i].target)) {
+                const scene_mod_target_descriptor_t *descriptor =
+                    sceneModTarget_descriptor(autos[i].target);
+
+                if (descriptor && descriptor->voice_slot == slot) {
+                    switch (descriptor->kind) {
+                    case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
+                        va_searchSceneMask |= VA_SEARCH_SCENE_VOICE_MORPH_BIT;
+                        break;
+                    case SCENE_MOD_TARGET_KIND_AUDIO_OUT:
+                        va_searchSceneMask |= VA_SEARCH_SCENE_AUDIO_OUT_BIT;
+                        break;
+                    case SCENE_MOD_TARGET_KIND_FX_SEND:
+                        va_searchSceneMask |= VA_SEARCH_SCENE_FX_SEND_BIT;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            }
+        }
+        va_searchCursor++;
+        /*
+         * Effect page: step 127 of tracks 0..5 continues at step 0 of the
+         * next track. Track 6 leaves the cursor at NUM_STEPS, which ends the
+         * loop and completes the search below. VOICE pages never advance.
+         */
+        if (effect_page && va_searchCursor >= NUM_STEPS &&
+            (uint8_t)(va_searchTrack + 1u) < NUM_TRACKS) {
+            va_searchCursor = 0u;
+            va_searchTrack++;
         }
     }
     if (va_searchCursor >= NUM_STEPS) {
@@ -1947,22 +2278,123 @@ void menu_voiceAutoOverlayBarChanged(void)
 }
 
 /*
- * Invalidate the track-wide marker result after a destructive Pattern clear.
+ * Invalidate the automation-presence result after a destructive Pattern clear.
  *
- * What: restarts the bounded search and cancels any pending value-marker
- * debounce while retaining the current held-step context. Why: removing one
- * target cannot be proven absent from the remaining 128 steps without a full
- * rescan. Inputs: an already-completed copy/clear PatternData mutation.
- * Outputs: cleared search result and refreshed VOICE frame. Affiliate:
- * copyClearTools.c.
+ * What: restarts the bounded search, cancels any pending VOICE value-marker
+ * debounce while keeping the held-step context, and repaints. Runs on VOICE
+ * pages (active-track search) and, since S074, on the Effect page
+ * (seven-track search). Why: removing a target cannot be proven absent from
+ * the remaining steps without a full rescan, and the SHIFT+COPY clear gesture
+ * is not page-gated, so it can run while the Effect page is visible. Inputs:
+ * an already-submitted copy/clear PatternData mutation. Outputs: a cleared
+ * search result and a refreshed frame; other pages return at once because
+ * their next VOICE/Effect entry restarts the search anyway. Callers:
+ * copyClearService.c after a Pattern paste or clear. Affiliates:
+ * va_searchRestart() and va_scanService().
  */
-void menu_voiceAutoOverlayPatternDeleted(void)
+void menu_patternContentChanged(void)
 {
-    if (!menu_isVoicePage(menu_activePage))
+    if (!menu_isScreenPage(menu_activePage))
         return;
     va_searchRestart();
     va_underlineSuppressed = 0u;
     menu_repaint();
+}
+
+/*
+ * Drop one automation target's underline immediately after pot clear.
+ *
+ * Inputs: canonical Pattern target. Output: only the matching VOICE/Effect
+ * presence bit is cleared; the bounded search continues for all other
+ * targets, and Menu repaints without changing the target value.
+ */
+void menu_automationTargetCleared(uint16_t target)
+{
+    if (menu_isVoicePage(menu_activePage)) {
+        uint8_t slot = menu_voicePageToSlot(menu_activePage);
+        if (instrumentParam_isVoiceParameter(target) &&
+            instrumentParam_slot(target) == slot) {
+            uint8_t local = instrumentParam_local(target);
+            if (local < 64u)
+                va_searchTargetMask[local >> 3u] &=
+                    (uint8_t)~(1u << (local & 7u));
+        } else if (sceneModTarget_isSceneTarget(target)) {
+            const scene_mod_target_descriptor_t *descriptor =
+                sceneModTarget_descriptor(target);
+            if (descriptor && descriptor->voice_slot == slot) {
+                switch (descriptor->kind) {
+                case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
+                    va_searchSceneMask &=
+                        (uint8_t)~VA_SEARCH_SCENE_VOICE_MORPH_BIT;
+                    break;
+                case SCENE_MOD_TARGET_KIND_AUDIO_OUT:
+                    va_searchSceneMask &=
+                        (uint8_t)~VA_SEARCH_SCENE_AUDIO_OUT_BIT;
+                    break;
+                case SCENE_MOD_TARGET_KIND_FX_SEND:
+                    va_searchSceneMask &=
+                        (uint8_t)~VA_SEARCH_SCENE_FX_SEND_BIT;
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+    } else if (menu_activePage == EFFECT_PAGE) {
+        if (effectTarget_isEffectId(target)) {
+            uint8_t local = effectTarget_local(target);
+            if (local < EFFECT_TARGET_PATTERN_LOCAL_LIMIT)
+                va_searchTargetMask[local >> 3u] &=
+                    (uint8_t)~(1u << (local & 7u));
+        } else if (sceneModTarget_isSceneTarget(target)) {
+            const scene_mod_target_descriptor_t *descriptor =
+                sceneModTarget_descriptor(target);
+            if (descriptor &&
+                descriptor->kind == SCENE_MOD_TARGET_KIND_EFFECT_MORPH)
+                va_searchSceneMask &=
+                    (uint8_t)~VA_SEARCH_SCENE_EFFECT_MORPH_BIT;
+        }
+    }
+    menu_repaint();
+}
+
+/*
+ * Repaint the active Copy/Clear overlay through Menu's existing LCD owner.
+ *
+ * Inputs: none; Copy/Clear has already updated its compact session ledger.
+ * Output: the overlay is painted over the current Menu shadow without a
+ * second display buffer. Client: copyClearSession.c encoder/source edges.
+ */
+void menu_copyClearMenuChanged(void)
+{
+    menu_repaint();
+}
+
+/*
+ * Close the Copy/Clear overlay and invalidate transient Menu marker state.
+ *
+ * Why: a held-copy frame may have borrowed the current LCD rows while VOICE
+ * CGRAM markers were valid. Clearing those caches before the ordinary repaint
+ * prevents stale underline glyph references after the overlay releases.
+ * Client: copyClearSession.c when COPY is released.
+ */
+void menu_copyClearMenuClosed(void)
+{
+    va_cgramValid = 0u;
+    va_underlineSuppressed = 0u;
+    menu_repaintAll();
+}
+
+/*
+ * Expose Menu's storage busy gate to Copy/Clear routing.
+ *
+ * Output: nonzero while an accepted Load/Save or resident storage operation
+ * owns the Menu surface. Copy/Clear uses this read-only bridge to reject new
+ * gestures without reaching Menu's private state.
+ */
+uint8_t menu_isStorageBusy(void)
+{
+    return menu_storageBusy;
 }
 
 /*
@@ -1989,6 +2421,17 @@ static void va_refreshAutomationLeds(void)
             instrumentParam_make(menu_voicePageToSlot(menu_activePage),
                                  cell.descriptor_index),
             va_heldMask);
+    } else if (cell.kind == MENU_CELL_SCENE_SETTING) {
+        instrument_param_id_t target =
+            menu_sceneSettingAutomationTarget(&cell);
+        if (target != INSTRUMENT_PARAM_INVALID) {
+            led_updateAutomationStepView(menu_activeVoice,
+                                         menu_shownPattern, target,
+                                         va_heldMask);
+        } else {
+            led_updatePatternTrackView(menu_activeVoice, menu_shownPattern,
+                                       buttonHandler_selectedStep, 0u);
+        }
     } else {
         led_updatePatternTrackView(menu_activeVoice, menu_shownPattern,
                                    buttonHandler_selectedStep, 0u);
@@ -2020,6 +2463,10 @@ static void va_queueMarkerTransaction(const uint8_t desired_base[4],
     uint8_t row;
     uint8_t col;
     uint8_t needed;
+
+    /* Copy/Clear owns the two LCD rows while its action menu is visible. */
+    if (copyClear_menuVisible())
+        return;
 
     for (i = 0u; i < VA_CGRAM_SLOT_COUNT; i++) {
         uint8_t valid = (uint8_t)(desired_valid & (uint8_t)(1u << i));
@@ -2209,9 +2656,12 @@ static void va_applyVoiceMarkers(void)
 
     if (editModeActive) {
         menu_cell_t cell = menu_resolveCell(activePage, activeParameter);
-        if (cell.kind == MENU_CELL_INSTRUMENT) {
+        if (cell.kind == MENU_CELL_INSTRUMENT ||
+            cell.kind == MENU_CELL_SCENE_SETTING) {
             instrument_param_id_t target =
-                instrumentParam_make(slot, cell.descriptor_index);
+                (cell.kind == MENU_CELL_INSTRUMENT)
+                    ? instrumentParam_make(slot, cell.descriptor_index)
+                    : menu_sceneSettingAutomationTarget(&cell);
             uint8_t value7;
             uint8_t suppress_bit =
                 (uint8_t)(1u << (activeParameter & 3u));
@@ -2226,6 +2676,10 @@ static void va_applyVoiceMarkers(void)
                     (va_underlineSuppressed & validity_bit)
                         ? va_workingValue[activeParameter & 3u]
                         : va_storedToParam(value7);
+                if (cell.kind == MENU_CELL_SCENE_SETTING &&
+                    cell.scene_setting == MENU_SCENE_SETTING_VOICE_MORPH &&
+                    (va_underlineSuppressed & validity_bit) == 0u)
+                    display_val = menu_morphAutomationExpand(value7);
                 memset(value_field, ' ', 16u);
                 va_formatValue3(&cell, display_val, &value_field[13]);
                 if ((va_underlineSuppressed & suppress_bit) == 0u) {
@@ -2239,8 +2693,24 @@ static void va_applyVoiceMarkers(void)
                         desired_valid = 0x01u;
                     }
                 }
-            } else if (va_searchComplete &&
+            } else if (cell.kind == MENU_CELL_INSTRUMENT &&
+                       va_searchComplete &&
                        va_searchTestBit(cell.descriptor_index)) {
+                int8_t left;
+                for (left = 8; left < 16 &&
+                     editDisplayBuffer[0][left] == ' '; left++)
+                    ;
+                if (left < 16 && lcd_underlineGlyph(
+                        (uint8_t)editDisplayBuffer[0][left], glyph_probe)) {
+                    desired_base[0] = (uint8_t)editDisplayBuffer[0][left];
+                    marker_row[0] = 0u;
+                    marker_col[0] = (uint8_t)left;
+                    desired_valid = 0x01u;
+                }
+            } else if (cell.kind == MENU_CELL_SCENE_SETTING &&
+                       va_searchComplete &&
+                       (va_searchSceneMask &
+                        va_sceneSearchBitForCell(&cell)) != 0u) {
                 int8_t left;
                 for (left = 8; left < 16 &&
                      editDisplayBuffer[0][left] == ' '; left++)
@@ -2264,9 +2734,14 @@ static void va_applyVoiceMarkers(void)
         uint8_t value7;
         instrument_param_id_t target;
 
-        if (cell.kind != MENU_CELL_INSTRUMENT)
+        if (cell.kind != MENU_CELL_INSTRUMENT &&
+            cell.kind != MENU_CELL_SCENE_SETTING)
             continue;
-        target = instrumentParam_make(slot, cell.descriptor_index);
+        target = (cell.kind == MENU_CELL_INSTRUMENT)
+            ? instrumentParam_make(slot, cell.descriptor_index)
+            : menu_sceneSettingAutomationTarget(&cell);
+        if (target == INSTRUMENT_PARAM_INVALID)
+            continue;
         if (va_overlayActive && va_resolveHeldValue(target, &value7)) {
             char value_text[3];
             int8_t right;
@@ -2275,6 +2750,10 @@ static void va_applyVoiceMarkers(void)
                 (va_underlineSuppressed & (uint8_t)(0x10u << i))
                     ? va_workingValue[i]
                     : va_storedToParam(value7);
+            if (cell.kind == MENU_CELL_SCENE_SETTING &&
+                cell.scene_setting == MENU_SCENE_SETTING_VOICE_MORPH &&
+                (va_underlineSuppressed & (uint8_t)(0x10u << i)) == 0u)
+                display_val = menu_morphAutomationExpand(value7);
             va_formatValue3(&cell, display_val, value_text);
             memcpy(&editDisplayBuffer[1][4u * i], value_text, 3u);
             if ((va_underlineSuppressed & (uint8_t)(1u << i)) == 0u) {
@@ -2288,7 +2767,8 @@ static void va_applyVoiceMarkers(void)
                     desired_valid |= (uint8_t)(1u << i);
                 }
             }
-        } else if (va_searchComplete &&
+        } else if (cell.kind == MENU_CELL_INSTRUMENT &&
+                   va_searchComplete &&
                    va_searchTestBit(cell.descriptor_index)) {
             int8_t left;
             uint8_t start = (uint8_t)(4u * i);
@@ -2303,6 +2783,178 @@ static void va_applyVoiceMarkers(void)
                 marker_col[i] = (uint8_t)(start + left);
                 desired_valid |= (uint8_t)(1u << i);
             }
+        } else if (cell.kind == MENU_CELL_SCENE_SETTING &&
+                   va_searchComplete &&
+                   (va_searchSceneMask &
+                    va_sceneSearchBitForCell(&cell)) != 0u) {
+            int8_t left;
+            uint8_t start = (uint8_t)(4u * i);
+            for (left = 0; left < 3 &&
+                 editDisplayBuffer[0][start + left] == ' '; left++)
+                ;
+            if (left < 3 && lcd_underlineGlyph(
+                    (uint8_t)editDisplayBuffer[0][start + left], glyph_probe)) {
+                desired_base[i] =
+                    (uint8_t)editDisplayBuffer[0][start + left];
+                marker_row[i] = 0u;
+                marker_col[i] = (uint8_t)(start + left);
+                desired_valid |= (uint8_t)(1u << i);
+            }
+        }
+    }
+    va_queueMarkerTransaction(desired_base, desired_valid,
+                              marker_row, marker_col);
+}
+
+/*
+ * Report whether one Effect cell's name takes the automation underline (S074).
+ *
+ * What: nonzero when any stored automation addresses the cell's parameter:
+ *   - Pattern automation: once the shared search is complete, a PARAM cell
+ *     has its local bit set in va_searchTargetMask[], or the `mrp` cell has
+ *     VA_SEARCH_SCENE_EFFECT_MORPH_BIT (`fxm`) set. The search covers every
+ *     step of every track of the viewed Pattern;
+ *   - FX-sequence locks: the cell's lane is locked on any of the 16 steps
+ *     (menuEffects_cellSeqLocked()). This is read live from the active
+ *     Scene's record, so it needs no search and no restart after lock edits.
+ * `typ`, `run`, `len`, and `scl` are never automated and return zero.
+ * Why: the S074 rule (user, 2026-09-29) - if there is any automation on a
+ * parameter, in the FX sequence or the Scene's Pattern, its name is
+ * underlined in both views, whether or not that automation would play with
+ * the current settings (FX length, run mode, track length, mute, trigger,
+ * probability, or the current type's AUTOMATABLE flags). The underline
+ * reports stored data, not audible effect.
+ * Input: one resolved menu cell. Output: 0/1. Caller:
+ * menu_applyEffectMarkers(). Affiliates: va_scanService(),
+ * va_searchTestBit(), menuEffects_cellSeqLocked().
+ */
+static uint8_t menu_effectCellAutomated(const menu_cell_t *cell)
+{
+    if (!cell || cell->kind != MENU_CELL_EFFECT)
+        return 0u;
+    if (va_searchComplete) {
+        if (cell->fx.kind == MENU_FX_CELL_MORPH_AMOUNT &&
+            (va_searchSceneMask & VA_SEARCH_SCENE_EFFECT_MORPH_BIT) != 0u)
+            return 1u;
+        if (cell->fx.kind == MENU_FX_CELL_PARAM &&
+            va_searchTestBit(cell->fx.index))
+            return 1u;
+    }
+    return menuEffects_cellSeqLocked(&cell->fx);
+}
+
+/*
+ * Apply Effect-page automation markers after the ordinary Effect frame is
+ * formed (S072 held-value marker; S074 name marker).
+ *
+ * What: chooses at most one underline per visible cell, in this order:
+ *   1. Held-step value (row 1). While SEQ steps are held, a sequenceable
+ *      cell (a PARAM row with a lane, or `mrp`) shows the first held step's
+ *      lane value. If that lane is locked on that step, the value's
+ *      rightmost glyph is underlined and the cell takes no other marker.
+ *   2. Parameter name (row 0). Otherwise, when menu_effectCellAutomated()
+ *      reports any Pattern automation (any step of any track of the viewed
+ *      Pattern) or any FX-sequence lock (any of the 16 steps, whether or not
+ *      it plays), the first non-space character of the name is underlined:
+ *      the 3-character short name at columns 4*i..4*i+2 in the compact view,
+ *      or the 8-character long name at columns 8..15 in the full view.
+ * Why: the VOICE pages follow this convention (va_applyVoiceMarkers()); until
+ * S074 the Effect page drew only step 1, so automated parameter names were
+ * never underlined.
+ * Inputs: menuIndex, editModeActive, the resolved Effect cells, the SEQ hold
+ * (menuEffects_holdDisplay()), the shared search result, and the active
+ * Scene's FX sequence. Outputs: held values written into editDisplayBuffer
+ * row 1 and one CGRAM marker transaction (marker slots 0..3 = CGRAM 2..5,
+ * one per visible cell; slot 0 only in the full view). No retained state
+ * changes. Callers: menu_repaintGeneric() - after menuEffects_paintEditView()
+ * for the manager full views (typ/run/len/scl/mrp), and at its common tail for
+ * PARAM full views and the compact view. Affiliates: menu_effectCellAutomated(),
+ * va_formatValue3(), menuEffects_formatValue3(),
+ * va_queueMarkerTransaction(), lcd_underlineGlyph().
+ */
+static void menu_applyEffectMarkers(void)
+{
+    uint8_t glyph_probe[8];
+    uint8_t desired_base[4] = { 0u, 0u, 0u, 0u };
+    uint8_t marker_row[4] = { 0u, 0u, 0u, 0u };
+    uint8_t marker_col[4] = { 0u, 0u, 0u, 0u };
+    uint8_t desired_valid = 0u;
+    uint8_t activePage;
+    uint8_t activeParameter;
+    uint8_t first;
+    uint8_t count;
+    uint8_t i;
+
+    if (menu_activePage != EFFECT_PAGE)
+        return;
+    activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    activeParameter = (uint8_t)(menuIndex & MASK_PARAMETER);
+    first = editModeActive ? activeParameter : 0u;
+    count = editModeActive ? 1u : 4u;
+    for (i = 0u; i < count; i++) {
+        uint8_t column = (uint8_t)(first + i);
+        menu_cell_t cell = menu_resolveCell(activePage, column);
+        uint8_t value;
+        uint8_t locked = 0u;
+        uint8_t slot = editModeActive ? 0u : i;
+        uint8_t name_start = editModeActive ? 8u : (uint8_t)(4u * i);
+        uint8_t name_width = editModeActive ? 8u : 3u;
+        uint8_t left;
+
+        if (cell.kind != MENU_CELL_EFFECT)
+            continue;
+        if (menuEffects_holdDisplay(&cell.fx, &value, &locked)) {
+            char *field = editModeActive ? &editDisplayBuffer[1][13]
+                                         : &editDisplayBuffer[1][4u * i];
+            int8_t right;
+
+            if (cell.fx.kind == MENU_FX_CELL_PARAM) {
+                /* S074: the type's label for the held value (Sync division). */
+                if (!menuEffects_formatParamValue3(&cell.fx, value, field))
+                    va_formatValue3(&cell, value, field);
+            }
+            else if (cell.fx.kind == MENU_FX_CELL_MORPH_AMOUNT)
+                /* Held `mrp` is a plain number, so show its lock value directly. */
+                numtostrpu(field, value, ' ');
+            else
+                (void)menuEffects_formatValue3(&cell.fx, field);
+            if (locked) {
+                for (right = 2; right >= 0 && field[right] == ' '; right--)
+                    ;
+                if (right >= 0 && lcd_underlineGlyph((uint8_t)field[right],
+                                                     glyph_probe)) {
+                    desired_base[slot] = (uint8_t)field[right];
+                    marker_row[slot] = 1u;
+                    marker_col[slot] = (uint8_t)(
+                        (editModeActive ? 13u : 4u * i) + (uint8_t)right);
+                    desired_valid |= (uint8_t)(1u << slot);
+                }
+                /* The held step's locked value owns this cell (VOICE rule). */
+                continue;
+            }
+        }
+        /* Unheld, or held but unlocked: fall back to the name marker. */
+        /*
+         * S074: a type-painted row 0 (CrumpBit's data-line overlay) holds no
+         * names, and its `0` characters are underline-able, so a name marker
+         * there would mark a bit. Those parameters show underlines on the
+         * type's named screens instead (Q16).
+         */
+        if (!editModeActive && menuEffects_screenHasCustomRow0(activePage))
+            continue;
+        if (!menu_effectCellAutomated(&cell))
+            continue;
+        for (left = 0u; left < name_width &&
+             editDisplayBuffer[0][name_start + left] == ' '; left++)
+            ;
+        if (left < name_width && lcd_underlineGlyph(
+                (uint8_t)editDisplayBuffer[0][name_start + left],
+                glyph_probe)) {
+            desired_base[slot] =
+                (uint8_t)editDisplayBuffer[0][name_start + left];
+            marker_row[slot] = 0u;
+            marker_col[slot] = (uint8_t)(name_start + left);
+            desired_valid |= (uint8_t)(1u << slot);
         }
     }
     va_queueMarkerTransaction(desired_base, desired_valid,
@@ -2339,6 +2991,56 @@ static void va_underlineService(void)
 }
 
 /*
+ * Refresh live Scene-setting values during playback.
+ *
+ * What: repaints the visible PERF Morph cells, VOICE/mix Scene-setting cells,
+ * or an Effect page whose type labels values from live state, at a bounded
+ * foreground cadence. Why: Scene target automation changes retained Scene
+ * values and is intentionally not reset on voice retrigger, while CrumpBit's
+ * Sync label follows tempo, so a display that repaints only on input shows
+ * stale values. Inputs:
+ * seq_isRunning(), time_sysTick, current page/cell context, and editModeActive.
+ * Output: one ordinary menu_repaint() approximately every 125 ms on a
+ * relevant page. The service never runs while the user is editing or while a
+ * screensaver owns the LCD. Affiliates: seq_applySceneAutomation(),
+ * menu_cellDisplayValue(), and menu_serviceRuntimeWidgets().
+ */
+static void menu_sceneLiveRefreshService(void)
+{
+    uint8_t activeSubPage;
+    uint8_t i;
+    uint8_t visible = 0u;
+
+    if (!seq_isRunning() || screensaver_isActive() || editModeActive)
+        return;
+
+    if (menu_activePage == PERFORMANCE_PAGE) {
+        visible = 1u;
+    } else if (menu_isVoicePage(menu_activePage)) {
+        activeSubPage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+        for (i = 0u; i < MENU_COMPACT_SCREEN_CELLS; i++) {
+            menu_cell_t cell = menu_resolveCell(activeSubPage, i);
+
+            if (va_sceneSearchBitForCell(&cell) != 0u) {
+                visible = 1u;
+                break;
+            }
+        }
+    } else if (menu_activePage == EFFECT_PAGE) {
+        /* S074: CrumpBit's Sync division follows the live tempo. */
+        visible = menuEffects_liveRefreshWanted();
+    }
+
+    if (!visible ||
+        (uint16_t)(time_sysTick - menu_sceneLiveRefreshTick) <
+            SCENE_LIVE_REFRESH_INTERVAL_MS)
+        return;
+
+    menu_sceneLiveRefreshTick = time_sysTick;
+    menu_repaint();
+}
+
+/*
  * Write one adjusted VOICE parameter to every physically held step.
  *
  * What: seeds from the parameter-domain working-value cache (if mid-edit),
@@ -2371,18 +3073,27 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
         !va_overlayActive)
         return;
     cell = menu_resolveCell(activePage, knobNr);
-    if (cell.kind != MENU_CELL_INSTRUMENT)
+    if (cell.kind == MENU_CELL_INSTRUMENT) {
+        target = instrumentParam_make(menu_voicePageToSlot(menu_activePage),
+                                      cell.descriptor_index);
+    } else if (cell.kind == MENU_CELL_SCENE_SETTING) {
+        target = menu_sceneSettingAutomationTarget(&cell);
+        if (target == INSTRUMENT_PARAM_INVALID)
+            return;
+    } else {
         return;
-
-    target = instrumentParam_make(menu_voicePageToSlot(menu_activePage),
-                                  cell.descriptor_index);
+    }
 
     /* Seed: working cache if validity bit set, else the stored parameter value,
      * else the read-only displayed endpoint for first creation. */
     if (va_underlineSuppressed & (uint8_t)(0x10u << knobNr))
         value = (uint16_t)va_workingValue[knobNr];
     else if (va_resolveHeldValue(target, &stored7))
-        value = (uint16_t)va_storedToParam(stored7);
+        value = (uint16_t)(
+            (cell.kind == MENU_CELL_SCENE_SETTING &&
+             cell.scene_setting == MENU_SCENE_SETTING_VOICE_MORPH)
+                ? menu_morphAutomationExpand(stored7)
+                : va_storedToParam(stored7));
     else
         value = menu_cellDisplayValue(&cell);
 
@@ -2396,9 +3107,16 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
     /* Cache the clamped parameter-domain value for the next detent. */
     va_workingValue[knobNr] = (value > 255u) ? 255u : (uint8_t)value;
 
-    /* Saturate the parameter-domain value to the 7-bit Pattern storage range;
-     * no MIDI-CC-style division is valid for instrument descriptor values. */
-    stored7 = (value > 127u) ? 127u : (uint8_t)value;
+    /*
+     * Saturate parameter-domain values to Pattern's seven-bit storage. Voice
+     * Morph is the one Scene target whose visible domain is 0..255, so it uses
+     * the explicit endpoint-preserving conversion instead of a plain clamp.
+     */
+    if (cell.kind == MENU_CELL_SCENE_SETTING &&
+        cell.scene_setting == MENU_SCENE_SETTING_VOICE_MORPH)
+        stored7 = menu_morphAutomationStore((uint8_t)value);
+    else
+        stored7 = (value > 127u) ? 127u : (uint8_t)value;
     for (i = 0u; i < va_heldCount; i++) {
         if (patSvc_writeStepAutomation(
                 menu_shownPattern, menu_activeVoice,
@@ -2406,7 +3124,19 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
             wrote = 1u;
     }
     if (wrote) {
-        va_searchSetBit(cell.descriptor_index);
+        /*
+         * Mark the just-written automation target immediately.
+         *
+         * Instrument cells update the descriptor bitmask used by the
+         * Pattern-wide name markers. Scene-setting cells update the compact
+         * Scene-target mask so the underline appears on the next repaint,
+         * without waiting for va_scanService() to complete its bounded sweep.
+         * Both paths preserve the edit-flash suppression and dirty repaint.
+         */
+        if (cell.kind == MENU_CELL_INSTRUMENT)
+            va_searchSetBit(cell.descriptor_index);
+        else if (cell.kind == MENU_CELL_SCENE_SETTING)
+            va_searchSceneMask |= va_sceneSearchBitForCell(&cell);
         va_underlineSuppressed |= (uint8_t)((1u << knobNr) | (0x10u << knobNr));
         va_lastEditTick = time_sysTick;
         menu_knobs_dirty = 1u;
@@ -2545,10 +3275,9 @@ static menu_cell_t menu_resolveSceneSettingCell(uint8_t index)
      * Inputs: column-local index in the appended one-screen Scene section.
      * Output: a MENU_CELL_SCENE_SETTING with scene_setting equal to the index
      * and slot equal to the current VOICE page's zero-based instrument slot.
-     * This keeps VOICE1/mix on voice 1's audio_out, fx_send_amount, and
-     * fader_setting, while VOICE2/mix edits voice 2's same three fields, and
-     * so on. Column 4 returns MENU_CELL_EMPTY because there are only three
-     * Scene settings per voice.
+     * This keeps VOICE1/mix on voice 1's audio_out, fx_send_amount,
+     * fader_setting, and Voice Morph, while VOICE2/mix edits voice 2's same
+     * four fields, and so on. Positions beyond the four entries return empty.
      *
      * Affiliates: menu_voiceSubPageScreenCount() appends exactly one screen;
      * menu_sceneSettingShortName(), menu_cellDisplayValue(), and
@@ -2666,6 +3395,21 @@ static menu_cell_t menu_resolveVoiceCellAtScreen(uint8_t subPage,
 
 static menu_cell_t menu_resolveCell(uint8_t subPage, uint8_t position)
 {
+    if (menu_activePage == EFFECT_PAGE) {
+        menu_cell_t cell;
+
+        /* Effect cells come from menuEffects' registry-driven layout. */
+        memset(&cell, 0, sizeof(cell));
+        cell.kind = MENU_CELL_EMPTY;
+        cell.static_param = PAR_NONE;
+        cell.text_id = TEXT_EMPTY;
+        cell.descriptor_index = INSTRUMENT_MENU_EMPTY;
+        if (menuEffects_resolveCell(subPage, position, &cell.fx)) {
+            cell.kind = MENU_CELL_EFFECT;
+            cell.descriptor = cell.fx.descriptor;
+        }
+        return cell;
+    }
     if (menu_isVoicePage(menu_activePage)) {
         uint8_t screen;
         if (subPage >= NUM_SUB_PAGES)
@@ -2798,9 +3542,10 @@ static void menu_sceneSettingShortName(const menu_cell_t *cell, char *dst)
      * Build compact three-character labels for VOICE mix Scene settings.
      *
      * Inputs: Scene-setting cell and three-byte destination. Output examples:
-     * 1ou..6ou for audio routing, 1fx..6fx for retained FX send, and
-     * 1fd..6fd for retained fader mode. The slot number is one-based so the
-     * compact label identifies which voice the Scene setting edits.
+     * 1ou..6ou for audio routing, 1fx..6fx for retained FX send,
+     * 1fd..6fd for retained fader mode, and 1vm..6vm for Voice Morph. The
+     * slot number is one-based so the compact label identifies which voice the
+     * Scene setting edits.
      */
     uint8_t voice = (cell && cell->slot < INSTRUMENT_SLOT_COUNT)
         ? (uint8_t)(cell->slot + 1u) : 1u;
@@ -2814,6 +3559,10 @@ static void menu_sceneSettingShortName(const menu_cell_t *cell, char *dst)
         dst[1] = 'f';
         dst[2] = 'd';
         break;
+    case MENU_SCENE_SETTING_VOICE_MORPH:
+        dst[1] = 'v';
+        dst[2] = 'm';
+        break;
     default:
         dst[1] = 'o';
         dst[2] = 'u';
@@ -2821,19 +3570,89 @@ static void menu_sceneSettingShortName(const menu_cell_t *cell, char *dst)
     }
 }
 
+/*
+ * Resolve one VOICE mix Scene-setting cell to a step-automation target.
+ *
+ * Inputs: resolved Menu cell and its zero-based voice slot. Output: canonical
+ * Scene target ID for audio_out, fx_send, or Voice Morph; fader_setting and
+ * malformed cells return INSTRUMENT_PARAM_INVALID because fader mode is not
+ * currently automatable. The table offsets are part of SceneModTargets'
+ * documented 384..403 namespace and keep overlay, marker, and LED paths on
+ * the same target identity.
+ * Affiliates: va_writeAutomationFromKnob(), va_applyVoiceMarkers(), and
+ * va_refreshAutomationLeds().
+ */
+static instrument_param_id_t menu_sceneSettingAutomationTarget(
+    const menu_cell_t *cell)
+{
+    if (!cell || cell->kind != MENU_CELL_SCENE_SETTING ||
+        cell->slot >= INSTRUMENT_SLOT_COUNT)
+        return INSTRUMENT_PARAM_INVALID;
+
+    switch (cell->scene_setting) {
+    case MENU_SCENE_SETTING_VOICE_MORPH:
+        return sceneModTarget_voiceMorphId(cell->slot);
+    case MENU_SCENE_SETTING_AUDIO_OUT:
+        return (instrument_param_id_t)(INSTRUMENT_VOICE_ID_COUNT +
+                                       8u + cell->slot);
+    case MENU_SCENE_SETTING_FX_SEND_AMOUNT:
+        return (instrument_param_id_t)(INSTRUMENT_VOICE_ID_COUNT +
+                                       14u + cell->slot);
+    default:
+        return INSTRUMENT_PARAM_INVALID;
+    }
+}
+
+/*
+ * Convert full-range Voice Morph to the seven-bit Pattern value.
+ *
+ * Inputs: 0..255 Scene Morph amount. Output: 0..126 for 0..254 by integer
+ * halving, with 255 preserved as 127 so the runtime endpoint is reachable.
+ * Affiliates: va_writeAutomationFromKnob() and step-editor value writes.
+ */
+static uint8_t menu_morphAutomationStore(uint8_t morph_value)
+{
+    return (morph_value == 255u) ? 127u : (uint8_t)(morph_value / 2u);
+}
+
+/*
+ * Expand the stored Voice Morph automation byte for Menu display/editing.
+ *
+ * Inputs: Pattern value 0..127. Output: 0..252 for 0..126 and 255 for 127.
+ * This is the display-side inverse of menu_morphAutomationStore() and matches
+ * seq_applySceneAutomation()'s runtime conversion.
+ */
+static uint8_t menu_morphAutomationExpand(uint8_t stored)
+{
+    return (stored >= 127u) ? 255u : (uint8_t)(stored * 2u);
+}
+
+/* Scene Morph automation uses the same seven-bit storage as voice Morph. */
+static uint8_t menu_sceneTargetIsMorph(
+    const scene_mod_target_descriptor_t *descriptor)
+{
+    return (uint8_t)(descriptor &&
+        (descriptor->kind == SCENE_MOD_TARGET_KIND_VOICE_MORPH ||
+         descriptor->kind == SCENE_MOD_TARGET_KIND_EFFECT_MORPH));
+}
+
 static void menu_sceneSettingFaderName(uint8_t value, char *dst)
 {
     /*
      * Format the retained fader mode domain.
      *
-     * Inputs: stored 0..2 fader mode. Output: compact user text. These labels
-     * are storage/UI placeholders until mixer/FX routing implements behavior:
-     * pre = normal/pre-FX, pst = post-FX, fx  = FX-only.
+     * Inputs: stored 0..3 fader mode. Output: compact user text. These labels
+     * are live mixer behavior: pre = fader before both dry and FX taps, pst =
+     * fader on the dry/post-FX mix only, fx = fader on the FX send only, and
+     * xfd (S074) = fader crossfades from the FX send (bottom) to the dry
+     * output (top). Used by both the compact row and the full edit view.
      */
     if (value == 1u)
         memcpy(dst, "pst", 3);
     else if (value == 2u)
         memcpy(dst, "fx ", 3);
+    else if (value == 3u)
+        memcpy(dst, "xfd", 3);
     else
         memcpy(dst, "pre", 3);
 }
@@ -2842,11 +3661,16 @@ static uint8_t menu_cellDtype(const menu_cell_t *cell)
 {
     if (!cell)
         return DTYPE_0B127;
+    /* Effect page cells are owned by menuEffects.c (Session 072 step 7). */
+    if (cell->kind == MENU_CELL_EFFECT)
+        return menuEffects_cellDtype(&cell->fx);
     if (cell->kind == MENU_CELL_SCENE_SETTING) {
         if (cell->scene_setting == MENU_SCENE_SETTING_AUDIO_OUT)
             return (uint8_t)((MENU_AUDIO_OUT << 4) | DTYPE_MENU);
         if (cell->scene_setting == MENU_SCENE_SETTING_FADER_SETTING)
             return DTYPE_0B15;
+        if (cell->scene_setting == MENU_SCENE_SETTING_VOICE_MORPH)
+            return DTYPE_0B255;
         return DTYPE_0B127;
     }
     if (cell->kind == MENU_CELL_INSTRUMENT ||
@@ -2861,6 +3685,9 @@ static uint16_t menu_cellDisplayValue(const menu_cell_t *cell)
 {
     if (!cell)
         return 0u;
+    /* Effect page cells are owned by menuEffects.c (Session 072 step 7). */
+    if (cell->kind == MENU_CELL_EFFECT)
+        return menuEffects_cellValue(&cell->fx);
     if (cell->kind == MENU_CELL_KIT_SETTING) {
         /*
          * Display generated kit-setting cells.
@@ -2890,21 +3717,34 @@ static uint16_t menu_cellDisplayValue(const menu_cell_t *cell)
     }
     if (cell->kind == MENU_CELL_SCENE_SETTING) {
         /*
-         * Display retained Scene-owned VOICE mix settings.
+         * Display Scene-owned VOICE mix settings.
          *
          * Inputs: active resident Scene and zero-based slot from the resolved
-         * cell. Outputs: scalar value in the same domain used by sceneset.scg
-         * and Preset setters. Morph endpoint display never changes these
-         * values because Scene settings are not instrument morph endpoints.
+         * cell, plus voiceModeShowMorph. Outputs: Morph, audio-out and fader
+         * cells keep their existing endpoint/effective rules. FX send shows
+         * the retained Morph endpoint in Morph view; otherwise its active
+         * step override or retained Normal endpoint. It never shows the
+         * interpolated send.
+         * menu_sceneLiveRefreshService() repaints this surface during playback,
+         * so the Scene superpage follows the live runtime layer just as PERF
+         * follows its flat Morph mirror.
+         *
+         * Affiliates: the three preset effective-value getters are read-only
+         * bridges; none of them writes SceneData or schedules AutoSave.
          */
         uint8_t scene_index = scene_getActiveIndex();
         switch (cell->scene_setting) {
         case MENU_SCENE_SETTING_AUDIO_OUT:
-            return scene_getVoiceAudioOut(scene_index, cell->slot);
+            return preset_getEffectiveAudioOut(scene_index, cell->slot);
         case MENU_SCENE_SETTING_FX_SEND_AMOUNT:
-            return scene_getVoiceFxSendAmount(scene_index, cell->slot);
+            return voiceModeShowMorph
+                ? scene_getVoiceFxSendMorph(scene_index, cell->slot)
+                : preset_getFxSendDisplayAmount(scene_index, cell->slot);
         case MENU_SCENE_SETTING_FADER_SETTING:
             return scene_getVoiceFaderSetting(scene_index, cell->slot);
+        case MENU_SCENE_SETTING_VOICE_MORPH:
+            return presetMorph_getEffectiveVoiceAmount(scene_index,
+                                                       cell->slot);
         default:
             return 0u;
         }
@@ -2918,6 +3758,9 @@ static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
 {
     if (!cell)
         return 0u;
+    /* Effect page cells are owned by menuEffects.c (Session 072 step 7). */
+    if (cell->kind == MENU_CELL_EFFECT)
+        return menuEffects_cellCommit(&cell->fx, value);
     if (cell->kind == MENU_CELL_KIT_SETTING) {
         uint16_t edit_mask = bank_sceneMaskVoiceEdit();
         uint8_t scene_index;
@@ -2967,9 +3810,7 @@ static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
                     scene_index, cell->slot, cell->descriptor_index,
                     voiceModeShowMorph ? INSTRUMENT_IMAGE_MORPH
                                        : INSTRUMENT_IMAGE_MAIN,
-                    (uint8_t)value,
-                    (uint8_t)(!voiceModeShowMorph &&
-                              scene_index == scene_getActiveIndex()));
+                    (uint8_t)value);
             } else if (!voiceModeShowMorph) {
                 changed |= preset_setSupplementalParameter(
                     scene_index, cell->slot, cell->descriptor_index, value);
@@ -3001,14 +3842,25 @@ static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
                                                    (uint8_t)value);
                 break;
             case MENU_SCENE_SETTING_FX_SEND_AMOUNT:
-                changed |= preset_setVoiceFxSendAmount(scene_index,
-                                                       cell->slot,
-                                                       (uint8_t)value);
+                /* S075 F2-H: view selects the retained send endpoint. */
+                changed |= voiceModeShowMorph
+                    ? preset_setVoiceFxSendMorph(scene_index, cell->slot,
+                                                 (uint8_t)value)
+                    : preset_setVoiceFxSendAmount(scene_index, cell->slot,
+                                                  (uint8_t)value);
                 break;
             case MENU_SCENE_SETTING_FADER_SETTING:
                 changed |= preset_setVoiceFaderSetting(scene_index,
                                                        cell->slot,
                                                        (uint8_t)value);
+                break;
+            case MENU_SCENE_SETTING_VOICE_MORPH:
+                if (scene_getVoiceMorphAmount(scene_index, cell->slot) !=
+                    (uint8_t)value) {
+                    preset_morphVoiceScene(scene_index, cell->slot,
+                                           (uint8_t)value);
+                    changed = 1u;
+                }
                 break;
             default:
                 break;
@@ -3016,6 +3868,17 @@ static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
         }
         return changed;
     }
+    /*
+     * S074 bus compressor cells are Scene-owned, not Global-owned mirrors.
+     * Fan out the clamped value through Preset and refresh from the active
+     * Scene; this prevents settings.cfg bulk apply from writing SceneData.
+     */
+    if (cell->kind == MENU_CELL_STATIC &&
+        menu_paramIsBusComp(cell->static_param))
+        return menu_commitBusCompParam(cell->static_param, (uint8_t)value);
+    if (cell->kind == MENU_CELL_STATIC &&
+        cell->static_param == PAR_EFFECT_MORPH)
+        return menu_commitEffectMorphParam((uint8_t)value);
     if (cell->kind == MENU_CELL_STATIC) {
         uint8_t *paramValue = menu_getParameterEditPtr(cell->static_param);
         uint8_t old_value;
@@ -3109,12 +3972,13 @@ static uint8_t menu_lfoTargetContext(const menu_cell_t *cell,
     ctx->raw_target_voice = raw_voice;
     if (raw_voice < INSTRUMENT_TARGET_VOICE_FIRST)
         ctx->target_voice = 1u;
-    else if (raw_voice > INSTRUMENT_TARGET_VOICE_SCENE)
-        ctx->target_voice = INSTRUMENT_TARGET_VOICE_SCENE;
+    else if (raw_voice > INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST)
+        ctx->target_voice = INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST;
     else
         ctx->target_voice = raw_voice;
+    /* Non-voice namespaces (`scn`, `fx`) have no target slot. */
     ctx->target_is_scene =
-        (uint8_t)(ctx->target_voice == INSTRUMENT_TARGET_VOICE_SCENE);
+        (uint8_t)(ctx->target_voice > INSTRUMENT_TARGET_VOICE_LAST);
     ctx->target_slot = ctx->target_is_scene
         ? 0xffu
         : (uint8_t)(ctx->target_voice - 1u);
@@ -3192,8 +4056,8 @@ static uint8_t menu_lfoTargetCommitVoiceAndReconcile(
         return 0u;
     if (raw_voice < INSTRUMENT_TARGET_VOICE_FIRST)
         voice = INSTRUMENT_TARGET_VOICE_FIRST;
-    else if (raw_voice > INSTRUMENT_TARGET_VOICE_SCENE)
-        voice = INSTRUMENT_TARGET_VOICE_SCENE;
+    else if (raw_voice > INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST)
+        voice = INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST;
     else
         voice = (uint8_t)raw_voice;
 
@@ -3203,8 +4067,9 @@ static uint8_t menu_lfoTargetCommitVoiceAndReconcile(
         menu_lfo_target_context_t next = *ctx;
         next.raw_target_voice = voice;
         next.target_voice = voice;
+        /* Both `scn` and `fx` are non-voice namespaces. */
         next.target_is_scene =
-            (uint8_t)(voice == INSTRUMENT_TARGET_VOICE_SCENE);
+            (uint8_t)(voice > INSTRUMENT_TARGET_VOICE_LAST);
         next.target_slot = next.target_is_scene
             ? 0xffu
             : (uint8_t)(voice - 1u);
@@ -3228,8 +4093,8 @@ static uint8_t menu_lfoTargetEditVoice(const menu_cell_t *cell, int16_t delta)
      *
      * Inputs: the resolved voice target cell and signed movement delta from
      * either the main encoder or an endless pot. Outputs: the target voice is
-     * clamped to 1..INSTRUMENT_TARGET_VOICE_SCENE, where the final value is
-     * displayed as `scn`, and the sibling target parameter is reconciled against the new
+     * clamped to 1..INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST (`scn` = 7,
+     * `fx` = 8), and the sibling target parameter is reconciled against the new
      * selected namespace.
      *
      * Why this is a separate edit helper: encoder and knob paths previously
@@ -3246,8 +4111,8 @@ static uint8_t menu_lfoTargetEditVoice(const menu_cell_t *cell, int16_t delta)
     next = (int16_t)ctx.target_voice + delta;
     if (next < (int16_t)INSTRUMENT_TARGET_VOICE_FIRST)
         next = INSTRUMENT_TARGET_VOICE_FIRST;
-    else if (next > (int16_t)INSTRUMENT_TARGET_VOICE_SCENE)
-        next = INSTRUMENT_TARGET_VOICE_SCENE;
+    else if (next > (int16_t)INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST)
+        next = INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST;
     return menu_lfoTargetCommitVoiceAndReconcile(cell, &ctx, (uint16_t)next);
 }
 
@@ -3468,6 +4333,19 @@ static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
      * this renderer descriptor-only prevents redundant voice text from leaking
      * into any current or future descriptor-target browser.
      */
+    /* Effect destinations use the active Scene's registry descriptor. */
+    if (effectTarget_isEffectId(target)) {
+        const effect_param_descriptor_t *effect_descriptor =
+            effects_targetDescriptor(scene_getActiveIndex(), target,
+                                     INSTRUMENT_TARGET_MODULATION);
+
+        if (effect_descriptor)
+            menu_copyPaddedField(valueAsText,
+                                 effect_descriptor->base.short_name, 3u);
+        else
+            memcpy(valueAsText, menuText_off, 3);
+        return;
+    }
     if (target == INSTRUMENT_PARAM_INVALID ||
         (!instrumentParam_isVoiceParameter(target) &&
          !sceneModTarget_isSceneTarget(target))) {
@@ -3501,6 +4379,22 @@ static void menu_displayInstrumentTargetFull(uint16_t target)
     const kit_instrument_slot_t *instrument;
     const ParamDescriptor *descriptor;
 
+    /* Effect destination: category and long name, like descriptor rows. */
+    if (effectTarget_isEffectId(target)) {
+        const effect_param_descriptor_t *effect_descriptor =
+            effects_targetDescriptor(scene_getActiveIndex(), target,
+                                     INSTRUMENT_TARGET_MODULATION);
+
+        if (!effect_descriptor) {
+            memcpy(&editDisplayBuffer[1][0], menuText_off, 3);
+            return;
+        }
+        menu_copyPaddedField(&editDisplayBuffer[1][0],
+                             effect_descriptor->base.category, 8u);
+        menu_copyPaddedField(&editDisplayBuffer[1][8],
+                             effect_descriptor->base.long_name, 8u);
+        return;
+    }
     if (target == INSTRUMENT_PARAM_INVALID ||
         (!instrumentParam_isVoiceParameter(target) &&
          !sceneModTarget_isSceneTarget(target))) {
@@ -3551,6 +4445,11 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
     uint16_t raw = menu_cellDisplayValue(cell);
     uint8_t value = (raw > 255u) ? 255u : (uint8_t)raw;
 
+    /* Effect page cells are owned by menuEffects.c (Session 072 step 7). */
+    if (cell && cell->kind == MENU_CELL_EFFECT &&
+        menuEffects_formatValue3(&cell->fx, valueAsText))
+        return;
+
     /*
      * Format one cell value for the compact four-column view. Instrument cells
      * share the same dtype vocabulary as static cells, but target cells may
@@ -3569,8 +4468,8 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
     } else if (dtype == DTYPE_VOICE_LFO && menu_cellIsLfoTargetVoice(cell)) {
         if (raw < INSTRUMENT_TARGET_VOICE_FIRST)
             raw = INSTRUMENT_TARGET_VOICE_FIRST;
-        else if (raw > INSTRUMENT_TARGET_VOICE_SCENE)
-            raw = INSTRUMENT_TARGET_VOICE_SCENE;
+        else if (raw > INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST)
+            raw = INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST;
         value = (uint8_t)raw;
     }
 
@@ -3586,6 +4485,10 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         menu_sceneSettingFaderName(value, valueAsText);
         return;
     }
+    /* S074 custom compact text: cmp off/St1/St2 and csc off/1..6. */
+    if (cell && cell->kind == MENU_CELL_STATIC &&
+        menu_busCompValueText(cell->static_param, value, valueAsText))
+        return;
 
     switch (dtype) {
     case DTYPE_TARGET_SELECTION_VELO:
@@ -3642,6 +4545,10 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         if (menu_cellIsLfoTargetVoice(cell) &&
             value == INSTRUMENT_TARGET_VOICE_SCENE) {
             memcpy(valueAsText, "scn", 3);
+        } else if (menu_cellIsLfoTargetVoice(cell) &&
+                   value == INSTRUMENT_TARGET_VOICE_EFFECT) {
+            /* Effect parameter namespace (Session 072 step 9). */
+            memcpy(valueAsText, "fx ", 3);
         } else {
             numtostrpu(valueAsText, value, ' ');
         }
@@ -3655,23 +4562,45 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
     if (!cell || !value)
         return;
 
+    /* Effect page cells are owned by menuEffects.c (Session 072 step 7). */
+    if (cell->kind == MENU_CELL_EFFECT) {
+        menuEffects_clampValue(&cell->fx, value);
+        return;
+    }
+
     if (cell->kind == MENU_CELL_SCENE_SETTING) {
         /*
          * Clamp Scene-setting cells before generic dtype handling.
          *
          * audio_out uses the six-entry mixer route menu, FX send uses 0..127,
-         * and fader mode uses 0..2 even though it borrows DTYPE_0B15 for basic
-         * numeric editing/display plumbing.
+         * fader mode uses 0..SCENE_FADER_SETTING_MAX (pre/pst/fx/xfd, S074),
+         * and Voice Morph uses its full 0..255 domain.
          */
         if (cell->scene_setting == MENU_SCENE_SETTING_AUDIO_OUT) {
             if (*value > 5u)
                 *value = 5u;
         } else if (cell->scene_setting == MENU_SCENE_SETTING_FADER_SETTING) {
-            if (*value > 2u)
-                *value = 2u;
+            if (*value > SCENE_FADER_SETTING_MAX)
+                *value = SCENE_FADER_SETTING_MAX;
+        } else if (cell->scene_setting == MENU_SCENE_SETTING_VOICE_MORPH) {
+            if (*value > 255u)
+                *value = 255u;
         } else if (*value > 127u) {
             *value = 127u;
         }
+        return;
+    }
+
+    /*
+     * S074 bus compressor domains are narrower than the generic 0..127 dtype:
+     * cmp is 0..2 and csc is 0..6, both defined by SceneData's clamp table.
+     */
+    if (cell->kind == MENU_CELL_STATIC &&
+        menu_paramIsBusComp(cell->static_param)) {
+        const uint8_t max = scene_busCompClamp(
+            (uint8_t)(cell->static_param - PAR_BUS_COMP_MODE), 255u);
+        if (*value > max)
+            *value = max;
         return;
     }
 
@@ -3747,9 +4676,51 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
     if (menu_cellIsLfoTargetVoice(cell)) {
         if (*value < INSTRUMENT_TARGET_VOICE_FIRST)
             *value = INSTRUMENT_TARGET_VOICE_FIRST;
-        else if (*value > INSTRUMENT_TARGET_VOICE_SCENE)
-            *value = INSTRUMENT_TARGET_VOICE_SCENE;
+        else if (*value > INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST)
+            *value = INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST;
     }
+}
+
+/*
+ * Clamp one value to an instrument parameter's menu domain (S075 F3).
+ *
+ * What: applies the same descriptor-domain clamp as a VOICE-page edit
+ * (menu_clampCellValue() for an instrument cell: dtype ranges, list sizes,
+ * on/off, target-selector tokens, and LFO target voice range) to one
+ * parameter of the active Scene's slot.
+ * Why: external MIDI now enters values into the Scene (stored, saved); a raw
+ * 0..127 CC must not persist an out-of-domain byte, for example 127 on an
+ * on/off parameter. The clamp rules live in Menu; this wrapper keeps one copy.
+ * Inputs: slot 0..5, descriptor-local index, raw value 0..255. Output: the
+ * clamped value, or the input unchanged when the slot/descriptor is invalid.
+ * Caller: MidiParser.c midiParser_enterTaggedParameter(). Affiliates:
+ * menu_clampCellValue(), menu_cellDtype().
+ */
+uint8_t menu_clampInstrumentValue(uint8_t slot, uint8_t descriptor_index,
+                                  uint8_t value)
+{
+    const kit_instrument_slot_t *instrument =
+        scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+    menu_cell_t cell;
+    uint16_t clamped = value;
+
+    /*
+     * Contract in menu.h. A transient instrument cell carries only what the
+     * clamp reads: kind, slot, descriptor index and descriptor (dtype,
+     * runtime kind for the LFO target checks).
+     */
+    if (!instrument)
+        return value;
+    memset(&cell, 0, sizeof(cell));
+    cell.kind = MENU_CELL_INSTRUMENT;
+    cell.slot = slot;
+    cell.descriptor_index = descriptor_index;
+    cell.descriptor = instrumentManager_descriptor(instrument->type,
+                                                   descriptor_index);
+    if (!cell.descriptor)
+        return value;
+    menu_clampCellValue(&cell, &clamped);
+    return (uint8_t)clamped;
 }
 
 
@@ -3894,7 +4865,10 @@ static const uint8_t menu_loadSaveLoadTypes[] = {
     SAVE_TYPE_KIT_MORPH,
     SAVE_TYPE_SCENE,
     SAVE_TYPE_BANK,
-    SAVE_TYPE_PATTERN
+    SAVE_TYPE_PATTERN,
+    /* Load-only modal install of /samples then /loops (S073: missing from
+     * this list since it was introduced). Save has no Samples action. */
+    SAVE_TYPE_SAMPLES
 };
 
 static const uint8_t menu_loadSaveSaveTypes[] = {
@@ -3988,11 +4962,15 @@ static void menu_requestTestScan(uint8_t what)
      * This is posted through Preset so completion follows the same poll path as
      * other storage operations. Save pages do not scan before editing because
      * overwrite behavior is intentionally delegated to the exact "w" open.
-     */
+    */
+    uint8_t accepted;
+
     if (menu_activePage != LOAD_PAGE)
         return;
-    if ((what == SAVE_TYPE_FILE && preset_scanTestFiles()) ||
-        (what == SAVE_TYPE_DIR && preset_scanTestDirs())) {
+    accepted = (uint8_t)((what == SAVE_TYPE_FILE && preset_scanTestFiles()) ||
+                         (what == SAVE_TYPE_DIR && preset_scanTestDirs()));
+    if (accepted) {
+        menu_selectionGenerationSnapshot = menu_selectionGeneration;
         menu_storageBusy = 1u;
     } else {
         menu_deferSelectionRequest = 1u;
@@ -4266,7 +5244,7 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
          * the older immutable request drains. Only the short entry/exit window
          * where HCNAMES owns the shared cache leaves the name blank.
          */
-        if (menu_storageBusy) {
+        if (menu_storageBusy || preset_getStatus() != PRESET_IDLE) {
             if (filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_KIT)) {
                 memcpy(preset_currentName,
                        filesystem_kitSlotName(slot), 8u);
@@ -4381,16 +5359,14 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
         menu_repaintAll();
         if (preset_loadKitForScenes(slot, menu_kitLoadSceneMask)) {
             /*
-             * Lock the accepted full-Kit coordinates through payload commit
-             * and runtime apply. Number-only turns may update the separate
-             * desired slot, but they never repost or overwrite this immutable
-             * request's slot/mask. Its changed Scene names are recorded in
-             * scratch after commit and serialized only at menu-family exit.
+             * Keep the encoder responsive while the immutable full-Kit request
+             * drains. Number-only turns update the separate desired slot, but
+             * never repost or overwrite this request's slot/mask. Its changed
+             * Scene names are recorded after commit and serialized at the
+             * menu-family checkpoint. Page exit still waits on Preset status.
             */
-            menu_storageBusy = 1u;
-            /* menu_parseEncoder() intentionally skips its trailing repaint
-             * once storage becomes busy; the pre-request repaint above has
-             * already published the number and `.hcindex` name. */
+            menu_selectionGenerationSnapshot = menu_selectionGeneration;
+            /* The pre-request repaint already published the coordinate/name. */
         } else {
             menu_deferSelectionRequest = 1;
         }
@@ -4401,9 +5377,9 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
         memcpy(preset_currentName, filesystem_kitSlotName(slot), 8u);
         menu_repaintAll();
         if (preset_loadKitMorphForScenes(slot, menu_kitLoadSceneMask)) {
-            /* KitMrp uses the same immutable request boundary even though it
-             * preserves all resident names and therefore skips Kit HCNAMES. */
-            menu_storageBusy = 1u;
+            /* KitMrp uses the same immutable request boundary, while the
+             * encoder remains free to choose the latest desired slot. */
+            menu_selectionGenerationSnapshot = menu_selectionGeneration;
         } else {
             menu_deferSelectionRequest = 1;
         }
@@ -4430,6 +5406,8 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
         preset_loadName(slot, what);
         if (preset_getStatus() != PRESET_LOAD_IN_PROGRESS)
             menu_deferSelectionRequest = 1;
+        else
+            menu_selectionGenerationSnapshot = menu_selectionGeneration;
     }
 }
 
@@ -4468,6 +5446,13 @@ static void menu_instrumentIndexLoadComplete(void)
     menu_traceInstrumentEntry(
         AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_INDEX_COMPLETE,
         (uint8_t)!index_ok);
+    if (menu_pendingPageSwitch != MENU_PENDING_PAGE_NONE) {
+        /* A physical exit owns the next safe boundary; do not reopen `.hcindex`. */
+        filesystem_clearNameCache();
+        menu_deferSelectionRequest = 0u;
+        menu_storageBusy = 0u;
+        return;
+    }
     if (!index_ok) {
         /*
          * Preserve the nested session while making a failed list inert.
@@ -4627,6 +5612,8 @@ static void menu_residentNameScratchFlushComplete(void)
     if (!flush_ok) {
         menu_traceInstrumentEntry(
             AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSHED, 1u);
+        /* A failed deferred write must not strand a queued physical exit. */
+        menu_storageBusy = 0u;
         menu_showFilesystemErrorOverlay();
         return;
     }
@@ -4639,7 +5626,8 @@ static void menu_residentNameScratchFlushComplete(void)
     filesystem_clearNameCache();
     menu_storageBusy = 0u;
 
-    if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
+    if (menu_pendingPageSwitch == MENU_PENDING_PAGE_NONE &&
+        (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)) {
         if (menu_instrumentLoadActive) {
             menu_requestInstrumentEntryNames();
         } else if (menu_saveOptions.what == SAVE_TYPE_KIT ||
@@ -4692,10 +5680,40 @@ static uint8_t menu_endResidentNameScratchSession(void)
     return 0u;
 }
 
+uint8_t menu_hasResidentNameDirtyMask(void)
+{
+    /*
+     * What: expose only whether deferred Kit/Instrument HCNAMES rows exist.
+     * Why: filesystem_tick() owns scheduler arbitration, while Menu owns the
+     * dirty mask and its identity semantics. Inputs: existing mask only.
+     * Outputs: nonzero requests one deferred HCNAMES write; no state changes.
+     * Affiliates: menu_triggerDeferredHcnamesFlush() and filesystem_tick().
+     */
+    return (uint8_t)(menu_residentNameDirtySceneMask != 0u);
+}
+
+void menu_triggerDeferredHcnamesFlush(void)
+{
+    /*
+     * What: hand one deferred HCNAMES checkpoint to the filesystem facade.
+     * Why: leaving Load/Save must repaint immediately; the dirty mask survives
+     * until this idle scheduler rung can safely start the existing atomic
+     * writer. Inputs: an idle facade and a nonzero Menu dirty mask. Outputs:
+     * one accepted HCNAMES request, or retained dirty state on refusal.
+     * Affiliates: menu_endResidentNameScratchSession(), filesystem_tick(),
+     * and menu_residentNameScratchFlushComplete().
+     */
+    if (menu_residentNameDirtySceneMask == 0u ||
+        menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)
+        return;
+    (void)menu_endResidentNameScratchSession();
+}
+
 static void menu_residentNameScratchLoaded(void)
 {
     uint8_t slot;
     uint8_t scene = menu_residentNameScratchScene;
+    uint8_t hcnames_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
 
     /*
      * Capture all seven resident rows during the one allowed entry traversal.
@@ -4706,10 +5724,17 @@ static void menu_residentNameScratchLoaded(void)
      * The current Kit or typed Instrument index is then loaded exactly once for
      * fast in-session browsing and payload opens.
      */
-    if (filesystem_status() != FS_STATUS_DONE || scene >= 16u) {
+    filesystem_ack();
+    if (!hcnames_ok || scene >= 16u) {
         menu_traceInstrumentEntry(
             AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_COMPLETE, 1u);
+        menu_storageBusy = 0u;
         menu_showFilesystemErrorOverlay();
+        return;
+    }
+    if (menu_pendingPageSwitch != MENU_PENDING_PAGE_NONE) {
+        /* Let the queued exit consume this completed entry without re-entry. */
+        menu_storageBusy = 0u;
         return;
     }
     menu_traceInstrumentEntry(
@@ -4780,6 +5805,7 @@ static uint8_t menu_requestResidentNameScratch(uint8_t scene)
     menu_residentNameScratchValid = 0u;
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
+    menu_selectionGenerationSnapshot = menu_selectionGeneration;
     if (!filesystem_requestLoadResidentKitName(
             scene, menu_residentNameScratchLoaded)) {
         menu_traceInstrumentEntry(
@@ -4975,6 +6001,8 @@ static uint8_t menu_finishInstrumentApplySession(void)
         menu_instrumentTempOperationPending = 0u;
         return 0u;
     }
+    if (menu_pendingPageSwitch != MENU_PENDING_PAGE_NONE)
+        return 0u;
     if (menu_instrumentLoadActive &&
         !menu_instrumentSaveMode &&
         !menu_instrumentLoadMorphMode &&
@@ -5025,9 +6053,10 @@ static void menu_requestInstrumentIndexLoad(instrument_type_t type)
      * machine has loaded that type's general-purpose name cache. A rejected
      * request is deferred through the existing selection retry path, which
      * handles a still-busy filesystem without inventing a second queue.
-     */
+    */
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
+    menu_selectionGenerationSnapshot = menu_selectionGeneration;
     if (!filesystem_requestLoadInstrumentIndex(
             type, menu_instrumentIndexLoadComplete)) {
         menu_traceInstrumentEntry(
@@ -5109,6 +6138,8 @@ static void menu_requestKitEntryNames(void)
         menu_repaintAll();
         return;
     }
+    /* Branch C is the follow-on request after HCNAMES entry; capture its row. */
+    menu_selectionGenerationSnapshot = menu_selectionGeneration;
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
     {
@@ -5133,6 +6164,9 @@ static void menu_requestKitEntryNames(void)
 
 static void menu_libraryIndexLoadComplete(void)
 {
+    uint8_t index_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+    uint8_t coordinate_current = (uint8_t)(
+        menu_selectionGenerationSnapshot == menu_selectionGeneration);
     uint8_t continue_bank_preview;
 
     /*
@@ -5158,13 +6192,27 @@ static void menu_libraryIndexLoadComplete(void)
      * menu_bankLoadPreviewComplete(), and the later OK handler is the sole
      * caller of preset_loadBank().
      */
+    /* The callback owns a direct filesystem request, not a Preset request. */
+    filesystem_ack();
+    if (!coordinate_current) {
+        /* The index is still useful as a whole domain; resolve the newest row. */
+        filesystem_clearNameCache();
+        menu_storageBusy = 0u;
+        menu_deferSelectionRequest = 1u;
+        menu_deferSelectionLoadKit = (uint8_t)(
+            menu_activePage == LOAD_PAGE &&
+            (menu_saveOptions.what == SAVE_TYPE_KIT ||
+             menu_saveOptions.what == SAVE_TYPE_KIT_MORPH));
+        memset(preset_currentName, ' ', 8u);
+        return;
+    }
     continue_bank_preview = (uint8_t)(
-        filesystem_status() == FS_STATUS_DONE &&
+        index_ok &&
         menu_activePage == LOAD_PAGE &&
         !menu_instrumentLoadActive &&
         menu_saveOptions.what == SAVE_TYPE_BANK &&
         filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_BANK));
-    if (filesystem_status() == FS_STATUS_DONE &&
+    if (index_ok &&
         menu_activePage == LOAD_PAGE &&
         !menu_instrumentLoadActive &&
         (menu_saveOptions.what == SAVE_TYPE_KIT ||
@@ -5195,6 +6243,7 @@ static void menu_libraryIndexLoadComplete(void)
 
 static void menu_sceneResidentNameLoaded(void)
 {
+    uint8_t name_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
     /*
      * Finish the single-name Scene-menu entry read.
      *
@@ -5205,9 +6254,16 @@ static void menu_sceneResidentNameLoaded(void)
      * index intentionally disposes the HCNAMES cache. Affiliates: Save editor
      * seeding and filesystem_residentSceneName().
      */
-    if (filesystem_status() != FS_STATUS_DONE ||
+    filesystem_ack();
+    if (!name_ok ||
         menu_sceneResidentNameScratchScene >= 16u) {
+        menu_storageBusy = 0u;
         menu_showFilesystemErrorOverlay();
+        return;
+    }
+    if (menu_pendingPageSwitch != MENU_PENDING_PAGE_NONE) {
+        /* The queued exit supersedes the follow-on Scene index request. */
+        menu_storageBusy = 0u;
         return;
     }
     filesystem_setIdentityName(
@@ -5215,6 +6271,7 @@ static void menu_sceneResidentNameLoaded(void)
         filesystem_residentSceneName(menu_sceneResidentNameScratchScene));
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
+    menu_selectionGenerationSnapshot = menu_selectionGeneration;
     if (!filesystem_requestLoadSceneIndex(menu_libraryIndexLoadComplete)) {
         menu_storageBusy = 0u;
         menu_deferSelectionRequest = 1u;
@@ -5268,6 +6325,7 @@ static void menu_requestSceneEntryName(void)
     menu_sceneResidentNameScratchScene = menu_loadSaveSourceScene;
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
+    menu_selectionGenerationSnapshot = menu_selectionGeneration;
     if (!filesystem_requestLoadResidentSceneName(
             menu_sceneResidentNameScratchScene,
             menu_sceneResidentNameLoaded)) {
@@ -5306,6 +6364,7 @@ static void menu_requestLibraryIndexLoad(uint8_t what)
         kind = (what == SAVE_TYPE_BANK)
             ? FS_LIBRARY_INDEX_BANK : FS_LIBRARY_INDEX_KIT;
     }
+    menu_selectionGenerationSnapshot = menu_selectionGeneration;
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
     /*
@@ -5382,6 +6441,9 @@ static void menu_refreshSavedLibraryName(uint8_t completed_op)
 static void menu_bankLoadPreviewComplete(void)
 {
     uint16_t slot = menu_currentPresetNr[SAVE_TYPE_BANK];
+    uint8_t preview_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+    uint8_t coordinate_current = (uint8_t)(
+        menu_selectionGenerationSnapshot == menu_selectionGeneration);
 
     /*
      * Apply one completed Load:[Bank] child preview scan.
@@ -5399,12 +6461,22 @@ static void menu_bankLoadPreviewComplete(void)
      * OK/OW command lifecycle remains inactive until preset_loadBank() later
      * accepts an explicit click.
      */
+    filesystem_ack();
     menu_storageBusy = 0u;
+    if (!coordinate_current) {
+        /* A stale child mask must never become the next Bank's LED mask. */
+        menu_bankLoadPreviewValid = 0u;
+        menu_kitLoadSceneMask = 0u;
+        menu_deferSelectionRequest = 1u;
+        menu_deferSelectionLoadKit = 0u;
+        menu_refreshLoadSceneLeds();
+        return;
+    }
     if (menu_activePage != LOAD_PAGE ||
         menu_instrumentLoadActive ||
         menu_saveOptions.what != SAVE_TYPE_BANK ||
         menu_bankLoadPreviewSlot != slot ||
-        filesystem_status() != FS_STATUS_DONE) {
+        !preview_ok) {
         menu_repaintAll();
         return;
     }
@@ -5430,6 +6502,8 @@ static void menu_requestBankLoadPreview(uint16_t slot)
      * menu_loadSaveCommandActive, so `...` remains reserved for an accepted
      * explicit OK/OW operation.
      */
+    /* A child scan is coordinate-specific; tag it before posting the request. */
+    menu_selectionGenerationSnapshot = menu_selectionGeneration;
     menu_bankLoadPreviewSlot = slot;
     menu_bankLoadPreviewMask = 0u;
     menu_bankLoadPreviewValid = 0u;
@@ -5484,6 +6558,7 @@ static void menu_instrumentLoadRequestSelection(void)
 {
     uint16_t count;
     uint16_t index;
+    uint8_t accepted;
 
     /*
      * Immediately load the selected Instrument/ file.
@@ -5496,15 +6571,24 @@ static void menu_instrumentLoadRequestSelection(void)
      * an InstrumentMrp request. The renderer derives the selected `.hcindex`
      * name directly during payload I/O; HCNAMES remains the post-commit
      * resident register and is not overwritten on this preview path.
-     */
+    */
     menu_deferSelectionRequest = 0u;
+    if (menu_storageBusy || preset_getStatus() != PRESET_IDLE) {
+        /* Keep the current Preset request immutable; the latest row is
+         * re-posted after its safe completion boundary. */
+        menu_deferSelectionRequest = 1u;
+        menu_deferSelectionLoadKit = 0u;
+        menu_repaintAll();
+        return;
+    }
     menu_instrumentLoadClampIndex();
     count = filesystem_instrumentCount(menu_instrumentLoadType);
     if (count == 0u)
         return;
     index = menu_instrumentLoadIndex[menu_instrumentLoadType];
     menu_repaintAll();
-    if ((menu_instrumentLoadMorphMode &&
+    accepted = (uint8_t)(
+        (menu_instrumentLoadMorphMode &&
          preset_loadInstrumentMorph(menu_instrumentLoadScene,
                                     menu_instrumentLoadSlot,
                                     menu_instrumentLoadType,
@@ -5513,7 +6597,8 @@ static void menu_instrumentLoadRequestSelection(void)
          preset_loadInstrumentForScenes(menu_kitLoadSceneMask,
                                         menu_instrumentLoadSlot,
                                         menu_instrumentLoadType,
-                                        index))) {
+                                        index)));
+    if (accepted) {
         /*
          * Keep storage coordinates immutable but leave plain number turns
          * available through menu_parseEncoder(). The LCD already shows the
@@ -5522,9 +6607,9 @@ static void menu_instrumentLoadRequestSelection(void)
          * entry/exit cache handoff can blank a desired row; the coalesced retry
          * receives its name when the typed index is restored.
          */
-        menu_storageBusy = 1u;
         /* The explicit pre-request repaint above already queued the selected
          * number and `.hcindex` name before storage became busy. */
+        menu_selectionGenerationSnapshot = menu_selectionGeneration;
     } else {
         /* A transiently busy filesystem retains the latest desired number for
          * the existing deferred retry path instead of losing the encoder turn. */
@@ -5622,6 +6707,10 @@ static void menu_instrumentLoadStepType(int8_t inc)
          * restore semantics. */
         menu_invalidateInstrumentLoadTemp();
         menu_instrumentLoadMorphMode = 1u;
+        menu_selectionGeneration++;
+        if (menu_residentNameDirtySceneMask != 0u &&
+            menu_endResidentNameScratchSession())
+            return;
         menu_requestInstrumentEntryNames();
         return;
     }
@@ -5632,6 +6721,10 @@ static void menu_instrumentLoadStepType(int8_t inc)
          * a fresh normal snapshot before exposing the normal `kit` row again. */
         menu_invalidateInstrumentLoadTemp();
         menu_instrumentLoadMorphMode = 0u;
+        menu_selectionGeneration++;
+        if (menu_residentNameDirtySceneMask != 0u &&
+            menu_endResidentNameScratchSession())
+            return;
         menu_requestInstrumentEntryNames();
         return;
     }
@@ -5665,6 +6758,10 @@ static void menu_instrumentLoadStepType(int8_t inc)
             menu_instrumentLoadMorphMode =
                 (uint8_t)(direction < 0 &&
                           entry->type == menu_instrumentLoadBaseType);
+            menu_selectionGeneration++;
+            if (menu_residentNameDirtySceneMask != 0u &&
+                menu_endResidentNameScratchSession())
+                return;
             menu_instrumentLoadClampIndex();
             if (menu_instrumentLoadMorphMode)
                 menu_requestInstrumentEntryNames();
@@ -5787,8 +6884,8 @@ void menu_perfModeSceneButtonPressed(uint8_t scene_index)
      *
      * Input: physical SEQ button index 0..15. Output: SceneData and BankData
      * active Scene records, viewed Pattern, and Sequencer runtime Pattern are
-     * updated together. BankData drops scene_mask_voice_edit to the new active
-     * Scene only when the new active Scene was not already in the edit set, and
+     * updated together. BankData selects the new active Scene's independent
+     * scene_mask_voice_edit entry and repairs only that entry's active bit.
      * Preset starts the bounded DSP apply for the newly audible Scene.
      */
     if (scene_index >= SCENE_COUNT || scene_index >= 16u ||
@@ -5846,13 +6943,19 @@ uint8_t menu_voiceHeldSceneButtonPressed(uint8_t scene_index)
      *
      * Input: physical SEQ button index while VOICE is held. Output: BankData's
      * scene_mask_voice_edit flips that Scene bit when the Scene is present.
-     * The active Scene cannot be removed because BankData normalizes the mask
-     * after every toggle. The function returns nonzero when it consumes the
-     * button so ButtonHandler does not reinterpret the press as step editing.
+     * Turning a bit on additionally requires the same Effect type and all six
+     * Instrument slot types as the active Scene. A mismatch is consumed with
+     * no toggle or flash, while turning a bit off remains allowed. The active
+     * Scene cannot be removed because BankData normalizes the mask after every
+     * toggle. The function returns nonzero when it consumes the button so
+     * ButtonHandler does not reinterpret the press as step editing.
      */
     if (scene_index >= SCENE_COUNT || scene_index >= 16u)
         return 0u;
     if (!bank_scenePresent(scene_index))
+        return 1u;
+    if (!bank_sceneInVoiceEditMask(scene_index) &&
+        !scene_editLayoutMatches(scene_getActiveIndex(), scene_index))
         return 1u;
     bank_toggleSceneMaskVoiceEdit(scene_index);
     menu_refreshVoiceHeldSceneLeds();
@@ -6143,8 +7246,22 @@ void menu_loadInstrumentExit(void)
      * one session and one exit boundary. ButtonHandler calls this when the
      * Load/Save mode button is pressed a second time.
      */
-    if (menu_loadInstrumentTransactionBusy())
+    if (menu_loadInstrumentTransactionBusy() ||
+        preset_getStatus() != PRESET_IDLE)
         return;
+    /*
+     * LSR-01: nested Instrument exit is an HCNAMES checkpoint boundary.
+     *
+     * What: advance the generation and tear down the outgoing Instrument
+     * context before flushing dirty Kit/Instrument rows. Why: the completion
+     * callback dispatches from live Menu state, so it must see Kit ownership
+     * and call menu_requestKitEntryNames() after the write. Inputs: existing
+     * dirty Scene mask and Instrument state. Outputs: an accepted flush
+     * returns before cache teardown; its completion reaches the Kit browser
+     * directly. Affiliates: menu_endResidentNameScratchSession(),
+     * menu_residentNameScratchFlushComplete(), and menu_requestKitEntryNames().
+     */
+    menu_selectionGeneration++;
     /* Leaving nested Instrument Load/Save is the final preview boundary.
      * Complete any selected normal pool identity while its `.hcindex` is still
      * active, then restore `/Kit/.hcindex` without an extra name allocation. */
@@ -6152,8 +7269,18 @@ void menu_loadInstrumentExit(void)
     menu_instrumentLoadActive = 0u;
     menu_instrumentSaveMode = 0u;
     menu_loadSaveClearInstrumentVoiceBlinks();
-    menu_requestKitEntryNames();
     menu_refreshLoadSceneLeds();
+    /*
+     * LSR-01 user feel: publish the Kit destination before a dirty HCNAMES
+     * flush can return early. Inputs: the completed exit state and LEDs above.
+     * Output: the LCD immediately shows Kit context; the later Kit index load
+     * supplies the definitive name and list frame.
+     */
+    menu_repaintAll();
+    if (menu_residentNameDirtySceneMask != 0u &&
+        menu_endResidentNameScratchSession())
+        return;
+    menu_requestKitEntryNames();
     if (!menu_storageBusy)
         menu_repaintAll();
 }
@@ -6174,7 +7301,8 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
     if ((menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) ||
         voiceNr >= INSTRUMENT_SLOT_COUNT)
         return 0u;
-    if (menu_storageBusy && !menu_instrumentLoadActive &&
+    if ((menu_storageBusy || preset_getStatus() != PRESET_IDLE) &&
+        !menu_instrumentLoadActive &&
         (menu_saveOptions.what == SAVE_TYPE_KIT ||
          menu_saveOptions.what == SAVE_TYPE_KIT_MORPH)) {
         /*
@@ -6184,7 +7312,8 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
          * a payload/apply owns immutable Scene coordinates. Entering nested
          * mode during either interval could replace the shared cache or change
          * Scene/voice ownership too early. Returning handled keeps the gesture
-         * deferred until the current transaction releases menu_storageBusy.
+         * deferred until the current transaction releases Menu/Preset
+         * ownership.
          */
         return 1u;
     }
@@ -6197,6 +7326,21 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
          */
         return 1u;
     }
+    /*
+     * LSR-01: a VOICE press that reaches entry/switch is a domain boundary.
+     *
+     * What: install the destination voice/type/mode context, then advance the
+     * selection generation and checkpoint dirty HCNAMES rows before the next
+     * voice replaces the Instrument coordinate. Why: this ButtonHandler path
+     * bypasses the encoder type-switch flush, and the completion callback
+     * dispatches from live Menu state. Inputs: selected voice, current page,
+     * existing dirty Scene mask, and generation. Outputs: an accepted flush
+     * consumes the press while its completion re-enters this exact Instrument
+     * context; a clean/refused flush falls through to the normal entry read.
+     * Affiliates: menu_endResidentNameScratchSession(),
+     * menu_residentNameScratchFlushComplete(), and menu_setActiveVoice().
+     */
+    menu_selectionGeneration++;
     /* A different VOICE starts a different one-voice preview contract. Finish
      * the prior voice while its typed cache/name context is still valid. */
     menu_invalidateInstrumentLoadTemp();
@@ -6227,6 +7371,18 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
     menu_instrumentLoadMorphMode = 0u;
     menu_invalidateInstrumentLoadTemp();
     menu_instrumentLoadClampIndex();
+    menu_setActiveVoice(voiceNr);
+    menu_refreshLoadSceneLeds();
+    /*
+     * LSR-01 user feel: publish the newly selected Instrument destination
+     * before any dirty HCNAMES flush can return early. Inputs: the complete
+     * destination state and LEDs above. Output: the LCD immediately reflects
+     * the selected voice/type while the asynchronous cache handoff continues.
+     */
+    menu_repaintAll();
+    if (menu_residentNameDirtySceneMask != 0u &&
+        menu_endResidentNameScratchSession())
+        return 1u;
     /*
      * The first Kit/Instrument-family entry obtains all seven resident names
      * from HCNAMES. Later voice entries in the same Scene select their own
@@ -6234,8 +7390,6 @@ uint8_t menu_loadInstrumentVoicePressed(uint8_t voiceNr)
      * active; they never reopen or rewrite the root resident-name file.
      */
     menu_requestInstrumentEntryNames();
-    menu_setActiveVoice(voiceNr);
-    menu_refreshLoadSceneLeds();
     if (!menu_storageBusy)
         menu_repaintAll();
     return 1u;
@@ -6247,11 +7401,14 @@ uint8_t menu_loadInstrumentTransactionBusy(void)
      * Expose the nested Instrument transaction lock to gesture routing.
      *
      * Output is nonzero only when Instrument mode is active and its successful
-     * filesystem request or bounded post-apply still owns menu_storageBusy.
-     * ButtonHandler uses this before preview and mode mutation, which cannot be
-     * protected by the encoder-only guard in menu_parseEncoder().
+     * filesystem request, Preset payload, or bounded post-apply still owns a
+     * transaction. ButtonHandler uses this before preview and mode mutation,
+     * which cannot be protected by the encoder-only guard in
+     * menu_parseEncoder(). The Preset-status check covers LSR-04 free-scroll
+     * loads whose payload is active before Menu raises menu_storageBusy.
      */
-    return (uint8_t)(menu_instrumentLoadActive && menu_storageBusy);
+    return (uint8_t)(menu_instrumentLoadActive &&
+                     (menu_storageBusy || preset_getStatus() != PRESET_IDLE));
 }
 
 /*
@@ -6490,6 +7647,21 @@ static void menu_loadSaveEnterInstrumentLoad(uint8_t voice, uint8_t option)
     instrument_type_t type;
     uint8_t morph;
 
+    /* Pot-1 must not mutate nested ownership while another facade/Preset
+     * transaction is still completing; the next detent can retry the target. */
+    if (menu_storageBusy || preset_getStatus() != PRESET_IDLE)
+        return;
+    /*
+     * LSR-01: Pot-1 entry into nested Instrument Load is a cache-domain
+     * boundary. Install the destination context before flushing so the
+     * completion callback re-enters this Instrument row, not the old Kit row.
+     * Inputs: selected voice/type, dirty mask, and generation. Outputs: an
+     * accepted flush consumes this logical position; a clean/refused flush
+     * falls through to the normal entry names request. Affiliate:
+     * menu_loadInstrumentVoicePressed(), which handles the equivalent button
+     * path.
+     */
+    menu_selectionGeneration++;
     /* Re-entering via Pot-1 may replace another nested Instrument context.
      * End that one first so no snapshot/name row crosses voice/type/mode. */
     menu_invalidateInstrumentLoadTemp();
@@ -6511,17 +7683,40 @@ static void menu_loadSaveEnterInstrumentLoad(uint8_t voice, uint8_t option)
     }
     menu_invalidateInstrumentLoadTemp();
     menu_instrumentLoadClampIndex();
+    menu_setActiveVoice(voice);
+    menu_loadSaveSetInstrumentVoiceLed(voice);
+    menu_refreshLoadSceneLeds();
+    /*
+     * LSR-01 user feel: show the Pot-1 Instrument Load destination before a
+     * dirty-name checkpoint starts. Inputs: the installed page, type, voice,
+     * and LEDs. Output: immediate destination context; the later index load
+     * supplies the definitive list/name frame.
+     */
+    menu_repaintAll();
+    if (menu_residentNameDirtySceneMask != 0u &&
+        menu_endResidentNameScratchSession())
+        return;
     /* Pot-1 follows the same session entry as a VOICE button: read all seven
      * HCNAMES rows only for a new Scene/session, then activate the typed index.
      * Re-entry in the same Scene selects the retained voice row directly. */
     menu_requestInstrumentEntryNames();
-    menu_setActiveVoice(voice);
-    menu_loadSaveSetInstrumentVoiceLed(voice);
-    menu_refreshLoadSceneLeds();
 }
 
 static void menu_loadSaveEnterInstrumentSave(uint8_t voice, uint8_t morph)
 {
+    /* Save entry has the same transaction boundary as Load entry. */
+    if (menu_storageBusy || preset_getStatus() != PRESET_IDLE)
+        return;
+    /*
+     * LSR-01: Pot-1 entry into nested Instrument Save is the same HCNAMES
+     * checkpoint boundary as Instrument Load. Install the destination
+     * page/mode/voice before flushing so completion dispatches to Save's
+     * Instrument context. Inputs: selected voice, Morph row, dirty mask, and
+     * generation. Output: an accepted flush consumes this logical position;
+     * a clean/refused flush follows the normal entry names request. Affiliate:
+     * menu_loadSaveEnterInstrumentLoad().
+     */
+    menu_selectionGeneration++;
     /* Save has no parameter preview. End any preceding nested normal Load
      * before changing page/mode so the selected pool identity is not lost. */
     menu_invalidateInstrumentLoadTemp();
@@ -6538,15 +7733,25 @@ static void menu_loadSaveEnterInstrumentSave(uint8_t voice, uint8_t morph)
     editModeActive = 1u;
     menu_instrumentLoadRefreshBaseType(0u);
     menu_instrumentLoadMorphMode = morph ? 1u : 0u;
+    menu_setActiveVoice(voice);
+    menu_loadSaveSetInstrumentVoiceLed(voice);
+    menu_refreshLoadSceneLeds();
+    /*
+     * LSR-01 user feel: show the Pot-1 Instrument Save destination before a
+     * dirty-name checkpoint starts. Inputs: the installed Save page, voice,
+     * Morph row, and LEDs. Output: immediate Save/Instrument context while
+     * the asynchronous name/cache handoff finishes in the background.
+     */
+    menu_repaintAll();
+    if (menu_residentNameDirtySceneMask != 0u &&
+        menu_endResidentNameScratchSession())
+        return;
     /*
      * Save's Pot-1 entry uses the same seven-row scratch as VOICE-button entry.
      * HCNAMES is read only if no session exists for this Scene; otherwise the
      * selected voice's resident seed is already available without card I/O.
      */
     menu_requestInstrumentEntryNames();
-    menu_setActiveVoice(voice);
-    menu_loadSaveSetInstrumentVoiceLed(voice);
-    menu_refreshLoadSceneLeds();
 }
 
 static void menu_loadSaveApplyLogicalPosition(uint16_t target)
@@ -6849,7 +8054,7 @@ static uint8_t getMaxEntriesForMenu(uint8_t menuId)
     case MENU_MIDI_FILTERING:return (uint8_t)midiFilterNames[0][0];
     case MENU_PPQ:           return (uint8_t)ppqNames[0][0];
     case MENU_EXT_SYNC:      return (uint8_t)extSyncNames[0][0];
-    case MENU_TRACK_SCALE:    return (uint8_t)trackScaleNames[0][0];
+    case MENU_TRACK_SCALE:    return (uint8_t)STEP_SCALE_COUNT;
     default: return 0;
     }
 }
@@ -6895,7 +8100,7 @@ static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *bu
     case MENU_MIDI_FILTERING: p = midiFilterNames[curParmVal+1];    break;
     case MENU_PPQ:            p = ppqNames[curParmVal+1];           break;
     case MENU_EXT_SYNC:       p = extSyncNames[curParmVal+1];       break;
-    case MENU_TRACK_SCALE:    p = trackScaleNames[curParmVal+1];    break;
+    case MENU_TRACK_SCALE:    p = stepScale_shortName((uint8_t)curParmVal); break;
     default: break;
     }
     buf[0]=p[0]; buf[1]=p[1]?p[1]:' '; buf[2]=p[2]?p[2]:' ';
@@ -7095,6 +8300,10 @@ static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter)
 {
     const uint8_t is2ndPage = (uint8_t)(activeParameter > 3);
 
+    /* Effect page: per-SELECT screen marker from menuEffects (step 7). */
+    if (menu_activePage == EFFECT_PAGE)
+        return menuEffects_scrollSign(activePage);
+
     if (menu_isVoicePage(menu_activePage)) {
         uint8_t screen;
         uint8_t hasNext;
@@ -7146,6 +8355,14 @@ static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter)
     }
 
     if (menu_activePage == MENU_MIDI_PAGE) {
+        /*
+         * S074 settings cues: the Scene-owned compressor page is the last
+         * populated sub-page. The first settings screen points to it with
+         * '^', the compressor page identifies Scene ownership with '+', and
+         * the page before it becomes '*' through the existing next-page test.
+         */
+        if (activePage == MENU_GLOBAL_SCENE_SUBPAGE && !is2ndPage)
+            return '+';
         if (is2ndPage) {
             if ((activePage < NUM_SUB_PAGES-1) &&
                 (menuPages[MENU_MIDI_PAGE][activePage+1].top1 != TEXT_EMPTY))
@@ -7155,7 +8372,7 @@ static uint8_t checkScrollSign(uint8_t activePage, uint8_t activeParameter)
         } else {
             if (has2ndPage(activePage)) {
                 if (activePage > 0) return '*';
-                else return '>';
+                else return '^';
             } else {
                 if (activePage > 0) return '<';
                 else return 0;
@@ -7284,6 +8501,21 @@ void menu_repaint(void)
         menu_repaintLoadSavePage();
     else
         menu_repaintGeneric();
+    /*
+     * S075 copy/clear menu overlay.
+     *
+     * What: while copy/clear shows a menu, every repaint replaces both LCD
+     * shadow rows with the two menu rows after the page renderer ran (the
+     * page state underneath is untouched). Why: page repaints (knob service,
+     * search completion, mode changes) keep happening during an operation and
+     * must not paint over the menu; the old menu wrote the LCD directly and
+     * was overwritten. Inputs: copyClear_menuVisible(),
+     * copyClear_formatMenu(). Output: two overlay rows without allocating
+     * another frame. Affiliates: menu_copyClearMenuChanged()/Closed(),
+     * va_queueMarkerTransaction().
+     */
+    if (copyClear_menuVisible())
+        copyClear_formatMenu(editDisplayBuffer[0], editDisplayBuffer[1]);
     if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
         !menu_loadSaveCursorVisible()) {
         uint8_t row;
@@ -7807,6 +9039,7 @@ static void menu_stepAutomationReset(void)
     menu_stepAutoActive = 0u;
     menu_stepAutoCursor = 0u;
     menu_stepAutoNumberLocked = 0u;
+    menu_stepAutoCategory = 0u;
 }
 
 /*
@@ -7917,6 +9150,97 @@ static uint8_t menu_stepAutomationTargetUsed(
 }
 
 /*
+ * `fx` step-automation helpers (Session 072 step 9; plan §10.2, View A).
+ *
+ * Category 7 lists the viewed Scene's AUTOMATABLE Effect rows in registry
+ * order. WIDE8 rows display their expanded value; Pattern still stores seven
+ * bits. The Pattern off sentinel is excluded before every block-7 test.
+ */
+static uint8_t menu_stepAutomationIsEffect(uint16_t target)
+{
+    return (uint8_t)(target != PAT_AUTOMATION_TARGET_OFF &&
+                     effectTarget_isEffectId(target));
+}
+
+static const effect_param_descriptor_t *menu_stepAutomationEffectDescriptor(
+    uint8_t scene, uint16_t target)
+{
+    return menu_stepAutomationIsEffect(target)
+        ? effects_targetDescriptor(scene, target, INSTRUMENT_TARGET_AUTOMATION)
+        : 0;
+}
+
+static uint8_t menu_effectAutomationIsWide(
+    const effect_param_descriptor_t *descriptor)
+{
+    return (uint8_t)(descriptor &&
+                     (descriptor->effect_flags & EFFECT_PARAM_FLAG_WIDE8) != 0u &&
+                     descriptor->expand7);
+}
+
+static void menu_formatEffectAutomationValue3(
+    const effect_param_descriptor_t *descriptor, uint8_t value, char *buf)
+{
+    if (menu_effectAutomationIsWide(descriptor))
+        numtostrpu(buf, descriptor->expand7(value), ' ');
+    else
+        menu_formatAutomationValue3(descriptor ? &descriptor->base : 0,
+                                    value, buf);
+}
+
+static uint8_t menu_effectAutomationMax(
+    const effect_param_descriptor_t *descriptor)
+{
+    uint8_t max_val;
+
+    if (!descriptor || menu_effectAutomationIsWide(descriptor))
+        return 127u;
+    max_val = menu_automationValueMax(&descriptor->base);
+    return (descriptor->max_value < max_val) ? descriptor->max_value : max_val;
+}
+
+/* Step the valid Effect target list while skipping duplicate page entries. */
+static instrument_param_id_t menu_stepAutomationEffectNext(
+    uint8_t scene, instrument_param_id_t current, int8_t direction,
+    const pat_automation_entry_t *autos, uint8_t count, uint8_t exclude)
+{
+    instrument_param_id_t candidate = menu_stepAutomationIsEffect(current)
+        ? current : INSTRUMENT_PARAM_INVALID;
+    uint8_t i;
+
+    for (i = 0u; i < EFFECT_PARAM_COUNT; i++) {
+        instrument_param_id_t next = effects_stepTarget(
+            scene, candidate, direction, INSTRUMENT_TARGET_AUTOMATION);
+
+        if (next == candidate)
+            return current;
+        if (next == INSTRUMENT_PARAM_INVALID)
+            return (direction < 0) ? INSTRUMENT_PARAM_INVALID : current;
+        if (!menu_stepAutomationTargetUsed(autos, count, next, exclude))
+            return next;
+        candidate = next;
+    }
+    return current;
+}
+
+/* Render an Effect category and long name into the detail target row. */
+static void menu_stepAutomationEffectLabel(
+    const effect_param_descriptor_t *descriptor)
+{
+    uint8_t i = 0u;
+    uint8_t j = 0u;
+
+    while (i < 14u && descriptor->base.category &&
+           descriptor->base.category[i]) {
+        editDisplayBuffer[1][2u + i] = descriptor->base.category[i];
+        i++;
+    }
+    while (i < 14u && descriptor->base.long_name &&
+           descriptor->base.long_name[j])
+        editDisplayBuffer[1][2u + i++] = descriptor->base.long_name[j++];
+}
+
+/*
  * Find the first unused automatable descriptor for one target slot.
  *
  * Inputs: viewed Scene, zero-based slot, and current step list. Output: the
@@ -7999,6 +9323,18 @@ static uint8_t menu_stepAutomationReplaceTarget(
     uint8_t scene, uint8_t track, uint8_t step,
     uint16_t old_target, uint16_t new_target, uint8_t value, uint8_t count)
 {
+    /*
+     * Normalize UI's wide invalid value to Pattern's nine-bit off entry.
+     *
+     * Inputs: canonical editor targets, where INSTRUMENT_PARAM_INVALID means
+     * off. Output: all service/data mutations use PAT_AUTOMATION_TARGET_OFF;
+     * no 0xffff value is truncated into a live pool record. This is the D17
+     * storage boundary and is intentionally adjacent to replacement logic.
+     */
+    if (old_target == INSTRUMENT_PARAM_INVALID)
+        old_target = PAT_AUTOMATION_TARGET_OFF;
+    if (new_target == INSTRUMENT_PARAM_INVALID)
+        new_target = PAT_AUTOMATION_TARGET_OFF;
     if (old_target == new_target)
         return 0u;
     if (count < PAT_BLOCK_AUTO_COUNT_MASK) {
@@ -8016,56 +9352,22 @@ static uint8_t menu_stepAutomationReplaceTarget(
 }
 
 /*
- * Return the default target slot for one visible STEP track.
- *
- * Inputs: fixed-grid track index 0..6. Output: matching voice slot 0..5;
- * track 7 (index 6) intentionally shares slot 6's descriptor namespace as
- * required by the fixed-grid hardware mapping. Affiliate: STEP Add behavior.
- */
-static uint8_t menu_stepAutomationSlotForTrack(uint8_t track)
-{
-    return (track < INSTRUMENT_SLOT_COUNT) ? track
-                                           : (INSTRUMENT_SLOT_COUNT - 1u);
-}
-
-/*
  * Add the default automation entry for the selected step.
  *
- * Inputs: current viewed Scene, active track, and decoded existing list.
- * Output: nonzero when the first unused automatable target on the mapped slot
- * is created with the current descriptor-domain parameter image. This is the
- * only implicit creation path used by endless-pot edits on the Add page.
+ * Inputs: current viewed Scene and active track. Output: a persistent row with
+ * the nine-bit Pattern off sentinel and value zero. The user then chooses a
+ * VOI category and PAR target explicitly, so opening/editing Add cannot
+ * silently affect the first descriptor while playback is active. The
+ * sentinel is accepted by PatternData but is skipped by sequencer playback.
+ * Affiliate: PAT_AUTOMATION_TARGET_OFF and patSvc_writeStepAutomation().
  */
 static uint8_t menu_stepAutomationAddDefault(void)
 {
     uint8_t scene = menu_getViewedPattern();
     uint8_t track = menu_getActiveVoice();
-    uint8_t slot = menu_stepAutomationSlotForTrack(track);
-    pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
-    instrument_param_id_t target;
-    const kit_instrument_slot_t *instrument;
-    uint8_t count;
-    uint8_t value = 0u;
-    uint8_t local;
-
-    count = pat_readStepAutomations(scene, track,
-                                    parameter_values[PAR_ACTIVE_STEP], autos,
-                                    PAT_BLOCK_AUTO_COUNT_MASK);
-    target = menu_stepAutomationFirstTarget(scene, slot, autos, count);
-    if (target == INSTRUMENT_PARAM_INVALID)
-        return 0u;
-    instrument = scene_instrumentSlotConst(scene, slot);
-    if (instrument && instrumentParam_isVoiceParameter(target)) {
-        local = instrumentParam_local(target);
-        value = instrument->parameter_images.instrument_parameters[local];
-        /* The image is already in descriptor parameter space; only clamp it
-         * defensively to the 7-bit Pattern automation storage domain. */
-        if (value > 127u)
-            value = 127u;
-    }
     return patSvc_writeStepAutomation(scene, track,
-                                   parameter_values[PAR_ACTIVE_STEP], target,
-                                   value);
+                                      parameter_values[PAR_ACTIVE_STEP],
+                                      PAT_AUTOMATION_TARGET_OFF, 0u);
 }
 
 /*
@@ -8093,6 +9395,106 @@ static uint8_t menu_stepAutomationEnsurePage(void)
     if (menu_stepAutoPageIndex >= count)
         menu_stepAutoPageIndex = (uint8_t)(count - 1u);
     return 1u;
+}
+
+/*
+ * Classify one stored STEP automation target for VOI rendering/editing.
+ *
+ * Inputs: Pattern's canonical target or PAT_AUTOMATION_TARGET_OFF. Output:
+ * 0..5 for voice slots, 6 for Scene targets, and 7 for the `fx` Effect
+ * category (block 7, Session 072 step 9). The wide invalid sentinel and the
+ * Pattern off value are accepted as aliases so stale editor state cannot be
+ * mistaken for voice slot zero.
+ */
+static uint8_t menu_stepAutomationCategory(uint16_t target)
+{
+    if (instrumentParam_isVoiceParameter(target))
+        return instrumentParam_slot(target);
+    if (sceneModTarget_isSceneTarget(target))
+        return 6u;
+    return 7u;
+}
+
+/* Return nonzero for either UI off representation. */
+static uint8_t menu_stepAutomationTargetOff(uint16_t target)
+{
+    return (uint8_t)(target == PAT_AUTOMATION_TARGET_OFF ||
+                     target == INSTRUMENT_PARAM_INVALID);
+}
+
+/*
+ * Read the current value for a newly selected step-automation target.
+ *
+ * Inputs: viewed Scene and a valid voice-descriptor or Scene target. Output:
+ * the target's current value in Pattern's 7-bit automation storage domain.
+ * Voice descriptor images and 7-bit Scene values are clamped to 127; Scene
+ * Voice Morph is converted with the same endpoint-preserving halving used by
+ * runtime automation. This keeps PAR selection immediately useful without
+ * changing D17's category-change default of off/zero.
+ */
+static uint8_t menu_stepAutomationCurrentValue(
+    uint8_t scene, instrument_param_id_t target)
+{
+    /* Effect rows use seven-bit storage, with WIDE8 inverse expansion. */
+    if (menu_stepAutomationIsEffect(target)) {
+        const effect_param_descriptor_t *descriptor =
+            menu_stepAutomationEffectDescriptor(scene, target);
+        uint8_t value;
+
+        if (!descriptor)
+            return 0u;
+        value = effects_getParameter(scene, effectTarget_local(target),
+                                     EFFECT_IMAGE_NORMAL);
+        if (menu_effectAutomationIsWide(descriptor))
+            return menu_morphAutomationStore(value);
+        if (value > descriptor->max_value)
+            value = descriptor->max_value;
+        return (value > 127u) ? 127u : value;
+    }
+    if (instrumentParam_isVoiceParameter(target) &&
+        instrumentManager_targetValid(scene, target,
+                                      INSTRUMENT_TARGET_AUTOMATION)) {
+        const kit_instrument_slot_t *instrument =
+            scene_instrumentSlotConst(scene, instrumentParam_slot(target));
+        uint8_t value = instrument
+            ? instrument->parameter_images.instrument_parameters[
+                  instrumentParam_local(target)]
+            : 0u;
+        return (value > 127u) ? 127u : value;
+    }
+
+    if (sceneModTarget_isSceneTarget(target)) {
+        const scene_mod_target_descriptor_t *descriptor =
+            sceneModTarget_descriptor(target);
+        uint8_t value = 0u;
+
+        if (!descriptor)
+            return 0u;
+        switch (descriptor->kind) {
+        case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
+            return menu_morphAutomationStore(
+                scene_getVoiceMorphAmount(scene, descriptor->voice_slot));
+        case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
+            value = scene_getSlot6Track7AmpEnvelopeDecay(scene);
+            break;
+        case SCENE_MOD_TARGET_KIND_AUDIO_OUT:
+            value = scene_getVoiceAudioOut(scene, descriptor->voice_slot);
+            break;
+        case SCENE_MOD_TARGET_KIND_FX_SEND:
+            value = scene_getVoiceFxSendAmount(scene, descriptor->voice_slot);
+            break;
+        case SCENE_MOD_TARGET_KIND_EFFECT_MORPH:
+            /* `fxm` stores seven bits like voice Morph. */
+            return menu_morphAutomationStore(scene_getEffectMorphAmount(scene));
+        default:
+            value = 0u;
+            break;
+        }
+        if (value > (uint8_t)descriptor->max_value)
+            value = (uint8_t)descriptor->max_value;
+        return (value > 127u) ? 127u : value;
+    }
+    return 0u;
 }
 
 /*
@@ -8124,52 +9526,118 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
         return 0u;
 
     if (field == 1u) {
+        /*
+         * Step-edit VOI/category cycling.
+         *
+         * Inputs: signed movement and the current Pattern target. Output:
+         * categories cycle voices 1..6, `scn`, `fx`; every transition writes
+         * D17's off sentinel so PAR selection is explicit. Same-category
+         * target retention is intentionally not attempted: a voice/category
+         * change must never silently retarget a playing step.
+         */
         instrument_param_id_t old_target = autos[page].target;
-        uint8_t old_slot;
-        uint8_t new_slot;
-        uint8_t old_local;
         instrument_param_id_t new_target;
+        uint8_t old_category = menu_stepAutomationTargetOff(old_target)
+            ? menu_stepAutoCategory
+            : menu_stepAutomationCategory(old_target);
+        uint8_t new_category = old_category;
         uint8_t movement = (uint8_t)(inc < 0 ? -inc : inc);
 
-        if (!instrumentParam_isVoiceParameter(old_target))
-            return 0u;
-        old_slot = instrumentParam_slot(old_target);
-        old_local = instrumentParam_local(old_target);
-        new_slot = old_slot;
         while (movement--) {
             if (inc > 0)
-                new_slot = (uint8_t)((new_slot + 1u) % INSTRUMENT_SLOT_COUNT);
+                new_category = (uint8_t)((new_category + 1u) % 8u);
             else
-                new_slot = (new_slot == 0u) ?
-                    (INSTRUMENT_SLOT_COUNT - 1u) : (uint8_t)(new_slot - 1u);
+                new_category = (new_category == 0u) ? 7u
+                    : (uint8_t)(new_category - 1u);
         }
-        new_target = instrumentParam_make(new_slot, old_local);
-        if (!instrumentManager_targetValid(scene, new_target,
-                                           INSTRUMENT_TARGET_AUTOMATION) ||
-            menu_stepAutomationTargetUsed(autos, count, new_target, page))
-            new_target = menu_stepAutomationFirstTarget(scene, new_slot, autos,
-                                                         count);
-        if (new_target == INSTRUMENT_PARAM_INVALID)
+        if (new_category == old_category)
             return 0u;
+        new_target = PAT_AUTOMATION_TARGET_OFF;
+        menu_stepAutoCategory = new_category;
         return menu_stepAutomationReplaceTarget(
-            scene, track, step, old_target, new_target, autos[page].value,
+            scene, track, step, old_target, new_target, 0u,
             count);
     }
 
     if (field == 2u) {
+        /*
+         * Step-edit PAR cycling.
+         *
+         * Inputs: signed movement, current category, and duplicate target
+         * list. Output: descriptor traversal for voice categories, filtered
+         * Scene-target traversal for `scn`, and registry-ordered Effect
+         * traversal for `fx`.
+         * Movement from the D17 off sentinel selects the first available
+         * target in the remembered category; movement backward from a first
+         * target returns to the same sentinel.
+         */
         instrument_param_id_t old_target = autos[page].target;
         instrument_param_id_t new_target;
-        uint8_t slot;
+        uint8_t new_value;
 
-        if (!instrumentParam_isVoiceParameter(old_target))
+        if (menu_stepAutomationTargetOff(old_target)) {
+            if (inc < 0)
+                return 0u;
+            if (menu_stepAutoCategory < 6u) {
+                new_target = menu_stepAutomationFirstTarget(
+                    scene, menu_stepAutoCategory, autos, count);
+            } else if (menu_stepAutoCategory == 6u) {
+                new_target = sceneModTarget_step(
+                    INSTRUMENT_PARAM_INVALID, 1,
+                    SCENE_MOD_TARGET_USE_AUTOMATION);
+                while (new_target != INSTRUMENT_PARAM_INVALID &&
+                       menu_stepAutomationTargetUsed(autos, count,
+                                                     new_target, page)) {
+                    instrument_param_id_t next = sceneModTarget_step(
+                        new_target, 1, SCENE_MOD_TARGET_USE_AUTOMATION);
+                    if (next == new_target)
+                        break;
+                    new_target = next;
+                }
+            } else if (menu_stepAutoCategory == 7u) {
+                /* `fx`: first unused AUTOMATABLE Effect row. */
+                new_target = menu_stepAutomationEffectNext(
+                    scene, INSTRUMENT_PARAM_INVALID, 1, autos, count, page);
+            } else {
+                return 0u;
+            }
+        } else if (instrumentParam_isVoiceParameter(old_target)) {
+            new_target = menu_stepAutomationNextTarget(
+                scene, instrumentParam_slot(old_target), old_target, inc,
+                autos, count, page);
+        } else if (sceneModTarget_isSceneTarget(old_target)) {
+            uint8_t tries;
+            new_target = old_target;
+            for (tries = 0u; tries < sceneModTarget_count(); tries++) {
+                instrument_param_id_t candidate = sceneModTarget_step(
+                    new_target, inc, SCENE_MOD_TARGET_USE_AUTOMATION);
+                if (candidate == new_target)
+                    break;
+                if (candidate == INSTRUMENT_PARAM_INVALID) {
+                    new_target = candidate;
+                    break;
+                }
+                if (!menu_stepAutomationTargetUsed(autos, count,
+                                                   candidate, page)) {
+                    new_target = candidate;
+                    break;
+                }
+                new_target = candidate;
+            }
+        } else if (menu_stepAutomationIsEffect(old_target)) {
+            new_target = menu_stepAutomationEffectNext(
+                scene, old_target, inc, autos, count, page);
+        } else {
             return 0u;
-        slot = instrumentParam_slot(old_target);
-        new_target = menu_stepAutomationNextTarget(
-            scene, slot, old_target, inc, autos, count, page);
+        }
+        if (new_target == INSTRUMENT_PARAM_INVALID)
+            new_target = PAT_AUTOMATION_TARGET_OFF;
         if (new_target == old_target)
             return 0u;
+        new_value = menu_stepAutomationTargetOff(new_target)
+            ? 0u : menu_stepAutomationCurrentValue(scene, new_target);
         return menu_stepAutomationReplaceTarget(
-            scene, track, step, old_target, new_target, autos[page].value,
+            scene, track, step, old_target, new_target, new_value,
             count);
     }
 
@@ -8190,7 +9658,20 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
                 desc = instrumentManager_descriptor(
                     inst->type, instrumentParam_local(vt));
         }
+        if (menu_stepAutomationTargetOff(vt))
+            return 0u;
         max_val = menu_automationValueMax(desc);
+        if (sceneModTarget_isSceneTarget(vt)) {
+            const scene_mod_target_descriptor_t *scene_desc =
+                sceneModTarget_descriptor(vt);
+            if (scene_desc)
+                max_val = menu_sceneTargetIsMorph(scene_desc)
+                    ? 127u : (uint8_t)scene_desc->max_value;
+        } else if (menu_stepAutomationIsEffect(vt)) {
+            /* Effect Pattern values remain seven-bit. */
+            max_val = menu_effectAutomationMax(
+                menu_stepAutomationEffectDescriptor(scene, vt));
+        }
         next = (int16_t)autos[page].value + inc;
         if (next < 0)
             next = 0;
@@ -8295,13 +9776,34 @@ static void menu_repaintStepAutomation(void)
     if (editModeActive && !on_add && menu_stepAutoCursor >= 2u) {
         uint16_t target = autos[page].target;
 
+        if (sceneModTarget_isSceneTarget(target))
+            menu_stepAutoCategory = 6u;
+        else if (menu_stepAutomationIsEffect(target))
+            menu_stepAutoCategory = 7u;
+        else if (instrumentParam_isVoiceParameter(target))
+            menu_stepAutoCategory = instrumentParam_slot(target);
+
         if (menu_stepAutoCursor == 2u) {
             memcpy(&editDisplayBuffer[0][0], "Target  Voice", 13u);
-            if (instrumentParam_isVoiceParameter(target) &&
+            if (sceneModTarget_isSceneTarget(target)) {
+                menu_copyPaddedField(&editDisplayBuffer[1][2], "scn", 3u);
+            } else if (menu_stepAutomationIsEffect(target)) {
+                menu_copyPaddedField(&editDisplayBuffer[1][2], "fx", 3u);
+            } else if (instrumentParam_isVoiceParameter(target) &&
                 instrumentManager_targetValid(scene, target,
                                               INSTRUMENT_TARGET_AUTOMATION)) {
                 numtostru(&editDisplayBuffer[1][2],
                           (uint8_t)(instrumentParam_slot(target) + 1u));
+            } else if (menu_stepAutomationTargetOff(target) &&
+                       menu_stepAutoCategory < 6u) {
+                numtostru(&editDisplayBuffer[1][2],
+                          (uint8_t)(menu_stepAutoCategory + 1u));
+            } else if (menu_stepAutomationTargetOff(target) &&
+                       menu_stepAutoCategory == 6u) {
+                menu_copyPaddedField(&editDisplayBuffer[1][2], "scn", 3u);
+            } else if (menu_stepAutomationTargetOff(target) &&
+                       menu_stepAutoCategory == 7u) {
+                menu_copyPaddedField(&editDisplayBuffer[1][2], "fx", 3u);
             } else {
                 menu_copyPaddedField(&editDisplayBuffer[1][2],
                                      "Invalid", 7u);
@@ -8311,7 +9813,9 @@ static void menu_repaintStepAutomation(void)
             uint8_t label_width = 0u;
 
             memcpy(&editDisplayBuffer[0][0], "Target  Parametr", 16u);
-            if (sceneModTarget_isSceneTarget(target)) {
+            if (menu_stepAutomationTargetOff(target)) {
+                menu_copyPaddedField(&editDisplayBuffer[1][2], "---", 3u);
+            } else if (sceneModTarget_isSceneTarget(target)) {
                 const scene_mod_target_descriptor_t *scene_descriptor =
                     sceneModTarget_descriptor(target);
                 if (scene_descriptor) {
@@ -8366,6 +9870,16 @@ static void menu_repaintStepAutomation(void)
                     label = "Invalid";
                     label_width = 7u;
                 }
+            } else if (menu_stepAutomationIsEffect(target)) {
+                const effect_param_descriptor_t *effect_descriptor =
+                    menu_stepAutomationEffectDescriptor(scene, target);
+
+                if (effect_descriptor)
+                    menu_stepAutomationEffectLabel(effect_descriptor);
+                else {
+                    label = "Invalid";
+                    label_width = 7u;
+                }
             } else {
                 label = "Invalid";
                 label_width = 7u;
@@ -8392,7 +9906,23 @@ static void menu_repaintStepAutomation(void)
                         desc = instrumentManager_descriptor(
                             inst->type, instrumentParam_local(target));
                 }
-                menu_formatAutomationValue3(desc, amt_value, amt_out);
+                if (menu_stepAutomationTargetOff(target)) {
+                    menu_copyPaddedField(amt_out, "off", 3u);
+                } else if (sceneModTarget_isSceneTarget(target)) {
+                    const scene_mod_target_descriptor_t *scene_descriptor =
+                        sceneModTarget_descriptor(target);
+                    uint8_t display_value = amt_value;
+                    if (scene_descriptor && menu_sceneTargetIsMorph(
+                            scene_descriptor))
+                        display_value = menu_morphAutomationExpand(amt_value);
+                    numtostrpu(amt_out, display_value, ' ');
+                } else if (menu_stepAutomationIsEffect(target)) {
+                    menu_formatEffectAutomationValue3(
+                        menu_stepAutomationEffectDescriptor(scene, target),
+                        amt_value, amt_out);
+                } else {
+                    menu_formatAutomationValue3(desc, amt_value, amt_out);
+                }
             }
         }
         return;
@@ -8423,9 +9953,17 @@ static void menu_repaintStepAutomation(void)
         memcpy(&editDisplayBuffer[1][13], "off", 3u);
     } else {
         uint16_t target = autos[page].target;
-        uint8_t valid = instrumentManager_targetValid(
-            scene, target, INSTRUMENT_TARGET_AUTOMATION);
+        uint8_t valid = (uint8_t)(!menu_stepAutomationTargetOff(target) &&
+            instrumentManager_targetValid(scene, target,
+                                          INSTRUMENT_TARGET_AUTOMATION));
         const ParamDescriptor *descriptor = 0;
+
+        if (sceneModTarget_isSceneTarget(target))
+            menu_stepAutoCategory = 6u;
+        else if (menu_stepAutomationIsEffect(target))
+            menu_stepAutoCategory = 7u;
+        else if (valid && instrumentParam_isVoiceParameter(target))
+            menu_stepAutoCategory = instrumentParam_slot(target);
 
         editDisplayBuffer[0][15] =
             (uint8_t)(page + 1u < count ||
@@ -8455,12 +9993,44 @@ static void menu_repaintStepAutomation(void)
                                      descriptor->short_name, 3u);
             else
                 menu_copyPaddedField(&editDisplayBuffer[1][9], "inv", 3u);
-        } else {
+        } else if (menu_stepAutomationIsEffect(target)) {
+            /* View A `fx` row: category plus the Effect row short label. */
+            const effect_param_descriptor_t *effect_descriptor =
+                menu_stepAutomationEffectDescriptor(scene, target);
+
+            memcpy(&editDisplayBuffer[1][5], "fx ", 3u);
+            menu_copyPaddedField(&editDisplayBuffer[1][9],
+                                 effect_descriptor
+                                     ? effect_descriptor->base.short_name
+                                     : "inv", 3u);
+        } else if (menu_stepAutoCategory < 6u) {
+            numtostru(&editDisplayBuffer[1][5],
+                      (uint8_t)(menu_stepAutoCategory + 1u));
+            menu_copyPaddedField(&editDisplayBuffer[1][9], "off", 3u);
+        } else if (menu_stepAutoCategory == 6u) {
             memcpy(&editDisplayBuffer[1][5], "scn", 3u);
-            menu_copyPaddedField(&editDisplayBuffer[1][9], "inv", 3u);
+            menu_copyPaddedField(&editDisplayBuffer[1][9], "off", 3u);
+        } else {
+            memcpy(&editDisplayBuffer[1][5], "fx ", 3u);
+            menu_copyPaddedField(&editDisplayBuffer[1][9], "---", 3u);
         }
-        menu_formatAutomationValue3(descriptor, autos[page].value,
-                                    &editDisplayBuffer[1][13]);
+        if (menu_stepAutomationTargetOff(target)) {
+            menu_copyPaddedField(&editDisplayBuffer[1][13], "off", 3u);
+        } else if (sceneModTarget_isSceneTarget(target)) {
+            const scene_mod_target_descriptor_t *scene_descriptor =
+                sceneModTarget_descriptor(target);
+            uint8_t display_value = autos[page].value;
+            if (scene_descriptor && menu_sceneTargetIsMorph(scene_descriptor))
+                display_value = menu_morphAutomationExpand(display_value);
+            numtostrpu(&editDisplayBuffer[1][13], display_value, ' ');
+        } else if (menu_stepAutomationIsEffect(target)) {
+            menu_formatEffectAutomationValue3(
+                menu_stepAutomationEffectDescriptor(scene, target),
+                autos[page].value, &editDisplayBuffer[1][13]);
+        } else {
+            menu_formatAutomationValue3(descriptor, autos[page].value,
+                                        &editDisplayBuffer[1][13]);
+        }
     }
 }
 
@@ -8485,6 +10055,13 @@ static void menu_repaintGeneric(void)
 
         if (menu_cellIsEmpty(&cell))
             return;
+        /* Effect manager cells paint their own full view; PARAM cells fall
+         * through to Menu's descriptor renderer below. */
+        if (cell.kind == MENU_CELL_EFFECT &&
+            menuEffects_paintEditView(&cell.fx)) {
+            menu_applyEffectMarkers();
+            return;
+        }
         if (cell.kind == MENU_CELL_STATIC &&
             cell.static_param == PAR_RUNTIME_CPU_USE) {
             menu_displayCpuUseEdit();
@@ -8508,8 +10085,8 @@ static void menu_repaintGeneric(void)
                    menu_cellIsLfoTargetVoice(&cell)) {
             if (curParmVal < INSTRUMENT_TARGET_VOICE_FIRST)
                 curParmVal = INSTRUMENT_TARGET_VOICE_FIRST;
-            else if (curParmVal > INSTRUMENT_TARGET_VOICE_SCENE)
-                curParmVal = INSTRUMENT_TARGET_VOICE_SCENE;
+            else if (curParmVal > INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST)
+                curParmVal = INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST;
         }
 
         memset(&editDisplayBuffer[0][0], ' ', 16);
@@ -8546,11 +10123,16 @@ static void menu_repaintGeneric(void)
                     menu_copyPaddedField(&editDisplayBuffer[0][8],
                                          "Fader", 8u);
                     break;
+                case MENU_SCENE_SETTING_VOICE_MORPH:
+                    menu_copyPaddedField(&editDisplayBuffer[0][8],
+                                         "VcMorph", 8u);
+                    break;
                 default:
                     break;
                 }
             } else if (cell.kind == MENU_CELL_INSTRUMENT ||
-                       cell.kind == MENU_CELL_KIT_SETTING) {
+                       cell.kind == MENU_CELL_KIT_SETTING ||
+                       cell.kind == MENU_CELL_EFFECT) {
                 menu_copyPaddedField(&editDisplayBuffer[0][0],
                                      cell.descriptor->category, 8u);
                 menu_copyPaddedField(&editDisplayBuffer[0][8],
@@ -8630,11 +10212,44 @@ static void menu_repaintGeneric(void)
                 if (menu_cellIsLfoTargetVoice(&cell) &&
                     value == INSTRUMENT_TARGET_VOICE_SCENE) {
                     memcpy(&editDisplayBuffer[1][13], "scn", 3);
+                } else if (menu_cellIsLfoTargetVoice(&cell) &&
+                           value == INSTRUMENT_TARGET_VOICE_EFFECT) {
+                    /* Effect parameter namespace (Session 072 step 9). */
+                    memcpy(&editDisplayBuffer[1][13], "fx ", 3);
                 } else {
                     numtostrpu(&editDisplayBuffer[1][13], value, ' ');
                 }
                 break;
             }
+        }
+        /*
+         * Type value text in the full view (S074; Effect page only).
+         *
+         * What: after generic dtype text, an Effect PARAM row may be
+         * relabelled by its format_value3 hook (CrumpBit: `sub` -> `dly`;
+         * `rte` -> the Sync division while Sync is on). The raw value remains
+         * unchanged. Inputs: the cell and displayed value. Output:
+         * editDisplayBuffer[1][13..15] when the hook handles the row.
+         * Affiliates: menuEffects_formatParamValue3(), held rendering.
+         */
+        if (cell.kind == MENU_CELL_EFFECT) {
+            const uint8_t effect_value =
+                (curParmVal > 255u) ? 255u : (uint8_t)curParmVal;
+
+            (void)menuEffects_formatParamValue3(
+                &cell.fx, effect_value, &editDisplayBuffer[1][13]);
+        }
+        /*
+         * S074 bus compressor full-view value text: cmp becomes off/St1/St2
+         * and csc becomes off/1..6. cam/ctm retain generic numeric text;
+         * valueNames supplies their Scene category and long names.
+         */
+        if (cell.kind == MENU_CELL_STATIC) {
+            const uint8_t bus_value =
+                (curParmVal > 255u) ? 255u : (uint8_t)curParmVal;
+
+            (void)menu_busCompValueText(
+                cell.static_param, bus_value, &editDisplayBuffer[1][13]);
         }
     } else {
         /*
@@ -8643,7 +10258,7 @@ static void menu_repaintGeneric(void)
          */
         memset(editDisplayBuffer[0], ' ', 16u);
         memset(editDisplayBuffer[1], ' ', 16u);
-        const uint8_t is2ndPage = menu_isVoicePage(menu_activePage)
+        const uint8_t is2ndPage = menu_isScreenPage(menu_activePage)
             ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
         uint8_t i;
 
@@ -8655,6 +10270,9 @@ static void menu_repaintGeneric(void)
             } else if (cell.kind == MENU_CELL_SCENE_SETTING) {
                 menu_sceneSettingShortName(&cell,
                                            &editDisplayBuffer[0][4u * i]);
+            } else if (cell.kind == MENU_CELL_EFFECT) {
+                menuEffects_shortName(&cell.fx,
+                                      &editDisplayBuffer[0][4u * i]);
             } else if (cell.kind == MENU_CELL_INSTRUMENT ||
                        cell.kind == MENU_CELL_KIT_SETTING) {
                 menu_copyPaddedField(&editDisplayBuffer[0][4u * i],
@@ -8669,6 +10287,19 @@ static void menu_repaintGeneric(void)
 
         upr_three(&editDisplayBuffer[0][(activeParameter % 4) * 4]);
         editDisplayBuffer[0][15] = (char)checkScrollSign(activePage, activeParameter);
+
+        /*
+         * Type-painted top row (S074; CrumpBit's data-line overlay).
+         *
+         * What: on a screen flagged in the type's select_layout->custom_row0,
+         * the type replaces columns 0..14 (names and the uppercase cue) with
+         * its own row; column 15 keeps the scroll marker written above. Why:
+         * the overlay shows bit states instead of names. Inputs: sub-page and
+         * editDisplayBuffer[0]. Output: row 0. Affiliates:
+         * menuEffects_paintRow0(), menu_applyEffectMarkers().
+         */
+        if (menu_activePage == EFFECT_PAGE)
+            menuEffects_paintRow0(activePage, editDisplayBuffer[0]);
 
         for (i = 0u; i < 4u; i++) {
             menu_cell_t cell = menu_resolveCell(activePage,
@@ -8692,6 +10323,7 @@ static void menu_repaintGeneric(void)
     /* S066 markers are applied only after the ordinary VOICE frame is fully
      * formatted, including the active-parameter capitalization above. */
     va_applyVoiceMarkers();
+    menu_applyEffectMarkers();
 }
 
 /* -----------------------------------------------------------------------
@@ -8740,7 +10372,8 @@ static void menu_encoderChangeParameter(int8_t inc)
      * caller. Affiliate: va_writeAutomationFromKnob().
      */
     if (va_overlayActive && menu_isVoicePage(menu_activePage) &&
-        cell.kind == MENU_CELL_INSTRUMENT) {
+        (cell.kind == MENU_CELL_INSTRUMENT ||
+         cell.kind == MENU_CELL_SCENE_SETTING)) {
         va_writeAutomationFromKnob(activeParameter, inc);
         return;
     }
@@ -8751,6 +10384,19 @@ static void menu_encoderChangeParameter(int8_t inc)
         (cell.static_param == PAR_RUNTIME_CPU_USE ||
          cell.static_param == PAR_PAT_STORE_USE))
         return;
+
+    /* Held SEQ steps write lane locks, never retained menu values (D2). */
+    if (cell.kind == MENU_CELL_EFFECT && menuEffects_seqHoldActive()) {
+        (void)menuEffects_holdEdit(&cell.fx, inc);
+        return;
+    }
+
+    /* `typ` changes only through its full view; turning browses candidates. */
+    if (cell.kind == MENU_CELL_EFFECT &&
+        cell.fx.kind == MENU_FX_CELL_TYPE) {
+        menuEffects_typeBrowse(inc);
+        return;
+    }
 
     value = menu_cellDisplayValue(&cell);
 
@@ -8864,6 +10510,19 @@ static void menu_moveToMenuItem(int8_t inc)
             menu_stepAutoActive = 0u;
             menu_stepAutoNumberLocked = 0u;
             menuIndex = (uint8_t)((1u << PAGE_SHIFT) | 2u);
+        }
+        return;
+    }
+
+    if (menu_activePage == EFFECT_PAGE) {
+        uint8_t sub_page = (uint8_t)activePage;
+        uint8_t column = (uint8_t)activeParameter;
+
+        /* Effect navigation crosses screens and SELECT buttons without wrap. */
+        if (menuEffects_move(inc, &sub_page, &column)) {
+            menuIndex = (uint8_t)((sub_page << PAGE_SHIFT) | column);
+            /* S074: a type may own the SELECT row (CrumpBit's data lines). */
+            menuEffects_renderSelectLeds(sub_page);
         }
         return;
     }
@@ -9181,6 +10840,8 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     if (menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_KIT ||
                         menu_instrumentLoadShownType != menu_instrumentLoadType ||
                         (uint16_t)next != menu_instrumentLoadShownIndex) {
+                        /* Every typed browser row is a new coordinate. */
+                        menu_selectionGeneration++;
                         menu_instrumentLoadSource = MENU_INSTRUMENT_SOURCE_POOL;
                         menu_instrumentLoadShownType = menu_instrumentLoadType;
                         menu_instrumentLoadShownIndex = (uint16_t)next;
@@ -9214,6 +10875,44 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 menu_saveOptions.state = SAVE_STATE_EDIT_PRESET_NR;
         }
         return;
+    }
+
+    /*
+     * LSR-03: an all-space Load name is unresolved, not an empty slot.
+     *
+     * The encoder remains free to move to another coordinate, but OK must not
+     * launch a command against a cache domain that has not answered yet. The
+     * Save page is intentionally excluded: its editor is seeded from the
+     * resident identity, so an empty target remains a valid Save destination.
+     */
+    if (btnClicked && menu_activePage == LOAD_PAGE &&
+        menu_saveOptions.what < SAVE_TYPE_GLO) {
+        const char *display_name = preset_currentName;
+        uint8_t name_blank = 1u;
+        uint8_t i;
+
+        if (menu_saveOptions.what == SAVE_TYPE_KIT ||
+            menu_saveOptions.what == SAVE_TYPE_KIT_MORPH) {
+            display_name = filesystem_kitSlotName(
+                menu_currentPresetNr[menu_saveOptions.what]);
+        } else if (menu_saveOptions.what == SAVE_TYPE_SCENE) {
+            display_name = filesystem_sceneSlotName(
+                menu_currentPresetNr[SAVE_TYPE_SCENE]);
+        } else if (menu_saveOptions.what == SAVE_TYPE_BANK) {
+            display_name = filesystem_bankSlotName(
+                menu_currentPresetNr[SAVE_TYPE_BANK]);
+        } else if (menu_saveOptions.what == SAVE_TYPE_PATTERN) {
+            display_name = filesystem_patternSlotName(
+                menu_currentPresetNr[SAVE_TYPE_PATTERN]);
+        }
+        for (i = 0u; i < 8u; i++) {
+            if (display_name[i] != ' ') {
+                name_blank = 0u;
+                break;
+            }
+        }
+        if (name_blank)
+            btnClicked = 0u;
     }
 
     if (btnClicked) {
@@ -9317,8 +11016,12 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 default: break;
                 }
             }
-            if (commandAccepted)
+            if (commandAccepted) {
+                /* Freeze this committed coordinate against older callbacks. */
+                menu_selectionGeneration++;
+                menu_selectionGenerationSnapshot = menu_selectionGeneration;
                 menu_beginLoadSaveCommand();
+            }
         }
     }
 
@@ -9329,6 +11032,8 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 uint8_t previous_type = menu_saveOptions.what;
                 menu_saveOptions.what =
                     menu_nextRestoredLoadSaveType(menu_saveOptions.what, inc);
+                if (menu_saveOptions.what != previous_type)
+                    menu_selectionGeneration++;
                 /*
                  * A top-level type change is a name-session boundary only when
                  * it leaves Kit/KitMrp. The new type is installed first so an
@@ -9416,6 +11121,8 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     newPreset = maxPreset;
                 menu_currentPresetNr[menu_saveOptions.what] =
                     (uint16_t)newPreset;
+                if (inc != 0)
+                    menu_selectionGeneration++;
                 break;
             }
             /* Settings and Samples are unnumbered Load/Save choices. Keeping
@@ -9438,6 +11145,7 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
             else if (newPreset > maxPreset) newPreset = maxPreset;
             menu_currentPresetNr[menu_saveOptions.what] = (uint16_t)newPreset;
             if (inc != 0) {
+                menu_selectionGeneration++;
                 if (menu_activePage == LOAD_PAGE) {
                     /* Kit load reads the name in its own phase 2 -
                     ** don't post a separate name load that would
@@ -9560,7 +11268,7 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
     uint8_t oldPage = menu_activePage;
     uint8_t oldIndex = menuIndex;
 
-    if (menu_storageBusy) {
+    if (menu_storageBusy || preset_getStatus() != PRESET_IDLE) {
         uint8_t allow_load_number_scroll = (uint8_t)(
             inc != 0 &&
             button == lastEncoderButton &&
@@ -9600,29 +11308,15 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
 
     screensaver_touch();
 
-    /* Clear mode owns both encoder turn and encoder click.
-    ** - Turn: select clear target.
-    ** - Click: execute selected clear operation.
-    ** While active, do NOT toggle regular menu edit mode. */
-    if (copyClear_isClearModeActive()) {
-        if (btnClicked) {
-            copyClear_executeClear();
-            return;
-        }
-
-        if (inc != 0) {
-            uint8_t target = copyClear_getClearTarget();
-            if (inc < 0) {
-                if (target != CLEAR_TRACK) {
-                    target--;
-                }
-            } else if (inc > 0) {
-                if (target != CLEAR_AUTOMATION2) {
-                    target++;
-                }
-            }
-            copyClear_setClearTarget(target);
-        }
+    /*
+     * S075: while the copy/clear button is held, copy/clear owns the encoder.
+     * A turn changes the menu selection when a menu is shown; clicks are
+     * ignored (user, B18); no parameter value or edit mode changes.
+     * Affiliates: copyClear_ownsEncoder(), copyClear_encoderTurned().
+     */
+    if (copyClear_ownsEncoder()) {
+        if (!btnClicked && inc != 0)
+            copyClear_encoderTurned(inc);
         return;
     }
 
@@ -9652,6 +11346,19 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
 
     if (btnClicked)
         editModeActive = (uint8_t)(1 - editModeActive);
+
+    if (btnClicked && menu_activePage == EFFECT_PAGE) {
+        menu_cell_t fx_cell = menu_resolveCell(
+            menu_getSubPage(), menuIndex & MASK_PARAMETER);
+
+        /* `typ` click-in browses; click-out commits the type transaction. */
+        if (menuEffects_editModeChanged(
+                editModeActive,
+                fx_cell.kind == MENU_CELL_EFFECT ? &fx_cell.fx : NULL)) {
+            menu_resetActiveParameter();
+            menu_endlessPotMappingChanged();
+        }
+    }
 
     if (btnClicked && menu_isVoicePage(menu_activePage) &&
         va_overlayActive) {
@@ -9728,7 +11435,7 @@ static uint8_t menu_paramVisible(uint16_t paramNr)
         return (uint8_t)(cell.kind == MENU_CELL_STATIC &&
                          cell.static_param == paramNr);
     } else {
-        const uint8_t is2ndPage = menu_isVoicePage(menu_activePage)
+        const uint8_t is2ndPage = menu_isScreenPage(menu_activePage)
             ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
         uint8_t i;
 
@@ -9767,15 +11474,93 @@ static uint8_t menu_paramIsMorphAmount(uint16_t paramNr)
      */
     if (paramNr == PAR_MORPH)
         return 1u;
+    if (paramNr == PAR_EFFECT_MORPH)
+        return 1u;
     return (uint8_t)(paramNr >= PAR_VOICE1_MORPH &&
                      paramNr <= PAR_VOICE6_MORPH);
+}
+
+/*
+ * S074 bus compressor cell helpers.
+ *
+ * menu_paramIsBusComp() identifies the four static page mirrors.
+ * menu_busCompValueText() owns cmp/csc three-character labels while cam/ctm
+ * use the generic numeric renderer. menu_commitBusCompParam() fans an edit to
+ * every Scene in the VOICE edit mask and then resynchronizes the mirrors.
+ * Affiliates: menu_cellCommitValue(), menu_clampCellValue(), Preset.
+ */
+static uint8_t menu_paramIsBusComp(uint16_t paramNr)
+{
+    return (uint8_t)(paramNr >= PAR_BUS_COMP_MODE &&
+                     paramNr <= PAR_BUS_COMP_SIDECHAIN);
+}
+
+static uint8_t menu_busCompValueText(uint16_t paramNr, uint8_t value,
+                                     char *dst)
+{
+    if (!dst)
+        return 0u;
+    if (paramNr == PAR_BUS_COMP_MODE) {
+        if (value == SCENE_BUS_COMP_MODE_ST1)
+            memcpy(dst, "St1", 3);
+        else if (value == SCENE_BUS_COMP_MODE_ST2)
+            memcpy(dst, "St2", 3);
+        else
+            memcpy(dst, menuText_off, 3);
+        return 1u;
+    }
+    if (paramNr == PAR_BUS_COMP_SIDECHAIN) {
+        if (value == SCENE_BUS_COMP_SIDECHAIN_OFF)
+            memcpy(dst, menuText_off, 3);
+        else
+            numtostrpu(dst, value, ' ');
+        return 1u;
+    }
+    return 0u;
+}
+
+static uint8_t menu_commitBusCompParam(uint16_t paramNr, uint8_t value)
+{
+    const uint8_t field = (uint8_t)(paramNr - PAR_BUS_COMP_MODE);
+    const uint16_t edit_mask = bank_sceneMaskVoiceEdit();
+    uint8_t scene_index;
+
+    /*
+     * Commit one page edit to every masked Scene, then show the active Scene.
+     * The active Scene may be outside the mask, so refreshing all mirrors is
+     * required for a truthful page after a fan-out edit.
+     */
+    for (scene_index = 0u;
+         scene_index < SCENE_COUNT && scene_index < 16u;
+         scene_index++) {
+        if ((edit_mask & (uint16_t)(1u << scene_index)) != 0u)
+            preset_setBusCompSetting(scene_index, field, value);
+    }
+    preset_syncBusCompMirrors();
+    return 1u;
+}
+
+/*
+ * Commit one PERF `fxm` edit (S075).
+ *
+ * What: writes the active Scene's Effect Morph through EffectsManager, which
+ * fans the value out through the edit mask and marks retained Scene AutoSave,
+ * then refreshes the flat PERF mirror. Settings Load replays the corresponding
+ * flat id through the refresh-only path. Input: clamped 0..255 value. Output:
+ * repaint requested. Affiliate: effects_setMorphAmount().
+ */
+static uint8_t menu_commitEffectMorphParam(uint8_t value)
+{
+    (void)effects_setMorphAmount(scene_getActiveIndex(), value);
+    preset_syncEffectMorphMirror();
+    return 1u;
 }
 
 static void menu_updateEndlessPotScales(void)
 {
     uint8_t activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
     uint8_t activeParameter = menuIndex & MASK_PARAMETER;
-    uint8_t is2ndPage = menu_isVoicePage(menu_activePage)
+    uint8_t is2ndPage = menu_isScreenPage(menu_activePage)
         ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
 
     for (uint8_t knobNr = 0; knobNr < ENDLESS_POT_COUNT; knobNr++) {
@@ -9785,6 +11570,9 @@ static void menu_updateEndlessPotScales(void)
                 menu_resolveCell(activePage, (uint8_t)(knobNr + is2ndPage));
             useDouble = (uint8_t)(cell.kind == MENU_CELL_STATIC &&
                                   menu_paramIsMorphAmount(cell.static_param));
+            /* Effect 0..255 cells (Morph amount and wide rows) use double rate. */
+            if (cell.kind == MENU_CELL_EFFECT)
+                useDouble = menuEffects_cellWantsDoublePot(&cell.fx);
         }
         endlessPots_setDouble(knobNr, useDouble);
     }
@@ -9796,9 +11584,101 @@ static void menu_endlessPotMappingChanged(void)
     endlessPots_snapshotAll();
 }
 
+/*
+ * Resolve one visible endless-pot column to the canonical clear target.
+ *
+ * Inputs: physical pot number and output record. Output: Pattern target and,
+ * for Effect cells, the optional FX-sequence lane; zero means this column has
+ * no automatable owner. Clear mode calls this before consuming a delta so the
+ * normal value-edit path is never entered. Affiliates: Menu cell resolution,
+ * SceneModTargets, EffectsManager, and copyClearSession.
+ */
+static uint8_t menu_knobClearTarget(uint8_t knobNr, cc_pot_target_t *out)
+{
+    const uint8_t active_page =
+        (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    const uint8_t active_parameter = (uint8_t)(menuIndex & MASK_PARAMETER);
+    const uint8_t second_page = menu_isScreenPage(menu_activePage)
+        ? 0u : (uint8_t)((active_parameter > 3u) ? 4u : 0u);
+    menu_cell_t cell;
+
+    if (!out || knobNr >= ENDLESS_POT_COUNT)
+        return 0u;
+    out->pattern_target = 0xffffu;
+    out->fx_lane = 0xffu;
+    cell = menu_resolveCell(active_page, (uint8_t)(knobNr + second_page));
+
+    if (cell.kind == MENU_CELL_INSTRUMENT) {
+        if (!cell.descriptor ||
+            (cell.descriptor->flags & INSTRUMENT_PARAM_FLAG_AUTOMATABLE) == 0u)
+            return 0u;
+        out->pattern_target = instrumentParam_make(
+            menu_voicePageToSlot(menu_activePage), cell.descriptor_index);
+        return 1u;
+    }
+    if (cell.kind == MENU_CELL_SCENE_SETTING) {
+        instrument_param_id_t target =
+            menu_sceneSettingAutomationTarget(&cell);
+        if (target == INSTRUMENT_PARAM_INVALID)
+            return 0u;
+        out->pattern_target = target;
+        return 1u;
+    }
+    if (cell.kind == MENU_CELL_KIT_SETTING) {
+        if (cell.kit_setting != MENU_KIT_SETTING_SLOT6_TRACK7_AMP_DECAY)
+            return 0u;
+        out->pattern_target = sceneModTarget_slot6DecayId();
+        return (uint8_t)(out->pattern_target != INSTRUMENT_PARAM_INVALID);
+    }
+    if (cell.kind == MENU_CELL_STATIC) {
+        if (cell.static_param >= PAR_VOICE1_MORPH &&
+            cell.static_param <= PAR_VOICE6_MORPH) {
+            out->pattern_target = sceneModTarget_voiceMorphId(
+                (uint8_t)(cell.static_param - PAR_VOICE1_MORPH));
+            return (uint8_t)(out->pattern_target != INSTRUMENT_PARAM_INVALID);
+        }
+        if (cell.static_param == PAR_EFFECT_MORPH) {
+            out->pattern_target = sceneModTarget_effectMorphId();
+            out->fx_lane = EFFECT_SEQ_LANE_MORPH;
+            return (uint8_t)(out->pattern_target != INSTRUMENT_PARAM_INVALID);
+        }
+        return 0u;
+    }
+    if (cell.kind != MENU_CELL_EFFECT)
+        return 0u;
+
+    if (cell.fx.kind == MENU_FX_CELL_MORPH_AMOUNT) {
+        out->pattern_target = sceneModTarget_effectMorphId();
+        out->fx_lane = EFFECT_SEQ_LANE_MORPH;
+        return (uint8_t)(out->pattern_target != INSTRUMENT_PARAM_INVALID);
+    }
+    if (cell.fx.kind != MENU_FX_CELL_PARAM ||
+        !effects_paramAutomatable(effects_activeType(), cell.fx.index))
+        return 0u;
+    out->pattern_target = effectTarget_id(cell.fx.index);
+    (void)effects_laneOfParam(effects_activeType(), cell.fx.index,
+                               &out->fx_lane);
+    return 1u;
+}
+
 void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
 {
     if (menu_storageBusy) return;
+
+    /*
+     * S075: while the copy/clear button is held, no pot changes a value.
+     * In a clear operation with no menu shown, the turn is a pot clear of the
+     * parameter under the pot (menu_knobClearTarget()); in a copy operation,
+     * over a non-automatable cell, or while a clear menu is shown it does
+     * nothing (spec §6). Affiliates: copyClear_ownsPots(),
+     * copyClear_potTurned().
+     */
+    if (copyClear_ownsPots()) {
+        cc_pot_target_t target;
+        if (delta != 0 && menu_knobClearTarget(knobNr, &target))
+            (void)copyClear_potTurned(&target);
+        return;
+    }
 
     if (knobNr >= ENDLESS_POT_COUNT) return;
     if (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) {
@@ -9833,7 +11713,7 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
 
     const uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
     const uint8_t activeParameter = menuIndex & MASK_PARAMETER;
-    const uint8_t is2ndPage       = menu_isVoicePage(menu_activePage)
+    const uint8_t is2ndPage       = menu_isScreenPage(menu_activePage)
         ? 0u : (uint8_t)((activeParameter > 3) ? 4 : 0);
     menu_cell_t cell =
         menu_resolveCell(activePage, (uint8_t)(knobNr + is2ndPage));
@@ -9841,6 +11721,15 @@ void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
     int32_t next;
 
     if (menu_cellIsEmpty(&cell)) return;
+    /* The endless pot over `typ` is intentionally inert. */
+    if (cell.kind == MENU_CELL_EFFECT && cell.fx.kind == MENU_FX_CELL_TYPE)
+        return;
+    /* Held SEQ steps write lane locks, never retained menu values (D2). */
+    if (cell.kind == MENU_CELL_EFFECT && menuEffects_seqHoldActive()) {
+        if (menuEffects_holdEdit(&cell.fx, delta))
+            menu_knobs_dirty = 1u;
+        return;
+    }
     if (cell.kind == MENU_CELL_STATIC &&
         (cell.static_param == PAR_RUNTIME_CPU_USE ||
          cell.static_param == PAR_PAT_STORE_USE)) return;
@@ -9953,21 +11842,99 @@ void menu_serviceRuntimeWidgets(void)
      * VOICE overlay services run every foreground pass, independently of the
      * slower CPU-use widget cadence. Held-state polling is first so scan/value
      * resolution sees the latest raw SEQ mask; all LCD work remains foreground
-     * only. Pattern-wide scans are four steps per pass by configuration.
+     * only. Pattern-wide scans are four step reads per pass by configuration
+     * (VOICE and Effect pages).
      */
     if (menu_isVoicePage(menu_activePage)) {
-        va_updateHeldState();
+        /* The overlay's TRACK gesture belongs to the Effect editor. */
+        if (!menu_fxVoiceMixOverlayActive())
+            va_updateHeldState();
         va_scanService();
         va_underlineService();
-        /* Retry a deferred marker transaction once the queue has drained.
-         * The retry bit survives sendDisplayBuffer() clearing
-         * menu_lcdRefreshPending, ensuring underlines recover after a
-         * burst of rapid encoder events. */
-        if ((va_cgramValid & VA_MARKER_RETRY_BIT) &&
-            lcd_queueFree() >= 72u) {
-            menu_repaint();
+    }
+
+    if (menu_activePage == EFFECT_PAGE || menu_fxVoiceMixOverlayActive()) {
+        uint8_t fx_actions = menuEffects_service();
+
+        if (menu_fxVoiceMixOverlayActive()) {
+            /* The Effect page is hidden; apply its service actions on return. */
+            if (fx_actions & MENU_FX_ACT_REPAIR)
+                menu_fxVoiceMixOverlay.flags |= MENU_FX_OVERLAY_REPAIR;
+            if (fx_actions & MENU_FX_ACT_EXIT_EDIT)
+                menu_fxVoiceMixOverlay.flags |= MENU_FX_OVERLAY_EXIT_EDIT;
+        } else {
+            /* Follow Scene switches and external type changes on the FX page. */
+            if (fx_actions & MENU_FX_ACT_EXIT_EDIT)
+                editModeActive = 0u;
+            if (fx_actions & MENU_FX_ACT_REPAIR) {
+                menu_resetActiveParameter();
+                menu_endlessPotMappingChanged();
+            }
+        /*
+         * Redraw after this pass's Effect state changes (S074 ordering fix).
+         *
+         * What: a SEQ hold transition (MENU_FX_ACT_HOLD_REPAINT) redraws with
+         * menu_repaint(); a Scene or type change alone
+         * (MENU_FX_ACT_REPAINT) keeps its forced full menu_repaintAll().
+         * Why: menu_repaintAll() overwrites currentDisplayBuffer with 0x7F,
+         * so va_queueMarkerTransaction() cannot find the LCD cell that still
+         * shows a CGRAM marker slot. It then redefines the slot while that
+         * cell still references it: on a hold, the new underlined value glyph
+         * flashes in the name row; on release, the underlined name glyph
+         * flashes in the value row, until the frame write reaches them.
+         * menu_repaint() keeps the shadow equal to the LCD, so the transaction
+         * restores the old cell to its plain character first, then redefines
+         * the slot, then writes the new cell and the rest of the frame (row 0,
+         * then row 1). A pass that reports both bits uses menu_repaint():
+         * menu_repaintGeneric() rebuilds both rows of the Effect frame in
+         * every view, so menu_repaintAll() would add only the forced resend
+         * that breaks the ordering.
+         * Inputs: fx_actions from menuEffects_service(). Output: at most one
+         * repaint. Affiliates: va_queueMarkerTransaction(),
+         * menu_applyEffectMarkers(), and va_updateHeldState() (the VOICE
+         * precedent, S066 Fix 5).
+         */
+            if (fx_actions & MENU_FX_ACT_HOLD_REPAINT)
+                menu_repaint();
+            else if (fx_actions & MENU_FX_ACT_REPAINT)
+                menu_repaintAll();
+        /*
+         * Effect-page automation-presence search (S074).
+         *
+         * What: advances the search shared with the VOICE pages, here over
+         * all seven tracks of the viewed Pattern, four step reads per pass.
+         * Why: the Effect page underlines parameter names automated in the
+         * Pattern; the result feeds menu_effectCellAutomated() through
+         * menu_applyEffectMarkers(). It runs after menuEffects_service() so
+         * that pass's Scene/type handling comes first. Output: one
+         * menu_repaint() when the search completes. Affiliates:
+         * va_scanService(), va_searchRestart().
+         */
+            va_scanService();
         }
     }
+
+    /*
+     * Retry a deferred marker transaction once the LCD queue has drained.
+     *
+     * What: repaints once when va_queueMarkerTransaction() had to defer its
+     * CGRAM work (VA_MARKER_RETRY_BIT) and the queue has room again. Why:
+     * the retry bit survives sendDisplayBuffer() clearing
+     * menu_lcdRefreshPending, so underlines recover after a burst of rapid
+     * encoder/pot events. The VOICE and Effect pages share the transaction,
+     * so both need the retry; before S074 only VOICE had it, and a deferred
+     * Effect marker stayed missing until an unrelated repaint. Inputs:
+     * menu_activePage, va_cgramValid, lcd_queueFree(). Output: at most one
+     * menu_repaint() per pass. Affiliates: va_queueMarkerTransaction(),
+     * va_applyVoiceMarkers(), menu_applyEffectMarkers().
+     */
+    if (menu_isScreenPage(menu_activePage) &&
+        (va_cgramValid & VA_MARKER_RETRY_BIT) &&
+        lcd_queueFree() >= 72u) {
+        menu_repaint();
+    }
+
+    menu_sceneLiveRefreshService();
 
     if ((uint16_t)(now - menu_cpuUseLastRefresh) < MENU_CPU_USE_REFRESH_MS)
         return;
@@ -10255,8 +12222,11 @@ void menu_pollPresetStatus(void)
     switch (preset_getCompletedOp()) {
     case PRESET_OP_KIT_LOAD:
     {
+        uint8_t selection_stale = (uint8_t)(
+            menu_selectionGenerationSnapshot != menu_selectionGeneration);
+
         if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
-            !menu_isLoadSaveSelectionCurrent()) {
+            (!menu_isLoadSaveSelectionCurrent() || selection_stale)) {
             /*
              * The encoder selected a newer Kit number while this immutable
              * load was running. Still apply and record the Kit that really
@@ -10283,7 +12253,7 @@ void menu_pollPresetStatus(void)
         menu_storageBusy = 1u;
         menu_refreshResidentNameScratchKit(
             preset_getKitRequestSceneMask());
-        if (!menu_isLoadSaveSelectionCurrent())
+        if (selection_stale || !menu_isLoadSaveSelectionCurrent())
             memset(preset_currentName, ' ', 8u);
         menu_startSoundApply(1u, 0u, 1u, 0u, 0u, 0u, 1u, 0u,
                              FS_STALE_WARNING_NONE);
@@ -10292,8 +12262,11 @@ void menu_pollPresetStatus(void)
 
     case PRESET_OP_KIT_MORPH_LOAD:
     {
+        uint8_t selection_stale = (uint8_t)(
+            menu_selectionGenerationSnapshot != menu_selectionGeneration);
+
         if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
-            !menu_isLoadSaveSelectionCurrent()) {
+            (!menu_isLoadSaveSelectionCurrent() || selection_stale)) {
             /* KitMrp also finishes the accepted endpoint apply and resident-
              * name read before the latest freely-scrolled number is posted. */
             menu_deferSelectionRequest = 1u;
@@ -10391,6 +12364,12 @@ void menu_pollPresetStatus(void)
          */
         if (!preset_completedBankLoadedScene()) {
             preset_ackStatus();
+            /*
+             * Empty-Bank loading restored bankset.bcg masks without a Scene
+             * commit. Validate them before the fallback Scene/Kit ladder can
+             * expose the mask to edits (S072 Step 10 F5).
+             */
+            bank_revalidateVoiceEditMasks();
             if (preset_loadFirstAvailableSceneOrKit()) {
                 menu_storageBusy = 1u;
             } else {
@@ -10544,8 +12523,18 @@ void menu_pollPresetStatus(void)
 
     case PRESET_OP_INSTRUMENT_LOAD:
     {
+        uint8_t selection_stale = (uint8_t)(
+            menu_selectionGenerationSnapshot != menu_selectionGeneration);
         uint8_t mark_autosave_whole_instrument = (uint8_t)(
             !filesystem_loadedInstrumentWasTemporary());
+
+        if (selection_stale && menu_activePage == LOAD_PAGE &&
+            menu_instrumentLoadActive && !menu_instrumentSaveMode) {
+            /* The loaded payload is committed, but its coordinate is no longer
+             * the displayed one; let the latest desired row win next. */
+            menu_deferSelectionRequest = 1u;
+            menu_deferSelectionLoadKit = 1u;
+        }
 
         /*
          * Track whether the resident slot still matches the `kit` snapshot.
@@ -10610,6 +12599,12 @@ void menu_pollPresetStatus(void)
     }
 
     case PRESET_OP_INSTRUMENT_MORPH_LOAD:
+        if (menu_selectionGenerationSnapshot != menu_selectionGeneration &&
+            menu_activePage == LOAD_PAGE && menu_instrumentLoadActive &&
+            !menu_instrumentSaveMode) {
+            menu_deferSelectionRequest = 1u;
+            menu_deferSelectionLoadKit = 1u;
+        }
         /*
          * Single InstrumentMrp completion.
          *
@@ -10862,6 +12857,17 @@ void menu_switchSubPage(uint8_t subPageNr)
     uint8_t activeParameter = menuIndex & MASK_PARAMETER;
     uint8_t activePage      = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
 
+    if (menu_activePage == EFFECT_PAGE) {
+        /* Effect SELECT presses choose/cycle menuEffects screens. */
+        uint8_t sub_page = activePage;
+        uint8_t column = activeParameter;
+
+        if (menuEffects_selectPressed(subPageNr, &sub_page, &column))
+            menuIndex = (uint8_t)((sub_page << PAGE_SHIFT) | column);
+        menu_endlessPotMappingChanged();
+        return;
+    }
+
     if (menu_isVoicePage(menu_activePage)) {
         /*
          * Voice SELECT buttons choose a sub-page and cycle its four-parameter screens.
@@ -10946,6 +12952,17 @@ void menu_switchSubPage(uint8_t subPageNr)
 void menu_resetActiveParameter(void)
 {
     uint8_t activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    if (menu_activePage == EFFECT_PAGE) {
+        uint8_t sub_page = activePage;
+        uint8_t column = menuIndex & MASK_PARAMETER;
+
+        /* Repair the Effect cursor after registry/layout changes. */
+        menuEffects_repairCursor(&sub_page, &column);
+        menuIndex = (uint8_t)((sub_page << PAGE_SHIFT) | column);
+        /* S074: a type may own the SELECT row (CrumpBit's data lines). */
+        menuEffects_renderSelectLeds(sub_page);
+        return;
+    }
     if (menu_isVoicePage(menu_activePage)) {
         /*
          * Repair a remembered voice screen after instrument/page changes.
@@ -10981,7 +12998,7 @@ void menu_switchPage(uint8_t pageNr)
     uint8_t old_page = menu_activePage;
     uint8_t was_voice_page = menu_isVoicePage(menu_activePage);
 
-    if (menu_storageBusy) {
+    if (menu_storageBusy || preset_getStatus() != PRESET_IDLE) {
         /*
          * Retain every genuine physical exit requested during busy work.
          * Inputs: a requested page while Load/Save owns a filesystem/apply
@@ -10996,6 +13013,9 @@ void menu_switchPage(uint8_t pageNr)
          */
         if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
             pageNr != LOAD_PAGE) {
+            /* Invalidate any live browser completion before the queued exit. */
+            if (menu_pendingPageSwitch == MENU_PENDING_PAGE_NONE)
+                menu_selectionGeneration++;
             menu_pendingPageSwitch = (uint8_t)(pageNr + 1u);
         }
         return;
@@ -11010,8 +13030,24 @@ void menu_switchPage(uint8_t pageNr)
      */
     menu_stepAutomationReset();
 
+    /*
+     * A real page switch abandons the Effect-page voice mix overlay without
+     * restoring the Effect page (S075 F2-F). The user chose the destination;
+     * the later TRACK release therefore has nothing left to restore. Because
+     * the overlay did not call menuEffects_leave(), do that when leaving FX.
+     */
+    if (menu_fxVoiceMixOverlay.flags & MENU_FX_OVERLAY_ACTIVE) {
+        menu_fxVoiceMixOverlay.flags = 0u;
+        if (pageNr != EFFECT_PAGE)
+            menuEffects_leave();
+    }
+
     if (was_voice_page && !menu_isVoicePage(pageNr))
         va_resetOverlay();
+
+    /* Leaving the Effect page discards an open type candidate and Morph view. */
+    if (menu_activePage == EFFECT_PAGE && pageNr != EFFECT_PAGE)
+        menuEffects_leave();
 
     /*
      * Capture the old context before page mutation. Pressing the Load/Save
@@ -11049,6 +13085,8 @@ void menu_switchPage(uint8_t pageNr)
 
     if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
         pageNr != LOAD_PAGE) {
+        /* The page transition is a coordinate boundary for all callbacks. */
+        menu_selectionGeneration++;
         /*
          * Leaving the Load/Save surface disposes the shared browser names.
          * This covers top-level Kit/Scene/Bank exits as well as nested
@@ -11107,6 +13145,10 @@ void menu_switchPage(uint8_t pageNr)
         menu_activePage = pageNr;
         editModeActive = 0;
         lockPotentiometerFetch();
+        if (pageNr == PERFORMANCE_PAGE) {
+            /* S075: refresh PERF `fxm` after Effect/copy/clear changes. */
+            preset_syncEffectMorphMirror();
+        }
         if (pageNr == SEQ_PAGE) {
             /*
              * STEP mode's front page is a track-settings view.
@@ -11120,6 +13162,41 @@ void menu_switchPage(uint8_t pageNr)
             pat_applyTrackSettingsToMenu(menu_getViewedPattern(), menu_getActiveVoice());
         }
         break;
+
+    case EFFECT_PAGE: {
+        uint8_t sub_page;
+        uint8_t column;
+
+        /* Enter Effect at SELECT 1 `typ`; repeated entry toggles its screen. */
+        menu_instrumentLoadActive = 0u;
+        menu_setVoiceModeShowMorph(0u);
+        if (menu_activePage == EFFECT_PAGE)
+            menuEffects_toggleFirstScreen(&sub_page, &column);
+        else
+            menuEffects_enter(&sub_page, &column);
+        menuEffects_setShowMorph(buttonHandler_getShift());
+        menu_activePage = EFFECT_PAGE;
+        /*
+         * Effect-page automation-presence search (S074).
+         *
+         * What: a fresh entry restarts the search shared with the VOICE pages
+         * in Effect mode (seven-track cursor from track 0, empty masks). Why:
+         * the shared va_search* bytes may still hold a completed VOICE result,
+         * which would mark the wrong Effect names. The restart runs after
+         * menu_activePage is set because va_searchRestart() selects the scan
+         * geometry from the page. A repeated SHIFT+PERF (screen toggle,
+         * old_page == EFFECT_PAGE) keeps the running search. Input: old_page
+         * (captured at the top of menu_switchPage()). Output: a restarted
+         * search that va_scanService() completes and repaints. Affiliates:
+         * va_searchRestart(), menuEffects_enter(),
+         * menu_serviceRuntimeWidgets().
+         */
+        if (old_page != EFFECT_PAGE)
+            va_searchRestart();
+        editModeActive = 0u;
+        lockPotentiometerFetch();
+        menuIndex = (uint8_t)((sub_page << PAGE_SHIFT) | column);
+        break; }
 
     case LOAD_PAGE:
         menu_setVoiceModeShowMorph(0u);
@@ -11188,6 +13265,12 @@ void menu_switchPage(uint8_t pageNr)
          */
         buttonHandler_showMuteLEDs();
         menu_refreshPerfSceneLeds();
+    } else if (pageNr == EFFECT_PAGE) {
+        /* Effect page owns mute/SELECT LEDs and the FX-sequencer row. */
+        buttonHandler_showMuteLEDs();
+        /* S074: a type may own the SELECT row (CrumpBit's data lines). */
+        menuEffects_renderSelectLeds(menu_getSubPage());
+        menuEffects_renderSeqLeds();
     } else {
         led_setActiveVoiceLeds((uint8_t)(1 << menu_getActiveVoice()));
         menu_muteModeActive = 0;
@@ -11195,8 +13278,23 @@ void menu_switchPage(uint8_t pageNr)
 
     menu_resetActiveParameter();
     menu_endlessPotMappingChanged();
-    if (end_resident_name_session)
-        (void)menu_endResidentNameScratchSession();
+    if (end_resident_name_session) {
+        /*
+         * Detach page repaint from HCNAMES persistence.
+         *
+         * What: discard only the browser/session view and retain the dirty
+         * Scene mask. Why: the destination page must become visible on this
+         * pass; filesystem_tick() will schedule the existing atomic HCNAMES
+         * rewrite once the facade is idle. Inputs: the pre-switch dirty mask.
+         * Outputs: no new buffer, no identity mutation, and no page-exit wait.
+         * Affiliates: menu_triggerDeferredHcnamesFlush() and the next idle
+         * filesystem scheduler rung.
+         */
+        menu_residentNameScratchValid = 0u;
+        menu_residentNameScratchScene =
+            MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
+        filesystem_clearNameCache();
+    }
     /*
      * Do not paint this frame while an async entry request is still in flight.
      *
@@ -11516,27 +13614,27 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
         break;
     }
 
-    case PAR_VOICE_DECIMATION_ALL:
+    case PAR_EFFECT_MORPH:
         /*
-         * Scene global decimation is retained with other Scene settings.
-         *
-         * Inputs: PERF "srt" value 0..127. Output: Preset stores the setting
-         * and applies mixer_decimation_rate[6] using the same taper as the
-         * legacy VOICE_DECIMATION_ALL MIDI CC. Keeping the write behind Preset
-         * gives future sceneset.scg load/save one owner boundary.
+         * S075 PERF `fxm` is refresh-only here. Settings/legacy loads replay
+         * this id range; they must not write SceneData. Page edits commit via
+         * menu_commitEffectMorphParam().
          */
-    {
-        uint16_t edit_mask = bank_sceneMaskVoiceEdit();
-        uint8_t scene_index;
-
-        for (scene_index = 0u;
-             scene_index < SCENE_COUNT && scene_index < 16u;
-             scene_index++) {
-            if ((edit_mask & (uint16_t)(1u << scene_index)) != 0u)
-                preset_setVoiceDecimationAll(scene_index, value);
-        }
+        preset_syncEffectMorphMirror();
         break;
-    }
+
+    case PAR_BUS_COMP_MODE:
+    case PAR_BUS_COMP_AMOUNT:
+    case PAR_BUS_COMP_TIME:
+    case PAR_BUS_COMP_SIDECHAIN:
+        /*
+         * S074 bus compressor mirrors are refresh-only in Global apply.
+         * Settings/legacy loads replay this range, but these ids must never
+         * write SceneData or settings.cfg; restore the active Scene values
+         * instead so a load cannot leave the page showing reset zeros.
+         */
+        preset_syncBusCompMirrors();
+        break;
 
     case PAR_ROLL:
         /*
@@ -11760,14 +13858,29 @@ uint8_t menu_getActivePage(void)   { return menu_activePage; }
 /* Expose only the accepted-command busy window needed by filesystem tracing. */
 uint8_t menu_isLoadSaveCommandActive(void) { return menu_loadSaveCommandActive; }
 uint8_t menu_getActiveVoice(void)  { return menu_activeVoice; }
-/* Track changes restart the custom STEP automation cursor at page zero. */
+/*
+ * Set the active track (voice) shown by Menu.
+ *
+ * What: a change restarts the custom STEP automation cursor at page zero,
+ * releases the VOICE held-step overlay, and restarts the VOICE
+ * automation-presence search for the new track. Why: those views are
+ * track-scoped. The Effect page (reached here by SHIFT+TRACK) keeps its
+ * search, which already covers all seven tracks; a restart would only blank
+ * its Pattern underlines until a redundant 224-pass rescan completed (S074).
+ * The next VOICE entry restarts the search regardless. Input: track 0..6.
+ * Output: menu_activeVoice and the dependent transient state. Callers:
+ * buttonHandler voice/track presses, menu_switchPage() voice entry.
+ * Affiliates: menu_stepAutomationReset(), va_resetOverlay(),
+ * va_searchRestart().
+ */
 void menu_setActiveVoice(uint8_t v)
 {
     if (menu_activeVoice != v) {
         menu_stepAutomationReset();
         va_resetOverlay();
         menu_activeVoice = v;
-        va_searchRestart();
+        if (menu_activePage != EFFECT_PAGE)
+            va_searchRestart();
         return;
     }
     menu_activeVoice = v;
@@ -11780,11 +13893,12 @@ void menu_setVoiceModeShowMorph(uint8_t onOff)
     /*
      * Set the voice-page morph endpoint overlay.
      *
-     * Why: buttonHandler owns the SHIFT+VOICE gesture, but Menu owns the
+     * Why: buttonHandler owns the SHIFT/latch gestures, but Menu owns the
      * parameter buffer used by repaint/edit code. Input onOff is boolean.
      * Output: voiceModeShowMorph is updated and the next repaint/edit resolves
-     * voice-page sound parameters against the matching buffer. Confederates:
-     * buttonHandler also owns the MODE1 blink feedback for this flag.
+     * voice-page sound and FX-send cells against the matching endpoint. Drivers
+     * include VOICE SHIFT and the Effect-page voice mix overlay (S075 F2-F/G).
+     * buttonHandler also owns the MODE1 blink feedback for the latch.
     */
     voiceModeShowMorph = (uint8_t)(onOff != 0u);
     menu_endlessPotMappingChanged();
@@ -11793,6 +13907,127 @@ void menu_setVoiceModeShowMorph(uint8_t onOff)
      * no-match parameter switches endpoints immediately. */
     if (menu_isVoicePage(menu_activePage))
         menu_repaint();
+}
+
+/*
+ * Set the momentary Effect-page Morph endpoint view.
+ *
+ * Input: physical SHIFT state. Output: Morphable FX cells resolve against the
+ * requested endpoint, while non-Morphable cells keep their normal value.
+ * Endless-pot snapshots and the visible LCD are refreshed only when the FX
+ * page owns the current display; VOICE morph state is independent.
+ */
+void menu_setEffectShowMorph(uint8_t onOff)
+{
+    menuEffects_setShowMorph(onOff);
+    if (menu_activePage != EFFECT_PAGE)
+        return;
+    menu_endlessPotMappingChanged();
+    menu_repaint();
+}
+
+/*
+ * Show the Effect type's home screen after a hooked SELECT (S074).
+ *
+ * What: leaves the full view, moves the cursor to the type layout's home
+ * screen, refreshes the pot mapping, re-renders the SELECT LEDs through the
+ * type owner, and repaints with menu_repaint(), which preserves the LCD shadow
+ * for ordered marker moves. Without a valid home it only re-renders and
+ * repaints. Caller: buttonHandler FX SELECT paths.
+ */
+void menu_effectShowHome(void)
+{
+    uint8_t sub_page;
+    uint8_t column;
+
+    if (menu_fxVoiceMixOverlay.flags & MENU_FX_OVERLAY_ACTIVE) {
+        /* Under the overlay only the saved Effect SELECT LEDs may change. */
+        menuEffects_renderSelectLeds((uint8_t)(
+            (menu_fxVoiceMixOverlay.fx_menu_index & MASK_PAGE) >> PAGE_SHIFT));
+        return;
+    }
+    if (menu_activePage != EFFECT_PAGE)
+        return;
+    if (menuEffects_home(&sub_page, &column)) {
+        editModeActive = 0u;
+        menuIndex = (uint8_t)((sub_page << PAGE_SHIFT) | column);
+        menu_endlessPotMappingChanged();
+    }
+    menuEffects_renderSelectLeds(menu_getSubPage());
+    menu_repaint();
+}
+
+/*
+ * Effect-page voice mix overlay (contract in menu.h, S075 F2-F).
+ *
+ * Begin swaps menu_activePage/menuIndex directly instead of calling
+ * menu_switchPage(): Effect service and LEDs remain alive while the normal
+ * VOICE screen resolves the selected track's mix cells. End restores the
+ * saved Effect position and applies service actions latched during the
+ * overlay.
+ */
+uint8_t menu_fxVoiceMixOverlayBegin(uint8_t track)
+{
+    uint8_t screen;
+
+    if (track >= NUM_TRACKS)
+        return 0u;
+    if ((menu_fxVoiceMixOverlay.flags & MENU_FX_OVERLAY_ACTIVE) == 0u) {
+        if (menu_activePage != EFFECT_PAGE)
+            return 0u;
+        menu_fxVoiceMixOverlay.flags = MENU_FX_OVERLAY_ACTIVE;
+        menu_fxVoiceMixOverlay.fx_menu_index = menuIndex;
+        menu_fxVoiceMixOverlay.fx_edit_mode = editModeActive;
+        menu_fxVoiceMixOverlay.mix_screen =
+            menu_voiceSubPageScreen[MENU_VOICE_MIX_SUBPAGE];
+    } else if (!menu_isVoicePage(menu_activePage)) {
+        return 0u;
+    }
+    lockPotentiometerFetch();
+    editModeActive = 0u;
+    menu_activePage = (uint8_t)(VOICE1_PAGE + track);
+    va_resetOverlay();
+    va_searchRestart();
+    pat_applyTrackSettingsToMenu(menu_shownPattern, track);
+    /* The first appended screen is the VOICE mix Scene-settings screen. */
+    screen = menu_voiceInstrumentScreenCount(MENU_VOICE_MIX_SUBPAGE);
+    menu_voiceSubPageScreen[MENU_VOICE_MIX_SUBPAGE] = screen;
+    menuIndex = (uint8_t)((MENU_VOICE_MIX_SUBPAGE << PAGE_SHIFT) |
+                          menu_voiceFirstSelectableColumn(
+                              MENU_VOICE_MIX_SUBPAGE, screen));
+    voiceModeShowMorph = (uint8_t)(buttonHandler_getShift() != 0u);
+    menu_endlessPotMappingChanged();
+    menu_repaintAll();
+    return 1u;
+}
+
+void menu_fxVoiceMixOverlayEnd(void)
+{
+    const uint8_t flags = menu_fxVoiceMixOverlay.flags;
+
+    if ((flags & MENU_FX_OVERLAY_ACTIVE) == 0u)
+        return;
+    menu_fxVoiceMixOverlay.flags = 0u;
+    lockPotentiometerFetch();
+    va_resetOverlay();
+    voiceModeShowMorph = 0u;
+    menu_voiceSubPageScreen[MENU_VOICE_MIX_SUBPAGE] =
+        menu_fxVoiceMixOverlay.mix_screen;
+    menu_activePage = EFFECT_PAGE;
+    menuIndex = menu_fxVoiceMixOverlay.fx_menu_index;
+    editModeActive = (flags & MENU_FX_OVERLAY_EXIT_EDIT)
+        ? 0u : menu_fxVoiceMixOverlay.fx_edit_mode;
+    va_searchRestart();
+    if (flags & MENU_FX_OVERLAY_REPAIR)
+        menu_resetActiveParameter();
+    menuEffects_setShowMorph(buttonHandler_getShift());
+    menu_endlessPotMappingChanged();
+    menu_repaintAll();
+}
+
+uint8_t menu_fxVoiceMixOverlayActive(void)
+{
+    return (uint8_t)(menu_fxVoiceMixOverlay.flags & MENU_FX_OVERLAY_ACTIVE);
 }
 
 void menu_showStepTrackSettingsFirstHalf(void)
@@ -11857,7 +14092,9 @@ void    menu_setShownPattern(uint8_t p)
      * Input: p is the viewed pattern index supplied by button/menu navigation.
      * Output: the UI Pattern index follows the resident Scene/Pattern slot when
      * valid, otherwise it falls back to Scene 0. A VOICE context change also
-     * invalidates the held-step/search view before repainting it.
+     * invalidates the held-step/search view before repainting it; on the
+     * Effect page (S074) the automation-presence search restarts and the
+     * page repaints.
      */
     {
         uint8_t next = pat_patternValid(p) ? p : 0u;
@@ -11869,6 +14106,18 @@ void    menu_setShownPattern(uint8_t p)
             va_searchRestart();
             led_updatePatternTrack(menu_activeVoice, menu_shownPattern,
                                    buttonHandler_selectedStep);
+            menu_repaint();
+        } else if (menu_activePage == EFFECT_PAGE) {
+            /*
+             * Effect page (S074): the Pattern-wide presence result belongs to
+             * the old Pattern. Restart at once so that no repaint before the
+             * next service pass shows its underlines, then repaint (FX-lock
+             * underlines are read live and stay correct). The Pattern check
+             * in va_scanService() is the backstop, and its completion
+             * repaints again. No Pattern LED update: the SEQ row belongs to
+             * the FX sequencer on this page.
+             */
+            va_searchRestart();
             menu_repaint();
         }
     }
@@ -11918,6 +14167,45 @@ void menu_setPlayedPattern(uint8_t patternNr)
 
 uint8_t menu_getViewedPattern(void) { return menu_shownPattern; }
 
+#if DEV_MODE_DIAGNOSTIC
+/*
+ * BC18 diagnostic check: the Scene-owned compressor page stays last.
+ *
+ * What: verifies the named page contains cmp first, has an empty second half,
+ * and has no populated settings page after it. Why: menu cues and SELECT
+ * traversal rely on the append-only placement rule. Output: silent success;
+ * on failure, a 1.5 s LCD notice before boot continues. Production compiles
+ * the check out. Affiliate: menuPages.h and MENU_GLOBAL_SCENE_SUBPAGE.
+ */
+static void menu_devCheckGlobalSceneSubPage(void)
+{
+    const Page *scene_page =
+        &menuPages[MENU_MIDI_PAGE][MENU_GLOBAL_SCENE_SUBPAGE];
+    uint8_t bad = (uint8_t)(scene_page->top1 != TEXT_BUS_COMP_MODE ||
+                            scene_page->top5 != TEXT_EMPTY);
+    uint8_t sub_page;
+    uint16_t t0;
+
+    for (sub_page = (uint8_t)(MENU_GLOBAL_SCENE_SUBPAGE + 1u);
+         sub_page < NUM_SUB_PAGES; sub_page++) {
+        if (menuPages[MENU_MIDI_PAGE][sub_page].top1 != TEXT_EMPTY)
+            bad = 1u;
+    }
+    if (!bad)
+        return;
+    lcd_clear();
+    lcd_setcursor(0, 1);
+    lcd_string("Menu: cmp page  ");
+    lcd_setcursor(0, 2);
+    lcd_string("not last (BC18) ");
+    lcd_waitForIdle();
+    t0 = time_sysTick;
+    while ((uint16_t)(time_sysTick - t0) < 1500u) {
+        /* diagnostic hold */
+    }
+}
+#endif
+
 /* -----------------------------------------------------------------------
 ** menu_init — exact port
 ** ----------------------------------------------------------------------- */
@@ -11947,7 +14235,7 @@ void menu_init(void)
     parameter_values[PAR_EUKLID_STEPS]  = 16;
     parameter_values[PAR_ROLL]          = 8;
     parameter_values[PAR_BPM]           = 120;
-    parameter_values[PAR_TRACK_SCALE]   = TRACK_SCALE_OFF;
+    parameter_values[PAR_TRACK_SCALE]   = TRACK_SCALE_DEFAULT;
     parameter_values[PAR_OSC_WAVE_INTERP] = 0;
     /*
      * Default AutoSave ON even when no settings file/card can be loaded.
@@ -11959,17 +14247,9 @@ void menu_init(void)
      * post-settings autosave policy application.
      */
     parameter_values[PAR_AUTOSAVE_ENABLED] = 1u;
-    /*
-     * Scene global sample-rate/decimation must default to full rate.
-     *
-     * SceneData also initializes voice_decimation_all to 127, but Menu's flat
-     * parameter mirror is memset to zero above and can be used by early global
-     * apply paths before a Scene settings apply has mirrored the retained
-     * value. A zero here shapes mixer_decimation_rate[6] to 0, so the decimator
-     * never refreshes voice samples and the unit presents as silent. Keep the
-     * mirror's undefined/startup value aligned with the Scene default.
-     */
-    parameter_values[PAR_VOICE_DECIMATION_ALL] = 127u;
+    /* S074 mirrors start at the Scene defaults until Scene apply runs. */
+    parameter_values[PAR_BUS_COMP_AMOUNT] = SCENE_BUS_COMP_DEFAULT_AMOUNT;
+    parameter_values[PAR_BUS_COMP_TIME] = SCENE_BUS_COMP_DEFAULT_TIME;
     /*
      * Wave interpolation is a sound-engine global that is applied immediately
      * at boot because there is no parser/global-apply pass between zeroed menu
@@ -11982,6 +14262,10 @@ void menu_init(void)
     // menu_switchPage(VOICE1_PAGE);
     menu_shownPattern = 0;
     menu_activeVoice = 0;
+#if DEV_MODE_DIAGNOSTIC
+    /* S074 BC18: verify the Scene-owned compressor page is still last. */
+    menu_devCheckGlobalSceneSubPage();
+#endif
     // lcd_clear();
     // led_setActiveVoice(0);
 

@@ -51,13 +51,14 @@ typedef uint8_t instrument_target_token_t;
  * LFO target namespace values stored in lfo_target_voice cells.
  *
  * Values 1..6 select instrument voices. Value 7 selects the Scene namespace
- * shown by Menu as `scn`; future values above the instrument voice range can
- * select effects or other target tables while lfo_target_param remains a local
- * byte token.
+ * shown by Menu as `scn`. Value 8 selects the active Scene's Effect namespace
+ * shown as `fx`; lfo_target_param is then an Effect-local byte token.
  */
 #define INSTRUMENT_TARGET_VOICE_FIRST 1u
 #define INSTRUMENT_TARGET_VOICE_LAST  INSTRUMENT_SLOT_COUNT
 #define INSTRUMENT_TARGET_VOICE_SCENE ((uint8_t)(INSTRUMENT_SLOT_COUNT + 1u))
+#define INSTRUMENT_TARGET_VOICE_EFFECT ((uint8_t)(INSTRUMENT_SLOT_COUNT + 2u))
+#define INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST INSTRUMENT_TARGET_VOICE_EFFECT
 
 typedef enum {
     INSTRUMENT_TYPE_DRM = 0,
@@ -107,10 +108,68 @@ typedef enum {
     INSTRUMENT_BIND_LFO_TARGET_PARAM_2
 } instrument_binding_kind_t;
 
+/*
+ * Descriptor special-writer tags (S073 Step 2).
+ *
+ * What:       names the fixed DSP setter associated with a descriptor row;
+ *             bits 5-6 select its oscillator where applicable.
+ * Why:        replaces repeated file_key string searches in the LFO, Morph,
+ *             velocity and Scene activation paths with a flash-stored tag.
+ * Inputs:     compile-time table constants.
+ * Outputs:    instrument_runtime_binding_t.special values.
+ * Accessors:  the four instrument parameter tables and the runtime writer.
+ * Affiliates: tools/dsp_test/check_special_tags.py and the diagnostic
+ *             self-check; Effect rows explicitly use IM_SPECIAL_NONE.
+ */
+typedef enum {
+    IM_SPECIAL_NONE = 0u,
+    IM_SPECIAL_NOISE_FREQ,
+    IM_SPECIAL_PITCH_COARSE,
+    IM_SPECIAL_PITCH_FINE,
+    IM_SPECIAL_FILTER_FREQ,
+    IM_SPECIAL_FILTER_RESO,
+    IM_SPECIAL_FILTER_DRIVE,
+    IM_SPECIAL_FILTER_TYPE,
+    IM_SPECIAL_AMP_ATTACK,
+    IM_SPECIAL_AMP_DECAY,
+    IM_SPECIAL_HAT_DECAY_CHOKE,
+    IM_SPECIAL_AMP_SLOPE,
+    IM_SPECIAL_PITCH_EG_DECAY,
+    IM_SPECIAL_PITCH_EG_SLOPE,
+    IM_SPECIAL_PITCH_EG_AMOUNT,
+    IM_SPECIAL_TRANSIENT_WAVE,
+    IM_SPECIAL_TRANSIENT_FREQ,
+    IM_SPECIAL_INSTRUMENT_DRIVE,
+    IM_SPECIAL_LFO_RATE,
+    IM_SPECIAL_WRITER_COUNT
+} instrument_special_writer_t;
+
+#define IM_SPECIAL_WRITER_MASK  0x1Fu
+#define IM_SPECIAL_OSC_MASK     0x60u
+#define IM_SPECIAL_OSC1         0x00u
+#define IM_SPECIAL_OSC2         0x20u
+#define IM_SPECIAL_OSC3         0x40u
+#define IM_SPECIAL_OSC_NOISE    0x60u
+_Static_assert(IM_SPECIAL_WRITER_COUNT <= (IM_SPECIAL_WRITER_MASK + 1u),
+               "special writer IDs must fit bits 0-4");
+
 typedef struct {
     instrument_binding_kind_t kind;
     uint16_t offset;
     uint8_t parameter_type;
+    /*
+     * Special DSP writer tag (S073 Step 2).
+     *
+     * What:       IM_SPECIAL_* writer ID | IM_SPECIAL_OSC_* selector, or 0
+     *             for generic offset writes.
+     * Why:        stores the fixed row-to-setter mapping once and avoids the
+     *             runtime key-string search.
+     * Inputs:     BIND_SPECIAL() in the instrument tables.
+     * Outputs:    read by instrumentManager_writeSpecialRuntime().
+     * Accessors:  InstrumentManager.c.
+     * Affiliates: the layout guards below and EffectParamRows.h.
+     */
+    uint8_t special;
 } instrument_runtime_binding_t;
 
 #define INSTRUMENT_PARAM_FLAG_MORPHABLE       0x01u
@@ -154,6 +213,23 @@ typedef struct {
     instrument_mod_domain_t mod_domain;
     instrument_runtime_binding_t runtime;
 } ParamDescriptor;
+
+/*
+ * Descriptor layout guards (S073 Step 2).
+ *
+ * What:       pins the binding and descriptor sizes so the new tag consumes
+ *             existing padding rather than growing every flash table.
+ * Why:        a silent table-size increase would invalidate the S0/flash
+ *             budget claim.
+ * Inputs:     compiler ABI layout.
+ * Outputs:    compile-time errors when the layout changes.
+ * Accessors:  the compiler.
+ * Affiliates: instrument_runtime_binding_t.special.
+ */
+_Static_assert(sizeof(instrument_runtime_binding_t) == 6u,
+               "instrument_runtime_binding_t must stay 6 bytes");
+_Static_assert(sizeof(ParamDescriptor) == 28u,
+               "ParamDescriptor must stay 28 bytes");
 
 #define INSTRUMENT_MENU_EMPTY 0xffu
 #define INSTRUMENT_MENU_SKIP  0xfeu
@@ -414,6 +490,16 @@ void instrumentManager_updateLfoAdapters(uint8_t source_slot,
                                          uint8_t polarity,
                                          float amount);
 /*
+ * Set/clear the generated slot-6 track-7 decay step overlay.
+ *
+ * Inputs: a seven-bit per-step decay value. Output: the alternate trigger
+ * path uses it without retaining Kit settings; clearing restores priority to
+ * any LFO overlay, then to the retained Kit value. Sequencer owns the call
+ * boundary and clears it at transport/Pattern restore.
+ */
+void instrumentManager_setSlot6Track7StepDecayOverride(uint8_t value);
+void instrumentManager_clearSlot6Track7StepDecayOverride(void);
+/*
  * Dynamic instrument runtime dispatcher.
  *
  * Inputs: logical slot/track numbers from SceneData, MIDI, mixer, and LFO
@@ -477,6 +563,25 @@ void instrumentManager_calcSlotAsync(uint8_t slot);
 void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
                                          uint8_t size);
 uint8_t instrumentManager_runtimePan(uint8_t slot);
+/*
+ * Read the current slot instrument's channel volume for the mixer.
+ *
+ * Inputs: zero-based render slot 0..5. Output: the tagged runtime member's
+ * vol field (0..1, descriptor instrument_vol / 127, including any live LFO,
+ * Morph, or step-automation value already written to it), or 0.0f for an
+ * unknown/empty slot type, which renders silence anyway.
+ *
+ * Why (Session 072, Effects Phase 5 step 2): the voice engines no longer
+ * apply volume; the mixer applies it after decimation so that the FX send can
+ * tap the decimated, pre-volume signal. Keeping the type switch here, beside
+ * instrumentManager_runtimePan(), preserves InstrumentManager as the only
+ * module that knows which engine struct occupies a slot.
+ *
+ * Clients: mixer.c mixer_init() and mixer_calcNextSampleBlock() (once per
+ * slot per 32-frame block). Foreground render context only. Affiliates:
+ * DrumVoice/SnareVoice/CymbalVoice/HiHatVoice vol members.
+ */
+float instrumentManager_runtimeVolume(uint8_t slot);
 void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
                                     uint8_t velocity);
 /*
@@ -505,8 +610,33 @@ void instrumentManager_visitRuntimeLfoNodes(
  * Instrument replacement because reset clears and reinitializes the slot.
  */
 void *instrumentManager_runtimeInstance(uint8_t slot);
+/*
+ * Apply one retained descriptor value to its runtime owner.
+ *
+ * Inputs: active Scene slot, descriptor registry entry, and descriptor-domain
+ * byte value. Output: the corresponding DSP/runtime owner is updated. For
+ * paired LFO target selectors, writing either the voice namespace or parameter
+ * token also reinstalls the pair from the current sibling cell; this clears
+ * stale Scene-target, decimation, or Morph contributions when the namespace
+ * changes without requiring a second UI edit. The caller must have stored the
+ * retained value in SceneData before invoking this active-runtime path.
+ * Clients: Preset supplemental apply, Menu edits, Kit/Scene activation, and
+ * bounded runtime automation.
+ */
 uint8_t instrumentManager_writeRuntime(uint8_t slot,
                                        const ParamDescriptor *descriptor,
                                        instrument_param_value_t value);
+
+/*
+ * Diagnostic proof of special-writer tags (S073 Step 2).
+ *
+ * What:       compares every descriptor tag with the original key classifier.
+ * Why:        proves the flash tags reproduce the pre-S073 writer mapping.
+ * Inputs:     the immutable instrument registry.
+ * Outputs:    mismatch count, clamped to 9; zero is pass.
+ * Accessors:  main.c's existing DEV_MODE_DIAGNOSTIC boot screen.
+ * Affiliates: check_special_tags.py and the tagged parameter tables.
+ */
+uint8_t instrumentManager_specialTagSelfCheck(void);
 
 #endif

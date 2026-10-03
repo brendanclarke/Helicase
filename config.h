@@ -219,6 +219,55 @@
  */
 #define DEV_LOGGING_IWDG_EXPIRE 120000u
 
+/*
+ * DEV_FXBUF_FORCE_VOICE_UNITS — screen-diagnostic test knob, default 0.
+ *
+ * What: when DEV_MODE_DIAGNOSTIC is 1, fxbuf_init() claims this many 4,416-
+ * byte voice units at boot (two per slot, slots 0..5 in order) so the Effect
+ * share can be exercised at its minimum size before any real voice buffer
+ * user exists. Values 0..12. Ignored entirely when DEV_MODE_DIAGNOSTIC is 0,
+ * so production can never lose arena to a stale test setting.
+ *
+ * Why: Phase 5 guarantees every Effect type works across the whole share
+ * range (full arena down to arena - 12 units). Until Phase 7 voice types
+ * allocate units, this is the only way to present the minimum share.
+ *
+ * Inputs: this constant. Outputs: fxbuf_unitsInUse()/fxbuf_effectShare()
+ * report the reduced share; the FxBf boot diagnostic shows it. Affiliates:
+ * Core/DSP/Effects/FxBuffer.c fxbuf_init(), main.c
+ * boot_showFxBufDiagnostic(), DEV_MODES.md. Units forced here are owned by
+ * the named slots; once Phase 7 voice buffer users exist, a nonzero value
+ * will collide with them — keep 0 outside deliberate share tests.
+ */
+#define DEV_FXBUF_FORCE_VOICE_UNITS 0u
+#if (DEV_FXBUF_FORCE_VOICE_UNITS > 12u)
+#error "DEV_FXBUF_FORCE_VOICE_UNITS must be 0..12 (FXBUF_VOICE_UNIT_COUNT)"
+#endif
+
+/*
+ * DEV_EFFECT_FORCE_TYPE — diagnostic boot type selector, default 0.
+ *
+ * When DEV_MODE_DIAGNOSTIC is enabled and this id is nonzero, main.c commits
+ * it through effects_changeType() immediately after normal boot Scene
+ * activation. Id 1 is StereoFilter (`flt`). Production builds ignore this
+ * hook. It exists so Steps 4–5 could exercise registry, AutoSave token, and
+ * DSP initialization before a user path existed. From Step 7 the Effect
+ * page's `typ` view is the normal path; the hook remains for bench diagnostics.
+ */
+#define DEV_EFFECT_FORCE_TYPE 0u
+
+/*
+ * ENABLE_EUKLID_PAGE — keep the retired Euklid/rotation UI compiled out.
+ *
+ * What: SHIFT+PERF (select mode 5) is the Effect page from Session 072 step 7.
+ * The Euklid generator page, its SHIFT paths, and the empty
+ * PATTERN_SETTINGS_PAGE/rotation entry are compiled out behind this switch;
+ * their source, page tables, and EuklidGenerator stay in the tree. Setting it
+ * to 1 is not supported without first giving Euklid another select mode,
+ * because mode 5 now belongs to SELECT_MODE_FX.
+ */
+#define ENABLE_EUKLID_PAGE 0
+
 //if 1 the amp EGs will be calculated on a per sample basis
 //takes too much calcuklation time
 //if 0 they are calculated for each dma buffer once, only a smoothing LP will be calculated in the sync loop
@@ -251,23 +300,80 @@
  * Affiliates: PatternData.c and sequencer.c.
  */
 #define PAT_STACK_SIZE           256u
+/*
+ * Permanent Pattern pool swap block (S075).
+ *
+ * What: the top 33 chunks (132 B, one maximum dynamic block) of every Scene
+ * pool are kept out of ordinary allocation. Why: a copy/clear paste can
+ * always place one maximum block even into a full pool (place via swap, free
+ * the old run, compact, return), and the block is reserved for future uses.
+ * Inputs: PAT_STACK_SIZE. Outputs: allocator bound (PAT_POOL_ALLOC_CHUNKS),
+ * swap byte offset, and the usage-percent denominator. Affiliates:
+ * PatternData.c pat_poolAlloc()/pat_raw*, PatternStackService.c bounds.
+ */
+#define PAT_POOL_SWAP_CHUNKS      33u
+#define PAT_POOL_SWAP_BYTES      (PAT_POOL_SWAP_CHUNKS * 4u)
+#define PAT_POOL_ALLOC_CHUNKS    ((uint16_t)(PAT_STACK_SIZE * 8u - PAT_POOL_SWAP_CHUNKS))
+#define PAT_POOL_SWAP_OFFSET     ((uint16_t)(PAT_POOL_ALLOC_CHUNKS * 4u))
 #define PAT_DEFAULT_NOTE          63u
 #define PAT_DEFAULT_VELOCITY     100u
 
 /*
  * Pattern stack service maintenance policy.
  *
- * What: gap reduction selects one trailing free chunk at or above sixty
- * percent logical occupancy; Tier 2 scans sixteen address entries per 500 Hz
- * pass and waits at least 100 ms between background passes. Why: foreground
- * edits and playback retain priority while fragmented free space is repaired
- * cooperatively. Inputs: compile-time service policy. Outputs: bounded
- * PatternStackService.c Tier 1/Tier 2 work. Affiliates: patSvc_tick().
+ * What: owned trailing-slack reservation with a latchable density level that
+ * scales with pool occupancy, plus reactive-only compaction triggered by a
+ * blocked allocation. Why: the former Tier 1/Tier 2 periodic relocation loop
+ * is replaced by a finite bounded repair epoch that sleeps when converged.
+ * Inputs: compile-time service policy. Outputs: bounded
+ * PatternStackService.c repair and reactive work. Affiliates: patSvc_tick(),
+ * patSvc_reactiveStep().
+ *
+ * PAT_COMPACT_SCAN_PER_TICK remains the reactive-recovery scan bound. The
+ * former elastic-gap and periodic-compaction thresholds are retired because
+ * repair now owns explicit trailing reservations and compaction is reactive.
+ * A future resize of PAT_STACK_SIZE beyond 256 changes PATSVC_POOL_CHUNKS and
+ * the backed/unbacked bitmap split. All new thresholds are expressed as
+ * percentages of PATSVC_POOL_CHUNKS, so they remain valid without
+ * re-architecture — only re-tuning. If this ever proves insufficient, add a
+ * comment here and a note to PATTERN_DYNAMIC_STACK.md §12.
  */
-#define PAT_GAP_REDUCE_THRESHOLD   60u
-#define PAT_COMPACT_INTERVAL_MS   100u
 #define PAT_COMPACT_SCAN_PER_TICK  16u
-#define PAT_COMPACT_FREE_RUN_THRESHOLD 8u
+
+/*
+ * Reservation-density policy thresholds (percent of PATSVC_POOL_CHUNKS).
+ *
+ * What: PAT_RESERVATION_REDUCE_THRESHOLD is the pool-occupancy percentage
+ * above which the repair pass stops creating new trailing-chunk reservations.
+ * PAT_RESERVATION_RESTORE_THRESHOLD is the percentage below which
+ * reservations are re-enabled after a reduction. The gap between the two
+ * provides hysteresis, preventing oscillation when occupancy hovers near a
+ * boundary. Why: at high occupancy the pool cannot afford to hold chunks out
+ * of general circulation; at low occupancy one reserved trailing chunk per
+ * block makes in-place growth nearly free. Inputs: compile-time percentage
+ * values. Outputs: PatternStackService.c density-latch transition decisions.
+ * Affiliates: patSvc_updateDensityLevel(), patSvc_tick() repair epoch. A
+ * future pool resize changes PATSVC_POOL_CHUNKS; these percentages remain
+ * valid because the service computes absolute chunk counts at runtime.
+ */
+#define PAT_RESERVATION_REDUCE_THRESHOLD   70u
+#define PAT_RESERVATION_RESTORE_THRESHOLD  50u
+
+/*
+ * Adaptive repair-tick budget bounds.
+ *
+ * What: PAT_REPAIR_SCAN_IDLE is the per-tick address-entry scan limit when no
+ * AutoSave work is pending. PAT_REPAIR_SCAN_BUSY is the reduced limit when
+ * AutoSave has pending semantic, non-semantic, or parameter dirty bits. Why:
+ * yielding foreground cycles to the filesystem facade under AutoSave pressure
+ * keeps file I/O responsive while still making bounded reservation progress.
+ * Inputs: compile-time address-entry limits. Outputs: bounded
+ * PatternStackService.c repair scans. Affiliates: patSvc_repairBudget(),
+ * autosave_maskHasDirty(), autosave_patternDirtyMask(), and
+ * autosave_nonSemanticPatternDirtyMask().
+ */
+#define PAT_REPAIR_SCAN_IDLE   16u
+#define PAT_REPAIR_SCAN_BUSY    4u
 
 
 #define EG_SPEED 	1;//0.04125f
@@ -306,23 +412,26 @@
 #define SYSTICK_TICKS_PER_MS (SYSTICK_HZ / 1000)
 
 /* -----------------------------------------------------------------------
-** VOICE overlay and UI hold-gesture timing.
+** VOICE overlay, Effect-page underline, and UI hold-gesture timing.
 **
 ** What: three tunable constants governing the VOICE-page held-step
-** automation overlay (S066). BUTTON_HOLD_DELAY_MS is the common short
+** automation overlay (S066) and the automation-presence search shared by the
+** VOICE and Effect pages (S074). BUTTON_HOLD_DELAY_MS is the common short
 ** long-press threshold shared by every UI gesture that distinguishes a hold
 ** from a tap; the current default is 200 ms. VOICE_AUTOMATION_UNDERLINE_QUIET_MS
-** is the quiet period before
-** reapplying a value underline after a rapid pot edit. The scan budget bounds
-** the asynchronous Pattern search to four steps per foreground pass.
+** is the quiet period before reapplying a value underline after a rapid pot
+** edit. VOICE_AUTOMATION_SCAN_STEPS_PER_PASS bounds the asynchronous Pattern
+** search to four step reads per foreground pass on both pages: a VOICE page
+** reads its one track (128 steps, 32 passes); the Effect page reads all
+** seven tracks of the viewed Pattern (896 steps, 224 passes).
 **
 ** Why: timing belongs in config.h so one clean rebuild applies the same
 ** thresholds to every UI path. The search budget also keeps the worst case at
-** 4 * 63 = 252 automation-entry comparisons per pass.
+** 4 * 63 = 252 automation-entry comparisons per pass on either page.
 **
 ** Inputs: none (compile-time constants). Outputs: buttonHandler and Menu UI
-** timing/search policy. Affiliates: time_sysTick, buttonHandler_tick(), and
-** menu_serviceRuntimeWidgets().
+** timing/search policy. Affiliates: time_sysTick, buttonHandler_tick(),
+** va_scanService(), and menu_serviceRuntimeWidgets().
 ** ----------------------------------------------------------------------- */
 #define BUTTON_HOLD_DELAY_MS                 200u
 #define VOICE_AUTOMATION_UNDERLINE_QUIET_MS  100u
@@ -424,6 +533,41 @@
  * debounce or durability policy, and applies solely when DEV_MODE_LOGGING is 1.
  */
 #define AUTOSAVE_TRACE_FLUSH_INTERVAL_MS 500u
+
+/*
+ * Pattern AutoSave semantic-drain timing.
+ *
+ * What: QUIET_WINDOW_MS is the required silence after the latest semantic
+ * Pattern mutation before a snapshot is admitted; MAX_LATENCY_MS is the hard
+ * ceiling from the first observed dirty-mask transition. Why: rapid editing
+ * bursts should coalesce into one PAT4 generation, while sustained editing
+ * must still converge. Inputs: Autosave.c's TIM2 mutation stamp and
+ * filesystem.c's first-dirty stamp. Outputs: semantic Pattern scheduling
+ * only; non-semantic relocation drains remain independent. These constants
+ * consume no RAM and do not alter PAT4 geometry.
+ */
+#define AUTOSAVE_PATTERN_QUIET_WINDOW_MS  250u
+#define AUTOSAVE_PATTERN_MAX_LATENCY_MS  5000u
+
+/*
+ * Background CPU budget for AutoSave drain and Pattern repair work.
+ *
+ * What: BACKGROUND_CPU_BUDGET_US_PER_MS_PLAYING is the microseconds of
+ * background work allowed per millisecond of wall time while the sequencer
+ * transport is running (2.5% CPU). BACKGROUND_CPU_BUDGET_US_PER_MS_STOPPED
+ * is the allowance while stopped (5% CPU). Zero disables the budget
+ * (unlimited -- debugging only).
+ *
+ * Why: bounds aggregate background CPU so audio processing, sequencer timing,
+ * and UI responsiveness are not impacted by AutoSave or Pattern maintenance.
+ * Inputs: compile-time microsecond-per-millisecond rates. Outputs:
+ * filesystem_backgroundBudgetAvailable() admission and
+ * filesystem_backgroundBudgetCharge() accounting. Affiliates: filesystem.c
+ * budget state/refill/drain gates, PatternStackService.c repair gating, and
+ * seq_isRunning(). These constants consume no RAM.
+ */
+#define BACKGROUND_CPU_BUDGET_US_PER_MS_PLAYING  25u
+#define BACKGROUND_CPU_BUDGET_US_PER_MS_STOPPED  50u
 
 /*
  * Session-065 pending automation handoff and PatternTrace geometry.

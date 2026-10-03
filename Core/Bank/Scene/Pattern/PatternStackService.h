@@ -25,11 +25,19 @@ void patSvc_init(void);
 /*
  * Advance one bounded 500 Hz service pass.
  *
- * What: handles target handover, deferred queue events, bulk barriers, Tier 1
- * gap maintenance, and paced Tier 2 compaction. Why: no pool scan, copy, or
- * relocation is allowed in TIM3 context. Inputs: live service state and
- * seq_activePattern. Output: at most one queue/relocation transaction per
- * foreground pass, with bounded bulk/scan work.
+ * What: handles target handover, deferred queue events, bulk barriers,
+ * reactive recovery, and a finite bounded repair epoch with owned
+ * trailing-slack reservations. Why: no pool scan, copy, or relocation is
+ * allowed in TIM3 context. Inputs: live service state and seq_activePattern.
+ * Output: at most one queue/relocation transaction per foreground pass, with
+ * bounded bulk/repair scan work. Logical occupancy is reconciled at mutation
+ * and lifecycle boundaries and cached through clean idle ticks, so this pass
+ * does not rescan the unchanged 256-byte backed bitmap. The repair section is
+ * suppressed on LOAD_PAGE/SAVE_PAGE and gated by the shared elapsed-time
+ * filesystem background budget; both gates preserve its cursor. Queue drain
+ * and handover remain active for lifecycle correctness. Affiliate:
+ * PatternData.c's direct bitmap authority, patSvc_updateDensityLevel(), and
+ * filesystem.h's budget API.
  */
 void patSvc_tick(void);
 
@@ -68,6 +76,42 @@ uint8_t patSvc_prepareSceneReplace(uint8_t scene);
 void patSvc_finishSceneReplace(uint8_t scene);
 
 /*
+ * Exclusive Pattern access for copy/clear (S075, spec §9.4).
+ *
+ * What: grants one caller sole write access to one Scene's Pattern region
+ * (address array, pool, bitmap, track settings) between begin and end, on any
+ * resident Scene. While the claim exists no queued edit, barrier, repair or
+ * reactive step touches any pool, and playback handover does not reopen
+ * admission or adopt the claimed Scene. Inputs: a resident Scene. Outputs:
+ * begin returns 1 when the caller may write and 0 while queued work still
+ * drains (call again next tick) or a filesystem replacement / other claim is
+ * pending; a caller that gives up still calls end. End recounts occupancy,
+ * restarts the repair epoch and reopens admission or resumes the handover.
+ * The raw block API in PatternData.h is legal only inside this window.
+ * Clients: copyClearService.c.
+ */
+uint8_t patSvc_beginExclusive(uint8_t scene);
+void patSvc_endExclusive(uint8_t scene);
+
+/*
+ * Bounded pool maintenance for the exclusive holder (S075).
+ *
+ * patSvc_exclusiveCompactStep(): one sliding-compaction move per call (the
+ * block just above the lowest free chunk moves down, through the empty swap
+ * block when the runs overlap). Output: 1 moved, 0 already packed or cannot
+ * move. Repeated calls make all free space one run below the swap block.
+ *
+ * patSvc_exclusiveEvacuateSwapStep(): moves one pre-S075 block that overlaps
+ * the swap block below it, or clears orphan swap bits. Output: 1 moved, 0 swap
+ * block empty, 2 cannot move (caller drops the job).
+ *
+ * Both require the caller's claim on `scene`; every move keeps publication
+ * order and marks only the layout-only (non-semantic) AutoSave state dirty.
+ */
+uint8_t patSvc_exclusiveCompactStep(uint8_t scene);
+uint8_t patSvc_exclusiveEvacuateSwapStep(uint8_t scene);
+
+/*
  * Foreground dynamic-pool mutation entrypoints.
  *
  * Each function rejects a non-service Scene or closed admission, executes
@@ -75,6 +119,8 @@ void patSvc_finishSceneReplace(uint8_t scene);
  * FIFO event. A queued foreground mutation returns optimistic acceptance;
  * execution-time allocation failure is traced and dropped by patSvc_tick().
  * These declarations are the only mutation calls Menu and generators use.
+ * `PAT_AUTOMATION_TARGET_OFF` is accepted by the write path as the persistent
+ * Pattern representation of Menu's off state; it is never a runtime target.
  */
 uint8_t patSvc_writeStepAutomation(uint8_t scene, uint8_t track,
                                    uint8_t step, uint16_t target,
@@ -102,5 +148,19 @@ uint8_t patSvc_removeTrackAutomationByTarget(uint8_t scene, uint8_t track,
  * admission or a traced drop when handover/overflow closes the path.
  */
 void patSvc_enqueueErase(uint8_t scene, uint8_t track, uint8_t step);
+
+/*
+ * Query and consume one chunk's service-owned trailing reservation.
+ *
+ * What: patSvc_isChunkReserved() reports whether a backed pool chunk is
+ * reserved as trailing slack; patSvc_consumeReservation() clears that bit.
+ * Why: PatternData.c's Gate-6 in-place automation append must consume its own
+ * reserved trailing chunk without reaching into service statics. Inputs: a
+ * chunk index bounded by the service pool geometry. Outputs: a reservation
+ * query or a cleared reservation bit. The caller sets the occupancy bitmap in
+ * the same transaction as consumption. Affiliate: pat_tryAppendAutomation().
+ */
+uint8_t patSvc_isChunkReserved(uint16_t chunk);
+void patSvc_consumeReservation(uint16_t chunk);
 
 #endif /* PATTERN_STACK_SERVICE_H_ */

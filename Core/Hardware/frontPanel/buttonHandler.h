@@ -18,7 +18,8 @@
 #define SELECT_MODE_PERF        0x01
 #define SELECT_MODE_STEP        0x02
 #define SELECT_MODE_LOAD_SAVE   0x03
-#define SELECT_MODE_PAT_GEN     0x05
+/* SHIFT+PERF selects the Effect page; the retired Euklid mode is compiled out. */
+#define SELECT_MODE_FX          0x05
 #define SELECT_MODE_SOM_GEN     0x06
 #define SELECT_MODE_MENU        0x07
 
@@ -94,6 +95,17 @@ uint16_t buttonHandler_seqHeldMask(void);
  * absolute steps. Inputs: zero-based SEQ button index. Output: absolute step.
  */
 uint8_t buttonHandler_visibleStep(uint8_t seqButtonPressed);
+
+/*
+ * Expose physical-row decoding to the held-COPY session.
+ *
+ * Inputs: raw button number. Outputs: zero-based row index or -1 when the
+ * button is outside that family. The mappings remain owned by ButtonHandler
+ * so Copy/Clear cannot drift from normal front-panel routing.
+ */
+int8_t buttonHandler_seqIndex(uint8_t buttonNr);
+int8_t buttonHandler_selectIndex(uint8_t buttonNr);
+int8_t buttonHandler_voiceIndex(uint8_t buttonNr);
 
 uint8_t buttonHandler_getMode(void);
 uint8_t buttonHandler_getShift(void);

@@ -34,12 +34,19 @@ const uint8_t cymbal_instrument_type_flags = CYMBAL_INSTRUMENT_TYPE_FLAGS;
      INSTRUMENT_PARAM_FLAG_AUTOMATABLE)
 
 /*
- * BIND stores the CymbalVoice byte offset and scalar type used by the generic
- * runtime writer. Some parameters still need extra DSP setters; those are
- * recognized later by InstrumentManager using descriptor->file_key.
+ * Runtime binding with an optional special-writer tag (S073 Step 2).
+ *
+ * What:       BIND_SPECIAL stores the CymbalVoice offset, scalar type and
+ *             fixed DSP setter tag; BIND keeps the generic tag-zero meaning.
+ * Why:        the runtime writer no longer searches file_key strings per write.
+ * Inputs:     member path, scalar type and optional IM_SPECIAL_* tag.
+ * Outputs:    one instrument_runtime_binding_t initializer.
+ * Accessors:  ROW_SPECIAL()/ROW_MENU_SPECIAL() below.
+ * Affiliates: InstrumentManager.h and check_special_tags.py.
  */
-#define BIND(member_, type_) \
-    { INSTRUMENT_BIND_INSTANCE_OFFSET, (uint16_t)offsetof(CymbalVoice, member_), type_ }
+#define BIND_SPECIAL(member_, type_, special_) \
+    { INSTRUMENT_BIND_INSTANCE_OFFSET, (uint16_t)offsetof(CymbalVoice, member_), type_, special_ }
+#define BIND(member_, type_) BIND_SPECIAL(member_, type_, IM_SPECIAL_NONE)
 
 #define MOD_NONE \
     { 0u, 0u, INSTRUMENT_MOD_DOMAIN_NONE }
@@ -64,12 +71,20 @@ const uint8_t cymbal_instrument_type_flags = CYMBAL_INSTRUMENT_TYPE_FLAGS;
 #define ROW(key_, cat_, long_, short_, dtype_, mod_, member_, type_) \
     { key_, short_, long_, cat_, dtype_, FLAGS_IMAGE, mod_, BIND(member_, type_) }
 
+/* ROW_SPECIAL is ROW with a constant DSP writer tag (S073 Step 2). */
+#define ROW_SPECIAL(key_, cat_, long_, short_, dtype_, mod_, member_, type_, special_) \
+    { key_, short_, long_, cat_, dtype_, FLAGS_IMAGE, mod_, BIND_SPECIAL(member_, type_, special_) }
+
 /*
  * ROW_MENU is a ROW variant for parameters whose dtype encodes a named menu
  * table, such as waveform, filter type, or LFO sync rate.
  */
 #define ROW_MENU(key_, cat_, long_, short_, menu_, mod_, member_, type_) \
     { key_, short_, long_, cat_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), FLAGS_IMAGE, mod_, BIND(member_, type_) }
+
+/* ROW_MENU_SPECIAL is ROW_MENU with a constant DSP writer tag (S073 Step 2). */
+#define ROW_MENU_SPECIAL(key_, cat_, long_, short_, menu_, mod_, member_, type_, special_) \
+    { key_, short_, long_, cat_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), FLAGS_IMAGE, mod_, BIND_SPECIAL(member_, type_, special_) }
 
 /*
  * ROW_NOBIND is for descriptor-owned cells that do not write a CymbalVoice
@@ -78,7 +93,7 @@ const uint8_t cymbal_instrument_type_flags = CYMBAL_INSTRUMENT_TYPE_FLAGS;
  * than FLAGS_IMAGE.
  */
 #define ROW_NOBIND(key_, cat_, long_, short_, dtype_, bind_kind_) \
-    { key_, short_, long_, cat_, dtype_, 0u, MOD_NONE, { bind_kind_, 0u, 0u } }
+    { key_, short_, long_, cat_, dtype_, 0u, MOD_NONE, { bind_kind_, 0u, 0u, IM_SPECIAL_NONE } }
 
 /*
  * ROW_NOBIND_IMAGE is for image parameters whose runtime destination is not a
@@ -86,7 +101,7 @@ const uint8_t cymbal_instrument_type_flags = CYMBAL_INSTRUMENT_TYPE_FLAGS;
  * target, and is applied through the supplied binding kind.
  */
 #define ROW_NOBIND_IMAGE(key_, cat_, long_, short_, dtype_, mod_, bind_kind_) \
-    { key_, short_, long_, cat_, dtype_, FLAGS_IMAGE, mod_, { bind_kind_, 0u, 0u } }
+    { key_, short_, long_, cat_, dtype_, FLAGS_IMAGE, mod_, { bind_kind_, 0u, 0u, IM_SPECIAL_NONE } }
 
 /*
  * Slot decimation is intentionally an image parameter, not a Scene target.
@@ -168,25 +183,25 @@ _Static_assert(CYMBAL_PARAM_DESCRIPTOR_COUNT == CYMBAL_PARAM_COUNT,
  */
 const ParamDescriptor cymbal_param_descriptors[] = {
     ROW_MENU("osc1_wave", "Oscilltr", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8),
-    ROW("osc1_pitch_coarse", "Oscilltr", "Coarse", "coa", DTYPE_0B127, MOD_0_127, osc.modNodeValue, TYPE_SPECIAL_F),
-    ROW("osc1_pitch_fine", "Oscilltr", "Fine", "fin", DTYPE_PM63, MOD_PM63, osc.modNodeValue, TYPE_SPECIAL_F),
+    ROW_SPECIAL("osc1_pitch_coarse", "Oscilltr", "Coarse", "coa", DTYPE_0B127, MOD_0_127, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC1),
+    ROW_SPECIAL("osc1_pitch_fine", "Oscilltr", "Fine", "fin", DTYPE_PM63, MOD_PM63, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_FINE | IM_SPECIAL_OSC1),
     ROW_MENU("osc2_wave", "Mod Osc", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, modOsc.waveform, TYPE_UINT8),
-    ROW("osc2_pitch_coarse", "Mod Osc", "Freqcy 1", "f1", DTYPE_0B127, MOD_0_127, modOsc.modNodeValue, TYPE_SPECIAL_F),
+    ROW_SPECIAL("osc2_pitch_coarse", "Mod Osc", "Freqcy 1", "f1", DTYPE_0B127, MOD_0_127, modOsc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC2),
     ROW("osc2_mod_amount", "Mod Osc", "Gain 1", "g1", DTYPE_0B127, MOD_0_127, fmModAmount1, TYPE_FLT),
     ROW_MENU("osc3_wave", "Mod Osc", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, modOsc2.waveform, TYPE_UINT8),
-    ROW("osc3_pitch_coarse", "Mod Osc", "Freqcy 2", "f2", DTYPE_0B127, MOD_0_127, modOsc2.modNodeValue, TYPE_SPECIAL_F),
+    ROW_SPECIAL("osc3_pitch_coarse", "Mod Osc", "Freqcy 2", "f2", DTYPE_0B127, MOD_0_127, modOsc2.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC3),
     ROW("osc3_mod_amount", "Mod Osc", "Gain 2", "g2", DTYPE_0B127, MOD_0_127, fmModAmount2, TYPE_FLT),
-    ROW("filter_freq", "Filter", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, filter.f, TYPE_FLT),
-    ROW("filter_reso", "Filter", "Resnance", "res", DTYPE_0B127, MOD_0_127, filter.q, TYPE_FLT),
-    ROW("filter_drive", "Filter", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, filter.drive, TYPE_FLT),
-    ROW_MENU("filter_type", "Filter", "Type", "typ", MENU_FILTER, MOD_NONE, filterType, TYPE_UINT8),
-    ROW("amp_envelope_attack", "Veloc EG", "Attack", "atk", DTYPE_0B127, MOD_0_127, oscVolEg.attack, TYPE_FLT),
-    ROW("amp_envelope_decay", "Veloc EG", "Decay", "dec", DTYPE_0B127, MOD_0_127, oscVolEg.decay, TYPE_FLT),
-    ROW("amp_envelope_slope", "Veloc EG", "Slope", "slp", DTYPE_0B127, MOD_0_127, oscVolEg.slope, TYPE_FLT),
+    ROW_SPECIAL("filter_freq", "Filter", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, filter.f, TYPE_FLT, IM_SPECIAL_FILTER_FREQ),
+    ROW_SPECIAL("filter_reso", "Filter", "Resnance", "res", DTYPE_0B127, MOD_0_127, filter.q, TYPE_FLT, IM_SPECIAL_FILTER_RESO),
+    ROW_SPECIAL("filter_drive", "Filter", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, filter.drive, TYPE_FLT, IM_SPECIAL_FILTER_DRIVE),
+    ROW_MENU_SPECIAL("filter_type", "Filter", "Type", "typ", MENU_FILTER, MOD_NONE, filterType, TYPE_UINT8, IM_SPECIAL_FILTER_TYPE),
+    ROW_SPECIAL("amp_envelope_attack", "Veloc EG", "Attack", "atk", DTYPE_0B127, MOD_0_127, oscVolEg.attack, TYPE_FLT, IM_SPECIAL_AMP_ATTACK),
+    ROW_SPECIAL("amp_envelope_decay", "Veloc EG", "Decay", "dec", DTYPE_0B127, MOD_0_127, oscVolEg.decay, TYPE_FLT, IM_SPECIAL_AMP_DECAY),
+    ROW_SPECIAL("amp_envelope_slope", "Veloc EG", "Slope", "slp", DTYPE_0B127, MOD_0_127, oscVolEg.slope, TYPE_FLT, IM_SPECIAL_AMP_SLOPE),
     ROW("amp_attack_repeat", "Veloc EG", "RepeatCt", "rpt", DTYPE_0B127, MOD_NONE, oscVolEg.repeat, TYPE_UINT8),
     ROW("instrument_vol", "Voice", "Volume", "vol", DTYPE_0B127, MOD_0_127, vol, TYPE_FLT),
     ROW("instrument_pan", "Voice", "Panning", "pan", DTYPE_PM63, MOD_PM63, pan, TYPE_UINT8),
-    ROW("instrument_drive", "Voice", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, distortion.shape, TYPE_FLT),
+    ROW_SPECIAL("instrument_drive", "Voice", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, distortion.shape, TYPE_FLT, IM_SPECIAL_INSTRUMENT_DRIVE),
     ROW_SLOT_DECIMATION("instrument_decimation", "Voice", "SampleRt", "srt", DTYPE_0B127),
     /*
      * LFO runtime rows.
@@ -197,7 +212,7 @@ const ParamDescriptor cymbal_param_descriptors[] = {
      * Pair 1 keeps the original file keys; pair 2 adds new save/load-ready
      * keys without changing the Kit folder hierarchy.
      */
-    ROW("lfo_rate", "LFO", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, lfo.modNodeValue, TYPE_SPECIAL_F),
+    ROW_SPECIAL("lfo_rate", "LFO", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, lfo.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_LFO_RATE),
     ROW("lfo_amount", "LFO", "Amount", "am1", DTYPE_0B127, MOD_0_127, lfo.modTarget.amount, TYPE_FLT),
     ROW("lfo_amount_2", "LFO", "Amount 2", "am2", DTYPE_0B127, MOD_0_127, lfo.modTarget2.amount, TYPE_FLT),
     ROW_MENU("lfo_wave", "LFO", "Waveform", "wav", MENU_LFO_WAVES, MOD_NONE, lfo.waveform, TYPE_UINT8),
@@ -212,9 +227,9 @@ const ParamDescriptor cymbal_param_descriptors[] = {
     ROW_NOBIND("lfo_target_param", "LFO", "DstParam", "ds1", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM),
     ROW_NOBIND("lfo_target_voice_2", "LFO", "DstVoice2", "vo2", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE_2),
     ROW_NOBIND("lfo_target_param_2", "LFO", "DstParam2", "ds2", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM_2),
-    ROW_MENU("transient_wave", "Transnt", "Waveform", "wav", MENU_TRANS, MOD_NONE, transGen.waveform, TYPE_UINT8),
+    ROW_MENU_SPECIAL("transient_wave", "Transnt", "Waveform", "wav", MENU_TRANS, MOD_NONE, transGen.waveform, TYPE_UINT8, IM_SPECIAL_TRANSIENT_WAVE),
     ROW("transient_vol", "Transnt", "Volume", "vol", DTYPE_0B127, MOD_0_127, transGen.volume, TYPE_FLT),
-    ROW("transient_freq", "Transnt", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, transGen.pitch, TYPE_FLT),
+    ROW_SPECIAL("transient_freq", "Transnt", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, transGen.pitch, TYPE_FLT, IM_SPECIAL_TRANSIENT_FREQ),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */

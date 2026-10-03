@@ -18,6 +18,14 @@
  */
 #include "menu.h"
 
+/*
+ * PatternData's allocator and Gate-6 append path consult the service-owned
+ * trailing-slack image without taking ownership of that image. Inputs/outputs:
+ * declaration visibility only; PatternStackService.c remains the reservation
+ * owner. Affiliate: pat_poolAlloc() and pat_tryAppendAutomation().
+ */
+#include "PatternStackService.h"
+
 #include <string.h>
 
 /*
@@ -29,7 +37,7 @@
  * 112-byte bridge bitmap to disappear without embedding a much larger payload
  * in every Scene record. Inputs: NUM_TRACKS, NUM_STEPS, and PAT_STACK_SIZE.
  * Outputs: one fixed region that pat_* functions index by Scene. Affiliates:
- * pat_initScene(), the Session-062 C allocator, and SRAM_MANIFEST.md.
+ * pat_initScene(), the Session-062 C allocator, and STORAGE_SRAM_MANIFEST.md.
  */
 _Static_assert(PAT_STACK_SIZE > 0u && PAT_STACK_SIZE <= 512u,
                "PAT_STACK_SIZE must fit the 14-bit pool bitmap");
@@ -74,23 +82,6 @@ static void pat_markSceneDirty(uint8_t scene_index)
 {
     bank_invalidateSdCleanScene(scene_index);
     autosave_markPatternDirty(scene_index);
-}
-
-/*
- * Mark a service-owned relocation through PatternData's established dirty
- * boundary.
- *
- * What: keep card-clean invalidation and Pattern AutoSave ownership in this
- * module while allowing PatternStackService.c to publish a completed pool
- * relocation. Why: the service may mutate address offsets/bitmap runs, but it
- * must not duplicate the two existing dirty-register calls. Inputs: a
- * resident Scene index; invalid indices are ignored. Affiliate: the Tier 1/2
- * relocation executor.
- */
-void pat_markPoolMutationDirty(uint8_t scene_index)
-{
-    if (scene_indexValid(scene_index))
-        pat_markSceneDirty(scene_index);
 }
 
 /*
@@ -147,7 +138,8 @@ uint8_t pat_poolUsagePercent(uint8_t scene_index)
         memcpy(&word, &region->bitmap[i * 4u], sizeof(word));
         used += (uint32_t)__builtin_popcount(word);
     }
-    used = (used * 100u) / (PAT_STACK_SIZE * 8u);
+    /* S075: report occupancy against the allocatable pool (reserve excluded). */
+    used = (used * 100u) / PAT_POOL_ALLOC_CHUNKS;
     return used > 99u ? 99u : (uint8_t)used;
 }
 
@@ -231,15 +223,30 @@ static uint8_t pat_poolOffsetValid(uint16_t byte_offset)
  * Allocate a contiguous first-fit run of dynamic-pool chunks.
  *
  * What: scan the free bitmap from chunk zero and reserve `chunks` adjacent
- * four-byte units. Why: menu-paced special edits need a bounded synchronous
- * allocator; defragmentation and relocation are deferred. Inputs: Scene region
- * and a nonzero chunk count. Output: byte offset on success or
- * PAT_ADDR_SENTINEL when the pool has no suitable run. Affiliates:
- * pat_poolFree(), pat_writeSpecials(), and pat_blockChunks().
+ * four-byte units, treating service-owned trailing reservations as unavailable
+ * to new blocks. Why: menu-paced special edits need a bounded synchronous
+ * allocator; defragmentation and relocation are deferred, while reserved slack
+ * remains available to its in-place Gate-6 owner. Inputs: Scene region and a
+ * nonzero chunk count. Output: byte offset on success or PAT_ADDR_SENTINEL
+ * when the pool has no suitable unreserved run. Affiliates: pat_poolFree(),
+ * pat_writeSpecials(), and pat_blockChunks().
  */
 static uint16_t pat_poolAlloc(pat_scene_region_t *r, uint8_t chunks)
 {
-    uint16_t max_chunk = (uint16_t)(PAT_STACK_SIZE * 8u);
+    /*
+     * Keep the permanent swap block out of ordinary allocation (S075).
+     *
+     * What: first-fit search stops at PAT_POOL_ALLOC_CHUNKS, so the top
+     * PAT_POOL_SWAP_CHUNKS chunks (one maximum 132 B block) are never handed
+     * to menu edits, service work, or load. Why: a copy/clear paste can then
+     * always place one maximum block even in a full pool, and the reserve is
+     * kept for future uses. A block already living in the reserve (placed by
+     * pat_rawPlaceViaSwap()) stays readable and is released normally by
+     * pat_poolFree(). Inputs: requested chunk count. Output: an offset below
+     * PAT_POOL_SWAP_OFFSET or PAT_ADDR_SENTINEL. Affiliates: config.h swap
+     * constants, pat_rawPlaceViaSwap(), pat_rawSwapReturn().
+     */
+    uint16_t max_chunk = (uint16_t)PAT_POOL_ALLOC_CHUNKS;
     uint16_t start;
     uint16_t run;
     uint16_t i;
@@ -251,7 +258,7 @@ static uint16_t pat_poolAlloc(pat_scene_region_t *r, uint8_t chunks)
     while ((uint32_t)start + chunks <= max_chunk) {
         run = 0u;
         for (i = start; i < (uint16_t)(start + chunks); i++) {
-            if (pat_bitmapGet(r, i)) {
+            if (pat_bitmapGet(r, i) || patSvc_isChunkReserved(i)) {
                 start = (uint16_t)(i + 1u);
                 run = 0u;
                 break;
@@ -270,13 +277,13 @@ static uint16_t pat_poolAlloc(pat_scene_region_t *r, uint8_t chunks)
 /*
  * Release a previously allocated dynamic-pool block.
  *
- * What: clear the block's bitmap run and zero its bytes. Why: erase, clear,
- * and specials reallocation must reclaim storage and prevent stale values from
- * appearing in a later allocation. Inputs: region, original aligned byte
- * offset, and original chunk count. Output: the allocation is free; malformed
- * offsets/runs are ignored. The caller updates its address entry separately.
- * Affiliates: pat_poolAlloc(), pat_eraseStep(), pat_clearTrack(), and
- * pat_writeSpecials().
+ * What: clear the block's bitmap run and zero its bytes, also releasing the
+ * former positional trailing reservation. Why: erase, clear, replacement, and
+ * reallocation must reclaim storage without leaving a stale soft claim in the
+ * service image. Inputs: region, original aligned byte offset, and original
+ * chunk count. Output: the allocation is free; malformed offsets/runs are
+ * ignored. The caller updates its address entry separately. Affiliates:
+ * pat_poolAlloc(), pat_eraseStep(), pat_clearTrack(), and pat_writeSpecials().
  */
 static void pat_poolFree(pat_scene_region_t *r, uint16_t byte_offset,
                          uint8_t chunks)
@@ -293,6 +300,8 @@ static void pat_poolFree(pat_scene_region_t *r, uint16_t byte_offset,
     for (i = base_chunk; i < (uint16_t)(base_chunk + chunks); i++)
         pat_bitmapClear(r, i);
     memset(&r->pool[byte_offset], 0, (size_t)chunks * 4u);
+    if ((uint32_t)base_chunk + chunks < max_chunk)
+        patSvc_consumeReservation((uint16_t)(base_chunk + chunks));
 }
 
 /*
@@ -479,12 +488,14 @@ static uint8_t pat_blockReadAutomations(const pat_scene_region_t *r,
  *
  * What: grow an unchanged-flags block in place only when the new operation is
  * exactly one appended automation and the extra logical chunks are adjacent
- * and free. The new entry is written before the header count is updated.
- * Why: this is the safe Gate-6 growth optimization; existing block bytes are
- * never cleared or rewritten while TIM3 can read them. Inputs: the old block,
- * the complete requested automation list, and its new chunk count. Output:
- * nonzero on an in-place append; zero leaves the block untouched so the normal
- * disjoint write-new/swap/free-old path can run. Affiliate: pat_writeDynamic().
+ * and free. A reserved trailing chunk is accepted here because positional
+ * ownership makes it this block's own slack; new allocations reject it. The
+ * new entry is written before the header count is updated. Why: this is the
+ * safe Gate-6 growth optimization; existing block bytes are never cleared or
+ * rewritten while TIM3 can read them. Inputs: the old block, the complete
+ * requested automation list, and its new chunk count. Output: nonzero on an
+ * in-place append; zero leaves the block untouched so the normal disjoint
+ * write-new/swap/free-old path can run. Affiliate: pat_writeDynamic().
  */
 static uint8_t pat_tryAppendAutomation(pat_scene_region_t *r,
                                        uint16_t old_offset,
@@ -510,6 +521,12 @@ static uint8_t pat_tryAppendAutomation(pat_scene_region_t *r,
         value_count++;
     if (old_flags & PAT_SPECIAL_PROB_BIT)
         value_count++;
+    /*
+     * S075: in-place growth must stay below the permanent swap-block reserve.
+     * A failed bound falls back to the disjoint write-new path.
+     */
+    if ((uint32_t)(old_offset >> 2u) + new_chunks > PAT_POOL_ALLOC_CHUNKS)
+        return 0u;
     for (i = old_chunks; i < new_chunks; i++) {
         if (pat_bitmapGet(r, (uint16_t)((old_offset >> 2u) + i)))
             return 0u;
@@ -530,6 +547,10 @@ static uint8_t pat_tryAppendAutomation(pat_scene_region_t *r,
     }
     for (i = old_chunks; i < new_chunks; i++)
         pat_bitmapSet(r, (uint16_t)((old_offset >> 2u) + i));
+    /* Occupancy publication consumes any owned reservations in the same
+     * transaction, so no chunk remains both reserved and occupied. */
+    for (i = old_chunks; i < new_chunks; i++)
+        patSvc_consumeReservation((uint16_t)((old_offset >> 2u) + i));
     {
         uint16_t packed = (uint16_t)(
             ((uint16_t)(autos[old_count].value & 0x7Fu) << 9u) |
@@ -774,12 +795,12 @@ void pat_initScene(uint8_t scene_index)
      * and wraps independently per track; valid range is 1–NUM_STEPS (128).
      *
      * track_scale and track_shuffle: stored and persisted but not yet consumed
-     * by the sequencer — deferred for future implementation. Defaults are
-     * TRACK_SCALE_OFF (no per-track rate override) and 0 (no shuffle offset).
+     * by playback. The scale index uses StepScale's shared table; the default
+     * is 1/16 and 0 remains the no-shuffle offset.
      */
     for (track = 0u; track < NUM_TRACKS; track++) {
         region->track_length[track] = NUM_STEPS_PER_BAR;
-        region->track_scale[track] = TRACK_SCALE_OFF;
+        region->track_scale[track] = TRACK_SCALE_DEFAULT;
         region->track_shuffle[track] = 0u;
     }
     region->pattern_change_bar = 0u;
@@ -1040,58 +1061,12 @@ void pat_clearPattern(uint8_t scene_index)
      * Clear the complete live Pattern region without touching Scene settings
      * or Kit data. Inputs: resident Scene index. Outputs: address array,
      * reserved pool, and free bitmap return to pat_initScene()'s empty state.
-     * Affiliate: copyClearTools' whole-pattern action.
+     * Affiliates: copyClearService.c through pat_rawRegionReset().
      */
     if (!scene_indexValid(scene_index))
         return;
     pat_initScene(scene_index);
     pat_markSceneDirty(scene_index);
-}
-
-void pat_copyTrack(uint8_t scene_index, uint8_t src_track, uint8_t dst_track)
-{
-    /*
-     * Deliberate Session-062 no-op for track copy.
-     *
-     * Inputs: source/destination Scene track coordinates. Output: none.
-     * Duplicating address entries also requires duplicating or defining
-     * ownership for every referenced dynamic block, so copy operations are
-     * deferred to SCOPING_TARGETS Phase 4.5 rather than copying stale offsets.
-     */
-    (void)scene_index;
-    (void)src_track;
-    (void)dst_track;
-}
-
-void pat_copyPattern(uint8_t src_scene, uint8_t dst_scene)
-{
-    /*
-     * Deliberate Session-062 no-op for cross-Scene Pattern copy.
-     *
-     * Inputs: source and destination Scene indices. Output: none. A correct
-     * implementation must duplicate the source address array and each pool
-     * block into destination-owned chunks; that allocator/ownership design is
-     * deferred to SCOPING_TARGETS Phase 4.5.
-     */
-    (void)src_scene;
-    (void)dst_scene;
-}
-
-void pat_copyBar(uint8_t scene_index, uint8_t track, uint8_t src_bar,
-                 uint8_t dst_bar)
-{
-    /*
-     * Deliberate Session-062 no-op for bar copy.
-     *
-     * Inputs: Scene, track, and source/destination bars. Output: none. A bar
-     * copy must duplicate sixteen address entries and their dynamic blocks,
-     * not merely copy offsets into shared storage; that work is deferred with
-     * the other copy operations to SCOPING_TARGETS Phase 4.5.
-     */
-    (void)scene_index;
-    (void)track;
-    (void)src_bar;
-    (void)dst_bar;
 }
 
 /*
@@ -1222,9 +1197,10 @@ uint8_t pat_readStepAutomations(uint8_t scene_index, uint8_t track,
  *
  * Inputs: resident coordinates, a canonical voice/Scene target ID, and a
  * 7-bit value. Output: nonzero when the validated target is updated or
- * appended; duplicate targets update in place, while a 64th entry or pool
- * exhaustion leaves the existing block unchanged. Affiliate:
- * instrumentManager_targetValid().
+ * appended; the reserved PAT_AUTOMATION_TARGET_OFF entry is also accepted as
+ * a persistent Menu no-op. Duplicate targets update in place, while a 64th
+ * entry or pool exhaustion leaves the existing block unchanged. Affiliate:
+ * instrumentManager_targetValid() and PatternStackService's D17 boundary.
  */
 uint8_t pat_writeStepAutomation(uint8_t scene_index, uint8_t track,
                                 uint8_t step, uint16_t target, uint8_t value)
@@ -1235,9 +1211,11 @@ uint8_t pat_writeStepAutomation(uint8_t scene_index, uint8_t track,
     uint8_t i;
 
     if (!pat_addrPtr(scene_index, track, step) ||
-        target >= INSTRUMENT_TOTAL_ID_COUNT ||
-        !instrumentManager_targetValid(scene_index, target,
-                                       INSTRUMENT_TARGET_AUTOMATION))
+        target > 0x01FFu ||
+        (target != PAT_AUTOMATION_TARGET_OFF &&
+         (target >= INSTRUMENT_TOTAL_ID_COUNT ||
+          !instrumentManager_targetValid(scene_index, target,
+                                         INSTRUMENT_TARGET_AUTOMATION))))
         return 0u;
     count = pat_readStepAutomations(scene_index, track, step, autos,
                                     PAT_BLOCK_AUTO_COUNT_MASK);
@@ -1432,4 +1410,520 @@ uint8_t pat_setStepProbability(uint8_t scene_index, uint8_t track,
         new_flags = (uint8_t)(sp.flags | PAT_SPECIAL_PROB_BIT);
     return pat_writeSpecials(scene_index, track, step, new_flags,
                              sp.note, sp.velocity, value);
+}
+
+/* =======================================================================
+ * S075 raw block API for the exclusive copy/clear holder.
+ *
+ * Contract: PatternData.h ("Raw block API for the exclusive copy/clear
+ * holder"). Every function below may be called only between
+ * patSvc_beginExclusive(scene) == 1 and patSvc_endExclusive(scene); no other
+ * pool writer runs in that window. Every step write keeps the publication
+ * order: write the new bytes into unreferenced pool space, publish the
+ * complete 16-bit address entry in one PRIMASK store (re-reading the live
+ * trigger bit inside the critical section when the policy keeps it), then
+ * free the old run. A reader (TIM3 now; chaining or per-track playback later)
+ * therefore sees a complete old or a complete new step, never a mixture.
+ * ======================================================================= */
+
+/*
+ * Resolve a raw trigger policy against one live address entry.
+ *
+ * Inputs: the live entry (read inside the caller's critical section) and
+ * PAT_RAW_TRIGGER_KEEP/OFF/ON. Output: the trigger bit to publish. Unknown
+ * policies keep the live bit. Callers: every raw publication below.
+ */
+static uint16_t pat_rawTriggerBits(uint16_t live, uint8_t trigger_mode)
+{
+    if (trigger_mode == PAT_RAW_TRIGGER_OFF)
+        return 0u;
+    if (trigger_mode == PAT_RAW_TRIGGER_ON)
+        return PAT_ADDR_TRIGGER_BIT;
+    return (uint16_t)(live & PAT_ADDR_TRIGGER_BIT);
+}
+
+/*
+ * Chunk count of the block a live entry references, or zero.
+ *
+ * Inputs: region and entry. Output: allocated chunks for a valid block;
+ * zero for trigger-only or malformed entries. Used to free the old run after
+ * a publication.
+ */
+static uint8_t pat_rawEntryChunks(const pat_scene_region_t *r, uint16_t entry)
+{
+    uint16_t offset = (uint16_t)(entry & PAT_ADDR_OFFSET_MASK);
+
+    if ((entry & PAT_ADDR_SPECIALS_BIT) == 0u || !pat_poolOffsetValid(offset))
+        return 0u;
+    return pat_blockChunks(r->pool[offset + 2u],
+                           (uint8_t)(r->pool[offset + 1u] &
+                                     PAT_BLOCK_AUTO_COUNT_MASK));
+}
+
+/*
+ * Copy an encoded block into the pool and stamp its back-reference.
+ *
+ * Inputs: region, destination offset (already owned by the caller), block
+ * bytes and size, and the owning track/step. Output: pool bytes written with
+ * header bits 15..6 = track*128+step and the block's automation count kept.
+ * The bytes are not referenced by any address entry yet.
+ */
+static void pat_rawStore(pat_scene_region_t *r, uint16_t offset,
+                         const uint8_t *block, uint8_t bytes,
+                         uint8_t track, uint8_t step)
+{
+    uint16_t header;
+
+    memcpy(&r->pool[offset], block, bytes);
+    header = (uint16_t)((((uint16_t)track * NUM_STEPS + step) <<
+                         PAT_BLOCK_STEP_ID_SHIFT) & PAT_BLOCK_STEP_ID_MASK);
+    header |= (uint16_t)(block[1] & PAT_BLOCK_AUTO_COUNT_MASK);
+    r->pool[offset] = (uint8_t)(header >> 8u);
+    r->pool[offset + 1u] = (uint8_t)header;
+}
+
+/*
+ * Publish one complete address entry and free the run it replaced.
+ *
+ * Inputs: region, entry pointer, new specials/offset bits (0x3FFF for no
+ * block), trigger policy. Output: one PRIMASK halfword store composed from the
+ * live trigger and the new bits, then the old block is released through
+ * pat_poolFree() (which also drops its trailing reservation).
+ */
+static void pat_rawPublish(pat_scene_region_t *r, uint16_t *entry,
+                           uint16_t new_bits, uint8_t trigger_mode)
+{
+    uint16_t old;
+    uint8_t old_chunks;
+
+    __asm volatile("cpsid i" ::: "memory");
+    old = *entry;
+    *entry = (uint16_t)(pat_rawTriggerBits(old, trigger_mode) | new_bits);
+    __asm volatile("cpsie i" ::: "memory");
+    old_chunks = pat_rawEntryChunks(r, old);
+    if (old_chunks != 0u)
+        pat_poolFree(r, (uint16_t)(old & PAT_ADDR_OFFSET_MASK), old_chunks);
+}
+
+/*
+ * Copy one live block (contract in PatternData.h).
+ *
+ * Output: block bytes (chunks*4) or 0 when the step has no block; *entry_out
+ * always receives the live entry (sentinel for invalid coordinates).
+ */
+uint8_t pat_rawReadBlock(uint8_t scene_index, uint8_t track, uint8_t step,
+                         uint8_t out[PAT_RAW_BLOCK_MAX], uint16_t *entry_out)
+{
+    const pat_scene_region_t *r = pat_sceneRegion(scene_index);
+    const uint16_t *entry = pat_addrPtr(scene_index, track, step);
+    uint16_t addr = entry ? *entry : PAT_ADDR_SENTINEL;
+    uint8_t chunks;
+
+    if (entry_out)
+        *entry_out = addr;
+    if (!r || !entry || !out)
+        return 0u;
+    chunks = pat_rawEntryChunks(r, addr);
+    if (chunks == 0u || (uint16_t)chunks * 4u > PAT_RAW_BLOCK_MAX ||
+        (uint32_t)(addr & PAT_ADDR_OFFSET_MASK) + (uint32_t)chunks * 4u >
+            (PAT_STACK_SIZE * 32u))
+        return 0u;
+    memcpy(out, &r->pool[addr & PAT_ADDR_OFFSET_MASK], (size_t)chunks * 4u);
+    return (uint8_t)(chunks * 4u);
+}
+
+/* Allocated byte size of an encoded block (contract in PatternData.h). */
+uint8_t pat_rawBlockBytes(const uint8_t *block)
+{
+    uint8_t chunks;
+
+    if (!block)
+        return 0u;
+    chunks = pat_blockChunks((uint8_t)(block[2] & PAT_SPECIAL_FLAGS_MASK),
+                             (uint8_t)(block[1] & PAT_BLOCK_AUTO_COUNT_MASK));
+    if ((uint16_t)chunks * 4u > PAT_RAW_BLOCK_MAX)
+        return 0u;
+    return (uint8_t)(chunks * 4u);
+}
+
+/*
+ * Decode a caller-held block (contract in PatternData.h).
+ *
+ * Output: specials (defaults for absent fields) and the automation count
+ * copied into autos (at most capacity). A NULL block decodes as "no block".
+ */
+uint8_t pat_rawDecode(const uint8_t *block, pat_step_specials_t *specials,
+                      pat_automation_entry_t *autos, uint8_t capacity)
+{
+    uint8_t flags;
+    uint8_t auto_count;
+    uint8_t copy_count;
+    uint8_t index = 3u;
+    uint8_t i;
+
+    if (specials) {
+        specials->note = PAT_DEFAULT_NOTE;
+        specials->velocity = PAT_DEFAULT_VELOCITY;
+        specials->probability = 127u;
+        specials->flags = 0u;
+    }
+    if (!block || pat_rawBlockBytes(block) == 0u)
+        return 0u;
+    flags = (uint8_t)(block[2] & PAT_SPECIAL_FLAGS_MASK);
+    auto_count = (uint8_t)(block[1] & PAT_BLOCK_AUTO_COUNT_MASK);
+    if (flags & PAT_SPECIAL_NOTE_BIT) {
+        if (specials) specials->note = block[index];
+        index++;
+    }
+    if (flags & PAT_SPECIAL_VEL_BIT) {
+        if (specials) specials->velocity = block[index];
+        index++;
+    }
+    if (flags & PAT_SPECIAL_PROB_BIT) {
+        if (specials) specials->probability = block[index];
+        index++;
+    }
+    if (specials)
+        specials->flags = flags;
+    if (!autos || capacity == 0u)
+        return auto_count;
+    copy_count = (auto_count < capacity) ? auto_count : capacity;
+    for (i = 0u; i < copy_count; i++) {
+        uint16_t packed = (uint16_t)(block[index] |
+                                     ((uint16_t)block[index + 1u] << 8u));
+        autos[i].target = (uint16_t)(packed & 0x01FFu);
+        autos[i].value = (uint8_t)((packed >> 9u) & 0x7Fu);
+        index = (uint8_t)(index + 2u);
+    }
+    return copy_count;
+}
+
+/*
+ * Encode a block into a caller buffer (contract in PatternData.h).
+ *
+ * Output: allocated byte size, or 0 for an empty block (no specials and no
+ * automation) or invalid input. The back-reference is left 0; placement
+ * stamps it.
+ */
+uint8_t pat_rawEncode(uint8_t out[PAT_RAW_BLOCK_MAX], uint8_t flags,
+                      uint8_t note, uint8_t velocity, uint8_t probability,
+                      const pat_automation_entry_t *autos, uint8_t count)
+{
+    uint8_t index = 3u;
+    uint8_t bytes;
+    uint8_t i;
+
+    flags &= (uint8_t)PAT_SPECIAL_FLAGS_MASK;
+    if (!out || count > PAT_BLOCK_AUTO_COUNT_MASK ||
+        (count != 0u && !autos) || (flags == 0u && count == 0u))
+        return 0u;
+    bytes = (uint8_t)(pat_blockChunks(flags, count) * 4u);
+    if (bytes == 0u || bytes > PAT_RAW_BLOCK_MAX)
+        return 0u;
+    memset(out, 0, bytes);
+    out[1] = (uint8_t)(count & PAT_BLOCK_AUTO_COUNT_MASK);
+    out[2] = flags;
+    if (flags & PAT_SPECIAL_NOTE_BIT) out[index++] = note;
+    if (flags & PAT_SPECIAL_VEL_BIT) out[index++] = velocity;
+    if (flags & PAT_SPECIAL_PROB_BIT) out[index++] = probability;
+    for (i = 0u; i < count; i++) {
+        uint16_t packed = (uint16_t)(((uint16_t)(autos[i].value & 0x7Fu) << 9u) |
+                                     (autos[i].target & 0x01FFu));
+        out[index++] = (uint8_t)packed;
+        out[index++] = (uint8_t)(packed >> 8u);
+    }
+    return bytes;
+}
+
+/*
+ * Place a block below the swap reserve (contract in PatternData.h).
+ *
+ * Output: 1 after allocate/write/publish/free; 0 when no contiguous run
+ * below the reserve exists (nothing changed).
+ */
+uint8_t pat_rawPlace(uint8_t scene_index, uint8_t track, uint8_t step,
+                     const uint8_t *block, uint8_t trigger_mode)
+{
+    pat_scene_region_t *r = pat_sceneRegionMut(scene_index);
+    uint16_t *entry = pat_addrPtr(scene_index, track, step);
+    uint8_t bytes = pat_rawBlockBytes(block);
+    uint16_t offset;
+
+    if (!r || !entry || bytes == 0u)
+        return 0u;
+    offset = pat_poolAlloc(r, (uint8_t)(bytes / 4u));
+    if (offset == PAT_ADDR_SENTINEL)
+        return 0u;
+    pat_rawStore(r, offset, block, bytes, track, step);
+    pat_rawPublish(r, entry, (uint16_t)(PAT_ADDR_SPECIALS_BIT | offset),
+                   trigger_mode);
+    pat_markSceneDirty(scene_index);
+    return 1u;
+}
+
+/*
+ * Place a block in the swap reserve (contract in PatternData.h).
+ *
+ * Output: 1 when the reserve was free and the step now references it; 0 when
+ * the reserve is occupied. The reserve chunks are marked occupied while the
+ * step lives there; pat_rawSwapReturn() moves it below the reserve.
+ */
+uint8_t pat_rawPlaceViaSwap(uint8_t scene_index, uint8_t track, uint8_t step,
+                            const uint8_t *block, uint8_t trigger_mode)
+{
+    pat_scene_region_t *r = pat_sceneRegionMut(scene_index);
+    uint16_t *entry = pat_addrPtr(scene_index, track, step);
+    uint8_t bytes = pat_rawBlockBytes(block);
+    uint8_t i;
+
+    if (!r || !entry || bytes == 0u ||
+        bytes / 4u > PAT_POOL_SWAP_CHUNKS || !pat_rawSwapFree(scene_index))
+        return 0u;
+    for (i = 0u; i < bytes / 4u; i++)
+        pat_bitmapSet(r, (uint16_t)(PAT_POOL_ALLOC_CHUNKS + i));
+    pat_rawStore(r, PAT_POOL_SWAP_OFFSET, block, bytes, track, step);
+    pat_rawPublish(r, entry,
+                   (uint16_t)(PAT_ADDR_SPECIALS_BIT | PAT_POOL_SWAP_OFFSET),
+                   trigger_mode);
+    pat_markSceneDirty(scene_index);
+    return 1u;
+}
+
+/*
+ * Move a swap-resident step below the reserve (contract in PatternData.h).
+ *
+ * Output: 1 after allocate/copy/publish (trigger kept) and the reserve has
+ * been freed; 0 when the step is not in the swap block or no run exists yet
+ * (the caller compacts and retries).
+ */
+uint8_t pat_rawSwapReturn(uint8_t scene_index, uint8_t track, uint8_t step)
+{
+    pat_scene_region_t *r = pat_sceneRegionMut(scene_index);
+    uint16_t *entry = pat_addrPtr(scene_index, track, step);
+    uint8_t block[PAT_RAW_BLOCK_MAX];
+    uint8_t bytes;
+    uint16_t offset;
+
+    if (!r || !entry ||
+        (*entry & PAT_ADDR_SPECIALS_BIT) == 0u ||
+        (*entry & PAT_ADDR_OFFSET_MASK) != PAT_POOL_SWAP_OFFSET)
+        return 0u;
+    bytes = pat_rawBlockBytes(&r->pool[PAT_POOL_SWAP_OFFSET]);
+    if (bytes == 0u)
+        return 0u;
+    offset = pat_poolAlloc(r, (uint8_t)(bytes / 4u));
+    if (offset == PAT_ADDR_SENTINEL)
+        return 0u;
+    memcpy(block, &r->pool[PAT_POOL_SWAP_OFFSET], bytes);
+    pat_rawStore(r, offset, block, bytes, track, step);
+    /* pat_rawPublish() frees the swap run through pat_poolFree(). */
+    pat_rawPublish(r, entry, (uint16_t)(PAT_ADDR_SPECIALS_BIT | offset),
+                   PAT_RAW_TRIGGER_KEEP);
+    pat_markSceneDirty(scene_index);
+    return 1u;
+}
+
+/*
+ * Publish "no block" for one step (contract in PatternData.h).
+ *
+ * Output: one publication of trigger|0x3FFF, then the old block is freed.
+ */
+void pat_rawPublishEmpty(uint8_t scene_index, uint8_t track, uint8_t step,
+                         uint8_t trigger_mode)
+{
+    pat_scene_region_t *r = pat_sceneRegionMut(scene_index);
+    uint16_t *entry = pat_addrPtr(scene_index, track, step);
+
+    if (!r || !entry)
+        return;
+    pat_rawPublish(r, entry, PAT_ADDR_SENTINEL, trigger_mode);
+    pat_markSceneDirty(scene_index);
+}
+
+/* Free chunks below the reserve (contract in PatternData.h). */
+uint16_t pat_rawFreeChunks(uint8_t scene_index)
+{
+    const pat_scene_region_t *r = pat_sceneRegion(scene_index);
+    uint16_t i;
+    uint16_t free_count = 0u;
+
+    if (!r)
+        return 0u;
+    for (i = 0u; i < PAT_POOL_ALLOC_CHUNKS; i++)
+        if (!pat_bitmapGet(r, i))
+            free_count++;
+    return free_count;
+}
+
+/* Nonzero when every reserve chunk is free (contract in PatternData.h). */
+uint8_t pat_rawSwapFree(uint8_t scene_index)
+{
+    const pat_scene_region_t *r = pat_sceneRegion(scene_index);
+    uint8_t i;
+
+    if (!r)
+        return 0u;
+    for (i = 0u; i < PAT_POOL_SWAP_CHUNKS; i++)
+        if (pat_bitmapGet(r, (uint16_t)(PAT_POOL_ALLOC_CHUNKS + i)))
+            return 0u;
+    return 1u;
+}
+
+/*
+ * Whole-region step 1: make every destination entry empty, trigger off.
+ *
+ * Each entry is one aligned halfword store, atomic for TIM3. After this pass
+ * no destination entry references the pool, so the body can be replaced.
+ */
+void pat_rawRegionSilence(uint8_t scene_index)
+{
+    pat_scene_region_t *r = pat_sceneRegionMut(scene_index);
+    uint8_t track;
+    uint16_t step;
+
+    if (!r)
+        return;
+    for (track = 0u; track < NUM_TRACKS; track++)
+        for (step = 0u; step < NUM_STEPS; step++)
+            r->address[track][step] = PAT_ADDR_SENTINEL;
+}
+
+/*
+ * Whole-region step 2: copy pool, bitmap, track settings and Pattern globals.
+ *
+ * Call only after pat_rawRegionSilence(dst): the destination pool is not
+ * referenced while it is overwritten.
+ */
+void pat_rawRegionCopyBody(uint8_t src_scene, uint8_t dst_scene)
+{
+    const pat_scene_region_t *src = pat_sceneRegion(src_scene);
+    pat_scene_region_t *dst = pat_sceneRegionMut(dst_scene);
+
+    if (!src || !dst || src_scene == dst_scene)
+        return;
+    memcpy(dst->pool, src->pool, sizeof(dst->pool));
+    memcpy(dst->bitmap, src->bitmap, sizeof(dst->bitmap));
+    memcpy(dst->track_length, src->track_length, sizeof(dst->track_length));
+    memcpy(dst->track_scale, src->track_scale, sizeof(dst->track_scale));
+    memcpy(dst->track_shuffle, src->track_shuffle, sizeof(dst->track_shuffle));
+    dst->pattern_change_bar = src->pattern_change_bar;
+    dst->pattern_next = src->pattern_next;
+}
+
+/*
+ * Whole-region step 3 (literal copy): publish source entries unchanged.
+ *
+ * Inputs: flat address range (index = track*128 + step). Output: the copied
+ * pool offsets are valid in the destination because the body is identical.
+ */
+void pat_rawRegionPublishSteps(uint8_t src_scene, uint8_t dst_scene,
+                               uint16_t first, uint16_t count)
+{
+    const pat_scene_region_t *src = pat_sceneRegion(src_scene);
+    pat_scene_region_t *dst = pat_sceneRegionMut(dst_scene);
+    uint16_t i;
+
+    if (!src || !dst || first >= PAT_STEPS_PER_SCENE)
+        return;
+    if ((uint32_t)first + count > PAT_STEPS_PER_SCENE)
+        count = (uint16_t)(PAT_STEPS_PER_SCENE - first);
+    for (i = 0u; i < count; i++) {
+        uint16_t index = (uint16_t)(first + i);
+
+        dst->address[index / NUM_STEPS][index % NUM_STEPS] =
+            src->address[index / NUM_STEPS][index % NUM_STEPS];
+    }
+    pat_markSceneDirty(dst_scene);
+}
+
+/*
+ * Whole-region step 3 (retarget copy): read the copied, unpublished block.
+ *
+ * Inputs: source/destination Scenes and flat index. Output: block bytes taken
+ * from the destination pool at the offset the source entry names, or 0 when
+ * the source step has no block.
+ */
+uint8_t pat_rawRegionCopiedBlock(uint8_t src_scene, uint8_t dst_scene,
+                                 uint16_t index, uint8_t out[PAT_RAW_BLOCK_MAX])
+{
+    const pat_scene_region_t *src = pat_sceneRegion(src_scene);
+    const pat_scene_region_t *dst = pat_sceneRegion(dst_scene);
+    uint16_t entry;
+    uint8_t chunks;
+
+    if (!src || !dst || !out || index >= PAT_STEPS_PER_SCENE)
+        return 0u;
+    entry = src->address[index / NUM_STEPS][index % NUM_STEPS];
+    chunks = pat_rawEntryChunks(dst, entry);
+    if (chunks == 0u || (uint16_t)chunks * 4u > PAT_RAW_BLOCK_MAX)
+        return 0u;
+    memcpy(out, &dst->pool[entry & PAT_ADDR_OFFSET_MASK], (size_t)chunks * 4u);
+    return (uint8_t)(chunks * 4u);
+}
+
+/*
+ * Whole-region step 3 (retarget copy): rewrite in place, then publish.
+ *
+ * Inputs: source/destination Scenes, flat index, and the rewritten block
+ * (NULL or empty = drop the block). The rewritten block must not be larger
+ * than the copied one (retargeting only drops or renames entries). Output:
+ * the copied block is overwritten while still unreferenced, tail chunks are
+ * freed, then the destination entry is published with the source trigger.
+ * Returns 0 (and publishes the copied block unchanged) if the rewrite would
+ * grow the block.
+ */
+uint8_t pat_rawRegionPublishRewritten(uint8_t src_scene, uint8_t dst_scene,
+                                      uint16_t index, const uint8_t *block)
+{
+    const pat_scene_region_t *src = pat_sceneRegion(src_scene);
+    pat_scene_region_t *dst = pat_sceneRegionMut(dst_scene);
+    uint16_t entry;
+    uint16_t offset;
+    uint8_t old_chunks;
+    uint8_t new_chunks;
+    uint8_t track;
+    uint8_t step;
+
+    if (!src || !dst || index >= PAT_STEPS_PER_SCENE)
+        return 0u;
+    track = (uint8_t)(index / NUM_STEPS);
+    step = (uint8_t)(index % NUM_STEPS);
+    entry = src->address[track][step];
+    old_chunks = pat_rawEntryChunks(dst, entry);
+    offset = (uint16_t)(entry & PAT_ADDR_OFFSET_MASK);
+    new_chunks = (uint8_t)(pat_rawBlockBytes(block) / 4u);
+    if (old_chunks == 0u) {
+        dst->address[track][step] = entry;
+        return 1u;
+    }
+    if (new_chunks > old_chunks) {
+        dst->address[track][step] = entry;
+        return 0u;
+    }
+    if (new_chunks == 0u) {
+        pat_poolFree(dst, offset, old_chunks);
+        dst->address[track][step] =
+            (uint16_t)((entry & PAT_ADDR_TRIGGER_BIT) | PAT_ADDR_SENTINEL);
+        pat_markSceneDirty(dst_scene);
+        return 1u;
+    }
+    pat_rawStore(dst, offset, block, (uint8_t)(new_chunks * 4u), track, step);
+    if (new_chunks < old_chunks)
+        pat_poolFree(dst, (uint16_t)(offset + (uint16_t)new_chunks * 4u),
+                     (uint8_t)(old_chunks - new_chunks));
+    dst->address[track][step] = entry;
+    pat_markSceneDirty(dst_scene);
+    return 1u;
+}
+
+/*
+ * Reset a whole region (spec §9.8, `clear pattern`).
+ *
+ * pat_initScene() already writes every address entry to the sentinel before
+ * it clears the pool and bitmap, so the publication order holds.
+ */
+void pat_rawRegionReset(uint8_t scene_index)
+{
+    pat_initScene(scene_index);
+    pat_markSceneDirty(scene_index);
 }

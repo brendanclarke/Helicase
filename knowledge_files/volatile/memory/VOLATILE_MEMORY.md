@@ -31,20 +31,137 @@ Do not recommend bumping `AUTOSAVE_PARAMETER_GETS_PER_WRITE` or adjusting
 capture timing unless the user explicitly asks. The section-based CRC
 format redesign is the chosen path for write performance.
 
-## Current carryover after Session 067
+## Current carryover after Session 075
 
-Session 067 implemented the Pattern Stack Service (unified pool mutation
-dispatcher with SPSC queue, two-tier defragmentation, bulk barriers,
-filesystem replacement handover, pool usage monitor, and elastic gap policy)
-and fixed the dtype automation value offset bug (identity mapping at all
-four code sites). The durable authorities are
-`knowledge_files/log_archive/067_SESSION_HANDOFF_LOG.md`,
-`PATTERN_DYNAMIC_STACK.md`, `MODULE_INTERCHANGE_SPEC.md`, and
-`SRAM_MANIFEST.md`.
-The S067 planning documents (`S067_STACK_SERVICE_DETAIL_PLAN.md`,
-`S067_STACK_SERVICE_IMPLEMENTATION.md`, `S067_DTYPE_OFFSET_BUG.md`,
-`S067_DTYPE_BUG_IMPLEMENTATION.md`) are disposable; their durable facts are
-in the handoff log and spec references.
+Session 075 (2026-10-01/03, `dev-ph6-copyclear`) started Phase 6: copy and
+clear of Pattern data, Scenes and Scene children (`Core/Menu/CopyClear/`),
+global `srt` retired (PERF `fxm`), the DEV trace stage `c`, two hardware
+follow-up rounds (F1, F2: defaults, pan rule, morphable FX send, VOICE
+hold-SHIFT Morph, Effect-page SHIFT+TRACK overlay) and the automation
+priority fix (F3).
+
+- **Commits:** HEAD `76aef20` holds every S075 code change. The closeout docs
+  and three comment-only pointer edits are uncommitted. The user manages
+  commits.
+- **Final link (DEV):** `text=532,408`, `data=416`, `bss=426,712`; payload
+  532,824 B of 753,664 (220,840 B free); ITCM 4,168 B; DTCM statics 4,472 B;
+  FX arena 126,592 B; `scenes` `0x65E0`. `LXRV2_lxr02.img` SHA-256
+  `d1c0aac2…9ceb`. Production build last measured at F1.
+- **Durable authorities:** `075_SESSION_HANDOFF_LOG.md`;
+  `COPYCLEAR_UTILITIES.md` (new); `PATTERN_DYNAMIC_STACK.md` §6.2a and §12.17;
+  `MODULE_INTERCHANGE_SPEC.md`; `BANK_PRESET_ARCHITECTURE.md`.
+- **Disposable:** the ten root `S075_*.md` documents.
+- **Next session (076):** user hardware checks (overlay follow-up, the
+  `COPYCLEAR_UTILITIES.md` §16 list, an F2-card validator run after deleting
+  old AutoSave records), production build measurement, then the next Phase 6
+  item chosen with the user.
+- **Open (details in `knowledge_files/volatile/S070_WORKING_NOTES.md` and the
+  log §13):** Pattern Load fan-out tear; O1 per-voice Morph equalisation;
+  MIDI-entered values reach the LCD only at the next repaint; Effects saved at
+  pan 64 show `1`; the S074 items (boot timeout, `cpu` with `cmp`, BC11, F4
+  trace priorities, stale comments).
+- **Hardware still pending from S072:** the Phase 5 Step 6–10 matrices.
+
+### Working preferences confirmed in Session 075
+
+- **Use the user's terms.** Do not introduce new semantic terms the user has
+  not used; when a code name is needed, mark it as a code name. (The S075
+  spec carried a terms table for this reason.)
+- **Comment blocks beside every change in both `.c` and `.h`,** at detailed
+  contract level (what, why, inputs, outputs, accessors, affiliates); schedules
+  give the exact block for each change.
+- **"No code change this turn"** means a schedule only. When the user says
+  "implement this yourself", implement directly (the S075 overlay
+  follow-up).
+- **Decision rounds:** each plan lists numbered questions with a
+  recommendation; the user answers tersely (e.g. "Q1: yes 2: approve"); fold
+  the answers into the plan, then report any further follow-ups before
+  scheduling.
+- **The user rejects workarounds that feel hacky** (an inert SELECT block
+  under the overlay) and asks for the behaviour to be stated as a rule
+  ("type SELECT functions keep working; only screen changes are
+  suppressed").
+- **No backward compatibility** when the user will wipe temporary records:
+  do not add migration code for AutoSave or sceneset changes unless asked.
+- **One UX for one concept** (all pans display and default the same; maths
+  may differ).
+- **Automation always wins**, menu edits only set endpoints, MIDI is lowest
+  priority (binding product rule).
+- **Hardware feedback arrives as numbered lists;** treat each item as a rule
+  to restate in the plan's feedback table, find the root cause in code before
+  proposing a change, and keep a verification table per item.
+- **Session closeout:** terse index entry, verbose handoff log, spec updates
+  (new reference documents only when the user names them), `MEMORY.md`,
+  volatile notes; preserve every detail of the root task documents because
+  the user deletes them.
+
+### Working preferences confirmed in Session 074
+
+- **"Do not change code files yourself this turn"** means schedule only;
+  the user (or an implementing agent they direct) applies it. The assistant
+  wrote code directly only when asked (the compressor tuning and the
+  saturator).
+- **No user error screens for failures that recover by themselves**; log
+  them in the trace instead (AutoSave torn-record policy).
+- **RAM approvals are explicit and scoped** ("ram expansions approved" for
+  the saturator's +8 B). Still state bytes, region, lifetime and owner.
+- **Tuning requests are relative and smooth across the range** ("just
+  slightly more", "extremely mild at low values to fairly extreme at the
+  top"). Implement them as curves over the control, show before/after tables,
+  and keep the change small.
+- **Correct your own earlier numbers visibly** when evidence contradicts
+  them (the drain poll counts, the validation count, the CPU estimate).
+- **Keep documents consistent with the code at every step:** status lines,
+  work notes and acceptance sections were updated in each S074 document as
+  work landed.
+
+### Working preferences confirmed in Session 073
+
+- **Constant CPU.** Never propose saving CPU by skipping DSP work when
+  something is inactive, silent or at zero. If an idea does, raise it
+  specifically; the expected answer is no (`MEMORY.md`, DSP CPU Policy). The
+  bus compressor's "no work while off" is the one user-approved exception
+  (S074).
+- **No new utilities, no profiler, no extra CPU widgets.** Prove DSP changes
+  with `tools/dsp_test/` (host `cc`, `python3` standard library, the ARM
+  toolchain).
+- **Do not add unrequested features, knobs or test builds.** The S073 growth
+  drill knob was added without a request and had to be removed ("i never
+  asked for that"). Ask before adding anything outside the request.
+- **Hardware checks are the user's** (listening, the worst-case Scene,
+  controls, the Effect budget). Hand over the list; do not claim them.
+- **Big refactors:** the assistant writes a line-level implementation
+  schedule; the user implements; the assistant reviews the diff, reruns every
+  gate, reports concisely, and corrects documentation that misstates things.
+- **Report RAM changes of every kind,** including ITCM code growth, with
+  byte count, region, lifetime and owner.
+
+### Effect-system invariants (Session 072)
+
+- **Writers.** Only SceneData writes `scene_t.effect` and
+  `effect_morph_amount`. UI, type hooks and the FX lock editor write only
+  through the EffectsManager edit API (`effects_setParameter`,
+  `…SeqRunMode/Length/StepScale`, `…MorphAmount`, `…SeqLaneLock`,
+  `effects_changeType`). Those fan out through the active VOICE edit mask
+  and mark AutoSave.
+- **Foreground only.**
+  - EffectsManager and FxBuffer must never be called from an ISR.
+  - TIM3 only publishes `seq_fxEvent`, Effect step markers (pending identity
+    bit 11) and the automation reset latch.
+- **Arena.** `.dtcm_fxbuf` is never cleared by the system. An owner clears
+  what it reads unless it deliberately adopts content the handoff marks
+  valid.
+- **Type-relative indices.** A local Effect row index means the same
+  parameter only within one type. The VOICE-mask layout gate plus
+  `bank_revalidateVoiceEditMasks()` keep fan-out safe; runtime re-validates
+  against the live type.
+- **IDs.** 511 is never an Effect target; Effect local 63 is never
+  automatable.
+- **Blank names.** They save as `none.*` (all-space stem); an empty stem
+  becomes `inst`. Pass explicit spaces.
+- **Resolution order** (`effects_service()`, every block): Morph base
+  (Pattern `fxm` > held FX Morph lane > retained) → LFO `fxm` → interpolate
+  → FX lock → Pattern overlay → LFO → clamps.
 
 ### Automation ordering invariant
 
@@ -66,14 +183,27 @@ is the runtime-interpolated value that accounts for Morph position.
 buffered in the TIM3 ISR pending buffer and drained in the foreground only.
 Do not call `instrumentManager_writeRuntime()` from any interrupt context.
 
+### buttonHandler concurrency model — foreground scan, not ISR
+
+`buttonHandler_buttonPressed()`/`buttonHandler_buttonReleased()` and the
+event ring run from the foreground 500 Hz `din_dout_exchange()` scan via
+`timebase_serviceFrontPanel()`, **not** from an ISR. Comments calling this
+"TIM6 ISR" context were stale through Session 067 and corrected in Session
+068 (`buttonHandler.c`/`.h`). The `volatile` qualifiers on `btn_held[]` and
+the event ring remain correct regardless — the foreground scan and the
+foreground consumer (`buttonHandler_processEvents()`, called twice per
+main-loop pass since Session 068) still interleave around audio rendering.
+
 ### 7-bit automation storage — identity mapping
 
 Automation values are stored as 7-bit (0..127). The stored value equals the
 parameter value directly (identity mapping). Every automatable descriptor
 parameter has a range ≤127. The old MIDI CC-style `/2` `*2` conversion was
 removed from all four code sites in Session 067 (dtype offset bug fix).
-Do not reintroduce `/2` or `*2` conversions for automation values unless a
-DTYPE_0B255 parameter becomes automatable in the future (none is today).
+Do not reintroduce `/2` or `*2` conversions for voice automation values.
+The one deliberate exception is Effect rows flagged `EFFECT_PARAM_FLAG_WIDE8`,
+which expand through their descriptor's `expand7` hook (Session 072). `fxm`
+and voice Morph expand with `v<127 ? 2v : 255`.
 
 The working-value cache (`va_workingValue[4]`) stores values to avoid
 re-reading from pool storage during pot edits. Nibble-split suppression byte
@@ -83,21 +213,61 @@ working value validity.
 ### CGRAM underline cache
 
 Four-slot bounded cache in CGRAM slots 2..5. Each slot holds a 5×8 underline
-glyph for one of the 4 voice automation parameters. Diff-based CGRAM
-transactions with retry bit (`VA_MARKER_RETRY_BIT = 0x10`) prevent redundant
-LCD writes. Slot allocation is deterministic (voice parameter index + 2).
+glyph for one of the 4 visible cells (VOICE and, since S072/S074, Effect
+page). Diff-based CGRAM transactions with retry bit
+(`VA_MARKER_RETRY_BIT = 0x10`) prevent redundant LCD writes; one shared retry
+serves both page families since S074. Slot allocation is deterministic (cell
+index + 2). **A redraw that can move a marker between cells must use
+`menu_repaint()`**, not `menu_repaintAll()`, or the new glyph flashes in the
+old cell (S066 Fix 5; S074 Effect hold/release fix).
 
 ### Pattern Stack Service routing
 
-All pool-mutating operations from Menu, Sequencer, copyClearTools, and
-EuklidGenerator route through `patSvc_*` (PatternStackService), not direct
-`pat_*` mutation calls. TIM3's automation read path reads address entries
+All pool-mutating operations from Menu, Sequencer and EuklidGenerator route
+through `patSvc_*` (PatternStackService), not direct `pat_*` mutation calls.
+The one exception (S075) is copy/clear's service, which writes through the
+PatternData raw block API only while it holds `patSvc_beginExclusive()`. TIM3's automation read path reads address entries
 directly (not through the service) — address entries are always consistent
 due to the publication ordering fix. `patSvc_idle()` must be called at all
 5 filesystem replacement boundary points.
 
-### Next feature: Phase 4.5 copy operations
+### Phase 6 copy/clear (Session 075, implemented)
 
-`pat_copyTrack`, `pat_copyPattern`, `pat_copyBar` are deliberate no-ops.
-Their implementation requires independent pool-block duplication and must
-route through the Pattern Stack Service.
+The Session 062 no-op copy APIs are gone. Copy/clear lives in
+`Core/Menu/CopyClear/` and is documented in `COPYCLEAR_UTILITIES.md`. Pastes
+duplicate pool blocks step by step through the swap block (never alias
+another step's block) and publish before free.
+
+### Automation priority (Session 075 F3)
+
+Automation, then menu edits, then MIDI. Every Morph-base runtime write goes
+through `presetMorph_writeRuntimeBase()`, which skips a parameter while
+`seq_automationHoldsParameter()` reports it held; the trigger restore then
+applies the latest `morph_interpolation[]`. Menu edits call
+`presetMorph_applyParameterNow()` for one parameter only; external MIDI
+stores an endpoint (`preset_setInstrumentParameterFromMidi()`).
+
+### Working preference: commits
+
+The user manages commit timing. Do not recommend, schedule, or gate work on
+committing in reviews, implementation schedules, or replies.
+
+### Working preference: scope discipline (Session 072)
+
+Stay strictly inside the requested feature's framework. Do not modify code
+outside it unless the plan requires it, and never "fix while passing"; the
+user was explicit: no side quests. Report unrelated findings instead, and log
+them in `SCOPING_TARGETS.md` or the session log for a later pass.
+
+### Working preference: step schedules (Session 072 method)
+
+For multi-step features the user implements the code. The assistant:
+
+1. writes a per-step implementation schedule listing every change by file,
+   line and add/remove/modify, with full comment blocks;
+2. after implementation, reviews the diff against the schedule, runs a clean
+   rebuild plus `link_budget.py`, and appends an assessment;
+3. folds findings into the next schedule as prerequisites.
+
+Every schedule states its flash estimate and RAM (byte count, region,
+lifetime, owner).

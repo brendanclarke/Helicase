@@ -16,6 +16,7 @@
  * must remain aligned with the descriptor keys.
  */
 #include "storageTypes.h"
+#include "EffectsManager.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -511,6 +512,49 @@ void storage_scenesetInit(storage_sceneset_t *state)
         memset(state, 0, sizeof(*state));
 }
 
+/*
+ * S074 bus compressor sceneset keys, in scene_bus_comp_field_t order.
+ *
+ * What:       the four permanent sceneset.scg keys. Why: one table serves
+ *             both the parser and filesystem.c's Scene writer, while older
+ *             firmware can ignore these optional unknown keys.
+ * Affiliates: storage_busCompKey(), storage_busCompFieldForKey().
+ */
+static const char *const storage_busCompKeys[SCENE_BUS_COMP_FIELD_COUNT] = {
+    "bus_comp_mode",
+    "bus_comp_amount",
+    "bus_comp_time",
+    "bus_comp_sidechain",
+};
+
+const char *storage_busCompKey(uint8_t field)
+{
+    /* Contract in storageTypes.h. */
+    return (field < SCENE_BUS_COMP_FIELD_COUNT) ? storage_busCompKeys[field]
+                                                : NULL;
+}
+
+/*
+ * Match one sceneset key against the S074 bus compressor key table.
+ *
+ * Inputs: parsed key and an output field pointer. Output: 1 and the matched
+ * field, or 0 with *field unchanged. Caller: storage_scenesetParseLine().
+ */
+static uint8_t storage_busCompFieldForKey(const char *key, uint8_t *field)
+{
+    uint8_t i;
+
+    if (!key || !field)
+        return 0u;
+    for (i = 0u; i < SCENE_BUS_COMP_FIELD_COUNT; i++) {
+        if (storage_streq(key, storage_busCompKeys[i])) {
+            *field = i;
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
 storage_status_t storage_scenesetParseLine(
     storage_sceneset_t *state,
     const char *line,
@@ -521,6 +565,8 @@ storage_status_t storage_scenesetParseLine(
     const char *value;
     storage_status_t st;
     uint8_t parsed;
+    /* S074: matched bus_comp_* key writes this enum-order field. */
+    uint8_t field = 0u;
 
     /*
      * Parse one sceneset.scg line.
@@ -578,13 +624,12 @@ storage_status_t storage_scenesetParseLine(
                                   INSTRUMENT_SLOT_COUNT,
                                   255u);
     } else if (storage_streq(key, "voice_decimation_all")) {
-        if (!target_settings)
-            return STORAGE_STATUS_BAD_VALUE;
-        st = storage_parseU8(value, &parsed);
-        if (st != STORAGE_STATUS_OK)
-            return st;
-        target_settings->voice_decimation_all =
-            (parsed > 127u) ? 127u : parsed;
+        /*
+         * S075: global decimation was removed. Scenes saved before S075 still
+         * carry this key; consume it so the file remains valid and ignore it.
+         */
+        (void)value;
+        return STORAGE_STATUS_OK;
     } else if (storage_streq(key, "midi_channel")) {
         if (!target_settings)
             return STORAGE_STATUS_BAD_VALUE;
@@ -625,11 +670,12 @@ storage_status_t storage_scenesetParseLine(
         state->seen_audio_out = 1u;
     } else if (storage_streq(key, "fx_send_amount")) {
         /*
-         * Parse retained future FX-send amounts.
+         * Parse retained per-voice FX-send amounts.
          *
          * Inputs: six comma-separated 0..127 values, one per instrument slot.
-         * Output: staged Scene settings update; runtime FX routing is not
-         * applied by storage.
+         * Output: staged Scene settings; the mixer pulls the effective amount
+         * every block (Session 072 Step 5), so storage applies nothing at
+         * runtime.
          */
         if (!target_settings)
             return STORAGE_STATUS_BAD_VALUE;
@@ -640,23 +686,68 @@ storage_status_t storage_scenesetParseLine(
         if (st != STORAGE_STATUS_OK)
             return st;
         state->seen_fx_send_amount = 1u;
+    } else if (storage_streq(key, "fx_send_morph")) {
+        /*
+         * Parse the per-voice FX-send Morph endpoints (S075 F2-H).
+         *
+         * Inputs: six comma-separated 0..127 values, one per instrument slot.
+         * Output: staged settings fx_send_morph[]. A missing key keeps the
+         * stage default 0 from filesystem_initSceneStage(); the writer is
+         * filesystem_nextScenesetLine() line 14.
+         */
+        if (!target_settings)
+            return STORAGE_STATUS_BAD_VALUE;
+        return storage_parseCsvU8(value,
+                                  target_settings->fx_send_morph,
+                                  INSTRUMENT_SLOT_COUNT,
+                                  127u);
     } else if (storage_streq(key, "fader_setting")) {
         /*
-         * Parse retained future fader topology modes.
+         * Parse retained per-voice fader modes.
          *
-         * Inputs: six comma-separated values in the current 0..2 mode domain.
-         * Output: staged Scene settings update; runtime behavior is future
-         * mixer/FX work.
+         * Inputs: six comma-separated values in the
+         * 0..SCENE_FADER_SETTING_MAX domain (0..3; mixer.h MIXER_FADER_*,
+         * 3 = xfd since S074). Output: staged Scene settings; the mixer reads
+         * the mode every block (Session 072 Step 5). A value above the
+         * domain rejects the file, as before. Firmware older than S074
+         * therefore rejects a Scene that uses xfd (downgrade only).
          */
         if (!target_settings)
             return STORAGE_STATUS_BAD_VALUE;
         st = storage_parseCsvU8(value,
                                 target_settings->fader_setting,
                                 INSTRUMENT_SLOT_COUNT,
-                                2u);
+                                SCENE_FADER_SETTING_MAX);
         if (st != STORAGE_STATUS_OK)
             return st;
         state->seen_fader_setting = 1u;
+    } else if (storage_streq(key, "effect_morph_amount")) {
+        /*
+         * Parse the Scene-level Effect Morph amount (Session 072 Step 6).
+         *
+         * Input: one 0..255 value. Output: staged Scene settings. The key is
+         * optional for older sceneset files and is deliberately absent from
+         * `.fx`, so Scene Load carries it while an Effect file does not.
+         */
+        if (!target_settings)
+            return STORAGE_STATUS_BAD_VALUE;
+        st = storage_parseU8(value, &parsed);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        target_settings->effect_morph_amount = parsed;
+    } else if (storage_busCompFieldForKey(key, &field)) {
+        /*
+         * Parse one S074 bus compressor setting into staged SceneData.
+         * Inputs are one 0..255 byte; output is the field-clamped domain
+         * (mode 0..2, amount/time 0..127, sidechain 0..6). Missing keys keep
+         * filesystem_initSceneStage()'s shared defaults.
+         */
+        if (!target_settings)
+            return STORAGE_STATUS_BAD_VALUE;
+        st = storage_parseU8(value, &parsed);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        target_settings->bus_comp[field] = scene_busCompClamp(field, parsed);
     }
     return STORAGE_STATUS_OK;
 }
@@ -1079,79 +1170,6 @@ uint8_t storage_formatInstrumentLine(char *dst, uint16_t capacity,
     return storage_formatInstrumentLineView(dst, capacity, &view, line_index);
 }
 
-void storage_effectStateInit(storage_effect_state_t *state)
-{
-    /*
-     * Clear placeholder effect validation bits.
-     *
-     * Effect files have no runtime payload yet, but Scene load still requires
-     * a guarded .fx file so the folder contract stays stable before Phase 6.
-     */
-    if (state)
-        memset(state, 0, sizeof(*state));
-}
-
-storage_status_t storage_effectParseLine(storage_effect_state_t *state,
-                                         const char *line)
-{
-    char key[24];
-    const char *value;
-    storage_status_t st;
-    uint8_t parsed;
-
-    /*
-     * Parse one placeholder .fx line.
-     *
-     * Unknown keys are ignored for forward compatibility with future effect
-     * schemas, but the v1 placeholder guard must be present for this first
-     * implementation to accept the file as a valid Scene effect.
-     */
-    if (!state || !line)
-        return STORAGE_STATUS_BAD_VALUE;
-    line = storage_trimLeft(line);
-    if (*line == '\0' || *line == '#')
-        return STORAGE_STATUS_OK;
-    st = storage_splitKeyValue(line, key, sizeof(key), &value);
-    if (st != STORAGE_STATUS_OK)
-        return st;
-    if (storage_streq(key, "format")) {
-        if (!storage_streq(value, "helicase.effect"))
-            return STORAGE_STATUS_INVALID_FORMAT;
-        state->seen_format = 1u;
-    } else if (storage_streq(key, "version")) {
-        st = storage_parseU8(value, &parsed);
-        if (st != STORAGE_STATUS_OK)
-            return st;
-        if (parsed != 1u)
-            return STORAGE_STATUS_UNSUPPORTED_VERSION;
-        state->seen_version = 1u;
-    } else if (storage_streq(key, "placeholder")) {
-        st = storage_parseU8(value, &parsed);
-        if (st != STORAGE_STATUS_OK)
-            return st;
-        if (parsed != 1u)
-            return STORAGE_STATUS_BAD_VALUE;
-        state->seen_placeholder = 1u;
-    }
-    return STORAGE_STATUS_OK;
-}
-
-storage_status_t storage_effectFinalize(const storage_effect_state_t *state)
-{
-    /*
-     * Validate the first-pass effect file.
-     *
-     * Until real FX data exists, requiring placeholder=1 prevents arbitrary
-     * .fx files from being mistaken for loadable effect state.
-     */
-    if (!state || !state->seen_format || !state->seen_version ||
-        !state->seen_placeholder) {
-        return STORAGE_STATUS_MISSING_REQUIRED;
-    }
-    return STORAGE_STATUS_OK;
-}
-
-
 /* Bankset's hexadecimal mask parser remains shared with the Bank schema. */
 static int8_t storage_patternHex(char c)
 {
@@ -1161,18 +1179,470 @@ static int8_t storage_patternHex(char c)
     return -1;
 }
 
-/* The effect and Bank directory schemas remain independent of Step storage. */
-uint8_t storage_formatEffectPlaceholderLine(char *dst, uint16_t capacity,
-                                            uint16_t line_index)
+/* ---------------------------------------------------------------------------
+ * `.fx` Effect files (Session 072 step 6; plan §14.1).
+ *
+ * Grammar (v2):
+ *   format=helicase.effect
+ *   version=2
+ *   type=<token3>
+ *   [params]    <descriptor file_key>=<0..255>   (clamped to max_value)
+ *   [morph]     same keys, Morphable rows only; absent section = copy [params]
+ *   [sequence]  run_mode=<fwd|rev|pip|rnd|sel>
+ *               length=<1..16>
+ *               step_scale=<token, S072_ST6 D3>
+ *               lane.<lane key>=0x<mask>,<16 values 0..255>
+ * Legacy (v1): format/version=1/placeholder=1 -> `off`.
+ * The file never carries its own name: the filename stem is the Effect name.
+ * --------------------------------------------------------------------------- */
+
+#define STORAGE_SECTION_SEQUENCE   3u
+#define STORAGE_SECTION_UNKNOWN    0xffu
+#define STORAGE_EFFECT_KEY_MAX     40u
+#define STORAGE_EFFECT_LANE_PREFIX "lane."
+#define STORAGE_EFFECT_LANE_PREFIX_LEN 5u
+
+static const char *const storage_effectRunModeTokens[EFFECT_SEQ_RUN_MODE_COUNT] = {
+    "fwd", "rev", "pip", "rnd", "sel"
+};
+
+static const char *const storage_effectStepScaleTokens[EFFECT_SEQ_SCALE_COUNT] = {
+    "1/64", "1/32t", "1/32", "1/16t", "1/16", "1/8t", "1/16.",
+    "1/8", "1/4t", "1/8.", "1/4", "1/2", "1bar", "2bar"
+};
+
+_Static_assert(sizeof(storage_effectStepScaleTokens) /
+                   sizeof(storage_effectStepScaleTokens[0]) ==
+                   EFFECT_SEQ_SCALE_COUNT,
+               "one .fx step_scale token per shared scale index");
+
+static uint8_t storage_effectTokenIndex(const char *const *tokens,
+                                        uint8_t count,
+                                        const char *text,
+                                        uint8_t *index_out)
 {
-    if (line_index == 0u) return storage_formatLiteral(dst, capacity, "format=helicase.effect\n");
-    if (line_index == 1u) return storage_formatLiteral(dst, capacity, "version=1\n");
-    if (line_index == 2u) return storage_formatLiteral(dst, capacity, "placeholder=1\n");
+    uint8_t i;
+
+    for (i = 0u; i < count; i++) {
+        if (storage_streq(tokens[i], text)) {
+            *index_out = i;
+            return 1u;
+        }
+    }
     return 0u;
+}
+
+static uint8_t storage_effectAppendText(char *dst, uint16_t capacity,
+                                        uint16_t *len, const char *text)
+{
+    while (*text != '\0') {
+        if (*len + 1u >= capacity)
+            return 0u;
+        dst[(*len)++] = *text++;
+    }
+    return 1u;
+}
+
+static uint8_t storage_effectAppendU8(char *dst, uint16_t capacity,
+                                      uint16_t *len, uint8_t value)
+{
+    char digits[4];
+    uint8_t count = 0u;
+
+    do {
+        digits[count++] = (char)('0' + (value % 10u));
+        value = (uint8_t)(value / 10u);
+    } while (value != 0u);
+    while (count > 0u) {
+        if (*len + 1u >= capacity)
+            return 0u;
+        dst[(*len)++] = digits[--count];
+    }
+    return 1u;
+}
+
+static storage_status_t storage_effectParseLane(effect_record_t *target,
+                                                uint8_t lane,
+                                                const char *value)
+{
+    uint8_t values[EFFECT_SEQ_STEP_COUNT];
+    uint16_t mask = 0u;
+    uint16_t lane_bit = (uint16_t)(1u << lane);
+    uint8_t digits = 0u;
+    uint8_t step;
+    storage_status_t st;
+
+    if (value[0] != '0' || (value[1] != 'x' && value[1] != 'X'))
+        return STORAGE_STATUS_BAD_VALUE;
+    value += 2;
+    while (*value != ',' && *value != '\0') {
+        int8_t nibble = storage_patternHex(*value);
+
+        if (nibble < 0 || digits >= 4u)
+            return STORAGE_STATUS_BAD_VALUE;
+        mask = (uint16_t)((mask << 4) | (uint16_t)nibble);
+        digits++;
+        value++;
+    }
+    if (digits == 0u || *value == '\0')
+        return STORAGE_STATUS_BAD_VALUE;
+    st = storage_parseCsvU8(value + 1, values, EFFECT_SEQ_STEP_COUNT, 255u);
+    if (st != STORAGE_STATUS_OK)
+        return st;
+    for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++) {
+        target->steps[step].value[lane] = values[step];
+        if ((mask & (uint16_t)(1u << step)) != 0u)
+            target->steps[step].lock_mask |= lane_bit;
+        else
+            target->steps[step].lock_mask &= (uint16_t)~lane_bit;
+    }
+    return STORAGE_STATUS_OK;
+}
+
+void storage_effectStateInit(storage_effect_state_t *state,
+                             effect_record_t *target)
+{
+    /* Reset parser state and the staged record before a `.fx` file. */
+    if (state) {
+        memset(state, 0, sizeof(*state));
+        state->type = EFFECT_TYPE_OFF;
+        state->current_section = STORAGE_SECTION_TOP;
+    }
+    if (target)
+        effects_recordDefaultsForType(target, EFFECT_TYPE_OFF);
+}
+
+storage_status_t storage_effectParseLine(storage_effect_state_t *state,
+                                         const char *line,
+                                         effect_record_t *target)
+{
+    char key[STORAGE_EFFECT_KEY_MAX];
+    const char *value;
+    storage_status_t st;
+    uint8_t parsed;
+    uint8_t index;
+
+    /* Parse one `.fx` line; unknown keys remain forward-compatible. */
+    if (!state || !line || !target)
+        return STORAGE_STATUS_BAD_VALUE;
+    line = storage_trimLeft(line);
+    if (*line == '\0' || *line == '#')
+        return STORAGE_STATUS_OK;
+    if (*line == '[') {
+        strncpy(key, line, sizeof(key) - 1u);
+        key[sizeof(key) - 1u] = '\0';
+        storage_trimRight(key);
+        if (state->version != 2u || !state->seen_type)
+            return STORAGE_STATUS_MISSING_REQUIRED;
+        if (storage_streq(key, "[params]")) {
+            state->current_section = STORAGE_SECTION_PARAMS;
+        } else if (storage_streq(key, "[morph]")) {
+            state->current_section = STORAGE_SECTION_MORPH;
+            state->seen_morph_section = 1u;
+        } else if (storage_streq(key, "[sequence]")) {
+            state->current_section = STORAGE_SECTION_SEQUENCE;
+        } else {
+            state->current_section = STORAGE_SECTION_UNKNOWN;
+        }
+        return STORAGE_STATUS_OK;
+    }
+    st = storage_splitKeyValue(line, key, sizeof(key), &value);
+    if (st != STORAGE_STATUS_OK)
+        return st;
+    if (state->current_section == STORAGE_SECTION_TOP) {
+        if (storage_streq(key, "format")) {
+            if (!storage_streq(value, "helicase.effect"))
+                return STORAGE_STATUS_INVALID_FORMAT;
+            state->seen_format = 1u;
+        } else if (storage_streq(key, "version")) {
+            st = storage_parseU8(value, &parsed);
+            if (st != STORAGE_STATUS_OK)
+                return st;
+            if (parsed != 1u && parsed != 2u)
+                return STORAGE_STATUS_UNSUPPORTED_VERSION;
+            state->version = parsed;
+        } else if (storage_streq(key, "placeholder")) {
+            st = storage_parseU8(value, &parsed);
+            if (st != STORAGE_STATUS_OK)
+                return st;
+            if (parsed != 1u)
+                return STORAGE_STATUS_BAD_VALUE;
+            state->seen_placeholder = 1u;
+        } else if (storage_streq(key, "type")) {
+            effect_type_id_t type;
+
+            if (state->seen_type || strlen(value) != 3u ||
+                !effects_typeFromToken(value, &type))
+                return STORAGE_STATUS_BAD_TYPE;
+            state->type = type;
+            state->seen_type = 1u;
+            effects_recordDefaultsForType(target, type);
+        }
+        return STORAGE_STATUS_OK;
+    }
+    if (state->current_section == STORAGE_SECTION_PARAMS ||
+        state->current_section == STORAGE_SECTION_MORPH) {
+        const effect_param_descriptor_t *descriptor =
+            effects_descriptorByKey(state->type, key, &index);
+
+        if (!descriptor)
+            return STORAGE_STATUS_OK;
+        st = storage_parseU8(value, &parsed);
+        if (st != STORAGE_STATUS_OK)
+            return st;
+        if (parsed > descriptor->max_value)
+            parsed = descriptor->max_value;
+        if (state->current_section == STORAGE_SECTION_PARAMS) {
+            target->normal[index] = parsed;
+        } else if ((descriptor->base.flags &
+                    INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u) {
+            target->morph[index] = parsed;
+        }
+        return STORAGE_STATUS_OK;
+    }
+    if (state->current_section == STORAGE_SECTION_SEQUENCE) {
+        if (storage_streq(key, "run_mode")) {
+            if (!storage_effectTokenIndex(storage_effectRunModeTokens,
+                                          EFFECT_SEQ_RUN_MODE_COUNT,
+                                          value, &parsed))
+                return STORAGE_STATUS_BAD_VALUE;
+            target->seq_run_mode = parsed;
+        } else if (storage_streq(key, "length")) {
+            st = storage_parseU8(value, &parsed);
+            if (st != STORAGE_STATUS_OK)
+                return st;
+            if (parsed < EFFECT_SEQ_LENGTH_MIN ||
+                parsed > EFFECT_SEQ_LENGTH_MAX)
+                return STORAGE_STATUS_BAD_VALUE;
+            target->seq_length = parsed;
+        } else if (storage_streq(key, "step_scale")) {
+            if (!storage_effectTokenIndex(storage_effectStepScaleTokens,
+                                          EFFECT_SEQ_SCALE_COUNT,
+                                          value, &parsed))
+                return STORAGE_STATUS_BAD_VALUE;
+            target->seq_step_scale = parsed;
+        } else if (strncmp(key, STORAGE_EFFECT_LANE_PREFIX,
+                           STORAGE_EFFECT_LANE_PREFIX_LEN) == 0) {
+            uint8_t lane;
+
+            if (!effects_laneByFileKey(
+                    state->type, key + STORAGE_EFFECT_LANE_PREFIX_LEN,
+                    &lane))
+                return STORAGE_STATUS_OK;
+            return storage_effectParseLane(target, lane, value);
+        }
+    }
+    return STORAGE_STATUS_OK;
+}
+
+storage_status_t storage_effectFinalize(const storage_effect_state_t *state,
+                                        effect_record_t *target)
+{
+    const effect_registry_entry_t *entry;
+    uint8_t index;
+
+    /* Validate v1 placeholders or complete v2 effect state. */
+    if (!state || !target || !state->seen_format || state->version == 0u)
+        return STORAGE_STATUS_MISSING_REQUIRED;
+    if (state->version == 1u) {
+        if (!state->seen_placeholder)
+            return STORAGE_STATUS_MISSING_REQUIRED;
+        effects_recordDefaultsForType(target, EFFECT_TYPE_OFF);
+        return STORAGE_STATUS_OK;
+    }
+    if (!state->seen_type)
+        return STORAGE_STATUS_MISSING_REQUIRED;
+    if (!state->seen_morph_section) {
+        entry = effects_registryEntry(state->type);
+        for (index = 0u; entry && index < entry->descriptor_count; index++) {
+            if ((entry->descriptors[index].base.flags &
+                 INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u)
+                target->morph[index] = target->normal[index];
+        }
+    }
+    return STORAGE_STATUS_OK;
+}
+
+static uint8_t storage_effectMorphRow(const effect_registry_entry_t *entry,
+                                      uint8_t ordinal, uint8_t *index_out)
+{
+    uint8_t index;
+    uint8_t seen = 0u;
+
+    for (index = 0u; index < entry->descriptor_count; index++) {
+        if ((entry->descriptors[index].base.flags &
+             INSTRUMENT_PARAM_FLAG_MORPHABLE) == 0u)
+            continue;
+        if (index_out && seen == ordinal) {
+            *index_out = index;
+            return 1u;
+        }
+        seen++;
+    }
+    return index_out ? 0u : seen;
+}
+
+static uint8_t storage_effectNamedLane(effect_type_id_t type,
+                                       uint8_t ordinal, uint8_t *lane_out)
+{
+    uint8_t lane;
+    uint8_t seen = 0u;
+
+    for (lane = 0u; lane < EFFECT_SEQ_LANE_COUNT; lane++) {
+        if (!effects_laneFileKey(type, lane))
+            continue;
+        if (seen == ordinal) {
+            *lane_out = lane;
+            return 1u;
+        }
+        seen++;
+    }
+    return 0u;
+}
+
+static uint8_t storage_formatEffectLaneLine(char *dst, uint16_t capacity,
+                                            const effect_record_t *record,
+                                            uint8_t lane, const char *key)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    uint16_t len = 0u;
+    uint16_t mask = 0u;
+    uint8_t step;
+    char mask_text[5];
+
+    for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++) {
+        if ((record->steps[step].lock_mask & (uint16_t)(1u << lane)) != 0u)
+            mask |= (uint16_t)(1u << step);
+    }
+    mask_text[0] = hex[(mask >> 12) & 0xfu];
+    mask_text[1] = hex[(mask >> 8) & 0xfu];
+    mask_text[2] = hex[(mask >> 4) & 0xfu];
+    mask_text[3] = hex[mask & 0xfu];
+    mask_text[4] = '\0';
+    if (!storage_effectAppendText(dst, capacity, &len,
+                                  STORAGE_EFFECT_LANE_PREFIX) ||
+        !storage_effectAppendText(dst, capacity, &len, key) ||
+        !storage_effectAppendText(dst, capacity, &len, "=0x") ||
+        !storage_effectAppendText(dst, capacity, &len, mask_text))
+        return 0u;
+    for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++) {
+        if (!storage_effectAppendText(dst, capacity, &len, ",") ||
+            !storage_effectAppendU8(dst, capacity, &len,
+                                    record->steps[step].value[lane]))
+            return 0u;
+    }
+    if (!storage_effectAppendText(dst, capacity, &len, "\n"))
+        return 0u;
+    dst[len] = '\0';
+    return (uint8_t)len;
+}
+
+uint8_t storage_formatEffectLine(char *dst, uint16_t capacity,
+                                 const effect_record_t *record,
+                                 uint16_t line_index)
+{
+    const effect_registry_entry_t *entry;
+    effect_type_id_t type;
+    uint8_t param_count;
+    uint8_t morph_count;
+    uint8_t index;
+
+    /* Stream the v2 header, params, morph, and sequence sections. */
+    if (!dst || capacity == 0u || !record)
+        return 0u;
+    type = effects_registryEntry(record->type) ? record->type
+                                               : EFFECT_TYPE_OFF;
+    entry = effects_registryEntry(type);
+    param_count = entry->descriptor_count;
+    morph_count = storage_effectMorphRow(entry, 0u, NULL);
+    if (line_index == 0u)
+        return storage_formatLiteral(dst, capacity, "format=helicase.effect\n");
+    if (line_index == 1u)
+        return storage_formatLiteral(dst, capacity, "version=2\n");
+    if (line_index == 2u)
+        return storage_formatAssignmentText(dst, capacity, "type",
+                                            entry->token3);
+    if (line_index == 3u)
+        return storage_formatLiteral(dst, capacity, "\n");
+    if (line_index == 4u)
+        return storage_formatLiteral(dst, capacity, "[params]\n");
+    line_index = (uint16_t)(line_index - 5u);
+    if (line_index < param_count)
+        return storage_formatAssignmentU16(
+            dst, capacity, entry->descriptors[line_index].base.file_key,
+            record->normal[line_index]);
+    line_index = (uint16_t)(line_index - param_count);
+    if (line_index == 0u)
+        return storage_formatLiteral(dst, capacity, "\n");
+    if (line_index == 1u)
+        return storage_formatLiteral(dst, capacity, "[morph]\n");
+    line_index = (uint16_t)(line_index - 2u);
+    if (line_index < morph_count) {
+        if (!storage_effectMorphRow(entry, (uint8_t)line_index, &index))
+            return 0u;
+        return storage_formatAssignmentU16(
+            dst, capacity, entry->descriptors[index].base.file_key,
+            record->morph[index]);
+    }
+    line_index = (uint16_t)(line_index - morph_count);
+    if (line_index == 0u)
+        return storage_formatLiteral(dst, capacity, "\n");
+    if (line_index == 1u)
+        return storage_formatLiteral(dst, capacity, "[sequence]\n");
+    if (line_index == 2u)
+        return storage_formatAssignmentText(
+            dst, capacity, "run_mode",
+            storage_effectRunModeTokens[
+                record->seq_run_mode < EFFECT_SEQ_RUN_MODE_COUNT
+                    ? record->seq_run_mode : EFFECT_SEQ_RUN_FWD]);
+    if (line_index == 3u)
+        return storage_formatAssignmentU16(dst, capacity, "length",
+                                           record->seq_length);
+    if (line_index == 4u)
+        return storage_formatAssignmentText(
+            dst, capacity, "step_scale",
+            storage_effectStepScaleTokens[
+                record->seq_step_scale < EFFECT_SEQ_SCALE_COUNT
+                    ? record->seq_step_scale : EFFECT_SEQ_SCALE_DEFAULT]);
+    line_index = (uint16_t)(line_index - 5u);
+    if (line_index >= EFFECT_SEQ_LANE_COUNT ||
+        !storage_effectNamedLane(type, (uint8_t)line_index, &index))
+        return 0u;
+    return storage_formatEffectLaneLine(dst, capacity, record, index,
+                                        effects_laneFileKey(type, index));
+}
+
+void storage_makeSavedEffectDisplayFilename(char *dst, uint8_t capacity,
+                                            const char *stem)
+{
+    uint8_t len = 0u;
+
+    /* Reuse Instrument stem normalization, then replace `.drm` with `.fx`. */
+    if (!dst || capacity == 0u)
+        return;
+    storage_makeSavedInstrumentDisplayFilename(dst, capacity, stem,
+                                               STORAGE_INSTRUMENT_DRM,
+                                               0u, 0u);
+    while (dst[len] != '\0')
+        len++;
+    if (len >= 4u && dst[len - 4u] == '.' && dst[len - 3u] == 'd' &&
+        dst[len - 2u] == 'r' && dst[len - 1u] == 'm') {
+        dst[len - 3u] = 'f';
+        dst[len - 2u] = 'x';
+        dst[len - 1u] = '\0';
+    }
 }
 
 void storage_banksetInit(storage_bankset_t *state)
 {
+    /*
+     * Clear all Bankset parser staging, including the 16-entry mask array.
+     *
+     * Inputs: caller-owned staging state. Output: no fields are considered
+     * seen and every per-Scene value starts at zero until a legacy or indexed
+     * key is parsed. Filesystem load preserves bank_init() defaults for entries
+     * whose seen bits remain clear.
+     */
     if (state) memset(state, 0, sizeof(*state));
 }
 storage_status_t storage_banksetParseLine(storage_bankset_t *state, const char *line)
@@ -1183,8 +1653,26 @@ storage_status_t storage_banksetParseLine(storage_bankset_t *state, const char *
     if (storage_streq(key,"format")) { if (!storage_streq(value,"helicase.bankset")) return STORAGE_STATUS_INVALID_FORMAT; state->seen_format=1u; }
     else if (storage_streq(key,"version")) { uint8_t v; st=storage_parseU8(value,&v); if(st!=STORAGE_STATUS_OK||v!=2u) return STORAGE_STATUS_UNSUPPORTED_VERSION; state->seen_version=1u; }
     else if (storage_streq(key,"active_scene")) { st=storage_parseU8(value,&state->active_scene); if(st!=STORAGE_STATUS_OK) return st; state->seen_active_scene=1u; }
-    else if (storage_streq(key,"scene_mask_voice_edit")) {
+    else if (storage_streq(key,"scene_mask_voice_edit") ||
+             (strncmp(key, "scene_mask_voice_edit", 21u) == 0 &&
+              key[21] == '_')) {
         uint16_t value16 = 0u; uint8_t n = 0u; uint8_t digits = 0u;
+        uint8_t scene_i;
+        uint8_t is_per_scene = (uint8_t)(key[21] == '_');
+
+        /*
+         * Parse legacy or indexed per-Scene VOICE edit masks.
+         *
+         * Inputs: one bankset key/value pair. Legacy
+         * scene_mask_voice_edit=XXXX seeds every Scene with its self-only
+         * default; scene_mask_voice_edit_NN=XXXX updates only Scene NN.
+         * Outputs: the staging array and one or all seen bits are populated
+         * for the filesystem commit loop. The indexed suffix accepts one or
+         * two decimal digits and is bounds-checked before the array write.
+         *
+         * Affiliate: storage_formatBanksetLine() emits the indexed form;
+         * filesystem.c applies only entries whose seen bit is set.
+         */
         if (value[0] == '0' && (value[1] == 'x' || value[1] == 'X'))
             n = 2u;
         while (value[n] != '\0' && digits < 4u) {
@@ -1194,8 +1682,23 @@ storage_status_t storage_banksetParseLine(storage_bankset_t *state, const char *
             digits++;
         }
         if (value[n] != '\0' || digits == 0u) return STORAGE_STATUS_BAD_VALUE;
-        state->scene_mask_voice_edit = value16;
-        state->seen_scene_mask_voice_edit = 1u;
+        if (is_per_scene) {
+            st = storage_parseU8(&key[22], &scene_i);
+            if (st != STORAGE_STATUS_OK || scene_i >= BANK_SCENE_SLOT_COUNT)
+                return STORAGE_STATUS_BAD_VALUE;
+            state->scene_mask_voice_edit[scene_i] = value16;
+            state->seen_scene_mask_voice_edit |= (uint16_t)(1u << scene_i);
+        } else {
+            /*
+             * Legacy bankset files contain one mask from the old single-Scene
+             * model. Seed each expanded slot with its self bit rather than
+             * broadcasting the legacy value, which could insert Scene 0 into
+             * every Scene's VOICE edit mask on migration.
+             */
+            for (scene_i = 0u; scene_i < BANK_SCENE_SLOT_COUNT; scene_i++)
+                state->scene_mask_voice_edit[scene_i] = (uint16_t)(1u << scene_i);
+            state->seen_scene_mask_voice_edit = 0xffffu;
+        }
     }
     return STORAGE_STATUS_OK;
 }
@@ -1207,14 +1710,42 @@ uint8_t storage_formatBanksetLine(char *dst,uint16_t capacity,const storage_bank
     if(line_index==0u) return storage_formatLiteral(dst,capacity,"format=helicase.bankset\n");
     if(line_index==1u) return storage_formatLiteral(dst,capacity,"version=2\n");
     if(line_index==2u) return storage_formatAssignmentU16(dst,capacity,"active_scene",state->active_scene);
-    if(line_index==3u) {
+    if(line_index >= 3u &&
+       line_index < (uint16_t)(3u + BANK_SCENE_SLOT_COUNT)) {
         static const char hex[]="0123456789abcdef";
-        if (capacity < 28u) return 0u;
-        memcpy(dst,"scene_mask_voice_edit=",22u);
-        dst[22]=hex[(state->scene_mask_voice_edit >> 12u)&15u];
-        dst[23]=hex[(state->scene_mask_voice_edit >> 8u)&15u];
-        dst[24]=hex[(state->scene_mask_voice_edit >> 4u)&15u];
-        dst[25]=hex[state->scene_mask_voice_edit&15u]; dst[26]='\n'; dst[27]='\0'; return 27u;
+        uint8_t scene_i = (uint8_t)(line_index - 3u);
+        uint16_t mask = state->scene_mask_voice_edit[scene_i];
+        uint8_t len;
+
+        /*
+         * Format one indexed per-Scene VOICE edit mask line.
+         *
+         * Inputs: line index 3..18 and the staged Scene mask array. Output:
+         * scene_mask_voice_edit_NN=XXXX\n, with a compact one-digit suffix for
+         * Scenes 0..9 and a two-digit suffix for Scenes 10..15. The writer is
+         * self-terminating through the existing line-index loop, so increasing
+         * the format from one line to 16 needs no filesystem ceiling change.
+         * Affiliate: storage_banksetParseLine() accepts both this form and the
+         * legacy single-key form.
+         */
+        if (capacity < 31u) return 0u;
+        memcpy(dst,"scene_mask_voice_edit_",22u);
+        if (scene_i >= 10u) {
+            dst[22] = (char)('0' + scene_i / 10u);
+            dst[23] = (char)('0' + scene_i % 10u);
+            len = 24u;
+        } else {
+            dst[22] = (char)('0' + scene_i);
+            len = 23u;
+        }
+        dst[len++] = '=';
+        dst[len++] = hex[(mask >> 12u) & 15u];
+        dst[len++] = hex[(mask >> 8u) & 15u];
+        dst[len++] = hex[(mask >> 4u) & 15u];
+        dst[len++] = hex[mask & 15u];
+        dst[len++] = '\n';
+        dst[len] = '\0';
+        return len;
     }
     return 0u;
 }
@@ -1363,7 +1894,7 @@ void storage_kitsetInit(storage_kitset_t *kit)
  * [slot1]..[slot6] sections collect instrument type and filename for each
  * voice. Legacy audio_out lines are accepted into side storage only; routing
  * is now Scene-owned and lives in sceneset.scg. The kit display name is owned
- * by the folder name, and performance controls such as voice_decimation_all
+ * by the folder name, and performance controls such as Effect Morph
  * are not stored in kitset.kcg.
  */
 storage_status_t storage_kitsetParseLine(storage_kitset_t *kit,
@@ -1644,9 +2175,9 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
              * parser's one-based destination slot. Output: the ordinary
              * numeric selector stored in SceneData. The self token is not a
              * Menu value, descriptor sentinel, or DSP runtime state. Numeric
-             * value 7 is retained as the Scene namespace displayed by Menu as
-             * `scn`; values outside the supported namespace clamp to a valid
-             * byte before Preset normalizes the paired target token.
+             * value 7 is the Scene namespace (`scn`) and 8 the Effect
+             * namespace (`fx`, Session 072 step 9); values outside the
+             * supported namespace clamp before paired-token normalization.
              */
             if (storage_streq(value, "self")) {
                 if (state->expected_slot < 1u ||
@@ -1660,8 +2191,8 @@ storage_status_t storage_instrumentParseLine(storage_instrument_state_t *state,
                     return st;
                 if (parsed < INSTRUMENT_TARGET_VOICE_FIRST)
                     parsed = INSTRUMENT_TARGET_VOICE_FIRST;
-                else if (parsed > INSTRUMENT_TARGET_VOICE_SCENE)
-                    parsed = INSTRUMENT_TARGET_VOICE_SCENE;
+                else if (parsed > INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST)
+                    parsed = INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST;
             }
         } else {
             /*

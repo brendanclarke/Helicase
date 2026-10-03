@@ -152,10 +152,11 @@ void sysclk_init(void)
     **   The 1MB region overshoots physical RAM; unmapped addresses would
     **   bus-fault on access regardless of caching.
     **
-    ** Region 1: DMA buffers (first 4KB of SRAM1) — Strongly-Ordered.
-    **   SIZE=11 → 2^(11+1) = 4KB, covers 0x20020000–0x20021000.
-    **   Higher region number wins on overlap, so this overrides Region 0
-    **   for the DMA buffer area. Non-cacheable, non-bufferable.
+    ** Region 1: DMA buffers (first 4KB of SRAM1) — Normal, non-cacheable
+    **   (S073 Step 3b; Strongly-Ordered before). SIZE=11 → 4KB,
+    **   0x20020000–0x20021000. Higher region number wins on overlap, so this
+    **   overrides Region 0. Stores are bufferable but never cached, so DMA
+    **   coherency is unchanged.
     **
     ** MPU register addresses (ARMv7-M):
     **   MPU_TYPE    0xE000ED90  (read-only, DREGION field)
@@ -184,13 +185,23 @@ void sysclk_init(void)
         MPU_RBAR = 0x20000000UL;
         MPU_RASR = (3UL << 24) | (1UL << 18) | (1UL << 17) | (19UL << 1) | 1UL;
 
-        /* Region 1: DMA buffers (4KB) — Strongly-Ordered (non-cacheable)
-        ** TEX=0 C=0 B=0 S=1 → Strongly-Ordered
-        ** AP=011, XN=1 (no execute)
-        ** = (1<<28) | (3<<24) | (0<<19) | (1<<18) | (0<<17) | (0<<16) | (11<<1) | 1 */
+        /*
+         * Region 1: DMA buffers (4KB) — Normal, non-cacheable (S073 Step 3b).
+         *
+         * What:       TEX=001 C=0 B=0 S=1, AP=011 and XN=1.
+         * Why:        lets the write buffer absorb the DMA ISR stores while
+         *             preserving uncached DMA coherency. pack_audio_half()
+         *             ends with a DSB before the ISR returns.
+         * Inputs:     none; MPU is disabled while the region is configured.
+         * Outputs:    MPU region 1 attributes.
+         * Accessors:  sysclk_init() during boot.
+         * Affiliates: .dma_nocache in the linker script, pack_audio_half(),
+         *             and adc_dma_buf, which remains uncached.
+         */
         MPU_RNR  = 1;
         MPU_RBAR = 0x20020000UL;
-        MPU_RASR = (1UL << 28) | (3UL << 24) | (1UL << 18) | (11UL << 1) | 1UL;
+        MPU_RASR = (1UL << 28) | (3UL << 24) | (1UL << 19) |
+                   (1UL << 18) | (11UL << 1) | 1UL;
 
         /* Enable MPU with default background map (PRIVDEFENA=1).
         ** Regions not covered by MPU use the default ARM memory map. */

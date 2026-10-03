@@ -54,6 +54,55 @@ void bank_setSceneMaskVoiceEdit(uint16_t mask);
 uint16_t bank_sceneMaskVoiceEdit(void);
 uint8_t bank_sceneInVoiceEditMask(uint8_t scene_index);
 void bank_toggleSceneMaskVoiceEdit(uint8_t scene_index);
+/*
+ * Drop VOICE edit-mask members whose layout no longer matches (plan §7.4).
+ *
+ * For each owner Scene, every member bit other than the owner itself is kept
+ * only while scene_editLayoutMatches(owner, member) holds. Changed entries
+ * are stored through bank_setSceneMaskVoiceEditForScene(), which marks the
+ * Bank VOICE-mask AutoSave field only on change; the active-bit invariant is
+ * preserved because an owner always matches itself.
+ *
+ * Menu load-completion funnels, boot restore, and effects_changeType() call
+ * this foreground-only repair after retained types may have changed. It costs
+ * at most 16 x 15 layout comparisons and allocates no additional SRAM.
+ */
+void bank_revalidateVoiceEditMasks(void);
+/*
+ * Read/write one resident Scene's VOICE edit fan-out mask.
+ *
+ * Inputs: zero-based Scene index and a raw 16-bit mask for the setter. Output:
+ * the indexed entry is normalized, the active-bit invariant is enforced for
+ * the active Scene, and the per-Scene Autosave field is marked on change. The
+ * getter returns the stored entry without changing active-Scene selection.
+ * Clients: Autosave restore/drain and bankset.bcg load/save staging. The
+ * active-entry wrappers above remain the UI/menu API.
+ */
+void bank_setSceneMaskVoiceEditForScene(uint8_t scene_index, uint16_t mask);
+uint16_t bank_sceneMaskVoiceEditForScene(uint8_t scene_index);
+
+/*
+ * Edit-mask helpers for copy/clear (S075, spec §4.4, §4.5, §5).
+ *
+ * bank_sceneFanoutMask(): the Scenes a paste or clear of a Scene child
+ * (Instrument, Kit, Effect, FX sequence, `clear send`) must reach: the Scene
+ * itself plus the members of its own directional entry that are present and
+ * pass scene_editLayoutMatches(scene, member), so fan-out never writes a
+ * mismatched Scene. The pressed Scene's own entry is used even when it is not
+ * active (user, F5); the active Scene's entry is read through the
+ * self-repairing getter.
+ * bank_exchangeVoiceEditMask(): `copy scene` / `copy scene settings` give the
+ * destination the source's entry with the two Scenes' bits exchanged
+ *   m' = (m & ~(src|dst)) | (m & src ? dst : 0) | (m & dst ? src : 0).
+ * bank_resetVoiceEditMaskToSelf(): `clear scene` / `clear scene settings`.
+ * Writers go through bank_setSceneMaskVoiceEditForScene(), which normalizes,
+ * keeps the active-bit invariant and marks the Bank AutoSave field; callers
+ * run bank_revalidateVoiceEditMasks() after any type change.
+ * Clients: copyOps.c, clearOps.c. Foreground only; no SRAM.
+ */
+uint16_t bank_sceneFanoutMask(uint8_t scene);
+void bank_exchangeVoiceEditMask(uint8_t src, uint8_t dst);
+void bank_resetVoiceEditMaskToSelf(uint8_t scene);
 void bank_setHasResidentBank(uint8_t present);
 uint8_t bank_hasResidentBank(void);
 

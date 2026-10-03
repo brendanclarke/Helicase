@@ -63,6 +63,8 @@
 #include "ledHandler.h"
 /* Sequencer owns transient automation restore for the shared trigger funnel. */
 #include "sequencer.h"
+/* S074: bus compressor sidechain intake in voiceControl_triggerNow(). */
+#include "BusCompressor.h"
 //#include "LCD_driver.h"
 
 static uint8_t active_voices=0;	// which voices are currently playing a note
@@ -167,6 +169,16 @@ static void voiceControl_triggerNow(uint8_t voice, uint8_t note, uint8_t vel)
 	 */
 	seq_restoreAutomatedParameters(voice);
 	instrumentManager_triggerTrack(voice, note, vel);
+
+	/*
+	 * Offer every trigger-funnel event to the S074 sidechain.
+	 *
+	 * Inputs: visible track and trigger velocity. Output: at most one pending
+	 * velocity-cubed weight; the compressor itself runs only in the mixer block
+	 * and ignores nonmatching/off sources. Sequencer, MIDI, rolls and previews
+	 * all share this funnel, preserving same-block duck timing.
+	 */
+	busComp_sidechainTrigger(voice, vel);
 
 	led_pulseLed((uint8_t)(LED_VOICE1 + voice));
 }

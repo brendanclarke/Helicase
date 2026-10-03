@@ -267,6 +267,8 @@ DEFAULT_PARAM_RENAMES = {
 # indices into canonical instrument IDs.
 LEGACY_MOD_TARGET_PARAMS = [
     "PAR_NONE",
+    # Legacy position only: S075 put PAR_EFFECT_MORPH in this firmware slot;
+    # Kit conversion never targets it.
     "PAR_VOICE_DECIMATION_ALL",
     "PAR_COARSE1",
     "PAR_FINE1",

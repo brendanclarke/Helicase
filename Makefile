@@ -12,6 +12,7 @@ MCU     = -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard
 
 CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -fdata-sections -ffunction-sections \
+          -MMD -MP \
           -I. \
           -ICore \
           -ICore/Hardware \
@@ -25,6 +26,7 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/Hardware/USB/App \
           -ICore/Hardware/USB/OTG_Driver/src \
           -ICore/Menu \
+          -ICore/Menu/CopyClear \
           -ICore/Bank \
           -ICore/Bank/Scene/Preset \
           -ICore/MIDI \
@@ -34,6 +36,9 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/DSP/Instruments/Snare \
           -ICore/DSP/Instruments/Cymbal \
           -ICore/DSP/Instruments/HiHat \
+          -ICore/DSP/Effects \
+          -ICore/DSP/Effects/StereoFilter \
+          -ICore/DSP/Effects/CrumpBit \
           -ICore/Bank/Scene \
           -ICore/Bank/Scene/Pattern \
           -ICore/Sequencer \
@@ -53,6 +58,7 @@ SRCS = \
   main.c \
   Core/Hardware/AudioCodecManager.c \
   Core/Hardware/memtest.c \
+  Core/Hardware/flashImage.c \
   Core/Hardware/triggerJacks.c \
   Core/Hardware/clocks.c \
   Core/Hardware/timebase.c \
@@ -84,8 +90,13 @@ SRCS = \
   Core/Hardware/USB/App/usbd_desc.c \
   Core/Hardware/USB/App/usbd_usr.c \
   Core/Menu/menu.c \
+  Core/Menu/menuEffects.c \
+  Core/Sequencer/StepScale.c \
   Core/Menu/Cc2Text.c \
-  Core/Menu/copyClearTools.c \
+  Core/Menu/CopyClear/copyClearSession.c \
+  Core/Menu/CopyClear/copyOps.c \
+  Core/Menu/CopyClear/clearOps.c \
+  Core/Menu/CopyClear/copyClearService.c \
   Core/Menu/screensaver.c \
   Core/Menu/SplashAnimation.c \
   Core/Bank/Scene/Preset/presetManager.c \
@@ -102,6 +113,10 @@ SRCS = \
   Core/DSP/Instruments/Snare/SnareParameters.c \
   Core/DSP/Instruments/Cymbal/CymbalParameters.c \
   Core/DSP/Instruments/HiHat/HiHatParameters.c \
+  Core/DSP/Effects/FxBuffer.c \
+  Core/DSP/Effects/EffectsManager.c \
+  Core/DSP/Effects/StereoFilter/StereoFilterParameters.c \
+  Core/DSP/Effects/CrumpBit/CrumpBitParameters.c \
   Core/MIDI/FIFO.c \
   Core/MIDI/MidiRealtime.c \
   Core/MIDI/Uart.c \
@@ -122,12 +137,15 @@ SRCS = \
 DSP_SRCS = \
   Core/DSPAudio/1PoleLp.c \
   Core/DSPAudio/BufferTools.c \
+  Core/DSPAudio/BusCompressor.c \
   Core/DSP/Instruments/Cymbal/CymbalVoice.c \
   Core/DSPAudio/Decay.c \
   Core/DSPAudio/distortion.c \
   Core/DSPAudio/dither.c \
   Core/DSP/Instruments/Drum/DrumVoice.c \
   Core/DSP/Instruments/HiHat/HiHat.c \
+  Core/DSP/Effects/StereoFilter/StereoFilterEffect.c \
+  Core/DSP/Effects/CrumpBit/CrumpBitEffect.c \
   Core/DSPAudio/lfo.c \
   Core/DSPAudio/mixer.c \
   Core/DSPAudio/modulationNode.c \
@@ -149,14 +167,23 @@ CFLAGS_DSP = $(subst -O2,-Ofast,$(CFLAGS))
 OBJS = $(patsubst %.c,$(BUILD)/%.o,$(patsubst %.s,$(BUILD)/%.o,$(SRCS))) \
        $(patsubst %.c,$(BUILD)/%.o,$(DSP_SRCS))
 
+-include $(OBJS:.o=.d)
+
 # -----------------------------------------------------------------------
 all: $(BUILD)/$(TARGET).bin
 	$(SZ) $(BUILD)/$(TARGET).elf
+	# Link budget (Session 072): flash headroom vs the 736 KiB application
+	# region (S073) and the DTCM FX arena size. Report only; the linker ASSERTs
+	# in STM32F765VIHx_FLASH.ld are the enforcing guards.
+	python3 tools/link_budget.py $(PREFIX)nm $(BUILD)/$(TARGET).elf
 
+# The .bin is the raw objcopy output. `make img` stamps the image check and
+# packages it (tools/build_lxrv2_img.py).
 $(BUILD)/$(TARGET).bin: $(BUILD)/$(TARGET).elf
 	$(CP) -O binary -S $< $@
 
-$(BUILD)/$(TARGET).elf: $(OBJS)
+# The linker script is a prerequisite so layout edits relink without a clean.
+$(BUILD)/$(TARGET).elf: $(OBJS) STM32F765VIHx_FLASH.ld
 	$(CC) $(OBJS) $(LDFLAGS) -o $@
 
 # DSP sources compiled with -Ofast (more specific rule wins over the generic one below)
@@ -179,6 +206,18 @@ $(BUILD)/Core/DSP/Instruments/HiHat/HiHat.o: Core/DSP/Instruments/HiHat/HiHat.c 
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
 
+# StereoFilter DSP runs with the fast-math policy; registry/descriptor control
+# sources remain ordinary -O2 sources in SRCS.
+$(BUILD)/Core/DSP/Effects/StereoFilter/StereoFilterEffect.o: Core/DSP/Effects/StereoFilter/StereoFilterEffect.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+
+# CrumpBit DSP (S074) runs with the fast-math policy like StereoFilter; its
+# descriptor, layout and page-hook source stays an ordinary -O2 source in SRCS.
+$(BUILD)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.o: Core/DSP/Effects/CrumpBit/CrumpBitEffect.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+
 $(BUILD)/%.o: %.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS) $< -o $@
@@ -190,8 +229,13 @@ $(BUILD)/%.o: %.s | $(BUILD)
 $(BUILD):
 	mkdir -p $(BUILD)
 
+# One script builds the card image: it stamps the per-sector CRCs that
+# flashImage.c checks at every boot (S073) and writes the LXRV2 header. If the
+# layout is not what the linker script promises it fails and leaves no image,
+# so no unstamped or stale image can be copied to the card (S074).
 img: $(BUILD)/$(TARGET).bin
-	python3 tools/build_lxrv2_img.py \
+	python3 tools/build_lxrv2_img.py $(PREFIX)nm \
+	    $(BUILD)/$(TARGET).elf \
 	    $(BUILD)/$(TARGET).bin \
 	    $(BUILD)/LXRV2_$(TARGET).img
 	@echo ">>> Copy $(BUILD)/LXRV2_$(TARGET).img to SD card root"

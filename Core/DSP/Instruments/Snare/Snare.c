@@ -40,6 +40,7 @@
 #include "squareRootLut.h"
 #include "modulationNode.h"
 #include "InstrumentManager.h"
+#include "voicePostChain.h"
 // #include "TriggerOut.h"
 
 
@@ -205,11 +206,20 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
                               const uint8_t size)
 {
 	/*
-	 * Render one snare instance into a mono block.
+	 * Render one snare instance into a mono, PRE-VOLUME block.
 	 *
 	 * Inputs: SnareVoice pointer, destination buffer, and block size. Output:
- * buf receives noise, oscillator, transient, envelope, and distortion for
- * that tagged instance without relying on a fixed snare wrapper.
+	 * buf receives noise, oscillator, transient, amp envelope, optional
+	 * velocity, and distortion for that tagged instance, but NOT the channel
+	 * volume (voice->vol).
+	 *
+	 * Why (Session 072, Effects Phase 5 step 2; volume-order bug fix D1):
+	 * volume used to multiply the signal before calcDistBlock(), so it also
+	 * acted as a hidden drive control (a bug; volume must be the last stage).
+	 * It is now a pure output level applied by the mixer after decimation,
+	 * matching Drum, so the FX send can tap a pre-volume signal that includes
+	 * this voice's distortion. Affiliates:
+	 * instrumentManager_runtimeVolume(), mixer_calcNextSampleBlock().
 	 */
 	if(!voice || !buf)
 		return;
@@ -227,28 +237,23 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 	calcNextOscSampleBlock(&voice->osc,transBuf,size,(1.f-voice->mix));
 	//--AS apply filter to synthesized sound as well here if desired, or combine code for more efficiency
 
-	uint8_t j;
-	if(voice->volumeMod)
+	/*
+	 * Fused Snare post-chain (S073 Step 4).
+	 *
+	 * What:       mix gain, saturating add, amp gain and distortion in one pass.
+	 * Why:        removes one intermediate post-chain pass while preserving
+	 *             the old int16 conversion and saturation points (S0).
+	 * Inputs:     filtered buf, transBuf, mix, volumeMod/velo/EG and distortion.
+	 * Outputs:    pre-volume buf.
+	 * Accessors:  this render function.
+	 * Affiliates: voicePostChain.h and the Step 4 host/ARM checks.
+	 */
 	{
-		for(j=0;j<size;j++)
-		{
-			//add filter to buffer
-			buf[j] *= voice->mix;
-			buf[j] = bufferTool_satAdd16(buf[j], transBuf[j]);
-			buf[j] *=  voice->velo * voice->vol * voice->egValueOscVol;
-		}
+		const float ampGain = voice->volumeMod
+			? voice->velo * voice->egValueOscVol
+			: voice->egValueOscVol;
+		voicePost_mixAddGainDist(buf, transBuf, voice->mix, ampGain,
+		                         &voice->distortion, size);
 	}
-	else
-	{
-		for(j=0;j<size;j++)
-		{
-			//add filter to buffer
-			buf[j] *= voice->mix;
-			buf[j] = bufferTool_satAdd16(buf[j], transBuf[j]);
-			buf[j] *=  voice->vol * voice->egValueOscVol;
-		}
-	}
-
-	calcDistBlock(&voice->distortion,buf,size);
 }
 //------------------------------------------------------------------------

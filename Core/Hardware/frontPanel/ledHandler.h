@@ -104,6 +104,12 @@ enum LedAliasNumbers {
 void led_init(void);
 void led_setValue(uint8_t val, uint8_t ledNr);
 void led_setValueTemp(uint8_t val, uint8_t ledNr);
+/*
+ * Restore the explicit base state for one logical LED. Temporary effect
+ * cancellation is owned by ledHandler.c's internal layer renderer, so public
+ * callers should use the effect API when they need blink/flash/pulse/chase
+ * priority preserved.
+ */
 void led_reset(uint8_t ledNr);
 void led_toggle(uint8_t ledNr);
 void led_toggleTemp(uint8_t ledNr);
@@ -259,7 +265,14 @@ void led_setBeatPulse(uint8_t on);
 /* Update Menu/LED pattern-follow state after Sequencer changes pattern. */
 void led_notifyPatternChanged(uint8_t playedPattern);
 /* Mirror a Sequencer rotation reset into the visible menu parameter. */
-/* Foreground drain for seq_ledState dirty payloads. */
+/*
+ * Foreground drain for seq_ledState dirty payloads.
+ *
+ * The CHASE payload is transport-gated at this ownership boundary: while
+ * seq_isRunning() is zero, the drain clears any retained LED_LAYER_CHASE
+ * rather than installing a playback-position inversion on the STEP row.
+ * This covers boot, transport stop, and stopped Scene/pattern realignment.
+ */
 void led_processSeqLedState(void);
 
 #endif

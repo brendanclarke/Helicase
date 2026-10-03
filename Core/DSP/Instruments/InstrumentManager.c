@@ -7,6 +7,7 @@
 #include "SceneModTargets.h"
 #include "presetManager.h"
 #include "presetMorphEngine.h"
+#include "EffectsManager.h"
 #include "DrumVoice.h"
 #include "Snare.h"
 #include "CymbalVoice.h"
@@ -15,6 +16,7 @@
 #include "modulationNode.h"
 #include "menu.h"
 #include "valueShaper.h"
+#include "config.h"
 #include "globals.h"
 #include <string.h>
 
@@ -76,7 +78,9 @@ typedef struct {
 typedef enum {
     INSTALLED_MOD_TARGET_NONE = 0,
     INSTALLED_MOD_TARGET_SLOT_DECIMATION,
-    INSTALLED_MOD_TARGET_SCENE_TARGET
+    INSTALLED_MOD_TARGET_SCENE_TARGET,
+    /* Effect parameter LFO destinations use EffectsManager's held-value path. */
+    INSTALLED_MOD_TARGET_EFFECT
 } installed_mod_target_kind_t;
 
 typedef struct {
@@ -121,6 +125,19 @@ static instrument_lfo_target_adapter_t
     lfo_descriptor_targets[INSTRUMENT_SLOT_COUNT][2u];
 static uint8_t slot6_track7_decay_lfo_active;
 static uint8_t slot6_track7_decay_lfo_value;
+
+/*
+ * Step-automation runtime override for generated slot-6 track-7 decay.
+ *
+ * Inputs: sequencer Scene-target automation supplies a per-step 0..127 value;
+ * transport-boundary restore clears it. Output: the track-7 alternate trigger
+ * path uses this transient value ahead of the continuous LFO override and the
+ * retained Kit setting. Lifetime: static runtime state only; no Kit/Scene
+ * storage or AutoSave marker is touched. Owner: InstrumentManager trigger
+ * backend. Affiliate: Sequencer Scene-automation restore.
+ */
+static uint8_t slot6_track7_decay_step_active;
+static uint8_t slot6_track7_decay_step_value;
 /*
  * Runtime type shadow for deferred Scene switching.
  *
@@ -734,11 +751,16 @@ uint8_t instrumentManager_targetValid(uint8_t scene_index,
      * Inputs: a canonical target ID and requested use. Voice IDs continue
      * through the registry-driven descriptor checks below; Scene IDs are
      * validated by the Scene-target table because they have no instrument
-     * descriptor. Output: Scene targets are legal for automation when present
-     * in that table, while all other non-voice IDs remain invalid. Affiliate:
-     * PatternData's packed automation writer and the STEP target picker.
+     * descriptor. Output: Scene targets and Effect block-7 targets are legal
+     * for automation when their owners mark them valid; other non-voice IDs
+     * remain invalid. Affiliate: PatternData's packed automation writer and
+     * the STEP target picker.
      */
     if (!instrumentParam_isVoiceParameter(id)) {
+        /* Effect automation is validated by the active Scene's registry. */
+        if (use == INSTRUMENT_TARGET_AUTOMATION &&
+            effectTarget_isEffectId(id))
+            return effects_targetValid(scene_index, id, use);
         if (use == INSTRUMENT_TARGET_AUTOMATION &&
             id >= INSTRUMENT_VOICE_ID_COUNT &&
             id < INSTRUMENT_TOTAL_ID_COUNT)
@@ -914,12 +936,11 @@ uint8_t instrumentManager_lfoTargetVoiceValid(uint8_t voice)
     /*
      * Validate the retained LFO target namespace byte.
      *
-     * Values 1..6 address instrument slots and value 7 is the Scene namespace
-     * displayed by Menu as `scn`. Future effect namespaces can be added above
-     * this value without widening lfo_target_param.
+     * Values 1..6 address instrument slots, 7 is `scn`, and 8 is the Effect
+     * namespace displayed as `fx` (Session 072 step 9).
      */
     return (uint8_t)(voice >= INSTRUMENT_TARGET_VOICE_FIRST &&
-                     voice <= INSTRUMENT_TARGET_VOICE_SCENE);
+                     voice <= INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST);
 }
 
 instrument_param_id_t instrumentManager_lfoTargetIdFromToken(
@@ -935,9 +956,9 @@ instrument_param_id_t instrumentManager_lfoTargetIdFromToken(
      * Expand an LFO target pair into a canonical runtime target.
      *
      * lfo_target_voice chooses the namespace. Voice namespaces interpret the
-     * parameter byte as a local descriptor index; the Scene namespace
-     * interprets it as a Scene target-table index. Off and invalid tokens
-     * always expand to INSTRUMENT_PARAM_INVALID.
+     * parameter byte as a local descriptor index; `scn` uses a Scene target
+     * index and `fx` uses an Effect-local descriptor index. Off and invalid
+     * tokens always expand to INSTRUMENT_PARAM_INVALID.
      */
     if (token == INSTRUMENT_TARGET_TOKEN_OFF ||
         !instrumentManager_lfoTargetVoiceValid(target_voice)) {
@@ -946,6 +967,16 @@ instrument_param_id_t instrumentManager_lfoTargetIdFromToken(
     if (target_voice == INSTRUMENT_TARGET_VOICE_SCENE) {
         uint16_t id = sceneModTarget_idFromIndex(token);
         return sceneModTarget_valid(id, SCENE_MOD_TARGET_USE_LFO)
+            ? id : INSTRUMENT_PARAM_INVALID;
+    }
+    if (target_voice == INSTRUMENT_TARGET_VOICE_EFFECT) {
+        /* `fx` accepts only current-Scene MODULATABLE Effect rows. */
+        uint16_t id;
+
+        if (token >= EFFECT_TARGET_ID_COUNT)
+            return INSTRUMENT_PARAM_INVALID;
+        id = effectTarget_id(token);
+        return effects_targetValid(scene_index, id, use)
             ? id : INSTRUMENT_PARAM_INVALID;
     }
     return instrumentManager_targetIdFromTokenForSlot(
@@ -961,9 +992,9 @@ instrument_target_token_t instrumentManager_lfoTargetTokenFromId(
     /*
      * Collapse a canonical LFO target ID into the selected namespace token.
      *
-     * Scene IDs become Scene target-table indices only when target_voice is
-     * the `scn` namespace. Instrument IDs become local descriptor indices only
-     * when they belong to the selected voice namespace.
+     * Scene IDs become Scene target-table indices only in `scn`; Effect IDs
+     * become local descriptor indices only in `fx`; instrument IDs become
+     * local descriptor indices only in the selected voice namespace.
      */
     if (id == INSTRUMENT_PARAM_INVALID ||
         !instrumentManager_lfoTargetVoiceValid(target_voice)) {
@@ -974,6 +1005,12 @@ instrument_target_token_t instrumentManager_lfoTargetTokenFromId(
         return (sceneModTarget_indexFromId(id, &index) &&
                 sceneModTarget_valid(id, SCENE_MOD_TARGET_USE_LFO))
             ? (instrument_target_token_t)index
+            : INSTRUMENT_TARGET_TOKEN_OFF;
+    }
+    if (target_voice == INSTRUMENT_TARGET_VOICE_EFFECT) {
+        /* Effect IDs collapse to local indices only in the `fx` namespace. */
+        return effects_targetValid(scene_index, id, use)
+            ? (instrument_target_token_t)effectTarget_local(id)
             : INSTRUMENT_TARGET_TOKEN_OFF;
     }
     return instrumentManager_targetTokenFromIdForSlot(
@@ -990,9 +1027,9 @@ instrument_target_token_t instrumentManager_stepLfoTargetToken(
     /*
      * Walk an LFO destination list in the selected namespace.
      *
-     * Voice namespaces reuse descriptor-token stepping. The Scene namespace
-     * walks SceneModTargets and stores only the resulting local Scene index in
-     * lfo_target_param.
+     * Voice namespaces reuse descriptor-token stepping. `scn` walks
+     * SceneModTargets and `fx` walks the current Effect registry, storing only
+     * the resulting local token in lfo_target_param.
      */
     if (!instrumentManager_lfoTargetVoiceValid(target_voice) || direction == 0)
         return current;
@@ -1001,6 +1038,15 @@ instrument_target_token_t instrumentManager_stepLfoTargetToken(
             scene_index, 0u, target_voice, current, use);
         uint16_t next_id = sceneModTarget_step(current_id, direction,
                                                SCENE_MOD_TARGET_USE_LFO);
+        return instrumentManager_lfoTargetTokenFromId(scene_index, target_voice,
+                                                      next_id, use);
+    }
+    if (target_voice == INSTRUMENT_TARGET_VOICE_EFFECT) {
+        /* Registry-ordered walk of the Scene's MODULATABLE Effect rows. */
+        uint16_t current_id = instrumentManager_lfoTargetIdFromToken(
+            scene_index, 0u, target_voice, current, use);
+        uint16_t next_id = effects_stepTarget(scene_index, current_id,
+                                              direction, use);
         return instrumentManager_lfoTargetTokenFromId(scene_index, target_voice,
                                                       next_id, use);
     }
@@ -1488,6 +1534,35 @@ uint8_t instrumentManager_runtimePan(uint8_t slot)
     }
 }
 
+/*
+ * Read the tagged runtime channel volume for one render slot.
+ *
+ * Mirrors instrumentManager_runtimePan(): resolve the slot's current runtime
+ * type, borrow that engine member, and read its vol field. An unknown type or
+ * missing instance returns 0.0f; such a slot renders silence in
+ * instrumentManager_calcSlotSyncBlock(), so no audible path depends on the
+ * fallback. Contract and clients: InstrumentManager.h.
+ */
+float instrumentManager_runtimeVolume(uint8_t slot)
+{
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? voice->vol : 0.0f; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? voice->vol : 0.0f; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        return voice ? voice->vol : 0.0f; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? voice->vol : 0.0f; }
+    default:
+        return 0.0f;
+    }
+}
+
 void instrumentManager_recalcSlotFilter(uint8_t slot)
 {
     /*
@@ -1554,12 +1629,14 @@ void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
                                          uint8_t size)
 {
     /*
-     * Render the current slot instrument into one mono audio block.
+     * Render the current slot instrument into one mono, pre-volume block.
      *
      * Inputs: zero-based render slot, output buffer, and block size. Output:
-     * the selected engine writes a mono voice block, or silence for unknown
-     * slot/type. Mixer remains responsible for decimation, pan, routing, and
-     * slider interpolation after this call.
+     * the selected engine writes a mono voice block WITHOUT channel volume, or
+     * silence for unknown slot/type. Mixer remains responsible for decimation,
+     * channel volume (instrumentManager_runtimeVolume(), Session 072 step 2),
+     * pan, routing, and slider interpolation after this call. The pre-volume
+     * block is also the FX-send tap point from Phase 5 step 5 onward.
      */
     if (!buf)
         return;
@@ -1614,10 +1691,17 @@ static void instrumentManager_applySlot6AlternateDecay(uint8_t alternate)
     ampEg = instrumentManager_ampEg(5u);
     if (!ampEg)
         return;
+    /*
+     * Specificity order for generated track-7 decay is step automation, then
+     * LFO, then the retained Kit setting. A step value defines the exact
+     * trigger-time target, so it intentionally wins over continuous LFO data.
+     */
     value = alternate
-        ? (slot6_track7_decay_lfo_active
-              ? slot6_track7_decay_lfo_value
-              : scene->kit.settings.slot6_track7_amp_envelope_decay)
+        ? (slot6_track7_decay_step_active
+              ? slot6_track7_decay_step_value
+              : (slot6_track7_decay_lfo_active
+                    ? slot6_track7_decay_lfo_value
+                    : scene->kit.settings.slot6_track7_amp_envelope_decay))
         : slot_state->parameter_images.morph_interpolation[base_index];
     if (value > 127u)
         value = 127u;
@@ -1767,6 +1851,54 @@ static OscInfo *instrumentManager_osc(uint8_t slot, const char *key)
         if (strncmp(key, "osc3_", 5) == 0) return &voice->modOsc2;
     }
     return 0;
+}
+
+/*
+ * Resolve a tagged oscillator selector to the live runtime member (S073 Step 2).
+ *
+ * What:       maps IM_SPECIAL_OSC_* to the oscillator that the old key-prefix
+ *             search would have selected for the slot's live instrument type.
+ * Why:        the runtime writer must preserve type-handoff behaviour without
+ *             rediscovering the fixed mapping with strncmp().
+ * Inputs:     slot and the selector bits from a descriptor tag.
+ * Outputs:    borrowed OscInfo pointer, or NULL when that oscillator is not
+ *             present on the live runtime type.
+ * Accessors:  instrumentManager_writeSpecialRuntime().
+ * Affiliates: instrumentManager_osc(), which remains for modulation binding,
+ *             and the four tagged parameter tables.
+ */
+static OscInfo *instrumentManager_oscBySelector(uint8_t slot, uint8_t selector)
+{
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        if (!voice) return 0;
+        if (selector == IM_SPECIAL_OSC1) return &voice->osc;
+        if (selector == IM_SPECIAL_OSC2) return &voice->modOsc;
+        return 0; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        if (!voice) return 0;
+        if (selector == IM_SPECIAL_OSC1) return &voice->osc;
+        if (selector == IM_SPECIAL_OSC_NOISE) return &voice->noiseOsc;
+        return 0; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        if (!voice) return 0;
+        if (selector == IM_SPECIAL_OSC1) return &voice->osc;
+        if (selector == IM_SPECIAL_OSC2) return &voice->modOsc;
+        if (selector == IM_SPECIAL_OSC3) return &voice->modOsc2;
+        return 0; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        if (!voice) return 0;
+        if (selector == IM_SPECIAL_OSC1) return &voice->osc;
+        if (selector == IM_SPECIAL_OSC2) return &voice->modOsc;
+        if (selector == IM_SPECIAL_OSC3) return &voice->modOsc2;
+        return 0; }
+    default:
+        return 0;
+    }
 }
 
 static ResonantFilter *instrumentManager_filter(uint8_t slot)
@@ -2267,9 +2399,6 @@ static uint8_t instrumentManager_applyVelocitySceneTarget(
     case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
         preset_morphVoice(descriptor->voice_slot, (uint8_t)value);
         return 1u;
-    case SCENE_MOD_TARGET_KIND_DECIMATION_ALL:
-        preset_setVoiceDecimationAll(scene_getActiveIndex(), (uint8_t)value);
-        return 1u;
     case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
         preset_setSlot6Track7AmpEnvelopeDecay(scene_getActiveIndex(), 0u,
                                               (uint8_t)value, 0u);
@@ -2277,6 +2406,65 @@ static uint8_t instrumentManager_applyVelocitySceneTarget(
     default:
         return 0u;
     }
+}
+
+_Static_assert(EFFECT_LFO_DIRECTION_NONE == PRESET_MORPH_LFO_DIRECTION_NONE &&
+               EFFECT_LFO_DIRECTION_DOWN == PRESET_MORPH_LFO_DIRECTION_MAIN &&
+               EFFECT_LFO_DIRECTION_UP == PRESET_MORPH_LFO_DIRECTION_MORPH,
+               "Effect and voice-Morph LFO directions share one encoding");
+
+/*
+ * Encode one LFO sample as a base-independent endpoint direction and depth.
+ *
+ * Positive polarity moves toward the maximum; negative polarity preserves
+ * original-LXR motion toward the minimum; bipolar polarity selects the
+ * endpoint from the centered source. The base is deliberately not read:
+ * each owner resolves the depth around its own current held value.
+ */
+static PresetMorphLfoDirection instrumentManager_lfoDirectionDepth(
+    float lfo_value_0_1, uint8_t polarity, float amount, uint8_t *depth_out)
+{
+    float signed_depth;
+    float magnitude;
+    PresetMorphLfoDirection direction;
+    uint8_t depth;
+
+    if (lfo_value_0_1 < 0.f)
+        lfo_value_0_1 = 0.f;
+    else if (lfo_value_0_1 > 1.f)
+        lfo_value_0_1 = 1.f;
+    if (amount < 0.f)
+        amount = 0.f;
+    else if (amount > 1.f)
+        amount = 1.f;
+    switch (polarity) {
+    case MOD_NODE_POLARITY_POSITIVE:
+        signed_depth = amount * lfo_value_0_1;
+        break;
+    case MOD_NODE_POLARITY_BIPOLAR:
+        signed_depth = amount * (2.f * lfo_value_0_1 - 1.f);
+        break;
+    default:
+        signed_depth = -(amount * (1.f - lfo_value_0_1));
+        break;
+    }
+    if (signed_depth > 0.f) {
+        direction = PRESET_MORPH_LFO_DIRECTION_MORPH;
+        magnitude = signed_depth;
+    } else if (signed_depth < 0.f) {
+        direction = PRESET_MORPH_LFO_DIRECTION_MAIN;
+        magnitude = -signed_depth;
+    } else {
+        direction = PRESET_MORPH_LFO_DIRECTION_NONE;
+        magnitude = 0.f;
+    }
+    if (magnitude > 1.f)
+        magnitude = 1.f;
+    depth = (uint8_t)(magnitude * 255.f + 0.5f);
+    if (depth == 0u)
+        direction = PRESET_MORPH_LFO_DIRECTION_NONE;
+    *depth_out = depth;
+    return direction;
 }
 
 static uint8_t instrumentManager_updateLfoSceneDestination(
@@ -2300,23 +2488,31 @@ static uint8_t instrumentManager_updateLfoSceneDestination(
     if (!descriptor || !scene)
         return 0u;
     switch (descriptor->kind) {
-    case SCENE_MOD_TARGET_KIND_VOICE_MORPH:
-        base = scene->settings.voice_morph_amount[descriptor->voice_slot];
-        shaped = modNode_shapeRangeU16(base, descriptor->min_value,
-                                       descriptor->max_value,
-                                       lfo_value_0_1, amount, polarity);
+    case SCENE_MOD_TARGET_KIND_VOICE_MORPH: {
+        /* Voice Morph keeps the S071 direction/depth contract unchanged. */
+        uint8_t depth;
+        PresetMorphLfoDirection direction =
+            instrumentManager_lfoDirectionDepth(lfo_value_0_1, polarity,
+                                                amount, &depth);
+
         presetMorph_setVoiceLfoModulation(scene_getActiveIndex(),
                                           descriptor->voice_slot,
                                           source_slot, target_pair,
-                                          1u, (uint8_t)shaped);
+                                          direction, depth);
         return 1u;
-    case SCENE_MOD_TARGET_KIND_DECIMATION_ALL:
-        base = scene->settings.voice_decimation_all;
-        shaped = modNode_shapeRangeU16(base, descriptor->min_value,
-                                       descriptor->max_value,
-                                       lfo_value_0_1, amount, polarity);
-        preset_applyVoiceDecimationAllRuntime((uint8_t)shaped);
+    }
+    case SCENE_MOD_TARGET_KIND_EFFECT_MORPH: {
+        /* Effect Morph resolves this same encoding around its live base. */
+        uint8_t depth;
+        PresetMorphLfoDirection direction =
+            instrumentManager_lfoDirectionDepth(lfo_value_0_1, polarity,
+                                                amount, &depth);
+
+        effects_setLfoContribution(source_slot, target_pair,
+                                   EFFECT_LFO_TARGET_MORPH,
+                                   (uint8_t)direction, depth);
         return 1u;
+    }
     case SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY:
         base = scene->kit.settings.slot6_track7_amp_envelope_decay;
         shaped = modNode_shapeRangeU16(base, descriptor->min_value,
@@ -2338,6 +2534,35 @@ static uint8_t instrumentManager_updateLfoSceneDestination(
     default:
         return 0u;
     }
+}
+
+void instrumentManager_setSlot6Track7StepDecayOverride(uint8_t value)
+{
+    /*
+     * Set the transient generated track-7 decay used by the next alternate
+     * trigger.
+     *
+     * Inputs: seven-bit step-automation value. Output: the trigger path uses
+     * this value without changing retained Kit settings or AutoSave state.
+     * Client: seq_applySceneAutomation(); restore: clear function below.
+     */
+    if (value > 127u)
+        value = 127u;
+    slot6_track7_decay_step_active = 1u;
+    slot6_track7_decay_step_value = value;
+}
+
+void instrumentManager_clearSlot6Track7StepDecayOverride(void)
+{
+    /*
+     * Clear the transient generated track-7 decay.
+     *
+     * Output: subsequent alternate triggers fall back to the active LFO
+     * override or retained Kit value. Client: transport-boundary Scene
+     * automation restore; no retained data is modified.
+     */
+    slot6_track7_decay_step_active = 0u;
+    slot6_track7_decay_step_value = 0u;
 }
 
 static const ParamDescriptor *instrumentManager_lfoAdapterDescriptor(
@@ -2430,7 +2655,6 @@ static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
                                                            uint8_t target_pair)
 {
     installed_mod_target_t *installed;
-    const scene_t *scene;
 
     /*
      * Restore the base value for one installed supplemental LFO target.
@@ -2445,7 +2669,6 @@ static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
     if (source_slot >= INSTRUMENT_SLOT_COUNT || target_pair > 1u)
         return;
     installed = &lfo_installed_targets[source_slot][target_pair];
-    scene = scene_getConst(scene_getActiveIndex());
     switch (installed->kind) {
     case INSTALLED_MOD_TARGET_SLOT_DECIMATION:
         (void)instrumentManager_applySlotDecimationTarget(
@@ -2456,12 +2679,6 @@ static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
         const scene_mod_target_descriptor_t *descriptor =
             sceneModTarget_descriptor(installed->target_id);
         if (descriptor &&
-            descriptor->kind == SCENE_MOD_TARGET_KIND_DECIMATION_ALL &&
-            scene) {
-            preset_applyVoiceDecimationAllRuntime(
-                scene->settings.voice_decimation_all);
-        }
-        if (descriptor &&
             descriptor->kind == SCENE_MOD_TARGET_KIND_SLOT6_TRACK7_AMP_DECAY) {
             slot6_track7_decay_lfo_active = 0u;
         }
@@ -2470,6 +2687,8 @@ static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
         break;
     }
     presetMorph_clearLfoSource(source_slot, target_pair);
+    /* Effect `fx`/`fxm` contributions from this pair end too (Step 9). */
+    effects_clearLfoSource(source_slot, target_pair);
     installed->kind = INSTALLED_MOD_TARGET_NONE;
     installed->target_id = INSTRUMENT_PARAM_INVALID;
 }
@@ -2524,6 +2743,17 @@ static uint8_t instrumentManager_installLfoModulationTarget(
     instrumentManager_restoreLfoSupplementalTarget(source_slot, target_index);
     if (target_id == INSTRUMENT_PARAM_INVALID) {
         modNode_clearDestination(node);
+        return 1u;
+    }
+    if (effectTarget_isEffectId(target_id)) {
+        /* Effect LFO targets resolve around the held value in EffectsManager. */
+        modNode_clearDestination(node);
+        if (!effects_targetValid(scene_getActiveIndex(), target_id,
+                                 INSTRUMENT_TARGET_MODULATION))
+            return 0u;
+        lfo_installed_targets[source_slot][target_index].kind =
+            INSTALLED_MOD_TARGET_EFFECT;
+        lfo_installed_targets[source_slot][target_index].target_id = target_id;
         return 1u;
     }
     if (instrumentManager_isSlotDecimationTarget(scene_getActiveIndex(),
@@ -2698,6 +2928,18 @@ void instrumentManager_updateLfoAdapters(uint8_t source_slot,
             installed->target_id, source_slot, target_pair,
             lfo_value_0_1, polarity, amount);
         break;
+    case INSTALLED_MOD_TARGET_EFFECT: {
+        /* Encode only; EffectsManager resolves the Effect parameter base. */
+        uint8_t depth;
+        PresetMorphLfoDirection direction =
+            instrumentManager_lfoDirectionDepth(lfo_value_0_1, polarity,
+                                                amount, &depth);
+
+        effects_setLfoContribution(source_slot, target_pair,
+                                   effectTarget_local(installed->target_id),
+                                   (uint8_t)direction, depth);
+        break;
+    }
     default:
         break;
     }
@@ -2707,184 +2949,259 @@ static uint8_t instrumentManager_writeSpecialRuntime(
     uint8_t slot, const ParamDescriptor *descriptor,
     instrument_param_value_t value)
 {
-    const char *key = descriptor ? descriptor->file_key : 0;
-    OscInfo *osc;
-    ResonantFilter *filter;
-    SlopeEg2 *ampEg;
-    DecayEg *pitchEg;
-    TransientGenerator *transient;
-    Distortion *distortion;
-    uint8_t byteValue = value;
-
     /*
-     * Descriptor-owned shaper bridge.
+     * Tagged descriptor special writer (S073 Step 2).
      *
-     * The storage address is still slot+descriptor_index. This function only
-     * restores the old DSP-side meaning for rows whose runtime update was more
-     * than a plain normalized float write in MidiParser.c: oscillator tuning,
-     * filter shapers, envelope setters, transient setters, and distortion
-     * curves. It intentionally keys from descriptor->file_key so no flat PAR_*
-     * identity layer comes back.
+     * What:       dispatches directly on the immutable row tag and performs
+     *             the same DSP setter math as the pre-S073 key-string chain.
+     * Why:        the fixed row mapping no longer pays strcmp/strstr/strncmp
+     *             work on every modulation, Morph, velocity or Scene write.
+     *             Every row still takes the same tag switch; no render work is
+     *             skipped by a control value.
+     * Inputs:     slot, descriptor tag and descriptor-domain byte value.
+     * Outputs:    DSP runtime state; 1 when a special writer consumed the
+     *             value, 0 for generic offset handling.
+     * Accessors:  instrumentManager_writeRuntimeInternal().
+     * Affiliates: InstrumentManager.h tags, the four parameter tables,
+     *             instrumentManager_oscBySelector(), and the diagnostic
+     *             classifier below.
      */
-    if (!key)
-        return 0u;
+    const uint8_t special = descriptor ? descriptor->runtime.special
+                                       : (uint8_t)IM_SPECIAL_NONE;
+    const uint8_t byteValue = value;
 
-    osc = instrumentManager_osc(slot, key);
-    if (osc) {
-        if (strcmp(key, "noise_freq") == 0) {
-            osc->freq = byteValue / 127.0f * 22000.0f;
-            return 1u;
-        }
-        if (strstr(key, "pitch_coarse")) {
-            osc->midiFreq = (uint16_t)((osc->midiFreq & 0x00ffu) |
-                                       ((uint16_t)byteValue << 8));
-            osc_recalcFreq(osc);
-            return 1u;
-        }
-        if (strstr(key, "pitch_fine")) {
-            osc->midiFreq = (uint16_t)((osc->midiFreq & 0xff00u) |
-                                       byteValue);
-            osc_recalcFreq(osc);
-            return 1u;
-        }
-    }
-
-    filter = instrumentManager_filter(slot);
-    if (filter) {
-        if (strcmp(key, "filter_freq") == 0) {
-            SVF_directSetFilterValue(filter,
-                valueShaperF2F(byteValue / 127.0f, FILTER_SHAPER));
-            return 1u;
-        }
-        if (strcmp(key, "filter_reso") == 0) {
-            SVF_setReso(filter, byteValue / 127.0f);
-            return 1u;
-        }
-        if (strcmp(key, "filter_drive") == 0) {
+    switch (special & IM_SPECIAL_WRITER_MASK) {
+    case IM_SPECIAL_NOISE_FREQ: {
+        OscInfo *osc = instrumentManager_oscBySelector(
+            slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
+        if (!osc) return 0u;
+        osc->freq = byteValue / 127.0f * 22000.0f;
+        return 1u; }
+    case IM_SPECIAL_PITCH_COARSE: {
+        OscInfo *osc = instrumentManager_oscBySelector(
+            slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
+        if (!osc) return 0u;
+        osc->midiFreq = (uint16_t)((osc->midiFreq & 0x00ffu) |
+                                   ((uint16_t)byteValue << 8));
+        osc_recalcFreq(osc);
+        return 1u; }
+    case IM_SPECIAL_PITCH_FINE: {
+        OscInfo *osc = instrumentManager_oscBySelector(
+            slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
+        if (!osc) return 0u;
+        osc->midiFreq = (uint16_t)((osc->midiFreq & 0xff00u) | byteValue);
+        osc_recalcFreq(osc);
+        return 1u; }
+    case IM_SPECIAL_FILTER_FREQ: {
+        ResonantFilter *filter = instrumentManager_filter(slot);
+        if (!filter) return 0u;
+        SVF_directSetFilterValue(filter,
+            valueShaperF2F(byteValue / 127.0f, FILTER_SHAPER));
+        return 1u; }
+    case IM_SPECIAL_FILTER_RESO: {
+        ResonantFilter *filter = instrumentManager_filter(slot);
+        if (!filter) return 0u;
+        SVF_setReso(filter, byteValue / 127.0f);
+        return 1u; }
+    case IM_SPECIAL_FILTER_DRIVE: {
+        ResonantFilter *filter = instrumentManager_filter(slot);
+        if (!filter) return 0u;
 #if UNIT_GAIN_DRIVE
-            filter->drive = byteValue / 127.0f;
+        filter->drive = byteValue / 127.0f;
 #else
-            SVF_setDrive(filter, byteValue);
+        SVF_setDrive(filter, byteValue);
 #endif
-            return 1u;
-        }
-        if (strcmp(key, "filter_type") == 0) {
-            instrumentManager_writeParameter(
-                (Parameter){ (void *)((uint8_t *)instrumentManager_runtimeInstance(slot) +
-                                      descriptor->runtime.offset),
-                             descriptor->runtime.parameter_type },
-                (uint8_t)(byteValue + 1u));
-            return 1u;
-        }
-    }
-
-    ampEg = instrumentManager_ampEg(slot);
-    if (ampEg) {
-        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_HAT &&
-            strcmp(key, "amp_envelope_decay") == 0) {
+        return 1u; }
+    case IM_SPECIAL_FILTER_TYPE:
+        if (!instrumentManager_filter(slot)) return 0u;
+        instrumentManager_writeParameter(
+            (Parameter){ (void *)((uint8_t *)instrumentManager_runtimeInstance(slot) +
+                                  descriptor->runtime.offset),
+                         descriptor->runtime.parameter_type },
+            (uint8_t)(byteValue + 1u));
+        return 1u;
+    case IM_SPECIAL_AMP_ATTACK: {
+        SlopeEg2 *ampEg = instrumentManager_ampEg(slot);
+        if (!ampEg) return 0u;
+        slopeEg2_setAttack(ampEg, byteValue,
+                           (uint8_t)(instrumentManager_slotType(slot) ==
+                                     INSTRUMENT_TYPE_DRM ? AMP_EG_SYNC : 0u));
+        return 1u; }
+    case IM_SPECIAL_AMP_DECAY: {
+        SlopeEg2 *ampEg = instrumentManager_ampEg(slot);
+        if (!ampEg) return 0u;
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_HAT) {
             HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
-            /*
-             * HiHat base decay keeps its dedicated closed-hat cache.
-             *
-             * Inputs: canonical base amp_envelope_decay descriptor value for a
-             * HiHat slot. Output: the slot hihat decayClosed receives the shaped
-             * SlopeEg2 decay value used when slot 6 is triggered from track 6.
-             * This must precede the generic amp_envelope_decay branch because
-             * HiHat stores closed/open decay in separate cached floats rather
-             * than only in oscVolEg.decay.
-             */
             if (voice)
                 voice->decayClosed = slopeEg2_calcDecay(byteValue);
             return 1u;
         }
-        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_HAT &&
-            strcmp(key, "amp_envelope_decay_choke") == 0) {
-            HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
-            /*
-             * HiHat choke decay keeps the former open-hat runtime cache.
-             *
-             * Inputs: canonical amp_envelope_decay_choke descriptor value.
-             * Output: the slot hihat decayOpen receives the shaped value used
-             * when the shared hihat slot is triggered from track 7. The descriptor
-             * remains separately mod-targetable because it is a normal
-             * descriptor row, not a hidden menu-only alternate.
-             */
-            if (voice)
-                voice->decayOpen = slopeEg2_calcDecay(byteValue);
-            return 1u;
-        }
-        if (strcmp(key, "amp_envelope_attack") == 0) {
-            slopeEg2_setAttack(ampEg, byteValue,
-                               (uint8_t)(instrumentManager_slotType(slot) ==
-                                         INSTRUMENT_TYPE_DRM ? AMP_EG_SYNC : 0u));
-            return 1u;
-        }
-        if (strcmp(key, "amp_envelope_decay") == 0) {
-            slopeEg2_setDecay(ampEg, byteValue,
-                              (uint8_t)(instrumentManager_slotType(slot) ==
-                                        INSTRUMENT_TYPE_DRM ? AMP_EG_SYNC : 0u));
-            return 1u;
-        }
-        if (strcmp(key, "amp_envelope_slope") == 0) {
-            slopeEg2_setSlope(ampEg, byteValue);
-            return 1u;
-        }
-    }
-
-    pitchEg = instrumentManager_pitchEg(slot);
-    if (pitchEg) {
-        if (strcmp(key, "pitch_envelope_decay") == 0) {
-            DecayEg_setDecay(pitchEg, byteValue);
-            return 1u;
-        }
-        if (strcmp(key, "pitch_envelope_slope") == 0) {
-            DecayEg_setSlope(pitchEg, byteValue);
-            return 1u;
-        }
-        if (strcmp(key, "pitch_envelope_amount") == 0) {
-            if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_DRM) {
-                DrumVoice *voice = instrumentManager_drumRuntime(slot);
-                if (voice)
-                    voice->egPitchModAmount =
-                        instrumentManager_pitchModAmount(byteValue);
-            } else if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_SNR) {
-                SnareVoice *voice = instrumentManager_snareRuntime(slot);
-                if (voice)
-                    voice->egPitchModAmount =
-                        instrumentManager_pitchModAmount(byteValue);
-            }
-            return 1u;
-        }
-    }
-
-    transient = instrumentManager_transient(slot);
-    if (transient) {
-        if (strcmp(key, "transient_wave") == 0) {
-            transient_setWaveform(transient, byteValue);
-            return 1u;
-        }
-        if (strcmp(key, "transient_freq") == 0) {
-            transient->pitch = 1.0f + ((byteValue / 33.9f) - 0.75f);
-            return 1u;
-        }
-    }
-
-    distortion = instrumentManager_distortion(slot);
-    if (distortion && strcmp(key, "instrument_drive") == 0) {
-        setDistortionShape(distortion, byteValue);
-        return 1u;
-    }
-
-    if (strcmp(key, "lfo_rate") == 0) {
-        Lfo *lfo = instrumentManager_runtimeLfo(slot);
-        if (!lfo)
+        slopeEg2_setDecay(ampEg, byteValue,
+                          (uint8_t)(instrumentManager_slotType(slot) ==
+                                    INSTRUMENT_TYPE_DRM ? AMP_EG_SYNC : 0u));
+        return 1u; }
+    case IM_SPECIAL_HAT_DECAY_CHOKE: {
+        HiHatVoice *voice;
+        if (!instrumentManager_ampEg(slot) ||
+            instrumentManager_slotType(slot) != INSTRUMENT_TYPE_HAT)
             return 0u;
-        lfo_setFreq(lfo, byteValue);
+        voice = instrumentManager_hihatRuntime(slot);
+        if (voice)
+            voice->decayOpen = slopeEg2_calcDecay(byteValue);
+        return 1u; }
+    case IM_SPECIAL_AMP_SLOPE: {
+        SlopeEg2 *ampEg = instrumentManager_ampEg(slot);
+        if (!ampEg) return 0u;
+        slopeEg2_setSlope(ampEg, byteValue);
+        return 1u; }
+    case IM_SPECIAL_PITCH_EG_DECAY: {
+        DecayEg *pitchEg = instrumentManager_pitchEg(slot);
+        if (!pitchEg) return 0u;
+        DecayEg_setDecay(pitchEg, byteValue);
+        return 1u; }
+    case IM_SPECIAL_PITCH_EG_SLOPE: {
+        DecayEg *pitchEg = instrumentManager_pitchEg(slot);
+        if (!pitchEg) return 0u;
+        DecayEg_setSlope(pitchEg, byteValue);
+        return 1u; }
+    case IM_SPECIAL_PITCH_EG_AMOUNT:
+        if (!instrumentManager_pitchEg(slot)) return 0u;
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_DRM) {
+            DrumVoice *voice = instrumentManager_drumRuntime(slot);
+            if (voice) voice->egPitchModAmount =
+                instrumentManager_pitchModAmount(byteValue);
+        } else if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_SNR) {
+            SnareVoice *voice = instrumentManager_snareRuntime(slot);
+            if (voice) voice->egPitchModAmount =
+                instrumentManager_pitchModAmount(byteValue);
+        }
         return 1u;
+    case IM_SPECIAL_TRANSIENT_WAVE: {
+        TransientGenerator *transient = instrumentManager_transient(slot);
+        if (!transient) return 0u;
+        transient_setWaveform(transient, byteValue);
+        return 1u; }
+    case IM_SPECIAL_TRANSIENT_FREQ: {
+        TransientGenerator *transient = instrumentManager_transient(slot);
+        if (!transient) return 0u;
+        transient->pitch = 1.0f + ((byteValue / 33.9f) - 0.75f);
+        return 1u; }
+    case IM_SPECIAL_INSTRUMENT_DRIVE: {
+        Distortion *distortion = instrumentManager_distortion(slot);
+        if (!distortion) return 0u;
+        setDistortionShape(distortion, byteValue);
+        return 1u; }
+    case IM_SPECIAL_LFO_RATE: {
+        Lfo *lfo = instrumentManager_runtimeLfo(slot);
+        if (!lfo) return 0u;
+        lfo_setFreq(lfo, byteValue);
+        return 1u; }
+    case IM_SPECIAL_NONE:
+    default:
+        return 0u;
     }
-
-    return 0u;
 }
+
+#if DEV_MODE_DIAGNOSTIC
+/*
+ * Original key classifier for the special-tag diagnostic (S073 Step 2).
+ *
+ * What:       returns the writer tag selected by the pre-S073 key-string
+ *             chain for a registry type and file key.
+ * Why:        the boot diagnostic compares this independent classifier with
+ *             the flash tag on every descriptor row.
+ * Inputs:     instrument type and a nullable file key.
+ * Outputs:    IM_SPECIAL_* plus an oscillator selector where applicable.
+ * Accessors:  instrumentManager_specialTagSelfCheck().
+ * Affiliates: tools/dsp_test/check_special_tags.py and the four table files.
+ */
+static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
+                                                    const char *key)
+{
+    uint8_t osc = 0xFFu;
+
+    if (!key)
+        return IM_SPECIAL_NONE;
+    if (strncmp(key, "osc1_", 5) == 0)
+        osc = IM_SPECIAL_OSC1;
+    else if (strncmp(key, "osc2_", 5) == 0 &&
+             (type == INSTRUMENT_TYPE_DRM || type == INSTRUMENT_TYPE_CYM ||
+              type == INSTRUMENT_TYPE_HAT))
+        osc = IM_SPECIAL_OSC2;
+    else if (strncmp(key, "osc3_", 5) == 0 &&
+             (type == INSTRUMENT_TYPE_CYM || type == INSTRUMENT_TYPE_HAT))
+        osc = IM_SPECIAL_OSC3;
+    else if (strncmp(key, "noise_", 6) == 0 && type == INSTRUMENT_TYPE_SNR)
+        osc = IM_SPECIAL_OSC_NOISE;
+    if (osc != 0xFFu) {
+        if (strcmp(key, "noise_freq") == 0)
+            return IM_SPECIAL_NOISE_FREQ | osc;
+        if (strstr(key, "pitch_coarse"))
+            return IM_SPECIAL_PITCH_COARSE | osc;
+        if (strstr(key, "pitch_fine"))
+            return IM_SPECIAL_PITCH_FINE | osc;
+    }
+    if (strcmp(key, "filter_freq") == 0) return IM_SPECIAL_FILTER_FREQ;
+    if (strcmp(key, "filter_reso") == 0) return IM_SPECIAL_FILTER_RESO;
+    if (strcmp(key, "filter_drive") == 0) return IM_SPECIAL_FILTER_DRIVE;
+    if (strcmp(key, "filter_type") == 0) return IM_SPECIAL_FILTER_TYPE;
+    if (type == INSTRUMENT_TYPE_HAT &&
+        strcmp(key, "amp_envelope_decay_choke") == 0)
+        return IM_SPECIAL_HAT_DECAY_CHOKE;
+    if (strcmp(key, "amp_envelope_attack") == 0) return IM_SPECIAL_AMP_ATTACK;
+    if (strcmp(key, "amp_envelope_decay") == 0) return IM_SPECIAL_AMP_DECAY;
+    if (strcmp(key, "amp_envelope_slope") == 0) return IM_SPECIAL_AMP_SLOPE;
+    if (type == INSTRUMENT_TYPE_DRM || type == INSTRUMENT_TYPE_SNR) {
+        if (strcmp(key, "pitch_envelope_decay") == 0)
+            return IM_SPECIAL_PITCH_EG_DECAY;
+        if (strcmp(key, "pitch_envelope_slope") == 0)
+            return IM_SPECIAL_PITCH_EG_SLOPE;
+        if (strcmp(key, "pitch_envelope_amount") == 0)
+            return IM_SPECIAL_PITCH_EG_AMOUNT;
+    }
+    if (strcmp(key, "transient_wave") == 0) return IM_SPECIAL_TRANSIENT_WAVE;
+    if (strcmp(key, "transient_freq") == 0) return IM_SPECIAL_TRANSIENT_FREQ;
+    if (strcmp(key, "instrument_drive") == 0)
+        return IM_SPECIAL_INSTRUMENT_DRIVE;
+    if (strcmp(key, "lfo_rate") == 0) return IM_SPECIAL_LFO_RATE;
+    return IM_SPECIAL_NONE;
+}
+
+/*
+ * Compare all flash special tags with the original key rules (S073 Step 2).
+ *
+ * What:       walks the immutable instrument registry and counts tag/classifier
+ *             mismatches, without allocating a table or retaining state.
+ * Why:        gives the diagnostic boot screen an on-device proof of the
+ *             descriptor migration.
+ * Inputs:     registry entries and descriptor rows.
+ * Outputs:    mismatch count clamped to 9; zero is pass.
+ * Accessors:  main.c boot_showFxBufDiagnostic().
+ * Affiliates: instrumentManager_classifySpecialKey() and the host checker.
+ */
+uint8_t instrumentManager_specialTagSelfCheck(void)
+{
+    uint8_t mismatches = 0u;
+    uint8_t e;
+
+    for (e = 0u; e < instrumentManager_registryCount(); e++) {
+        const instrument_registry_entry_t *entry =
+            instrumentManager_registryEntryAt(e);
+        uint8_t i;
+
+        if (!entry)
+            continue;
+        for (i = 0u; i < entry->descriptor_count; i++) {
+            const ParamDescriptor *d = &entry->descriptors[i];
+            if (d->runtime.special !=
+                instrumentManager_classifySpecialKey(entry->type, d->file_key) &&
+                mismatches < 9u)
+                mismatches++;
+        }
+    }
+    return mismatches;
+}
+#endif
 
 static uint8_t instrumentManager_writeRuntimeInternal(
     uint8_t slot, const ParamDescriptor *descriptor,
@@ -2956,13 +3273,45 @@ static uint8_t instrumentManager_writeRuntimeInternal(
     case INSTRUMENT_BIND_LFO_TARGET_VOICE:
     case INSTRUMENT_BIND_LFO_TARGET_VOICE_2:
         /*
-         * The selected target voice is stored in its descriptor cell and paired
-         * with the matching lfo_target_param binding when that later binding is
-         * applied. There is no standalone DSP write for this value. Pair 1 and
-         * pair 2 share this validation but keep separate binding identities so
-         * Menu/storage can find the correct sibling descriptor cells.
+         * Reinstall the LFO destination when its target namespace changes.
+         *
+         * The voice cell selects the namespace (voices 1..6 or Scene) under
+         * which the sibling parameter token is interpreted. Changing that
+         * namespace can move the target between disjoint ID spaces. The old
+         * store-only path left the previous install — including any Scene
+         * voice-Morph contribution — active until the parameter cell changed.
+         *
+         * The caller has already stored value in SceneData. Read the matching
+         * sibling parameter cell, expand the new voice/token pair, and use the
+         * normal install path so restoreLfoSupplementalTarget() clears stale
+         * descriptor, decimation, and Morph state before the new target.
          */
-        return instrumentManager_lfoTargetVoiceValid(value);
+        {
+            uint8_t target_pair =
+                (descriptor->runtime.kind == INSTRUMENT_BIND_LFO_TARGET_VOICE_2)
+                    ? 1u : 0u;
+            instrument_binding_kind_t param_kind = target_pair
+                ? INSTRUMENT_BIND_LFO_TARGET_PARAM_2
+                : INSTRUMENT_BIND_LFO_TARGET_PARAM;
+            const kit_instrument_slot_t *source =
+                scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+            uint8_t param_index;
+            uint8_t param_token = INSTRUMENT_TARGET_TOKEN_OFF;
+
+            if (!instrumentManager_lfoTargetVoiceValid(value))
+                return 0u;
+            if (source &&
+                instrumentManager_descriptorIndexForBinding(
+                    source->type, param_kind, &param_index)) {
+                param_token =
+                    source->parameter_images.instrument_parameters[param_index];
+            }
+            return instrumentManager_installLfoModulationTarget(
+                slot, target_pair,
+                instrumentManager_lfoTargetIdFromToken(
+                    scene_getActiveIndex(), slot, value, param_token,
+                    INSTRUMENT_TARGET_MODULATION));
+        }
 
     case INSTRUMENT_BIND_LFO_TARGET_PARAM:
     case INSTRUMENT_BIND_LFO_TARGET_PARAM_2:

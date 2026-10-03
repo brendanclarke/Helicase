@@ -4,6 +4,25 @@
 #include <stdint.h>
 
 /*
+ * Base-independent direction for one hidden LFO voice-Morph contribution.
+ *
+ * Inputs: InstrumentManager converts LFO polarity/source/amount into this
+ * direction plus a normalized 0..255 depth. Output: the Morph worker computes
+ * the signed delta from the effective base when it resolves the contribution.
+ * NONE is inactive, MAIN moves toward amount 0, and MORPH moves toward amount
+ * 255. The representation replaces the former active+absolute-amount pair
+ * without increasing the contribution table's two-byte entry size.
+ *
+ * Affiliate: presetMorph_resolveLfoAmount() consumes this enum and the depth;
+ * presetMorph_clearLfoSource() writes NONE/0 during route teardown.
+ */
+typedef enum {
+    PRESET_MORPH_LFO_DIRECTION_NONE = 0,
+    PRESET_MORPH_LFO_DIRECTION_MAIN,
+    PRESET_MORPH_LFO_DIRECTION_MORPH
+} PresetMorphLfoDirection;
+
+/*
  * Rate-limited Scene Morph worker.
  *
  * Requests queue dirty instrument slots. tick() does at most one
@@ -57,7 +76,7 @@ void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot);
  * Set the hidden LFO Morph layer for one target voice.
  *
  * Inputs: Scene index, zero-based target voice slot, source LFO slot, target
- * pair index, active flag, and the LFO-shaped Morph amount in the 0..255
+ * pair index, base-independent direction, and normalized depth in the 0..255
  * domain. Output: the Morph worker records that one source contribution and
  * queues the target voice, but it does not mutate
  * SceneData.settings.voice_morph_amount[] and does not update PERF menu
@@ -65,16 +84,17 @@ void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot);
  *
  * This API exists because LFO Morph modulation is not the same operation as
  * preset_morphVoice(). Menu, velocity, and MIDI CC1 set the retained base
- * Morph value. LFO modulation is a secondary layer centered on that base and
- * must be consumed by the bounded Morph worker so it never interpolates an
- * entire voice immediately from the audio/LFO dispatch path.
+ * Morph value. LFO modulation is a secondary layer centered on the current
+ * effective base, including a step-automation base when present, and must be
+ * consumed by the bounded Morph worker so it never interpolates an entire
+ * voice immediately from the audio/LFO dispatch path.
  */
 void presetMorph_setVoiceLfoModulation(uint8_t scene_index,
                                        uint8_t target_slot,
                                        uint8_t source_slot,
                                        uint8_t target_pair,
-                                       uint8_t active,
-                                       uint8_t amount);
+                                       PresetMorphLfoDirection direction,
+                                       uint8_t depth);
 /*
  * Clear one LFO source/pair from every hidden Morph target.
  *
@@ -85,5 +105,62 @@ void presetMorph_setVoiceLfoModulation(uint8_t scene_index,
  * the old source/pair but may no longer know which voice it previously drove.
  */
 void presetMorph_clearLfoSource(uint8_t source_slot, uint8_t target_pair);
+
+/*
+ * Read the effective runtime Morph base for one voice.
+ *
+ * Inputs: resident Scene index and zero-based voice slot. Output: the active
+ * step-automation Morph overlay when present, otherwise the retained Scene
+ * amount. This is a read-only bridge for Menu's live Scene superpage and
+ * diagnostics; LFO direction/depth resolution remains inside the bounded
+ * Morph worker. It never changes SceneData or AutoSave state.
+ */
+uint8_t presetMorph_getEffectiveVoiceAmount(uint8_t scene_index,
+                                             uint8_t slot);
+
+/*
+ * Read the resolved Morph amount of one voice (S075 F2-H).
+ *
+ * What: the amount the Morph worker uses: the step override or retained base,
+ * plus active LFO contributions when this is the active Scene. Read-only; it
+ * never changes SceneData, AutoSave or worker state. Output is 0..255, or 0
+ * for an invalid Scene/slot. Client: preset_getEffectiveFxSendAmount().
+ */
+uint8_t presetMorph_getResolvedVoiceAmount(uint8_t scene_index,
+                                           uint8_t slot);
+/*
+ * Re-interpolate and apply one voice parameter now (S075 F3).
+ *
+ * What: after a menu edit of one Normal or Morph endpoint, computes that
+ * parameter's interpolated value with the amount the voice is playing with
+ * (presetMorph_getResolvedVoiceAmount(): step override or retained amount,
+ * plus any LFO layer on the active Scene), stores it in
+ * morph_interpolation[local], and writes it to the runtime unless step
+ * automation holds the parameter.
+ * Why: a menu edit only sets an endpoint, and the sound follows the
+ * interpolation, never the raw edited value, so with Morph above 0 the sound
+ * changes by less than the edit. Automation always wins. Only this parameter's
+ * interpolation can change, so the whole voice is not queued and no other
+ * parameter is rewritten. The edit is heard at once in both views.
+ * Inputs: resident Scene, slot 0..5, descriptor-local index of a morphable
+ * parameter. Outputs: morph_interpolation[local] (any Scene); a runtime write
+ * (active Scene, parameter not held). Non-morphable or invalid input: no-op.
+ * Client: preset_setInstrumentParameter() (menu edits). Affiliates:
+ * presetMorph_tick() (same maths), seq_automationHoldsParameter().
+ */
+void presetMorph_applyParameterNow(uint8_t scene_index, uint8_t slot,
+                                   uint8_t local);
+
+/*
+ * Set/clear step-automation Morph overlays.
+ *
+ * Step automation replaces a retained Morph base only in the runtime worker;
+ * LFO contributions are centered on that transient base. Clearing all
+ * overlays queues restoration from retained Scene values at transport or
+ * Pattern boundaries without marking the Scene dirty.
+ */
+void presetMorph_setStepAutomationOverride(uint8_t scene_index,
+                                           uint8_t slot, uint8_t amount);
+void presetMorph_clearAllStepAutomationOverrides(uint8_t scene_index);
 
 #endif

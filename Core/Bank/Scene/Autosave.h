@@ -35,17 +35,17 @@
 /* One-byte writer witness; generation, not this wrapping byte, selects A/B. */
 #define AUTOSAVE_HEADER_PROBE_COUNTER_OFFSET 16u
 /*
- * S064 format version for the scalar AutoSave record.
+ * Session 072 step 6 format version for the scalar AutoSave record.
  *
- * What: identifies the 145-row HCNAMES identity image carried by the
- * record. Why: the previous version serialized only rows 0..128, so its
- * payload must not be interpreted as a complete Pattern-aware identity
- * image. Inputs/outputs: compile-time format tag consumed by the writer and
- * boot validator; the scalar record byte geometry remains unchanged.
- * Affiliates: autosave_streamValidationUpdate(),
- * filesystem_autosaveBootReaderBlocking(), and HCNAMES Pattern provenance.
+ * What: identifies the 161-row HCNAMES identity image (Pattern rows 129..144
+ * plus Effect rows 145..160), the Effect source field at Effect-relative
+ * 430..431, and a live Effect reader. Why: version 2 records carry no Effect
+ * provenance and a 145-row identity image, so they must not be interpreted;
+ * they are rejected and a fresh baseline is created. Affiliates:
+ * autosave_streamValidationUpdate(), filesystem_autosaveBootReaderBlocking(),
+ * and HCNAMES Pattern/Effect provenance.
  */
-#define AUTOSAVE_HEADER_FORMAT_VERSION        2u
+#define AUTOSAVE_HEADER_FORMAT_VERSION        3u
 #define AUTOSAVE_HEADER_COMMIT_VALID        0xa5u
 
 /*
@@ -100,7 +100,7 @@
  * Affiliates: filesystem.c's FS_RESIDENT_NAMES_ROW_COUNT and the Pattern
  * dirty/HNAMES lifecycle.
  */
-#define AUTOSAVE_HCNAMES_ROW_COUNT           145u
+#define AUTOSAVE_HCNAMES_ROW_COUNT           161u
 #define AUTOSAVE_HCNAMES_ROW_BYTES             9u
 
 /* HCNAMES' fixed Bank / Scene / Kit / Instrument row ownership. */
@@ -125,6 +125,10 @@
 #define AUTOSAVE_HCNAMES_PATTERN_BASE \
     (AUTOSAVE_HCNAMES_INSTRUMENT_BASE + \
      (AUTOSAVE_SCENE_COUNT * AUTOSAVE_INSTRUMENTS_PER_KIT))
+
+/* Effect provenance rows follow the sixteen resident Pattern rows. */
+#define AUTOSAVE_HCNAMES_EFFECT_BASE \
+    (AUTOSAVE_HCNAMES_PATTERN_BASE + AUTOSAVE_SCENE_COUNT)
 
 /*
  * Absolute top-level offsets.
@@ -156,25 +160,44 @@
     (AUTOSAVE_BANK_OFFSET + 12u)
 #define AUTOSAVE_BANK_VOICE_EDIT_MASK_OFFSET \
     (AUTOSAVE_BANK_OFFSET + 13u)
+/*
+ * Width of the per-Scene VOICE edit-mask region.
+ *
+ * Inputs: the fixed 16-Scene Bank workspace. Output: 32 little-endian bytes,
+ * two bytes per Scene, at offsets 13..44 within the Bank section. The region
+ * remains inside AUTOSAVE_BANK_SECTION_BYTES (128), so the record allocation
+ * and payload offsets do not change.
+ *
+ * Affiliates: BankData's indexed mask accessors, autosave_getLivePayloadByte(),
+ * autosave_markBankFieldDirty(), and autosave_applyBankPayload().
+ */
+#define AUTOSAVE_BANK_VOICE_EDIT_MASK_BYTES \
+    (BANK_SCENE_SLOT_COUNT * 2u)
 
 /*
  * One Scene's relative regions and explicit parameter allocation.
  *
  * Scene source occupies bytes 8..9; parameters occupy bytes 10..127, of
- * which indices 0..39 currently exist. Effects reserve 512 bytes without a
- * live owner. Kit begins at 640: source at 8..9, parameters at 10..127, then
- * six 192-byte Instruments, ending at 1,920.
+ * which indices 0..44 exist (40 = Effect Morph amount, Session 072; 41..44 =
+ * the bus compressor's cmp/cam/ctm/csc, S074). The
+ * Effect region (128..639) holds a 3-byte type token, an 8-byte name, and
+ * 419 live parameter bytes from Effect-relative offset 11. Kit begins at
+ * 640: source at 8..9, parameters at 10..127, then six 192-byte Instruments,
+ * ending at 1,920.
  */
 #define AUTOSAVE_SCENE_NAME_OFFSET              0u
 #define AUTOSAVE_SCENE_PARAMETERS_OFFSET       10u
 #define AUTOSAVE_SCENE_PARAMETER_ALLOC_BYTES  118u
-#define AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES    40u
+#define AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES    51u  /* S075 F2: +6 FX-send Morph */
 #define AUTOSAVE_EFFECT_OFFSET                128u
 #define AUTOSAVE_EFFECT_TYPE_OFFSET             0u
-#define AUTOSAVE_EFFECT_NAME_OFFSET             1u
-#define AUTOSAVE_EFFECT_PARAMETERS_OFFSET        9u
-#define AUTOSAVE_EFFECT_PARAMETER_ALLOC_BYTES  503u
-#define AUTOSAVE_EFFECT_PARAM_COUNT              0u
+#define AUTOSAVE_EFFECT_TYPE_BYTES              3u
+#define AUTOSAVE_EFFECT_NAME_OFFSET             3u
+#define AUTOSAVE_EFFECT_PARAMETERS_OFFSET      11u
+#define AUTOSAVE_EFFECT_PARAMETER_ALLOC_BYTES  501u
+#define AUTOSAVE_EFFECT_PARAM_COUNT            419u
+#define AUTOSAVE_EFFECT_SOURCE_OFFSET \
+    (AUTOSAVE_EFFECT_PARAMETERS_OFFSET + AUTOSAVE_EFFECT_PARAM_COUNT)
 #define AUTOSAVE_KIT_OFFSET                   640u
 #define AUTOSAVE_KIT_NAME_OFFSET                0u
 #define AUTOSAVE_KIT_PARAMETERS_OFFSET         10u
@@ -185,18 +208,19 @@
 /*
  * Format-owned identifiers for every currently live scalar parameter domain.
  *
- * What: Bank fields select variable-width ranges, while Scene and Kit values
- * select one byte in their ordered allocations; Effect deliberately has a
- * zero live count. Why: retained owners must never repeat wire offsets, and a
- * newly added parameter must extend the same count used by both its getter and
- * dirty marker. Inputs/outputs: owner setters pass these identifiers to the
- * marker API below; Autosave converts them to canonical mask bits. Affiliates:
- * BankData, SceneData, Preset, and autosave_getLivePayloadByte().
+ * What: Bank fields select variable-width ranges, while Scene, Kit, and
+ * Effect values select one byte in their ordered allocations. Effect owns a
+ * uint16_t index space because its 419 live cells exceed one byte. Why:
+ * retained owners must never repeat wire offsets, and a newly added parameter
+ * must extend the same count used by both its getter and dirty marker.
+ * Inputs/outputs: owner setters pass these identifiers to the marker API;
+ * Autosave converts them to canonical mask bits. Affiliates: BankData,
+ * SceneData, Preset, and autosave_getLivePayloadByte().
  *
  * Future-owner rule: a new Bank field needs a field/width mapping and getter;
  * a new Scene or Kit parameter is appended before its COUNT and written only
- * through its owner setter; a future Effect parameter raises the zero live
- * count, adds retained ownership/getter logic, and uses the Effect marker.
+ * through its owner setter; a new Effect cell extends the ordered enum,
+ * getter, and SceneData setter using the Effect marker.
  */
 typedef enum {
     AUTOSAVE_BANK_FIELD_RESTORE_SLOT = 0,
@@ -210,13 +234,29 @@ typedef enum {
 typedef enum {
     AUTOSAVE_SCENE_PARAM_MORPH_AMOUNT = 0,
     AUTOSAVE_SCENE_PARAM_VOICE_MORPH_BASE = 1,
-    AUTOSAVE_SCENE_PARAM_DECIMATION_ALL = 7,
+    /* S075: former global decimation cell; kept as reserved cell 7. */
+    AUTOSAVE_SCENE_PARAM_RESERVED_7 = 7,
     AUTOSAVE_SCENE_PARAM_AUDIO_OUT_BASE = 8,
     AUTOSAVE_SCENE_PARAM_FX_SEND_BASE = 14,
     AUTOSAVE_SCENE_PARAM_FADER_BASE = 20,
     AUTOSAVE_SCENE_PARAM_MIDI_CHANNEL_BASE = 26,
     AUTOSAVE_SCENE_PARAM_MIDI_NOTE_BASE = 33,
-    AUTOSAVE_SCENE_PARAM_COUNT = 40
+    /* Scene Effect Morph amount; appended so earlier wire positions stay fixed. */
+    AUTOSAVE_SCENE_PARAM_EFFECT_MORPH = 40,
+    /*
+     * S074 bus compressor Scene bytes in scene_bus_comp_field_t order:
+     * cmp, cam, ctm, csc. They occupy previously reserved cells, so the
+     * AutoSave record layout, masks and format version remain unchanged.
+     */
+    AUTOSAVE_SCENE_PARAM_BUS_COMP_BASE = 41,
+    /*
+     * S075 F2-H: Morph endpoint of the per-voice FX send, one cell per
+     * instrument slot (45..50), in scene_settings_t.fx_send_morph[] order.
+     * These occupy previously reserved cells; record layout and masks stay
+     * unchanged. Owner: scene_setVoiceFxSendMorph().
+     */
+    AUTOSAVE_SCENE_PARAM_FX_SEND_MORPH_BASE = 45,
+    AUTOSAVE_SCENE_PARAM_COUNT = 51
 } autosave_scene_parameter_t;
 
 typedef enum {
@@ -224,6 +264,32 @@ typedef enum {
     AUTOSAVE_KIT_PARAM_SLOT6_TRACK7_MORPH_DECAY,
     AUTOSAVE_KIT_PARAM_COUNT
 } autosave_kit_parameter_t;
+
+/*
+ * Ordered live cells in the 512-byte Effect region.
+ *
+ * The three sequence settings are followed by normal[64], morph[64], and
+ * sixteen 18-byte steps (mask low, mask high, then 16 lane values). This is
+ * an explicit wire projection rather than a serialized C struct layout.
+ */
+typedef enum {
+    AUTOSAVE_EFFECT_PARAM_SEQ_RUN_MODE = 0,
+    AUTOSAVE_EFFECT_PARAM_SEQ_LENGTH = 1,
+    AUTOSAVE_EFFECT_PARAM_SEQ_STEP_SCALE = 2,
+    AUTOSAVE_EFFECT_PARAM_NORMAL_BASE = 3,
+    AUTOSAVE_EFFECT_PARAM_MORPH_BASE = 67,
+    AUTOSAVE_EFFECT_PARAM_STEPS_BASE = 131
+} autosave_effect_parameter_t;
+
+#define AUTOSAVE_EFFECT_STEP_BYTES              18u
+#define AUTOSAVE_EFFECT_STEP_MASK_LO_OFFSET      0u
+#define AUTOSAVE_EFFECT_STEP_MASK_HI_OFFSET      1u
+#define AUTOSAVE_EFFECT_STEP_VALUES_OFFSET       2u
+
+_Static_assert(AUTOSAVE_EFFECT_PARAM_STEPS_BASE +
+                   16u * AUTOSAVE_EFFECT_STEP_BYTES ==
+                   AUTOSAVE_EFFECT_PARAM_COUNT,
+               "Effect live cells end after the 16th sequence step");
 
 /*
  * One Instrument's fixed 192-byte relative layout.
@@ -270,6 +336,11 @@ _Static_assert(AUTOSAVE_EFFECT_PARAMETERS_OFFSET +
 _Static_assert(AUTOSAVE_EFFECT_PARAM_COUNT <=
                    AUTOSAVE_EFFECT_PARAMETER_ALLOC_BYTES,
                "live Effect parameters must fit their reserved cells");
+_Static_assert(AUTOSAVE_EFFECT_SOURCE_OFFSET == 430u,
+               "Effect source must remain at relative bytes 430..431");
+_Static_assert(AUTOSAVE_EFFECT_SOURCE_OFFSET + AUTOSAVE_SOURCE_BYTES <=
+                   AUTOSAVE_EFFECT_SECTION_BYTES,
+               "Effect source must fit the reserved Effect section");
 _Static_assert(AUTOSAVE_KIT_OFFSET + AUTOSAVE_KIT_SECTION_BYTES ==
                    AUTOSAVE_SCENE_SECTION_BYTES,
                "Kit must end at the Scene boundary");
@@ -297,6 +368,8 @@ _Static_assert(AUTOSAVE_KIT_PARAMETERS_OFFSET +
                    AUTOSAVE_KIT_INSTRUMENTS_OFFSET,
                "Kit parameter allocation must end at Instruments");
 _Static_assert(AUTOSAVE_HCNAMES_PATTERN_BASE + AUTOSAVE_SCENE_COUNT ==
+                   AUTOSAVE_HCNAMES_EFFECT_BASE &&
+               AUTOSAVE_HCNAMES_EFFECT_BASE + AUTOSAVE_SCENE_COUNT ==
                    AUTOSAVE_HCNAMES_ROW_COUNT,
                "autosave name mapping must consume all HCNAMES rows");
 _Static_assert(AUTOSAVE_SCENE_PARAM_COUNT ==
@@ -427,10 +500,12 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value);
  * mask-relative interval streamed from the selected file; take accepts a
  * payload-relative offset. Outputs: enabled owner mutations may set bits,
  * recovery bits are always ORed into the one 3,856-byte SRAM record, HasDirty
- * reports pending work, and take returns/clears one prior bit atomically. Why:
- * boot initialization must not look like user mutation, while foreground
- * classification must not erase an interrupt-side re-dirty. Affiliates:
- * filesystem boot recovery and drain phases 54-56.
+ * reports pending work through a constant-time maintained-count test, and
+ * take returns/clears one prior bit atomically. Why: boot initialization must
+ * not look like user mutation, while foreground classification must not erase
+ * an interrupt-side re-dirty. The count is private to Autosave.c and has no
+ * wire-format representation. Affiliates: filesystem boot recovery and drain
+ * phases 54-56.
  */
 void autosave_setMutationTrackingEnabled(uint8_t enabled);
 /*
@@ -560,6 +635,36 @@ uint16_t autosave_patternDirtyMask(void);
 void autosave_clearPatternDirty(uint8_t scene_index);
 
 /*
+ * Read the latest semantic Pattern mutation timestamp.
+ *
+ * What: returns the TIM2 microsecond stamp captured by the most recent
+ * autosave_markPatternDirty() call, or zero after autosave_discardDirtyMask().
+ * Why: filesystem.c uses the raw value with timebase_tim2Delta() to enforce
+ * the Pattern AutoSave quiet window without owning mutation state. Input:
+ * none. Output: one aligned 32-bit timestamp. Affiliate:
+ * filesystem_autosavePatternDrainSchedule_tick().
+ */
+uint32_t autosave_lastPatternSemanticUs(void);
+
+/*
+ * Non-semantic Pattern dirty mask: one bit per Scene for physical-relocation-
+ * only changes that do not represent musical edits.
+ *
+ * What: set, read, and clear one bit per resident Scene. Why: physical pool
+ * relocations change block addresses and bitmap runs but not musical content;
+ * a separate mask lets the scheduler run non-semantic writes at strictly lower
+ * priority than semantic Pattern and parameter AutoSave. The mark function
+ * does not clear the HCNAMES refreshed witness or the Bank card-clean bit —
+ * relocations must never touch those registers. Inputs/outputs: scene_index
+ * 0..15 for set/clear; the getter returns the full 16-bit pending mask.
+ * Affiliates: PatternStackService.c relocation executor and filesystem.c
+ * non-semantic Pattern drain scheduling.
+ */
+void autosave_markNonSemanticPatternDirty(uint8_t scene_index);
+uint16_t autosave_nonSemanticPatternDirtyMask(void);
+void autosave_clearNonSemanticPatternDirty(uint8_t scene_index);
+
+/*
  * Payload-to-resident apply functions (boot reader, §10).
  *
  * What: inverse of autosave_getLivePayloadByte() — writes winner-record
@@ -572,13 +677,16 @@ void autosave_clearPatternDirty(uint8_t scene_index);
 void autosave_applyBankPayload(const uint8_t *bank_section);
 void autosave_applyScenePayload(uint8_t scene_index,
                                 const uint8_t *scene_section);
+/* Apply one validated Effect wire region while autosave tracking is off. */
+void autosave_applyEffectPayload(uint8_t scene_index,
+                                 const uint8_t *effect_section);
 void autosave_applyKitPayload(uint8_t scene_index,
                               const uint8_t *kit_section);
 uint8_t autosave_applyInstrumentPayload(uint8_t scene_index,
                                         uint8_t instrument_slot,
                                         const uint8_t *instrument_record);
 uint16_t autosave_extractPayloadSource(const uint8_t *section,
-                                       uint8_t source_offset);
+                                       uint16_t source_offset);
 
 /*
  * Restore captured live offsets after an unsuccessful target transaction.
