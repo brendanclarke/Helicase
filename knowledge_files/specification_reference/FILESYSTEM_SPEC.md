@@ -36,6 +36,11 @@ bus compressor (`bus_comp_mode`, `bus_comp_amount`, `bus_comp_time`,
 else on the card changed. Two AutoSave facts relevant to every file on the
 card were learned in S074:
 
+Session 075 F2 adds the keyed `fx_send_morph` line (six 0..127 Morph send
+endpoints) after the bus compressor lines. A missing key loads zero. Fresh or
+cleared Scene voice routes default to St1, and bus compressor defaults are
+`off`, 0, 0, `off`.
+
 - AsyncFATFS stores a cluster-rounded size while a file is open for writing,
   so an interrupted write leaves an overlong file;
 - validators must therefore prove the exact length with a one-byte
@@ -933,9 +938,10 @@ pattern.pat
 `sceneset.scg` stores scene-level metadata/configuration and validates the
 folder as a scene. Current v1 Scene settings include global/per-voice Morph
 values, seven MIDI channel/note values, the
-Scene-owned per-voice mix settings `audio_out[6]`, `fx_send_amount[6]`, and
-`fader_setting[6]`, the optional `effect_morph_amount`, and (S074) the four
-optional bus compressor keys.
+Scene-owned per-voice mix settings `audio_out[6]`, Normal/Morph FX-send
+endpoints `fx_send_amount[6]`/`fx_send_morph[6]`, and `fader_setting[6]`, the
+optional `effect_morph_amount`, and (S074) the four optional bus compressor
+keys.
 
 The writer emits one `key=value` line per field, in this order:
 
@@ -955,6 +961,7 @@ The writer emits one `key=value` line per field, in this order:
 | 11 | `bus_comp_amount` | 0..127 (`cam`) | S074; optional |
 | 12 | `bus_comp_time` | 0..127 (`ctm`) | S074; optional |
 | 13 | `bus_comp_sidechain` | 0..6 (`off`, voice 1..6) | S074; optional |
+| 14 | `fx_send_morph` | 6 × 0..127 | S075 F2; missing loads 0 |
 
 - **`voice_decimation_all` retired (S075).** Global `srt` is no longer a
   parameter: the key is not written, and an existing file that contains it
@@ -968,7 +975,7 @@ The writer emits one `key=value` line per field, in this order:
     (`storage_busCompKey()`), so the spellings cannot drift.
   - A parsed value is **clamped** to its field's domain
     (`scene_busCompClamp()`), not rejected.
-  - A missing key keeps the defaults (`off`, 48, 48, `off`), which all three
+  - A missing key keeps the defaults (`off`, 0, 0, `off`), which all three
     Scene stage-default paths set.
   - Older firmware ignores the keys as unknown.
   - The values are per Scene and travel with Scene and Bank load/save.
@@ -1084,7 +1091,7 @@ type=flt
 [params]
 effect_audio_out=0
 effect_level=127
-effect_pan=64
+effect_pan=63
 filter_freq=40
 filter_reso=90
 filter_drive=0
@@ -1135,6 +1142,7 @@ Current `scene_settings_t` fields:
 - `midi_note[NUM_TRACKS]`
 - `audio_out[INSTRUMENT_SLOT_COUNT]`
 - `fx_send_amount[INSTRUMENT_SLOT_COUNT]`
+- `fx_send_morph[INSTRUMENT_SLOT_COUNT]` (Morph endpoint of the FX send)
 - `fader_setting[INSTRUMENT_SLOT_COUNT]` (0..`SCENE_FADER_SETTING_MAX` = 3)
 - `effect_morph_amount` (0..255, Session 072)
 - `bus_comp[SCENE_BUS_COMP_FIELD_COUNT]` (mode, amount, time, sidechain;
@@ -1282,7 +1290,8 @@ Validation rules:
   preference. A source tool must reject or deliberately rename an overlength
   stem and update every reference; firmware must not silently truncate it.
 - File extension must match declared type: `.drm`, `.snr`, `.cym`, or `.hat`.
-- Legacy `audio_out=<0..5>` lines may still be parsed as compatibility side
+- A missing `audio_out` line defaults every voice to St1 (stored route 0;
+  S075 F2). Legacy `audio_out=<0..5>` lines may still be parsed as compatibility side
   data. Scene Load imports them only when loading an embedded Kit inside an old
   Scene folder whose `sceneset.scg` lacks an `audio_out` line. Root Kit Load
   ignores them and preserves current Scene routing.

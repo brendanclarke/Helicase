@@ -275,7 +275,11 @@ uint8_t ccClear_potTurned(const cc_pot_target_t *target)
 
 /* ---- queued Scene-level clears (spec §5, §9.9) ------------------------- */
 
-/* `clear send`: FX send 0 and fader `pre` on the track's slot, fanned out. */
+/*
+ * `clear send`: both FX-send endpoints 0 and fader `pre` on the track's slot,
+ * fanned out over the destination Scene's edit mask (S075 F2-Q9). Clearing
+ * the Morph endpoint keeps the send at 0 for every resolved Morph amount.
+ */
 static uint8_t ccClear_runSend(const cc_job_t *job)
 {
     uint8_t slot = (job->track < INSTRUMENT_SLOT_COUNT)
@@ -288,6 +292,7 @@ static uint8_t ccClear_runSend(const cc_job_t *job)
         if ((mask & ccClear_bit(m)) == 0u)
             continue;
         (void)preset_setVoiceFxSendAmount(m, slot, 0u);
+        (void)preset_setVoiceFxSendMorph(m, slot, 0u);
         (void)preset_setVoiceFaderSetting(m, slot, 0u);
     }
     ccTrace(AUTOSAVE_TRACE_CC_EVT_FANOUT,

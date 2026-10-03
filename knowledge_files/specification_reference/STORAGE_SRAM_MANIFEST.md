@@ -4,15 +4,19 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 075 F1/trace implementation (2026-10-02),
-  `dev-ph6-copyclear`, uncommitted. DEV link: `text=530,592`, `data=416`,
-  `bss=426,616`; binary 531,008 B. Production (`DEV_MODE_LOGGING=0`) link:
-  `text=516,688`, `data=408`, `bss=409,840`; binary 517,096 B. The F1 pass
+- **Current as of:** Session 075 F2 implementation (2026-10-03),
+  `dev-ph6-copyclear`, uncommitted. DEV link: `text=531,936`, `data=416`,
+  `bss=426,712`; raw binary 532,352 B and stamped image 532,368 B.
+  Production (`DEV_MODE_LOGGING=0`) remains at the F1 snapshot until the
+  production configuration is rebuilt. The F1 pass
   adds +124 B production SRAM1 net: early source masks +64 B, restore masks
   +64 B, early flags +1 B and governor credit +2 B, offset by the removed
   group-blink state −7 B. The 9,000 B name cache doubles as copy/clear
   working storage only during an intentional lazy loan (§8.2). Every Scene
-  pool keeps a permanent 132 B swap block (§8.2).
+  pool keeps a permanent 132 B swap block (§8.2). F2 adds the six-byte
+  `fx_send_morph` endpoint array to each Scene, the 4-byte Effect-page voice
+  mix overlay record, and the 1-byte overlay TRACK mask; the measured DEV
+  `scenes` symbol is `0x65E0`.
 - **S074 changes:** +64 B SRAM1 (Scene settings for the bus compressor);
   +32 B DTCM `.dtcmz` (bus compressor state), so the FX arena is −32 B;
   CrumpBit uses 0 B of static RAM (56 B inside the existing 76 B union)
@@ -34,9 +38,9 @@ changing any of it.
   `python3 tools/link_budget.py arm-none-eabi-nm build/lxr02.elf`
 
   ```
-  Flash : 502,928 / 753,664 B used, headroom 250,736 B
+  Flash : 532,352 / 753,664 B used, headroom 221,312 B
   ITCM  : 4,168 / 16,384 B
-  DTCM  : statics 4,480 B
+  DTCM  : statics 4,472 B
   FXBUF : 126,592 B at 0x20001180 (min 122,880, margin 3,712)
   ```
 
@@ -79,21 +83,21 @@ is 128 KiB, sectors 5–11 are 256 KiB.
 
 - **Window:** `0x08008000–0x080BFFFF` (753,664 B), sectors 1–6. Session 073
   added sector 6 (it was sample storage before); the window was 480 KiB.
-- **Use at S074 close:** 502,928 B; **headroom 250,736 B**.
+- **Use at S075 F2 DEV link:** 532,352 B; **headroom 221,312 B**.
 - **History:** 34,356 B free at S072 Step 1; 8,080 B at the S072 close;
   269,504 B after the S073 expansion; 266,560 B after the S073 DSP
-  refactor; 250,736 B at the S074 close. S074 added +15,824 B, of which
-  CrumpBit was 11,600 B.
+  refactor; 250,736 B at the S074 close; 221,312 B at the S075 F2 DEV link.
+  S074 added +15,824 B, of which CrumpBit was 11,600 B.
 
 ### 3.2 Image layout
 
 The linker script is `STM32F765VIHx_FLASH.ld`. The image is, in order:
 
-| Section | Size (S073) | Notes |
+| Section | Size (S075 F2 DEV) | Notes |
 |---|---:|---|
 | `.isr_vector` | 456 B | At `0x08008000`; VTOR is set at startup |
 | `.image_check` | 32 B | Per-sector CRC block (§3.4); `(READONLY)`, so `size` does not count it as data |
-| `.text` | 497,344 B (S074; 481,520 at S073) | `Reset_Handler` first (`KEEP(*(.text.Reset_Handler))`), then code and `.rodata` |
+| `.text` | 526,768 B (S075 F2 DEV; 497,344 at S074) | `Reset_Handler` first (`KEEP(*(.text.Reset_Handler))`), then code and `.rodata` |
 | `.itcm` load image | 4,168 B | Copied to ITCM by `Reset_Handler` |
 | `.data` load image | 416 B | Copied to SRAM1 |
 | `.dtcm` load image | 512 B | Copied to DTCM (`squareRootLut`) |
@@ -272,32 +276,38 @@ only works while sector 6 holds no code.
 
 ---
 
-## 5. Static RAM ledger (S073 close)
+## 5. Static RAM ledger (Session 075 F2 DEV link)
 
 | Region and section | Start | Capacity | Static bytes | Free |
 |---|---|---:|---:|---:|
 | SRAM1 `.dma_nocache` | `0x20020000` | part of SRAM1 | 3,100 | — |
 | SRAM1 `.data` | `0x20020c1c` | part of SRAM1 | 416 | — |
-| SRAM1 `.bss` | `0x20020dc0` | part of SRAM1 | 292,732 | — |
-| **SRAM1 total** | `0x20020000` | **376,832** | **296,248** | **80,584** |
+| SRAM1 `.bss` | `0x20020dc0` | part of SRAM1 | 293,060 | — |
+| **SRAM1 total** | `0x20020000` | **376,832** | **296,576** | **80,256** |
 | DTCM `.dtcm` | `0x20000000` | part of DTCM | 512 | — |
-| DTCM `.dtcmz` | `0x20000200` | part of DTCM | 3,968 | — |
+| DTCM `.dtcmz` | `0x20000200` | part of DTCM | 3,960 | — |
 | DTCM `.dtcm_fxbuf` (arena) | `0x20001180` | part of DTCM | 126,592 | 0 (reserved arena) |
-| **DTCM total** | `0x20000000` | **131,072** | **131,072** | **0** |
+| **DTCM total** | `0x20000000` | **131,072** | **131,064** | **8** |
 | ITCM `.itcm` (code) | `0x00000000` | 16,384 | **4,168** | 12,216 |
 | SRAM2 `.devwdg_noinit` | `0x2007c000` | 16,384 | 0 | see stack note |
 
-- Static data RAM (SRAM1 + DTCM including the arena) is 427,320 B;
-  including ITCM code, 431,488 B.
-- **Session 075 changes (approved: up to +100 B SRAM1):** `.bss`
-  292,732 → 292,828 B (+96), `.data` 416 → 412 (−4), DTCM `.dtcmz`
-  3,968 → 3,960 (−8, arena unchanged). Owners: `copyClearSession.c` 25 B
+- Static data RAM (SRAM1 + DTCM including the arena) is 427,640 B;
+  including ITCM code, 431,808 B.
+- **Session 075 changes (approved: +101 B F2 allocation ledger):** the F1
+  implementation and F2 overlay/data additions produce the current DEV
+  `.bss` 293,060 B, `.data` 416 B, DTCM `.dtcmz` 3,960 B (the FX arena is
+  unchanged). F2's new owners are `SceneData.c:scenes` +96 B for
+  `fx_send_morph[6]`, `menu.c` +4 B for the overlay record, and
+  `buttonHandler.c` +1 B for its TRACK mask.
+  The earlier F1 owners remain: `copyClearSession.c` 25 B
   (`cc_state` 6, `cc_source` 6, `cc_rowStack` 8, row count 1, edge masks 4);
   `copyClearService.c` 59 B (queue 24 + head/count 2, register 16 + count/Scene
   2, run state 6, flags/claim 2, retry counter 2, name-buffer pointer 4);
-  `service_exclusive_scene` 1 B; `fs_name_cache_borrowed` 1 B; `scenes` −32 B
+  `service_exclusive_scene` 1 B; `fs_name_cache_borrowed` 1 B; the F1
+  retired-decimation transition reduced `scenes` by 32 B
   (`voice_decimation_all` removed: settings 45 → 44 B, 2 B per record with
-  alignment). `mixer_decimation_rate[]` (DTCM, 28 → 24 B) accounts for the
+  alignment) before F2 appended `fx_send_morph[6]` and restored the current
+  50 B layout. `mixer_decimation_rate[]` (DTCM, 28 → 24 B) accounts for the
   `.dtcmz` change. The remainder is LTO placement and alignment.
 - **Session 074 changes (all approved):**
   - SRAM1 `.bss` +56 B. `scenes` grew +64 B (`scene_settings_t` 41 → 45 B
@@ -407,7 +417,7 @@ byte, including alignment and small variables omitted here.
 
 | Owner / object | Bytes | Allocation and use |
 | --- | ---: | --- |
-| `SceneData.c`: `scenes` | 25,984 | Sixteen resident Scene records, 1,624 B each: 44 B settings (41 + the S074 bus compressor's 4 − the S075-retired `voice_decimation_all`), 420 B Scene-owned Effect record, and the 1,160 B Kit; Pattern regions are separate. |
+| `SceneData.c`: `scenes` | 26,080 | Sixteen resident Scene records, 1,630 B each: 50 B settings including the S075 F2 `fx_send_morph[6]`, 420 B Scene-owned Effect record, and the 1,160 B Kit; Pattern regions are separate. |
 | `PatternData.c`: `pat_regions` | 168,304 | Sixteen packed regions of 10,519 B: each has 1,792 B step addresses, 8,192 B pool, 512 B bitmap, and 23 B Pattern/track settings. Since S075 the top 132 B of each pool (33 chunks) is a permanent swap block outside normal allocation (8,060 B usable), kept as a guaranteed rewrite area for copy/clear and later features (`PATTERN_DYNAMIC_STACK.md` §3, §12.17). |
 | `PatternData.c`: `pat_autosave_snapshot` | 10,519 | One Scene-sized snapshot for an in-flight Pattern AutoSave. |
 | `PatternStackService.c`: `reservation_image` | 512 | One non-persisted bit image for the current service Scene's trailing pool reservations; three separate one-byte policy/rebuild flags accompany it. |

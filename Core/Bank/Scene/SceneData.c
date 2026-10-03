@@ -28,18 +28,18 @@ static uint8_t scene_active_index;
 static uint8_t scene_defaultVoiceAudioOut(uint8_t slot)
 {
     /*
-     * Preserve the current boot-kit routing defaults without making SceneData
-     * depend on DSP mixer headers.
+     * Default Scene route of a voice (S075 F2-A, user decision F2-Q1).
      *
-     * Inputs: zero-based resident instrument slot. Output: the retained route
-     * byte used when Scene storage has no explicit audio_out line. Values match
-     * the current default Slak routing convention: voice 1 routes to output
-     * entry 2, voices 2..5 to entry 0, and voice 6 to entry 1.
+     * What: route 0 (St1, MenuText.h route ids: 0 St1, 1 St2, 2 L1, 3 R1,
+     * 4 L2, 5 R2) for every instrument slot. It replaces the old boot-Kit
+     * convention (voice 1 -> L1, voice 6 -> St2), which made a cleared Scene
+     * come up with voices 1 and 6 on unexpected outputs. Why: one default on
+     * every path: fresh Scenes, clear scene/settings, and invalid route
+     * fallbacks. Inputs: zero-based slot; kept so callers do not change.
+     * Output: 0. Affiliates: filesystem_defaultVoiceAudioOut() and
+     * preset_applyKitAudioRouting().
      */
-    if (slot == 0u)
-        return 2u;
-    if (slot == 5u)
-        return 1u;
+    (void)slot;
     return 0u;
 }
 
@@ -491,6 +491,38 @@ uint8_t scene_getVoiceFxSendAmount(uint8_t scene_index, uint8_t slot)
     return scene->settings.fx_send_amount[slot];
 }
 
+void scene_setVoiceFxSendMorph(uint8_t scene_index, uint8_t slot,
+                               uint8_t amount)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    /*
+     * Store one FX-send Morph endpoint (contract in SceneData.h, S075 F2-H).
+     *
+     * Clamp, then use scene_storeParameterByte() so the byte is written before
+     * AutoSave cell FX_SEND_MORPH_BASE + slot and card-clean invalidation. A
+     * mixer runtime push is unnecessary: the next block reads both endpoints.
+     */
+    if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    if (amount > 127u)
+        amount = 127u;
+    scene_storeParameterByte(
+        scene_index, &scene->settings.fx_send_morph[slot],
+        (uint8_t)(AUTOSAVE_SCENE_PARAM_FX_SEND_MORPH_BASE + slot), amount);
+}
+
+uint8_t scene_getVoiceFxSendMorph(uint8_t scene_index, uint8_t slot)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+
+    /* Contract in SceneData.h: retained 0..127, or 0 for invalid storage. */
+    if (!scene || slot >= INSTRUMENT_SLOT_COUNT ||
+        scene->settings.fx_send_morph[slot] > 127u)
+        return 0u;
+    return scene->settings.fx_send_morph[slot];
+}
+
 void scene_setVoiceFaderSetting(uint8_t scene_index, uint8_t slot,
                                 uint8_t mode)
 {
@@ -837,8 +869,8 @@ uint8_t scene_getEffectMorphAmount(uint8_t scene_index)
 /*
  * S074 bus compressor domain/default tables, in scene_bus_comp_field_t order.
  *
- * What:       maxima (St2, 127, 127, voice 6) and defaults (off, 48, 48,
- *             off). Why: parser, menu, AutoSave restore and Scene setter all
+ * What:       maxima (St2, 127, 127, voice 6) and defaults (off, 0, 0,
+ *             off; S075 F2-B). Why: parser, menu, AutoSave restore and Scene setter all
  *             use the same clamp boundary, so no path stores an unreachable
  *             value. Affiliates: storageTypes.c, presetManager.c, menu.c.
  */
@@ -954,6 +986,8 @@ uint8_t scene_commitSettings(uint8_t scene_index, const scene_settings_t *src)
         scene_setVoiceMorphAmount(scene_index, i, image.voice_morph_amount[i]);
         scene_setVoiceAudioOut(scene_index, i, image.audio_out[i]);
         scene_setVoiceFxSendAmount(scene_index, i, image.fx_send_amount[i]);
+        /* S075 F2-H: copy/clear carry both FX-send endpoints. */
+        scene_setVoiceFxSendMorph(scene_index, i, image.fx_send_morph[i]);
         scene_setVoiceFaderSetting(scene_index, i, image.fader_setting[i]);
     }
     for (i = 0u; i < NUM_TRACKS; i++) {
@@ -1026,7 +1060,7 @@ void scene_initAll(void)
     memset(scenes, 0, sizeof(scenes));
     scene_active_index = 0u;
     for (scene_index = 0u; scene_index < SCENE_COUNT; scene_index++) {
-        /* S074: bus compressor defaults are off, 48, 48, off. */
+        /* S074/S075 F2-B: bus compressor defaults are off, 0, 0, off. */
         scene_busCompDefaults(&scenes[scene_index].settings);
         for (track = 0u; track < NUM_TRACKS; track++)
             scenes[scene_index].settings.midi_channel[track] =
@@ -1040,6 +1074,8 @@ void scene_initAll(void)
             scenes[scene_index].settings.audio_out[track] =
                 scene_defaultVoiceAudioOut(track);
             scenes[scene_index].settings.fx_send_amount[track] = 0u;
+            /* S075 F2-H: a fresh Scene's Morph endpoint is also 0. */
+            scenes[scene_index].settings.fx_send_morph[track] = 0u;
             scenes[scene_index].settings.fader_setting[track] = 0u;
         }
         /* Seed the Scene-owned Effect before any file/runtime apply begins. */

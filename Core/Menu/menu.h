@@ -449,6 +449,20 @@ void menu_setEffectShowMorph(uint8_t onOff);
 void menu_effectShowHome(void);
 
 /*
+ * Effect-page voice mix overlay (S075 F2-F, approved +4 B SRAM1).
+ *
+ * SHIFT+TRACK shows the selected VOICE mix Scene-setting screen (`+`) over
+ * the Effect page while preserving its sub-page, cursor, edit state and live
+ * Effect LEDs. Begin moves/reselects the overlay; end restores the saved
+ * Effect position and applies any latched Effect service actions. A real page
+ * switch abandons the overlay and does not restore the Effect page.
+ * Affiliates: buttonHandler.c and ledHandler.c.
+ */
+uint8_t menu_fxVoiceMixOverlayBegin(uint8_t track);
+void menu_fxVoiceMixOverlayEnd(void);
+uint8_t menu_fxVoiceMixOverlayActive(void);
+
+/*
  * VOICE held-step automation overlay bridge.
  *
  * What: ButtonHandler calls menu_voiceAutoOverlayHoldExpired() when the common

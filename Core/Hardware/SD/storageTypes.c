@@ -686,6 +686,21 @@ storage_status_t storage_scenesetParseLine(
         if (st != STORAGE_STATUS_OK)
             return st;
         state->seen_fx_send_amount = 1u;
+    } else if (storage_streq(key, "fx_send_morph")) {
+        /*
+         * Parse the per-voice FX-send Morph endpoints (S075 F2-H).
+         *
+         * Inputs: six comma-separated 0..127 values, one per instrument slot.
+         * Output: staged settings fx_send_morph[]. A missing key keeps the
+         * stage default 0 from filesystem_initSceneStage(); the writer is
+         * filesystem_nextScenesetLine() line 14.
+         */
+        if (!target_settings)
+            return STORAGE_STATUS_BAD_VALUE;
+        return storage_parseCsvU8(value,
+                                  target_settings->fx_send_morph,
+                                  INSTRUMENT_SLOT_COUNT,
+                                  127u);
     } else if (storage_streq(key, "fader_setting")) {
         /*
          * Parse retained per-voice fader modes.

@@ -360,7 +360,7 @@ same group keeps the current selection.
 | `clear track` | as above for 128 steps; length, scale, shuffle to defaults (16, default scale, 0) | no |
 | `… automation` | automation removed; trigger and specials kept | no |
 | `… notes` | trigger off, note/velocity specials removed; probability and automation kept | no |
-| `clear send` | the track's slot (track 7 → slot 6): FX send 0, fader `pre` | yes |
+| `clear send` | the track's slot (track 7 → slot 6): both FX-send endpoints 0, fader `pre` | yes |
 | `clear scene` on the active Scene | everything except the Kit to defaults (settings, Effect `off`, FX sequence, Pattern); the Scene's edit mask reset to itself | no |
 | `clear scene` on another Scene | emptied, Kit included; Bank-present off; edit mask reset to itself | no |
 | `clear scene settings` | settings to defaults; edit mask reset to itself | no |
@@ -457,7 +457,7 @@ While a menu is up, page repaints draw the menu, underline (CGRAM) updates are
 held, and pot repaints do not draw the page.
 
 ```
-COPY    03T2s005        CLR     S03T2
+Copy    03T2s005        Clear   S03T2
 [step -> merge ]        [track notes   ]
 ```
 
@@ -670,7 +670,7 @@ A paste or clear that needs a busy Preset worker waits at the head of the queue.
 | `clear scene` (active / other), `clear scene settings` | per §5, through the setters and InstrumentManager slot reset | apply if active; mask reset to itself |
 | `clear fx` | `scene_effectRecordDefaults()` committed | activate if active; revalidate |
 | `clear fx sequence`, EFFECTS SEQ | sequence steps through SceneData setters (closes Phase 5 debt A15) | refresh held Morph lane and lock markers |
-| `clear send` | `preset_setVoiceFxSendAmount(…, 0)`, `preset_setVoiceFaderSetting(…, pre)` | — |
+| `clear send` | `preset_setVoiceFxSendAmount(…, 0)`, `preset_setVoiceFxSendMorph(…, 0)`, `preset_setVoiceFaderSetting(…, pre)` | — |
 
 When `copy kit` or `copy scene` makes a Scene present, mark the whole Scene and
 its Pattern dirty (`autosave_markSceneWithPatternDirty()`), so settings or an

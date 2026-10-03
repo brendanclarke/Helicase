@@ -1689,3 +1689,92 @@ S075 F2 (format 3, 161 HCNAMES rows, 51 Scene cells)."
 
 (To be appended during implementation: per-stage status, build sizes,
 deviations, hardware results.)
+
+### 2026-10-03 — Stages A–E applied
+
+- Applied A-01..A-04: fresh/staged/invalid Scene voice routes now default to
+  St1 (stored route 0), and the fixture generator uses the same fallback.
+- Applied B-01..B-02: bus compressor defaults are now off/0/0/off in the
+  shared Scene defaults and their adjacent contracts/comments.
+- Applied C-01..C-02: copy/clear row 0 now reads `Copy`/`Clear`; the source
+  indicator remains anchored at column 8.
+- Applied D-01..D-05: full Effect views safely space-pad short names and show
+  only the long name for named TYPE/RUN/SCALE values; stale numeric overlays
+  and the TYPE browse mark were removed.
+- Applied E-01..E-05: common/Effect and CrumpBit pan defaults use stored 63,
+  both stereo balance laws are centred on 63, CrumpBit defaults are mix 0 /
+  feedback 64 / rate 64 / pan 63, and the sync label is `snc`.
+- No build run yet; Stage F follows.
+
+### 2026-10-03 — Stages F–H core paths applied
+
+- Applied F-01..F-13: `scene_settings_t` now owns
+  `fx_send_morph[6]`; SceneData setters/getters, defaults, copy/clear commit,
+  Scene Load staging, AutoSave cells 45..50, sceneset parsing/writing, and
+  the fixture writer all carry the endpoint. No compatibility marker or
+  migration path was added, per revision 2.
+- Applied F-14..F-20: the read-only resolved-Morph bridge includes active
+  Scene LFO contributions; the mixer getter interpolates Normal/Morph send
+  endpoints with step overrides taking priority; Menu-facing display/edit
+  accessors separate endpoint display from audible interpolation; `clear send`
+  clears both endpoints and fader mode.
+- Applied G-01..G-02: VOICE mix cells display/edit the endpoint selected by
+  `voiceModeShowMorph` while retaining edit-mask fan-out.
+- Applied H-01..H-04: holding SHIFT in VOICE shows Morph and release restores
+  the persistent SHIFT+MODE latch state.
+- Overlay stages I-01..I-13 and tooling/docs remain.
+
+### 2026-10-03 — Stages I–K applied
+
+- Applied I-01..I-13: SHIFT+TRACK now owns the approved +4 B Effect-page
+  voice-mix overlay record; Effect page state is swapped directly and restored
+  on the last TRACK release. Effect service, SELECT hooks/LEDs, SEQ/BAR
+  behavior, chase/record/follow ownership, SHIFT Morph selection, real-mode
+  abandonment, and lost-release cleanup are all wired.
+- Applied J-01..J-02: generated Scene fixtures now write
+  `fx_send_morph=0,0,0,0,0,0`; the AutoSave validator matches format 3,
+  161 HCNAMES rows, Scene parameters at byte 10, all 51 live cells, optional
+  Scene keys, reserved cell 7 = 127, MIDI note 63, and bus-compressor
+  clamping.
+- Applied K-01..K-08: filesystem, AutoSave, Bank/Preset, SRAM, DSP, full
+  spec, scoping, memory, and implementation-log references now describe the
+  F2 contracts. `S075_PH6_COPYCLEAR_IMPLEMENTATION.md` has the corresponding
+  §14.8 pointer.
+
+### 2026-10-03 — First F2 build and layout gate
+
+- `make all` passed with the existing unrelated warnings only. DEV link:
+  `text=531,936`, `data=416`, `bss=426,712`; payload `532,352` B; ITCM
+  `4,168` B; DTCM statics `4,472` B; FXBUF `126,592` B at
+  `0x20001180`, margin `3,712` B.
+- `arm-none-eabi-nm -S build/lxr02.elf | grep -w scenes` reports
+  `20051e28 000065e0 B scenes`, the required `0x65E0` size. The new symbols
+  also show the approved overlay record and TRACK mask; SRAM growth is within
+  the approved +101 B ledger.
+- `git diff --check` passed. Hardware cases in §13.2 remain pending; the
+  user must delete old AutoSave/temporary records before first F2 boot.
+
+### 2026-10-03 — Scripted verification
+
+- `PYTHONPYCACHEPREFIX=/private/tmp/helicase-pycache python3 -m py_compile
+  tools/verify_bank_autosave.py tools/populate_scene_directory.py` passed.
+  `make -C tools/dsp_test mixer special_tags` passed
+  (`mixer differing samples: 0`; `special tags OK (155 rows, 0 mismatches)`).
+- `make all && make img` passed again after the final source/comment pass,
+  with only the pre-existing unused-filesystem, packed-member, libc-nano, and
+  LTO-serial warnings. Final DEV measurements remain
+  `text=531,936`, `data=416`, `bss=426,712`, raw payload
+  `532,352` B, stamped image `532,368` B, and `scenes=0x65E0`.
+- The checked-in `SD_CARD/` fixture is not a coherent post-F2-drain Bank
+  snapshot: the validator reaches the new format/offset checks but reports
+  pre-existing HCNAMES/active-scene/edit-mask mismatches. Therefore the
+  required post-F2-drain validator PASS and all hardware cases stay pending;
+  no fixture or AutoSave record was modified.
+
+### 2026-10-03 — Final consistency pass
+
+- Clarified the SRAM manifest's historical F1 decimation note so it does not
+  read as a current F2 struct-size claim.
+- Re-ran `git diff --check`, both Python syntax checks, and the mixer/special-
+  tag DSP harness; all passed. The final build and image measurements above
+  are unchanged.

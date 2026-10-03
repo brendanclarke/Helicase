@@ -203,6 +203,16 @@ static uint16_t buttonHandler_voiceSceneSeqPressedMask = 0u;
  */
 static uint16_t buttonHandler_loadSceneSeqPressedMask = 0u;
 
+/*
+ * TRACK buttons holding the Effect-page voice mix overlay (S075 F2-F; +1 B
+ * SRAM1, approved F2-Q5).
+ *
+ * Bit n is set when SHIFT+TRACK n opens or moves the overlay. The release
+ * edge clears it even if SHIFT was released first; the last clear restores the
+ * Effect page. Overflow reconciliation clears this mask and ends the overlay.
+ */
+static uint8_t buttonHandler_fxVoiceMixTrackMask = 0u;
+
 /* -----------------------------------------------------------------------
 ** Helpers
 ** ----------------------------------------------------------------------- */
@@ -947,7 +957,9 @@ static void handleSelectButton(uint8_t selectNr)
             /*
              * SHIFT+SELECT is reserved for optional type UI hooks. S074:
              * CrumpBit resets that data line to normal and asks for its home
-             * screen.
+             * screen. Under the voice-mix overlay the hook still owns the press,
+             * but default Effect screen navigation is suppressed until TRACK
+             * release.
              */
             if (menuEffects_hookSelect(selectNr, 1u, 1u) ==
                 EFFECT_UI_SHOW_HOME)
@@ -992,6 +1004,8 @@ static void handleSelectButton(uint8_t selectNr)
                 menu_effectShowHome();
             break;
         }
+        if (menu_fxVoiceMixOverlayActive())
+            break;
         menu_switchSubPage(selectNr);
         menuEffects_renderSelectLeds(menu_getSubPage());
         menu_repaintAll();
@@ -1159,10 +1173,18 @@ static void handleVoiceButton(uint8_t voiceNr)
         }
 
         if (bh_state.selectButtonMode == SELECT_MODE_FX) {
-            /* SHIFT+TRACK selects the active track without leaving FX mode. */
+            /*
+             * SHIFT+TRACK selects the active track without leaving FX mode and
+             * shows its VOICE mix screen while TRACK is held (S075 F2-F).
+             * The Effect type hook above already has priority.
+             */
             menu_setActiveVoice(voiceNr);
             buttonHandler_showMuteLEDs();
             led_flashLed((uint8_t)(LED_VOICE1 + voiceNr));
+            if (buttonHandler_getShift() && menu_fxVoiceMixOverlayBegin(voiceNr))
+                buttonHandler_fxVoiceMixTrackMask = (uint8_t)(
+                    buttonHandler_fxVoiceMixTrackMask |
+                    (uint8_t)(1u << voiceNr));
             if (shouldPreviewVoice)
                 seq_previewVoice(voiceNr);
             return;
@@ -1391,20 +1413,27 @@ static void processPress(uint8_t buttonNr)
         switch (bh_state.selectButtonMode) {
         case SELECT_MODE_VOICE:
             /*
-             * Holding SHIFT in VOICE mode no longer enters a temporary STEP
-             * overlay.
+             * Hold SHIFT in VOICE mode to show and edit Morph endpoints
+             * (S075 F2-G). The existing VOICE page and parameter buffer remain
+             * active; only Menu's endpoint resolver changes. Release restores
+             * the SHIFT+MODE VOICE latch state in processRelease(), while
+             * SHIFT combinations continue to reach their normal handlers.
              *
-             * Why: SHIFT+MODE_VOICE is now the persistent morph voice mode
-             * gesture. A plain SHIFT press must not steal the UI away from
-             * voice pages, because morph endpoint editing uses the same pages,
-             * SELECT subpages, encoder, and endless pots as normal voice mode.
-             * Output: only the physical SHIFT LED changes for this gesture.
+             * Output: Menu's voiceModeShowMorph = 1; the next repaint/edit
+             * resolves instrument and FX-send endpoint cells against Morph.
              */
+            menu_setVoiceModeShowMorph(1u);
             return;
 
         case SELECT_MODE_FX:
-            /* Holding SHIFT displays/edits Morph endpoints on the FX page. */
+            /*
+             * Holding SHIFT displays/edits Morph endpoints on the FX page;
+             * under the voice-mix overlay it selects the VOICE Morph view
+             * while preserving Effect Morph state for return (S075 F2-Q6 c).
+             */
             menu_setEffectShowMorph(1u);
+            if (menu_fxVoiceMixOverlayActive())
+                menu_setVoiceModeShowMorph(1u);
             break;
 
         case SELECT_MODE_PERF:
@@ -1466,6 +1495,24 @@ static void processRelease(uint8_t buttonNr)
             copyClear_copyReleased();
         }
         return;
+    }
+    {
+        /*
+         * Consume release of an overlay TRACK before copy/clear routing
+         * (S075 F2-F). The overlay remains while any paired TRACK is held;
+         * releasing the last one restores the saved Effect page.
+         */
+        int8_t voice = btn_to_voice(buttonNr);
+        if (voice >= 0) {
+            const uint8_t bit = (uint8_t)(1u << (uint8_t)voice);
+            if ((buttonHandler_fxVoiceMixTrackMask & bit) != 0u) {
+                buttonHandler_fxVoiceMixTrackMask = (uint8_t)(
+                    buttonHandler_fxVoiceMixTrackMask & (uint8_t)~bit);
+                if (buttonHandler_fxVoiceMixTrackMask == 0u)
+                    menu_fxVoiceMixOverlayEnd();
+                return;
+            }
+        }
     }
     if (copyClear_buttonReleased(buttonNr))
         return;
@@ -1550,12 +1597,12 @@ static void processRelease(uint8_t buttonNr)
         switch (bh_state.selectButtonMode) {
         case SELECT_MODE_VOICE:
             /*
-             * VOICE-mode SHIFT release pairs with the no-op SHIFT press above.
+             * End the momentary VOICE Morph view (S075 F2-G).
              *
-             * Output: restore the selected voice LEDs only. Do not call
-             * buttonHandler_leaveSeqMode(), because SHIFT no longer entered
-             * the STEP overlay in VOICE mode.
+             * Output: return to the SHIFT+MODE VOICE latch state and restore
+             * selected voice/latch LED feedback. Do not enter STEP mode.
              */
+            menu_setVoiceModeShowMorph(buttonHandler_morphVoiceModeActive);
             led_setActiveVoice(menu_getActiveVoice());
             if (buttonHandler_morphVoiceModeActive)
                 led_setBlinkLed(LED_MODE1, 1u);
@@ -1569,8 +1616,14 @@ static void processRelease(uint8_t buttonNr)
             return;
 
         case SELECT_MODE_FX:
-            /* End the momentary Morph view while keeping FX mute LEDs. */
+            /*
+             * End the momentary Morph view while keeping FX mute LEDs. Under
+             * the overlay only the VOICE endpoint view changes; TRACK keeps
+             * the overlay up (S075 F2-Q6 c).
+             */
             menu_setEffectShowMorph(0u);
+            if (menu_fxVoiceMixOverlayActive())
+                menu_setVoiceModeShowMorph(0u);
             buttonHandler_showMuteLEDs();
             return;
 
@@ -1626,6 +1679,9 @@ void buttonHandler_processEvents(void)
         (void)copyClear_eventOverflow();
         buttonHandler_voiceSceneSeqPressedMask = 0u;
         buttonHandler_loadSceneSeqPressedMask = 0u;
+        /* S075 F2-F: a lost TRACK release must not strand the overlay. */
+        buttonHandler_fxVoiceMixTrackMask = 0u;
+        menu_fxVoiceMixOverlayEnd();
         buttonHandler_buttonTimerStepNr = NO_STEP_SELECTED;
 #if DEV_MODE_LOGGING
         {

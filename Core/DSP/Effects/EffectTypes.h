@@ -60,10 +60,17 @@
 #define EFFECT_COMMON_PARAM_PAN          2u
 #define EFFECT_COMMON_PARAM_COUNT        3u
 
-/* Common defaults: St1 route, unity return, and centred pan. */
+/*
+ * Common defaults: St1 route, unity return, centred pan.
+ *
+ * Pan (S075 F2-E, user decision F2-Q4): stored 0 is fully left and displays
+ * -63, stored 127 is fully right and displays 64, and absolute centre is
+ * stored 63, displaying 0 through DTYPE_PM63. The Effect return and CrumpBit
+ * delay stereo laws use the same centre; mono laws remain constant-power.
+ */
 #define EFFECT_COMMON_DEFAULT_AUDIO_OUT  0u
 #define EFFECT_COMMON_DEFAULT_LEVEL      127u
-#define EFFECT_COMMON_DEFAULT_PAN        64u
+#define EFFECT_COMMON_DEFAULT_PAN        63u
 
 /* Types: registry id 0 is permanently the valid `off` type. */
 typedef uint8_t effect_type_id_t;

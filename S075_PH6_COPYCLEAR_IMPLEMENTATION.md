@@ -2926,3 +2926,12 @@ Verification on 2026-10-02:
   decode, `git diff --check`, and the forbidden-symbol grep passed.
 - Hardware F1/trace verification remains pending; the exact witness matrix is
   in the combined schedule's build-and-verification section.
+
+### 14.8 F2 follow-up, 2026-10-03
+
+The F2 implementation is recorded in
+`S075_PH6_COPYCLEAR_F2_IMPLEMENTATION.md`. It applies the approved Scene route,
+compressor, pan, Effect full-view, FX-send Morph, VOICE SHIFT, and Effect-page
+SHIFT+TRACK overlay decisions. The F2 schedule is the authoritative line-level
+record for the new AutoSave/sceneset fields, the +101 B approved allocation,
+the validator update, build measurements, and the remaining hardware matrix.

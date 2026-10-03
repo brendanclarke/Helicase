@@ -166,9 +166,9 @@ data, which lives in `pat_regions[16]` (168,304 bytes) in PatternData.
 | MIDI routing | Channel and note per track | 7 tracks |
 | Scene Morph | Per-voice morph amount (0..255) | 6 values |
 | Audio routing | Per-voice output assignment (0..5) | 6 bytes |
-| FX send | Per-voice send amount (0..127) | 6 bytes; the mixer reads the effective value (step override first) each block |
+| FX send | Per-voice Normal and Morph send endpoints (0..127) | 12 bytes; the mixer reads the step override, otherwise interpolates the endpoints by the voice's resolved Morph amount each block (S075 F2) |
 | Fader mode | Per-voice `pre`/`pst`/`fx`/`xfd` (0..3) | 6 bytes; `xfd` (3) added in S074 (`SCENE_FADER_SETTING_MAX`) |
-| Bus compressor (S074) | `bus_comp[4]`: `cmp` 0..2 (off/St1/St2), `cam` 0..127, `ctm` 0..127, `csc` 0..6 | 4 bytes; defaults off/48/48/off; AutoSave Scene parameters 41..44; `sceneset.scg` `bus_comp_*` keys; edited on the last settings page and fanned out to the VOICE edit mask; not modulatable |
+| Bus compressor (S074) | `bus_comp[4]`: `cmp` 0..2 (off/St1/St2), `cam` 0..127, `ctm` 0..127, `csc` 0..6 | 4 bytes; defaults off/0/0/off; AutoSave Scene parameters 41..44; `sceneset.scg` `bus_comp_*` keys; edited on the last settings page and fanned out to the VOICE edit mask; not modulatable |
 | Effect | Type, 64 normal cells, 64 Morph cells, 16-step sequence | 420-byte Scene-owned record; saved as named `.fx` v2 child |
 | Effect Morph | Scene `effect_morph_amount` | AutoSave Scene setting index 40; serialized in `sceneset.scg` when present |
 
@@ -400,9 +400,12 @@ to [0, 255].
 active, else retained Scene value. Session 071 added the step-override table.
 Direct mixer register write for DSP apply.
 
-**FX Send:** `preset_getEffectiveFxSend(slot)` returns step override when
-active, else retained Scene value. The mixer pulls it each block, applies the
-stored PRE/POST/FX fader topology, and ramps the send into the live FX bus.
+**FX Send:** `preset_getEffectiveFxSend(slot)` returns the step override when
+active, otherwise Normal/Morph endpoints interpolated by the resolved voice
+Morph amount (including active-Scene LFO contributions). The VOICE Normal view
+shows the override or Normal endpoint; Morph view shows the Morph endpoint.
+The mixer pulls the audible value each block, applies the stored PRE/POST/FX
+fader topology, and ramps the send into the live FX bus.
 
 **Effect parameters and `fxm`:** EffectsManager owns these overlays
 (`effects_automation`). Parameter overlays end when the writing track's

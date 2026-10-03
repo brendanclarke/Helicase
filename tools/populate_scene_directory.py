@@ -22,7 +22,9 @@ DEFAULT_SCENE_ROOT = ROOT / "SD_CARD" / "Scene"
 NUM_TRACKS = 7
 
 KIT_DIR_RE = re.compile(r"^(\d{3})[ _](.+)$")
-DEFAULT_AUDIO_OUT = [2, 0, 0, 0, 0, 1]
+# S075 F2-A: every voice defaults to route 0 (St1); the firmware fallbacks
+# (scene_defaultVoiceAudioOut(), filesystem_defaultVoiceAudioOut()) agree.
+DEFAULT_AUDIO_OUT = [0, 0, 0, 0, 0, 0]
 
 
 def parse_numbered_dir(path: Path) -> tuple[int, str] | None:
@@ -86,6 +88,8 @@ def make_sceneset(scene_name: str, audio_out: list[int]) -> str:
             "audio_out=" + ",".join(str(value) for value in audio_out),
             "fx_send_amount=0,0,0,0,0,0",
             "fader_setting=0,0,0,0,0,0",
+            # S075 F2-H: Morph endpoint of the per-voice FX send.
+            "fx_send_morph=0,0,0,0,0,0",
             "",
         ]
     )

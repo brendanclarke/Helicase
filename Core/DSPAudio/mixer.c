@@ -103,6 +103,8 @@ static INDTCMZ mixer_fx_bus_t mixer_fx_bus;
  * What: send amount x send-side fader, one float per slot (24 B DTCM). Why:
  * mixer_addVoiceInt16ToOutputAndFx() ramps send changes from knobs, automation, and
  * fader-mode edits without a zipper. Inputs: preset_getEffectiveFxSendAmount()
+ * (the step override, otherwise Normal/Morph endpoints interpolated by the
+ * voice's resolved Morph amount, S075 F2-H)
  * and SceneData fader_setting. Output: the current block's send ramp state.
  * Affiliate: mixer_calcNextSampleBlock().
  */
@@ -1026,11 +1028,19 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		io.share = &share;
 		effects_process(&io);
 
+		/*
+		 * Effect return pan (S075 F2-E, user decision F2-Q4).
+		 *
+		 * What: stereo output uses a balance law centred on stored 63: at 63
+		 * both sides are unity, 0 silences the right side, and 127 silences the
+		 * left side. Mono output keeps its existing constant-power law. Inputs:
+		 * fx_pan 0..127 and fx_level. Outputs: gainL/gainR.
+		 */
 		if (fx_stereo_out) {
-			gainL = fx_level * ((fx_pan <= 64u) ? 1.0f
-					: (float)(127u - fx_pan) / 63.0f);
-			gainR = fx_level * ((fx_pan >= 64u) ? 1.0f
-					: (float)fx_pan / 64.0f);
+			gainL = fx_level * ((fx_pan <= 63u) ? 1.0f
+					: (float)(127u - fx_pan) / 64.0f);
+			gainR = fx_level * ((fx_pan >= 63u) ? 1.0f
+					: (float)fx_pan / 63.0f);
 		} else {
 			gainL = fx_level * squareRootLut[127u - fx_pan];
 			gainR = fx_level * squareRootLut[fx_pan];

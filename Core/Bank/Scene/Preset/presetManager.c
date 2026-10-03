@@ -1134,13 +1134,43 @@ void preset_clearAllFxSendStepOverrides(void)
 
 uint8_t preset_getEffectiveFxSendAmount(uint8_t scene_index, uint8_t slot)
 {
+    uint8_t normal;
+    uint8_t morph;
+    uint8_t amount;
+
     /*
-     * Read one voice's effective FX-send amount.
+     * Read one voice's effective (audible) FX-send amount.
      *
-	 * Inputs: resident Scene index and zero-based voice slot. Output: the
-	 * active step overlay amount when present, otherwise retained SceneData.
-	 * This read-only bridge is used by the live Scene superpage display and by
-	 * mixer_calcNextSampleBlock() for every FX-send block.
+     * Inputs: resident Scene index and zero-based voice slot. Output: the
+     * active step overlay while present; otherwise the Normal/Morph endpoints
+     * interpolated by the voice's resolved Morph amount (S075 F2-H):
+     * normal + (morph - normal) * amount / 255, rounded. Equal endpoints
+     * return without resolving Morph. Caller: mixer, every block. Menu uses
+     * preset_getFxSendDisplayAmount() for endpoint display.
+     */
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    if (fx_send_step_override[slot].active)
+        return fx_send_step_override[slot].amount;
+    normal = scene_getVoiceFxSendAmount(scene_index, slot);
+    morph = scene_getVoiceFxSendMorph(scene_index, slot);
+    if (normal == morph)
+        return normal;
+    amount = presetMorph_getResolvedVoiceAmount(scene_index, slot);
+    /* 127 * 255 + 127 fits uint16_t. */
+    return (uint8_t)(((uint16_t)normal * (uint16_t)(255u - amount) +
+                      (uint16_t)morph * amount + 127u) / 255u);
+}
+
+uint8_t preset_getFxSendDisplayAmount(uint8_t scene_index, uint8_t slot)
+{
+    /*
+     * Value shown by the VOICE mix FX-send cell in Normal view (S075 F2-H).
+     *
+     * Output: active step override while one plays, otherwise the retained
+     * Normal endpoint. Never the interpolated send; Morph view reads the
+     * retained Morph endpoint directly, like instrument endpoint images.
+     * Caller: menu_cellDisplayValue().
      */
     if (slot >= INSTRUMENT_SLOT_COUNT)
         return 0u;
@@ -1185,6 +1215,25 @@ uint8_t preset_setVoiceFxSendAmount(uint8_t scene_index, uint8_t slot,
     if (amount > 127u)
         amount = 127u;
     scene_setVoiceFxSendAmount(scene_index, slot, amount);
+    return 1u;
+}
+
+uint8_t preset_setVoiceFxSendMorph(uint8_t scene_index, uint8_t slot,
+                                   uint8_t amount)
+{
+    /*
+     * Retain one Scene FX-send Morph endpoint (S075 F2-H).
+     *
+     * Inputs: resident Scene index, zero-based instrument slot, and 0..127
+     * amount. Output: SceneData retains the value and marks its AutoSave cell;
+     * the mixer reads it on the next block. Client: Menu Morph view and
+     * clearOps.c `clear send`.
+     */
+    if (!scene_get(scene_index) || slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    if (amount > 127u)
+        amount = 127u;
+    scene_setVoiceFxSendMorph(scene_index, slot, amount);
     return 1u;
 }
 

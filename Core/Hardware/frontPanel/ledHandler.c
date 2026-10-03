@@ -1181,10 +1181,11 @@ void led_updateCurrentStep(uint8_t step)
      * LED owner decides whether that chase light should be visible on the
      * current page and pattern. */
     /*
-     * The Effect page owns the FX-sequencer chase layer. Pattern chase must
-     * neither draw nor clear that layer during each sixteenth-note drain.
+     * The Effect page owns the FX-sequencer chase layer, also while the
+     * SHIFT+TRACK voice mix overlay is shown over it (S075 F2-F). Pattern
+     * chase must neither draw nor clear that layer.
      */
-    if (menu_activePage == EFFECT_PAGE)
+    if (menu_activePage == EFFECT_PAGE || menu_fxVoiceMixOverlayActive())
         return;
 
     uint8_t shownPattern;
@@ -1249,7 +1250,8 @@ void led_updateRecordedMainStep(uint8_t activeTrack,
     /* Performance page STEP LEDs select rotation/performance actions rather than
      * edit track step state, so recording feedback must not overwrite them. */
     if (menu_activePage == PERFORMANCE_PAGE ||
-        menu_activePage == EFFECT_PAGE)
+        menu_activePage == EFFECT_PAGE ||
+        menu_fxVoiceMixOverlayActive())
         return;
     /* subStep is expected to be 0..127; modulo maps it into STEP1..16. Keep the
      * guard because seq_ledState is shared state. */
@@ -1432,8 +1434,9 @@ void led_notifyPatternChanged(uint8_t playedPattern)
 
     if (parameter_values[PAR_FOLLOW]) {
         menu_setShownPattern(patNr);
-        /* Effect page's SEQ row is not a Pattern view (Session 072 step 7). */
-        if (menu_activePage != EFFECT_PAGE) {
+        /* Effect page's SEQ row is not a Pattern view, including its overlay. */
+        if (menu_activePage != EFFECT_PAGE &&
+            !menu_fxVoiceMixOverlayActive()) {
             led_clearSequencerLeds();
             led_updatePatternTrack(menu_getActiveVoice(), patNr,
                                    buttonHandler_selectedStep);

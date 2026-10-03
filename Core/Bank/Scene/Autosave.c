@@ -94,10 +94,15 @@ _Static_assert(AUTOSAVE_SCENE_PARAM_EFFECT_MORPH -
 _Static_assert(AUTOSAVE_SCENE_PARAM_BUS_COMP_BASE ==
                    AUTOSAVE_SCENE_PARAM_EFFECT_MORPH + 1u,
                "Scene Effect Morph must remain one cell");
-_Static_assert(AUTOSAVE_SCENE_PARAM_COUNT -
+_Static_assert(AUTOSAVE_SCENE_PARAM_FX_SEND_MORPH_BASE -
                    AUTOSAVE_SCENE_PARAM_BUS_COMP_BASE ==
                    SCENE_BUS_COMP_FIELD_COUNT,
                "Scene bus compressor group must cover every field");
+/* S075 F2-H: the FX-send Morph group closes the live Scene cells. */
+_Static_assert(AUTOSAVE_SCENE_PARAM_COUNT -
+                   AUTOSAVE_SCENE_PARAM_FX_SEND_MORPH_BASE ==
+                   INSTRUMENT_SLOT_COUNT,
+               "Scene FX-send Morph group must cover every instrument slot");
 
 /*
  * Eight-bit Hamming-weight table for atomic dirty-mask accounting.
@@ -928,10 +933,14 @@ static uint8_t autosave_getSceneParameter(const scene_t *scene,
     } else if (parameter_index == AUTOSAVE_SCENE_PARAM_EFFECT_MORPH) {
         /* Index 40 is the retained Scene Effect Morph amount. */
         *value = scene->settings.effect_morph_amount;
-    } else {
+    } else if (parameter_index < AUTOSAVE_SCENE_PARAM_FX_SEND_MORPH_BASE) {
         /* Indices 41..44 are the S074 bus compressor settings (cmp..csc). */
         *value = scene->settings.bus_comp[
             parameter_index - AUTOSAVE_SCENE_PARAM_BUS_COMP_BASE];
+    } else {
+        /* Indices 45..50 are the FX-send Morph endpoints (S075 F2-H). */
+        *value = scene->settings.fx_send_morph[
+            parameter_index - AUTOSAVE_SCENE_PARAM_FX_SEND_MORPH_BASE];
     }
     return 1u;
 }
@@ -1340,14 +1349,14 @@ void autosave_applyBankPayload(const uint8_t *bank_section)
 /*
  * Apply a validated winner record's Scene parameters to resident SceneData.
  *
- * What: the inverse of autosave_getSceneParameter(). Reads the 45 live
+ * What: the inverse of autosave_getSceneParameter(). Reads the 51 live
  * Scene-parameter bytes from the payload and writes them into
  * scene->settings through SceneData's change-aware setters (their dirty
  * notifications no-op while boot tracking is disabled). Inputs: scene_index
  * (0..15), pointer to the 1920-byte Scene section. Outputs: morph_amount,
  * voice_morph_amount[6], reserved cell 7, audio_out[6], fx_send_amount[6],
- * fader_setting[6], midi_channel[7], midi_note[7], effect_morph_amount and
- * the S074 bus_comp[4] all updated in
+ * fader_setting[6], midi_channel[7], midi_note[7], effect_morph_amount, the
+ * S074 bus_comp[4] and the S075 F2 fx_send_morph[6] all updated in
  * scene_get(scene_index)->settings. Why: each field's payload index must
  * mirror the getter's autosave_scene_parameter_t enum chain. Affiliates:
  * autosave_getSceneParameter() line 634, autosave_scene_parameter_t,
@@ -1414,7 +1423,8 @@ void autosave_applyScenePayload(uint8_t scene_index,
         } else if (parameter_index == AUTOSAVE_SCENE_PARAM_EFFECT_MORPH) {
             /* Index 40 restores the retained Scene Effect Morph amount. */
             scene_setEffectMorphAmount(scene_index, value);
-        } else {
+        } else if (parameter_index <
+                   AUTOSAVE_SCENE_PARAM_FX_SEND_MORPH_BASE) {
             /*
              * Indices 41..44 restore the S074 bus compressor through its
              * clamping, change-aware setter. A pre-S074 record's zero-filled
@@ -1424,6 +1434,13 @@ void autosave_applyScenePayload(uint8_t scene_index,
                 scene_index,
                 (uint8_t)(parameter_index -
                           AUTOSAVE_SCENE_PARAM_BUS_COMP_BASE),
+                value);
+        } else {
+            /* Indices 45..50 restore FX-send Morph endpoints (S075 F2-H). */
+            scene_setVoiceFxSendMorph(
+                scene_index,
+                (uint8_t)(parameter_index -
+                          AUTOSAVE_SCENE_PARAM_FX_SEND_MORPH_BASE),
                 value);
         }
     }

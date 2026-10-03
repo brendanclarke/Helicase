@@ -192,7 +192,7 @@ Each Scene region reserves:
 
 - eight name bytes;
 - two HCNAMES source bytes immediately after the name;
-- 118 Scene-parameter bytes, currently 45 live
+- 118 Scene-parameter bytes, currently 51 live
   (`AUTOSAVE_SCENE_PARAM_COUNT`):
 
   | Index | Meaning |
@@ -207,7 +207,8 @@ Each Scene region reserves:
   | 33..39 | MIDI note per track |
   | 40 | Effect Morph amount (S072) |
   | 41..44 | bus compressor `cmp`, `cam`, `ctm`, `csc` (S074) |
-  | 45..117 | reserved (zero) |
+  | 45..50 | per-voice FX-send Morph endpoint (S075 F2) |
+  | 51..117 | reserved (zero) |
 
   - 512 Effect bytes: 3 type bytes, 8 name bytes, 419 live parameter cells, and
     80 reserved bytes;
@@ -276,7 +277,8 @@ source fields use previously reserved bytes without a version bump because the
 record, mask, payload, section boundaries, and validation size are unchanged.
 The same reasoning covers appending a **Scene parameter** into the reserved
 tail of the 118-byte allocation. That was done for Effect Morph (index 40,
-S072) and for the bus compressor (41..44, S074). The condition: zero, which
+S072), the bus compressor (41..44, S074), and FX-send Morph (45..50, S075 F2).
+The condition: zero, which
 every older record holds there, must be a safe value to restore. The first
 restore after the S074 upgrade therefore reads `cmp off`, `cam 0`, `ctm 0`,
 `csc off` (not the 48/48 defaults). That is harmless because the compressor
@@ -286,6 +288,12 @@ new internal layout, upgrading old-format parameter positions in place. Any
 future change to offsets, widths, ordering, or interpretation outside this
 explicit Phase C migration still requires a format-version decision and an
 explicit migration/rejection policy.
+
+S075 F2's deployment policy is the user-approved no-backward-compatibility
+exception: before first boot, delete the old .hcprms1, .hcprms2, and other
+temporary records. F2 adds Scene cells 45..50 without a marker or restore
+migration; records written before F2 are not migrated and are deleted with the
+F2 update.
 
 ## Boot restore and policy lifecycle
 

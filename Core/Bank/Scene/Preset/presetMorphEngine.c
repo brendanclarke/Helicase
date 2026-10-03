@@ -721,6 +721,25 @@ uint8_t presetMorph_getEffectiveVoiceAmount(uint8_t scene_index,
     return presetMorph_effectiveVoiceBase(scene, slot);
 }
 
+uint8_t presetMorph_getResolvedVoiceAmount(uint8_t scene_index,
+                                           uint8_t slot)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+
+    /*
+     * Resolve the same base/LFO amount used by the Morph worker (contract in
+     * presetMorphEngine.h, S075 F2-H). LFO contributions are runtime state of
+     * the active Scene only; another resident Scene resolves to its base.
+     * Equal FX-send endpoints avoid calling this getter in the mixer.
+     */
+    if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    if (scene_index == scene_getActiveIndex() &&
+        presetMorph_voiceHasLfoLayer(slot))
+        return presetMorph_resolveLfoAmount(scene, slot);
+    return presetMorph_effectiveVoiceBase(scene, slot);
+}
+
 void presetMorph_setStepAutomationOverride(uint8_t scene_index,
                                            uint8_t slot, uint8_t amount)
 {

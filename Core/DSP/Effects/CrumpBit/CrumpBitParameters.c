@@ -40,6 +40,9 @@ const char crumpBit_full8[] = "CrumpBit";
  * - sub-type (8): only `dly` (max 0); its label comes from the format hook,
  *   because every DTYPE_MENU table id (4 bits) is already in use.
  * - sync (9): on/off; Pattern-automatable and sequenceable.
+ * - Defaults (S075 F2-E, user): mix 0, feedback 64, rate 64, delay pan 63
+ *   (the absolute centre, shows 0). The sync row's 3-letter label is `snc`;
+ *   its file key remains `crump_sync`.
  * Why: the registry makes storage, AutoSave, the Effect page, lanes,
  * automation and LFO work without type-specific code elsewhere. Inputs:
  * none (const). Output: 11 rows. Accessors: EffectsManager (resolution,
@@ -56,17 +59,17 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
     EFFECT_ROW("crump_bit_invert", "Bits", "BitInv", "biv", DTYPE_0B255,
                0u, EFFECT_MOD_NONE, 0u, 255u),
     EFFECT_ROW("crump_mix", "Delay", "Mix", "mix", DTYPE_0B127,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 40u, 127u),
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     EFFECT_ROW("crump_feedback", "Delay", "Feedback", "fbk", DTYPE_0B127,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 48u, 127u),
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
     EFFECT_ROW("crump_rate", "Delay", "Rate", "rte", DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
     EFFECT_ROW("crump_subtype", "CrumpBit", "SubType", "sub", DTYPE_0B127,
                0u, EFFECT_MOD_NONE, CRUMPBIT_SUBTYPE_DELAY, 0u),
-    EFFECT_ROW("crump_sync", "Delay", "Sync", "syn", DTYPE_ON_OFF,
+    EFFECT_ROW("crump_sync", "Delay", "Sync", "snc", DTYPE_ON_OFF,
                INSTRUMENT_PARAM_FLAG_AUTOMATABLE, EFFECT_MOD_NONE, 0u, 1u),
     EFFECT_ROW("crump_dly_pan", "Delay", "DlyPan", "dpn", DTYPE_PM63,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
 };
 
 _Static_assert(sizeof(crumpBit_descriptors) /
@@ -232,9 +235,10 @@ static uint8_t crumpBit_uiFormatValue3(uint8_t index, uint8_t value,
  * CrumpBit Effect-page layout (S074_CRUMPBIT_EFFECT.md §5.1).
  *
  * What: SELECT 1 stays manager-owned. SELECT 2 holds three screens: home
- * overlay (mix/fbk/rte/mrp), page 2 (mix/fbk/rte/sub), and page 3 (syn/dpn).
+ * overlay (mix/fbk/rte/mrp), page 2 (mix/fbk/rte/sub), and page 3 (snc/dpn).
  * Every other SELECT has zero screens because its buttons are bit toggles.
  * The encoder walks SELECT 1 s0 -> s1 -> overlay -> page 2 -> page 3.
+ * The page-3 short labels are `snc` and `dpn` (S075 F2-E).
  * Inputs: none (const). Output: registry layout consumed by menuEffects.
  * Affiliates: EFFECT_LAYOUT_CELL_MORPH, crumpBit_uiPaintRow0().
  */

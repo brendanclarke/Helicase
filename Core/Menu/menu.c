@@ -1211,6 +1211,28 @@ static uint8_t menuIndex = 0;
 static uint8_t menu_voiceSubPageScreen[NUM_SUB_PAGES];
 
 /*
+ * Effect-page voice mix overlay record (S075 F2-F; +4 B SRAM1, approved
+ * F2-Q5).
+ *
+ * What: while SHIFT+TRACK holds a VOICE mix screen over the Effect page, this
+ * saves the Effect menu position/edit mode and the replaced mix screen. Why:
+ * the overlay swaps page state directly so menu_switchPage() does not clear
+ * Effect LEDs, hold state or Morph view. Lifetime: begin to end, or a real
+ * menu_switchPage() that abandons the overlay. The flags also latch Effect
+ * service actions until the Effect page returns.
+ */
+#define MENU_FX_OVERLAY_ACTIVE     0x01u
+#define MENU_FX_OVERLAY_REPAIR     0x02u
+#define MENU_FX_OVERLAY_EXIT_EDIT  0x04u
+typedef struct {
+    uint8_t flags;
+    uint8_t fx_menu_index;
+    uint8_t fx_edit_mode;
+    uint8_t mix_screen;
+} menu_fx_voice_mix_overlay_t;
+static menu_fx_voice_mix_overlay_t menu_fxVoiceMixOverlay;
+
+/*
  * STEP automation editor state (+5 B static Menu state).
  *
  * What: the selected automation page, DELETE/CLEAR action, activation flag,
@@ -3695,12 +3717,14 @@ static uint16_t menu_cellDisplayValue(const menu_cell_t *cell)
     }
     if (cell->kind == MENU_CELL_SCENE_SETTING) {
         /*
-         * Display effective Scene-owned VOICE mix settings.
+         * Display Scene-owned VOICE mix settings.
          *
          * Inputs: active resident Scene and zero-based slot from the resolved
-         * cell. Outputs: automatable Morph, audio-out, and FX-send cells show
-         * their transient step-automation value while active, otherwise the
-         * retained SceneData value. Fader setting remains retained-only.
+         * cell, plus voiceModeShowMorph. Outputs: Morph, audio-out and fader
+         * cells keep their existing endpoint/effective rules. FX send shows
+         * the retained Morph endpoint in Morph view; otherwise its active
+         * step override or retained Normal endpoint. It never shows the
+         * interpolated send.
          * menu_sceneLiveRefreshService() repaints this surface during playback,
          * so the Scene superpage follows the live runtime layer just as PERF
          * follows its flat Morph mirror.
@@ -3713,7 +3737,9 @@ static uint16_t menu_cellDisplayValue(const menu_cell_t *cell)
         case MENU_SCENE_SETTING_AUDIO_OUT:
             return preset_getEffectiveAudioOut(scene_index, cell->slot);
         case MENU_SCENE_SETTING_FX_SEND_AMOUNT:
-            return preset_getEffectiveFxSendAmount(scene_index, cell->slot);
+            return voiceModeShowMorph
+                ? scene_getVoiceFxSendMorph(scene_index, cell->slot)
+                : preset_getFxSendDisplayAmount(scene_index, cell->slot);
         case MENU_SCENE_SETTING_FADER_SETTING:
             return scene_getVoiceFaderSetting(scene_index, cell->slot);
         case MENU_SCENE_SETTING_VOICE_MORPH:
@@ -3818,9 +3844,12 @@ static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
                                                    (uint8_t)value);
                 break;
             case MENU_SCENE_SETTING_FX_SEND_AMOUNT:
-                changed |= preset_setVoiceFxSendAmount(scene_index,
-                                                       cell->slot,
-                                                       (uint8_t)value);
+                /* S075 F2-H: view selects the retained send endpoint. */
+                changed |= voiceModeShowMorph
+                    ? preset_setVoiceFxSendMorph(scene_index, cell->slot,
+                                                 (uint8_t)value)
+                    : preset_setVoiceFxSendAmount(scene_index, cell->slot,
+                                                  (uint8_t)value);
                 break;
             case MENU_SCENE_SETTING_FADER_SETTING:
                 changed |= preset_setVoiceFaderSetting(scene_index,
@@ -11777,21 +11806,30 @@ void menu_serviceRuntimeWidgets(void)
      * (VOICE and Effect pages).
      */
     if (menu_isVoicePage(menu_activePage)) {
-        va_updateHeldState();
+        /* The overlay's TRACK gesture belongs to the Effect editor. */
+        if (!menu_fxVoiceMixOverlayActive())
+            va_updateHeldState();
         va_scanService();
         va_underlineService();
     }
 
-    if (menu_activePage == EFFECT_PAGE) {
+    if (menu_activePage == EFFECT_PAGE || menu_fxVoiceMixOverlayActive()) {
         uint8_t fx_actions = menuEffects_service();
 
-        /* Follow Scene switches and external type changes on the FX page. */
-        if (fx_actions & MENU_FX_ACT_EXIT_EDIT)
-            editModeActive = 0u;
-        if (fx_actions & MENU_FX_ACT_REPAIR) {
-            menu_resetActiveParameter();
-            menu_endlessPotMappingChanged();
-        }
+        if (menu_fxVoiceMixOverlayActive()) {
+            /* The Effect page is hidden; apply its service actions on return. */
+            if (fx_actions & MENU_FX_ACT_REPAIR)
+                menu_fxVoiceMixOverlay.flags |= MENU_FX_OVERLAY_REPAIR;
+            if (fx_actions & MENU_FX_ACT_EXIT_EDIT)
+                menu_fxVoiceMixOverlay.flags |= MENU_FX_OVERLAY_EXIT_EDIT;
+        } else {
+            /* Follow Scene switches and external type changes on the FX page. */
+            if (fx_actions & MENU_FX_ACT_EXIT_EDIT)
+                editModeActive = 0u;
+            if (fx_actions & MENU_FX_ACT_REPAIR) {
+                menu_resetActiveParameter();
+                menu_endlessPotMappingChanged();
+            }
         /*
          * Redraw after this pass's Effect state changes (S074 ordering fix).
          *
@@ -11816,10 +11854,10 @@ void menu_serviceRuntimeWidgets(void)
          * menu_applyEffectMarkers(), and va_updateHeldState() (the VOICE
          * precedent, S066 Fix 5).
          */
-        if (fx_actions & MENU_FX_ACT_HOLD_REPAINT)
-            menu_repaint();
-        else if (fx_actions & MENU_FX_ACT_REPAINT)
-            menu_repaintAll();
+            if (fx_actions & MENU_FX_ACT_HOLD_REPAINT)
+                menu_repaint();
+            else if (fx_actions & MENU_FX_ACT_REPAINT)
+                menu_repaintAll();
         /*
          * Effect-page automation-presence search (S074).
          *
@@ -11832,7 +11870,8 @@ void menu_serviceRuntimeWidgets(void)
          * menu_repaint() when the search completes. Affiliates:
          * va_scanService(), va_searchRestart().
          */
-        va_scanService();
+            va_scanService();
+        }
     }
 
     /*
@@ -12951,6 +12990,18 @@ void menu_switchPage(uint8_t pageNr)
      */
     menu_stepAutomationReset();
 
+    /*
+     * A real page switch abandons the Effect-page voice mix overlay without
+     * restoring the Effect page (S075 F2-F). The user chose the destination;
+     * the later TRACK release therefore has nothing left to restore. Because
+     * the overlay did not call menuEffects_leave(), do that when leaving FX.
+     */
+    if (menu_fxVoiceMixOverlay.flags & MENU_FX_OVERLAY_ACTIVE) {
+        menu_fxVoiceMixOverlay.flags = 0u;
+        if (pageNr != EFFECT_PAGE)
+            menuEffects_leave();
+    }
+
     if (was_voice_page && !menu_isVoicePage(pageNr))
         va_resetOverlay();
 
@@ -13802,11 +13853,12 @@ void menu_setVoiceModeShowMorph(uint8_t onOff)
     /*
      * Set the voice-page morph endpoint overlay.
      *
-     * Why: buttonHandler owns the SHIFT+VOICE gesture, but Menu owns the
+     * Why: buttonHandler owns the SHIFT/latch gestures, but Menu owns the
      * parameter buffer used by repaint/edit code. Input onOff is boolean.
      * Output: voiceModeShowMorph is updated and the next repaint/edit resolves
-     * voice-page sound parameters against the matching buffer. Confederates:
-     * buttonHandler also owns the MODE1 blink feedback for this flag.
+     * voice-page sound and FX-send cells against the matching endpoint. Drivers
+     * include VOICE SHIFT and the Effect-page voice mix overlay (S075 F2-F/G).
+     * buttonHandler also owns the MODE1 blink feedback for the latch.
     */
     voiceModeShowMorph = (uint8_t)(onOff != 0u);
     menu_endlessPotMappingChanged();
@@ -13848,6 +13900,12 @@ void menu_effectShowHome(void)
     uint8_t sub_page;
     uint8_t column;
 
+    if (menu_fxVoiceMixOverlay.flags & MENU_FX_OVERLAY_ACTIVE) {
+        /* Under the overlay only the saved Effect SELECT LEDs may change. */
+        menuEffects_renderSelectLeds((uint8_t)(
+            (menu_fxVoiceMixOverlay.fx_menu_index & MASK_PAGE) >> PAGE_SHIFT));
+        return;
+    }
     if (menu_activePage != EFFECT_PAGE)
         return;
     if (menuEffects_home(&sub_page, &column)) {
@@ -13857,6 +13915,79 @@ void menu_effectShowHome(void)
     }
     menuEffects_renderSelectLeds(menu_getSubPage());
     menu_repaint();
+}
+
+/*
+ * Effect-page voice mix overlay (contract in menu.h, S075 F2-F).
+ *
+ * Begin swaps menu_activePage/menuIndex directly instead of calling
+ * menu_switchPage(): Effect service and LEDs remain alive while the normal
+ * VOICE screen resolves the selected track's mix cells. End restores the
+ * saved Effect position and applies service actions latched during the
+ * overlay.
+ */
+uint8_t menu_fxVoiceMixOverlayBegin(uint8_t track)
+{
+    uint8_t screen;
+
+    if (track >= NUM_TRACKS)
+        return 0u;
+    if ((menu_fxVoiceMixOverlay.flags & MENU_FX_OVERLAY_ACTIVE) == 0u) {
+        if (menu_activePage != EFFECT_PAGE)
+            return 0u;
+        menu_fxVoiceMixOverlay.flags = MENU_FX_OVERLAY_ACTIVE;
+        menu_fxVoiceMixOverlay.fx_menu_index = menuIndex;
+        menu_fxVoiceMixOverlay.fx_edit_mode = editModeActive;
+        menu_fxVoiceMixOverlay.mix_screen =
+            menu_voiceSubPageScreen[MENU_VOICE_MIX_SUBPAGE];
+    } else if (!menu_isVoicePage(menu_activePage)) {
+        return 0u;
+    }
+    lockPotentiometerFetch();
+    editModeActive = 0u;
+    menu_activePage = (uint8_t)(VOICE1_PAGE + track);
+    va_resetOverlay();
+    va_searchRestart();
+    pat_applyTrackSettingsToMenu(menu_shownPattern, track);
+    /* The first appended screen is the VOICE mix Scene-settings screen. */
+    screen = menu_voiceInstrumentScreenCount(MENU_VOICE_MIX_SUBPAGE);
+    menu_voiceSubPageScreen[MENU_VOICE_MIX_SUBPAGE] = screen;
+    menuIndex = (uint8_t)((MENU_VOICE_MIX_SUBPAGE << PAGE_SHIFT) |
+                          menu_voiceFirstSelectableColumn(
+                              MENU_VOICE_MIX_SUBPAGE, screen));
+    voiceModeShowMorph = (uint8_t)(buttonHandler_getShift() != 0u);
+    menu_endlessPotMappingChanged();
+    menu_repaintAll();
+    return 1u;
+}
+
+void menu_fxVoiceMixOverlayEnd(void)
+{
+    const uint8_t flags = menu_fxVoiceMixOverlay.flags;
+
+    if ((flags & MENU_FX_OVERLAY_ACTIVE) == 0u)
+        return;
+    menu_fxVoiceMixOverlay.flags = 0u;
+    lockPotentiometerFetch();
+    va_resetOverlay();
+    voiceModeShowMorph = 0u;
+    menu_voiceSubPageScreen[MENU_VOICE_MIX_SUBPAGE] =
+        menu_fxVoiceMixOverlay.mix_screen;
+    menu_activePage = EFFECT_PAGE;
+    menuIndex = menu_fxVoiceMixOverlay.fx_menu_index;
+    editModeActive = (flags & MENU_FX_OVERLAY_EXIT_EDIT)
+        ? 0u : menu_fxVoiceMixOverlay.fx_edit_mode;
+    va_searchRestart();
+    if (flags & MENU_FX_OVERLAY_REPAIR)
+        menu_resetActiveParameter();
+    menuEffects_setShowMorph(buttonHandler_getShift());
+    menu_endlessPotMappingChanged();
+    menu_repaintAll();
+}
+
+uint8_t menu_fxVoiceMixOverlayActive(void)
+{
+    return (uint8_t)(menu_fxVoiceMixOverlay.flags & MENU_FX_OVERLAY_ACTIVE);
 }
 
 void menu_showStepTrackSettingsFirstHalf(void)

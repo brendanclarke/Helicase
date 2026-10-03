@@ -188,7 +188,7 @@
 #define AUTOSAVE_SCENE_NAME_OFFSET              0u
 #define AUTOSAVE_SCENE_PARAMETERS_OFFSET       10u
 #define AUTOSAVE_SCENE_PARAMETER_ALLOC_BYTES  118u
-#define AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES    45u  /* S074: +4 bus compressor */
+#define AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES    51u  /* S075 F2: +6 FX-send Morph */
 #define AUTOSAVE_EFFECT_OFFSET                128u
 #define AUTOSAVE_EFFECT_TYPE_OFFSET             0u
 #define AUTOSAVE_EFFECT_TYPE_BYTES              3u
@@ -249,7 +249,14 @@ typedef enum {
      * AutoSave record layout, masks and format version remain unchanged.
      */
     AUTOSAVE_SCENE_PARAM_BUS_COMP_BASE = 41,
-    AUTOSAVE_SCENE_PARAM_COUNT = 45
+    /*
+     * S075 F2-H: Morph endpoint of the per-voice FX send, one cell per
+     * instrument slot (45..50), in scene_settings_t.fx_send_morph[] order.
+     * These occupy previously reserved cells; record layout and masks stay
+     * unchanged. Owner: scene_setVoiceFxSendMorph().
+     */
+    AUTOSAVE_SCENE_PARAM_FX_SEND_MORPH_BASE = 45,
+    AUTOSAVE_SCENE_PARAM_COUNT = 51
 } autosave_scene_parameter_t;
 
 typedef enum {

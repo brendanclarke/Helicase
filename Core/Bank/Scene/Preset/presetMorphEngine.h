@@ -119,6 +119,17 @@ uint8_t presetMorph_getEffectiveVoiceAmount(uint8_t scene_index,
                                              uint8_t slot);
 
 /*
+ * Read the resolved Morph amount of one voice (S075 F2-H).
+ *
+ * What: the amount the Morph worker uses: the step override or retained base,
+ * plus active LFO contributions when this is the active Scene. Read-only; it
+ * never changes SceneData, AutoSave or worker state. Output is 0..255, or 0
+ * for an invalid Scene/slot. Client: preset_getEffectiveFxSendAmount().
+ */
+uint8_t presetMorph_getResolvedVoiceAmount(uint8_t scene_index,
+                                           uint8_t slot);
+
+/*
  * Set/clear step-automation Morph overlays.
  *
  * Step automation replaces a retained Morph base only in the runtime worker;

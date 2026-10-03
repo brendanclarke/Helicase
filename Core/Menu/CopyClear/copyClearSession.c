@@ -853,7 +853,16 @@ void copyClear_formatMenu(char row0[17], char row1[17])
     memset(row1, ' ', 16u);
     row0[16] = '\0';
     row1[16] = '\0';
-    cc_put(row0, &pos, (cc_state.phase == CC_OP_CLEAR) ? "CLR" : "COPY");
+    /*
+     * Row 0: operation word, then the source indicator (S075 F2-C).
+     *
+     * What: `Copy` or `Clear` from column 0 (user: mixed case, full word),
+     * then the source indicator from column 8, the 9th character (F1-D), so
+     * the indicator never moves with the word length. Inputs: cc_state.phase.
+     * Output: row0[0..15]. Affiliates: cc_formatIndicator(),
+     * copyClear_menuVisible() contract in copyClearSession.h.
+     */
+    cc_put(row0, &pos, (cc_state.phase == CC_OP_CLEAR) ? "Clear" : "Copy");
     pos = 8u;
     cc_formatIndicator(row0, &pos);
     label = (cc_state.phase == CC_OP_CLEAR)

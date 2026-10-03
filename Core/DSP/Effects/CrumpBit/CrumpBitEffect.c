@@ -326,10 +326,16 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     per_frame = 1.0f / (float)io->frames;
     mix_to = (float)rt->mix_raw * (1.0f / 127.0f);
     fb_to = (float)rt->feedback_raw * (CRUMPBIT_FEEDBACK_MAX / 127.0f);
-    gain_l_to = (rt->pan_raw <= 64u) ? 1.0f
-        : (float)(127u - rt->pan_raw) * (1.0f / 63.0f);
-    gain_r_to = (rt->pan_raw >= 64u) ? 1.0f
-        : (float)rt->pan_raw * (1.0f / 64.0f);
+    /*
+     * Delay pan balance centred on 63 (S075 F2-E, F2-Q4): 63 is both-side
+     * unity and displays 0, 0 is right silent, and 127 is left silent. This
+     * matches the Effect return stereo law in mixer.c. Input: pan_raw 0..127;
+     * output: block-ramp targets gain_l_to and gain_r_to.
+     */
+    gain_l_to = (rt->pan_raw <= 63u) ? 1.0f
+        : (float)(127u - rt->pan_raw) * (1.0f / 64.0f);
+    gain_r_to = (rt->pan_raw >= 63u) ? 1.0f
+        : (float)rt->pan_raw * (1.0f / 63.0f);
     mix = rt->mix;
     fb = rt->feedback;
     gain_l = rt->gain_l;

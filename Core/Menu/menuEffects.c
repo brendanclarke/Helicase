@@ -537,16 +537,38 @@ void menuEffects_shortName(const menuEffects_cell_t *cell, char *dst)
         dst[i] = (text[i] != '\0') ? text[i] : ' ';
 }
 
-/* Copy a bounded/padded LCD field. */
+/*
+ * Copy a bounded, space-padded LCD field (S075 F2-D fix).
+ *
+ * What: copies `src` up to its terminator or `width` characters, then pads
+ * the rest of the field with spaces. Why: after a short string's terminator,
+ * the old loop kept copying following flash bytes into the full view. Inputs:
+ * destination (at least `width` bytes), source (NULL paints spaces), width
+ * 0..16. Output: exactly `width` bytes written; no terminator is added.
+ * Caller: menuEffects_paintEditView().
+ */
 static void menuEffects_copyField(char *dst, const char *src, uint8_t width)
 {
-    uint8_t i;
+    uint8_t i = 0u;
 
-    for (i = 0u; i < width; i++)
-        dst[i] = (src && src[i] != '\0') ? src[i] : ' ';
+    if (src) {
+        for (; i < width && src[i] != '\0'; i++)
+            dst[i] = src[i];
+    }
+    for (; i < width; i++)
+        dst[i] = ' ';
 }
 
-/* Paint the manager-owned full view; descriptor PARAM cells use Menu's path. */
+/*
+ * Paint the manager-owned Effect full views (TYPE, RUN, LENGTH, SCALE, MORPH).
+ *
+ * What: row 0 is the group/name pair; row 1 shows the value. Rule (S075 F2-D,
+ * user): named values (TYPE, RUN, SCALE) show only their long name from
+ * column 0; numeric values (LENGTH, MORPH) show only the number at column 13.
+ * The `typ` browse has no changed mark: it commits on encoder click, the gate
+ * in F2-Q3. Inputs: the resolved cell and Effect record. Output: 1 when this
+ * function painted editDisplayBuffer, 0 for PARAM/NONE cells.
+ */
 uint8_t menuEffects_paintEditView(const menuEffects_cell_t *cell)
 {
     const effect_record_t *record = menuEffects_record();
@@ -565,9 +587,6 @@ uint8_t menuEffects_paintEditView(const menuEffects_cell_t *cell)
         menuEffects_copyField(&editDisplayBuffer[0][8], "Type", 8u);
         menuEffects_copyField(&editDisplayBuffer[1][0],
                               entry ? entry->full8 : "?", 8u);
-        if (menuEffects_typeEdit && value != record->type)
-            editDisplayBuffer[1][11] = '*';
-        (void)menuEffects_formatValue3(cell, &editDisplayBuffer[1][13]);
         break; }
     case MENU_FX_CELL_RUN:
         menuEffects_copyField(&editDisplayBuffer[0][0], "FX Seq", 8u);
@@ -575,7 +594,6 @@ uint8_t menuEffects_paintEditView(const menuEffects_cell_t *cell)
         if (value < EFFECT_SEQ_RUN_MODE_COUNT)
             menuEffects_copyField(&editDisplayBuffer[1][0],
                                   menuEffects_runLong[value], 8u);
-        (void)menuEffects_formatValue3(cell, &editDisplayBuffer[1][13]);
         break;
     case MENU_FX_CELL_LENGTH:
         menuEffects_copyField(&editDisplayBuffer[0][0], "FX Seq", 8u);
@@ -587,7 +605,6 @@ uint8_t menuEffects_paintEditView(const menuEffects_cell_t *cell)
         menuEffects_copyField(&editDisplayBuffer[0][8], "StepScal", 8u);
         menuEffects_copyField(&editDisplayBuffer[1][0],
                               stepScale_longName((uint8_t)value), 8u);
-        (void)menuEffects_formatValue3(cell, &editDisplayBuffer[1][13]);
         break;
     case MENU_FX_CELL_MORPH_AMOUNT:
         menuEffects_copyField(&editDisplayBuffer[0][0], "Effect", 8u);

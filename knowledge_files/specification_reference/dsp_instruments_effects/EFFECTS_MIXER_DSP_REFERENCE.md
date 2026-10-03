@@ -6,7 +6,7 @@ the master bus compressor, and the path to the two DACs. It covers the
 arithmetic, the number formats, what each stage costs, and how to change or
 extend it.
 
-- **Current as of:** Session 074 close (2026-09-30). S074 added CrumpBit
+- **Current as of:** Session 075 F2 (2026-10-03). S074 added CrumpBit
   (§4.4, the first type using the arena), the master bus compressor (§5A),
   the `xfd` fader mode (§3.2) and the closure of the arena gaps (§5.3).
 - **Scope split with `EFFECTS_BUS_REFERENCE.md`:** that document is the
@@ -190,9 +190,9 @@ When the Effect is active:
    input channel count, `share` = the current arena share (§5).
 3. `effects_process(&io)`: the type's `process()` works in place.
 4. **Return gains** (`level` = the common `vol` row / 127):
-   - stereo-output type (balance, unity at centre):
-     `gL = level · (pan ≤ 64 ? 1 : (127 − pan)/63)`,
-     `gR = level · (pan ≥ 64 ? 1 : pan/64)`;
+   - stereo-output type (balance, unity at stored centre 63):
+     `gL = level · (pan ≤ 63 ? 1 : (127 − pan)/64)`,
+     `gR = level · (pan ≥ 63 ? 1 : pan/63)`;
    - mono-output type (constant power): `gL = level · squareRootLut[127 − pan]`,
      `gR = level · squareRootLut[pan]`.
 5. `mixer_addFxReturnToOutput()` ramps both gains per sample from the
@@ -346,7 +346,7 @@ per sample, the tape loop (mono):
   - Both are computed every block and `sync` selects one (constant cost), so
     tempo changes glide the delay. The target is clamped to `length − 2`.
 - **Mix, feedback, pan:** `mix = row/127`; `fb = row·0.99/127` (always < 1);
-  delay pan `gL = p ≤ 64 ? 1 : (127 − p)/63`, `gR = p ≥ 64 ? 1 : p/64`. All
+  delay pan `gL = p ≤ 63 ? 1 : (127 − p)/64`, `gR = p ≥ 63 ? 1 : p/63`. All
   four ramp linearly across the block and are stored as the exact targets at
   the end.
 - **Arena use:** one byte per sample. The loop length is

@@ -143,8 +143,15 @@ typedef enum {
 #define SCENE_BUS_COMP_MODE_ST1        1u
 #define SCENE_BUS_COMP_MODE_ST2        2u
 #define SCENE_BUS_COMP_SIDECHAIN_OFF   0u
-#define SCENE_BUS_COMP_DEFAULT_AMOUNT 48u
-#define SCENE_BUS_COMP_DEFAULT_TIME   48u
+/*
+ * Bus compressor defaults (S075 F2-B, user decision F2-Q2): mode off,
+ * amount 0, time 0, sidechain off. A fresh, cleared or default-staged Scene
+ * has no compression and neutral values. Used only through
+ * scene_busCompDefault[] in SceneData.c, which feeds scene_busCompDefaults()
+ * for every default path.
+ */
+#define SCENE_BUS_COMP_DEFAULT_AMOUNT  0u
+#define SCENE_BUS_COMP_DEFAULT_TIME    0u
 
 typedef struct {
     /*
@@ -178,17 +185,21 @@ typedef struct {
      * domain 0..5. Preset clamps it against the DSP mixer constants before
      * writing mixer_audioRouting[], keeping SceneData free of mixer includes.
      *
-     * fx_send_amount and fader_setting are retained now for the Scene file/UI
-     * contract. FX send is 0..127. Fader mode is 0..SCENE_FADER_SETTING_MAX
+     * fx_send_amount and fx_send_morph are the Normal and Morph endpoints of
+     * the per-voice FX send (0..127; Morph endpoint S075 F2-H). The live send
+     * is interpolated by the voice's resolved Morph amount each audio block;
+     * step automation overrides both endpoints while its step plays.
+     * fader_setting is 0..SCENE_FADER_SETTING_MAX
      * (0..3): pre (normal/pre-FX), pst (post-FX), fx (FX-only) and xfd (dry
      * to FX crossfade, S074), interpreted by the mixer FX path. Preset
      * setters store the values and the live mixer applies the selected mode.
      *
      * These fields are indexed by instrument slot, not by track. Track 7
      * continues to share slot 6's voice/mix identity.
-     */
+    */
     uint8_t audio_out[INSTRUMENT_SLOT_COUNT];
     uint8_t fx_send_amount[INSTRUMENT_SLOT_COUNT];
+    uint8_t fx_send_morph[INSTRUMENT_SLOT_COUNT];
     uint8_t fader_setting[INSTRUMENT_SLOT_COUNT];
     /*
      * Per-track MIDI assignment settings retained with the Scene.
@@ -425,6 +436,19 @@ void scene_setVoiceFxSendAmount(uint8_t scene_index, uint8_t slot,
                                 uint8_t amount);
 uint8_t scene_getVoiceFxSendAmount(uint8_t scene_index, uint8_t slot);
 /*
+ * Morph endpoint of one voice's FX send (S075 F2-H).
+ *
+ * What: stores/returns the retained 0..127 Morph endpoint through the
+ * change-aware Scene owner. The setter marks AutoSave cell
+ * AUTOSAVE_SCENE_PARAM_FX_SEND_MORPH_BASE + slot only when the byte changes;
+ * invalid Scene/slot reads return 0. Clients: Preset, Menu, copy/clear and
+ * AutoSave restore. Affiliate: the Normal endpoint above and `fx_send_morph`
+ * in sceneset.scg.
+ */
+void scene_setVoiceFxSendMorph(uint8_t scene_index, uint8_t slot,
+                               uint8_t amount);
+uint8_t scene_getVoiceFxSendMorph(uint8_t scene_index, uint8_t slot);
+/*
  * Largest stored fader mode (S074): 0 pre, 1 pst, 2 fx, 3 xfd.
  *
  * What: the single domain limit for fader_setting[]. The SceneData setter
@@ -495,8 +519,8 @@ uint8_t scene_getEffectMorphAmount(uint8_t scene_index);
 /*
  * S074 master bus compressor accessors (cmp, cam, ctm, csc).
  *
- * scene_busCompDefaults() writes off, 48, 48, off into a settings image for
- * every fresh/staged/emptied Scene path. scene_busCompClamp() applies the
+ * scene_busCompDefaults() writes off, 0, 0, off (S075 F2-B) into a settings
+ * image for every fresh/staged/emptied Scene path. scene_busCompClamp() applies the
  * field domain (mode 0..2, amount/time 0..127, sidechain 0..6), returning 0
  * for an invalid field. scene_setBusCompSetting() clamps and commits through
  * the change-aware Scene store; scene_getBusCompSetting() returns the retained
@@ -515,8 +539,9 @@ uint8_t scene_getBusCompSetting(uint8_t scene_index, uint8_t field);
  *
  * scene_settingsDefaults(): the settings of a fresh Scene (as Scene Load's
  * stage defaults: MIDI channel track+1, note MIDI_DEFAULT_TRIGGER_NOTE,
- * default audio route per slot, FX send 0, fader pre, Morph amounts 0, Effect
- * Morph 0, bus compressor off/48/48/off). scene_commitSettings(): copies a
+ * default audio route per slot, FX send Normal and Morph endpoints 0, fader
+ * pre, Morph amounts 0, Effect
+ * Morph 0, bus compressor off/0/0/off). scene_commitSettings(): copies a
  * complete settings image into one Scene field by field through the
  * change-aware setters, so every changed byte marks its own AutoSave cell and
  * the card-clean bit; no runtime apply (Preset owns that). Why: `copy scene

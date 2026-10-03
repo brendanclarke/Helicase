@@ -145,8 +145,9 @@ uint8_t copyClear_eventOverflow(void);
  * Menu drawing. copyClear_menuVisible() is nonzero while a menu is set in any
  * held phase: copy from the first provisional source press, and clear from
  * the first object press until release. copyClear_formatMenu() fills two
- * 16-character rows (NUL at index 16): row 0 `COPY`/`CLR` at column 0 and the
- * source indicator at column 9, row 1 the bracketed selection label.
+ * 16-character rows (NUL at index 16): row 0 `Copy`/`Clear` at column 0 and
+ * the source indicator from column 8 (the 9th character), row 1 the bracketed
+ * selection label.
  * Callers: menu_repaint(), va_queueMarkerTransaction().
  */
 uint8_t copyClear_menuVisible(void);

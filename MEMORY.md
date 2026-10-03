@@ -146,17 +146,25 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   children (Instrument, Effect, FX sequence, mix settings) fan out;
   Pattern data never does. Phase 6 copy/clear spec:
   `S075_PH6_COPY_CLEAR_FULL_SPEC.md` (root).
-- **S075 state (F1 and stage-`c` trace implemented, unverified on hardware):**
+- **S075 state (F2 implemented, unverified on hardware):**
   `Core/Menu/CopyClear/` (four file pairs) replaces `copyClearTools`. Global
   `srt` is retired (PERF `fxm` = Effect Morph in its cell; AutoSave Scene
   cell 7 reserved, written 127; Scene target 390 a retired placeholder).
+  F2 adds St1 route defaults, bus-compressor off/0/0/off defaults, stored pan
+  centre 63 and the CrumpBit `snc`/default fixes, Normal/Morph FX-send
+  endpoints with AutoSave cells 45..50 and resolved-Morph interpolation, the
+  momentary VOICE Morph view, and the Effect-page SHIFT+TRACK voice-mix
+  overlay. The overlay keeps Effect LEDs/service live and restores its saved
+  Effect cursor/state when the last TRACK releases; real mode switches abandon
+  it. The approved F2 allocation is +101 B: `scenes` +96 B, the Menu overlay
+  record +4 B, and the button-handler TRACK mask +1 B.
   Every Pattern pool keeps a permanent 132 B swap block (8,060 B usable).
   The 9 kB name cache is lent to copy/clear during an operation; while lent
   other filesystem ops are refused. AutoSave, trace, settings and Pattern
   repair do not start while an operation runs. The F1 pass adds +124 B
   production SRAM1 net; DEV adds 24 B of trace/latch state. Deviations,
-  verification and open hardware checks: `S075_PH6_COPYCLEAR_IMPLEMENTATION.md`
-  §14.3, §14.5, §14.7.
+  verification and open hardware checks: `S075_PH6_COPYCLEAR_F2_IMPLEMENTATION.md`
+  §13.2, §14, §15, plus the combined schedule's §14.5/§14.7.
 - **Session 074 is closed.** Durable record: `074_SESSION_HANDOFF_LOG.md`.
   The ten root `S074_*.md` documents are superseded (the user deletes them).
   Next was Session 075 (Phase 6 copy/clear; see the current-state note).
@@ -166,9 +174,10 @@ end; durable facts belong in `knowledge_files/log_archive/` or
     `DEV_MODE_DIAGNOSTIC 1` (then `DEV_LOGGING_IWDG 1` if it hangs);
   - `cpu` widget reading with `cmp` on against off not taken;
   - BC11 (track 7 counts as compressor sidechain voice 6) unconfirmed;
-  - O1: a Settings Load bulk apply equalises per-voice Morph and `srt`
-    across the VOICE edit mask (existing, not fixed);
-  - `DTYPE_PM63` Effect pan rows show centre (64) as `1`;
+  - O1's `srt` part is retired in S075; per-voice Morph remains a Scene
+    setting and continues to fan out through the existing VOICE edit mask;
+  - the old `DTYPE_PM63` centre-at-64 display quirk is resolved by S075 F2:
+    Effect pan defaults/stereo balance now use stored 63, which displays 0;
   - F4 trace-ring priorities (lifecycle records drop under dirty bursts);
   - saturator α 0.35 not A/B tested; CrumpBit minimum-share run not reported;
   - stale comments: `BusCompressor.h` (24 B), the `BusCompressor.c` loop

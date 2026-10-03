@@ -1935,9 +1935,9 @@ Session 075 startup: `S075_PH6_COPY_CLEAR.md` (root).
   every masked Scene and mark AutoSave; the legacy paths zero the mirrors
   first, so `srt` 0 would be written. Fix with the bus compressor's
   refresh-only pattern. Unverified on hardware.
-- **Effect pan display.** Effect pan rows (`pan`, CrumpBit `dpn`) store 64 as
-  centre (the mixer law), but `DTYPE_PM63` displays `value − 63`, so centre
-  shows `1`.
+- **Effect pan display.** Resolved by S075 F2: Effect and CrumpBit pan rows
+  default to stored 63 (display 0); stored 0/127 display -63/64 and the
+  stereo balance law is centred on 63.
 - **AutoSave trace ring priorities (F4).** Whole-object dirty bursts
   (2,000–15,000 `D` records) push out lifecycle records; they hid the torn
   publication and the first repaired drain's `A`/`V`. Collapse bursts into

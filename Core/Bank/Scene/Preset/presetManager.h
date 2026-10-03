@@ -400,7 +400,9 @@ void preset_applyVoiceAudioOutRuntime(uint8_t slot, uint8_t route);
  * settings; audio-out DSP restore remains owned by preset_applyKitAudioRouting.
  * The audio/FX tables are six-entry runtime state and are cleared at transport
  * restore and preset_init(). The mixer pulls the effective FX-send getter each
- * block; the setter remains a retained/overlay storage boundary.
+ * block; it reads the step override, otherwise the Normal/Morph endpoints
+ * interpolated by the voice's resolved Morph amount (S075 F2-H). The display
+ * getter returns the step override or Normal endpoint, never interpolation.
  */
 void preset_setAudioOutStepOverride(uint8_t slot, uint8_t route);
 void preset_clearAllAudioOutStepOverrides(uint8_t scene_index);
@@ -408,6 +410,7 @@ uint8_t preset_getEffectiveAudioOut(uint8_t scene_index, uint8_t slot);
 void preset_setFxSendStepOverride(uint8_t slot, uint8_t amount);
 void preset_clearAllFxSendStepOverrides(void);
 uint8_t preset_getEffectiveFxSendAmount(uint8_t scene_index, uint8_t slot);
+uint8_t preset_getFxSendDisplayAmount(uint8_t scene_index, uint8_t slot);
 void preset_applySceneSettings(uint8_t scene_index);
 /*
  * Scene-owned per-voice mix setting setters.
@@ -418,12 +421,16 @@ void preset_applySceneSettings(uint8_t scene_index);
  * (pre/pst/fx/xfd) have no push step: the mixer reads both every block.
  *
  * Clients: VOICE mix Scene-setting cells, sceneset load/apply follow-up, and
- * future MIDI/Bank Scene setting mutation.
+ * future MIDI/Bank Scene setting mutation. FX send has two endpoints: the
+ * Normal setter below and the Morph setter (S075 F2-H); both are retained in
+ * SceneData.
  */
 uint8_t preset_setVoiceAudioOut(uint8_t scene_index, uint8_t slot,
                                 uint8_t route);
 uint8_t preset_setVoiceFxSendAmount(uint8_t scene_index, uint8_t slot,
                                     uint8_t amount);
+uint8_t preset_setVoiceFxSendMorph(uint8_t scene_index, uint8_t slot,
+                                   uint8_t amount);
 uint8_t preset_setVoiceFaderSetting(uint8_t scene_index, uint8_t slot,
                                     uint8_t mode);
 uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,

@@ -115,8 +115,8 @@ mixer_calcNextSampleBlock():
       bus → float (× 1/8388352), R zeroed for mono-in/stereo-out
       effects_process(io)                       in place; io.share = current share
       return gains:
-         stereo-out: balance gL = pan<=64 ? 1 : (127-pan)/63,
-                             gR = pan>=64 ? 1 : pan/64
+         stereo-out: balance gL = pan<=63 ? 1 : (127-pan)/64,
+                             gR = pan>=63 ? 1 : pan/63
          mono-out:   constant power squareRootLut[127-pan], [pan]
          × level (vol/127); ramped from mixer_fx_return_last_gain[2]
       route(out) with mixer_checkOutJackAvailable() → saturated add
@@ -197,7 +197,7 @@ future, tokens never change meaning.
 |---:|---|---|---:|---|---|---:|---:|
 | 0 | `off` / `Off␣␣` / `Off` | none | 3 | — | default / none | 0 | 0 |
 | 1 | `flt` / `StFlt` / `StFilter` | stereo in, stereo out | 7 | freq, reso, drive, type, vol, pan | default / none | 76 B (two filter states) | 0 |
-| 2 | `cbt` / `CrmBt` / `CrumpBit` | stereo in, stereo out | 11 | bof, biv, mix, fbk, rte, syn, vol, pan, dpn | custom layout; `select`, `render_leds`, `paint_row0`, `format_value3`, flag `OWNS_SELECT_LEDS` | 56 B | 70,592 B |
+| 2 | `cbt` / `CrmBt` / `CrumpBit` | stereo in, stereo out | 11 | bof, biv, mix, fbk, rte, snc, vol, pan, dpn | custom layout; `select`, `render_leds`, `paint_row0`, `format_value3`, flag `OWNS_SELECT_LEDS` | 56 B | 70,592 B |
 
 `effects_runtime_t` is a union of every runtime struct and is **76 B**
 (StereoFilter is the largest). `_Static_assert`s check each member against
@@ -520,7 +520,7 @@ underline reports stored data, not what is audible.
 | 1 | 0, 1 | `typ out vol pan`, `run len scl mrp` | manager (unchanged) |
 | 2 | 0 = **overlay** (home) | bit states `- - - - - - - ->` | `mix fbk rte mrp` |
 | 2 | 1 | `mix fbk rte sub` | the same rows, then the sub-type (`dly`) |
-| 2 | 2 | `syn dpn` | two empty cells |
+| 2 | 2 | `snc dpn` | two empty cells |
 | 3..8 | — | (no screens) | SELECT 1..8 are bit buttons on this type |
 
 - **Layout:** `screen_count = {0, 3, 0, …}`, `custom_row0[1] = 0x01`, home
@@ -553,9 +553,13 @@ underline reports stored data, not what is audible.
 - **Masks are not Pattern-automatable or LFO-modulatable** (7-bit Pattern
   values cannot reach bit 7; interpolated masks are meaningless). They are
   sequenced through FX lanes 1–2, which hold full 8-bit values.
-- **Pan display quirk (existing):** the Effect pan rows (`pan`, `dpn`) store
-  64 as centre, but `DTYPE_PM63` displays `value − 63`, so centre shows `1`.
-  Logged in `SCOPING_TARGETS.md`.
+- **Pan rule (S075 F2):** every pan stores 0..127; stored 63 is centre and
+  displays 0 through `DTYPE_PM63`, while 0 displays -63 and 127 displays 64.
+  Effect and CrumpBit defaults use 63; stereo balance laws are centred on 63
+  and mono constant-power laws are unchanged. Effects saved at 64 display 1.
+
+CrumpBit's F2 defaults are mix 0, feedback 64, rate 64, delay pan 63
+(display 0), with the sync row labelled `snc`.
 
 ---
 

@@ -12670,8 +12670,8 @@ static void filesystem_loadSceneDirectory_tick(void)
                  * Inputs: op_sceneset_state.seen_audio_out, the kitset parser's
                  * seen_audio_out_mask, and legacy_audio_out[] values. Output:
                  * shared scene-stage settings.audio_out[] in persisted route
-                 * domain 0..5. The per-slot loop clamps corrupt route bytes to
-                 * the same defaults used by new-format scenes.
+                 * domain 0..5. The per-slot loop replaces a corrupt route
+                 * byte with the Scene default route, St1 (S075 F2-Q1).
                  *
                  * Affiliates/clients: storage_kitsetHasCompleteLegacyAudioOut(),
                  * storage_kitsetLegacyAudioOut(), SceneData route accessors,
@@ -16648,20 +16648,22 @@ static void filesystem_initSceneStage(filesystem_scene_stage_t *stage)
          * Scene-owned voice mix defaults mirror SceneData's resident init.
          *
          * Inputs: the zero-based instrument slot. Outputs: staged Scene route,
-         * FX send, and fader mode bytes before any optional sceneset.scg lines
+         * FX send Normal and Morph endpoints, and fader mode bytes before any
+         * optional sceneset.scg lines
          * are parsed. The loop is deliberately per-slot, not per-track, because
          * audio routing is six-voice mixer state while MIDI defaults above are
          * seven-track sequencer state.
          */
         stage->settings.audio_out[slot] = filesystem_defaultVoiceAudioOut(slot);
         stage->settings.fx_send_amount[slot] = 0u;
+        stage->settings.fx_send_morph[slot] = 0u;   /* S075 F2-H */
         stage->settings.fader_setting[slot] = 0u;
         instrumentManager_resetSlot(&stage->kit.instruments[slot],
                                     initial_types[slot]);
     }
     /*
-     * S074: stage bus compressor defaults (off, 48, 48, off) through the
-     * shared SceneData helper, so optional sceneset keys behave like a fresh
+     * S074/S075 F2-B: stage bus compressor defaults (off, 0, 0, off) through
+     * the shared SceneData helper, so optional sceneset keys behave like a fresh
      * resident Scene.
      */
     scene_busCompDefaults(&stage->settings);
@@ -16745,25 +16747,18 @@ static void filesystem_resetSceneLoadChildDiscovery(void)
 static uint8_t filesystem_defaultVoiceAudioOut(uint8_t slot)
 {
     /*
-     * Local copy of the SceneData route default for filesystem staging.
+     * Local copy of the SceneData route default for filesystem staging
+     * (S075 F2-A, user decision F2-Q1).
      *
-     * What: returns the canonical mixer route for a missing Scene audio_out
-     * value: slot 1/voice 1 uses stereo DAC2, slot 6/voice 6 uses DAC1 right,
-     * and all other voices use stereo DAC1.
-     *
-     * Why: filesystem.c initializes off-scene staging memory and cannot route
-     * through scene_setVoiceAudioOut(), which writes resident SceneData by
-     * index. Keeping the arithmetic here byte-for-byte simple also makes the
-     * legacy kitset import fallback below explicit.
-     *
-     * Inputs: zero-based voice slot. Output: persisted Scene route domain
-     * 0..5. Affiliates: scene_defaultVoiceAudioOut() in SceneData.c and
-     * preset_applyKitAudioRouting().
+     * What: route 0 (St1) for every slot, the same value as
+     * scene_defaultVoiceAudioOut() in SceneData.c. Why: filesystem.c
+     * initializes off-Scene staging memory and cannot write resident
+     * SceneData by index. This covers missing sceneset routes, the boot empty
+     * Scene path, and the legacy kitset fallback after invalid route bytes.
+     * Inputs: zero-based voice slot (unused). Output: 0 in route domain 0..5.
+     * Affiliates: scene_defaultVoiceAudioOut(), preset_applyKitAudioRouting().
      */
-    if (slot == 0u)
-        return 2u;
-    if (slot == 5u)
-        return 1u;
+    (void)slot;
     return 0u;
 }
 
@@ -17284,6 +17279,15 @@ static uint8_t filesystem_nextScenesetLine(char *dst, uint16_t cap,
             dst, cap, storage_busCompKey(field),
             scene->settings.bus_comp[field]);
     }
+    case 14u:
+        /*
+         * S075 F2-H: append six FX-send Morph endpoints after the bus
+         * compressor lines so no earlier writer line moves. Parser:
+         * storageTypes.c `fx_send_morph`.
+         */
+        return filesystem_formatAssignmentCsvU8Line(
+            dst, cap, "fx_send_morph", scene->settings.fx_send_morph,
+            INSTRUMENT_SLOT_COUNT);
     default:
         return 0u;
     }
@@ -28844,6 +28848,7 @@ static void filesystem_bootReaderEmptyScene(uint8_t scene_index)
         scene->settings.audio_out[slot] =
             filesystem_defaultVoiceAudioOut(slot);
         scene->settings.fx_send_amount[slot] = 0u;
+        scene->settings.fx_send_morph[slot] = 0u;   /* S075 F2-H */
         scene->settings.fader_setting[slot] = 0u;
         instrumentManager_resetSlot(&scene->kit.instruments[slot],
                                     initial_types[slot]);
