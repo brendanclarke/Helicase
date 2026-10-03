@@ -137,7 +137,7 @@ survives, with no user action at all.
 | Scene targets: FX send `Nfx`, audio out `Nou`, voice Morph `Nvm`, Effect Morph `fxm` | Separate overlays (`preset_setFxSendStepOverride()`, `preset_setAudioOutStepOverride()`, `morph_step_override[]`, `effects_setMorphAutomation()`) read through effective getters; edits change only retained values. |
 | Track-7 alternate decay step override | Own override (`instrumentManager_setSlot6Track7StepDecayOverride()`). |
 | Non-morphable (supplemental) instrument cells | The worker skips them. `preset_setSupplementalParameter()` writes only the edited cell. |
-| A MIDI CC to one parameter | Writes only that parameter (`MidiParser.c` line 106). It does replace that parameter's automation overlay and its Morph interpolation until the next worker write or trigger; see §6, P1. |
+| A MIDI CC to one parameter | External CC enters the active Scene's clamped Normal endpoint and queues the Morph worker; the worker skips any automation-held runtime value. The legacy internal CC path remains runtime-only; see §6, P1. |
 
 ## 5. Remediation (code changes)
 
@@ -441,6 +441,9 @@ automation holds it (S075 automation fix)."
   active Scene); the Morph sweep applies it whenever it gets to it, and the
   sweep skips automation-held parameters. Implementation:
   `S075_F3_AUTOMATION_BUGFIX_IMPLEMENTATION.md` Stages C–E.
+- **P1 status:** implemented in S075 F3. External MIDI now enters the active
+  Scene endpoint at the lowest priority; internal legacy CC calls retain their
+  runtime-only behavior.
 - **P2 — the menu edit no longer queues the whole voice.** Today every edit
   re-walks every morphable parameter of the voice, which is what clobbered
   the automation. After R-10 an edit re-interpolates only the edited

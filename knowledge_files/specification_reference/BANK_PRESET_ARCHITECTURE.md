@@ -193,9 +193,11 @@ or runtime dispatch — they are never the stored representation.
 Parameters change through these paths:
 
 1. **User edit (VOICE page):** `preset_setInstrumentParameter()` writes the
-   descriptor-indexed byte in the Scene image, applies to DSP runtime via
-   `InstrumentManager`, and optionally records automation. Fan-out: written
-   to every Scene in `bank_scene_mask_voice_edit`.
+   descriptor-indexed endpoint in the Scene image and applies only that
+   parameter's resolved Morph interpolation to DSP runtime via
+   `InstrumentManager`. A step-automation-held parameter keeps its runtime
+   value until the next trigger. Fan-out: written to every Scene in
+   `bank_scene_mask_voice_edit`.
 
 2. **User edit (Scene settings/PERF page):** Scene-level values (morph,
    decimation, audio routing) written through SceneData setters. Fan-out
@@ -214,6 +216,12 @@ Parameters change through these paths:
    `instrumentManager_writeRuntime()` and set dirty bits. Scene targets
    use runtime-only overlays (Session 070). Neither path changes stored
    images.
+
+   **S075 F3 priority:** step automation wins until the voice's next trigger;
+   a menu edit changes an endpoint and applies only that parameter's
+   interpolation at once; external MIDI is lowest priority, storing the
+   active Scene's Normal endpoint for the Morph worker to apply. Morph-base
+   writers never overwrite a held automation runtime value.
 
 6. **Kit/Instrument/Scene/Bank Load:** Commits validated data from staging
    into resident storage. Scene/Bank loads stage the Effect atomically with
@@ -443,6 +451,12 @@ result[i] = normal[i] + ((morph[i] - normal[i]) * amount) / 255
 
 Results are stored in `morph_interpolation[slot][descriptor_index]` and
 applied to DSP runtime through the normal descriptor writer.
+
+S075 F3 priority is explicit at the runtime boundary: step automation holds
+the current runtime value until the next trigger; a menu endpoint edit
+re-interpolates only the edited descriptor at the voice's resolved Morph
+amount; an external MIDI CC stores the active Scene's Normal endpoint and is
+applied by the bounded worker, which skips automation-held descriptors.
 
 ### Morph decimation
 

@@ -236,6 +236,11 @@ static volatile uint8_t seq_pending_automation_drain = 0u;
  * Lifetime: static until the matching trigger restores the set bits or a
  * transport/pattern reset clears them. Owner: Sequencer. Affiliate:
  * seq_drainPendingAutomation() and seq_restoreAutomatedParameters().
+ * S075 F3: the bitmap is also the "automation holds this value" record that
+ * enforces "automation always wins": the Morph sweep, the per-parameter menu
+ * apply and synchronous voice applies consult it through
+ * seq_automationHoldsParameter() and never overwrite a held runtime value
+ * before the trigger.
  */
 static uint64_t seq_automation_dirty[INSTRUMENT_SLOT_COUNT];
 
@@ -1126,6 +1131,17 @@ void seq_restoreAutomatedParameters(uint8_t trigger_track)
         }
     }
     seq_automation_dirty[slot] = 0u;
+}
+
+/*
+ * Contract in sequencer.h. Read-only view of the overlay bitmap;
+ * INSTRUMENT_PARAM_COUNT is 64, one bit per descriptor-local index.
+ */
+uint8_t seq_automationHoldsParameter(uint8_t slot, uint8_t local)
+{
+    if (slot >= INSTRUMENT_SLOT_COUNT || local >= INSTRUMENT_PARAM_COUNT)
+        return 0u;
+    return (uint8_t)((seq_automation_dirty[slot] >> local) & 1u);
 }
 
 static uint8_t seq_handleMasterBoundary(void)

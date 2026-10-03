@@ -2935,3 +2935,13 @@ compressor, pan, Effect full-view, FX-send Morph, VOICE SHIFT, and Effect-page
 SHIFT+TRACK overlay decisions. The F2 schedule is the authoritative line-level
 record for the new AutoSave/sceneset fields, the +101 B approved allocation,
 the validator update, build measurements, and the remaining hardware matrix.
+
+### 14.9 F3 automation fix, 2026-10-03
+
+The S075 F3 automation fix is recorded in
+`S075_F3_AUTOMATION_BUGFIX_IMPLEMENTATION.md`. It adds a read-only query over
+the existing Sequencer automation bitmap, guards Morph-base runtime writes,
+applies menu edits only at the edited parameter's resolved interpolation, and
+routes external MIDI CC/NRPN input through retained, clamped Normal endpoints
+while preserving the legacy internal runtime-only CC path. The F3 ledger adds
+no SRAM allocation; hardware verification remains in the F3 schedule's §8.2.

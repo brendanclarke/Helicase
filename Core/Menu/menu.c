@@ -3810,9 +3810,7 @@ static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
                     scene_index, cell->slot, cell->descriptor_index,
                     voiceModeShowMorph ? INSTRUMENT_IMAGE_MORPH
                                        : INSTRUMENT_IMAGE_MAIN,
-                    (uint8_t)value,
-                    (uint8_t)(!voiceModeShowMorph &&
-                              scene_index == scene_getActiveIndex()));
+                    (uint8_t)value);
             } else if (!voiceModeShowMorph) {
                 changed |= preset_setSupplementalParameter(
                     scene_index, cell->slot, cell->descriptor_index, value);
@@ -4681,6 +4679,48 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
         else if (*value > INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST)
             *value = INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST;
     }
+}
+
+/*
+ * Clamp one value to an instrument parameter's menu domain (S075 F3).
+ *
+ * What: applies the same descriptor-domain clamp as a VOICE-page edit
+ * (menu_clampCellValue() for an instrument cell: dtype ranges, list sizes,
+ * on/off, target-selector tokens, and LFO target voice range) to one
+ * parameter of the active Scene's slot.
+ * Why: external MIDI now enters values into the Scene (stored, saved); a raw
+ * 0..127 CC must not persist an out-of-domain byte, for example 127 on an
+ * on/off parameter. The clamp rules live in Menu; this wrapper keeps one copy.
+ * Inputs: slot 0..5, descriptor-local index, raw value 0..255. Output: the
+ * clamped value, or the input unchanged when the slot/descriptor is invalid.
+ * Caller: MidiParser.c midiParser_enterTaggedParameter(). Affiliates:
+ * menu_clampCellValue(), menu_cellDtype().
+ */
+uint8_t menu_clampInstrumentValue(uint8_t slot, uint8_t descriptor_index,
+                                  uint8_t value)
+{
+    const kit_instrument_slot_t *instrument =
+        scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+    menu_cell_t cell;
+    uint16_t clamped = value;
+
+    /*
+     * Contract in menu.h. A transient instrument cell carries only what the
+     * clamp reads: kind, slot, descriptor index and descriptor (dtype,
+     * runtime kind for the LFO target checks).
+     */
+    if (!instrument)
+        return value;
+    memset(&cell, 0, sizeof(cell));
+    cell.kind = MENU_CELL_INSTRUMENT;
+    cell.slot = slot;
+    cell.descriptor_index = descriptor_index;
+    cell.descriptor = instrumentManager_descriptor(instrument->type,
+                                                   descriptor_index);
+    if (!cell.descriptor)
+        return value;
+    menu_clampCellValue(&cell, &clamped);
+    return (uint8_t)clamped;
 }
 
 

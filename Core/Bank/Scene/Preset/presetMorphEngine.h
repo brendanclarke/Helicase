@@ -128,6 +128,28 @@ uint8_t presetMorph_getEffectiveVoiceAmount(uint8_t scene_index,
  */
 uint8_t presetMorph_getResolvedVoiceAmount(uint8_t scene_index,
                                            uint8_t slot);
+/*
+ * Re-interpolate and apply one voice parameter now (S075 F3).
+ *
+ * What: after a menu edit of one Normal or Morph endpoint, computes that
+ * parameter's interpolated value with the amount the voice is playing with
+ * (presetMorph_getResolvedVoiceAmount(): step override or retained amount,
+ * plus any LFO layer on the active Scene), stores it in
+ * morph_interpolation[local], and writes it to the runtime unless step
+ * automation holds the parameter.
+ * Why: a menu edit only sets an endpoint, and the sound follows the
+ * interpolation, never the raw edited value, so with Morph above 0 the sound
+ * changes by less than the edit. Automation always wins. Only this parameter's
+ * interpolation can change, so the whole voice is not queued and no other
+ * parameter is rewritten. The edit is heard at once in both views.
+ * Inputs: resident Scene, slot 0..5, descriptor-local index of a morphable
+ * parameter. Outputs: morph_interpolation[local] (any Scene); a runtime write
+ * (active Scene, parameter not held). Non-morphable or invalid input: no-op.
+ * Client: preset_setInstrumentParameter() (menu edits). Affiliates:
+ * presetMorph_tick() (same maths), seq_automationHoldsParameter().
+ */
+void presetMorph_applyParameterNow(uint8_t scene_index, uint8_t slot,
+                                   uint8_t local);
 
 /*
  * Set/clear step-automation Morph overlays.

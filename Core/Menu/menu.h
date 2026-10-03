@@ -463,6 +463,24 @@ void menu_fxVoiceMixOverlayEnd(void);
 uint8_t menu_fxVoiceMixOverlayActive(void);
 
 /*
+ * Clamp one value to an instrument parameter's menu domain (S075 F3).
+ *
+ * What: applies the same descriptor-domain clamp as a VOICE-page edit
+ * (menu_clampCellValue() for an instrument cell: dtype ranges, list sizes,
+ * on/off, target-selector tokens, and LFO target voice range) to one
+ * parameter of the active Scene's slot.
+ * Why: external MIDI now enters values into the Scene (stored, saved); a raw
+ * 0..127 CC must not persist an out-of-domain byte, for example 127 on an
+ * on/off parameter. The clamp rules live in Menu; this wrapper keeps one copy.
+ * Inputs: slot 0..5, descriptor-local index, raw value 0..255. Output: the
+ * clamped value, or the input unchanged when the slot/descriptor is invalid.
+ * Caller: MidiParser.c midiParser_enterTaggedParameter(). Affiliates:
+ * menu_clampCellValue(), menu_cellDtype().
+ */
+uint8_t menu_clampInstrumentValue(uint8_t slot, uint8_t descriptor_index,
+                                  uint8_t value);
+
+/*
  * VOICE held-step automation overlay bridge.
  *
  * What: ButtonHandler calls menu_voiceAutoOverlayHoldExpired() when the common

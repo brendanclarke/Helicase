@@ -1747,6 +1747,11 @@ Current descriptor Morph state after Session 033:
 - The worker uses the active slot's current instrument type and descriptor
   table, so instrument swapping remains dynamic and the Morph engine does not
   own hardcoded parameter lists.
+- **S075 F3 priority:** step automation wins until the voice's next trigger;
+  a menu edit changes an endpoint and applies that parameter's resolved Morph
+  interpolation immediately; external MIDI is lowest priority and stores the
+  active Scene's Normal endpoint for the Morph worker. Held automation is not
+  overwritten by a Morph-base runtime write.
 - Per-voice Morph amounts live in `scene_settings_t.voice_morph_amount[6]`.
 - PERF shows two four-cell screens: `mrp 1vm 2vm 3vm` and `4vm 5vm 6vm fxm`
   (S075: `fxm` is the active Scene's Effect Morph, committed like the Effect
@@ -1840,6 +1845,11 @@ Current target limitations:
 - `preset_applyInstrumentRuntimeValueInternal()` currently ignores its
   `recordAutomation` argument.
 - `seq_recordAutomation()` still accepts/narrows destination as `uint8_t`.
+
+External MIDI CC descriptor edits are now retained endpoint entries: the value
+is clamped to the same menu domain as a VOICE edit, marked for AutoSave, and
+saved with the active Scene. The bounded Morph worker applies the endpoint's
+interpolation and skips any descriptor currently held by step automation.
 
 Therefore, the remaining descriptor target follow-up is step automation:
 `AutomationNode`, step target storage, automation recording, and automation

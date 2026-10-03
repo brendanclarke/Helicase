@@ -369,15 +369,47 @@ void    preset_applySoundParameter(uint16_t paramNr, uint8_t value,
  *   rebuilds morph_interpolation[].
  * - future Menu/MIDI descriptor editors should call the setters instead of
  *   touching SceneData arrays directly.
+ *
+ * Runtime contract (S075 F3): an endpoint edit on the active Scene applies
+ * only the edited parameter's interpolation at the voice's resolved Morph
+ * amount (presetMorph_applyParameterNow()), never the raw value, and never
+ * over a parameter held by step automation (automation always wins; the next
+ * trigger applies the new interpolation).
  */
 uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
                                       uint8_t descriptor_index,
                                       instrument_image_select_t image,
-                                      uint8_t value,
-                                      uint8_t record_automation);
+                                      uint8_t value);
 uint8_t preset_setSupplementalParameter(uint8_t scene_index, uint8_t slot,
                                         uint8_t descriptor_index,
                                         instrument_param_value_t value);
+/*
+ * Enter one instrument parameter from external MIDI (S075 F3, user P1:
+ * MIDI takes the lowest priority).
+ *
+ * What: stores `value` as the active Scene's Normal endpoint of one
+ * descriptor and queues that voice for the Morph sweep. Nothing is written
+ * to the runtime here: the sweep applies the new interpolation whenever it
+ * reaches the parameter, and skips it while step automation holds it.
+ * Non-morphable parameters (never automatable, never swept) go through
+ * preset_setSupplementalParameter(), which stores and applies them as a menu
+ * edit does.
+ * Why: automation wins, then menu edits, then MIDI. A CC is an endpoint entry,
+ * not a runtime override, so it can override neither automation nor the Morph
+ * interpolation.
+ * Inputs: slot 0..5, descriptor-local index for the active Scene's slot type,
+ * and a value already clamped to the descriptor domain
+ * (menu_clampInstrumentValue()). Output: 1 when stored/queued, 0 for an
+ * invalid slot/descriptor. Retention: a changed byte marks its AutoSave
+ * Normal cell and clears the Scene's card-clean bit, like a menu edit.
+ * Active Scene only (no edit-mask fan-out). Caller: MidiParser.c
+ * midiParser_enterTaggedParameter(). Affiliates:
+ * preset_storeInstrumentEndpoint(), presetMorph_requestVoice(),
+ * seq_automationHoldsParameter().
+ */
+uint8_t preset_setInstrumentParameterFromMidi(uint8_t slot,
+                                              uint8_t descriptor_index,
+                                              uint8_t value);
 uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
                                            instrument_param_id_t id,
                                            instrument_param_value_t value);

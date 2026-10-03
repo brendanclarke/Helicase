@@ -154,6 +154,27 @@ void seq_drainPendingAutomation(void);
  */
 void seq_restoreAutomatedParameters(uint8_t trigger_track);
 /*
+ * Report whether step automation currently holds one voice parameter
+ * (S075 F3).
+ *
+ * What: nonzero when seq_automation_dirty[slot] has bit `local` set, that is,
+ * seq_drainPendingAutomation() wrote a step value into this descriptor's
+ * runtime and the voice has not been triggered since.
+ * Why: automation always wins (user rule). The overlay lasts until the next
+ * trigger, so writers of the Morph base update morph_interpolation[] but
+ * leave a held runtime value alone; seq_restoreAutomatedParameters() then
+ * applies the new base at the trigger.
+ * Inputs: instrument slot 0..5 (track 7 uses slot 5), descriptor-local index
+ * 0..INSTRUMENT_PARAM_COUNT-1. Output: 0/1; 0 for out-of-range input.
+ * Context: foreground only. The drain, the trigger funnel
+ * (voiceControl_processPending()), the transport restores and the Morph sweep
+ * all run in the main loop, so the 64-bit bitmap is never read half-written.
+ * Client: presetMorph_writeRuntimeBase() (presetMorphEngine.c).
+ * Affiliates: seq_drainPendingAutomation(), seq_restoreAutomatedParameters(),
+ * seq_restoreAllAutomation().
+ */
+uint8_t seq_automationHoldsParameter(uint8_t slot, uint8_t local);
+/*
  * Start or stop the sequencer transport.
  *
  * Inputs: nonzero starts, zero stops. Output: both paths reset the fixed-grid

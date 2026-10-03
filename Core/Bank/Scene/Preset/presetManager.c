@@ -906,8 +906,7 @@ static void preset_storeInstrumentEndpoint(uint8_t scene_index,
 uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
                                       uint8_t descriptor_index,
                                       instrument_image_select_t image,
-                                      uint8_t value,
-                                      uint8_t record_automation)
+                                      uint8_t value)
 {
     kit_instrument_slot_t *instrument = scene_instrumentSlot(scene_index, slot);
     const ParamDescriptor *descriptor;
@@ -927,8 +926,9 @@ uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
      * import should not write the Scene arrays directly. The setter enforces
      * descriptor ownership/range, chooses the persisted endpoint, commits only
      * a changed byte through the generic endpoint/Autosave boundary, and
-     * schedules Morph interpolation so the runtime image and DSP backend follow
-     * the Scene state. Affiliate code: presetMorphEngine owns
+     * re-interpolates only the edited parameter so the runtime image and DSP
+     * backend follow the Scene state. A parameter held by step automation keeps
+     * its runtime value until the next trigger. Affiliate code: presetMorphEngine owns
      * morph_interpolation[], while preset_applyInstrumentRuntimeValueInternal()
      * owns the temporary legacy DSP mirror.
      */
@@ -938,26 +938,21 @@ uint8_t preset_setInstrumentParameter(uint8_t scene_index, uint8_t slot,
     if (scene_index == scene_getActiveIndex()) {
         scene_t *scene = scene_get(scene_index);
         preset_ensureMorphInitialized();
-        if (record_automation && image == INSTRUMENT_IMAGE_MAIN &&
-            scene && scene_getVoiceMorphAmount(scene_index, slot) == 0u) {
-            (void)preset_applyInstrumentRuntimeValueInternal(
-                scene_index,
-                instrumentParam_make(slot, descriptor_index),
-                value,
-                1u);
-        }
         /*
-         * Endpoint edits are slot-local under per-voice Morph.
+         * Apply the edited endpoint's interpolation now (S075 F3).
          *
-         * Inputs: the edited slot/descriptor endpoint and the retained
-         * per-slot Morph amount in SceneData. Output: only that slot is queued
-         * for interpolation; other voices keep their current Morph positions.
-         * This preserves dynamic instrument membership because the worker will
-         * still ask InstrumentManager which descriptors are morphable for the
-         * slot's current type.
+         * Inputs: the endpoint stored above. Output: morph_interpolation[] and,
+         * unless automation holds the parameter, the runtime value of this one
+         * parameter at the voice's resolved Morph amount. The former raw write
+         * ignored the automation overlay and a `Nvm`/LFO Morph amount. The whole
+         * voice is no longer queued, so no other parameter's interpolation
+         * changes and automated parameters are not rewritten.
+         * Affiliates: presetMorph_applyParameterNow(),
+         * seq_restoreAutomatedParameters().
          */
         if (scene)
-            presetMorph_requestVoice(scene_index, slot);
+            presetMorph_applyParameterNow(scene_index, slot,
+                                          descriptor_index);
     }
     return 1u;
 }
@@ -995,6 +990,58 @@ uint8_t preset_setSupplementalParameter(uint8_t scene_index, uint8_t slot,
         scene_index, slot, descriptor_index, INSTRUMENT_IMAGE_MAIN, value);
     if (scene_index == scene_getActiveIndex())
         return instrumentManager_writeRuntime(slot, descriptor, value);
+    return 1u;
+}
+
+/*
+ * Enter one instrument parameter from external MIDI (S075 F3, user P1:
+ * MIDI takes the lowest priority).
+ *
+ * What: stores `value` as the active Scene's Normal endpoint of one descriptor
+ * and queues that voice for the Morph sweep. Nothing is written to the runtime
+ * here: the sweep applies the new interpolation whenever it reaches the
+ * parameter, and skips it while step automation holds it. Non-morphable
+ * parameters go through preset_setSupplementalParameter(), the same path as a
+ * menu edit.
+ * Why: automation wins, then menu edits, then MIDI. A CC is an endpoint entry,
+ * not a runtime override, so it can override neither automation nor the Morph
+ * interpolation.
+ * Inputs: slot 0..5, descriptor-local index for the active Scene's slot type,
+ * and a value already clamped to the descriptor domain.
+ * Output: 1 when stored/queued, 0 for an invalid slot/descriptor. Retention: a
+ * changed byte marks its AutoSave Normal cell and clears the Scene card-clean
+ * bit, like a menu edit. Active Scene only (no edit-mask fan-out).
+ * Client: MidiParser.c midiParser_enterTaggedParameter(). Affiliates:
+ * preset_storeInstrumentEndpoint(), presetMorph_requestVoice(),
+ * seq_automationHoldsParameter().
+ */
+uint8_t preset_setInstrumentParameterFromMidi(uint8_t slot,
+                                              uint8_t descriptor_index,
+                                              uint8_t value)
+{
+    const uint8_t scene_index = scene_getActiveIndex();
+    const kit_instrument_slot_t *instrument =
+        scene_instrumentSlotConst(scene_index, slot);
+    const ParamDescriptor *descriptor;
+
+    /*
+     * Contract in presetManager.h. Lowest priority: store and queue only.
+     * The sweep's guarded write (presetMorph_writeRuntimeBase()) decides when,
+     * and whether, the runtime changes.
+     */
+    if (!instrument)
+        return 0u;
+    descriptor = instrumentManager_descriptor(instrument->type,
+                                              descriptor_index);
+    if (!descriptor)
+        return 0u;
+    if (!(descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE))
+        return preset_setSupplementalParameter(scene_index, slot,
+                                               descriptor_index, value);
+    preset_storeInstrumentEndpoint(scene_index, slot, descriptor_index,
+                                   INSTRUMENT_IMAGE_MAIN, value);
+    preset_ensureMorphInitialized();
+    presetMorph_requestVoice(scene_index, slot);
     return 1u;
 }
 

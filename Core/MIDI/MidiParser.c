@@ -91,10 +91,11 @@ static uint8_t midiParser_haveDinSync = 0;
  * it exposes that key; an unavailable key/type is a safe no-op. This replaces
  * direct fixed-global field writes without turning external MIDI into a Scene
  * persistence or morph edit, and it keeps future loaded types bounded by the
- * manager's tagged runtime contract.
+ * manager's tagged runtime contract. Internal legacy callers only since S075
+ * F3; external MIDI uses midiParser_enterTaggedParameter().
  */
 static void midiParser_writeTaggedRuntime(uint8_t slot, const char *key,
-											 uint8_t value)
+														uint8_t value)
 {
 	const ParamDescriptor *descriptor;
 	instrument_type_t type = instrumentManager_runtimeType(slot);
@@ -107,6 +108,40 @@ static void midiParser_writeTaggedRuntime(uint8_t slot, const char *key,
 }
 
 /*
+ * Enter one external MIDI CC into an instrument parameter (S075 F3, user P1).
+ *
+ * What: resolves the CC's descriptor key on the active Scene's slot type,
+ * clamps the value to the parameter's menu domain, and hands it to
+ * preset_setInstrumentParameterFromMidi(): the Normal endpoint is stored and
+ * the voice is queued; the Morph sweep applies the interpolation whenever it
+ * reaches the parameter and skips it while step automation holds it.
+ * Why: MIDI takes the lowest priority: automation, then menu edits, then
+ * MIDI. A direct runtime write (midiParser_writeTaggedRuntime()) overrode
+ * both automation and the Morph interpolation.
+ * Inputs: visible slot 0..5, descriptor file key, MIDI value 0..127.
+ * Output: stored endpoint (retained, AutoSave-marked) or nothing when the
+ * slot's type has no such key. The LCD is not repainted here.
+ * Caller: midiParser_applyTaggedInstrumentCc() with external != 0.
+ * Affiliates: instrumentManager_descriptorIndexByKey(),
+ * menu_clampInstrumentValue(), preset_setInstrumentParameterFromMidi().
+ */
+static void midiParser_enterTaggedParameter(uint8_t slot, const char *key,
+														 uint8_t value)
+{
+	const kit_instrument_slot_t *instrument =
+		scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+	uint8_t index = 0xffu;
+
+	if (!instrument || !key)
+		return;
+	if (!instrumentManager_descriptorIndexByKey(instrument->type, key, &index) ||
+		index >= INSTRUMENT_PARAM_COUNT)
+		return;
+	(void)preset_setInstrumentParameterFromMidi(
+		slot, index, menu_clampInstrumentValue(slot, index, value));
+}
+
+/*
  * Translate the non-persistent portion of the historical CC/CC2 map.
  *
  * Inputs: MIDI controller class, controller number, and 0..127 value. Output:
@@ -114,10 +149,14 @@ static void midiParser_writeTaggedRuntime(uint8_t slot, const char *key,
  * slot. Mixer, note, mute, and target-selector controls remain handled by the
  * caller because they do not own engine object storage. The compact mapping
  * intentionally shares semantic keys across engine types, making a loaded
- * type receive only controls it actually implements.
+ * type receive only controls it actually implements. S075 F3: `external`
+ * selects the destination; external MIDI enters the parameter through
+ * midiParser_enterTaggedParameter() (stored endpoint, Morph sweep), while
+ * internal legacy calls retain the runtime-only write below.
  */
 static void midiParser_applyTaggedInstrumentCc(uint8_t cc2, uint8_t cc,
-													 uint8_t value)
+														uint8_t value,
+														uint8_t external)
 {
 	uint8_t slot;
 	const char *key = 0;
@@ -256,7 +295,10 @@ static void midiParser_applyTaggedInstrumentCc(uint8_t cc2, uint8_t cc,
 			return;
 		}
 	}
-	midiParser_writeTaggedRuntime(slot, key, value);
+	if (external)
+		midiParser_enterTaggedParameter(slot, key, value);
+	else
+		midiParser_writeTaggedRuntime(slot, key, value);
 }
 
 enum State
@@ -437,18 +479,37 @@ float midiParser_calcDetune(uint8_t value)
 	}
 	return cent;
 }
+/*
+ * CC dispatcher shared by external MIDI input and the legacy internal path
+ * (S075 F3). `external` is nonzero only for CCs received from MIDI input:
+ * they enter the parameter (lowest priority); internal legacy calls keep the
+ * runtime-only write. Public entry for internal callers:
+ * midiParser_ccHandler().
+ */
+static void midiParser_ccDispatch(MidiMsg msg, uint8_t updateOriginalValue,
+                                  uint8_t external);
+
 //-----------------------------------------------------------
-static void midiParser_nrpnHandler(uint16_t value)
+/* Contract in the dispatcher declaration above; preserve CC origin for NRPN. */
+static void midiParser_nrpnHandler(uint16_t value, uint8_t external)
 {
 	MidiMsg msg2;
 	msg2.status = MIDI_CC2;
 	msg2.data1 = midiParser_activeNrpnNumber;
 	msg2.data2 = value;
-	midiParser_ccHandler(msg2,true);
+	/* S075 F3: an NRPN keeps the origin of its data-entry CC. */
+	midiParser_ccDispatch(msg2, true, external);
 }
 //-----------------------------------------------------------
-/** handle all incoming CCs and invoke action*/
-void midiParser_ccHandler(MidiMsg msg, uint8_t updateOriginalValue)
+/*
+ * Dispatch one CC/CC2 event and preserve whether it came from external MIDI.
+ *
+ * Contract: the public midiParser_ccHandler() wrapper below keeps legacy
+ * internal runtime-only writes; external parseMidiMessage() calls pass
+ * external=1 so tagged instrument controls enter retained Scene endpoints.
+ */
+static void midiParser_ccDispatch(MidiMsg msg, uint8_t updateOriginalValue,
+                                   uint8_t external)
 {
 	if(msg.status == MIDI_CC)
 	{
@@ -458,7 +519,7 @@ void midiParser_ccHandler(MidiMsg msg, uint8_t updateOriginalValue)
 			midiParser_originalCcValues[paramNr+1] = msg.data2;
 		}
 		if (msg.data1 == NRPN_DATA_ENTRY_COARSE) {
-			midiParser_nrpnHandler(msg.data2);
+			midiParser_nrpnHandler(msg.data2, external);
 			return;
 		}
 		if (msg.data1 == NRPN_FINE) {
@@ -472,7 +533,7 @@ void midiParser_ccHandler(MidiMsg msg, uint8_t updateOriginalValue)
 			return;
 		}
 
-		midiParser_applyTaggedInstrumentCc(0u, msg.data1, msg.data2);
+		midiParser_applyTaggedInstrumentCc(0u, msg.data1, msg.data2, external);
 #if 0 /* Retired fixed-engine field map; descriptor map above is authoritative. */
 		switch(msg.data1)
 		{
@@ -1115,7 +1176,7 @@ void midiParser_ccHandler(MidiMsg msg, uint8_t updateOriginalValue)
 		if(updateOriginalValue) {
 			midiParser_originalCcValues[paramNr] = msg.data2;
 		}
-		midiParser_applyTaggedInstrumentCc(1u, msg.data1, msg.data2);
+		midiParser_applyTaggedInstrumentCc(1u, msg.data1, msg.data2, external);
 #if 0 /* Retired fixed-engine field map; descriptor map above is authoritative. */
 		switch(msg.data1)
 		{
@@ -1415,6 +1476,19 @@ void midiParser_ccHandler(MidiMsg msg, uint8_t updateOriginalValue)
 		#endif
 		modNode_originalValueChanged(paramNr);
 	}
+}
+
+/*
+ * Internal CC entry (legacy flat sound parameters, armed-step reset).
+ *
+ * Inputs/outputs as before S075 F3: instrument keys get a runtime-only write.
+ * External MIDI input uses midiParser_ccDispatch(…, 1) instead, which enters
+ * the parameter (MIDI takes the lowest priority).
+ * Caller: preset_applySoundParameter().
+ */
+void midiParser_ccHandler(MidiMsg msg, uint8_t updateOriginalValue)
+{
+	midiParser_ccDispatch(msg, updateOriginalValue, 0u);
 }
 
 //-----------------------------------------------------------
@@ -1829,14 +1903,15 @@ void midiParser_parseMidiMessage(MidiMsg msg)
 					}
 				} else if(chanonly == midi_MidiChannels[7]) {
 					/*
-					 * Global-channel CC automation records to the currently
-					 * active UI voice. Menu owns that active voice; Sequencer
-					 * owns the recording gate and delegates actual Pattern
-					 * writes onward.
+					 * Global-channel CC from MIDI input (S075 F3): instrument
+					 * keys enter the parameter at the lowest priority
+					 * (stored endpoint, applied by the Morph sweep; automation
+					 * and menu edits win). Menu owns the active voice; Sequencer
+					 * owns the recording gate.
 					 */
-					midiParser_ccHandler(msg,1);
+					midiParser_ccDispatch(msg, 1u, 1u);
 				}
-				/* midiParser_ccHandler above already updates parameters locally.
+				/* midiParser_ccDispatch above already updates parameters locally.
 				** Re-processing the same CC locally would double-record
 				** automation and double-apply the parameter. */
 			}

@@ -2,6 +2,7 @@
 #include "presetManager.h"
 #include "InstrumentManager.h"
 #include "SceneData.h"
+#include "sequencer.h"
 #include <stdint.h>
 
 typedef struct {
@@ -436,6 +437,38 @@ void presetMorph_prioritizeVoice(uint8_t scene_index, uint8_t slot)
     morph_worker.descriptor_index = 0u;
 }
 
+/*
+ * Write one Morph-derived base value to the voice runtime, unless step
+ * automation holds that parameter (S075 F3).
+ *
+ * What: for the active Scene, applies `value` through
+ * preset_applyInstrumentRuntimeValue(), except when
+ * seq_automationHoldsParameter(slot, local) is set. The caller has already
+ * stored `value` in morph_interpolation[local], which is what the next
+ * trigger restores, so a held parameter picks up the new base at that trigger
+ * instead of losing its automation mid-note.
+ * Why: automation always wins (user rule). A menu edit, a Morph change, an LFO
+ * on Morph, `Nvm` automation, a MIDI CC or an Instrument/Kit apply can queue
+ * the whole voice; before S075 F3 every automated parameter of that voice
+ * snapped back to its base while the note was still sounding.
+ * Inputs: Scene, slot 0..5, descriptor-local index, interpolated value.
+ * Output: one runtime write, or none (inactive Scene, held parameter).
+ * Callers: presetMorph_tick(), presetMorph_applyVoiceNow(),
+ * presetMorph_applyParameterNow(). Affiliates: seq_restoreAutomatedParameters(),
+ * seq_restoreAllAutomation(), preset_applyInstrumentRuntimeValue().
+ */
+static void presetMorph_writeRuntimeBase(uint8_t scene_index, uint8_t slot,
+                                         uint8_t local,
+                                         instrument_param_value_t value)
+{
+    if (scene_index != scene_getActiveIndex())
+        return;
+    if (seq_automationHoldsParameter(slot, local))
+        return;
+    (void)preset_applyInstrumentRuntimeValue(
+        scene_index, instrumentParam_make(slot, local), value);
+}
+
 uint8_t presetMorph_tick(void)
 {
     scene_t *scene;
@@ -487,7 +520,6 @@ uint8_t presetMorph_tick(void)
             const ParamDescriptor *descriptor =
                 instrumentManager_descriptor(instrument->type, local);
             instrument_param_value_t value;
-            instrument_param_id_t id;
 
             if (!descriptor ||
                 !(descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)) {
@@ -498,10 +530,9 @@ uint8_t presetMorph_tick(void)
                 instrument->parameter_images.morph_instrument_parameters[local],
                 morph_worker.pass_amount[morph_worker.slot]);
             instrument->parameter_images.morph_interpolation[local] = value;
-            id = instrumentParam_make(morph_worker.slot, local);
-            if (morph_worker.scene_index == scene_getActiveIndex())
-                preset_applyInstrumentRuntimeValue(morph_worker.scene_index,
-                                                   id, value);
+            /* Held automation keeps its runtime value until the trigger. */
+            presetMorph_writeRuntimeBase(morph_worker.scene_index,
+                                         morph_worker.slot, local, value);
             return 1u;
         }
         morph_worker.pass_mask &=
@@ -567,6 +598,9 @@ void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot)
      * active-Scene runtime writes are complete before the caller returns. This
      * mirrors presetMorph_tick() but intentionally walks the whole slot so a
      * trigger-time Scene swap cannot fire with half-old instrument parameters.
+     * Parameters held by step automation keep their runtime value; only
+     * morph_interpolation[] is updated for them (S075 F3,
+     * presetMorph_writeRuntimeBase()).
      */
     if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
         return;
@@ -585,7 +619,6 @@ void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot)
         const ParamDescriptor *descriptor =
             instrumentManager_descriptor(instrument->type, local);
         instrument_param_value_t value;
-        instrument_param_id_t id;
 
         /*
          * Walk descriptor indices rather than raw storage cells.
@@ -603,9 +636,8 @@ void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot)
             instrument->parameter_images.morph_instrument_parameters[local],
             amount);
         instrument->parameter_images.morph_interpolation[local] = value;
-        id = instrumentParam_make(slot, local);
-        if (scene_index == scene_getActiveIndex())
-            preset_applyInstrumentRuntimeValue(scene_index, id, value);
+        /* Held automation keeps its runtime value until the trigger. */
+        presetMorph_writeRuntimeBase(scene_index, slot, local, value);
     }
 
     if (morph_worker.scene_index == scene_index) {
@@ -738,6 +770,55 @@ uint8_t presetMorph_getResolvedVoiceAmount(uint8_t scene_index,
         presetMorph_voiceHasLfoLayer(slot))
         return presetMorph_resolveLfoAmount(scene, slot);
     return presetMorph_effectiveVoiceBase(scene, slot);
+}
+
+/*
+ * Re-interpolate and apply one voice parameter now (S075 F3).
+ *
+ * What: after a menu edit of one Normal or Morph endpoint, computes that
+ * parameter's interpolated value with the amount the voice is playing with
+ * (presetMorph_getResolvedVoiceAmount(): step override or retained amount,
+ * plus any LFO layer on the active Scene), stores it in
+ * morph_interpolation[local], and writes it to the runtime unless step
+ * automation holds the parameter.
+ * Why: a menu edit only sets an endpoint, and the sound follows the
+ * interpolation, never the raw edited value. Automation always wins. Only
+ * this parameter's interpolation can change, so the whole voice is not
+ * queued and no other parameter is rewritten. The edit is heard at once in
+ * both views.
+ * Inputs: resident Scene, slot 0..5, descriptor-local index of a morphable
+ * parameter. Outputs: morph_interpolation[local] (any Scene); a runtime write
+ * (active Scene, parameter not held). Non-morphable or invalid input: no-op.
+ * Client: preset_setInstrumentParameter() (menu edits). Affiliates:
+ * presetMorph_tick() (same maths), seq_automationHoldsParameter().
+ */
+void presetMorph_applyParameterNow(uint8_t scene_index, uint8_t slot,
+                                   uint8_t local)
+{
+    scene_t *scene = scene_get(scene_index);
+    kit_instrument_slot_t *instrument;
+    const ParamDescriptor *descriptor;
+    instrument_param_value_t value;
+
+    /*
+     * Contract in presetMorphEngine.h. Same interpolation as the sweep
+     * (presetMorph_interpolate() over the retained Normal/Morph images) at
+     * the resolved amount, so the sweep later writes the same value.
+     */
+    if (!scene || slot >= INSTRUMENT_SLOT_COUNT ||
+        local >= INSTRUMENT_PARAM_COUNT)
+        return;
+    instrument = &scene->kit.instruments[slot];
+    descriptor = instrumentManager_descriptor(instrument->type, local);
+    if (!descriptor ||
+        !(descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE))
+        return;
+    value = presetMorph_interpolate(
+        instrument->parameter_images.instrument_parameters[local],
+        instrument->parameter_images.morph_instrument_parameters[local],
+        presetMorph_getResolvedVoiceAmount(scene_index, slot));
+    instrument->parameter_images.morph_interpolation[local] = value;
+    presetMorph_writeRuntimeBase(scene_index, slot, local, value);
 }
 
 void presetMorph_setStepAutomationOverride(uint8_t scene_index,

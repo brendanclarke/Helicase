@@ -797,3 +797,59 @@ voices through the guarded sweep.
 
 (To be appended during implementation: per-stage status, build sizes, the
 §8.1 registry check, deviations, hardware results.)
+
+### 11.1 2026-10-03 — context and plan read
+
+- Read `MEMORY.md`, `S075_F3_AUTOMATION_BUG.md`, and this implementation
+  schedule before changing code.
+- Confirmed the governing rules: step automation has runtime priority until
+  the next trigger; a menu edit changes an endpoint and applies only that
+  parameter's resolved Morph interpolation; external MIDI is lowest priority
+  and enters the active Scene's Normal endpoint.
+- Confirmed the approved allocation ledger: 0 B SRAM/static allocation and
+  approximately 24 B transient stack use on the MIDI clamp path.
+- Verified the current source anchors and caller signatures against the
+  schedule; the working tree is the expected post-F2 layout.
+- Stage A complete: added `seq_automationHoldsParameter()` as a read-only
+  query over the existing `seq_automation_dirty[]` bitmap and documented the
+  bitmap's S075 F3 priority role adjacent to its declaration/storage.
+- No allocation or caller behavior changed in Stage A.
+- Stage B complete: `presetMorph_writeRuntimeBase()` now guards both bounded
+  and synchronous Morph runtime writes, while all callers still update
+  `morph_interpolation[]`; added the public, documented
+  `presetMorph_applyParameterNow()` path for one-parameter endpoint edits.
+- No allocation changed. Next: remove the old menu direct-write/whole-voice
+  queue in Stage C and add the retained external-MIDI entry path.
+- Stage C complete: removed `record_automation` from the typed instrument
+  endpoint setter, replaced the active-Scene whole-voice queue/raw runtime
+  write with the one-parameter interpolation path, and added the documented
+  active-Scene MIDI endpoint setter.
+- Stage D complete: menu callers now use the reduced setter signature, and
+  `menu_clampInstrumentValue()` reuses the existing cell clamp for MIDI's
+  retained values. No SRAM allocation changed; the planned transient clamp
+  cell remains stack-local.
+- Stage E complete: external global-channel CC and NRPN input now dispatches
+  through the clamped, retained active-Scene endpoint path; the public legacy
+  `midiParser_ccHandler()` wrapper preserves runtime-only internal behavior.
+  Origin is carried through the dispatcher without a new allocation.
+- Stage F complete: updated the Bank/Preset and filesystem authorities, the F3
+  bug report, and the Phase 6 implementation log with the priority rules and
+  retained MIDI behavior.
+- Tagged-CC registry audit complete: 36 unique descriptor keys extracted from
+  `midiParser_applyTaggedInstrumentCc()`; all resolve in the instrument
+  registries and none match a `ROW_NOBIND` descriptor. No mapped key becomes
+  an instance-offset supplemental no-op on the retained MIDI path.
+- Verification complete: `make all` passed with only the existing newlib,
+  unused-function, packed-member, and LTO warnings; `make img` passed. Final
+  ELF size is `text=532,408`, `data=416`, `bss=426,712`; link budget is
+  532,824 / 753,664 B with 220,840 B headroom, ITCM 4,168 B, DTCM statics
+  4,472 B, and FX arena margin 3,712 B. The regenerated image is
+  `build/LXRV2_lxr02.img`, 532,840 B on disk (532,824 B payload), SHA-256
+  `d1c0aac283e0631ccb074bafa1aa43a6884da0bba9493c4ebe685b78c5709ceb`.
+- `git diff --check` passed. No SRAM/static allocation was added; hardware
+  cases in §8.2 remain pending bench verification.
+
+### 11.2 2026-10-03 — implementation and verification close
+
+- Stages A–F are implemented and documented. No deviation from the approved
+  schedule or RAM ledger was required.
