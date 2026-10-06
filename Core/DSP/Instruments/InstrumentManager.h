@@ -141,6 +141,12 @@ typedef enum {
     IM_SPECIAL_TRANSIENT_FREQ,
     IM_SPECIAL_INSTRUMENT_DRIVE,
     IM_SPECIAL_LFO_RATE,
+    /*
+     * S076 P2: lfo_offset writer. Scales the 0..127 descriptor byte onto the
+     * full 32-bit phase accumulator range before writing lfo.phaseOffset,
+     * instead of the raw TYPE_UINT32 store that made 127 effectively zero.
+     */
+    IM_SPECIAL_LFO_OFFSET,
     IM_SPECIAL_WRITER_COUNT
 } instrument_special_writer_t;
 
@@ -499,6 +505,33 @@ void instrumentManager_updateLfoAdapters(uint8_t source_slot,
  */
 void instrumentManager_setSlot6Track7StepDecayOverride(uint8_t value);
 void instrumentManager_clearSlot6Track7StepDecayOverride(void);
+/*
+ * LFO phase Scene-change handoff (S076 P2).
+ *
+ * What:       captureLfoPhases() snapshots the running phase of every slot's
+ *             LFO before the deferred Scene worker starts.
+ *             restoreLfoPhaseIfNeeded(slot) checks the incoming LFO's
+ *             retrigger field after descriptor values are applied and decides:
+ *             scn retrigger -> phase = phaseOffset (reset to start);
+ *             otherwise -> phase = captured snapshot (continue cycle).
+ * Why:        instrumentManager_resetRuntimeSlot() unconditionally zeroes the
+ *             LFO phase via memset + lfo_init. Without capture/restore, the
+ *             running phase is always lost on Scene change.
+ * Inputs:     captureLfoPhases() reads from the current runtime LFOs.
+ *             restoreLfoPhaseIfNeeded(slot) reads the handoff struct and the
+ *             incoming LFO's retrigger field (already written by descriptor
+ *             apply).
+ * Outputs:    captureLfoPhases() fills the static handoff struct
+ *             (28 bytes: 6 x uint32_t phase + 1 uint8_t valid, padded).
+ *             restoreLfoPhaseIfNeeded(slot) writes lfo->phase.
+ * Callers:    preset_startDrumsetApply() (capture),
+ *             preset_resetAndApplyKitVoiceImage() (restore).
+ * Affiliates: instrumentManager_resetRuntimeSlot() (the reset that destroys
+ *             the phase), presetMorph_applyVoiceNow() (descriptor apply that
+ *             writes retrigger before restore is called).
+ */
+void instrumentManager_captureLfoPhases(void);
+void instrumentManager_restoreLfoPhaseIfNeeded(uint8_t slot);
 /*
  * Dynamic instrument runtime dispatcher.
  *

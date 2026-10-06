@@ -1652,6 +1652,34 @@ static void preset_resetAndApplyKitVoiceImage(uint8_t scene_index,
         instrumentManager_resetRuntimeSlot(voice);
     (void)preset_applyKitAudioRouting(scene_index, voice);
     presetMorph_applyVoiceNow(scene_index, voice);
+    /*
+     * S076 P2: restore or reset the LFO phase based on the incoming Scene's
+     * retrigger setting (S076 P2).
+     *
+     * What:       calls instrumentManager_restoreLfoPhaseIfNeeded(voice) which
+     *             checks the incoming LFO's retrigger field:
+     *             - LFO_RETRIGGER_SCENE: phase = phaseOffset (reset to the
+     *               incoming Scene's configured start offset).
+     *             - Otherwise: phase = captured snapshot from the outgoing
+     *               Scene (continue the LFO cycle uninterrupted).
+     * Why:        instrumentManager_resetRuntimeSlot() (called earlier in this
+     *             function or already complete) zeroed the phase. The
+     *             retrigger value was not available at reset time - it was
+     *             written by presetMorph_applyVoiceNow() in the line above.
+     *             This is the earliest point where both the retrigger setting
+     *             and the scaled phaseOffset are in the runtime LFO.
+     * Inputs:     zero-based voice slot; the incoming LFO's retrigger and
+     *             phaseOffset fields (already written by descriptor apply);
+     *             the static handoff struct (written by captureLfoPhases).
+     * Outputs:    lfo->phase set to either phaseOffset or captured phase.
+     * Guard:      active-Scene check matches the existing
+     *             instrumentManager_resetRuntimeSlot() guard above.
+     * Affiliates: instrumentManager_captureLfoPhases() (the snapshot writer,
+     *             called in preset_startDrumsetApply()),
+     *             LFO_RETRIGGER_SCENE (lfo.h).
+     */
+    if (scene_index == scene_getActiveIndex())
+        instrumentManager_restoreLfoPhaseIfNeeded(voice);
 }
 
 /* Start the existing bounded all-source modulation rebind cursor.
@@ -1716,6 +1744,29 @@ void preset_sendDrumsetParameters(void)
 
 void preset_startDrumsetApply(void)
 {
+    /*
+     * S076 P2: snapshot each slot's running LFO phase before the deferred
+     * Scene worker resets runtime slots (S076 P2).
+     *
+     * What:       calls instrumentManager_captureLfoPhases() to read the
+     *             current phase of each slot's LFO into the static handoff
+     *             struct.
+     * Why:        instrumentManager_resetRuntimeSlot() will zero the phase
+     *             via memset + lfo_init. The snapshot preserves the running
+     *             phase for slots whose incoming LFO does not have the scn
+     *             retrigger set.
+     * Inputs:     current runtime LFO phases (six uint32_t values).
+     * Outputs:    lfo_scene_handoff populated and marked valid.
+     * Placement:  before instrumentManager_clearAllRuntimeModulationTargets()
+     *             because the mod target teardown does not modify LFO phase
+     *             but must complete before any slot reset begins. The capture
+     *             runs once per Scene worker, not per slot.
+     * Affiliates: instrumentManager_restoreLfoPhaseIfNeeded() (the consumer,
+     *             called per slot in preset_resetAndApplyKitVoiceImage()),
+     *             instrumentManager_resetRuntimeSlot() (the reset that
+     *             destroys the phase).
+     */
+    instrumentManager_captureLfoPhases();
     /*
      * Detach outgoing runtime targets before the deferred Scene worker starts.
      *
@@ -3356,6 +3407,123 @@ void preset_rebuildMorph(void)
 
     preset_ensureMorphInitialized();
     presetMorph_rebuildScene(scene_index);
+}
+
+/*
+ * preset_resetSlotMorphToNormal — equalise one slot's Morph to its Normal.
+ *
+ * What:       iterates the descriptor table of the slot's current instrument
+ *             type and, for every descriptor whose flags include
+ *             INSTRUMENT_PARAM_FLAG_MORPHABLE, copies the retained Normal
+ *             image byte onto the retained Morph image byte. Non-morphable
+ *             descriptor rows are untouched.
+ * Why:        the "reset morph" clears (track- and Scene-level) need one shared
+ *             per-slot morphable-copy loop. Writing the retained Scene image
+ *             directly and marking once afterwards is the same pattern the
+ *             KitMrp/InstrumentMrp endpoint commits use; going through
+ *             preset_setInstrumentParameter() per byte would re-interpolate
+ *             each descriptor and re-check automation for a batch the caller
+ *             rebuilds with a single preset_rebuildMorph().
+ * Inputs:     scene_index (0..15) and slot (0..5). The slot's current type
+ *             selects the descriptor table.
+ * Outputs:    the count of Morph bytes changed (0 for invalid coordinates or an
+ *             empty descriptor table). On change, marks the slot's Morph
+ *             AutoSave scope and clears the Scene's card-clean bit. Does NOT
+ *             queue the Morph worker.
+ * Accessors:  scene_instrumentSlot(), instrumentManager_registryEntry(),
+ *             INSTRUMENT_PARAM_FLAG_MORPHABLE, autosave_markInstrumentMorphDirty(),
+ *             bank_invalidateSdCleanScene().
+ * Affiliates: preset_copySlotNormalToMorph() below,
+ *             ccClear_runResetMorphTrack(), ccClear_runResetSceneMorph(),
+ *             preset_rebuildMorph().
+ */
+uint8_t preset_resetSlotMorphToNormal(uint8_t scene_index, uint8_t slot)
+{
+    kit_instrument_slot_t *dst = scene_instrumentSlot(scene_index, slot);
+    const instrument_registry_entry_t *entry;
+    instrument_parameter_images_t *images;
+    uint8_t changed = 0u;
+    uint8_t i;
+
+    if (!dst)
+        return 0u;
+    entry = instrumentManager_registryEntry(dst->type);
+    if (!entry || !entry->descriptors)
+        return 0u;
+    images = &dst->parameter_images;
+    for (i = 0u; i < entry->descriptor_count; i++) {
+        if (!(entry->descriptors[i].flags & INSTRUMENT_PARAM_FLAG_MORPHABLE))
+            continue;
+        if (images->morph_instrument_parameters[i] !=
+            images->instrument_parameters[i]) {
+            images->morph_instrument_parameters[i] =
+                images->instrument_parameters[i];
+            changed++;
+        }
+    }
+    if (changed) {
+        autosave_markInstrumentMorphDirty(scene_index, slot);
+        bank_invalidateSdCleanScene(scene_index);
+    }
+    return changed;
+}
+
+/*
+ * preset_copySlotNormalToMorph — copy src Normal onto dst Morph.
+ *
+ * What:       reads the source slot's Normal image and writes every morphable
+ *             descriptor byte into the destination slot's Morph image, by
+ *             descriptor index. Returns 0 with no side effects when the source
+ *             and destination instrument types differ (a different type's
+ *             descriptor indices are meaningless, so the member is silently
+ *             skipped).
+ * Why:        the "morph" track copy and the "scene morph" Scene copy share
+ *             this cross-Scene, per-slot morphable-endpoint loop. Matching
+ *             types guarantee identical descriptor layouts, so an index-by-
+ *             index copy needs no key remapping.
+ * Inputs:     src_scene/src_slot (Normal source) and dst_scene/dst_slot (Morph
+ *             target), all coordinates valid.
+ * Outputs:    the count of Morph bytes changed (0 for invalid coordinates or a
+ *             type mismatch). On change, marks the destination slot's Morph
+ *             AutoSave scope and clears the destination Scene's card-clean bit.
+ *             Does NOT queue the Morph worker.
+ * Accessors:  scene_instrumentSlot(), instrumentManager_registryEntry(),
+ *             autosave_markInstrumentMorphDirty(), bank_invalidateSdCleanScene().
+ * Affiliates: preset_resetSlotMorphToNormal() above, ccCopy_runMorphTrack(),
+ *             ccCopy_runSceneMorph().
+ */
+uint8_t preset_copySlotNormalToMorph(uint8_t src_scene, uint8_t src_slot,
+                                     uint8_t dst_scene, uint8_t dst_slot)
+{
+    const kit_instrument_slot_t *src =
+        scene_instrumentSlotConst(src_scene, src_slot);
+    kit_instrument_slot_t *dst = scene_instrumentSlot(dst_scene, dst_slot);
+    const instrument_registry_entry_t *entry;
+    instrument_parameter_images_t *dst_images;
+    uint8_t changed = 0u;
+    uint8_t i;
+
+    if (!src || !dst || src->type != dst->type)
+        return 0u;
+    entry = instrumentManager_registryEntry(dst->type);
+    if (!entry || !entry->descriptors)
+        return 0u;
+    dst_images = &dst->parameter_images;
+    for (i = 0u; i < entry->descriptor_count; i++) {
+        if (!(entry->descriptors[i].flags & INSTRUMENT_PARAM_FLAG_MORPHABLE))
+            continue;
+        if (dst_images->morph_instrument_parameters[i] !=
+            src->parameter_images.instrument_parameters[i]) {
+            dst_images->morph_instrument_parameters[i] =
+                src->parameter_images.instrument_parameters[i];
+            changed++;
+        }
+    }
+    if (changed) {
+        autosave_markInstrumentMorphDirty(dst_scene, dst_slot);
+        bank_invalidateSdCleanScene(dst_scene);
+    }
+    return changed;
 }
 
 /* S075: the former global `srt` setter was retired with its Scene field. */

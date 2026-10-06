@@ -33,12 +33,32 @@ static const char *const ccClear_stepLabels[] = {
 static const char *const ccClear_barLabels[] = {
     "cancel", "bar", "bar auto", "bar notes"
 };
+/*
+ * What:       track clear labels, with "reset morph" before "send". The VOICE
+ *             TRACK menu shows count 5 (indices 0..4: cancel, track,
+ *             track auto, track notes, reset morph); the EFFECTS TRACK menu
+ *             shows count 6 (0..5: adds "send" at the end). One shared array
+ *             serves both because the VOICE encoder never reaches index 5.
+ * Why:        "reset morph" appears in both menus while "send" is EFFECTS-only,
+ *             so a single array with the shared selection first and "send"
+ *             last avoids splitting the arrays and the label dispatch.
+ * Inputs:     ccClear_label() indexes by selection, gated by selectionCount.
+ * Outputs:    const label strings.
+ * Affiliates: CC_CLEAR_RESET_MORPH (4), CC_CLEAR_SEND (5).
+ */
 static const char *const ccClear_trackLabels[] = {
-    "cancel", "track", "track auto", "track notes", "send"
+    "cancel", "track", "track auto", "track notes", "reset morph", "send"
 };
+/*
+ * What:       PERF Scene clear labels. "reset morph" (index 8) equalises the
+ *             whole Scene's morph endpoints; "reset fx morph" (index 9)
+ *             equalises only the Effect's morphable morph endpoints.
+ * Why:        exposes the two new S076 P3 selections at the end of the menu.
+ * Affiliates: CC_CLEAR_SCENE_RESET_MORPH, CC_CLEAR_SCENE_RESET_FX_MORPH.
+ */
 static const char *const ccClear_sceneLabels[] = {
     "cancel", "scene", "settings", "pattern", "automation", "notes", "fx",
-    "fx sequence"
+    "fx sequence", "reset morph", "reset fx morph"
 };
 
 cc_menu_t ccClear_menuForObject(uint8_t mode, cc_kind_t kind)
@@ -55,12 +75,23 @@ cc_menu_t ccClear_menuForObject(uint8_t mode, cc_kind_t kind)
 
 uint8_t ccClear_selectionCount(cc_menu_t menu)
 {
+    /*
+     * What:       updated counts: CLEAR_TRACK 4 -> 5 (added "reset morph"),
+     *             CLEAR_TRACK_FX 5 -> 6 (added "reset morph"; "send" is now
+     *             the last shared label), CLEAR_SCENE 8 -> 10 (added
+     *             "reset morph" and "reset fx morph").
+     * Why:        the encoder clamps to selectionCount - 1; raising each count
+     *             exposes the new selections at the end of its menu.
+     * Inputs:     cc_menu_t from ccClear_menuForObject().
+     * Outputs:    total entry count including "cancel" at index 0.
+     * Affiliates: ccClear_label(), copyClearSession.c encoder clamping.
+     */
     switch (menu) {
     case CC_MENU_CLEAR_STEP:     return 4u;
     case CC_MENU_CLEAR_BAR:      return 4u;
-    case CC_MENU_CLEAR_TRACK:    return 4u;
-    case CC_MENU_CLEAR_TRACK_FX: return 5u;
-    case CC_MENU_CLEAR_SCENE:    return 8u;
+    case CC_MENU_CLEAR_TRACK:    return 5u;  /* +reset morph */
+    case CC_MENU_CLEAR_TRACK_FX: return 6u;  /* +reset morph, send last */
+    case CC_MENU_CLEAR_SCENE:    return 10u; /* +reset morph, +reset fx morph */
     default:                     return 0u;
     }
 }
@@ -415,6 +446,161 @@ static uint8_t ccClear_runFxSequence(const cc_job_t *job)
     return CC_RUN_DONE;
 }
 
+/*
+ * `clear track reset morph` (S076 P3): equalise one voice slot's Morph
+ * endpoints to its current Normal endpoints, plus the voice's correlated Scene
+ * morph params, fanned out through the edit mask.
+ *
+ * What:       for each Scene in the fan-out mask:
+ *             (a) preset_resetSlotMorphToNormal() resets the morphable
+ *                 instrument descriptors;
+ *             (b) preset_setVoiceFxSendMorph() sets the FX-send Morph endpoint
+ *                 to that Scene's FX-send Normal endpoint;
+ *             (c) when the slot is slot 6 (index 5) the generated
+ *                 slot-6/track-7 Morph decay takes the Normal decay;
+ *             (d) the instrument row loses its refreshed flag.
+ *             When the active Scene is in the mask the Morph worker is
+ *             requeued once after all writes.
+ * Why:        per-track morph reset is a Scene-child edit, so it fans out like
+ *             `clear send` (user F3). No morph amount is touched: equal
+ *             endpoints make any Morph amount a no-op.
+ * Inputs:     job->scene (destination Scene), job->track (clamped to a slot).
+ * Outputs:    CC_RUN_WAIT while the active Scene's apply workers drain, then
+ *             CC_RUN_DONE. Side effects: Instrument Morph, FX-send Morph and
+ *             Kit Morph-decay AutoSave marks; Morph worker requeue.
+ * Accessors:  bank_sceneFanoutMask(), preset_resetSlotMorphToNormal(),
+ *             preset_setVoiceFxSendMorph(), scene_getVoiceFxSendAmount(),
+ *             scene_setSlot6Track7MorphAmpEnvelopeDecay(),
+ *             scene_getSlot6Track7AmpEnvelopeDecay(), preset_rebuildMorph().
+ * Affiliates: ccClear_runSend() (fan-out clear model),
+ *             ccCopy_runMorphTrack() (analogous copy).
+ */
+static uint8_t ccClear_runResetMorphTrack(const cc_job_t *job)
+{
+    uint8_t slot = (job->track < INSTRUMENT_SLOT_COUNT)
+                       ? job->track
+                       : (uint8_t)(INSTRUMENT_SLOT_COUNT - 1u);
+    uint16_t mask = bank_sceneFanoutMask(job->scene);
+    uint8_t active = scene_getActiveIndex();
+    uint8_t m;
+
+    if ((mask & ccClear_bit(active)) != 0u && !preset_applyWorkersIdle())
+        return CC_RUN_WAIT;
+    for (m = 0u; m < SCENE_COUNT; m++) {
+        if ((mask & ccClear_bit(m)) == 0u)
+            continue;
+        (void)preset_resetSlotMorphToNormal(m, slot);
+        (void)preset_setVoiceFxSendMorph(
+            m, slot, scene_getVoiceFxSendAmount(m, slot));
+        if (slot == INSTRUMENT_SLOT_COUNT - 1u)
+            scene_setSlot6Track7MorphAmpEnvelopeDecay(
+                m, scene_getSlot6Track7AmpEnvelopeDecay(m));
+        ccSvc_nameContentChanged(
+            filesystem_identityRow(FS_ROW_INSTRUMENT, m, slot));
+    }
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_FANOUT,
+            (uint32_t)mask | ((uint32_t)(job->scene & 0xFu) << 16u) |
+            (7u << 20u) | ((uint32_t)(slot & 0xFu) << 25u));
+    if ((mask & ccClear_bit(active)) != 0u)
+        preset_rebuildMorph();
+    menu_repaint();
+    return CC_RUN_DONE;
+}
+
+/*
+ * `clear scene reset morph` (S076 P3): equalise the whole Scene's morph
+ * endpoints to Normal. Does NOT fan out (parallels `clear scene`), does NOT
+ * clear the Bank-present bit and does NOT touch morph amounts.
+ *
+ * What:       for each of the six slots: reset the morphable instrument
+ *             descriptors and the FX-send Morph endpoint; set the generated
+ *             slot-6 decay Morph endpoint to its Normal value; then
+ *             effects_resetMorphToNormalSingle() resets the morphable Effect
+ *             endpoints. When the Scene is active the Morph worker and the
+ *             Effect runtime are rebuilt and the menu repaints.
+ * Why:        the PERF Scene clear of morph endpoints is a whole-Scene
+ *             operation with no edit-mask fan-out.
+ * Inputs:     job->scene.
+ * Outputs:    CC_RUN_WAIT while an active Scene's apply workers drain, then
+ *             CC_RUN_DONE. Side effects: Instrument Morph, FX-send Morph, Kit
+ *             Morph-decay and Effect AutoSave marks; runtime rebuild.
+ * Accessors:  preset_resetSlotMorphToNormal(), preset_setVoiceFxSendMorph(),
+ *             scene_getVoiceFxSendAmount(),
+ *             scene_setSlot6Track7MorphAmpEnvelopeDecay(),
+ *             scene_getSlot6Track7AmpEnvelopeDecay(),
+ *             effects_resetMorphToNormalSingle(), preset_rebuildMorph().
+ * Affiliates: ccClear_runScene() (whole-Scene model),
+ *             ccCopy_runSceneMorph() (analogous copy).
+ */
+static uint8_t ccClear_runResetSceneMorph(const cc_job_t *job)
+{
+    uint8_t scene = job->scene;
+    uint8_t active = (uint8_t)(scene == scene_getActiveIndex());
+    uint8_t slot;
+
+    if (active && !preset_applyWorkersIdle())
+        return CC_RUN_WAIT;
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        (void)preset_resetSlotMorphToNormal(scene, slot);
+        (void)preset_setVoiceFxSendMorph(
+            scene, slot, scene_getVoiceFxSendAmount(scene, slot));
+        ccSvc_nameContentChanged(
+            filesystem_identityRow(FS_ROW_INSTRUMENT, scene, slot));
+    }
+    scene_setSlot6Track7MorphAmpEnvelopeDecay(
+        scene, scene_getSlot6Track7AmpEnvelopeDecay(scene));
+    (void)effects_resetMorphToNormalSingle(scene);
+    ccSvc_nameContentChanged(
+        filesystem_identityRow(FS_ROW_SCENE, scene, 0u));
+    ccSvc_nameContentChanged(
+        filesystem_identityRow(FS_ROW_EFFECT, scene, 0u));
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_FANOUT,
+            (uint32_t)ccClear_bit(scene) |
+            ((uint32_t)(scene & 0xFu) << 16u) | (8u << 20u));
+    if (active) {
+        preset_rebuildMorph();
+        menu_repaintAll();
+    }
+    return CC_RUN_DONE;
+}
+
+/*
+ * `clear scene reset fx morph` (S076 P3): equalise only the Effect's
+ * morphable Morph endpoints to their Normal values; fans out through the edit
+ * mask (parallels `clear fx`).
+ *
+ * What:       gates on the active Scene's apply workers, then delegates the
+ *             fan-out, morphability check and runtime activation to
+ *             effects_resetMorphToNormal().
+ * Why:        thin PERF clear wrapper matching ccClear_runFx() with the added
+ *             worker wait and the new trace kind.
+ * Inputs:     job->scene.
+ * Outputs:    CC_RUN_WAIT while the active Scene's apply workers drain, then
+ *             CC_RUN_DONE. Side effects: Effect AutoSave marks, Effect row
+ *             refreshed flags cleared, runtime reactivated.
+ * Accessors:  effects_resetMorphToNormal(), bank_sceneFanoutMask(),
+ *             preset_applyWorkersIdle(), ccClear_effectRowsChanged().
+ * Affiliates: ccClear_runFx() (model), effects_resetRecord().
+ */
+static uint8_t ccClear_runResetFxMorph(const cc_job_t *job)
+{
+    uint16_t written;
+
+    if ((bank_sceneFanoutMask(job->scene) &
+         ccClear_bit(scene_getActiveIndex())) != 0u &&
+        !preset_applyWorkersIdle())
+        return CC_RUN_WAIT;
+    written = effects_resetMorphToNormal(job->scene);
+    if (written)
+        ccClear_effectRowsChanged(written);
+    ccTrace(AUTOSAVE_TRACE_CC_EVT_FANOUT,
+            (uint32_t)(written ? written : bank_sceneFanoutMask(job->scene)) |
+            ((uint32_t)(job->scene & 0xFu) << 16u) | (9u << 20u));
+    if ((written & ccClear_bit(scene_getActiveIndex())) != 0u)
+        menu_repaintAll();
+    return CC_RUN_DONE;
+}
+
 uint8_t ccClear_runJob(const cc_job_t *job)
 {
     uint8_t sel;
@@ -430,8 +616,22 @@ uint8_t ccClear_runJob(const cc_job_t *job)
     case CC_KIND_BAR:
         return ccSvc_runPatternClear(job);
     case CC_KIND_TRACK:
-        return (sel == CC_CLEAR_SEND) ? ccClear_runSend(job)
-                                      : ccSvc_runPatternClear(job);
+        /*
+         * What:       three-way track clear dispatch. CC_CLEAR_RESET_MORPH is
+         *             the shared "reset morph" selection (4 in both TRACK
+         *             menus); CC_CLEAR_SEND (5) is EFFECTS-only; every other
+         *             selection is a Pattern clear.
+         * Why:        `send` now sits after `reset morph` in the shared
+         *             label array, so both named selections must be tested
+         *             before falling through to the Pattern engine.
+         * Affiliates: ccClear_runSend(), ccClear_runResetMorphTrack(),
+         *             ccClear_trackLabels[].
+         */
+        if (sel == CC_CLEAR_RESET_MORPH)
+            return ccClear_runResetMorphTrack(job);
+        if (sel == CC_CLEAR_SEND)
+            return ccClear_runSend(job);
+        return ccSvc_runPatternClear(job);
     case CC_KIND_SCENE:
         switch (sel) {
         case CC_CLEAR_SCENE_ALL:         return ccClear_runScene(job);
@@ -446,6 +646,8 @@ uint8_t ccClear_runJob(const cc_job_t *job)
         case CC_CLEAR_SCENE_NOTES:       return ccSvc_runPatternClear(job);
         case CC_CLEAR_SCENE_FX:          return ccClear_runFx(job);
         case CC_CLEAR_SCENE_FX_SEQUENCE: return ccClear_runFxSequence(job);
+        case CC_CLEAR_SCENE_RESET_MORPH:    return ccClear_runResetSceneMorph(job);
+        case CC_CLEAR_SCENE_RESET_FX_MORPH: return ccClear_runResetFxMorph(job);
         default:
             ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_BAD_SELECTION, sel);
             return CC_RUN_DROP;

@@ -60,6 +60,27 @@
 
 #define LFO_MAX_F 		200 //[Hz]
 #define LFO_SR 			(REAL_FS/(float)OUTPUT_DMA_SIZE)
+/*
+ * LFO retrigger source: Scene change (S076 P2).
+ *
+ * What:       value 7 in the lfo.retrigger field. When set, a Scene change
+ *             resets the LFO phase to phaseOffset using the incoming Scene's
+ *             configured offset. When NOT set, the LFO inherits the outgoing
+ *             Scene's running phase so the cycle continues uninterrupted.
+ * Why:        gives the user per-LFO control over whether a Scene change
+ *             interrupts the LFO cycle. This value is outside the voice
+ *             trigger range 1..6 and must not match voice retrigger
+ *             comparisons.
+ * Inputs:     stored as uint8_t in lfo.retrigger via the MENU_RETRIGGER
+ *             selector (retriggerNames[] index 7 = "scn").
+ * Outputs:    instrumentManager_restoreLfoPhaseIfNeeded() tests this value
+ *             to decide reset vs. continue; instrumentManager_retriggerRuntimeLfos()
+ *             excludes it from voice trigger matching.
+ * Affiliates: retriggerNames[] (MenuText.h),
+ *             instrumentManager_retriggerRuntimeLfos() (InstrumentManager.c),
+ *             instrumentManager_restoreLfoPhaseIfNeeded() (InstrumentManager.c).
+ */
+#define LFO_RETRIGGER_SCENE  7u
 //-------------------------------------------------------------
 typedef struct LfoStruct
 {

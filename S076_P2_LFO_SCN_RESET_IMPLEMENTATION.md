@@ -573,7 +573,7 @@ static void preset_resetAndApplyKitVoiceImage(uint8_t scene_index,
 
 | Item | Size | Region |
 |------|------|--------|
-| `lfo_scene_handoff` | 25 bytes (6 × uint32_t + 1 × uint8_t) | SRAM1 (BSS) |
+| `lfo_scene_handoff` | 25 bytes quoted (payload); **28 bytes measured** + 32 B BSS delta (see Implementation Log) | SRAM1 (BSS) |
 
 No DTCM, arena, or stack impact. The `IM_SPECIAL_LFO_OFFSET` enum value and
 classifier string are compile-time/flash. The `#define` is compile-time.
@@ -651,4 +651,240 @@ should pass (mismatch count = 0).
 
 ## Implementation Log
 
-*(To be filled in as changes are applied.)*
+Applied in one pass on `dev-ph6-cleanup` at HEAD `61661fe` ("lfo scn reset pre
+implementation"). Working tree was clean at the start; the S076 P1 scene
+automation work is already committed. All 13 changes landed with their
+comment blocks placed directly above (or inside) the affected code, in both
+`.c` and `.h` files.
+
+### Changes applied
+
+| # | File | Result |
+|---|------|--------|
+| 1 | `Core/DSPAudio/lfo.h` | Added `#define LFO_RETRIGGER_SCENE 7u` with full comment block, after the `LFO_MAX_F`/`LFO_SR` block. |
+| 2 | `Core/Menu/MenuText.h` | `retriggerNames` count 7 -> 8, `"scn"` appended; added a short comment block above the table. |
+| 3 | `Core/DSP/Instruments/InstrumentManager.h` | Added `IM_SPECIAL_LFO_OFFSET` (value 19) before `IM_SPECIAL_WRITER_COUNT` (now 20) with an inline comment. `_Static_assert` still passes. |
+| 4 | `Core/DSP/Instruments/InstrumentManager.h` | Declared `instrumentManager_captureLfoPhases()` and `instrumentManager_restoreLfoPhaseIfNeeded()` with a full comment block, after the slot-6 track-7 declarations. |
+| 5 | `Core/DSP/Instruments/InstrumentManager.c` | Added static `lfo_scene_handoff` struct with comment block, after `instrumentManager_clearSlot6Track7StepDecayOverride()`. |
+| 6 | `Core/DSP/Instruments/InstrumentManager.c` | Added `instrumentManager_captureLfoPhases()` with comment block. |
+| 7 | `Core/DSP/Instruments/InstrumentManager.c` | Added `instrumentManager_restoreLfoPhaseIfNeeded()` with comment block. |
+| 8 | `Core/DSP/Instruments/InstrumentManager.c` | Retrigger collision fix in `instrumentManager_retriggerRuntimeLfos()`: added `retrigger != 0u` and `retrigger <= INSTRUMENT_SLOT_COUNT` guards with an inline comment. |
+| 9 | `Core/DSP/Instruments/InstrumentManager.c` | Added `IM_SPECIAL_LFO_OFFSET` case to `instrumentManager_writeSpecialRuntime()` with comment block; scales byte to full 32-bit phase. |
+| 10 | `Core/DSP/Instruments/InstrumentManager.c` | Added `"lfo_offset"` -> `IM_SPECIAL_LFO_OFFSET` mapping to `instrumentManager_classifySpecialKey()` with a comment (compiled only under `DEV_MODE_DIAGNOSTIC`). |
+| 11a-d | `DrumParameters.c`, `SnareParameters.c`, `CymbalParameters.c`, `HiHatParameters.c` | Each `lfo_offset` row converted from `ROW(...)` to `ROW_SPECIAL(..., IM_SPECIAL_LFO_OFFSET)`, `TYPE_UINT32` preserved; short comment block above each row. |
+| 12 | `Core/Bank/Scene/Preset/presetManager.c` | `instrumentManager_captureLfoPhases()` inserted at the top of `preset_startDrumsetApply()`, before the existing "Detach outgoing runtime targets" comment/call, with its own comment block. |
+| 13 | `Core/Bank/Scene/Preset/presetManager.c` | `instrumentManager_restoreLfoPhaseIfNeeded(voice)` added after `presetMorph_applyVoiceNow()` in `preset_resetAndApplyKitVoiceImage()`, guarded by `scene_index == scene_getActiveIndex()`, with a comment block. |
+| 14 | `tools/dsp_test/check_special_tags.py` | Companion tooling change (not in the original change list): added `'lfo_offset': 'LFO_OFFSET'` to the `simple` map so the host checker mirrors the new classifier. Without it `make special_tags` would fail on the `lfo_offset` rows. |
+
+### Placement note (Change 12)
+
+The capture call was placed **above** the existing comment block that
+describes `instrumentManager_clearAllRuntimeModulationTargets()`, so that
+existing comment stays adjacent to its own call. The capture therefore still
+executes before the modulation teardown, as the plan requires.
+
+### Build check (DEV config, `make all`)
+
+Baseline measured at the same HEAD with the S076 P2 diff reverse-applied and
+rebuilt, so the comparison is exact for this branch:
+
+| Metric | Baseline (HEAD `61661fe`) | With S076 P2 | Delta |
+|--------|---------------------------:|-------------:|------:|
+| text | 532,784 | 532,336 | **-448** |
+| data | 416 | 416 | **0** |
+| bss  | 426,712 | 426,744 | **+32** |
+
+Link budget after the change: flash 532,752 / 753,664 B used (headroom
+220,912 B); ITCM 4,168 / 16,384 B; DTCM statics 4,472 B; FX arena 126,592 B
+at `0x20001180` (margin 3,712 B). No errors; the only warnings are
+pre-existing ones in untouched files (`filesystem.c` unused DEV-only
+functions, `PatternData.c` packed-member address, `EuklidGenerator.c`
+sign-compare).
+
+`text` **decreased** by 448 B rather than increasing slightly. This is an
+LTO/-Ofast whole-program effect (inlining and layout shifted across many
+translation units once the four parameter tables and `InstrumentManager.h`
+changed); it is not a functional concern. `data` is unchanged, as expected.
+
+`make img` produced the flashable image `build/LXRV2_lxr02.img`
+(532,768 B on disk, 532,752 B payload), SHA-256
+`7f7c550ab2e1dd786cc7901a5ccc187a60e082d196aac60fcdf087df54427e5e`.
+
+### RAM: measured vs. quoted (needs user acknowledgement)
+
+`arm-none-eabi-nm -S` reports `lfo_scene_handoff` as `0x1c` = **28 bytes**,
+not the **25 bytes** quoted in the plan and the New RAM table. The payload is
+24 B (`uint32_t phase[6]`) + 1 B (`uint8_t valid`); the struct is padded to a
+4-byte boundary. The BSS section delta is **+32 B** (`426,712 -> 426,744`)
+because the next symbol is 4-byte aligned. Any layout of `{uint32_t[6];
+uint8_t;}` is at least 28 bytes, so 25 was arithmetically unreachable without
+split storage. The in-code comments were corrected to 28 bytes. Since the
+plan quoted 25 B as the approved figure, this 3-byte overage (struct) /
+7-byte section growth is flagged for the user's acknowledgement.
+
+### Verification status
+
+- **Host tag checker (`make -C tools/dsp_test special_tags`):** PASS -
+`special tags OK (155 rows, 0 mismatches)`; all four `lfo_offset` rows now
+classify as `IM_SPECIAL_LFO_OFFSET`.
+- **Build:** clean (`make all`), sizes as above.
+- **On-device diagnostic self-check:** not exercised in this config -
+`DEV_MODE_DIAGNOSTIC` is `0` in `config.h`, so
+`instrumentManager_classifySpecialKey()`/`instrumentManager_specialTagSelfCheck()`
+are compiled out. The host checker covers the same mapping.
+- **Hardware functional tests (section "Functional tests"):** still pending;
+they require the user to flash and play the six scenarios.
+
+### Notes / follow-ups observed
+
+- `preset_sendDrumsetParameters()` (the pre-audio synchronous path) shares
+`preset_resetAndApplyKitVoiceImage()`, so it also calls the new restore. That
+path only runs when `audioCodec_renderCount == 0` (boot), before any Scene
+worker has captured, so `lfo_scene_handoff.valid` is still 0 and the restore
+is a no-op - matching the plan's boot expectation.
+- The legacy raw MIDI CC path in `MidiParser.c` already scales
+`phaseOffset = value/127 * 0xffffffff`; the descriptor path now agrees with
+it. No MIDI file was changed.
+- Step-automation edge (`lfo_retrigger_voice` carries
+`INSTRUMENT_PARAM_FLAG_AUTOMATABLE` via `FLAGS_IMAGE`, so the automation UI
+can target it): if a step currently holds the retrigger cell,
+`presetMorph_applyVoiceNow()` defers writing the incoming Scene's retrigger
+(S075 F3, `presetMorph_writeRuntimeBase()`). The restore decision then reads
+the held value until that voice's next trigger. This follows the binding
+"automation always wins until the next trigger" rule; recorded as an edge,
+not treated as a defect.
+
+---
+
+## Post-Implementation Assessment
+
+Reviewed against the diff at HEAD `61661fe` (unstaged working tree). Every
+change was verified by reading the diff hunks and cross-referencing the
+schedule, the plan (`S076_P2_LFO_OPTIONAL_SCENE_RESET.md`), and the live
+source.
+
+### Change-by-change status
+
+| # | Scheduled | Landed | Correct |
+|---|-----------|--------|---------|
+| 1 | `#define LFO_RETRIGGER_SCENE 7u` in `lfo.h` after line 62 | After `LFO_SR`, before the struct. Full comment block present. | YES |
+| 2 | `retriggerNames` count 7→8, `"scn"` appended in `MenuText.h` | Count byte changed, `{"scn"}` appended. Comment block added above the table. | YES |
+| 3 | `IM_SPECIAL_LFO_OFFSET` in enum before `WRITER_COUNT` | Inserted as value 19, `WRITER_COUNT` now 20. `_Static_assert` (≤ 32) still passes. Inline comment block. | YES |
+| 4 | Declare `captureLfoPhases` + `restoreLfoPhaseIfNeeded` in `.h` | After slot6 track7 decay declarations. Full comment block. Comment corrected to 28 bytes. | YES |
+| 5 | Static `lfo_scene_handoff` struct in `.c` | After `instrumentManager_clearSlot6Track7StepDecayOverride()`. Full comment block. RAM comment corrected to 28 bytes. | YES |
+| 6 | `instrumentManager_captureLfoPhases()` function | Immediately after struct. Iterates 6 slots, captures phase or 0 for NULL, sets valid. Full comment block. | YES |
+| 7 | `instrumentManager_restoreLfoPhaseIfNeeded()` function | Immediately after capture. Guards: slot range, valid, NULL LFO. Branches on `LFO_RETRIGGER_SCENE`. Full comment block. | YES |
+| 8 | Retrigger collision fix in `retriggerRuntimeLfos()` | Added `retrigger != 0u && retrigger <= INSTRUMENT_SLOT_COUNT &&` guard. Inline comment block. | YES |
+| 9 | `IM_SPECIAL_LFO_OFFSET` case in special writer switch | Inserted after `IM_SPECIAL_LFO_RATE`, before `IM_SPECIAL_NONE`. Scales via `(uint64_t)byteValue * 0xFFFFFFFFu / 127u`. Full comment block. | YES |
+| 10 | `"lfo_offset"` classifier mapping | After `"lfo_rate"`, before `return IM_SPECIAL_NONE`. Inline comment. | YES |
+| 11a | DrumParameters.c `lfo_offset` → `ROW_SPECIAL` | `ROW_SPECIAL(..., IM_SPECIAL_LFO_OFFSET)`, `TYPE_UINT32` preserved. Short comment block. | YES |
+| 11b | SnareParameters.c `lfo_offset` → `ROW_SPECIAL` | Identical pattern. | YES |
+| 11c | CymbalParameters.c `lfo_offset` → `ROW_SPECIAL` | Identical pattern. | YES |
+| 11d | HiHatParameters.c `lfo_offset` → `ROW_SPECIAL` | Identical pattern. | YES |
+| 12 | `captureLfoPhases()` call in `preset_startDrumsetApply()` | Placed at the top of the function body, before the existing modulation teardown comment/call. Full comment block. | YES |
+| 13 | `restoreLfoPhaseIfNeeded(voice)` call in `preset_resetAndApplyKitVoiceImage()` | After `presetMorph_applyVoiceNow()`, guarded by `scene_index == scene_getActiveIndex()`. Full comment block. | YES |
+| 14 | `check_special_tags.py` companion | `'lfo_offset': 'LFO_OFFSET'` added to `simple` map. Not in the original 13-change schedule; necessary for `make special_tags` to pass. | YES |
+
+### Discrepancies between schedule and implementation
+
+1. **Function name in Change 9 description**: the schedule says
+   `instrumentManager_applySpecialWriter()` — the actual function is
+   `instrumentManager_writeSpecialRuntime()`. The code landed in the correct
+   function; the schedule text had a name error. No functional impact.
+
+2. **Struct size**: the plan and schedule quoted 25 bytes for
+   `lfo_scene_handoff`. Actual size is 28 bytes (struct padding aligns the
+   trailing `uint8_t` to the next 4-byte boundary). BSS delta is +32 (section
+   alignment). The implementation log already documents this and the in-code
+   comments were corrected to 28 bytes. No functional impact.
+
+3. **Change 14 (check_special_tags.py)**: not listed in the original 13-change
+   schedule. Required for the host tag checker to agree with the new classifier
+   mapping. The implementation log documents it. Correct addition.
+
+4. **Change 12 placement**: the schedule said "before
+   `instrumentManager_clearAllRuntimeModulationTargets()` (line 1728)".
+   The implementation placed the call at the very top of
+   `preset_startDrumsetApply()`, before the existing comment block for the
+   teardown call. This is equivalent — the capture still runs before teardown
+   and before any slot reset. The implementation log documents the placement
+   reasoning.
+
+### Correctness analysis
+
+**Phase offset scaling** — `(uint32_t)(((uint64_t)byteValue * 0xFFFFFFFFu) / 127u)`:
+- byteValue 0 → 0 (cycle start). ✓
+- byteValue 64 → ~0x80808080 (~50.4% of cycle). ✓
+- byteValue 127 → 0xFFFFFFFF (full cycle wrap). ✓
+- The `uint64_t` cast prevents overflow on `127 * 0xFFFFFFFF`. ✓
+
+**Retrigger collision guard** — `retrigger != 0u && retrigger <= INSTRUMENT_SLOT_COUNT`:
+- Values 1..6 (voice triggers) pass both checks. ✓
+- Value 0 (off) excluded by `!= 0u`. ✓
+- Value 7 (scn) excluded by `<= 6`. ✓
+- trigger_track 6 (slot-6 alternate): `trigger_track + 1 = 7`, but no
+  retrigger 1..6 equals 7, and scn (7) is excluded. ✓
+
+**Restore logic ordering** — in `preset_resetAndApplyKitVoiceImage()`:
+1. `instrumentManager_resetRuntimeSlot(voice)` — zeroes phase via memset + lfo_init.
+2. `presetMorph_applyVoiceNow(scene_index, voice)` — writes incoming Scene's
+   retrigger, phaseOffset (now scaled), freq, etc. via descriptors.
+3. `instrumentManager_restoreLfoPhaseIfNeeded(voice)` — reads retrigger to
+   decide reset (phaseOffset) vs. continue (captured phase).
+
+This ordering guarantees both `retrigger` and `phaseOffset` are in the runtime
+LFO before the decision is made. ✓
+
+**Boot path safety** — `preset_sendDrumsetParameters()` (the pre-audio
+synchronous path) calls `preset_resetAndApplyKitVoiceImage()` at line 1727 but
+does NOT call `instrumentManager_captureLfoPhases()`. The handoff struct's
+`valid` field starts as 0 (BSS zero). `restoreLfoPhaseIfNeeded()` returns
+immediately when `!valid`. LFO phase stays at 0 from `lfo_init()` — identical
+to current boot behaviour. ✓
+
+**`IM_SPECIAL_WRITER_COUNT` static assert** — value 20 ≤ 32
+(`IM_SPECIAL_WRITER_MASK` = 0x1F, mask + 1 = 32). Passes. ✓
+
+**Menu selector range** — `retriggerNames[0][0]` = 8. The menu engine reads
+this byte as the count of selectable entries, so the selector now cycles
+through indices 0..7 (off, v1..v6, scn). The `TYPE_UINT8` field stores 0..7
+without issue. ✓
+
+**Kit file compatibility** — value 7 saved in `lfo.retrigger` by the existing
+`TYPE_UINT8` path. Older firmware loading this file: the menu engine would
+clamp the display to its own retriggerNames count (7), showing `v6` instead
+of `scn`, but the stored value 7 would never match any `trigger_track + 1`
+comparison (values 1..7, with 7 only from track 6 alt-trigger, which older
+firmware handles the same way). Harmless. ✓
+
+**MIDI CC legacy agreement** — the implementation log notes that `MidiParser.c`
+already scales `phaseOffset = value/127 * 0xffffffff`. The descriptor path now
+agrees. No MIDI path was changed. ✓
+
+### Build results
+
+| Metric | Baseline (pre-P2) | With S076 P2 | Delta |
+|--------|-------------------:|-------------:|------:|
+| text | 532,784 | 532,336 | -448 |
+| data | 416 | 416 | 0 |
+| bss | 426,712 | 426,744 | +32 |
+
+Text decrease is an LTO/-Ofast reoptimization artifact (table layout and
+inlining decisions changed across translation units when the four parameter
+tables and the header changed). Not a functional concern.
+
+BSS +32 accounts for the 28-byte `lfo_scene_handoff` struct plus section
+alignment padding.
+
+Host tag checker: `special tags OK (155 rows, 0 mismatches)`.
+
+### Verdict
+
+All 13 scheduled changes plus the companion tooling change are implemented
+correctly. Every code path — Scene-change capture/restore, boot no-op, voice
+retrigger guard, phase offset scaling, menu expansion — is sound. The schedule
+naming discrepancy (Change 9 function name) and struct padding (25 → 28 bytes)
+are documentation-only issues, already corrected in the in-code comments.
+
+**Status: PASS — ready for hardware verification (six functional test
+scenarios listed in the Verification section).**

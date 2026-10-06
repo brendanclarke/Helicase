@@ -595,6 +595,42 @@ void    preset_morphVoiceScene(uint8_t scene_index, uint8_t slot,
                                uint8_t morph);
 void    preset_rebuildMorph(void);
 /*
+ * Endpoint-only morph helpers for copy/clear (S076 P3).
+ *
+ * What:       preset_resetSlotMorphToNormal() equalises one instrument slot's
+ *             Morph endpoint to its current Normal endpoint; it iterates the
+ *             slot's instrument type descriptor table and, for every
+ *             descriptor whose flags include INSTRUMENT_PARAM_FLAG_MORPHABLE,
+ *             copies instrument_parameters[i] onto
+ *             morph_instrument_parameters[i]. Non-morphable descriptors are
+ *             untouched.
+ *             preset_copySlotNormalToMorph() copies one source Scene/slot's
+ *             Normal endpoints onto another Scene/slot's Morph endpoints,
+ *             requiring the two instrument types to match; a mismatch is a
+ *             complete no-change for that slot.
+ * Why:        the "reset morph" clear operations (track- and Scene-level) and
+ *             the "morph"/"scene morph" copy operations share this
+ *             morphable-descriptor endpoint loop. Keeping the byte writes and
+ *             the descriptor iteration inside the Preset owner path matches
+ *             the KitMrp/InstrumentMrp endpoint commits and avoids firing
+ *             preset_setInstrumentParameter()'s per-byte runtime and fan-out
+ *             work for a batch the caller will rebuild once.
+ * Inputs:     reset: scene_index (0..15), slot (0..5); copy: src_scene/src_slot
+ *             (Normal source) and dst_scene/dst_slot (Morph target), all valid.
+ * Outputs:    the count of Morph bytes changed. Zero for invalid coordinates or
+ *             a type mismatch. On change the destination slot's Morph scope and
+ *             the owning Scene's card-clean bit are marked. The helpers do NOT
+ *             queue the Morph worker; the caller does that after all writes.
+ * Accessors:  scene_instrumentSlot(), instrumentManager_registryEntry(),
+ *             autosave_markInstrumentMorphDirty(), bank_invalidateSdCleanScene().
+ * Affiliates: ccClear_runResetMorphTrack(), ccClear_runResetSceneMorph(),
+ *             ccCopy_runMorphTrack(), ccCopy_runSceneMorph(),
+ *             preset_rebuildMorph().
+ */
+uint8_t preset_resetSlotMorphToNormal(uint8_t scene_index, uint8_t slot);
+uint8_t preset_copySlotNormalToMorph(uint8_t src_scene, uint8_t src_slot,
+                                     uint8_t dst_scene, uint8_t dst_slot);
+/*
  * S074 master bus compressor Scene settings (cmp, cam, ctm, csc).
  *
  * preset_setBusCompSetting() clamps and commits one field of one Scene through

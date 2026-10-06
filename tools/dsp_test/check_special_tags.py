@@ -45,7 +45,9 @@ def expected(t, key):
         'amp_envelope_decay': 'AMP_DECAY', 'amp_envelope_slope': 'AMP_SLOPE',
         'transient_wave': 'TRANSIENT_WAVE',
         'transient_freq': 'TRANSIENT_FREQ',
-        'instrument_drive': 'INSTRUMENT_DRIVE', 'lfo_rate': 'LFO_RATE'}
+        'instrument_drive': 'INSTRUMENT_DRIVE', 'lfo_rate': 'LFO_RATE',
+        # S076 P2: lfo_offset now scales its byte through IM_SPECIAL_LFO_OFFSET.
+        'lfo_offset': 'LFO_OFFSET'}
     if t == 'HAT' and key == 'amp_envelope_decay_choke':
         return {'IM_SPECIAL_HAT_DECAY_CHOKE'}
     if t in ('DRM', 'SNR'):

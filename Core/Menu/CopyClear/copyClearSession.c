@@ -803,18 +803,42 @@ static void cc_formatIndicator(char row[17], uint8_t *pos)
         }
         break;
     case CC_KIND_TRACK:
+        /*
+         * What:       track source indicator. The middle letter identifies the
+         *             copy selection: "T" for a whole track, "i" for
+         *             instrument copy, "m" for the new morph copy (S076 P3).
+         * Why:        the menu label already distinguishes the selection, but
+         *             the indicator keeps the source readable at a glance and
+         *             matches the design's SNN{L}N form.
+         * Affiliates: CC_COPY_TRACK, CC_COPY_INSTRUMENT, CC_COPY_MORPH.
+         */
         cc_put(row, pos, "S");
         cc_putNum(row, pos, (uint16_t)(s->scene + 1u), 2u);
-        cc_put(row, pos, (cc_state.phase == CC_OP_COPY &&
-                          cc_state.selection == CC_COPY_INSTRUMENT) ? "i" : "T");
+        if (cc_state.phase == CC_OP_COPY &&
+            cc_state.selection == CC_COPY_INSTRUMENT)
+            cc_put(row, pos, "i");
+        else if (cc_state.phase == CC_OP_COPY &&
+                 cc_state.selection == CC_COPY_MORPH)
+            cc_put(row, pos, "m");
+        else
+            cc_put(row, pos, "T");
         cc_putNum(row, pos, (uint16_t)(s->track + 1u), 1u);
         break;
     case CC_KIND_SCENE:
         cc_put(row, pos, "S");
         cc_putNum(row, pos, (uint16_t)(s->scene + 1u), 2u);
         if (cc_state.phase == CC_OP_COPY) {
-            static const char *const copy_suffix[] = { "", "c", "K", "f", "P" };
-            if (cc_state.selection < 5u)
+            /*
+             * What:       Scene copy suffix by selection: "" scene, "c"
+             *             settings, "K" kit, "f" effect, "P" pattern, "m"
+             *             scene morph (S076 P3).
+             * Why:        the new CC_COPY_SCENE_MORPH = 5 entry needs its own
+             *             indicator letter.
+             */
+            static const char *const copy_suffix[] = {
+                "", "c", "K", "f", "P", "m"
+            };
+            if (cc_state.selection < 6u)
                 cc_put(row, pos, copy_suffix[cc_state.selection]);
         } else {
             static const char *const clear_suffix[] = {

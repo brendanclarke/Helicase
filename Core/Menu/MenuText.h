@@ -76,8 +76,16 @@ static const char nextPatternNames[][4] = {
     {"p9"},{"p10"},{"p11"},{"p12"},{"p13"},{"p14"},{"p15"},{"p16"},
     {"r2"},{"r3"},{"r4"},{"r5"},{"r6"},{"r7"},{"r8"},
 };
+/*
+ * LFO retrigger selector names (S076 P2).
+ *
+ * The leading byte is the selectable-entry count. Index 7 is the new "scn"
+ * option (LFO_RETRIGGER_SCENE): a Scene change resets this LFO's phase to its
+ * scaled offset, while every voice value keeps the existing voice retrigger
+ * behaviour. Values 0..6 are unchanged.
+ */
 static const char retriggerNames[][4] = {
-    {7}, {"off"},{"v1"},{"v2"},{"v3"},{"v4"},{"v5"},{"v6"},
+    {8}, {"off"},{"v1"},{"v2"},{"v3"},{"v4"},{"v5"},{"v6"},{"scn"},
 };
 static const char lfoWaveNames[][4] = {
     {8}, {"sin"},{"tri"},{"sup"},{"sdn"},{"sqr"},{"rnd"},{"xup"},{"xdn"},

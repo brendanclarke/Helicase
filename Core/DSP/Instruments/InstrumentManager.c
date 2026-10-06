@@ -1509,7 +1509,23 @@ void instrumentManager_retriggerRuntimeLfos(uint8_t trigger_track)
         return;
     for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
         Lfo *lfo = instrumentManager_runtimeLfo(slot);
-        if (lfo && lfo->retrigger == (uint8_t)(trigger_track + 1u))
+        /*
+         * Guard voice retrigger range to exclude LFO_RETRIGGER_SCENE (S076 P2).
+         *
+         * What:       only matches retrigger values 1..INSTRUMENT_SLOT_COUNT
+         *             (i.e. 1..6, the voice trigger sources). Values 0 (off)
+         *             and 7+ (scn, future) are excluded.
+         * Why:        trigger_track 6 is the slot-6 alternate/choke trigger.
+         *             trigger_track + 1 == 7 == LFO_RETRIGGER_SCENE. Without
+         *             this guard, an LFO with retrigger = scn would falsely
+         *             retrigger on every slot-6 alternate trigger.
+         * Inputs:     lfo->retrigger (uint8_t), trigger_track (uint8_t).
+         * Outputs:    phase reset only for voice retrigger matches.
+         * Affiliates: LFO_RETRIGGER_SCENE (lfo.h), lfo_retrigger() (lfo.c).
+         */
+        if (lfo && lfo->retrigger != 0u &&
+            lfo->retrigger <= INSTRUMENT_SLOT_COUNT &&
+            lfo->retrigger == (uint8_t)(trigger_track + 1u))
             lfo->phase = lfo->phaseOffset;
     }
 }
@@ -2565,6 +2581,102 @@ void instrumentManager_clearSlot6Track7StepDecayOverride(void)
     slot6_track7_decay_step_value = 0u;
 }
 
+/*
+ * LFO phase snapshot for Scene-change handoff (S076 P2).
+ *
+ * What:       captures each slot's running LFO phase before the deferred
+ *             Scene worker resets runtime slots. The incoming Scene's LFO
+ *             settings determine whether the phase is restored (continue)
+ *             or reset to phaseOffset (scn).
+ * Why:        the slot reset (memset + lfo_init) zeroes the phase
+ *             unconditionally. Without a snapshot, there is nothing to
+ *             restore from.
+ * Inputs:     instrumentManager_captureLfoPhases() writes all 6 phases from
+ *             the current runtime. instrumentManager_restoreLfoPhaseIfNeeded()
+ *             reads the captured phase for one slot after descriptor values
+ *             have been applied.
+ * Output:     one uint32_t phase per slot, plus a valid flag.
+ * Lifetime:   static runtime state. Valid from capture until the next capture
+ *             or boot. At boot, valid = 0 (BSS zero), so the first Scene
+ *             apply uses lfo_init's default phase (0) - same as current
+ *             behaviour.
+ * RAM:        28 bytes SRAM1 (6 x uint32_t phase + 1 uint8_t valid, padded).
+ * Affiliates: preset_startDrumsetApply() (capture site),
+ *             preset_resetAndApplyKitVoiceImage() (restore site),
+ *             instrumentManager_resetRuntimeSlot() (the reset that destroys
+ *             the phase).
+ */
+static struct {
+    uint32_t phase[INSTRUMENT_SLOT_COUNT];
+    uint8_t  valid;
+} lfo_scene_handoff;
+
+/*
+ * Snapshot every slot's running LFO phase for Scene-change handoff (S076 P2).
+ *
+ * What:       iterates all INSTRUMENT_SLOT_COUNT slots and reads the current
+ *             runtime LFO phase into the static handoff struct.
+ * Why:        must run before the deferred Scene worker calls
+ *             instrumentManager_resetRuntimeSlot(), which zeroes the phase
+ *             via memset + lfo_init. After capture, the handoff is marked
+ *             valid so restoreLfoPhaseIfNeeded() can use it.
+ * Inputs:     current runtime LFO state for each slot (may be NULL if slot
+ *             type is NONE - captured as 0).
+ * Outputs:    lfo_scene_handoff.phase[] filled, lfo_scene_handoff.valid = 1.
+ * Callers:    preset_startDrumsetApply() - once per Scene-change worker,
+ *             before instrumentManager_clearAllRuntimeModulationTargets().
+ * Affiliates: instrumentManager_runtimeLfo() (the per-slot LFO accessor),
+ *             instrumentManager_restoreLfoPhaseIfNeeded() (the consumer).
+ */
+void instrumentManager_captureLfoPhases(void)
+{
+    uint8_t slot;
+
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        Lfo *lfo = instrumentManager_runtimeLfo(slot);
+        lfo_scene_handoff.phase[slot] = lfo ? lfo->phase : 0u;
+    }
+    lfo_scene_handoff.valid = 1u;
+}
+
+/*
+ * Restore or reset one slot's LFO phase after Scene descriptor apply (S076 P2).
+ *
+ * What:       reads the incoming LFO's retrigger field (already written by
+ *             presetMorph_applyVoiceNow -> descriptor path) and decides:
+ *             - retrigger == LFO_RETRIGGER_SCENE: phase = phaseOffset
+ *               (the incoming Scene requests a fresh start at its offset).
+ *             - otherwise: phase = handoff snapshot (the outgoing Scene's
+ *               running phase, so the LFO continues its cycle).
+ * Why:        instrumentManager_resetRuntimeSlot() zeroed the phase via
+ *             memset + lfo_init. The incoming Scene's retrigger value was
+ *             not yet written at that point, so the decision is deferred
+ *             until after descriptor apply.
+ * Inputs:     zero-based slot (0..INSTRUMENT_SLOT_COUNT-1), the static
+ *             handoff struct, and the incoming LFO's retrigger field.
+ * Outputs:    lfo->phase is set. Out-of-range slot, invalid handoff, or
+ *             NULL LFO is a no-op.
+ * Callers:    preset_resetAndApplyKitVoiceImage() - after
+ *             presetMorph_applyVoiceNow() and before the slot is considered
+ *             live.
+ * Affiliates: instrumentManager_captureLfoPhases() (the writer),
+ *             LFO_RETRIGGER_SCENE (lfo.h), instrumentManager_runtimeLfo().
+ */
+void instrumentManager_restoreLfoPhaseIfNeeded(uint8_t slot)
+{
+    Lfo *lfo;
+
+    if (slot >= INSTRUMENT_SLOT_COUNT || !lfo_scene_handoff.valid)
+        return;
+    lfo = instrumentManager_runtimeLfo(slot);
+    if (!lfo)
+        return;
+    if (lfo->retrigger == LFO_RETRIGGER_SCENE)
+        lfo->phase = lfo->phaseOffset;
+    else
+        lfo->phase = lfo_scene_handoff.phase[slot];
+}
+
 static const ParamDescriptor *instrumentManager_lfoAdapterDescriptor(
     const instrument_lfo_target_adapter_t *adapter)
 {
@@ -3096,6 +3208,33 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         if (!lfo) return 0u;
         lfo_setFreq(lfo, byteValue);
         return 1u; }
+    case IM_SPECIAL_LFO_OFFSET: {
+        /*
+         * Scale 0..127 descriptor byte to full 32-bit phase range (S076 P2).
+         *
+         * What:       converts the seven-bit offset value into a uint32_t
+         *             phaseOffset spanning 0..0xFFFFFFFF, matching the LFO
+         *             phase accumulator's full range.
+         * Why:        the raw TYPE_UINT32 path writes the byte value directly
+         *             (e.g. 127 -> 127/4294967295 ~= 0% of cycle). With
+         *             scaling, value 127 maps to 0xFFFFFFFF (~=100% of cycle),
+         *             value 64 maps to ~=50%, and value 0 maps to 0.
+         * Inputs:     byteValue (0..127) from descriptor/automation write.
+         * Outputs:    lfo->phaseOffset set to the scaled uint32_t value.
+         * Callers:    instrumentManager_writeRuntime() via the special tag
+         *             dispatch. Descriptor rows: lfo_offset in Drum, Snare,
+         *             Cymbal, HiHat parameter tables.
+         * Affiliates: IM_SPECIAL_LFO_RATE (the analogous rate handler),
+         *             lfo.phaseOffset (the target field),
+         *             instrumentManager_retriggerRuntimeLfos() and
+         *             instrumentManager_restoreLfoPhaseIfNeeded() (consumers
+         *             of the scaled phaseOffset).
+         */
+        Lfo *lfo = instrumentManager_runtimeLfo(slot);
+        if (!lfo) return 0u;
+        lfo->phaseOffset =
+            (uint32_t)(((uint64_t)byteValue * 0xFFFFFFFFu) / 127u);
+        return 1u; }
     case IM_SPECIAL_NONE:
     default:
         return 0u;
@@ -3164,6 +3303,12 @@ static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
     if (strcmp(key, "instrument_drive") == 0)
         return IM_SPECIAL_INSTRUMENT_DRIVE;
     if (strcmp(key, "lfo_rate") == 0) return IM_SPECIAL_LFO_RATE;
+    /*
+     * S076 P2: lfo_offset uses the IM_SPECIAL_LFO_OFFSET handler so
+     * the 0..127 byte is scaled to full 32-bit phase range instead of
+     * being written raw by the TYPE_UINT32 path.
+     */
+    if (strcmp(key, "lfo_offset") == 0) return IM_SPECIAL_LFO_OFFSET;
     return IM_SPECIAL_NONE;
 }
 

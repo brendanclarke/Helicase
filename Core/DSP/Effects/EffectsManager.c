@@ -991,6 +991,110 @@ uint16_t effects_resetRecord(uint8_t dst_scene)
 }
 
 /*
+ * Reset Effect morph endpoints to Normal values with fan-out (S076 P3).
+ * Contract in EffectsManager.h.
+ *
+ * What:       for every same-type edit-mask member, copies each morphable
+ *             parameter's retained Normal byte onto its Morph byte through the
+ *             in-place whole-record commit pair. A member with no differing
+ *             byte is left closed and unmarked.
+ * Why:        "reset fx morph" fans out exactly like "clear fx": same-type
+ *             members share the descriptor layout, so the same morphable index
+ *             set is equalised in each.
+ * Inputs:     dst_scene; the destination's current type fixes the mask and the
+ *             morphable index set.
+ * Outputs:    the Scene mask of Scenes written. Side effects:
+ *             scene_finishEffectWholeCommit() marks the Effect region;
+ *             effects_activateScene() rebuilds the active runtime.
+ * Affiliates: effects_resetRecord() (model), effects_fanoutMask(),
+ *             effects_paramMorphable(), ccClear_runResetFxMorph().
+ */
+uint16_t effects_resetMorphToNormal(uint8_t dst_scene)
+{
+    const effect_record_t *dst = scene_effectConst(dst_scene);
+    effect_type_id_t type;
+    uint16_t mask;
+    uint16_t written = 0u;
+    uint8_t member;
+
+    if (!dst || dst_scene >= SCENE_COUNT)
+        return 0u;
+    type = dst->type;
+    mask = effects_fanoutMask(dst_scene, 1u);
+    for (member = 0u; member < SCENE_COUNT; member++) {
+        effect_record_t *record;
+        uint8_t changed = 0u;
+        uint8_t i;
+
+        if ((mask & (uint16_t)(1u << member)) == 0u)
+            continue;
+        record = scene_effectRecordForWholeCommit(member);
+        if (!record)
+            continue;
+        for (i = 0u; i < EFFECT_PARAM_COUNT; i++) {
+            if (!effects_paramMorphable(type, i))
+                continue;
+            if (record->morph[i] != record->normal[i]) {
+                record->morph[i] = record->normal[i];
+                changed = 1u;
+            }
+        }
+        if (changed) {
+            scene_finishEffectWholeCommit(member);
+            written |= (uint16_t)(1u << member);
+        }
+    }
+    if ((written & (uint16_t)(1u << scene_getActiveIndex())) != 0u)
+        effects_activateScene(scene_getActiveIndex());
+    return written;
+}
+
+/*
+ * Reset Effect morph endpoints for one Scene, no fan-out (S076 P3).
+ * Contract in EffectsManager.h.
+ *
+ * What:       the same morphable Normal -> Morph copy as
+ *             effects_resetMorphToNormal() but applied to exactly one Scene.
+ * Why:        the whole-Scene "reset morph" clear owns its own non-fanned-out
+ *             loop and hands the Effect slice to this single-Scene helper.
+ * Inputs:     scene_index.
+ * Outputs:    nonzero if any byte changed. Side effects:
+ *             scene_finishEffectWholeCommit() on change and
+ *             effects_activateScene() when the active Scene changed.
+ * Affiliates: effects_resetMorphToNormal() above, effects_paramMorphable(),
+ *             ccClear_runResetSceneMorph().
+ */
+uint8_t effects_resetMorphToNormalSingle(uint8_t scene_index)
+{
+    const effect_record_t *dst = scene_effectConst(scene_index);
+    effect_record_t *record;
+    effect_type_id_t type;
+    uint8_t changed = 0u;
+    uint8_t i;
+
+    if (!dst || scene_index >= SCENE_COUNT)
+        return 0u;
+    type = dst->type;
+    record = scene_effectRecordForWholeCommit(scene_index);
+    if (!record)
+        return 0u;
+    for (i = 0u; i < EFFECT_PARAM_COUNT; i++) {
+        if (!effects_paramMorphable(type, i))
+            continue;
+        if (record->morph[i] != record->normal[i]) {
+            record->morph[i] = record->normal[i];
+            changed = 1u;
+        }
+    }
+    if (changed) {
+        scene_finishEffectWholeCommit(scene_index);
+        if (scene_index == scene_getActiveIndex())
+            effects_activateScene(scene_index);
+    }
+    return changed;
+}
+
+/*
  * Paste one retained FX-sequence step across same-type edit-mask members.
  *
  * Inputs: destination Scene, 0..15 step, and an 18-byte step image. Output:
