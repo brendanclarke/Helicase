@@ -409,6 +409,15 @@ void effects_automationStepBegin(uint8_t track);
 uint8_t effects_applyAutomation(uint8_t track, uint8_t local, uint8_t value7);
 void effects_automationStepFlush(void);
 void effects_setMorphAutomation(uint8_t amount);
+/*
+ * Clear the Pattern `fxm` Morph-base override (S076 Rule A).
+ *
+ * What: deactivates the morph_override_valid flag without touching per-
+ * parameter Effect overlays. Input: none. Output: the Effect service loop
+ * falls back to retained Scene Effect Morph on the next block. Caller:
+ * effects_setMorphAmountScene(). Affiliate: effects_setMorphAutomation().
+ */
+void effects_clearMorphAutomationOverride(void);
 
 void effects_setLfoContribution(uint8_t source_slot, uint8_t pair,
                                 uint8_t target, uint8_t direction,

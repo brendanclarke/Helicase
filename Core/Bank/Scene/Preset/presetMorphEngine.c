@@ -862,3 +862,31 @@ void presetMorph_clearAllStepAutomationOverrides(uint8_t scene_index)
     if (any && scene_getConst(scene_index))
         presetMorph_rebuildScene(scene_index);
 }
+
+/*
+ * Clear the step-automation Morph base for one voice (S076 Rule A).
+ *
+ * What: deactivates morph_step_override[slot] so the effective Morph base
+ * falls back to the retained Scene amount. Unlike the clearAll helper this
+ * does NOT queue a rebuild; the caller is a retained-value setter that will
+ * queue its own rebuild or retained-base commit immediately after.
+ * Why: a non-automation write (menu edit, MIDI CC1, copy/clear, type change)
+ * must supersede any active step override for that slot so the user's edit
+ * is audible and visible. The full transport-boundary clear
+ * (presetMorph_clearAllStepAutomationOverrides) continues to own bulk
+ * restore with rebuild.
+ * Inputs: zero-based instrument slot 0..INSTRUMENT_SLOT_COUNT-1.
+ * Output: the slot's morph_step_override.active is set to 0. Out-of-range
+ * slot is a no-op.
+ * Callers: preset_morphVoiceScene(), preset_morphScene().
+ * Affiliates: presetMorph_setStepAutomationOverride() (the setter),
+ * presetMorph_clearAllStepAutomationOverrides() (the transport clear),
+ * presetMorph_effectiveVoiceBase() (the consumer that checks .active),
+ * presetMorph_getEffectiveVoiceAmount() (the display bridge).
+ */
+void presetMorph_clearStepAutomationOverride(uint8_t slot)
+{
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    morph_step_override[slot].active = 0u;
+}

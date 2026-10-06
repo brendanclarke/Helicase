@@ -644,6 +644,20 @@ static uint8_t effects_setMorphAmountScene(uint8_t scene_index, uint8_t amount)
     uint8_t before = scene_getEffectMorphAmount(scene_index);
 
     scene_setEffectMorphAmount(scene_index, amount);
+    /*
+     * S076 Rule A: a non-automation retained write supersedes the Pattern
+     * `fxm` Morph override for the active Scene. The service loop reads
+     * morph_override_valid every block; once cleared it uses the retained
+     * Scene Effect Morph amount for all LFO and base resolution.
+     * Input: active Scene guard against effects_state.scene_index (the
+     * runtime's own active Scene, which tracks scene_getActiveIndex()).
+     * Output: effects_automation.morph_override_valid = 0.
+     * Callers (upstream): effects_setMorphAmount() fan-out, called by
+     * menu_commitEffectMorphParam() and clearOps.c. Affiliate:
+     * effects_setMorphAutomation() (the automation setter).
+     */
+    if (scene_index == effects_state.scene_index)
+        effects_clearMorphAutomationOverride();
     return (uint8_t)(scene_getEffectMorphAmount(scene_index) != before);
 }
 
@@ -1184,6 +1198,28 @@ void effects_setMorphAutomation(uint8_t amount)
     /* Pattern `fxm` is a runtime-only expanded Morph-base override. */
     effects_automation.morph_override = amount;
     effects_automation.morph_override_valid = 1u;
+}
+
+/*
+ * Clear the Pattern `fxm` Morph-base override (S076 Rule A).
+ *
+ * What: deactivates effects_automation.morph_override_valid so the Effect
+ * service loop falls back to the retained Scene Effect Morph amount.
+ * Why: a non-automation write (menu edit, MIDI CC1 global, copy/clear)
+ * must supersede any active Pattern fxm override so the user's edit is
+ * audible. The full transport-boundary clear (effects_automationReset)
+ * continues to own bulk clear; this API clears only the morph override
+ * without touching per-parameter Effect overlays or owner tracks.
+ * Inputs: none. Output: morph_override_valid = 0; the morph_override
+ * value is left stale because it is not read while invalid.
+ * Callers: effects_setMorphAmountScene() (the active-Scene retained
+ * write path). Affiliates: effects_setMorphAutomation() (the setter),
+ * effects_automationReset() (the transport/Scene clear),
+ * effects_service() service loop line 1567–1568 (the consumer).
+ */
+void effects_clearMorphAutomationOverride(void)
+{
+    effects_automation.morph_override_valid = 0u;
 }
 
 void effects_setLfoContribution(uint8_t source_slot, uint8_t pair,

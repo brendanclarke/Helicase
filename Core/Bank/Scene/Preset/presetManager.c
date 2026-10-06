@@ -1242,6 +1242,20 @@ uint8_t preset_setVoiceAudioOut(uint8_t scene_index, uint8_t slot,
     if (route > MIXER_ROUTING_DAC2_R)
         route = MIXER_ROUTING_DAC1_STEREO;
     scene_setVoiceAudioOut(scene_index, slot, route);
+    /*
+     * S076 Rule A: a non-automation retained write supersedes any active
+     * step override for this slot. preset_applyKitAudioRouting() (called
+     * next) writes the retained route to the DSP mixer, and once the
+     * override is inactive the effective getter returns the retained route
+     * for display.
+     * Input: active Scene guard. Output: audio_out_step_override[slot].active = 0.
+     * Callers (upstream): menu_cellCommitValue() Scene-setting branch.
+     * Affiliate: preset_setAudioOutStepOverride() (the automation setter),
+     * preset_getEffectiveAudioOut() (the display bridge),
+     * preset_applyVoiceAudioOutRuntime() (the DSP write).
+     */
+    if (scene_index == scene_getActiveIndex())
+        audio_out_step_override[slot].active = 0u;
     return preset_applyKitAudioRouting(scene_index, slot);
 }
 
@@ -1262,6 +1276,21 @@ uint8_t preset_setVoiceFxSendAmount(uint8_t scene_index, uint8_t slot,
     if (amount > 127u)
         amount = 127u;
     scene_setVoiceFxSendAmount(scene_index, slot, amount);
+    /*
+     * S076 Rule A: a non-automation retained write supersedes any active
+     * step override for this slot. The mixer reads the effective getter
+     * each block; once the override is inactive the retained value takes
+     * over on the next block. No rebuild is needed because FX send has no
+     * interpolation worker — the mixer reads the value directly.
+     * Input: active Scene guard. Output: fx_send_step_override[slot].active = 0.
+     * Callers (upstream): menu_cellCommitValue() Scene-setting branch,
+     * clearOps.c `clear send`. Affiliate: preset_setFxSendStepOverride()
+     * (the automation setter), preset_getEffectiveFxSendAmount() (the
+     * mixer consumer), preset_getFxSendDisplayAmount() (the display
+     * bridge).
+     */
+    if (scene_index == scene_getActiveIndex())
+        fx_send_step_override[slot].active = 0u;
     return 1u;
 }
 
@@ -1281,6 +1310,20 @@ uint8_t preset_setVoiceFxSendMorph(uint8_t scene_index, uint8_t slot,
     if (amount > 127u)
         amount = 127u;
     scene_setVoiceFxSendMorph(scene_index, slot, amount);
+    /*
+     * S076 Rule A: editing either endpoint of a morphable FX send releases
+     * the step override so the interpolated result from retained Normal
+     * and Morph endpoints takes effect. The mixer consumer
+     * (preset_getEffectiveFxSendAmount) interpolates using the resolved
+     * voice Morph amount when no step override is active.
+     * Input: active Scene guard. Output: fx_send_step_override[slot].active = 0.
+     * Callers (upstream): menu_cellCommitValue() Scene-setting Morph
+     * branch, clearOps.c `clear send`. Affiliate:
+     * preset_setVoiceFxSendAmount() (the Normal-endpoint twin, also
+     * clears — Change 3).
+     */
+    if (scene_index == scene_getActiveIndex())
+        fx_send_step_override[slot].active = 0u;
     return 1u;
 }
 
@@ -1332,6 +1375,22 @@ uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
         scene_setSlot6Track7MorphAmpEnvelopeDecay(scene_index, value);
     else
         scene_setSlot6Track7AmpEnvelopeDecay(scene_index, value);
+    /*
+     * S076 Rule A: a non-automation retained write supersedes any active
+     * step decay override. The generated track-7 trigger path reads the
+     * step override first when active; clearing it makes the next trigger
+     * use the retained Kit value (or the LFO layer, if one is active).
+     * Input: active Scene guard. Output:
+     * instrumentManager_clearSlot6Track7StepDecayOverride() sets
+     * slot6_track7_decay_step_active = 0.
+     * Callers (upstream): menu_cellCommitValue() Kit setting branch,
+     * InstrumentManager type-change normalization. Affiliate:
+     * instrumentManager_setSlot6Track7StepDecayOverride() (the automation
+     * setter), instrumentManager_getSlot6Track7StepDecay() (the trigger
+     * consumer).
+     */
+    if (scene_index == scene_getActiveIndex())
+        instrumentManager_clearSlot6Track7StepDecayOverride();
     return 1u;
 }
 
@@ -1340,6 +1399,36 @@ void preset_applySceneSettings(uint8_t scene_index)
     const scene_t *scene = scene_getConst(scene_index);
     if (!scene || scene_index != scene_getActiveIndex())
         return;
+
+    /*
+     * S076 Rule B: Scene activation clears every Scene-target step override
+     * left by the previous Scene's automation.
+     *
+     * What: deactivates all five persistent override families before the
+     * new Scene's mirrors, routing, and Morph are applied. Without this
+     * clear the new Scene's presetMorph_rebuildScene() reads stale
+     * morph_step_override values from the previous Scene, the mixer
+     * continues using the previous Scene's FX send override, and audio
+     * routing does not switch.
+     * Why: main-pattern automation sets these overrides per step, but the
+     * overrides carry no Scene identity. A Scene switch means every
+     * override from the previous Scene is stale; the new Scene's retained
+     * values are the correct baseline.
+     * Inputs: none (this function already validated that scene_index is the
+     * active Scene). Outputs: all override .active flags are 0.
+     * Effect Morph (effects_automation.morph_override_valid) is already
+     * cleared by effects_activateScene() → effects_automationReset(),
+     * which runs in preset_startDrumsetApply() at the same Scene-switch
+     * boundary before this function is called. No duplicate clear needed.
+     * Callers (upstream of this function): preset_startDrumsetApply()
+     * (Scene switch), Bank Load, boot. Affiliates:
+     * seq_restoreAllSceneAutomation() (the transport-boundary clear path,
+     * unchanged).
+     */
+    preset_clearAllFxSendStepOverrides();
+    preset_clearAllAudioOutStepOverrides(scene_index);
+    presetMorph_clearAllStepAutomationOverrides(scene_index);
+    instrumentManager_clearSlot6Track7StepDecayOverride();
 
     /*
      * Apply immediate Scene-wide settings that still have legacy mirrors.
@@ -3183,6 +3272,21 @@ void preset_morphScene(uint8_t scene_index, uint8_t morph)
     scene_setAllVoiceMorphAmounts(scene_index, morph);
     /* Global Morph also owns the retained Scene Effect Morph amount. */
     scene_setEffectMorphAmount(scene_index, morph);
+    /*
+     * S076 Rule A: bulk Morph set from PERF / global MIDI CC1 supersedes
+     * every active step-automation Morph override. Each slot is cleared
+     * individually through the single-slot helper. The clear precedes the
+     * active-Scene mirror sync and rebuild so the worker uses the newly
+     * retained amounts.
+     * Input: active Scene guard. Output: all morph_step_override[].active = 0.
+     * Callers (upstream): preset_morph() (PERF global Morph, MIDI CC1
+     * global). Affiliate: preset_morphVoiceScene() (the per-slot twin —
+     * Change 6).
+     */
+    if (scene_index == scene_getActiveIndex()) {
+        for (uint8_t s = 0u; s < INSTRUMENT_SLOT_COUNT; s++)
+            presetMorph_clearStepAutomationOverride(s);
+    }
     if (scene_index == scene_getActiveIndex()) {
         preset_syncSceneMorphMirrors(scene);
         presetMorph_requestAll(scene_index);
@@ -3218,6 +3322,19 @@ void preset_morphVoiceScene(uint8_t scene_index, uint8_t slot, uint8_t morph)
         return;
     preset_ensureMorphInitialized();
     scene_setVoiceMorphAmount(scene_index, slot, morph);
+    /*
+     * S076 Rule A: a non-automation Morph write supersedes any active step
+     * override for this slot. The clear precedes the active-Scene rebuild
+     * request so presetMorph_effectiveVoiceBase() returns the newly retained
+     * amount when the worker processes the queued slot.
+     * Input: active Scene guard. Output: morph_step_override[slot].active = 0.
+     * Callers (upstream): preset_morphVoice() (PERF, MIDI CC1 per-voice),
+     * menu_cellCommitValue() Morph cells. Affiliate:
+     * presetMorph_setStepAutomationOverride() (the automation setter),
+     * presetMorph_effectiveVoiceBase() (the worker consumer).
+     */
+    if (scene_index == scene_getActiveIndex())
+        presetMorph_clearStepAutomationOverride(slot);
     if (scene_index == scene_getActiveIndex()) {
         parameter_values[PAR_VOICE1_MORPH + slot] = morph;
         presetMorph_requestVoice(scene_index, slot);

@@ -273,6 +273,28 @@ static void seq_clearAutomationDirty(void)
 }
 
 /*
+ * Clear the Scene-target automation dirty bitmap (S076 Rule B).
+ *
+ * What: zeroes seq_scene_automation_dirty. Why: the dirty bits reference
+ * the previous Scene's mod-target table indices. After a Scene switch the
+ * new Scene's retained values are the correct transport-restore baseline,
+ * and old dirty bits that indexed into the previous Scene's target table
+ * could restore wrong entries or alias into the new table. Clearing here
+ * means a subsequent transport reset restores retained values for only
+ * those targets that the new Scene's automation actually wrote.
+ * Inputs: none. Output: seq_scene_automation_dirty = 0.
+ * Caller: seq_selectActivePattern() and seq_alignActivePatternToScene()
+ * on Scene change. Affiliates: seq_applySceneAutomation() (the setter),
+ * seq_restoreAllSceneAutomation() (the transport-boundary consumer),
+ * seq_clearAutomationDirty() (the boot/transport clear that zeroes both
+ * voice and Scene bitmaps).
+ */
+void seq_clearSceneAutomationDirty(void)
+{
+    seq_scene_automation_dirty = 0u;
+}
+
+/*
  * Restore every dirty automation overlay to its morph-interpolated base value.
  *
  * What: walks all instrument slots and, for each set bit in
@@ -659,6 +681,19 @@ void seq_selectActivePattern(uint8_t pattern)
 	led_notifyPatternChanged(seq_activePattern);
 	seq_sendProgChg(seq_activePattern);
 	voiceControl_noteOff(0xFF);
+	/*
+	 * S076 Rule B: clear the Scene-target automation dirty bitmap.
+	 *
+	 * What: the dirty bits reference mod-target table indices from the
+	 * previous Scene. The new Scene's retained values are the correct
+	 * transport-restore baseline, and stale bits could restore wrong
+	 * entries or alias into the new Scene's table. Clearing here means a
+	 * subsequent transport reset only restores targets that the new
+	 * Scene's own automation wrote.
+	 * Affiliate: seq_restoreAllSceneAutomation() (transport-boundary
+	 * restore, uses this bitmap).
+	 */
+	seq_clearSceneAutomationDirty();
 }
 
 void seq_alignActivePatternToScene(uint8_t scene_index)
@@ -697,6 +732,11 @@ void seq_alignActivePatternToScene(uint8_t scene_index)
 	seq_loadPendigFlag = 0u;
 	seq_newPatternAvailable = 0u;
 	seq_realignActivePatternToMasterClock();
+	/*
+	 * S076 Rule B: clear the Scene-target automation dirty bitmap.
+	 * Same rationale as seq_selectActivePattern() — see Change 15.
+	 */
+	seq_clearSceneAutomationDirty();
 }
 
 /*

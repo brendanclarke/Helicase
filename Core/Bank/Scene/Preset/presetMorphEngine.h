@@ -162,5 +162,15 @@ void presetMorph_applyParameterNow(uint8_t scene_index, uint8_t slot,
 void presetMorph_setStepAutomationOverride(uint8_t scene_index,
                                            uint8_t slot, uint8_t amount);
 void presetMorph_clearAllStepAutomationOverrides(uint8_t scene_index);
+/*
+ * Clear the step-automation Morph base for one voice (S076 Rule A).
+ *
+ * What: deactivates the per-slot Morph step override without queueing a
+ * rebuild. The caller owns the subsequent retained-value commit or rebuild
+ * request. Input: zero-based instrument slot. Output: override deactivated;
+ * out-of-range is a no-op. Callers: preset_morphVoiceScene(),
+ * preset_morphScene(). Affiliate: presetMorph_setStepAutomationOverride().
+ */
+void presetMorph_clearStepAutomationOverride(uint8_t slot);
 
 #endif

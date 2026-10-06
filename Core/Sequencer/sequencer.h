@@ -175,6 +175,18 @@ void seq_restoreAutomatedParameters(uint8_t trigger_track);
  */
 uint8_t seq_automationHoldsParameter(uint8_t slot, uint8_t local);
 /*
+ * Clear the Scene-target automation dirty bitmap (S076 Rule B).
+ *
+ * What: zeroes the bitmap that tracks which Scene mod targets were written
+ * by step automation during the current transport pass. After a Scene
+ * switch the previous Scene's dirty bits are stale and could alias into
+ * the new Scene's target table on transport restore.
+ * Input: none. Output: seq_scene_automation_dirty = 0.
+ * Callers: seq_selectActivePattern(), seq_alignActivePatternToScene().
+ * Affiliate: seq_applySceneAutomation().
+ */
+void seq_clearSceneAutomationDirty(void);
+/*
  * Start or stop the sequencer transport.
  *
  * Inputs: nonzero starts, zero stops. Output: both paths reset the fixed-grid
