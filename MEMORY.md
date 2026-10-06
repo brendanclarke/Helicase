@@ -20,57 +20,40 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
-**Current working source**: **Session 075 is closed** on `dev-ph6-copyclear`
-(2026-10-03). **Phase 6 has started:** copy and clear are implemented, plus
-two rounds of hardware follow-ups (F1, F2) and an automation-priority fix
-(F3). Phase 5 (the Effects bus, initial pass) was largely completed in S074.
+**Current working source**: **Session 076 is closed** on `dev-ph6-cleanup`
+(2026-10-06). S076 implemented four feature/fix batches (P1–P4) on top of
+Session 075's copy/clear framework. All four build clean; hardware
+verification is pending (`S077_RETEST_CHECKLIST.md`).
 
-- **Commits:** HEAD `76aef20` holds every S075 code change. The S075
-  closeout documentation (log, index, `COPYCLEAR_UTILITIES.md`, spec
-  updates, this file, volatile notes, `SCOPING_TARGETS.md`) and three
-  comment-only code edits (`AutosaveTrace.h` ×2, `copyClearSession.h`, now
-  pointing at `COPYCLEAR_UTILITIES.md`) are uncommitted. The user manages
-  commits.
-- **Build at S075 close (DEV config):** `text=532,408`, `data=416`,
-  `bss=426,712`; flash payload 532,824 B of 753,664 (**220,840 B free**);
-  ITCM 4,168 / 16,384 B; DTCM statics 4,472 B; FX arena 126,592 B at
-  `0x20001180` (margin 3,712 B); `scenes` `0x65E0`. `LXRV2_lxr02.img`
-  532,840 B, SHA-256 `d1c0aac2…9ceb` (record the `.img` hash; the `.bin` is
-  unstamped). The production build (`DEV_MODE_LOGGING 0`) was last measured
-  at F1 and needs a rebuild.
-- **Hardware (user):** the base pass, F1 and F2 were tested and each fed the
-  next round; F3 "seems ok". Not yet reported: the SHIFT+TRACK overlay
-  follow-up re-test and the remaining case list (`COPYCLEAR_UTILITIES.md`
-  §16).
+- **Commits:** S076 code changes are uncommitted on `dev-ph6-cleanup`.
+  The user manages commits.
+- **Build at S076 close (DEV config):** `text=535,976`, `data=416`,
+  `bss=426,744`; flash payload 536,392 B of 753,664 (**217,272 B free**).
+  RAM growth from S075: +32 B (28-byte `lfo_scene_handoff` struct +
+  alignment). The production build (`DEV_MODE_LOGGING 0`) was last measured
+  at S075 F1 and needs a rebuild.
+- **Hardware (user):** S076 P1–P4 await hardware testing. S075 carry-over
+  items also still open (overlay re-test, case list, F3 edge cases).
 
-Session 075 in one paragraph:
+Session 076 in one paragraph:
 
-- **Copy/clear** (`Core/Menu/CopyClear/`, reference
-  `COPYCLEAR_UTILITIES.md`). COPY held + object copies; SHIFT + COPY clears.
-  Sources: step/range, bar/range, track, Scene, FX step/range; Scene-level
-  pastes `scene/settings/kit/effect/pattern`, `instrument`; clears per
-  object, PERF Scene clears, EFFECTS SEQ clear, pot clears of automation.
-  Background service (queue 4, register 8), exclusive per-Scene Pattern
-  boundary, permanent 132 B **swap block** per pool (8,060 B usable), raw
-  block API, sliding compaction, retargeting, early trigger bits with drop
-  restore, 0.1 % trickle governor, lazy 9 kB name-buffer loan, one HCNAMES
-  rewrite (`HNcU`). AutoSave/trace/settings/repair suspended per operation.
-  Pattern never fans out; Scene children fan out through the edit mask.
-- **Global `srt` retired;** PERF `fxm` (Effect Morph) in its cell.
-- **F2:** St1 and compressor off/0/0/off defaults, `Copy`/`Clear` header,
-  long-name-only Effect full views, one pan rule (stored 63 = centre = `0`),
-  CrumpBit defaults/`snc`, morphable FX send (`fx_send_morph[6]`, AutoSave
-  cells 45..50), VOICE hold-SHIFT Morph view, Effect-page SHIFT+TRACK
-  voice-mix overlay (last TRACK pressed; no mutes while held).
-- **F3:** automation always wins until the voice's next trigger; menu edits
-  apply one parameter's interpolation; external MIDI is lowest priority.
-- **RAM (approved):** F2 +101 B, F1 net +124 B, base pass +92 B net; DEV
-  trace +24 B.
+- **P1:** Scene parameter automation override clear rules — Rule A
+  (non-automation writes clear their override) and Rule B (Scene activation
+  clears all five override families). 7 files, 16 inline additions.
+- **P2:** LFO retrigger value 7 (`scn`) for Scene-change phase handoff,
+  plus the LFO phase offset scaling fix (`IM_SPECIAL_LFO_OFFSET`, raw byte
+  → full 32-bit phase). 9+1 files, +32 B BSS.
+- **P3:** copy/clear morph additions — `reset morph` (track and Scene),
+  `reset fx morph`, `copy morph` (track and Scene). `CC_CLEAR_SEND` moved
+  from value 4 to 5. 8 files, +2,848 B flash.
+- **P4:** `reload scene` in the PERF clear menu (fire-and-forget Scene
+  reload from HCNAMES source), bar chaselight on SELECT LEDs in STEP mode,
+  SHIFT+SELECT sets per-track pattern length. 5 files, +792 B flash.
 
 **Permanent authority:**
 
-- `knowledge_files/log_archive/075_SESSION_HANDOFF_LOG.md` (and 074, 073,
-  072);
+- `knowledge_files/log_archive/076_SESSION_HANDOFF_LOG.md` (and 075, 074,
+  073, 072);
 - `knowledge_files/specification_reference/COPYCLEAR_UTILITIES.md` (new in
   S075);
 - `knowledge_files/specification_reference/dsp_instruments_effects/`:
@@ -87,6 +70,8 @@ Session 075 in one paragraph:
 - The ten root `S075_*.md` documents are superseded (the user deletes them);
   their pre-implementation versions are in `00bd078`, `b1216db`, `822bbc9`,
   `b8f08db`.
+- The eight root `S076_*.md` task documents are superseded by
+  `076_SESSION_HANDOFF_LOG.md` (the user deletes them).
 
 Still deferred: per-track step scale/shuffle playback (`PATTERN_DYNAMIC_STACK.md`
 §6.4).
@@ -147,9 +132,10 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   Scene children (Instrument, Kit, Effect, FX sequence, `send`) fan out;
   Pattern data never does. `copy scene`/`settings` exchange the mask entry;
   `clear scene`/`settings` reset it to self.
-- **Session 075 is closed.** Durable record: `075_SESSION_HANDOFF_LOG.md`;
-  copy/clear reference: `COPYCLEAR_UTILITIES.md`. The ten root `S075_*.md`
-  documents are superseded (the user deletes them).
+- **Session 076 is closed.** Durable record: `076_SESSION_HANDOFF_LOG.md`;
+  copy/clear reference: `COPYCLEAR_UTILITIES.md`. The eight root `S076_*.md`
+  task documents are superseded (the user deletes them). The ten root
+  `S075_*.md` documents were also superseded at S075 close.
 - **Automation priority (user, S075 F3) — binding:** step automation, then
   menu edits, then MIDI. A held voice-parameter automation value is never
   overwritten before the voice's next trigger: every Morph-base runtime write

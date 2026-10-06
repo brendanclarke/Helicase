@@ -1516,8 +1516,9 @@ From "notes from others" in `putting it together`: doubling the sequencer's trac
 
 ### Suggested Complementary Features
 
-- **Automation "eraser" mode** (from the earlier draft, still reasonable): a shortcut — e.g., holding `CLEAR` while turning a parameter's knob — that wipes all step automation for that specific parameter across the active track in one gesture, complementing but distinct from the step-edit list menu's per-step "remove" functions.
-- **Scene-inclusion visual on the voice page:** consider a brief on-screen summary ("editing: 3/16 scenes") when a parameter is touched, so it's obvious at a glance how broad the edit's blast radius is before committing to a knob turn.
+~~- **Automation "eraser" mode** (from the earlier draft, still reasonable): a shortcut — e.g., holding `CLEAR` while turning a parameter's knob — that wipes all step automation for that specific parameter across the active track in one gesture, complementing but distinct from the step-edit list menu's per-step "remove" functions.~~ [done]
+
+~~- **Scene-inclusion visual on the voice page:** consider a brief on-screen summary ("editing: 3/16 scenes") when a parameter is touched, so it's obvious at a glance how broad the edit's blast radius is before committing to a knob turn.~~ [absolutely rejected]
 
 ## Phase 7 — DSP Expansion
 

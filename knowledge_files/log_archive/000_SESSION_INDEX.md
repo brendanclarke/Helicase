@@ -90,6 +90,7 @@ it belongs in the summary or the log, not here.
 | 073 | 2026-09-28/29 | `dev-ph5-effects`, HEAD `692abf8` + uncommitted closeout edits | Program flash 480 → 736 KiB, Load:[Samples] restored, DSP CPU refactor (about 10 % worst case), `tools/dsp_test` bench |
 | 074 | 2026-09-29/30 | `dev-ph5-effects`, HEAD `50610dd` | Effect-page underlines, CrumpBit (first arena Effect), master bus compressor, `xfd` fader mode, AutoSave torn-record fix |
 | 075 | 2026-10-01/03 | `dev-ph6-copyclear`, HEAD `76aef20` | Phase 6 copy/clear (`Core/Menu/CopyClear/`), `srt` retired, F1/F2 hardware follow-ups, morphable FX send, automation-priority fix |
+| 076 | 2026-10-06 | `dev-ph6-cleanup`, HEAD uncommitted | Scene parameter automation override clear rules; LFO Scene-reset retrigger and phase-offset scaling fix; copy/clear morph additions; reload scene, bar chaselight, SHIFT+SELECT pattern length |
 
 
 ---

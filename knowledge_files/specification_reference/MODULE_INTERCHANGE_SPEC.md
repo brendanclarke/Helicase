@@ -1,7 +1,7 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-075, including typed HCNAMES, `.fx` Effect storage, AutoSave boot restore, typed Instrument-index
+076, including typed HCNAMES, `.fx` Effect storage, AutoSave boot restore, typed Instrument-index
 repair, AsyncFATFS directory publication, the Phase 4 dynamic Pattern storage
 system, step automation editing/playback (Session 065), the VOICE-page
 held-step automation overlay (Session 066), the Pattern Stack Service with
@@ -31,7 +31,23 @@ and the Session 075 additions:
   Effect-page SHIFT+TRACK voice-mix overlay (F2);
 - the automation-priority fix: `seq_automationHoldsParameter()`, the guarded
   Morph-base write, one-parameter menu edits and the external-MIDI endpoint
-  entry (F3).
+  entry (F3);
+
+and the Session 076 additions:
+
+- Scene parameter automation override clear rules (P1): Rule A
+  (non-automation writes clear their override) and Rule B (Scene activation
+  clears all overrides via `seq_clearSceneAutomationDirty()` and inline
+  clears in `preset_applySceneSettings()`);
+- LFO Scene-reset retrigger `scn` (P2): `LFO_RETRIGGER_SCENE` (7u),
+  `captureLfoPhases()`, `restoreLfoPhaseIfNeeded()`, and
+  `IM_SPECIAL_LFO_OFFSET` for phase-offset scaling;
+- copy/clear morph additions (P3): `preset_resetSlotMorphToNormal()`,
+  `preset_copySlotNormalToMorph()`, `effects_resetMorphToNormal()`,
+  `effects_resetMorphToNormalSingle()`, new clear/copy selections;
+- reload scene, bar chaselight, SHIFT+SELECT pattern length (P4):
+  `CC_CLEAR_SCENE_RELOAD`, `led_updateSelectBarChaselight()` (static),
+  `handleSelectButton()` SHIFT+STEP split.
 
 The DSP internals behind these APIs are described in
 `INSTRUMENTS_DSP_REFERENCE.md` and `EFFECTS_MIXER_DSP_REFERENCE.md`.
@@ -698,6 +714,7 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 | `seq_automationHoldsParameter(slot, local)` | S075 F3: nonzero while step automation holds that descriptor's runtime value (its `seq_automation_dirty[slot]` bit). Read-only; foreground only. The guard behind "automation always wins". | `presetMorph_writeRuntimeBase()` |
 | `seq_restoreAllAutomation()` | Walk all 6 slots' 64-bit dirty bitmaps and restore each dirty descriptor index from `morph_interpolation[]` via `instrumentManager_writeRuntime()`. Called from `seq_setStepIndexToStart()` before `seq_clearAutomationDirty()` (Session 070). | Sequencer transport restart |
 | `seq_restoreAllSceneAutomation()` | Walk `seq_scene_automation_dirty` (uint32_t) bitmap and restore each dirty Scene target from its retained SceneData getter. Clears morph step overrides, slot6 decay step state, and audio routing. Called from `seq_setStepIndexToStart()` (Session 070). | Sequencer transport restart |
+| `seq_clearSceneAutomationDirty()` | Clear the `seq_scene_automation_dirty` bitmap. Rule B: called from `seq_selectActivePattern()` and `seq_alignActivePatternToScene()` so a Scene activation starts with a clean overlay state. (S076 P1) | Sequencer Scene activation paths |
 | `seq_midiNoteOff(chan)` / `seq_sendMidiNoteOn(channel, note, veloc)` | MIDI note output ownership. | MidiParser, Sequencer |
 | `seq_offsetTrackStepIndexForRotation(trackNr, oldRot, newRot, len)` | Narrow runtime hook for live rotation compensation. | PatternData only |
 
@@ -770,12 +787,15 @@ prefixes remain `preset_*` for the mechanical move.
 | `presetMorph_getResolvedVoiceAmount(scene, slot)` / `presetMorph_applyParameterNow(scene, slot, local)` | S075: the amount the Morph worker uses (step override or retained base, plus active-Scene LFO contributions); re-interpolate one parameter now, store `morph_interpolation[local]` and write the runtime through the guarded `presetMorph_writeRuntimeBase()` (skips held automation). | `preset_getEffectiveFxSendAmount()`, `preset_setInstrumentParameter()` |
 | `presetMorph_setStepAutomationOverride(scene, slot, amount)` | Set a per-voice Morph step automation override. The morph engine uses this value instead of the retained per-voice amount while active. LFO modulates around the override value (Session 070). | Sequencer Scene automation drain |
 | `presetMorph_clearAllStepAutomationOverrides(scene)` | Clear all per-voice Morph step overrides and restore retained amounts. Called on transport restart (Session 070). | Sequencer Scene automation restore |
+| `presetMorph_clearStepAutomationOverride(slot)` | Clear one voice Morph step override. Rule A: called when a non-automation write changes the voice Morph retained value (`preset_morphVoiceScene()`, `preset_morphScene()`). (S076 P1) | presetManager Morph setters |
 | `presetMorph_getEffectiveVoiceAmount(scene, slot)` | Return the step override when active, else the retained per-voice Morph amount. Single query point for the morph decimation engine (Session 070). Also used by menu.c for Scene superpage live display (Session 071). | presetMorphEngine internals, morph decimation, Menu |
 | `preset_setAudioOutStepOverride(slot, route)` / `preset_clearAllAudioOutStepOverrides(scene)` / `preset_getEffectiveAudioOut(scene, slot)` | Per-voice audio-out step automation overlay. Route clamped to `MIXER_ROUTING_DAC2_R`. Cleared by `preset_init()` and transport restore (Session 071). | Sequencer Scene automation drain, Menu superpage |
 | `preset_setFxSendStepOverride(slot, amount)` / `preset_clearAllFxSendStepOverrides()` / `preset_getEffectiveFxSendAmount(scene, slot)` | Per-voice FX-send step automation overlay (clamped to 127). The effective (audible) send is the override, else the Normal/Morph endpoints interpolated by `presetMorph_getResolvedVoiceAmount()` (equal endpoints return at once; S075 F2). The mixer reads it each block and ramps the live send. | Sequencer Scene automation drain, mixer |
 | `preset_getFxSendDisplayAmount(scene, slot)` / `preset_setVoiceFxSendAmount(scene, slot, amount)` / `preset_setVoiceFxSendMorph(scene, slot, amount)` | S075 F2: the Normal-view cell value (override else Normal endpoint); retain the Normal or Morph endpoint through SceneData (no runtime push). | Menu VOICE mix cell, CopyClear `clear send` |
 | `preset_setBusCompSetting(scene, field, value)` / `preset_syncBusCompMirrors()` | S074: clamp and commit one bus compressor field of one Scene through SceneData (the VOICE edit-mask fan-out calls it per Scene), and copy the active Scene's four values into the `PAR_BUS_COMP_*` page mirrors (also on every Scene apply, `preset_applySceneSettings()`). No runtime push: BusCompressor reads SceneData per block. | Menu bus compressor page, Scene apply |
 | `preset_setVoiceFaderSetting(scene, slot, mode)` | Clamp to 0..`SCENE_FADER_SETTING_MAX` (3 since S074, `xfd`) and store through SceneData. | Menu VOICE mix page |
+| `preset_resetSlotMorphToNormal(scene, slot)` | Copy all Morphable Normal descriptor bytes into the Morph image for one slot, plus the correlated Scene morph endpoints (FX send morph, Kit slot-6 decay morph). (S076 P3) | CopyClear clear morph, copy morph |
+| `preset_copySlotNormalToMorph(scene, slot)` | Copy all Normal descriptor bytes into the Morph image for one slot. (S076 P3) | CopyClear copy morph |
 
 ## Core/DSPAudio/mixer
 
@@ -885,6 +905,9 @@ or the FX audio bus.
 | `effects_activateScene(scene)` | Select a Scene's retained Effect type; different types switch immediately through the FxBuffer handoff, while same-type activation preserves tails. | Preset Scene/Bank apply paths |
 | `effects_targetValid()` / `effects_targetDescriptor()` / `effects_stepTarget()` | Validate/describe/walk block-7 targets for a Scene's type and use. | InstrumentManager, Menu |
 | `effects_automationReset()` / `effects_automationStepBegin()` / `effects_applyAutomation()` / `effects_automationStepFlush()` / `effects_setMorphAutomation()` | Pattern overlay lifecycle and the `fxm` override (third restore rule). | Sequencer drain, `seq_applySceneAutomation()` |
+| `effects_clearMorphAutomationOverride()` | Clear the Effect Morph automation override. Rule A: called when a non-automation write changes `fxm` (`effects_setMorphAmountScene()`). (S076 P1) | EffectsManager Morph setter |
+| `effects_resetMorphToNormal(scene)` | Equalise all morphable Effect endpoints of a Scene to their Normal values. (S076 P3) | CopyClear Scene morph reset |
+| `effects_resetMorphToNormalSingle(scene)` | Same as above, for fan-out use (single Scene at a time). (S076 P3) | CopyClear fx morph reset |
 | `effects_setLfoContribution()` / `effects_clearLfoSource()` | Base-independent LFO entries per source/pair. | InstrumentManager |
 | `effects_init()` / `effects_activateScene()` | Boot init (share callback); Scene activation (type switch through the handoff, clears FX position/held Morph/overlays). Since S074 a same-type activation refreshes the handoff (`effects_exportHandoff()`, internal) without `init`. | `main.c`, Preset |
 | `effect_ui_hooks_t` / `effect_select_layout_t` (registry contract, extended S074) | Per-type page hooks (`select`/`track`/`bar`, `render_leds`, `paint_row0`, `format_value3`, `flags` with `EFFECT_UI_FLAG_OWNS_SELECT_LEDS`; returns `EFFECT_UI_HANDLED`/`EFFECT_UI_SHOW_HOME`) and layouts (`custom_row0`, home screen, the `EFFECT_LAYOUT_CELL_MORPH` sentinel). Contract in `EFFECTS_BUS_REFERENCE.md` §8.4. | menuEffects, buttonHandler, type Parameters files |
@@ -950,7 +973,8 @@ voices, the Scene namespace, and the Effect namespace (`fx`, value 8).
 | `instrumentManager_runtimeInstance()` / trigger/filter/async/sync/pan/volume/LFO dispatch family | Resolve the runtime object for the current active Scene slot type. Engines render pre-volume; `instrumentManager_runtimeVolume()` supplies the channel volume that the mixer applies after decimation (Session 072 step 2). | mixer, MIDI/Sequencer trigger paths, Preset |
 | `instrumentManager_clearAllRuntimeModulationTargets()` | Restore/clear both LFO pairs and velocity target for every outgoing current source before a slot type changes. | Preset staged Instrument commit |
 | `instrumentManager_resetRuntimeSlot(slot)` | Initialize only the incoming committed slot/type runtime object. | Preset staged Instrument commit |
-| `instrumentManager_writeRuntime()` / target validation/stepping helpers | Apply descriptor/supplemental bindings and validate canonical targets against current slot types. Special conversions are chosen by the row's flash tag (`runtime.special`, `IM_SPECIAL_*`, S073) in `instrumentManager_writeSpecialRuntime()`, not by the key string. | Preset, Menu, modulation paths |
+| `instrumentManager_writeRuntime()` / target validation/stepping helpers | Apply descriptor/supplemental bindings and validate canonical targets against current slot types. Special conversions are chosen by the row's flash tag (`runtime.special`, `IM_SPECIAL_*`, S073) in `instrumentManager_writeSpecialRuntime()`, not by the key string. `IM_SPECIAL_LFO_OFFSET` (19, S076 P2) scales the 0–127 byte to a full 32-bit phase: `(uint64_t)v * 0xFFFFFFFF / 127`. | Preset, Menu, modulation paths |
+| `captureLfoPhases()` / `restoreLfoPhaseIfNeeded(voice)` | Scene-change LFO phase handoff for retrigger `scn` (7). Capture runs in `preset_startDrumsetApply()` before teardown; restore runs in `preset_resetAndApplyKitVoiceImage()` after each voice is rebuilt. Static 28 B BSS `lfo_scene_handoff`. (S076 P2) | Preset Scene/Bank apply paths |
 | `instrumentManager_specialTagSelfCheck()` (diagnostic builds) | Compare every row's tag with the old key rules; shown as the `s` digit on the `FxBf` boot screen. Host twin: `tools/dsp_test/check_special_tags.py`. | `main.c` diagnostic screen |
 | `instrumentManager_updateLfoAdapters(source_slot, pair, lfo, polarity, amount)` | Update InstrumentManager-owned LFO destinations: descriptor-domain adapters, slot decimation, and Scene targets. Descriptor adapters shape in parameter space and then call the normal runtime writer. For voice-morph targets, Session 071 changed encoding to direction+depth without reading the morph base; Effect parameter and `fxm` destinations are encoded to direction/depth by the shared `instrumentManager_lfoDirectionDepth()` and stored in EffectsManager. | `lfo.c` |
 | `INSTRUMENT_TARGET_VOICE_EFFECT` / `INSTRUMENT_TARGET_VOICE_NAMESPACE_LAST` | LFO namespace byte 8 (`fx`); the upper clamp for every picker/parser. | Menu, storageTypes |

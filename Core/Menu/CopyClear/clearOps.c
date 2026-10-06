@@ -53,12 +53,16 @@ static const char *const ccClear_trackLabels[] = {
  * What:       PERF Scene clear labels. "reset morph" (index 8) equalises the
  *             whole Scene's morph endpoints; "reset fx morph" (index 9)
  *             equalises only the Effect's morphable morph endpoints.
- * Why:        exposes the two new S076 P3 selections at the end of the menu.
- * Affiliates: CC_CLEAR_SCENE_RESET_MORPH, CC_CLEAR_SCENE_RESET_FX_MORPH.
+ *             "reload scene" (index 10) reloads the Scene from its HCNAMES
+ *             source slot on the SD card.
+ * Why:        extends the menu to expose the Scene reload operation that
+ *             reverts the Scene to its saved state without page navigation.
+ * Affiliates: CC_CLEAR_SCENE_RESET_MORPH, CC_CLEAR_SCENE_RESET_FX_MORPH,
+ *             CC_CLEAR_SCENE_RELOAD, ccClear_runReloadScene().
  */
 static const char *const ccClear_sceneLabels[] = {
     "cancel", "scene", "settings", "pattern", "automation", "notes", "fx",
-    "fx sequence", "reset morph", "reset fx morph"
+    "fx sequence", "reset morph", "reset fx morph", "reload scene"
 };
 
 cc_menu_t ccClear_menuForObject(uint8_t mode, cc_kind_t kind)
@@ -91,7 +95,7 @@ uint8_t ccClear_selectionCount(cc_menu_t menu)
     case CC_MENU_CLEAR_BAR:      return 4u;
     case CC_MENU_CLEAR_TRACK:    return 5u;  /* +reset morph */
     case CC_MENU_CLEAR_TRACK_FX: return 6u;  /* +reset morph, send last */
-    case CC_MENU_CLEAR_SCENE:    return 10u; /* +reset morph, +reset fx morph */
+    case CC_MENU_CLEAR_SCENE:    return 11u; /* +reset morph, +reset fx morph, +reload scene */
     default:                     return 0u;
     }
 }
@@ -601,6 +605,52 @@ static uint8_t ccClear_runResetFxMorph(const cc_job_t *job)
     return CC_RUN_DONE;
 }
 
+/*
+ * `reload scene`: reload this Scene from its HCNAMES source slot on the SD
+ * card.
+ *
+ * What:       reads the Scene's source slot from the filesystem-owned HCNAMES
+ *             resident source register. If the source is a valid numeric
+ *             library slot (0..999), issues a full Scene load through the
+ *             Preset API. If the source is a non-numeric token (INHERIT,
+ *             UNKNOWN, DIRECT, PATTERN_AUTOSAVE) or the Preset layer refuses
+ *             the request (already busy, filesystem facade unavailable), the
+ *             operation is silently dropped.
+ * Why:        gives users a fast "revert to saved" from the PERF clear menu
+ *             without navigating to the Load page. The Preset path is used
+ *             (not a direct filesystem call) because it owns pm_status,
+ *             the Scene-load completion callback, Bank-present promotion,
+ *             Pattern AutoSave marking, and the menu_pollPresetStatus()
+ *             handoff that applies the runtime surface and repaints the
+ *             display.
+ * Inputs:     job->scene is the clear object's Scene index (0..15).
+ * Outputs:    CC_RUN_DONE unconditionally (fire-and-forget). If accepted by
+ *             Preset, the load lifecycle proceeds asynchronously: filesystem
+ *             reads sceneset.scg, embedded Kit, Pattern, and Effect;
+ *             on_scene_load_complete() commits and marks AutoSave dirty;
+ *             menu_pollPresetStatus() picks up PRESET_OP_SCENE_LOAD and
+ *             calls menu_startSoundApply() with reset_save=0 (because the
+ *             active page is not LOAD_PAGE/SAVE_PAGE), applying the Scene
+ *             runtime and repainting the current display in place.
+ * Accessors:  filesystem_identityRow(FS_ROW_SCENE, scene, 0),
+ *             filesystem_residentSource(), FS_RESIDENT_SOURCE_VALUE_MASK,
+ *             preset_loadSceneForScenes().
+ * Affiliates: on_scene_load_complete() (presetManager.c:467),
+ *             menu_pollPresetStatus() PRESET_OP_SCENE_LOAD (menu.c:12288),
+ *             menu_startSoundApply() (menu.c:512).
+ */
+static uint8_t ccClear_runReloadScene(const cc_job_t *job)
+{
+    uint16_t row = filesystem_identityRow(FS_ROW_SCENE, job->scene, 0u);
+    uint16_t src = (uint16_t)(filesystem_residentSource(row) &
+                              FS_RESIDENT_SOURCE_VALUE_MASK);
+
+    if (src <= 999u)
+        (void)preset_loadSceneForScenes(src, (uint16_t)(1u << job->scene));
+
+    return CC_RUN_DONE;
+}
+
 uint8_t ccClear_runJob(const cc_job_t *job)
 {
     uint8_t sel;
@@ -648,6 +698,7 @@ uint8_t ccClear_runJob(const cc_job_t *job)
         case CC_CLEAR_SCENE_FX_SEQUENCE: return ccClear_runFxSequence(job);
         case CC_CLEAR_SCENE_RESET_MORPH:    return ccClear_runResetSceneMorph(job);
         case CC_CLEAR_SCENE_RESET_FX_MORPH: return ccClear_runResetFxMorph(job);
+        case CC_CLEAR_SCENE_RELOAD:         return ccClear_runReloadScene(job);
         default:
             ccSvc_traceDropReason(AUTOSAVE_TRACE_CC_DROP_BAD_SELECTION, sel);
             return CC_RUN_DROP;

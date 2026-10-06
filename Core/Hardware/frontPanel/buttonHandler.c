@@ -952,6 +952,54 @@ static void handleSelectButton(uint8_t selectNr)
     if (buttonHandler_getShift()) {
         switch (bh_state.selectButtonMode) {
         case SELECT_MODE_STEP:
+            /*
+             * SHIFT+SELECT in STEP mode: set the active track's pattern
+             * length to the end of the bar represented by this SELECT button.
+             *
+             * What:       the active track's track_length is set to
+             *             (selectNr + 1) * NUM_STEPS_PER_BAR, so SELECT 1
+             *             gives 16 steps (one bar), SELECT 8 gives 128 steps
+             *             (eight bars). The viewed bar clamps downward if it
+             *             would exceed the new length, and the STEP/SELECT LEDs
+             *             and the menu parameter display repaint.
+             * Why:        provides a fast physical gesture for setting the
+             *             per-track loop length from the front panel, matching
+             *             the natural SELECT=bar mapping in STEP mode.
+             * Inputs:     selectNr 0..7 from handleSelectButton(); the active
+             *             Scene is menu_getViewedPattern(); the active track is
+             *             menu_getActiveVoice().
+             * Outputs:    pat_setTrackLength() commits the value and marks the
+             *             Scene dirty (AutoSave). PAR_TRACK_LENGTH is refreshed
+             *             by pat_applyTrackSettingsToMenu(). If the viewed bar
+             *             was beyond the new length, buttonHandler_selectBar()
+             *             clamps it, updating menu_currentBar, selectedStep, and
+             *             repainting STEP/SELECT LEDs. menu_repaintAll()
+             *             redraws the current LCD page.
+             * Accessors:  menu_getViewedPattern(), menu_getActiveVoice(),
+             *             menu_currentBar, menu_repaintAll().
+             * Affiliates: pat_setTrackLength() (PatternData.c:1106),
+             *             pat_applyTrackSettingsToMenu() (PatternData.c:1093),
+             *             buttonHandler_selectBar() (buttonHandler.c:398),
+             *             seq_advanceTrackStep() reads track_length at
+             *             playback (sequencer.c:908).
+             */
+        {
+            uint8_t newLen = (uint8_t)((selectNr + 1u) * NUM_STEPS_PER_BAR);
+            uint8_t scene  = menu_getViewedPattern();
+            uint8_t track  = menu_getActiveVoice();
+
+            pat_setTrackLength(scene, track, newLen);
+
+            /* Snap the viewed bar back into range when the new length is
+             * shorter than the bar the user was viewing. */
+            if (menu_currentBar >= (uint8_t)(selectNr + 1u))
+                buttonHandler_selectBar(selectNr);
+
+            pat_applyTrackSettingsToMenu(scene, track);
+            menu_repaintAll();
+        }
+            break;
+
         case SELECT_MODE_VOICE:
             buttonHandler_selectBar(selectNr);
             break;

@@ -76,7 +76,25 @@ typedef enum {
     CC_CLEAR_SCENE_FX,
     CC_CLEAR_SCENE_FX_SEQUENCE,
     CC_CLEAR_SCENE_RESET_MORPH,     /* 8 */
-    CC_CLEAR_SCENE_RESET_FX_MORPH   /* 9 */
+    CC_CLEAR_SCENE_RESET_FX_MORPH,  /* 9 */
+    /*
+     * What:       reload the Scene from the SD card using its HCNAMES source.
+     * Why:        provides a non-destructive "revert to saved" for a Scene
+     *             without requiring navigation to the Load page. The operation
+     *             is placed in the PERF clear-scene menu because it operates
+     *             on a whole Scene and naturally extends the existing Scene
+     *             management selections.
+     * Inputs:     the clear object's Scene index; the source is read from the
+     *             HCNAMES resident source register at runtime.
+     * Outputs:    if a valid numeric source (0..999) exists, a full Scene
+     *             load is issued through preset_loadSceneForScenes();
+     *             otherwise the operation is silently dropped.
+     * Accessors:  filesystem_identityRow(), filesystem_residentSource().
+     * Affiliates: preset_loadSceneForScenes() (presetManager.c:2697),
+     *             on_scene_load_complete() (presetManager.c:467),
+     *             menu_pollPresetStatus() PRESET_OP_SCENE_LOAD (menu.c:12288).
+     */
+    CC_CLEAR_SCENE_RELOAD           /* 10 */
 } cc_clear_scene_sel_t;
 
 /*

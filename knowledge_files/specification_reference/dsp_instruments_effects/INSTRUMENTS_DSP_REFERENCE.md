@@ -4,12 +4,14 @@ How the six instrument voices are rendered, how their parameters reach the
 DSP, how modulation (LFO, velocity, Morph, step automation) works, what each
 part costs, and how to change or extend it.
 
-- **Current as of:** Session 075 close (2026-10-03). S074 changed nothing
+- **Current as of:** Session 076 close (2026-10-06). S074 changed nothing
   in the voice engines; it added a sidechain tap in the trigger funnel
   (§2) and a mirrored fader gain used by the mixer's `xfd` mode. S075
   changed no engine either: it retired the global `srt` LFO/automation
   target and fixed **who may write a voice parameter's runtime value
-  when** (§4.3, §7.5: automation, then menu edits, then MIDI).
+  when** (§4.3, §7.5: automation, then menu edits, then MIDI). S076 added
+  LFO retrigger value 7 (`scn`, Scene-change phase handoff) and fixed
+  the LFO phase offset scaling (§7.1).
 - **Related documents:**
   - `EFFECTS_MIXER_DSP_REFERENCE.md`: what happens to a voice block after it
     leaves the instrument (decimation, mixer, FX bus, output);
@@ -477,8 +479,21 @@ envelope) and 1 (phase offset at trigger) produce no sample.
 - **Rate:** `lfo_setFreq(v)`: `f = ((v+1)/128)³ · 200 Hz`; the phase
   increment is `f / (44,108/32) · 2³²`, so the LFO steps once per block.
   Sync modes 1..11 (4/1 … 1/32) derive the rate from `seq_getBpm()`.
-- **Retrigger:** a trigger on the selected track resets the phase to the
-  offset.
+- **Retrigger:** values 0–7: off (0), v1–v6 (1–6), scn (7,
+  `LFO_RETRIGGER_SCENE`). Values 1–6 reset the phase to the offset on a
+  trigger from the corresponding track. Value 7 (`scn`) preserves the LFO
+  phase across a Scene change: `captureLfoPhases()` snapshots the phase
+  before the old Scene's instruments are torn down, and
+  `restoreLfoPhaseIfNeeded(voice)` writes it back after the new voice is
+  rebuilt, provided the new LFO retrigger is still `scn`. The handoff struct
+  is 28 B BSS in InstrumentManager.
+- **Phase offset scaling (Session 076 fix):** the `lfo_offset` parameter
+  (0–127) is now tagged `ROW_SPECIAL` and handled by `IM_SPECIAL_LFO_OFFSET`
+  (value 19). The scaling is
+  `phaseOffset = (uint64_t)byteValue * 0xFFFFFFFFu / 127u`, mapping 0 to
+  0x00000000 and 127 to 0xFFFFFFFF. Before this fix the raw byte was written
+  directly into the uint32_t `phaseOffset`, which made the offset effectively
+  zero.
 - **Polarity:** negative (original LXR: `base · (1 − amount + amount·lfo)`,
   moves down from the base), positive (towards the maximum), bipolar.
 - **Dispatch** (`lfo_dispatchNextValue`, once per block per slot): the value

@@ -4,7 +4,7 @@
 
 This is the authoritative reference for how parameters are stored in resident
 memory across the Bank, Scene, Kit, Instrument, and Effect hierarchy, current
-as of the **Session 075 close** (2026-10-03). S073 changed nothing here. S074
+as of the **Session 076 close** (2026-10-06). S073 changed nothing here. S074
 added the bus compressor Scene settings and the fourth fader mode. S075
 added:
 
@@ -16,7 +16,15 @@ added:
 - the FX-send Morph endpoint (`fx_send_morph[6]`, §3, §7);
 - the VOICE hold-SHIFT Morph view and the Effect-page SHIFT+TRACK voice-mix
   overlay (§5);
-- the automation-priority rules (§3 "When parameters change", §8). How a stored value reaches the DSP
+- the automation-priority rules (§3 "When parameters change", §8).
+
+S076 added:
+
+- override clear rules (§7 "Override clear rules"): Rule A (a non-automation
+  write to a parameter clears its step override) and Rule B (Scene activation
+  clears all five override families);
+- copy/clear morph operations (`COPYCLEAR_UTILITIES.md` §7, §13): track and
+  Scene morph reset/copy, plus "reload scene" in the PERF clear menu. How a stored value reaches the DSP
 (descriptor writers, special-writer tags, LFO adapters) is in
 `INSTRUMENTS_DSP_REFERENCE.md`. It describes what is stored, where it lives, when it changes,
 when it becomes visible, and how it is persisted.
@@ -471,6 +479,33 @@ source. See `EFFECTS_BUS_REFERENCE.md` §6 and §11.
 1. Step override (if `step_active`)
 2. LFO contribution (if LFO active)
 3. Retained Scene value
+
+### Override clear rules (Session 076 P1)
+
+Five override families exist (the table above). Two rules govern when they
+are cleared outside the transport restore path:
+
+**Rule A — Non-automation writes clear the override:** when a user edit or
+Morph change writes a retained value for a parameter that has a step
+override, the override is cleared so the new retained value takes effect
+immediately. The clear is placed at the point where the retained value
+changes:
+
+| Override | Clear site |
+|----------|-----------|
+| `fx_send_step_override[slot]` | `preset_setVoiceFxSendAmount()`, `preset_setVoiceFxSendMorph()` |
+| `audio_out_step_override[slot]` | `preset_setVoiceAudioOut()` |
+| `morph_step_override[slot]` | `preset_morphVoiceScene()`, `preset_morphScene()` |
+| `slot6_track7_decay_step_active` | `preset_setSlot6Track7AmpEnvelopeDecay()` |
+| `effects_automation.morph_override_valid` | `effects_setMorphAmountScene()` |
+
+**Rule B — Scene activation clears all:** `preset_applySceneSettings()` clears
+all five override families and the `seq_scene_automation_dirty` bitmap through
+`seq_clearSceneAutomationDirty()`. This ensures a freshly activated Scene has
+no stale overlays from the previous Scene.
+
+Any future override family must be added to both Rule A (its setter) and
+Rule B (`preset_applySceneSettings()`).
 
 ### Transport restore
 

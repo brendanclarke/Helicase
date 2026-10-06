@@ -5,10 +5,11 @@ children on the LXR-02: what the user can do, what each operation changes,
 and how the code does it. Written for a developer who has to read, fix or
 extend `Core/Menu/CopyClear/`.
 
-- **Current as of:** Session 075 close (2026-10-03, `dev-ph6-copyclear`,
-  HEAD `76aef20`). Built in S075 (base pass, F1 follow-up, F2 follow-up);
-  history and every user decision are in
-  `knowledge_files/log_archive/075_SESSION_HANDOFF_LOG.md` §4–§10.
+- **Current as of:** Session 076 close (2026-10-06, `dev-ph6-cleanup`).
+  Built in S075 (base pass, F1 follow-up, F2 follow-up); S076 P3 added morph
+  reset/copy operations and P4 added reload scene. History and every user
+  decision are in `knowledge_files/log_archive/075_SESSION_HANDOFF_LOG.md`
+  §4–§10 and `076_SESSION_HANDOFF_LOG.md` §4–§5.
 - **Where this document and the code disagree, the code wins;** fix this
   document in the same change.
 - **Related documents:**
@@ -246,14 +247,15 @@ them to 4 bits, which broke every range in bars 2..8.)
 |---|---|---|
 | step, step range | `CC_MENU_COPY_STEP` | `step -> repl`, `step -> merge`, `auto -> repl`, `auto -> merge` |
 | bar, bar range | `CC_MENU_COPY_BAR` | `bar -> repl`, `bar -> merge`, `auto -> repl`, `auto -> merge` |
-| track | `CC_MENU_COPY_TRACK` | `track`, `instrument` |
-| Scene | `CC_MENU_COPY_SCENE` | `scene`, `settings`, `kit`, `effect`, `pattern` |
+| track | `CC_MENU_COPY_TRACK` | `track`, `instrument`, `morph` |
+| Scene | `CC_MENU_COPY_SCENE` | `scene`, `settings`, `kit`, `effect`, `pattern`, `morph` |
 | FX step, FX range | `CC_MENU_COPY_FX` | `step` |
 
 Enum values: `CC_COPY_ALL` (`… -> repl`), `CC_COPY_MERGE_ALL`
-(`… -> merge`), `CC_COPY_AUTO` (`auto -> repl`), `CC_COPY_MERGE_AUTO`
-(`auto -> merge`); `CC_COPY_TRACK`/`CC_COPY_INSTRUMENT`; `CC_COPY_SCENE`,
-`CC_COPY_SCENE_SETTINGS`, `CC_COPY_KIT`, `CC_COPY_EFFECT`, `CC_COPY_PATTERN`.
+(`… -> merge`), `CC_COPY_MORPH` (2, track), `CC_COPY_AUTO` (`auto -> repl`),
+`CC_COPY_MERGE_AUTO` (`auto -> merge`); `CC_COPY_TRACK`/`CC_COPY_INSTRUMENT`;
+`CC_COPY_SCENE`, `CC_COPY_SCENE_SETTINGS`, `CC_COPY_KIT`, `CC_COPY_EFFECT`,
+`CC_COPY_PATTERN`, `CC_COPY_SCENE_MORPH` (5, Scene).
 
 ### 6.2 Pastes and where they write
 
@@ -370,9 +372,9 @@ paste is dropped (`FX_TYPE_MISMATCH`).
 |---|---|---|---|
 | VOICE, STEP | SEQ, SEQ range | `CC_MENU_CLEAR_STEP` | `cancel`, `step`, `step auto`, `step notes` |
 | STEP | SELECT, SELECT range | `CC_MENU_CLEAR_BAR` | `cancel`, `bar`, `bar auto`, `bar notes` |
-| VOICE, STEP, PERF | TRACK | `CC_MENU_CLEAR_TRACK` | `cancel`, `track`, `track auto`, `track notes` |
+| VOICE, STEP, PERF | TRACK | `CC_MENU_CLEAR_TRACK` | `cancel`, `track`, `track auto`, `track notes`, `reset morph` |
 | EFFECTS | TRACK | `CC_MENU_CLEAR_TRACK_FX` | as above + `send` |
-| PERF | SEQ (Scene) | `CC_MENU_CLEAR_SCENE` | `cancel`, `scene`, `settings`, `pattern`, `automation`, `notes`, `fx`, `fx sequence` |
+| PERF | SEQ (Scene) | `CC_MENU_CLEAR_SCENE` | `cancel`, `scene`, `settings`, `pattern`, `automation`, `notes`, `fx`, `fx sequence`, `reset morph`, `reset fx morph`, `reload scene` |
 | EFFECTS | SEQ | none | clears that FX step at once |
 | any | endless pot | none | §8 |
 
@@ -392,6 +394,10 @@ paste is dropped (`FX_TYPE_MISMATCH`).
 | `automation` / `notes` (PERF) | as the track selections, on all 7 tracks | no |
 | `fx` | Effect record to defaults (`off`) | yes |
 | `fx sequence`, EFFECTS SEQ | sequence steps only (all 16, or the one pressed): lock masks and lane values to their empty state; parameters, run mode, length, scale stay | yes |
+| `reset morph` (VOICE/EFFECTS TRACK) | the track's slot: all Morphable descriptor Morph endpoints := Normal, plus correlated Scene morph endpoints (FX send morph, Kit slot-6 decay morph) | yes |
+| `reset morph` (PERF Scene) | all 6 slots' Morphable Morph := Normal, plus all correlated Scene morph endpoints and every morphable Effect morph endpoint; does NOT clear morph amounts | no |
+| `reset fx morph` (PERF Scene) | only the Effect's morphable morph endpoints := Normal | yes |
+| `reload scene` (PERF Scene) | if the Scene has a valid numeric HCNAMES source (0..999), issue a full Scene reload from the SD card through `preset_loadSceneForScenes()`; otherwise silently dropped. Fire-and-forget: returns `CC_RUN_DONE` immediately | no |
 
 Names stay on every clear (rows whose content changed lose `R`, §14). There
 is no Instrument clear.
@@ -860,6 +866,12 @@ final phase that waits for `ccSvc_namesReady()` and never delays the data.
 | `clear fx sequence` | `ccClear_runFxSequence()` | `effects_clearSeqLanes(scene, 0xFFFF, 0xFFFF)` (fans out) | refresh Effect UI |
 | EFFECTS SEQ clear | `ccClear_fxStepNow()` | `effects_clearSeqLanes(scene, bit(step), 0xFFFF)` at the press | — |
 | `clear send` | `ccClear_runSend()` | `preset_setVoiceFxSendAmount(…, 0)`, `preset_setVoiceFxSendMorph(…, 0)`, `preset_setVoiceFaderSetting(…, pre)` per member | repaint |
+| `clear reset morph` (track) | `ccClear_runResetMorphTrack()` | `preset_resetSlotMorphToNormal(scene, slot)` per member (fans out through `bank_sceneFanoutMask()`): Morphable Normal → Morph, FX send morph, slot-6 decay morph | repaint |
+| `clear reset morph` (Scene) | `ccClear_runResetSceneMorph()` | loops 6 slots `preset_resetSlotMorphToNormal()` + `effects_resetMorphToNormal()` for the Scene's Effect; does NOT fan out | repaint |
+| `clear reset fx morph` | `ccClear_runResetFxMorph()` | `effects_resetMorphToNormalSingle(scene)` per member (fans out) | repaint |
+| `reload scene` | `ccClear_runReloadScene()` | `preset_loadSceneForScenes(source, 1u << scene)` if source ≤ 999 (fire-and-forget) | the Preset lifecycle handles apply and repaint |
+| `copy morph` (track) | `ccCopy_runMorphTrack()` | `preset_copySlotNormalToMorph(scene, slot)` per member (fans out) | repaint |
+| `copy morph` (Scene) | `ccCopy_runSceneMorph()` | loops 6 slots `preset_copySlotNormalToMorph()` for the destination Scene; does NOT fan out | repaint |
 
 Defaults used by `clear scene`/`settings` (`scene_settingsDefaults()`): MIDI
 channel = track + 1, note `MIDI_DEFAULT_TRIGGER_NOTE` (63), audio out St1
@@ -1158,6 +1170,15 @@ block, and keep per-tick work bounded.
 - **S075 F2 (2026-10-03):** `Copy`/`Clear` header; `clear send` clears both
   FX-send endpoints; Scene defaults (St1, compressor off/0/0/off) used by
   `clear scene`/`settings`.
+- **S076 P3 (2026-10-06):** `reset morph` track clear (VOICE and EFFECTS
+  TRACK menus), `reset morph` and `reset fx morph` Scene clears, `morph`
+  track and Scene copy selections; `CC_CLEAR_RESET_MORPH` (4) inserted before
+  `CC_CLEAR_SEND` (now 5); `preset_resetSlotMorphToNormal()`,
+  `preset_copySlotNormalToMorph()`, `effects_resetMorphToNormal()`,
+  `effects_resetMorphToNormalSingle()`.
+- **S076 P4 (2026-10-06):** `reload scene` (10) added to the PERF clear-scene
+  menu; fire-and-forget Scene reload from the HCNAMES source register through
+  `preset_loadSceneForScenes()`.
 
 ---
 

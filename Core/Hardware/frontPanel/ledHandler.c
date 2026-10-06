@@ -1409,6 +1409,74 @@ void led_setBeatPulse(uint8_t on)
 }
 
 /*
+ * Update the SELECT LED bar chaselight during playback in STEP mode.
+ *
+ * What:       overlays a tempo-pulsed indicator on the SELECT row to show
+ *             which bar the sequencer is currently playing, in addition to
+ *             the steady-on indicator for the viewed bar (menu_currentBar).
+ *             The pulse follows the same beat timing as the Play button:
+ *             on at beat boundaries, off one step later.
+ * Why:        gives the user visual bar-position feedback during playback
+ *             without leaving STEP mode. The inverted-pulse rule ensures the
+ *             chaselight is visible even when the playback bar and the viewed
+ *             bar coincide (the LED blinks off instead of being a second on).
+ * Inputs:     seq_ledState.chaseStep (the active voice's absolute step
+ *             0..127, already reflecting the per-track length wrap),
+ *             seq_ledState.beatPulse (1 at beat boundary, 0 between),
+ *             menu_currentBar (the viewed bar 0..7),
+ *             seq_isRunning() (transport state).
+ *             Must only be called while SELECT_MODE_STEP is active.
+ * Outputs:    SELECT LED base state: menu_currentBar on, all others off.
+ *             When running and beat pulse is active:
+ *               - playback bar == viewed bar: that LED turns OFF (inverted).
+ *               - playback bar != viewed bar: that LED turns ON (normal pulse).
+ *             When running and beat pulse is inactive:
+ *               - base state only (viewed bar on, all others off).
+ *             When stopped: base state only.
+ * Accessors:  led_setValue(), seq_isRunning(), seq_ledState (ledHandler.h),
+ *             menu_currentBar (menu.h), NUM_STEPS_PER_BAR (PatternData.h).
+ * Affiliates: led_processSeqLedState() (the sole caller, via CHASE and BEAT
+ *             dirty handlers), led_setActiveSelectButton() (base state writer
+ *             called from buttonHandler_selectBar and led_updatePatternTrackView),
+ *             led_setBeatPulse() (Play button pulse, same timing source).
+ */
+static void led_updateSelectBarChaselight(void)
+{
+    uint8_t i;
+    uint8_t viewedBar = menu_currentBar;
+
+    /* Write base state: viewed bar on, all others off. */
+    for (i = 0u; i < 8u; i++)
+        led_setValue((uint8_t)(i == viewedBar), (uint8_t)(LED_PART_SELECT1 + i));
+
+    if (!seq_isRunning())
+        return;
+
+    {
+        uint8_t playbackBar =
+            (uint8_t)(seq_ledState.chaseStep / NUM_STEPS_PER_BAR);
+        uint8_t pulse = seq_ledState.beatPulse;
+
+        if (playbackBar >= NUM_BARS)
+            return;
+
+        if (pulse) {
+            if (playbackBar == viewedBar) {
+                /* Inverted pulse: the LED is already on for the viewed bar,
+                 * so turn it OFF at the beat to create a visible blink. */
+                led_setValue(0u, (uint8_t)(LED_PART_SELECT1 + playbackBar));
+            } else {
+                /* Normal pulse: light the playback bar LED at the beat. */
+                led_setValue(1u, (uint8_t)(LED_PART_SELECT1 + playbackBar));
+            }
+        }
+        /* When pulse is 0: base state only (the viewed bar on, others off).
+         * A previous normal-pulse LED is extinguished by the base-state
+         * write above; an inverted-pulse LED is restored the same way. */
+    }
+}
+
+/*
  * Notify the front-panel layer that playback has switched patterns.
  *
      * Input: playedPattern is the new sequencer pattern slot. Outputs:
@@ -1509,8 +1577,24 @@ void led_processSeqLedState(void)
     shownPattern = menu_getViewedPattern();
 
     /* Beat pulse: set/clear START_STOP according to seq_ledState.beatPulse. */
-    if (d & SEQ_LED_DIRTY_BEAT)
+    if (d & SEQ_LED_DIRTY_BEAT) {
         led_setBeatPulse(seq_ledState.beatPulse);
+        /*
+         * What:       update the SELECT-row bar chaselight whenever the beat
+         *             pulse phase changes (on -> off or off -> on).
+         * Why:        the pulse phase controls whether the playback-bar LED
+         *             is lit or dark. BEAT fires once per phase transition,
+         *             which is exactly when the SELECT-row chaselight must
+         *             repaint. The CHASE handler below covers bar-boundary
+         *             changes; this handler covers pulse-phase changes within
+         *             the same bar.
+         * Inputs:     SELECT_MODE_STEP guard; the function reads
+         *             seq_ledState.beatPulse internally.
+         * Affiliates: led_updateSelectBarChaselight() above.
+         */
+        if (buttonHandler_getMode() == SELECT_MODE_STEP)
+            led_updateSelectBarChaselight();
+    }
 
     /* Chase light: install it only while playback has a valid position. When
      * stopped, remove any old chase inversion instead of rendering the queued
@@ -1520,6 +1604,20 @@ void led_processSeqLedState(void)
             led_updateCurrentStep(seq_ledState.chaseStep);
         else
             led_clearActive_step();
+        /*
+         * What:       update the SELECT-row bar chaselight whenever the
+         *             playback step advances and may have crossed a bar
+         *             boundary, or when transport stops (clearing the pulse).
+         * Why:        the CHASE dirty bit fires at every step advance and at
+         *             stop, which is exactly when the playback bar may change
+         *             or disappear. Coupling the call here avoids a new dirty
+         *             flag.
+         * Inputs:     SELECT_MODE_STEP guard; the function reads
+         *             seq_ledState.chaseStep and beatPulse internally.
+         * Affiliates: led_updateSelectBarChaselight() above.
+         */
+        if (buttonHandler_getMode() == SELECT_MODE_STEP)
+            led_updateSelectBarChaselight();
     }
 
     /* Recorded step: update STEP1..16 for the visible bar unless performance
