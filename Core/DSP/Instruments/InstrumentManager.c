@@ -1416,22 +1416,58 @@ void instrumentManager_clearAllRuntimeModulationTargets(void)
     }
 }
 
-void instrumentManager_resetRuntimeSlot(uint8_t slot)
+/*
+ * Clear runtime modulation targets for one slot only (S077 P2 §2.2).
+ *
+ * What: detaches LFO and velocity modulation nodes owned by a single source
+ * slot without disturbing other slots' bindings. Why: the single-voice apply
+ * must clear only the affected slot's outgoing graph, unlike the full drumset
+ * worker which clears all six slots at once. Clearing all would break live
+ * modulation on slots that are not being reassigned. Inputs: slot 0..5.
+ * Output: this source's two LFO pair destinations and velocity source are
+ * cleared. Affiliates: instrumentManager_clearAllRuntimeModulationTargets()
+ * (the all-slot version used by the drumset worker),
+ * instrumentManager_restoreLfoSupplementalTarget(),
+ * instrumentManager_restoreVelocitySupplementalTarget().
+ */
+void instrumentManager_clearRuntimeModulationTargetsForSlot(uint8_t slot)
+{
+    Lfo *lfo;
+    uint8_t pair;
+
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    lfo = instrumentManager_runtimeLfo(slot);
+    for (pair = 0u; pair < 2u; pair++) {
+        instrumentManager_restoreLfoSupplementalTarget(slot, pair);
+        if (lfo)
+            modNode_clearDestination(pair ? &lfo->modTarget2
+                                          : &lfo->modTarget);
+    }
+    instrumentManager_restoreVelocitySupplementalTarget(slot);
+    modNode_clearDestination(&velocityModulators[slot]);
+}
+
+/*
+ * Reset one slot's runtime type from a caller-selected Scene (S077 P2 §2.1).
+ *
+ * What: identical to instrumentManager_resetRuntimeSlot() but resolves the
+ * incoming tagged type from scene_index instead of scene_getActiveIndex().
+ * Why: the per-track single-voice apply commits a slot whose played Scene may
+ * differ from the global active Scene, so the runtime type shadow must follow
+ * that played Scene. Inputs: slot 0..5 and a resident Scene index. Output: that
+ * slot's tagged runtime member is cleared and reinitialized to the Scene's
+ * type. Affiliates: instrumentManager_resetRuntimeSlot() (active-Scene wrapper),
+ * instrumentManager_slotType().
+ */
+void instrumentManager_resetRuntimeSlotFromScene(uint8_t slot,
+                                                 uint8_t scene_index)
 {
     const kit_instrument_slot_t *incoming;
 
-    /*
-     * Reset only the incoming runtime selected by the committed Scene type.
-     *
-     * This is the only tagged-member replacement point. Input is a zero-based
-     * slot after staged SceneData commit and outgoing target teardown. Output
-     * is one cleared and fully initialized engine object with stopped envelopes
-     * and default LFO nodes; Preset then applies descriptor/Morph values. Other
-     * slots are deliberately untouched so a Scene worker can rebuild safely.
-     */
     if (slot >= INSTRUMENT_SLOT_COUNT)
         return;
-    incoming = scene_instrumentSlotConst(scene_getActiveIndex(), slot);
+    incoming = scene_instrumentSlotConst(scene_index, slot);
     memset(&runtime_slots[slot], 0, sizeof(runtime_slots[slot]));
     runtime_slot_type[slot] =
         incoming ? incoming->type : INSTRUMENT_TYPE_UNKNOWN;
@@ -1451,6 +1487,20 @@ void instrumentManager_resetRuntimeSlot(uint8_t slot)
     default:
         break;
     }
+}
+
+void instrumentManager_resetRuntimeSlot(uint8_t slot)
+{
+    /*
+     * Reset only the incoming runtime selected by the committed Scene type.
+     *
+     * This is the only tagged-member replacement point. Input is a zero-based
+     * slot after staged SceneData commit and outgoing target teardown. Output
+     * is one cleared and fully initialized engine object with stopped envelopes
+     * and default LFO nodes; Preset then applies descriptor/Morph values. Other
+     * slots are deliberately untouched so a Scene worker can rebuild safely.
+     */
+    instrumentManager_resetRuntimeSlotFromScene(slot, scene_getActiveIndex());
 }
 
 void instrumentManager_dispatchRuntimeLfos(void)
@@ -2636,6 +2686,29 @@ void instrumentManager_captureLfoPhases(void)
         Lfo *lfo = instrumentManager_runtimeLfo(slot);
         lfo_scene_handoff.phase[slot] = lfo ? lfo->phase : 0u;
     }
+    lfo_scene_handoff.valid = 1u;
+}
+
+/*
+ * Capture LFO phase for one slot before a single-voice apply (S077 P2 §2.3).
+ *
+ * What: snapshots one slot's running LFO phase into the static handoff struct
+ * and marks it valid. Why: instrumentManager_resetRuntimeSlotFromScene() will
+ * zero the phase via memset + lfo_init; the snapshot preserves it for
+ * restoration when the incoming LFO does not have Scene retrigger set. Inputs:
+ * slot 0..5. Output: lfo_scene_handoff.phase[slot] updated and
+ * lfo_scene_handoff.valid = 1. Affiliates:
+ * instrumentManager_captureLfoPhases() (all-slot version),
+ * instrumentManager_restoreLfoPhaseIfNeeded() (the consumer).
+ */
+void instrumentManager_captureLfoPhaseForSlot(uint8_t slot)
+{
+    Lfo *lfo;
+
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    lfo = instrumentManager_runtimeLfo(slot);
+    lfo_scene_handoff.phase[slot] = lfo ? lfo->phase : 0u;
     lfo_scene_handoff.valid = 1u;
 }
 

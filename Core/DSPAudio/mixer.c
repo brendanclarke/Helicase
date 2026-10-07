@@ -960,7 +960,13 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		 * dry mix, and FX scales only the send. The send tap is accumulated before
 		 * channel volume, while the normal output keeps the combined voice ramp.
 		 */
-		mixer_faderGains(slot, fx_scene, &voiceGain, &sendGain);
+		/*
+		 * S077 P2 §3.5: the per-voice FX send and fader mode resolve through the
+		 * track's played Scene, which may differ from the global active Scene.
+		 * The bus compressor remains scene-global and stays on fx_scene.
+		 */
+		mixer_faderGains(slot, preset_getSlotPlayedScene(slot),
+				&voiceGain, &sendGain);
 		pan = instrumentManager_runtimePan(slot);
 		/*
 		 * One-pass dry + send when the send is active (S073 Step 5).

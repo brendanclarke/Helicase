@@ -457,16 +457,37 @@ void presetMorph_prioritizeVoice(uint8_t scene_index, uint8_t slot)
  * presetMorph_applyParameterNow(). Affiliates: seq_restoreAutomatedParameters(),
  * seq_restoreAllAutomation(), preset_applyInstrumentRuntimeValue().
  */
+/*
+ * Write one interpolated Morph value to the live runtime (S077 P2 §3.4).
+ *
+ * What: the force flag selects whether a non-active resident Scene may write
+ * the live runtime slot. Why: the normal Morph worker and synchronous Scene
+ * switch only ever write the active Scene (force = 0 preserves that guard),
+ * while the per-track single-voice apply commits a slot whose played Scene may
+ * differ from the active Scene and must write the runtime for that Scene
+ * (force = 1). Inputs: Scene index, slot, descriptor-local index, value, force.
+ * Output: unless step automation holds the parameter, the descriptor runtime
+ * value is written. Affiliates: seq_automationHoldsParameter(),
+ * preset_applyInstrumentRuntimeValueForced().
+ */
+static void presetMorph_writeRuntimeBaseEx(uint8_t scene_index, uint8_t slot,
+                                           uint8_t local,
+                                           instrument_param_value_t value,
+                                           uint8_t force)
+{
+    if (!force && scene_index != scene_getActiveIndex())
+        return;
+    if (seq_automationHoldsParameter(slot, local))
+        return;
+    (void)preset_applyInstrumentRuntimeValueForced(
+        scene_index, instrumentParam_make(slot, local), value);
+}
+
 static void presetMorph_writeRuntimeBase(uint8_t scene_index, uint8_t slot,
                                          uint8_t local,
                                          instrument_param_value_t value)
 {
-    if (scene_index != scene_getActiveIndex())
-        return;
-    if (seq_automationHoldsParameter(slot, local))
-        return;
-    (void)preset_applyInstrumentRuntimeValue(
-        scene_index, instrumentParam_make(slot, local), value);
+    presetMorph_writeRuntimeBaseEx(scene_index, slot, local, value, 0u);
 }
 
 uint8_t presetMorph_tick(void)
@@ -583,25 +604,27 @@ void presetMorph_rebuildScene(uint8_t scene_index)
     presetMorph_requestAll(scene_index);
 }
 
-void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot)
+/*
+ * Commit one slot's Morph-derived runtime image (S077 P2 §3.4).
+ *
+ * What: walks every morphable descriptor cell, updates morph_interpolation[],
+ * and (when force_runtime or the Scene is active) writes the live runtime.
+ * Inputs: Scene index, slot, and a force flag selecting whether a non-active
+ * Scene may write the runtime. Output: the slot image is current. This is the
+ * shared body of presetMorph_applyVoiceNow() (active Scene, force = 0) and
+ * presetMorph_applyVoiceNowFromScene() (per-track played Scene, force = 1).
+ * Parameters held by step automation keep their runtime value; only
+ * morph_interpolation[] is updated for them (S075 F3).
+ */
+static void presetMorph_applyVoiceNowInternal(uint8_t scene_index,
+                                              uint8_t slot,
+                                              uint8_t force_runtime)
 {
     scene_t *scene = scene_get(scene_index);
     kit_instrument_slot_t *instrument;
     uint8_t local;
     uint8_t amount;
 
-    /*
-     * Commit one slot's Morph-derived runtime image immediately.
-     *
-     * Inputs: Scene/slot selected by the deferred Scene-switch worker. Outputs:
-     * all morphable descriptor cells in morph_interpolation[] are updated, and
-     * active-Scene runtime writes are complete before the caller returns. This
-     * mirrors presetMorph_tick() but intentionally walks the whole slot so a
-     * trigger-time Scene swap cannot fire with half-old instrument parameters.
-     * Parameters held by step automation keep their runtime value; only
-     * morph_interpolation[] is updated for them (S075 F3,
-     * presetMorph_writeRuntimeBase()).
-     */
     if (!scene || slot >= INSTRUMENT_SLOT_COUNT)
         return;
     instrument = &scene->kit.instruments[slot];
@@ -609,10 +632,13 @@ void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot)
      * Synchronous Scene-switch application also honors a live step overlay.
      * The overlay is normally restored before a transport/Pattern boundary,
      * but this guard keeps trigger-time priority behavior consistent if a
-     * caller applies a slot while the overlay is still active.
+     * caller applies a slot while the overlay is still active. The hidden LFO
+     * Morph layer is live state of the active Scene only, so an inactive
+     * resident Scene resolves to its retained base amount (S077 P2 §6.7).
      */
     amount = presetMorph_effectiveVoiceBase(scene, slot);
-    if (presetMorph_voiceHasLfoLayer(slot))
+    if (scene_index == scene_getActiveIndex() &&
+        presetMorph_voiceHasLfoLayer(slot))
         amount = presetMorph_resolveLfoAmount(scene, slot);
 
     for (local = 0u; local < INSTRUMENT_PARAM_COUNT; local++) {
@@ -637,7 +663,8 @@ void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot)
             amount);
         instrument->parameter_images.morph_interpolation[local] = value;
         /* Held automation keeps its runtime value until the trigger. */
-        presetMorph_writeRuntimeBase(scene_index, slot, local, value);
+        presetMorph_writeRuntimeBaseEx(scene_index, slot, local, value,
+                                       force_runtime);
     }
 
     if (morph_worker.scene_index == scene_index) {
@@ -672,6 +699,33 @@ void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot)
             morph_worker.priority_resume_valid = 0u;
         }
     }
+}
+
+/*
+ * Commit one active-Scene slot's Morph-derived runtime image (S076/S077).
+ *
+ * Inputs: active Scene/slot selected by the deferred Scene-switch worker.
+ * Output: morph_interpolation[] and the live runtime image are current for that
+ * slot. Callers: preset_sendDrumsetParameters(), preset_resetAndApplyKitVoiceImage().
+ */
+void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot)
+{
+    presetMorph_applyVoiceNowInternal(scene_index, slot, 0u);
+}
+
+/*
+ * Commit one per-track slot's runtime image from its played Scene
+ * (S077 P2 §3.4).
+ *
+ * Inputs: the track's played Scene and slot. Output: morph_interpolation[] is
+ * refreshed and the live runtime is written even though the Scene is not the
+ * global active Scene. Client: preset_resetAndApplyKitVoiceImage() when the
+ * single-voice apply commits a slot whose played Scene differs from the active
+ * one. Affiliate: presetMorph_applyVoiceNow() (the active-Scene wrapper).
+ */
+void presetMorph_applyVoiceNowFromScene(uint8_t scene_index, uint8_t slot)
+{
+    presetMorph_applyVoiceNowInternal(scene_index, slot, 1u);
 }
 
 void presetMorph_setVoiceLfoModulation(uint8_t scene_index,

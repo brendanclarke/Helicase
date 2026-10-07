@@ -171,15 +171,56 @@ uint8_t seq_activePattern = 0;				/**< the currently playing pattern*/
 uint8_t seq_pendingPattern = 0;				/**< next pattern to play*/
 
 /*
- * Current per-track Pattern assignment stub.
+ * Per-track played-Scene map (S077 P2 §3.1).
  *
- * What: one resident Scene byte per track, currently all equal to the active
- * Pattern. Why: the stack service's single mutation target remains explicit
- * while a future sequencer revision may assign tracks independently. Inputs:
- * initialization and active-pattern changes. Output: playback-facing state;
- * no independent assignment behavior exists in S067. RAM: +7 bytes SRAM1.
+ * What: one resident Scene byte per track, the Scene playback reads for that
+ * track's sequence, instrument, and per-voice settings. Why: per-track Scene
+ * playback lets individual tracks read a Scene other than the global active
+ * one. Inputs: seq_init(), seq_selectActivePattern(),
+ * seq_alignActivePatternToScene(), seq_handleMasterBoundary(), and the PERF
+ * hold-VOICE+press-SEQ gesture through seq_setTrackPlayedScene(). Output:
+ * playback-facing state; every entry equals seq_activePattern when no override
+ * is set. RAM: +7 bytes SRAM1 (allocated in S067).
  */
 uint8_t seq_perTrackPattern[NUM_TRACKS];
+
+/*
+ * Per-track playback override flag (S077 P2 §3.1).
+ *
+ * What: nonzero when any entry in seq_perTrackPattern[] differs from
+ * seq_activePattern. Why: gates the fast path - when zero, all existing code
+ * paths that reference seq_activePattern are correct as-is and no per-track
+ * branching is needed. Recomputed by seq_recomputePerTrackActive() whenever
+ * seq_perTrackPattern[] changes. Inputs: seq_perTrackPattern[],
+ * seq_activePattern. Output: 0 or 1. RAM: +1 byte SRAM1. Owner: Sequencer.
+ * Lifetime: static. Affiliates: seq_setTrackPlayedScene(),
+ * seq_clearPerTrackOverrides(), seq_selectActivePattern(),
+ * seq_alignActivePatternToScene(), seq_handleMasterBoundary().
+ */
+uint8_t seq_perTrackActive = 0;
+
+/*
+ * Recompute the seq_perTrackActive convenience flag (S077 P2 §1.2).
+ *
+ * What: walks seq_perTrackPattern[] and sets seq_perTrackActive to 1 if any
+ * entry differs from seq_activePattern, 0 otherwise. Why: centralises the
+ * derivation so every mutation site calls one function rather than duplicating
+ * the scan. Inputs: seq_perTrackPattern[NUM_TRACKS], seq_activePattern.
+ * Output: seq_perTrackActive (0 or 1). Caller: seq_setTrackPlayedScene(),
+ * seq_clearPerTrackOverrides().
+ */
+static void seq_recomputePerTrackActive(void)
+{
+    uint8_t track;
+
+    for (track = 0u; track < NUM_TRACKS; track++) {
+        if (seq_perTrackPattern[track] != seq_activePattern) {
+            seq_perTrackActive = 1u;
+            return;
+        }
+    }
+    seq_perTrackActive = 0u;
+}
 
 uint8_t seq_recordActive = 0;				/**< set to 1 to activate the reording mode*/
 
@@ -331,7 +372,15 @@ static void seq_restoreAllAutomation(void)
 
         if (!mask)
             continue;
-        instrument = scene_instrumentSlotConst(seq_activePattern, slot);
+        /*
+         * All-slot automation restore uses per-track played Scene (S077 P2).
+         *
+         * What: the morph_interpolation[] restore base comes from the Scene
+         * whose instrument is actually loaded in each slot. Inputs:
+         * seq_perTrackPattern[slot] for slot 0..5. When no per-track override is
+         * set this equals seq_activePattern and behaviour is unchanged.
+         */
+        instrument = scene_instrumentSlotConst(seq_perTrackPattern[slot], slot);
         if (!instrument)
             continue;
         while (mask) {
@@ -485,6 +534,8 @@ void seq_init()
 	/* Keep the future per-track map aligned with the one active Scene. */
 	for (uint8_t track = 0u; track < NUM_TRACKS; track++)
 		seq_perTrackPattern[track] = seq_activePattern;
+	/* S077 P2: identical entries mean the per-track fast path is inactive. */
+	seq_perTrackActive = 0u;
 	seq_pending_automation_count = 0u;
 	seq_pending_automation_drain = 0u;
 	seq_clearAutomationDirty();
@@ -552,6 +603,71 @@ static void seq_sendMidi(MidiMsg msg)
 
 
 //------------------------------------------------------------------------------
+/*
+ * Assign one track to play from a specific Scene (S077 P2 §1.3).
+ *
+ * What: sets seq_perTrackPattern[track] to scene_index and recalculates
+ * seq_perTrackActive. Tracks 5 and 6 (HiHat choke pair, indices 5 and 6 in
+ * the seven-track array) always switch together. Why: the PERF
+ * hold-VOICE+press-SEQ gesture calls this to override one track's playback
+ * Scene without changing the global active Scene. Inputs: track 0..6, a Scene
+ * index validated by pat_patternValid(). Output: seq_perTrackPattern[track]
+ * updated. ISR safety: foreground-only write to a single byte read by TIM3;
+ * ARM Cortex-M7 byte stores are atomic. Affiliates:
+ * seq_clearPerTrackOverrides(), seq_recomputePerTrackActive(),
+ * preset_startSingleVoiceApply() (called after this by the button handler).
+ */
+void seq_setTrackPlayedScene(uint8_t track, uint8_t scene_index)
+{
+    if (track >= NUM_TRACKS || !pat_patternValid(scene_index))
+        return;
+
+    seq_perTrackPattern[track] = scene_index;
+    /* The HiHat choke pair shares one played Scene (tracks 5 and 6). */
+    if (track >= 5u) {
+        seq_perTrackPattern[5] = scene_index;
+        seq_perTrackPattern[6] = scene_index;
+    }
+    seq_recomputePerTrackActive();
+}
+
+/*
+ * Reset all per-track played-Scene entries to the active Scene (S077 P2 §1.5).
+ *
+ * What: sets every seq_perTrackPattern[] entry to seq_activePattern and clears
+ * seq_perTrackActive to 0. Why: any scene-level playback change (PERF SEQ
+ * press without a VOICE hold) coalesces all tracks back to one Scene
+ * (plan §4.3, Q2). Inputs: seq_activePattern. Output: all entries equal
+ * activePattern. Affiliates: the button handler coalesce gesture;
+ * seq_selectActivePattern()/seq_alignActivePatternToScene() already perform the
+ * same loop inline for their own Scene changes.
+ */
+void seq_clearPerTrackOverrides(void)
+{
+    uint8_t track;
+
+    for (track = 0u; track < NUM_TRACKS; track++)
+        seq_perTrackPattern[track] = seq_activePattern;
+    seq_perTrackActive = 0u;
+}
+
+/*
+ * Read one track's played Scene (S077 P2 §3.5).
+ *
+ * What: returns seq_perTrackPattern[track], or seq_activePattern for an
+ * out-of-range track. Why: Preset's mixer consumer resolves per-slot FX-send,
+ * fader-mode, and Morph-amount lookups through the track's played Scene rather
+ * than the global active Scene. Inputs: track/slot 0..6. Output: resident Scene
+ * index. Context: foreground only. Affiliates: preset_getSlotPlayedScene().
+ */
+uint8_t seq_getTrackPlayedScene(uint8_t track)
+{
+    if (track >= NUM_TRACKS)
+        return seq_activePattern;
+    return seq_perTrackPattern[track];
+}
+
+//------------------------------------------------------------------------------
 void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note)
 {
 	uint8_t midiChan; // which midi channel to send a note on
@@ -584,14 +700,23 @@ void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note)
 	//Trigger internal synth voice
 	voiceControl_noteOn(voiceNr, note, vol);
 
-	midiChan = (uint8_t)(scene_getTrackMidiChannel(seq_activePattern, voiceNr) - 1u);
+	/*
+	 * Per-track MIDI output (S077 P2 §6.5).
+	 *
+	 * What: MIDI output uses the track's played Scene's channel, not the global
+	 * active Scene's. Why: each track sends MIDI on the channel configured in
+	 * the Scene it is playing from. Inputs: seq_perTrackPattern[voiceNr].
+	 * Output: MIDI note-on uses the correct Scene's channel. When no per-track
+	 * override is set this equals seq_activePattern and behaviour is unchanged.
+	 */
+	midiChan = (uint8_t)(scene_getTrackMidiChannel(seq_perTrackPattern[voiceNr], voiceNr) - 1u);
 
 	/*
 	 * MIDI output note/channel are PatternData-owned track settings now. A note
 	 * value of 0 preserves the old "use the triggered note" behavior; nonzero
 	 * values override the outgoing MIDI note for this pattern track.
 	 */
-	midiNote = scene_getTrackMidiNote(seq_activePattern, voiceNr);
+	midiNote = scene_getTrackMidiNote(seq_perTrackPattern[voiceNr], voiceNr);
 	if(midiNote == 0)
 		midiNote = note;
 
@@ -620,7 +745,14 @@ void seq_previewVoice(uint8_t voiceNr)
 	if (voiceNr > 6u || seq_running)
 		return;
 
-	note = scene_getTrackMidiNote(seq_activePattern, voiceNr);
+	/*
+	 * Preview uses the track's played Scene for MIDI identity (S077 P2 §6.5).
+	 *
+	 * What: stopped-transport voice preview auditions through the MIDI
+	 * channel/note of whichever Scene the track is playing from. Inputs:
+	 * seq_perTrackPattern[voiceNr].
+	 */
+	note = scene_getTrackMidiNote(seq_perTrackPattern[voiceNr], voiceNr);
 	if (note == 0u)
 		note = MIDI_DEFAULT_TRIGGER_NOTE;
 
@@ -634,7 +766,7 @@ void seq_previewVoice(uint8_t voiceNr)
 	voiceControl_noteOff(voiceNr);
 	voiceControl_noteOn(voiceNr, note, ROLL_VOLUME);
 
-	midiChan = (uint8_t)(scene_getTrackMidiChannel(seq_activePattern, voiceNr) - 1u);
+	midiChan = (uint8_t)(scene_getTrackMidiChannel(seq_perTrackPattern[voiceNr], voiceNr) - 1u);
 	seq_sendMidiNoteOn(midiChan, note, ROLL_VOLUME);
 }
 //------------------------------------------------------------------------------
@@ -675,6 +807,13 @@ void seq_selectActivePattern(uint8_t pattern)
 	/* S067 has one playback Scene, so every track follows the new target. */
 	for (uint8_t track = 0u; track < NUM_TRACKS; track++)
 		seq_perTrackPattern[track] = pattern;
+	/*
+	 * Scene-level switch always coalesces (S077 P2 §4.3, Q2).
+	 *
+	 * What: the loop above already set every seq_perTrackPattern[] entry to the
+	 * new pattern, so the per-track override flag is now necessarily 0.
+	 */
+	seq_perTrackActive = 0u;
 	seq_loadPendigFlag = 0u;
 	seq_newPatternAvailable = 0u;
 	seq_realignActivePatternToMasterClock();
@@ -729,6 +868,14 @@ void seq_alignActivePatternToScene(uint8_t scene_index)
 	/* Keep the future per-track assignment stub aligned during boot restore. */
 	for (uint8_t track = 0u; track < NUM_TRACKS; track++)
 		seq_perTrackPattern[track] = scene_index;
+	/*
+	 * Bank Load alignment also clears per-track overrides (S077 P2 §6.4).
+	 *
+	 * What: Bank Load coalesces all tracks to the loaded active Scene. Former
+	 * per-track overrides are stale because Scene indices now point at newly
+	 * loaded content.
+	 */
+	seq_perTrackActive = 0u;
 	seq_loadPendigFlag = 0u;
 	seq_newPatternAvailable = 0u;
 	seq_realignActivePatternToMasterClock();
@@ -763,7 +910,16 @@ static void seq_queueStepAutomations(uint8_t track, uint8_t step)
     uint8_t i;
     uint16_t base;
 
-    region = pat_sceneRegion(seq_activePattern);
+    /*
+     * Per-track automation region (S077 P2 §3.2).
+     *
+     * What: reads the automation block from the track's own played Scene.
+     * Why: automation entries are authored per-Scene; a track playing from
+     * Scene B must queue Scene B's automation, not Scene A's. Inputs:
+     * seq_perTrackPattern[track]. When no per-track override is set this
+     * equals seq_activePattern and behaviour is unchanged.
+     */
+    region = pat_sceneRegion(seq_perTrackPattern[track]);
     if (!region || !pat_trackValid(track) || !pat_stepValid(step))
         return;
     address = region->address[track][step];
@@ -823,11 +979,51 @@ static void seq_queueStepAutomations(uint8_t track, uint8_t step)
  * rewritten by the owning track end their overlay. A full queue records the
  * same PatternTrace overflow witness as automation entries.
  */
+/*
+ * Effect-type match test for per-track FX automation (S077 P2 §3.6, Q9).
+ *
+ * What: compares the active Scene's retained effect type against one track's
+ * played Scene's retained effect type. Why: FX automation entries are authored
+ * for a specific effect type; applying them to a different type would write
+ * parameters into undefined slots. Inputs: seq_activePattern,
+ * seq_perTrackPattern[track]. Output: 1 when the types match (or either record
+ * is unavailable is treated as no-match), 0 otherwise. Context: safe in TIM3
+ * ISR - scene_effectConst() returns a const SRAM1 pointer with no allocation
+ * or I/O. Affiliates: seq_queueEffectStepMarker() and seq_drainPendingAutomation().
+ */
+static uint8_t seq_trackEffectTypeMatchesActive(uint8_t track)
+{
+    const effect_record_t *active;
+    const effect_record_t *played;
+
+    if (track >= NUM_TRACKS)
+        return 0u;
+    active = scene_effectConst(seq_activePattern);
+    played = scene_effectConst(seq_perTrackPattern[track]);
+    if (!active || !played)
+        return 0u;
+    return (uint8_t)(active->type == played->type);
+}
+
 static void seq_queueEffectStepMarker(uint8_t track, uint8_t step)
 {
     uint16_t step_id = (uint16_t)(track * NUM_STEPS + step);
 
     if ((seq_effectAutomationTracks & (uint8_t)(1u << track)) == 0u)
+        return;
+    /*
+     * Effect-type gate for per-track FX step markers (S077 P2 §3.6, Q9).
+     *
+     * What: before queueing an FX step boundary, compare the active Scene's
+     * retained effect type against the track's played Scene's retained effect
+     * type. If they differ, the marker is dropped so the foreground drain does
+     * not begin an overlay against the wrong effect type. Why: FX automation
+     * entries are authored for a specific effect type. Inputs:
+     * seq_activePattern, seq_perTrackPattern[track]. Output: marker queued only
+     * when types match. Fast path: when no per-track override is set the types
+     * are trivially equal, so the comparison is skipped behind seq_perTrackActive.
+     */
+    if (seq_perTrackActive && !seq_trackEffectTypeMatchesActive(track))
         return;
     if (seq_pending_automation_count < SEQ_PENDING_BUF_COUNT) {
         uint8_t pending_index = seq_pending_automation_count;
@@ -904,7 +1100,19 @@ static void seq_advanceTrackStep(uint8_t track)
 	 * I/O, so this is safe in TIM3 ISR context (priority 2). A NULL region or
 	 * a zero-length field falls back to the historic 16-step bar.
 	 */
-	const pat_scene_region_t *region = pat_sceneRegion(seq_activePattern);
+	/*
+	 * Per-track played-Scene read (S077 P2 §3.2).
+	 *
+	 * What: reads the track's own played Scene instead of the global active
+	 * Scene for pattern region, step activity, step specials, and automation.
+	 * Why: when a track plays from a Scene other than the active one, its
+	 * sequence data (loop length, step triggers, automation) must come from that
+	 * track's assigned Scene. Inputs: seq_perTrackPattern[track] - a single-byte
+	 * SRAM1 read, atomic on Cortex-M7. Output: region, step checks, and
+	 * automation all resolve against the track's played Scene. When no per-track
+	 * override is set this equals seq_activePattern and behaviour is identical.
+	 */
+	const pat_scene_region_t *region = pat_sceneRegion(seq_perTrackPattern[track]);
 	uint8_t len = (region && region->track_length[track] > 0u)
 	              ? region->track_length[track]
 	              : NUM_STEPS_PER_BAR;
@@ -926,19 +1134,24 @@ static void seq_advanceTrackStep(uint8_t track)
 		 * step is still a complete playback step for automation purposes.
 		 */
 		pat_step_specials_t sp = pat_readStepSpecials(
-		    seq_activePattern, track, (uint8_t)seq_stepIndex[track]);
+		    seq_perTrackPattern[track], track, (uint8_t)seq_stepIndex[track]);
 		uint8_t step_allowed = seq_evaluateStepCondition(&sp);
 
-		if (pat_isStepActive(track, (uint8_t)seq_stepIndex[track], seq_activePattern)) {
+		if (pat_isStepActive(track, (uint8_t)seq_stepIndex[track], seq_perTrackPattern[track])) {
 			if (seq_eraseActive && track == menu_getActiveVoice()) {
 				/*
 				 * Live erase clears only the static trigger in TIM3. Pool
 				 * reclamation is a foreground PatternStackService event so this
 				 * ISR never mutates pool bytes or bitmap state.
+				 *
+				 * S077 P2 §3.2: erase targets the pattern data the track is
+				 * actually playing, not necessarily the global active Scene.
+				 * Erasing from the active Scene while the track plays from a
+				 * different Scene would clear steps that are not audible.
 				 */
-				pat_setStepActive(seq_activePattern, track,
+				pat_setStepActive(seq_perTrackPattern[track], track,
 				                  (uint8_t)seq_stepIndex[track], 0u);
-				patSvc_enqueueErase(seq_activePattern, track,
+				patSvc_enqueueErase(seq_perTrackPattern[track], track,
 				                    (uint8_t)seq_stepIndex[track]);
 			} else if (step_allowed) {
 				seq_triggerVoice(track, sp.velocity, sp.note);
@@ -1075,18 +1288,31 @@ void seq_drainPendingAutomation(void)
             /* Automation storage is already in descriptor parameter space;
              * do not apply MIDI-CC-style 7-bit-to-8-bit expansion here. */
             uint8_t value = (uint8_t)((packed >> 9u) & 0x7Fu);
+            /*
+             * Per-track ownership for this entry (S077 P2 §1.16).
+             *
+             * What: the writing track is embedded in the packed step
+             * identity as (step_id / NUM_STEPS); its played Scene selects the
+             * instrument image used for validation and the effect type used by
+             * the FX gate. Output: owner_track 0..6, owner_scene resident
+             * index. When no per-track override is set owner_scene equals
+             * seq_activePattern and behaviour is unchanged.
+             */
+            uint8_t owner_track = (uint8_t)((identity &
+                                             SEQ_PENDING_STEP_ID_MASK) /
+                                            NUM_STEPS);
+            uint8_t owner_scene = seq_getTrackPlayedScene(owner_track);
 
             if ((identity & SEQ_PENDING_TYPE_FX_STEP_BIT) != 0u) {
                 /* One owning track's step boundary precedes its entries. */
-                effects_automationStepBegin((uint8_t)(
-                    (identity & SEQ_PENDING_STEP_ID_MASK) / NUM_STEPS));
+                effects_automationStepBegin(owner_track);
             } else if ((identity & SEQ_PENDING_TYPE_AUTOMATION_BIT) != 0u) {
                 if (instrumentParam_isVoiceParameter(target) &&
-                    instrumentManager_targetValid(seq_activePattern, target,
+                    instrumentManager_targetValid(owner_scene, target,
                                                   INSTRUMENT_TARGET_AUTOMATION)) {
                     uint8_t slot = instrumentParam_slot(target);
                     const kit_instrument_slot_t *instrument =
-                        scene_instrumentSlotConst(seq_activePattern, slot);
+                        scene_instrumentSlotConst(owner_scene, slot);
                     const ParamDescriptor *descriptor = instrument
                         ? instrumentManager_descriptor(
                               instrument->type, instrumentParam_local(target))
@@ -1101,11 +1327,23 @@ void seq_drainPendingAutomation(void)
                 } else if (sceneModTarget_isSceneTarget(target)) {
                     (void)seq_applySceneAutomation(target, value);
                 } else if (effectTarget_isEffectId(target)) {
-                    /* Block-7 entries are owned by the writing track. */
-                    (void)effects_applyAutomation(
-                        (uint8_t)((identity & SEQ_PENDING_STEP_ID_MASK) /
-                                  NUM_STEPS),
-                        effectTarget_local(target), value);
+                    /*
+                     * Effect automation type gate (S077 P2 §1.17, Q9).
+                     *
+                     * What: before applying a block-7 (Effect) entry, compare
+                     * the active Scene's effect type against the owning
+                     * track's played Scene's effect type. If the types differ,
+                     * drop the entry. Why: effect parameters are type-specific;
+                     * writing values authored for one effect type into another
+                     * would touch undefined slots. Fast path: when no per-track
+                     * override is set the types are trivially equal, so the
+                     * comparison is skipped. Block-7 entries are owned by the
+                     * writing track via effects_applyAutomation().
+                     */
+                    if (!seq_perTrackActive ||
+                        seq_trackEffectTypeMatchesActive(owner_track))
+                        (void)effects_applyAutomation(owner_track,
+                            effectTarget_local(target), value);
                 }
             }
             i++;
@@ -1156,7 +1394,16 @@ void seq_restoreAutomatedParameters(uint8_t trigger_track)
     if (!mask)
         return;
 
-    instrument = scene_instrumentSlotConst(seq_activePattern, slot);
+    /*
+     * Retrigger restore reads the track's played Scene (S077 P2 §3.2).
+     *
+     * What: the morph_interpolation[] values used to restore automation
+     * overlays must come from the Scene whose instrument is actually loaded in
+     * this slot - the track's played Scene, not the global active Scene. Why:
+     * if a track plays from Scene B, restoring from Scene A's image would apply
+     * wrong values. Inputs: seq_perTrackPattern[trigger_track].
+     */
+    instrument = scene_instrumentSlotConst(seq_perTrackPattern[trigger_track], slot);
     if (instrument) {
         while (mask) {
             uint8_t local = (uint8_t)__builtin_ctzll(mask);
@@ -1204,6 +1451,13 @@ static uint8_t seq_handleMasterBoundary(void)
 			/* The S067 stub follows the instant master-boundary switch. */
 			for (uint8_t track = 0u; track < NUM_TRACKS; track++)
 				seq_perTrackPattern[track] = seq_activePattern;
+			/*
+			 * Master-boundary commit clears per-track overrides (S077 P2).
+			 *
+			 * What: the loop above already set every entry to the committed
+			 * active pattern, so the override flag is necessarily 0.
+			 */
+			seq_perTrackActive = 0u;
 			seq_setStepIndexToStart();
 			seq_resetStepScheduler();
 			led_notifyPatternChanged(seq_activePattern);
@@ -1251,9 +1505,21 @@ void seq_realignActivePatternToMasterClock(void)
 	 * context), seq_advanceTrackStep() (uses the same per-track length for its
 	 * wrap boundary), led_processSeqLedState() (drains the chase dirty bit).
 	 */
-	const pat_scene_region_t *region = pat_sceneRegion(seq_activePattern);
-
+	/*
+	 * Per-track realignment uses each track's played Scene (S077 P2 §3.2).
+	 *
+	 * What: each track derives its step position from the master clock using its
+	 * own played Scene's track_length, not the global active Scene's. Why: tracks
+	 * playing from different Scenes may have different track lengths; a global
+	 * region read would position tracks at step offsets for the wrong loop
+	 * length. Inputs: seq_perTrackPattern[track], seq_masterStepClock. Output:
+	 * seq_stepIndex[track] = masterStepClock % that track's length. Note:
+	 * pat_sceneRegion() returns an SRAM1 pointer with no allocation, so moving
+	 * the call inside the loop is safe in any context.
+	 */
 	for (track = 0u; track < NUM_TRACKS; track++) {
+		const pat_scene_region_t *region =
+		    pat_sceneRegion(seq_perTrackPattern[track]);
 		uint8_t len = (region && region->track_length[track] > 0u)
 		              ? region->track_length[track]
 		              : NUM_STEPS_PER_BAR;
@@ -1262,6 +1528,40 @@ void seq_realignActivePatternToMasterClock(void)
 	}
 	seq_ledState.chaseStep = seq_stepIndex[menu_getActiveVoice()];
 	seq_ledState.dirty |= SEQ_LED_DIRTY_CHASE;
+}
+
+/*
+ * Realign a single track's step position against the master clock
+ * (S077 P2 §1.4).
+ *
+ * What: derives one track's seq_stepIndex from seq_masterStepClock using that
+ * track's own played Scene's track_length from PatternData's
+ * pat_sceneRegion(seq_perTrackPattern[track]). Why: when a per-track Scene
+ * assignment changes a track's loop length, the track must be repositioned
+ * against the master clock to avoid phase discontinuities; also used by the
+ * double-click single-track realign gesture. Inputs: track 0..6,
+ * seq_masterStepClock (global). Output: seq_stepIndex[track] and
+ * seq_lastMasterStep[track] updated; the chase LED dirty bit is set when the
+ * track is the UI-selected voice. Affiliates: pat_sceneRegion(),
+ * seq_realignActivePatternToMasterClock() (the all-track variant).
+ */
+void seq_realignTrackToMasterClock(uint8_t track)
+{
+	const pat_scene_region_t *region;
+	uint8_t len;
+
+	if (track >= NUM_TRACKS)
+		return;
+	region = pat_sceneRegion(seq_perTrackPattern[track]);
+	len = (region && region->track_length[track] > 0u)
+	      ? region->track_length[track]
+	      : NUM_STEPS_PER_BAR;
+	seq_stepIndex[track] = (int16_t)(seq_masterStepClock % len);
+	seq_lastMasterStep[track] = (uint8_t)seq_stepIndex[track];
+	if (track == menu_getActiveVoice()) {
+		seq_ledState.chaseStep = seq_stepIndex[track];
+		seq_ledState.dirty |= SEQ_LED_DIRTY_CHASE;
+	}
 }
 
 static void seq_processSchedulerTick(void)
@@ -1748,6 +2048,18 @@ void seq_recordTrigger(uint8_t trackNr)
 //------------------------------------------------------------------------
 void seq_setRecordingMode(uint8_t active)
 {
+	/*
+	 * Record-arm gate on per-track overrides (S077 P2 §3.7).
+	 *
+	 * What: refuses to arm live recording when any track plays from a Scene
+	 * other than the active Scene. Why: recording into a track whose played
+	 * Scene differs from the viewed Scene would write steps into the wrong
+	 * Scene's pattern data. Inputs: seq_perTrackActive. Output: seq_recordActive
+	 * unchanged when per-track overrides exist; disarming (active == 0) is always
+	 * honoured.
+	 */
+	if (active && seq_perTrackActive)
+		return;
 	seq_recordActive = active;
 }
 

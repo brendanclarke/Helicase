@@ -1580,6 +1580,17 @@ void led_processSeqLedState(void)
     if (d & SEQ_LED_DIRTY_BEAT) {
         led_setBeatPulse(seq_ledState.beatPulse);
         /*
+         * PERF Scene LED tempo pulse (S077 P2 §5.1).
+         *
+         * What: repaint the PERF Scene row on each beat-phase change so the
+         * active Scene's SEQ LED follows seq_ledState.beatPulse (the view that
+         * menu_refreshPerfSceneLeds() reads). Why: without a per-beat refresh
+         * the pulse would hold its last value. Affiliates:
+         * menu_refreshPerfSceneLeds(), buttonHandler_getMode().
+         */
+        if (buttonHandler_getMode() == SELECT_MODE_PERF)
+            menu_refreshPerfSceneLeds();
+        /*
          * What:       update the SELECT-row bar chaselight whenever the beat
          *             pulse phase changes (on -> off or off -> on).
          * Why:        the pulse phase controls whether the playback-bar LED

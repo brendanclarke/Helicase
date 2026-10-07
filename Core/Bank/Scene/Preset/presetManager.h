@@ -413,6 +413,17 @@ uint8_t preset_setInstrumentParameterFromMidi(uint8_t slot,
 uint8_t preset_applyInstrumentRuntimeValue(uint8_t scene_index,
                                            instrument_param_id_t id,
                                            instrument_param_value_t value);
+/*
+ * Runtime apply that ignores the active-Scene write guard (S077 P2 §3.4).
+ *
+ * Inputs: Scene index, slot/descriptor-index instrument ID, and descriptor
+ * image value. Output: the live runtime is written even when the Scene is not
+ * the active Scene. Client: presetMorph_writeRuntimeBaseEx() when force is set
+ * by the per-track single-voice apply. Affiliate: the guarded public wrapper.
+ */
+uint8_t preset_applyInstrumentRuntimeValueForced(uint8_t scene_index,
+                                                 instrument_param_id_t id,
+                                                 instrument_param_value_t value);
 uint8_t preset_applyKitAudioRouting(uint8_t scene_index, uint8_t slot);
 /*
  * Apply one voice's output route without retaining it in SceneData.
@@ -499,6 +510,26 @@ uint8_t preset_setSlot6Track7AmpEnvelopeDecay(uint8_t scene_index,
  */
 void    preset_startDrumsetApply(void);
 uint8_t preset_tickDrumsetApply(void);
+/*
+ * Per-track single-voice deferred apply (S077 P2 §2.1, §3.4).
+ *
+ * Inputs: slot 0..5, source Scene index. Output: the drumset worker's bit for
+ * this slot is cleared (the single-voice apply supersedes it), the slot's LFO
+ * phase is snapshotted, its outgoing modulation graph is cleared, the source
+ * Scene's audio routing is applied, and the slot is armed for a deferred
+ * quiet-wait commit from its played Scene. Client: the buttonHandler PERF
+ * hold-VOICE+press-SEQ gesture. Affiliate: preset_tickDrumsetApply() polls the
+ * single-voice worker before the Scene worker.
+ */
+void    preset_startSingleVoiceApply(uint8_t slot, uint8_t source_scene);
+/*
+ * Resolve one slot's played Scene for per-track playback (S077 P2 §3.5).
+ *
+ * Inputs: slot 0..5. Output: the resident Scene playback reads for that slot's
+ * track (seq_activePattern when no override is set). Client: mixer_faderGains()
+ * resolves per-voice FX send / fader mode / Morph amount through this.
+ */
+uint8_t preset_getSlotPlayedScene(uint8_t slot);
 /*
  * Report whether the Scene and Instrument apply workers are idle (S075).
  *

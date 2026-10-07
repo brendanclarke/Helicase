@@ -24,6 +24,8 @@
 #include "timebase.h"
 #include "copyClearSession.h"
 #include "PatternData.h"
+#include "BankData.h"
+#include "SceneData.h"
 #include "menuEffects.h"
 #if ENABLE_EUKLID_PAGE
 #include "EuklidGenerator.h"
@@ -216,6 +218,55 @@ static uint16_t buttonHandler_loadSceneSeqPressedMask = 0u;
  */
 static uint8_t buttonHandler_fxVoiceMixTrackMask = 0u;
 
+/*
+ * PERF mode held-VOICE bitmask for per-track Scene assignment (S077 P2 §3.1).
+ *
+ * What: one bit per VOICE button (bits 0..6) set while that VOICE button is
+ * physically held in PERF mode. While any bit is set, SEQ presses are
+ * intercepted for per-track assignment instead of scene-level switching. Why:
+ * the hold-VOICE+press-SEQ gesture enables per-track Scene playback (plan
+ * §4.1). Multiple VOICE buttons may be held simultaneously for multi-track
+ * assignment (Q11). RAM: +1 byte SRAM1. Owner: buttonHandler.c. Affiliates:
+ * perf_voiceActionOccurred, buttonHandler_perfVoiceHeldSeqPressed(),
+ * buttonHandler_perfVoiceReleased().
+ */
+static uint8_t perf_heldVoiceMask = 0u;
+
+/*
+ * PERF VOICE action-occurred flag for mute-toggle cancellation (S077 P2 §3.1).
+ *
+ * What: set to 1 when a held VOICE button's hold produced a per-track
+ * assignment (a SEQ press during the hold) or when a non-VOICE, non-SEQ button
+ * was pressed during the hold. When set, VOICE releases do not toggle mute.
+ * Why: the VOICE release is a single-track mute toggle only when no per-track
+ * assignment or other unrelated action occurred (plan §4.1, Q8). RAM: +1 byte
+ * SRAM1. Owner: buttonHandler.c. Affiliates: perf_heldVoiceMask.
+ */
+static uint8_t perf_voiceActionOccurred = 0u;
+
+/*
+ * General-purpose double-click detector (S077 P2 §3.2, Q7).
+ *
+ * What: detects a second press of the same button within DOUBLE_CLICK_TIMEOUT
+ * of the first. Only one button can be in a double-click window at a time. The
+ * first click fires its single-click action immediately (no latency); the second
+ * click within the timeout returns DBLCLICK_DOUBLE so the caller can apply the
+ * additive double-click action. Why: PERF mode needs double-click on SEQ
+ * buttons for realignment; the detector is general-purpose for future reuse.
+ * Protocol: dblclick_onPress(buttonNr) is called on every press and returns
+ * DBLCLICK_FIRST or DBLCLICK_DOUBLE; dblclick_cancel() clears the window when
+ * any non-SEQ action intervenes. A router that runs after onPress can also
+ * recognise a double by (!dblclick_armed && dblclick_button == buttonNr).
+ * RAM: +3 bytes SRAM1 (button id, deadline, armed flag). Affiliates:
+ * DOUBLE_CLICK_TIMEOUT, time_sysTick.
+ */
+static uint8_t dblclick_button = 0u;
+static uint16_t dblclick_deadline = 0u;
+static uint8_t dblclick_armed = 0u;
+
+#define DBLCLICK_FIRST  0u
+#define DBLCLICK_DOUBLE 1u
+
 /* -----------------------------------------------------------------------
 ** Helpers
 ** ----------------------------------------------------------------------- */
@@ -358,6 +409,48 @@ static int8_t btn_to_voice(uint8_t buttonNr)
     case BUT_VOICE_7: return 6;
     default: return -1;
     }
+}
+
+/*
+ * Register one button press with the double-click detector (S077 P2 §3.2).
+ *
+ * What: returns DBLCLICK_DOUBLE when the same button was armed within
+ * DOUBLE_CLICK_TIMEOUT; otherwise arms this button and returns DBLCLICK_FIRST.
+ * A press of a different button restarts the window for that button. Why: the
+ * first click must always fire its single-click action immediately, so the
+ * detector never delays a press. Inputs: buttonNr. Output: DBLCLICK_FIRST or
+ * DBLCLICK_DOUBLE. A caller running after this can recognise a double by
+ * checking (!dblclick_armed && dblclick_button == buttonNr). Uses time_sysTick
+ * with the unsigned 16-bit wrap-safe subtraction used elsewhere in this file.
+ * Affiliates: dblclick_cancel(), DOUBLE_CLICK_TIMEOUT.
+ */
+static uint8_t dblclick_onPress(uint8_t buttonNr)
+{
+    uint8_t result = DBLCLICK_FIRST;
+
+    if (dblclick_armed && dblclick_button == buttonNr &&
+        (uint16_t)(dblclick_deadline - time_sysTick) < 32768u) {
+        /* Second press of the same button inside the window. */
+        result = DBLCLICK_DOUBLE;
+        dblclick_armed = 0u;
+    } else {
+        dblclick_button = buttonNr;
+        dblclick_deadline = (uint16_t)(time_sysTick + DOUBLE_CLICK_TIMEOUT);
+        dblclick_armed = 1u;
+    }
+    return result;
+}
+
+/*
+ * Cancel any pending double-click window (S077 P2 §3.2).
+ *
+ * What: clears the armed flag so the next press of the previously armed button
+ * starts a fresh single-click window. Why: any action other than the same
+ * button press cancels the window. Inputs: none. Output: dblclick_armed = 0.
+ */
+static void dblclick_cancel(void)
+{
+    dblclick_armed = 0u;
 }
 
 /*
@@ -745,6 +838,160 @@ static void buttonHandler_setRemoveStep(uint8_t ledNr, uint8_t seqButtonPressed)
                  ledNr);
 }
 
+/* Forward declaration: defined below with the other PERF gesture handlers. */
+static void buttonHandler_perfRefreshHeldSceneLeds(void);
+
+/*
+ * Per-track Scene assignment: VOICE held + SEQ pressed (S077 P2 §4.1).
+ *
+ * What: for every VOICE bit set in perf_heldVoiceMask, calls
+ * seq_setTrackPlayedScene(track, scene) and seq_realignTrackToMasterClock(track),
+ * then arms preset_startSingleVoiceApply() for the affected slot. Why: the user
+ * holds one or more VOICE buttons and presses a SEQ button to assign those
+ * tracks to play from the pressed Scene. Inputs: seqButtonPressed 0..15 (the
+ * Scene index) and perf_heldVoiceMask. Output: per-track playback state updated,
+ * instrument apply armed, perf_voiceActionOccurred set so the subsequent VOICE
+ * release does not toggle mute, and the double-click window cancelled. HiHat
+ * link: tracks 5 and 6 always switch together inside seq_setTrackPlayedScene()
+ * and share slot 5. Validation: the Scene must be resident (bank_scenePresent).
+ * Affiliates: seq_setTrackPlayedScene(), seq_realignTrackToMasterClock(),
+ * preset_startSingleVoiceApply().
+ */
+static void buttonHandler_perfVoiceHeldSeqPressed(uint8_t seqButtonPressed)
+{
+    uint8_t track;
+
+    if (seqButtonPressed >= SCENE_COUNT || seqButtonPressed >= 16u ||
+        !bank_scenePresent(seqButtonPressed))
+        return;
+
+    for (track = 0u; track < NUM_TRACKS; track++) {
+        uint8_t slot;
+
+        if ((perf_heldVoiceMask & (uint8_t)(1u << track)) == 0u)
+            continue;
+        seq_setTrackPlayedScene(track, seqButtonPressed);
+        seq_realignTrackToMasterClock(track);
+        /* Track 7 (index 6) shares the HiHat slot 5. */
+        slot = (track >= INSTRUMENT_SLOT_COUNT)
+            ? (uint8_t)(INSTRUMENT_SLOT_COUNT - 1u) : track;
+        preset_startSingleVoiceApply(slot, seqButtonPressed);
+    }
+    perf_voiceActionOccurred = 1u;
+    dblclick_cancel();
+    /* Re-blink each held track's (now updated) played Scene (S077 P2 §5.4). */
+    buttonHandler_perfRefreshHeldSceneLeds();
+}
+
+/*
+ * PERF Scene press with double-click detection (S077 P2 §4.2, §4.3).
+ *
+ * What: handles a SEQ press in PERF mode when no VOICE is held.
+ *       PAR_FOLLOW on, single click: scene-level switch via
+ *         menu_perfModeSceneButtonPressed() (coalesces all tracks + realigns).
+ *       PAR_FOLLOW on, double click: same plus an explicit realign.
+ *       PAR_FOLLOW off, single click: view change only via menu_setShownPattern()
+ *         + menu_refreshPerfSceneLeds(); playback and per-track overrides stay.
+ *       PAR_FOLLOW off, double click: full Scene change + coalesce + realign.
+ * Why: PAR_FOLLOW off lets the user navigate the viewed Scene without changing
+ * playback; a deliberate double-click then commits the change. Inputs:
+ * seqButtonPressed 0..15, parameter_values[PAR_FOLLOW], and the double-click
+ * detector state (set by processPress, which calls dblclick_onPress() for this
+ * press). Output: Scene/view state updated per the rules above.
+ * Affiliates: menu_perfModeSceneButtonPressed(), menu_setShownPattern(),
+ * menu_refreshPerfSceneLeds(), seq_realignActivePatternToMasterClock().
+ */
+static void buttonHandler_perfScenePressed(uint8_t seqButtonPressed)
+{
+    /* A double is an onPress result of DOUBLE: the window was just consumed. */
+    uint8_t isDouble = (uint8_t)(!dblclick_armed &&
+                                 dblclick_button == seqButtonPressed);
+
+    if (seqButtonPressed >= SCENE_COUNT || seqButtonPressed >= 16u ||
+        !bank_scenePresent(seqButtonPressed))
+        return;
+
+    if (parameter_values[PAR_FOLLOW]) {
+        /* A full Scene-level switch coalesces all tracks and always realigns. */
+        menu_perfModeSceneButtonPressed(seqButtonPressed);
+        if (isDouble)
+            seq_realignActivePatternToMasterClock();
+    } else {
+        /* Single click changes only the viewed Scene, not playback. */
+        menu_setShownPattern(seqButtonPressed);
+        menu_refreshPerfSceneLeds();
+        if (isDouble)
+            menu_perfModeSceneButtonPressed(seqButtonPressed);
+    }
+}
+
+/*
+ * Repaint the transient per-track Scene indication for a PERF VOICE hold
+ * (S077 P2 §5.4).
+ *
+ * What: clears every SEQ LED's blink layer and blinks the SEQ LED of each Scene
+ * that a currently held VOICE track is playing from. When the last VOICE is
+ * released it restores the ordinary PERF Scene row via
+ * menu_refreshPerfSceneLeds(). Why: while holding VOICE for per-track
+ * assignment the user should see which Scene each held track plays from before
+ * changing it; the indication is transient and vanishes on release. Inputs:
+ * perf_heldVoiceMask, seq_getTrackPlayedScene(). Output: SEQ LED blink state.
+ * Affiliates: menu_refreshPerfSceneLeds().
+ */
+static void buttonHandler_perfRefreshHeldSceneLeds(void)
+{
+    uint8_t i;
+
+    for (i = 0u; i < 16u; i++)
+        led_setBlinkLed((uint8_t)(LED_SEQ1 + i), 0u);
+    for (i = 0u; i < NUM_TRACKS; i++) {
+        uint8_t played;
+
+        if ((perf_heldVoiceMask & (uint8_t)(1u << i)) == 0u)
+            continue;
+        played = seq_getTrackPlayedScene(i);
+        if (played < 16u)
+            led_setBlinkLed((uint8_t)(LED_SEQ1 + played), 1u);
+    }
+    if (perf_heldVoiceMask == 0u)
+        menu_refreshPerfSceneLeds();
+}
+
+/*
+ * PERF VOICE release: single-track mute toggle (S077 P2 §4.1, Q8, Q12).
+ *
+ * What: clears this VOICE bit from perf_heldVoiceMask. If perf_voiceActionOccurred
+ * is 0 (no per-track assignment or unrelated button press during the hold),
+ * toggles mute for this single track. Each VOICE button's mute fires on its own
+ * release independently (Q12). Why: replaces the old cumulative unmute; the
+ * mute toggle is cancelled when the hold produced a per-track assignment or an
+ * unrelated button was pressed. Inputs: voiceNr 0..6. Output: mute toggled or
+ * not; the mask bit cleared; perf_voiceActionOccurred reset when the last VOICE
+ * is released. Affiliates: seq_setMute(), buttonHandler_muteVoice().
+ */
+static void buttonHandler_perfVoiceReleased(uint8_t voiceNr)
+{
+    uint8_t bit = (uint8_t)(1u << voiceNr);
+
+    if ((perf_heldVoiceMask & bit) == 0u)
+        return;
+    perf_heldVoiceMask = (uint8_t)(perf_heldVoiceMask & ~bit);
+    if (perf_voiceActionOccurred == 0u) {
+        if (buttonHandler_mutedVoices & bit) {
+            buttonHandler_muteVoice(voiceNr, 0);
+            seq_setMute(voiceNr, 0);
+        } else {
+            buttonHandler_muteVoice(voiceNr, 1);
+            seq_setMute(voiceNr, 1);
+        }
+        /* Repaint the VOICE mute row deterministically in PERF mode. */
+        buttonHandler_showMuteLEDs();
+    }
+    if (perf_heldVoiceMask == 0u)
+        perf_voiceActionOccurred = 0u;
+    buttonHandler_perfRefreshHeldSceneLeds();
+}
+
 static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
 {
     uint8_t ledNr = (uint8_t)(seqButtonPressed + LED_STEP1);
@@ -777,7 +1024,18 @@ static void buttonHandler_seqButtonPressed(uint8_t seqButtonPressed)
             buttonHandler_selectActiveStep(ledNr, seqButtonPressed);
             break;
         case SELECT_MODE_PERF:
-            menu_perfModeSceneButtonPressed(seqButtonPressed);
+            /*
+             * PERF SEQ press routing (S077 P2 §4.1, §4.2).
+             *
+             * A held VOICE routes to per-track assignment; otherwise the
+             * press is a scene-level switch with double-click detection.
+             * Affiliates: buttonHandler_perfVoiceHeldSeqPressed(),
+             * buttonHandler_perfScenePressed().
+             */
+            if (perf_heldVoiceMask != 0u)
+                buttonHandler_perfVoiceHeldSeqPressed(seqButtonPressed);
+            else
+                buttonHandler_perfScenePressed(seqButtonPressed);
             break;
         case SELECT_MODE_FX:
             /*
@@ -1176,6 +1434,31 @@ static void handleVoiceButton(uint8_t voiceNr)
     wasSelectedVoice = (uint8_t)(voiceNr == menu_getActiveVoice());
     shouldPreviewVoice = (uint8_t)(wasSelectedVoice && !seq_isRunning());
 
+    /*
+     * PERF VOICE button press: per-track hold arm (S077 P2 §4.1, Q8).
+     *
+     * What: sets this VOICE's bit in perf_heldVoiceMask and clears any pending
+     * double-click window. While any VOICE bit is set, SEQ presses become
+     * per-track assignments instead of Scene switches, and the mute toggle is
+     * deferred to release. Why: this replaces the old cumulative unmute
+     * (tracks 0..N, SHIFT+VOICE) and the immediate press-time single-track mute
+     * so one feature owns the PERF VOICE gesture: a press arms the hold, a SEQ
+     * press during the hold assigns playback, and a plain release toggles this
+     * track's mute. Inputs: voiceNr 0..6. Output: perf_heldVoiceMask updated.
+     * Affiliates: buttonHandler_perfVoiceReleased(),
+     * buttonHandler_perfVoiceHeldSeqPressed().
+     */
+    if (bh_state.selectButtonMode == SELECT_MODE_PERF) {
+        perf_heldVoiceMask |= (uint8_t)(1u << voiceNr);
+        dblclick_cancel();
+        /*
+         * Transient per-track Scene indication during the hold (S077 P2 §5.4):
+         * blink the SEQ LED of the Scene each held track is playing from.
+         */
+        buttonHandler_perfRefreshHeldSceneLeds();
+        return;
+    }
+
     {
         uint8_t muteModeActive = buttonHandler_getShift();
         if (bh_state.selectButtonMode == SELECT_MODE_PERF ||
@@ -1235,26 +1518,6 @@ static void handleVoiceButton(uint8_t voiceNr)
             return;
         }
 
-        if (bh_state.selectButtonMode == SELECT_MODE_PERF) {
-            /*
-             * PERF voice buttons clear mutes up to the selected voice and then
-             * repaint mute LEDs. The actual audible mute state belongs to
-             * Sequencer, while buttonHandler_mutedVoices is the front-panel
-             * shadow used to draw the current mute view.
-             */
-            uint8_t i;
-            for (i = 0; i <= voiceNr; i++) {
-                if (buttonHandler_mutedVoices & (1u << i)) {
-                    seq_setMute(i, 0);
-                    buttonHandler_mutedVoices &= (uint8_t)~(1u << i);
-                }
-            }
-            buttonHandler_showMuteLEDs();
-            if (shouldPreviewVoice)
-                seq_previewVoice(voiceNr);
-            return;
-        }
-
         if (bh_state.selectButtonMode == SELECT_MODE_FX) {
             /*
              * SHIFT+TRACK selects the active track without leaving FX mode and
@@ -1278,6 +1541,27 @@ static void handleVoiceButton(uint8_t voiceNr)
         if (bh_state.selectButtonMode == SELECT_MODE_VOICE) {
             menu_switchPage(voiceNr);
             led_setActiveSelectButton(menu_getSubPage());
+            /*
+             * View-follows-track when PAR_FOLLOW is on (S077 P2 §6.1).
+             *
+             * What: if PAR_FOLLOW is on and the selected track plays from a
+             * Scene other than the viewed one, switch the viewed Scene to that
+             * track's played Scene. Why: VOICE/STEP views should present the
+             * settings of the track that is actually sounding so the user edits
+             * the right instrument. Inputs: parameter_values[PAR_FOLLOW],
+             * seq_perTrackActive, seq_getTrackPlayedScene(voiceNr). Output:
+             * menu_setShownPattern() moves the viewed Scene. Guard: only when a
+             * per-track override exists, so there is no overhead otherwise.
+             * Note: the retained Scene write target still follows the active
+             * Scene (bank edit mask); this phase moves the view only.
+             * Affiliates: menu_setShownPattern(), menu_getViewedPattern().
+             */
+            if (parameter_values[PAR_FOLLOW] && seq_perTrackActive) {
+                uint8_t played = seq_getTrackPlayedScene(voiceNr);
+
+                if (played != menu_getViewedPattern())
+                    menu_setShownPattern(played);
+            }
         }
 
         /*
@@ -1324,6 +1608,22 @@ static void handleVoiceButton(uint8_t voiceNr)
 /* Process one press event */
 static void processPress(uint8_t buttonNr)
 {
+    /*
+     * Double-click detection and PERF VOICE gesture bookkeeping (S077 P2 §3.8,
+     * §3.9).
+     *
+     * Every press is offered to the general-purpose double-click detector; a
+     * non-SEQ press cancels any pending SEQ window. While a PERF VOICE hold is
+     * active, a button that is neither a VOICE nor a SEQ button cancels the mute
+     * gesture by marking the hold as action-occurred.
+     */
+    (void)dblclick_onPress(buttonNr);
+    if (btn_to_seq(buttonNr) < 0)
+        dblclick_cancel();
+    if (perf_heldVoiceMask != 0u &&
+        btn_to_voice(buttonNr) < 0 && btn_to_seq(buttonNr) < 0)
+        perf_voiceActionOccurred = 1u;
+
     /*
      * Held-COPY owns its complete button gesture before ordinary row routing.
      * Inputs: one foreground event. Output: nonzero consumption prevents a
@@ -1595,6 +1895,17 @@ static void processRelease(uint8_t buttonNr)
                     menu_fxVoiceMixOverlayEnd();
                 return;
             }
+            /*
+             * PERF VOICE release: single-track mute toggle (S077 P2 §4.1, Q8,
+             * Q12). The toggle fires only when the hold had no per-track
+             * assignment and no unrelated button press; each VOICE's mute
+             * fires on its own release independently.
+             */
+            if (bh_state.selectButtonMode == SELECT_MODE_PERF &&
+                (perf_heldVoiceMask & bit) != 0u) {
+                buttonHandler_perfVoiceReleased((uint8_t)voice);
+                return;
+            }
         }
     }
     if (copyClear_buttonReleased(buttonNr))
@@ -1765,6 +2076,14 @@ void buttonHandler_processEvents(void)
         /* S075 F2-F: a lost TRACK release must not strand the overlay. */
         buttonHandler_fxVoiceMixTrackMask = 0u;
         menu_fxVoiceMixOverlayEnd();
+        /*
+         * S077 P2: a dropped VOICE release must not strand the PERF per-track
+         * hold or its action flag, and a lost SEQ edge must not leave a stale
+         * double-click window armed.
+         */
+        perf_heldVoiceMask = 0u;
+        perf_voiceActionOccurred = 0u;
+        dblclick_cancel();
         buttonHandler_buttonTimerStepNr = NO_STEP_SELECTED;
 #if DEV_MODE_LOGGING
         {

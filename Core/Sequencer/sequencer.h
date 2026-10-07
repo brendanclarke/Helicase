@@ -50,6 +50,54 @@ extern uint8_t seq_eraseActive;
  */
 extern uint8_t seq_perTrackPattern[NUM_TRACKS];
 
+/*
+ * Nonzero when any track plays from a Scene other than seq_activePattern
+ * (S077 P2 §1.1).
+ *
+ * Inputs: derived from seq_perTrackPattern[] vs seq_activePattern. Output:
+ * foreground code reads this to gate per-track UI/record behaviour: the fast
+ * path when 0 leaves all seq_activePattern reads correct as-is. Affiliates:
+ * seq_setTrackPlayedScene(), seq_clearPerTrackOverrides().
+ */
+extern uint8_t seq_perTrackActive;
+
+/*
+ * Set one track's played Scene for per-track playback (S077 P2 §1.3).
+ *
+ * Inputs: track 0..6, valid Scene index. Output: seq_perTrackPattern[track]
+ * updated, seq_perTrackActive recomputed. Tracks 5+6 (HiHat pair) switch
+ * together. Client: the buttonHandler PERF hold-VOICE+press-SEQ gesture.
+ */
+void seq_setTrackPlayedScene(uint8_t track, uint8_t scene_index);
+
+/*
+ * Coalesce all tracks back to the active Scene (S077 P2 §1.5).
+ *
+ * Output: all seq_perTrackPattern[] == seq_activePattern; seq_perTrackActive
+ * = 0. Client: the scene-level SEQ press coalesce (PAR_FOLLOW on single-click,
+ * PAR_FOLLOW off double-click).
+ */
+void seq_clearPerTrackOverrides(void);
+
+/*
+ * Read one track's played Scene (S077 P2 §3.5).
+ *
+ * Inputs: track/slot 0..6. Output: the resident Scene playback reads for that
+ * track (seq_activePattern for an out-of-range track). Client:
+ * preset_getSlotPlayedScene() resolves per-voice FX-send, fader, and Morph
+ * lookups through this.
+ */
+uint8_t seq_getTrackPlayedScene(uint8_t track);
+
+/*
+ * Realign one track's step cursor from the master clock using its own played
+ * Scene's track length (S077 P2 §1.4).
+ *
+ * Input: track 0..6. Output: seq_stepIndex[track] repositioned. Client:
+ * per-track assignment gesture, double-click single-track realign.
+ */
+void seq_realignTrackToMasterClock(uint8_t track);
+
 void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note);
 /*
  * Stopped-transport voice preview.

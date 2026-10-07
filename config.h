@@ -434,6 +434,18 @@
 ** va_scanService(), and menu_serviceRuntimeWidgets().
 ** ----------------------------------------------------------------------- */
 #define BUTTON_HOLD_DELAY_MS                 200u
+/*
+ * Double-click detection window (S077 P2 §4.2, Q7).
+ *
+ * What: the maximum milliseconds between the first and second press of the same
+ * button for the second press to count as a double-click. Why: PERF SEQ
+ * double-click triggers realignment. The timeout is short enough to avoid false
+ * positives during rapid Scene switching but long enough for a deliberate
+ * double-tap. Inputs: time_sysTick. Output: the double-click detector's
+ * wrap-safe comparison in buttonHandler.c. Domain: must stay below 32,768 for
+ * unsigned 16-bit comparison. Affiliate: buttonHandler.c dblclick_onPress().
+ */
+#define DOUBLE_CLICK_TIMEOUT                 300u
 #define VOICE_AUTOMATION_UNDERLINE_QUIET_MS  100u
 #define VOICE_AUTOMATION_SCAN_STEPS_PER_PASS 4u
 

@@ -533,6 +533,16 @@ void instrumentManager_clearSlot6Track7StepDecayOverride(void);
 void instrumentManager_captureLfoPhases(void);
 void instrumentManager_restoreLfoPhaseIfNeeded(uint8_t slot);
 /*
+ * Capture one slot's LFO phase before a single-voice apply (S077 P2 §2.3).
+ *
+ * Inputs: slot 0..5. Output: the slot's running phase is snapshotted into the
+ * shared handoff struct and marked valid, so
+ * instrumentManager_restoreLfoPhaseIfNeeded() can continue the cycle after the
+ * slot reset. Client: preset_startSingleVoiceApply(). Affiliate:
+ * instrumentManager_captureLfoPhases() (the all-slot variant).
+ */
+void instrumentManager_captureLfoPhaseForSlot(uint8_t slot);
+/*
  * Dynamic instrument runtime dispatcher.
  *
  * Inputs: logical slot/track numbers from SceneData, MIDI, mixer, and LFO
@@ -561,6 +571,15 @@ void instrumentManager_runtimeInit(void);
  */
 void instrumentManager_clearAllRuntimeModulationTargets(void);
 /*
+ * Clear runtime modulation targets for one slot only (S077 P2 §2.2).
+ *
+ * Inputs: slot 0..5. Output: this source slot's two LFO pair destinations and
+ * velocity source are detached, leaving every other slot's modulation graph
+ * live. Client: preset_startSingleVoiceApply(). Affiliate:
+ * instrumentManager_clearAllRuntimeModulationTargets() (the all-slot variant).
+ */
+void instrumentManager_clearRuntimeModulationTargetsForSlot(uint8_t slot);
+/*
  * Quiet test for deferred Scene-slot replacement.
  *
  * Inputs: zero-based instrument slot. Output: nonzero when the slot has no
@@ -588,6 +607,17 @@ uint8_t instrumentManager_ampEnvelopeQuiet(uint8_t slot);
  * voices during one Instrument load.
  */
 void instrumentManager_resetRuntimeSlot(uint8_t slot);
+/*
+ * Reinitialize one slot's runtime from a caller-selected Scene (S077 P2 §2.1).
+ *
+ * Inputs: slot 0..5 and a resident Scene index. Output: that slot's tagged
+ * runtime member is reset to the Scene's type and engine defaults. Why: the
+ * single-voice per-track apply commits a slot whose played Scene may differ
+ * from the active Scene. Affiliate: instrumentManager_resetRuntimeSlot()
+ * (the active-Scene wrapper).
+ */
+void instrumentManager_resetRuntimeSlotFromScene(uint8_t slot,
+                                                 uint8_t scene_index);
 void instrumentManager_dispatchRuntimeLfos(void);
 void instrumentManager_recalcRuntimeLfoSync(void);
 void instrumentManager_retriggerRuntimeLfos(uint8_t trigger_track);

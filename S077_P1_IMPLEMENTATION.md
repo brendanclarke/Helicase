@@ -790,3 +790,114 @@ by Steps 3F, 3G, 3H, and 3I.
 ### Not done here
 - **T1-T6 are hardware tests** (SD card + LXR-02). They were not run in this
   session; the trace event 0x51 and the wait behaviour are ready for T2.
+
+---
+
+## Post-Implementation Assessment
+
+Verified all changed files against the plan. Every planned change is present and
+correct; nothing was omitted and nothing was added beyond the three documented
+deviations. Summary of findings by area:
+
+### 1. PatternData.c / .h — background region (Steps 1–2)
+
+- `pat_autosave_snapshot` is fully replaced by `pat_background_region`
+  (same type, same `.bss` footprint). The old name does not appear anywhere in
+  the codebase.
+- `pat_snapshotScene()` copies into `pat_background_region`; `pat_autosaveSnapshot()`
+  returns it. Both are structurally identical to the pre-change code, differing
+  only in the target name.
+- `pat_backgroundPoolMut()` returns `pat_background_region.pool` — correct: the
+  pool field is the raw `uint8_t[PAT_STACK_SIZE * 32]` array, and the accessor
+  hands out only the pool, not the address array or bitmap.
+- The ownership contract comment (lines 60–84) accurately describes every
+  current and future user of the region, the mutual-exclusion mechanisms, and
+  the boot-only rollback path.
+
+### 2. copyClearService.c / .h — snap table and pool scratch (Step 3)
+
+- `ccSvc_snapTable[NUM_STEPS]` (line 109, 256 B) replaces the cast into the
+  borrowed name buffer. Naturally aligned as a static `uint16_t[]`.
+- `CC_SNAP_OFFSET` widened from `0x07FFu` to `0x0FFFu`; `_Static_assert` guards
+  that `PAT_POOL_ALLOC_CHUNKS` fits. At `PAT_STACK_SIZE 256` the maximum chunk
+  index is 2,015; the 12-bit field holds 4,095, leaving room for a future 512
+  pool. Bits 12–13 are free between `CC_SNAP_OFFSET` and `CC_SNAP_BLOCK` (bit 14).
+  Correct.
+- SNAPSHOT phase (case 1, line 666): block data is `memcpy`'d into
+  `pat_backgroundPoolMut()` at `run->aux * 4` — the same four-byte-chunk
+  addressing the old path used. The `aux` accumulator advances by `bytes / 4`.
+  The `ccSvc_table()` write uses the static table. Both are correct.
+- `ccSvc_snapBlock()` reads back from `pat_backgroundPoolMut()` at the stored
+  offset. The block accessor in `ccSvc_sourceBlock()` (called from the PLACE
+  phase) is unchanged apart from the new table/pool source. Correct.
+- `CC_SCRATCH_TABLE_OFFSET` and `CC_SCRATCH_BLOCK_OFFSET` are removed from the
+  header. `CC_SCRATCH_REMAP_OFFSET` (0) and the remap layout comment remain.
+  The assert protecting the remap-fits-loan invariant was retargeted to
+  `FS_NAME_SCRATCH_BYTES` (Deviation 1) — sound, since the define it formerly
+  referenced no longer exists.
+- The header's `ccSvc_scratch()` comment (lines 91–101) accurately documents the
+  reduced scope: remap and HCNAMES only, no block data or table.
+
+### 3. filesystem.c / .h — snapshot gate (Step 4)
+
+- `filesystem_patternSnapshotInUse()` (line 25840): returns nonzero when
+  `current_op == FS_INTERNAL_OP_AUTOSAVE_PATTERN_DRAIN && op_phase >= 2 && op_phase <= 6`.
+  This matches the drain state machine exactly: phases 2–6 read the snapshot
+  (header build, address array write, bitmap write, pool streaming); phases 0–1
+  are chdir/fopen; phases 7+ are CRC/close/HCNAMES. The `>= 2` lower bound is
+  correct (phase 2 is the first snapshot reader).
+- The gate is checked at paste path selection (line 641) before any pool write,
+  and the paste returns `CC_RUN_WAIT` while it is true. The gate re-checks on
+  every tick until the drain advances past phase 6. This is safe: both
+  `ccSvc_tick()` and `filesystem_tick()` are called from the same cooperative
+  main-loop path, so no interrupt race on the 10.5 kB region.
+
+### 4. Trace event (Step 4 continued)
+
+- `AUTOSAVE_TRACE_CC_EVT_SNAPSHOT_GATE` (0x51) is defined in `AutosaveTrace.h`
+  line 533, fitting in the copy/clear event namespace (0x50 is SUSPEND).
+- Deviation 2 (one record per wait episode, not per tick) is the right call.
+  The accumulated tick count in `scratch_wait` gives the same diagnostic
+  information — how long the paste waited — without consuming a trace slot per
+  tick. The `scratch_wait` counter is incremented with `CC_TRACE_SAT16` on every
+  gated tick, then emitted and cleared when the gate opens. The counter is
+  reused from its prior role (name-buffer scratch wait), which the overlap path
+  no longer reaches; no naming conflict.
+
+### 5. Build and RAM
+
+- Build is clean; flash payload 536,456 B.
+- Measured BSS delta is +264 B. Only 256 B of new storage is declared
+  (`ccSvc_snapTable`). The extra 8 B is alignment padding, which varies with
+  LTO placement and is not actionable. Deviation 3 documents the measured
+  totals correctly.
+- The 10,519 B `pat_background_region` replaces the 10,519 B
+  `pat_autosave_snapshot` at net zero — confirmed by the symbol sizes in the
+  progress log (0x2917 = 10,519 for both old and new).
+
+### 6. Deviation assessment
+
+All three deviations are sound engineering decisions, not regressions:
+
+1. **Assert retarget** — the plan's original assert would not compile after
+   removing its referenced define. The replacement preserves the same invariant
+   (remap fits loan) with a define that exists.
+2. **Trace shape** — one record per episode is the standard pattern used by
+   every other copy/clear wait trace (scratch wait, claim wait, fs-refused
+   wait). Emitting per-tick would be an anomaly.
+3. **BSS +264 vs +256** — 8 B of alignment overhead on a 427 kB `.bss` section
+   is not material. The measured totals are recorded accurately.
+
+### 7. Remaining work
+
+- **T1–T6 hardware tests.** The code is ready; the tests require an LXR-02 with
+  SD card. T2 (overlapping paste during an in-flight drain) is the critical
+  new-behaviour test; T1 (normal overlapping paste) and T3–T6 are regression
+  checks.
+- **Q6 follow-up** (abandon an in-flight drain). Deferred; only needed if T2
+  shows the gate wait is user-perceptible.
+
+### Verdict
+
+Implementation matches the plan. All changes are correct, complete, and safe to
+test on hardware.

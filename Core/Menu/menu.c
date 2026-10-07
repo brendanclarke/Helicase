@@ -6873,8 +6873,46 @@ void menu_refreshPerfSceneLeds(void)
                          pat_sceneHasActiveSteps(scene_index),
                      (uint8_t)(LED_SEQ1 + scene_index));
     }
-    if (active_scene < 16u && (present_mask & (uint16_t)(1u << active_scene)))
-        led_setBlinkLed((uint8_t)(LED_SEQ1 + active_scene), 1u);
+    if (active_scene < 16u && (present_mask & (uint16_t)(1u << active_scene))) {
+        /*
+         * Active Scene LED tempo pulse (S077 P2 §5.1).
+         *
+         * What: while the transport runs, the active Scene's SEQ LED is on at
+         * beat boundaries and off between them, driven by
+         * seq_ledState.beatPulse and refreshed on every BEAT dirty event (see
+         * ledHandler.c). While stopped it keeps the standard blink. Why:
+         * distinguishes the active Scene from merely viewed Scenes and gives
+         * tempo-synchronised feedback. Affiliates: led_processSeqLedState()
+         * (the BEAT drain that calls back into this function in PERF mode).
+         */
+        if (seq_isRunning()) {
+            led_setBlinkLed((uint8_t)(LED_SEQ1 + active_scene), 0u);
+            led_setValue(seq_ledState.beatPulse,
+                         (uint8_t)(LED_SEQ1 + active_scene));
+        } else {
+            led_setBlinkLed((uint8_t)(LED_SEQ1 + active_scene), 1u);
+        }
+    }
+    {
+        /*
+         * Viewed Scene rapid indication (S077 P2 §5.2).
+         *
+         * What: when PAR_FOLLOW is off and the viewed Scene differs from the
+         * active Scene, the viewed Scene's SEQ LED blinks. Why: shows which
+         * Scene the user is viewing/editing while playback follows a different
+         * active Scene. A viewed Scene equal to the active Scene keeps the
+         * tempo pulse. Note: this uses the LED engine's single persistent blink
+         * cadence (LED_BLINK_TIME_MS, ledHandler.c); the engine has no separate
+         * rapid rate, so the indication is the blink-versus-pulse difference
+         * rather than a distinct fast cadence.
+         */
+        uint8_t viewed = menu_getViewedPattern();
+
+        if (!parameter_values[PAR_FOLLOW] && viewed < 16u &&
+            viewed != active_scene &&
+            (present_mask & (uint16_t)(1u << viewed)))
+            led_setBlinkLed((uint8_t)(LED_SEQ1 + viewed), 1u);
+    }
 }
 
 void menu_perfModeSceneButtonPressed(uint8_t scene_index)

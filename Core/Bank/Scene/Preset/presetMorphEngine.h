@@ -73,6 +73,16 @@ void presetMorph_rebuildScene(uint8_t scene_index);
  */
 void presetMorph_applyVoiceNow(uint8_t scene_index, uint8_t slot);
 /*
+ * Synchronously rebuild one per-track slot's Morph interpolation from its
+ * played Scene (S077 P2 §3.4).
+ *
+ * Inputs: the track's played Scene index and zero-based slot. Output: the
+ * slot's morph_interpolation[] image is rebuilt and the live runtime is written
+ * even though the Scene is not the active Scene. Client:
+ * preset_resetAndApplyKitVoiceImage() on the single-voice per-track path.
+ */
+void presetMorph_applyVoiceNowFromScene(uint8_t scene_index, uint8_t slot);
+/*
  * Set the hidden LFO Morph layer for one target voice.
  *
  * Inputs: Scene index, zero-based target voice slot, source LFO slot, target
