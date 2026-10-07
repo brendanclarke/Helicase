@@ -5641,6 +5641,69 @@ static void menu_residentNameScratchFlushComplete(void)
         menu_repaintAll();
 }
 
+static void menu_residentNameDeferredFlushComplete(void)
+{
+    /*
+     * What: completion callback for the background HCNAMES rewrite that runs
+     * after leaving Load/Save with a nonzero dirty-Scene mask.
+     *
+     * Why this exists as a separate callback: the foreground callback
+     * menu_residentNameScratchFlushComplete() was written for name-session
+     * boundaries *inside* the Load page, where the next browser view needs
+     * the write's result. It therefore raises and clears menu_storageBusy,
+     * clears the browser name cache, posts browser requests, repaints, and
+     * enters the next Kit/Instrument context. None of those actions apply
+     * after leaving Load/Save: the destination page is already visible and
+     * fully working, the browser cache is already disposed (menu_switchPage()
+     * line 13334), and menu_storageBusy must never be raised on this path
+     * because it would lock mode buttons, encoder, pots, runtime widgets,
+     * and copy/clear for the ~3 s write duration (the root cause of
+     * S077_P3_BLANK_MENU_AFTER_SCN_LOAD.md §3).
+     *
+     * Inputs: the filesystem facade status at the moment the HCNAMES write
+     * completed (FS_STATUS_DONE on success, FS_STATUS_ERROR on failure).
+     *
+     * Outputs:
+     *   - filesystem_ack() is called exactly once on both paths, returning
+     *     the shared facade from DONE/ERROR to IDLE. This is mandatory:
+     *     without it the facade stays at its terminal status and blocks
+     *     AutoSave, the trace flush, and every other idle-only scheduler
+     *     rung permanently. See the identical pattern in
+     *     menu_residentNameScratchFlushComplete() (line 5610) and
+     *     menu_showFilesystemErrorOverlay() (line 5069 ff.).
+     *   - Success: menu_residentNameDirtySceneMask is cleared. The in-RAM
+     *     name block and the card copy now agree. No cache clear, no browser
+     *     request, no repaint — the visible page reads only SceneData,
+     *     parameter_values, and the in-RAM name block, none of which depend
+     *     on the card copy (§4 of the parent document).
+     *   - Failure: the dirty mask is kept and
+     *     menu_showFilesystemErrorOverlay() is called, which shows the FsErr
+     *     overlay exactly as today. filesystem_tick() will retry on its next
+     *     idle pass because the mask is still nonzero.
+     *   - menu_storageBusy is not touched on either path. It was never set
+     *     by the trigger (Change 2 below) and must not be set here.
+     *
+     * Common accessors: called only by filesystem_residentNames_tick() at
+     * the end of the HCNAMES write state machine via the callback pointer
+     * passed to filesystem_requestUpdateResidentKitNames().
+     *
+     * Affiliates: menu_triggerDeferredHcnamesFlush() (the trigger, Change 2),
+     * menu_residentNameScratchFlushComplete() (the foreground sibling),
+     * filesystem_requestUpdateResidentKitNames(),
+     * filesystem_residentNames_tick(), filesystem_ack(),
+     * menu_showFilesystemErrorOverlay().
+     */
+    uint8_t flush_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+
+    filesystem_ack();
+
+    if (!flush_ok) {
+        menu_showFilesystemErrorOverlay();
+        return;
+    }
+    menu_residentNameDirtySceneMask = 0u;
+}
+
 static uint8_t menu_endResidentNameScratchSession(void)
 {
     /*
@@ -5663,6 +5726,27 @@ static uint8_t menu_endResidentNameScratchSession(void)
         menu_residentNameScratchScene =
             MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
         filesystem_clearNameCache();
+        return 0u;
+    }
+    if (filesystem_status() == FS_STATUS_BUSY) {
+        /*
+         * Skip the boundary flush quietly while another owner holds the
+         * facade (S077 P3).
+         *
+         * What: return 0 with the dirty mask, scratch, and menu_storageBusy
+         * untouched, and no error overlay. Why: the background HCNAMES write
+         * started by menu_triggerDeferredHcnamesFlush() no longer locks the
+         * Menu, so the user can re-enter Load/Save and cross a session
+         * boundary while it runs. That write is already serializing these
+         * mask bits, and the in-RAM name block cannot change while the facade
+         * is busy; a busy refusal is not a card error. Inputs: the facade
+         * status. Output: callers continue on their existing 0-return path,
+         * whose next browser request defers on the busy facade and retries
+         * once it is idle. The DEV trace keeps the FAILED record. Affiliates:
+         * menu_residentNameDeferredFlushComplete(), menu_deferSelectionRequest.
+         */
+        menu_traceInstrumentEntry(
+            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_HCNAMES_FLUSH, 1u);
         return 0u;
     }
     menu_storageBusy = 1u;
@@ -5695,18 +5779,55 @@ uint8_t menu_hasResidentNameDirtyMask(void)
 void menu_triggerDeferredHcnamesFlush(void)
 {
     /*
-     * What: hand one deferred HCNAMES checkpoint to the filesystem facade.
-     * Why: leaving Load/Save must repaint immediately; the dirty mask survives
-     * until this idle scheduler rung can safely start the existing atomic
-     * writer. Inputs: an idle facade and a nonzero Menu dirty mask. Outputs:
-     * one accepted HCNAMES request, or retained dirty state on refusal.
-     * Affiliates: menu_endResidentNameScratchSession(), filesystem_tick(),
-     * and menu_residentNameScratchFlushComplete().
+     * What: hand one deferred HCNAMES rewrite to the filesystem facade as a
+     * background write that does not lock the Menu.
+     *
+     * Why: after leaving Load/Save, the dirty-Scene mask records Kit and
+     * Instrument identity rows whose in-RAM names have been updated by a
+     * completed load or save but whose card copy in `/.hcnames` is stale.
+     * The destination page must be fully working immediately — mode buttons,
+     * encoder, pots, runtime widgets, and copy/clear — so this path must not
+     * raise menu_storageBusy. The old implementation delegated to
+     * menu_endResidentNameScratchSession(), which raised menu_storageBusy
+     * and used the foreground callback menu_residentNameScratchFlushComplete().
+     * That locked the entire Menu for the ~3 s write duration, causing the
+     * blank-VOICE-page and encoder-lock symptoms described in
+     * S077_P3_BLANK_MENU_AFTER_SCN_LOAD.md §3.
+     *
+     * Inputs: an idle filesystem facade (checked by filesystem_tick() before
+     * calling this function, line 25621), copy/clear not suspended (same
+     * gate), and a nonzero menu_residentNameDirtySceneMask. The page must
+     * not be LOAD_PAGE or SAVE_PAGE (those sessions manage their own
+     * foreground flushes). The name scratch was already invalidated and the
+     * browser cache already cleared at Load/Save exit (menu_switchPage()
+     * lines 13331–13334).
+     *
+     * Outputs:
+     *   - Calls filesystem_requestUpdateResidentKitNames() directly with the
+     *     dirty mask and the new background callback
+     *     menu_residentNameDeferredFlushComplete().
+     *   - Does NOT touch menu_storageBusy. The filesystem goes BUSY for the
+     *     duration of the write, which prevents AutoSave and other facade
+     *     users from starting, but the Menu itself remains fully responsive.
+     *   - If the request is refused (filesystem reports busy despite the
+     *     caller's check — a race that the existing retry tolerates), the
+     *     mask stays set and filesystem_tick() retries on the next idle pass.
+     *
+     * Common accessors: called only from filesystem_tick() (line 25623)
+     * through the menu_hasResidentNameDirtyMask() / page-check gate.
+     *
+     * Affiliates: menu_residentNameDeferredFlushComplete() (the callback),
+     * menu_endResidentNameScratchSession() (the foreground sibling, unchanged,
+     * still used by all in-session boundaries on the Load page),
+     * filesystem_tick(), filesystem_requestUpdateResidentKitNames(),
+     * filesystem_residentNames_tick().
      */
     if (menu_residentNameDirtySceneMask == 0u ||
         menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)
         return;
-    (void)menu_endResidentNameScratchSession();
+    (void)filesystem_requestUpdateResidentKitNames(
+        menu_residentNameDirtySceneMask,
+        menu_residentNameDeferredFlushComplete);
 }
 
 static void menu_residentNameScratchLoaded(void)
@@ -13322,10 +13443,15 @@ void menu_switchPage(uint8_t pageNr)
          *
          * What: discard only the browser/session view and retain the dirty
          * Scene mask. Why: the destination page must become visible on this
-         * pass; filesystem_tick() will schedule the existing atomic HCNAMES
-         * rewrite once the facade is idle. Inputs: the pre-switch dirty mask.
+         * pass, and the deferred write must not lock the Menu. The ~3 s card
+         * write that filesystem_tick() schedules once the facade is idle runs
+         * as a background operation: it holds the filesystem (as AutoSave
+         * does) but never raises menu_storageBusy, so mode buttons, encoder,
+         * pots, runtime widgets, and copy/clear remain responsive throughout.
+         * Inputs: the pre-switch dirty mask.
          * Outputs: no new buffer, no identity mutation, and no page-exit wait.
-         * Affiliates: menu_triggerDeferredHcnamesFlush() and the next idle
+         * Affiliates: menu_triggerDeferredHcnamesFlush(),
+         * menu_residentNameDeferredFlushComplete(), and the next idle
          * filesystem scheduler rung.
          */
         menu_residentNameScratchValid = 0u;

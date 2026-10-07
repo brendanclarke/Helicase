@@ -6602,9 +6602,10 @@ static void filesystem_residentNames_tick(void)
      * Read `/.hcnames`, optionally replace affected Instrument or Kit rows,
      * and write the variable-length register through the normal flush gate.
      *
-     * Load mode is used on Instrument or Kit menu entry: it fills the existing
-     * generalized cache and lets Menu copy one selected row before requesting
-     * the appropriate `.hcindex`. Update mode first performs that same read,
+     * Load mode is used on Instrument or Kit menu entry: it fills the
+     * dedicated `hcnames_name_mirror` and lets Menu copy one selected row
+     * before requesting the appropriate `.hcindex`. Update mode first
+     * performs that same read,
      * changes only rows identified by the completed action, then truncates and
      * streams all cached rows. A full Kit update replaces one Kit row and its
      * six Instrument rows per selected Scene; a nested Instrument update still
@@ -30487,14 +30488,14 @@ bool filesystem_requestUpdateResidentKitNames(uint16_t scene_mask,
      * Kit/Instrument family exit, plus an optional callback. Individual
      * scroll, load, and save operations only update committed SceneData and
      * Menu scratch; they do not call this updater.
-     * Output: `/.hcnames` is read into the existing generalized cache, exactly
-     * one Kit row and six Instrument rows per selected Scene are replaced from
-     * committed resident state, and the variable-length file is rewritten
-     * through the normal close/flush gate. Every unrelated logical row is
-     * preserved from the file. One exit request can therefore commit several
-     * actions and several Scenes without retaining a 16-by-7 name array. The
-     * request reuses the existing operation mask, line buffer, and general
-     * cache, so it adds no persistent SRAM storage.
+     * Output: `/.hcnames` is read into the dedicated `hcnames_name_mirror`,
+     * exactly one Kit row and six Instrument rows per selected Scene are
+     * replaced from committed resident state, and the variable-length file is
+     * rewritten through the normal close/flush gate. Every unrelated logical
+     * row is preserved from the file. One exit request can therefore commit
+     * several actions and several Scenes without retaining a 16-by-7 name
+     * array. The request reuses the existing operation mask, line buffer, and
+     * the dedicated mirror, so it adds no persistent SRAM storage.
      */
     if (status == FS_STATUS_BUSY)
         return false;

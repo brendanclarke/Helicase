@@ -903,17 +903,18 @@ void filesystem_clearIdentityNames(void);
 /*
  * Resident Instrument name-register access.
  *
- * What: the load request reads root `/.hcnames` into the existing generalized
- * name cache so Menu can copy one Scene/voice name on nested Instrument Load or
- * Save entry. The update request performs the same read, replaces only the
- * Instrument row(s) selected by scene_mask/instrument_slot from committed
- * resident state, and streams the variable-length file back before callback.
+ * What: the load request reads root `/.hcnames` into the dedicated 1,449-byte
+ * `hcnames_name_mirror` so Menu can copy one Scene/voice name on nested
+ * Instrument Load or Save entry. The update request performs the same read,
+ * replaces only the Instrument row(s) selected by scene_mask/instrument_slot
+ * from committed resident state, and streams the variable-length file back
+ * before callback.
  *
  * Why the complete file is borrowed: `.hcnames` lines are trimmed, so changing
  * one name can change its byte length and cannot safely be overwritten at a
  * fixed byte offset. Unrelated rows are preserved from the file. No additional
- * SRAM array is allocated: both operations temporarily reuse the single
- * `fs_list_cache_name[1000][9]` allocation normally occupied by `.hcindex`.
+ * SRAM array is allocated: both operations use the dedicated
+ * `hcnames_name_mirror`, not the shared `fs_list_cache_name` browser cache.
  * A multi-Scene normal Instrument Load may set several scene_mask bits; a Save
  * passes one bit. All calls are asynchronous and return false when busy or when
  * coordinates are invalid.
@@ -946,10 +947,10 @@ const char *filesystem_residentInstrumentName(uint8_t scene_index,
 /*
  * Resident Kit name-register access.
  *
- * The load request mirrors Instrument menu entry: it borrows the generalized
- * cache for all 161 root HCNAMES rows so Menu can copy one resident Scene's Kit
- * name plus all six Instrument names before `/Kit/.hcindex` replaces that same
- * allocation. Menu retains those seven rows for the complete combined
+ * The load request reads `/.hcnames` into the dedicated `hcnames_name_mirror`
+ * so Menu can copy one resident Scene's Kit name plus all six Instrument names
+ * before `/Kit/.hcindex` replaces the shared `fs_list_cache_name` browser
+ * cache. Menu retains those seven rows for the complete combined
  * Kit/Instrument session. Loads and saves only update the Menu scratch and an
  * accumulated dirty-Scene mask; they do not reopen HCNAMES. At session exit,
  * one update request replaces exactly the Kit row plus all six Instrument rows

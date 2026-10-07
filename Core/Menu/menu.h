@@ -586,11 +586,15 @@ uint8_t menu_isLoadSaveCommandActive(void);
  * What: exposes Menu's existing dirty-mask state to filesystem_tick() and
  * lets that scheduler start the existing atomic HCNAMES writer after page
  * exit. Why: page repaint/exit must not wait for HCNAMES persistence, while
- * the dirty mask must remain owned by Menu until a successful completion.
- * Inputs: no new storage; the implementation reads Menu's resident-name
- * session state. Outputs: a read-only dirty query and one deferred flush
- * request. Affiliates: filesystem_tick(), menu.c's resident-name helpers, and
- * menu_residentNameScratchFlushComplete().
+ * the dirty mask must remain owned by Menu until a successful completion. The
+ * deferred write is a background operation: it holds the filesystem (as
+ * AutoSave does) but must not raise menu_storageBusy, so mode buttons,
+ * encoder, pots, runtime widgets, and copy/clear stay responsive for the ~3 s
+ * write (S077_P3_BLANK_MENU_AFTER_SCN_LOAD.md §3). Inputs: no new storage; the
+ * implementation reads Menu's resident-name session state. Outputs: a
+ * read-only dirty query and one deferred flush request. Affiliates:
+ * filesystem_tick(), menu.c's resident-name helpers, and
+ * menu_residentNameDeferredFlushComplete().
  */
 uint8_t menu_hasResidentNameDirtyMask(void);
 void menu_triggerDeferredHcnamesFlush(void);

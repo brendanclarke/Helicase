@@ -20,14 +20,14 @@ These verify Rule A (non-automation writes clear overrides) and Rule B
 
 | # | Check | Observe | Result |
 |---|-------|---------|--------|
-| 1.1 | Play a pattern with FX send automation on a voice. While playing, turn the FX send knob on VOICE page. Verify the knob edit takes effect immediately and automation no longer holds. | D/I | |
-| 1.2 | Same test with audio-out automation: play a pattern with audio-out step automation, change the routing on VOICE page. Verify new route is heard. | D | |
-| 1.3 | Play a pattern with voice Morph automation. Change the voice Morph on PERF page. Verify the Morph edit replaces the automation value. | D/I | |
-| 1.4 | Play a pattern with slot-6 track-7 decay automation. Edit the decay on VOICE page. Verify the edit takes. | D | |
-| 1.5 | Play a pattern with Effect Morph (`fxm`) automation. Edit `fxm` on PERF or Effect page. Verify the edit replaces the override. | D/I | |
-| 1.6 | **Rule B — Scene switch clears all.** Set up automation overrides on several parameters (FX send, Morph, audio out). Switch to another Scene and back. Verify all overrides are cleared and parameters return to their stored values (not the automation values). | D/I | |
-|   | - *Edge case:* switch Scenes while playback is running with active automation on multiple override families. Verify no stale overrides persist on the return Scene. | D | |
-| 1.7 | **Regression:** normal step automation still works — values are applied during playback and cleared on transport stop/restart. | D | |
+| 1.1 | Play a pattern with FX send automation on a voice. While playing, turn the FX send knob on VOICE page. Verify the knob edit takes effect immediately and automation no longer holds. | D/I | PASS |
+| 1.2 | Same test with audio-out automation: play a pattern with audio-out step automation, change the routing on VOICE page. Verify new route is heard. | D | PASS |
+| 1.3 | Play a pattern with voice Morph automation. Change the voice Morph on PERF page. Verify the Morph edit replaces the automation value. | D/I | PASS |
+| 1.4 | Play a pattern with slot-6 track-7 decay automation. Edit the decay on VOICE page. Verify the edit takes. | D | PASS |
+| 1.5 | Play a pattern with Effect Morph (`fxm`) automation. Edit `fxm` on PERF or Effect page. Verify the edit replaces the override. | D/I | PASS |
+| 1.6 | **Rule B — Scene switch clears all.** Set up automation overrides on several parameters (FX send, Morph, audio out). Switch to another Scene and back. Verify all overrides are cleared and parameters return to their stored values (not the automation values). | D/I | PASS |
+|   | - *Edge case:* switch Scenes while playback is running with active automation on multiple override families. Verify no stale overrides persist on the return Scene. | D | PASS |
+| 1.7 | **Regression:** normal step automation still works — values are applied during playback and cleared on transport stop/restart. | D | PASS |
 
 ---
 
@@ -35,14 +35,14 @@ These verify Rule A (non-automation writes clear overrides) and Rule B
 
 | # | Check | Observe | Result |
 |---|-------|---------|--------|
-| 2.1 | Set an LFO retrigger to `scn` (value 7). Verify the label shows `scn` on the VOICE page. | I | |
-| 2.2 | With retrigger `scn`: switch Scenes while the LFO is running. Verify the LFO phase is preserved across the Scene change (the modulation continues smoothly without a jump). | D | |
-| 2.3 | With retrigger `scn` on Scene A: switch to Scene B where the same LFO has a different retrigger (e.g. `v1`). Verify the captured phase is NOT restored (the LFO should retrigger on voice 1 as configured in Scene B). | D | |
-| 2.4 | With retrigger `scn` + a nonzero phase offset: verify the LFO starts at the offset position after a non-Scene trigger event (e.g., transport start). | D | |
-| 2.5 | **Phase offset scaling:** set LFO phase offset to 64 (mid-range). Verify the LFO starts at approximately 50% phase (half-cycle). Compare with offset 0 (start) and 127 (near end). | D | |
-|   | - *Edge case:* offset 127 should place the LFO phase near 100% of the cycle, not near 0%. | D | |
-| 2.6 | **Retrigger values 0–6 regression:** verify `off`, `v1`–`v6` still work correctly (LFO retriggers on the corresponding voice track's trigger). | D | |
-| 2.7 | Save a Scene with retrigger `scn` and a nonzero offset. Load it back. Verify both values are preserved. | S | |
+| 2.1 | Set an LFO retrigger to `scn` (value 7). Verify the label shows `scn` on the VOICE page. | I | PASS |
+| 2.2 | With retrigger `scn`: switch Scenes while the LFO is running. Verify the LFO phase is preserved across the Scene change (the modulation continues smoothly without a jump). | D | PASS |
+| 2.3 | With retrigger `scn` on Scene A: switch to Scene B where the same LFO has a different retrigger (e.g. `v1`). Verify the captured phase is NOT restored (the LFO should retrigger on voice 1 as configured in Scene B). | D | PASS |
+| 2.4 | With retrigger `scn` + a nonzero phase offset: verify the LFO starts at the offset position after a non-Scene trigger event (e.g., transport start). | D | PASS |
+| 2.5 | **Phase offset scaling:** set LFO phase offset to 64 (mid-range). Verify the LFO starts at approximately 50% phase (half-cycle). Compare with offset 0 (start) and 127 (near end). | D | PASS |
+|   | - *Edge case:* offset 127 should place the LFO phase near 100% of the cycle, not near 0%. | D | PASS |
+| 2.6 | **Retrigger values 0–6 regression:** verify `off`, `v1`–`v6` still work correctly (LFO retriggers on the corresponding voice track's trigger). | D | PASS |
+| 2.7 | Save a Scene with retrigger `scn` and a nonzero offset. Load it back. Verify both values are preserved. | S | PASS |
 
 ---
 
