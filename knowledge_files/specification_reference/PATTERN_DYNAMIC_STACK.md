@@ -86,9 +86,18 @@ read-only access and `pat_sceneRegionMut(scene)` is reserved for bounded owner
 paths such as validated filesystem application. Ordinary clients use the
 public operations so mutation tracking cannot be bypassed.
 
-One additional `pat_autosave_snapshot` is exactly 10,519 bytes. It is the sole
-immutable source for an in-flight Pattern AutoSave write; there is no snapshot
-per Scene and no PAT4-sized filesystem stage.
+One additional `pat_background_region` is exactly 10,519 bytes (S077; it
+replaces the former standalone `pat_autosave_snapshot` at identical size). It
+is not a playable Scene: every Scene-indexed bound (scene_indexValid(),
+pat_patternValid(), the sequencer, the UI, PERF and Bank) stays at
+`SCENE_COUNT` (16), and it is reached only through its accessors. It serves
+three purposes that must never run concurrently: the immutable source for an
+in-flight Pattern AutoSave write (`pat_snapshotScene()` /
+`pat_autosaveSnapshot()`), the copy/clear scratch pool for an overlapping
+paste (`pat_backgroundPoolMut()`; the pool is a full PAT_STACK_SIZE * 32
+bytes, so it always fits what the source pool could hold), and future Bank
+Load staging. There is no snapshot per Scene and no PAT4-sized filesystem
+stage.
 
 ## 2. Address encoding
 

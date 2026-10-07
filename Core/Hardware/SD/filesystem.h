@@ -377,6 +377,17 @@ void filesystem_patternAutosaveBootReaderBlocking(void);
  */
 void filesystem_patternAutosaveOnLoad(uint8_t scene_index);
 /*
+ * Pattern drain snapshot-reading gate (S077).
+ *
+ * What: nonzero while the Pattern drain is reading the background region
+ * snapshot (phases 2-6). Why: an overlapping paste must not overwrite pool
+ * bytes while the drain streams them. The paste returns CC_RUN_WAIT at path
+ * selection while this is true. Inputs: internal drain state. Output:
+ * boolean. Affiliates: copyClearService.c, pat_snapshotScene(),
+ * filesystem_autosavePatternDrain_tick().
+ */
+uint8_t filesystem_patternSnapshotInUse(void);
+/*
  * Boot load driven entirely by .hcnames when it is authoritative.
  *
  * What: parses .hcnames (temp-file prelude first, then the register),

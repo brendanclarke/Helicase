@@ -57,16 +57,33 @@ _Static_assert(sizeof(pat_scene_region_t) ==
 static pat_scene_region_t pat_regions[SCENE_COUNT];
 
 /*
- * Pattern AutoSave snapshot staging buffer.
+ * Background Scene region (S077).
  *
- * What: one standalone pat_scene_region_t separate from pat_regions[]. Why:
- * the background writer snapshots one Scene in the main loop, then streams
- * it over many filesystem ticks without reading data that recording/erasing
- * may later change. SRAM cost: 10,519 bytes in SRAM1 .bss. Lifetime: static;
- * written by pat_snapshotScene() and read by pat_autosaveSnapshot(). Owner:
- * PatternData.c exclusively. Affiliate: filesystem.c Pattern drain writer.
+ * What: one additional pat_scene_region_t outside pat_regions[SCENE_COUNT].
+ * Not a playable Scene: scene_indexValid(), pat_patternValid(), the sequencer,
+ * the UI, PERF and Bank all continue to bound at SCENE_COUNT (16). It is
+ * reached only through its named accessors. Why: serves three purposes that
+ * must never overlap with live Scenes - (1) AutoSave snapshot staging for the
+ * Pattern drain writer, (2) copy/clear scratch pool for overlapping pastes
+ * that would otherwise borrow the 9 kB name buffer for block data, and
+ * (3) future Bank Load staging. SRAM cost: 10,519 bytes in SRAM1 .bss (the
+ * same footprint as the removed pat_autosave_snapshot; net zero). Lifetime:
+ * static. Owner: PatternData.c exclusively. Accessors: pat_snapshotScene(),
+ * pat_autosaveSnapshot(), pat_backgroundPoolMut(). Affiliates: filesystem.c
+ * Pattern drain writer, copyClearService.c overlapping paste engine.
+ *
+ * Ownership contract (these users must never run concurrently):
+ *   - AutoSave Pattern drain vs copy/clear snapshot: a new drain is blocked
+ *     by copyClear_backgroundSuspended(); an in-flight drain by the
+ *     filesystem_patternSnapshotInUse() gate at paste path selection.
+ *   - AutoSave Pattern drain vs Bank Load staging: future; Bank Load
+ *     suspends AutoSave by the same mechanism.
+ *   - Copy/clear snapshot vs Bank Load staging: future; copy/clear is
+ *     refused while Load/Save owns the UI (menu_storageBusy).
+ *   - Boot reader rollback copy vs any: boot only; it runs before copy/clear
+ *     or AutoSave can start.
  */
-static pat_scene_region_t pat_autosave_snapshot;
+static pat_scene_region_t pat_background_region;
 
 /*
  * Mark one Pattern mutation at the existing card-clean boundary.
@@ -88,29 +105,51 @@ static void pat_markSceneDirty(uint8_t scene_index)
  * Capture one coherent Pattern region for the background writer.
  *
  * Inputs: validated resident Scene index and an idle RECORD/ERASE boundary.
- * Output: the dedicated 10,519-byte snapshot becomes a plain copy of the
- * selected live region. No interrupt masking is performed; filesystem.c owns
- * the scheduler guard that makes the copy safe. Affiliate:
- * pat_autosaveSnapshot().
+ * Output: the background region becomes a plain copy of the selected live
+ * region. No interrupt masking is performed; the caller owns the scheduler
+ * guard that makes the copy safe. The copy/clear paste engine must check
+ * filesystem_patternSnapshotInUse() before overwriting the same region's
+ * pool during an overlapping paste (S077). Affiliate: pat_autosaveSnapshot().
  */
 void pat_snapshotScene(uint8_t scene_index)
 {
     if (!scene_indexValid(scene_index))
         return;
-    memcpy(&pat_autosave_snapshot, &pat_regions[scene_index],
+    memcpy(&pat_background_region, &pat_regions[scene_index],
            sizeof(pat_scene_region_t));
 }
 
 /*
  * Borrow the latest Pattern AutoSave snapshot for bounded file streaming.
  *
- * Input: none. Output: const pointer to PatternData's dedicated snapshot,
- * valid until the next pat_snapshotScene() call. No allocation or I/O occurs;
+ * Input: none. Output: const pointer into the background region, valid until
+ * the next pat_snapshotScene() call. No allocation or I/O occurs;
  * filesystem.c is the sole consumer. Affiliate: Pattern drain state machine.
  */
 const pat_scene_region_t *pat_autosaveSnapshot(void)
 {
-    return &pat_autosave_snapshot;
+    return &pat_background_region;
+}
+
+/*
+ * Mutable pointer to the background region's pool bytes.
+ *
+ * What: returns the raw pool array of pat_background_region for use as
+ * copy/clear scratch storage during an overlapping paste. The pool is exactly
+ * PAT_STACK_SIZE * 32 bytes (8,192 B today), the same size as every live
+ * Scene pool. Why: the overlapping paste formerly borrowed the 9 kB name
+ * buffer for block data; this accessor removes that dependency and scales
+ * automatically with PAT_STACK_SIZE. The caller writes retargeted source
+ * blocks contiguously from byte 0. The swap reservation and bitmap within the
+ * background region are irrelevant for raw scratch; only the pool bytes are
+ * used. Inputs: none. Outputs: a non-NULL mutable pointer valid for the
+ * static lifetime. The caller must ensure no concurrent reader (see the
+ * filesystem_patternSnapshotInUse() gate). Affiliates: copyClearService.c
+ * overlapping paste engine, pat_snapshotScene(), pat_autosaveSnapshot().
+ */
+uint8_t *pat_backgroundPoolMut(void)
+{
+    return pat_background_region.pool;
 }
 
 /*

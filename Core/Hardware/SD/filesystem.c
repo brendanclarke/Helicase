@@ -25818,6 +25818,31 @@ fs_status_t filesystem_status(void)
     return status;
 }
 
+/*
+ * Pattern drain snapshot-reading gate (S077).
+ *
+ * What: returns nonzero while the Pattern drain state machine is actively
+ * reading the background region snapshot. The drain reads the snapshot in
+ * phases 2-6 (header build, address array, bitmap, pool) and does not read it
+ * in phases 0-1 (chdir, fopen) or 7+ (CRC, close, HCNAMES update). Why: the
+ * overlapping paste copies source blocks into the same background region's
+ * pool; it must not overwrite pool bytes while the drain is streaming them to
+ * disk. The copyClear_backgroundSuspended() gate prevents NEW drains from
+ * starting, but an in-flight drain that began before the copy/clear session
+ * started may still be reading. This function fills that gap. Both ccSvc_tick()
+ * and filesystem_tick() are cooperative main-loop code (called from
+ * timebase_serviceFrontPanel()), so there is no interrupt race on the 10.5 kB
+ * snapshot. Inputs: current_op, op_phase (module-static). Outputs: nonzero
+ * while the snapshot is being read. Affiliates: copyClearService.c
+ * overlapping-paste path-selection gate, pat_snapshotScene(),
+ * pat_autosaveSnapshot().
+ */
+uint8_t filesystem_patternSnapshotInUse(void)
+{
+    return (uint8_t)(current_op == FS_INTERNAL_OP_AUTOSAVE_PATTERN_DRAIN &&
+                     op_phase >= 2u && op_phase <= 6u);
+}
+
 void filesystem_getBootDiagnostic(uint8_t *op, uint8_t *phase)
 {
     uint8_t public_op = FS_BOOT_DIAG_OTHER;

@@ -693,20 +693,21 @@ captures everything after the suspension ends.
   refuses every operation except the copy/clear name write (callers see a
   busy facade). Entering LOAD/SAVE right after releasing COPY therefore
   waits until the buffer is returned.
-- **Borrowed lazily, only by:** a step/bar paste that overlaps its own source
-  (snapshot) and the end-of-operation name phase. Clears, pot clears,
-  whole-Pattern copy/reset, non-overlapping pastes and Scene-level data
-  commits never wait for it.
+- **Borrowed lazily, only by:** the end-of-operation name phase (the
+  `FS_INTERNAL_OP_UPDATE_HCNAMES_COPY` overlay applies the remap from offset
+  0 of the buffer). Since S077 an overlapping paste no longer borrows the
+  buffer; it snapshots into the background region's pool (§17). Clears, pot
+  clears, whole-Pattern copy/reset, non-overlapping pastes and Scene-level
+  data commits never wait for it.
 
 | Offset (`CC_SCRATCH_*`) | Use | Bytes |
 |---|---|---:|
 | 0 | HCNAMES row remap (`0xFF` = unchanged; 161 rows) | 161 |
-| 256 | paste source table (address entries of the running paste) | ≤ 256 |
-| 512 | source blocks, retargeted (one track cannot exceed one usable pool) | ≤ 8,060 |
-| | **worst case** | **8,572** |
 
-The name write reuses the region from 256 for the original names and sources
-(1,771 B), so jobs do not start while it is in flight.
+The buffer carries the 161 B remap alone. The paste source table is the static
+`ccSvc_snapTable[128]` and the retargeted source blocks live in the background
+region's pool (S077); neither uses the borrowed buffer, so jobs copy no block
+data through it.
 
 ---
 
@@ -774,8 +775,8 @@ Run state: `run.phase` bit 0 = snapshot path; `run.sub` = phase below;
 
 | `sub` | Phase | What happens |
 |---|---|---|
-| 0 | path, buffer, claim, evacuate | Geometry from the job and source (`ccSvc_pasteGeometry()`; count 0 → `BAD_GEOMETRY`). **Overlap test** (`ccSvc_pasteOverlaps()`: same Scene and track and the destination step set intersects the source set, two 128-bit stack masks) → snapshot path, which needs the name buffer (WAIT until granted). Then claim the destination Scene and evacuate the swap block if needed. |
-| 1 | snapshot (overlap only) | Copy source address entries and blocks into the buffer, 16 per tick, retargeted for the destination. Trigger bits come from the slot's early source mask, not the live entry. |
+| 0 | path, buffer, claim, evacuate | Geometry from the job and source (`ccSvc_pasteGeometry()`; count 0 → `BAD_GEOMETRY`). **Overlap test** (`ccSvc_pasteOverlaps()`: same Scene and track and the destination step set intersects the source set, two 128-bit stack masks) → snapshot path, which waits while the Pattern drain is reading the background region snapshot (`filesystem_patternSnapshotInUse()`; WAIT until clear). Then claim the destination Scene and evacuate the swap block if needed. |
+| 1 | snapshot (overlap only) | Copy source address entries into the static `ccSvc_snapTable[128]` and the retargeted source blocks into the background region's pool (`pat_backgroundPoolMut()`), 16 per tick. Trigger bits come from the slot's early source mask, not the live entry. |
 | 2 | check | Walk the destination steps in paste order with the would-be block of each (`ccSvc_pasteBuild()` → `ccCopy_buildStep()`); for **every growing step** the free chunks before it (outside the swap block, counting reclaimable reservations) must be ≥ its new size, because old and new blocks coexist until publication. Fail → `CHECK_FAIL`, `NO_ROOM` drop; nothing has changed. Steps that do not grow always fit through the swap block. |
 | 3 | place | Up to 8 steps per tick: a growing step goes into a free run (sliding compaction first if needed) and is published; a non-growing step goes through the swap block (place, publish, free, return). Trigger bits as the selection requires. |
 | 4 | finish | Length extension or track settings (`copy track`), dirty mark (PatternData helper → Pattern AutoSave), `ccSvc_patternChangedUi()` (presence-search restart via `menu_patternContentChanged()`, step LEDs, STEP page), early flags cleared. |
@@ -962,10 +963,11 @@ bar, 3 track, 4 Scene, 5 FX step), 11..14 Scene, 15..17 track (7 = none),
 | 0x24 | `EARLY_TRIG` | 0..7 steps written (sat 255); 8 paste (0 clear); 9 source mask used; 16..18 kind; 19..22 Scene; 23..25 track; 26..27 queue slot (pastes) | `ccSvc_pasteTriggersNow()`, `ccClear_triggersOffNow()` |
 | 0x30 | `FANOUT` | 0..15 Scene mask written; 16..19 destination Scene; 20..23 kind (1 instrument, 2 kit, 3 effect, 4 send, 5 clear fx, 6 FX step paste); 24 active Scene touched; 25..28 slot (instrument/send) | Scene-level executors |
 | 0x31 | `MASK_SET` | 0..15 resulting entry; 16..19 Scene; 20 0 exchange / 1 reset; 21..24 source Scene (exchange) | `copy scene`, `copy scene settings`, `clear scene`, `clear scene settings` |
-| 0x40 | `SCRATCH` | 0 0 borrow / 1 return; 8..23 ticks waited for the borrow (sat 65,535) | `ccSvc_ensureScratch()`, teardown |
+| 0x40 | `SCRATCH` | 0 0 borrow / 1 return; 8..23 ticks waited for the borrow (S077: always 0; the snapshot wait moved to 0x51) | `ccSvc_ensureScratch()`, teardown |
 | 0x41 | `FS_REFUSED` | 0..7 refused `fs_internal_op_t`; 8..15 `current_op`; first refusal per loan only | `filesystem_start()` |
 | 0x42 | `NAMES` | 0..1 event (0 requested, 1 written, 2 error, 3 gave up); 8..15 rows copied; 16..23 reserved 0; 24..31 refused requests before acceptance (sat 255) | `ccSvc_tick()`, `ccSvc_namesWritten()` |
 | 0x50 | `SUSPEND` | 0 0 begin / 1 end; 1 facade busy at the edge; 8..15 `current_op` | `filesystem_tick()` |
+| 0x51 | `SNAPSHOT_GATE` | 0..15 ticks an overlapping paste waited for the Pattern drain to stop reading the background snapshot (sat 65,535); emitted once when the gate clears | `ccSvc_runPatternPaste()` |
 
 ### 15.3 Drop reasons (`JOB_END` bits 2..7)
 
@@ -977,7 +979,7 @@ bar, 3 track, 4 Scene, 5 FX step), 11..14 Scene, 15..17 track (7 = none),
 | 3 | `ADVANCED_LIMIT` (`copy instrument`) | refusing member Scene (low nibble), slot (high nibble) |
 | 4 | `FX_TYPE_MISMATCH` (FX step paste) | source type (low), destination type (high) |
 | 5 | `NO_SOURCE` | — |
-| 6 | `NO_SCRATCH` (snapshot engine without the buffer) | — |
+| 6 | `NO_SCRATCH` (retired in S077; no producer remains) | — |
 | 7 | `BAD_SELECTION` (dispatch default) | selection |
 | 8 | `BAD_GEOMETRY` (paste count 0) | kind |
 
@@ -1058,7 +1060,9 @@ S075 close are marked ◻.
 | `fs_name_cache_borrowed` (filesystem) | 1 | SRAM1 |
 | DEV trace state + filesystem latches | 24 | SRAM1, `DEV_MODE_LOGGING` only |
 | Swap block | 132 per Scene | Pattern pool data, not RAM |
-| Name buffer | ≤ 8,572 of 9,000 | borrowed, not new |
+| Paste source table (`ccSvc_snapTable[128]`) | 256 | SRAM1 `.bss` (S077, approved) |
+| Background region pool (paste snapshot target) | ≤ 8,060 of 8,192 | Pattern pool data, not new |
+| Name buffer | 161 of 9,000 | borrowed, not new (S077: remap only) |
 | Stack peaks | ≈ 1.2 KB live paste path; 288 B FX snapshot; 504 B merge lists | foreground main loop |
 | CPU | 8 steps / 16 snapshot reads / 32 region entries per 2 ms tick; ≤ 0.1 % while an older writer finishes | foreground only; no audio-path work |
 
@@ -1091,7 +1095,8 @@ Exact linked totals: `STORAGE_SRAM_MANIFEST.md` §5, §8.2.
 
 - **No data clipboard:** free SRAM1 is reserved for Pattern data; the source
   is read when each paste runs (all 16 Patterns are resident), and only an
-  overlapping paste borrows the name buffer for a snapshot.
+  overlapping paste takes a snapshot, into the background region's pool
+  (`pat_backgroundPoolMut()`) rather than the 9 kB name buffer (S077).
 - **Step-by-step placement with a swap block** instead of erase-then-write:
   a step is never missing and TIM3 never reads half a block, even in a full
   pool.

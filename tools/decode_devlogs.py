@@ -542,7 +542,7 @@ CC_EVENTS = {
     0x20: "REG_ADD", 0x21: "REG_REFUSED", 0x22: "REG_DONE",
     0x23: "FX_CLEAR", 0x24: "EARLY_TRIG", 0x30: "FANOUT",
     0x31: "MASK_SET", 0x40: "SCRATCH", 0x41: "FS_REFUSED",
-    0x42: "NAMES", 0x50: "SUSPEND",
+    0x42: "NAMES", 0x50: "SUSPEND", 0x51: "SNAPSHOT_GATE",
 }
 CC_KINDS = {1: "step", 2: "bar", 3: "track", 4: "scene", 5: "fx-step"}
 CC_DROP = {0: "none", 1: "NO_ROOM", 2: "EVACUATE_FAILED",

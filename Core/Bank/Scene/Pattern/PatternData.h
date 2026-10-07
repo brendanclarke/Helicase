@@ -425,6 +425,19 @@ uint8_t pat_setStepVolume(uint8_t scene_index, uint8_t track, uint8_t step,
  */
 void pat_snapshotScene(uint8_t scene_index);
 const pat_scene_region_t *pat_autosaveSnapshot(void);
+/*
+ * Mutable pointer to the background region's pool (S077).
+ *
+ * What: the raw PAT_STACK_SIZE * 32 pool bytes of the background region, for
+ * use as copy/clear scratch storage during an overlapping paste. Why:
+ * replaces the 9 kB name-buffer borrow for block data; the pool is always
+ * large enough (same type as the source pool) and scales with PAT_STACK_SIZE.
+ * The caller must ensure no concurrent snapshot reader
+ * (filesystem_patternSnapshotInUse() gate). Inputs: none. Outputs: non-NULL
+ * mutable pointer (static lifetime). Affiliates: copyClearService.c,
+ * pat_snapshotScene(), pat_autosaveSnapshot().
+ */
+uint8_t *pat_backgroundPoolMut(void);
 
 /*
  * Compute one resident Scene's dynamic-pool occupancy for the Global widget.

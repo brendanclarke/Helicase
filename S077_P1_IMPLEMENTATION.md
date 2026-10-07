@@ -695,3 +695,98 @@ by Steps 3F, 3G, 3H, and 3I.
 | T4 | AutoSave Pattern drain after a copy operation | The background region holds the snapshot, not stale copy data. |
 | T5 | Power-cycle after paste + AutoSave | Pattern content survives (PAT4 file valid). |
 | T6 | HCNAMES write after paste | Name remap still works (borrowed name buffer, remap-only). |
+
+---
+
+## Progress Log (S077 session notes)
+
+### Step 1 - allocate the 17th region (PatternData) - DONE
+- **1A** replaced `pat_autosave_snapshot` with `static pat_scene_region_t
+  pat_background_region;` and the new comment block (three purposes plus the
+  ownership contract). [`PatternData.c` L59-86]
+- **1B/1C** `pat_snapshotScene()` and `pat_autosaveSnapshot()` now copy from
+  and return `pat_background_region`.
+- **1D/1E** added `uint8_t *pat_backgroundPoolMut(void)` (returns
+  `pat_background_region.pool`) and declared it in the header.
+- No caller changes were needed: filesystem.c and the boot reader keep using
+  the unchanged accessor names (Step 2 confirmed there is no other reference
+  to the removed variable anywhere in `Core/`).
+
+### Step 2 - AutoSave snapshot migration - DONE
+- No code beyond Step 1. The drain writer's `pat_autosaveSnapshot()` call and
+  the boot reader's snapshot/restore pair now point into the background
+  region. Boot runs before copy/clear or AutoSave, so there is no contention.
+
+### Step 3 - copy/clear snapshot -> background pool - DONE
+- **3A** added `static uint16_t ccSvc_snapTable[NUM_STEPS];` (128 entries,
+  256 B SRAM1).
+- **3B** widened `CC_SNAP_OFFSET` `0x07FF` -> `0x0FFF` and added
+  `_Static_assert(PAT_POOL_ALLOC_CHUNKS <= CC_SNAP_OFFSET + 1u)`.
+- **3C/3D** `ccSvc_table()` returns the static table; `ccSvc_snapBlock()`
+  indexes `pat_backgroundPoolMut()`.
+- **3E** the SNAPSHOT phase writes retargeted blocks into the background pool.
+- **3F** overlap path selection waits on `filesystem_patternSnapshotInUse()`
+  instead of `ccSvc_ensureScratch()`.
+- **3G** removed `CC_SCRATCH_TABLE_OFFSET` and `CC_SCRATCH_BLOCK_OFFSET`.
+- **3H** removed the pool-fits-name-buffer assert (see deviation 1).
+- **3I** rewrote the `ccSvc_scratch()` comment: the loan is remap-only.
+- **3J/3K** `PatternData.h` and `filesystem.h` were already included.
+
+### Step 4 - snapshot gate and mutual exclusion - DONE
+- **4A/4B** added `filesystem_patternSnapshotInUse()` in filesystem.c and its
+  declaration in filesystem.h: true while `current_op ==
+  FS_INTERNAL_OP_AUTOSAVE_PATTERN_DRAIN && op_phase >= 2u && op_phase <= 6u`.
+  Verified against the drain: phase 2 builds the header from the snapshot,
+  phases 4-6 stream address/bitmap/pool, phases 0-1 and 7+ do not read it.
+- **4C** added `AUTOSAVE_TRACE_CC_EVT_SNAPSHOT_GATE 0x51u` (AutosaveTrace.h)
+  and the matching decoder name in `tools/decode_devlogs.py`.
+- **4D** the gate records one `SNAPSHOT_GATE` trace record per wait episode
+  (see deviation 2).
+- Confirmed the new-drain side of the contract: `copyClear_backgroundSuspended()`
+  is consulted by the background-writer scheduler that admits "both Pattern
+  AutoSave drains" (filesystem.c ~L25568), so no drain starts during a
+  copy/clear session; the gate covers a drain already in flight.
+
+### Step 5 - name buffer borrowing (reduced scope) - DONE
+- The borrow remains for the 161 B remap and the HCNAMES write; the overlap
+  path no longer borrows. `ccSvc_namesReady()` (copyOps.c Scene executors) and
+  the names-dirty branch in `ccSvc_tick()` are unchanged, and
+  `fs_list_cache_name`'s [0..160] remap offsets (0-161) are unchanged.
+
+### Step 6 - build, test and document - DONE (build + docs); hardware pending
+- `make all`: clean. New warnings: none. The only warnings are pre-existing
+  (unrelated filesystem.c unused functions; `PatternData.c` packed-member
+  address at the pre-existing `pat_addrPtr()`).
+- `make img`: OK, `build/LXRV2_lxr02.img` (payload 536,456 B).
+- `arm-none-eabi-size`: `text=536,040`, `data=416`, `bss=427,008`.
+- New symbols: `ccSvc_snapTable` 0x100 (256 B), `pat_background_region`
+  0x2917 (10,519 B).
+- `link_budget.py`: flash 536,456 / 753,664 (headroom 217,208 B); ITCM 4,168;
+  DTCM statics 4,472; FXBUF margin 3,712.
+- Docs updated: `COPYCLEAR_UTILITIES.md` §11.7, §12.5, §15.2, §15.3, §17, §18;
+  `PATTERN_DYNAMIC_STACK.md` §1; `STORAGE_SRAM_MANIFEST.md` §5, §8.2, §11.
+
+### Deviations / decisions taken during implementation
+1. **§3H assert had to be retargeted, not left as written.** The plan kept the
+   remap assert referencing `CC_SCRATCH_TABLE_OFFSET`, but change 3G removes
+   that define, so the file would not compile. Retargeted it to
+   `FS_NAME_SCRATCH_BYTES` with the message "HCNAMES remap must fit the
+   borrowed name buffer"; the invariant (the 161-row remap fits the 9,000 B
+   loan) is preserved.
+2. **§4D trace shape.** The plan's snippet emitted a 0x51 record on every
+   gated tick with value 0, which would flood the bounded DEV trace ring
+   (2,048 records) during a multi-hundred-millisecond drain and bury the rest
+   of the operation. Implemented one record per wait episode carrying the
+   accumulated tick count, emitted when the gate clears (reusing the existing
+   `scratch_wait` counter, which the snapshot path no longer uses). This is
+   what "record the gate wait (ticks)" and test T2 ask for.
+3. **Measured `.bss` delta is +264 B, not +256 B.** Only 256 B of new storage
+   is declared (`ccSvc_snapTable`; the region is net zero against the removed
+   snapshot), so the extra 8 B is section alignment/LTO placement. Recorded
+   the measured totals (SRAM1 `.bss` 293,356; SRAM1 total static 296,872;
+   free 79,960) in `STORAGE_SRAM_MANIFEST.md` §5 rather than the plan's
+   rounded +256.
+
+### Not done here
+- **T1-T6 are hardware tests** (SD card + LXR-02). They were not run in this
+  session; the trace event 0x51 and the wait behaviour are ready for T2.

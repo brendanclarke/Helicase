@@ -88,23 +88,21 @@ void ccSvc_interactionStarted(void);
 /* Run state of the job at the queue head (valid only inside an executor). */
 cc_run_t *ccSvc_run(void);
 /*
- * Borrowed 9 kB name buffer (S075, F1-I).
+ * Borrowed 9 kB name buffer (S075 F1-I; S077 reduced scope).
  *
- * What: the filesystem's name cache, lent to copy/clear only when it is used:
- * by a step/bar paste that overlaps its own source (snapshot), and by the
- * name remap and its end-of-operation HCNAMES write. Clears, pot clears,
- * whole-Pattern copy/reset, non-overlapping pastes and Scene-level data
- * commits never wait for it. ccSvc_scratch() returns NULL while not borrowed.
- * Layout (spec §9.3): [0..160] HCNAMES row remap (0xFF = unchanged);
- * [256..511] paste source table; [512..] source blocks. Accessors:
+ * What: the filesystem's name cache, lent to copy/clear only for the HCNAMES
+ * row remap and the end-of-operation name write. Source block data and the
+ * paste source table are no longer stored here (S077: blocks use the
+ * background region's pool; the table is a static uint16_t[128]). Clears, pot
+ * clears, whole-Pattern copy/reset, non-overlapping pastes and Scene-level
+ * data commits never wait for it. ccSvc_scratch() returns NULL while not
+ * borrowed. Layout: [0..160] HCNAMES row remap (0xFF = unchanged). Accessors:
  * copyClearService.c, copyOps.c.
  */
 uint8_t *ccSvc_scratch(void);
 /* Borrow scratch for the final name phase; zero while filesystem is busy. */
 uint8_t ccSvc_namesReady(void);
 #define CC_SCRATCH_REMAP_OFFSET   0u
-#define CC_SCRATCH_TABLE_OFFSET   256u
-#define CC_SCRATCH_BLOCK_OFFSET   512u
 
 /*
  * Bounded engines shared by the executors (each returns CC_RUN_*):

@@ -282,14 +282,14 @@ only works while sector 6 holds no code.
 
 ---
 
-## 5. Static RAM ledger (Session 075 close DEV link; unchanged since F2)
+## 5. Static RAM ledger (Session 077 close DEV link)
 
 | Region and section | Start | Capacity | Static bytes | Free |
 |---|---|---:|---:|---:|
 | SRAM1 `.dma_nocache` | `0x20020000` | part of SRAM1 | 3,100 | — |
 | SRAM1 `.data` | `0x20020c1c` | part of SRAM1 | 416 | — |
-| SRAM1 `.bss` | `0x20020dc0` | part of SRAM1 | 293,060 | — |
-| **SRAM1 total** | `0x20020000` | **376,832** | **296,576** | **80,256** |
+| SRAM1 `.bss` | `0x20020dc0` | part of SRAM1 | 293,356 | — |
+| **SRAM1 total** | `0x20020000` | **376,832** | **296,872** | **79,960** |
 | DTCM `.dtcm` | `0x20000000` | part of DTCM | 512 | — |
 | DTCM `.dtcmz` | `0x20000200` | part of DTCM | 3,960 | — |
 | DTCM `.dtcm_fxbuf` (arena) | `0x20001180` | part of DTCM | 126,592 | 0 (reserved arena) |
@@ -297,8 +297,17 @@ only works while sector 6 holds no code.
 | ITCM `.itcm` (code) | `0x00000000` | 16,384 | **4,168** | 12,216 |
 | SRAM2 `.devwdg_noinit` | `0x2007c000` | 16,384 | 0 | see stack note |
 
-- Static data RAM (SRAM1 + DTCM including the arena) is 427,640 B;
-  including ITCM code, 431,808 B.
+- Static data RAM (SRAM1 + DTCM including the arena) is 427,936 B;
+  including ITCM code, 432,104 B.
+- **Session 077 changes (approved: +256 B S077 allocation):** the only new
+  owner is `copyClearService.c`: `ccSvc_snapTable` (256 B, the static paste
+  source table). `pat_background_region` (10,519 B) replaces the former
+  `pat_autosave_snapshot` at identical size, so the section moved +264 B
+  (the 256 B table plus 8 B of section alignment). DEV link `text=536,040`,
+  `data=416`, `bss=427,008`; flash payload 536,456 B.
+- **Session 076 changes:** `lfo_scene_handoff` (28-byte struct plus
+  alignment, +32 B `.bss`). DEV link `text=535,976`, `data=416`,
+  `bss=426,744`.
 - **Session 075 changes (approved: +101 B F2 allocation ledger):** the F1
   implementation and F2 overlay/data additions produce the current DEV
   `.bss` 293,060 B, `.data` 416 B, DTCM `.dtcmz` 3,960 B (the FX arena is
@@ -425,7 +434,7 @@ byte, including alignment and small variables omitted here.
 | --- | ---: | --- |
 | `SceneData.c`: `scenes` | 26,080 | Sixteen resident Scene records, 1,630 B each: 50 B settings including the S075 F2 `fx_send_morph[6]`, 420 B Scene-owned Effect record, and the 1,160 B Kit; Pattern regions are separate. |
 | `PatternData.c`: `pat_regions` | 168,304 | Sixteen packed regions of 10,519 B: each has 1,792 B step addresses, 8,192 B pool, 512 B bitmap, and 23 B Pattern/track settings. Since S075 the top 132 B of each pool (33 chunks) is a permanent swap block outside normal allocation (8,060 B usable), kept as a guaranteed rewrite area for copy/clear and later features (`PATTERN_DYNAMIC_STACK.md` §3, §12.17). |
-| `PatternData.c`: `pat_autosave_snapshot` | 10,519 | One Scene-sized snapshot for an in-flight Pattern AutoSave. |
+| `PatternData.c`: `pat_background_region` | 10,519 | One Scene-sized background region outside `pat_regions[]`, not a playable Scene (S077). Serves as the immutable snapshot for an in-flight Pattern AutoSave, the copy/clear scratch pool for an overlapping paste (`pat_backgroundPoolMut()`), and future Bank Load staging. Replaces the former `pat_autosave_snapshot` at identical size. |
 | `PatternStackService.c`: `reservation_image` | 512 | One non-persisted bit image for the current service Scene's trailing pool reservations; three separate one-byte policy/rebuild flags accompany it. |
 | `PatternStackService.c`: `service_queue` | 256 | Sixty-four 32-bit mutation entries; cursors and repair/handover state are additional small SRAM1 objects. |
 | `Autosave.c`: `autosave_dirty_mask` | 3,856 | Sole canonical scalar dirty-bit mask. |
@@ -435,9 +444,10 @@ byte, including alignment and small variables omitted here.
 | `filesystem.c`: `fs_autosave_parameter_cache` | 4,608 | Bounded scalar AutoSave patch offsets and values. |
 | `filesystem.c`: `fs_stage_workspace` | 2,048 | One union shared by Kit, Instrument, Scene+Effect, AutoSave writer, and HCNAMES regeneration staging. The Scene+Effect peak is 1,625 B (the typed-load assert sums to 2,009 of 2,048 since S074); union members are not additive. The AutoSave writer member gained the 1-byte `overlong_mask` in S074 (0 B: inside the union). |
 | `filesystem.c`: `staging_buf` | 512 | Shared streaming and trace-batch buffer. |
-| `filesystem.c`: `fs_list_cache_name` | 9,000 | One 1,000 × 9 browser/index name cache. Since S075 it is also lent to copy/clear as working storage while an operation runs (`filesystem_borrowNameCacheScratch()`; tag `FS_NAME_CACHE_COPYCLEAR`): [0..160] HCNAMES row remap, [256..511] paste source table, [512..] source blocks (≤ 8,060 B), Kit/Effect/FX-range copies, and at the end the original HCNAMES names/sources (1,771 B at 256). Worst case 8,572 B. While lent, cache disposal is ignored and other filesystem ops are refused; the cache is cleared on return and Load/Save reloads its index. |
+| `filesystem.c`: `fs_list_cache_name` | 9,000 | One 1,000 × 9 browser/index name cache. Since S075 it is also lent to copy/clear as working storage while an operation runs (`filesystem_borrowNameCacheScratch()`; tag `FS_NAME_CACHE_COPYCLEAR`): [0..160] HCNAMES row remap. Since S077 the paste source table and source blocks no longer use this buffer (the table is the static `ccSvc_snapTable[128]`; the blocks use `pat_background_region.pool`), so the loan carries the 161 B remap only. While lent, cache disposal is ignored and other filesystem ops are refused; the cache is cleared on return and Load/Save reloads its index. |
 | `copyClearSession.c` / `copyClearService.c` | 215 | Copy/clear operation state, source, raw-index press stack, edge masks; queue of four 6 B jobs, eight-entry pot-clear register, run state, early-trigger masks, trickle credit and name-buffer pointer (S075 F1). The +131 B F1 owner delta is separate from the −7 B retired LED state in the net ledger. |
 | `filesystem.c`: `hcnames_name_mirror`, `fs_resident_source` | 1,771 | Separate 161 × 9 HCNAMES names and 161 × 2 provenance sources; Effect rows are 145..160. |
+| `copyClearService.c`: `ccSvc_snapTable` | 256 | Static 128 × `uint16_t` paste source table (S077, approved): bit 15 source trigger, bit 14 stored block, bits 11..0 pool chunk offset. Replaces the table formerly cast into the borrowed name buffer and covers a future `PAT_STACK_SIZE` of 512. |
 | `filesystem.c`: `op_effect_display_name` | 9 | Cached Effect filename stem for the current Scene/Bank child save. |
 | `filesystem.c`: `op_effect_state` | 7 | Bounded `.fx` parser state retained across async file-reader passes. |
 | `filesystem.c`: `fs_identity_name`, `fs_identity_valid_mask` | 74 | Eight × 9 Scene/Kit/Instrument identity strings plus a 16-bit validity mask; the Bank's nine-byte name is held separately by BankData. |
@@ -576,3 +586,10 @@ not describe it in detail.
     unstamped);
   - final link `text=502,512`, `data=416`, `bss=426,392`; payload
     502,928 B.
+- **S076:** `lfo_scene_handoff` (28-byte struct plus alignment, +32 B
+  `.bss`). DEV link `text=535,976`, `data=416`, `bss=426,744`.
+- **S077:** the static paste source table `copyClearService.c:ccSvc_snapTable`
+  (+256 B, approved); `PatternData.c:pat_background_region` (10,519 B)
+  replaces `pat_autosave_snapshot` at identical size. Section +264 B (256 B
+  table plus 8 B alignment). DEV link `text=536,040`, `data=416`,
+  `bss=427,008`; flash payload 536,456 B.
