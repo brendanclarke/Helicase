@@ -728,3 +728,50 @@ Written: build/LXRV2_lxr02.img (539116b) OK
   Scene, Pot-1 to Bank, and nested Instrument Load entry from Kit.
   Expected: no FsErr, and names fill in after the write.
 - Changes are uncommitted; the user manages commits.
+
+---
+
+## Hardware Verification (user, 2026-10-08)
+
+**Result: the reported bug is fixed.** On the A1-fixed image
+(`build/LXRV2_lxr02.img`, 539,116 B), the user can no longer produce a blank
+screen after a Scene Load. Both reproduction paths from
+`S077_P3_BLANK_MENU_AFTER_SCN_LOAD.md` §1 were covered by the user's re-test:
+
+- the original non-active-Scene repro (load into slot 12 → PERF → SEQ 12 →
+  MODE VOICE → SELECT 6);
+- the minimal active-Scene repro (load → PERF → MODE VOICE → SELECT).
+
+**Assessment:**
+
+- The hardware result confirms the root cause in the bug doc §3: the
+  background `.hcnames` rewrite was holding `menu_storageBusy`.
+- It also confirms the fix in §5: the write now runs without locking the
+  Menu.
+- A1 caused no regression in the tested paths.
+
+**Related checklist result:** `S077_RETEST_CHECKLIST.md` P3 (S076 copy/clear
+Morph additions, items 3.1–3.18) was tested on the same image and marked
+PASS. That section exercises copy/clear, the gesture this fix unblocked
+during the write window. The check covers the existing feature, not
+copy/clear started during the write itself.
+
+**Not reported in this pass** (remain open, bug doc §10 and the A1 test):
+
+- **Encoder, pot and widget responsiveness** immediately after leaving
+  Load/Save (§10 test 3). The encoder lock was the second symptom, so this
+  is expected fixed but not explicitly reported.
+- **Kit, Instrument and Save variants** (§10 test 5).
+- **Load/Save re-entry within ~3 s**, including the A1 boundary sequence
+  (§10 tests 6–9): type-row change off Scene, Pot-1 to Bank, and nested
+  Instrument entry. Expected: no FsErr, names fill in after the write.
+- **Persistence of the rewritten `/.hcnames` rows** across a power cycle
+  (§10 tests 10–11).
+- **Regressions:** in-session Load-page flushes and AutoSave scheduling
+  (§10 tests 12–14).
+
+**Still open in code:** A2 (stale comment references) and A3 (log wording),
+both cosmetic.
+
+**Status:** fix accepted on the primary symptom. Changes are uncommitted;
+the user manages commits.

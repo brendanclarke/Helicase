@@ -33,8 +33,9 @@
  * One queued paste or clear (6 B). op: class | selection. kind: source kind
  * (paste) or object kind (clear). scene/track: destination (paste) or object
  * Scene/track (clear). start: destination start (paste: absolute step, bar,
- * track, Scene or FX step) or object start. end: object end (clear); unused
- * for pastes (the length comes from the operation's source).
+ * bar-to-step absolute step, track, Scene or FX step) or object start.
+ * end: object end (clear); unused for pastes (the length comes from the
+ * operation's source).
  */
 typedef struct {
     uint8_t op;
@@ -106,8 +107,8 @@ uint8_t ccSvc_namesReady(void);
 
 /*
  * Bounded engines shared by the executors (each returns CC_RUN_*):
- * ccSvc_runPatternPaste(): step, range, bar and `copy track` pastes (spec
- * §9.5). ccSvc_runPatternClear(): step/bar/track and PERF Pattern clears
+ * ccSvc_runPatternPaste(): step, range, bar, bar-to-step and `copy track`
+ * pastes (spec §9.5). ccSvc_runPatternClear(): step/bar/track and PERF Pattern clears
  * (spec §5). ccSvc_runRegionCopy(): whole-Pattern copy src -> dst with
  * retargeting when types differ (spec §9.8). ccSvc_runRegionReset(): empty
  * one whole Pattern. They take and release the exclusive boundary themselves

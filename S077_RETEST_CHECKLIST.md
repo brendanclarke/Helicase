@@ -52,34 +52,34 @@ These verify Rule A (non-automation writes clear overrides) and Rule B
 
 | # | Check | Observe | Result |
 |---|-------|---------|--------|
-| 3.1 | SHIFT+COPY, press TRACK in VOICE mode. Verify "reset morph" appears as a clear selection (before "send" if in EFFECTS). | I | |
-| 3.2 | Select "reset morph" and release TRACK. Verify the active track's Morph endpoints equal its Normal endpoints (check by switching to Morph view on VOICE page). | I | |
-| 3.3 | Verify "reset morph" fans out through the voice-edit mask: set up a 2-Scene edit mask, clear "reset morph" on track 1, and check both Scenes' Morph endpoints. | I | |
-| 3.4 | COPY, press TRACK in VOICE mode. Verify "morph" appears as a copy selection. | I | |
-| 3.5 | Select "morph", press destination TRACK. Verify the destination's Morph endpoints are replaced by its Normal endpoints. | I | |
-| 3.6 | Verify "morph" copy fans out through the edit mask. | I | |
-| 3.7 | Verify the source indicator shows the 'm' suffix for morph copy. | I | |
+| 3.1 | SHIFT+COPY, press TRACK in VOICE mode. Verify "reset morph" appears as a clear selection (before "send" if in EFFECTS). | I | PASS |
+| 3.2 | Select "reset morph" and release TRACK. Verify the active track's Morph endpoints equal its Normal endpoints (check by switching to Morph view on VOICE page). | I | PASS |
+| 3.3 | Verify "reset morph" fans out through the voice-edit mask: set up a 2-Scene edit mask, clear "reset morph" on track 1, and check both Scenes' Morph endpoints. | I | PASS |
+| 3.4 | COPY, press TRACK in VOICE mode. Verify "morph" appears as a copy selection. | I | PASS |
+| 3.5 | Select "morph", press destination TRACK. Verify the destination's Morph endpoints are replaced by its Normal endpoints. | I | PASS |
+| 3.6 | Verify "morph" copy fans out through the edit mask. | I | PASS |
+| 3.7 | Verify the source indicator shows the 'm' suffix for morph copy. | I | PASS |
 
 ### Scene-level operations (PERF Scene menu)
 
 | # | Check | Observe | Result |
 |---|-------|---------|--------|
-| 3.8 | SHIFT+COPY, press a Scene in PERF. Verify "reset morph" and "reset fx morph" appear in the scene clear menu. | I | |
-| 3.9 | Select "reset morph" (Scene level). Verify all 6 slots + FX send morph + slot-6 decay morph + Effect morph endpoints are equalised to Normal. | I | |
-| 3.10 | Verify Scene-level "reset morph" does NOT fan out (only the pressed Scene is affected, not edit-mask members). | I | |
-| 3.11 | Select "reset fx morph". Verify only the Effect's morphable morph endpoints are equalised, not voice slots. | I | |
-| 3.12 | Verify "reset fx morph" DOES fan out through the edit mask. | I | |
-| 3.13 | COPY, press Scene in PERF. Verify "morph" appears in the scene copy menu. | I | |
-| 3.14 | Select "morph" (Scene copy). Verify all 6 slots' Normal → Morph, applied to the destination Scene. | I | |
-| 3.15 | Verify Scene-level "morph" copy does NOT fan out. | I | |
+| 3.8 | SHIFT+COPY, press a Scene in PERF. Verify "reset morph" and "reset fx morph" appear in the scene clear menu. | I | PASS |
+| 3.9 | Select "reset morph" (Scene level). Verify all 6 slots + FX send morph + slot-6 decay morph + Effect morph endpoints are equalised to Normal. | I | PASS |
+| 3.10 | Verify Scene-level "reset morph" DOES fan out through the edit mask: set up a 2-Scene edit mask, clear "reset morph" on a Scene, verify all mask members' Morph endpoints are equalised to their own Normal. | I | |
+| 3.11 | Select "reset fx morph". Verify only the Effect's morphable morph endpoints are equalised, not voice slots. | I | PASS |
+| 3.12 | Verify "reset fx morph" DOES fan out through the edit mask. | I | PASS |
+| 3.13 | COPY, press Scene in PERF. Verify "morph" appears in the scene copy menu. | I | PASS |
+| 3.14 | Select "[scene -> morph]" (Scene copy). Verify all 6 slots' Normal → Morph, applied to the destination Scene AND every edit-mask member. | I | |
+| 3.15 | Verify Scene-level "[scene -> morph]" copy DOES fan out through the edit mask. | I | |
 
 ### Regression
 
 | # | Check | Observe | Result |
 |---|-------|---------|--------|
-| 3.16 | Existing clear selections still work: "track", "track auto", "track notes", "send" (EFFECTS). | I/D | |
-| 3.17 | Existing Scene clear selections still work: "scene", "settings", "pattern", etc. | I/D | |
-| 3.18 | Existing copy selections still work: "track", "instrument", step/bar pastes. | I/D | |
+| 3.16 | Existing clear selections still work: "track", "track auto", "track notes", "send" (EFFECTS). | I/D | PASS |
+| 3.17 | Existing Scene clear selections still work: "scene", "settings", "pattern", etc. | I/D | PASS |
+| 3.18 | Existing copy selections still work: "track", "instrument", step/bar pastes. | I/D | PASS |
 
 ---
 

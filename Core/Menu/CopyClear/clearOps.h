@@ -54,13 +54,16 @@ typedef enum {
  * What:       CC_CLEAR_SCENE_RESET_MORPH (8) equalises all six instrument
  *             slots' morph endpoints, all correlated Scene morph endpoints
  *             (FX send morph x6, Kit slot-6 decay morph) and every morphable
- *             Effect morph endpoint to their current Normal values; it does
- *             NOT fan out (parallels `clear scene`), does NOT clear the
- *             Bank-present bit and does NOT touch any morph amount.
+ *             Effect morph endpoint to their current Normal values, fanning
+ *             out through the destination's edit mask (parallels `clear fx`).
+ *             It does NOT clear the Bank-present bit and does NOT touch any
+ *             morph amount.
  *             CC_CLEAR_SCENE_RESET_FX_MORPH (9) equalises only the Effect's
  *             morphable morph endpoints and fans out through the edit mask
  *             (parallels `clear fx`).
  * Why:        whole-Scene and Effect-only morph resets for the PERF clear menu.
+ *             Morph endpoints are scene-child data and fan out like every other
+ *             scene-child clear.
  * Inputs:     ccClear_requestClear(), ccClear_runJob() dispatch.
  * Outputs:    none (enum constants).
  * Accessors:  ccClear_selectionCount(), ccClear_label(), ccClear_runJob().

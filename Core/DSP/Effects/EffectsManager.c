@@ -1055,8 +1055,9 @@ uint16_t effects_resetMorphToNormal(uint8_t dst_scene)
  *
  * What:       the same morphable Normal -> Morph copy as
  *             effects_resetMorphToNormal() but applied to exactly one Scene.
- * Why:        the whole-Scene "reset morph" clear owns its own non-fanned-out
- *             loop and hands the Effect slice to this single-Scene helper.
+ * Why:        the whole-Scene "reset morph" clear and "scene -> morph" copy
+ *             own their own edit-mask fan-out loop and hand each member's
+ *             Effect slice to this single-Scene helper.
  * Inputs:     scene_index.
  * Outputs:    nonzero if any byte changed. Side effects:
  *             scene_finishEffectWholeCommit() on change and

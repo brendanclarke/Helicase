@@ -29,7 +29,7 @@ typedef enum {
     CC_COPY_MERGE_AUTO
 } cc_copy_step_sel_t;
 /*
- * What:       CC_COPY_MORPH (2) is the "morph" track-level copy. It copies the
+ * What:       CC_COPY_MORPH (2) is the "inst -> morph" track-level copy. It copies the
  *             source track's Normal endpoints onto the destination track's
  *             Morph endpoints (instrument images plus the correlated Scene
  *             params: FX send, Kit slot-6 decay) and fans out through the
@@ -49,14 +49,17 @@ typedef enum {
     CC_COPY_MORPH
 } cc_copy_track_sel_t;
 /*
- * What:       CC_COPY_SCENE_MORPH (5) is the "scene morph" Scene-level copy. It
- *             copies all Normal endpoints of the source Scene onto the
- *             destination Scene's Morph endpoints for every matching-type
- *             component (instruments, FX send x6, Kit slot-6 decay, Effect).
- *             It silently skips instruments and/or the Effect whose types
- *             differ, does NOT fan out (parallels `copy scene`), does NOT
- *             exchange or reset the edit mask and does NOT touch morph amounts.
- * Why:        whole-Scene morph copy for the PERF copy menu.
+ * What:       CC_COPY_SCENE_MORPH (5) is the "scene -> morph" Scene-level
+ *             copy. It copies all Normal endpoints of the source Scene onto
+ *             the destination Scene's Morph endpoints for every matching-type
+ *             component (instruments, FX send x6, Kit slot-6 decay, Effect),
+ *             fanning out through the destination's edit mask (parallels
+ *             `copy kit`). It silently skips instruments and/or the Effect
+ *             whose types differ per member, does NOT exchange or reset the
+ *             edit mask and does NOT touch morph amounts.
+ * Why:        whole-Scene morph copy for the PERF copy menu. Morph endpoints
+ *             are scene-child data and fan out like every other scene-child
+ *             edit.
  * Inputs:     ccCopy_requestPaste(), ccCopy_runJob() dispatch.
  * Outputs:    none (enum constant).
  * Accessors:  ccCopy_selectionCount(), ccCopy_label(), ccCopy_runJob().
@@ -93,6 +96,20 @@ const char *ccCopy_label(cc_menu_t menu, uint8_t selection);
 uint8_t ccCopy_requestPaste(const cc_source_t *src, uint8_t selection,
                             uint8_t dst_scene, uint8_t dst_track,
                             uint8_t dst_start);
+
+/*
+ * What:       bar-to-step paste request. Like ccCopy_requestPaste() but the
+ *             job kind is CC_KIND_BAR_TO_STEP: bar source coordinates, step
+ *             destination coordinates.
+ * Why:        cross-kind paste for bar source -> step destination.
+ * Inputs:     src (CC_KIND_BAR), selection, dst_scene, dst_track,
+ *             dst_start (absolute step).
+ * Outputs:    1 if queued, 0 if dropped.
+ * Affiliates: ccCopy_requestPaste(), CC_KIND_BAR_TO_STEP.
+ */
+uint8_t ccCopy_requestBarToStep(const cc_source_t *src, uint8_t selection,
+                                uint8_t dst_scene, uint8_t dst_track,
+                                uint8_t dst_start);
 
 /*
  * Retarget automation for a different destination track or Scene (spec §9.7).
@@ -151,9 +168,10 @@ uint8_t ccCopy_buildStep(uint8_t selection, const uint8_t *src_block,
 
 /*
  * Run one queued paste (the job at the queue head). Dispatches by source
- * kind and selection: Pattern pastes to the service engine, `copy
- * instrument`, `copy morph`, the PERF Scene pastes (including
- * `copy scene morph`) and FX step pastes to the executors below. Returns
+ * kind and selection: Pattern pastes (step, bar, bar-to-step, track) to the
+ * service engine, `copy instrument`, `copy inst -> morph`, the PERF Scene
+ * pastes (including `copy scene -> morph`) and FX step pastes to the
+ * executors below. Returns
  * CC_RUN_DONE, CC_RUN_WAIT or CC_RUN_DROP. Caller: ccSvc_tick().
  *
  * Scene-level executors (spec §9.9) wait (CC_RUN_WAIT) while

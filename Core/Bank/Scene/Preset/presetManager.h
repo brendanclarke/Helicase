@@ -640,7 +640,7 @@ void    preset_rebuildMorph(void);
  *             requiring the two instrument types to match; a mismatch is a
  *             complete no-change for that slot.
  * Why:        the "reset morph" clear operations (track- and Scene-level) and
- *             the "morph"/"scene morph" copy operations share this
+ *             the "inst -> morph"/"scene -> morph" copy operations share this
  *             morphable-descriptor endpoint loop. Keeping the byte writes and
  *             the descriptor iteration inside the Preset owner path matches
  *             the KitMrp/InstrumentMrp endpoint commits and avoids firing

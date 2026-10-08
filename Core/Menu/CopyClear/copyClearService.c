@@ -306,7 +306,7 @@ static uint8_t ccSvc_claimAndEvacuate(uint8_t scene)
 
 /* ---- Pattern paste engine (spec §9.5) ---------------------------------- */
 
-/* Geometry of a step/range/bar/track paste. */
+/* Geometry of a step/range/bar/bar-to-step/track paste. */
 typedef struct {
     uint8_t src_first;   /* first source step                         */
     int8_t dir;          /* +1 or -1                                  */
@@ -341,6 +341,34 @@ static void ccSvc_pasteGeometry(const cc_job_t *job, cc_paste_geo_t *g)
         }
         g->count = (uint8_t)((hi - lo + 1u) * NUM_STEPS_PER_BAR);
         g->dst_first = (uint8_t)(job->start * NUM_STEPS_PER_BAR);
+        break;
+    /*
+     * What:       bar-to-step cross-kind paste geometry. The source uses bar
+     *             coordinates (identical to CC_KIND_BAR: src->start * 16,
+     *             direction and count scaled by 16). The destination uses
+     *             step coordinates (job->start is an absolute step, used
+     *             directly — NOT multiplied by 16).
+     * Why:        the user copied a bar source and pasted to a step
+     *             destination. The source data is the same bar(s); only the
+     *             destination alignment changes.
+     * Inputs:     job->start (absolute step 0..127), src->start/end (bar
+     *             indices 0..7).
+     * Outputs:    g->dst_first = job->start (absolute step); source fields
+     *             identical to CC_KIND_BAR.
+     * Affiliates: CC_KIND_BAR (source geometry), CC_KIND_STEP (destination
+     *             geometry model).
+     */
+    case CC_KIND_BAR_TO_STEP:
+        if (src->start <= src->end) {
+            g->src_first = (uint8_t)(src->start * NUM_STEPS_PER_BAR);
+            g->dir = 1;
+        } else {
+            g->src_first = (uint8_t)(src->start * NUM_STEPS_PER_BAR +
+                                     NUM_STEPS_PER_BAR - 1u);
+            g->dir = -1;
+        }
+        g->count = (uint8_t)((hi - lo + 1u) * NUM_STEPS_PER_BAR);
+        g->dst_first = job->start;
         break;
     default:            /* `copy track` */
         g->src_first = 0u;
@@ -467,9 +495,17 @@ uint8_t ccSvc_pasteTriggersNow(uint8_t slot)
     if (slot >= CC_QUEUE_SIZE)
         return 0u;
     job = &ccSvc_queue[slot];
+    /*
+     * What:       early trigger gate. Accepts step, bar, bar-to-step and
+     *             track paste jobs; other kinds (Scene, FX step) have no
+     *             Pattern triggers to preview.
+     * Why:        CC_KIND_BAR_TO_STEP is a Pattern paste and needs the same
+     *             immediate trigger-bit write as CC_KIND_BAR and CC_KIND_STEP.
+     * Affiliates: ccSvc_pasteGeometry(), ccCopy_requestBarToStep().
+     */
     if ((job->op & CC_JOB_CLASS_MASK) != CC_JOB_PASTE ||
         (job->kind != CC_KIND_STEP && job->kind != CC_KIND_BAR &&
-         job->kind != CC_KIND_TRACK))
+         job->kind != CC_KIND_BAR_TO_STEP && job->kind != CC_KIND_TRACK))
         return 0u;
     ccSvc_pasteGeometry(job, &g);
     if (g.count == 0u ||

@@ -4,7 +4,8 @@
  * Contract in clearOps.h. Pattern clears are sequenced by the service engine
  * (copyClearService.c); this file supplies the menus and runs the Scene-level
  * clears. `clear scene` and `clear scene settings` reset the Scene's own edit
- * mask and do not fan out; `clear send`, `clear fx`, `clear fx sequence`, the
+ * mask and do not fan out; `clear send`, `clear fx`, `clear fx sequence`,
+ * `clear scene reset morph`, the
  * EFFECTS SEQ clear and the FX-lane part of a pot clear fan out through the
  * edit mask (user, confirm 1). Names stay on every clear; changed rows lose
  * their refreshed flag. `notes` turns triggers off, removes note/velocity
@@ -512,56 +513,78 @@ static uint8_t ccClear_runResetMorphTrack(const cc_job_t *job)
 }
 
 /*
- * `clear scene reset morph` (S076 P3): equalise the whole Scene's morph
- * endpoints to Normal. Does NOT fan out (parallels `clear scene`), does NOT
- * clear the Bank-present bit and does NOT touch morph amounts.
+ * `clear scene reset morph` (S076 P3, S077 P4 fan-out correction): equalise
+ * the whole Scene's morph endpoints to Normal, fanning out through the edit
+ * mask (parallels `clear fx`).
  *
- * What:       for each of the six slots: reset the morphable instrument
- *             descriptors and the FX-send Morph endpoint; set the generated
- *             slot-6 decay Morph endpoint to its Normal value; then
- *             effects_resetMorphToNormalSingle() resets the morphable Effect
- *             endpoints. When the Scene is active the Morph worker and the
- *             Effect runtime are rebuilt and the menu repaints.
- * Why:        the PERF Scene clear of morph endpoints is a whole-Scene
- *             operation with no edit-mask fan-out.
- * Inputs:     job->scene.
- * Outputs:    CC_RUN_WAIT while an active Scene's apply workers drain, then
- *             CC_RUN_DONE. Side effects: Instrument Morph, FX-send Morph, Kit
- *             Morph-decay and Effect AutoSave marks; runtime rebuild.
- * Accessors:  preset_resetSlotMorphToNormal(), preset_setVoiceFxSendMorph(),
- *             scene_getVoiceFxSendAmount(),
+ * What:       for each Scene in bank_sceneFanoutMask(job->scene):
+ *             (a) for each of the six slots:
+ *                 preset_resetSlotMorphToNormal() resets the morphable
+ *                 instrument descriptors (each member uses its OWN Normal
+ *                 endpoints, not a shared source);
+ *             (b) preset_setVoiceFxSendMorph() sets the member's FX-send
+ *                 Morph endpoint to that member's FX-send Normal endpoint;
+ *             (c) when the slot is slot 6 the generated slot-6/track-7 Morph
+ *                 decay takes that member's Normal decay;
+ *             (d) effects_resetMorphToNormalSingle() resets the member's
+ *                 morphable Effect endpoints;
+ *             (e) the member's Instrument, Scene and Effect HCNAMES rows
+ *                 lose their refreshed flag.
+ *             When the active Scene is in the mask the Morph worker is
+ *             requeued and the menu repaints once after all writes.
+ * Why:        morph endpoints are scene-child data (instrument images, FX
+ *             send, Effect parameters). Scene-child clears fan out through
+ *             the edit mask: `clear fx`, `clear send` and `clear reset morph`
+ *             (track) all fan out. The original single-Scene version
+ *             incorrectly paralleled `clear scene` (which resets the mask,
+ *             not a child). Each member equalises its OWN Normal to its OWN
+ *             Morph, since reset makes endpoints equal within each Scene, not
+ *             across Scenes.
+ * Inputs:     job->scene (destination, origin of the fan-out mask).
+ * Outputs:    CC_RUN_WAIT while the active Scene's apply workers drain, then
+ *             CC_RUN_DONE. Side effects: Instrument Morph, FX-send Morph,
+ *             Kit Morph-decay and Effect AutoSave marks; runtime rebuild.
+ * Accessors:  bank_sceneFanoutMask(), preset_resetSlotMorphToNormal(),
+ *             preset_setVoiceFxSendMorph(), scene_getVoiceFxSendAmount(),
  *             scene_setSlot6Track7MorphAmpEnvelopeDecay(),
  *             scene_getSlot6Track7AmpEnvelopeDecay(),
  *             effects_resetMorphToNormalSingle(), preset_rebuildMorph().
- * Affiliates: ccClear_runScene() (whole-Scene model),
+ * Affiliates: ccClear_runFx() (fan-out clear model),
+ *             ccClear_runResetMorphTrack() (per-slot fan-out morph reset),
  *             ccCopy_runSceneMorph() (analogous copy).
  */
 static uint8_t ccClear_runResetSceneMorph(const cc_job_t *job)
 {
-    uint8_t scene = job->scene;
-    uint8_t active = (uint8_t)(scene == scene_getActiveIndex());
-    uint8_t slot;
+    uint16_t mask = bank_sceneFanoutMask(job->scene);
+    uint8_t active = scene_getActiveIndex();
+    uint8_t m;
 
-    if (active && !preset_applyWorkersIdle())
+    if ((mask & ccClear_bit(active)) != 0u && !preset_applyWorkersIdle())
         return CC_RUN_WAIT;
-    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
-        (void)preset_resetSlotMorphToNormal(scene, slot);
-        (void)preset_setVoiceFxSendMorph(
-            scene, slot, scene_getVoiceFxSendAmount(scene, slot));
+    for (m = 0u; m < SCENE_COUNT; m++) {
+        uint8_t slot;
+
+        if ((mask & ccClear_bit(m)) == 0u)
+            continue;
+        for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+            (void)preset_resetSlotMorphToNormal(m, slot);
+            (void)preset_setVoiceFxSendMorph(
+                m, slot, scene_getVoiceFxSendAmount(m, slot));
+            ccSvc_nameContentChanged(
+                filesystem_identityRow(FS_ROW_INSTRUMENT, m, slot));
+        }
+        scene_setSlot6Track7MorphAmpEnvelopeDecay(
+            m, scene_getSlot6Track7AmpEnvelopeDecay(m));
+        (void)effects_resetMorphToNormalSingle(m);
         ccSvc_nameContentChanged(
-            filesystem_identityRow(FS_ROW_INSTRUMENT, scene, slot));
+            filesystem_identityRow(FS_ROW_SCENE, m, 0u));
+        ccSvc_nameContentChanged(
+            filesystem_identityRow(FS_ROW_EFFECT, m, 0u));
     }
-    scene_setSlot6Track7MorphAmpEnvelopeDecay(
-        scene, scene_getSlot6Track7AmpEnvelopeDecay(scene));
-    (void)effects_resetMorphToNormalSingle(scene);
-    ccSvc_nameContentChanged(
-        filesystem_identityRow(FS_ROW_SCENE, scene, 0u));
-    ccSvc_nameContentChanged(
-        filesystem_identityRow(FS_ROW_EFFECT, scene, 0u));
     ccTrace(AUTOSAVE_TRACE_CC_EVT_FANOUT,
-            (uint32_t)ccClear_bit(scene) |
-            ((uint32_t)(scene & 0xFu) << 16u) | (8u << 20u));
-    if (active) {
+            (uint32_t)mask |
+            ((uint32_t)(job->scene & 0xFu) << 16u) | (8u << 20u));
+    if ((mask & ccClear_bit(active)) != 0u) {
         preset_rebuildMorph();
         menu_repaintAll();
     }

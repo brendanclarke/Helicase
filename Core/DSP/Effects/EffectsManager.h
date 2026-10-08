@@ -368,8 +368,9 @@ uint16_t effects_resetRecord(uint8_t dst_scene);
  *             effects_resetMorphToNormalSingle() performs the same copy for one
  *             Scene with no edit-mask fan-out.
  * Why:        "clear scene reset fx morph" fans out exactly like "clear fx"
- *             (same-type members receive the change), while "clear scene reset
- *             morph" and "copy scene morph" own their own single-Scene loop.
+ *             (same-type members receive the change). "clear scene reset morph"
+ *             and "copy scene -> morph" fan out through the bank edit mask and
+ *             call effects_resetMorphToNormalSingle() per member.
  *             Centralising the morphability check and the SceneData whole-record
  *             commit path keeps the effect-morph owner boundary in Effects.
  * Inputs:     effects_resetMorphToNormal(): dst_scene; the destination's

@@ -3748,10 +3748,10 @@ uint8_t preset_resetSlotMorphToNormal(uint8_t scene_index, uint8_t slot)
  *             and destination instrument types differ (a different type's
  *             descriptor indices are meaningless, so the member is silently
  *             skipped).
- * Why:        the "morph" track copy and the "scene morph" Scene copy share
- *             this cross-Scene, per-slot morphable-endpoint loop. Matching
- *             types guarantee identical descriptor layouts, so an index-by-
- *             index copy needs no key remapping.
+ * Why:        the "inst -> morph" track copy and the "scene -> morph" Scene
+ *             copy share this cross-Scene, per-slot morphable-endpoint loop.
+ *             Matching types guarantee identical descriptor layouts, so an
+ *             index-by-index copy needs no key remapping.
  * Inputs:     src_scene/src_slot (Normal source) and dst_scene/dst_slot (Morph
  *             target), all coordinates valid.
  * Outputs:    the count of Morph bytes changed (0 for invalid coordinates or a

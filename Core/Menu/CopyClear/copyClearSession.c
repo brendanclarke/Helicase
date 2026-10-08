@@ -343,6 +343,36 @@ static uint8_t cc_copySeq(uint8_t index)
                                buttonHandler_visibleStep(index),
                                cc_sourceLength());
         }
+        /*
+         * What:       bar-to-step paste. When the copy source is a bar or bar
+         *             range, a SEQ press pastes the bar content starting at
+         *             the pressed step. The job kind is set to
+         *             CC_KIND_BAR_TO_STEP so the geometry function uses bar
+         *             source coordinates and step destination coordinates.
+         *             The flash uses CC_KIND_STEP because the destination is
+         *             a step range (the user sees step LEDs flash, not bar
+         *             LEDs). The step count is sourceLength * NUM_STEPS_PER_BAR
+         *             (each bar expands to 16 steps).
+         * Why:        a bar is a contiguous block of steps; pasting to a step
+         *             destination gives sub-bar placement precision. The
+         *             reverse (step source -> bar destination) is navigation,
+         *             not a paste, by user rule.
+         * Inputs:     cc_source (kind == CC_KIND_BAR), index (SEQ button).
+         * Outputs:    queued CC_KIND_BAR_TO_STEP job via ccCopy_requestPaste.
+         * Affiliates: cc_copySelect() (bar-to-bar paste, unchanged),
+         *             CC_KIND_BAR_TO_STEP, ccSvc_pasteGeometry().
+         */
+        else if (cc_source.kind == CC_KIND_BAR) {
+            if (ccCopy_requestBarToStep(&cc_source, cc_state.selection,
+                                        cc_activeScene(),
+                                        menu_getActiveVoice(),
+                                        buttonHandler_visibleStep(index)))
+                cc_flashObject(CC_KIND_STEP, cc_activeScene(),
+                               menu_getActiveVoice(),
+                               buttonHandler_visibleStep(index),
+                               (uint8_t)(cc_sourceLength() *
+                                         NUM_STEPS_PER_BAR));
+        }
         return 1u;
     }
     if (mode == SELECT_MODE_PERF) {
@@ -806,7 +836,8 @@ static void cc_formatIndicator(char row[17], uint8_t *pos)
         /*
          * What:       track source indicator. The middle letter identifies the
          *             copy selection: "T" for a whole track, "i" for
-         *             instrument copy, "m" for the new morph copy (S076 P3).
+         *             instrument copy, "m" for inst -> morph (S076 P3,
+         *             label S077 P4).
          * Why:        the menu label already distinguishes the selection, but
          *             the indicator keeps the source readable at a glance and
          *             matches the design's SNN{L}N form.
@@ -831,9 +862,10 @@ static void cc_formatIndicator(char row[17], uint8_t *pos)
             /*
              * What:       Scene copy suffix by selection: "" scene, "c"
              *             settings, "K" kit, "f" effect, "P" pattern, "m"
-             *             scene morph (S076 P3).
-             * Why:        the new CC_COPY_SCENE_MORPH = 5 entry needs its own
-             *             indicator letter.
+             *             scene -> morph (S076 P3, label S077 P4).
+             * Why:        CC_COPY_SCENE_MORPH = 5 needs its own indicator
+             *             letter; the suffix "m" stays (one-character
+             *             positional abbreviation, not the menu label).
              */
             static const char *const copy_suffix[] = {
                 "", "c", "K", "f", "P", "m"

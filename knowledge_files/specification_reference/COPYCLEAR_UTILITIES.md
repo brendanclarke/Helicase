@@ -247,8 +247,8 @@ them to 4 bits, which broke every range in bars 2..8.)
 |---|---|---|
 | step, step range | `CC_MENU_COPY_STEP` | `step -> repl`, `step -> merge`, `auto -> repl`, `auto -> merge` |
 | bar, bar range | `CC_MENU_COPY_BAR` | `bar -> repl`, `bar -> merge`, `auto -> repl`, `auto -> merge` |
-| track | `CC_MENU_COPY_TRACK` | `track`, `instrument`, `morph` |
-| Scene | `CC_MENU_COPY_SCENE` | `scene`, `settings`, `kit`, `effect`, `pattern`, `morph` |
+| track | `CC_MENU_COPY_TRACK` | `track`, `instrument`, `inst -> morph` |
+| Scene | `CC_MENU_COPY_SCENE` | `scene`, `settings`, `kit`, `effect`, `pattern`, `scene -> morph` |
 | FX step, FX range | `CC_MENU_COPY_FX` | `step` |
 
 Enum values: `CC_COPY_ALL` (`… -> repl`), `CC_COPY_MERGE_ALL`
@@ -291,6 +291,13 @@ Scene in the normal way (navigation), so a Pattern paste can cross Scenes.
 - **Retargeting** when the destination track or Scene differs (§6.6).
 - Never fans out.
 
+**Bar-to-step paste (S077 P5):** when a bar or bar range is the copy source,
+a SEQ press in VOICE/STEP mode pastes the bar content starting at the pressed
+step (cross-kind paste). The source geometry is identical to a bar-to-bar
+paste (bar indices x 16); only the destination is in step space (absolute
+step, not multiplied). The reverse (step source -> SELECT press) is
+navigation, not a paste. The job kind is `CC_KIND_BAR_TO_STEP`.
+
 ### 6.4 Track
 
 - `copy track` (`CC_COPY_TRACK`): all 128 steps as `… -> repl`, plus the
@@ -317,6 +324,7 @@ Scene in the normal way (navigation), so a Pattern paste can cross Scenes.
 | `copy kit` | `kit_t` (six slots + Kit settings) | yes | makes each written Scene present; names |
 | `copy effect` | `effect_record_t` (may change the destination's type) | yes | names |
 | `copy pattern` | the whole region including the Pattern globals; automation retargeted when the Instrument or Effect types differ | no | names |
+| `copy scene -> morph` | all 6 slots' Normal → Morph, FX send × 6 Normal → Morph, slot-6 decay Normal → Morph, Effect Normal → Morph (same type only) | yes | — |
 
 **Edit-mask exchange** (`bank_exchangeVoiceEditMask(src, dst)`): the
 destination's entry becomes the source's entry with the source and
@@ -395,7 +403,7 @@ paste is dropped (`FX_TYPE_MISMATCH`).
 | `fx` | Effect record to defaults (`off`) | yes |
 | `fx sequence`, EFFECTS SEQ | sequence steps only (all 16, or the one pressed): lock masks and lane values to their empty state; parameters, run mode, length, scale stay | yes |
 | `reset morph` (VOICE/EFFECTS TRACK) | the track's slot: all Morphable descriptor Morph endpoints := Normal, plus correlated Scene morph endpoints (FX send morph, Kit slot-6 decay morph) | yes |
-| `reset morph` (PERF Scene) | all 6 slots' Morphable Morph := Normal, plus all correlated Scene morph endpoints and every morphable Effect morph endpoint; does NOT clear morph amounts | no |
+| `reset morph` (PERF Scene) | all 6 slots' Morphable Morph := Normal, plus all correlated Scene morph endpoints and every morphable Effect morph endpoint; does NOT clear morph amounts | yes |
 | `reset fx morph` (PERF Scene) | only the Effect's morphable morph endpoints := Normal | yes |
 | `reload scene` (PERF Scene) | if the Scene has a valid numeric HCNAMES source (0..999), issue a full Scene reload from the SD card through `preset_loadSceneForScenes()`; otherwise silently dropped. Fire-and-forget: returns `CC_RUN_DONE` immediately | no |
 
@@ -515,7 +523,7 @@ FX steps 01..16. Clear menus show the same indicator for the pressed object.
 
 | Fans out | Does not fan out |
 |---|---|
-| `copy instrument`, `copy kit`, `copy effect`, FX step pastes, `clear fx`, `clear fx sequence`, EFFECTS SEQ clear, the FX-lane part of an EFFECTS/PERF pot clear, `clear send` | every Pattern paste and clear (step, range, bar, track, `copy pattern`, `clear pattern`, `clear automation`, `clear notes`, the Pattern part of any pot clear); `copy scene` and `copy scene settings` (they **set** the mask); `clear scene` and `clear scene settings` (they **reset** it) |
+| `copy instrument`, `copy kit`, `copy effect`, `copy scene -> morph`, FX step pastes, `clear fx`, `clear fx sequence`, `clear reset morph` (track and Scene), `clear reset fx morph`, EFFECTS SEQ clear, the FX-lane part of an EFFECTS/PERF pot clear, `clear send` | every Pattern paste and clear (step, range, bar, track, `copy pattern`, `clear pattern`, `clear automation`, `clear notes`, the Pattern part of any pot clear); `copy scene` and `copy scene settings` (they **set** the mask); `clear scene` and `clear scene settings` (they **reset** it) |
 
 - **Why:** Scenes in one edit mask are meant to share parameters and FX
   settings; the edit mask locks them together for everything except the
@@ -596,7 +604,7 @@ startDrumsetApply/applySceneSettings/setVoiceFxSend*/setVoiceFaderSetting`;
 
 | Button | No source yet | step/range | bar/range | track | Scene | FX step |
 |---|---|---|---|---|---|---|
-| SEQ (VOICE/STEP) | source | **paste** | ignored | ignored | ignored | ignored |
+| SEQ (VOICE/STEP) | source | **paste** | **paste** (bar-to-step: bar content starting at the pressed step) | ignored | ignored | ignored |
 | SEQ (PERF) | Scene source | navigate | navigate | navigate | **paste** | navigate |
 | SEQ (EFFECTS) | FX source | ignored | ignored | ignored | ignored | **paste** |
 | SELECT (STEP) | bar source | navigate (bar) | **paste** | normal | ignored | ignored |
@@ -768,7 +776,7 @@ One slide per call; the paste engine calls it while a growing step does not
 fit. (Copy/clear's own moves are not traced per move in PatternTrace;
 `JOB_STATS` counts them.)
 
-### 12.5 Paste engine (`ccSvc_runPatternPaste()`; step, range, bar, `copy track`)
+### 12.5 Paste engine (`ccSvc_runPatternPaste()`; step, range, bar, bar-to-step, `copy track`)
 
 Run state: `run.phase` bit 0 = snapshot path; `run.sub` = phase below;
 `cursor` = step; `aux` = snapshot cursor / free chunks / swap-return bit.
@@ -868,11 +876,11 @@ final phase that waits for `ccSvc_namesReady()` and never delays the data.
 | EFFECTS SEQ clear | `ccClear_fxStepNow()` | `effects_clearSeqLanes(scene, bit(step), 0xFFFF)` at the press | — |
 | `clear send` | `ccClear_runSend()` | `preset_setVoiceFxSendAmount(…, 0)`, `preset_setVoiceFxSendMorph(…, 0)`, `preset_setVoiceFaderSetting(…, pre)` per member | repaint |
 | `clear reset morph` (track) | `ccClear_runResetMorphTrack()` | `preset_resetSlotMorphToNormal(scene, slot)` per member (fans out through `bank_sceneFanoutMask()`): Morphable Normal → Morph, FX send morph, slot-6 decay morph | repaint |
-| `clear reset morph` (Scene) | `ccClear_runResetSceneMorph()` | loops 6 slots `preset_resetSlotMorphToNormal()` + `effects_resetMorphToNormal()` for the Scene's Effect; does NOT fan out | repaint |
-| `clear reset fx morph` | `ccClear_runResetFxMorph()` | `effects_resetMorphToNormalSingle(scene)` per member (fans out) | repaint |
+| `clear reset morph` (Scene) | `ccClear_runResetSceneMorph()` | loops 6 slots `preset_resetSlotMorphToNormal()` + `effects_resetMorphToNormalSingle()` per member (fans out through `bank_sceneFanoutMask()`): each member's own Morph := own Normal, FX send morph, slot-6 decay morph, Effect morph | repaint |
+| `clear reset fx morph` | `ccClear_runResetFxMorph()` | `effects_resetMorphToNormal(scene)` (fans out internally) | repaint |
 | `reload scene` | `ccClear_runReloadScene()` | `preset_loadSceneForScenes(source, 1u << scene)` if source ≤ 999 (fire-and-forget) | the Preset lifecycle handles apply and repaint |
-| `copy morph` (track) | `ccCopy_runMorphTrack()` | `preset_copySlotNormalToMorph(scene, slot)` per member (fans out) | repaint |
-| `copy morph` (Scene) | `ccCopy_runSceneMorph()` | loops 6 slots `preset_copySlotNormalToMorph()` for the destination Scene; does NOT fan out | repaint |
+| `copy inst -> morph` | `ccCopy_runMorphTrack()` | `preset_copySlotNormalToMorph(scene, slot)` per member (fans out) | repaint |
+| `copy scene -> morph` | `ccCopy_runSceneMorph()` | `preset_copySlotNormalToMorph(src, slot, m, slot)` per member (fans out through `bank_sceneFanoutMask()`): source Normal → member Morph, FX send, slot-6 decay, Effect (same type only) | repaint |
 
 Defaults used by `clear scene`/`settings` (`scene_settingsDefaults()`): MIDI
 channel = track + 1, note `MIDI_DEFAULT_TRIGGER_NOTE` (63), audio out St1
@@ -1184,6 +1192,15 @@ block, and keep per-tick work bounded.
 - **S076 P4 (2026-10-06):** `reload scene` (10) added to the PERF clear-scene
   menu; fire-and-forget Scene reload from the HCNAMES source register through
   `preset_loadSceneForScenes()`.
+- **S077 P4 (2026-10-08):** scene morph fan-out correction. `copy scene ->
+  morph` (was `scene morph`) and `clear scene reset morph` now fan out through
+  the edit mask (parallels `copy kit` / `clear fx`). Track morph copy label
+  renamed `inst -> morph`. Comments and §10 fan-out table updated.
+- **S077 P5 (2026-10-08):** bar-to-step cross-kind paste. A bar/bar-range
+  copy source can be pasted to a step destination (SEQ press in VOICE/STEP
+  mode). New kind `CC_KIND_BAR_TO_STEP`, new request function
+  `ccCopy_requestBarToStep()`. Geometry, early triggers, dispatch and flash
+  updated.
 
 ---
 
