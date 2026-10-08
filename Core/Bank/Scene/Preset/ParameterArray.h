@@ -108,6 +108,15 @@ enum ParamEnums
 	PAR_TRACK_SCALE,
 	PAR_TRACK_MIDI_CHAN,
 	PAR_TRACK_MIDI_NOTE,
+	/*
+	 * Per-track play mode flat parameter (S078 §4.1).
+	 *
+	 * What: menu display/edit mirror for the track's play mode byte. Input:
+	 * Menu track settings page. Output: parameter_values[PAR_TRACK_PLAY_MODE]
+	 * holds 0..5. Affiliates: pat_applyTrackSettingsToMenu(),
+	 * pat_setTrackPlayMode(), menuPages.h SEQ_PAGE layout.
+	 */
+	PAR_TRACK_PLAY_MODE,
 
 	PAR_BEGINNING_OF_GLOBALS,
 	PAR_BPM = PAR_BEGINNING_OF_GLOBALS,

@@ -933,6 +933,97 @@ uint8_t scene_getBusCompSetting(uint8_t scene_index, uint8_t field)
 }
 
 /*
+ * Per-track Morph endpoints (S078 §5.4).
+ *
+ * What: store or read one track's Morph endpoint for length, scale, or shuffle.
+ * Setters clamp to the parameter domain and commit through
+ * scene_storeParameterByte(), so a changed byte marks exactly its AutoSave
+ * Scene cell (51..71) and the card-clean bit. Getters return the retained
+ * value, or the parameter default for an invalid Scene/track. Why: the effective
+ * track getters in presetMorphEngine.c interpolate the Pattern Normal value
+ * against these endpoints at the voice Morph amount. Inputs: resident Scene
+ * index, track 0..6, value. Outputs: retained Scene data updated. Affiliates:
+ * Autosave Scene cells, filesystem.c sceneset writer, presetMorphEngine.c.
+ */
+void scene_setTrackMorphLength(uint8_t scene_index, uint8_t track,
+                               uint8_t value)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    if (!scene || track >= NUM_TRACKS)
+        return;
+    if (value < 1u)
+        value = 1u;
+    else if (value > NUM_STEPS)
+        value = NUM_STEPS;
+    scene_storeParameterByte(
+        scene_index, &scene->settings.track_morph_length[track],
+        (uint8_t)(AUTOSAVE_SCENE_PARAM_TRACK_MORPH_LENGTH_BASE + track),
+        value);
+}
+
+uint8_t scene_getTrackMorphLength(uint8_t scene_index, uint8_t track)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+
+    if (!scene || track >= NUM_TRACKS ||
+        scene->settings.track_morph_length[track] < 1u ||
+        scene->settings.track_morph_length[track] > NUM_STEPS)
+        return NUM_STEPS_PER_BAR;
+    return scene->settings.track_morph_length[track];
+}
+
+void scene_setTrackMorphScale(uint8_t scene_index, uint8_t track,
+                              uint8_t value)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    if (!scene || track >= NUM_TRACKS)
+        return;
+    if (value >= STEP_SCALE_COUNT)
+        value = STEP_SCALE_DEFAULT;
+    scene_storeParameterByte(
+        scene_index, &scene->settings.track_morph_scale[track],
+        (uint8_t)(AUTOSAVE_SCENE_PARAM_TRACK_MORPH_SCALE_BASE + track),
+        value);
+}
+
+uint8_t scene_getTrackMorphScale(uint8_t scene_index, uint8_t track)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+
+    if (!scene || track >= NUM_TRACKS ||
+        scene->settings.track_morph_scale[track] >= STEP_SCALE_COUNT)
+        return STEP_SCALE_DEFAULT;
+    return scene->settings.track_morph_scale[track];
+}
+
+void scene_setTrackMorphShuffle(uint8_t scene_index, uint8_t track,
+                                uint8_t value)
+{
+    scene_t *scene = scene_get(scene_index);
+
+    if (!scene || track >= NUM_TRACKS)
+        return;
+    if (value > 127u)
+        value = 127u;
+    scene_storeParameterByte(
+        scene_index, &scene->settings.track_morph_shuffle[track],
+        (uint8_t)(AUTOSAVE_SCENE_PARAM_TRACK_MORPH_SHUFFLE_BASE + track),
+        value);
+}
+
+uint8_t scene_getTrackMorphShuffle(uint8_t scene_index, uint8_t track)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+
+    if (!scene || track >= NUM_TRACKS ||
+        scene->settings.track_morph_shuffle[track] > 127u)
+        return 0u;
+    return scene->settings.track_morph_shuffle[track];
+}
+
+/*
  * Default Instrument types of a fresh or emptied Scene (DRM, DRM, DRM, SNR,
  * CYM, HAT). Shared by scene_initAll() and scene_resetKitToDefaults() (S075)
  * so both produce the same Kit. filesystem_initSceneStage() keeps its own
@@ -964,6 +1055,16 @@ void scene_settingsDefaults(scene_settings_t *out)
     for (i = 0u; i < NUM_TRACKS; i++) {
         out->midi_channel[i] = (uint8_t)(i + 1u);
         out->midi_note[i] = MIDI_DEFAULT_TRIGGER_NOTE;
+        /*
+         * Track Morph endpoint defaults (S078 §5.4).
+         *
+         * What: fresh Scenes start with Morph endpoints matching the Normal
+         * defaults (length 16, scale 76/1/16, shuffle 0), so Morph amount
+         * 0..255 produces no change until the endpoints differ.
+         */
+        out->track_morph_length[i] = NUM_STEPS_PER_BAR;
+        out->track_morph_scale[i] = STEP_SCALE_DEFAULT;
+        out->track_morph_shuffle[i] = 0u;
     }
     for (i = 0u; i < INSTRUMENT_SLOT_COUNT; i++)
         out->audio_out[i] = scene_defaultVoiceAudioOut(i);
@@ -993,6 +1094,11 @@ uint8_t scene_commitSettings(uint8_t scene_index, const scene_settings_t *src)
     for (i = 0u; i < NUM_TRACKS; i++) {
         scene_setTrackMidiChannel(scene_index, i, image.midi_channel[i]);
         scene_setTrackMidiNote(scene_index, i, image.midi_note[i]);
+        /* S078 §5.4: copy/clear carry the three track Morph endpoints. */
+        scene_setTrackMorphLength(scene_index, i, image.track_morph_length[i]);
+        scene_setTrackMorphScale(scene_index, i, image.track_morph_scale[i]);
+        scene_setTrackMorphShuffle(scene_index, i,
+                                   image.track_morph_shuffle[i]);
     }
     scene_setEffectMorphAmount(scene_index, image.effect_morph_amount);
     for (i = 0u; i < SCENE_BUS_COMP_FIELD_COUNT; i++)

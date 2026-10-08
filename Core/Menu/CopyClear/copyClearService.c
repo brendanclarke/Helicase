@@ -850,6 +850,9 @@ uint8_t ccSvc_runPatternPaste(const cc_job_t *job)
                                   s->track_scale[src->track]);
                 pat_setTrackShuffle(job->scene, job->track,
                                     s->track_shuffle[src->track]);
+                /* S078 §4.1: play mode is part of a track copy. */
+                pat_setTrackPlayMode(job->scene, job->track,
+                                     s->track_play_mode[src->track]);
             }
         } else if (dst) {
             uint16_t last = (uint16_t)g.dst_first + g.count - 1u;
@@ -1020,6 +1023,8 @@ uint8_t ccSvc_runPatternClear(const cc_job_t *job)
             pat_setTrackLength(job->scene, job->track, NUM_STEPS_PER_BAR);
             pat_setTrackScale(job->scene, job->track, TRACK_SCALE_DEFAULT);
             pat_setTrackShuffle(job->scene, job->track, 0u);
+            /* S078 §4.1: clearing a track returns play mode to fwd. */
+            pat_setTrackPlayMode(job->scene, job->track, 0u);
         }
         ccSvc_release();
         ccSvc_patternChangedUi(job->scene,

@@ -497,6 +497,23 @@ static uint8_t ccClear_runResetMorphTrack(const cc_job_t *job)
         (void)preset_resetSlotMorphToNormal(m, slot);
         (void)preset_setVoiceFxSendMorph(
             m, slot, scene_getVoiceFxSendAmount(m, slot));
+        /*
+         * S078 §5.8: equalise this track's Morph timing endpoints to the
+         * Scene's own Pattern Normal values, so a Morph sweep is a no-op for the
+         * track afterwards. job->track is the unclamped destination track 0..6.
+         */
+        if (job->track < NUM_TRACKS) {
+            const pat_scene_region_t *region = pat_sceneRegion(m);
+
+            if (region) {
+                scene_setTrackMorphLength(m, job->track,
+                                          region->track_length[job->track]);
+                scene_setTrackMorphScale(m, job->track,
+                                         region->track_scale[job->track]);
+                scene_setTrackMorphShuffle(m, job->track,
+                                           region->track_shuffle[job->track]);
+            }
+        }
         if (slot == INSTRUMENT_SLOT_COUNT - 1u)
             scene_setSlot6Track7MorphAmpEnvelopeDecay(
                 m, scene_getSlot6Track7AmpEnvelopeDecay(m));
@@ -576,6 +593,24 @@ static uint8_t ccClear_runResetSceneMorph(const cc_job_t *job)
         scene_setSlot6Track7MorphAmpEnvelopeDecay(
             m, scene_getSlot6Track7AmpEnvelopeDecay(m));
         (void)effects_resetMorphToNormalSingle(m);
+        /*
+         * S078 §5.4: equalise this Scene's track Morph endpoints to its own
+         * Pattern Normal track timing for all seven tracks, so any Morph amount
+         * is a no-op afterwards. Scene-wide counterpart of clear track reset
+         * morph for the morphable track parameters.
+         */
+        {
+            const pat_scene_region_t *region = pat_sceneRegion(m);
+            uint8_t t;
+
+            if (region) {
+                for (t = 0u; t < NUM_TRACKS; t++) {
+                    scene_setTrackMorphLength(m, t, region->track_length[t]);
+                    scene_setTrackMorphScale(m, t, region->track_scale[t]);
+                    scene_setTrackMorphShuffle(m, t, region->track_shuffle[t]);
+                }
+            }
+        }
         ccSvc_nameContentChanged(
             filesystem_identityRow(FS_ROW_SCENE, m, 0u));
         ccSvc_nameContentChanged(

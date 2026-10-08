@@ -190,6 +190,17 @@ becomes 128; `EFFECT_SEQ_SCALE_DEFAULT` becomes 76. Default is 1/16; no
 special concern for what old `.fx` files end up at — the conversion utility
 handles cards that need it.
 
+### 2.7 Downstream consumers of the StepScale API
+
+CrumpBit (`Core/DSP/Effects/CrumpBit/`) uses the StepScale API to compute
+tempo-synced delay lengths. `crumpBit_divisionFor()` walks the StepScale
+table to find the nearest musical division for its delay rate;
+`crumpBit_uiFormatValue3()` displays the matched division using the
+short-name API. Both callers must be updated when `stepScale_ticks()` is
+renamed to `stepScale_ticksQ8()` (Q8.8 return value, divide by 256.0f in
+the float DSP context) and when `stepScale_shortName()` may return NULL for
+non-musical stops.
+
 ---
 
 ## 3. Per-track shuffle
@@ -358,18 +369,29 @@ assigns both tracks together (`sequencer.c:628-629`). The two tracks may
 have **different morph endpoints** for length/scale/shuffle, but the
 interpolation amount is always voice 6's single morph value.
 
-### 5.4 Morph endpoint storage
+### 5.4 Morph endpoint storage and effective-getter architecture
 
 Length, scale, and shuffle are **Scene parameters** for morph purposes, not
 Pattern parameters. The Pattern region stores the Normal values
 (`track_length`, `track_scale`, `track_shuffle`); the Morph endpoints live
-in Scene data and are persisted through the existing **parameter AutoSave**
-system, alongside instrument and Scene-setting morph endpoints.
+in `scene_settings_t` and are persisted through the existing **parameter
+AutoSave** system, alongside instrument and Scene-setting morph endpoints.
 
-This follows the existing architecture: Patterns store step/track data, but
-the Morph system is a Scene-level override. The morph worker interpolates
-between the Pattern's Normal value and the Scene's Morph endpoint at the
-voice morph amount.
+This follows the existing architecture (matching the S075 FX-send Morph
+pattern): Patterns store step/track data, Scenes own Morph endpoints. The
+morph worker does **not** write interpolated values into the Pattern
+region — doing so would overwrite the retained Normal values and mark the
+Pattern dirty. Instead, the morph worker computes effective values and
+caches them in ISR-static arrays:
+
+    seq_effectiveTrackLength[NUM_TRACKS]   (7 bytes, uint8_t)
+    seq_effectiveTrackScale[NUM_TRACKS]    (7 bytes, uint8_t)
+    seq_effectiveTrackShuffle[NUM_TRACKS]  (7 bytes, uint8_t)
+
+The sequencer reads these effective arrays instead of the region directly.
+The morph worker refreshes them each tick from
+`presetMorph_interpolate(normal, morph_endpoint, voice_morph_amount)`.
+When morph amount is 0, the effective values equal the Normal values.
 
 Per Scene: 3 parameters × 7 tracks = **21 bytes** of new Morph endpoint
 storage in Scene data. No AutoSave format version bump needed — the user
@@ -381,7 +403,42 @@ layout starts clean.
 Step scale, shuffle, and length are automatable as **Scene (`scn`) targets**
 through the existing Pattern automation system, using three new target IDs
 in the Scene target block (block 6 of the 9-bit automation parameter ID
-space, PATTERN_DYNAMIC_STACK.md §4.4).
+space, PATTERN_DYNAMIC_STACK.md §4.4). Automation writes to the effective
+arrays; the restore path recomputes the effective value from Normal + Morph
+endpoint + morph amount.
+
+### 5.6 Morph endpoint UI — SHIFT in STEP mode
+
+Morph endpoint editing for track settings follows the same SHIFT overlay
+pattern used by VOICE pages and the Effect page:
+
+- **SHIFT held on the STEP front page** shows and edits the Scene's track
+  morph endpoints (`track_morph_length`, `track_morph_scale`,
+  `track_morph_shuffle`) instead of the Pattern's Normal values. The play
+  mode cell (`mod`) is not shown in morph view (discrete, non-morphable).
+- **Editing** while SHIFT is held writes to the Scene morph endpoints via
+  `scene_setTrackMorphLength/Scale/Shuffle()` and calls
+  `preset_rebuildMorph()` to refresh interpolation.
+- **Display** reads from the Scene's morph endpoint fields when the morph
+  overlay flag is set, otherwise from the Pattern region's Normal values.
+
+This requires extending the `voiceModeShowMorph` flag or adding a parallel
+`stepModeShowMorph` flag, and adding morph-aware display/commit paths in
+`pat_applyTrackSettingsToMenu()` and the STEP page edit handler.
+
+### 5.7 Morph endpoint persistence and copy/clear
+
+- **sceneset.scg:** three new CSV lines (`track_morph_length`,
+  `track_morph_scale`, `track_morph_shuffle`), each carrying 7
+  comma-separated uint8_t values. Missing keys in old files leave the
+  defaults from `scene_settingsDefaults()`.
+- **Bank Save/Load:** morph endpoints are part of Scene settings and travel
+  with sceneset.scg. No separate instrument file changes.
+- **Copy/Clear:** the existing "scene → morph" copy and "reset morph" clear
+  operations must be extended to include track morph endpoints. "scene →
+  morph" copies Normal track_length/scale/shuffle into the Scene morph
+  endpoint fields. "reset morph" equalises the morph endpoints to the
+  current Normal values.
 
 ---
 
@@ -453,10 +510,15 @@ fractional behaviour is introduced.
 | Per-track Q8.8 accumulator | ISR static (SRAM1) | 14 | `uint16_t[7]` |
 | FX seq Q8.8 accumulator | ISR static (SRAM1) | 2 | `uint16_t` |
 | Per-track shuffle delay counter | ISR static (SRAM1) | 7 | `uint8_t[7]` |
+| Per-track shuffle pending | ISR static (SRAM1) | 7 | `uint8_t[7]` |
+| Per-track shuffle vel/note | ISR static (SRAM1) | 14 | `uint8_t[7]` × 2 |
 | Per-track play state | ISR static (SRAM1) | 7 | `uint8_t[7]` (pip dir + stopped) |
+| Effective track length | ISR static (SRAM1) | 7 | `uint8_t[7]` morph output |
+| Effective track scale | ISR static (SRAM1) | 7 | `uint8_t[7]` morph output |
+| Effective track shuffle | ISR static (SRAM1) | 7 | `uint8_t[7]` morph output |
 | `track_play_mode[7]` in region | Already reserved | 7 | Uses PAT4 reserved bytes |
 | Morph endpoints (per Scene) | Scene data | 21 | 3 params × 7 tracks |
-| **Total new ISR-static** | | **30** | |
+| **Total new ISR-static** | | **72** | |
 | **Total new flash** | | **~368** | Negligible against 214 KB free |
 
 All new ISR-static allocations require user acknowledgement per the RAM

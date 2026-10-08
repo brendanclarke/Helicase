@@ -83,13 +83,26 @@ typedef struct __attribute__((packed)) {
     uint8_t track_length[NUM_TRACKS];
     uint8_t track_scale[NUM_TRACKS];
     uint8_t track_shuffle[NUM_TRACKS];
+    /*
+     * Per-track play mode (S078 §4.1).
+     *
+     * What: one byte per track selecting the playback direction: 0 fwd,
+     * 1 rev, 2 pip, 3 rnd, 4 onc (once synced), 5 1fr (once free). Values
+     * >= 6 are treated as fwd. Why: allows each track to have an independent
+     * playback direction, matching the FX sequencer's existing run modes.
+     * Inputs: Menu edits, Scene/Pattern loads. Outputs: seq_advanceTrackStep()
+     * direction logic. Storage: one byte per track at offset 3 in the PAT4
+     * 16-byte track header. RAM: 7 bytes per Scene region. Affiliates:
+     * sequencer.c play-mode ISR logic, filesystem.c PAT4 reader/writer.
+     */
+    uint8_t track_play_mode[NUM_TRACKS];
     uint8_t pattern_change_bar;
     uint8_t pattern_next;
 } pat_scene_region_t;
 
 _Static_assert(sizeof(pat_scene_region_t) ==
                (PAT_STEPS_PER_SCENE * 2u) + (PAT_STACK_SIZE * 32u) +
-               512u + 23u,
+               512u + 30u,
                "pat_scene_region_t size must match the Pattern budget");
 
 /*
@@ -369,6 +382,15 @@ void pat_applyTrackSettingsToMenu(uint8_t scene_index, uint8_t track);
 void pat_setTrackLength(uint8_t scene_index, uint8_t track, uint8_t value);
 void pat_setTrackScale(uint8_t scene_index, uint8_t track, uint8_t value);
 void pat_setTrackShuffle(uint8_t scene_index, uint8_t track, uint8_t value);
+/*
+ * Per-track play mode setter (S078 §4.1).
+ *
+ * What: writes the play mode byte for one track in the Pattern region.
+ * Input: scene_index, track 0..6, value 0..5 (>= 6 is stored but plays fwd).
+ * Output: region updated, Pattern AutoSave marked dirty. Affiliates: menu.c
+ * PAR_TRACK_PLAY_MODE edit handler, pat_applyTrackSettingsToMenu().
+ */
+void pat_setTrackPlayMode(uint8_t scene_index, uint8_t track, uint8_t value);
 
 /*
  * Step-automation persistence operations.

@@ -701,6 +701,50 @@ storage_status_t storage_scenesetParseLine(
                                   target_settings->fx_send_morph,
                                   INSTRUMENT_SLOT_COUNT,
                                   127u);
+    } else if (storage_streq(key, "track_morph_length")) {
+        /*
+         * Parse the per-track Morph length endpoints (S078 §5.4).
+         *
+         * Inputs: seven comma-separated 1..NUM_STEPS values. Output: staged
+         * settings track_morph_length[]. A missing key keeps the stage default
+         * NUM_STEPS_PER_BAR; the writer is filesystem_nextScenesetLine()
+         * line 15.
+         */
+        if (!target_settings)
+            return STORAGE_STATUS_BAD_VALUE;
+        return storage_parseCsvU8(value,
+                                  target_settings->track_morph_length,
+                                  NUM_TRACKS,
+                                  NUM_STEPS);
+    } else if (storage_streq(key, "track_morph_scale")) {
+        /*
+         * Parse the per-track Morph scale endpoints (S078 §5.4).
+         *
+         * Inputs: seven comma-separated 0..127 CC values on the shared StepScale
+         * log curve. Output: staged settings track_morph_scale[]. A missing key
+         * keeps the stage default STEP_SCALE_DEFAULT; the writer is
+         * filesystem_nextScenesetLine() line 16.
+         */
+        if (!target_settings)
+            return STORAGE_STATUS_BAD_VALUE;
+        return storage_parseCsvU8(value,
+                                  target_settings->track_morph_scale,
+                                  NUM_TRACKS,
+                                  (STEP_SCALE_COUNT - 1u));
+    } else if (storage_streq(key, "track_morph_shuffle")) {
+        /*
+         * Parse the per-track Morph shuffle endpoints (S078 §5.4).
+         *
+         * Inputs: seven comma-separated 0..127 values. Output: staged settings
+         * track_morph_shuffle[]. A missing key keeps the stage default 0; the
+         * writer is filesystem_nextScenesetLine() line 17.
+         */
+        if (!target_settings)
+            return STORAGE_STATUS_BAD_VALUE;
+        return storage_parseCsvU8(value,
+                                  target_settings->track_morph_shuffle,
+                                  NUM_TRACKS,
+                                  127u);
     } else if (storage_streq(key, "fader_setting")) {
         /*
          * Parse retained per-voice fader modes.
@@ -1206,15 +1250,77 @@ static const char *const storage_effectRunModeTokens[EFFECT_SEQ_RUN_MODE_COUNT] 
     "fwd", "rev", "pip", "rnd", "sel"
 };
 
-static const char *const storage_effectStepScaleTokens[EFFECT_SEQ_SCALE_COUNT] = {
-    "1/64", "1/32t", "1/32", "1/16t", "1/16", "1/8t", "1/16.",
-    "1/8", "1/4t", "1/8.", "1/4", "1/2", "1bar", "2bar"
+/*
+ * .fx step_scale token vocabulary (S078 §2.6, §2.5).
+ *
+ * What: the file keeps its original symbolic tokens, but each token now names
+ * the equivalent CC position on the 128-position log curve instead of a
+ * 14-entry index. Tokens whose old duration exceeds the new curve maximum
+ * (1bar, 2bar) clamp to CC 127 (1/2 note). Why: the step_scale field is
+ * token-based, so an old card parses to the same musical division with no
+ * migration; a CC with no token is written as its decimal value, and the
+ * parser accepts either form. Affiliates: storage_effectParseSequence(),
+ * storage_formatEffectLine().
+ */
+typedef struct {
+    uint8_t cc;
+    const char *token;
+} storage_effectScaleToken_t;
+
+static const storage_effectScaleToken_t storage_effectScaleTokens[] = {
+    {  0u, "1/64"  },
+    { 16u, "1/32t" },
+    { 38u, "1/32"  },
+    { 54u, "1/16t" },
+    { 76u, "1/16"  },
+    { 83u, "1/8t"  },
+    { 86u, "1/16." },
+    { 93u, "1/8"   },
+    {100u, "1/4t"  },
+    {103u, "1/8."  },
+    {110u, "1/4"   },
+    {127u, "1/2"   },
+    {127u, "1bar"  },
+    {127u, "2bar"  },
 };
 
-_Static_assert(sizeof(storage_effectStepScaleTokens) /
-                   sizeof(storage_effectStepScaleTokens[0]) ==
-                   EFFECT_SEQ_SCALE_COUNT,
-               "one .fx step_scale token per shared scale index");
+#define STORAGE_EFFECT_SCALE_TOKEN_COUNT \
+    ((uint8_t)(sizeof(storage_effectScaleTokens) / \
+               sizeof(storage_effectScaleTokens[0])))
+
+/* Symbolic token for an exact CC, or NULL when the CC has no token. */
+static const char *storage_effectScaleTokenFor(uint8_t cc)
+{
+    uint8_t i;
+
+    for (i = 0u; i < STORAGE_EFFECT_SCALE_TOKEN_COUNT; i++) {
+        if (storage_effectScaleTokens[i].cc == cc)
+            return storage_effectScaleTokens[i].token;
+    }
+    return NULL;
+}
+
+/* Parse a symbolic .fx step_scale token or a decimal CC 0..127. */
+static uint8_t storage_effectScaleParse(const char *text, uint8_t *cc_out)
+{
+    uint8_t i;
+    uint8_t parsed = 0u;
+
+    if (!text || !cc_out)
+        return 0u;
+    for (i = 0u; i < STORAGE_EFFECT_SCALE_TOKEN_COUNT; i++) {
+        if (storage_streq(storage_effectScaleTokens[i].token, text)) {
+            *cc_out = storage_effectScaleTokens[i].cc;
+            return 1u;
+        }
+    }
+    if (storage_parseU8(text, &parsed) != STORAGE_STATUS_OK)
+        return 0u;
+    if (parsed >= EFFECT_SEQ_SCALE_COUNT)
+        return 0u;
+    *cc_out = parsed;
+    return 1u;
+}
 
 static uint8_t storage_effectTokenIndex(const char *const *tokens,
                                         uint8_t count,
@@ -1416,9 +1522,7 @@ storage_status_t storage_effectParseLine(storage_effect_state_t *state,
                 return STORAGE_STATUS_BAD_VALUE;
             target->seq_length = parsed;
         } else if (storage_streq(key, "step_scale")) {
-            if (!storage_effectTokenIndex(storage_effectStepScaleTokens,
-                                          EFFECT_SEQ_SCALE_COUNT,
-                                          value, &parsed))
+            if (!storage_effectScaleParse(value, &parsed))
                 return STORAGE_STATUS_BAD_VALUE;
             target->seq_step_scale = parsed;
         } else if (strncmp(key, STORAGE_EFFECT_LANE_PREFIX,
@@ -1598,12 +1702,21 @@ uint8_t storage_formatEffectLine(char *dst, uint16_t capacity,
     if (line_index == 3u)
         return storage_formatAssignmentU16(dst, capacity, "length",
                                            record->seq_length);
-    if (line_index == 4u)
-        return storage_formatAssignmentText(
-            dst, capacity, "step_scale",
-            storage_effectStepScaleTokens[
-                record->seq_step_scale < EFFECT_SEQ_SCALE_COUNT
-                    ? record->seq_step_scale : EFFECT_SEQ_SCALE_DEFAULT]);
+    if (line_index == 4u) {
+        /*
+         * S078 §2.6: write the symbolic token when the stored CC has one, and
+         * a decimal CC otherwise. A stale out-of-range byte falls back to the
+         * 1/16 default through the descriptor's symbolic token.
+         */
+        uint8_t cc = (record->seq_step_scale < EFFECT_SEQ_SCALE_COUNT)
+                         ? record->seq_step_scale : EFFECT_SEQ_SCALE_DEFAULT;
+        const char *token = storage_effectScaleTokenFor(cc);
+
+        if (token)
+            return storage_formatAssignmentText(dst, capacity, "step_scale",
+                                                token);
+        return storage_formatAssignmentU8(dst, capacity, "step_scale", cc);
+    }
     line_index = (uint16_t)(line_index - 5u);
     if (line_index >= EFFECT_SEQ_LANE_COUNT ||
         !storage_effectNamedLane(type, (uint8_t)line_index, &index))

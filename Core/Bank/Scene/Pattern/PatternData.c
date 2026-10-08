@@ -43,7 +43,7 @@ _Static_assert(PAT_STACK_SIZE > 0u && PAT_STACK_SIZE <= 512u,
                "PAT_STACK_SIZE must fit the 14-bit pool bitmap");
 _Static_assert(sizeof(pat_scene_region_t) ==
                (PAT_STEPS_PER_SCENE * 2u) + (PAT_STACK_SIZE * 32u) +
-               512u + 23u,
+               512u + 30u,
                "pat_scene_region_t size must match the Pattern budget");
 
 /*
@@ -833,14 +833,20 @@ void pat_initScene(uint8_t scene_index)
      * fixed behavior. seq_advanceTrackStep() reads this at each step boundary
      * and wraps independently per track; valid range is 1–NUM_STEPS (128).
      *
-     * track_scale and track_shuffle: stored and persisted but not yet consumed
-     * by playback. The scale index uses StepScale's shared table; the default
-     * is 1/16 and 0 remains the no-shuffle offset.
+     * track_scale: consumed by the per-track DDA accumulators (S078). The
+     * value is a 128-position CC on StepScale's shared log curve; the default
+     * is 76 (1/16).
+     *
+     * track_shuffle: consumed by the per-track shuffle deferral (S078). 0 is
+     * the no-shuffle offset.
+     *
+     * track_play_mode: 0 fwd is the default; see pat_scene_region_t.
      */
     for (track = 0u; track < NUM_TRACKS; track++) {
         region->track_length[track] = NUM_STEPS_PER_BAR;
         region->track_scale[track] = TRACK_SCALE_DEFAULT;
         region->track_shuffle[track] = 0u;
+        region->track_play_mode[track] = 0u;
     }
     region->pattern_change_bar = 0u;
     region->pattern_next = 0u;
@@ -1139,6 +1145,7 @@ void pat_applyTrackSettingsToMenu(uint8_t scene_index, uint8_t track)
     parameter_values[PAR_TRACK_LENGTH] = region->track_length[track];
     parameter_values[PAR_TRACK_SCALE] = region->track_scale[track];
     parameter_values[PAR_SHUFFLE] = region->track_shuffle[track];
+    parameter_values[PAR_TRACK_PLAY_MODE] = region->track_play_mode[track];
 }
 
 /* Persist one track-length menu edit in the resident Scene region. */
@@ -1171,6 +1178,24 @@ void pat_setTrackShuffle(uint8_t scene_index, uint8_t track, uint8_t value)
     if (!region || !pat_trackValid(track))
         return;
     region->track_shuffle[track] = value;
+    pat_markSceneDirty(scene_index);
+}
+
+/*
+ * Per-track play mode setter (S078 §4.1).
+ *
+ * What: writes the play mode byte for one track in the Pattern region.
+ * Input: scene_index, track 0..6, value 0..5. Output: region updated, Pattern
+ * AutoSave marked dirty. Affiliates: menu.c PAR_TRACK_PLAY_MODE edit handler,
+ * pat_applyTrackSettingsToMenu().
+ */
+void pat_setTrackPlayMode(uint8_t scene_index, uint8_t track, uint8_t value)
+{
+    pat_scene_region_t *region = pat_sceneRegionMut(scene_index);
+
+    if (!region || !pat_trackValid(track))
+        return;
+    region->track_play_mode[track] = value;
     pat_markSceneDirty(scene_index);
 }
 
@@ -1845,6 +1870,8 @@ void pat_rawRegionCopyBody(uint8_t src_scene, uint8_t dst_scene)
     memcpy(dst->track_length, src->track_length, sizeof(dst->track_length));
     memcpy(dst->track_scale, src->track_scale, sizeof(dst->track_scale));
     memcpy(dst->track_shuffle, src->track_shuffle, sizeof(dst->track_shuffle));
+    memcpy(dst->track_play_mode, src->track_play_mode,
+           sizeof(dst->track_play_mode));
     dst->pattern_change_bar = src->pattern_change_bar;
     dst->pattern_next = src->pattern_next;
 }

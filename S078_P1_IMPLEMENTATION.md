@@ -759,7 +759,8 @@ New:
   if (shuffle_val > 0u && is_odd_step) {
       uint8_t delay = (uint8_t)((uint16_t)shuffle_val * 24u / 256u);
       if (delay > 0u) {
-          seq_trackShuffleDelay[track] = delay;
+          seq_trackShuffleDelay[track] =
+              (uint8_t)(delay - 1u);
           seq_trackShufflePending[track] = 1u;
           seq_trackShuffleVel[track] = sp.velocity;
           seq_trackShuffleNote[track] = sp.note;
@@ -776,6 +777,10 @@ New:
  *
  * What: odd-indexed steps (1, 3, 5, ...) with nonzero shuffle are deferred
  * by (shuffle_value * 24) / 256 PPQ ticks. Even steps fire immediately.
+ * The delay counter is set to (delay - 1u) because the countdown loop in
+ * seq_processShuffleDelays() decrements first and fires when delay reaches
+ * 0 on the subsequent tick — setting delay = N would give N+1 ticks of
+ * actual delay; the subtraction is safe because delay > 0u is guaranteed.
  * Why: shuffle is a groove/feel concept that delays every other beat. The
  * delay is always based on the 1/16th grid (24 PPQ ticks), not the track's
  * step scale, so it vanishes for large scales (musically correct). Inputs:
@@ -1120,7 +1125,14 @@ for play mode: `DTYPE_MENU|(MENU_TRACK_PLAY_MODE<<4)` with short labels
 
 ---
 
-## Step 5 — Morphability
+## Step 5 — Morphability (effective-getter architecture)
+
+The morph worker does **not** write interpolated values into the Pattern
+region — doing so would overwrite retained Normal values and mark the
+Pattern dirty. Instead, it follows the S075 FX-send Morph pattern:
+Pattern region keeps Normal values; Scene settings stores Morph endpoints;
+the morph worker computes effective values cached in ISR-static arrays;
+the sequencer reads the effective arrays.
 
 #### 5-1 `Core/Bank/Scene/SceneData.h` — morph endpoint storage in Scene settings
 
@@ -1132,29 +1144,14 @@ for play mode: `DTYPE_MENU|(MENU_TRACK_PLAY_MODE<<4)` with short labels
     uint8_t track_morph_shuffle[NUM_TRACKS];
 ```
 
-/*
- * Per-track Morph endpoints for length, scale, and shuffle (S078 §5.4).
- *
- * What: the Morph endpoint values for three track parameters, stored per
- * Scene. The Normal values live in pat_scene_region_t (Pattern data); these
- * are the Morph endpoints interpolated by the voice morph amount. Why: the
- * Morph system is Scene-level — Patterns store step/track data, Scenes own
- * Morph endpoints. Tracks 6 and 7 share voice 6's morph amount
- * (voice_morph_amount[5]) but may have different endpoints here.
- * Inputs: Menu Morph-endpoint edits, Scene Load. Outputs: the morph worker
- * interpolates between Pattern Normal values and these endpoints. RAM: 21
- * bytes per Scene (3 × 7), 336 bytes total across 16 Scenes. No AutoSave
- * version bump — user deletes AutoSave files after implementation.
- * Affiliates: presetMorphEngine.c track morph worker, Autosave Scene params,
- * sceneset.scg writer/parser.
- */
+21 bytes per Scene (3 × 7), 336 bytes total across 16 Scenes. No AutoSave
+version bump — user deletes AutoSave files after implementation.
 
 #### 5-2 `Core/Bank/Scene/SceneData.c` — defaults and setters
 
 **In `scene_settingsDefaults()` — add**
 
 ```c
-    memset(out->track_morph_length, 0, sizeof(out->track_morph_length));
     for (uint8_t t = 0u; t < NUM_TRACKS; t++) {
         out->track_morph_length[t] = NUM_STEPS_PER_BAR;
         out->track_morph_scale[t] = STEP_SCALE_DEFAULT;
@@ -1162,34 +1159,13 @@ for play mode: `DTYPE_MENU|(MENU_TRACK_PLAY_MODE<<4)` with short labels
     }
 ```
 
-/*
- * Track Morph endpoint defaults (S078 §5.4).
- *
- * What: fresh Scenes start with Morph endpoints matching the Normal defaults
- * (length 16, scale 76/1/16, shuffle 0), so Morph amount 0..255 produces no
- * change until the user edits the Morph endpoints.
- */
+Fresh Scenes start with Morph endpoints matching the Normal defaults
+(length 16, scale 76, shuffle 0), so Morph amount 0..255 produces no
+change until the user edits the Morph endpoints.
 
-**Add setter/getter pairs:**
-
-```c
-void scene_setTrackMorphLength(uint8_t scene_index, uint8_t track, uint8_t value);
-uint8_t scene_getTrackMorphLength(uint8_t scene_index, uint8_t track);
-void scene_setTrackMorphScale(uint8_t scene_index, uint8_t track, uint8_t value);
-uint8_t scene_getTrackMorphScale(uint8_t scene_index, uint8_t track);
-void scene_setTrackMorphShuffle(uint8_t scene_index, uint8_t track, uint8_t value);
-uint8_t scene_getTrackMorphShuffle(uint8_t scene_index, uint8_t track);
-```
-
-/*
- * Track Morph endpoint setters (S078 §5.4).
- *
- * What: stores one track's Morph endpoint for length/scale/shuffle in the
- * Scene settings. Clamps and marks the matching AutoSave Scene parameter cell.
- * Inputs: Scene index, track 0..6, value. Outputs: retained Scene data
- * updated. Affiliates: Autosave Scene parameter cells (new entries),
- * presetMorphEngine.c track morph path.
- */
+**Add setter/getter pairs** for `scene_setTrackMorphLength/Scale/Shuffle()`
+and matching getters. Each setter clamps and marks the corresponding
+AutoSave Scene parameter cell.
 
 #### 5-3 `Core/Bank/Scene/Autosave.h` — new Scene parameter cells
 
@@ -1202,236 +1178,119 @@ uint8_t scene_getTrackMorphShuffle(uint8_t scene_index, uint8_t track);
     AUTOSAVE_SCENE_PARAM_COUNT = 72
 ```
 
-**Update `AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES`:**
+Update `AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES` from 51u to 72u. 72 <= 118
+capacity, so the allocation remains valid.
 
+#### 5-4 `Core/Bank/Scene/Preset/presetMorphEngine.c` — track morph worker with effective-value arrays
+
+**Add ISR-static effective-value arrays in `sequencer.c`:**
+
+```c
+static uint8_t seq_effectiveTrackLength[NUM_TRACKS];
+static uint8_t seq_effectiveTrackScale[NUM_TRACKS];
+static uint8_t seq_effectiveTrackShuffle[NUM_TRACKS];
 ```
-Old:
-  #define AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES    51u
 
-New:
-  #define AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES    72u
-```
-
-/*
- * Track Morph endpoint AutoSave cells (S078 §5.4).
- *
- * What: 21 new AutoSave Scene parameter cells for the three track Morph
- * endpoint arrays (7 tracks × 3 parameters). These occupy previously
- * reserved cells in the 118-byte Scene parameter allocation. Why: the Morph
- * endpoints must survive power cycles via AutoSave. No format version bump
- * needed — user deletes AutoSave files. Inputs: Scene setters mark these
- * cells. Outputs: Autosave drain serializes them. 72 <= 118 capacity, so
- * the allocation remains valid. Affiliates: scene_setTrackMorph*() setters.
- */
-
-#### 5-4 `Core/Bank/Scene/Preset/presetMorphEngine.c` — track morph worker
-
-**After the existing voice morph tick loop (~line 493) — add**
-
-A new track morph pass that runs after the per-descriptor pass completes:
+**Add a new track morph pass in `presetMorphEngine.c` after the
+per-descriptor pass completes:**
 
 ```c
 static void presetMorph_trackTick(uint8_t scene_index)
 {
     const scene_t *scene = scene_getConst(scene_index);
     if (!scene) return;
+    const pat_scene_region_t *region = pat_sceneRegion(scene_index);
+    if (!region) return;
 
     for (uint8_t track = 0u; track < NUM_TRACKS; track++) {
         uint8_t slot = (track <= 5u) ? track : 5u;
         uint8_t amount = scene->settings.voice_morph_amount[slot];
-        const pat_scene_region_t *region = pat_sceneRegion(scene_index);
-        if (!region) continue;
 
-        /* Length: interpolate, round to nearest integer, clamp 1..128 */
-        uint8_t norm_len = region->track_length[track];
-        uint8_t morph_len = scene->settings.track_morph_length[track];
-        uint8_t new_len = presetMorph_interpolate(norm_len, morph_len, amount);
-        if (new_len < 1u) new_len = 1u;
-        /* Apply only if changed — avoid unnecessary dirty marks */
-        ...
+        uint8_t len = presetMorph_interpolate(
+            region->track_length[track],
+            scene->settings.track_morph_length[track], amount);
+        if (len < 1u) len = 1u;
+        seq_effectiveTrackLength[track] = len;
 
-        /* Scale: interpolate CC values */
-        uint8_t norm_scale = region->track_scale[track];
-        uint8_t morph_scale = scene->settings.track_morph_scale[track];
-        uint8_t new_scale = presetMorph_interpolate(norm_scale, morph_scale, amount);
-        ...
+        seq_effectiveTrackScale[track] = presetMorph_interpolate(
+            region->track_scale[track],
+            scene->settings.track_morph_scale[track], amount);
 
-        /* Shuffle: interpolate 0..127 */
-        uint8_t norm_shuffle = region->track_shuffle[track];
-        uint8_t morph_shuffle = scene->settings.track_morph_shuffle[track];
-        uint8_t new_shuffle = presetMorph_interpolate(norm_shuffle, morph_shuffle, amount);
-        ...
+        seq_effectiveTrackShuffle[track] = presetMorph_interpolate(
+            region->track_shuffle[track],
+            scene->settings.track_morph_shuffle[track], amount);
     }
 }
 ```
 
-/*
- * Track morph interpolation worker (S078 §5.1, §5.3).
- *
- * What: interpolates length, scale, and shuffle between Pattern Normal
- * values and Scene Morph endpoints using the associated voice's morph
- * amount. Track N uses voice_morph_amount[N] for tracks 0..5; tracks 6
- * and 7 use voice_morph_amount[5] (HiHat/Choke pair). The interpolated
- * values are applied as live overrides — they affect DDA tick intervals
- * and shuffle delays in real time but do not modify the stored Pattern
- * region. Why: continuous morph sweep of length/scale/shuffle produces
- * musically useful real-time variation. Inputs: pat_scene_region_t Normal
- * values, scene_settings_t Morph endpoints, voice_morph_amount[slot].
- * Outputs: live track playback parameters updated. Called from the
- * bounded morph tick after descriptor passes complete. Affiliates:
- * presetMorph_interpolate() (existing arithmetic), sequencer.c DDA
- * accumulator (reads track_scale live), seq_advanceTrackStep() (reads
- * track_length and track_shuffle live).
- */
-
-Note: the morph worker writes to the Pattern region's track_length,
-track_scale, and track_shuffle fields as live overrides. The Normal values
-must be preserved separately (either cached or restored from the Scene's
-base values on Morph amount = 0).
+The effective arrays are initialised from Normal values at pattern load /
+scene change (morph amount 0 path). The sequencer reads
+`seq_effectiveTrackLength[track]` etc. instead of
+`region->track_length[track]` in `seq_advanceTrackStep()`,
+`seq_processSchedulerTick()`, and the DDA interval lookup.
 
 #### 5-5 `Core/Hardware/SD/storageTypes.c` — sceneset parser for morph endpoints
 
-**After `fx_send_morph` parser block (~line 701) — add**
-
-```c
-    } else if (storage_streq(key, "track_morph_length")) {
-        return storage_parseCsvU8(value,
-                                  target_settings->track_morph_length,
-                                  NUM_TRACKS);
-    } else if (storage_streq(key, "track_morph_scale")) {
-        return storage_parseCsvU8(value,
-                                  target_settings->track_morph_scale,
-                                  NUM_TRACKS);
-    } else if (storage_streq(key, "track_morph_shuffle")) {
-        return storage_parseCsvU8(value,
-                                  target_settings->track_morph_shuffle,
-                                  NUM_TRACKS);
-```
-
-/*
- * sceneset.scg parser for track Morph endpoints (S078 §5.4).
- *
- * What: three new CSV keys, each carrying 7 comma-separated uint8_t values.
- * Optional for old sceneset files — missing keys leave the defaults from
- * scene_settingsDefaults(). Why: track morph endpoints are Scene settings
- * that must survive Scene Save/Load. Inputs: sceneset.scg line. Outputs:
- * target_settings track_morph_* arrays. Affiliates: filesystem.c sceneset
- * writer, scene_commitSettings().
- */
+**After `fx_send_morph` parser block (~line 701) — add three CSV keys:**
+`track_morph_length`, `track_morph_scale`, `track_morph_shuffle`. Each
+parses 7 comma-separated uint8_t values via `storage_parseCsvU8()`.
+Missing keys in old sceneset files leave the defaults from
+`scene_settingsDefaults()`.
 
 #### 5-6 `Core/Hardware/SD/filesystem.c` — sceneset writer for morph endpoints
 
-**After line 17291 (case 14, fx_send_morph write) — add**
+**After case 14 (fx_send_morph write) — add cases 15, 16, 17** using
+`filesystem_formatAssignmentCsvU8Line()` for the three morph endpoint
+arrays.
 
-```c
-    case 15u:
-        return filesystem_formatAssignmentCsvU8Line(
-            dst, cap, "track_morph_length",
-            scene->settings.track_morph_length, NUM_TRACKS);
-    case 16u:
-        return filesystem_formatAssignmentCsvU8Line(
-            dst, cap, "track_morph_scale",
-            scene->settings.track_morph_scale, NUM_TRACKS);
-    case 17u:
-        return filesystem_formatAssignmentCsvU8Line(
-            dst, cap, "track_morph_shuffle",
-            scene->settings.track_morph_shuffle, NUM_TRACKS);
-```
+#### 5-7 `Core/Menu/menu.c` — STEP morph UI (SHIFT overlay)
 
-/*
- * sceneset.scg writer for track Morph endpoints (S078 §5.4).
- *
- * What: three new lines appended after fx_send_morph, keeping all earlier
- * line numbers unchanged. Why: Scene Save must persist the Morph endpoints.
- * Inputs: scene->settings.track_morph_* arrays. Outputs: three CSV lines
- * in sceneset.scg. Affiliates: storageTypes.c parser counterpart.
- */
+**SHIFT held on the STEP front page** shows and edits the Scene's track
+morph endpoints instead of the Pattern's Normal values. This follows the
+existing `voiceModeShowMorph` pattern used by VOICE pages:
 
-#### 5-7 `Core/Bank/Scene/SceneModTargets.h` — new target kinds
+- Add a `stepModeShowMorph` flag (or extend `voiceModeShowMorph` scope).
+- When the flag is set, the three morphable cells (len, scl, shf) on the
+  STEP page resolve against the Scene morph endpoint fields instead of the
+  Pattern region. The play mode cell (`mod`) is hidden or greyed in morph
+  view (discrete, non-morphable).
+- SHIFT hold sets the flag (`buttonHandler.c`, extend the SHIFT-hold path
+  at lines 1793-1820 to cover MODE_STEP). SHIFT release clears it (extend
+  lines 1990-2022). Latching via SHIFT+MODE_STEP toggles it (extend
+  lines 1129-1149).
+- Editing while the flag is set writes to the Scene morph endpoints via
+  `scene_setTrackMorphLength/Scale/Shuffle()` and calls
+  `preset_rebuildMorph()` to refresh interpolation.
+- Display reads from the Scene's morph endpoint fields when the flag is
+  set, otherwise from the Pattern region's Normal values.
 
-**After `SCENE_MOD_TARGET_KIND_EFFECT_MORPH` — add**
+#### 5-8 `Core/Menu/CopyClear/copyClearService.c` — morph copy/clear for track endpoints
 
-```c
-    SCENE_MOD_TARGET_KIND_TRACK_LENGTH,
-    SCENE_MOD_TARGET_KIND_TRACK_SCALE,
-    SCENE_MOD_TARGET_KIND_TRACK_SHUFFLE,
-```
+Extend the existing "scene → morph" copy and "reset morph" clear
+operations to include track morph endpoints:
 
-#### 5-8 `Core/Bank/Scene/SceneModTargets.c` — new target table entries
+- **CC_COPY_MORPH / CC_COPY_SCENE_MORPH:** copy Normal
+  `track_length/scale/shuffle` from the Pattern region into the Scene
+  morph endpoint fields.
+- **CC_CLEAR_RESET_MORPH / CC_CLEAR_SCENE_RESET_MORPH:** equalise the
+  morph endpoints to the current Normal values (setting morph amount to 0
+  effectively).
 
-**After line 114 (Effect Morph row, ID 20) — add**
+#### 5-9 `Core/Bank/Scene/SceneModTargets.h/.c` — new automation target kinds
 
-21 new entries (7 tracks × 3 parameters), IDs 21..41:
+Add `SCENE_MOD_TARGET_KIND_TRACK_LENGTH/SCALE/SHUFFLE` and 21 new target
+table entries (7 tracks × 3 parameters), IDs 21..41. Automation writes
+to the effective arrays; the restore path recomputes effective values from
+Normal + Morph endpoint + morph amount.
 
-```c
-    /* Per-track length targets (IDs 405..411) */
-    { SCENE_MOD_TARGET_ID(21u), SCENE_MOD_TARGET_KIND_TRACK_LENGTH, 0u,
-      1u, 128u, SCENE_MOD_TARGET_USE_AUTOMATION,
-      "Track", "1 Len  ", "1ln" },
-    /* ... tracks 2-7 ... */
+#### 5-10 `Core/Sequencer/sequencer.c` — scene automation apply for track targets
 
-    /* Per-track scale targets (IDs 412..418) */
-    { SCENE_MOD_TARGET_ID(28u), SCENE_MOD_TARGET_KIND_TRACK_SCALE, 0u,
-      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
-      "Track", "1 Scale", "1sc" },
-    /* ... tracks 2-7 ... */
-
-    /* Per-track shuffle targets (IDs 419..425) */
-    { SCENE_MOD_TARGET_ID(35u), SCENE_MOD_TARGET_KIND_TRACK_SHUFFLE, 0u,
-      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION,
-      "Track", "1 Shuf ", "1sh" },
-    /* ... tracks 2-7 ... */
-```
-
-/*
- * Scene automation targets for track parameters (S078 §5.5).
- *
- * What: 21 new Scene targets for per-track length, scale, and shuffle. These
- * are automatable as Scene (`scn`) targets in Pattern automation. voice_slot
- * carries the track index (0..6) for the apply handler. Why: allows step
- * automation to modulate per-track timing parameters. IDs 21..41 occupy 21
- * of the remaining 43 available IDs in the 64-ID Scene block. Inputs:
- * Pattern 7-bit automation values. Outputs: runtime track parameter overlays
- * through seq_applySceneAutomation(). Affiliates: Menu automation picker,
- * Pattern validation.
- */
-
-#### 5-9 `Core/Sequencer/sequencer.c` — scene automation apply for track targets
-
-**In `seq_applySceneAutomation()` (~line 1197) — add cases**
-
-```c
-    case SCENE_MOD_TARGET_KIND_TRACK_LENGTH:
-        if (descriptor->voice_slot < NUM_TRACKS)
-            pat_setTrackLength(scene_getActiveIndex(),
-                               descriptor->voice_slot, value);
-        break;
-    case SCENE_MOD_TARGET_KIND_TRACK_SCALE:
-        if (descriptor->voice_slot < NUM_TRACKS)
-            pat_setTrackScale(scene_getActiveIndex(),
-                              descriptor->voice_slot, value);
-        break;
-    case SCENE_MOD_TARGET_KIND_TRACK_SHUFFLE:
-        if (descriptor->voice_slot < NUM_TRACKS)
-            pat_setTrackShuffle(scene_getActiveIndex(),
-                                descriptor->voice_slot, value);
-        break;
-```
-
-/*
- * Scene automation apply for track parameters (S078 §5.5).
- *
- * What: routes Pattern automation values to the track parameter setters.
- * voice_slot carries the track index. Why: step automation targeting track
- * length/scale/shuffle must update the live Pattern region so the DDA
- * accumulator and shuffle delay pick up the change immediately. These are
- * runtime overlays — the Pattern AutoSave dirty mark from the setter is
- * acceptable because step automation is a transient overlay that the
- * restore path will undo. Inputs: target descriptor kind and 7-bit value.
- * Outputs: pat_scene_region_t track parameters updated. Affiliates:
- * seq_restoreAllSceneAutomation() must be extended to restore these targets
- * from their retained base values.
- */
+In `seq_applySceneAutomation()`, add cases for the three new target
+kinds. Automation values write to the `seq_effectiveTrack*` arrays
+directly (runtime overlays). `seq_restoreAllSceneAutomation()` restores
+by recomputing the effective value from `presetMorph_interpolate(normal,
+morph_endpoint, amount)` — no separate base-value store needed since the
+Normal and Morph endpoint are always available.
 
 ---
 
@@ -1456,9 +1315,9 @@ REMAP_TABLE = {
     8: 100,   # 1/4 triplet
     9: 103,   # dotted 1/8
     10: 110,  # 1/4
-    11: 120,  # dotted 1/4  (was /2 old table, actually 1/2 = 127)
-    12: 127,  # 1 bar → map to 1/2 as closest
-    13: 127,  # 2 bars → map to 1/2 as closest (exceeds new range)
+    11: 127,  # 1/2 note (192 ticks)
+    12: 127,  # 1 bar → clamp to 1/2 (exceeds new 8.0x max)
+    13: 127,  # 2 bars → clamp to 1/2 (exceeds new 8.0x max)
 }
 ```
 
@@ -1529,12 +1388,15 @@ menu_currentBar = step / NUM_STEPS_PER_BAR;
 | `seq_trackShuffleVel[7]` | `uint8_t[7]` | 7 | sequencer.c |
 | `seq_trackShuffleNote[7]` | `uint8_t[7]` | 7 | sequencer.c |
 | `seq_trackPlayState[7]` | `uint8_t[7]` | 7 | sequencer.c |
-| **Total new ISR-static** | | **55** | |
+| `seq_effectiveTrackLength[7]` | `uint8_t[7]` | 7 | sequencer.c (Step 5) |
+| `seq_effectiveTrackScale[7]` | `uint8_t[7]` | 7 | sequencer.c (Step 5) |
+| `seq_effectiveTrackShuffle[7]` | `uint8_t[7]` | 7 | sequencer.c (Step 5) |
+| **Total new ISR-static** | | **76** | |
 
-Note: the proposal estimated 30 bytes. The additional 25 bytes come from
-shuffle velocity/note deferral buffers and the FX step counter, which were
-not counted in the proposal's estimate. This is still negligible relative to
-SRAM1 capacity.
+Note: the proposal estimated 72 bytes (30 original + 21 effective arrays +
+21 shuffle buffers). The measured 55 bytes from Steps 1-4 plus the 21 bytes
+from effective arrays in Step 5 yields 76. This is still negligible relative
+to SRAM1 capacity.
 
 ## Summary of new flash allocations
 
@@ -1580,6 +1442,8 @@ SRAM1 capacity.
 | `Core/Bank/Scene/Preset/ParameterArray.h` | Add: `PAR_TRACK_PLAY_MODE` |
 | `Core/Bank/Scene/SceneModTargets.h` | Add: 3 new target kinds |
 | `Core/Bank/Scene/SceneModTargets.c` | Add: 21 new target table entries |
+| `Core/DSP/Effects/CrumpBit/CrumpBitEffect.c` | Modify: `stepScale_ticks()` → `stepScale_ticksQ8() / 256.0f` |
+| `Core/DSP/Effects/CrumpBit/CrumpBitParameters.c` | Modify: `stepScale_shortName()` → `stepScale_formatShort()` |
 | `Core/DSP/Effects/EffectTypes.h` | No code change (aliases resolve) |
 | `Core/Menu/menuPages.h` | Modify: SEQ_PAGE layout |
 | `Core/Menu/menu.c` | Modify: scale display, play mode display/edit, bar display |
@@ -1587,3 +1451,490 @@ SRAM1 capacity.
 | `Core/Hardware/SD/filesystem.c` | Add: `track_play_mode` reader/writer, sceneset morph lines |
 | `Core/Hardware/SD/storageTypes.c` | Add: sceneset parser for morph endpoints |
 | `tools/convert_scene_scale.py` | Add: new file |
+
+---
+
+## Implementation progress log (Codex, 2026-10-08)
+
+Status: **Steps 1-4, 6, 7 implemented and building clean.** **Step 5
+(Morphability) is deferred** pending one design decision - see below.
+
+Clean rebuild (make clean && make all, DEV config): text 534,808 B, data 420 B,
+bss 427,200 B. Flash payload 535,228 B of 753,664 (218,436 B free). No new
+compiler warnings from this change set.
+
+### Step 1 - 128-position Q8.8 LUT and per-track DDA accumulators
+
+Implemented in its final (Stage 2) form, i.e. the true Q8.8 LUT. The plan's
+Stage 1 integer-only intermediate was not left as a separate code state; the DDA
+plumbing is identical either way, and Stage 1 timing can be re-validated by
+temporarily zeroing the LUT low bytes (each entry then equals round(multiplier)
+x 256).
+
+- Core/Sequencer/StepScale.h - STEP_SCALE_COUNT 128, STEP_SCALE_DEFAULT 76;
+  stepScale_ticksQ8(), stepScale_shortName/longName (NULL for non-stops),
+  stepScale_isMusicalStop(), plus a new shared stepScale_formatShort() that owns
+  the symbolic-or-decimal three-character fallback.
+- Core/Sequencer/StepScale.c - 128-entry Q8.8 LUT generated from
+  step_scale_0_127.csv (range 1536..49152), and the 14-entry nudge-stop label
+  table.
+- Core/Sequencer/sequencer.c - seq_trackAccumulator[7] (uint16_t, 14 B);
+  seq_processSchedulerTick() now has the per-track DDA loop. The master 1/16th
+  counter (seq_masterStepClock/seq_masterStepCnt) is still derived with the old
+  24-tick modulo for bar display, boundaries, trigger clock, and MIDI beat.
+- Realignment (seq_realignActivePatternToMasterClock(),
+  seq_realignTrackToMasterClock()) sets the Q8.8 phase
+  ((seq_elapsedPpqTicks << 8) % interval) and derives the step index from the
+  same Q8.8 timeline.
+
+### Deviations from the written plan (Step 1)
+
+1. **Immediate step zero.** The plan seeded accumulators to 0 and dropped the
+   elapsed-tick modulo guard from the advance test. With a zero seed the first
+   tick adds 256 and cannot reach the minimum interval (1536), so step zero
+   would be lost and the first note would arrive one step late.
+   seq_setStepIndexToStart() instead seeds each accumulator to interval - 256,
+   so the initial tick fires exactly once with a zero remainder. Verified by
+   construction against the old behaviour (fires at elapsed 0, interval,
+   2 x interval, ...).
+2. **Non-forward realignment.** The plan's realign snippet used a forward
+   position % len for every mode. Added seq_stepIndexForMode() so rev/pip/onc/
+   1fr tracks land on the step their mode would have reached, and pip sets its
+   direction bit from the mapped cycle phase.
+3. **Stopped once-mode tracks.** Realignment skips a track whose once-mode
+   stopped flag is set (S078 section 4.3: the double-click realign gesture must
+   not restart a stopped track).
+4. **Menu scale clamp.** getMaxEntriesForMenu(MENU_TRACK_SCALE) is left
+   returning STEP_SCALE_COUNT; the clamp uses value >= n -> n-1, so this yields
+   max 127. The plan's suggested STEP_SCALE_COUNT - 1 would have capped the
+   parameter at 126.
+
+### Step 2 - FX sequencer migration (Stage 3)
+
+- seq_fxAccumulator (uint16_t, 2 B) and seq_fxStepCounter (uint32_t, 4 B).
+- seq_fxClockTick() now uses the same Q8.8 DDA and a monotonic step counter
+  instead of seq_elapsedPpqTicks % ticks and / ticks. The accumulator is seeded
+  in seq_setStepIndexToStart() alongside the track accumulators.
+- .fx step_scale is token-based, not a raw byte, so section 2.5's no-migration
+  rule does not apply directly. storageTypes.c now keeps the original 14
+  symbolic tokens but maps each to its new CC (1bar/2bar clamp to 127), parses a
+  decimal CC 0..127 as a fallback, and writes the token when one exists (decimal
+  otherwise). Old .fx files therefore load at the same musical division with no
+  migration; only numeric step_scale values need the converter.
+
+### Step 3 - Per-track shuffle
+
+seq_trackShuffleDelay/Pending/Vel/Note[7] (28 B). Odd-indexed steps with nonzero
+shuffle are deferred by (shuffle x 24) / 256 PPQ ticks; the tick-down runs before
+the DDA advance. The delay is fixed to the 1/16th grid, not the track scale
+(section 3.3). A pending deferral is flushed before a new one is set so a fast
+track cannot lose an un-fired odd step; a pending deferral fires even if the
+track then stops (section 10.2).
+
+### Step 4 - Play modes
+
+- pat_scene_region_t::track_play_mode[7] (offset 3 of the 16-byte PAT4 track
+  header); region _Static_assert updated 23 -> 30 in both PatternData.h and
+  PatternData.c.
+- pat_setTrackPlayMode(), init default 0, pat_applyTrackSettingsToMenu(), and the
+  whole-region copy body.
+- seq_trackPlayState[7] with STOPPED (bit 0) and PIP_REV (bit 1).
+  seq_advanceTrackStep() implements fwd/rev/pip/rnd/onc/1fr. Pip uses the
+  direction bit plus the index, so no 6-bit cycle counter is needed (a 128-step
+  track needs a 256-step cycle, which would not fit the plan's 6 bits anyway).
+- Retrigger: seq_selectActivePattern(), seq_alignActivePatternToScene(), and
+  seq_setTrackPlayedScene() clear the stopped state; transport start/stop and
+  pattern boundaries clear it through seq_setStepIndexToStart().
+- PAT4 reader/writer (1 writer + 3 readers), copy/clear, and the STEP page
+  layout len | scl | shf | mod | mch | not | -- | --.
+- PAR_TRACK_PLAY_MODE added to ParameterArray.h after PAR_TRACK_MIDI_NOTE.
+
+### Deviation from the written plan (Step 4): play-mode display
+
+The plan asked for DTYPE_MENU | (MENU_TRACK_PLAY_MODE << 4). DTYPE_MENU packs its
+table id into the high nibble, so ids 0..15 are already all assigned
+(MENU_TRACK_SCALE through MENU_EXT_SYNC); a seventeenth id would wrap to id 0 and
+display the track-scale table. A dedicated DTYPE_* value is also impossible: the
+dtype byte is unpacked with (dtype & 0x0f) in every Menu formatter, and all
+sixteen nibble values (DTYPE_0B255 through DTYPE_1B128) are already used, so a
+seventeenth enum value would alias DTYPE_0B255.
+
+Resolution: store the parameter as DTYPE_0B127 and apply the 0..5 play-mode
+value, name, and clamp through static-param special cases keyed on
+MENU_CELL_STATIC + PAR_TRACK_PLAY_MODE in va_formatValue3(),
+menu_formatCellValue3(), menu_clampCellValue(), and the menu_repaintGeneric()
+edit painter, using menu_getPlayModeName() and the trackPlayModeNames table.
+TEXT_TRACK_PLAY_MODE, SHORT_PLAY_MODE (mod), and LONG_PLAY_MODE (PlayMode) are
+appended so no existing index moves.
+
+### Step 6 - Conversion utility
+
+tools/convert_scene_scale.py added. Remaps the seven track_scale bytes in PAT4
+files and recomputes the header CRC32C (Castagnoli, reflected, exactly
+autosave_recordCrcBegin/Finish). .fx files are token-based, so only a numeric
+step_scale value in 0..13 is remapped; symbolic tokens are already correct.
+Verified round-trip (CRC self-consistent, idempotent on a second pass).
+
+### Step 7 - Bar display
+
+**No code change required - already satisfied.** menu_currentBar is the
+user-selected viewed bar (written only by buttonHandler_selectBar()), not a
+playback chase position. The playback bar indication is derived from
+seq_ledState.chaseStep in ledHandler.c (led_updateSelectBarChaselight(),
+led_updateCurrentStep()), and seq_ledState.chaseStep is
+seq_stepIndex[menu_getActiveVoice()]. With the per-track DDA the viewed track's
+index already advances at its own scale, so the bar display follows the viewed
+track. There is no menu_currentBar assignment in any playback path to change.
+
+### Step 5 - Morphability: RESOLVED, ready for implementation
+
+Both open questions from the initial deferral have been resolved:
+
+1. **Effective-getter architecture (decided).** The morph worker does NOT write
+   into the Pattern region. It follows the S075 FX-send Morph pattern: Normal
+   values stay in `pat_scene_region_t`; the morph worker computes effective
+   values and caches them in ISR-static arrays
+   (`seq_effectiveTrackLength/Scale/Shuffle[7]`, 21 B). The sequencer reads
+   these effective arrays. Automation writes to the effective arrays and
+   restores by recomputing from Normal + endpoint + amount.
+2. **UI and persistence specified.** SHIFT held on the STEP page shows/edits
+   morph endpoints (matching VOICE/FX SHIFT overlay pattern). sceneset.scg gets
+   three CSV lines. Copy/clear morph operations are extended to include track
+   endpoints.
+
+Step 5 plan text has been rewritten above (5-1 through 5-10) with the
+effective-getter architecture, STEP morph UI spec, and copy/clear integration.
+
+### Post-implementation bug fixes (review, 2026-10-08)
+
+1. **Shuffle off-by-one (Step 3).** `seq_processShuffleDelays()` decrements
+   then fires at 0 — setting `delay = N` gave N+1 actual ticks. Fixed:
+   `seq_trackShuffleDelay[track] = (uint8_t)(delay - 1u)` (safe because
+   `delay > 0u` is guaranteed at that point). Plan text updated.
+
+2. **Converter REMAP_TABLE (Step 6).** Plan text had `11: 120` (dotted 1/4);
+   the actual code already correctly had `11: 127` (1/2 note, 192 ticks).
+   Plan text corrected to match.
+
+### CrumpBit — downstream StepScale consumer
+
+CrumpBit (`Core/DSP/Effects/CrumpBit/`) uses the StepScale API to compute
+tempo-synced delay lengths. Two call sites updated:
+
+- `crumpBit_divisionFor()`: `stepScale_ticks(i)` → `stepScale_ticksQ8(i) /
+  256.0f` (float DSP context, Q8.8 return divided back to float ticks).
+- `crumpBit_uiFormatValue3()` (via CrumpBitParameters.c):
+  `stepScale_shortName()` → `stepScale_formatShort()` (handles NULL for
+  non-musical stops by formatting the raw CC as a decimal 3-char string).
+
+These changes are necessary — CrumpBit is a downstream consumer of the
+renamed/retyped StepScale API.
+
+### RAM / flash accounting (measured)
+
+- New ISR-static SRAM1: 55 B (14 accumulator + 2 FX accumulator + 4 FX counter
+  + 28 shuffle + 7 play state) - matches the plan's summary table.
+- New per-Scene Region RAM: 112 B (7 B play mode x 16 Scenes).
+- bss grew 192 B (55 + 112 + alignment) versus the S077 close.
+- Flash: new tables (~440 B: 256 LUT + ~170 label table + ~28 play-mode names)
+  plus the new sequencer/menu code. The net DEV text size fell 3,608 B versus
+  S077 after a clean rebuild; this is an LTO layout/de-unrolling artefact (the
+  CrumpBit division loop is now a 128-iteration loop rather than a
+  possibly-unrolled 14-iteration one). Worth a second look at session close.
+
+### Hardware test focus
+
+1. All 14 old nudge stops produce the same timing as the old table at CC
+   0/16/38/54/60/76/83/86/93/100/103/110/120/127.
+2. Two tracks at different scales stay phase-correct across pattern boundaries
+   and scene changes.
+3. Fractional positions (e.g. CC 50) are audibly distinct from rounded
+   neighbours; a smooth knob sweep has no glitches.
+4. Shuffle on/off per track; extreme values.
+5. Play modes fwd/rev/pip/rnd/onc/1fr including once-mode retrigger on scene
+   change and per-track scene reassignment; stopped once tracks survive a
+   double-click realign.
+6. FX sequencer at non-musical CC positions and on old .fx tokens.
+7. PAT4 round-trip of track_play_mode; copy/clear of a track carries it.
+8. Old PAT4 files play at the bottom of the curve (intended); the converter
+   migrates them.
+
+---
+
+## Step 5 implementation log (Codex, 2026-10-08)
+
+Step 5 is now implemented against the revised effective-getter + STEP-Morph-UI
+spec (5-1..5-10). Clean build (`make all`, DEV config): text 537,592 B,
+data 420 B, bss 427,608 B. No new compiler warnings.
+
+### 5-1 / 5-2 SceneData
+
+- `scene_settings_t` gains `track_morph_length/scale/shuffle[NUM_TRACKS]`
+  (21 B/Scene, 336 B across 16 Scenes).
+- `scene_settingsDefaults()` and `filesystem_initSceneStage()` seed 16/76/0.
+- New `scene_setTrackMorphLength/Scale/Shuffle()` (clamped, change-aware
+  `scene_storeParameterByte()` funnel) and matching getters.
+- `scene_commitSettings()` carries the three endpoints, so Scene
+  settings/Scene copy/clear include them.
+
+### 5-3 Autosave
+
+- Cells 51..57 (length), 58..64 (scale), 65..71 (shuffle); COUNT and
+  LIVE_BYTES 51 -> 72.
+- Getter/setter branches added; the group static asserts updated.
+- A zero length cell (pre-S078 record) is skipped rather than clamped to the
+  unreachable minimum, so an old AutoSave record leaves the fresh default.
+
+### 5-4 Effective-value arrays
+
+- `seq_effectiveTrackLength/Scale/Shuffle[NUM_TRACKS]` (21 B, ISR-static,
+  sequencer.c).
+- `seq_refreshTrackEffectiveParams()` recomputes them per track from the
+  track played Scene (Normal, Morph endpoint, retained voice Morph amount).
+- `presetMorph_getTrackEffectiveLength/Scale/Shuffle()` in presetMorphEngine.c
+  own the interpolation and the step-automation overlay check.
+- Refresh points: `presetMorph_tick()` (every foreground worker tick, before
+  its early-out), `seq_init()`, `seq_selectActivePattern()`,
+  `seq_alignActivePatternToScene()`, `seq_setTrackPlayedScene()`,
+  `seq_clearPerTrackOverrides()`, and `seq_setStepIndexToStart()`.
+- The sequencer reads the arrays in `seq_advanceTrackStep()`,
+  `seq_processSchedulerTick()`, both realign helpers, and the DDA seed.
+
+**Deviations from the 5-4 snippet:**
+
+1. The arrays are file-static in sequencer.c and written through
+   `seq_refreshTrackEffectiveParams()`, not written directly from
+   presetMorphEngine.c (the snippet file-static arrays cannot be written from
+   another translation unit). The interpolation math stays in
+   presetMorphEngine.c, matching the spec.
+2. The refresh is per-track from each track **played Scene**
+   (`seq_perTrackPattern[track]`), not one global scene, so tracks playing a
+   per-track-assigned Scene (S077 P2) get the right Normal, endpoints, and
+   Morph amount.
+3. The amount used is the retained `voice_morph_amount[slot]` (the snippet
+   choice), not the LFO/step-resolved amount, so voice-Morph step automation
+   does not change track timing.
+
+### 5-5 / 5-6 sceneset persistence
+
+- `storageTypes.c` parses `track_morph_length/scale/shuffle` (7 CSV values).
+- `filesystem.c` writer cases 15/16/17 append the three lines; all earlier
+  line numbers are unchanged.
+
+### 5-7 STEP Morph UI (SHIFT overlay)
+
+- New dedicated `menu_patternTrackMorphEndpoint` flag +
+  `menu_setPatternTrackMorphEndpoint()` (a parallel flag rather than widening
+  `voiceModeShowMorph`, so the VOICE Morph latch is untouched).
+- `buttonHandler.c`: SHIFT press in SELECT_MODE_STEP sets the view; SHIFT
+  release clears it.
+- `menu_getParameterDisplayValue()` and `menu_cellCommitValue()` redirect only
+  PAR_TRACK_LENGTH/PAR_TRACK_SCALE/PAR_SHUFFLE to the viewed Scene Morph
+  endpoints while the view is active; the Normal mirror and the Pattern region
+  are untouched. Both the encoder and the RV1-4 pots converge on these two
+  functions, so both edit the endpoints.
+- The discrete play-mode cell is blanked and inert in the Morph view (5.6).
+
+**Deviation:** the SHIFT+MODE_STEP *latch* (extend lines 1129-1149) is not
+implemented. SHIFT+MODE_STEP currently maps to SELECT_MODE_SOM_GEN
+((STEP + 4) & 7 == SOM_GEN) and is the only entry to the SOM generator page;
+latching the Morph view there would make SOM unreachable. The hold-only view
+(SHIFT held) matches the VOICE hold interaction and keeps SOM accessible. If a
+latch is wanted, it needs a different gesture or a new SOM entry point.
+
+### 5-8 Copy/clear
+
+- `copy track morph` and `clear track reset morph` now also set the
+  destination track `track_morph_*` from the source/own Pattern Normal.
+- `copy scene -> morph` and `clear scene reset morph` now also copy/equalise
+  all seven tracks endpoints.
+
+### 5-9 / 5-10 Automation
+
+- Three new Scene target kinds and 21 rows (IDs 405..425, `voice_slot` =
+  track index).
+- `seq_applySceneAutomation()` sets the track overlay and writes the effective
+  array directly; `seq_restoreAllSceneAutomation()` clears the overlays and
+  `seq_setStepIndexToStart()` recomputes the effective values.
+
+### RAM
+
+- New per-Scene: 336 B (21 x 16).
+- New ISR-static: 55 B (steps 1-4) + 21 B (effective arrays) = 76 B; plus 24 B
+  of step-automation overlay state (21 value bytes + 3 mask bytes) in the
+  Morph engine. The proposal table lists 72 B; the measured total is 76 B
+  ISR-static (the plan note already acknowledges this) plus the overlay bytes.
+- Measured bss growth from S077 to this point: roughly +600 B (112 region play
+  mode + 336 Scene settings + 76 ISR-static + overlays + alignment).
+
+### Step 5 hardware test focus
+
+- SHIFT held on the STEP page shows the Scene Morph endpoints; editing len/scl/
+  shf writes the endpoints, not the Pattern Normal; releasing SHIFT restores
+  the Normal values; the `mod` cell is blank in Morph view.
+- Sweeping PERF Morph with differing endpoints changes track length/scale/
+  shuffle in real time; at Morph 0 the values equal Normal.
+- `copy scene -> morph` / `clear scene reset morph` and the per-track variants
+  move/equalise the endpoints.
+- sceneset.scg round-trips the three new lines; an old sceneset without them
+  loads the 16/76/0 defaults.
+- Scene step automation on a track Len/Scl/Shuf target changes playback for
+  that step and restores at the transport/Pattern boundary.
+
+---
+
+## Code review assessment (2026-10-08)
+
+Full diff review of all 32 changed files (Steps 1-7 plus Step 5 Morphability).
+Clean build: text 537,592 B, data 420 B, bss 427,608 B. No compiler warnings.
+
+### Architecture
+
+The effective-getter morph architecture is correctly implemented. The data
+flow is:
+
+    Pattern region (Normal) + Scene settings (Morph endpoint)
+        → presetMorph_getTrackEffective*() (interpolation + overlay check)
+        → seq_refreshTrackEffectiveParams() (cache write)
+        → seq_effectiveTrackLength/Scale/Shuffle[] (ISR-static cache)
+        → sequencer DDA / advanceTrackStep / realign (cache read)
+
+Normal values in `pat_scene_region_t` are never overwritten by the Morph
+system. The Pattern dirty bit is never raised by Morph or step automation.
+This matches the S075 FX-send Morph pattern.
+
+### Refresh coverage
+
+`seq_refreshTrackEffectiveParams()` is called at all required points:
+- `presetMorph_tick()` — every foreground worker tick (before the
+  `!active` early-out, so endpoint edits propagate even when no morph
+  sweep is active)
+- `seq_init()` — boot
+- `seq_selectActivePattern()` — Scene change
+- `seq_alignActivePatternToScene()` — committed Scene change
+- `seq_setTrackPlayedScene()` — per-track Scene assignment
+- `seq_clearPerTrackOverrides()` — per-track Scene coalesce
+- `seq_setStepIndexToStart()` — transport reset (after automation restore)
+
+### Step automation overlay
+
+The overlay architecture (`track_param_override_mask` + `_value` arrays in
+presetMorphEngine.c) is correct:
+- `presetMorph_setTrackParamStepOverride()` sets a bit in the mask and
+  stores the value. The effective getters check the mask bit first.
+- `presetMorph_clearAllTrackParamStepOverrides()` zeroes all three mask
+  bytes. Called from `seq_restoreAllSceneAutomation()` before the
+  retained-value pass.
+- `seq_applySceneAutomation()` writes the effective cache directly after
+  setting the overlay, so playback changes on the next DDA tick.
+- The restore path in `seq_setStepIndexToStart()` calls
+  `seq_refreshTrackEffectiveParams()` after clearing overlays, so the
+  cache returns to Normal + Morph base values.
+
+### STEP Morph UI
+
+- `menu_patternTrackMorphEndpoint` flag is correctly scoped to
+  `menu_activePage == SEQ_PAGE` via `menu_patternTrackMorphViewActive()`.
+- Display redirect: `menu_getParameterDisplayValue()` reads Scene morph
+  endpoints for the three morphable cells. The play-mode cell is blanked
+  via `menu_getPlayModeName()` returning dashes.
+- Commit redirect: `menu_cellCommitValue()` writes to Scene morph
+  endpoints via `scene_setTrackMorph*()` and returns early, never touching
+  `parameter_values[]` or the Pattern region.
+- The play-mode cell edit is correctly blocked during morph view (returns 0).
+
+### Deviation: no SHIFT+MODE_STEP latch
+
+Correctly documented. SHIFT+MODE_STEP maps to `SELECT_MODE_SOM_GEN` via the
+`(mode + 4) & 7` rotation, so latching the Morph view there would block SOM
+entry. The hold-only interaction (SHIFT down = morph view, SHIFT up = normal)
+matches the VOICE hold behaviour and is the right call.
+
+### Deviation: endpoint edit does not call preset_rebuildMorph()
+
+The plan spec said to call `preset_rebuildMorph()` after endpoint edits. The
+implementation omits this because `presetMorph_tick()` calls
+`seq_refreshTrackEffectiveParams()` unconditionally on every foreground tick,
+so the edit propagates within one main-loop pass (~1-2 ms). This is correct
+and avoids the full morph rebuild cost. The plan spec is superseded by the
+unconditional refresh.
+
+### Copy/clear morph integration
+
+- Track copy morph (`ccCopy_runMorphTrack`): copies source track Normal
+  values to destination track morph endpoints. Correct — this is the
+  "copy Normal → Morph" semantic.
+- Scene copy morph (`ccCopy_runSceneMorph`): copies source Scene Normal
+  for all 7 tracks. Correct.
+- Track clear reset morph (`ccClear_runResetMorphTrack`): equalises
+  endpoints to the track's own Normal. Correct.
+- Scene clear reset morph (`ccClear_runResetSceneMorph`): equalises all 7
+  tracks. Correct.
+
+### Persistence
+
+- sceneset.scg: three new CSV lines (cases 15/16/17 in writer, parser
+  keyed on `track_morph_length/scale/shuffle`). Missing keys in old files
+  fall back to staged defaults from `filesystem_initSceneStage()`.
+- AutoSave: cells 51..71, `LIVE_BYTES` 51 → 72. Static asserts validate
+  group coverage. Zero-value guard on length cells handles pre-S078 records.
+- `scene_commitSettings()` carries the three endpoints.
+
+### Interpolation arithmetic
+
+`presetMorph_interpTrack()` uses unsigned `uint16_t` arithmetic:
+`(normal * (255 - amount) + morph * amount + 127) / 255`. This is
+algebraically identical to the existing `presetMorph_interpolate()` signed
+formula. For the 0..128 track parameter domain, the unsigned version is safe
+and avoids sign extension. Amount 0 returns normal, amount 255 returns morph.
+
+### SceneModTargets
+
+21 new rows (IDs 21..41, macro `SCENE_MOD_TARGET_ID(n)` which maps to
+405..425). Length targets have min=1, max=128; scale and shuffle have
+min=0, max=127. All use `SCENE_MOD_TARGET_USE_AUTOMATION` only (no
+velocity/LFO), matching the plan. `voice_slot` carries the track index 0..6.
+
+### RAM accounting
+
+| Category | Bytes | Notes |
+|:---------|------:|:------|
+| ISR-static (Steps 1-4) | 55 | 14+2+4+28+7 |
+| ISR-static (Step 5 effective arrays) | 21 | 3 × uint8_t[7] |
+| **Total ISR-static** | **76** | |
+| Step 5 overlay state | 24 | 21 value bytes + 3 mask bytes |
+| per-Scene settings | 336 | 21 × 16 Scenes |
+| per-Scene region | 112 | 7 × 16 Scenes |
+| **Total bss growth** | ~600 | includes alignment |
+
+### Flash
+
+text 537,592 B — grew 2,784 B from the Steps 1-4 baseline (534,808 B).
+215,652 B free of 753,664 B. The Step 5 additions are modest relative to
+the free flash.
+
+### Issues found
+
+None. The implementation is correct against the revised plan. All
+sequencer reads use the effective arrays. No retained Normal values are
+overwritten by Morph or automation. AutoSave round-trips are guarded.
+The STEP morph UI is correctly scoped and gated.
+
+### Follow-ups for hardware testing
+
+Carry forward the hardware test lists from Steps 1-4 and Step 5 above.
+Priority items:
+
+1. SHIFT held on STEP page: verify morph endpoint display/edit, play-mode
+   blanking, release returns Normal.
+2. PERF Morph sweep with differing endpoints: verify continuous
+   length/scale/shuffle change in real time, exact Normal at amount 0.
+3. sceneset.scg round-trip: save, delete AutoSave, reboot, verify endpoints.
+4. Old sceneset without new keys: verify 16/76/0 defaults load cleanly.
+5. Copy scene → morph / clear scene reset morph with track endpoints.
+6. Step automation on track Len/Scl/Shuf targets: verify playback change,
+   transport restore.
+7. All 14 musical stops timing verification against the old table.
+8. Two tracks at different scales: phase alignment across pattern/scene
+   boundaries.
+9. Play modes including once-mode retrigger and stopped-track realign.

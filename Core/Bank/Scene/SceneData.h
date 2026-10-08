@@ -232,6 +232,24 @@ typedef struct {
      */
     uint8_t bus_comp[SCENE_BUS_COMP_FIELD_COUNT];
     /*
+     * Per-track Morph endpoints for length, scale, and shuffle (S078 §5.4).
+     *
+     * What: the Morph endpoint values for three track parameters, stored per
+     * Scene. The Normal values live in pat_scene_region_t (Pattern data); these
+     * are the Morph endpoints interpolated by the voice Morph amount. Why: the
+     * Morph system is Scene-level - Patterns store step/track data, Scenes own
+     * Morph endpoints. Tracks 6 and 7 share voice 6's Morph amount
+     * (voice_morph_amount[5]) but may have different endpoints here. Inputs:
+     * sceneset.scg load and AutoSave restore. Outputs: the effective track
+     * getters in presetMorphEngine.c interpolate between Pattern Normal values
+     * and these endpoints. RAM: 21 bytes per Scene (3 x 7), 336 bytes total
+     * across 16 Scenes. Affiliates: scene_setTrackMorph*() setters,
+     * Autosave Scene parameter cells 51..71, filesystem.c sceneset writer.
+     */
+    uint8_t track_morph_length[NUM_TRACKS];
+    uint8_t track_morph_scale[NUM_TRACKS];
+    uint8_t track_morph_shuffle[NUM_TRACKS];
+    /*
      * Autosave extension rule for Scene settings.
      *
      * A future serialized byte is not complete until it has a named index,
@@ -533,6 +551,28 @@ uint8_t scene_busCompClamp(uint8_t field, uint8_t value);
 void scene_setBusCompSetting(uint8_t scene_index, uint8_t field,
                              uint8_t value);
 uint8_t scene_getBusCompSetting(uint8_t scene_index, uint8_t field);
+
+/*
+ * Per-track Morph endpoints (S078 §5.4).
+ *
+ * What: store or read one track's Morph endpoint for length, scale, or shuffle
+ * in the Scene settings. Setters clamp to the parameter domain (length
+ * 1..NUM_STEPS, scale 0..STEP_SCALE_COUNT-1, shuffle 0..127), store through the
+ * change-aware scene_storeParameterByte() funnel, and mark the matching
+ * AutoSave Scene cell. Getters return the retained value. Inputs: resident
+ * Scene index, track 0..6, value. Outputs: retained Scene data updated.
+ * Affiliates: Autosave Scene parameter cells 51..71, presetMorphEngine.c
+ * effective-value getters, filesystem.c sceneset writer.
+ */
+void scene_setTrackMorphLength(uint8_t scene_index, uint8_t track,
+                               uint8_t value);
+uint8_t scene_getTrackMorphLength(uint8_t scene_index, uint8_t track);
+void scene_setTrackMorphScale(uint8_t scene_index, uint8_t track,
+                              uint8_t value);
+uint8_t scene_getTrackMorphScale(uint8_t scene_index, uint8_t track);
+void scene_setTrackMorphShuffle(uint8_t scene_index, uint8_t track,
+                                uint8_t value);
+uint8_t scene_getTrackMorphShuffle(uint8_t scene_index, uint8_t track);
 
 /*
  * Whole-settings defaults and commit for copy/clear (S075).

@@ -1052,6 +1052,25 @@ static uint8_t ccCopy_runMorphTrack(const cc_job_t *job)
         (void)preset_copySlotNormalToMorph(src->scene, s_slot, m, d_slot);
         (void)preset_setVoiceFxSendMorph(
             m, d_slot, scene_getVoiceFxSendAmount(src->scene, s_slot));
+        /*
+         * S078 §5.8: copy the source track's Pattern Normal timing onto this
+         * member's per-track Morph endpoints. job->track is the destination
+         * track (0..6) and src->track is the source track, so this is the
+         * per-track counterpart of the Scene-wide track endpoint copy.
+         */
+        if (job->track < NUM_TRACKS && src->track < NUM_TRACKS) {
+            const pat_scene_region_t *src_region =
+                pat_sceneRegion(src->scene);
+
+            if (src_region) {
+                scene_setTrackMorphLength(m, job->track,
+                                          src_region->track_length[src->track]);
+                scene_setTrackMorphScale(m, job->track,
+                                         src_region->track_scale[src->track]);
+                scene_setTrackMorphShuffle(m, job->track,
+                                           src_region->track_shuffle[src->track]);
+            }
+        }
         if (s_slot == INSTRUMENT_SLOT_COUNT - 1u &&
             d_slot == INSTRUMENT_SLOT_COUNT - 1u)
             scene_setSlot6Track7MorphAmpEnvelopeDecay(
@@ -1168,6 +1187,27 @@ static uint8_t ccCopy_runSceneMorph(const cc_job_t *job)
                     }
                     if (changed)
                         scene_finishEffectWholeCommit(m);
+                }
+            }
+        }
+        /*
+         * S078 §5.4: copy the source Scene's Pattern Normal track timing onto
+         * this member's track Morph endpoints for all seven tracks. This is the
+         * Scene-wide counterpart of copy track morph for the morphable track
+         * parameters, and keeps the track endpoints coupled to the Normal values
+         * the user is duplicating.
+         */
+        {
+            const pat_scene_region_t *src_region = pat_sceneRegion(src->scene);
+            uint8_t t;
+
+            if (src_region) {
+                for (t = 0u; t < NUM_TRACKS; t++) {
+                    scene_setTrackMorphLength(m, t,
+                                              src_region->track_length[t]);
+                    scene_setTrackMorphScale(m, t, src_region->track_scale[t]);
+                    scene_setTrackMorphShuffle(m, t,
+                                               src_region->track_shuffle[t]);
                 }
             }
         }

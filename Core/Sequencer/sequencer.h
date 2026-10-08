@@ -97,6 +97,20 @@ uint8_t seq_getTrackPlayedScene(uint8_t track);
  * per-track assignment gesture, double-click single-track realign.
  */
 void seq_realignTrackToMasterClock(uint8_t track);
+/*
+ * Recompute the effective (morphed) per-track timing cache (S078 §5.4).
+ *
+ * What: refreshes the sequencer's ISR-static effective length/scale/shuffle
+ * arrays from each track's played Scene Normal values, Scene Morph endpoints,
+ * and associated voice Morph amount. Why: the sequencer reads these arrays
+ * instead of the Pattern region, so a Morph sweep changes playback without
+ * writing retained Normal data. Inputs: none. Output: seq_effectiveTrack*
+ * updated. Callers: presetMorph_tick() (every foreground worker tick),
+ * seq_selectActivePattern(), seq_alignActivePatternToScene(),
+ * seq_setTrackPlayedScene(), seq_clearPerTrackOverrides(), and
+ * seq_setStepIndexToStart().
+ */
+void seq_refreshTrackEffectiveParams(void);
 
 void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note);
 /*

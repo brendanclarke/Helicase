@@ -1848,6 +1848,12 @@ static void processPress(uint8_t buttonNr)
             break;
 
         case SELECT_MODE_STEP:
+            /*
+             * S078 §5.6: hold SHIFT on the STEP page to show and edit the
+             * per-track length/scale/shuffle Morph endpoints, mirroring the
+             * VOICE SHIFT Morph view. Release returns to Normal values.
+             */
+            menu_setPatternTrackMorphEndpoint(1u);
             buttonHandler_leaveSeqModeStepMode();
             break;
 
@@ -2022,6 +2028,8 @@ static void processRelease(uint8_t buttonNr)
             return;
 
         case SELECT_MODE_STEP:
+            /* S078 §5.6: leaving the STEP SHIFT view returns to Normal cells. */
+            menu_setPatternTrackMorphEndpoint(0u);
             buttonHandler_enterSeqModeStepMode();
             break;
 

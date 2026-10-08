@@ -816,6 +816,50 @@ static void menu_sendSoundParameter(uint16_t paramNr, uint8_t value)
         menu_parseGlobalParam(paramNr, value);
 }
 
+/*
+ * STEP-page track Morph endpoint view flag (S078 §5.4).
+ *
+ * Why: the per-track length/scale/shuffle Morph endpoints are Scene settings
+ * that need an edit surface; holding SHIFT in STEP mode shows and edits them on
+ * the STEP front page. Input/client: buttonHandler sets this through
+ * menu_setPatternTrackMorphEndpoint(). Output: the three helpers below redirect
+ * only PAR_TRACK_LENGTH/PAR_TRACK_SCALE/PAR_SHUFFLE to the active Scene's track
+ * Morph endpoints while this flag and the SEQ page are active. Risk: it must
+ * never redirect any other parameter or page, and never writes the retained
+ * Pattern Normal values.
+ */
+static uint8_t menu_patternTrackMorphEndpoint = 0;
+
+/*
+ * Test whether the STEP-page track Morph endpoint view is showing.
+ *
+ * Inputs: none. Output: nonzero while SHIFT is held on the SEQ page. Clients:
+ * menu_getPlayModeName() (hides the discrete play-mode cell) and
+ * menu_patternTrackMorphEndpointActive().
+ */
+static uint8_t menu_patternTrackMorphViewActive(void)
+{
+    return (uint8_t)(menu_patternTrackMorphEndpoint != 0u &&
+                     menu_activePage == SEQ_PAGE);
+}
+
+/*
+ * Test whether one parameter is being shown as a track Morph endpoint.
+ *
+ * Inputs: canonical ParameterArray id. Output: nonzero only for the three
+ * morphable track timing parameters while the STEP Morph view is active on the
+ * SEQ page. Clients: menu_getParameterDisplayValue(), menu_cellCommitValue().
+ * Affiliates: scene_get/setTrackMorph*().
+ */
+static uint8_t menu_patternTrackMorphEndpointActive(uint16_t paramNr)
+{
+    if (!menu_patternTrackMorphViewActive())
+        return 0u;
+    return (uint8_t)(paramNr == PAR_TRACK_LENGTH ||
+                     paramNr == PAR_TRACK_SCALE ||
+                     paramNr == PAR_SHUFFLE);
+}
+
 uint8_t menu_paramUsesMorphView(uint16_t paramNr)
 {
     /*
@@ -853,6 +897,28 @@ uint8_t menu_getParameterDisplayValue(uint16_t paramNr)
      */
     if (menu_paramUsesMorphView(paramNr))
         return parameters2[paramNr];
+    /*
+     * STEP-page track Morph endpoint view (S078 §5.4).
+     *
+     * What: while SHIFT is held in STEP mode the three track timing cells show
+     * the active Scene's Morph endpoints instead of the Pattern Normal values.
+     * Why: this is the only edit surface for the per-track Morph endpoints, and
+     * it mirrors the VOICE SHIFT Morph view. The Normal mirror
+     * parameter_values[] is untouched.
+     */
+    if (menu_patternTrackMorphEndpointActive(paramNr)) {
+        uint8_t track = menu_getActiveVoice();
+        uint8_t scene_index = menu_getViewedPattern();
+
+        switch (paramNr) {
+        case PAR_TRACK_LENGTH:
+            return scene_getTrackMorphLength(scene_index, track);
+        case PAR_TRACK_SCALE:
+            return scene_getTrackMorphScale(scene_index, track);
+        default:
+            return scene_getTrackMorphShuffle(scene_index, track);
+        }
+    }
     if (paramNr < NUM_PARAMS)
         return parameter_values[paramNr];
     return 0u;
@@ -1059,6 +1125,18 @@ const enum Datatypes parameter_dtypes[NUM_PARAMS] = {
     [PAR_TRACK_SCALE] = DTYPE_MENU|(MENU_TRACK_SCALE<<4),
     [PAR_TRACK_MIDI_CHAN] = DTYPE_1B16,
     [PAR_TRACK_MIDI_NOTE] = DTYPE_NOTE_NAME,
+    /*
+     * Per-track play mode (S078 §4.1).
+     *
+     * Why DTYPE_0B127 and not a new dtype: all sixteen DTYPE_* nibble values
+     * are already assigned and the packed dtype byte has no spare nibble, so a
+     * new enum value would wrap in the (dtype & 0x0f) extraction used by every
+     * Menu formatter. The 0..5 play-mode name/clamp is instead applied by
+     * static-param special cases in va_formatValue3(), menu_formatCellValue3(),
+     * menu_clampCellValue(), and the menu_repaintGeneric() edit painter, all
+     * keyed on MENU_CELL_STATIC + PAR_TRACK_PLAY_MODE.
+     */
+    [PAR_TRACK_PLAY_MODE] = DTYPE_0B127,
     [PAR_BPM] = DTYPE_0B255,
     [PAR_MIDI_CHAN_1] = DTYPE_1B16,
     [PAR_MIDI_CHAN_2] = DTYPE_1B16,
@@ -1191,6 +1269,8 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_BUS_COMP_AMOUNT,CAT_SCENE,LONG_BUS_COMP_AMOUNT},
     {SHORT_BUS_COMP_TIME,CAT_SCENE,LONG_BUS_COMP_TIME},
     {SHORT_BUS_COMP_SIDECHAIN,CAT_SCENE,LONG_BUS_COMP_SIDECHAIN},
+    /* S078 per-track play mode: mod / Pattern / PlayMode. */
+    {SHORT_PLAY_MODE,CAT_PATTERN,LONG_PLAY_MODE},
 };
 
 /* -----------------------------------------------------------------------
@@ -1745,6 +1825,7 @@ static void menu_displayModTargetShort(uint8_t curParmVal, char *valueAsText);
 static uint8_t getMaxEntriesForMenu(uint8_t menuId);
 static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *buf);
 static void menu_getLfoPolarityName(uint8_t value, char *buf);
+static void menu_getPlayModeName(uint16_t value, char *buf);
 static void menu_endlessPotMappingChanged(void);
 static uint8_t menu_cpuUseWidgetVisible(void);
 static void menu_formatCpuUsePercent3(char *buf);
@@ -2688,6 +2769,13 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
                             char out[3])
 {
     uint8_t dtype = (uint8_t)(menu_cellDtype(cell) & 0x0fu);
+
+    /* Per-track play mode shows its 0..5 name (S078 §4.1). */
+    if (cell && cell->kind == MENU_CELL_STATIC &&
+        cell->static_param == PAR_TRACK_PLAY_MODE) {
+        menu_getPlayModeName(value, out);
+        return;
+    }
 
     switch (dtype) {
     case DTYPE_PM63:
@@ -4047,6 +4135,42 @@ static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
     if (cell->kind == MENU_CELL_STATIC &&
         cell->static_param == PAR_EFFECT_MORPH)
         return menu_commitEffectMorphParam((uint8_t)value);
+    /*
+     * S078 §5.6: the discrete play-mode cell is hidden in the STEP Morph view,
+     * so an encoder/pot turn there must not change the Normal play mode.
+     */
+    if (cell->kind == MENU_CELL_STATIC &&
+        cell->static_param == PAR_TRACK_PLAY_MODE &&
+        menu_patternTrackMorphViewActive())
+        return 0u;
+    if (cell->kind == MENU_CELL_STATIC &&
+        menu_patternTrackMorphEndpointActive(cell->static_param)) {
+        /*
+         * Commit a STEP-page track Morph endpoint edit (S078 §5.4).
+         *
+         * What: routes the clamped value to the active Scene's track Morph
+         * endpoint for the viewed pattern and active track, exactly like the
+         * VOICE SHIFT Morph view. Why: the retained Pattern Normal values and
+         * the flat parameter_values[] mirror must not change in Morph view.
+         * Shared by the encoder and the endless pots (both converge on
+         * menu_cellCommitValue).
+         */
+        uint8_t track = menu_getActiveVoice();
+        uint8_t scene_index = menu_getViewedPattern();
+
+        switch (cell->static_param) {
+        case PAR_TRACK_LENGTH:
+            scene_setTrackMorphLength(scene_index, track, (uint8_t)value);
+            break;
+        case PAR_TRACK_SCALE:
+            scene_setTrackMorphScale(scene_index, track, (uint8_t)value);
+            break;
+        default:
+            scene_setTrackMorphShuffle(scene_index, track, (uint8_t)value);
+            break;
+        }
+        return 1u;
+    }
     if (cell->kind == MENU_CELL_STATIC) {
         uint8_t *paramValue = menu_getParameterEditPtr(cell->static_param);
         uint8_t old_value;
@@ -4618,6 +4742,13 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         menuEffects_formatValue3(&cell->fx, valueAsText))
         return;
 
+    /* Per-track play mode shows its 0..5 name (S078 §4.1). */
+    if (cell && cell->kind == MENU_CELL_STATIC &&
+        cell->static_param == PAR_TRACK_PLAY_MODE) {
+        menu_getPlayModeName(value, valueAsText);
+        return;
+    }
+
     /*
      * Format one cell value for the compact four-column view. Instrument cells
      * share the same dtype vocabulary as static cells, but target cells may
@@ -4729,6 +4860,14 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
     uint8_t dtype;
     if (!cell || !value)
         return;
+
+    /* Per-track play mode clamps to the six stored modes (S078 §4.1). */
+    if (cell->kind == MENU_CELL_STATIC &&
+        cell->static_param == PAR_TRACK_PLAY_MODE) {
+        if (*value > (uint16_t)(trackPlayModeNames[0][0] - 1u))
+            *value = (uint16_t)(trackPlayModeNames[0][0] - 1u);
+        return;
+    }
 
     /* Effect page cells are owned by menuEffects.c (Session 072 step 7). */
     if (cell->kind == MENU_CELL_EFFECT) {
@@ -8427,7 +8566,28 @@ static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *bu
     case MENU_MIDI_FILTERING: p = midiFilterNames[curParmVal+1];    break;
     case MENU_PPQ:            p = ppqNames[curParmVal+1];           break;
     case MENU_EXT_SYNC:       p = extSyncNames[curParmVal+1];       break;
-    case MENU_TRACK_SCALE:    p = stepScale_shortName((uint8_t)curParmVal); break;
+    case MENU_TRACK_SCALE: {
+        /*
+         * Track scale display formatter (S078 §2.3).
+         *
+         * Musical stops show their symbolic name (e.g. "/16"); all other CC
+         * positions show the raw 7-bit value right-justified in three
+         * characters. CC 0 is always the musical stop "/64", so bare "0" never
+         * appears. Why: decimal multipliers are not informative on a
+         * three-character display. Inputs: curParmVal 0..127. Outputs: pointer
+         * to a static label for musical stops, or buf written directly for
+         * numeric values. Affiliates: stepScale_shortName(),
+         * stepScale_formatShort().
+         */
+        const char *name = stepScale_shortName((uint8_t)curParmVal);
+
+        if (name) {
+            p = name;
+            break;
+        }
+        stepScale_formatShort((uint8_t)curParmVal, buf);
+        return;
+    }
     default: break;
     }
     buf[0]=p[0]; buf[1]=p[1]?p[1]:' '; buf[2]=p[2]?p[2]:' ';
@@ -8456,6 +8616,42 @@ static void menu_getLfoPolarityName(uint8_t value, char *buf)
     if (value >= count)
         value = (uint8_t)(count - 1u);
     p = lfoPolarityNames[value + 1u];
+    buf[0] = p[0];
+    buf[1] = p[1] ? p[1] : ' ';
+    buf[2] = p[2] ? p[2] : ' ';
+}
+
+/*
+ * Format one per-track play-mode value into a three-character field.
+ *
+ * What: writes the fwd/rev/pip/rnd/onc/1fr token for stored values 0..5, and
+ * clamps stale larger values to the last token. Inputs: raw stored value and a
+ * three-character output. Outputs: exactly three characters, no terminator.
+ * Why: the stored byte is the raw play-mode enum and has no DTYPE_MENU table
+ * id (the nibble space is full), so the value/clamp is applied by static-param
+ * special cases. Affiliates: menu_formatCellValue3(), va_formatValue3(),
+ * menu_clampCellValue(), the edit-view painter.
+ */
+static void menu_getPlayModeName(uint16_t value, char *buf)
+{
+    const char *p;
+    uint8_t count = (uint8_t)trackPlayModeNames[0][0];
+
+    /*
+     * S078 §5.6: the discrete play mode is not morphable, so the STEP Morph
+     * view blanks its cell instead of showing a Normal value.
+     */
+    if (menu_patternTrackMorphViewActive()) {
+        memcpy(buf, menuText_dash, 3);
+        return;
+    }
+    if (count == 0u) {
+        memcpy(buf, menuText_dash, 3);
+        return;
+    }
+    if (value >= count)
+        value = (uint16_t)(count - 1u);
+    p = trackPlayModeNames[value + 1u];
     buf[0] = p[0];
     buf[1] = p[1] ? p[1] : ' ';
     buf[2] = p[2] ? p[2] : ' ';
@@ -10530,8 +10726,15 @@ static void menu_repaintGeneric(void)
             case DTYPE_0b1:
                 numtostrpu(&editDisplayBuffer[1][13], (uint8_t)(value+1), ' ');
                 break;
-            default:
             case DTYPE_0B127:
+                /* Per-track play mode shows its 0..5 name (S078 §4.1). */
+                if (cell.kind == MENU_CELL_STATIC &&
+                    cell.static_param == PAR_TRACK_PLAY_MODE) {
+                    menu_getPlayModeName(value, &editDisplayBuffer[1][13]);
+                    break;
+                }
+                /* fall through */
+            default:
             case DTYPE_0B255:
             case DTYPE_1B16:
             case DTYPE_1B128:
@@ -13895,6 +14098,18 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
         pat_setTrackShuffle(menu_getViewedPattern(), menu_getActiveVoice(), value);
         break;
 
+    case PAR_TRACK_PLAY_MODE:
+        /*
+         * Play mode is per-track Pattern playback state (S078 §4.1).
+         *
+         * Menu supplies the viewed pattern and active track because the STEP
+         * front page edits the track currently in front of the user. PatternData
+         * stores the 0..5 byte and the sequencer reads it per step boundary.
+         */
+        pat_setTrackPlayMode(menu_getViewedPattern(), menu_getActiveVoice(),
+                             value);
+        break;
+
     case PAR_QUANTISATION:
         /*
          * Quantisation affects recording/playback timing, so it remains a
@@ -14270,6 +14485,24 @@ void menu_setVoiceModeShowMorph(uint8_t onOff)
      * no-match parameter switches endpoints immediately. */
     if (menu_isVoicePage(menu_activePage))
         menu_repaint();
+}
+
+void menu_setPatternTrackMorphEndpoint(uint8_t onOff)
+{
+    /*
+     * Set the STEP-page track Morph endpoint view (S078 §5.4).
+     *
+     * Why: buttonHandler owns the SHIFT gesture in SELECT_MODE_STEP, but Menu
+     * owns which buffer the STEP front-page cells resolve against. Input onOff
+     * is boolean. Output: menu_patternTrackMorphEndpoint is updated; the three
+     * track timing cells on the SEQ page then read/edit the active Scene's Morph
+     * endpoints. The page is repainted only while the SEQ page is visible so the
+     * endpoint values appear immediately. This is a view/edit overlay only and
+     * never affects the retained Pattern Normal values.
+     */
+    menu_patternTrackMorphEndpoint = (uint8_t)(onOff != 0u);
+    if (menu_activePage == SEQ_PAGE)
+        menu_repaintAll();
 }
 
 /*

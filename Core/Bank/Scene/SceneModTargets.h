@@ -44,7 +44,23 @@ typedef enum {
      * the Scene-level Morph amount. Step automation and LFO apply runtime
      * overlays through EffectsManager; velocity is not offered.
      */
-    SCENE_MOD_TARGET_KIND_EFFECT_MORPH
+    SCENE_MOD_TARGET_KIND_EFFECT_MORPH,
+    /*
+     * Per-track step-automation targets (S078 §5.5).
+     *
+     * Inputs: voice_slot carries the track index 0..6; the stored 7-bit value
+     * is a length (1..128), scale CC (0..127), or shuffle (0..127). Output:
+     * step automation sets a runtime-only overlay consumed by
+     * presetMorphEngine.c's effective track getters, so the retained Pattern
+     * Normal values are never overwritten. Why: these three are the morphable
+     * track timing parameters, offered to the Scene automation category only
+     * (no velocity/LFO flags). Affiliates: SceneModTargets.c table rows
+     * 405..425, seq_applySceneAutomation(),
+     * presetMorph_setTrackParamStepOverride().
+     */
+    SCENE_MOD_TARGET_KIND_TRACK_LENGTH,
+    SCENE_MOD_TARGET_KIND_TRACK_SCALE,
+    SCENE_MOD_TARGET_KIND_TRACK_SHUFFLE
 } scene_mod_target_kind_t;
 
 typedef enum {

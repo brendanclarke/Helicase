@@ -79,14 +79,14 @@ const Page menuPages[NUM_PAGES][NUM_SUB_PAGES] = {
   {TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},
 },
 /* SEQ_PAGE
- * Subpage 0 is the track-settings front page. Active parameters 0..3 show
- * length/scale/MIDI channel/MIDI note; active parameters 4..7 show the second
- * half, currently per-track shuffle. Clients: STEP-mode VOICE re-press toggles
- * menuIndex through Menu helpers, and encoder scrolling can still reach the
- * second half through the normal menu traversal.
+ * Subpage 0 is the track-settings front page. S078 §7 groups the three
+ * morphable parameters (len, scl, shf) on the left, followed by the discrete
+ * play mode (mod), MIDI channel, and MIDI note. The two remaining cells are
+ * reserved. Clients: STEP-mode VOICE re-press toggles menuIndex through Menu
+ * helpers, and encoder scrolling reaches every cell through normal traversal.
  */
 /* SEQ_PAGE */ {
-  {TEXT_PAT_LENGTH,TEXT_TRACK_SCALE,TEXT_MIDI_CHANNEL,TEXT_NOTE,TEXT_SHUFFLE,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_TRACK_LENGTH,PAR_TRACK_SCALE,PAR_TRACK_MIDI_CHAN,PAR_TRACK_MIDI_NOTE,PAR_SHUFFLE,PAR_NONE,PAR_NONE,PAR_NONE},
+  {TEXT_PAT_LENGTH,TEXT_TRACK_SCALE,TEXT_SHUFFLE,TEXT_TRACK_PLAY_MODE,TEXT_MIDI_CHANNEL,TEXT_NOTE,TEXT_EMPTY,TEXT_EMPTY, PAR_TRACK_LENGTH,PAR_TRACK_SCALE,PAR_SHUFFLE,PAR_TRACK_PLAY_MODE,PAR_TRACK_MIDI_CHAN,PAR_TRACK_MIDI_NOTE,PAR_NONE,PAR_NONE},
   /* Step specials stop at probability; subpage-1 automation is rendered by
    * menu.c from PatternData's variable-length block list. */
   {TEXT_STEP_VELOCITY,TEXT_NOTE,TEXT_PROBABILITY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY,TEXT_EMPTY, PAR_STEP_VOLUME,PAR_STEP_NOTE,PAR_STEP_PROB,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE,PAR_NONE},

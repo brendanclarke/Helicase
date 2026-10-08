@@ -183,4 +183,58 @@ void presetMorph_clearAllStepAutomationOverrides(uint8_t scene_index);
  */
 void presetMorph_clearStepAutomationOverride(uint8_t slot);
 
+/*
+ * Morphable per-track timing parameters (S078 §5.1, §5.4).
+ *
+ * Inputs: one enum value per morphable track parameter. Output: identifies the
+ * Scene Morph endpoint array and the step-automation overlay lane. Affiliates:
+ * scene_setTrackMorph*(), presetMorph_setTrackParamStepOverride(),
+ * SceneModTargets.c track rows.
+ */
+typedef enum {
+    PRESETMORPH_TRACK_LENGTH = 0,
+    PRESETMORPH_TRACK_SCALE,
+    PRESETMORPH_TRACK_SHUFFLE,
+    PRESETMORPH_TRACK_PARAM_COUNT
+} presetMorph_trackParam_t;
+
+/*
+ * Effective (morphed) track timing values (S078 §5.1, §5.4).
+ *
+ * What: the value the sequencer should play for one track, computed on demand
+ * as Pattern Normal interpolated against the Scene Morph endpoint at the
+ * associated voice's resolved Morph amount, then overridden by any active
+ * step-automation value. Tracks 6 and 7 use voice 6's amount
+ * (voice_morph_amount[5] / slot 5). Why: the streamed values must follow a
+ * Morph sweep and step automation without ever writing the retained Pattern
+ * region, so no Normal value is lost and no Pattern AutoSave dirty bit is
+ * raised. Inputs: a resident Scene index (the track's played Scene) and track
+ * 0..6. Output: length 1..NUM_STEPS, scale CC 0..127, shuffle 0..127.
+ * Callers: sequencer.c DDA/interpolation/realign paths. Affiliates:
+ * scene_getTrackMorph*(), presetMorph_getResolvedVoiceAmount().
+ */
+uint8_t presetMorph_getTrackEffectiveLength(uint8_t scene_index,
+                                            uint8_t track);
+uint8_t presetMorph_getTrackEffectiveScale(uint8_t scene_index,
+                                           uint8_t track);
+uint8_t presetMorph_getTrackEffectiveShuffle(uint8_t scene_index,
+                                             uint8_t track);
+
+/*
+ * Set/clear per-track step-automation timing overlays (S078 §5.5).
+ *
+ * What: a runtime-only absolute value for one track parameter, applied ahead of
+ * the Normal/Morph interpolation while active. Why: step automation targeting
+ * the track length/scale/shuffle Scene targets must change playback without
+ * overwriting retained Pattern data or Scene endpoints. Inputs: track 0..6, a
+ * presetMorph_trackParam_t, and a 7-bit value. Output: the matching overlay is
+ * active until cleared. Lifetime: static runtime state, cleared at boot and at
+ * transport/Pattern restore. Affiliates: seq_applySceneAutomation(),
+ * seq_restoreAllSceneAutomation().
+ */
+void presetMorph_setTrackParamStepOverride(uint8_t track,
+                                           presetMorph_trackParam_t param,
+                                           uint8_t value);
+void presetMorph_clearAllTrackParamStepOverrides(void);
+
 #endif

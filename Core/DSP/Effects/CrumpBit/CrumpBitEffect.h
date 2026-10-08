@@ -97,16 +97,16 @@ float crumpBit_rateSamples(uint8_t rate);
 /*
  * Step-scale division that Sync snaps a Rate to (Q7).
  *
- * What: among the shared StepScale divisions (/64 .. 2br, 96 PPQ ticks)
- * whose length at `bpm` fits CRUMPBIT_DELAY_MAX_SAMPLES, returns the index
+ * What: among the shared StepScale CC positions (0..127, 96 PPQ ticks) whose
+ * length at the given tempo fits CRUMPBIT_DELAY_MAX_SAMPLES, returns the CC
  * nearest in log time to crumpBit_rateSamples(rate). It uses the bracketing
- * pair and the geometric-mean rule: no logarithms, and a constant 14-step
+ * pair and the geometric-mean rule: no logarithms, and a constant 128-step
  * loop. If no division fits (below about 4 BPM) it returns 0, and the DSP
  * clamps that length to the maximum. Why shared: the Effect-page label must
  * show exactly the division the DSP plays. Inputs: rate 0..127, bpm from
- * seq_getBpm() (0 is treated as 1). Output: a StepScale index 0..13.
+ * seq_getBpm() (0 is treated as 1). Output: a StepScale CC 0..127.
  * Accessors: crumpBit_uiFormatValue3() (label), CrumpBitEffect.c (target).
- * Affiliates: stepScale_ticks(), stepScale_shortName().
+ * Affiliates: stepScale_ticksQ8(), stepScale_formatShort().
  */
 uint8_t crumpBit_syncDivision(uint8_t rate, uint16_t bpm);
 

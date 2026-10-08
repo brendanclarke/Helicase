@@ -224,8 +224,8 @@ static uint8_t crumpBit_uiFormatValue3(uint8_t index, uint8_t value,
     }
     if (index == CRUMPBIT_PARAM_RATE &&
         menuEffects_shownParam(CRUMPBIT_PARAM_SYNC) != 0u) {
-        memcpy(out, stepScale_shortName(
-                        crumpBit_syncDivision(value, seq_getBpm())), 3u);
+        /* S078: nudge stops show their symbol, other CCs show the raw value. */
+        stepScale_formatShort(crumpBit_syncDivision(value, seq_getBpm()), out);
         return 1u;
     }
     return 0u;

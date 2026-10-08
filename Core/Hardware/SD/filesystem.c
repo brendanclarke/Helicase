@@ -3039,6 +3039,8 @@ static void filesystem_patternBuildHeader(uint8_t *header,
         header[base] = region->track_length[track];
         header[base + 1u] = region->track_scale[track];
         header[base + 2u] = region->track_shuffle[track];
+        /* S078 §4.5: byte 3 of the 16-byte track header stores play mode. */
+        header[base + 3u] = region->track_play_mode[track];
     }
 }
 
@@ -13165,6 +13167,8 @@ static void filesystem_loadSceneDirectory_tick(void)
                 region->track_length[track] = staging_buf[base];
                 region->track_scale[track] = staging_buf[base + 1u];
                 region->track_shuffle[track] = staging_buf[base + 2u];
+                /* S078 §4.5: old files are zero-filled here -> fwd. */
+                region->track_play_mode[track] = staging_buf[base + 3u];
             }
             op_stream_index = 0u;
             op_phase = 48u;
@@ -15195,6 +15199,8 @@ static void filesystem_loadPattern_tick(void)
                 region->track_length[track] = staging_buf[base];
                 region->track_scale[track] = staging_buf[base + 1u];
                 region->track_shuffle[track] = staging_buf[base + 2u];
+                /* S078 §4.5: root Pattern Load play mode. */
+                region->track_play_mode[track] = staging_buf[base + 3u];
             }
             op_stream_index = 0u; op_phase = 9u; return;
         }
@@ -16668,6 +16674,16 @@ static void filesystem_initSceneStage(filesystem_scene_stage_t *stage)
      * resident Scene.
      */
     scene_busCompDefaults(&stage->settings);
+    /*
+     * S078 §5.4: stage the track Morph endpoint defaults (16/76/0) so a
+     * sceneset.scg without the new keys behaves like a fresh resident Scene,
+     * and Morph amount 0..255 is a no-op until the endpoints differ.
+     */
+    for (track = 0u; track < NUM_TRACKS; track++) {
+        stage->settings.track_morph_length[track] = NUM_STEPS_PER_BAR;
+        stage->settings.track_morph_scale[track] = STEP_SCALE_DEFAULT;
+        stage->settings.track_morph_shuffle[track] = 0u;
+    }
 }
 
 static uint8_t filesystem_commitSceneStage(void)
@@ -17289,6 +17305,23 @@ static uint8_t filesystem_nextScenesetLine(char *dst, uint16_t cap,
         return filesystem_formatAssignmentCsvU8Line(
             dst, cap, "fx_send_morph", scene->settings.fx_send_morph,
             INSTRUMENT_SLOT_COUNT);
+    case 15u:
+        /*
+         * S078 §5.4: append the three per-track Morph endpoint lines after
+         * fx_send_morph so no earlier writer line moves. Parser keys:
+         * storageTypes.c track_morph_length/scale/shuffle.
+         */
+        return filesystem_formatAssignmentCsvU8Line(
+            dst, cap, "track_morph_length", scene->settings.track_morph_length,
+            NUM_TRACKS);
+    case 16u:
+        return filesystem_formatAssignmentCsvU8Line(
+            dst, cap, "track_morph_scale", scene->settings.track_morph_scale,
+            NUM_TRACKS);
+    case 17u:
+        return filesystem_formatAssignmentCsvU8Line(
+            dst, cap, "track_morph_shuffle",
+            scene->settings.track_morph_shuffle, NUM_TRACKS);
     default:
         return 0u;
     }
@@ -28415,6 +28448,8 @@ static uint8_t filesystem_bootReaderReadPatternFile(const char *file_name,
         region->track_length[track] = staging_buf[base];
         region->track_scale[track] = staging_buf[base + 1u];
         region->track_shuffle[track] = staging_buf[base + 2u];
+        /* S078 §4.5: AutoSave Pattern boot play mode. */
+        region->track_play_mode[track] = staging_buf[base + 3u];
     }
     if (filesystem_blockRead(file, (uint8_t *)region->address,
                              PATTERN_FILE_ADDRESS_BYTES) !=

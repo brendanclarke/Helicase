@@ -112,6 +112,55 @@ static const scene_mod_target_descriptor_t scene_mod_targets[] = {
     { SCENE_MOD_TARGET_ID(20u), SCENE_MOD_TARGET_KIND_EFFECT_MORPH, 0xffu,
       0u, 255u, SCENE_MOD_TARGET_USE_LFO | SCENE_MOD_TARGET_USE_AUTOMATION,
       "Effect", "FX Morph", "fxm" },
+    /*
+     * S078 §5.5: per-track step-automation targets for the morphable timing
+     * parameters. IDs 405..411 are length, 412..418 scale, and 419..425
+     * shuffle; voice_slot carries the track index for seq_applySceneAutomation().
+     * Only the automation flag is offered: these are pattern-timing values, not
+     * velocity/LFO modulation destinations.
+     */
+    { SCENE_MOD_TARGET_ID(21u), SCENE_MOD_TARGET_KIND_TRACK_LENGTH, 0u,
+      1u, 128u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "1 Len", "1ln" },
+    { SCENE_MOD_TARGET_ID(22u), SCENE_MOD_TARGET_KIND_TRACK_LENGTH, 1u,
+      1u, 128u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "2 Len", "2ln" },
+    { SCENE_MOD_TARGET_ID(23u), SCENE_MOD_TARGET_KIND_TRACK_LENGTH, 2u,
+      1u, 128u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "3 Len", "3ln" },
+    { SCENE_MOD_TARGET_ID(24u), SCENE_MOD_TARGET_KIND_TRACK_LENGTH, 3u,
+      1u, 128u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "4 Len", "4ln" },
+    { SCENE_MOD_TARGET_ID(25u), SCENE_MOD_TARGET_KIND_TRACK_LENGTH, 4u,
+      1u, 128u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "5 Len", "5ln" },
+    { SCENE_MOD_TARGET_ID(26u), SCENE_MOD_TARGET_KIND_TRACK_LENGTH, 5u,
+      1u, 128u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "6 Len", "6ln" },
+    { SCENE_MOD_TARGET_ID(27u), SCENE_MOD_TARGET_KIND_TRACK_LENGTH, 6u,
+      1u, 128u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "7 Len", "7ln" },
+    { SCENE_MOD_TARGET_ID(28u), SCENE_MOD_TARGET_KIND_TRACK_SCALE, 0u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "1 Scale", "1sc" },
+    { SCENE_MOD_TARGET_ID(29u), SCENE_MOD_TARGET_KIND_TRACK_SCALE, 1u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "2 Scale", "2sc" },
+    { SCENE_MOD_TARGET_ID(30u), SCENE_MOD_TARGET_KIND_TRACK_SCALE, 2u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "3 Scale", "3sc" },
+    { SCENE_MOD_TARGET_ID(31u), SCENE_MOD_TARGET_KIND_TRACK_SCALE, 3u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "4 Scale", "4sc" },
+    { SCENE_MOD_TARGET_ID(32u), SCENE_MOD_TARGET_KIND_TRACK_SCALE, 4u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "5 Scale", "5sc" },
+    { SCENE_MOD_TARGET_ID(33u), SCENE_MOD_TARGET_KIND_TRACK_SCALE, 5u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "6 Scale", "6sc" },
+    { SCENE_MOD_TARGET_ID(34u), SCENE_MOD_TARGET_KIND_TRACK_SCALE, 6u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "7 Scale", "7sc" },
+    { SCENE_MOD_TARGET_ID(35u), SCENE_MOD_TARGET_KIND_TRACK_SHUFFLE, 0u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "1 Shuf", "1sh" },
+    { SCENE_MOD_TARGET_ID(36u), SCENE_MOD_TARGET_KIND_TRACK_SHUFFLE, 1u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "2 Shuf", "2sh" },
+    { SCENE_MOD_TARGET_ID(37u), SCENE_MOD_TARGET_KIND_TRACK_SHUFFLE, 2u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "3 Shuf", "3sh" },
+    { SCENE_MOD_TARGET_ID(38u), SCENE_MOD_TARGET_KIND_TRACK_SHUFFLE, 3u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "4 Shuf", "4sh" },
+    { SCENE_MOD_TARGET_ID(39u), SCENE_MOD_TARGET_KIND_TRACK_SHUFFLE, 4u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "5 Shuf", "5sh" },
+    { SCENE_MOD_TARGET_ID(40u), SCENE_MOD_TARGET_KIND_TRACK_SHUFFLE, 5u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "6 Shuf", "6sh" },
+    { SCENE_MOD_TARGET_ID(41u), SCENE_MOD_TARGET_KIND_TRACK_SHUFFLE, 6u,
+      0u, 127u, SCENE_MOD_TARGET_USE_AUTOMATION, "Track", "7 Shuf", "7sh" },
 };
 
 /* Scene targets occupy block 6, exactly 64 IDs before Effect block 7. */

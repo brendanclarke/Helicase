@@ -3,6 +3,7 @@
 #include "InstrumentManager.h"
 #include "SceneData.h"
 #include "sequencer.h"
+#include "PatternData.h"
 #include <stdint.h>
 
 typedef struct {
@@ -57,6 +58,25 @@ static struct {
     uint8_t active;
     uint8_t amount;
 } morph_step_override[INSTRUMENT_SLOT_COUNT];
+
+/*
+ * Per-track step-automation overlays for the morphable timing parameters
+ * (S078 §5.5).
+ *
+ * What: one absolute value per track and one active-bit byte per parameter.
+ * A set bit T in track_param_override_mask[param] means track T is driven by
+ * step automation and its Normal/Morph interpolation is bypassed. Why: step
+ * automation reaches playback as a runtime overlay without writing the
+ * retained Pattern region or Scene endpoints. Tracks 6 and 7 share voice 6's
+ * automation only in the sense that the target rows carry the track index;
+ * each track's overlay is independent. Lifetime: static runtime state, cleared
+ * at boot and at transport/Pattern restore. Owner: Preset Morph engine.
+ * Affiliates: presetMorph_getTrackEffective*(), seq_applySceneAutomation(),
+ * seq_restoreAllSceneAutomation(). RAM: 21 + 3 bytes SRAM1.
+ */
+static uint8_t track_param_override_value[PRESETMORPH_TRACK_PARAM_COUNT]
+                                         [NUM_TRACKS];
+static uint8_t track_param_override_mask[PRESETMORPH_TRACK_PARAM_COUNT];
 
 #define PRESET_MORPH_ALL_SLOTS_MASK \
     ((uint8_t)((1u << INSTRUMENT_SLOT_COUNT) - 1u))
@@ -493,6 +513,15 @@ static void presetMorph_writeRuntimeBase(uint8_t scene_index, uint8_t slot,
 uint8_t presetMorph_tick(void)
 {
     scene_t *scene;
+
+    /*
+     * S078 §5.4: refresh the sequencer's effective track-timing cache on every
+     * worker tick, before the early-out below, so a Morph sweep, a Morph
+     * endpoint edit, or a Pattern Normal edit all reach playback within one
+     * main-loop pass. The array math is 7 tracks x 3 parameters, so it stays
+     * inside the bounded worker budget.
+     */
+    seq_refreshTrackEffectiveParams();
 
     if (!morph_worker.active)
         return 0u;
@@ -943,4 +972,188 @@ void presetMorph_clearStepAutomationOverride(uint8_t slot)
     if (slot >= INSTRUMENT_SLOT_COUNT)
         return;
     morph_step_override[slot].active = 0u;
+}
+
+/*
+ * Resolve the voice slot whose Morph amount drives one track (S078 §5.3).
+ *
+ * Inputs: track 0..6. Output: the track index for tracks 0..5, and 5 for tracks
+ * 6 and 7 (the HiHat/Choke pair shares voice 6). Affiliates:
+ * presetMorph_trackAmount(), the effective track getters below.
+ */
+static uint8_t presetMorph_trackSlot(uint8_t track)
+{
+    return (track <= 5u) ? track : 5u;
+}
+
+/*
+ * Retained voice Morph amount that drives one track's timing endpoints (S078
+ * §5.3, §5-4).
+ *
+ * Inputs: the track's played Scene and track index. Output: the retained
+ * voice_morph_amount[] of the associated voice (track 6/7 use voice 6), or 0
+ * for an invalid Scene. Why: the effective track values follow the user's Morph
+ * setting (PERF knob / MIDI CC1), matching the plan's effective-array design;
+ * the resolved amount (step override + LFO) is intentionally not used here.
+ */
+static uint8_t presetMorph_trackAmount(uint8_t scene_index, uint8_t track)
+{
+    const scene_t *scene = scene_getConst(scene_index);
+
+    if (!scene)
+        return 0u;
+    return scene->settings.voice_morph_amount[presetMorph_trackSlot(track)];
+}
+
+/*
+ * Interpolate one track timing value between its endpoints (S078 §5.1).
+ *
+ * Inputs: Normal value, Morph endpoint, and a 0..255 amount. Output: the
+ * rounded interpolation, exactly Normal at amount 0 and Morph at 255. Why: same
+ * contract as the instrument and FX-send Morph paths, so a Morph sweep is
+ * continuous across every endpoint kind.
+ */
+static uint8_t presetMorph_interpTrack(uint8_t normal, uint8_t morph,
+                                       uint8_t amount)
+{
+    if (amount == 0u)
+        return normal;
+    if (amount == 255u)
+        return morph;
+    return (uint8_t)(((uint16_t)normal * (uint16_t)(255u - amount) +
+                      (uint16_t)morph * amount + 127u) / 255u);
+}
+
+uint8_t presetMorph_getTrackEffectiveLength(uint8_t scene_index,
+                                            uint8_t track)
+{
+    const pat_scene_region_t *region;
+    uint8_t normal;
+    uint8_t result;
+
+    /*
+     * Effective track length (S078 §5.1).
+     *
+     * Inputs: the track's played Scene and track index. Output: the value the
+     * sequencer loops on: any active step-automation overlay, otherwise the
+     * Pattern Normal interpolated against the Scene Morph endpoint at the
+     * voice Morph amount, clamped to 1..NUM_STEPS. Never writes retained data.
+     */
+    if (track >= NUM_TRACKS)
+        return NUM_STEPS_PER_BAR;
+    if (track_param_override_mask[PRESETMORPH_TRACK_LENGTH] &
+        (uint8_t)(1u << track))
+        return track_param_override_value[PRESETMORPH_TRACK_LENGTH][track];
+    region = pat_sceneRegion(scene_index);
+    if (!region)
+        return NUM_STEPS_PER_BAR;
+    normal = region->track_length[track];
+    if (normal < 1u)
+        normal = NUM_STEPS_PER_BAR;
+    result = presetMorph_interpTrack(
+        normal, scene_getTrackMorphLength(scene_index, track),
+        presetMorph_trackAmount(scene_index, track));
+    if (result < 1u)
+        result = 1u;
+    else if (result > NUM_STEPS)
+        result = NUM_STEPS;
+    return result;
+}
+
+uint8_t presetMorph_getTrackEffectiveScale(uint8_t scene_index,
+                                           uint8_t track)
+{
+    const pat_scene_region_t *region;
+    uint8_t normal;
+    uint8_t result;
+
+    /*
+     * Effective track step-scale CC (S078 §5.1).
+     *
+     * Inputs: the track's played Scene and track index. Output: a CC 0..127 the
+     * DDA accumulator turns into a Q8.8 tick interval: any active step-automation
+     * overlay, otherwise the Pattern Normal CC interpolated against the Scene
+     * Morph endpoint CC. A stale byte falls back to the 1/16 default.
+     */
+    if (track >= NUM_TRACKS)
+        return STEP_SCALE_DEFAULT;
+    if (track_param_override_mask[PRESETMORPH_TRACK_SCALE] &
+        (uint8_t)(1u << track))
+        return track_param_override_value[PRESETMORPH_TRACK_SCALE][track];
+    region = pat_sceneRegion(scene_index);
+    if (!region)
+        return STEP_SCALE_DEFAULT;
+    normal = region->track_scale[track];
+    if (normal >= STEP_SCALE_COUNT)
+        normal = STEP_SCALE_DEFAULT;
+    result = presetMorph_interpTrack(
+        normal, scene_getTrackMorphScale(scene_index, track),
+        presetMorph_trackAmount(scene_index, track));
+    if (result >= STEP_SCALE_COUNT)
+        result = STEP_SCALE_DEFAULT;
+    return result;
+}
+
+uint8_t presetMorph_getTrackEffectiveShuffle(uint8_t scene_index,
+                                             uint8_t track)
+{
+    const pat_scene_region_t *region;
+    uint8_t normal;
+    uint8_t result;
+
+    /*
+     * Effective track shuffle amount (S078 §5.1).
+     *
+     * Inputs: the track's played Scene and track index. Output: a 0..127
+     * shuffle amount: any active step-automation overlay, otherwise the Pattern
+     * Normal amount interpolated against the Scene Morph endpoint.
+     */
+    if (track >= NUM_TRACKS)
+        return 0u;
+    if (track_param_override_mask[PRESETMORPH_TRACK_SHUFFLE] &
+        (uint8_t)(1u << track))
+        return track_param_override_value[PRESETMORPH_TRACK_SHUFFLE][track];
+    region = pat_sceneRegion(scene_index);
+    if (!region)
+        return 0u;
+    normal = region->track_shuffle[track];
+    if (normal > 127u)
+        normal = 0u;
+    result = presetMorph_interpTrack(
+        normal, scene_getTrackMorphShuffle(scene_index, track),
+        presetMorph_trackAmount(scene_index, track));
+    return (result > 127u) ? 0u : result;
+}
+
+void presetMorph_setTrackParamStepOverride(uint8_t track,
+                                           presetMorph_trackParam_t param,
+                                           uint8_t value)
+{
+    /*
+     * Activate one track's step-automation timing overlay (S078 §5.5).
+     *
+     * Inputs: track 0..6, parameter lane, and the 7-bit automation value.
+     * Output: the overlay value is stored and its active bit set, so the
+     * effective getters return it until the next transport/Pattern restore.
+     * Invalid coordinates are a no-op.
+     */
+    if (track >= NUM_TRACKS || param >= PRESETMORPH_TRACK_PARAM_COUNT)
+        return;
+    track_param_override_value[param][track] = value;
+    track_param_override_mask[param] |= (uint8_t)(1u << track);
+}
+
+void presetMorph_clearAllTrackParamStepOverrides(void)
+{
+    /*
+     * Drop every track timing overlay (S078 §5.5).
+     *
+     * Inputs: none. Output: all three active-bit bytes are zero, so the
+     * effective getters fall back to the Normal/Morph interpolation. Common
+     * caller: seq_restoreAllSceneAutomation() at transport/Pattern boundaries.
+     */
+    uint8_t param;
+
+    for (param = 0u; param < PRESETMORPH_TRACK_PARAM_COUNT; param++)
+        track_param_override_mask[param] = 0u;
 }

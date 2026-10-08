@@ -111,6 +111,16 @@ static const char syncRateNames[][4] = {
 static const char extSyncNames[][4] = {
     {5}, {"off"}, {"usb"}, {"din"}, {"pls"}, {"aut"},
 };
+/*
+ * Per-track play-mode names (S078 §4.2).
+ *
+ * The leading byte is the selectable-entry count; entries follow in the stored
+ * play-mode order fwd/rev/pip/rnd/onc/1fr. Clients: the STEP track-settings
+ * "mod" cell and the menu.c play-mode formatter (menu_getPlayModeName).
+ */
+static const char trackPlayModeNames[][4] = {
+    {6}, {"fwd"},{"rev"},{"pip"},{"rnd"},{"onc"},{"1fr"},
+};
 static const char waveformNames[][4] = {
     {6}, {"Sin"},{"Tri"},{"Saw"},{"Rec"},{"Noi"},{"Cym"},
 };
@@ -147,6 +157,8 @@ static const char shortNames[][4] = {
     {"ats"},
     /* S074 bus compressor compact labels. */
     {"cmp"},{"cam"},{"ctm"},{"csc"},
+    /* S078 per-track play mode compact label. */
+    {"mod"},
 };
 
 static const char catNames[][16] = {
@@ -184,6 +196,8 @@ static const char longNames[][16] = {
     {"AutoSave"},
     /* S074 bus compressor long names. */
     {"BusComp"},{"CompAmt"},{"CompTime"},{"CompSC"},
+    /* S078 per-track play mode long name. */
+    {"PlayMode"},
 };
 
 #endif /* MENUTEXT_H_ */

@@ -80,13 +80,13 @@ float crumpBit_rateSamples(uint8_t rate)
 /*
  * Nearest fitting division for one free-running length.
  *
- * What: walks the 14 ascending StepScale divisions and keeps the longest one
- * <= target (low) and the shortest one > target (high), skipping any longer
- * than CRUMPBIT_DELAY_MAX_SAMPLES. It picks low when target^2 < low*high,
- * which is nearest in log time. Inputs: target length and samples per tick at
- * the current tempo. Output: a StepScale index; 0 if nothing fits. Callers:
- * crumpBit_syncDivision(), crumpBit_targetSamples(). Affiliates:
- * stepScale_ticks().
+ * What: walks the 128 ascending StepScale CC positions and keeps the longest
+ * one <= target (low) and the shortest one > target (high), skipping any
+ * longer than CRUMPBIT_DELAY_MAX_SAMPLES. It picks low when target^2 <
+ * low*high, which is nearest in log time. Inputs: target length and samples per
+ * tick at the current tempo. Output: a StepScale CC 0..127; 0 if nothing fits.
+ * Callers: crumpBit_syncDivision(), crumpBit_targetSamples(). Affiliates:
+ * stepScale_ticksQ8() (Q8.8 ticks).
  */
 static uint8_t crumpBit_divisionFor(float target, float per_tick)
 {
@@ -97,7 +97,7 @@ static uint8_t crumpBit_divisionFor(float target, float per_tick)
     uint8_t i;
 
     for (i = 0u; i < STEP_SCALE_COUNT; i++) {
-        const float t = (float)stepScale_ticks(i) * per_tick;
+        const float t = ((float)stepScale_ticksQ8(i) / 256.0f) * per_tick;
 
         if (t > CRUMPBIT_DELAY_MAX_SAMPLES)
             continue;
@@ -133,15 +133,15 @@ uint8_t crumpBit_syncDivision(uint8_t rate, uint16_t bpm)
  * target, and the glide bends the pitch like a tape machine. Inputs: row
  * values rate and sync, and bpm (seq_getBpm()). Output: target length in
  * samples. Caller: crumpBit_process(). Affiliates: crumpBit_divisionFor(),
- * stepScale_ticks().
+ * stepScale_ticksQ8().
  */
 static float crumpBit_targetSamples(uint8_t rate, uint8_t sync, uint16_t bpm)
 {
     const float per_tick =
         CRUMPBIT_SAMPLES_PER_TICK / (float)(bpm ? bpm : 1u);
     const float free_run = crumpBit_rateSamples(rate);
-    const float synced = (float)stepScale_ticks(
-        crumpBit_divisionFor(free_run, per_tick)) * per_tick;
+    const float synced = ((float)stepScale_ticksQ8(
+        crumpBit_divisionFor(free_run, per_tick)) / 256.0f) * per_tick;
     const float target = sync ? synced : free_run;
 
     return (target > CRUMPBIT_DELAY_MAX_SAMPLES)

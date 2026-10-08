@@ -188,7 +188,7 @@
 #define AUTOSAVE_SCENE_NAME_OFFSET              0u
 #define AUTOSAVE_SCENE_PARAMETERS_OFFSET       10u
 #define AUTOSAVE_SCENE_PARAMETER_ALLOC_BYTES  118u
-#define AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES    51u  /* S075 F2: +6 FX-send Morph */
+#define AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES    72u  /* S078: +21 track Morph endpoints */
 #define AUTOSAVE_EFFECT_OFFSET                128u
 #define AUTOSAVE_EFFECT_TYPE_OFFSET             0u
 #define AUTOSAVE_EFFECT_TYPE_BYTES              3u
@@ -256,7 +256,17 @@ typedef enum {
      * unchanged. Owner: scene_setVoiceFxSendMorph().
      */
     AUTOSAVE_SCENE_PARAM_FX_SEND_MORPH_BASE = 45,
-    AUTOSAVE_SCENE_PARAM_COUNT = 51
+    /*
+     * S078 §5.4: per-track Morph endpoints for length, scale, and shuffle, one
+     * cell per track (51..57, 58..64, 65..71). They occupy previously reserved
+     * cells in the 118-byte Scene parameter allocation, so the AutoSave record
+     * layout, masks, and format version stay unchanged. Owner:
+     * scene_setTrackMorphLength/Scale/Shuffle().
+     */
+    AUTOSAVE_SCENE_PARAM_TRACK_MORPH_LENGTH_BASE = 51,
+    AUTOSAVE_SCENE_PARAM_TRACK_MORPH_SCALE_BASE = 58,
+    AUTOSAVE_SCENE_PARAM_TRACK_MORPH_SHUFFLE_BASE = 65,
+    AUTOSAVE_SCENE_PARAM_COUNT = 72
 } autosave_scene_parameter_t;
 
 typedef enum {

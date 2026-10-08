@@ -147,6 +147,8 @@ enum NamesEnum {
     /* S074 Scene-owned bus compressor page: cmp, cam, ctm, csc. */
     TEXT_BUS_COMP_MODE, TEXT_BUS_COMP_AMOUNT,
     TEXT_BUS_COMP_TIME, TEXT_BUS_COMP_SIDECHAIN,
+    /* S078 per-track play mode label for the STEP track-settings page. */
+    TEXT_TRACK_PLAY_MODE,
     NUM_NAMES
 };
 
@@ -192,6 +194,8 @@ enum longNamesEnum {
     /* S074 bus compressor long names. */
     LONG_BUS_COMP_MODE, LONG_BUS_COMP_AMOUNT,
     LONG_BUS_COMP_TIME, LONG_BUS_COMP_SIDECHAIN,
+    /* S078 per-track play mode. */
+    LONG_PLAY_MODE,
 };
 
 enum shortNamesEnum {
@@ -222,7 +226,9 @@ enum shortNamesEnum {
     SHORT_AUTOSAVE,
     /* S074 bus compressor compact labels: cmp, cam, ctm, csc. */
     SHORT_BUS_COMP_MODE, SHORT_BUS_COMP_AMOUNT,
-    SHORT_BUS_COMP_TIME, SHORT_BUS_COMP_SIDECHAIN
+    SHORT_BUS_COMP_TIME, SHORT_BUS_COMP_SIDECHAIN,
+    /* S078 per-track play mode compact label: mod. */
+    SHORT_PLAY_MODE
 };
 
 #define PAR_RUNTIME_CPU_USE 0xFFFEu
@@ -427,6 +433,20 @@ uint8_t menu_voiceHeldSceneButtonPressed(uint8_t scene_index);
  * encoder, and endless-pot code uses the matching parameter buffer.
  */
 void menu_setVoiceModeShowMorph(uint8_t onOff);
+
+/*
+ * STEP-page track Morph endpoint view (S078 §5.4).
+ *
+ * Why: the per-track length/scale/shuffle Morph endpoints are Scene settings
+ * and need an edit surface. Holding SHIFT in STEP mode shows and edits the
+ * endpoints on the STEP front-page cells, mirroring the VOICE SHIFT Morph view.
+ * Input onOff is a boolean owned by buttonHandler's SHIFT press/release in
+ * SELECT_MODE_STEP. Output: the STEP page's len/scl/shf cells read and write
+ * the active Scene's track Morph endpoints instead of the Pattern Normal
+ * values, and the page repaints. Separate from voiceModeShowMorph so the VOICE
+ * morph latch is never affected.
+ */
+void menu_setPatternTrackMorphEndpoint(uint8_t onOff);
 
 /*
  * Effect-page SHIFT Morph view (Session 072 step 7; plan §13.5).

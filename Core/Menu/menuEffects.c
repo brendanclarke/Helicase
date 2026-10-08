@@ -503,8 +503,13 @@ uint8_t menuEffects_formatValue3(const menuEffects_cell_t *cell, char *dst)
         return 1u;
     }
     if (cell->kind == MENU_FX_CELL_SCALE) {
-        /* Labels come from the sequencer-owned shared StepScale table. */
-        memcpy(dst, stepScale_shortName((uint8_t)value), 3u);
+        /*
+         * Labels come from the sequencer-owned shared StepScale table (S078).
+         *
+         * A nudge stop shows its symbol; every other CC position shows its raw
+         * 7-bit value. stepScale_formatShort() owns that fallback.
+         */
+        stepScale_formatShort((uint8_t)value, dst);
         return 1u;
     }
     if (cell->kind == MENU_FX_CELL_PARAM)
@@ -601,10 +606,20 @@ uint8_t menuEffects_paintEditView(const menuEffects_cell_t *cell)
         numtostrpu(&editDisplayBuffer[1][13], (uint8_t)value, ' ');
         break;
     case MENU_FX_CELL_SCALE:
+        /*
+         * S078: nudge stops show their long name; all other CC positions show
+         * the raw value at the numeric column, matching the S075 F2-D rule.
+         */
         menuEffects_copyField(&editDisplayBuffer[0][0], "FX Seq", 8u);
         menuEffects_copyField(&editDisplayBuffer[0][8], "StepScal", 8u);
-        menuEffects_copyField(&editDisplayBuffer[1][0],
-                              stepScale_longName((uint8_t)value), 8u);
+        {
+            const char *nm = stepScale_longName((uint8_t)value);
+
+            if (nm)
+                menuEffects_copyField(&editDisplayBuffer[1][0], nm, 8u);
+            else
+                numtostrpu(&editDisplayBuffer[1][13], (uint8_t)value, ' ');
+        }
         break;
     case MENU_FX_CELL_MORPH_AMOUNT:
         menuEffects_copyField(&editDisplayBuffer[0][0], "Effect", 8u);
