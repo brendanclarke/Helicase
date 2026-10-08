@@ -4,12 +4,21 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 075 close (2026-10-03), `dev-ph6-copyclear`,
-  HEAD `76aef20` (F3). DEV link: `text=532,408`, `data=416`, `bss=426,712`;
-  raw binary 532,824 B and stamped image 532,840 B (SHA-256
-  `d1c0aac2…9ceb`). F3 added code only; the RAM ledger is unchanged since
-  F2. Production (`DEV_MODE_LOGGING=0`) was last measured at F1 and needs a
-  rebuild. The F1 pass
+- **Current as of:** Session 077 close (2026-10-08), `dev-ph6-cleanup`,
+  uncommitted. DEV link: `text=538,416`, `data=416`, `bss=427,008`;
+  flash payload 538,832 B of 753,664 B (**headroom 214,832 B**).
+  Production (`DEV_MODE_LOGGING=0`) was last measured at S075 F1 and needs a
+  rebuild.
+- **S077 changes:** +264 B BSS (256 B `copyClearService.c:ccSvc_snapTable[128]`
+  static paste source table + 8 B alignment). `PatternData.c:pat_background_region`
+  (10,519 B) replaces `pat_autosave_snapshot` at identical size — no net change
+  from that substitution. The 9 kB name-buffer loan now carries only the
+  161 B HCNAMES remap (paste table and source blocks moved to the static table
+  and `pat_background_region.pool`). S077 text growth was +2,440 B (P1–P6).
+- **S076 changes:** +264 B BSS (28-byte `lfo_scene_handoff` struct + alignment
+  in S076 P2). +3,584 B text. The S075 F1 production measurement needs a
+  rebuild.
+- **S075 changes:** The F1 pass
   adds +124 B production SRAM1 net: early source masks +64 B, restore masks
   +64 B, early flags +1 B and governor credit +2 B, offset by the removed
   group-blink state −7 B. The 9,000 B name cache doubles as copy/clear

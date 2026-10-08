@@ -3,13 +3,28 @@
 ## Authority and status
 
 This is the authoritative live-memory, allocator, PAT4 interchange, Pattern
-Stack Service, and Pattern AutoSave reference, **current as of the Session 075
-close** (2026-10-03, `dev-ph6-copyclear`, HEAD `76aef20`). Session 073 changed
+Stack Service, and Pattern AutoSave reference, **current as of the Session 077
+close** (2026-10-08, `dev-ph6-cleanup`, uncommitted). Session 073 changed
 nothing. Session 074 changed no Pattern storage or allocator code; it added a
 second reader of step automation (the Effect-page underline search reads every
 step of every track of the viewed Pattern through
 `pat_readStepAutomations()`, 4 steps per foreground pass) and saw a torn PAT4
 file repair itself exactly as designed (§9).
+
+**Session 077 changed this area in two ways:**
+
+- **`pat_background_region`** (§1): the standalone `pat_autosave_snapshot` is
+  now `pat_background_region`, an identical-type 10,519 B region outside
+  `pat_regions[]`. It serves the AutoSave snapshot, the copy/clear overlap
+  paste pool (`pat_backgroundPoolMut()`), and future Bank Load staging. These
+  three uses must never run concurrently. The copy/clear overlap path now
+  waits on `filesystem_patternSnapshotInUse()` instead of borrowing name-buffer
+  space, and the paste source table is a static `uint16_t[128]` in
+  `copyClearService.c` instead of being stored in the name buffer.
+- **Per-track Scene playback** (§6): the sequencer reads
+  `seq_perTrackPattern[track]` instead of `seq_activePattern` in all ISR/
+  foreground step-advance, automation, and trigger paths, enabling independent
+  track-to-Scene mapping during live performance.
 
 **Session 075 (Phase 6) changed this area in three ways:**
 

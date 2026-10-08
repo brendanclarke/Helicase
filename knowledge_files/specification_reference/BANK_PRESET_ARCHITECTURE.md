@@ -4,7 +4,7 @@
 
 This is the authoritative reference for how parameters are stored in resident
 memory across the Bank, Scene, Kit, Instrument, and Effect hierarchy, current
-as of the **Session 076 close** (2026-10-06). S073 changed nothing here. S074
+as of the **Session 077 close** (2026-10-08). S073 changed nothing here. S074
 added the bus compressor Scene settings and the fourth fader mode. S075
 added:
 
@@ -24,7 +24,34 @@ S076 added:
   write to a parameter clears its step override) and Rule B (Scene activation
   clears all five override families);
 - copy/clear morph operations (`COPYCLEAR_UTILITIES.md` §7, §13): track and
-  Scene morph reset/copy, plus "reload scene" in the PERF clear menu. How a stored value reaches the DSP
+  Scene morph reset/copy, plus "reload scene" in the PERF clear menu.
+
+S077 added:
+
+- **per-track Scene playback** (`seq_perTrackPattern[7]`): independent
+  track-to-Scene mapping during live PERF mode. The user holds a PERF VOICE
+  button and presses a SEQ button to assign that track to a different Scene's
+  Pattern data, instrument parameters, MIDI routing, fader and FX send. The
+  mixer reads the played Scene per voice via `preset_getSlotPlayedScene()`.
+  `preset_startSingleVoiceApply()` factors single-voice instrument apply from
+  the drumset worker. Double-click on a PERF SEQ button toggles per-track
+  override; PERF VOICE release without action toggles mute. Recording is
+  gated on `!seq_perTrackActive`. Known limitation: LFO/velocity Scene-
+  namespace target tokens still resolve through the active Scene.
+- **blank menu after Scene Load fix** (P3): background `.hcnames` rewrite no
+  longer raises `menu_storageBusy`; a lightweight callback
+  (`menu_residentNameDeferredFlushComplete()`) replaces the old delegation.
+  `menu_endResidentNameScratchSession()` guards `filesystem_status() == BUSY`.
+- **Scene morph fan-out correction** (P4): `ccCopy_runSceneMorph()` and
+  `ccClear_runResetSceneMorph()` now fan out through `bank_sceneFanoutMask()`
+  like `copy kit`/`clear fx`, not like `copy scene`/`clear scene`.
+- **PERF mode morph automation underline** (P6): the automation underline
+  pipeline (scan → classify → render) now covers the PERF page via
+  `va_searchPerfMorphMask` and `menu_applyPerfMarkers()`. PERF compact-view
+  cells show underline markers for voices whose morph automation is present
+  in the active Pattern.
+
+How a stored value reaches the DSP
 (descriptor writers, special-writer tags, LFO adapters) is in
 `INSTRUMENTS_DSP_REFERENCE.md`. It describes what is stored, where it lives, when it changes,
 when it becomes visible, and how it is persisted.

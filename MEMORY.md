@@ -20,40 +20,46 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
-**Current working source**: **Session 076 is closed** on `dev-ph6-cleanup`
-(2026-10-06). S076 implemented four feature/fix batches (P1–P4) on top of
-Session 075's copy/clear framework. All four build clean; hardware
-verification is pending (`S077_RETEST_CHECKLIST.md`).
+**Current working source**: **Session 077 is closed** on `dev-ph6-cleanup`
+(2026-10-08). S077 implemented six parts (P1–P6): background Scene region,
+per-track Scene playback, blank menu fix, Scene morph fan-out correction,
+bar-to-step copy, and PERF mode morph automation underline. P1–P3 hardware
+tested (P3 primary symptom confirmed fixed, P1/P2 retest items PASS); P4–P6
+await hardware testing.
 
-- **Commits:** S076 code changes are uncommitted on `dev-ph6-cleanup`.
+- **Commits:** S077 code changes are uncommitted on `dev-ph6-cleanup`.
   The user manages commits.
-- **Build at S076 close (DEV config):** `text=535,976`, `data=416`,
-  `bss=426,744`; flash payload 536,392 B of 753,664 (**217,272 B free**).
-  RAM growth from S075: +32 B (28-byte `lfo_scene_handoff` struct +
-  alignment). The production build (`DEV_MODE_LOGGING 0`) was last measured
-  at S075 F1 and needs a rebuild.
-- **Hardware (user):** S076 P1–P4 await hardware testing. S075 carry-over
-  items also still open (overlay re-test, case list, F3 edge cases).
+- **Build at S077 close (DEV config):** `text=538,416`, `data=416`,
+  `bss=427,008`; flash payload 538,832 B of 753,664 (**214,832 B free**).
+  BSS growth from S076: +264 B (256 B `ccSvc_snapTable[128]` + 8 B alignment).
+  The production build (`DEV_MODE_LOGGING 0`) was last measured at S075 F1
+  and needs a rebuild.
+- **Hardware (user):** S077 P4–P6 await hardware testing. S076 P1–P4 and
+  S075 carry-over items also still open (overlay re-test, case list, F3 edge
+  cases).
 
-Session 076 in one paragraph:
+Session 077 in one paragraph:
 
-- **P1:** Scene parameter automation override clear rules — Rule A
-  (non-automation writes clear their override) and Rule B (Scene activation
-  clears all five override families). 7 files, 16 inline additions.
-- **P2:** LFO retrigger value 7 (`scn`) for Scene-change phase handoff,
-  plus the LFO phase offset scaling fix (`IM_SPECIAL_LFO_OFFSET`, raw byte
-  → full 32-bit phase). 9+1 files, +32 B BSS.
-- **P3:** copy/clear morph additions — `reset morph` (track and Scene),
-  `reset fx morph`, `copy morph` (track and Scene). `CC_CLEAR_SEND` moved
-  from value 4 to 5. 8 files, +2,848 B flash.
-- **P4:** `reload scene` in the PERF clear menu (fire-and-forget Scene
-  reload from HCNAMES source), bar chaselight on SELECT LEDs in STEP mode,
-  SHIFT+SELECT sets per-track pattern length. 5 files, +792 B flash.
+- **P1:** `pat_background_region` (17th region, 10,519 B) replaces
+  `pat_autosave_snapshot`; copy snapshot migration moves paste table to static
+  `ccSvc_snapTable[128]` and source blocks to `pat_backgroundPoolMut()`.
+  `filesystem_patternSnapshotInUse()` gate for overlap paste concurrency.
+- **P2:** Per-track Scene playback: `seq_perTrackPattern[7]`, PERF
+  hold-VOICE+press-SEQ gesture, `preset_startSingleVoiceApply()`, double-click
+  detector, live mixer reads via `preset_getSlotPlayedScene()`. 50 changes
+  across 16 files.
+- **P3:** Blank menu after Scene Load fix — background `.hcnames` rewrite no
+  longer raises `menu_storageBusy`. Hardware verified.
+- **P4:** Scene morph fan-out correction — `copy morph`/`reset morph` now fan
+  out through `bank_sceneFanoutMask()`.
+- **P5:** Bar-to-step cross-kind copy (`CC_KIND_BAR_TO_STEP`).
+- **P6:** PERF mode morph automation underline (`va_searchPerfMorphMask`,
+  `menu_applyPerfMarkers()`).
 
 **Permanent authority:**
 
-- `knowledge_files/log_archive/076_SESSION_HANDOFF_LOG.md` (and 075, 074,
-  073, 072);
+- `knowledge_files/log_archive/077_SESSION_HANDOFF_LOG.md` (and 076, 075,
+  074, 073, 072);
 - `knowledge_files/specification_reference/COPYCLEAR_UTILITIES.md` (new in
   S075);
 - `knowledge_files/specification_reference/dsp_instruments_effects/`:
@@ -72,6 +78,9 @@ Session 076 in one paragraph:
   `b8f08db`.
 - The eight root `S076_*.md` task documents are superseded by
   `076_SESSION_HANDOFF_LOG.md` (the user deletes them).
+- The eleven root `S077_*.md` task documents are superseded by
+  `077_SESSION_HANDOFF_LOG.md` (the user deletes them after hardware test
+  results are recorded).
 
 Still deferred: per-track step scale/shuffle playback (`PATTERN_DYNAMIC_STACK.md`
 §6.4).
@@ -131,11 +140,29 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   to match in parameters and FX settings, so edits, pastes and clears of
   Scene children (Instrument, Kit, Effect, FX sequence, `send`) fan out;
   Pattern data never does. `copy scene`/`settings` exchange the mask entry;
-  `clear scene`/`settings` reset it to self.
-- **Session 076 is closed.** Durable record: `076_SESSION_HANDOFF_LOG.md`;
-  copy/clear reference: `COPYCLEAR_UTILITIES.md`. The eight root `S076_*.md`
-  task documents are superseded (the user deletes them). The ten root
-  `S075_*.md` documents were also superseded at S075 close.
+  `clear scene`/`settings` reset it to self. **Scene morph** copy/reset fans
+  out through `bank_sceneFanoutMask()` like kit/fx, NOT like scene/settings
+  (S077 P4 correction).
+- **Session 077 is closed.** Durable record: `077_SESSION_HANDOFF_LOG.md`;
+  copy/clear reference: `COPYCLEAR_UTILITIES.md`. The eleven root `S077_*.md`
+  task documents are superseded (the user deletes them after hardware test
+  results are recorded). The eight root `S076_*.md` and ten root `S075_*.md`
+  documents were also superseded at their respective session closes.
+- **Per-track Scene playback (S077 P2):** `seq_perTrackPattern[7]` maps each
+  track to its played Scene. ISR reads are single-byte SRAM1 (atomic on
+  Cortex-M7). Recording is gated on `!seq_perTrackActive`. The mixer reads
+  the played Scene per voice via `preset_getSlotPlayedScene()`. Known
+  limitation: LFO/velocity Scene-namespace target tokens still resolve
+  through the active Scene in InstrumentManager.
+- **Background .hcnames (S077 P3):** the background rewrite must NOT raise
+  `menu_storageBusy`. The correct path is
+  `menu_residentNameDeferredFlushComplete()`.
+  `menu_endResidentNameScratchSession()` must guard `filesystem_status() ==
+  BUSY`.
+- **pat_background_region (S077 P1):** 10,519 B (17th region), replaces
+  `pat_autosave_snapshot`. Three non-concurrent uses: AutoSave snapshot,
+  overlap paste pool, Bank Load staging. `filesystem_patternSnapshotInUse()`
+  gates overlap availability.
 - **Automation priority (user, S075 F3) — binding:** step automation, then
   menu edits, then MIDI. A held voice-parameter automation value is never
   overwritten before the voice's next trigger: every Morph-base runtime write
@@ -159,7 +186,12 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   132 B of every pool is the swap block; Pattern writes publish before free;
   while `copyClear_backgroundSuspended()` is set no AutoSave, Pattern
   AutoSave, trace, settings write or repair epoch starts; the 9 kB name cache
-  may be lent (other filesystem ops are refused while lent).
+  may be lent (other filesystem ops are refused while lent). Since S077 the
+  paste source table is a static `uint16_t[128]` and source blocks use
+  `pat_backgroundPoolMut()`; the name buffer loan now carries only the 161 B
+  HCNAMES remap.
+- **S077 open items:** P4/P5/P6 hardware testing; P3 items 3.10/3.14/3.15
+  re-test after P4 fan-out correction; carry-over C1–C6.
 - **S075 open items** (details in the log §13 and `SCOPING_TARGETS.md`
   "Session 075 carry-forward"): overlay follow-up re-test; the case list
   (`COPYCLEAR_UTILITIES.md` §16); an F2-card validator PASS; production

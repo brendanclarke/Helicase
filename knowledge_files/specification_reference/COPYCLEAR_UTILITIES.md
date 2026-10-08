@@ -5,11 +5,14 @@ children on the LXR-02: what the user can do, what each operation changes,
 and how the code does it. Written for a developer who has to read, fix or
 extend `Core/Menu/CopyClear/`.
 
-- **Current as of:** Session 076 close (2026-10-06, `dev-ph6-cleanup`).
+- **Current as of:** Session 077 close (2026-10-08, `dev-ph6-cleanup`).
   Built in S075 (base pass, F1 follow-up, F2 follow-up); S076 P3 added morph
-  reset/copy operations and P4 added reload scene. History and every user
-  decision are in `knowledge_files/log_archive/075_SESSION_HANDOFF_LOG.md`
-  §4–§10 and `076_SESSION_HANDOFF_LOG.md` §4–§5.
+  reset/copy operations and P4 added reload scene; S077 P1 migrated copy
+  snapshot to `pat_background_region`, P4 corrected Scene morph fan-out, and
+  P5 added bar-to-step cross-kind paste. History and every user decision are
+  in `knowledge_files/log_archive/075_SESSION_HANDOFF_LOG.md` §4–§10,
+  `076_SESSION_HANDOFF_LOG.md` §4–§5, and `077_SESSION_HANDOFF_LOG.md`
+  §2/§5/§6.
 - **Where this document and the code disagree, the code wins;** fix this
   document in the same change.
 - **Related documents:**

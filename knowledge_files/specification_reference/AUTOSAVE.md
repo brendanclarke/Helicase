@@ -4,7 +4,21 @@
 
 This is the authoritative reference for the implemented Helicase AutoSave
 format, ownership, boot restore, mutation tracking, and background writer
-through Session 075. Session 073 changed nothing in AutoSave. Session 075
+through Session 077. Session 073 changed nothing in AutoSave.
+
+Session 077 made one change:
+
+- **Pattern AutoSave snapshot gate** (P1): `filesystem_patternSnapshotInUse()`
+  returns nonzero during autosave drain phases 2–6 (`FS_INTERNAL_OP_AUTOSAVE_
+  PATTERN_DRAIN`, `op_phase >= 2u && op_phase <= 6u`). The copy/clear overlap
+  paste path waits on this gate before using `pat_background_region.pool` as
+  the paste source block, ensuring the AutoSave snapshot's immutable data is
+  not overwritten mid-drain. The snapshot object itself is now
+  `pat_background_region` (S077), replacing `pat_autosave_snapshot` at
+  identical type and size (10,519 B). Trace: `AUTOSAVE_TRACE_CC_EVT_SNAPSHOT_
+  GATE 0x51u`. See `PATTERN_DYNAMIC_STACK.md` §1.
+
+Session 075
 made three changes (details below; history in `075_SESSION_HANDOFF_LOG.md`):
 
 - Scene cell 7 (the retired global `srt`) is reserved: written as 127,

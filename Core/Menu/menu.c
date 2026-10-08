@@ -1262,7 +1262,7 @@ static uint8_t menu_stepAutoNumberLocked = 0u;
 static uint8_t menu_stepAutoCategory = 0u;
 
 /*
- * VOICE held-step automation overlay state (exactly 45 B static SRAM).
+ * VOICE held-step automation overlay state (exactly 46 B static SRAM).
  *
  * What: Menu-owned foreground state for held-step selection, the asynchronous
  * 128-step Pattern search, four CGRAM marker slots, one shared underline
@@ -1280,9 +1280,11 @@ static uint8_t menu_stepAutoCategory = 0u;
  * Affiliates: buttonHandler_seqHeldMask(), buttonHandler_visibleStep(),
  * pat_readStepAutomations(), patSvc_writeStepAutomation(), lcd_underlineGlyph(),
  * led_updateAutomationStepView(), and time_sysTick.
- * Budget: 20 B held + 13 B search + 5 B CGRAM + 3 B debounce + 4 B working.
- * Approved on 2026-09-15 (40 B), extended +4 B for working values, and
- * extended +1 B for the Scene-target search mask in S070 remediation.
+ * Budget: 20 B held + 13 B search + 5 B CGRAM + 3 B debounce + 4 B working
+ * + 1 B PERF per-voice morph mask.
+ * Approved on 2026-09-15 (40 B), extended +4 B for working values, extended
+ * +1 B for the Scene-target search mask in S070 remediation, and extended
+ * +1 B for the PERF per-voice morph presence mask in S077 P6.
  *
  * Effect-page sharing (S074, +0 B): the Effect page (SHIFT+PERF) reuses the
  * 13 search bytes for its seven-track automation-presence search, and the
@@ -1292,6 +1294,12 @@ static uint8_t menu_stepAutoCategory = 0u;
  * crosses pages; va_searchRestart() selects the page's scan geometry. The
  * held, debounce, and working-value bytes remain VOICE-only (the Effect SEQ
  * hold lives in menuEffects.c).
+ *
+ * PERF-page sharing (S077 P6, +1 B): the PERF page uses the same held/search
+ * machinery but needs independent per-voice morph presence, which the
+ * single-slot va_searchSceneMask cannot express, so it adds one dedicated
+ * mask byte (va_searchPerfMorphMask). The page is mutually exclusive with
+ * VOICE/Effect and every PERF entry restarts the search.
  */
 static uint16_t va_heldMask = 0u;
 static uint8_t va_heldOrder[16];
@@ -1343,6 +1351,25 @@ static uint8_t va_searchTargetMask[8];
 #define VA_SEARCH_SCENE_EFFECT_MORPH_BIT 0x08u
 static uint8_t va_searchSceneMask = 0u;
 
+/*
+ * Per-voice morph presence mask for PERF mode (S077 P6).
+ *
+ * What: bits 0..5 report voice morph automation for voices 0..5; bit 6
+ * reports effect morph automation from Pattern data. Set by va_scanService()
+ * in PERF mode, cleared by va_searchRestart(). Consumed by
+ * menu_applyPerfMarkers(). FX-sequence morph locks are checked separately by
+ * menu_applyPerfMarkers() through menuEffects_cellSeqLocked().
+ * Why: the shared va_searchSceneMask holds only one voice slot's morph bit
+ * (the viewed voice), so PERF needs independent per-voice presence to mark all
+ * six morph names plus the effect morph name. Inputs: Pattern automation
+ * entries read in PERF mode. Outputs: menu_applyPerfMarkers() name underlines.
+ * Lifetime: the current search context; cleared by va_searchRestart().
+ * Affiliates: VA_SEARCH_SCENE_VOICE_MORPH_BIT, va_scanService(),
+ * menu_automationTargetCleared(), menu_applyPerfMarkers().
+ */
+#define VA_PERF_MORPH_EFFECT_BIT 0x40u
+static uint8_t va_searchPerfMorphMask = 0u;
+
 static uint8_t va_cgramBase[4];
 static uint8_t va_cgramValid = 0u;
 
@@ -1364,10 +1391,11 @@ _Static_assert(
     sizeof(va_searchPattern) + sizeof(va_searchCursor) +
     sizeof(va_searchComplete) + sizeof(va_searchTargetMask) +
     sizeof(va_searchSceneMask) +
+    sizeof(va_searchPerfMorphMask) +
     sizeof(va_cgramBase) + sizeof(va_cgramValid) +
     sizeof(va_lastEditTick) + sizeof(va_underlineSuppressed) +
-    sizeof(va_workingValue) == 45u,
-    "S070 VOICE overlay state must remain exactly 45 bytes");
+    sizeof(va_workingValue) == 46u,
+    "S077 VOICE/PERF overlay state must remain exactly 46 bytes");
 
 /* Declared here so a CGRAM/DDRAM transaction can retire a Load/Save hardware
  * cursor before redefining slots; the initialized definitions live beside
@@ -1869,6 +1897,7 @@ static void menu_sceneLiveRefreshService(void);
 static void va_refreshAutomationLeds(void);
 static void va_applyVoiceMarkers(void);
 static void menu_applyEffectMarkers(void);
+static void menu_applyPerfMarkers(void);
 static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta);
 static void va_formatValue3(const menu_cell_t *cell, uint8_t value, char out[3]);
 
@@ -1905,10 +1934,11 @@ static uint8_t menu_voicePageToSlot(uint8_t page)
 /*
  * Restart the asynchronous automation-presence search.
  *
- * What: records the viewed Pattern, sets the track context, clears both
- * presence masks and the completion flag, and resumes at step zero. VOICE
+ * What: records the viewed Pattern, sets the track context, clears every
+ * presence mask and the completion flag, and resumes at step zero. VOICE
  * pages record menu_activeVoice as the one track to scan; the Effect page
- * (S074) starts its seven-track cursor at track 0.
+ * (S074) and the PERF page (S077 P6) start their seven-track cursor at
+ * track 0.
  * Why: a result from another Pattern, track, voice slot, or page must never
  * produce a stale name underline. VOICE and Effect share this state (0 B),
  * so the restart is the single place that selects the page's scan geometry;
@@ -1925,12 +1955,14 @@ static uint8_t menu_voicePageToSlot(uint8_t page)
  */
 static void va_searchRestart(void)
 {
-    va_searchTrack = (menu_activePage == EFFECT_PAGE) ? 0u : menu_activeVoice;
+    va_searchTrack = (menu_activePage == EFFECT_PAGE ||
+                      menu_activePage == PERFORMANCE_PAGE) ? 0u : menu_activeVoice;
     va_searchPattern = menu_shownPattern;
     va_searchCursor = 0u;
     va_searchComplete = 0u;
     memset(va_searchTargetMask, 0, sizeof(va_searchTargetMask));
     va_searchSceneMask = 0u;
+    va_searchPerfMorphMask = 0u;
 }
 
 static void va_searchSetBit(uint8_t descriptor_index)
@@ -2024,14 +2056,18 @@ static void va_searchRecordEffectTarget(uint16_t target)
  *   - Effect page (S074): all seven tracks, one after another through
  *     va_searchTrack; Effect parameter targets and `fxm`, classified by
  *     va_searchRecordEffectTarget(). Done after 896 steps (224 passes).
+ *   - PERF page (S077 P6): all seven tracks, one after another through
+ *     va_searchTrack; Scene voice morph targets set the per-voice bit in
+ *     va_searchPerfMorphMask, and Scene effect morph sets bit 6.
+ *     va_searchTargetMask[] is unused. Done after 896 steps (224 passes).
  * Why: scanning a Pattern synchronously on every repaint would stall the UI.
- * One function serves both pages so the 252-byte entry buffer exists once on
- * the stack (S074 adds no stack). Inputs: the current search context,
- * menu_activePage, and the PatternData pool. Output: complete presence masks
- * and one menu_repaint() when the last step is read, with a hard 4*63
- * comparison ceiling per service pass on either page. A Pattern change (and,
- * on VOICE pages, a track change) restarts the search. Caller:
- * menu_serviceRuntimeWidgets() on VOICE and Effect pages. Affiliates:
+ * One function serves all three modes so the 252-byte entry buffer exists
+ * once on the stack (S074/S077 P6 add no stack). Inputs: the current search
+ * context, menu_activePage, and the PatternData pool. Output: complete
+ * presence masks and one menu_repaint() when the last step is read, with a
+ * hard 4*63 comparison ceiling per service pass on any page. A Pattern change
+ * (and, on VOICE pages, a track change) restarts the search. Caller:
+ * menu_serviceRuntimeWidgets() on VOICE, Effect, and PERF pages. Affiliates:
  * instrumentParam namespace, sceneModTarget_descriptor(),
  * va_searchRecordEffectTarget(), and PatternData.
  */
@@ -2039,13 +2075,14 @@ static void va_scanService(void)
 {
     pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
     uint8_t effect_page = (uint8_t)(menu_activePage == EFFECT_PAGE);
+    uint8_t perf_page = (uint8_t)(menu_activePage == PERFORMANCE_PAGE);
     uint8_t slot;
     uint8_t budget;
 
     if (va_searchComplete)
         return;
     if (va_searchPattern != menu_shownPattern ||
-        (!effect_page && va_searchTrack != menu_activeVoice)) {
+        (!effect_page && !perf_page && va_searchTrack != menu_activeVoice)) {
         va_searchRestart();
         return;
     }
@@ -2067,6 +2104,32 @@ static void va_scanService(void)
                 continue;
             if (effect_page) {
                 va_searchRecordEffectTarget(autos[i].target);
+                continue;
+            }
+            /*
+             * PERF mode (S077 P6): classify only the Scene targets that PERF
+             * can underline - the six per-voice morphs and the Scene effect
+             * morph. Each voice morph sets its own bit so all six are
+             * independent; the effect morph sets VA_PERF_MORPH_EFFECT_BIT.
+             * Every other target is ignored, and va_searchTargetMask[] stays
+             * empty on this page.
+             */
+            if (perf_page) {
+                if (sceneModTarget_isSceneTarget(autos[i].target)) {
+                    const scene_mod_target_descriptor_t *descriptor =
+                        sceneModTarget_descriptor(autos[i].target);
+
+                    if (descriptor) {
+                        if (descriptor->kind ==
+                                SCENE_MOD_TARGET_KIND_VOICE_MORPH &&
+                            descriptor->voice_slot < 6u)
+                            va_searchPerfMorphMask |=
+                                (uint8_t)(1u << descriptor->voice_slot);
+                        else if (descriptor->kind ==
+                                 SCENE_MOD_TARGET_KIND_EFFECT_MORPH)
+                            va_searchPerfMorphMask |= VA_PERF_MORPH_EFFECT_BIT;
+                    }
+                }
                 continue;
             }
             if (instrumentParam_isVoiceParameter(autos[i].target) &&
@@ -2095,11 +2158,12 @@ static void va_scanService(void)
         }
         va_searchCursor++;
         /*
-         * Effect page: step 127 of tracks 0..5 continues at step 0 of the
-         * next track. Track 6 leaves the cursor at NUM_STEPS, which ends the
-         * loop and completes the search below. VOICE pages never advance.
+         * Effect and PERF pages: step 127 of tracks 0..5 continues at step 0
+         * of the next track. Track 6 leaves the cursor at NUM_STEPS, which
+         * ends the loop and completes the search below. VOICE pages never
+         * advance.
          */
-        if (effect_page && va_searchCursor >= NUM_STEPS &&
+        if ((effect_page || perf_page) && va_searchCursor >= NUM_STEPS &&
             (uint8_t)(va_searchTrack + 1u) < NUM_TRACKS) {
             va_searchCursor = 0u;
             va_searchTrack++;
@@ -2282,10 +2346,11 @@ void menu_voiceAutoOverlayBarChanged(void)
  *
  * What: restarts the bounded search, cancels any pending VOICE value-marker
  * debounce while keeping the held-step context, and repaints. Runs on VOICE
- * pages (active-track search) and, since S074, on the Effect page
- * (seven-track search). Why: removing a target cannot be proven absent from
- * the remaining steps without a full rescan, and the SHIFT+COPY clear gesture
- * is not page-gated, so it can run while the Effect page is visible. Inputs:
+ * pages (active-track search), and, since S074, on the Effect page and, since
+ * S077 P6, on the PERF page (both seven-track searches). Why: removing a
+ * target cannot be proven absent from the remaining steps without a full
+ * rescan, and the SHIFT+COPY clear gesture is not page-gated, so it can run
+ * while the Effect or PERF page is visible. Inputs:
  * an already-submitted copy/clear PatternData mutation. Outputs: a cleared
  * search result and a refreshed frame; other pages return at once because
  * their next VOICE/Effect entry restarts the search anyway. Callers:
@@ -2294,7 +2359,8 @@ void menu_voiceAutoOverlayBarChanged(void)
  */
 void menu_patternContentChanged(void)
 {
-    if (!menu_isScreenPage(menu_activePage))
+    if (!menu_isScreenPage(menu_activePage) &&
+        menu_activePage != PERFORMANCE_PAGE)
         return;
     va_searchRestart();
     va_underlineSuppressed = 0u;
@@ -2304,8 +2370,8 @@ void menu_patternContentChanged(void)
 /*
  * Drop one automation target's underline immediately after pot clear.
  *
- * Inputs: canonical Pattern target. Output: only the matching VOICE/Effect
- * presence bit is cleared; the bounded search continues for all other
+ * Inputs: canonical Pattern target. Output: only the matching VOICE, Effect,
+ * or PERF presence bit is cleared; the bounded search continues for all other
  * targets, and Menu repaints without changing the target value.
  */
 void menu_automationTargetCleared(uint16_t target)
@@ -2353,6 +2419,28 @@ void menu_automationTargetCleared(uint16_t target)
                 descriptor->kind == SCENE_MOD_TARGET_KIND_EFFECT_MORPH)
                 va_searchSceneMask &=
                     (uint8_t)~VA_SEARCH_SCENE_EFFECT_MORPH_BIT;
+        }
+    } else if (menu_activePage == PERFORMANCE_PAGE) {
+        /*
+         * What: drop the PERF presence bit immediately after a pot clear so
+         * the underline disappears without waiting for a full rescan (S077
+         * P6). Why: PERF has no incremental VOICE/Effect presence state; the
+         * va_searchPerfMorphMask bit is its equivalent. Affiliates:
+         * va_searchPerfMorphMask, va_scanService(), menu_applyPerfMarkers().
+         */
+        if (sceneModTarget_isSceneTarget(target)) {
+            const scene_mod_target_descriptor_t *descriptor =
+                sceneModTarget_descriptor(target);
+
+            if (descriptor) {
+                if (descriptor->kind == SCENE_MOD_TARGET_KIND_VOICE_MORPH &&
+                    descriptor->voice_slot < 6u)
+                    va_searchPerfMorphMask &=
+                        (uint8_t)~(1u << descriptor->voice_slot);
+                else if (descriptor->kind ==
+                         SCENE_MOD_TARGET_KIND_EFFECT_MORPH)
+                    va_searchPerfMorphMask &= (uint8_t)~VA_PERF_MORPH_EFFECT_BIT;
+            }
         }
     }
     menu_repaint();
@@ -2955,6 +3043,86 @@ static void menu_applyEffectMarkers(void)
             marker_row[slot] = 0u;
             marker_col[slot] = (uint8_t)(name_start + left);
             desired_valid |= (uint8_t)(1u << slot);
+        }
+    }
+    va_queueMarkerTransaction(desired_base, desired_valid,
+                              marker_row, marker_col);
+}
+
+/*
+ * Apply PERF-page morph automation markers after the compact frame is formed.
+ *
+ * What: underlines the name of each PERF morph cell whose automation is
+ * present in the viewed Pattern or the FX sequence (effect morph only).
+ * Column 0 (PAR_MORPH, global) is never marked. Columns 1..6 check
+ * va_searchPerfMorphMask bits 0..5 (Pattern voice morph). Column 7 checks
+ * va_searchPerfMorphMask bit 6 (Pattern effect morph) and
+ * menuEffects_cellSeqLocked() (FX seq morph lane).
+ * Why: PERF morph cells are MENU_CELL_STATIC, so neither va_applyVoiceMarkers
+ * nor menu_applyEffectMarkers can render them. The pot-clear path already
+ * resolves PERF morph targets independently; this function adds the matching
+ * visual presence indicator. Inputs: va_searchComplete,
+ * va_searchPerfMorphMask, the compact view layout, editDisplayBuffer.
+ * Output: up to 4 CGRAM marker transactions. Caller: menu_repaintGeneric().
+ * Affiliates: va_scanService(), va_queueMarkerTransaction(),
+ * menuEffects_cellSeqLocked().
+ */
+static void menu_applyPerfMarkers(void)
+{
+    uint8_t glyph_probe[8];
+    uint8_t desired_base[4] = { 0u, 0u, 0u, 0u };
+    uint8_t marker_row[4] = { 0u, 0u, 0u, 0u };
+    uint8_t marker_col[4] = { 0u, 0u, 0u, 0u };
+    uint8_t desired_valid = 0u;
+    uint8_t activeParameter;
+    uint8_t is2nd;
+    uint8_t i;
+
+    if (menu_activePage != PERFORMANCE_PAGE)
+        return;
+
+    activeParameter = (uint8_t)(menuIndex & MASK_PARAMETER);
+    is2nd = (uint8_t)((activeParameter > 3u) ? 4u : 0u);
+
+    for (i = 0u; i < 4u; i++) {
+        uint8_t column = (uint8_t)(i + is2nd);
+        uint8_t automated = 0u;
+        int8_t left;
+        uint8_t start;
+
+        if (column == 0u)
+            continue;
+        if (column >= 1u && column <= 6u) {
+            if (va_searchComplete &&
+                (va_searchPerfMorphMask &
+                 (uint8_t)(1u << (column - 1u))) != 0u)
+                automated = 1u;
+        } else if (column == 7u) {
+            if (va_searchComplete &&
+                (va_searchPerfMorphMask & VA_PERF_MORPH_EFFECT_BIT) != 0u)
+                automated = 1u;
+            if (!automated) {
+                menuEffects_cell_t fx_cell;
+
+                memset(&fx_cell, 0, sizeof(fx_cell));
+                fx_cell.kind = MENU_FX_CELL_MORPH_AMOUNT;
+                automated = menuEffects_cellSeqLocked(&fx_cell);
+            }
+        }
+        if (!automated)
+            continue;
+
+        start = (uint8_t)(4u * i);
+        for (left = 0; left < 3 &&
+             editDisplayBuffer[0][start + left] == ' '; left++)
+            ;
+        if (left < 3 && lcd_underlineGlyph(
+                (uint8_t)editDisplayBuffer[0][start + left], glyph_probe)) {
+            desired_base[i] =
+                (uint8_t)editDisplayBuffer[0][start + left];
+            marker_row[i] = 0u;
+            marker_col[i] = (uint8_t)(start + left);
+            desired_valid |= (uint8_t)(1u << i);
         }
     }
     va_queueMarkerTransaction(desired_base, desired_valid,
@@ -10483,6 +10651,7 @@ static void menu_repaintGeneric(void)
      * formatted, including the active-parameter capitalization above. */
     va_applyVoiceMarkers();
     menu_applyEffectMarkers();
+    menu_applyPerfMarkers();
 }
 
 /* -----------------------------------------------------------------------
@@ -12074,20 +12243,37 @@ void menu_serviceRuntimeWidgets(void)
     }
 
     /*
+     * PERF-page morph automation-presence search (S077 P6).
+     *
+     * What: advances the search over all seven tracks of the viewed Pattern,
+     * four step reads per pass, classifying only voice morph and effect morph
+     * Scene targets into va_searchPerfMorphMask. Why: PERF underlines morph
+     * names whose automation exists in the Pattern; the result feeds
+     * menu_applyPerfMarkers(). Output: one menu_repaint() when the search
+     * completes. Affiliates: va_scanService(), va_searchRestart().
+     */
+    if (menu_activePage == PERFORMANCE_PAGE)
+        va_scanService();
+
+    /*
      * Retry a deferred marker transaction once the LCD queue has drained.
      *
      * What: repaints once when va_queueMarkerTransaction() had to defer its
      * CGRAM work (VA_MARKER_RETRY_BIT) and the queue has room again. Why:
      * the retry bit survives sendDisplayBuffer() clearing
      * menu_lcdRefreshPending, so underlines recover after a burst of rapid
-     * encoder/pot events. The VOICE and Effect pages share the transaction,
-     * so both need the retry; before S074 only VOICE had it, and a deferred
-     * Effect marker stayed missing until an unrelated repaint. Inputs:
+     * encoder/pot events. The VOICE, Effect, and PERF pages share the
+     * transaction, so all three need the retry; before S074 only VOICE had it,
+     * and a deferred Effect marker stayed missing until an unrelated repaint;
+     * the PERF page (S077 P6) joined the shared transaction for the same
+     * reason. Inputs:
      * menu_activePage, va_cgramValid, lcd_queueFree(). Output: at most one
      * menu_repaint() per pass. Affiliates: va_queueMarkerTransaction(),
-     * va_applyVoiceMarkers(), menu_applyEffectMarkers().
+     * va_applyVoiceMarkers(), menu_applyEffectMarkers(),
+     * menu_applyPerfMarkers().
      */
-    if (menu_isScreenPage(menu_activePage) &&
+    if ((menu_isScreenPage(menu_activePage) ||
+         menu_activePage == PERFORMANCE_PAGE) &&
         (va_cgramValid & VA_MARKER_RETRY_BIT) &&
         lcd_queueFree() >= 72u) {
         menu_repaint();
@@ -13307,6 +13493,19 @@ void menu_switchPage(uint8_t pageNr)
         if (pageNr == PERFORMANCE_PAGE) {
             /* S075: refresh PERF `fxm` after Effect/copy/clear changes. */
             preset_syncEffectMorphMirror();
+            /*
+             * PERF-page morph automation-presence search (S077 P6).
+             *
+             * What: a fresh PERF entry restarts the seven-track search in
+             * PERF mode (empty masks, track cursor at 0). Why: the shared
+             * va_search* bytes may still hold a completed VOICE or Effect
+             * result, which would underline the wrong PERF names.
+             * menu_activePage is already set above because
+             * va_searchRestart() selects the scan geometry from the page.
+             * Affiliates: va_searchRestart(), va_scanService(),
+             * menu_applyPerfMarkers().
+             */
+            va_searchRestart();
         }
         if (pageNr == SEQ_PAGE) {
             /*

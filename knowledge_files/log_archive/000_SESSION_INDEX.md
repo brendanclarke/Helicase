@@ -91,6 +91,7 @@ it belongs in the summary or the log, not here.
 | 074 | 2026-09-29/30 | `dev-ph5-effects`, HEAD `50610dd` | Effect-page underlines, CrumpBit (first arena Effect), master bus compressor, `xfd` fader mode, AutoSave torn-record fix |
 | 075 | 2026-10-01/03 | `dev-ph6-copyclear`, HEAD `76aef20` | Phase 6 copy/clear (`Core/Menu/CopyClear/`), `srt` retired, F1/F2 hardware follow-ups, morphable FX send, automation-priority fix |
 | 076 | 2026-10-06 | `dev-ph6-cleanup`, HEAD uncommitted | Scene parameter automation override clear rules; LFO Scene-reset retrigger and phase-offset scaling fix; copy/clear morph additions; reload scene, bar chaselight, SHIFT+SELECT pattern length |
+| 077 | 2026-10-08 | `dev-ph6-cleanup`, HEAD uncommitted | Background Scene region (17th `pat_background_region`), copy snapshot migration, per-track Scene playback, blank menu after load fix, Scene morph fan-out correction, bar-to-step copy, PERF mode morph automation underline |
 
 
 ---
@@ -529,6 +530,18 @@ Session 065 delivered the first working end-to-end step automation path: the exi
 | **Automation always wins** until the voice's next trigger: every Morph-base runtime write is guarded by `seq_automationHoldsParameter()`; a menu edit applies only that parameter's interpolation; external MIDI CC is lowest priority (stores the clamped Normal endpoint; the Morph sweep applies it) | 075 |
 | One pan rule: stored 0..127, **63 = centre = display `0`** (`DTYPE_PM63`); Effect stereo balance laws are centred on 63; mono laws unchanged | 075 |
 | FX send has Normal/Morph endpoints (`fx_send_morph[6]`, AutoSave Scene cells 45..50, `sceneset.scg` `fx_send_morph`); Scene parameter count is **51** | 075 |
+| `pat_background_region` (10,519 B, 17th region) replaces `pat_autosave_snapshot`: used by Pattern AutoSave snapshot, copy/clear overlap paste pool, and future Bank Load staging; never a playable Scene | 077 |
+| `ccSvc_snapTable[128]` (256 B static) holds the paste source table; removed from the 9 kB name buffer. `CC_SNAP_OFFSET` widened to `0x0FFFu` | 077 |
+| `filesystem_patternSnapshotInUse()` returns nonzero during autosave drain phases 2–6; copy/clear overlap waits on this gate, not the retired `ccSvc_ensureScratch()` | 077 |
+| Per-track Scene playback: `seq_perTrackPattern[7]` maps each track to its played Scene; `seq_perTrackActive` flag; ISR reads played Scene per track for region/specials/automation | 077 |
+| `preset_startSingleVoiceApply()` / `preset_tickSingleVoiceApply()` factor single-voice instrument apply from the drumset worker with supersede coordination | 077 |
+| `preset_getSlotPlayedScene(slot)` returns the played Scene for a voice slot, used by the mixer for live fader/send reads | 077 |
+| PERF hold-VOICE+press-SEQ gesture assigns tracks to Scenes; double-click on SEQ toggles per-track override; PERF VOICE release without action toggles mute. `DOUBLE_CLICK_TIMEOUT 300u` | 077 |
+| Background `.hcnames` rewrite must NOT raise `menu_storageBusy` — it locks mode switches/encoder/pots/widgets/copy-clear for ~3 s. Use a lightweight callback (`menu_residentNameDeferredFlushComplete()`) instead | 077 |
+| `menu_endResidentNameScratchSession()` must guard `filesystem_status() == FS_STATUS_BUSY` — without this guard, re-entering Load/Save during a write triggers a spurious FsErr overlay | 077 |
+| Scene morph copy/reset fans out through `bank_sceneFanoutMask()` like `copy kit`/`clear fx`, NOT like `copy scene`/`clear scene` (which exchange/reset the edit mask) | 077 |
+| `CC_KIND_BAR_TO_STEP` (6): cross-kind paste uses bar source geometry (src×16) with step destination geometry (job->start directly); no identical-paste check | 077 |
+| PERF morph automation underline: `va_searchPerfMorphMask` (7-bit), `menu_applyPerfMarkers()` walks 4 visible compact-view cells; the scan/classify/render pipeline was extended to PERF page | 077 |
 
 ---
 
@@ -1760,3 +1773,30 @@ fed back each round; F3 "seems ok". **Phase 6 has started.**
   `AUTOSAVE.md`, `FILESYSTEM_SPEC.md`, `DEV_MODES.md`,
   `STORAGE_SRAM_MANIFEST.md`, `dsp_instruments_effects/EFFECTS_BUS_REFERENCE.md`,
   `dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md`.
+
+### 076 — Override Clear Rules, LFO Scene Retrigger, Morph Copy/Reset, Reload Scene, Bar Chaselight, Pattern Length (2026-10-06)
+
+Session 076 ran on `dev-ph6-cleanup` from the S075 close (`76aef20`; text 532,408, bss 426,712) to uncommitted (text 535,976, data 416, bss 426,744; payload 536,392 B of 753,664, headroom 217,272 B). Four parts implemented:
+
+- **P1 override clear rules:** Rule A (a non-automation write to a parameter clears its step override) and Rule B (Scene activation clears all five override families — instrument, Scene target, voice audio-out, slot-6 track-7 decay, and Effect). 7 files, 16 inline additions.
+- **P2 LFO retrigger `scn` + phase offset fix:** LFO retrigger value 7 (`scn`) performs Scene-change phase handoff via a per-slot `lfo_scene_handoff` struct (+32 B BSS); the LFO phase offset scaling fix converts the raw byte through `IM_SPECIAL_LFO_OFFSET` to full 32-bit phase. 9+1 files.
+- **P3 morph reset/copy:** `reset morph` (track and Scene), `reset fx morph`, `copy morph` (track and Scene). `CC_CLEAR_SEND` moved from value 4 to 5. 8 files, +2,848 B flash.
+- **P4 reload scene / bar chaselight / pattern length:** `reload scene` in the PERF clear menu (fire-and-forget Scene reload from HCNAMES source); bar chaselight on SELECT LEDs in STEP mode; SHIFT+SELECT sets per-track pattern length. 5 files, +792 B flash.
+
+- **Find here**: [076_SESSION_HANDOFF_LOG.md](076_SESSION_HANDOFF_LOG.md),
+  `COPYCLEAR_UTILITIES.md`, `BANK_PRESET_ARCHITECTURE.md`.
+
+### 077 — Background Scene Region, Per-Track Scene Playback, Blank Menu Fix, Scene Morph Fan-Out, Bar-to-Step Copy, PERF Morph Underline (2026-10-08)
+
+Session 077 ran on `dev-ph6-cleanup` from the S076 close (text 535,976, bss 426,744) through six parts to final build text=538,416, data=416, bss=427,008 (payload 538,832 B of 753,664, headroom 214,832 B). BSS +264 B from S076 (256 B static paste table + 8 B alignment).
+
+- **P1 background Scene region (17th `pat_background_region`):** replaced `pat_autosave_snapshot` with an identical-type `pat_background_region` (10,519 B, same as one Scene). `pat_snapshotScene()` / `pat_autosaveSnapshot()` now operate on it; new `pat_backgroundPoolMut()` returns the background pool for copy/clear overlap pastes. `copyClearService.c` gained a static `ccSvc_snapTable[128]` (256 B BSS) for the paste source table, no longer stored in the 9 kB name buffer. `CC_SNAP_OFFSET` widened from `0x07FFu` to `0x0FFFu`. New `filesystem_patternSnapshotInUse()` returns nonzero during autosave drain phases 2–6. Overlap path waits on the filesystem gate instead of the retired `ccSvc_ensureScratch()`.
+- **P2 per-track Scene playback (50 changes across 16 files):** `seq_perTrackPattern[7]` for independent track-to-Scene mapping; `seq_perTrackActive` flag; `seq_setTrackPlayedScene()` / `seq_clearPerTrackOverrides()` / `seq_getTrackPlayedScene()` APIs. Sequencer ISR reads played Scene per track for region/specials/automation/erase. `preset_startSingleVoiceApply()` / `preset_tickSingleVoiceApply()` factor single-voice instrument apply from the drumset worker. PERF hold-VOICE+press-SEQ gesture assigns tracks to Scenes; double-click detector (`dblclick_onPress()`, `DOUBLE_CLICK_TIMEOUT 300u`). Live mixer reads from played Scene via `preset_getSlotPlayedScene()`. PERF LED refresh with tempo pulse and viewed-scene blink. Bug found and fixed: `dblclick_onPress()` timing comparison inverted (fast double-clicks treated as two singles).
+- **P3 blank menu after Scene Load fix:** root cause was background `.hcnames` rewrite raising `menu_storageBusy` for ~3 s, locking mode switches/encoder/pots/widgets/copy-clear. Fixed with new lightweight `menu_residentNameDeferredFlushComplete()` callback that never touches `menu_storageBusy`. A1 fix: `menu_endResidentNameScratchSession()` guard — if `filesystem_status() == FS_STATUS_BUSY`, return 0 with no overlay (prevents spurious FsErr). Hardware verified: primary symptom confirmed fixed.
+- **P4 Scene morph fan-out correction:** `ccCopy_runSceneMorph()` and `ccClear_runResetSceneMorph()` rewritten with `bank_sceneFanoutMask()` loop and per-member Effect type check, matching the fan-out model of `copy kit`/`clear fx`. Labels corrected: `"morph"` → `"inst -> morph"`, `"scene morph"` → `"scene -> morph"`. Pre-existing §13 error in `clear reset fx morph` row corrected.
+- **P5 bar-to-step copy:** new `CC_KIND_BAR_TO_STEP` (6); `cc_copySeq()` routes bar source to step destination via `ccCopy_requestBarToStep()`; `ccSvc_pasteGeometry()` new case uses bar source coords (src×16) with step destination coords (job->start directly). No identical-paste check (cross-kind is never identical).
+- **P6 PERF mode morph automation underline:** new `va_searchPerfMorphMask` (7-bit mask: bits 0–5 per-voice morph, bit 6 effect morph). `va_scanService()` PERF branch classifies morph automation. New `menu_applyPerfMarkers()` walks 4 visible compact-view cells and applies underline markers. Extensions to `menu_repaintGeneric()`, `menu_serviceRuntimeWidgets()`, CGRAM retry guard, `menu_patternContentChanged()`, `menu_switchPage()` PERF entry, and `menu_automationTargetCleared()`.
+
+- **Find here**: [077_SESSION_HANDOFF_LOG.md](077_SESSION_HANDOFF_LOG.md),
+  `COPYCLEAR_UTILITIES.md`, `PATTERN_DYNAMIC_STACK.md`, `STORAGE_SRAM_MANIFEST.md`,
+  `BANK_PRESET_ARCHITECTURE.md`, `AUTOSAVE.md`.
