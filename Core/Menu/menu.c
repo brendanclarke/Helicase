@@ -1380,6 +1380,16 @@ static uint8_t menu_stepAutoCategory = 0u;
  * single-slot va_searchSceneMask cannot express, so it adds one dedicated
  * mask byte (va_searchPerfMorphMask). The page is mutually exclusive with
  * VOICE/Effect and every PERF entry restarts the search.
+ *
+ * STEP-page sharing (S078 P2 §B held overlay, S078 P3 search, +0 B): the
+ * SEQ_PAGE track-settings view reuses the held/marker/debounce/working-value
+ * bytes for its held-step overlay and the 13 search bytes for an active-track
+ * search of the three track timing targets (length, scale, shuffle), whose
+ * result is VA_SEARCH_SCENE_TRACK_BIT(0..2) in va_searchSceneMask. SEQ_PAGE is
+ * mutually exclusive with the VOICE, Effect and PERF pages, and every SEQ
+ * entry from another page restarts the search (menu_switchPage()). S078 P3
+ * removed the former 1 B STEP presence byte, whose only reader was
+ * unreachable.
  */
 static uint16_t va_heldMask = 0u;
 static uint8_t va_heldOrder[16];
@@ -1415,20 +1425,45 @@ static uint8_t va_searchTargetMask[8];
  *
  * What: on VOICE pages, one bit each for the Voice Morph, Audio Out, and FX
  * Send targets of the active VOICE slot; on the Effect page (S074), one bit
- * for the Scene Effect Morph target `fxm` (ID 404), shown on the `mrp` cell.
+ * for the Scene Effect Morph target `fxm` (ID 404), shown on the `mrp` cell;
+ * on the STEP track-settings page (SEQ_PAGE, S078 P3), one bit each for the
+ * track length, scale, and shuffle targets of the active track
+ * (VA_SEARCH_SCENE_TRACK_BIT(0..2)), shown on the `len`/`scl`/`shf` cells.
  * Why: Scene target IDs occupy block 6 (384..447) and cannot be represented
  * by va_searchTargetMask[], whose bits are locals 0..63. Inputs:
- * va_scanService() entries (VOICE: the active track; Effect: all tracks).
- * Outputs: va_applyVoiceMarkers() and menu_effectCellAutomated() underline
- * the matching name after the bounded search completes. Lifetime: the current
- * search context; cleared by va_searchRestart(). Affiliate:
- * sceneModTarget_descriptor().
+ * va_scanService() entries (VOICE and SEQ: the active track; Effect: all
+ * tracks). Outputs: va_applyVoiceMarkers(), menu_effectCellAutomated(), and
+ * sa_applyTrackMarkers() underline the matching name after the bounded search
+ * completes. Lifetime: the current search context; cleared by
+ * va_searchRestart(). Affiliates: sceneModTarget_descriptor(),
+ * va_sceneSearchBitForCell(), va_seqTrackSearchBit().
  */
 #define VA_SEARCH_SCENE_VOICE_MORPH_BIT 0x01u
 #define VA_SEARCH_SCENE_AUDIO_OUT_BIT   0x02u
 #define VA_SEARCH_SCENE_FX_SEND_BIT     0x04u
 /* Effect page only: `fxm` Pattern automation for the `mrp` cell (S074). */
 #define VA_SEARCH_SCENE_EFFECT_MORPH_BIT 0x08u
+/*
+ * SEQ_PAGE only: Pattern automation of the active track's timing targets
+ * (S078 P3).
+ *
+ * What: one bit per automatable SEQ subpage-0 cell, in cell order: cell 0
+ * `len` = 0x10, cell 1 `scl` = 0x20, cell 2 `shf` = 0x40. Why: the STEP
+ * track-settings page underlines a parameter name when its target is stored
+ * anywhere on the shown track (S074 rule: the underline reports stored data),
+ * and these block-6 Scene targets (405..425) have no place in
+ * va_searchTargetMask[]. The bits sit above the VOICE (0x01..0x04) and Effect
+ * (0x08) bits, so a stale cross-page result can never alias a STEP cell,
+ * although every page entry restarts the search anyway. Input: a SEQ
+ * subpage-0 cell position 0..2 (callers guarantee the range by first
+ * resolving a valid target through menu_seqCellToTrackTarget() or
+ * va_seqTrackSearchBit()). Output: the bit mask for va_searchSceneMask.
+ * Accessors: va_seqTrackSearchBit() (set and clear predicate),
+ * sa_writeAutomationFromKnob() (immediate set on a held write),
+ * sa_applyTrackMarkers() (reader). Affiliates: va_scanService(),
+ * menu_automationTargetCleared().
+ */
+#define VA_SEARCH_SCENE_TRACK_BIT(cell) ((uint8_t)(0x10u << (cell)))
 static uint8_t va_searchSceneMask = 0u;
 
 /*
@@ -1982,6 +2017,16 @@ static void menu_applyPerfMarkers(void);
 static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta);
 static void va_formatValue3(const menu_cell_t *cell, uint8_t value, char out[3]);
 
+/* S078 P2 §B STEP overlay helpers. Definitions stay adjacent to the va_*
+ * state/logic below; these declarations keep the same forward-reference style
+ * so the repaint/input/service call sites above the definitions compile. */
+static instrument_param_id_t menu_seqCellToTrackTarget(
+    uint8_t cell_position, uint8_t track);
+static void sa_writeAutomationFromKnob(uint8_t cellPos, int8_t delta);
+static void sa_clearAutomationFromKnob(uint8_t cellPos);
+static void sa_refreshAutomationLeds(void);
+static void sa_applyTrackMarkers(void);
+
 static uint8_t menu_isVoicePage(uint8_t page)
 {
     return (uint8_t)(page <= VOICE7_PAGE);
@@ -2017,22 +2062,25 @@ static uint8_t menu_voicePageToSlot(uint8_t page)
  *
  * What: records the viewed Pattern, sets the track context, clears every
  * presence mask and the completion flag, and resumes at step zero. VOICE
- * pages record menu_activeVoice as the one track to scan; the Effect page
- * (S074) and the PERF page (S077 P6) start their seven-track cursor at
- * track 0.
+ * pages and the STEP track-settings page (SEQ_PAGE, S078 P3) record
+ * menu_activeVoice as the one track to scan; the Effect page (S074) and the
+ * PERF page (S077 P6) start their seven-track cursor at track 0.
  * Why: a result from another Pattern, track, voice slot, or page must never
- * produce a stale name underline. VOICE and Effect share this state (0 B),
- * so the restart is the single place that selects the page's scan geometry;
- * callers must therefore set menu_activePage before calling it.
+ * produce a stale name underline. VOICE, SEQ, Effect, and PERF share this
+ * state (0 B), so the restart is the single place that selects the page's scan
+ * geometry; callers must therefore set menu_activePage before calling it.
  * Inputs: menu_activePage, menu_shownPattern, menu_activeVoice. Outputs:
  * cleared va_search* state; markers from the search stay absent until
  * va_scanService() completes the new search (FX-lock underlines on the Effect
- * page do not depend on it). Callers: VOICE and Effect entry in
+ * page do not depend on it). Callers: VOICE, Effect, PERF, and SEQ entry in
  * menu_switchPage(), menu_setActiveVoice() (not on the Effect page),
- * menu_setShownPattern(), menu_patternContentChanged(), the STEP
- * automation deletes, and va_scanService() on a context mismatch.
- * Affiliates: va_scanService(), va_searchSetBit(), va_applyVoiceMarkers(),
- * menu_effectCellAutomated().
+ * menu_setShownPattern(), menu_patternContentChanged(), the STEP automation
+ * editor's target changes and deletes
+ * (menu_stepAutomationReplaceTarget(), menu_stepAutomationExecuteItem0()),
+ * the STEP overlay's held-step clear (sa_clearAutomationFromKnob()), and
+ * va_scanService() on a context mismatch. Affiliates: va_scanService(),
+ * va_searchSetBit(), va_seqTrackSearchBit(), va_applyVoiceMarkers(),
+ * sa_applyTrackMarkers(), menu_effectCellAutomated().
  */
 static void va_searchRestart(void)
 {
@@ -2088,6 +2136,52 @@ static uint8_t va_sceneSearchBitForCell(const menu_cell_t *cell)
 }
 
 /*
+ * Resolve the SEQ_PAGE search bit for one stored track-timing target
+ * (S078 P3).
+ *
+ * What: returns VA_SEARCH_SCENE_TRACK_BIT(0), (1), or (2) when `target` is
+ * the track length, scale, or shuffle Scene target of `track`, and zero for
+ * every other stored target: voice descriptors, other Scene targets, Effect
+ * targets, another track's timing targets, and the PAT_AUTOMATION_TARGET_OFF
+ * sentinel (0x1FF is not a Scene target).
+ * Why: the STEP track-settings page underlines `len`/`scl`/`shf` from the
+ * Pattern-wide search. The bit must come from one predicate both when the
+ * search sets it (va_scanService()) and when a pot clear drops it
+ * (menu_automationTargetCleared()), so set and clear stay symmetric, as
+ * va_sceneSearchBitForCell() keeps them for the VOICE Scene cells. The kind +
+ * voice_slot test is the same validation that menu_seqCellToTrackTarget()
+ * applies, so the bit order equals the SEQ subpage-0 cell order (0 len, 1
+ * scl, 2 shf).
+ * Inputs: a stored 9-bit Pattern target and the track 0..6 being searched or
+ * shown. Output: one bit of va_searchSceneMask, or 0. Cost: one descriptor
+ * lookup; no state. Accessors: va_scanService() (SEQ_PAGE classification) and
+ * menu_automationTargetCleared() (SEQ_PAGE arm). Affiliates:
+ * sceneModTarget_isSceneTarget(), sceneModTarget_descriptor(),
+ * SCENE_MOD_TARGET_KIND_TRACK_* (SceneModTargets.h),
+ * menu_seqCellToTrackTarget(), sa_applyTrackMarkers().
+ */
+static uint8_t va_seqTrackSearchBit(uint16_t target, uint8_t track)
+{
+    const scene_mod_target_descriptor_t *descriptor;
+
+    if (!sceneModTarget_isSceneTarget(target))
+        return 0u;
+    descriptor = sceneModTarget_descriptor(target);
+    if (!descriptor || descriptor->voice_slot != track)
+        return 0u;
+    switch (descriptor->kind) {
+    case SCENE_MOD_TARGET_KIND_TRACK_LENGTH:
+        return VA_SEARCH_SCENE_TRACK_BIT(0u);
+    case SCENE_MOD_TARGET_KIND_TRACK_SCALE:
+        return VA_SEARCH_SCENE_TRACK_BIT(1u);
+    case SCENE_MOD_TARGET_KIND_TRACK_SHUFFLE:
+        return VA_SEARCH_SCENE_TRACK_BIT(2u);
+    default:
+        return 0u;
+    }
+}
+
+/*
  * Record one Pattern automation entry for the Effect-page search (S074).
  *
  * What: sets the presence bit for an Effect parameter target (block 7, IDs
@@ -2134,6 +2228,11 @@ static void va_searchRecordEffectTarget(uint16_t target)
  *   - VOICE page: the active track only; voice descriptor targets and
  *     per-voice Scene targets owned by the page's slot. Done after 128 steps
  *     (32 passes).
+ *   - SEQ_PAGE, the STEP track settings (S078 P3): the active track only,
+ *     with the same geometry and track-mismatch restart as a VOICE page; the
+ *     track's length/scale/shuffle Scene targets set
+ *     VA_SEARCH_SCENE_TRACK_BIT(0..2) in va_searchSceneMask through
+ *     va_seqTrackSearchBit(). Done after 128 steps (32 passes).
  *   - Effect page (S074): all seven tracks, one after another through
  *     va_searchTrack; Effect parameter targets and `fxm`, classified by
  *     va_searchRecordEffectTarget(). Done after 896 steps (224 passes).
@@ -2142,21 +2241,25 @@ static void va_searchRecordEffectTarget(uint16_t target)
  *     va_searchPerfMorphMask, and Scene effect morph sets bit 6.
  *     va_searchTargetMask[] is unused. Done after 896 steps (224 passes).
  * Why: scanning a Pattern synchronously on every repaint would stall the UI.
- * One function serves all three modes so the 252-byte entry buffer exists
- * once on the stack (S074/S077 P6 add no stack). Inputs: the current search
- * context, menu_activePage, and the PatternData pool. Output: complete
+ * One function serves all four modes so the 252-byte entry buffer exists
+ * once on the stack (S074/S077 P6/S078 P3 add no stack). Inputs: the current
+ * search context, menu_activePage, and the PatternData pool. Output: complete
  * presence masks and one menu_repaint() when the last step is read, with a
  * hard 4*63 comparison ceiling per service pass on any page. A Pattern change
- * (and, on VOICE pages, a track change) restarts the search. Caller:
- * menu_serviceRuntimeWidgets() on VOICE, Effect, and PERF pages. Affiliates:
- * instrumentParam namespace, sceneModTarget_descriptor(),
- * va_searchRecordEffectTarget(), and PatternData.
+ * (and, on VOICE and SEQ pages, a track change) restarts the search, but only
+ * while the search is incomplete: a completed result returns at the top, so
+ * every context change must also call va_searchRestart() explicitly. Caller:
+ * menu_serviceRuntimeWidgets() on VOICE, SEQ, Effect, and PERF pages.
+ * Affiliates: instrumentParam namespace, sceneModTarget_descriptor(),
+ * va_searchRecordEffectTarget(), va_seqTrackSearchBit(), and PatternData.
  */
 static void va_scanService(void)
 {
     pat_automation_entry_t autos[PAT_BLOCK_AUTO_COUNT_MASK];
     uint8_t effect_page = (uint8_t)(menu_activePage == EFFECT_PAGE);
     uint8_t perf_page = (uint8_t)(menu_activePage == PERFORMANCE_PAGE);
+    /* S078 P3: STEP track settings use VOICE geometry for the active track. */
+    uint8_t seq_page = (uint8_t)(menu_activePage == SEQ_PAGE);
     uint8_t slot;
     uint8_t budget;
 
@@ -2185,6 +2288,31 @@ static void va_scanService(void)
                 continue;
             if (effect_page) {
                 va_searchRecordEffectTarget(autos[i].target);
+                continue;
+            }
+            /*
+             * STEP track settings (S078 P3): classify only the active
+             * track's length/scale/shuffle Scene targets.
+             *
+             * What: ORs VA_SEARCH_SCENE_TRACK_BIT(0..2) into
+             * va_searchSceneMask for each matching stored entry; every other
+             * target contributes 0 and is skipped. Why: the `len`/`scl`/`shf`
+             * names must be underlined whenever that target is stored on any
+             * of the track's 128 steps, whether or not steps are held (P3
+             * Bug 1b - nothing searched SEQ_PAGE before). The `continue`
+             * keeps the VOICE classification below from running with the
+             * meaningless SEQ_PAGE slot value from menu_voicePageToSlot().
+             * Inputs: the decoded entry and va_searchTrack (==
+             * menu_activeVoice at restart). Output: va_searchSceneMask bits,
+             * read by sa_applyTrackMarkers() once va_searchComplete is set.
+             * Entries waiting in the pot-clear register were already skipped
+             * above (ccSvc_targetPending()). Affiliates:
+             * va_seqTrackSearchBit(), menu_automationTargetCleared(),
+             * sa_writeAutomationFromKnob().
+             */
+            if (seq_page) {
+                va_searchSceneMask |=
+                    va_seqTrackSearchBit(autos[i].target, va_searchTrack);
                 continue;
             }
             /*
@@ -2357,7 +2485,21 @@ static void va_updateHeldState(void)
          * stale CGRAM slot references and restore them before redefining. */
         menu_repaint();
     } else if (changed && va_overlayActive) {
-        va_refreshAutomationLeds();
+        /*
+         * S078 P2 §B / P3: the same held-mask bookkeeping serves both
+         * overlays, so the LED refresh is page-dispatched. STEP runs on
+         * SEQ_PAGE and shows per-step track-parameter automation; VOICE runs
+         * on voice pages. No STEP presence state needs re-deriving here: the
+         * held-value markers are resolved live by sa_applyTrackMarkers()
+         * through va_resolveHeldValue() on the repaint below, and the name
+         * markers come from the Pattern-wide search, which does not depend
+         * on the held set. Affiliates: sa_refreshAutomationLeds(),
+         * va_refreshAutomationLeds(), sa_applyTrackMarkers().
+         */
+        if (menu_activePage == SEQ_PAGE)
+            sa_refreshAutomationLeds();
+        else
+            va_refreshAutomationLeds();
         menu_repaint();
     }
 }
@@ -2427,21 +2569,36 @@ void menu_voiceAutoOverlayBarChanged(void)
  *
  * What: restarts the bounded search, cancels any pending VOICE value-marker
  * debounce while keeping the held-step context, and repaints. Runs on VOICE
- * pages (active-track search), and, since S074, on the Effect page and, since
- * S077 P6, on the PERF page (both seven-track searches). Why: removing a
+ * pages (active-track search), since S074 on the Effect page, since S077 P6
+ * on the PERF page (both seven-track searches), and since S078 P3 on the STEP
+ * track-settings page (SEQ_PAGE, active-track search of the length/scale/
+ * shuffle targets, which a track clear, a step clear, a paste, or a
+ * `len`/`scl`/`shf` pot clear (register completion) can change). Why: removing a
  * target cannot be proven absent from the remaining steps without a full
  * rescan, and the SHIFT+COPY clear gesture is not page-gated, so it can run
  * while the Effect or PERF page is visible. Inputs:
  * an already-submitted copy/clear PatternData mutation. Outputs: a cleared
  * search result and a refreshed frame; other pages return at once because
- * their next VOICE/Effect entry restarts the search anyway. Callers:
+ * their next VOICE/Effect/PERF/SEQ entry restarts the search anyway. Callers:
  * copyClearService.c after a Pattern paste or clear. Affiliates:
  * va_searchRestart() and va_scanService().
  */
 void menu_patternContentChanged(void)
 {
+    /*
+     * S078 P3: admit SEQ_PAGE. What: a completed copy/clear job on the
+     * viewed Scene restarts the STEP active-track search. Why:
+     * va_scanService() never re-validates a completed result, so without this
+     * restart a pasted or cleared `len`/`scl`/`shf` target would keep its old
+     * name underline (or miss a new one) until the next SEQ entry. Input: the
+     * page shown when ccSvc_patternChangedUi() runs. Output: restart,
+     * debounce reset, repaint. Accessor: ccSvc_patternChangedUi()
+     * (copyClearService.c). Affiliates: va_searchRestart(), va_scanService(),
+     * sa_applyTrackMarkers().
+     */
     if (!menu_isScreenPage(menu_activePage) &&
-        menu_activePage != PERFORMANCE_PAGE)
+        menu_activePage != PERFORMANCE_PAGE &&
+        menu_activePage != SEQ_PAGE)
         return;
     va_searchRestart();
     va_underlineSuppressed = 0u;
@@ -2452,8 +2609,15 @@ void menu_patternContentChanged(void)
  * Drop one automation target's underline immediately after pot clear.
  *
  * Inputs: canonical Pattern target. Output: only the matching VOICE, Effect,
- * or PERF presence bit is cleared; the bounded search continues for all other
- * targets, and Menu repaints without changing the target value.
+ * PERF, or STEP track-settings (SEQ_PAGE, S078 P3) presence bit is cleared;
+ * the bounded search continues for all other targets, and Menu repaints
+ * without changing the target value. Accessor: ccClear_potTurned()
+ * (clearOps.c) after ccSvc_registerAdd(); the target is then removed from
+ * every step of the Scene, so dropping the bit outright is correct. A
+ * held-step-only removal (sa_clearAutomationFromKnob()) must not use this
+ * function and restarts the search instead. Affiliates: va_searchSceneMask,
+ * va_searchTargetMask[], va_searchPerfMorphMask, va_seqTrackSearchBit(),
+ * ccSvc_targetPending().
  */
 void menu_automationTargetCleared(uint16_t target)
 {
@@ -2523,6 +2687,23 @@ void menu_automationTargetCleared(uint16_t target)
                     va_searchPerfMorphMask &= (uint8_t)~VA_PERF_MORPH_EFFECT_BIT;
             }
         }
+    } else if (menu_activePage == SEQ_PAGE) {
+        /*
+         * STEP track settings (S078 P3).
+         *
+         * What: drops the `len`/`scl`/`shf` presence bit of the active track
+         * when its target enters the pot-clear register. Why: the pot clear
+         * (menu_knobClearTarget() SEQ arm, Bug 2 fix) removes the target from
+         * all 128 steps of the track in the background, and spec §8 requires
+         * the underline to go at the turn; the scan cannot set the bit again
+         * while the target waits (ccSvc_targetPending()). A non-track target,
+         * or another track's target, maps to 0, so the AND leaves the mask
+         * unchanged. Inputs: target, menu_activeVoice. Output:
+         * va_searchSceneMask. Affiliates: va_seqTrackSearchBit(),
+         * ccClear_potTurned(), sa_applyTrackMarkers().
+         */
+        va_searchSceneMask &= (uint8_t)~va_seqTrackSearchBit(
+            target, menu_activeVoice);
     }
     menu_repaint();
 }
@@ -3230,8 +3411,14 @@ static void va_underlineService(void)
 {
     if ((va_underlineSuppressed & 0x0Fu) == 0u)
         return;
-    if (!menu_isVoicePage(menu_activePage) || !va_overlayActive ||
-        va_heldMask == 0u) {
+    /*
+     * S078 P2 §B: the shared suppression/validity byte also serves the STEP
+     * overlay, which runs on SEQ_PAGE. Admit that context so the debounce
+     * survives there too; every other non-voice page still drops it.
+     */
+    if ((!menu_isVoicePage(menu_activePage) &&
+         !(menu_activePage == SEQ_PAGE && va_overlayActive)) ||
+        !va_overlayActive || va_heldMask == 0u) {
         va_underlineSuppressed = 0u;
         return;
     }
@@ -3397,6 +3584,499 @@ static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta)
         va_lastEditTick = time_sysTick;
         menu_knobs_dirty = 1u;
     }
+}
+
+/* -----------------------------------------------------------------------
+** S078 P2 §A/§B — multi-step specials and STEP track automation overlay
+** ----------------------------------------------------------------------- */
+
+/*
+ * Write one step special (velocity, note, or probability) to every physically
+ * held step, or to the single selected step when only one is held.
+ *
+ * What: when two or more SEQ buttons are physically held in STEP mode, the
+ * adjusted value is written to all of them through the same
+ * PatternStackService setter the single-step path uses; with fewer than two
+ * held steps it degenerates to the existing single-step write. Why: multi-step
+ * editing reuses the step-specials commit path, and PatternStackService
+ * already validates coordinates and owns pool allocation, so no new storage
+ * state is needed. Inputs: viewed pattern, active track, the new value, and a
+ * setter with the shared (scene, track, step, value) signature. Output: the
+ * setter is called once per held step (or once for the selected step);
+ * nothing is mutated when the mask is empty. Affiliates:
+ * buttonHandler_seqHeldMask(), buttonHandler_visibleStep(),
+ * patSvc_setStepVolume/Note/Probability. Called from the
+ * PAR_STEP_VOLUME/PAR_STEP_NOTE/PAR_STEP_PROB arms in menu_parseGlobalParam()
+ * (reached through menu_cellCommitValue() -> menu_sendEditedParameter()).
+ */
+static void menu_broadcastStepSpecial(
+    uint8_t scene, uint8_t track, uint8_t value,
+    uint8_t (*setter)(uint8_t, uint8_t, uint8_t, uint8_t))
+{
+    uint16_t mask = buttonHandler_seqHeldMask();
+    uint8_t i;
+
+    if (__builtin_popcount(mask) < 2) {
+        setter(scene, track, parameter_values[PAR_ACTIVE_STEP], value);
+        return;
+    }
+    for (i = 0u; i < 16u; i++) {
+        if (mask & (uint16_t)(1u << i))
+            setter(scene, track, buttonHandler_visibleStep(i), value);
+    }
+}
+
+/*
+ * Map a SEQ_PAGE subpage-0 cell position to its track automation target.
+ *
+ * What: position 0 is track length, 1 is track scale, and 2 is track shuffle;
+ * any other position is not automatable. Why: only these three track timing
+ * parameters have SCENE_MOD_TARGET_KIND_TRACK_* rows in SceneModTargets.c
+ * (IDs 405..411 length, 412..418 scale, 419..425 shuffle), and the STEP
+ * held-step overlay edits exactly them as step automation. Inputs: absolute
+ * cell position 0..7 on SEQ_PAGE subpage 0 and the active track 0..6. Output:
+ * the canonical Scene mod target ID, or INSTRUMENT_PARAM_INVALID for a
+ * non-automatable position or invalid track. The ID is computed from the
+ * table's contiguous seven-row-per-kind layout and then re-validated through
+ * sceneModTarget_descriptor(), so a future table reorder degrades to "not
+ * automatable" instead of writing the wrong target. Accessors:
+ * sa_writeAutomationFromKnob(), sa_clearAutomationFromKnob(),
+ * sa_applyTrackMarkers(), sa_refreshAutomationLeds(), menu_parseKnobDelta()
+ * (STEP overlay intercept), menu_encoderChangeParameter(), and (S078 P3)
+ * menu_knobClearTarget() for the SEQ_PAGE pot clear. Affiliate:
+ * va_seqTrackSearchBit(), which applies the same kind/voice_slot validation
+ * from the opposite direction (stored target -> cell bit).
+ */
+static instrument_param_id_t menu_seqCellToTrackTarget(
+    uint8_t cell_position, uint8_t track)
+{
+    uint16_t base;
+    instrument_param_id_t id;
+    const scene_mod_target_descriptor_t *descriptor;
+
+    if (track >= NUM_TRACKS)
+        return INSTRUMENT_PARAM_INVALID;
+    switch (cell_position) {
+    case 0u: base = INSTRUMENT_VOICE_ID_COUNT + 21u; break; /* length  */
+    case 1u: base = INSTRUMENT_VOICE_ID_COUNT + 28u; break; /* scale   */
+    case 2u: base = INSTRUMENT_VOICE_ID_COUNT + 35u; break; /* shuffle */
+    default: return INSTRUMENT_PARAM_INVALID;
+    }
+    id = (instrument_param_id_t)(base + track);
+    descriptor = sceneModTarget_descriptor(id);
+    if (!descriptor || descriptor->voice_slot != track)
+        return INSTRUMENT_PARAM_INVALID;
+    if ((cell_position == 0u &&
+         descriptor->kind != SCENE_MOD_TARGET_KIND_TRACK_LENGTH) ||
+        (cell_position == 1u &&
+         descriptor->kind != SCENE_MOD_TARGET_KIND_TRACK_SCALE) ||
+        (cell_position == 2u &&
+         descriptor->kind != SCENE_MOD_TARGET_KIND_TRACK_SHUFFLE))
+        return INSTRUMENT_PARAM_INVALID;
+    return id;
+}
+
+/*
+ * Write one track automation parameter to every held step (S078 P2 §B).
+ *
+ * What: resolves the cell position to a track target, seeds the value from the
+ * working-value cache (mid-edit), else the newest exact held automation value,
+ * else the retained parameter display value, then applies the delta with the
+ * same menu_clampCellValue() path as ordinary editing. Why: held edits are
+ * Pattern-only and must never call endpoint commit, DSP, or AutoSave code; the
+ * clamped parameter-domain result is cached for the next detent so successive
+ * turns feel like the normal edit path. Inputs: absolute cell position (0..7
+ * on SEQ_PAGE subpage 0) and a signed delta. Output:
+ * patSvc_writeStepAutomation() for every held step, the working-value cache,
+ * the SEQ search bit VA_SEARCH_SCENE_TRACK_BIT(cell) in va_searchSceneMask
+ * (S078 P3), edit-flash suppression, and the coalesced repaint flag.
+ * Affiliates: menu_seqCellToTrackTarget(), va_resolveHeldValue(),
+ * va_formatValue3().
+ */
+static void sa_writeAutomationFromKnob(uint8_t cellPos, int8_t delta)
+{
+    instrument_param_id_t target;
+    uint8_t activePage;
+    uint8_t knob_idx;
+    menu_cell_t cell;
+    uint16_t value;
+    int32_t next;
+    uint8_t stored7;
+    uint8_t wrote = 0u;
+    uint8_t i;
+
+    if (!va_overlayActive || menu_activePage != SEQ_PAGE ||
+        (menuIndex & MASK_PAGE) != 0u)
+        return;
+    target = menu_seqCellToTrackTarget(cellPos, menu_activeVoice);
+    if (target == INSTRUMENT_PARAM_INVALID)
+        return;
+
+    activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    knob_idx = (uint8_t)(cellPos & 3u);
+    cell = menu_resolveCell(activePage, cellPos);
+
+    /* Seed: working cache if valid, else the stored held automation value,
+     * else the retained parameter value for first creation. */
+    if (va_underlineSuppressed & (uint8_t)(0x10u << knob_idx))
+        value = (uint16_t)va_workingValue[knob_idx];
+    else if (va_resolveHeldValue(target, &stored7))
+        value = (uint16_t)stored7;
+    else
+        value = menu_cellDisplayValue(&cell);
+
+    next = (int32_t)value + (int32_t)delta;
+    if (next < 0)      next = 0;
+    if (next > 65535)  next = 65535;
+    value = (uint16_t)next;
+    menu_clampCellValue(&cell, &value);
+
+    va_workingValue[knob_idx] = (value > 255u) ? 255u : (uint8_t)value;
+    stored7 = (value > 127u) ? 127u : (uint8_t)value;
+
+    for (i = 0u; i < va_heldCount; i++) {
+        if (patSvc_writeStepAutomation(
+                menu_shownPattern, menu_activeVoice,
+                buttonHandler_visibleStep(va_heldOrder[i]), target, stored7))
+            wrote = 1u;
+    }
+
+    if (wrote) {
+        /*
+         * S078 P3: mark the SEQ_PAGE search result now, exactly as the VOICE
+         * held write sets its search bit (va_searchSetBit()). What: ORs this
+         * cell's VA_SEARCH_SCENE_TRACK_BIT into va_searchSceneMask. Why: a
+         * completed search is never re-run by va_scanService(), and a running
+         * one may already have passed the held steps (or the write may still
+         * sit in the patSvc FIFO), so without this bit the `len`/`scl`/`shf`
+         * name would not underline when the steps are released. knob_idx ==
+         * cellPos here, because only cells 0..2 resolve to a valid target.
+         * Then hold the edit-flash suppression exactly like the VOICE overlay.
+         * Reader: sa_applyTrackMarkers() (name branch). Affiliates:
+         * va_scanService(), va_searchRestart().
+         */
+        va_searchSceneMask |= VA_SEARCH_SCENE_TRACK_BIT(knob_idx);
+        va_underlineSuppressed |=
+            (uint8_t)((1u << knob_idx) | (0x10u << knob_idx));
+        va_lastEditTick = time_sysTick;
+        menu_knobs_dirty = 1u;
+    }
+}
+
+/*
+ * Remove one track parameter's automation from every held step (S078 P2 §B).
+ *
+ * What: called when the STEP overlay intercepts a copy/clear clear-mode pot
+ * turn while SEQ steps are held; removes the resolved track target from each
+ * held step, restarts the active-track search, and refreshes LEDs and the
+ * frame. Why: the copy/clear default pot action clears a whole track (all 128
+ * steps), which would over-clear when only some steps are held. Because only
+ * the held steps lose the target, other steps may still carry it, so the name
+ * underline must be found again by a rescan, not dropped
+ * (menu_automationTargetCleared() is for whole-track clears only, S078 P3).
+ * Inputs: absolute cell position (0..7). Output: per-held-step automation
+ * removal, a restarted search, LED refresh, and a repaint. Accessor:
+ * menu_parseKnobDelta() STEP overlay intercept. Affiliates:
+ * copyClear_isClearMode(), patSvc_removeStepAutomation(), va_searchRestart(),
+ * sa_refreshAutomationLeds(), sa_applyTrackMarkers().
+ */
+static void sa_clearAutomationFromKnob(uint8_t cellPos)
+{
+    instrument_param_id_t target;
+    uint8_t knob_idx = (uint8_t)(cellPos & 3u);
+    uint8_t i;
+
+    if (!va_overlayActive || menu_activePage != SEQ_PAGE ||
+        (menuIndex & MASK_PAGE) != 0u)
+        return;
+    target = menu_seqCellToTrackTarget(cellPos, menu_activeVoice);
+    if (target == INSTRUMENT_PARAM_INVALID)
+        return;
+
+    for (i = 0u; i < va_heldCount; i++) {
+        (void)patSvc_removeStepAutomation(
+            menu_shownPattern, menu_activeVoice,
+            buttonHandler_visibleStep(va_heldOrder[i]), target);
+    }
+
+    /* Drop the working-value validity so the display re-seeds from the
+     * retained value now that the held automation is gone. */
+    va_underlineSuppressed &= (uint8_t)~(uint8_t)(0x10u << knob_idx);
+    /*
+     * S078 P3: restart the SEQ_PAGE search instead of dropping the bit.
+     * What: clears the result and rescans the active track (32 passes). Why:
+     * this clear covers only the held steps, so the `len`/`scl`/`shf` name
+     * must stay underlined if any other step still carries the target; only a
+     * full rescan can show that. The name stays blank until the rescan
+     * completes, the same behaviour as the STEP automation editor's deletes.
+     * Output: va_search* reset. Affiliates: va_scanService(),
+     * menu_stepAutomationExecuteItem0().
+     */
+    va_searchRestart();
+    sa_refreshAutomationLeds();
+    menu_repaint();
+}
+
+/*
+ * Show step-automation presence on the LED row for the focused track parameter.
+ *
+ * What: while the overlay is clicked into one automatable track cell, lights
+ * every visible step that contains that exact target and blinks the physically
+ * held steps; for a non-automatable cell it restores the ordinary pattern
+ * track LEDs. Why: the STEP overlay follows the VOICE overlay's LED contract,
+ * giving per-step feedback for the parameter being edited. Inputs: menuIndex
+ * (visible cell), menu_activeVoice, menu_shownPattern, va_heldMask. Output:
+ * the STEP1..STEP16 remembered LED state. Affiliates:
+ * led_updateAutomationStepView(), led_updatePatternTrackView().
+ */
+static void sa_refreshAutomationLeds(void)
+{
+    uint8_t pos;
+    instrument_param_id_t target;
+
+    if (!va_overlayActive || menu_activePage != SEQ_PAGE)
+        return;
+    if (!editModeActive)
+        return;
+
+    pos = (uint8_t)(menuIndex & MASK_PARAMETER);
+    /* Only subpage 0 holds automatable track cells; any other subpage shows
+     * the ordinary pattern track LEDs. */
+    target = ((menuIndex & MASK_PAGE) == 0u)
+        ? menu_seqCellToTrackTarget(pos, menu_activeVoice)
+        : INSTRUMENT_PARAM_INVALID;
+
+    if (target != INSTRUMENT_PARAM_INVALID) {
+        led_updateAutomationStepView(menu_activeVoice, menu_shownPattern,
+                                     target, va_heldMask);
+    } else {
+        led_updatePatternTrackView(menu_activeVoice, menu_shownPattern,
+                                   buttonHandler_selectedStep, 0u);
+    }
+}
+
+/*
+ * Apply underline markers for the STEP track-settings page (S078 P2 §B / P3).
+ *
+ * What: on SEQ_PAGE subpage 0, applies the VOICE one-marker-per-cell rule to
+ * the three automatable track cells (`len`, `scl`, `shf`):
+ *   - held value: while the held-step overlay is active and a held step
+ *     carries the cell's target, the cell shows the newest held value
+ *     (working value mid-edit) and that value is underlined (row 1);
+ *   - name: otherwise, once the active-track search is complete and found
+ *     the target anywhere on the track, the parameter name is underlined
+ *     (row 0; overview: first character of the short name; clicked-in view:
+ *     first character of the long name at columns 8..15).
+ * Non-automatable cells (play mode, MIDI channel, MIDI note) never mark.
+ * Why: S078 P3 Bug 1 - the former name branch depended on a presence byte set
+ * only when the value branch already applied, so it never ran, and the pass
+ * returned without the overlay, so automated track parameters were never
+ * underlined on the top row. The S074 rule holds here too: the underline
+ * reports stored data, whatever the transport, track length, or held state.
+ * Inputs: menuIndex, editModeActive, va_overlayActive with the shared held
+ * list and working values, va_searchComplete/va_searchSceneMask, and
+ * editDisplayBuffer as formatted by menu_repaintGeneric(). Output: one
+ * va_queueMarkerTransaction() per SEQ subpage-0 frame (also with no markers,
+ * so stale CGRAM marks are retired). Accessor: menu_repaintGeneric() (after
+ * the VOICE/Effect/PERF marker passes, which return at once on SEQ_PAGE).
+ * Affiliates: menu_seqCellToTrackTarget(), va_resolveHeldValue(),
+ * va_formatValue3(), VA_SEARCH_SCENE_TRACK_BIT(), va_scanService(),
+ * va_queueMarkerTransaction(), va_applyVoiceMarkers() (the reference rule).
+ */
+static void sa_applyTrackMarkers(void)
+{
+    uint8_t glyph_probe[8];
+    uint8_t desired_base[4] = { 0u, 0u, 0u, 0u };
+    uint8_t marker_row[4] = { 0u, 0u, 0u, 0u };
+    uint8_t marker_col[4] = { 0u, 0u, 0u, 0u };
+    uint8_t desired_valid = 0u;
+    uint8_t activePage;
+    uint8_t is2ndPage;
+
+    /* S078 P3: runs on SEQ_PAGE with or without the held-step overlay; the
+     * held-value branches below test va_overlayActive themselves. */
+    if (menu_activePage != SEQ_PAGE)
+        return;
+
+    activePage = (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT);
+    if (activePage != 0u)
+        return; /* Only subpage 0 (track settings) has automatable cells. */
+    is2ndPage = (uint8_t)(((menuIndex & MASK_PARAMETER) > 3u) ? 4u : 0u);
+
+    if (editModeActive) {
+        uint8_t pos = (uint8_t)(menuIndex & MASK_PARAMETER);
+        uint8_t knob_idx = (uint8_t)(pos & 3u);
+        uint8_t suppress_bit = (uint8_t)(1u << knob_idx);
+        uint8_t validity_bit = (uint8_t)(suppress_bit << 4u);
+        uint8_t value7;
+        instrument_param_id_t target =
+            menu_seqCellToTrackTarget(pos, menu_activeVoice);
+
+        if (target == INSTRUMENT_PARAM_INVALID) {
+            /* Non-automatable cell: no marker. */
+        } else if (va_overlayActive &&
+                   va_resolveHeldValue(target, &value7)) {
+            menu_cell_t cell = menu_resolveCell(activePage, pos);
+            char val_text[3];
+            uint8_t display_val =
+                (va_underlineSuppressed & validity_bit)
+                    ? va_workingValue[knob_idx]
+                    : value7;
+            int8_t right;
+
+            va_formatValue3(&cell, display_val, val_text);
+            memcpy(&editDisplayBuffer[1][13], val_text, 3u);
+            if ((va_underlineSuppressed & suppress_bit) == 0u) {
+                for (right = 15; right >= 13 &&
+                     editDisplayBuffer[1][right] == ' '; right--)
+                    ;
+                if (right >= 13 && lcd_underlineGlyph(
+                        (uint8_t)editDisplayBuffer[1][right], glyph_probe)) {
+                    desired_base[0] = (uint8_t)editDisplayBuffer[1][right];
+                    marker_row[0] = 1u;
+                    marker_col[0] = (uint8_t)right;
+                    desired_valid = 0x01u;
+                }
+            }
+        } else if (va_searchComplete &&
+                   (va_searchSceneMask &
+                    VA_SEARCH_SCENE_TRACK_BIT(pos)) != 0u &&
+                   (va_underlineSuppressed & suppress_bit) == 0u) {
+            /*
+             * S078 P3 clicked-in name marker. What: underlines the first
+             * character of the long name that menu_repaintGeneric() writes
+             * at editDisplayBuffer[0][8..15] for static cells (columns 0..7
+             * hold the category). Why: same name-marker rule as the VOICE
+             * clicked-in view (va_applyVoiceMarkers()); `pos` is 0..2
+             * because the target resolved. Output: CGRAM slot 0 request.
+             */
+            int8_t left;
+            for (left = 8; left < 16 &&
+                 editDisplayBuffer[0][left] == ' '; left++)
+                ;
+            if (left < 16 && lcd_underlineGlyph(
+                    (uint8_t)editDisplayBuffer[0][left], glyph_probe)) {
+                desired_base[0] = (uint8_t)editDisplayBuffer[0][left];
+                marker_row[0] = 0u;
+                marker_col[0] = (uint8_t)left;
+                desired_valid = 0x01u;
+            }
+        }
+    } else {
+        uint8_t i;
+
+        for (i = 0u; i < 4u; i++) {
+            uint8_t pos = (uint8_t)(is2ndPage + i);
+            uint8_t start = (uint8_t)(4u * i);
+            uint8_t value7;
+            instrument_param_id_t target =
+                menu_seqCellToTrackTarget(pos, menu_activeVoice);
+            uint8_t suppress_bit = (uint8_t)(1u << (pos & 3u));
+            uint8_t validity_bit = (uint8_t)(suppress_bit << 4u);
+
+            if (target == INSTRUMENT_PARAM_INVALID)
+                continue;
+            if (va_overlayActive && va_resolveHeldValue(target, &value7)) {
+                menu_cell_t cell = menu_resolveCell(activePage, pos);
+                char val_text[3];
+                uint8_t display_val =
+                    (va_underlineSuppressed & validity_bit)
+                        ? va_workingValue[pos & 3u]
+                        : value7;
+                int8_t right;
+
+                va_formatValue3(&cell, display_val, val_text);
+                memcpy(&editDisplayBuffer[1][start], val_text, 3u);
+                if ((va_underlineSuppressed & suppress_bit) == 0u) {
+                    for (right = 2; right >= 0 && val_text[right] == ' '; right--)
+                        ;
+                    if (right >= 0 && lcd_underlineGlyph(
+                            (uint8_t)val_text[right], glyph_probe)) {
+                        desired_base[i] = (uint8_t)val_text[right];
+                        marker_row[i] = 1u;
+                        marker_col[i] = (uint8_t)(start + right);
+                        desired_valid |= (uint8_t)(1u << i);
+                    }
+                }
+            } else if (va_searchComplete &&
+                       (va_searchSceneMask &
+                        VA_SEARCH_SCENE_TRACK_BIT(pos)) != 0u &&
+                       (va_underlineSuppressed & suppress_bit) == 0u) {
+                /*
+                 * S078 P3 overview name marker. What: underlines the first
+                 * non-space character of the cell's short name on row 0 (the
+                 * active cell may be upper-cased by upr_three(); the glyph
+                 * table covers both cases). Why: replaces the unreachable
+                 * former STEP presence-mask branch with the Pattern-wide
+                 * search result, so the name marks with or without held steps.
+                 */
+                int8_t left;
+                for (left = 0; left < 3 &&
+                     editDisplayBuffer[0][start + left] == ' '; left++)
+                    ;
+                if (left < 3 && lcd_underlineGlyph(
+                        (uint8_t)editDisplayBuffer[0][start + left],
+                        glyph_probe)) {
+                    desired_base[i] =
+                        (uint8_t)editDisplayBuffer[0][start + left];
+                    marker_row[i] = 0u;
+                    marker_col[i] = (uint8_t)(start + left);
+                    desired_valid |= (uint8_t)(1u << i);
+                }
+            }
+        }
+    }
+
+    va_queueMarkerTransaction(desired_base, desired_valid,
+                              marker_row, marker_col);
+}
+
+/*
+ * Enter the STEP held-step track automation overlay (S078 P2 §B).
+ *
+ * What: shows the SEQ_PAGE track-settings front page for the pressed track and
+ * arms the shared held/marker state for the STEP context, refreshes the step
+ * LEDs, and repaints. Why: holding SEQ steps and pressing a
+ * TRACK button must turn the track timing cells into a per-held-step automation
+ * editor without disturbing the retained Pattern values. Inputs: voiceNr (the
+ * pressed track 0..6). Output: menu_activePage == SEQ_PAGE, menuIndex on
+ * subpage 0, va_overlayActive set, held order seeded from the physical mask,
+ * step LEDs refreshed. Name underlines come from the SEQ_PAGE active-track
+ * search (S078 P3), which menu_setActiveVoice() (track change) or
+ * menu_switchPage() (entry from another page) restarts when needed; held
+ * value markers are resolved live by sa_applyTrackMarkers(). Caller:
+ * handleVoiceButton() in buttonHandler.c when buttonHandler_seqHeldMask() is
+ * nonzero. Affiliates: menu_setActiveVoice(), menu_switchPage(),
+ * va_updateHeldState(), va_searchRestart(), sa_refreshAutomationLeds(),
+ * sa_applyTrackMarkers().
+ */
+void menu_enterStepTrackAutomationOverlay(uint8_t voiceNr)
+{
+    if (voiceNr >= NUM_TRACKS || menu_storageBusy)
+        return;
+
+    menu_setActiveVoice(voiceNr);
+    if (menu_activePage != SEQ_PAGE)
+        menu_switchPage(SEQ_PAGE);
+    menu_showStepTrackSettingsFirstHalf();
+    pat_applyTrackSettingsToMenu(menu_shownPattern, menu_activeVoice);
+    /* A fresh overlay entry always starts in the four-cell overview, matching
+     * the ordinary STEP track-settings entry that menu_switchPage() gives. */
+    editModeActive = 0u;
+
+    /* Arm the shared overlay state only after any page switch, because
+     * leaving a voice page resets it. */
+    va_overlayActive = 1u;
+    va_underlineSuppressed = 0u;
+    va_heldMask = 0u;
+    va_heldCount = 0u;
+    memset(va_workingValue, 0, sizeof(va_workingValue));
+
+    /* Build the newest-first held order immediately so the first frame can
+     * resolve held automation values and the LED row. */
+    va_updateHeldState();
+    sa_refreshAutomationLeds();
+    menu_repaint();
 }
 
 static menu_cell_t menu_resolveCellAbsolute(uint8_t subPage, uint8_t position)
@@ -9840,7 +10520,16 @@ static instrument_param_id_t menu_stepAutomationNextTarget(
  * Output: the new target is written before the old one is removed whenever
  * capacity permits. At the 63-entry limit the old entry is temporarily removed
  * and restored on failure so a full block can still change target without an
- * intermediate duplicate. Affiliate: main-encoder target edits.
+ * intermediate duplicate. On success the automation-presence search restarts
+ * (S078 P3): this is the single path for every STEP-editor target change
+ * (VOI/category cycling and PAR cycling in menu_stepAutomationEdit()), and a
+ * changed target can add or remove a `len`/`scl`/`shf` name underline on the
+ * STEP track-settings page. The editor only runs on SEQ_PAGE
+ * (menu_stepAutomationPageActive()), so the restart selects the SEQ
+ * active-track geometry, and the search, serviced on every SEQ subpage, has
+ * finished before the user returns to the track settings. Accessor:
+ * menu_stepAutomationEdit(). Affiliates: va_searchRestart(), va_scanService(),
+ * patSvc_writeStepAutomation(), patSvc_removeStepAutomation().
  */
 static uint8_t menu_stepAutomationReplaceTarget(
     uint8_t scene, uint8_t track, uint8_t step,
@@ -9864,12 +10553,17 @@ static uint8_t menu_stepAutomationReplaceTarget(
         if (!patSvc_writeStepAutomation(scene, track, step, new_target, value))
             return 0u;
         (void)patSvc_removeStepAutomation(scene, track, step, old_target);
+        /* S078 P3: a target change can move a track-settings name marker. */
+        va_searchRestart();
         return 1u;
     }
     if (!patSvc_removeStepAutomation(scene, track, step, old_target))
         return 0u;
-    if (patSvc_writeStepAutomation(scene, track, step, new_target, value))
+    if (patSvc_writeStepAutomation(scene, track, step, new_target, value)) {
+        /* S078 P3: a target change can move a track-settings name marker. */
+        va_searchRestart();
         return 1u;
+    }
     (void)patSvc_writeStepAutomation(scene, track, step, old_target, value);
     return 0u;
 }
@@ -10256,14 +10950,20 @@ static uint8_t menu_stepAutomationExecuteItem0(void)
         menu_stepAutoNumberLocked = 0u;
     } else if (menu_stepAutoDeleteMode) {
         (void)patSvc_removeTrackAutomationByTarget(scene, track, autos[page].target);
-        /* S066: a target deletion can change the Pattern-wide name marker. */
-        if (menu_isVoicePage(menu_activePage))
-            va_searchRestart();
+        /*
+         * S066 / S078 P3: a target deletion can change the Pattern-wide name
+         * marker. What: restart the presence search unconditionally. Why:
+         * this editor only runs on SEQ_PAGE (menu_stepAutomationPageActive()),
+         * so the former menu_isVoicePage() guard was never true and a deleted
+         * `len`/`scl`/`shf` target kept its STEP track-settings underline.
+         * Output: SEQ active-track search reset. Affiliates:
+         * va_searchRestart(), va_scanService(), sa_applyTrackMarkers().
+         */
+        va_searchRestart();
     } else {
         (void)patSvc_removeStepAutomation(scene, track, step, autos[page].target);
-        /* S066: a target deletion can change the Pattern-wide name marker. */
-        if (menu_isVoicePage(menu_activePage))
-            va_searchRestart();
+        /* S066 / S078 P3: as above - unconditional SEQ_PAGE search restart. */
+        va_searchRestart();
     }
     count = pat_stepAutomationCount(scene, track, step);
     if (menu_stepAutoPageIndex > count)
@@ -10850,11 +11550,21 @@ static void menu_repaintGeneric(void)
         }
     }
 
-    /* S066 markers are applied only after the ordinary VOICE frame is fully
-     * formatted, including the active-parameter capitalization above. */
+    /* S066/S078 markers are applied only after the ordinary frame is fully
+     * formatted, including the active-parameter capitalization above. The
+     * STEP pass now also runs without its held-step overlay so stored
+     * `len`/`scl`/`shf` automation can mark names on an ordinary SEQ frame. */
     va_applyVoiceMarkers();
     menu_applyEffectMarkers();
     menu_applyPerfMarkers();
+    /*
+     * S078 P2 §B / P3: the STEP track-cell markers are applied after the
+     * ordinary SEQ frame is formatted, mirroring the VOICE pass above. It
+     * returns immediately on any page but SEQ_PAGE; on SEQ_PAGE it reports
+     * held values when the overlay is active and stored-data name markers
+     * otherwise.
+     */
+    sa_applyTrackMarkers();
 }
 
 /* -----------------------------------------------------------------------
@@ -10886,6 +11596,27 @@ static void menu_encoderChangeParameter(int8_t inc)
             uint8_t field = (uint8_t)(menu_stepAutoCursor - 1u);
             (void)menu_stepAutomationEdit(field, inc);
         }
+        return;
+    }
+
+    /*
+     * S078 P2 §B: STEP held-step track automation overlay owns the encoder.
+     *
+     * What: a clicked-in turn on an automatable SEQ_PAGE subpage-0 cell
+     * (length, scale, shuffle) writes that parameter to every held step
+     * instead of committing the retained Pattern value. Why: this must run
+     * before the generic commit path and the VOICE overlay check; a
+     * non-automatable cell (play mode, MIDI channel, MIDI note) deliberately
+     * falls through to the ordinary retained-value commit. Inputs: visible
+     * cell position and signed increment. Output: Pattern automation writes
+     * or an ordinary commit. Affiliates: menu_seqCellToTrackTarget(),
+     * sa_writeAutomationFromKnob().
+     */
+    if (va_overlayActive && menu_activePage == SEQ_PAGE &&
+        activePage == 0u &&
+        menu_seqCellToTrackTarget(activeParameter, menu_activeVoice) !=
+            INSTRUMENT_PARAM_INVALID) {
+        sa_writeAutomationFromKnob(activeParameter, inc);
         return;
     }
 
@@ -11899,6 +12630,20 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
         va_refreshAutomationLeds();
     }
 
+    /*
+     * S078 P2 §B: same click-in/click-out handling for the STEP overlay.
+     *
+     * What: clicking into or out of an automatable track cell drops the
+     * working-value/edit-flash cache and repaints the automation LED row.
+     * Why: the marker and LED geometry changes between the overview and the
+     * clicked-in single-parameter view, so a stale underline must not carry
+     * over. Affiliates: sa_refreshAutomationLeds().
+     */
+    if (btnClicked && menu_activePage == SEQ_PAGE && va_overlayActive) {
+        va_underlineSuppressed = 0u;
+        sa_refreshAutomationLeds();
+    }
+
     /* NOTE: original AVR did inc *= -1 here to correct encoder orientation.
     ** Our TIM1 input capture is wired for the same physical CW=positive sense
     ** so the inversion is NOT needed. */
@@ -12121,8 +12866,13 @@ static void menu_endlessPotMappingChanged(void)
  * Inputs: physical pot number and output record. Output: Pattern target and,
  * for Effect cells, the optional FX-sequence lane; zero means this column has
  * no automatable owner. Clear mode calls this before consuming a delta so the
- * normal value-edit path is never entered. Affiliates: Menu cell resolution,
- * SceneModTargets, EffectsManager, and copyClearSession.
+ * normal value-edit path is never entered. Pages: VOICE, PERF, Effect, and
+ * (S078 P3) the STEP track settings, SEQ_PAGE subpage 0 (`len`/`scl`/`shf` of
+ * the active track); COPYCLEAR_UTILITIES.md §8. Accessor:
+ * menu_parseKnobDelta() copy/clear branch (only reached on SEQ_PAGE when the
+ * held-step overlay is not active; with held steps the overlay's per-step
+ * clear runs first). Affiliates: Menu cell resolution, SceneModTargets,
+ * EffectsManager, menu_seqCellToTrackTarget(), and copyClearSession.
  */
 static uint8_t menu_knobClearTarget(uint8_t knobNr, cc_pot_target_t *out)
 {
@@ -12162,6 +12912,37 @@ static uint8_t menu_knobClearTarget(uint8_t knobNr, cc_pot_target_t *out)
         return (uint8_t)(out->pattern_target != INSTRUMENT_PARAM_INVALID);
     }
     if (cell.kind == MENU_CELL_STATIC) {
+        /*
+         * STEP track settings pot clear (S078 P3, Bug 2).
+         *
+         * What: on SEQ_PAGE subpage 0, maps the pot's cell (first half: 0
+         * `len`, 1 `scl`, 2 `shf`; second half: 4..7, never automatable) to
+         * the active track's length/scale/shuffle Scene target.
+         * Why: these cells are MENU_CELL_STATIC (PAR_TRACK_LENGTH /
+         * PAR_TRACK_SCALE / PAR_SHUFFLE), and this arm previously accepted
+         * only the PERF Morph cells, so SHIFT+COPY + pot never queued a clear
+         * for track automation. The `active_page == 0u` guard is required:
+         * SEQ subpage 1 positions 0..2 (velocity, note, probability) are also
+         * STATIC and must stay non-clearable. The SHIFT Morph endpoint view
+         * changes only value resolution, not the cell, so the clear works in
+         * both views, as on VOICE.
+         * Inputs: knobNr, second_page (SEQ_PAGE is not a screen page, so it is
+         * the half offset), menu_activeVoice. Output: out->pattern_target =
+         * 405+t / 412+t / 419+t, fx_lane stays 0xff (no FX lane); return 1
+         * for an automatable cell, 0 otherwise. Downstream:
+         * copyClear_potTurned() -> ccClear_potTurned() -> ccSvc_registerAdd()
+         * removes the target from every step of the active Scene,
+         * menu_automationTargetCleared() drops the name underline at once,
+         * and ccSvc_patternChangedUi() -> menu_patternContentChanged()
+         * restarts the search on completion. Affiliates:
+         * menu_seqCellToTrackTarget(), va_seqTrackSearchBit(),
+         * sa_clearAutomationFromKnob() (held-step variant).
+         */
+        if (menu_activePage == SEQ_PAGE && active_page == 0u) {
+            out->pattern_target = menu_seqCellToTrackTarget(
+                (uint8_t)(knobNr + second_page), menu_activeVoice);
+            return (uint8_t)(out->pattern_target != INSTRUMENT_PARAM_INVALID);
+        }
         if (cell.static_param >= PAR_VOICE1_MORPH &&
             cell.static_param <= PAR_VOICE6_MORPH) {
             out->pattern_target = sceneModTarget_voiceMorphId(
@@ -12195,6 +12976,45 @@ static uint8_t menu_knobClearTarget(uint8_t knobNr, cc_pot_target_t *out)
 void menu_parseKnobDelta(uint8_t knobNr, int8_t delta)
 {
     if (menu_storageBusy) return;
+
+    /*
+     * S078 P2 §B: STEP held-step track automation overlay owns the pots.
+     *
+     * What: while the overlay is active on SEQ_PAGE subpage 0, an endless-pot
+     * turn on an automatable track cell (length, scale, shuffle) writes that
+     * parameter to every held step; a turn while SHIFT+COPY is held in clear
+     * mode removes that parameter's automation from the held steps only (not
+     * the whole track the copy/clear default would clear). Turns on
+     * non-automatable cells (play mode, MIDI channel, MIDI note) fall through
+     * to the ordinary retained-value editor below. Why: this must run before
+     * the copyClear_ownsPots() intercept so the per-held-step clear replaces
+     * the track-wide clear. Inputs: physical pot number and signed delta.
+     * Output: Pattern automation writes/removals or an ordinary commit.
+     * Affiliates: copyClear_isClearMode(), sa_writeAutomationFromKnob(),
+     * sa_clearAutomationFromKnob(), menu_seqCellToTrackTarget().
+     */
+    if (va_overlayActive && menu_activePage == SEQ_PAGE &&
+        (menuIndex & MASK_PAGE) == 0u && knobNr < ENDLESS_POT_COUNT) {
+        const uint8_t seqActiveParameter = (uint8_t)(menuIndex & MASK_PARAMETER);
+        const uint8_t seqIs2ndPage =
+            (uint8_t)((seqActiveParameter > 3u) ? 4u : 0u);
+        const uint8_t seqCellPos = (uint8_t)(knobNr + seqIs2ndPage);
+        const uint8_t seqAutomatable =
+            (uint8_t)(menu_seqCellToTrackTarget(seqCellPos, menu_activeVoice) !=
+                      INSTRUMENT_PARAM_INVALID);
+
+        if (copyClear_ownsPots()) {
+            if (copyClear_isClearMode() && seqAutomatable &&
+                !copyClear_menuVisible())
+                sa_clearAutomationFromKnob(seqCellPos);
+            return;
+        }
+        if (seqAutomatable) {
+            sa_writeAutomationFromKnob(seqCellPos, delta);
+            return;
+        }
+        /* Non-automatable cell: fall through to normal retained editing. */
+    }
 
     /*
      * S075: while the copy/clear button is held, no pot changes a value.
@@ -12374,7 +13194,7 @@ void menu_serviceRuntimeWidgets(void)
      * slower CPU-use widget cadence. Held-state polling is first so scan/value
      * resolution sees the latest raw SEQ mask; all LCD work remains foreground
      * only. Pattern-wide scans are four step reads per pass by configuration
-     * (VOICE and Effect pages).
+     * (VOICE, SEQ, Effect, and PERF pages).
      */
     if (menu_isVoicePage(menu_activePage)) {
         /* The overlay's TRACK gesture belongs to the Effect editor. */
@@ -12382,6 +13202,37 @@ void menu_serviceRuntimeWidgets(void)
             va_updateHeldState();
         va_scanService();
         va_underlineService();
+    }
+
+    /*
+     * S078 P2 §B / P3: STEP track-settings services.
+     *
+     * What: on SEQ_PAGE, always advance the active-track automation-presence
+     * search (S078 P3); with the held-step overlay armed, also poll the
+     * physical held-step mask first and run the value-underline debounce, in
+     * the same order as the VOICE pages above.
+     * Why: the `len`/`scl`/`shf` name underlines come from the Pattern-wide
+     * search, which must run whether or not steps are held (P3 Bug 1b: it
+     * never ran on SEQ_PAGE). It also runs on SEQ subpage 1 and the
+     * step-automation editor, so a search restarted there by an editor change
+     * has finished when the user returns to the track settings.
+     * va_updateHeldState() owns the one held-order list and its overlay-exit
+     * path (mask -> 0), and va_underlineService() owns the edit-flash restore;
+     * the second overlay test sees an exit made by the first call. Inputs:
+     * menu_activePage == SEQ_PAGE, va_overlayActive. Outputs: held order and
+     * LED refresh on a mask change, overlay exit, search progress (one repaint
+     * on completion), and the debounced marker repaint. Cost: at most
+     * VOICE_AUTOMATION_SCAN_STEPS_PER_PASS step reads per pass, as on a VOICE
+     * page. Affiliates: va_updateHeldState(), va_scanService(),
+     * va_underlineService(), sa_refreshAutomationLeds(),
+     * sa_applyTrackMarkers().
+     */
+    if (menu_activePage == SEQ_PAGE) {
+        if (va_overlayActive)
+            va_updateHeldState();
+        va_scanService();
+        if (va_overlayActive)
+            va_underlineService();
     }
 
     if (menu_activePage == EFFECT_PAGE || menu_fxVoiceMixOverlayActive()) {
@@ -13590,7 +14441,14 @@ void menu_switchPage(uint8_t pageNr)
             menuEffects_leave();
     }
 
-    if (was_voice_page && !menu_isVoicePage(pageNr))
+    /*
+     * S078 P2 §B: the shared overlay state is reset on either boundary that
+     * can end a held-step overlay - leaving a voice page (VOICE overlay) or
+     * leaving SEQ_PAGE (STEP overlay). The original voice-only test missed
+     * the SEQ_PAGE exit, so a STEP overlay could survive a mode change.
+     */
+    if ((was_voice_page && !menu_isVoicePage(pageNr)) ||
+        (menu_activePage == SEQ_PAGE && pageNr != SEQ_PAGE))
         va_resetOverlay();
 
     /* Leaving the Effect page discards an open type candidate and Morph view. */
@@ -13721,6 +14579,26 @@ void menu_switchPage(uint8_t pageNr)
              * press behind even though menu_activeVoice is already correct.
              */
             pat_applyTrackSettingsToMenu(menu_getViewedPattern(), menu_getActiveVoice());
+            /*
+             * STEP track-settings automation-presence search (S078 P3).
+             *
+             * What: entering SEQ_PAGE from any other page restarts the search
+             * in SEQ geometry (active track; menu_activePage is already
+             * SEQ_PAGE, which va_searchRestart() requires). Why: the shared
+             * va_search* bytes may hold a completed VOICE, Effect, or PERF
+             * result. A VOICE result for the same Pattern and track would
+             * even pass va_scanService()'s mismatch test, which a completed
+             * search never reaches anyway, so the `len`/`scl`/`shf` bits would
+             * never be filled. The old_page guard keeps re-entries from
+             * SEQ_PAGE (SHIFT release -> buttonHandler_enterSeqModeStepMode(),
+             * STEP TRACK presses) from blanking valid underlines for a
+             * 32-pass rescan. Inputs: old_page, menu_shownPattern,
+             * menu_activeVoice. Output: va_search* reset. Affiliates:
+             * va_searchRestart(), va_scanService(), sa_applyTrackMarkers(),
+             * menu_enterStepTrackAutomationOverlay().
+             */
+            if (old_page != SEQ_PAGE)
+                va_searchRestart();
         }
         break;
 
@@ -14311,29 +15189,33 @@ void menu_parseGlobalParam(uint16_t paramNr, uint8_t value)
 
     case PAR_STEP_PROB:
         /*
-         * Step probability mutates the selected Pattern step for the active
-         * voice/viewed pattern.
+         * Step probability mutates the selected Pattern step (or every
+         * physically held step) for the active voice/viewed pattern.
          */
-        patSvc_setStepProbability(menu_getViewedPattern(), menu_getActiveVoice(),
-                               parameter_values[PAR_ACTIVE_STEP], value);
+        menu_broadcastStepSpecial(menu_getViewedPattern(),
+                                  menu_getActiveVoice(),
+                                  (uint8_t)value, patSvc_setStepProbability);
         break;
 
     case PAR_STEP_NOTE:
         /*
-         * Step note mutates the selected Pattern step. PatternData validates
-         * pattern/track/step coordinates and owns the stored note value.
+         * Step note mutates the selected Pattern step (or every held step).
+         * PatternData validates pattern/track/step coordinates and owns the
+         * stored note value.
          */
-        patSvc_setStepNote(menu_getViewedPattern(), menu_getActiveVoice(),
-                        parameter_values[PAR_ACTIVE_STEP], value);
+        menu_broadcastStepSpecial(menu_getViewedPattern(),
+                                  menu_getActiveVoice(),
+                                  (uint8_t)value, patSvc_setStepNote);
         break;
 
     case PAR_STEP_VOLUME:
         /*
-         * Step volume/velocity mutates the selected Pattern step. This direct
-         * call replaces the old sequencer-step opcode.
+         * Step volume/velocity mutates the selected Pattern step (or every
+         * held step). This direct call replaces the old sequencer-step opcode.
          */
-        patSvc_setStepVolume(menu_getViewedPattern(), menu_getActiveVoice(),
-                          parameter_values[PAR_ACTIVE_STEP], value);
+        menu_broadcastStepSpecial(menu_getViewedPattern(),
+                                  menu_getActiveVoice(),
+                                  (uint8_t)value, patSvc_setStepVolume);
         break;
 
     case PAR_MIDI_ROUTING:
@@ -14689,8 +15571,8 @@ void    menu_setShownPattern(uint8_t p)
      * Output: the UI Pattern index follows the resident Scene/Pattern slot when
      * valid, otherwise it falls back to Scene 0. A VOICE context change also
      * invalidates the held-step/search view before repainting it; on the
-     * Effect page (S074) the automation-presence search restarts and the
-     * page repaints.
+     * Effect page (S074) and the STEP track-settings page (SEQ_PAGE, S078 P3)
+     * the automation-presence search restarts and the page repaints.
      */
     {
         uint8_t next = pat_patternValid(p) ? p : 0u;
@@ -14712,6 +15594,25 @@ void    menu_setShownPattern(uint8_t p)
              * in va_scanService() is the backstop, and its completion
              * repaints again. No Pattern LED update: the SEQ row belongs to
              * the FX sequencer on this page.
+             */
+            va_searchRestart();
+            menu_repaint();
+        } else if (menu_activePage == SEQ_PAGE) {
+            /*
+             * STEP track settings (S078 P3).
+             *
+             * What: restart the active-track search for the new Pattern and
+             * repaint. Why: va_scanService() only checks the Pattern while a
+             * search is still running, so a completed result for the old
+             * Scene would keep underlining (or missing) `len`/`scl`/`shf`
+             * names after a Scene change. The held-step overlay is
+             * deliberately kept: its held values and LEDs already read
+             * menu_shownPattern live, and its exit stays tied to the physical
+             * step release. No Pattern LED update here: the STEP LED owners
+             * refresh the row on Pattern change. Inputs: menu_shownPattern
+             * (already updated). Output: va_search* reset and one repaint.
+             * Affiliates: va_searchRestart(), va_scanService(),
+             * sa_applyTrackMarkers().
              */
             va_searchRestart();
             menu_repaint();

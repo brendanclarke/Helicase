@@ -192,6 +192,19 @@ uint8_t copyClear_ownsPots(void);
 uint8_t copyClear_potTurned(const cc_pot_target_t *target);
 
 /*
+ * Report whether the held copy/clear gesture is a clear (not a copy).
+ *
+ * What: nonzero only while CC_OP_CLEAR is the active phase, i.e. SHIFT was
+ * held when the copy/clear button went down. Why: copyClear_ownsPots() is
+ * true for both copy and clear, but the STEP held-step track automation
+ * overlay (S078 P2 §8) must intercept a pot turn only to remove automation
+ * from the held steps; in copy mode the same pot turn must stay inert.
+ * Inputs: cc_state.phase. Output: 1 for clear, 0 for armed-copy/copy/none.
+ * Callers: menu_parseKnobDelta().
+ */
+uint8_t copyClear_isClearMode(void);
+
+/*
  * AutoSave and Pattern maintenance suspension (spec §9.2).
  * Output: nonzero from the start of an operation (first copy object press or
  * pot clear) until the copy/clear button has been released and the service

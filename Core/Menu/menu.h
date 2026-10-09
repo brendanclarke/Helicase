@@ -520,15 +520,17 @@ void menu_voiceAutoOverlayBarChanged(void);
  * Restart the automation-presence search after Pattern content changed (S075;
  * formerly menu_voiceAutoOverlayPatternDeleted()).
  *
- * What: restarts the bounded search shared by the VOICE pages (active track)
- * and the Effect page (all seven tracks, S074), then repaints, so underlines
- * follow the new content once the rescan completes. Why: a paste or clear can
- * add or remove automation anywhere in the viewed Pattern, and a removed
- * target cannot be proven absent without a full rescan. Inputs: none; call
- * after Pattern content has been changed. Outputs: a cleared search and a
- * repaint on VOICE and Effect pages; nothing on other pages, whose next
- * VOICE/Effect entry restarts the search anyway. Callers: copyClearService.c
- * after every Pattern paste/clear on the viewed Scene. Affiliates:
+ * What: restarts the bounded search shared by the VOICE pages (active track),
+ * the STEP track-settings page (SEQ_PAGE, active track, `len`/`scl`/`shf`,
+ * S078 P3), the Effect page (all seven tracks, S074), and the PERF page (all
+ * seven tracks, S077 P6), then repaints, so underlines follow the new content
+ * once the rescan completes. Why: a paste or clear can add or remove
+ * automation anywhere in the viewed Pattern, and a removed target cannot be
+ * proven absent without a full rescan. Inputs: none; call after Pattern
+ * content has been changed. Outputs: a cleared search and a repaint on those
+ * pages; nothing on other pages, whose next entry restarts the search anyway.
+ * Callers: copyClearService.c (ccSvc_patternChangedUi()) after every Pattern
+ * paste/clear and pot-clear register pass on the viewed Scene. Affiliates:
  * va_searchRestart() and va_scanService() in menu.c.
  */
 void menu_patternContentChanged(void);
@@ -536,12 +538,15 @@ void menu_patternContentChanged(void);
  * Drop one target's underline now, without restarting the search (S075).
  *
  * What: clears the presence bit for one target in the current search result
- * and repaints. Why: a pot clear removes the underline at the turn (spec §6)
- * while the background removal runs; restarting the whole search would make
- * every other underline vanish until the rescan completes. The search loop
- * filters targets waiting in the register (ccSvc_targetPending()), so the
- * bit cannot come back before the removal finishes. Inputs: Pattern target
- * ID. Output: repaint. Caller: ccClear_potTurned().
+ * and repaints; VOICE, Effect, PERF, and (S078 P3) the STEP track-settings
+ * `len`/`scl`/`shf` bits of the active track are covered. Why: a pot clear
+ * removes the underline at the turn (spec §8) while the background removal
+ * runs; restarting the whole search would make every other underline vanish
+ * until the rescan completes. The search loop filters targets waiting in the
+ * register (ccSvc_targetPending()), so the bit cannot come back before the
+ * removal finishes. Only for whole-Scene removals: a held-step-only removal
+ * restarts the search instead. Inputs: Pattern target ID. Output: repaint.
+ * Caller: ccClear_potTurned().
  */
 void menu_automationTargetCleared(uint16_t target);
 /*
@@ -568,6 +573,26 @@ uint8_t menu_isStorageBusy(void);
 void menu_toggleStepTrackSettingsHalf(void);
 void menu_showStepTrackSettingsFirstHalf(void);
 void menu_showStepEditPage(void);
+/*
+ * STEP held-step track automation overlay (S078 P2 §B).
+ *
+ * What: enters the STEP-mode overlay that writes an automatable track timing
+ * parameter (length, scale, shuffle) as step automation to every physically
+ * held step. Why: STEP mode has no track-level parameter editor, so holding
+ * steps and pressing a TRACK button opens the SEQ track-settings page with
+ * automation-editing semantics instead of the normal retained-value editor.
+ * Inputs: voiceNr is the pressed TRACK button (0..6). Outputs: the SEQ_PAGE
+ * front page is shown for that track, the shared VOICE-overlay state is armed
+ * for the STEP context, step LEDs are refreshed, and the frame is repainted;
+ * held-step values are underlined on the value row, and automated
+ * `len`/`scl`/`shf` names are underlined from the SEQ_PAGE Pattern search
+ * (S078 P3), which also runs without the overlay. Lifetime: until all steps
+ * are released, the page changes, or the mode changes. Caller:
+ * handleVoiceButton() in buttonHandler.c when buttonHandler_seqHeldMask() is
+ * nonzero. Affiliates: menu_seqCellToTrackTarget(),
+ * sa_refreshAutomationLeds(), sa_applyTrackMarkers().
+ */
+void menu_enterStepTrackAutomationOverlay(uint8_t voiceNr);
 void menu_resetActiveParameter(void);
 uint8_t menu_getSubPage(void);
 /*

@@ -1575,6 +1575,24 @@ static void handleVoiceButton(uint8_t voiceNr)
 
         if (bh_state.selectButtonMode == SELECT_MODE_STEP ||
             menu_activePage == SEQ_PAGE) {
+            /*
+             * Held steps + TRACK = STEP track automation overlay (S078 P2 §B).
+             *
+             * What: while one or more SEQ steps are physically held, a TRACK
+             * (VOICE) press opens the held-step track automation overlay for
+             * the pressed track instead of the ordinary track-settings page
+             * switch. Why: the overlay edits automatable track timing
+             * parameters (length, scale, shuffle) as per-step automation on
+             * the held steps, so the TRACK press must not also reset the
+             * front-page half or repaint the plain settings view. Inputs:
+             * physical held-step mask. Output: Menu overlay entry; this press
+             * returns before the ordinary half-toggle/page-switch path.
+             * Affiliates: menu_enterStepTrackAutomationOverlay().
+             */
+            if (buttonHandler_seqHeldMask() != 0u) {
+                menu_enterStepTrackAutomationOverlay(voiceNr);
+                return;
+            }
             led_clearAllBlinkLeds();
             /*
              * STEP-mode VOICE presses own the track-settings front-page half.

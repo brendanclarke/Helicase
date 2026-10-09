@@ -439,12 +439,20 @@ selection (`… notes`, `… auto`); its triggers then stay off (accepted).
 - The Pattern part covers the **active Scene, all 7 tracks × 128 steps, and
   never fans out**. The FX-sequence part (Effect rows, Effect Morph) clears
   the lane on all 16 steps **and fans out**.
+- STEP track settings (S078 P3): with no SEQ steps held, a pot clear over
+  `len`, `scl`, or `shf` (first half of the track-settings page) follows the
+  rules above for the active track's target. With SEQ steps held after a
+  TRACK press (the held-step overlay, S078 P2 §B), the same turn instead
+  removes the target from the held steps only, at once, without the register
+  (`sa_clearAutomationFromKnob()`); the name underline is then re-derived by
+  the search.
 
 | Page | Cell | Pattern target | FX sequence (fans out) |
 |---|---|---|---|
 | VOICE (Normal or Morph view) | Instrument parameter | `slot·64 + descriptor` | — |
 | VOICE | voice Morph, audio out, FX send | `Nvm`, `Nou`, `Nfx` | — |
 | VOICE | generated slot-6/track-7 decay | `7dc` | — |
+| STEP (track settings, Normal or Morph view) | `len`, `scl`, `shf` | track target 405+t / 412+t / 419+t (t = active track) | — |
 | PERF | `1vm..6vm` | matching Scene target | — |
 | PERF | `fxm` (Effect Morph) | `fxm` (404) | lane 0 (Morph lane) |
 | EFFECTS | Effect parameter, local *L* | `448 + L` | the lane mapped to *L* |
@@ -1051,7 +1059,7 @@ S075 close are marked ◻.
 | Pastes ◻ | Every step/bar selection on a playing Pattern without glitches; overlap with the source; cross-track and cross-Scene retargeting (same type, by key, by page position, dtype mismatch dropped); `copy track` with settings; nearly full pool: completed or dropped whole, early triggers restored except user-toggled steps |
 | Probability | `auto -> repl` copies the source probability (set/changed/removed); `auto -> merge` leaves it; `… notes` keeps it |
 | Clears | Every selection; `clear track` resets settings; steps go dark at once; PERF clears on the active and another Scene (other: emptied, dark); `clear send` zeroes both send endpoints and sets `pre` |
-| Pot clears | VOICE, PERF (`1vm..6vm`, `fxm`), Effect page; no menu; underline off at the turn; values never change; 8-entry register; FX-lane part fans out; starts at once during a running drain |
+| Pot clears | VOICE, STEP track settings (`len`/`scl`/`shf`; held steps: held-only), PERF (`1vm..6vm`, `fxm`), Effect page; no menu; underline off at the turn; values never change; 8-entry register; FX-lane part fans out; starts at once during a running drain |
 | Scene level ◻ | Instrument (fan-out, Advanced limit, track 7, decay pair, LFO `self`), Kit, Effect (type change, fan-out), settings (mask exchange), Scene, Pattern (retarget), present rule |
 | Names ◻ | HCNAMES rows after each kind, fanned-out and chained pastes; `R` cleared; card removed during the name write ends the operation |
 | Suspension ◻ | AutoSave/trace/settings writers do not start during an operation; a running writer finishes; the scalar drain runs ~250 ms after the end; repair resumes |
