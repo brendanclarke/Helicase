@@ -3,7 +3,7 @@
 Session 079, Part 1 — General plan for expanding the step special system with
 trigger conditions, per-step roll (rate, rhythm, fill), and micro-timing delay.
 
-Decisions from Q&A round 1 are folded in; resolved questions are marked
+Decisions from Q&A rounds 1–2 are folded in; resolved questions are marked
 (DECIDED). Follow-up questions at the end.
 
 ---
@@ -160,6 +160,11 @@ A per-track flag `seq_trackLastConditionFired[7]` records whether the most
 recently evaluated conditional step fired or was suppressed. At track start
 (or counter reset), this flag defaults to 0 (not fired), so an opening `lst`
 will not fire and an opening `!ls` will fire.
+
+(DECIDED: F4.) Every conditional step (value 1..36) updates the flag when
+evaluated — regardless of which condition type caused suppression. `lst` checks
+whether the last conditional trigger fired; the nature of the condition is
+irrelevant.
 
 Chaining: `r50` → `lst` → `lst` — the r50 coin-flip gates the entire chain.
 
@@ -326,9 +331,28 @@ duration; the second half is silent (no retriggers). The retrigger rate is
 unchanged — the triggers are spaced at the roll rate but stop after 50% of the
 step has elapsed.
 
-A value of 0 means no retriggers at all (the roll is effectively off,
-equivalent to not having a roll). The UI should probably prevent storing 0
-and instead clear the roll entirely.
+(DECIDED: F1.) **Gate trigger.** When fill < 100, the last trigger in the
+roll's filled region is a **gated trigger**: the voice's effective decay is
+briefly set to ~1/10th its actual value, producing a choked hit that marks the
+end of the roll region. This gives the fill a rhythmic cut-off rather than an
+abrupt silence.
+
+- Fill 100 (default): the roll fills the entire step. No gate trigger; the step
+  boundary handles termination naturally.
+- Fill 50: retriggers for the first 50% of the step at normal velocity, then the
+  final retrigger in that region fires as a gated trigger (1/10th decay).
+- Fill 0: a single gated trigger at the step's fire time. No retriggers — just
+  one choked hit.
+
+**Microtiming applies to fill.** (DECIDED: F1.) The entire roll (including the
+gate trigger) is shifted by the micro-timing delay. The same drop rule applies:
+if the next step's trigger arrives before the deferred roll completes, the
+remaining retriggers (including the gate) are dropped.
+
+**Gate trigger + carry-over:** when two adjacent steps carry over (§4.2), the
+gate trigger does NOT fire at the first step's fill boundary. The gate only
+fires at the true end of the roll — the last step's fill boundary, or when the
+next step's roll parameters differ and the carry-over breaks.
 
 ### 6.2 Interaction with roll carry-over
 
@@ -562,8 +586,8 @@ specials. The pool read is a short SRAM1 access, not SD I/O.
 ### A5. Roll fill at small values
 
 Roll fill of 1% on a short step may produce zero retriggers (the fill window
-is shorter than one retrigger interval). The roll would be silent. This is
-correct by definition — if the user sets fill to 1%, they get 1% of the step.
+is shorter than one retrigger interval). In this case, the step produces only
+the single gated trigger (1/10th decay) at the fire time — same as fill 0.
 
 ### A6. Micro-timing + shuffle overflow into next step
 
@@ -580,53 +604,44 @@ roll/rhythm/fill values. The existing subpage mechanism uses BAR or a similar
 control. Verify that the subpage navigation gesture still works with 3
 subpages (track settings + 2 step-specials pages).
 
+### A8. No retrigger cap (DECIDED: F2)
+
+Absolute roll rates on very slow tracks can produce many retriggers per step
+(e.g., 64th roll on a 1/1-scale step → ~64 retriggers). No cap. Computationally
+fine (at most one trigger per PPQ tick).
+
+### A9. Condition evaluated at step-advance time (DECIDED: F3)
+
+A step with condition + roll + micro-timing: the condition is evaluated at
+step-advance time, not at the delayed trigger time. If fill mode activates
+between step-advance and the delayed trigger, it does not retroactively gate or
+un-gate the step. Simpler, deterministic, no RNG re-roll.
+
 ---
 
-## 13. Follow-up questions
+## 13. Resolved follow-ups (round 2)
 
-### F1. Roll fill value 0
+- **F1 (Roll fill 0):** DECIDED. Fill 0 = single gated trigger. Fill < 100
+  ends with a gated trigger (1/10th effective decay). Microtiming applies;
+  drop-if-next-trigger rule holds. See §6.1.
+- **F2 (No cap):** DECIDED. No retrigger cap on slow tracks. See A8.
+- **F3 (Condition at advance time):** DECIDED. Condition evaluated at
+  step-advance time, not at delayed trigger time. See A9.
+- **F4 (`lst`/`!ls` + `fil`):** DECIDED. Every conditional step updates
+  `seq_trackLastConditionFired` when evaluated. `lst` checks whether the last
+  conditional trigger fired — period. The nature of the condition that
+  suppressed or allowed it is irrelevant. See §3.4.
+- **F5 (Converter scope):** DECIDED. Keep `convert_pattern_specials.py`
+  separate from `convert_scene_scale.py`.
 
-Should roll fill 0 be treated as "no roll" (equivalent to clearing the roll)?
-Or should it be a valid value meaning "zero-length roll" (silent)? If the
-former, the UI should prevent storing 0 and instead clear the roll special
-entirely when the user dials fill down to 0. If the latter, 0 is a stored
-value that produces no retriggers.
+---
 
-### F2. Absolute roll rates on very slow tracks
+## 14. Follow-up questions
 
-A track at 1/2 scale (one step = a half note = 48 PPQ ticks). A 64th roll on
-that step produces 48 / 1.5 ≈ 32 retriggers per step. A 1/1 scale (whole note
-= 96 ticks) with a 64th roll → ~64 retriggers per step. These are musically
-extreme but computationally fine (one trigger per PPQ tick at most). Is this
-the intended range, or should there be a maximum retrigger count per step?
+### F6. Gate trigger mechanism (DECIDED)
 
-### F3. Condition + roll + micro-timing deferred-trigger interaction
-
-A step with condition + roll + micro-timing delay: the condition is evaluated
-at step-advance time (not at the delayed time). If the condition passes, the
-entire roll (starting from the delayed position) fires. Is this correct? Or
-should the condition be re-evaluated at the delayed trigger time (allowing
-fill mode to activate between step-advance and the delayed trigger)?
-
-**Recommendation:** evaluate at step-advance time. Evaluating at delayed time
-would require storing the condition index in the deferred trigger state and
-re-running the RNG, which changes the probabilistic outcome.
-
-### F4. `lst`/`!ls` interaction with `fil`/`!fl`
-
-If a step has `fil` and doesn't fire (fill not active), does it update the
-`seq_trackLastConditionFired` flag? If yes, a subsequent `lst` step would not
-fire (because the `fil` step didn't fire). If no, the `lst` step would look
-further back to the previous conditional step that wasn't fill-gated.
-
-**Recommendation:** yes, update the flag. The `fil` step was evaluated and
-suppressed — that is a "did not fire" result, and `lst`/`!ls` should reflect
-it. This keeps the model simple: every conditional step updates the flag,
-regardless of which condition type suppressed it.
-
-### F5. Python converter scope
-
-Should `tools/convert_pattern_specials.py` also handle the S078 scale
-conversion (`tools/convert_scene_scale.py`), or remain a separate tool? A
-combined converter that handles both PAT4 v4 → v5 (probability) and the scene
-scale adjustment would simplify card preparation to one step.
+The gate trigger (§6.1) uses a "gated" bit in the trigger event, passed to
+`voiceControl_triggerVoice()`. The voice engine checks the flag and applies a
+1/10th decay multiplier for that one trigger cycle. The voice's AmpEnvDecay
+parameter (or equivalent) is scaled by 0.1. Cleanest separation — one bit,
+handled once in the voice control layer, works uniformly across voice types.
