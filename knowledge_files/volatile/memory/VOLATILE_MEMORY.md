@@ -31,36 +31,49 @@ Do not recommend bumping `AUTOSAVE_PARAMETER_GETS_PER_WRITE` or adjusting
 capture timing unless the user explicitly asks. The section-based CRC
 format redesign is the chosen path for write performance.
 
-## Current carryover after Session 075
+## Current carryover after Session 078
 
-Session 075 (2026-10-01/03, `dev-ph6-copyclear`) started Phase 6: copy and
-clear of Pattern data, Scenes and Scene children (`Core/Menu/CopyClear/`),
-global `srt` retired (PERF `fxm`), the DEV trace stage `c`, two hardware
-follow-up rounds (F1, F2: defaults, pan rule, morphable FX send, VOICE
-hold-SHIFT Morph, Effect-page SHIFT+TRACK overlay) and the automation
-priority fix (F3).
+Session 078 (2026-10-08/10, `dev-ph6-cleanup`) implemented per-track timing
+(continuous 128-position step scale with Q8.8 DDA, FX sequencer on the same
+curve, shuffle, run modes, morphable/automatable length/scale/shuffle), STEP
+multi-step editing and the held-step track automation overlay, the STEP
+underline/pot-clear fix, and the run-mode remediation.
 
-- **Commits:** HEAD `76aef20` holds every S075 code change. The closeout docs
-  and three comment-only pointer edits are uncommitted. The user manages
-  commits.
-- **Final link (DEV):** `text=532,408`, `data=416`, `bss=426,712`; payload
-  532,824 B of 753,664 (220,840 B free); ITCM 4,168 B; DTCM statics 4,472 B;
-  FX arena 126,592 B; `scenes` `0x65E0`. `LXRV2_lxr02.img` SHA-256
-  `d1c0aac2…9ceb`. Production build last measured at F1.
-- **Durable authorities:** `075_SESSION_HANDOFF_LOG.md`;
-  `COPYCLEAR_UTILITIES.md` (new); `PATTERN_DYNAMIC_STACK.md` §6.2a and §12.17;
-  `MODULE_INTERCHANGE_SPEC.md`; `BANK_PRESET_ARCHITECTURE.md`.
-- **Disposable:** the ten root `S075_*.md` documents.
-- **Next session (076):** user hardware checks (overlay follow-up, the
-  `COPYCLEAR_UTILITIES.md` §16 list, an F2-card validator run after deleting
-  old AutoSave records), production build measurement, then the next Phase 6
-  item chosen with the user.
-- **Open (details in `knowledge_files/volatile/S070_WORKING_NOTES.md` and the
-  log §13):** Pattern Load fan-out tear; O1 per-voice Morph equalisation;
-  MIDI-entered values reach the LCD only at the next repaint; Effects saved at
-  pan 64 show `1`; the S074 items (boot timeout, `cpu` with `cmp`, BC11, F4
-  trace priorities, stale comments).
-- **Hardware still pending from S072:** the Phase 5 Step 6–10 matrices.
+- **Commits:** P1 `0c23def`, P2+P3 `b537e6f`; P4 and the close-out docs are
+  uncommitted. The user manages commits.
+- **Final link (DEV):** `text=539,856`, `data=416`, `bss=427,616`; payload
+  540,272 B of 753,664 (213,392 B free).
+- **Durable authorities:** `078_SESSION_HANDOFF_LOG.md`;
+  `PATTERN_DYNAMIC_STACK.md` §6.3a/§6.4; `BANK_PRESET_ARCHITECTURE.md` §5/§8;
+  `MODULE_INTERCHANGE_SPEC.md`.
+- **Next session (079):** carry-over list in
+  `knowledge_files/volatile/S078_WORKING_NOTES.md` (STEP marker retry
+  decision, remaining retest rows, production build). S078 P1–P4 are all
+  hardware PASS.
+
+### Working preferences confirmed in Session 078
+
+- **Root cause first, then a narrow fix document.** For a reported defect the
+  user asks for the "precise, targeted reason" and a narrowly scoped fix
+  written to a named root document, before any code. Read the code, rule out
+  alternatives explicitly, and do not pad with speculative diagnostic plans
+  when the code already proves the cause.
+- **Plan → schedule → implement → review → test.** The user asks for a
+  per-change implementation schedule (file, line, add/remove/modify, full
+  comment blocks), then implements (or asks the assistant to), then asks for
+  an assessment appended to the schedule, then tests on hardware and asks for
+  results to be marked in the documents.
+- **Deviations found in a deep dive are listed explicitly** and the plan
+  document is updated to match the schedule when asked.
+- **"Doesn't work" without detail:** ask which part, what was seen, and which
+  image was flashed before changing code (S078: it was a wrong image).
+- **Labels follow existing vocabulary.** The user rejects poor abbreviations
+  (`mod`) and wants a concept to read the same everywhere (track `run` /
+  `Track` / `RunMode`, matching the FX sequencer's `run` / `RunMode`).
+- **SHIFT Morph-view rule (binding):** a non-morphable parameter shows and
+  edits its Normal value in every Morph view; never `---`, never locked.
+- **Session closeout also updates `SCOPING_TARGETS.md`** for what was
+  accomplished (this or earlier sessions).
 
 ### Working preferences confirmed in Session 075
 

@@ -7,7 +7,10 @@ Effect-page framework extensions it needed, and the automation underlines.
 Session 075 added Effect and FX-sequence copy/clear with fan-out (A15
 closed, §8.3, §9), the PERF `fxm` cell, the one pan rule (§8.6), the
 long-name-only full views (§8.1) and the SHIFT+TRACK voice-mix overlay
-(§8.4).
+(§8.4). Session 078 moved the FX sequencer clock onto the 128-position
+continuous step-scale curve with a Q8.8 DDA accumulator (§10) shared with the
+Pattern tracks, remapped the `.fx` `step_scale` tokens to curve positions
+(§12), and moved CrumpBit's sync division to the new StepScale API (§10).
 It describes what the firmware does and how to extend it. **Where any plan or
 log disagrees, this document describes the code**; §13 lists the known
 differences from the plan.
@@ -255,7 +258,7 @@ shown on the `FxBf` boot screen. Codes:
 | Field | Bytes | Default |
 |---|---|---|
 | `type` | 1 | `off` |
-| `seq_run_mode`, `seq_length`, `seq_step_scale` | 3 | `fwd`, 16, index 4 (`1/16`) |
+| `seq_run_mode`, `seq_length`, `seq_step_scale` | 3 | `fwd`, 16, CC 76 (`1/16`; a step-scale CC 0..127 since S078) |
 | `normal[64]`, `morph[64]` | 128 | common 0/127/64; type rows = type default |
 | `steps[16]` = {`lock_mask` u16, `value[16]`} | 288 | no locks |
 
@@ -631,8 +634,14 @@ CrumpBit's F2 defaults are mix 0, feedback 64, rate 64, delay pan 63
 
 ## 10. FX sequencer
 
-- **Clock** (TIM3, 96 PPQ, `seq_elapsedPpqTicks`): `T = stepScale_ticks(scl)`
-  and `n = ticks / T`. At each boundary:
+- **Clock** (TIM3, 96 PPQ; S078 DDA): every PPQ tick
+  `seq_fxClockTick()` adds 256 to `seq_fxAccumulator` (Q8.8); when it reaches
+  `T = stepScale_ticksQ8(scl)` it subtracts `T`, takes `n =
+  seq_fxStepCounter++` (FX boundaries since the last reset; both are reset by
+  `seq_setStepIndexToStart()`), and publishes the index below. The counter
+  replaces the former `n = ticks / T`, which is ambiguous for fractional
+  intervals. Same curve and arithmetic as the Pattern tracks
+  (`PATTERN_DYNAMIC_STACK.md` §6.4). At each boundary:
 
   | Mode | Index |
   |---|---|
@@ -650,9 +659,15 @@ CrumpBit's F2 defaults are mix 0, feedback 64, rate 64, delay pan 63
   where the selected step applies at once), and the held Morph is cleared.
 - **Transport.** While stopped, only `sel` applies. Start/stop/reset publishes
   RESET.
-- **Shared scale table** (`StepScale.c`), ticks:
-  `6 8 12 16 24 32 36 48 64 72 96 192 384 768` (default index 4 = 1/16).
-  Pattern track scale shares the index but playback ignores it (A10).
+- **Shared scale curve** (`StepScale.c`, S078): `seq_step_scale` is a CC
+  0..127, `multiplier = 0.25 × 2^(cc / (127/5))` × 24 ticks, so 1/64 (CC 0,
+  6 ticks) … 1/2 (CC 127, 192 ticks); default CC 76 = 1/16. The 14 musical
+  stops (0 `/64`, 16 `32t`, 38 `/32`, 54 `16t`, 60 `d32`, 76 `/16`, 83 `8Tr`,
+  86 `d16`, 93 `/8`, 100 `4Tr`, 103 `d/8`, 110 `/4`, 120 `d/4`, 127 `/2`) show
+  their names; other positions show the CC (`stepScale_formatShort()`). The
+  pre-S078 `1bar`/`2bar` divisions no longer exist (the curve tops out at
+  1/2). Pattern track scale uses the same curve and is played since S078 (A10
+  closed).
 
 ---
 
@@ -663,7 +678,7 @@ CrumpBit's F2 defaults are mix 0, feedback 64, rate 64, delay pan 63
 | IDs | Owner |
 |---|---|
 | 0..383 | voice slots (6 × 64) |
-| 384..447 | Scene targets; 384..404 in use; **404 = `fxm`** |
+| 384..447 | Scene targets; 384..425 in use; **404 = `fxm`**; 405..425 = track length/scale/shuffle (S078) |
 | 448..510 | **Effect local 0..62** (`448 + local`) |
 | 511 | Pattern off sentinel |
 
@@ -721,8 +736,14 @@ type=flt
 ```
 
 The `step_scale` tokens are the `.fx` file's own spelling
-(`storage_effectStepScaleTokens`, index-aligned with StepScale). They differ
-from the on-screen long names (`1/32T`, `1 bar`).
+(`storage_effectScaleTokens[]` in `storageTypes.c`). Since S078 each token
+names a CC on the curve: `1/64` 0, `1/32t` 16, `1/32` 38, `1/16t` 54, `1/16`
+76, `1/8t` 83, `1/16.` 86, `1/8` 93, `1/4t` 100, `1/8.` 103, `1/4` 110,
+`1/2` 127, `1bar` 127, `2bar` 127 (clamped). A decimal CC 0..127 is also
+accepted; the writer emits the token when one exists (CC 60/120 and every
+non-stop CC are written as decimals). Old files keep their musical division
+with no migration. The tokens differ from the on-screen names (`32t`,
+`1/32T`).
 
 - Unknown keys are skipped; missing keys take the defaults.
 - An unknown type token fails the load.

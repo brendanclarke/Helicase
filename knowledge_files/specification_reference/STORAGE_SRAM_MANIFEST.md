@@ -4,11 +4,23 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 077 close (2026-10-08), `dev-ph6-cleanup`,
-  uncommitted. DEV link: `text=538,416`, `data=416`, `bss=427,008`;
-  flash payload 538,832 B of 753,664 B (**headroom 214,832 B**).
-  Production (`DEV_MODE_LOGGING=0`) was last measured at S075 F1 and needs a
-  rebuild.
+- **Current as of:** Session 078 close (2026-10-10), `dev-ph6-cleanup`
+  (P1 `0c23def`, P2+P3 `b537e6f`, P4 uncommitted). DEV link:
+  `text=539,856`, `data=416`, `bss=427,616`; flash payload 540,272 B of
+  753,664 B (**headroom 213,392 B**). Production (`DEV_MODE_LOGGING=0`) was
+  last measured at S075 F1 and needs a rebuild.
+- **S078 changes (approved at plan acceptance):** +608 B BSS from S077.
+  `sequencer.c` +76 B ISR-static timing state (per-track Q8.8 accumulators
+  14 B, FX accumulator 2 B, FX step counter 4 B, shuffle delay/pending/
+  velocity/note 28 B, play state 7 B, effective length/scale/shuffle 21 B);
+  `presetMorphEngine.c` +24 B track step-override state
+  (`track_param_override_value[21]` + `track_param_override_mask[3]`);
+  `scenes` +352 B (16 × 22 B: 21 B `track_morph_*` endpoints + alignment);
+  `pat_regions` +112 B and `pat_background_region` +7 B
+  (`track_play_mode[7]` per region). The P2 STEP overlay's 1 B presence byte
+  was added and removed again in P3 (released, not reused). Flash: the
+  256 B Q8.8 step-scale LUT, the 14-stop label table, run-mode names and
+  21 Scene target rows; text +1,440 B over the session.
 - **S077 changes:** +264 B BSS (256 B `copyClearService.c:ccSvc_snapTable[128]`
   static paste source table + 8 B alignment). `PatternData.c:pat_background_region`
   (10,519 B) replaces `pat_autosave_snapshot` at identical size — no net change
@@ -291,14 +303,14 @@ only works while sector 6 holds no code.
 
 ---
 
-## 5. Static RAM ledger (Session 077 close DEV link)
+## 5. Static RAM ledger (Session 078 close DEV link)
 
 | Region and section | Start | Capacity | Static bytes | Free |
 |---|---|---:|---:|---:|
 | SRAM1 `.dma_nocache` | `0x20020000` | part of SRAM1 | 3,100 | — |
 | SRAM1 `.data` | `0x20020c1c` | part of SRAM1 | 416 | — |
-| SRAM1 `.bss` | `0x20020dc0` | part of SRAM1 | 293,356 | — |
-| **SRAM1 total** | `0x20020000` | **376,832** | **296,872** | **79,960** |
+| SRAM1 `.bss` | `0x20020dc0` | part of SRAM1 | 293,964 | — |
+| **SRAM1 total** | `0x20020000` | **376,832** | **297,480** | **79,352** |
 | DTCM `.dtcm` | `0x20000000` | part of DTCM | 512 | — |
 | DTCM `.dtcmz` | `0x20000200` | part of DTCM | 3,960 | — |
 | DTCM `.dtcm_fxbuf` (arena) | `0x20001180` | part of DTCM | 126,592 | 0 (reserved arena) |
@@ -306,8 +318,11 @@ only works while sector 6 holds no code.
 | ITCM `.itcm` (code) | `0x00000000` | 16,384 | **4,168** | 12,216 |
 | SRAM2 `.devwdg_noinit` | `0x2007c000` | 16,384 | 0 | see stack note |
 
-- Static data RAM (SRAM1 + DTCM including the arena) is 427,936 B;
-  including ITCM code, 432,104 B.
+- Static data RAM (SRAM1 + DTCM including the arena) is 428,544 B;
+  including ITCM code, 432,712 B.
+- **Session 078 changes:** `.bss` +608 B (owners listed in the header and
+  §8.2). DEV link `text=539,856`, `data=416`, `bss=427,616`; flash payload
+  540,272 B.
 - **Session 077 changes (approved: +256 B S077 allocation):** the only new
   owner is `copyClearService.c`: `ccSvc_snapTable` (256 B, the static paste
   source table). `pat_background_region` (10,519 B) replaces the former
@@ -441,9 +456,9 @@ byte, including alignment and small variables omitted here.
 
 | Owner / object | Bytes | Allocation and use |
 | --- | ---: | --- |
-| `SceneData.c`: `scenes` | 26,080 | Sixteen resident Scene records, 1,630 B each: 50 B settings including the S075 F2 `fx_send_morph[6]`, 420 B Scene-owned Effect record, and the 1,160 B Kit; Pattern regions are separate. |
-| `PatternData.c`: `pat_regions` | 168,304 | Sixteen packed regions of 10,519 B: each has 1,792 B step addresses, 8,192 B pool, 512 B bitmap, and 23 B Pattern/track settings. Since S075 the top 132 B of each pool (33 chunks) is a permanent swap block outside normal allocation (8,060 B usable), kept as a guaranteed rewrite area for copy/clear and later features (`PATTERN_DYNAMIC_STACK.md` §3, §12.17). |
-| `PatternData.c`: `pat_background_region` | 10,519 | One Scene-sized background region outside `pat_regions[]`, not a playable Scene (S077). Serves as the immutable snapshot for an in-flight Pattern AutoSave, the copy/clear scratch pool for an overlapping paste (`pat_backgroundPoolMut()`), and future Bank Load staging. Replaces the former `pat_autosave_snapshot` at identical size. |
+| `SceneData.c`: `scenes` | 26,432 | Sixteen resident Scene records, 1,652 B each: 71 B settings including the S075 F2 `fx_send_morph[6]` and the S078 `track_morph_length/scale/shuffle[7]`, 420 B Scene-owned Effect record, and the 1,160 B Kit (plus alignment); Pattern regions are separate. |
+| `PatternData.c`: `pat_regions` | 168,416 | Sixteen packed regions of 10,526 B: each has 1,792 B step addresses, 8,192 B pool, 512 B bitmap, and 30 B Pattern/track settings (length, scale CC, shuffle, run mode × 7 + 2 Pattern bytes; run mode added in S078). Since S075 the top 132 B of each pool (33 chunks) is a permanent swap block outside normal allocation (8,060 B usable), kept as a guaranteed rewrite area for copy/clear and later features (`PATTERN_DYNAMIC_STACK.md` §3, §12.17). |
+| `PatternData.c`: `pat_background_region` | 10,526 | One Scene-sized background region outside `pat_regions[]`, not a playable Scene (S077). Serves as the immutable snapshot for an in-flight Pattern AutoSave, the copy/clear scratch pool for an overlapping paste (`pat_backgroundPoolMut()`), and future Bank Load staging. Replaces the former `pat_autosave_snapshot` at identical size. |
 | `PatternStackService.c`: `reservation_image` | 512 | One non-persisted bit image for the current service Scene's trailing pool reservations; three separate one-byte policy/rebuild flags accompany it. |
 | `PatternStackService.c`: `service_queue` | 256 | Sixty-four 32-bit mutation entries; cursors and repair/handover state are additional small SRAM1 objects. |
 | `Autosave.c`: `autosave_dirty_mask` | 3,856 | Sole canonical scalar dirty-bit mask. |
@@ -468,6 +483,8 @@ byte, including alignment and small variables omitted here.
 | `usb_manager.c`: `USB_OTG_dev` | 1,524 | USB core/device handle. |
 | `usb_midi_core.c`: `usb_MidiMessages` | 2,048 | USB MIDI input ring. |
 | `sequencer.c`: pending automation + dirty bits | 560 | 128 four-byte pending records (512 B) and six per-voice 64-bit dirty maps (48 B). |
+| `sequencer.c`: per-track timing state (S078) | 76 | ISR-static: `seq_trackAccumulator[7]` (Q8.8, 14 B), `seq_fxAccumulator` (2 B), `seq_fxStepCounter` (4 B), `seq_trackShuffleDelay/Pending/Vel/Note[7]` (28 B), `seq_trackPlayState[7]` (7 B), `seq_effectiveTrackLength/Scale/Shuffle[7]` (21 B, the morphed/automated timing cache). Written by TIM3 and by foreground refresh points (`PATTERN_DYNAMIC_STACK.md` §6.4). |
+| `presetMorphEngine.c`: track step overrides (S078) | 24 | `track_param_override_value[3][7]` + `track_param_override_mask[3]`: runtime-only length/scale/shuffle step-automation overlay. |
 | `InstrumentManager.c`: `lfo_descriptor_targets` | 192 | Twelve descriptor LFO adapters for six slots and two target pairs. |
 | `menu.c`: `parameter_values` | 384 | Legacy Menu/MIDI parameter cells. |
 | `MidiParser.c`: `midiParser_originalCcValues` | 255 | Legacy MIDI CC baseline cells. |
@@ -602,3 +619,7 @@ not describe it in detail.
   replaces `pat_autosave_snapshot` at identical size. Section +264 B (256 B
   table plus 8 B alignment). DEV link `text=536,040`, `data=416`,
   `bss=427,008`; flash payload 536,456 B.
+- **S078:** per-track timing (+76 B sequencer, +24 B Morph engine), track
+  Morph endpoints (+352 B `scenes`), run mode (+112 B `pat_regions`,
+  +7 B `pat_background_region`); section +608 B. DEV link `text=539,856`,
+  `data=416`, `bss=427,616`; flash payload 540,272 B (headroom 213,392 B).

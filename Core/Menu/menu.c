@@ -833,14 +833,30 @@ static uint8_t menu_patternTrackMorphEndpoint = 0;
 /*
  * Test whether the STEP-page track Morph endpoint view is showing.
  *
- * Inputs: none. Output: nonzero while SHIFT is held on the SEQ page. Clients:
- * menu_getPlayModeName() (hides the discrete play-mode cell) and
- * menu_patternTrackMorphEndpointActive().
+ * What: nonzero only while the STEP SHIFT flag is set, the SEQ page is
+ * showing, and SHIFT is physically held (S078 P4).
+ * Why: the STEP Morph view is momentary (no latch, unlike SHIFT+VOICE). The
+ * flag is cleared only by a SHIFT release processed in STEP mode, and three
+ * routes skip that: a SHIFT+mode gesture from STEP (the release runs in the
+ * new mode), a mode change whose page switch was refused while storage or
+ * Preset was busy (the SEQ page stays visible), and a SHIFT release edge
+ * dropped by event-ring overflow. The physical SHIFT state
+ * (btn_held[BUT_SHIFT], written by the scan, not the ring) is correct in
+ * every case, so gating on it ends a stuck view on all three routes without
+ * a reset at each one. The Effect page already re-syncs its Morph view from
+ * buttonHandler_getShift() in the same way (menu_switchPage() Effect arm,
+ * menu_fxVoiceMixOverlayEnd()).
+ * Inputs: menu_patternTrackMorphEndpoint, menu_activePage,
+ * buttonHandler_getShift(). Output: 0/1. Accessors:
+ * menu_patternTrackMorphEndpointActive() (len/scl/shf display and commit
+ * redirection). Affiliates: menu_setPatternTrackMorphEndpoint(),
+ * buttonHandler.c SHIFT press/release STEP arms. Foreground only.
  */
 static uint8_t menu_patternTrackMorphViewActive(void)
 {
     return (uint8_t)(menu_patternTrackMorphEndpoint != 0u &&
-                     menu_activePage == SEQ_PAGE);
+                     menu_activePage == SEQ_PAGE &&
+                     buttonHandler_getShift() != 0u);
 }
 
 /*
@@ -1269,8 +1285,8 @@ static const Name valueNames[NUM_NAMES] = {
     {SHORT_BUS_COMP_AMOUNT,CAT_SCENE,LONG_BUS_COMP_AMOUNT},
     {SHORT_BUS_COMP_TIME,CAT_SCENE,LONG_BUS_COMP_TIME},
     {SHORT_BUS_COMP_SIDECHAIN,CAT_SCENE,LONG_BUS_COMP_SIDECHAIN},
-    /* S078 per-track play mode: mod / Pattern / PlayMode. */
-    {SHORT_PLAY_MODE,CAT_PATTERN,LONG_PLAY_MODE},
+    /* S078 per-track run mode: run / Track / RunMode (S078 P4 relabel). */
+    {SHORT_PLAY_MODE,CAT_TRACK,LONG_PLAY_MODE},
 };
 
 /* -----------------------------------------------------------------------
@@ -4816,13 +4832,15 @@ static uint8_t menu_cellCommitValue(const menu_cell_t *cell, uint16_t value)
         cell->static_param == PAR_EFFECT_MORPH)
         return menu_commitEffectMorphParam((uint8_t)value);
     /*
-     * S078 §5.6: the discrete play-mode cell is hidden in the STEP Morph view,
-     * so an encoder/pot turn there must not change the Normal play mode.
+     * SHIFT Morph view rule (S078 P4, project-wide): only morphable cells are
+     * redirected to a Morph endpoint. On the STEP page that is len/scl/shf
+     * (menu_patternTrackMorphEndpointActive()). The non-morphable run, mch,
+     * and not cells fall through to the ordinary Normal commit below, so a
+     * Morph view never blanks or locks a parameter, matching VOICE
+     * (menu_paramUsesMorphView()) and the Effect page (EffectsManager Normal
+     * fallback). Affiliates: menu_getParameterDisplayValue(),
+     * menu_getPlayModeName().
      */
-    if (cell->kind == MENU_CELL_STATIC &&
-        cell->static_param == PAR_TRACK_PLAY_MODE &&
-        menu_patternTrackMorphViewActive())
-        return 0u;
     if (cell->kind == MENU_CELL_STATIC &&
         menu_patternTrackMorphEndpointActive(cell->static_param)) {
         /*
@@ -9302,14 +9320,16 @@ static void menu_getLfoPolarityName(uint8_t value, char *buf)
 }
 
 /*
- * Format one per-track play-mode value into a three-character field.
+ * Format one per-track run-mode value into a three-character field.
  *
  * What: writes the fwd/rev/pip/rnd/onc/1fr token for stored values 0..5, and
  * clamps stale larger values to the last token. Inputs: raw stored value and a
  * three-character output. Outputs: exactly three characters, no terminator.
- * Why: the stored byte is the raw play-mode enum and has no DTYPE_MENU table
+ * Why: the stored byte is the raw run-mode enum and has no DTYPE_MENU table
  * id (the nibble space is full), so the value/clamp is applied by static-param
- * special cases. Affiliates: menu_formatCellValue3(), va_formatValue3(),
+ * special cases. The run mode is not morphable, so every view - including the
+ * STEP SHIFT Morph view - shows its Normal value (S078 P4 rule; never `---`).
+ * Affiliates: menu_formatCellValue3(), va_formatValue3(),
  * menu_clampCellValue(), the edit-view painter.
  */
 static void menu_getPlayModeName(uint16_t value, char *buf)
@@ -9317,14 +9337,6 @@ static void menu_getPlayModeName(uint16_t value, char *buf)
     const char *p;
     uint8_t count = (uint8_t)trackPlayModeNames[0][0];
 
-    /*
-     * S078 §5.6: the discrete play mode is not morphable, so the STEP Morph
-     * view blanks its cell instead of showing a Normal value.
-     */
-    if (menu_patternTrackMorphViewActive()) {
-        memcpy(buf, menuText_dash, 3);
-        return;
-    }
     if (count == 0u) {
         memcpy(buf, menuText_dash, 3);
         return;

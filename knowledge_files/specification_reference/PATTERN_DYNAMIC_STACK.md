@@ -3,13 +3,29 @@
 ## Authority and status
 
 This is the authoritative live-memory, allocator, PAT4 interchange, Pattern
-Stack Service, and Pattern AutoSave reference, **current as of the Session 077
-close** (2026-10-08, `dev-ph6-cleanup`, uncommitted). Session 073 changed
+Stack Service, and Pattern AutoSave reference, **current as of the Session 078
+close** (2026-10-10, `dev-ph6-cleanup`). Session 073 changed
 nothing. Session 074 changed no Pattern storage or allocator code; it added a
 second reader of step automation (the Effect-page underline search reads every
 step of every track of the viewed Pattern through
 `pat_readStepAutomations()`, 4 steps per foreground pass) and saw a torn PAT4
 file repair itself exactly as designed (§9).
+
+**Session 078 changed this area in four ways:**
+
+- **Per-track timing is now played** (§6.4): a continuous 128-position step
+  scale with per-track Q8.8 DDA accumulators, per-track shuffle on the 1/16
+  grid, and per-track run modes (`track_play_mode[7]`, §1, PAT4 track header
+  byte 3, §7). The sequencer reads an effective (morphed/automated) cache, never
+  the region directly, and never writes the region for timing.
+- **Track timing Morph and automation** (§6.1, §6.4): Scene targets
+  405..425 (length/scale/shuffle per track) are runtime-only overlays; Morph
+  endpoints live in Scene settings (`BANK_PRESET_ARCHITECTURE.md`).
+- **STEP-page editing** (§6.3): held SEQ steps broadcast velocity/note/
+  probability; held steps + TRACK opens a held-step track-automation overlay;
+  the STEP track-settings page has a Pattern-wide automation underline search
+  and SHIFT+COPY pot clears.
+- **Region size:** 10,519 → **10,526 B** (+7 B `track_play_mode`).
 
 **Session 077 changed this area in two ways:**
 
@@ -54,9 +70,9 @@ Implemented and hardware accepted:
   up to 63 per step) with uniqueness invariant and dtype-aware editing;
 - first-fit bit-packed pool allocator and block reclamation;
 - Pattern/track settings storage, Menu edit, and PAT4 persistence; Sequencer
-  probability playback; per-track step-length playback (Session 068, see
-  §6.4) — per-track step-scale and shuffle are stored/edited/persisted but
-  have no playback effect (deferred, see §6.4);
+  probability playback; per-track step-length playback (Session 068) and,
+  since Session 078, per-track continuous step scale, shuffle and run modes
+  with Morph and step automation (§6.4);
 - sequencer automation playback: TIM3 copies to 32-entry debounced
   pending buffer, foreground drain via `instrumentManager_writeRuntime()`,
   per-slot dirty bitmap with morph-interpolation restore on voice trigger;
@@ -89,20 +105,29 @@ typedef struct __attribute__((packed)) {
     uint8_t  track_length[7];       /* 7 B */
     uint8_t  track_scale[7];        /* 7 B */
     uint8_t  track_shuffle[7];      /* 7 B */
+    uint8_t  track_play_mode[7];    /* 7 B, S078: 0 fwd .. 5 1fr */
     uint8_t  pattern_change_bar;    /* 1 B */
     uint8_t  pattern_next;          /* 1 B */
-} pat_scene_region_t;               /* 10,519 B */
+} pat_scene_region_t;               /* 10,526 B */
 ```
 
-`pat_regions[16]` is exactly 168,304 bytes. Pattern storage is not embedded in
-`scene_t`; `scenes[16]` is a separate 26,080-byte SceneData object (S075 F2:
-1,630 B per Scene). `pat_sceneRegion(scene)` returns
+The header `_Static_assert` pins the size as address + pool + bitmap + 30
+(the 30-byte parameter tail: four 7-byte track arrays + 2 Pattern bytes;
+it was 23 before S078). `track_scale` holds a step-scale **CC 0..127**
+(S078; 76 = 1/16, §6.4), not the pre-S078 14-entry index.
+`track_play_mode` values ≥ 6 are treated as `fwd`.
+
+`pat_regions[16]` is exactly 168,416 bytes. Pattern storage is not embedded in
+`scene_t`; `scenes[16]` is a separate 26,432-byte SceneData object (S078:
+1,652 B per Scene, +21 B track Morph endpoints and alignment).
+`pat_sceneRegion(scene)` returns
 read-only access and `pat_sceneRegionMut(scene)` is reserved for bounded owner
 paths such as validated filesystem application. Ordinary clients use the
 public operations so mutation tracking cannot be bypassed.
 
-One additional `pat_background_region` is exactly 10,519 bytes (S077; it
-replaces the former standalone `pat_autosave_snapshot` at identical size). It
+One additional `pat_background_region` is exactly 10,526 bytes (S077; it
+replaces the former standalone `pat_autosave_snapshot` at identical size, and
+grew with the region type in S078). It
 is not a playable Scene: every Scene-indexed bound (scene_indexValid(),
 pat_patternValid(), the sequencer, the UI, PERF and Bank) stays at
 `SCENE_COUNT` (16), and it is reached only through its accessors. It serves
@@ -186,7 +211,9 @@ inconsistent back-reference makes a block invalid.
 
 Each automation entry's 9-bit target is the canonical `instrument_param_id_t`:
 `slot * INSTRUMENT_PARAM_COUNT + descriptor_index` for voice parameters
-(IDs 0..383), a Scene target ID (384+), or an Effect parameter ID 448..510
+(IDs 0..383), a Scene target ID (384+; since S078 including the track
+timing targets 405..411 length, 412..418 scale, 419..425 shuffle, one per
+track), or an Effect parameter ID 448..510
 (block 7, Session 072 step 9). A step must never contain two
 entries with the same 9-bit target (uniqueness invariant, enforced at write
 time). The 7-bit value is an identity mapping: stored value = parameter value.
@@ -318,7 +345,10 @@ expand to 0..255:
   `preset_applyVoiceAudioOutRuntime()` plus `preset_setAudioOutStepOverride()`
   for Audio Out routing, `preset_setFxSendStepOverride()` for FX Send (the
   mixer reads the effective send each block; the override beats the
-  Normal/Morph send endpoints), or `effects_setMorphAutomation()` for `fxm`. Sets the corresponding bit in
+  Normal/Morph send endpoints), `effects_setMorphAutomation()` for `fxm`, or
+  (S078) `presetMorph_setTrackParamStepOverride()` for the track
+  length/scale/shuffle targets 405..425, which also writes the sequencer's
+  effective cache directly so the next DDA tick follows (§6.4). Sets the corresponding bit in
   `seq_scene_automation_dirty` (`uint32_t`, 4 B). Scene automation never
   writes retained Scene/Kit setters — this prevents AutoSave thrashing and
   preserves user-set values.
@@ -397,50 +427,173 @@ velocity, or probability performs a tracked pool read-modify-write and repaints
 the menu. Track and Pattern setting pages read/write the fields in the resident
 region; PAT4 persists them.
 
-### 6.4 Per-track length, scale, and shuffle — playback consumption status
+The automation pages run only on SEQ_PAGE subpage 1
+(`menu_stepAutomationPageActive()`). Every target change goes through
+`menu_stepAutomationReplaceTarget()` and every delete through
+`menu_stepAutomationExecuteItem0()`; since S078 both restart the
+automation-presence search unconditionally (the former
+`menu_isVoicePage()` guards were dead), so the STEP track-settings underline
+(§6.3a) follows editor changes. Value-only edits and Add (`off` sentinel) do
+not change presence.
 
-`track_length[7]`, `track_scale[7]`, and `track_shuffle[7]` (§1) are all
-correctly stored, Menu-editable, dirty-marked, and PAT4-persisted, but only
-`track_length` currently affects playback. This distinction is not visible
-from the resident-object struct alone and is stated here explicitly because
-it was the source of a Session 068 field report.
+### 6.3a STEP-page multi-step editing and track automation (S078)
 
-**Track length (Session 068, implemented).** `seq_advanceTrackStep()` and
-`seq_realignActivePatternToMasterClock()` (`Core/Sequencer/sequencer.c`) read
-`region->track_length[track]` as each track's independent step-wrap boundary,
-falling back to `NUM_STEPS_PER_BAR` (16) when the region pointer is
-unavailable or the stored value is 0. Each track therefore loops
-independently at its own configured length. The in-memory init default is 16
-(`PatternData.c`), matching historic single-bar playback; the field's valid
-storage range is 1..`NUM_STEPS` (128), but multi-bar lengths (17..128)
-additionally require `menu_currentBar` integration in the chase-LED renderer
-that has not been built — the accepted, tested range is 1..16.
-`seq_handleMasterBoundary()` intentionally remains fixed at
-`NUM_STEPS_PER_BAR`: it detects the master-grid bar boundary (pattern-change
-commit, beat LED, clock output), a bar-level concept independent of any
-individual track's loop length, and must not be changed to track length.
+**Multi-step specials broadcast.** In STEP mode with two or more SEQ buttons
+held, a velocity/note/probability edit is written to every held step of the
+visible bar (`menu_broadcastStepSpecial()` → `patSvc_setStepVolume/Note/
+Probability()`; `buttonHandler_seqHeldMask()` + `buttonHandler_visibleStep()`).
+The display seeds from the last-pressed step; one held step is the old path;
+the automation pages stay single-step. Triggerless steps receive specials;
+a missing block is allocated; pool exhaustion drops writes silently.
 
-**Track scale (stored/displayed; playback not implemented).** Step 8 moves
-`track_scale[track]` to the shared StepScale index table, with init default
-`TRACK_SCALE_DEFAULT` (index 4, `1/16`). All tracks still advance together on
-one global divisor, `SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP` (24 PPQ ticks =
-1/16th note, in `seq_processSchedulerTick()`), so the retained scale has no
-playback effect regardless of its stored value. A future playback pass requires
-per-track PPQ tick accumulators and must consume the same StepScale ticks used
-by the FX sequencer; it must not introduce a second scale index order.
+**Held-step track automation overlay.** Hold SEQ steps, press TRACK
+(`handleVoiceButton()` STEP arm → `menu_enterStepTrackAutomationOverlay()`):
+the track-settings page becomes a per-held-step automation editor for the
+three automatable cells (`len`/`scl`/`shf` → Scene targets 405/412/419 +
+track via `menu_seqCellToTrackTarget()`, which re-validates through
+`sceneModTarget_descriptor()`). Pot/encoder turns write the 7-bit value to
+every held step (`patSvc_writeStepAutomation()`; length 128 clamps to 127);
+non-automatable cells (`run`, `mch`, `not`) edit their retained value. With
+SHIFT+COPY held (clear mode, no menu shown) a pot turn removes that target
+from the held steps only (`copyClear_isClearMode()`). The overlay shares the
+VOICE overlay's held/marker/search state (`menu.c` va_* block, 46 B) and
+exits when all steps are released, the page/mode changes, or the track
+changes.
 
-**Track shuffle (not implemented).** Every step fires at a uniform tick
-boundary; there is no shuffle-offset calculation in `sequencer.c`.
-`track_shuffle[track]` (init default 0) has no playback effect regardless of
-its stored value. A fix requires sub-step scheduling — either a per-track
-"delay ticks remaining" counter (`NUM_TRACKS` bytes of new ISR-static state)
-or a deferred trigger queue; tracked in `SCOPING_TARGETS.md` § Session 068
-deferred items.
+**Underline.** On SEQ_PAGE subpage 0 the VOICE one-marker-per-cell rule
+applies to `len`/`scl`/`shf`: a held step carrying the target shows and
+underlines its value; otherwise the name is underlined when the active-track
+Pattern search found the target (`VA_SEARCH_SCENE_TRACK_BIT()` in
+`va_searchSceneMask`, set by `va_seqTrackSearchBit()` in `va_scanService()`).
+The search runs on every SEQ subpage and restarts on SEQ entry, track change,
+Scene change, copy/clear completion, editor target changes/deletes and
+held-step clears. Without held steps, SHIFT+COPY + pot over a track cell is an
+ordinary whole-Scene pot clear (`menu_knobClearTarget()` SEQ arm,
+`COPYCLEAR_UTILITIES.md` §8). Reader count: this search is a third reader of
+step automation (4 step reads per pass, active track only).
 
-Scale and shuffle are each orthogonal to length and to each other: length
-selects which step indices exist, scale selects how fast steps are visited,
-shuffle offsets timing within a step interval. All three are meant to compose
-independently once scale and shuffle are implemented.
+### 6.4 Per-track timing: length, scale, shuffle, run mode (S068, S078)
+
+All four per-track settings (§1) are stored, Menu-editable, dirty-marked,
+PAT4-persisted **and played** since Session 078. Implementation:
+`Core/Sequencer/sequencer.c` (ISR side), `Core/Sequencer/StepScale.c/.h`
+(curve), `Core/Bank/Scene/Preset/presetMorphEngine.c` (effective values).
+They compose independently: length selects which step indices exist, scale
+how fast they are visited, shuffle offsets odd steps in time, and the run
+mode where the index goes next.
+
+**Effective cache — the sequencer never reads timing from the region
+directly.** `seq_effectiveTrackLength/Scale/Shuffle[NUM_TRACKS]` (21 B,
+file-static in sequencer.c) hold Normal (region) interpolated against the
+Scene's Morph endpoint at the retained Morph amount of the track's voice
+(tracks 1–5 → voices 1–5, tracks 6–7 → voice 6), or a step-automation
+overlay value when one is active. `seq_refreshTrackEffectiveParams()`
+recomputes them per track from each track's **played** Scene
+(`seq_perTrackPattern[track]`, S077), calling
+`presetMorph_getTrackEffectiveLength/Scale/Shuffle()`. Refresh points:
+`presetMorph_tick()` every foreground worker tick (before its idle
+early-out, so endpoint edits propagate within one main-loop pass),
+`seq_init()`, `seq_selectActivePattern()`, `seq_alignActivePatternToScene()`,
+`seq_setTrackPlayedScene()`, `seq_clearPerTrackOverrides()`,
+`seq_setStepIndexToStart()`. Morph and automation never write the region and
+never mark the Pattern dirty.
+
+**Length (S068).** The effective length is each track's wrap boundary
+(fallback `NUM_STEPS_PER_BAR` when 0). A Morph sweep that shortens the loop
+parks an out-of-range index at L−1 before the mode advance, so the change takes
+effect at once. `seq_handleMasterBoundary()` intentionally stays on the fixed
+16-step master grid (pattern-change commit, beat LED, clock out): it is a
+bar-level concept independent of track length. The playback bar shown on the
+SELECT LEDs follows the viewed track (`seq_ledState.chaseStep` =
+`seq_stepIndex[menu_getActiveVoice()]`); `menu_currentBar` is only the
+user-selected viewed bar.
+
+**Scale — 128-position continuous log curve (S078).** `track_scale` is a CC
+0..127; `multiplier(cc) = 0.25 × 2^(cc / (127/5))` (0.25× = 1/64 … 8× = 1/2,
+relative to the 1/16 step of 24 PPQ ticks), with 14 positions nudged onto
+exact musical values: 0 `/64`, 16 `32t`, 38 `/32`, 54 `16t`, 60 `d32`,
+**76 `/16` (default)**, 83 `8Tr`, 86 `d16`, 93 `/8`, 100 `4Tr`, 103 `d/8`,
+110 `/4`, 120 `d/4`, 127 `/2`. The display shows the symbolic name at a stop
+and the raw CC elsewhere (`stepScale_formatShort()`).
+`stepScale_ticksQ8(cc)` returns the Q8.8 tick interval
+`round(multiplier × 24 × 256)` from a 256 B flash LUT (1,536..49,152).
+
+Per-track DDA (`seq_processSchedulerTick()`): each PPQ tick every track adds
+256 to `seq_trackAccumulator[track]` (`uint16_t[7]`) and, while the
+accumulator ≥ interval, subtracts it and calls `seq_advanceTrackStep()`.
+The remainder carries, so fractional rates are exact on average with no
+drift; the loop runs at most once per tick (minimum interval 1,536 > 256).
+`seq_setStepIndexToStart()` seeds every accumulator to `interval − 256` so
+step 0 fires on the first tick (a zero seed would lose it). A scale change
+mid-playback keeps the remainder (no reset). The master 1/16 counter is
+still the 24-tick modulo and is used only for boundaries, beat, clock and
+MIDI.
+
+Realignment (`seq_realignActivePatternToMasterClock()`,
+`seq_realignTrackToMasterClock()`): phase = `(seq_elapsedPpqTicks << 8) %
+interval`; the step comes from the same Q8.8 timeline mapped through
+`seq_stepIndexForMode()` (so rev/pip/onc/1fr land where their mode would be,
+and pip's direction bit is set from the cycle phase). Stopped once-mode
+tracks are skipped.
+
+The FX sequencer uses the same curve and a DDA of its own
+(`EFFECTS_BUS_REFERENCE.md`). Old PAT4 files (bytes 0..13 from the
+14-index era) are not migrated on device and play near the fast end of the
+curve; `tools/convert_scene_scale.py` remaps them offline (old index →
+CC 0,16,38,54,76,83,86,93,100,103,110,127,127,127) and recomputes the CRC32C.
+
+**Shuffle (S078).** Odd-indexed steps (0-indexed 1, 3, 5, …) with nonzero
+effective shuffle are deferred by `(shuffle × 24) / 256` PPQ ticks (0..11):
+always on the 1/16 grid, never scaled by the track's scale (a slow track gets
+a proportionally tiny swing; musically intended). `seq_advanceTrackStep()`
+stores velocity/note in `seq_trackShuffleVel/Note[7]` and sets
+`seq_trackShuffleDelay[7] = delay − 1` and `seq_trackShufflePending[7]`
+instead of triggering; `seq_processShuffleDelays()` runs each tick **before**
+the DDA advance, decrements and fires at 0 (hence `− 1`). A pending deferral
+is flushed before a new one is set, and fires even if the track then stops.
+28 B ISR-static.
+
+**Run mode (S078).** `track_play_mode[track]` (Menu cell `run`, category
+`Track`, long name `RunMode`):
+
+| Value | Token | Index movement on each step boundary |
+|---:|---|---|
+| 0 | `fwd` | +1, wrap L−1 → 0 (default) |
+| 1 | `rev` | −1, wrap 0 → L−1 |
+| 2 | `pip` | ping-pong, ends play twice (cycle 2L; same as the FX sequencer) |
+| 3 | `rnd` | `(GetRngValue() & 0x7FFF) % L` |
+| 4 | `onc` | once, entered aligned to the master clock; stops after L−1 |
+| 5 | `1fr` | once, always from step 0; stops after L−1 |
+
+`seq_trackPlayState[7]`: bit 0 `SEQ_PLAY_STATE_STOPPED`, bit 1
+`SEQ_PLAY_STATE_PIP_REV` (pip needs no cycle counter: direction bit plus
+index). A stopped once-track advances no further. **Retrigger** (STOPPED
+cleared): global Scene change (`seq_selectActivePattern()`,
+`seq_alignActivePatternToScene()`), per-track Scene reassignment of that
+track (`seq_setTrackPlayedScene()`; voice 6 reassigns tracks 6 and 7
+together), transport start/stop and Pattern boundaries
+(`seq_setStepIndexToStart()`). **Not** retriggered by the double-click
+realign or a reassignment of another track. The DDA decides **when** a step
+fires; the run mode decides **where** the index goes.
+
+**Step automation of track timing.** Scene targets 405..425 (§4) apply
+through `presetMorph_setTrackParamStepOverride()` (mask + value, 24 B in the
+Morph engine) and write the effective cache directly;
+`seq_restoreAllSceneAutomation()` clears them
+(`presetMorph_clearAllTrackParamStepOverrides()`) and
+`seq_setStepIndexToStart()` recomputes the cache. Like all step automation
+the overlay holds until transport stop or a Pattern restore; clearing the
+automation does not undo the last applied value. The run mode is not
+automatable or morphable.
+
+**Adding a per-track timing parameter** (how-to): add the region byte
+(update the size assert and PAT4 track header byte), init/setter/menu apply
+in PatternData, PAT4 writer + three readers in filesystem.c, copy/clear track
+copy/clear in copyClearService.c, a `PAR_*` id + SEQ_PAGE cell (menuPages.h)
++ dispatch case in `menu_parseGlobalParam()`, and — if morphable — a Scene
+endpoint, AutoSave cell, `sceneset.scg` key, effective cache entry, getter
+in presetMorphEngine.c, and a Scene target kind. Read timing only through the
+effective cache in ISR code.
 
 ## 7. PAT4 wire format
 
@@ -453,7 +606,7 @@ One PAT4 file is exactly 10,656 bytes:
 | --- | ---: | ---: | --- |
 | Fixed header | 0 | 32 | magic/version/stack/generation/CRC/reserved |
 | Pattern parameters | 32 | 16 | change-bar, next, 14 reserved |
-| Track parameters | 48 | 112 | 7 × (length, scale, shuffle, 13 reserved) |
+| Track parameters | 48 | 112 | 7 × (length, scale CC, shuffle, run mode, 12 reserved) |
 | Address array | 160 | 1,792 | 7 × 128 little-endian encoded entries |
 | Bitmap | 1,952 | 512 | exact bit-packed allocator state |
 | Pool | 2,464 | 8,192 | dynamic blocks/padding |
@@ -476,6 +629,11 @@ exact EOF and matching CRC before committing. Firmware does not add a semantic
 allocator graph audit during load; host validators should check address,
 bitmap, back-reference, and pool consistency. Root/library saves use generation
 zero.
+
+Track header bytes per track (16 each, base = 48 + 16 × track): 0 length,
+1 scale (CC 0..127 since S078; older files carry the 14-index value and are
+not migrated on device), 2 shuffle, 3 run mode (S078; pre-S078 files carry
+0 = `fwd`), 4..15 reserved zero. The file size and CRC rules are unchanged.
 
 Scene directories contain exactly one `<Pattern name>.pat`, not a fixed
 `pattern.pat`. The root library uses `Pattern/NNN <name>.pat`. Pattern Load

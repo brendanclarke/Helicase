@@ -160,7 +160,10 @@ enum catNamesEnum {
     CAT_GLOBAL, CAT_VELOCITY, CAT_PARAMETER, CAT_SEQUENCER,
     CAT_GENERATOR, CAT_MIDI, CAT_TRIGGER,
     /* S074: Scene-owned static cells on the bus compressor page. */
-    CAT_SCENE
+    CAT_SCENE,
+    /* S078 P4: per-track Pattern settings category ("Track"); parallel to
+     * catNames[] in MenuText.h, which must stay index-aligned. */
+    CAT_TRACK
 };
 
 enum longNamesEnum {
@@ -194,7 +197,7 @@ enum longNamesEnum {
     /* S074 bus compressor long names. */
     LONG_BUS_COMP_MODE, LONG_BUS_COMP_AMOUNT,
     LONG_BUS_COMP_TIME, LONG_BUS_COMP_SIDECHAIN,
-    /* S078 per-track play mode. */
+    /* S078 per-track run mode long name: RunMode (S078 P4). */
     LONG_PLAY_MODE,
 };
 
@@ -227,7 +230,7 @@ enum shortNamesEnum {
     /* S074 bus compressor compact labels: cmp, cam, ctm, csc. */
     SHORT_BUS_COMP_MODE, SHORT_BUS_COMP_AMOUNT,
     SHORT_BUS_COMP_TIME, SHORT_BUS_COMP_SIDECHAIN,
-    /* S078 per-track play mode compact label: mod. */
+    /* S078 per-track run mode compact label: run (S078 P4). */
     SHORT_PLAY_MODE
 };
 

@@ -1491,22 +1491,22 @@ arm:
 
 ## 7. Hardware test plan
 
-| # | Steps | Expected |
-|---|-------|----------|
-| 1 | STEP mode, track settings, Scene with no track automation | No underlines |
-| 2 | Hold steps → TRACK → turn `scl` → release steps | `scl` name underlined on the top row: at once if the search had finished (the bit is set at the write), otherwise when it finishes |
-| 3 | Repeat 2 but keep the steps held | `scl` **value** underlined (bottom row) after the 100 ms quiet period |
-| 4 | Clicked-in (encoder) on `scl` with no steps held, track has `scl` automation | Long name underlined (row 0, first character from column 8) |
-| 5 | No steps held, SHIFT+COPY, turn the `scl` pot | `scl` underline disappears at once; after the register pass, step automation for `scl` no longer runs on that track; other tracks unchanged. The last applied scale stays until transport stop or Pattern restore (sticky step-override rule, `presetMorph_clearAllTrackParamStepOverrides()`) |
-| 6 | Same as 5 for `shf` and `len`; also with SHIFT still held (Morph view) | Same as 5 |
-| 7 | Hold steps → TRACK → write `shf` → SHIFT+COPY (steps still held) → turn the `shf` pot | Removed from the held steps only; after the rescan, the name stays underlined if non-held steps still carry `shf` |
-| 8 | Step-automation editor (`scn`): add `len` on one step, then TRACK back to track settings; then delete it and return | `len` name underlined, then not underlined |
-| 9 | Change track, then change the shown Scene, on the track settings page | Underlines follow the shown track and Scene; no stale marks |
-| 10 | SHIFT press/release with underlines shown | Underlines stay (no rescan blank) |
-| 11 | Subpage 1 (vel/note/prob), SHIFT+COPY + turn a pot | Nothing cleared |
-| 12 | Second half (play mode/MIDI ch/note), SHIFT+COPY + turn a pot | Nothing cleared |
-| 13 | Copy/paste or clear a track that carries `scl` automation while on track settings | Underline updates after the job completes |
-| 14 | Regression: VOICE, Effect, PERF pot clears and underlines; VOICE held-step overlay | Unchanged |
+| # | Steps | Expected | Result |
+|---|-------|----------|--------|
+| 1 | STEP mode, track settings, Scene with no track automation | No underlines | PASS |
+| 2 | Hold steps → TRACK → turn `scl` → release steps | `scl` name underlined on the top row: at once if the search had finished (the bit is set at the write), otherwise when it finishes | PASS |
+| 3 | Repeat 2 but keep the steps held | `scl` **value** underlined (bottom row) after the 100 ms quiet period | PASS |
+| 4 | Clicked-in (encoder) on `scl` with no steps held, track has `scl` automation | Long name underlined (row 0, first character from column 8) | PASS |
+| 5 | No steps held, SHIFT+COPY, turn the `scl` pot | `scl` underline disappears at once; after the register pass, step automation for `scl` no longer runs on that track; other tracks unchanged. The last applied scale stays until transport stop or Pattern restore (sticky step-override rule, `presetMorph_clearAllTrackParamStepOverrides()`) | PASS |
+| 6 | Same as 5 for `shf` and `len`; also with SHIFT still held (Morph view) | Same as 5 | PASS |
+| 7 | Hold steps → TRACK → write `shf` → SHIFT+COPY (steps still held) → turn the `shf` pot | Removed from the held steps only; after the rescan, the name stays underlined if non-held steps still carry `shf` | PASS |
+| 8 | Step-automation editor (`scn`): add `len` on one step, then TRACK back to track settings; then delete it and return | `len` name underlined, then not underlined | PASS |
+| 9 | Change track, then change the shown Scene, on the track settings page | Underlines follow the shown track and Scene; no stale marks | PASS |
+| 10 | SHIFT press/release with underlines shown | Underlines stay (no rescan blank) | PASS |
+| 11 | Subpage 1 (vel/note/prob), SHIFT+COPY + turn a pot | Nothing cleared | PASS |
+| 12 | Second half (play mode/MIDI ch/note), SHIFT+COPY + turn a pot | Nothing cleared | PASS |
+| 13 | Copy/paste or clear a track that carries `scl` automation while on track settings | Underline updates after the job completes | PASS |
+| 14 | Regression: VOICE, Effect, PERF pot clears and underlines; VOICE held-step overlay | Unchanged | PASS |
 
 ---
 
@@ -1723,7 +1723,7 @@ with no behavioural effect:
 
 ### 10.7 Remaining work
 
-- Hardware test plan §7 (14 rows) is not yet run.
+- ~~Hardware test plan §7 (14 rows) is not yet run.~~ **Done (2026-10-10):** all 14 rows PASS on hardware.
 - ~~Optional: fix the two comments in §10.4.~~ **Done (2026-10-09):** both
   comments corrected in menu.c (`va_searchRestart()` caller list;
   `menu_enterStepTrackAutomationOverlay()` header). This is a comment-only

@@ -740,7 +740,10 @@ is off.
       write, ramped mix;
     - estimated 75–95 instructions per sample in total, against 160–206
       for StereoFilter's two ZDF channels;
-    - per block: one `expf`, a 14-step StepScale walk and one divide;
+    - per block: one `expf`, a StepScale walk and one divide (14 steps in
+      S074; 128 positions since S078, `stepScale_ticksQ8()` — still a small
+      per-block cost, not re-measured; the LTO build stopped unrolling the
+      walk and text fell about 3.6 KB);
     - no per-sample division or transcendental.
 
     Every stage runs whatever the settings. Not measured separately on

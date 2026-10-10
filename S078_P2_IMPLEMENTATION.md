@@ -934,21 +934,21 @@ the existing VOICE overlay.
 
 ## §B.19  Test matrix
 
-| # | Steps | Action | Expected |
-|---|-------|--------|----------|
-| 1 | Hold 1 step → TRACK 1 | Adjust length | Step automation written for track 1 length |
-| 2 | Hold 3 steps → TRACK 2 | Adjust scale | All 3 steps get track 2 scale automation |
-| 3 | Same as 2 | Check underline | Scale name is underlined |
-| 4 | Same as 2 | SHIFT+COPY + turn length knob | Track 2 length automation removed from held steps, underline drops |
-| 5 | Release all steps | Check display | Overlay exits, normal STEP display |
-| 6 | Hold steps → TRACK → adjust play mode | Check | Normal retained-value edit, no automation |
-| 7 | Hold steps → TRACK → adjust MIDI ch | Check | Normal retained-value edit |
-| 8 | Play transport running | Hold steps → TRACK → adjust scale | Automation fires at those steps during playback |
-| 9 | Hold 1 step in STEP mode | Adjust velocity | Single step (regression) |
-| 10 | Hold 3 steps in STEP mode | Adjust velocity | All 3 steps get new velocity |
-| 11 | Hold 3 steps in STEP mode | Adjust note | All 3 steps get new note |
-| 12 | Hold 3 steps → scroll to automation editor | Check | Single-step automation editor, no broadcast |
-| 13 | VOICE mode: hold steps → press TRACK | Check | Enters VOICE overlay, not STEP overlay |
+| # | Steps | Action | Expected | Result |
+|---|-------|--------|----------|--------|
+| 1 | Hold 1 step → TRACK 1 | Adjust length | Step automation written for track 1 length | PASS |
+| 2 | Hold 3 steps → TRACK 2 | Adjust scale | All 3 steps get track 2 scale automation | PASS |
+| 3 | Same as 2 | Check underline | Scale name is underlined | PASS |
+| 4 | Same as 2 | SHIFT+COPY + turn length knob | Track 2 length automation removed from held steps, underline drops | PASS |
+| 5 | Release all steps | Check display | Overlay exits, normal STEP display | PASS |
+| 6 | Hold steps → TRACK → adjust play mode | Check | Normal retained-value edit, no automation | PASS |
+| 7 | Hold steps → TRACK → adjust MIDI ch | Check | Normal retained-value edit | PASS |
+| 8 | Play transport running | Hold steps → TRACK → adjust scale | Automation fires at those steps during playback | PASS |
+| 9 | Hold 1 step in STEP mode | Adjust velocity | Single step (regression) | PASS |
+| 10 | Hold 3 steps in STEP mode | Adjust velocity | All 3 steps get new velocity | PASS |
+| 11 | Hold 3 steps in STEP mode | Adjust note | All 3 steps get new note | PASS |
+| 12 | Hold 3 steps → scroll to automation editor | Check | Single-step automation editor, no broadcast | PASS |
+| 13 | VOICE mode: hold steps → press TRACK | Check | Enters VOICE overlay, not STEP overlay | PASS |
 
 
 ---

@@ -1,7 +1,7 @@
 # Module Interchange Spec
 
 This is the current direct-call ownership and API-boundary map through Session
-076, including typed HCNAMES, `.fx` Effect storage, AutoSave boot restore, typed Instrument-index
+078, including typed HCNAMES, `.fx` Effect storage, AutoSave boot restore, typed Instrument-index
 repair, AsyncFATFS directory publication, the Phase 4 dynamic Pattern storage
 system, step automation editing/playback (Session 065), the VOICE-page
 held-step automation overlay (Session 066), the Pattern Stack Service with
@@ -48,6 +48,23 @@ and the Session 076 additions:
 - reload scene, bar chaselight, SHIFT+SELECT pattern length (P4):
   `CC_CLEAR_SCENE_RELOAD`, `led_updateSelectBarChaselight()` (static),
   `handleSelectButton()` SHIFT+STEP split.
+
+and the Session 078 additions (per-track timing, `PATTERN_DYNAMIC_STACK.md`
+§6.4 and §6.3a; Morph rules in `BANK_PRESET_ARCHITECTURE.md`):
+
+- StepScale's 128-position Q8.8 curve (`stepScale_ticksQ8()`,
+  `stepScale_formatShort()`, `stepScale_isMusicalStop()`) shared by Pattern
+  tracks, the FX sequencer and CrumpBit;
+- sequencer per-track DDA, shuffle, run modes and the effective timing cache
+  (`seq_refreshTrackEffectiveParams()`);
+- `pat_setTrackPlayMode()`, `scene_setTrackMorphLength/Scale/Shuffle()`,
+  `presetMorph_getTrackEffective*()`, `presetMorph_setTrackParamStepOverride()`
+  / `presetMorph_clearAllTrackParamStepOverrides()`, three Scene target kinds
+  (IDs 405..425);
+- STEP-page UI: `menu_setPatternTrackMorphEndpoint()` (momentary SHIFT Morph
+  view), `menu_enterStepTrackAutomationOverlay()` (held steps + TRACK),
+  the multi-step specials broadcast, the STEP automation underline search and
+  `copyClear_isClearMode()`.
 
 The DSP internals behind these APIs are described in
 `INSTRUMENTS_DSP_REFERENCE.md` and `EFFECTS_MIXER_DSP_REFERENCE.md`.
@@ -270,10 +287,11 @@ layout.
 | `scene_setVoiceFaderSetting()` / `scene_getVoiceFaderSetting()` | Per-voice fader mode 0..`SCENE_FADER_SETTING_MAX` (3 = `xfd` since S074; equal to `MIXER_FADER_XFD`, asserted in `mixer.c`). | Preset, `.scg` parser, AutoSave, mixer |
 | `scene_settingsDefaults(out)` / `scene_commitSettings(scene, src)` / `scene_commitKit(scene, kit)` / `scene_resetKitToDefaults(scene)` | Whole-settings defaults and field-by-field commit through the change-aware setters; whole-Kit commit and fresh-Kit reset with the Kit AutoSave marker and card-clean invalidation. No runtime apply. (S075) | CopyClear |
 | `scene_setVoiceAudioOut()` / `scene_getVoiceAudioOut()` | Per-voice route 0..5 (0 St1, 1 St2, 2 L1, 3 R1, 4 L2, 5 R2). The default for every slot, and the fallback for an invalid byte, is St1 (route 0) since S075 F2 (`scene_defaultVoiceAudioOut()`). | Preset, `.scg` parser, AutoSave |
+| `scene_setTrackMorphLength/Scale/Shuffle(scene, track, value)` / `scene_getTrackMorphLength/Scale/Shuffle(scene, track)` | S078: Morph endpoints of the Pattern's per-track length (1..128), scale CC (0..127) and shuffle (0..127). Setters clamp and go through `scene_storeParameterByte()` (AutoSave Scene cells 51..71). The Normal values stay in the Pattern region. | Menu STEP SHIFT Morph view (`menu_cellCommitValue()`), copy/clear morph copy/reset, AutoSave reader, `presetMorph_getTrackEffective*()` |
 | `scene_setVoiceFxSendAmount()` / `scene_getVoiceFxSendAmount()` / `scene_setVoiceFxSendMorph()` / `scene_getVoiceFxSendMorph()` | Normal and Morph endpoints of the per-voice FX send (0..127; AutoSave Scene cells 14..19 and 45..50). Change-aware; no runtime push: the mixer interpolates every block through `preset_getEffectiveFxSendAmount()`. (Morph endpoint: S075 F2) | Preset, `.scg` parser/writer, AutoSave, CopyClear |
 
-The 420-byte record and the 16-record SRAM1 allocation (`scenes`, 26,080 B:
-1,630 B per Scene since S075 F2) are firmware-lifetime SceneData storage. EffectsManager owns 84 B of resolution state and 184 B of
+The 420-byte record and the 16-record SRAM1 allocation (`scenes`, 26,432 B:
+1,652 B per Scene since S078, +21 B track Morph endpoints) are firmware-lifetime SceneData storage. EffectsManager owns 84 B of resolution state and 184 B of
 overlay/LFO state in SRAM1, plus the 76-byte DTCM type runtime; the mixer owns
 the FX bus.
 
@@ -352,10 +370,12 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 | `pat_getEffectiveTrackLength(pattern, track)` | Read nonzero playback length, converting stored 0 to 16. | Sequencer step walk, external clock, start-position reset |
 | `pat_setTrackRotation(pattern, track, rotation)` | Set track rotation and invoke Sequencer runtime compensation if needed. | buttonHandler perf rotation, Sequencer stop reset |
 | `pat_getTrackRotation(pattern, track)` | Read track rotation. | `pat_applyTrackSettingsToMenu()` |
-| `pat_setTrackScale(pattern, track, scale)` / `pat_getTrackScale(pattern, track)` / `pat_getTrackScaleRatio(pattern, track)` | Store/read per-track timing scale and convert it to exact numerator/denominator timing for Sequencer. | `menu_parseGlobalParam(PAR_TRACK_SCALE)`, Sequencer scheduler |
+| `pat_setTrackScale(pattern, track, scale)` / `pat_getTrackScale(pattern, track)` / `pat_getTrackScaleRatio(pattern, track)` | Store/read the per-track Normal step-scale CC (0..127 on the S078 curve; 76 = 1/16). Playback reads the effective cache, not this directly. | `menu_parseGlobalParam(PAR_TRACK_SCALE)`, copy/clear, `presetMorph_getTrackEffectiveScale()` |
+| `pat_setTrackPlayMode(scene, track, mode)` | S078: store the per-track run mode 0..5 (fwd/rev/pip/rnd/onc/1fr) and mark the Scene's Pattern dirty. Read by the sequencer per step boundary (`region->track_play_mode`); PAT4 track header byte 3. | `menu_parseGlobalParam(PAR_TRACK_PLAY_MODE)`, copy/clear track copy/clear |
+| `pat_applyTrackSettingsToMenu(scene, track)` | Mirror length/scale/shuffle/run mode into `parameter_values[]`. | Menu track/page changes, buttonHandler, STEP overlay entry |
 | `pat_setTrackMidiChannel(pattern, track, channel)` / `pat_getTrackMidiChannel(pattern, track)` | Store/read per-track MIDI output channel in menu form (`1..16`). | `menu_parseGlobalParam(PAR_TRACK_MIDI_CHAN)`, Sequencer MIDI output/input matching |
 | `pat_setTrackMidiNote(pattern, track, note)` / `pat_getTrackMidiNote(pattern, track)` | Store/read per-track MIDI note override (`0` means fallback/default). | `menu_parseGlobalParam(PAR_TRACK_MIDI_NOTE)`, Sequencer trigger/preview/MIDI output |
-| `pat_setTrackShuffle(pattern, track, shuffle)` / `pat_getTrackShuffle(pattern, track)` | Store/read per-track shuffle amount (`0..127`); no legacy all-track shuffle import/export remains. | `menu_parseGlobalParam(PAR_SHUFFLE)`, filesystem per-track shuffle extension, Sequencer scheduler |
+| `pat_setTrackShuffle(pattern, track, shuffle)` / `pat_getTrackShuffle(pattern, track)` | Store/read per-track Normal shuffle amount (`0..127`); played since S078 through the effective cache (odd steps deferred `(shuffle × 24) / 256` ticks). No legacy all-track shuffle import/export remains. | `menu_parseGlobalParam(PAR_SHUFFLE)`, filesystem, `presetMorph_getTrackEffectiveShuffle()` |
 | `pat_clearTrack(scene, track)` | Free dynamic blocks and reset one track. | PatternStackService barrier, `pat_clearPattern()` |
 | `pat_clearPattern(scene)` | Free dynamic blocks and reset all tracks in one Scene Pattern. | PatternStackService barrier, initialization |
 | Raw block API: `pat_rawReadBlock`, `pat_rawBlockBytes`, `pat_rawDecode`, `pat_rawEncode`, `pat_rawPlace`, `pat_rawPlaceViaSwap`, `pat_rawSwapReturn`, `pat_rawPublishEmpty`, `pat_rawFreeChunks`, `pat_rawSwapFree`, `pat_rawRegionSilence/CopyBody/PublishSteps/CopiedBlock/PublishRewritten/Reset` | Whole-step and whole-region reads, placements and publications in publication order, including the permanent swap block (S075; `PATTERN_DYNAMIC_STACK.md` §12.17). Legal only under `patSvc_beginExclusive()`. The S062 no-op `pat_copy*` surface is removed. | `copyClearService.c` only |
@@ -523,6 +543,9 @@ dispatch to owners.
 | `visibleStep()` | Return the visible step index accounting for bar offset (Session 066, promoted to extern). | Menu, ledHandler |
 | Copy/clear router (S075) | `processPress()`/`processRelease()` offer every edge to `copyClear_buttonPressed/Released()` first (nonzero = consumed); `case BUT_COPY` calls `copyClear_copyPressed(shift)` except SHIFT+COPY while recording and running (erase); the event loop calls `copyClear_postEvent()` and, on ring overflow, `copyClear_eventOverflow()`. | CopyClear |
 | VOICE hold-SHIFT Morph view (S075 F2) | SHIFT press in VOICE mode → `menu_setVoiceModeShowMorph(1)`; release → back to the SHIFT+MODE VOICE latch (`buttonHandler_morphVoiceModeActive`). | Menu |
+| STEP hold-SHIFT Morph view (S078) | SHIFT press in STEP mode → `menu_setPatternTrackMorphEndpoint(1)` (+ LED leave); SHIFT release in STEP mode → `menu_setPatternTrackMorphEndpoint(0)` + `buttonHandler_enterSeqModeStepMode()`. A release handled in another mode (SHIFT+mode button) cannot clear it, so Menu also gates the view on `buttonHandler_getShift()` (S078 P4). No latch: SHIFT+MODE STEP is the only SOM entry. | Menu |
+| STEP held steps + TRACK (S078) | In `handleVoiceButton()`'s STEP arm, `buttonHandler_seqHeldMask() != 0` calls `menu_enterStepTrackAutomationOverlay(voiceNr)` and returns before the ordinary half toggle. | Menu |
+| `handleModeButtons()` | The only writer of `selectButtonMode`. With SHIFT held a MODE button selects `(mode + 4) & 7` (SHIFT+VOICE = VOICE Morph latch), so SHIFT-derived view state set in the old mode must not rely on the SHIFT release (it runs in the new mode). | buttonHandler |
 | Effect-page SHIFT+TRACK voice-mix overlay (S075 F2) | After the type's TRACK hook declines, SHIFT+TRACK in FX mode selects the track and calls `menu_fxVoiceMixOverlayBegin()`; `buttonHandler_fxVoiceMixTrackMask` (1 B) holds the TRACKs keeping it up. While the mask is nonzero every TRACK press joins it and moves the overlay to that track; **no TRACK press mutes**. The last release calls `menu_fxVoiceMixOverlayEnd()` (release consumed before copy/clear routing). SHIFT under the overlay switches the voice Morph view; default SELECT navigation is skipped (type SELECT hooks still run); overflow clears the mask and ends the overlay. | Menu, ledHandler |
 
 Public state used by other modules:
@@ -556,6 +579,9 @@ edit dispatch, and post-load operation follow-up.
 | `menu_switchPage(pageNr)` / `menu_switchSubPage(subPageNr)` | Page navigation and direct Pattern/LED refresh. | buttonHandler/Menu |
 | `menu_resetActiveParameter()` | Keep active parameter valid for page. | buttonHandler/Menu |
 | `menu_setVoiceModeShowMorph(onOff)` | Set the VOICE-page Morph endpoint view for descriptor-backed instrument cells and the FX-send cell; repaint/edit helpers resolve the main or Morph image. Driven by the SHIFT+MODE VOICE latch, by SHIFT held in VOICE mode (S075 F2) and by SHIFT under the Effect-page overlay. | buttonHandler |
+| `menu_setPatternTrackMorphEndpoint(onOff)` | S078: set the STEP-page track Morph endpoint flag (repaints when SEQ_PAGE is shown). The view is active only while the flag is set, SEQ_PAGE is shown **and SHIFT is physically held** (`menu_patternTrackMorphViewActive()`); then `len`/`scl`/`shf` display and commit the Scene endpoints (`scene_setTrackMorph*()`), while `run`/`mch`/`not` keep their Normal values (Morph-view rule). | buttonHandler SHIFT press/release in STEP |
+| `menu_enterStepTrackAutomationOverlay(voiceNr)` | S078: open the STEP held-step track automation overlay for the pressed track: SEQ_PAGE first half, shared va_* held state armed, LEDs, repaint. Pot/encoder turns on `len`/`scl`/`shf` write Scene targets 405..425 to every held step (`sa_writeAutomationFromKnob()`); SHIFT+COPY + pot removes them from the held steps (`sa_clearAutomationFromKnob()`); exits on release of all steps or a page/mode/track change. | buttonHandler `handleVoiceButton()` |
+| STEP multi-step specials (internal, S078) | `menu_broadcastStepSpecial()` writes velocity/note/probability to every held SEQ step of the visible bar (2+ held) through `patSvc_setStepVolume/Note/Probability()`; one held step = single-step path. | `menu_parseGlobalParam(PAR_STEP_*)` |
 | `menu_fxVoiceMixOverlayBegin(track)` / `menu_fxVoiceMixOverlayEnd()` / `menu_fxVoiceMixOverlayActive()` | S075 F2 Effect-page SHIFT+TRACK overlay: Begin saves the Effect position in a 4-byte record and shows VOICE `track`'s mix sub-page on its first Scene-setting screen (a second call moves it); End restores the Effect page, applies latched `menuEffects_service()` actions and repaints. Does **not** go through `menu_switchPage()` (which would run `menuEffects_leave()`); a real page switch ends it without restore. `menu_serviceRuntimeWidgets()` keeps running `menuEffects_service()` under it so the Effect LEDs stay live. | buttonHandler, ledHandler |
 | VOICE mix FX-send cell (internal, S075 F2) | Normal view shows the step override or the Normal endpoint (`preset_getFxSendDisplayAmount()`); Morph view shows and edits the Morph endpoint (`scene_getVoiceFxSendMorph()` / `preset_setVoiceFxSendMorph()`); never the interpolated send. Edits fan out over the edit mask. | Menu internals |
 | `menu_clampInstrumentValue(slot, descriptor_index, value)` | S075 F3: the VOICE-page descriptor-domain clamp (`menu_clampCellValue()` on a transient instrument cell) for one parameter of the active Scene, so external MIDI never stores an out-of-domain byte. | MidiParser |
@@ -580,7 +606,8 @@ edit dispatch, and post-load operation follow-up.
 | `menu_voiceAutoOverlayEnter()` / `menu_voiceAutoOverlayExit()` | Enter/exit VOICE-page held-step automation overlay (Session 066). Entry initializes 44-byte state block, starts async search. Exit restores normal VOICE display and clears CGRAM. | buttonHandler SEQ held-step timing |
 | `menu_voiceAutoOverlayHeldChanged()` | Notify overlay that the held-step mask changed. Invalidates working values, restarts async search. | buttonHandler SEQ press/release during overlay |
 | `menu_patternContentChanged()` (renamed from `menu_voiceAutoOverlayPatternDeleted()`, S075) | Restart the automation-presence search after any Pattern paste or clear and repaint on VOICE pages and the Effect page (`menu_isScreenPage()`); other pages return (their next entry restarts the search). | copyClearService |
-| `menu_automationTargetCleared(target)` | Drop one target's underline at a pot clear without restarting the search. (S075) | clearOps |
+| `menu_automationTargetCleared(target)` | Drop one target's underline at a whole-Scene pot clear without restarting the search (S075). VOICE, Effect, PERF and (S078) the STEP `len`/`scl`/`shf` bits. Not for held-step-only removals, which restart the search. | clearOps |
+| STEP automation underline (internal, S078) | On SEQ_PAGE `va_scanService()` searches the active track for targets 405..425 (`va_seqTrackSearchBit()` → `VA_SEARCH_SCENE_TRACK_BIT(0..2)` = 0x10/0x20/0x40 in `va_searchSceneMask`); `sa_applyTrackMarkers()` underlines held values (overlay) or names (search). Restarts: SEQ entry, track/Scene change, `menu_patternContentChanged()`, step-automation editor target changes/deletes, held-step clear. `menu_knobClearTarget()` maps SEQ subpage-0 cells 0..2 to their track targets for whole-Scene pot clears. | Menu internal |
 | `menu_copyClearMenuChanged()` / `menu_copyClearMenuClosed()` / `menu_isStorageBusy()` | Copy/clear menu repaint, close (CGRAM cache invalidation + full repaint), storage-lock view. (S075) | copyClearSession |
 | Automation-presence search (internal, S066/S074) | `va_searchRestart()`, `va_scanService()` (4 step reads per pass; VOICE: the active track; Effect page: all 7 tracks of the viewed Pattern), `va_searchRecordEffectTarget()` (block-7 locals 0..62 and `fxm`; rejects local 63/`0x1FF`), `menu_effectCellAutomated()`, `menu_applyEffectMarkers()`. 13 shared bytes; every entry to a VOICE or Effect page restarts it. | Menu internals |
 | `menu_effectShowHome()` | S074: jump the Effect page to the active type's layout home screen, leaving any full view (used when a type's SELECT hook returns `EFFECT_UI_SHOW_HOME`). Under the S075 overlay it only re-renders the SELECT LEDs for the saved Effect sub-page (no screen change while TRACK is held). | buttonHandler FX SELECT paths |
@@ -655,6 +682,7 @@ Pattern), with pot clears of automation. Four file pairs:
 | `copyClear_menuVisible()` / `copyClear_formatMenu(r0, r1)` | Menu overlay. | `menu_repaint()`, `va_queueMarkerTransaction()` |
 | `copyClear_ownsEncoder()` / `copyClear_encoderTurned(inc)` | Encoder ownership while held (clicks ignored). | `menu_parseEncoder()` |
 | `copyClear_ownsPots()` / `copyClear_potTurned(target)` | Pot ownership; pot clear in a clear operation. | `menu_parseKnobDelta()` |
+| `copyClear_isClearMode()` | S078: nonzero only while the held gesture is a clear (`CC_OP_CLEAR`); `copyClear_ownsPots()` is true for copy too. | Menu STEP held-step overlay pot intercept |
 | `copyClear_backgroundSuspended()` | AutoSave/maintenance suspension predicate. | `filesystem_tick()` gates, `patSvc_tick()` repair gate |
 | `ccSvc_tick()` | One bounded service step at 500 Hz. | `timebase.c` after `patSvc_tick()` |
 | `ccSvc_targetPending(target)` | Underline filter for targets waiting in the register. | `va_scanService()` |
@@ -690,9 +718,10 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 | `seq_tick()` | Advance playback when due. | TIM3 owner |
 | `seq_triggerVoice(voiceNr, vol, note)` | Trigger one voice from Sequencer/SOM. | Sequencer, SOM |
 | `seq_previewVoice(voiceNr)` | Trigger the selected voice while transport is stopped without reading or advancing step state. | buttonHandler selected-voice re-press |
-| Internal scheduler helpers (`seq_advanceTrackStep()`, `seq_processSchedulerTick()`) | Compute due events from absolute 96-PPQ tick time. Each track wraps independently at its own `track_length` (Session 068; reads `pat_scene_region_t`, falls back to `NUM_STEPS_PER_BAR`=16). `track_scale` and `track_shuffle` are stored/edited/persisted but **not yet consumed** — all tracks still advance on one shared 24-PPQ-tick (1/16th-note) global divisor with no shuffle offset; see `PATTERN_DYNAMIC_STACK.md` §6.4. | Sequencer only; reads PatternData track settings |
+| Internal scheduler helpers (`seq_advanceTrackStep()`, `seq_processSchedulerTick()`, `seq_processShuffleDelays()`, `seq_stepIndexForMode()`) | S078: per-PPQ-tick, each track adds 256 to its Q8.8 accumulator and advances while ≥ `stepScale_ticksQ8(effective scale)`; shuffle deferrals tick down first; the run mode (`region->track_play_mode`, `seq_trackPlayState[]`) moves the index; wrap at the effective length. Timing comes only from `seq_effectiveTrack*[]`. See `PATTERN_DYNAMIC_STACK.md` §6.4. | Sequencer only |
+| `seq_refreshTrackEffectiveParams()` | S078: recompute `seq_effectiveTrackLength/Scale/Shuffle[7]` per track from its played Scene via `presetMorph_getTrackEffective*()`. | `presetMorph_tick()` (every foreground pass), `seq_init()`, Scene activation, per-track assignment/coalesce, `seq_setStepIndexToStart()` |
 | `seq_resetDeltaAndTick()` / `seq_resetToPatternStart()` / `seq_setDeltaT(delta)` | Clock/reset timing control. | trigger/MIDI sync paths |
-| `seq_realignActivePatternToMasterClock()` | Recalculate per-track runtime step position from the master step clock and each track's own `track_length` (Session 068; scale not yet applied). | buttonHandler/PERF pattern realign gesture |
+| `seq_realignActivePatternToMasterClock()` / `seq_realignTrackToMasterClock(track)` | Recalculate each track's step and Q8.8 accumulator phase from `seq_elapsedPpqTicks` and the track's effective scale/length, mapped through its run mode (`seq_stepIndexForMode()`); stopped once-mode tracks are skipped (S078). | buttonHandler/PERF realign gesture, per-track Scene assignment |
 | `seq_triggerNextMasterStep(stepSize)` | External clock master-step scheduling. | trigger/MIDI sync paths |
 | `seq_setBpm(bpm)` / `seq_getBpm()` | Tempo. | Menu/global apply |
 | `seq_sync()` | External MIDI clock tick. | MidiParser |
@@ -720,13 +749,23 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 
 ### Shared StepScale contract
 
-`Core/Sequencer/StepScale.h/.c` owns the fourteen-entry, 96-PPQ scale table
-used by both Pattern track-scale display/storage and the FX sequencer clock.
-The order is `6, 8, 12, 16, 24, 32, 36, 48, 64, 72, 96, 192, 384, 768`
-ticks, with index 4 (`1/16`) as the default. `stepScale_ticks()` clamps stale
-retained bytes for playback; the short/long label accessors clamp them for
-display without rewriting the card. Track playback continues to ignore scale
-until the joint track-scale pass.
+`Core/Sequencer/StepScale.h/.c` owns the 128-position continuous step-scale
+curve (S078) used by Pattern track scale, the FX sequencer clock and CrumpBit
+sync. A scale byte is a CC 0..127: `multiplier = 0.25 × 2^(cc / (127/5))`
+relative to the 24-tick 1/16 step, with 14 positions nudged to musical values
+(`stepScale_stops[]`; default `STEP_SCALE_DEFAULT` = 76 = 1/16,
+`STEP_SCALE_COUNT` = 128).
+
+| API | Use | Usual callers |
+|---|---|---|
+| `stepScale_ticksQ8(cc)` | Q8.8 96-PPQ tick interval from the 256 B LUT (1,536..49,152); out of range → default. ISR-safe. | sequencer DDA (tracks and FX), realignment, CrumpBit (`/ 256.0f`) |
+| `stepScale_shortName(cc)` / `stepScale_longName(cc)` | Symbolic label at a musical stop, NULL elsewhere. | Menu, menuEffects |
+| `stepScale_isMusicalStop(cc)` | Stop membership. | Menu |
+| `stepScale_formatShort(cc, out3)` | Three characters: the stop name, else the right-justified decimal CC. | Menu `MENU_TRACK_SCALE`, menuEffects, CrumpBit `crumpBit_uiFormatValue3()` |
+
+The `.fx` file keeps its own symbolic tokens mapped to CCs in
+`storageTypes.c` (`FILESYSTEM_SPEC.md`). Pre-S078 PAT4 bytes are the old
+14-entry index and are not migrated on device (`tools/convert_scene_scale.py`).
 
 The FX clock runs in TIM3 from `seq_elapsedPpqTicks`, publishing only
 `SEQ_FX_EVENT_RESET`/`SEQ_FX_EVENT_STEP` plus a 0..15 index through
@@ -785,6 +824,8 @@ prefixes remain `preset_*` for the mechanical move.
 | `preset_morph(morph)` / `preset_morphVoice(slot, morph)` / `preset_morphTick()` / `preset_getMorphValue(index, morph)` | Rate-limited descriptor Morph interpolation/application. Global Morph bulk-sets all six per-voice Morph values and the active Scene's Effect Morph amount; per-voice/Effect retained Morph values are the engine inputs. | Menu, MIDI, velocity modulation, main loop |
 | `presetMorph_setVoiceLfoModulation(scene_index, target_slot, source_slot, target_pair, direction, depth)` / `presetMorph_clearLfoSource(source_slot, target_pair)` | Maintain the hidden per-voice Morph LFO overlay. Session 071 changed the setter from absolute amount to base-independent direction (`PresetMorphLfoDirection`: NONE/MAIN/MORPH) + normalized depth. The resolver computes signed deltas from the current effective base at resolution time, eliminating stale-base errors when step automation changes the base between LFO sample and resolve. | InstrumentManager/LFO dispatch |
 | `presetMorph_getResolvedVoiceAmount(scene, slot)` / `presetMorph_applyParameterNow(scene, slot, local)` | S075: the amount the Morph worker uses (step override or retained base, plus active-Scene LFO contributions); re-interpolate one parameter now, store `morph_interpolation[local]` and write the runtime through the guarded `presetMorph_writeRuntimeBase()` (skips held automation). | `preset_getEffectiveFxSendAmount()`, `preset_setInstrumentParameter()` |
+| `presetMorph_getTrackEffectiveLength/Scale/Shuffle(scene, track)` | S078: effective track timing value = the step override when its mask bit is set, else `presetMorph_interpTrack(Normal (region), Scene endpoint, retained voice Morph amount of the track's voice)`; length floored at 1. Tracks 6 and 7 use voice 6's amount. | `seq_refreshTrackEffectiveParams()` |
+| `presetMorph_setTrackParamStepOverride(track, param, value)` / `presetMorph_clearAllTrackParamStepOverrides()` | S078: runtime-only track length/scale/shuffle step-automation overlay (3 mask bytes + 21 values). Set from the Scene automation drain (targets 405..425), cleared by `seq_restoreAllSceneAutomation()`. Never writes the Pattern region. | `seq_applySceneAutomation()`, `seq_restoreAllSceneAutomation()` |
 | `presetMorph_setStepAutomationOverride(scene, slot, amount)` | Set a per-voice Morph step automation override. The morph engine uses this value instead of the retained per-voice amount while active. LFO modulates around the override value (Session 070). | Sequencer Scene automation drain |
 | `presetMorph_clearAllStepAutomationOverrides(scene)` | Clear all per-voice Morph step overrides and restore retained amounts. Called on transport restart (Session 070). | Sequencer Scene automation restore |
 | `presetMorph_clearStepAutomationOverride(slot)` | Clear one voice Morph step override. Rule A: called when a non-automation write changes the voice Morph retained value (`preset_morphVoiceScene()`, `preset_morphScene()`). (S076 P1) | presetManager Morph setters |
@@ -1012,6 +1053,9 @@ Current target order:
   Session 072 Step 5
 - Effect Morph `fxm` (ID 404; LFO + automation, no velocity) — EffectsManager
   Morph-base overlay (Session 072 Step 9)
+- Track length (IDs 405–411), scale (412–418) and shuffle (419–425), one per
+  track (`voice_slot` = track 0..6), `SCENE_MOD_TARGET_KIND_TRACK_*`,
+  automation only — the sequencer's track timing overlay (Session 078)
 
 Scene Decimation deliberately appears after the six Morph targets so the
 velocity target list does not place it directly beside a voice-local

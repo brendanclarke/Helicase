@@ -116,7 +116,7 @@ static const char extSyncNames[][4] = {
  *
  * The leading byte is the selectable-entry count; entries follow in the stored
  * play-mode order fwd/rev/pip/rnd/onc/1fr. Clients: the STEP track-settings
- * "mod" cell and the menu.c play-mode formatter (menu_getPlayModeName).
+ * `run` cell and the menu.c run-mode formatter (menu_getPlayModeName).
  */
 static const char trackPlayModeNames[][4] = {
     {6}, {"fwd"},{"rev"},{"pip"},{"rnd"},{"onc"},{"1fr"},
@@ -157,8 +157,13 @@ static const char shortNames[][4] = {
     {"ats"},
     /* S074 bus compressor compact labels. */
     {"cmp"},{"cam"},{"ctm"},{"csc"},
-    /* S078 per-track play mode compact label. */
-    {"mod"},
+    /*
+     * S078 per-track run mode compact label (S078 P4: renamed from `mod`).
+     * `run` matches the FX sequencer's run-mode cell (menuEffects.c), so the
+     * same concept reads the same on the Effect page and the STEP track
+     * settings. Accessor: valueNames[TEXT_TRACK_PLAY_MODE] (menu.c).
+     */
+    {"run"},
 };
 
 static const char catNames[][16] = {
@@ -170,6 +175,13 @@ static const char catNames[][16] = {
     {"Generatr"},{"MIDI"},{"Trigger"},
     /* S074: CAT_SCENE, the full-view category of Scene-owned cells. */
     {"Scene"},
+    /*
+     * S078 P4: CAT_TRACK, the full-view category of per-track Pattern
+     * settings. The clicked-in view of the STEP run-mode cell reads
+     * "Track   RunMode", in parallel with the FX sequencer's
+     * "FX Seq  RunMode". Accessor: valueNames[TEXT_TRACK_PLAY_MODE].
+     */
+    {"Track"},
 };
 
 static const char longNames[][16] = {
@@ -196,8 +208,9 @@ static const char longNames[][16] = {
     {"AutoSave"},
     /* S074 bus compressor long names. */
     {"BusComp"},{"CompAmt"},{"CompTime"},{"CompSC"},
-    /* S078 per-track play mode long name. */
-    {"PlayMode"},
+    /* S078 per-track run mode long name (S078 P4: renamed from PlayMode to
+     * match the FX sequencer's RunMode). */
+    {"RunMode"},
 };
 
 #endif /* MENUTEXT_H_ */

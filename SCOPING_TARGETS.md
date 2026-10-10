@@ -30,7 +30,12 @@ sequencer, Effect automation/LFO, and edit-mask fan-out. See
 `EFFECTS_BUS_FEATURE_PLAN.md` and `EFFECTS_BUS_REFERENCE.md`. Session 073
 then grew program flash to 736 KiB (§5.5), restored Load:[Samples], and cut
 worst-case DSP CPU by about 10 % without skipping any work (see "Session 073
-carry-forward" at the end). The post-Phase-4
+carry-forward" at the end). Sessions 075–078 then worked through Phase 6
+and the deferred Phase 4 track work: copy/clear (S075), Morph copy/reset,
+reload scene, bar chaselight and SHIFT+SELECT pattern length (S076),
+per-track Scene playback and PERF Morph underlines (S077), and per-track step
+scale, shuffle, run modes, track Morph/automation and STEP held-step editing
+(S078; see "Sessions 076–078 summary and carry-forward" at the end). The post-Phase-4
 bugfix/refactor work is tracked in
 `AUTOSAVE_TEST_CASES_LOAD_SAVE_REVISIONS.md`. Phase 5 now establishes Effect
 files, the audio bus and shared buffer, its fixed sequencer, and the related
@@ -1125,10 +1130,24 @@ Automation on a step plays back regardless of whether that step has a trigger �
   active Scene through the complete clear/image/rebind lifecycle). Session 067's
   Pattern Stack Service provides instant playback switching via atomic 16-bit
   pointer swap in the per-track address array, so Scene switches take effect
-  without waiting for the end of the bar. Per-track scene assignment remains
-  Phase 6 work. Per-voice morph in PERF is complete (Phase 3 §3.4).
+  without waiting for the end of the bar. ~~Per-track scene assignment
+  remains Phase 6 work~~ — **done in S077 P2** (§6.5). Per-voice morph in PERF
+  is complete (Phase 3 §3.4).
 
 ### 4.7 Per-track step timing scale
+
+**Status: implemented in Session 078** (`PATTERN_DYNAMIC_STACK.md` §6.4,
+`078_SESSION_HANDOFF_LOG.md` §2). As built, scale is a continuous
+128-position log curve (CC 0..127, `0.25 × 2^(cc/(127/5))` × the 1/16 step:
+1/64 … 1/2) with 14 positions nudged onto musical values including the
+dotted and triplet divisions (`32t`, `16t`, `d32`, `8Tr`, `d16`, `4Tr`, `d/8`,
+`d/4`), played through per-track Q8.8 DDA accumulators so non-musical
+positions are fractionally exact. The longest step is 1/2 note: the
+original "×16 = 1 bar" range (and the old `1bar`/`2bar` table entries) was
+not carried over. Per-track shuffle and run modes (fwd/rev/pip/rnd/onc/1fr)
+landed in the same session, and length/scale/shuffle are morphable (Scene
+endpoints, the voice's Morph amount) and step-automatable (Scene targets
+405..425). The original plan text follows.
 
 Per-track length (up to 128 steps) and per-track scale, accessible from the second page under the transient-voicing ("click") sub-page. Since there are no sub-steps in this paradigm, scale is expressed relative to the base step (1 step = 1/16th note): scaling a track up to ×16 means 1 step on that track = 1 bar, in `/2` increments down to `/16` (1 step = 1/128th note). Dot and triplet subdivisions are flagged by you as open — see below.
 
@@ -1174,7 +1193,7 @@ folding it into an existing temporary layer.
 ### Open Engineering Questions
 
 - **Manual roll triggering:** you flagged needing "a smart way of triggering manual rolls" now that rolls are decoupled from pattern length — this needs a concrete UI proposal (which button/hold-gesture initiates a manual roll, and at what rate) before Phase 6's UI work can wire it up.
-- **Dot/triplet subdivisions for per-track scale:** flagged as "maybe" in the source doc — worth a decision before 4.7 is implemented, since it affects the scale-value encoding (a plain `/2..×16` power-of-two range doesn't accommodate dotted/triplet values without extra encoding bits).
+- ~~**Dot/triplet subdivisions for per-track scale**~~ — **resolved in S078:** a continuous 0..127 curve with dotted/triplet musical stops (§4.7), no extra encoding bits.
 - **`automation hold` vs. the 4.3a default hold-and-reset behavior:** as flagged in 4.3a, it's not yet clear what the dedicated `hold` flag adds on top of the now-default "holds until next active step" behavior for ordinary automation. Left open deliberately (per your note that this can wait for the implementation session), but worth resolving before both are built as potentially-overlapping mechanisms.
 
 ## Phase 5 — Effects Foundation & Scene Fixes
@@ -1203,7 +1222,8 @@ forward:**
   (S075, Phase 6 copy/clear; hardware verification pending);**
 - MIDI mapping of Effect parameters (A20);
 - live record of FX moves (A22);
-- track step-scale/shuffle playback (A10).
+- ~~track step-scale/shuffle playback (A10)~~ — **done (S078)**: Pattern
+  tracks and the FX sequencer share the 128-position curve and Q8.8 DDA.
 
 The 480 KiB flash limit was resolved in Session 073 (§5.5).
 
@@ -1395,9 +1415,9 @@ when formats and allocations are implemented.
 
 ### Suggested Complementary Improvements
 
-- Pattern track scale and shuffle are stored but not yet used by playback.
-  Define how FX sequence scale relates to that clock, and consider finishing
-  the deferred Pattern timing work in this phase.
+- ~~Pattern track scale and shuffle are stored but not yet used by playback.
+  Define how FX sequence scale relates to that clock~~ — **done (S078)**: both
+  use the same StepScale curve and DDA; FX scale is independent per Scene.
 - Test recording, playback, display, and reset together for per-voice Morph
   and the generated VOICE7 decay before adding more Scene automation targets.
 - Make standalone Effect Load report success and failure as clearly as the
@@ -1441,6 +1461,13 @@ Pattern track properties work documented in
 (per-track scale/shuffle, copy/paste/clear, live record automation, roll
 overhaul, Patgen/Euklid revert). These are implementation-eligible and should
 land before the MIDI/UI items below.
+
+**Status after S078:** per-track scale/shuffle **done (S078)**, plus run
+modes and track Morph/automation; copy/paste/clear **done (S075–S077)**;
+dot/triplet subdivisions **resolved (S078)**. Still open: live record of
+automation, roll overhaul and manual roll triggering (§4.8), Patgen/Euklid
+revert (§4.9), the `12a`/`12b` ternary scale mode (§4.10), and the
+automation `hold` reconciliation (§4.3a).
 
 ### 6.1 MIDI and External Control Cleanup
 
@@ -1489,7 +1516,7 @@ indicator). See Phase 3 §3.4 and Phase 4 §4.6 completion notes for details.
 §3.4 (visible/editable per-voice Morph controls in PERF implemented). The
 remaining item:
 
-- **Per-track scene assignment:** hold a voice button and press a `SEQ` (scene) button to assign that individual track to play from a different scene than the rest — same gesture as the old "per-track pattern assignment" idea, retargeted at scenes.
+- ~~**Per-track scene assignment:** hold a voice button and press a `SEQ` (scene) button to assign that individual track to play from a different scene than the rest — same gesture as the old "per-track pattern assignment" idea, retargeted at scenes.~~ **Done in S077 P2** (`seq_perTrackPattern[7]`, hold VOICE + press SEQ, double-click realign; hardware PASS at the S078 close, retest rows 6.1–6.42). Known limitation: Scene-namespace LFO/velocity target tokens resolve through the active Scene.
 
 ### 6.6 Looper
 
@@ -1713,8 +1740,10 @@ items formerly in this section now live in
   causing the chase renderer's shown/played equality predicate to reject every
   chase update. Fix: added `menu_setPlayedPattern()` at three filesystem
   realignment sites. Hardware-accepted. See `S068_MISSING_CHASELIGHT.md`.
-- **Per-track step scale (sequencer consumption).** `track_scale[track]` is
-  stored, persisted, and editable through the Menu, but the sequencer advances
+- **Per-track step scale (sequencer consumption) — RESOLVED (S078).**
+  Per-track Q8.8 DDA on a continuous 128-position curve
+  (`PATTERN_DYNAMIC_STACK.md` §6.4). Original note: `track_scale[track]` was
+  stored, persisted, and editable through the Menu, but the sequencer advanced
   all tracks on a single global 24-PPQ-tick divisor
   (`SEQ_INTERNAL_TICKS_PER_DEFAULT_STEP`). All tracks play at 1/16th note
   resolution regardless of the stored scale value. Fix requires per-track PPQ
@@ -1722,7 +1751,9 @@ items formerly in this section now live in
   and a scale-to-ticks mapping table validated against the original LXR's
   documented scale labels. Interacts with §4.7 "Per-track step timing scale"
   design. See `S068_TRACK_SETTINGS_IGNORED.md` Root cause 2.
-- **Per-track shuffle (sequencer consumption).** `track_shuffle[track]` is
+- **Per-track shuffle (sequencer consumption) — RESOLVED (S078).** Odd
+  steps deferred `(shuffle × 24)/256` ticks on the 1/16 grid with per-track
+  delay counters. Original note: `track_shuffle[track]` was
   stored, persisted, and editable through the Menu, but the sequencer fires
   every step at a uniform tick boundary with no shuffle offset. Fix requires
   sub-step scheduling: either per-track delay counters (+7 bytes ISR static)
@@ -2005,3 +2036,49 @@ Session 075 record: `knowledge_files/log_archive/075_SESSION_HANDOFF_LOG.md`
 - **Copy/clear known limits** (by design): `COPYCLEAR_UTILITIES.md` §18.
 - **Trace ring** still at the temporary 2,048 records (D2).
 
+## Sessions 076–078 summary and carry-forward (2026-10-10)
+
+Records: `076_SESSION_HANDOFF_LOG.md`, `077_SESSION_HANDOFF_LOG.md`,
+`078_SESSION_HANDOFF_LOG.md`.
+
+### Accomplished
+
+- **S076:** override clear rules (Rule A/Rule B); LFO retrigger `scn` Scene
+  phase handoff and the phase-offset scaling fix; `reset morph`/`copy morph`
+  at track and Scene level and `reset fx morph`; `reload scene`; STEP bar
+  chaselight; SHIFT+SELECT per-track pattern length. Hardware PASS (retest
+  rows 1.x–4.x, except 3.10/3.14/3.15).
+- **S077:** 17th background region (AutoSave snapshot / overlap paste pool);
+  per-track Scene playback (§6.5) with PERF hold-VOICE+SEQ and double-click
+  realign; blank-menu-after-Scene-Load fix; Scene morph copy/reset fan-out
+  correction; bar-to-step paste; PERF Morph automation underlines. Hardware
+  PASS for P1 and P2 (rows 5.x, 6.x) and the P3 fix.
+- **S078:** §4.7 per-track step scale (continuous curve, DDA), per-track
+  shuffle, per-track run modes (fwd/rev/pip/rnd/onc/1fr with once-mode
+  retrigger rules), FX sequencer on the same curve, morphable and
+  step-automatable track length/scale/shuffle, the STEP SHIFT Morph view,
+  STEP multi-step specials broadcast, the STEP held-step track automation
+  overlay, STEP automation underlines and pot clears, run-mode relabel
+  (`run`/`Track`/`RunMode`), `tools/convert_scene_scale.py`. Product rule
+  added: any SHIFT Morph view shows/edits Normal for non-morphable
+  parameters. Hardware PASS for P1–P4 (2026-10-10).
+
+### Open
+
+- Hardware: S078 P1–P4 all PASS (2026-10-10). Still open: retest rows
+  3.10/3.14/3.15 (S077 P4) and C1–C6; S077 P5/P6 have no recorded test rows.
+- Decision: STEP-page deferred CGRAM marker retry (`menu.c`
+  `menu_serviceRuntimeWidgets()` retry excludes SEQ_PAGE; one-line fix).
+- Accepted limits: track length 128 cannot be step-automated (7-bit);
+  clearing track automation does not undo its last applied value (sticky
+  until transport stop/Pattern restore); old PAT4 scale bytes need the
+  offline converter.
+- Optional: move `len`/`scl`/`shf` to the `Track` category; a STEP Morph
+  latch would need a gesture other than SHIFT+MODE STEP (the only SOM entry).
+- Still deferred: live record of automation and FX moves (A22), roll overhaul
+  (§4.8), Patgen/Euklid revert (§4.9), `12a`/`12b` scale mode (§4.10),
+  automation `hold` reconciliation, `/Effect/` browser (A35), MIDI mapping
+  (A20), one-shot LFOs (§6.2), looper (§6.6), external MIDI tracks (§6.8).
+- Carried from S074/S075: Pattern Load fan-out tear; O1; F4 trace priorities;
+  boot timeout; `cpu` with `cmp`; BC11; saturator α; stale comments;
+  production build re-measurement.

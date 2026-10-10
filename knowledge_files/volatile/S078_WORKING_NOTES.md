@@ -1,102 +1,82 @@
-# S078 Inter-Session Working Notes
+# S078 Inter-Session Working Notes — carry-over after the Session 078 close
 
-Last updated: 2026-10-08 (Session 077 closure).
+Last updated: 2026-10-10 (Session 078 closure; for Session 079). This file
+was the S077 → S078 carry-over and has been rewritten in place.
 
-The full Session 077 record is
-`knowledge_files/log_archive/077_SESSION_HANDOFF_LOG.md`. The copy/clear
-reference is `knowledge_files/specification_reference/COPYCLEAR_UTILITIES.md`.
+The full Session 078 record is
+`knowledge_files/log_archive/078_SESSION_HANDOFF_LOG.md`. Per-track timing
+authority: `PATTERN_DYNAMIC_STACK.md` §6.4 (timing) and §6.3a (STEP-page
+editing). Morph architecture and the Morph-view rule:
+`BANK_PRESET_ARCHITECTURE.md` §5, §8.
 
-## Build metrics at S077 closure
+## Build metrics at S078 closure
 
 | Metric | Value |
 |---|---|
-| text / data / bss (DEV config) | 538,416 / 416 / 427,008 |
-| Flash payload | 538,832 B of 753,664 B; **headroom 214,832 B** |
-| BSS growth from S076 | +264 B (256 B `ccSvc_snapTable[128]` + 8 B alignment) |
-| Branch | `dev-ph6-cleanup`: S077 code changes uncommitted |
+| text / data / bss (DEV config) | 539,856 / 416 / 427,616 |
+| Flash payload | 540,272 B of 753,664 B; **headroom 213,392 B** |
+| BSS growth from S077 | +608 B (76 B sequencer timing, 24 B track overrides, 352 B Scene track Morph endpoints, 119 B run-mode bytes incl. background region; approved at plan acceptance) |
+| Branch | `dev-ph6-cleanup`: P1 `0c23def`, P2+P3 `b537e6f`; P4 + close-out docs uncommitted |
+| Image | `build/LXRV2_lxr02.img` 540,384 B, SHA-256 `ecc0eb0b…3bd8bd` |
 | Production build (`DEV_MODE_LOGGING 0`) | last measured at S075 F1: `text=516,688 data=408 bss=409,840`; re-measure |
 
-## Carry-over from Session 077
+## Carry-over from Session 078
 
-1. **Hardware testing (top priority):** S077 P4–P6 await hardware verification.
-   Use `S077_RETEST_CHECKLIST.md` in the root directory. Key areas:
-   - P4 items 4.1–4.20: Scene morph fan-out correction (test that
-     `copy morph` and `reset morph` fan out to edit-mask members);
-   - P5 items 5.1–5.11: bar-to-step cross-kind copy (bar source →
-     step destination, verify correct geometry);
-   - P6 items 6.1–6.42: PERF mode morph automation underline (verify
-     underline markers appear on PERF page for voices with morph
-     automation);
-   - P3 items 3.10, 3.14, 3.15: cleared for re-test after P4 fan-out
-     correction;
-   - Carry-over C1–C6 from earlier sessions.
-
-2. **S076 P1–P4 carry-over (still needs hardware):**
-   - P1: automation override clears (Rule A per-parameter, Rule B per-Scene);
-   - P2: LFO retrigger `scn` Scene-change phase handoff, phase offset
-     scaling;
-   - P3: `reset morph` and `copy morph` at track and Scene level, fan-out
-     behavior, `reset fx morph` fan-out;
-   - P4: `reload scene`, bar chaselight, SHIFT+SELECT per-track pattern
-     length.
-
-3. **S075 carry-over (still open):**
-   - the SHIFT+TRACK overlay follow-up re-test;
-   - the combined case list in `COPYCLEAR_UTILITIES.md` §16;
-   - F3 cases beyond "seems ok";
-   - card preparation (delete `.hcprms1`/`.hcprms2` before first boot of
-     this firmware on an older card);
-   - production build not re-measured since S075 F1.
-
-4. **Open defects (not fixed):**
-   - Pattern Load fan-out `memcpy` can tear one playback tick;
-   - O1: Settings Load bulk Global apply equalises per-voice Morph across
-     the VOICE edit mask;
-   - F4: AutoSave trace ring drops lifecycle records during dirty bursts;
-   - underline limitations (live erase race, deferred clear race);
-   - P2 known limitation: Scene-namespace LFO/velocity target tokens resolve
-     through the active Scene in InstrumentManager, not the played Scene.
-
-5. **Behaviours to remember (accepted):** Effects saved at pan 64 show `1`;
+1. **Hardware testing:** S078 P1, P2, P3 and P4 are all PASS (user,
+   2026-10-10). Still open:
+   - Retest rows still blank: 3.10/3.14/3.15 (S077 P4 Scene morph fan-out),
+     C1–C6. S077 P5 (bar-to-step) and P6 (PERF morph underline) never had
+     checklist rows.
+2. **Decision:** the STEP-page deferred-marker retry gap
+   (`menu_serviceRuntimeWidgets()` retry excludes SEQ_PAGE; fix: add
+   `|| menu_activePage == SEQ_PAGE`). Offered, not applied.
+3. **Accepted limits (S078):** track length 128 cannot be step-automated
+   (7-bit); a queued patSvc removal can leave a stale STEP name underline
+   until the next restart; clearing automation does not undo the last applied
+   value (sticky until transport stop / Pattern restore); old PAT4 scale bytes
+   play fast until converted (`tools/convert_scene_scale.py`).
+4. **Possible follow-ups the user may want:** move `len`/`scl`/`shf` to
+   category `Track` (three `valueNames` edits); a STEP Morph latch would need
+   a gesture other than SHIFT+MODE STEP (the SOM entry).
+5. **Card preparation:** delete `.hcprms1`/`.hcprms2` after flashing S078
+   firmware on an older card (AutoSave Scene cells 51..71 are not migrated;
+   old records restore scale 0 for the track Morph endpoint).
+6. **Open defects carried (not fixed):** Pattern Load fan-out `memcpy` can
+   tear one playback tick; O1 Settings Load per-voice Morph equalisation; F4
+   AutoSave trace ring drops lifecycle records during dirty bursts; underline
+   limitations (live erase race, deferred clear race); S077 P2 limitation:
+   Scene-namespace LFO/velocity target tokens resolve through the active
+   Scene in InstrumentManager.
+7. **Behaviours to remember (accepted):** Effects saved at pan 64 show `1`;
    MIDI-entered values reach the LCD only at the next repaint; copy/clear
    limits in `COPYCLEAR_UTILITIES.md` §18.
-
-6. **S074 items still open:** the unexplained boot timeout; the `cpu` widget
-   with `cmp` on; CrumpBit minimum-share run; BC11; saturator α 0.35.
-
-7. **Stale tools and comments:** `decode_devlogs.py` misreads `pattrace.bin`;
-   `BusCompressor.h` ("24 B"), `BusCompressor.c` ("+0.45 %"),
-   `CrumpBitEffect.h` ("73,632 B"), the S074 C4 comment in `menu.c`,
-   `main.c` about 532.
-
-8. **Small carried debt:** Makefile echoed comments, bare-`make` default
-   goal; duplicated comment lines in `mixer.c` and `ResonantFilter.c`;
-   `presetManager.c` comment indentation; unreachable Scene Save phases
-   33–36.
-
-9. **CC_CLEAR_SEND moved:** from value 4 to value 5 due to S076 P3
-   reordering (`CC_CLEAR_RESET_MORPH` is now 4). Any code that hardcodes
-   the old value must be updated.
-
+8. **S074 items still open:** the unexplained boot timeout; the `cpu` widget
+   with `cmp` on; CrumpBit minimum-share run; BC11; saturator α 0.35; stale
+   comments (`BusCompressor.h` "24 B", `BusCompressor.c` "+0.45 %",
+   `CrumpBitEffect.h` "73,632 B", the S074 C4 comment in `menu.c`, `main.c`
+   about 532).
+9. **Stale tools/small debt:** `decode_devlogs.py` misreads `pattrace.bin`;
+   Makefile echoed comments and bare-`make` default goal; duplicated comment
+   lines in `mixer.c` and `ResonantFilter.c`; `presetManager.c` comment
+   indentation; unreachable Scene Save phases 33–36;
+   `AUTOSAVE_TRACE_RECORD_COUNT` still at the temporary 2,048.
 10. **Deferred features:** `/Effect/` browser and Load/Save item (A35); MIDI
-    mapping (A20); live record of FX moves (A22) and of automation; track
-    step-scale/shuffle playback (A10). FX lock removal (A15) and Scene
-    copy/clear of the Effect were done in S075.
-
-11. **Disposable:** the eleven root `S077_*.md` documents (after test results
-    are recorded); the eight root `S076_*.md` documents; the ten root
-    `S075_*.md` documents.
-
-12. **Still open from earlier sessions:** Phase 5 hardware acceptance for
+    mapping (A20); live record of FX moves (A22) and of automation; roll
+    overhaul; Patgen/Euklid revert; triplet `12a/12b` scale mode
+    (SCOPING §4.10); one-shot LFOs; looper; external MIDI sequencing tracks.
+11. **Still open from earlier sessions:** Phase 5 hardware acceptance for
     S072 Steps 6–10; slow Load type switching; D-C1 (boot image check); LFO
     noise range (suspected); optional AutoSave old-format mask guard;
-    filesystem budget primitive extraction; `AUTOSAVE_TRACE_RECORD_COUNT`
-    still at temporary 2,048.
+    filesystem budget primitive extraction.
+12. **Disposable:** the root `S078_*.md` documents (P1–P4 plans and
+    schedules, `S078_RETEST_CHECKLIST.md`); earlier `S077_*`, `S076_*` and
+    `S075_*` root documents if still present.
 
 ## Next session recommended goal
 
-1. Hardware testing of S077 P4–P6 and S076 P1–P4 using
-   `S077_RETEST_CHECKLIST.md`. Fix anything found.
-2. Re-measure the production build.
-3. Collect user's pending S075 hardware reports (item 3 above).
-4. Agree the next feature/fix target with the user.
+1. Decide the STEP marker retry one-liner.
+2. Clear the remaining retest rows (3.10/3.14/3.15, C1–C6) and give S077 P5/P6
+   a quick check.
+3. Re-measure the production build.
+4. Agree the next feature/fix target (SCOPING §6.0 remainder: roll overhaul,
+   Patgen/Euklid revert, live record of automation; or Phase 6 MIDI work).

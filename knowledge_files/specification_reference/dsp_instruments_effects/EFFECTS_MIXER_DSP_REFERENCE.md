@@ -345,7 +345,10 @@ per sample, the tape loop (mono):
   - `free = 70,573·e^(−rate·ln80/127)` samples: 1.60 s at rate 0, 20 ms at
     127, about 180 ms at 64 (`crumpBit_rateSamples()`).
   - `synced` = the StepScale division nearest in log time, at `seq_getBpm()`
-    (96-PPQ ticks × 27,567.5 / BPM samples), among divisions ≤ 1.60 s. The
+    (96-PPQ ticks × 27,567.5 / BPM samples), among divisions ≤ 1.60 s. Since
+    S078 the walk covers all 128 curve positions (`stepScale_ticksQ8(i) /
+    256.0f` ticks, fractional) instead of the 14 old table entries; the UI
+    label uses `stepScale_formatShort()`. The
     bracketing pair is chosen with the geometric-mean test
     `target² < low·high`, so no logarithms (`crumpBit_divisionFor()`).
   - Both are computed every block and `sync` selects one (constant cost), so

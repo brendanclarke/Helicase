@@ -1642,22 +1642,22 @@ renamed/retyped StepScale API.
   CrumpBit division loop is now a 128-iteration loop rather than a
   possibly-unrolled 14-iteration one). Worth a second look at session close.
 
-### Hardware test focus
+### Hardware test focus — PASS (user, 2026-10-10)
 
 1. All 14 old nudge stops produce the same timing as the old table at CC
-   0/16/38/54/60/76/83/86/93/100/103/110/120/127.
+   0/16/38/54/60/76/83/86/93/100/103/110/120/127. **PASS**
 2. Two tracks at different scales stay phase-correct across pattern boundaries
-   and scene changes.
+   and scene changes. **PASS**
 3. Fractional positions (e.g. CC 50) are audibly distinct from rounded
-   neighbours; a smooth knob sweep has no glitches.
-4. Shuffle on/off per track; extreme values.
+   neighbours; a smooth knob sweep has no glitches. **PASS**
+4. Shuffle on/off per track; extreme values. **PASS**
 5. Play modes fwd/rev/pip/rnd/onc/1fr including once-mode retrigger on scene
    change and per-track scene reassignment; stopped once tracks survive a
-   double-click realign.
-6. FX sequencer at non-musical CC positions and on old .fx tokens.
-7. PAT4 round-trip of track_play_mode; copy/clear of a track carries it.
+   double-click realign. **PASS**
+6. FX sequencer at non-musical CC positions and on old .fx tokens. **PASS**
+7. PAT4 round-trip of track_play_mode; copy/clear of a track carries it. **PASS**
 8. Old PAT4 files play at the bottom of the curve (intended); the converter
-   migrates them.
+   migrates them. **PASS**
 
 ---
 
@@ -1767,7 +1767,7 @@ latch is wanted, it needs a different gesture or a new SOM entry point.
 - Measured bss growth from S077 to this point: roughly +600 B (112 region play
   mode + 336 Scene settings + 76 ISR-static + overlays + alignment).
 
-### Step 5 hardware test focus
+### Step 5 hardware test focus — PASS (user, 2026-10-10)
 
 - SHIFT held on the STEP page shows the Scene Morph endpoints; editing len/scl/
   shf writes the endpoints, not the Pattern Normal; releasing SHIFT restores
@@ -1920,21 +1920,21 @@ sequencer reads use the effective arrays. No retained Normal values are
 overwritten by Morph or automation. AutoSave round-trips are guarded.
 The STEP morph UI is correctly scoped and gated.
 
-### Follow-ups for hardware testing
+### Follow-ups for hardware testing — PASS (user, 2026-10-10)
 
 Carry forward the hardware test lists from Steps 1-4 and Step 5 above.
 Priority items:
 
 1. SHIFT held on STEP page: verify morph endpoint display/edit, play-mode
-   blanking, release returns Normal.
+   blanking, release returns Normal. **PASS**
 2. PERF Morph sweep with differing endpoints: verify continuous
-   length/scale/shuffle change in real time, exact Normal at amount 0.
-3. sceneset.scg round-trip: save, delete AutoSave, reboot, verify endpoints.
-4. Old sceneset without new keys: verify 16/76/0 defaults load cleanly.
-5. Copy scene → morph / clear scene reset morph with track endpoints.
+   length/scale/shuffle change in real time, exact Normal at amount 0. **PASS**
+3. sceneset.scg round-trip: save, delete AutoSave, reboot, verify endpoints. **PASS**
+4. Old sceneset without new keys: verify 16/76/0 defaults load cleanly. **PASS**
+5. Copy scene → morph / clear scene reset morph with track endpoints. **PASS**
 6. Step automation on track Len/Scl/Shuf targets: verify playback change,
-   transport restore.
-7. All 14 musical stops timing verification against the old table.
+   transport restore. **PASS**
+7. All 14 musical stops timing verification against the old table. **PASS**
 8. Two tracks at different scales: phase alignment across pattern/scene
-   boundaries.
-9. Play modes including once-mode retrigger and stopped-track realign.
+   boundaries. **PASS**
+9. Play modes including once-mode retrigger and stopped-track realign. **PASS**

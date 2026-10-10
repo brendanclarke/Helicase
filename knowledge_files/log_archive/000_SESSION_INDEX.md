@@ -1800,3 +1800,20 @@ Session 077 ran on `dev-ph6-cleanup` from the S076 close (text 535,976, bss 426,
 - **Find here**: [077_SESSION_HANDOFF_LOG.md](077_SESSION_HANDOFF_LOG.md),
   `COPYCLEAR_UTILITIES.md`, `PATTERN_DYNAMIC_STACK.md`, `STORAGE_SRAM_MANIFEST.md`,
   `BANK_PRESET_ARCHITECTURE.md`, `AUTOSAVE.md`.
+
+### 078 — Continuous Per-Track Step Scale, Shuffle, Run Modes, Track Morph/Automation, STEP Held-Step Editing, Run-Mode Remediation (2026-10-08/10)
+
+Session 078 ran on `dev-ph6-cleanup` from the S077 close (`8c123fb`; text 538,416, bss 427,008) through `0c23def` (P1) and `b537e6f` (P2+P3) to uncommitted P4 (text 539,856, data 416, bss 427,616; payload 540,272 B of 753,664, headroom 213,392 B). Four parts:
+
+- **P1 track settings expansion:** 128-position continuous log step scale (0.25×..8×, 14 nudged musical stops, default CC 76 = 1/16) with a Q8.8 LUT and per-track DDA accumulators (drift-free fractional timing; seed `interval − 256`); FX sequencer on the same curve (DDA + step counter; `.fx` tokens map to CCs); per-track shuffle on the 1/16 grid (`shuffle × 24 / 256` ticks, odd steps); per-track run modes fwd/rev/pip/rnd/onc/1fr (`track_play_mode[7]`, PAT4 track byte 3, once-mode retrigger rules); morphable length/scale/shuffle (Scene endpoints `track_morph_*[7]`, AutoSave cells 51..71, `sceneset.scg` lines, effective cache `seq_effectiveTrack*[]` per played Scene, voice Morph amount drives its tracks); Scene automation targets 405..425; STEP SHIFT Morph view; `tools/convert_scene_scale.py`. RAM +608 B bss (76 B ISR-static, 24 B overrides, 336 B Scene endpoints, 112 B region).
+- **P2 STEP multi-step editing:** held steps broadcast velocity/note/probability; held steps + TRACK opens a held-step track-automation overlay (`len`/`scl`/`shf` written to held steps; SHIFT+COPY + pot clears held steps only; `copyClear_isClearMode()`).
+- **P3 underline/clear fix:** STEP-page Pattern search (`VA_SEARCH_SCENE_TRACK_BIT`, `va_seqTrackSearchBit()`), name underline with or without held steps, editor/Scene/copy-clear restarts, `menu_knobClearTarget()` STEP arm for pot clears; dead presence byte removed. Hardware 14/14 PASS.
+- **P4 run-mode remediation:** STEP Morph view gated on physical SHIFT (fixes stuck view after SHIFT+mode button, busy page refusal, dropped release); **rule: any SHIFT Morph view shows/edits Normal for non-morphable parameters**; label `run`/`Track`/`RunMode`. Hardware PASS.
+- **Hardware:** P1, P2, P3 and P4 all PASS (user, 2026-10-10).
+- **Retest:** S076 P4, S077 P1 and S077 P2 checklist sections all PASS; 3.10/3.14/3.15 and C1–C6 open. Open finding: STEP marker retry gap (`menu.c` ~13329).
+
+- **Find here**: [078_SESSION_HANDOFF_LOG.md](078_SESSION_HANDOFF_LOG.md),
+  `PATTERN_DYNAMIC_STACK.md` (§6.4), `BANK_PRESET_ARCHITECTURE.md`,
+  `MODULE_INTERCHANGE_SPEC.md`, `FILESYSTEM_SPEC.md`, `AUTOSAVE.md`,
+  `COPYCLEAR_UTILITIES.md`, `STORAGE_SRAM_MANIFEST.md`,
+  `dsp_instruments_effects/EFFECTS_BUS_REFERENCE.md`.

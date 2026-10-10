@@ -366,17 +366,17 @@ return (uint16_t)(base + menu_activeVoice);
 3. Call `patSvc_removeStepAutomation()` per held step,
    `menu_automationTargetCleared()` for immediate underline drop.
 
-### Step 8 — Integration testing
+### Step 8 — Integration testing — PASS (user, 2026-10-10)
 
-1. Hold 1 step → TRACK → adjust length → verify automation written.
-2. Hold 3 steps → TRACK → adjust scale → verify all 3 get automation.
-3. Verify underline appears on the adjusted parameter.
-4. Clear button + knob → verify automation removed, underline gone.
-5. Release all steps → verify overlay exits, normal display returns.
-6. Verify multi-step specials (vel/note/prob) broadcast works.
+1. Hold 1 step → TRACK → adjust length → verify automation written. **PASS**
+2. Hold 3 steps → TRACK → adjust scale → verify all 3 get automation. **PASS**
+3. Verify underline appears on the adjusted parameter. **PASS**
+4. Clear button + knob → verify automation removed, underline gone. **PASS**
+5. Release all steps → verify overlay exits, normal display returns. **PASS**
+6. Verify multi-step specials (vel/note/prob) broadcast works. **PASS**
 7. Verify single-step behaviour unchanged (vel/note/prob and automation
-   editor).
-8. Play transport: verify step automation fires at the correct steps.
+   editor). **PASS**
+8. Play transport: verify step automation fires at the correct steps. **PASS**
 
 ---
 

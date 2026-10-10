@@ -4,7 +4,23 @@
 
 This is the authoritative reference for the implemented Helicase AutoSave
 format, ownership, boot restore, mutation tracking, and background writer
-through Session 077. Session 073 changed nothing in AutoSave.
+through Session 078. Session 073 changed nothing in AutoSave.
+
+Session 078 made one change:
+
+- **Track Morph endpoints** (Scene parameters 51..71): per-track Morph
+  endpoints of the Pattern's length (51..57), scale (58..64) and shuffle
+  (65..71), written by `scene_setTrackMorphLength/Scale/Shuffle()`.
+  `AUTOSAVE_SCENE_PARAM_COUNT` and `AUTOSAVE_SCENE_PARAMETER_LIVE_BYTES` go
+  from 51 to **72** (capacity 118). Appended into the reserved tail with no
+  format version bump; **no migration** (user deletes `.hcprms1`/`.hcprms2`
+  after the update). A zero **length** cell (a pre-S078 record) is skipped
+  on restore rather than clamped, so the staged default 16 stays; zero is a
+  valid restore value for scale (`/64`) and shuffle, so old records restore
+  scale 0 there — another reason the records are deleted. The Pattern's
+  `track_play_mode` is Pattern data and travels in PAT4 (track header byte 3),
+  not in the scalar record. The Pattern AutoSave snapshot
+  (`pat_background_region`) grew with the region type to 10,526 B.
 
 Session 077 made one change:
 
@@ -218,8 +234,8 @@ Each Scene region reserves:
 
 - eight name bytes;
 - two HCNAMES source bytes immediately after the name;
-- 118 Scene-parameter bytes, currently 51 live
-  (`AUTOSAVE_SCENE_PARAM_COUNT`):
+- 118 Scene-parameter bytes, currently 72 live
+  (`AUTOSAVE_SCENE_PARAM_COUNT`, S078):
 
   | Index | Meaning |
   |---:|---|
@@ -234,7 +250,10 @@ Each Scene region reserves:
   | 40 | Effect Morph amount (S072) |
   | 41..44 | bus compressor `cmp`, `cam`, `ctm`, `csc` (S074) |
   | 45..50 | per-voice FX-send Morph endpoint (S075 F2) |
-  | 51..117 | reserved (zero) |
+  | 51..57 | track Morph endpoint length, tracks 1..7 (S078; 1..128; 0 = pre-S078 record, skipped on restore) |
+  | 58..64 | track Morph endpoint scale CC, tracks 1..7 (S078; 0..127) |
+  | 65..71 | track Morph endpoint shuffle, tracks 1..7 (S078; 0..127) |
+  | 72..117 | reserved (zero) |
 
   - 512 Effect bytes: 3 type bytes, 8 name bytes, 419 live parameter cells, and
     80 reserved bytes;
@@ -303,7 +322,9 @@ source fields use previously reserved bytes without a version bump because the
 record, mask, payload, section boundaries, and validation size are unchanged.
 The same reasoning covers appending a **Scene parameter** into the reserved
 tail of the 118-byte allocation. That was done for Effect Morph (index 40,
-S072), the bus compressor (41..44, S074), and FX-send Morph (45..50, S075 F2).
+S072), the bus compressor (41..44, S074), FX-send Morph (45..50, S075 F2) and
+the track Morph endpoints (51..71, S078; a zero length is skipped on restore
+because zero is not a valid length).
 The condition: zero, which
 every older record holds there, must be a safe value to restore. The first
 restore after the S074 upgrade therefore reads `cmp off`, `cam 0`, `ctm 0`,
