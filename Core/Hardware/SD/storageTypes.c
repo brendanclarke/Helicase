@@ -417,13 +417,11 @@ const char *storage_instrumentTypeToText(storage_instrument_type_t type)
      * kitset.kcg and instrument metadata. Returning NULL for unknown types lets
      * filesystem reject an impossible save before it writes a partial file.
      */
-    switch (type) {
-    case STORAGE_INSTRUMENT_DRM: return "drm";
-    case STORAGE_INSTRUMENT_SNR: return "snr";
-    case STORAGE_INSTRUMENT_CYM: return "cym";
-    case STORAGE_INSTRUMENT_HAT: return "hat";
-    default: return NULL;
-    }
+    const instrument_registry_entry_t *entry =
+        instrumentManager_registryEntry((instrument_type_t)type);
+
+    /* The registry token is the single source, as for the reverse parse. */
+    return entry ? entry->type_text : NULL;
 }
 
 const char *storage_instrumentTypeExtension(storage_instrument_type_t type)

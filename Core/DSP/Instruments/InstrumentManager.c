@@ -3,6 +3,7 @@
 #include "SnareParameters.h"
 #include "CymbalParameters.h"
 #include "HiHatParameters.h"
+#include "PlaitsKickParameters.h"
 #include "SceneData.h"
 #include "SceneModTargets.h"
 #include "presetManager.h"
@@ -12,6 +13,7 @@
 #include "Snare.h"
 #include "CymbalVoice.h"
 #include "HiHat.h"
+#include "PlaitsKickVoice.h"
 #include "mixer.h"
 #include "modulationNode.h"
 #include "menu.h"
@@ -48,6 +50,11 @@ static const instrument_registry_entry_t instrument_registry[] = {
       HIHAT_INSTRUMENT_TYPE_FLAGS,
       hihat_param_descriptors, HIHAT_PARAM_DESCRIPTOR_COUNT,
       hihat_menu_pages, HIHAT_MENU_PAGE_COUNT },
+    /* Plaits analog kick (C translation of Plaits' AnalogBassDrum, MIT). */
+    { INSTRUMENT_TYPE_PBD, "pbd", plaits_kick_instrument_display_label, ".pbd", "PlKick",
+      PLAITS_KICK_INSTRUMENT_TYPE_FLAGS,
+      plaits_kick_param_descriptors, PLAITS_KICK_PARAM_DESCRIPTOR_COUNT,
+      plaits_kick_menu_pages, PLAITS_KICK_MENU_PAGE_COUNT },
 };
 
 #define INSTRUMENT_REGISTRY_COUNT \
@@ -172,6 +179,7 @@ typedef union {
     SnareVoice snare;
     CymbalVoice cymbal;
     HiHatVoice hihat;
+    PlaitsKickVoice plaits_kick;
     uint8_t reserved[INSTRUMENT_RUNTIME_SLOT_BYTES];
 } InstrumentRuntimeSlot;
 static InstrumentRuntimeSlot runtime_slots[INSTRUMENT_SLOT_COUNT];
@@ -184,6 +192,8 @@ _Static_assert(sizeof(CymbalVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
                "CymbalVoice exceeds tagged slot reserve");
 _Static_assert(sizeof(HiHatVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
                "HiHatVoice exceeds tagged slot reserve");
+_Static_assert(sizeof(PlaitsKickVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
+               "PlaitsKickVoice exceeds tagged slot reserve");
 _Static_assert(sizeof(InstrumentRuntimeSlot) == INSTRUMENT_RUNTIME_SLOT_BYTES,
                "Tagged slot reserve changed through alignment or member size");
 
@@ -241,6 +251,11 @@ static CymbalVoice *instrumentManager_cymbalRuntime(uint8_t slot)
 static HiHatVoice *instrumentManager_hihatRuntime(uint8_t slot)
 {
     return (slot < INSTRUMENT_SLOT_COUNT) ? &runtime_slots[slot].hihat : 0;
+}
+
+static PlaitsKickVoice *instrumentManager_plaitsKickRuntime(uint8_t slot)
+{
+    return (slot < INSTRUMENT_SLOT_COUNT) ? &runtime_slots[slot].plaits_kick : 0;
 }
 
 static char instrumentManager_lower(char c)
@@ -1290,6 +1305,7 @@ void *instrumentManager_runtimeInstance(uint8_t slot)
     case INSTRUMENT_TYPE_SNR: return instrumentManager_snareRuntime(slot);
     case INSTRUMENT_TYPE_CYM: return instrumentManager_cymbalRuntime(slot);
     case INSTRUMENT_TYPE_HAT: return instrumentManager_hihatRuntime(slot);
+    case INSTRUMENT_TYPE_PBD: return instrumentManager_plaitsKickRuntime(slot);
     default: return 0;
     }
 }
@@ -1308,6 +1324,9 @@ static Lfo *instrumentManager_runtimeLfo(uint8_t slot)
         return voice ? &voice->lfo : 0; }
     case INSTRUMENT_TYPE_HAT: {
         HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? &voice->lfo : 0; }
+    case INSTRUMENT_TYPE_PBD: {
+        PlaitsKickVoice *voice = instrumentManager_plaitsKickRuntime(slot);
         return voice ? &voice->lfo : 0; }
     default:
         return 0;
@@ -1376,6 +1395,9 @@ void instrumentManager_runtimeInit(void)
             break;
         case INSTRUMENT_TYPE_HAT:
             HiHat_initVoice(instrumentManager_hihatRuntime(slot));
+            break;
+        case INSTRUMENT_TYPE_PBD:
+            PlaitsKick_initVoice(instrumentManager_plaitsKickRuntime(slot));
             break;
         default:
             break;
@@ -1508,6 +1530,9 @@ void instrumentManager_resetRuntimeSlotFromScene(uint8_t slot,
     case INSTRUMENT_TYPE_HAT:
         HiHat_initVoice(instrumentManager_hihatRuntime(slot));
         break;
+    case INSTRUMENT_TYPE_PBD:
+        PlaitsKick_initVoice(instrumentManager_plaitsKickRuntime(slot));
+        break;
     default:
         break;
     }
@@ -1623,6 +1648,9 @@ uint8_t instrumentManager_runtimePan(uint8_t slot)
     case INSTRUMENT_TYPE_HAT: {
         HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
         return voice ? voice->pan : 64u; }
+    case INSTRUMENT_TYPE_PBD: {
+        PlaitsKickVoice *voice = instrumentManager_plaitsKickRuntime(slot);
+        return voice ? voice->pan : 64u; }
     default:
         return 64u;
     }
@@ -1651,6 +1679,9 @@ float instrumentManager_runtimeVolume(uint8_t slot)
         return voice ? voice->vol : 0.0f; }
     case INSTRUMENT_TYPE_HAT: {
         HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? voice->vol : 0.0f; }
+    case INSTRUMENT_TYPE_PBD: {
+        PlaitsKickVoice *voice = instrumentManager_plaitsKickRuntime(slot);
         return voice ? voice->vol : 0.0f; }
     default:
         return 0.0f;
@@ -1733,6 +1764,9 @@ void instrumentManager_calcSlotAsync(uint8_t slot)
     case INSTRUMENT_TYPE_HAT:
         HiHat_calcAsyncVoice(instrumentManager_hihatRuntime(slot));
         break;
+    case INSTRUMENT_TYPE_PBD:
+        PlaitsKick_calcVoiceAsync(instrumentManager_plaitsKickRuntime(slot));
+        break;
     default:
         break;
     }
@@ -1765,6 +1799,10 @@ void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
         break;
     case INSTRUMENT_TYPE_HAT:
         HiHat_calcSyncBlockVoice(instrumentManager_hihatRuntime(slot), buf, size);
+        break;
+    case INSTRUMENT_TYPE_PBD:
+        PlaitsKick_calcVoiceSyncBlock(instrumentManager_plaitsKickRuntime(slot),
+                                      buf, size);
         break;
     default:
         memset(buf, 0, size * sizeof(buf[0]));
@@ -1870,6 +1908,10 @@ void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
     case INSTRUMENT_TYPE_HAT:
         HiHat_triggerVoice(instrumentManager_hihatRuntime(slot), slot,
                            velocity, alternate_slot6, note);
+        break;
+    case INSTRUMENT_TYPE_PBD:
+        PlaitsKick_triggerVoice(instrumentManager_plaitsKickRuntime(slot), slot,
+                                velocity, note);
         break;
     default:
         break;
@@ -2076,6 +2118,9 @@ static SlopeEg2 *instrumentManager_ampEg(uint8_t slot)
     case INSTRUMENT_TYPE_HAT: {
         HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
         return voice ? &voice->oscVolEg : 0; }
+    case INSTRUMENT_TYPE_PBD: {
+        PlaitsKickVoice *voice = instrumentManager_plaitsKickRuntime(slot);
+        return voice ? &voice->oscVolEg : 0; }
     default:
         return 0;
     }
@@ -2109,6 +2154,9 @@ static Distortion *instrumentManager_distortion(uint8_t slot)
         return voice ? &voice->distortion : 0; }
     case INSTRUMENT_TYPE_HAT: {
         HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? &voice->distortion : 0; }
+    case INSTRUMENT_TYPE_PBD: {
+        PlaitsKickVoice *voice = instrumentManager_plaitsKickRuntime(slot);
         return voice ? &voice->distortion : 0; }
     default:
         return 0;

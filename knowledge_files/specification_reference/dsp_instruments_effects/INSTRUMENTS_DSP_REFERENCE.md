@@ -124,6 +124,7 @@ tap is foreground-only, like the rest of the funnel.
   | Snare | `SnareVoice` | 420 |
   | Cymbal | `CymbalVoice` | 476 |
   | HiHat | `HiHatVoice` | 484 |
+  | Plaits kick | `PlaitsKickVoice` | 284 |
 
   Building blocks: `OscInfo` 72 B, `ResonantFilter` 36 B, `Lfo` 124 B,
   `ModulationNode` 44 B, `SlopeEg2` 28 B, `DecayEg` 12 B,
@@ -333,6 +334,33 @@ fused post-chain: buf + mod (saturating) → amp gain → distortion
 As Cymbal, with the FM carrier at gain 0.5. Two amp-decay caches: `decayClosed`
 (`amp_envelope_decay`) and `decayOpen` (the `_choke` row). The trigger's
 alternate flag (visible track 7) selects the open decay.
+
+### 5.4a Plaits kick (`PlaitsKickVoice.c`, Basic, token `pbd`)
+
+A C translation of Plaits' analog bass drum (`AnalogBassDrum`, the
+`BassDrumEngine` parameter mapping and `Overdrive`; Emilie Gillet, MIT; the
+notice is in `PlaitsKickVoice.h`), followed by the shared LXR post-chain:
+
+```
+trigger pulse (1 ms) + FM pulse (6 ms) --> diode shaping
+resonant SVF band-pass, f = f0 (1 + attack FM + self FM), Q from Decay
+tone one-pole (Tone) --> Plaits overdrive (Harmncs top half) --> x0.8
+fused post-chain: amp EG ramp -> velocity gain -> distortion        --> buf
+```
+
+- **Rows:** `kick_note`, `kick_fine` (raw bytes; note + trigger note − 63,
+  ±½ semitone fine), `kick_harmonics`, `kick_tone`, `kick_decay` (0..1, Plaits
+  Harmonics/Timbre/Morph), then the standard amp EG, voice, LFO and velocity
+  rows. Velocity is also Plaits' accent (pulse height).
+- **Rate:** constants are in seconds × 44,108 Hz; Q and the excitation scale
+  use f0 in Hz, so pitch, decay and level match Plaits. A host comparison with
+  the original C++ (5 settings) agreed within 2 % on peak, decay time and f0.
+- **Amp EG:** the kick is self-enveloped. The shipped presets set the amp EG
+  to decay 100, slope 127 (a ~5 s gate) so the generic Scene-switch quiet test
+  and the track-7 alternate decay still work.
+- **Cost:** about 145 instructions and 5 `VDIV` per sample (est. ~4 %), the
+  same order as Drum.
+- **Library:** `SD_CARD/Instrument/PlKick/*.pbd` (six presets).
 
 ### 5.5 Where each engine's hot code runs
 

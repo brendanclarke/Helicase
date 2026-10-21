@@ -65,6 +65,7 @@ typedef enum {
     INSTRUMENT_TYPE_SNR,
     INSTRUMENT_TYPE_CYM,
     INSTRUMENT_TYPE_HAT,
+    INSTRUMENT_TYPE_PBD,
     INSTRUMENT_TYPE_UNKNOWN
 } instrument_type_t;
 
