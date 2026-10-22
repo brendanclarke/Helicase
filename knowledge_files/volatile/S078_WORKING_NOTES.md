@@ -1,75 +1,69 @@
-# S082 Inter-Session Working Notes — carry-over after the Session 082 close
+# S083 Inter-Session Working Notes — carry-over after the Session 083 close
 
-Last updated: 2026-10-21 (Session 082 closure, then the late Session 081
-close-out; for Session 083). This file was the S078 → S079, S079 → S080 and
-S080 → S081 carry-over and has been rewritten in place again. Session 081 was
-closed out after S082; its carry-over is the section "Carry-over from Session
-081" below (item 9).
+Last updated: 2026-10-22 (Session 083 closure; for Session 084). This file
+was the S078 → S079 … S082 → S083 carry-over and has been rewritten in place
+again. The full Session 083 record is
+`knowledge_files/log_archive/083_SESSION_HANDOFF_LOG.md`. Authorities:
+- `MIDI_SPEC.md` (complete MIDI use and code reference);
+- `FILESYSTEM_SPEC.md` (`settings.cfg` 26 lines, `midilrn.cfg`, `sceneset.scg`
+  track MIDI rows);
+- `MODULE_INTERCHANGE_SPEC.md` ("Core/MIDI", PERF surface, SHIFT+REC);
+- `DEV_MODES.md` (trace stage `m`, `MlWr`);
+- `STORAGE_SRAM_MANIFEST.md` (S083 rows).
 
-The full Session 082 record is
-`knowledge_files/log_archive/082_SESSION_HANDOFF_LOG.md`. Authorities:
-- `FILESYSTEM_SPEC.md` "Current Bank behavior" (Bank Load/Save, preview, HCNAMES tokens, background and progressive load);
-- `MODULE_INTERCHANGE_SPEC.md` "Background Bank load (S082)";
-- `BANK_PRESET_ARCHITECTURE.md` (availability, edit masks);
-- `AUTOSAVE.md` (abort allow-list, range marking);
-- `DEV_MODES.md` (`b`/`h`/`Q` 0x08, stall site 10).
-
-## Build metrics at S082 closure
+## Build metrics at S083 closure
 
 | Metric | Value |
 |---|---|
-| text / data / bss (DEV config) | 598,120 / 420 / 430,928 |
-| Flash payload | 598,540 B of 753,664 B; **headroom 155,124 B** |
-| S082 SRAM | Scene 17 1,658 B; P0 16 B; P1 93 B (91 BSS + 2 `.data`); P3 4 B; DEV-only diagnostics |
-| Branch | `dev-ph6-midi`; code at `8a83df0` (P3), `b25ffbe` (P0–P2); close-out docs uncommitted |
-| Production build (`DEV_MODE_LOGGING 0`) | last measured at S075 F1: `text=516,688 data=408 bss=409,840`; re-measure |
+| text / data / bss (DEV config) | 608,744 / 424 / 430,112 |
+| Flash payload | 608,848 B of 753,664 B; **headroom 144,816 B** |
+| S083 SRAM | net about −816 B vs S082 (USB ring 2,048 → 768 B; Learn 528, overlay 56, NRPN 48, DIN stamps 128, TX 22, flags) |
+| Branch | `dev-ph6-midi`; planning `f9aaeec`, implementation `d007027`, fixes and follow-ups `bbea23f`; final close-out doc edits after it |
+| Production build (`DEV_MODE_LOGGING 0`) | last measured at S075 F1: `text=516,688 data=408 bss=409,840`; re-measure (S081–S083 unmeasured) |
+| Host test | `make -C tools/midi_test run` → PASS |
 
-## Next session: S083 MIDI
+## Carry-over from Session 083 (MIDI)
 
-- Plan: `S083_P1_MIDI_IMPLEMENTATION_PLAN.md` (rev 4 + the §13 S082 outcome
-  notes); reference `MIDI_SPEC.md`.
-- **Already built in S082:**
-  - the background load API, the result byte, the MIDI deferral and the drop filter;
-  - CC0 RX only needs to call `preset_requestBackgroundBankLoad(v, 0, 0, PRESET_BANK_ORIGIN_MIDI)`.
-- **Keep:**
-  - the drop filter runs after thru routing; under consume-then-route a filtered message counts as not consumed;
-  - MIDI parameter writes must fan out through `bank_editTargetMask()`, so that they respect Scene 17 and load availability.
-- **S083 Phase D (PC/CC0)** depends on the S082 P1/P3 hardware checks below.
+1. **Hardware:** the final build "checks out" (user, 2026-10-22). The
+   per-phase MIDI matrices (A–G and the F-1..F-7 checks) were not reported
+   row by row; they are the regression list in `083_SESSION_HANDOFF_LOG.md`
+   §11.2 and `MIDI_SPEC.md` §17.2.
+2. **Testing setup:** a card without `midi_filt_rx/tx` keys has RXF/TXF =
+   off (consumes and sends nothing) and MRT off. Set RXF/TXF to `all`.
+3. **Card files:** `midilrn.cfg` is created by the first Learn;
+   `settings.cfg` is 26 lines (`lines=26`); `learn=`/`l` lines from the first
+   S083 build are ignored and dropped by the next settings write.
+4. **Product decisions owed (only if the user asks):**
+   - RXF/TXF/MRT defaults (off today);
+   - whether a BAR overlay set in PERF should also shape MIDI notes outside
+     PERF (it does: one overlay state);
+   - whether recorded overlay rolls should carry the `pv` rhythm (the S081
+     rule says rhythm is never recorded);
+   - a published NRPN chart per instrument type and Effect type (R7).
+5. **Accepted limits:** a downstream hanging note after a mid-note map
+   change (R9); per-track playback writes and Learn type matching use the
+   active Scene (R10); MIDI flams ignore note-off; MIDI-held rolls are not
+   looper holds; panel early-return edit paths (target-selection cells, roll
+   rhythm, held-step overlays) send no parameter TX; `midilrn.cfg` write
+   retries once, then waits for the next Learn.
+6. **Small debt:** the 7 pre-existing `filesystem.c` unused-function
+   warnings (`filesystem_applyLegacy22Globals`, `_blockRename`,
+   `_reportBootSubstep`, `_bootLoggingSetKitDetail`,
+   `_applyStaleGlobalsFallback`, `_staleMetaPrefixLen`,
+   `_metaHasStoredGlobalsLen`); `PatternData.c:201` packed-member and
+   `EuklidGenerator.c:54` sign-compare warnings.
+7. **Disposable:** the three root `S083_*.md` documents
+   (`S083_P1_MIDI_IMPLEMENTATION_PLAN.md`, `S083_P1_IMPLEMENTATION.md`,
+   `S083_P2_MIDI_TRACK_FIXUPS.md`); the user deletes them. Their content is
+   in the 083 log and `MIDI_SPEC.md`.
 
 ## Carry-over from Session 082
 
-1. **Hardware testing (S082): passed (user, 2026-10-21, S083 Q3).**
-   - **P0:**
-     - Bank round trips: 4 modes × {all, partial, none} × {empty, Kit-only, full} children;
-     - check the active/viewed Scene, the emptied active Scene, the `.hcnames` rows (`-`, `bNNN`, `x`), reboot on both boot paths, and `tools/verify_bank_autosave.py`;
-     - Bank page UI (LED matrix vs PERF, COPY tap/hold, labels, retention), Instrument `chg`, pot coalescing, BAR2.
-   - **P0 fixes:**
-     - stopped and Merge-keeping loads must not build Scene 17;
-     - a 30 s all-pot spin during the preview and an AutoSave drain;
-     - a truncated `.pat` in a Bank child.
-   - **P1:**
-     - name prefills and saves from 17;
-     - rebuild scope and fit (T3 on Scene 5, forced non-fit, T6/T7);
-     - MIDI deferral, drop and missing slot (needs S083 or a test hook);
-     - loads on 17 go to the home Scene;
-     - a load during a scalar drain in a wait phase and an action phase, during a Pattern drain in phases 7 and 4, and during an HCNAMES publication;
-     - the A3 sequence (Kit Load into home, Kit Save from 17, exit, reboot with no AutoSave record; home must keep its Kit);
-     - A8 (a stall in phase 2 ends FAILED after 20 s).
-   - **P2:** confirmed by listening; record `audioCodec_underrunCount` across a 16-Scene Replace and a Merge.
-   - **P3** (untested):
-     - leave Load/Save at once;
-     - PERF fill; switching 17 → A → B → A with no second activation and AutoSave idle;
-     - fan-out links;
-     - the frozen screen (1-based `NN.`, D7 on page, quiet off page);
-     - queued/chain behaviour;
-     - FOLLOW-off STEP drop;
-     - copy/clear mid-load (`LOAD_PENDING`, names after the load);
-     - stopped load locked;
-     - MIDI CC0 unlock at phase 5;
-     - card pull off page;
-     - underrun count.
-2. **P3 A1 decided (S083 Q2, applied in S083 Phase D); A2 still open** (one-liners, not applied):
-   - **A1:** skip the whole queued action when the target is unavailable (`menu_serviceDeferredSceneChange()`, before `menu_applyQueuedSceneAction()`). Today a SHIFT+SEQ queue armed before a direct Merge load into a replaced Scene still clears mutes and writes Morph 0.
+1. **Hardware testing (S082): passed** (user, 2026-10-21, S083 Q3). The
+   per-part matrices are in `082_SESSION_HANDOFF_LOG.md` §11.2 for
+   regression use.
+2. **P3 A1 fixed in S083 (Q2); A2 still open** (one-liners, not applied):
+   - **A1 (done):** a queued action whose target is unavailable is skipped whole (`menu_serviceDeferredSceneChange()`).
    - **A2:** repaint the Scene LEDs in the frozen-screen re-press guard of `menu_switchPage()`.
    - **A3:** SHIFT+REC opened from Load/Save mode shows no W1 blink. Leave it unless the user asks.
 3. **F5 Scene 2 Case-3 invalidation:** root cause open. Capture protocol:
@@ -85,7 +79,7 @@ The full Session 082 record is
    The trace flush is suppressed during a command, so power-off before the next flush loses a load's records.
 6. **Optional, only if asked:** run `FS_FAST_DRAIN_POLL_PASSES` inside the idle window. The user declined further load speed-ups (W5).
 7. **Card preparation:** delete `/.hcnames`, `.hcnamtmp`, `.hcprms1` and `.hcprms2` after flashing S082+ firmware on an older card.
-8. **Disposable:** the eight root `S082_*.md` documents and `SD_CARD_082_P0/`, `SD_CARD_082_P1/`.
+8. **Disposable:** the eight root `S082_*.md` documents and `SD_CARD_082_P0/`, `SD_CARD_082_P1/` (if still present).
 9. **Session 081 close-out: done** (2026-10-21): `081_SESSION_HANDOFF_LOG.md`, the index entry, the spec updates and `MEMORY.md`. Its open items are in the next section.
 
 ## Carry-over from Session 081 (live record, ramps, loop while record, bar pulse)
@@ -132,11 +126,11 @@ LiveRecord). Authorities: `PATTERN_DYNAMIC_STACK.md` §6.1–§6.2b, §6.5, §6.
      (~lines 1227, 1279).
 9d. **Small debt:** add stage `W` (causes 1–5) to `tools/decode_devlogs.py`;
     re-measure the production build (S081 and S082 both unmeasured).
-9e. **Deferred (MIDI rework, S083):** MIDI note timestamps and realtime
-    queue-skip priority; CC → target mapping for `liveRec_paramIn()`; whether
-    MIDI CC adopts R12 menu priority; global-channel CC1 must stay unrecorded
-    (G-1). Also deferred: step record while stopped, recording FX-sequence
-    locks, automation `hold` reconciliation (SCOPING §4.3a).
+9e. **MIDI items deferred from S081: done in S083** (arrival stamps,
+    real target IDs for `liveRec_paramIn()`, MIDI = menu edit incl. R12,
+    CC1 on G unrecorded). Still deferred: step record while stopped,
+    recording FX-sequence locks, automation `hold` reconciliation
+    (SCOPING §4.3a).
 9f. **Disposable:** the ten root `S081_*.md` documents (superseded by the
     081 log; the user deletes them).
 
@@ -150,7 +144,7 @@ LiveRecord). Authorities: `PATTERN_DYNAMIC_STACK.md` §6.1–§6.2b, §6.5, §6.
     - `fls` variable flam spacing;
     - edit lock during scene changeover.
 12. **Accepted limits:**
-    - S080: looper projection uses the current scale for the whole span; the overlay repeat timer has a single slot; and so on.
+    - S080: looper projection uses the current scale for the whole span; and so on (the single overlay repeat slot was lifted in S083: per-track table).
     - S079: special-flags byte full; pool capacity under extreme use; roll quantization; shuffle + micro-timing.
     - S078: track length 128 cannot be automated; a queued removal can leave a stale underline; automation is sticky until stop (since S081 a menu edit of that track parameter clears the override, R12).
 13. **S079 P2 checklist** (4 items) and the P1 addendum fix 3 (7mu/!7m) still need on-device confirmation.
@@ -183,7 +177,7 @@ LiveRecord). Authorities: `PATTERN_DYNAMIC_STACK.md` §6.1–§6.2b, §6.5, §6.
     - one-shot LFOs;
     - external MIDI sequencing tracks.
 
-    MIDI mapping (A20) is now the S083 plan.
+    MIDI mapping (A20) was done in S083.
 19. **Still open from earlier sessions:**
     - Phase 5 hardware acceptance for S072 Steps 6–10;
     - slow Load type switching;
@@ -195,9 +189,8 @@ LiveRecord). Authorities: `PATTERN_DYNAMIC_STACK.md` §6.1–§6.2b, §6.5, §6.
 
 ## Next session recommended goal
 
-1. S083 MIDI, Phase A first (cleanup, consume-then-route), keeping the S082
-   drop filter and deferral intact.
-2. In parallel, run the S082 P1/P3 hardware checks (item 1) before S083
-   Phase D.
-3. Decide P3 A1/A2.
-4. Close out S081 when the user asks.
+1. Pick the next `SCOPING_TARGETS.md` Phase 6 item (MIDI §6.1 and A20 are
+   done).
+2. Open items worth a look when convenient: F5 (Scene 2 Case-3
+   invalidation), S082 P3 A2, S081 P3 A-1 (decision), the production build
+   re-measure.

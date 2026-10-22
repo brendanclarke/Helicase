@@ -97,6 +97,7 @@ it belongs in the summary or the log, not here.
 | 080 | 2026-10-10/11 | `dev-ph6-cleanup`, `4869a98` | PERF performance surface: looper, BAR VOICE-trigger overlay, SHIFT+REC menu, Scene queue/change division, Scene chaining, loopable tracks |
 | 081 | 2026-10-12/16 | `dev-ph6-cleanup`, `2a0fd86` (logged after S082) | Live record and live erase, step reset rule, R12/R13 automation priority, 96-PPQ roll table, linear automation ramps (`asm`), loop while record, VOICE bar pulse |
 | 082 | 2026-10-16/20 | `dev-ph6-midi`, `8a83df0` | Load/Save cleanup, Bank Replace/Merge, background Bank load through Scene 17, work while loading |
+| 083 | 2026-10-21/22 | `dev-ph6-midi`, `bbea23f` | MIDI rework: `Core/MIDI/` rebuild, note map, MIDI writes as menu edits, NRPN, MIDI Learn (`midilrn.cfg`), PC/CC0, Continue/SPP, transmit; track `ch`/`nte` `off`, CC2 = BAR overlay, `pv<`/`pv>` |
 
 
 ---
@@ -1992,7 +1993,7 @@ Session 082 ran on `dev-ph6-midi` from the S081 code commit (`2a0fd86`; S081 was
 
 ### 083 — MIDI Implementation: `Core/MIDI/` Rebuild, Note Map, NRPN/Learn, Transport, Transmit; Track `ch`/`nte` `off`, `midilrn.cfg`, CC2 = BAR Overlay, `pv<`/`pv>` (2026-10-21/22)
 
-Session 083 ran on `dev-ph6-midi`: planning commit `f9aaeec`, the implementation commit `d007027`, then follow-ups uncommitted at the close. The final DEV link is `text=608,744`, `data=424`, `bss=430,112` (payload 608,848 B of 753,664 B, **headroom 144,816 B**). The work was the S082-planned MIDI rework (`SCOPING_TARGETS.md` Phase 6 §6.1, A20): plan revision 5 (Q1–Q13), a full code schedule, implementation in phases A–H, an assessment with fixes, and three rounds of hardware follow-ups.
+Session 083 ran on `dev-ph6-midi`: planning commit `f9aaeec`, the implementation commit `d007027`, and `bbea23f` (assessment fixes, all follow-ups and the first close-out drafts); the final close-out document edits followed. The final DEV link is `text=608,744`, `data=424`, `bss=430,112` (payload 608,848 B of 753,664 B, **headroom 144,816 B**). The work was the S082-planned MIDI rework (`SCOPING_TARGETS.md` Phase 6 §6.1, A20): plan revision 5 (Q1–Q13), a full code schedule, implementation in phases A–H, an assessment with fixes, and three rounds of hardware follow-ups.
 
 - **Rebuild (Q7):** `Core/MIDI/` was replaced by single-role modules:
   - `MidiDefs.h`, `MidiBuffer`, `MidiDin`, `MidiIn`, `MidiTransport`;

@@ -351,9 +351,9 @@ Current bridges and limitations:
   direct descriptor targets, voice-local decimation, per-voice Morph, and Scene
   Decimation. LFO direct descriptor overlays now go through descriptor-domain
   adapters; the remaining target-runtime gap is step automation.
-- `AutomationNode` and the current step automation storage/playback path still
-  use legacy/narrow target IDs and must be rebuilt for descriptor and Scene
-  modulation targets.
+- (Historical, closed.) `AutomationNode` and the old narrow-ID step automation
+  path were removed (commit `eb9ec46`); step automation uses the canonical
+  9-bit targets in PAT4 (`PATTERN_DYNAMIC_STACK.md`).
 - New Scene modulation target IDs are runtime/menu IDs. Scene folders persist
   Scene mix/routing settings in `sceneset.scg` and the Scene-owned Effect in
   one `<name>.fx` child (v2, Session 072).
@@ -2219,21 +2219,20 @@ Current LFO modulation behavior:
 
 Current target limitations:
 
-- `AutomationNode` still plays back by emitting legacy MIDI CC/CC2 through
-  `midiParser_ccHandler()`.
+- (Closed) `AutomationNode` and the legacy MIDI CC/CC2 playback
+  (`midiParser_ccHandler()`) no longer exist: `AutomationNode` was removed
+  with the old pattern storage, and S083 deleted the legacy CC map with
+  `MidiParser`.
 - `preset_applyInstrumentRuntimeValueInternal()` currently ignores its
   `recordAutomation` argument.
 - `seq_recordAutomation()` still accepts/narrows destination as `uint8_t`.
 
-External MIDI CC descriptor edits are now retained endpoint entries: the value
-is clamped to the same menu domain as a VOICE edit, marked for AutoSave, and
-saved with the active Scene. The bounded Morph worker applies the endpoint's
-interpolation and skips any descriptor currently held by step automation.
-
-Therefore, the remaining descriptor target follow-up is step automation:
-`AutomationNode`, step target storage, automation recording, and automation
-display must preserve descriptor/Scene target IDs and apply through the same
-descriptor-aware runtime routes.
+External MIDI parameter writes (NRPN, Learn, CC1) are menu edits since S083
+(`menu_commitTargetEdit()`, `MIDI_SPEC.md` §5.6): the value is clamped to the
+same menu domain as a VOICE edit, stored as the active Scene's Normal
+endpoint, fanned out through the edit mask, marked for AutoSave and saved
+with the Scene. Step automation, its storage, recording and display use the
+canonical descriptor/Scene target IDs (`PATTERN_DYNAMIC_STACK.md`).
 
 The main remaining modulation correctness follow-up is dynamic owner enumeration
 for non-adapter paths: `modNode_resetTargets()` and
@@ -2752,8 +2751,8 @@ instrument runtime propagation:
   only after all incoming tagged members are valid.
 - Confirm LFO negative polarity on envelope decay follows the visible parameter
   direction and amount scale through the descriptor writer.
-- Treat step automation as pending until the descriptor-aware AutomationNode
-  pass is complete.
+- (Closed) Step automation is descriptor-aware (canonical 9-bit targets);
+  the old AutomationNode no longer exists.
 
 ## AutoSave boundary
 

@@ -299,10 +299,8 @@ module owns each call, state transition, and retained object.
   for non-instrument sound parameters. It is not the canonical store for new
   descriptor-backed instrument parameters.
 - `ParameterArray` remains the legacy runtime pointer map used by older flat
-  parameter paths and by `AutomationNode`. It is no longer the canonical map
-  for instrument file keys. `Step` destinations are already canonical 16-bit
-  IDs, but AutomationNode still narrows them to legacy byte CC/CC2 routing;
-  descriptor step automation uses canonical 9-bit `instrument_param_id_t`
+  parameter paths (the old `AutomationNode` is gone). It is no longer the
+  canonical map for instrument file keys. Descriptor step automation uses canonical 9-bit `instrument_param_id_t`
   targets and 7-bit pool-packed values with identity mapping (stored value =
   parameter value; Session 065 storage, Session 067 dtype fix).
 - Descriptor-backed velocity/LFO target storage, menu display, and runtime
@@ -1227,9 +1225,9 @@ Purpose: owns the legacy numeric parameter id map and runtime pointer map from
 flat sound parameter ids to DSP engine fields. After Session 032, instrument
 file keys and dynamic VOICE pages are descriptor-backed through
 InstrumentManager/SceneData instead of this table. `ParameterArray` remains
-important for older static sound parameters and for the legacy AutomationNode
-path. Session 033 added descriptor-aware LFO/velocity adapters; AutomationNode
-still needs the same descriptor/Scene target migration.
+important for older static sound parameters. Session 033 added
+descriptor-aware LFO/velocity adapters. (The legacy AutomationNode path and the
+S083-retired MIDI CC map no longer use it.)
 
 | API / Data | Use | Usual callers / clients |
 |---|---|---|
@@ -1288,6 +1286,7 @@ or the FX audio bus.
 | R13 menu holds and lock layering (S081, internal) | `effects_setParameter()` / `effects_setMorphAmount()` (origin = active Scene, row in the runtime type) clear the overlay and set `menuHold`/`menuHoldMorph`; `effects_lockClearLayers()` at an FX lock step start (`effects_seqConsume()` STEP, `effects_seqSelect()` in `sel`) clears the overlay and `menuHold` of each locked lane's parameter; `effects_service()` resolves menuHold > lock (its step only; the held Morph lane is gone) > overlay > menu (`EFFECTS_BUS_REFERENCE.md` §6). | Menu, Sequencer drain |
 | `effects_setLiveEraseLanes(laneMask)` / `effects_takeErasedLocks(*step, *laneMask)` | S081 live FX-sequence erase: the 16-bit lane mask whose locks are excluded at each FX step start; the per-step record `effects_erasedLanes[16]` is taken one step at a time (returns 0 when empty) and cleared with `effects_clearSeqLanes()`. | LiveRecord |
 | `effects_storeValue7(scene, local, value)` | S081: the inverse of a WIDE8 row's `expand7`, so a live-recorded Effect value is stored 7-bit. | LiveRecord value resolver |
+| `effects_setMorphAmountFromGlobal(scene, amount)` | S083 follow-up: global Morph (`mrp`, CC1 on G) sets the Effect Morph of ONE Scene with `fxm` menu-edit semantics: stores the amount, clears the Pattern `fxm` override (S076 Rule A) and, on the active Scene, sets `menuHoldMorph` (holds over an FX Morph lock until the next Morph automation). No fan-out (the caller runs per edit-mask Scene); never records (G-1). | `preset_morphScene()` |
 | `effects_clearMorphAutomationOverride()` | Clear the Effect Morph automation override. Rule A: called when a non-automation write changes `fxm` (`effects_setMorphAmountScene()`). (S076 P1) | EffectsManager Morph setter |
 | `effects_resetMorphToNormal(scene)` | Equalise all morphable Effect endpoints of a Scene to their Normal values. (S076 P3) | CopyClear Scene morph reset |
 | `effects_resetMorphToNormalSingle(scene)` | Same as above, for fan-out use (single Scene at a time). (S076 P3) | CopyClear fx morph reset |
@@ -1454,6 +1453,23 @@ Shared runtime state:
 - `midiLearn_table[128]`: global type-tagged CC rows.
 - `midiOut_trackNote/Channel[7]`: per-track sounding note and its channel.
 - `midiOut_nrpnKey[2]`, `midiOut_pending`, `midiOut_lastSendMs`: parameter TX.
+
+Data flow in one line each (full diagrams, every module's internals, the
+integration points, concurrency rules and extension recipes are in
+`MIDI_SPEC.md` Part II, the code reference):
+
+- **Receive:** USART3/OTG ISRs stamp each message (TIM2 µs) → realtime to the
+  `MidiTransport` ring (TIM3 handler, `snc` gate), everything else to the DIN
+  buffer / USB ring → `midiIn_service()` frames and dispatches → consumers
+  (`MidiNotes`, `MidiControl` → `MidiLearn`, `MidiProgram`, `MidiTransport`)
+  → not consumed: `midiOut_forward()` per MRT.
+- **Write:** every received parameter value goes through
+  `midiControl_writeTarget()` → `menu_commitTargetEdit()` (a MIDI write is a
+  menu edit: R12/R13, fan-out, recording, repaint).
+- **Transmit:** `seq_triggerVoice()` → `midiOut_trackTrigger()` (inverse note
+  map); panel edits → `midiOut_parameterChanged()` → `midiOut_service()`
+  (learned CC or NRPN); PC via `seq_sendProgChg()` /
+  `midiOut_trackProgramChange()`; CC0 after a Menu Bank load.
 
 The S082 Bank-load drop filter moved verbatim into `MidiIn.c`
 (`midiIn_acceptedDuringBankLoad()`): while a load runs, only realtime,

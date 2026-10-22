@@ -4,9 +4,12 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 083 (2026-10-21), `dev-ph6-midi`. DEV link:
-  `text=603,896`, `data=424`, `bss=430,120`; flash payload 604,320 B of
-  753,664 B (**headroom 149,344 B**), after the MIDI rebuild.
+- **Current as of:** Session 083 close (2026-10-22), `dev-ph6-midi`. DEV
+  link: `text=608,744`, `data=424`, `bss=430,112`; flash payload 608,848 B of
+  753,664 B (**headroom 144,816 B**). ITCM 4,168 / 16,384 B; DTCM statics
+  4,472 B; FXBUF 126,592 B at 0x20001180 (margin 3,712 B). The entries below
+  run newest first; the S083 assessment fixes (2026-10-21) changed text to
+  604,200 and bss to 430,112 (−8 B alignment) with no new statics.
 - **S083 follow-up (2026-10-22):** −1 B SRAM1. `MidiNotes` no longer has
   a `midiNotes_action` CC2 state: CC2 sets `buttonHandler`
   `bh_overlayActive`. The overlay entry field `vel` (always 100) became the
@@ -600,7 +603,16 @@ byte, including alignment and small variables omitted here.
 | `presetMorphEngine.c`: track step overrides (S078) | 24 | `track_param_override_value[3][7]` + `track_param_override_mask[3]`: runtime-only length/scale/shuffle step-automation overlay. |
 | `InstrumentManager.c`: `lfo_descriptor_targets` | 192 | Twelve descriptor LFO adapters for six slots and two target pairs. |
 | `menu.c`: `parameter_values` | 384 | Legacy Menu/MIDI parameter cells. |
-| `MidiParser.c`: `midiParser_originalCcValues` | 255 | Legacy MIDI CC baseline cells. |
+| `MidiLearn.c`: `midiLearn_table` + state (S083) | 528 | 128 × 4 B type-tagged Learn rows (ccKind, space, type, index) + count, state, target, `FUL` deadline (518 B, 528 with alignment). Global, runtime; persisted in `midilrn.cfg`. |
+| `MidiControl.c`: `midiControl_nrpn` (S083) | 48 | NRPN receive contexts, 2 ports × 8 × 3 B (key, MSB, LSB). |
+| `MidiOut.c`: note-off record + parameter TX (S083) | 22 | `midiOut_trackNote/Channel[7]` (14 B: sounding note and its channel per track) and `midiOut_nrpnKey[2]`, `midiOut_pending`, `midiOut_lastSendMs` (8 B). |
+| `MidiDin.c`: DIN buffers (S083) | 334 | RX `midiBuffer_rx_t` 194 B (66 B + 64 × 2 B arrival stamps); TX normal and realtime lanes 2 × 66 B; two 4 B drop counters. |
+| `MidiTransport.c`: realtime ring (S083, moved from MidiRealtime) | ≈ 270 | 32 × 8 B events + head/tail/drop counter, MTC and AUTO-sync state. |
+| `MidiIn.c`: configuration and framer (S083) | 10 | `midiIn_config` (G, filters, MRT) 3 B, framer state 1 B, in-progress `MidiMsg` 6 B. |
+| `buttonHandler.c`: `bh_overlay[7]` (S083 Q5) | 56 | Per-track overlay repeat table, 8 B per track (held MIDI note, note + `def`, roll rhythm position `pos`, count, interval, next); shared by panel and MIDI. |
+| `sequencer.c`: `seq_resumeTick`, `seq_sceneChangeFromMidi` (S083) | 5 | Continue/SPP resume tick (4 B) and the MIDI-origin PC flag (1 B). |
+| `filesystem.c`: `fs_midilearn_write` (S083) | 1 | `midilrn.cfg` write request (PENDING, RETRIED). |
+| ~~`MidiParser.c`: `midiParser_originalCcValues`~~ | 0 | Retired in S083 with `MidiParser.c` (was 255 B). |
 | `buttonHandler.c`: `evt_ring` | 64 | Sixty-four one-byte front-panel events; producer/consumer and overflow state are additional bytes. |
 | `lcd.c`: `lcd_queue` | 384 | LCD command queue. |
 | `FxBuffer.c`: `fxbuf_state` | 28 | Linker arena base/size, twelve unit owners, count, and share callback. |

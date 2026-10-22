@@ -589,9 +589,9 @@ Replace the remaining legacy target runtime path for descriptor-backed targets:
 - Status after Session 034: velocity and LFO destinations are
   descriptor-aware for direct descriptor targets, supplemental voice-local
   decimation, per-voice Morph Scene targets, and Scene Decimation.
-- Make `AutomationNode` descriptor-aware instead of emitting legacy MIDI CC/CC2
-  into the (now retired) legacy CC handler; new writes go through
-  `menu_commitTargetEdit()`.
+- ~~Make `AutomationNode` descriptor-aware~~ — moot: `AutomationNode` was
+  removed with the old pattern storage, and the legacy CC handler with S083;
+  MIDI writes go through `menu_commitTargetEdit()`.
 - Stop narrowing step automation destinations to `uint8_t`; preserve canonical
   descriptor IDs.
 - Make `preset_applyInstrumentRuntimeValueInternal()` honor automation
@@ -1486,7 +1486,7 @@ automation `hold` reconciliation (§4.3a).
 
 ### 6.1 MIDI and External Control Cleanup
 
-**Done in S083 (2026-10-21).** `Core/MIDI/` was rebuilt as single-role
+**Done in S083 (2026-10-21/22; hardware checked by the user).** `Core/MIDI/` was rebuilt as single-role
 modules (MidiDefs, MidiBuffer, MidiDin, MidiIn, MidiTransport, MidiNoteMap,
 MidiNotes, MidiControl, MidiLearn, MidiProgram, MidiOut, MidiPitch); the
 legacy `MidiParser`/`Uart`/`FIFO`/`MidiRealtime`/`MidiMessages` files and the
@@ -1495,11 +1495,14 @@ the consume-then-route dispatcher and the new MRT list, N1-N5 note mapping
 with the Q4 transmit-range rule, CC2/per-track overlay rolls, arrival-time
 record placement, Continue/SPP, PC 0..15 whole Scene and per-track, CC0
 background Bank load, NRPN over the 9-bit target space, CC1 on G and voice
-channels, the 128-entry type-tagged MIDI Learn table with `settings.cfg`
-lines, and note/parameter/PC/CC0 transmit with echo suppression. MIDI writes
-are menu edits (S083 Q1). Behaviour authority: `MIDI_SPEC.md`; module APIs:
-`MODULE_INTERCHANGE_SPEC.md`. Hardware verification is the S083 close-out
-matrix.
+channels, the 128-entry type-tagged MIDI Learn table (stored in its own root
+file `midilrn.cfg`, rewritten after every Learn), and note/parameter/PC/CC0
+transmit with echo suppression. MIDI writes are menu edits (S083 Q1).
+Follow-ups: track `ch off`/`nte off`, global Morph sets FX Morph, SHIFT+REC
+`pv<`/`pv>` overlay roll rhythm, CC2 sets the PERF BAR overlay itself.
+Authority: `MIDI_SPEC.md` (complete use and code reference); record:
+`083_SESSION_HANDOFF_LOG.md`. Still open: a published NRPN chart per
+instrument/Effect type.
 
 ### 6.2 One-shot LFOs
 
@@ -2055,9 +2058,9 @@ Session 075 record: `knowledge_files/log_archive/075_SESSION_HANDOFF_LOG.md`
 - **Pattern Load fan-out tear** (Session 075 findings, above): not fixed.
 - **O1** (Settings Load equalises per-voice Morph across the edit mask): the
   `srt` part is gone; per-voice Morph remains.
-- **MIDI:** CC-entered values show on the LCD only at the next repaint; the
-  legacy internal CC path (`preset_applySoundParameter()`) stays
-  runtime-only.
+- ~~**MIDI:** CC-entered values show on the LCD only at the next repaint~~ —
+  fixed in S083 (`menu_notifyTargetChanged()` repaints by target ID);
+  `preset_applySoundParameter()` was removed.
 - **Effects saved at pan 64** show `1` (no migration, user).
 - **Copy/clear known limits** (by design): `COPYCLEAR_UTILITIES.md` §18.
 - **Trace ring** still at the temporary 2,048 records (D2).

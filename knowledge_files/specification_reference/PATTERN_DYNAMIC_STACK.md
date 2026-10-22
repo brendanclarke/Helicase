@@ -28,7 +28,8 @@ appear below where they apply):
   `48` dropped; `PAR_ROLL` retired.
 - **`qnt trk`** (§6.5, §6.7): track-grid quantise for recording and
   per-track loop anchors.
-- **Linear automation ramps `asm`** (§6.2b): per-track Pattern setting
+- **Linear automation ramps `asm`** (§6.2b; labelled `rmp` / Automtn / Ramp
+  since S083): per-track Pattern setting
   `track_auto_smooth`, PAT4 track header byte 5 (§7). Region 10,527 →
   **10,528 B**.
 - **Live record and live erase** (§6.7): new `LiveRecord` module, Pattern
@@ -125,7 +126,8 @@ drops (`SCENE17`); after the release both return. The copy/clear overlap path
   resident Scene, a raw block API and sliding compaction (§12.17).
 - **Automation priority** (§6.2a): a held step-automation value is never
   overwritten before the voice's next trigger; menu edits apply only their
-  own parameter's interpolation; external MIDI is lowest priority.
+  own parameter's interpolation; external MIDI was lowest priority (since
+  S083 Q1 a MIDI write is a menu edit, §6.2a).
 - **Documentation corrections** found while closing S075: the block header is
   big-endian (§4), the pending queue is a 128-record append queue (§6.1), and
   the drain writes voice values without 7→8-bit expansion (§6.1).
@@ -676,6 +678,14 @@ override, and the next automation entry applies again:
 
 Each clear pairs with `seq_clearSceneAutomationBit(index)`.
 
+**Global Morph (`mrp`, CC1 on G; S083 follow-up).** The bulk Morph set
+(`preset_morphScene()`) clears every voice's step Morph override (S076 Rule
+A) and also sets the Effect Morph as an `fxm` menu edit
+(`effects_setMorphAmountFromGlobal()`: the Pattern `fxm` override clears and,
+on the active Scene, `menuHoldMorph` holds the new amount over an FX Morph
+lock until the next Morph automation). Neither the voice nor the Effect
+amounts it writes are recorded (G-1).
+
 The S075 table below is still the rule for every writer other than a menu
 edit:
 
@@ -828,8 +838,9 @@ that pass write one more sample after `seq_restoreAllAutomation()` (it holds
 until the voice's next trigger). B's apply time assumes B's trigger is
 deferred when B is active; if live record suppresses B's trigger, B's
 entries land at its nominal start and the ramp ends there, a little early.
-The two writers that already bypass the priority rule (internal legacy MIDI,
-supplemental parameters) now hold until the ramp value next changes.
+The writer that bypasses the priority rule (supplemental parameters) holds
+until the ramp value next changes. (The internal legacy MIDI writer is gone
+since S083; MIDI writes are menu edits, §6.2a.)
 
 **Cost.** TIM3: one prediction per step of an `on` track. Drain: one
 `pat_findStepAutomation()` per paired entry. Service: at most 64 runtime
@@ -1075,8 +1086,9 @@ with `SEQ_PLAY_STATE_STOPPED` set past the end and cleared when rewound
 inside. It uses the current effective scale and length for the whole span,
 so a Morph/automation change during the span is approximated.
 
-**Continue and Song Position Pointer (S083 T1).** A MIDI Stop stores the
-reached master tick in `seq_resumeTick`; an SPP while stopped stores
+**Continue and Song Position Pointer (S083 T1).** A Stop stores the first
+unplayed master tick in `seq_resumeTick` (`seq_elapsedPpqTicks + 1`, or 0 when
+no tick was played; S083 assessment F-1 fixed a replayed tick); an SPP while stopped stores
 `pos x 24` there; Continue (`seq_continueRunning()`) starts the ordinary
 transport sequence and then sets `seq_elapsedPpqTicks = resume - 1` and
 calls `seq_realignActivePatternToMasterClock()` (the §6.5 anchor mapping),
@@ -1393,8 +1405,9 @@ Sources: the BAR VOICE-trigger overlay in PERF (`buttonHandler_overlayReport()`
 `buttonHandler_overlayTrigger()`, the flam main and roll hits from
 `buttonHandler_overlayTick()`, releases and rate switches through
 `liveRec_rollRelease()` / `liveRec_rollRateChange()`), and MIDI notes
-(`midiParser_noteOn()`, kind SINGLE). Each hit is reported **when it
-sounds**. Gates: LATCH or OVERDUB, running, ownership.
+(`midiNotes_handle()`, kind SINGLE, or through the overlay executor when
+the BAR overlay is on; S083). Each hit is reported **when it sounds**; a MIDI
+hit carries its arrival age (see "Arrival time" below). Gates: LATCH or OVERDUB, running, ownership.
 
 **Placement** (`seq_captureTrackTime()` + `seq_placeFromSnapshot()`):
 
@@ -1474,8 +1487,11 @@ after the pot and encoder commits, also on a detent clamped at min or max.
 recorded or automatable, and the voice/FX Morph values a global change writes
 are never recorded through it), RECORDING/global/MIDI/Load/Save pages, step
 editors and held-step overlays, FX lane locks, LFO/velocity targets, `typ`,
-Morph-view edits, `len`, non-automatable targets. MIDI CC calls
-`liveRec_paramIn(0xFFFF)` (stub until the MIDI rework).
+Morph-view edits, `len`, non-automatable targets. MIDI writes (NRPN, Learn,
+CC1 on a voice channel) record through `menu_commitTargetEdit()` with the real
+target ID (`liveRec_paramIn(id, LIVEREC_SRC_MIDI)`, S083 Q1); the panel-view
+exclusions do not apply to MIDI, which always writes the active Scene's
+Normal endpoint. CC1 on G (global Morph) is never recorded (G-1).
 
 **State:** three 512-bit bitmaps over the 9-bit target ID space, indexed
 directly: `latch` (owns its automation this take), `dirty` (adjusted since

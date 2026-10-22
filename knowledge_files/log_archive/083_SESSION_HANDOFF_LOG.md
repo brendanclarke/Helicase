@@ -71,8 +71,8 @@ KNOWN ISSUES RESOLVED: the pre-S083 MIDI gaps (§3); S082 P3 A1 (queued
   muted-track note-off bug; USB CIN framing; Learn persistence; the
   decode_devlogs.py op-name drift.
 
-NEXT SESSION RECOMMENDED GOAL: commit the S083 follow-ups, then continue
-  SCOPING_TARGETS.md Phase 6 (see §15).
+NEXT SESSION RECOMMENDED GOAL: continue SCOPING_TARGETS.md Phase 6 (MIDI
+  §6.1 and A20 are done; see §15).
 BLOCKERS: none.
 
 CRITICAL REMINDERS FOR NEXT SESSION:
@@ -110,7 +110,11 @@ CRITICAL REMINDERS FOR NEXT SESSION:
 **Commits:**
 - `f9aaeec`: S083 pre-implementation (planning documents);
 - `d007027`: "s083 midi implemented, untested" (phases A-H);
-- the assessment fixes and all P2 work are uncommitted at the close.
+- `bbea23f`: "session 083 midi, implemented and tested, needs closeout"
+  (assessment fixes, all P2 work, the three root documents and the first
+  close-out drafts);
+- the final close-out document edits (this log's last revision, the
+  specification rewrite, MEMORY.md, volatile notes) followed `bbea23f`.
 
 **Session documents:** these root files are superseded by this log and the
 specifications, and can be deleted:
@@ -122,6 +126,34 @@ specifications, and can be deleted:
 **Authority from now on:**
 - `MIDI_SPEC.md` is the complete use and code reference.
 - The code wins where the two disagree.
+
+**Resolving "plan …" citations in code comments.** The S083 code comments
+cite the deleted plan by section (`plan 3.5`, `plan 3.9 C`) and by decision
+id (`F27`, `Q1`, `C-1`, `R-B`, `F-2`). Decision ids are in §4 and §8 of this
+log and in `MIDI_SPEC.md` §20. Section numbers map as follows (other "plan
+§x" citations in the tree belong to earlier sessions' plans):
+
+| Plan section | Topic | Now described in |
+|--------------|-------|------------------|
+| 1.1–1.5 (M, N, T, P, C ids) | Requirements | this log §2; `MIDI_SPEC.md` Part I |
+| 2 | Pre-S083 code baseline | this log §3 |
+| 3.1 | Module layout | `MIDI_SPEC.md` §12.1, §13 |
+| 3.2 | Message flow, consume-then-route | `MIDI_SPEC.md` §3, §12.2 |
+| 3.3 | Note map and TX inverse (Q4) | `MIDI_SPEC.md` §4.1, §9, §13.6 |
+| 3.4 | Triggers, overlays, recording | `MIDI_SPEC.md` §4.3, §14.3 |
+| 3.5 | Parameter writes (menu edit, NRPN) | `MIDI_SPEC.md` §5.4–§5.6, §12.3, §14.1 |
+| 3.6 | MIDI Learn | `MIDI_SPEC.md` §6, §13.9 |
+| 3.7 | Program and Bank change | `MIDI_SPEC.md` §7, §13.10 |
+| 3.8 | Realtime and transport | `MIDI_SPEC.md` §8, §13.5, §14.2 |
+| 3.9 | Transmit (N, R, C, P) | `MIDI_SPEC.md` §9, §12.4, §13.11 |
+| 3.10 | Menu (G off, `chn`/`nte`, MRT, retired ids) | `MIDI_SPEC.md` §2, §14.1 |
+| 3.11 | Arrival time | `MIDI_SPEC.md` §4.3, §13.7, §14.2 |
+| 3.12 | Storage | `MIDI_SPEC.md` §11; `FILESYSTEM_SPEC.md` |
+| 4, 13 | What MIDI needs from S082; S082 outcome notes | `MIDI_SPEC.md` §7.2, §10 |
+| 6, 12 (Q13) | Resources, RAM options | this log §4.3, §10; `MIDI_SPEC.md` §18 |
+| 7, 13.3, 14.4 (R ids) | Risks | this log §5 |
+| 9, 11 (F, Q ids) | Decisions | this log §4; `MIDI_SPEC.md` §20 |
+| 14 | S081 outcome notes (recording hooks, reset, per-track PC realign R20) | `MIDI_SPEC.md` §4.3, §5.6, §14.2; this log §5 |
 
 ---
 
@@ -1140,8 +1172,8 @@ Keep these for future MIDI work. The user's testing passed overall.
 
 ## 15. Carry-forward
 
-1. **Commit** the uncommitted S083 work (assessment fixes and P2) on
-   `dev-ph6-midi`.
+1. **State:** all S083 code is in `bbea23f` on `dev-ph6-midi`; the final
+   close-out document edits came after it.
 2. **Delete** the root documents `S083_P1_MIDI_IMPLEMENTATION_PLAN.md`,
    `S083_P1_IMPLEMENTATION.md` and `S083_P2_MIDI_TRACK_FIXUPS.md` (user's
    plan); this log and `MIDI_SPEC.md` carry them.
