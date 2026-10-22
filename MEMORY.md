@@ -217,6 +217,12 @@ MIDI behaviour and code: `MIDI_SPEC.md`; `midilrn.cfg` and settings keys:
 S084 notes). Short
 points:
 
+* **LXR1 import tools (2026-10-22, host only, not yet hardware-tested):**
+  `tools/lxr1_converters/` converts LXR1 `.snd` → Kit, `.pat` → PAT4
+  library Patterns, `.all`/`.prf` → Banks (manual `LXR1_CONVERTERS.md`
+  there; handoff log `LXR1_CONVERTERS_IMPLEMENTATION.md` at the root).
+  The 2013 factory kits use page-reference LFO/velocity targets, not
+  modTargets indices.
 * **MIDI testing needs RXF/TXF = `all`:** a card without the keys defaults
   to off (consumes and sends nothing).
 * **Card files:** `midilrn.cfg` appears with the first Learn; `settings.cfg`
