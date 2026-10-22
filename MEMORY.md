@@ -20,47 +20,45 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
-**Current working source**: **Session 083 (MIDI) is implemented** on
-`dev-ph6-midi` (2026-10-21), pending the hardware matrix. `Core/MIDI/` was
-rebuilt as the single-role modules listed under "MIDI / Clock Reminders"
-below; `MidiParser`, `Uart`, `FIFO`, `MidiRealtime`, `MidiMessages`,
-`MidiNoteNumbers` and the legacy LXR CC/CC2 map are gone. MIDI reads and
-writes follow `MIDI_SPEC.md` (now "current as of S083"). Schedule and
-per-phase notes: `S083_P1_IMPLEMENTATION.md` §12. DEV build at the
-implementation close: `text=603,896`, `data=424`, `bss=430,120`; flash
-headroom 149,344 B. Session 082 remains closed (Load/Save, background Bank
-load, Scene 17: `082_SESSION_HANDOFF_LOG.md`).
+**Current working source**: **Session 083 (MIDI) is closed** (2026-10-22)
+on `dev-ph6-midi`. Record: `knowledge_files/log_archive/083_SESSION_HANDOFF_LOG.md`;
+authority: `MIDI_SPEC.md` (the complete MIDI use and code reference, Parts
+I–III). `Core/MIDI/` was rebuilt as the single-role modules listed under
+"MIDI / Clock Reminders" below; `MidiParser`, `Uart`, `FIFO`, `MidiRealtime`,
+`MidiMessages`, `MidiNoteNumbers` and the legacy LXR CC/CC2 map are gone.
 
-- **Commits:** S082 planning `8206a73`, `8b1b647`, `45846b7`; P0–P2 code
-  `b25ffbe`; P3 code `8a83df0`; the close-out documents are uncommitted. The
-  user manages commits.
-- **Session 081 is closed (logged 2026-10-21, after S082):** code
-  `96a403b`..`2a0fd86` on `dev-ph6-cleanup` (merged by PR #7); record
-  `knowledge_files/log_archive/081_SESSION_HANDOFF_LOG.md` and the index entry.
-  S081 built live record and live erase (LiveRecord), the step reset rule,
-  automation priority R12/R13, the 96-PPQ roll table, `qnt trk`, linear
-  automation ramps (`asm`), loop while record, the G-1 global Morph fix and
-  the VOICE bar pulse. Its hardware checks passed (user, 2026-10-21, S083
-  Q3). S082 did not change LiveRecord.
-- **Build at S083 implementation close (DEV config):** `text=603,896`,
-  `data=424`, `bss=430,120`; flash payload 604,320 B of 753,664
-  (**149,344 B free**). S082's baseline was `598,120 / 420 / 430,928`
-  (155,124 B free).
-  S082 SRAM: Scene 17 1,658 B, P0 16 B, P1 93 B, P3 4 B (DEV-only
-  diagnostics extra). Production build (`DEV_MODE_LOGGING 0`) last measured
-  at S075 F1; needs a rebuild.
-- **Hardware (user):** S081 and S082 passed their hardware checks
-  (2026-10-21, S083 Q3). The P0 first-boot freeze was not reproduced; the
-  F5 Scene 2 Case-3 invalidation is open (`082_SESSION_HANDOFF_LOG.md` §11,
-  §13).
-- **Session 083 (MIDI) is implemented (2026-10-21):** plan revision 5 and
-  `S083_P1_IMPLEMENTATION.md` applied in full (A–G; H documents updated).
-  Target spec: `MIDI_SPEC.md`. Hardware verification of the A–G matrices is
-  still to be reported by the user.
+- **Commits:** S083 planning `f9aaeec`; implementation `d007027`;
+  assessment fixes and all P2 follow-ups `bbea23f`. The final close-out
+  document edits came after it. The user manages commits.
+- **Build at S083 close (DEV config):** `text=608,744`, `data=424`,
+  `bss=430,112`; flash payload 608,848 B of 753,664 (**144,816 B free**).
+  S082 baseline was `598,120 / 420 / 430,928`. Production build
+  (`DEV_MODE_LOGGING 0`) last measured at S075 F1; needs a rebuild.
+- **Hardware (user):** the S083 P1 build was tested ("seems ok", leading to
+  the P2 follow-ups) and the final build "checks out" (2026-10-22). S081 and
+  S082 passed their checks (2026-10-21). Open since S082: F5 (Scene 2 Case-3
+  invalidation); S082 P3 A2 (frozen-screen blink loss, low).
+- **S083 in brief:**
+  - **Rebuild:** the `Core/MIDI/` rebuild with consume-then-route and the
+    new MRT list.
+  - **Notes:** the N1–N5 note map with the Q4 TX inverse; the per-track
+    overlay executor (panel + MIDI); arrival stamps for record placement.
+  - **Control:** a MIDI write is a menu edit (Q1); NRPN = 9-bit target ID;
+    MIDI Learn.
+  - **PC/CC0/transport:** PC/CC0 via S082; Continue/SPP gated by `snc`.
+  - **Transmit:** per-track note-off; parameter TX (learned CC else NRPN);
+    no echo.
+  - **Follow-ups:** track `ch off`/`nte off` (`def` → `on`), `asm` →
+    `rmp`; Learn in `midilrn.cfg`; global Morph sets FX Morph; SHIFT+REC
+    `pv<`/`pv>`; CC2 sets the PERF BAR overlay itself.
 - **Automated Scene changes (user, S083 Q2, 2026-10-21) — binding:**
   "Scenes or tracks from Scenes are not automatable unless they are changed
   via a voice edit mask from an active Scene or track." A queued action whose
-  target Scene is unavailable is skipped whole (S082 P3 A1).
+  target Scene is unavailable is skipped whole (S082 P3 A1, fixed).
+- **Session 081 is closed** (`081_SESSION_HANDOFF_LOG.md`): live record and
+  erase, the step reset rule, R12/R13, the 96-PPQ roll table, `qnt trk`,
+  automation ramps (now labelled `rmp`), loop while record, G-1, VOICE bar
+  pulse.
 
 Session 082 in one paragraph:
 
@@ -83,7 +81,7 @@ Session 082 in one paragraph:
 
 **Permanent authority:**
 
-- `knowledge_files/log_archive/082_SESSION_HANDOFF_LOG.md` (and 081 —
+- `knowledge_files/log_archive/083_SESSION_HANDOFF_LOG.md`, `082_…` (and 081 —
   written after S082 —, 080, 079, 078, 077, 076, 075, 074, 073, 072);
 - `knowledge_files/specification_reference/COPYCLEAR_UTILITIES.md` (new in
   S075);
@@ -128,6 +126,11 @@ Session 082 in one paragraph:
   `S081_P3_IMPLEMENTATION.md`, `S081_P4_VOICE_MODE_BAR_LED.md`,
   `S081_P4_IMPLEMENTATION.md`) are superseded by `081_SESSION_HANDOFF_LOG.md`
   and the updated specifications (the user deletes them).
+- The three root `S083_*.md` task documents
+  (`S083_P1_MIDI_IMPLEMENTATION_PLAN.md`, `S083_P1_IMPLEMENTATION.md`,
+  `S083_P2_MIDI_TRACK_FIXUPS.md`) are superseded by
+  `083_SESSION_HANDOFF_LOG.md` and `MIDI_SPEC.md` (the user deletes them;
+  the plan and schedule are in `f9aaeec`/`d007027`).
 - The four root `S079_*.md` task documents (`S079_P1_STEP_CONDITIONS_SPECIALS.md`,
   `S079_P1_IMPLEMENTATION.md`, `S079_P2_ROLL_FOLLOWUP_REMEDIATION.md`,
   `S079_P2_IMPLEMENTATION.md`) are superseded by `079_SESSION_HANDOFF_LOG.md`
@@ -207,52 +210,29 @@ must not allocate those rings, cursors, or timing records.
 
 ## Volatile Notes
 
-**Session 082 is closed.** Durable record: `082_SESSION_HANDOFF_LOG.md`;
-Bank Load/Save, preview, HCNAMES tokens and the background/progressive load:
-`FILESYSTEM_SPEC.md` "Current Bank behavior"; the walkthrough and APIs:
-`MODULE_INTERCHANGE_SPEC.md` "Background Bank load (S082)"; availability:
-`BANK_PRESET_ARCHITECTURE.md`. Carry-over:
-`knowledge_files/volatile/S078_WORKING_NOTES.md` (rewritten as the S082 →
-S083 notes). Binding rules from S082:
+**Session 083 is closed.** Durable record: `083_SESSION_HANDOFF_LOG.md`;
+MIDI behaviour and code: `MIDI_SPEC.md`; `midilrn.cfg` and settings keys:
+`FILESYSTEM_SPEC.md`. Carry-over notes:
+`knowledge_files/volatile/S078_WORKING_NOTES.md` (rewritten as the S083 →
+S084 notes). Short
+points:
 
-* **Load/Save repaint:** pot deltas coalesce through `menu_knobs_dirty`;
-  `menu_serviceKnobRepaint()` routes LOAD/SAVE pages to `menu_repaint()`.
-  Never reintroduce `menu_repaintAll()` per pot delta; only page/type entry
-  and command start/finish repaint everything. The Load/Save pots obey the
-  encoder's storage gate (pot 2 number scroll excepted), and a refused
-  request restores `menu_storageBusy` instead of forcing 0.
-* **The active and viewed Scene never change because of a load or save**;
-  the only exception is the automatic move to Scene 17 (the view follows only
-  with `PAR_FOLLOW` on). `bankset.bcg` `active_scene` is boot-only.
-* **Scene 17:** exact copy of what plays; editable; never AutoSaved; no PERF
-  LED, no PC, no chain; its edit mask is itself only (bit 16 in the 32-bit
-  helpers, never in a 16-bit mask); released only by a whole-Scene change,
-  never returned to. **Nothing loads into Scene 17** — every load targets the
-  home Scene (`scene_backgroundHomeIndex()`). Saves from 17 use the 90 B name
-  capture and publish no HCNAMES row.
-* **Cached Scene indices are a Scene 17 hazard** (S082 P2-1): EffectsManager
-  kept reading the home Scene's Effect after the switch. Any module that
-  caches a Scene index must follow playback onto 17
-  (`effects_rebindSourceScene()` is the pattern).
-* **Never abort an AsyncFATFS-backed phase with a callback outstanding**
-  (late callbacks corrupt the next operation; a second `fclose()` hangs). The
-  AutoSave yield aborts only at `filesystem_autosaveDrainAbortSafe()` phases.
-* **HCNAMES register reset only after acceptance** (F9): every request calls
-  `filesystem_prepareResidentNamesCache()` only after `filesystem_start()`
-  accepted it. **One identity block serves one Scene at a time** (P1 A3):
-  Save entry flushes rows owed for any other Scene first.
-* **Availability vs presence (P3):** selection, fan-out, copy/clear and LEDs
-  use `bank_sceneAvailable*()`; persistence (AutoSave, Bank Save, end-of-load
-  commit) uses presence. Outside a load they are identical. A locked load
-  (phases 1–4, 6, stopped loads) drops panel input; an unlocked load frees
-  every page except Load/Save.
-* **No chain evaluation during a Bank load** (counters keep running);
-  manual Scene changes go to available Scenes only.
-* **Card preparation after S082:** delete `/.hcnames`, `.hcnamtmp`,
-  `.hcprms1` and `.hcprms2` (new Scene-row tokens, assigned present mask).
-* **Open:** P3 A1 (queued action parts run for a dropped target) and A2
-  (frozen-screen blink loss) await a decision; F5 Scene 2 invalidation;
-  P2-4/P2-5 instrumentation not built.
+* **MIDI testing needs RXF/TXF = `all`:** a card without the keys defaults
+  to off (consumes and sends nothing).
+* **Card files:** `midilrn.cfg` appears with the first Learn; `settings.cfg`
+  is 26 lines (`lines=26`); `learn=`/`l` lines left by the first S083 build
+  are ignored and dropped on the next settings write.
+* **Open product decisions (no action unless asked):** RXF/TXF defaults;
+  whether a PERF BAR overlay should also shape MIDI notes outside PERF (it
+  does today); whether recorded overlay rolls should carry the `pv` rhythm;
+  publishing a per-type NRPN chart.
+* **Still open from S082:** F5 Scene 2 Case-3 invalidation (instrumented);
+  P3 A2 frozen-screen blink loss (low). P3 A1 is fixed (S083 Q2).
+* **S082 binding rules** (Load/Save repaint coalescing, active Scene never
+  changes on load/save, Scene 17 rules, cached Scene indices, AsyncFATFS
+  abort safety, HCNAMES reset after acceptance, availability vs presence, no
+  chains during a load) remain in force: `082_SESSION_HANDOFF_LOG.md` and the
+  specifications.
 
 This section is for short carryover points only. Flush or rewrite it at session
 end; durable facts belong in `knowledge_files/log_archive/` or
@@ -1375,7 +1355,7 @@ are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
 
 ### Specification-reference index
 
-These are the fourteen authoritative/reference documents under
+These are the fifteen authoritative/reference documents under
 `knowledge_files/specification_reference/`. Since Session 074 the four DSP
 and Effects documents (`EFFECTS_BUS_REFERENCE.md`,
 `EFFECTS_MIXER_DSP_REFERENCE.md`, `INSTRUMENTS_DSP_REFERENCE.md`,
@@ -1396,11 +1376,12 @@ and may contain historical snapshots as noted below.
 | `dsp_instruments_effects/CPU_USE_DSP_AUDIT.md` | DSP performance audit (S074 cost additions items 27–31, S075 items 32–35): the Session 073 cost audit (findings F1–F10, sound classes S0–S4, checked-and-rejected ideas) above the 2026-05 historical audit (render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA), and the ordered optimization record (items 1–26, including the S073 results). | Investigating audio underruns or planning an optimization. For how the DSP works now, use the two DSP references. |
 | `DEV_MODES.md` | Screen-only diagnostic versus file-only logging contract, current `bootlog.bin`/`asavetrc.bin` formats (including the S074 `V` flag layout and the S075 copy/clear stage `c`), the stall-detection sites (the drain is progress-aware since S074), the BC18 settings-page check, duplicate limitation, and failed unified-log warning. | Adding or interpreting diagnostics, trace, or logging output. |
 | `dsp_instruments_effects/EFFECTS_BUS_REFERENCE.md` | (S078: FX sequencer Q8.8 DDA on the 128-position step-scale curve, `.fx` token→CC map.) (S081: R13 resolution — menuHold > lock > overlay > menu, one-step Morph lane, markers/owners removed; FX realign; live FX-sequence erase.) As-built Phase 5 Effect system through S075 (registry `off/flt/cbt`, the page hook/layout contract, the automation-underline rule, CrumpBit's page; S075 Effect copy/clear and fan-out, the pan rule, full views, the SHIFT+TRACK overlay): module map, signal flow and fader modes, type contract and registry self-check codes, retained data and type change, resolution order, DTCM arena and handoff, Effect page, fan-out and layout gate, FX sequencer, IDs/automation/LFO, `.fx`/HCNAMES/AutoSave, lifecycle, design rationale, debugging, and the add-a-type tutorial. | Adding an Effect type or changing anything in the Effect/bus/FX-sequencer path. |
-| `FILESYSTEM_SPEC.md` | Current product storage specification through Session 082 (S081: PAT4 track byte 5 `asm`, `quantisation` 5 = `trk`; S080: settings.cfg `perf_*`/`scd`/`qcd`/`qac` keys and `lines=24`, `sceneset.scg` chain lines 18/19, PAT4 track byte 4 loop exclusion; S078: PAT4 `track_scale` as a step-scale CC and run-mode byte 3, `sceneset.scg` `track_morph_*` lines 15..17, `.fx` `step_scale` token→CC map, the offline converter; earlier: the `sceneset.scg` line table with the `bus_comp_*` keys, `fader_setting` 0..3, retired `voice_decimation_all` and `fx_send_morph`; the `cbt` `.fx` keys; the copy/clear name-buffer loan and `HNcU`; retained MIDI endpoint entries): root layout, typed 161-row HCNAMES, PAT4, `.fx` v2 Effect children, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, boot restore, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
-| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 082 (S081: the "Core/Sequencer/LiveRecord (S081)" section, live-record/ramp/reset/R12 Sequencer services, MidiVoiceControl reset mask, PatternData/Service record ops and target override, EffectsManager R13 and live FX erase, REC/erase/overlay buttonHandler rows, Menu record hooks; S082: background Bank load; S080: the "PERF performance surface" section — button map, latched menus, pages, LED rules, scene change execution, how to add a PERF gesture — plus looper/scene/chain sequencer APIs, `LED_LAYER_FAST`, chain editor and Loopable APIs; S078: the 128-position StepScale contract, sequencer DDA/shuffle/run-mode/effective-cache helpers, track Morph/override APIs, the STEP Morph view, STEP held-step overlay, multi-step broadcast, `copyClear_isClearMode()`; earlier: including EffectsManager, FxBuffer, menuEffects and its S074 page extensions, BusCompressor, StepScale, the S075 CopyClear module, the FX-send Morph/overlay APIs and the automation-priority guard) for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
+| `FILESYSTEM_SPEC.md` | Current product storage specification through Session 083 (S083: `settings.cfg` G off/MRT list/`perf_vel_*`/`lines=26`, the new root `midilrn.cfg` MIDI Learn file with its safe write and boot recovery, `sceneset.scg` track `midi_channel` 0..17 / `midi_note` 0..128; S081: PAT4 track byte 5 `asm`, `quantisation` 5 = `trk`; S080: settings.cfg `perf_*`/`scd`/`qcd`/`qac` keys and `lines=24`, `sceneset.scg` chain lines 18/19, PAT4 track byte 4 loop exclusion; S078: PAT4 `track_scale` as a step-scale CC and run-mode byte 3, `sceneset.scg` `track_morph_*` lines 15..17, `.fx` `step_scale` token→CC map, the offline converter; earlier: the `sceneset.scg` line table with the `bus_comp_*` keys, `fader_setting` 0..3, retired `voice_decimation_all` and `fx_send_morph`; the `cbt` `.fx` keys; the copy/clear name-buffer loan and `HNcU`; retained MIDI endpoint entries): root layout, typed 161-row HCNAMES, PAT4, `.fx` v2 Effect children, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, boot restore, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
+| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 083 (S083: the "Core/MIDI" section and data flow, shared menu commit, transport/per-track Scene APIs, overlay entry points and one overlay state, Learn gesture, SHIFT+REC page, `midilrn.cfg` APIs; S081: the "Core/Sequencer/LiveRecord (S081)" section, live-record/ramp/reset/R12 Sequencer services, MidiVoiceControl reset mask, PatternData/Service record ops and target override, EffectsManager R13 and live FX erase, REC/erase/overlay buttonHandler rows, Menu record hooks; S082: background Bank load; S080: the "PERF performance surface" section — button map, latched menus, pages, LED rules, scene change execution, how to add a PERF gesture — plus looper/scene/chain sequencer APIs, `LED_LAYER_FAST`, chain editor and Loopable APIs; S078: the 128-position StepScale contract, sequencer DDA/shuffle/run-mode/effective-cache helpers, track Morph/override APIs, the STEP Morph view, STEP held-step overlay, multi-step broadcast, `copyClear_isClearMode()`; earlier: including EffectsManager, FxBuffer, menuEffects and its S074 page extensions, BusCompressor, StepScale, the S075 CopyClear module, the FX-send Morph/overlay APIs and the automation-priority guard) for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
+| `MIDI_SPEC.md` | Complete MIDI use and code reference, current as of S083 close: Part I behaviour (settings, receive pipeline, note map, CC1/CC2/NRPN, Learn and `midilrn.cfg`, PC/CC0, transport, transmit, Scene 17, storage); Part II code reference (module map and data flow, every `Core/MIDI/` module's API and internals, integration points in menu/sequencer/buttonHandler/Preset/Effects/filesystem/USB, contexts and concurrency, extension recipes, host test and diagnostics, RAM, binding rules); Part III decisions (F/Q/C ids). | Any MIDI work: behaviour, channels, note map, NRPN/Learn, transport, TX, or adding a MIDI feature. |
 | `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
 | `PATTERN_DYNAMIC_STACK.md` | Dynamic Pattern storage (address array, pool, bitmap), PAT4, Pattern Stack Service, step automation encoding and drain, including S072 Effect targets and Effect step markers, (S075) the swap block, exclusive boundary, raw block API, sliding compaction and the automation-priority rule (§6.2a), (S077) the background region, (S078) per-track timing as played — continuous step scale, DDA, shuffle, run modes, effective cache, track automation (§6.4) — and STEP-page multi-step editing/track automation overlay/underlines (§6.3a), (S079) the 7-special block, trigger conditions and roll engine, and (S080) the 41-entry conditions, the master-clock-anchored PERF looper (§6.5), scene change/queue timing and scene chaining (§6.6) and the `track_loop_exclude` byte. (S081) the step reset rule and deferred automation (§6.1/§6.2), R12 (§6.2a), automation ramps `asm` (§6.2b), live record and live erase (§6.7), looping while recording, the 96-PPQ roll table, `qnt trk`, PAT4 byte 5, the corrected queue format and the live-record service ops/target override (§12). Updated through Session 081 (with S082 Scene 17 notes). | Changing Pattern storage, step automation, or the automation drain. |
-| `STORAGE_SRAM_MANIFEST.md` | (Ledger table current through S080; S081 and S082 changes in the header bullets and §8.2.) On-chip storage map (renamed from `SRAM_MANIFEST.md` in S073; S074 and S075 ledgers, sector 6 contents, the swap block and name-buffer loan): program flash window, image layout, linker guards, boot image check, bootloader facts and growth paths; sample flash layout and guards; the static RAM ledger (SRAM1, DTCM and the FX arena, ITCM contents, DMA region); SRAM1 owners; the reservation and approval policy. SD card storage is only referenced. | Changing retained state, flash layout or sample storage, adding caches/names, or evaluating memory cost. Update it in the same change. |
+| `STORAGE_SRAM_MANIFEST.md` | (S083 MIDI statics have per-item rows; header bullets carry S081–S083 deltas. Ledger table otherwise current through S080; S081 and S082 changes in the header bullets and §8.2.) On-chip storage map (renamed from `SRAM_MANIFEST.md` in S073; S074 and S075 ledgers, sector 6 contents, the swap block and name-buffer loan): program flash window, image layout, linker guards, boot image check, bootloader facts and growth paths; sample flash layout and guards; the static RAM ledger (SRAM1, DTCM and the FX arena, ITCM contents, DMA region); SRAM1 owners; the reservation and approval policy. SD card storage is only referenced. | Changing retained state, flash layout or sample storage, adding caches/names, or evaluating memory cost. Update it in the same change. |
 | `dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md` | Instrument DSP (S073; S074 sidechain tap in the trigger funnel; S075 runtime-write priority: automation, menu, MIDI): timing model and constant-CPU rule, per-block sequence, tagged runtime slots, descriptors and the write path (special-writer tags), the four voice engines, oscillator/filter/envelope/transient/distortion building blocks, LFO/velocity/Morph/automation modulation, measured costs, and how to add parameters, writers, modes and instrument types. | Changing or extending voices, parameters, modulation or their cost. |
 | `dsp_instruments_effects/EFFECTS_MIXER_DSP_REFERENCE.md` | Mixer and Effect DSP (S073, S074: CrumpBit DSP, the master bus compressor, `xfd`; S075: pan laws centred on 63, global decimation removed, FX-send Morph): number formats and headroom, jack routing, fader modes, dry/send arithmetic, the FX bus and return, output buffers, DMA pack and MPU, the StereoFilter DSP, the DTCM arena contract for buffer-using Effects, measured costs, and how to add Effect DSP or change the mixer and output pipeline. | Changing the mixer, the FX bus, an Effect's DSP, or the output path. |
 
@@ -1889,8 +1870,12 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
   S082 Bank-load drop filter runs before the consumers; a dropped message
   counts as not consumed and is forwarded. Never forward before parsing.
 - **Channels are 1..16 with 0 = off/unassigned everywhere in MIDI code** (the
-  wire nibble is channel - 1). G is 0..16; a track's `chn` is 0 = `glb`.
-  `SceneData` no longer falls back to track+1.
+  wire nibble is channel - 1). G is 0..16 (0 = `off`); a track's `ch` stores
+  0 = `glb`, 17 = `off`. `SceneData` no longer falls back to track+1.
+- **Never cache a Scene index in MIDI code:** `midiNoteMap_load()` reads the
+  active (RX) or played (TX) Scene per message (Scene changes, Scene 17).
+- `midiTransport_processRealtime()` runs in TIM3 only. Port writes go only
+  through `MidiOut` (PRIMASK sections; TIM3 also sends).
 - **Note map:** a track's `nte` is the root of its receive range, not a pitch
   (`MidiNoteMap`). A note triggers at most one track (lowest wins). A note is
   transmitted only when the inverse lands on the same track and pitch (Q4).
@@ -1918,9 +1903,15 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
   included (as an `fxm` menu edit). It is never recorded.
 - **SHIFT+REC:** page 2 is `pv< pv> qnt rtk`. `pv<`/`pv>` set the overlay
   roll velocity rhythm, using the step `rtm` list
-  (`settings.cfg` `perf_vel_lt/rt`, `lines=26`). **CC0** on G requests the S082 background Bank load
-  under RXF P. **PC** 0..15 on G is a whole-Scene change; on a voice channel
-  it moves that channel's tracks. PC/CC0 are dropped during a Bank load.
+  (`settings.cfg` `perf_vel_lt/rt`, `lines=26`); one rule for step and
+  overlay rolls: `seq_rollRhythmVelocity()`.
+- **CC0** on G requests the S082 background Bank load under RXF P. **PC**
+  0..15 on G is a whole-Scene change; on a voice channel it moves that
+  channel's tracks (`seq_assignTracksToScene()`, realigned, new take). PC/CC0
+  are dropped during a Bank load (forwarded, not consumed).
+- **SHIFT+PLAY no longer toggles the transport in any mode** (it arms the
+  chord; +REC = Learn, +SEQ in PERF = chain editor).
+- **RXF/TXF/MRT default to off** on a card without the keys.
 - **MIDI Learn** is global: 128 type-tagged rows in the root file
   `midilrn.cfg`, not `settings.cfg` (26 lines, `lines=26`).
   - The file has a `format=helicase.midilearn`/`version=1` header, then
@@ -1946,7 +1937,7 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 ---
 
 ### Morph / Endless-Pot Reminders
-- `preset_morph()` is rate-limited by `preset_morphTick()`. Descriptor Morph now runs per voice from Scene-owned instrument images through `presetMorphEngine`; global `mrp` bulk-sets all six per-voice values, and LFO Morph modulation is a hidden overlay centered on the retained per-voice base.
+- `preset_morph()` is rate-limited by `preset_morphTick()`. Descriptor Morph now runs per voice from Scene-owned instrument images through `presetMorphEngine`; global `mrp` bulk-sets all six per-voice values and (S083) the Effect Morph as an `fxm` menu edit (`effects_setMorphAmountFromGlobal()`), and LFO Morph modulation is a hidden overlay centered on the retained per-voice base.
 - Do not add a morph skip cache. The request/pass generation scheduler must send a full final pass at the latest morph value.
 - Legacy MorphKit load/save still uses `parameters2[]` and flat `.SND` behavior. Do not treat it as the final descriptor instrument morph persistence path.
 - RV1-RV4 are analog endless pots, not the digital Gray-code encoder. The driver uses raw A/B snapshot baselines, `ENDLESS_POT_DEADZONE = 20`, `ENDLESS_POT_TIMEOUT_MS = 5000`, and `ENDLESS_POT_DELTA_TIMEOUT_MS = 20`.
@@ -2257,9 +2248,9 @@ Scene 17 invariants in the Volatile Notes.
   mutation during I/O and clears/rebuilds all modulation/runtime ownership on
   commit. It also prevents rapid encoder, destination, Scene, mode, or preview
   events from interleaving with a load.
-- Still unresolved: Pattern `Step` stores canonical 16-bit destinations but
-  `AutomationNode` is still legacy byte CC/CC2 based; migrate before enabling
-  descriptor step automation. Direct descriptor LFO writes were repaired in
+- (Closed) `AutomationNode` and the legacy byte CC/CC2 path no longer exist
+  (old pattern storage removed; MIDI CC map retired in S083); step automation
+  uses canonical 9-bit targets. Direct descriptor LFO writes were repaired in
   Session 035 through InstrumentManager descriptor-domain adapters, but normal
   modulation-node reset/original-value paths still enumerate fixed global
   pools rather than InstrumentManager's dynamic pools.

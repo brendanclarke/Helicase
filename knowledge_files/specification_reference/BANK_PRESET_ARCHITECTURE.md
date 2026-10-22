@@ -76,7 +76,10 @@ S079 changed nothing here. S080 added:
   STEP Loopable mirrors; the single PC reset stays `PAR_BAR_RESET_MODE`;
 - the queued-change morph reset `preset_morphScene(target, 0)` (qac `mrp`,
   `o+r`, `mmr`, `rld`, `r+r`): a Scene-local write of overall, six voice and
-  Effect Morph amounts, not an edit-mask fan-out;
+  Effect Morph amounts, not an edit-mask fan-out. Since S083 the Effect Morph
+  part goes through `effects_setMorphAmountFromGlobal()`, so on the active
+  Scene it also clears a Pattern `fxm` override and sets the Effect menu hold,
+  exactly as a panel `mrp` edit or MIDI CC1 on G does;
 - the Pattern-side Loopable flag (`track_loop_exclude`) is Pattern data
   (`PATTERN_DYNAMIC_STACK.md` §1), not a Scene setting.
 
@@ -264,21 +267,22 @@ data, which lives in `pat_regions[16]` (168,304 bytes) in PatternData.
 | Morph parameter images | Byte array per slot, descriptor-indexed | One image per voice |
 | Supplemental parameters | Single-endpoint values (decimation, velo_mod_amount) | Per voice |
 | Target selections | Velocity target, LFO target × 2 pairs, per voice | byte tokens, 0xff = off |
-| MIDI routing | Channel and note per track | 7 tracks |
+| Track MIDI settings | Channel and note per track: channel 0 `glb` (follow G), 1..16, 17 `off`; note 0 `on` (no root), 1..127 root, 128 `off` (S083; `MIDI_SPEC.md` §2.2) | 7 tracks |
 | Scene Morph | Per-voice morph amount (0..255) | 6 values |
 | Audio routing | Per-voice output assignment (0..5: St1, St2, L1, R1, L2, R2) | 6 bytes; default St1 (route 0) for every voice since S075 F2 (was L1 for voice 1 and St2 for voice 6) |
 | FX send | Per-voice Normal and Morph send endpoints (0..127) | 12 bytes; the mixer reads the step override, otherwise interpolates the endpoints by the voice's resolved Morph amount each block (S075 F2) |
 | Fader mode | Per-voice `pre`/`pst`/`fx`/`xfd` (0..3) | 6 bytes; `xfd` (3) added in S074 (`SCENE_FADER_SETTING_MAX`) |
 | Bus compressor (S074) | `bus_comp[4]`: `cmp` 0..2 (off/St1/St2), `cam` 0..127, `ctm` 0..127, `csc` 0..6 | 4 bytes; defaults off/0/0/off; AutoSave Scene parameters 41..44; `sceneset.scg` `bus_comp_*` keys; edited on the last settings page and fanned out to the VOICE edit mask; not modulatable |
 | Effect | Type, 64 normal cells, 64 Morph cells, 16-step sequence | 420-byte Scene-owned record; saved as named `.fx` v2 child |
-| Effect Morph | Scene `effect_morph_amount` | AutoSave Scene setting index 40; serialized in `sceneset.scg` when present; edited on PERF as `fxm` (S075) and on the Effect page as `mrp` |
+| Effect Morph | Scene `effect_morph_amount` | AutoSave Scene setting index 40; serialized in `sceneset.scg` when present; edited on PERF as `fxm` (S075) and on the Effect page as `mrp`; also set by the global Morph (`mrp`, MIDI CC1 on G) as an `fxm` menu edit, never recorded (S083) |
 | Scene chain (S080) | `chain_condition[2]` (cn1/cn2, 0..78) and `chain_next[2]` (nx1/nx2, 0..43; 43 = `stp`) | 4 bytes; defaults 0/0 = `nul`/`slf` = no chaining; AutoSave Scene parameters 72..73 and 74..75; `sceneset.scg` `chain_condition` / `chain_next` CSV pairs; edited in the PERF chain editor through `PAR_CHAIN_*` mirrors of the viewed Scene; `scene_setChainCondition/Next()` clamp and mark AutoSave; carried by `scene_commitSettings()` (copy/clear); no edit-mask fan-out; read by the TIM3 chain engine through the ISR-safe getters |
 | Track Morph endpoints (S078) | `track_morph_length[7]` (1..128), `track_morph_scale[7]` (step-scale CC 0..127), `track_morph_shuffle[7]` (0..127) | 21 bytes; the Morph ("B") endpoints of the Pattern's per-track length/scale/shuffle, whose Normal values stay in the Pattern region; defaults 16/76/0 (equal to the Normal defaults, so Morph changes nothing until edited); AutoSave Scene parameters 51..57, 58..64, 65..71; `sceneset.scg` `track_morph_*` keys; edited on the STEP page with SHIFT held; `scene_setTrackMorphLength/Scale/Shuffle()` clamp and mark AutoSave; carried by `scene_commitSettings()` |
 
 Fresh, cleared and default-staged Scenes (`scene_initAll()`,
 `scene_settingsDefaults()` used by `clear scene` / `clear scene settings`,
 `filesystem_initSceneStage()`, the boot empty-Scene reset) all use the same
-defaults: MIDI channel track + 1, note 63, St1 routes, FX send Normal and
+defaults: track MIDI channel 0 (`glb`) and note 0 (`on`) (S083; was channel
+track + 1, note 63), St1 routes, FX send Normal and
 Morph 0, fader `pre`, Morph amounts 0, Effect Morph 0, compressor
 off/0/0/off, track Morph endpoints 16/76/0 (S078), chain 0/0 = no chaining
 (S080; supplied by the `memset` in `scene_settingsDefaults()` and
@@ -346,7 +350,8 @@ Parameters change through these paths:
      changes by less than the edit (correct). The whole voice is not queued.
    - External MIDI CC/NRPN commits exactly like a menu edit: the active
      Scene's clamped Normal endpoint, `seq_menuOverrideSet()` and edit-mask
-     fan-out. The retired `preset_setInstrumentParameterFromMidi()` path no
+     fan-out (`bank_editTargetMask()`: Scene 17 alone while it is active;
+     Scenes still loading are skipped during an unlocked Bank load). The retired `preset_setInstrumentParameterFromMidi()` path no
      longer exists.
    - Before S075 F3 a menu edit queued the whole voice and the worker
      overwrote held automation mid-note (also on Morph changes, LFO on

@@ -31,27 +31,64 @@ Do not recommend bumping `AUTOSAVE_PARAMETER_GETS_PER_WRITE` or adjusting
 capture timing unless the user explicitly asks. The section-based CRC
 format redesign is the chosen path for write performance.
 
-## Current carryover after Session 082
+## Current carryover after Session 083
 
-Session 082 (2026-10-16/21, `dev-ph6-midi`) rebuilt Load/Save (Bank
-Replace/Merge with COPY tap/hold and a content preview, Instrument `chg`,
-coalesced name editing) and built the background Bank load through Scene 17,
-then fixed audio during a load (Effect source rebind, range AutoSave marks,
-idle-time card servicing) and unlocked the panel while a load runs
-(availability, frozen Load/Save screen, progressive Bank Load).
+Session 083 (2026-10-21/22, `dev-ph6-midi`) implemented the MIDI rework:
+`Core/MIDI/` rebuilt as single-role modules, consume-then-route, the N1–N5
+note map, NRPN = 9-bit target IDs, MIDI writes as menu edits (Q1), MIDI
+Learn, PC/CC0, Continue/SPP, transmit with no echo; then hardware follow-ups
+(track `ch off`/`nte off`, `asm` → `rmp`, Learn in `midilrn.cfg`, global
+Morph sets FX Morph, SHIFT+REC `pv<`/`pv>`, CC2 sets the PERF BAR overlay).
 
-- **Commits:** planning `8206a73`/`8b1b647`/`45846b7`; code `b25ffbe`
-  (P0–P2) and `8a83df0` (P3); close-out docs uncommitted. The user manages
-  commits.
-- **Final link (DEV):** `text=598,120`, `data=420`, `bss=430,928`; payload
-  598,540 B of 753,664 (155,124 B free).
-- **Durable authorities:** `082_SESSION_HANDOFF_LOG.md`; `FILESYSTEM_SPEC.md`
-  "Current Bank behavior"; `MODULE_INTERCHANGE_SPEC.md` "Background Bank
-  load (S082)".
-- **Next session (083):** S083 MIDI plan; carry-over list in
-  `knowledge_files/volatile/S078_WORKING_NOTES.md` (S082 hardware checks, P3
-  A1/A2 decision, F5; the S081 close-out was written on 2026-10-21, its
-  carry-over is items 9a–9f there).
+- **Commits:** planning `f9aaeec`, implementation `d007027`, assessment
+  fixes and P2 follow-ups `bbea23f`; final close-out doc edits after it (the
+  user manages commits).
+- **Final link (DEV):** `text=608,744`, `data=424`, `bss=430,112`; payload
+  608,848 B of 753,664 (144,816 B free).
+- **Hardware:** the final build "checks out" (user, 2026-10-22).
+- **Durable authorities:** `083_SESSION_HANDOFF_LOG.md`; `MIDI_SPEC.md` (the
+  complete MIDI use and code reference); `FILESYSTEM_SPEC.md` "`midilrn.cfg`".
+- **Carry-over list:** `knowledge_files/volatile/S078_WORKING_NOTES.md`
+  (rewritten as the S083 → S084 notes).
+
+## Carryover from Session 082 (closed)
+
+Session 082 (2026-10-16/21) rebuilt Load/Save (Bank Replace/Merge, preview,
+Instrument `chg`, coalesced name editing) and built the background Bank load
+through Scene 17 (audio during a load, panel unlocked while a load runs).
+Record: `082_SESSION_HANDOFF_LOG.md`. Its hardware checks passed (S083 Q3).
+Open: F5 (Scene 2 Case-3 invalidation), P3 A2 (frozen-screen blink loss);
+P3 A1 was fixed in S083.
+
+### Working preferences confirmed in Session 083
+
+- **Same method as S081/S082:** plan revision with numbered questions (Q1–Q13)
+  → line-level schedule with paste-ready comment blocks (the user implements)
+  → assessment appended to the schedule (numbered findings F-n, D-n) →
+  targeted fixes with every affected comment block amended → work appended to
+  the schedule as new sections. Hardware follow-ups arrive as short
+  correction lists; each becomes its own appended section.
+- **Follow-up questions before code:** for a design change (e.g. moving Learn
+  to `midilrn.cfg`) list numbered follow-ups with a recommendation each; the
+  user answers "yes to all, implement it". Recommendations must be concrete
+  (format, write timing, recovery, boot order, RAM, trace).
+- **When the user names values but not their effect** (track `ch off`,
+  `nte off`), choose the least surprising meaning, implement it, and state
+  it as a table the user can correct.
+- **Keep stored defaults stable:** add new values above the stored range and
+  convert to the requested menu order at the menu edge, rather than
+  renumbering stored data (no migration rule).
+- **Root-cause before redesign:** the Learn persistence report had a plain
+  bug (formatter returned 1, not the length) as well as the user's requested
+  redesign; fix and report both.
+- **Answer "what did we decide?" questions from the record:** check the spec
+  and plan, say what was decided, then why it does not work as expected
+  (CC2 existed but only shaped MIDI notes).
+- **Handoff and close-out documents must carry every relevant detail** of the
+  task documents, because the user deletes them; the comment-block audit of
+  all landed changes is part of the handoff.
+- **Never recommend committing** (restated by the standing commits rule):
+  state "uncommitted" as a fact only.
 
 ## Carryover from Session 081 (closed out after Session 082)
 
@@ -359,7 +396,7 @@ another step's block) and publish before free.
 
 ### Automation priority (Session 075 F3, amended Session 081 R12)
 
-Automation, then menu edits, then MIDI — except that since S081 a menu edit
+(Historical order: automation, then menu edits, then MIDI.) Since S081 a menu edit
 of an automated Instrument parameter sounds at once and suppresses its
 automation until the voice's next trigger (`seq_menuOverrideSet()`), and
 Effect parameters resolve menuHold > lock > overlay > menu (R13). Instrument
@@ -368,12 +405,13 @@ mask). Every Morph-base runtime write goes
 through `presetMorph_writeRuntimeBase()`, which skips a parameter while
 `seq_automationHoldsParameter()` reports it held; the trigger restore then
 applies the latest `morph_interpolation[]`. Menu edits call
-`presetMorph_applyParameterNow()` for one parameter only; external MIDI
-stores an endpoint (`preset_setInstrumentParameterFromMidi()`).
-**S083 Q1 (2026-10-21, decided, not yet built):** a MIDI write is a menu
-edit, with the same priority and actions against automation and recording,
-through one shared Menu commit; `preset_setInstrumentParameterFromMidi()` is
-to be retired.
+`presetMorph_applyParameterNow()` for one parameter only.
+**S083 Q1 (built):** a MIDI write is a menu edit, with the same priority and
+actions against automation and recording, through one shared Menu commit
+(`menu_commitTargetEdit()` → `menu_cellCommitValueEx(cell, v, panel = 0)`);
+`preset_setInstrumentParameterFromMidi()` is gone. Global Morph (panel `mrp`,
+CC1 on G) also sets the Effect Morph as an `fxm` menu edit and is never
+recorded (G-1).
 
 ### Working preference: commits
 

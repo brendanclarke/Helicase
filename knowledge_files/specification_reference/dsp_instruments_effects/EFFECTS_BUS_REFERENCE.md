@@ -307,6 +307,15 @@ EFFECT_IMAGE_NORMAL, ...)`, which sets `menuHold` exactly like an Effect-page
 edit, so it beats a lock and the overlay until the next automation (R13).
 MIDI never writes a Morph image.
 
+**Global Morph sets the Effect Morph (S083 follow-up).** The global Morph
+(PERF `mrp`, MIDI CC1 on G, the qac Morph reset) runs `preset_morphScene()`
+per edit-mask Scene, which calls `effects_setMorphAmountFromGlobal(scene,
+amount)`: it stores `effect_morph_amount`, clears the Pattern `fxm` override
+(`morph_override_valid`) and, on the active Scene, sets `menuHoldMorph`, so
+the new amount beats an FX Morph lane lock and `fxm` automation until the next
+Morph automation, exactly as an `fxm` edit does. The `fxm` mirror is synced
+(`preset_syncEffectMorphMirror()`). It is never recorded (G-1).
+
 Per Effect parameter `i` there are four layers:
 
 | Layer | Set by | Cleared by |

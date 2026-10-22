@@ -122,7 +122,7 @@ The page reads `ch nte lop rmp`.
 **Stored values** (`sceneset.scg`, AutoSave):
 - `ch`: 0 = `glb`, 1..16, 17 = `off` (`MIDI_TRACK_CHANNEL_OFF`);
 - `nte`: 0 = `on`, 1..127, 128 = `off` (`MIDI_TRACK_NOTE_OFF`);
-- the menu converts between the two orders (§14.4).
+- the menu converts between the two orders (§14.1).
 
 **Effects:**
 - **`ch off`:** the track has no MIDI channel at all: no notes in or out,
