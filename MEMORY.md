@@ -223,6 +223,14 @@ points:
   there; handoff log `LXR1_CONVERTERS_IMPLEMENTATION.md` at the root).
   The 2013 factory kits use page-reference LFO/velocity targets, not
   modTargets indices.
+* **LXR-02 import tools (2026-10-23, closed; host only, not yet hardware-tested):**
+  `tools/lxr2_converters/` converts Erica LXR-02 `NN-*.snd` → Kit, `.pat`
+  → PAT4, `projNN/` → Banks (16 patterns each), `.sng` → chained Banks
+  (manual `LXR2_CONVERTERS.md` there; handoff log
+  `LXR2_CONVERTERS_IMPLEMENTATION.md` at the root). It imports the Helicase
+  writers from `tools/lxr1_converters/lxr1_common.py`: editing that module
+  affects both converter sets. User decision: LXR-02 track MIDI notes still
+  at the default (48 on all tracks) are written as `nte on`.
 * **MIDI testing needs RXF/TXF = `all`:** a card without the keys defaults
   to off (consumes and sends nothing).
 * **Card files:** `midilrn.cfg` appears with the first Learn; `settings.cfg`
