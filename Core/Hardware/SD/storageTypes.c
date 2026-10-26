@@ -2448,3 +2448,114 @@ void storage_instrumentCopyMainToMorphFallback(storage_instrument_type_t type,
         }
     }
 }
+
+/*
+ * Natural, numeric-aware name order (S084 VX2 VX2-3.1).
+ *
+ * What:       case-insensitive compare in which each decimal digit run is
+ *             one number. Leading zeros are skipped; a longer remaining run
+ *             is larger; equal lengths compare digit by digit; equal values
+ *             put the run with fewer leading zeros first.
+ * Why:        the installer's frame and sample order must read naturally
+ *             (f2 before f10) and must be deterministic for equal names.
+ * Inputs:     a, b (never NULL; empty allowed).  Outputs: -1, 0 or 1.
+ * Accessors:  filesystem_installCollect().
+ * Affiliates: storage_stripOrderPrefix(), test_natural_order.c.
+ */
+int8_t storage_naturalCompare(const char *a, const char *b)
+{
+    const char *pa = a;
+    const char *pb = b;
+    int8_t zero_tie = 0;
+
+    if (!a || !b)
+        return (int8_t)((!a && !b) ? 0 : (!a ? -1 : 1));
+
+    while (*pa != '\0' && *pb != '\0') {
+        if (*pa >= '0' && *pa <= '9' && *pb >= '0' && *pb <= '9') {
+            const char *za = pa;
+            const char *zb = pb;
+            const char *ea;
+            const char *eb;
+            uint16_t la;
+            uint16_t lb;
+            uint16_t i;
+
+            while (*za == '0')
+                za++;
+            while (*zb == '0')
+                zb++;
+            ea = za;
+            while (*ea >= '0' && *ea <= '9')
+                ea++;
+            eb = zb;
+            while (*eb >= '0' && *eb <= '9')
+                eb++;
+            la = (uint16_t)(ea - za);
+            lb = (uint16_t)(eb - zb);
+            if (la != lb)
+                return (int8_t)((la < lb) ? -1 : 1);
+            for (i = 0u; i < la; i++) {
+                if (za[i] != zb[i])
+                    return (int8_t)((za[i] < zb[i]) ? -1 : 1);
+            }
+            if (zero_tie == 0) {
+                const uint16_t zla = (uint16_t)(za - pa);
+                const uint16_t zlb = (uint16_t)(zb - pb);
+
+                if (zla != zlb)
+                    zero_tie = (int8_t)((zla < zlb) ? -1 : 1);
+            }
+            pa = ea;
+            pb = eb;
+            continue;
+        }
+        {
+            char ca = *pa;
+            char cb = *pb;
+
+            if (ca >= 'A' && ca <= 'Z')
+                ca = (char)(ca + ('a' - 'A'));
+            if (cb >= 'A' && cb <= 'Z')
+                cb = (char)(cb + ('a' - 'A'));
+            if (ca != cb)
+                return (int8_t)((ca < cb) ? -1 : 1);
+        }
+        pa++;
+        pb++;
+    }
+    if (*pa != '\0')
+        return 1;
+    if (*pb != '\0')
+        return -1;
+    return zero_tie;
+}
+
+/*
+ * Ordering prefix of a folder name (S084 VX2 VX2-3.1).
+ *
+ * What:       skips a leading digit run and a following run of ' ', '_' or
+ *             '-'; returns the remainder when it is non-empty.
+ * Why:        D2 display rule; the full name still orders the folder.
+ * Inputs:     name (never NULL).  Outputs: display start inside name.
+ * Accessors:  filesystem_installWavetables().
+ * Affiliates: storage_naturalCompare().
+ */
+const char *storage_stripOrderPrefix(const char *name)
+{
+    const char *p = name;
+
+    if (!name)
+        return name;
+    while (*p >= '0' && *p <= '9')
+        p++;
+    if (p == name)
+        return name;
+    if (*p == ' ' || *p == '_' || *p == '-') {
+        while (*p == ' ' || *p == '_' || *p == '-')
+            p++;
+        if (*p != '\0')
+            return p;
+    }
+    return name;
+}

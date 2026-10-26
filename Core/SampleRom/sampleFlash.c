@@ -139,6 +139,8 @@ static int flash_wait(uint32_t timeout_units)
  * macro and the linker symbol ever drift apart, every erase and write is
  * refused rather than risking application code. It is a compare of two
  * constants and needs no RAM.
+ * S084 VX2: the catalogue v2 regions (SampleMemory.h) all lie inside sectors
+ * 7..11; the guards are unchanged.
  */
 _Static_assert(SAMPLE_FIRST_SECTOR >= 6u && SAMPLE_FIRST_SECTOR <= 11u,
                "sample floor must be a 256 KB sector above the application");

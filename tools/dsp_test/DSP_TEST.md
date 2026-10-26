@@ -162,7 +162,7 @@ Each instrument parameter row carries a tag that picks its DSP setter
 four tables (`DrumParameters.c`, `SnareParameters.c`, `CymbalParameters.c`,
 `HiHatParameters.c`), classifies each `file_key` with the pre-S073
 string rules, and compares the result with the row's tag. Output:
-`special tags OK (155 rows, 0 mismatches)`.
+`special tags OK (185 rows, 0 mismatches)`.
 
 Run it after adding or changing any instrument parameter row. The diagnostic
 firmware build does the same comparison at boot (the `s` digit on the `FxBf`
@@ -193,13 +193,20 @@ S073 tree.
 | `selftest` | Frozen filter against itself (old == old), 276,480,000 samples per variant | about 50 s | `differing=0` for int16 and float |
 | `filter` | Rounding baseline, then frozen filter against the batched solver; S1 report | about 2.5 min | `int16 ... SDR=91.6896 dB`, `float ... SDR=86.5468 dB`, `S1 acceptance: PASS (0 failures)` |
 | `armcheck-filter` | `vdiv` count in the old and new ARM filter objects | seconds | `vdiv old: 81`, `vdiv new: 39` |
-| `special_tags` | §4.4 | seconds | `special tags OK (155 rows, 0 mismatches)` |
+| `special_tags` | §4.4 | seconds | `special tags OK (185 rows, 0 mismatches)` |
 | `pack` | DMA pack, old against new, including clamp values | seconds | `pack differing bytes: 0` |
 | `postchain` | Fused post-chains, four engines, all distortion shapes, gain ramps, `volumeMod` both ways | seconds | `post-chain differing samples: 0` |
 | `armcheck-postchain` | ARM `MATCH` for Drum, Snare and Cymbal/HiHat | seconds | three `MATCH` lines |
 | `octave` | Octave-edge selection over every float in range | seconds | `octave mismatches: 16, max edge distance: 2 ulps, max error: 0.000403883111 cents` |
 | `mixer` | Combined dry + send against the old calls, every routing, stereo and mono input, ramps, near-saturation buses | seconds | `mixer differing samples: 0` |
 | `armcheck-mixer` | ARM `MATCH` for all four dry × send combinations and the send-only default case, plus instruction counts | seconds | six `MATCH` lines; totals 55→44, 69→59, 73→63, 87→78 |
+| `natural_order` | Numeric-aware compare and folder prefix strip (S084 VX2) | seconds | `natural_order OK (0 failures)` |
+| `catalogue` | Catalogue v2 writer/reader: gain codes, frame conversions, split writes, fit/count limits, magic-last commit, STALE, corruption | seconds | `catalogue OK (0 failures)` |
+| `stock_gen` | Real additive generator against `frozen/stock_ref.bin`, every level peaks at full scale | about 1 s | `stock_gen OK (0 failures)` |
+| `wtb` | Wavetable frames of 600/256/64/2 points, 8/16-bit, 1/2/104 frames against a float64 reference; position, silence, zero FM | seconds | `wtb OK (0 failures)` |
+| `transient` | PCM bit-identical, trs silence, sample gain and one-shot, 2,205-sample bursts and tau = 10 ms, type round trip | seconds | `transient OK (0 failures)` |
+| `shaper` | All 14 `dty` shapers against `frozen/shaper` (plotted reference) | seconds | `shaper OK (0 failures)` |
+| `armcheck-vx2` | Instruction report: stock and wavetable loops, then one specialised probe per transient kind and per drive type (`armcheck/vx2_spec.c`) | seconds | per-kind and per-type totals; see `S084_P2_IMPLEMENTATION.md` §17 |
 | `clean` | Deletes `build/` | — | — |
 
 These targets are specific to the S073 changes. They stay valid as

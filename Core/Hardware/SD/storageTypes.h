@@ -652,4 +652,38 @@ void storage_makeSavedInstrumentDisplayFilename(char *dst,
                                                 uint8_t one_based_voice,
                                                 uint8_t force_voice_suffix);
 
+/*
+ * Natural, numeric-aware name order (S084 VX2 VX2-3.1).
+ *
+ * What:       compares two NUL-terminated names case-insensitively, but
+ *             treats each run of decimal digits as one number: leading zeros
+ *             are skipped, a longer remaining run is larger, equal lengths
+ *             compare digit by digit, and on equal value the run with fewer
+ *             leading zeros sorts first. Returns -1, 0 or 1. 0 means equal
+ *             under these rules (case and zero-padding differences only).
+ * Why:        P2-A / plan §4.1.4: frames and samples install in the order a
+ *             person reads ("f2" before "f10"); wavetable frame order is the
+ *             filename order.
+ * Inputs:     a, b (may be empty, never NULL).  Outputs: -1/0/1.
+ * Accessors:  filesystem.c installer (VX2-3.7).
+ * Affiliates: tools/sampleoptimize.py (keeps file names, so its output
+ *             sorts the same), tools/dsp_test/test_natural_order.c.
+ */
+int8_t storage_naturalCompare(const char *a, const char *b);
+
+/*
+ * Ordering prefix of a folder name (S084 VX2 VX2-3.1).
+ *
+ * What:       returns a pointer past a leading run of digits followed by
+ *             one or more of ' ', '_' or '-', if a non-empty name remains;
+ *             otherwise the name itself.
+ * Why:        D2: "000 hvoice" orders by its number and displays "hvoice",
+ *             so cards that follow the older numbered-folder convention keep
+ *             working.
+ * Inputs:     name.  Outputs: the display start.
+ * Accessors:  filesystem_installWavetables() (display names).
+ * Affiliates: storage_naturalCompare() (ordering still uses the full name).
+ */
+const char *storage_stripOrderPrefix(const char *name);
+
 #endif /* STORAGETYPES_H_ */

@@ -626,7 +626,7 @@ automation storage. Provides edit APIs and menu-refresh helpers.
 | `pat_setTrackLoopable(scene, track, loopable)` / `pat_trackLoopable(scene, track)` | S080: per-track looper opt-out stored inverted in `track_loop_exclude` (bit set = not loopable; default all loopable); setter marks the Pattern dirty only on change; getter returns 1 for invalid coordinates. PAT4 track header byte 4. The sequencer reads the region directly in `seq_loopableTrackMask()`. | `menu_cellCommitValue()` (`lop` cell), copy/clear track copy (carries) / clear (loopable), `pat_applyTrackSettingsToMenu()` mirror |
 | `pat_setTrackAutoSmooth(scene, track, on)` / `pat_trackAutoSmooth(scene, track)` | S081 P2: per-track automation-ramp flag `asm` in `track_auto_smooth` (bit set = `on`; default `off`); setter marks the Pattern dirty only on change; PAT4 track header byte 5. The Sequencer reads the region byte directly from TIM3 (`PATTERN_DYNAMIC_STACK.md` §6.2b). | `menu_cellCommitValue(PAR_TRACK_AUTO_SMOOTH)`, copy/clear track copy/clear |
 | `pat_findStepAutomation(scene, track, step, target9, *value)` | S081 P2: single-target lookup in one step's automation tail; returns 1 and the 7-bit value when present. Copies nothing. | Sequencer ramp pairing (`seq_rampStartIfPaired()`), LiveRecord first-change write (`liveRec_writeCurrentValue()`) |
-| `pat_recordStep(scene, track, step, const pat_record_spec_t *spec)` | S081: one live-recorded trigger (note or default note, velocity, timing, roll, fill, `fil`); trigger ON in the same PRIMASK publish; rhythm cleared; condition kept unless `setFil`; automation kept; velocity/fill 100 stored as absent; bit-15-only cheap path. Returns success. | PatternStackService `RECORD_STEP` only |
+| `pat_recordStep(scene, track, step, const pat_record_spec_t *spec)` | S081: one live-recorded trigger (note or default note, velocity, timing, roll, fill, `fil`; S084 P4: the roll's `rhythm`, stored only with a roll and cleared without one); trigger ON in the same PRIMASK publish; condition kept unless `setFil`; automation kept; velocity/fill 100 stored as absent; bit-15-only cheap path. Returns success. | PatternStackService `RECORD_STEP` only |
 | `pat_eraseSpecials(scene, track, step)` | S081: live SEQ-hold erase of one step: with automation, keeps condition + automation and drops the other specials; otherwise releases the block (trigger KEEP; TIM3 cleared bit 15). | PatternStackService `ERASE_SPECIALS` only |
 | `pat_writeDynamic(…, trigger_policy)` (internal) | S081: the block publish takes KEEP/ON/OFF (`PAT_RAW_TRIGGER_*`) applied inside both PRIMASK publishes; every pre-S081 caller passes KEEP. | PatternData internals |
 | `pat_applyTrackSettingsToMenu(scene, track)` | Mirror length/scale/shuffle/run mode, Loopable and (S081) `asm` into `parameter_values[]`. | Menu track/page changes, buttonHandler, STEP overlay entry |
@@ -827,13 +827,13 @@ dispatch to owners.
 | VOICE hold-SHIFT Morph view (S075 F2) | SHIFT press in VOICE mode → `menu_setVoiceModeShowMorph(1)`; release → back to the SHIFT+MODE VOICE latch (`buttonHandler_morphVoiceModeActive`). | Menu |
 | STEP hold-SHIFT Morph view (S078) | SHIFT press in STEP mode → `menu_setPatternTrackMorphEndpoint(1)` (+ LED leave); SHIFT release in STEP mode → `menu_setPatternTrackMorphEndpoint(0)` + `buttonHandler_enterSeqModeStepMode()`. A release handled in another mode (SHIFT+mode button) cannot clear it, so Menu also gates the view on `buttonHandler_getShift()` (S078 P4). No latch: SHIFT+MODE STEP is the only SOM entry. | Menu |
 | STEP held steps + TRACK (S078) | In `handleVoiceButton()`'s STEP arm, `buttonHandler_seqHeldMask() != 0` calls `menu_enterStepTrackAutomationOverlay(voiceNr)` and returns before the ordinary half toggle. | Menu |
-| PERF looper / overlay / SHIFT+REC / chain chord (S080; overlay S083 Q5) | See "PERF performance surface". Hold state `bh_loopSelectHeldMask`, `bh_loopLastSelectButton`, `bh_loopTrackMask` (mask returned by the sequencer), `bh_loopBarModifier`, `bh_loopBarHeld` (event-order BAR holds); helpers `buttonHandler_loopCheckDisengage()`, `buttonHandler_loopForceRelease()`; overlay `bh_overlayActive` + the per-track table `bh_overlay[7]` (heldMidiNote, note + `def` bit, roll rhythm position (was velocity, always 100), count 0/1/0xFF, interval, next; serviced in `buttonHandler_tick()`); latches `bh_shiftRecMenuActive`, `bh_shiftReleaseConsume`, `bh_chainPlayArmed`. | Sequencer, Menu, ledHandler, MidiNotes |
+| PERF looper / overlay / SHIFT+REC / chain chord (S080; overlay S083 Q5, S084 P2) | See "PERF performance surface". Hold state `bh_loopSelectHeldMask`, `bh_loopLastSelectButton`, `bh_loopTrackMask` (mask returned by the sequencer), `bh_loopBarModifier`, `bh_loopBarHeld` (event-order BAR holds); helpers `buttonHandler_loopCheckDisengage()`, `buttonHandler_loopForceRelease()`; overlay `bh_overlayActive` + the per-track gesture table `bh_overlay[7]` (heldMidiNote, note + `def` bit, count 0/1/0xFF, rate; 4 B per track). The hit timing lives in the Sequencer's live engine (`seq_live*`, TIM3, 96-PPQ); `buttonHandler_overlayTick()` only publishes the overlay `pv` rhythm and drains hits to LiveRecord. Latches `bh_shiftRecMenuActive`, `bh_shiftReleaseConsume`, `bh_chainPlayArmed`. | Sequencer, Menu, ledHandler, MidiNotes |
 | MIDI overlay entry points (S083) | `buttonHandler_overlayActive()` (the one BAR overlay state 0/1/2, any mode), `buttonHandler_setOverlay(which)` (CC2 on G: same as a BAR press — state, BAR LEDs in PERF unless the looper owns them, held entries re-configured), `buttonHandler_overlayMidiNoteOn(track, which, internal, midiNote, ageUs)`, `buttonHandler_overlayMidiNoteOff(track, midiNote)` (ends a MIDI-held roll; a flam main still plays). One executor and one state for panel and MIDI; the C-9 BAR-over-CC2 priority is retired (2026-10-22). | MidiNotes |
 | Learn LEDs (S083) | `buttonHandler_setLearnLeds(on)`: on flashes SHIFT/PLAY/REC; off restores SHIFT hold, transport and REC LATCH states. | MidiLearn |
 | `buttonHandler_loopSelectLed()` | S080: SELECT index (0..7) of the looper division while the looper is held or engaged, else 0xFF. | `menu_syncPerfSelectLed()` |
 | REC button (S081) | Press: with SHIFT and the SHIFT+PLAY chord armed → `midiLearn_arm()` (S083, first test); SHIFT → SHIFT+REC menu; menu open → close it; live erase on → nothing (SHIFT or not); otherwise start the hold timer (`bh_recPressTick` `u16`, wrap-safe, `bh_recArmed`). `buttonHandler_tick()` enters OVERDUB once the hold passes `DOUBLE_CLICK_TIMEOUT` (300 ms) (`liveRec_overdubBegin()` + REC LED pulse). Release: an overdub → `liveRec_overdubEnd()` + pulse; otherwise toggle `liveRec_setLatch()`. REC LED flashes while SHIFT+REC is open and armed. REC works while looping (S081 P3). | LiveRecord |
 | Live-erase chord and router (S081) | `bh_shiftHeld`/`bh_clearHeld` are updated before any early exit. With `liveRec_armed()`, SHIFT+COPY in either order calls `buttonHandler_liveEraseBegin()` (the single entry; clears the gesture masks only when entering from off) → `liveRec_eraseBegin()`; SHIFT and CLEAR LEDs stay lit while either is held; releasing both calls `buttonHandler_liveEraseEnd()` (the single exit: `liveRec_eraseEnd()`, REC LED restored, automation-underline search restarted). The SHIFT release runs the erase-end test before its consume/latched-menu breaks. Router right after `copyClear_buttonPressed()`: SEQ in VOICE/STEP → `liveRec_eraseSeqHeld(activeTrack, held)`, in FX → `liveRec_eraseFxSeqHeld()`, else consumed; VOICE in VOICE/STEP/PERF/FX → `liveRec_eraseTrackHeld()` (not while the loop is engaged: the VOICE stays a looper button), else consumed; PLAY → plain transport toggle (`buttonHandler_setRunStopState()` + `seq_setRunning()`, bypassing `bh_chainPlayArmed`). Per-button gesture masks `bh_eraseSeqMask`, `bh_eraseFxSeqMask`, `bh_eraseVoiceMask` end exactly the gesture a press started (even after erase ended); a MODE press clears them and calls `liveRec_eraseReleaseHeld()`. | LiveRecord |
-| Overlay recording and R19 (S081) | `buttonHandler_overlayReport()` feeds `liveRec_triggerIn()` after each overlay `seq_triggerVoice()`: SINGLE / FLAM_GRACE / ROLL_START from `buttonHandler_overlayTrigger()`, FLAM_MAIN / ROLL_HIT from `buttonHandler_overlayTick()` (the 1 ms timer, reset = `bh_overlayCount != 0xFF`); `buttonHandler_overlayRelease()` → `liveRec_rollRelease()`; `bh_overlayNoteDefault` marks a `def` note. `buttonHandler_overlaySwitchHeld()` (`bh_overlayHeldType`) re-configures a held VOICE trigger when the other BAR is pressed or the held overlay's BAR is toggled off (roll ↔ single/flam per F-B/F-O) and calls `liveRec_rollRateChange()`. `handleModeButtons()` shows the BAR overlay LEDs only in PERF. | LiveRecord, Sequencer |
+| Overlay recording and R19 (S081; S084 P2/P4) | `buttonHandler_overlayReport()` feeds `liveRec_triggerIn()`: SINGLE / FLAM_GRACE / ROLL_START from `buttonHandler_overlayStart()` (first hits, foreground), FLAM_MAIN / ROLL_HIT from `buttonHandler_overlayDrain()` (the TIM3 live hits, with their TIM2 age). `buttonHandler_overlayEndTrack()` → `liveRec_rollRelease(track)`; `bh_overlay`'s `def` bit marks a `def` note. `buttonHandler_overlaySwitchHeld()` (`bh_overlayHeldType`) re-configures a held VOICE trigger when the other BAR is pressed or the held overlay's BAR is toggled off (roll ↔ single/flam per F-B/F-O) and calls `liveRec_rollRateChange(track, idx, rhythm)`. `handleModeButtons()` shows the BAR overlay LEDs only in PERF. | LiveRecord, Sequencer |
 | Q13 STEP refusal (S081) | `buttonHandler_setRemoveStep()` refuses a step toggle silently while `liveRec_activePatternLocked()` (writing into a per-track target Scene other than the active one). | LiveRecord |
 | `buttonHandler_enterLoadSaveForBackgroundLoad()` | S082 P1 D7/D32: put the front panel into Load/Save for a MIDI-origin Bank load. Closes latched surfaces (PERF looper, SHIFT+REC, overlay, chain chord), ends an open copy/clear session, sets mode LEDs. Menu performs the page change. | `menu_backgroundBankLoadUiBegin()` |
 | Background load panel gates (S082 P1 R7, P3) | While the load is **locked** (`preset_backgroundBankLoadLocked()`: phases 1–4 and 6, or a load requested with the transport stopped), MODE presses and SHIFT+REC entry are dropped (mode LEDs unchanged, nothing queued) and `menu_switchPage()` drops every page request. Once it is unlocked (phase 5 of a progressive load) MODE and SHIFT+REC work; Menu then shows only the frozen Bank Load screen for Load/Save. VOICE on the Load/Save page stays consumed for the whole load (`menu_loadInstrumentVoicePressed()`). | handleModeButtons, buttonHandler_shiftRecMenuEnter, menu_switchPage, menu_loadInstrumentVoicePressed |
@@ -1031,13 +1031,13 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 |---|---|---|
 | `seq_init()` | Initialize automation nodes, runtime indices, PatternData. | `main.c` boot |
 | `seq_tick()` | Advance playback when due. | TIM3 owner |
-| `seq_triggerVoice(voiceNr, vol, note, reset)` | Trigger one voice. S081 `reset` (the step reset rule, `PATTERN_DYNAMIC_STACK.md` §6.2): 1 for a step's first trigger (on-time hit, deferred fire, `seq_rollBegin()` first hit), overlay presses, preview and SOM; 0 for roll retriggers 2+ (`seq_processRollTicks()`); the overlay 1 ms timer passes `bh_overlayCount != 0xFF`. Reaches `voiceControl_noteOn()` / `voiceControl_noteOnNoReset()`. | Sequencer, SOM, buttonHandler overlay |
+| `seq_triggerVoice(voiceNr, vol, note, reset)` | Trigger one voice. S081 `reset` (the step reset rule, `PATTERN_DYNAMIC_STACK.md` §6.2): 1 for a step's first trigger (on-time hit, deferred fire, `seq_rollBegin()` first hit), overlay presses, preview, SOM and the TIM3 flam main; 0 for step-roll retriggers 2+ (`seq_processRollTicks()`) and live overlay roll repeats (`seq_processLiveTicks()`, S084 P2). Reaches `voiceControl_noteOn()` / `voiceControl_noteOnNoReset()`. | Sequencer, SOM, buttonHandler overlay |
 | `seq_previewVoice(voiceNr)` | Trigger the selected voice while transport is stopped without reading or advancing step state. | buttonHandler selected-voice re-press |
 | Internal scheduler helpers (`seq_advanceTrackStep()`, `seq_processSchedulerTick()`, `seq_processShuffleDelays()`, `seq_stepIndexForMode()`) | S078: per-PPQ-tick, each track adds 256 to its Q8.8 accumulator and advances while ≥ `stepScale_ticksQ8(effective scale)`; shuffle deferrals tick down first; the run mode (`region->track_play_mode`, `seq_trackPlayState[]`) moves the index; wrap at the effective length. Timing comes only from `seq_effectiveTrack*[]`. See `PATTERN_DYNAMIC_STACK.md` §6.4. | Sequencer only |
 | `seq_refreshTrackEffectiveParams()` | S078: recompute `seq_effectiveTrackLength/Scale/Shuffle[7]` per track from its played Scene via `presetMorph_getTrackEffective*()`. | `presetMorph_tick()` (every foreground pass), `seq_init()`, Scene activation, per-track assignment/coalesce, `seq_setStepIndexToStart()` |
-| `seq_resetDeltaAndTick()` / `seq_resetToPatternStart()` / `seq_setDeltaT(delta)` | Clock/reset timing control. | trigger/MIDI sync paths |
+| `seq_resetDeltaAndTick()` / `seq_resetToPatternStart()` / `seq_setDeltaT(delta)` | Clock/reset timing control. Since S084 P0 A1 a MIDI clock runs the first of its 4 scheduler ticks on the edge and `seq_tick()`'s tempo timer interpolates the other 3 (`seq_extClockTicks()`, `seq_extTicksOwed`); ticks still owed at the next clock are caught up first, and transport start/stop/continue and the external reset drop them. | trigger/MIDI sync paths |
 | `seq_realignActivePatternToMasterClock()` / `seq_realignTrackToMasterClock(track)` | Recalculate each track's step and Q8.8 accumulator phase from `seq_elapsedPpqTicks` and the track's effective scale/length, mapped through its run mode (`seq_stepIndexForMode()`); stopped once-mode tracks are skipped (S078). | buttonHandler/PERF realign gesture, per-track Scene assignment |
-| `seq_triggerNextMasterStep(stepSize)` | External clock master-step scheduling. | trigger/MIDI sync paths |
+| `seq_triggerNextMasterStep(stepSize)` | External clock master-step scheduling. Since S084 P0 A1 the pulse's `stepSize × 3` ticks are spread over the pulse period the same way (first tick on the pulse, the rest interpolated at the measured tempo). | trigger/MIDI sync paths |
 | `seq_setBpm(bpm)` / `seq_getBpm()` | Tempo. | Menu/global apply |
 | `seq_sync()` | External MIDI clock tick. | MidiTransport |
 | `seq_getExtSync()` / `seq_setExtSync(isExt)` / `seq_setExtSyncSource(source)` / `seq_getExtSyncSource()` / `seq_noteExtSyncActivity(source, timestampUs)` | External sync mode/activity. | Menu, MidiTransport, triggerJacks |
@@ -1046,7 +1046,8 @@ Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or
 | `seq_setRunning(isRunning)` / `seq_setRunningEx(isRunning, sendRealtime)` / `seq_isRunning()` | Transport. `Ex` with `sendRealtime = 0` is the received-MIDI path (C-11: MRT forwards the message, the LXR does not send a second copy). A stop stores `seq_resumeTick` for Continue (S083 R-C). The stop branch queues `SEQ_LED_DIRTY_CHASE` after setting `seq_running = 0u`. | buttonHandler, MidiTransport, clockSync |
 | `seq_continueRunning(sendRealtime)` / `seq_setResumeTick(tick)` | S083 T1: resume at the stored tick (or a plain start at 0), and set the tick from SPP x 24 while stopped. | `sync_midiContinue()`, `midiTransport_handleSystemCommon()` |
 | `seq_assignTracksToScene(trackMask, scene)` | S083 P3: shared per-track Scene move (set played Scene, realign, note-off, one slot apply) for the panel and a MIDI PC on a voice channel. | buttonHandler, MidiProgram |
-| `seq_rollRhythmVelocity(rhythm, vel, pos)` | S083: the pure roll velocity-rhythm rule (packed `rtm` byte: bits 7..4 cycle, bit 3 halve/double, bits 2..0 full count). Shared by step rolls (`seq_rollComputeVelocity()`) and the PERF BAR overlay rolls (`pv<`/`pv>`). | Sequencer, buttonHandler overlay tick |
+| `seq_rollRhythmVelocity(rhythm, vel, pos)` | S083: the pure roll velocity-rhythm rule (packed `rtm` byte: bits 7..4 cycle, bit 3 halve/double, bits 2..0 full count). Shared by step rolls (`seq_rollComputeVelocity()`) and the live overlay rolls (`seq_processLiveTicks()`), both TIM3 (S084 P2). | Sequencer only |
+| Live overlay engine (S084 P2) `seq_liveRollStart(track, rate, note, vel, pos)` / `seq_liveRollSetRate(track, rate)` / `seq_liveFlamArm(track, note, vel, ticks)` / `seq_liveStop(track)` / `seq_liveSetRhythm(rhythm)` / `seq_liveTakeHits(track, &stampUs, &flamMain)` | Master-tick overlay roll/flam engine (`PATTERN_DYNAMIC_STACK.md` §6). The foreground fires hit 0, then arms (`pos` = 1, first repeat one rate interval later) and re-rates without losing the time since the last hit; flam main is armed `ticks` (12 = 1/32) ahead. `seq_processLiveTicks()` fires repeats and mains in TIM3, before the running gate, and from `seq_tick()` under external sync while stopped. Each track's mailbox holds the roll-hit count, the flam-main bit and the latest TIM2 µs stamp; `buttonHandler_overlayDrain()` takes them. All multi-byte writes hold PRIMASK. | buttonHandler overlay (start, re-configure, end, drain, tick) |
 | `seq_setSceneChangeOrigin(origin)` | S083 Q9: suppress the PC for a MIDI-originated whole-Scene change, including a deferred one. | `menu_perfModeSceneChangeFrom()` |
 | `seq_setMute(trackNr, isMuted)` / `seq_isTrackMuted(trackNr)` | Playback mute state. | buttonHandler, Menu |
 | ~~`seq_setRoll()` / `seq_setRollRate()`~~ | Removed in S081 with the legacy live roll and `PAR_ROLL`. Step rolls use `seq_rollBegin()` / `seq_processRollTicks()` with the 96-PPQ table `seq_rollPpq()` (`PATTERN_DYNAMIC_STACK.md` §6). | — |
@@ -1819,17 +1820,17 @@ other than T (Pattern) or the origin Scene's fan-out set (FX sequence).
 | `liveRec_mode()` / `liveRec_armed()` / `liveRec_patternWriting()` | `LIVEREC_MODE_OFF/LATCH/OVERDUB/ERASE`; armed = mode ≠ OFF (copy/clear refusal, REC/erase gates); writing = armed and running (Pattern AutoSave gate, target override). | buttonHandler, Menu, copyClearSession, filesystem |
 | `liveRec_onActiveTrackChanged(track)` / `liveRec_setRecordTrack(track)` / `liveRec_recordTrack()` | `rtk` follow (on a real track change), SHIFT+REC override, display. | `menu_setActiveVoice()`, `rtk` cell |
 | `liveRec_activePatternLocked()` | Q13: 1 while writing into T ≠ the active Scene; Pattern edits of the viewed Pattern are refused silently. | Menu, `buttonHandler_setRemoveStep()` |
-| `liveRec_triggerIn(const liveRec_trigger_t *)` | One hit when it sounds: {track, note, velocity, kind `LIVEREC_HIT_SINGLE/FLAM_GRACE/FLAM_MAIN/ROLL_START/ROLL_HIT`, roll index, source `LIVEREC_SRC_OVERLAY/MIDI`, note_is_default}. Capture, placement, flam pairing, roll classification and spans. | `buttonHandler_overlayReport()`, `midiNotes_handle()` |
-| `liveRec_rollRateChange(track, rollIndex)` / `liveRec_rollRelease(track)` | Overlay switch or toggle-off while held; release (roll end write). | `buttonHandler_overlaySwitchHeld()`, `buttonHandler_overlayRelease()` |
+| `liveRec_triggerIn(const liveRec_trigger_t *)` | One hit when it sounds: {track, note, velocity, kind `LIVEREC_HIT_SINGLE/FLAM_GRACE/FLAM_MAIN/ROLL_START/ROLL_HIT`, roll index, rhythm (S084 P4, roll kinds), source `LIVEREC_SRC_OVERLAY/MIDI`, note_is_default, age_us}. Capture, placement, flam pairing, per-track roll spans. Every held roll is a span at any rate (Q7); a `ROLL_HIT` with no open span opens one. | `buttonHandler_overlayReport()`, `midiNotes_handle()` |
+| `liveRec_rollRateChange(track, rollIndex, rhythm)` / `liveRec_rollRelease(track)` | Overlay switch or toggle-off while held (rate and rhythm of that track's span); release ends that track's roll with its end write (S084 P4). | `buttonHandler_overlayReconfigure()`, `buttonHandler_overlayEndTrack()` |
 | `liveRec_paramIn(target9, source)` | Mark an adjusted recordable target (dirty; latch in LATCH) after the ownership check; captures individual voice/FX Morph edits into `liveRec_morphValue[7]`; with `LIVEREC_AUTOMATION_FIRST_CHANGE` 1 writes the first change of the step at once. No value is passed: the write reads the current value from the origin Scene A. | `menu_liveRecRecordCell()`, `menu_commitTargetEdit()` (MIDI) |
 | `liveRec_eraseParam(target9, fxLane)` | Knob erase: the target joins the erase bitmap; an FX lane joins the knob lanes. | Menu knob-erase branch |
 | `liveRec_eraseSeqHeld(track, held)` / `liveRec_eraseFxSeqHeld(held)` / `liveRec_eraseTrackHeld(track, held)` | SEQ hold on the active track (specials) / FX SEQ hold (counted) / TRACK hold (full). | buttonHandler erase router |
 | `liveRec_eraseReleaseHeld()` | Drop every held SEQ/TRACK/FX-SEQ erase gesture, keeping erase mode and the knob targets. | `handleModeButtons()`, `liveRec_eraseEnd()` |
 
 State (static SRAM1): mode, `rtk`, T, origin Scene A, epochs; the `latch`,
-`dirty` and `erase` bitmaps (3 × 64 B over the 9-bit target space); roll
-capture (`liveRec_rollTrack/Step/Index/StartDelay/Span/Hits/PendingIdx`,
-note, velocity, note-default); flam grace (`liveRec_graceDeltaQ8/Tick/Vel/
+`dirty` and `erase` bitmaps (3 × 64 B over the 9-bit target space); per-track
+roll capture `liveRec_roll[7]` (flags HELD/SPAN/NOTE_DEF, step, index,
+startDelay, note, vel, hits, rhythm; 8 B each, S084 P4); flam grace (`liveRec_graceDeltaQ8/Tick/Vel/
 Valid`); per-track `liveRec_prevStep[7]` / `liveRec_prevFlags[7]` (VALID,
 FIRED, JUMP of the entry that began each step); erase gesture state
 (`liveRec_eraseSpecials/Full`, `liveRec_eraseKnobFxLanes`,
@@ -2053,3 +2054,81 @@ Nested Instrument Load:
 * Stepping away and back before committing restores `kit` with its snapshot.
   Multi-Scene destinations hide a type unless every selected Scene can take it.
   InstrumentMrp never shows `chg`.
+
+## Session 084 P1 — voice foundations (new modules and calls)
+
+**Status:** implemented; hardware verification pending.
+
+| Module | Owns | Called by |
+|---|---|---|
+| `Core/DSPAudio/OscillatorPwm.c` | `oscPwm_prepare()`, `oscPwm_render()`, `oscPwm_renderFm()`: the six computed width families | `Oscillator.c` type dispatch and `osc_setFreq()` |
+| `Core/DSPAudio/OscillatorSample.c` | `oscSample_bind/restart/phaseIncForFreq/render/renderFm`: Q20.12 sample playback for `smp`/`slp` | `Oscillator.c`, `OscSection.c`, the IM writers |
+| `Core/DSPAudio/OscRenderPool.c` | `oscRenderPool_beginBlock/claim/scratchSection/scratchMod`: the 4-unit per-block render budget and the `itp` scratch blocks | `mixer.c`, `modulationNode.c`, `InstrumentManager.c`, `OscSection.c` |
+| `Core/DSPAudio/OscSection.c` | `oscSection_*`: the `fm/mix/snc/rng` combination, run modes `rst/fre/itp`, the pitch slew arm, the filter cutoff/resonance slew | the four engine `.c` files, `InstrumentManager.c` |
+| `Core/DSP/Instruments/InstrumentCellFormat.c` | `instrumentCellFormat_describe()`: type-dependent cell kind/index/max | `menu.c` formatted-cell sites |
+
+**Changed calls**
+
+- `mixer_calcNextSampleBlock()`: per block `oscRenderPool_beginBlock()`,
+  `instrumentManager_claimOscSectionUnits()`, `modNode_resetTargets()`; per slot
+  `mixer_slotLevelAndDeclick()` between `instrumentManager_calcSlotSyncBlock()`
+  and `mixer_decimateBlock()`.
+- `InstrumentManager` exposes `instrumentManager_slotQuiet()`,
+  `..._noteSlotBlockPeak()`, `..._slotLastPeak()`,
+  `..._takeSlotDeclickArm()`, `..._claimOscSectionUnits()`,
+  `..._oscForDescriptor()`, `..._oscSection()`, `..._oscWaveMax()`,
+  `..._oscSourceMax()`. `instrumentManager_ampEnvelopeQuiet()` is gone.
+- `Preset`: `preset_tickInstrumentSwap()` is serviced before the per-track
+  worker; `preset_startInstrumentApplyImage()` defers a sounding slot;
+  the trigger funnel commits a pending Instrument swap first.
+- `osc_freqToTableIndex()` is exported from `Oscillator.c` for the pwm level
+  selection; `SVF_recalcFreqFrom()` is added for the `fre`/`itp` slew.
+- `lfo_retriggerPhase()` and `lfo_isOneShot()` own the looping/one-shot
+  difference; `instrumentManager_retriggerRuntimeLfos()` and
+  `instrumentManager_restoreLfoPhaseIfNeeded()` call them.
+
+### Session 084 VX2 — sample flash and voice-expansion APIs
+
+* **`Core/SampleRom/SampleMemory.h`**: catalogue v2 read API
+  (`sampleMemory_catalogueState/_getGeneration/_getNumSamples/_getSampleInfo/
+  _getDisplayName/_getNumWavetables/_getWavetableInfo/_getWavetableName/
+  _stockValid`) and the inline `sampleMemory_gainFromCode()`. It owns the
+  flash map constants and the 20 B records; there is no RAM index.
+* **`Core/SampleRom/SampleInstall.h`**: the modal writer
+  (`sampleInstall_acceptFormat/_storedBytes/_begin/_writeStockBlock/
+  _beginSample/_writeSampleData/_finishSample/_beginWavetable/
+  _writeFrameData/_finishWavetable/_commit/_bytesFree/_sampleCount/
+  _wavetableCount`). Only `filesystem_installSamplesBlocking()` calls it.
+* **`Core/SampleRom/StockWaveGen.h`** and **`Core/DSPAudio/StockWaves.h`**:
+  install-time additive generation and the block-rate level/fallback selector.
+* **`Core/DSPAudio/OscillatorWavetable.h`**, **`OscillatorPwm.h`** and
+  **`DriveShaper.h`**: render code owned by DSPAudio; they include no Menu,
+  Scene, filesystem or Effect headers. `SVF_calcBlockZDFShaped()` is the
+  only new ResonantFilter entry point.
+* **Filesystem**: `filesystem_installSamplesBlocking(fs_install_report_t *)`
+  and `filesystem_setInstallProgress()`; `filesystem_installLoopsBlocking()`
+  is gone. `storage_naturalCompare()` and `storage_stripOrderPrefix()` live
+  in `storageTypes`.
+* **InstrumentManager**: `instrumentManager_isSelectorDescriptor()` replaces
+  `instrumentManager_isOscSelectorDescriptor()`, and
+  `instrumentManager_transientType()` exposes the live `trt` value to the
+  cell formatter.
+
+### Session 084 VX3 — inserted effects module boundary
+
+* **`Core/DSP/InsertEffects/InsertEffect.h`** owns the 48-byte per-type state
+  ceiling, placement/flag contract, block context, and descriptor operations.
+  The shared `DelayLine.h` primitives are DSP-only and carry no Menu, Scene,
+  filesystem, or instrument-manager dependency.
+* **`VoiceBuffer.c/.h`** owns the twelve active records, two lease runners,
+  adjacent pair claims, same-use re-adoption, Hold overflow, and tail expiry.
+  `InsertEffectsManager.c/.h` owns the append-only Mix/transient registries,
+  pending selection state, D+S rate routing, and descriptor lookup.
+* **InstrumentManager** remains the only retained-value writer. Its existing
+  selector and modulation paths write `fxt`, `amt`, transient options, and
+  `SLOT_DECIMATION` through the inserted manager; the inserted DSP code does
+  not include Menu, Scene, MIDI, or filesystem headers.
+* **Mixer** consumes only the post-engine stage entry point and its existing
+  dry/send helpers. It no longer owns a decimator. Preset selectors bracket
+  multi-row changes with the VoiceBuffer pass API, preserving one allocator
+  notification per committed pass.

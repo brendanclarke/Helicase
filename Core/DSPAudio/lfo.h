@@ -57,6 +57,43 @@
 #define LFO_EXP_UP		0x06
 #define LFO_EXP_DOWN	0x07
 
+/*
+ * One-shot and exponential-triangle LFO waves (S084 P1 P1-1.1).
+ *
+ * What:       values 8..15 are one-shot versions of waves 0..7 (same order:
+ *             si1 tr1 su1 sd1 sq1 rn1 xu1 xd1); 16 is the exponential
+ *             triangle (xtr), 17 its one-shot (xt1). Stored values 0..7 keep
+ *             their meaning.
+ * Why:        plan §4.5 / ENHANCED_FEATURES.md: a one-shot runs one cycle per
+ *             retrigger and holds its end value; `ofs` becomes a start delay.
+ * Inputs:     the lfo_wave descriptor row (MENU_LFO_WAVES).
+ * Outputs:    lfo_calc() wave selection; lfoWaveNames[] count must equal
+ *             LFO_WAVE_COUNT.
+ * Accessors:  lfo.c, MenuText.h lfoWaveNames[], the four *Parameters.c rows.
+ * Affiliates: lfo_retriggerPhase(), lfo_isOneShot(),
+ *             instrumentManager_retriggerRuntimeLfos(),
+ *             instrumentManager_restoreLfoPhaseIfNeeded().
+ */
+#define LFO_ONE_SHOT_BASE  0x08
+#define LFO_SINE_1         0x08
+#define LFO_TRI_1          0x09
+#define LFO_SAW_UP_1       0x0A
+#define LFO_SAW_DOWN_1     0x0B
+#define LFO_REC_1          0x0C
+#define LFO_NOISE_1        0x0D
+#define LFO_EXP_UP_1       0x0E
+#define LFO_EXP_DOWN_1     0x0F
+#define LFO_XTRI           0x10
+#define LFO_XTRI_1         0x11
+#define LFO_WAVE_COUNT     18u
+
+/* One-shot run state (S084 P1 P1-1.1): idle before the first fire, a
+** start delay, the single cycle, then holding the end value. */
+#define LFO_ONESHOT_IDLE   0u
+#define LFO_ONESHOT_DELAY  1u
+#define LFO_ONESHOT_RUN    2u
+#define LFO_ONESHOT_HOLD   3u
+
 
 #define LFO_MAX_F 		200 //[Hz]
 #define LFO_SR 			(REAL_FS/(float)OUTPUT_DMA_SIZE)
@@ -117,6 +154,23 @@ typedef struct LfoStruct
 	 */
 	uint8_t		polarity;
 	float		modNodeValue;
+	/*
+	 * One-shot state (S084 P1 P1-1.2).
+	 *
+	 * What:       oneShotState is LFO_ONESHOT_*; delayBlocks counts the
+	 *             remaining start-delay blocks (derived from phaseOffset at
+	 *             each fire).
+	 * Why:        one-shot waves must stop after one cycle and may wait an
+	 *             `ofs`-scaled delay before running (plan §4.5).
+	 * Inputs:     lfo_retriggerPhase() arms both; lfo_calc() advances them.
+	 * Outputs:    lfo_calc()'s phase handling for waves >= LFO_ONE_SHOT_BASE.
+	 * Accessors:  lfo.c only.
+	 * Affiliates: instrumentManager_retriggerRuntimeLfos(),
+	 *             instrumentManager_restoreLfoPhaseIfNeeded(); lives inside the
+	 *             engine struct, so it costs no static RAM (+8 B per LFO).
+	 */
+	uint8_t		oneShotState;
+	uint32_t	delayBlocks;
 } Lfo;
 //-------------------------------------------------------------
 void lfo_init(Lfo *lfo);
@@ -139,5 +193,31 @@ void lfo_setFreq(Lfo *lfo, float f);
 void lfo_setSync(Lfo* lfo, uint8_t sync);
 void lfo_recalcSync();
 void lfo_retrigger(uint8_t voiceNr);
+
+/*
+ * Restart an LFO's phase for a retrigger or Scene fire (S084 P1 P1-1.3).
+ *
+ * What:       looping waves jump to phaseOffset (today's behaviour). One-shot
+ *             waves restart at phase 0 in the DELAY state with
+ *             delayBlocks = phaseOffset / effective phaseInc (0 if phaseInc is
+ *             0), so `ofs` becomes a start delay scaled to the LFO period.
+ *             rn1 draws its single random value here.
+ * Why:        one place owns the looping/one-shot difference for every caller.
+ * Inputs:     lfo (non-NULL).
+ * Outputs:    lfo->phase, oneShotState, delayBlocks, rnd.
+ * Accessors:  instrumentManager_retriggerRuntimeLfos(),
+ *             instrumentManager_restoreLfoPhaseIfNeeded().
+ * Affiliates: lfo_calc(), LFO_ONE_SHOT_BASE.
+ */
+void lfo_retriggerPhase(Lfo *lfo);
+
+/*
+ * True for waves that run once per fire (S084 P1 P1-1.3).
+ *
+ * What:       waveform in 8..15 or LFO_XTRI_1.
+ * Inputs:     lfo.  Outputs: 1/0.
+ * Accessors:  lfo.c, InstrumentManager.c (Scene-activation fire).
+ */
+uint8_t lfo_isOneShot(const Lfo *lfo);
 
 #endif /* LFO_H_ */

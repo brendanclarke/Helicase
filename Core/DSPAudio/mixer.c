@@ -54,7 +54,9 @@
 #include "Snare.h"
 #include "HiHat.h"
 #include "InstrumentManager.h"
+#include "OscRenderPool.h"
 #include "EffectsManager.h"
+#include "InsertEffectsManager.h"
 #include "BufferTools.h"
 #include "squareRootLut.h"
 #include "adcPots.h"
@@ -123,44 +125,67 @@ static volatile uint8_t mixer_out_l1_available = 1u; /* PD6 */
 static volatile uint8_t mixer_out_r1_available = 1u; /* PD7 */
 static volatile uint8_t mixer_out_l2_available = 1u; /* PB4 */
 static volatile uint8_t mixer_out_r2_available = 1u; /* PB6 */
-//-----------------------------------------------------------------------
-#if USE_DECIMATOR
-INCCMZ float mixer_decimation_rate[6];		/**<sets the per-voice sample rate decimation. 0..1 = full rate*/
-INCCMZ float mixer_decimation_cnt[6];		/**<s'n'h counter for decimator*/
-INCCMZ int16_t mixer_voice_samples[6];		/**< stores the last outputted sample of the 6 voices*/
-#endif
+/*
+ * Slot level witness and swap declick (S084 P1 P1-2.4).
+ *
+ * What:       for one rendered pre-volume block: (1) measures the absolute
+ *             peak and reports it to InstrumentManager; (2) if the slot was
+ *             just rebuilt, sets the declick offset to
+ *             (last output sample of the old voice - first sample of the new
+ *             one); (3) adds the decaying offset to every sample with __SSAT
+ *             (offset *= MIXER_DECLICK_R per sample, about 1 ms); (4) stores
+ *             the block's last sample. Steps (1), (3), (4) run every block
+ *             for every slot (constant CPU); the offset is 0 when idle.
+ * Why:        plan §5.7: swaps are judged on the real pre-fader level and
+ *             never click, whether quiet, triggered or forced by the bound.
+ * Inputs:     slot 0..5; b = the block straight from
+ *             instrumentManager_calcSlotSyncBlock() (before decimation).
+ * Outputs:    b (declicked in place); mixer_slotLastSample[slot],
+ *             mixer_slotDeclick[slot]; instrumentManager_noteSlotBlockPeak().
+ * Accessors:  mixer_calcNextSampleBlock() slot loop only.
+ * Affiliates: instrumentManager_takeSlotDeclickArm(), P1-2.3. About 5
+ *             instructions per sample per slot. 36 B SRAM1 (§0.4).
+ */
+static int16_t mixer_slotLastSample[6];
+static float mixer_slotDeclick[6];
+#define MIXER_DECLICK_R 0.97758f
+
+static inline void mixer_slotLevelAndDeclick(uint8_t slot, int16_t *b)
+{
+	uint16_t peak = 0u;
+	float dc;
+	uint8_t i;
+
+	if (slot >= 6u || !b)
+		return;
+	dc = mixer_slotDeclick[slot];
+	if (instrumentManager_takeSlotDeclickArm(slot))
+		dc = (float)mixer_slotLastSample[slot] - (float)b[0];
+	for (i = 0u; i < OUTPUT_DMA_SIZE; i++) {
+		const int16_t s = b[i];
+		const int32_t wide = (int32_t)s;
+		const uint16_t mag = (uint16_t)((wide < 0) ? -wide : wide);
+
+		/* Peak excludes the declick: it is the new voice's own level. */
+		if (mag > peak)
+			peak = mag;
+		b[i] = __SSAT(wide + (int32_t)dc, 16);
+		dc *= MIXER_DECLICK_R;
+	}
+	mixer_slotDeclick[slot] = dc;
+	mixer_slotLastSample[slot] = b[OUTPUT_DMA_SIZE - 1u];
+	instrumentManager_noteSlotBlockPeak(slot, peak);
+}
 //-----------------------------------------------------------------------
 void mixer_init()
 {
-#if USE_DECIMATOR
 	int i;
 	for(i=0;i<6;i++)
 	{
-		mixer_decimation_rate[i] 	= 1;
-		mixer_decimation_cnt[i] 	= 0;
-		mixer_voice_samples[i] 		= 0;
 		mixer_audioRouting[i]		= 0;
 		/* Seed the ramp at the combined gain so the first block does not fade
 		** in; requires instrumentManager_runtimeInit() first (dsp_init order). */
 		mixer_voice_last_gain[i]    = slider_vol[i] * instrumentManager_runtimeVolume(i);
-	}
-#endif
-}
-//-----------------------------------------------------------------------
-void mixer_decimateBlock(const uint8_t voiceNr, int16_t* buffer)
-{
-	uint8_t i;
-	for(i=0;i<OUTPUT_DMA_SIZE;i++)
-	{
-		/* S075: the retired global multiplier (former rate[6]) is gone. */
-		mixer_decimation_cnt[voiceNr] += mixer_decimation_rate[voiceNr];
-		if(mixer_decimation_cnt[voiceNr] >= 1.f)
-		{
-			mixer_decimation_cnt[voiceNr] -= 1.f;
-			mixer_voice_samples[voiceNr] = buffer[i];
-
-		}
-		buffer[i] = mixer_voice_samples[voiceNr];
 	}
 }
 //-----------------------------------------------------------------------
@@ -863,6 +888,15 @@ void mixer_calcNextSampleBlockTest(sample_mx_t *output, sample_mx_t *output2)
 void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 {
 
+	/*
+	 * S084 P1 P1-6.5: reset the oscillator render pool and let run-mode `itp`
+	 * crossfades claim first (ongoing, then pending, lowest slot first),
+	 * before any waveform-interpolation claim made by the velocity re-apply
+	 * below. Affiliates: OscRenderPool.c,
+	 * instrumentManager_claimOscSectionUnits().
+	 */
+	oscRenderPool_beginBlock();
+	instrumentManager_claimOscSectionUnits();
 	modNode_resetTargets();
 	//re assign velocity modulation
 	modNode_reassignVeloMod();
@@ -891,6 +925,8 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	 * EffectsManager owns type handoff and parameter resolution.
 	 */
 	effects_service();
+	/* Service deferred VoiceBuffer reallocations between audio blocks. */
+	insertFx_service();
 
 	//calculate trigger io phase
 	// TODO DSP_PORT
@@ -963,9 +999,15 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		float voiceGain;
 		float sendGain;
 		instrumentManager_calcSlotSyncBlock(slot, sampleData, OUTPUT_DMA_SIZE);
-		mixer_decimateBlock(slot,sampleData);
 		/*
-		 * sampleData is the decimated, pre-volume voice block. The fader mode
+		 * S084 P1 P1-2.4: measure the real pre-fader level and declick a
+		 * just-rebuilt slot before decimation and volume.
+		 * Affiliates: instrumentManager_noteSlotBlockPeak(),
+		 * instrumentManager_takeSlotDeclickArm().
+		 */
+		mixer_slotLevelAndDeclick(slot, sampleData);
+		/*
+		 * sampleData is the Mix-FX-processed, pre-volume voice block. The fader mode
 		 * creates parallel dry/send gains: PRE scales both, POST scales only the
 		 * dry mix, and FX scales only the send. The send tap is accumulated before
 		 * channel volume, while the normal output keeps the combined voice ramp.

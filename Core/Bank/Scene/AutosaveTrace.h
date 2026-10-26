@@ -277,6 +277,26 @@ typedef enum {
      * ('m' branch).
      */
     AUTOSAVE_TRACE_STAGE_MIDI_LEARN_FILE = 'm',
+    /*
+     * v: deferred instrument swaps (S084 P1 P1-0.1).
+     *
+     * What:       one record per committed slot swap. flags = reason:
+     *             1 QUIET (pre-fader peak under the quiet threshold for the
+     *             required blocks), 2 TRIGGER (forced by a note on the slot),
+     *             3 BOUND (PRESET_SWAP_FORCE_MS elapsed), 4 IMMEDIATE (the slot
+     *             was already quiet when the swap was requested).
+     *             value32 = slot | last block peak << 8 (uint16, int16 LSB) |
+     *             path << 24 (1 Scene worker, 2 per-track worker,
+     *             3 Instrument load/preview).
+     * Why:        S084 P1 replaces the envelope-value quiet test and the
+     *             pass-count force bound (plan §3.9); hardware tests need a
+     *             witness of when and why each swap happened and at what level.
+     * Inputs:     preset swap commit sites.
+     * Outputs:    one trace record; DEV logging only, no product state.
+     * Accessors:  presetManager.c preset_traceSwap().
+     * Affiliates: tools/decode_devlogs.py ('v' branch), DEV_MODES.md.
+     */
+    AUTOSAVE_TRACE_STAGE_VOICE_SWAP = 'v',
 } autosave_trace_stage_t;
 
 #define AUTOSAVE_TRACE_MLRN_WRITE    0x01u

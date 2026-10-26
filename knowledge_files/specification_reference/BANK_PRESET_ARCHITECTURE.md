@@ -770,7 +770,7 @@ for PERF display purposes, but it is not the source of truth.
   58..61, S074). They are refreshed from the active Scene by
   `preset_syncBusCompMirrors()` and never serialized as Globals.
 - S080 Globals (serialized in settings.cfg): `PAR_PERF_BTN_LT/RT` (overlay
-  trigger type 0..11), `PAR_PERF_NOTE_LT/RT` (0 = track note, else 1..127),
+  trigger type 0..14 since S084 P3), `PAR_PERF_NOTE_LT/RT` (0 = track note, else 1..127),
   `PAR_SCENE_CHANGE_DIV` (scd 0..9), `PAR_SCENE_QUEUE_DIV` (qcd 0..17),
   `PAR_SCENE_QUEUE_ACTION` (qac 0..8). The PC reset is the pre-existing
   `PAR_BAR_RESET_MODE` (pcr; the S080 P1 duplicate `PAR_SCENE_PC_RESET` was
@@ -872,3 +872,44 @@ S082 active Scene and edit masks:
   missing or malformed slot manifest counts as every untouched entry = self.
 * Scene 17's edit mask is itself only (bit 16 in the 32-bit fan-out helpers);
   it is never part of a 16-bit resident Bank mask.
+
+## Session 084 P1 — deferred instrument swap rules
+
+**Status:** implemented; hardware verification pending.
+
+* **Quiet means the real level.** A slot commits when the mixer's pre-fader
+  block peak has stayed at or below 8 int16 LSB (about -72 dBFS) for 8
+  consecutive blocks (about 5.8 ms). The old amp-envelope-value test is gone:
+  it ignored the post-envelope drive (up to +48 dB) and was not the signal.
+* **The force bound is time.** PRESET_SWAP_FORCE_MS = 2000 ms measured on
+  time_sysTick from the first non-quiet observation of an episode. The old
+  1,000-pass counter was unpaced (tens of milliseconds) and is removed.
+* **Every commit declicks.** instrumentManager_resetRuntimeSlotFromScene()
+  arms the slot on every reset path (Scene, per-track, Instrument load/preview,
+  trigger force, boot). The mixer offsets the first block by
+  (last old sample - first new sample) and multiplies the offset by 0.97758
+  per sample (about 1 ms).
+* **Instrument load and preview use the same swap.** A quiet slot commits
+  immediately (trace reason immediate); a sounding slot keeps the old
+  instrument until quiet, its next trigger, or the bound. The wait never holds
+  menu_storageBusy; a newer preview rewrites the images and re-arms the slot.
+* **Supersession.** A whole-Scene switch clears instrument_swap_pending_mask;
+  a per-track apply clears that slot's bit. While an Instrument swap waits, LFOs
+  aimed at the slot from other slots stay detached until the rebind after the
+  commit (at most the bound).
+* **Trace.** Stage v: flags = reason (1 quiet, 2 trigger, 3 bound,
+  4 immediate); value = slot | peak << 8 | path << 24 (1 Scene, 2 per-track,
+  3 Instrument).
+
+## Session 084 VX2 — appended instrument rows
+
+`oscN_type`, `oscN_source`, `osc_run_mode`, `transient_type` and
+`filter_drive_type` are single-ended `[params]` cells: they are appended
+descriptor rows, not Morph endpoints. `transient_type` is not automatable,
+modulatable or Morphable; `filter_drive_type` is automatable but not Morphable
+or modulatable. All five belong to the selector class recognised by
+`instrumentManager_isSelectorDescriptor()` (INSTANCE_OFFSET binding, MORPHABLE
+clear, a special writer), so Preset's supplemental path stores them and the
+apply pre-pass writes them in descriptor order before the Morph image. That
+order lets the type-dependent `wav` rows (sample start, frame position,
+transient entry) clamp against the incoming type.

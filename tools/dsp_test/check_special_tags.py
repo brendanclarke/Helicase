@@ -38,6 +38,16 @@ def expected(t, key):
             return {'IM_SPECIAL_PITCH_COARSE', osc}
         if 'pitch_fine' in key:
             return {'IM_SPECIAL_PITCH_FINE', osc}
+        # S084 P1: oscillator type/source/wave and run-mode rows (P1-10.1).
+        # osc2_mod_type is the fm/mix/snc/rng selector, not an osc type.
+        if key.endswith('_type') and not key.endswith('_mod_type'):
+            return {'IM_SPECIAL_OSC_TYPE', osc}
+        if key.endswith('_source'):
+            return {'IM_SPECIAL_OSC_SOURCE', osc}
+        if key.endswith('_wave'):
+            return {'IM_SPECIAL_OSC_WAVE', osc}
+    if key == 'osc_run_mode':
+        return {'IM_SPECIAL_RUN_MODE'}
     simple = {
         'filter_freq': 'FILTER_FREQ', 'filter_reso': 'FILTER_RESO',
         'filter_drive': 'FILTER_DRIVE', 'filter_type': 'FILTER_TYPE',
@@ -45,7 +55,11 @@ def expected(t, key):
         'amp_envelope_decay': 'AMP_DECAY', 'amp_envelope_slope': 'AMP_SLOPE',
         'transient_wave': 'TRANSIENT_WAVE',
         'transient_freq': 'TRANSIENT_FREQ',
+        # S084 VX2: the transient and filter drive selectors.
+        'transient_type': 'TRANSIENT_TYPE',
+        'filter_drive_type': 'DRIVE_TYPE',
         'instrument_drive': 'INSTRUMENT_DRIVE', 'lfo_rate': 'LFO_RATE',
+        'mix_fx_type': 'MIX_FX_TYPE', 'mix_fx_amount': 'MIX_FX_AMOUNT',
         # S076 P2: lfo_offset now scales its byte through IM_SPECIAL_LFO_OFFSET.
         'lfo_offset': 'LFO_OFFSET'}
     if t == 'HAT' and key == 'amp_envelope_decay_choke':

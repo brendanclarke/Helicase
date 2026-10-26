@@ -287,12 +287,16 @@ typedef struct {
 pat_step_specials_t pat_readStepSpecials(uint8_t scene_index,
                                         uint8_t track, uint8_t step);
 /*
- * Recorded step spec (S081 D-2b, §8.4).
+ * Recorded step spec (S081 D-2b, §8.4; S084 P4 rhythm).
  *
- * What: the fields a live-recorded trigger writes to one step: note, velocity,
- * micro-timing, roll rate and fill, plus setFil (R10) and noteIsDefault (a `def`
- * note records no note special). Rhythm is never recorded (cleared). The
- * condition is kept unless setFil is set.
+ * What: the fields a live-recorded trigger writes to one step: note,
+ * velocity, micro-timing, roll rate, fill and (S084) roll rhythm, plus
+ * setFil (R10) and noteIsDefault (a `def` note records no note special).
+ * rhythm is stored only with a roll (roll != 0) and only when nonzero;
+ * otherwise the step's rhythm is cleared. The condition is kept unless
+ * setFil is set. Why: an overlay roll played with a `pv` velocity rhythm
+ * must replay with it (S084 P0 F7, Q8). RAM: 8 B per copy (4 staging slots
+ * in PatternStackService, +4 B).
  */
 typedef struct {
     uint8_t note;
@@ -300,6 +304,7 @@ typedef struct {
     uint8_t timing;
     uint8_t roll;
     uint8_t fill;
+    uint8_t rhythm;
     uint8_t setFil;
     uint8_t noteIsDefault;
 } pat_record_spec_t;
@@ -308,7 +313,8 @@ typedef struct {
  * Write a recorded step's specials and trigger (S081 D-2a, §19.3).
  *
  * What: reads the existing specials and automation for the step, applies the
- * record spec (note, velocity, timing, roll, fill; clears rhythm; keeps the
+ * record spec (note, velocity, timing, roll, fill, rhythm with a roll; clears
+ * rhythm without one; keeps the
  * condition or sets fil), and writes the result with trigger ON. A result with no
  * specials and no automation only sets bit 15 (pat_setStepActive). Why: the old
  * seq_recordTrigger only set the trigger bit; live recording writes the full step

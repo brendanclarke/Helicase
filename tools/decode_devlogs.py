@@ -33,6 +33,7 @@ the live Effect type-token bytes, and the 419-cell Effect projection.
 from __future__ import annotations
 
 import argparse
+import math
 import time
 from collections import Counter
 from pathlib import Path
@@ -131,6 +132,8 @@ STAGE_ENUM = {
     "h": "AUTOSAVE_TRACE_STAGE_HCNAMES_PROVENANCE",
     # m: S083 midilrn.cfg (MIDI Learn table) writes and boot recovery.
     "m": "AUTOSAVE_TRACE_STAGE_MIDI_LEARN_FILE",
+    # v: S084 P1 deferred instrument swap (reason, path, slot, level).
+    "v": "AUTOSAVE_TRACE_STAGE_VOICE_SWAP",
 }
 
 STAGE_PRODUCER = {
@@ -172,6 +175,7 @@ STAGE_PRODUCER = {
     "h": "filesystem HCNAMES register / Menu Load/Save (S082 review F5)",
     "m": "filesystem_midiLearnWriterCompleted() / "
          "filesystem_loadMidiLearn_tick() (S083)",
+    "v": "presetManager preset_traceSwap() (S084 P1)",
 }
 
 # AUTOSAVE_TRACE_PHASE_STALL_SITE_* (AutosaveTrace.h). Session 057 widened the
@@ -1021,6 +1025,20 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
                       f"lines={(value >> 24) & 0xFF}")
         else:
             detail = f"{enum_name}: unknown event 0x{flags:02x}"
+    elif ch == "v":
+        # v: S084 P1 deferred instrument swap (reason, path, slot, pre-fader peak).
+        reasons = {1: "quiet", 2: "trigger", 3: "bound", 4: "immediate"}
+        paths = {1: "scene", 2: "track", 3: "instrument"}
+        peak = (value >> 8) & 0xFFFF
+        path = (value >> 24) & 0xFF
+        if peak:
+            level = f"{20.0 * math.log10(peak / 32767.0):.1f} dBFS"
+        else:
+            level = "-inf dBFS"
+        detail = (f"{enum_name}: SWAP slot={value & 0xFF} "
+                  f"reason={reasons.get(flags, flags)} "
+                  f"path={paths.get(path, path)} "
+                  f"peak={peak} LSB ({level})")
     else:
         detail = f"{enum_name}: no decoder for this stage"
 

@@ -48,6 +48,7 @@
 #include "lfo.h"
 #include "distortion.h"
 #include "snapEg.h"
+#include "OscSection.h"
 
 
 //#define NUM_HAT 1
@@ -80,6 +81,19 @@ typedef struct HiHatStruct
 
 	ResonantFilter filter;
 	uint8_t		filterType;
+	/*
+	 * Filter drive type and its state (S084 VX2 VX2-7.5).
+	 *
+	 * What:       DRIVE_TYPE_* (0 = sft, today's input clip) and the shaper
+	 *             state the stateful types use.
+	 * Why:        plan §4.4: voice-only drive types with state in the engine
+	 *             (no static RAM); inside the runtime-slot union.
+	 * Writers:    IM_SPECIAL_DRIVE_TYPE (type, reset on change);
+	 *             *_initVoice() (reset).
+	 * Readers:    the render function's filter call.
+	 */
+	uint8_t		driveType;
+	DriveShaperState shaper;
 
 	TransientGenerator transGen;
 
@@ -88,12 +102,31 @@ typedef struct HiHatStruct
 
 	Distortion distortion;
 
+	/* S084 VX3: Mix selection/amount and slot identity for insert stages. */
+	uint8_t insertType;
+	uint8_t insertAmount;
+	uint8_t stageSlot;
+
 	SlopeEg2		oscVolEg;
 	float 		egValueOscVol;
 	Lfo 		lfo;
 	SnapEg snapEg;
 	uint8_t volumeMod;	//modulate volume by midi velocity if 1
 	uint8_t isOpen;		//is 1 if urrent playing voice is open hihat, 0 for closed
+
+	/*
+	 * Oscillator section state (S084 P1 P1-8.1).
+	 *
+	 * What:       run mode, `itp` snapshot/crossfade and filter slew for this
+	 *             voice's oscillators (OscSection.h).
+	 * Why:        plan §4.1.6: run modes apply per voice to every oscillator.
+	 * Inputs:     the `run` descriptor row (IM_SPECIAL_RUN_MODE); triggers.
+	 * Outputs:    used by trigger, render and filter recalc.
+	 * Accessors:  this engine's .c, InstrumentManager.c.
+	 * Affiliates: OscSection.c, OscRenderPool.c. Inside the runtime-slot
+	 *             union.
+	 */
+	OscSectionState section;
 
 } HiHatVoice;
 

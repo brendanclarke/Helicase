@@ -298,6 +298,11 @@ and applies the common rows (route, level, pan) itself.
   block through. Its arithmetic must stay identical to `SVF_calcBlockZDF()`;
   both are described in `INSTRUMENTS_DSP_REFERENCE.md` §6.2. An `#error`
   guards the shaper configuration it does not mirror.
+  **S084 VX2 exception:** the voice filter gained
+  `SVF_calcBlockZDFShaped()` with the 14 `dty` input shapers, but the Effect
+  twin keeps the soft clip only. Effect types have no drive-type row, so the
+  float twin is deliberately not extended; `SVF_calcBlockZDF()` (sft) remains
+  the shared reference.
 
 ---
 
@@ -782,3 +787,28 @@ descriptors, lanes, page layout and storage. For the DSP:
   return-ramp reset; the master bus compressor with tuning revision 1 and
   band-split saturation; the `xfd` fader mode (`074_SESSION_HANDOFF_LOG.md`
   §7–§10).
+
+## Session 084 VX3 current path
+
+The current mixer renders each slot through
+`instrumentManager_calcSlotSyncBlock()` and the inserted Mix stage before
+the dry/send fader path. There is no `mixer_decimateBlock()` or
+`mixer_decimation_rate[]`; `D+S` owns the distortion and sample-rate hold in
+`InsertDriveSrr.c`, with `rte` delivered by the existing slot-decimation
+binding. Other Mix types use the same post-engine stage contract and may claim
+a two-unit buffer lease.
+
+`FxBuffer` now exposes sixteen position slots: twelve regular voice positions
+and four lease positions. The Effect share is the contiguous bottom region;
+the floor is computed as arena bytes minus sixteen unit sizes. A pass depth
+coalesces multiple selector changes into one share callback. `VoiceBuffer`
+uses fourteen DTCM records (twelve active plus two runners), holds an
+incompatible allocation until a runner expires, and expires/fades tails
+before releasing its adjacent lease pair.
+
+CrumpBit's share is elastic (`20,608 B` minimum, `70,592 B` preferred).
+Shrinking keeps the newest samples and crossfades the wet path; growth is
+deferred to the ring wrap. The old fixed `73,600 B` minimum-share table and
+the `56 B` runtime wording are historical S074 measurements, not the current
+VX3 contract (`CrumpBitRuntime` is 68 B). The final ARM link measured
+`125,536 B` of FX arena and `5,528 B` DTCM statics.

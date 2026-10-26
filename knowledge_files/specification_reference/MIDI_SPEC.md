@@ -145,7 +145,7 @@ The page reads `ch nte lop rmp`.
 
 | Cell | Key | Meaning |
 |------|-----|---------|
-| `pb<` / `pb>` | `perf_btn_lt/rt` | Trigger type of overlay `<` / `>` (12 types: 4 single velocities, 2 flams, 6 rolls). |
+| `pb<` / `pb>` | `perf_btn_lt/rt` | Trigger type of overlay `<` / `>` (15 types: 4 single velocities, 2 flams, and the nine STEP roll rates `1/8 8tr 16 16t 32 32t 64 64t 128` = step index type − 5, S084 P3). Stored values 6..11 changed meaning; no migration. The first hit fires in the foreground, repeats and flam mains on the 96-PPQ master tick (so they follow the internal tempo or the external clock; S084 P2). |
 | `pn<` / `pn>` | `perf_note_lt/rt` | Panel note of the overlay (`def` = default pitch). MIDI notes always use their own resolved pitch. |
 | `pv<` / `pv>` | `perf_vel_lt/rt` | Roll velocity rhythm (the step `rtm` list: `off`, `1-2`..`4-5` halve, `1+2`..`4+5` double); roll types only. |
 
@@ -275,7 +275,7 @@ at +64.
 **Overlay action:**
 - When the BAR overlay is `<` or `>` (one state, set by the PERF BAR
   buttons or by CC2 on G, §5.3, in any mode), the note performs that
-  overlay's action instead: one of 12 trigger types.
+  overlay's action instead: one of 15 trigger types (S084 P3).
 - It plays at the note's resolved pitch, not the overlay's `pn` setting.
 - Each track has its own repeat state, shared with the panel's VOICE
   overlay: rolls on several tracks run at once, and a new hit on a track
@@ -1554,3 +1554,24 @@ SysEx dump/restore, MIDI 2.0, multi-cable USB.
   - `STORAGE_SRAM_MANIFEST.md` (RAM);
   - `DEV_MODES.md` (trace);
   - the MEMORY.md "MIDI / Clock Reminders".
+
+## Session 084 P1 - appended instrument targets
+
+The new instrument rows (`oscN_type`, `oscN_source`, and `osc_run_mode`) are
+appended descriptors, so their NRPN target IDs, MIDI Learn entries and
+automation IDs follow by append. No MIDI behaviour changes in P1.
+`oscN_type`, `oscN_source` and `osc_run_mode` are not Morphable and not
+LFO/velocity targets; `oscN_wave` keeps its modulation domain, now bounded by
+the oscillator type (0..5 for `wav`, 0..127 otherwise).
+
+## Session 084 VX2 - appended instrument targets
+
+`transient_type` and `filter_drive_type` are appended descriptor rows, so
+their NRPN target IDs, MIDI Learn entries and automation IDs follow by append.
+`transient_type` is not automatable and not modulatable (the type fixes what
+the transient `wav` list can reach); `filter_drive_type` is automatable but
+not Morphable or an LFO/velocity target. Under `wtb`, `oscN_wave` is a
+0..127 frame position rather than a stock-wave index; the `wav` type keeps
+0..10. A transient `wav` list longer than 128 (12 PCM + up to 233 samples +
+11 stock waves) is reachable to 127 by automation and MIDI; the menu reaches
+the whole list.

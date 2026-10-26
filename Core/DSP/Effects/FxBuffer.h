@@ -103,6 +103,27 @@
 /* unit_owner value meaning "unit is free". */
 #define FXBUF_UNIT_FREE                0xFFu
 
+/*
+ * Unit positions, regular and lease (S084 VX3 VX3-1.1).
+ *
+ * What:       the shared arena exposes sixteen physical positions. Positions
+ *             0..11 are the ordinary voice-unit range; positions 12..15 are
+ *             available to regular units or to the four lease units carried
+ *             by the two VoiceBuffer tail runners. A lease is a retag of the
+ *             old physical unit, never an audio copy.
+ * Why:        P3 D1-D3 use Hold overflow and two tail runners, so four lease
+ *             positions are sufficient and the Effect floor is deterministic.
+ * Inputs:     compile-time geometry. Outputs: allocator capacity constants.
+ * Accessors:  FxBuffer.c and VoiceBuffer.c.
+ * Affiliates: VoiceBuffer.h asserts the runner/lease relationship.
+ */
+#define FXBUF_POSITION_COUNT           16u
+#define FXBUF_REGULAR_UNIT_MAX         FXBUF_VOICE_UNIT_COUNT
+#define FXBUF_LEASE_UNIT_MAX           4u
+#define FXBUF_OWNER_LEASE_BASE         0x40u
+_Static_assert(FXBUF_REGULAR_UNIT_MAX + FXBUF_LEASE_UNIT_MAX ==
+               FXBUF_POSITION_COUNT, "regular + lease positions must fit");
+
 /* Handoff ---------------------------------------------------------------- */
 
 /* 16 read and 16 write pointer entries: [0..11] voice units (index = unit
@@ -197,6 +218,17 @@ void fxbuf_init(void);
 uint32_t fxbuf_arenaBytes(void);
 
 /*
+ * Effect floor (S084 VX3 VX3-1.2).
+ *
+ * What:       returns the arena bytes left when every regular and lease
+ *             position is occupied. Why: every elastic Effect's minimum
+ *             buffer must fit below this value. Inputs: none. Outputs: a
+ *             32-byte-aligned byte count. Accessors: EffectsManager and
+ *             host/DEV capacity checks. Affiliates: FxBuffer geometry.
+ */
+uint32_t fxbuf_effectFloorBytes(void);
+
+/*
  * Return the current contiguous Effect share.
  *
  * Input: non-NULL `out`. Output: base pointer, arena-relative offset zero,
@@ -232,6 +264,69 @@ uint8_t fxbuf_voiceUnitCount(uint8_t slot);
 
 /* Return the total number of claimed units. */
 uint8_t fxbuf_unitsInUse(void);
+
+/*
+ * Position allocator (S084 VX3 VX3-1.2).
+ *
+ * What:       claims one position nearest the arena top, or an adjacent pair
+ *             for a two-unit ring, while enforcing the twelve-unit regular
+ *             cap and the two-units-per-slot cap. The returned pair is in
+ *             lowest-address-first order. Inputs: slot 0..5, count 1..2,
+ *             and a two-byte output array. Outputs: nonzero on an all-or-
+ *             nothing claim. Accessors: VoiceBuffer.c. Affiliates:
+ *             fxbuf_unitFits(), fxbuf_unitPtr(), the pass API below.
+ */
+uint8_t fxbuf_unitAcquire(uint8_t slot, uint8_t count, uint8_t units_out[2]);
+
+/* Claim the higher-address neighbour of one owned unit for a same-use grow;
+** the existing unit stays the ring base (remediation R3). */
+uint8_t fxbuf_unitAcquireAbove(uint8_t slot, uint8_t existing,
+                               uint8_t units_out[2]);
+
+/* Would a regular claim succeed without changing allocator state? */
+uint8_t fxbuf_unitFits(uint8_t slot, uint8_t count);
+
+/* Would a claim fit if `released` units of slot were first retagged? */
+uint8_t fxbuf_unitFitsReplacing(uint8_t slot, uint8_t count,
+                                uint8_t released);
+
+/*
+ * Lease retagging (S084 VX3 VX3-1.2).
+ *
+ * What:       retags existing positions to a tail runner or back to a slot;
+ *             audio remains in place and the Effect share is unchanged.
+ * Why:        tail changes must not copy or cut ringing audio. Inputs:
+ *             positions, count, and tail/slot id. Outputs: nonzero only when
+ *             all requested positions pass the lease and ownership caps.
+ * Accessors:  VoiceBuffer.c. Affiliates: the two tail runners.
+ */
+uint8_t fxbuf_unitToLease(const uint8_t *units, uint8_t count, uint8_t tail_id);
+uint8_t fxbuf_leaseToSlot(const uint8_t *units, uint8_t count, uint8_t slot);
+
+/* Free regular or lease positions; contents are intentionally untouched. */
+void fxbuf_unitRelease(const uint8_t *units, uint8_t count);
+
+/* Return an aligned pointer to one claimed position, or NULL if invalid. */
+int16_t *fxbuf_unitPtr(uint8_t unit);
+
+/*
+ * Coalesce allocator notifications around one foreground apply pass
+ * (S084 VX3 VX3-1.2).
+ *
+ * What:       nested begin/end brackets defer share callbacks until the
+ *             outermost end and emit at most one callback if the share moved.
+ * Why:        one Scene/Instrument apply must compact CrumpBit once, before
+ *             the next render block writes newly claimed units. Inputs: none.
+ * Outputs:    one synchronous callback at the outermost end. Accessors:
+ *             VoiceBuffer.c and Preset apply passes.
+ */
+void fxbuf_beginPass(void);
+void fxbuf_endPass(void);
+
+#if DEV_MODE_DIAGNOSTIC
+/* S084 VX3 VX3-1.2: one owner character for each of the 16 positions. */
+void fxbuf_devOwnerMap(char out[FXBUF_POSITION_COUNT + 1u]);
+#endif
 
 /*
  * Borrow one owned voice unit as an aligned sample array.

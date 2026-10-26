@@ -96,8 +96,13 @@ static const char retriggerNames[][4] = {
     {8}, {"off"},{"v1"},{"v2"},{"v3"},{"v4"},{"v5"},{"v6"},{"scn"},
 };
 static const char lfoWaveNames[][4] = {
-    {8}, {"sin"},{"tri"},{"sup"},{"sdn"},{"sqr"},{"rnd"},{"xup"},{"xdn"},
+    {18}, {"sin"},{"tri"},{"sup"},{"sdn"},{"sqr"},{"rnd"},{"xup"},{"xdn"},
+    {"si1"},{"tr1"},{"su1"},{"sd1"},{"sq1"},{"rn1"},{"xu1"},{"xd1"},
+    {"xtr"},{"xt1"},
 };
+/* S084 P1 P1-1.9: lfoWaveNames covers the loop and one-shot lists plus xtr /
+** xt1. Its count must equal LFO_WAVE_COUNT (lfo.h). Menu reads the leading
+** byte, so adding waves needs no menu code change. */
 /* Three-character display names for the shared LFO polarity selector.
 ** Clients: descriptor ROW("lfo_polarity", ..., DTYPE_LFO_POLARITY), compact
 ** value formatting, and single-parameter edit formatting. Outputs: "neg",
@@ -126,7 +131,46 @@ static const char trackPlayModeNames[][4] = {
     {6}, {"fwd"},{"rev"},{"pip"},{"rnd"},{"onc"},{"1fr"},
 };
 static const char waveformNames[][4] = {
-    {6}, {"Sin"},{"Tri"},{"Saw"},{"Rec"},{"Noi"},{"Cym"},
+    /* S084 VX2 VX2-4.10: the 11-entry wav list (plan 4.1.2). */
+    {11}, {"Sin"},{"Tri"},{"Saw"},{"Rec"},{"Noi"},{"Cym"},
+    {"sq3"},{"sw3"},{"sqa"},{"tra"},{"swa"},
+};
+/* S084 P1 P1-11.1: oscillator type, run mode, pwm family and mod-mode
+** names. Order and count must match OSC_TYPE_*, OSC_RUN_*, OSC_PWM_*,
+** OSC_MOD_* (Oscillator.h, OscSection.h, OscillatorPwm.h). Rendered by menu.c
+** from InstrumentCellFormat descriptions (decision O3). */
+static const char oscTypeNames[][4] = {
+    /* S084 VX2 VX2-9.1: wtb appended (stored value 4). */
+    {5}, {"wav"},{"pwm"},{"smp"},{"slp"},{"wtb"},
+};
+/*
+ * Transient types (S084 VX2 VX2-9.1).
+ *
+ * What: trs, wav; P3 appends buf. Count = TRANSIENT_TYPE_SELECTABLE.
+ * Clients: the trt cell through InstrumentCellFormat.
+ */
+static const char transientTypeNames[][4] = {
+    /* S084 VX3 VX3-10.1: buf opens the seven transient-buffer options. */
+    {3}, {"trs"},{"wav"},{"buf"},
+};
+/*
+ * Filter drive types (S084 VX2 VX2-9.1).
+ *
+ * What: plan §4.4 names in DRIVE_TYPE_* order. Count = DRIVE_TYPE_COUNT.
+ * Clients: the dty cell through InstrumentCellFormat.
+ */
+static const char driveTypeNames[][4] = {
+    {14}, {"sft"},{"rct"},{"art"},{"thf"},{"fdc"},{"bsw"},{"tsw"},
+    {"lsw"},{"lsq"},{"sfd"},{"afd"},{"asf"},{"chb"},{"rsb"},
+};
+static const char runModeNames[][4] = {
+    {3}, {"rst"},{"fre"},{"itp"},
+};
+static const char pwmFamilyNames[][4] = {
+    {6}, {"prc"},{"psw"},{"ptr"},{"pq3"},{"pw3"},{"swp"},
+};
+static const char mixFmNames[][4] = {
+    {4}, {"fm "},{"mix"},{"snc"},{"rng"},
 };
 static const char outputNames[][7] = {
     {6}, {"St1"},{"St2"},{"L1"},{"R1"},{"L2"},{"R2"},
@@ -292,7 +336,8 @@ static const char conditionNames[][4] = {
  * Add "64t" and "128". Why: the table indices and names must match the new
  * 10-entry seq_rollPpq table. Stored bytes shift with no migration. Inputs:
  * roll index 0..9. Affiliates: seq_rollPpq, menu_getRollRateName, STEP roll
- * clamp.
+ * clamp, perfBtnTypeNames (overlay roll types 6..14 = these indices 1..9,
+ * S084 P3).
  */
 static const char stepRollRateNames[][4] = {
     {10},
@@ -300,17 +345,24 @@ static const char stepRollRateNames[][4] = {
 };
 
 /*
- * S080 E4: PERF BAR overlay trigger-type names.
+ * PERF BAR overlay trigger-type names (S080 E4; S084 P3 one roll list).
  *
- * [0]=count; [1..12] = stored value 0..11. Rendered by the static-param
- * special case in menu.c (S080 E6) because all 16 DTYPE_MENU ids are taken.
- * Order: vmx, v10, v64, v32, flm, fls, then the held roll rates r/8..128.
- * Affiliates: PAR_PERF_BTN_LT/RT, the overlay trigger dispatch (E12).
+ * [0] = count 15; [1..15] = stored value 0..14. 0..3 single velocities
+ * (vmx v10 v64 v32), 4..5 flams (flm fls), 6..14 held rolls with exactly
+ * the STEP roll labels and rates: value v is step-roll index v - 5 (1/8,
+ * 8tr, 16, 16t, 32, 32t, 64, 64t, 128). Why: PERF offered only six of the
+ * nine step rates under different names (S084 P0 F1); one list makes every
+ * step roll playable live and keeps one vocabulary (Q1). Stored values
+ * 6..11 changed meaning; no migration (user Q2, 2026-10-24). Rendered by
+ * the static-param special case in menu.c (all DTYPE_MENU ids are taken),
+ * which reads the count from [0][0]. Affiliates: PAR_PERF_BTN_LT/RT,
+ * stepRollRateNames, seq_rollPpq(), buttonHandler_overlayStart()
+ * (BH_OVERLAY_TYPE_* layout), menu_clampCellValue().
  */
 static const char perfBtnTypeNames[][4] = {
-    {12},
+    {15},
     {"vmx"},{"v10"},{"v64"},{"v32"},{"flm"},{"fls"},
-    {"r/8"},{"r16"},{"r32"},{"r64"},{"r6t"},{"128"},
+    {"1/8"},{"8tr"},{" 16"},{"16t"},{" 32"},{"32t"},{" 64"},{"64t"},{"128"},
 };
 
 /*

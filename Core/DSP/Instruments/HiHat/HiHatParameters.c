@@ -88,6 +88,41 @@ const uint8_t hihat_instrument_type_flags = HIHAT_INSTRUMENT_TYPE_FLAGS;
     { key_, short_, long_, cat_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), FLAGS_IMAGE, mod_, BIND_SPECIAL(member_, type_, special_) }
 
 /*
+ * Selector row: automatable, not Morphable, not an LFO/velocity target
+ * (S084 P1 P1-9.1).
+ *
+ * What:       a byte selector with a special writer and no modulation domain.
+ * Why:        plan §6 D16/Q30: typ/src/run are automatable but never Morphed
+ *             or LFO-modulated (switching type mid-Morph would jump).
+ * Accessors:  this file's descriptor table.
+ * Affiliates: check_special_tags.py (macro name ends in _SPECIAL, so the tag
+ *             is checked).
+ */
+#define FLAGS_SELECT INSTRUMENT_PARAM_FLAG_AUTOMATABLE
+#define ROW_SELECT_SPECIAL(key_, cat_, long_, short_, member_, special_) \
+    { key_, short_, long_, cat_, DTYPE_0B127, FLAGS_SELECT, MOD_NONE, \
+      BIND_SPECIAL(member_, TYPE_UINT8, special_) }
+
+/*
+ * Selector row without automation (S084 VX2 VX2-8.1).
+ *
+ * What:       as ROW_SELECT_SPECIAL but with no capability flags: not
+ *             Morphable, not modulatable, not automatable. Applied by the
+ *             selector pre-pass and stored as a single-ended [params] cell.
+ * Why:        plan 4.3.1: the transient type is fixed per sound so
+ *             automation and modulation can never cross between a buffer and
+ *             a non-buffer option (P3).
+ * Inputs:     key, category, labels, member, special tag.
+ * Outputs:    one ParamDescriptor.
+ * Accessors:  this table.
+ * Affiliates: instrumentManager_isSelectorDescriptor(),
+ *             check_special_tags.py.
+ */
+#define ROW_SELECT_NOAUTO_SPECIAL(key_, cat_, long_, short_, member_, special_) \
+    { key_, short_, long_, cat_, DTYPE_0B127, 0u, MOD_NONE, \
+      BIND_SPECIAL(member_, TYPE_UINT8, special_) }
+
+/*
  * ROW_NOBIND is for descriptor-owned cells that do not write a HiHatVoice
  * member directly. These are single-endpoint supplemental values such as
  * modulation target selectors, so they intentionally start with flags=0 rather
@@ -110,7 +145,8 @@ const uint8_t hihat_instrument_type_flags = HIHAT_INSTRUMENT_TYPE_FLAGS;
  * Inputs: the normal descriptor text fields. Output: a descriptor whose flags
  * mark per-instrument decimation as morphable, modulatable, and automatable
  * even though its runtime binding is supplemental. InstrumentManager already
- * applies this binding through mixer_decimation_rate[slot]; the modulation and
+ * applies this binding through insertFx_setRate(slot, byte) for the D+S Mix
+ * stage; the modulation and
  * automation target resolvers need follow-up adapter work so this descriptor
  * can be selected like other voice-local sound parameters without pretending
  * it is a direct HiHatVoice member.
@@ -171,6 +207,17 @@ typedef enum {
     HIHAT_PARAM_TRANSIENT_WAVE,
     HIHAT_PARAM_TRANSIENT_VOL,
     HIHAT_PARAM_TRANSIENT_FREQ,
+    HIHAT_PARAM_OSC1_TYPE,
+    HIHAT_PARAM_OSC1_SOURCE,
+    HIHAT_PARAM_OSC2_TYPE,
+    HIHAT_PARAM_OSC2_SOURCE,
+    HIHAT_PARAM_OSC3_TYPE,
+    HIHAT_PARAM_OSC3_SOURCE,
+    HIHAT_PARAM_RUN_MODE,
+    HIHAT_PARAM_TRANSIENT_TYPE,
+    HIHAT_PARAM_FILTER_DRIVE_TYPE,
+    HIHAT_PARAM_MIX_FX_TYPE,
+    HIHAT_PARAM_MIX_FX_AMOUNT,
     HIHAT_PARAM_COUNT
 } hihat_param_index_t;
 
@@ -185,13 +232,13 @@ _Static_assert(HIHAT_PARAM_DESCRIPTOR_COUNT == HIHAT_PARAM_COUNT,
  * domain, and runtime binding for one descriptor-indexed storage cell.
  */
 const ParamDescriptor hihat_param_descriptors[] = {
-    ROW_MENU("osc1_wave", "Oscilltr", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8),
+    ROW_MENU_SPECIAL("osc1_wave", "Oscilltr", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8, IM_SPECIAL_OSC_WAVE | IM_SPECIAL_OSC1),
     ROW_SPECIAL("osc1_pitch_coarse", "Oscilltr", "Coarse", "coa", DTYPE_0B127, MOD_0_127, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC1),
     ROW_SPECIAL("osc1_pitch_fine", "Oscilltr", "Fine", "fin", DTYPE_PM63, MOD_PM63, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_FINE | IM_SPECIAL_OSC1),
-    ROW_MENU("osc2_wave", "Mod Osc", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, modOsc.waveform, TYPE_UINT8),
+    ROW_MENU_SPECIAL("osc2_wave", "Mod Osc", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, modOsc.waveform, TYPE_UINT8, IM_SPECIAL_OSC_WAVE | IM_SPECIAL_OSC2),
     ROW_SPECIAL("osc2_pitch_coarse", "Mod Osc", "Freqcy 1", "f1", DTYPE_0B127, MOD_0_127, modOsc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC2),
     ROW("osc2_mod_amount", "Mod Osc", "Gain 1", "g1", DTYPE_0B127, MOD_0_127, fmModAmount1, TYPE_FLT),
-    ROW_MENU("osc3_wave", "Mod Osc", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, modOsc2.waveform, TYPE_UINT8),
+    ROW_MENU_SPECIAL("osc3_wave", "Mod Osc", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, modOsc2.waveform, TYPE_UINT8, IM_SPECIAL_OSC_WAVE | IM_SPECIAL_OSC3),
     ROW_SPECIAL("osc3_pitch_coarse", "Mod Osc", "Freqcy 2", "f2", DTYPE_0B127, MOD_0_127, modOsc2.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC3),
     ROW("osc3_mod_amount", "Mod Osc", "Gain 2", "g2", DTYPE_0B127, MOD_0_127, fmModAmount2, TYPE_FLT),
     ROW_SPECIAL("filter_freq", "Filter", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, filter.f, TYPE_FLT, IM_SPECIAL_FILTER_FREQ),
@@ -204,8 +251,8 @@ const ParamDescriptor hihat_param_descriptors[] = {
     ROW_SPECIAL("amp_envelope_slope", "Veloc EG", "Slope", "slp", DTYPE_0B127, MOD_0_127, oscVolEg.slope, TYPE_FLT, IM_SPECIAL_AMP_SLOPE),
     ROW("instrument_vol", "Voice", "Volume", "vol", DTYPE_0B127, MOD_0_127, vol, TYPE_FLT),
     ROW("instrument_pan", "Voice", "Panning", "pan", DTYPE_PM63, MOD_PM63, pan, TYPE_UINT8),
-    ROW_SPECIAL("instrument_drive", "Voice", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, distortion.shape, TYPE_FLT, IM_SPECIAL_INSTRUMENT_DRIVE),
-    ROW_SLOT_DECIMATION("instrument_decimation", "Voice", "SampleRt", "srt", DTYPE_0B127),
+    ROW_SPECIAL("instrument_drive", "Voice", "Depth", "dpt", DTYPE_0B127, MOD_0_127, distortion.shape, TYPE_FLT, IM_SPECIAL_INSTRUMENT_DRIVE),
+    ROW_SLOT_DECIMATION("instrument_decimation", "Voice", "Rate", "rte", DTYPE_0B127),
     /*
      * LFO runtime rows.
      *
@@ -237,6 +284,34 @@ const ParamDescriptor hihat_param_descriptors[] = {
     ROW_MENU_SPECIAL("transient_wave", "Transnt", "Waveform", "wav", MENU_TRANS, MOD_NONE, transGen.waveform, TYPE_UINT8, IM_SPECIAL_TRANSIENT_WAVE),
     ROW("transient_vol", "Transnt", "Volume", "vol", DTYPE_0B127, MOD_0_127, transGen.volume, TYPE_FLT),
     ROW_SPECIAL("transient_freq", "Transnt", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, transGen.pitch, TYPE_FLT, IM_SPECIAL_TRANSIENT_FREQ),
+    /*
+     * Oscillator type/source and voice run mode (S084 P1 P1-9.3).
+     *
+     * What:       typ = OSC_TYPE_* per oscillator; src = pwm family or sample
+     *             index; run = OSC_RUN_* for the whole voice.
+     * Why:        plan §4.1.1, §4.1.6. Appended so existing indices, automation,
+     *             LFO tokens, MIDI Learn and NRPN IDs are unchanged.
+     * Inputs:     menu, automation, MIDI (menu edits), Kit/Instrument files
+     *             (keys osc1_type, osc1_source, osc2_type, osc2_source,
+     *             osc3_type, osc3_source, osc_run_mode; a missing key loads
+     *             0 = wav / 0 / rst).
+     * Outputs:    the IM_SPECIAL_OSC_TYPE / _OSC_SOURCE / _RUN_MODE writers.
+     * Accessors:  InstrumentManager.c, InstrumentCellFormat.c, menu.c.
+     * Affiliates: hihat_menu_pages[] page 0 and the Mod page.
+     */
+    ROW_SELECT_SPECIAL("osc1_type", "Oscilltr", "Type", "typ", osc.oscType, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
+    ROW_SELECT_SPECIAL("osc1_source", "Oscilltr", "Source", "src", osc.source, IM_SPECIAL_OSC_SOURCE | IM_SPECIAL_OSC1),
+    ROW_SELECT_SPECIAL("osc2_type", "Mod Osc", "Type", "typ", modOsc.oscType, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC2),
+    ROW_SELECT_SPECIAL("osc2_source", "Mod Osc", "Source", "src", modOsc.source, IM_SPECIAL_OSC_SOURCE | IM_SPECIAL_OSC2),
+    ROW_SELECT_SPECIAL("osc3_type", "Mod Osc", "Type", "typ", modOsc2.oscType, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC3),
+    ROW_SELECT_SPECIAL("osc3_source", "Mod Osc", "Source", "src", modOsc2.source, IM_SPECIAL_OSC_SOURCE | IM_SPECIAL_OSC3),
+    ROW_SELECT_SPECIAL("osc_run_mode", "Oscilltr", "RunMode", "run", section.runMode, IM_SPECIAL_RUN_MODE),
+    /* S084 VX2 VX2-8.2: transient type (not automatable) and filter drive
+    ** type (automatable), appended so existing IDs are unchanged. */
+    ROW_SELECT_NOAUTO_SPECIAL("transient_type", "Transnt", "Type", "trt", transGen.type, IM_SPECIAL_TRANSIENT_TYPE),
+    ROW_SELECT_SPECIAL("filter_drive_type", "Filter", "DriveTyp", "dty", driveType, IM_SPECIAL_DRIVE_TYPE),
+    ROW_SELECT_NOAUTO_SPECIAL("mix_fx_type", "Voice", "MixFX", "fxt", insertType, IM_SPECIAL_MIX_FX_TYPE),
+    ROW_SPECIAL("mix_fx_amount", "Voice", "Amount", "amt", DTYPE_0B127, MOD_0_127, insertAmount, TYPE_UINT8, IM_SPECIAL_MIX_FX_AMOUNT),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -251,14 +326,19 @@ const uint8_t hihat_param_descriptor_count =
  * that base descriptor with amp_envelope_decay_choke only when this Choke type
  * is assigned to slot 6. Keeping one table prevents HiHat from carrying a
  * private open-hat menu fork now that `_choke` is the registry convention.
+ *
+ * Oscillator page cells (S084 P1 P1-9.4): typ, src and run join page 0; the
+ * two modulator oscillators' typ/src sit on the Mod page.
  */
 const instrument_menu_page_t hihat_menu_pages[] = {
-    {{ HIHAT_PARAM_OSC1_PITCH_COARSE, HIHAT_PARAM_OSC1_PITCH_FINE, HIHAT_PARAM_OSC1_WAVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    {{ HIHAT_PARAM_OSC1_PITCH_COARSE, HIHAT_PARAM_OSC1_PITCH_FINE, HIHAT_PARAM_OSC1_WAVE, HIHAT_PARAM_OSC1_TYPE, HIHAT_PARAM_OSC1_SOURCE, HIHAT_PARAM_RUN_MODE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ HIHAT_PARAM_AMP_ENVELOPE_ATTACK, HIHAT_PARAM_AMP_ENVELOPE_DECAY, HIHAT_PARAM_AMP_ENVELOPE_SLOPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ HIHAT_PARAM_VELO_MOD_DEST, HIHAT_PARAM_VELO_MOD_AMOUNT, HIHAT_PARAM_VELO_VOL_ON_OFF, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
-    {{ HIHAT_PARAM_OSC2_PITCH_COARSE, HIHAT_PARAM_OSC3_PITCH_COARSE, HIHAT_PARAM_OSC2_MOD_AMOUNT, HIHAT_PARAM_OSC3_MOD_AMOUNT, HIHAT_PARAM_OSC2_WAVE, HIHAT_PARAM_OSC3_WAVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
-    {{ HIHAT_PARAM_TRANSIENT_WAVE, HIHAT_PARAM_TRANSIENT_VOL, HIHAT_PARAM_TRANSIENT_FREQ, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
-    {{ HIHAT_PARAM_FILTER_FREQ, HIHAT_PARAM_FILTER_RESO, HIHAT_PARAM_FILTER_TYPE, HIHAT_PARAM_FILTER_DRIVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    {{ HIHAT_PARAM_OSC2_PITCH_COARSE, HIHAT_PARAM_OSC3_PITCH_COARSE, HIHAT_PARAM_OSC2_MOD_AMOUNT, HIHAT_PARAM_OSC3_MOD_AMOUNT, HIHAT_PARAM_OSC2_WAVE, HIHAT_PARAM_OSC3_WAVE, HIHAT_PARAM_OSC2_TYPE, HIHAT_PARAM_OSC2_SOURCE, HIHAT_PARAM_OSC3_TYPE, HIHAT_PARAM_OSC3_SOURCE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* S084 VX2 VX2-8.4: trt on the transient page's fourth pot; dty behind
+    ** SELECT on the filter page. */
+    {{ HIHAT_PARAM_TRANSIENT_WAVE, HIHAT_PARAM_TRANSIENT_VOL, HIHAT_PARAM_TRANSIENT_FREQ, HIHAT_PARAM_TRANSIENT_TYPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    {{ HIHAT_PARAM_FILTER_FREQ, HIHAT_PARAM_FILTER_RESO, HIHAT_PARAM_FILTER_TYPE, HIHAT_PARAM_FILTER_DRIVE, HIHAT_PARAM_FILTER_DRIVE_TYPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     /*
      * One wide LFO sub-page: oscillator controls, application shape/amounts,
      * then target selector pairs. Menu displays this 16-cell row as four-cell
@@ -266,7 +346,7 @@ const instrument_menu_page_t hihat_menu_pages[] = {
      * below remains accessible.
      */
     {{ HIHAT_PARAM_LFO_RATE, HIHAT_PARAM_LFO_SYNC, HIHAT_PARAM_LFO_WAVE, HIHAT_PARAM_LFO_OFFSET, HIHAT_PARAM_LFO_RETRIGGER_VOICE, HIHAT_PARAM_LFO_POLARITY, HIHAT_PARAM_LFO_AMOUNT, HIHAT_PARAM_LFO_AMOUNT_2, HIHAT_PARAM_LFO_TARGET_VOICE, HIHAT_PARAM_LFO_TARGET_PARAM, HIHAT_PARAM_LFO_TARGET_VOICE_2, HIHAT_PARAM_LFO_TARGET_PARAM_2, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
-    {{ HIHAT_PARAM_INSTRUMENT_VOL, HIHAT_PARAM_INSTRUMENT_PAN, HIHAT_PARAM_INSTRUMENT_DECIMATION, HIHAT_PARAM_INSTRUMENT_DRIVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    {{ HIHAT_PARAM_INSTRUMENT_VOL, HIHAT_PARAM_INSTRUMENT_PAN, HIHAT_PARAM_INSTRUMENT_DECIMATION, HIHAT_PARAM_INSTRUMENT_DRIVE, HIHAT_PARAM_MIX_FX_TYPE, HIHAT_PARAM_MIX_FX_AMOUNT, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
 };
 
 /* Number of instrument-owned subpages exposed for each HiHat voice page. */

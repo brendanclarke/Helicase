@@ -1,0 +1,338 @@
+[
+ {
+  "signal": "sine40",
+  "type": "sft",
+  "count": 4812,
+  "base": "sine40_sft"
+ },
+ {
+  "signal": "sine40",
+  "type": "rct",
+  "count": 4812,
+  "base": "sine40_rct"
+ },
+ {
+  "signal": "sine40",
+  "type": "art",
+  "count": 4812,
+  "base": "sine40_art"
+ },
+ {
+  "signal": "sine40",
+  "type": "thf",
+  "count": 4812,
+  "base": "sine40_thf"
+ },
+ {
+  "signal": "sine40",
+  "type": "fdc",
+  "count": 4812,
+  "base": "sine40_fdc"
+ },
+ {
+  "signal": "sine40",
+  "type": "bsw",
+  "count": 4812,
+  "base": "sine40_bsw"
+ },
+ {
+  "signal": "sine40",
+  "type": "tsw",
+  "count": 4812,
+  "base": "sine40_tsw"
+ },
+ {
+  "signal": "sine40",
+  "type": "lsw",
+  "count": 4812,
+  "base": "sine40_lsw"
+ },
+ {
+  "signal": "sine40",
+  "type": "lsq",
+  "count": 4812,
+  "base": "sine40_lsq"
+ },
+ {
+  "signal": "sine40",
+  "type": "sfd",
+  "count": 4812,
+  "base": "sine40_sfd"
+ },
+ {
+  "signal": "sine40",
+  "type": "afd",
+  "count": 4812,
+  "base": "sine40_afd"
+ },
+ {
+  "signal": "sine40",
+  "type": "asf",
+  "count": 4812,
+  "base": "sine40_asf"
+ },
+ {
+  "signal": "sine40",
+  "type": "chb",
+  "count": 4812,
+  "base": "sine40_chb"
+ },
+ {
+  "signal": "sine40",
+  "type": "rsb",
+  "count": 4812,
+  "base": "sine40_rsb"
+ },
+ {
+  "signal": "sine80",
+  "type": "sft",
+  "count": 4812,
+  "base": "sine80_sft"
+ },
+ {
+  "signal": "sine80",
+  "type": "rct",
+  "count": 4812,
+  "base": "sine80_rct"
+ },
+ {
+  "signal": "sine80",
+  "type": "art",
+  "count": 4812,
+  "base": "sine80_art"
+ },
+ {
+  "signal": "sine80",
+  "type": "thf",
+  "count": 4812,
+  "base": "sine80_thf"
+ },
+ {
+  "signal": "sine80",
+  "type": "fdc",
+  "count": 4812,
+  "base": "sine80_fdc"
+ },
+ {
+  "signal": "sine80",
+  "type": "bsw",
+  "count": 4812,
+  "base": "sine80_bsw"
+ },
+ {
+  "signal": "sine80",
+  "type": "tsw",
+  "count": 4812,
+  "base": "sine80_tsw"
+ },
+ {
+  "signal": "sine80",
+  "type": "lsw",
+  "count": 4812,
+  "base": "sine80_lsw"
+ },
+ {
+  "signal": "sine80",
+  "type": "lsq",
+  "count": 4812,
+  "base": "sine80_lsq"
+ },
+ {
+  "signal": "sine80",
+  "type": "sfd",
+  "count": 4812,
+  "base": "sine80_sfd"
+ },
+ {
+  "signal": "sine80",
+  "type": "afd",
+  "count": 4812,
+  "base": "sine80_afd"
+ },
+ {
+  "signal": "sine80",
+  "type": "asf",
+  "count": 4812,
+  "base": "sine80_asf"
+ },
+ {
+  "signal": "sine80",
+  "type": "chb",
+  "count": 4812,
+  "base": "sine80_chb"
+ },
+ {
+  "signal": "sine80",
+  "type": "rsb",
+  "count": 4812,
+  "base": "sine80_rsb"
+ },
+ {
+  "signal": "sine127",
+  "type": "sft",
+  "count": 4812,
+  "base": "sine127_sft"
+ },
+ {
+  "signal": "sine127",
+  "type": "rct",
+  "count": 4812,
+  "base": "sine127_rct"
+ },
+ {
+  "signal": "sine127",
+  "type": "art",
+  "count": 4812,
+  "base": "sine127_art"
+ },
+ {
+  "signal": "sine127",
+  "type": "thf",
+  "count": 4812,
+  "base": "sine127_thf"
+ },
+ {
+  "signal": "sine127",
+  "type": "fdc",
+  "count": 4812,
+  "base": "sine127_fdc"
+ },
+ {
+  "signal": "sine127",
+  "type": "bsw",
+  "count": 4812,
+  "base": "sine127_bsw"
+ },
+ {
+  "signal": "sine127",
+  "type": "tsw",
+  "count": 4812,
+  "base": "sine127_tsw"
+ },
+ {
+  "signal": "sine127",
+  "type": "lsw",
+  "count": 4812,
+  "base": "sine127_lsw"
+ },
+ {
+  "signal": "sine127",
+  "type": "lsq",
+  "count": 4812,
+  "base": "sine127_lsq"
+ },
+ {
+  "signal": "sine127",
+  "type": "sfd",
+  "count": 4812,
+  "base": "sine127_sfd"
+ },
+ {
+  "signal": "sine127",
+  "type": "afd",
+  "count": 4812,
+  "base": "sine127_afd"
+ },
+ {
+  "signal": "sine127",
+  "type": "asf",
+  "count": 4812,
+  "base": "sine127_asf"
+ },
+ {
+  "signal": "sine127",
+  "type": "chb",
+  "count": 4812,
+  "base": "sine127_chb"
+ },
+ {
+  "signal": "sine127",
+  "type": "rsb",
+  "count": 4812,
+  "base": "sine127_rsb"
+ },
+ {
+  "signal": "kick110",
+  "type": "sft",
+  "count": 7939,
+  "base": "kick110_sft"
+ },
+ {
+  "signal": "kick110",
+  "type": "rct",
+  "count": 7939,
+  "base": "kick110_rct"
+ },
+ {
+  "signal": "kick110",
+  "type": "art",
+  "count": 7939,
+  "base": "kick110_art"
+ },
+ {
+  "signal": "kick110",
+  "type": "thf",
+  "count": 7939,
+  "base": "kick110_thf"
+ },
+ {
+  "signal": "kick110",
+  "type": "fdc",
+  "count": 7939,
+  "base": "kick110_fdc"
+ },
+ {
+  "signal": "kick110",
+  "type": "bsw",
+  "count": 7939,
+  "base": "kick110_bsw"
+ },
+ {
+  "signal": "kick110",
+  "type": "tsw",
+  "count": 7939,
+  "base": "kick110_tsw"
+ },
+ {
+  "signal": "kick110",
+  "type": "lsw",
+  "count": 7939,
+  "base": "kick110_lsw"
+ },
+ {
+  "signal": "kick110",
+  "type": "lsq",
+  "count": 7939,
+  "base": "kick110_lsq"
+ },
+ {
+  "signal": "kick110",
+  "type": "sfd",
+  "count": 7939,
+  "base": "kick110_sfd"
+ },
+ {
+  "signal": "kick110",
+  "type": "afd",
+  "count": 7939,
+  "base": "kick110_afd"
+ },
+ {
+  "signal": "kick110",
+  "type": "asf",
+  "count": 7939,
+  "base": "kick110_asf"
+ },
+ {
+  "signal": "kick110",
+  "type": "chb",
+  "count": 7939,
+  "base": "kick110_chb"
+ },
+ {
+  "signal": "kick110",
+  "type": "rsb",
+  "count": 7939,
+  "base": "kick110_rsb"
+ }
+]

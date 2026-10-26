@@ -112,6 +112,24 @@ INITCM_EFFECT void SVF_recalcFreq(ResonantFilter* filter)
 #endif
 }
 //------------------------------------------------------------------------------------
+/*
+ * Recompute the integrator gain from a given cutoff (S084 P1 P1-7.3).
+ *
+ * What:       g = fastTan(pi * fUsed) without changing filter->f.
+ * Why:        run modes `fre`/`itp` slew the cutoff the loop uses while the
+ *             writers keep setting the target in filter->f; SVF_recalcFreq()
+ *             stays untouched for `rst` and for the Effect filter (twin rule).
+ * Inputs:     filter, fUsed (0..0.45).  Outputs: filter->g.
+ * Accessors:  oscSection_filterRecalc().
+ * Affiliates: SVF_recalcFreq(), fastTan().
+ */
+INITCM_EFFECT void SVF_recalcFreqFrom(ResonantFilter* filter, float fUsed)
+{
+	if (!filter)
+		return;
+	filter->g = fastTan(M_PI * fUsed);
+}
+//------------------------------------------------------------------------------------
 void SVF_setDrive(ResonantFilter* filter,uint8_t drive)
 {
 #if USE_SHAPER_NONLINEARITY
@@ -331,9 +349,169 @@ INITCM_EFFECT_NOINLINE void SVF_calcBlockZDF(ResonantFilter* filter, const uint8
 				break;
 			}
 		}
+	filter->s1 = s1;
+	filter->s2 = s2;
+	filter->zi = zi;
+	}
+}
+/*
+ * ZDF voice filter with a drive-type input stage (S084 VX2 VX2-7.4).
+ *
+ * Implementation note: copy of SVF_calcBlockZDF(); keep the two in step (the
+ * golden filter harness checks sft only; test_shaper checks the shaped input
+ * stage). Stage A and Stage B are untouched, so sft stays bit-identical by
+ * construction (the engines call the original function for it).
+ *
+ * What:       replaces the input soft clip with driveShaper_apply() for both
+ *             the ZDF and the naive two-pole paths; one extra division per
+ *             block (the tracker reciprocal).
+ * Why:        plan §4.4, D7/D8.
+ * Inputs:     filter, filter type, drive type 1..13, shaper state, buf, size.
+ * Outputs:    buf; s1/s2/zi; shaper state.
+ * Accessors:  the four engines when driveType != DRIVE_TYPE_SFT.
+ * Affiliates: DriveShaper.h, SVF_calcBlockZDF().
+ */
+INITCM_EFFECT_NOINLINE void SVF_calcBlockZDFShaped(ResonantFilter* filter, const uint8_t type, const uint8_t driveType, DriveShaperState* shaper, int16_t* buf, const uint8_t size)
+{
+	uint8_t i;
+	const float f 	= filter->g;
+	//fix unstable filter for high f and r settings
+	const float R 	= filter->f >= 0.4499f ? 1 : filter->q;
+	const float ff 	= f*f;
+	/*
+	 * Shaper state in a local copy (S084 VX2 review fix F3).
+	 *
+	 * What:       the loop works on `sh`, a stack copy of the voice's shaper
+	 *             state, written back once after the block.
+	 * Why:        through the struct pointer the compiler must assume the
+	 *             uint8_t flag/count stores may alias the int16 buffer and
+	 *             reload/store the state every sample; a local whose address
+	 *             never escapes the inlined shaper stays in registers.
+	 */
+	DriveShaperState sh = *shaper;
+	const float inc = driveShaper_blockInc(&sh);
+
+	if(type == FILTER_NAIVE_2_POLE)
+	{
+
+		float f_lp2 = filter->f * 2.21f;
+		for(i=0;i<size;i++)
+		{
+			const float u = (buf[i]/((float)0x7fff))*filter->drive;
+			float x = driveShaper_apply(driveType, &sh, u,
+			                            softClipTwo(u), inc);
+			float q = (1-filter->q) *1.4 + (1-filter->q) / (1.0f - f_lp2);
+
+			filter->a += f_lp2 * ((x - filter->a)  + q * (filter->a - filter->b ));
+			if(filter->a > 1) filter->a = 1;
+			else if(filter->a < -1) filter->a = -1;
+
+			filter->b  += f_lp2 * (filter->a - filter->b );
+			if(filter->b > 1) filter->b = 1;
+			else if(filter->b < -1) filter->b = -1;
+
+			int32_t tmp;
+			tmp = (filter->b  * FILTER_GAIN);
+			buf[i] = __SSAT(tmp,16);
+		}
+		*shaper = sh;	/* S084 VX2 review fix F3: write the local back */
+
+	} else {
+		const float drive = filter->drive;
+		float s1 = filter->s1;
+		float s2 = filter->s2;
+		float zi = filter->zi;
+
+		for(i=0;i<size;i++)
+		{
+			const float u    = (buf[i]/((float)0x7fff))*drive;
+			const float ax   = 0.25f*u*u;
+			const float a1   = 0.25f*s1*s1;
+			const float Nx   = svf_padeNum(ax);
+			const float Dx   = svf_padeDen(ax);
+			const float N1   = svf_padeNum(a1);
+			const float D1   = svf_padeDen(a1);
+			const float invA = 1.f / (Dx*D1);
+			const float s    = u*Nx*D1*invA;
+			const float x    = driveShaper_apply(driveType, &sh, u, s, inc);
+			const float t1   = N1*Dx*invA;
+
+			/* input with half sample delay, for non-linearities */
+			const float ih = 0.5f * (x + zi);
+			zi = x;
+
+			const float v0   = 0.5f * (ih - 2*R*s1 - s2);
+			const float a0   = v0*v0;
+			const float N0   = svf_padeNum(a0);
+			const float D0   = svf_padeDen(a0);
+			const float E    = D0 + f*2*R*N0;
+			const float P    = ff*N0*t1;
+			const float F    = P + E;
+			const float Q    = P*x + s2*E + f*D0*t1*s1;
+			const float invB = 1.f / (D0*E*F);
+			const float t0   = N0*E*F*invB;
+			const float g0   = D0*D0*F*invB;
+			const float y1   = Q*D0*E*invB;
+
+			const float s1t1 = s1*t1;
+			const float xx   = t0*(x - y1);
+			const float y0   = (s1t1 + f*xx)*g0;
+			s1 = s1t1 + 2*f*(xx - t0*2*R*y0);
+			s2 = s2 + 2*f*t1*y0;
+
+			int32_t tmp;
+			switch(type)
+			{
+			default:
+				filter->s1 = s1;
+				filter->s2 = s2;
+				filter->zi = zi;
+				*shaper = sh;	/* S084 VX2 review fix F3 */
+				return;
+			case FILTER_LP:
+				tmp = fastTanh(y1) * 0x7fff;
+				buf[i] = __SSAT(tmp,16);
+				break;
+			case FILTER_HP:
+			{
+				const float ugb = 2*R*y0;
+				const float h = x - ugb - y1;
+				tmp = h * FILTER_GAIN;
+				buf[i] = __SSAT(tmp,16);
+			}
+				break;
+			case FILTER_BP:
+				tmp = y0 * FILTER_GAIN;
+				buf[i] = __SSAT(tmp,16);
+				break;
+			case FILTER_UNITY_BP:
+			{
+				const float ugb = 2*R*y0;
+				tmp = ugb * FILTER_GAIN;
+				buf[i] = __SSAT(tmp,16);
+			}
+				break;
+			case FILTER_NOTCH:
+			{
+				const float ugb = 2*R*y0;
+				tmp = (x-ugb) * FILTER_GAIN;
+				buf[i] = __SSAT(tmp,16);
+			}
+				break;
+			case FILTER_PEAK:
+			{
+				const float ugb = 2*R*y0;
+				const float h = x - ugb - y1;
+				tmp = (y1-h) * FILTER_GAIN;
+				buf[i] = __SSAT(tmp,16);
+			}
+				break;
+			}
+		}
 		filter->s1 = s1;
 		filter->s2 = s2;
 		filter->zi = zi;
+		*shaper = sh;	/* S084 VX2 review fix F3 */
 	}
 }
 //------------------------------------------------------------------------------------

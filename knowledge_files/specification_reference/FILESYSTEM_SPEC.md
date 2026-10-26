@@ -74,8 +74,9 @@ Session 080 (PERF performance surface, `MODULE_INTERCHANGE_SPEC.md` "PERF
 performance surface"):
 
 - `settings.cfg` gains seven Global keys — `perf_btn_lt`, `perf_note_lt`,
-  `perf_btn_rt`, `perf_note_rt` (BAR overlay trigger type 0..11 / note
-  0..127, 0 = the track's note), `scd` (direct scene change division 0..9),
+  `perf_btn_rt`, `perf_note_rt` (BAR overlay trigger type 0..14 since S084
+  P3 / note 0..127, 0 = the track's note), `scd` (direct scene change
+  division 0..9),
   `qcd` (queued change division 0..17), `qac` (queue action 0..8) — and the
   terminator becomes `lines=24` (see "settings.cfg"). A P1-era file's `pcr=`
   line (a duplicate PC reset, removed) is skipped as an unknown key; the PC
@@ -132,7 +133,7 @@ Use this document to distinguish three things:
   `/.hcprms1`/`/.hcprms2` AutoSave pair and boot readers, the 16 hidden
   Pattern A/B pairs specified in `AUTOSAVE.md`, and `.fx` v2 Scene/Bank Effect
   storage.
-- Settled target shape: Bank, Scene, Kit, Pattern, Sample, Wavetable, Effect,
+- Settled target shape: Bank, Scene, Kit, Pattern, samples, wavetables, Effect,
   Instrument, and `settings.cfg` filesystem layout.
 - Not implemented yet: Effect library/browser persistence,
   crash-recoverable promotion into explicit Bank library files,
@@ -372,8 +373,8 @@ Bank/
 Scene/
 Kit/
 Pattern/
-Sample/
-Wavetable/
+samples/
+wavetables/
 Effect/
 Instrument/
 ```
@@ -713,7 +714,9 @@ midi_routing (S083: 0..7 = off UtD DtD DtU bth DtA AtD all),
 screensaver_on_off, bar_reset_mode, prescaler_clock_in,
 prescaler_clock_out1, prescaler_clock_out2, follow, and osc_wave_interp, and
 since Session 080 `perf_btn_lt`, `perf_note_lt`, `perf_btn_rt`,
-`perf_note_rt`, `scd`, `qcd`, `qac` (writer cases 17..23; defaults 0), and
+`perf_note_rt`, `scd`, `qcd`, `qac` (writer cases 17..23; defaults 0; the
+`perf_btn_*` range is 0..14 since S084 P3 and older values are not
+migrated), and
 since the S083 follow-up `perf_vel_lt`, `perf_vel_rt` (cases 24/25: the
 SHIFT+REC `pv<`/`pv>` overlay roll velocity rhythm, a packed roll-rhythm
 byte as the step `rtm` special, 0 = off; the menu snaps an unlisted byte and
@@ -843,8 +846,10 @@ The underlying asyncfatfs layer uses a state-machine approach to navigate direct
 
 ## Numbered Folders
 
-`Bank`, `Scene`, `Kit`, and `Wavetable` contain meaningful numbered
-subdirectories. Numbered folders use this form:
+`Bank`, `Scene` and `Kit` contain meaningful numbered subdirectories.
+`wavetables/` folders may carry an optional numeric ordering prefix (it is
+stripped from the display name; see "Wavetable"). Numbered folders use this
+form:
 
 ```text
 000 <name>
@@ -2270,46 +2275,90 @@ Current Pattern notes:
 
 ## Sample
 
-Status: legacy sample/loop install path exists; this target root pool naming is
-part of the future typed layout.
+Status: implemented (S084 VX2). Root `samples/` holds the installed samples.
 
-`Sample/` contains an alphanumerically sorted list of `.wav` files to write to
-flash:
+`samples/` is walked recursively, files first and then subfolders, each in
+natural order (`storage_naturalCompare()`: digit runs compare by value, so
+`f2` sorts before `f10`). Depth is limited to three levels below
+`samples/`. Folders are opened by their long names, so names longer than
+8.3, with spaces or mixed case install normally. Only mono 16-bit 44.1 kHz
+PCM WAV files are accepted; other files are skipped and counted, as is a
+file whose declared data runs past its end or that fails to read during the
+copy (the install continues; only a flash programming failure aborts it). Samples play from the `smp`/`slp` oscillator types;
+looping is an oscillator-level choice, not a directory distinction. Each
+sample's catalogue entry carries the peak-normalisation gain byte (see
+"Sample flash catalogue v2").
 
 ```text
-Sample/
+samples/
   <sample name>.wav
+  <folder>/
+    <sample name>.wav
 ```
-
-Samples play from normal oscillators. Looping is an oscillator-level option,
-not a directory-level distinction.
 
 ## Wavetable
 
-Status: settled target; the library/browser remains deferred, while Scene and
-Bank child `.fx` v2 storage is implemented in Session 072 ST6.
+Status: implemented (S084 VX2).
 
-`Wavetable/` contains numbered wavetable folders:
+`wavetables/` is walked recursively. Every folder that contains valid WAV
+frames is one wavetable, named by the folder with a leading digit run and one
+or more of ` `, `_`, `-` stripped (`000 hvoice` displays as `hvoice`);
+ordering still uses the full folder name in natural order. Files directly in
+`wavetables/` belong to no table and are ignored. Folders are opened by
+their long names. Depth is limited to three folder levels below
+`wavetables/` (the deepest open chain is `wavetables/`, three folders and one
+frame file, within asyncfatfs's five handles); deeper folders are not
+visited.
 
 ```text
-Wavetable/
-  000 <wavetable name>/
-  001 <wavetable name>/
+wavetables/
+  hvoice/
+    frame001.wav
+    frame002.wav
+  004 <analog>/
+    <frame>.wav
 ```
 
-Each wavetable folder contains an alphanumerically sorted set of `.wav` files:
+Frames are stored exactly as supplied (W1): mono or stereo, 8, 16 or 24-bit;
+stereo becomes mono by averaging, 24-bit is rounded to 16-bit, and 8-bit stays
+8-bit with the WAV unsigned bias removed. All frames of one table must share
+the frame length and stored bit depth (8 or 16); their source forms may
+differ (a stereo or 24-bit frame in a table that began with a mono 16-bit
+one is converted with its own format). A file that does not match the first
+in length or stored depth is skipped and counted, as are frames beyond the
+128th. A table may have 1..128 frames. A frame that fails to read skips its
+table, not the install. The first valid file sets
+the length and depth. A table that does not fit in the remaining sample flash
+is skipped whole before any byte is written. The short name is `wNN` and the
+single-parameter view shows the folder name; `wav` 0..127 maps onto the
+table's frames with interpolation.
 
-```text
-Wavetable/000 <wavetable name>/
-  <sample a>.wav
-  <sample b>.wav
-  <sample c>.wav
-```
+Wavetables are read by the `wtb` oscillator type only. Every frame length costs
+the same; there are no mips and no on-device expansion.
 
-Wavetables are loaded during the sample-load process and written to flash. They
-behave like normal samples in storage, but are only read by wavetable
-oscillators. A wavetable oscillator operates on one wavetable at a time and can
-be modulated across all samples inside that wavetable. Wavetable samples always
+## Sample flash catalogue v2
+
+Regions inside sectors 7..11 (all 32-byte aligned):
+
+| Region | Address | Bytes |
+|---|---|---:|
+| stock-wave block (5 waves x 11 levels) | `0x080C0000` | 61,120 |
+| item data (samples, wavetables) | `0x080CEEC0` | up to 1,241,408 |
+| catalogue v2 | `0x081FE000` | 8,192 |
+
+The 32-byte header holds `"LXC2"`, version 2, the entry size (20), the sample
+and wavetable counts, the stock-valid flag, the first free data byte and the
+stock base. Sample entries hold (offset, frames, 8-character name, gain code);
+wavetable entries hold (offset, frame length, frame count, bits, name). Entries
+are programmed as each item finishes; the magic is programmed last, so a
+partial install reads as EMPTY or STALE, never as a half catalogue. A v1
+install (count word at the base, no v2 magic) reports STALE and the boot screen
+shows `Samples invalid` / `reload samples`; nothing is migrated (Q7).
+
+The gain code is `floor(24 log2(32767 / peak))` (1/24-octave steps, never
+clipping); playback applies `2^(code/24)` once per block to `smp`/`slp` and to
+sample transients (Q15). Wavetable frames get no gain. The DSP reads the
+catalogue in place; there is no RAM index (Q8).
 play looped. The menu shows the wavetable name when selecting the wavetable
 used by the oscillator.
 
@@ -2425,16 +2474,15 @@ whitelists `menu_loadSaveLoadTypes[]` and `menu_loadSaveSaveTypes[]` in
   Scene Load actions accumulate their destination mask; leaving the family
   performs at most one HCNAMES rewrite.
 
-- **`Load:[Samples]`** (Load page only; restored in Session 073, missing
-  from `menu_loadSaveLoadTypes[]` since July): OK runs the modal
+- **`Load:[Samples]`** (Load page only): OK runs the modal
   `menu_loadSamplesModal()`. It first waits up to 10 s (`Waiting SD...`) for
-  a storage operation that was already running, suspends audio, erases
-  on-chip sample sectors 7–11, installs the card's `/samples` folder, then
-  appends `/loops`, and reinitialises audio. Only mono 16-bit 44.1 kHz PCM
-  WAV files are accepted; files are taken in whole-filename order with ASCII
-  case folded. Save has no Samples action.
-
-Still compiled but intentionally gated from the normal type cycler:
+  a storage operation that was already running, suspends audio, erases sample
+  sectors 7..11, generates the stock-wave block, installs `samples/` and then
+  `wavetables/`, commits catalogue v2 (magic last) and reinitialises audio.
+  `/loops` is retired. The modal shows the stages (`Erasing...`,
+  `Stock waves`, `Samples NNN`, `Wavetbl NNN`, `Saving index`) and a
+  `Smp NNN Wtb NN` / `Skip NNN` summary held for 1.5 s. Save has no Samples
+  action.
 
 - `Settings` / Globals
 - All
@@ -2834,10 +2882,10 @@ Kit/
     tight.hat
 Pattern/
   four_on_floor.pat
-Sample/
+samples/
   glass_hit.wav
-Wavetable/
-  000 Vowels/
+wavetables/
+  Vowels/
     a.wav
     e.wav
     i.wav
@@ -2847,3 +2895,30 @@ Instrument/
   909kik.drm
   snap.snr
 ```
+
+
+## Session 084 P1 - instrument keys for oscillator type and run mode
+
+**Status:** implemented; hardware verification pending.
+
+Every instrument [params] section gains appended keys (descriptor indices are
+stored, so append only):
+
+| Instrument | Keys |
+|---|---|
+| Drum | osc1_type, osc1_source, osc2_type, osc2_source, osc_run_mode |
+| Snare | osc1_type, osc1_source, osc_run_mode |
+| Cymbal | osc1_type, osc1_source, osc2_type, osc2_source, osc3_type, osc3_source, osc_run_mode |
+| HiHat | the same seven as Cymbal |
+
+- Values: type = 0 wav, 1 pwm, 2 smp, 3 slp; source = pwm family 0..5 or
+  installed sample index; run mode = 0 rst, 1 fre, 2 itp.
+- Missing keys load 0. The staged slot is zeroed before parsing, so an older
+  Kit/Instrument file loads as wav / source 0 / rst (today's behaviour).
+  No migration is performed.
+- oscN_wave keeps its key and byte domain, but its meaning now depends on the
+  type: a stock-wave index for wav (clamped to 5), a width or start control
+  0..127 otherwise. Samples are no longer part of the waveform list; their
+  selection is oscN_source with type smp or slp.
+- osc2_mod_type accepts 0 fm, 1 mix, 2 snc, 3 rng.
+- LFO lfo_wave accepts 0..17 (8..15 one-shots, 16 xtr, 17 xt1).

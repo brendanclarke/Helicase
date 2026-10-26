@@ -33,8 +33,22 @@
     (INSTRUMENT_PARAM_FLAG_MORPHABLE | INSTRUMENT_PARAM_FLAG_MODULATABLE | \
      INSTRUMENT_PARAM_FLAG_AUTOMATABLE)
 
-/* Generic row: key, category, long label (<=8), short label (<=3), dtype,
- * ParamDescriptor flags/domain, type-change default, and inclusive maximum. */
+/*
+ * Generic row with an explicit Effect capability flag (S084 VX3 VX3-2.9).
+ *
+ * What:       builds one descriptor while preserving the shared instrument
+ *             binding/domain layout and allowing a type to mark a row as
+ *             buffer-dependent. Why: CrumpBit Rate's reachable minimum is a
+ *             runtime property of the FxBuffer share. Inputs: row metadata,
+ *             instrument flags/domain, default/max and Effect flags. Outputs:
+ *             one initialized descriptor. Accessors: Effect parameter tables.
+ */
+#define EFFECT_ROW_FLAGS(key_, cat_, long_, short_, dtype_, flags_, mod_, def_, max_, effect_flags_) \
+    { { key_, short_, long_, cat_, (uint8_t)(dtype_), (uint8_t)(flags_), mod_, \
+        EFFECT_BIND_NONE }, (uint8_t)(def_), (uint8_t)(max_), \
+      (uint8_t)(effect_flags_), 0 }
+
+/* Generic row: the established non-buffer-dependent form. */
 #define EFFECT_ROW(key_, cat_, long_, short_, dtype_, flags_, mod_, def_, max_) \
     { { key_, short_, long_, cat_, (uint8_t)(dtype_), (uint8_t)(flags_), mod_, \
         EFFECT_BIND_NONE }, (uint8_t)(def_), (uint8_t)(max_), 0u, 0 }

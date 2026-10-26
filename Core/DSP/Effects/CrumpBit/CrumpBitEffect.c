@@ -18,6 +18,7 @@
 #include "StepScale.h"
 #include "sequencer.h"
 #include <math.h>
+#include <string.h>
 
 /*
  * Private DSP constants (S074_CRUMPBIT_EFFECT.md §3).
@@ -42,8 +43,8 @@
 #define CRUMPBIT_LOOP_MIN          4u
 #define CRUMPBIT_DIVISION_NONE     0xFFu
 
-_Static_assert(sizeof(CrumpBitRuntime) == 56u,
-               "CrumpBitRuntime size is recorded in the S074 schedule and "
+_Static_assert(sizeof(CrumpBitRuntime) == 68u,
+               "CrumpBitRuntime size is recorded in the S084 schedule and "
                "must stay inside the 76 B Effect union");
 _Static_assert(CRUMPBIT_BUFFER_BYTES >=
                (uint32_t)CRUMPBIT_DELAY_MAX_SAMPLES + 2u,
@@ -88,7 +89,8 @@ float crumpBit_rateSamples(uint8_t rate)
  * Callers: crumpBit_syncDivision(), crumpBit_targetSamples(). Affiliates:
  * stepScale_ticksQ8() (Q8.8 ticks).
  */
-static uint8_t crumpBit_divisionFor(float target, float per_tick)
+static uint8_t crumpBit_divisionFor(float target, float per_tick,
+                                    uint32_t max_len)
 {
     uint8_t low = CRUMPBIT_DIVISION_NONE;
     uint8_t high = CRUMPBIT_DIVISION_NONE;
@@ -99,7 +101,7 @@ static uint8_t crumpBit_divisionFor(float target, float per_tick)
     for (i = 0u; i < STEP_SCALE_COUNT; i++) {
         const float t = ((float)stepScale_ticksQ8(i) / 256.0f) * per_tick;
 
-        if (t > CRUMPBIT_DELAY_MAX_SAMPLES)
+        if (t > (float)max_len)
             continue;
         if (t <= target) {
             low = i;
@@ -116,12 +118,15 @@ static uint8_t crumpBit_divisionFor(float target, float per_tick)
     return (target * target < t_low * t_high) ? low : high;
 }
 
-uint8_t crumpBit_syncDivision(uint8_t rate, uint16_t bpm)
+uint8_t crumpBit_syncDivision(uint8_t rate, uint16_t bpm, uint32_t max_len)
 {
     const float per_tick =
         CRUMPBIT_SAMPLES_PER_TICK / (float)(bpm ? bpm : 1u);
 
-    return crumpBit_divisionFor(crumpBit_rateSamples(rate), per_tick);
+    if (max_len > CRUMPBIT_BUFFER_BYTES)
+        max_len = CRUMPBIT_BUFFER_BYTES;
+    return crumpBit_divisionFor(crumpBit_rateSamples(rate), per_tick,
+                                max_len > 2u ? max_len - 2u : 0u);
 }
 
 /*
@@ -135,41 +140,122 @@ uint8_t crumpBit_syncDivision(uint8_t rate, uint16_t bpm)
  * samples. Caller: crumpBit_process(). Affiliates: crumpBit_divisionFor(),
  * stepScale_ticksQ8().
  */
-static float crumpBit_targetSamples(uint8_t rate, uint8_t sync, uint16_t bpm)
+static float crumpBit_targetSamples(uint8_t rate, uint8_t sync, uint16_t bpm,
+                                    uint32_t max_len)
 {
     const float per_tick =
         CRUMPBIT_SAMPLES_PER_TICK / (float)(bpm ? bpm : 1u);
     const float free_run = crumpBit_rateSamples(rate);
-    const float synced = ((float)stepScale_ticksQ8(
-        crumpBit_divisionFor(free_run, per_tick)) / 256.0f) * per_tick;
+    const uint8_t division = crumpBit_divisionFor(
+        free_run, per_tick, max_len > 2u ? max_len - 2u : 0u);
+    const float synced = ((float)stepScale_ticksQ8(division) / 256.0f) *
+                         per_tick;
     const float target = sync ? synced : free_run;
+    const float limit = (float)(max_len > 2u ? max_len - 2u : 0u);
 
-    return (target > CRUMPBIT_DELAY_MAX_SAMPLES)
-        ? CRUMPBIT_DELAY_MAX_SAMPLES : target;
+    return (target > limit) ? limit : target;
+}
+
+/* Reverse one inclusive byte range for the in-place circular rotation below. */
+static void crumpBit_reverse(int8_t *base, uint32_t first, uint32_t last)
+{
+    while (first < last) {
+        const int8_t sample = base[first];
+
+        base[first++] = base[last];
+        base[last--] = sample;
+    }
 }
 
 /*
- * Seat the loop in the current Effect share.
+ * Keep the newest audio in a smaller loop (S084 VX3 VX3-2.6).
  *
- * What: the loop length is min(share bytes, CRUMPBIT_BUFFER_BYTES). When it
- * differs from the seated length (first block after init, or a share change),
- * the loop is re-seated: write position 0 and valid 0, so old content is
- * muted rather than read with the wrong geometry. Inputs: runtime, share (may
- * be NULL). Output: loop length (0 if no share). Callers: crumpBit_process(),
- * crumpBit_bufferChanged(). Affiliates: FxBuffer share contract.
+ * What: reorders the K newest loop bytes to [0, K) oldest first without a
+ * scratch buffer. A contiguous tail uses memmove(); a wrapped tail rotates
+ * the old ring in place before the new length hides its unused suffix. Why:
+ * the shrinking top of the share is about to belong to a voice unit, so the
+ * newest audio moves down first. Inputs: runtime (length, write_pos, valid),
+ * base, newLen. Outputs: the reordered bytes; caller sets write_pos/valid.
+ * Accessors: crumpBit_seat(). Affiliates: FxBuffer's contiguous share.
+ */
+static uint32_t crumpBit_compact(const CrumpBitRuntime *rt, int8_t *base,
+                                 uint32_t new_len)
+{
+    const uint32_t keep_limit = (new_len > 2u) ? new_len - 2u : 0u;
+    const uint32_t keep = (rt->valid < keep_limit) ? rt->valid : keep_limit;
+    const uint32_t length = rt->length;
+    const uint32_t write_pos = rt->write_pos;
+
+    if (!base || keep == 0u || length == 0u)
+        return keep;
+    if (write_pos >= keep) {
+        /* The newest K bytes are contiguous immediately before write_pos. */
+        memmove(base, base + write_pos - keep, keep);
+    } else {
+        /* Rotate the circular sequence so its newest K bytes begin at zero. */
+        const uint32_t start = (write_pos + length - keep) % length;
+
+        if (start != 0u) {
+            crumpBit_reverse(base, 0u, start - 1u);
+            crumpBit_reverse(base, start, length - 1u);
+            crumpBit_reverse(base, 0u, length - 1u);
+        }
+    }
+    return keep;
+}
+
+/*
+ * Seat the loop in the current share, elastically (S084 VX3 VX3-2.6).
+ *
+ * What: target = min(share bytes, CRUMPBIT_BUFFER_BYTES). First seat starts
+ * empty; shrink keeps the newest min(valid, target - 2) bytes, arms a one-
+ * block read crossfade only when the current delay no longer fits, and
+ * cancels pending growth; grow waits for the write wrap. Why: a voice-unit
+ * reservation must not mute a running CrumpBit loop, while growth must not
+ * expose unrecorded bytes in the middle of a cycle. Inputs: runtime and share
+ * (NULL = length 0). Outputs: seat fields. Callers: crumpBit_process() and
+ * crumpBit_bufferChanged(). Affiliates: crumpBit_compact(), fxbuf_endPass().
  */
 static uint32_t crumpBit_seat(CrumpBitRuntime *rt, const fx_share_t *share)
 {
-    uint32_t len = share ? share->bytes : 0u;
+    uint32_t target = share ? share->bytes : 0u;
 
-    if (len > CRUMPBIT_BUFFER_BYTES)
-        len = CRUMPBIT_BUFFER_BYTES;
-    if (len != rt->length) {
-        rt->length = len;
+    if (target > CRUMPBIT_BUFFER_BYTES)
+        target = CRUMPBIT_BUFFER_BYTES;
+    if (!share || !share->base) {
+        rt->length = 0u;
         rt->write_pos = 0u;
         rt->valid = 0u;
+        rt->pending_length = 0u;
+        rt->xfade = 0u;
+        return 0u;
     }
-    return len;
+    if (rt->length == 0u) {
+        rt->length = target;
+        rt->write_pos = 0u;
+        rt->valid = 0u;
+        rt->pending_length = 0u;
+        return target;
+    }
+    if (target < rt->length) {
+        const uint32_t keep = crumpBit_compact(
+            rt, (int8_t *)(void *)share->base, target);
+        const float new_limit = (float)(target > 2u ? target - 2u : 0u);
+
+        rt->length = target;
+        rt->write_pos = keep;
+        rt->valid = keep;
+        rt->pending_length = 0u;
+        if (rt->delay > new_limit) {
+            rt->xfade = 1u;
+            rt->xfade_wet = 0.0f;
+        }
+    } else if (target > rt->length) {
+        rt->pending_length = target;
+    } else {
+        rt->pending_length = 0u;
+    }
+    return rt->length;
 }
 
 /*
@@ -192,6 +278,9 @@ static void crumpBit_init(void *rt_void, const fxbuf_handoff_t *handoff)
     rt->write_pos = 0u;
     rt->valid = 0u;
     rt->primed = 0u;
+    rt->pending_length = 0u;
+    rt->xfade_wet = 0.0f;
+    rt->xfade = 0u;
 }
 
 /*
@@ -264,6 +353,9 @@ static void crumpBit_writeParam(void *rt_void, uint8_t index, uint8_t value)
  * io->l/io->r in place and loop bytes in the share. Caller: effects_process().
  * Affiliates: crumpBit_adc(), crumpBit_targetSamples(), crumpBit_seat(),
  * seq_getBpm().
+ * S084 VX3 VX3-2.7: growth takes effect at the write wrap (pending_length),
+ * a shrink's read jump crossfades over one block, and Sync only picks
+ * divisions that fit the current loop.
  */
 static void crumpBit_process(void *rt_void, effect_io_t *io)
 {
@@ -296,7 +388,9 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     float ac_yl;
     float ac_yr;
     float per_frame;
+    float xfade_from;
     uint8_t n;
+    uint8_t xfade;
 
     if (!rt || !io || !io->l || !io->share || !io->share->base ||
         io->frames == 0u)
@@ -314,7 +408,7 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     keep = (uint32_t)~((uint32_t)rt->bit_off & ~invert) & 0xFFu;
 
     /* Tape target for this block; the first block starts on it. */
-    target = crumpBit_targetSamples(rt->rate, rt->sync, seq_getBpm());
+    target = crumpBit_targetSamples(rt->rate, rt->sync, seq_getBpm(), len);
     if (target > flen - 2.0f)
         target = flen - 2.0f;
     if (!rt->primed) {
@@ -352,6 +446,8 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     ac_xr = rt->ac_x_r;
     ac_yl = rt->ac_y_l;
     ac_yr = rt->ac_y_r;
+    xfade = rt->xfade;
+    xfade_from = rt->xfade_wet;
 
     for (n = 0u; n < io->frames; n++) {
         const uint32_t code_l = (crumpBit_adc(left[n]) & keep) ^ invert;
@@ -387,13 +483,27 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
         wet = ((float)loop[i0] +
                frac * (float)(loop[i1] - loop[i0])) * CRUMPBIT_LSB;
         wet = ((delay + 2.0f) <= (float)valid) ? wet : 0.0f;
+        if (xfade)
+            wet = xfade_from + (wet - xfade_from) *
+                ((float)(n + 1u) / (float)io->frames);
+        rt->xfade_wet = wet;
 
         /* Re-record through the 8-bit converter; feedback stays bounded. */
         loop[wp] = (int8_t)((int32_t)crumpBit_adc(0.5f * (hl + hr) +
                                                  fb * wet) - 128);
-        wp++;
-        wp -= (wp >= len) ? len : 0u;
-        valid += (valid < len) ? 1u : 0u;
+        {
+            const uint32_t old_len = len;
+
+            wp++;
+            wp -= (wp >= old_len) ? old_len : 0u;
+            valid += (valid < old_len) ? 1u : 0u;
+            if (rt->pending_length > old_len && wp == 0u) {
+                len = rt->pending_length;
+                flen = (float)len;
+                rt->pending_length = 0u;
+                wp = old_len;
+            }
+        }
 
         right[n] = hr + mix * (gain_r * wet - hr);
         left[n] = hl + mix * (gain_l * wet - hl);
@@ -406,6 +516,7 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     rt->ac_x_r = ac_xr;
     rt->ac_y_l = ac_yl;
     rt->ac_y_r = ac_yr;
+    rt->xfade = 0u;
     /* Land exactly on the targets so ramp rounding never accumulates. */
     rt->mix = mix_to;
     rt->feedback = fb_to;
@@ -426,7 +537,40 @@ static void crumpBit_bufferChanged(void *rt_void, const fx_share_t *share)
     (void)crumpBit_seat((CrumpBitRuntime *)rt_void, share);
 }
 
-/* CrumpBit operations; the fixed delay range has no buffer-dependent clamp. */
+/*
+ * Smallest reachable Rate for the share (S084 VX3 VX3-2.8, D14, Q32).
+ *
+ * What: for the Rate row, returns ceil(127 * ln(70573 / (len - 2)) /
+ * ln(80)), clamped to 0..127, where len is the current share capped at the
+ * preferred loop size. Other rows return zero. Why: lower Rate means a
+ * longer delay, so the manager must retain the stored value while applying
+ * the smallest value the current loop can actually play. Inputs: row index
+ * and current share. Output: effective minimum Rate. Caller:
+ * effects_service(). Affiliates: CRUMPBIT_DELAY_MAX_SAMPLES and math.h.
+ */
+static uint8_t crumpBit_effectiveMin(uint8_t index, const fx_share_t *share)
+{
+    float len;
+    float ratio;
+    float result;
+
+    if (index != CRUMPBIT_PARAM_RATE || !share)
+        return 0u;
+    len = (float)share->bytes;
+    if (len > (float)CRUMPBIT_BUFFER_BYTES)
+        len = (float)CRUMPBIT_BUFFER_BYTES;
+    if (len <= 2.0f)
+        return 127u;
+    ratio = CRUMPBIT_DELAY_MAX_SAMPLES / (len - 2.0f);
+    if (ratio <= 1.0f)
+        return 0u;
+    result = ceilf(127.0f * logf(ratio) / CRUMPBIT_RATE_LN_SPAN);
+    if (result > 127.0f)
+        result = 127.0f;
+    return (uint8_t)result;
+}
+
+/* CrumpBit operations; its Rate range follows the elastic Effect share. */
 const effect_type_ops_t crumpBit_ops = {
     crumpBit_init,
     crumpBit_exportHandoff,
@@ -434,4 +578,5 @@ const effect_type_ops_t crumpBit_ops = {
     crumpBit_process,
     crumpBit_bufferChanged,
     NULL,
+    crumpBit_effectiveMin,
 };

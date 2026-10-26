@@ -59,6 +59,24 @@ void lfo_init(Lfo *lfo)
 	lfo->modNodeValue	= 1;
 	lfo->polarity		= MOD_NODE_POLARITY_NEGATIVE;
 
+	/*
+	 * One-shot state at init (S084 P1 P1-1.4).
+	 *
+	 * What:       a new LFO starts IDLE with no pending delay. An idle
+	 *             one-shot with a voice retrigger (v1..v6) outputs its start
+	 *             value (phase 0) until that voice triggers; with retrigger
+	 *             off or scn, lfo_calc() fires it on its first block (S084 P1
+	 *             review fix F7), and a Scene activation fires it again.
+	 * Why:        engine init and slot resets must leave one-shot waves in a
+	 *             defined, silent-start state (plan §4.5).
+	 * Inputs:     none.  Outputs: lfo->oneShotState, lfo->delayBlocks.
+	 * Accessors:  each engine's *_initVoice() through lfo_init().
+	 * Affiliates: lfo_retriggerPhase(), lfo_calc().
+	 */
+	lfo->oneShotState	= LFO_ONESHOT_IDLE;
+	lfo->delayBlocks	= 0u;
+	lfo->rnd			= 0.f;
+
 	modNode_init(&lfo->modTarget);
 	modNode_init(&lfo->modTarget2);
 }
@@ -68,10 +86,93 @@ float lfo_calc(Lfo *lfo)
 	uint32_t oldPhase 		= lfo->phase;
 	float inc = lfo->phaseInc*lfo->modNodeValue;
 	uint32_t incInt = inc;
-	lfo->phase 			   += incInt;//lfo->phaseInc*lfo->modNodeValue;
-	const uint8_t overflow 	= oldPhase>lfo->phase;
+	uint8_t overflow = 0u;
+	const uint8_t oneShot = lfo_isOneShot(lfo);
+	const uint8_t wave = lfo->waveform;
+	uint8_t base;
 
-	switch(lfo->waveform)
+	/*
+	 * One block of LFO output in 0..1 (S084 P1 P1-1.5).
+	 *
+	 * What:       advances the phase (looping waves always; one-shot waves only
+	 *             while running, with a start delay and a held end value) and
+	 *             returns the wave value. Noise now spans 0..1 like every wave.
+	 * Why:        plan §4.5 one-shots; plan §6 r4 Q17: every wave must behave
+	 *             the same under the negative/positive/bipolar polarity
+	 *             options, and noise previously spanned -1..1.
+	 * Inputs:     lfo (phase, phaseInc, modNodeValue, waveform, one-shot state).
+	 * Outputs:    value 0..1; lfo->phase, oneShotState, delayBlocks, rnd.
+	 * Accessors:  lfo_dispatchNextValue() once per block per slot.
+	 * Affiliates: lfo_retriggerPhase(), LFO_* constants, the LFO adapters in
+	 *             InstrumentManager (they clamp the source to 0..1).
+	 */
+	if (!oneShot) {
+		lfo->phase += incInt;
+		overflow = (uint8_t)(oldPhase > lfo->phase);
+	} else {
+		switch (lfo->oneShotState) {
+		case LFO_ONESHOT_RUN:
+			lfo->phase += incInt;
+			overflow = (uint8_t)(oldPhase > lfo->phase);
+			if (overflow) {
+				lfo->oneShotState = LFO_ONESHOT_HOLD;
+				lfo->phase = 0xffffffffu;
+			}
+			break;
+		case LFO_ONESHOT_DELAY:
+			lfo->phase = 0u;
+			if (lfo->delayBlocks > 0u)
+				lfo->delayBlocks--;
+			if (lfo->delayBlocks == 0u)
+				lfo->oneShotState = LFO_ONESHOT_RUN;
+			break;
+		case LFO_ONESHOT_IDLE:
+			/*
+			 * A one-shot that has not been fired yet
+			 * (S084 P1 review fix F7).
+			 *
+			 * What:       retrigger off (0) or scn: fire now through
+			 *             lfo_retriggerPhase() (start delay, then run, then
+			 *             hold). Retrigger v1..v6: wait for the voice trigger
+			 *             at phase 0, so the output is the wave's start value.
+			 * Why:        IDLE is the state after lfo_init() and after any
+			 *             looping wave (lfo_retriggerPhase() sets IDLE for
+			 *             looping waves), so it is exactly "just became a
+			 *             one-shot". Before this fix a wave change to
+			 *             si1..xt1 in the menu left the LFO frozen at its
+			 *             old mid-cycle phase, a static offset on the target,
+			 *             until the next Scene activation fired it. An LFO
+			 *             with no voice trigger source has nothing else that
+			 *             will fire it, so it fires when selected; at Scene
+			 *             activation instrumentManager_restoreLfoPhaseIfNeeded()
+			 *             fires it again, as before.
+			 * Cost:       a compare per block while IDLE; the fire happens
+			 *             once, after which the state is DELAY/RUN/HOLD.
+			 */
+			if (lfo->retrigger == 0u ||
+				lfo->retrigger == LFO_RETRIGGER_SCENE)
+				lfo_retriggerPhase(lfo);
+			else
+				lfo->phase = 0u;
+			break;
+		default:
+			/* HOLD keeps phase: the held end value. */
+			break;
+		}
+	}
+
+	/*
+	 * Base wave for the value lookup: one-shot values 8..15 reuse waves 0..7,
+	 * xt1 reuses xtr. Stored 0..7 and LFO_XTRI are unchanged.
+	 */
+	if (wave >= LFO_ONE_SHOT_BASE && wave <= LFO_EXP_DOWN_1)
+		base = (uint8_t)(wave - LFO_ONE_SHOT_BASE);
+	else if (wave == LFO_XTRI_1)
+		base = LFO_XTRI;
+	else
+		base = wave;
+
+	switch(base)
 	{
 	//---
 		case LFO_SINE:
@@ -86,7 +187,19 @@ float lfo_calc(Lfo *lfo)
 		return lfo->phase/(float)0xffffffff ;
 		break;
 	//---
-		case LFO_REC:
+	case LFO_REC:
+		/* S084 P1: a one-shot square starts high and holds low. */
+		if(oneShot)
+		{
+			if(lfo->phase <= 0x7fffffffu)
+			{
+				return 1.f;
+			}
+			else
+			{
+				return 0.f;
+			}
+		}
 		if(lfo->phase > 0x7fffffff)
 		{
 			return 1.f;
@@ -97,11 +210,11 @@ float lfo_calc(Lfo *lfo)
 		}
 		break;
 	//---
-		case LFO_NOISE:
-		if(overflow)
+	case LFO_NOISE:
+		/* S084 P1: 0..1 like every wave; rn1's value is drawn at the fire. */
+		if(overflow && !oneShot)
 		{
-			// lfo->rnd = (float)(GetRngValue() & 0x7FFF) / 32767.0f;
-			lfo->rnd = (float)(GetRngValue()) / 32767.0f;
+			lfo->rnd = (float)(GetRngValue() & 0x7FFF) / 32767.0f;
 		}
 		return lfo->rnd;
 		break;
@@ -117,10 +230,18 @@ float lfo_calc(Lfo *lfo)
 			}
 			break;
 	//---
-		case LFO_EXP_DOWN:
+	case LFO_EXP_DOWN:
 			{
 				float x = (0xffffffff-(lfo->phase)) / (float)0xffffffff;
 				return x*x*x;//valueShaperF2F(x,-0.9f);
+			}
+			break;
+	//---
+	case LFO_XTRI:
+			{
+				const float triangle = 1.f -
+					fabsf((lfo->phase/(float)0xffffffff)*2.f - 1.f);
+				return triangle*triangle*triangle;
 			}
 			break;
 	//---
@@ -273,5 +394,61 @@ void lfo_retrigger(uint8_t voice)
 	 * into arbitrary slots.
 	 */
 	instrumentManager_retriggerRuntimeLfos(voice);
+}
+//-------------------------------------------------------------
+uint8_t lfo_isOneShot(const Lfo *lfo)
+{
+	/*
+	 * True for waves that run once per fire (S084 P1 P1-1.3).
+	 *
+	 * What:       waveform 8..15 (the one-shot list) or LFO_XTRI_1.
+	 * Why:        lfo_calc(), lfo_retriggerPhase() and the Scene-activation
+	 *             fire need one shared definition of "one-shot".
+	 * Inputs:     lfo.  Outputs: 1/0 (0 for NULL).
+	 * Accessors:  lfo.c, InstrumentManager.c.
+	 */
+	if (!lfo)
+		return 0u;
+	if (lfo->waveform >= LFO_ONE_SHOT_BASE &&
+		lfo->waveform <= LFO_EXP_DOWN_1)
+		return 1u;
+	return (uint8_t)(lfo->waveform == LFO_XTRI_1);
+}
+//-------------------------------------------------------------
+void lfo_retriggerPhase(Lfo *lfo)
+{
+	/*
+	 * Restart an LFO's phase for a retrigger or Scene fire (S084 P1 P1-1.3).
+	 *
+	 * What:       looping waves jump to phaseOffset (today's behaviour).
+	 *             One-shot waves restart at phase 0 in the DELAY state with
+	 *             delayBlocks = phaseOffset / effective phaseInc (0 if the
+	 *             increment is 0), so `ofs` becomes a start delay scaled to
+	 *             the LFO period. rn1 draws its single random value here.
+	 * Why:        one place owns the looping/one-shot difference for every
+	 *             caller (voice retrigger and Scene activation).
+	 * Inputs:     lfo (non-NULL).
+	 * Outputs:    lfo->phase, oneShotState, delayBlocks, rnd.
+	 * Accessors:  instrumentManager_retriggerRuntimeLfos(),
+	 *             instrumentManager_restoreLfoPhaseIfNeeded().
+	 * Affiliates: lfo_calc(), lfo_isOneShot(), LFO_ONE_SHOT_BASE.
+	 */
+	uint32_t inc;
+
+	if (!lfo)
+		return;
+	if (!lfo_isOneShot(lfo)) {
+		lfo->phase = lfo->phaseOffset;
+		lfo->oneShotState = LFO_ONESHOT_IDLE;
+		lfo->delayBlocks = 0u;
+		return;
+	}
+	inc = (uint32_t)(lfo->phaseInc * lfo->modNodeValue);
+	lfo->phase = 0u;
+	lfo->delayBlocks = inc ? (lfo->phaseOffset / inc) : 0u;
+	lfo->oneShotState = lfo->delayBlocks
+		? LFO_ONESHOT_DELAY : LFO_ONESHOT_RUN;
+	if (lfo->waveform == LFO_NOISE_1)
+		lfo->rnd = (float)(GetRngValue() & 0x7FFF) / 32767.0f;
 }
 //-------------------------------------------------------------

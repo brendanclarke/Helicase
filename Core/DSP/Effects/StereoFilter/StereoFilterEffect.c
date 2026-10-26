@@ -111,4 +111,5 @@ const effect_type_ops_t stereoFilter_ops = {
     stereoFilter_process,
     NULL,
     NULL,
+    NULL,
 };

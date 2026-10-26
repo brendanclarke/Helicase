@@ -49,8 +49,9 @@ def find_function(text, name):
 
 
 def find_object(text, name):
-    m = re.search(r'^[^\n;#]*\b' + re.escape(name) + r'\s*\[[^\]]*\]\s*=\s*\{',
-                  text, re.M)
+    # Any number of dimensions: sine_table[N] and sawTable[11][1024].
+    m = re.search(r'^[^\n;#]*\b' + re.escape(name) +
+                  r'\s*(?:\[[^\]]*\]\s*)+=\s*\{', text, re.M)
     if not m:
         return None
     end = _match_block(text, m.end() - 1)

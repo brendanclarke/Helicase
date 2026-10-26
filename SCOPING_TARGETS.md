@@ -1637,6 +1637,20 @@ Grounding from actual granular-synthesis practice, since this is new DSP territo
 - **Drone.** Interacting sub-oscillators, slow chaotic LFOs, internal bit-crush, a short delay/feedback loop using its share of the Phase 5 DTCM buffer, integrated ring modulation, bit inversion, and some extra pre-wired or limited-selection internal LFOs (i.e., not the full general-purpose LFO routing the main voices get — a smaller, purpose-built set). No transient/envelope in the normal sense — it's meant to sit and drone once triggered.
 - **Karplus-Strong.** This is worth calling out as the *cheapest* of the new voices to implement well: the algorithm is a short noise burst fed into a delay line of length `N = Fs / f0` (sample rate over target fundamental), read back through a simple one-pole averaging filter (`y[n] = (y[n-N] + y[n-N-1]) / 2`, or a loss-factor-weighted version for controllable decay time), fed back into the delay line. A single delay line plus a one-pole filter per voice is far cheaper than any of the other new voice types, and the classic extension for better pitch accuracy at higher notes (an allpass filter correcting the fractional part of the delay length that a purely integer-sample delay line can't represent) is a small, well-documented addition if pitch accuracy on higher-pitched plucks turns out to matter.
 - **Convolution chamber.** A pitch-enveloped transient or user sample run through a simulated resonant chamber (spring reverb, cabinet, etc.) via convolution. This is real convolution reverb, which is the most CPU-expensive item in this entire phase — a true convolution against an arbitrary-length impulse response scales with IR length, and even a short IR (a few hundred samples) is meaningfully more expensive per sample than anything else in this document. This needs an explicit CPU budget decision (how long an IR is affordable per voice, whether it's one shared chamber IR set or per-kit-selectable, whether a cheaper structured/algorithmic reverb approximation is an acceptable substitute for true convolution) before committing to "convolution" as the literal implementation rather than as the description of the desired *sound*.
+- **303-style bass voice (future, user 2026-10-25).** A dedicated instrument
+  in the character of the TB-303. When it is built, refine the stock
+  `sq3`/`sw3` waves (S084 P1, `S084_P1_VOICE_EXPANSIONS.md` §4.1.2).
+  - **Waveform concerns carried from S084 P1:**
+    - The waves were digitised from screenshots, which resolve only the
+      first 30–40 harmonics. Everything above is a fitted power-law roll-off
+      (`tools/plots/plot_stock_waves.py`, `stock_wave_harmonics.csv`), so
+      low notes are only as bright as the fit says.
+    - The captures were taken after a filter, so the resonance "pips" in
+      `sw3` are part of the stored wave rather than a product of the voice's
+      own filter. A 303 voice with its own diode-ladder-style filter would
+      want the raw oscillator shapes instead.
+    - Re-derive both from audio recordings (raw oscillator and filtered),
+      using the same script with WAV input.
 
 ### 7.4 New oscillators
 

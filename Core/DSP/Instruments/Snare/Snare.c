@@ -41,6 +41,7 @@
 #include "modulationNode.h"
 #include "InstrumentManager.h"
 #include "voicePostChain.h"
+#include "InsertEffectsManager.h"
 // #include "TriggerOut.h"
 
 
@@ -105,8 +106,21 @@ void Snare_initVoice(SnareVoice *voice)
 	setDistortionShape(&voice->distortion, 2.f);
 
 	SVF_init(&voice->filter);
+	driveShaper_reset(&voice->shaper);
 
 	lfo_init(&voice->lfo);
+	/*
+	 * Oscillator section init (S084 P1 P1-8.2).
+	 *
+	 * What:       run mode rst, no crossfade, oscCount 2 for Snare.
+	 * Why:        a fresh or reset slot starts in today's behaviour until its
+	 *             `run` row is applied (plan §4.1.6).
+	 * Inputs:     the engine instance.  Outputs: voice->section.
+	 * Accessors:  Snare_initVoice() via
+	 *             instrumentManager_resetRuntimeSlot*().
+	 * Affiliates: OscSection.c, IM_SPECIAL_RUN_MODE writer.
+	 */
+	oscSection_init(&voice->section, 2u);
 }
 //---------------------------------------------------
 void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
@@ -137,17 +151,41 @@ void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
 	 */
 	instrumentManager_applyVelocityModulationTarget(source_slot, vel/127.f);
 
-	float offset = 1;
-	if(voice->transGen.waveform==1) //offset mode
+	/*
+	 * S084 P1 P1-8.3: the run mode decides the trigger behaviour. rst = today
+	 * (phase resets); fre = no reset (oscillators slew); itp = snapshot then
+	 * reset, crossfaded by the section. Snare never clears its filter.
+	 */
 	{
-		offset -= voice->transGen.volume;
+		OscInfo* oscs[2] = { &voice->osc, &voice->noiseOsc };
+
+		if (oscSection_beginTrigger(&voice->section, oscs)) {
+			float offset = 1;
+			/* S084 VX2 VX2-6.5: Snp/Ofs are trs kinds; under wav, bytes 0/1
+			** are PCM transients (transient_isSnap()/transient_isOffset()). */
+			if(transient_isOffset(&voice->transGen)) //offset mode
+			{
+				offset -= voice->transGen.volume;
+			}
+			if(voice->osc.oscType == OSC_TYPE_SMP ||
+			   voice->osc.oscType == OSC_TYPE_SLP)
+				oscSample_restart(&voice->osc);
+		else if(voice->osc.oscType == OSC_TYPE_PWM)
+			voice->osc.phase = (0xffu<<20)*offset;
+		else if(voice->osc.oscType == OSC_TYPE_WTB)
+			/* S084 VX2 VX2-5.8: wavetables start at the table offset;
+			** waveform is a frame position, not a wave id. */
+			voice->osc.phase = (0xffu<<20)*offset;
+		else if(voice->osc.waveform == SINE)
+				voice->osc.phase = (0x3ff<<20)*offset;
+			/* S084 VX2 VX2-4.12: table waves, including sq3..swa, start at the
+			** table offset (osc_isTableWave()). */
+			else if(osc_isTableWave(voice->osc.waveform))
+				voice->osc.phase = (0xff<<20)*offset;
+			else
+				voice->osc.phase = 0;
+		}
 	}
-	if(voice->osc.waveform == SINE)
-		voice->osc.phase = (0x3ff<<20)*offset;
-	else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)
-		voice->osc.phase = (0xff<<20)*offset;
-	else
-		voice->osc.phase = 0;
 
 	DecayEg_trigger(&voice->oscPitchEg);
 	slopeEg2_trigger(&voice->oscVolEg);
@@ -157,6 +195,8 @@ void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
 	//TODO noise muss mit transponiert werden
 
 	transient_trigger(&voice->transGen);
+	/* S084 VX3 VX3-8.9: re-arm the transient buffer stage. */
+	insertFx_transientTrigger(voice->stageSlot);
 
 	SnapEg_trigger(&voice->snapEg);
 }
@@ -192,7 +232,7 @@ void Snare_calcAsyncVoice(SnareVoice *voice)
 	*/
 
 	//calc snap EG if transient sample 0 is activated
-	if(voice->transGen.waveform == 0)
+	if(transient_isSnap(&voice->transGen))
 	{
 		const float snapVal = SnapEg_calc(&voice->snapEg, voice->transGen.pitch);
 		voice->osc.pitchMod += snapVal*voice->transGen.volume;;
@@ -227,7 +267,24 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 
 
 	calcNoiseBlock(&voice->noiseOsc,buf,size,0.9f);
-	SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);
+	if (voice->section.itpState == OSC_ITP_ACTIVE) {
+		int16_t* oldBuf = oscRenderPool_scratchSection();
+
+		calcNoiseBlock(&voice->section.itpOld[1], oldBuf, size, 0.9f);
+		oscSection_blendItp(&voice->section, buf, oldBuf, size);
+	}
+	/* S084 VX3 VX3-8.9: transient buffer PRE-filter stage. */
+	insertFx_renderTransient(voice->stageSlot, INSERT_PLACE_PRE, buf, size,
+	                        voice->transGen.volume, voice->transGen.pitch);
+	/* S084 VX2 VX2-7.6: sft keeps the untouched loop (bit-identical). */
+	if (voice->driveType == DRIVE_TYPE_SFT)
+		SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);
+	else
+		SVF_calcBlockZDFShaped(&voice->filter, voice->filterType,
+		                       voice->driveType, &voice->shaper, buf, size);
+	/* S084 VX3 VX3-8.9: transient buffer POST-filter stage. */
+	insertFx_renderTransient(voice->stageSlot, INSERT_PLACE_POST, buf, size,
+	                        voice->transGen.volume, voice->transGen.pitch);
 
 	//calc transient sample
 	transient_calcBlock(&voice->transGen,transBuf,size);
@@ -235,6 +292,13 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 
 	//calc next osc sample
 	calcNextOscSampleBlock(&voice->osc,transBuf,size,(1.f-voice->mix));
+	if (voice->section.itpState == OSC_ITP_ACTIVE) {
+		int16_t* oldBuf = oscRenderPool_scratchSection();
+
+		calcNextOscSampleBlock(&voice->section.itpOld[0], oldBuf, size,
+		                       (1.f-voice->mix));
+		oscSection_blendItp(&voice->section, transBuf, oldBuf, size);
+	}
 	//--AS apply filter to synthesized sound as well here if desired, or combine code for more efficiency
 
 	/*
@@ -252,8 +316,8 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 		const float ampGain = voice->volumeMod
 			? voice->velo * voice->egValueOscVol
 			: voice->egValueOscVol;
-		voicePost_mixAddGainDist(buf, transBuf, voice->mix, ampGain,
-		                         &voice->distortion, size);
+		voicePost_mixAddGain(buf, transBuf, voice->mix, ampGain, size);
 	}
+	oscSection_finishBlock(&voice->section, size);
 }
 //------------------------------------------------------------------------

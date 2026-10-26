@@ -97,29 +97,48 @@ static uint8_t liveRec_erase[LIVEREC_TARGET_BYTES];
 static uint8_t liveRec_morphValue[LIVEREC_MORPH_TARGETS];
 
 /*
- * Open fast-roll capture (S081 §8.8, E-4; P1C items 4/15).
+ * Open roll capture, one per track (S081 §8.8 E-4, P1C items 4/15; S084 P4
+ * per track, every held roll).
  *
- * What: while a fast roll is held, liveRec_rollHeld is 1 and:
- *  - liveRec_rollTrack/rollStep/rollStartDelay give the start step and
- *    its micro-timing as written at the start;
- *  - liveRec_rollIndex is the current rate;
- *  - liveRec_rollSpan is 1 once the playhead has reached the start step
- *    (at once when the start is the current step or behind it; at the
- *    start step's ring entry when the hit was quantised forward).
- * The span writer only writes steps after the start, and only while
- * liveRec_rollSpan is set; the start and the end drain the ring first
- * (liveRec_syncRing()), so both are decided on the capture's step. Why:
- * P1B rewrote the start step with timing 0 when it ended, and wrote a roll
- * onto the step before a forward-quantised start; the end writer had no
- * start delay to keep. RAM: +2 B.
- * Affiliates: liveRec_triggerIn() (start), liveRec_service() (span),
- * liveRec_endRoll().
+ * What: while a track's roll gesture is recorded, its entry has
+ * LIVEREC_ROLL_HELD and:
+ *  - step/startDelay: the start step and its micro-timing as written;
+ *  - index/rhythm: the current step-roll rate and velocity rhythm (the
+ *    overlay's `pv`, Q8), written into every span and the end step;
+ *  - note/vel and LIVEREC_ROLL_NOTE_DEF: the payload (a `def` note records
+ *    no note special, S081 Q12);
+ *  - hits: roll hits reported since the start (the "released before the
+ *    second hit" test);
+ *  - LIVEREC_ROLL_SPAN: the playhead has reached the start step (at once
+ *    when the start is the current step or behind it; at the start step's
+ *    ring entry when quantised forward, LC-8).
+ * The span writer writes only steps after the start, and only with SPAN
+ * set; the start and the end drain the ring first (liveRec_syncRing()).
+ * Why: S081 kept one slot for all tracks, but S083 Q5 lets overlay rolls
+ * run on several tracks at once: another track's hits were counted against
+ * the open roll, a release on any track ended it, and a second start
+ * overwrote it and left the first track's live hold stuck (S084 P0 F5).
+ * Every held roll is now a span at any rate (user Q7, 2026-10-24), so there
+ * is no slow/fast state. Inputs: liveRec_triggerIn() (start, hits),
+ * liveRec_rollRateChange(). Outputs: span, start and end step writes;
+ * seq_setLiveHold(). RAM: 7 x 8 B = 56 B SRAM1 static (replaces 11 B of
+ * scalars). Affiliates: liveRec_drainRing(), liveRec_endRoll(),
+ * liveRec_endAllRolls().
  */
-static uint8_t  liveRec_rollHeld = 0u;
-static uint8_t  liveRec_rollStep = 0u;
-static uint8_t  liveRec_rollIndex = 0u;
-static uint8_t  liveRec_rollStartDelay = 0u;
-static uint8_t  liveRec_rollSpan = 0u;
+#define LIVEREC_ROLL_HELD      0x01u
+#define LIVEREC_ROLL_SPAN      0x02u
+#define LIVEREC_ROLL_NOTE_DEF  0x04u
+typedef struct {
+    uint8_t flags;
+    uint8_t step;
+    uint8_t index;
+    uint8_t startDelay;
+    uint8_t note;
+    uint8_t vel;
+    uint8_t hits;
+    uint8_t rhythm;
+} liveRec_roll_t;
+static liveRec_roll_t liveRec_roll[NUM_TRACKS];
 
 /*
  * Pending flam grace (S081 §8.7; P1B item 5, P1C items 8/9).
@@ -135,10 +154,6 @@ static int32_t liveRec_graceDeltaQ8;
 static uint32_t liveRec_graceTick;
 static uint8_t liveRec_graceVel = 0u;
 static uint8_t liveRec_graceValid = 0u;
-
-static uint8_t liveRec_rollNote = 0u;
-static uint8_t liveRec_rollNoteDefault = 0u;
-static uint8_t liveRec_rollVel = 0u;
 
 /*
  * Last boundary-ring entry per track (S081 C-9a; S081 P3 FQ3/FQ4).
@@ -165,22 +180,15 @@ static uint8_t liveRec_prevStep[NUM_TRACKS];
 static uint8_t liveRec_prevFlags[NUM_TRACKS];
 
 /*
- * S081 P1B/P1C added state (items 3/9/10/16/26; P1C 2/4/10/15). RAM about 14 B
- * (P1B 10 B + P1C 4 B), plus DEV-only counters.
+ * S081 P1B/P1C added state (items 3/9/10/16/26; P1C 2/4/10/15). RAM about 11 B
+ * (14 B before S084 P4 moved 3 B of roll state), plus DEV-only counters.
  *  lastSceneEpoch/sceneEpochValid  last seen seq_getSceneEpoch() (LR-9);
- *  rollTrack  the track the open fast roll belongs to (LR-3);
- *  rollHits  retriggers seen since ROLL_START (LR-13 plain-trigger fallback);
- *  rollPendingIdx  a fast roll to start at the next ROLL_HIT (LR-14);
- *  rollStartDelay/rollSpan  the roll start's micro-timing and whether the
- *  playhead has reached the start step (P1C LC-7);
  *  eraseSeqCount/eraseSeqTrack  held SEQ erase buttons and the captured
  *  active track (LR-8); eraseFxSeqCount  held FX-mode SEQ buttons (LC-2).
+ * (S084 P4: the roll fields moved into the per-track liveRec_roll[].)
  */
 static uint8_t liveRec_lastSceneEpoch;
 static uint8_t liveRec_sceneEpochValid;
-static uint8_t liveRec_rollTrack = 0u;
-static uint8_t liveRec_rollHits;
-static uint8_t liveRec_rollPendingIdx;
 static uint8_t liveRec_eraseSeqCount;
 static uint8_t liveRec_eraseSeqTrack;
 #if DEV_MODE_LOGGING
@@ -195,8 +203,10 @@ static void liveRec_stepEnd(uint8_t track, uint8_t step, uint8_t fired,
 static void liveRec_writeCurrentValue(uint8_t step, uint16_t target);
 static void liveRec_writePendingFirst(uint8_t step);
 #endif
-/* End an open fast roll; defined below with the roll helpers (LR-13). */
-static void liveRec_endRoll(uint8_t writeEnd);
+/* End one track's open roll, or every track's (S081 LR-13; S084 per
+ * track); defined below with the roll helpers. */
+static void liveRec_endRoll(uint8_t track, uint8_t writeEnd);
+static void liveRec_endAllRolls(uint8_t writeEnd);
 
 /* Live-erase masks owned by LiveRecord, pushed to the Sequencer/Effects (G). */
 static uint8_t  liveRec_eraseSpecials;
@@ -281,14 +291,6 @@ static void liveRec_pushEraseMasks(void)
                    : 0u));
 }
 
-/* Step-roll tick table duplicated for the slow/fast classification (§5.4). */
-static uint8_t liveRec_rollPpqTicks(uint8_t rate)
-{
-    static const uint8_t t[10] = {0u, 48u, 32u, 24u, 16u, 12u, 8u, 6u, 4u, 3u};
-
-    return (rate <= 9u) ? t[rate] : 0u;
-}
-
 /*
  * Place a captured trigger on a track's step grid (S081 §8.3, E-1 step 5).
  *
@@ -301,17 +303,20 @@ static uint8_t liveRec_rollPpqTicks(uint8_t rate)
  * Submit one recorded step (S081 §8.4, P1B item 15).
  *
  * What: builds the record spec (note or "default note", velocity, timing,
- * roll, fill, fil) and submits it through patSvc_recordStep() to the track's
+ * roll, fill, rhythm, fil) and submits it through patSvc_recordStep() to the track's
  * played Scene; on acceptance, marks the recorded-step LED. Why: Q12, an
  * overlay hit with note `def` stores no note special (playback then uses the
  * default note); P1 always stored the resolved MIDI note. Inputs: step
- * fields. Output: nonzero when accepted (else a counted drop, LR-18).
+ * fields. S084 P4: rhythm is the roll's velocity rhythm (the overlay `pv`
+ * byte, Q8); it is stored only with a roll, so the recorded roll plays with
+ * the velocity shape that was heard (S084 P0 F7). Pass 0 for a non-roll
+ * write. Output: nonzero when accepted (else a counted drop, LR-18).
  * Affiliates: pat_recordStep(), seq_markRecordedStep().
  */
 static uint8_t liveRec_writeStep(uint8_t track, uint8_t step, uint8_t note,
                                  uint8_t noteIsDefault, uint8_t vel,
                                  uint8_t timing, uint8_t roll, uint8_t fill,
-                                 uint8_t setFil)
+                                 uint8_t rhythm, uint8_t setFil)
 {
     pat_record_spec_t spec;
 
@@ -321,6 +326,7 @@ static uint8_t liveRec_writeStep(uint8_t track, uint8_t step, uint8_t note,
     spec.timing = timing;
     spec.roll = roll;
     spec.fill = fill;
+    spec.rhythm = rhythm;
     spec.setFil = setFil;
     if (patSvc_recordStep(seq_getTrackPlayedScene(track), track, step, &spec)) {
         seq_markRecordedStep(track, seq_getTrackPlayedScene(track), step);
@@ -337,9 +343,15 @@ static uint8_t liveRec_writeStep(uint8_t track, uint8_t step, uint8_t note,
  * current active Scene. Why: every take boundary (REC off, overdub entry/exit,
  * track or rtk change, any Scene change) discards pending automation intent.
  * The erase bitmap is not touched (live erase owns its own lifetime).
+ * S084 P4: a take boundary also ends every open roll WITHOUT an end write
+ * (PATTERN_DYNAMIC_STACK.md §6.7.4: Scene change, REC off, rtk change),
+ * and lifts its live hold. Before S084 only a playhead break did this, so a
+ * release after REC off still wrote the end step (S084 P0 F8). A roll still
+ * held starts a new span at its next hit if the new take records.
  */
 static void liveRec_newTake(void)
 {
+    liveRec_endAllRolls(0u);
     memset(liveRec_latch, 0, sizeof(liveRec_latch));
     memset(liveRec_dirty, 0, sizeof(liveRec_dirty));
     liveRec_origin = scene_getActiveIndex();
@@ -358,6 +370,7 @@ void liveRec_init(uint8_t activeTrack)
     memset(liveRec_latch, 0, sizeof(liveRec_latch));
     memset(liveRec_dirty, 0, sizeof(liveRec_dirty));
     memset(liveRec_erase, 0, sizeof(liveRec_erase));
+    memset(liveRec_roll, 0, sizeof(liveRec_roll));
 }
 
 /* Position epoch -> end per-step capture state (latches/erase kept). */
@@ -371,7 +384,7 @@ static void liveRec_syncPosition(void)
     } else if (posEpoch != liveRec_lastEpoch) {
         liveRec_lastEpoch = posEpoch;
         memset(liveRec_prevFlags, 0, sizeof(liveRec_prevFlags));
-        liveRec_endRoll(0u);
+        liveRec_endAllRolls(0u);
         liveRec_graceValid = 0u;
     }
 }
@@ -393,30 +406,38 @@ static void liveRec_drainRing(void)
             uint8_t prev = liveRec_prevStep[b.track];
 
             /*
-             * Extend a held fast roll over the step that just ended
-             * (S081 §8.8 E-4, P1B items 3/16, P1C item 15).
+             * Extend a held roll over the step that just ended
+             * (S081 §8.8 E-4, P1B items 3/16, P1C item 15; S084 P4
+             * per-track slots).
              *
-             * What: when the rolled track's next ring entry arrives, its
-             * previous step has ended under the held roll. That step is
-             * written as an active step with the roll rate, timing 0 and
-             * fill 100 (carry-over), but only if the roll's start step has
-             * been reached (liveRec_rollSpan) and the ended step is not the
-             * start step itself. The start step keeps the delay and fill it
-             * was written with at the start; the end step is written by
+             * What: when a rolled track's next ring entry arrives (each
+             * track with an open roll, S084 P4), its previous step has ended
+             * under the held roll. That step is written as an active step
+             * with the roll rate, timing 0 and fill 100 (carry-over), but
+             * only if the roll's start step has been reached (its
+             * LIVEREC_ROLL_SPAN flag) and the ended step is not the start
+             * step itself. The start step keeps the delay and fill it was
+             * written with at the start; the end step is written by
              * liveRec_endRoll(). fil applies while PERF is held. Roll start
              * and end drain the ring first (liveRec_syncRing()), so prev is
              * never a step from before the capture. Why: the steps the roll
              * spans must replay it. P1B rewrote the start step with timing 0
              * and, for a forward-quantised start, wrote a roll on the step
-             * before it. Affiliates: seq_takeRecBoundary(),
-             * liveRec_writeStep(), LC-7 state.
+             * before it. The span keeps fill 100, so the next step carries it
+             * in playback (S084 P1 carry rule), and the roll's rhythm (Q8).
+             * Affiliates: seq_takeRecBoundary(), liveRec_writeStep(),
+             * liveRec_roll[].
              */
-            if (liveRec_rollHeld && b.track == liveRec_rollTrack &&
-                liveRec_rollSpan && prev != liveRec_rollStep) {
-                liveRec_writeStep(liveRec_rollTrack, prev, liveRec_rollNote,
-                                  liveRec_rollNoteDefault, liveRec_rollVel,
-                                  0u, liveRec_rollIndex, 100u,
-                                  seq_fillActive);
+            if (b.track < NUM_TRACKS) {
+                liveRec_roll_t *r = &liveRec_roll[b.track];
+
+                if ((r->flags & (LIVEREC_ROLL_HELD | LIVEREC_ROLL_SPAN)) ==
+                        (LIVEREC_ROLL_HELD | LIVEREC_ROLL_SPAN) &&
+                    prev != r->step)
+                    liveRec_writeStep(b.track, prev, r->note,
+                        (uint8_t)((r->flags & LIVEREC_ROLL_NOTE_DEF) != 0u),
+                        r->vel, 0u, r->index, 100u, r->rhythm,
+                        seq_fillActive);
             }
             /*
              * The ended step's own flags (S081 P3 FQ4/FQ3).
@@ -454,9 +475,9 @@ static void liveRec_drainRing(void)
                 (b.fired ? LIVEREC_PREV_FIRED : 0u) |
                 (b.jump ? LIVEREC_PREV_JUMP : 0u));
             /* LC-8: a forward-quantised roll start is reached here. */
-            if (liveRec_rollHeld && b.track == liveRec_rollTrack &&
-                b.step == liveRec_rollStep)
-                liveRec_rollSpan = 1u;
+            if ((liveRec_roll[b.track].flags & LIVEREC_ROLL_HELD) != 0u &&
+                b.step == liveRec_roll[b.track].step)
+                liveRec_roll[b.track].flags |= LIVEREC_ROLL_SPAN;
         }
     }
 }
@@ -465,9 +486,10 @@ static void liveRec_drainRing(void)
  * Bring the ring view up to a live capture (S081 §8.8, P1C review C-1).
  *
  * What: the service's position-epoch check and ring drain, also run at a
- * fast-roll start and a roll end, right after their live capture. Every
+ * roll start and a roll end, right after their live capture. Every
  * step that began before the capture already has its entry in the ring, so
- * afterwards liveRec_prevStep[] and liveRec_rollSpan match the capture.
+ * afterwards liveRec_prevStep[] and the held track's LIVEREC_ROLL_SPAN flag
+ * match the capture (S084 P4).
  * Why: the 500 Hz drain lags the playhead by up to 2 ms; a roll started or
  * released in that window was decided on the previous step (span written
  * onto the step before the start, or a covered step left unwritten).
@@ -1100,18 +1122,20 @@ uint8_t liveRec_activePatternLocked(void)
  * Why: P1 marked every non-current step, including steps already passed,
  * which silenced the new hit on its next pass; and its cancel dropped the
  * replaced step's automation. Inputs: track, placement (step, delay, rel,
- * ahead), note, velocity, roll, fil. Output: nonzero when the write was
- * accepted. Accessors: liveRec_triggerIn(), liveRec_placeFlam().
+ * ahead), note, velocity, roll, rhythm (roll only; 0 otherwise), fil.
+ * Output: nonzero when the write was accepted. Accessors:
+ * liveRec_triggerIn(), liveRec_placeFlam().
  * Affiliates: seq_suppressStepOnce(), seq_cancelPendingTrigger(),
  * patSvc_recordStep().
  */
 static uint8_t liveRec_commitHit(uint8_t track, const seq_place_t *pl,
                                  uint8_t note, uint8_t noteIsDefault,
-                                 uint8_t vel, uint8_t roll, uint8_t setFil)
+                                 uint8_t vel, uint8_t roll, uint8_t rhythm,
+                                 uint8_t setFil)
 {
     if (!liveRec_writeStep(track, pl->step, note, noteIsDefault, vel,
                            pl->delay, roll, (uint8_t)(roll ? 100u : 0u),
-                           setFil))
+                           (uint8_t)(roll ? rhythm : 0u), setFil))
         return 0u;
     if (pl->rel > 0)
         seq_suppressStepOnce(track, pl->step, pl->ahead);
@@ -1169,84 +1193,114 @@ static void liveRec_placeFlam(uint8_t track, const seq_track_time_t *snap,
     }
     if (haveGrace && gracePl.step != mainPl->step)
         (void)liveRec_commitHit(track, &gracePl, t->note, t->note_is_default,
-                                liveRec_graceVel, 0u, setFil);
+                                liveRec_graceVel, 0u, 0u, setFil);
     liveRec_graceValid = 0u;
     (void)liveRec_commitHit(track, mainPl, t->note, t->note_is_default,
-                            t->velocity, 0u, setFil);
+                            t->velocity, 0u, 0u, setFil);
 }
 
 /*
- * End a recorded fast roll (S081 §8.8, P1B item 16, P1C items 4/7).
+ * End one track's recorded roll (S081 §8.8, P1B item 16, P1C items 4/7;
+ * S084 P4 per track, every held roll).
  *
  * What: places the release on the rolled track and writes one step:
- *  - released before the second hit, or before a forward-quantised start
- *    step was reached: the START step is rewritten as a plain trigger at
- *    its start delay (roll and fill removed);
+ *  - released before a forward-quantised start step was reached, or on
+ *    the start step before the second hit: the START step is rewritten as
+ *    a plain trigger at its start delay (roll, fill and rhythm removed). A
+ *    release on a later step before the second hit takes the later-step
+ *    rule below, so span steps already written stay covered (S084 P0 A2);
  *  - released on the start step: the start step keeps its delay and gets
  *    fill = release delay - start delay (1..100);
  *  - released on a later step: that step gets timing 0 (a spanned step
  *    starts at its boundary) and fill = release delay (1..99).
- * The live hold on the rolled track is lifted. With writeEnd = 0 (stop,
- * Scene change, realign: the playhead has jumped) nothing is written.
- * Why: the Sequencer runs a roll's fill window from its delayed first hit
- * (seq_rollBegin()), so on the start step the fill must be measured from
- * the start delay. P1B wrote the quick-release trigger at the release
- * point, and micro-timed the end step by the release offset. Inputs:
- * liveRec_roll* state (LC-7), the live capture. Outputs: one write, live
- * hold off. Accessors: liveRec_rollRelease(), liveRec_rollRateChange(),
- * liveRec_service(). Affiliates: seq_placeFromSnapshot(), seq_setLiveHold(),
- * pat_recordStep() (fill 100 stored as absent, PD-1).
+ * The end step keeps the roll's rate and rhythm, and the span before it
+ * has fill 100, so playback carries the roll into the end step and stops
+ * it at the release point (S084 P1 carry rule, user Q4). The track's live
+ * hold is lifted. With writeEnd = 0 (playhead break, take boundary)
+ * nothing is written. Only this track's entry is touched (S084 P0 F5).
+ * Why: the Sequencer runs a roll's window from its delayed first hit
+ * (seq_rollBegin()), so on the start step the fill is measured from the
+ * start delay. Inputs: track, writeEnd, liveRec_roll[track], the live
+ * capture. Outputs: one write, live hold off, entry cleared. Accessors:
+ * liveRec_rollRelease(), liveRec_rollRateChange(), liveRec_triggerIn() (a
+ * new start on a held track), liveRec_endAllRolls(). Affiliates:
+ * seq_placeFromSnapshot(), seq_setLiveHold(), pat_recordStep() (fill 100
+ * stored as absent, PD-1).
  */
-static void liveRec_endRoll(uint8_t writeEnd)
+static void liveRec_endRoll(uint8_t track, uint8_t writeEnd)
 {
-    if (!liveRec_rollHeld) {
-        liveRec_rollPendingIdx = 0u;
+    liveRec_roll_t *r;
+
+    if (track >= NUM_TRACKS)
         return;
-    }
+    r = &liveRec_roll[track];
+    if ((r->flags & LIVEREC_ROLL_HELD) == 0u)
+        return;
     if (writeEnd && seq_isRunning()) {
         seq_track_time_t snap;
         seq_place_t pl;
+        uint8_t def = (uint8_t)((r->flags & LIVEREC_ROLL_NOTE_DEF) != 0u);
 
-        seq_captureTrackTime(liveRec_rollTrack, &snap);
-        /* Span every step that ended before the release; a position break
-         * found here has already ended the roll (P1C review C-1). */
+        seq_captureTrackTime(track, &snap);
         liveRec_syncRing();
-        if (!liveRec_rollHeld)
-            return;
-        if (seq_placeFromSnapshot(liveRec_rollTrack, &snap,
-                                  liveRec_frac8(&snap), 0u, &pl)) {
-            if (liveRec_rollHits == 0u || !liveRec_rollSpan) {
-                /* Released before the second hit, or before a forward-
-                 * quantised start: the start step becomes a plain trigger. */
-                liveRec_writeStep(liveRec_rollTrack, liveRec_rollStep,
-                                  liveRec_rollNote, liveRec_rollNoteDefault,
-                                  liveRec_rollVel, liveRec_rollStartDelay,
-                                  0u, 0u, seq_fillActive);
-            } else if (pl.step == liveRec_rollStep) {
-                /* Released on the start step: keep its delay; the fill is
-                 * the part of the step from the roll's start to the release. */
-                int16_t f = (int16_t)pl.delay - (int16_t)liveRec_rollStartDelay;
+        if ((r->flags & LIVEREC_ROLL_HELD) == 0u)
+            return;                 /* a position break ended it (C-1) */
+        if (seq_placeFromSnapshot(track, &snap, liveRec_frac8(&snap), 0u,
+                                  &pl)) {
+            /*
+             * Plain-trigger rewrite only while no span can exist (S084 P0
+             * A2).
+             *
+             * What: the start step becomes a plain trigger when the start
+             * step was not yet reached (forward-quantised), or when the
+             * release is still on the start step with no second hit. A
+             * release on a later step before the second hit takes the normal
+             * end write below. Why: every held roll is a span (Q7), so a
+             * slow roll (interval longer than the step) can have span steps
+             * written before its second hit. Rewriting only the start step
+             * left those spans to replay as a roll that was never played.
+             * With the normal end write, the P1 time window carries hit 0
+             * through the spans and closes at the release, before the next
+             * hit was due: playback is the one hit that was heard (its tail
+             * ducked at the release, as at every recorded roll end).
+             */
+            if ((r->flags & LIVEREC_ROLL_SPAN) == 0u ||
+                (r->hits == 0u && pl.step == r->step)) {
+                liveRec_writeStep(track, r->step, r->note, def, r->vel,
+                                  r->startDelay, 0u, 0u, 0u, seq_fillActive);
+            } else if (pl.step == r->step) {
+                int16_t f = (int16_t)pl.delay - (int16_t)r->startDelay;
 
-                liveRec_writeStep(liveRec_rollTrack, liveRec_rollStep,
-                                  liveRec_rollNote, liveRec_rollNoteDefault,
-                                  liveRec_rollVel, liveRec_rollStartDelay,
-                                  liveRec_rollIndex,
+                liveRec_writeStep(track, r->step, r->note, def, r->vel,
+                                  r->startDelay, r->index,
                                   (uint8_t)((f < 1) ? 1 : ((f > 100) ? 100 : f)),
-                                  seq_fillActive);
+                                  r->rhythm, seq_fillActive);
             } else {
-                /* Released on a later step: it starts at its boundary. */
-                liveRec_writeStep(liveRec_rollTrack, pl.step,
-                                  liveRec_rollNote, liveRec_rollNoteDefault,
-                                  liveRec_rollVel, 0u, liveRec_rollIndex,
+                liveRec_writeStep(track, pl.step, r->note, def, r->vel, 0u,
+                                  r->index,
                                   (uint8_t)((pl.delay < 1u) ? 1u : pl.delay),
-                                  seq_fillActive);
+                                  r->rhythm, seq_fillActive);
             }
         }
     }
-    seq_setLiveHold(liveRec_rollTrack, 0u);
-    liveRec_rollHeld = 0u;
-    liveRec_rollSpan = 0u;
-    liveRec_rollPendingIdx = 0u;
+    seq_setLiveHold(track, 0u);
+    r->flags = 0u;
+}
+
+/*
+ * End every track's open roll (S084 P4).
+ *
+ * What: liveRec_endRoll() for tracks 0..6. Why: a playhead break or a take
+ * boundary ends all open rolls at once. Inputs: writeEnd (0 at both
+ * callers: no end write). Outputs: as liveRec_endRoll(). Accessors:
+ * liveRec_syncPosition(), liveRec_newTake().
+ */
+static void liveRec_endAllRolls(uint8_t writeEnd)
+{
+    uint8_t t;
+
+    for (t = 0u; t < NUM_TRACKS; t++)
+        liveRec_endRoll(t, writeEnd);
 }
 
 /*
@@ -1362,56 +1416,60 @@ void liveRec_triggerIn(const liveRec_trigger_t *t)
         return;
     }
 
-    if (t->kind == LIVEREC_HIT_ROLL_HIT && liveRec_rollHeld) {
-        /* Fast roll: spanned by E-4, no per-hit write. */
-        liveRec_rollHits++;
-        return;
-    }
+    /*
+     * Held rolls: every one is a span, per track (S081 §8.8; S084 P4,
+     * user Q7).
+     *
+     * What: a ROLL_HIT on a track with an open roll only counts (the span
+     * writer covers its steps). A ROLL_START, or a ROLL_HIT on a track with
+     * no open roll (REC armed mid-roll, a new take, or a single/flam ->
+     * roll switch), opens the track's roll at this hit: the step is placed
+     * and quantised like any hit and written with the rate, fill 100 and
+     * the rhythm; the track is live-held so its stored triggers stay silent
+     * while held. A start on a track that already holds a roll first ends
+     * that roll here. A hit without a rate (roll 0) is a plain single.
+     * Why: S081 recorded a roll slower than the track's step as single
+     * hits, each quantised on its own, so the split depended on the step
+     * scale and a triplet roll under `qnt` lost its rate (S084 P0 F6); the
+     * user decided every held roll is a span (Q7, 2026-10-24: "yes, if the
+     * button or MIDI input note is held"). The pending-index state of the
+     * S081 rate switch is gone: each ROLL_HIT carries the held rate. Flams
+     * keep F-L (recorded hit by hit).
+     * Inputs: t (kind, roll, rhythm, note, velocity, note_is_default), the
+     * placement pl, setFil. Outputs: liveRec_roll[track], the start-step
+     * write, live hold. Affiliates: liveRec_endRoll(), liveRec_drainRing()
+     * (spans), liveRec_commitHit().
+     */
     if (t->kind == LIVEREC_HIT_ROLL_START || t->kind == LIVEREC_HIT_ROLL_HIT) {
-        uint8_t rollIndex;
-        uint8_t rollTicks;
-        uint16_t stepTicks;
+        liveRec_roll_t *r = &liveRec_roll[track];
 
-        if (t->kind == LIVEREC_HIT_ROLL_HIT) {
-            /* A single/flam -> roll switch starts the roll at this hit. */
-            if (liveRec_rollPendingIdx == 0u) {
-                (void)liveRec_commitHit(track, &pl, t->note,
-                                        t->note_is_default, t->velocity, 0u,
-                                        setFil);
-                return;
-            }
-            rollIndex = liveRec_rollPendingIdx;
-            liveRec_rollPendingIdx = 0u;
-        } else {
-            rollIndex = t->roll;
-        }
-        stepTicks = (uint16_t)(snap.interval >> 8u);
-        if (stepTicks == 0u)
-            stepTicks = 1u;
-        rollTicks = liveRec_rollPpqTicks(rollIndex);
-        if (rollTicks == 0u || rollTicks >= stepTicks) {
-            /* Slow roll: recorded hit by hit (F-L). */
-            (void)liveRec_commitHit(track, &pl, t->note, t->note_is_default,
-                                    t->velocity, 0u, setFil);
+        if (t->kind == LIVEREC_HIT_ROLL_HIT &&
+            (r->flags & LIVEREC_ROLL_HELD) != 0u) {
+            if (r->hits < 0xFFu)
+                r->hits++;            /* spanned: no per-hit write */
             return;
         }
-        /* Fast roll: live-hold and record the start step with the rate.
-         * Drain first so prevStep is the capture's step (P1C review C-1). */
+        if (t->roll == 0u) {
+            (void)liveRec_commitHit(track, &pl, t->note, t->note_is_default,
+                                    t->velocity, 0u, 0u, setFil);
+            return;
+        }
+        if ((r->flags & LIVEREC_ROLL_HELD) != 0u)
+            liveRec_endRoll(track, 1u);   /* a new start ends the old roll */
         liveRec_syncRing();
         seq_setLiveHold(track, 1u);
-        liveRec_rollHeld = 1u;
-        liveRec_rollTrack = track;
-        liveRec_rollStep = pl.step;
-        liveRec_rollStartDelay = pl.delay;
-        /* A forward-quantised start is reached at its own ring entry (LC-8). */
-        liveRec_rollSpan = (uint8_t)(pl.rel <= 0);
-        liveRec_rollIndex = rollIndex;
-        liveRec_rollHits = 0u;
-        liveRec_rollNote = t->note;
-        liveRec_rollNoteDefault = t->note_is_default;
-        liveRec_rollVel = t->velocity;
+        r->flags = (uint8_t)(LIVEREC_ROLL_HELD |
+                   ((pl.rel <= 0) ? LIVEREC_ROLL_SPAN : 0u) |
+                   (t->note_is_default ? LIVEREC_ROLL_NOTE_DEF : 0u));
+        r->step = pl.step;
+        r->startDelay = pl.delay;
+        r->index = t->roll;
+        r->rhythm = t->rhythm;
+        r->note = t->note;
+        r->vel = t->velocity;
+        r->hits = 0u;
         (void)liveRec_commitHit(track, &pl, t->note, t->note_is_default,
-                                t->velocity, rollIndex, setFil);
+                                t->velocity, t->roll, t->rhythm, setFil);
         return;
     }
     if (t->kind == LIVEREC_HIT_FLAM_GRACE) {
@@ -1426,55 +1484,56 @@ void liveRec_triggerIn(const liveRec_trigger_t *t)
         return;
     }
     (void)liveRec_commitHit(track, &pl, t->note, t->note_is_default,
-                            t->velocity, 0u, setFil);
+                            t->velocity, 0u, 0u, setFil);
 }
 
 /*
- * Overlay rate switch while a roll is held (S081 §8.8 F-C, R19, P1B 16).
+ * Overlay change while a roll gesture is held (S081 §8.8 F-C, R19; S084 P4
+ * per track, every roll a span).
  *
- * What: re-classifies the roll at every switch: a fast roll that becomes
- * slow ends (its later hits record as singles); a roll that becomes fast
- * (from slow, or single -> roll with no hit at the switch) starts as a
- * recorded fast roll at its next hit; fast -> fast changes the rate from
- * the step containing the switch. Why: P1 only updated the index, so a
- * single -> roll switch recorded a fast roll as many single hits, and a
- * fast -> slow switch kept writing roll steps. Inputs: track, new step-roll
- * index (0 = roll ended). Outputs: liveRec_roll* state. Accessors:
- * buttonHandler_overlaySwitchHeld(). Affiliates: liveRec_endRoll(), the
- * ROLL_HIT branch of liveRec_triggerIn().
+ * What: rollIndex 0 (the overlay became single/flam or off) ends this
+ * track's recorded roll at this point. Any other rate: an open roll takes
+ * the new rate and rhythm from the step containing the switch (the span
+ * writer and the end write use them; F-C). With no open roll nothing is
+ * stored: the next ROLL_HIT carries the rate and opens the span (P4-13).
+ * Why: S081 re-classified slow and fast rates here and kept a pending index
+ * in a single shared slot; with spans for every rate (Q7) and per-track
+ * slots (F5) only the rate and rhythm are left to update. In playback the
+ * rate change is a different roll, so the switch step restarts the roll at
+ * its boundary (F-R). Inputs: track, step-roll index 0..9, rhythm byte.
+ * Outputs: liveRec_roll[track]. Accessors:
+ * buttonHandler_overlayReconfigure(). Affiliates: liveRec_endRoll(),
+ * liveRec_drainRing().
  */
-void liveRec_rollRateChange(uint8_t track, uint8_t rollIndex)
+void liveRec_rollRateChange(uint8_t track, uint8_t rollIndex, uint8_t rhythm)
 {
-    seq_track_time_t snap;
-    uint16_t stepTicks;
-    uint8_t rollTicks;
+    liveRec_roll_t *r;
 
+    if (track >= NUM_TRACKS)
+        return;
+    r = &liveRec_roll[track];
     if (rollIndex == 0u) {
-        liveRec_endRoll(1u);
+        liveRec_endRoll(track, 1u);
         return;
     }
-    seq_captureTrackTime(track, &snap);
-    stepTicks = (uint16_t)(snap.interval >> 8u);
-    if (stepTicks == 0u)
-        stepTicks = 1u;
-    rollTicks = liveRec_rollPpqTicks(rollIndex);
-    if (rollTicks == 0u || rollTicks >= stepTicks) {
-        /* New rate is slow: end any fast roll; later hits record as singles. */
-        if (liveRec_rollHeld)
-            liveRec_endRoll(1u);
-        liveRec_rollPendingIdx = 0u;
-        return;
+    if ((r->flags & LIVEREC_ROLL_HELD) != 0u) {
+        r->index = rollIndex;
+        r->rhythm = rhythm;
     }
-    if (liveRec_rollHeld)
-        liveRec_rollIndex = rollIndex;       /* fast -> fast */
-    else
-        liveRec_rollPendingIdx = rollIndex;  /* single/flam -> roll */
 }
 
+/*
+ * A held roll gesture was released (S081; S084 P4 per track).
+ *
+ * What: ends THIS track's recorded roll with its end write. S081 ignored
+ * the track and ended whichever roll was open (S084 P0 F5). Inputs: track.
+ * Accessors: buttonHandler_overlayEndTrack(), _Reconfigure() (overlay
+ * off), _Start() (a new gesture replaces a held roll). Affiliates:
+ * liveRec_endRoll().
+ */
 void liveRec_rollRelease(uint8_t track)
 {
-    (void)track;
-    liveRec_endRoll(1u);
+    liveRec_endRoll(track, 1u);
 }
 
 

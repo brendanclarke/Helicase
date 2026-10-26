@@ -194,8 +194,9 @@ typedef struct {
  *
  * init/export_handoff own type-specific arena adoption. write_param receives
  * only type-specific indices (3..63); EffectsManager owns common indices 0..2.
- * process handles one normalized block. buffer_changed and effective_max are
- * optional hooks for types affected by a changing FxBuffer share.
+ * process handles one normalized block. buffer_changed, effective_max and
+ * effective_min are optional hooks for types affected by a changing FxBuffer
+ * share.
  */
 typedef struct {
     void (*init)(void *rt, const fxbuf_handoff_t *handoff);
@@ -204,6 +205,8 @@ typedef struct {
     void (*process)(void *rt, effect_io_t *io);
     void (*buffer_changed)(void *rt, const fx_share_t *share);
     uint8_t (*effective_max)(uint8_t index, const fx_share_t *share);
+    /* S084 VX3: lower clamp for buffer-dependent rows such as CrumpBit Rate. */
+    uint8_t (*effective_min)(uint8_t index, const fx_share_t *share);
 } effect_type_ops_t;
 
 /*
@@ -247,6 +250,19 @@ const effect_param_descriptor_t *effects_descriptorByKey(
     effect_type_id_t type, const char *file_key, uint8_t *index_out);
 uint8_t effects_paramAutomatable(effect_type_id_t type, uint8_t index);
 uint8_t effects_paramModulatable(effect_type_id_t type, uint8_t index);
+
+/*
+ * Last applied runtime value (S084 VX3 VX3-2.2).
+ *
+ * What:       returns the value after Morph, lock, overlay, LFO and the
+ *             active Effect's share-dependent clamps. Why: the CrumpBit Rate
+ *             cell can display the reachable value while retaining the raw
+ *             value for a later share growth. Inputs: local row index.
+ * Outputs:    applied byte, or zero outside the common 0..63 row domain.
+ * Accessors:  menuEffects and the Effect value formatter. Affiliates:
+ *             effects_service(), effect_type_ops_t.
+ */
+uint8_t effects_appliedValue(uint8_t index);
 
 /*
  * `.fx` storage helpers (Session 072 step 6; plan §14.1).

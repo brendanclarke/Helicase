@@ -15,7 +15,8 @@ HOSTFLAGS := -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-v
 ARMCC  := arm-none-eabi-gcc
 ARMFLAGS := -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard -Ofast -std=gnu11 \
             -fdata-sections -ffunction-sections -I$(ROOT) -I$(ROOT)/Core \
-            -I$(ROOT)/Core/DSPAudio -I$(ROOT)/Core/compat -I$(GEN)
+            -I$(ROOT)/Core/DSPAudio -I$(ROOT)/Core/DSP/InsertEffects \
+            -I$(ROOT)/Core/compat -I$(GEN)
 EX := python3 extract.py
 FP := python3 fpseq.py
 
@@ -27,7 +28,11 @@ fn = $(foreach s,$(1),--func $(s))
 rn = $(foreach s,$(2),--rename $(s)=$(1)$(s))
 
 .PHONY: selftest filter special_tags pack postchain octave mixer \
-        armcheck-filter armcheck-postchain armcheck-mixer clean
+        armcheck-filter armcheck-postchain armcheck-mixer \
+        lfo_oneshot osc_pwm osc_sample osc_run swap_level \
+        natural_order catalogue stock_gen wtb transient shaper test_fxbuf \
+        test_insert_types test_voicebuffer_cases test_crumpbit_elastic \
+        armcheck-vx2 armcheck-vx3 clean
 $(GEN):
 	mkdir -p $(GEN)
 
@@ -48,6 +53,161 @@ clean:
 # Step 2 host proof: tagged rows equal the pre-S073 key classifier.
 special_tags:
 	cd $(ROOT) && python3 tools/dsp_test/check_special_tags.py
+
+# S084 P1 WP1/WP4/WP5/WP6/WP7: the new voice foundations. Each target compiles
+# the real source text (extracted verbatim) against the host prelude, so a
+# change to the firmware function is what the test measures.
+lfo_oneshot: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object sine_table \
+	  --out $(GEN)/lfo_tab.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/lfo.c --func lfo_isOneShot \
+	  --func lfo_retriggerPhase --func lfo_calc \
+	  --out $(GEN)/lfo_fns.c
+	cat $(GEN)/lfo_tab.c $(GEN)/lfo_fns.c > $(GEN)/lfo_new.c
+	$(HOSTCC) $(HOSTFLAGS) test_lfo_oneshot.c -o build/lfo_oneshot -lm
+	./build/lfo_oneshot
+
+osc_pwm: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object sine_table \
+	  --object sawTable --object triTable --object recTable \
+	  --out $(GEN)/pwm_tab.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c --object osc_octaveEdgeHz \
+	  --func freqToTableIndex --func osc_freqToTableIndex \
+	  --out $(GEN)/pwm_idx.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/OscillatorPwm.c --func pwm_read1024 \
+	  --func pwm_readSine --func pwm_readWarp --func pwm_sawPair \
+	  --func pwm_sawSum --func pwm_warp --func pwm_sweep \
+	  --func pwm_familyLevel --func oscPwm_prepare --func oscPwm_render \
+	  --func oscPwm_renderFm --out $(GEN)/pwm_fns.c
+	cat $(GEN)/pwm_tab.c $(GEN)/pwm_idx.c $(GEN)/pwm_fns.c > $(GEN)/pwm_new.c
+	$(HOSTCC) $(HOSTFLAGS) test_osc_pwm.c -o build/osc_pwm -lm
+	./build/osc_pwm
+
+osc_sample: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/OscillatorSample.c \
+	  --func oscSample_bind --func oscSample_restart \
+	  --func oscSample_phaseIncForFreq --func oscSample_render \
+	  --func oscSample_renderFm --out $(GEN)/sample_new.c
+	$(HOSTCC) $(HOSTFLAGS) test_osc_sample.c -o build/osc_sample -lm
+	./build/osc_sample
+
+osc_run: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/OscSection.c \
+	  --func oscSection_init --func oscSection_beginTrigger \
+	  --func oscSection_claimOngoing --func oscSection_claimPending \
+	  --func oscSection_blendItp --func oscSection_finishBlock \
+	  --func oscSection_filterRecalc \
+	  --out $(GEN)/oscsection_new.c
+	$(HOSTCC) $(HOSTFLAGS) test_osc_run.c -o build/osc_run -lm
+	./build/osc_run
+
+swap_level: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/mixer.c \
+	  --func mixer_slotLevelAndDeclick --out $(GEN)/swap_new.c
+	$(HOSTCC) $(HOSTFLAGS) test_swap_level.c -o build/swap_level -lm
+	./build/swap_level
+
+natural_order: | $(GEN)
+	$(EX) --src $(ROOT)/Core/Hardware/SD/storageTypes.c \
+	  --func storage_naturalCompare --func storage_stripOrderPrefix \
+	  --out $(GEN)/storage_natural.c
+	$(HOSTCC) $(HOSTFLAGS) test_natural_order.c -o build/natural_order -lm
+	./build/natural_order
+
+stock_gen: | $(GEN)
+	python3 $(ROOT)/tools/gen_stock_recipes.py \
+	  --emit-ref frozen/stock_ref.bin
+	$(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object sine_table \
+	  --out $(GEN)/stock_sine.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/StockWaves.c \
+	  --object stockWave_levelOffset --object stockWave_levelShift \
+	  --out $(GEN)/stock_levels.c
+	$(HOSTCC) $(HOSTFLAGS) -I$(ROOT)/Core/SampleRom \
+	  -I$(ROOT)/Core/DSPAudio -I$(ROOT)/Core -I$(ROOT)/Core/compat \
+	  test_stock_gen.c -o build/stock_gen -lm
+	./build/stock_gen
+
+wtb: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/OscillatorWavetable.c \
+	  --func oscWavetable_bind --func oscWavetable_render \
+	  --func oscWavetable_renderFm --out $(GEN)/wtb_new.c
+	$(HOSTCC) $(HOSTFLAGS) test_wtb.c -o build/wtb -lm
+	./build/wtb
+
+shaper: | $(GEN)
+	python3 $(ROOT)/tools/plots/plot_waveshapers.py \
+	  --export-ref frozen/shaper
+	$(HOSTCC) $(HOSTFLAGS) -I$(ROOT)/Core/DSPAudio \
+	  test_shaper.c $(ROOT)/Core/DSPAudio/DriveShaper.c -o build/shaper -lm
+	./build/shaper
+
+catalogue: | $(GEN)
+	$(HOSTCC) $(HOSTFLAGS) -I$(ROOT) -I$(ROOT)/Core \
+	  -I$(ROOT)/Core/SampleRom -I$(ROOT)/Core/DSPAudio \
+	  -I$(ROOT)/Core/compat test_catalogue.c -o build/catalogue -lm
+	./build/catalogue
+
+transient: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/transientGenerator.c \
+	  --func transient_resolve --func transient_init --func transient_trigger --func transient_setType \
+	  --func transient_setWave --func transient_waveMax \
+	  --func transient_calcBlock --out $(GEN)/transient_new.c
+	$(HOSTCC) $(HOSTFLAGS) -I$(ROOT) -I$(ROOT)/Core/DSPAudio -I$(ROOT)/Core/compat \
+	  test_transient.c -o build/transient -lm
+	./build/transient
+
+test_fxbuf: | $(GEN)
+	$(HOSTCC) -O2 -std=gnu11 -Wall -Wno-unused-function \
+	  -DFXBUF_HOST_TEST -I$(ROOT) -I$(ROOT)/Core/DSP/Effects \
+	  test_fxbuf.c -o build/fxbuf -lm
+	./build/fxbuf
+
+INSERT_TYPE_SRCS := \
+	$(ROOT)/Core/DSP/InsertEffects/InsertDriveSrr.c \
+	$(ROOT)/Core/DSP/InsertEffects/InsertFold.c \
+	$(ROOT)/Core/DSP/InsertEffects/InsertCrush.c \
+	$(ROOT)/Core/DSP/InsertEffects/InsertRing.c \
+	$(ROOT)/Core/DSP/InsertEffects/InsertPhaser.c \
+	$(ROOT)/Core/DSP/InsertEffects/InsertFlanger.c \
+	$(ROOT)/Core/DSP/InsertEffects/InsertChorus.c \
+	$(ROOT)/Core/DSP/InsertEffects/InsertEcho.c \
+	$(ROOT)/Core/DSP/InsertEffects/InsertComb.c \
+	$(ROOT)/Core/DSP/InsertEffects/InsertRoom.c \
+	$(ROOT)/Core/DSP/InsertEffects/Transient/TransientResonator.c \
+	$(ROOT)/Core/DSP/InsertEffects/Transient/TransientPluck.c \
+	$(ROOT)/Core/DSP/InsertEffects/Transient/TransientTube.c \
+	$(ROOT)/Core/DSP/InsertEffects/Transient/TransientFlam.c \
+	$(ROOT)/Core/DSP/InsertEffects/Transient/TransientStutter.c \
+	$(ROOT)/Core/DSP/InsertEffects/Transient/TransientReverse.c \
+	$(ROOT)/Core/DSP/InsertEffects/Transient/TransientSpring.c \
+	host_transient_tables.c
+
+test_insert_types: | $(GEN)
+	$(HOSTCC) -O2 -std=gnu11 -Wall -Wno-unused-function \
+	  -fno-vectorize -fno-slp-vectorize -DINSERT_HOST_TEST \
+	  -I$(ROOT) -I$(ROOT)/Core \
+	  -I$(ROOT)/Core/DSPAudio -I$(ROOT)/Core/DSP/Effects \
+	  -I$(ROOT)/Core/DSP/InsertEffects -I$(ROOT)/Core/compat \
+	  test_insert_types.c $(INSERT_TYPE_SRCS) -o build/insert_types -lm
+	./build/insert_types
+
+test_voicebuffer_cases: | $(GEN)
+	$(HOSTCC) -O2 -std=gnu11 -Wall -Wno-unused-function \
+	  -DINSERT_HOST_TEST -DFXBUF_HOST_TEST \
+	  -I$(ROOT) -I$(ROOT)/Core -I$(ROOT)/Core/DSPAudio \
+	  -I$(ROOT)/Core/DSP/Effects -I$(ROOT)/Core/DSP/InsertEffects \
+	  -I$(ROOT)/Core/compat test_voicebuffer_cases.c -o build/voicebuffer_cases -lm
+	./build/voicebuffer_cases
+
+test_crumpbit_elastic: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.c \
+	  --func crumpBit_rateSamples --func crumpBit_divisionFor \
+	  --func crumpBit_syncDivision --func crumpBit_reverse \
+	  --func crumpBit_compact --func crumpBit_seat \
+	  --func crumpBit_effectiveMin --out $(GEN)/crumpbit_elastic_new.c
+	$(HOSTCC) $(HOSTFLAGS) -I$(ROOT) -I$(ROOT)/Core \
+	  test_crumpbit_elastic.c -o build/crumpbit_elastic -lm
+	./build/crumpbit_elastic
 
 # Step 3a gate: old and word-store packers must produce identical bytes.
 pack: | $(GEN)
@@ -193,3 +353,62 @@ armcheck-mixer: mixer
 	  --report --all
 	$(FP) --obj build/ac_mixer.o --ref old_dry:4 --ref old_send:3 --new new_combined:27 \
 	  --report --all
+
+# S084 VX2 WP10: per-loop instruction report for the new render code.
+armcheck-vx2: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c \
+	  --func calcStockWaveBlock --func calcStockWaveFmBlock \
+	  --rename static= --out $(GEN)/vx2_stock_arm.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/OscillatorWavetable.c \
+	  --func oscWavetable_bind --func oscWavetable_render \
+	  --func oscWavetable_renderFm --rename static= \
+	  --out $(GEN)/vx2_wtb_arm.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/transientGenerator.c \
+	  --func transient_resolve --func transient_calcBlock \
+	  --rename static= --out $(GEN)/vx2_tr_arm.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/ResonantFilter.c \
+	  --func svf_padeNum --func svf_padeDen --func fastTanh --func tanhXdX \
+	  --func softClipTwo --func SVF_calcBlockZDF \
+	  --func SVF_calcBlockZDFShaped --rename static= \
+	  --out $(GEN)/vx2_flt_arm.c
+	cat $(GEN)/vx2_stock_arm.c $(GEN)/vx2_wtb_arm.c $(GEN)/vx2_tr_arm.c \
+	  $(GEN)/vx2_flt_arm.c > $(GEN)/vx2_fns_arm.c
+	$(ARMCC) $(ARMFLAGS) -I$(ROOT)/Core/SampleRom \
+	  -c armcheck/vx2.c -o build/ac_vx2.o
+	# S084 VX2 review fix F3/F5: per-type probes (armcheck/vx2_spec.c). The
+	# shared functions hold several overlapping loops, so their loop 0 is not
+	# a meaningful figure; each probe below is one specialised loop.
+	sed -e 's/^INITCM_EFFECT_NOINLINE void SVF_calcBlockZDFShaped(/static inline __attribute__((always_inline)) void spec_zdfs(/' \
+	    -e 's/^INITCM_EFFECT_NOINLINE void SVF_calcBlockZDF(/static inline __attribute__((always_inline)) void spec_zdf(/' \
+	    -e '/^INITCM_EFFECT float \(tanhXdX\|softClipTwo\)/s/^INITCM_EFFECT /static inline /' \
+	    $(GEN)/vx2_flt_arm.c > $(GEN)/vx2_flt_spec.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/transientGenerator.c \
+	  --func transient_calcBlock --rename transient_calcBlock=spec_tr \
+	  --out $(GEN)/vx2_tr_spec_raw.c
+	sed -e 's/^void spec_tr(/static inline __attribute__((always_inline)) void spec_tr(/' \
+	    $(GEN)/vx2_tr_spec_raw.c > $(GEN)/vx2_tr_spec.c
+	$(ARMCC) $(ARMFLAGS) -I$(ROOT)/Core/SampleRom \
+	  -c armcheck/vx2_spec.c -o build/ac_vx2_spec.o
+	@echo "--- stock reader: loop 1 = per-sample loop (loop 0 is the fallback call)"
+	$(FP) --obj build/ac_vx2.o --ref calcStockWaveBlock:1 \
+	  --new calcStockWaveFmBlock:0 --report --all | tail -1
+	@echo "--- wtb plain / FM"
+	$(FP) --obj build/ac_vx2.o --ref oscWavetable_render:0 \
+	  --new oscWavetable_renderFm:0 --report --all | tail -1
+	@echo "--- transient kinds (cap 22)"
+	@for k in pcm sample sine table noise crash; do printf "%-7s " $$k; \
+	  $(FP) --obj build/ac_vx2_spec.o --ref tr_$$k:0 --new tr_$$k:0 \
+	    --report --all | tail -1; done
+	@echo "--- ZDF LP: sft reference, then each drive type (target sft + 6)"
+	@printf "%-7s " sft; $(FP) --obj build/ac_vx2_spec.o --ref zdf_sft_lp:0 \
+	  --new zdf_sft_lp:0 --report --all | tail -1
+	@for t in rct art thf fdc bsw tsw lsw lsq sfd afd asf chb rsb; do \
+	  printf "%-7s " $$t; $(FP) --obj build/ac_vx2_spec.o --ref zdf_$$t:0 \
+	    --new zdf_$$t:0 --report --all | tail -1; done
+
+# S084 VX3 remediation §18.4: per-type insert loop cost report (Gate G3/G4).
+# Report only; the caps and the per-type decisions are in
+# S084_P3_IMPLEMENTATION.md §18.4.
+armcheck-vx3: | $(GEN)
+	sh armcheck/vx3_probe.sh "$(ARMCC) $(ARMFLAGS)"
+	python3 looplen.py build/vx3_p_*.o

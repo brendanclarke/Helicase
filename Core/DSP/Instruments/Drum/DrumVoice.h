@@ -49,6 +49,7 @@
 #include "transientGenerator.h"
 #include "snapEg.h"
 #include "dither.h"
+#include "OscSection.h"
 //------------------------------------------------------------------------
 enum
 {
@@ -86,9 +87,34 @@ typedef struct VoiceStruct
 	float 		volEgValueBlock[OUTPUT_DMA_SIZE];
 	Distortion distortion;
 
+	/*
+	 * Insert stage fields (S084 VX3 VX3-7.3).
+	 *
+	 * What: runtime copies of Mix FX type/amount and the owning slot for
+	 * transient PRE/POST calls. Why: the manager owns selections while the
+	 * engine supplies its distortion and transient values to the stage.
+	 * Writers: InstrumentManager. Readers: insertFx_render*().
+	 */
+	uint8_t insertType;
+	uint8_t insertAmount;
+	uint8_t stageSlot;
+
 #if ENABLE_DRUM_SVF
 	ResonantFilter filter;
 	uint8_t		filterType; // bit 0 = lp, bit 1 = hp, bit 3 = bp on/off
+	/*
+	 * Filter drive type and its state (S084 VX2 VX2-7.5).
+	 *
+	 * What:       DRIVE_TYPE_* (0 = sft, today's input clip) and the shaper
+	 *             state the stateful types use.
+	 * Why:        plan §4.4: voice-only drive types with state in the engine
+	 *             (no static RAM); inside the runtime-slot union.
+	 * Writers:    IM_SPECIAL_DRIVE_TYPE (type, reset on change);
+	 *             *_initVoice() (reset).
+	 * Readers:    the render function's filter call.
+	 */
+	uint8_t		driveType;
+	DriveShaperState shaper;
 #endif
 
 #ifdef USE_AMP_FILTER
@@ -111,6 +137,20 @@ typedef struct VoiceStruct
 	uint8_t volumeMod;	//modulate volume by midi velocity if 1
 
 	Dither dither;
+
+	/*
+	 * Oscillator section state (S084 P1 P1-8.1).
+	 *
+	 * What:       run mode, `itp` snapshot/crossfade and filter slew for this
+	 *             voice's oscillators (OscSection.h).
+	 * Why:        plan §4.1.6: run modes apply per voice to every oscillator.
+	 * Inputs:     the `run` descriptor row (IM_SPECIAL_RUN_MODE); triggers.
+	 * Outputs:    used by trigger, render and filter recalc.
+	 * Accessors:  this engine's .c, InstrumentManager.c.
+	 * Affiliates: OscSection.c, OscRenderPool.c. Inside the runtime-slot
+	 *             union.
+	 */
+	OscSectionState section;
 } DrumVoice;
 //------------------------------------------------------------------------
 

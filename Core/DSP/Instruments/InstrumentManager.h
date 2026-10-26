@@ -4,6 +4,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "ParameterArray.h"
+/* S084 P1 P1-10.1: OscInfo and OscSectionState in the accessor contracts. */
+#include "Oscillator.h"
+#include "OscSection.h"
 
 /*
  * Canonical instrument registry contract.
@@ -147,6 +150,27 @@ typedef enum {
      * instead of the raw TYPE_UINT32 store that made 127 effectively zero.
      */
     IM_SPECIAL_LFO_OFFSET,
+    /*
+     * S084 P1 P1-10.1: oscillator type/source/waveform and voice run mode.
+     * OSC_TYPE/OSC_SOURCE/OSC_WAVE carry an IM_SPECIAL_OSC_* selector; the
+     * writers clamp per type, rebind sample state and refresh the slot's
+     * waveform modulation domains. RUN_MODE writes the voice's
+     * OscSectionState.runMode.
+     */
+    IM_SPECIAL_OSC_TYPE,
+    IM_SPECIAL_OSC_SOURCE,
+    IM_SPECIAL_OSC_WAVE,
+    IM_SPECIAL_RUN_MODE,
+    /*
+     * S084 VX2 VX2-6.4 / VX2-7.6: transient type (trt) and filter drive type
+     * (dty). Both are non-morphable selector rows applied by the selector
+     * pre-pass (instrumentManager_isSelectorDescriptor()).
+     */
+    IM_SPECIAL_TRANSIENT_TYPE,
+    IM_SPECIAL_DRIVE_TYPE,
+    /* S084 VX3: Mix FX selector and amount writers (non-selector amount). */
+    IM_SPECIAL_MIX_FX_TYPE,
+    IM_SPECIAL_MIX_FX_AMOUNT,
     IM_SPECIAL_WRITER_COUNT
 } instrument_special_writer_t;
 
@@ -580,18 +604,51 @@ void instrumentManager_clearAllRuntimeModulationTargets(void);
  */
 void instrumentManager_clearRuntimeModulationTargetsForSlot(uint8_t slot);
 /*
- * Quiet test for deferred Scene-slot replacement.
+ * Whether a slot is quiet enough to swap (S084 P1 P1-2.2).
  *
- * Inputs: zero-based instrument slot. Output: nonzero when the slot has no
- * active amp envelope or its envelope value is below the Scene-switch quiet
- * floor. Preset uses this before committing a newly selected Scene's instrument
- * runtime into a slot that may still be ringing from the previous Scene.
- *
- * The threshold is intentionally based on the runtime envelope value rather
- * than the envelope phase alone: SlopeEg2 can remain in EG_D after it has
- * decayed to silence, so a value floor is the stable "basically zero" test.
+ * What:       1 when the slot's pre-fader block peak has stayed at or below
+ *             INSTRUMENT_SLOT_QUIET_PEAK for INSTRUMENT_SLOT_QUIET_BLOCKS
+ *             consecutive blocks (or the slot is invalid).
+ * Why:        replaces the amp-envelope-value test (plan §3.9, §5.7).
+ * Inputs:     slot.  Outputs: 1 quiet / 0 sounding.
+ * Accessors:  preset_tickSingleVoiceApply(), preset_tickDrumsetApply(),
+ *             preset_startInstrumentApplyImage(), preset_tickInstrumentSwap().
+ * Affiliates: instrumentManager_noteSlotBlockPeak().
  */
-uint8_t instrumentManager_ampEnvelopeQuiet(uint8_t slot);
+uint8_t instrumentManager_slotQuiet(uint8_t slot);
+
+/*
+ * Record one rendered block's pre-volume peak (S084 P1 P1-2.2).
+ *
+ * What:       stores the peak and advances or clears the quiet counter.
+ * Why:        the mixer sees every slot's rendered block once; this keeps the
+ *             quiet state in its owner without the mixer knowing thresholds.
+ * Inputs:     slot 0..5, peak = max |sample| of the block before volume,
+ *             fader, pan and decimation.
+ * Outputs:    instrumentManager_slotLastPeak[], ..._slotQuietBlocks[].
+ * Accessors:  mixer_calcNextSampleBlock() (P1-2.4).
+ * Affiliates: instrumentManager_slotQuiet(). Foreground render context.
+ */
+void instrumentManager_noteSlotBlockPeak(uint8_t slot, uint16_t peak);
+
+/*
+ * Last recorded block peak of a slot (S084 P1 P1-2.2).
+ * Inputs: slot. Outputs: peak in int16 LSB (0 for invalid slots).
+ * Accessors: presetManager.c preset_traceSwap() (DEV trace 'v').
+ */
+uint16_t instrumentManager_slotLastPeak(uint8_t slot);
+
+/*
+ * Consume a slot's declick request (S084 P1 P1-2.2).
+ *
+ * What:       returns 1 once after the slot was rebuilt, then clears it.
+ * Why:        the mixer applies the swap declick on the first block of the
+ *             new instrument (plan §5.7 item 4); the arm is set where every
+ *             swap path converges (resetRuntimeSlotFromScene).
+ * Inputs:     slot. Outputs: 1 if armed.
+ * Accessors:  mixer_calcNextSampleBlock() (P1-2.4).
+ */
+uint8_t instrumentManager_takeSlotDeclickArm(uint8_t slot);
 /*
  * Reinitialize one committed slot's incoming DSP runtime instance.
  *
@@ -725,5 +782,104 @@ uint8_t instrumentManager_writeRuntime(uint8_t slot,
  * Affiliates: check_special_tags.py and the tagged parameter tables.
  */
 uint8_t instrumentManager_specialTagSelfCheck(void);
+
+/*
+ * Borrow the oscillator a descriptor's tag selects (S084 P1 P1-10.2).
+ *
+ * What:       resolves an OSC_TYPE/OSC_SOURCE/OSC_WAVE row's
+ *             IM_SPECIAL_OSC_* selector against the slot's live runtime type.
+ * Why:        InstrumentCellFormat and the Menu need the same oscillator
+ *             mapping the writers use without knowing the engine structs.
+ * Inputs:     slot, descriptor.  Outputs: borrowed OscInfo* or NULL.
+ * Accessors:  InstrumentCellFormat.c.
+ * Affiliates: instrumentManager_oscBySelector().
+ */
+OscInfo *instrumentManager_oscForDescriptor(uint8_t slot,
+                                            const ParamDescriptor *descriptor);
+
+/*
+ * Borrow a slot's oscillator section state (S084 P1 P1-10.2).
+ *
+ * What:       returns the live engine's OscSectionState.
+ * Why:        the run-mode writer and the filter recalc need one mapping.
+ * Inputs:     slot.  Outputs: borrowed pointer or NULL.
+ * Accessors:  InstrumentManager.c, InstrumentCellFormat.c.
+ * Affiliates: OscSection.h.
+ */
+OscSectionState *instrumentManager_oscSection(uint8_t slot);
+
+/*
+ * A slot's transient type (S084 VX2 VX2-6.3).
+ *
+ * What:       TRANSIENT_TYPE_* of the slot's live transient generator; trs
+ *             when the slot has none.
+ * Why:        InstrumentCellFormat formats the transient wav cell by type.
+ * Inputs:     slot.  Outputs: type.
+ * Accessors:  InstrumentCellFormat.c.
+ * Affiliates: instrumentManager_transient() (static).
+ */
+uint8_t instrumentManager_transientType(uint8_t slot);
+
+/*
+ * Maximum `wav` value for an oscillator's current type (S084 P1 P1-10.2).
+ *
+ * What:       OSC_STOCK_WAVE_COUNT - 1 for `wav`, 127 otherwise.
+ * Why:        the writer clamp, the modulation domain and the cell formatter
+ *             must agree.
+ * Inputs:     osc.  Outputs: maximum value.
+ * Accessors:  InstrumentCellFormat.c, InstrumentManager.c.
+ * Affiliates: OSC_STOCK_WAVE_COUNT.
+ */
+uint8_t instrumentManager_oscWaveMax(const OscInfo *osc);
+
+/*
+ * Maximum `src` value for an oscillator's current type (S084 P1 P1-10.2).
+ *
+ * What:       OSC_PWM_FAMILY_COUNT - 1 for `pwm`; installed sample count - 1
+ *             for `smp`/`slp`; 0 for `wav`.
+ * Why:        see instrumentManager_oscWaveMax().
+ * Inputs:     osc.  Outputs: maximum value.
+ * Accessors:  InstrumentCellFormat.c, InstrumentManager.c.
+ * Affiliates: OSC_PWM_FAMILY_COUNT, SampleMemory.
+ */
+uint8_t instrumentManager_oscSourceMax(const OscInfo *osc);
+
+/*
+ * Is this descriptor a selector row? (S084 VX2 VX2-8.5; P1 review fix F1)
+ *
+ * What:       1 for every single-ended row that binds a voice member
+ *             through a special writer: INSTANCE_OFFSET binding, MORPHABLE
+ *             clear, special tag != IM_SPECIAL_NONE. Today: typ, src, run
+ *             (P1), trt, dty (S084 VX2 VX2-8.5). 0 for every other row,
+ *             including NULL.
+ * Why:        these are the only rows that are single-ended (no Morph image)
+ *             yet bind a voice member directly. Preset must store and apply
+ *             them through the supplemental path, and it must apply them
+ *             before the Morph image so the type-dependent `wav` row is
+ *             clamped against the incoming type, not the reset default.
+ * Inputs:     descriptor (nullable).  Outputs: 0/1.
+ * Accessors:  presetManager.c preset_setSupplementalParameterInternal(),
+ *             preset_applySelectorRows(),
+ *             preset_applyKitVoiceSupplementalInternal().
+ * Affiliates: ROW_SELECT_SPECIAL in the four *Parameters.c tables.
+ */
+uint8_t instrumentManager_isSelectorDescriptor(
+    const ParamDescriptor *descriptor);
+
+/*
+ * Grant oscillator render-pool units to run-mode crossfades
+ * (S084 P1 P1-10.5).
+ *
+ * What:       ongoing `itp` crossfades re-claim first, then new ones, lowest
+ *             slot first; a new crossfade that does not fit falls back to
+ *             `fre` for that trigger.
+ * Why:        plan §4.1.6 priority: itp before waveform interpolation, lowest
+ *             voice first; ongoing crossfades are never cut.
+ * Inputs:     each slot's OscSectionState and oscillators.
+ * Outputs:    OscRenderPool grants; itp states.
+ * Accessors:  mixer_calcNextSampleBlock() before modNode_resetTargets().
+ * Affiliates: OscSection.c, OscRenderPool.c.
+ */
+void instrumentManager_claimOscSectionUnits(void);
 
 #endif

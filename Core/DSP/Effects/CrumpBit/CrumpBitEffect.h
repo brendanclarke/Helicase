@@ -17,22 +17,22 @@
 /*
  * CrumpBit loop geometry (S074_CRUMPBIT_EFFECT.md §3.4).
  *
- * CRUMPBIT_DELAY_MAX_SAMPLES: the longest delay, 1.60 s at 44,108 Hz. Rate 0
- * and every Sync division are clamped to it. It is fixed (not
- * share-dependent) so a Scene sounds the same whatever voice units future
- * instruments claim.
- * CRUMPBIT_BUFFER_BYTES: the loop length actually used, 1.60 s plus a
- * 2-sample interpolation guard, rounded up to 32 B. One byte per 8-bit mono
- * sample. It must stay <= the minimum Effect share (73,632 B with all twelve
- * voice units claimed). It is declared as buffer_min_bytes and
- * buffer_pref_bytes in the registry row.
+ * CRUMPBIT_DELAY_MAX_SAMPLES: the longest delay, 1.60 s at 44,108 Hz.
+ * CRUMPBIT_BUFFER_MIN_BYTES: the smallest supported loop share. It is the
+ * approved 20,608 B floor after the future buffer-voice geometry is reserved;
+ * the Rate row's effective minimum keeps the 1.60 s endpoint inside it.
+ * CRUMPBIT_BUFFER_BYTES: the preferred loop length, 1.60 s plus a 2-sample
+ * interpolation guard, rounded up to 32 B. One byte per 8-bit mono sample.
+ * The registry advertises both values and FxBuffer supplies the actual
+ * contiguous share between them.
  * Accessors: CrumpBitEffect.c, EffectsManager.c (registry row).
  */
 #define CRUMPBIT_DELAY_MAX_SAMPLES   70573.0f
+#define CRUMPBIT_BUFFER_MIN_BYTES    20608u
 #define CRUMPBIT_BUFFER_BYTES        70592u
 
 /*
- * CrumpBit runtime (56 B, a member of EffectsManager's DTCM runtime union).
+ * CrumpBit runtime (68 B, a member of EffectsManager's DTCM runtime union).
  *
  * What: the per-sample DSP state and the last resolved row values. Audio (the
  * 8-bit loop) lives in the FxBuffer Effect share, never here.
@@ -49,8 +49,12 @@
  * - bit_off .. pan_raw: the last row values from write_param();
  * - primed: 0 until the first block sets delay directly to its target (no
  *   glide on entry).
+ * - pending_length: a requested growth, committed only when write_pos wraps,
+ *   so a larger share cannot expose unrecorded bytes mid-loop;
+ * - xfade_wet/xfade: the prior wet sample and one-block flag used when a
+ *   shrink changes the fractional read geometry.
  * Why here: EffectsManager zeroes the union and calls init() when the type
- * becomes active; the union is 76 B (StereoFilter), so 56 B needs no RAM.
+ * becomes active; the union is 76 B (StereoFilter), so 68 B needs no RAM.
  * Accessors: CrumpBitEffect.c only; no other module may keep a pointer.
  * Affiliates: effects_runtime_t, M4 (size guard),
  * EFFECTS_MIXER_DSP_REFERENCE.md §4.2.
@@ -76,6 +80,9 @@ typedef struct {
     uint8_t sync;
     uint8_t pan_raw;
     uint8_t primed;
+    uint32_t pending_length;
+    float xfade_wet;
+    uint8_t xfade;
 } CrumpBitRuntime;
 
 /* DSP operations for the registry row (init, export, write, process, share). */
@@ -98,16 +105,17 @@ float crumpBit_rateSamples(uint8_t rate);
  * Step-scale division that Sync snaps a Rate to (Q7).
  *
  * What: among the shared StepScale CC positions (0..127, 96 PPQ ticks) whose
- * length at the given tempo fits CRUMPBIT_DELAY_MAX_SAMPLES, returns the CC
- * nearest in log time to crumpBit_rateSamples(rate). It uses the bracketing
+ * length at the given tempo fits max_len, returns the CC nearest in log time
+ * to crumpBit_rateSamples(rate). It uses the bracketing
  * pair and the geometric-mean rule: no logarithms, and a constant 128-step
  * loop. If no division fits (below about 4 BPM) it returns 0, and the DSP
  * clamps that length to the maximum. Why shared: the Effect-page label must
  * show exactly the division the DSP plays. Inputs: rate 0..127, bpm from
- * seq_getBpm() (0 is treated as 1). Output: a StepScale CC 0..127.
+ * seq_getBpm() (0 is treated as 1), and max_len in samples. Output: a
+ * StepScale CC 0..127.
  * Accessors: crumpBit_uiFormatValue3() (label), CrumpBitEffect.c (target).
  * Affiliates: stepScale_ticksQ8(), stepScale_formatShort().
  */
-uint8_t crumpBit_syncDivision(uint8_t rate, uint16_t bpm);
+uint8_t crumpBit_syncDivision(uint8_t rate, uint16_t bpm, uint32_t max_len);
 
 #endif /* CRUMP_BIT_EFFECT_H_ */

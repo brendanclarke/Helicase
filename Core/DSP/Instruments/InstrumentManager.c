@@ -8,12 +8,16 @@
 #include "presetManager.h"
 #include "presetMorphEngine.h"
 #include "EffectsManager.h"
+#include "InsertEffectsManager.h"
 #include "DrumVoice.h"
 #include "Snare.h"
 #include "CymbalVoice.h"
 #include "HiHat.h"
 #include "mixer.h"
 #include "modulationNode.h"
+#include "OscillatorSample.h"
+#include "OscRenderPool.h"
+#include "SampleMemory.h"
 #include "menu.h"
 #include "valueShaper.h"
 #include "config.h"
@@ -152,7 +156,6 @@ static uint8_t slot6_track7_decay_step_value;
  * runtime is reinitialized and about to receive descriptor values.
  */
 static instrument_type_t runtime_slot_type[INSTRUMENT_SLOT_COUNT];
-#define INSTRUMENT_AMP_EG_QUIET_THRESHOLD 0.0001f
 
 /*
  * Sole tagged runtime owner for loadable instrument types.
@@ -165,8 +168,24 @@ static instrument_type_t runtime_slot_type[INSTRUMENT_SLOT_COUNT];
  * are deliberately absent so adding an engine cannot multiply SRAM by type.
  */
 #define INSTRUMENT_RUNTIME_CURRENT_MAX_BYTES sizeof(DrumVoice)
-#define INSTRUMENT_RUNTIME_SLOT_BYTES \
-    (2u * INSTRUMENT_RUNTIME_CURRENT_MAX_BYTES)
+/*
+ * Fixed tagged-slot reserve (S084 P1).
+ *
+ * What:       1,176 B per slot, the established reserve that was originally
+ *             expressed as twice the largest engine state.
+ * Why:        S084 P1 adds the oscillator type/slew fields and each engine's
+ *             OscSectionState (including its three-oscillator `itp` snapshot).
+ *             Letting the reserve float at 2 x sizeof(DrumVoice) would multiply
+ *             that growth into six slots of new SRAM; the ledger approves the
+ *             growth inside the existing reserve only. A fixed reserve keeps
+ *             the static footprint unchanged and leaves the remaining
+ *             headroom for the P2/P3 engine fields.
+ * Inputs:     the four engine structs.
+ * Outputs:    InstrumentRuntimeSlot size; the asserts below enforce the fit.
+ * Accessors:  runtime_slots[].
+ * Affiliates: the _Static_asserts immediately below, STORAGE_SRAM_MANIFEST.md.
+ */
+#define INSTRUMENT_RUNTIME_SLOT_BYTES 1176u
 typedef union {
     DrumVoice drum;
     SnareVoice snare;
@@ -204,6 +223,37 @@ static float instrumentManager_gateFade[INSTRUMENT_SLOT_COUNT];
 static float instrumentManager_gateFadeStep[INSTRUMENT_SLOT_COUNT];
 static volatile uint8_t instrumentManager_gateDuck[INSTRUMENT_SLOT_COUNT];
 
+/*
+ * Slot level and quiet state for deferred swaps (S084 P1 P1-2.1).
+ *
+ * What:       instrumentManager_slotPeak[] is the absolute peak of each
+ *             slot's last rendered pre-volume block (int16 LSB);
+ *             instrumentManager_slotQuietBlocks[] counts consecutive blocks
+ *             whose peak stayed <= INSTRUMENT_SLOT_QUIET_PEAK (saturating at
+ *             INSTRUMENT_SLOT_QUIET_BLOCKS); instrumentManager_slotDeclickArm
+ *             is a bit mask of slots whose next rendered block must be
+ *             declicked because the slot was just rebuilt.
+ * Why:        plan §3.9: the old test read the amp-envelope value, which
+ *             ignores the post-envelope drive (up to +48 dB) and is not the
+ *             signal. The real pre-fader level is measured by the mixer.
+ * Inputs:     instrumentManager_noteSlotBlockPeak() (mixer, every block);
+ *             instrumentManager_resetRuntimeSlotFromScene() (arm, counters).
+ * Outputs:    instrumentManager_slotQuiet(), instrumentManager_slotLastPeak(),
+ *             instrumentManager_takeSlotDeclickArm().
+ * Accessors:  mixer.c, presetManager.c.
+ * Affiliates: P1-2.4 (mixer), P1-2.6..P1-2.10 (swap workers). 19 B SRAM1,
+ *             approved in §0.4.
+ */
+#define INSTRUMENT_SLOT_QUIET_PEAK   8u      /* int16 LSB, about -72 dBFS */
+#define INSTRUMENT_SLOT_QUIET_BLOCKS 8u      /* about 5.8 ms */
+static uint16_t instrumentManager_slotPeak[INSTRUMENT_SLOT_COUNT];
+static uint8_t  instrumentManager_slotQuietBlocks[INSTRUMENT_SLOT_COUNT];
+static uint8_t  instrumentManager_slotDeclickArm;
+static uint16_t instrumentManager_stageInputPeak[INSTRUMENT_SLOT_COUNT] = {
+    INSERT_WITNESS_OUTPUT, INSERT_WITNESS_OUTPUT, INSERT_WITNESS_OUTPUT,
+    INSERT_WITNESS_OUTPUT, INSERT_WITNESS_OUTPUT, INSERT_WITNESS_OUTPUT
+};
+
 /* Per-block fade decrement for ROLL_FILL_FADE_MS at the real sample rate. */
 static const float instrumentManager_gateFadeStepRate =
     (float)OUTPUT_DMA_SIZE / ((float)ROLL_FILL_FADE_MS * 0.001f * REAL_FS);
@@ -213,11 +263,17 @@ static uint8_t instrumentManager_resolveModulationTarget(
     instrument_param_id_t id,
     instrument_runtime_target_t *target_out);
 static instrument_type_t instrumentManager_slotType(uint8_t slot);
+static Distortion *instrumentManager_distortion(uint8_t slot);
+static uint8_t instrumentManager_insertAmount(uint8_t slot);
 static SlopeEg2 *instrumentManager_ampEg(uint8_t slot);
 static void instrumentManager_restoreLfoSupplementalTarget(uint8_t source_slot,
                                                            uint8_t target_pair);
 static void instrumentManager_restoreVelocitySupplementalTarget(
     uint8_t source_slot);
+static uint8_t instrumentManager_installVelocityModulationTarget(
+    uint8_t source_slot, instrument_param_id_t target_id);
+static const ParamDescriptor *instrumentManager_lfoAdapterDescriptor(
+    const instrument_lfo_target_adapter_t *adapter);
 static uint8_t instrumentManager_writeRuntimeInternal(
     uint8_t slot, const ParamDescriptor *descriptor,
     instrument_param_value_t value,
@@ -742,6 +798,102 @@ static uint8_t instrumentManager_descriptorSupportsModulationRange(
     return instrumentManager_descriptorModDomain(descriptor, 0);
 }
 
+/*
+ * Waveform modulation domain for a slot's oscillator (S084 P1 P1-10.4).
+ *
+ * What:       the descriptor domain, with an OSC_WAVE row's maximum taken
+ *             from the oscillator's current type (wav: stock count - 1;
+ *             pwm/smp/slp: 127).
+ * Why:        plan §5.1: LFO/velocity sweeps of `wav` must stay inside the
+ *             selected type's range; the global maximum no longer fits.
+ * Inputs:     slot, descriptor.  Outputs: domain_out; 1 when modulatable.
+ * Accessors:  instrumentManager_resolveModulationTarget();
+ *             instrumentManager_refreshWaveDomains().
+ * Affiliates: IM_SPECIAL_OSC_TYPE writer (calls the refresh).
+ */
+static uint8_t instrumentManager_descriptorModDomainForSlot(
+    uint8_t slot,
+    const ParamDescriptor *descriptor,
+    instrument_mod_domain_t *domain_out)
+{
+    OscInfo *osc;
+
+    if (!instrumentManager_descriptorModDomain(descriptor, domain_out))
+        return 0u;
+    if ((descriptor->runtime.special & IM_SPECIAL_WRITER_MASK) ==
+        IM_SPECIAL_OSC_WAVE) {
+        osc = instrumentManager_oscForDescriptor(slot, descriptor);
+        if (!osc)
+            return 0u;
+        if (domain_out)
+            domain_out->max_value = instrumentManager_oscWaveMax(osc);
+    }
+    return 1u;
+}
+
+/*
+ * Refresh a slot's waveform modulation domains (S084 P1 P1-10.4).
+ *
+ * What:       for every installed LFO adapter whose target slot is `slot` and
+ *             whose descriptor is an OSC_WAVE row, recompute the domain and
+ *             clamp the cached base; if a velocity destination targets such a
+ *             row, reinstall it so ModulationNode's cached range follows.
+ * Why:        a type change redefines the legal `wav` range (plan §5.1).
+ * Inputs:     slot.  Outputs: adapter domains/base; velocity node range.
+ * Accessors:  the IM_SPECIAL_OSC_TYPE writer.
+ * Affiliates: instrumentManager_installVelocityModulationTarget(),
+ *             instrumentManager_descriptorModDomainForSlot().
+ */
+static void instrumentManager_refreshWaveDomains(uint8_t slot)
+{
+    uint8_t source;
+    uint8_t pair;
+
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    for (source = 0u; source < INSTRUMENT_SLOT_COUNT; source++) {
+        for (pair = 0u; pair < 2u; pair++) {
+            instrument_lfo_target_adapter_t *adapter =
+                &lfo_descriptor_targets[source][pair];
+            const ParamDescriptor *descriptor;
+
+            if (!adapter->active || adapter->slot != slot)
+                continue;
+            descriptor = instrumentManager_lfoAdapterDescriptor(adapter);
+            if (!descriptor)
+                continue;
+            if ((descriptor->runtime.special & IM_SPECIAL_WRITER_MASK) !=
+                IM_SPECIAL_OSC_WAVE)
+                continue;
+            if (instrumentManager_descriptorModDomainForSlot(
+                    slot, descriptor, &adapter->domain) &&
+                adapter->base_value > adapter->domain.max_value)
+                adapter->base_value = adapter->domain.max_value;
+        }
+        {
+            ModulationNode *node = &velocityModulators[source];
+            const ParamDescriptor *descriptor;
+            uint8_t local;
+
+            if (node->destinationMode != MOD_NODE_DEST_DIRECT_PARAMETER)
+                continue;
+            if (!instrumentParam_isVoiceParameter(node->destination) ||
+                instrumentParam_slot(node->destination) != slot)
+                continue;
+            local = instrumentParam_local(node->destination);
+            descriptor = instrumentManager_descriptor(
+                instrumentManager_slotType(slot), local);
+            if (!descriptor)
+                continue;
+            if ((descriptor->runtime.special & IM_SPECIAL_WRITER_MASK) !=
+                IM_SPECIAL_OSC_WAVE)
+                continue;
+            (void)instrumentManager_installVelocityModulationTarget(
+                source, node->destination);
+        }
+    }
+}
+
 static uint8_t instrumentManager_descriptorIsSlotDecimationTarget(
     const ParamDescriptor *descriptor)
 {
@@ -804,7 +956,7 @@ uint8_t instrumentManager_targetValid(uint8_t scene_index,
          * ModulationNode pointer backend or explicit supplemental descriptor
          * targets with their own adapter. Slot decimation is the first
          * supplemental voice target: it is descriptor-owned and image-backed,
-         * but applies through mixer_decimation_rate[slot] rather than a
+         * but applies through insertFx_setRate(slot, byte) rather than a
          * voice-struct member pointer. Keeping both cases in the shared
          * validator makes Menu target stepping and DSP target installation
          * agree without a hardcoded parameter list.
@@ -1383,26 +1535,91 @@ void instrumentManager_runtimeInit(void)
     }
 }
 
-uint8_t instrumentManager_ampEnvelopeQuiet(uint8_t slot)
+/*
+ * Whether a slot is quiet enough to swap (S084 P1 P1-2.2).
+ *
+ * What:       1 when the slot's pre-fader block peak has stayed at or below
+ *             INSTRUMENT_SLOT_QUIET_PEAK for INSTRUMENT_SLOT_QUIET_BLOCKS
+ *             consecutive blocks (or the slot is invalid).
+ * Why:        replaces the amp-envelope-value test (plan §3.9, §5.7).
+ * Inputs:     slot.  Outputs: 1 quiet / 0 sounding.
+ * Accessors:  preset_tickSingleVoiceApply(), preset_tickDrumsetApply(),
+ *             preset_startInstrumentApplyImage(), preset_tickInstrumentSwap().
+ * Affiliates: instrumentManager_noteSlotBlockPeak().
+ */
+uint8_t instrumentManager_slotQuiet(uint8_t slot)
 {
-    SlopeEg2 *ampEg;
-
-    /*
-     * Determine whether a runtime slot is quiet enough to swap.
-     *
-     * Inputs: zero-based slot using the current runtime type shadow. Outputs:
-     * 1 for invalid/no-envelope/stopped/near-zero slots, 0 for slots whose amp
-     * envelope is still meaningfully above silence. Invalid or missing runtime
-     * instances are treated as quiet because there is no old sound to protect.
-     */
     if (slot >= INSTRUMENT_SLOT_COUNT)
         return 1u;
-    ampEg = instrumentManager_ampEg(slot);
-    if (!ampEg)
-        return 1u;
-    if (ampEg->state == EG_STOPPED)
-        return 1u;
-    return (uint8_t)(ampEg->value <= INSTRUMENT_AMP_EG_QUIET_THRESHOLD);
+    return (uint8_t)(instrumentManager_slotQuietBlocks[slot] >=
+                     INSTRUMENT_SLOT_QUIET_BLOCKS);
+}
+
+/*
+ * Record one rendered block's pre-volume peak (S084 P1 P1-2.2).
+ *
+ * What:       stores the peak and advances or clears the quiet counter.
+ * Why:        the mixer sees every slot's rendered block once; this keeps the
+ *             quiet state in its owner without the mixer knowing thresholds.
+ * Inputs:     slot 0..5, peak = max |sample| of the block before volume,
+ *             fader, pan and decimation.
+ * Outputs:    instrumentManager_slotPeak[], ..._slotQuietBlocks[].
+ * Accessors:  mixer_calcNextSampleBlock() (P1-2.4).
+ * Affiliates: instrumentManager_slotQuiet(). Foreground render context.
+ */
+void instrumentManager_noteSlotBlockPeak(uint8_t slot, uint16_t peak)
+{
+    uint8_t quiet;
+
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    /* S084 VX3 VX3-7.6: buffer stages report their input witness peak. */
+    if (instrumentManager_stageInputPeak[slot] != INSERT_WITNESS_OUTPUT)
+        peak = instrumentManager_stageInputPeak[slot];
+    instrumentManager_slotPeak[slot] = peak;
+    quiet = (uint8_t)(peak <= INSTRUMENT_SLOT_QUIET_PEAK);
+    if (quiet) {
+        if (instrumentManager_slotQuietBlocks[slot] <
+            INSTRUMENT_SLOT_QUIET_BLOCKS)
+            instrumentManager_slotQuietBlocks[slot]++;
+    } else {
+        instrumentManager_slotQuietBlocks[slot] = 0u;
+    }
+}
+
+/*
+ * Last recorded block peak of a slot (S084 P1 P1-2.2).
+ * Inputs: slot. Outputs: peak in int16 LSB (0 for invalid slots).
+ * Accessors: presetManager.c preset_traceSwap() (DEV trace 'v').
+ */
+uint16_t instrumentManager_slotLastPeak(uint8_t slot)
+{
+    return (slot < INSTRUMENT_SLOT_COUNT)
+        ? instrumentManager_slotPeak[slot] : 0u;
+}
+
+/*
+ * Consume a slot's declick request (S084 P1 P1-2.2).
+ *
+ * What:       returns 1 once after the slot was rebuilt, then clears it.
+ * Why:        the mixer applies the swap declick on the first block of the
+ *             new instrument (plan §5.7 item 4); the arm is set where every
+ *             swap path converges (resetRuntimeSlotFromScene).
+ * Inputs:     slot. Outputs: 1 if armed.
+ * Accessors:  mixer_calcNextSampleBlock() (P1-2.4).
+ */
+uint8_t instrumentManager_takeSlotDeclickArm(uint8_t slot)
+{
+    uint8_t bit;
+    uint8_t armed;
+
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return 0u;
+    bit = (uint8_t)(1u << slot);
+    armed = (uint8_t)((instrumentManager_slotDeclickArm & bit) != 0u);
+    instrumentManager_slotDeclickArm =
+        (uint8_t)(instrumentManager_slotDeclickArm & (uint8_t)~bit);
+    return armed;
 }
 
 void instrumentManager_clearAllRuntimeModulationTargets(void)
@@ -1511,10 +1728,32 @@ void instrumentManager_resetRuntimeSlotFromScene(uint8_t slot,
     default:
         break;
     }
+    /* S084 VX3 VX3-7.7: runtime members carry the insert-call slot. */
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM:
+        instrumentManager_drumRuntime(slot)->stageSlot = slot; break;
+    case INSTRUMENT_TYPE_SNR:
+        instrumentManager_snareRuntime(slot)->stageSlot = slot; break;
+    case INSTRUMENT_TYPE_CYM:
+        instrumentManager_cymbalRuntime(slot)->stageSlot = slot; break;
+    case INSTRUMENT_TYPE_HAT:
+        instrumentManager_hihatRuntime(slot)->stageSlot = slot; break;
+    default:
+        break;
+    }
     /* S079 P2 fix 4: a rebind opens the slot's gate fade. */
     instrumentManager_gateFade[slot] = 1.0f;
     instrumentManager_gateFadeStep[slot] = 0.0f;
     instrumentManager_gateDuck[slot] = 0u;
+    /*
+     * S084 P1 P1-2.3: a rebuilt slot declicks its first block and starts
+     * quiet. Every swap path (Scene worker, per-track worker, Instrument
+     * load/preview, trigger force, boot) converges here, so the declick
+     * covers all of them. Affiliates: instrumentManager_takeSlotDeclickArm(),
+     * mixer_calcNextSampleBlock().
+     */
+    instrumentManager_slotDeclickArm |= (uint8_t)(1u << slot);
+    instrumentManager_slotQuietBlocks[slot] = INSTRUMENT_SLOT_QUIET_BLOCKS;
 }
 
 void instrumentManager_resetRuntimeSlot(uint8_t slot)
@@ -1548,6 +1787,76 @@ void instrumentManager_dispatchRuntimeLfos(void)
         Lfo *lfo = instrumentManager_runtimeLfo(slot);
         if (lfo)
             lfo_dispatchNextValue(lfo, slot);
+    }
+}
+
+/*
+ * Grant oscillator render-pool units to run-mode crossfades
+ * (S084 P1 P1-10.5).
+ *
+ * What:       ongoing `itp` crossfades re-claim first, then new ones, lowest
+ *             slot first; a new crossfade that does not fit falls back to
+ *             `fre` for that trigger.
+ * Why:        plan §4.1.6 priority: itp before waveform interpolation, lowest
+ *             voice first; ongoing crossfades are never cut.
+ * Inputs:     each slot's OscSectionState and oscillators.
+ * Outputs:    OscRenderPool grants; itp states.
+ * Accessors:  mixer_calcNextSampleBlock() before modNode_resetTargets().
+ * Affiliates: OscSection.c, OscRenderPool.c.
+ */
+void instrumentManager_claimOscSectionUnits(void)
+{
+    uint8_t slot;
+
+    /* Loop 1: ongoing crossfades keep their units, in slot order. */
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        OscSectionState *section = instrumentManager_oscSection(slot);
+
+        if (section)
+            oscSection_claimOngoing(section);
+    }
+    /* Loop 2: new crossfades claim what is left, lowest slot first. */
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        OscSectionState *section = instrumentManager_oscSection(slot);
+        OscInfo *oscs[OSC_SECTION_MAX_OSCS] = { 0, 0, 0 };
+
+        if (!section)
+            continue;
+        switch (instrumentManager_slotType(slot)) {
+        case INSTRUMENT_TYPE_DRM: {
+            DrumVoice *voice = instrumentManager_drumRuntime(slot);
+            if (voice) {
+                oscs[0] = &voice->osc;
+                oscs[1] = &voice->modOsc;
+            }
+            break; }
+        case INSTRUMENT_TYPE_SNR: {
+            SnareVoice *voice = instrumentManager_snareRuntime(slot);
+            if (voice) {
+                oscs[0] = &voice->osc;
+                oscs[1] = &voice->noiseOsc;
+            }
+            break; }
+        case INSTRUMENT_TYPE_CYM: {
+            CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+            if (voice) {
+                oscs[0] = &voice->osc;
+                oscs[1] = &voice->modOsc;
+                oscs[2] = &voice->modOsc2;
+            }
+            break; }
+        case INSTRUMENT_TYPE_HAT: {
+            HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+            if (voice) {
+                oscs[0] = &voice->osc;
+                oscs[1] = &voice->modOsc;
+                oscs[2] = &voice->modOsc2;
+            }
+            break; }
+        default:
+            break;
+        }
+        oscSection_claimPending(section, oscs);
     }
 }
 
@@ -1600,11 +1909,15 @@ void instrumentManager_retriggerRuntimeLfos(uint8_t trigger_track)
          * Inputs:     lfo->retrigger (uint8_t), trigger_track (uint8_t).
          * Outputs:    phase reset only for voice retrigger matches.
          * Affiliates: LFO_RETRIGGER_SCENE (lfo.h), lfo_retrigger() (lfo.c).
+         *
+         * S084 P1 P1-1.7: lfo_retriggerPhase() replaces the direct phase
+         * write so one-shot waves restart with their start delay; looping
+         * waves still jump to phaseOffset.
          */
         if (lfo && lfo->retrigger != 0u &&
             lfo->retrigger <= INSTRUMENT_SLOT_COUNT &&
             lfo->retrigger == (uint8_t)(trigger_track + 1u))
-            lfo->phase = lfo->phaseOffset;
+            lfo_retriggerPhase(lfo);
     }
 }
 
@@ -1660,30 +1973,35 @@ float instrumentManager_runtimeVolume(uint8_t slot)
 void instrumentManager_recalcSlotFilter(uint8_t slot)
 {
     /*
-     * Recalculate the current slot instrument's filter coefficients.
+     * Per-block filter coefficient update through the oscillator section
+     * (S084 P1 P1-10.3).
      *
-     * Inputs: zero-based slot. Output: the active runtime filter for that
-     * slot/type receives SVF_recalcFreq(). This small dispatcher is kept here
-     * rather than folded into mixer.c because filter ownership depends on the
-     * instrument currently loaded into the slot, not on the physical voice
-     * number.
+     * What:       rst: exactly SVF_recalcFreq() (S0). fre/itp: the cutoff and
+     *             resonance the loop uses slew over about 2 ms toward the
+     *             values the writers set, so a retrigger never steps a
+     *             ringing filter.
+     * Why:        plan §4.1.6 (r4 Q4 answer: yes, a fast parameter slew when
+     *             the filter state is kept).
+     * Inputs:     slot.  Outputs: filter->g (and q in fre/itp).
+     * Accessors:  mixer_calcNextSampleBlock() step 4.
+     * Affiliates: oscSection_filterRecalc(), SVF_recalcFreqFrom().
      */
     switch (instrumentManager_slotType(slot)) {
     case INSTRUMENT_TYPE_DRM: {
         DrumVoice *voice = instrumentManager_drumRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) oscSection_filterRecalc(&voice->section, &voice->filter);
         break; }
     case INSTRUMENT_TYPE_SNR: {
         SnareVoice *voice = instrumentManager_snareRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) oscSection_filterRecalc(&voice->section, &voice->filter);
         break; }
     case INSTRUMENT_TYPE_CYM: {
         CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) oscSection_filterRecalc(&voice->section, &voice->filter);
         break; }
     case INSTRUMENT_TYPE_HAT: {
         HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) oscSection_filterRecalc(&voice->section, &voice->filter);
         break; }
     default:
         break;
@@ -1769,6 +2087,16 @@ void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
     default:
         memset(buf, 0, size * sizeof(buf[0]));
         break;
+    }
+    /* S084 VX3 VX3-7.5: Mix FX is the final slot-render stage. */
+    if (slot < INSTRUMENT_SLOT_COUNT) {
+        insert_stage_in_t in;
+
+        in.drive = instrumentManager_distortion(slot);
+        in.amount = instrumentManager_insertAmount(slot);
+        instrumentManager_stageInputPeak[slot] =
+            in.drive ? insertFx_renderMix(slot, buf, size, &in)
+                     : INSERT_WITNESS_OUTPUT;
     }
 }
 
@@ -2041,6 +2369,138 @@ static OscInfo *instrumentManager_oscBySelector(uint8_t slot, uint8_t selector)
     }
 }
 
+/*
+ * Maximum `wav` value for an oscillator's current type
+ * (S084 P1 P1-10.2).
+ *
+ * What:       OSC_STOCK_WAVE_COUNT - 1 for `wav`, 127 otherwise.
+ * Why:        the writer clamp, the modulation domain and the cell formatter
+ *             must agree (plan §4.1.1, §5.1).
+ * Inputs:     osc.  Outputs: maximum value.
+ * Accessors:  the OSC_TYPE/OSC_WAVE writers, the per-slot domain,
+ *             InstrumentCellFormat.c.
+ * Affiliates: OSC_STOCK_WAVE_COUNT (Oscillator.h).
+ */
+uint8_t instrumentManager_oscWaveMax(const OscInfo *osc)
+{
+    if (!osc)
+        return 0u;
+    return (osc->oscType == OSC_TYPE_WAV)
+        ? (uint8_t)(OSC_STOCK_WAVE_COUNT - 1u) : 127u;
+}
+
+/*
+ * Maximum `src` value for an oscillator's current type
+ * (S084 P1 P1-10.2).
+ *
+ * What:       OSC_PWM_FAMILY_COUNT - 1 for `pwm`; installed sample count - 1
+ *             for `smp`/`slp`; 0 for `wav`.
+ * Why:        see instrumentManager_oscWaveMax().
+ * Inputs:     osc.  Outputs: maximum value.
+ * Accessors:  the OSC_TYPE/OSC_SOURCE writers, the cell formatter.
+ * Affiliates: OSC_PWM_FAMILY_COUNT, SampleMemory.
+ */
+uint8_t instrumentManager_oscSourceMax(const OscInfo *osc)
+{
+    uint8_t count;
+
+    if (!osc)
+        return 0u;
+    switch (osc->oscType) {
+    case OSC_TYPE_PWM:
+        return (uint8_t)(OSC_PWM_FAMILY_COUNT - 1u);
+    case OSC_TYPE_SMP:
+    case OSC_TYPE_SLP:
+        count = sampleMemory_getNumSamples();
+        return count ? (uint8_t)(count - 1u) : 0u;
+    case OSC_TYPE_WTB:
+        /* S084 VX2 VX2-5.7: one installed wavetable per src value. */
+        count = sampleMemory_getNumWavetables();
+        return count ? (uint8_t)(count - 1u) : 0u;
+    case OSC_TYPE_WAV:
+    default:
+        return 0u;
+    }
+}
+
+/*
+ * Is this descriptor a selector row? (S084 VX2 VX2-8.5; P1 review fix F1)
+ *
+ * What:       1 for every single-ended row that binds a voice member
+ *             through a special writer: INSTANCE_OFFSET binding, MORPHABLE
+ *             clear, special tag != IM_SPECIAL_NONE. Today: typ, src, run
+ *             (P1), trt, dty (S084 VX2 VX2-8.5).
+ * Why:        Preset's supplemental path rejects INSTANCE_OFFSET rows in
+ *             general (they normally belong to the Morph image); the selector
+ *             rows are the one deliberate exception and must be recognised by
+ *             their writer tag, not by key text. Recognising the class rather
+ *             than a list keeps a future selector row from silently missing
+ *             the pre-pass (the P1 review F1 failure mode).
+ * Inputs:     descriptor (nullable).  Outputs: 0/1.
+ * Accessors:  presetManager.c (supplemental setter, selector pre-pass, Kit
+ *             supplemental loop).
+ * Affiliates: ROW_SELECT_SPECIAL (FLAGS_SELECT) in the *Parameters.c tables.
+ */
+uint8_t instrumentManager_isSelectorDescriptor(
+    const ParamDescriptor *descriptor)
+{
+    if (!descriptor ||
+        descriptor->runtime.kind != INSTRUMENT_BIND_INSTANCE_OFFSET ||
+        (descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE))
+        return 0u;
+    return (uint8_t)((descriptor->runtime.special & IM_SPECIAL_WRITER_MASK) !=
+                     IM_SPECIAL_NONE);
+}
+
+/*
+ * Borrow a slot's oscillator section state (S084 P1 P1-10.2).
+ *
+ * What:       returns the live engine's OscSectionState.
+ * Why:        the run-mode writer and the filter recalc need one mapping.
+ * Inputs:     slot.  Outputs: borrowed pointer or NULL.
+ * Accessors:  InstrumentManager.c, InstrumentCellFormat.c.
+ * Affiliates: OscSection.h.
+ */
+OscSectionState *instrumentManager_oscSection(uint8_t slot)
+{
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? &voice->section : 0; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? &voice->section : 0; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        return voice ? &voice->section : 0; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? &voice->section : 0; }
+    default:
+        return 0;
+    }
+}
+
+/*
+ * Borrow the oscillator a descriptor's tag selects (S084 P1 P1-10.2).
+ *
+ * What:       resolves an OSC_TYPE/OSC_SOURCE/OSC_WAVE row's
+ *             IM_SPECIAL_OSC_* selector against the slot's live runtime type.
+ * Why:        InstrumentCellFormat and the Menu need the same oscillator
+ *             mapping the writers use without knowing the engine structs.
+ * Inputs:     slot, descriptor.  Outputs: borrowed OscInfo* or NULL.
+ * Accessors:  InstrumentCellFormat.c.
+ * Affiliates: instrumentManager_oscBySelector().
+ */
+OscInfo *instrumentManager_oscForDescriptor(uint8_t slot,
+                                            const ParamDescriptor *descriptor)
+{
+    if (!descriptor || slot >= INSTRUMENT_SLOT_COUNT)
+        return 0;
+    return instrumentManager_oscBySelector(
+        slot, (uint8_t)(descriptor->runtime.special & IM_SPECIAL_OSC_MASK));
+}
+
 static ResonantFilter *instrumentManager_filter(uint8_t slot)
 {
     switch (instrumentManager_slotType(slot)) {
@@ -2058,6 +2518,52 @@ static ResonantFilter *instrumentManager_filter(uint8_t slot)
         return voice ? &voice->filter : 0; }
     default:
         return 0;
+    }
+}
+
+/*
+ * Borrow a slot's drive type and shaper state (S084 VX2 VX2-7.7).
+ *
+ * What:       maps the slot's live instrument type to its engine's
+ *             driveType/shaper pair.
+ * Why:        the drive-type writer and the cell formatter use one mapping,
+ *             without exposing the engine structs.
+ * Inputs:     slot, out pointers.  Outputs: 1 when the engine exists.
+ * Accessors:  IM_SPECIAL_DRIVE_TYPE writer.
+ * Affiliates: DriveShaper.h, the four engine headers.
+ */
+static uint8_t instrumentManager_driveFields(uint8_t slot, uint8_t **type,
+                                             DriveShaperState **state)
+{
+    if (!type || !state)
+        return 0u;
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        if (!voice) return 0u;
+        *type = &voice->driveType;
+        *state = &voice->shaper;
+        return 1u; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        if (!voice) return 0u;
+        *type = &voice->driveType;
+        *state = &voice->shaper;
+        return 1u; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        if (!voice) return 0u;
+        *type = &voice->driveType;
+        *state = &voice->shaper;
+        return 1u; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        if (!voice) return 0u;
+        *type = &voice->driveType;
+        *state = &voice->shaper;
+        return 1u; }
+    default:
+        return 0u;
     }
 }
 
@@ -2115,6 +2621,51 @@ static Distortion *instrumentManager_distortion(uint8_t slot)
     }
 }
 
+/* Return the engine-owned Mix type/amount fields for a live slot. */
+static uint8_t instrumentManager_insertFields(uint8_t slot,
+                                              uint8_t **type_out,
+                                              uint8_t **amount_out)
+{
+    if (type_out) *type_out = NULL;
+    if (amount_out) *amount_out = NULL;
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        if (!voice) return 0u;
+        if (type_out) *type_out = &voice->insertType;
+        if (amount_out) *amount_out = &voice->insertAmount;
+        return 1u; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        if (!voice) return 0u;
+        if (type_out) *type_out = &voice->insertType;
+        if (amount_out) *amount_out = &voice->insertAmount;
+        return 1u; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        if (!voice) return 0u;
+        if (type_out) *type_out = &voice->insertType;
+        if (amount_out) *amount_out = &voice->insertAmount;
+        return 1u; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        if (!voice) return 0u;
+        if (type_out) *type_out = &voice->insertType;
+        if (amount_out) *amount_out = &voice->insertAmount;
+        return 1u; }
+    default:
+        return 0u;
+    }
+}
+
+static uint8_t instrumentManager_insertAmount(uint8_t slot)
+{
+    uint8_t *amount = NULL;
+
+    return instrumentManager_insertFields(slot, NULL, &amount) && amount
+        ? *amount : 0u;
+}
+
 static TransientGenerator *instrumentManager_transient(uint8_t slot)
 {
     switch (instrumentManager_slotType(slot)) {
@@ -2133,6 +2684,23 @@ static TransientGenerator *instrumentManager_transient(uint8_t slot)
     default:
         return 0;
     }
+}
+
+/*
+ * A slot's transient type (S084 VX2 VX2-6.3).
+ *
+ * What:       TRANSIENT_TYPE_* of the slot's live transient generator; trs
+ *             when the slot has none.
+ * Why:        InstrumentCellFormat formats the transient wav cell by type.
+ * Inputs:     slot.  Outputs: type.
+ * Accessors:  InstrumentCellFormat.c.
+ * Affiliates: instrumentManager_transient() (static).
+ */
+uint8_t instrumentManager_transientType(uint8_t slot)
+{
+    TransientGenerator *transient = instrumentManager_transient(slot);
+
+    return transient ? transient->type : (uint8_t)TRANSIENT_TYPE_TRS;
 }
 
 static uint8_t instrumentManager_descriptorIndexForPointer(
@@ -2375,8 +2943,10 @@ static uint8_t instrumentManager_resolveModulationTarget(
     target_out->parameter.type = descriptor->runtime.parameter_type;
     target_out->waveInterpTarget =
         instrumentManager_waveInterpTarget(target_slot, descriptor);
-    if (!instrumentManager_descriptorModDomain(descriptor,
-                                               &target_out->domain)) {
+    /* S084 P1 P1-10.4: the wave row's maximum depends on the target slot's
+    ** oscillator type. */
+    if (!instrumentManager_descriptorModDomainForSlot(
+            target_slot, descriptor, &target_out->domain)) {
         return 0u;
     }
     if (!instrumentManager_buildModulationRange(descriptor,
@@ -2425,9 +2995,10 @@ static uint8_t instrumentManager_applySlotDecimationTarget(uint16_t id,
      * Apply one voice-local slot-decimation modulation value.
      *
      * Inputs: canonical descriptor target ID and 0..127 value. Output:
-     * InstrumentManager's existing supplemental runtime writer updates
-     * mixer_decimation_rate[target_slot]. This helper keeps velocity and LFO
-     * supplemental modulation paths from duplicating descriptor decode and
+     * InstrumentManager's existing supplemental runtime writer updates the
+     * target slot's D+S Mix rate through insertFx_setRate(). This helper keeps
+     * velocity and LFO supplemental modulation paths from duplicating
+     * descriptor decode and
      * binding rules.
      */
     if (!instrumentParam_isVoiceParameter(id))
@@ -2799,6 +3370,9 @@ void instrumentManager_captureLfoPhaseForSlot(uint8_t slot)
  *             memset + lfo_init. The incoming Scene's retrigger value was
  *             not yet written at that point, so the decision is deferred
  *             until after descriptor apply.
+ *             S084 P1 P1-1.8: a one-shot LFO whose retrigger is off or scn
+ *             fires once here (its start delay applies), even when no
+ *             handoff snapshot is valid; other LFOs keep the S076 rule.
  * Inputs:     zero-based slot (0..INSTRUMENT_SLOT_COUNT-1), the static
  *             handoff struct, and the incoming LFO's retrigger field.
  * Outputs:    lfo->phase is set. Out-of-range slot, invalid handoff, or
@@ -2813,13 +3387,25 @@ void instrumentManager_restoreLfoPhaseIfNeeded(uint8_t slot)
 {
     Lfo *lfo;
 
-    if (slot >= INSTRUMENT_SLOT_COUNT || !lfo_scene_handoff.valid)
+    if (slot >= INSTRUMENT_SLOT_COUNT)
         return;
     lfo = instrumentManager_runtimeLfo(slot);
     if (!lfo)
         return;
+    /*
+     * S084 P1 P1-1.8: a one-shot with no voice trigger source fires at Scene
+     * activation (r4 Q17 / Q9). This test runs before the handoff validity
+     * guard because the fire must not depend on an outgoing snapshot.
+     */
+    if (lfo_isOneShot(lfo) &&
+        (lfo->retrigger == 0u || lfo->retrigger == LFO_RETRIGGER_SCENE)) {
+        lfo_retriggerPhase(lfo);
+        return;
+    }
+    if (!lfo_scene_handoff.valid)
+        return;
     if (lfo->retrigger == LFO_RETRIGGER_SCENE)
-        lfo->phase = lfo->phaseOffset;
+        lfo_retriggerPhase(lfo);
     else
         lfo->phase = lfo_scene_handoff.phase[slot];
 }
@@ -3261,6 +3847,9 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         ResonantFilter *filter = instrumentManager_filter(slot);
         if (!filter) return 0u;
         SVF_setReso(filter, byteValue / 127.0f);
+        /* S084 P1 P1-10.3: the fre/itp slew needs the writer's target. */
+        oscSection_noteResoTarget(instrumentManager_oscSection(slot),
+                                  filter->q);
         return 1u; }
     case IM_SPECIAL_FILTER_DRIVE: {
         ResonantFilter *filter = instrumentManager_filter(slot);
@@ -3279,6 +3868,33 @@ static uint8_t instrumentManager_writeSpecialRuntime(
                          descriptor->runtime.parameter_type },
             (uint8_t)(byteValue + 1u));
         return 1u;
+    /*
+     * Filter drive type writer (S084 VX2 VX2-7.7).
+     *
+     * What:       clamps to 0..DRIVE_TYPE_COUNT-1; on a change, stores it and
+     *             resets the shaper state so trackers and DC blockers start
+     *             clean.
+     * Why:        plan §4.4; automatable (a step lock can change the type per
+     *             step), so a type change must never carry another type's
+     *             state.
+     * Inputs:     byteValue.  Outputs: driveType, shaper.
+     * Accessors:  instrumentManager_writeRuntime() (selector pre-pass,
+     *             supplemental menu/MIDI edits, step automation).
+     * Affiliates: driveShaper_reset(), SVF_calcBlockZDFShaped().
+     */
+    case IM_SPECIAL_DRIVE_TYPE: {
+        uint8_t *driveType;
+        DriveShaperState *shaper;
+        const uint8_t type = (byteValue < DRIVE_TYPE_COUNT)
+            ? byteValue : (uint8_t)(DRIVE_TYPE_COUNT - 1u);
+
+        if (!instrumentManager_driveFields(slot, &driveType, &shaper))
+            return 0u;
+        if (*driveType != type) {
+            *driveType = type;
+            driveShaper_reset(shaper);
+        }
+        return 1u; }
     case IM_SPECIAL_AMP_ATTACK: {
         SlopeEg2 *ampEg = instrumentManager_ampEg(slot);
         if (!ampEg) return 0u;
@@ -3335,10 +3951,33 @@ static uint8_t instrumentManager_writeSpecialRuntime(
                 instrumentManager_pitchModAmount(byteValue);
         }
         return 1u;
+    /*
+     * Transient type and wave writers (S084 VX2 VX2-6.3).
+     *
+     * What:       TYPE selects trs/wav (buf reserved); WAVE records the
+     *             requested byte and clamps the live one to the type's list.
+     *             Both re-resolve the transient kind.
+     * Why:        plan §4.3.1; the P1 review fix F2 rule for type-dependent
+     *             ranges (a type round trip keeps the choice).
+     * Inputs:     byteValue.  Outputs: TransientGenerator type/wave/kind.
+     * Accessors:  instrumentManager_writeRuntime() (selector pre-pass and
+     *             menu/MIDI for TYPE; Morph base, automation and file apply
+     *             for WAVE).
+     * Affiliates: transient_setType(), transient_setWave().
+     */
+    case IM_SPECIAL_TRANSIENT_TYPE: {
+        TransientGenerator *transient = instrumentManager_transient(slot);
+        if (!transient) return 0u;
+        transient_setType(transient, byteValue);
+        insertFx_selectTransient(slot, transient->waveform,
+                                 (uint8_t)(transient->type == TRANSIENT_TYPE_BUF));
+        return 1u; }
     case IM_SPECIAL_TRANSIENT_WAVE: {
         TransientGenerator *transient = instrumentManager_transient(slot);
         if (!transient) return 0u;
-        transient_setWaveform(transient, byteValue);
+        transient_setWave(transient, byteValue);
+        insertFx_selectTransient(slot, transient->waveform,
+                                 (uint8_t)(transient->type == TRANSIENT_TYPE_BUF));
         return 1u; }
     case IM_SPECIAL_TRANSIENT_FREQ: {
         TransientGenerator *transient = instrumentManager_transient(slot);
@@ -3349,6 +3988,24 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         Distortion *distortion = instrumentManager_distortion(slot);
         if (!distortion) return 0u;
         setDistortionShape(distortion, byteValue);
+        return 1u; }
+    case IM_SPECIAL_MIX_FX_TYPE: {
+        uint8_t *type_field = NULL;
+
+        if (!instrumentManager_insertFields(slot, &type_field, NULL))
+            return 0u;
+        *type_field = byteValue;
+        if (insertFx_selectMix(slot, byteValue))
+            instrumentManager_slotDeclickArm |= (uint8_t)(1u << slot);
+        /* Ec2/Rv2 may downgrade at the allocator boundary (C13). */
+        *type_field = insertFx_mixType(slot);
+        return 1u; }
+    case IM_SPECIAL_MIX_FX_AMOUNT: {
+        uint8_t *amount_field = NULL;
+
+        if (!instrumentManager_insertFields(slot, NULL, &amount_field))
+            return 0u;
+        *amount_field = (byteValue > 127u) ? 127u : byteValue;
         return 1u; }
     case IM_SPECIAL_LFO_RATE: {
         Lfo *lfo = instrumentManager_runtimeLfo(slot);
@@ -3381,6 +4038,124 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         if (!lfo) return 0u;
         lfo->phaseOffset =
             (uint32_t)(((uint64_t)byteValue * 0xFFFFFFFFu) / 127u);
+        return 1u; }
+    /*
+     * Oscillator type/source/waveform and run-mode writers (S084 P1 P1-10.2).
+     *
+     * What:       clamp each value to the oscillator's current type, keep the
+     *             other two fields legal after a type change, invalidate the
+     *             frequency cache, rebind sample state, and refresh any LFO
+     *             adapter whose waveform domain depends on the type.
+     * Why:        plan §4.1.1 / §5.1: `wav` means a stock wave, a pwm width, a
+     *             wavetable position (P2) or a sample start, by type; sweeps
+     *             must stay inside the selection.
+     * Inputs:     slot, descriptor (special tag + selector), byte value.
+     * Outputs:    OscInfo fields / OscSectionState.runMode; 1 = consumed.
+     * Accessors:  instrumentManager_writeRuntime() (menu, automation, Morph
+     *             base for the wave row, LFO adapters for the wave row, file
+     *             apply, MIDI menu edits).
+     * Affiliates: oscSample_bind(), instrumentManager_refreshWaveDomains(),
+     *             InstrumentCellFormat.c (same max rules).
+     *
+     * Requested bytes (S084 P1 review fix F2):
+     * What:       the wave and source writers keep the unclamped written byte
+     *             in osc->waveRequest / osc->sourceRequest and clamp only the
+     *             live field (waveform / source). The type writer re-derives
+     *             both live fields from the requested bytes against the new
+     *             type's maximum, instead of clamping whatever the live field
+     *             currently holds.
+     * Why:        a clamp is lossy. Before this fix a pwm width or sample
+     *             start above 5, written while the type was still `wav` (the
+     *             Kit/Scene apply order, or a pwm -> wav -> pwm knob round
+     *             trip), was cut to 5 and stayed 5 after the type changed
+     *             back. With the requested byte kept, a type change is
+     *             reversible and the runtime always equals
+     *             min(written byte, type maximum).
+     * Inputs:     byteValue; for the type writer, the requested bytes.
+     * Outputs:    waveRequest/sourceRequest (wave/source writers);
+     *             waveform/source clamped to the current type.
+     * Reset:      a slot reset zeroes both request bytes (memset in
+     *             instrumentManager_resetRuntimeSlotFromScene()). Every apply
+     *             path writes the selector rows first and the Morph image
+     *             (which holds the wave row) afterwards, so the request bytes
+     *             hold the stored values before a later type change reads
+     *             them.
+     * Not tracked: LFO modulation of the wave row writes osc->waveform
+     *             directly through its pointer (modulationNode.c) every block
+     *             and does not touch waveRequest; the next LFO block
+     *             re-applies it after a type change.
+     */
+    case IM_SPECIAL_OSC_TYPE: {
+        OscInfo *osc = instrumentManager_oscBySelector(
+            slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
+        uint8_t type;
+        uint8_t maxValue;
+
+        if (!osc) return 0u;
+        type = (byteValue < OSC_TYPE_COUNT) ? byteValue
+                                            : (uint8_t)(OSC_TYPE_COUNT - 1u);
+        /*
+         * Union hygiene on entering wtb (S084 VX2 review fix F11).
+         *
+         * What:       when the type changes to wtb from any other type, the
+         *             wtb state is marked unbound (base 0, not primed) before
+         *             the bind below.
+         * Why:        OscWtbState shares bytes with OscPwmState (VX2-5.2); the
+         *             bind refreshes only when base is 0 or index/generation
+         *             differ, so stale pwm bytes that happened to look like a
+         *             valid binding could otherwise be used as a table address.
+         *             The reverse switch is safe: freqCacheValid = 0 below makes
+         *             oscPwm_prepare() rewrite every pwm field.
+         */
+        if (type == OSC_TYPE_WTB && osc->oscType != OSC_TYPE_WTB) {
+            osc->wtb.base = 0u;
+            osc->wtb.primed = 0u;
+        }
+        osc->oscType = type;
+        maxValue = instrumentManager_oscWaveMax(osc);
+        osc->waveform = (osc->waveRequest > maxValue) ? maxValue
+                                                      : osc->waveRequest;
+        maxValue = instrumentManager_oscSourceMax(osc);
+        osc->source = (osc->sourceRequest > maxValue) ? maxValue
+                                                      : osc->sourceRequest;
+        osc->freqCacheValid = 0u;
+        if (type == OSC_TYPE_SMP || type == OSC_TYPE_SLP)
+            oscSample_bind(osc);
+        else if (type == OSC_TYPE_WTB)
+            oscWavetable_bind(osc);
+        instrumentManager_refreshWaveDomains(slot);
+        return 1u; }
+    case IM_SPECIAL_OSC_SOURCE: {
+        OscInfo *osc = instrumentManager_oscBySelector(
+            slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
+        const uint8_t maxValue = instrumentManager_oscSourceMax(osc);
+
+        if (!osc) return 0u;
+        osc->sourceRequest = byteValue;	/* F2: keep the unclamped byte */
+        osc->source = (byteValue > maxValue) ? maxValue : byteValue;
+        osc->freqCacheValid = 0u;
+        if (osc->oscType == OSC_TYPE_SMP || osc->oscType == OSC_TYPE_SLP)
+            oscSample_bind(osc);
+        else if (osc->oscType == OSC_TYPE_WTB)
+            oscWavetable_bind(osc);
+        return 1u; }
+    case IM_SPECIAL_OSC_WAVE: {
+        OscInfo *osc = instrumentManager_oscBySelector(
+            slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
+        const uint8_t maxValue = instrumentManager_oscWaveMax(osc);
+
+        if (!osc) return 0u;
+        osc->waveRequest = byteValue;	/* F2: keep the unclamped byte */
+        osc->waveform = (byteValue > maxValue) ? maxValue : byteValue;
+        if (osc->oscType == OSC_TYPE_SMP || osc->oscType == OSC_TYPE_SLP)
+            oscSample_bind(osc);
+        return 1u; }
+    case IM_SPECIAL_RUN_MODE: {
+        OscSectionState *section = instrumentManager_oscSection(slot);
+
+        if (!section) return 0u;
+        section->runMode = (byteValue < OSC_RUN_COUNT)
+            ? byteValue : (uint8_t)(OSC_RUN_COUNT - 1u);
         return 1u; }
     case IM_SPECIAL_NONE:
     default:
@@ -3426,6 +4201,27 @@ static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
             return IM_SPECIAL_PITCH_COARSE | osc;
         if (strstr(key, "pitch_fine"))
             return IM_SPECIAL_PITCH_FINE | osc;
+        /*
+         * Legacy-rule classification of the S084 rows (S084 P1 P1-10.6).
+         *
+         * What:       maps oscN_type / oscN_source / oscN_wave to
+         *             IM_SPECIAL_OSC_TYPE / _OSC_SOURCE / _OSC_WAVE with the
+         *             oscillator selector.
+         * Why:        the diagnostic self-check (the `s` digit on the FxBf boot
+         *             screen, DEV_MODES.md) compares every row's compile-time
+         *             tag with this classifier; new rows must be covered so the
+         *             proof stays complete.
+         * Inputs:     instrument type, file key.  Outputs: expected tag.
+         * Accessors:  the DEV_MODE_DIAGNOSTIC tag self-check.
+         * Affiliates: tools/dsp_test/check_special_tags.py (host twin).
+         */
+        /* osc2_mod_type is the fm/mix/snc/rng selector, not an osc type. */
+        if (strstr(key, "_type") && !strstr(key, "_mod_type"))
+            return IM_SPECIAL_OSC_TYPE | osc;
+        if (strstr(key, "_source"))
+            return IM_SPECIAL_OSC_SOURCE | osc;
+        if (strstr(key, "_wave"))
+            return IM_SPECIAL_OSC_WAVE | osc;
     }
     if (strcmp(key, "filter_freq") == 0) return IM_SPECIAL_FILTER_FREQ;
     if (strcmp(key, "filter_reso") == 0) return IM_SPECIAL_FILTER_RESO;
@@ -3446,9 +4242,16 @@ static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
             return IM_SPECIAL_PITCH_EG_AMOUNT;
     }
     if (strcmp(key, "transient_wave") == 0) return IM_SPECIAL_TRANSIENT_WAVE;
+    /* S084 VX2 VX2-7.8: the transient and drive type selectors. */
+    if (strcmp(key, "transient_type") == 0) return IM_SPECIAL_TRANSIENT_TYPE;
+    if (strcmp(key, "filter_drive_type") == 0) return IM_SPECIAL_DRIVE_TYPE;
     if (strcmp(key, "transient_freq") == 0) return IM_SPECIAL_TRANSIENT_FREQ;
     if (strcmp(key, "instrument_drive") == 0)
         return IM_SPECIAL_INSTRUMENT_DRIVE;
+    if (strcmp(key, "mix_fx_type") == 0)
+        return IM_SPECIAL_MIX_FX_TYPE;
+    if (strcmp(key, "mix_fx_amount") == 0)
+        return IM_SPECIAL_MIX_FX_AMOUNT;
     if (strcmp(key, "lfo_rate") == 0) return IM_SPECIAL_LFO_RATE;
     /*
      * S076 P2: lfo_offset uses the IM_SPECIAL_LFO_OFFSET handler so
@@ -3456,6 +4259,8 @@ static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
      * being written raw by the TYPE_UINT32 path.
      */
     if (strcmp(key, "lfo_offset") == 0) return IM_SPECIAL_LFO_OFFSET;
+    /* S084 P1 P1-10.6: the voice run-mode selector. */
+    if (strcmp(key, "osc_run_mode") == 0) return IM_SPECIAL_RUN_MODE;
     return IM_SPECIAL_NONE;
 }
 
@@ -3537,8 +4342,7 @@ static uint8_t instrumentManager_writeRuntimeInternal(
     case INSTRUMENT_BIND_SLOT_DECIMATION:
         if (slot >= INSTRUMENT_SLOT_COUNT)
             return 0u;
-        mixer_decimation_rate[slot] =
-            valueShaperI2F((uint8_t)((value > 127u) ? 127u : value), -0.7f);
+        insertFx_setRate(slot, (uint8_t)((value > 127u) ? 127u : value));
         return 1u;
 
     case INSTRUMENT_BIND_VELOCITY_AMOUNT:

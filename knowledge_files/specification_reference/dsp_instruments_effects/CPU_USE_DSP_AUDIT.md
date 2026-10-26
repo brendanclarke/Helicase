@@ -798,3 +798,43 @@ the new copy/clear work is foreground-only and bounded.
     test per Morph-worker parameter write; a menu edit now does one
     interpolation instead of queueing up to 64 parameter writes (less
     foreground work).
+
+### Session 084 VX2 additions (2026-10-26; S084_P2_IMPLEMENTATION.md)
+
+36. **ADDED (S084 VX2): stock waves, wtb, transient types, drive types.**
+    Figures are fpseq.py static loop totals from `make armcheck-vx2`, each
+    measured as one specialised loop (`armcheck/vx2_spec.c`; corrected
+    2026-10-26, S084_P2_IMPLEMENTATION.md §17 — the first report counted the
+    wrong loops).
+    - The generated stock waves use the table path: 24 instructions per
+      sample (FM 31), the same as the 1,024-point tables (24 / 35).
+    - wtb reads two frames every sample: 64 instructions (FM 70),
+      independent of the frame length; above the schedule's 47/62 target,
+      constant work with no skip.
+    - Transients (cap 22, 0 divisions): PCM 18, sample 15, sine/table
+      burst 15, noise 14, crash 16. Sample and burst reads are not
+      interpolated (D6: interpolated they measured 29 and 26).
+    - Filter LP, per drive type (sft 100, 3 divisions with the LP output;
+      no type adds a division): rct 108, thf 109, asf 109, chb 107, bsw 117,
+      sfd 118, afd 121, rsb 120, art 124, fdc 126, tsw 132, lsq 132,
+      lsw 134. The plan's sft + 6 target holds for none; the stateful types
+      are +20..+34 after the review optimisation (they were +43..+55).
+      sft still calls the untouched SVF_calcBlockZDF().
+- Worst-case voice budgeting must use lsw (the costliest drive type), a
+  wtb FM oscillator and the PCM transient (the costliest kind); see the
+  P2 hardware item X7.
+
+### Session 084 VX3 additions (2026-10-26)
+
+37. **ADDED: inserted Mix/transient stage.** The post-engine stage is serviced
+    before the mixer dry/send accumulation. `D+S` contains the P2 distortion
+    curve plus its sample-rate hold; the former mixer decimator is no longer
+    paid as a separate mixer stage. The type registry adds twelve Mix and
+    seven transient descriptors, with all state structs constrained to 48 B.
+38. **ADDED: elastic allocator bookkeeping.** `FxBuffer` scans sixteen
+    positions, pass-coalesces share callbacks, and reserves four lease units
+    for two VoiceBuffer runners. VoiceBuffer records are 14 × 80 B in DTCM;
+    tail expiry and Hold retry are foreground work before the next render.
+39. **MEASURED: final link budget.** `make -B all` reports 675,736 text bytes,
+    5,528 B DTCM statics, 125,536 B FX arena, and 77,488 B flash headroom.
+    Per-type and worst-case board CPU measurements remain hardware items H2/H9.

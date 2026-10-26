@@ -1224,6 +1224,38 @@ Pattern (44–53) → publish (61).
     at once on a non-resetting Scene change);
   - live FX-sequence erase (`effects_setLiveEraseLanes()`,
     `effects_takeErasedLocks()`, `effects_erasedLanes[16]`, §10) and
-    `effects_storeValue7()` for recording WIDE8 rows (§11.2). Live record of
-    Effect parameter moves (A22) is done for track automation; FX-sequence
-    lock recording is still deferred.
+  `effects_storeValue7()` for recording WIDE8 rows (§11.2). Live record of
+  Effect parameter moves (A22) is done for track automation; FX-sequence
+  lock recording is still deferred.
+
+## Session 084 VX3 — inserted voice effects and elastic buffer ownership
+
+The voice path now renders the instrument, applies the selected Mix insert,
+and then performs the ordinary dry/send accumulation. The former mixer-owned
+decimator is gone. `D+S` keeps the P2 distortion curve and applies its
+sample-rate hold in the same inserted stage; its `rte` value is still reached
+through `INSTRUMENT_BIND_SLOT_DECIMATION` and `insertFx_setRate()`.
+
+`Core/DSP/InsertEffects/VoiceBuffer.c` owns fourteen 80-byte records: twelve
+active slots and two lease runners. Buffer types claim adjacent two-unit
+positions from the top of the sixteen-position `FxBuffer` map. If both
+runners are occupied, a new compatible selection is held and retried after
+tail expiry; an existing same-use record is re-adopted without a gap. Tail
+expiry is bounded and fades before release. Preset application brackets its
+selectors with `voiceBuffer_beginPass()`/`voiceBuffer_endPass()` so one
+coalesced share notification reaches the Effect resolver.
+
+The Mix registry is append-only at twelve entries (`D+S`, `Fod`, `Csh`, `Rng`,
+`Phs`, `Fln`, `Cho`, `Ech`, `Ec2`, `Cmb`, `Rev`, `Rv2`); the transient registry
+has seven entries (`Rsn`, `Plk`, `Tub`, `Flm`, `Bzz`, `Rvs`, `Spr`). The
+descriptor contract, shared delay-line helpers, 48-byte state ceiling, and
+type-dependent labels live in `Core/DSP/InsertEffects/` and are deliberately
+independent of Menu, Scene, and filesystem code.
+
+CrumpBit is elastic: its approved minimum is 20,608 B and preferred share is
+70,592 B. Shrink compacts the newest valid samples and crossfades the wet
+path; growth is committed at the ring wrap. The allocator floor is computed
+from sixteen positions, not the legacy twelve regular units, because the two
+lease runners can reserve four units. This section supersedes the pre-VX3
+fixed-share and mixer-decimator descriptions above; the historical entries
+remain as session records.

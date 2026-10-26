@@ -20,8 +20,11 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
-**Current working source**: **Session 083 (MIDI) is closed** (2026-10-22)
-on `dev-ph6-midi`. Record: `knowledge_files/log_archive/083_SESSION_HANDOFF_LOG.md`;
+**Current working source**: **Session 084 P0 (roll fix-up) is implemented**
+on `dev-ph6-midi`, on top of the closed Session 083 (2026-10-22). Hardware
+verification of S084 is pending; the change schedule and its log are
+`S084_P0_IMPLEMENTATION.md` (assessment `S084_P0_ROLL_FIXUP.md`).
+The S083 record is `knowledge_files/log_archive/083_SESSION_HANDOFF_LOG.md`;
 authority: `MIDI_SPEC.md` (the complete MIDI use and code reference, Parts
 I–III). `Core/MIDI/` was rebuilt as the single-role modules listed under
 "MIDI / Clock Reminders" below; `MidiParser`, `Uart`, `FIFO`, `MidiRealtime`,
@@ -34,6 +37,22 @@ I–III). `Core/MIDI/` was rebuilt as the single-role modules listed under
   `bss=430,112`; flash payload 608,848 B of 753,664 (**144,816 B free**).
   S082 baseline was `598,120 / 420 / 430,928`. Production build
   (`DEV_MODE_LOGGING 0`) last measured at S075 F1; needs a rebuild.
+- **Build at S084 P0 (DEV config):** `text=609,128`, `data=424`,
+  `bss=430,200`; flash payload 609,552 B of 753,664 (**144,112 B free**).
+  The measured `bss` delta is +88 B (the approved estimate was +86 B, the
+  rest alignment); the P1-only build measured 430,096 B.
+- **Session 084 P1 — voice foundations (2026-10-25, code landed; hardware
+  pending).** Oscillator types `wav/pwm/smp/slp`, run modes `rst/fre/itp`,
+  Drum `snc`/`rng`, the 4-unit oscillator render pool, one-shot LFOs and the
+  `rnd` range fix, Q20.12 samples, and the deferred-swap fix (real pre-fader
+  level, 2,000 ms bound, declick, Instrument preview on the same path).
+  Build (DEV): `text=624,464`, `data=428`, `bss=430,408`; flash payload
+  624,892 B (**128,772 B free**); ITCM 10,872 / 16,384 B. The runtime-slot
+  reserve is now the fixed 1,176 B so the engine growth adds no SRAM.
+  Schedule, measurements, deviations and remaining hardware items:
+  `S084_P1_IMPLEMENTATION.md` §16. Plan: `S084_P1_VOICE_EXPANSIONS.md`.
+  Host proofs: `make -C tools/dsp_test lfo_oneshot osc_pwm osc_sample
+  osc_run swap_level special_tags filter mixer postchain pack octave`.
 - **Hardware (user):** the S083 P1 build was tested ("seems ok", leading to
   the P2 follow-ups) and the final build "checks out" (2026-10-22). S081 and
   S082 passed their checks (2026-10-21). Open since S082: F5 (Scene 2 Case-3
@@ -59,6 +78,27 @@ I–III). `Core/MIDI/` was rebuilt as the single-role modules listed under
   erase, the step reset rule, R12/R13, the 96-PPQ roll table, `qnt trk`,
   automation ramps (now labelled `rmp`), loop while record, G-1, VOICE bar
   pulse.
+- **Session 084 P0 — roll fix-up (2026-10-24, code landed; hardware
+  pending).** One roll engine on the 96-PPQ master tick:
+  - **P1:** a step roll's length is a time window (`seq_rollWindow[7]`,
+    interval × fill from the step's or deferred fire), not a hit count.
+    A carry fires no hit, leaves the accumulator and rhythm position
+    running, and replaces the window. A fill-100 roll parks at its window
+    end and resumes on phase; a fill < 100 roll ducks there. Carry rule
+    (user Q4): same rate and rhythm, refused when the **previous** roll
+    step's fill was below 100 %; the incoming fill only sets its window.
+  - **P2:** PERF/MIDI overlay rolls and the flam main fire from TIM3
+    (`seq_live*`), not a `PAR_BPM` millisecond timer. `seq_processLiveTicks()`
+    runs first in `seq_processSchedulerTick()`, before the running gate;
+    `seq_tick()` services it under external sync while stopped. Hits are
+    published per track (count, flam bit, TIM2 stamp) and drained by
+    `buttonHandler_overlayDrain()`; LiveRecord still never runs in TIM3.
+  - **P3:** one roll list: PERF types 0..14 = 4 singles, 2 flams, then the
+    nine STEP rates (value − 5). Stored values 6..11 changed meaning; no
+    migration (user Q2).
+  - **P4:** every held roll is a span at any rate (user Q7), recorded per
+    track (`liveRec_roll[7]`), with the `pv` rhythm stored in `rtm` (Q8).
+    A take boundary ends open rolls with no end write (F8).
 
 Session 082 in one paragraph:
 
@@ -238,8 +278,7 @@ points:
   are ignored and dropped on the next settings write.
 * **Open product decisions (no action unless asked):** RXF/TXF defaults;
   whether a PERF BAR overlay should also shape MIDI notes outside PERF (it
-  does today); whether recorded overlay rolls should carry the `pv` rhythm;
-  publishing a per-type NRPN chart.
+  does today); publishing a per-type NRPN chart.
 * **Still open from S082:** F5 Scene 2 Case-3 invalidation (instrumented);
   P3 A2 frozen-screen blink loss (low). P3 A1 is fixed (S083 Q2).
 * **S082 binding rules** (Load/Save repaint coalescing, active Scene never
@@ -1860,10 +1899,13 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - `BUTTON_TIMEOUT` is milliseconds on this port (`500u`), not original AVR ticks (`38 * 13.107ms`).
 - `EuklidGenerator.c` matches original LXR. PATGEN distribution depends on `__CLZ(0) == 32`; do not replace the shim with `__builtin_clz()`.
 - `seq_tick()` is owned by `TIM3_IRQHandler`. **Do NOT add seq_tick() back to the main loop.**
-- **S080 TIM3 order in `seq_processSchedulerTick()`:** master boundary (scene
-  change fire detection) → `seq_chainServiceTick()` → deferred triggers →
-  (unless chain `stp`) `seq_loopProcessTick()` → per-track DDA → rolls → FX
-  clock. Scene changes themselves run in the foreground
+- **S080/S084 TIM3 order in `seq_processSchedulerTick()`:** live overlay
+  rolls/flams (`seq_processLiveTicks()`, **first**, before the running gate)
+  → master boundary (scene change fire detection) →
+  `seq_chainServiceTick()` → deferred triggers → (unless chain `stp`)
+  `seq_loopProcessTick()` → per-track DDA → step rolls → FX clock. Under
+  external sync while stopped, `seq_tick()` services the live overlay engine
+  from its tempo timer instead. Scene changes themselves run in the foreground
   (`menu_serviceDeferredSceneChange()` from `buttonHandler_tick()`).
 - `midiTransport_processRealtime()` and `triggerJacks_tick()` are also owned by TIM3. Do NOT call them from the main loop.
 - `voiceControl_processPending()` is called only inside `audio_check_and_render()` before `mixer_calcNextSampleBlock()`. Do NOT call from ISR context.
@@ -1871,6 +1913,13 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 
 ### MIDI / Clock Reminders (S083; supersedes the Session 019 notes)
 - TIM2 is a shared free-running 1 µs counter. Do NOT reset it on each pulse. Use unsigned subtraction for deltas.
+- **External clock ticks are interpolated (S084 P0 A1).** A MIDI clock
+  (4 scheduler ticks) or a jack pulse (`stepSize × 3` ticks) runs only its
+  first tick on the edge (`seq_extClockTicks()`); `seq_tick()`'s tempo timer
+  (period from `seq_tempo`, measured from the clock) runs the rest one by one
+  from `seq_extTicksOwed`, and the next edge catches up any tick still owed.
+  Do not go back to running a period's ticks back to back: every roll,
+  shuffle and micro-timing inside the period would fire at one instant.
 - TIM5 is free and reserved for future `afatfs_poll()` ISR migration. Do NOT use it for anything else.
 - PAR_EXT_SYNC values in order: `off` / `usb` / `din` / `pls` / `aut`. PAR_BPM minimum is 1; value 0 no longer means external sync.
 - **`Core/MIDI/` is rebuilt (S083).** Modules: `MidiDefs.h`, `MidiBuffer`,

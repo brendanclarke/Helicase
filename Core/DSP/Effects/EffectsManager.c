@@ -95,11 +95,11 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
         (uint16_t)sizeof(StereoFilterRuntime), 0u, 0u
     },
     /*
-     * CrumpBit (`cbt`, S074): stereo in and out. The 8-bit mono tape loop
-     * uses CRUMPBIT_BUFFER_BYTES of the FxBuffer Effect share (min = pref;
-     * the fixed range fits the minimum share). Lanes 1..9: bit off, bit
-     * invert, mix, feedback, rate, sync, vol, pan, delay pan. Lane 0 is
-     * Effect Morph.
+     * CrumpBit (`cbt`, S074/S084 VX3): stereo in and out. The 8-bit mono
+     * tape loop prefers CRUMPBIT_BUFFER_BYTES and elastically shrinks to
+     * CRUMPBIT_BUFFER_MIN_BYTES; the loop keeps its newest audio. Lanes 1..9:
+     * bit off, bit invert, mix, feedback, rate, sync, vol, pan, delay pan.
+     * Lane 0 is Effect Morph.
      */
     {
         crumpBit_token3, crumpBit_abbrev5, crumpBit_full8,
@@ -115,7 +115,7 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
           EFFECT_LANE_NONE, EFFECT_LANE_NONE, EFFECT_LANE_NONE },
         &crumpBit_layout, &crumpBit_ops, &crumpBit_ui,
         (uint16_t)sizeof(CrumpBitRuntime),
-        CRUMPBIT_BUFFER_BYTES, CRUMPBIT_BUFFER_BYTES
+        CRUMPBIT_BUFFER_MIN_BYTES, CRUMPBIT_BUFFER_BYTES
     },
 };
 
@@ -332,6 +332,22 @@ uint8_t effects_paramModulatable(effect_type_id_t type, uint8_t index)
     return (uint8_t)(descriptor &&
         (descriptor->base.flags & INSTRUMENT_PARAM_FLAG_MODULATABLE) != 0u &&
         descriptor->base.mod_domain.flags != INSTRUMENT_MOD_DOMAIN_NONE);
+}
+
+/*
+ * Return the last applied Effect row value (S084 VX3 VX3-2.2).
+ *
+ * What:       exposes the manager's post-resolution byte, including the
+ *             current FxBuffer-dependent clamp. Why: the UI must distinguish
+ *             a stored CrumpBit Rate from the value the present loop can
+ *             actually play. Inputs: local row index. Outputs: zero for an
+ *             invalid index, otherwise the cached applied byte. Accessors:
+ *             menuEffects and future Effect formatters. Affiliates:
+ *             effects_service(), effects_state.last_applied[].
+ */
+uint8_t effects_appliedValue(uint8_t index)
+{
+    return (index < EFFECT_PARAM_COUNT) ? effects_state.last_applied[index] : 0u;
 }
 
 /* Resolve the retained Effect type of one resident Scene. */
@@ -1631,6 +1647,10 @@ static uint8_t effects_registrySelfCheck(void)
         for (previous = 0u; previous < type; previous++)
             if (memcmp(effects_registry[previous].token3, entry->token3, 3u) == 0)
                 return 10u;
+        /* S084 VX3 VX3-2.4: every elastic minimum must fit the floor. */
+        if (entry->buffer_min_bytes > fxbuf_effectFloorBytes() ||
+            entry->buffer_min_bytes > entry->buffer_pref_bytes)
+            return 11u;
     }
     return 0u;
 }
@@ -1952,6 +1972,14 @@ void effects_service(void)
 
             if (value > limit)
                 value = limit;
+        }
+        /* S084 VX3 VX3-2.2: lower share-dependent clamp (D14). */
+        if ((descriptor->effect_flags & EFFECT_PARAM_FLAG_BUFFER_DEPENDENT) != 0u &&
+            entry->ops && entry->ops->effective_min) {
+            uint8_t floor_value = entry->ops->effective_min(index, &share);
+
+            if (value < floor_value)
+                value = floor_value;
         }
         if (!effects_state.force_all &&
             value == effects_state.last_applied[index])

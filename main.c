@@ -81,6 +81,8 @@
 #include "InstrumentManager.h"
 #include "FxBuffer.h"
 #include "EffectsManager.h"
+#include "InsertEffectsManager.h"
+#include "VoiceBuffer.h"
 
 #include "memtest.h"
 #include "flashImage.h"
@@ -119,6 +121,8 @@ static void dsp_init(void)
      * DEV_FXBUF_FORCE_VOICE_UNITS.
      */
     fxbuf_init();
+    /* Initialize Mix/transient registries without reserving voice units. */
+    insertFx_init();
     /*
      * Initialize InstrumentManager's complete tagged runtime ownership.
      *
@@ -346,6 +350,9 @@ static void boot_showFxBufDiagnostic(void)
     fx_share_t share;
     char row1[17] = "FxBf 000K u00 s0";
     char row2[17] = "Shr  000K st0 r0";
+    char owner_map[FXBUF_POSITION_COUNT + 1u];
+    char record_map[17];
+    char runner_map[17];
     uint8_t registry_code;
 
     fxbuf_effectShare(&share);
@@ -377,8 +384,42 @@ static void boot_showFxBufDiagnostic(void)
     lcd_setcursor(0, 2);
     lcd_string(row2);
     boot_delayMs(1500u);
+    /* S084 VX3 VX3-4.9: expose the physical owner map and active/tail
+     * record map without adding a permanent diagnostic screen or storage. */
+    fxbuf_devOwnerMap(owner_map);
+    voiceBuffer_devDump(record_map, runner_map);
+    lcd_clear();
+    lcd_setcursor(0, 1);
+    lcd_string(owner_map);
+    lcd_setcursor(0, 2);
+    lcd_string(record_map);
+    boot_delayMs(1500u);
 }
 #endif
+
+/*
+ * Stale sample flash after a firmware update (S084 VX2 VX2-3.12).
+ *
+ * What:       when sample flash holds a v1 install (no v2 header, a v1
+ *             count word present), shows "Samples invalid" /
+ *             "reload samples" for 1.5 s.
+ * Why:        Q7: nothing is retained across the catalogue change; D13
+ *             wording. Without the notice, smp/slp voices would fall
+ *             silent with no explanation.
+ * Inputs:     sampleMemory_catalogueState().
+ * Outputs:    LCD only; no storage access.
+ * Accessors:  boot, once.
+ * Affiliates: boot_delayMs(), SampleMemory.c refresh.
+ */
+static void boot_showSampleCatalogueNotice(void)
+{
+    lcd_clear();
+    lcd_home();
+    lcd_string("Samples invalid");
+    lcd_setcursor(0, 2);
+    lcd_string("reload samples");
+    boot_delayMs(1500u);
+}
 
 /*
  * Development-only boot-screen instrumentation.
@@ -580,6 +621,9 @@ int main(void)
 
     triggerJacks_init();
     sampleMemory_init();
+    /* S084 VX2 VX2-3.12: a v1 install cannot be read by catalogue v2. */
+    if (sampleMemory_catalogueState() == SAMPLE_CATALOGUE_STALE)
+        boot_showSampleCatalogueNotice();
     /*
      * Establish retained Scene type ownership before constructing tagged DSP
      * runtime members.

@@ -39,6 +39,8 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/DSP/Effects \
           -ICore/DSP/Effects/StereoFilter \
           -ICore/DSP/Effects/CrumpBit \
+          -ICore/DSP/InsertEffects \
+          -ICore/DSP/InsertEffects/Transient \
           -ICore/Bank/Scene \
           -ICore/Bank/Scene/Pattern \
           -ICore/Sequencer \
@@ -109,6 +111,7 @@ SRCS = \
   Core/Bank/Scene/Pattern/PatternTrace.c \
   Core/Bank/Scene/SceneModTargets.c \
   Core/DSP/Instruments/InstrumentManager.c \
+  Core/DSP/Instruments/InstrumentCellFormat.c \
   Core/DSP/Instruments/Drum/DrumParameters.c \
   Core/DSP/Instruments/Snare/SnareParameters.c \
   Core/DSP/Instruments/Cymbal/CymbalParameters.c \
@@ -117,6 +120,7 @@ SRCS = \
   Core/DSP/Effects/EffectsManager.c \
   Core/DSP/Effects/StereoFilter/StereoFilterParameters.c \
   Core/DSP/Effects/CrumpBit/CrumpBitParameters.c \
+  Core/DSP/InsertEffects/InsertEffectsManager.c \
   Core/MIDI/MidiBuffer.c \
   Core/MIDI/MidiDin.c \
   Core/MIDI/MidiTransport.c \
@@ -139,8 +143,15 @@ SRCS = \
 	  Core/Sequencer/LiveRecord.c \
   Core/SampleRom/SampleMemory.c \
   Core/SampleRom/sampleFlash.c \
+  Core/SampleRom/SampleInstall.c \
+  Core/SampleRom/StockWaveGen.c \
+  Core/SampleRom/StockWaveRecipes.c \
   Core/Src/startup_stm32f765xx.s
 
+# S084 P1 P1-12.1: oscillator types, pwm families, sample playback, the
+# oscillator section (run modes, sync/ring) and the shared render pool.
+# Render code: -Ofast through the Core/DSPAudio/%.o rule. InstrumentCellFormat
+# (menu text semantics) is control code and stays in SRCS (-O2).
 DSP_SRCS = \
   Core/DSPAudio/1PoleLp.c \
   Core/DSPAudio/BufferTools.c \
@@ -148,15 +159,39 @@ DSP_SRCS = \
   Core/DSP/Instruments/Cymbal/CymbalVoice.c \
   Core/DSPAudio/Decay.c \
   Core/DSPAudio/distortion.c \
+  Core/DSPAudio/DriveShaper.c \
   Core/DSPAudio/dither.c \
   Core/DSP/Instruments/Drum/DrumVoice.c \
   Core/DSP/Instruments/HiHat/HiHat.c \
   Core/DSP/Effects/StereoFilter/StereoFilterEffect.c \
   Core/DSP/Effects/CrumpBit/CrumpBitEffect.c \
+  Core/DSP/InsertEffects/VoiceBuffer.c \
+  Core/DSP/InsertEffects/InsertDriveSrr.c \
+  Core/DSP/InsertEffects/InsertFold.c \
+  Core/DSP/InsertEffects/InsertCrush.c \
+  Core/DSP/InsertEffects/InsertRing.c \
+  Core/DSP/InsertEffects/InsertPhaser.c \
+  Core/DSP/InsertEffects/InsertFlanger.c \
+  Core/DSP/InsertEffects/InsertChorus.c \
+  Core/DSP/InsertEffects/InsertEcho.c \
+  Core/DSP/InsertEffects/InsertComb.c \
+  Core/DSP/InsertEffects/InsertRoom.c \
+  Core/DSP/InsertEffects/Transient/TransientResonator.c \
+  Core/DSP/InsertEffects/Transient/TransientPluck.c \
+  Core/DSP/InsertEffects/Transient/TransientTube.c \
+  Core/DSP/InsertEffects/Transient/TransientFlam.c \
+  Core/DSP/InsertEffects/Transient/TransientStutter.c \
+  Core/DSP/InsertEffects/Transient/TransientReverse.c \
+  Core/DSP/InsertEffects/Transient/TransientSpring.c \
   Core/DSPAudio/lfo.c \
   Core/DSPAudio/mixer.c \
   Core/DSPAudio/modulationNode.c \
   Core/DSPAudio/Oscillator.c \
+  Core/DSPAudio/OscillatorPwm.c \
+  Core/DSPAudio/OscillatorSample.c \
+  Core/DSPAudio/OscillatorWavetable.c \
+  Core/DSPAudio/OscRenderPool.c \
+  Core/DSPAudio/OscSection.c \
   Core/DSPAudio/random.c \
   Core/DSPAudio/ResonantFilter.c \
   Core/DSPAudio/Samples.c \
@@ -164,6 +199,7 @@ DSP_SRCS = \
   Core/DSPAudio/snapEg.c \
   Core/DSP/Instruments/Snare/Snare.c \
   Core/DSPAudio/squareRootLut.c \
+  Core/DSPAudio/StockWaves.c \
   Core/DSPAudio/transientGenerator.c \
   Core/DSPAudio/transientTables.c \
   Core/DSPAudio/wavetable.c
@@ -222,6 +258,15 @@ $(BUILD)/Core/DSP/Effects/StereoFilter/StereoFilterEffect.o: Core/DSP/Effects/St
 # CrumpBit DSP (S074) runs with the fast-math policy like StereoFilter; its
 # descriptor, layout and page-hook source stays an ordinary -O2 source in SRCS.
 $(BUILD)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.o: Core/DSP/Effects/CrumpBit/CrumpBitEffect.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+
+# S084 VX3: insert render code and VoiceBuffer use the DSP fast-math policy.
+$(BUILD)/Core/DSP/InsertEffects/%.o: Core/DSP/InsertEffects/%.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+
+$(BUILD)/Core/DSP/InsertEffects/Transient/%.o: Core/DSP/InsertEffects/Transient/%.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
 

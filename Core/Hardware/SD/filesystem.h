@@ -1368,8 +1368,49 @@ bool filesystem_requestLoadInstrumentMorphTemp(uint8_t destination_scene,
                                                uint8_t destination_slot,
                                                instrument_type_t type,
                                                fs_completion_cb_t cb);
-uint8_t filesystem_installSamplesBlocking(void);
-uint8_t filesystem_installLoopsBlocking(void);
+/*
+ * Modal sample-flash install report (S084 VX2 VX2-3.3).
+ *
+ * What:       counts of installed samples and wavetables, skipped files
+ *             (unsupported, mismatched frames, no fit) and skipped tables
+ *             (no fit, no valid frame), and whether the catalogue committed.
+ * Why:        D13: the Load:[Samples] summary on the LCD.
+ * Inputs:     filled by filesystem_installSamplesBlocking().
+ * Outputs:    read by menu_loadSamplesModal().
+ * Accessors:  menu.c.
+ * Affiliates: SampleInstall.c counts.
+ */
+typedef struct {
+    uint8_t  samples;
+    uint8_t  wavetables;
+    uint16_t skipped_files;
+    uint8_t  skipped_tables;
+    uint8_t  committed;
+} fs_install_report_t;
+
+#define FS_INSTALL_STAGE_ERASE      0u
+#define FS_INSTALL_STAGE_STOCK      1u
+#define FS_INSTALL_STAGE_SAMPLES    2u
+#define FS_INSTALL_STAGE_WAVETABLES 3u
+#define FS_INSTALL_STAGE_COMMIT     4u
+typedef void (*fs_install_progress_fn)(uint8_t stage, uint16_t count);
+
+/*
+ * Install samples/ then wavetables/ into catalogue v2, blocking
+ * (S084 VX2 VX2-3.3).
+ *
+ * What:       erases sample flash, generates the stock block, installs
+ *             samples/ recursively and then every wavetable folder under
+ *             wavetables/, commits the catalogue, and reports.
+ * Why:        P2-A; replaces the samples/ + loops/ pair (loops/ retired,
+ *             plan §4.1.5).
+ * Inputs:     the card; report (nullable); the progress hook.
+ * Outputs:    1 when the catalogue committed; *report.
+ * Accessors:  menu_loadSamplesModal() only; audio must be suspended.
+ * Affiliates: SampleInstall.c, storage_naturalCompare().
+ */
+uint8_t filesystem_installSamplesBlocking(fs_install_report_t *report);
+void    filesystem_setInstallProgress(fs_install_progress_fn fn);
 
 /* Return the most recent eight-character name produced by a load-name request.
  *

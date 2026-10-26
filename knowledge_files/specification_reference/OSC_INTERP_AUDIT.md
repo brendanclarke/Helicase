@@ -119,3 +119,12 @@ Result:
 - compare OFF vs ON behavior.
 3. Verify persistence:
 - set ON, save globals, power cycle/load globals, confirm ON restored.
+
+## Session 084 P1 - the shared render pool
+
+`OSC_WAVE_INTERP_MAX_ACTIVE` is retired. `OSC_RENDER_POOL_UNITS` (4) is the
+per-block budget: run-mode `itp` crossfades claim first, then waveform
+interpolation. Interpolation now applies to `wav`-type oscillators only;
+`pwm`, `smp` and `slp` controls are continuous and never use it. The scratch
+blocks live in `OscRenderPool.c` and the active count is per block, reset by
+`oscRenderPool_beginBlock()` at the top of `mixer_calcNextSampleBlock()`.

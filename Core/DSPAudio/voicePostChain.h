@@ -18,6 +18,49 @@
 #include "distortion.h"
 
 /*
+ * Post-chain without distortion (S084 VX3 VX3-7.1).
+ *
+ * What: retains the existing fused gain/mix/truncation pass but stops before
+ * the distortion curve. Why: D+S now owns that curve at the Mix stage, where
+ * it can be shared with the insert selection. Inputs: the former chain inputs
+ * except Distortion. Outputs: the exact pre-drive int16 block.
+ */
+static inline void voicePost_drumGain(int16_t *buf, const float gain,
+                                      const float lastGain,
+                                      const float veloGain,
+                                      const uint8_t size)
+{
+	uint8_t i;
+	const float inv_size = 1.f/(size-1.f);
+	for(i=0;i<size;i++) {
+		const int16_t eg = bufferTool_floatToInt16Store(
+			buf[i] * bufferTool_interpolatedGain(i, inv_size, gain, lastGain));
+		buf[i] = bufferTool_floatToInt16Store(eg * veloGain);
+	}
+}
+
+static inline void voicePost_mixAddGain(int16_t *buf, const int16_t *add,
+		const float mix, const float ampGain, const uint8_t size)
+{
+	uint8_t j;
+	for(j=0;j<size;j++) {
+		const int16_t m = bufferTool_floatToInt16Store(buf[j] * mix);
+		const int16_t s = bufferTool_satAdd16(m, add[j]);
+		buf[j] = bufferTool_floatToInt16Store(s * ampGain);
+	}
+}
+
+static inline void voicePost_addGain(int16_t *buf, const int16_t *add,
+		const float ampGain, const uint8_t size)
+{
+	uint8_t j;
+	for(j=0;j<size;j++) {
+		const int16_t s = bufferTool_satAdd16(buf[j], add[j]);
+		buf[j] = bufferTool_floatToInt16Store(s * ampGain);
+	}
+}
+
+/*
  * Drum amp ramp -> velocity -> distortion (S073 Step 4).
  * Inputs: filtered block, current/previous gains, selected velocity gain,
  *         distortion state and size. Outputs: buf.

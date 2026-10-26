@@ -62,8 +62,9 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     EFFECT_ROW("crump_feedback", "Delay", "Feedback", "fbk", DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
-    EFFECT_ROW("crump_rate", "Delay", "Rate", "rte", DTYPE_0B127,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
+    EFFECT_ROW_FLAGS("crump_rate", "Delay", "Rate", "rte", DTYPE_0B127,
+                     EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u,
+                     EFFECT_PARAM_FLAG_BUFFER_DEPENDENT),
     EFFECT_ROW("crump_subtype", "CrumpBit", "SubType", "sub", DTYPE_0B127,
                0u, EFFECT_MOD_NONE, CRUMPBIT_SUBTYPE_DELAY, 0u),
     EFFECT_ROW("crump_sync", "Delay", "Sync", "snc", DTYPE_ON_OFF,
@@ -207,10 +208,9 @@ static void crumpBit_uiPaintRow0(uint8_t sub_page, uint8_t screen,
  * Format hook: CrumpBit value text on the Effect page (Q7).
  *
  * What: `sub` shows `dly`; `rte` shows the snapped step division when the
- * shown Sync is on. crumpBit_syncDivision() applies the same rule the DSP
- * uses, at the current tempo. Everything else returns 0 for generic dtype
- * formatting. Why: the raw 0..127 Rate stays underneath (pots, storage,
- * automation, locks, LFO), and only the Effect page shows the division.
+ * shown Sync is on. The current share and effects_appliedValue() are used so
+ * the label follows the value the DSP can presently play while storage keeps
+ * the original Rate. Everything else returns 0 for generic dtype formatting.
  * Inputs: row index, value being shown, and a 3-character output. Output:
  * nonzero when out[0..2] was written. Affiliates: stepScale_shortName(),
  * seq_getBpm(), menuEffects_shownParam().
@@ -224,8 +224,13 @@ static uint8_t crumpBit_uiFormatValue3(uint8_t index, uint8_t value,
     }
     if (index == CRUMPBIT_PARAM_RATE &&
         menuEffects_shownParam(CRUMPBIT_PARAM_SYNC) != 0u) {
+        fx_share_t share;
+
+        fxbuf_effectShare(&share);
         /* S078: nudge stops show their symbol, other CCs show the raw value. */
-        stepScale_formatShort(crumpBit_syncDivision(value, seq_getBpm()), out);
+        stepScale_formatShort(crumpBit_syncDivision(
+            effects_appliedValue(CRUMPBIT_PARAM_RATE), seq_getBpm(),
+            share.bytes), out);
         return 1u;
     }
     return 0u;

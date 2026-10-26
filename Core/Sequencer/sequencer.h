@@ -227,10 +227,44 @@ void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note, uint8_t reset)
  * vel*2 (clamp 127). 0x00 and any full > cycle are off (always `vel`).
  * Why: step rolls (step special `rtm`) and the PERF BAR overlay rolls
  * (`pv<`/`pv>`) must use one rule. Pure, no state. Callers:
- * seq_rollComputeVelocity() (step rolls, TIM3), buttonHandler's overlay
- * roll tick (foreground).
+ * seq_rollComputeVelocity() (step rolls) and seq_processLiveTicks()
+ * (overlay rolls, S084 P2), both TIM3.
  */
 uint8_t seq_rollRhythmVelocity(uint8_t rhythm, uint8_t vel, uint8_t pos);
+/*
+ * Live overlay roll/flam engine (S084 P2). Contracts; the definitions in
+ * sequencer.c carry the full description.
+ *
+ * seq_liveRollStart(track, rate, note, vel, pos): arm a held roll on the
+ * master tick. The caller has already fired hit 0. rate is the step-roll
+ * index 1..9 (0 or invalid: stops). The first repeat follows one rate
+ * interval after the press (ppq - 1 whole ticks from the next tick); pos is
+ * the rhythm position of that repeat (1 after a fired hit 0). Clears the
+ * track's mailbox.
+ * seq_liveRollSetRate(track, rate): change a running roll's rate and keep
+ * the time since its last hit (S081 F-B). No effect unless a roll runs.
+ * seq_liveFlamArm(track, note, vel, ticks): arm a flam main hit `ticks`
+ * master ticks after the press (12 = 1/32), fired with reset = 1. Clears
+ * the mailbox.
+ * seq_liveStop(track): disarm the track; the mailbox keeps unreported hits
+ * for a final seq_liveTakeHits().
+ * seq_liveSetRhythm(rhythm): the packed rhythm byte applied to every live
+ * roll from its next hit (the active overlay's `pv<`/`pv>`).
+ * seq_liveTakeHits(track, &stampUs, &flamMain): returns the roll hits
+ * fired since the last take (0..255), sets flamMain when the flam main
+ * fired, and stampUs to the TIM2 µs time of the latest hit; clears them.
+ * Context: foreground; TIM3-safe (PRIMASK). Accessor: buttonHandler
+ * overlay. Affiliates: seq_processLiveTicks().
+ */
+void    seq_liveRollStart(uint8_t track, uint8_t rate, uint8_t note,
+                          uint8_t vel, uint8_t pos);
+void    seq_liveRollSetRate(uint8_t track, uint8_t rate);
+void    seq_liveFlamArm(uint8_t track, uint8_t note, uint8_t vel,
+                        uint8_t ticks);
+void    seq_liveStop(uint8_t track);
+void    seq_liveSetRhythm(uint8_t rhythm);
+uint8_t seq_liveTakeHits(uint8_t track, uint32_t *stampUs,
+                         uint8_t *flamMain);
 /*
  * Stopped-transport voice preview.
  *

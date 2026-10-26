@@ -48,6 +48,7 @@
 #include "Autosave.h"
 #include "AutosaveTrace.h"
 #include "EffectsManager.h"
+#include "VoiceBuffer.h"
 #include "copyClearService.h"
 #include "mixer.h"
 #include "timebase.h"
@@ -231,19 +232,40 @@ static void preset_markRequestedScenesPresentOnSuccessfulLoad(void)
  */
 static uint8_t drumset_apply_active = 0;
 /*
- * A Scene activation normally waits for each pending voice's amp envelope to
- * become quiet before replacing that voice's runtime image. Continuous play
- * can keep an envelope non-quiet indefinitely, which leaves this foreground
- * worker active and consequently keeps Menu's accepted Load command from
- * reaching its terminal index restore and command cleanup. The existing
- * trigger-time force path already defines the accepted recovery behavior for
- * a voice that cannot wait; this one-second bound selects that path after
- * 1,000 main-tick passes without quiet progress. The value is a timing bound,
- * not a new persistence or audio image.
+ * Real-time bound for deferred slot swaps (S084 P1 P1-2.5).
+ *
+ * What:       PRESET_SWAP_FORCE_MS is the longest a deferred swap waits for a
+ *             quiet slot or a trigger before it is forced (with the mixer's
+ *             declick). drumset_apply_wait_start_ms / drumset_apply_waiting
+ *             time the Scene worker's current non-quiet episode;
+ *             preset_swapWaitStartMs[] time each slot's per-track or
+ *             Instrument swap; instrument_swap_pending_mask marks Instrument
+ *             loads/previews waiting for their slot.
+ * Why:        plan §3.9: the old bound counted unpaced main-loop passes
+ *             (about tens of ms, not the documented second), which forced
+ *             ringing voices early. time_sysTick is the 1 ms TIM6 counter;
+ *             distances are compared as signed 16-bit (wrap-safe, as
+ *             led_timeReached()).
+ * Inputs:     time_sysTick (timebase.h).
+ * Outputs:    the force decisions in preset_tickDrumsetApply(),
+ *             preset_tickSingleVoiceApply(), preset_tickInstrumentSwap().
+ * Accessors:  presetManager.c only.
+ * Affiliates: instrumentManager_slotQuiet(), P1-0.1 trace 'v'.
+ *             14 B SRAM1 net (§0.4).
  */
-#define DRUMSET_APPLY_FORCE_TICKS 1000u
-/* Consecutive non-quiet foreground passes for the currently armed worker. */
-static uint16_t drumset_apply_stall_ticks = 0u;
+#define PRESET_SWAP_FORCE_MS 2000u
+/* Trace 'v' reason and path codes (AUTOSAVE_TRACE_STAGE_VOICE_SWAP). */
+#define PRESET_SWAP_REASON_QUIET      1u
+#define PRESET_SWAP_REASON_TRIGGER    2u
+#define PRESET_SWAP_REASON_BOUND      3u
+#define PRESET_SWAP_REASON_IMMEDIATE  4u
+#define PRESET_SWAP_PATH_SCENE        1u
+#define PRESET_SWAP_PATH_TRACK        2u
+#define PRESET_SWAP_PATH_INSTRUMENT   3u
+static uint16_t drumset_apply_wait_start_ms = 0u;
+static uint8_t  drumset_apply_waiting = 0u;
+static uint16_t preset_swapWaitStartMs[INSTRUMENT_SLOT_COUNT];
+static uint8_t  instrument_swap_pending_mask = 0u;
 static uint8_t drumset_apply_voice = 0;
 static uint8_t drumset_apply_scene = 0u;
 static uint16_t drumset_apply_pending_mask = 0u;
@@ -259,7 +281,7 @@ static uint16_t drumset_apply_pending_mask = 0u;
  * untouched. Outputs: preset_tickSingleVoiceApply() commits at most one quiet
  * slot per foreground pass. RAM: +1 byte SRAM1. Owner: Preset. Affiliates:
  * preset_startSingleVoiceApply(), preset_tickSingleVoiceApply(),
- * preset_resetAndApplyKitVoiceImage(), instrumentManager_ampEnvelopeQuiet().
+ * preset_resetAndApplyKitVoiceImage(), instrumentManager_slotQuiet().
  */
 static uint8_t single_voice_pending_mask = 0u;
 static uint8_t instrument_apply_active = 0u;
@@ -1088,6 +1110,50 @@ static uint8_t preset_setSupplementalParameterInternal(
     if (!descriptor)
         return 0u;
 
+    /*
+     * Oscillator selector rows (S084 P1 review fix F1).
+     *
+     * What:       `typ`, `src`, `run`, `trt` and `dty`
+     *             (instrumentManager_isSelectorDescriptor()) are stored as
+     *             single-ended [params] cells and written to the runtime
+     *             here. All three images are kept
+     *             equal, as preset_storeSupplementalCell() does for the target
+     *             selectors: the Normal cell through the generic endpoint store
+     *             (dirty marking, Autosave), and the unserialised Morph mirror
+     *             and morph_interpolation[] directly.
+     * Why:        before this fix every INSTANCE_OFFSET row was rejected below,
+     *             and preset_setInstrumentParameter() rejects non-morphable
+     *             rows, so a menu or MIDI edit of these rows stored nothing and
+     *             changed nothing (S084 P1 assessment F1). morph_interpolation[]
+     *             must follow because seq_restoreAutomatedParameters() writes
+     *             that cell back when a step-automation lock on the row
+     *             releases; without it the type would snap back to a stale
+     *             value on the next trigger.
+     * Runtime:    only for the active Scene, or with force (per-track played
+     *             Scene), exactly like the other supplemental rows.
+     * Inputs:     Scene, slot, descriptor index, value (already clamped by
+     *             menu_clampCellValue() for menu and MIDI edits; the writers
+     *             clamp again).
+     * Outputs:    the three image cells; the runtime field via the
+     *             IM_SPECIAL_OSC_TYPE / _OSC_SOURCE / _RUN_MODE writer.
+     * Affiliates: preset_applySelectorRows() (Scene/Instrument apply),
+     *             menu.c MENU_CELL_INSTRUMENT commit, MidiControl.c through
+     *             menu_commitTargetEdit().
+     */
+    if (instrumentManager_isSelectorDescriptor(descriptor)) {
+        if (descriptor_index >= INSTRUMENT_PARAM_COUNT)
+            return 0u;
+        preset_storeInstrumentEndpoint(
+            scene_index, slot, descriptor_index, INSTRUMENT_IMAGE_MAIN, value);
+        instrument->parameter_images.morph_instrument_parameters[descriptor_index] =
+            value;
+        instrument->parameter_images.morph_interpolation[descriptor_index] =
+            value;
+        if (force || scene_index == scene_getActiveIndex())
+            return instrumentManager_writeRuntime(slot, descriptor, value);
+        return 1u;
+    }
+
     if (descriptor->runtime.kind == INSTRUMENT_BIND_INSTANCE_OFFSET ||
         (descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)) {
         return 0u;
@@ -1724,6 +1790,69 @@ static void preset_normalizeSlotModulationTargets(uint8_t scene_index,
     }
 }
 
+/*
+ * Apply one slot's oscillator selector rows to the runtime
+ * (S084 P1 review fix F1/F2).
+ *
+     * What:       for every selector row of the slot's instrument (`typ`,
+     *             `src`, `run`, `trt`, `dty`;
+     *             instrumentManager_isSelectorDescriptor()), copies the
+ *             stored Normal cell into the Morph mirror and morph_interpolation[]
+ *             and writes it through instrumentManager_writeRuntime(), in
+ *             descriptor order (osc1 type, osc1 source, ..., run mode).
+ * Why:        F1: no apply path wrote these rows before. The Morph image
+ *             apply skips non-morphable rows and the supplemental rebind
+ *             rejected INSTANCE_OFFSET rows, so after any Kit, Scene or
+ *             Instrument load every voice stayed `wav`/`rst`.
+ *             F2: the rows must land before the Morph image, because the
+ *             `wav` row's writer clamps to the current type's maximum; a pwm
+ *             width or sample start applied while the reset slot is still
+ *             `wav` would otherwise be clamped to 5 (the request bytes in
+ *             OscInfo also make the order recoverable, but applying the type
+ *             first keeps the very first rendered block correct).
+ *             The mirror copies make seq_restoreAutomatedParameters() restore
+ *             the stored selector when a step-automation lock releases (it
+ *             reads morph_interpolation[] for every row) and keep the
+ *             unserialised Morph mirror equal to the Normal cell, as
+ *             preset_storeSupplementalCell() does for target selectors.
+ * Writes:     runtime unconditionally. Callers have just reset the slot
+ *             (instrumentManager_resetRuntimeSlot*()), so no held automation
+ *             value survives in the runtime to protect, and the stored value
+ *             is the correct starting point until the next automated step.
+ * Inputs:     Scene index (active Scene or a track's played Scene) and slot.
+ * Outputs:    image mirrors; OscInfo.oscType/source, OscSectionState.runMode.
+ * Accessors:  preset_resetAndApplyKitVoiceImage() (boot, Scene switch,
+ *             per-track played Scene, staged Instrument commit),
+ *             the immediate Instrument apply after its slot reset.
+ * Affiliates: preset_setSupplementalParameterInternal() (menu/MIDI edits of
+ *             the same rows), preset_applyKitVoiceSupplementalInternal()
+ *             (skips these rows), the IM_SPECIAL_OSC_TYPE writer (F2).
+ */
+static void preset_applySelectorRows(uint8_t scene_index, uint8_t voice)
+{
+    kit_instrument_slot_t *instrument = scene_instrumentSlot(scene_index, voice);
+    const instrument_registry_entry_t *entry;
+    uint8_t i;
+
+    if (!instrument || voice >= INSTRUMENT_SLOT_COUNT)
+        return;
+    entry = instrumentManager_registryEntry(instrument->type);
+    if (!entry)
+        return;
+    for (i = 0u; i < entry->descriptor_count && i < INSTRUMENT_PARAM_COUNT;
+         i++) {
+        const ParamDescriptor *descriptor = &entry->descriptors[i];
+        instrument_param_value_t value;
+
+        if (!instrumentManager_isSelectorDescriptor(descriptor))
+            continue;
+        value = instrument->parameter_images.instrument_parameters[i];
+        instrument->parameter_images.morph_instrument_parameters[i] = value;
+        instrument->parameter_images.morph_interpolation[i] = value;
+        (void)instrumentManager_writeRuntime(voice, descriptor, value);
+    }
+}
+
 static void preset_applyKitVoiceSupplementalInternal(uint8_t scene_index,
                                                      uint8_t voice,
                                                      uint8_t force)
@@ -1751,6 +1880,17 @@ static void preset_applyKitVoiceSupplementalInternal(uint8_t scene_index,
     for (i = 0u; i < entry->descriptor_count; i++) {
         const ParamDescriptor *descriptor = &entry->descriptors[i];
         if (descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)
+            continue;
+        /*
+         * S084 P1 review fix F1: the oscillator selector rows are applied
+         * once, before the Morph image, by preset_applySelectorRows().
+         * This rebind loop also runs later (the all-source cursor, the
+         * per-track forced apply) and can run while step automation holds a
+         * selector; re-writing them here would override that held value and
+         * repeat the type-change side effects (sample rebind, domain
+         * refresh) for no change.
+         */
+        if (instrumentManager_isSelectorDescriptor(descriptor))
             continue;
         (void)preset_setSupplementalParameterInternal(
             scene_index, voice, i,
@@ -1813,6 +1953,20 @@ static void preset_resetAndApplyKitVoiceImage(uint8_t scene_index,
     }
 
     /*
+     * One slot image apply is one VoiceBuffer allocator transaction
+     * (S084 VX3 VX3-9.8).
+     *
+     * What: brackets selector writes, including Mix `fxt` and transient `buf`
+     * selection, so any nested VoiceBuffer reservations publish one final
+     * Effect-share notification. Why: a Scene/Instrument commit must not make
+     * CrumpBit compact once per selector or per internal handoff. Inputs: the
+     * incoming Scene slot and the existing runtime record. Output: the new
+     * active record/tail state and one deferred share update. Nested callers
+     * (the six-slot boot/Scene pass) coalesce the whole transaction further.
+     */
+    voiceBuffer_beginPass();
+
+    /*
      * Rebind the DSP runtime type at the same time as parameter commit.
      *
      * Input: the Scene slot selected by the activation worker (the active
@@ -1825,6 +1979,12 @@ static void preset_resetAndApplyKitVoiceImage(uint8_t scene_index,
      * active Scene's.
      */
     instrumentManager_resetRuntimeSlotFromScene(voice, scene_index);
+    /*
+     * S084 P1 review fix F1/F2: oscillator type, source and run mode land
+     * right after the reset and before the Morph image, so the `wav` row is
+     * clamped against the incoming type. See preset_applySelectorRows().
+     */
+    preset_applySelectorRows(scene_index, voice);
     (void)preset_applyKitAudioRouting(scene_index, voice);
     /*
      * Commit the Morph interpolation image. An inactive played Scene uses the
@@ -1863,6 +2023,7 @@ static void preset_resetAndApplyKitVoiceImage(uint8_t scene_index,
      *             LFO_RETRIGGER_SCENE (lfo.h).
      */
     instrumentManager_restoreLfoPhaseIfNeeded(voice);
+    voiceBuffer_endPass();
 }
 
 /* Start the existing bounded all-source modulation rebind cursor.
@@ -1901,6 +2062,8 @@ void preset_sendDrumsetParameters(void)
 {
     uint8_t voice;
 
+    /* Coalesce the boot Scene's six selector/VoiceBuffer reservations. */
+    voiceBuffer_beginPass();
     instrumentManager_clearAllRuntimeModulationTargets();
     preset_ensureMorphInitialized();
     preset_applySceneSettings(scene_getActiveIndex());
@@ -1922,7 +2085,7 @@ void preset_sendDrumsetParameters(void)
          * instrumentManager_installLfoModulationTarget().
          */
     }
-
+    voiceBuffer_endPass();
 }
 
 void preset_startDrumsetApply(void)
@@ -1974,8 +2137,13 @@ void preset_startDrumsetApply(void)
      * pending per-track single-voice commit is stale and dropped here.
      */
     single_voice_pending_mask = 0u;
+    /*
+     * S084 P1 P1-2.10: a whole-Scene switch supersedes a pending Instrument
+     * swap, because the new Scene's image replaces the slot anyway.
+     */
+    instrument_swap_pending_mask = 0u;
     /* A new Scene worker must not inherit non-progress from its predecessor. */
-    drumset_apply_stall_ticks = 0u;
+    drumset_apply_waiting = 0u;
 }
 
 /*
@@ -2007,6 +2175,50 @@ static void preset_applyPerVoiceSceneSettings(uint8_t slot,
 }
 
 /*
+ * Whether a deferred swap has waited past the bound (S084 P1 P1-2.5).
+ *
+ * What:       1 when PRESET_SWAP_FORCE_MS or more have passed since start,
+ *             compared as a signed 16-bit distance on time_sysTick.
+ * Why:        the bound must be real time and wrap-safe (time_sysTick wraps
+ *             every 65.5 s); the old pass counter was neither (plan §3.9).
+ * Inputs:     start (a time_sysTick stamp).  Outputs: 1 expired / 0 waiting.
+ * Accessors:  preset_tickDrumsetApply(), preset_tickSingleVoiceApply(),
+ *             preset_tickInstrumentSwap().
+ * Affiliates: led_timeReached() (same wrap rule), PRESET_SWAP_FORCE_MS.
+ */
+static uint8_t preset_swapWaitExpired(uint16_t start)
+{
+    return (uint8_t)((int16_t)(time_sysTick - start) >=
+                     (int16_t)PRESET_SWAP_FORCE_MS);
+}
+
+/*
+ * Record one committed swap in the DEV trace (S084 P1 P1-2.5).
+ *
+ * What:       writes stage 'v': flags = reason (1 quiet, 2 trigger, 3 bound,
+ *             4 immediate), value = slot | last pre-fader block peak << 8 |
+ *             path << 24 (1 Scene, 2 per-track, 3 Instrument).
+ * Why:        hardware verification of plan §5.7 needs to see why and at what
+ *             level each swap happened.
+ * Inputs:     slot, reason, path; instrumentManager_slotLastPeak().
+ * Outputs:    one trace record (DEV logging only; compiled out otherwise,
+ *             like every autosaveTrace_record() call).
+ * Accessors:  every swap commit site in presetManager.c.
+ * Affiliates: AUTOSAVE_TRACE_STAGE_VOICE_SWAP, tools/decode_devlogs.py.
+ */
+static void preset_traceSwap(uint8_t slot, uint8_t reason, uint8_t path)
+{
+    uint32_t trace_value;
+
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    trace_value = (uint32_t)slot |
+                  ((uint32_t)instrumentManager_slotLastPeak(slot) << 8) |
+                  ((uint32_t)path << 24);
+    autosaveTrace_record(AUTOSAVE_TRACE_STAGE_VOICE_SWAP, reason, trace_value);
+}
+
+/*
  * Commit one quiet slot from its played Scene for per-track playback
  * (S077 P2 §3.4).
  *
@@ -2029,16 +2241,131 @@ static void preset_commitSingleVoiceSlot(uint8_t slot)
 }
 
 /*
- * Advance at most one deferred per-track single-voice apply (S077 P2 §3.4).
+ * Arm a deferred Instrument swap for one active-Scene slot (S084 P1 P1-2.9).
  *
- * What: scans single_voice_pending_mask round-robin and commits the first slot
- * whose amp envelope is quiet. Why: a per-track Scene assignment must hot-swap
- * that slot's instrument without clicking, exactly like the drumset worker, and
- * without disturbing the other five slots. Inputs: single_voice_pending_mask
- * and instrumentManager_ampEnvelopeQuiet(). Output: 1 when one slot committed
- * this pass, 0 otherwise. A continuously ringing slot is committed by the
- * trigger-time force path (preset_applyDeferredSceneSlotForTrigger()).
- * Affiliates: preset_commitSingleVoiceSlot().
+ * What:       captures the slot's LFO phase, sets its bit in
+ *             instrument_swap_pending_mask and starts its wait timer. The
+ *             slot keeps rendering its old instrument.
+ * Why:        an Instrument load/preview must not cut a ringing voice and must
+ *             not hold the Menu while it waits (plan §5.7).
+ * Inputs:     slot 0..5 (active Scene; its images already updated).
+ * Outputs:    instrument_swap_pending_mask, preset_swapWaitStartMs[slot].
+ * Accessors:  preset_startInstrumentApplyImage().
+ * Affiliates: instrumentManager_captureLfoPhaseForSlot(),
+ *             preset_tickInstrumentSwap().
+ */
+static void preset_armInstrumentSwap(uint8_t slot)
+{
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    instrumentManager_captureLfoPhaseForSlot(slot);
+    instrument_swap_pending_mask =
+        (uint8_t)(instrument_swap_pending_mask | (uint8_t)(1u << slot));
+    preset_swapWaitStartMs[slot] = time_sysTick;
+}
+
+/*
+ * Commit a deferred Instrument swap (S084 P1 P1-2.9).
+ *
+ * What:       rebuilds the slot from the active Scene with the Scene-switch
+ *             commit (preset_resetAndApplyKitVoiceImage(): reset, routing,
+ *             immediate voice Morph image, LFO phase), applies the slot's
+ *             supplemental targets (preset_applyKitVoiceSupplementalForced())
+ *             and starts the existing all-source modulation rebind
+ *             (preset_startSceneModulationRebind()) on the background worker
+ *             (sets drumset_apply_active/drumset_apply_scene with an empty
+ *             pending mask, so preset_tickDrumsetApply() drains the cursor and
+ *             finishes as it does after a Scene switch).
+ * Why:        reuse the proven Scene-switch commit and rebind instead of a new
+ *             path (user, r4 Q28: "re-use the code").
+ * Inputs:     slot; scene_getActiveIndex().
+ * Outputs:    the rebuilt slot; pending bit cleared; trace 'v' path 3.
+ * Accessors:  preset_tickInstrumentSwap(),
+ *             preset_applyDeferredSceneSlotForTrigger().
+ * Affiliates: P1-2.3 declick arm (inside the reset).
+ */
+static void preset_commitInstrumentSwapSlot(uint8_t slot, uint8_t reason)
+{
+    uint8_t active_scene;
+
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    active_scene = scene_getActiveIndex();
+    preset_resetAndApplyKitVoiceImage(active_scene, slot);
+    preset_applyKitVoiceSupplementalForced(active_scene, slot);
+    /*
+     * Let the Scene worker own the all-source rebind, exactly as after a
+     * switch. If a Scene switch for this same Scene is already in progress,
+     * keep its pending slot mask: this commit must not drop slots that the
+     * worker still owes.
+     */
+    if (!drumset_apply_active || drumset_apply_scene != active_scene) {
+        drumset_apply_pending_mask = 0u;
+        drumset_apply_voice = 0u;
+    }
+    drumset_apply_scene = active_scene;
+    drumset_apply_active = 1u;
+    drumset_apply_voice = 0u;
+    drumset_apply_waiting = 0u;
+    preset_startSceneModulationRebind(active_scene);
+    instrument_swap_pending_mask =
+        (uint8_t)(instrument_swap_pending_mask & (uint8_t)~(1u << slot));
+    preset_traceSwap(slot, reason, PRESET_SWAP_PATH_INSTRUMENT);
+}
+
+/*
+ * Advance at most one deferred Instrument swap (S084 P1 P1-2.9).
+ *
+ * What:       commits the first pending slot that is quiet or past the
+ *             bound.
+ * Inputs:     instrument_swap_pending_mask, instrumentManager_slotQuiet(),
+ *             preset_swapWaitStartMs[].
+ * Outputs:    1 when one slot committed this pass.
+ * Accessors:  preset_tickDrumsetApply() (called before the per-track worker),
+ *             which Menu ticks in the background outside the storage-busy
+ *             path.
+ * Affiliates: preset_commitInstrumentSwapSlot().
+ */
+static uint8_t preset_tickInstrumentSwap(void)
+{
+    uint8_t slot;
+
+    if (instrument_swap_pending_mask == 0u)
+        return 0u;
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        uint8_t bit = (uint8_t)(1u << slot);
+        uint8_t reason;
+
+        if ((instrument_swap_pending_mask & bit) == 0u)
+            continue;
+        if (instrumentManager_slotQuiet(slot)) {
+            reason = PRESET_SWAP_REASON_QUIET;
+        } else if (preset_swapWaitExpired(preset_swapWaitStartMs[slot])) {
+            reason = PRESET_SWAP_REASON_BOUND;
+        } else {
+            continue;
+        }
+        preset_commitInstrumentSwapSlot(slot, reason);
+        return 1u;
+    }
+    return 0u;
+}
+
+/*
+ * Advance at most one deferred per-track single-voice apply
+ * (S077 P2 §3.4; S084 P1 P1-2.6).
+ *
+ * What:       commits the first pending slot that is quiet (real pre-fader
+ *             level) or whose wait passed PRESET_SWAP_FORCE_MS; the mixer
+ *             declicks the first block of the new instrument.
+ * Why:        a per-track Scene assignment hot-swaps one slot without a
+ *             click and without cutting a ringing voice early (plan §5.7).
+ * Inputs:     single_voice_pending_mask, instrumentManager_slotQuiet(),
+ *             preset_swapWaitStartMs[].
+ * Outputs:    1 when one slot committed this pass.
+ * Accessors:  preset_tickDrumsetApply().
+ * Affiliates: preset_commitSingleVoiceSlot(), trace 'v' (path 2),
+ *             preset_applyDeferredSceneSlotForTrigger() (trigger force).
  */
 static uint8_t preset_tickSingleVoiceApply(void)
 {
@@ -2048,12 +2375,19 @@ static uint8_t preset_tickSingleVoiceApply(void)
         return 0u;
     for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
         uint8_t bit = (uint8_t)(1u << slot);
+        uint8_t reason;
 
         if ((single_voice_pending_mask & bit) == 0u)
             continue;
-        if (!instrumentManager_ampEnvelopeQuiet(slot))
+        if (instrumentManager_slotQuiet(slot)) {
+            reason = PRESET_SWAP_REASON_QUIET;
+        } else if (preset_swapWaitExpired(preset_swapWaitStartMs[slot])) {
+            reason = PRESET_SWAP_REASON_BOUND;
+        } else {
             continue;
+        }
         preset_commitSingleVoiceSlot(slot);
+        preset_traceSwap(slot, reason, PRESET_SWAP_PATH_TRACK);
         single_voice_pending_mask =
             (uint8_t)(single_voice_pending_mask & ~bit);
         return 1u;
@@ -2090,6 +2424,11 @@ void preset_startSingleVoiceApply(uint8_t slot, uint8_t source_scene)
     if (slot >= INSTRUMENT_SLOT_COUNT || !scene_getConst(source_scene))
         return;
     bit = (uint8_t)(1u << slot);
+    /* S084 P1 P1-2.6: start this slot's real-time wait when it is armed. */
+    preset_swapWaitStartMs[slot] = time_sysTick;
+    /* A per-track apply supersedes a pending Instrument swap for this slot. */
+    instrument_swap_pending_mask =
+        (uint8_t)(instrument_swap_pending_mask & (uint8_t)~bit);
     /* Supersede the drumset worker for this slot (Q6-b). */
     drumset_apply_pending_mask =
         (uint16_t)(drumset_apply_pending_mask & ~(uint16_t)bit);
@@ -2109,13 +2448,22 @@ void preset_startSingleVoiceApply(uint8_t slot, uint8_t source_scene)
  */
 uint8_t preset_applyWorkersIdle(void)
 {
+    /* S084 P1 P1-2.10: pending Instrument swaps count as work. */
     return (uint8_t)(!drumset_apply_active && !instrument_apply_active &&
-                     single_voice_pending_mask == 0u);
+                     single_voice_pending_mask == 0u &&
+                     instrument_swap_pending_mask == 0u);
 }
 
 uint8_t preset_tickDrumsetApply(void)
 {
     uint8_t checked;
+
+    /*
+     * S084 P1 P1-2.10: service a deferred Instrument load/preview first. It
+     * shares the quiet test and commit path; at most one slot per pass.
+     */
+    if (preset_tickInstrumentSwap())
+        return 1u;
 
     /*
      * Service the per-track single-voice worker first (S077 P2 §3.4). It
@@ -2175,27 +2523,33 @@ uint8_t preset_tickDrumsetApply(void)
             drumset_apply_voice = 0u;
         if ((drumset_apply_pending_mask & bit) == 0u)
             continue;
-        if (!instrumentManager_ampEnvelopeQuiet(voice)) {
+        if (!instrumentManager_slotQuiet(voice)) {
             /*
-             * No quiet result is observable for this pending voice. Count
-             * foreground passes rather than wall-clock calls so the bound is
-             * expressed in the same cadence that owns this cooperative
-             * worker. Once the bound is reached, use the already-established
-             * trigger-time force commit for this exact voice and clear the
-             * episode counter. The pending-mask helper performs the normal
-             * runtime-image commit; this branch only guarantees progress.
+             * S084 P1 P1-2.7: no quiet result for this voice. The force is a
+             * real-time bound (PRESET_SWAP_FORCE_MS from the first non-quiet
+             * observation in this episode), not a pass count: main-loop
+             * passes are unpaced, so the old 1,000-pass bound forced ringing
+             * voices after tens of milliseconds. The forced commit reuses the
+             * trigger-time path; the mixer declicks it.
              */
-            if (++drumset_apply_stall_ticks >= DRUMSET_APPLY_FORCE_TICKS) {
-                drumset_apply_stall_ticks = 0u;
+            if (!drumset_apply_waiting) {
+                drumset_apply_waiting = 1u;
+                drumset_apply_wait_start_ms = time_sysTick;
+            } else if (preset_swapWaitExpired(drumset_apply_wait_start_ms)) {
+                drumset_apply_waiting = 0u;
                 preset_applyDeferredSceneSlotForTrigger(voice);
+                preset_traceSwap(voice, PRESET_SWAP_REASON_BOUND,
+                                 PRESET_SWAP_PATH_SCENE);
             }
             continue;
         }
 
         /* A quiet commit is real progress; a later voice starts a new wait. */
-        drumset_apply_stall_ticks = 0u;
+        drumset_apply_waiting = 0u;
 
         preset_resetAndApplyKitVoiceImage(drumset_apply_scene, voice);
+        preset_traceSwap(voice, PRESET_SWAP_REASON_QUIET,
+                         PRESET_SWAP_PATH_SCENE);
         drumset_apply_pending_mask =
             (uint16_t)(drumset_apply_pending_mask & ~bit);
         if (drumset_apply_pending_mask == 0u)
@@ -2210,6 +2564,32 @@ void preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track)
 {
     uint8_t voice;
     uint16_t bit;
+
+    /*
+     * Fast swap of a pending Instrument load on trigger (S084 P1 P1-2.10).
+     *
+     * What:       if the triggered slot has an Instrument load/preview
+     *             waiting, commit it now, before the note reaches the
+     *             engine.
+     * Why:        plan §5.7 item 4 / r4 Q28: a retrigger is the natural swap
+     *             point; the new instrument plays the note; the mixer
+     *             declicks the first block.
+     * Inputs:     trigger_track (0..6; 6 maps to slot 5),
+     *             instrument_swap_pending_mask.
+     * Outputs:    the slot rebuilt; pending bit cleared; trace 'v' reason
+     *             TRIGGER, path 3.
+     * Accessors:  voiceControl_triggerNow() via MidiVoiceControl.c (the
+     *             single trigger funnel).
+     * Affiliates: preset_commitInstrumentSwapSlot(), P1-2.3 declick arm.
+     */
+    if (trigger_track <= INSTRUMENT_SLOT_COUNT) {
+        uint8_t ivoice = (trigger_track >= INSTRUMENT_SLOT_COUNT)
+            ? (INSTRUMENT_SLOT_COUNT - 1u) : trigger_track;
+
+        if (instrument_swap_pending_mask & (1u << ivoice))
+            preset_commitInstrumentSwapSlot(ivoice,
+                                            PRESET_SWAP_REASON_TRIGGER);
+    }
 
     /*
      * Force a pending Scene slot to commit immediately before it triggers.
@@ -2240,6 +2620,8 @@ void preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track)
             presetMorph_prioritizeVoice(seq_getTrackPlayedScene(svoice),
                                         svoice);
             preset_commitSingleVoiceSlot(svoice);
+            preset_traceSwap(svoice, PRESET_SWAP_REASON_TRIGGER,
+                             PRESET_SWAP_PATH_TRACK);
             single_voice_pending_mask =
                 (uint8_t)(single_voice_pending_mask & ~sbit);
         }
@@ -2259,6 +2641,8 @@ void preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track)
 
     presetMorph_prioritizeVoice(drumset_apply_scene, voice);
     preset_resetAndApplyKitVoiceImage(drumset_apply_scene, voice);
+    preset_traceSwap(voice, PRESET_SWAP_REASON_TRIGGER,
+                     PRESET_SWAP_PATH_SCENE);
     drumset_apply_pending_mask =
         (uint16_t)(drumset_apply_pending_mask & ~bit);
     if (drumset_apply_pending_mask == 0u)
@@ -2724,7 +3108,34 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
     if (!active_scene_touched)
         return;
 
+    /*
+     * S084 P1 P1-2.8: Instrument load and Instrument-Load preview use the
+     * shared deferred swap (plan §5.7 item 5, §6 r4 Q28). A quiet slot swaps
+     * now; a sounding slot keeps playing its old instrument until it is
+     * quiet, its next trigger, or PRESET_SWAP_FORCE_MS, and the Scene images
+     * already hold the new instrument (committed above). The wait never holds
+     * the Menu: instrument_apply_active stays 0, so menu_storageBusy clears
+     * and scrolling continues; a newer preview simply rewrites the images and
+     * re-arms the same slot. Affiliates: preset_armInstrumentSwap(),
+     * preset_tickInstrumentSwap(), preset_applyDeferredSceneSlotForTrigger().
+     */
+    if (!instrumentManager_slotQuiet(slot)) {
+        preset_armInstrumentSwap(slot);
+        return;
+    }
+    instrument_swap_pending_mask =
+        (uint8_t)(instrument_swap_pending_mask & (uint8_t)~(1u << slot));
     instrumentManager_resetRuntimeSlot(slot);
+    /*
+     * S084 P1 review fix F1/F2: this immediate Instrument apply rebuilds the
+     * Morph image through the background worker and never passes through
+     * preset_resetAndApplyKitVoiceImage(), so the oscillator selector rows
+     * are applied here, after the reset and before the first Morph write.
+     */
+    /* The immediate selector commit is one allocator pass (VX3-9.8). */
+    voiceBuffer_beginPass();
+    preset_applySelectorRows(scene_getActiveIndex(), slot);
+    voiceBuffer_endPass();
     (void)preset_applyKitAudioRouting(scene_getActiveIndex(), slot);
     preset_ensureMorphInitialized();
     presetMorph_requestAll(scene_getActiveIndex());
@@ -2733,6 +3144,8 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
     instrument_apply_phase = INSTRUMENT_APPLY_PHASE_MORPH_REBUILD;
     instrument_apply_rebind_source = 0u;
     instrument_apply_morph_only = 0u;
+    preset_traceSwap(slot, PRESET_SWAP_REASON_IMMEDIATE,
+                     PRESET_SWAP_PATH_INSTRUMENT);
 }
 
 void preset_startInstrumentApply(uint8_t scene_index,

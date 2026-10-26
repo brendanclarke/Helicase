@@ -46,6 +46,7 @@
 #include "modulationNode.h"
 #include "InstrumentManager.h"
 #include "voicePostChain.h"
+#include "InsertEffectsManager.h"
 // TODO DSP_PORT
 // #include "TriggerOut.h"
 
@@ -107,6 +108,7 @@ void Drum_initVoice(DrumVoice *voice, uint8_t seed_index)
 	transient_init(&voice->transGen);
 #if ENABLE_DRUM_SVF
 	SVF_init(&voice->filter);
+	driveShaper_reset(&voice->shaper);
 	voice->filterType = 0x01;
 #endif
 	lfo_init(&voice->lfo);
@@ -122,7 +124,9 @@ void Drum_initVoice(DrumVoice *voice, uint8_t seed_index)
 
 	voice->osc.freq = 440;
 	voice->osc.modNodeValue = 1;
-	voice->osc.waveform = TRI+seed_index; //for testing init to tri,saw,rec
+	/* S084 P1 P1-8.2: test seed limited to Tri/Saw/Rec; values above Cym are
+	** no longer legal `wav` values. */
+	voice->osc.waveform = TRI + (seed_index % 3u);
 	voice->osc.fmMod = 0;
 	voice->osc.midiFreq = 70<<8;
 
@@ -142,6 +146,19 @@ void Drum_initVoice(DrumVoice *voice, uint8_t seed_index)
 #endif
 	voice->decimationCnt = 0;
 	voice->decimationRate = 1;
+	/*
+	 * Oscillator section init (S084 P1 P1-8.2).
+	 *
+	 * What:       run mode rst, no crossfade, oscCount 2 for Drum; the filter
+	 *             slew starts from the filter's values at the first recalc.
+	 * Why:        a fresh or reset slot must start in today's behaviour until
+	 *             its `run` row is applied (plan §4.1.6).
+	 * Inputs:     the engine instance.  Outputs: voice->section.
+	 * Accessors:  Drum_initVoice() via
+	 *             instrumentManager_resetRuntimeSlot*().
+	 * Affiliates: OscSection.c, IM_SPECIAL_RUN_MODE writer.
+	 */
+	oscSection_init(&voice->section, 2u);
 }
 //---------------------------------------------------
 void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
@@ -174,15 +191,31 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 	 */
 	instrumentManager_applyVelocityModulationTarget(source_slot, vol/127.f);
 
+	/*
+	 * S084 P1 P1-8.3: the run mode decides the trigger behaviour. rst = today
+	 * (phase resets, filter cleared); fre = no reset (oscillators slew, filter
+	 * keeps ringing); itp = snapshot then reset, crossfaded by the section
+	 * (filter keeps ringing). Plan §4.1.6, §6 r4 Q3/Q4.
+	 */
+	{
+		OscInfo* oscs[2] = { &voice->osc, &voice->modOsc };
+		const uint8_t resetOscillators =
+			oscSection_beginTrigger(&voice->section, oscs);
+
 	//only reset phase if envelope is closed
 #ifdef USE_AMP_FILTER
-	if((voice->volEgValueBlock[15]<=0.01f) || (voice->transGen.waveform==1))
+	if(resetOscillators &&
+	   ((voice->volEgValueBlock[15]<=0.01f) ||
+	    transient_isOffset(&voice->transGen)))
 #else
 		//if((voice->ampFilterInput<=0.01f) || (voice->transGen.waveform==1))
+	if(resetOscillators)
 #endif
 	{
 		float offset = 1;
-		if(voice->transGen.waveform==1) //offset mode
+		/* S084 VX2 VX2-6.5: Snp/Ofs are trs kinds; under wav, bytes 0/1
+		** are PCM transients (transient_isSnap()/transient_isOffset()). */
+		if(transient_isOffset(&voice->transGen)) //offset mode
 		{
 			offset -= voice->transGen.volume;
 #ifdef USE_AMP_FILTER
@@ -192,13 +225,25 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 			setOnePoleCoef(&voice->ampFilter,ampSmoothValue);
 #endif
 		}
-		if(voice->osc.waveform == SINE)
+		if(voice->osc.oscType == OSC_TYPE_SMP ||
+		   voice->osc.oscType == OSC_TYPE_SLP)
+			oscSample_restart(&voice->osc);
+		else if(voice->osc.oscType == OSC_TYPE_PWM)
+			voice->osc.phase = (0xffu<<20)*offset;
+		else if(voice->osc.oscType == OSC_TYPE_WTB)
+			/* S084 VX2 VX2-5.8: wavetables start at the table offset;
+			** waveform is a frame position, not a wave id. */
+			voice->osc.phase = (0xffu<<20)*offset;
+		else if(voice->osc.waveform == SINE)
 			voice->osc.phase = 1024 + ( (0x3ff<<20) - 1024)*offset;//voice->osc.startPhase ;
-		else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)
+			/* S084 VX2 VX2-4.12: table waves, including sq3..swa, start at the
+			** table offset (osc_isTableWave()). */
+			else if(osc_isTableWave(voice->osc.waveform))
 			voice->osc.phase = (0xff<<20)*offset;
 		else
 			voice->osc.phase = 0;
 
+	}
 	}
 
 	osc_setBaseNote(&voice->osc,note);
@@ -210,11 +255,14 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 	voice->velo = vol/127.f;
 
 	transient_trigger(&voice->transGen);
+	/* S084 VX3 VX3-8.9: re-arm the transient buffer stage. */
+	insertFx_transientTrigger(voice->stageSlot);
 
 	SnapEg_trigger(&voice->snapEg);
 
-	//reset filter coeffs to prevent wrong transient
-	SVF_reset(&voice->filter);
+	/* S084 P1 P1-8.3: only rst clears the filter (fre/itp keep it ringing). */
+	if (voice->section.runMode == OSC_RUN_RST)
+		SVF_reset(&voice->filter);
 }
 //---------------------------------------------------
 void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
@@ -237,7 +285,7 @@ void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
 	voice->osc.pitchMod = 1+pitchEgValue;
 
 	//calc snap EG if transient sample 0 is activated
-	if(voice->transGen.waveform == 0)
+	if(transient_isSnap(&voice->transGen))
 	{
 		const float snapVal = SnapEg_calc(&voice->snapEg, voice->transGen.pitch);
 		voice->osc.pitchMod += snapVal*voice->transGen.volume;
@@ -310,20 +358,27 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	calcOnePoleBlockFixedInput(&voice->ampFilter, voice->ampFilterInput,voice->volEgValueBlock, size);
 #endif
 
-	//calc next mod osc sampleBlock
-	calcNextOscSampleBlock(&voice->modOsc,modBuf,size,voice->fmModAmount);
+	/*
+	 * S084 P1 P1-8.4: oscillator section (combination + run-mode crossfade).
+	 * fm/mix render exactly as before (S0, golden test P1-12.5). While an itp
+	 * crossfade is active the pre-trigger section also renders into the pool
+	 * scratch and the two are blended over OSC_ITP_SAMPLES.
+	 */
+	oscSection_renderDrum(&voice->osc, &voice->modOsc, voice->mixOscs,
+	                      voice->fmModAmount, buf, modBuf, size);
+	if (voice->section.itpState == OSC_ITP_ACTIVE) {
+		int16_t* oldBuf = oscRenderPool_scratchSection();
+		int16_t* oldMod = oscRenderPool_scratchMod();
 
-	if(voice->mixOscs)
-	{
-		//calc main osc buffer
-		calcNextOscSampleBlock(&voice->osc,buf,size, (1.f-voice->fmModAmount));
-		//add mod buffer to main osc buffer
-		bufferTool_addBuffersSaturating(buf,modBuf,size);
+		oscSection_renderDrum(&voice->section.itpOld[0],
+		                      &voice->section.itpOld[1],
+		                      voice->mixOscs, voice->fmModAmount,
+		                      oldBuf, oldMod, size);
+		oscSection_blendItp(&voice->section, buf, oldBuf, size);
 	}
-	else
-	{
-		calcNextOscSampleFmBlock(&voice->osc,modBuf,buf,size,1.0f);
-	}
+	/* S084 VX3 VX3-8.9: transient buffer PRE-filter stage. */
+	insertFx_renderTransient(voice->stageSlot, INSERT_PLACE_PRE, buf, size,
+	                        voice->transGen.volume, voice->transGen.pitch);
 
 	//calc transient sample
 	transient_calcBlock(&voice->transGen,modBuf,size);
@@ -332,7 +387,12 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	bufferTool_addBuffersSaturating(buf,modBuf,size);
 
 	//calc filter block
-	SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);
+	/* S084 VX2 VX2-7.6: sft keeps the untouched loop (bit-identical). */
+	if (voice->driveType == DRIVE_TYPE_SFT)
+		SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);
+	else
+		SVF_calcBlockZDFShaped(&voice->filter, voice->filterType,
+		                       voice->driveType, &voice->shaper, buf, size);
 
 	#if defined(USE_AMP_FILTER) || (USE_FILTER_DRIVE != 0)
 	/* Non-default legacy configurations retain their separate passes. */
@@ -343,9 +403,6 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	#endif
 	if(voice->volumeMod)
 		bufferTool_addGain(buf,voice->velo,size);
-	#if (USE_FILTER_DRIVE == 0)
-	calcDistBlock(&voice->distortion,buf,size);
-	#endif
 	#else
 	/*
 	 * Fused Drum post-chain (S073 Step 4).
@@ -359,10 +416,13 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	 * Accessors:  this render function through InstrumentManager.
 	 * Affiliates: voicePostChain.h, Drum gain bookkeeping and the Step 4 tests.
 	 */
-	voicePost_drum(buf, voice->ampFilterInput, voice->lastGain,
-	               voice->volumeMod ? voice->velo : 1.0f,
-	               &voice->distortion, size);
+	voicePost_drumGain(buf, voice->ampFilterInput, voice->lastGain,
+	                   voice->volumeMod ? voice->velo : 1.0f, size);
 	#endif
+	/* S084 VX3 VX3-8.9: transient buffer POST-filter stage. */
+	insertFx_renderTransient(voice->stageSlot, INSERT_PLACE_POST, buf, size,
+	                        voice->transGen.volume, voice->transGen.pitch);
+	oscSection_finishBlock(&voice->section, size);
 	/*
 	 * Channel volume is intentionally not applied here (Session 072 step 2).
 	 * The mixer multiplies the decimated block by voice->vol x slider gain;

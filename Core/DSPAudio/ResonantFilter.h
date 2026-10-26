@@ -50,6 +50,7 @@
 #include "datatypes.h"
 #include "math.h"
 #include "distortion.h"
+#include "DriveShaper.h"
 //----------------------------------------------------
 #define ENABLE_NONLINEAR_INTEGRATORS 	1
 #define FILTER_GAIN 					0x70ff
@@ -99,6 +100,29 @@ void SVF_setDrive(ResonantFilter* filter, uint8_t drive);
 void SVF_directSetFilterValue(ResonantFilter* filter, float val);
 //------------------------------------------------------------------------------------
 void SVF_calcBlockZDF(ResonantFilter* filter, const uint8_t type, int16_t* buf, const uint8_t size);
+/* ------------------------------------------------------------------------------------ */
+/*
+ * ZDF voice filter with a drive-type input stage (S084 VX2 VX2-7.3).
+ *
+ * What:       SVF_calcBlockZDF() with one change: the input stage x =
+ *             driveShaper_apply(driveType, state, u, s, inc) instead of the
+ *             soft clip s. Stage A (the shared 1/(Dx D1)) is unchanged and
+ *             still yields s and t1; Stage B and the outputs are unchanged.
+ *             Two divisions per sample, plus one per block (inc). The naive
+ *             2-pole path shapes softClipTwo(u) the same way.
+ * Why:        plan §4.4; D7 (shared Stage A), D8 (one switched loop: 13
+ *             unswitched copies would not fit ITCM). SVF_calcBlockZDF()
+ *             stays the sft path, so sft is bit-identical by construction.
+ * Inputs:     filter, filter type, drive type 1..13, shaper state, buf, size.
+ * Outputs:    buf; s1/s2/zi and the shaper state.
+ * Accessors:  the four engines when driveType != DRIVE_TYPE_SFT.
+ * Affiliates: DriveShaper.h; the float twin SVF_calcBlockZDFFloat() keeps
+ *             the soft clip only (Effects have no drive type; documented
+ *             exception to the twin rule).
+ */
+void SVF_calcBlockZDFShaped(ResonantFilter* filter, const uint8_t type,
+                            const uint8_t driveType, DriveShaperState* shaper,
+                            int16_t* buf, const uint8_t size);
 //------------------------------------------------------------------------------------
 /*
  * Float-I/O ZDF block for Effects only (Session 072 step 4).
@@ -116,6 +140,18 @@ void SVF_calcBlockZDFFloat(ResonantFilter* filter, const uint8_t type,
                            float* buf, const uint8_t size);
 //------------------------------------------------------------------------------------
 void SVF_recalcFreq(ResonantFilter* filter);
+/*
+ * Recompute the integrator gain from a given cutoff (S084 P1 P1-7.3).
+ *
+ * What:       g = fastTan(pi * fUsed) without changing filter->f.
+ * Why:        run modes `fre`/`itp` slew the cutoff the loop uses while the
+ *             writers keep setting the target in filter->f; SVF_recalcFreq()
+ *             stays untouched for `rst` and for the Effect filter (twin rule).
+ * Inputs:     filter, fUsed (0..0.45).  Outputs: filter->g.
+ * Accessors:  oscSection_filterRecalc().
+ * Affiliates: SVF_recalcFreq(), fastTan().
+ */
+void SVF_recalcFreqFrom(ResonantFilter* filter, float fUsed);
 //------------------------------------------------------------------------------------
 void SVF_reset(ResonantFilter* filter);
 

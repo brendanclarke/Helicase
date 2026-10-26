@@ -42,9 +42,10 @@ enum {
  * SINGLE      a plain single hit.
  * FLAM_GRACE  the soft leading hit of a flam (fires in overlayTrigger).
  * FLAM_MAIN   the flam's delayed main hit (fires in overlayTick).
- * ROLL_START  the first hit of a held roll.
- * ROLL_HIT    a later hit of a held roll (fast rolls are spanned, slow rolls
- *             are recorded hit by hit).
+ * ROLL_START  the first hit of a held roll (opens a span, S084 P4).
+ * ROLL_HIT    later hits of a held roll, reported by the foreground drain
+ *             (one report may cover several TIM3 hits). It carries the held
+ *             rate; it opens a span on a track with none open (S084 P4).
  */
 enum {
     LIVEREC_HIT_SINGLE = 0,
@@ -63,13 +64,15 @@ enum {
 /*
  * One trigger hit reported when it sounds (S081 §4.2; S083 Q6 age).
  *
- * Inputs: track 0..6, note, velocity, kind (LIVEREC_HIT_*), roll (the step
- * roll index for a ROLL_START; 0 otherwise), source (LIVEREC_SRC_*),
+ * Inputs: track 0..6, note, velocity, kind (LIVEREC_HIT_*), roll (the
+ * step-roll index on ROLL_START and ROLL_HIT; 0 otherwise), rhythm (S084
+ * P4: the roll's packed velocity rhythm, the overlay pv byte, on roll
+ * kinds; 0 otherwise), source (LIVEREC_SRC_*),
  * note_is_default (1 when the note came from the track default, so a 'def'
  * records no special), age_us (S083: how long ago the hit actually
  * happened, in us; 0 = now). A MIDI note's age is its arrival-to-processing
  * delay, so placement uses the arrival time (Q6). Panel, overlay repeat and
- * sequencer hits pass 0. Stack only (+2 B per record).
+ * sequencer hits pass 0. Stack only (+3 B per record since S083).
  */
 typedef struct {
     uint8_t track;
@@ -77,6 +80,7 @@ typedef struct {
     uint8_t velocity;
     uint8_t kind;
     uint8_t roll;
+    uint8_t rhythm;
     uint8_t source;
     uint8_t note_is_default;
     uint16_t age_us;
@@ -107,7 +111,10 @@ uint8_t liveRec_activePatternLocked(void);
 
 /* Triggers (buttonHandler overlay, MidiNotes). */
 void    liveRec_triggerIn(const liveRec_trigger_t *t);
-void    liveRec_rollRateChange(uint8_t track, uint8_t rollIndex);
+/* S084 P4: rate and rhythm of a held roll after an overlay change (0 ends
+** it); release ends one track's roll. */
+void    liveRec_rollRateChange(uint8_t track, uint8_t rollIndex,
+                               uint8_t rhythm);
 void    liveRec_rollRelease(uint8_t track);
 
 /* Automation (Menu now, MidiParser later). S081 P3 (G-1): a voice or FX

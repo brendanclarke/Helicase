@@ -831,3 +831,29 @@ general development-log converter. Its `FS_INTERNAL_OPS` table is positional
 and must exactly match `fs_internal_op_t` in `filesystem.c`; Session 064
 closeout synchronized all 50 entries, including Pattern drain/HCNAMES/boot
 operations and Pattern scans.
+
+## Session 084 P1 - trace stage v (deferred instrument swaps)
+
+**Status:** implemented; hardware verification pending.
+
+* Stage `v`: one record per committed slot swap.
+* `flags` = reason: 1 quiet (real pre-fader peak under the quiet threshold for
+  the required blocks), 2 trigger (a note on the slot), 3 bound
+  (PRESET_SWAP_FORCE_MS elapsed), 4 immediate (the slot was already quiet).
+* `value` = slot | last block peak << 8 (uint16, int16 LSB) | path << 24
+  (1 Scene worker, 2 per-track worker, 3 Instrument load/preview).
+* Producer: `presetManager preset_traceSwap()`. Decoder:
+  `tools/decode_devlogs.py` `v` branch (prints the peak in LSB and dBFS).
+
+## Session 084 VX3 diagnostics
+
+The DEV boot diagnostic now displays the FxBuffer owner-position map and the
+fourteen VoiceBuffer record states after the existing arena-share screen.
+`FxBuffer` reports sixteen positions (twelve regular plus four lease), while
+VoiceBuffer reports twelve active records and two lease runners. The display
+is observational only; it does not claim units or alter pending Hold state.
+
+The S084 VX3 forced-unit and hardware checks remain user-board work: exercise
+the two-runner Hold path, tail release, CrumpBit shrink/grow behavior, and the
+`Ec2`/`Rv2` downgrade under six simultaneous buffer stages before treating
+the CPU and audio-capture gates as closed.

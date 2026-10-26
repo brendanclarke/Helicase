@@ -75,11 +75,13 @@ appear below where they apply):
   tracks; `seq_trackRepeatCount[7]`, `seq_trackLastConditionFired[7]`,
   `seq_fillActive`.
 - **Per-step roll engine** (§6): `seq_rollBegin()`, `seq_processRollTicks()`,
-  `seq_rollComputeVelocity()` — 8 roll rates (absolute note values), packed
+  `seq_rollComputeVelocity()` — 9 roll rates (absolute note values), packed
   rhythm byte encoding (21 ordered entries), fill percentage with ~5 ms
   output-gain duck via `instrumentManager_requestGateDuck()` /
-  `instrumentManager_gateGain()` in the mixer. Carry-over across matching
-  steps. Roll + duck state reset at all four sequencer reset sites.
+  `instrumentManager_gateGain()` in the mixer. Since S084 P1 the length is a
+  master-tick time window (not a hit count) and carry needs the same rate and
+  rhythm unless the previous step's fill was below 100 %. Roll state reset at
+  all four sequencer reset sites via `seq_rollClearTrack()`.
 - **PAT4 version** (§7): bumped from 1 to 2; reader rejects version 1.
   Offline converter `tools/convert_pattern_specials.py`.
 
@@ -405,32 +407,54 @@ and automation. The sequencer then triggers with the resolved note and
 velocity. If the step has a roll special, `seq_rollBegin()` starts a
 per-step retrigger engine at the specified rate (9 absolute note values,
 independent of track scale; table below), with rhythm-modified velocity via
-the packed byte pattern and a fill percentage that controls how much of the
-step duration the roll occupies. Fill < 100 ducks the voice at the fill
-boundary via `instrumentManager_requestGateDuck()`. If the step has a
-micro-timing delay, the trigger is deferred by
-`(step_interval * timing_value) / 100` ticks, additive with shuffle. Since
-S081 a roll step takes the same deferral (shuffle and micro-timing) as a plain
-trigger, and its first hit fires at the deferred time. Roll carry-over
-extends across adjacent steps with matching rate/rhythm/fill.
+the packed byte pattern. If the step has a micro-timing delay, the trigger is
+deferred by `(step_interval * timing_value) / 100` ticks, additive with
+shuffle. Since S081 a roll step takes the same deferral (shuffle and
+micro-timing) as a plain trigger, and its first hit fires at the deferred
+time.
+
+**Roll engine: a time window on the master clock (S084 P1).** A roll's rate is
+a fixed 96-PPQ tick interval (`seq_rollPpq()`, table below); its length is a
+window in master ticks, `step interval × fill / 100`, rounded from the Q8.8
+interval and measured from the step's (possibly deferred) fire. Track scale
+therefore decides only how long a step's roll lasts, never the spacing of its
+hits. `seq_rollWindow[7]` counts the ticks left in which retriggers may fire.
+`seq_rollBegin()` on a step that does not carry fires hit #1 (reset) and
+starts `seq_rollTickAccum[]` at the rate interval; on a carry it fires no hit,
+requests the reset-only renewal (`voiceControl_resetOnly()`), leaves the
+accumulator and rhythm position untouched, and replaces the window (the new
+step owns the roll from its fire). `seq_processRollTicks()` closes the window
+when it reaches 0: fill < 100 requests the duck
+(`instrumentManager_requestGateDuck()`) and ends the roll, while fill 100
+parks it (`SEQ_ROLL_CARRY` without `SEQ_ROLL_RUN`): the accumulator keeps
+counting down to 0 and holds, so a carry resumes exactly on phase. A carried
+step deferred by shuffle/micro-timing stretches (never shortens) the previous
+window to reach its fire. Carry eligibility is re-checked at every step event
+(`SEQ_ROLL_CARRY` is cleared unless that step's trigger fires with the same
+rate and rhythm), so a parked roll cannot resume across an empty step.
+`seq_rollClearTrack()` centralizes the reset at boot, at per-track and
+whole-Scene changes, and at the transport reset. Hits sit at
+`first-hit + k × interval` at any step scale, including a rate that does not
+divide the step (16t in a 1/16 step). PERF/MIDI overlay rolls use the same
+engine model on the same tick (see below).
 
 **Step roll rate table (S081 P1 §5.4).** `seq_processRollTicks()` runs on the
 96-PPQ tick, and `seq_rollPpq()` returns the retrigger interval in 96-PPQ
 ticks (guard `rate > 9` → 0). Before S081 the table held 24-PPQ values, so
 every step roll played 4× fast on hardware.
 
-| Index | Menu label (`stepRollRateNames`) | Interval (96-PPQ ticks) |
-|---:|---|---:|
-| 0 | `off` | 0 |
-| 1 | `1/8` | 48 |
-| 2 | `8tr` | 32 |
-| 3 | `16` | 24 |
-| 4 | `16t` | 16 |
-| 5 | `32` | 12 |
-| 6 | `32t` | 8 |
-| 7 | `64` | 6 |
-| 8 | `64t` | 4 |
-| 9 | `128` | 3 |
+| Index | Menu label (`stepRollRateNames`) | Interval (96-PPQ ticks) | PERF type (S084) |
+|---:|---|---:|---:|
+| 0 | `off` | 0 | — |
+| 1 | `1/8` | 48 | 6 |
+| 2 | `8tr` | 32 | 7 |
+| 3 | `16` | 24 | 8 |
+| 4 | `16t` | 16 | 9 |
+| 5 | `32` | 12 | 10 |
+| 6 | `32t` | 8 | 11 |
+| 7 | `64` | 6 | 12 |
+| 8 | `64t` | 4 | 13 |
+| 9 | `128` | 3 | 14 |
 
 The old `48` entry (the same rate as `32t`) was dropped, so stored indices
 above it moved down by one with no migration (decision F-H: backward
@@ -438,12 +462,36 @@ compatibility is not a constraint). The PAT4 byte format is unchanged. The
 legacy `PAR_ROLL` live-roll parameter and its `rollRateNames` /
 `MENU_ROLL_RATES` table were retired in S081.
 
-**Roll length and the next step (S081 F-R).** A roll runs its own length:
-the step interval × fill, measured from its (possibly delayed) first hit.
-Only the next step's **trigger** cuts it short: a plain hit ends it, a
-matching roll carries it, a different roll replaces it. An empty or
-automation-only next step does not cut it (before S081 any step without a
-roll ended a running roll at its start).
+**Roll length and the next step (S081 F-R; carry rule S084 P1/Q4).** A roll
+runs its own window, the step interval × fill, measured from its (possibly
+delayed) first hit. Only the next step's **trigger** cuts it short: a plain
+hit ends it, a matching roll carries it, a different roll replaces it. An
+empty or automation-only next step does not cut it (before S081 any step
+without a roll ended a running roll at its start). A carry needs the same
+rate and rhythm; it is refused when the previous roll step's fill was below
+100 %, and the incoming step's own fill only sets that step's window (user
+Q4, 2026-10-24). A fill-100 roll that reaches its window end is parked with
+its phase intact, so a fractional step interval or a shuffled/micro-timed
+carrying step cannot introduce a gap.
+
+**Live overlay rolls and flams (S084 P2).** PERF BAR overlay and MIDI-note
+gestures run on the same 96-PPQ tick, not a foreground millisecond timer. Per
+track, `seq_liveMode/Rate/Accum/Pos/Note/Vel[]` hold an armed roll or a
+pending flam main; `seq_liveRhythm` is the active overlay's `pv` byte.
+`seq_liveRollStart()` arms a roll after the foreground has fired hit 0 (the
+first repeat is one rate interval after the press), `seq_liveRollSetRate()`
+keeps the time since the last hit, `seq_liveFlamArm()` arms the main hit 12
+ticks (1/32) after the press, and `seq_liveStop()` disarms a track.
+`seq_processLiveTicks()` runs first in `seq_processSchedulerTick()`, before
+the `!seq_running` gate, so a held roll repeats at the internal tempo while
+stopped and follows every external clock tick while running; under external
+sync while stopped, `seq_tick()` services it from the tempo timer
+(`seq_tempo` follows the incoming clock). Each TIM3 hit is published to a
+per-track mailbox (count, flam bit, TIM2 µs stamp) and the foreground
+`buttonHandler_overlayDrain()` reports it to LiveRecord with the hit's
+arrival age; LiveRecord never runs in TIM3. The overlay offers 15 types:
+four single velocities, two flams and the nine step-roll rates (index =
+type − 5).
 
 ### 6.1 Step automation playback
 
@@ -574,8 +622,9 @@ step's first trigger**:
 - A roll whose hits run into the next step's time does not reset there; the
   next step's own trigger does.
 - Live triggers (overlay presses, MIDI notes, preview) reset at each new
-  press. Each flam hit counts as a press. Overlay roll repeats from the 1 ms
-  timer do not reset.
+  press. Each flam hit counts as a press (the grace in the foreground, the
+  main from `seq_processLiveTicks()`). Live overlay roll repeats do not
+  reset (S084 P2).
 
 **Mechanism: a per-voice pending-reset mask.** `voiceControl_pendingReset`
 (`u8`, bits 0..6, `MidiVoiceControl.c`) records that a voice owes a reset.
@@ -583,8 +632,9 @@ step's first trigger**:
 - `seq_triggerVoice(voice, vol, note, reset)` passes `reset`: 1 for on-time
   step hits, deferred fires, `seq_rollBegin()`'s first hit, overlay presses,
   preview and SOM; 0 for `seq_processRollTicks()` retriggers; the overlay
-  1 ms timer passes `bh_overlayCount != 0xFF` (1 for a flam main, 0 for roll
-  repeats). `voiceControl_noteOn()` (MIDI, preview, overlay) always sets the
+  live tick (`seq_processLiveTicks()`, TIM3) passes 1 for a flam main and 0
+  for roll repeats (S084 P2). `voiceControl_noteOn()` (MIDI, preview,
+  overlay) always sets the
   bit; `voiceControl_noteOnNoReset()` serves roll retriggers 2+;
   `voiceControl_resetOnly(voice)` sets the bit with no trigger (roll
   renewal).
@@ -1402,8 +1452,9 @@ bit 11     jump     (S081 P3: pushed by a looper wrap mid-step or a resume,
 
 Sources: the BAR VOICE-trigger overlay in PERF (`buttonHandler_overlayReport()`
 → `liveRec_triggerIn()`; the grace and single hits from
-`buttonHandler_overlayTrigger()`, the flam main and roll hits from
-`buttonHandler_overlayTick()`, releases and rate switches through
+`buttonHandler_overlayStart()`, the flam main and roll hits from the TIM3
+live engine through `buttonHandler_overlayDrain()`, releases and rate
+switches through
 `liveRec_rollRelease()` / `liveRec_rollRateChange()`), and MIDI notes
 (`midiNotes_handle()`, kind SINGLE, or through the overlay executor when
 the BAR overlay is on; S083). Each hit is reported **when it sounds**; a MIDI
@@ -1438,8 +1489,9 @@ as scale or length changed during playback.
 
 **Commit** (`pat_recordStep()` through `patSvc_recordStep()`): bit 15 on;
 note (`def` → no note special); velocity (100 stored as absent); timing =
-delay; roll/fill (fill 100 stored as absent) or cleared; rhythm cleared;
-condition kept, or `fil` (21) while fill is active; automation kept. A step
+delay; roll/fill (fill 100 stored as absent) or cleared; the roll's rhythm
+with a roll, or cleared without one (S084 P4); condition kept, or `fil` (21)
+while fill is active; automation kept. A step
 landed **ahead** of the playhead in this pass gets an echo mark
 (`seq_suppressStepOnce(track, step, ahead)`: TIM3 skips that stored trigger
 once — automation still plays — and the mark expires at capture + ahead +
@@ -1455,25 +1507,35 @@ snapped main; both written if they land on different steps, otherwise the
 main only. Un-quantised: each at its own time; if both land in one step,
 the main.
 
-**Rolls** (overlay `r/8 r16 r32 r64 r6t 128` = step indices 1 3 5 7 8 9):
+**Rolls** (overlay types 6..14 = step indices 1..9, the whole STEP list; S084
+P3/Q7):
 
-- A roll whose interval is at least the track's step interval is recorded
-  **hit by hit** as single steps.
-- A faster roll: the start step is placed like a hit and written with the
-  roll; the rolled track is **live-held** (`seq_setLiveHold()`: its stored
-  triggers are skipped while held; automation plays); each later ring entry
-  writes the previous step as a span (trigger + rate + fill 100 + `fil`),
-  never the start step and never a step before a forward-quantised start.
-- Release: before the second hit → the start step becomes a plain trigger
-  at its start delay; on the start step → fill = release − start; on a later
-  step → that step at timing 0, fill = the release offset. Then the live
-  hold ends.
-- Rate switches while held: to slow ends the recorded roll (later hits are
-  singles); to fast (from slow or single) starts a recorded roll at the next
-  hit; fast → fast takes the new rate from the step containing the switch.
-  Toggling the overlay off ends the roll at that step.
-- A Scene change, stop, REC off or `rtk` change ends an open roll without an
-  end write.
+- Every held roll is recorded as a **span**, whatever its rate relative to the
+  track's step (user Q7, 2026-10-24: "yes, if the button or MIDI input note is
+  held"). There is no slow/fast split and no per-hit quantisation, so the
+  track's step scale and `qnt` no longer decide how a roll is stored.
+- The start step is placed and quantised like any hit and written with the
+  roll rate, fill 100 and the active `pv` rhythm (`rtm`, Q8); the rolled
+  track is **live-held** (`seq_setLiveHold()`: its stored triggers are skipped
+  while held; automation plays). Each later ring entry writes the previous
+  step as a span (trigger + rate + fill 100 + rhythm + `fil`), never the start
+  step and never a step before a forward-quantised start.
+- Release: before the second hit → the start step becomes a plain trigger at
+  its start delay; on the start step → fill = release − start; on a later
+  step → that step at timing 0, fill = the release offset. The end step keeps
+  the rate and rhythm; the span before it has fill 100, so playback carries
+  the roll into the release step and stops it there. Then the live hold ends.
+- Open rolls are per track (`liveRec_roll[7]`): a release, a new start or a
+  rate change touches only that track, so concurrent overlay/MIDI rolls on
+  several tracks record independently (S084 P4/F5).
+- Rate switches while held take effect from the step containing the switch
+  (rate and rhythm are updated; the switch step is a different roll in
+  playback, so it restarts at its boundary). Toggling the overlay off ends
+  the roll at that step. A `ROLL_HIT` on a track with no open span (REC armed
+  mid-roll, a new take, single/flam → roll) opens one at that hit.
+- A take boundary (Scene change, stop, REC off, overdub in/out, erase in,
+  `rtk` change) ends every open roll **without** an end write and lifts its
+  live hold (S084 F8).
 
 #### 6.7.5 Automation recording
 
@@ -2026,7 +2088,8 @@ uint8_t  patSvc_exclusiveEvacuateSwapStep(scene);
 - `patSvc_recordStep()` stages the spec and submits `RECORD_STEP` (direct
   when idle). Execution calls `pat_recordStep(scene, track, step, spec)`
   (PatternData): it reads the existing specials and automation, applies
-  note/velocity/timing/roll/fill, clears rhythm, keeps the condition or sets
+  note/velocity/timing/roll/fill and the roll's rhythm (cleared without a
+  roll; S084 P4), keeps the condition or sets
   `fil`, keeps automation, and publishes with **trigger ON** in the same
   PRIMASK publish (`pat_writeDynamic()`'s `trigger_policy` KEEP/ON/OFF, the
   `PAT_RAW_TRIGGER_*` values; every older caller passes KEEP). Velocity 100
