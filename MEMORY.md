@@ -20,8 +20,13 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
-**Current working source**: **Session 083 (MIDI) is closed** (2026-10-22)
-on `dev-ph6-midi`. Record: `knowledge_files/log_archive/083_SESSION_HANDOFF_LOG.md`;
+**Current working source**: **Session 084 (roll fix-up) is closed**
+(2026-10-26) on `dev-ph7-voice_expansion`: base commit `91265e9c` (code =
+`59406a4`, the S083 end), the S084 code and close-out documents uncommitted.
+**Hardware verification of S084 (V1–V7) is pending and gates S085.** Record:
+`knowledge_files/log_archive/084_SESSION_HANDOFF_LOG.md`; carry-over
+`knowledge_files/volatile/S078_WORKING_NOTES.md`.
+The S083 record is `knowledge_files/log_archive/083_SESSION_HANDOFF_LOG.md`;
 authority: `MIDI_SPEC.md` (the complete MIDI use and code reference, Parts
 I–III). `Core/MIDI/` was rebuilt as the single-role modules listed under
 "MIDI / Clock Reminders" below; `MidiParser`, `Uart`, `FIFO`, `MidiRealtime`,
@@ -34,6 +39,9 @@ I–III). `Core/MIDI/` was rebuilt as the single-role modules listed under
   `bss=430,112`; flash payload 608,848 B of 753,664 (**144,816 B free**).
   S082 baseline was `598,120 / 420 / 430,928`. Production build
   (`DEV_MODE_LOGGING 0`) last measured at S075 F1; needs a rebuild.
+- **Build at S084 close (DEV config):** `text=609,288`, `data=424`,
+  `bss=430,200`; flash payload 609,712 B of 753,664 (**143,952 B free**).
+  `bss` +88 B vs S083 (approved +87 B, user 2026-10-26; 1 B alignment).
 - **Hardware (user):** the S083 P1 build was tested ("seems ok", leading to
   the P2 follow-ups) and the final build "checks out" (2026-10-22). S081 and
   S082 passed their checks (2026-10-21). Open since S082: F5 (Scene 2 Case-3
@@ -59,6 +67,43 @@ I–III). `Core/MIDI/` was rebuilt as the single-role modules listed under
   erase, the step reset rule, R12/R13, the 96-PPQ roll table, `qnt trk`,
   automation ramps (now labelled `rmp`), loop while record, G-1, VOICE bar
   pulse.
+- **Session 084 — roll fix-up (closed 2026-10-26; hardware pending).** It
+  ran twice: the first tree (roll fix-up + voice expansions P1–P5) went over
+  the voice CPU budget and froze on hardware, so it was rolled back whole;
+  the roll fix-up was re-implemented alone. The abandoned tree is the
+  **spike**, `../Helicase-dev-ph7-spike/` (own repository, `26fb7c3`),
+  reference only: `S084_POST-MORTEM.md` there sets the plan — **S085**
+  oscillator/modulation-mode cherry-pick (`S085_OSC_MOD_CHERRYPICK.md`),
+  **S086** the effects chain inside an 88-cycle per-voice budget
+  (`S086_EFFECTS_CHAIN_POST_MORTEM_EVAL.md`). Copy only the hunks a session
+  document names. One roll engine on the 96-PPQ master tick:
+  - **P1:** a step roll's length is a time window (`seq_rollWindow[7]`,
+    interval × fill from the step's or deferred fire), not a hit count.
+    A carry fires no hit, leaves the accumulator and rhythm position
+    running, and replaces the window. A fill-100 roll parks at its window
+    end and resumes on phase; a fill < 100 roll ducks there. Carry rule
+    (user Q4): same rate and rhythm, refused when the **previous** roll
+    step's fill was below 100 %; the incoming fill only sets its window.
+  - **P2:** PERF/MIDI overlay rolls and the flam main fire from TIM3
+    (`seq_live*`), not a `PAR_BPM` millisecond timer. `seq_processLiveTicks()`
+    runs first in `seq_processSchedulerTick()`, before the running gate;
+    `seq_tick()` services it under external sync while stopped. Hits are
+    published per track (count, flam bit, TIM2 stamp) and drained by
+    `buttonHandler_overlayDrain()`; LiveRecord still never runs in TIM3.
+  - **P3:** one roll list: PERF types 0..14 = 4 singles, 2 flams, then the
+    nine STEP rates (value − 5). Stored values 6..11 changed meaning; no
+    migration (user Q2).
+  - **P4:** every held roll is a span at any rate (user Q7), recorded per
+    track (`liveRec_roll[7]`), with the `pv` rhythm stored in `rtm` (Q8).
+    A take boundary ends open rolls with no end write (F8). A slow roll
+    released on a later step before its second hit takes the normal end
+    write (A2).
+  - **Fixes:** external clock ticks interpolated (A1, binding note under
+    "MIDI / Clock Reminders"); drain before every overlay switch (A3) and
+    before judging an entry held in `buttonHandler_overlayReconfigure()`
+    (B1). Host check H1 passes (base code reproduces the defect).
+  - **Also logged in S084:** the host-only LXR1 and LXR-02 import tools
+    (below, "Volatile Notes").
 
 Session 082 in one paragraph:
 
@@ -81,7 +126,7 @@ Session 082 in one paragraph:
 
 **Permanent authority:**
 
-- `knowledge_files/log_archive/083_SESSION_HANDOFF_LOG.md`, `082_…` (and 081 —
+- `knowledge_files/log_archive/084_SESSION_HANDOFF_LOG.md`, `083_…`, `082_…` (and 081 —
   written after S082 —, 080, 079, 078, 077, 076, 075, 074, 073, 072);
 - `knowledge_files/specification_reference/COPYCLEAR_UTILITIES.md` (new in
   S075);
@@ -131,6 +176,11 @@ Session 082 in one paragraph:
   `S083_P2_MIDI_TRACK_FIXUPS.md`) are superseded by
   `083_SESSION_HANDOFF_LOG.md` and `MIDI_SPEC.md` (the user deletes them;
   the plan and schedule are in `f9aaeec`/`d007027`).
+- The two root `S084_*.md` task documents (`S084_P0_ROLL_FIXUP.md`,
+  `S084_P0_IMPLEMENTATION.md`) and the converter handoffs
+  `LXR1_CONVERTERS_IMPLEMENTATION.md`, `LXR2_CONVERTERS_IMPLEMENTATION.md`
+  are superseded by `084_SESSION_HANDOFF_LOG.md` and the specifications
+  (the user deletes them; the converter manuals stay in `tools/`).
 - The four root `S079_*.md` task documents (`S079_P1_STEP_CONDITIONS_SPECIALS.md`,
   `S079_P1_IMPLEMENTATION.md`, `S079_P2_ROLL_FOLLOWUP_REMEDIATION.md`,
   `S079_P2_IMPLEMENTATION.md`) are superseded by `079_SESSION_HANDOFF_LOG.md`
@@ -210,27 +260,27 @@ must not allocate those rings, cursors, or timing records.
 
 ## Volatile Notes
 
-**Session 083 is closed.** Durable record: `083_SESSION_HANDOFF_LOG.md`;
-MIDI behaviour and code: `MIDI_SPEC.md`; `midilrn.cfg` and settings keys:
-`FILESYSTEM_SPEC.md`. Carry-over notes:
-`knowledge_files/volatile/S078_WORKING_NOTES.md` (rewritten as the S083 →
-S084 notes). Short
-points:
+**Session 084 is closed.** Durable record: `084_SESSION_HANDOFF_LOG.md`;
+roll engine, live overlay engine, external clock, roll recording:
+`PATTERN_DYNAMIC_STACK.md` §6 and §6.7.4; overlay gesture lifecycle:
+`MODULE_INTERCHANGE_SPEC.md` "BAR overlay trigger engine"; MIDI view:
+`MIDI_SPEC.md`. Carry-over notes:
+`knowledge_files/volatile/S078_WORKING_NOTES.md` (rewritten as the S084 →
+S085 notes). Short points:
 
-* **LXR1 import tools (2026-10-22, host only, not yet hardware-tested):**
-  `tools/lxr1_converters/` converts LXR1 `.snd` → Kit, `.pat` → PAT4
-  library Patterns, `.all`/`.prf` → Banks (manual `LXR1_CONVERTERS.md`
-  there; handoff log `LXR1_CONVERTERS_IMPLEMENTATION.md` at the root).
-  The 2013 factory kits use page-reference LFO/velocity targets, not
-  modTargets indices.
-* **LXR-02 import tools (2026-10-23, closed; host only, not yet hardware-tested):**
-  `tools/lxr2_converters/` converts Erica LXR-02 `NN-*.snd` → Kit, `.pat`
-  → PAT4, `projNN/` → Banks (16 patterns each), `.sng` → chained Banks
-  (manual `LXR2_CONVERTERS.md` there; handoff log
-  `LXR2_CONVERTERS_IMPLEMENTATION.md` at the root). It imports the Helicase
-  writers from `tools/lxr1_converters/lxr1_common.py`: editing that module
-  affects both converter sets. User decision: LXR-02 track MIDI notes still
-  at the default (48 on all tracks) are written as `nte on`.
+* **Next:** run the S084 hardware matrix V1–V7
+  (`084_SESSION_HANDOFF_LOG.md` §9.2), then S085 from the spike's
+  `S085_OSC_MOD_CHERRYPICK.md`. Keep `../Helicase-dev-ph7-spike/` until
+  S086 no longer needs it.
+* **Import tools (host only, never hardware-tested):**
+  `tools/lxr1_converters/` (LXR1 `.snd` → Kit, `.pat` → PAT4, `.all`/`.prf`
+  → Banks; the 2013 factory kits use page-reference LFO/velocity targets)
+  and `tools/lxr2_converters/` (LXR-02 kits, patterns, `projNN/` → Banks of
+  16, `.sng` → chained Banks; default track notes 48 → `nte on`). Manuals
+  in each directory; overview `FILESYSTEM_SPEC.md` "Import tools"; record
+  `084_SESSION_HANDOFF_LOG.md` §12–§13. The LXR-02 set imports the Helicase
+  writers from `lxr1_common.py`; both parse the Instrument descriptors at
+  run time, so an Instrument key change needs them re-checked.
 * **MIDI testing needs RXF/TXF = `all`:** a card without the keys defaults
   to off (consumes and sends nothing).
 * **Card files:** `midilrn.cfg` appears with the first Learn; `settings.cfg`
@@ -238,8 +288,12 @@ points:
   are ignored and dropped on the next settings write.
 * **Open product decisions (no action unless asked):** RXF/TXF defaults;
   whether a PERF BAR overlay should also shape MIDI notes outside PERF (it
-  does today); whether recorded overlay rolls should carry the `pv` rhythm;
-  publishing a per-type NRPN chart.
+  does today); publishing a per-type NRPN chart; the unassigned spike items
+  (LFO one-shots, deferred swap fixes, swap trace `v`, elastic Effect
+  contract); the LXR1 converter questions (`--partial-rolls` default, empty
+  patterns as Scenes, retiring `tools/convert_legacy_kits.py`).
+* **`.gitignore`** has an unused `Helicase-dev-ph7-spike/` entry (the spike
+  moved next to the repository); harmless.
 * **Still open from S082:** F5 Scene 2 Case-3 invalidation (instrumented);
   P3 A2 frozen-screen blink loss (low). P3 A1 is fixed (S083 Q2).
 * **S082 binding rules** (Load/Save repaint coalescing, active Scene never
@@ -306,6 +360,20 @@ end; durable facts belong in `knowledge_files/log_archive/` or
   sequence** aligned to the master clock (the realign calls
   `seq_fxRealignToMasterClock()`); correct as implemented in S081 (P1 review
   item 29, closed).
+- **Roll engine and live overlay (S084) — binding:** a roll's length is a
+  master-tick window (`seq_rollWindow`), never a per-step hit count; a carry
+  fires no hit and never touches the accumulator or rhythm position; carry
+  = same rate and rhythm, refused when the **previous** roll step's fill was
+  below 100 % (user Q4); fill-100 rolls park at the window end and the
+  carry-eligibility check at every step event ends a parked roll. PERF/MIDI
+  overlay repeats and flam mains fire in TIM3 (`seq_processLiveTicks()`,
+  first in the scheduler tick, before the running gate); the foreground
+  only arms, re-rates, stops and drains (`seq_live*`, PRIMASK) and reports
+  to LiveRecord. Drain before every `bh_overlayActive` change and before
+  judging an entry held. Every held roll records as a per-track span; a
+  take boundary ends open rolls without an end write. Overlay types 0..14
+  = singles, flams, then the STEP rates (index = type − 5); keep
+  `perfBtnTypeNames`, `BH_OVERLAY_TYPE_*` and the menu clamp in step.
 - **S081 open items:** P3 A-1 (tapping an already-looped VOICE
   drops it on release — confirm); stale previous step when REC is armed while
   running; P4 B-2; stage `W` missing from `tools/decode_devlogs.py`; every
@@ -1860,10 +1928,13 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 - `BUTTON_TIMEOUT` is milliseconds on this port (`500u`), not original AVR ticks (`38 * 13.107ms`).
 - `EuklidGenerator.c` matches original LXR. PATGEN distribution depends on `__CLZ(0) == 32`; do not replace the shim with `__builtin_clz()`.
 - `seq_tick()` is owned by `TIM3_IRQHandler`. **Do NOT add seq_tick() back to the main loop.**
-- **S080 TIM3 order in `seq_processSchedulerTick()`:** master boundary (scene
-  change fire detection) → `seq_chainServiceTick()` → deferred triggers →
-  (unless chain `stp`) `seq_loopProcessTick()` → per-track DDA → rolls → FX
-  clock. Scene changes themselves run in the foreground
+- **S080/S084 TIM3 order in `seq_processSchedulerTick()`:** live overlay
+  rolls/flams (`seq_processLiveTicks()`, **first**, before the running gate)
+  → master boundary (scene change fire detection) →
+  `seq_chainServiceTick()` → deferred triggers → (unless chain `stp`)
+  `seq_loopProcessTick()` → per-track DDA → step rolls → FX clock. Under
+  external sync while stopped, `seq_tick()` services the live overlay engine
+  from its tempo timer instead. Scene changes themselves run in the foreground
   (`menu_serviceDeferredSceneChange()` from `buttonHandler_tick()`).
 - `midiTransport_processRealtime()` and `triggerJacks_tick()` are also owned by TIM3. Do NOT call them from the main loop.
 - `voiceControl_processPending()` is called only inside `audio_check_and_render()` before `mixer_calcNextSampleBlock()`. Do NOT call from ISR context.
@@ -1871,6 +1942,13 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 
 ### MIDI / Clock Reminders (S083; supersedes the Session 019 notes)
 - TIM2 is a shared free-running 1 µs counter. Do NOT reset it on each pulse. Use unsigned subtraction for deltas.
+- **External clock ticks are interpolated (S084 P0 A1).** A MIDI clock
+  (4 scheduler ticks) or a jack pulse (`stepSize × 3` ticks) runs only its
+  first tick on the edge (`seq_extClockTicks()`); `seq_tick()`'s tempo timer
+  (period from `seq_tempo`, measured from the clock) runs the rest one by one
+  from `seq_extTicksOwed`, and the next edge catches up any tick still owed.
+  Do not go back to running a period's ticks back to back: every roll,
+  shuffle and micro-timing inside the period would fire at one instant.
 - TIM5 is free and reserved for future `afatfs_poll()` ISR migration. Do NOT use it for anything else.
 - PAR_EXT_SYNC values in order: `off` / `usb` / `din` / `pls` / `aut`. PAR_BPM minimum is 1; value 0 no longer means external sync.
 - **`Core/MIDI/` is rebuilt (S083).** Modules: `MidiDefs.h`, `MidiBuffer`,

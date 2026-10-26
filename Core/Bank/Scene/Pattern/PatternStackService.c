@@ -98,7 +98,8 @@ static uint8_t service_replace_pending;
  * The patSvc_recordStep() caller copies the spec into a free slot; the queue
  * event payload carries the slot index; execution frees it. Why: the queue's
  * 16-bit payload cannot hold the full record spec. The table is owned by the
- * service (no LiveRecord dependency). RAM: +34 B.
+ * service (no LiveRecord dependency). RAM: +34 B (S084 P4: +4 B, the spec's
+ * rhythm byte in each of the 4 slots).
  *
  * service_target_request: the requested recording-target Scene (0xFF = none).
  * patSvc_desiredScene() returns it, else seq_activePattern; it replaces the

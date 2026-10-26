@@ -1,16 +1,18 @@
 # S084 P0 — Roll Fix-up: Assessment and Plan
 
 **Session:** 084, phase P0 (assessment and plan; no code changed)
-**Branch:** `prime` at `debbe72f` (tree identical to `59406a4`, the base
-the findings were read from)
+**Branch:** `dev-ph7-voice_expansion` (code tree identical to `59406a4`, the
+base the findings were read from)
 **Date:** 2026-10-24; status revised 2026-10-26
-**Status:** **NOT YET IMPLEMENTED** on the current repository. User
+**Status:** **IMPLEMENTED (2026-10-26); hardware checks pending.** User
 decisions Q2, Q4 and Q7 are recorded (2026-10-24, §5). The other questions
-proceed on the recommendation unless the user objects. The change schedule
-is `S084_P0_IMPLEMENTATION.md`. It also carries the user-approved
-assessment fixes A1–A4 from an earlier build on the abandoned spike
-(`Helicase-dev-ph7-spike/`, reference only; schedule §11). Hardware checks
-remain with the user (schedule §9).
+proceed on the recommendation. The change schedule is
+`S084_P0_IMPLEMENTATION.md`; its §10 log carries the per-phase build and
+host-check results. It also carries the user-approved assessment fixes
+A1–A4 from an earlier build on the abandoned spike
+(`../Helicase-dev-ph7-spike/`, reference only; schedule §11). The §8 P0
+specification and `MEMORY.md` updates are applied; hardware checks and the
+session handoff log remain with the user (schedule §9).
 **Scope:** rolls triggered from the PERF BAR overlay (panel VOICE and MIDI
 notes), step rolls (STEP special `rol`), and how LiveRecord writes a played
 roll into the Pattern.

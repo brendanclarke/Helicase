@@ -292,7 +292,8 @@ static const char conditionNames[][4] = {
  * Add "64t" and "128". Why: the table indices and names must match the new
  * 10-entry seq_rollPpq table. Stored bytes shift with no migration. Inputs:
  * roll index 0..9. Affiliates: seq_rollPpq, menu_getRollRateName, STEP roll
- * clamp.
+ * clamp, perfBtnTypeNames (overlay roll types 6..14 = these indices 1..9,
+ * S084 P3).
  */
 static const char stepRollRateNames[][4] = {
     {10},
@@ -300,17 +301,24 @@ static const char stepRollRateNames[][4] = {
 };
 
 /*
- * S080 E4: PERF BAR overlay trigger-type names.
+ * PERF BAR overlay trigger-type names (S080 E4; S084 P3 one roll list).
  *
- * [0]=count; [1..12] = stored value 0..11. Rendered by the static-param
- * special case in menu.c (S080 E6) because all 16 DTYPE_MENU ids are taken.
- * Order: vmx, v10, v64, v32, flm, fls, then the held roll rates r/8..128.
- * Affiliates: PAR_PERF_BTN_LT/RT, the overlay trigger dispatch (E12).
+ * [0] = count 15; [1..15] = stored value 0..14. 0..3 single velocities
+ * (vmx v10 v64 v32), 4..5 flams (flm fls), 6..14 held rolls with exactly
+ * the STEP roll labels and rates: value v is step-roll index v - 5 (1/8,
+ * 8tr, 16, 16t, 32, 32t, 64, 64t, 128). Why: PERF offered only six of the
+ * nine step rates under different names (S084 P0 F1); one list makes every
+ * step roll playable live and keeps one vocabulary (Q1). Stored values
+ * 6..11 changed meaning; no migration (user Q2, 2026-10-24). Rendered by
+ * the static-param special case in menu.c (all DTYPE_MENU ids are taken),
+ * which reads the count from [0][0]. Affiliates: PAR_PERF_BTN_LT/RT,
+ * stepRollRateNames, seq_rollPpq(), buttonHandler_overlayStart()
+ * (BH_OVERLAY_TYPE_* layout), menu_clampCellValue().
  */
 static const char perfBtnTypeNames[][4] = {
-    {12},
+    {15},
     {"vmx"},{"v10"},{"v64"},{"v32"},{"flm"},{"fls"},
-    {"r/8"},{"r16"},{"r32"},{"r64"},{"r6t"},{"128"},
+    {"1/8"},{"8tr"},{" 16"},{"16t"},{" 32"},{"32t"},{" 64"},{"64t"},{"128"},
 };
 
 /*

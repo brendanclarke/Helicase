@@ -1,16 +1,19 @@
 # S084 P0 — Roll Fix-up: Implementation Schedule
 
 **Session:** 084, phase P0
-**Status:** **NOT YET IMPLEMENTED** on the current repository. The schedule
-is complete and ready to follow from §4. The §10 log is empty.
-**Branch:** `prime` at `debbe72f`. Its tree is identical to `59406a4`, the
-base this schedule was written against (checked 2026-10-26: `git diff
-59406a4 HEAD` is empty).
+**Status:** **IMPLEMENTED AND CLOSED (2026-10-26); hardware checks
+pending.** P1–P4 build clean; H1 passes; the §12 assessment fixes B1/B2 are
+applied (§13). Durable record: `knowledge_files/log_archive/
+084_SESSION_HANDOFF_LOG.md`. This document is superseded by that log and the
+specifications.
+**Branch:** `dev-ph7-voice_expansion` at `91265e9c` (the code tree is
+identical to `59406a4`, the base this schedule was written against:
+`git diff 59406a4 HEAD` shows only the two S084 P0 documents).
 **Date:** 2026-10-24; revised for re-implementation 2026-10-26
 **Assessment and plan:** `S084_P0_ROLL_FIXUP.md` (findings F1–F8, phases P1–P4)
-**Reference build:** `Helicase-dev-ph7-spike/` at `26fb7c3` holds an earlier,
+**Reference build:** `../Helicase-dev-ph7-spike/` (next to the repository) at `26fb7c3` holds an earlier,
 abandoned implementation of this schedule (see §11 and
-`Helicase-dev-ph7-spike/S084_POST-MORTEM.md`). Every entry here was checked
+`../Helicase-dev-ph7-spike/S084_POST-MORTEM.md`). Every entry here was checked
 against that code, and its approved assessment fixes A1–A4 are folded into
 the entries.
 
@@ -18,13 +21,13 @@ the entries.
 
 ## 0. How to use this schedule
 
-- **Line numbers are at `59406a4`**, which equals the current `prime` tree
+- **Line numbers are at `59406a4`**, which equals the implementation base `91265e9c` on `dev-ph7-voice_expansion`
   (every anchor was re-checked on 2026-10-26). Within one file, apply the
   changes from the highest line down, or find each change by its **anchor**
   (the function or symbol named in the entry). Earlier edits shift later
   lines.
 - **The spike is reference only.** To see an entry as it was built, run
-  `git -C Helicase-dev-ph7-spike diff 59406a4 26fb7c3 -- <file>`.
+  `git -C ../Helicase-dev-ph7-spike diff 59406a4 26fb7c3 -- <file>`.
   `sequencer.c/.h`, `LiveRecord.c/.h`, `buttonHandler.c`, `MidiNotes.c`,
   `PatternData.c/.h` and `PatternStackService.c` carry only P0 hunks there.
   `MenuText.h`, `menu.c`, `ParameterArray.h`, the specifications and
@@ -2166,8 +2169,8 @@ of the 4 slots).` No code change: the slot copies the whole spec.
 ## 8. Specification and memory updates (close-out)
 
 The spike holds the as-built text for every row below. Read it with
-`git -C Helicase-dev-ph7-spike diff 59406a4 26fb7c3 -- <file>`. The
-**base lines** are at `59406a4` (= `prime`); they are the old-side line
+`git -C ../Helicase-dev-ph7-spike diff 59406a4 26fb7c3 -- <file>`. The
+**base lines** are at `59406a4` (= `91265e9c`); they are the old-side line
 numbers of the spike's hunks. Copy the hunks named **P0**. **Skip** every
 other hunk in the same file: those are S084 voice work (oscillators,
 samples/wavetables, swap, transient, Mix FX) and go to S085/S086. Re-derive
@@ -2198,7 +2201,7 @@ Paths are under `knowledge_files/specification_reference/` unless shown.
 | same | after 97 | Step roll arrays: `seq_rollWindow` replaces `seq_rollRemaining` and the duck arrays. | |
 | same | new row after 590; 592–593; 612 | Sequencer live engine row (79 B); LiveRecord row (per-track `liveRec_roll[7]`, ≈ 291 B); PatternStackService staging row (40 B); `bh_overlay[7]` row (28 B). Add `seq_extTicksOwed` (1 B, A1) to the sequencer entry; the spike omitted it. | |
 | `BANK_PRESET_ARCHITECTURE.md` | 773 | `PAR_PERF_BTN_LT/RT` trigger type 0..14 since S084 P3. | 874 (`Session 084 P1 — deferred instrument swap rules`) |
-| `MEMORY.md` (root) | 23–24 | Current working source: S084 P0 implemented on `prime`, hardware pending. | the `Session 084 P1 — voice foundations` bullet inserted after line 36 |
+| `MEMORY.md` (root) | 23–24 | Current working source: S084 P0 implemented on `dev-ph7-voice_expansion`, hardware pending. | the `Session 084 P1 — voice foundations` bullet inserted after line 36 |
 | same | after 36 | Build at S084 P0 (this build's numbers). | |
 | same | after 61 | S084 P0 summary (P1–P4) and the binding rules: carry rule Q4, spans Q7, live engine in TIM3, LiveRecord never in TIM3. | |
 | same | 241–242 | Open product decisions: remove "whether recorded overlay rolls should carry the `pv` rhythm" (decided, Q8). | |
@@ -2257,17 +2260,68 @@ a tempo different from `bpm`:
 
 ## 10. Implementation log
 
-**Not started.** Record each phase here as it lands on `prime`: the date,
+**P1–P4 complete (2026-10-26); hardware checks pending.** Each phase landed on
+`dev-ph7-voice_expansion` (tree identical to `59406a4`): the date,
 the entries applied, any deviation from an entry (and why), the build
 numbers against the S083 close and §2, the warnings check, and the H1/V
 results as the user reports them.
 
 | Phase | Date | Entries | Build (`text`/`data`/`bss`) | Deviations | Checks |
 |---|---|---|---|---|---|
-| P1 | | P1-1..P1-16 | | | H1, V1 |
-| P2 + P3 | | P2-1..P2-28, P3-1..P3-7, P4-17..P4-19 + interim `liveRec_rollRateChange()` signature (§3) | | | V1 (ext), V2, V5, V6, V7 |
-| P4 | | P4-1..P4-16, P4-20..P4-24 | | | V3, V4, V5 |
-| §8 docs | | — | — | | — |
+| P1 | 2026-10-26 | P1-1..P1-16 | 608,736 / 424 / 430,096 | none | H1 pass; V1 hardware pending |
+| P2 + P3 | 2026-10-26 | P2-1..P2-28, P3-1..P3-7, P4-17..P4-19 + interim `liveRec_rollRateChange()` signature (§3) | 609,336 / 424 / 430,152 | none | V1 (ext), V2, V5, V6, V7 hardware pending |
+| P4 | 2026-10-26 | P4-1..P4-16, P4-20..P4-24 | 609,288 / 424 / 430,200 | none | V3, V4, V5 hardware pending |
+| §8 docs | 2026-10-26 | P0 rows in PATTERN_DYNAMIC_STACK, MIDI_SPEC, FILESYSTEM_SPEC, MODULE_INTERCHANGE_SPEC, STORAGE_SRAM_MANIFEST, BANK_PRESET_ARCHITECTURE, MEMORY | — | none | close-out log pending hardware |
+
+**P1 (2026-10-26).** All 16 entries applied in `sequencer.c` as written.
+No deviations. `make all` clean (no warning from a changed line); the
+pre-existing `PatternData.c:201` packed-member warning is unchanged.
+`bss` fell 16 B (the §2 estimate was −14 B; the rest is alignment), exactly
+the spike's P1 figure.
+
+Host check H1 (`/tmp/s084_h1`, scratch only; not installed): the
+`59406a4` engine printed the F2 trace and the P1 engine the scheduled one:
+
+| Case (24-tick step) | `59406a4` | P1 |
+|---|---|---|
+| steps 0/24, roll `32`, fill 100 | 0, 12, 35 | 0, 12, 24, 36 (nothing at 48) |
+| steps 0/24, roll `64`, fill 100 | 0, 6, 12, 18, 29, 35, 41 | every 6 from 0 to 42 |
+| step 0 fill 50, step 24 fill 100, roll `32` | (not compared) | 0; duck 12; 24 (reset 1); 36 |
+| roll 0, empty 24, roll 48, roll `32` | (not compared) | 0, 12 (ends at 24); 48 (reset 1), 60 |
+
+Hardware checks V1/V1b/V1c remain with the user.
+
+**P2 + P3 (2026-10-26).** All entries applied as written, including the
+three P4 prerequisites the P2 build needs (§3): `liveRec_trigger_t.rhythm`,
+the three-argument prototype, `MidiNotes.c` initialising `lr.rhythm`, and
+the interim `(void)rhythm` body. No deviations. `make all` clean apart from
+the pre-existing `filesystem.c` unused-function, `PatternData.c:201` and
+`EuklidGenerator.c:54` warnings. `bss` rose 56 B over P1 (+52 B estimated,
+the rest alignment).
+
+Not yet run: V1 (external half), V2, V5, V6, V7 (hardware).
+
+**P4 (2026-10-26).** All entries applied as written. The interim
+three-argument `liveRec_rollRateChange()` body from the P2 build is replaced
+by the per-track form. No deviations. `make all` clean apart from the same
+pre-existing warnings. Final build `text=609,288`, `data=424`,
+`bss=430,200` (net +88 B against the S083 close; §2 estimated +87 B before
+alignment), image 609,712 B. This matches the spike's final A1–A4 figures.
+
+Host-only sanity checks (scratchpad, not installed):
+
+- H1 re-run after P4: unchanged P1 traces, as above.
+- Live engine: a 12-tick roll started at `accum = ppq - 1` repeats at 11,
+  23, 35; a flam armed with 12 ticks fires its main at 11 with reset 1 and
+  sets the flam mask. Spacing is exactly `ppq` after the first repeat.
+
+**§8 (2026-10-26).** The P0 specification rows and `MEMORY.md` are updated
+with this build's numbers and the as-built behaviour; no S084 voice-work
+hunk was copied from the spike. The session handoff log and the deletion of
+the root S084 documents wait for the user's V1–V7 results.
+
+Still with the user: V1 (external half), V2, V3, V4, V5, V6, V7, then the
+session handoff log at close-out.
 
 ---
 
@@ -2275,7 +2329,7 @@ results as the user reports them.
 
 This schedule was first implemented on `dev-ph6-midi` (2026-10-24). That
 tree went on to the S084 voice work, and it was rolled back as a whole
-(`Helicase-dev-ph7-spike/S084_POST-MORTEM.md`). None of it is on `prime`. Its
+(`../Helicase-dev-ph7-spike/S084_POST-MORTEM.md`). None of it is in this tree. Its
 P0 code built clean and passed static review. It was **never hardware
 tested**. This section keeps what the re-implementation needs from it.
 
@@ -2338,3 +2392,196 @@ the release takes the later-step end write: P1's window carries hit 0 to
 the release, and playback is the one hit that was heard. The rejected
 alternative was to backfill the spans at the first `ROLL_HIT`. It is exact,
 but it needs a per-track pending-step list (more RAM and code).
+
+---
+
+## 12. Post-implementation assessment (2026-10-26)
+
+**Scope:** the working tree on `dev-ph7-voice_expansion` against `91265e9c`
+(the pre-implementation commit, code identical to `59406a4`), read against
+§4–§8. Checked by:
+- a code comparison with the reviewed spike;
+- a rebuild;
+- an independent re-run of H1;
+- a read of the runtime paths the A1–A3 fixes touch. Those fixes were
+  written after the spike's own review, so they had never been reviewed.
+
+No hardware was run.
+
+### 12.1 Conformance
+
+| Area | Entries | Result |
+|---|---|---|
+| P1 step roll engine (`sequencer.c`) | P1-1..P1-16 | Applied. The code is identical to the spike's. The only differences are comments: entry IDs replaced by function names (§0 rule), and two small improvements not in the schedule. The carry-renewal comment in `seq_rollBegin()` no longer describes the removed slot count, and the F-R comment names `seq_rollWindow`. |
+| P2 live engine, A3 drain, A1 interpolation (`sequencer.c/.h`, `buttonHandler.c`) | P2-1..P2-28 | Applied; code identical to the spike's. The `seq_tick()` comment is one merged block, as P2-5 specifies. All four `bh_overlayActive` assignments are preceded by `buttonHandler_overlayDrainAll()`. |
+| P3 one roll list (`MenuText.h`, `menu.c`, `ParameterArray.h`) | P3-1..P3-7 | Applied. These shared files carry only the P0 hunks; no S084 voice hunk was copied. |
+| P4 LiveRecord / PatternData / MidiNotes | P4-1..P4-24 | Applied; code identical to the spike's. P4-16 (the `FLAM_MAIN` line) and P4-24 (the `liveRec_syncRing()` comment) are present. Some comment text is rewrapped, or appended after `Affiliates:` instead of before it (cosmetic). |
+| Entry IDs in code | §0 | None: no `P1-12`, `P1-13`, `P4-13` or `(Pn-n)` citation in the changed sources. |
+| §8 documents | — | Every hunk in the six specification files and `MEMORY.md` matches a §8 row, and no skip-listed (voice-work) hunk is present. The numbers are this build's: free flash 753,664 − 609,712 = 143,952 B. `STORAGE_SRAM_MANIFEST.md` lists `seq_extTicksOwed` (the spike omitted it) and does not carry the spike's muddled "−7 B" sentence. |
+
+**Build (re-run for this review):** `make all` after touching every changed
+`.c` file gives `text=609,288`, `data=424`, `bss=430,200`, the same as the
+§10 log. Against the S083 close, `bss` is +88 B: the approved +87 B plus
+1 B of alignment. The only compiler warning from a changed file is the
+pre-existing `PatternData.c:201` (`-Waddress-of-packed-member`, on an
+unchanged line). `make img` reproduces `build/LXRV2_lxr02.img`
+byte-for-byte. Its 609,712 B payload plus a 16 B header gives the 609,728 B
+file, so the log is right.
+
+**H1 (re-run independently, scratchpad harness).** The harness extracts
+the real `seq_rollPpq/RhythmVelocity/ComputeVelocity/Carries/Begin/
+ClearTrack` and `seq_processRollTicks()` from each tree, with stubs:
+
+| Case (24-tick step) | `59406a4` (`HEAD`) | Working tree |
+|---|---|---|
+| two steps, roll `32`, fill 100 | 0, 12, 35 | 0, 12, 24, 36 |
+| two steps, roll `64`, fill 100 | 0 6 12 18, 29 35 41 | every 6 from 0 to 42 |
+| fill 50 then fill 100, roll `32` | 0, duck 12, 24 (reset), 36 | 0, duck 12, 24 (reset), 36 |
+| roll, empty, roll (`32`) | 0, 12, **59** (stale carry) | 0, 12, 48 (reset), 60 |
+
+This matches §9 and the §10 log. The base code fails both F2 cases, and
+also the empty-step case, which carried on a stale phase. So the check
+discriminates, as the S084 gate requires. The implementer's H1 ran in
+`/tmp`, not the scratchpad, and was not kept. This has no effect on the
+result.
+
+**Binding rules:**
+- **LiveRecord in TIM3:** never called there. `seq_processLiveTicks()` only
+  writes the mailbox; the foreground drains it.
+- **Reset rule:** holds. Hit #1 and the flam main reset; roll repeats do
+  not; a carry calls `voiceControl_resetOnly()`.
+- **F-R:** the cut is unchanged apart from clearing the window.
+- **TIM3 order:** live ticks run first, before the running gate.
+- **External clock (A1):** `seq_extClockTicks()` and the `seq_tick()`
+  interpolation both run inside `TIM3_IRQHandler()`
+  (`midiTransport_processRealtime()` → `triggerJacks_tick()` →
+  `seq_tick()`). So `seq_extTicksOwed` has a single writer context and no
+  race. The tempo timer runs on 0.25 ms `systick_ticks`. A period's last
+  interpolated tick is caught up at the next edge only if the tempo
+  estimate is off by more than about 4 % (pulse, 24 ticks) or 33 % (MIDI
+  clock, 4 ticks).
+
+### 12.2 Findings
+
+| # | Finding | Severity | Status |
+|---|---|---|---|
+| B1 | `buttonHandler_overlayReconfigure()` reads `midiHeld` before its drain. A MIDI-held flam whose main fires in that gap is switched to a roll that no note-off can end. | Low (narrow window), but the symptom is a stuck roll | Fixed (§13.1) |
+| B2 | Document paths and branch: the spike now sits next to the repository (`../Helicase-dev-ph7-spike`), not inside it, and four lines still say `prime`. | Nit | Fixed (§13.2) |
+
+#### B1 — Reconfigure can start an unreleasable MIDI roll
+
+**Where.** Each loop pass of `buttonHandler_overlayReconfigure()` computes
+`midiHeld` (and `oldRoll`) from the entry, and only then calls
+`buttonHandler_overlayDrain(track)`. When the drain finds a fired flam
+main, it ends the entry: `count = 0`, `heldMidiNote =
+BH_OVERLAY_NO_MIDI_NOTE`. The loop still treats the entry as held, so with
+a roll type it calls `seq_liveRollStart()` and sets `count = 0xFF`. The
+stale `midiHeld` comes from before the drain cleared `heldMidiNote`.
+
+**Effect.**
+- `buttonHandler_overlayMidiNoteOff()` finds no track holding the note, so
+  the roll is not ended by the note-off.
+- Later re-configures skip the entry (it is not held), so turning the
+  overlay off does not stop it either.
+- The roll repeats until a new overlay gesture on that track replaces it.
+
+**Window.** The A3 drain-all just before `bh_overlayActive` changes already
+handles the common case: if the main fired earlier, the entry is ended
+before the loop, and no roll starts. That matches S083. The defect needs a
+TIM3 tick that fires the flam main between `buttonHandler_overlayDrainAll()`
+and that track's pass in the loop: a few microseconds per overlay switch,
+while a MIDI flam's main is pending (the first 12 ticks after the note).
+Panel-held entries are not affected: `bh_overlayVoiceMask` still lets the
+VOICE release end them. Before S084 this could not happen, because the
+flam main fired in the same foreground loop.
+
+**Proposed fix:** drain first, then judge the entry.
+
+```c
+        buttonHandler_overlayDrain(track);   /* may end a fired flam (B-12) */
+        midiHeld = (uint8_t)(e->heldMidiNote != BH_OVERLAY_NO_MIDI_NOTE);
+        panelHeld = (uint8_t)((bh_overlayVoiceMask >> track) & 1u);
+        oldRoll = (uint8_t)(e->count == 0xFFu);
+        if (!(midiHeld || panelHeld))
+            continue;
+```
+
+- Unheld entries are now drained here too. That is harmless: the drain
+  does nothing for an idle entry, and otherwise reports what
+  `buttonHandler_overlayTick()` would report 1 ms later.
+- Add a sentence to the function comment: the drain comes first, so an
+  entry ended by a fired flam main is judged as not held.
+- RAM and behaviour are otherwise unchanged.
+
+**Verification hook:** not practical to provoke on hardware. Confirm by
+reading the code, and add to V5: switch BAR/CC2 to a roll type
+repeatedly while tapping MIDI notes under a flam overlay. Every roll must
+stop at its note-off.
+
+#### B2 — Nits
+
+- `S084_P0_IMPLEMENTATION.md` §0, §8 and §11 still say `prime` (lines 23,
+  2172, 2203, 2331).
+- They also run `git -C Helicase-dev-ph7-spike`. The spike now lives at
+  `../Helicase-dev-ph7-spike`, so those commands need that path. The
+  `.gitignore` entry for the old location is now unused but harmless.
+
+### 12.3 Verdict
+
+The implementation follows the schedule entry for entry, builds clean at
+the approved RAM, and passes H1. Its code is identical to the spike build
+that was reviewed in the spike assessment, plus the documented
+comment-level corrections.
+
+**B1 should be fixed before V5 (the MIDI overlay checks).** It is a
+reorder of four lines in one function. The internal-sync and
+step-roll checks V1–V4 and V6–V7 can run now. B2 is optional cleanup at
+close-out. The session handoff log and the deletion of the root `S084_*.md`
+documents still wait for the V1–V7 results.
+
+---
+
+## 13. Assessment fixes applied (2026-10-26)
+
+The user approved both §12 fixes ("make those 2 narrow, targeted fixes").
+
+### 13.1 B1 — Reconfigure judges the entry after its drain
+
+`Core/Hardware/frontPanel/buttonHandler.c`,
+`buttonHandler_overlayReconfigure()`:
+
+- **MODIFY** the head of the per-track loop. `buttonHandler_overlayDrain(track)`
+  now runs first; `midiHeld`, `panelHeld` and `oldRoll` are computed after
+  it (declared without initialisers), and only then is the
+  `!(midiHeld || panelHeld)` skip taken. The rest of the loop is unchanged.
+- **MODIFY** the function comment: one added paragraph explains the order
+  (a MIDI flam whose main fired since the last drain is ended by the drain,
+  B-12, so it is judged not held and no roll is started that no note-off
+  could end; draining an unheld entry only reports what
+  `buttonHandler_overlayTick()` would report 1 ms later).
+
+No RAM change. **Build:** `make all && make img` pass, `text=609,288`,
+`data=424`, `bss=430,200` (unchanged: a reorder), image payload
+609,712 B; no new warning.
+
+**Verification:** by reading the code (the race needs a TIM3 tick inside a
+few µs). V5 gains a case: switch BAR/CC2 to a roll type repeatedly while
+tapping MIDI notes under a flam overlay; every roll must stop at its
+note-off.
+
+### 13.2 B2 — Document paths and branch
+
+`S084_P0_IMPLEMENTATION.md` (header, §0, §8, §11) and
+`S084_P0_ROLL_FIXUP.md` (header): the spike path is
+`../Helicase-dev-ph7-spike/` and the base is `91265e9c` on
+`dev-ph7-voice_expansion`, not `prime`. The `.gitignore` entry
+`Helicase-dev-ph7-spike/` (added this session for the spike's old location
+inside the repository) is now unused and harmless; it is left in place.
+
+### 13.3 Close-out
+
+Session 084 is closed with this section. The durable record is
+`knowledge_files/log_archive/084_SESSION_HANDOFF_LOG.md`; the
+specifications carry the behaviour. Hardware checks V1–V7 (§9, plus the
+V5 case above) are carried to the next session; their results are recorded
+there.

@@ -367,36 +367,38 @@ static uint8_t bh_chainPlayArmed = 0u;
 static uint8_t bh_overlayActive = 0u;
 
 /*
- * Per-track overlay repeat state (S083 Q5; was the S080 E12 single slot).
+ * Per-track overlay gesture state (S083 Q5; S084 P2 master-tick timing).
  *
  * What: one entry per track. heldMidiNote: the MIDI note whose note-off
  * ends this track's roll, stored as note + 1 (0 = panel or none, so the
  * zero-initialised table needs no init code). note: internal note, bit 7
- * set when it came from `def` (records no note special, S081 Q12). pos:
- * roll hit position for the velocity rhythm (S083 follow-up; replaced the
- * former `vel`, which was always 100): 0 = the first hit, counted up per
- * repeat; flam and roll hits play at BH_OVERLAY_VEL, roll hits shaped by
- * `pv<`/`pv>` through seq_rollRhythmVelocity(). count: remaining repeats (0 idle, 1 = flam main pending,
- * 0xFF = held roll). interval: repeat period in ms (time_sysTick). next:
- * next deadline. Why: MIDI notes on several tracks (and several held
- * VOICE buttons) roll at the same time; the S080 single slot let the
- * latest overlay take over the only timer. RAM: 7 x 8 B = 56 B SRAM1,
- * static (Q5 approved; R-A +7 B), replaces 9 B. Writers: overlay start,
- * release, switch and tick below (all foreground). Affiliates:
- * buttonHandler_tick(), MidiNotes.
+ * set when it came from `def` (records no note special, S081 Q12). count:
+ * 0 idle, 1 = flam main pending, 0xFF = held roll. rate: the held roll's
+ * step-roll index 1..9 (reported with each roll hit so LiveRecord can start
+ * a span at any hit, S084 P4). The hit timing, rhythm position and
+ * repeats live in the Sequencer's live engine (seq_live*, TIM3); this
+ * table only owns the gesture. Why: S080-S083 timed repeats here with a
+ * 1 ms timer from PAR_BPM, off the master clock (S084 P0 F4). MIDI notes on
+ * several tracks (and several held VOICE buttons) roll at once (S083 Q5).
+ * RAM: 7 x 4 B = 28 B SRAM1 static (S084: -28 B; pos, interval and next
+ * removed, rate added). Writers: overlay start, drain, end and
+ * re-configure below (all foreground). Affiliates: buttonHandler_tick(),
+ * MidiNotes, seq_liveRollStart(), seq_liveTakeHits().
  */
 typedef struct {
-	uint8_t  heldMidiNote;
-	uint8_t  note;
-	uint8_t  pos;
-	uint8_t  count;
-	uint16_t interval;
-	uint16_t next;
+	uint8_t heldMidiNote;
+	uint8_t note;
+	uint8_t count;
+	uint8_t rate;
 } bh_overlay_track_t;
 
 #define BH_OVERLAY_NOTE_DEFAULT  0x80u
 #define BH_OVERLAY_VEL           100u /* flam main and roll base velocity */
 #define BH_OVERLAY_NO_MIDI_NOTE  0u   /* heldMidiNote stores note + 1 */
+#define BH_FLAM_TICKS            12u  /* flam main: 1/32 at 96 PPQ */
+#define BH_OVERLAY_TYPE_FLAM_FIRST  4u   /* flm, fls */
+#define BH_OVERLAY_TYPE_ROLL_FIRST  6u   /* 1/8 .. 128 = step index 1..9 */
+#define BH_OVERLAY_TYPE_MAX         14u
 
 static bh_overlay_track_t bh_overlay[NUM_TRACKS];
 
@@ -406,7 +408,7 @@ static uint8_t bh_overlayVoiceMask = 0u;
 /*
  * Held overlay trigger type (S081 §5.7, R19, F-B/F-O).
  *
- * What: the trigger type (0..11) of the overlay whose VOICE is currently held,
+ * What: the trigger type (0..14, S084 P3) of the overlay whose VOICE is currently held,
  * or 0xFF when none. Why: pressing the other BAR while a VOICE is held switches
  * the overlay; the held trigger must adopt the new type/rate, and a roll needs
  * to know whether the previous type was a roll. RAM: +1 byte SRAM1. Affiliates:
@@ -863,58 +865,52 @@ static uint16_t bh_recPressTick;
 static uint8_t  bh_recArmed;
 
 /*
- * S080 E12: BAR overlay trigger helpers.
+ * BAR overlay trigger helpers (S080 E12; master-tick timing S084 P2).
  *
- * buttonHandler_overlayDivisionMs() converts a SELECT-style division index
- * (0 = 1 bar .. 7 = 1/128) to milliseconds from the current BPM (15000/BPM ms
- * per 1/16 note). buttonHandler_overlayTrigger() fires the configured overlay
- * trigger (single velocity, flam, or held roll) for one VOICE. Flams fire a
- * soft leading hit plus one delayed main hit; rolls fire immediately and then
- * repeat from buttonHandler_tick() until release. buttonHandler_overlayRelease()
- * stops the repeat and sends note-off. Why: the overlay turns the VOICE row
- * into a performance trigger row while a BAR overlay is active; rolls use a 1 ms
- * foreground timer (only one track repeats at a time). Inputs: overlay params,
- * VOICE index, BPM. Outputs: seq_triggerVoice()/voiceControl_noteOff() calls and
- * the bh_overlay* repeat state. Affiliates: handleVoiceButton() (E12),
- * processRelease(), buttonHandler_tick().
+ * The overlay turns the VOICE row (and MIDI notes, S083) into a trigger row
+ * while BAR `<` or `>` is active. Types 0..3 fire one hit at a fixed
+ * velocity; 4..5 fire a soft grace hit now and a main hit BH_FLAM_TICKS
+ * master ticks later; 6..14 are held rolls at the step-roll rates (index =
+ * type - 5, S084 P3). First hits fire here in the foreground; flam mains
+ * and roll repeats fire from the Sequencer's live engine on the 96-PPQ
+ * master tick (seq_live*, TIM3) and are reported to LiveRecord by
+ * buttonHandler_overlayDrain(). The ms timer from PAR_BPM is gone: it ran
+ * off the master clock and ignored external sync (S084 P0 F4).
+ * Affiliates: handleVoiceButton() (E12), processRelease(),
+ * buttonHandler_tick(), MidiNotes, LiveRecord.
  */
-static uint16_t buttonHandler_overlaySixteenthMs(void)
+
+/*
+ * Velocity rhythm of overlay `which` (S083 follow-up; S084 helper).
+ *
+ * What: the packed roll-rhythm byte of `pv<` (which 1) or `pv>` (which 2;
+ * also returned for 0, where no roll runs). Why: the same lookup was
+ * repeated in the tick, start and re-configure paths; S084 also records it
+ * (P4). Inputs: which. Output: rhythm byte (0 = off). Accessors:
+ * buttonHandler_overlayStart(), _Reconfigure(), _Drain(), _Tick().
+ * Affiliates: PAR_PERF_VEL_LT/RT, seq_liveSetRhythm().
+ */
+static uint8_t buttonHandler_overlayRhythm(uint8_t which)
 {
-    uint16_t bpm = parameter_values[PAR_BPM];
-
-    if (bpm == 0u)
-        bpm = 120u;
-    return (uint16_t)(15000u / bpm);
-}
-
-static uint16_t buttonHandler_overlayDivisionMs(uint8_t idx)
-{
-    uint16_t base = buttonHandler_overlaySixteenthMs();
-
-    switch (idx) {
-    case 0u: return (uint16_t)(base * 16u);   /* 1 bar */
-    case 1u: return (uint16_t)(base * 8u);    /* 1/2 bar */
-    case 2u: return (uint16_t)(base * 4u);    /* 1/4 bar */
-    case 3u: return (uint16_t)(base * 2u);    /* 1/8 bar (eighth note) */
-    case 4u: return base;                     /* 1/16 */
-    case 5u: return (uint16_t)(base / 2u);    /* 1/32 */
-    case 6u: return (uint16_t)(base / 4u);    /* 1/64 */
-    default: return (uint16_t)(base / 8u);    /* 1/128 */
-    }
+    return parameter_values[(which == 1u) ? PAR_PERF_VEL_LT
+                                          : PAR_PERF_VEL_RT];
 }
 
 /*
  * Report one overlay hit to LiveRecord (S081 §19.7, E-2a).
  *
  * What: builds a liveRec_trigger_t for the hit (track, note, velocity, kind,
- * roll, OVERLAY source) and calls liveRec_triggerIn(). Why: LiveRecord captures
- * each hit when it sounds. Affiliates: liveRec_triggerIn().
+ * roll, rhythm, source, age) and calls liveRec_triggerIn(). Why: LiveRecord
+ * captures each hit when it sounds. Affiliates: liveRec_triggerIn().
+ * S084: roll is the step-roll index on ROLL_START and on every ROLL_HIT
+ * (the held rate), rhythm the active overlay's `pv` byte on roll kinds (0
+ * otherwise), so LiveRecord can start or re-rate a span at any hit.
  */
 static void buttonHandler_overlayReport(uint8_t voiceNr, uint8_t note,
                                         uint8_t noteIsDefault,
                                         uint8_t velocity, uint8_t kind,
-                                        uint8_t roll, uint8_t source,
-                                        uint16_t ageUs)
+                                        uint8_t roll, uint8_t rhythm,
+                                        uint8_t source, uint16_t ageUs)
 {
     liveRec_trigger_t t;
 
@@ -923,6 +919,7 @@ static void buttonHandler_overlayReport(uint8_t voiceNr, uint8_t note,
     t.velocity = velocity;
     t.kind = kind;
     t.roll = roll;
+    t.rhythm = rhythm;
     /* S083: LIVEREC_SRC_OVERLAY for panel overlays, LIVEREC_SRC_MIDI for
     ** MIDI-started ones; ageUs is the first MIDI hit's arrival age (0 for
     ** repeats and panel hits). */
@@ -933,69 +930,162 @@ static void buttonHandler_overlayReport(uint8_t voiceNr, uint8_t note,
 }
 
 /*
- * Start an overlay action on one track (S080 E12; S083 Q5 per-track).
+ * Report a track's live hits to LiveRecord (S084 P2).
  *
- * What: reads the trigger type of overlay `which` (1 = BAR <, 2 = BAR >),
- * fires the first hit (single: one trigger at the type's velocity; flam:
- * soft lead hit now, main 1/32 later; roll: first hit now at
- * BH_OVERLAY_VEL as rhythm position 0, repeats until release shaped by
- * `pv<`/`pv>` (S083 follow-up)) and fills the track's entry. Inputs: track, which, internal
- * note (bit 7 = `def`), heldMidiNote (MIDI note + 1 that ends a roll, or
- * BH_OVERLAY_NO_MIDI_NOTE), source and age for LiveRecord. Outputs:
- * seq_triggerVoice(), LiveRecord report, bh_overlay[track]. Callers:
+ * What: takes the hits the Sequencer's live engine fired since the last
+ * take. A fired flam main is reported as FLAM_MAIN and ends the entry (a
+ * MIDI-held flam's note-off already let it finish, B-12). One or more roll
+ * hits are reported as ONE ROLL_HIT carrying the held rate and rhythm:
+ * LiveRecord only counts roll hits and starts a span at the first hit it
+ * sees for a track with no open span. The age is the time since the latest
+ * hit (TIM2 µs, capped at 65535), so its placement uses the hit time, not
+ * the 1 ms drain time (the S083 Q6 arrival-age path). Why: LiveRecord never
+ * runs in TIM3; TIM3 publishes, this foreground step reports. Inputs:
+ * track, bh_overlay[track], the live mailbox. Outputs:
+ * buttonHandler_overlayReport() calls; the entry ends after a flam main.
+ * Context: foreground. Accessors: buttonHandler_overlayTick() (every
+ * pass), _EndTrack() and _Start() (final take before a gesture ends),
+ * _Reconfigure() (before a rate or type change). Affiliates:
+ * seq_liveTakeHits(), liveRec_triggerIn().
+ */
+static void buttonHandler_overlayDrain(uint8_t track)
+{
+    bh_overlay_track_t *e = &bh_overlay[track];
+    uint32_t stampUs;
+    uint32_t age;
+    uint8_t flamMain;
+    uint8_t hits;
+    uint8_t pitch = (uint8_t)(e->note & 0x7Fu);
+    uint8_t isDef = (uint8_t)((e->note & BH_OVERLAY_NOTE_DEFAULT) != 0u);
+    uint8_t source = (e->heldMidiNote != BH_OVERLAY_NO_MIDI_NOTE)
+                     ? LIVEREC_SRC_MIDI : LIVEREC_SRC_OVERLAY;
+
+    if (e->count == 0u)
+        return;
+    hits = seq_liveTakeHits(track, &stampUs, &flamMain);
+    if (hits == 0u && !flamMain)
+        return;
+    age = timebase_tim2Delta(timebase_tim2Now(), stampUs);
+    if (age > 0xFFFFu)
+        age = 0xFFFFu;
+    if (flamMain) {
+        buttonHandler_overlayReport(track, pitch, isDef, BH_OVERLAY_VEL,
+                                    LIVEREC_HIT_FLAM_MAIN, 0u, 0u, source,
+                                    (uint16_t)age);
+        e->count = 0u;
+        e->heldMidiNote = BH_OVERLAY_NO_MIDI_NOTE;
+        return;
+    }
+    if (e->count == 0xFFu)
+        buttonHandler_overlayReport(track, pitch, isDef, BH_OVERLAY_VEL,
+                                    LIVEREC_HIT_ROLL_HIT, e->rate,
+                                    buttonHandler_overlayRhythm(
+                                        bh_overlayActive),
+                                    source, (uint16_t)age);
+}
+
+/*
+ * Report every track's live hits under the current overlay (S084 P0 A3).
+ *
+ * What: buttonHandler_overlayDrain() for tracks 0..6. Called right before
+ * bh_overlayActive changes (BAR press, CC2, event-ring overflow). Why: the
+ * drain reports a roll hit with the active overlay's `pv` rhythm; draining
+ * after the change gave hits played under the old overlay the new overlay's
+ * rhythm, which a span opened by such a hit would then store. Inputs: the
+ * entries, bh_overlayActive (still the old value). Outputs: LiveRecord
+ * reports. Context: foreground. Accessors: buttonHandler_setOverlay(), the
+ * BAR1/BAR2 presses in processPress(), buttonHandler_processEvents()
+ * overflow recovery. Affiliates: buttonHandler_overlayReconfigure() (which
+ * drains again, now with nothing left from the old overlay).
+ */
+static void buttonHandler_overlayDrainAll(void)
+{
+    uint8_t track;
+
+    for (track = 0u; track < NUM_TRACKS; track++)
+        buttonHandler_overlayDrain(track);
+}
+
+/*
+ * Start an overlay gesture on one track (S080 E12; S083 Q5 per-track;
+ * S084 P2 master-tick timing, P3 15 types).
+ *
+ * What: a new gesture first ends the track's old one: its live entry is
+ * stopped, its unreported hits are drained to LiveRecord, and a held roll's
+ * recording is ended at this point. Then it reads the trigger type of
+ * overlay `which` (1 = BAR <, 2 = BAR >) and fires the first hit:
+ *  - 0..3 single: one hit at 127/100/64/32;
+ *  - 4..5 flam: grace hit at 64 now, and the main hit (BH_OVERLAY_VEL,
+ *    reset) armed BH_FLAM_TICKS master ticks later (seq_liveFlamArm());
+ *  - 6..14 roll: hit 0 at BH_OVERLAY_VEL now, then repeats at step-roll
+ *    index type - 5 on the master tick, shaped by the overlay's `pv`
+ *    rhythm from position 1 (seq_liveRollStart()), until release.
+ * The internal note is stored for every type, so a later switch of a held
+ * single to a roll plays the right pitch (the S083 entry kept a stale note
+ * after a single). Why: S084 P0 F4 (timing) and F1 (types).
+ * Inputs: track, which, internal note (bit 7 = `def`), heldMidiNote (MIDI
+ * note + 1 that ends a roll, or BH_OVERLAY_NO_MIDI_NOTE), source and age
+ * for LiveRecord. Outputs: seq_triggerVoice(), the LiveRecord report, the
+ * live entry, bh_overlay[track]. Context: foreground. Callers:
  * buttonHandler_overlayTrigger() (panel), buttonHandler_overlayMidiNoteOn()
- * (MidiNotes). Affiliates: buttonHandler_overlayTick(), _Release().
+ * (MidiNotes). Affiliates: buttonHandler_overlayDrain(), _EndTrack(),
+ * seq_liveRollStart(), seq_liveFlamArm(), liveRec_triggerIn().
  */
 static void buttonHandler_overlayStart(uint8_t track, uint8_t which,
                                        uint8_t note, uint8_t heldMidiNote,
                                        uint8_t source, uint16_t ageUs)
 {
-    bh_overlay_track_t *e = &bh_overlay[track];
+    bh_overlay_track_t *e;
     uint8_t type = (which == 1u) ? parameter_values[PAR_PERF_BTN_LT]
                                  : parameter_values[PAR_PERF_BTN_RT];
     uint8_t pitch = (uint8_t)(note & 0x7Fu);
     uint8_t isDef = (uint8_t)((note & BH_OVERLAY_NOTE_DEFAULT) != 0u);
-    uint16_t interval;
 
-    if (type > 11u)
+    if (track >= NUM_TRACKS)
+        return;
+    e = &bh_overlay[track];
+    if (type > BH_OVERLAY_TYPE_MAX)
         type = 0u;
-    if (type <= 3u) {
+    if (e->count != 0u) {                 /* a new gesture replaces the old */
+        uint8_t wasRoll = (uint8_t)(e->count == 0xFFu);
+
+        seq_liveStop(track);
+        buttonHandler_overlayDrain(track);
+        e->count = 0u;
+        if (wasRoll)
+            liveRec_rollRelease(track);
+    }
+    e->note = note;
+    if (type < BH_OVERLAY_TYPE_FLAM_FIRST) {
         static const uint8_t singleVel[4] = {127u, 100u, 64u, 32u};
 
         seq_triggerVoice(track, singleVel[type], pitch, 1);
         buttonHandler_overlayReport(track, pitch, isDef, singleVel[type],
-                                    LIVEREC_HIT_SINGLE, 0u, source, ageUs);
-        e->count = 0u;
+                                    LIVEREC_HIT_SINGLE, 0u, 0u, source, ageUs);
         e->heldMidiNote = BH_OVERLAY_NO_MIDI_NOTE;
         return;
     }
-    if (type == 4u || type == 5u) {
+    if (type < BH_OVERLAY_TYPE_ROLL_FIRST) {
         seq_triggerVoice(track, 64u, pitch, 1);
         buttonHandler_overlayReport(track, pitch, isDef, 64u,
-                                    LIVEREC_HIT_FLAM_GRACE, 0u, source, ageUs);
-        interval = buttonHandler_overlayDivisionMs(5u);
-        e->pos = 0u;
+                                    LIVEREC_HIT_FLAM_GRACE, 0u, 0u,
+                                    source, ageUs);
+        seq_liveFlamArm(track, pitch, BH_OVERLAY_VEL, BH_FLAM_TICKS);
         e->count = 1u;
     } else {
-        static const uint8_t rollDiv[6] = {3u, 4u, 5u, 6u, 6u, 7u};
-        static const uint8_t rollIdx[6] = {1u, 3u, 5u, 7u, 8u, 9u};
-        uint8_t idx = (uint8_t)(type - 6u);
+        uint8_t idx = (uint8_t)(type - (BH_OVERLAY_TYPE_ROLL_FIRST - 1u));
+        uint8_t rhythm = buttonHandler_overlayRhythm(which);
 
-        interval = buttonHandler_overlayDivisionMs(rollDiv[idx]);
-        if (idx == 4u)                                  /* r6t triplet */
-            interval = (uint16_t)((interval * 2u) / 3u);
-        /* Roll hit 0 is inside every rhythm's full window: base velocity. */
         seq_triggerVoice(track, BH_OVERLAY_VEL, pitch, 1);
         buttonHandler_overlayReport(track, pitch, isDef, BH_OVERLAY_VEL,
-                                    LIVEREC_HIT_ROLL_START, rollIdx[idx],
+                                    LIVEREC_HIT_ROLL_START, idx, rhythm,
                                     source, ageUs);
-        e->pos = 1u;
+        seq_liveSetRhythm(rhythm);
+        seq_liveRollStart(track, idx, pitch, BH_OVERLAY_VEL, 1u);
+        e->rate = idx;
         e->count = 0xFFu;
     }
-    e->note = note;
     e->heldMidiNote = heldMidiNote;
-    e->interval = (interval != 0u) ? interval : 1u;
-    e->next = (uint16_t)(time_sysTick + e->interval);
 }
 
 /*
@@ -1019,7 +1109,7 @@ static void buttonHandler_overlayTrigger(uint8_t voiceNr)
     if (note == 0u)
         note = (uint8_t)(MIDI_DEFAULT_TRIGGER_NOTE | BH_OVERLAY_NOTE_DEFAULT);
     bh_overlayVoiceMask |= (uint8_t)(1u << voiceNr);
-    bh_overlayHeldType = (type > 11u) ? 0u : type;
+    bh_overlayHeldType = (type > BH_OVERLAY_TYPE_MAX) ? 0u : type;
     buttonHandler_overlayStart(voiceNr, bh_overlayActive, note,
                                BH_OVERLAY_NO_MIDI_NOTE,
                                LIVEREC_SRC_OVERLAY, 0u);
@@ -1028,15 +1118,21 @@ static void buttonHandler_overlayTrigger(uint8_t voiceNr)
 /*
  * End one track's overlay gesture (S080 E12; S083 per-track).
  *
- * What: stops the track's repeats, sends the voice and MIDI note-off, and
- * ends any recorded roll. Panel: only for a VOICE that fired an overlay
- * (bh_overlayVoiceMask). Inputs: voiceNr. Outputs: entry idle, masks.
- * Callers: processRelease() (VOICE up), the looper engage, MIDI note-off
- * (through buttonHandler_overlayEndTrack()). Affiliates: liveRec_rollRelease(),
+ * What: stops the track's live entry (no further repeat or flam main can
+ * fire), reports the hits that already sounded (so LiveRecord's "released
+ * before the second hit" test sees them), sends the voice and MIDI
+ * note-off, and ends the track's recorded roll (S084: per track). Panel:
+ * only for a VOICE that fired an overlay (bh_overlayVoiceMask). Inputs:
+ * voiceNr. Outputs: entry idle, masks. Callers: processRelease() (VOICE
+ * up), the looper engage, MIDI note-off (through
+ * buttonHandler_overlayEndTrack()). Affiliates: seq_liveStop(),
+ * buttonHandler_overlayDrain(), liveRec_rollRelease(),
  * midiOut_trackNoteOff().
  */
 static void buttonHandler_overlayEndTrack(uint8_t track)
 {
+    seq_liveStop(track);
+    buttonHandler_overlayDrain(track);
     bh_overlay[track].count = 0u;
     bh_overlay[track].heldMidiNote = BH_OVERLAY_NO_MIDI_NOTE;
     voiceControl_noteOff(track);
@@ -1081,19 +1177,32 @@ static void buttonHandler_liveEraseBegin(void)
 
 /*
  * Re-configure active overlay entries after an overlay change (S081 5.7
- * R19/F-B/F-O; S083 per-track).
+ * R19/F-B/F-O; S083 per-track; S084 P2 master tick, P3 15 types).
  *
  * What: for every held entry (panel-held or MIDI-held; after a BAR press,
- * a CC2 change or an event-ring overflow) applies the S081 rules per track,
- * judging "was a roll" by the entry's own count (0xFF):
- *  - overlay off: repeats stop, no extra hit, recorded roll ends;
- *  - roll -> roll: new interval from the last hit time;
- *  - single/flam -> roll: repeats start one interval from now, at rhythm
- *    position 1 (the hit already played was hit 0; S083 follow-up);
- *  - roll -> single/flam: repeats stop, recorded roll ends.
- * Inputs: which (0 off, 1 <, 2 >). Outputs: entries, LiveRecord rate
- * changes. Callers: buttonHandler_overlaySwitchHeld() (BAR press, CC2), the
- * event-ring overflow recovery in buttonHandler_processEvents().
+ * a CC2 change or an event-ring overflow), first reports its unreported
+ * hits, then applies the S081 rules per track, judging "was a roll" by the
+ * entry's own count (0xFF). The drain runs before the held test (S084 P0
+ * B1): a MIDI flam whose main fired in TIM3 since the last drain is ended
+ * by the drain (heldMidiNote cleared, B-12), so it is judged not held and no
+ * roll is started that no note-off could end. Draining an unheld entry only
+ * reports what buttonHandler_overlayTick() would report 1 ms later.
+ *  - overlay off: the live entry stops, no extra hit, the recorded roll
+ *    ends;
+ *  - roll -> roll: seq_liveRollSetRate() keeps the time since the last hit
+ *    (new interval from the last hit time);
+ *  - single/flam -> roll: seq_liveRollStart() starts repeats one interval
+ *    from now at rhythm position 1 (the hit already played was hit 0); a
+ *    pending flam main is dropped, as before;
+ *  - roll -> single/flam: the live entry stops, the recorded roll ends.
+ * The new overlay's `pv` rhythm is published to the live engine at once.
+ * Why: S084 P0 F4: rates on the master clock. Inputs: which (0 off, 1 <,
+ * 2 >), the entries. Outputs: live engine calls, entries, LiveRecord rate
+ * changes (rate and rhythm, S084 P4). Context: foreground. Callers:
+ * buttonHandler_overlaySwitchHeld() (BAR press, CC2), the event-ring
+ * overflow recovery in buttonHandler_processEvents(). Affiliates:
+ * buttonHandler_overlayDrain(), seq_liveRollSetRate(), seq_liveRollStart(),
+ * seq_liveStop(), liveRec_rollRateChange(), liveRec_rollRelease().
  */
 static void buttonHandler_overlayReconfigure(uint8_t which)
 {
@@ -1101,51 +1210,48 @@ static void buttonHandler_overlayReconfigure(uint8_t which)
 
     for (track = 0u; track < NUM_TRACKS; track++) {
         bh_overlay_track_t *e = &bh_overlay[track];
-        uint8_t midiHeld = (uint8_t)(e->heldMidiNote != BH_OVERLAY_NO_MIDI_NOTE);
-        uint8_t panelHeld = (uint8_t)((bh_overlayVoiceMask >> track) & 1u);
+        uint8_t midiHeld;
+        uint8_t panelHeld;
+        uint8_t oldRoll;
         uint8_t type;
-        uint8_t oldRoll = (uint8_t)(e->count == 0xFFu);
+        uint8_t idx;
+        uint8_t rhythm;
 
+        buttonHandler_overlayDrain(track);   /* may end a fired flam (B-12) */
+        midiHeld = (uint8_t)(e->heldMidiNote != BH_OVERLAY_NO_MIDI_NOTE);
+        panelHeld = (uint8_t)((bh_overlayVoiceMask >> track) & 1u);
+        oldRoll = (uint8_t)(e->count == 0xFFu);
         if (!(midiHeld || panelHeld))
             continue;
         if (which == 0u) {
+            seq_liveStop(track);
             e->count = 0u;
             liveRec_rollRelease(track);
             continue;
         }
         type = (which == 1u) ? parameter_values[PAR_PERF_BTN_LT]
                              : parameter_values[PAR_PERF_BTN_RT];
-        if (type > 11u)
+        if (type > BH_OVERLAY_TYPE_MAX)
             type = 0u;
-        if (type < 6u) {
+        if (type < BH_OVERLAY_TYPE_ROLL_FIRST) {
+            seq_liveStop(track);
             e->count = 0u;
-            liveRec_rollRateChange(track, 0u);
+            liveRec_rollRateChange(track, 0u, 0u);
             continue;
         }
-        {
-            static const uint8_t rollDiv[6] = {3u, 4u, 5u, 6u, 6u, 7u};
-            static const uint8_t rollIdx[6] = {1u, 3u, 5u, 7u, 8u, 9u};
-            uint8_t idx = (uint8_t)(type - 6u);
-            uint16_t interval = buttonHandler_overlayDivisionMs(rollDiv[idx]);
-
-            if (idx == 4u)
-                interval = (uint16_t)((interval * 2u) / 3u);
-            if (interval == 0u)
-                interval = 1u;
-            if (oldRoll) {
-                uint16_t lastHit = (uint16_t)(e->next - e->interval);
-
-                e->interval = interval;
-                e->next = (uint16_t)(lastHit + interval);
-            } else {
-                /* single/flam -> roll: the hit already played was hit 0. */
-                e->pos = 1u;
-                e->interval = interval;
-                e->next = (uint16_t)(time_sysTick + interval);
-                e->count = 0xFFu;
-            }
-            liveRec_rollRateChange(track, rollIdx[idx]);
+        idx = (uint8_t)(type - (BH_OVERLAY_TYPE_ROLL_FIRST - 1u));
+        rhythm = buttonHandler_overlayRhythm(which);
+        seq_liveSetRhythm(rhythm);
+        if (oldRoll) {
+            seq_liveRollSetRate(track, idx);
+        } else {
+            /* single/flam -> roll: the hit already played was hit 0. */
+            seq_liveRollStart(track, idx, (uint8_t)(e->note & 0x7Fu),
+                              BH_OVERLAY_VEL, 1u);
+            e->count = 0xFFu;
         }
+        e->rate = idx;
+        liveRec_rollRateChange(track, idx, rhythm);
     }
 }
 
@@ -1169,7 +1275,7 @@ static void buttonHandler_overlaySwitchHeld(void)
                        ? parameter_values[PAR_PERF_BTN_LT]
                        : parameter_values[PAR_PERF_BTN_RT];
         bh_overlayHeldType = (bh_overlayActive == 0u) ? 0xFFu
-                             : ((type > 11u) ? 0u : type);
+                             : ((type > BH_OVERLAY_TYPE_MAX) ? 0u : type);
     }
     buttonHandler_overlayReconfigure(bh_overlayActive);
 }
@@ -1195,68 +1301,27 @@ static void buttonHandler_liveEraseEnd(void)
 }
 
 /*
- * Fire due overlay repeats on every track (S080 E12; S083 per-track).
+ * Foreground overlay service, every buttonHandler_tick() (S080 E12; S083
+ * per-track; S084 P2: timing moved to the master tick).
  *
- * What: for each entry with count != 0 whose deadline passed (signed
- * 16-bit distance, S081 P4 rule), fires the flam main (resetting) or a
- * roll repeat (non-resetting) and reports it (age 0; source MIDI when the
- * entry is MIDI-held). S083 follow-up: a roll repeat's velocity is
- * BH_OVERLAY_VEL shaped by the active overlay's rhythm (`pv<` =
- * PAR_PERF_VEL_LT, `pv>` = PAR_PERF_VEL_RT) at the entry's hit position
- * `pos`, through seq_rollRhythmVelocity() (the step `rtm` rule); the rhythm
- * is read live, so a `pv` edit or a BAR/CC2 overlay change applies from the
- * next hit. The flam main stays at BH_OVERLAY_VEL. The reported velocity is
- * the played one. Context: buttonHandler_tick(), foreground.
+ * What: publishes the active overlay's velocity rhythm (`pv<` = PAR_PERF_
+ * VEL_LT, `pv>` = PAR_PERF_VEL_RT) to the live engine, so a `pv` edit or
+ * a BAR/CC2 overlay change shapes every held roll from its next hit, and
+ * reports each track's new live hits to LiveRecord
+ * (buttonHandler_overlayDrain()). It no longer fires hits: flam mains and
+ * roll repeats fire in TIM3 (seq_processLiveTicks()). Why: S084 P0 F4.
+ * Inputs: bh_overlayActive, the PERF velocity parameters, the entries.
+ * Outputs: seq_liveSetRhythm(), LiveRecord reports. Context: foreground,
+ * 1 ms. Accessor: buttonHandler_tick(). Affiliates: seq_liveTakeHits(),
+ * seq_rollRhythmVelocity() (applied in TIM3).
  */
 static void buttonHandler_overlayTick(void)
 {
     uint8_t track;
 
-    for (track = 0u; track < NUM_TRACKS; track++) {
-        bh_overlay_track_t *e = &bh_overlay[track];
-        uint8_t pitch = (uint8_t)(e->note & 0x7Fu);
-        uint8_t isDef = (uint8_t)((e->note & BH_OVERLAY_NOTE_DEFAULT) != 0u);
-        uint8_t source = (e->heldMidiNote != BH_OVERLAY_NO_MIDI_NOTE)
-                         ? LIVEREC_SRC_MIDI : LIVEREC_SRC_OVERLAY;
-        uint8_t vel;
-
-        if (e->count == 0u)
-            continue;
-        if ((uint16_t)(time_sysTick - e->next) >= 32768u)
-            continue;
-        if (e->count == 0xFFu) {
-            /*
-             * Roll repeat: the active overlay's velocity rhythm (`pv<` /
-             * `pv>`, S083 follow-up) shapes BH_OVERLAY_VEL by hit position,
-             * the step-roll rule (seq_rollRhythmVelocity()). Every held
-             * entry follows bh_overlayActive (re-configured on change).
-             */
-            vel = seq_rollRhythmVelocity(
-                parameter_values[(bh_overlayActive == 1u) ? PAR_PERF_VEL_LT
-                                                          : PAR_PERF_VEL_RT],
-                BH_OVERLAY_VEL, e->pos);
-            if (e->pos < 0xFFu)
-                e->pos++;
-            else
-                e->pos = 16u;   /* 256 mod 60: same phase in cycles 2..5 */
-        } else {
-            vel = BH_OVERLAY_VEL;
-        }
-        seq_triggerVoice(track, vel, pitch, (uint8_t)(e->count != 0xFFu));
-        buttonHandler_overlayReport(track, pitch, isDef, vel,
-                                    (e->count == 0xFFu)
-                                        ? LIVEREC_HIT_ROLL_HIT
-                                        : LIVEREC_HIT_FLAM_MAIN,
-                                    0u, source, 0u);
-        if (e->count != 0xFFu) {
-            e->count--;
-            if (e->count == 0u) {
-                e->heldMidiNote = BH_OVERLAY_NO_MIDI_NOTE;
-                continue;
-            }
-        }
-        e->next = (uint16_t)(e->next + e->interval);
-    }
+    seq_liveSetRhythm(buttonHandler_overlayRhythm(bh_overlayActive));
+    for (track = 0u; track < NUM_TRACKS; track++)
+        buttonHandler_overlayDrain(track);
 }
 
 /* Contracts in buttonHandler.h. */
@@ -1280,6 +1345,7 @@ void buttonHandler_setOverlay(uint8_t which)
      */
     if (which > 2u || which == bh_overlayActive)
         return;
+    buttonHandler_overlayDrainAll();     /* S084 P0 A3: old rhythm */
     bh_overlayActive = which;
     if (bh_state.selectButtonMode == SELECT_MODE_PERF && !seq_loopActive) {
         led_setValue((uint8_t)(which == 1u), LED_BAR1);
@@ -1328,7 +1394,7 @@ void buttonHandler_overlayMidiNoteOff(uint8_t track, uint8_t midiNote)
 
 void buttonHandler_tick(void)
 {
-    /* S080 E12: service the overlay flam/roll repeat timer. */
+    /* S080 E12 / S084 P2: publish the overlay rhythm and report live hits. */
     buttonHandler_overlayTick();
     /* S080 F9: run a deferred/queued scene change when its boundary has fired. */
     menu_serviceDeferredSceneChange();
@@ -3113,6 +3179,7 @@ static void processPress(uint8_t buttonNr)
                                        bh_loopBarModifier);
                 break;
             }
+            buttonHandler_overlayDrainAll();  /* S084 P0 A3: old rhythm */
             bh_overlayActive = (bh_overlayActive == 1u) ? 0u : 1u;
             led_setValue((uint8_t)(bh_overlayActive == 1u), LED_BAR1);
             led_setValue((uint8_t)(bh_overlayActive == 2u), LED_BAR2);
@@ -3151,6 +3218,7 @@ static void processPress(uint8_t buttonNr)
                                        bh_loopBarModifier);
                 break;
             }
+            buttonHandler_overlayDrainAll();  /* S084 P0 A3: old rhythm */
             bh_overlayActive = (bh_overlayActive == 2u) ? 0u : 2u;
             led_setValue((uint8_t)(bh_overlayActive == 1u), LED_BAR1);
             led_setValue((uint8_t)(bh_overlayActive == 2u), LED_BAR2);
@@ -3750,6 +3818,7 @@ void buttonHandler_processEvents(void)
          * menu_chainMenuClose(), buttonHandler_shiftRecMenuExit().
          */
         buttonHandler_loopForceRelease();
+        buttonHandler_overlayDrainAll();     /* S084 P0 A3: old rhythm */
         bh_overlayActive = 0u;
         /* S083: per-track entries stop with the overlay. */
         buttonHandler_overlayReconfigure(0u);

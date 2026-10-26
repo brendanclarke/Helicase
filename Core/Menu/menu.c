@@ -6448,7 +6448,8 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
     /*
      * S080 E6/F10: BAR overlay and scene-global domains.
      *
-     * What: clamp the overlay trigger type to 0..11, the overlay note to 0..127
+     * What: clamp the overlay trigger type to 0..14 (S084 P3: 6 non-roll types
+     * + 9 step-roll rates), the overlay note to 0..127
      * (0 = def), scd to 0..9, qcd to 0..17 (S080 P2 longer queue list), qac
      * to 0..8 (Defect 15), chain conditions to
      * 0..78 and chain next-scene values to 0..43 (Phase G). Why: all DTYPE_MENU
@@ -6483,7 +6484,7 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
             return;
         case PAR_PERF_BTN_LT:
         case PAR_PERF_BTN_RT:
-            if (*value > 11u) *value = 11u;
+            if (*value > 14u) *value = 14u;
             return;
         case PAR_PERF_NOTE_LT:
         case PAR_PERF_NOTE_RT:
@@ -11649,7 +11650,9 @@ static uint8_t menu_getS080StaticName(const menu_cell_t *cell,
     switch (cell->static_param) {
     case PAR_PERF_BTN_LT:
     case PAR_PERF_BTN_RT:
-        menu_nameTable3(perfBtnTypeNames, 12u, value, buf);
+        /* S084 P3: count from the table's own [0][0], so it cannot drift. */
+        menu_nameTable3(perfBtnTypeNames, (uint8_t)perfBtnTypeNames[0][0],
+                        value, buf);
         return 1u;
     case PAR_PERF_NOTE_LT:
     case PAR_PERF_NOTE_RT:

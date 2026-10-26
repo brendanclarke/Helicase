@@ -2043,3 +2043,26 @@ Session 083 ran on `dev-ph6-midi`: planning commit `f9aaeec`, the implementation
   (`settings.cfg`, `midilrn.cfg`, `sceneset.scg` rows 4/5), `PATTERN_DYNAMIC_STACK.md`,
   `BANK_PRESET_ARCHITECTURE.md`, `DEV_MODES.md` (stage `m`),
   `STORAGE_SRAM_MANIFEST.md`, `MEMORY.md`.
+
+### 084 — Roll Fix-up: Time-Window Roll Engine, Master-Tick PERF/MIDI Overlay Rolls, One Roll List, Per-Track Recorded Spans, External Clock Interpolation; LXR1/LXR-02 Import Tools Closed (2026-10-22..26)
+
+Session 084 ran in two attempts. The first (2026-10-24..26, `dev-ph6-midi`) implemented the roll fix-up and then the S084 voice expansions (P1–P5) on one tree; that tree went over the voice CPU budget and froze on hardware, so it was rolled back whole (spike commit `26fb7c3`, kept next to the repository as `../Helicase-dev-ph7-spike/`, reference only; `S084_POST-MORTEM.md` there). The roll fix-up was re-implemented alone on `dev-ph7-voice_expansion` from `91265e9c` (pre-implementation commit, code = `59406a4`); the implementation is uncommitted at close. Final DEV link `text=609,288`, `data=424`, `bss=430,200` (payload 609,712 B of 753,664 B, **headroom 143,952 B**; `bss` +88 B vs S083, approved +87 B plus alignment). Not hardware-tested.
+
+- **Problem (user):** the PERF roll list did not match the STEP list; a recorded roll did not play back at the played rate; roll rate must follow the master clock, not the track's step scale.
+- **Findings F1–F8:** PERF had 6 of 9 rates (F1); a carried roll step lost its boundary hit and started a roll period late, so recorded rolls fell to about one hit per step (F2, root cause); a recorded roll's end step restarted the roll (F3); overlay rolls ran on a 1 ms foreground timer from `PAR_BPM` (2–7 % fast, no external sync) (F4); LiveRecord had one roll slot for 7 concurrent tracks (F5); slow rolls were recorded hit by hit and lost their rate under `qnt` (F6); `pv` rhythm not recorded (F7); a take boundary left the recorded roll open (F8).
+- **P1 step engine:** a roll's length is a master-tick window (`seq_rollWindow[7]`, interval × fill from the step's or deferred fire); a carry fires no hit and keeps phase; fill-100 rolls park at the window end; carry needs the same rate and rhythm and is refused after a fill < 100 step (user Q4); duck arrays folded into the window; `seq_rollClearTrack()`.
+- **P2 live engine:** PERF/MIDI overlay rolls and flam mains fire in TIM3 (`seq_live*`, `seq_processLiveTicks()` first in the scheduler tick, before the running gate); per-track mailbox drained by `buttonHandler_overlayDrain()` with TIM2 age; `bh_overlay[7]` 8 → 4 B; ms timers retired.
+- **P3:** PERF `pb<`/`pb>` = 15 types: `vmx v10 v64 v32 flm fls` + the nine STEP rates (index = type − 5); no migration (user Q2).
+- **P4 recording:** every held roll is a per-track span at any rate (user Q7, `liveRec_roll[7]`); the `pv` rhythm is stored in `rtm` (Q8); a take boundary ends rolls with no end write.
+- **Assessment fixes:** A1 external clock ticks interpolated between edges (`seq_extClockTicks()`, `seq_extTicksOwed`); A2 slow-roll early release keeps spans covered; A3 drain before an overlay switch; B1 reconfigure drains before judging a held entry (no unreleasable MIDI roll); doc nits A4/B2.
+- **Checks:** host check H1 (real roll functions, old vs new) reproduces F2 on the base and passes on the new code; hardware V1–V7 carried.
+- **Import tools (host only, logged here):** `tools/lxr1_converters/` (LXR1 `.snd`/`.pat`/`.all`/`.prf`, 2026-10-22, `efea1bf`) and `tools/lxr2_converters/` (LXR-02 kits, patterns, projects, songs, 2026-10-23, `59406a4`).
+
+- **Find here**: [084_SESSION_HANDOFF_LOG.md](084_SESSION_HANDOFF_LOG.md),
+  `PATTERN_DYNAMIC_STACK.md` (§6 roll engine, live engine, external clock,
+  §6.7.4 roll recording), `MODULE_INTERCHANGE_SPEC.md` (PERF overlay
+  engine, `seq_live*`, LiveRecord rows), `MIDI_SPEC.md` (overlay types,
+  clock, buttonHandler integration), `FILESYSTEM_SPEC.md` (`perf_btn_*`,
+  import tools), `STORAGE_SRAM_MANIFEST.md`, `BANK_PRESET_ARCHITECTURE.md`,
+  `tools/lxr1_converters/LXR1_CONVERTERS.md`,
+  `tools/lxr2_converters/LXR2_CONVERTERS.md`, `MEMORY.md`.

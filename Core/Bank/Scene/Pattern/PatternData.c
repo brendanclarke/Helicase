@@ -814,8 +814,9 @@ static uint8_t pat_writeSpecials(uint8_t scene_index, uint8_t track,
  * Write a recorded step's specials and trigger (S081 D-2a, §8.4, §19.3).
  *
  * What: reads the existing specials and automation, applies the record spec
- * (note, velocity, timing, roll, fill; clears rhythm; keeps the condition or sets
- * fil), then writes the result with trigger ON. If the result has no specials and
+ * (note, velocity, timing, roll, fill, and the roll's rhythm (S084 P4; cleared
+ * on a step without a roll); keeps the condition or sets fil), then writes the
+ * result with trigger ON. If the result has no specials and
  * no automation it only sets bit 15 (pat_setStepActive). Why: the old
  * seq_recordTrigger only set the trigger bit; live recording writes the full step
  * in one block replacement. Inputs: scene, track, step, spec. Outputs: nonzero on
@@ -849,8 +850,6 @@ uint8_t pat_recordStep(uint8_t scene_index, uint8_t track, uint8_t step,
                                          PAT_BLOCK_AUTO_COUNT_MASK);
 
     flags = sp.flags;
-    /* Rhythm is never recorded. */
-    flags &= (uint8_t)~PAT_SPECIAL_RHYTHM_BIT;
     /* Note: a default note records no note special. */
     if (spec->noteIsDefault) {
         flags &= (uint8_t)~PAT_SPECIAL_NOTE_BIT;
@@ -883,9 +882,10 @@ uint8_t pat_recordStep(uint8_t scene_index, uint8_t track, uint8_t step,
         sp.timing = spec->timing;
         flags |= PAT_SPECIAL_TIMING_BIT;
     }
-    /* Roll rate + fill. */
+    /* Roll rate + fill + rhythm (S084 P4: rhythm only with a roll). */
     if (spec->roll == 0u) {
-        flags &= (uint8_t)~(PAT_SPECIAL_ROLL_BIT | PAT_SPECIAL_FILL_BIT);
+        flags &= (uint8_t)~(PAT_SPECIAL_ROLL_BIT | PAT_SPECIAL_FILL_BIT |
+                            PAT_SPECIAL_RHYTHM_BIT);
     } else {
         sp.roll = spec->roll;
         flags |= PAT_SPECIAL_ROLL_BIT;
@@ -894,6 +894,12 @@ uint8_t pat_recordStep(uint8_t scene_index, uint8_t track, uint8_t step,
         } else {
             sp.fill = spec->fill;
             flags |= PAT_SPECIAL_FILL_BIT;
+        }
+        if (spec->rhythm == 0u) {
+            flags &= (uint8_t)~PAT_SPECIAL_RHYTHM_BIT;
+        } else {
+            sp.rhythm = spec->rhythm;
+            flags |= PAT_SPECIAL_RHYTHM_BIT;
         }
     }
     /* Condition kept; fil overrides it (R10). */

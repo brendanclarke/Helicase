@@ -96,6 +96,7 @@ uint8_t midiNotes_handle(const MidiMsg *msg)
 		lr.velocity = msg->data2;
 		lr.kind = LIVEREC_HIT_SINGLE;
 		lr.roll = 0u;
+		lr.rhythm = 0u;
 		lr.source = LIVEREC_SRC_MIDI;
 		lr.note_is_default =
 		    (uint8_t)(internal == MIDI_NOTEMAP_ROOT_INTERNAL);

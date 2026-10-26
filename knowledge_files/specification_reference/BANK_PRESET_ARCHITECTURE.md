@@ -770,7 +770,7 @@ for PERF display purposes, but it is not the source of truth.
   58..61, S074). They are refreshed from the active Scene by
   `preset_syncBusCompMirrors()` and never serialized as Globals.
 - S080 Globals (serialized in settings.cfg): `PAR_PERF_BTN_LT/RT` (overlay
-  trigger type 0..11), `PAR_PERF_NOTE_LT/RT` (0 = track note, else 1..127),
+  trigger type 0..14 since S084 P3), `PAR_PERF_NOTE_LT/RT` (0 = track note, else 1..127),
   `PAR_SCENE_CHANGE_DIV` (scd 0..9), `PAR_SCENE_QUEUE_DIV` (qcd 0..17),
   `PAR_SCENE_QUEUE_ACTION` (qac 0..8). The PC reset is the pre-existing
   `PAR_BAR_RESET_MODE` (pcr; the S080 P1 duplicate `PAR_SCENE_PC_RESET` was

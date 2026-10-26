@@ -1,9 +1,9 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference through Session 082 (Session 069 for every phase before Phase 5;
-the Session 072, 073, 074, 075, 078, 080, 081 and 082 additions are noted
-below). It includes the Session 058 Bank
+reference through Session 084 (Session 069 for every phase before Phase 5;
+the Session 072, 073, 074, 075, 078, 080, 081, 082, 083 and 084 additions
+are noted below or in their sections). It includes the Session 058 Bank
 I/O and stopped-playback speedups, the Session 059 typed Instrument-index
 repair, and Session 060's `.hcnames` atomic safe-write/refreshed flag, the boot
 Instrument `.hcindex` generation fix, and system-wide macOS AppleDouble
@@ -74,8 +74,9 @@ Session 080 (PERF performance surface, `MODULE_INTERCHANGE_SPEC.md` "PERF
 performance surface"):
 
 - `settings.cfg` gains seven Global keys — `perf_btn_lt`, `perf_note_lt`,
-  `perf_btn_rt`, `perf_note_rt` (BAR overlay trigger type 0..11 / note
-  0..127, 0 = the track's note), `scd` (direct scene change division 0..9),
+  `perf_btn_rt`, `perf_note_rt` (BAR overlay trigger type 0..14 since S084
+  P3 / note 0..127, 0 = the track's note), `scd` (direct scene change
+  division 0..9),
   `qcd` (queued change division 0..17), `qac` (queue action 0..8) — and the
   terminator becomes `lines=24` (see "settings.cfg"). A P1-era file's `pcr=`
   line (a duplicate PC reset, removed) is skipped as an unknown key; the PC
@@ -106,6 +107,19 @@ Session 081 (live record, automation ramps; `081_SESSION_HANDOFF_LOG.md`;
 - The recording track `rtk` is runtime only; nothing new is saved for live
   record. Pattern AutoSave is gated only while live record is writing
   (armed and running), not merely armed.
+
+Session 084 (roll fix-up; `084_SESSION_HANDOFF_LOG.md`):
+
+- `settings.cfg` `perf_btn_lt`/`perf_btn_rt` range **0..14**: 0..3 single
+  velocities, 4..5 flams, 6..14 the nine STEP roll rates (step-roll index =
+  value − 5). Values 6..11 written by older firmware now name different
+  rates; they are **not migrated** (user Q2). The parser does not clamp;
+  a value above 14 plays as type 0 and the menu clamps it on the first
+  edit.
+- Live-recorded roll steps now store the overlay's `pv` velocity rhythm in
+  the step's `rtm` special (PAT4 unchanged: the special already existed).
+- Host-only import tools for LXR1 and LXR-02 card content write Kits,
+  library Patterns and Banks in this document's formats ("Import tools").
 
 - AsyncFATFS stores a cluster-rounded size while a file is open for writing,
   so an interrupted write leaves an overlong file;
@@ -713,7 +727,9 @@ midi_routing (S083: 0..7 = off UtD DtD DtU bth DtA AtD all),
 screensaver_on_off, bar_reset_mode, prescaler_clock_in,
 prescaler_clock_out1, prescaler_clock_out2, follow, and osc_wave_interp, and
 since Session 080 `perf_btn_lt`, `perf_note_lt`, `perf_btn_rt`,
-`perf_note_rt`, `scd`, `qcd`, `qac` (writer cases 17..23; defaults 0), and
+`perf_note_rt`, `scd`, `qcd`, `qac` (writer cases 17..23; defaults 0; the
+`perf_btn_*` range is 0..14 since S084 P3 and older values are not
+migrated), and
 since the S083 follow-up `perf_vel_lt`, `perf_vel_rt` (cases 24/25: the
 SHIFT+REC `pv<`/`pv>` overlay roll velocity rhythm, a packed roll-rhythm
 byte as the step `rtm` special, 0 = off; the menu snaps an unlisted byte and
@@ -2652,6 +2668,48 @@ stopped-playback fast drain changes foreground poll density; a poll-count
 ceiling would time out a healthy busy card and make AsyncFATFS re-dirty/retry
 the same sector forever. The low-level rule is authoritative in
 `ASYNCFATFS_REFERENCE.md`.
+
+## Import tools (host only; LXR1 and LXR-02 content)
+
+Two Python tool sets convert legacy card content into the formats of this
+document. They run on a computer, never on the device; nothing in the
+firmware reads legacy formats ("no backward compatibility" applies to the
+firmware only). Both are documented fully (usage, options, file formats,
+mapping tables, troubleshooting, maintenance) in their own manuals:
+
+| Tool set | Converts | Manual |
+|---|---|---|
+| `tools/lxr1_converters/` (2026-10-22) | Sonic Potions LXR: `pNNN.snd` → `Kit/NNN <name>/`; `pNNN.pat` (8 patterns) → `Pattern/NNN <name> <n>.pat` (PAT4); `pNNN.all`/`.prf` → `Bank/NNN <name>/` (Scenes 00..07, the same Kit in every Scene, all voice edit masks tied). | `LXR1_CONVERTERS.md` |
+| `tools/lxr2_converters/` (2026-10-23) | Erica Synths LXR-02: `NN-NAME.snd` → Kit; `NN-NAME.pat` → PAT4; `projNN/` → Banks of 16 patterns (A..D); `NN-NAME.sng` → a Bank whose Scenes play the song through `xNN` chains. | `LXR2_CONVERTERS.md` |
+
+**How they fit this filesystem.**
+- Output defaults to `SD_CARD/<Library>`; library slots are allocated free
+  (`--start-slot`) or kept (`--keep-numbers`, never overwriting unless
+  `--overwrite`); `--dry-run` writes nothing.
+- The Helicase writers (Kit/Instrument, PAT4 builder and verifier,
+  `sceneset.scg`, `bankset.bcg`, slot allocator) live in
+  `tools/lxr1_converters/lxr1_common.py`; the LXR-02 tools import them, so
+  a change there affects both sets.
+- Instrument keys, morphable rows, target validity and automation IDs are
+  parsed from the firmware's `Core/DSP/Instruments/*/*Parameters.c` at run
+  time; start-up fails, naming the keys, if the converter key map and the
+  firmware disagree (`Firmware._check_key_coverage()`). **Adding,
+  renaming or removing an Instrument key therefore needs the converters
+  checked** (Drum 39, Snare 38, Cymbal 39, HiHat 39 rows at S084).
+- Every PAT4 is re-decoded and verified (CRC32C, back-references, bitmap,
+  specials, automation) before it is written. A PAT4 or `sceneset.scg`
+  format change must be mirrored in `lxr1_common.py`.
+- Scene settings that legacy files carry (voice audio out, track MIDI
+  channel and note) go into `sceneset.scg`; BPM and other true globals are
+  not converted. LXR-02 tracks left at the default MIDI note (48 on all
+  seven) are written as `nte on`.
+- Rolls: evenly spaced whole-step sub-step rolls (LXR1) and LXR-02 flams
+  become step rolls at fill 100; adjacent roll steps carry evenly since the
+  S084 roll engine (`PATTERN_DYNAMIC_STACK.md` §6).
+
+Both sets are host-tested only (synthetic files built from the original
+firmware sources; the factory LXR1 kits). Hardware checks and the full
+design and test record: `084_SESSION_HANDOFF_LOG.md` §12–§13.
 
 ## Verification Anchors
 
