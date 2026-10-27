@@ -10,6 +10,37 @@ RAM accepted).
 
 ---
 
+## Status at the S085 close (2026-10-27) — read before §1–§12
+
+- **Implemented** as §4–§5, with the implementation deviations D7/D8
+  (§11.4); committed as `8812bffd` ("mod osc expansion implemented").
+- **Hardware (user):** P1 "checks out completely fine on the hardware".
+- **Two post-implementation adjustments** (uncommitted at close), after the
+  P1 hardware pass:
+  - **D9, §13:** `snc` and `rng` follow the mod envelope with the `fm`
+    response: d = amt² × env (`Drum_modEnvDepth()`).
+  - **D10, §14:** the `rng` depth is ramped per sample from the previous
+    block's value and snapped at a trigger (`ringSnap`, `ringDepthQ15`).
+    `osc_ringK()` was replaced by `osc_ringDepthQ15()`; the ring copies take
+    `depthQ15, depthStepQ15`; the modulator renders at gain 1.
+- **Therefore these §4 code blocks are superseded** (the source of truth is
+  the code and §13/§14):
+  - the O-H1 ring declaration and `osc_ringK()`;
+  - the O-C1 `osc_ringSample()` and the six ring copies plus the ring
+    dispatcher;
+  - the D-H2 field list (+ `ringSnap`, `ringDepthQ15`);
+  - the D-C1 init (+ the ramp state) and the trigger (+ `ringSnap = 1`);
+  - the D-C2 `snc`/`rng` cases;
+  - the X4 ring tests (R1 → R1–R3, M1 `osc_ringDepthQ15()`).
+- **Assessment findings F1–F4 (§12.6):** all fixed at the close.
+- **Figures:** §1 is the P1 measurement. The final `rng` figures are in
+  §14 (ramped: dearest `rng` ≈ 90–91 vs dearest `fm` ≈ 92, linked).
+- **Durable record:** `knowledge_files/log_archive/085_SESSION_HANDOFF_LOG.md`,
+  `INSTRUMENTS_DSP_REFERENCE.md` §5.1/§6.1/§8/§9/§10. This document and the
+  plan may be deleted.
+
+---
+
 ## 0. Read this first
 
 ### 0.1 How to use this document
@@ -45,6 +76,10 @@ figures.
 | **D4** | G-A: `Drum_calcVoiceSyncBlock` disassembly identical (§5) | G-A compares the **callees** (every existing oscillator loop, `osc_setFreq`, `bufferTool_addBuffersSaturating`) byte for byte. In `Drum_calcVoiceSyncBlock`, the `fm`/`mix` paths are checked to make the same calls with the same arguments in the same order. | The dispatch itself has to change from `if` to `switch`: a few instructions per block (< 0.2 per sample), which is not loop cost. |
 | **D5** | ITCM ≈ +1.0–1.5 KB (§8) | **≈ +2.85 KB** (2,848 B: the documented code compiled standalone; LTO may move it by a little) | Ring copies are needed for five waveform families (D1), including the user-sample loop (552 B). The two interpolation variants are inlined into their ITCM dispatchers, as `calcPeriodicInterpBlock()` is today. 12,216 B of ITCM are free. |
 | **D6** | the reset list "128 B on the stack" | the same (`syncOver[32]`, SRAM2 stack) | It is not put in DTCM: the DTCM statics would eat the FX-arena margin (3,712 B). |
+| **D7** (§11.4) | new code inside `.itcm` | `.itcm.s085` subsection; `elf_symdump.py` `PADDING` rule | keeps every existing loop's address and short branches |
+| **D8** (§11.4) | the unsynced fallback calls `calcNextOscSampleBlock(…, 1.f)` | `osc_renderPlainWave()` (leaf dispatch); `noinline` dispatchers | new constant-gain call sites made LTO re-specialise the baseline clones |
+| **D9** (§13, post-hardware) | `snc` depth and `rng` amount = `amt` | d = amt² × env = `fmModAmount × osc.fmMod` (`Drum_modEnvDepth()`) | user: `snc`/`rng` must use the mod envelope with the `fm` response |
+| **D10** (§14, post-hardware) | `rng`: modulator at gain `amt`, constant K per block | modulator at gain 1; per-sample depth ramp `d_i = d0 + (i+1)·step` in Q15; snap after a trigger | the envelope-driven depth stepped once per block and zippered ("crunchy") |
 
 ### 0.3 Precondition
 
@@ -162,6 +197,9 @@ Drum_calcVoiceSyncBlock()  switch (modMode)
 ### 4.1 `Core/DSPAudio/Oscillator.h`
 
 #### O-H1 — Add after line 149 (`void osc_recalcFreq(OscInfo* osc);`), before line 151 (`#endif /* OSCILLATOR_H_ */`)
+
+> **Superseded in part (D10, §14):** the ring declaration below now takes `depthQ15, depthStepQ15`; `osc_ringK()` is replaced by `osc_ringDepthQ15()` (Q15 depth, 0 → 0, 1 → 32768).
+
 
 ```c
 //-----------------------------------------------------------
@@ -341,6 +379,9 @@ static inline int32_t osc_ringK(const float amount)
 ### 4.2 `Core/DSPAudio/Oscillator.c`
 
 #### O-C1 — Add after line 913 (`};`, the end of `calcSampleOsc()`), before line 914 (` //------…` above `osc_calcSineFreqValue()`)
+
+> **Superseded in part (D10, §14):** `osc_ringSample()` is now `G = (32768 − d) + ((d·mod) >> 15); out = SSAT16((car·G) >> 15)` with a per-sample `d`; every ring copy steps `ringDepth += depthStepQ15` before each store. D7/D8 (§11.4) changed the placement macros and the unsynced fallback.
+
 
 **Notes:**
 - The read and interpolation lines of every copy are the plain loops' lines
@@ -1017,6 +1058,9 @@ INITCM void calcNextOscSampleRingBlock(OscInfo* osc, const int16_t* modBuf,
 
 #### D-H2 — Modify lines 103–105, then add after them
 
+> **Superseded in part (D10, §14):** `DrumVoice` also has `uint8_t ringSnap` (in the padding after `modMode`) and `int32_t ringDepthQ15` (after `syncClock`); `sizeof(DrumVoice)` 596 B.
+
+
 **Before:**
 ```c
 #if ENABLE_MIX_OSC
@@ -1097,6 +1141,9 @@ INITCM void calcNextOscSampleRingBlock(OscInfo* osc, const int16_t* modBuf,
 ### 4.4 `Core/DSP/Instruments/Drum/DrumVoice.c`
 
 #### D-C2 — Replace lines 313–326
+
+> **Superseded in part (D9 §13, D10 §14):** `snc` uses `osc_syncDepthQ30(Drum_modEnvDepth(voice))`; `rng` computes `target = osc_ringDepthQ15(Drum_modEnvDepth(voice))`, `start = ringSnap ? target : ringDepthQ15`, `step = (target − start)/size`, renders the modulator at gain 1, calls `calcNextOscSampleRingBlock(…, start, step)` and stores `start + step·size`.
+
 
 **Before (313–326):**
 ```c
@@ -2616,6 +2663,11 @@ matrix and the session close-out are still to do (§11.5).
 
 No correctness, CPU or RAM defect was found.
 
+**Status at the close:** F1 fixed (the replacement text below is now in
+`Oscillator.c`); F2 fixed (`.itcm.s085`); F3 superseded by §14 (the
+ramped figures, standalone and linked, are in the DSP reference §8.1);
+F4 fixed (`DSP_TEST.md` §5).
+
 **F1 replacement text.**
 
 `osc_renderSyncWave()`, the What paragraph:
@@ -2643,3 +2695,149 @@ Placement line:
 - **The session close-out:** `085_SESSION_HANDOFF_LOG.md`, plus the
   `MEMORY.md` current-state and binding notes. `MEMORY.md` still describes
   the S084 state.
+
+---
+
+## 13. Follow-up: the mod envelope in `snc` and `rng` (2026-10-27)
+
+**Hardware:** P1 passed on the device (user). One change was requested:
+`snc` and `rng` follow the mod envelope with the same response as `fm`.
+
+**The response:**
+- `fm`'s FM index is (modulator × amt) × `osc.fmMod`, where
+  `osc.fmMod = amt × env`. So `fm` already responds as **amt² × env**.
+- env is the PitchMod decay envelope (`egPitchVal`): 1 at each trigger,
+  decaying to 0. The PitchMod amount scales only the pitch sweep.
+- `snc` and `rng` now use the same depth, d = amt² × env:
+  - `snc`: sync depth = d;
+  - `rng`: modulator gain = d and K = (1 − d) × 32768.
+- `fm` and `mix` are not changed.
+
+**Code changes:**
+
+| File | Change |
+|---|---|
+| `DrumVoice.c` `Drum_calcVoiceAsync()` | comment block on `osc.fmMod` (code unchanged) |
+| `DrumVoice.c` | new `static inline float Drum_modEnvDepth()` = `fmModAmount × osc.fmMod`, with its comment block, before `Drum_calcVoiceSyncBlock()` |
+| `DrumVoice.c` `Drum_calcVoiceSyncBlock()` | `snc` depth and both `rng` amounts use `Drum_modEnvDepth()`; the switch's comment block describes d |
+| `DrumVoice.h` | the `DRUM_MOD_*` comment block describes d = amt² × env |
+| `Oscillator.h` | comments only: `calcNextOscSampleSyncBlock()`, `calcNextOscSampleRingBlock()`, `osc_syncDepthQ30()`, `osc_ringK()` |
+| `INSTRUMENTS_DSP_REFERENCE.md` §5.1 | diagram and mode bullets |
+
+**Behaviour:**
+- Over a hit, `snc` fades to a free-running slave and `rng` to the dry
+  carrier.
+- A long PitchMod decay gives roughly the previous static sound.
+- On the block where the envelope reaches 0, `DecayEg_calc()` can return a
+  slightly negative value; `osc_syncDepthQ30()` and `osc_ringK()` clamp it.
+- **The envelope updates once per block, as for `fm`.** In `rng` it scales
+  an amplitude, so listen for steps with a very short PitchMod decay.
+  - **The fix if needed:** a per-block ramp of K, about +2 instructions per
+    sample, still under `fm`.
+
+**Cost:** one multiply per block; nothing per sample.
+
+**Build (DEV):**
+
+| | text | data | bss | ITCM | flash headroom |
+|---|---:|---:|---:|---:|---:|
+| Before | 613,232 | 424 | 430,248 | 7,560 B | 140,008 B |
+| After | 613,248 (+16) | 424 | 430,248 | 7,560 B | 139,992 B |
+
+No new warning.
+
+**Gates rerun:**
+- `oscmod_identity` OK (0 removed or changed lines);
+- `osc_mod failures: 0`;
+- `elf_osc_check` 0 missing, 0 changed, 0 added (the known D7 `PADDING`
+  line).
+
+The plan's R10 ("`osc.fmMod` unused in `snc`/`rng`") no longer applies.
+
+**Hardware re-test (user):**
+- `snc` and `rng` with a short and a long PitchMod decay;
+- `amt` sweep: the response should feel like `fm`;
+- `rng` with a very short decay: no stepping;
+- `fm`/`mix` unchanged.
+
+---
+
+## 14. Follow-up: the `rng` depth ramp (2026-10-27)
+
+**Why:** with the mod envelope (§13), the `rng` depth d stepped once per
+block. d set both the modulator gain and the dry gain, so `rng` zippered at
+the 1.4 kHz block rate ("crunchy", user). `snc` is not ramped: its depth
+acts only at reset instants and puts no step into the audio (user agreed).
+
+**The law:**
+- The modulator renders at gain 1.
+- Sample i of the ring copy uses d_i = d0 + (i + 1) × step (Q15):
+  - G_i = (32768 − d_i) + ((d_i × m_i) >> 15);
+  - out = SSAT16((car × G_i) >> 15).
+
+  This is carrier × (1 − d) + carrier × modulator × d with d moving
+  linearly across the block. d = 0 gives the carrier exactly.
+- **Ramp state:**
+  - d0 is the value the previous block reached (`DrumVoice.ringDepthQ15`).
+    Storing the reached value means the integer step never drifts.
+  - On the first block after a trigger, `ringSnap` (set by
+    `Drum_triggerVoice()`) makes d0 the block's own d. Hits start at full
+    depth, as `fm` hits do (user choice: snap).
+  - **For the run modes later (user):** in free-run, try "ramp always"
+    instead of the snap.
+
+**Code changes:**
+
+| File | Change |
+|---|---|
+| `Oscillator.c` | `osc_ringSample()` takes a Q15 depth (new G law); the six ring copies and the ring dispatcher take `depthQ15, depthStepQ15` and step the depth per sample; comment blocks updated |
+| `Oscillator.h` | `calcNextOscSampleRingBlock()` contract (`depthQ15, depthStepQ15`); `osc_ringK()` is replaced by `osc_ringDepthQ15()` |
+| `DrumVoice.h` | `ringSnap` (in padding) and `int32_t ringDepthQ15` (+4 B); `DRUM_MOD_RNG` comment |
+| `DrumVoice.c` | init (`ringDepthQ15 = 0`, `ringSnap = 1`); trigger sets `ringSnap`; the `rng` case computes start/target/step, renders the modulator at gain 1, and stores the reached depth |
+| `tools/dsp_test/test_osc_mod.c`, `Makefile` | R1–R3 against an independent ramped reference and the float law (±2 LSB); M1 for `osc_ringDepthQ15()` |
+| `INSTRUMENTS_DSP_REFERENCE.md`, `STORAGE_SRAM_MANIFEST.md`, `CPU_USE_DSP_AUDIT.md` | the law, the figures and item 39 |
+
+**Cost** (instructions per sample):
+
+| `rng` carrier | Before the ramp | Ramped, standalone | Ramped, linked | `fm` carrier, same wave |
+|---|---:|---:|---:|---:|
+| Tri/Saw/Rec | 28 | 31 | 31 | 35 |
+| Sine | 27 | 30 | 30 | 30 |
+| Crash | 30 | 33 | 33 | 38 |
+| Noise | 13/25 | 16/18 | 16/19 | 12–13/27 (`fm` ignores FM on noise) |
+| User sample | 40–41 (42–43 linked) | 46/48 | 49/50 | 48/49 (linked 50/51) |
+
+- **Per block:** one integer divide.
+- **The modulator call (gain 1)** binds to the baseline gain-1 clone
+  `calcNextOscSampleBlock.constprop.1`, the one waveform interpolation
+  already uses. That clone is unchanged (`elf_osc_check`) and slightly
+  cheaper than `.constprop.0`, which `fm` uses.
+- **Gate (Q1 (a)):** the dearest `rng` (user samples) is ≈ 90–91 against
+  the dearest `fm` ≈ 92 in the linked image. It passes, but by 1–2
+  instructions, the narrowest margin of the four modes.
+- **At the same waves:** sine `rng` ties with `fm`. A noise carrier is +3
+  over `fm`-with-noise (reported, not the gate).
+
+**Build (DEV):**
+
+| | text | bss | ITCM | flash headroom |
+|---|---:|---:|---:|---:|
+| Before | 613,248 | 430,248 | 7,560 B | 139,992 B |
+| After | 613,536 | 430,296 | 7,792 B | 139,704 B |
+
+- `DrumVoice` 592 → 596 B; `runtime_slots` +48 B.
+- No new warning.
+
+**Gates:**
+- `oscmod_identity` OK;
+- `osc_mod failures: 0`;
+- `elf_osc_check` 0 missing, 0 changed, 0 added (the D7 `PADDING` line);
+- `special_tags` 155 / 0.
+
+**Hardware re-test (user):**
+- `rng` with a very short PitchMod decay (no crunch);
+- hit-to-hit attack (snap: full ring depth at each hit);
+- the `amt` response;
+- the six-slot `rng` user-sample Scene on the `cpu` widget, which has the
+  narrowest margin;
+- `fm`/`mix`/`snc` unchanged.

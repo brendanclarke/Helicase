@@ -4,16 +4,22 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 085 P1 Drum `snc`/`rng` (2026-10-27),
-  `dev-ph7-voice_expansion`. DEV link: `text=613,232`, `data=424`,
-  `bss=430,248`; flash payload 613,656 B of 753,664 B (**headroom
-  140,008 B**). ITCM 7,560 / 16,384 B; DTCM statics
+- **Current as of:** Session 085 close: Drum `snc`/`rng` with the mod envelope and the `rng` depth ramp (2026-10-27),
+  `dev-ph7-voice_expansion`. DEV link: `text=613,536`, `data=424`,
+  `bss=430,296`; flash payload 613,960 B of 753,664 B (**headroom
+  139,704 B**). ITCM 7,792 / 16,384 B; DTCM statics
   4,472 B; FXBUF 126,592 B at 0x20001180 (margin 3,712 B). The entries below
   run newest first; the S083 assessment fixes (2026-10-21) changed text to
   604,200 and bss to 430,112 (−8 B alignment) with no new statics.
+- **S085 P1 follow-up, `rng` depth ramp (2026-10-27):** `DrumVoice` 592 →
+  596 B (`ringDepthQ15`, +4 B; `ringSnap` sits in padding), so
+  `runtime_slots` 7,104 → 7,152 B (+48 B SRAM1 bss: 430,248 → 430,296).
+  ITCM 7,560 → 7,792 B (+232 B: the ramped ring copies). text 613,232 →
+  613,536 B (headroom 139,704 B). RAM approved by the user (S085 P1 plan
+  r3).
 - **S085 P1 changes (2026-10-27):** `DrumVoice` 588 → 592 B
   (`syncClock`, +4 B), so `runtime_slots` 7,056 → 7,104 B (+48 B SRAM1
-  bss). ITCM 4,168 → 7,560 B (+3,392 B: the `itcm.s085` sync/ring
+  bss). ITCM 4,168 → 7,560 B (+3,392 B: the `.itcm.s085` sync/ring
   copies, their dispatchers, `osc_renderSyncWave`, `osc_renderPlainWave`
   and `osc_buildSyncList`). DTCM unchanged. The `snc` render puts
   `syncOver[32]` (128 B) on the audio stack (SRAM2) for one block. RAM
@@ -171,8 +177,8 @@ changing any of it.
   `python3 tools/link_budget.py arm-none-eabi-nm build/lxr02.elf`
 
   ```
-  Flash : 613,656 / 753,664 B used, headroom 140,008 B
-  ITCM  : 7,560 / 16,384 B
+  Flash : 613,960 / 753,664 B used, headroom 139,704 B
+  ITCM  : 7,792 / 16,384 B
   DTCM  : statics 4,472 B
   FXBUF : 126,592 B at 0x20001180 (min 122,880, margin 3,712)
   ```
@@ -426,7 +432,7 @@ only works while sector 6 holds no code.
 | DTCM `.dtcmz` | `0x20000200` | part of DTCM | 3,960 | — |
 | DTCM `.dtcm_fxbuf` (arena) | `0x20001180` | part of DTCM | 126,592 | 0 (reserved arena) |
 | **DTCM total** | `0x20000000` | **131,072** | **131,064** | **8** |
-| ITCM `.itcm` (code) | `0x00000000` | 16,384 | **7,560** | 8,824 |
+| ITCM `.itcm` (code) | `0x00000000` | 16,384 | **7,792** | 8,592 |
 | SRAM2 `.devwdg_noinit` | `0x2007c000` | 16,384 | 0 | see stack note |
 
 - Static data RAM (SRAM1 + DTCM including the arena) is 428,900 B;
@@ -508,11 +514,11 @@ and runs with zero wait states.
 | `calcSampleOscFmBlock` | 196 |
 | `calcFmBlock` (three specialisations) | 192 × 3 |
 | Veneers for the interpolation blocks | 8 × 2 |
-| S085 P1: `calcNextOscSampleSyncBlock` / `calcNextOscSampleRingBlock` (dispatchers) | 396 / 504 |
-| S085 P1: `osc_renderSyncWave` / `osc_renderPlainWave` | 228 / 728 |
+| S085 P1: `calcNextOscSampleSyncBlock` / `calcNextOscSampleRingBlock` (dispatchers) | 396 / 552 (ramped ring) |
+| S085 P1: `osc_renderSyncWave` / `osc_renderPlainWave` | 232 / 728 (both LTO `.constprop.0`) |
 | S085 P1: `osc_buildSyncList` | 54 |
 | S085 P1: sync copies (table / sine / crash) | 176 / 172 / 176 |
-| S085 P1: ring copies (table / sine / noise / crash / user sample) | 152 / 144 / 92 / 148 / 408 |
+| S085 P1: ring copies, depth ramped (table / sine / noise / crash / user sample) | 192 / 184 / 108 / 196 / 448 |
 | S085 P1: interpolated sync/ring variants | inlined into the two dispatchers |
 
 - Only oscillator code is placed here. Filter and distortion ITCM placement
@@ -609,7 +615,7 @@ byte, including alignment and small variables omitted here.
 | `filesystem.c`: `fs_identity_name`, `fs_identity_valid_mask` | 74 | Eight × 9 Scene/Kit/Instrument identity strings plus a 16-bit validity mask; the Bank's nine-byte name is held separately by BankData. |
 | `filesystem.c`: `op_bank_child_scratch` | 144 | One union: 16 × 9 Bank-child names or 16 × 6 boot-reader Instrument types, with disjoint lifetimes. |
 | `asyncfatfs.c`: `afatfs` | 6,984 | FAT state, caches, and five file handles in one owner. |
-| `InstrumentManager.c`: `runtime_slots` | 7,104 | Six tagged 1,184 B engine slots; no parallel native engine array. The largest engine (`DrumVoice`) is 592 B (588 + the S085 P1 `syncClock`); the reserve is twice that. |
+| `InstrumentManager.c`: `runtime_slots` | 7,152 | Six tagged 1,192 B engine slots; no parallel native engine array. The largest engine (`DrumVoice`) is 596 B (588 + the S085 P1 `syncClock` + the follow-up `ringDepthQ15`); the reserve is twice that. |
 | `adcPots.c`: `slider_lut` | 4,096 | 1,024 `float` slider conversion values. |
 | `SampleMemory.c`: resident and install caches | 5,040 | 1,440 B `sample_info_cache`, 1,080 B `sample_name_cache`, 120 B loop flags, 1,440 B `install_info`, and 960 B `install_names`. |
 | `usb_manager.c`: `USB_OTG_dev` | 1,524 | USB core/device handle. |

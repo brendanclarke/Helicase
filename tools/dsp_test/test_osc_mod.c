@@ -4,7 +4,7 @@
  * What:       runs the new Oscillator.c S085 P1 functions (extracted from the
  *             current source) against the unchanged plain loops (extracted
  *             from the same file):
- *               R1 ring copies == plain render at gain 1 + the exact integer
+ *               R1-R3 ring copies == plain render at gain 1 + the exact integer
  *                  ring law, every carrier family, interpolation, amt 0..1;
  *                  amt 0 == the carrier exactly;
  *               S1 sync at depth 0 == the plain render, resets present;
@@ -17,7 +17,7 @@
  *               S6 unsynced slaves (noise, user sample) == the plain render;
  *               S7 the interpolated slave: partners share the list; the
  *                  phase rule;
- *               M1 osc_syncDepthQ30() / osc_ringK() / osc_syncRatioQ16().
+ *               M1 osc_syncDepthQ30() / osc_ringDepthQ15() / osc_syncRatioQ16().
  * Why:        S085 P1 §7.1: the new code must be exact where it should
  *             equal existing code, and its laws must hold where it is new.
  *             Each case names the code break that must make it fail.
@@ -131,13 +131,25 @@ static void set_interp(OscInfo *o, uint8_t next, float frac)
     o->waveInterpGeneration = 7u;
 }
 
-static int16_t ring_ref(int16_t car, int16_t mod, int32_t k)
+/*
+ * Reference ring law with a per-sample depth (S085 P1 follow-up): sample i
+ * uses d_i = d0 + (i + 1) x step (Q15), G = (32768 - d) + ((d x mod) >> 15),
+ * out = SSAT16((car x G) >> 15). Written independently of osc_ringSample().
+ */
+static int16_t ring_ref(int16_t car, int16_t mod, int32_t d)
 {
-    const int32_t v = ((int32_t)car * (k + (int32_t)mod)) >> 15;
+    const int32_t g = (32768 - d) + ((d * (int32_t)mod) >> 15);
+    const int32_t v = ((int32_t)car * g) >> 15;
     return (int16_t)(v > 32767 ? 32767 : (v < -32768 ? -32768 : v));
 }
 
-/* R1. Break: >> 14 in osc_ringSample(); K taken from amt instead of 1 - amt. */
+/*
+ * R1 (law, every carrier family, constant and ramped depth), R2 (the ramp:
+ * per-sample depth, d0 = d1 snaps, depth 0 is the carrier exactly), R3 (the
+ * integer law against the float law car x (1 - d) + car x mod x d within 2
+ * LSB). Breaks: >> 14 in osc_ringSample(); the depth taken at i instead of
+ * i + 1; the step ignored; (1 - d) in place of d.
+ */
 static void test_ring(void)
 {
     static const uint8_t waves[] = { SINE, TRI, SAW, REC, NOISE, CRASH,
@@ -147,9 +159,10 @@ static void test_ring(void)
     static const uint32_t incs[] = { 0x00800000u, 0x07000000u, 0x30000000u };
 
     for (unsigned w = 0u; w < 8u; ++w)
-     for (unsigned a = 0u; a < 5u; ++a)
-      for (unsigned p = 0u; p < 3u; ++p)
-       for (unsigned interp = 0u; interp < 2u; ++interp) {
+     for (unsigned a0 = 0u; a0 < 5u; ++a0)
+      for (unsigned a1 = 0u; a1 < 5u; ++a1)
+       for (unsigned p = 0u; p < 3u; ++p)
+        for (unsigned interp = 0u; interp < 2u; ++interp) {
         const uint8_t isSample = (uint8_t)(waves[w] >= OSC_SAMPLE_START);
         const uint32_t ph = isSample ? (p == 2u ? (4090u << 17) : ((100u + 997u * p) << 17))
                                      : phases[p];
@@ -157,7 +170,9 @@ static void test_ring(void)
         OscInfo ref = make_osc(waves[w], ph, inc, (uint8_t)(w == 7u));
         OscInfo dut;
         int16_t mod[N], car[N], out[N];
-        const int32_t k = osc_ringK(amts[a]);
+        const int32_t d0 = osc_ringDepthQ15(amts[a0]);
+        const int32_t d1 = osc_ringDepthQ15(amts[a1]);
+        const int32_t step = (d1 - d0) / (int32_t)N;
         uint32_t rng;
 
         if (interp && waves[w] >= CRASH)
@@ -170,20 +185,25 @@ static void test_ring(void)
             mod[i] = (int16_t)(golden_rand(&host_rng) >> 16);
         mod[0] = -32768;
         mod[1] = 32767;
-        if (amts[a] == 0.0f)       /* amt 0: the modulator block (gain amt) is 0 */
-            memset(mod, 0, sizeof(mod));
         rng = host_rng;
         calcNextOscSampleBlock(&ref, car, N, 1.0f);
         host_rng = rng;
-        calcNextOscSampleRingBlock(&dut, mod, out, N, k);
+        calcNextOscSampleRingBlock(&dut, mod, out, N, d0, step);
         for (unsigned i = 0u; i < N; ++i) {
-            if (out[i] != ring_ref(car[i], mod[i], k))
-                fail("R1 ring law", w, a, i);
-            if (amts[a] == 0.0f && out[i] != car[i])
-                fail("R1 amt 0 is the carrier", w, p, i);
+            const int32_t d = d0 + (int32_t)(i + 1u) * step;
+            const double law = (double)car[i] * (1.0 - d / 32768.0) +
+                               (double)car[i] * (double)mod[i] * d / (32768.0 * 32768.0);
+            const double sat = law > 32767.0 ? 32767.0 : (law < -32768.0 ? -32768.0 : law);
+
+            if (out[i] != ring_ref(car[i], mod[i], d))
+                fail(step ? "R2 ramped ring law" : "R1 ring law", w, a0 * 5u + a1, i);
+            if (fabs((double)out[i] - sat) > 2.0)
+                fail("R3 integer law vs float law", w, a0 * 5u + a1, i);
+            if (d0 == 0 && d1 == 0 && out[i] != car[i])
+                fail("R2 depth 0 is the carrier", w, p, i);
         }
         if (dut.phase != ref.phase || dut.output != ref.output)
-            fail("R1 oscillator state", w, a, p);
+            fail("R1 oscillator state", w, a0 * 5u + a1, p);
        }
     host_interp_on = 0u;
 }
@@ -394,12 +414,14 @@ static void test_maps(void)
     if (osc_syncDepthQ30(-1.0f) != 0) fail("M1 depth < 0", 0u, 0u, 0u);
     if (osc_syncDepthQ30(2.0f) != 0x40000000) fail("M1 depth > 1", 0u, 0u, 0u);
     if (osc_syncDepthQ30(NAN) != 0) fail("M1 depth NaN", 0u, 0u, 0u);
-    if (osc_ringK(0.0f) != 32768) fail("M1 K at 0", 0u, 0u, 0u);
-    if (osc_ringK(1.0f) != 0) fail("M1 K at 1", 0u, 0u, 0u);
-    if (osc_ringK(0.5f) != 16384) fail("M1 K at 0.5", 0u, 0u, 0u);
-    if (osc_ringK(0.25f) != 24576) fail("M1 K at 0.25", 0u, 0u, 0u);
+    if (osc_ringDepthQ15(0.0f) != 0) fail("M1 ring depth at 0", 0u, 0u, 0u);
+    if (osc_ringDepthQ15(1.0f) != 32768) fail("M1 ring depth at 1", 0u, 0u, 0u);
+    if (osc_ringDepthQ15(0.5f) != 16384) fail("M1 ring depth at 0.5", 0u, 0u, 0u);
+    if (osc_ringDepthQ15(0.25f) != 8192) fail("M1 ring depth at 0.25", 0u, 0u, 0u);
+    if (osc_ringDepthQ15(-1.0f) != 0) fail("M1 ring depth < 0", 0u, 0u, 0u);
+    if (osc_ringDepthQ15(2.0f) != 32768) fail("M1 ring depth > 1", 0u, 0u, 0u);
+    if (osc_ringDepthQ15(NAN) != 0) fail("M1 ring depth NaN", 0u, 0u, 0u);
     if (osc_syncDepthQ30(0.25f) != 0x10000000) fail("M1 depth 0.25", 0u, 0u, 0u);
-    if (osc_ringK(NAN) != 32768) fail("M1 K NaN", 0u, 0u, 0u);
     if (osc_syncRatioQ16(100u, 0u) != 0u) fail("M1 ratio clock 0", 0u, 0u, 0u);
     if (osc_syncRatioQ16(0x01000000u, 0x01000000u) != 65536u) fail("M1 ratio 1", 0u, 0u, 0u);
     if (osc_syncRatioQ16(0xffffffffu, 1u) != 4294967040u) fail("M1 ratio clamp", 0u, 0u, 0u);

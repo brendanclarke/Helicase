@@ -20,12 +20,20 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
-**Current working source**: **Session 084 (roll fix-up) is closed**
-(2026-10-26) on `dev-ph7-voice_expansion`: base commit `91265e9c` (code =
-`59406a4`, the S083 end), the S084 code and close-out documents uncommitted.
-**Hardware verification of S084 (V1–V7) is pending and gates S085.** Record:
-`knowledge_files/log_archive/084_SESSION_HANDOFF_LOG.md`; carry-over
-`knowledge_files/volatile/S078_WORKING_NOTES.md`.
+**Current working source**: **Session 085 (Drum `snc`/`rng` mod modes) is
+closed** (2026-10-27) on `dev-ph7-voice_expansion`:
+- **Commits:** planning `1ea234ea`, pre-implementation `b450d76a`,
+  implementation `8812bffd`.
+- **Uncommitted:** the follow-ups (mod envelope, `rng` depth ramp), the F1/F4
+  doc fixes and the close-out documents.
+- **Records:** `knowledge_files/log_archive/085_SESSION_HANDOFF_LOG.md`;
+  carry-over `knowledge_files/volatile/S078_WORKING_NOTES.md` (rewritten as
+  the S085 → S086 notes).
+- **Next:** S086 from `S086_P1_OSC_TYPE_EXPANSION.md` (root).
+- **Hardware:** S085 P1 passed ("checks out completely fine"); the `rng` ramp
+  re-test was not reported before the close. The S084 matrix V1–V7 is still
+  recorded as open (confirm closed or waived).
+
 The S083 record is `knowledge_files/log_archive/083_SESSION_HANDOFF_LOG.md`;
 authority: `MIDI_SPEC.md` (the complete MIDI use and code reference, Parts
 I–III). `Core/MIDI/` was rebuilt as the single-role modules listed under
@@ -42,6 +50,31 @@ I–III). `Core/MIDI/` was rebuilt as the single-role modules listed under
 - **Build at S084 close (DEV config):** `text=609,288`, `data=424`,
   `bss=430,200`; flash payload 609,712 B of 753,664 (**143,952 B free**).
   `bss` +88 B vs S083 (approved +87 B, user 2026-10-26; 1 B alignment).
+- **Build at S085 close (DEV config):** `text=613,536`, `data=424`,
+  `bss=430,296`; flash payload 613,960 B of 753,664 (**139,704 B free**);
+  ITCM 7,792 / 16,384 B (S084: 4,168); `DrumVoice` 596 B (`runtime_slots`
+  7,152 B). RAM approved by the user (S085 plan r3, ramp +48 B confirmed).
+- **Session 085 in brief** (`085_SESSION_HANDOFF_LOG.md`;
+  `INSTRUMENTS_DSP_REFERENCE.md` §5.1.1, §6.1, §8, §9.3, §10):
+  - **First attempt, rolled back:** the full oscillator cherry-pick (types
+    `pwm/smp/slp/wtb`, run modes, render pool) hit 100 % CPU on hardware.
+    Its tree is `Helicase-dev-ph7-voice-pwm-spike/` (repo root, `4ad2f850`,
+    post-mortems `ef7d5445`), reference only.
+  - **P1:** Drum `osc2_mod_type` (`mixOscs` → `modMode`) = `fm mix snc
+    rng` (0–3; other bytes play `fm`).
+    - **`snc`:** the FM-page oscillator is not rendered; `syncClock` at its
+      frequency builds a per-block reset list; sync copies of the
+      Sin/Tri/Saw/Rec/Crash loops (noise and user-sample slaves unsynced;
+      crash and user-sample masters act as noise); only the slave is heard.
+    - **`rng`:** the ring law folded into per-waveform carrier copies.
+    - **Follow-ups:** `snc`/`rng` depth = amt² × the mod (PitchMod decay)
+      envelope, the `fm` response (`Drum_modEnvDepth()`); the `rng` depth is
+      ramped per sample (`ringDepthQ15`), snapped after a trigger
+      (`ringSnap`).
+    - **Code placement:** all new code in `.itcm.s085`, `noinline,
+      noclone`; `fm`/`mix` loops byte-identical (`elf_osc_check`).
+  - **Menu:** `mixFmNames`/`menu_getMixFmName()`; MIDI 2 = `snc`, 3–127 =
+    `rng`.
 - **Hardware (user):** the S083 P1 build was tested ("seems ok", leading to
   the P2 follow-ups) and the final build "checks out" (2026-10-22). S081 and
   S082 passed their checks (2026-10-21). Open since S082: F5 (Scene 2 Case-3
@@ -71,12 +104,13 @@ I–III). `Core/MIDI/` was rebuilt as the single-role modules listed under
   ran twice: the first tree (roll fix-up + voice expansions P1–P5) went over
   the voice CPU budget and froze on hardware, so it was rolled back whole;
   the roll fix-up was re-implemented alone. The abandoned tree is the
-  **spike**, `../Helicase-dev-ph7-spike/` (own repository, `26fb7c3`),
-  reference only: `S084_POST-MORTEM.md` there sets the plan — **S085**
-  oscillator/modulation-mode cherry-pick (`S085_OSC_MOD_CHERRYPICK.md`),
-  **S086** the effects chain inside an 88-cycle per-voice budget
-  (`S086_EFFECTS_CHAIN_POST_MORTEM_EVAL.md`). Copy only the hunks a session
-  document names. One roll engine on the 96-PPQ master tick:
+  **spike**, now `Helicase-dev-ph7-spike/` in the repository root (own
+  repository, `26fb7c3`, `.gitignore`d), reference only.
+  `S084_POST-MORTEM.md` there planned S085 as the oscillator cherry-pick;
+  that attempt failed, and S085 became the staged plan above. The effects
+  chain (`S086_EFFECTS_CHAIN_POST_MORTEM_EVAL.md`) moved after the
+  oscillator stages. Copy only the hunks a session document names. One roll
+  engine on the 96-PPQ master tick:
   - **P1:** a step roll's length is a time window (`seq_rollWindow[7]`,
     interval × fill from the step's or deferred fire), not a hit count.
     A carry fires no hit, leaves the accumulator and rhythm position
@@ -126,7 +160,7 @@ Session 082 in one paragraph:
 
 **Permanent authority:**
 
-- `knowledge_files/log_archive/084_SESSION_HANDOFF_LOG.md`, `083_…`, `082_…` (and 081 —
+- `knowledge_files/log_archive/085_SESSION_HANDOFF_LOG.md`, `084_…`, `083_…`, `082_…` (and 081 —
   written after S082 —, 080, 079, 078, 077, 076, 075, 074, 073, 072);
 - `knowledge_files/specification_reference/COPYCLEAR_UTILITIES.md` (new in
   S075);
@@ -181,6 +215,16 @@ Session 082 in one paragraph:
   `LXR1_CONVERTERS_IMPLEMENTATION.md`, `LXR2_CONVERTERS_IMPLEMENTATION.md`
   are superseded by `084_SESSION_HANDOFF_LOG.md` and the specifications
   (the user deletes them; the converter manuals stay in `tools/`).
+- The two root S085 P1 task documents (`S085_P1_OSC_MOD_SNC_RNG.md`,
+  `S085_P1_OSC_MOD_IMPLEMENTATION.md`) are superseded by
+  `085_SESSION_HANDOFF_LOG.md` and the specifications (the user deletes
+  them; versions in `b450d76a` (plan r4, schedule) and `8812bffd` (schedule
+  with the implementation log)). The S085 cherry-pick
+  inputs (`S085_OSC_MOD_CHERRYPICK.md`, `S085_SAMPLE_INDEX_SPEEDUP.md`) and
+  `S086_P1_OSC_TYPE_EXPANSION.md` stay until S086 is done.
+- `tools/dsp_test/frozen85/` (S085 snapshot + `elf_osc.txt`) is the
+  reference for `oscmod_identity` and `elf_osc_check`. S086 adds its own
+  `frozen86/` (do not refreeze `frozen/`, the pre-S073 reference).
 - The four root `S079_*.md` task documents (`S079_P1_STEP_CONDITIONS_SPECIALS.md`,
   `S079_P1_IMPLEMENTATION.md`, `S079_P2_ROLL_FOLLOWUP_REMEDIATION.md`,
   `S079_P2_IMPLEMENTATION.md`) are superseded by `079_SESSION_HANDOFF_LOG.md`
@@ -228,6 +272,35 @@ must not allocate those rings, cursors, or timing records.
   against the worst-case Scene; the user accounts for it on the `cpu`
   widget. Do not generalise this exception to anything else.
 
+## Oscillator work under the CPU rule (user, S085) — binding
+
+- **"Absolutely no increase in CPU cycles overall."** The gate: the dearest
+  setting of a voice in any mode must not exceed that voice's dearest
+  setting before the change. Per-same-wave comparisons are reported only.
+  - Freeze the ceiling figures before replacing a loop that sets them
+    (S086 replaces the v1 user-sample loops).
+  - At the S085 close the Drum ceiling is `fm` with user samples, ≈ 90 per
+    sample standalone / ≈ 92 linked.
+- **Proof:**
+  - `fpseq.py` counts on the standalone object **and** the linked ELF;
+  - `oscmod_identity` + `elf_osc_check` (the old loops unchanged);
+  - a host test with break proofs;
+  - then the user's device check (six-slot worst-case Scene, `cpu` widget,
+    underruns).
+  - No DEV cycle probe (user, S085 Q2).
+- **Code rules:**
+  - never edit an existing oscillator loop to add a feature; add copies per
+    waveform and use;
+  - new ITCM code in its own `.itcm.sNNN` subsection, `noinline, noclone`;
+  - no new constant-argument calls into `calcNextOscSampleBlock()` (LTO
+    re-clones it; call the leaves);
+  - per-sample ramps for per-block amplitude parameters.
+- **Drum `modOsc` is never reset on a trigger** (any mode). Do not change it
+  unless the user tests it and asks (S085 Q6b).
+- **`snc`/`rng`/`fm` share the amt² × mod-envelope response.** The `rng`
+  depth snaps after a trigger; **in S087 the free-run run mode is to try
+  "ramp always"** (user).
+
 ## Load/Save Slot Scrolling Policy (user, repeated 2026-10-19) — binding
 
 - **Scrolling a slot number (encoder or endless pot) must never block or lag.**
@@ -260,18 +333,28 @@ must not allocate those rings, cursors, or timing records.
 
 ## Volatile Notes
 
-**Session 084 is closed.** Durable record: `084_SESSION_HANDOFF_LOG.md`;
-roll engine, live overlay engine, external clock, roll recording:
-`PATTERN_DYNAMIC_STACK.md` §6 and §6.7.4; overlay gesture lifecycle:
-`MODULE_INTERCHANGE_SPEC.md` "BAR overlay trigger engine"; MIDI view:
-`MIDI_SPEC.md`. Carry-over notes:
-`knowledge_files/volatile/S078_WORKING_NOTES.md` (rewritten as the S084 →
-S085 notes). Short points:
+**Session 085 is closed.** Durable record: `085_SESSION_HANDOFF_LOG.md`;
+Drum mod modes and the oscillator sync/ring family:
+`INSTRUMENTS_DSP_REFERENCE.md` §5.1.1, §6.1; costs §8 and
+`CPU_USE_DSP_AUDIT.md` items 36–40. Carry-over notes:
+`knowledge_files/volatile/S078_WORKING_NOTES.md` (rewritten as the S085 →
+S086 notes). Session 084 (roll fix-up) is in `084_SESSION_HANDOFF_LOG.md`.
+Short points:
 
-* **Next:** run the S084 hardware matrix V1–V7
-  (`084_SESSION_HANDOFF_LOG.md` §9.2), then S085 from the spike's
-  `S085_OSC_MOD_CHERRYPICK.md`. Keep `../Helicase-dev-ph7-spike/` until
-  S086 no longer needs it.
+* **Next:** S086 oscillator type expansion from
+  `S086_P1_OSC_TYPE_EXPANSION.md`:
+  - stages: stock waves, the sample rework, wavetables, the optimizer, then
+    a `pwm` evaluation;
+  - **menu (user):** `pos` (`Oscilltr` `Position`) is the fourth cell of
+    the first oscillator screen; `typ` (and S087's `run`) go on the second
+    screen.
+  - **Answer its open questions Q1–Q11 first.**
+* **Keep until S086 is done:** `S085_OSC_MOD_CHERRYPICK.md`,
+  `S085_SAMPLE_INDEX_SPEEDUP.md`, `S086_P1_OSC_TYPE_EXPANSION.md`,
+  `Helicase-dev-ph7-spike/` and `Helicase-dev-ph7-voice-pwm-spike/` (all in
+  the root). `S085_P1_OSC_MOD_SNC_RNG.md` and
+  `S085_P1_OSC_MOD_IMPLEMENTATION.md` are carried by the 085 log and the
+  specs (disposable).
 * **Import tools (host only, never hardware-tested):**
   `tools/lxr1_converters/` (LXR1 `.snd` → Kit, `.pat` → PAT4, `.all`/`.prf`
   → Banks; the 2013 factory kits use page-reference LFO/velocity targets)
@@ -292,8 +375,9 @@ S085 notes). Short points:
   (LFO one-shots, deferred swap fixes, swap trace `v`, elastic Effect
   contract); the LXR1 converter questions (`--partial-rolls` default, empty
   patterns as Scenes, retiring `tools/convert_legacy_kits.py`).
-* **`.gitignore`** has an unused `Helicase-dev-ph7-spike/` entry (the spike
-  moved next to the repository); harmless.
+* **`.gitignore`** ignores `Helicase-dev-ph7-spike/` (it is back in the
+  root); `Helicase-dev-ph7-voice-pwm-spike/` is not ignored (it shows as
+  untracked).
 * **Still open from S082:** F5 Scene 2 Case-3 invalidation (instrumented);
   P3 A2 frozen-screen blink loss (low). P3 A1 is fixed (S083 Q2).
 * **S082 binding rules** (Load/Save repaint coalescing, active Scene never
@@ -1455,16 +1539,16 @@ and may contain historical snapshots as noted below.
 | `AUTOSAVE.md` | Implemented scalar HCPR and per-Scene PAT4 hidden A/B formats, boot readers, ownership, dirty masks, writer lifecycle, power-loss behavior (including torn records), and validation status, including the S072 v3 Effect region, the S074 bus compressor cells 41..44, the S074 torn-record fix and the `V` flag layout, (S075) reserved cell 7, FX-send Morph cells 45..50 (no migration) and the copy/clear suspension gates, (S077) the snapshot gate, (S078) the track Morph endpoint cells 51..71, and (S080) the Scene chain cells 72..75 and the restore-loop `continue` fix. Updated through Session 080. | Changing AutoSave format, boot restore, dirty hooks, capture, scheduling, or recovery. |
 | `COPYCLEAR_UTILITIES.md` | Phase 6 copy/clear (S075; S076 morph copy/reset and reload scene; S077 background-region snapshot, Scene morph fan-out, bar-to-step; S078 track run mode and track Morph endpoints in track/morph copy/clear, STEP pot clears; S080 Loopable flag in track copy/clear, Scene chain in Scene settings copy/clear): mental model, terms, gestures by mode, operation lifecycle, sources/ranges, every copy and clear selection, pot clears, screens/LEDs, fan-out and the present rule, architecture and entry points, the service tick and suspension, the name-buffer loan, Pattern engines (exclusive boundary, swap block, raw block API, sliding compaction, paste/clear/region engines, early triggers), Scene-level executors, HCNAMES names, trace stage `c` layouts, verification list, resources, limits, how to modify, and a map of the `spec §N`/decision tags used in code comments. | Changing copy/clear, the Pattern pool rewrite rules, or reading a stage-`c` trace. |
 | `BANK_PRESET_ARCHITECTURE.md` | Hierarchy overview (Bank → Scene → Kit → Instrument), BankData voice-edit mask, SceneData parameter images, morph engine, runtime overlay architecture, Scene mod targets, `parameter_values[]` legacy bridge, dirty marking, boot restore order, the Scene target table (incl. `fxm` and the S078 track targets 405..425), Effect overlays, the S072 edit-mask layout gate, the S074 bus compressor settings and the Settings-Load bulk-apply hazard (O1), (S075) the copy/clear edit-mask rules, St1/compressor defaults, FX-send Normal/Morph endpoints, VOICE Morph views and the automation-priority rules, (S076/S077) override clear rules and per-track Scene playback, (S078) track Morph endpoints, the track effective-value architecture, the STEP Morph view and the project-wide Morph-view rule, and (S080) the Scene chain settings, the S080 `parameter_values[]` Globals/mirrors and their dirty marking. Updated through Session 080. | Understanding parameter storage, morph interpolation, runtime overlays, Scene activation, or dirty marking. |
-| `dsp_instruments_effects/CPU_USE_DSP_AUDIT.md` | DSP performance audit (S074 cost additions items 27–31, S075 items 32–35): the Session 073 cost audit (findings F1–F10, sound classes S0–S4, checked-and-rejected ideas) above the 2026-05 historical audit (render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA), and the ordered optimization record (items 1–26, including the S073 results). | Investigating audio underruns or planning an optimization. For how the DSP works now, use the two DSP references. |
+| `dsp_instruments_effects/CPU_USE_DSP_AUDIT.md` | DSP performance audit (S074 cost additions items 27–31, S075 items 32–35, S085 items 36–40: `snc`/`rng`, the ramp, the rejected first S085 attempt): the Session 073 cost audit (findings F1–F10, sound classes S0–S4, checked-and-rejected ideas) above the 2026-05 historical audit (render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA), and the ordered optimization record (items 1–26, including the S073 results). | Investigating audio underruns or planning an optimization. For how the DSP works now, use the two DSP references. |
 | `DEV_MODES.md` | Screen-only diagnostic versus file-only logging contract, current `bootlog.bin`/`asavetrc.bin` formats (including the S074 `V` flag layout and the S075 copy/clear stage `c`), the stall-detection sites (the drain is progress-aware since S074), the BC18 settings-page check, duplicate limitation, and failed unified-log warning. | Adding or interpreting diagnostics, trace, or logging output. |
 | `dsp_instruments_effects/EFFECTS_BUS_REFERENCE.md` | (S078: FX sequencer Q8.8 DDA on the 128-position step-scale curve, `.fx` token→CC map.) (S081: R13 resolution — menuHold > lock > overlay > menu, one-step Morph lane, markers/owners removed; FX realign; live FX-sequence erase.) As-built Phase 5 Effect system through S075 (registry `off/flt/cbt`, the page hook/layout contract, the automation-underline rule, CrumpBit's page; S075 Effect copy/clear and fan-out, the pan rule, full views, the SHIFT+TRACK overlay): module map, signal flow and fader modes, type contract and registry self-check codes, retained data and type change, resolution order, DTCM arena and handoff, Effect page, fan-out and layout gate, FX sequencer, IDs/automation/LFO, `.fx`/HCNAMES/AutoSave, lifecycle, design rationale, debugging, and the add-a-type tutorial. | Adding an Effect type or changing anything in the Effect/bus/FX-sequencer path. |
 | `FILESYSTEM_SPEC.md` | Current product storage specification through Session 083 (S083: `settings.cfg` G off/MRT list/`perf_vel_*`/`lines=26`, the new root `midilrn.cfg` MIDI Learn file with its safe write and boot recovery, `sceneset.scg` track `midi_channel` 0..17 / `midi_note` 0..128; S081: PAT4 track byte 5 `asm`, `quantisation` 5 = `trk`; S080: settings.cfg `perf_*`/`scd`/`qcd`/`qac` keys and `lines=24`, `sceneset.scg` chain lines 18/19, PAT4 track byte 4 loop exclusion; S078: PAT4 `track_scale` as a step-scale CC and run-mode byte 3, `sceneset.scg` `track_morph_*` lines 15..17, `.fx` `step_scale` token→CC map, the offline converter; earlier: the `sceneset.scg` line table with the `bus_comp_*` keys, `fader_setting` 0..3, retired `voice_decimation_all` and `fx_send_morph`; the `cbt` `.fx` keys; the copy/clear name-buffer loan and `HNcU`; retained MIDI endpoint entries): root layout, typed 161-row HCNAMES, PAT4, `.fx` v2 Effect children, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, boot restore, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
 | `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 083 (S083: the "Core/MIDI" section and data flow, shared menu commit, transport/per-track Scene APIs, overlay entry points and one overlay state, Learn gesture, SHIFT+REC page, `midilrn.cfg` APIs; S081: the "Core/Sequencer/LiveRecord (S081)" section, live-record/ramp/reset/R12 Sequencer services, MidiVoiceControl reset mask, PatternData/Service record ops and target override, EffectsManager R13 and live FX erase, REC/erase/overlay buttonHandler rows, Menu record hooks; S082: background Bank load; S080: the "PERF performance surface" section — button map, latched menus, pages, LED rules, scene change execution, how to add a PERF gesture — plus looper/scene/chain sequencer APIs, `LED_LAYER_FAST`, chain editor and Loopable APIs; S078: the 128-position StepScale contract, sequencer DDA/shuffle/run-mode/effective-cache helpers, track Morph/override APIs, the STEP Morph view, STEP held-step overlay, multi-step broadcast, `copyClear_isClearMode()`; earlier: including EffectsManager, FxBuffer, menuEffects and its S074 page extensions, BusCompressor, StepScale, the S075 CopyClear module, the FX-send Morph/overlay APIs and the automation-priority guard) for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
 | `MIDI_SPEC.md` | Complete MIDI use and code reference, current as of S083 close: Part I behaviour (settings, receive pipeline, note map, CC1/CC2/NRPN, Learn and `midilrn.cfg`, PC/CC0, transport, transmit, Scene 17, storage); Part II code reference (module map and data flow, every `Core/MIDI/` module's API and internals, integration points in menu/sequencer/buttonHandler/Preset/Effects/filesystem/USB, contexts and concurrency, extension recipes, host test and diagnostics, RAM, binding rules); Part III decisions (F/Q/C ids). | Any MIDI work: behaviour, channels, note map, NRPN/Learn, transport, TX, or adding a MIDI feature. |
-| `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
+| `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist; (S085) interpolation in the Drum `snc`/`rng` paths. | Changing oscillator interpolation or its global save/load behavior. |
 | `PATTERN_DYNAMIC_STACK.md` | Dynamic Pattern storage (address array, pool, bitmap), PAT4, Pattern Stack Service, step automation encoding and drain, including S072 Effect targets and Effect step markers, (S075) the swap block, exclusive boundary, raw block API, sliding compaction and the automation-priority rule (§6.2a), (S077) the background region, (S078) per-track timing as played — continuous step scale, DDA, shuffle, run modes, effective cache, track automation (§6.4) — and STEP-page multi-step editing/track automation overlay/underlines (§6.3a), (S079) the 7-special block, trigger conditions and roll engine, and (S080) the 41-entry conditions, the master-clock-anchored PERF looper (§6.5), scene change/queue timing and scene chaining (§6.6) and the `track_loop_exclude` byte. (S081) the step reset rule and deferred automation (§6.1/§6.2), R12 (§6.2a), automation ramps `asm` (§6.2b), live record and live erase (§6.7), looping while recording, the 96-PPQ roll table, `qnt trk`, PAT4 byte 5, the corrected queue format and the live-record service ops/target override (§12). Updated through Session 081 (with S082 Scene 17 notes). | Changing Pattern storage, step automation, or the automation drain. |
 | `STORAGE_SRAM_MANIFEST.md` | (S083 MIDI statics have per-item rows; header bullets carry S081–S083 deltas. Ledger table otherwise current through S080; S081 and S082 changes in the header bullets and §8.2.) On-chip storage map (renamed from `SRAM_MANIFEST.md` in S073; S074 and S075 ledgers, sector 6 contents, the swap block and name-buffer loan): program flash window, image layout, linker guards, boot image check, bootloader facts and growth paths; sample flash layout and guards; the static RAM ledger (SRAM1, DTCM and the FX arena, ITCM contents, DMA region); SRAM1 owners; the reservation and approval policy. SD card storage is only referenced. | Changing retained state, flash layout or sample storage, adding caches/names, or evaluating memory cost. Update it in the same change. |
-| `dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md` | Instrument DSP (S073; S074 sidechain tap in the trigger funnel; S075 runtime-write priority: automation, menu, MIDI): timing model and constant-CPU rule, per-block sequence, tagged runtime slots, descriptors and the write path (special-writer tags), the four voice engines, oscillator/filter/envelope/transient/distortion building blocks, LFO/velocity/Morph/automation modulation, measured costs, and how to add parameters, writers, modes and instrument types. | Changing or extending voices, parameters, modulation or their cost. |
+| `dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md` | Instrument DSP (S073; S074 sidechain tap in the trigger funnel; S075 runtime-write priority: automation, menu, MIDI; S085: §5.1.1 Drum mod modes `fm mix snc rng`, the mod envelope, the `rng` ramp; §6.1 the sync/ring oscillator family and its placement rules; §8 per-mode costs; §9.3 adding an oscillator mode or type under the CPU rule; §10 S085 pitfalls): timing model and constant-CPU rule, per-block sequence, tagged runtime slots, descriptors and the write path (special-writer tags), the four voice engines, oscillator/filter/envelope/transient/distortion building blocks, LFO/velocity/Morph/automation modulation, measured costs, and how to add parameters, writers, modes and instrument types. | Changing or extending voices, parameters, modulation or their cost. |
 | `dsp_instruments_effects/EFFECTS_MIXER_DSP_REFERENCE.md` | Mixer and Effect DSP (S073, S074: CrumpBit DSP, the master bus compressor, `xfd`; S075: pan laws centred on 63, global decimation removed, FX-send Morph): number formats and headroom, jack routing, fader modes, dry/send arithmetic, the FX bus and return, output buffers, DMA pack and MPU, the StereoFilter DSP, the DTCM arena contract for buffer-using Effects, measured costs, and how to add Effect DSP or change the mixer and output pipeline. | Changing the mixer, the FX bus, an Effect's DSP, or the output path. |
 
 ---

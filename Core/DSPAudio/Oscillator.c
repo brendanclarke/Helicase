@@ -997,20 +997,31 @@ static inline __attribute__((always_inline)) uint32_t osc_syncPull(
 }
 
 /*
- * The ring law for one sample (S085 P1).
+ * The ring law for one sample (S085 P1; per-sample depth, S085 P1 follow-up).
  *
- * What:       SSAT16((car x (ringK + mod)) >> 15). With mod = modulator x
- *             amt and ringK = (1 - amt) x 32768 this is car x (1 - amt) +
- *             car x modulator x amt (plan K5). The saturation catches the
- *             single full-scale case (-32768 x -32768 at amt 1).
- * Inputs:     car (the carrier sample), mod (the modulator block sample),
- *             ringK.  Outputs: the stored sample.
- * Accessors:  the ring copies below; tools/dsp_test osc_mod (R1).
+ * What:       G = (32768 - d) + ((d x mod) >> 15); out = SSAT16((car x G) >>
+ *             15). With mod = the modulator at gain 1 and d = the ring depth
+ *             in Q15 (0..32768), this is car x (1 - d) + car x modulator x d
+ *             (plan K5). d = 0 gives G = 32768, so the output is the carrier
+ *             exactly, whatever mod is. The saturation catches the single
+ *             full-scale case (car -32768, G -32768 at d = 1, mod = -32768).
+ * Why:        d is ramped per sample by the caller (the ring copies below), so
+ *             the ring amount no longer steps once per block. The per-block
+ *             step was audible as a 1.4 kHz zipper ("crunchy") once rng
+ *             followed the mod envelope.
+ * Inputs:     car (the carrier sample), mod (the modulator sample, gain 1),
+ *             depthQ15 (this sample's d).
+ * Outputs:    the stored sample.
+ * Range:      |d x mod| <= 2^30; G lies in [-32768, 32768]; car x G fits
+ *             int32.
+ * Accessors:  the ring copies below; tools/dsp_test osc_mod (R1, R2).
  */
 static inline __attribute__((always_inline)) int16_t osc_ringSample(
-	const int16_t car, const int16_t mod, const int32_t ringK)
+	const int16_t car, const int16_t mod, const int32_t depthQ15)
 {
-	return (int16_t)__SSAT(((int32_t)car * (ringK + (int32_t)mod)) >> 15, 16);
+	const int32_t gain = (32768 - depthQ15) + ((depthQ15 * (int32_t)mod) >> 15);
+
+	return (int16_t)__SSAT(((int32_t)car * gain) >> 15, 16);
 }
 
 /*
@@ -1252,11 +1263,10 @@ static OSC_S085_LOOP void calcSampleOscSyncBlock(OscInfo* osc, const uint32_t* o
  * One waveform's sync render, without the interpolation check (S085 P1).
  *
  * What:       dispatches Sin/Tri/Saw/Rec/Crash to their sync copies. NOISE
- *             and user samples render through calcNextOscSampleBlock() at
- *             gain 1, unsynced (plan A3/A4). That call repeats its own
- *             interpolation check, which is false here: the caller already
- *             took the interpolation path, or the partner copy has
- *             interpolation cleared.
+ *             and user samples render unsynced through osc_renderPlainWave()
+ *             (the leaf loops at gain 1, plan A3/A4). No interpolation check
+ *             is needed here: the caller already took the interpolation
+ *             path, or the partner copy has interpolation cleared.
  * Inputs:     osc, over[size], ratioQ16, depthQ30, buf[size], size.
  * Outputs:    buf; osc state.
  * Accessors:  calcNextOscSampleSyncBlock(); calcPeriodicInterpSyncBlock().
@@ -1306,9 +1316,8 @@ static OSC_S085_SECTION void osc_renderSyncWave(OscInfo* osc, const uint32_t* ov
  * Inputs:     osc (interpolation active), over[size], ratioQ16, depthQ30,
  *             buf[size], size.
  * Outputs:    buf; osc->phase.
- * Placement:  no INITCM attribute, like calcPeriodicInterpBlock(); the
- *             compiler inlines it into its ITCM dispatcher, as it does
- *             calcPeriodicInterpBlock() into calcNextOscSampleBlock().
+ * Placement:  .itcm.s085 (OSC_S085_SECTION); the compiler inlines it into
+ *             its noinline ITCM dispatcher (OSC_S085_DISPATCH).
  * Accessors:  calcNextOscSampleSyncBlock().
  * Affiliates: calcPeriodicInterpBlock(); osc_interp_a/osc_interp_b scratch.
  */
@@ -1367,16 +1376,19 @@ OSC_S085_DISPATCH void calcNextOscSampleSyncBlock(OscInfo* osc, const uint32_t* 
  * Sine carrier with the ring law (S085 P1).
  *
  * What:       calcSineBlock() with the store replaced by
- *             osc_ringSample(oscOut, modBuf[i], ringK).
- * Inputs:     osc, modBuf[size], buf[size], size, ringK.
+ *             osc_ringSample(oscOut, modBuf[i], d_i).
+ * Inputs:     osc, modBuf[size], buf[size], size, depthQ15,
+ *             depthStepQ15.
  * Outputs:    buf; osc->phase.
  * Accessors:  calcNextOscSampleRingBlock().
  * Affiliates: calcSineBlock(); tools/dsp_test osc_mod R1.
  */
 static OSC_S085_LOOP void calcSineRingBlock(OscInfo* osc, const int16_t* modBuf,
                                             int16_t* buf, const uint8_t size,
-                                            const int32_t ringK)
+                                            const int32_t depthQ15,
+                                            const int32_t depthStepQ15)
 {
+	int32_t ringDepth = depthQ15;
 	uint8_t i;
 	for(i=0;i<size;i++)
 	{
@@ -1392,7 +1404,8 @@ static OSC_S085_LOOP void calcSineRingBlock(OscInfo* osc, const int16_t* modBuf,
 
 		osc->phase = oscPhase + osc->phaseInc;
 
-		buf[i] = osc_ringSample(oscOut, modBuf[i], ringK);
+		ringDepth += depthStepQ15;
+		buf[i] = osc_ringSample(oscOut, modBuf[i], ringDepth);
 	}
 }
 
@@ -1400,8 +1413,9 @@ static OSC_S085_LOOP void calcSineRingBlock(OscInfo* osc, const int16_t* modBuf,
  * Tri/Saw/Rec carrier with the ring law (S085 P1).
  *
  * What:       calcWavetableOscBlock() with the store replaced by
- *             osc_ringSample(oscOut, modBuf[i], ringK).
- * Inputs:     osc, table, modBuf[size], buf[size], size, ringK.
+ *             osc_ringSample(oscOut, modBuf[i], d_i).
+ * Inputs:     osc, table, modBuf[size], buf[size], size, depthQ15,
+ *             depthStepQ15.
  * Outputs:    buf; osc->phase.
  * Accessors:  calcNextOscSampleRingBlock().
  * Affiliates: calcWavetableOscBlock(); tools/dsp_test osc_mod R1.
@@ -1411,8 +1425,10 @@ static OSC_S085_LOOP void calcWavetableOscRingBlock(OscInfo* osc,
                                                     const int16_t* modBuf,
                                                     int16_t* buf,
                                                     const uint8_t size,
-                                                    const int32_t ringK)
+                                                    const int32_t depthQ15,
+                                                    const int32_t depthStepQ15)
 {
+	int32_t ringDepth = depthQ15;
 	uint8_t i;
 	for(i=0;i<size;i++)
 	{
@@ -1425,7 +1441,8 @@ static OSC_S085_LOOP void calcWavetableOscRingBlock(OscInfo* osc,
 		oscOut += frac*(table[osc->tableOffset][next] - oscOut);
 
 		osc->phase = oscPhase + osc->phaseInc;
-		buf[i] = osc_ringSample(oscOut, modBuf[i], ringK);
+		ringDepth += depthStepQ15;
+		buf[i] = osc_ringSample(oscOut, modBuf[i], ringDepth);
 	}
 }
 
@@ -1434,16 +1451,19 @@ static OSC_S085_LOOP void calcWavetableOscRingBlock(OscInfo* osc,
  *
  * What:       calcNoiseBlock(): a new hardware-RNG value on each phase wrap,
  *             held between wraps; the store is replaced by
- *             osc_ringSample(osc->output, modBuf[i], ringK).
- * Inputs:     osc, modBuf[size], buf[size], size, ringK.
+ *             osc_ringSample(osc->output, modBuf[i], d_i).
+ * Inputs:     osc, modBuf[size], buf[size], size, depthQ15,
+ *             depthStepQ15.
  * Outputs:    buf; osc->phase; osc->output.
  * Accessors:  calcNextOscSampleRingBlock().
  * Affiliates: calcNoiseBlock(); GetRngValue() (random.c).
  */
 static OSC_S085_LOOP void calcNoiseRingBlock(OscInfo* osc, const int16_t* modBuf,
                                              int16_t* buf, const uint8_t size,
-                                             const int32_t ringK)
+                                             const int32_t depthQ15,
+                                             const int32_t depthStepQ15)
 {
+	int32_t ringDepth = depthQ15;
 	int i;
 	for(i=0;i<size;i++)
 	{
@@ -1456,7 +1476,8 @@ static OSC_S085_LOOP void calcNoiseRingBlock(OscInfo* osc, const int16_t* modBuf
 			osc->output = (int16_t)(GetRngValue()); //normal pitched white noise
 		}
 
-		buf[i] = osc_ringSample(osc->output, modBuf[i], ringK);
+		ringDepth += depthStepQ15;
+		buf[i] = osc_ringSample(osc->output, modBuf[i], ringDepth);
 	}
 }
 
@@ -1464,16 +1485,19 @@ static OSC_S085_LOOP void calcNoiseRingBlock(OscInfo* osc, const int16_t* modBuf
  * Crash carrier with the ring law (S085 P1).
  *
  * What:       calcSampleOscBlock() with the store replaced by
- *             osc_ringSample(oscOut, modBuf[i], ringK).
- * Inputs:     osc, modBuf[size], buf[size], size, ringK.
+ *             osc_ringSample(oscOut, modBuf[i], d_i).
+ * Inputs:     osc, modBuf[size], buf[size], size, depthQ15,
+ *             depthStepQ15.
  * Outputs:    buf; osc->phase.
  * Accessors:  calcNextOscSampleRingBlock().
  * Affiliates: calcSampleOscBlock().
  */
 static OSC_S085_LOOP void calcSampleOscRingBlock(OscInfo* osc, const int16_t* modBuf,
                                                  int16_t* buf, const uint8_t size,
-                                                 const int32_t ringK)
+                                                 const int32_t depthQ15,
+                                                 const int32_t depthStepQ15)
 {
+	int32_t ringDepth = depthQ15;
 	uint8_t i;
 	for(i=0;i<size;i++)
 	{
@@ -1487,7 +1511,8 @@ static OSC_S085_LOOP void calcSampleOscRingBlock(OscInfo* osc, const int16_t* mo
 		oscOut = (oscOut - 127)*256;
 
 		osc->phase = oscPhase + osc->phaseInc;
-		buf[i] = osc_ringSample(oscOut, modBuf[i], ringK);
+		ringDepth += depthStepQ15;
+		buf[i] = osc_ringSample(oscOut, modBuf[i], ringDepth);
 	}
 }
 
@@ -1496,11 +1521,12 @@ static OSC_S085_LOOP void calcSampleOscRingBlock(OscInfo* osc, const int16_t* mo
  *
  * What:       calcUserSampleOscBlock() (the sample cache, one-shot hold,
  *             looped wrap, interpolation across the loop seam) with the
- *             store replaced by osc_ringSample(oscOut, modBuf[i], ringK).
+ *             store replaced by osc_ringSample(oscOut, modBuf[i], d_i).
  *             Like the plain loop, an empty sample returns without writing
  *             buf (unchanged behaviour, kept for parity).
  * Inputs:     osc (waveform >= OSC_SAMPLE_START), modBuf[size], buf[size],
- *             size, ringK.
+ *             size, depthQ15,
+ *             depthStepQ15.
  * Outputs:    buf; osc->phase; osc sample cache.
  * Accessors:  calcNextOscSampleRingBlock().
  * Affiliates: calcUserSampleOscBlock(); osc_updateSampleCache();
@@ -1510,7 +1536,8 @@ static OSC_S085_LOOP void calcUserSampleOscRingBlock(OscInfo* osc,
                                                      const int16_t* modBuf,
                                                      int16_t* buf,
                                                      const uint8_t size,
-                                                     const int32_t ringK)
+                                                     const int32_t depthQ15,
+                                                     const int32_t depthStepQ15)
 {
 	uint8_t sampleIndex = osc->waveform - OSC_SAMPLE_START;
 	osc_updateSampleCache(osc, sampleIndex);
@@ -1521,6 +1548,7 @@ static OSC_S085_LOOP void calcUserSampleOscRingBlock(OscInfo* osc,
 	const int16_t* sampleData = osc->sampleCacheData;
 	if(sampleSize == 0) return;
 
+	int32_t ringDepth = depthQ15;
 	uint8_t i;
 	for(i=0;i<size;i++)
 	{
@@ -1554,7 +1582,8 @@ static OSC_S085_LOOP void calcUserSampleOscRingBlock(OscInfo* osc,
 		{
 			osc->phase = oscPhase + osc->phaseInc;
 		}
-		buf[i] = osc_ringSample(oscOut, modBuf[i], ringK);
+		ringDepth += depthStepQ15;
+		buf[i] = osc_ringSample(oscOut, modBuf[i], ringDepth);
 	}
 }
 
@@ -1563,13 +1592,12 @@ static OSC_S085_LOOP void calcUserSampleOscRingBlock(OscInfo* osc,
  *
  * What:       calcPeriodicInterpBlock(): both partners rendered plain at
  *             gain 1 into the DTCM scratch, then blended. The blend's store
- *             is replaced by osc_ringSample(blend, modBuf[i], ringK). The
+ *             is replaced by osc_ringSample(blend, modBuf[i], d_i). The
  *             phase follows the plain rule (start + phaseInc x size).
- * Placement:  no INITCM attribute, like calcPeriodicInterpBlock(); the
- *             compiler inlines it into its ITCM dispatcher, as it does
- *             calcPeriodicInterpBlock() into calcNextOscSampleBlock().
+ * Placement:  .itcm.s085 (OSC_S085_SECTION); the compiler inlines it into
+ *             its noinline ITCM dispatcher (OSC_S085_DISPATCH).
  * Inputs:     osc (interpolation active), modBuf[size], buf[size], size,
- *             ringK.
+ *             depthQ15, depthStepQ15.
  * Outputs:    buf; osc->phase.
  * Accessors:  calcNextOscSampleRingBlock().
  * Affiliates: calcPeriodicInterpBlock(); OSC_WAVE_INTERP_MAX_ACTIVE.
@@ -1578,7 +1606,8 @@ static OSC_S085_SECTION void calcPeriodicInterpRingBlock(OscInfo* osc,
                                                          const int16_t* modBuf,
                                                          int16_t* buf,
                                                          const uint8_t size,
-                                                         const int32_t ringK)
+                                                         const int32_t depthQ15,
+                                                         const int32_t depthStepQ15)
 {
 	const uint8_t base = osc->waveform;
 	const uint8_t next = osc->waveInterpNext;
@@ -1586,6 +1615,7 @@ static OSC_S085_SECTION void calcPeriodicInterpRingBlock(OscInfo* osc,
 	const uint32_t startPhase = osc->phase;
 	OscInfo oscA = *osc;
 	OscInfo oscB = *osc;
+	int32_t ringDepth = depthQ15;
 	uint8_t i;
 
 	oscA.waveform = base;
@@ -1600,7 +1630,8 @@ static OSC_S085_SECTION void calcPeriodicInterpRingBlock(OscInfo* osc,
 		const int16_t a = osc_interp_a[i];
 		const int16_t b = osc_interp_b[i];
 		const int16_t out = (int16_t)(a + frac * (b - a));
-		buf[i] = osc_ringSample(out, modBuf[i], ringK);
+		ringDepth += depthStepQ15;
+		buf[i] = osc_ringSample(out, modBuf[i], ringDepth);
 	}
 	osc->phase = startPhase + (osc->phaseInc * (uint32_t)size);
 }
@@ -1608,41 +1639,44 @@ static OSC_S085_SECTION void calcPeriodicInterpRingBlock(OscInfo* osc,
 /*
  * Render one carrier block with the ring law (S085 P1).
  * Contract: Oscillator.h. It mirrors calcNextOscSampleBlock(), including the
- * user-sample range check that returns without writing buf.
+ * user-sample range check that returns without writing buf. Every ring copy
+ * uses d_i = depthQ15 + (i + 1) x depthStepQ15 for sample i, so the block
+ * ends at depthQ15 + size x depthStepQ15 (the caller's next start value).
  */
 OSC_S085_DISPATCH void calcNextOscSampleRingBlock(OscInfo* osc, const int16_t* modBuf,
                                                   int16_t* buf, const uint8_t size,
-                                                  const int32_t ringK)
+                                                  const int32_t depthQ15,
+                                                  const int32_t depthStepQ15)
 {
 	if (osc_waveInterpActive(osc)) {
-		calcPeriodicInterpRingBlock(osc, modBuf, buf, size, ringK);
+		calcPeriodicInterpRingBlock(osc, modBuf, buf, size, depthQ15, depthStepQ15);
 		return;
 	}
 
 	switch(osc->waveform)
 	{
 	case SINE:
-		calcSineRingBlock(osc, modBuf, buf, size, ringK);
+		calcSineRingBlock(osc, modBuf, buf, size, depthQ15, depthStepQ15);
 		break;
 	case SAW:
-		calcWavetableOscRingBlock(osc, sawTable, modBuf, buf, size, ringK);
+		calcWavetableOscRingBlock(osc, sawTable, modBuf, buf, size, depthQ15, depthStepQ15);
 		break;
 	case TRI:
-		calcWavetableOscRingBlock(osc, triTable, modBuf, buf, size, ringK);
+		calcWavetableOscRingBlock(osc, triTable, modBuf, buf, size, depthQ15, depthStepQ15);
 		break;
 	case REC:
-		calcWavetableOscRingBlock(osc, recTable, modBuf, buf, size, ringK);
+		calcWavetableOscRingBlock(osc, recTable, modBuf, buf, size, depthQ15, depthStepQ15);
 		break;
 	case NOISE:
-		calcNoiseRingBlock(osc, modBuf, buf, size, ringK);
+		calcNoiseRingBlock(osc, modBuf, buf, size, depthQ15, depthStepQ15);
 		break;
 	case CRASH:
-		calcSampleOscRingBlock(osc, modBuf, buf, size, ringK);
+		calcSampleOscRingBlock(osc, modBuf, buf, size, depthQ15, depthStepQ15);
 		break;
 	default://sample playback
 		if( osc->waveform - OSC_SAMPLE_START > sampleMemory_getNumSamples() ) return; // return if out of range
 
-		calcUserSampleOscRingBlock(osc, modBuf, buf, size, ringK);
+		calcUserSampleOscRingBlock(osc, modBuf, buf, size, depthQ15, depthStepQ15);
 		break;
 	}
 }

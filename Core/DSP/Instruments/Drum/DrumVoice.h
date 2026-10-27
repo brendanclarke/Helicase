@@ -58,12 +58,16 @@ enum
  * Drum osc2 mod modes: the stored values of osc2_mod_type (S085 P1).
  *
  * What:       DRUM_MOD_FM  0  the carrier phase-modulated by the modulator;
+ *                             FM index ~ amt^2 x env;
  *             DRUM_MOD_MIX 1  carrier x (1 - amt) + modulator x amt;
  *             DRUM_MOD_SNC 2  the carrier hard-synced to a phase clock at
- *                             the FM-page frequency, amt = sync depth; only
+ *                             the FM-page frequency, sync depth d; only
  *                             the carrier is heard;
- *             DRUM_MOD_RNG 3  carrier x (1 - amt) + carrier x modulator x
- *                             amt.
+ *             DRUM_MOD_RNG 3  carrier x (1 - d) + carrier x modulator x d,
+ *                             d ramped per sample (snapped after a trigger).
+ *             d = amt^2 x env (Drum_modEnvDepth()), env = the PitchMod
+ *             decay envelope: fm, snc and rng share one response to amt
+ *             and the envelope (S085 P1 follow-up). mix uses amt alone.
  * Why:        0 and 1 keep their stored meaning, so old kits load unchanged;
  *             2 and 3 are appended (plan K1). Any other byte renders as fm
  *             (plan Q7).
@@ -142,6 +146,23 @@ typedef struct VoiceStruct
 #endif
 
 	/*
+	 * rng depth snap request (S085 P1 follow-up).
+	 *
+	 * What:       set to 1 by Drum_triggerVoice(); the next rng block starts
+	 *             its depth ramp at that block's own depth (no ramp up from
+	 *             the previous hit's tail) and clears it.
+	 * Why:        user choice "snap": a hit starts at full ring depth, as fm
+	 *             starts at full FM depth. The carrier phase is reset on the
+	 *             same trigger, so the jump adds no new discontinuity. When
+	 *             the oscillator run modes return, the free-run mode is to
+	 *             ramp always instead (user, for trial then).
+	 * Accessors:  Drum_triggerVoice() (sets), Drum_calcVoiceSyncBlock() (rng:
+	 *             reads and clears), Drum_initVoice().
+	 * Layout:     sits in the padding after modMode (no size change).
+	 */
+	uint8_t ringSnap;
+
+	/*
 	 * snc phase clock (S085 P1, deviation D2).
 	 *
 	 * What:       the clock that resets the carrier in snc. It is advanced by
@@ -161,6 +182,25 @@ typedef struct VoiceStruct
 	 *             sizeof(DrumVoice), so +8 B per slot).
 	 */
 	uint32_t syncClock;
+
+	/*
+	 * rng depth ramp state (S085 P1 follow-up).
+	 *
+	 * What:       the ring depth d (Q15, 0..32768) reached at the end of the
+	 *             last rng block. The next rng block ramps from here to its
+	 *             own d = osc_ringDepthQ15(Drum_modEnvDepth()) across its
+	 *             samples, then stores the value it reached.
+	 * Why:        a d stepped once per block was audible as a zipper once rng
+	 *             followed the mod envelope ("crunchy"). Storing the reached
+	 *             value (not the target) means integer rounding of the step
+	 *             never accumulates.
+	 * Inputs/Outputs: Q15 depth.
+	 * Accessors:  Drum_calcVoiceSyncBlock() (rng), Drum_initVoice().
+	 * Affiliates: Oscillator.h calcNextOscSampleRingBlock() (depthQ15,
+	 *             depthStepQ15); ringSnap; InstrumentManager.c runtime-slot
+	 *             reserve (2 x sizeof(DrumVoice): +8 B per slot).
+	 */
+	int32_t ringDepthQ15;
 
 	float decimationCnt;
 	float decimationRate;

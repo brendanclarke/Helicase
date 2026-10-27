@@ -254,7 +254,7 @@ osc_mod: | $(GEN)
 	  --out $(GEN)/om_sampleinfo.inc
 	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c --lines 123-124 --out $(GEN)/om_scratch.inc
 	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --func osc_syncDepthQ30 \
-	  --func osc_ringK --out $(GEN)/om_map.c
+	  --func osc_ringDepthQ15 --out $(GEN)/om_map.c
 	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c $(call fn,$(OSC_PLAIN)) \
 	  --out $(GEN)/om_plain.c
 	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c $(call fn,$(OSC_S085)) \

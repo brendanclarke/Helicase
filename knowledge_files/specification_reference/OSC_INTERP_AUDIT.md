@@ -119,3 +119,34 @@ Result:
 - compare OFF vs ON behavior.
 3. Verify persistence:
 - set ON, save globals, power cycle/load globals, confirm ON restored.
+
+## Interpolation in the Drum `snc` and `rng` modes (Session 085)
+
+The Drum mod modes `snc` and `rng` (`INSTRUMENTS_DSP_REFERENCE.md`
+§5.1.1, §6.1) have their own interpolated render paths. Both follow the
+same gate as the plain path: `osc_waveInterpActive()`, a unit granted by
+`modulationNode.c` (at most `OSC_WAVE_INTERP_MAX_ACTIVE` = 2 per block),
+the blend fraction and `next` > base.
+
+- **`rng` carrier (`calcPeriodicInterpRingBlock()`):**
+  - both partners render plain at gain 1 into `osc_interp_a/b` through
+    `osc_renderPlainWave()` (the leaf loops, not `calcNextOscSampleBlock()`;
+    see the D8 note in the DSP reference §6.1);
+  - the ring law with the per-sample depth is applied in the blend loop;
+  - the phase follows the plain rule (start + `phaseInc` × size).
+- **`snc` slave (`calcPeriodicInterpSyncBlock()`):**
+  - both partners render through the sync dispatch from the **same reset
+    list**, so they reset on the same samples. A noise or user-sample
+    partner renders unsynced.
+  - The oscillator phase becomes the base partner's synced phase when the
+    base waveform has a sync copy (Sin/Tri/Saw/Rec/Crash). Otherwise the
+    plain rule applies.
+- **The `snc` master is not rendered.** An LFO on the FM-page `wav` in
+  `snc` still claims an interpolation unit for that oscillator. That costs
+  no CPU, but another voice may lose interpolation in that block (an
+  accepted limit).
+- **Cost:** an interpolated `snc` or `rng` render is two copies + the
+  blend, below the interpolated FM carrier (two FM renders + the blend).
+  The variants are inlined into their ITCM dispatchers.
+- **Future (S086 plan):** wavetable frame blending is to claim the same
+  interpolation units, with stepping as the fallback when none is free.

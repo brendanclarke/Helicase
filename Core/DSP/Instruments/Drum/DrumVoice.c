@@ -148,6 +148,10 @@ void Drum_initVoice(DrumVoice *voice, uint8_t seed_index)
 	 * Accessors: Drum_calcVoiceSyncBlock().
 	 */
 	voice->syncClock = 0u;
+	/* rng depth ramp (S085 P1 follow-up): start dry; the first rng block
+	** after a trigger snaps to its own depth (ringSnap). */
+	voice->ringDepthQ15 = 0;
+	voice->ringSnap = 1u;
 	voice->decimationCnt = 0;
 	voice->decimationRate = 1;
 }
@@ -214,6 +218,16 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 
 
 	DecayEg_trigger(&voice->oscPitchEg);
+	/*
+	 * rng depth snap (S085 P1 follow-up; user choice "snap").
+	 * What: the mod envelope restarts at 1 here, so the next rng block starts
+	 * at its full depth instead of ramping up from the tail. Why: hits start
+	 * at full ring depth, as fm hits start at full FM depth; the carrier phase
+	 * resets on this trigger anyway. One store; no effect in fm/mix/snc.
+	 * Accessors: Drum_calcVoiceSyncBlock() (rng). Future: free-run run mode
+	 * ramps always (user, to try when the run modes return).
+	 */
+	voice->ringSnap = 1u;
 	slopeEg2_trigger(&voice->oscVolEg);
 	voice->velo = vol/127.f;
 
@@ -251,7 +265,20 @@ void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
 		voice->osc.pitchMod += snapVal*voice->transGen.volume;
 	}
 
-	// fm amount with pitch eg
+	/*
+	 * Mod envelope: osc2 mod amount x the pitch envelope (S085 P1 follow-up).
+	 *
+	 * What:       osc.fmMod = amt x env, where env (egPitchVal) is the
+	 *             PitchMod decay envelope: 1 at each trigger, decaying to 0.
+	 *             The PitchMod amount (egPitchModAmount) scales only the
+	 *             pitch sweep, not this.
+	 * Why:        fm reads it as its FM depth on a modulator block already
+	 *             scaled by amt, so the fm response is amt^2 x env.
+	 *             Drum_modEnvDepth() reuses it so that snc and rng follow the
+	 *             same amt^2 x env response.
+	 * Accessors:  calcNextOscSampleFmBlock() (fm); Drum_modEnvDepth() (snc,
+	 *             rng), both in Drum_calcVoiceSyncBlock().
+	 */
 	voice->osc.fmMod = voice->fmModAmount * egPitchVal;
 
 	//calc the osc + noise vol eg
@@ -290,6 +317,34 @@ void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
 }
 
 //---------------------------------------------------
+/*
+ * snc / rng modulation depth with the fm response (S085 P1 follow-up).
+ *
+ * What:       amt x osc.fmMod = amt^2 x env, where env is the PitchMod decay
+ *             envelope (Drum_calcVoiceAsync()). It is full at each trigger
+ *             and decays to 0, so snc fades to a free-running slave and rng
+ *             to the dry carrier over the hit.
+ * Why:        the user asked for the fm response in all three modes. fm's
+ *             FM index is (modulator x amt) x (amt x env), so amt^2 x env is
+ *             exactly fm's response to the amount knob and the envelope. fm
+ *             itself is not changed. A slightly negative env on the block
+ *             where the envelope reaches 0 (DecayEg_calc() subtracts past
+ *             zero) gives a slightly negative value; osc_syncDepthQ30() and
+ *             osc_ringDepthQ15() clamp it to depth 0 / dry.
+ * Inputs:     voice->fmModAmount, voice->osc.fmMod (set this block by
+ *             Drum_calcVoiceAsync(), which the mixer runs before the
+ *             render).
+ * Outputs:    the depth, nominally 0..1.
+ * Cost:       one multiply per block.
+ * Accessors:  Drum_calcVoiceSyncBlock() (snc and rng cases).
+ * Affiliates: Oscillator.h osc_syncDepthQ30(), osc_ringDepthQ15(); DrumVoice.h
+ *             DRUM_MOD_*.
+ */
+static inline float Drum_modEnvDepth(const DrumVoice *voice)
+{
+	return voice->fmModAmount * voice->osc.fmMod;
+}
+//---------------------------------------------------
 void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 {
 	/*
@@ -323,19 +378,24 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	 *
 	 * What:       fm and mix make exactly the calls they made before, in the
 	 *             same order, with the same arguments.
-	 *             - rng: the modulator block at gain amt, then the carrier
-	 *               through its ring copy (carrier x (K + modBuf) >> 15).
+	 *             - rng: the modulator block at gain 1, then the carrier
+	 *               through its ring copy: carrier x (1 - d) + carrier x
+	 *               modulator x d, with d ramped per sample from the last
+	 *               block's value (snapped after a trigger).
 	 *             - snc: the FM-page oscillator is not rendered. Its
 	 *               frequency drives syncClock, the block's reset list is
 	 *               built from that clock, and the carrier renders through
-	 *               its sync copy at gain 1 with amt as the sync depth.
+	 *               its sync copy at gain 1 with d as the sync depth.
+	 *             Here d = Drum_modEnvDepth() = amt^2 x the PitchMod decay
+	 *             envelope: the response fm already has (S085 P1 follow-up).
 	 *             modBuf is still fully rewritten by transient_calcBlock()
 	 *             below, so its contents in snc do not matter.
 	 * Why:        S085_P1_OSC_MOD_SNC_RNG.md §4. The session rule: no mode may
 	 *             cost more than today's dearest fm setting (implementation
-	 *             §1).
-	 * Inputs:     voice->modMode, fmModAmount, osc, modOsc, syncClock; size
-	 *             <= OUTPUT_DMA_SIZE (as modBuf already assumes).
+	 *             §1). The envelope adds one multiply per block.
+	 * Inputs:     voice->modMode, fmModAmount, osc (incl. osc.fmMod), modOsc,
+	 *             syncClock; size <= OUTPUT_DMA_SIZE (as modBuf already
+	 *             assumes).
 	 * Outputs:    buf (the oscillator section); modBuf (fm, mix, rng);
 	 *             syncClock (snc).
 	 * Accessors:  this render function, through InstrumentManager.
@@ -360,18 +420,39 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 
 		voice->syncClock = osc_buildSyncList(voice->syncClock, clockInc,
 		                                     syncOver, size);
+		/* sync depth = amt^2 x mod envelope (Drum_modEnvDepth()) */
 		calcNextOscSampleSyncBlock(&voice->osc, syncOver, clockInc,
-		                           osc_syncDepthQ30(voice->fmModAmount),
+		                           osc_syncDepthQ30(Drum_modEnvDepth(voice)),
 		                           buf, size);
 		break;
 	}
 
 	case DRUM_MOD_RNG:
-		//calc next mod osc sampleBlock (gain amt, as in mix)
-		calcNextOscSampleBlock(&voice->modOsc,modBuf,size,voice->fmModAmount);
+	{
+		/*
+		 * Ring depth ramp (S085 P1 follow-up).
+		 * What: d = amt^2 x mod envelope (Drum_modEnvDepth()) in Q15. The
+		 * ring copy moves d linearly from the last block's end value
+		 * (ringDepthQ15) to this block's d, one step per sample. On the first
+		 * block after a trigger (ringSnap) it starts at this block's d
+		 * instead (no ramp). The modulator renders at gain 1; the ring copy
+		 * applies d. The value actually reached (start + size x step) is
+		 * stored, so the step's integer rounding never accumulates.
+		 * Why: a d stepped once per block zippered ("crunchy").
+		 * Cost: one divide per block; about 3 instructions per sample in the
+		 * ring copy (implementation §14).
+		 */
+		const int32_t target = osc_ringDepthQ15(Drum_modEnvDepth(voice));
+		const int32_t start = voice->ringSnap ? target : voice->ringDepthQ15;
+		const int32_t step = size ? (target - start) / (int32_t)size : 0;
+
+		voice->ringSnap = 0u;
+		calcNextOscSampleBlock(&voice->modOsc,modBuf,size,1.0f);
 		calcNextOscSampleRingBlock(&voice->osc, modBuf, buf, size,
-		                           osc_ringK(voice->fmModAmount));
+		                           start, step);
+		voice->ringDepthQ15 = start + step * (int32_t)size;
 		break;
+	}
 
 	case DRUM_MOD_FM:
 	default:

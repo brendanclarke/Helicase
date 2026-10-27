@@ -814,6 +814,31 @@ the new copy/clear work is foreground-only and bounded.
 38. **UNCHANGED (S085 P1): `fm` and `mix`.** The existing loops are
     byte-identical in the linked firmware (`elf_osc_check`; one unused
     trailing literal-pool word is the only diff at
-    `calcNextOscSampleBlock.constprop.0`). Device check:
-    <`cpu` readings for the six-slot `fm` / `snc` / `rng` Scenes, to be
-    filled at G-C>.
+    `calcNextOscSampleBlock.constprop.0`). Device check: the user reported
+    P1 "checks out completely fine on the hardware"; no `cpu` figures were
+    recorded.
+39. **CHANGED (S085 P1 follow-up): `rng` depth ramp.** `snc`/`rng` follow
+    the mod envelope (d = amt² × env, the `fm` response; one multiply per
+    block). The `rng` ring depth is ramped per sample from the last block's
+    value: the ring copies cost about +3 per sample (table 31, sine 30,
+    crash 33, noise 16–19, user sample 46–48 standalone / 49–50 linked)
+    and one divide per block. The modulator renders at gain 1 through the
+    baseline gain-1 clone. Dearest `rng` (user samples) ≈ 90–91 vs dearest
+    `fm` ≈ 92 in the linked image: under `fm`, by the narrowest margin of
+    any mode. Hardware (user): P1 passed; the ramp is to be re-tested.
+40. **REJECTED (S085, first attempt, rolled back): the full oscillator
+    cherry-pick from the S084 spike.** It added the types `pwm`/`smp`/`slp`/
+    `wtb`, the run modes `rst`/`fre`/`itp`, a two-unit render pool and the
+    first `snc`/`rng`.
+    - **On hardware:** all instruments on `pwm` reached 100 % CPU and
+      stalled the interface.
+    - **Static worst cases:** Cymbal/HiHat 98 → 178 per sample; Drum `fm`
+      68 → 135; `snc` 162; `rng` 135; system ≈ 1,278 per sample with the
+      pool. `pwm` loops 42–58 plain.
+    - **Shared plain/sync loops** added +2 to every plain render. ITCM
+      reached 16,272 / 16,384 B before sharing.
+    - **The cost was never measured on hardware before acceptance.**
+    - **The rule that replaced it (user):** "no increase in CPU cycles
+      overall", gated per stage on the device. Record:
+      `085_SESSION_HANDOFF_LOG.md` §2; the failed tree
+      `Helicase-dev-ph7-voice-pwm-spike/` (post-mortems there).

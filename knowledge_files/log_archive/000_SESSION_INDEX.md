@@ -2066,3 +2066,37 @@ Session 084 ran in two attempts. The first (2026-10-24..26, `dev-ph6-midi`) impl
   import tools), `STORAGE_SRAM_MANIFEST.md`, `BANK_PRESET_ARCHITECTURE.md`,
   `tools/lxr1_converters/LXR1_CONVERTERS.md`,
   `tools/lxr2_converters/LXR2_CONVERTERS.md`, `MEMORY.md`.
+
+### 085 — Drum Osc2 Mod Modes `snc` (Hard Sync) and `rng` (Ring) Under a No-CPU-Increase Rule; Mod Envelope and `rng` Depth Ramp; S086 Type-Expansion Plan (2026-10-27)
+
+Session 085 restarted the oscillator work after a second failed attempt. The first S085 tree (the full cherry-pick of oscillator types, run modes and the render pool from the S084 spike) drove the device to 100 % CPU with `pwm` on every instrument and was rolled back. It is kept at `Helicase-dev-ph7-voice-pwm-spike/` in the repository root (`4ad2f850`, post-mortems `ef7d5445`), reference only; the original spike `Helicase-dev-ph7-spike/` (`26fb7c3`) also moved into the root.
+
+S085 P1 then added only the Drum `mod` values `snc` and `rng`, under the user rule **"absolutely no increase in CPU cycles overall"**. Commits: planning `1ea234ea`, pre-implementation `b450d76a`, implementation `8812bffd`. The mod-envelope and ramp follow-ups and the close-out documents are uncommitted. Final DEV link `text=613,536`, `data=424`, `bss=430,296`; payload 613,960 B (**headroom 139,704 B**); ITCM 7,792 / 16,384 B. P1 passed on hardware; the ramp re-test was not reported before the close.
+
+- **Gate (Q1 (a)):** the dearest setting of a voice in any mode ≤ today's dearest Drum `fm` (user samples: ≈ 90 standalone, ≈ 92 linked). Per-same-wave comparisons are reported only. Measured by `fpseq` (standalone and linked) plus the device `cpu` widget; no cycle probe (Q2).
+- **`osc2_mod_type` (`mixOscs` → `modMode`):** 0 `fm`, 1 `mix`, 2 `snc`, 3 `rng`; any other byte plays `fm`. `fm`/`mix` keep their calls and compiled loops (`elf_osc_check`: 0 changed).
+- **`snc`:**
+  - The FM-page oscillator is not rendered. A dedicated `DrumVoice.syncClock` (D2; not `modOsc.phase`, to avoid a one-shot-sample over-read) runs at the FM-page frequency (`osc_syncClockInc()`, `<< 5` for crash and user samples: they act as noise).
+  - A per-block reset list (`osc_buildSyncList()`, `OSC_SYNC_NONE`) drives sync copies of the Sin/Tri/Saw/Rec/Crash loops. Noise and user samples render unsynced.
+  - The reset lands on i + 1 at overshoot × ratio (Q4), pulled by the depth (Q10, Q30); only the slave is heard.
+- **`rng`:** carrier × (1 − d) + carrier × modulator × d, folded into per-waveform carrier copies (D1; a separate pass was measured at 7.5–9 and failed the gate). Every waveform supported.
+- **Follow-ups:**
+  - `snc`/`rng` depth d = amt² × env (`Drum_modEnvDepth()`, the `fm` response, D9);
+  - the `rng` depth ramped per sample (`ringDepthQ15`) and snapped after a trigger (`ringSnap`) after the user heard crunch (D10). Dearest `rng` ≈ 90–91 vs `fm` ≈ 92 linked (narrowest margin).
+- **Implementation deviations:** new ITCM code in `.itcm.s085` (D7); `osc_renderPlainWave()` and `noinline` dispatchers to keep the baseline LTO clones (D8).
+- **Tooling:** `snapshot85.sh`/`frozen85/`, `elf_symdump.py` (`elf_osc_baseline/check`), `test_osc_mod.c` (R1–R3, S1–S7, M1, with break proofs), `oscmod_identity`, `armcheck-oscmod`.
+- **Menu:** `mixFmNames` (`fm mix snc rng`) via `menu_getMixFmName()`; clamp and automation max 3; MIDI 3–127 → `rng`.
+- **RAM:** `DrumVoice` 588 → 596 B (`runtime_slots` +96 B); stack +128 B in `snc`; ITCM +3,624 B. Approved (plan r3).
+- **Decisions:**
+  - the trigger is unchanged (Drum `modOsc` never resets, Q6b);
+  - crash as master = noise; crash slave syncs;
+  - plan §12 (future sample/wavetable sync: the optimizer-flagged zero-crossing bitmap; otherwise one-shot = noise, loop resets at the loop, wavetable at the frame wrap).
+- **S086 plan written:** `S086_P1_OSC_TYPE_EXPANSION.md` (stock waves, samples, wavetables, optimizer, then `pwm`; `pos` = `Oscilltr Position` as the fourth cell of the oscillator screen; `typ` on screen 2).
+
+- **Find here**: [085_SESSION_HANDOFF_LOG.md](085_SESSION_HANDOFF_LOG.md),
+  `INSTRUMENTS_DSP_REFERENCE.md` (§5.1 Drum mod modes, §6.1 sync/ring
+  oscillator support, §8 costs, §9.3 adding an oscillator mode or type,
+  §10 pitfalls), `CPU_USE_DSP_AUDIT.md` (items 36–39),
+  `STORAGE_SRAM_MANIFEST.md`, `MIDI_SPEC.md` §5.5, `FILESYSTEM_SPEC.md`
+  (`osc2_mod_type`), `tools/dsp_test/DSP_TEST.md`,
+  `S086_P1_OSC_TYPE_EXPANSION.md`, `MEMORY.md`.

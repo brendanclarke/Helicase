@@ -204,9 +204,9 @@ S073 tree.
 | `mixer` | Combined dry + send against the old calls, every routing, stereo and mono input, ramps, near-saturation buses | seconds | `mixer differing samples: 0` |
 | `armcheck-mixer` | ARM `MATCH` for all four dry × send combinations and the send-only default case, plus instruction counts | seconds | six `MATCH` lines; totals 55→44, 69→59, 73→63, 87→78 |
 | `oscmod_identity` | `Oscillator.c/.h` have no removed or changed line against `frozen85/`; `BufferTools.c/.h` identical | seconds | two `removed or changed lines: 0` lines, `oscmod_identity: OK` |
-| `osc_mod` | `test_osc_mod.c` (R1, S1–S7, M1) | seconds | `osc_mod failures: 0` |
+| `osc_mod` | `test_osc_mod.c` (R1–R3 ring law incl. the per-sample depth ramp, S1–S7 sync, M1 mappings) | seconds | `osc_mod failures: 0` (plus one expected int-to-pointer cast warning from the extracted `osc_updateSampleCache()`) |
 | `armcheck-oscmod` | per-sample counts of the S085 P1 loops beside the plain/FM loops they replace | seconds | the §1.2 figures of S085_P1_OSC_MOD_IMPLEMENTATION.md, within a few instructions |
-| `elf_osc_baseline` / `elf_osc_check` | the linked firmware's existing oscillator loops, before and after | seconds | `0 missing, 0 changed` (new symbols allowed) |
+| `elf_osc_baseline` / `elf_osc_check` | the linked firmware's existing oscillator loops, before and after | seconds | `0 missing, 0 changed` (new symbols allowed); one `PADDING` line for `calcNextOscSampleBlock.constprop.0` (an unused trailing literal-pool word, S085 deviation D7) |
 | `clean` | Deletes `build/` | — | — |
 
 These targets are specific to the S073 changes. They stay valid as

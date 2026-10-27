@@ -156,7 +156,7 @@ void osc_recalcFreq(OscInfo* osc);
  * What:       OSC_SYNC_NONE; the sync clock (osc_syncClockInc,
  *             osc_buildSyncList); the sync and ring dispatchers
  *             (calcNextOscSampleSyncBlock, calcNextOscSampleRingBlock); and
- *             the amount mappings (osc_syncDepthQ30, osc_ringK). The
+ *             the amount mappings (osc_syncDepthQ30, osc_ringDepthQ15). The
  *             dispatchers mirror calcNextOscSampleBlock(): the same
  *             waveform-interpolation entry, the same waveform switch and the
  *             same user-sample range check.
@@ -238,7 +238,9 @@ uint32_t osc_buildSyncList(uint32_t clock, const uint32_t clockInc,
  *             - Synced: Sin, Tri, Saw, Rec, Crash.
  *             - Rendered plain (no sync): Noi, user samples (plan A3/A4).
  *             - Waveform interpolation: both partners use the same list.
- * Why:        plan Q10: amt is the sync depth (0 free-running, 1 hard sync).
+ * Why:        plan Q10: the Drum amount is the sync depth (0 free-running,
+ *             1 hard sync); the Drum passes amt^2 x the PitchMod decay
+ *             envelope, the fm response (DrumVoice.c Drum_modEnvDepth()).
  *             Only the slave is heard.
  * Inputs:     osc (the carrier), over[size] from osc_buildSyncList(),
  *             clockInc (the same value the list was built with), depthQ30
@@ -254,34 +256,47 @@ void calcNextOscSampleSyncBlock(OscInfo* osc, const uint32_t* over,
                                 int16_t* buf, const uint8_t size);
 
 /*
- * Render one carrier block with the ring law applied (S085 P1).
+ * Render one carrier block with the ring law applied (S085 P1; per-sample
+ * depth ramp, S085 P1 follow-up).
  *
  * What:       renders osc exactly as calcNextOscSampleBlock() would at
- *             gain 1, but stores
- *                 buf[i] = SSAT16(osc_i x (ringK + modBuf[i]) >> 15)
- *             instead of osc_i x gain. With modBuf = modulator x amt and
- *             ringK = (1 - amt) x 32768, this is
- *                 carrier x (1 - amt) + carrier x modulator x amt
- *             (plan K5). Every waveform is supported, including noise, user
- *             samples and waveform interpolation.
+ *             gain 1, but stores, for sample i,
+ *                 d_i    = depthQ15 + (i + 1) x depthStepQ15
+ *                 G_i    = (32768 - d_i) + ((d_i x modBuf[i]) >> 15)
+ *                 buf[i] = SSAT16((osc_i x G_i) >> 15)
+ *             instead of osc_i x gain. With modBuf = the modulator at gain 1
+ *             and d in Q15 this is
+ *                 carrier x (1 - d) + carrier x modulator x d
+ *             (plan K5), with d moving linearly across the block. d = 0 gives
+ *             the carrier exactly. Every waveform is supported, including
+ *             noise, user samples and waveform interpolation.
  * Why:        D1: a separate ring pass made rng as expensive as fm or more
- *             with user-sample oscillators. Folded into the store, it costs
- *             the plain loop + 0..4 instructions per sample.
- * Inputs:     osc (the carrier), modBuf[size] (the modulator block at gain
- *             amt), buf[size], size, ringK (osc_ringK()).
+ *             with user-sample oscillators, so the law is folded into the
+ *             carrier's store. The ramp (follow-up): d follows the mod
+ *             envelope, and a d that stepped once per block was audible as a
+ *             zipper; ramping costs about 3 instructions per sample and keeps
+ *             rng under the fm worst case (implementation §14).
+ * Inputs:     osc (the carrier); modBuf[size] (the modulator block at gain
+ *             1); buf[size]; size; depthQ15 (d at the end of the previous
+ *             block, 0..32768); depthStepQ15 (per-sample increment; the
+ *             block ends at depthQ15 + size x depthStepQ15). The Drum's d is
+ *             amt^2 x the PitchMod decay envelope (Drum_modEnvDepth(),
+ *             osc_ringDepthQ15()).
  * Outputs:    buf; osc->phase / osc->output as the plain render.
  * Accessors:  Drum_calcVoiceSyncBlock().
- * Affiliates: the ring copies in Oscillator.c; the mix path (the same
- *             modBuf).
+ * Affiliates: the ring copies and osc_ringSample() in Oscillator.c;
+ *             DrumVoice.ringDepthQ15 / ringSnap (the ramp state).
  */
 void calcNextOscSampleRingBlock(OscInfo* osc, const int16_t* modBuf,
                                 int16_t* buf, const uint8_t size,
-                                const int32_t ringK);
+                                const int32_t depthQ15,
+                                const int32_t depthStepQ15);
 
 /*
  * Sync depth from the Drum amount (S085 P1).
  *
- * What:       amount (fmModAmount, 0..1) as Q30: 0 -> 0 (no pull), 1 ->
+ * What:       amount (0..1; the Drum passes amt^2 x the PitchMod decay
+ *             envelope, Drum_modEnvDepth()) as Q30: 0 -> 0 (no pull), 1 ->
  *             0x40000000 (exact hard sync). Out-of-range or non-positive
  *             input clamps.
  * Why:        Q30 makes both ends exact. depth 0 is bit-identical to the
@@ -300,25 +315,27 @@ static inline int32_t osc_syncDepthQ30(const float amount)
 }
 
 /*
- * Ring dry gain from the Drum amount (S085 P1).
+ * Ring depth in Q15 from the Drum amount (S085 P1 follow-up; replaces the
+ * dry gain osc_ringK()).
  *
- * What:       K = round((1 - amount) x 32768), 0..32768. K = 32768 at
- *             amount 0, so rng at amount 0 is the carrier exactly (the
- *             modulator block is then all zeros). K = 0 at amount 1 gives
- *             the pure ring product.
- * Inputs:     amount (fmModAmount, 0..1).  Outputs: K.
- * Range:      K + modBuf lies in [-32768, 65535]; times an int16 carrier it
- *             stays below 2^31.
+ * What:       d = round(amount x 32768), 0..32768. 0 at amount 0 (the carrier
+ *             exactly), 32768 at amount 1 (the pure ring product).
+ *             Out-of-range or non-positive input clamps.
+ * Why:        the ring copies now take the depth itself and ramp it per
+ *             sample (calcNextOscSampleRingBlock()); Q15 keeps every product
+ *             in int32.
+ * Inputs:     amount (0..1; the Drum passes amt^2 x the PitchMod decay
+ *             envelope, Drum_modEnvDepth()).  Outputs: d in Q15.
  * Accessors:  Drum_calcVoiceSyncBlock() (once per block).
  * Affiliates: osc_ringSample() in Oscillator.c.
  */
-static inline int32_t osc_ringK(const float amount)
+static inline int32_t osc_ringDepthQ15(const float amount)
 {
 	if (!(amount > 0.0f))
-		return 32768;
-	if (amount >= 1.0f)
 		return 0;
-	return (int32_t)((1.0f - amount) * 32768.0f + 0.5f);
+	if (amount >= 1.0f)
+		return 32768;
+	return (int32_t)(amount * 32768.0f + 0.5f);
 }
 
 #endif /* OSCILLATOR_H_ */
