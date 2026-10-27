@@ -1368,8 +1368,61 @@ bool filesystem_requestLoadInstrumentMorphTemp(uint8_t destination_scene,
                                                uint8_t destination_slot,
                                                instrument_type_t type,
                                                fs_completion_cb_t cb);
-uint8_t filesystem_installSamplesBlocking(void);
-uint8_t filesystem_installLoopsBlocking(void);
+/*
+ * Load:[Samples] report (S085 C3.3).
+ *
+ * What:       counts of installed samples and wavetables, skipped files
+ *             (unsupported, unreadable, mismatched frames, no fit, frames
+ *             past 128) and skipped tables (no fit, no valid frame, unreadable
+ *             folder), and whether the catalogue committed.
+ * Why:        the modal's summary line.
+ * Inputs:     filled by filesystem_installSamplesBlocking().
+ * Outputs:    read by menu_loadSamplesModal().
+ * Accessors:  menu.c.
+ * Affiliates: SampleInstall.c counts.
+ */
+typedef struct {
+    uint8_t  samples;
+    uint8_t  wavetables;
+    uint16_t skipped_files;
+    uint8_t  skipped_tables;
+    uint8_t  committed;
+} fs_install_report_t;
+
+/*
+ * Install stages for the progress line (S085 C3.3).
+ * Accessors: filesystem.c (reports), menu.c (shows).
+ */
+#define FS_INSTALL_STAGE_ERASE      0u
+#define FS_INSTALL_STAGE_STOCK      1u
+#define FS_INSTALL_STAGE_SAMPLES    2u
+#define FS_INSTALL_STAGE_WAVETABLES 3u
+#define FS_INSTALL_STAGE_COMMIT     4u
+typedef void (*fs_install_progress_fn)(uint8_t stage, uint16_t count);
+
+/*
+ * Install samples/ and wavetables/ into catalogue v2, blocking (S085 C3.3).
+ *
+ * What:       erases sample flash, generates the stock block, installs
+ *             samples/ (files first, then subfolders, natural order, depth
+ *             <= 3), then every folder under wavetables/ that holds valid
+ *             frames (one folder = one table), then commits.
+ * Why:        plan §5 item 8; replaces the samples/ + loops/ pair.
+ * Inputs:     the card (audio suspended by the caller); report (nullable).
+ * Outputs:    1 when the catalogue committed; *report.
+ * Accessors:  menu_loadSamplesModal() only.
+ * Affiliates: SampleInstall.c, storage_naturalCompare().
+ */
+uint8_t filesystem_installSamplesBlocking(fs_install_report_t *report);
+
+/*
+ * Register the install progress hook (S085 C3.3).
+ *
+ * What:       stores or clears (NULL) the modal's progress callback.
+ * Why:        Menu owns the LCD; the installer owns the stages.
+ * Accessors:  menu_loadSamplesModal().
+ */
+void    filesystem_setInstallProgress(fs_install_progress_fn fn);
 
 /* Return the most recent eight-character name produced by a load-name request.
  *

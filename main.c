@@ -316,6 +316,31 @@ static void boot_delayMs(uint16_t ms)
     while ((uint16_t)(time_sysTick - t0) < ms) { /* boot-only hold */ }
 }
 
+/*
+ * Sample flash notice at boot (S085 C3.9).
+ *
+ * What:       STALE (a v1 install from an older firmware): "Samples invalid"
+ *             / "reload samples"; EMPTY (never installed, or an interrupted
+ *             install): "No samples" / "load samples". 1.5 s each, LCD only.
+ * Why:        plan §4.3.4/§4.3.6: catalogue v2 does not read v1 installs, and
+ *             the stock waves sq3 sw3 sqa tra swa exist only after a
+ *             Load:[Samples] (they play as Rec/Saw/Tri until then).
+ * Inputs:     sampleMemory_catalogueState().  Outputs: LCD text.
+ * Accessors:  main(), once, right after sampleMemory_init().
+ * Affiliates: boot_delayMs(), SampleMemory.c.
+ */
+static void boot_showSampleCatalogueNotice(uint8_t state)
+{
+    lcd_clear();
+    lcd_home();
+    lcd_string(state == SAMPLE_CATALOGUE_STALE ? "Samples invalid"
+                                               : "No samples");
+    lcd_setcursor(0, 2);
+    lcd_string(state == SAMPLE_CATALOGUE_STALE ? "reload samples"
+                                               : "load samples");
+    boot_delayMs(1500u);
+}
+
 #if DEV_MODE_DIAGNOSTIC
 /*
  * FxBf boot diagnostic (DEV_MODE_DIAGNOSTIC only; screen-only, no file I/O).
@@ -580,6 +605,10 @@ int main(void)
 
     triggerJacks_init();
     sampleMemory_init();
+    /* S085 C3.9: catalogue v2 cannot read v1 installs; stock waves need an
+    ** install. */
+    if (sampleMemory_catalogueState() != SAMPLE_CATALOGUE_V2)
+        boot_showSampleCatalogueNotice(sampleMemory_catalogueState());
     /*
      * Establish retained Scene type ownership before constructing tagged DSP
      * runtime members.
@@ -660,7 +689,6 @@ int main(void)
 
         /* Menu init — must be before preset load (memsets parameter_values) */
         menu_init();
-        menu_setNumSamples(sampleMemory_getNumSamples());
         /*
          * Mount can publish a timeout before Menu initialization, but Menu is
          * still required by the runtime path reached after recovery. Input is

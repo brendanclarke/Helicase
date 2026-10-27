@@ -368,19 +368,32 @@ only works while sector 6 holds no code.
 
 ## 4. Sample flash (sectors 7–11)
 
-### 4.1 Layout
+### 4.1 Layout (catalogue v2 since Session 085)
 
 | Region | Range | Size |
 |---|---|---:|
-| Sample audio | `0x080C0000–0x081FF69F` | 1,308,320 B (about 14.8 s of 44.1 kHz 16-bit mono) |
-| `SampleInfo[120]` | `0x081FF6A0–0x081FFC3F` | 1,440 B (12 B each: 3-char name, pad, 32-bit size in samples with bit 31 = loop flag, absolute offset) |
-| Display names `[120][8]` | `0x081FFC40–0x081FFFFF` | 960 B |
+| Stock waves `Re3 Sw3 ReA TrA SwA` (code `SQ3`…`SWA`) | `0x080C0000–0x080CEEBF` | 61,120 B (5 × 6,112 int16 points, 11 levels; generated at install) |
+| Items (samples, wavetable frames) | `0x080CEEC0–0x081FE7FF` | 1,243,456 B (about 14.1 s of 44.1 kHz 16-bit mono) |
+| Catalogue | `0x081FE800–0x081FFFFF` | 6,144 B (32 B header + 128 × 20 B sample entries + 128 × 20 B wavetable entries = 5,152 B used) |
 
-- Before Session 073 the audio started at `0x08080000` (sector 6) and held
+- **Format:** the byte format, states and install rules are in
+  `FILESYSTEM_SPEC.md` "S085 — Sample flash catalogue v2 and the
+  installer".
+- **Macros:** `Core/SampleRom/SampleMemory.h`
+  (`SAMPLE_ROM_START_ADDRESS 0x080C0000`, `SAMPLE_FIRST_SECTOR 7u`,
+  `SAMPLE_DATA_START_ADDRESS`, `SAMPLE_CATALOGUE_START_ADDRESS`,
+  `SAMPLE_MAX_COUNT 128`, `WAVETABLE_MAX_COUNT 128`,
+  `WAVETABLE_MAX_FRAMES 128`).
+- **No RAM copy:** the catalogue is read in place. The v1 RAM caches
+  (5,040 B) and the `sample_manifest` (13,441 B) were released in S085.
+- **Before Session 085 (v1):**
+  - audio `0x080C0000–0x081FF69F` (1,308,320 B);
+  - `SampleInfo[120]` at `0x081FF6A0` (12 B each, bit 31 = loop flag);
+  - display names `[120][8]` at `0x081FFC40`.
+
+  A v1 install now reads STALE.
+- **Before Session 073:** audio started at `0x08080000` (sector 6) and held
   1,570,464 B.
-- Macros: `Core/SampleRom/SampleMemory.h` (`SAMPLE_ROM_START_ADDRESS
-  0x080C0000`, `SAMPLE_FIRST_SECTOR 7u`, `SAMPLE_MAX_COUNT 120`).
-- RAM caches of this table live in SRAM1 (§8, `SampleMemory.c`, 5,040 B).
 
 ### 4.2 Guards
 
@@ -395,10 +408,13 @@ only works while sector 6 holds no code.
 
 ### 4.3 Installing
 
-- Load:[Samples] (Load page only) runs `menu_loadSamplesModal()`: it waits up
-  to 10 s for a storage operation already running, suspends audio, erases
-  sectors 7–11, installs `/samples` then appends `/loops`, and reinitialises
-  audio. Only mono 16-bit 44.1 kHz PCM WAV files are accepted.
+- **Load:[Samples]** (Load page only) runs `menu_loadSamplesModal()`.
+  - It waits up to 10 s for a storage operation already running, then
+    suspends audio.
+  - It erases sectors 7–11, generates the stock block, installs
+    `samples/` then `wavetables/`, commits the catalogue (magic last), and
+    reinitialises audio.
+  - Card rules: `FILESYSTEM_SPEC.md`.
 - A pre-S073 install is rejected (0 samples): its entry 0 is at
   `0x08080004`, below the floor.
 - **Rollback hazard:** a pre-S073 firmware on a unit that has a pre-S073
@@ -491,16 +507,30 @@ only works while sector 6 holds no code.
 Code placed with `INITCM` (`config.h`) is copied from flash to ITCM at boot
 and runs with zero wait states.
 
-| Function | Bytes |
+**After Session 085:** 12,432 of 16,384 B; 3,952 B free. Under LTO the
+type renderers are inlined into the dispatchers.
+
+| Function (S085 DEV link) | Bytes |
 |---|---:|
-| `calcNextOscSampleBlock` (two specialisations) | 876 + 824 |
-| `calcUserSampleOscFmBlock` | 444 |
-| `calcNextOscSampleFmBlock` | 440 |
-| `osc_setFreq` (standalone since S073) | 400 |
-| `calcUserSampleOscBlock` | 396 |
-| `calcSampleOscFmBlock` | 196 |
-| `calcFmBlock` (three specialisations) | 192 × 3 |
-| Veneers for the interpolation blocks | 8 × 2 |
+| `calcNextOscSampleFmBlock` (with the pwm/sample/wtb FM renderers inlined) | 4,508 |
+| `osc_renderSyncBlock` (the `wav` hard-sync loops) | 1,972 |
+| `calcNextOscSampleBlock` | 1,504 |
+| `oscPwm_blockLane` (pwm plain and sync, shared) | 1,504 |
+| `osc_setFreq` | 1,372 |
+| `oscWavetable_blockLane` (shared) | 856 |
+| `oscSample_blockLane` (shared) | 464 |
+| `calcFmBlock` | 220 |
+| veneers (`memset`, `memcpy`, binds) | 8 each |
+
+- **The shared loops must stay shared.** The pwm, sample and wavetable
+  loops serve both plain and hard-sync renders (`OSC_SHARED_LOOP`:
+  noinline, noclone, no loop unswitching). Separate sync copies took ITCM
+  to 16,272 B; the shared form saves 3.4 KB.
+- **History:** before S085, ITCM was 4,168 B (S084): two
+  `calcNextOscSampleBlock` specialisations 876 + 824,
+  `calcUserSampleOscFmBlock` 444, `calcNextOscSampleFmBlock` 440,
+  `osc_setFreq` 400, `calcUserSampleOscBlock` 396,
+  `calcSampleOscFmBlock` 196, `calcFmBlock` 192 × 3, veneers 8 × 2.
 
 - Only oscillator code is placed here. Filter and distortion ITCM placement
   (`ENABLE_EFFECT_INITCM_CODE`) is off: it measured worse in Session 023,
@@ -703,7 +733,7 @@ not describe it in detail.
 | AutoSave `.hcprms1/.hcprms2` (HCPR v3), PAT4 A/B, boot restore | `AUTOSAVE.md` |
 | The async FAT/VFAT layer and its caller rules | `ASYNCFATFS_REFERENCE.md` |
 | Trace and boot log files (`/asavetrc.bin`, `/bootlog.bin`, `/pattrace.bin`) | `DEV_MODES.md` |
-| Sample source folders `/samples` and `/loops` | §4.3 above |
+| Sample source folders `samples/` and `wavetables/` (`/loops` retired in S085) | `FILESYSTEM_SPEC.md` "S085 — Sample flash catalogue v2" |
 
 ---
 
@@ -824,3 +854,65 @@ production (1 B DEV); P3 4 B. DEV-only S082 diagnostics:
 `fs_stall_poll_uncounted` 1 B. Decision history: `082_SESSION_HANDOFF_LOG.md`
 §7. `preset_buildBackgroundScene()`
 uses one 136-byte stack block buffer; no new large stack frame is added.
+
+---
+
+## S085 — sample flash map, RAM ledger, slot reserve
+
+**Sample flash** (sectors 7–11, 1,310,720 B): stock block 61,120 B at
+`0x080C0000`; items 1,243,456 B at `0x080CEEC0`; catalogue 6,144 B at
+`0x081FE800` (§4.1).
+
+**SRAM1 ledger** (approved S085 Q4, 2026-10-26; measured `bss` −16,100 B,
+released and not reused):
+
+| Item | Bytes | Owner | Lifetime |
+|---|---:|---|---|
+| `oscRenderPool_scratch[32]` (int16) + `oscRenderPool_unitsUsed` | +65 (+3 alignment; 129 B approved) | `OscRenderPool.c` | static; one extra oscillator render per block |
+| `fs_install_batch[32]` (64 B entries) + count, `fs_install_last[4]`, report/progress/failed | +2,313 | `filesystem.c` | static; used only in the modal install |
+| `sample_install` state | +44 (`_Static_assert`) | `SampleInstall.c` | static; modal install |
+| catalogue count, state, stock flag | +3 | `SampleMemory.c` | static |
+| `menu_installSummaryUntil` (uint16) | +2 | `menu.c` | static |
+| `sample_manifest[120]` + count | −13,441 | `filesystem.c` | removed |
+| `SampleMemory` caches and v1 install scalars | −5,040 (+ ≈ 20) | `SampleMemory.c` | removed |
+| `sample_io_buf` 516 → 512 | −4 | `filesystem.c` | — |
+| `menu_numSamples` | −1 | `menu.c` | removed |
+
+**DTCM:**
+- `modNode_waveInterpActiveCount` removed (−1 B); statics 4,468 B.
+- `osc_interp_a/b` (2 × 64 B, `INDTCMZ`) are unchanged. They also serve
+  the hard-sync interpolation pair.
+
+**Stack** (no static RAM):
+- The card walk keeps one 64 B entry per directory level, ≈ 200 B at depth
+  3, in the modal install only, with audio suspended.
+- `oscSection_renderSync()` keeps the `snc` lane `wrap[32]` + `over[32]`
+  (160 B) on the audio stack.
+
+**Runtime slots:** the reserve is a fixed 1,176 B per slot, 7,056 B in all
+(it was `2 × sizeof(DrumVoice)`). Each engine struct is `_Static_assert`ed
+inside it. Measured after S085 (`arm-none-eabi-gcc`, firmware include
+paths, `sizeof`):
+
+| Struct | Bytes | Free in the slot | Before S085 |
+|---|---:|---:|---:|
+| `DrumVoice` | 840 (832 before S085 P2) | 336 | 588 |
+| `HiHatVoice` | 788 (780) | 388 | — |
+| `CymbalVoice` | 776 (772) | 400 | — |
+| `SnareVoice` | 672 (664) | 504 | — |
+
+**S085 P2** (approved +8 B per engine, user, 2026-10-27, U4): the
+retrigger ramp state, Drum `float lastVeloGain; uint8_t ampRampArm;`, the
+others `float lastAmpGain; uint8_t ampRampArm;`. Lifetime and owner: the
+engine instance inside its runtime slot. Measured +4/+8/+4/+8 (Drum and
+Cymbal had tail padding). Static RAM unchanged (`bss` 414,100); the slots
+stay 7,056 B and the `_Static_assert`s pass.
+- **F-A (Drum FM depth ramp):** adds `float lastFmMod`. The unused Drum
+  field `float egValueOscVol` was removed, so Drum is 840 B: +8 for all of
+  P2, within U4.
+| of which `OscSectionState` | 140 | — | — |
+| `OscInfo` (each) | 124 | — | — |
+
+The S084 spike's S086 work needed about 44–48 B per engine.
+
+**ITCM:** 12,432 / 16,384 B after S085 (§6).

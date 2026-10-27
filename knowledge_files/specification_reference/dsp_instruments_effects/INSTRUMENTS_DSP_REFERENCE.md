@@ -4,7 +4,12 @@ How the six instrument voices are rendered, how their parameters reach the
 DSP, how modulation (LFO, velocity, Morph, step automation) works, what each
 part costs, and how to change or extend it.
 
-- **Current as of:** Session 076 close (2026-10-06). S074 changed nothing
+- **Current as of:** Session 085 close (2026-10-27). S085 rebuilt the
+  oscillator: five types (`wav pwm smp slp wtb`), run modes
+  (`rst fre itp`), Drum `mod` modes `fm mix snc rng`, the render pool, the
+  stock waves and sample-flash playback. §12 is the full reference; §5,
+  §6.1, §7.4, §8 and §9.3 point to it.
+- **Earlier:** Session 076 close (2026-10-06). S074 changed nothing
   in the voice engines; it added a sidechain tap in the trigger funnel
   (§2) and a mirrored fader gain used by the mixer's `xfd` mode. S075
   changed no engine either: it retired the global `srt` LFO/automation
@@ -21,6 +26,8 @@ part costs, and how to change or extend it.
   - `FILESYSTEM_SPEC.md`: instrument files and descriptor keys on the card;
   - `CPU_USE_DSP_AUDIT.md`: the cost audit and optimisation history;
   - `OSC_INTERP_AUDIT.md`: oscillator waveform interpolation;
+  - `FILESYSTEM_SPEC.md` "Sample flash catalogue v2": how samples, wavetables
+    and the stock waves reach sample flash;
   - `tools/dsp_test/DSP_TEST.md`: the host test bench for DSP changes.
 
 ---
@@ -286,12 +293,16 @@ arrays are forbidden** in DSP code (they caused silent stack corruption).
 ### 5.1 Drum (`DrumVoice.c`, Basic)
 
 ```
-modOsc  --(gain fmModAmount)--> modBuf
-if mixOscs:  osc (gain 1−fmModAmount) + modBuf, saturating      --> buf
-else:        osc phase-modulated by modBuf (FM)                  --> buf
+oscillator section (§12.7), by the mod row (mixOscs = OSC_MOD_*):
+  fm : modOsc (gain amt) -> modBuf; osc phase-modulated by modBuf --> buf
+  mix: modOsc (gain amt) + osc (gain 1−amt), saturating             --> buf
+  snc: osc hard-synced to modOsc; slave·(1−amt) + master·amt         --> buf
+  rng: osc·(1−amt) + ((osc·modOsc)>>15)·amt, saturating             --> buf
+  itp active: the old carrier renders the same way into the pool
+  scratch and crossfades into buf (oscSection_blendItp)
 transient (sample 2.., or zeros for snap/offset modes)           --> + buf, saturating
 ZDF filter (filterType)                                          --> buf
-fused post-chain: amp EG ramp → velocity gain → distortion       --> buf (pre-volume)
+fused post-chain: amp EG ramp → velocity ramp → distortion       --> buf (pre-volume)
 ```
 
 - **Control rate** (`Drum_calcVoiceAsync`): pitch envelope
@@ -301,11 +312,23 @@ fused post-chain: amp EG ramp → velocity gain → distortion       --> buf (pr
   (`slopeEg2_calc`), keeping `lastGain` and the new value for the per-sample
   ramp; `osc_setFreq()` for both oscillators.
 - **Trigger:** retriggers LFOs whose retrigger track matches; applies velocity
-  modulation; resets the oscillator phase (with the transient offset mode);
-  triggers pitch and amp envelopes, transient and snap; `SVF_reset()` clears
-  filter state to avoid a wrong transient.
+  modulation; asks `oscSection_beginTrigger()` what the run mode resets
+  (§12.6): in `rst` the carrier phase resets (only when the amp envelope is
+  closed, as before; with the transient offset mode) and `SVF_reset()`
+  clears the filter; in `fre` nothing resets and every oscillator slews; in
+  `itp` the carrier is snapshotted and restarted. Then it triggers the pitch
+  and amp envelopes, transient and snap.
+- **Amp envelope on a trigger (S085 P2, §12.6.1):** `rst` calls
+  `slopeEg2_trigger()` as before. `fre`/`itp` call
+  `slopeEg2_retriggerFrom(ampFilterInput)` (the attack starts at the gain
+  the last block ended on) and set `ampRampArm` when that gain is audible.
+  An armed block always ramps the envelope gain from `lastGain`, even at
+  attack 0 (the async's no-ramp rule for attack 0 is skipped), and ramps
+  the velocity gain from `lastVeloGain`.
 - **Velocity:** `velo = vel/127`; with `volumeMod` on it scales the output
-  (the multiply always runs; with `volumeMod` off it multiplies by 1.0).
+  (the multiply always runs; with `volumeMod` off it multiplies by 1.0). The
+  post-chain ramps it from `lastVeloGain` on an armed block; every other
+  block passes equal endpoints (flat).
 
 ### 5.2 Snare (`Snare.c`, Basic)
 
@@ -313,31 +336,50 @@ fused post-chain: amp EG ramp → velocity gain → distortion       --> buf (pr
 noise osc (gain 0.9)                                  --> buf
 ZDF filter                                            --> buf   (the filter shapes the noise only)
 transient                                             --> transBuf; buf + transBuf, saturating
-tonal osc (gain 1−mix)                                --> transBuf
-fused post-chain: buf·mix + transBuf (saturating) → amp gain → distortion
+tonal osc (gain 1−mix)                                --> transBuf  (itp: the old copy blends in here)
+fused post-chain: buf·mix + transBuf (saturating) → amp ramp → distortion
 ```
 
-`ampGain = volumeMod ? velo·EG : EG`, chosen once per block.
+The tonal oscillator is the carrier for the run modes; the noise oscillator
+slews in `fre`/`itp` and is never snapshotted.
+
+`ampGain = volumeMod ? velo·EG : EG`, chosen once per block. The chain
+ramps from `lastAmpGain` to `ampGain` across the block; the endpoints are
+equal (flat, the S073 loop exactly) except on the one block armed by a
+`fre`/`itp` retrigger with level left (`ampRampArm`, §12.6.1). The trigger
+calls `slopeEg2_trigger()` in `rst` and
+`slopeEg2_retriggerFrom(egValueOscVol)` in `fre`/`itp`.
 
 ### 5.3 Cymbal (`CymbalVoice.c`, Advanced)
 
 ```
+oscSection_renderFm2 (§12.7):
 modOsc (gain fmModAmount1) + modOsc2 (gain fmModAmount2), saturating --> mod
 osc phase-modulated by mod (FM, gain 1.0)                           --> buf
+(itp: the old carrier, FM'd by the same mod block, crossfades in)
 ZDF filter                                                          --> buf
 transient                                                           --> mod
-fused post-chain: buf + mod (saturating) → amp gain → distortion
+fused post-chain: buf + mod (saturating) → amp ramp → distortion
 ```
+
+Amp gain, its ramp and the trigger as Snare (§5.2, §12.6.1).
 
 ### 5.4 HiHat (`HiHat.c`, Advanced + Choke)
 
-As Cymbal, with the FM carrier at gain 0.5. Two amp-decay caches: `decayClosed`
+As Cymbal, with the FM carrier at gain 0.5 (`oscSection_renderFm2(…,
+carGain 0.5)`). In `rst` Cymbal resets both modulator phases on a trigger;
+HiHat does not (both as before S085). Two amp-decay caches: `decayClosed`
 (`amp_envelope_decay`) and `decayOpen` (the `_choke` row). The trigger's
-alternate flag (visible track 7) selects the open decay.
+alternate flag (visible track 7) selects the open decay. The amp trigger
+and ramp are as Snare (§5.2, §12.6.1); the decay is selected before the
+envelope is retriggered, so a matched attack decays at the new note's
+rate.
 
 ### 5.5 Where each engine's hot code runs
 
-The oscillator block functions are in ITCM (`INITCM`), zero wait states. The
+The oscillator block functions, the type renderers, the hard-sync loops and
+`osc_setFreq()` are in ITCM (`INITCM`), zero wait states (12,432 of 16,384 B
+used after S085, §12.12). The
 filter, distortion and post-chains are flash code, inlined by LTO into
 `mixer_calcNextSampleBlock()`. ITCM for the filter and distortion was tried
 in Session 023 and measured worse.
@@ -348,18 +390,24 @@ in Session 023 and measured worse.
 
 ### 6.1 Oscillator (`Oscillator.c/.h`)
 
-- **`OscInfo`** holds a 32-bit phase accumulator, `phaseInc`, `freq`,
-  `pitchMod`, `fmMod`, `modNodeValue`, the waveform, the wavetable octave
-  (`tableOffset`), a frequency cache, and a sample cache.
-- **Waveforms:** `SINE` 0, `TRI` 1, `SAW` 2, `REC` 3, `NOISE` 4, `CRASH` 5
-  (the built-in crash sample), then user samples from 6
-  (`OSC_SAMPLE_START`).
+Summary; the full reference is §12.
+
+- **`OscInfo`** holds a 32-bit phase accumulator, `phaseInc` (and the slew
+  fields `phaseIncTarget`, `phaseIncStep`, `slewSamplesLeft`), `freq`,
+  `pitchMod`, `fmMod`, `modNodeValue`, the type (`oscType`), the selection
+  (`waveform`: the `wav` row), the continuous control (`source`: the `mod`
+  row), the request bytes,
+  the wavetable octave (`tableOffset`), a frequency cache, sample bounds and
+  a per-type union.
+- **Types:** `wav` (the 11-entry wave list `Sin Tri Saw Rec Noi Cym Re3 Sw3
+  ReA TrA SwA`), `pwm`, `smp`, `slp`, `wtb`. Samples are no longer part of
+  the wave list (§12.2).
 - **Effective frequency:** `freq · pitchMod · modNodeValue`, where `freq`
   comes from the base note plus coarse/fine tuning
   (`MidiNoteFrequencies[note] · detune`).
-- **Phase formats:** sine uses a 4,096-entry table (`<<20`), wavetables 1,024
-  entries (`<<22`), samples a `<<17` index. Long samples are not fully
-  32-bit clean yet (the `phase >> 17` index path).
+- **Phase formats:** sine 4,096 entries (`<<20`); tables 1,024 (`<<22`);
+  the crash sample `<<17`; pwm and `wtb` a full 2^32 cycle; installed
+  samples Q20.12 frames (any length up to 1,048,575 frames).
 - **Wavetables:** `sawTable`, `triTable`, `recTable` are 11 band-limited
   octaves × 1,024 samples (22,528 B each, flash). `osc_setFreq()` picks the
   octave with `freqToTableIndex()`: the number of the ten edges
@@ -367,23 +415,23 @@ in Session 023 and measured worse.
   below the frequency. All ten compares always run. (Before S073 this was
   `(69 + 12·log2f(f/440))/12`; the host check found 16 inputs that differ,
   each within 2 ulps of an edge.)
-- **Frequency cache:** `osc_setFreq()` recomputes `phaseInc` and the octave
-  only when the effective frequency or waveform changed. A pitch envelope
-  changes the frequency every block, so budget for the recompute.
+- **Frequency cache:** `osc_setFreq()` recomputes the target and the octave
+  only when the effective frequency, waveform or type key changed; the slew
+  bookkeeping runs every call. A pitch envelope changes the frequency every
+  block, so budget for the recompute.
 - **Noise:** `calcNoiseBlock()` reads the hardware RNG (`GetRngValue()`,
   returns `int16_t`) on each phase wrap. The RNG makes a new value about
   every 0.83 µs, so at high noise rates some samples repeat. This is the
   accepted noise character: a software PRNG was rejected in S073 because it
   would change it.
 - **FM:** `calcNextOscSampleFmBlock()` phase-modulates the carrier by a
-  modulator block (`calcFmBlock` for wavetables, `calcFmSineBlock`,
-  `calcSampleOscFmBlock`, `calcUserSampleOscFmBlock`).
-- **Waveform interpolation:** when a waveform parameter is modulated, up to
-  `OSC_WAVE_INTERP_MAX_ACTIVE` (2) oscillators per block blend the two
-  neighbouring waveforms (`calcPeriodicInterpBlock`: render both into DTCM
-  scratch buffers, then blend). Each costs about two oscillator renders.
-  Details: `OSC_INTERP_AUDIT.md`.
-- **ITCM:** the block renderers and (since S073) `osc_setFreq()`.
+  modulator block (`calcFmBlock` for tables, `calcFmSineBlock`,
+  `calcSampleOscFmBlock`, `calcStockWaveFmBlock`, and the pwm/sample/`wtb`
+  FM renderers).
+- **Waveform interpolation:** for `wav`-type oscillators only, an
+  oscillator granted a render-pool unit blends the two neighbouring waves
+  (§12.8, `OSC_INTERP_AUDIT.md`).
+- **ITCM:** the block renderers, the sync renderers and `osc_setFreq()`.
 
 ### 6.2 Resonant filter (`ResonantFilter.c/.h`)
 
@@ -541,8 +589,10 @@ local token in that namespace. Install:
   next block, so an overlay lasts exactly one block. Descriptor adapters
   instead write through the owner's setter each block, with the base kept in
   the adapter.
-- **Waveform modulation** of an oscillator can blend neighbouring waveforms
-  (§6.1) for at most two oscillators per block; the rest step.
+- **Waveform modulation** of a `wav`-type oscillator can blend neighbouring
+  waves when the render pool grants it a unit (§12.8; two units per block,
+  shared with `itp` crossfades); the rest step. pwm/smp/slp/wtb controls
+  are continuous by design and never use the pool.
 
 ### 7.5 Step automation and Morph
 
@@ -605,6 +655,10 @@ display and runtime resolution.
 
 ## 8. Cost
 
+The S085 oscillator figures (every type, FM, hard-sync slave, section
+loops) and the derived per-voice worst cases are in §12.11; they supersede
+the oscillator rows below.
+
 ### 8.1 Measured instruction counts (S073)
 
 Per-sample loop instruction totals from `fpseq.py --report --all` on
@@ -617,23 +671,25 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 | FM wavetable / FM sine carrier | 35 / 30 | 0 |
 | Noise | 12–13 | 0 |
 | Crash sample / FM crash | 30 / 38 | 0 |
-| User sample (non-looped to looped paths) | about 28–49 | 0 |
+| User sample (non-looped to looped paths) | about 28–49 (retired in S085; see §12.11 for `smp`/`slp`) | 0 |
 | Transient sample | 22 | 0 |
 | Saturating buffer add | about 4–5 (two samples per step) | 0 |
 | ZDF filter (per type) | 85–104 (was 73–89) | 2 (was 5) |
 | Naive 2-pole filter | about 40–60 | 1 |
-| Drum post-chain | 32 (was 38 in three passes) | 1 |
-| Snare post-chain | 30 (was 35) | 1 |
-| Cymbal/HiHat post-chain | 25 (was 28) | 1 |
+| Drum post-chain | 35 since S085 P2 (velocity ramp; S073: 32, was 38 in three passes) | 1 |
+| Snare post-chain | 35 since S085 P2 (amp ramp; S073: 30, was 35) | 1 |
+| Cymbal/HiHat post-chain | 30 since S085 P2 (amp ramp; S073: 25, was 28) | 1 |
 
 ### 8.2 Per-voice estimate (worst case, per sample)
 
 | Engine | Composition | About |
 |---|---|---:|
-| Drum (FM mode) | mod osc 24 + FM carrier 35 + transient 22 + add 5 + filter 95 + post 32 | 215 instructions, 3 divisions |
-| Snare | noise 13 + filter 95 + transient 22 + add 5 + osc 24 + post 30 | 190 instructions, 3 divisions |
-| Cymbal | 2 mod osc 48 + add 5 + FM carrier 35 + filter 95 + transient 22 + post 25 | 230 instructions, 3 divisions |
-| HiHat | as Cymbal | 230 instructions, 3 divisions |
+| Drum (FM mode) | mod osc 24 + FM carrier 35 + transient 22 + add 5 + filter 95 + post 35 | 218 instructions, 3 divisions |
+| Snare | noise 13 + filter 95 + transient 22 + add 5 + osc 24 + post 35 | 195 instructions, 3 divisions |
+| Cymbal | 2 mod osc 48 + add 5 + FM carrier 35 + filter 95 + transient 22 + post 30 | 235 instructions, 3 divisions |
+| HiHat | as Cymbal | 235 instructions, 3 divisions |
+
+The post figures are the S085 P2 ramped chains (+3 Drum, +5 the others).
 
 Add waveform interpolation (about one extra oscillator render each, at most
 two per block) and the mixer per slot (decimator 12–18, dry path 28–46, plus
@@ -718,12 +774,9 @@ General rules for every change:
   on its own.
 - Filter: add the type to `filterTypeEnum`, the output `switch` in **both**
   ZDF twins, and the `MENU_FILTER` text; keep the batched solver untouched.
-- Oscillator: add the waveform constant, the render `case` in
-  `calcNextOscSampleBlock()` / `calcNextOscSampleFmBlock()` and
-  `calcNextOscSample()`, the frequency `case` in `osc_setFreq()`, and the menu
-  text. Waveform numbers above `CRASH` are user samples; inserting a waveform
-  shifts them, which changes stored values. Prefer a design that does not
-  renumber.
+- Oscillator: see §12.13 (add a `wav` wave, add a type, add a pwm
+  family). Append wave numbers after `SWA` (10); stored `wav` values are
+  kept as numbers, so inserting renumbers saved kits.
 - Distortion: add a mode selector rather than changing
   `distortion_curveSample16()`; keep the fused post-chains using one shared
   expression per mode.
@@ -773,8 +826,15 @@ fields from `ModulationNode`.
 - **The runtime type shadow**, not the Scene's stored type, decides which
   engine renders a slot during a Scene switch.
 - **Pointers into `runtime_slots` die at a type change.**
-- **Retrigger phase:** Drum resets its filter and phase on trigger; the other
-  engines keep their oscillator phase and filter state.
+- **Retrigger phase:** depends on the run mode (§12.6). In `rst`, Drum resets
+  its filter and carrier phase (the phase only when the amp envelope is
+  closed), Cymbal resets its carrier and both modulators, Snare and HiHat
+  reset the carrier phase; in `fre` nothing resets; in `itp` the carrier is
+  snapshotted and restarted and crossfades.
+- **Request bytes vs live values (§12.10).** `waveform`/`source` are the
+  clamped live values; `waveRequest`/`sourceRequest` hold what the user set.
+  A writer that skips the request (any retained write path) loses values on
+  a type round trip; an LFO overlay that writes it pollutes them.
 - **LFO noise range (suspected issue, not verified):** `lfo_calc()` divides the
   signed `GetRngValue()` by 32767, so noise spans −1..1 while every other
   waveform is 0..1. The descriptor shaper clamps its source to 0..1, so about
@@ -799,3 +859,661 @@ fields from `ModulationNode`.
 - Session 075: no engine change; global `srt` retired (target 390 a
   placeholder); runtime-write priority fixed (§4.3, §7.5;
   `075_SESSION_HANDOFF_LOG.md` §11).
+- Session 085: oscillator types, stock waves, per-sample slew, run modes,
+  Drum `snc`/`rng`, the render pool, sample-flash playback, constant-cost
+  hard sync (§12; `085_SESSION_HANDOFF_LOG.md`).
+
+---
+
+## 12. The oscillator section (Session 085)
+
+**What this covers:** what a voice's oscillators can be, how each type
+renders, what happens on a trigger in each run mode, how the Drum `mod`
+modes combine two oscillators, how extra renders are budgeted, what
+everything costs, how it is tested, and how to extend it.
+
+**Where the code is:**
+
+| File | What it owns |
+|---|---|
+| `Core/DSPAudio/Oscillator.h/.c` | `OscInfo`, the wave list, the type dispatch, the slew, the `wav` renderers, `osc_setFreq()`, the sync dispatch |
+| `OscillatorPwm.h/.c` | the pwm families |
+| `OscillatorSample.h/.c` | `smp`/`slp` |
+| `OscillatorWavetable.h/.c` | `wtb` |
+| `StockWaves.h/.c` | stock-wave table access and the fallback |
+| `OscRenderPool.h/.c` | the 2-unit budget and the scratch block |
+| `OscSection.h/.c` | run modes, `itp`, mod modes, `snc`, filter slew |
+| `OscSyncLane.h` | the hard-sync reset contract |
+| `Core/DSP/Instruments/InstrumentManager.c` | writers, maxima, domains, claims |
+| `InstrumentCellFormat.c` | menu display |
+| `Core/SampleRom/` | the stock-wave generator and the catalogue |
+
+### 12.1 Rows a user sees
+
+| Row (key) | Values | Meaning |
+|---|---|---|
+| `typ` (`oscN_type`) | 0 `wav`, 1 `pwm`, 2 `smp`, 3 `slp`, 4 `wtb` | the oscillator type |
+| `wav` (`oscN_wave`) | depends on `typ` | the selection. `wav`: wave 0–10; `pwm`: family 0–5 (`Rec Saw Tri Re3 Sw3 Swp`); `smp`/`slp`: sample 0..count−1; `wtb`: wavetable 0..count−1. The single-parameter view shows a sample's or table's 8-character name on the left. |
+| `mod` (`oscN_source`) | 0–127 | the type's continuous control. `pwm`: width; `smp`/`slp`: start; `wtb`: table position; `wav` ignores it. Always a plain number; the single-parameter view shows it once, on the left. Morphable, and an LFO/velocity target. |
+| `run` (`osc_run_mode`) | 0 `rst`, 1 `fre`, 2 `itp` | one per voice |
+| Drum `mod` (`osc2_mod_type`) | 0 `fm`, 1 `mix`, 2 `snc`, 3 `rng` | how the two Drum oscillators combine |
+
+**Which oscillator is which:**
+- `osc1` is the carrier (the oscillator you hear).
+- Drum's `osc2` is the modulator / sync master.
+- Cymbal and HiHat have two modulators, `osc2` and `osc3`.
+- Snare has `osc1` and an internal noise oscillator with no type row.
+- The Cymbal and HiHat modulators (`osc2`, `osc3`) cannot be `pwm`
+  (`instrumentManager_oscTypeAllowed()`; a `pwm` FM oscillator there crashed
+  on hardware). The writer stores a `pwm` request as `wav`, the menu steps
+  over it (`wav` ↔ `smp`), and a stored `pwm` displays as `wav`. Drum's
+  `osc2` and every carrier keep all five types.
+
+**History (S085 P2 §14):** until the row swap the selection (pwm family,
+sample, table) was on a selector row `src` and the continuous control on
+`wav`. The keys did not change, so a kit saved before the swap with a
+non-`wav` type loads with the two values exchanged (no migration, Q8).
+
+**Stored values:**
+- Stored 0 is the pre-S085 behaviour.
+- The rows are appended (Drum 44, Snare 41, Cymbal/HiHat 46 descriptors),
+  so old files and IDs keep their meaning; a missing key loads 0.
+- Old kits' `wav` 6–10 now play the stock waves, and 11 or more clamp to
+  `swa`. There is no migration.
+
+### 12.2 The data model (`OscInfo`, `Oscillator.h`)
+
+| Field | Role |
+|---|---|
+| `phase`, `phaseInc` | the accumulator and the current per-sample increment |
+| `phaseIncTarget`, `phaseIncStep`, `slewSamplesLeft` | the pitch slew (§12.4) |
+| `oscType` | `OSC_TYPE_*` |
+| `waveform` | the live, clamped `wav` value (wave id, pwm family, sample or table index) |
+| `source` | the live `mod` value 0–127 (width, start or position) |
+| `waveRequest`, `sourceRequest` | the last retained bytes written to `wav`/`mod`, before clamping (§12.10); the sample/table binds re-expand `waveform` from `waveRequest` when the catalogue generation changes |
+| `tableOffset` | band-limited level 0–10 for table reads |
+| `freqCacheValue/Waveform/Source/Type/Valid` | the `osc_setFreq()` cache key (the type key's bit 7 = `sampleMemory_stockValid()` for pwm; `Source` because the pwm width is `source`, which velocity and the LFO write directly) |
+| `sampleStart`, `sampleEnd`, `sampleCache*`, `sampleGainCode` | the bound sample (frames, data pointer, generation, gain) |
+| union `pwm` (`OscPwmState`) / `wtb` (`OscWtbState`) | per-type block state; each type re-initialises its member on entry, so a type change never reads the other member's bytes |
+| `waveInterpNext/Frac/Generation` | the waveform-interpolation grant (§12.8) |
+
+`sizeof(OscInfo)` is 124 B.
+
+**Engine structs:** each engine also holds one `OscSectionState` (140 B,
+§12.6). Measured struct sizes: Drum 832 B, HiHat 780, Cymbal 772,
+Snare 664, all inside the fixed 1,176 B runtime slot.
+
+### 12.3 Dispatch and the per-type renderers
+
+**Entry points:**
+- **`calcNextOscSampleBlock(osc, buf, size, gain)`** (plain) and
+  **`calcNextOscSampleFmBlock(osc, mod, buf, size, gain)`** (phase
+  modulated by a block) switch on `oscType` **once per block**.
+- Every type keeps its own specialised hot loop; no loop tests the type
+  per sample.
+- Hard sync uses `osc_renderSyncBlock()` (§12.9).
+
+| Type | Renderer | Read | FM depth |
+|---|---|---|---|
+| `wav` Sin | `calcSineBlock` | 4,096-point table, linear interpolation | `calcFmSineBlock` |
+| `wav` Tri/Saw/Rec | `calcWavetableOscBlock(table)` | 1,024 points × level, linear | `calcFmBlock` (mod × fmMod << 19) |
+| `wav` Noi | `calcNoiseBlock` | a new `GetRngValue()` on each phase wrap | (plain in FM too) |
+| `wav` Cym | `calcSampleOscBlock` | 8-bit crash sample, `phase >> 17` | `calcSampleOscFmBlock` |
+| `wav` Re3…SwA | `calcStockWaveBlock` | stock level (§12.3.1), linear | `calcStockWaveFmBlock` (<< 19) |
+| `pwm` | `oscPwm_render` | §12.3.2 | `oscPwm_renderFm` (<< 19) |
+| `smp`/`slp` | `oscSample_render` | §12.3.3 | `oscSample_renderFm` (<< 9) |
+| `wtb` | `oscWavetable_render` | §12.3.4 | `oscWavetable_renderFm` (<< 19) |
+
+**Edge cases:**
+- A `wav` value outside the list renders silence.
+- `wav`-type oscillators can blend two neighbouring waves when the pool
+  grants a unit (§12.8).
+
+#### 12.3.1 Stock waves `Re3 Sw3 ReA TrA SwA`
+
+The menu names (S085 P2 §14) map to the code constants `SQ3 SW3 SQA TRA
+SWA` (wav values 6–10).
+
+- **Character:** five analog-style waves (303 square and saw, a squarer
+  square, a "dirty" triangle, a saw).
+- **Where they come from:** generated **at install** into the first
+  61,120 B of sample flash by `StockWaveGen.c`, from additive recipes in
+  `StockWaveRecipes.c`.
+  - The recipes are made by `tools/gen_stock_recipes.py` from
+    `tools/plots/stock_wave_harmonics.csv`.
+  - The device and the script sum in the same float32 order; `stock_gen`
+    checks every point within ±1 LSB.
+- **Level geometry:** 11 band-limited levels.
+  - Levels 0–4 have 1,024 points; levels 5–10 have 512, 256, 128, 64, 16
+    and 16.
+  - Harmonics per level: 511, 511, 337, 168, 84, 42, 21, 10, 5, 2, 1.
+  - 6,112 points per wave.
+- **Lookup:** `stockWave_level(wave, level)` returns `{tab, shift, mask}`.
+  The renderer reads `index = phase >> shift`.
+- **Fallback:** before the first install (`sampleMemory_stockValid()` = 0)
+  the same call returns program-flash tables: `Sw3`/`SwA` → Saw,
+  `TrA` → Tri, `Re3`/`ReA` → Rec. The boot shows "No samples" /
+  "load samples" in that state.
+
+#### 12.3.2 pwm families (`OscillatorPwm.c`)
+
+- **What is stored:** nothing. Each family is computed from the saw/tri
+  tables or the stock block.
+- **Per block:** `oscPwm_prepare()` runs on a frequency-cache miss. It
+  turns c = `mod`/127 (`source`) into the width state (`OscPwmState`: `shift`,
+  `split`, `scale`, `warpA`, `warpB`, `mix`, `seg`), with up to three
+  divisions. It picks the table level at frequency × the warp compression,
+  so a narrowed segment stays band-limited.
+
+The family is the `wav` row (`waveform`). Menu names (S085 P2 §14; the
+code constants keep the old spelling): `Rec` = `OSC_PWM_PRC`, `Saw` =
+`PSW`, `Tri` = `PTR`, `Re3` = `PQ3`, `Sw3` = `PW3`, `Swp` = `SWP`.
+
+| Family | Output | Width w as c goes 0 → 1 |
+|---|---|---|
+| `prc` | (saw(p) − saw(p + w)) · 1/(2·max(w, 1−w)): a pulse; at c = 0 it equals `Rec` (correlation > 0.99) | 0.5 → 0.04 |
+| `psw` | (saw(p) + saw(p + w)) · 0.5/(1 − w) | 0 → 0.5 |
+| `ptr` | triangle read through a two-slope phase warp meeting at w | 0.5 → 0.03 |
+| `pq3` | `sq3` through the warp; natural split s0 = 0.78 (0.5 before an install) | s0 → 0.12 |
+| `pw3` | `sw3` through the warp; s0 = 0.42 (0.5 before) | s0 → 0.04 |
+| `swp` | four segments by ⌊4c⌋: sine→tri, tri→saw, saw→square (two reads + blend), then a narrowing `prc` | blend = frac(4c) |
+
+- **Warp:** maps [0, w) onto [0, s0) with slope s0/w, and [w, 1) onto
+  [s0, 1); w is clamped to [0.02, 0.98].
+- **Interpolation:** reads interpolate with a 22-bit fraction (×
+  2.384185791015625e−07). Whole-cycle positions use 2^−32.
+- **Measured width:** `prc`'s positive fraction rises from 50 % to 96 % as
+  c goes 0 → 1 (host test).
+- **Reference model:** `tools/plots/plot_pwm.py` (`pwm_families.png`).
+
+#### 12.3.3 `smp` and `slp` (`OscillatorSample.c`)
+
+- **Phase:** Q20.12 frames, `OSC_SAMPLE_PHASE_SHIFT` 12, so up to
+  1,048,575 frames play fully. The increment is `f · 2^22 / FS` (1,024 · f
+  / FS frames per sample).
+- **`oscSample_bind()`** runs every block (a generation compare when
+  nothing changed).
+  - The sample index is `min(waveform, count − 1)` (the `wav` row). When
+    the catalogue generation changed, `waveform` is first re-expanded from
+    `waveRequest`, so a smaller reinstall does not overwrite the stored
+    choice.
+  - `sampleStart = mod · frames / 128` (`source`, linear);
+    `sampleEnd = frames`.
+  - The gain code comes from the catalogue.
+- **Per sample:** clamp the read index to start; interpolate to the next
+  frame.
+  - **`slp`:** wraps reads and phase into `[start, end)`; the frame after
+    the last is `start` (the loop seam).
+  - **`smp`:** holds at `end − 1` and outputs **0** there and afterwards (a
+    select, so the cost does not change).
+- **Gain:** `sampleMemory_gainFromCode(code)` = 2^(code/24), applied once
+  per block.
+- **Trigger:** a resetting trigger calls `oscSample_restart()`
+  (phase = start).
+- **End test:** `oscSample_isFinished()` (an `smp` read index has reached
+  `end − 1`) is the `snc` "master ended" test.
+
+#### 12.3.4 `wtb` (`OscillatorWavetable.c`)
+
+- **Format:** a wavetable is `frame_count` (≤ 128) frames of `frame_len`
+  points, stored 8- or 16-bit.
+- **Rows:** `wav` selects the table (`min(waveform, count − 1)`, re-expanded
+  from `waveRequest` on a catalogue change, as for samples); `mod`
+  (`source`) is the frame position, target = `mod · (n − 1) / 127`.
+- **Looping:** each frame is one cycle; the phase wraps at 2^32 and the
+  point after the last reads point 0 (`nx`), so a note plays the cycle
+  continuously. `wtb` has no end test.
+- **The frame pair** (design decision D1):
+  - Once per block the renderer picks two neighbouring frames `fa`, `fb`
+    between the current position and the target.
+  - It moves the position at most to the next frame boundary and ramps the
+    blend `ff` across the block (one float divide per block).
+- **Per sample:**
+  - `m = phase · frame_len` (64-bit); `idx = m >> 32`;
+    `nx = idx + 1`, wrapping to 0 at `frame_len`.
+  - Two points from each frame, two blends. 8-bit points are `int8 << 8`.
+- **Cost of the design:** a fast position sweep glides at one frame per
+  block (≈ 1,378 frames/s) instead of jumping. It keeps the worst case at
+  43 instructions per sample (FM 48) instead of 64/70.
+- **Hygiene (F11):** entering `wtb` clears `wtb.base` and `primed`, so stale
+  pwm bytes in the union are never trusted.
+
+### 12.4 Per-sample pitch slew
+
+**In the renderers:** every block renderer advances a local increment and
+adds `phaseIncStep` to it on every sample, then writes it back. The add
+always runs; in `rst` the step is 0, so the output equals the pre-S085
+loop (`osc_s0`).
+
+**Per block, `osc_setFreq()`:**
+1. Recompute the target for the type, cached on (frequency, waveform,
+   source, type key).
+2. With no slew armed: `phaseInc = target`, step 0.
+3. With a slew armed (`osc_armSlew()` sets `slewSamplesLeft` = 132):
+   step = (target − phaseInc) / **max(left, 32)**, and `left` falls by 32.
+   - The divisor never goes below the block length: the renderer applies
+     the step on all 32 samples. (Dividing by the 4 samples left in the
+     last block overshot the target by 20.5 % of the interval; assessment
+     A1.)
+   - The glide is linear for 128 samples, then the last 3 % arrives over a
+     fifth block. It never passes the target.
+
+### 12.5 Frequency per type (`osc_setFreq()`)
+
+| Type | Target increment | Level |
+|---|---|---|
+| `wav` Sin, Noi | `freq2PhaseIncr()` (4,096-point) | — |
+| `wav` tables and stock | `freq2PhaseIncr1024()` | `freqToTableIndex(f)` |
+| `wav` Cym | `freq2PhaseIncr32767()` | — |
+| `pwm` | from `oscPwm_prepare()` (2^32 per cycle) | at f × compression |
+| `smp`/`slp` | `oscSample_phaseIncForFreq()` | — |
+| `wtb` | `freq2PhaseIncr1024()` (2^32 per cycle) | — |
+
+### 12.6 Run modes and the trigger (`OscSection.c`)
+
+**`OscSectionState`:**
+
+| Field | Meaning |
+|---|---|
+| `runMode` | `rst` / `fre` / `itp` |
+| `itpState` | IDLE / PENDING / ACTIVE |
+| `itpPos` | the crossfade position |
+| `itpOld` | one `OscInfo` copy of the carrier |
+| `fSmooth`, `qSmooth`, `qTarget` | filter slew state |
+
+**`oscSection_beginTrigger(section, carrier, mods[], n)`** returns what the
+engine resets:
+
+| Mode | Returns | Oscillators | Filter |
+|---|---|---|---|
+| `rst` | `OSC_TRIGGER_RESET_ALL` | the engine's usual resets (see §5 and §10) | Drum clears it (`SVF_reset`) |
+| `fre` | `OSC_TRIGGER_RESET_NONE` | none; every oscillator's slew is armed | keeps ringing |
+| `itp` | `OSC_TRIGGER_RESET_CARRIER` | carrier snapshotted into `itpOld` and restarted; the modulators slew | keeps ringing |
+
+**Phase offsets on reset:**
+- `smp`/`slp` → `oscSample_restart()`;
+- pwm, `wtb` and table waves → `(0xff << 20) × offset`;
+- sine → its quarter offset;
+- else 0.
+
+`offset` is 1, or `1 − transient volume` in the transient offset mode.
+
+**Why `itp` crossfades only the carrier:** a click is an amplitude step,
+and the section has three sources:
+1. The carrier reset. This is what `itp` hides.
+2. A modulator reset in `mix`. A direct step.
+3. A modulator reset in FM. A frequency kink, not a step.
+
+`itp` never resets modulators. It renders the old carrier copy against the
+**same live modulator block** as the new carrier, so the fading copy
+carries exactly the FM tail of the un-retriggered sound. The crossfade is
+linear over `OSC_ITP_SAMPLES` (132). One pool unit per voice per block.
+
+**Lifecycle:**
+1. A trigger sets PENDING (or keeps ACTIVE).
+2. At the next block start the mixer claims a unit (§12.8). Granted:
+   ACTIVE. Refused: the carrier's phase is restored from the snapshot and
+   its slew armed, so the trigger behaves as `fre`.
+3. The engine renders the old copy into `oscRenderPool_scratch()`, then
+   calls `oscSection_blendItp()` and `oscSection_finishBlock()`. After 132
+   samples the state returns to IDLE.
+
+**Accepted:**
+- A retrigger during an ACTIVE fade re-snapshots the live carrier, so the
+  output steps by (1 − t)·(old − new). It needs triggers less than 3 ms
+  apart.
+- In `itp`, Cymbal's FM attack differs per hit, because its modulators are
+  not reset.
+
+**Filter slew** (`oscSection_filterRecalc()`, replacing `SVF_recalcFreq()`
+in `instrumentManager_recalcSlotFilter()`):
+- **`rst`:** exactly `SVF_recalcFreq()`.
+- **`fre`/`itp`:** cutoff and resonance move toward their targets by 0.28
+  per block (≈ 2 ms) through `SVF_recalcFreqFrom(filter, f)`. A resonance
+  written by modulation since the last block becomes the new target
+  (`oscSection_noteResoTarget()` from the resonance writer).
+
+#### 12.6.1 Amp envelope on a `fre`/`itp` retrigger (S085 P2)
+
+The run modes keep the oscillators and the filter running through a
+retrigger. Before P2 every engine still restarted its amp envelope with
+`slopeEg2_trigger()`, which keeps the raw value v but switches from the
+decay curve `f(v, slope)` to the attack curve `f(v, invSlope)`, with
+`f(v,k) = (1+k)v/(1+k|v|)`. The gain jumps when the envelope enters attack.
+At v = 0.5 (halfway down the decay):
+
+| Slope | Gain before | Gain after | Step |
+|---:|---:|---:|---:|
+| 0 | ≈ 0.00 | ≈ 1.00 | +1.0 |
+| 32 | 0.25 | 0.75 | +0.50 |
+| 64 | 0.50 | 0.50 | ≈ 0 |
+| 96 | 0.76 | 0.24 | −0.51 |
+| 127 | ≈ 1.00 | ≈ 0.00 | −1.0 |
+
+Drum ramped the step over one block, except at attack 0, where it was not
+ramped at all. Snare, Cymbal and HiHat apply one constant gain per block,
+so the step landed on one sample. A new velocity (`volumeMod` on) stepped
+the level too.
+
+**The rule (user, 2026-10-27):**
+- **`rst` is unchanged:** `slopeEg2_trigger()`, and every ramp runs flat,
+  so the output is bit-identical (`postchain`).
+- **`fre`/`itp`:** the attack starts at the gain the voice is producing.
+  When that gain is audible, the next block ramps from the previous block's
+  gain (and velocity) to the new one.
+
+**Gain match** (`slopeEg2_retriggerFrom(eg, g)`, `SlopeEg2.c`): sets
+`v = g / (1 + k(1 − g))`, k = `invSlope`, so `f(v, invSlope) = g`.
+- The denominator is ≥ 1 + `invSlope` ≥ 0.00025, because
+  `slopeEg2_setSlope()` caps the amount at ±0.9995.
+- g and v are clamped to [0, 1].
+- **Repeat mode:** `repeat > 0` keeps `slopeEg2_trigger()` (value 1,
+  `EG_REPEAT`); the armed ramp covers the jump.
+- **Fully decayed:** g ≈ 0 gives v ≈ 0, a fresh attack.
+- **Precision:** within 1e-5, except near slope 127, where the attack curve
+  is so steep near v = 1 that the nearest float v misses g by up to ~1e-4
+  (−80 dB).
+
+**Audible test** (`slopeEg2_isAudibleGain()`): `gain ≥ 1/32768`
+(`SLOPEEG2_AUDIBLE_GAIN`, one output step), on the gain the engine applied
+to its last block: Drum `ampFilterInput`, the others `egValueOscVol`.
+`instrumentManager_ampEnvelopeQuiet()` is not used: it tests the raw value,
+and at slope 127 a raw 0.0001 is still a gain of about 0.29.
+
+**Arm lifecycle** (`ampRampArm`, one byte per engine):
+1. The `fre`/`itp` trigger sets it when the gain is audible.
+2. Drum's async (`Drum_calcVoiceAsync()`) reads it: an armed block always
+   ramps the envelope gain, even at attack 0.
+3. The render passes the stored "last" value as the ramp start
+   (`lastVeloGain` for Drum, `lastAmpGain` for the others), records the
+   gain just applied, and clears the arm.
+
+Every other block passes equal endpoints. The ramp arithmetic runs every
+sample of every block in every mode (constant cost). Only its endpoints
+differ.
+
+**Still restarts on a `fre`/`itp` retrigger, by design:**
+- the transient sample (the intended attack sound);
+- the pitch envelope (Drum, Snare) and the snap envelope. These change
+  frequency, not amplitude: in `fre` the oscillator slew glides the jump
+  over 160 samples; in `itp` the modulators glide and the carrier's jump
+  is inside the crossfade.
+
+**State:** Drum `float lastVeloGain; uint8_t ampRampArm;`; Snare, Cymbal,
+HiHat `float lastAmpGain; uint8_t ampRampArm;`. Inside the 1,176 B runtime
+slot (`STORAGE_SRAM_MANIFEST.md` "S085").
+
+**Tests:** `ampretrig` (gain match for every slope, repeat fallback, the
+audible threshold, ramp wiring, no step in a Snare-style sequence);
+`postchain` (flat ramps = the S073 loops); breaks B27–B32.
+
+**Drum FM depth on a `fre` retrigger (S085 P2 F-A):**
+- **The problem:** Drum's FM depth is `fmMod = fmModAmount × pitch
+  envelope` (`Drum_calcVoiceAsync()`), and `DecayEg_trigger()` restarts the
+  pitch envelope at 1.0. The depth therefore jumps at every retrigger. The
+  Drum's FM is phase modulation (the carrier reads at
+  `phase + (mod × fmMod) << 17/19`), so the jump moves the read phase by
+  `mod × Δ fmMod`: a click whose size depends on the modulator's value at
+  the trigger (sporadic). The pitch slew does not cover it, because it
+  glides increments, not depth.
+- **The fix:** on the armed block (`ampRampArm`), `Drum_calcVoiceSyncBlock()`
+  passes `fmRampFrom = lastFmMod / fmMod` (clamped to 0..1; 1 on every
+  other block) to `oscSection_renderDrumRamped()`. In fm mode
+  `oscSection_rampModDepth()` scales the modulator block from `fmRampFrom`
+  to 1 across the block before the carrier reads it, so the effective depth
+  glides from the old value to the new over one block.
+- **Flat cases:**
+  - With an `itp` crossfade active the ramp is forced flat: the old carrier
+    copy keeps its own old `fmMod` and must see the unscaled modulator, and
+    the crossfade already hides the new carrier's jump.
+  - `mix`, `snc` and `rng` do not use `fmMod`.
+  - A ramp from 1 multiplies by exactly 1.0 (bit-identical; `osc_s0` runs
+    this path).
+- **Limit:** the clamp keeps the scaled modulator from exceeding its
+  rendered value. A retrigger whose new depth is *below* the old one (a
+  lowered FM amount) keeps that part of the step.
+- **Cost:** 15 instructions per sample in Drum fm mode, every block
+  (`p_fm_ramp`). Drum fm becomes 135 per sample, still below Drum `snc`
+  (162) and Cymbal/HiHat (178).
+- **State:** `float lastFmMod`. Drum's unused `egValueOscVol` field was
+  removed to pay for it, so the struct is 840 B (+8 for all of P2).
+- **Tests:** `osc_run` "fm depth ramp": exact wiring, flat = unramped,
+  forced flat under `itp`, and a phase sweep where the worst boundary step
+  falls from 65,311 to 294 (never above the block's own largest step +
+  3 LSB). Breaks B33–B35.
+- **On hardware** (pre-existing, unchanged): the FM conversion
+  `(uint32_t)(mod × fmMod)` compiles to `VCVT.U32`, which saturates
+  negative products to 0. The carrier is therefore phase-modulated by the
+  positive half of the modulator only. The host build wraps instead.
+
+### 12.7 Combining oscillators
+
+**`oscSection_renderDrum(car, mod, mode, amt, buf, modBuf, n, oldCar, oldBuf)`:**
+
+| Mode | Computation |
+|---|---|
+| `fm` | `mod` at gain amt → `modBuf`; `car` FM by `modBuf` → `buf`. Bit-identical to pre-S085. |
+| `mix` | `mod` at amt; `car` at 1 − amt; saturating sum. Bit-identical to pre-S085. |
+| `snc` | §12.9 |
+| `rng` | `mod` and `car` at gain 1; `out = car·(1 − amt) + ((car·mod) >> 15)·amt`, saturated |
+
+In every mode an `itp` copy (`oldCar`) is rendered with the same modulator
+block.
+
+**`oscSection_renderFm2(car, m1, m2, g1, g2, carGain, …)`** (Cymbal, HiHat):
+- the two modulators at their gains, a saturating sum;
+- the carrier FM at `carGain` (Cymbal 1.0, HiHat 0.5);
+- the `itp` copy with the same sum.
+
+`osc_s0` proves `fm`, `mix` and FM2 bit-identical to the frozen pre-S085
+engine lines.
+
+### 12.8 The render pool (`OscRenderPool.c`)
+
+**The budget:**
+- **Units:** `OSC_RENDER_POOL_UNITS` = 2 per 32-sample block, system-wide.
+  One unit = one extra oscillator render (plus its blend): an `itp` old
+  carrier, or the second wave of a `wav` interpolation pair.
+- **Budgeted full:** the worst case assumes both units always taken by the
+  dearest render.
+
+**Claims, in mixer order** (`EFFECTS_MIXER_DSP_REFERENCE.md`):
+1. `oscRenderPool_beginBlock()`.
+2. Ongoing `itp` crossfades, lowest slot first. They are never cut unless
+   the pool is full.
+3. Waveform interpolation claims, while velocity and LFO modulation are
+   applied (`modulationNode.c`; `wav` type only).
+4. New `itp` crossfades, lowest slot first; refused ones fall back to `fre`.
+
+**Scratch:** `oscRenderPool_scratch()` is one 32-sample block. Voices
+render one at a time, so one block serves both units.
+
+### 12.9 Hard sync (`snc`) at constant cost
+
+**Roles:** the modulator is the master and the carrier the slave. At each
+master wrap the slave restarts at the master's overshoot scaled by
+`ratio` = slave increment / master increment (once per block).
+
+**Steps:**
+1. **Lane.** `oscSection_buildSyncLane()` walks a copy of the master phase
+   before the master renders and records, for each sample *i*, `wrap[i]`
+   (the master wrapped between *i* and *i* + 1) and `over[i]` (the
+   overshoot).
+   - A periodic master wraps at 2^32.
+   - A sample master's cycle is `(end − start) · 4096`, measured from its
+     start. The modulo runs every sample.
+   - An `smp` master that has ended records no wraps, so the slave runs
+     free.
+2. **Master.** The master renders once, at unit gain, into `modBuf`.
+3. **Slave.** `osc_renderSyncBlock(slave, buf, n, 1.0, &lane)` runs the
+   slave's normal loop. After producing sample *i* it replaces the phase
+   with `base + over[i]·ratio` when `wrap[i]` is set (`oscSync_phase()`):
+   - the reset lands on sample *i* + 1, so the slave renders through the
+     wrap sample (D13);
+   - `base` is `start << 12` for an `smp`/`slp` slave, else 0;
+   - a synced one-shot slave replays from its start on each wrap.
+4. **Copy.** The `itp` copy runs the same lane with its own ratio.
+5. **Mix:** `slave·(1 − amt) + master·amt`, saturated.
+
+**Why this shape:** the cost per sample is the same for 0 wraps or 32. The
+first S085 form called the renderer once per wrap. A sample master at a
+high note wraps on **every** sample, so the per-call setup (dispatch,
+bind, frame pair) landed on every sample (assessment A2).
+
+**Code layout (ITCM matters):**
+- **wav loops** are always-inline cores that take a lane pointer
+  (`calcSineCore`, `calcWavetableOscCore`, `calcNoiseCore`,
+  `calcSampleOscCore`, `calcStockWaveCore`).
+  - The plain functions pass a literal NULL, so their loops are unchanged.
+  - `osc_renderSyncBlock()` holds the sync copies.
+- **pwm, smp/slp and wtb** run one shared loop each for plain and sync
+  (`oscPwm_blockLane()`, `oscSample_blockLane()`,
+  `oscWavetable_blockLane()`).
+  - The loop is marked `OSC_SHARED_LOOP` (`noinline`, `noclone`, no loop
+    unswitching) and tests the lane every sample (+2 instructions on the
+    plain render).
+  - Separate copies of everything cost 5.6 KB of ITCM.
+  - **Do not remove these attributes:** GCC otherwise clones the loop per
+    lane value.
+
+### 12.10 Values, requests and ranges (`InstrumentManager.c`)
+
+**Special writers:**
+- **`IM_SPECIAL_OSC_TYPE` (20):** sets the type.
+  - A type the oscillator may not take (`pwm` on a Cymbal/HiHat modulator,
+    `instrumentManager_oscTypeAllowed()`) is written as `wav`.
+  - It re-derives `waveform` from `waveRequest` and `source` from
+    `sourceRequest`, clamped to the new type's maxima.
+  - It binds `smp`/`slp`/`wtb` and refreshes the slot's `wav` modulation
+    domains.
+  - Entering `wtb` clears its union state first.
+- **`IM_SPECIAL_OSC_SOURCE` (21), `IM_SPECIAL_OSC_WAVE` (22):** record the
+  request byte **only for retained writes**, then clamp the live value.
+  - Retained writes are menu, MIDI, file load, Morph, step automation and
+    LFO restore of a base. LFO overlays are not.
+  - Because of this, a sample choice of 100 survives smp → wav → smp, and an
+    LFO can never become the stored value.
+  - `OSC_WAVE` (`wav`) rebinds `smp`/`slp`/`wtb` (the selection moved);
+    `OSC_SOURCE` (`mod`) rebinds `smp`/`slp` (the start moved).
+- **`IM_SPECIAL_RUN_MODE` (23):** sets `runMode`.
+
+**Maxima:**
+- `wav`: 10 for the `wav` type, 5 for pwm, count − 1 for samples and
+  tables (0 when none is installed).
+- `mod`: 127 for every type.
+
+**Per-slot domains:** the clamp, the velocity range, the LFO adapter
+domain and base, and the menu's automation maximum all use the per-slot
+maximum (`instrumentManager_descriptorModDomainForSlot()`). A type change
+re-derives each LFO adapter's base from `waveRequest` (assessment A9).
+
+**Storage** (`BANK_PRESET_ARCHITECTURE.md`): `typ` and `run` are
+automatable but not morphable. `wav` and `mod` are ordinary image rows
+(Morphable, LFO/velocity targets); Morphing `wav` under `smp`/`wtb` steps
+through the installed samples or tables between the two endpoints. They are stored single-ended and applied
+before the Morph image on every slot reset (`preset_applySelectorRows()`).
+
+### 12.11 Cost (worst-case instructions per sample)
+
+- **Measured** by `make -C tools/dsp_test armcheck-osc` (`osccost.py`: the
+  longest path through each loop; `armcheck/probe_*.c` fix the block
+  constants).
+- **Counts:** firmware pwm/smp/wtb plain = the loop + 2 (the lane test).
+  Calls count 1.
+- **Not included:** sample-flash wait states, which apply to the stock,
+  `smp` and `wtb` reads.
+
+| Loop | pre-S085 | plain | FM | `snc` slave |
+|---|---:|---:|---:|---:|
+| Tri/Saw/Rec | 24 | 25 | 36 | 35 |
+| Sin | 23 | 24 | 31 | 34 |
+| Noi | 16 + call | 16 + call | — | 20 + call |
+| Cym | 30 | 31 | 39 | 37 |
+| stock | — | 24 | 34 | 35 |
+| pwm `prc`/`psw` | — | 51 | 56 | 63 |
+| pwm `ptr`/`pq3`/`pw3` | — | 42 | 47 | 53 |
+| pwm `swp` seg 0/1/2/3 | — | 48/50/58/52 | 53/55/62/57 | 60/63/70/65 |
+| `smp` | — | 40 | 45 | 53 |
+| `slp` | — | 47 | 53 | 61 |
+| `wtb` 8/16-bit | — | 40/43 | 44/48 | 51/54 |
+
+**Section loops:**
+
+| Loop | Worst |
+|---|---:|
+| `snc` lane, full-wrap master | 11 |
+| `snc` lane, sample master | 18 (includes a UDIV) |
+| `snc` mix pass / with the `itp` copy | 16 / 28 |
+| `rng` law | 19 |
+| `itp` blend | 23 |
+
+**Per-voice worst cases** (oscillator section only):
+
+| Engine / mode | Composition | Worst |
+|---|---|---:|
+| Drum `fm` | 58 + 62 + FM depth ramp 15 (S085 P2 F-A) | 135 |
+| Drum `mix` | 58 + 58 + add | 116 + add |
+| Drum `snc` | lane 18 + master 58 + slave 70 + mix 16 | **162** |
+| Drum `rng` | 58 + 58 + 19 | 135 |
+| Snare | 58 + 16 | 74 |
+| Cymbal / HiHat | 2 × 58 + 62 + add | **178** + add |
+| Pre-S085 Cymbal (comparison) | | 98 |
+| Pool (system-wide) | 2 × (≤ 82 + 23) | ≤ 210 |
+
+**Post-chains (S085 P2):** the amp/velocity ramps (§12.6.1) bring the
+post-chain loops to Drum 35 (+3), Snare 35 (+5), Cymbal/HiHat 30 (+5),
+outside the oscillator section above. That is at most +30 per sample over
+six voice slots, about 0.6 % of the sample period, in every mode
+(`armcheck-postchain`, `ramp_*`).
+
+### 12.12 Tests
+
+| Target | What it proves |
+|---|---|
+| `osc_run` (modes `run`, `pwm`, `sample`, `wtb`) | slew trajectory; `itp` click bound in fm and mix (rst and a modulator reset must exceed it); pool order; `snc` (no-wrap identity per family, reset index, `itp` copy ratio, mix law, sample master with start > 0, finished master); `rng`; sample playback, seam, gain, re-expansion; `wtb` continuity, nx wrap, 8-bit; pwm polarity, F3 midpoints, width |
+| `osc_s0` | `rst` bit-identity against the frozen pre-S085 loops (incl. noise), an `osc_setFreq()` pitch sweep, and the frozen engine source lines for Drum fm/mix and Cymbal/HiHat FM2 |
+| `stock_gen` | every stock point within ±1 LSB of the reference |
+| `armcheck-osc`, `armcheck-osc-base` | the cost table |
+| `ampretrig` (S085 P2) | the gain-matched retrigger, the audible threshold, the post-chain ramps, no step on a `fre` retrigger (§12.6.1) |
+| `breakproofs` | 32 deliberate defects (B27–B32 from S085 P2), each must fail its test |
+
+### 12.13 How to extend
+
+**Add a `wav` wave:**
+1. Append a constant after `SWA` and raise `OSC_STOCK_WAVE_COUNT`.
+2. Add the `case` in `calcNextOscSampleBlock()`,
+   `calcNextOscSampleFmBlock()`, the scalar dispatchers and
+   `osc_renderSyncBlock()`, plus the frequency case in `osc_setFreq()` if
+   it is not a 1,024-point table.
+3. Add the name to `waveformNames` (the `_Static_assert` in `menu.c` checks
+   the count) and `osc_isTableWave()` if it takes the table phase offset.
+4. If it is generated at install, extend the stock block (the sample-flash
+   map moves: `SampleMemory.h`, `STOCK_WAVE_*`, the generator, the
+   reference).
+
+**Add a type:**
+1. Append `OSC_TYPE_*` and raise `OSC_TYPE_COUNT` and `oscTypeNames`.
+2. Write a plain and an FM renderer with the per-sample slew. Add a sync
+   form (a lane argument; use the shared-loop pattern if ITCM is tight)
+   and its `osc_renderSyncBlock()` case.
+3. Add a union member if the type keeps block state (`_Static_assert` the
+   size), re-initialised on entry.
+4. Add the `osc_setFreq()` target, the maxima in
+   `instrumentManager_oscWaveMaxForType()` / `_oscSourceMaxForType()`, the
+   type writer's bind call, `InstrumentCellFormat` kinds, and the menu
+   names.
+5. Measure with a probe (`armcheck/probe_*.c`), add host tests, and add a
+   break proof for each test.
+
+**Add a pwm family:**
+1. Append `OSC_PWM_*` and raise `OSC_PWM_FAMILY_COUNT` and
+   `pwmFamilyNames`.
+2. Add the width rule in `oscPwm_prepare()` and the `case` in
+   `oscPwm_block()`.
+3. Add probe wrappers (`PWM_PLAIN(name, family, seg)`) and update the cost
+   table. The dearest family sets the per-voice worst case.
+
+**Change the pool size:**
+1. Change `OSC_RENDER_POOL_UNITS`.
+2. Re-derive the worst case (units × the dearest unit). A unit is a full
+   extra carrier render, not a fraction.

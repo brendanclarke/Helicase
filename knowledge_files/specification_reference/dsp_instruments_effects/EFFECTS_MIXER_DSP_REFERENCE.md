@@ -782,3 +782,31 @@ descriptors, lanes, page layout and storage. For the DSP:
   return-ramp reset; the master bus compressor with tuning revision 1 and
   band-split saturation; the `xfd` fader mode (`074_SESSION_HANDOFF_LOG.md`
   §7–§10).
+
+---
+
+## S085 mixer block-start order
+
+`mixer_calcNextSampleBlock()`:
+
+1. `oscRenderPool_beginBlock()`
+2. `instrumentManager_claimOscSectionOngoing()` (accepts the pool in
+   `mixer.c`; ongoing itp crossfades keep their unit)
+3. `modNode_resetTargets()`
+4. `modNode_reassignVeloMod()` (waveform interpolation claims here)
+5. `instrumentManager_dispatchRuntimeLfos()`
+6. `instrumentManager_claimOscSectionPending()` (new itp, lowest slot first;
+   a refused trigger falls back to `fre`)
+7. slot filter recalc, slot async, Effects, render
+
+The decimator is unchanged. The pool is 2 units and is budgeted full: one
+unit is one extra oscillator render plus its blend (an `itp` old carrier,
+or the second wave of a `wav` interpolation pair), at most ≈ 105
+instructions per sample, so the pool adds ≤ 210 per sample system-wide
+(`CPU_USE_DSP_AUDIT.md` "S085 oscillator cost record"). The order matters:
+- A refused `itp` claim must arm its slew **before** `calcSlotAsync()` runs
+  `osc_setFreq()`, so step 6 (pending claims) must stay before step 7.
+- Interpolation claims (step 4) must stay between the ongoing claims
+  (step 2) and the pending claims (step 6): that is the Q14 priority.
+- The `snc` lane is built inside the Drum render, before the master
+  renders (`INSTRUMENTS_DSP_REFERENCE.md` §12.9).

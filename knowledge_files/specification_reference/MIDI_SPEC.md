@@ -1618,3 +1618,28 @@ SysEx dump/restore, MIDI 2.0, multi-cable USB.
   - `STORAGE_SRAM_MANIFEST.md` (RAM);
   - `DEV_MODES.md` (trace);
   - the MEMORY.md "MIDI / Clock Reminders".
+
+---
+
+## S085 — Oscillator rows on MIDI/NRPN
+
+The appended descriptor rows are ordinary automatable 7-bit rows:
+
+| Row | Drum | Snare | Cymbal | HiHat |
+|---|---:|---:|---:|---:|
+| `osc1_type` | 39 | 38 | 39 | 39 |
+| `osc1_source` | 40 | 39 | 40 | 40 |
+| `osc2_type` | 41 | — | 41 | 41 |
+| `osc2_source` | 42 | — | 42 | 42 |
+| `osc3_type` | — | — | 43 | 43 |
+| `osc3_source` | — | — | 44 | 44 |
+| `osc_run_mode` | 43 | 40 | 45 | 45 |
+
+(The local index is the descriptor index; NRPN ID = slot x 64 + local
+index.) A MIDI write is a retained menu edit: it records the request byte
+and re-derives the live value. LFO overlays do not record the request. The
+`oscN_wave` row reaches all 128 installed samples/wavetables; `oscN_source`
+is the menu's `mod` row (0..127: pwm width, sample start, table position;
+S085 P2 §14 swap); `typ` is 0..4 and `run` 0..2. A Cymbal/HiHat
+`osc2_type`/`osc3_type` write of 1 (`pwm`) is played as `wav`; the menu's
+own edits step over it.

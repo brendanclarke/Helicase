@@ -15,7 +15,9 @@ HOSTFLAGS := -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-v
 ARMCC  := arm-none-eabi-gcc
 ARMFLAGS := -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard -Ofast -std=gnu11 \
             -fdata-sections -ffunction-sections -I$(ROOT) -I$(ROOT)/Core \
-            -I$(ROOT)/Core/DSPAudio -I$(ROOT)/Core/compat -I$(GEN)
+            -I$(ROOT)/Core/DSPAudio -I$(ROOT)/Core/compat -I$(GEN) \
+            -I$(ROOT)/Core/MIDI -I$(ROOT)/Core/SampleRom \
+            -I$(ROOT)/Core/Bank/Scene/Preset -I$(ROOT)/Core/DSP/Instruments
 EX := python3 extract.py
 FP := python3 fpseq.py
 
@@ -27,9 +29,181 @@ fn = $(foreach s,$(1),--func $(s))
 rn = $(foreach s,$(2),--rename $(s)=$(1)$(s))
 
 .PHONY: selftest filter special_tags pack postchain octave mixer \
-        armcheck-filter armcheck-postchain armcheck-mixer clean
+        natural_order catalogue stock_gen osc_run osc_pwm osc_sample wtb osc_s0 \
+        ampretrig \
+        armcheck-osc-base armcheck-osc \
+        armcheck-filter armcheck-postchain armcheck-mixer breakproofs clean
 $(GEN):
 	mkdir -p $(GEN)
+
+# S085 host harness (C17.1). The real oscillator/section sources are compiled
+# natively; hostcompat shadows the ARM-only CMSIS header and prelude_osc.h
+# supplies placement macros and __SSAT.
+OSCINC := -Ihostcompat -I. -I$(ROOT) -I$(ROOT)/Core \
+          -I$(ROOT)/Core/DSPAudio -I$(ROOT)/Core/SampleRom \
+          -I$(ROOT)/Core/compat -I$(ROOT)/Core/MIDI \
+          -I$(ROOT)/Core/Bank/Scene/Preset -I$(ROOT)/Core/DSP/Instruments
+OSCFLAGS := -O2 -std=gnu11 -Wall -Wno-unused-function -Wno-comment \
+            -include prelude_osc.h $(OSCINC)
+OSCSRCS := host_osc_support.c $(ROOT)/Core/DSPAudio/Oscillator.c \
+           $(ROOT)/Core/DSPAudio/OscillatorPwm.c \
+           $(ROOT)/Core/DSPAudio/OscillatorSample.c \
+           $(ROOT)/Core/DSPAudio/OscillatorWavetable.c \
+           $(ROOT)/Core/DSPAudio/OscRenderPool.c \
+           $(ROOT)/Core/DSPAudio/OscSection.c \
+           $(ROOT)/Core/DSPAudio/StockWaves.c \
+           $(ROOT)/Core/DSPAudio/wavetable.c \
+           $(ROOT)/Core/DSPAudio/Samples.c
+
+# C17.3: natural order, catalogue v2 and stock generation.
+natural_order: | $(GEN)
+	$(EX) --src $(ROOT)/Core/Hardware/SD/storageTypes.c \
+	  --func storage_naturalCompare --func storage_stripOrderPrefix \
+	  --out $(GEN)/nat.c
+	$(HOSTCC) -O2 -std=gnu11 -Wall -include prelude.h -I. test_natural_order.c \
+	  $(GEN)/nat.c -o build/natural_order
+	./build/natural_order
+
+catalogue: | $(GEN)
+	$(HOSTCC) -O2 -std=gnu11 -Wall -Wno-comment -include prelude_cat.h \
+	  -Ihostcompat -I$(ROOT) -I$(ROOT)/Core \
+	  -I$(ROOT)/Core/DSPAudio -I$(ROOT)/Core/SampleRom \
+	  -I$(ROOT)/Core/compat -I. \
+	  test_catalogue.c host_sampleflash_stub.c \
+	  $(ROOT)/Core/SampleRom/SampleMemory.c \
+	  $(ROOT)/Core/SampleRom/SampleInstall.c -o build/catalogue -lm
+	./build/catalogue
+
+stock_gen: | $(GEN)
+	$(EX) --src $(ROOT)/Core/SampleRom/StockWaveGen.c \
+	  --func stockWaveGen_point --rename stockWaveGen_point=host_stockWaveGen_point \
+	  --rename static= --out $(GEN)/stock_gen.c
+	$(EX) --src $(ROOT)/Core/SampleRom/StockWaveGen.c \
+	  --object stock_gen_length --object stock_gen_harmonics \
+	  --out $(GEN)/stock_geo.c
+	$(EX) --src $(ROOT)/Core/SampleRom/StockWaveRecipes.c \
+	  --object stockWaveRecipeA --object stockWaveRecipeB \
+	  --object stockWaveLevelScale --out $(GEN)/stock_rec.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object sine_table \
+	  --out $(GEN)/stock_sine.c
+	$(HOSTCC) -O2 -std=gnu11 -Wall -Wno-comment -include prelude.h \
+	  -include $(ROOT)/Core/DSPAudio/StockWaves.h \
+	  -include $(ROOT)/Core/DSPAudio/wavetable.h \
+	  -Ihostcompat -I$(GEN) -I. \
+	  -I$(ROOT) -I$(ROOT)/Core -I$(ROOT)/Core/DSPAudio \
+	  test_stock_gen.c stock_all.c -o build/stock_gen -lm
+	./build/stock_gen
+
+# C17.6: the real oscillator layers.
+# S085 P2: gain-matched amp retrigger and the post-chain ramps.
+ampretrig: | $(GEN)
+	$(HOSTCC) $(OSCFLAGS) test_amp_retrigger.c \
+	  $(ROOT)/Core/DSPAudio/SlopeEg2.c $(ROOT)/Core/DSPAudio/distortion.c \
+	  -o build/ampretrig -lm
+	./build/ampretrig
+
+osc_run: | $(GEN)
+	$(HOSTCC) $(OSCFLAGS) test_osc_run.c $(OSCSRCS) \
+	  -o build/osc_run -lm
+	./build/osc_run all
+
+osc_pwm: osc_run
+	./build/osc_run pwm
+
+osc_sample: osc_run
+	./build/osc_run sample
+
+wtb: osc_run
+	./build/osc_run wtb
+
+# C17.5: bit-identical rst and the old fm/mix/FM2 compositions.
+# Assessment A7: also the frozen noise loop, the frozen osc_setFreq() (a
+# pitch sweep), and the verbatim frozen85 engine oscillator lines (Drum
+# 313-326, Cymbal 240-247, HiHat 257-264) wrapped by s0_engines.c.
+S0_RENAME_DISPATCH := --rename calcNextOscSampleBlock=old_dispatch \
+	  --rename calcNextOscSampleFmBlock=old_dispatchFm
+osc_s0: | $(GEN)
+	$(EX) --src $(FROZEN)85/Core/DSPAudio/Oscillator.c \
+	  --func calcSineBlock --func calcFmSineBlock \
+	  --func calcWavetableOscBlock --func calcFmBlock \
+	  --func calcSampleOscBlock --func calcSampleOscFmBlock \
+	  --func calcNoiseBlock \
+	  --rename calcSineBlock=old_calcSineBlock \
+	  --rename calcFmSineBlock=old_calcFmSineBlock \
+	  --rename calcWavetableOscBlock=old_calcWavetableOscBlock \
+	  --rename calcFmBlock=old_calcFmBlock \
+	  --rename calcSampleOscBlock=old_calcSampleOscBlock \
+	  --rename calcSampleOscFmBlock=old_calcSampleOscFmBlock \
+	  --rename calcNoiseBlock=old_calcNoiseBlock \
+	  --out $(GEN)/s0_old.c
+	$(EX) --src $(FROZEN)85/Core/DSPAudio/Oscillator.c \
+	  --object osc_octaveEdgeHz --func freqToTableIndex \
+	  --func freq2PhaseIncr --func freq2PhaseIncr1024 --func freq2PhaseIncr32767 \
+	  --func osc_calcSineFreqValue --func osc_calcNoiseFreqValue \
+	  --func osc_calcWavetableFreqValue --func osc_calcSampleFreqValue \
+	  --func osc_calcUserSampleFreqValue --func osc_setFreq \
+	  --rename osc_octaveEdgeHz=old_osc_octaveEdgeHz \
+	  --rename freqToTableIndex=old_freqToTableIndex \
+	  --rename freq2PhaseIncr=old_freq2PhaseIncr \
+	  --rename freq2PhaseIncr1024=old_freq2PhaseIncr1024 \
+	  --rename freq2PhaseIncr32767=old_freq2PhaseIncr32767 \
+	  --rename osc_calcSineFreqValue=old_osc_calcSineFreqValue \
+	  --rename osc_calcNoiseFreqValue=old_osc_calcNoiseFreqValue \
+	  --rename osc_calcWavetableFreqValue=old_osc_calcWavetableFreqValue \
+	  --rename osc_calcSampleFreqValue=old_osc_calcSampleFreqValue \
+	  --rename osc_calcUserSampleFreqValue=old_osc_calcUserSampleFreqValue \
+	  --rename osc_setFreq=old_osc_setFreq \
+	  --out $(GEN)/s0_old_freq.c
+	$(EX) --src $(FROZEN)85/Core/DSP/Instruments/Drum/DrumVoice.c \
+	  --lines 313-326 $(S0_RENAME_DISPATCH) --out $(GEN)/s0_drum_lines.c
+	$(EX) --src $(FROZEN)85/Core/DSP/Instruments/Cymbal/CymbalVoice.c \
+	  --lines 240-247 $(S0_RENAME_DISPATCH) --out $(GEN)/s0_cym_lines.c
+	$(EX) --src $(FROZEN)85/Core/DSP/Instruments/HiHat/HiHat.c \
+	  --lines 257-264 $(S0_RENAME_DISPATCH) --out $(GEN)/s0_hat_lines.c
+	$(HOSTCC) $(OSCFLAGS) -I$(GEN) -include $(ROOT)/Core/DSPAudio/Oscillator.h \
+	  -include $(ROOT)/Core/DSPAudio/Samples.h -include $(ROOT)/Core/DSPAudio/random.h \
+	  test_osc_s0.c s0_engines.c $(GEN)/s0_old.c $(GEN)/s0_old_freq.c \
+	  $(OSCSRCS) -o build/osc_s0 -lm
+	./build/osc_s0
+
+# C17.4: ARM per-sample loop report (assessment A3). Each probe wrapper fixes
+# its block constants so its innermost loop is one case's per-sample body;
+# osccost.py prints the static instruction count of every innermost loop.
+# armcheck-osc-base prices the frozen pre-S085 loops on the same compiler
+# flags; armcheck-osc prices the S085 loops and the probe wrappers. The
+# figures are recorded in S085_P1_IMPLEMENTATION.md C19.2.
+COST := python3 osccost.py
+PROBE_FLAGS := $(ARMFLAGS) -I$(ROOT)/Core/DSPAudio -I$(ROOT)/Core/SampleRom
+
+armcheck-osc-base: | $(GEN)
+	$(ARMCC) $(ARMFLAGS) -include armcheck/osc_base_compat.h \
+	  -c $(FROZEN)85/Core/DSPAudio/Oscillator.c \
+	  -o build/osc_base.o
+	$(COST) --obj build/osc_base.o --func calcSineBlock --func calcFmSineBlock \
+	  --func calcWavetableOscBlock --func calcFmBlock --func calcNoiseBlock \
+	  --func calcSampleOscBlock --func calcSampleOscFmBlock
+
+armcheck-osc: | $(GEN)
+	$(ARMCC) $(ARMFLAGS) -c $(ROOT)/Core/DSPAudio/Oscillator.c -o build/osc_new.o
+	$(ARMCC) $(PROBE_FLAGS) -c armcheck/probe_wav.c -o build/probe_wav.o
+	$(ARMCC) $(PROBE_FLAGS) -c armcheck/probe_pwm.c -o build/probe_pwm.o
+	$(ARMCC) $(PROBE_FLAGS) -c armcheck/probe_smp.c -o build/probe_smp.o
+	$(ARMCC) $(PROBE_FLAGS) -c armcheck/probe_wtb.c -o build/probe_wtb.o
+	$(ARMCC) $(PROBE_FLAGS) -c armcheck/probe_section.c -o build/probe_section.o
+	$(COST) --obj build/osc_new.o --func calcSineBlock --func calcFmSineBlock \
+	  --func calcWavetableOscBlock --func calcFmBlock --func calcNoiseBlock \
+	  --func calcSampleOscBlock --func calcSampleOscFmBlock \
+	  --func calcStockWaveBlock --func calcStockWaveFmBlock
+	$(COST) --obj build/probe_wav.o --func p_table_sync --func p_sine_sync \
+	  --func p_noise_sync --func p_crash_sync --func p_stock_sync
+	$(COST) --obj build/probe_pwm.o \
+	  $(foreach f,prc psw ptr pq3 pw3 swp0 swp1 swp2 swp3,--func p_pwm_$(f) \
+	  --func p_pwm_$(f)_fm --func p_pwm_$(f)_lane)
+	$(COST) --obj build/probe_smp.o --func p_smp --func p_smp_fm --func p_smp_lane \
+	  --func p_slp --func p_slp_fm --func p_slp_lane
+	$(COST) --obj build/probe_wtb.o --func p_wtb --func p_wtb_fm --func p_wtb_lane
+	$(COST) --obj build/probe_section.o --func p_lane_table --func p_lane_sample \
+	  --func oscSection_renderSync --func p_rng --func p_blend --func p_fm_ramp
 
 # Step 0 gate: exact frozen source against itself.
 selftest: | $(GEN)
@@ -100,11 +274,16 @@ armcheck-postchain: postchain
 	  --rename calcDistBlock=old_calcDistBlock --out $(GEN)/pc_old_dist_arm.c
 	$(ARMCC) $(ARMFLAGS) -c armcheck/postchain.c -o build/ac_postchain.o
 	$(FP) --obj build/ac_postchain.o --ref old_addGainInterpolated \
-	  --ref old_addGain --ref old_calcDistBlock --new new_drum
+	  --ref old_addGain --ref old_calcDistBlock --new new_drum --report
 	$(FP) --obj build/ac_postchain.o --ref ref_snare:0 --ref old_calcDistBlock \
-	  --new new_snare
+	  --new new_snare --report
 	$(FP) --obj build/ac_postchain.o --ref ref_cymbal:0 --ref old_calcDistBlock \
-	  --new new_addgain
+	  --new new_addgain --report
+	# S085 P2 (C7.3): the ramps add value operations by design, so the three
+	# runs above are reports; this is the per-sample cost (35 / 35 / 30).
+	python3 osccost.py --obj build/ac_postchain.o --func new_drum \
+	  --func new_snare --func new_addgain --func ramp_drum \
+	  --func ramp_snare --func ramp_addgain
 
 # Step 1 gate: rounding baseline, then frozen (A) against the current batched
 # solver (B) over the full S1 grid and both I/O twins.
@@ -193,3 +372,8 @@ armcheck-mixer: mixer
 	  --report --all
 	$(FP) --obj build/ac_mixer.o --ref old_dry:4 --ref old_send:3 --new new_combined:27 \
 	  --report --all
+
+# C17.9 / assessment A10: each listed defect, applied in a temporary copy of
+# the tree, must make its host target fail. The working tree is untouched.
+breakproofs:
+	python3 breakproofs.py

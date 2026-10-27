@@ -54,6 +54,7 @@
 #include "Snare.h"
 #include "HiHat.h"
 #include "InstrumentManager.h"
+#include "OscRenderPool.h"
 #include "EffectsManager.h"
 #include "BufferTools.h"
 #include "squareRootLut.h"
@@ -863,6 +864,18 @@ void mixer_calcNextSampleBlockTest(sample_mx_t *output, sample_mx_t *output2)
 void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 {
 
+	/*
+	 * Oscillator render pool, part 1 (S085 C9.4).
+	 *
+	 * What:       reset the pool, then let crossfades already running keep
+	 *             their unit (lowest slot first).
+	 * Why:        Q14 claim order: an ongoing crossfade is never cut; waveform
+	 *             interpolation (granted while velocity and LFO modulation are
+	 *             applied just below) comes next; new crossfades come last.
+	 * Affiliates: OscRenderPool.c, instrumentManager_claimOscSectionOngoing().
+	 */
+	oscRenderPool_beginBlock();
+	instrumentManager_claimOscSectionOngoing();
 	modNode_resetTargets();
 	//re assign velocity modulation
 	modNode_reassignVeloMod();
@@ -876,6 +889,18 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	 * InstrumentManager owns the dynamic instrument-to-runtime selection.
 	 */
 	instrumentManager_dispatchRuntimeLfos();
+	/*
+	 * Oscillator render pool, part 2 (S085 C9.4).
+	 *
+	 * What:       triggers since the last block (voiceControl_processPending()
+	 *             ran before this function) claim what is left, lowest slot
+	 *             first; a refused itp trigger behaves as fre (its carrier
+	 *             phase is restored and slews).
+	 * Why:        must precede the filter recalc and calcSlotAsync(), so a
+	 *             fallback slew is armed before osc_setFreq() computes steps.
+	 * Affiliates: instrumentManager_claimOscSectionPending().
+	 */
+	instrumentManager_claimOscSectionPending();
 	for(uint8_t slot=0u; slot<6u; slot++)
 		instrumentManager_recalcSlotFilter(slot);
 	for(uint8_t slot=0u; slot<6u; slot++)

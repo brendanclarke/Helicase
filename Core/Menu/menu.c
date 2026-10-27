@@ -44,6 +44,9 @@
 #include "presetManager.h"
 #include "filesystem.h"
 #include "SampleMemory.h"
+#include "InstrumentCellFormat.h"
+#include "Oscillator.h"
+#include "OscSection.h"
 #include "sequencer.h"
 #include "LiveRecord.h"
 #include "StepScale.h"
@@ -1045,16 +1048,85 @@ static void menu_setStorageMessage(const char *message, const char *detail)
     lcd_waitForIdle();
 }
 
+/*
+ * Install summary hold (S085 C3.10).
+ *
+ * What:       time_sysTick deadline (0 = none) until which the Load:[Samples]
+ *             summary stays on screen; then the normal page repaints.
+ * Why:        a blocking delay after the modal would starve audio; the
+ *             deadline is serviced from menu_pollPresetStatus() (approved
+ *             2 B, S085 §0.5).
+ * Writers:    menu_loadSamplesModal().  Readers: menu_serviceInstallSummary().
+ */
+static uint16_t menu_installSummaryUntil;
+
+/*
+ * Three-digit count text (S085 C3.10).
+ *
+ * What:       writes value (0..999) as three digits, leading zeros kept.
+ * Accessors:  menu_installProgress(), menu_loadSamplesModal().
+ */
+static void menu_installCount3(char *dst, uint16_t value)
+{
+    if (value > 999u)
+        value = 999u;
+    dst[0] = (char)('0' + value / 100u);
+    dst[1] = (char)('0' + (value / 10u) % 10u);
+    dst[2] = (char)('0' + value % 10u);
+}
+
+/*
+ * Load:[Samples] progress line (S085 C3.10).
+ *
+ * What:       row 2 shows the stage: "Erasing", "Stock waves",
+ *             "Samples NNN", "Wavetbl NNN", "Commit".
+ * Why:        the install is longer than v1; the user sees it move.
+ * Inputs:     stage (FS_INSTALL_STAGE_*), count.
+ * Accessors:  registered with filesystem_setInstallProgress().
+ */
+static void menu_installProgress(uint8_t stage, uint16_t count)
+{
+    char line[17] = "                ";
+
+    switch (stage) {
+    case FS_INSTALL_STAGE_ERASE:   memcpy(line, "Erasing", 7u); break;
+    case FS_INSTALL_STAGE_STOCK:   memcpy(line, "Stock waves", 11u); break;
+    case FS_INSTALL_STAGE_SAMPLES:
+        memcpy(line, "Samples", 7u);
+        menu_installCount3(&line[8], count);
+        break;
+    case FS_INSTALL_STAGE_WAVETABLES:
+        memcpy(line, "Wavetbl", 7u);
+        menu_installCount3(&line[8], count);
+        break;
+    default:                       memcpy(line, "Commit", 6u); break;
+    }
+    lcd_setcursor(0, 2);
+    lcd_string(line);
+    lcd_waitForIdle();
+}
+
+/*
+ * Retire the summary (S085 C3.10).
+ *
+ * What:       once time_sysTick passes menu_installSummaryUntil, clears the
+ *             deadline and repaints the menu.
+ * Accessors:  menu_pollPresetStatus() (first statement).
+ */
+static void menu_serviceInstallSummary(void)
+{
+    if (menu_installSummaryUntil == 0u ||
+        (int16_t)(time_sysTick - menu_installSummaryUntil) < 0)
+        return;
+    menu_installSummaryUntil = 0u;
+    menu_repaintAll();
+}
+
 static void menu_loadSamplesModal(void)
 {
-    /* Single visible load command: install /samples first, then append /loops.
-    ** This preserves the old user-facing two-step behavior and per-stage
-    ** progress text, but avoids exposing a separate SampLoop menu option and
-    ** reinitializes audio only once after all flash work is complete. */
+    /* Single visible load command: full catalogue v2 install of /samples and
+    ** /wavetables, then one audio resume. */
     uint16_t t0;
-    uint8_t samplesOk;
-    uint8_t loopsOk;
-    const char *failedMessage = "Sample upload";
 
     menu_beginStorageMessage("Sample upload");
     lcd_setcursor(0, 2);
@@ -1086,31 +1158,47 @@ static void menu_loadSamplesModal(void)
             filesystem_tick();
     }
 
-    menu_setStorageMessage("Sample upload", "Writing flash");
-    samplesOk = filesystem_installSamplesBlocking();
-    menu_setStorageMessage("Loop upload", "Writing flash");
-    loopsOk = filesystem_installLoopsBlocking();
-    if (samplesOk) {
-        failedMessage = "Loop upload";
-    }
+    {
+        fs_install_report_t report;
+        char row1[17] = "Smp 000 Wtb 000 ";
+        char row2[17] = "Skip 000        ";
+        uint8_t ok;
 
-    audioCodec_resume();
-    menu_setNumSamples(sampleMemory_getNumSamples());
+        menu_setStorageMessage("Sample upload", "Erasing");
+        filesystem_setInstallProgress(menu_installProgress);
+        ok = filesystem_installSamplesBlocking(&report);
+        filesystem_setInstallProgress(NULL);
+        audioCodec_resume();
 
-    if (menu_loadSaveCommandActive)
-        menu_finishLoadSaveCommand();
-    else {
-        menu_storageBusy = 0u;
-        menu_resetSaveParameters();
-    }
-    if (!samplesOk || !loopsOk) {
+        if (menu_loadSaveCommandActive)
+            menu_finishLoadSaveCommand();
+        else {
+            menu_storageBusy = 0u;
+            menu_resetSaveParameters();
+        }
+        /*
+         * Summary (S085 C3.10): "Smp NNN Wtb NNN" / "Skip NNN" (files plus
+         * tables), or "Sample upload" / "Failed". Held 1.5 s through
+         * menu_installSummaryUntil, never by blocking.
+         */
         lcd_clear();
         lcd_home();
-        lcd_string(failedMessage);
-        lcd_setcursor(0, 2);
-        lcd_string("Failed");
-    } else {
-        menu_repaintAll();
+        if (ok) {
+            menu_installCount3(&row1[4], report.samples);
+            menu_installCount3(&row1[12], report.wavetables);
+            menu_installCount3(&row2[5], (uint16_t)(report.skipped_files +
+                                                    report.skipped_tables));
+            lcd_string(row1);
+            lcd_setcursor(0, 2);
+            lcd_string(row2);
+        } else {
+            lcd_string("Sample upload");
+            lcd_setcursor(0, 2);
+            lcd_string("Failed");
+        }
+        menu_installSummaryUntil = (uint16_t)(time_sysTick + 1500u);
+        if (menu_installSummaryUntil == 0u)
+            menu_installSummaryUntil = 1u;
     }
 }
 
@@ -1654,7 +1742,6 @@ static uint8_t cur_hw_on;
  * needs the same coalesced repaint flag before that definition is reached. */
 extern volatile uint8_t menu_knobs_dirty;
 
-uint8_t menu_numSamples = 0;
 uint16_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
 uint8_t menu_shownPattern = 0;
 uint8_t menu_currentBar = 0;
@@ -2037,6 +2124,17 @@ static void menu_displayModTargetFull(uint8_t curParmVal);
 static void menu_displayModTargetShort(uint8_t curParmVal, char *valueAsText);
 static uint8_t getMaxEntriesForMenu(uint8_t menuId);
 static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *buf);
+/*
+ * Name tables follow their DSP counts (S085 C15.8).
+ * What: compile-time proof that each MenuText.h table count equals its
+ * constant. Why: a new type, run mode, family, mode or wave cannot ship
+ * without its name.
+ */
+_Static_assert(OSC_TYPE_COUNT == 5u, "oscTypeNames has 5 entries");
+_Static_assert(OSC_RUN_COUNT == 3u, "runModeNames has 3 entries");
+_Static_assert(OSC_PWM_FAMILY_COUNT == 6u, "pwmFamilyNames has 6 entries");
+_Static_assert(OSC_MOD_COUNT == 4u, "mixFmNames has 4 entries");
+_Static_assert(OSC_STOCK_WAVE_COUNT == 11u, "waveformNames has 11 entries");
 static void menu_getLfoPolarityName(uint8_t value, char *buf);
 static void menu_getPlayModeName(uint16_t value, char *buf);
 static void menu_getConditionName(uint16_t value, char *buf);
@@ -2203,6 +2301,12 @@ static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
 static void menu_displayInstrumentTargetFull(uint16_t target);
 static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText);
 static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value);
+static void menu_formatSampleShortName(uint8_t sampleIndex, char *buf);
+static uint8_t menu_instrumentCellText3(uint8_t scene, uint8_t slot,
+                                        const ParamDescriptor *descriptor,
+                                        uint8_t value, char out[3]);
+static uint8_t menu_instrumentCellFull(const menu_cell_t *cell, uint8_t scene,
+                                       uint8_t value, char line[16]);
 /* S074 bus compressor helpers; definitions stay with display/commit logic. */
 static uint8_t menu_paramIsBusComp(uint16_t paramNr);
 static uint8_t menu_busCompValueText(uint16_t paramNr, uint8_t value,
@@ -3280,6 +3384,101 @@ static void va_queueMarkerTransaction(const uint8_t desired_base[4],
 }
 
 /*
+ * Wavetable short name (S085 C15.4).
+ * What: w01..w99, then wA0.. (the sample short-name shape).
+ * Accessors: menu_instrumentCellText3().
+ */
+static void menu_formatWavetableShortName(uint8_t index, char *buf)
+{
+    const uint8_t display = (uint8_t)(index + 1u);
+
+    buf[0] = 'w';
+    if (display <= 99u) {
+        buf[1] = (char)('0' + display / 10u);
+        buf[2] = (char)('0' + display % 10u);
+        return;
+    }
+    buf[1] = (char)('A' + (display - 100u) / 10u);
+    buf[2] = (char)('0' + (display - 100u) % 10u);
+}
+
+/*
+ * Formatted instrument cell, three characters (S085 C15.4).
+ *
+ * What:       renders typ / run / mod / wav cells from
+ *             instrumentCellFormat_describe(); returns 0 for every other row.
+ *             mod (CELL_FMT_NUMBER) is the plain number.
+ * Inputs:     scene, slot, descriptor, value.  Outputs: out[3]; 1 if handled.
+ * Accessors:  va_formatValue3(), menu_formatCellValue3(),
+ *             menu_formatAutomationValue3Slot(), menu_instrumentCellFull().
+ * Affiliates: MenuText.h tables, menu_formatSampleShortName().
+ */
+static uint8_t menu_instrumentCellText3(uint8_t scene, uint8_t slot,
+                                        const ParamDescriptor *descriptor,
+                                        uint8_t value, char out[3])
+{
+    instrument_cell_format_t f;
+
+    if (!instrumentCellFormat_describe(scene, slot, descriptor, value, &f))
+        return 0u;
+    switch (f.kind) {
+    case CELL_FMT_OSC_TYPE:    memcpy(out, oscTypeNames[f.index + 1u], 3);  break;
+    case CELL_FMT_RUN_MODE:    memcpy(out, runModeNames[f.index + 1u], 3);  break;
+    case CELL_FMT_PWM_FAMILY:  memcpy(out, pwmFamilyNames[f.index + 1u], 3); break;
+    case CELL_FMT_STOCK_WAVE:  memcpy(out, waveformNames[f.index + 1u], 3); break;
+    case CELL_FMT_SAMPLE:      menu_formatSampleShortName(f.index, out);    break;
+    case CELL_FMT_WAVETABLE:   menu_formatWavetableShortName(f.index, out); break;
+    default:                   numtostrpu(out, f.index, ' ');               break;
+    }
+    return 1u;
+}
+
+/*
+ * Formatted instrument cell, full second line (S085 C15.4).
+ *
+ * What:       wav row: line[0..]: the sample or wavetable name (8
+ *             characters) or the stock wave name; line[13..15]: the compact
+ *             value. mod row: the number once, at line[0..2], nothing on
+ *             the right (P2 §14: the type says what the number is).
+ * Why:        the single-parameter view shows names; a number needs no
+ *             label.
+ * Inputs:     cell, scene, value, the 16-character line.
+ * Outputs:    1 if handled.  Accessors: menu_repaintGeneric().
+ */
+static uint8_t menu_instrumentCellFull(const menu_cell_t *cell, uint8_t scene,
+                                       uint8_t value, char line[16])
+{
+    instrument_cell_format_t f;
+    char name[SAMPLE_DISPLAY_NAME_LEN + 1u];
+
+    if (!cell || cell->kind != MENU_CELL_INSTRUMENT ||
+        !instrumentCellFormat_describe(scene, cell->slot, cell->descriptor,
+                                       value, &f))
+        return 0u;
+    switch (f.kind) {
+    case CELL_FMT_SAMPLE:
+        sampleMemory_getDisplayName(f.index, name);
+        memcpy(&line[0], name, SAMPLE_DISPLAY_NAME_LEN);
+        break;
+    case CELL_FMT_WAVETABLE:
+        sampleMemory_getWavetableName(f.index, name);
+        memcpy(&line[0], name, SAMPLE_DISPLAY_NAME_LEN);
+        break;
+    case CELL_FMT_STOCK_WAVE:
+        memcpy(&line[0], waveformNames[f.index + 1u], 3u);
+        break;
+    case CELL_FMT_NUMBER:
+        numtostrpu(&line[0], f.index, ' ');
+        return 1u;
+    default:
+        break;
+    }
+    (void)menu_instrumentCellText3(scene, cell->slot, cell->descriptor, value,
+                                   &line[13]);
+    return 1u;
+}
+
+/*
  * Format one automation value using the cell's dtype vocabulary.
  *
  * Mirrors the dtype switch in menu_formatCellValue3() but accepts an explicit
@@ -3320,12 +3519,19 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
     if (menu_getS080StaticName(cell, value, out))
         return;
 
+    /* S085 C15.5: formatted oscillator cell. */
+    if (cell && cell->kind == MENU_CELL_INSTRUMENT &&
+        menu_instrumentCellText3(scene_getActiveIndex(), cell->slot,
+                                 cell->descriptor, value, out))
+        return;
+
     switch (dtype) {
     case DTYPE_PM63:
         numtostrps(out, (int8_t)(value - 63));
         break;
     case DTYPE_MIX_FM:
-        memcpy(out, (value == 1u) ? menuText_mix : menuText_fm, 3);
+        /* S085 C15.6: fm / mix / snc / rng. */
+        memcpy(out, mixFmNames[1u + ((value < 4u) ? value : 0u)], 3);
         break;
     case DTYPE_ON_OFF:
         memcpy(out, (value == 1u) ? menuText_on : menuText_off, 3);
@@ -5234,7 +5440,10 @@ static uint8_t menu_cellCommitValueEx(const menu_cell_t *cell, uint16_t value,
                     morphView ? INSTRUMENT_IMAGE_MORPH
                                        : INSTRUMENT_IMAGE_MAIN,
                     (uint8_t)value);
-            } else if (!morphView) {
+            } else if (!morphView ||
+                       instrumentManager_isSelectorDescriptor(cell->descriptor)) {
+                /* S085 C15.10: selector rows are single-ended; under SHIFT
+                ** Morph an edit stores Normal (S078 Morph-view rule). */
                 changed |= preset_setSupplementalParameter(
                     scene_index, cell->slot, cell->descriptor_index, value);
             }
@@ -6331,6 +6540,12 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
     if (menu_getMidiStaticName(cell, value, valueAsText))
         return;
 
+    /* S085 C15.5: formatted oscillator cell. */
+    if (cell && cell->kind == MENU_CELL_INSTRUMENT &&
+        menu_instrumentCellText3(scene_getActiveIndex(), cell->slot,
+                                 cell->descriptor, value, valueAsText))
+        return;
+
     /*
      * Format one cell value for the compact four-column view. Instrument cells
      * share the same dtype vocabulary as static cells, but target cells may
@@ -6395,8 +6610,8 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         setNoteName(value, valueAsText);
         break;
     case DTYPE_MIX_FM:
-        if (value == 1u) memcpy(valueAsText, menuText_mix, 3);
-        else            memcpy(valueAsText, menuText_fm, 3);
+        /* S085 C15.6: fm / mix / snc / rng. */
+        memcpy(valueAsText, mixFmNames[1u + ((value < 4u) ? value : 0u)], 3);
         break;
     case DTYPE_ON_OFF:
         if (value == 1u) memcpy(valueAsText, menuText_on, 3);
@@ -6610,6 +6825,48 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
         return;
     }
 
+    /*
+     * Formatted instrument rows clamp to their current maximum
+     * (S085 C15.5).
+     *
+     * What:       typ 0..4, run 0..2, wav to the stored type's maximum, mod
+     *             0..127 (InstrumentCellFormat). The maximum can exceed 127
+     *             for no row: 128 samples / wavetables give wav <= 127 (Q7).
+     * Why:        the dtype nibble cannot express these ranges; menu and MIDI
+     *             edits (menu_commitTargetEdit()) both pass here.
+     */
+    if (cell->kind == MENU_CELL_INSTRUMENT && cell->descriptor) {
+        instrument_cell_format_t f;
+
+        if (instrumentCellFormat_describe(scene_getActiveIndex(), cell->slot,
+                                          cell->descriptor,
+                                          (uint8_t)((*value > 255u) ? 255u : *value),
+                                          &f)) {
+            const kit_instrument_slot_t *inst = scene_instrumentSlotConst(
+                scene_getActiveIndex(), cell->slot);
+
+            if (*value > f.max)
+                *value = f.max;
+            /*
+             * Step over pwm where the oscillator may not take it (P2 §14).
+             *
+             * What:       a Cymbal/HiHat FM typ edit landing on pwm moves on
+             *             to smp when coming from wav (or below) and back to
+             *             wav when coming from above, so the encoder steps
+             *             wav <-> smp and an absolute pot never stores pwm.
+             * Inputs:     the cell's current displayed value (direction).
+             */
+            if (f.kind == CELL_FMT_OSC_TYPE && inst &&
+                !instrumentManager_oscTypeAllowed(
+                    (uint8_t)inst->type, cell->descriptor->runtime.special,
+                    (uint8_t)*value))
+                *value = (menu_cellDisplayValue(cell) > OSC_TYPE_PWM)
+                             ? OSC_TYPE_WAV : OSC_TYPE_SMP;
+            return;
+        }
+    }
+
+
     dtype = (uint8_t)(menu_cellDtype(cell) & 0x0f);
     switch (dtype) {
     case DTYPE_AUTOM_TARGET: {
@@ -6653,6 +6910,9 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
         if (*value > 15u) *value = 15u;
         break;
     case DTYPE_MIX_FM:
+        /* S085 C15.6: fm / mix / snc / rng. */
+        if (*value > 3u) *value = 3u;
+        break;
     case DTYPE_ON_OFF:
     case DTYPE_0b1:
         if (*value > 1u) *value = 1u;
@@ -11453,7 +11713,7 @@ static uint8_t getMaxEntriesForMenu(uint8_t menuId)
     case MENU_SEQ_QUANT:     return (uint8_t)quantisationNames[0][0];
     case MENU_MIDI:          return (uint8_t)midiModes[0][0];
     case MENU_NEXT_PATTERN:  return (uint8_t)nextPatternNames[0][0];
-    case MENU_WAVEFORM:      return (uint8_t)((uint8_t)waveformNames[0][0] + menu_numSamples);
+    case MENU_WAVEFORM:      return (uint8_t)waveformNames[0][0];
     case MENU_MIDI_ROUTING:  return (uint8_t)midiRoutingNames[0][0];
     case MENU_MIDI_FILTERING:return (uint8_t)midiFilterNames[0][0];
     case MENU_PPQ:           return (uint8_t)ppqNames[0][0];
@@ -11487,12 +11747,10 @@ static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *bu
     case MENU_AUDIO_OUT:      p = outputNames[curParmVal+1];        break;
     case MENU_FILTER:         p = filterTypes[curParmVal+1];        break;
     case MENU_WAVEFORM:
-        if (curParmVal < (uint8_t)waveformNames[0][0]) {
-            p = waveformNames[curParmVal+1]; break;
-        } else {
-            menu_formatSampleShortName((uint8_t)(curParmVal - waveformNames[0][0]), buf);
-            return;
-        }
+        /* S085 C15.7: samples left the wav list (smp/slp + src). */
+        if (curParmVal < (uint8_t)waveformNames[0][0])
+            p = waveformNames[curParmVal+1];
+        break;
     case MENU_SYNC_RATES:     p = syncRateNames[curParmVal+1];      break;
     case MENU_LFO_WAVES:      p = lfoWaveNames[curParmVal+1];       break;
     case MENU_RETRIGGER:      p = retriggerNames[curParmVal+1];     break;
@@ -12890,8 +13148,7 @@ static void menu_stepAutomationReset(void)
  *
  * Inputs: resolved descriptor (may be NULL). Output: maximum valid value
  * in the 7-bit automation domain. DTYPE_MENU tables return count-1 so the
- * encoder cannot produce OOB indices; MENU_WAVEFORM is excluded because
- * indices beyond the built-in table address sample slots.
+ * encoder cannot produce OOB indices.
  */
 static uint8_t menu_automationValueMax(const ParamDescriptor *descriptor)
 {
@@ -12910,12 +13167,16 @@ static uint8_t menu_automationValueMax(const ParamDescriptor *descriptor)
         case MENU_LFO_WAVES:  return (uint8_t)(lfoWaveNames[0][0] - 1u);
         case MENU_RETRIGGER:  return (uint8_t)(retriggerNames[0][0] - 1u);
         case MENU_SYNC_RATES: return (uint8_t)(syncRateNames[0][0] - 1u);
+        /* S085 C15.7: samples left the wav list (smp/slp + src). */
+        case MENU_WAVEFORM:   return (uint8_t)(waveformNames[0][0] - 1u);
         default: return 127u;
         }
     }
     case DTYPE_ON_OFF:
-    case DTYPE_MIX_FM:
         return 1u;
+    case DTYPE_MIX_FM:
+        /* S085 C15.6: fm / mix / snc / rng. */
+        return (uint8_t)(mixFmNames[0][0] - 1u);
     case DTYPE_LFO_POLARITY:
         return 2u;
     default:
@@ -12946,7 +13207,8 @@ static void menu_formatAutomationValue3(const ParamDescriptor *descriptor,
         uint8_t menuId = (uint8_t)(descriptor->dtype >> 4);
         uint8_t max_val = menu_automationValueMax(descriptor);
 
-        if (menuId == MENU_WAVEFORM || value <= max_val)
+        /* S085 C15.7: samples left the wav list (smp/slp + src). */
+        if (value <= max_val)
             getMenuItemNameForValue(menuId, value, buf);
         else
             numtostrpu(buf, value, ' ');
@@ -12956,7 +13218,8 @@ static void menu_formatAutomationValue3(const ParamDescriptor *descriptor,
         memcpy(buf, value ? menuText_on : menuText_off, 3);
         return;
     case DTYPE_MIX_FM:
-        memcpy(buf, (value == 1u) ? menuText_mix : menuText_fm, 3);
+        /* S085 C15.6: fm / mix / snc / rng. */
+        memcpy(buf, mixFmNames[1u + ((value < 4u) ? value : 0u)], 3);
         return;
     case DTYPE_LFO_POLARITY:
         menu_getLfoPolarityName(value, buf);
@@ -12971,6 +13234,42 @@ static void menu_formatAutomationValue3(const ParamDescriptor *descriptor,
         numtostrpu(buf, value, ' ');
         return;
     }
+}
+
+/*
+ * Slot-aware automation maximum (S085 C15.9).
+ *
+ * What:       for a formatted instrument row, its current maximum (capped at
+ *             127: automation is 7-bit); otherwise menu_automationValueMax().
+ * Inputs:     descriptor, scene, slot.
+ * Accessors:  menu_stepAutomationEdit().
+ */
+static uint8_t menu_automationValueMaxSlot(const ParamDescriptor *descriptor,
+                                           uint8_t scene, uint8_t slot)
+{
+    instrument_cell_format_t f;
+
+    if (descriptor &&
+        instrumentCellFormat_describe(scene, slot, descriptor, 0u, &f))
+        return (f.max > 127u) ? 127u : f.max;
+    return menu_automationValueMax(descriptor);
+}
+
+/*
+ * Slot-aware automation value text (S085 C15.9).
+ *
+ * What:       the formatted text for typ/run/mod/wav rows (by the target
+ *             Scene image's type), else menu_formatAutomationValue3().
+ * Accessors:  menu_repaintStepAutomation() (two sites).
+ */
+static void menu_formatAutomationValue3Slot(const ParamDescriptor *descriptor,
+                                            uint8_t value, char *buf,
+                                            uint8_t scene, uint8_t slot)
+{
+    if (descriptor &&
+        menu_instrumentCellText3(scene, slot, descriptor, value, buf))
+        return;
+    menu_formatAutomationValue3(descriptor, value, buf);
 }
 
 /*
@@ -13517,7 +13816,9 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
         }
         if (menu_stepAutomationTargetOff(vt))
             return 0u;
-        max_val = menu_automationValueMax(desc);
+        max_val = menu_automationValueMaxSlot(desc, scene,
+            instrumentParam_isVoiceParameter(vt)
+                ? instrumentParam_slot(vt) : 0u);
         if (sceneModTarget_isSceneTarget(vt)) {
             const scene_mod_target_descriptor_t *scene_desc =
                 sceneModTarget_descriptor(vt);
@@ -13784,7 +14085,9 @@ static void menu_repaintStepAutomation(void)
                         menu_stepAutomationEffectDescriptor(scene, target),
                         amt_value, amt_out);
                 } else {
-                    menu_formatAutomationValue3(desc, amt_value, amt_out);
+                    menu_formatAutomationValue3Slot(desc, amt_value, amt_out,
+                        scene, instrumentParam_isVoiceParameter(target)
+                            ? instrumentParam_slot(target) : 0u);
                 }
             }
         }
@@ -13891,8 +14194,10 @@ static void menu_repaintStepAutomation(void)
                 menu_stepAutomationEffectDescriptor(scene, target),
                 autos[page].value, &editDisplayBuffer[1][13]);
         } else {
-            menu_formatAutomationValue3(descriptor, autos[page].value,
-                                        &editDisplayBuffer[1][13]);
+            menu_formatAutomationValue3Slot(descriptor, autos[page].value,
+                &editDisplayBuffer[1][13], scene,
+                instrumentParam_isVoiceParameter(target)
+                    ? instrumentParam_slot(target) : 0u);
         }
     }
 }
@@ -14015,6 +14320,10 @@ static void menu_repaintGeneric(void)
             } else if (menu_getMidiStaticName(&cell, value,
                                        &editDisplayBuffer[1][13])) {
                 /* S083 MIDI names: off / glb / on / channel / note. */
+            } else if (menu_instrumentCellFull(&cell, scene_getActiveIndex(),
+                                               (uint8_t)value,
+                                               editDisplayBuffer[1])) {
+                /* S085 C15.5: formatted oscillator cell. */
             } else switch (dtype) {
             case DTYPE_TARGET_SELECTION_VELO:
             case DTYPE_TARGET_SELECTION_LFO:
@@ -14026,8 +14335,9 @@ static void menu_repaintGeneric(void)
                     menu_displayModTargetFull(value);
                 break;
             case DTYPE_MIX_FM:
-                if (value==1) memcpy(&editDisplayBuffer[1][13], menuText_mix, 3);
-                else               memcpy(&editDisplayBuffer[1][13], menuText_fm, 3);
+                /* S085 C15.6: fm / mix / snc / rng. */
+                memcpy(&editDisplayBuffer[1][13],
+                       mixFmNames[1u + ((value < 4u) ? value : 0u)], 3);
                 break;
             case DTYPE_ON_OFF:
                 if (value==1) memcpy(&editDisplayBuffer[1][13], menuText_on, 3);
@@ -14047,15 +14357,7 @@ static void menu_repaintGeneric(void)
                 break;
             case DTYPE_MENU: {
                 uint8_t menuId = (uint8_t)(menu_cellDtype(&cell) >> 4);
-                if (menuId == MENU_WAVEFORM && value >= (uint8_t)waveformNames[0][0]) {
-                    char sampleName[SAMPLE_DISPLAY_NAME_LEN + 1u];
-                    uint8_t sampleIndex =
-                        (uint8_t)(value - (uint8_t)waveformNames[0][0]);
-
-                    sampleMemory_getDisplayName(sampleIndex, sampleName);
-                    memcpy(&editDisplayBuffer[1][0], sampleName,
-                           SAMPLE_DISPLAY_NAME_LEN);
-                }
+                /* S085 C15.7: samples left the wav list (smp/slp + src). */
                 getMenuItemNameForValue(menuId, value, &editDisplayBuffer[1][13]);
                 break; }
             case DTYPE_PM63:
@@ -16606,6 +16908,9 @@ void menu_pollPresetStatus(void)
     uint8_t retrySelectionAfterAck = 0;
     uint8_t retrySelectionLoadKit = 0;
 
+    /* S085 C3.10: retire the Load:[Samples] summary. */
+    menu_serviceInstallSummary();
+
     /*
      * Advance a background Bank Load before the Preset completion dispatch
      * (S082 C7/C10).
@@ -18889,7 +19194,6 @@ void menu_setActiveVoice(uint8_t v)
 }
 uint8_t menu_areMuteLedsShown(void){ return menu_muteModeActive; }
 uint8_t menu_getSubPage(void)      { return (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT); }
-void    menu_setNumSamples(uint8_t n) { menu_numSamples = n; }
 void menu_setVoiceModeShowMorph(uint8_t onOff)
 {
     /*

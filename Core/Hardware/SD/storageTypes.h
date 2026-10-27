@@ -652,4 +652,33 @@ void storage_makeSavedInstrumentDisplayFilename(char *dst,
                                                 uint8_t one_based_voice,
                                                 uint8_t force_voice_suffix);
 
+
+/*
+ * Natural, numeric-aware name order (S085 C3.1).
+ *
+ * What:       case-insensitive compare in which each decimal digit run is one
+ *             number: leading zeros are skipped, a longer remaining run is
+ *             larger, equal lengths compare digit by digit; if the names are
+ *             otherwise equal, the run with fewer leading zeros sorts first.
+ * Why:        the installer orders samples, wavetable folders and frames as
+ *             people read them (f2 before f10), deterministically.
+ * Inputs:     a, b (NULL sorts first; empty allowed).  Outputs: -1, 0, 1.
+ * Accessors:  filesystem.c filesystem_installCompare().
+ * Affiliates: storage_stripOrderPrefix(), tools/dsp_test/test_natural_order.c.
+ *             Pure string code: no asyncfatfs calls (this module's rule).
+ */
+int8_t storage_naturalCompare(const char *a, const char *b);
+
+/*
+ * Display start after an ordering prefix (S085 C3.1).
+ *
+ * What:       skips a leading digit run followed by a run of ' ', '_' or '-'
+ *             and returns the remainder when it is not empty; otherwise
+ *             returns name unchanged.
+ * Why:        "003 hvoice" orders by its number and shows as "hvoice".
+ * Inputs:     name.  Outputs: a pointer into name.
+ * Accessors:  filesystem_installWavetableTree().
+ * Affiliates: storage_naturalCompare() (the full name still orders).
+ */
+const char *storage_stripOrderPrefix(const char *name);
 #endif /* STORAGETYPES_H_ */

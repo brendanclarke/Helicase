@@ -4,6 +4,16 @@ Status: **proposal / not implemented**. This is a design draft against the
 current LXR-02 firmware tree, written in the style of
 `MODULE_INTERCHANGE_SPEC.md`, for review before any code is written.
 
+**Revised 2026-10-27 (Session 085 close):**
+- **Code facts re-checked** against the tree (module paths, select-mode
+  codes, the Euklid page, `CAT_GENERATOR`, the SOM flag): §1 and §2.2.
+- **New §2.6.** Session 085 built a type selector whose dependent rows
+  change meaning with the type (the oscillator `typ`/`wav`/`mod` rows).
+  §2.6 records the parts of that pattern a Generator type row should
+  reuse.
+- **§5 updated:** the S085 answers to the open questions on page tables
+  and CPU.
+
 ## 1. What exists today
 
 The firmware already has two pattern generators, but they are architecturally
@@ -12,12 +22,12 @@ type, treat the current pattern as input, choose Off/Overdub/Replace"):
 
 | | Euklid | SOM |
 |---|---|---|
-| Module | `Core/Scene/Pattern/EuklidGenerator.c` | `Core/Scene/Pattern/SomGenerator.c` |
-| Menu page | `EUKLID_PAGE` (dedicated select-mode button, `SELECT_MODE_PAT_GEN = 0x05`) | `SOM_PAGE` (dedicated select-mode button, `SELECT_MODE_SOM_GEN = 0x06`) |
-| Params | `PAR_EUKLID_LENGTH/STEPS/ROTATION`, plus `PAR_MORPH`/`PAR_ROLL` on the same page | `PAR_POS_X/POS_Y/FLUX/SOM_FREQ` |
+| Module | `Core/Bank/Scene/Pattern/EuklidGenerator.c` | `Core/Bank/Scene/Pattern/SomGenerator.c` (data in `SomData.c`) |
+| Menu page | `EUKLID_PAGE` still exists in `menu.h`/`menuPages.h`, but **its select mode is retired and compiled out** (`ENABLE_EUKLID_PAGE` is off; `buttonHandler.h`: "the retired Euklid mode is compiled out"). There is no `SELECT_MODE_PAT_GEN` any more. | `SOM_PAGE` (select mode `SELECT_MODE_SOM_GEN = 0x06`; `buttonHandler.c` switches to it) |
+| Params | `PAR_EUKLID_LENGTH/STEPS/ROTATION` and `PAR_MORPH` (shown as X-fade). `PAR_ROLL` was retired in place in S081 (A3-5, Q14); its cell is cleared. | `PAR_POS_X/POS_Y/FLUX/SOM_FREQ` |
 | Scope | Per-track (`euklid_length[NUM_TRACKS]` etc.), one track edited at a time via `menu_getActiveVoice()` | Global/all-voice — one `SomGenerator` struct drives all 7 tracks at once |
 | When it runs | **Write-once ("bake")**: any param edit calls `euklid_generate()` → `euklid_transferPattern()` → `pat_setMainStepsRaw()`. It overwrites the pattern's main-step mask immediately and permanently. There is no "live" Euklid. | **Live, real-time**: `som_tick()` is called from `sequencer.c` every step and directly calls `seq_triggerVoice()`. It does not touch `PatternData` at all — it plays *instead of* the stored pattern. |
-| Mix mode | None. Editing Euklid destroys the previous main-step content for that track/pattern. | Binary and, importantly, **currently dead**: `seq_SomModeActive` (`sequencer.c:91`) is declared, checked at `sequencer.c:479`, and never set to `1` anywhere in the reachable code. SOM mode cannot currently be turned on from the UI. |
+| Mix mode | None. Editing Euklid destroys the previous main-step content for that track/pattern. | Binary and, importantly, **currently dead**: `seq_SomModeActive` (`sequencer.c:804`, static) is checked at `sequencer.c:3067` (the `som_tick()` call is at 3069) and at 5616, and is never set to 1 anywhere. SOM mode cannot be turned on from the UI. (Re-checked 2026-10-27.) |
 
 Key finding: **neither generator today implements "Off / Overdub / Replace."**
 Euklid is a destructive one-shot bake. SOM is an unwired, would-be full
@@ -27,12 +37,22 @@ already there.
 
 Also relevant:
 
-- Select-mode buttons are a 3-bit field (`buttonHandler.h`:
-  `SELECT_MODE_VOICE 0x00` … `SELECT_MODE_MENU 0x07`). All 8 codes are
-  taken except `0x04`. There is **no free slot** to add a ninth top-level
-  mode — collapsing `SELECT_MODE_PAT_GEN` + `SELECT_MODE_SOM_GEN` into one
-  `SELECT_MODE_GENERATOR` is required, not optional, unless we're willing to
-  steal a currently-used slot.
+- **Select-mode buttons** are a 3-bit field. `buttonHandler.h` today:
+
+  | Code | Mode |
+  |---|---|
+  | `0x00` | `VOICE` |
+  | `0x01` | `PERF` |
+  | `0x02` | `STEP` |
+  | `0x03` | `LOAD_SAVE` |
+  | `0x04` | **free** (the retired Euklid mode) |
+  | `0x05` | `FX` (SHIFT+PERF opens the Effect page) |
+  | `0x06` | `SOM_GEN` |
+  | `0x07` | `MENU` |
+
+  A Generator mode can take `0x04`, or replace `SOM_GEN` at `0x06` (which
+  also frees `0x06`). Collapsing is no longer forced by a lack of codes; it
+  is still the cleaner design, since SOM would become one Generator type.
 - Pattern data model (`PatternData.h`): `NUM_TRACKS=7`, `NUM_PATTERN=8`,
   `NUM_STEPS=128` (16 main steps × 8 sub-steps). Each `Step` has
   `volume`(+active bit)/`prob`/`note`/2 automation lanes. Reads for a
@@ -49,7 +69,7 @@ Also relevant:
 
 ## 2. Proposed architecture
 
-### 2.1 New module: `Core/Scene/Pattern/GeneratorEngine.c/.h`
+### 2.1 New module: `Core/Bank/Scene/Pattern/GeneratorEngine.c/.h`
 
 A thin dispatcher that owns:
 - the active `GeneratorType` (per active voice, see 2.3),
@@ -67,9 +87,11 @@ Euklid a live path it doesn't have today (see 2.4).
 ### 2.2 Menu: collapse two pages into one
 
 - Remove `EUKLID_PAGE` and `SOM_PAGE` from `enum PageNames`; add
-  `GENERATOR_PAGE`.
-- Remove `SELECT_MODE_PAT_GEN`/`SELECT_MODE_SOM_GEN`; add a single
-  `SELECT_MODE_GENERATOR = 0x05`, freeing `0x06` for future use.
+  `GENERATOR_PAGE`. The `ENABLE_EUKLID_PAGE` blocks in `buttonHandler.c`
+  (lines ~30, 719, 2832, 2875, 3297) go with it.
+- Replace `SELECT_MODE_SOM_GEN` (`0x06`) with `SELECT_MODE_GENERATOR`, or
+  use the free `0x04`. (`0x05` is `SELECT_MODE_FX` since the Effect page
+  work; the older draft's `0x05` proposal would collide.)
 - `menuPages[GENERATOR_PAGE][NUM_SUB_PAGES]` sub-page 0 becomes the **type +
   mix** selector row (new `TEXT_GEN_TYPE`, `TEXT_GEN_OUTPUT_MODE` labels,
   new `PAR_GEN_TYPE`/`PAR_GEN_OUTPUT_MODE` params, `DTYPE_MENU`-style
@@ -86,8 +108,9 @@ Euklid a live path it doesn't have today (see 2.4).
   before switching to `EUKLID_PAGE`. (a) is more in keeping with the existing
   all-`const` table style and is the recommended option.
 
-- New `CAT_GENERATOR` already exists in `catNamesEnum` (currently unused) —
-  reuse it for all six types instead of adding a new category.
+- `CAT_GENERATOR` already exists in `catNamesEnum`. It is in use (the SOM
+  `X`/`Y` names in `menu.c` ~1430); reuse it for all six types instead of
+  adding a category.
 
 ### 2.3 Scope: per-voice or global?
 
@@ -183,6 +206,69 @@ new PatternData accessors:
   play through" implies for a live performance tool but *is* fine for
   auditioning — both use cases are legitimate, so bake should be a manual,
   explicit step rather than automatic.
+
+### 2.6 Reuse of the Session 085 type-selector pattern
+
+**Why:** Session 085 added the oscillator `typ` row. Its dependent rows
+(`wav`, `mod`) change meaning, range and display with the type. After
+the S085 P2 §14 swap, `wav` is the selection (wave, pwm family, sample,
+table; a name) and `mod` a plain 0..127 (pwm width, sample start, table
+position). Some types are excluded per oscillator (no `pwm` on the
+Cymbal/HiHat modulators, `instrumentManager_oscTypeAllowed()`). That is the same problem as the
+Generator's Type row and its type-specific parameters. The pieces that
+worked, and where they live, are summarised below. Full detail is in
+`085_SESSION_HANDOFF_LOG.md` §4.10–§4.13, `INSTRUMENTS_DSP_REFERENCE.md`
+(oscillator chapter) and `BANK_PRESET_ARCHITECTURE.md` (selector rows).
+
+1. **Keep the page tables `const`; vary formatting and range per type**
+   (answers §5 item 3).
+   - S085 did not swap page tables. Each cell kept its parameter.
+   - `InstrumentCellFormat` (`instrumentCellFormat_describe()`) returns,
+     for the shown value, a *kind* (name table, number, sample name…), a
+     clamped index, the current maximum and an aux value.
+   - `menu.c` uses it at the formatting sites, in `menu_clampCellValue()`
+     and for the automation maximum and text.
+   - **For the Generator:** sub-pages 1+ could be one const table of
+     generic `PAR_GEN_P1…P8` cells. A `generatorCellFormat_describe(type,
+     param, value)` would supply the per-type label, value text and maximum
+     (option (c), alongside the draft's (a) and (b)). Option (a) (six const
+     sub-tables) remains valid; (c) keeps `menuPages` unchanged and one
+     automation ID per generic parameter.
+2. **Request bytes survive a type round trip.**
+   - When the type changes, S085 re-derives each dependent value from its
+     last *retained* request (`waveRequest`, `sourceRequest`), clamped to
+     the new type's maximum. A width of 100 survives pwm → wav → pwm
+     although `wav` allows only 0–10.
+   - Only retained writes record the request: menu, MIDI, load, Morph and
+     automation. Temporary overlays (LFO) do not (S085 D2).
+   - **For the Generator:** store per-type parameter values, or one request
+     byte per generic parameter, so switching Type and back restores
+     settings.
+3. **Ranges follow the type everywhere** (S085 D11, A9). The clamp, the
+   automation maximum, the velocity and LFO ranges, and the LFO *base*
+   must all use the current type's maximum. When the type changes, the
+   base is re-derived from the request, not from the clamped value.
+4. **Stored zero is today's behaviour.** New rows default to 0 = the old
+   behaviour (`typ` 0 = `wav`, `run` 0 = `rst`). The Generator's Type 0 and
+   Output Mode 0 (Off) should map to "what the firmware does today".
+5. **Selectors are single-ended and applied first.**
+   - The S085 selector rows (`typ`, `run`) are automatable but not
+     morphable.
+   - They are stored with the Normal cell, the Morph mirror and the
+     interpolation cell set equal.
+   - They are applied before anything that depends on them
+     (`preset_applySelectorRows()` runs before the Morph image on every
+     slot reset path).
+   - In the SHIFT Morph view they edit Normal (D12).
+   - If Generator Type and Output Mode become stored or automatable
+     values, they need the same rules.
+6. **Constant worst-case cost** (MEMORY.md "DSP CPU Policy"; reaffirmed in
+   S085).
+   - Budget each Generator type by its worst tick, never its average.
+   - S085's render pool is a precedent for a shared, budgeted resource
+     with a fixed claim order: 2 units per block, ongoing work first, new
+     work refused rather than over budget. Markov or Genetic work in the
+     sequencer path would follow it.
 
 ## 3. Proposed page layout
 
@@ -303,7 +389,8 @@ purely the dead `seq_SomModeActive` wiring (2.4), not missing controls.
 
 ## 5. Open questions / risks
 
-1. **CPU budget.** `sequencer.c`'s step loop runs at audio-adjacent timing
+1. **CPU budget** (constant worst-case policy; §2.6 item 6).
+   `sequencer.c`'s step loop runs at audio-adjacent timing
    on the STM32F765. SOM's `som_tick()` only actually computes on every 8th
    step (`if(stepNr%8 != 0) return;`) — that budget precedent should apply
    to Markov/Genetic too; neither should do real work every single
@@ -318,7 +405,9 @@ purely the dead `seq_SomModeActive` wiring (2.4), not missing controls.
 3. **Menu page table is currently fully `const`.** Making Generator's
    sub-pages 1+ swap by type is the first non-static page in the menu
    system (§2.2) — this is more invasive than adding a page, and is worth
-   confirming as acceptable scope before implementation starts.
+   confirming as acceptable scope before implementation starts. **S085
+   precedent:** keep the tables const and drive labels, value text and
+   ranges from a per-type formatter (§2.6 item 1, option (c)).
 4. **Overdub is entirely new territory.** Nothing in the current engine
    triggers two independent sources (stored pattern + generator) into the
    same voice on the same step without one silencing the other — needs a

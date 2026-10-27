@@ -53,6 +53,8 @@
 #include "modulationNode.h"
 #include "InstrumentManager.h"
 #include "voicePostChain.h"
+#include "OscillatorSample.h"
+#include "OscRenderPool.h"
 // TODO DSP_PORT
 // #include "TriggerOut.h"
 
@@ -124,10 +126,14 @@ void HiHat_initVoice(HiHatVoice *voice)
 	slopeEg2_init(&voice->oscVolEg);
 	voice->decayClosed = voice->oscVolEg.decay;
 	voice->decayOpen = voice->oscVolEg.decay;
+	/* S085 P2: no retrigger ramp pending. */
+	voice->lastAmpGain = 0.0f;
+	voice->ampRampArm = 0u;
 
 	SVF_init(&voice->filter);
 
 	lfo_init(&voice->lfo);
+	oscSection_init(&voice->section);
 }
 //---------------------------------------------------
 void HiHat_triggerVoice(HiHatVoice *voice, const uint8_t source_slot,
@@ -159,17 +165,35 @@ void HiHat_triggerVoice(HiHatVoice *voice, const uint8_t source_slot,
 	 */
 	instrumentManager_applyVelocityModulationTarget(source_slot, vel/127.f);
 
-	float offset = 1;
-	if(voice->transGen.waveform==1) //offset mode
+	/*
+	 * Run mode decides the trigger resets (S085 C11.5).
+	 *
+	 * What:       rst: today's carrier reset; fre: no reset, all three slew;
+	 *             itp: the carrier is snapshotted and reset, the modulators
+	 *             slew as in fre. The HiHat modulators are never reset
+	 *             (pre-S085 behaviour), so no RESET_ALL loop.
+	 */
 	{
-		offset -= voice->transGen.volume;
+		OscInfo* const mods[2] = { &voice->modOsc, &voice->modOsc2 };
+		const uint8_t reset = oscSection_beginTrigger(&voice->section,
+		                                              &voice->osc, mods, 2u);
+
+		if (reset != OSC_TRIGGER_RESET_NONE) {
+			float offset = 1;
+			if(voice->transGen.waveform==1) //offset mode
+				offset -= voice->transGen.volume;
+			if (voice->osc.oscType == OSC_TYPE_SMP ||
+			    voice->osc.oscType == OSC_TYPE_SLP)
+				oscSample_restart(&voice->osc);
+			else if (voice->osc.oscType != OSC_TYPE_WAV ||
+			         osc_isTableWave(voice->osc.waveform))
+				voice->osc.phase = (0xff<<20)*offset;
+			else if (voice->osc.waveform == SINE)
+				voice->osc.phase = (0x3ff<<20)*offset;
+			else
+				voice->osc.phase = 0;
+		}
 	}
-	if(voice->osc.waveform == SINE)
-		voice->osc.phase = (0x3ff<<20)*offset;
-	else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)
-		voice->osc.phase = (0xff<<20)*offset;
-	else
-		voice->osc.phase = 0;
 
 	osc_setBaseNote(&voice->osc,note);
 	osc_setBaseNote(&voice->modOsc,note);
@@ -178,7 +202,31 @@ void HiHat_triggerVoice(HiHatVoice *voice, const uint8_t source_slot,
 	voice->isOpen = isOpen;
 	voice->oscVolEg.decay = isOpen?voice->decayOpen:voice->decayClosed;
 
-	slopeEg2_trigger(&voice->oscVolEg);
+	/*
+	 * Amp envelope retrigger by run mode (S085 P2).
+	 *
+	 * What:       rst: slopeEg2_trigger(), exactly as before. fre/itp: the
+	 *             attack starts at the last block's envelope gain
+	 *             (egValueOscVol) and, when audible, the next block ramps
+	 *             from the previous amp gain (ampRampArm).
+	 * Why:        the decay -> attack curve switch and the per-block constant
+	 *             gain stepped the output on the retrigger sample.
+	 * Inputs:     section.runMode, egValueOscVol, the envelope.
+	 * Outputs:    oscVolEg, ampRampArm.
+	 * Affiliates: HiHat_calcSyncBlockVoice(), slopeEg2_retriggerFrom(),
+	 *             slopeEg2_isAudibleGain().
+	 * Note:       the open/closed decay is selected first (line above), so
+	 *             the matched attack decays at the new note's rate; switching
+	 *             the decay rate does not step the level.
+	 */
+	if (voice->section.runMode == OSC_RUN_RST) {
+		slopeEg2_trigger(&voice->oscVolEg);
+	} else {
+		const float gainNow = voice->egValueOscVol;
+
+		slopeEg2_retriggerFrom(&voice->oscVolEg, gainNow);
+		voice->ampRampArm = slopeEg2_isAudibleGain(gainNow);
+	}
 	voice->velo = vel/127.f;
 	transient_trigger(&voice->transGen);
 
@@ -255,13 +303,19 @@ void HiHat_calcSyncBlockVoice(HiHatVoice *voice, int16_t* buf,
 	** Fixed: static buffers, same as Snare/Cymbal (Session 8). */
 	static int16_t mod1[OUTPUT_DMA_SIZE], mod2[OUTPUT_DMA_SIZE];
 	//calc next mod osc samples, scaled with mod amount
-	calcNextOscSampleBlock(&voice->modOsc,mod1,size, voice->fmModAmount1);
-	calcNextOscSampleBlock(&voice->modOsc2,mod2,size,  voice->fmModAmount2);
+	/* S085 C11.5: two-modulator FM through OscSection (bit-identical with no
+	** crossfade); itp renders the old carrier with the same summed modulator
+	** and crossfades. */
+	{
+		OscInfo* const old = oscSection_itpCarrier(&voice->section);
+		int16_t* const oldBuf = old ? oscRenderPool_scratch() : 0;
 
-	//combine both mod oscs to 1 modulation signal
-	bufferTool_addBuffersSaturating(mod1,mod2,size);
-
-	calcNextOscSampleFmBlock(&voice->osc,mod1,buf,size,0.5f) ;
+		oscSection_renderFm2(&voice->osc, &voice->modOsc, &voice->modOsc2,
+		                     voice->fmModAmount1, voice->fmModAmount2, 0.5f,
+		                     buf, mod1, mod2, size, old, oldBuf);
+		if (old)
+			oscSection_blendItp(&voice->section, buf, oldBuf, size);
+	}
 
 	SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);
 
@@ -279,11 +333,28 @@ void HiHat_calcSyncBlockVoice(HiHatVoice *voice, int16_t* buf,
 	 * Accessors:  this render function.
 	 * Affiliates: voicePostChain.h and the Step 4 host/ARM checks.
 	 */
+	/*
+	 * Amp ramp endpoints and the arm (S085 P2).
+	 *
+	 * What:       as Snare (C4.4): the armed retrigger block ramps from
+	 *             lastAmpGain; other blocks are flat; then record and clear.
+	 * Why:        removes the retrigger step in fre/itp; rst unchanged.
+	 * Inputs:     volumeMod, velo, egValueOscVol, lastAmpGain, ampRampArm.
+	 * Outputs:    buf; lastAmpGain; ampRampArm = 0.
+	 * Affiliates: voicePost_addGainDist(), HiHat_triggerVoice().
+	 */
 	{
 		const float ampGain = voice->volumeMod
 			? voice->velo * voice->egValueOscVol
 			: voice->egValueOscVol;
-		voicePost_addGainDist(buf, mod1, ampGain, &voice->distortion, size);
+		const float lastAmpGain = voice->ampRampArm
+			? voice->lastAmpGain : ampGain;
+
+		voicePost_addGainDist(buf, mod1, ampGain, lastAmpGain,
+		                      &voice->distortion, size);
+		voice->lastAmpGain = ampGain;
+		voice->ampRampArm = 0u;
 	}
+	oscSection_finishBlock(&voice->section, size);
 }
 //---------------------------------------------------

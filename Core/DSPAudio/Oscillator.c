@@ -52,7 +52,12 @@
 #include "Samples.h"
 #include "MidiPitch.h"
 #include "modulationNode.h"
+#include "OscillatorSample.h"
+#include "OscillatorPwm.h"
+#include "OscillatorWavetable.h"
+#include "StockWaves.h"
 #include <math.h>
+#include <string.h>
 // TODO DSP_PORT
 // #include "sequencer.h"
 
@@ -135,32 +140,25 @@ static inline void osc_clearWaveInterp(OscInfo* osc)
 	osc->waveInterpGeneration = 0u;
 }
 //-----------------------------------------------------------
-static inline void osc_updateSampleCache(OscInfo* osc, uint8_t sampleIndex)
-{
-	/* User sample metadata lives in flash-backed SampleMemory tables. The
-	** generation counter lets oscillators keep cached pointers/sizes across
-	** audio blocks and invalidate them after a sample/loop install refreshes
-	** the manifest. */
-	const uint32_t generation = sampleMemory_getGeneration();
-
-	if (osc->sampleCacheData &&
-		osc->sampleCacheIndex == sampleIndex &&
-		osc->sampleCacheGeneration == generation) {
-		return;
-	}
-
-	SampleInfo info = sampleMemory_getSampleInfo(sampleIndex);
-	osc->sampleCacheIndex = sampleIndex;
-	osc->sampleCacheGeneration = generation;
-	osc->sampleCacheSize = info.size;
-	osc->sampleCacheData = (const int16_t*)((const int8_t*)info.offset);
-	osc->sampleCacheLooped = sampleMemory_isLooped(sampleIndex);
-}
 //-----------------------------------------------------------
+/*
+ * Waveform interpolation eligibility (S085 C5.5).
+ *
+ * What:       1 when this block's modulation granted the oscillator a blend
+ *             pair (generation match, 0 < frac < 1, next > base, both inside
+ *             the wav list) and the oscillator is wav type.
+ * Why:        plan §4.3.5: samples left the wav list, and pwm/smp/slp/wtb
+ *             controls are continuous by design; only wav blends neighbours.
+ *             The budget is granted by OscRenderPool (C9.3).
+ * Accessors:  the two block dispatchers and the scalar dispatchers.
+ */
 static inline uint8_t osc_waveInterpActive(const OscInfo* osc)
 {
-	const uint8_t maxWave = (uint8_t)(OSC_SAMPLE_START + sampleMemory_getNumSamples() - 1u);
+	const uint8_t maxWave = (uint8_t)(OSC_STOCK_WAVE_COUNT - 1u);
 
+	if (osc->oscType != OSC_TYPE_WAV) {
+		return 0u;
+	}
 	if (!modNode_getWaveInterpEnabled()) {
 		return 0u;
 	}
@@ -213,7 +211,6 @@ static void calcPeriodicInterpBlock(OscInfo* osc, int16_t* buf, const uint8_t si
 	const uint8_t base = osc->waveform;
 	const uint8_t next = osc->waveInterpNext;
 	const float frac = osc->waveInterpFrac;
-	const uint32_t startPhase = osc->phase;
 	OscInfo oscA = *osc;
 	OscInfo oscB = *osc;
 	uint8_t i;
@@ -232,7 +229,8 @@ static void calcPeriodicInterpBlock(OscInfo* osc, int16_t* buf, const uint8_t si
 		const int16_t out = (int16_t)(a + frac * (b - a));
 		buf[i] = out * gain;
 	}
-	osc->phase = startPhase + (osc->phaseInc * (uint32_t)size);
+	osc->phase = oscA.phase;
+	osc->phaseInc = oscA.phaseInc;
 }
 //-----------------------------------------------------------
 static int16_t calcPeriodicInterp(OscInfo* osc)
@@ -256,7 +254,6 @@ static void calcPeriodicInterpFmBlock(OscInfo* osc, int16_t* modBuffer, int16_t*
 	const uint8_t base = osc->waveform;
 	const uint8_t next = osc->waveInterpNext;
 	const float frac = osc->waveInterpFrac;
-	const uint32_t startPhase = osc->phase;
 	OscInfo oscA = *osc;
 	OscInfo oscB = *osc;
 	int16_t lastOut = 0;
@@ -276,7 +273,8 @@ static void calcPeriodicInterpFmBlock(OscInfo* osc, int16_t* modBuffer, int16_t*
 		lastOut = (int16_t)(a + frac * (b - a));
 		buf[i] = lastOut * gain;
 	}
-	osc->phase = startPhase + (osc->phaseInc * (uint32_t)size);
+	osc->phase = oscA.phase;
+	osc->phaseInc = oscA.phaseInc;
 	osc->output = lastOut;
 }
 //-----------------------------------------------------------
@@ -296,9 +294,29 @@ static int16_t calcPeriodicInterpFm(OscInfo* osc, OscInfo* modOsc)
 	return out;
 }
 //-----------------------------------------------------------
-INITCM void calcSineBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain)
+/*
+ * Per-sample pitch slew in every block renderer (S085 C5.6).
+ *
+ * What:       the loop advances phase by a local increment and adds
+ *             osc->phaseIncStep to that increment every sample; the final
+ *             increment is written back to osc->phaseInc.
+ * Why:        run modes fre/itp glide from the old to the new pitch over
+ *             OSC_SLEW_SAMPLES without per-block steps (plan §4.3.7). The add
+ *             always runs, with step 0 when no slew is active, so the cost
+ *             never depends on the run mode (constant CPU). In rst the step is
+ *             always 0, so the output is bit-identical to the pre-S085 loop
+ *             (proved by osc_s0, C17.5).
+ * Inputs:     osc->phaseInc, osc->phaseIncStep (from osc_setFreq()).
+ * Outputs:    osc->phase, osc->phaseInc.
+ * Accessors:  the dispatchers; ITCM.
+ * Affiliates: osc_setFreq(), osc_armSlew(), the type renderers (same rule).
+ */
+OSC_SYNC_INLINE void calcSineCore(OscInfo* osc, int16_t* buf, const uint8_t size,
+                                   const float gain, const OscSyncLane* lane)
 {
 	uint8_t i;
+	uint32_t inc = osc->phaseInc;
+	const int32_t step = osc->phaseIncStep;
 	for(i=0;i<size;i++)
 	{
 		const uint32_t oscPhase = osc->phase;
@@ -315,10 +333,19 @@ INITCM void calcSineBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const 
 			oscOut = sine_table[itg];
 		#endif
 
-		osc->phase = oscPhase + osc->phaseInc;
+		/* S085 C5.6: per-sample slew. */
+		osc->phase = oscPhase + inc;
+		if (lane)
+			osc->phase = oscSync_phase(lane, (uint8_t)i, osc->phase, 0u);
+		inc += (uint32_t)step;
 
 		buf[i] = oscOut * gain;
 	}
+	osc->phaseInc = inc;
+}
+INITCM void calcSineBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain)
+{
+	calcSineCore(osc, buf, size, gain, 0);
 }
 //-----------------------------------------------------------
 int16_t calcSine(OscInfo* osc)
@@ -346,6 +373,8 @@ int16_t calcSine(OscInfo* osc)
 INITCM void calcFmSineBlock(OscInfo* osc, int16_t* modBuffer, int16_t* buf, uint8_t size,const float gain)
 {
 	uint8_t i;
+	uint32_t inc = osc->phaseInc;
+	const int32_t step = osc->phaseIncStep;
 	for(i=0;i<size;i++)
 	{
 		const uint32_t oscPhase = osc->phase;
@@ -362,9 +391,12 @@ INITCM void calcFmSineBlock(OscInfo* osc, int16_t* modBuffer, int16_t* buf, uint
 		oscOut = sine_table[itg];
 	#endif
 
-		osc->phase = oscPhase + osc->phaseInc;
+		/* S085 C5.6: per-sample slew. */
+		osc->phase = oscPhase + inc;
+		inc += (uint32_t)step;
 		buf[i] =  oscOut * gain;
 	}
+	osc->phaseInc = inc;
 }
 //-----------------------------------------------------------
 int16_t calcFmSine(OscInfo* osc, OscInfo* modOsc)
@@ -391,6 +423,8 @@ int16_t calcFmSine(OscInfo* osc, OscInfo* modOsc)
 INITCM void calcFmBlock(OscInfo* osc, const int16_t table[][1024], int16_t* modBuffer, int16_t* buf, uint8_t size ,const float gain)
 {
 	uint8_t i;
+	uint32_t inc = osc->phaseInc;
+	const int32_t step = osc->phaseIncStep;
 	for(i=0;i<size;i++)
 	{
 		const uint32_t oscPhase = osc->phase;
@@ -409,10 +443,13 @@ INITCM void calcFmBlock(OscInfo* osc, const int16_t table[][1024], int16_t* modB
 		oscOut = table[overtoneIndex][itg];
 	#endif
 
-		osc->phase = oscPhase + osc->phaseInc;
+		/* S085 C5.6: per-sample slew. */
+		osc->phase = oscPhase + inc;
+		inc += (uint32_t)step;
 		osc->output = oscOut;
 		buf[i] = oscOut * gain;
 	}
+	osc->phaseInc = inc;
 }
 //-----------------------------------------------------------
 int16_t calcFm(OscInfo* osc, OscInfo* modOsc, const int16_t table[][1024])
@@ -441,6 +478,35 @@ int16_t calcFm(OscInfo* osc, OscInfo* modOsc, const int16_t table[][1024])
 //-----------------------------------------------------------
 INITCM void calcNextOscSampleFmBlock(OscInfo* osc, int16_t* modBuffer, int16_t* buf, uint8_t size ,const float gain)
 {
+	/*
+	 * Render one oscillator block by type (S085 C5.7).
+	 *
+	 * What:       pwm, smp/slp and wtb go to their own renderers; wav keeps
+	 *             the waveform switch (now with the generated stock waves) and
+	 *             waveform interpolation; a wav value outside the list
+	 *             renders silence.
+	 * Why:        plan §5 item 2: each type keeps its own specialised hot
+	 *             loop (no per-sample type test); the type test is per block.
+	 * Inputs:     osc, (modBuffer), buf, size, gain.
+	 * Outputs:    buf; the oscillator's phase state advanced.
+	 * Accessors:  OscSection.c (all engine oscillator renders).
+	 * Affiliates: oscPwm_render*(), oscSample_render*(),
+	 *             oscWavetable_render*(), calcStockWave*Block().
+	 */
+	switch (osc->oscType) {
+	case OSC_TYPE_PWM:
+		oscPwm_renderFm(osc, modBuffer, buf, size, gain);
+		return;
+	case OSC_TYPE_SMP:
+	case OSC_TYPE_SLP:
+		oscSample_renderFm(osc, modBuffer, buf, size, gain);
+		return;
+	case OSC_TYPE_WTB:
+		oscWavetable_renderFm(osc, modBuffer, buf, size, gain);
+		return;
+	default:
+		break;
+	}
 	if (osc_waveInterpActive(osc)) {
 		calcPeriodicInterpFmBlock(osc, modBuffer, buf, size, gain);
 		return;
@@ -473,8 +539,16 @@ INITCM void calcNextOscSampleFmBlock(OscInfo* osc, int16_t* modBuffer, int16_t* 
 			calcSampleOscFmBlock(osc,modBuffer,buf,size,gain);
 			break;
 
+		case SQ3:
+		case SW3:
+		case SQA:
+		case TRA:
+		case SWA:
+			calcStockWaveFmBlock(osc, modBuffer, buf, size, gain);
+			break;
+
 		default:
-			calcUserSampleOscFmBlock(osc,modBuffer,buf,size,gain);
+			memset(buf, 0, (size_t)size * sizeof(int16_t));
 			break;
 
 		}
@@ -482,6 +556,17 @@ INITCM void calcNextOscSampleFmBlock(OscInfo* osc, int16_t* modBuffer, int16_t* 
 //-----------------------------------------------------------
 int16_t calcNextOscSampleFm(OscInfo* osc,OscInfo* modOsc)
 {
+	/* S085 C5.8: non-wav types render through their block renderer (one
+	** sample); the scalar path has no external caller and is kept only for
+	** the scalar interpolation helpers. */
+	if (osc->oscType != OSC_TYPE_WAV) {
+		int16_t mod = modOsc->output;
+		int16_t out = 0;
+
+		calcNextOscSampleFmBlock(osc, &mod, &out, 1u, 1.0f);
+		osc->output = out;
+		return out;
+	}
 	if (osc_waveInterpActive(osc)) {
 		return calcPeriodicInterpFm(osc, modOsc);
 	}
@@ -512,6 +597,19 @@ int16_t calcNextOscSampleFm(OscInfo* osc,OscInfo* modOsc)
 		return calcSampleOscFm(osc,modOsc);
 		break;
 
+	case SQ3:
+	case SW3:
+	case SQA:
+	case TRA:
+	case SWA: {
+		int16_t out = 0;
+		int16_t modBuf[1] = { modOsc->output };
+
+		calcStockWaveFmBlock(osc, modBuf, &out, 1u, 1.0f);
+		osc->output = out;
+		return out;
+	}
+
 	default:
 
 		return 0;
@@ -521,13 +619,17 @@ int16_t calcNextOscSampleFm(OscInfo* osc,OscInfo* modOsc)
 	return 0;
 }
 //-----------------------------------------------------------
-INITCM void calcNoiseBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain)
+OSC_SYNC_INLINE void calcNoiseCore(OscInfo* osc, int16_t* buf, const uint8_t size,
+                                    const float gain, const OscSyncLane* lane)
 {
 	int i;
+	uint32_t inc = osc->phaseInc;
+	const int32_t step = osc->phaseIncStep;
 	for(i=0;i<size;i++)
 	{
 		const uint32_t lastPhase = osc->phase;
-		osc->phase += osc->phaseInc;
+		osc->phase += inc;
+		inc += (uint32_t)step;
 
 		if(lastPhase > osc->phase)
 		{
@@ -535,9 +637,16 @@ INITCM void calcNoiseBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const
 			// osc->output = (int16_t)(GetRngValue()& 0x7FFF); //normal pitched white noise
 			osc->output = (int16_t)(GetRngValue()); //normal pitched white noise
 		}
+		if (lane)
+			osc->phase = oscSync_phase(lane, (uint8_t)i, osc->phase, 0u);
 
 		buf[i] = osc->output * gain;
 	}
+	osc->phaseInc = inc;
+}
+INITCM void calcNoiseBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain)
+{
+	calcNoiseCore(osc, buf, size, gain, 0);
 }
 //-----------------------------------------------------------
 int16_t calcNoise(OscInfo* osc)
@@ -576,6 +685,20 @@ int16_t calcNoise(OscInfo* osc)
 //-----------------------------------------------------------
 INITCM void calcNextOscSampleBlock(OscInfo* osc, int16_t* buf, const uint8_t size, const float gain)
 {
+	switch (osc->oscType) {
+	case OSC_TYPE_PWM:
+		oscPwm_render(osc, buf, size, gain);
+		return;
+	case OSC_TYPE_SMP:
+	case OSC_TYPE_SLP:
+		oscSample_render(osc, buf, size, gain);
+		return;
+	case OSC_TYPE_WTB:
+		oscWavetable_render(osc, buf, size, gain);
+		return;
+	default:
+		break;
+	}
 	if (osc_waveInterpActive(osc)) {
 		calcPeriodicInterpBlock(osc, buf, size, gain);
 		return;
@@ -607,16 +730,32 @@ INITCM void calcNextOscSampleBlock(OscInfo* osc, int16_t* buf, const uint8_t siz
 			calcSampleOscBlock(osc,buf,size, gain);
 			break;
 
-		default://sample playback
-			if( osc->waveform - OSC_SAMPLE_START > sampleMemory_getNumSamples() ) return; // return if out of range
+		case SQ3:
+		case SW3:
+		case SQA:
+		case TRA:
+		case SWA:
+			calcStockWaveBlock(osc, buf, size, gain);
+			break;
 
-			calcUserSampleOscBlock(osc,buf,size, gain);
+		default:
+			memset(buf, 0, (size_t)size * sizeof(int16_t));
 			break;
 		}
 }
 //-----------------------------------------------------------
 int16_t calcNextOscSample(OscInfo* osc)
 {
+	/* S085 C5.8: non-wav types render through their block renderer (one
+	** sample); the scalar path has no external caller and is kept only for
+	** the scalar interpolation helpers. */
+	if (osc->oscType != OSC_TYPE_WAV) {
+		int16_t out = 0;
+
+		calcNextOscSampleBlock(osc, &out, 1u, 1.0f);
+		osc->output = out;
+		return out;
+	}
 	if (osc_waveInterpActive(osc)) {
 		return calcPeriodicInterp(osc);
 	}
@@ -647,6 +786,18 @@ int16_t calcNextOscSample(OscInfo* osc)
 		return calcSampleOsc(osc);
 		break;
 
+	case SQ3:
+	case SW3:
+	case SQA:
+	case TRA:
+	case SWA: {
+		int16_t out = 0;
+
+		calcStockWaveBlock(osc, &out, 1u, 1.0f);
+		osc->output = out;
+		return out;
+	}
+
 	default:
 
 		return 0;
@@ -656,9 +807,14 @@ int16_t calcNextOscSample(OscInfo* osc)
 	return 0;
 };
 //---------------------------------------------------------------
-INITCM void calcWavetableOscBlock(OscInfo* osc, const int16_t table[][1024], int16_t* buf, const uint8_t size ,const float gain)
+OSC_SYNC_INLINE void calcWavetableOscCore(OscInfo* osc, const int16_t table[][1024],
+                                           int16_t* buf, const uint8_t size,
+                                           const float gain,
+                                           const OscSyncLane* lane)
 {
 	uint8_t i;
+	uint32_t inc = osc->phaseInc;
+	const int32_t step = osc->phaseIncStep;
 	for(i=0;i<size;i++)
 	{
 		const uint32_t oscPhase = osc->phase;
@@ -674,9 +830,18 @@ INITCM void calcWavetableOscBlock(OscInfo* osc, const int16_t table[][1024], int
 			oscOut = table[osc->tableOffset][itg];
 		#endif
 
-			osc->phase = oscPhase + osc->phaseInc;
+			/* S085 C5.6: per-sample slew. */
+			osc->phase = oscPhase + inc;
+			if (lane)
+				osc->phase = oscSync_phase(lane, i, osc->phase, 0u);
+			inc += (uint32_t)step;
 			buf[i] = oscOut * gain;
 	}
+	osc->phaseInc = inc;
+}
+INITCM void calcWavetableOscBlock(OscInfo* osc, const int16_t table[][1024], int16_t* buf, const uint8_t size ,const float gain)
+{
+	calcWavetableOscCore(osc, table, buf, size, gain, 0);
 }
 
 //---------------------------------------------------------------
@@ -703,10 +868,92 @@ int16_t calcWavetableOsc(OscInfo* osc,  const int16_t table[][1024])
 
 };
 
+/*
+ * Generated stock-wave renderers (S085 C5.9).
+ *
+ * What:       read level tableOffset of stock wave (waveform - SQ3) with
+ *             linear interpolation and the per-sample slew; the FM variant
+ *             adds (mod x fmMod) << 19 to the read phase, the calcFmBlock
+ *             depth. Before the first install they render the fallback table
+ *             through the same loop.
+ * Why:        plan §4.3.4; same cost class as calcWavetableOscBlock().
+ * Inputs:     osc, (modBuffer), buf, size, gain.
+ * Outputs:    buf; osc->phase, osc->phaseInc.
+ * Accessors:  calcNextOscSampleBlock(), calcNextOscSampleFmBlock().
+ * Affiliates: stockWave_level(), osc_calcWavetableFreqValue(). ITCM.
+ */
+OSC_SYNC_INLINE void calcStockWaveCore(OscInfo* osc, int16_t* buf,
+                                       const uint8_t size, const float gain,
+                                       const OscSyncLane* lane)
+{
+	const stock_level_t lv = stockWave_level(
+		(uint8_t)(osc->waveform - STOCK_WAVE_FIRST), osc->tableOffset);
+	const uint8_t lowShift = (uint8_t)(32u - lv.shift);
+	uint32_t inc = osc->phaseInc;
+	const int32_t step = osc->phaseIncStep;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const uint32_t oscPhase = osc->phase;
+		const uint32_t index = oscPhase >> lv.shift;
+		const uint32_t next = (index + 1u) & lv.mask;
+		const float frac =
+			(float)(oscPhase << lowShift) * 2.3283064365386963e-10f; /* 2^-32 */
+		int16_t oscOut = lv.tab[index];
+
+		oscOut = (int16_t)((float)oscOut +
+			frac * (float)((int32_t)lv.tab[next] - (int32_t)oscOut));
+		buf[i] = oscOut * gain;
+		/* S085 C5.6: per-sample slew. */
+		osc->phase = oscPhase + inc;
+		if (lane)
+			osc->phase = oscSync_phase(lane, (uint8_t)i, osc->phase, 0u);
+		inc += (uint32_t)step;
+	}
+	osc->phaseInc = inc;
+}
+INITCM void calcStockWaveBlock(OscInfo* osc, int16_t* buf, const uint8_t size,
+                               const float gain)
+{
+	calcStockWaveCore(osc, buf, size, gain, 0);
+}
+
+INITCM void calcStockWaveFmBlock(OscInfo* osc, int16_t* modBuffer,
+                                 int16_t* buf, uint8_t size, const float gain)
+{
+	const stock_level_t lv = stockWave_level(
+		(uint8_t)(osc->waveform - STOCK_WAVE_FIRST), osc->tableOffset);
+	const uint8_t lowShift = (uint8_t)(32u - lv.shift);
+	uint32_t inc = osc->phaseInc;
+	const int32_t step = osc->phaseIncStep;
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const uint32_t index32 = osc->phase +
+			(((uint32_t)(modBuffer[i] * osc->fmMod)) << 19);
+		const uint32_t index = index32 >> lv.shift;
+		const uint32_t next = (index + 1u) & lv.mask;
+		const float frac =
+			(float)(index32 << lowShift) * 2.3283064365386963e-10f;
+		int16_t oscOut = lv.tab[index];
+
+		oscOut = (int16_t)((float)oscOut +
+			frac * (float)((int32_t)lv.tab[next] - (int32_t)oscOut));
+		osc->output = oscOut;
+		buf[i] = oscOut * gain;
+		/* S085 C5.6: per-sample slew. */
+		osc->phase += inc;
+		inc += (uint32_t)step;
+	}
+	osc->phaseInc = inc;
+}
+
 //------------------------------------------------------------------
 INITCM void calcSampleOscFmBlock(OscInfo* osc,int16_t* modBuffer, int16_t* buf, uint8_t size ,const float gain)
 {
 	uint8_t i;
+	uint32_t inc = osc->phaseInc;
+	const int32_t step = osc->phaseIncStep;
 	for(i=0;i<size;i++)
 	{
 		const uint32_t oscPhase 	= osc->phase;
@@ -725,10 +972,13 @@ INITCM void calcSampleOscFmBlock(OscInfo* osc,int16_t* modBuffer, int16_t* buf, 
 
 		oscOut = (oscOut - 127)*256;
 
-		osc->phase = oscPhase + osc->phaseInc;
+		/* S085 C5.6: per-sample slew. */
+		osc->phase = oscPhase + inc;
+		inc += (uint32_t)step;
 		osc->output = oscOut;
 		buf[i] = oscOut * gain;
 	}
+	osc->phaseInc = inc;
 }
 //------------------------------------------------------------------
 int16_t calcSampleOscFm(OscInfo* osc, OscInfo* modOsc)
@@ -754,119 +1004,14 @@ int16_t calcSampleOscFm(OscInfo* osc, OscInfo* modOsc)
 	osc->output = oscOut;
 	return oscOut;
 };
-//------------------------------------------------------------------
-INITCM void calcUserSampleOscFmBlock(OscInfo* osc,int16_t* modBuffer, int16_t* buf, uint8_t size ,const float gain)
-{
-	uint8_t sampleIndex = osc->waveform - OSC_SAMPLE_START;
-	osc_updateSampleCache(osc, sampleIndex);
-	uint32_t sampleSize = osc->sampleCacheSize;
-	uint8_t looped = osc->sampleCacheLooped;
-
-	//cast sample data to signed int16_t array
-	const int16_t* sampleData = osc->sampleCacheData;
-	if(sampleSize == 0) return;
-
-	uint8_t i;
-	for(i=0;i<size;i++)
-	{
-		const uint32_t oscPhase 	= osc->phase;
-		int16_t oscOut ;
-
-		const uint32_t index =  oscPhase + (((uint32_t)(modBuffer[i]*osc->fmMod))<<14);
-		uint32_t  itg	= index>>17;
-
-		if(looped && itg >= sampleSize)
-			itg %= sampleSize;
-
-	#if INTERPOLATE_FM_OSC
-		oscOut = sampleData[itg];
-		const float frac	= (index & 0x0001FFFF) * 0.00000762939453125f; // 1 / 2^17
-		if(looped && (itg + 1u) >= sampleSize)
-			oscOut += frac*(sampleData[0] - oscOut);
-		else
-			oscOut += frac*(sampleData[itg + 1u] - oscOut);
-		itg++;
-	#else
-		oscOut = sampleData[itg];
-	#endif
-
-		//one shot
-		if(looped)
-		{
-			uint32_t nextPhase = oscPhase + osc->phaseInc;
-			if(sampleSize < 32768u) {
-				uint32_t loopPhase = sampleSize << 17;
-				if(nextPhase >= loopPhase)
-					nextPhase %= loopPhase;
-			}
-			osc->phase = nextPhase;
-		}
-		else if(itg < sampleSize)
-		{
-			osc->phase = oscPhase + osc->phaseInc;
-		}
-		osc->output = oscOut;
-		buf[i] = oscOut * gain;
-	}
-}
 //---------------------------------------------------------------
-INITCM void calcUserSampleOscBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain)
-{
-	uint8_t sampleIndex = osc->waveform - OSC_SAMPLE_START;
-	osc_updateSampleCache(osc, sampleIndex);
-	uint32_t sampleSize = osc->sampleCacheSize;
-	uint8_t looped = osc->sampleCacheLooped;
-
-	//cast sample data to signed int16_t array
-	const int16_t* sampleData = osc->sampleCacheData;
-	if(sampleSize == 0) return;
-
-	uint8_t i;
-	for(i=0;i<size;i++)
-	{
-		const uint32_t oscPhase = osc->phase;
-		int16_t oscOut ;
-		uint32_t  itg	= oscPhase>>17;
-
-		if(looped && itg >= sampleSize)
-			itg %= sampleSize;
-
-	#if INTERPOLATE_OSC
-
-		oscOut = sampleData[itg];
-		const float frac = (oscPhase & 0x0001FFFF) * 0.00000762939453125f; // 1 / 2^17
-		if(looped && (itg + 1u) >= sampleSize)
-			oscOut += frac*(sampleData[0] - oscOut);
-		else
-			oscOut += frac*(sampleData[itg + 1u] - oscOut);
-		itg++;
-	#else
-		oscOut = sampleData[itg];
-	#endif
-	//	oscOut = (oscOut - 127)*256;
-
-		//one shot
-		if(looped)
-		{
-			uint32_t nextPhase = oscPhase + osc->phaseInc;
-			if(sampleSize < 32768u) {
-				uint32_t loopPhase = sampleSize << 17;
-				if(nextPhase >= loopPhase)
-					nextPhase %= loopPhase;
-			}
-			osc->phase = nextPhase;
-		}
-		else if(itg < sampleSize)
-		{
-			osc->phase = oscPhase + osc->phaseInc;
-		}
-		buf[i] = oscOut * gain;
-	}
-}
-//---------------------------------------------------------------
-INITCM void calcSampleOscBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain)
+OSC_SYNC_INLINE void calcSampleOscCore(OscInfo* osc, int16_t* buf, const uint8_t size,
+                                        const float gain,
+                                        const OscSyncLane* lane)
 {
 	uint8_t i;
+	uint32_t inc = osc->phaseInc;
+	const int32_t step = osc->phaseIncStep;
 	for(i=0;i<size;i++)
 	{
 		const uint32_t oscPhase = osc->phase;
@@ -884,9 +1029,18 @@ INITCM void calcSampleOscBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,c
 	#endif
 		oscOut = (oscOut - 127)*256;
 
-		osc->phase = oscPhase + osc->phaseInc;
+		/* S085 C5.6: per-sample slew. */
+		osc->phase = oscPhase + inc;
+		if (lane)
+			osc->phase = oscSync_phase(lane, (uint8_t)i, osc->phase, 0u);
+		inc += (uint32_t)step;
 		buf[i] = oscOut * gain;
 	}
+	osc->phaseInc = inc;
+}
+INITCM void calcSampleOscBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain)
+{
+	calcSampleOscCore(osc, buf, size, gain, 0);
 }
 //---------------------------------------------------------------
 int16_t calcSampleOsc(OscInfo* osc)
@@ -914,7 +1068,7 @@ int16_t calcSampleOsc(OscInfo* osc)
  //-----------------------------------------------------------
 static void osc_calcSineFreqValue(OscInfo* osc, const float currentFreq)
 {
-	osc->phaseInc = freq2PhaseIncr(currentFreq);
+	osc->phaseIncTarget = freq2PhaseIncr(currentFreq);
 }
 //-----------------------------------------------------------
 static void osc_calcNoiseFreqValue(OscInfo* osc, const float currentFreq)
@@ -924,7 +1078,7 @@ static void osc_calcNoiseFreqValue(OscInfo* osc, const float currentFreq)
 //-----------------------------------------------------------
 static void osc_calcWavetableFreqValue(OscInfo* osc, const float currentFreq)
 {
-	osc->phaseInc = freq2PhaseIncr1024(currentFreq);
+	osc->phaseIncTarget = freq2PhaseIncr1024(currentFreq);
 
 	const uint8_t overtoneIndex = freqToTableIndex(currentFreq);
 	osc->tableOffset = overtoneIndex>10?10:overtoneIndex;
@@ -932,64 +1086,145 @@ static void osc_calcWavetableFreqValue(OscInfo* osc, const float currentFreq)
 //-----------------------------------------------------------
 static void osc_calcSampleFreqValue(OscInfo* osc, const float currentFreq)
 {
-	osc->phaseInc = freq2PhaseIncr32767(currentFreq);
+	osc->phaseIncTarget = freq2PhaseIncr32767(currentFreq);
 }
 //-----------------------------------------------------------
-static void osc_calcUserSampleFreqValue(OscInfo* osc, const float currentFreq)
+/*
+ * Update an oscillator's frequency state for the next block (S085 C5.12).
+ *
+ * What:       computes the phase-increment target for the oscillator's type
+ *             (wav tables/sine/noise/crash, pwm via oscPwm_prepare(), Q20.12
+ *             samples, wtb at 2^32 per cycle), caches it by (frequency,
+ *             waveform, source, type key) — source is the pwm width, which
+ *             velocity and the LFO write directly — then advances the slew: with no slew armed
+ *             phaseInc = target and step = 0; with a slew armed the per-sample
+ *             step reaches the target after the remaining slew samples.
+ *             The pwm cache key carries sampleMemory_stockValid() in bit 7,
+ *             so an install that makes the stock block valid re-derives the
+ *             pq3/pw3 natural split once (S084 P2 F10).
+ * Why:        plan §5 items 1-3. The cache must never hide the slew
+ *             bookkeeping, so the slew part runs every call. The step
+ *             division always runs (divisor clamped to 1), so the block cost
+ *             does not depend on the run mode.
+ * Inputs:     freq, pitchMod, modNodeValue, oscType, waveform, source, slew.
+ * Outputs:    phaseIncTarget, phaseInc, phaseIncStep, slewSamplesLeft,
+ *             tableOffset, pwm state.
+ * Accessors:  each engine's async update, once per block per oscillator.
+ * Affiliates: osc_armSlew(), oscPwm_prepare(), oscSample_phaseIncForFreq().
+ *             ITCM.
+ */
+INITCM void osc_setFreq(OscInfo* osc)
 {
-	osc_calcSampleFreqValue(osc, currentFreq);
-}
-//-----------------------------------------------------------
- INITCM void osc_setFreq(OscInfo* osc)
- {
-		const float currentFreq = osc->freq*osc->pitchMod*osc->modNodeValue;
-		/* osc_setFreq() is called frequently by the block dispatcher. Cache the
-		** effective frequency+waveform tuple so unchanged blocks skip the
-		** phase-increment recalculation and wavetable octave selection
-		** (S073 Step 6: octave selection is now an edge count, not log2f()). */
-		if (osc->freqCacheValid &&
-			osc->freqCacheWaveform == osc->waveform &&
-			osc->freqCacheValue == currentFreq) {
-			return;
-		}
+	const float currentFreq = osc->freq * osc->pitchMod * osc->modNodeValue;
+	const uint8_t cacheType = (uint8_t)(osc->oscType |
+		((osc->oscType == OSC_TYPE_PWM && sampleMemory_stockValid())
+			? 0x80u : 0u));
 
-		switch(osc->waveform)
-		{
-		case SINE:
-			osc_calcSineFreqValue(osc, currentFreq);
+	if (!(osc->freqCacheValid &&
+	      osc->freqCacheType == cacheType &&
+	      osc->freqCacheWaveform == osc->waveform &&
+	      osc->freqCacheSource == osc->source &&
+	      osc->freqCacheValue == currentFreq)) {
+		switch (osc->oscType) {
+		case OSC_TYPE_PWM:
+			oscPwm_prepare(osc, currentFreq);
 			break;
-
-		case SAW:
-			osc_calcWavetableFreqValue(osc, currentFreq);
+		case OSC_TYPE_SMP:
+		case OSC_TYPE_SLP:
+			osc->phaseIncTarget = oscSample_phaseIncForFreq(currentFreq);
 			break;
-
-		case TRI:
-			osc_calcWavetableFreqValue(osc, currentFreq);
+		case OSC_TYPE_WTB:
+			osc->phaseIncTarget = freq2PhaseIncr1024(currentFreq);
 			break;
-
-		case REC:
-			osc_calcWavetableFreqValue(osc, currentFreq);
-			break;
-
-		case NOISE:
-			osc_calcNoiseFreqValue(osc, currentFreq);
-			break;
-
-
-		case CRASH:
-			osc_calcSampleFreqValue(osc, currentFreq);
-			break;
-
-		//samples
+		case OSC_TYPE_WAV:
 		default:
-			osc_calcUserSampleFreqValue(osc, currentFreq);
+			switch (osc->waveform) {
+			case SINE:
+				osc_calcSineFreqValue(osc, currentFreq);
+				break;
+			case NOISE:
+				osc_calcNoiseFreqValue(osc, currentFreq);
+				break;
+			case CRASH:
+				osc_calcSampleFreqValue(osc, currentFreq);
+				break;
+			default: /* TRI SAW REC and SQ3..SWA: table octave */
+				osc_calcWavetableFreqValue(osc, currentFreq);
+				break;
+			}
 			break;
-
 		}
 		osc->freqCacheValue = currentFreq;
 		osc->freqCacheWaveform = osc->waveform;
+		osc->freqCacheSource = osc->source;
+		osc->freqCacheType = cacheType;
 		osc->freqCacheValid = 1u;
- }
+	}
+	{
+		/*
+		 * Slew step for this block (S085 C5.12, assessment A1 fix).
+		 *
+		 * What:       step = (target - phaseInc) / max(left, block). Every
+		 *             renderer adds the step on all OUTPUT_DMA_SIZE samples of
+		 *             the block, so the divisor must never be smaller than the
+		 *             block: with OSC_SLEW_SAMPLES 132 the last slew block
+		 *             starts with left = 4, and dividing by 4 drove the
+		 *             increment 7 steps past the target (a 20.5 % pitch
+		 *             overshoot for 28 samples, then a snap back). With the
+		 *             floor the last block lands on the target at its final
+		 *             sample; the glide takes 160 samples (5 blocks) and is
+		 *             monotonic. The difference is taken in uint32 and cast
+		 *             once, so increments above 2^31 cannot overflow int32.
+		 * Cost:       unchanged: one compare-select and one SDIV every call.
+		 * Proof:      osc_run test_slew renders the trajectory (A5).
+		 */
+		const uint16_t left = osc->slewSamplesLeft;
+		const uint16_t divisor = (left > OUTPUT_DMA_SIZE)
+			? left : (uint16_t)OUTPUT_DMA_SIZE;
+		const int32_t step = (int32_t)(osc->phaseIncTarget - osc->phaseInc) /
+		                     (int32_t)divisor;
+
+		if (left == 0u) {
+			osc->phaseInc = osc->phaseIncTarget;
+			osc->phaseIncStep = 0;
+		} else {
+			osc->phaseIncStep = step;
+			osc->slewSamplesLeft = (left > OUTPUT_DMA_SIZE)
+				? (uint16_t)(left - OUTPUT_DMA_SIZE) : 0u;
+		}
+	}
+}
+
+/*
+ * Band-limited octave index for a frequency (S085 C5.12).
+ *
+ * What:       the S073 Step 6 edge count (0..10), exposed.
+ * Why:        the pwm families select the same band-limited level as the wav
+ *             tables, at frequency x warp compression.
+ * Accessors:  oscPwm_prepare().  Affiliates: freqToTableIndex().
+ */
+uint8_t osc_freqToTableIndex(float f)
+{
+	return freqToTableIndex(f);
+}
+
+/*
+ * Arm the pitch slew (S085 C5.12).
+ *
+ * What:       sets slewSamplesLeft = OSC_SLEW_SAMPLES; the next osc_setFreq()
+ *             computes the per-sample step from the current phaseInc toward
+ *             the new target.
+ * Why:        plan §4.3.7: fre glides every oscillator; itp glides the
+ *             modulators.
+ * Inputs:     osc.  Outputs: osc->slewSamplesLeft.
+ * Accessors:  oscSection_beginTrigger(), oscSection_claimPending().
+ * Affiliates: osc_setFreq(), every renderer's phaseIncStep.
+ */
+void osc_armSlew(OscInfo* osc)
+{
+	if (osc)
+		osc->slewSamplesLeft = OSC_SLEW_SAMPLES;
+}
  //-----------------------------------------------------------
 void osc_setBaseNote(OscInfo* osc, uint8_t baseNote)
 {
@@ -1030,3 +1265,100 @@ void osc_recalcFreq(OscInfo* osc)
 	 osc->freq = MidiNoteFrequencies[note]*cent;
  }
  //-----------------------------------------------------------
+//-----------------------------------------------------------
+/*
+ * Waveform-interpolation pair under hard sync (S085 assessment A2).
+ *
+ * What:       calcPeriodicInterpBlock() with both neighbour renders synced
+ *             by the same lane, so the blend partners reset together.
+ * Why:        a wav slave that holds a pool unit for interpolation must keep
+ *             its blend in snc; the unit already budgets the second render.
+ * Accessors:  osc_renderSyncBlock().
+ */
+static void calcPeriodicInterpSyncBlock(OscInfo* osc, int16_t* buf,
+                                        const uint8_t size, const float gain,
+                                        const OscSyncLane* lane)
+{
+	const float frac = osc->waveInterpFrac;
+	OscInfo oscA = *osc;
+	OscInfo oscB = *osc;
+	uint8_t i;
+
+	oscA.waveform = osc->waveform;
+	osc_clearWaveInterp(&oscA);
+	oscB.waveform = osc->waveInterpNext;
+	osc_clearWaveInterp(&oscB);
+
+	osc_renderSyncBlock(&oscA, osc_interp_a, size, 1.f, lane);
+	osc_renderSyncBlock(&oscB, osc_interp_b, size, 1.f, lane);
+
+	for (i = 0; i < size; i++) {
+		const int16_t a = osc_interp_a[i];
+		const int16_t b = osc_interp_b[i];
+		const int16_t out = (int16_t)(a + frac * (b - a));
+		buf[i] = out * gain;
+	}
+	osc->phase = oscA.phase;
+	osc->phaseInc = oscA.phaseInc;
+}
+//-----------------------------------------------------------
+/*
+ * Hard-sync slave dispatch (S085 assessment A2; declared in Oscillator.h).
+ *
+ * What:       the calcNextOscSampleBlock() type and waveform dispatch, once
+ *             per block, into the sync form of each family's loop.
+ * Cost:       per sample, the family's plain loop plus the oscSync_phase()
+ *             select (about 6 instructions); measured by armcheck-osc
+ *             (C19.2).
+ */
+INITCM void osc_renderSyncBlock(OscInfo* osc, int16_t* buf, uint8_t size,
+                                float gain, const OscSyncLane* lane)
+{
+	switch (osc->oscType) {
+	case OSC_TYPE_PWM:
+		oscPwm_renderSync(osc, buf, size, gain, lane);
+		return;
+	case OSC_TYPE_SMP:
+	case OSC_TYPE_SLP:
+		oscSample_renderSync(osc, buf, size, gain, lane);
+		return;
+	case OSC_TYPE_WTB:
+		oscWavetable_renderSync(osc, buf, size, gain, lane);
+		return;
+	default:
+		break;
+	}
+	if (osc_waveInterpActive(osc)) {
+		calcPeriodicInterpSyncBlock(osc, buf, size, gain, lane);
+		return;
+	}
+	switch (osc->waveform) {
+	case SINE:
+		calcSineCore(osc, buf, size, gain, lane);
+		break;
+	case SAW:
+	case TRI:
+	case REC:
+		/* One inlined copy for the three tables (ITCM). */
+		calcWavetableOscCore(osc, (osc->waveform == SAW) ? sawTable
+		                     : (osc->waveform == TRI) ? triTable : recTable,
+		                     buf, size, gain, lane);
+		break;
+	case NOISE:
+		calcNoiseCore(osc, buf, size, gain, lane);
+		break;
+	case CRASH:
+		calcSampleOscCore(osc, buf, size, gain, lane);
+		break;
+	case SQ3:
+	case SW3:
+	case SQA:
+	case TRA:
+	case SWA:
+		calcStockWaveCore(osc, buf, size, gain, lane);
+		break;
+	default:
+		memset(buf, 0, (size_t)size * sizeof(int16_t));
+		break;
+	}
+}

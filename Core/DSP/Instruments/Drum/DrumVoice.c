@@ -46,6 +46,8 @@
 #include "modulationNode.h"
 #include "InstrumentManager.h"
 #include "voicePostChain.h"
+#include "OscillatorSample.h"
+#include "OscRenderPool.h"
 // TODO DSP_PORT
 // #include "TriggerOut.h"
 
@@ -122,7 +124,8 @@ void Drum_initVoice(DrumVoice *voice, uint8_t seed_index)
 
 	voice->osc.freq = 440;
 	voice->osc.modNodeValue = 1;
-	voice->osc.waveform = TRI+seed_index; //for testing init to tri,saw,rec
+	/* S085 C11.2: seed limited to Tri/Saw/Rec; 6+ are stock waves now. */
+	voice->osc.waveform = (uint8_t)(TRI + (seed_index % 3u));
 	voice->osc.fmMod = 0;
 	voice->osc.midiFreq = 70<<8;
 
@@ -130,6 +133,10 @@ void Drum_initVoice(DrumVoice *voice, uint8_t seed_index)
 	voice->egPitchModAmount = 0.5f;
 
 	slopeEg2_init(&voice->oscVolEg);
+	/* S085 P2: no retrigger ramp pending; the first block starts flat. */
+	voice->lastVeloGain = 1.0f;
+	voice->ampRampArm = 0u;
+	voice->lastFmMod = 0.0f;   /* S085 P2 F-A */
 	setDistortionShape(&voice->distortion, 2.f);
 
 #ifdef USE_AMP_FILTER
@@ -142,6 +149,8 @@ void Drum_initVoice(DrumVoice *voice, uint8_t seed_index)
 #endif
 	voice->decimationCnt = 0;
 	voice->decimationRate = 1;
+	/* S085 C11.2: rst until the run row is applied. */
+	oscSection_init(&voice->section);
 }
 //---------------------------------------------------
 void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
@@ -174,31 +183,43 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 	 */
 	instrumentManager_applyVelocityModulationTarget(source_slot, vol/127.f);
 
-	//only reset phase if envelope is closed
-#ifdef USE_AMP_FILTER
-	if((voice->volEgValueBlock[15]<=0.01f) || (voice->transGen.waveform==1))
-#else
-		//if((voice->ampFilterInput<=0.01f) || (voice->transGen.waveform==1))
-#endif
 	{
-		float offset = 1;
-		if(voice->transGen.waveform==1) //offset mode
-		{
-			offset -= voice->transGen.volume;
+		OscInfo* const mods[1] = { &voice->modOsc };
+		const uint8_t reset = oscSection_beginTrigger(&voice->section,
+		                                              &voice->osc, mods, 1u);
+
+		//only reset phase if envelope is closed
 #ifdef USE_AMP_FILTER
-			setOnePoleCoef(&voice->ampFilter,1.0f); //turn off amp filter for super snappy attack
-
-		} else {
-			setOnePoleCoef(&voice->ampFilter,ampSmoothValue);
+		if (reset != OSC_TRIGGER_RESET_NONE &&
+		    ((voice->volEgValueBlock[15]<=0.01f) || (voice->transGen.waveform==1)))
+#else
+		if (reset != OSC_TRIGGER_RESET_NONE)
 #endif
+		{
+			float offset = 1;
+			if(voice->transGen.waveform==1) //offset mode
+			{
+				offset -= voice->transGen.volume;
+#ifdef USE_AMP_FILTER
+				setOnePoleCoef(&voice->ampFilter,1.0f);
+			} else {
+				setOnePoleCoef(&voice->ampFilter,ampSmoothValue);
+#endif
+			}
+			if (voice->osc.oscType == OSC_TYPE_SMP ||
+			    voice->osc.oscType == OSC_TYPE_SLP)
+				oscSample_restart(&voice->osc);
+			else if (voice->osc.oscType != OSC_TYPE_WAV ||
+			         osc_isTableWave(voice->osc.waveform))
+				voice->osc.phase = (0xff<<20)*offset;
+			else if (voice->osc.waveform == SINE)
+				voice->osc.phase = 1024 + ( (0x3ff<<20) - 1024)*offset;
+			else
+				voice->osc.phase = 0;
 		}
-		if(voice->osc.waveform == SINE)
-			voice->osc.phase = 1024 + ( (0x3ff<<20) - 1024)*offset;//voice->osc.startPhase ;
-		else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)
-			voice->osc.phase = (0xff<<20)*offset;
-		else
-			voice->osc.phase = 0;
-
+		/* S085 C11.2: only rst clears the filter (fre/itp keep it ringing). */
+		if (reset == OSC_TRIGGER_RESET_ALL)
+			SVF_reset(&voice->filter);
 	}
 
 	osc_setBaseNote(&voice->osc,note);
@@ -206,15 +227,42 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 
 
 	DecayEg_trigger(&voice->oscPitchEg);
-	slopeEg2_trigger(&voice->oscVolEg);
+	/*
+	 * Amp envelope retrigger by run mode (S085 P2).
+	 *
+	 * What:       rst: slopeEg2_trigger(), exactly as before. fre/itp: the
+	 *             attack starts at the gain the last block ended on
+	 *             (ampFilterInput; slopeEg2_retriggerFrom()), and when that
+	 *             gain is still audible the next block ramps from it
+	 *             (ampRampArm). A fully decayed voice gets a fresh attack and
+	 *             no ramp.
+	 * Why:        slopeEg2_trigger() switches the raw value from the decay to
+	 *             the attack curve, a gain step of up to full scale; at
+	 *             attack 0 the async also skipped the per-block ramp. That
+	 *             was the retrigger click in fre/itp.
+	 * Inputs:     section.runMode, ampFilterInput, the envelope.
+	 * Outputs:    oscVolEg, ampRampArm.
+	 * Affiliates: Drum_calcVoiceAsync() (ramp at attack 0 when armed),
+	 *             Drum_calcVoiceSyncBlock() (velocity ramp),
+	 *             slopeEg2_retriggerFrom(), slopeEg2_isAudibleGain().
+	 */
+#if (AMP_EG_SYNC != 0)
+#error "S085 P2 amp retrigger assumes AMP_EG_SYNC == 0 (ampFilterInput)"
+#endif
+	if (voice->section.runMode == OSC_RUN_RST) {
+		slopeEg2_trigger(&voice->oscVolEg);
+	} else {
+		const float gainNow = voice->ampFilterInput;
+
+		slopeEg2_retriggerFrom(&voice->oscVolEg, gainNow);
+		voice->ampRampArm = slopeEg2_isAudibleGain(gainNow);
+	}
 	voice->velo = vol/127.f;
 
 	transient_trigger(&voice->transGen);
 
 	SnapEg_trigger(&voice->snapEg);
 
-	//reset filter coeffs to prevent wrong transient
-	SVF_reset(&voice->filter);
 }
 //---------------------------------------------------
 void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
@@ -250,7 +298,14 @@ void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
 #if (AMP_EG_SYNC==0)
 
 	//check if in attack phase
-	if( (voice->oscVolEg.attack == 1 ) && ((voice->oscVolEg.state == EG_A) || (voice->oscVolEg.state == EG_REPEAT)) )
+	/*
+	 * S085 P2: an armed fre/itp retrigger block always ramps from the last
+	 * gain, so attack 0 (and a repeat-mode restart) does not jump to full in
+	 * one sample. Unarmed blocks keep the original rule exactly.
+	 */
+	if( (voice->oscVolEg.attack == 1 ) &&
+	    ((voice->oscVolEg.state == EG_A) || (voice->oscVolEg.state == EG_REPEAT)) &&
+	    !voice->ampRampArm )
 	{
 			//if attack is set to 0 -> no interpolation
 		voice->ampFilterInput = slopeEg2_calc(&voice->oscVolEg);
@@ -310,19 +365,59 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	calcOnePoleBlockFixedInput(&voice->ampFilter, voice->ampFilterInput,voice->volEgValueBlock, size);
 #endif
 
-	//calc next mod osc sampleBlock
-	calcNextOscSampleBlock(&voice->modOsc,modBuf,size,voice->fmModAmount);
+	/*
+	 * Oscillator section (S085 C11.2).
+	 *
+	 * What:       fm/mix/snc/rng through OscSection; with itp active the old
+	 *             carrier renders into the pool scratch with the same live
+	 *             modulator block and the two crossfade.
+	 * Why:        plan §4.3.7; fm/mix with no crossfade are bit-identical to
+	 *             the pre-S085 code (osc_s0).
+	 * Affiliates: oscSection_renderDrum(), oscSection_blendItp(),
+	 *             oscRenderPool_scratch().
+	 */
+	{
+		OscInfo* const old = oscSection_itpCarrier(&voice->section);
+		int16_t* const oldBuf = old ? oscRenderPool_scratch() : 0;
 
-	if(voice->mixOscs)
-	{
-		//calc main osc buffer
-		calcNextOscSampleBlock(&voice->osc,buf,size, (1.f-voice->fmModAmount));
-		//add mod buffer to main osc buffer
-		bufferTool_addBuffersSaturating(buf,modBuf,size);
-	}
-	else
-	{
-		calcNextOscSampleFmBlock(&voice->osc,modBuf,buf,size,1.0f);
+		/*
+		 * FM depth ramp start (S085 P2 F-A).
+		 *
+		 * What:       on the armed fre/itp retrigger block (ampRampArm, set
+		 *             only when the voice is still audible) the fm modulator
+		 *             block ramps from lastFmMod / fmMod to 1; every other
+		 *             block passes 1 (flat). The ratio is computed every
+		 *             block and clamped to 0..1, so the scaled modulator can
+		 *             never exceed its rendered value (no int16 overflow);
+		 *             a retrigger whose new depth is below the old one
+		 *             (rare: lowered FM amount) keeps that part of the step.
+		 *             While an itp crossfade is active the section forces it
+		 *             flat.
+		 * Why:        fmMod = fmModAmount x pitch envelope, and
+		 *             DecayEg_trigger() restarts the envelope at 1.0, so the
+		 *             FM depth jumped at the retrigger; with phase modulation
+		 *             that jumped the carrier's read phase by
+		 *             mod x (new - old): the sporadic high-FM fre click.
+		 * Inputs:     osc.fmMod (this block), lastFmMod, ampRampArm.
+		 * Outputs:    the ramp start passed to the section; lastFmMod.
+		 * Affiliates: oscSection_renderDrumRamped(), Drum_calcVoiceAsync().
+		 */
+		const float fmNow = voice->osc.fmMod;
+		float fmRatio = voice->lastFmMod / ((fmNow > 0.0f) ? fmNow : 1.0f);
+		float fmRampFrom;
+
+		if (fmRatio > 1.0f)
+			fmRatio = 1.0f;
+		if (fmRatio < 0.0f)
+			fmRatio = 0.0f;
+		fmRampFrom = (voice->ampRampArm && fmNow > 0.0f) ? fmRatio : 1.0f;
+		oscSection_renderDrumRamped(&voice->osc, &voice->modOsc,
+		                            voice->mixOscs, voice->fmModAmount,
+		                            buf, modBuf, size, old, oldBuf,
+		                            fmRampFrom);
+		voice->lastFmMod = fmNow;
+		if (old)
+			oscSection_blendItp(&voice->section, buf, oldBuf, size);
 	}
 
 	//calc transient sample
@@ -359,9 +454,29 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	 * Accessors:  this render function through InstrumentManager.
 	 * Affiliates: voicePostChain.h, Drum gain bookkeeping and the Step 4 tests.
 	 */
-	voicePost_drum(buf, voice->ampFilterInput, voice->lastGain,
-	               voice->volumeMod ? voice->velo : 1.0f,
-	               &voice->distortion, size);
+	/*
+	 * Velocity ramp endpoints and the arm (S085 P2).
+	 *
+	 * What:       the block's velocity gain ramps from lastVeloGain when
+	 *             this is the armed retrigger block, else it is flat. After
+	 *             the block, lastVeloGain records the gain just applied and
+	 *             the arm is cleared (one block only).
+	 * Why:        a new velocity at a fre/itp retrigger with level left would
+	 *             step the output; rst and ordinary blocks stay bit-identical.
+	 * Inputs:     volumeMod, velo, lastVeloGain, ampRampArm.
+	 * Outputs:    buf; lastVeloGain; ampRampArm = 0.
+	 * Affiliates: voicePost_drum(), Drum_triggerVoice().
+	 */
+	{
+		const float veloGain = voice->volumeMod ? voice->velo : 1.0f;
+		const float lastVeloGain = voice->ampRampArm
+			? voice->lastVeloGain : veloGain;
+
+		voicePost_drum(buf, voice->ampFilterInput, voice->lastGain,
+		               veloGain, lastVeloGain, &voice->distortion, size);
+		voice->lastVeloGain = veloGain;
+		voice->ampRampArm = 0u;
+	}
 	#endif
 	/*
 	 * Channel volume is intentionally not applied here (Session 072 step 2).
@@ -369,5 +484,7 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	 * see instrumentManager_runtimeVolume() and mixer_calcNextSampleBlock().
 	 * Re-adding a gain stage here would apply volume twice.
 	 */
+	/* S085 C11.2: advance or end the itp crossfade. */
+	oscSection_finishBlock(&voice->section, size);
 }
 //---------------------------------------------------

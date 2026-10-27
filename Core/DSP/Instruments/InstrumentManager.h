@@ -147,6 +147,20 @@ typedef enum {
      * instead of the raw TYPE_UINT32 store that made 127 effectively zero.
      */
     IM_SPECIAL_LFO_OFFSET,
+    /*
+     * Oscillator type/source/wave and voice run mode (S085 C13.1).
+     *
+     * What:       OSC_TYPE/OSC_SOURCE/OSC_WAVE carry an IM_SPECIAL_OSC_*
+     *             selector; their writers clamp per type, keep the request
+     *             bytes (retained writes only), rebind sample/wavetable state
+     *             and refresh the wav modulation domains. RUN_MODE writes the
+     *             voice's OscSectionState.runMode.
+     * Why:        plan §5 item 5. IDs 20..23; the count becomes 24 (<= 32).
+     */
+    IM_SPECIAL_OSC_TYPE,
+    IM_SPECIAL_OSC_SOURCE,
+    IM_SPECIAL_OSC_WAVE,
+    IM_SPECIAL_RUN_MODE,
     IM_SPECIAL_WRITER_COUNT
 } instrument_special_writer_t;
 
@@ -725,5 +739,90 @@ uint8_t instrumentManager_writeRuntime(uint8_t slot,
  * Affiliates: check_special_tags.py and the tagged parameter tables.
  */
 uint8_t instrumentManager_specialTagSelfCheck(void);
+
+struct OscStruct;
+struct OscSectionStateStruct;
+
+/*
+ * Oscillator of a descriptor's selector (S085 C13.1).
+ *
+ * What:       resolves an OSC_TYPE/OSC_SOURCE/OSC_WAVE row's IM_SPECIAL_OSC_*
+ *             selector against the slot's live runtime.
+ * Inputs:     slot, descriptor.  Outputs: borrowed oscillator or NULL.
+ * Accessors:  InstrumentCellFormat.c, InstrumentManager.c.
+ * Affiliates: instrumentManager_oscBySelector().
+ */
+struct OscStruct *instrumentManager_oscForDescriptor(
+    uint8_t slot, const ParamDescriptor *descriptor);
+
+/*
+ * A slot's oscillator section (S085 C13.1).
+ * What: the live engine's OscSectionState, or NULL.
+ * Accessors: InstrumentManager.c (run writer, filter, claims),
+ *            InstrumentCellFormat.c.
+ */
+struct OscSectionStateStruct *instrumentManager_oscSection(uint8_t slot);
+
+/*
+ * Type-dependent maxima (S085 C13.1).
+ *
+ * What:       wav row: OSC_STOCK_WAVE_COUNT - 1 for wav,
+ *             OSC_PWM_FAMILY_COUNT - 1 for pwm, installed samples - 1 for
+ *             smp/slp, installed wavetables - 1 for wtb (0 when nothing is
+ *             installed). mod row: 127 for every type (P2 §14 row swap).
+ *             The ...ForType forms take the type directly (the formatter
+ *             reads it from the Scene image, S085 D5).
+ * Why:        one rule for the writer clamp, the modulation domain and the
+ *             menu.
+ * Accessors:  InstrumentManager.c, InstrumentCellFormat.c.
+ */
+uint8_t instrumentManager_oscWaveMaxForType(uint8_t oscType);
+uint8_t instrumentManager_oscSourceMaxForType(uint8_t oscType);
+
+/*
+ * May this oscillator take this type? (P2 §14)
+ *
+ * What:       0 for pwm on a Cymbal or HiHat FM oscillator (selector OSC2 or
+ *             OSC3); 1 otherwise. The main oscillators, the Drum FM
+ *             oscillator and the Snare keep every type.
+ * Why:        a pwm Cymbal/HiHat FM oscillator crashed on hardware; the user
+ *             excluded the type there rather than keep it.
+ * Inputs:     instrumentType (instrument_type_t), special (the row's tag;
+ *             only the IM_SPECIAL_OSC_MASK bits are read), oscType.
+ * Outputs:    1 = allowed.
+ * Accessors:  the IM_SPECIAL_OSC_TYPE writer (coerces pwm to wav: file load,
+ *             autosave, automation), InstrumentCellFormat.c (a stored pwm
+ *             reads as wav), menu_clampCellValue() (edits step over pwm).
+ */
+uint8_t instrumentManager_oscTypeAllowed(uint8_t instrumentType,
+                                         uint8_t special, uint8_t oscType);
+
+/*
+ * Is this descriptor a selector row? (S085 C13.1)
+ *
+ * What:       1 for INSTANCE_OFFSET rows with MORPHABLE clear and any special
+ *             writer (today: typ, run); 0 otherwise, including NULL.
+ * Why:        Preset stores these through the supplemental path and applies
+ *             them before the Morph image (C14). The class, not a key list,
+ *             so a future selector row cannot miss the pre-pass.
+ * Accessors:  presetManager.c (three sites).
+ * Affiliates: ROW_SELECT_SPECIAL (C12.1).
+ */
+uint8_t instrumentManager_isSelectorDescriptor(
+    const ParamDescriptor *descriptor);
+
+/*
+ * Render-pool claims for itp crossfades (S085 C13.1).
+ *
+ * What:       Ongoing: every slot with an ACTIVE crossfade keeps its unit.
+ *             Pending: every slot with a PENDING crossfade claims one unit,
+ *             lowest slot first; refused, that trigger behaves as fre.
+ * Why:        Q14 claim order: ongoing itp, interpolation (in between, as
+ *             modulation applies), new itp.
+ * Accessors:  mixer_calcNextSampleBlock() (C9.4).
+ * Affiliates: oscSection_claimOngoing()/_claimPending(), OscRenderPool.c.
+ */
+void instrumentManager_claimOscSectionOngoing(void);
+void instrumentManager_claimOscSectionPending(void);
 
 #endif

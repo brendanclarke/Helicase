@@ -831,3 +831,15 @@ general development-log converter. Its `FS_INTERNAL_OPS` table is positional
 and must exactly match `fs_internal_op_t` in `filesystem.c`; Session 064
 closeout synchronized all 50 entries, including Pattern drain/HCNAMES/boot
 operations and Pattern scans.
+
+---
+
+## S085 — Special-tag self-check
+
+The DEV diagnostic classifier and the host checker cover the S085 selector
+rows. `check_special_tags.py` now reports **177 rows, 0 mismatches**
+(155 before S085 + 22 new selector rows). The new tags are
+`IM_SPECIAL_OSC_TYPE`, `IM_SPECIAL_OSC_SOURCE`, `IM_SPECIAL_OSC_WAVE`
+(with the `IM_SPECIAL_OSC1/2/3` selector bits) and
+`IM_SPECIAL_RUN_MODE`. `osc2_mod_type` is the fm/mix/snc/rng row and
+carries no special tag.

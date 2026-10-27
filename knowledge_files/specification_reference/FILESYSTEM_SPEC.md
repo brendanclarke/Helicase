@@ -30,6 +30,14 @@ Load/Save Menu Reachability") and moves the on-chip sample flash floor to
 sector 7. The on-chip flash layout, the sample index and the install guards
 are in `STORAGE_SRAM_MANIFEST.md` §4; nothing on the card changed.
 
+Session 085 replaces the sample install:
+- **What changed:** sample flash catalogue v2 (stock waves + items +
+  catalogue); the card folders `samples/` and `wavetables/`; natural order,
+  depth 3, per-file skip; `/loops` is retired.
+- **Where it is specified:** "S085 — Sample flash catalogue v2 and the
+  installer" at the end of this file. The instrument keys `oscN_type`,
+  `oscN_source` and `osc_run_mode` are in the same section.
+
 Session 074 adds four optional `sceneset.scg` keys for the Scene-owned master
 bus compressor (`bus_comp_mode`, `bus_comp_amount`, `bus_comp_time`,
 `bus_comp_sidechain`). It widens `fader_setting` to 0..3 (the fourth mode,
@@ -391,6 +399,7 @@ Wavetable/
 Effect/
 Instrument/
 ```
+
 
 Settled target root file:
 
@@ -2286,8 +2295,11 @@ Current Pattern notes:
 
 ## Sample
 
-Status: legacy sample/loop install path exists; this target root pool naming is
-part of the future typed layout.
+Status: **the install path today is the S085 installer**: lower-case
+`samples/` and `wavetables/` at the card root, specified in "S085 — Sample
+flash catalogue v2 and the installer". The capitalised `Sample/` and
+`Wavetable/` pools below are the future typed-layout names for the library
+browser; the installer does not read them.
 
 `Sample/` contains an alphanumerically sorted list of `.wav` files to write to
 flash:
@@ -2443,12 +2455,15 @@ whitelists `menu_loadSaveLoadTypes[]` and `menu_loadSaveSaveTypes[]` in
 
 - **`Load:[Samples]`** (Load page only; restored in Session 073, missing
   from `menu_loadSaveLoadTypes[]` since July): OK runs the modal
-  `menu_loadSamplesModal()`. It first waits up to 10 s (`Waiting SD...`) for
-  a storage operation that was already running, suspends audio, erases
-  on-chip sample sectors 7–11, installs the card's `/samples` folder, then
-  appends `/loops`, and reinitialises audio. Only mono 16-bit 44.1 kHz PCM
-  WAV files are accepted; files are taken in whole-filename order with ASCII
-  case folded. Save has no Samples action.
+  `menu_loadSamplesModal()`.
+  - It first waits up to 10 s (`Waiting SD...`) for a storage operation
+    that was already running, then suspends audio.
+  - It then runs the S085 install (`filesystem_installSamplesBlocking()`):
+    erase sectors 7–11, generate the stock waves, install `samples/`, then
+    `wavetables/` (natural order), and commit.
+  - It shows the progress and a summary, then reinitialises audio.
+  - Details: "S085 — Sample flash catalogue v2 and the installer".
+  - Save has no Samples action.
 
 Still compiled but intentionally gated from the normal type cycler:
 
@@ -2905,3 +2920,184 @@ Instrument/
   909kik.drm
   snap.snr
 ```
+
+---
+
+## S085 — Sample flash catalogue v2 and the installer
+
+**Purpose:** what `Load:[Samples]` reads from the card, how it lays the
+result out in on-chip sample flash, how the firmware reads it back, and what
+the user sees.
+
+**Code:**
+- `Core/SampleRom/SampleMemory.h/.c`: map, records, read API.
+- `SampleInstall.h/.c`: format conversion and programming.
+- `StockWaveGen.c`: the stock waves.
+- `Core/Hardware/SD/filesystem.c`: the card walk.
+- `storageTypes.c`: natural order.
+- `Core/Menu/menu.c`: the modal and summary.
+- `main.c`: the boot notice.
+- **Playback:** `INSTRUMENTS_DSP_REFERENCE.md` §12.
+
+### Card layout
+
+```text
+samples/                     one-shot samples (smp/slp sources)
+  01 kick.wav                files first, natural order
+  more/                      then subfolders, to depth 3
+    10 snare.wav
+wavetables/                  every folder holding .wav files = one wavetable
+  ak_hvox/                   table name = folder name (numeric prefix dropped)
+    AKWF_hvoice_0001.wav     each file = one single-cycle frame, natural order
+    ...
+```
+
+- **Order:** natural order. Digit runs compare by value (`f2` < `f10`);
+  letters compare case folded; ties fall back to the exact name, then the
+  8.3 name.
+- **Names:**
+  - The sort key is the long name up to 48 characters
+    (`AFATFS_LONG_FILENAME_MAX`); longer or non-ASCII names use the 8.3
+    alias.
+  - The 8-character display name is the file stem, or for a table its
+    folder name with a leading number plus space/`_`/`-` removed. A longer
+    stem shows as first 4 + an ellipsis glyph + last 3.
+- **Depth:** 3 below `samples/` or `wavetables/`. Deeper folders are
+  ignored.
+- **Retired:** `/loops`. The repository card's reference set is
+  `SD_CARD/wavetables/ak_hvox/` (optimised by `tools/sampleoptimize.py`;
+  the originals are in `SD_CARD/wavetables_old/`).
+
+### Accepted WAV formats
+
+PCM (format 1) or WAVE_FORMAT_EXTENSIBLE with the PCM subformat; `fmt` and
+`data` chunks in any order.
+
+| Item | Accepted | Stored |
+|---|---|---|
+| Sample (`samples/`) | mono, 16-bit, 44,100 Hz only | as is, + 2 zero frames; gain code from the peak |
+| Wavetable frame (`wavetables/`) | mono or stereo; 8, 16 or 24-bit; any rate (pitch comes from the oscillator) | 8-bit (unsigned in WAV) → signed int8, never expanded; 16 → 16; 24 → 16 (rounded `(x + 128) >> 8`, saturated); stereo → mono as `(L + R) >> 1` |
+
+**Tables:**
+- **One length and depth per table:** all frames share the first valid
+  frame's length and stored depth. A frame that differs is skipped.
+- **Mixed source formats:** files in one table may use different source
+  formats; each frame is decoded with its own format.
+- **Limits:** at most 128 frames per table (more are counted as skipped);
+  at most 128 samples and 128 tables.
+- **Converting other files:** `tools/sampleoptimize.py` converts other
+  sample formats and shrinks tables to the shortest power-of-two frame
+  length that plays the same.
+
+### Install sequence and errors
+
+**Sequence:**
+1. Wait for a running storage operation (`Waiting SD...`, up to 10 s);
+   suspend audio.
+2. `sampleInstall_begin()`: erase sectors 7–11 ("Erasing").
+3. `sampleInstall_writeStockBlock()`: generate the five stock waves
+   ("Stock waves").
+4. Walk `samples/` ("Samples NNN"). For each file: parse the WAV,
+   `sampleInstall_beginSample()`, copy the data in 512 B reads,
+   `finishSample()` (programs the entry).
+5. Walk `wavetables/` ("Wavetbl NNN"). For each table folder:
+   - **Pass A** counts the matching frames.
+   - `beginWavetable()`.
+   - **Pass B** copies them, calling `setFrameFormat()` per file, then
+     `finishWavetable()`.
+6. `sampleInstall_commit()` ("Commit"): program the header without its
+   magic, then the magic `LXC2` last; invalidate the D-cache; refresh the
+   reader (a new generation).
+7. Show the summary `Smp NNN Wtb NNN` / `Skip NNN` (or `Sample upload` /
+   `Failed`) for 1.5 s; reinitialise audio.
+
+**Error handling:**
+
+| Situation | Result |
+|---|---|
+| A file that cannot be parsed, has an unsupported format, or reads short | that file is skipped (`skipped_files`); a short item is refused (−4) and abandoned |
+| A table folder that cannot be opened, or whose frames fail to read | that table is skipped (`skipped_tables`) |
+| No space left | the item is refused (−3) and skipped |
+| A flash error or a state error | the install stops; no magic is written, so the catalogue reads EMPTY |
+| A power loss before the magic | EMPTY at the next boot |
+
+- **Opens:** every blocking open gives up after 2,000 polls
+  (`FS_BLOCK_OPEN_HANDLE_RETRIES`), so a broken folder cannot hang the
+  modal.
+- **Long-named folders** are opened by their long name
+  (`filesystem_blockOpenDirLfn()`).
+
+### On-chip layout (`SampleMemory.h`)
+
+Sample flash is sectors 7–11, `0x080C0000`–`0x081FFFFF`, 1,310,720 B.
+Regions are 32-byte aligned.
+
+| Region | Address | Bytes | Content |
+|---|---|---:|---|
+| Stock block | `0x080C0000` | 61,120 | 5 waves × 6,112 int16 points (11 levels) |
+| Items | `0x080CEEC0` | 1,243,456 | samples and wavetable frames, each 4-byte aligned, in install order |
+| Catalogue | `0x081FE800` | 6,144 | header + 128 sample entries + 128 wavetable entries (5,152 B used) |
+
+**Records** (little-endian, naturally aligned; unwritten bytes read
+`0xFF`):
+
+```c
+header (32 B):   u32 magic 0x3243584C "LXC2" (programmed last)
+                 u16 version 2, u16 entry_bytes 20
+                 u8 sample_count, u8 wavetable_count, u8 stock_valid, u8 0
+                 u32 data_end, u32 stock_start, u32 reserved[3]
+sample (20 B):   u32 offset, u32 frames, char name[8], u8 gain_code, u8 pad[3]
+wavetable (20 B):u32 offset, u16 frame_len, u8 frame_count, u8 bits(8|16),
+                 char name[8], u8 pad[4]
+```
+
+**Gain code:** `code = ⌊24 · log2(32767 / peak)⌋`, clamped 0–255. Playback
+gain is `2^(code/24)`, so every sample is normalised to full scale
+without clipping. Wavetable frames carry no gain.
+
+### States and the boot notice
+
+| State | Meaning | Boot shows (1.5 s) |
+|---|---|---|
+| EMPTY | erased, never installed, or an interrupted install | `No samples` / `load samples` |
+| V2 | a committed catalogue | nothing |
+| STALE | a v1 install from older firmware (a count word 1–120 at the old place) | `Samples invalid` / `reload samples` |
+
+**Until a V2 install:**
+- The stock waves play their Rec/Saw/Tri fallback.
+- `smp`/`slp`/`wtb` oscillators are silent.
+- The `wav` row has no sample or table to select.
+
+### Reading it back
+
+**API:** `sampleMemory_init()` and `sampleMemory_refresh()` validate the
+header and count the leading valid entries. Every read is in place through
+`SAMPLE_FLASH_PTR()` (no RAM copy). The getters are:
+- `sampleMemory_getNumSamples()`, `getSampleInfo()`, `getDisplayName()`;
+- `getNumWavetables()`, `getWavetableInfo()`, `getWavetableName()`;
+- `stockValid()`, `catalogueState()`;
+- `getGeneration()`: bumped by each refresh. The oscillator binds compare
+  it, so a reinstall rebinds every playing oscillator.
+
+**Stored selections:** a stored `wav` value under `smp`/`slp`/`wtb` is a
+request.
+- It binds `min(request, count − 1)`, so a smaller reinstall clamps
+  without losing the stored value; a larger one restores it.
+
+### Instrument file keys
+
+- **New keys:** `oscN_type`, `oscN_source`, `osc_run_mode` (N = 1 for every
+  engine; 2 for Drum, Cymbal and HiHat; 3 for Cymbal and HiHat).
+- **Key meanings (S085 P2 §14 row swap):** `oscN_wave` is the selection
+  (stock wave, pwm family, sample or wavetable index); `oscN_source` is the
+  menu's `mod` row, 0–127 (pwm width, sample start, table position). Kits
+  saved before the swap with a non-`wav` type load with the two values
+  exchanged (no migration).
+- **Cymbal/HiHat `osc2_type`/`osc3_type`:** a stored 1 (`pwm`) loads as
+  `wav`; those modulators cannot be `pwm`.
+- **Missing keys** load 0: `wav`, mod 0, `rst`.
+- **Rows** are appended after the old set, so existing indices and IDs are
+  unchanged.
+- **The `wav` key keeps its number:** 0–5 as before; 6–10 are the stock
+  waves; 11 and up clamp to `SwA` (old kits that pointed at samples now
+  play stock waves; no migration).

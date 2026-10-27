@@ -2066,3 +2066,84 @@ Session 084 ran in two attempts. The first (2026-10-24..26, `dev-ph6-midi`) impl
   import tools), `STORAGE_SRAM_MANIFEST.md`, `BANK_PRESET_ARCHITECTURE.md`,
   `tools/lxr1_converters/LXR1_CONVERTERS.md`,
   `tools/lxr2_converters/LXR2_CONVERTERS.md`, `MEMORY.md`.
+
+### 085 — Oscillator Types, Run Modes, Drum `snc`/`rng`, Stock Waves, Sample Flash Catalogue v2 and Installer (2026-10-26..27)
+
+Session 085 re-implemented the oscillator part of the abandoned S084 voice
+spike on the rolled-back tree (`dev-ph7-voice_expansion`, base `1ea234ea`;
+implementation uncommitted at close).
+
+- **How it ran:**
+  - Review of the cherry-pick document (`S085_OSC_MOD_CHERRYPICK.md`).
+  - A plan through six revisions, decided by user answers Q1–Q15.
+  - A line-level schedule with 13 deep-dive decisions, D1–D13.
+  - The user's implementation.
+  - An assessment (findings A1–A10) and its fixes.
+- **Final DEV link:** `text=642,360`, `data=424`, `bss=414,100` (payload
+  642,784 B of 753,664 B, **headroom 110,880 B**; `bss` −16,100 B against
+  S084, released and not reused). **ITCM 12,432 / 16,384 B.**
+- **Hardware:** not tested. S084 V1–V7 and S085 H1–H11 are pending.
+
+**What was built:**
+- **Oscillator types** (`typ`): `wav` (11-wave list: Sin Tri Saw Rec Noi
+  Cym + stock `sq3 sw3 sqa tra swa`), `pwm` (families `prc psw ptr pq3 pw3
+  swp`), `smp`/`slp` (Q20.12 sample playback, linear start, `smp` silent
+  after the end), `wtb` (block-rate frame pair, D1). `src` picks the
+  family, sample or table; `wav` is each type's continuous control. The
+  request bytes are written by retained writes only (D2), so values
+  survive type round trips.
+- **Per-sample pitch slew** in every renderer (132 samples; A1 fix: step =
+  remaining / max(left, 32)).
+- **Run modes** (`run`):
+  - `rst`: today's resets.
+  - `fre`: no reset; all oscillators slew; the filter rings and slews.
+  - `itp`: carrier-only 132-sample crossfade. The modulators slew and feed
+    both carriers. One pool unit; with no free unit the trigger behaves as
+    `fre`.
+- **Drum `mod`** = `fm mix snc rng`:
+  - `snc` is constant cost (A2). A per-block wrap lane drives one sync loop
+    per slave family.
+  - Mix law: slave × (1 − amt) + master × amt.
+  - No slave reset after a one-shot master ends (D6); the slave resets on
+    sample *i* + 1 (D13).
+- **Render pool:** 2 units. Claim order: ongoing `itp` → `wav`
+  interpolation → new `itp`.
+- **Rows:** appended `typ`/`src`/`run` rows; Drum 44, Snare 41, Cymbal and
+  HiHat 46; `special_tags` 177 / 0. The rows are stored single-ended and
+  applied before the Morph image on every apply path. In the SHIFT Morph
+  view they edit Normal (D12).
+- **Menu:** type-aware formatted cells from the shown Scene image (D5);
+  sample and table names in the single-parameter view; `wav` domain per
+  slot for velocity, LFO and automation (D11; A9 LFO base re-derivation).
+- **Sample flash catalogue v2:**
+  - Map: stock block 61,120 B at `0x080C0000`, items 1,243,456 B at
+    `0x080CEEC0`, catalogue 6,144 B at `0x081FE800`.
+  - Limits and states: 128 samples, 128 wavetables; EMPTY/V2/STALE with
+    boot notices; gain code `2^(code/24)`.
+  - Installer: `samples/` and `wavetables/` (one folder = one table),
+    natural order, files first, depth 3, per-file skip, mixed frame
+    formats; magic programmed last.
+  - `/loops` retired; the card's `wavetables/ak_hvox` optimised
+    600 → 256 points.
+- **Tools and tests:**
+  - New: `sampleoptimize.py`, `gen_stock_recipes.py`, osc plots;
+    `frozen85/` snapshot.
+  - Host tests `natural_order`, `catalogue`, `stock_gen`, `osc_run`
+    (`osc_pwm`/`osc_sample`/`wtb`) and `osc_s0` (frozen85 loops,
+    `osc_setFreq` sweep, verbatim frozen engine lines).
+  - Per-sample cost probes (`osccost.py`, `armcheck/probe_*.c`).
+  - `breakproofs.py`: 26 defects, each caught.
+- **Costs** (worst instructions per sample): table 24 → 25 (slew); dearest
+  oscillator `pwm swp` seg 2 at 58 / FM 62; `wtb` 43 / 48; per-voice
+  section worst Cymbal/HiHat 178, Drum `snc` 162; pool ≤ 210.
+
+**Find here:**
+- [085_SESSION_HANDOFF_LOG.md](085_SESSION_HANDOFF_LOG.md);
+- `INSTRUMENTS_DSP_REFERENCE.md` (oscillator section: types, renderers,
+  slew, run modes, sync, pool, costs, how to add a type);
+- `FILESYSTEM_SPEC.md` (sample flash v2 and installer);
+- `STORAGE_SRAM_MANIFEST.md`, `CPU_USE_DSP_AUDIT.md`,
+  `EFFECTS_MIXER_DSP_REFERENCE.md`, `MODULE_INTERCHANGE_SPEC.md`,
+  `BANK_PRESET_ARCHITECTURE.md`, `MIDI_SPEC.md`, `OSC_INTERP_AUDIT.md`,
+  `DEV_MODES.md`;
+- `tools/dsp_test/DSP_TEST.md`, `MEMORY.md`.

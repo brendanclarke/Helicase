@@ -8,6 +8,7 @@ Inputs:     the four parameter tables in the repository root.
 Outputs:    a row count and mismatch diagnostics; failure exits 1.
 Accessors:  make -C tools/dsp_test special_tags.
 Affiliates: InstrumentManager.c's diagnostic classifier.
+S085 C17.7: oscillator type/source/wave and run-mode selectors.
 """
 import re
 import sys
@@ -38,6 +39,16 @@ def expected(t, key):
             return {'IM_SPECIAL_PITCH_COARSE', osc}
         if 'pitch_fine' in key:
             return {'IM_SPECIAL_PITCH_FINE', osc}
+        # S085 C17.7: oscillator selectors; osc2_mod_type is the fm/mix/snc/rng
+        # row (no tag).
+        if key.endswith('_type') and not key.endswith('_mod_type'):
+            return {'IM_SPECIAL_OSC_TYPE', osc}
+        if key.endswith('_source'):
+            return {'IM_SPECIAL_OSC_SOURCE', osc}
+        if key.endswith('_wave'):
+            return {'IM_SPECIAL_OSC_WAVE', osc}
+    if key == 'osc_run_mode':
+        return {'IM_SPECIAL_RUN_MODE'}
     simple = {
         'filter_freq': 'FILTER_FREQ', 'filter_reso': 'FILTER_RESO',
         'filter_drive': 'FILTER_DRIVE', 'filter_type': 'FILTER_TYPE',

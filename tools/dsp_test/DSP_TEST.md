@@ -195,8 +195,8 @@ S073 tree.
 | `armcheck-filter` | `vdiv` count in the old and new ARM filter objects | seconds | `vdiv old: 81`, `vdiv new: 39` |
 | `special_tags` | §4.4 | seconds | `special tags OK (155 rows, 0 mismatches)` |
 | `pack` | DMA pack, old against new, including clamp values | seconds | `pack differing bytes: 0` |
-| `postchain` | Fused post-chains, four engines, all distortion shapes, gain ramps, `volumeMod` both ways | seconds | `post-chain differing samples: 0` |
-| `armcheck-postchain` | ARM `MATCH` for Drum, Snare and Cymbal/HiHat | seconds | three `MATCH` lines |
+| `postchain` | Fused post-chains, four engines, all distortion shapes, gain ramps, `volumeMod` both ways. Since S085 P2 the chains take "last" endpoints; the test passes equal ones, which must equal the frozen passes (the `rst` guarantee, §9.6) | seconds | `post-chain differing samples: 0` |
+| `armcheck-postchain` | Since S085 P2 a cost report: `fpseq.py --report` for Drum, Snare and Cymbal/HiHat, then `osccost.py` for the flat (`new_*`) and ramped (`ramp_*`) chains (§9.6) | seconds | `ramp_drum` 35, `ramp_snare` 35, `ramp_addgain` 30 |
 | `octave` | Octave-edge selection over every float in range | seconds | `octave mismatches: 16, max edge distance: 2 ulps, max error: 0.000403883111 cents` |
 | `mixer` | Combined dry + send against the old calls, every routing, stereo and mono input, ramps, near-saturation buses | seconds | `mixer differing samples: 0` |
 | `armcheck-mixer` | ARM `MATCH` for all four dry × send combinations and the send-only default case, plus instruction counts | seconds | six `MATCH` lines; totals 55→44, 69→59, 73→63, 87→78 |
@@ -345,3 +345,167 @@ per-voice and per-block budget.
   removed.
 - **A passing bench is not a hardware pass.** The user-owned hardware checks
   (worst-case Scene, listening, controls) still gate every DSP change.
+
+---
+
+## 9. S085 additions
+
+**Purpose:** the oscillator, section, sample-flash and stock-wave tests;
+the per-sample cost probes; the break-proof runner. The firmware being
+tested is described in `INSTRUMENTS_DSP_REFERENCE.md` §12 and
+`FILESYSTEM_SPEC.md` "S085 — Sample flash catalogue v2".
+
+### 9.1 Layout
+
+| Path | Role |
+|---|---|
+| `frozen85/` | the pre-S085 snapshot (`Oscillator.c/h`, `ResonantFilter.c/h`, `BufferTools.c/h`, `Samples.c`, `mixer.c`, `modulationNode.c`, `wavetable.c`, the four engine `.c` files), taken before the first S085 edit with `sh snapshot.sh tools/dsp_test/frozen85`. The S0 reference. |
+| `prelude_osc.h`, `prelude_cat.h`, `hostcompat/` | host doubles for the real oscillator and catalogue sources (portable `__SSAT`, empty `INITCM`, `SAMPLE_FLASH_PTR()` mapped onto RAM windows) |
+| `host_osc_support.c` | catalogue doubles (8 samples × 100,000 frames, 4 tables × 4 frames × 32 points, stock flag) and test hooks: `host_catalogue_reset/set()`, `host_set_gain_code()`, `host_set_table_bits()` (8 = read the same bytes as int8), `host_rng_reset()`, `host_sample_data()`, `host_table_data()`; `GetRngValue()`, the interpolation gate, the saturating add, filter stubs |
+| `host_sampleflash_stub.c` | a RAM image of sectors 7–11 for `catalogue` |
+| `test_osc_run.c` | the oscillator layers (§9.2) |
+| `test_osc_s0.c`, `s0_engines.c`, `s0_engine_shim.h` | the S0 proof against `frozen85/` |
+| `test_catalogue.c`, `test_natural_order.c`, `test_stock_gen.c`, `stock_all.c` | sample flash, card order, stock waves |
+| `armcheck/probe_wav.c`, `probe_pwm.c`, `probe_smp.c`, `probe_wtb.c`, `probe_section.c`, `osc_base_compat.h` | ARM cost probes (§9.3) |
+| `osccost.py` | worst-case path per loop from the control-flow graph (§9.3) |
+| `breakproofs.py` | the break-proof runner (§9.4) |
+| `looplen.py` | instructions *outside* loops (prologue/setup); not a per-sample measure |
+
+### 9.2 Targets
+
+| Target | Proves |
+|---|---|
+| `natural_order` | numeric-aware card order (`f2 < f10`, case folding, leading zeros) and the ordering-prefix strip |
+| `catalogue` | catalogue v2 states (EMPTY/STALE/V2), commit and reload, gain code (23 for peak 16,384), limits (128), fit, mixed-format frames, abort, short item (−4), torn install (no magic = EMPTY), entry bounds |
+| `stock_gen` | every device stock point vs `frozen/stock_ref.bin` within ±1 LSB |
+| `osc_run` | **slew:** the rendered trajectory, up and down. **itp:** the click bound in fm and mix (rst and a modulator reset must exceed it). **pool:** claim order. **snc:** no-wrap bit-identity for all nine slave families; reset on *i* + 1 for saw/smp/pwm/wtb slaves; the `itp` copy's ratio; mix law; sample master with start > 0; finished one-shot master. **rng:** the law. **smp/slp:** clamp and re-expansion, start, a 100,000-sample run, end silence, seam, wrap, gain code. **wtb:** frame-pair limits, block continuity, nx wrap, the 8-bit path. **pwm:** polarity > 0.99, F3 midpoints within 1 LSB, monotonic width. Prints the itp margins. |
+| `osc_pwm` / `osc_sample` / `wtb` | the same binary with mode `pwm` / `sample` / `wtb` |
+| `osc_s0` | frozen85 vs current with step 0: sine, tri, saw, rec, crash (plain and FM) and noise; a 20-block `osc_setFreq()` sweep (27.5 Hz → 10.9 kHz; increments, levels, samples); Drum fm/mix (4 cases) and Cymbal/HiHat FM2 against the **verbatim frozen engine lines** (Drum 313–326, Cymbal 240–247, HiHat 257–264), extracted with `extract.py --lines` and wrapped by `s0_engines.c` |
+| `armcheck-osc-base` | worst-case loop paths of the frozen pre-S085 loops |
+| `armcheck-osc` | worst-case loop paths of every S085 loop and probe |
+| `ampretrig` | (S085 P2, §9.6) the gain-matched amp retrigger, the audible threshold, the post-chain ramps, no step on a `fre` retrigger |
+| `breakproofs` | 35 deliberate defects (B27–B32 from S085 P2, B33–B35 from P2 F-A); each must make its target fail |
+
+### 9.3 Cost probes (`osccost.py`, `armcheck/probe_*.c`)
+
+**Why a new script:**
+- `fpseq.py --report --all` sums every instruction inside each
+  backward-branch address range. That counts both arms of an if/else and
+  nested or versioned ranges.
+- `looplen.py` counts what is *outside* the loops.
+- Neither gives a per-sample worst case for a loop with branches.
+
+**What `osccost.py --obj X --func F…` does:**
+1. Builds the instruction-level control-flow graph.
+2. Finds natural loops by dominator back edges.
+3. Prints the longest path from the header round to the back edge: one
+   iteration's worst case, each instruction counted once, calls as 1.
+- A loop the compiler versioned (for example FM buffer NULL or not) shows
+  as two loops; take the larger.
+- An irreducible loop (two entries) prints nothing. Trace it by hand, as
+  for `p_noise_sync`.
+
+**Probe wrappers:**
+- Each wrapper `#include`s one source file and fixes the block constants
+  (the pwm family and swp segment, the `smp`/`slp` type), so its loop is
+  one case.
+- `*_lane` wrappers reproduce the firmware's shared plain/sync loop:
+  - their *worst* path is the synced slave;
+  - the plain firmware cost is the plain wrapper + 2.
+
+**Results:** the table is in `CPU_USE_DSP_AUDIT.md` "S085 oscillator cost
+record" and `INSTRUMENTS_DSP_REFERENCE.md` §12.11.
+
+### 9.4 Break proofs (`breakproofs.py`, `make breakproofs`)
+
+**Rule:** a test counts only if it fails on a deliberately broken version.
+
+**How it runs:**
+1. Copy `Core/`, `tools/` and `config.h` into a temporary directory.
+2. For each break: apply one source edit there and run the named target.
+3. Report `FAILS (good)` or `PASSES (blind)`, then restore and continue.
+
+- The working tree is never touched.
+- `python3 breakproofs.py B3 B7` runs a subset.
+- Each break names the decision or finding it guards (D13, Q10, F5, …).
+  When you add a test, add a break.
+
+### 9.5 Reference figures
+
+| | S084 | S085 (implementation) | S085 (after the assessment fixes) |
+|---|---:|---:|---:|
+| Flash used / 753,664 | 609,712 | 641,384 | 642,784 |
+| ITCM / 16,384 | 4,168 | 10,632 | 12,432 |
+| DTCM statics | 4,472 | 4,468 | 4,468 |
+
+Per-sample oscillator costs: see §9.3.
+
+### 9.7 S085 P2 F-A: the Drum FM depth ramp
+
+**`osc_run` "fm depth ramp"** (`test_fm_depth_ramp()`):
+1. **Exact wiring:** the modulator block equals a plain render scaled by
+   the written-out ramp; the carrier equals an FM render of it.
+2. **Flat:** `oscSection_renderDrumRamped(…, 1.0f)` equals
+   `oscSection_renderDrum()`.
+3. **Forced flat under `itp`:** with an old carrier the modulator block is
+   unscaled.
+4. **No step:** 16 modulator × 8 carrier start phases; block 1 at depth
+   0.15, block 2 at 0.8. The ramped boundary step is never above the
+   block's own largest step + 3 LSB (int16 truncation), and the worst is
+   less than a quarter of the unramped one. Printed: worst 294 against
+   65,311.
+
+**Breaks:** B33 (ramp ignores its start), B34 (not forced flat under
+`itp`), B35 (ramp runs the wrong way).
+
+**Probe:** `p_fm_ramp` in `armcheck/probe_section.c` (15 per sample).
+
+### 9.6 S085 P2: amp envelope on a `fre`/`itp` retrigger
+
+The firmware is described in `INSTRUMENTS_DSP_REFERENCE.md` §12.6.1.
+
+**`ampretrig`** (`test_amp_retrigger.c`; the real `SlopeEg2.c`,
+`distortion.c` and `voicePostChain.h`, built with `OSCFLAGS`):
+1. **Gain match:** slope 0..127, nine gains from 0 to 1, attack
+   1/20/30/64/127. After `slopeEg2_retriggerFrom(g)` the attack curve at the
+   new raw value equals g, the state is `EG_A`, and the following calcs
+   never fall below g.
+   - Tolerance (`match_tolerance()`): 1e-5, plus the gain change that
+     8 float steps of v make on the attack curve. Near slope 127 the curve
+     is so steep near v = 1 that float v cannot do better than ~1e-4.
+2. **Repeat mode:** `repeat > 0` gives value 1, `EG_REPEAT`, the counter
+   reloaded.
+3. **Audible threshold:** 0 below 1/32768, 1 at and above it.
+4. **Ramp wiring:** the three chains with last ≠ current, rising and
+   falling, against written-out reference steps (sample 0 at the last
+   gain, sample 31 at the current gain, monotonic).
+5. **No step:** a Snare-style sequence: decay at slope 96 to ≈ 0.76, a
+   `fre` retrigger at attack 25, the armed block, three attack blocks.
+   Two conditions must hold:
+   - no sample step is larger than one block's attack increment;
+   - no sample dips below the gain before the trigger.
+
+   The dip condition is needed for B28: there the armed ramp spreads the
+   drop, so the step bound alone does not catch it. Prints the figures.
+
+**`postchain`:** passes equal endpoints, so it still proves that `rst` (and
+every unarmed block) is bit-identical to the S073 loops. It cannot see a
+wrong ramp direction (B32); `ampretrig` check 4 does.
+
+**`armcheck-postchain`:** the ramp adds value operations, so the three
+`fpseq.py` runs are reports. In `new_*` (one variable passed twice) `-Ofast`
+folds the ramp away and the counts stay 32/30/25. The firmware passes a
+runtime select, so its cost is the `ramp_*` figure: **35 / 35 / 30**.
+Each engine file, compiled alone, has one post-chain loop at that cost (no
+versioning on the arm).
+
+**Breaks:**
+
+| ID | Defect | Caught by |
+|---|---|---|
+| B27 | inversion uses `slope`, not `invSlope` | gain match |
+| B28 | the raw value is kept (no match) | gain match; no-step dip |
+| B29 | `voicePost_addGainDist()` ignores `lastAmpGain` | ramp wiring |
+| B30 | Drum velocity ramp endpoints swapped | ramp wiring |
+| B31 | `SLOPEEG2_AUDIBLE_GAIN` = 0.01 | audible threshold |
+| B32 | `voicePost_mixAddGainDist()` ramps the wrong way | ramp wiring, no-step step (`postchain` stays 0 differing) |

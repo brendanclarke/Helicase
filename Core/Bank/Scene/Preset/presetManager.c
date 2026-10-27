@@ -1088,6 +1088,43 @@ static uint8_t preset_setSupplementalParameterInternal(
     if (!descriptor)
         return 0u;
 
+    /*
+     * Oscillator selector rows (S085 C14.1).
+     *
+     * What:       typ and run (instrumentManager_isSelectorDescriptor())
+     *             are stored as single-ended cells: the Normal cell through
+     *             preset_storeInstrumentEndpoint() (dirty marking, AutoSave,
+     *             card-clean bit), the unserialised Morph mirror and
+     *             morph_interpolation[] set to the same value. The runtime is
+     *             written for the active Scene, or with force (per-track
+     *             played Scene).
+     * Why:        every INSTANCE_OFFSET row is rejected below; without this a
+     *             menu or MIDI edit of these rows stored nothing (S084 P1 F1).
+     *             morph_interpolation[] must follow because
+     *             seq_restoreAutomatedParameters() writes that cell back when a
+     *             step-automation lock on the row releases.
+     * Inputs:     Scene, slot, descriptor index, value (clamped by
+     *             menu_clampCellValue() for menu and MIDI edits; the writers
+     *             clamp again), force.
+     * Outputs:    the three image cells; the runtime via the
+     *             IM_SPECIAL_OSC_TYPE/_OSC_SOURCE/_RUN_MODE writers.
+     * Accessors:  menu.c instrument cell commit; MidiControl.c through
+     *             menu_commitTargetEdit().
+     * Affiliates: preset_applySelectorRows() (C14.2).
+     */
+    if (instrumentManager_isSelectorDescriptor(descriptor)) {
+        if (descriptor_index >= INSTRUMENT_PARAM_COUNT)
+            return 0u;
+        preset_storeInstrumentEndpoint(
+            scene_index, slot, descriptor_index, INSTRUMENT_IMAGE_MAIN, value);
+        instrument->parameter_images.morph_instrument_parameters[descriptor_index] =
+            value;
+        instrument->parameter_images.morph_interpolation[descriptor_index] = value;
+        if (force || scene_index == scene_getActiveIndex())
+            return instrumentManager_writeRuntime(slot, descriptor, value);
+        return 1u;
+    }
+
     if (descriptor->runtime.kind == INSTRUMENT_BIND_INSTANCE_OFFSET ||
         (descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)) {
         return 0u;
@@ -1724,6 +1761,53 @@ static void preset_normalizeSlotModulationTargets(uint8_t scene_index,
     }
 }
 
+/*
+ * Apply one slot's selector rows to the runtime (S085 C14.2).
+ *
+ * What:       for every selector row of the slot's instrument (typ, run)
+ *             in descriptor order: copies the stored Normal cell into the
+ *             Morph mirror and morph_interpolation[], and writes it through
+ *             instrumentManager_writeRuntime() (a retained write, so the
+ *             request bytes are recorded).
+ * Why:        no other apply path writes these rows; they must land right
+ *             after the slot reset and before the Morph image, because the wav
+ *             row is clamped against the incoming type (a pwm width or sample
+ *             start applied while the reset slot is still wav would clamp to
+ *             10 for that first block).
+ * Writes:     the runtime unconditionally: the callers have just reset the
+ *             slot, so no held automation value survives in it.
+ * Inputs:     Scene index (active or a track's played Scene), slot.
+ * Outputs:    image mirrors; OscInfo.oscType/source, OscSectionState.runMode.
+ * Accessors:  preset_resetAndApplyKitVoiceImage() (boot, Scene switch,
+ *             deferred Scene slot and its trigger path, per-track played
+ *             Scene, copy/clear paste, Scene 17), the immediate Instrument
+ *             apply (C14.5).
+ * Affiliates: C14.1, C14.3, the IM_SPECIAL_OSC_TYPE writer.
+ */
+static void preset_applySelectorRows(uint8_t scene_index, uint8_t voice)
+{
+    kit_instrument_slot_t *instrument = scene_instrumentSlot(scene_index, voice);
+    const instrument_registry_entry_t *entry;
+    uint8_t i;
+
+    if (!instrument || voice >= INSTRUMENT_SLOT_COUNT)
+        return;
+    entry = instrumentManager_registryEntry(instrument->type);
+    if (!entry)
+        return;
+    for (i = 0u; i < entry->descriptor_count && i < INSTRUMENT_PARAM_COUNT; i++) {
+        const ParamDescriptor *descriptor = &entry->descriptors[i];
+        instrument_param_value_t value;
+
+        if (!instrumentManager_isSelectorDescriptor(descriptor))
+            continue;
+        value = instrument->parameter_images.instrument_parameters[i];
+        instrument->parameter_images.morph_instrument_parameters[i] = value;
+        instrument->parameter_images.morph_interpolation[i] = value;
+        (void)instrumentManager_writeRuntime(voice, descriptor, value);
+    }
+}
+
 static void preset_applyKitVoiceSupplementalInternal(uint8_t scene_index,
                                                      uint8_t voice,
                                                      uint8_t force)
@@ -1751,6 +1835,15 @@ static void preset_applyKitVoiceSupplementalInternal(uint8_t scene_index,
     for (i = 0u; i < entry->descriptor_count; i++) {
         const ParamDescriptor *descriptor = &entry->descriptors[i];
         if (descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)
+            continue;
+        /*
+         * S085 C14.3: selector rows are applied once, before the Morph image,
+         * by preset_applySelectorRows(). This loop also runs later (the
+         * all-source rebind cursor, the forced per-track apply), possibly
+         * while step automation holds a selector; re-writing here would
+         * override that value and repeat the type-change side effects.
+         */
+        if (instrumentManager_isSelectorDescriptor(descriptor))
             continue;
         (void)preset_setSupplementalParameterInternal(
             scene_index, voice, i,
@@ -1825,6 +1918,11 @@ static void preset_resetAndApplyKitVoiceImage(uint8_t scene_index,
      * active Scene's.
      */
     instrumentManager_resetRuntimeSlotFromScene(voice, scene_index);
+    /*
+     * S085 C14.4: oscillator type, source and run mode land right after the
+     * reset and before routing and the Morph image (C14.2).
+     */
+    preset_applySelectorRows(scene_index, voice);
     (void)preset_applyKitAudioRouting(scene_index, voice);
     /*
      * Commit the Morph interpolation image. An inactive played Scene uses the
@@ -2725,6 +2823,13 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
         return;
 
     instrumentManager_resetRuntimeSlot(slot);
+    /*
+     * S085 C14.5: this immediate apply rebuilds the Morph image through the
+     * background worker and never passes preset_resetAndApplyKitVoiceImage(),
+     * so the selector rows are applied here, after the reset and before the
+     * first Morph write.
+     */
+    preset_applySelectorRows(scene_getActiveIndex(), slot);
     (void)preset_applyKitAudioRouting(scene_getActiveIndex(), slot);
     preset_ensureMorphInitialized();
     presetMorph_requestAll(scene_getActiveIndex());

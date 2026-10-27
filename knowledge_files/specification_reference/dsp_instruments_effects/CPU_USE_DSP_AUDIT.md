@@ -349,6 +349,10 @@ at ~3us/byte via GPIO bit-bang). Multiple bursts per poll call can total
 
 ## 4. Are L1 I-Cache and D-Cache enabled?
 
+> **Historical (2026-05).** Both L1 caches have been enabled since then
+> (`clocks.c`: `SCB->CCR |= IC`, `|= DC`; MPU set up for the DMA region).
+> See "Session 043 current-state supersession" above.
+
 **Neither is enabled. This is the single largest performance issue.**
 
 `clocks.c:100` enables only the ART accelerator (flash prefetch/instruction
@@ -798,3 +802,130 @@ the new copy/clear work is foreground-only and bounded.
     test per Morph-worker parameter write; a menu edit now does one
     interpolation instead of queueing up to 64 parameter writes (less
     foreground work).
+
+---
+
+## S085 oscillator cost record
+
+**What changed:**
+- the oscillator type dispatch and the per-sample pitch slew;
+- the pwm families, Q20.12 sample playback, the block-rate wavetable frame
+  pair, the stock-wave renderers;
+- the oscillator section (run modes, `itp`, Drum `snc`/`rng`) and the 2-unit
+  render pool;
+- **constant-cost hard sync:** a per-block wrap lane drives one loop per
+  slave family, instead of one renderer call per master wrap.
+
+**Build (DEV, after the assessment fixes):** `text=642,360`, `data=424`,
+`bss=414,100`; flash headroom 110,880 B; **ITCM 12,432 / 16,384 B**. `bss`
+released 16,100 B (the v1 sample caches), not reused.
+
+**Method:**
+- `make -C tools/dsp_test armcheck-osc-base` (frozen pre-S085 loops) and
+  `armcheck-osc` (S085).
+- `osccost.py` reports the **longest path through each loop** from the
+  control-flow graph: the worst case of one iteration, counting each
+  instruction once.
+- `armcheck/probe_*.c` wrappers fix the block constants, so each wrapper's
+  loop is one case.
+- Static counts, not cycles: the Cortex-M7 dual-issues, `VDIV`/`UDIV` take
+  several cycles, and reads from **sample flash** (stock waves, `smp`,
+  `wtb`) go through the 16 KB D-cache. Long samples and large tables miss
+  it, and a miss pays the flash wait states. Hardware row H11 measures the
+  real figure.
+- The `looplen.py` figures published earlier (18/22/17/20) were
+  instructions outside the loops, not per-sample costs. They are withdrawn.
+
+| Loop (instructions per sample, worst path) | pre-S085 | S085 plain | S085 FM | as `snc` slave |
+|---|---:|---:|---:|---:|
+| Tri/Saw/Rec table | 24 | 25 | 36 | 35 |
+| sine | 23 | 24 | 31 | 34 |
+| noise (+ the `GetRngValue()` call) | 16 | 16 | — | 20 |
+| crash | 30 | 31 | 39 | 37 |
+| stock waves | — | 24 | 34 | 35 |
+| pwm `prc`/`psw` | — | 51 | 56 | 63 |
+| pwm `ptr`/`pq3`/`pw3` | — | 42 | 47 | 53 |
+| pwm `swp` seg 0/1/2/3 | — | 48/50/58/52 | 53/55/62/57 | 60/63/70/65 |
+| `smp` / `slp` | — | 40 / 47 | 45 / 53 | 53 / 61 |
+| `wtb` 8/16-bit | — | 40/43 | 44/48 | 51/54 |
+
+The `+1` on every pre-existing loop is the per-sample slew add, which
+always runs. The firmware pwm/smp/wtb plain figures include a 2-instruction
+lane test (the plain and sync renders share one loop to save 3.4 KB of
+ITCM).
+
+**Section loops:**
+
+| Loop | Worst |
+|---|---:|
+| `snc` lane builder | 11 (full-wrap master) / 18 (sample master; a UDIV every sample) |
+| `snc` mix pass | 16 (28 with the `itp` copy) |
+| `rng` law | 19 |
+| `itp` blend | 23 |
+
+**Per-voice oscillator section, worst case:**
+
+| Engine | Worst |
+|---|---:|
+| Cymbal / HiHat | 178 (+ the saturating add) |
+| Drum `snc` | 162 |
+| Drum `rng` | 135 |
+| Drum `fm` | 120 |
+| Drum `mix` | 116 (+ add) |
+| Snare | 74 |
+| Pre-S085 Cymbal | 98 |
+
+**Pool:** 2 units per block system-wide, budgeted full; one unit ≤ 105
+(old carrier ≤ 82 including the `snc` extra mix, plus the blend 23), so
+≤ 210.
+
+**System:** 6 Cymbal-class slots + the pool ≈ 1,278 instructions per
+sample ≈ 26 % of the 4,897-cycle sample period at one instruction per
+cycle.
+
+**`snc` decision (C10.6):**
+- **The cap:** the cap was FM carrier + 10. The first S085 form exceeded it
+  by design: one renderer call per wrap, and one wrap per sample is
+  reachable with a sample master at a high note.
+- **The fix:** step 4, the per-type constant-cost loops
+  (`INSTRUMENTS_DSP_REFERENCE.md` §12.9). The slave overhead is 10–16
+  instructions per sample over its plain loop, independent of the wrap
+  count.
+
+**S086 input:** budget 178 (Cymbal/HiHat) or 162 (Drum `snc`) per voice
+for the oscillator section, plus the pool's 210 once, beside the 88-cycle
+effects chain.
+
+**S085 P2 (amp envelope on a `fre`/`itp` retrigger) post-chain costs:**
+the fused post-chains ramp their gain from a "last" value
+(`INSTRUMENTS_DSP_REFERENCE.md` §12.6.1). Measured with `osccost.py` on
+`armcheck-postchain` (`ramp_*`, the firmware shape) and on each engine
+file compiled alone with the firmware DSP flags (one loop each, no
+versioning):
+
+| Loop (instructions per sample, worst path) | S073 | S085 P2 | Change |
+|---|---:|---:|---:|
+| Drum `voicePost_drum()` (envelope + velocity ramps) | 32 | 35 | +3 |
+| Snare `voicePost_mixAddGainDist()` | 30 | 35 | +5 |
+| Cymbal/HiHat `voicePost_addGainDist()` | 25 | 30 | +5 |
+
+- **System:** at most +30 per sample (six Snare/Cymbal/HiHat-class
+  slots), about 0.6 % of the 4,897-cycle sample period. It runs in every
+  mode; only the endpoints differ.
+- **Per block:** Snare/Cymbal/HiHat gain one `1/(size−1)` VDIV (Drum had
+  it). Each render adds one select and two stores; Drum's async adds one
+  flag test.
+- **Per trigger (`fre`/`itp` only):** one gain match, one VDIV.
+- **Build (DEV):** `text=643,192` (+832), `bss=414,100` (unchanged), ITCM
+  12,432 (unchanged).
+
+**S085 P2 F-A (Drum FM depth ramp):**
+- **Cost:** `oscSection_rampModDepth()` scales the Drum fm modulator block
+  every fm block (flat except on the armed retrigger block): **15**
+  instructions per sample (`armcheck-osc`, `p_fm_ramp`). That is a
+  separate pass over the 32-sample modulator buffer; the schedule's
+  estimate of ≈ 4 was low.
+- **Effect on the worst cases:** Drum `fm` 120 → 135 per sample. The
+  per-voice worst cases are unchanged: Drum `snc` 162, Cymbal/HiHat 178.
+- **Build (DEV):** `text=643,368` (+176), `bss` unchanged, ITCM 12,432
+  unchanged.

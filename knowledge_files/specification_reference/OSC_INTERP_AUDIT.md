@@ -119,3 +119,29 @@ Result:
 - compare OFF vs ON behavior.
 3. Verify persistence:
 - set ON, save globals, power cycle/load globals, confirm ON restored.
+
+---
+
+## S085 — Render pool replaces the two-slot limit
+
+- `OSC_WAVE_INTERP_MAX_ACTIVE` and `modNode_waveInterpActiveCount` are
+  gone. A shared 2-unit `OscRenderPool` now grants:
+  1. ongoing carrier-only `itp` crossfades;
+  2. `wav`-type waveform interpolation (claims while velocity/LFO
+     modulation is applied);
+  3. new `itp` crossfades, lowest slot first.
+- Interpolation is `wav`-type only. Samples left the `wav` list and live
+  under `typ` (the sample is the `wav` row under `smp`/`slp`), so interpolating between samples is gone. The stock
+  waves are part of the 11-entry `wav` list and do blend.
+- `wtb` frames never use the pool: two frames are always rendered per block
+  (one pair chosen per block, D1).
+- A refused new `itp` trigger behaves as `fre`: the carrier phase is
+  restored from the snapshot and the pitch slew is armed.
+- **Under hard sync** (Drum `mod` = `snc`), a `wav` slave holding a unit
+  renders both blend partners through the sync lane
+  (`calcPeriodicInterpSyncBlock()` in `Oscillator.c`), so they reset
+  together. The unit already budgets the second render; the blend is
+  unchanged. The blend uses the same DTCM scratch (`osc_interp_a/b`).
+- **Cost:** a unit is one extra oscillator render plus the blend loop. The
+  pool is budgeted full at 2 units (`CPU_USE_DSP_AUDIT.md` "S085 oscillator
+  cost record").

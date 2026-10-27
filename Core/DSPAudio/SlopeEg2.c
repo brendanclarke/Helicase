@@ -70,6 +70,41 @@ void slopeEg2_trigger(SlopeEg2* eg)
 	eg->repeatCnt = eg->repeat;
 }
 //--------------------------------------------------
+/*
+ * Retrigger the attack from the gain the voice is producing (S085 P2;
+ * declared in SlopeEg2.h).
+ *
+ * Implementation note: the attack stage returns
+ * f(v, k) = (1+k)v / (1+k|v|) with k = invSlope (slopeEg2_calc(), EG_A).
+ * For v >= 0, solving g = f(v, k) for v gives v = g / (1 + k(1 - g)).
+ * slopeEg2_setSlope() keeps the amount in +-0.9995, so invSlope > -1 and
+ * the denominator is at least 1 + invSlope >= 0.00025 (never zero or
+ * negative). The clamps keep the raw value in the range slopeEg2_calc()
+ * expects.
+ */
+void slopeEg2_retriggerFrom(SlopeEg2* eg, float gainNow)
+{
+	float v;
+
+	if (eg->repeat) {
+		/* Repeat mode starts at full by design; the engines ramp the jump. */
+		slopeEg2_trigger(eg);
+		return;
+	}
+	if (gainNow < 0.0f)
+		gainNow = 0.0f;
+	if (gainNow > 1.0f)
+		gainNow = 1.0f;
+	v = gainNow / (1.0f + eg->invSlope * (1.0f - gainNow));
+	if (v < 0.0f)
+		v = 0.0f;
+	if (v > 1.0f)
+		v = 1.0f;
+	eg->value = v;
+	eg->state = EG_A;
+	eg->repeatCnt = eg->repeat;
+}
+//--------------------------------------------------
 float slopeEg2_calcSlopeValue(float val, float slope)
 {
 	return (1+slope)*val/(1+slope*fabsf(val));

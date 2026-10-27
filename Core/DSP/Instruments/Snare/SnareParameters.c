@@ -87,6 +87,25 @@ const uint8_t snare_instrument_type_flags = SNARE_INSTRUMENT_TYPE_FLAGS;
     { key_, short_, long_, cat_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), FLAGS_IMAGE, mod_, BIND_SPECIAL(member_, type_, special_) }
 
 /*
+ * Selector row (S085 C12.1).
+ *
+ * What:       a byte selector with a special writer: automatable, not
+ *             Morphable, no modulation domain (not an LFO/velocity target).
+ * Why:        typ/run switch the oscillator's meaning; Morphing or LFO
+ *             sweeps across them would jump between types. They are stored as
+ *             single-ended [params] cells and applied before the Morph image
+ *             (C14.2).
+ * Accessors:  this table.
+ * Affiliates: instrumentManager_isSelectorDescriptor() (recognises the
+ *             class), check_special_tags.py (the macro name ends in
+ *             _SPECIAL, so the tag is checked).
+ */
+#define FLAGS_SELECT INSTRUMENT_PARAM_FLAG_AUTOMATABLE
+#define ROW_SELECT_SPECIAL(key_, cat_, long_, short_, member_, special_) \
+    { key_, short_, long_, cat_, DTYPE_0B127, FLAGS_SELECT, MOD_NONE, \
+      BIND_SPECIAL(member_, TYPE_UINT8, special_) }
+
+/*
  * ROW_NOBIND is for descriptor-owned cells that do not write a SnareVoice
  * member directly. These are single-endpoint supplemental values such as
  * modulation target selectors, so they intentionally start with flags=0 rather
@@ -167,6 +186,9 @@ typedef enum {
     SNARE_PARAM_TRANSIENT_WAVE,
     SNARE_PARAM_TRANSIENT_VOL,
     SNARE_PARAM_TRANSIENT_FREQ,
+    SNARE_PARAM_OSC1_TYPE,
+    SNARE_PARAM_OSC1_SOURCE,
+    SNARE_PARAM_RUN_MODE,
     SNARE_PARAM_COUNT
 } snare_param_index_t;
 
@@ -181,7 +203,7 @@ _Static_assert(SNARE_PARAM_DESCRIPTOR_COUNT == SNARE_PARAM_COUNT,
  * domain, and runtime binding for one descriptor-indexed storage cell.
  */
 const ParamDescriptor snare_param_descriptors[] = {
-    ROW_MENU("osc1_wave", "Oscilltr", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8),
+    ROW_MENU_SPECIAL("osc1_wave", "Oscilltr", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8, IM_SPECIAL_OSC_WAVE | IM_SPECIAL_OSC1),
     ROW_SPECIAL("osc1_pitch_coarse", "Oscilltr", "Coarse", "coa", DTYPE_0B127, MOD_0_127, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC1),
     ROW_SPECIAL("osc1_pitch_fine", "Oscilltr", "Fine", "fin", DTYPE_PM63, MOD_PM63, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_FINE | IM_SPECIAL_OSC1),
     ROW_SPECIAL("noise_freq", "Noise", "Frequncy", "noi", DTYPE_0B127, MOD_0_127, noiseOsc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_NOISE_FREQ | IM_SPECIAL_OSC_NOISE),
@@ -232,6 +254,27 @@ const ParamDescriptor snare_param_descriptors[] = {
     ROW_MENU_SPECIAL("transient_wave", "Transnt", "Waveform", "wav", MENU_TRANS, MOD_NONE, transGen.waveform, TYPE_UINT8, IM_SPECIAL_TRANSIENT_WAVE),
     ROW("transient_vol", "Transnt", "Volume", "vol", DTYPE_0B127, MOD_0_127, transGen.volume, TYPE_FLT),
     ROW_SPECIAL("transient_freq", "Transnt", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, transGen.pitch, TYPE_FLT, IM_SPECIAL_TRANSIENT_FREQ),
+    /*
+     * Oscillator type/mod and voice run mode (S085 C12.4; P2 §14).
+     *
+     * What:       typ = OSC_TYPE_* per oscillator (a selector); mod (key
+     *             oscN_source) = the type's continuous control, 0..127: pwm
+     *             width, smp/slp start, wtb table position; wav ignores it.
+     *             mod is an image row: Morphable, an LFO/velocity target.
+     *             The selection (stock wave, pwm family, sample, table) is
+     *             the wav row. run = OSC_RUN_* for the whole voice.
+     * Why:        plan §5 item 5. Appended, so existing indices, automation
+     *             IDs, LFO tokens, MIDI Learn and NRPN IDs are unchanged; a
+     *             missing key loads 0 (wav / 0 / rst).
+     * Inputs:     menu, MIDI (menu edits), automation, Kit/Instrument files
+     *             (keys below).
+     * Outputs:    the IM_SPECIAL_OSC_TYPE / _OSC_SOURCE / _RUN_MODE writers.
+     * Accessors:  InstrumentManager.c, InstrumentCellFormat.c, menu.c.
+     * Affiliates: this table's menu pages (C12.6).
+     */
+    ROW_SELECT_SPECIAL("osc1_type", "Oscilltr", "Type", "typ", osc.oscType, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
+    ROW_SPECIAL("osc1_source", "Oscilltr", "Mod", "mod", DTYPE_0B127, MOD_0_127, osc.source, TYPE_UINT8, IM_SPECIAL_OSC_SOURCE | IM_SPECIAL_OSC1),
+    ROW_SELECT_SPECIAL("osc_run_mode", "Oscilltr", "RunMode", "run", section.runMode, IM_SPECIAL_RUN_MODE),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -247,7 +290,8 @@ const uint8_t snare_param_descriptor_count =
  * in this instrument-owned table so Menu can keep those owners separate.
  */
 const instrument_menu_page_t snare_menu_pages[] = {
-    {{ SNARE_PARAM_OSC1_PITCH_COARSE, SNARE_PARAM_OSC1_PITCH_FINE, SNARE_PARAM_NOISE_FREQ, SNARE_PARAM_OSC1_NOISE_MIX, SNARE_PARAM_OSC1_WAVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* S085 C12.6: typ/mod/run on the oscillator page; the modulator's typ/mod on its page. */
+    {{ SNARE_PARAM_OSC1_PITCH_COARSE, SNARE_PARAM_OSC1_PITCH_FINE, SNARE_PARAM_NOISE_FREQ, SNARE_PARAM_OSC1_NOISE_MIX, SNARE_PARAM_OSC1_WAVE, SNARE_PARAM_OSC1_TYPE, SNARE_PARAM_OSC1_SOURCE, SNARE_PARAM_RUN_MODE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ SNARE_PARAM_AMP_ENVELOPE_ATTACK, SNARE_PARAM_AMP_ENVELOPE_DECAY, SNARE_PARAM_AMP_ATTACK_REPEAT, SNARE_PARAM_AMP_ENVELOPE_SLOPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ SNARE_PARAM_PITCH_ENVELOPE_DECAY, SNARE_PARAM_PITCH_ENVELOPE_SLOPE, SNARE_PARAM_PITCH_ENVELOPE_AMOUNT, INSTRUMENT_MENU_SKIP, SNARE_PARAM_VELO_MOD_DEST, SNARE_PARAM_VELO_MOD_AMOUNT, SNARE_PARAM_VELO_VOL_ON_OFF, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
@@ -282,3 +326,5 @@ _Static_assert(SNARE_MENU_PAGE_COUNT ==
 #undef MOD_PM63
 #undef MOD_0_127
 #undef MOD_NONE
+#undef FLAGS_SELECT
+#undef ROW_SELECT_SPECIAL

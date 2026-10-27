@@ -872,3 +872,29 @@ S082 active Scene and edit masks:
   missing or malformed slot manifest counts as every untouched entry = self.
 * Scene 17's edit mask is itself only (bit 16 in the 32-bit fan-out helpers);
   it is never part of a 16-bit resident Bank mask.
+
+---
+
+## S085 — Selector rows in Preset
+
+`oscN_type` and `osc_run_mode` are
+`INSTRUMENT_BIND_INSTANCE_OFFSET` rows without `MORPHABLE`
+(`instrumentManager_isSelectorDescriptor()`). `oscN_source` (the menu's
+`mod` row) was a selector until the S085 P2 §14 row swap; it is now an
+ordinary Morphable image row, and the selection it used to carry moved to
+`oscN_wave`, which was already an image row.
+
+- **Store:** the Normal cell through `preset_storeInstrumentEndpoint()`
+  (dirty/AutoSave/card-clean), the Morph mirror and
+  `morph_interpolation[]` set to the same value; the runtime write uses
+  the active Scene or `force` (per-track played Scene).
+- **Apply:** `preset_applySelectorRows()` runs immediately after every
+  slot reset (Scene switch, per-track Scene, boot, deferred slot, Scene 17,
+  copy/clear paste, AutoSave restore) and in the immediate Instrument apply,
+  before the Morph image.
+- **Rebind:** the supplemental loop skips selector rows so a held
+  step-automation value is not overwritten and type side effects are not
+  repeated.
+- **SHIFT Morph:** selector rows display their Morph mirror (kept equal to
+  Normal) and an edit under SHIFT commits Normal (C15.10). Other
+  non-morphable instrument rows keep the old drop behaviour.

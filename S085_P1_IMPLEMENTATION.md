@@ -1,6 +1,6 @@
 # S085 P1 — Implementation Schedule: Oscillator Types, Run Modes, Modulation Modes, Sample Flash v2
 
-**Session:** 085, phase P1 (schedule only; no firmware code changed)
+**Session:** 085, phase P1 (schedule + implementation; see §21)
 **Branch:** `dev-ph7-voice_expansion` (base `91265e9c` + the S084 roll fix-up, uncommitted)
 **Date:** 2026-10-26
 **Plan of record:** `S085_P1_OSC_MOD_PLAN.md` (r6). "Plan §x" refers to it.
@@ -7633,3 +7633,596 @@ One table, static instructions per sample (`fpseq.py`), with VDIV:
 | H11 | worst-case Scene: `wtb` FM oscillators on every voice, two `itp` crossfades, waveform interpolation, `snc` at high master pitch; DEV render-overrun counter and `audioCodec_underrunCount` | no underruns; `cpu` figure recorded |
 
 ---
++
+---
+## 21. Implementation progress log (working notes)
+
+**2026-10-26 — S085 P1 implementation.**
+
+### WP0 — snapshot and baseline
+- `tools/dsp_test/snapshot.sh` gained the optional DEST and the S085 list
+  (`frozen85`); `sh tools/dsp_test/snapshot.sh tools/dsp_test/frozen85`
+  froze 14 files **before the first edit**.
+- Baseline (pre-change, DEV): `text=609,288 data=424 bss=430,200`;
+  flash 609,712 / 753,664 (headroom 143,952); ITCM 4,168; DTCM 4,472.
+- `armcheck-osc-base` reports the frozen loops (straight-line counts from
+  `looplen.py`): `calcSineBlock` 18, `calcFmBlock` 22,
+  `calcWavetableOscBlock` 17, `calcSampleOscBlock` 20. These are whole
+  functions after inlining; the per-sample figures remain to be read on the
+  hardware/codegen side.
+
+### WP1–WP3 — catalogue v2, installer, card walk, boot notice
+- `SampleMemory.h/.c` rewritten (in-place catalogue, EMPTY/V2/STALE, gain
+  code, 128/128); `SampleInstall.h/.c` added (accept formats, convert,
+  program entries, commit magic last); `filesystem.c` walk replaced
+  (batched natural order, depth 3, per-file skip, mixed source formats);
+  boot notice added; `menu_numSamples` removed; Load:[Samples] reports
+  samples/tables/skips and holds the summary through a deadline.
+- Host: `natural_order` and `catalogue` pass (including mixed frame
+  formats, abort, short item, torn install, entry bounds).
+- **Note:** the schedule's G1 build-only checkpoint was folded into G3,
+  because WP1 removed the v1 sample API that `Oscillator.c` still called;
+  WP5 removed that path in the same change set.
+
+### WP4 — stock waves
+- CSV, generator, recipes, `StockWaveGen`, `StockWaves` added;
+  `stock_ref.bin` regenerated. `stock_gen`: worst 1 LSB, 0 failures.
+- Generator header corrected to the S085 C4.3 block; SHA-256 stays in the
+  generated file.
+
+### WP5–WP11 — oscillator model, renderers, pool, section, engines
+- `Oscillator.h/.c`: 11-entry wav list, five types, request bytes, slew,
+  type dispatch, stock renderers, `osc_setFreq()` per type.
+- New `OscillatorPwm`, `OscillatorSample`, `OscillatorWavetable`,
+  `OscRenderPool`, `OscSection`; `modulationNode` and `mixer` claim
+  order; `ResonantFilter` `SVF_recalcFreqFrom`.
+- Engines: section state, run-mode trigger, itp carrier crossfade,
+  `oscSection_finishBlock()`; fm/mix/FM2 composition preserved.
+- Host: `osc_run` (slew, carrier-only itp click, pool fallback, snc
+  one-shot-master rule, smp/slp, wtb frame pair, prc polarity) and
+  `osc_s0` (frozen85 vs current renderers and drum/FM2 compositions) pass.
+
+### WP12–WP15 — rows, InstrumentManager, Preset, menu
+- Four tables: 44/41/46/46 rows, selector macro, typ/src/run rows, menu
+  cells. `special_tags`: **177 rows, 0 mismatches**.
+- InstrumentManager: writer IDs 20–23, fixed 1,176 B slot, per-slot wav
+  domains (D11), itp claims, filter recalc through the section, classifier.
+- Preset: selector store/apply, rebind skip, post-reset apply, immediate
+  Instrument apply. Menu: formatted cells (clamps, names, width/start/frame),
+  `mixFmNames` 4 values, 11-wave list, count asserts, slot-aware automation,
+  SHIFT-Morph selector edit.
+
+### WP16–WP17 — build, tools, tests
+- `make all` clean. **DEV after S085:** `text=640,960 data=424
+  bss=414,100`; flash 641,384 / 753,664 (**headroom 112,280 B**);
+  ITCM 10,632 / 16,384; DTCM 4,468; FXBUF 126,592 (margin 3,712).
+- `bss` fell by 16,100 B against S083/S084; the released RAM is not
+  reused (RAM policy).
+- New host targets `natural_order`, `catalogue`, `stock_gen`,
+  `osc_run`, `osc_pwm`, `osc_sample`, `wtb`, `osc_s0`; ARM report
+  targets `armcheck-osc-base`/`armcheck-osc` with `looplen.py`.
+- Card: `wavetables/ak_hvox` optimised 600 -> 256 points,
+  124,800 -> 53,248 B (worst -23.2 dB, median -44.8 dB, -0.14 dB table
+  scale); originals in `wavetables_old/ak_hvox`; `samples/01_cut.wav`
+  unchanged (7,460 B). Report recorded here.
+
+### Deviations / open points
+- **D1** (block-rate wtb frame pair) is implemented as specified.
+- **D2** (retained writes only) implemented through the writer's
+  `retained` flag.
+- **D11** (per-slot wav domain) implemented in all three sites.
+- **snc cost cap (C10.6):** the aggregate ARM report is available, but the
+  per-sample worst case was not isolated from the inlined codegen; the
+  constant-cost fallback loops were therefore **not** added. Re-measure at
+  hardware bring-up (H11); if the cap is exceeded, C10.6's per-type loops
+  remain the prepared fallback.
+- **Break-proof runs:** the new tests were written to fail on the listed
+  breaks; the scratch-copy break runs must be recorded on hardware/CI. The
+  green runs above are the current gate state.
+- **Runtime-slot sizes:** the fixed 1,176 B reserve passes every
+  `_Static_assert`; exact per-engine sizes need the G3 measurement tool
+  (`pahole`/debug info) and are not recorded yet.
+- **Spike path:** in this checkout the spike is
+  `../Helicase-dev-ph7-spike/`, not inside the working tree. `MEMORY.md`
+  was left with the observed path; the plan's §1 correction is therefore
+  amended here.
+- Hardware matrix C19.3 (H1–H11) remains for the user.
+
+### WP18–WP19 — documents and gates
+- Documents written: `085_SESSION_HANDOFF_LOG.md`, `MEMORY.md`
+  (sample flash, builds, volatile S085), `FILESYSTEM_SPEC.md`,
+  `INSTRUMENTS_DSP_REFERENCE.md`, `CPU_USE_DSP_AUDIT.md`,
+  `EFFECTS_MIXER_DSP_REFERENCE.md`, `MODULE_INTERCHANGE_SPEC.md`,
+  `STORAGE_SRAM_MANIFEST.md`, `BANK_PRESET_ARCHITECTURE.md`,
+  `OSC_INTERP_AUDIT.md`, `MIDI_SPEC.md`, `DEV_MODES.md`,
+  `SCOPING_TARGETS.md` §7.4 and `tools/dsp_test/DSP_TEST.md`.
+- G0–G4 are green (build, host tests, `special_tags`, image). G5's
+  cost-record items still open: per-sample loop probes, exact engine sizes,
+  snc cap, break-proof scratch runs, and the hardware matrix.
+
+---
+## 22. Assessment of the implementation (review, 2026-10-27)
+
+**Verdict:** the firmware implements the schedule faithfully and builds
+clean; the host suite is green. It is **not ready for the hardware matrix
+yet**:
+- one correctness bug in the pitch slew (§22.2 A1);
+- the `snc` worst case is over the C10.6 cap, and the fallback loops were
+  not added (A2);
+- the cost record (C19.2) does not exist, and the probes used cannot
+  produce it (A3);
+- two tests cannot fail (A4, A5), and several C17.6 checks are missing
+  (A6, A7).
+
+Fix the bug and the `snc` loops, then rerun §22.6 before C19.3.
+
+### 22.1 Verification repeated
+
+| Check | Result |
+|---|---|
+| `make all` (DEV) | clean; flash 641,384 / 753,664 (headroom 112,280); ITCM 10,632 / 16,384; DTCM 4,468; FXBUF margin 3,712. Matches §21. |
+| Host: `natural_order`, `catalogue`, `stock_gen` (worst 1 LSB), `osc_run` (all/pwm/sample/wtb), `osc_s0` | 0 failures |
+| `special_tags` | 177 rows, 0 mismatches |
+| `selftest`, `filter` (S1 PASS), `pack`, `postchain`, `mixer`, `armcheck-postchain` (MATCH), `armcheck-mixer` | unchanged, pass |
+| G4 leftover-symbol search (`insertFx_`, `driveShaper`, `transient_is`, `voiceBuffer_`, `slotQuiet`, `OSC_SAMPLE_START`, `OSC_WAVE_INTERP_MAX_ACTIVE`, `menu_numSamples`, `sampleMemory_install`, `filesystem_installLoopsBlocking`, `calcUserSampleOsc`, `sampleCacheLooped`, `sampleMemory_isLooped`) | 0 hits in `Core/`, `main.c`, `config.h`, `Makefile` |
+
+### 22.2 Findings (most severe first)
+
+#### A1 — Pitch slew overshoots on its last block (correctness, high)
+
+- **Where:** `Core/DSPAudio/Oscillator.c:1122-1134` (`osc_setFreq()`),
+  with `OSC_SLEW_SAMPLES` 132 (`Oscillator.h:111`) and `OUTPUT_DMA_SIZE` 32.
+- **Defect:**
+  - The step is computed as `remaining / slewSamplesLeft`.
+  - Every renderer adds that step for all 32 samples of the block.
+  - 132 is not a multiple of 32, so the last slew block starts with
+    `slewSamplesLeft` = 4. That block computes the step for 4 samples and
+    applies it for 32.
+  - The increment overshoots the target for 28 samples, then snaps back on
+    the next block (`left == 0`).
+- **Measured** with the real `osc_setFreq()` and `calcNextOscSampleBlock()`
+  (scratch probe, 200 → 400 Hz saw): **the increment peaks 20.5 % of the
+  interval past the target.** That is a short pitch spike and a slope step on
+  every `fre` trigger and every modulator in `itp`.
+- **Fix (either, no CPU change):**
+  - divide by `max(left, OUTPUT_DMA_SIZE)`, so the last block spreads the
+    remainder over the samples it actually renders; or
+  - make `OSC_SLEW_SAMPLES` a multiple of the block (128, 2.9 ms).
+- **The test missed it:** `test_slew` (`tools/dsp_test/test_osc_run.c:68`)
+  calls `osc_setFreq()` without rendering, so it never sees the per-sample
+  trajectory (see A5).
+
+#### A2 — The `snc` worst case is over the cap; C10.6 step 4 applies (CPU, high)
+
+- **Where:** `Core/DSPAudio/OscSection.c:160-217`
+  (`oscSection_renderSync()`).
+- **One wrap per sample is reachable:**
+  - A sample master's increment is 1,024 × f / FS frames per sample (Q20.12),
+    about 290 frames per sample at a 12.5 kHz note.
+  - Its cycle is `end − start` frames, as small as size / 128 at `wav` 127.
+  - The master therefore wraps on every sample. A table master at the top of
+    the note range wraps every 3–4 samples.
+- **Cost of one wrap:** each wrap makes a full `calcNextOscSampleBlock()`
+  call for a 1-sample segment. That call pays:
+  - the type dispatch, prologue and epilogue;
+  - the per-call setup: `stockWave_level()`; `oscSample_bind()` for
+    `smp`/`slp`; for `wtb`, `oscWavetable_bind()` and the frame pair with two
+    float divides.
+- **The cap cannot hold.** Straight-line instructions outside the loop:
+  - `calcStockWaveBlock` 38 (whole function);
+  - `oscSample_render` 45;
+  - `oscWavetable_render` 161 (all paths).
+
+  Even the cheapest slave is about the 24-instruction loop + 38 + the wrap
+  loop per sample. The cap is FM carrier + 10 ≈ 46.
+- **`itp` doubles it:** in `snc`, `itp` renders the old carrier through the
+  same segments.
+- **Required:** implement the C10.6 step 4 per-type sync loops before G3 is
+  closed. One loop per slave family (table/stock, sine, pwm, sample, wtb;
+  noise and crash as table reads), each with constant cost of about (c) + 6.
+- **About §21:** it defers this to H11. Under the constant-CPU policy the
+  static evidence already decides it, and H11 cannot prove the worst case
+  unless the test Scene happens to hit it.
+
+#### A3 — The cost record does not exist, and the probes cannot produce it (process/CPU, high)
+
+- **The probes measure the wrong thing:**
+  - `armcheck-osc-base` / `armcheck-osc` (`tools/dsp_test/Makefile:135-151`)
+    run `looplen.py`, which counts instructions **outside** loops.
+  - The §21 baseline (`calcSineBlock` 18, `calcFmBlock` 22, …) is therefore
+    prologue and epilogue, not per-sample cost.
+  - For the new renderers the counts are meaningless. `oscPwm_render` is a
+    7-instruction tail call into `oscPwm_block`. The `wtb`/`smp` objects
+    contain many nested and duplicated loop paths.
+- **C17.4 is not built:** it asked for force-inlined wrappers, one per case
+  with block constants fixed, so each wrapper is exactly one loop.
+- **Measured in this review** with `fpseq.py --report --all` on the existing
+  objects (single-loop functions only):
+
+  | Loop | pre-S085 | S085 | Note |
+  |---|---:|---:|---|
+  | table (`calcWavetableOscBlock`) | 24 | 25 | +1 slew add |
+  | table FM (`calcFmBlock`) | 35 | 36 | +1 |
+  | sine / FM | 23 / 30 | 24 / 31 | +1 |
+  | crash / FM (`calcSampleOsc*Block`) | 30 / 38 | 31 / 39 | +1 |
+  | stock / FM | — | 24 / 34 | target ≈ table: met |
+  | itp blend | — | 23 | per voice while active |
+  | wtb 8-bit / 16-bit / FM | — | ≈ 37–38 / 41–42 / 44–49 | loop-body lengths. Which body is the per-sample path is unconfirmed; D1 target 42 / 48. |
+  | pwm, smp/slp, snc, rng | — | not measurable | per-sample `switch`/branches; needs the C17.4 wrappers |
+
+- **Required:**
+  - build the C17.4 wrappers;
+  - fill C19.2, including the derived per-voice worst case for each engine,
+    which S086 needs;
+  - replace the §21 baseline figures with the per-sample ones above.
+
+#### A4 — The `itp` click test cannot fail (test, medium)
+
+- **Where:** `tools/dsp_test/test_osc_run.c:86-137`.
+- **Defect:**
+  - After `oscSection_beginTrigger()` the test never resets the carrier
+    phase, as the engines do on `OSC_TRIGGER_RESET_CARRIER`.
+  - The test also never changes the carrier pitch.
+  - So the old copy and the live carrier are the same oscillator, and the
+    blend is a no-op.
+- **Proved** with a scratch probe:
+  - as written, the old-carrier block is **bit-identical** to the new one;
+  - with the engine's reset applied, the first sample jumps by 12,672, which
+    is the step the blend must hide.
+- **Fix:**
+  - apply the engine reset (`phase = (0xff << 20) × offset`, or
+    `oscSample_restart()`) and a new pitch after the trigger;
+  - add the break run: `oscSection_blendItp()` as a no-op must fail;
+  - add the C17.6 cases that are missing: `mix` mode, and the
+    "modulators reset" fail variant.
+
+#### A5 — The slew test never renders (test, medium)
+
+- `test_slew` checks only `osc_setFreq()` bookkeeping, so A1 passes it.
+- **Add** a rendered trajectory:
+  - the increment is monotonic toward the target and never past it;
+  - it reaches the target within `OSC_SLEW_SAMPLES` samples;
+  - the break: restoring the current divisor must fail.
+
+#### A6 — C17.6 coverage gaps (test, medium)
+
+| Area | Present | Missing (C17.6) |
+|---|---|---|
+| pool | two ongoing fill the pool; a refused pending restores phase and arms the slew | the waveform-interpolation-in-between ordering case |
+| `snc` | a finished one-shot master stops resetting | reset index (D13: slave rendered through *i*, reset at *i* + 1), the mix law, a sample master with start > 0 |
+| `rng` | none | the wet/dry law |
+| `smp`/`slp` | request clamp, start = size/2 at `wav` 64, end silence, `isFinished` | full 100,000-frame playback; re-expansion (12 installed binds 9); gain code; a seam check that can fail (`seam < 4000000` is always true for int16) |
+| `wtb` | position 1..3 after a jump | continuity across blocks, idx/nx bounds at `frame_len` − 1, the 8-bit path, F11 |
+| `pwm` | `prc` polarity, correlation > 0.9 | the schedule's > 0.99; F3 midpoints within 1 LSB of the reference; monotonic width |
+
+Also merged against the schedule: `osc_pwm`, `osc_sample` and `wtb` are mode
+aliases of `osc_run`, not separate files. This is harmless, but the per-file
+break runs (C17.9) need recording per mode.
+
+#### A7 — `osc_s0` gaps (test, medium)
+
+- **Not compared:**
+  - the noise renderer;
+  - the HiHat carrier gain 0.5 (FM2 runs at 1.0 only);
+  - a block with an `osc_setFreq()` pitch change (only `phaseIncStep` = 0
+    blocks).
+- **The drum fm/mix reference is hand-written in the test** from the old
+  functions. The schedule asked for the frozen85 engine lines through
+  `extract.py --lines`. As written, the test proves equivalence with the
+  test author's reading of the old engine, not with the frozen code.
+
+#### A8 — `itp` retrigger during an active crossfade steps (behaviour, low)
+
+- **Where:** `OscSection.c:58-64`.
+- **Defect:**
+  - A retrigger while ACTIVE re-snapshots only the live carrier and restarts
+    the fade at 0.
+  - The audible signal at that moment is
+    old × (1 − *t*) + new × *t*. It jumps to new, a step of
+    (1 − *t*) × (old − new).
+  - This happens only for retriggers less than 3 ms apart (fast rolls and
+    ratchets).
+- **Options:**
+  - accept it, document it, and add it to H7 with a roll; or
+  - keep the existing old copy when *t* < 0.5. That is cheaper but still
+    steps.
+
+  An exact fix needs a second copy (+124 B per voice; RAM approval).
+
+#### A9 — The D11 LFO base is clamped permanently on a type round trip (behaviour, low)
+
+- **Where:** `Core/DSP/Instruments/InstrumentManager.c:837`
+  (`instrumentManager_refreshWaveDomains()`).
+- **Defect:**
+  - Narrowing to `wav` clamps `adapter->base_value` to 10.
+  - Going back to `pwm`/`smp`/`wtb` widens the domain but leaves the base at
+    10, while `waveRequest` keeps the stored value (e.g. 100).
+  - The LFO then centres on 10 until the target is reassigned, and the
+    restore writes 10 to the runtime.
+- **Fix:** on refresh, set the base to `min(osc->waveRequest, max)`, not
+  `min(base, max)`.
+
+#### A10 — Break proofs and sizes (process, low)
+
+- **Break proofs:** §21 says the break runs "must be recorded on
+  hardware/CI". C17.9 is a host procedure in scratch copies, and it is
+  runnable now (A4 shows one). Run and record them for every new test.
+- **Engine sizes,** measured in this review (`arm-none-eabi-gcc`, firmware
+  include paths, `sizeof`):
+
+  | Struct | Bytes | In the 1,176 B slot |
+  |---|---:|---|
+  | `DrumVoice` | 832 | 344 B left (pre-S085: 588) |
+  | `HiHatVoice` | 780 | 396 B left |
+  | `CymbalVoice` | 772 | 404 B left |
+  | `SnareVoice` | 664 | 512 B left |
+  | `OscInfo` | 124 | |
+  | `OscSectionState` | 140 | one `OscInfo` copy + 16 |
+
+  Record these in `STORAGE_SRAM_MANIFEST.md`, as C18 requires.
+
+### 22.3 Reviewed and found correct
+
+- **Oscillator model:**
+  - type dispatch is per block, with no per-sample type test;
+  - wav values 0..5 are unchanged and 6..10 are stock waves; out-of-list
+    renders silence;
+  - the slew add is in every renderer, including the interpolation copies,
+    which now write back `oscA.phase` and `phaseInc`.
+- **Selector writers:**
+  - `IM_SPECIAL_OSC_TYPE/_SOURCE/_WAVE/_RUN_MODE`: the type change
+    re-derives wave and source from the request bytes;
+  - only retained writes record requests (D2; LFO overlay and restore pass
+    0);
+  - `wtb` is re-primed on entry;
+  - `refreshWaveDomains()` covers LFO adapters and velocity at all three
+    sites (D11).
+- **Pool order** (`mixer.c`): reset → ongoing `itp` → modulation
+  (waveform-interpolation claims, `wav` type only) → pending `itp` → filter
+  recalc → `calcSlotAsync()`. A refused pending restores phase and arms the
+  slew before `osc_setFreq()`. This matches Q14 and the carrier-only rule.
+- **Section:**
+  - `snc` is correct apart from cost (A2): it renders through sample *i*
+    then resets (D13), stops on a finished one-shot master (D6), computes
+    ratios once per block, and uses the cycle-relative shadow for a sample
+    master;
+  - `rng` and the `mix` law are as specified;
+  - the filter slew: `rst` is exactly `SVF_recalcFreq()`.
+- **Engines:**
+  - Drum keeps the envelope-closed reset condition and the unconditional
+    filter reset in `rst`;
+  - HiHat carrier gain is 0.5;
+  - Cymbal resets its modulators only in `rst`;
+  - Snare crossfades the tone oscillator before the transient sum;
+  - every engine calls `finishBlock()`.
+- **Sample and wavetable:**
+  - Q20.12 addressing (≤ 1,048,576 frames; items region 621,728 frames);
+  - smp end silence is a select (constant cost);
+  - the slp wrap;
+  - `wtb` frame count is capped at 128 by the installer and stays within
+    `uint8_t`;
+  - pass A and pass B of the table walk use the same filter.
+- **Preset (C14.1–C14.5):**
+  - selector store with both mirrors;
+  - apply after every slot reset and in the immediate Instrument apply;
+  - the rebind loop skips selectors.
+- **Menu:**
+  - formatted cells from the Scene image (D5);
+  - `mixFmNames` 4 values and 11 waves, both with `_Static_assert`s;
+  - SHIFT Morph selector edits go to Normal (D12);
+  - the install summary is held by a 1,500-tick deadline (C3.10).
+- **Structure and documentation:** no G4 leftovers; the documentation
+  blocks are present at the change sites.
+
+### 22.4 Review of the §21 claims
+
+| Claim | Assessment |
+|---|---|
+| G0–G4 green | **G0, G2 and G4 agree. G3 is not closed:** the C10.6 decision is due at G3 and comes out over the cap (A2). |
+| Baseline loop counts 18/22/17/20 | Straight-line counts, not per sample. Per sample: 23/35/24/30 (A3). |
+| "per-sample worst case not isolated from the inlined codegen" | True of `looplen.py`. The C17.4 wrapper technique exists for exactly this and was not built. |
+| Break proofs need hardware/CI | No; they are host runs (A10). |
+| Engine sizes need pahole | Measured here with a `sizeof` probe (A10). |
+| Card optimisation figures, flash/RAM figures | Consistent with the build output; not re-derived. |
+
+### 22.5 Work order before C19.3
+
+1. **A1 slew fix,** then the rendered slew test (A5) with its break run.
+2. **A2 per-type `snc` loops** (C10.6 step 4); record the decision in the
+   handoff log.
+3. **A3 C17.4 wrappers;** fill C19.2, including the derived per-voice and
+   pool worst cases, and the `snc` figure against the cap.
+4. **Fix A4;** fill the A6/A7 gaps; run and record C17.9 break proofs for
+   every new test.
+5. **Decide A8** (document or change) **and fix A9.**
+6. **Record the A10 sizes** in `STORAGE_SRAM_MANIFEST.md`.
+7. **Rerun §22.1,** then hand over C19.3 (H1–H11). Add a fast roll in `itp`
+   to H7 and an `smp` master at `wav` 127 to H11.
+
+---
+## 23. Fixes for the §22 findings (2026-10-27)
+
+All ten findings are dealt with. The firmware builds clean, and every host
+gate is green. Each new test fails on a deliberately broken version (26
+break proofs, §23.4).
+
+### 23.1 What changed, by finding
+
+| # | Change | Files |
+|---|---|---|
+| A1 | `osc_setFreq()` divides the remaining slew by `max(slewSamplesLeft, OUTPUT_DMA_SIZE)`, not by `slewSamplesLeft`. The difference is taken in `uint32_t` and cast once, so increments above 2^31 cannot overflow `int32_t`. The glide is linear for 128 samples; the last 4/132 of the interval spreads over a fifth block (160 samples in all). It is monotonic and never passes the target. `OSC_SLEW_SAMPLES` stays 132, and its comment now states this. | `Oscillator.c` (slew block of `osc_setFreq()`), `Oscillator.h` |
+| A2 | The `snc` segment render is replaced by the C10.6 step 4 constant-cost form. See §23.2. | new `OscSyncLane.h`; `Oscillator.c/.h`, `OscillatorPwm.c/.h`, `OscillatorSample.c/.h`, `OscillatorWavetable.c/.h`, `OscSection.c` |
+| A3 | Per-sample probes built (C17.4) and the cost record filled (§23.3). `osccost.py` (new) reports the worst-case path of every natural loop from the control-flow graph. The probe wrappers are `armcheck/probe_wav.c`, `probe_pwm.c`, `probe_smp.c`, `probe_wtb.c` and `probe_section.c`. `armcheck-osc-base` and `armcheck-osc` now print per-sample figures; the `looplen.py` calls are gone. | `tools/dsp_test/osccost.py`, `armcheck/probe_*.c`, `Makefile` |
+| A4 | `test_itp_click` rewritten. It applies the engine's carrier reset and a new pitch, then runs the mixer's claim order for 6 blocks, in `fm` and in `mix`. The bound is the step of the same sound changing pitch without a trigger, plus the fade slope (65,536 / 132). Measured: fm crossfade 1,785 against bound 2,404 (rst 32,365); mix 921 against 1,406 (rst 16,007). A `mix` variant that also resets the modulator steps 9,222 and must exceed the bound. The test also asserts that the old and new carrier blocks differ. | `tools/dsp_test/test_osc_run.c` |
+| A5 | `test_slew` renders the trajectory up and down. The per-sample increment must be monotonic, never pass the target, reach it within 6 blocks, and match the renderer's write-back. | same |
+| A6 | New cases (§23.4 lists the breaks that prove each one): <ul><li>pool order with interpolation between ongoing and new crossfades;</li><li>`snc`: no-wrap bit-identity for all nine slave families; D13 reset index for saw, `smp`, `pwm` and `wtb` slaves; the `itp` copy's own ratio; Q10 mix law; F5 sample master with start > 0; `rng` law;</li><li>`smp`/`slp`: re-expansion (7 of 5 binds 4, then 7 of 8); a full 100,000-sample one-shot; the exact `slp` seam and wrap; gain code 24 = ×2;</li><li>`wtb`: block continuity (2 × 32 = 1 × 64); the nx wrap at `frame_len − 1`; the 8-bit path;</li><li>`pwm`: polarity > 0.99; F3 midpoints within 1 LSB; monotonic `prc` width.</li></ul> `prc` high time rises from 50 % to 96 % as `wav` goes 0 → 127. New host hooks: `host_set_gain_code()`, `host_set_table_bits()`, `host_rng_reset()`, `host_sample_data()`, `host_table_data()`. | `test_osc_run.c`, `host_osc_support.c` |
+| A7 | `osc_s0` additions: <ul><li>the frozen noise loop;</li><li>a 20-block pitch sweep (27.5 Hz → 10.9 kHz) through the frozen `osc_setFreq()` and the current one, comparing increments, table levels and samples for sine, tri, saw, rec, noise and crash;</li><li>Drum fm/mix (4 cases) and Cymbal/HiHat FM2 against the **verbatim frozen85 engine lines**: Drum 313–326, Cymbal 240–247, HiHat 257–264, extracted with `extract.py --lines` and wrapped by `s0_engines.c` / `s0_engine_shim.h`. This covers the HiHat 0.5 carrier gain.</li></ul> The hand-written old compositions are gone. `extract.py` now skips comments between `)` and `{` (frozen `freq2PhaseIncr()`). | `test_osc_s0.c`, `s0_engines.c`, `s0_engine_shim.h`, `extract.py`, `Makefile` |
+| A8 | Accepted and documented at `oscSection_beginTrigger()`: S084 P1 F6 / plan R11. An exact fix needs a second carrier copy per voice (+124 B RAM each). H7 gains a fast roll in `itp`. | `OscSection.c` |
+| A9 | `instrumentManager_refreshWaveDomains()` sets each LFO adapter's base to `min(osc->waveRequest, new max)`, not `min(old base, new max)`. A `pwm → wav → pwm` round trip therefore restores the LFO centre. | `InstrumentManager.c` |
+| A10 | Break proofs automated (`breakproofs.py`, `make breakproofs`). It applies each defect in a temporary copy of the tree, so the working tree is untouched. 26 breaks, all caught (§23.4). Engine sizes recorded (§22.2 A10, unchanged by these fixes) and added to `STORAGE_SRAM_MANIFEST.md`. | `tools/dsp_test/breakproofs.py`, `Makefile` |
+
+### 23.2 The constant-cost `snc` (A2, C10.6 step 4)
+
+- **Lane.** Once per block, `oscSection_buildSyncLane()` walks the master's
+  shadow phase. It records `wrap[i]` (the master wrapped after sample *i*)
+  and `over[i]` (its overshoot) on the stack (2 × 32 entries, 160 B; no
+  static RAM).
+  - The sample-master modulo runs on every sample, not only on a wrap.
+  - A finished one-shot master records no wraps (D6).
+- **Slave render.** One call per block:
+  - The slave renders through `osc_renderSyncBlock()`, which dispatches by
+    type once.
+  - Inside the loop, `oscSync_phase()` replaces the phase after sample *i*
+    with `base + over[i] × ratio` when `wrap[i]` is set (D13: reset on
+    *i* + 1). `base` is 0, or `sampleStart << 12` for `smp`/`slp`.
+  - The `itp` copy uses the same lane with its own ratio. The master is
+    rendered once.
+- **Placement and ITCM:**
+  - **wav cores** (sine, Tri/Saw/Rec, noise, crash, stock) are
+    always-inline with a lane argument. Every plain entry point passes a
+    literal NULL, so the plain loops are unchanged instruction for
+    instruction (pre-S085 counts + 1 for the slew; `osc_s0` bit-identical).
+    `osc_renderSyncBlock()` holds their sync copies (1,972 B ITCM).
+  - **pwm, smp/slp and wtb** share one loop between plain and sync
+    (`OSC_SHARED_LOOP`: noinline, noclone, no loop unswitching), with a
+    per-sample lane test. A separate sync copy of every renderer was built
+    first and cost 5.6 KB of ITCM (16,272 / 16,384 B), leaving S086 none.
+    The shared form costs the plain pwm/smp/wtb render 2 instructions per
+    sample (the NULL test) and saves 3.4 KB.
+- **Compiler note.** GCC compiles the `oscSync_phase()` select as a branch
+  around the reset arithmetic (the reset reads `over[i]`). The no-wrap path
+  is therefore shorter. The figures below budget the wrap path (the worst
+  case).
+
+**Build after the fixes (DEV):**
+
+| | Before §23 | After §23 | Change |
+|---|---:|---:|---:|
+| text | 640,960 | 642,360 | +1,400 |
+| bss | 414,100 | 414,100 | 0 |
+| Flash used / headroom | 641,384 / 112,280 | 642,784 / 110,880 | +1,400 |
+| ITCM | 10,632 / 16,384 | 12,432 / 16,384 | +1,800 (3,952 B free) |
+| DTCM statics | 4,468 | 4,468 | 0 |
+| FXBUF margin | 3,712 | 3,712 | 0 |
+
+### 23.3 Cost record (C19.2), worst-case instructions per sample
+
+- **Method:** `osccost.py` (static longest path through each loop body)
+  on `arm-none-eabi-gcc 14.2 -Ofast`, Cortex-M7 flags. The wrapper probes
+  fix every block constant.
+- **Firmware plain pwm/smp/wtb** = the no-lane figure + 2 (the lane test),
+  confirmed on `prc`: 49 → 51.
+- **Calls count as 1.** Noise calls `GetRngValue()` on a wrap.
+- **Not included:** sample-flash read wait states for the stock, `smp` and
+  `wtb` table reads. H11 measures the real figure.
+
+| Loop | pre-S085 | S085 plain | S085 FM | S085 as `snc` slave |
+|---|---:|---:|---:|---:|
+| table Tri/Saw/Rec | 24 | 25 | 36 | 35 |
+| sine | 23 | 24 | 31 | 34 |
+| noise | 16 + call | 16 + call | (plain) | 20 + call (hand-traced; irreducible loop) |
+| crash | 30 | 31 | 39 | 37 |
+| stock `sq3`…`swa` | — | 24 | 34 | 35 |
+| pwm `prc` / `psw` | — | 51 | 56 | 63 |
+| pwm `ptr` / `pq3` / `pw3` | — | 42 | 47 | 53 |
+| pwm `swp` seg 0 / 1 / 2 / 3 | — | 48 / 50 / **58** / 52 | 53 / 55 / **62** / 57 | 60 / 63 / **70** / 65 |
+| `smp` | — | 40 | 45 | 53 |
+| `slp` | — | 47 | 53 | 61 |
+| `wtb` 8-bit / 16-bit | — | 40 / 43 | 44 / 48 | 51 / 54 |
+
+**Section loops:**
+
+| Loop | Worst |
+|---|---:|
+| `snc` lane builder, full-wrap master | 11 |
+| `snc` lane builder, sample master (includes one UDIV) | 18 |
+| `snc` mix pass / with the `itp` copy | 16 / 28 |
+| `rng` law | 19 |
+| `itp` blend | 23 |
+
+- **D1 target met:** `wtb` 43 / 48 against the target 42 / 48.
+- **Not `wtb`:** the dearest oscillator is `pwm swp` segment 2, with
+  58 plain and 62 FM.
+- **`snc` slave overhead:** 10–16 instructions per sample over the plain
+  loop, against the C10.6 estimate of about 6. It is constant per sample
+  and independent of the wrap count. The segment form it replaces paid a
+  full renderer call (38 to over 100 instructions of setup) on every
+  wrap, up to every sample.
+
+**Derived worst cases** (oscillator section only; the pre-existing
+saturating adds are not counted):
+
+| Engine / mode | Composition | Worst |
+|---|---|---:|
+| Drum `fm` | modulator 58 + FM carrier 62 | 120 |
+| Drum `mix` | 58 + 58 | 116 |
+| Drum `snc` | lane 18 + master 58 + slave 70 + mix 16 | **162** |
+| Drum `rng` | 58 + 58 + 19 | 135 |
+| Snare | tone 58 + noise 16 | 74 |
+| Cymbal / HiHat | 2 × 58 + FM carrier 62 | **178** |
+| Pre-S085 Cymbal (for comparison) | 2 × 30 + 38 | 98 |
+| One `itp` pool unit | old carrier ≤ 70 + extra mix 12 (`snc` case) + blend 23 | ≤ 105 |
+| Pool (2 units, system-wide) | 2 × 105 | ≤ 210 |
+| System worst (6 Cymbal/HiHat-class slots + pool) | 6 × 178 + 210 | ≈ 1,278 |
+
+- **System worst in context:** ≈ 1,278 instructions per sample, about
+  26 % of the 4,897-cycle sample period at one instruction per cycle.
+  Pre-S085 the same arrangement was ≈ 6 × 98 + 2 × the interpolation unit.
+- **For S086:** budget the per-voice oscillator worst case of 178
+  (Cymbal/HiHat) and 162 (Drum `snc`) beside the 88-cycle chain, plus the
+  pool's 210 once.
+
+### 23.4 Break proofs (C17.9, `make -C tools/dsp_test breakproofs`)
+
+Every break makes its target fail (FAILS = good):
+
+| ID | Defect | Target | Caught by |
+|---|---|---|---|
+| B1 | slew divisor back to `slewSamplesLeft` | `osc_run` | slew never passes the target |
+| B2 | `itp` blend is a no-op | `osc_run` | itp step 32,365 > bound 2,404 |
+| B3 | sync reset one sample early | `osc_run` | D13 reset index (saw, smp, pwm, wtb) |
+| B4 | `snc` mix law swapped | `osc_run` | no-wrap identity, mix law |
+| B5 | `rng` `>> 14` | `osc_run` | rng law |
+| B6 | shadow ignores the sample start | `osc_run` | F5 |
+| B7 | a finished one-shot master still resets | `osc_run` | D6 |
+| B8 | `itp` copy uses the carrier's ratio | `osc_run` | itp copy ratio |
+| B9 | `smp` sync base 0 | `osc_run` | D13 smp |
+| B10 | a pending crossfade ignores the pool | `osc_run` | pool fallback and order |
+| B11 | `smp` end not silent | `osc_sample` | end silence, full playback |
+| B12 | `slp` seam reads the last frame twice | `osc_sample` | seam |
+| B13 | gain code ignored | `osc_sample` | gain ×2 |
+| B14 | the clamp overwrites `sourceRequest` | `osc_sample` | re-expansion |
+| B15 | `wtb` nx bound removed | `wtb` | nx wrap |
+| B16 | `wtb` 8-bit `<< 7` | `wtb` | 8-bit path |
+| B17 | `wtb` phase not written back | `wtb` | block continuity |
+| B18 | pwm fraction 1/2^32 (F3) | `osc_pwm` | midpoints within 1 LSB |
+| B19 | `prc` polarity inverted | `osc_pwm` | polarity, width |
+| B20 | HiHat carrier gain ignored | `osc_s0` | hihat fm2 (0.5) |
+| B21 | noise value halved | `osc_s0` | noise, noise sweep |
+| B22 | table level capped at 9 | `osc_s0` | sweep tri/saw/rec block 19 |
+| B23 | Drum `mix` carrier gain | `osc_s0` | drum mix |
+| B24 | natural order ignores digit-run length | `natural_order` | f2 < f10 |
+| B25 | gain code not derived from the peak | `catalogue` | gain code for peak 16384 |
+| B26 | stock level scale dropped | `stock_gen` | wave 0 level 0 |
+
+**Not host-testable** (`InstrumentManager.c` is not compiled by the
+harness): F11 type-writer hygiene and the A9 base re-derivation. Hardware
+rows H6 and H9 cover them.
+
+### 23.5 Gate state and what remains
+
+- **G0–G4:** green.
+  - `make all` clean; `make img` written (642,784 B).
+  - Host: `natural_order`, `catalogue`, `stock_gen`, `osc_run` (all, pwm,
+    sample, wtb), `osc_s0`, `special_tags` (177 / 0), `selftest`, `filter`
+    (S1 PASS), `pack`, `postchain`, `octave` (its documented 16
+    mismatches), `mixer`, `armcheck-postchain` (MATCH), `armcheck-mixer`.
+  - `breakproofs`: 26 / 26.
+- **G5:** the cost record is filled (§23.3). The remaining item is the
+  hardware matrix C19.3.
+- **Hardware matrix additions:**
+  - H7: a fast roll in `itp` (A8).
+  - H8: `snc` with an `smp` master at `wav` 127 at a high note: one wrap
+    per sample, the A2 worst case.
+  - H11: the same `snc` worst case. The figures exclude sample-flash wait
+    states, so H11 is the real CPU measurement.

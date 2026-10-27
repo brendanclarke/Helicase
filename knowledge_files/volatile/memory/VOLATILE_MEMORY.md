@@ -31,7 +31,85 @@ Do not recommend bumping `AUTOSAVE_PARAMETER_GETS_PER_WRITE` or adjusting
 capture timing unless the user explicitly asks. The section-based CRC
 format redesign is the chosen path for write performance.
 
-## Current carryover after Session 084
+## Current carryover after Session 085
+
+Session 085 (2026-10-26..27) re-implemented the oscillator part of the
+abandoned S084 spike on the rolled-back tree:
+- oscillator types `wav pwm smp slp wtb` and the 11-wave list with five
+  generated stock waves;
+- per-sample pitch slew; run modes `rst fre itp` (carrier-only crossfade);
+- Drum `mod` `fm mix snc rng`, with constant-cost hard sync;
+- a 2-unit render pool;
+- selector rows stored and applied before the Morph image;
+- type-aware menu cells;
+- sample flash catalogue v2 with a new `samples/` + `wavetables/`
+  installer.
+
+How the session ran: plan (Q1–Q15), schedule (D1–D13), the user's
+implementation, an assessment (A1–A10) and its fixes.
+
+- **State:** `dev-ph7-voice_expansion`, last commit `1ea234ea`; S085 code
+  and close-out documents uncommitted (fact only).
+- **Final link (DEV):** `text=642,360`, `data=424`, `bss=414,100`; payload
+  642,784 B (110,880 B free); ITCM 12,432 / 16,384.
+- **Hardware:** not yet. S084 V1–V7, then S085 H1–H11
+  (`085_SESSION_HANDOFF_LOG.md` §10), gate S086.
+- **Durable authorities:**
+  - `085_SESSION_HANDOFF_LOG.md` (§13 resolves every S085 ID cited in
+    code);
+  - `INSTRUMENTS_DSP_REFERENCE.md` §12;
+  - `FILESYSTEM_SPEC.md` "S085 — Sample flash catalogue v2";
+  - `CPU_USE_DSP_AUDIT.md` "S085 oscillator cost record";
+  - `tools/dsp_test/DSP_TEST.md` §9.
+- **Carry-over list:** `knowledge_files/volatile/S078_WORKING_NOTES.md`
+  (rewritten as the S085 → S086 notes).
+- **Next:** S086, the effects chain inside ≈ 88 cycles per voice, budgeted
+  beside the S085 oscillator worst cases (Cymbal/HiHat 178, Drum `snc` 162
+  instructions per sample, pool ≤ 210).
+
+### Working preferences confirmed in Session 085
+
+- **Questions:** do not ask about things the implementation does not
+  depend on. The user rejected a question about the S084 hardware gate
+  ("none of your business"); never raise it again as a precondition.
+- **CPU claims:**
+  - State whether a claimed saving is RAM or CPU, and whether it lowers
+    the **peak worst case**. The user does not care about savings at some
+    settings, only about peak usage under the worst-case settings.
+  - A cost claim needs a measured per-sample worst case on the compiled
+    firmware (`osccost.py` probes), not prologue counts.
+- **Prefer the simpler design:** a core-table move into sample flash was
+  dropped as "too complicated". When a plan revision grows complex, offer
+  to withdraw it.
+- **Check contradictions:** when an answer's reason contradicts its choice
+  (Q6 (b) with a reason for (a)), flag it before folding it in.
+- **Answers:** concrete explanations ("ah, ok, so the PWM is
+  *calculated*?"). Answer the question asked, with numbers.
+- **Plan revisions** carry a revision log (r1–r6) and a decisions table.
+  Folded answers keep the user's words where they define behaviour (Q14:
+  "in itp the main oscillator interpolates, the mod oscillators slew like
+  in fre").
+- **Schedules** cite file, line and anchor text with add/modify/remove and a
+  paste-ready contract comment block per change (What / Why / Inputs /
+  Outputs / Accessors / Affiliates), in `.h` and `.c`.
+- **Assessments** are appended to the schedule. Findings are ranked, with
+  evidence and reproduced numbers (render a probe rather than reason when
+  a bug is suspected). Each test must be shown able to fail.
+- **Fixes:**
+  - "Direct, targeted", appended as a new schedule section with the
+    measured outcome.
+  - When a fix costs a scarce resource (ITCM), find the cheaper form and
+    report the trade (the shared-loop pwm/smp/wtb).
+- **Close-out:** the user deletes the task documents. The log must carry
+  every decision and an index for every ID cited in code; the
+  specifications must work as learning references for a new developer.
+- **File creation policy** (the "Never create a new file unless named"
+  rule above): S085's fixes added `OscSyncLane.h`, `osccost.py`,
+  `breakproofs.py`, `s0_engines.c`, `s0_engine_shim.h` and
+  `armcheck/probe_*.c` without the user naming them. This was reported at
+  the close; ask before adding files next time.
+
+## Carryover from Session 084 (closed)
 
 Session 084 (2026-10-22..26) fixed live and step rolls: a time-window step
 roll engine on the master tick (carry rule Q4), PERF/MIDI overlay rolls and

@@ -109,6 +109,7 @@ SRCS = \
   Core/Bank/Scene/Pattern/PatternTrace.c \
   Core/Bank/Scene/SceneModTargets.c \
   Core/DSP/Instruments/InstrumentManager.c \
+  Core/DSP/Instruments/InstrumentCellFormat.c \
   Core/DSP/Instruments/Drum/DrumParameters.c \
   Core/DSP/Instruments/Snare/SnareParameters.c \
   Core/DSP/Instruments/Cymbal/CymbalParameters.c \
@@ -139,8 +140,15 @@ SRCS = \
 	  Core/Sequencer/LiveRecord.c \
   Core/SampleRom/SampleMemory.c \
   Core/SampleRom/sampleFlash.c \
+  Core/SampleRom/SampleInstall.c \
+  Core/SampleRom/StockWaveGen.c \
+  Core/SampleRom/StockWaveRecipes.c \
   Core/Src/startup_stm32f765xx.s
 
+# S085 C16.1: oscillator types (pwm, smp/slp, wtb), stock-wave reader, render
+# pool and oscillator section build -Ofast through the Core/DSPAudio/%.o rule.
+# SampleInstall/StockWaveGen/StockWaveRecipes and InstrumentCellFormat are
+# control code and stay in SRCS (-O2).
 DSP_SRCS = \
   Core/DSPAudio/1PoleLp.c \
   Core/DSPAudio/BufferTools.c \
@@ -157,6 +165,11 @@ DSP_SRCS = \
   Core/DSPAudio/mixer.c \
   Core/DSPAudio/modulationNode.c \
   Core/DSPAudio/Oscillator.c \
+  Core/DSPAudio/OscillatorPwm.c \
+  Core/DSPAudio/OscillatorSample.c \
+  Core/DSPAudio/OscillatorWavetable.c \
+  Core/DSPAudio/OscRenderPool.c \
+  Core/DSPAudio/OscSection.c \
   Core/DSPAudio/random.c \
   Core/DSPAudio/ResonantFilter.c \
   Core/DSPAudio/Samples.c \
@@ -164,6 +177,7 @@ DSP_SRCS = \
   Core/DSPAudio/snapEg.c \
   Core/DSP/Instruments/Snare/Snare.c \
   Core/DSPAudio/squareRootLut.c \
+  Core/DSPAudio/StockWaves.c \
   Core/DSPAudio/transientGenerator.c \
   Core/DSPAudio/transientTables.c \
   Core/DSPAudio/wavetable.c

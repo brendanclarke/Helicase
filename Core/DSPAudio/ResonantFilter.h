@@ -116,6 +116,19 @@ void SVF_calcBlockZDFFloat(ResonantFilter* filter, const uint8_t type,
                            float* buf, const uint8_t size);
 //------------------------------------------------------------------------------------
 void SVF_recalcFreq(ResonantFilter* filter);
+
+/*
+ * Integrator gain from a given cutoff (S085 C10.4).
+ *
+ * What:       filter->g = fastTan(pi x fUsed) without changing filter->f; the
+ *             same USE_SHAPER_NONLINEARITY step as SVF_recalcFreq().
+ * Why:        run modes fre/itp slew the cutoff the loop uses while the
+ *             writers keep setting the target in filter->f (S085 D7).
+ * Inputs:     filter, fUsed (0..0.45).  Outputs: filter->g.
+ * Accessors:  oscSection_filterRecalc().
+ * Affiliates: SVF_recalcFreq() (unchanged; rst and the Effect filter).
+ */
+void SVF_recalcFreqFrom(ResonantFilter* filter, float fUsed);
 //------------------------------------------------------------------------------------
 void SVF_reset(ResonantFilter* filter);
 

@@ -2163,3 +2163,53 @@ Nested Instrument Load:
 * Stepping away and back before committing restores `kit` with its snapshot.
   Multi-Scene destinations hide a type unless every selected Scene can take it.
   InstrumentMrp never shows `chg`.
+
+---
+
+## S085 — Oscillator modules and call map
+
+| Module | Owns | Called by |
+|---|---|---|
+| `Oscillator.c/.h` | `OscInfo`, 11-wave list, five types, dispatch, slew, stock renderers, `osc_setFreq()`, `osc_renderSyncBlock()` (hard-sync slave dispatch) | engines via OscSection, `modulationNode` (targets) |
+| `OscSyncLane.h` | the hard-sync lane contract (`OscSyncLane`, `oscSync_phase()`, `OSC_SYNC_INLINE`, `OSC_SHARED_LOOP`) | `OscSection.c` (builds lanes), the renderers (consume them) |
+| `OscillatorSample.c/.h` | Q20.12 `smp`/`slp` bind, restart, end test, render (plain, FM, sync) | `Oscillator.c` dispatch, `osc_setFreq`, engines' triggers, `OscSection` snc |
+| `OscillatorPwm.c/.h` | six pwm families, per-block width state, render (plain, FM, sync) | `Oscillator.c` dispatch, `osc_setFreq` |
+| `OscillatorWavetable.c/.h` | `OscWtbState`, block-rate frame pair, render (plain, FM, sync) | `Oscillator.c` dispatch, `osc_setFreq`, the type writer (bind) |
+| `StockWaves.c/.h` | stock level resolution + Rec/Saw/Tri fallback | stock renderers, pwm pq3/pw3 |
+| `OscRenderPool.c/.h` | 2-unit budget, old-carrier scratch | `mixer`, `modulationNode`, `InstrumentManager`, `OscSection`, engines |
+| `OscSection.c/.h` | run/mode render, itp state, snc, filter slew | the four engines, `InstrumentManager` |
+| `SampleInstall.c/.h` | WAV parse/convert/program, commit | `filesystem.c` installer |
+| `StockWaveGen.c/.h`, `StockWaveRecipes.c` | install-time stock tables | `SampleInstall` |
+| `InstrumentCellFormat.c/.h` | type-aware cell description | `menu.c` |
+
+**InstrumentManager additions:** special writers `IM_SPECIAL_OSC_TYPE`
+(20), `_OSC_SOURCE` (21), `_OSC_WAVE` (22), `IM_SPECIAL_RUN_MODE` (23);
+`instrumentManager_oscForDescriptor()`, `_oscSection()`,
+`_oscWaveMaxForType()`, `_oscSourceMaxForType()`,
+`_isSelectorDescriptor()`, `_claimOscSectionOngoing()`,
+`_claimOscSectionPending()`. Writers take `retained` (D2): only
+menu/MIDI/load/Morph/automation updates the request bytes; LFO overlays clamp
+the live value only.
+
+**Rules between these modules:**
+- **The type dispatch is per block, never per sample.** A renderer is
+  called through `calcNextOscSampleBlock()`/`FmBlock()` (or
+  `osc_renderSyncBlock()` for an `snc` slave) and must not be called
+  directly by an engine.
+- **Engines reach the section only through `OscSection.h`:**
+  `beginTrigger` on a trigger; `itpCarrier`, `renderDrum`/`renderFm2`,
+  `blendItp`, `finishBlock` in the render.
+- **The pool is claimed only by the mixer path:**
+  `instrumentManager_claimOscSectionOngoing/Pending()` and
+  `modulationNode.c`. Engines read the result through
+  `oscSection_itpCarrier()` and borrow `oscRenderPool_scratch()` for the
+  block.
+- **Sample-flash data is read only through `SampleMemory`** (catalogue)
+  and `SAMPLE_FLASH_PTR()` (items, stock block). Only `SampleInstall` (from
+  the modal install) writes it, through `sampleFlash.c`.
+
+**Preset:** selector rows are stored single-ended (Normal + Morph mirror +
+`morph_interpolation[]`), applied by `preset_applySelectorRows()` after
+every slot reset and before the Morph image, and skipped by the supplemental
+rebind loop. **Menu:** `InstrumentCellFormat` drives formatted cells,
+clamps, the single-parameter names and slot-aware automation.

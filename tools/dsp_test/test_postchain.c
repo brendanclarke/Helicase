@@ -9,6 +9,8 @@
  * Outputs:    differing sample count; nonzero on any mismatch.
  * Accessors:  tools/dsp_test/Makefile postchain.
  * Affiliates: voicePostChain.h, BufferTools.h and distortion.h.
+ * S085 P2:    the chains now take "last" endpoints; equal endpoints must
+ *             reproduce the frozen passes exactly (the rst guarantee).
  */
 #include <stdint.h>
 #include <string.h>
@@ -96,20 +98,24 @@ static unsigned compare_engine(unsigned engine, float shape, float mix,
         old_calcDistBlock(&old_voice.distortion, old_buf, OUTPUT_DMA_SIZE);
         voicePost_drum(new_buf, gain, last_gain,
                        volume_mod ? velo : 1.0f,
+                       volume_mod ? velo : 1.0f,   /* S085 P2: flat ramp */
                        &new_voice.distortion, OUTPUT_DMA_SIZE);
     } else if (engine == 1u) {
         old_snare(old_buf, old_add, &old_voice, OUTPUT_DMA_SIZE);
         voicePost_mixAddGainDist(new_buf, new_add, mix,
+                                 volume_mod ? velo * gain : gain,
                                  volume_mod ? velo * gain : gain,
                                  &new_voice.distortion, OUTPUT_DMA_SIZE);
     } else if (engine == 2u) {
         old_cymbal(old_buf, old_add, &old_voice, OUTPUT_DMA_SIZE);
         voicePost_addGainDist(new_buf, new_add,
                               volume_mod ? velo * gain : gain,
+                              volume_mod ? velo * gain : gain,
                               &new_voice.distortion, OUTPUT_DMA_SIZE);
     } else {
         old_hihat(old_buf, old_add, &old_voice, OUTPUT_DMA_SIZE);
         voicePost_addGainDist(new_buf, new_add,
+                              volume_mod ? velo * gain : gain,
                               volume_mod ? velo * gain : gain,
                               &new_voice.distortion, OUTPUT_DMA_SIZE);
     }

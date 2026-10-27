@@ -873,12 +873,20 @@
 #define INTERPOLATE_OSC 1
 #define INTERPOLATE_FM_OSC 1
 
-/* Maximum number of oscillator waveform targets that may use waveform
-** interpolation in one 32-frame DSP block. Extra eligible targets snap to
-** their integer waveform ID for that block to bound CPU cost. This keeps user
-** samples eligible for interpolation while preventing every modulated voice
-** from doubling oscillator render work at once. */
-#define OSC_WAVE_INTERP_MAX_ACTIVE 2u
+/*
+ * Shared oscillator render pool (S085 C5.13).
+ *
+ * What:       extra oscillator renders allowed per 32-frame block, shared by
+ *             run-mode itp carrier crossfades and waveform interpolation.
+ *             One unit = one extra oscillator render. Claim order (C9.4):
+ *             ongoing itp crossfades, then waveform interpolation, then new
+ *             itp crossfades, lowest slot first.
+ * Why:        plan Q14: the pool stays at 2 units (today's interpolation
+ *             limit); itp crossfades only the carrier (1 unit per voice). The
+ *             pool is budgeted as always full (constant-CPU rule).
+ * Accessors:  OscRenderPool.c.
+ */
+#define OSC_RENDER_POOL_UNITS 2u
 
 
 /* SYNTH_FS — omit. Original was the StdPeriph enum I2S_AudioFreq_44k passed

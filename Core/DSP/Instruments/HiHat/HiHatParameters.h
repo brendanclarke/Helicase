@@ -11,7 +11,7 @@
  * diagnostics. Keep these macros aligned with the descriptor/page arrays in
  * HiHatParameters.c whenever rows/pages are added.
  */
-#define HIHAT_PARAM_DESCRIPTOR_COUNT 39u
+#define HIHAT_PARAM_DESCRIPTOR_COUNT 46u
 #define HIHAT_MENU_PAGE_COUNT       8u
 #define HIHAT_INSTRUMENT_TYPE_FLAGS \
     (INSTRUMENT_FLAG_ADVANCED | INSTRUMENT_FLAG_CHOKE)

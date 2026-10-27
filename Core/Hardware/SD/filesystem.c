@@ -76,6 +76,7 @@
 #include "menu.h"
 #include "copyClearSession.h"
 #include "SampleMemory.h"
+#include "SampleInstall.h"
 #include "sequencer.h"
 #include "LiveRecord.h"
 #include "PatternData.h"
@@ -23354,23 +23355,54 @@ static void filesystem_loadName_tick(void)
 ** invoking it. asyncfatfs still does the SD byte pumping; we simply poll it
 ** synchronously until each open/read/seek/close step completes.
 ** ----------------------------------------------------------------------- */
-#define FS_SAMPLE_MANIFEST_MAX SAMPLE_MAX_COUNT
 #define FS_SAMPLE_BUFFER_SIZE  512u
-#define FS_SAMPLE_LFN_MAX      80u
 #define FS_SAMPLE_ELLIPSIS     ((char)0x00)
+#define FS_INSTALL_BATCH       32u
+#define FS_INSTALL_MAX_DEPTH   3u
+#define FS_INSTALL_KEY_LEN     (AFATFS_LONG_FILENAME_MAX + 1u)   /* 49 */
+
+/*
+ * Batched natural-order selection (S085 C3.4).
+ *
+ * What:       fs_install_batch holds up to 32 directory entries (8.3 alias,
+ *             verified display name as the sort key, directory flag), kept
+ *             sorted; each pass over a directory fills it with the next names
+ *             after the last one handled. fs_install_last[d] is that "last"
+ *             entry for recursion level d. fs_install_report, _progress and
+ *             _failed carry the running install.
+ * Why:        the former 120-entry manifest (13,441 B) sorted a folder in RAM;
+ *             this needs 2,313 B for any folder size, at about n/32
+ *             directory passes (approved, S085 §0.5).
+ *             Long names: asyncfatfs keeps names up to 48 ASCII characters;
+ *             a longer or non-ASCII name falls back to its 8.3 alias, which
+ *             then orders and names the item (S085 plan §6 item 9).
+ * Inputs:     afatfs object scans.  Outputs: install order.
+ * Accessors:  filesystem_installCollect() and the walkers below.
+ * Affiliates: storage_naturalCompare(), FS_INSTALL_MAX_DEPTH (asyncfatfs has
+ *             5 handles: the folder chain plus one open file).
+ */
+typedef struct {
+    char    short_name[13];
+    char    key[FS_INSTALL_KEY_LEN];
+    uint8_t is_dir;
+    uint8_t pad;
+} fs_install_entry_t;
+
+_Static_assert(sizeof(fs_install_entry_t) == 64u, "install entry is 64 B");
 
 typedef struct {
-    char filename[13];
-    char sort_name[FS_SAMPLE_LFN_MAX];
-    char name[3];
-    char display_name[SAMPLE_DISPLAY_NAME_LEN];
+    sample_install_fmt_t fmt;
     uint32_t data_offset;
     uint32_t data_bytes;
-} fs_sample_manifest_t;
+} fs_wav_info_t;
 
-static fs_sample_manifest_t sample_manifest[FS_SAMPLE_MANIFEST_MAX];
-static uint8_t sample_manifest_count = 0;
-static uint8_t sample_io_buf[FS_SAMPLE_BUFFER_SIZE + 4u];
+static fs_install_entry_t fs_install_batch[FS_INSTALL_BATCH];
+static uint8_t fs_install_batch_count;
+static fs_install_entry_t fs_install_last[FS_INSTALL_MAX_DEPTH + 1u];
+static fs_install_report_t *fs_install_report;
+static fs_install_progress_fn fs_install_progress;
+static uint8_t fs_install_failed;
+static uint8_t sample_io_buf[FS_SAMPLE_BUFFER_SIZE];
 
 static volatile uint8_t block_file_ready = 0;
 static afatfsFilePtr_t block_file = NULL;
@@ -23402,6 +23434,30 @@ static void filesystem_blockOpenCb(afatfsFilePtr_t file)
 {
     block_file = file;
     block_file_ready = 1;
+}
+
+/*
+ * Bounded wait for a free asyncfatfs handle (S085 C3.5).
+ *
+ * What:       the blocking open helpers retry an open whose call returned
+ *             false (asyncfatfs refuses only when no handle is free, after
+ *             reporting NULL through the callback). They now give up after
+ *             FS_BLOCK_OPEN_HANDLE_RETRIES polls and return NULL.
+ * Why:        a handle can be freed by an asynchronous close during a poll,
+ *             so a short wait stays; but when the caller's own open chain
+ *             holds every handle, no poll frees one, and the former unbounded
+ *             loop froze the device with audio suspended (S084 P2 F2).
+ * Inputs:     the helper's retry counter.  Outputs: 1 give up, 0 retry.
+ * Accessors:  filesystem_blockOpen(), _blockOpenLfn(), _blockOpenDirLfn().
+ * Affiliates: AFATFS_MAX_OPEN_FILES, FS_INSTALL_MAX_DEPTH.
+ */
+#define FS_BLOCK_OPEN_HANDLE_RETRIES 2000u
+static uint8_t filesystem_blockOpenGiveUp(uint16_t *retries)
+{
+    if (*retries >= FS_BLOCK_OPEN_HANDLE_RETRIES)
+        return 1u;
+    (*retries)++;
+    return 0u;
 }
 
 static void filesystem_blockCloseCb(void)
@@ -23463,12 +23519,18 @@ static void filesystem_blockPoll(void)
 
 static afatfsFilePtr_t filesystem_blockOpen(const char *filename)
 {
+    uint16_t retries = 0u;
+
     block_file_ready = 0;
     block_file = NULL;
 
     while (!afatfs_fopen(filename, "r", filesystem_blockOpenCb)) {
+        /* S085 C3.5: a refused open (no free handle) is bounded; the
+        ** refusal's NULL callback is cleared so the wait below sees only
+        ** a real open. */
+        block_file_ready = 0;
         filesystem_blockPoll();
-        if (!filesystem_blockFsOk())
+        if (!filesystem_blockFsOk() || filesystem_blockOpenGiveUp(&retries))
             return NULL;
     }
 
@@ -23483,6 +23545,8 @@ static afatfsFilePtr_t filesystem_blockOpen(const char *filename)
 
 static afatfsFilePtr_t filesystem_blockOpenLfn(const char *filename)
 {
+    uint16_t retries = 0u;
+
     block_file_ready = 0;
     block_file = NULL;
 
@@ -23491,8 +23555,12 @@ static afatfsFilePtr_t filesystem_blockOpenLfn(const char *filename)
                              AFATFS_MATCH_CASE_INSENSITIVE,
                              NULL,
                              filesystem_blockOpenCb)) {
+        /* S085 C3.5: a refused open (no free handle) is bounded; the
+        ** refusal's NULL callback is cleared so the wait below sees only
+        ** a real open. */
+        block_file_ready = 0;
         filesystem_blockPoll();
-        if (!filesystem_blockFsOk())
+        if (!filesystem_blockFsOk() || filesystem_blockOpenGiveUp(&retries))
             return NULL;
     }
 
@@ -23507,6 +23575,8 @@ static afatfsFilePtr_t filesystem_blockOpenLfn(const char *filename)
 
 static afatfsFilePtr_t filesystem_blockOpenDirLfn(const char *filename)
 {
+    uint16_t retries = 0u;
+
     block_file_ready = 0;
     block_file = NULL;
 
@@ -23514,8 +23584,12 @@ static afatfsFilePtr_t filesystem_blockOpenDirLfn(const char *filename)
                                AFATFS_MATCH_CASE_INSENSITIVE,
                                NULL,
                                filesystem_blockOpenCb)) {
+        /* S085 C3.5: a refused open (no free handle) is bounded; the
+        ** refusal's NULL callback is cleared so the wait below sees only
+        ** a real open. */
+        block_file_ready = 0;
         filesystem_blockPoll();
-        if (!filesystem_blockFsOk())
+        if (!filesystem_blockFsOk() || filesystem_blockOpenGiveUp(&retries))
             return NULL;
     }
 
@@ -24333,11 +24407,6 @@ static uint8_t filesystem_quarantineBankKitsBlocking(uint16_t slot)
 }
 #endif
 
-static uint16_t filesystem_le16(const uint8_t *p)
-{
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-
 static uint32_t filesystem_le32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
@@ -24353,7 +24422,7 @@ static uint8_t filesystem_chunkIdEquals(const uint8_t *p, const char *id)
 static uint8_t filesystem_isWavName(const char *filename)
 {
     uint8_t i = 0;
-    while (filename[i] != '\0' && i < (FS_SAMPLE_LFN_MAX - 1u))
+    while (filename[i] != '\0' && i < (FS_INSTALL_KEY_LEN - 1u))
         i++;
     if (i < 5u)
         return 0;
@@ -24363,21 +24432,13 @@ static uint8_t filesystem_isWavName(const char *filename)
         (filename[i - 1u] == 'V' || filename[i - 1u] == 'v'));
 }
 
-static void filesystem_sampleNameFromFilename(char dst[3], const char *filename)
-{
-    for (uint8_t i = 0; i < 3u; i++) {
-        char c = filename[i];
-        dst[i] = (c == '\0' || c == '.') ? ' ' : c;
-    }
-}
-
 static void filesystem_displayNameFromFilename(char dst[SAMPLE_DISPLAY_NAME_LEN],
                                                const char *filename)
 {
     uint8_t len = 0;
     uint8_t stem_len = 0;
 
-    while (filename[len] != '\0' && len < (FS_SAMPLE_LFN_MAX - 1u)) {
+    while (filename[len] != '\0' && len < (FS_INSTALL_KEY_LEN - 1u)) {
         if (filename[len] == '.')
             stem_len = len;
         len++;
@@ -24406,409 +24467,644 @@ static void filesystem_displayNameFromFilename(char dst[SAMPLE_DISPLAY_NAME_LEN]
         dst[i] = ' ';
 }
 
-static void filesystem_copySampleSortName(char dst[FS_SAMPLE_LFN_MAX],
-                                          const char *filename)
+/*
+ * Parse one WAV header (S085 C3.7).
+ *
+ * What:       opens the 8.3 alias, checks RIFF/WAVE, walks the chunks; the fmt
+ *             chunk goes to sampleInstall_acceptFormat() for the given kind;
+ *             the data chunk must lie inside the file (a seek to its exact end
+ *             succeeds; asyncfatfs clamps seeks to EOF, so a truncated or
+ *             streamed file fails here). Stops once both chunks are known.
+ *             Rejects data that is empty or not a whole number of frames.
+ * Why:        a file whose declared data exceeds the file would otherwise
+ *             fail mid-copy after flash was programmed (S084 P2 F7); a
+ *             missing pad byte after an odd data chunk must not reject a
+ *             valid file.
+ * Inputs:     short_name, kind.  Outputs: 1 and *out, or 0 (skip the file).
+ * Accessors:  filesystem_installSampleFiles(), filesystem_installWavetable().
+ * Affiliates: sampleInstall_acceptFormat(), filesystem_installCopy().
+ */
+static uint8_t filesystem_parseWav(const char *short_name,
+                                   sample_install_kind_t kind,
+                                   fs_wav_info_t *out)
 {
-    uint8_t i;
+    afatfsFilePtr_t file;
+    uint8_t hdr[12];
+    uint8_t fmt_buf[40];
+    uint8_t fmt_ok = 0u;
+    uint8_t data_ok = 0u;
+    uint32_t data_offset = 0u;
+    uint32_t data_bytes = 0u;
 
-    for (i = 0; i < (FS_SAMPLE_LFN_MAX - 1u) && filename[i] != '\0'; i++)
-        dst[i] = filename[i];
-    dst[i] = '\0';
-}
-
-static uint8_t filesystem_lfnCharAt(const uint8_t *entry, uint8_t index,
-                                    uint16_t *out)
-{
-    static const uint8_t offsets[13] = {
-        1u, 3u, 5u, 7u, 9u,
-        14u, 16u, 18u, 20u, 22u, 24u,
-        28u, 30u
-    };
-    uint8_t o = offsets[index];
-
-    *out = (uint16_t)entry[o] | ((uint16_t)entry[o + 1u] << 8);
-    return 1;
-}
-
-static void filesystem_lfnReset(char *lfn, uint8_t *valid)
-{
-    memset(lfn, 0, FS_SAMPLE_LFN_MAX);
-    *valid = 0;
-}
-
-static void filesystem_lfnAppendEntry(const fatDirectoryEntry_t *entry,
-                                      char *lfn, uint8_t *valid)
-{
-    const uint8_t *raw = (const uint8_t *)entry;
-    uint8_t seq = raw[0] & 0x1fu;
-
-    if (seq == 0u || seq > 6u) {
-        filesystem_lfnReset(lfn, valid);
-        return;
-    }
-
-    if (raw[0] & 0x40u) {
-        memset(lfn, 0, FS_SAMPLE_LFN_MAX);
-        *valid = 1;
-    } else if (!*valid) {
-        return;
-    }
-
-    uint8_t pos = (uint8_t)((seq - 1u) * 13u);
-    for (uint8_t i = 0; i < 13u && pos < (FS_SAMPLE_LFN_MAX - 1u); i++, pos++) {
-        uint16_t ch;
-
-        (void)filesystem_lfnCharAt(raw, i, &ch);
-        if (ch == 0x0000u)
-            break;
-        if (ch == 0xffffu)
-            continue;
-        lfn[pos] = (ch < 0x80u) ? (char)ch : '_';
-    }
-}
-
-static char filesystem_sortLower(char c)
-{
-    if (c >= 'A' && c <= 'Z')
-        return (char)(c + ('a' - 'A'));
-    return c;
-}
-
-static int8_t filesystem_compareSampleNameStrict(const char *a, const char *b)
-{
-    for (uint8_t i = 0; i < (FS_SAMPLE_LFN_MAX - 1u); i++) {
-        char ca = filesystem_sortLower(a[i]);
-        char cb = filesystem_sortLower(b[i]);
-
-        if (ca != cb)
-            return (ca < cb) ? -1 : 1;
-        if (ca == '\0')
-            return 0;
-    }
-    return 0;
-}
-
-static void filesystem_insertSampleManifest(const fs_sample_manifest_t *manifest)
-{
-    uint8_t pos = 0;
-
-    while (pos < sample_manifest_count &&
-           filesystem_compareSampleNameStrict(sample_manifest[pos].sort_name,
-                                              manifest->sort_name) <= 0)
-        pos++;
-
-    if (sample_manifest_count < FS_SAMPLE_MANIFEST_MAX) {
-        for (uint8_t i = sample_manifest_count; i > pos; i--)
-            sample_manifest[i] = sample_manifest[i - 1u];
-        sample_manifest[pos] = *manifest;
-        sample_manifest_count++;
-        return;
-    }
-
-    if (pos >= FS_SAMPLE_MANIFEST_MAX)
-        return;
-
-    for (uint8_t i = (uint8_t)(FS_SAMPLE_MANIFEST_MAX - 1u); i > pos; i--)
-        sample_manifest[i] = sample_manifest[i - 1u];
-    sample_manifest[pos] = *manifest;
-}
-
-static uint8_t filesystem_parseWav(const char *filename, fs_sample_manifest_t *out)
-{
-    afatfsFilePtr_t file = filesystem_blockOpen(filename);
-    uint8_t hdr[16];
-    uint8_t fmt_ok = 0;
-    uint8_t data_ok = 0;
-    uint32_t data_offset = 0;
-    uint32_t data_bytes = 0;
-
+    if (!out)
+        return 0u;
+    file = filesystem_blockOpen(short_name);
     if (file == NULL)
-        return 0;
-
-    if (filesystem_blockRead(file, hdr, 12u) != 12u)
-        goto fail;
-    if (!filesystem_chunkIdEquals(hdr, "RIFF") ||
+        return 0u;
+    if (filesystem_blockRead(file, hdr, 12u) != 12u ||
+        !filesystem_chunkIdEquals(hdr, "RIFF") ||
         !filesystem_chunkIdEquals(hdr + 8u, "WAVE"))
         goto fail;
-
     while (!afatfs_feof(file)) {
-        uint32_t chunk_data_pos;
-        uint32_t chunk_size;
-        uint32_t next_chunk_pos;
+        uint32_t pos;
+        uint32_t size;
+        uint32_t next;
 
         if (filesystem_blockRead(file, hdr, 8u) != 8u)
             break;
-        chunk_size = filesystem_le32(hdr + 4u);
-        if (!filesystem_blockTell(file, &chunk_data_pos))
+        size = filesystem_le32(hdr + 4u);
+        if (!filesystem_blockTell(file, &pos))
             goto fail;
-
-        next_chunk_pos = chunk_data_pos + chunk_size + (chunk_size & 1u);
-        if (next_chunk_pos < chunk_data_pos)
+        next = pos + size + (size & 1u);
+        if (next < pos)
             goto fail;
-
         if (filesystem_chunkIdEquals(hdr, "fmt ")) {
-            if (chunk_size < 16u)
-                goto fail;
-            if (filesystem_blockRead(file, hdr, 16u) != 16u)
-                goto fail;
+            const uint32_t n = (size < sizeof(fmt_buf))
+                ? size : (uint32_t)sizeof(fmt_buf);
 
-            fmt_ok = (uint8_t)(filesystem_le16(hdr + 0u) == 1u &&
-                               filesystem_le16(hdr + 2u) == 1u &&
-                               filesystem_le32(hdr + 4u) == 44100u &&
-                               filesystem_le16(hdr + 14u) == 16u);
-            if (!fmt_ok)
+            if (n < 16u || filesystem_blockRead(file, fmt_buf, n) != n ||
+                !sampleInstall_acceptFormat(fmt_buf, n, kind, &out->fmt))
                 goto fail;
+            fmt_ok = 1u;
         } else if (filesystem_chunkIdEquals(hdr, "data")) {
-            data_offset = chunk_data_pos;
-            data_bytes = chunk_size;
-            data_ok = (uint8_t)(data_bytes != 0u && ((data_bytes & 1u) == 0u));
+            if (!filesystem_blockSeek(file, pos + size))
+                goto fail;
+            data_offset = pos;
+            data_bytes = size;
+            data_ok = 1u;
+            if (fmt_ok)
+                break;
         }
-
-        if (!filesystem_blockSeek(file, next_chunk_pos))
-            goto fail;
         if (fmt_ok && data_ok)
             break;
+        if (!filesystem_blockSeek(file, next))
+            goto fail;
     }
-
-    if (!fmt_ok || !data_ok)
+    if (!fmt_ok || !data_ok || out->fmt.block_align == 0u ||
+        data_bytes < out->fmt.block_align ||
+        (data_bytes % out->fmt.block_align) != 0u)
         goto fail;
-
-    memset(out, 0, sizeof(*out));
-    for (uint8_t i = 0; i < 12u && filename[i] != '\0'; i++)
-        out->filename[i] = filename[i];
-    filesystem_sampleNameFromFilename(out->name, filename);
-    filesystem_displayNameFromFilename(out->display_name, filename);
     out->data_offset = data_offset;
     out->data_bytes = data_bytes;
-
     (void)filesystem_blockClose(file);
-    return 1;
-
+    return 1u;
 fail:
     (void)filesystem_blockClose(file);
-    return 0;
+    return 0u;
 }
 
-static uint8_t filesystem_manifestCanFit(uint32_t *planned_addr, uint32_t data_bytes)
+/*
+ * Install progress notification (S085 C3.8).
+ *
+ * What:       forwards a stage or item count to the Menu hook when set.
+ * Why:        the install now includes stock generation and frames; the LCD
+ *             shows a moving stage line instead of one static text.
+ * Accessors:  the install functions below.
+ */
+static void filesystem_installProgress(uint8_t stage, uint16_t count)
 {
-    uint32_t needed = (data_bytes + 3u) & ~3u;
-    needed += 4u;
-    if (*planned_addr > SAMPLE_INFO_START_ADDRESS)
-        return 0;
-    if (needed > (SAMPLE_INFO_START_ADDRESS - *planned_addr))
-        return 0;
-    *planned_addr += needed;
-    return 1;
+    if (fs_install_progress)
+        fs_install_progress(stage, count);
 }
 
-static uint8_t filesystem_scanSamples(afatfsFilePtr_t dir, uint32_t planned_addr,
-                                      uint8_t max_new_samples)
+/*
+ * Install entry order (S085 C3.8).
+ *
+ * What:       natural order of the display name, then a byte compare of the
+ *             display name, then the 8.3 alias.
+ * Why:        deterministic order for names equal under natural rules.
+ * Accessors:  filesystem_installCollect().
+ */
+static int8_t filesystem_installCompare(const fs_install_entry_t *a,
+                                        const fs_install_entry_t *b)
 {
-    afatfsFinder_t finder;
-    char lfn_name[FS_SAMPLE_LFN_MAX];
-    uint8_t lfn_valid = 0;
+    int8_t c = storage_naturalCompare(a->key, b->key);
 
-    sample_manifest_count = 0;
-    filesystem_lfnReset(lfn_name, &lfn_valid);
-    afatfs_findFirst(dir, &finder);
+    if (c == 0)
+        c = (int8_t)strcmp(a->key, b->key);
+    if (c == 0)
+        c = (int8_t)strcmp(a->short_name, b->short_name);
+    return (int8_t)((c < 0) ? -1 : ((c > 0) ? 1 : 0));
+}
 
+/*
+ * Blocking return to the parent directory (S085 C3.8).
+ *
+ * What:       polls afatfs_chdirParent() until SUCCESS or FAILURE.
+ * Why:        it returns an operation status (SUCCESS == 0), so it must never
+ *             be tested with !().
+ * Accessors:  the two tree walkers.
+ */
+static uint8_t filesystem_installChdirParent(void)
+{
     for (;;) {
-        fatDirectoryEntry_t *entry = NULL;
-        afatfsOperationStatus_e st;
-        char filename[13];
-        fs_sample_manifest_t manifest;
+        const afatfsOperationStatus_e st = afatfs_chdirParent();
 
-        do {
-            st = afatfs_findNext(dir, &finder, &entry);
-            if (st == AFATFS_OPERATION_IN_PROGRESS)
-                filesystem_blockPoll();
-            if (!filesystem_blockFsOk()) {
-                afatfs_findLast(dir);
-                return 0;
-            }
-        } while (st == AFATFS_OPERATION_IN_PROGRESS);
+        if (st == AFATFS_OPERATION_SUCCESS)
+            return 1u;
+        if (st == AFATFS_OPERATION_FAILURE)
+            return 0u;
+        filesystem_blockPoll();
+        if (!filesystem_blockFsOk())
+            return 0u;
+    }
+}
+
+/*
+ * Collect the next batch of entries in natural order (S085 C3.8).
+ *
+ * What:       one object scan of the current directory. Keeps entries that
+ *             match want_dir (directories) or are .wav files, do not start
+ *             with '.', and sort strictly after *after (an empty key means
+ *             from the start). Only the `capacity` smallest are kept, sorted
+ *             by insertion. The scan always ends with afatfs_findLastObject().
+ * Why:        bounded RAM for any folder size; deterministic order.
+ * Inputs:     dir, want_dir, after, capacity 1..FS_INSTALL_BATCH.
+ * Outputs:    fs_install_batch[0..fs_install_batch_count); 0 on a card error.
+ * Accessors:  the walkers below.
+ * Affiliates: filesystem_blockFindNextObject(), filesystem_installCompare().
+ */
+static uint8_t filesystem_installCollect(afatfsFilePtr_t dir, uint8_t want_dir,
+                                         const fs_install_entry_t *after,
+                                         uint8_t capacity)
+{
+    afatfsObjectFinder_t finder;
+    afatfsObjectInfo_t object;
+
+    if (capacity == 0u || capacity > FS_INSTALL_BATCH)
+        capacity = FS_INSTALL_BATCH;
+    fs_install_batch_count = 0u;
+    afatfs_findFirstObject(dir, &finder);
+    for (;;) {
+        fs_install_entry_t e;
+        uint8_t i;
+        const afatfsOperationStatus_e st =
+            filesystem_blockFindNextObject(dir, &finder, &object);
 
         if (st == AFATFS_OPERATION_FAILURE) {
-            afatfs_findLast(dir);
-            return 0;
+            afatfs_findLastObject(dir, &finder);
+            return 0u;
         }
-        if (entry == NULL || fat_isDirectoryEntryTerminator(entry))
+        if (object.id.kind == AFATFS_OBJECT_NONE)
             break;
-        if (fat_isDirectoryEntryEmpty(entry)) {
-            filesystem_lfnReset(lfn_name, &lfn_valid);
+        if (object.id.displayName[0] == '\0' ||
+            object.id.displayName[0] == '.')
             continue;
-        }
-        if ((entry->attrib & 0x0fu) == 0x0fu) {
-            filesystem_lfnAppendEntry(entry, lfn_name, &lfn_valid);
+        if (want_dir ? (object.id.kind != AFATFS_OBJECT_DIRECTORY)
+                     : (object.id.kind != AFATFS_OBJECT_FILE ||
+                        !filesystem_isWavName(object.id.displayName)))
             continue;
-        }
-        if ((entry->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY) ||
-            (entry->attrib & FAT_FILE_ATTRIBUTE_VOLUME_ID)) {
-            filesystem_lfnReset(lfn_name, &lfn_valid);
+        memset(&e, 0, sizeof(e));
+        memcpy(e.short_name, object.id.shortName, 12u);
+        memcpy(e.key, object.id.displayName, FS_INSTALL_KEY_LEN - 1u);
+        e.is_dir = want_dir;
+        if (after && after->key[0] != '\0' &&
+            filesystem_installCompare(&e, after) <= 0)
             continue;
+        i = fs_install_batch_count;
+        if (i >= capacity) {
+            if (filesystem_installCompare(&e,
+                    &fs_install_batch[capacity - 1u]) >= 0)
+                continue;
+            i = (uint8_t)(capacity - 1u);
+        } else {
+            fs_install_batch_count++;
         }
-
-        memset(filename, 0, sizeof(filename));
-        fat_convertFATStyleToFilename(entry->filename, filename);
-        fat_applyFilenameCaseFlags(filename, entry->ntReserved);
-        const char *display_filename =
-            (lfn_valid && filesystem_isWavName(lfn_name)) ? lfn_name : filename;
-
-        if (!filesystem_isWavName(filename)) {
-            filesystem_lfnReset(lfn_name, &lfn_valid);
-            continue;
+        while (i > 0u &&
+               filesystem_installCompare(&e, &fs_install_batch[i - 1u]) < 0) {
+            fs_install_batch[i] = fs_install_batch[i - 1u];
+            i--;
         }
-
-        afatfs_findLast(dir);
-        if (!filesystem_parseWav(filename, &manifest))
-            goto scan_next_entry;
-        filesystem_displayNameFromFilename(manifest.display_name, display_filename);
-        filesystem_copySampleSortName(manifest.sort_name, display_filename);
-        filesystem_insertSampleManifest(&manifest);
-
-scan_next_entry:
-        filesystem_lfnReset(lfn_name, &lfn_valid);
+        fs_install_batch[i] = e;
     }
-
-    afatfs_findLast(dir);
-
-    uint8_t out = 0;
-    for (uint8_t i = 0; i < sample_manifest_count; i++) {
-        if (out >= max_new_samples)
-            break;
-        if (!filesystem_manifestCanFit(&planned_addr, sample_manifest[i].data_bytes))
-            continue;
-        if (out != i)
-            sample_manifest[out] = sample_manifest[i];
-        out++;
-    }
-    sample_manifest_count = out;
-    return 1;
+    afatfs_findLastObject(dir, &finder);
+    return 1u;
 }
 
-static uint8_t filesystem_installOneSample(const fs_sample_manifest_t *manifest,
-                                           uint8_t looped)
+/*
+ * Stream one data chunk into the open item (S085 C3.8).
+ *
+ * What:       opens the alias, seeks to the data, reads 512 B chunks into
+ *             sample_io_buf and hands them to the sample or frame writer.
+ * Outputs:    FS_COPY_OK; FS_COPY_READ_FAIL (open/seek/read failure: the
+ *             caller skips this file or table); FS_COPY_WRITE_FAIL (writer or
+ *             flash failure: the caller aborts the install).
+ * Accessors:  filesystem_installSampleFiles(), filesystem_installWavetable().
+ */
+#define FS_COPY_OK          0u
+#define FS_COPY_READ_FAIL   1u
+#define FS_COPY_WRITE_FAIL  2u
+static uint8_t filesystem_installCopy(const char *short_name, uint32_t offset,
+                                      uint32_t bytes, uint8_t frames)
 {
-    afatfsFilePtr_t file = filesystem_blockOpen(manifest->filename);
-    uint32_t remaining = manifest->data_bytes;
-    int rc;
+    afatfsFilePtr_t file = filesystem_blockOpen(short_name);
+    uint8_t result = FS_COPY_READ_FAIL;
 
     if (file == NULL)
-        return 0;
-    if (!filesystem_blockSeek(file, manifest->data_offset))
-        goto fail;
+        return FS_COPY_READ_FAIL;
+    if (!filesystem_blockSeek(file, offset))
+        goto done;
+    while (bytes > 0u) {
+        const uint32_t n = (bytes > FS_SAMPLE_BUFFER_SIZE)
+            ? FS_SAMPLE_BUFFER_SIZE : bytes;
+        int rc;
 
-    rc = sampleMemory_installStartSample(manifest->name, manifest->display_name,
-                                         looped,
-                                         manifest->data_bytes);
-    if (rc != 0)
-        goto fail;
-
-    while (remaining > 0u) {
-        uint32_t to_read = remaining;
-        uint32_t to_write;
-
-        if (to_read > FS_SAMPLE_BUFFER_SIZE)
-            to_read = FS_SAMPLE_BUFFER_SIZE;
-
-        if (filesystem_blockRead(file, sample_io_buf, to_read) != to_read)
-            goto fail;
-
-        remaining -= to_read;
-        to_write = to_read;
-        if (remaining == 0u) {
-            uint32_t padded = (to_write + 3u) & ~3u;
-            while (to_write < padded)
-                sample_io_buf[to_write++] = 0;
+        if (filesystem_blockRead(file, sample_io_buf, n) != n)
+            goto done;
+        bytes -= n;
+        rc = frames ? sampleInstall_writeFrameData(sample_io_buf, n)
+                    : sampleInstall_writeSampleData(sample_io_buf, n);
+        if (rc != 0) {
+            result = FS_COPY_WRITE_FAIL;
+            goto done;
         }
-
-        if (sampleMemory_installWriteData(sample_io_buf, to_write) != 0)
-            goto fail;
     }
-
-    if (sampleMemory_installFinishSample() != 0)
-        goto fail;
-
+    result = FS_COPY_OK;
+done:
     (void)filesystem_blockClose(file);
-    return 1;
-
-fail:
-    (void)filesystem_blockClose(file);
-    return 0;
+    return result;
 }
 
-static uint8_t filesystem_installSampleFolderBlocking(const char *folder,
-                                                      uint8_t append,
-                                                      uint8_t looped)
+/*
+ * Install every WAV file of one directory (S085 C3.8).
+ *
+ * What:       batches of 32 in natural order; each file is parsed (SAMPLE
+ *             form), begun, streamed and finished. Unsupported, refused or
+ *             unreadable files are counted and skipped; only a flash/state
+ *             failure stops the install.
+ * Inputs:     dir (the current directory), depth.
+ * Outputs:    report counts; fs_install_last[depth].
+ * Accessors:  filesystem_installSampleTree().
+ */
+static void filesystem_installSampleFiles(afatfsFilePtr_t dir, uint8_t depth)
 {
-    afatfsFilePtr_t sample_dir;
-    uint8_t ok = 0;
-    uint32_t planned_addr;
-    uint8_t max_new_samples = SAMPLE_MAX_COUNT;
+    fs_install_last[depth].key[0] = '\0';
+    for (;;) {
+        uint8_t i;
 
-    if (status == FS_STATUS_BUSY)
-        return 0;
-    if (!filesystem_blockFsOk())
-        return 0;
+        if (!filesystem_installCollect(dir, 0u, &fs_install_last[depth],
+                                       FS_INSTALL_BATCH)) {
+            fs_install_failed = 1u;
+            return;
+        }
+        if (fs_install_batch_count == 0u)
+            return;
+        for (i = 0u; i < fs_install_batch_count; i++) {
+            fs_wav_info_t wav;
+            char display[SAMPLE_DISPLAY_NAME_LEN];
+            uint8_t copy;
+            int rc;
 
+            if (!filesystem_parseWav(fs_install_batch[i].short_name,
+                                     SAMPLE_INSTALL_KIND_SAMPLE, &wav)) {
+                fs_install_report->skipped_files++;
+                continue;
+            }
+            filesystem_displayNameFromFilename(display,
+                                               fs_install_batch[i].key);
+            if (sampleInstall_beginSample(display, &wav.fmt,
+                                          wav.data_bytes) != 0) {
+                fs_install_report->skipped_files++;
+                continue;
+            }
+            copy = filesystem_installCopy(fs_install_batch[i].short_name,
+                                          wav.data_offset, wav.data_bytes, 0u);
+            if (copy == FS_COPY_READ_FAIL) {
+                sampleInstall_abortItem();
+                fs_install_report->skipped_files++;
+                continue;
+            }
+            rc = (copy == FS_COPY_OK) ? sampleInstall_finishSample() : -1;
+            if (rc == -4) {
+                fs_install_report->skipped_files++;
+                continue;
+            }
+            if (rc != 0) {
+                fs_install_failed = 1u;
+                return;
+            }
+            fs_install_report->samples++;
+            filesystem_installProgress(FS_INSTALL_STAGE_SAMPLES,
+                                       fs_install_report->samples);
+        }
+        fs_install_last[depth] = fs_install_batch[fs_install_batch_count - 1u];
+    }
+}
+
+/*
+ * Open and enter one subfolder by its display name (S085 C3.8).
+ *
+ * What:       afatfs_opendir_lfn(display name) and chdir into it. The display
+ *             name, not the 8.3 alias, is used: for an entry with a long name
+ *             asyncfatfs matches only the long name (S084 P2 F1).
+ * Outputs:    the handle, or NULL (fs_install_failed set when the card is no
+ *             longer usable; otherwise the caller counts a skip).
+ * Accessors:  the two tree walkers.
+ */
+static afatfsFilePtr_t filesystem_installEnter(const fs_install_entry_t *e)
+{
+    afatfsFilePtr_t sub = filesystem_blockOpenDirLfn(e->key);
+
+    if (sub == NULL) {
+        if (!filesystem_blockFsOk())
+            fs_install_failed = 1u;
+        return NULL;
+    }
+    if (!filesystem_blockChdir(sub)) {
+        (void)filesystem_blockClose(sub);
+        fs_install_failed = 1u;
+        return NULL;
+    }
+    return sub;
+}
+
+/* Leave a subfolder entered by filesystem_installEnter() (S085 C3.8). */
+static void filesystem_installLeave(afatfsFilePtr_t sub)
+{
+    if (!filesystem_installChdirParent() || !filesystem_blockClose(sub))
+        fs_install_failed = 1u;
+}
+
+/*
+ * Walk samples/ (S085 C3.8).
+ *
+ * What:       the directory's files first, then its subfolders one at a time
+ *             in natural order (each: files first, then its subfolders),
+ *             while depth < FS_INSTALL_MAX_DEPTH.
+ * Why:        the deepest open chain is samples/ + 3 folders + 1 file = 5
+ *             asyncfatfs handles (AFATFS_MAX_OPEN_FILES).
+ * Inputs:     dir, depth (0 = samples/).
+ * Outputs:    installed samples; the CWD is dir again on return.
+ * Accessors:  filesystem_installSamplesBlocking().
+ */
+static void filesystem_installSampleTree(afatfsFilePtr_t dir, uint8_t depth)
+{
+    fs_install_entry_t after;
+
+    filesystem_installSampleFiles(dir, depth);
+    if (fs_install_failed || depth >= FS_INSTALL_MAX_DEPTH)
+        return;
+    memset(&after, 0, sizeof(after));
+    for (;;) {
+        afatfsFilePtr_t sub;
+
+        if (!filesystem_installCollect(dir, 1u, &after, 1u)) {
+            fs_install_failed = 1u;
+            return;
+        }
+        if (fs_install_batch_count == 0u)
+            return;
+        after = fs_install_batch[0];
+        sub = filesystem_installEnter(&after);
+        if (sub == NULL) {
+            if (fs_install_failed)
+                return;
+            fs_install_report->skipped_files++;
+            continue;
+        }
+        filesystem_installSampleTree(sub, (uint8_t)(depth + 1u));
+        filesystem_installLeave(sub);
+        if (fs_install_failed)
+            return;
+    }
+}
+
+/*
+ * Install one wavetable folder (S085 C3.8).
+ *
+ * What:       Pass A validates and counts the folder's WAV frames: the first
+ *             valid file fixes the stored depth and the frame length (frames
+ *             of 2..65,535 points); later files must match both or are
+ *             skipped; frames past 128 are counted as skipped. If at least one
+ *             frame is valid the table is begun (fit checked before any byte
+ *             is written). Pass B repeats the same batches and rule and
+ *             streams exactly the counted frames, each decoded with its own
+ *             source format (sampleInstall_setFrameFormat()). A read failure
+ *             skips the table; a short table (-4) is skipped.
+ * Why:        one length and one stored depth per table; mixed source forms
+ *             convert correctly; one bad file never aborts the install.
+ * Inputs:     dir (the table folder, current), display name.
+ * Outputs:    installed tables; skipped files/tables.
+ * Accessors:  filesystem_installWavetableTree().
+ */
+static void filesystem_installWavetable(afatfsFilePtr_t dir,
+                                        const char display[SAMPLE_DISPLAY_NAME_LEN])
+{
+    fs_install_entry_t after;
+    fs_wav_info_t first;
+    uint8_t have_first = 0u;
+    uint16_t frame_len = 0u;
+    uint8_t count = 0u;
+    uint8_t copied = 0u;
+    uint8_t i;
+    int rc;
+
+    memset(&after, 0, sizeof(after));
+    for (;;) {                                   /* Pass A */
+        if (!filesystem_installCollect(dir, 0u, &after, FS_INSTALL_BATCH)) {
+            fs_install_failed = 1u;
+            return;
+        }
+        if (fs_install_batch_count == 0u)
+            break;
+        for (i = 0u; i < fs_install_batch_count; i++) {
+            fs_wav_info_t wav;
+            uint32_t fl;
+
+            if (!filesystem_parseWav(fs_install_batch[i].short_name,
+                                     SAMPLE_INSTALL_KIND_FRAME, &wav)) {
+                fs_install_report->skipped_files++;
+                continue;
+            }
+            fl = wav.data_bytes / wav.fmt.block_align;
+            if (fl < 2u || fl > 0xffffu) {
+                fs_install_report->skipped_files++;
+            } else if (!have_first) {
+                first = wav;
+                have_first = 1u;
+                frame_len = (uint16_t)fl;
+                count = 1u;
+            } else if (wav.fmt.stored_bits == first.fmt.stored_bits &&
+                       (uint16_t)fl == frame_len &&
+                       count < WAVETABLE_MAX_FRAMES) {
+                count++;
+            } else {
+                fs_install_report->skipped_files++;
+            }
+        }
+        after = fs_install_batch[fs_install_batch_count - 1u];
+    }
+    if (!have_first)
+        return;
+    if (sampleInstall_beginWavetable(display, &first.fmt, frame_len,
+                                     count) != 0) {
+        fs_install_report->skipped_tables++;
+        return;
+    }
+    memset(&after, 0, sizeof(after));
+    for (;;) {                                   /* Pass B */
+        if (!filesystem_installCollect(dir, 0u, &after, FS_INSTALL_BATCH)) {
+            fs_install_failed = 1u;
+            return;
+        }
+        if (fs_install_batch_count == 0u)
+            break;
+        for (i = 0u; i < fs_install_batch_count && copied < count; i++) {
+            fs_wav_info_t wav;
+            uint8_t copy;
+
+            if (!filesystem_parseWav(fs_install_batch[i].short_name,
+                                     SAMPLE_INSTALL_KIND_FRAME, &wav) ||
+                wav.fmt.stored_bits != first.fmt.stored_bits ||
+                wav.data_bytes / wav.fmt.block_align != frame_len)
+                continue;
+            if (sampleInstall_setFrameFormat(&wav.fmt) != 0) {
+                fs_install_failed = 1u;
+                return;
+            }
+            copy = filesystem_installCopy(fs_install_batch[i].short_name,
+                                          wav.data_offset,
+                                          (uint32_t)frame_len *
+                                              wav.fmt.block_align, 1u);
+            if (copy == FS_COPY_READ_FAIL) {
+                sampleInstall_abortItem();
+                fs_install_report->skipped_tables++;
+                return;
+            }
+            if (copy != FS_COPY_OK) {
+                fs_install_failed = 1u;
+                return;
+            }
+            copied++;
+        }
+        after = fs_install_batch[fs_install_batch_count - 1u];
+    }
+    rc = sampleInstall_finishWavetable();
+    if (rc == -4) {
+        fs_install_report->skipped_tables++;
+        return;
+    }
+    if (rc != 0) {
+        fs_install_failed = 1u;
+        return;
+    }
+    fs_install_report->wavetables++;
+    filesystem_installProgress(FS_INSTALL_STAGE_WAVETABLES,
+                               fs_install_report->wavetables);
+}
+
+/*
+ * Walk wavetables/ (S085 C3.8).
+ *
+ * What:       every subfolder is one table named by the folder (ordering
+ *             prefix stripped, first 8 display characters, the ellipsis rule
+ *             of filesystem_displayNameFromFilename()); its files install as
+ *             that table, then its own subfolders are visited the same way
+ *             while depth + 1 < FS_INSTALL_MAX_DEPTH. Files directly in
+ *             wavetables/ belong to no table and are ignored.
+ * Why:        one folder shape for any card; the open chain stays within 5
+ *             handles (wavetables/ + 3 folders + 1 file).
+ * Inputs:     dir, depth (0 = wavetables/).
+ * Outputs:    installed tables; the CWD is dir again on return.
+ * Accessors:  filesystem_installSamplesBlocking().
+ */
+static void filesystem_installWavetableTree(afatfsFilePtr_t dir, uint8_t depth)
+{
+    fs_install_entry_t after;
+
+    memset(&after, 0, sizeof(after));
+    for (;;) {
+        afatfsFilePtr_t sub;
+        char display[SAMPLE_DISPLAY_NAME_LEN];
+
+        if (!filesystem_installCollect(dir, 1u, &after, 1u)) {
+            fs_install_failed = 1u;
+            return;
+        }
+        if (fs_install_batch_count == 0u)
+            return;
+        after = fs_install_batch[0];
+        sub = filesystem_installEnter(&after);
+        if (sub == NULL) {
+            if (fs_install_failed)
+                return;
+            fs_install_report->skipped_tables++;
+            continue;
+        }
+        filesystem_displayNameFromFilename(display,
+                                           storage_stripOrderPrefix(after.key));
+        filesystem_installWavetable(sub, display);
+        if (!fs_install_failed && (uint8_t)(depth + 1u) < FS_INSTALL_MAX_DEPTH)
+            filesystem_installWavetableTree(sub, (uint8_t)(depth + 1u));
+        filesystem_installLeave(sub);
+        if (fs_install_failed)
+            return;
+    }
+}
+
+/* Open a top-level folder and walk it (S085 C3.8); a missing folder is fine. */
+static void filesystem_installTop(const char *name,
+                                  void (*walk)(afatfsFilePtr_t, uint8_t))
+{
+    afatfsFilePtr_t dir = filesystem_blockOpenDirLfn(name);
+
+    if (dir == NULL) {
+        if (!filesystem_blockFsOk())
+            fs_install_failed = 1u;
+        return;
+    }
+    if (filesystem_blockChdir(dir))
+        walk(dir, 0u);
+    else
+        fs_install_failed = 1u;
+    (void)filesystem_blockChdir(NULL);
+    (void)filesystem_blockClose(dir);
+}
+
+uint8_t filesystem_installSamplesBlocking(fs_install_report_t *report)
+{
+    fs_install_report_t local;
+    uint8_t ok = 0u;
+
+    if (status == FS_STATUS_BUSY || !filesystem_blockFsOk())
+        return 0u;
     status = FS_STATUS_BUSY;
     current_op = FS_INTERNAL_OP_NONE;
+    fs_install_report = report ? report : &local;
+    memset(fs_install_report, 0, sizeof(*fs_install_report));
+    fs_install_failed = 0u;
+    fs_install_batch_count = 0u;
 
-    if (append) {
-        if (sampleMemory_installAppendBegin() != 0)
-            goto done;
-        planned_addr = SAMPLE_INFO_START_ADDRESS - sampleMemory_installBytesFree();
-        max_new_samples = (uint8_t)(SAMPLE_MAX_COUNT - sampleMemory_getNumSamples());
-    } else {
-        planned_addr = SAMPLE_ROM_START_ADDRESS + 4u;
-    }
-
-    sample_dir = filesystem_blockOpen(folder);
-    if (sample_dir == NULL)
+    filesystem_installProgress(FS_INSTALL_STAGE_ERASE, 0u);
+    if (sampleInstall_begin() != 0)
         goto done;
-
-    if (!filesystem_blockChdir(sample_dir))
-        goto close_dir;
-
-    if (!filesystem_scanSamples(sample_dir, planned_addr, max_new_samples))
-        goto root_and_close;
-
-    if (!append) {
-        if (sampleMemory_installBegin() != 0)
-            goto root_and_close;
+    filesystem_installProgress(FS_INSTALL_STAGE_STOCK, 0u);
+    if (sampleInstall_writeStockBlock() != 0)
+        goto done;
+    filesystem_installProgress(FS_INSTALL_STAGE_SAMPLES, 0u);
+    filesystem_installTop("samples", filesystem_installSampleTree);
+    if (fs_install_failed)
+        goto done;
+    filesystem_installProgress(FS_INSTALL_STAGE_WAVETABLES, 0u);
+    filesystem_installTop("wavetables", filesystem_installWavetableTree);
+    if (fs_install_failed)
+        goto done;
+    filesystem_installProgress(FS_INSTALL_STAGE_COMMIT, 0u);
+    if (sampleInstall_commit() == 0) {
+        fs_install_report->committed = 1u;
+        ok = 1u;
     }
-
-    ok = 1;
-    for (uint8_t i = 0; i < sample_manifest_count; i++) {
-        if (!filesystem_installOneSample(&sample_manifest[i], looped)) {
-            ok = 0;
-            break;
-        }
-    }
-
-    if (ok && sampleMemory_installCommit() != 0)
-        ok = 0;
-
-root_and_close:
-    (void)filesystem_blockChdir(NULL);
-close_dir:
-    (void)filesystem_blockClose(sample_dir);
 done:
+    fs_install_report = NULL;
     current_op = FS_INTERNAL_OP_NONE;
     status = FS_STATUS_IDLE;
     return ok;
 }
 
-uint8_t filesystem_installSamplesBlocking(void)
+void filesystem_setInstallProgress(fs_install_progress_fn fn)
 {
-    return filesystem_installSampleFolderBlocking("samples", 0, 0);
+    fs_install_progress = fn;
 }
-
-uint8_t filesystem_installLoopsBlocking(void)
-{
-    return filesystem_installSampleFolderBlocking("loops", 1, 1);
-}
-
 /* -----------------------------------------------------------------------
 ** Retired generic asyncfatfs File/Dir test operations
 **

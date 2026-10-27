@@ -51,21 +51,21 @@
 #include "modulationNode.h"
 #include "InstrumentManager.h"
 #include "Oscillator.h"
-#include "../SampleRom/SampleMemory.h"
+#include "OscRenderPool.h"
 // TODO DSP_PORT
 // #include "sequencer.h"
 
 INCCMZ ModulationNode velocityModulators[6];
-/* Oscillator waveform interpolation budget for one 32-frame DSP block.
+/* Oscillator waveform interpolation for one 32-frame block (S085 C9.3).
 **
 ** modNode_resetTargets() starts a new generation at the top of each mixer
-** block. The first OSC_WAVE_INTERP_MAX_ACTIVE eligible oscillator waveform
-** targets receive a fractional base/next pair; later eligible targets fall
-** back to integer waveform IDs for that block. This bounds CPU cost while
-** preserving the headline user-sample interpolation path. */
+** block. A wav-type oscillator waveform target receives a fractional
+** base/next pair when OscRenderPool grants one unit; ongoing itp crossfades
+** claimed theirs first, new itp crossfades claim after modulation. Refused
+** targets snap to their integer waveform for that block. pwm/smp/slp/wtb
+** never interpolate (their wav row is already continuous). */
 static INCCMZ uint8_t modNode_waveInterpEnabled = 0;
 static INCCMZ uint32_t modNode_waveInterpGeneration = 1u;
-static INCCMZ uint8_t modNode_waveInterpActiveCount = 0u;
 
 static OscInfo* modNode_getWaveTargetOsc(uint16_t param)
 {
@@ -73,14 +73,18 @@ static OscInfo* modNode_getWaveTargetOsc(uint16_t param)
 	return 0;
 }
 
+/*
+ * Highest wav-list value (S085 C9.3).
+ *
+ * What:       OSC_STOCK_WAVE_COUNT - 1 (10, swa).
+ * Why:        samples left the wav list (plan §4.3.5); the per-slot range of
+ *             the other types comes from InstrumentManager's domain (C13.6).
+ * Accessors:  the interpolation clamp below; InstrumentManager.c (wav-type
+ *             domain).
+ */
 uint8_t modNode_getMaxWaveformIndex(void)
 {
-	const uint8_t sampleCount = sampleMemory_getNumSamples();
-	const uint16_t maxWave = (uint16_t)OSC_SAMPLE_START + sampleCount;
-	if (maxWave == 0u) {
-		return CRASH;
-	}
-	return (uint8_t)(maxWave - 1u);
+	return (uint8_t)(OSC_STOCK_WAVE_COUNT - 1u);
 }
 
 static float modNode_clampFloat(float value, float min, float max)
@@ -435,7 +439,6 @@ void modNode_resetTargets()
 	modNode_waveInterpGeneration++;
 	if (modNode_waveInterpGeneration == 0u)
 		modNode_waveInterpGeneration = 1u;
-	modNode_waveInterpActiveCount = 0u;
 	for(i=0;i<6;i++)
 		modNode_restoreTarget(&velocityModulators[i]);
 	instrumentManager_visitRuntimeLfoNodes(modNode_restoreLfoPair, 0);
@@ -770,7 +773,7 @@ void modNode_updateValuePolarity(ModulationNode* vm, float val, uint8_t polarity
 			OscInfo *osc = (vm->destinationMode == MOD_NODE_DEST_DIRECT_PARAMETER)
 				? (OscInfo *)vm->waveInterpTarget
 				: modNode_getWaveTargetOsc(vm->destination);
-			if (osc && modNode_waveInterpActiveCount < OSC_WAVE_INTERP_MAX_ACTIVE) {
+			if (osc && osc->oscType == OSC_TYPE_WAV && oscRenderPool_claim(1u)) {
 				const uint8_t maxWave = modNode_getMaxWaveformIndex();
 					if (modulated > maxWave) {
 						modulated = maxWave;
@@ -792,7 +795,6 @@ void modNode_updateValuePolarity(ModulationNode* vm, float val, uint8_t polarity
 					osc->waveInterpNext = next;
 					osc->waveInterpFrac = frac;
 					osc->waveInterpGeneration = modNode_waveInterpGeneration;
-					modNode_waveInterpActiveCount++;
 					break;
 				}
 		}

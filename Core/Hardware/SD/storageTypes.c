@@ -2448,3 +2448,103 @@ void storage_instrumentCopyMainToMorphFallback(storage_instrument_type_t type,
         }
     }
 }
+
+/*
+ * Natural, numeric-aware name order (S085 C3.2).
+ *
+ * What:       compares two names run by run: digit runs as numbers (leading
+ *             zeros skipped, longer run first, then digit by digit, fewer
+ *             leading zeros first on a tie), everything else case-insensitively.
+ * Why:        deterministic human ordering for the installer's card walk.
+ * Inputs:     a, b.  Outputs: -1, 0, 1.
+ * Accessors:  filesystem_installCompare(), tools/dsp_test/test_natural_order.c.
+ * Affiliates: storage_stripOrderPrefix().
+ *             Pure string code; no asyncfatfs calls.
+ */
+int8_t storage_naturalCompare(const char *a, const char *b)
+{
+    const char *pa = a;
+    const char *pb = b;
+    int8_t zero_tie = 0;
+
+    if (!a || !b)
+        return (int8_t)((!a && !b) ? 0 : (!a ? -1 : 1));
+    while (*pa != '\0' && *pb != '\0') {
+        if (*pa >= '0' && *pa <= '9' && *pb >= '0' && *pb <= '9') {
+            const char *za = pa;
+            const char *zb = pb;
+            const char *ea;
+            const char *eb;
+            uint16_t la;
+            uint16_t lb;
+            uint16_t i;
+
+            while (*za == '0')
+                za++;
+            while (*zb == '0')
+                zb++;
+            for (ea = za; *ea >= '0' && *ea <= '9'; ea++)
+                ;
+            for (eb = zb; *eb >= '0' && *eb <= '9'; eb++)
+                ;
+            la = (uint16_t)(ea - za);
+            lb = (uint16_t)(eb - zb);
+            if (la != lb)
+                return (int8_t)((la < lb) ? -1 : 1);
+            for (i = 0u; i < la; i++) {
+                if (za[i] != zb[i])
+                    return (int8_t)((za[i] < zb[i]) ? -1 : 1);
+            }
+            if (zero_tie == 0 && (za - pa) != (zb - pb))
+                zero_tie = (int8_t)(((za - pa) < (zb - pb)) ? -1 : 1);
+            pa = ea;
+            pb = eb;
+            continue;
+        }
+        {
+            char ca = *pa;
+            char cb = *pb;
+
+            if (ca >= 'A' && ca <= 'Z')
+                ca = (char)(ca + ('a' - 'A'));
+            if (cb >= 'A' && cb <= 'Z')
+                cb = (char)(cb + ('a' - 'A'));
+            if (ca != cb)
+                return (int8_t)((ca < cb) ? -1 : 1);
+        }
+        pa++;
+        pb++;
+    }
+    if (*pa != '\0')
+        return 1;
+    if (*pb != '\0')
+        return -1;
+    return zero_tie;
+}
+
+/*
+ * Display start after an ordering prefix (S085 C3.2).
+ *
+ * What:       skips a leading digit run followed by a run of ' ', '_' or '-'
+ *             and returns the remainder when it is not empty; otherwise
+ *             returns name unchanged.
+ * Why:        "003 hvoice" orders by its number and shows as "hvoice".
+ * Inputs:     name.  Outputs: a pointer into name.
+ * Accessors:  filesystem_installWavetableTree().
+ * Affiliates: storage_naturalCompare().
+ *             Pure string code; no asyncfatfs calls.
+ */
+const char *storage_stripOrderPrefix(const char *name)
+{
+    const char *p = name;
+
+    if (!name)
+        return name;
+    while (*p >= '0' && *p <= '9')
+        p++;
+    if (p == name || (*p != ' ' && *p != '_' && *p != '-'))
+        return name;
+    while (*p == ' ' || *p == '_' || *p == '-')
+        p++;
+    return (*p != '\0') ? p : name;
+}

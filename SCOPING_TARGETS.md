@@ -1640,6 +1640,15 @@ Grounding from actual granular-synthesis practice, since this is new DSP territo
 
 ### 7.4 New oscillators
 
+- **Built in S085 (P1):** the `wtb` wavetable type, the `pwm` families,
+  and installed-sample playback (`smp`/`slp`) are implemented. Cards use
+  `wavetables/<table>/NN.wav` (one folder = one table; the reference set is
+  `SD_CARD/wavetables/ak_hvox`); `/loops` is retired. See
+  `INSTRUMENTS_DSP_REFERENCE.md` §12 and `FILESYSTEM_SPEC.md`
+  "S085 — Sample flash catalogue v2 and the installer". Also built: run modes
+  `rst fre itp`, Drum `mod` `snc`/`rng` (constant-cost hard sync), the
+  five stock waves. The buffer oscillator and swarm remain future work.
+
 - **Wavetable.** Reads `.wav` files of any length from numbered folders under root `Wavetable/` (confirmed by your answer — not a fixed single-cycle format, no Serum-style multi-frame container). Morphable (interpolating between two selected waves) but not modulatable directly; scanning through a wavetable set happens via LFO or envelope targeting the wavetable-position parameter, same as any other modulatable parameter.
 - **PWM.** You flagged this as "probably wavetables, but suggest another method if you have one" — a direct suggestion: implementing PWM as a genuine variable-duty-cycle square calculation (compare the oscillator's phase accumulator against a duty-cycle threshold instead of the fixed 50% used by `REC`) is cheaper than storing a set of wavetable frames at different duty cycles, and only needs one new parameter (duty cycle) rather than wavetable memory. The tradeoff is the same aliasing consideration as any hard-edged digital waveform on this platform (no oversampling budget), so it inherits the same character as the existing `SAW`/`REC` waveforms rather than being cleaner than them — which is likely fine, since they're presumably an accepted part of the current sound already.
 - **Buffer oscillator.** Reads from a defined portion of the shared DTCM buffer described in Phase 5.6, using the same scanning parameters as the granular oscillator/instrument (position, loop size, retrigger, rate/sync, retrigger randomization). Its ownership and read/write relationship with the Effect must be specified so a Scene or Effect change cannot invalidate the Instrument's slice. It can share scanning code with 7.2's granular instrument.

@@ -40,6 +40,8 @@
 #include "modulationNode.h"
 #include "InstrumentManager.h"
 #include "voicePostChain.h"
+#include "OscillatorSample.h"
+#include "OscRenderPool.h"
 // TODO DSP_PORT
 // #include "TriggerOut.h"
 #include "config.h"
@@ -111,10 +113,14 @@ void Cymbal_initVoice(CymbalVoice *voice)
 	voice->volumeMod = 1;
 
 	slopeEg2_init(&voice->oscVolEg);
+	/* S085 P2: no retrigger ramp pending. */
+	voice->lastAmpGain = 0.0f;
+	voice->ampRampArm = 0u;
 
 	SVF_init(&voice->filter);
 
 	lfo_init(&voice->lfo);
+	oscSection_init(&voice->section);
 
 }
 //---------------------------------------------------
@@ -145,26 +151,73 @@ void Cymbal_triggerVoice(CymbalVoice *voice, const uint8_t source_slot,
 	 */
 	instrumentManager_applyVelocityModulationTarget(source_slot, vel/127.f);
 
-	float offset = 1;
-	if(voice->transGen.waveform==1) //offset mode
+	/*
+	 * Run mode decides the trigger resets (S085 C11.4).
+	 *
+	 * What:       rst: today's resets (carrier at its start phase, both
+	 *             modulators to 0 / sample start); fre: no reset, all three
+	 *             slew; itp: the carrier is snapshotted and reset, the
+	 *             modulators slew (so an itp hit's FM attack is not identical
+	 *             from hit to hit; rst is, plan §4.3.7).
+	 */
 	{
-		offset -= voice->transGen.volume;
-	}
-	if(voice->osc.waveform == SINE)
-		voice->osc.phase = (0x3ff<<20)*offset;
-	else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)
-		voice->osc.phase = (0xff<<20)*offset;
-	else
-		voice->osc.phase = 0;
+		OscInfo* const mods[2] = { &voice->modOsc, &voice->modOsc2 };
+		const uint8_t reset = oscSection_beginTrigger(&voice->section,
+		                                              &voice->osc, mods, 2u);
+		uint8_t m;
 
-	voice->modOsc.phase = 0;
-	voice->modOsc2.phase = 0;
+		if (reset != OSC_TRIGGER_RESET_NONE) {
+			float offset = 1;
+			if(voice->transGen.waveform==1) //offset mode
+				offset -= voice->transGen.volume;
+			if (voice->osc.oscType == OSC_TYPE_SMP ||
+			    voice->osc.oscType == OSC_TYPE_SLP)
+				oscSample_restart(&voice->osc);
+			else if (voice->osc.oscType != OSC_TYPE_WAV ||
+			         osc_isTableWave(voice->osc.waveform))
+				voice->osc.phase = (0xff<<20)*offset;
+			else if (voice->osc.waveform == SINE)
+				voice->osc.phase = (0x3ff<<20)*offset;
+			else
+				voice->osc.phase = 0;
+		}
+		if (reset == OSC_TRIGGER_RESET_ALL) {
+			for (m = 0u; m < 2u; m++) {
+				if (mods[m]->oscType == OSC_TYPE_SMP ||
+				    mods[m]->oscType == OSC_TYPE_SLP)
+					oscSample_restart(mods[m]);
+				else
+					mods[m]->phase = 0;
+			}
+		}
+	}
 
 	osc_setBaseNote(&voice->osc,note);
 	osc_setBaseNote(&voice->modOsc,note);
 	osc_setBaseNote(&voice->modOsc2,note);
 
-	slopeEg2_trigger(&voice->oscVolEg);
+	/*
+	 * Amp envelope retrigger by run mode (S085 P2).
+	 *
+	 * What:       rst: slopeEg2_trigger(), exactly as before. fre/itp: the
+	 *             attack starts at the last block's envelope gain
+	 *             (egValueOscVol) and, when audible, the next block ramps
+	 *             from the previous amp gain (ampRampArm).
+	 * Why:        the decay -> attack curve switch and the per-block constant
+	 *             gain stepped the output on the retrigger sample.
+	 * Inputs:     section.runMode, egValueOscVol, the envelope.
+	 * Outputs:    oscVolEg, ampRampArm.
+	 * Affiliates: Cymbal_calcSyncBlockVoice(), slopeEg2_retriggerFrom(),
+	 *             slopeEg2_isAudibleGain().
+	 */
+	if (voice->section.runMode == OSC_RUN_RST) {
+		slopeEg2_trigger(&voice->oscVolEg);
+	} else {
+		const float gainNow = voice->egValueOscVol;
+
+		slopeEg2_retriggerFrom(&voice->oscVolEg, gainNow);
+		voice->ampRampArm = slopeEg2_isAudibleGain(gainNow);
+	}
 	voice->velo = vel/127.f;
 
 	transient_trigger(&voice->transGen);
@@ -237,14 +290,19 @@ void Cymbal_calcSyncBlockVoice(CymbalVoice *voice, int16_t* buf,
 	static int16_t mod[OUTPUT_DMA_SIZE];
 	static int16_t mod2[OUTPUT_DMA_SIZE];
 
-	//calc next mod osc sample
-	calcNextOscSampleBlock(&voice->modOsc,mod,size,voice->fmModAmount1);
-	calcNextOscSampleBlock(&voice->modOsc2,mod2,size,voice->fmModAmount2);
+	/* S085 C11.4: two-modulator FM through OscSection (bit-identical with no
+	** crossfade); itp renders the old carrier with the same summed modulator
+	** and crossfades. */
+	{
+		OscInfo* const old = oscSection_itpCarrier(&voice->section);
+		int16_t* const oldBuf = old ? oscRenderPool_scratch() : 0;
 
-	//combine both mod oscs to 1 modulation signal
-	bufferTool_addBuffersSaturating(mod,mod2,size);
-
-	calcNextOscSampleFmBlock(&voice->osc,mod,buf,size,1.f) ;
+		oscSection_renderFm2(&voice->osc, &voice->modOsc, &voice->modOsc2,
+		                     voice->fmModAmount1, voice->fmModAmount2, 1.f,
+		                     buf, mod, mod2, size, old, oldBuf);
+		if (old)
+			oscSection_blendItp(&voice->section, buf, oldBuf, size);
+	}
 	SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);
 
 	//calc transient sample
@@ -261,11 +319,28 @@ void Cymbal_calcSyncBlockVoice(CymbalVoice *voice, int16_t* buf,
 	 * Accessors:  this render function.
 	 * Affiliates: voicePostChain.h and the Step 4 host/ARM checks.
 	 */
+	/*
+	 * Amp ramp endpoints and the arm (S085 P2).
+	 *
+	 * What:       as Snare (C4.4): the armed retrigger block ramps from
+	 *             lastAmpGain; other blocks are flat; then record and clear.
+	 * Why:        removes the retrigger step in fre/itp; rst unchanged.
+	 * Inputs:     volumeMod, velo, egValueOscVol, lastAmpGain, ampRampArm.
+	 * Outputs:    buf; lastAmpGain; ampRampArm = 0.
+	 * Affiliates: voicePost_addGainDist(), Cymbal_triggerVoice().
+	 */
 	{
 		const float ampGain = voice->volumeMod
 			? voice->velo * voice->egValueOscVol
 			: voice->egValueOscVol;
-		voicePost_addGainDist(buf, mod, ampGain, &voice->distortion, size);
+		const float lastAmpGain = voice->ampRampArm
+			? voice->lastAmpGain : ampGain;
+
+		voicePost_addGainDist(buf, mod, ampGain, lastAmpGain,
+		                      &voice->distortion, size);
+		voice->lastAmpGain = ampGain;
+		voice->ampRampArm = 0u;
 	}
+	oscSection_finishBlock(&voice->section, size);
 }
 //---------------------------------------------------

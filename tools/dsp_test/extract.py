@@ -39,8 +39,19 @@ def find_function(text, name):
                     break
             i += 1
         j = i + 1
-        while j < len(text) and text[j] in ' \t\r\n':
-            j += 1
+        # S085 A7: skip blanks and comments between ')' and '{'
+        # (frozen85 freq2PhaseIncr() has a trailing '//4096').
+        while j < len(text):
+            if text[j] in ' \t\r\n':
+                j += 1
+            elif text.startswith('//', j):
+                nl = text.find('\n', j)
+                j = len(text) if nl < 0 else nl + 1
+            elif text.startswith('/*', j):
+                end = text.find('*/', j + 2)
+                j = len(text) if end < 0 else end + 2
+            else:
+                break
         if j < len(text) and text[j] == '{':
             end = _match_block(text, j)
             if end > 0:
@@ -49,7 +60,9 @@ def find_function(text, name):
 
 
 def find_object(text, name):
-    m = re.search(r'^[^\n;#]*\b' + re.escape(name) + r'\s*\[[^\]]*\]\s*=\s*\{',
+    # S085 C17.2: allow several bracket groups (sawTable[11][1024]).
+    m = re.search(r'^[^\n;#]*\b' + re.escape(name) +
+                  r'\s*(?:\[[^\]]*\])+\s*=\s*\{',
                   text, re.M)
     if not m:
         return None

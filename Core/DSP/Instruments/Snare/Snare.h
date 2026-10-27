@@ -48,6 +48,7 @@
 #include "BufferTools.h"
 #include "lfo.h"
 #include "snapEg.h"
+#include "OscSection.h"
 
 #define USE_PEAK 0
 //------------------------------------------------------------------------
@@ -91,12 +92,45 @@ typedef struct SnareStruct
 
 	SlopeEg2		oscVolEg;
 	float 		egValueOscVol;
+	/*
+	 * Retrigger ramp state (S085 P2).
+	 *
+	 * What:       lastAmpGain = the amp gain (envelope x velocity when
+	 *             volumeMod is on) the post-chain applied to the previous
+	 *             block; ampRampArm = 1 for the one block after a fre/itp
+	 *             trigger that found the voice still audible.
+	 * Why:        that block ramps from the previous gain, so neither the
+	 *             envelope restart nor a new velocity steps the output; all
+	 *             other blocks use equal endpoints (rst unchanged).
+	 * Writers:    Snare_triggerVoice() (arm), Snare_calcSyncBlockVoice()
+	 *             (lastAmpGain every block; clears the arm),
+	 *             Snare_initVoice().
+	 * Readers:    Snare_calcSyncBlockVoice().
+	 * Affiliates: voicePost_mixAddGainDist(), slopeEg2_isAudibleGain(); the
+	 *             1,176 B slot _Static_assert in InstrumentManager.c.
+	 */
+	float lastAmpGain;
+	uint8_t ampRampArm;
 
 	Distortion distortion;
 	SnapEg snapEg;
 
 	uint8_t volumeMod;	//modulate volume by midi velocity if 1
 
+	/*
+	 * Oscillator section state (S085 C11.1).
+	 *
+	 * What:       run mode, the itp carrier snapshot and crossfade, and the
+	 *             filter slew for this voice (OscSection.h).
+	 * Why:        plan §4.3.7: run modes apply per voice; the snapshot holds
+	 *             one carrier (about 140 B), inside the runtime-slot reserve.
+	 * Inputs:     the run row (IM_SPECIAL_RUN_MODE); triggers; pool grants.
+	 * Outputs:    used by this engine's trigger and render, and by
+	 *             InstrumentManager (filter recalc, claims).
+	 * Accessors:  this engine's .c, InstrumentManager.c.
+	 * Affiliates: OscSection.c, OscRenderPool.c.
+	 */
+	OscSectionState section;
 } SnareVoice;
 
 /*

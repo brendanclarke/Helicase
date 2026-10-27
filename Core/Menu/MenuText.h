@@ -40,8 +40,6 @@
 static const char menuText_ok[]    = "ok ";
 static const char menuText_off[]   = "off";
 static const char menuText_on[]    = "on ";
-static const char menuText_mix[]   = "mix";
-static const char menuText_fm[]    = "fm ";
 static const char menuText_dash[]  = "---";
 static const char menuText_blank[] = "   ";
 static const char menuText_any[]   = "any";
@@ -125,8 +123,41 @@ static const char extSyncNames[][4] = {
 static const char trackPlayModeNames[][4] = {
     {6}, {"fwd"},{"rev"},{"pip"},{"rnd"},{"onc"},{"1fr"},
 };
+/*
+ * wav list (S085 C15.3).
+ * What: the six original waves and the five generated stock waves; index =
+ * stored wav value. The stock names are capitalised like the originals
+ * (P2 §14: Re3 Sw3 ReA TrA SwA for SQ3 SW3 SQA TRA SWA).
+ * Affiliates: Oscillator.h SQ3..SWA, OSC_STOCK_WAVE_COUNT.
+ */
 static const char waveformNames[][4] = {
-    {6}, {"Sin"},{"Tri"},{"Saw"},{"Rec"},{"Noi"},{"Cym"},
+    {11}, {"Sin"},{"Tri"},{"Saw"},{"Rec"},{"Noi"},{"Cym"},
+    {"Re3"},{"Sw3"},{"ReA"},{"TrA"},{"SwA"},
+};
+
+/*
+ * Oscillator section name tables (S085 C15.3).
+ *
+ * What:       [0][0] = count; [1..] = the three-character names in stored
+ *             order. oscTypeNames: typ (Oscillator.h OSC_TYPE_*);
+ *             runModeNames: run (OSC_RUN_*); pwmFamilyNames: wav under pwm
+ *             (OSC_PWM_*; no "p" prefix, typ already says pwm, P2 §14);
+ *             mixFmNames: the Drum FM mode row (OSC_MOD_*).
+ * Why:        plan §5 item 7; count asserts in menu.c keep them in step with
+ *             the DSP constants (C15.8).
+ * Accessors:  menu.c formatted cells and the DTYPE_MIX_FM sites.
+ */
+static const char oscTypeNames[][4] = {
+    {5}, {"wav"},{"pwm"},{"smp"},{"slp"},{"wtb"},
+};
+static const char runModeNames[][4] = {
+    {3}, {"rst"},{"fre"},{"itp"},
+};
+static const char pwmFamilyNames[][4] = {
+    {6}, {"Rec"},{"Saw"},{"Tri"},{"Re3"},{"Sw3"},{"Swp"},
+};
+static const char mixFmNames[][4] = {
+    {4}, {"fm "},{"mix"},{"snc"},{"rng"},
 };
 static const char outputNames[][7] = {
     {6}, {"St1"},{"St2"},{"L1"},{"R1"},{"L2"},{"R2"},

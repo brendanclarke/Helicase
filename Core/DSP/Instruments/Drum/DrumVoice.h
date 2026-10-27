@@ -49,6 +49,7 @@
 #include "transientGenerator.h"
 #include "snapEg.h"
 #include "dither.h"
+#include "OscSection.h"
 //------------------------------------------------------------------------
 enum
 {
@@ -82,7 +83,9 @@ typedef struct VoiceStruct
 	TransientGenerator transGen;
 	Lfo 		lfo;
 	SlopeEg2	oscVolEg;
-	float 		egValueOscVol;
+	/* S085 P2 F-A: the unused float egValueOscVol was removed here (Drum keeps
+	** its envelope gain in ampFilterInput); its 4 B pay for lastFmMod, so the
+	** P2 growth stays within the approved +8 B. */
 	float 		volEgValueBlock[OUTPUT_DMA_SIZE];
 	Distortion distortion;
 
@@ -98,6 +101,40 @@ typedef struct VoiceStruct
 #if (AMP_EG_SYNC==0)
 	float ampFilterInput;
 	float lastGain;
+	/*
+	 * Retrigger ramp state (S085 P2).
+	 *
+	 * What:       lastVeloGain = the velocity gain the post-chain applied to
+	 *             the previous block (velo, or 1.0 with volumeMod off);
+	 *             ampRampArm = 1 for the one block after a fre/itp trigger
+	 *             that found the voice still audible.
+	 * Why:        that block ramps the envelope gain (even at attack 0) and
+	 *             the velocity gain from the previous block's values, so the
+	 *             retrigger has no step. Every other block uses equal
+	 *             endpoints (rst is unchanged).
+	 * Writers:    Drum_triggerVoice() (arm), Drum_calcVoiceSyncBlock()
+	 *             (lastVeloGain every block; clears the arm),
+	 *             Drum_initVoice().
+	 * Readers:    Drum_calcVoiceAsync(), Drum_calcVoiceSyncBlock().
+	 * Affiliates: voicePost_drum(), slopeEg2_isAudibleGain(); the 1,176 B
+	 *             slot _Static_assert in InstrumentManager.c.
+	 */
+	float lastVeloGain;
+	uint8_t ampRampArm;
+	/*
+	 * FM depth of the previous block (S085 P2 F-A).
+	 *
+	 * What:       the carrier's fmMod (fmModAmount x pitch envelope) used by
+	 *             the last rendered block.
+	 * Why:        the armed retrigger block ramps the FM depth from this
+	 *             value to the new one (oscSection_renderDrumRamped()), so
+	 *             the pitch-envelope restart does not jump the carrier's
+	 *             read phase in fre.
+	 * Writers:    Drum_calcVoiceSyncBlock() (every block), Drum_initVoice().
+	 * Readers:    Drum_calcVoiceSyncBlock().
+	 * Affiliates: Drum_calcVoiceAsync() (osc.fmMod), ampRampArm.
+	 */
+	float lastFmMod;
 #endif
 
 #if ENABLE_MIX_OSC
@@ -111,6 +148,20 @@ typedef struct VoiceStruct
 	uint8_t volumeMod;	//modulate volume by midi velocity if 1
 
 	Dither dither;
+	/*
+	 * Oscillator section state (S085 C11.1).
+	 *
+	 * What:       run mode, the itp carrier snapshot and crossfade, and the
+	 *             filter slew for this voice (OscSection.h).
+	 * Why:        plan §4.3.7: run modes apply per voice; the snapshot holds
+	 *             one carrier (about 140 B), inside the runtime-slot reserve.
+	 * Inputs:     the run row (IM_SPECIAL_RUN_MODE); triggers; pool grants.
+	 * Outputs:    used by this engine's trigger and render, and by
+	 *             InstrumentManager (filter recalc, claims).
+	 * Accessors:  this engine's .c, InstrumentManager.c.
+	 * Affiliates: OscSection.c, OscRenderPool.c.
+	 */
+	OscSectionState section;
 } DrumVoice;
 //------------------------------------------------------------------------
 

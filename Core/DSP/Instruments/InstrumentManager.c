@@ -14,6 +14,11 @@
 #include "HiHat.h"
 #include "mixer.h"
 #include "modulationNode.h"
+#include "OscSection.h"
+#include "OscillatorSample.h"
+#include "OscillatorWavetable.h"
+#include "OscRenderPool.h"
+#include "SampleMemory.h"
 #include "menu.h"
 #include "valueShaper.h"
 #include "config.h"
@@ -159,14 +164,25 @@ static instrument_type_t runtime_slot_type[INSTRUMENT_SLOT_COUNT];
  *
  * Inputs: SceneData selects one engine type for each visible slot. Output: one
  * union member per slot supplies that engine's complete DSP state. The 1,176 B
- * reserve is twice the current largest engine state and is future-engine
- * capacity, not a second active engine. runtime_slot_type selects the only
- * member that may be read or rendered; fixed globals and per-engine slot pools
- * are deliberately absent so adding an engine cannot multiply SRAM by type.
+ * reserve is fixed (S085 C13.2) and is future-engine capacity, not a second
+ * active engine. runtime_slot_type selects the only member that may be read
+ * or rendered; fixed globals and per-engine slot pools are deliberately
+ * absent so adding an engine cannot multiply SRAM by type.
  */
-#define INSTRUMENT_RUNTIME_CURRENT_MAX_BYTES sizeof(DrumVoice)
-#define INSTRUMENT_RUNTIME_SLOT_BYTES \
-    (2u * INSTRUMENT_RUNTIME_CURRENT_MAX_BYTES)
+/*
+ * Fixed tagged-slot reserve (S085 C13.2).
+ *
+ * What:       1,176 B per slot, the established reserve (formerly expressed
+ *             as twice the largest engine, 2 x 588 B).
+ * Why:        S085 adds the oscillator type/slew fields and each engine's
+ *             OscSectionState; 2 x sizeof(DrumVoice) would grow the reserve
+ *             with them (six slots of new SRAM). The growth is approved inside
+ *             the existing reserve only; the _Static_asserts below prove the
+ *             fit (estimates: Drum ~824, Snare ~656, Cymbal ~760, HiHat
+ *             ~768 B; measured at G3).
+ * Affiliates: STORAGE_SRAM_MANIFEST.md, the asserts below.
+ */
+#define INSTRUMENT_RUNTIME_SLOT_BYTES 1176u
 typedef union {
     DrumVoice drum;
     SnareVoice snare;
@@ -222,6 +238,15 @@ static uint8_t instrumentManager_writeRuntimeInternal(
     uint8_t slot, const ParamDescriptor *descriptor,
     instrument_param_value_t value,
     uint8_t notify_base_change);
+static const ParamDescriptor *instrumentManager_lfoAdapterDescriptor(
+    const instrument_lfo_target_adapter_t *adapter);
+static uint8_t instrumentManager_installVelocityModulationTarget(
+    uint8_t source_slot, uint16_t destination);
+static uint8_t instrumentManager_descriptorModDomainForSlot(
+    uint8_t slot, const ParamDescriptor *descriptor,
+    instrument_mod_domain_t *domain_out);
+static void instrumentManager_refreshWaveDomains(uint8_t slot);
+static OscInfo *instrumentManager_carrier(uint8_t slot);
 
 static DrumVoice *instrumentManager_drumRuntime(uint8_t slot)
 {
@@ -740,6 +765,112 @@ static uint8_t instrumentManager_descriptorSupportsModulationRange(
      * just because their storage happens to be a byte.
      */
     return instrumentManager_descriptorModDomain(descriptor, 0);
+}
+
+/*
+ * Modulation domain for a slot's descriptor (S085 C13.6).
+ *
+ * What:       the descriptor domain, with an OSC_WAVE row's maximum taken
+ *             from that slot oscillator's current type (wav: 10; pwm: 5;
+ *             smp/slp/wtb: installed count - 1).
+ * Why:        LFO and velocity sweeps of wav stay inside the selected type's
+ *             range (plan §5 item 5); S085 D11 makes every domain use of the
+ *             row slot-aware.
+ * Inputs:     slot, descriptor.  Outputs: *domain_out; 1 when modulatable.
+ * Accessors:  resolveModulationTarget(), buildModulationRange(),
+ *             noteRuntimeValueChanged(), refreshWaveDomains().
+ */
+static uint8_t instrumentManager_descriptorModDomainForSlot(
+    uint8_t slot, const ParamDescriptor *descriptor,
+    instrument_mod_domain_t *domain_out)
+{
+    instrument_mod_domain_t domain;
+
+    if (!instrumentManager_descriptorModDomain(descriptor, &domain))
+        return 0u;
+    if ((descriptor->runtime.special & IM_SPECIAL_WRITER_MASK) ==
+        IM_SPECIAL_OSC_WAVE) {
+        OscInfo *osc = instrumentManager_oscForDescriptor(slot, descriptor);
+
+        if (!osc)
+            return 0u;
+        domain.max_value = instrumentManager_oscWaveMaxForType(osc->oscType);
+    }
+    if (domain_out)
+        *domain_out = domain;
+    return 1u;
+}
+
+/*
+ * Refresh a slot's wav modulation domains after a type change (S085 C13.6).
+ *
+ * What:       every active LFO adapter targeting an OSC_WAVE row of `slot`
+ *             recomputes its domain and re-derives its base from the
+ *             oscillator's retained waveRequest (clamped); every velocity node
+ *             whose direct destination is such a row is reinstalled so its
+ *             cached range follows.
+ * Accessors:  the IM_SPECIAL_OSC_TYPE writer.
+ * Affiliates: instrumentManager_installVelocityModulationTarget().
+ */
+static void instrumentManager_refreshWaveDomains(uint8_t slot)
+{
+    uint8_t source;
+    uint8_t pair;
+
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    for (source = 0u; source < INSTRUMENT_SLOT_COUNT; source++) {
+        ModulationNode *node = &velocityModulators[source];
+
+        for (pair = 0u; pair < 2u; pair++) {
+            instrument_lfo_target_adapter_t *adapter =
+                &lfo_descriptor_targets[source][pair];
+            const ParamDescriptor *d;
+
+            if (!adapter->active || adapter->slot != slot)
+                continue;
+            d = instrumentManager_lfoAdapterDescriptor(adapter);
+            if (!d || (d->runtime.special & IM_SPECIAL_WRITER_MASK) !=
+                          IM_SPECIAL_OSC_WAVE)
+                continue;
+            /*
+             * Base re-derivation (assessment A9 fix).
+             *
+             * What:       the LFO base becomes the retained wav request
+             *             clamped to the new type's domain, not the old base
+             *             clamped. waveRequest holds the last retained wav
+             *             byte (menu, MIDI, load, Morph, automation; D2), so
+             *             it survives a pwm -> wav -> pwm round trip.
+             * Why:        clamping the old base made a narrowing change (to
+             *             wav, max 10) permanent: back on pwm/smp/wtb the LFO
+             *             still centred on 10 and its restore wrote 10, while
+             *             the oscillator itself re-derived the full request.
+             */
+            if (instrumentManager_descriptorModDomainForSlot(slot, d,
+                                                            &adapter->domain)) {
+                const OscInfo *osc =
+                    instrumentManager_oscForDescriptor(slot, d);
+                const uint8_t request = osc ? osc->waveRequest
+                                            : (uint8_t)adapter->base_value;
+
+                adapter->base_value =
+                    (request > adapter->domain.max_value)
+                        ? adapter->domain.max_value : request;
+            }
+        }
+        if (node->destinationMode == MOD_NODE_DEST_DIRECT_PARAMETER &&
+            instrumentParam_isVoiceParameter(node->destination) &&
+            instrumentParam_slot(node->destination) == slot) {
+            const ParamDescriptor *d = instrumentManager_descriptor(
+                instrumentManager_slotType(slot),
+                instrumentParam_local(node->destination));
+
+            if (d && (d->runtime.special & IM_SPECIAL_WRITER_MASK) ==
+                         IM_SPECIAL_OSC_WAVE)
+                (void)instrumentManager_installVelocityModulationTarget(
+                    source, node->destination);
+        }
+    }
 }
 
 static uint8_t instrumentManager_descriptorIsSlotDecimationTarget(
@@ -1551,6 +1682,31 @@ void instrumentManager_dispatchRuntimeLfos(void)
     }
 }
 
+/*
+ * Keep ongoing itp crossfades (S085 C13.7).
+ * Accessors: mixer_calcNextSampleBlock() before modulation.
+ */
+void instrumentManager_claimOscSectionOngoing(void)
+{
+    uint8_t slot;
+
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++)
+        oscSection_claimOngoing(instrumentManager_oscSection(slot));
+}
+
+/*
+ * Claim new itp crossfades (S085 C13.7).
+ * Accessors: mixer_calcNextSampleBlock() after modulation.
+ */
+void instrumentManager_claimOscSectionPending(void)
+{
+    uint8_t slot;
+
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++)
+        oscSection_claimPending(instrumentManager_oscSection(slot),
+                                instrumentManager_carrier(slot));
+}
+
 void instrumentManager_recalcRuntimeLfoSync(void)
 {
     uint8_t slot;
@@ -1667,23 +1823,26 @@ void instrumentManager_recalcSlotFilter(uint8_t slot)
      * rather than folded into mixer.c because filter ownership depends on the
      * instrument currently loaded into the slot, not on the physical voice
      * number.
+     * S085 C13.8: through the oscillator section. rst is exactly
+     * SVF_recalcFreq() (S0); fre/itp slew cutoff and resonance (Q15).
+     * Affiliates: oscSection_filterRecalc(), SVF_recalcFreqFrom().
      */
     switch (instrumentManager_slotType(slot)) {
     case INSTRUMENT_TYPE_DRM: {
         DrumVoice *voice = instrumentManager_drumRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) oscSection_filterRecalc(&voice->section, &voice->filter);
         break; }
     case INSTRUMENT_TYPE_SNR: {
         SnareVoice *voice = instrumentManager_snareRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) oscSection_filterRecalc(&voice->section, &voice->filter);
         break; }
     case INSTRUMENT_TYPE_CYM: {
         CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) oscSection_filterRecalc(&voice->section, &voice->filter);
         break; }
     case INSTRUMENT_TYPE_HAT: {
         HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) oscSection_filterRecalc(&voice->section, &voice->filter);
         break; }
     default:
         break;
@@ -2041,6 +2200,123 @@ static OscInfo *instrumentManager_oscBySelector(uint8_t slot, uint8_t selector)
     }
 }
 
+/*
+ * Wav-row maximum for a type (S085 C13.5; P2 §14 row swap).
+ * What: 10 for wav, 5 for pwm, count-1 for samples/tables (0 when none).
+ * Accessors: writers, domain, formatter.
+ */
+uint8_t instrumentManager_oscWaveMaxForType(uint8_t oscType)
+{
+    uint8_t count;
+
+    switch (oscType) {
+    case OSC_TYPE_PWM:
+        return (uint8_t)(OSC_PWM_FAMILY_COUNT - 1u);
+    case OSC_TYPE_SMP:
+    case OSC_TYPE_SLP:
+        count = sampleMemory_getNumSamples();
+        return count ? (uint8_t)(count - 1u) : 0u;
+    case OSC_TYPE_WTB:
+        count = sampleMemory_getNumWavetables();
+        return count ? (uint8_t)(count - 1u) : 0u;
+    case OSC_TYPE_WAV:
+    default:
+        return (uint8_t)(OSC_STOCK_WAVE_COUNT - 1u);
+    }
+}
+
+/*
+ * Mod-row maximum for a type (S085 C13.5; P2 §14 row swap).
+ * What: 127 for every type: pwm width, sample start or table position. The
+ *       wav type ignores the row; the value is kept.
+ * Accessors: writers, formatter.
+ */
+uint8_t instrumentManager_oscSourceMaxForType(uint8_t oscType)
+{
+    (void)oscType;
+    return 127u;
+}
+
+/*
+ * May this oscillator take this type? (P2 §14; contract in the header.)
+ */
+uint8_t instrumentManager_oscTypeAllowed(uint8_t instrumentType,
+                                         uint8_t special, uint8_t oscType)
+{
+    const uint8_t sel = (uint8_t)(special & IM_SPECIAL_OSC_MASK);
+
+    if (oscType != OSC_TYPE_PWM)
+        return 1u;
+    if (instrumentType != INSTRUMENT_TYPE_CYM &&
+        instrumentType != INSTRUMENT_TYPE_HAT)
+        return 1u;
+    return (uint8_t)(sel != IM_SPECIAL_OSC2 && sel != IM_SPECIAL_OSC3);
+}
+
+/*
+ * Is this a selector row? (S085 C13.5)
+ * What: INSTANCE_OFFSET, not Morphable, any special writer (typ, run).
+ * Accessors: Preset (three sites), Menu.
+ */
+uint8_t instrumentManager_isSelectorDescriptor(const ParamDescriptor *descriptor)
+{
+    if (!descriptor ||
+        descriptor->runtime.kind != INSTRUMENT_BIND_INSTANCE_OFFSET ||
+        (descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE))
+        return 0u;
+    return (uint8_t)((descriptor->runtime.special & IM_SPECIAL_WRITER_MASK) !=
+                     IM_SPECIAL_NONE);
+}
+
+/*
+ * A slot's oscillator section (S085 C13.5).
+ * Accessors: run writer, filter recalc, claims.
+ */
+OscSectionState *instrumentManager_oscSection(uint8_t slot)
+{
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *v = instrumentManager_drumRuntime(slot);
+        return v ? &v->section : 0; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *v = instrumentManager_snareRuntime(slot);
+        return v ? &v->section : 0; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *v = instrumentManager_cymbalRuntime(slot);
+        return v ? &v->section : 0; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *v = instrumentManager_hihatRuntime(slot);
+        return v ? &v->section : 0; }
+    default:
+        return 0;
+    }
+}
+
+/*
+ * Oscillator of a descriptor's selector (S085 C13.5).
+ * Accessors: InstrumentCellFormat.c, the domains.
+ */
+OscInfo *instrumentManager_oscForDescriptor(uint8_t slot,
+                                            const ParamDescriptor *descriptor)
+{
+    if (!descriptor || slot >= INSTRUMENT_SLOT_COUNT)
+        return 0;
+    return instrumentManager_oscBySelector(
+        slot, (uint8_t)(descriptor->runtime.special & IM_SPECIAL_OSC_MASK));
+}
+
+/*
+ * A slot's carrier (S085 C13.5).
+ *
+ * What:       the oscillator itp crossfades: the main oscillator of every
+ *             engine (osc).
+ * Accessors:  instrumentManager_claimOscSectionPending().
+ */
+static OscInfo *instrumentManager_carrier(uint8_t slot)
+{
+    return instrumentManager_oscBySelector(slot, IM_SPECIAL_OSC1);
+}
+
 static ResonantFilter *instrumentManager_filter(uint8_t slot)
 {
     switch (instrumentManager_slotType(slot)) {
@@ -2199,7 +2475,8 @@ static void instrumentManager_noteRuntimeValueChanged(
                                                   &target)) {
         modNode_directOriginalValueChanged(id, target.range);
     }
-    if (!instrumentManager_descriptorModDomain(descriptor, &domain))
+    /* S085 C13.6 (D11): per-slot wav domain. */
+    if (!instrumentManager_descriptorModDomainForSlot(slot, descriptor, &domain))
         return;
     if (value < domain.min_value)
         value = domain.min_value;
@@ -2260,6 +2537,7 @@ static void *instrumentManager_waveInterpTarget(
 }
 
 static uint8_t instrumentManager_buildModulationRange(
+    uint8_t slot,
     const ParamDescriptor *descriptor,
     void *waveInterpTarget,
     mod_node_range_t *range_out)
@@ -2282,8 +2560,10 @@ static uint8_t instrumentManager_buildModulationRange(
         range_out->max = 0.f;
         range_out->valid = 0u;
     }
+    /* S085 C13.6 (D11): per-slot wav domain. */
     if (!descriptor || !range_out ||
-        !instrumentManager_descriptorModDomain(descriptor, &domain)) {
+        !instrumentManager_descriptorModDomainForSlot(slot, descriptor,
+                                                      &domain)) {
         return 0u;
     }
 
@@ -2375,11 +2655,12 @@ static uint8_t instrumentManager_resolveModulationTarget(
     target_out->parameter.type = descriptor->runtime.parameter_type;
     target_out->waveInterpTarget =
         instrumentManager_waveInterpTarget(target_slot, descriptor);
-    if (!instrumentManager_descriptorModDomain(descriptor,
-                                               &target_out->domain)) {
+    /* S085 C13.6 (D11): per-slot wav domain. */
+    if (!instrumentManager_descriptorModDomainForSlot(target_slot, descriptor,
+                                                      &target_out->domain)) {
         return 0u;
     }
-    if (!instrumentManager_buildModulationRange(descriptor,
+    if (!instrumentManager_buildModulationRange(target_slot, descriptor,
                                                 target_out->waveInterpTarget,
                                                 &target_out->range)) {
         return 0u;
@@ -3206,7 +3487,7 @@ void instrumentManager_updateLfoAdapters(uint8_t source_slot,
 
 static uint8_t instrumentManager_writeSpecialRuntime(
     uint8_t slot, const ParamDescriptor *descriptor,
-    instrument_param_value_t value)
+    instrument_param_value_t value, uint8_t retained)
 {
     /*
      * Tagged descriptor special writer (S073 Step 2).
@@ -3218,6 +3499,12 @@ static uint8_t instrumentManager_writeSpecialRuntime(
      *             Every row still takes the same tag switch; no render work is
      *             skipped by a control value.
      * Inputs:     slot, descriptor tag and descriptor-domain byte value.
+     * retained (S085 C13.4, D2): 1 for retained writes (menu, MIDI, file
+     *             apply, Morph, automation; writeRuntimeInternal's
+     *             notify_base_change), 0 for LFO overlays. Only retained
+     *             writes update the oscillator request bytes, so an LFO
+     *             block never replaces the stored wav or src byte that a
+     *             later type change re-derives from.
      * Outputs:    DSP runtime state; 1 when a special writer consumed the
      *             value, 0 for generic offset handling.
      * Accessors:  instrumentManager_writeRuntimeInternal().
@@ -3261,6 +3548,8 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         ResonantFilter *filter = instrumentManager_filter(slot);
         if (!filter) return 0u;
         SVF_setReso(filter, byteValue / 127.0f);
+        /* S085 C13.4: the fre/itp filter slew follows the writer's q. */
+        oscSection_noteResoTarget(instrumentManager_oscSection(slot), filter->q);
         return 1u; }
     case IM_SPECIAL_FILTER_DRIVE: {
         ResonantFilter *filter = instrumentManager_filter(slot);
@@ -3382,6 +3671,97 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         lfo->phaseOffset =
             (uint32_t)(((uint64_t)byteValue * 0xFFFFFFFFu) / 127u);
         return 1u; }
+    /*
+     * Oscillator type/source/wave and run-mode writers (S085 C13.4).
+     *
+     * What:       OSC_TYPE sets the type, re-derives waveform and source from
+     *             the request bytes against the new type's maxima, clears the
+     *             frequency cache, binds sample/wavetable state, and refreshes
+     *             the slot's wav modulation domains; entering wtb clears the
+     *             wtb binding first (S084 P2 F11: the union bytes belonged to
+     *             pwm; pwm on a Cymbal/HiHat FM oscillator is written as
+     *             wav, P2 §14). OSC_WAVE (the wav row: stock waveform, pwm family,
+     *             sample or wavetable index) and OSC_SOURCE (the mod row: pwm
+     *             width, sample start or table position, 0..127) record the
+     *             request byte (retained writes only, D2) and clamp the live
+     *             field. RUN_MODE clamps to 0..2.
+     * Why:        plan §5 item 5; a clamp is lossy, the request bytes make a
+     *             type change reversible (a sample index survives smp -> wav
+     *             -> smp).
+     * Inputs:     slot, descriptor (selector), byte, retained.
+     * Outputs:    OscInfo fields / OscSectionState.runMode; 1 = consumed.
+     * Accessors:  instrumentManager_writeRuntimeInternal() (menu, MIDI,
+     *             automation, Morph, file apply, LFO overlays on both rows).
+     * Affiliates: oscSample_bind(), oscWavetable_bind(),
+     *             instrumentManager_refreshWaveDomains(),
+     *             InstrumentCellFormat.c (same maxima).
+     */
+    case IM_SPECIAL_OSC_TYPE: {
+        OscInfo *osc = instrumentManager_oscBySelector(
+            slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
+        uint8_t type;
+        uint8_t max;
+
+        if (!osc) return 0u;
+        type = (byteValue < OSC_TYPE_COUNT) ? byteValue
+                                            : (uint8_t)(OSC_TYPE_COUNT - 1u);
+        /* P2 §14: no pwm on a Cymbal/HiHat FM oscillator. */
+        if (!instrumentManager_oscTypeAllowed(
+                (uint8_t)instrumentManager_slotType(slot), special, type))
+            type = OSC_TYPE_WAV;
+        if (type == OSC_TYPE_WTB && osc->oscType != OSC_TYPE_WTB) {
+            osc->wtb.base = 0u;
+            osc->wtb.primed = 0u;
+        }
+        osc->oscType = type;
+        max = instrumentManager_oscWaveMaxForType(type);
+        osc->waveform = (osc->waveRequest > max) ? max : osc->waveRequest;
+        max = instrumentManager_oscSourceMaxForType(type);
+        osc->source = (osc->sourceRequest > max) ? max : osc->sourceRequest;
+        osc->freqCacheValid = 0u;
+        if (type == OSC_TYPE_SMP || type == OSC_TYPE_SLP)
+            oscSample_bind(osc);
+        else if (type == OSC_TYPE_WTB)
+            oscWavetable_bind(osc);
+        instrumentManager_refreshWaveDomains(slot);
+        return 1u; }
+    case IM_SPECIAL_OSC_SOURCE: {
+        OscInfo *osc = instrumentManager_oscBySelector(
+            slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
+        uint8_t max;
+
+        if (!osc) return 0u;
+        if (retained)
+            osc->sourceRequest = byteValue;
+        max = instrumentManager_oscSourceMaxForType(osc->oscType);
+        osc->source = (byteValue > max) ? max : byteValue;
+        osc->freqCacheValid = 0u;
+        if (osc->oscType == OSC_TYPE_SMP || osc->oscType == OSC_TYPE_SLP)
+            oscSample_bind(osc);          /* start position follows mod */
+        return 1u; }
+    case IM_SPECIAL_OSC_WAVE: {
+        OscInfo *osc = instrumentManager_oscBySelector(
+            slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
+        uint8_t max;
+
+        if (!osc) return 0u;
+        if (retained)
+            osc->waveRequest = byteValue;
+        max = instrumentManager_oscWaveMaxForType(osc->oscType);
+        osc->waveform = (byteValue > max) ? max : byteValue;
+        osc->freqCacheValid = 0u;
+        if (osc->oscType == OSC_TYPE_SMP || osc->oscType == OSC_TYPE_SLP)
+            oscSample_bind(osc);          /* the sample follows wav */
+        else if (osc->oscType == OSC_TYPE_WTB)
+            oscWavetable_bind(osc);       /* the table follows wav */
+        return 1u; }
+    case IM_SPECIAL_RUN_MODE: {
+        OscSectionState *section = instrumentManager_oscSection(slot);
+
+        if (!section) return 0u;
+        section->runMode = (byteValue < OSC_RUN_COUNT)
+            ? byteValue : (uint8_t)(OSC_RUN_COUNT - 1u);
+        return 1u; }
     case IM_SPECIAL_NONE:
     default:
         return 0u;
@@ -3426,6 +3806,16 @@ static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
             return IM_SPECIAL_PITCH_COARSE | osc;
         if (strstr(key, "pitch_fine"))
             return IM_SPECIAL_PITCH_FINE | osc;
+        /*
+         * S085 C13.9: oscN_type / oscN_source / oscN_wave. osc2_mod_type is
+         * the fm/mix/snc/rng row (no special tag) and is excluded.
+         */
+        if (strstr(key, "_type") && !strstr(key, "_mod_type"))
+            return IM_SPECIAL_OSC_TYPE | osc;
+        if (strstr(key, "_source"))
+            return IM_SPECIAL_OSC_SOURCE | osc;
+        if (strstr(key, "_wave"))
+            return IM_SPECIAL_OSC_WAVE | osc;
     }
     if (strcmp(key, "filter_freq") == 0) return IM_SPECIAL_FILTER_FREQ;
     if (strcmp(key, "filter_reso") == 0) return IM_SPECIAL_FILTER_RESO;
@@ -3456,6 +3846,7 @@ static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
      * being written raw by the TYPE_UINT32 path.
      */
     if (strcmp(key, "lfo_offset") == 0) return IM_SPECIAL_LFO_OFFSET;
+    if (strcmp(key, "osc_run_mode") == 0) return IM_SPECIAL_RUN_MODE;
     return IM_SPECIAL_NONE;
 }
 
@@ -3516,7 +3907,8 @@ static uint8_t instrumentManager_writeRuntimeInternal(
     if (!descriptor)
         return 0u;
 
-    if (instrumentManager_writeSpecialRuntime(slot, descriptor, value)) {
+    if (instrumentManager_writeSpecialRuntime(slot, descriptor, value,
+                                              notify_base_change)) {
         if (notify_base_change)
             instrumentManager_noteRuntimeValueChanged(slot, descriptor, value);
         return 1u;

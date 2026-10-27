@@ -41,6 +41,8 @@
 #include "modulationNode.h"
 #include "InstrumentManager.h"
 #include "voicePostChain.h"
+#include "OscillatorSample.h"
+#include "OscRenderPool.h"
 // #include "TriggerOut.h"
 
 
@@ -101,12 +103,16 @@ void Snare_initVoice(SnareVoice *voice)
 	voice->egPitchModAmount = 0.5f;
 
 	slopeEg2_init(&voice->oscVolEg);
+	/* S085 P2: no retrigger ramp pending. */
+	voice->lastAmpGain = 0.0f;
+	voice->ampRampArm = 0u;
 
 	setDistortionShape(&voice->distortion, 2.f);
 
 	SVF_init(&voice->filter);
 
 	lfo_init(&voice->lfo);
+	oscSection_init(&voice->section);
 }
 //---------------------------------------------------
 void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
@@ -137,20 +143,60 @@ void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
 	 */
 	instrumentManager_applyVelocityModulationTarget(source_slot, vel/127.f);
 
-	float offset = 1;
-	if(voice->transGen.waveform==1) //offset mode
+	/*
+	 * Run mode decides the trigger resets (S085 C11.3).
+	 *
+	 * What:       rst: today's tonal-oscillator reset; fre: no reset, the
+	 *             tonal and noise oscillators slew; itp: the tonal oscillator
+	 *             is snapshotted and reset, the noise oscillator slews. Start
+	 *             phase by type as C11.2.
+	 * Why:        plan §4.3.7 (Snare's carrier is the tonal oscillator).
+	 */
 	{
-		offset -= voice->transGen.volume;
+		OscInfo* const mods[1] = { &voice->noiseOsc };
+		const uint8_t reset = oscSection_beginTrigger(&voice->section,
+		                                              &voice->osc, mods, 1u);
+
+		if (reset != OSC_TRIGGER_RESET_NONE) {
+			float offset = 1;
+			if(voice->transGen.waveform==1) //offset mode
+				offset -= voice->transGen.volume;
+			if (voice->osc.oscType == OSC_TYPE_SMP ||
+			    voice->osc.oscType == OSC_TYPE_SLP)
+				oscSample_restart(&voice->osc);
+			else if (voice->osc.oscType != OSC_TYPE_WAV ||
+			         osc_isTableWave(voice->osc.waveform))
+				voice->osc.phase = (0xff<<20)*offset;
+			else if (voice->osc.waveform == SINE)
+				voice->osc.phase = (0x3ff<<20)*offset;
+			else
+				voice->osc.phase = 0;
+		}
 	}
-	if(voice->osc.waveform == SINE)
-		voice->osc.phase = (0x3ff<<20)*offset;
-	else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)
-		voice->osc.phase = (0xff<<20)*offset;
-	else
-		voice->osc.phase = 0;
 
 	DecayEg_trigger(&voice->oscPitchEg);
-	slopeEg2_trigger(&voice->oscVolEg);
+	/*
+	 * Amp envelope retrigger by run mode (S085 P2).
+	 *
+	 * What:       rst: slopeEg2_trigger(), exactly as before. fre/itp: the
+	 *             attack starts at the last block's envelope gain
+	 *             (egValueOscVol) and, when audible, the next block ramps
+	 *             from the previous amp gain (ampRampArm).
+	 * Why:        the decay -> attack curve switch and the per-block constant
+	 *             gain stepped the output on the retrigger sample.
+	 * Inputs:     section.runMode, egValueOscVol, the envelope.
+	 * Outputs:    oscVolEg, ampRampArm.
+	 * Affiliates: Snare_calcSyncBlockVoice(), slopeEg2_retriggerFrom(),
+	 *             slopeEg2_isAudibleGain().
+	 */
+	if (voice->section.runMode == OSC_RUN_RST) {
+		slopeEg2_trigger(&voice->oscVolEg);
+	} else {
+		const float gainNow = voice->egValueOscVol;
+
+		slopeEg2_retriggerFrom(&voice->oscVolEg, gainNow);
+		voice->ampRampArm = slopeEg2_isAudibleGain(gainNow);
+	}
 	voice->velo = vel/127.f;
 
 	osc_setBaseNote(&voice->osc,note);
@@ -235,6 +281,17 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 
 	//calc next osc sample
 	calcNextOscSampleBlock(&voice->osc,transBuf,size,(1.f-voice->mix));
+	/* S085 C11.3: itp crossfade of the tonal oscillator (same gain). */
+	{
+		OscInfo* const old = oscSection_itpCarrier(&voice->section);
+
+		if (old) {
+			int16_t* const oldBuf = oscRenderPool_scratch();
+
+			calcNextOscSampleBlock(old, oldBuf, size, (1.f-voice->mix));
+			oscSection_blendItp(&voice->section, transBuf, oldBuf, size);
+		}
+	}
 	//--AS apply filter to synthesized sound as well here if desired, or combine code for more efficiency
 
 	/*
@@ -248,12 +305,31 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 	 * Accessors:  this render function.
 	 * Affiliates: voicePostChain.h and the Step 4 host/ARM checks.
 	 */
+	/*
+	 * Amp ramp endpoints and the arm (S085 P2).
+	 *
+	 * What:       ampGain as before (velo x envelope, or the envelope). The
+	 *             armed retrigger block ramps from lastAmpGain; other blocks
+	 *             are flat. Afterwards lastAmpGain records ampGain and the
+	 *             arm is cleared.
+	 * Why:        removes the retrigger step in fre/itp; rst and ordinary
+	 *             blocks stay bit-identical.
+	 * Inputs:     volumeMod, velo, egValueOscVol, lastAmpGain, ampRampArm.
+	 * Outputs:    buf; lastAmpGain; ampRampArm = 0.
+	 * Affiliates: voicePost_mixAddGainDist(), Snare_triggerVoice().
+	 */
 	{
 		const float ampGain = voice->volumeMod
 			? voice->velo * voice->egValueOscVol
 			: voice->egValueOscVol;
+		const float lastAmpGain = voice->ampRampArm
+			? voice->lastAmpGain : ampGain;
+
 		voicePost_mixAddGainDist(buf, transBuf, voice->mix, ampGain,
-		                         &voice->distortion, size);
+		                         lastAmpGain, &voice->distortion, size);
+		voice->lastAmpGain = ampGain;
+		voice->ampRampArm = 0u;
 	}
+	oscSection_finishBlock(&voice->section, size);
 }
 //------------------------------------------------------------------------

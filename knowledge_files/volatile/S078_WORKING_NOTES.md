@@ -1,28 +1,90 @@
-# S084 Inter-Session Working Notes — carry-over after the Session 084 close
+# S085 Inter-Session Working Notes — carry-over after the Session 085 close
 
-Last updated: 2026-10-26 (Session 084 closure; for Session 085). This file
-was the S078 → S079 … S083 → S084 carry-over and has been rewritten in place
-again. The full Session 084 record is
-`knowledge_files/log_archive/084_SESSION_HANDOFF_LOG.md`. Authorities:
-- `PATTERN_DYNAMIC_STACK.md` §6 (time-window roll engine, live overlay
-  engine, TIM3 order, external clock interpolation), §6.7.4 (roll
-  recording), §6.7.9;
-- `MODULE_INTERCHANGE_SPEC.md` "PERF performance surface" → "BAR overlay
-  trigger engine", the sequencer and LiveRecord rows;
-- `MIDI_SPEC.md` (overlay types, clock, buttonHandler integration);
-- `FILESYSTEM_SPEC.md` (`perf_btn_*` 0..14, "Import tools");
-- `STORAGE_SRAM_MANIFEST.md` (S084 rows).
+Last updated: 2026-10-27 (Session 085 closure; for Session 086). This file
+was the S078 → S079 … S084 → S085 carry-over and has been rewritten in place
+again. The full Session 085 record is
+`knowledge_files/log_archive/085_SESSION_HANDOFF_LOG.md`. Authorities:
+- `INSTRUMENTS_DSP_REFERENCE.md` §12 (the oscillator section);
+- `FILESYSTEM_SPEC.md` "S085 — Sample flash catalogue v2 and the
+  installer";
+- `CPU_USE_DSP_AUDIT.md` "S085 oscillator cost record";
+- `STORAGE_SRAM_MANIFEST.md` §4, §6, "S085";
+- `MODULE_INTERCHANGE_SPEC.md` "S085 — Oscillator modules and call map";
+- `BANK_PRESET_ARCHITECTURE.md` "S085 — Selector rows in Preset";
+- `tools/dsp_test/DSP_TEST.md` §9.
 
-## Build metrics at S084 closure
+## Build metrics at S085 closure
 
 | Metric | Value |
 |---|---|
-| text / data / bss (DEV config) | 609,288 / 424 / 430,200 |
-| Flash payload | 609,712 B of 753,664 B; **headroom 143,952 B** (image file 609,728 B with header) |
-| S084 SRAM | +88 B measured vs S083 (approved +87 B, user 2026-10-26) |
-| Branch | `dev-ph7-voice_expansion`; base `91265e9c` (code = `59406a4`); S084 code and close-out documents uncommitted |
-| Production build (`DEV_MODE_LOGGING 0`) | last measured at S075 F1: `text=516,688 data=408 bss=409,840`; re-measure (S081–S084 unmeasured) |
-| Host checks | S084 H1 roll harness (scratchpad; log §9.1) PASS; `make -C tools/midi_test run` (S083) |
+| text / data / bss (DEV config) | 642,360 / 424 / 414,100 |
+| Flash payload | 642,784 B of 753,664 B; **headroom 110,880 B** (`make img` 642,784 B) |
+| ITCM | **12,432 / 16,384 B (3,952 B free)** |
+| DTCM statics / FXBUF | 4,468 B / 126,592 B (margin 3,712) |
+| S085 SRAM | `bss` −16,100 B vs S084 (v1 sample caches released, not reused); approved items +2,427 B (Q4, 2026-10-26) |
+| Runtime slots | 6 × 1,176 B; Drum 832 (344 free), HiHat 780, Cymbal 772, Snare 664 |
+| Branch | `dev-ph7-voice_expansion`; last commit `1ea234ea` (plan and schedule); S085 code and close-out documents uncommitted |
+| Production build (`DEV_MODE_LOGGING 0`) | last measured at S075 F1: `text=516,688 data=408 bss=409,840`; re-measure (S081–S085 unmeasured) |
+| Host checks | `make -C tools/dsp_test natural_order catalogue stock_gen osc_run osc_s0 special_tags selftest filter pack postchain octave mixer armcheck-postchain armcheck-mixer armcheck-osc breakproofs`: all green; breakproofs 26/26 |
+
+## Carry-over from Session 085 (oscillators, sample flash v2)
+
+1. **Hardware matrix H1–H11** (`085_SESSION_HANDOFF_LOG.md` §10), after
+   the S084 V1–V7. Order:
+   1. **Install (H2) first:** `samples/`, `wavetables/ak_hvox/`, a
+      long-named folder at each level, a 3-deep and a 4-deep folder, a
+      mixed mono/stereo/24-bit table, a truncated WAV.
+   2. **Boot notices (H1):** an old card gives STALE; an erased sample
+      flash gives EMPTY.
+   3. **Oscillator rows:** H3 waves (fallback before the install), H4 pwm,
+      H4a–H4d selector store/reload/MIDI/SHIFT-Morph/automation release,
+      H5 samples, H6 wavetables (+ pwm → wtb → pwm), H7 run modes (+ a
+      fast `itp` roll), H7a resonance in `fre`/`itp`, H8 `snc`/`rng` (+ an
+      `smp` master at `wav` 127, high note), H9 `wav` ranges on pwm/smp/wtb
+      and the LFO centre after a type round trip, H10 old kits.
+   4. **H11 worst-case Scene** with the DEV render-overrun counter and
+      `audioCodec_underrunCount`; record the `cpu` figure.
+2. **S086** (effects chain: transient + filter drive + Mix FX as one
+   `chain` inside ≈ 88 cycles per voice per sample):
+   - **Budget beside it:** the S085 oscillator worst cases (Cymbal/HiHat
+     178, Drum `snc` 162 instructions per sample, the pool ≤ 210).
+   - **ITCM free:** 3,952 B.
+   - **First:** explain the spike freeze (buffer-using Mix/transient types;
+     drive types other than `sft`) with the DEV fault capture and the
+     render-overrun counter.
+   - **Spike source:** `Helicase-dev-ph7-spike/` (inside the working tree,
+     git-ignored), `S086_EFFECTS_CHAIN_POST_MORTEM_EVAL.md` there. The
+     out-of-scope S085 list (`085_SESSION_HANDOFF_LOG.md` §2.1) is S086's
+     inventory.
+3. **Binding S085 rules:**
+   - constant-cost `snc` via `OscSyncLane.h`;
+   - the shared pwm/smp/wtb loops (`OSC_SHARED_LOOP`) stay shared;
+   - request bytes are written by retained writes only;
+   - selector rows are applied before the Morph image on every reset path;
+   - slew divisor ≥ 32;
+   - catalogue magic programmed last;
+   - every new oscillator test gets a break in `breakproofs.py`.
+4. **Accepted limits:**
+   - an `itp` retrigger inside 3 ms steps (exact fix +124 B per voice,
+     not approved);
+   - `wtb` position moves ≤ 1 frame per block;
+   - the `snc` select is a branch (the wrap path is budgeted);
+   - plain pwm/smp/wtb pay a 2-instruction lane test;
+   - cost figures exclude sample-flash D-cache misses (H11 measures);
+   - stock waves fall back before the first install;
+   - no migration of old kits' `wav` 6+.
+5. **Possible later work** (only if asked):
+   - per-family pwm loops (removes the per-sample family switch, costs
+     ITCM);
+   - an exact `itp` retrigger;
+   - moving cold sync copies out of ITCM if S086 needs the space (both L1
+     caches are on).
+6. **Disposable** (the user's plan): root `S085_OSC_MOD_CHERRYPICK.md`,
+   `S085_P1_OSC_MOD_PLAN.md`, `S085_P1_IMPLEMENTATION.md`. The 085 log and
+   the specifications carry them.
+7. **Card:** `SD_CARD/wavetables/ak_hvox` (optimised 600 → 256 points),
+   originals in `SD_CARD/wavetables_old/` and `samples_old/`. `/loops` is
+   gone.
 
 ## Carry-over from Session 084 (roll fix-up)
 
@@ -35,7 +97,8 @@ again. The full Session 084 record is
    CC2 overlay incl. the A3 rhythm and B1 flam → roll checks (V5); stopped
    transport and 4-PPQ pulse sync (V6); external start/stop/Continue (V7).
    **S085 starts only after these pass** (post-mortem gate).
-2. **The spike** `../Helicase-dev-ph7-spike/` (own repository, `26fb7c3`,
+2. **The spike** `Helicase-dev-ph7-spike/` (inside the working tree since the
+   S085 close; own repository, `26fb7c3`,
    branch `dev-ph7-voice-spike`) is reference only. Its documents
    (`S084_POST-MORTEM.md`, `S085_OSC_MOD_CHERRYPICK.md`,
    `S086_EFFECTS_CHAIN_POST_MORTEM_EVAL.md`, `S084_P1..P5_*.md`) are
@@ -78,8 +141,8 @@ again. The full Session 084 record is
    held-roll rate switch restarts the roll at the switch step in playback;
    a quick panel flam release drops the pending main; old `perf_btn_*`
    values 6..11 play different rates (no migration).
-6. **`.gitignore`:** unused `Helicase-dev-ph7-spike/` entry; remove any
-   time.
+6. **`.gitignore`:** the `Helicase-dev-ph7-spike/` entry is in use again
+   (the spike is inside the tree); keep it.
 
 ## Carry-over from Session 083 (MIDI)
 
@@ -243,9 +306,10 @@ LiveRecord). Authorities: `PATTERN_DYNAMIC_STACK.md` §6.1–§6.2b, §6.5, §6.
 
 ## Next session recommended goal
 
-1. Run the S084 hardware matrix V1–V7 and record the results.
-2. Then Session 085: the oscillator and modulation-mode cherry-pick
-   (`../Helicase-dev-ph7-spike/S085_OSC_MOD_CHERRYPICK.md`).
+1. Run the S084 hardware matrix V1–V7, then the S085 matrix H1–H11
+   (`085_SESSION_HANDOFF_LOG.md` §10), and record the results.
+2. Then Session 086: the effects chain inside ≈ 88 cycles per voice,
+   budgeted beside the S085 oscillator worst cases.
 3. Open items worth a look when convenient: F5 (Scene 2 Case-3
    invalidation), S082 P3 A2, S081 P3 A-1 (decision), the production build
    re-measure.
