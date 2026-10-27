@@ -189,7 +189,14 @@ const ParamDescriptor drum_param_descriptors[] = {
     ROW_MENU("osc2_wave", "FM", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, modOsc.waveform, TYPE_UINT8),
     ROW_SPECIAL("osc2_pitch_coarse", "FM", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, modOsc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC2),
     ROW("osc2_mod_amount", "FM", "Amount", "amt", DTYPE_0B127, MOD_0_127, fmModAmount, TYPE_FLT),
-    ROW("osc2_mod_type", "FM", "Mode", "mod", DTYPE_MIX_FM, MOD_NONE, mixOscs, TYPE_UINT8),
+    /*
+     * S085 P1: osc2 mod mode, stored 0 fm, 1 mix, 2 snc, 3 rng
+     * (DRUM_MOD_*). The key, row index, automation ID and NRPN ID are
+     * unchanged. DTYPE_MIX_FM's clamp, automation max and names come from
+     * MenuText.h mixFmNames (menu.c menu_getMixFmName()). The bound member
+     * was renamed mixOscs -> modMode.
+     */
+    ROW("osc2_mod_type", "FM", "Mode", "mod", DTYPE_MIX_FM, MOD_NONE, modMode, TYPE_UINT8),
     ROW_SPECIAL("filter_freq", "Filter", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, filter.f, TYPE_FLT, IM_SPECIAL_FILTER_FREQ),
     ROW_SPECIAL("filter_reso", "Filter", "Resnance", "res", DTYPE_0B127, MOD_0_127, filter.q, TYPE_FLT, IM_SPECIAL_FILTER_RESO),
     ROW_SPECIAL("filter_drive", "Filter", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, filter.drive, TYPE_FLT, IM_SPECIAL_FILTER_DRIVE),

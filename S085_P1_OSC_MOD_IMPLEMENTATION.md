@@ -2414,3 +2414,232 @@ storage are unchanged.
   - `check_special_tags.py`, because no tag changes;
   - the converters, which only write 0/1;
   - `frozen/` (pre-S073), which is untouched.
+
+---
+
+## 11. Implementation log (2026-10-27)
+
+This section records the session's actual measurements and the two
+deviations found while making the gates pass. Everything in §4–§8 above is
+implemented as written except D7 and D8 below.
+
+### 11.1 Baseline (before any firmware edit)
+
+- `sh tools/dsp_test/snapshot85.sh` froze eight files into
+  `tools/dsp_test/frozen85/`.
+- `make clean && make all`: `text=609,288`, `data=424`,
+  `bss=430,200`; flash payload 609,712 B (headroom 143,952 B); ITCM
+  4,168 / 16,384 B; DTCM 4,472 B; FXBUF 126,592 B (margin 3,712 B).
+  This equals the S084 close figures in `MEMORY.md`.
+- `make -C tools/dsp_test elf_osc_baseline` wrote
+  `frozen85/elf_osc.txt` (12 linked symbols, all LTO clones).
+- Baseline `fpseq.py --report --all` (main loop) reproduced §1.2:
+  table 24, sine 23, crash 30, noise 12–13, user sample 40–41, FM table 35,
+  FM sine 30, FM crash 38, FM user sample 40–41.
+
+### 11.2 Build and ledgers (after the firmware change)
+
+| Figure | Baseline | After | Delta |
+|---|---:|---:|---:|
+| `text` | 609,288 | 613,232 | +3,944 |
+| `data` | 424 | 424 | 0 |
+| `bss` | 430,200 | 430,248 | +48 |
+| Flash payload | 609,712 | 613,656 | +3,944 |
+| Flash headroom | 143,952 | 140,008 | −3,944 |
+| ITCM | 4,168 | 7,560 | +3,392 |
+| DTCM statics | 4,472 | 4,472 | 0 |
+| FX arena margin | 3,712 | 3,712 | 0 |
+
+- `DrumVoice` is 592 B (was 588); `runtime_slots` is 7,104 B (was
+  7,056), both static asserts still hold.
+- ITCM is above the plan's ≈2,848 B estimate because the two dispatchers
+  stay out of line plus the new `osc_renderPlainWave` (D8); 8,824 B of
+  ITCM remain free.
+- `make img` wrote a 613,656-byte image.
+- No new compiler warning (only the four pre-existing newlib
+  `_close/_lseek/_read/_write` linker notes).
+- A final `make clean && make all && make img` reproduced every figure
+  above; the gates were re-run on that clean build.
+
+### 11.3 Gates
+
+| Gate | Result |
+|---|---|
+| `make -C tools/dsp_test osc_mod` | `osc_mod failures: 0` (I3's expected integer-to-pointer warning only) |
+| `make -C tools/dsp_test oscmod_identity` | `removed or changed lines: 0` for both files; `BufferTools` byte-identical; `OK` |
+| `make -C tools/dsp_test elf_osc_check` | `0 missing, 0 changed, 0 added`; one `PADDING` note (D7) |
+| `make -C tools/dsp_test armcheck-oscmod` | builder 7; sync table 34/39, sine 33/38, crash 36/41; ring table 28, sine 27, crash 30, noise 13, user sample 40; matches §1.2 |
+| `make -C tools/dsp_test special_tags` | `155 rows, 0 mismatches` (no rows added) |
+| Break proofs (§5 X4) | all twelve applied one at a time: every one produced a non-zero `osc_mod failures` count, and the source was restored after each |
+
+The break proofs run: `>> 14` ring shift; `K` from `amt`; `K` ≤ 0
+returning 0; the pull applied for `OSC_SYNC_NONE`; unsigned pull
+difference; the table sync copy pulling `oscPhase` before the advance;
+the ratio inverted; `<< 5` removed; the builder testing `next > clock`;
+partner B rendered plain; the interpolation phase rule reversed; the depth
+scaled to Q31. Two reverts initially landed at the first textual match
+instead of their hunk (`osc_syncDepthQ30`/`osc_ringK`/`osc_syncClockInc`);
+they were corrected before the final build, and the final source has zero
+removed/changed lines against `frozen85/`.
+
+### 11.4 Deviations found during implementation
+
+| # | Plan said | Implementation does | Why |
+|---|---|---|---|
+| **D7** | every existing oscillator loop's disassembly identical apart from addresses and veneers | the new code is placed in `.itcm.s085` and `elf_symdump.py` treats a trailing run of literal-pool words as layout (`PADDING`) | putting the new functions inside `.itcm` pushed `calcUserSampleOscBlock` out of 16-bit tail-branch range and flipped a clone's tail to `b.w`. With `.itcm.s085` (the linker script already matches `*(.itcm.*)` after `*(.itcm)`), the instructions are identical; one previously unused pool word at the end of `calcNextOscSampleBlock.constprop.0` still differs. Instructions, branches and middle pool entries are still compared strictly. |
+| **D8** | the sync/ring dispatchers are `INITCM` and the unsynced fallback calls `calcNextOscSampleBlock(osc, buf, size, 1.f)` | the dispatchers are `noinline`+`noclone` in `.itcm.s085`; a new `osc_renderPlainWave()` (leaf dispatch at gain 1) serves the unsynced fallback and the ring interpolation partners | the first build added constant-gain call sites to `calcNextOscSampleBlock()`, so LTO re-specialised its two baseline clones (they swapped roles and bodies). Routing the fallback and the ring partners to the leaves reproduces §7 I1's mitigation and restores the baseline clone text. `noinline` keeps the interpolated blend loops in ITCM instead of inlining them into the flash-resident Drum render. |
+
+### 11.5 Not done here
+
+- **Device gate G-C and the listening matrix H1–H6 (user):** six Drum slots
+  at the baseline `fm` settings, then all `snc` (crash and interpolated
+  slaves) and all `rng` (user-sample carrier); `cpu` no worse, zero
+  underruns, interface responsive; `fm`/`mix` A/B against the S084 build.
+- **S084 hardware check V1–V7** is still open and gates S085 (plan R1);
+  the user confirmed P1 may be implemented now.
+- **Session close-out** (§9): `085_SESSION_HANDOFF_LOG.md` and the
+  `MEMORY.md` binding notes after G-C.
+
+---
+
+## 12. Assessment of the implementation (2026-10-27)
+
+**Verdict:** the firmware change is correct and meets the CPU gate on every
+build-time check. No code behaviour needs to change. Four documentation
+corrections are open (§12.6, F1–F4). The device gate G-C, the listening
+matrix and the session close-out are still to do (§11.5).
+
+### 12.1 What was checked, and how
+
+- **Every changed file was compared with this document:**
+  - the firmware: `Oscillator.c/.h`, `DrumVoice.c/.h`,
+    `DrumParameters.c`, `MenuText.h`, `menu.c`;
+  - the tools: `snapshot85.sh`, `elf_symdump.py`, `test_osc_mod.c`, the
+    Makefile;
+  - the specifications.
+
+  The §4–§5 code blocks were diffed against the added lines.
+- **Rerun on the current `build/lxr02.elf`** (built after the last source
+  edit): `oscmod_identity`, `osc_mod`, `elf_osc_check`, `special_tags` and
+  `armcheck-oscmod`.
+- **Baseline rebuilt** from `HEAD` (`b450d76a`, whose code is the
+  pre-change tree) in a scratch git worktree, removed afterwards. It
+  reproduced `frozen85/elf_osc.txt` byte for byte and ITCM 4,168 B. The two
+  linked images were then compared (§12.4).
+- **Loops measured in the linked image:** `fpseq.py` was run on the linked
+  ELF as well as on standalone objects, so the LTO-built loops were
+  measured too.
+
+### 12.2 Conformance with §4–§5
+
+| ID | Result |
+|---|---|
+| O-H1 | identical to §4.1 |
+| O-C1 | identical to §4.2, except D7 (`OSC_S085_SECTION` `.itcm.s085`; `OSC_S085_DISPATCH` on both dispatchers) and D8 (`osc_renderPlainWave()`; it replaces the two `calcNextOscSampleBlock(…, 1.f)` fallbacks in `osc_renderSyncWave()` and `calcPeriodicInterpRingBlock()`). There are no removed or changed lines in the pre-existing text (`oscmod_identity`). |
+| D-H1, D-H2, D-C1, D-C2, P1 | verbatim |
+| T1, T2, M1–M8 | verbatim, at the planned anchors |
+| X1 | verbatim |
+| X2 | §5 plus the D7 `PADDING` rule (`strip_pool()`) |
+| X3 | §5 plus `osc_renderPlainWave` in `OSC_S085` |
+| X4 | §5 plus `#define OSC_S085_SECTION` / `OSC_S085_DISPATCH` (empty) |
+| X5, S1–S5 | done, with measured figures; S6 none, as planned |
+
+### 12.3 Gates (rerun for this assessment)
+
+| Gate | Result |
+|---|---|
+| `oscmod_identity` | `removed or changed lines: 0` for both files; `BufferTools.c/.h` identical; `OK` |
+| `osc_mod` | `osc_mod failures: 0`; only the expected I3 cast warning |
+| `elf_osc_check` | `12 baseline symbols, 0 missing, 0 changed, 0 added`, one `PADDING` line (D7, §12.5) |
+| `special_tags` | `155 rows, 0 mismatches` |
+| `armcheck-oscmod` (standalone) | builder 7; sync table 34/39, sine 33/38, crash 36/41; ring table 28, sine 27, crash 30, noise 13/25, user sample 40/41: §1.2 exactly |
+| Ledgers (`link_budget.py`, `size`) | text 613,232; data 424; bss 430,248; flash headroom 140,008 B; ITCM 7,560 / 16,384 B; DTCM 4,472 B; FX-arena margin 3,712 B. These match §11.2. |
+
+### 12.4 The Drum render in the linked image (closes §6 step 6, D4)
+
+- **Where it is:** LTO merges `Drum_calcVoiceSyncBlock()` into
+  `mixer_calcNextSampleBlock()`. The call targets of that function were
+  compared between the rebuilt baseline and the new image.
+- **Unchanged:** 21 call targets, including every oscillator, FM, filter
+  and post-chain callee.
+- **`calcNextOscSampleBlock.constprop.0`:** 7 → 9 call sites. That is
+  exactly the switch's new shape: the `rng` modulator call, and the `fm`
+  modulator call, which is now a separate site instead of one shared with
+  `mix`. It is the baseline clone in every case.
+- **New:** one call each to `calcNextOscSampleSyncBlock`,
+  `calcNextOscSampleRingBlock` and `osc_buildSyncList`.
+- **No new clone of any existing function** appears. The function grew by
+  75 lines: per-block dispatch, not per-sample work.
+- **Result:** `fm` and `mix` call the same compiled loops with the same
+  arguments as before. D4 holds in the linked image, not only in the
+  source.
+
+### 12.5 The two implementation deviations
+
+**D7 (`.itcm.s085`, `PADDING`): accepted.**
+- **Placement:** `STM32F765VIHx_FLASH.ld:148–151` places `*(.itcm)` before
+  `*(.itcm.*)` inside the one copied `.itcm` output section. The new code
+  therefore follows all existing ITCM code, is copied at boot, and stays
+  under the 16 KB `ASSERT`.
+- **The one difference:** at `calcNextOscSampleBlock.constprop.0`, the
+  baseline had one more trailing `.word` (268 vs 267 lines). All 14
+  PC-relative loads in that clone are identical. An instruction that still
+  referenced the dropped word would now point past the function, so the
+  word was alignment padding.
+- **The tolerance is narrow:** `strip_pool()` removes only a trailing run
+  of `.word ADDR`. Every instruction, branch and interior pool entry is
+  still compared.
+- **Residual risk:** a future change that removes a referenced trailing
+  literal would also change the load that uses it, so the gate would still
+  report CHANGED.
+
+**D8 (`osc_renderPlainWave()`, `noinline` dispatchers): accepted.**
+- **Behaviour:** host cases R1 (interpolated carriers) and S6 (noise and
+  user-sample slaves) compare it against `calcNextOscSampleBlock()` and
+  pass, so its output equals `calcNextOscSampleBlock()` at gain 1.
+- **In the linked image:** LTO builds `osc_renderPlainWave.constprop.0`
+  (728 B ITCM). Its loop counts reproduce the baseline gain-1 clone
+  `calcNextOscSampleBlock.constprop.1` loop for loop (22, 23, 23, 37, 23,
+  70, 82, 10, 94/95), so it adds ITCM bytes but no per-sample cost.
+- **What it buys:** it keeps the baseline clones untouched (§7 I1). The
+  `noinline` dispatchers keep the interpolated blend loops in ITCM rather
+  than in the flash-resident mixer.
+
+### 12.6 Findings
+
+| # | Severity | Finding | Fix |
+|---|---|---|---|
+| F1 | Low (documentation-in-place) | Three comment blocks in `Oscillator.c` describe the pre-D8 code. `osc_renderSyncWave()` (lines 1253–1258) says NOISE and user samples "render through calcNextOscSampleBlock() … That call repeats its own interpolation check". `calcPeriodicInterpSyncBlock()` (1309–1311) and `calcPeriodicInterpRingBlock()` (1568–1570) say "Placement: no INITCM attribute, like calcPeriodicInterpBlock()". | Replace with the text below. |
+| F2 | Low | `STORAGE_SRAM_MANIFEST.md:16` writes `itcm.s085`. | `.itcm.s085` |
+| F3 | Low | The linked user-sample ring copy measures **42/43**; the standalone build gives 40/41. So `rng` with user-sample oscillators is ≈ **84** in the image, not 82. The gate still holds: `fm` 90, a margin of 6. `INSTRUMENTS_DSP_REFERENCE.md` §8.1/§8.2 and this document's §1.2/§1.3 quote 40–41 / 82. | State "40–41 standalone, 42–43 linked; `rng` ≈ 84". |
+| F4 | Low | `tools/dsp_test/DSP_TEST.md:209`: the expected `elf_osc_check` output omits the `PADDING` line (D7). | "`0 missing, 0 changed`; one `PADDING` line for `calcNextOscSampleBlock.constprop.0` (D7)". |
+
+No correctness, CPU or RAM defect was found.
+
+**F1 replacement text.**
+
+`osc_renderSyncWave()`, the What paragraph:
+```c
+ * What:       dispatches Sin/Tri/Saw/Rec/Crash to their sync copies. NOISE
+ *             and user samples render unsynced through osc_renderPlainWave()
+ *             (the leaf loops at gain 1, plan A3/A4; D8). No interpolation
+ *             check is needed here: the caller already took the
+ *             interpolation path, or the partner copy has interpolation
+ *             cleared.
+```
+
+`calcPeriodicInterpSyncBlock()` and `calcPeriodicInterpRingBlock()`, the
+Placement line:
+```c
+ * Placement:  .itcm.s085 (OSC_S085_SECTION, D7); the compiler inlines it
+ *             into its noinline ITCM dispatcher (OSC_S085_DISPATCH, D8).
+```
+
+### 12.7 Still open (unchanged from §11.5)
+
+- **Device gate G-C and the listening matrix H1–H6.** These are the
+  acceptance tests; everything above is build-time evidence.
+- **The S084 hardware check V1–V7.**
+- **The session close-out:** `085_SESSION_HANDOFF_LOG.md`, plus the
+  `MEMORY.md` current-state and binding notes. `MEMORY.md` still describes
+  the S084 state.

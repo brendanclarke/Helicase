@@ -405,6 +405,8 @@ All MIDI parameter values are **absolute 7-bit** and pass to the parameter
 unchanged (identity, as in step automation).
 - They are clamped to the parameter's own domain (descriptor maximum,
   enumerated lists, target tokens), the same rule step automation applies.
+- Drum `osc2_mod_type` (`mod`): 0 `fm`, 1 `mix`, 2 `snc`, 3–127 `rng`
+  (S085 P1; before S085, 1–127 gave `mix`).
 - The only translation is the Morph amounts (§5.2).
 - WIDE8 Effect rows expand through the Effect type's 7-bit expansion, as
   automation does.

@@ -54,6 +54,29 @@ enum
 {
 	IS_PLAYING = 0x1,
 };
+/*
+ * Drum osc2 mod modes: the stored values of osc2_mod_type (S085 P1).
+ *
+ * What:       DRUM_MOD_FM  0  the carrier phase-modulated by the modulator;
+ *             DRUM_MOD_MIX 1  carrier x (1 - amt) + modulator x amt;
+ *             DRUM_MOD_SNC 2  the carrier hard-synced to a phase clock at
+ *                             the FM-page frequency, amt = sync depth; only
+ *                             the carrier is heard;
+ *             DRUM_MOD_RNG 3  carrier x (1 - amt) + carrier x modulator x
+ *                             amt.
+ * Why:        0 and 1 keep their stored meaning, so old kits load unchanged;
+ *             2 and 3 are appended (plan K1). Any other byte renders as fm
+ *             (plan Q7).
+ * Accessors:  DrumVoice.modMode; Drum_calcVoiceSyncBlock(); Drum_initVoice().
+ * Affiliates: DrumParameters.c row osc2_mod_type (DTYPE_MIX_FM); MenuText.h
+ *             mixFmNames (same order, count = DRUM_MOD_COUNT); menu.c
+ *             menu_getMixFmName().
+ */
+#define DRUM_MOD_FM    0u
+#define DRUM_MOD_MIX   1u
+#define DRUM_MOD_SNC   2u
+#define DRUM_MOD_RNG   3u
+#define DRUM_MOD_COUNT 4u
 //------------------------------------------------------------------------
 typedef struct VoiceStruct
 {
@@ -101,8 +124,43 @@ typedef struct VoiceStruct
 #endif
 
 #if ENABLE_MIX_OSC
-	uint8_t mixOscs;
+	/*
+	 * osc2 mod mode, DRUM_MOD_FM .. DRUM_MOD_RNG (S085 P1; was the boolean
+	 * mixOscs).
+	 *
+	 * What:       written by the descriptor row osc2_mod_type (TYPE_UINT8)
+	 *             from the menu, Morph, step automation and MIDI; never by
+	 *             an LFO (MOD_NONE). Read once per block by
+	 *             Drum_calcVoiceSyncBlock()'s switch.
+	 * Why:        renamed because the byte now holds four modes. A boolean
+	 *             test (the old if(voice->mixOscs)) would play snc and rng
+	 *             as mix.
+	 * Accessors:  Drum_initVoice(), Drum_calcVoiceSyncBlock(), the
+	 *             descriptor binding (DrumParameters.c).
+	 */
+	uint8_t modMode;
 #endif
+
+	/*
+	 * snc phase clock (S085 P1, deviation D2).
+	 *
+	 * What:       the clock that resets the carrier in snc. It is advanced by
+	 *             osc_buildSyncList() once per snc block, at
+	 *             osc_syncClockInc(&modOsc) per sample. Zeroed by
+	 *             Drum_initVoice(). It is not reset on a trigger: like
+	 *             modOsc, it runs free (user, plan Q6b).
+	 * Why:        modOsc is not rendered in snc. Advancing modOsc.phase
+	 *             instead would push a one-shot user-sample phase past the
+	 *             sample's end, and a later fm/mix render would read beyond
+	 *             the sample (and, near the top of sample flash, beyond
+	 *             flash).
+	 * Inputs/Outputs: the 32-bit clock phase (2^32 per nominal period).
+	 * Accessors:  Drum_calcVoiceSyncBlock(), Drum_initVoice().
+	 * Affiliates: Oscillator.h osc_syncClockInc() / osc_buildSyncList();
+	 *             InstrumentManager.c runtime-slot reserve (2 x
+	 *             sizeof(DrumVoice), so +8 B per slot).
+	 */
+	uint32_t syncClock;
 
 	float decimationCnt;
 	float decimationRate;

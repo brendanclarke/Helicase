@@ -40,8 +40,6 @@
 static const char menuText_ok[]    = "ok ";
 static const char menuText_off[]   = "off";
 static const char menuText_on[]    = "on ";
-static const char menuText_mix[]   = "mix";
-static const char menuText_fm[]    = "fm ";
 static const char menuText_dash[]  = "---";
 static const char menuText_blank[] = "   ";
 static const char menuText_any[]   = "any";
@@ -105,6 +103,21 @@ static const char lfoWaveNames[][4] = {
 ** mod_node_polarity_t: 0 negative, 1 positive, 2 bipolar. */
 static const char lfoPolarityNames[][4] = {
     {3}, {"neg"},{"pos"},{"bi"},
+};
+/*
+ * Drum osc2 mod mode names (S085 P1).
+ *
+ * What:       [0] = count (4), then "fm ", "mix", "snc", "rng" in stored
+ *             order (DrumVoice.h DRUM_MOD_FM .. DRUM_MOD_RNG).
+ * Why:        DTYPE_MIX_FM grew from two values to four. One table replaces
+ *             the two literals menuText_fm / menuText_mix, so the names,
+ *             clamp and automation maximum share one count.
+ * Accessors:  menu.c menu_getMixFmName(), menu_clampCellValue(),
+ *             menu_automationValueMax().
+ * Affiliates: DrumParameters.c osc2_mod_type; DrumVoice.h DRUM_MOD_COUNT.
+ */
+static const char mixFmNames[][4] = {
+    {4}, {"fm "},{"mix"},{"snc"},{"rng"},
 };
 /* rollRateNames / MENU_ROLL_RATES retired in place (S081 A3-5, Q14). */
 static const char syncRateNames[][4] = {

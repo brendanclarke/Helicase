@@ -27,7 +27,8 @@ fn = $(foreach s,$(1),--func $(s))
 rn = $(foreach s,$(2),--rename $(s)=$(1)$(s))
 
 .PHONY: selftest filter special_tags pack postchain octave mixer \
-        armcheck-filter armcheck-postchain armcheck-mixer clean
+        armcheck-filter armcheck-postchain armcheck-mixer clean \
+        oscmod_identity osc_mod armcheck-oscmod elf_osc_baseline elf_osc_check
 $(GEN):
 	mkdir -p $(GEN)
 
@@ -193,3 +194,95 @@ armcheck-mixer: mixer
 	  --report --all
 	$(FP) --obj build/ac_mixer.o --ref old_dry:4 --ref old_send:3 --new new_combined:27 \
 	  --report --all
+
+# ---------------------------------------------------------------------------
+# S085 P1: Drum snc / rng (S085_P1_OSC_MOD_IMPLEMENTATION.md §5, §6).
+#
+# What:       oscmod_identity  the pre-change oscillator/buffer source text is
+#                              unchanged (only the S085 P1 block is added);
+#             osc_mod          host behaviour of the new code (test_osc_mod.c);
+#             armcheck-oscmod  per-sample instruction counts of the new
+#                              loops beside today's plain/FM loops (G-B);
+#             elf_osc_baseline / elf_osc_check
+#                              normalised disassembly of every existing
+#                              oscillator loop in the linked firmware,
+#                              before and after (G-A).
+# Why:        S085 P1 rule: no increase in CPU, and fm/mix unchanged.
+# Inputs:     frozen85/ (snapshot85.sh), the current sources, build/lxr02.elf.
+# Accessors:  make -C tools/dsp_test <target>.
+# Affiliates: elf_symdump.py, fpseq.py, extract.py, prelude.h.
+# ---------------------------------------------------------------------------
+FROZEN85 := frozen85
+FW_ELF   := $(ROOT)/build/lxr02.elf
+FW_INC   := $(addprefix -I$(ROOT)/,$(patsubst -I%,%,$(filter -I%, \
+            $(shell sed -n '/^CFLAGS/,/^$$/p' $(ROOT)/Makefile))))
+OSC_ELF_SYMS := calcSineBlock calcFmSineBlock calcFmBlock calcWavetableOscBlock \
+                calcNoiseBlock calcSampleOscBlock calcSampleOscFmBlock \
+                calcUserSampleOscBlock calcUserSampleOscFmBlock \
+                calcNextOscSampleBlock calcNextOscSampleFmBlock \
+                calcPeriodicInterpBlock calcPeriodicInterpFmBlock osc_setFreq \
+                bufferTool_addBuffersSaturating
+OSC_PLAIN := freq2PhaseIncr1024 freq2PhaseIncr32767 osc_clearWaveInterp \
+             osc_updateSampleCache osc_waveInterpActive calcSineBlock \
+             calcWavetableOscBlock calcNoiseBlock calcSampleOscBlock \
+             calcUserSampleOscBlock calcPeriodicInterpBlock calcNextOscSampleBlock
+OSC_S085  := osc_syncPull osc_ringSample osc_syncRatioQ16 osc_syncWaveform \
+             osc_renderPlainWave \
+             osc_syncClockInc osc_buildSyncList calcSineSyncBlock \
+             calcWavetableOscSyncBlock calcSampleOscSyncBlock osc_renderSyncWave \
+             calcPeriodicInterpSyncBlock calcNextOscSampleSyncBlock \
+             calcSineRingBlock calcWavetableOscRingBlock calcNoiseRingBlock \
+             calcSampleOscRingBlock calcUserSampleOscRingBlock \
+             calcPeriodicInterpRingBlock calcNextOscSampleRingBlock
+
+# G-A source half: nothing removed or changed in Oscillator.c/.h (lines may
+# only be added); BufferTools.c/.h byte-identical.
+oscmod_identity:
+	@for f in Core/DSPAudio/Oscillator.c Core/DSPAudio/Oscillator.h; do \
+	  n=$$(diff $(FROZEN85)/$$f $(ROOT)/$$f | grep -c '^<' || true); \
+	  echo "$$f: removed or changed lines: $$n"; test "$$n" -eq 0 || exit 1; \
+	done
+	cmp $(FROZEN85)/Core/DSPAudio/BufferTools.c $(ROOT)/Core/DSPAudio/BufferTools.c
+	cmp $(FROZEN85)/Core/DSPAudio/BufferTools.h $(ROOT)/Core/DSPAudio/BufferTools.h
+	@echo "oscmod_identity: OK"
+
+# Host behaviour of the new code against the unchanged plain loops.
+osc_mod: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 49-55 --out $(GEN)/om_defs.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 61-92 --out $(GEN)/om_oscinfo.inc
+	$(EX) --src $(ROOT)/Core/SampleRom/SampleMemory.h --lines 104-109 \
+	  --out $(GEN)/om_sampleinfo.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c --lines 123-124 --out $(GEN)/om_scratch.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --func osc_syncDepthQ30 \
+	  --func osc_ringK --out $(GEN)/om_map.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c $(call fn,$(OSC_PLAIN)) \
+	  --out $(GEN)/om_plain.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c $(call fn,$(OSC_S085)) \
+	  --out $(GEN)/om_s085.c
+	$(HOSTCC) $(HOSTFLAGS) test_osc_mod.c -o build/osc_mod -lm
+	./build/osc_mod
+
+# G-B: static per-sample counts, new loops beside the loops they replace.
+# Sync copies print two loops (no-reset and reset paths); budget the larger.
+armcheck-oscmod: | $(GEN)
+	$(ARMCC) $(ARMFLAGS) $(FW_INC) -c $(ROOT)/Core/DSPAudio/Oscillator.c -o build/ac_osc.o
+	$(FP) --obj build/ac_osc.o --ref osc_buildSyncList --new osc_buildSyncList --report --all
+	$(FP) --obj build/ac_osc.o --ref calcWavetableOscBlock --new calcWavetableOscSyncBlock --report --all
+	$(FP) --obj build/ac_osc.o --ref calcSineBlock --new calcSineSyncBlock --report --all
+	$(FP) --obj build/ac_osc.o --ref calcSampleOscBlock --new calcSampleOscSyncBlock --report --all
+	$(FP) --obj build/ac_osc.o --ref calcFmBlock --new calcWavetableOscRingBlock --report --all
+	$(FP) --obj build/ac_osc.o --ref calcFmSineBlock --new calcSineRingBlock --report --all
+	$(FP) --obj build/ac_osc.o --ref calcSampleOscFmBlock --new calcSampleOscRingBlock --report --all
+	$(FP) --obj build/ac_osc.o --ref calcNoiseBlock --new calcNoiseRingBlock --report --all
+	$(FP) --obj build/ac_osc.o --ref calcUserSampleOscFmBlock --new calcUserSampleOscRingBlock --report --all
+
+# G-A firmware half. Run elf_osc_baseline once on the unchanged tree (after
+# `make clean && make all` at the repository root); elf_osc_check after.
+elf_osc_baseline:
+	python3 elf_symdump.py --elf $(FW_ELF) $(foreach s,$(OSC_ELF_SYMS),--sym $(s)) \
+	  --out $(FROZEN85)/elf_osc.txt
+
+elf_osc_check: | $(GEN)
+	python3 elf_symdump.py --elf $(FW_ELF) $(foreach s,$(OSC_ELF_SYMS),--sym $(s)) \
+	  --out build/elf_osc_now.txt
+	python3 elf_symdump.py --compare $(FROZEN85)/elf_osc.txt build/elf_osc_now.txt

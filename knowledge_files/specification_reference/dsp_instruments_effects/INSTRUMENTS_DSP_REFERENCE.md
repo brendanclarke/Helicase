@@ -286,9 +286,12 @@ arrays are forbidden** in DSP code (they caused silent stack corruption).
 ### 5.1 Drum (`DrumVoice.c`, Basic)
 
 ```
-modOsc  --(gain fmModAmount)--> modBuf
-if mixOscs:  osc (gain 1−fmModAmount) + modBuf, saturating      --> buf
-else:        osc phase-modulated by modBuf (FM)                  --> buf
+modMode fm  (0): modOsc --(gain fmModAmount)--> modBuf; osc phase-modulated by modBuf      --> buf
+modMode mix (1): modOsc --(gain fmModAmount)--> modBuf; osc (gain 1−fmModAmount) + modBuf  --> buf
+modMode rng (3): modOsc --(gain fmModAmount)--> modBuf; osc ring copy: osc·(K+modBuf)>>15,
+                 K = (1−fmModAmount)·32768                                                  --> buf
+modMode snc (2): modOsc not rendered; syncClock at the FM-page frequency --> reset list;
+                 osc sync copy, gain 1, depth fmModAmount                                   --> buf
 transient (sample 2.., or zeros for snap/offset modes)           --> + buf, saturating
 ZDF filter (filterType)                                          --> buf
 fused post-chain: amp EG ramp → velocity gain → distortion       --> buf (pre-volume)
@@ -306,6 +309,25 @@ fused post-chain: amp EG ramp → velocity gain → distortion       --> buf (pr
   filter state to avoid a wrong transient.
 - **Velocity:** `velo = vel/127`; with `volumeMod` on it scales the output
   (the multiply always runs; with `volumeMod` off it multiplies by 1.0).
+- **Mod modes (S085 P1).** `osc2_mod_type` (`modMode`): 0 `fm`, 1 `mix`,
+  2 `snc`, 3 `rng`; any other byte plays `fm`.
+  - **`snc`:** the FM-page oscillator is a clock (`syncClock`, its own
+    field) at the FM-page frequency, never rendered. `modOsc.phase` is not
+    touched.
+    - Sin, Tri, Saw and Rec masters reset the slave once per cycle. Crash
+      and user-sample masters act as noise: the clock is their increment
+      `<< 5`, one reset per nominal period.
+    - Sin/Tri/Saw/Rec/Crash slaves sync. Noise and user-sample slaves
+      render unsynced.
+    - The reset lands on the sample after the wrap, at the overshoot ×
+      slave/clock ratio. `amt` pulls the phase that far (0 free, 127 hard).
+    - Only the slave is heard.
+  - **`rng`:** carrier·(1−amt) + carrier·modulator·amt, folded into the
+    carrier's store; every waveform.
+  - **Trigger:** unchanged in every mode. `modOsc` and `syncClock` run free.
+  - **An LFO on the FM-page `wav` in `snc`** still claims an interpolation
+    unit, which is then unused.
+  - Implementation: `S085_P1_OSC_MOD_IMPLEMENTATION.md`.
 
 ### 5.2 Snare (`Snare.c`, Basic)
 
@@ -337,7 +359,10 @@ alternate flag (visible track 7) selects the open decay.
 
 ### 5.5 Where each engine's hot code runs
 
-The oscillator block functions are in ITCM (`INITCM`), zero wait states. The
+The oscillator block functions are in ITCM (`INITCM`), zero wait states
+(since S085 P1 also the sync/ring copies, their dispatchers and the
+reset-list builder; the two interpolation variants are inlined into their
+ITCM dispatchers, like `calcPeriodicInterpBlock()`). The
 filter, distortion and post-chains are flash code, inlined by LTO into
 `mixer_calcNextSampleBlock()`. ITCM for the filter and distortion was tried
 in Session 023 and measured worse.
@@ -378,6 +403,17 @@ in Session 023 and measured worse.
 - **FM:** `calcNextOscSampleFmBlock()` phase-modulates the carrier by a
   modulator block (`calcFmBlock` for wavetables, `calcFmSineBlock`,
   `calcSampleOscFmBlock`, `calcUserSampleOscFmBlock`).
+- **Sync and ring (S085 P1):** `calcNextOscSampleSyncBlock()` /
+  `calcNextOscSampleRingBlock()` mirror `calcNextOscSampleBlock()`. They
+  dispatch to per-waveform copies of the plain loops (`calc*SyncBlock`,
+  `calc*RingBlock`) whose reads are verbatim; only the phase update (sync)
+  or the store (ring) differs.
+  - The reset list (`osc_buildSyncList()`, `OSC_SYNC_NONE`) is built once
+    per block from the clock (`osc_syncClockInc()`).
+  - The existing loops are unchanged; `tools/dsp_test` `oscmod_identity`
+    and `elf_osc_check` prove it.
+  - Later master kinds (plan §12: looped samples, wavetable frames, the
+    zero-crossing bitmap) add a list builder, not new slave loops.
 - **Waveform interpolation:** when a waveform parameter is modulated, up to
   `OSC_WAVE_INTERP_MAX_ACTIVE` (2) oscillators per block blend the two
   neighbouring waveforms (`calcPeriodicInterpBlock`: render both into DTCM
@@ -620,6 +656,9 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 | User sample (non-looped to looped paths) | about 28–49 | 0 |
 | Transient sample | 22 | 0 |
 | Saturating buffer add | about 4–5 (two samples per step) | 0 |
+| Sync reset-list builder (S085) | 7 | 0 |
+| Sync slave Tri/Saw/Rec / sine / crash (no reset / reset path) | 34/39 / 33/38 / 36/41 | 0 (+1 per block) |
+| Ring carrier Tri/Saw/Rec / sine / crash / noise / user sample | 28 / 27 / 30 / 13 / 40–41 | 0 |
 | ZDF filter (per type) | 85–104 (was 73–89) | 2 (was 5) |
 | Naive 2-pole filter | about 40–60 | 1 |
 | Drum post-chain | 32 (was 38 in three passes) | 1 |
@@ -631,6 +670,8 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 | Engine | Composition | About |
 |---|---|---:|
 | Drum (FM mode) | mod osc 24 + FM carrier 35 + transient 22 + add 5 + filter 95 + post 32 | 215 instructions, 3 divisions |
+| Drum (`rng`) | mod osc 24 + ring carrier 28 + transient 22 + add 5 + filter 95 + post 32 | 206 instructions, 3 divisions |
+| Drum (`snc`) | builder 7 + sync slave 39 + transient 22 + add 5 + filter 95 + post 32 | 200 instructions, 3 divisions + 1 per block |
 | Snare | noise 13 + filter 95 + transient 22 + add 5 + osc 24 + post 30 | 190 instructions, 3 divisions |
 | Cymbal | 2 mod osc 48 + add 5 + FM carrier 35 + filter 95 + transient 22 + post 25 | 230 instructions, 3 divisions |
 | HiHat | as Cymbal | 230 instructions, 3 divisions |
@@ -638,6 +679,9 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 Add waveform interpolation (about one extra oscillator render each, at most
 two per block) and the mixer per slot (decimator 12–18, dry path 28–46, plus
 the send; `EFFECTS_MIXER_DSP_REFERENCE.md`).
+
+With user-sample oscillators, the oscillator section is `fm` 90, `mix` 87,
+`rng` 82, `snc` ≤ 48 (S085 P1 §1).
 
 ### 8.3 Share of the budget (audit estimates, ±50 %)
 
@@ -799,3 +843,7 @@ fields from `ModulationNode`.
 - Session 075: no engine change; global `srt` retired (target 390 a
   placeholder); runtime-write priority fixed (§4.3, §7.5;
   `075_SESSION_HANDOFF_LOG.md` §11).
+- Session 085 P1: Drum mod modes `snc` (hard sync to an FM-page clock, `amt`
+  = depth) and `rng` (ring, folded into the carrier store); `mixOscs`
+  renamed `modMode`; `DrumVoice.syncClock` (S085 P1 implementation
+  document).

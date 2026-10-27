@@ -798,3 +798,22 @@ the new copy/clear work is foreground-only and bounded.
     test per Morph-worker parameter write; a menu edit now does one
     interpolation instead of queueing up to 64 parameter writes (less
     foreground work).
+
+### Session 085 P1 additions (record in `085_SESSION_HANDOFF_LOG.md`)
+
+36. **ADDED (S085 P1): Drum `rng`.** The ring law is folded into
+    per-waveform carrier copies. It costs the plain loop + 0…4 per sample
+    and has no separate pass. A separate pass (9 scalar, 7.5 packed) was
+    measured and rejected: with user-sample oscillators it made `rng` ≥
+    `fm` (89.5–91 vs 90).
+37. **ADDED (S085 P1): Drum `snc`.** The FM-page oscillator is not
+    rendered. The cost is a 7-instruction reset-list builder plus the
+    slave's sync copy (plain + 10…11 on the reset path) and one VDIV per
+    block. The dearest `snc` (crash slave, 48) is below the dearest `fm`
+    (user samples, 90).
+38. **UNCHANGED (S085 P1): `fm` and `mix`.** The existing loops are
+    byte-identical in the linked firmware (`elf_osc_check`; one unused
+    trailing literal-pool word is the only diff at
+    `calcNextOscSampleBlock.constprop.0`). Device check:
+    <`cpu` readings for the six-slot `fm` / `snc` / `rng` Scenes, to be
+    filled at G-C>.

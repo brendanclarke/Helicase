@@ -912,6 +912,742 @@ int16_t calcSampleOsc(OscInfo* osc)
 
 };
  //-----------------------------------------------------------
+/* =========================================================================
+** S085 P1: Drum osc2 mod modes snc (hard sync) and rng (ring)
+** =========================================================================
+**
+** What:       the sync clock and reset-list builder; sync and ring copies of
+**             the plain block loops above; their two dispatchers. Each copy
+**             repeats its plain loop's read and interpolation exactly. Only
+**             the phase update (sync) or the final store (ring) differs.
+** Why:        the existing loops must stay unchanged instruction for
+**             instruction (fm and mix may not change cost or sound). So the
+**             new behaviour lives in separate functions, not in extra
+**             parameters on the shared loops: the S085 rollback's shared
+**             plain/sync loops added cost to every plain render.
+**             OSC_S085_LOOP keeps each copy out of line and unspecialised.
+**             Each one then appears under its own name for fpseq.py and ITCM
+**             accounting, and LTO cannot fold it into an existing loop.
+** Accessors:  calcNextOscSampleSyncBlock(), calcNextOscSampleRingBlock(),
+**             osc_buildSyncList(), osc_syncClockInc() (all called from
+**             Drum_calcVoiceSyncBlock()).
+** Affiliates: Oscillator.h S085 P1 block; DrumVoice.c; tools/dsp_test
+**             (test_osc_mod.c, armcheck-oscmod, elf_osc_check).
+*/
+#if (INTERPOLATE_OSC != 1)
+#error "S085 P1 sync/ring copies implement the interpolated read only (INTERPOLATE_OSC 1)"
+#endif
+
+/*
+ * S085 P1 ITCM placement.
+ *
+ * What:       .itcm.s085 for every new oscillator function.
+ * Why:        the linker script places *(.itcm) first and *(.itcm.*) after
+ *             it, so the new code follows all existing ITCM code. The
+ *             existing loops then keep their addresses and their short
+ *             (16-bit) tail branches; appending this code inside .itcm
+ *             pushed calcUserSampleOscBlock() out of b.n range and changed
+ *             that loop's compiled text (which the G-A gate forbids).
+ * Accessors:  the S085 P1 functions below.
+ */
+#define OSC_S085_SECTION __attribute__((section(".itcm.s085")))
+#define OSC_S085_LOOP OSC_S085_SECTION __attribute__((noinline, noclone))
+/*
+ * The two public S085 P1 dispatchers stay out of line in ITCM (S085 P1).
+ *
+ * What:       INITCM plus noinline/noclone.
+ * Why:        they must not be inlined into Drum_calcVoiceSyncBlock() (flash):
+ *             their interpolated variants' blend loops are per-sample code
+ *             and the cost gate assumes the same ITCM placement that
+ *             calcPeriodicInterpBlock() gets through calcNextOscSampleBlock().
+ * Accessors:  Drum_calcVoiceSyncBlock().
+ */
+#define OSC_S085_DISPATCH OSC_S085_SECTION __attribute__((noinline, noclone))
+
+/*
+ * Apply one sync reset to an advanced slave phase (S085 P1).
+ *
+ * What:       target = over x ratioQ16 >> 16 is where the slave would be
+ *             had it restarted at the clock's wrap instant (the overshoot
+ *             correction, plan Q4). The result moves phase toward target by
+ *             depthQ30 (0 = no move, 1 << 30 = exactly target), along the
+ *             signed (short) way round the 32-bit phase circle.
+ *             over == OSC_SYNC_NONE returns phase unchanged.
+ * Why:        plan Q10 (amt = sync depth), K6 (the arithmetic runs on every
+ *             sample; only the select depends on the list).
+ * Inputs:     phase, already advanced by phaseInc (so the reset lands on the
+ *             next sample, K4); over (the list entry); ratioQ16; depthQ30.
+ * Outputs:    the next phase.
+ * Range:      over < the clock increment, so target is below the slave
+ *             increment (a clamped ratio only lowers it). |diff x depthQ30|
+ *             < 2^61.
+ * Accessors:  calcSineSyncBlock(), calcWavetableOscSyncBlock(),
+ *             calcSampleOscSyncBlock(); tools/dsp_test osc_mod (S2, S3).
+ */
+static inline __attribute__((always_inline)) uint32_t osc_syncPull(
+	const uint32_t phase, const uint32_t over, const uint32_t ratioQ16,
+	const int32_t depthQ30)
+{
+	const uint32_t target = (uint32_t)(((uint64_t)over * ratioQ16) >> 16);
+	const int32_t diff = (int32_t)(target - phase);
+	const uint32_t pulled = phase +
+		(uint32_t)(int32_t)(((int64_t)diff * depthQ30) >> 30);
+
+	return (over != OSC_SYNC_NONE) ? pulled : phase;
+}
+
+/*
+ * The ring law for one sample (S085 P1).
+ *
+ * What:       SSAT16((car x (ringK + mod)) >> 15). With mod = modulator x
+ *             amt and ringK = (1 - amt) x 32768 this is car x (1 - amt) +
+ *             car x modulator x amt (plan K5). The saturation catches the
+ *             single full-scale case (-32768 x -32768 at amt 1).
+ * Inputs:     car (the carrier sample), mod (the modulator block sample),
+ *             ringK.  Outputs: the stored sample.
+ * Accessors:  the ring copies below; tools/dsp_test osc_mod (R1).
+ */
+static inline __attribute__((always_inline)) int16_t osc_ringSample(
+	const int16_t car, const int16_t mod, const int32_t ringK)
+{
+	return (int16_t)__SSAT(((int32_t)car * (ringK + (int32_t)mod)) >> 15, 16);
+}
+
+/*
+ * Slave-to-clock increment ratio in Q16.16, once per block (S085 P1).
+ *
+ * What:       slaveInc / clockInc x 65536, clamped below 2^32. clockInc 0
+ *             gives 0 (the builder then produces no resets anyway).
+ * Why:        it turns a clock overshoot into slave phase units (plan
+ *             §4.3.2). Float: one VDIV per block (about 0.5 cycles per
+ *             sample) instead of a 64-bit integer divide.
+ * Inputs:     slaveInc, clockInc.  Outputs: ratioQ16.
+ * Accessors:  calcNextOscSampleSyncBlock(); tools/dsp_test osc_mod (M1).
+ */
+static uint32_t osc_syncRatioQ16(const uint32_t slaveInc, const uint32_t clockInc)
+{
+	float ratio;
+
+	if (clockInc == 0u)
+		return 0u;
+	ratio = ((float)slaveInc / (float)clockInc) * 65536.0f;
+	if (ratio > 4294967040.0f)
+		ratio = 4294967040.0f;
+	return (uint32_t)ratio;
+}
+
+/*
+ * Whether a waveform has a sync copy (S085 P1).
+ *
+ * What:       1 for SINE, TRI, SAW, REC and CRASH; 0 for NOISE and user
+ *             samples, which render unsynced in P1 (plan A3/A4).
+ * Accessors:  calcPeriodicInterpSyncBlock() (the phase rule).
+ * Affiliates: osc_renderSyncWave() (the same partition, as a switch).
+ */
+static inline uint8_t osc_syncWaveform(const uint8_t waveform)
+{
+	return (uint8_t)((waveform <= CRASH) && (waveform != NOISE));
+}
+
+/*
+ * Render one waveform at gain 1, without the interpolation check (S085 P1).
+ *
+ * What:       the waveform switch of calcNextOscSampleBlock() with a constant
+ *             gain of 1, calling the leaf loops directly (and repeating its
+ *             user-sample range check).
+ * Why:        the unsynced fallbacks (noise and user samples) and the ring
+ *             interpolation partners must not add constant-gain call sites to
+ *             calcNextOscSampleBlock(): LTO then re-specialises that
+ *             function's existing constprop clones, which the G-A gate
+ *             forbids (implementation §7 I1). The leaves already receive a
+ *             constant 1.0f from the baseline interpolation clone, so their
+ *             specialisations are unchanged.
+ * Inputs:     osc (interpolation already cleared by the caller where
+ *             relevant), buf[size], size.
+ * Outputs:    buf; osc state, exactly as calcNextOscSampleBlock().
+ * Accessors:  osc_renderSyncWave(); calcPeriodicInterpRingBlock().
+ * Affiliates: calcNextOscSampleBlock() (the reference dispatch).
+ */
+static OSC_S085_SECTION void osc_renderPlainWave(OscInfo* osc, int16_t* buf,
+                                                 const uint8_t size)
+{
+	switch(osc->waveform)
+	{
+	case SINE:
+		calcSineBlock(osc, buf, size, 1.f);
+		break;
+	case SAW:
+		calcWavetableOscBlock(osc, sawTable, buf, size, 1.f);
+		break;
+	case TRI:
+		calcWavetableOscBlock(osc, triTable, buf, size, 1.f);
+		break;
+	case REC:
+		calcWavetableOscBlock(osc, recTable, buf, size, 1.f);
+		break;
+	case NOISE:
+		calcNoiseBlock(osc, buf, size, 1.f);
+		break;
+	case CRASH:
+		calcSampleOscBlock(osc, buf, size, 1.f);
+		break;
+	default://sample playback
+		if( osc->waveform - OSC_SAMPLE_START > sampleMemory_getNumSamples() ) return;
+
+		calcUserSampleOscBlock(osc, buf, size, 1.f);
+		break;
+	}
+}
+
+/*
+ * Sync clock increment for the FM-page oscillator (S085 P1).
+ * Contract: Oscillator.h. Crash and user samples run in <<17 point units
+ * (osc_calcSampleFreqValue: f/fs x 2^27), which is 1/32 of the 2^32-per-
+ * period clock, hence << 5 after the clamp.
+ */
+uint32_t osc_syncClockInc(const OscInfo* master)
+{
+	uint32_t inc = master->phaseInc;
+
+	if (master->waveform >= CRASH) {
+		if (inc > 0x07FFFFFFu)
+			inc = 0x07FFFFFFu;
+		inc <<= 5;
+	}
+	return inc;
+}
+
+/*
+ * Build one block's sync reset list (S085 P1).
+ * Contract: Oscillator.h. `next < clock` is the carry of the 32-bit add,
+ * and next is then the overshoot past the wrap (always < clockInc).
+ */
+OSC_S085_LOOP uint32_t osc_buildSyncList(uint32_t clock, const uint32_t clockInc,
+                                         uint32_t* over, const uint8_t size)
+{
+	uint8_t i;
+
+	for (i = 0u; i < size; i++) {
+		const uint32_t next = clock + clockInc;
+
+		over[i] = (next < clock) ? next : OSC_SYNC_NONE;
+		clock = next;
+	}
+	return clock;
+}
+
+/*
+ * Sine slave under sync (S085 P1).
+ *
+ * What:       calcSineBlock()'s read and interpolation (4,096-point table,
+ *             <<20 phase); the store is oscOut (gain 1, D3); the phase
+ *             update goes through osc_syncPull().
+ * Inputs:     osc, over[size], ratioQ16, depthQ30, buf[size], size.
+ * Outputs:    buf; osc->phase.
+ * Accessors:  osc_renderSyncWave().
+ * Affiliates: calcSineBlock() (the reference; must stay identical in its
+ *             read), tools/dsp_test osc_mod S1/S2.
+ */
+static OSC_S085_LOOP void calcSineSyncBlock(OscInfo* osc, const uint32_t* over,
+                                            const uint32_t ratioQ16,
+                                            const int32_t depthQ30,
+                                            int16_t* buf, const uint8_t size)
+{
+	uint8_t i;
+	for(i=0;i<size;i++)
+	{
+		const uint32_t oscPhase = osc->phase;
+		int16_t oscOut;
+
+		const uint32_t index =  oscPhase;
+		uint32_t  itg	= index>>20;
+
+		oscOut = sine_table[itg++];
+		const float frac = (index & 0xfffff) * 0.00000095367431640625f;
+		oscOut += frac*(sine_table[itg] - oscOut);
+
+		osc->phase = osc_syncPull(oscPhase + osc->phaseInc, over[i],
+		                          ratioQ16, depthQ30);
+
+		buf[i] = oscOut;
+	}
+}
+
+/*
+ * Tri/Saw/Rec slave under sync (S085 P1).
+ *
+ * What:       calcWavetableOscBlock()'s read and interpolation (1,024-point
+ *             band-limited table at osc->tableOffset, <<22 phase); the
+ *             store is oscOut (gain 1, D3); the phase update goes through
+ *             osc_syncPull().
+ * Inputs:     osc, table (sawTable / triTable / recTable), over[size],
+ *             ratioQ16, depthQ30, buf[size], size.
+ * Outputs:    buf; osc->phase.
+ * Accessors:  osc_renderSyncWave().
+ * Affiliates: calcWavetableOscBlock(); tools/dsp_test osc_mod S1/S2.
+ */
+static OSC_S085_LOOP void calcWavetableOscSyncBlock(OscInfo* osc,
+                                                    const int16_t table[][1024],
+                                                    const uint32_t* over,
+                                                    const uint32_t ratioQ16,
+                                                    const int32_t depthQ30,
+                                                    int16_t* buf,
+                                                    const uint8_t size)
+{
+	uint8_t i;
+	for(i=0;i<size;i++)
+	{
+		const uint32_t oscPhase = osc->phase;
+		int16_t oscOut ;
+		uint32_t  itg	= oscPhase>>22;
+		const uint32_t next = (itg + 1u) & 0x000003FFu;
+		oscOut = table[osc->tableOffset][itg];
+		const float frac = (oscPhase & 0x003FFFFF) * 2.384185791015625e-07f; // 1 / 2^22
+		oscOut += frac*(table[osc->tableOffset][next] - oscOut);
+
+		osc->phase = osc_syncPull(oscPhase + osc->phaseInc, over[i],
+		                          ratioQ16, depthQ30);
+		buf[i] = oscOut;
+	}
+}
+
+/*
+ * Crash slave under sync (S085 P1).
+ *
+ * What:       calcSampleOscBlock()'s read (32,768-point 8-bit crashSample,
+ *             <<17 phase, (x - 127) x 256); the store is oscOut (gain 1,
+ *             D3); the phase update goes through osc_syncPull(). A hard
+ *             reset restarts the cymbal read near its start.
+ * Note:       it reads crashSample[itg + 1] at itg = 32767, exactly as the
+ *             plain loop does (unchanged behaviour, kept for identity).
+ * Inputs:     osc, over[size], ratioQ16, depthQ30, buf[size], size.
+ * Outputs:    buf; osc->phase.
+ * Accessors:  osc_renderSyncWave().
+ * Affiliates: calcSampleOscBlock(); plan A2/Q12 (crash slave syncs).
+ */
+static OSC_S085_LOOP void calcSampleOscSyncBlock(OscInfo* osc, const uint32_t* over,
+                                                 const uint32_t ratioQ16,
+                                                 const int32_t depthQ30,
+                                                 int16_t* buf, const uint8_t size)
+{
+	uint8_t i;
+	for(i=0;i<size;i++)
+	{
+		const uint32_t oscPhase = osc->phase;
+		int16_t oscOut ;
+		uint32_t  itg	= oscPhase>>17;
+
+		oscOut = crashSample[itg++];
+		const float frac = (oscPhase & 0x0001FFFF) * 0.00000762939453125f; // 1 / 2^17
+		oscOut += frac*(crashSample[itg] - oscOut);
+		oscOut = (oscOut - 127)*256;
+
+		osc->phase = osc_syncPull(oscPhase + osc->phaseInc, over[i],
+		                          ratioQ16, depthQ30);
+		buf[i] = oscOut;
+	}
+}
+
+/*
+ * One waveform's sync render, without the interpolation check (S085 P1).
+ *
+ * What:       dispatches Sin/Tri/Saw/Rec/Crash to their sync copies. NOISE
+ *             and user samples render through calcNextOscSampleBlock() at
+ *             gain 1, unsynced (plan A3/A4). That call repeats its own
+ *             interpolation check, which is false here: the caller already
+ *             took the interpolation path, or the partner copy has
+ *             interpolation cleared.
+ * Inputs:     osc, over[size], ratioQ16, depthQ30, buf[size], size.
+ * Outputs:    buf; osc state.
+ * Accessors:  calcNextOscSampleSyncBlock(); calcPeriodicInterpSyncBlock().
+ * Affiliates: osc_syncWaveform() (the same partition).
+ */
+static OSC_S085_SECTION void osc_renderSyncWave(OscInfo* osc, const uint32_t* over,
+                                                const uint32_t ratioQ16,
+                                                const int32_t depthQ30,
+                                                int16_t* buf, const uint8_t size)
+{
+	switch(osc->waveform)
+	{
+	case SINE:
+		calcSineSyncBlock(osc, over, ratioQ16, depthQ30, buf, size);
+		break;
+	case SAW:
+		calcWavetableOscSyncBlock(osc, sawTable, over, ratioQ16, depthQ30, buf, size);
+		break;
+	case TRI:
+		calcWavetableOscSyncBlock(osc, triTable, over, ratioQ16, depthQ30, buf, size);
+		break;
+	case REC:
+		calcWavetableOscSyncBlock(osc, recTable, over, ratioQ16, depthQ30, buf, size);
+		break;
+	case CRASH:
+		calcSampleOscSyncBlock(osc, over, ratioQ16, depthQ30, buf, size);
+		break;
+	default:	/* NOISE and user samples: unsynced in P1 */
+		osc_renderPlainWave(osc, buf, size);
+		break;
+	}
+}
+
+/*
+ * Waveform-interpolated slave under sync (S085 P1).
+ *
+ * What:       calcPeriodicInterpBlock() with each partner rendered through
+ *             osc_renderSyncWave() against the same reset list, so both
+ *             partners reset on the same samples. The blend is the plain
+ *             one at gain 1.
+ *             Phase rule: when the base partner has a sync copy, osc->phase
+ *             takes the base partner's (synced) phase. Otherwise it takes
+ *             the plain rule, start + phaseInc x size.
+ * Why:        plan Q5: `wav` behaves the same in every mode. Cost is bounded
+ *             by the existing two-unit interpolation limit
+ *             (OSC_WAVE_INTERP_MAX_ACTIVE).
+ * Inputs:     osc (interpolation active), over[size], ratioQ16, depthQ30,
+ *             buf[size], size.
+ * Outputs:    buf; osc->phase.
+ * Placement:  no INITCM attribute, like calcPeriodicInterpBlock(); the
+ *             compiler inlines it into its ITCM dispatcher, as it does
+ *             calcPeriodicInterpBlock() into calcNextOscSampleBlock().
+ * Accessors:  calcNextOscSampleSyncBlock().
+ * Affiliates: calcPeriodicInterpBlock(); osc_interp_a/osc_interp_b scratch.
+ */
+static OSC_S085_SECTION void calcPeriodicInterpSyncBlock(OscInfo* osc,
+                                                         const uint32_t* over,
+                                                         const uint32_t ratioQ16,
+                                                         const int32_t depthQ30,
+                                                         int16_t* buf,
+                                                         const uint8_t size)
+{
+	const uint8_t base = osc->waveform;
+	const uint8_t next = osc->waveInterpNext;
+	const float frac = osc->waveInterpFrac;
+	const uint32_t startPhase = osc->phase;
+	OscInfo oscA = *osc;
+	OscInfo oscB = *osc;
+	uint8_t i;
+
+	oscA.waveform = base;
+	osc_clearWaveInterp(&oscA);
+	oscB.waveform = next;
+	osc_clearWaveInterp(&oscB);
+
+	osc_renderSyncWave(&oscA, over, ratioQ16, depthQ30, osc_interp_a, size);
+	osc_renderSyncWave(&oscB, over, ratioQ16, depthQ30, osc_interp_b, size);
+
+	for (i = 0; i < size; i++) {
+		const int16_t a = osc_interp_a[i];
+		const int16_t b = osc_interp_b[i];
+		buf[i] = (int16_t)(a + frac * (b - a));
+	}
+	osc->phase = osc_syncWaveform(base) ? oscA.phase
+	                                    : startPhase + (osc->phaseInc * (uint32_t)size);
+}
+
+/*
+ * Render one slave block under hard sync (S085 P1).
+ * Contract: Oscillator.h. Order: ratio (one VDIV), then the interpolation
+ * entry (as calcNextOscSampleBlock()), then the waveform switch.
+ */
+OSC_S085_DISPATCH void calcNextOscSampleSyncBlock(OscInfo* osc, const uint32_t* over,
+                                                 const uint32_t clockInc,
+                                                 const int32_t depthQ30,
+                                                 int16_t* buf, const uint8_t size)
+{
+	const uint32_t ratioQ16 = osc_syncRatioQ16(osc->phaseInc, clockInc);
+
+	if (osc_waveInterpActive(osc)) {
+		calcPeriodicInterpSyncBlock(osc, over, ratioQ16, depthQ30, buf, size);
+		return;
+	}
+	osc_renderSyncWave(osc, over, ratioQ16, depthQ30, buf, size);
+}
+
+/*
+ * Sine carrier with the ring law (S085 P1).
+ *
+ * What:       calcSineBlock() with the store replaced by
+ *             osc_ringSample(oscOut, modBuf[i], ringK).
+ * Inputs:     osc, modBuf[size], buf[size], size, ringK.
+ * Outputs:    buf; osc->phase.
+ * Accessors:  calcNextOscSampleRingBlock().
+ * Affiliates: calcSineBlock(); tools/dsp_test osc_mod R1.
+ */
+static OSC_S085_LOOP void calcSineRingBlock(OscInfo* osc, const int16_t* modBuf,
+                                            int16_t* buf, const uint8_t size,
+                                            const int32_t ringK)
+{
+	uint8_t i;
+	for(i=0;i<size;i++)
+	{
+		const uint32_t oscPhase = osc->phase;
+		int16_t oscOut;
+
+		const uint32_t index =  oscPhase;
+		uint32_t  itg	= index>>20;
+
+		oscOut = sine_table[itg++];
+		const float frac = (index & 0xfffff) * 0.00000095367431640625f;
+		oscOut += frac*(sine_table[itg] - oscOut);
+
+		osc->phase = oscPhase + osc->phaseInc;
+
+		buf[i] = osc_ringSample(oscOut, modBuf[i], ringK);
+	}
+}
+
+/*
+ * Tri/Saw/Rec carrier with the ring law (S085 P1).
+ *
+ * What:       calcWavetableOscBlock() with the store replaced by
+ *             osc_ringSample(oscOut, modBuf[i], ringK).
+ * Inputs:     osc, table, modBuf[size], buf[size], size, ringK.
+ * Outputs:    buf; osc->phase.
+ * Accessors:  calcNextOscSampleRingBlock().
+ * Affiliates: calcWavetableOscBlock(); tools/dsp_test osc_mod R1.
+ */
+static OSC_S085_LOOP void calcWavetableOscRingBlock(OscInfo* osc,
+                                                    const int16_t table[][1024],
+                                                    const int16_t* modBuf,
+                                                    int16_t* buf,
+                                                    const uint8_t size,
+                                                    const int32_t ringK)
+{
+	uint8_t i;
+	for(i=0;i<size;i++)
+	{
+		const uint32_t oscPhase = osc->phase;
+		int16_t oscOut ;
+		uint32_t  itg	= oscPhase>>22;
+		const uint32_t next = (itg + 1u) & 0x000003FFu;
+		oscOut = table[osc->tableOffset][itg];
+		const float frac = (oscPhase & 0x003FFFFF) * 2.384185791015625e-07f; // 1 / 2^22
+		oscOut += frac*(table[osc->tableOffset][next] - oscOut);
+
+		osc->phase = oscPhase + osc->phaseInc;
+		buf[i] = osc_ringSample(oscOut, modBuf[i], ringK);
+	}
+}
+
+/*
+ * Noise carrier with the ring law (S085 P1).
+ *
+ * What:       calcNoiseBlock(): a new hardware-RNG value on each phase wrap,
+ *             held between wraps; the store is replaced by
+ *             osc_ringSample(osc->output, modBuf[i], ringK).
+ * Inputs:     osc, modBuf[size], buf[size], size, ringK.
+ * Outputs:    buf; osc->phase; osc->output.
+ * Accessors:  calcNextOscSampleRingBlock().
+ * Affiliates: calcNoiseBlock(); GetRngValue() (random.c).
+ */
+static OSC_S085_LOOP void calcNoiseRingBlock(OscInfo* osc, const int16_t* modBuf,
+                                             int16_t* buf, const uint8_t size,
+                                             const int32_t ringK)
+{
+	int i;
+	for(i=0;i<size;i++)
+	{
+		const uint32_t lastPhase = osc->phase;
+		osc->phase += osc->phaseInc;
+
+		if(lastPhase > osc->phase)
+		{
+			//overflow happened -> phaseWrapped
+			osc->output = (int16_t)(GetRngValue()); //normal pitched white noise
+		}
+
+		buf[i] = osc_ringSample(osc->output, modBuf[i], ringK);
+	}
+}
+
+/*
+ * Crash carrier with the ring law (S085 P1).
+ *
+ * What:       calcSampleOscBlock() with the store replaced by
+ *             osc_ringSample(oscOut, modBuf[i], ringK).
+ * Inputs:     osc, modBuf[size], buf[size], size, ringK.
+ * Outputs:    buf; osc->phase.
+ * Accessors:  calcNextOscSampleRingBlock().
+ * Affiliates: calcSampleOscBlock().
+ */
+static OSC_S085_LOOP void calcSampleOscRingBlock(OscInfo* osc, const int16_t* modBuf,
+                                                 int16_t* buf, const uint8_t size,
+                                                 const int32_t ringK)
+{
+	uint8_t i;
+	for(i=0;i<size;i++)
+	{
+		const uint32_t oscPhase = osc->phase;
+		int16_t oscOut ;
+		uint32_t  itg	= oscPhase>>17;
+
+		oscOut = crashSample[itg++];
+		const float frac = (oscPhase & 0x0001FFFF) * 0.00000762939453125f; // 1 / 2^17
+		oscOut += frac*(crashSample[itg] - oscOut);
+		oscOut = (oscOut - 127)*256;
+
+		osc->phase = oscPhase + osc->phaseInc;
+		buf[i] = osc_ringSample(oscOut, modBuf[i], ringK);
+	}
+}
+
+/*
+ * User-sample carrier with the ring law (S085 P1).
+ *
+ * What:       calcUserSampleOscBlock() (the sample cache, one-shot hold,
+ *             looped wrap, interpolation across the loop seam) with the
+ *             store replaced by osc_ringSample(oscOut, modBuf[i], ringK).
+ *             Like the plain loop, an empty sample returns without writing
+ *             buf (unchanged behaviour, kept for parity).
+ * Inputs:     osc (waveform >= OSC_SAMPLE_START), modBuf[size], buf[size],
+ *             size, ringK.
+ * Outputs:    buf; osc->phase; osc sample cache.
+ * Accessors:  calcNextOscSampleRingBlock().
+ * Affiliates: calcUserSampleOscBlock(); osc_updateSampleCache();
+ *             SampleMemory.
+ */
+static OSC_S085_LOOP void calcUserSampleOscRingBlock(OscInfo* osc,
+                                                     const int16_t* modBuf,
+                                                     int16_t* buf,
+                                                     const uint8_t size,
+                                                     const int32_t ringK)
+{
+	uint8_t sampleIndex = osc->waveform - OSC_SAMPLE_START;
+	osc_updateSampleCache(osc, sampleIndex);
+	uint32_t sampleSize = osc->sampleCacheSize;
+	uint8_t looped = osc->sampleCacheLooped;
+
+	//cast sample data to signed int16_t array
+	const int16_t* sampleData = osc->sampleCacheData;
+	if(sampleSize == 0) return;
+
+	uint8_t i;
+	for(i=0;i<size;i++)
+	{
+		const uint32_t oscPhase = osc->phase;
+		int16_t oscOut ;
+		uint32_t  itg	= oscPhase>>17;
+
+		if(looped && itg >= sampleSize)
+			itg %= sampleSize;
+
+		oscOut = sampleData[itg];
+		const float frac = (oscPhase & 0x0001FFFF) * 0.00000762939453125f; // 1 / 2^17
+		if(looped && (itg + 1u) >= sampleSize)
+			oscOut += frac*(sampleData[0] - oscOut);
+		else
+			oscOut += frac*(sampleData[itg + 1u] - oscOut);
+		itg++;
+
+		//one shot
+		if(looped)
+		{
+			uint32_t nextPhase = oscPhase + osc->phaseInc;
+			if(sampleSize < 32768u) {
+				uint32_t loopPhase = sampleSize << 17;
+				if(nextPhase >= loopPhase)
+					nextPhase %= loopPhase;
+			}
+			osc->phase = nextPhase;
+		}
+		else if(itg < sampleSize)
+		{
+			osc->phase = oscPhase + osc->phaseInc;
+		}
+		buf[i] = osc_ringSample(oscOut, modBuf[i], ringK);
+	}
+}
+
+/*
+ * Waveform-interpolated carrier with the ring law (S085 P1).
+ *
+ * What:       calcPeriodicInterpBlock(): both partners rendered plain at
+ *             gain 1 into the DTCM scratch, then blended. The blend's store
+ *             is replaced by osc_ringSample(blend, modBuf[i], ringK). The
+ *             phase follows the plain rule (start + phaseInc x size).
+ * Placement:  no INITCM attribute, like calcPeriodicInterpBlock(); the
+ *             compiler inlines it into its ITCM dispatcher, as it does
+ *             calcPeriodicInterpBlock() into calcNextOscSampleBlock().
+ * Inputs:     osc (interpolation active), modBuf[size], buf[size], size,
+ *             ringK.
+ * Outputs:    buf; osc->phase.
+ * Accessors:  calcNextOscSampleRingBlock().
+ * Affiliates: calcPeriodicInterpBlock(); OSC_WAVE_INTERP_MAX_ACTIVE.
+ */
+static OSC_S085_SECTION void calcPeriodicInterpRingBlock(OscInfo* osc,
+                                                         const int16_t* modBuf,
+                                                         int16_t* buf,
+                                                         const uint8_t size,
+                                                         const int32_t ringK)
+{
+	const uint8_t base = osc->waveform;
+	const uint8_t next = osc->waveInterpNext;
+	const float frac = osc->waveInterpFrac;
+	const uint32_t startPhase = osc->phase;
+	OscInfo oscA = *osc;
+	OscInfo oscB = *osc;
+	uint8_t i;
+
+	oscA.waveform = base;
+	osc_clearWaveInterp(&oscA);
+	oscB.waveform = next;
+	osc_clearWaveInterp(&oscB);
+
+	osc_renderPlainWave(&oscA, osc_interp_a, size);
+	osc_renderPlainWave(&oscB, osc_interp_b, size);
+
+	for (i = 0; i < size; i++) {
+		const int16_t a = osc_interp_a[i];
+		const int16_t b = osc_interp_b[i];
+		const int16_t out = (int16_t)(a + frac * (b - a));
+		buf[i] = osc_ringSample(out, modBuf[i], ringK);
+	}
+	osc->phase = startPhase + (osc->phaseInc * (uint32_t)size);
+}
+
+/*
+ * Render one carrier block with the ring law (S085 P1).
+ * Contract: Oscillator.h. It mirrors calcNextOscSampleBlock(), including the
+ * user-sample range check that returns without writing buf.
+ */
+OSC_S085_DISPATCH void calcNextOscSampleRingBlock(OscInfo* osc, const int16_t* modBuf,
+                                                  int16_t* buf, const uint8_t size,
+                                                  const int32_t ringK)
+{
+	if (osc_waveInterpActive(osc)) {
+		calcPeriodicInterpRingBlock(osc, modBuf, buf, size, ringK);
+		return;
+	}
+
+	switch(osc->waveform)
+	{
+	case SINE:
+		calcSineRingBlock(osc, modBuf, buf, size, ringK);
+		break;
+	case SAW:
+		calcWavetableOscRingBlock(osc, sawTable, modBuf, buf, size, ringK);
+		break;
+	case TRI:
+		calcWavetableOscRingBlock(osc, triTable, modBuf, buf, size, ringK);
+		break;
+	case REC:
+		calcWavetableOscRingBlock(osc, recTable, modBuf, buf, size, ringK);
+		break;
+	case NOISE:
+		calcNoiseRingBlock(osc, modBuf, buf, size, ringK);
+		break;
+	case CRASH:
+		calcSampleOscRingBlock(osc, modBuf, buf, size, ringK);
+		break;
+	default://sample playback
+		if( osc->waveform - OSC_SAMPLE_START > sampleMemory_getNumSamples() ) return; // return if out of range
+
+		calcUserSampleOscRingBlock(osc, modBuf, buf, size, ringK);
+		break;
+	}
+}
+
+//-----------------------------------------------------------
 static void osc_calcSineFreqValue(OscInfo* osc, const float currentFreq)
 {
 	osc->phaseInc = freq2PhaseIncr(currentFreq);

@@ -138,8 +138,16 @@ void Drum_initVoice(DrumVoice *voice, uint8_t seed_index)
 #endif
 
 #if ENABLE_MIX_OSC
-	voice->mixOscs = true;
+	voice->modMode = DRUM_MOD_MIX;	/* S085 P1: was mixOscs = true (1 = mix) */
 #endif
+	/*
+	 * snc clock start (S085 P1).
+	 * What: the clock phase begins at 0 on every runtime reset (Scene or
+	 * type change); triggers do not touch it. Why: deterministic start
+	 * after a reset; free-running afterwards like modOsc (plan Q6b).
+	 * Accessors: Drum_calcVoiceSyncBlock().
+	 */
+	voice->syncClock = 0u;
 	voice->decimationCnt = 0;
 	voice->decimationRate = 1;
 }
@@ -310,19 +318,67 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	calcOnePoleBlockFixedInput(&voice->ampFilter, voice->ampFilterInput,voice->volEgValueBlock, size);
 #endif
 
-	//calc next mod osc sampleBlock
-	calcNextOscSampleBlock(&voice->modOsc,modBuf,size,voice->fmModAmount);
-
-	if(voice->mixOscs)
+	/*
+	 * Oscillator section by osc2 mod mode (S085 P1).
+	 *
+	 * What:       fm and mix make exactly the calls they made before, in the
+	 *             same order, with the same arguments.
+	 *             - rng: the modulator block at gain amt, then the carrier
+	 *               through its ring copy (carrier x (K + modBuf) >> 15).
+	 *             - snc: the FM-page oscillator is not rendered. Its
+	 *               frequency drives syncClock, the block's reset list is
+	 *               built from that clock, and the carrier renders through
+	 *               its sync copy at gain 1 with amt as the sync depth.
+	 *             modBuf is still fully rewritten by transient_calcBlock()
+	 *             below, so its contents in snc do not matter.
+	 * Why:        S085_P1_OSC_MOD_SNC_RNG.md §4. The session rule: no mode may
+	 *             cost more than today's dearest fm setting (implementation
+	 *             §1).
+	 * Inputs:     voice->modMode, fmModAmount, osc, modOsc, syncClock; size
+	 *             <= OUTPUT_DMA_SIZE (as modBuf already assumes).
+	 * Outputs:    buf (the oscillator section); modBuf (fm, mix, rng);
+	 *             syncClock (snc).
+	 * Accessors:  this render function, through InstrumentManager.
+	 * Affiliates: Oscillator.h S085 P1 block; DrumVoice.h DRUM_MOD_*;
+	 *             DrumParameters.c osc2_mod_type.
+	 */
+	switch (voice->modMode)
 	{
+	case DRUM_MOD_MIX:
+		//calc next mod osc sampleBlock
+		calcNextOscSampleBlock(&voice->modOsc,modBuf,size,voice->fmModAmount);
 		//calc main osc buffer
 		calcNextOscSampleBlock(&voice->osc,buf,size, (1.f-voice->fmModAmount));
 		//add mod buffer to main osc buffer
 		bufferTool_addBuffersSaturating(buf,modBuf,size);
-	}
-	else
+		break;
+
+	case DRUM_MOD_SNC:
 	{
+		uint32_t syncOver[OUTPUT_DMA_SIZE];
+		const uint32_t clockInc = osc_syncClockInc(&voice->modOsc);
+
+		voice->syncClock = osc_buildSyncList(voice->syncClock, clockInc,
+		                                     syncOver, size);
+		calcNextOscSampleSyncBlock(&voice->osc, syncOver, clockInc,
+		                           osc_syncDepthQ30(voice->fmModAmount),
+		                           buf, size);
+		break;
+	}
+
+	case DRUM_MOD_RNG:
+		//calc next mod osc sampleBlock (gain amt, as in mix)
+		calcNextOscSampleBlock(&voice->modOsc,modBuf,size,voice->fmModAmount);
+		calcNextOscSampleRingBlock(&voice->osc, modBuf, buf, size,
+		                           osc_ringK(voice->fmModAmount));
+		break;
+
+	case DRUM_MOD_FM:
+	default:
+		//calc next mod osc sampleBlock
+		calcNextOscSampleBlock(&voice->modOsc,modBuf,size,voice->fmModAmount);
 		calcNextOscSampleFmBlock(&voice->osc,modBuf,buf,size,1.0f);
+		break;
 	}
 
 	//calc transient sample

@@ -1818,6 +1818,8 @@ Current keys by family:
   `osc2_mod_amount`, `osc2_mod_type`, `osc3_wave`,
   `osc3_pitch_coarse`, `osc3_mod_amount`, `noise_freq`,
   `osc1_noise_mix`.
+  `osc2_mod_type` (Drum) stores 0 `fm`, 1 `mix`, 2 `snc`, 3 `rng`
+  (S085 P1). A missing key loads 0.
 - Filter: `filter_freq`, `filter_reso`, `filter_drive`, `filter_type`.
 - Amp envelope: `amp_envelope_attack`, `amp_envelope_decay`,
   `amp_envelope_decay_choke`, `amp_envelope_slope`, `amp_attack_repeat`.

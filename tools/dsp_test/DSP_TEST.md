@@ -74,6 +74,9 @@ for testing.
 | `test_postchain.c` | Voice post-chains: old separate passes against the fused helpers, all four engines. |
 | `test_octave.c` | Wavetable octave selection: `log2f()` formula against the edge table, every float from 0.001 to 65,536 Hz. |
 | `test_mixer.c` | Mixer: old dry + send calls against the combined function. |
+| `snapshot85.sh`, `frozen85/` | S085 P1: the pre-change `Oscillator.c/.h`, `BufferTools.c/.h`, `DrumVoice.c/.h`, `DrumParameters.c`, `MenuText.h`, and `elf_osc.txt` (the normalised firmware disassembly of every existing oscillator loop). `snapshot85.sh` refuses to run if `frozen85/` exists. |
+| `elf_symdump.py` | Dumps or compares the normalised disassembly of listed firmware symbols (all LTO clones), with addresses removed (S085 P1 G-A). |
+| `test_osc_mod.c` | Drum `snc`/`rng` oscillator support: the ring and sync copies against the unchanged plain loops, the builder, the clock and the mappings (S085 P1). |
 | `armcheck/postchain.c`, `armcheck/mixer.c` | ARM translation units that include old and new code side by side for `fpseq.py`. |
 | `build/` | Generated fragments, objects and programs. Git-ignored; `make clean` deletes it. |
 | `DSP_TEST.md` | This document. |
@@ -200,6 +203,10 @@ S073 tree.
 | `octave` | Octave-edge selection over every float in range | seconds | `octave mismatches: 16, max edge distance: 2 ulps, max error: 0.000403883111 cents` |
 | `mixer` | Combined dry + send against the old calls, every routing, stereo and mono input, ramps, near-saturation buses | seconds | `mixer differing samples: 0` |
 | `armcheck-mixer` | ARM `MATCH` for all four dry × send combinations and the send-only default case, plus instruction counts | seconds | six `MATCH` lines; totals 55→44, 69→59, 73→63, 87→78 |
+| `oscmod_identity` | `Oscillator.c/.h` have no removed or changed line against `frozen85/`; `BufferTools.c/.h` identical | seconds | two `removed or changed lines: 0` lines, `oscmod_identity: OK` |
+| `osc_mod` | `test_osc_mod.c` (R1, S1–S7, M1) | seconds | `osc_mod failures: 0` |
+| `armcheck-oscmod` | per-sample counts of the S085 P1 loops beside the plain/FM loops they replace | seconds | the §1.2 figures of S085_P1_OSC_MOD_IMPLEMENTATION.md, within a few instructions |
+| `elf_osc_baseline` / `elf_osc_check` | the linked firmware's existing oscillator loops, before and after | seconds | `0 missing, 0 changed` (new symbols allowed) |
 | `clean` | Deletes `build/` | — | — |
 
 These targets are specific to the S073 changes. They stay valid as

@@ -148,4 +148,177 @@ void osc_setBaseNote(OscInfo* osc, uint8_t baseNote);
 /** recalculate the frequency if either the base note or the offset note value changed*/
 void osc_recalcFreq(OscInfo* osc);
 
+//-----------------------------------------------------------
+/*
+ * Drum osc2 mod modes snc (hard sync) and rng (ring): oscillator side
+ * (S085 P1).
+ *
+ * What:       OSC_SYNC_NONE; the sync clock (osc_syncClockInc,
+ *             osc_buildSyncList); the sync and ring dispatchers
+ *             (calcNextOscSampleSyncBlock, calcNextOscSampleRingBlock); and
+ *             the amount mappings (osc_syncDepthQ30, osc_ringK). The
+ *             dispatchers mirror calcNextOscSampleBlock(): the same
+ *             waveform-interpolation entry, the same waveform switch and the
+ *             same user-sample range check.
+ * Why:        S085_P1_OSC_MOD_SNC_RNG.md §4; S085_P1_OSC_MOD_IMPLEMENTATION.md.
+ *             The session rule is no increase in CPU. snc renders only the
+ *             slave: the FM-page oscillator is a phase clock and is never
+ *             rendered. rng folds the ring product into the carrier's own
+ *             store instead of a separate pass. The existing plain and FM
+ *             loops are not edited, so fm and mix compile unchanged.
+ * Accessors:  Drum_calcVoiceSyncBlock() (DrumVoice.c) only.
+ * Affiliates: Oscillator.c S085 P1 section; tools/dsp_test targets osc_mod,
+ *             oscmod_identity, armcheck-oscmod, elf_osc_check.
+ */
+
+/*
+ * "No reset after this sample" marker in a sync reset list (S085 P1).
+ *
+ * What:       over[i] == OSC_SYNC_NONE: the clock did not wrap after sample
+ *             i. Any other value is the clock's overshoot past its wrap.
+ *             That overshoot is always < the clock increment, so it can
+ *             never equal this marker.
+ * Accessors:  osc_buildSyncList() writes it; the sync copies in
+ *             Oscillator.c read it.
+ */
+#define OSC_SYNC_NONE 0xFFFFFFFFu
+
+/*
+ * Sync clock increment for the FM-page (master) oscillator (S085 P1).
+ *
+ * What:       master->phaseInc, in "2^32 per nominal period" units.
+ *             - Sine, table and noise phases already are.
+ *             - Crash and user samples (a <<17 point index; 1,024 points per
+ *               nominal period) are scaled << 5. They are first clamped to
+ *               0x07FFFFFF so the shift cannot overflow; a master at or above
+ *               fs then resets the slave on every sample.
+ * Why:        plan A1/A4: in P1 every master is a clock at its frequency.
+ *             Crash and user samples act as noise (one reset per nominal
+ *             period), not as their audio.
+ * Inputs:     master (read only). Its phaseInc is current:
+ *             Drum_calcVoiceAsync() runs osc_setFreq() on both Drum
+ *             oscillators every block, in every mode.
+ * Outputs:    the clock increment.
+ * Accessors:  Drum_calcVoiceSyncBlock().
+ * Affiliates: osc_buildSyncList(); calcNextOscSampleSyncBlock() (the ratio).
+ */
+uint32_t osc_syncClockInc(const OscInfo* master);
+
+/*
+ * Build one block's sync reset list (S085 P1).
+ *
+ * What:       advances clock by clockInc once per sample. When the addition
+ *             wraps (the clock passed 2^32 between samples i and i + 1),
+ *             over[i] = the new clock value: the overshoot past the wrap.
+ *             Otherwise over[i] = OSC_SYNC_NONE.
+ * Why:        plan §4.3.1 / Q11: one list per block serves every slave copy.
+ *             Later master kinds (looped samples, wavetable frames, the
+ *             zero-crossing bitmap; plan §12) add a builder, not new slave
+ *             loops.
+ * Inputs:     clock (the clock phase at block start), clockInc, over[size],
+ *             size (<= OUTPUT_DMA_SIZE).
+ * Outputs:    over[0..size-1]; returns the clock phase at block end (the
+ *             caller stores it in DrumVoice.syncClock).
+ * Cost:       constant per sample (an add, a compare, a select, a store).
+ * Accessors:  Drum_calcVoiceSyncBlock().
+ * Affiliates: calcNextOscSampleSyncBlock(); OSC_SYNC_NONE.
+ */
+uint32_t osc_buildSyncList(uint32_t clock, const uint32_t clockInc,
+                           uint32_t* over, const uint8_t size);
+
+/*
+ * Render one slave block under hard sync (S085 P1).
+ *
+ * What:       renders osc at gain 1, exactly as calcNextOscSampleBlock()
+ *             would. After sample i, when over[i] != OSC_SYNC_NONE, the
+ *             advanced phase is pulled toward the reset target:
+ *                 target = over[i] x ratio, ratio = osc->phaseInc / clockInc;
+ *                 phase += depth x (signed)(target - phase).
+ *             The reset therefore lands on sample i + 1 (plan K4).
+ *             - Synced: Sin, Tri, Saw, Rec, Crash.
+ *             - Rendered plain (no sync): Noi, user samples (plan A3/A4).
+ *             - Waveform interpolation: both partners use the same list.
+ * Why:        plan Q10: amt is the sync depth (0 free-running, 1 hard sync).
+ *             Only the slave is heard.
+ * Inputs:     osc (the carrier), over[size] from osc_buildSyncList(),
+ *             clockInc (the same value the list was built with), depthQ30
+ *             (osc_syncDepthQ30()), buf[size], size.
+ * Outputs:    buf; osc->phase (and osc->output for the plain fallbacks).
+ * Cost:       one divide per call (the ratio), then the waveform's sync
+ *             copy: S085_P1_OSC_MOD_IMPLEMENTATION.md §1.
+ * Accessors:  Drum_calcVoiceSyncBlock().
+ * Affiliates: the sync copies and osc_renderSyncWave() in Oscillator.c.
+ */
+void calcNextOscSampleSyncBlock(OscInfo* osc, const uint32_t* over,
+                                const uint32_t clockInc, const int32_t depthQ30,
+                                int16_t* buf, const uint8_t size);
+
+/*
+ * Render one carrier block with the ring law applied (S085 P1).
+ *
+ * What:       renders osc exactly as calcNextOscSampleBlock() would at
+ *             gain 1, but stores
+ *                 buf[i] = SSAT16(osc_i x (ringK + modBuf[i]) >> 15)
+ *             instead of osc_i x gain. With modBuf = modulator x amt and
+ *             ringK = (1 - amt) x 32768, this is
+ *                 carrier x (1 - amt) + carrier x modulator x amt
+ *             (plan K5). Every waveform is supported, including noise, user
+ *             samples and waveform interpolation.
+ * Why:        D1: a separate ring pass made rng as expensive as fm or more
+ *             with user-sample oscillators. Folded into the store, it costs
+ *             the plain loop + 0..4 instructions per sample.
+ * Inputs:     osc (the carrier), modBuf[size] (the modulator block at gain
+ *             amt), buf[size], size, ringK (osc_ringK()).
+ * Outputs:    buf; osc->phase / osc->output as the plain render.
+ * Accessors:  Drum_calcVoiceSyncBlock().
+ * Affiliates: the ring copies in Oscillator.c; the mix path (the same
+ *             modBuf).
+ */
+void calcNextOscSampleRingBlock(OscInfo* osc, const int16_t* modBuf,
+                                int16_t* buf, const uint8_t size,
+                                const int32_t ringK);
+
+/*
+ * Sync depth from the Drum amount (S085 P1).
+ *
+ * What:       amount (fmModAmount, 0..1) as Q30: 0 -> 0 (no pull), 1 ->
+ *             0x40000000 (exact hard sync). Out-of-range or non-positive
+ *             input clamps.
+ * Why:        Q30 makes both ends exact. depth 0 is bit-identical to the
+ *             free-running slave, and depth 1 lands exactly on the target.
+ * Inputs:     amount.  Outputs: depthQ30.
+ * Accessors:  Drum_calcVoiceSyncBlock() (once per block).
+ * Affiliates: osc_syncPull() in Oscillator.c.
+ */
+static inline int32_t osc_syncDepthQ30(const float amount)
+{
+	if (!(amount > 0.0f))
+		return 0;
+	if (amount >= 1.0f)
+		return 0x40000000;
+	return (int32_t)(amount * 1073741824.0f);
+}
+
+/*
+ * Ring dry gain from the Drum amount (S085 P1).
+ *
+ * What:       K = round((1 - amount) x 32768), 0..32768. K = 32768 at
+ *             amount 0, so rng at amount 0 is the carrier exactly (the
+ *             modulator block is then all zeros). K = 0 at amount 1 gives
+ *             the pure ring product.
+ * Inputs:     amount (fmModAmount, 0..1).  Outputs: K.
+ * Range:      K + modBuf lies in [-32768, 65535]; times an int16 carrier it
+ *             stays below 2^31.
+ * Accessors:  Drum_calcVoiceSyncBlock() (once per block).
+ * Affiliates: osc_ringSample() in Oscillator.c.
+ */
+static inline int32_t osc_ringK(const float amount)
+{
+	if (!(amount > 0.0f))
+		return 32768;
+	if (amount >= 1.0f)
+		return 0;
+	return (int32_t)((1.0f - amount) * 32768.0f + 0.5f);
+}
+
 #endif /* OSCILLATOR_H_ */

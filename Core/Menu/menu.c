@@ -2038,6 +2038,7 @@ static void menu_displayModTargetShort(uint8_t curParmVal, char *valueAsText);
 static uint8_t getMaxEntriesForMenu(uint8_t menuId);
 static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *buf);
 static void menu_getLfoPolarityName(uint8_t value, char *buf);
+static void menu_getMixFmName(uint8_t value, char *buf);	/* S085 P1 */
 static void menu_getPlayModeName(uint16_t value, char *buf);
 static void menu_getConditionName(uint16_t value, char *buf);
 static void menu_getRollRateName(uint16_t value, char *buf);
@@ -3325,7 +3326,8 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
         numtostrps(out, (int8_t)(value - 63));
         break;
     case DTYPE_MIX_FM:
-        memcpy(out, (value == 1u) ? menuText_mix : menuText_fm, 3);
+        /* S085 P1: fm / mix / snc / rng (menu_getMixFmName()). */
+        menu_getMixFmName(value, out);
         break;
     case DTYPE_ON_OFF:
         memcpy(out, (value == 1u) ? menuText_on : menuText_off, 3);
@@ -6395,8 +6397,8 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         setNoteName(value, valueAsText);
         break;
     case DTYPE_MIX_FM:
-        if (value == 1u) memcpy(valueAsText, menuText_mix, 3);
-        else            memcpy(valueAsText, menuText_fm, 3);
+        /* S085 P1: fm / mix / snc / rng (menu_getMixFmName()). */
+        menu_getMixFmName(value, valueAsText);
         break;
     case DTYPE_ON_OFF:
         if (value == 1u) memcpy(valueAsText, menuText_on, 3);
@@ -6653,6 +6655,13 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
         if (*value > 15u) *value = 15u;
         break;
     case DTYPE_MIX_FM:
+        /*
+         * S085 P1: osc2 mod mode 0..3. Menu edits and MIDI writes both pass
+         * here (MIDI_SPEC.md §5.5), so CC/NRPN 3..127 select rng.
+         */
+        if (*value > (uint16_t)(mixFmNames[0][0] - 1u))
+            *value = (uint16_t)(mixFmNames[0][0] - 1u);
+        break;
     case DTYPE_ON_OFF:
     case DTYPE_0b1:
         if (*value > 1u) *value = 1u;
@@ -11559,6 +11568,41 @@ static void menu_getLfoPolarityName(uint8_t value, char *buf)
 }
 
 /*
+ * Format the Drum osc2 mod mode (DTYPE_MIX_FM) (S085 P1).
+ *
+ * What:       writes "fm ", "mix", "snc" or "rng" for the stored values
+ *             0..3. Any other byte shows "fm ", matching the render, whose
+ *             switch defaults to fm (plan Q7).
+ * Why:        the dtype grew from a two-value ternary to four values. One
+ *             helper keeps the six display sites (compact cell, single
+ *             parameter edit, value-automation search, automation value,
+ *             repaint) identical.
+ * Inputs:     value (the stored byte), buf (3 characters, not terminated).
+ * Outputs:    buf[0..2].
+ * Accessors:  va_formatValue3(), menu_formatCellValue3(),
+ *             menu_formatAutomationValue3(), menu_repaintGeneric().
+ * Affiliates: MenuText.h mixFmNames; DrumVoice.h DRUM_MOD_*;
+ *             menu_clampCellValue() and menu_automationValueMax() (the same
+ *             count).
+ */
+static void menu_getMixFmName(uint8_t value, char *buf)
+{
+    const uint8_t count = (uint8_t)mixFmNames[0][0];
+    const char *p;
+
+    if (value >= count)
+        value = 0u;
+    p = mixFmNames[value + 1u];
+    buf[0] = p[0];
+    buf[1] = p[1] ? p[1] : ' ';
+    buf[2] = p[2] ? p[2] : ' ';
+}
+
+/* S085 P1: mixFmNames holds the count plus fm, mix, snc, rng (DRUM_MOD_COUNT). */
+_Static_assert(sizeof(mixFmNames) / sizeof(mixFmNames[0]) == 5u,
+               "mixFmNames must list the four Drum osc2 mod modes");
+
+/*
  * Format one per-track run-mode value into a three-character field.
  *
  * What: writes the fwd/rev/pip/rnd/onc/1fr token for stored values 0..5, and
@@ -12914,8 +12958,10 @@ static uint8_t menu_automationValueMax(const ParamDescriptor *descriptor)
         }
     }
     case DTYPE_ON_OFF:
-    case DTYPE_MIX_FM:
         return 1u;
+    case DTYPE_MIX_FM:
+        /* S085 P1: osc2 mod mode 0..3; step automation may select snc/rng. */
+        return (uint8_t)(mixFmNames[0][0] - 1u);
     case DTYPE_LFO_POLARITY:
         return 2u;
     default:
@@ -12956,7 +13002,8 @@ static void menu_formatAutomationValue3(const ParamDescriptor *descriptor,
         memcpy(buf, value ? menuText_on : menuText_off, 3);
         return;
     case DTYPE_MIX_FM:
-        memcpy(buf, (value == 1u) ? menuText_mix : menuText_fm, 3);
+        /* S085 P1: fm / mix / snc / rng (menu_getMixFmName()). */
+        menu_getMixFmName(value, buf);
         return;
     case DTYPE_LFO_POLARITY:
         menu_getLfoPolarityName(value, buf);
@@ -14026,8 +14073,8 @@ static void menu_repaintGeneric(void)
                     menu_displayModTargetFull(value);
                 break;
             case DTYPE_MIX_FM:
-                if (value==1) memcpy(&editDisplayBuffer[1][13], menuText_mix, 3);
-                else               memcpy(&editDisplayBuffer[1][13], menuText_fm, 3);
+                /* S085 P1: fm / mix / snc / rng (menu_getMixFmName()). */
+                menu_getMixFmName(value, &editDisplayBuffer[1][13]);
                 break;
             case DTYPE_ON_OFF:
                 if (value==1) memcpy(&editDisplayBuffer[1][13], menuText_on, 3);
