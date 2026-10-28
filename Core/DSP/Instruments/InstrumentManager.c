@@ -766,33 +766,23 @@ static uint8_t instrumentManager_descriptorSupportsModulationRange(
 }
 
 /*
- * Stage-B body of instrumentManager_waveDomainMax() (see the declaration).
+ * Highest legal value of an oscillator wave row (S087 stage D; S087 P1).
  *
- * What:       every wave row still reports the stock waveform list's last
- *             index, so no range changes before the user content exists.
- * Why:        the signature and its one call site land in stage B; stage D
- *             replaces the body with the per-type and modulator-list counts.
- * Inputs:     slot, descriptor (both unused here).
- * Outputs:    modNode_getMaxWaveformIndex().
- * Accessors:  instrumentManager_descriptorModDomain().
- * Affiliates: osc_userCount()/osc_userListCount() (stage D).
+ * What:       osc1_wave: the last entry of osc1's current type (wav:
+ *             OSC_STOCK_LAST; smp/slp: samples - 1; wtb: tables - 1; 0 when
+ *             none); a modulator wave row: the last entry of the flat list
+ *             (osc_userListCount() - 1). Any other row: OSC_STOCK_LAST.
+ * Why:        LFO and velocity ranges, the menu clamp and the automation
+ *             display must agree on what exists (S087 P0 r8, §12.4).
+ * Inputs:     slot (INSTRUMENT_SLOT_COUNT = unknown), descriptor.
+ * Outputs:    the highest value.
+ * Accessors:  instrumentManager_descriptorModDomain(),
+ *             instrumentManager_waveCellCount().
+ * Affiliates: osc_userCount(), osc_userListCount().
  */
 static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
                                                const ParamDescriptor *descriptor)
 {
-    /*
-     * Typed wave-row maximum (S087 stage D, D-40).
-     *
-     * What:       osc1_wave -> osc_userCount(osc1's type) - 1; a modulator
-     *             wave row -> osc_userListCount() - 1; otherwise the stock
-     *             list's last index.
-     * Why:        LFO/velocity ranges, the menu clamp and automation display
-     *             must agree on what exists for the type/list in force.
-     * Inputs:     slot (INSTRUMENT_SLOT_COUNT = unknown), descriptor.
-     * Outputs:    max value (0 when nothing installed).
-     * Accessors:  instrumentManager_descriptorModDomain().
-     * Affiliates: osc_userCount(), osc_userListCount().
-     */
     if (descriptor && descriptor->file_key &&
         strstr(descriptor->file_key, "_wave")) {
         if (strcmp(descriptor->file_key, "osc1_wave") == 0 &&
@@ -809,7 +799,7 @@ static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
             return count ? (uint8_t)(count - 1u) : 0u;
         }
     }
-    return modNode_getMaxWaveformIndex();
+    return OSC_STOCK_LAST;   /* S087 P1: only wave rows reach here (above); the stock list is the safe range */
 }
 
 /*

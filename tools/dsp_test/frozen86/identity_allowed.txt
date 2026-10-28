@@ -1,8 +1,0 @@
-Core/DSPAudio/Oscillator.c:<  * What:       1 for SINE, TRI, SAW, REC and CRASH; 0 for NOISE and user
-Core/DSPAudio/Oscillator.c:<  *             samples, which render unsynced in P1 (plan A3/A4).
-Core/DSPAudio/Oscillator.c:< 	return (uint8_t)((waveform <= CRASH) && (waveform != NOISE));
-Core/DSPAudio/Oscillator.c:<  * period clock, hence << 5 after the clamp.
-Core/DSPAudio/Oscillator.c:< 	if (master->waveform >= CRASH) {
-Core/DSPAudio/Oscillator.h:< #define OSC_SAMPLE_START 	0x06
-Core/DSPAudio/Oscillator.h:<  *             - Sine, table and noise phases already are.
-Core/DSPAudio/Oscillator.h:<  *             - Synced: Sin, Tri, Saw, Rec, Crash.

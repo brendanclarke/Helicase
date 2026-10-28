@@ -230,23 +230,13 @@ void modNode_setWaveInterpEnabled(uint8_t enabled);
 uint8_t modNode_getWaveInterpEnabled(void);
 uint32_t modNode_getWaveInterpGeneration(void);
 /*
- * Return the current maximum waveform index for oscillator waveform modulation.
- *
- * Inputs: none; the value follows SampleMemory's current sample count. Output:
- * the highest waveform id that a modulated oscillator waveform field may hold.
- * InstrumentManager uses this while building a direct-target range, and
- * ModulationNode uses it again for the interpolation write path. Keeping one
- * accessor prevents Menu or InstrumentManager from duplicating sample/waveform
- * packing rules.
- */
-uint8_t modNode_getMaxWaveformIndex(void);
-/*
  * Claim one of the two interpolation slots for this block (S087 stage E).
  *
- * What:       returns 1 and stamps osc->interpStamp with this block's
- *             generation when a slot is granted; 0 otherwise. The global
- *             toggle off grants nothing; a holder keeps a reserved slot; a
- *             newcomer needs a free slot.
+ * What:       returns 1 and stamps osc->interpStamp with this block's stamp
+ *             (1..255) when a slot is granted; 0 otherwise. The global toggle
+ *             off grants nothing; a grant already made this block is kept; a
+ *             holder of last block keeps a reserved slot; a newcomer needs a
+ *             free slot (S087 P1).
  * Why:        wavetable frame blending takes a slot and steps without one.
  * Inputs:     osc.  Outputs: grant flag, interpStamp, the counters.
  * Accessors:  osc_renderTyped*() (wtb branch).

@@ -2921,3 +2921,38 @@ Instrument/
   909kik.drm
   snap.snr
 ```
+
+---
+
+## Binding Mandates — Load/Save Slot Scrolling
+
+> **Any session that touches Load/Save UI or per-slot preview must read and
+> follow these rules.** (User, repeated 2026-10-19)
+
+- **Scrolling a slot number (encoder or endless pot) must never block or lag.**
+  Every slot change runs, in this order and each asynchronously:
+  1. **number** updates immediately;
+  2. **name** loads (it may be blank briefly);
+  3. **LED array** loads after the name.
+- **The next turn disposes whatever is still running, in the same order.**
+  It increments the number, blanks the name, cancels the LED load, and
+  restarts the name load. Name and LEDs may be blank for a moment until the
+  item settles. No stage may hold the input gate (`menu_storageBusy`) while
+  the user scrolls.
+- **Bank is the case that keeps breaking**, because its LED array is a card
+  scan (the child preview: up to 16 child folders plus PAT4 reads). Since
+  2026-10-19:
+  - the Bank name comes from the resident Bank index;
+  - the preview never takes `menu_storageBusy`;
+  - each new selection cancels it (`filesystem_cancelScanBankScenes()`,
+    called from `menu_requestCurrentLoadSaveSelection()`,
+    `menu_requestBankChildPreview()` and the Load/Save exit);
+  - the cancelled scan unwinds at a callback-free phase and finishes ERROR;
+  - the latest slot is served by the deferred retry.
+- **Bank OK stays gated** by a valid preview of the shown slot (Load). On
+  Save, OK cancels a running preview and needs a second press.
+- **Why:** the user has had to restate this rule several times; Scene and
+  Kit scrolling already behave this way.
+- **How to apply:** any new per-slot work (preview, probe, name read) must
+  follow it; check the encoder gate (`menu_parseEncoder()`) and the pot gate
+  (`menu_handleLoadSaveKnobDelta()`) for the page.

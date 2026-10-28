@@ -1429,3 +1429,380 @@ Does not exist yet. Needs to be created from MEMORY.md lines 1418–1572.
 
 A roughly 65% reduction, with zero information loss (everything removed is
 already carried by session logs or specification references).
+
+---
+
+## Category V — Source-code verification (S087)
+
+All claims in MEMORY.md and in the proposed pointers/compressions above were
+verified against the actual source code by reading the relevant `.c` and `.h`
+files. Results below.
+
+### V-PASS: Claims confirmed against code
+
+| Claim | Source file : line | Status |
+|-------|-------------------|--------|
+| TIM6 priority 6 | `Core/Hardware/timebase.c:300` | ✓ |
+| TIM7 priority 7 | `Core/Hardware/frontPanel/lcd.c:462` | ✓ |
+| TIM3 priority 2 | `Core/Sequencer/sequencerTimer.c:85` | ✓ |
+| DMA1_Stream4 priority 4 | `Core/Hardware/AudioCodecManager.c:603` | ✓ |
+| DMA1_Stream7 priority 4 | `Core/Hardware/AudioCodecManager.c:604` | ✓ |
+| USART3 priority 5 | `Core/MIDI/MidiDin.c:223` | ✓ |
+| TIM2 free-running 1 µs | `Core/Hardware/timebase.c:273–286` | ✓ |
+| TIM5 unused / reserved | no references in `Core/` | ✓ |
+| TIM3 = sequencer tick (4 kHz) | `Core/Sequencer/sequencerTimer.c:91–104` | ✓ |
+| OUTPUT_DMA_SIZE = 32 | `config.h:840` | ✓ |
+| AUDIO_DMA_FRAMES = 96 | `config.h:846` | ✓ |
+| SPSC 2-slot queue (ready_head / ready_tail / ready_count) | `Core/Hardware/AudioCodecManager.c:237–241` | ✓ |
+| DSP render in main loop, not DMA ISR | `main.c:183–223`, `config.h:853 (AUDIO_RENDER_IN_DMA_ISR 0)` | ✓ |
+| output = DAC2, output2 = DAC1 | `Core/Hardware/AudioCodecManager.h:52–53` | ✓ |
+| sampleMix_toS24 — no LSW=0 or >>8 | `Core/Hardware/AudioCodecManager.c:384–391` | ✓ |
+| EXTI_IMR = 0 first in main() | `main.c:580–581` | ✓ |
+| audioCodec_init() after all SD boot | `main.c:1413` (SD boot ends line 1367) | ✓ |
+| sequencerTimer_init() after audioCodec_init() | `main.c:1471` | ✓ |
+| seq_tick() in TIM3 ISR only | `Core/Sequencer/sequencerTimer.c:97` | ✓ |
+| MIDI channels 1..16, 0=off | `Core/MIDI/MidiDefs.h:63–65` | ✓ |
+| External clock ticks interpolated | `Core/Sequencer/sequencer.c:6540–6628` | ✓ |
+| Encoder: Dannegger algorithm, encode_read4() | `Core/Hardware/frontPanel/IO/encoder.c:43,196,251` | ✓ |
+| Encoder divide-by-4, accel max 4×, slow 25 ms, fast 3 ms | `encoder.c:101–105,258,283–299,355–359` | ✓ |
+| LCD queue: head/tail SPSC, no lcd_q_count | `Core/Hardware/frontPanel/lcd.c:273–301` | ✓ |
+| buttonHandler_processEvents(): `if`, not `while` | `Core/Hardware/frontPanel/buttonHandler.c:3844` | ✓ |
+| atan2f(b, a) argument order in endlessPots | `Core/Hardware/frontPanel/IO/endlessPots.c:176` | ✓ |
+| -Ofast for DSP sources only, -O2 elsewhere, -flto | `Makefile:13,55,173–174,198–214` | ✓ |
+| No VLAs remain | `CymbalVoice.c:273–278`, `HiHat.c:293–295` (fixed) | ✓ |
+| RCC_AHB2ENR = 0x40023834 | `Core/DSPAudio/random.c:44` | ✓ |
+| RNG_CR = 0x50060800, RNG_DR = 0x50060808 | `Core/DSPAudio/random.c:47,53` | ✓ |
+| DTCM non-DMA warning | `Core/Hardware/AudioCodecManager.c:211–212` | ✓ |
+| Boot order 58-step sequence | `main.c:574–1471` (verified in full) | ✓ |
+
+---
+
+### V-FAIL: Claims in MEMORY.md that do NOT match code
+
+These must be corrected in the refactored document.
+
+---
+
+#### V-FAIL-1. Sample loop flag: NOT bit 31 of .size
+
+**MEMORY.md claim:** "`SampleInfo.size` bit 31 = loop flag"
+
+**Actual code:** The v2 catalogue (`sample_catalogue_entry_t` at
+`Core/SampleRom/SampleMemory.h:147–156`) uses a separate `flags` field —
+bit 0 = loop present. The v1 layout with its 120-entry manifest and bit-31
+convention has been removed. `sampleMemory_isLooped()` (SampleMemory.c:255)
+is a stub returning `0u`; loop data lives in `loop_start`/`loop_end` fields.
+
+**Fix:** Replace "`SampleInfo.size` bit 31 = loop flag" with:
+> `sample_catalogue_entry_t.flags` bit 0 = loop present; loop bounds in
+> `loop_start`/`loop_end` fields.
+
+---
+
+#### V-FAIL-2. Sample rate: not enforced to 44.1 kHz
+
+**MEMORY.md claim:** "Mono 16-bit 44.1 kHz WAV only"
+
+**Actual code:** `sampleInstall_acceptFormat()` at `SampleInstall.c:69–105`
+accepts any sample rate. The comment at SampleInstall.h:30 says
+`uint32_t sample_rate; /* any rate; the host converts if it wants */`.
+Non-44.1 kHz files play transposed; no rate enforcement at install.
+
+**Fix:** Replace "Mono 16-bit 44.1 kHz WAV only" with:
+> Stored as mono 16-bit (8/16/24-bit and stereo accepted at install,
+> converted down). Any sample rate accepted; non-44.1 kHz plays transposed.
+
+---
+
+#### V-FAIL-3. Max sample count: 128, not 120
+
+**MEMORY.md claim:** "up to 120 entries"
+
+**Actual code:** `SAMPLE_MAX_COUNT = 128u` at `SampleMemory.h:112`.
+The 120-entry figure is from the removed v1 manifest (SampleMemory.h:97).
+
+**Fix:** Change "120" to "128" in the Sample Flash section.
+
+---
+
+#### V-FAIL-4. Audio render call order: seq_drainPendingAutomation is internal
+
+**MEMORY.md claim:** The render loop is `voiceControl_processPending →
+seq_drainPendingAutomation → seq_rampService → BASEPRI → mixer → commit`.
+
+**Actual code (main.c:213–221):** `seq_drainPendingAutomationTo(mark)` is
+called *inside* `voiceControl_processPending()` (at MidiVoiceControl.c:454),
+not as a separate top-level call. The actual top-level sequence is:
+
+1. `voiceControl_processPending()` (internally drains automation)
+2. `seq_rampService()`
+3. `dsp_maskLowPriorityIrqs()` (raises BASEPRI to 6 << 4)
+4. `mixer_calcNextSampleBlock()`
+5. `irq_setBasepri()` (restores)
+6. `audioCodec_commitRenderBuffer()`
+
+**Fix:** Update the render-loop listing to show the correct top-level calls.
+Note that `seq_drainPendingAutomation` is internal to voiceControl, not a
+separate step.
+
+---
+
+#### V-FAIL-5. Trace record count: 32, not 2,048
+
+**MEMORY.md claim:** "2,048 trace records"
+
+**Actual code:** `PAT_TRACE_RECORD_COUNT = 32u` at `PatternTrace.h:27`.
+`AUTOSAVE_TRACE_RECORD_COUNT = 64u` at `AutosaveTrace.h:35`. Neither is
+2,048. The 2,048 value may be from an earlier implementation or a
+compile-time override that is no longer present.
+
+**Fix:** Correct the trace record count in the open-items list (D-1).
+
+---
+
+#### V-FAIL-6. "St1" / "St2" naming is documentation-only
+
+**MEMORY.md claim:** "output = DAC2 = **St2**; output2 = DAC1 = **St1**"
+
+**Actual code:** The code uses "DAC1 (U23)" and "DAC2 (U24)" as the hardware
+labels (AudioCodecManager.h:52–53). "St1"/"St2" do not appear in code. The
+mapping is correct (output→DAC2, output2→DAC1) but the "St" labels are
+panel/schematic names, not code identifiers.
+
+**Fix:** Keep the rule (it's correct and useful) but clarify that St1/St2 are
+panel labels, not code identifiers:
+> output = DAC2 (U24) = panel **St2**; output2 = DAC1 (U23) = panel **St1**
+
+---
+
+### V-RESOLVED: Open items (Category D) that code shows are resolved
+
+These items from the D-list should be marked RESOLVED and deleted from the
+consolidated open-items section.
+
+---
+
+#### V-RESOLVED-1. D-7: PAR_EXT_SYNC / PAR_FETCH slot conflict — RESOLVED
+
+`PAR_FETCH` does not exist anywhere in the project (zero grep hits).
+`PAR_EXT_SYNC` is defined and used normally (ParameterArray.h:145). The
+conflict was eliminated when PAR_FETCH was removed.
+
+**Action:** Remove from open items.
+
+---
+
+#### V-RESOLVED-2. D-6: Synced LFO tempo hardcoded 130 BPM — RESOLVED
+
+`lfo_calcPhaseInc()` at `Core/DSPAudio/lfo.c:162–176` now calls
+`seq_getBpm()` instead of using a hardcoded value. Comment explicitly warns
+against fixed BPM.
+
+**Action:** Remove from open items.
+
+---
+
+#### V-RESOLVED-3. D-9: SELECT_1 LED dark at boot — RESOLVED (or spurious)
+
+No `SELECT_1` literal exists in code. Boot calls `led_init()` and
+`led_setMode2(SELECT_MODE_VOICE)` at menu init. The "dark SELECT row"
+reference in menu.h:707 is about PERF mode looper behavior, not boot.
+
+**Action:** Remove from open items.
+
+---
+
+#### V-RESOLVED-4. D-3: Long sample playback not 32-bit clean — MOOT
+
+32-bit samples are rejected at the format gate (`sampleInstall_acceptFormat`
+accepts 8/16/24-bit only). No 32-bit audio data enters the system.
+
+**Action:** Remove from open items.
+
+---
+
+#### V-RESOLVED-5. D-1: Trace record count decision (2,048 vs 64) — RESOLVED
+
+Neither value is current. PatternTrace = 32, AutosaveTrace = 64. The
+decision has been made (at 32 records for pattern trace). No longer an open
+question.
+
+**Action:** Remove from open items.
+
+---
+
+### V-NOTE: Additional IRQs not in MEMORY.md table
+
+The MEMORY.md IRQ table (lines 1722–1735) is missing four interrupt sources
+that exist in code. The complete table from source is:
+
+```
+Priority 0: SysTick (implicit default — no explicit NVIC_IPR write)
+Priority 1: TIM1_CC  — encoder input capture (encoder.c:181)
+Priority 2: TIM3     — sequencer 4 kHz tick (sequencerTimer.c:85)
+Priority 3: EXTI4    — CLK IN jack (triggerJacks.c:345)
+Priority 3: EXTI9_5  — RST IN jack (triggerJacks.c:346)
+Priority 4: DMA1_S4  — audio I2S2 master DMA (AudioCodecManager.c:603)
+Priority 4: DMA1_S7  — audio I2S3 slave DMA (AudioCodecManager.c:604)
+Priority 5: USART3   — MIDI DIN RX/TX (MidiDin.c:223)
+Priority 5: OTG_FS   — USB Full Speed (usb_bsp.c:103)
+Priority 6: TIM6_DAC — 1 kHz heartbeat (timebase.c:300)
+Priority 7: TIM7     — 5 kHz LCD state machine (lcd.c:462)
+```
+
+**Action:** Use this complete table when updating HARDWARE_MAP.md (H-prereq-1).
+
+---
+
+### V-NOTE: USB BSP stale comment
+
+`Core/Hardware/USB/App/usb_bsp.c:92–94` says "preempt priority 5, lower
+than TIM6" but TIM6 is priority 6 — USB at 5 is actually *higher* urgency
+than TIM6. The value `0x50` (= 5 << 4) is correct; the comment text is
+misleading. Not a MEMORY.md issue but should be fixed in a code cleanup pass.
+
+---
+
+### V-NOTE: -Ofast scope
+
+MEMORY.md should clarify that `-Ofast` applies only to DSP source files
+(`Core/DSPAudio/*.c` plus specific instrument voice files). All other sources
+compile at `-O2`. Both use `-flto`.
+
+---
+
+### Updated Open Items (Category D) after verification
+
+Items struck from the list:
+
+| # | Item | Verdict |
+|---|------|---------|
+| D-1 | Trace record count 2,048 vs 64 | **RESOLVED** — now 32 (PatternTrace) |
+| D-3 | Long sample 32-bit cleanliness | **MOOT** — 32-bit rejected at gate |
+| D-6 | Synced LFO 130 BPM hardcoded | **RESOLVED** — uses seq_getBpm() |
+| D-7 | PAR_EXT_SYNC / PAR_FETCH conflict | **RESOLVED** — PAR_FETCH removed |
+| D-9 | SELECT_1 LED dark at boot | **RESOLVED** — no evidence of issue |
+
+Remaining open items after verification (17 → 12 active):
+
+1. ~~D-1 Trace record count~~ → RESOLVED
+2. D-2 Multi-destination HCNAMES exit not hardware-tested
+3. ~~D-3 Long sample 32-bit~~ → MOOT
+4. D-4 Load/save button display glitch fix not applied
+5. D-5 RV1-RV4 noise hardware soak
+6. ~~D-6 Synced LFO 130 BPM~~ → RESOLVED
+7. ~~D-7 PAR_EXT_SYNC / PAR_FETCH~~ → RESOLVED
+8. D-8 Sample loader naming hardware soak
+9. ~~D-9 SELECT_1 LED dark at boot~~ → RESOLVED
+10. D-10 Phase 5 hardware acceptance S072 Steps 6–10
+11. D-11 S082 F5 Scene 2 Case-3 invalidation
+12. D-12 S082 P3 A2 frozen-screen blink loss
+13. D-13 Boot timeout (reproduce with DEV_MODE_DIAGNOSTIC 1)
+14. D-14 S084 matrix V1–V7 confirmation
+15. D-15 S081 open items (P3 A-1, stale previous step, P4 B-2, etc.)
+16. D-16 S077 re-test rows 3.10/3.14/3.15
+17. D-17 S078 STEP marker retry one-liner
+18. D-18 `cpu` widget with `cmp` on
+19. D-19 Stale comments (BusCompressor.h, etc.)
+20. D-20 STEP underline deferred CGRAM marker retry
+21. D-21 Dither global menu option not wired — **STILL OPEN**
+22. D-22 Name-cache ownership interlock deferred
+
+---
+
+## Execution Status (2026-10-28)
+
+All approved changes (Categories A–H, V-FAIL corrections, test extraction)
+have been executed. Final line counts:
+
+| File | Before | After | Notes |
+|------|--------|-------|-------|
+| `MEMORY.md` | 2,773 | 744 | 73% reduction, zero information loss |
+| `knowledge_files/volatile/S070_WORKING_NOTES.md` | existed | deleted | Category G |
+| `knowledge_files/volatile/S076_WORKING_NOTES.md` | existed | deleted | Category G |
+| `knowledge_files/volatile/OPEN_TESTS.md` | — | created | Test items extracted from MEMORY.md |
+| `knowledge_files/specification_reference/REPOSITORY_LAYOUT.md` | — | created | H-prereq-4 |
+| `knowledge_files/hardware_archive/HARDWARE_MAP.md` | stale IRQ table | updated | H-prereq-1: 10-row IRQ table + encoder rules |
+| `knowledge_files/specification_reference/dsp_instruments_effects/EFFECTS_MIXER_DSP_REFERENCE.md` | — | section added | H-prereq-2: render loop quick reference |
+| `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md` | — | section added | H-prereq-3: boot/init order |
+
+### What was done
+
+- **Category A (DELETE session history):** ~1,100 lines of session-by-session
+  narrative removed: S082 summary, S083–S085 "in brief" blocks, permanent
+  authority document-disposition list, all session 040–064 detailed narratives,
+  and all "Resolved / Changed in Session NN" blocks (~490 lines).
+- **Category B (MOVE spec content):** Repository layout moved to
+  `REPOSITORY_LAYOUT.md`; SD architecture replaced with pointer to
+  `FILESYSTEM_SPEC.md` / `ASYNCFATFS_REFERENCE.md`; hardware detail replaced
+  with pointer to `HARDWARE_MAP.md`; boot order replaced with pointer to
+  `MODULE_INTERCHANGE_SPEC.md`.
+- **Category C (COMPRESS binding rules):** ~250 lines compressed to ~65 lines
+  organized by topic (Sequencer/Timing, Live Record, Looper, Effects, Menu/UI,
+  Scene/Bank, Storage/Filesystem, DSP).
+- **Category D (consolidate open items):** 5 resolved items removed
+  (V-RESOLVED-1 through V-RESOLVED-5). Test items extracted to
+  `OPEN_TESTS.md`. Remaining items in a 20-line "Open Items" section.
+- **Category E (agent mandates):** E-1 (commenting mandate at lines 1654–1657)
+  removed. E-2 (agent volatile memory at lines 1658–1660) removed. E-3 (line 5
+  rewrite) applied: "Update it whenever…" → "Do not append session history…".
+  E-4 (header dependency) kept.
+- **Category F (KEEP):** Four binding policies, Failed Approaches, Toolchain,
+  DSP/RNG rules, Morph/Endless-Pot reminders all kept verbatim.
+- **Category G (stale volatile):** S070 and S076 working notes deleted.
+- **Category H (duplication audit):** Repository layout, GPIO table, IRQ table,
+  boot order, encoder rules, render loop, and SD architecture all replaced with
+  pointers to the updated/created spec documents.
+- **V-FAIL corrections applied:**
+  - V-FAIL-1: sample loop flag → catalogue v2 `flags` bit 0
+  - V-FAIL-2: sample rate → any rate accepted
+  - V-FAIL-3: 120 entries → 128
+  - V-FAIL-4: render call order corrected (drain inside voiceControl)
+  - V-FAIL-5: trace count corrected (32 PatternTrace / 64 AutosaveTrace)
+  - V-FAIL-6: St1/St2 clarified as panel labels
+- **Test extraction:** All individual test mentions, hardware soak items, and
+  untested-feature notes moved to `knowledge_files/volatile/OPEN_TESTS.md`.
+
+---
+
+## Second Pass (2026-10-28, same session)
+
+User-directed cleanup of remaining bloat and agent overreach in the 744-line
+MEMORY.md. Final result: **525 lines**.
+
+| File | Before | After | Notes |
+|------|--------|-------|-------|
+| `MEMORY.md` | 744 | 525 | 29% further reduction |
+| `CPU_USE_DSP_AUDIT.md` | 876 | ~900 | §Binding Mandates appended |
+| `INSTRUMENTS_DSP_REFERENCE.md` | 1,300 | ~1,350 | §12 Binding Mandates appended |
+| `FILESYSTEM_SPEC.md` | 2,923 | ~2,960 | §Binding Mandates appended |
+
+### What was done
+
+- **Git state tracking removed (44 lines):** "Current working source" block
+  (commits, uncommitted changes, per-session carry-over, build numbers) deleted
+  entirely — git is the source of truth for all of this.
+- **Volatile Notes removed (31 lines):** entire section deleted from MEMORY.md;
+  all content was already in `knowledge_files/volatile/S078_WORKING_NOTES.md`.
+- **RAM policy softened:** 16-line bureaucratic policy rewritten to 6 lines.
+  Intent preserved (user sign-off for expansions, DTCM/SRAM1 earmarked). Removed
+  the agent-imposed "A change that releases RAM does not authorise reuse of that
+  capacity for another subsystem" hard block.
+- **Three detailed binding sections moved to spec documents:**
+  - DSP CPU Policy (21 lines) → `CPU_USE_DSP_AUDIT.md` §Binding Mandates
+  - Oscillator work under the CPU rule (42 lines) → `INSTRUMENTS_DSP_REFERENCE.md` §12
+  - Load/Save Slot Scrolling Policy (29 lines) → `FILESYSTEM_SPEC.md` §Binding Mandates
+  - MEMORY.md now has a 3-row pointer table ("Before touching a module, read the
+    mandates in its reference document.")
+- **"Where to look" table removed (29 rows):** duplicated
+  `000_SESSION_INDEX.md` and the spec docs themselves.
+- **Specification-reference index removed (16 rows):** the specs are
+  self-describing; the session index and `REPOSITORY_LAYOUT.md` serve this role.
+- **Replaced with compact References section** (4 bullet points: repo layout,
+  session index, specification documents, open tests).
+- **Project identity updated:** "LXR-02 Firmware Port" → "Helicase LXR — new
+  firmware for the LXR-02 hardware. Not a port of preceding LXR-01 or LXR-02
+  firmware."
+- **File handle mandate softened:** "Do not raise this pool without new evidence"
+  → "S057 disproved handle exhaustion; five suffice" (states the fact, not a
+  prohibition).

@@ -1298,3 +1298,51 @@ fields from `ModulationNode`.
   bend, on the phase waves and the crash sample (whose array gained a guard
   entry). The F1 lesson (no state live across an inlined render) and the
   mixer hot-loop gate (`086_SESSION_HANDOFF_LOG.md`).
+
+---
+
+## 12. Binding Mandates — Oscillator Work Under the CPU Rule
+
+> **Any session that touches oscillator or voice DSP must read and follow
+> these rules.** (User, S085)
+
+- **"Absolutely no increase in CPU cycles overall."** The gate: the dearest
+  setting of a voice in any mode must not exceed that voice's dearest
+  setting before the change. Per-same-wave comparisons are reported only.
+  - Freeze the ceiling figures before replacing a loop that sets them
+    (S087 stage D replaces the v1 user-sample loops; the figures are in
+    `S087_P0_OSC_TYPE_SAMPLES_WAVETABLES.md` §1.4).
+  - At the S085 close the Drum ceiling is `fm` with user samples, ≈ 90 per
+    sample standalone / ≈ 92 linked.
+- **Proof:**
+  - `fpseq.py` counts on the standalone object **and** the linked ELF;
+  - `oscmod_identity` + `elf_osc_check` (the old loops unchanged); since
+    S086 `osc86_identity`, `engine86_identity`, `elf86_p3_check` against a
+    snapshot of the previous image, and **`elf86_mixer_check`** (the
+    per-sample loops LTO inlines into `mixer_calcNextSampleBlock()`);
+  - a host test with break proofs;
+  - then the user's device check (six-slot worst-case Scene, `cpu` widget,
+    underruns).
+  - No DEV cycle probe (user, S085 Q2).
+- **Code rules:**
+  - never edit an existing oscillator loop to add a feature; add copies per
+    waveform and use;
+  - new ITCM code in its own `.itcm.sNNN` subsection, `noinline, noclone`;
+  - no new constant-argument calls into `calcNextOscSampleBlock()` (LTO
+    re-clones it; call the leaves);
+  - per-sample ramps for per-block amplitude parameters;
+  - **(S086 F1) no state live across a voice render:** the renders are
+    inlined into `mixer_calcNextSampleBlock()`, so a local kept from before
+    a render to after it raises register pressure there and slows unrelated
+    inlined loops. Keep such state in `OscInfo` (the `positionBendStep`
+    pattern; free padding: offsets 34–35 and 75);
+  - **every `osc_positionBendApply()` needs its `osc_positionBendRestore()`
+    after the same render** (`osc_setFreq()`'s cache would keep a bend);
+  - host tests compile the header's own constants (extract them; S086 F3);
+  - a new waveform "the same way as the existing ones" means the same
+    mechanism (fixed tables, same loops), not a new one (S086 P2).
+- **Drum `modOsc` is never reset on a trigger** (any mode). Do not change it
+  unless the user tests it and asks (S085 Q6b).
+- **`snc`/`rng`/`fm` share the amt² × mod-envelope response.** The `rng`
+  depth snaps after a trigger; **in S087 the free-run run mode is to try
+  "ramp always"** (user).

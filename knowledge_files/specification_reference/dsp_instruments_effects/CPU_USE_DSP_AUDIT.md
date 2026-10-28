@@ -874,3 +874,29 @@ the new copy/clear work is foreground-only and bounded.
     (layout-insensitive) and fails if one grew. Hardware (user): the
     six-slot worst-case Scene with an LFO on every `pos` reads the same
     `cpu` as before.
+
+---
+
+## Binding Mandates — DSP CPU Policy
+
+> **Any session that changes DSP cost must read and follow these rules.**
+> (User, 2026-09-28)
+
+- **Never save CPU by skipping, bypassing or switching off DSP work** because
+  an element is currently inactive, silent, or set to zero (distortion at 0,
+  a silent voice, a send at 0, and so on).
+- **Why:** freed CPU gets filled by other features. Then, when everything is
+  requested at once, the result is underruns or features dropped at random.
+- **Headroom is only the worst case with everything active** (the stress
+  Scene peak), never the average.
+- **Any proposal** that turns processing off for a feature that can be active
+  must be raised with the user. The expected answer is no.
+- **CPU reductions must also meet the sound rules** agreed for each change
+  (classes S0 bit-identical … S4 audible). The S073 decisions are in
+  `073_SESSION_HANDOFF_LOG.md` §6.
+- **How to prove a DSP change:** `tools/dsp_test/` (host comparison plus the
+  ARM `fpseq.py` check; `DSP_TEST.md`).
+- **The one approved exception (S074):** the master bus compressor does no
+  work while `cmp` is off. With it on, its cost (about 1.4–1.8 %) counts
+  against the worst-case Scene; the user accounts for it on the `cpu`
+  widget.

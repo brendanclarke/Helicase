@@ -2129,3 +2129,196 @@ worst case (A1):
 **The mixer-inlined loops** are as in the S087 P0 tree: 37 equal, 1
 shrank, and the Snare noise loop 14 → 15 (F12, unchanged by this
 schedule).
+
+---
+
+## 10. Implementation record (S087 P1, 2026-10-28)
+
+### 10.1 Status
+
+All changes in §1-§8 are applied to the working tree (base `0e2d61dd`
+plus the S087 P0 implementation). The firmware builds cleanly with no
+new warnings, and the linked resource figures reproduce §9 exactly:
+
+| Item | This build | §9 expected |
+|---|---:|---:|
+| text / data / bss | 670,328 / 420 / 412,392 | same |
+| Flash used / headroom | 670,748 / 82,916 | same |
+| ITCM | 12,640 / 16,384 | same |
+| DTCM statics | 4,344 | same |
+| FX arena margin | 3,840 | same |
+
+`make img` writes `build/LXRV2_lxr02.img` (670,748 B). No new compiler
+warnings: the two P0 warnings (`calcUserSampleOscRingBlock`,
+`modNode_getWaveTargetOsc`) are gone with P1-17.
+
+### 10.2 Applied per file
+
+| File | IDs | Notes |
+|---|---|---|
+| `SampleInstall.c` | SI-1 … SI-8 | `install_fault` (1 B), `sampleInstall_program()`, a header written only by `commit()` with the magic last, and abort/pad/entry writes that always advance the cursor. Full comment blocks were added to `beginSample()`/`beginWavetable()` (the tree had none; SI-2/SI-4 assumed one). |
+| `filesystem.c` | FS-1 … FS-6 | The walk starts at depth 0 (`samples/`, `wavetables/`), recursion stops before the per-level arrays are exceeded, and the 128-frame cap keeps advancing the last-taken name. |
+| `Oscillator.c` | OC-1 … OC-36 | The four blend copies now use `osc_wtbPlanBlock()`/`osc_wtbFramePos()` (fractional frames, at most two segments per block); `osc_slpBlockInc()` converts a backward glide once per block; the `slp` FM read is absolute and picks its loop/lead-in rule per block; the bind resolves `WTB8` before comparing and picks the increment law from what is bound; `osc_typedTriggerPhase()` binds first; the v1 sample loops and the dormant `wav` interpolation (with `osc_interp_a/b`, `osc_syncWaveform()`, the v1 cache and the four dispatcher entries) are deleted. |
+| `Oscillator.h` | OH-1 … OH-5 | `interpStamp` documents the 1..255 stamp; the retired interpolation fields keep their place; the v1 declarations are gone. |
+| `SampleMemory.c/.h` | SM-1 … SM-3 | `stub_silence_buffer` (512 B of flash), the v1 `SampleInfo` shims and their declarations are gone. |
+| `modulationNode.c/.h` | MN-1 … MN-7 | `modNode_interpStampOf()` gives 1..255; `modNode_interpLastStamp` is one `INCCMZ` byte (R-E1 = +2 B as approved); the claim keeps a grant made this block; `modNode_getWaveTargetOsc()`/`modNode_getMaxWaveformIndex()` are removed. |
+| `InstrumentManager.c` | IM-1, IM-2 | The non-wave fallback is `OSC_STOCK_LAST`; the two stacked comment blocks on `instrumentManager_waveDomainMax()` were merged into the single block IM-2 specifies. |
+| `menu.c` | MU-1 … MU-3 | `menu_formatVoiceAutomationValue3()` formats wave values through `menu_formatWaveCell()`; the amount display and the edit line both use it. |
+
+Three comment blocks were corrected beyond the literal schedule because
+the deletion left them false:
+
+- `osc_renderSyncWave()`: the header still described the interpolation
+  partner path and named the deleted `osc_syncWaveform()`; it now
+  describes the single switch and the NOISE fallback.
+- The one-frame wavetable copy: its block claimed it blended two frames;
+  it is now described as the nearest-frame copy and the Q9 fallback.
+- `osc_wtbRingBlock()`/`osc_smpRingBlock()` gained the S085 ring-law
+  line, as OC-3/OC-10 ask.
+
+### 10.3 Memory
+
+- **R-E1:** `modNode_interpLastStamp` (1 B `INCCMZ`) plus
+  `modNode_interpReserved` (1 B) = **+2 B**, as approved (F18 fixed).
+- **R-C3:** `install_fault` = **1 B .bss**, within the approved installer
+  state.
+- **Released:** `osc_interp_a/b` = 128 B DTCM (R-D1); `stub_silence_buffer`
+  = 512 B flash; the v1 loops and shims. DTCM statics 4,476 → 4,344 B.
+
+### 10.4 Test bench (outside the Core-only scope, required by the changes)
+
+These are mechanical consequences of P1, not new behaviour:
+
+- **`tools/dsp_test/Makefile`:** the `Oscillator.h` struct extraction moves
+  `128-229` → `128-230` (OH-4 adds one comment line; P0 §3.3 requires
+  updating the range). The `osc_sample` S087-section extraction moves
+  `1988-5000` → `1508-5000`, starting at `osc_userCount()` so the extracted
+  set is complete after the deletions (`osc_setType()` stays separately
+  extracted). `interp_slots` also extracts `modNode_interpStampOf()` and
+  puts it first.
+- **`catalogue_host.c`:** `sampleFlash_writeWord()` is now flash-accurate
+  (programming only clears bits, read-back mismatch returns 3), so the
+  F1/F2 laws run under the real program-once rule.
+- **`catalogue` break proof:** the old sed set `header.magic` early, which
+  P1-1 makes inert; the break now publishes the complete header in
+  `begin()` after the erase, and law 3 catches it.
+- **`test_interp_slots.c`:** the stamp state is a `uint8_t`, and law 5
+  holds both slots for 300 blocks across the 255-stamp wrap (F11).
+- **`test_osc_sample.c`:** two laws were added where the P0 assessment
+  asked for them: L4 (a backward `slp` glide inside the loop is the equal
+  forward step: a 100-point loop, one point per block, `pos` 65 -> 64
+  ends at `start - 90` Q19.12) and L6 (`slp` FM with `loop_start` 40/60
+  reads point 50, not point 10; its lead-in reads point 10, not a frozen
+  loop start). L4/L6 install their own items, so the 4-point sample is
+  re-installed before L8.
+- **`test_osc_wtb.c`:** law 7 (F8): a held `pos` of 64 on a 2-frame table
+  gives a mixed value between the frames, not either frame.
+
+These three laws assert the P1 behaviour, not an old expectation; they are
+not wired as break builds (the bench work is outside this schedule), but
+their expected values fail under the pre-P1 code by construction (the old
+`slp` FM read point 10 instead of 50; the old nearest-frame read returned
+frame A or B; the old unsigned step jumped by an arbitrary amount).
+
+### 10.5 Gates and host tests run
+
+| Gate / target | Result |
+|---|---|
+| `make all` / `make img` | clean, figures above |
+| `osc87_identity` | **fails by design**: 1,738 changed/removed lines vs the pre-S087 snapshot, all from the P1-17 removals plus the P0 allow-list. The allow-list must be re-baselined when this is committed. |
+| `engine87_identity` | pass (13 allowed) |
+| `elf87_check` | fails as recorded in §10.7 of the P0 record (no allow-list; the v1 symbols are now gone) |
+| `elf87_mixer_check` | 37 hot loops equal, 1 shrank, the Snare noise loop 14 → 15 (F12, the unchanged user decision) |
+| `stepauto_order` | 0 failures; break proof caught |
+| `drain_cursor` | 0 failures; break proof caught |
+| `osc_type` | 0 failures; both break proofs caught |
+| `catalogue` | 0 failures under the flash-accurate stub; break proof caught |
+| `wav_install`, `natural_order`, `sampleoptimize` | 0 failures |
+| `osc_sample` | 0 failures, including the new L4/L6 |
+| `osc_wtb` | 0 failures, including the new law 7 |
+| `interp_slots` | 0 failures, including law 5 |
+| `special_tags` | 163 rows, 0 mismatches |
+| `stock_tables` | OK |
+| `selftest` | 276,480,000 samples, 0 differing (int16 and float) |
+| `filter`, `pack`, `postchain`, `octave`, `mixer` | pass (S1 acceptance; mixer laws) |
+
+A scratch check of F2 (not a repo file): with the flash-accurate stub, an
+item written and then aborted, followed by another item, commits one entry
+whose data and zero pad read back exactly (`f2_abort failures: 0`). That
+is the case the old rewind broke.
+
+`osc_mod`, `osc_pos` and `osc_stock` remain non-compiling (F15: their
+`SampleMemory.h` v1 extractions are stale). That is the host-bench
+follow-up the schedule excludes.
+
+### 10.6 Still open after this schedule
+
+- **F12** (the Snare noise loop's +1 instruction) is unchanged and still
+  needs the user's decision; A1 allows it.
+- **F13** (`slp` FM's dearest path) is now the OC-11 shape: 49/50 inside
+  the loop and 39 in the lead-in per §9; sections stay under their frozen
+  worst cases.
+- **F15** (the three stale host targets) remains.
+- **D-1** (the field renaming) was not done, as scheduled.
+- **Hardware §7.3-§7.5** has not been run; the install and playback lists
+  are now the next gate.
+
+---
+
+## 10. Assessment of the follow-up implementation (2026-10-28)
+
+### 10.1 Verdict
+
+**The follow-up is implemented exactly as scheduled.**
+- `build/lxr02.bin` from a clean `make all` of the working tree is
+  byte-identical to the build of this schedule applied mechanically,
+  which is the build §9's figures come from.
+- So every code change P1-1 … P1-18 is in place as written, and §9's
+  figures are the tree's figures.
+
+| Item | Value |
+|---|---|
+| text / data / bss | 670,328 / 420 / 412,392 |
+| Flash | 670,748 / 753,664 (headroom 82,916) |
+| ITCM | 12,640 / 16,384 |
+| DTCM statics | 4,344 |
+| FX arena margin | 3,840 |
+| Warnings | none new; the S087 unused-function warnings are gone |
+
+### 10.2 Differences from the schedule (all comments; no code effect)
+
+| File | Difference | Assessment |
+|---|---|---|
+| `SampleInstall.c` | Full comment blocks for `sampleInstall_beginSample()`/`beginWavetable()` | Correct: SI-2/SI-4 asked for a line in each function's block, and those functions had none |
+| `filesystem.c` | FS-1/FS-3 comment edits | As scheduled |
+| `Oscillator.c` | The old S087 comment blocks above `osc_slpPlainBlock`, `osc_slpFmBlock` and `osc_slpRingBlock` deleted | Correct, and a **schedule omission**: OC-9/OC-11/OC-12 cited each MOD range from the function line, so the old block would otherwise sit above the new one |
+| `Oscillator.c` | `osc_renderSyncWave()`'s block rewritten (no user samples, no interpolation check, NOISE fallback) | Correct, and a **schedule omission**: OC-26/OC-29 deleted what that block described |
+| `Oscillator.c` | `osc_wtbSyncBlendBlock` names the blend `out` before the store | Equivalent; the binary is identical |
+| `InstrumentManager.c` | The inner comment of `instrumentManager_waveDomainMax()` removed | Correct: IM-2's block above the function says the same |
+| `modulationNode.c`, `menu.c` | One blank line each | None |
+
+### 10.3 Gates on the tree
+
+- **Host targets pass:**
+  - `stepauto_order`, `drain_cursor`, `osc_type`, `catalogue`,
+    `wav_install`, `natural_order`, `sampleoptimize`, `osc_sample`,
+    `osc_wtb`, `interp_slots`, `special_tags` (163/0), `stock_tables`,
+    `selftest`;
+  - `catalogue_host.c` now programs flash as the device does (AND, then
+    the read-back check), and `catalogue` passes under it. That confirms
+    F1 and F2 against the real rule.
+- **Still not compiling:** `osc_mod`, `osc_pos`, `osc_stock` (P0 impl.
+  §11 F15; outside this schedule, which covered firmware only).
+- **Mixer-inlined loops:** 37 equal, 1 shrank, 1 grew. The growth is the
+  Snare noise loop, 14 → 15 (F12), unchanged and still the user's
+  decision.
+
+### 10.4 Open
+
+1. **F12:** accept the Snare noise loop's +1 per sample (A1 allows it),
+   or ask for a change.
+2. **F15:** the S085/S086 host suites need their extraction ranges
+   brought up to date (test bench only).
+3. **Hardware:** the S087 P0 lists §7.1 → §7.5 have not been run. They
+   are the remaining acceptance test, in order, stopping at the first
+   failure.

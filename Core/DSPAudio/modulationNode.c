@@ -66,54 +66,76 @@ static INCCMZ uint32_t modNode_waveInterpGeneration = 1u;
 static INCCMZ uint8_t modNode_waveInterpActiveCount = 0u;
 /* S087 E: sticky slot reservations (A8). */
 static INCCMZ uint8_t modNode_interpReserved = 0u;
-static INCCMZ uint32_t modNode_interpLastGen = 0u;
 
-static OscInfo* modNode_getWaveTargetOsc(uint16_t param)
-{
-	(void)param;
-	return 0;
-}
+/*
+ * Stamp of the block that just ended (S087 P1).
+ *
+ * What:       modNode_interpStampOf() of the previous block's generation, taken
+ *             by modNode_resetTargets() before the generation advances.
+ * Why:        a holder of last block is recognised by this stamp (sticky
+ *             claims, A8); one byte is the approved R-E1 size (impl. §11 F18:
+ *             a uint32_t made R-E1 +5 B).
+ * Inputs:     modNode_resetTargets().  Outputs: read by modNode_interpClaim().
+ * RAM:        1 B INCCMZ (R-E1, with modNode_interpReserved: +2 B).
+ */
+static INCCMZ uint8_t modNode_interpLastStamp = 0u;
 
-uint8_t modNode_getMaxWaveformIndex(void)
+/*
+ * Slot stamp of a block generation (S087 P1).
+ *
+ * What:       (generation % 255) + 1: 1..255, never 0; consecutive generations
+ *             (also across the 32-bit wrap that skips 0) give different stamps.
+ * Why:        OscInfo.interpStamp uses 0 for "no slot" (impl. §11 F11).
+ * Inputs:     generation.  Outputs: stamp.
+ * Accessors:  modNode_resetTargets(), modNode_interpClaim().
+ * Affiliates: OscInfo.interpStamp.
+ */
+static inline uint8_t modNode_interpStampOf(uint32_t generation)
 {
-	const uint8_t sampleCount = sampleMemory_getNumSamples();
-	const uint16_t maxWave = (uint16_t)OSC_SAMPLE_START + sampleCount;
-	if (maxWave == 0u) {
-		return CRASH;
-	}
-	return (uint8_t)(maxWave - 1u);
+	return (uint8_t)((generation % 255u) + 1u);
 }
 
 /*
- * Claim one of the two interpolation slots for this block (S087 stage E; see
- * the header).
+ * Claim one of the two interpolation slots for this block (S087 P1; S087
+ * stage E; see the header).
  *
- * What:       a holder takes a reserved slot; a newcomer is granted only when
- *             grants plus unclaimed reservations leave room.
- * Why:        sticky grants avoid block-rate flipping; S088's run mode shares
- *             the same slots (ongoing crossfades are holders).
- * Inputs:     osc.  Outputs: grant flag, interpStamp, counters.
- * Accessors:  osc_renderTyped*() (wtb branch).
- * Affiliates: modNode_resetTargets(); OSC_WAVE_INTERP_MAX_ACTIVE.
+ * What:       with the global toggle on: an oscillator already granted in this
+ *             block keeps its grant; a holder of last block (its stamp equals
+ *             modNode_interpLastStamp) takes one of the reserved slots; a
+ *             newcomer is granted only when grants plus unclaimed reservations
+ *             leave room under OSC_WAVE_INTERP_MAX_ACTIVE. A grant stamps the
+ *             oscillator with this block's stamp (1..255).
+ * Why:        S087 P0 A3/A7/A8: wavetable blending takes one of the two slots
+ *             and steps without one; sticky grants avoid block-rate flipping;
+ *             S088's run mode shares the slots. impl. §11 F11: stamps are never
+ *             0, so a holder is always recognised.
+ * Inputs:     osc (OscInfo*); the generation, the counters.
+ * Outputs:    grant flag; osc->interpStamp; the counters.
+ * Accessors:  osc_wtbBlendBlock(), osc_wtbFmBlendBlock(),
+ *             osc_wtbRingBlendBlock(), osc_wtbSyncBlendBlock().
+ * Affiliates: modNode_resetTargets(), modNode_interpStampOf();
+ *             OscInfo.interpStamp; osc_setType() (clears the stamp).
  */
 uint8_t modNode_interpClaim(void* oscp)
 {
 	OscInfo* osc = (OscInfo*)oscp;
+	const uint8_t stamp = modNode_interpStampOf(modNode_waveInterpGeneration);
 
 	if (!osc || !modNode_waveInterpEnabled)
 		return 0u;
-	if (osc->interpStamp != 0u &&
-	    osc->interpStamp == (uint8_t)modNode_interpLastGen &&
+	if (osc->interpStamp == stamp)
+		return 1u;
+	if (osc->interpStamp == modNode_interpLastStamp &&
 	    modNode_interpReserved != 0u) {
 		modNode_interpReserved--;
 		modNode_waveInterpActiveCount++;
-		osc->interpStamp = (uint8_t)modNode_waveInterpGeneration;
+		osc->interpStamp = stamp;
 		return 1u;
 	}
 	if ((uint16_t)modNode_waveInterpActiveCount + modNode_interpReserved <
 	    OSC_WAVE_INTERP_MAX_ACTIVE) {
 		modNode_waveInterpActiveCount++;
-		osc->interpStamp = (uint8_t)modNode_waveInterpGeneration;
+		osc->interpStamp = stamp;
 		return 1u;
 	}
 	return 0u;
@@ -468,12 +490,22 @@ static void modNode_restoreLfoPair(ModulationNode *primary,
 void modNode_resetTargets()
 {
 	uint8_t i;
+	/*
+	 * Slot reservations for the new block (S087 P1; S087 stage E).
+	 *
+	 * What:       records the stamp of the block that just ended, advances the
+	 *             generation (skipping 0), and reserves last block's grants for
+	 *             their holders before clearing the grant count.
+	 * Why:        sticky claims (S087 P0 A8). impl. §11 F11: the stamp was the
+	 *             generation's low byte, 0 every 256 blocks, which is also
+	 *             "no slot"; both holders lost their slots for one block.
+	 * Affiliates: modNode_interpClaim(), modNode_interpStampOf().
+	 */
+	modNode_interpLastStamp = modNode_interpStampOf(modNode_waveInterpGeneration);
 	modNode_waveInterpGeneration++;
 	if (modNode_waveInterpGeneration == 0u)
 		modNode_waveInterpGeneration = 1u;
-	/* S087 E: last block's grants are reserved for their holders. */
 	modNode_interpReserved = modNode_waveInterpActiveCount;
-	modNode_interpLastGen = modNode_waveInterpGeneration - 1u;
 	modNode_waveInterpActiveCount = 0u;
 	for(i=0;i<6;i++)
 		modNode_restoreTarget(&velocityModulators[i]);

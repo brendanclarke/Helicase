@@ -90,6 +90,15 @@ lcd_init() is still blocking but runs before TIM7 starts — safe.
 
 TIM1 Input Capture, ICxF=0xF hardware filter. Dannegger algorithm. encode_read4() only.
 
+**Encoder operational rules** (verified against encoder.c):
+- Algorithm: Dannegger difference (ISR line 196), NOT LUT
+- Seed: `last = new & 3` in encode_init() (line 158)
+- Divide: round-toward-zero in encode_read4() (divide by 4, NOT >>= 2)
+- Acceleration: 8-entry timestamp buffer, 1x-4x linear interpolation, ACCEL_SLOW_MS=25, ACCEL_FAST_MS=3, ACCEL_DECAY_MS=100, ACCEL_MAX_MULT=4
+- Rebound suppression: ts_dirs[] majority-direction check
+- ISR: TIM1_CC at priority 1 (encoder.c:181)
+- encode_read1/read2 permanently removed
+
 ## Endless Pots / Analog Quadrature Encoders (RV1-4) — ADC1
 | Encoder | A Pin | B Pin | ADC Ch |
 |---------|-------|-------|--------|
@@ -128,15 +137,18 @@ ADC1: 14-channel circular scan via DMA2 Stream0 Ch0. 480-cycle sample time. 4MHz
 On STM32F765, EXTI4 has its own IRQ10. CLK IN on PD4 is handled by `EXTI4_IRQHandler`; RST IN on PD5 is handled by `EXTI9_5_IRQHandler` through EXTI5. CLK IN and RST IN are GPIO inputs with internal pull-ups and use rising-edge EXTI for low-to-high voltage transitions. PD6/PD7 EXTI is masked; OUT1 detect is GPIO input with internal pull-ups and retained state sampled by the same 500Hz foreground service that samples PB4/PB6.
 
 ## Clocks / Interrupts Summary
-| IRQ | Priority | Handler | Period | Function |
-|-----|----------|---------|--------|----------|
-| SysTick | 0 (highest) | SysTick_Handler | 1ms | lcd_ms_ticks for LCD blocking delays only |
-| TIM1_CC (IRQ27) | 1 | TIM1_CC_IRQHandler | event | Main encoder A/B input capture |
-| TIM6_DAC (IRQ54) | 1 | TIM6_DAC_IRQHandler | 1ms (1kHz) | LED/button SPI, jack-detect service scheduling, systick |
-| TIM7 (IRQ55) | 2 | TIM7_IRQHandler | 100µs (10kHz) | LCD async queue drain |
-| EXTI4 (IRQ10) | 3 | EXTI4_IRQHandler | event | CLK IN (EXTI4/PD4) |
-| EXTI9_5 (IRQ23) | 3 | EXTI9_5_IRQHandler | event | RST IN (EXTI5/PD5 rising edge); PD6/PD7 masked and polled as jack state |
-| OTG_FS (IRQ67) | 5 | OTG_FS_IRQHandler | event | USB MIDI |
+| IRQ | Priority | Handler | Function |
+|-----|----------|---------|----------|
+| IRQ10 | 3 | EXTI4_IRQHandler | CLK IN — PD4 rising edge, push to trigger event ring |
+| IRQ15 | 4 | DMA1_Stream4_IRQHandler | I2S2/DAC2 — audio refill master |
+| IRQ23 | 3 | EXTI9_5_IRQHandler | RST IN — PD5 rising edge; PD6/PD7 masked and polled as jack state |
+| IRQ27 | 1 | TIM1_CC_IRQHandler | Main encoder A/B input capture |
+| IRQ29 | 2 | TIM3_IRQHandler | 4kHz sequencer timing owner: processRealtimeEvents → triggerJacks_tick → seq_tick |
+| IRQ39 | 5 | USART3_IRQHandler | MIDI DIN RX/TX; timestamps bytes with TIM2; realtime bytes → MidiTransport ring, others → stamped MidiBuffer |
+| IRQ47 | 4 | DMA1_Stream7_IRQHandler | I2S3/DAC1 — audio slave (flags only) |
+| IRQ54 | 6 | TIM6_DAC_IRQHandler | 1kHz — counters + foreground front-panel service flag |
+| IRQ55 | 7 | TIM7_IRQHandler | 5kHz — LCD queue drain |
+| IRQ67 | 5 | OTG_FS_IRQHandler | USB MIDI |
 
 ## Package Notes
 - TFBGA100: PD0-PD7 are bonded (PD8-PD15 are NOT present)

@@ -238,14 +238,4 @@ void       sampleMemory_getDisplayName(uint8_t index,
 void       sampleMemory_getWavetableName(uint8_t index,
                                          char name[SAMPLE_DISPLAY_NAME_LEN + 1u]);
 
-/* S087 C (interim): v1 readers on v2 data until stage D (D-29 removes). */
-typedef struct SampleInfoStruct
-{
-    char     name[3];
-    uint32_t size;
-    uint32_t offset;
-} SampleInfo;
-SampleInfo sampleMemory_getSampleInfo(uint8_t index);
-uint8_t    sampleMemory_isLooped(uint8_t index);
-
 #endif /* SAMPLEMEMORY_H_ */

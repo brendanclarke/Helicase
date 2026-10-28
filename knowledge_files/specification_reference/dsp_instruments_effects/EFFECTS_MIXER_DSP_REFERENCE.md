@@ -250,6 +250,35 @@ are queued for the DMA pack.
   load. The two DMA streams are not synchronised with each other (DAC1 and
   DAC2 can drift by up to one ISR period; a known, accepted limitation).
 
+### Render loop and output pipeline quick reference
+
+**Main loop pattern** (`main.c` `audio_check_and_render()`, called ~14× per main-loop iteration):
+
+```c
+if (audioCodec_isSuspended()) return;
+while (audioCodec_queueFreeSlots() > 0) {
+    for (frame = 0; frame < AUDIO_DMA_FRAMES; frame += OUTPUT_DMA_SIZE) {
+        voiceControl_processPending();        // triggers + seq_drainPendingAutomationTo (internal)
+        seq_rampService();                    // automation ramps (S081 P2)
+        basepri = dsp_maskLowPriorityIrqs();  // BASEPRI 6 << 4: timing-critical IRQs stay live
+        mixer_calcNextSampleBlock(&buf[frame * 2], &buf2[frame * 2]);
+        irq_setBasepri(basepri);              // restore
+    }
+    audioCodec_commitRenderBuffer();
+}
+```
+
+Note: `seq_drainPendingAutomationTo(mark)` is called *inside* `voiceControl_processPending()` (MidiVoiceControl.c:454), not as a separate top-level step.
+
+**Constants:**
+- `OUTPUT_DMA_SIZE = 32` — DSP frames per mixer block (0.73 ms @ 44108 Hz; config.h:840)
+- `AUDIO_DMA_FRAMES = 96` — hardware frames per DMA half (2.18 ms budget = 471,288 cycles @ 216 MHz; config.h:846)
+- `AUDIO_RENDER_IN_DMA_ISR = 0` — diagnostic only (config.h:853)
+
+**SPSC queue** (AudioCodecManager.c:237–241): 2-slot queue. `ready_queue[2]` backing array; `ready_head` (ISR-owned), `ready_tail` (main-loop-owned), `ready_count` (0–2). `audioCodec_getQueueFreePercent()` uses DWT cycle-counter accounting — an audio queue-free pressure meter, not generic MCU utilisation.
+
+**Critical rule: DSP render must remain in the main loop.** Moving it to the DMA ISR creates a hard 2.18 ms ceiling — when DSP expands beyond the budget the system locks up with no graceful degradation. Main loop allows unlimited expansion with underruns as the graceful signal.
+
 ---
 
 ## 4. Effect DSP

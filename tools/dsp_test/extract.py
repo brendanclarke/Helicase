@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
-"""Extract exact C functions, objects, or line ranges for S073 tests.
+"""Extract exact C source for the host tests.
 
-What:       extracts named source fragments and optionally renames identifiers.
-Why:        the golden harness must compile the real old and new source text,
-            not a transcription of DSP expressions.
-Inputs:     --src, --func/--object/--lines, --rename, --out.
-Outputs:    one generated C fragment; missing selectors fail the command.
-Accessors:  tools/dsp_test/Makefile.
-Affiliates: snapshot.sh and the generated frozen/current fragments.
+What:       extracts named fragments of one source file and optionally renames
+            identifiers:
+              --body           the whole file without its quoted #include lines
+                               and with __attribute__((section("..."))) removed
+                               (the firmware headers and ITCM/DTCM placement do
+                               not build on the host);
+              --func NAME      a function definition;
+              --object NAME    an initialised array;
+              --typedef NAME   "typedef ... } NAME;";
+              --enum NAME      "enum NAME { ... };";
+              --macro NAME     a #define with its continuation lines.
+            Every selector is found by name, so line shifts never break it.
+Why:        the tests must compile the real source text, not a transcription.
+Inputs:     --src, the selectors above, --rename OLD=NEW, --out.
+Outputs:    one generated C fragment; a missing selector fails the command.
+Accessors:  tools/dsp_test/Makefile, tools/dsp_test/spike/Makefile.
+Affiliates: prelude.h; the modules/ and spike/ tests.
 """
 import argparse
 import re
@@ -60,31 +70,61 @@ def find_object(text, name):
     return text[m.start():semi + 1]
 
 
+def find_typedef(text, name):
+    m = re.search(r'^\}\s*' + re.escape(name) + r'\s*;', text, re.M)
+    if not m:
+        return None
+    start = text.rfind('\ntypedef', 0, m.start())
+    start = 0 if start < 0 else start + 1
+    return text[start:m.end()]
+
+
+def find_enum(text, name):
+    m = re.search(r'^enum\s+' + re.escape(name) + r'\s*\{', text, re.M)
+    if not m:
+        return None
+    end = _match_block(text, m.end() - 1)
+    return text[m.start():text.index(';', end) + 1]
+
+
+def find_macro(text, name):
+    m = re.search(r'^#define\s+' + re.escape(name) + r'\b.*?(?<!\\)$',
+                  text, re.M | re.S)
+    return m.group(0) if m else None
+
+
+def body(text):
+    text = re.sub(r'^\s*#include\s+"[^"]*".*$', '', text, flags=re.M)
+    return re.sub(r'__attribute__\(\(section\("[^"]*"\)\)\)', '', text)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--src', required=True)
     ap.add_argument('--func', action='append', default=[])
     ap.add_argument('--object', action='append', default=[])
-    ap.add_argument('--lines')
+    ap.add_argument('--typedef', action='append', default=[])
+    ap.add_argument('--enum', action='append', default=[])
+    ap.add_argument('--macro', action='append', default=[])
+    ap.add_argument('--body', action='store_true')
     ap.add_argument('--rename', action='append', default=[])
     ap.add_argument('--out', required=True)
     a = ap.parse_args()
     with open(a.src) as source:
         text = source.read()
     parts = []
-    if a.lines:
-        lo, hi = (int(v) for v in a.lines.split('-', 1))
-        parts.append('\n'.join(text.splitlines()[lo - 1:hi]))
-    for name in a.object:
-        got = find_object(text, name)
-        if got is None:
-            sys.exit(f'extract.py: object {name} not found in {a.src}')
-        parts.append(got)
-    for name in a.func:
-        got = find_function(text, name)
-        if got is None:
-            sys.exit(f'extract.py: function {name} not found in {a.src}')
-        parts.append(got)
+    if a.body:
+        parts.append(body(text))
+    for kind, names, finder in (('macro', a.macro, find_macro),
+                                ('enum', a.enum, find_enum),
+                                ('typedef', a.typedef, find_typedef),
+                                ('object', a.object, find_object),
+                                ('function', a.func, find_function)):
+        for name in names:
+            got = finder(text, name)
+            if got is None:
+                sys.exit(f'extract.py: {kind} {name} not found in {a.src}')
+            parts.append(got)
     out = '\n\n'.join(parts) + '\n'
     for pair in a.rename:
         old, new = pair.split('=', 1)

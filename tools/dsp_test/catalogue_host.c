@@ -1,14 +1,16 @@
 /*
- * Host sample-flash image and flash stubs (S087 stage C).
+ * Host sample-flash image and flash stubs (S087 stage C; S087 P1).
  *
- * What:       a 1.31 MB RAM image of sectors 7-11 plus the sampleFlash API
- *             implemented as plain memory writes (no bit-clear emulation is
- *             needed: every test writes erased areas or rewrites the same
- *             values).
- * Why:        the real catalogue and installer code must run on the host.
+ * What:       a 1.31 MB RAM image of sectors 7-11 plus the sampleFlash API.
+ *             sampleFlash_writeWord() now models real NOR programming: the
+ *             word becomes old & data (only 1 bits clear), and a read-back
+ *             mismatch returns 3 exactly as sampleFlash.c does.
+ * Why:        S087 P1 F1/F2: a plain memcpy stub hid both a second header
+ *             write and an item reprogrammed after an abort. The installer
+ *             must satisfy the real program-once rule here before the device.
  * Inputs:     none.  Outputs: cat_host_image and the flash stubs.
  * Accessors:  test_catalogue.c, test_wav_install.c.
- * Affiliates: cat_host.h, SampleMemory.c, SampleInstall.c.
+ * Affiliates: cat_host.h, SampleMemory.c, SampleInstall.c, sampleFlash.c.
  */
 #include <stdint.h>
 #include <string.h>
@@ -37,8 +39,15 @@ int sampleFlash_writeWord(uint32_t address, uint32_t data)
 {
     if (address < CAT_HOST_BASE || address + 4u > CAT_HOST_END)
         return -1;
-    memcpy(&cat_host_mem[address - CAT_HOST_BASE], &data, 4u);
-    return 0;
+    {
+        uint8_t *p = &cat_host_mem[address - CAT_HOST_BASE];
+        uint32_t word;
+
+        memcpy(&word, p, 4u);
+        word &= data;            /* programming only clears bits */
+        memcpy(p, &word, 4u);
+        return (word == data) ? 0 : 3;
+    }
 }
 
 int sampleFlash_writeBytes(uint32_t *address, const uint8_t *data, uint32_t bytes)

@@ -55,10 +55,6 @@
 *.dep
 *.htm
 
-# S073 golden harness build products (generated fragments and binaries)
-tools/dsp_test/build/
-tools/dsp_test/frozen87/
-
 # S084 reference copy of the abandoned dev-ph7 spike (not part of this tree)
 Helicase-dev-ph7-spike/
 Helicase-dev-ph7-voice-pwm-spike/

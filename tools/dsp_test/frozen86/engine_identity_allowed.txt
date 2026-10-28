@@ -1,4 +1,0 @@
-Core/DSP/Instruments/Drum/DrumVoice.c:< 		else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)
-Core/DSP/Instruments/Snare/Snare.c:< 	else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)
-Core/DSP/Instruments/Cymbal/CymbalVoice.c:< 	else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)
-Core/DSP/Instruments/HiHat/HiHat.c:< 	else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)

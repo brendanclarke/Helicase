@@ -2163,3 +2163,56 @@ Nested Instrument Load:
 * Stepping away and back before committing restores `kit` with its snapshot.
   Multi-Scene destinations hide a type unless every selected Scene can take it.
   InstrumentMrp never shows `chg`.
+
+## Boot / Init Order (main.c)
+
+```
+EXTI_PR  = 0xFFFFFFFF;       // clear all pending EXTI flags
+EXTI_IMR = 0x00000000;       // mask all EXTI lines — MUST be first
+sysclk_init();               // system clock (216 MHz)
+SCB_VTOR = APP_FLASH_ORIGIN; // vector table relocation to 0x08008000
+cpsie i;                     // enable interrupts
+time_initSysTick();          // SysTick 4 kHz
+lcd_init();                  // LCD hardware — before lcd_tim7_init()
+lcd_tim7_init();             // LCD async timer (5 kHz, priority 7)
+boot_show_splash();
+encode_init(); din_init(); dout_init();
+endlessPots_init(); adc_init(); led_init();
+time_initTimer();            // TIM2 (1 µs timestamp) + TIM6 (1 kHz heartbeat)
+flashImage_verifyAtBoot();   // per-sector CRC32 check
+triggerJacks_init();
+sampleMemory_init();
+scene_initAll(); bank_init();
+dsp_init();                  // initRng, fxbuf_init, instrumentManager_runtimeInit,
+                             // effects_init, mixer_init, parameterArray_init, modNode_init ×6
+seq_init();                  // seeds pattern/sub-step defaults
+euklid_init(); som_init();
+midiDin_init(); usb_init(); adc_checkPots();
+
+// --- SD card boot section (blocking, pre-audio) ---
+filesystem_bootLoggingBegin();
+filesystem_devIwdgBootCheck();
+filesystem_initCardAndMountBlocking();
+menu_init();                 // memset on parameter_values — do NOT also memset in main()
+preset_loadGlobals();        // settings.cfg
+// Kit/Scene/Bank/Pattern library scans and .hcindex creation
+// Bank/Scene/Kit boot load + autosave restore
+// Pattern autosave reader + autosave file creation
+filesystem_enableRuntimeSettingsWrites();
+filesystem_bootLoggingEnd();
+
+// --- Post-SD, pre-main-loop ---
+patSvc_init(); copyClear_init();
+liveRec_init(menu_getActiveVoice());
+audioCodec_init();           // PLLI2S, GPIO, DMA, I2S — AFTER all SD boot ops
+bank_revalidateVoiceEditMasks();
+preset_startDrumsetApply();  // arms the chunked Scene apply worker
+menu_start();
+sequencerTimer_init();       // TIM3 4 kHz (priority 2) — LAST init before main loop
+```
+
+**Critical ordering constraints:**
+- `EXTI_IMR = 0` must be the first executable statement.
+- `audioCodec_init()` must follow all blocking SD operations (SD boot ends at `filesystem_bootLoggingEnd()`).
+- `sequencerTimer_init()` must follow `audioCodec_init()` — it is the very last call before the `for(;;)` main loop.
+- `seq_tick()` is owned by TIM3 — never add it to the main loop.

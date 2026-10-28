@@ -42,8 +42,6 @@
 #define WAVETABLE_ENTRIES_BASE (SAMPLE_ENTRIES_BASE + \
                                 SAMPLE_MAX_COUNT * SAMPLE_ENTRY_BYTES)
 
-static const int16_t stub_silence_buffer[256] = { 0 };
-
 static uint8_t sample_count = 0;
 static uint8_t wavetable_count = 0;
 static uint32_t sample_generation = 1u;
@@ -233,29 +231,6 @@ void sampleMemory_getWavetableName(uint8_t index,
         sampleMemory_wavetableEntry(index);
 
     sampleMemory_copyName(entry ? entry->name : 0, name);
-}
-
-/* S087 C (interim): v1 readers on v2 data until stage D (D-29 removes). */
-SampleInfo sampleMemory_getSampleInfo(uint8_t index)
-{
-    SampleInfo info;
-    const sample_catalogue_entry_t *entry = sampleMemory_sampleEntry(index);
-
-    memset(&info, 0, sizeof(info));
-    if (!entry) {
-        info.offset = (uint32_t)(uintptr_t)stub_silence_buffer;
-        return info;
-    }
-    memcpy(info.name, entry->name, sizeof(info.name));
-    info.size = entry->frames;
-    info.offset = (uint32_t)(uintptr_t)SAMPLE_FLASH_PTR(entry->offset);
-    return info;
-}
-
-uint8_t sampleMemory_isLooped(uint8_t index)
-{
-    (void)index;
-    return 0u;
 }
 
 void sampleMemory_loadSamples(void)

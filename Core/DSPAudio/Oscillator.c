@@ -120,182 +120,6 @@ static inline uint32_t freq2PhaseIncr32767(const float f)
 	return (((1024*f)/REAL_FS))*131072 ; //(<<17)
 }
 //-----------------------------------------------------------
-static INDTCMZ int16_t osc_interp_a[OUTPUT_DMA_SIZE];
-static INDTCMZ int16_t osc_interp_b[OUTPUT_DMA_SIZE];
-
-/* Waveform interpolation is intentionally block-based here. The old scalar
-** approach evaluated both neighboring waveforms through the normal dispatcher
-** for every output sample. Rendering each neighbor once into a 32-frame scratch
-** buffer keeps the audible interpolation behavior but turns the extra work into
-** two ordinary block renders plus a cheap blend loop. */
-static inline void osc_clearWaveInterp(OscInfo* osc)
-{
-	osc->waveInterpFrac = 0.f;
-	osc->waveInterpNext = osc->waveform;
-	osc->waveInterpGeneration = 0u;
-}
-//-----------------------------------------------------------
-static inline void osc_updateSampleCache(OscInfo* osc, uint8_t sampleIndex)
-{
-	/* User sample metadata lives in flash-backed SampleMemory tables. The
-	** generation counter lets oscillators keep cached pointers/sizes across
-	** audio blocks and invalidate them after a sample/loop install refreshes
-	** the manifest. */
-	const uint32_t generation = sampleMemory_getGeneration();
-
-	if (osc->sampleCacheData &&
-		osc->sampleCacheIndex == sampleIndex &&
-		osc->sampleCacheGeneration == generation) {
-		return;
-	}
-
-	SampleInfo info = sampleMemory_getSampleInfo(sampleIndex);
-	osc->sampleCacheIndex = sampleIndex;
-	osc->sampleCacheGeneration = generation;
-	osc->sampleCacheSize = info.size;
-	osc->sampleCacheData = (const int16_t*)((const int8_t*)info.offset);
-	osc->sampleCacheLooped = sampleMemory_isLooped(sampleIndex);
-}
-//-----------------------------------------------------------
-static inline uint8_t osc_waveInterpActive(const OscInfo* osc)
-{
-	const uint8_t maxWave = (uint8_t)(OSC_SAMPLE_START + sampleMemory_getNumSamples() - 1u);
-
-	if (!modNode_getWaveInterpEnabled()) {
-		return 0u;
-	}
-	if (osc->waveInterpGeneration != modNode_getWaveInterpGeneration()) {
-		return 0u;
-	}
-	if (osc->waveInterpFrac <= 0.f || osc->waveInterpFrac >= 1.f) {
-		return 0u;
-	}
-	if (osc->waveInterpNext <= osc->waveform) {
-		return 0u;
-	}
-	if (osc->waveform > maxWave || osc->waveInterpNext > maxWave) {
-		return 0u;
-	}
-	return 1u;
-}
-//-----------------------------------------------------------
-static inline int16_t osc_evalWaveAtPhase(const OscInfo* src, const uint8_t waveform, const uint32_t phase)
-{
-	OscInfo tmp = *src;
-	int16_t out = 0;
-
-	tmp.waveform = waveform;
-	tmp.phase = phase;
-	tmp.waveInterpFrac = 0.f;
-	tmp.waveInterpNext = waveform;
-	tmp.waveInterpGeneration = 0u;
-	calcNextOscSampleBlock(&tmp, &out, 1u, 1.f);
-	return out;
-}
-//-----------------------------------------------------------
-static inline int16_t osc_evalWaveAtPhaseFm(const OscInfo* src, const uint8_t waveform, const uint32_t phase, const int16_t modSample)
-{
-	OscInfo tmp = *src;
-	int16_t out = 0;
-	int16_t modBuf[1] = { modSample };
-
-	tmp.waveform = waveform;
-	tmp.phase = phase;
-	tmp.waveInterpFrac = 0.f;
-	tmp.waveInterpNext = waveform;
-	tmp.waveInterpGeneration = 0u;
-	calcNextOscSampleFmBlock(&tmp, modBuf, &out, 1u, 1.f);
-	return out;
-}
-//-----------------------------------------------------------
-static void calcPeriodicInterpBlock(OscInfo* osc, int16_t* buf, const uint8_t size, const float gain)
-{
-	const uint8_t base = osc->waveform;
-	const uint8_t next = osc->waveInterpNext;
-	const float frac = osc->waveInterpFrac;
-	const uint32_t startPhase = osc->phase;
-	OscInfo oscA = *osc;
-	OscInfo oscB = *osc;
-	uint8_t i;
-
-	oscA.waveform = base;
-	osc_clearWaveInterp(&oscA);
-	oscB.waveform = next;
-	osc_clearWaveInterp(&oscB);
-
-	calcNextOscSampleBlock(&oscA, osc_interp_a, size, 1.f);
-	calcNextOscSampleBlock(&oscB, osc_interp_b, size, 1.f);
-
-	for (i = 0; i < size; i++) {
-		const int16_t a = osc_interp_a[i];
-		const int16_t b = osc_interp_b[i];
-		const int16_t out = (int16_t)(a + frac * (b - a));
-		buf[i] = out * gain;
-	}
-	osc->phase = startPhase + (osc->phaseInc * (uint32_t)size);
-}
-//-----------------------------------------------------------
-static int16_t calcPeriodicInterp(OscInfo* osc)
-{
-	const uint8_t base = osc->waveform;
-	const uint8_t next = osc->waveInterpNext;
-	const float frac = osc->waveInterpFrac;
-	const uint32_t phase = osc->phase;
-
-	const int16_t a = osc_evalWaveAtPhase(osc, base, phase);
-	const int16_t b = osc_evalWaveAtPhase(osc, next, phase);
-	const int16_t out = (int16_t)(a + frac * (b - a));
-
-	osc->phase = phase + osc->phaseInc;
-	osc->output = out;
-	return out;
-}
-//-----------------------------------------------------------
-static void calcPeriodicInterpFmBlock(OscInfo* osc, int16_t* modBuffer, int16_t* buf, const uint8_t size, const float gain)
-{
-	const uint8_t base = osc->waveform;
-	const uint8_t next = osc->waveInterpNext;
-	const float frac = osc->waveInterpFrac;
-	const uint32_t startPhase = osc->phase;
-	OscInfo oscA = *osc;
-	OscInfo oscB = *osc;
-	int16_t lastOut = 0;
-	uint8_t i;
-
-	oscA.waveform = base;
-	osc_clearWaveInterp(&oscA);
-	oscB.waveform = next;
-	osc_clearWaveInterp(&oscB);
-
-	calcNextOscSampleFmBlock(&oscA, modBuffer, osc_interp_a, size, 1.f);
-	calcNextOscSampleFmBlock(&oscB, modBuffer, osc_interp_b, size, 1.f);
-
-	for (i = 0; i < size; i++) {
-		const int16_t a = osc_interp_a[i];
-		const int16_t b = osc_interp_b[i];
-		lastOut = (int16_t)(a + frac * (b - a));
-		buf[i] = lastOut * gain;
-	}
-	osc->phase = startPhase + (osc->phaseInc * (uint32_t)size);
-	osc->output = lastOut;
-}
-//-----------------------------------------------------------
-static int16_t calcPeriodicInterpFm(OscInfo* osc, OscInfo* modOsc)
-{
-	const uint8_t base = osc->waveform;
-	const uint8_t next = osc->waveInterpNext;
-	const float frac = osc->waveInterpFrac;
-	const uint32_t phase = osc->phase;
-
-	const int16_t a = osc_evalWaveAtPhaseFm(osc, base, phase, modOsc->output);
-	const int16_t b = osc_evalWaveAtPhaseFm(osc, next, phase, modOsc->output);
-	const int16_t out = (int16_t)(a + frac * (b - a));
-
-	osc->phase = phase + osc->phaseInc;
-	osc->output = out;
-	return out;
-}
-//-----------------------------------------------------------
 INITCM void calcSineBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain)
 {
 	uint8_t i;
@@ -463,11 +287,6 @@ _Static_assert(sizeof(osc_stockTables) / sizeof(osc_stockTables[0]) ==
 //-----------------------------------------------------------
 INITCM void calcNextOscSampleFmBlock(OscInfo* osc, int16_t* modBuffer, int16_t* buf, uint8_t size ,const float gain)
 {
-	if (osc_waveInterpActive(osc)) {
-		calcPeriodicInterpFmBlock(osc, modBuffer, buf, size, gain);
-		return;
-	}
-
 	switch(osc->waveform)
 		{
 		case SINE:
@@ -512,10 +331,6 @@ INITCM void calcNextOscSampleFmBlock(OscInfo* osc, int16_t* modBuffer, int16_t* 
 //-----------------------------------------------------------
 int16_t calcNextOscSampleFm(OscInfo* osc,OscInfo* modOsc)
 {
-	if (osc_waveInterpActive(osc)) {
-		return calcPeriodicInterpFm(osc, modOsc);
-	}
-
 	switch(osc->waveform)
 	{
 	case SINE:
@@ -606,11 +421,6 @@ int16_t calcNoise(OscInfo* osc)
 //-----------------------------------------------------------
 INITCM void calcNextOscSampleBlock(OscInfo* osc, int16_t* buf, const uint8_t size, const float gain)
 {
-	if (osc_waveInterpActive(osc)) {
-		calcPeriodicInterpBlock(osc, buf, size, gain);
-		return;
-	}
-
 	switch(osc->waveform)
 		{
 		case SINE:
@@ -650,10 +460,6 @@ INITCM void calcNextOscSampleBlock(OscInfo* osc, int16_t* buf, const uint8_t siz
 //-----------------------------------------------------------
 int16_t calcNextOscSample(OscInfo* osc)
 {
-	if (osc_waveInterpActive(osc)) {
-		return calcPeriodicInterp(osc);
-	}
-
 	switch(osc->waveform)
 	{
 	case SINE:
@@ -787,115 +593,6 @@ int16_t calcSampleOscFm(OscInfo* osc, OscInfo* modOsc)
 	osc->output = oscOut;
 	return oscOut;
 };
-//------------------------------------------------------------------
-INITCM void calcUserSampleOscFmBlock(OscInfo* osc,int16_t* modBuffer, int16_t* buf, uint8_t size ,const float gain)
-{
-	uint8_t sampleIndex = osc->waveform - OSC_SAMPLE_START;
-	osc_updateSampleCache(osc, sampleIndex);
-	uint32_t sampleSize = osc->sampleCacheSize;
-	uint8_t looped = osc->sampleCacheLooped;
-
-	//cast sample data to signed int16_t array
-	const int16_t* sampleData = osc->sampleCacheData;
-	if(sampleSize == 0) return;
-
-	uint8_t i;
-	for(i=0;i<size;i++)
-	{
-		const uint32_t oscPhase 	= osc->phase;
-		int16_t oscOut ;
-
-		const uint32_t index =  oscPhase + (((uint32_t)(modBuffer[i]*osc->fmMod))<<14);
-		uint32_t  itg	= index>>17;
-
-		if(looped && itg >= sampleSize)
-			itg %= sampleSize;
-
-	#if INTERPOLATE_FM_OSC
-		oscOut = sampleData[itg];
-		const float frac	= (index & 0x0001FFFF) * 0.00000762939453125f; // 1 / 2^17
-		if(looped && (itg + 1u) >= sampleSize)
-			oscOut += frac*(sampleData[0] - oscOut);
-		else
-			oscOut += frac*(sampleData[itg + 1u] - oscOut);
-		itg++;
-	#else
-		oscOut = sampleData[itg];
-	#endif
-
-		//one shot
-		if(looped)
-		{
-			uint32_t nextPhase = oscPhase + osc->phaseInc;
-			if(sampleSize < 32768u) {
-				uint32_t loopPhase = sampleSize << 17;
-				if(nextPhase >= loopPhase)
-					nextPhase %= loopPhase;
-			}
-			osc->phase = nextPhase;
-		}
-		else if(itg < sampleSize)
-		{
-			osc->phase = oscPhase + osc->phaseInc;
-		}
-		osc->output = oscOut;
-		buf[i] = oscOut * gain;
-	}
-}
-//---------------------------------------------------------------
-INITCM void calcUserSampleOscBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain)
-{
-	uint8_t sampleIndex = osc->waveform - OSC_SAMPLE_START;
-	osc_updateSampleCache(osc, sampleIndex);
-	uint32_t sampleSize = osc->sampleCacheSize;
-	uint8_t looped = osc->sampleCacheLooped;
-
-	//cast sample data to signed int16_t array
-	const int16_t* sampleData = osc->sampleCacheData;
-	if(sampleSize == 0) return;
-
-	uint8_t i;
-	for(i=0;i<size;i++)
-	{
-		const uint32_t oscPhase = osc->phase;
-		int16_t oscOut ;
-		uint32_t  itg	= oscPhase>>17;
-
-		if(looped && itg >= sampleSize)
-			itg %= sampleSize;
-
-	#if INTERPOLATE_OSC
-
-		oscOut = sampleData[itg];
-		const float frac = (oscPhase & 0x0001FFFF) * 0.00000762939453125f; // 1 / 2^17
-		if(looped && (itg + 1u) >= sampleSize)
-			oscOut += frac*(sampleData[0] - oscOut);
-		else
-			oscOut += frac*(sampleData[itg + 1u] - oscOut);
-		itg++;
-	#else
-		oscOut = sampleData[itg];
-	#endif
-	//	oscOut = (oscOut - 127)*256;
-
-		//one shot
-		if(looped)
-		{
-			uint32_t nextPhase = oscPhase + osc->phaseInc;
-			if(sampleSize < 32768u) {
-				uint32_t loopPhase = sampleSize << 17;
-				if(nextPhase >= loopPhase)
-					nextPhase %= loopPhase;
-			}
-			osc->phase = nextPhase;
-		}
-		else if(itg < sampleSize)
-		{
-			osc->phase = oscPhase + osc->phaseInc;
-		}
-		buf[i] = oscOut * gain;
-	}
-}
 //---------------------------------------------------------------
 INITCM void calcSampleOscBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain)
 {
@@ -990,9 +687,9 @@ int16_t calcSampleOsc(OscInfo* osc)
  *
  * What:       INITCM plus noinline/noclone.
  * Why:        they must not be inlined into Drum_calcVoiceSyncBlock() (flash):
- *             their interpolated variants' blend loops are per-sample code
- *             and the cost gate assumes the same ITCM placement that
- *             calcPeriodicInterpBlock() gets through calcNextOscSampleBlock().
+ *             their waveform switches select per-sample loops, and the cost
+ *             gate assumes ITCM placement for them (S087 P1: the interpolated
+ *             variants are retired, A7).
  * Accessors:  Drum_calcVoiceSyncBlock().
  */
 #define OSC_S085_DISPATCH OSC_S085_SECTION __attribute__((noinline, noclone))
@@ -1081,21 +778,6 @@ static uint32_t osc_syncRatioQ16(const uint32_t slaveInc, const uint32_t clockIn
 }
 
 /*
- * Whether a waveform has a sync copy (S085 P1).
- *
- * What:       1 for SINE, TRI, SAW, REC, CRASH and the stock table waves
- *             (S086 P2); 0 for NOISE and user samples, which render unsynced
- *             in P1 (plan A3/A4).
- * Accessors:  calcPeriodicInterpSyncBlock() (the phase rule).
- * Affiliates: osc_renderSyncWave() (the same partition, as a switch).
- */
-static inline uint8_t osc_syncWaveform(const uint8_t waveform)
-{
-	return (uint8_t)(((waveform <= CRASH) && (waveform != NOISE)) ||
-	                 ((waveform >= OSC_STOCK_FIRST) && (waveform <= OSC_STOCK_LAST)));
-}
-
-/*
  * Render one waveform at gain 1, without the interpolation check (S085 P1).
  *
  * What:       the waveform switch of calcNextOscSampleBlock() with a constant
@@ -1111,7 +793,7 @@ static inline uint8_t osc_syncWaveform(const uint8_t waveform)
  * Inputs:     osc (interpolation already cleared by the caller where
  *             relevant), buf[size], size.
  * Outputs:    buf; osc state, exactly as calcNextOscSampleBlock().
- * Accessors:  osc_renderSyncWave(); calcPeriodicInterpRingBlock().
+ * Accessors:  osc_renderSyncWave() (NOISE: unsynced).
  * Affiliates: calcNextOscSampleBlock() (the reference dispatch).
  */
 static OSC_S085_SECTION void osc_renderPlainWave(OscInfo* osc, int16_t* buf,
@@ -1309,17 +991,18 @@ static OSC_S085_LOOP void calcSampleOscSyncBlock(OscInfo* osc, const uint32_t* o
 }
 
 /*
- * One waveform's sync render, without the interpolation check (S085 P1).
+ * One waveform's sync render (S085 P1; S087 P1).
  *
- * What:       dispatches Sin/Tri/Saw/Rec/Crash to their sync copies. NOISE
- *             and user samples render unsynced through osc_renderPlainWave()
- *             (the leaf loops at gain 1, plan A3/A4). No interpolation check
- *             is needed here: the caller already took the interpolation
- *             path, or the partner copy has interpolation cleared.
+ * What:       dispatches Sin/Tri/Saw/Rec/Crash and the stock table waves to
+ *             their sync copies. NOISE renders unsynced through
+ *             osc_renderPlainWave() (the leaf loops at gain 1, plan A3/A4).
+ * Why:        the slave partition is a switch, not a predicate: S087 P1
+ *             retires the waveform-interpolation partner path (A7), so no
+ *             check or partner copy remains here.
  * Inputs:     osc, over[size], ratioQ16, depthQ30, buf[size], size.
  * Outputs:    buf; osc state.
- * Accessors:  calcNextOscSampleSyncBlock(); calcPeriodicInterpSyncBlock().
- * Affiliates: osc_syncWaveform() (the same partition).
+ * Accessors:  calcNextOscSampleSyncBlock().
+ * Affiliates: osc_renderPlainWave() (the NOISE fallback).
  */
 static OSC_S085_SECTION void osc_renderSyncWave(OscInfo* osc, const uint32_t* over,
                                                 const uint32_t ratioQ16,
@@ -1354,62 +1037,9 @@ static OSC_S085_SECTION void osc_renderSyncWave(OscInfo* osc, const uint32_t* ov
 }
 
 /*
- * Waveform-interpolated slave under sync (S085 P1).
- *
- * What:       calcPeriodicInterpBlock() with each partner rendered through
- *             osc_renderSyncWave() against the same reset list, so both
- *             partners reset on the same samples. The blend is the plain
- *             one at gain 1.
- *             Phase rule: when the base partner has a sync copy, osc->phase
- *             takes the base partner's (synced) phase. Otherwise it takes
- *             the plain rule, start + phaseInc x size.
- * Why:        plan Q5: `wav` behaves the same in every mode. Cost is bounded
- *             by the existing two-unit interpolation limit
- *             (OSC_WAVE_INTERP_MAX_ACTIVE).
- * Inputs:     osc (interpolation active), over[size], ratioQ16, depthQ30,
- *             buf[size], size.
- * Outputs:    buf; osc->phase.
- * Placement:  .itcm.s085 (OSC_S085_SECTION); the compiler inlines it into
- *             its noinline ITCM dispatcher (OSC_S085_DISPATCH).
- * Accessors:  calcNextOscSampleSyncBlock().
- * Affiliates: calcPeriodicInterpBlock(); osc_interp_a/osc_interp_b scratch.
- */
-static OSC_S085_SECTION void calcPeriodicInterpSyncBlock(OscInfo* osc,
-                                                         const uint32_t* over,
-                                                         const uint32_t ratioQ16,
-                                                         const int32_t depthQ30,
-                                                         int16_t* buf,
-                                                         const uint8_t size)
-{
-	const uint8_t base = osc->waveform;
-	const uint8_t next = osc->waveInterpNext;
-	const float frac = osc->waveInterpFrac;
-	const uint32_t startPhase = osc->phase;
-	OscInfo oscA = *osc;
-	OscInfo oscB = *osc;
-	uint8_t i;
-
-	oscA.waveform = base;
-	osc_clearWaveInterp(&oscA);
-	oscB.waveform = next;
-	osc_clearWaveInterp(&oscB);
-
-	osc_renderSyncWave(&oscA, over, ratioQ16, depthQ30, osc_interp_a, size);
-	osc_renderSyncWave(&oscB, over, ratioQ16, depthQ30, osc_interp_b, size);
-
-	for (i = 0; i < size; i++) {
-		const int16_t a = osc_interp_a[i];
-		const int16_t b = osc_interp_b[i];
-		buf[i] = (int16_t)(a + frac * (b - a));
-	}
-	osc->phase = osc_syncWaveform(base) ? oscA.phase
-	                                    : startPhase + (osc->phaseInc * (uint32_t)size);
-}
-
-/*
  * Render one slave block under hard sync (S085 P1).
- * Contract: Oscillator.h. Order: ratio (one VDIV), then the interpolation
- * entry (as calcNextOscSampleBlock()), then the waveform switch.
+ * Contract: Oscillator.h. Order: ratio (one VDIV), then the waveform switch
+ * (S087 P1: the waveform-interpolation entry is retired, A7).
  */
 OSC_S085_DISPATCH void calcNextOscSampleSyncBlock(OscInfo* osc, const uint32_t* over,
                                                  const uint32_t clockInc,
@@ -1418,10 +1048,6 @@ OSC_S085_DISPATCH void calcNextOscSampleSyncBlock(OscInfo* osc, const uint32_t* 
 {
 	const uint32_t ratioQ16 = osc_syncRatioQ16(osc->phaseInc, clockInc);
 
-	if (osc_waveInterpActive(osc)) {
-		calcPeriodicInterpSyncBlock(osc, over, ratioQ16, depthQ30, buf, size);
-		return;
-	}
 	osc_renderSyncWave(osc, over, ratioQ16, depthQ30, buf, size);
 }
 
@@ -1570,129 +1196,9 @@ static OSC_S085_LOOP void calcSampleOscRingBlock(OscInfo* osc, const int16_t* mo
 }
 
 /*
- * User-sample carrier with the ring law (S085 P1).
- *
- * What:       calcUserSampleOscBlock() (the sample cache, one-shot hold,
- *             looped wrap, interpolation across the loop seam) with the
- *             store replaced by osc_ringSample(oscOut, modBuf[i], d_i).
- *             Like the plain loop, an empty sample returns without writing
- *             buf (unchanged behaviour, kept for parity).
- * Inputs:     osc (waveform >= OSC_SAMPLE_START), modBuf[size], buf[size],
- *             size, depthQ15,
- *             depthStepQ15.
- * Outputs:    buf; osc->phase; osc sample cache.
- * Accessors:  calcNextOscSampleRingBlock().
- * Affiliates: calcUserSampleOscBlock(); osc_updateSampleCache();
- *             SampleMemory.
- */
-static OSC_S085_LOOP void calcUserSampleOscRingBlock(OscInfo* osc,
-                                                     const int16_t* modBuf,
-                                                     int16_t* buf,
-                                                     const uint8_t size,
-                                                     const int32_t depthQ15,
-                                                     const int32_t depthStepQ15)
-{
-	uint8_t sampleIndex = osc->waveform - OSC_SAMPLE_START;
-	osc_updateSampleCache(osc, sampleIndex);
-	uint32_t sampleSize = osc->sampleCacheSize;
-	uint8_t looped = osc->sampleCacheLooped;
-
-	//cast sample data to signed int16_t array
-	const int16_t* sampleData = osc->sampleCacheData;
-	if(sampleSize == 0) return;
-
-	int32_t ringDepth = depthQ15;
-	uint8_t i;
-	for(i=0;i<size;i++)
-	{
-		const uint32_t oscPhase = osc->phase;
-		int16_t oscOut ;
-		uint32_t  itg	= oscPhase>>17;
-
-		if(looped && itg >= sampleSize)
-			itg %= sampleSize;
-
-		oscOut = sampleData[itg];
-		const float frac = (oscPhase & 0x0001FFFF) * 0.00000762939453125f; // 1 / 2^17
-		if(looped && (itg + 1u) >= sampleSize)
-			oscOut += frac*(sampleData[0] - oscOut);
-		else
-			oscOut += frac*(sampleData[itg + 1u] - oscOut);
-		itg++;
-
-		//one shot
-		if(looped)
-		{
-			uint32_t nextPhase = oscPhase + osc->phaseInc;
-			if(sampleSize < 32768u) {
-				uint32_t loopPhase = sampleSize << 17;
-				if(nextPhase >= loopPhase)
-					nextPhase %= loopPhase;
-			}
-			osc->phase = nextPhase;
-		}
-		else if(itg < sampleSize)
-		{
-			osc->phase = oscPhase + osc->phaseInc;
-		}
-		ringDepth += depthStepQ15;
-		buf[i] = osc_ringSample(oscOut, modBuf[i], ringDepth);
-	}
-}
-
-/*
- * Waveform-interpolated carrier with the ring law (S085 P1).
- *
- * What:       calcPeriodicInterpBlock(): both partners rendered plain at
- *             gain 1 into the DTCM scratch, then blended. The blend's store
- *             is replaced by osc_ringSample(blend, modBuf[i], d_i). The
- *             phase follows the plain rule (start + phaseInc x size).
- * Placement:  .itcm.s085 (OSC_S085_SECTION); the compiler inlines it into
- *             its noinline ITCM dispatcher (OSC_S085_DISPATCH).
- * Inputs:     osc (interpolation active), modBuf[size], buf[size], size,
- *             depthQ15, depthStepQ15.
- * Outputs:    buf; osc->phase.
- * Accessors:  calcNextOscSampleRingBlock().
- * Affiliates: calcPeriodicInterpBlock(); OSC_WAVE_INTERP_MAX_ACTIVE.
- */
-static OSC_S085_SECTION void calcPeriodicInterpRingBlock(OscInfo* osc,
-                                                         const int16_t* modBuf,
-                                                         int16_t* buf,
-                                                         const uint8_t size,
-                                                         const int32_t depthQ15,
-                                                         const int32_t depthStepQ15)
-{
-	const uint8_t base = osc->waveform;
-	const uint8_t next = osc->waveInterpNext;
-	const float frac = osc->waveInterpFrac;
-	const uint32_t startPhase = osc->phase;
-	OscInfo oscA = *osc;
-	OscInfo oscB = *osc;
-	int32_t ringDepth = depthQ15;
-	uint8_t i;
-
-	oscA.waveform = base;
-	osc_clearWaveInterp(&oscA);
-	oscB.waveform = next;
-	osc_clearWaveInterp(&oscB);
-
-	osc_renderPlainWave(&oscA, osc_interp_a, size);
-	osc_renderPlainWave(&oscB, osc_interp_b, size);
-
-	for (i = 0; i < size; i++) {
-		const int16_t a = osc_interp_a[i];
-		const int16_t b = osc_interp_b[i];
-		const int16_t out = (int16_t)(a + frac * (b - a));
-		ringDepth += depthStepQ15;
-		buf[i] = osc_ringSample(out, modBuf[i], ringDepth);
-	}
-	osc->phase = startPhase + (osc->phaseInc * (uint32_t)size);
-}
-
-/*
  * Render one carrier block with the ring law (S085 P1).
- * Contract: Oscillator.h. It mirrors calcNextOscSampleBlock(), including the
- * user-sample range check that returns without writing buf. Every ring copy
+ * Contract: Oscillator.h. It mirrors calcNextOscSampleBlock()'s waveform
+ * switch (S087 P1: no interpolation entry, no user samples). Every ring copy
  * uses d_i = depthQ15 + (i + 1) x depthStepQ15 for sample i, so the block
  * ends at depthQ15 + size x depthStepQ15 (the caller's next start value).
  */
@@ -1701,11 +1207,6 @@ OSC_S085_DISPATCH void calcNextOscSampleRingBlock(OscInfo* osc, const int16_t* m
                                                   const int32_t depthQ15,
                                                   const int32_t depthStepQ15)
 {
-	if (osc_waveInterpActive(osc)) {
-		calcPeriodicInterpRingBlock(osc, modBuf, buf, size, depthQ15, depthStepQ15);
-		return;
-	}
-
 	switch(osc->waveform)
 	{
 	case SINE:
@@ -1763,11 +1264,6 @@ static void osc_calcSampleFreqValue(OscInfo* osc, const float currentFreq)
 	osc->phaseInc = freq2PhaseIncr32767(currentFreq);
 }
 //-----------------------------------------------------------
-static void osc_calcUserSampleFreqValue(OscInfo* osc, const float currentFreq)
-{
-	osc_calcSampleFreqValue(osc, currentFreq);
-}
-//-----------------------------------------------------------
  INITCM void osc_setFreq(OscInfo* osc)
  {
 		const float currentFreq = osc->freq*osc->pitchMod*osc->modNodeValue;
@@ -1785,6 +1281,25 @@ static void osc_calcUserSampleFreqValue(OscInfo* osc, const float currentFreq)
 		 */
 		if (osc->oscType == OSC_TYPE_WAV && osc->waveform > OSC_STOCK_LAST)
 			osc->waveform = OSC_STOCK_LAST;
+		/*
+		 * Modulator list clamp (S087 P1).
+		 *
+		 * What:       a modulator wav value past the end of its flat list (stock,
+		 *             s, l, w; osc_userListCount()) is clamped to the last
+		 *             entry.
+		 * Why:        S087 P0 r8 / A23: the value is used as it is, clamped to an
+		 *             entry that exists; a value past the list bound no item and
+		 *             the modulator was silent.
+		 * Inputs:     oscType, waveform, the catalogue counts.
+		 * Outputs:    waveform.
+		 * Affiliates: osc_userListCount(); osc_userBind().
+		 */
+		if (osc->oscType == OSC_TYPE_MODLIST) {
+			const uint8_t last = (uint8_t)(osc_userListCount() - 1u);
+
+			if (osc->waveform > last)
+				osc->waveform = last;
+		}
 		if (osc->oscType == OSC_TYPE_MODLIST &&
 		    osc->waveform < OSC_SAMPLE_START &&
 		    osc->sampleCacheLooped != OSC_BIND_NONE) {
@@ -1843,9 +1358,13 @@ static void osc_calcUserSampleFreqValue(OscInfo* osc, const float currentFreq)
 			osc_calcSampleFreqValue(osc, currentFreq);
 			break;
 
-		//samples
+		/*
+		 * S087 P1: user content never reaches this switch (osc_userBind()
+		 * above sets its increment); the default only guards an impossible
+		 * value with the table law.
+		 */
 		default:
-			osc_calcUserSampleFreqValue(osc, currentFreq);
+			osc_calcWavetableFreqValue(osc, currentFreq);
 			break;
 
 		}
@@ -1951,6 +1470,16 @@ void osc_setType(OscInfo* osc, uint8_t type)
 	/* D7: a type change re-anchors pos and the phase units. */
 	osc->positionApplied = osc->position;
 	osc->freqCacheValid = 0u;
+	/*
+	 * Release a held interpolation slot (S087 P1).
+	 *
+	 * What:       clears interpStamp, so the oscillator is no longer counted as
+	 *             last block's slot holder.
+	 * Why:        S087 P0 impl. §11 F17 (the header promised it); a stale stamp
+	 *             could take a reservation that belongs to a real holder.
+	 * Affiliates: modNode_interpClaim(); OscInfo.interpStamp.
+	 */
+	osc->interpStamp = 0u;
 	osc_userBind(osc);
 	if (type == OSC_TYPE_SMP || type == OSC_TYPE_SLP) {
 		osc->phase = osc_typedTriggerPhase(osc);
@@ -2019,17 +1548,30 @@ uint8_t osc_userListCount(void)
 }
 
 /*
- * Bind the oscillator's catalogue item for this block (S087 stage D; see the
- * header).
+ * Bind the oscillator's catalogue item for this block (S087 P1; S087 stage
+ * D/E; see the header).
  *
- * What:       kind/index from oscType or the modulator list; on a change
- *             re-reads the item and re-anchors pos/phase; always sets the
- *             sample phase increment.
- * Why:        one bind for osc1 and the modulators, safe across reinstall/type
- *             changes (S087 P0 §6.3, D7, A23/A24).
- * Inputs:     osc, catalogue.  Outputs: bind fields, phaseInc.
- * Accessors:  osc_setFreq().
- * Affiliates: SampleMemory.h; osc_userCount()/osc_userListCount().
+ * What:       resolves (kind, index) from oscType (osc1: smp/slp/wtb, the index
+ *             clamped to the last item) or from the modulator's flat list
+ *             (stock, s, l, w). A wavetable's kind is resolved to WTB8 or WTB16
+ *             from its entry BEFORE the comparison with the stored bind. When
+ *             kind, index or the catalogue generation differ, re-reads the item
+ *             (base address, frames or frame length) and re-anchors (D7):
+ *             positionApplied = position; a smp phase past the new end is
+ *             clamped to the end; a slp phase past the loop end is folded into
+ *             the loop once. Every block: phaseInc = the cycle law (2^32 per
+ *             cycle, freq2PhaseIncr()) for a wavetable bind or a wtb osc1, else
+ *             the sample law f x 2^22 / REAL_FS (Q19.12).
+ * Why:        one bind for osc1 and the modulators (S087 P0 §6.3, D7, A23, A24).
+ *             impl. §11 F9: an 8-bit table compared its stored WTB8 with a
+ *             provisional WTB16 and rebound every block (no frame glide).
+ *             impl. §11 F7: a modulator w entry (oscType MODLIST) got the
+ *             sample law, 1,024 x too slow; its sync clock was wrong likewise.
+ * Inputs:     osc, the catalogue.  Outputs: bind fields, phaseInc,
+ *             positionApplied/phase on a change.
+ * Accessors:  osc_setFreq(), osc_setType(), osc_typedTriggerPhase().
+ * Affiliates: SampleMemory.h; osc_userCount()/osc_userListCount();
+ *             osc_syncClockInc() (returns a wavetable master's phaseInc as is).
  */
 void osc_userBind(OscInfo* osc)
 {
@@ -2075,20 +1617,30 @@ void osc_userBind(OscInfo* osc)
 		}
 	}
 
+	/* F9: the stored kind of a wavetable is its entry's depth. */
+	if (kind == OSC_BIND_WTB16) {
+		const wavetable_catalogue_entry_t *w =
+			sampleMemory_wavetableEntry(index);
+
+		if (!w) {
+			kind = OSC_BIND_NONE;
+			index = 0u;
+		} else if (w->bits == 8u) {
+			kind = OSC_BIND_WTB8;
+		}
+	}
+
 	if (kind != osc->sampleCacheLooped ||
 	    index != osc->sampleCacheIndex ||
 	    generation != osc->sampleCacheGeneration) {
-		const uint8_t isWtb = (uint8_t)(kind == OSC_BIND_WTB8 ||
-		                                kind == OSC_BIND_WTB16);
 		const sample_catalogue_entry_t *entry = (kind == OSC_BIND_SMP ||
 		                                        kind == OSC_BIND_SLP)
-			? sampleMemory_sampleEntry(index) : (const sample_catalogue_entry_t *)0;
-		const wavetable_catalogue_entry_t *wentry = isWtb
+			? sampleMemory_sampleEntry(index)
+			: (const sample_catalogue_entry_t *)0;
+		const wavetable_catalogue_entry_t *wentry = (kind == OSC_BIND_WTB8 ||
+		                                             kind == OSC_BIND_WTB16)
 			? sampleMemory_wavetableEntry(index)
 			: (const wavetable_catalogue_entry_t *)0;
-
-		if (wentry)
-			kind = (wentry->bits == 8u) ? OSC_BIND_WTB8 : OSC_BIND_WTB16;
 
 		osc->sampleCacheIndex = index;
 		osc->sampleCacheLooped = kind;
@@ -2115,7 +1667,9 @@ void osc_userBind(OscInfo* osc)
 			}
 		}
 	}
-	osc->phaseInc = (osc->oscType == OSC_TYPE_WTB)
+	/* F7: the increment law follows what is bound, not the oscillator role. */
+	osc->phaseInc = (kind == OSC_BIND_WTB8 || kind == OSC_BIND_WTB16 ||
+	                 osc->oscType == OSC_TYPE_WTB)
 		? freq2PhaseIncr(currentFreq)
 		: (uint32_t)((currentFreq * 4194304.0f) / REAL_FS);
 }
@@ -2130,6 +1684,8 @@ void osc_userBind(OscInfo* osc)
  * Inputs:     osc (bound).  Outputs: start phase; positionApplied.
  * Accessors:  the engines' typed trigger branch.
  * Affiliates: osc_positionTrigger() guard (D-6).
+ * S087 P1: binds first, so a sample changed on the trigger's own step
+ *           starts correctly.
  */
 uint32_t osc_typedTriggerPhase(OscInfo* osc)
 {
@@ -2139,6 +1695,19 @@ uint32_t osc_typedTriggerPhase(OscInfo* osc)
 	osc->positionApplied = osc->position;
 	if (!osc_isTyped(osc))
 		return 0u;
+	/*
+	 * Bind before the start is computed (S087 P1).
+	 *
+	 * What:       re-reads the bound item when the wav value, the type or the
+	 *             catalogue changed since the last block.
+	 * Why:        S087 P0 impl. §11 F10: a step's own automation (a new sample)
+	 *             is applied just before its trigger (stage A), but the bind
+	 *             otherwise follows only in the next block's osc_setFreq(); the
+	 *             pos start and the loop clamp below used the previous item's
+	 *             length, and a shorter one-shot started past its end (silence).
+	 * Affiliates: osc_userBind(); voiceControl_processPending() (stage A order).
+	 */
+	osc_userBind(osc);
 	if (osc->oscType == OSC_TYPE_WTB)
 		return 0u;   /* stage E: pos is a frame position, not a phase */
 	if (osc->sampleCacheSize == 0u)
@@ -2159,17 +1728,28 @@ uint32_t osc_typedTriggerPhase(OscInfo* osc)
 }
 
 /*
- * Typed pos blend for one block (S087 stage D; see the header).
+ * Typed pos glide for one block (S087 P1; S087 stage D/E).
  *
- * What:       linear d = position - positionApplied, capped to the sample
- *             speed limit and to a non-negative block-end phase; smp stops
- *             when finished; phaseInc += d x frames when bending.
- * Why:        D1/D3/D4/D5: samples are not periodic, so the difference is
- *             linear and a finished one-shot stays finished.
- * Inputs:     osc (bound), bend.  Outputs: phaseInc, positionApplied,
- *             positionBendStep.
+ * What:       wtb: d = position - positionApplied, linear, capped so the
+ *             block moves at most one frame (|d| <= 127 / (count - 1)); the
+ *             frame position moves, phaseInc never bends.
+ *             smp/slp: d = position - positionApplied (linear, D3), 0 once a
+ *             one-shot has ended (D4, no revival), capped to the D5 speed limit
+ *             (|d| x frames <= OSC_POS_SAMPLE_SPEED_CAP x phaseInc, at least 1).
+ *             A backward step is further limited while the playhead is outside
+ *             a loop (smp, or slp still in its lead-in) so the block's last
+ *             phase stays >= 0: phase + size x (phaseInc + d x frames) >= 0.
+ *             positionApplied += d; when `bend`, phaseInc += d x frames and
+ *             positionBendStep = d, else positionBendStep = 0 (Drum snc).
+ * Why:        S087 P0 D1/D3/D4/D5; impl. §11 F16: the old limit (points / 32)
+ *             ignored the sample length. Inside a loop a backward glide is a
+ *             forward step modulo the loop (osc_slpBlockInc()), so no limit
+ *             applies there.
+ * Inputs:     osc (bound), bend.
+ * Outputs:    phaseInc, positionApplied, positionBendStep.
  * Accessors:  osc_positionBendApply() (typed branch).
- * Affiliates: osc_typedPositionRestore(); OSC_POS_SAMPLE_SPEED_CAP.
+ * Affiliates: osc_typedPositionRestore(); OSC_POS_SAMPLE_SPEED_CAP;
+ *             osc_wtbPlanBlock() (reads the wtb step); OUTPUT_DMA_SIZE.
  */
 void osc_typedPositionApply(OscInfo* osc, uint8_t bend)
 {
@@ -2178,14 +1758,9 @@ void osc_typedPositionApply(OscInfo* osc, uint8_t bend)
 	int32_t maxStep;
 
 	if (osc->oscType == OSC_TYPE_WTB) {
-		/*
-		 * S087 E: pos is the frame position. A block moves at most one
-		 * frame pair's worth, and phaseInc is never bent.
-		 */
 		const wavetable_catalogue_entry_t *wt =
 			sampleMemory_wavetableEntry(osc->sampleCacheIndex);
 		const int32_t count = wt ? (int32_t)wt->frame_count : 0;
-		int32_t maxStep;
 
 		d = (int32_t)osc->position - (int32_t)osc->positionApplied;
 		maxStep = (count > 1) ? (int32_t)(127 / (count - 1)) : 1;
@@ -2217,13 +1792,23 @@ void osc_typedPositionApply(OscInfo* osc, uint8_t bend)
 		d = maxStep;
 	else if (d < -maxStep)
 		d = -maxStep;
-	/* Keep the block-end phase non-negative (D4). */
 	if (d < 0) {
-		const int32_t points = (int32_t)(osc->phase >> OSC_SAMPLE_PHASE_SHIFT);
-		const int32_t limit = points / (int32_t)OUTPUT_DMA_SIZE;
+		const sample_catalogue_entry_t *entry =
+			(osc->oscType == OSC_TYPE_SLP)
+			? sampleMemory_sampleEntry(osc->sampleCacheIndex)
+			: (const sample_catalogue_entry_t *)0;
+		const uint32_t loopStartPh = entry
+			? (entry->loop_start << OSC_SAMPLE_PHASE_SHIFT) : 0u;
 
-		if (d < -limit)
-			d = -limit;
+		if (osc->oscType == OSC_TYPE_SMP || osc->phase < loopStartPh) {
+			const int64_t room = (int64_t)osc->phase +
+				(int64_t)OUTPUT_DMA_SIZE * (int64_t)osc->phaseInc;
+			const int64_t perStep = (int64_t)OUTPUT_DMA_SIZE * (int64_t)frames;
+			const int32_t minD = (room > 0) ? (int32_t)(-(room / perStep)) : 0;
+
+			if (d < minD)
+				d = minD;
+		}
 	}
 	osc->positionApplied =
 		(uint8_t)(((uint32_t)osc->positionApplied + (uint32_t)d) & 127u);
@@ -2283,6 +1868,46 @@ static float osc_bindGain(const OscInfo* osc)
 }
 
 /*
+ * Per-block step of a looped sample (S087 P1).
+ *
+ * What:       the block's phase step (phaseInc, possibly bent negative by a pos
+ *             glide), returned as the unsigned value the slp copies add each
+ *             sample:
+ *             - forward: reduced modulo the loop length when it is not shorter
+ *               than the loop (A5);
+ *             - backward, with the block starting inside the loop: the equal
+ *               forward step modulo the loop, loop length - (magnitude modulo the
+ *               loop length), so the single upward wrap at loop_end stays exact;
+ *             - backward, with the block starting in the lead-in: the signed
+ *               step unchanged; osc_typedPositionApply() keeps the block's last
+ *               phase >= 0, and a backward step never reaches loop_end.
+ * Why:        S087 P0 A2/A5 (pos moves the playhead, which wraps into the fixed
+ *             loop); impl. §11 F5: the unsigned modulo of a negative step gave
+ *             an arbitrary forward step. Converting once per block keeps the
+ *             per-sample loop unchanged (no second wrap).
+ * Inputs:     phaseInc (bent for this block), phase (block start),
+ *             loopStartPh, lenPh (Q19.12, lenPh > 0).
+ * Outputs:    the step to add per sample (two's complement when backward in the
+ *             lead-in).
+ * Accessors:  osc_slpPlainBlock(), osc_slpFmBlock(), osc_slpRingBlock().
+ * Affiliates: osc_typedPositionApply() (the bend and the lead-in limit);
+ *             SAMPLE_MAX_FRAMES (every step and phase fit int32).
+ */
+static inline uint32_t osc_slpBlockInc(uint32_t phaseInc, uint32_t phase,
+                                       uint32_t loopStartPh, uint32_t lenPh)
+{
+	const int32_t inc = (int32_t)phaseInc;
+	uint32_t mag;
+
+	if (inc >= 0)
+		return (phaseInc >= lenPh) ? (phaseInc % lenPh) : phaseInc;
+	if (phase < loopStartPh)
+		return phaseInc;
+	mag = (uint32_t)(-(int64_t)inc) % lenPh;
+	return (mag == 0u) ? 0u : (lenPh - mag);
+}
+
+/*
  * smp plain: one one-shot block (S087 stage D).
  *
  * What:       Q19.12 linear read of the bound item; the two zero frames at the
@@ -2321,14 +1946,22 @@ static OSC_S087_LOOP void osc_smpPlainBlock(OscInfo* osc, int16_t *buf,
 }
 
 /*
- * slp plain: one looped block (S087 stage D).
+ * slp plain: one looped block (S087 P1; S087 stage D).
  *
- * What:       fixed loop region; the next-point read at the seam goes to
- *             loop_start (A6); the phase wraps by one loop length.
- * Why:        D-12, L2/L3/L4.
- * Inputs:     osc, buf, size, gain.  Outputs: buf; phase.
- * Accessors:  osc_renderTyped()/osc_renderUserList().
- * Affiliates: osc_userBind(); test_osc_sample.c.
+ * What:       Q19.12 linear read of the bound item with a fixed loop region:
+ *             the seam reads loop_start (A6); the phase takes the per-block
+ *             step from osc_slpBlockInc() and wraps once at loop_end.
+ * Why:        S087 P0 D-12, A5, A6; impl. §11 F5: a backward pos glide made the
+ *             block increment negative and the unsigned modulo turned it into an
+ *             arbitrary forward step. osc_slpBlockInc() now returns a backward
+ *             step inside the loop as the equal forward step modulo the loop
+ *             (and the signed step in the lead-in), so the single upward wrap
+ *             stays correct.
+ * Inputs:     osc (bound slp), buf, size, gain.
+ * Outputs:    buf; osc->phase.
+ * Cost:       per sample as the S087 copy before.
+ * Accessors:  osc_renderTyped(), osc_renderUserList().
+ * Affiliates: osc_slpBlockInc(), osc_userBind(), osc_typedPositionApply().
  */
 static OSC_S087_LOOP void osc_slpPlainBlock(OscInfo* osc, int16_t *buf,
                                             uint8_t size, float gain)
@@ -2339,19 +1972,19 @@ static OSC_S087_LOOP void osc_slpPlainBlock(OscInfo* osc, int16_t *buf,
 	const uint32_t ls = entry ? entry->loop_start : 0u;
 	const uint32_t le = entry ? entry->loop_end : osc->sampleCacheSize;
 	const uint32_t len = le - ls;
-	uint32_t inc = osc->phaseInc;
 	const uint32_t lenPh = len << OSC_SAMPLE_PHASE_SHIFT;
 	const uint32_t loopEndPh = le << OSC_SAMPLE_PHASE_SHIFT;
 	const float g = gain * osc_bindGain(osc);
 	uint32_t ph = osc->phase;
+	uint32_t inc;
 	uint8_t i;
 
 	if (!data || osc->sampleCacheSize == 0u || len == 0u) {
 		osc_zeroBlock(buf, size);
 		return;
 	}
-	if (inc >= lenPh)
-		inc %= lenPh;
+	inc = osc_slpBlockInc(osc->phaseInc, ph, ls << OSC_SAMPLE_PHASE_SHIFT,
+	                      lenPh);
 	for (i = 0u; i < size; i++) {
 		const uint32_t idx = ph >> OSC_SAMPLE_PHASE_SHIFT;
 		const uint32_t next = (idx + 1u == le) ? ls : idx + 1u;
@@ -2415,15 +2048,29 @@ static OSC_S087_LOOP void osc_smpFmBlock(OscInfo* osc, const int16_t *mod,
 }
 
 /*
- * slp FM carrier: one looped block (S087 stage D).
+ * slp FM carrier: one looped block (S087 P1; S087 stage D).
  *
- * What:       the FM offset is bounded to half a loop, wrapped once each way
- *             into the loop, then clamped to the last point; the plain seam
- *             and phase wrap stay.
- * Why:        D-14, A5: constant cost, no per-sample modulo.
- * Inputs:     osc, mod, buf, size, gain.  Outputs: buf; phase.
+ * What:       the read position is the phase + (ssat(mod x fmMod) << 9).
+ *             The block's read rule is chosen once, from where the block
+ *             starts:
+ *             - inside the loop (phase >= loop_start): the offset is bounded to
+ *               half a loop and the read, relative to loop_start, wraps once
+ *               each way; the index is loop_start + that relative point;
+ *             - in the lead-in (phase < loop_start): the absolute read is
+ *               clamped to [0, loop_end - 1].
+ *             The seam reads loop_start. The phase takes the per-block step from
+ *             osc_slpBlockInc() and wraps once at loop_end.
+ * Why:        S087 P0 D-14, A5, A6; impl. §11 F6: the read was relative to
+ *             loop_start but indexed data[] as absolute, so a smpl loop that
+ *             does not start at 0 played the wrong region, and the lead-in read
+ *             froze at loop_start; impl. §11 F5 (backward glides).
+ * Inputs:     osc (bound slp), mod[size], buf, size, gain.
+ * Outputs:    buf; osc->phase.
+ * Edge:       a block that starts in the lead-in and enters the loop keeps
+ *             the lead-in read rule (clamp) for its remaining samples.
  * Accessors:  osc_renderTypedFm().
- * Affiliates: test_osc_sample.c.
+ * Affiliates: osc_slpBlockInc(), osc_slpPlainBlock(), osc_smpFmBlock() (the
+ *             same FM scale, A17 addendum).
  */
 static OSC_S087_LOOP void osc_slpFmBlock(OscInfo* osc, const int16_t *mod,
                                          int16_t *buf, uint8_t size, float gain)
@@ -2434,58 +2081,73 @@ static OSC_S087_LOOP void osc_slpFmBlock(OscInfo* osc, const int16_t *mod,
 	const uint32_t ls = entry ? entry->loop_start : 0u;
 	const uint32_t le = entry ? entry->loop_end : osc->sampleCacheSize;
 	const uint32_t len = le - ls;
-	uint32_t inc = osc->phaseInc;
 	const uint32_t lenPh = len << OSC_SAMPLE_PHASE_SHIFT;
+	const uint32_t loopStartPh = ls << OSC_SAMPLE_PHASE_SHIFT;
 	const uint32_t loopEndPh = le << OSC_SAMPLE_PHASE_SHIFT;
-	const int32_t half = (int32_t)(lenPh >> 1);
 	const float g = gain * osc_bindGain(osc);
 	uint32_t ph = osc->phase;
+	uint32_t inc;
 	uint8_t i;
 
 	if (!data || osc->sampleCacheSize == 0u || len == 0u) {
 		osc_zeroBlock(buf, size);
 		return;
 	}
-	if (inc >= lenPh)
-		inc %= lenPh;
-	for (i = 0u; i < size; i++) {
-		int32_t off = (int32_t)__SSAT(
-			(int32_t)((float)mod[i] * osc->fmMod), 16) << OSC_FM_SAMPLE_SHIFT;
-		int32_t rel;
-		int32_t rp;
-		uint32_t idx;
-		uint32_t next;
-		int16_t a;
-		int16_t b;
-		float out;
+	inc = osc_slpBlockInc(osc->phaseInc, ph, loopStartPh, lenPh);
+	if (ph >= loopStartPh) {
+		const int32_t loopLen = (int32_t)lenPh;
+		const int32_t half = loopLen >> 1;
 
-		if (off > half)
-			off = half;
-		else if (off < -half)
-			off = -half;
-		rel = (int32_t)(ph - (ls << OSC_SAMPLE_PHASE_SHIFT));
-		if (rel < 0)
-			rel = 0;
-		else if ((uint32_t)rel >= lenPh)
-			rel = (int32_t)(lenPh - 1u);
-		rp = rel + off;
-		if (rp < 0)
-			rp += (int32_t)lenPh;
-		else if ((uint32_t)rp >= lenPh)
-			rp -= (int32_t)lenPh;
-		if (rp < 0)
-			rp = 0;
-		else if ((uint32_t)rp >= lenPh)
-			rp = (int32_t)(lenPh - 1u);
-		idx = (uint32_t)rp >> OSC_SAMPLE_PHASE_SHIFT;
-		next = (idx + 1u == le) ? ls : idx + 1u;
-		a = data[idx];
-		b = data[next];
-		out = (float)a + osc_frac12((uint32_t)rp) * (float)(b - a);
-		buf[i] = (int16_t)(out * g);
-		ph += inc;
-		if (ph >= loopEndPh)
-			ph -= lenPh;
+		for (i = 0u; i < size; i++) {
+			int32_t off = (int32_t)__SSAT(
+				(int32_t)((float)mod[i] * osc->fmMod), 16) << OSC_FM_SAMPLE_SHIFT;
+			int32_t rp;
+			uint32_t idx;
+			uint32_t next;
+			int16_t a;
+			int16_t b;
+			float out;
+
+			off = (off > half) ? half : off;
+			off = (off < -half) ? -half : off;
+			rp = (int32_t)(ph - loopStartPh) + off;
+			rp = (rp < 0) ? rp + loopLen : rp;
+			rp = (rp >= loopLen) ? rp - loopLen : rp;
+			idx = ls + ((uint32_t)rp >> OSC_SAMPLE_PHASE_SHIFT);
+			next = (idx + 1u == le) ? ls : idx + 1u;
+			a = data[idx];
+			b = data[next];
+			out = (float)a + osc_frac12((uint32_t)rp) * (float)(b - a);
+			buf[i] = (int16_t)(out * g);
+			ph += inc;
+			if (ph >= loopEndPh)
+				ph -= lenPh;
+		}
+	} else {
+		const int32_t lastPh = (int32_t)loopEndPh - 1;
+
+		for (i = 0u; i < size; i++) {
+			const int32_t off = (int32_t)__SSAT(
+				(int32_t)((float)mod[i] * osc->fmMod), 16) << OSC_FM_SAMPLE_SHIFT;
+			int32_t rp = (int32_t)ph + off;
+			uint32_t idx;
+			uint32_t next;
+			int16_t a;
+			int16_t b;
+			float out;
+
+			rp = (rp < 0) ? 0 : rp;
+			rp = (rp > lastPh) ? lastPh : rp;
+			idx = (uint32_t)rp >> OSC_SAMPLE_PHASE_SHIFT;
+			next = (idx + 1u == le) ? ls : idx + 1u;
+			a = data[idx];
+			b = data[next];
+			out = (float)a + osc_frac12((uint32_t)rp) * (float)(b - a);
+			buf[i] = (int16_t)(out * g);
+			ph += inc;
+			if (ph >= loopEndPh)
+				ph -= lenPh;
+		}
 	}
 	osc->phase = ph;
 }
@@ -2499,6 +2161,7 @@ static OSC_S087_LOOP void osc_slpFmBlock(OscInfo* osc, const int16_t *mod,
  * Outputs:    buf; phase.
  * Accessors:  osc_renderTypedRing().
  * Affiliates: osc_ringSample().
+ * S087 P1: the depth steps before use (S085 ring law).
  */
 static OSC_S087_LOOP void osc_smpRingBlock(OscInfo* osc, const int16_t *modBuf,
                                            int16_t *buf, uint8_t size,
@@ -2523,22 +2186,30 @@ static OSC_S087_LOOP void osc_smpRingBlock(OscInfo* osc, const int16_t *modBuf,
 		const int16_t b = data[idx + 1u];
 		const float out = (float)a + osc_frac12(ph) * (float)(b - a);
 
-		buf[i] = (int16_t)((float)osc_ringSample((int16_t)out, modBuf[i], depth) * g);
+		/* S087 P1: S085 ring law, d_i = depthQ15 + (i + 1) x step. */
 		depth += depthStepQ15;
+		buf[i] = (int16_t)((float)osc_ringSample((int16_t)out, modBuf[i], depth) * g);
 		ph = osc_smpReadPhase(ph + inc, endPh);
 	}
 	osc->phase = ph;
 }
 
 /*
- * slp ring carrier: one looped block (S087 stage D).
+ * slp ring carrier: one looped block (S087 P1; S087 stage D).
  *
- * What:       the looped seam read with the ring law and depth ramp.
- * Why:        D-16, L2/L7.
- * Inputs:     osc, modBuf, buf, size, depthQ15, depthStepQ15.
- * Outputs:    buf; phase.
+ * What:       as osc_slpPlainBlock() (the per-block step from osc_slpBlockInc(),
+ *             one upward wrap at loop_end, the seam read at loop_start), with
+ *             the ring law d_i = depthQ15 + (i + 1) x depthStepQ15 and the item's
+ *             gain code.
+ * Why:        S087 P0 D-16, A6; impl. §11 F5 (a backward pos glide is a forward
+ *             step modulo the loop, see osc_slpBlockInc()); the S085 ring law
+ *             (Oscillator.h calcNextOscSampleRingBlock()).
+ * Inputs:     osc (bound slp), modBuf[size], buf, size, depthQ15,
+ *             depthStepQ15.
+ * Outputs:    buf; osc->phase.
+ * Cost:       per sample as the S087 copy before (the depth add moves).
  * Accessors:  osc_renderTypedRing().
- * Affiliates: osc_ringSample().
+ * Affiliates: osc_slpBlockInc(), osc_ringSample(), osc_slpPlainBlock().
  */
 static OSC_S087_LOOP void osc_slpRingBlock(OscInfo* osc, const int16_t *modBuf,
                                            int16_t *buf, uint8_t size,
@@ -2551,11 +2222,11 @@ static OSC_S087_LOOP void osc_slpRingBlock(OscInfo* osc, const int16_t *modBuf,
 	const uint32_t ls = entry ? entry->loop_start : 0u;
 	const uint32_t le = entry ? entry->loop_end : osc->sampleCacheSize;
 	const uint32_t len = le - ls;
-	uint32_t inc = osc->phaseInc;
 	const uint32_t lenPh = len << OSC_SAMPLE_PHASE_SHIFT;
 	const uint32_t loopEndPh = le << OSC_SAMPLE_PHASE_SHIFT;
 	const float g = osc_bindGain(osc);
 	uint32_t ph = osc->phase;
+	uint32_t inc;
 	int32_t depth = depthQ15;
 	uint8_t i;
 
@@ -2563,8 +2234,8 @@ static OSC_S087_LOOP void osc_slpRingBlock(OscInfo* osc, const int16_t *modBuf,
 		osc_zeroBlock(buf, size);
 		return;
 	}
-	if (inc >= lenPh)
-		inc %= lenPh;
+	inc = osc_slpBlockInc(osc->phaseInc, ph, ls << OSC_SAMPLE_PHASE_SHIFT,
+	                      lenPh);
 	for (i = 0u; i < size; i++) {
 		const uint32_t idx = ph >> OSC_SAMPLE_PHASE_SHIFT;
 		const uint32_t next = (idx + 1u == le) ? ls : idx + 1u;
@@ -2572,8 +2243,8 @@ static OSC_S087_LOOP void osc_slpRingBlock(OscInfo* osc, const int16_t *modBuf,
 		const int16_t b = data[next];
 		const float out = (float)a + osc_frac12(ph) * (float)(b - a);
 
-		buf[i] = (int16_t)((float)osc_ringSample((int16_t)out, modBuf[i], depth) * g);
 		depth += depthStepQ15;
+		buf[i] = (int16_t)((float)osc_ringSample((int16_t)out, modBuf[i], depth) * g);
 		ph += inc;
 		if (ph >= loopEndPh)
 			ph -= lenPh;
@@ -2650,9 +2321,21 @@ static OSC_S087_LOOP void osc_slpSyncBlock(OscInfo* osc, const uint32_t *over,
 	const uint32_t frames = osc->sampleCacheSize;
 	const uint32_t lenPh = len << OSC_SAMPLE_PHASE_SHIFT;
 	const uint32_t loopEndPh = le << OSC_SAMPLE_PHASE_SHIFT;
-	const uint32_t startPh = (uint32_t)(
+	/*
+	 * Sync reset target (S087 P1; D9, A5).
+	 *
+	 * What:       the pos start point; a start at or past loop_end (a smpl loop
+	 *             that ends before the file) is clamped to loop_start, as
+	 *             osc_typedTriggerPhase() does at a trigger.
+	 * Why:        S087 P0 impl. §11 F21: the reset and the trigger must start a
+	 *             looped sample at the same point, inside its fixed loop.
+	 * Affiliates: osc_typedTriggerPhase().
+	 */
+	const uint32_t posStartPh = (uint32_t)(
 		(((uint32_t)(osc->position & 127u) * frames) >> 7u) <<
 		OSC_SAMPLE_PHASE_SHIFT);
+	const uint32_t startPh = (posStartPh >= loopEndPh)
+		? (ls << OSC_SAMPLE_PHASE_SHIFT) : posStartPh;
 	const float g = osc_bindGain(osc);
 	uint32_t ph = osc->phase;
 	uint8_t i;
@@ -2833,6 +2516,7 @@ uint8_t osc_syncMasterIsLoop(const OscInfo* master)
  * Outputs:    over[]; the next position.
  * Accessors:  Drum snc master branch (D-38).
  * Affiliates: osc_syncMasterIsLoop().
+ * S087 P1: a stale clock is folded into the loop at entry (F20).
  */
 OSC_S087_LOOP uint32_t osc_buildLoopSyncList(OscInfo* master, uint32_t pos,
                                              uint32_t* over, uint8_t size)
@@ -2855,6 +2539,21 @@ OSC_S087_LOOP uint32_t osc_buildLoopSyncList(OscInfo* master, uint32_t pos,
 	}
 	if (inc >= lenPh)
 		inc %= lenPh;
+	/*
+	 * Bring a stale clock into the loop (S087 P1).
+	 *
+	 * What:       a position at or past loop_end (left in DrumVoice.syncClock by
+	 *             a master of another kind, in 2^32-per-cycle units) is folded
+	 *             into the loop once, before the per-sample walk.
+	 * Why:        S087 P0 impl. §11 F20: without it the walk subtracted one loop
+	 *             per sample and published a reset on every sample for several
+	 *             blocks after the master changed to an l entry.
+	 * Inputs:     pos, the loop region.  Outputs: pos inside [loop_start,
+	 *             loop_end) or still in the lead-in.
+	 * Affiliates: Drum_calcVoiceSyncBlock() (owner of syncClock).
+	 */
+	if (pos >= loopEndPh)
+		pos = loopStartPh + ((pos - loopStartPh) % lenPh);
 	for (i = 0u; i < size; i++) {
 		pos += inc;
 		if (pos >= loopEndPh) {
@@ -2917,12 +2616,123 @@ static uint32_t osc_wtbFrameOf(uint8_t position, uint32_t count)
 }
 
 /*
- * Wavetable plain copies (S087 stage E).
+ * Fractional frame position of one pos value (S087 P1).
  *
- * What:       one frame, or two frames blended with ff ramping from the
- *             block's start to its end frame fraction.
- * Why:        A20: pos interpolates; wav steps.
- * Accessors:  osc_renderTyped().
+ * What:       pos x (count - 1) / 127, in frames (0.0 .. count - 1).
+ * Why:        S087 P0 A20: the frame index is the interpolation target; the
+ *             blend needs the fraction, not the nearest frame (impl. §11 F8).
+ * Inputs:     position (0..127), count (frames, >= 1).
+ * Outputs:    frame position.
+ * Accessors:  osc_wtbPlanBlock().
+ * Affiliates: osc_wtbFrameOf() (the nearest frame, used by the one-frame
+ *             fallback).
+ */
+static float osc_wtbFramePos(uint8_t position, uint32_t count)
+{
+	if (count <= 1u)
+		return 0.0f;
+	return (float)(position & 127u) * (float)(count - 1u) * (1.0f / 127.0f);
+}
+
+/*
+ * One wavetable blend block, split at a frame crossing (S087 P1).
+ *
+ * What:       segments (1 or 2); for each segment its exclusive end sample,
+ *             the lower frame of its pair, and ff at its first sample; step is
+ *             the per-sample change of the frame position.
+ * Why:        osc_typedPositionApply() limits one block's move to at most one
+ *             frame (|d| <= 127 / (count - 1)), so a glide crosses at most one
+ *             frame boundary per block; splitting there keeps every sample a
+ *             blend of the two frames around its own position.
+ * Accessors:  osc_wtbPlanBlock() (writes), the four blend copies (read).
+ */
+typedef struct {
+	uint8_t  segments;
+	uint8_t  end[2];
+	uint32_t pair[2];
+	float    ff[2];
+	float    step;
+} osc_wtbPlan_t;
+
+/*
+ * Plan one wavetable blend block (S087 P1).
+ *
+ * What:       the block glides from fs (the position at its start,
+ *             positionApplied - positionBendStep) to fe (positionApplied), as
+ *             fractional frames; sample i sits at fs + i x step, step =
+ *             (fe - fs) / size. When the glide crosses frame floor(min) + 1
+ *             strictly inside the block, the block splits at the first sample
+ *             on or past the crossing. Each segment blends the pair
+ *             floor(min of its first and last position), clamped to count - 2,
+ *             starting at ff = its first position - that frame.
+ * Why:        S087 P0 impl. §11 F8: fractional frames, with no extrapolation
+ *             past a pair; a held pos (fs == fe) gives one segment with a
+ *             constant ff = the fraction.
+ * Inputs:     osc (positionApplied, positionBendStep), count (>= 2), size.
+ * Outputs:    *plan.
+ * Accessors:  osc_wtbBlendBlock(), osc_wtbFmBlendBlock(),
+ *             osc_wtbRingBlendBlock(), osc_wtbSyncBlendBlock().
+ * Affiliates: osc_wtbFramePos(); osc_typedPositionApply() (the one-frame cap).
+ */
+static void osc_wtbPlanBlock(const OscInfo* osc, uint32_t count, uint8_t size,
+                             osc_wtbPlan_t* plan)
+{
+	const float fe = osc_wtbFramePos(osc->positionApplied, count);
+	const float fs = osc_wtbFramePos(
+		(uint8_t)((osc->positionApplied - (uint8_t)osc->positionBendStep) & 127u),
+		count);
+	const float step = (size != 0u) ? (fe - fs) / (float)size : 0.0f;
+	const float lo = (fs < fe) ? fs : fe;
+	const float hi = (fs < fe) ? fe : fs;
+	const float cross = (float)((uint32_t)lo + 1u);
+	uint8_t k = size;
+	uint8_t s;
+
+	plan->step = step;
+	if (size == 0u) {
+		plan->segments = 0u;
+		return;
+	}
+	if (step != 0.0f && cross > lo && cross < hi) {
+		const float t = (cross - fs) / step;
+		uint32_t kk = (uint32_t)t;
+
+		if ((float)kk < t)
+			kk++;
+		if (kk > 0u && kk < size)
+			k = (uint8_t)kk;
+	}
+	plan->segments = (k < size) ? 2u : 1u;
+	plan->end[0] = k;
+	plan->end[1] = size;
+	for (s = 0u; s < plan->segments; s++) {
+		const uint8_t i0 = (s == 0u) ? 0u : k;
+		const uint8_t i1 = plan->end[s];
+		const float ps = fs + (float)i0 * step;
+		const float pe = fs + (float)(i1 - 1u) * step;
+		const float pmin = (ps < pe) ? ps : pe;
+		uint32_t pair = (pmin > 0.0f) ? (uint32_t)pmin : 0u;
+		float ff;
+
+		if (pair > count - 2u)
+			pair = count - 2u;
+		ff = ps - (float)pair;
+		if (ff < 0.0f)
+			ff = 0.0f;
+		else if (ff > 1.0f)
+			ff = 1.0f;
+		plan->pair[s] = pair;
+		plan->ff[s] = ff;
+	}
+}
+
+/*
+ * Wavetable plain copy, one frame (S087 stage E; S087 P1).
+ *
+ * What:       the frame nearest to positionApplied (osc_wtbFrameOf()).
+ * Why:        A20: pos interpolates; wav steps. S087 P1: this is also the
+ *             no-slot / one-frame fallback of osc_wtbBlendBlock().
+ * Accessors:  osc_renderTyped(), osc_wtbBlendBlock() (fallback).
  */
 static OSC_S087_LOOP void osc_wtbPlainBlock(OscInfo* osc, int16_t* buf,
                                             uint8_t size, float gain)
@@ -2951,6 +2761,25 @@ static OSC_S087_LOOP void osc_wtbPlainBlock(OscInfo* osc, int16_t* buf,
 	osc->phase = ph;
 }
 
+/*
+ * Wavetable plain render with frame blending (S087 P1; S087 stage E).
+ *
+ * What:       with a granted interpolation slot, renders the block in at most
+ *             two segments planned by osc_wtbPlanBlock(), each blending one
+ *             frame pair with ff ramping through the fractional frame position.
+ *             A pos held between two frames plays their mix. Without a slot,
+ *             or with one frame, the one-frame copy plays the nearest frame
+ *             (the Q9 fallback).
+ * Why:        S087 P0 A3/A7/A20: wavetables interpolate the frame index, always
+ *             while the global setting is on, until both slots are taken;
+ *             impl. §11 F8: the frame position was rounded to whole frames, so
+ *             no in-between frame was ever heard.
+ * Inputs:     osc (bound to a wavetable; positionApplied/positionBendStep from
+ *             osc_typedPositionApply()), buf, size, gain.
+ * Outputs:    buf; osc->phase.
+ * Accessors:  osc_renderTyped().
+ * Affiliates: osc_wtbPlanBlock(), osc_wtbPlainBlock(), modNode_interpClaim().
+ */
 static OSC_S087_LOOP void osc_wtbBlendBlock(OscInfo* osc, int16_t* buf,
                                             uint8_t size, float gain)
 {
@@ -2959,38 +2788,35 @@ static OSC_S087_LOOP void osc_wtbBlendBlock(OscInfo* osc, int16_t* buf,
 	uint32_t ph = osc->phase;
 	const uint32_t inc = osc->phaseInc;
 	const uint32_t count = wt ? wt->frame_count : 0u;
-	uint32_t fe;
-	uint32_t fs;
-	uint32_t frame;
-	const uint8_t *a;
-	const uint8_t *b;
-	float ff;
-	float ffStep;
-	uint8_t i;
+	osc_wtbPlan_t plan;
+	uint8_t i = 0u;
+	uint8_t s;
 
 	if (!wt || !osc->sampleCacheData || count < 2u ||
 	    !modNode_interpClaim(osc)) {
 		osc_wtbPlainBlock(osc, buf, size, gain);
 		return;
 	}
-	fe = osc_wtbFrameOf(osc->positionApplied, count);
-	fs = osc_wtbFrameOf((uint8_t)((osc->positionApplied -
-	                               (uint8_t)osc->positionBendStep) & 127u), count);
-	frame = fs < fe ? fs : fe;
-	if (frame + 1u >= count)
-		frame = count - 2u;
-	a = osc_wtbFrame(osc, wt, frame);
-	b = osc_wtbFrame(osc, wt, frame + 1u);
-	ff = (float)(fs - frame);
-	ffStep = size ? ((float)((int32_t)fe - (int32_t)fs) / (float)size) : 0.0f;
-	for (i = 0u; i < size; i++) {
-		const float x0 = osc_wtbRead(a, wt->bits, wt->frame_len, ph);
-		const float x1 = osc_wtbRead(b, wt->bits, wt->frame_len, ph);
-		const float out = x0 + ff * (x1 - x0);
+	{
+		const uint8_t bits = wt->bits;
+		const uint32_t len = wt->frame_len;
 
-		buf[i] = (int16_t)(out * gain);
-		ff += ffStep;
-		ph += inc;
+		osc_wtbPlanBlock(osc, count, size, &plan);
+		for (s = 0u; s < plan.segments; s++) {
+			const uint8_t *a = osc_wtbFrame(osc, wt, plan.pair[s]);
+			const uint8_t *b = osc_wtbFrame(osc, wt, plan.pair[s] + 1u);
+			float ff = plan.ff[s];
+
+			for (; i < plan.end[s]; i++) {
+				const float x0 = osc_wtbRead(a, bits, len, ph);
+				const float x1 = osc_wtbRead(b, bits, len, ph);
+				const float out = x0 + ff * (x1 - x0);
+
+				buf[i] = (int16_t)(out * gain);
+				ff += plan.step;
+				ph += inc;
+			}
+		}
 	}
 	osc->phase = ph;
 }
@@ -3033,6 +2859,20 @@ static OSC_S087_LOOP void osc_wtbFmBlock(OscInfo* osc, const int16_t* mod,
 	osc->phase = ph;
 }
 
+/*
+ * Wavetable FM carrier with frame blending (S087 P1; S087 stage E).
+ *
+ * What:       as osc_wtbSyncBlendBlock() for the frame plan; both frames are
+ *             read at ph + (ssat(mod x fmMod) << 19), the table-FM fraction of
+ *             a cycle. Without a slot, or with one frame, the one-frame FM copy
+ *             runs.
+ * Why:        S087 P0 A3/A20, A17 addendum; impl. §11 F8.
+ * Inputs:     osc (bound to a wavetable), mod[size], buf, size, gain.
+ * Outputs:    buf; osc->phase.
+ * Accessors:  osc_renderTypedFm().
+ * Affiliates: osc_wtbPlanBlock(), osc_wtbFmBlock(), calcFmBlock() (the same
+ *             FM scale), modNode_interpClaim().
+ */
 static OSC_S087_LOOP void osc_wtbFmBlendBlock(OscInfo* osc,
                                               const int16_t* mod,
                                               int16_t* buf, uint8_t size,
@@ -3043,40 +2883,37 @@ static OSC_S087_LOOP void osc_wtbFmBlendBlock(OscInfo* osc,
 	uint32_t ph = osc->phase;
 	const uint32_t inc = osc->phaseInc;
 	const uint32_t count = wt ? wt->frame_count : 0u;
-	uint32_t fe;
-	uint32_t fs;
-	uint32_t frame;
-	const uint8_t *a;
-	const uint8_t *b;
-	float ff;
-	float ffStep;
-	uint8_t i;
+	osc_wtbPlan_t plan;
+	uint8_t i = 0u;
+	uint8_t s;
 
 	if (!wt || !osc->sampleCacheData || count < 2u ||
 	    !modNode_interpClaim(osc)) {
 		osc_wtbFmBlock(osc, mod, buf, size, gain);
 		return;
 	}
-	fe = osc_wtbFrameOf(osc->positionApplied, count);
-	fs = osc_wtbFrameOf((uint8_t)((osc->positionApplied -
-	                               (uint8_t)osc->positionBendStep) & 127u), count);
-	frame = fs < fe ? fs : fe;
-	if (frame + 1u >= count)
-		frame = count - 2u;
-	a = osc_wtbFrame(osc, wt, frame);
-	b = osc_wtbFrame(osc, wt, frame + 1u);
-	ff = (float)(fs - frame);
-	ffStep = size ? ((float)((int32_t)fe - (int32_t)fs) / (float)size) : 0.0f;
-	for (i = 0u; i < size; i++) {
-		const uint32_t rp = ph + ((uint32_t)__SSAT(
-			(int32_t)((float)mod[i] * osc->fmMod), 16) << 19);
-		const float x0 = osc_wtbRead(a, wt->bits, wt->frame_len, rp);
-		const float x1 = osc_wtbRead(b, wt->bits, wt->frame_len, rp);
-		const float out = x0 + ff * (x1 - x0);
+	{
+		const uint8_t bits = wt->bits;
+		const uint32_t len = wt->frame_len;
 
-		buf[i] = (int16_t)(out * gain);
-		ff += ffStep;
-		ph += inc;
+		osc_wtbPlanBlock(osc, count, size, &plan);
+		for (s = 0u; s < plan.segments; s++) {
+			const uint8_t *a = osc_wtbFrame(osc, wt, plan.pair[s]);
+			const uint8_t *b = osc_wtbFrame(osc, wt, plan.pair[s] + 1u);
+			float ff = plan.ff[s];
+
+			for (; i < plan.end[s]; i++) {
+				const uint32_t rp = ph + ((uint32_t)__SSAT(
+					(int32_t)((float)mod[i] * osc->fmMod), 16) << 19);
+				const float x0 = osc_wtbRead(a, bits, len, rp);
+				const float x1 = osc_wtbRead(b, bits, len, rp);
+				const float out = x0 + ff * (x1 - x0);
+
+				buf[i] = (int16_t)(out * gain);
+				ff += plan.step;
+				ph += inc;
+			}
+		}
 	}
 	osc->phase = ph;
 }
@@ -3086,6 +2923,7 @@ static OSC_S087_LOOP void osc_wtbFmBlendBlock(OscInfo* osc,
  *
  * What:       the plain read with the ring law and depth ramp.
  * Accessors:  osc_renderTypedRing().
+ * S087 P1: the depth steps before use (S085 ring law).
  */
 static OSC_S087_LOOP void osc_wtbRingBlock(OscInfo* osc, const int16_t* modBuf,
                                            int16_t* buf, uint8_t size,
@@ -3111,14 +2949,33 @@ static OSC_S087_LOOP void osc_wtbRingBlock(OscInfo* osc, const int16_t* modBuf,
 		for (i = 0u; i < size; i++) {
 			const float out = osc_wtbRead(base, wt->bits, wt->frame_len, ph);
 
-			buf[i] = osc_ringSample((int16_t)out, modBuf[i], depth);
+			/* S087 P1: S085 ring law, d_i = depthQ15 + (i + 1) x step. */
 			depth += depthStepQ15;
+			buf[i] = osc_ringSample((int16_t)out, modBuf[i], depth);
 			ph += inc;
 		}
 	}
 	osc->phase = ph;
 }
 
+/*
+ * Wavetable ring carrier with frame blending (S087 P1; S087 stage E).
+ *
+ * What:       as osc_wtbSyncBlendBlock() for the frame plan; the blended value
+ *             takes the ring law with d_i = depthQ15 + (i + 1) x depthStepQ15
+ *             (the depth steps before it is used, as in every S085 ring copy).
+ *             Without a slot, or with one frame, the one-frame ring copy runs.
+ * Why:        S087 P0 A3/A20 and impl. §11 F8 (fractional frames, one pair per
+ *             segment); the ring law of Oscillator.h
+ *             calcNextOscSampleRingBlock() (the block ends at depthQ15 + size x
+ *             depthStepQ15, the caller's next start).
+ * Inputs:     osc (bound to a wavetable), modBuf[size], buf, size, depthQ15,
+ *             depthStepQ15.
+ * Outputs:    buf (gain 1); osc->phase.
+ * Accessors:  osc_renderTypedRing().
+ * Affiliates: osc_wtbPlanBlock(), osc_wtbRingBlock(), osc_ringSample(),
+ *             modNode_interpClaim().
+ */
 static OSC_S087_LOOP void osc_wtbRingBlendBlock(OscInfo* osc,
                                                 const int16_t* modBuf,
                                                 int16_t* buf, uint8_t size,
@@ -3130,40 +2987,37 @@ static OSC_S087_LOOP void osc_wtbRingBlendBlock(OscInfo* osc,
 	uint32_t ph = osc->phase;
 	const uint32_t inc = osc->phaseInc;
 	const uint32_t count = wt ? wt->frame_count : 0u;
-	uint32_t fe;
-	uint32_t fs;
-	uint32_t frame;
-	const uint8_t *a;
-	const uint8_t *b;
-	float ff;
-	float ffStep;
 	int32_t depth = depthQ15;
-	uint8_t i;
+	osc_wtbPlan_t plan;
+	uint8_t i = 0u;
+	uint8_t s;
 
 	if (!wt || !osc->sampleCacheData || count < 2u ||
 	    !modNode_interpClaim(osc)) {
 		osc_wtbRingBlock(osc, modBuf, buf, size, depthQ15, depthStepQ15);
 		return;
 	}
-	fe = osc_wtbFrameOf(osc->positionApplied, count);
-	fs = osc_wtbFrameOf((uint8_t)((osc->positionApplied -
-	                               (uint8_t)osc->positionBendStep) & 127u), count);
-	frame = fs < fe ? fs : fe;
-	if (frame + 1u >= count)
-		frame = count - 2u;
-	a = osc_wtbFrame(osc, wt, frame);
-	b = osc_wtbFrame(osc, wt, frame + 1u);
-	ff = (float)(fs - frame);
-	ffStep = size ? ((float)((int32_t)fe - (int32_t)fs) / (float)size) : 0.0f;
-	for (i = 0u; i < size; i++) {
-		const float x0 = osc_wtbRead(a, wt->bits, wt->frame_len, ph);
-		const float x1 = osc_wtbRead(b, wt->bits, wt->frame_len, ph);
-		const float out = x0 + ff * (x1 - x0);
+	{
+		const uint8_t bits = wt->bits;
+		const uint32_t len = wt->frame_len;
 
-		buf[i] = osc_ringSample((int16_t)out, modBuf[i], depth);
-		depth += depthStepQ15;
-		ff += ffStep;
-		ph += inc;
+		osc_wtbPlanBlock(osc, count, size, &plan);
+		for (s = 0u; s < plan.segments; s++) {
+			const uint8_t *a = osc_wtbFrame(osc, wt, plan.pair[s]);
+			const uint8_t *b = osc_wtbFrame(osc, wt, plan.pair[s] + 1u);
+			float ff = plan.ff[s];
+
+			for (; i < plan.end[s]; i++) {
+				const float x0 = osc_wtbRead(a, bits, len, ph);
+				const float x1 = osc_wtbRead(b, bits, len, ph);
+				const float out = x0 + ff * (x1 - x0);
+
+				depth += depthStepQ15;
+				buf[i] = osc_ringSample((int16_t)out, modBuf[i], depth);
+				ff += plan.step;
+				ph += inc;
+			}
+		}
 	}
 	osc->phase = ph;
 }
@@ -3201,6 +3055,28 @@ static OSC_S087_LOOP void osc_wtbSyncBlock(OscInfo* osc, const uint32_t* over,
 	osc->phase = ph;
 }
 
+/*
+ * Wavetable sync slave with frame blending (S087 P1; S087 stage E).
+ *
+ * What:       with a granted interpolation slot, renders the block in at most
+ *             two segments planned by osc_wtbPlanBlock(): each segment blends
+ *             one frame pair with ff ramping through the fractional frame
+ *             position; the cycle phase takes osc_syncPull() after every sample
+ *             (reset target 0 + overshoot). Without a slot, or with one frame,
+ *             the one-frame sync copy runs.
+ * Why:        S087 P0 A3/A20: the frame index (pos) is the interpolation
+ *             target; S087 P0 impl. §11 F8: the frame position must stay
+ *             fractional, and a glide crossing a frame boundary inside the
+ *             block changes pair at the crossing sample instead of
+ *             extrapolating.
+ * Inputs:     osc (bound to a wavetable), over[size], ratioQ16, depthQ30,
+ *             buf, size.
+ * Outputs:    buf (gain 1); osc->phase.
+ * Cost:       per sample as before (two frame reads, two interpolations, the
+ *             blend, the pull); the segment set-up is per block.
+ * Accessors:  osc_renderTypedSync().
+ * Affiliates: osc_wtbPlanBlock(), osc_wtbSyncBlock(), modNode_interpClaim().
+ */
 static OSC_S087_LOOP void osc_wtbSyncBlendBlock(OscInfo* osc,
                                                 const uint32_t* over,
                                                 uint32_t ratioQ16,
@@ -3212,38 +3088,35 @@ static OSC_S087_LOOP void osc_wtbSyncBlendBlock(OscInfo* osc,
 	uint32_t ph = osc->phase;
 	const uint32_t inc = osc->phaseInc;
 	const uint32_t count = wt ? wt->frame_count : 0u;
-	uint32_t fe;
-	uint32_t fs;
-	uint32_t frame;
-	const uint8_t *a;
-	const uint8_t *b;
-	float ff;
-	float ffStep;
-	uint8_t i;
+	osc_wtbPlan_t plan;
+	uint8_t i = 0u;
+	uint8_t s;
 
 	if (!wt || !osc->sampleCacheData || count < 2u ||
 	    !modNode_interpClaim(osc)) {
 		osc_wtbSyncBlock(osc, over, ratioQ16, depthQ30, buf, size);
 		return;
 	}
-	fe = osc_wtbFrameOf(osc->positionApplied, count);
-	fs = osc_wtbFrameOf((uint8_t)((osc->positionApplied -
-	                               (uint8_t)osc->positionBendStep) & 127u), count);
-	frame = fs < fe ? fs : fe;
-	if (frame + 1u >= count)
-		frame = count - 2u;
-	a = osc_wtbFrame(osc, wt, frame);
-	b = osc_wtbFrame(osc, wt, frame + 1u);
-	ff = (float)(fs - frame);
-	ffStep = size ? ((float)((int32_t)fe - (int32_t)fs) / (float)size) : 0.0f;
-	for (i = 0u; i < size; i++) {
-		const float x0 = osc_wtbRead(a, wt->bits, wt->frame_len, ph);
-		const float x1 = osc_wtbRead(b, wt->bits, wt->frame_len, ph);
-		const float out = x0 + ff * (x1 - x0);
+	{
+		const uint8_t bits = wt->bits;
+		const uint32_t len = wt->frame_len;
 
-		buf[i] = (int16_t)out;
-		ff += ffStep;
-		ph = osc_syncPull(ph + inc, over[i], ratioQ16, depthQ30);
+		osc_wtbPlanBlock(osc, count, size, &plan);
+		for (s = 0u; s < plan.segments; s++) {
+			const uint8_t *a = osc_wtbFrame(osc, wt, plan.pair[s]);
+			const uint8_t *b = osc_wtbFrame(osc, wt, plan.pair[s] + 1u);
+			float ff = plan.ff[s];
+
+			for (; i < plan.end[s]; i++) {
+				const float x0 = osc_wtbRead(a, bits, len, ph);
+				const float x1 = osc_wtbRead(b, bits, len, ph);
+				const float out = x0 + ff * (x1 - x0);
+
+				buf[i] = (int16_t)out;
+				ff += plan.step;
+				ph = osc_syncPull(ph + inc, over[i], ratioQ16, depthQ30);
+			}
+		}
 	}
 	osc->phase = ph;
 }

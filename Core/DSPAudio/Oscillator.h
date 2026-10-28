@@ -163,7 +163,7 @@ typedef struct OscStruct
 	float 		fmMod;
 
 	float		modNodeValue;
-	uint8_t		waveInterpNext;			/* next waveform used for morph blend */
+	uint8_t		waveInterpNext;			/* S087 P1: unused (A7); kept: positionBendStep, oscType and interpStamp follow it in the padding */
 	/*
 	 * pos bend of the block being rendered (S086 P3, assessment F1).
 	 *
@@ -201,8 +201,9 @@ typedef struct OscStruct
 	/*
 	 * Interpolation slot stamp (S087 stage E).
 	 *
-	 * What:       low 8 bits of the block generation in which this oscillator
-	 *             last held one of the two interpolation slots; 0 = none.
+	 * What:       the stamp (modNode_interpStampOf(), 1..255) of the block in
+	 *             which this oscillator last held one of the two interpolation
+	 *             slots; 0 = none (S087 P1: a stamp is never 0).
 	 * Why:        sticky claims (S087 P0 A8): a holder keeps its slot from
 	 *             block to block, so it does not flip between blending and
 	 *             stepping. Byte 35 is padding before waveInterpFrac.
@@ -211,8 +212,8 @@ typedef struct OscStruct
 	 * Affiliates: modNode_resetTargets(); OSC_WAVE_INTERP_MAX_ACTIVE.
 	 */
 	uint8_t		interpStamp;
-	float		waveInterpFrac;			/* blend amount [0..1] between waveform and next */
-	uint32_t	waveInterpGeneration;	/* audio-block generation stamp */
+	float		waveInterpFrac;			/* S087 P1: unused (wav interpolation retired, A7); kept for the OscInfo layout */
+	uint32_t	waveInterpGeneration;	/* S087 P1: unused; kept for the OscInfo layout */
 	float		freqCacheValue;
 	uint8_t		freqCacheWaveform;
 	uint8_t		freqCacheValid;
@@ -307,10 +308,6 @@ void calcNextOscSampleFmBlock(OscInfo* osc, int16_t* modBuffer, int16_t* buf, ui
 int16_t calcNextOscSampleFm(OscInfo* osc, OscInfo* modOsc);
 //-----------------------------------------------------------
 void calcSampleOscBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain);
-//-----------------------------------------------------------
-void calcUserSampleOscFmBlock(OscInfo* osc,int16_t* modBuffer, int16_t* buf, uint8_t size ,const float gain);
-//-----------------------------------------------------------
-void calcUserSampleOscBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain);
 //-----------------------------------------------------------
 int16_t calcSampleOsc(OscInfo* osc);
 //-----------------------------------------------------------
@@ -638,8 +635,7 @@ static inline uint32_t osc_positionTrigger(OscInfo* osc)
  *             immediately before their osc1 render.
  * Affiliates: osc_positionBendRestore() (must follow the render);
  *             osc_setFreq() (its cache would keep a bend left in phaseInc);
- *             calcPeriodicInterp*() (end the block at start + phaseInc x size,
- *             which includes the bend); 086 log §4.3.
+ *             osc_typedPositionApply() (typed osc1, S087); 086 log §4.3.
  */
 static inline void osc_positionBendApply(OscInfo* osc, const uint8_t bend)
 {

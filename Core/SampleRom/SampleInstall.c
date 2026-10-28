@@ -39,6 +39,23 @@ static uint16_t item_frame_len;
 static char     item_name[SAMPLE_DISPLAY_NAME_LEN];
 static int32_t  item_peak;
 
+/*
+ * Write fault latch (S087 P1).
+ *
+ * What:       1 after a failed sector erase or a failed word write during this
+ *             install; 0 otherwise. While set, no new item may begin.
+ * Why:        after a failed write it is unknown which words of the attempted
+ *             range were programmed; writing further items could program over
+ *             them. Items finished before the fault stay valid and are
+ *             published by sampleInstall_commit().
+ * Inputs:     sampleInstall_begin() (erase), sampleInstall_program().
+ * Outputs:    read by sampleInstall_beginSample()/beginWavetable().
+ * Accessors:  this file only.
+ * Affiliates: sampleFlash_writeWord() (read-back check, return 3).
+ * RAM:        1 B .bss (within the approved R-C3 installer state).
+ */
+static uint8_t  install_fault;
+
 static uint16_t sampleInstall_le16(const uint8_t *p)
 {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
@@ -87,21 +104,62 @@ uint8_t sampleInstall_acceptFormat(const uint8_t *fmt, uint32_t bytes,
     return 1u;
 }
 
+/*
+ * Program bytes at a cursor, program-once safe (S087 P1).
+ *
+ * What:       programs `bytes` bytes at *addr (4-aligned; a partial last word
+ *             is padded with 0xFF by sampleFlash_writeBytes()) and ALWAYS
+ *             advances *addr past every word attempted, whether the write
+ *             succeeded or not. A failure sets install_fault.
+ * Why:        S087 P0 impl. §11 F2: sampleFlash_writeBytes() leaves its cursor
+ *             at the start of the range when a word fails, although earlier
+ *             words of the range are already programmed; the installer must
+ *             never write those words again.
+ * Inputs:     addr (cursor, 4-aligned), data, bytes.
+ * Outputs:    *addr = old *addr + bytes rounded up to 4; install_fault; 0 on
+ *             success, the sampleFlash error otherwise.
+ * Accessors:  sampleInstall_flush(), sampleInstall_finishSample(),
+ *             sampleInstall_finishWavetable().
+ * Affiliates: sampleFlash_writeBytes().
+ */
+static int sampleInstall_program(uint32_t *addr, const uint8_t *data,
+                                 uint32_t bytes)
+{
+    const uint32_t end = *addr + ((bytes + 3u) & ~3u);
+    uint32_t cursor = *addr;
+    int rc = sampleFlash_writeBytes(&cursor, data, bytes);
+
+    *addr = end;
+    if (rc != 0)
+        install_fault = 1u;
+    return rc;
+}
+
+/*
+ * Write the buffered item bytes (S087 P1; S087 stage C).
+ *
+ * What:       programs the whole words in out_buf, then a partial last word
+ *             padded with zeros (sample and frame padding must read 0), each
+ *             through sampleInstall_program(); empties the buffer.
+ * Why:        the cursor must advance past every attempted word (F2).
+ * Inputs:     out_buf, out_len, write_addr.
+ * Outputs:    flash; write_addr; out_len = 0; 0 or the error.
+ * Accessors:  sampleInstall_append(), sampleInstall_finishSample(),
+ *             sampleInstall_finishWavetable(), sampleInstall_commit().
+ * Affiliates: sampleInstall_program().
+ */
 static int sampleInstall_flush(void)
 {
-    uint32_t whole = out_len & ~3u;
+    const uint32_t whole = out_len & ~3u;
     int rc = 0;
 
     if (whole != 0u)
-        rc = sampleFlash_writeBytes(&write_addr, out_buf, whole);
+        rc = sampleInstall_program(&write_addr, out_buf, whole);
     if (rc == 0 && (out_len & 3u) != 0u) {
         uint8_t tail[4] = { 0u, 0u, 0u, 0u };
 
         memcpy(tail, &out_buf[whole], (uint32_t)(out_len & 3u));
-        /* Erased bytes read as 0xFF; sample data padding must be 0. */
-        for (uint8_t i = (uint8_t)(out_len & 3u); i < 4u; i++)
-            tail[i] = 0u;
-        rc = sampleFlash_writeBytes(&write_addr, tail, 4u);
+        rc = sampleInstall_program(&write_addr, tail, 4u);
     }
     out_len = 0u;
     return rc;
@@ -159,11 +217,27 @@ static int32_t sampleInstall_mono(const uint8_t *p, uint8_t channels,
     return sum;
 }
 
+/*
+ * Open a sample item (S087 stage C; S087 P1).
+ *
+ * What:       validates the accepted format, clamps the frame count to
+ *             SAMPLE_MAX_FRAMES, refuses when the item does not fit below the
+ *             catalogue, then records the start address, the frame count and
+ *             the item's name, format and peak state.
+ * Why:        one item at a time, written forward from write_addr; the entry
+ *             that makes it visible is written by sampleInstall_finishSample().
+ * Inputs:     name, frames, fmt (sampleInstall_acceptFormat()).
+ * Outputs:    the open item state; 1 when opened, 0 when refused (bad format,
+ *             an item already open, the count limit, no space).
+ * Accessors:  filesystem_installSampleFile().
+ * Affiliates: sampleInstall_writeFrames(), sampleInstall_finishSample().
+ * S087 P1: refused after a write fault (install_fault).
+ */
 uint8_t sampleInstall_beginSample(const char name[SAMPLE_DISPLAY_NAME_LEN],
                                   uint32_t frames,
                                   const sample_install_fmt_t *fmt)
 {
-    if (!fmt || item_open || sample_items >= SAMPLE_MAX_COUNT)
+    if (!fmt || item_open || install_fault || sample_items >= SAMPLE_MAX_COUNT)
         return 0u;
     if (fmt->channels == 0u || fmt->bits == 0u)
         return 0u;
@@ -209,6 +283,24 @@ uint8_t sampleInstall_writeFrames(const uint8_t *src, uint32_t frames)
     return 1u;
 }
 
+/*
+ * Finish the open sample (S087 P1; S087 stage C).
+ *
+ * What:       flushes the last sample bytes, programs the two zero frames
+ *             after the data (the smp end pad, A4), then programs the 28 B
+ *             sample entry once in the next free sample slot (loop points from
+ *             smpl when valid, else the whole sample; the gain code from the
+ *             peak). Any failed write sets install_fault and closes the item.
+ * Why:        program-once rule (S087 P0 impl. §11 F1/F2); the pad must exist
+ *             for the smp reader, and the entry is the only thing that makes
+ *             the item visible.
+ * Inputs:     loop_start, loop_end (exclusive), has_loop; item_start,
+ *             frames_total, item_name, item_peak, sample_items.
+ * Outputs:    pad and entry in flash; sample_items + 1 on success; 1/0.
+ * Accessors:  filesystem_installSampleFile().
+ * Affiliates: sampleInstall_gainCode(); SampleMemory.h sample entry layout;
+ *             sampleInstall_program().
+ */
 uint8_t sampleInstall_finishSample(uint32_t loop_start, uint32_t loop_end,
                                    uint8_t has_loop)
 {
@@ -218,12 +310,11 @@ uint8_t sampleInstall_finishSample(uint32_t loop_start, uint32_t loop_end,
 
     if (item_open != 1u)
         return 0u;
-    if (sampleInstall_flush() != 0)
+    if (sampleInstall_flush() != 0 ||
+        sampleInstall_program(&write_addr, zeros, 4u) != 0) {
+        item_open = 0u;
         return 0u;
-    /* Two zero frames after every sample (A4). */
-    if (sampleFlash_writeBytes(&write_addr, zeros, 4u) != 0)
-        return 0u;
-
+    }
     memset(&entry, 0, sizeof(entry));
     entry.offset = item_start;
     entry.frames = frames_total;
@@ -240,20 +331,37 @@ uint8_t sampleInstall_finishSample(uint32_t loop_start, uint32_t loop_end,
     entry_addr = SAMPLE_CATALOGUE_START_ADDRESS +
                  sizeof(sample_catalogue_header_t) +
                  (uint32_t)sample_items * SAMPLE_ENTRY_BYTES;
-    if (sampleFlash_writeBytes(&entry_addr, (const uint8_t *)&entry,
-                               sizeof(entry)) != 0)
+    item_open = 0u;
+    if (sampleInstall_program(&entry_addr, (const uint8_t *)&entry,
+                              sizeof(entry)) != 0)
         return 0u;
     sample_items++;
-    item_open = 0u;
     return 1u;
 }
 
+/*
+ * Open a wavetable item (S087 stage C; S087 P1).
+ *
+ * What:       validates the frame geometry (WAVETABLE_FRAME_MIN..MAX points,
+ *             1..WAVETABLE_MAX_FRAMES frames, 8 or 16 stored bits) and the
+ *             accepted format, refuses when the item does not fit below the
+ *             catalogue, then records the start address, the frame geometry
+ *             and the item's name and format.
+ * Why:        one table is one item: every frame of the folder is written
+ *             through sampleInstall_writeFrame(), and the entry written by
+ *             sampleInstall_finishWavetable() describes the whole table.
+ * Inputs:     name, frame_len, frame_count, bits, fmt.
+ * Outputs:    the open item state; 1 when opened, 0 when refused.
+ * Accessors:  filesystem_installWavetableHere().
+ * Affiliates: sampleInstall_writeFrame(), sampleInstall_finishWavetable().
+ * S087 P1: refused after a write fault (install_fault).
+ */
 uint8_t sampleInstall_beginWavetable(const char name[SAMPLE_DISPLAY_NAME_LEN],
                                      uint16_t frame_len, uint8_t frame_count,
                                      uint8_t bits,
                                      const sample_install_fmt_t *fmt)
 {
-    if (!fmt || item_open || wavetable_items >= WAVETABLE_MAX_COUNT)
+    if (!fmt || item_open || install_fault || wavetable_items >= WAVETABLE_MAX_COUNT)
         return 0u;
     if (frame_len < WAVETABLE_FRAME_MIN || frame_len > WAVETABLE_FRAME_MAX)
         return 0u;
@@ -307,6 +415,20 @@ uint8_t sampleInstall_writeFrame(const uint8_t *src, uint16_t frames)
     return 1u;
 }
 
+/*
+ * Finish the open wavetable (S087 P1; S087 stage C).
+ *
+ * What:       flushes the last frame bytes, then programs the 20 B wavetable
+ *             entry once, in the next free wavetable slot. A failed entry write
+ *             sets install_fault; the slot index is not reused.
+ * Why:        catalogue entries follow the program-once rule like the item
+ *             data; after a fault no further item may claim the same slot.
+ * Inputs:     item_start, item_frame_len, frames_written, item_stored_bits,
+ *             item_name, wavetable_items.
+ * Outputs:    the entry in flash; wavetable_items + 1 on success; 1/0.
+ * Accessors:  filesystem_installWavetableHere().
+ * Affiliates: SampleMemory.h wavetable entry layout; sampleInstall_program().
+ */
 uint8_t sampleInstall_finishWavetable(void)
 {
     wavetable_catalogue_entry_t entry;
@@ -314,8 +436,10 @@ uint8_t sampleInstall_finishWavetable(void)
 
     if (item_open != 2u)
         return 0u;
-    if (sampleInstall_flush() != 0)
+    if (sampleInstall_flush() != 0) {
+        item_open = 0u;
         return 0u;
+    }
     memset(&entry, 0, sizeof(entry));
     entry.offset = item_start;
     entry.frame_len = item_frame_len;
@@ -326,38 +450,61 @@ uint8_t sampleInstall_finishWavetable(void)
                  sizeof(sample_catalogue_header_t) +
                  SAMPLE_MAX_COUNT * SAMPLE_ENTRY_BYTES +
                  (uint32_t)wavetable_items * WAVETABLE_ENTRY_BYTES;
-    if (sampleFlash_writeBytes(&entry_addr, (const uint8_t *)&entry,
-                               sizeof(entry)) != 0)
+    item_open = 0u;
+    if (sampleInstall_program(&entry_addr, (const uint8_t *)&entry,
+                              sizeof(entry)) != 0)
         return 0u;
     wavetable_items++;
-    item_open = 0u;
     return 1u;
 }
 
+/*
+ * Drop the open item (S087 P1; S087 stage C).
+ *
+ * What:       discards the buffered, unwritten bytes and closes the item. The
+ *             write cursor is NOT moved back: the item's words already
+ *             programmed stay programmed and are skipped (lost space), and the
+ *             next item starts at the first word never written. No catalogue
+ *             entry is written for the dropped item.
+ * Why:        S087 P0 impl. §11 F2: rewinding made the next item program over
+ *             programmed words; its read-back failed and it was lost too.
+ * Inputs:     item_open, out_len.
+ * Outputs:    item_open = 0; out_len = 0; write_addr unchanged.
+ * Accessors:  filesystem_installSampleFile(), filesystem_installWavetableHere(),
+ *             sampleInstall_commit().
+ * Affiliates: sampleInstall_program() (always moves the cursor past every word
+ *             it attempted).
+ */
 void sampleInstall_abortItem(void)
 {
     if (item_open) {
-        write_addr = item_start;
         out_len = 0u;
         item_open = 0u;
     }
 }
 
+/*
+ * Start an install (S087 P1; S087 stage C).
+ *
+ * What:       erases sectors 7..11 and resets the installer state. Nothing is
+ *             programmed: the catalogue header is written once, by
+ *             sampleInstall_commit(). A failed erase sets install_fault, so no
+ *             item is written into flash that is not erased.
+ * Why:        S087 P0 impl. §11 F1: a header written here could not be
+ *             rewritten at commit. An interrupted install reads EMPTY because
+ *             the whole catalogue, magic included, stays erased.
+ * Inputs:     none.
+ * Outputs:    erased sample flash; write_addr at the first item address;
+ *             counters cleared; install_fault from the erase result.
+ * Accessors:  filesystem_installUserContentBlocking().
+ * Affiliates: sampleFlash_eraseAllSamples(); sampleInstall_commit();
+ *             sampleMemory_refresh() (EMPTY/STALE detection reads word 0 of
+ *             the item region, which an S087 install never programs).
+ */
 void sampleInstall_begin(void)
 {
-    sample_catalogue_header_t header;
-    uint32_t addr;
-
     sampleFlash_init();
-    (void)sampleFlash_eraseAllSamples();
-    /* Mark a v2 install in progress: no magic, so it reads EMPTY if aborted. */
-    memset(&header, 0, sizeof(header));
-    header.magic = 0xFFFFFFFFu;
-    header.version = SAMPLE_CATALOGUE_VERSION;
-    header.sample_entry_bytes = SAMPLE_ENTRY_BYTES;
-    header.wavetable_entry_bytes = WAVETABLE_ENTRY_BYTES;
-    addr = SAMPLE_CATALOGUE_START_ADDRESS;
-    (void)sampleFlash_writeBytes(&addr, (const uint8_t *)&header, sizeof(header));
+    install_fault = (uint8_t)(sampleFlash_eraseAllSamples() != 0);
     out_len = 0u;
     write_addr = SAMPLE_ROM_START_ADDRESS + 4u;
     item_start = write_addr;
@@ -376,29 +523,47 @@ uint32_t sampleInstall_bytesFree(void)
     return SAMPLE_CATALOGUE_START_ADDRESS - write_addr;
 }
 
+/*
+ * Publish the catalogue (S087 P1; S087 stage C).
+ *
+ * What:       closes an open item (abort), flushes the output buffer, then
+ *             programs the catalogue header exactly once: words 1..7 (version,
+ *             entry sizes, counts, flags, data_end, reserved = 0) first, and
+ *             the magic word (word 0) last. Invalidates the D-cache over sample
+ *             flash and refreshes the read API.
+ * Why:        a flash word can be programmed once after the erase, and
+ *             sampleFlash_writeWord() verifies each word: the header must not
+ *             be written at begin and again here (S087 P0 impl. §11 F1). The
+ *             magic last keeps an interrupted install readable as EMPTY: until
+ *             the magic is programmed, word 0 is erased.
+ * Inputs:     the counters of finished items (sample_items, wavetable_items),
+ *             write_addr (the end of the item data).
+ * Outputs:    the header in flash; the refreshed catalogue; 1 when the header
+ *             and the magic were programmed, else 0.
+ * Accessors:  filesystem_installUserContentBlocking().
+ * Affiliates: sampleMemory_refresh(); SampleMemory.h header layout;
+ *             sampleFlash_writeBytes()/writeWord().
+ */
 uint8_t sampleInstall_commit(void)
 {
     sample_catalogue_header_t header;
     uint32_t addr;
-    int rc;
 
     if (item_open)
-        return 0u;
-    if (sampleInstall_flush() != 0)
-        return 0u;
+        sampleInstall_abortItem();
+    (void)sampleInstall_flush();
     memset(&header, 0, sizeof(header));
-    header.magic = 0xFFFFFFFFu;
+    header.magic = 0xFFFFFFFFu;            /* not written here; see below */
     header.version = SAMPLE_CATALOGUE_VERSION;
     header.sample_entry_bytes = SAMPLE_ENTRY_BYTES;
     header.wavetable_entry_bytes = WAVETABLE_ENTRY_BYTES;
     header.sample_count = sample_items;
     header.wavetable_count = wavetable_items;
     header.data_end = write_addr;
-    addr = SAMPLE_CATALOGUE_START_ADDRESS;
-    rc = sampleFlash_writeBytes(&addr, (const uint8_t *)&header, sizeof(header));
-    if (rc != 0)
+    addr = SAMPLE_CATALOGUE_START_ADDRESS + 4u;
+    if (sampleFlash_writeBytes(&addr, (const uint8_t *)&header + 4u,
+                               (uint32_t)sizeof(header) - 4u) != 0)
         return 0u;
-    /* The magic is programmed last: an aborted install leaves no v2 catalogue. */
     if (sampleFlash_writeWord(SAMPLE_CATALOGUE_START_ADDRESS,
                               SAMPLE_CATALOGUE_MAGIC) != 0)
         return 0u;

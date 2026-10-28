@@ -13218,6 +13218,53 @@ static void menu_formatAutomationValue3(const ParamDescriptor *descriptor,
 }
 
 /*
+ * Format a voice parameter's 7-bit automation value (S087 P1).
+ *
+ * What:       for an oscillator wave row (DTYPE_MENU, MENU_WAVEFORM) of a voice
+ *             target: the 3-character code of the entry the value selects for
+ *             that slot's oscillator - sNN/lNN/wNN for user content, the stock
+ *             name for a stock wave, the number when the value selects nothing
+ *             (menu_formatWaveCell() on a cell built for the target). Every
+ *             other row: menu_formatAutomationValue3().
+ * Why:        S087 P0 §12.4 and impl. §10.7: the automation display read every
+ *             wave value as stock or sNN, so osc1 under slp/wtb and the
+ *             modulators' l/w entries showed the wrong item.
+ * Inputs:     target (canonical voice parameter ID), descriptor, value, buf[3].
+ * Outputs:    buf (3 characters).
+ * Accessors:  the step-automation amount display and the automation edit line.
+ * Affiliates: menu_formatWaveCell(), menu_formatAutomationValue3(),
+ *             instrumentParam_slot()/instrumentParam_local().
+ */
+static void menu_formatVoiceAutomationValue3(uint16_t target,
+                                             const ParamDescriptor *descriptor,
+                                             uint8_t value, char *buf)
+{
+    if (descriptor &&
+        (descriptor->dtype & 0x0fu) == DTYPE_MENU &&
+        (uint8_t)(descriptor->dtype >> 4) == MENU_WAVEFORM &&
+        instrumentParam_isVoiceParameter(target)) {
+        menu_cell_t cell;
+        char name[SAMPLE_DISPLAY_NAME_LEN];
+        char code[3];
+
+        memset(&cell, 0, sizeof(cell));
+        cell.kind = MENU_CELL_INSTRUMENT;
+        cell.slot = instrumentParam_slot(target);
+        cell.descriptor_index = instrumentParam_local(target);
+        cell.descriptor = descriptor;
+        menu_formatWaveCell(&cell, value, name, code);
+        if (code[0] != ' ')
+            memcpy(buf, code, 3u);
+        else if (name[0] != ' ')
+            memcpy(buf, name, 3u);
+        else
+            numtostrpu(buf, value, ' ');
+        return;
+    }
+    menu_formatAutomationValue3(descriptor, value, buf);
+}
+
+/*
  * Return whether a target is already used by another automation page.
  *
  * Inputs: decoded list, count, candidate target, and an optional page to
@@ -14028,7 +14075,8 @@ static void menu_repaintStepAutomation(void)
                         menu_stepAutomationEffectDescriptor(scene, target),
                         amt_value, amt_out);
                 } else {
-                    menu_formatAutomationValue3(desc, amt_value, amt_out);
+                    menu_formatVoiceAutomationValue3(target, desc, amt_value,
+                                                     amt_out);
                 }
             }
         }
@@ -14135,8 +14183,9 @@ static void menu_repaintStepAutomation(void)
                 menu_stepAutomationEffectDescriptor(scene, target),
                 autos[page].value, &editDisplayBuffer[1][13]);
         } else {
-            menu_formatAutomationValue3(descriptor, autos[page].value,
-                                        &editDisplayBuffer[1][13]);
+            menu_formatVoiceAutomationValue3(target, descriptor,
+                                             autos[page].value,
+                                             &editDisplayBuffer[1][13]);
         }
     }
 }

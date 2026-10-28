@@ -23357,7 +23357,7 @@ static void filesystem_loadName_tick(void)
 ** ----------------------------------------------------------------------- */
 #define FS_SAMPLE_BUFFER_SIZE  512u
 #define FS_SAMPLE_LFN_MAX      80u
-#define FS_INSTALL_DEPTH       3u   /* samples/ and wavetables/ folder bound */
+#define FS_INSTALL_DEPTH       3u   /* folder levels incl. samples/ and wavetables/ (depth 0..2) */
 #define FS_INSTALL_NAME_MAX    49u  /* AFATFS_LONG_FILENAME_MAX + 1 */
 #define FS_INSTALL_SHORT_MAX   13u  /* AFATFS_SHORT_FILENAME_MAX */
 
@@ -24770,10 +24770,20 @@ static uint8_t filesystem_installWavetableHere(afatfsFilePtr_t dir,
             } else if ((uint16_t)frames == frame_len &&
                        wav.fmt.bits == first.fmt.bits &&
                        wav.fmt.channels == first.fmt.channels) {
+                /*
+                 * Frame cap without a stall (S087 P1).
+                 *
+                 * What:       counts frames up to WAVETABLE_MAX_FRAMES; files past
+                 *             the cap are still taken (the "last" name below
+                 *             advances) but not counted, and pass 2 installs
+                 *             only the first `count` frames in natural order.
+                 * Why:        S087 P0 impl. §11 F3: `continue` skipped the
+                 *             advance, so the same file was picked forever and
+                 *             the modal install hung with audio suspended.
+                 * Affiliates: filesystem_installPick(); WAVETABLE_MAX_FRAMES.
+                 */
                 if (count < WAVETABLE_MAX_FRAMES)
                     count++;
-                else
-                    continue;
             } else {
                 ok = 0u;   /* mixed length or format: install nothing */
                 break;
@@ -24832,10 +24842,12 @@ static uint8_t filesystem_installWavetableHere(afatfsFilePtr_t dir,
  * What:       enters the folder, installs its .wav files in natural order,
  *             then recurses into its subfolders in natural order (depth <= 3).
  * Why:        S087 P0 §5.2 folder order; no per-folder manifest array.
- * Inputs:     open directory handle, depth (1 = samples/).
+ * Inputs:     open directory handle, depth (0 = samples/; at most
+ *             FS_INSTALL_DEPTH - 1).
  * Outputs:    items appended to the catalogue.
  * Accessors:  filesystem_installUserContentBlocking().
  * Affiliates: filesystem_installSampleFile(), filesystem_installPick().
+ * S087 P1: depth indexes the per-level name arrays directly (F4).
  */
 static void filesystem_installSampleFolder(afatfsFilePtr_t dir, uint8_t depth)
 {
@@ -24855,7 +24867,7 @@ static void filesystem_installSampleFolder(afatfsFilePtr_t dir, uint8_t depth)
                                    FS_INSTALL_NAME_MAX,
                                    fs_install_best[depth]);
     }
-    if (depth >= FS_INSTALL_DEPTH)
+    if ((uint8_t)(depth + 1u) >= FS_INSTALL_DEPTH)  /* S087 P1: children must index < FS_INSTALL_DEPTH */
         return;
     fs_install_last[depth][0] = '\0';
     for (;;) {
@@ -24884,10 +24896,12 @@ static void filesystem_installSampleFolder(afatfsFilePtr_t dir, uint8_t depth)
  *             files (the folder name is the table name), then recurses into
  *             subfolders, each one also a table.
  * Why:        S087 P0 §5.2/A24: every folder holding .wav files is a table.
- * Inputs:     open directory handle, its display name, depth (1 = wavetables/).
+ * Inputs:     open directory handle, its display name, depth (0 = wavetables/;
+ *             at most FS_INSTALL_DEPTH - 1).
  * Outputs:    wavetable items appended to the catalogue.
  * Accessors:  filesystem_installUserContentBlocking().
  * Affiliates: filesystem_installWavetableHere(), filesystem_installPick().
+ * S087 P1: depth indexes the per-level name arrays directly (F4).
  */
 static void filesystem_installWavetableFolder(afatfsFilePtr_t dir,
                                               const char *display_name,
@@ -24900,7 +24914,7 @@ static void filesystem_installWavetableFolder(afatfsFilePtr_t dir,
         return;
     filesystem_installCopyName(name, sizeof(name), display_name);
     (void)filesystem_installWavetableHere(dir, name, depth);
-    if (depth >= FS_INSTALL_DEPTH)
+    if ((uint8_t)(depth + 1u) >= FS_INSTALL_DEPTH)  /* S087 P1: children must index < FS_INSTALL_DEPTH */
         return;
     fs_install_last[depth][0] = '\0';
     for (;;) {
@@ -24960,13 +24974,13 @@ uint8_t filesystem_installUserContentBlocking(void)
 
     dir = filesystem_blockOpenDirLfn("samples");
     if (dir != NULL) {
-        filesystem_installSampleFolder(dir, 1u);
+        filesystem_installSampleFolder(dir, 0u);  /* S087 P1: samples/ is depth 0 */
         (void)filesystem_blockClose(dir);
         (void)filesystem_blockChdir(NULL);
     }
     dir = filesystem_blockOpenDirLfn("wavetables");
     if (dir != NULL) {
-        filesystem_installWavetableFolder(dir, "wavetables", 1u);
+        filesystem_installWavetableFolder(dir, "wavetables", 0u);  /* S087 P1 */
         (void)filesystem_blockClose(dir);
         (void)filesystem_blockChdir(NULL);
     }
