@@ -382,7 +382,17 @@ void seq_moveTracksToBackgroundScene(uint8_t track_mask);
  * written Instrument entry of an rmp track may start a linear ramp toward the
  * same target on the predicted next step.
  */
-void seq_drainPendingAutomation(void);
+void seq_drainPendingAutomationTo(uint8_t limit);
+/*
+ * Mark the automation published so far (S087 stage A).
+ *
+ * What: returns seq_pending_automation_count. Must be called with
+ * interrupts masked; voiceControl_processPending() calls it inside the same
+ * PRIMASK section as its trigger pops. Output: the producer count, to pass as
+ * the limit of seq_drainPendingAutomationTo(). Affiliates:
+ * seq_drainPendingAutomationTo(), seq_queueStepAutomations().
+ */
+uint8_t seq_pendingAutomationMark(void);
 /*
  * Automation ramp service (S081 P2, rmp).
  *
@@ -396,7 +406,7 @@ void seq_drainPendingAutomation(void);
  * TIM3's per-track ramp contexts, the master tick clock. Outputs: runtime
  * Instrument writes, seq_automation_dirty bits. Context: foreground only.
  * Client: main.c audio_check_and_render(), right after
- * seq_drainPendingAutomation().
+ * seq_drainPendingAutomationTo().
  */
 void seq_rampService(void);
 /*
@@ -417,7 +427,7 @@ void seq_restoreAutomatedParameters(uint8_t trigger_track);
  * (S075 F3).
  *
  * What: nonzero when seq_automation_dirty[slot] has bit `local` set, that is,
- * seq_drainPendingAutomation() wrote a step value into this descriptor's
+ * seq_drainPendingAutomationTo() wrote a step value into this descriptor's
  * runtime and the voice has not been triggered since.
  * Why: automation always wins (user rule). The overlay lasts until the next
  * trigger, so writers of the Morph base update morph_interpolation[] but
@@ -429,7 +439,7 @@ void seq_restoreAutomatedParameters(uint8_t trigger_track);
  * (voiceControl_processPending()), the transport restores and the Morph sweep
  * all run in the main loop, so the 64-bit bitmap is never read half-written.
  * Client: presetMorph_writeRuntimeBase() (presetMorphEngine.c).
- * Affiliates: seq_drainPendingAutomation(), seq_restoreAutomatedParameters(),
+ * Affiliates: seq_drainPendingAutomationTo(), seq_restoreAutomatedParameters(),
  * seq_restoreAllAutomation().
  */
 uint8_t seq_automationHoldsParameter(uint8_t slot, uint8_t local);
@@ -443,7 +453,7 @@ uint8_t seq_automationHoldsParameter(uint8_t slot, uint8_t local);
  * Inputs: slot 0..5, descriptor-local index. Context: foreground only.
  * Client: menu_cellCommitValue() INSTRUMENT branch. Affiliates:
  * seq_restoreAutomatedParameters() (per-trigger clear),
- * seq_drainPendingAutomation() (skip filter).
+ * seq_drainPendingAutomationTo() (skip filter).
  */
 void seq_menuOverrideSet(uint8_t slot, uint8_t local);
 /*

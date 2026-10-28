@@ -1048,14 +1048,12 @@ static void menu_setStorageMessage(const char *message, const char *detail)
 
 static void menu_loadSamplesModal(void)
 {
-    /* Single visible load command: install /samples first, then append /loops.
-    ** This preserves the old user-facing two-step behavior and per-stage
-    ** progress text, but avoids exposing a separate SampLoop menu option and
-    ** reinitializes audio only once after all flash work is complete. */
+    /* S087 C: one install for samples/ and wavetables/ (catalogue v2);
+    ** /loops is retired and audio is reinitialized once after the flash work. */
     uint16_t t0;
-    uint8_t samplesOk;
-    uint8_t loopsOk;
-    const char *failedMessage = "Sample upload";
+    uint8_t ok;
+    uint8_t slot;
+    char counts[12];
 
     menu_beginStorageMessage("Sample upload");
     lcd_setcursor(0, 2);
@@ -1088,15 +1086,12 @@ static void menu_loadSamplesModal(void)
     }
 
     menu_setStorageMessage("Sample upload", "Writing flash");
-    samplesOk = filesystem_installSamplesBlocking();
-    menu_setStorageMessage("Loop upload", "Writing flash");
-    loopsOk = filesystem_installLoopsBlocking();
-    if (samplesOk) {
-        failedMessage = "Loop upload";
-    }
+    ok = filesystem_installUserContentBlocking();
 
     audioCodec_resume();
-    menu_setNumSamples(sampleMemory_getNumSamples());
+    /* S087 C (C-31): reinstall changes every slot's wave-row count. */
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++)
+        instrumentManager_waveDomainChanged(slot);
 
     if (menu_loadSaveCommandActive)
         menu_finishLoadSaveCommand();
@@ -1104,14 +1099,29 @@ static void menu_loadSamplesModal(void)
         menu_storageBusy = 0u;
         menu_resetSaveParameters();
     }
-    if (!samplesOk || !loopsOk) {
+    if (!ok) {
         lcd_clear();
         lcd_home();
-        lcd_string(failedMessage);
+        lcd_string("Sample upload");
         lcd_setcursor(0, 2);
         lcd_string("Failed");
     } else {
-        menu_repaintAll();
+        /* S087 C: the result screen counts samples and wavetables. */
+        lcd_clear();
+        lcd_home();
+        lcd_string("Sample upload");
+        lcd_setcursor(0, 2);
+        counts[0] = 'S';
+        counts[1] = (char)('0' + sampleMemory_getNumSamples() / 100u);
+        counts[2] = (char)('0' + (sampleMemory_getNumSamples() / 10u) % 10u);
+        counts[3] = (char)('0' + sampleMemory_getNumSamples() % 10u);
+        counts[4] = ' ';
+        counts[5] = 'W';
+        counts[6] = (char)('0' + sampleMemory_getNumWavetables() / 100u);
+        counts[7] = (char)('0' + (sampleMemory_getNumWavetables() / 10u) % 10u);
+        counts[8] = (char)('0' + sampleMemory_getNumWavetables() % 10u);
+        counts[9] = '\0';
+        lcd_string(counts);
     }
 }
 
@@ -1655,7 +1665,6 @@ static uint8_t cur_hw_on;
  * needs the same coalesced repaint flag before that definition is reached. */
 extern volatile uint8_t menu_knobs_dirty;
 
-uint8_t menu_numSamples = 0;
 uint16_t menu_currentPresetNr[NUM_PRESET_LOCATIONS];
 uint8_t menu_shownPattern = 0;
 uint8_t menu_currentBar = 0;
@@ -2422,7 +2431,7 @@ static uint8_t va_seqTrackSearchBit(uint16_t target, uint8_t track)
  * so an Effect type change needs no rescan. Caller: va_scanService() on
  * EFFECT_PAGE. Affiliates: effectTarget_isEffectId() and effectTarget_local()
  * (EffectTypes.h), sceneModTarget_descriptor(), and
- * seq_drainPendingAutomation() (the playback decoding of the same IDs).
+ * seq_drainPendingAutomationTo() (the playback decoding of the same IDs).
  */
 static void va_searchRecordEffectTarget(uint16_t target)
 {
@@ -5223,7 +5232,7 @@ static uint8_t menu_cellCommitValueEx(const menu_cell_t *cell, uint16_t value,
          * guarded runtime write (presetMorph_writeRuntimeBase()) goes through.
          * Inputs: cell slot and descriptor index. Outputs: override bit set, held
          * bit cleared. Affiliates: seq_menuOverrideSet(),
-         * preset_setInstrumentParameter(), seq_drainPendingAutomation() filter.
+         * preset_setInstrumentParameter(), seq_drainPendingAutomationTo() filter.
          */
         seq_menuOverrideSet(cell->slot, cell->descriptor_index);
         for (scene_index = 0u;
@@ -5240,6 +5249,74 @@ static uint8_t menu_cellCommitValueEx(const menu_cell_t *cell, uint16_t value,
             } else if (!morphView) {
                 changed |= preset_setSupplementalParameter(
                     scene_index, cell->slot, cell->descriptor_index, value);
+            }
+        }
+        /*
+         * Clamp osc1_wave after a typ switch (S087 stage B; P0 r8).
+         *
+         * What:       when the committed cell is a SELECTOR row tagged
+         *             IM_SPECIAL_OSC_TYPE, read the slot's stored osc1_wave
+         *             (Normal and Morph endpoints) in every edited Scene and,
+         *             where a value exceeds instrumentManager_waveCellCount()
+         *             for the new type, commit the clamped value with
+         *             preset_setInstrumentParameter() (both images).
+         * Why:        the user rule: the wav value is used as it is, clamped
+         *             to something that exists on switch; the stored value
+         *             must show what plays. Values in range are untouched.
+         *             Stage B only offers wav, so the clamp is a no-op until
+         *             the sample types exist.
+         * Inputs:     cell, edit mask, the new type.
+         * Outputs:    clamped stored osc1_wave where needed; changed flag.
+         * Affiliates: osc_setType() (the runtime clamp);
+         *             instrumentManager_waveCellCount().
+         */
+        if ((cell->descriptor->runtime.special & IM_SPECIAL_WRITER_MASK) ==
+            IM_SPECIAL_OSC_TYPE) {
+            const kit_instrument_slot_t *owner =
+                scene_instrumentSlotConst(scene_getActiveIndex(), cell->slot);
+            uint8_t wave_index = INSTRUMENT_PARAM_COUNT;
+            uint8_t i;
+
+            if (owner) {
+                for (i = 0u; i < INSTRUMENT_PARAM_COUNT; i++) {
+                    const ParamDescriptor *d =
+                        instrumentManager_descriptor(owner->type, i);
+
+                    if (!d)
+                        break;
+                    if (strcmp(d->file_key, "osc1_wave") == 0) {
+                        wave_index = i;
+                        break;
+                    }
+                }
+            }
+            if (wave_index < INSTRUMENT_PARAM_COUNT) {
+                const ParamDescriptor *wave_desc =
+                    instrumentManager_descriptor(owner->type, wave_index);
+                uint8_t max_wave = (uint8_t)(
+                    instrumentManager_waveCellCount(cell->slot, wave_desc) - 1u);
+
+                for (scene_index = 0u;
+                     scene_index < SCENE_SLOT_TOTAL;
+                     scene_index++) {
+                    const kit_instrument_slot_t *inst;
+
+                    if ((edit_mask & (1ul << scene_index)) == 0u)
+                        continue;
+                    inst = scene_instrumentSlotConst(scene_index, cell->slot);
+                    if (!inst)
+                        continue;
+                    if (inst->parameter_images.instrument_parameters[wave_index] >
+                        max_wave)
+                        changed |= preset_setInstrumentParameter(
+                            scene_index, cell->slot, wave_index,
+                            INSTRUMENT_IMAGE_MAIN, max_wave);
+                    if (inst->parameter_images
+                            .morph_instrument_parameters[wave_index] > max_wave)
+                        changed |= preset_setInstrumentParameter(
+                            scene_index, cell->slot, wave_index,
+                            INSTRUMENT_IMAGE_MORPH, max_wave);
+                }
             }
         }
         return changed;
@@ -6675,7 +6752,14 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
             *value = (uint16_t)(n - 1u);
         break; }
     case DTYPE_MENU: {
-        uint8_t n = getMaxEntriesForMenu((uint8_t)(menu_cellDtype(cell) >> 4));
+        const uint8_t menuId = (uint8_t)(menu_cellDtype(cell) >> 4);
+        uint8_t n = getMaxEntriesForMenu(menuId);
+
+        /* S087 D: a wave cell's count follows osc1's type or the modulator
+         * list (P0 §4.3, §12.4). */
+        if (menuId == MENU_WAVEFORM &&
+            cell && cell->kind == MENU_CELL_INSTRUMENT && cell->descriptor)
+            n = instrumentManager_waveCellCount(cell->slot, cell->descriptor);
         if (n == 0u)
             *value = 0u;
         else if (*value >= n)
@@ -11463,7 +11547,10 @@ static uint8_t getMaxEntriesForMenu(uint8_t menuId)
     case MENU_SEQ_QUANT:     return (uint8_t)quantisationNames[0][0];
     case MENU_MIDI:          return (uint8_t)midiModes[0][0];
     case MENU_NEXT_PATTERN:  return (uint8_t)nextPatternNames[0][0];
-    case MENU_WAVEFORM:      return (uint8_t)((uint8_t)waveformNames[0][0] + menu_numSamples);
+    /* S087 D: callers without a cell see the stock list; the cell clamp below
+     * uses the type/list count. */
+    case MENU_WAVEFORM:      return (uint8_t)waveformNames[0][0];
+    case MENU_OSC_TYPE:      return (uint8_t)OSC_TYPE_SELECTABLE;  /* S087 B */
     case MENU_MIDI_ROUTING:  return (uint8_t)midiRoutingNames[0][0];
     case MENU_MIDI_FILTERING:return (uint8_t)midiFilterNames[0][0];
     case MENU_PPQ:           return (uint8_t)ppqNames[0][0];
@@ -11473,20 +11560,114 @@ static uint8_t getMaxEntriesForMenu(uint8_t menuId)
     }
 }
 
-static void menu_formatSampleShortName(uint8_t sampleIndex, char *buf)
+/*
+ * Short s/l/w code for a user entry (S087 stage D; P0 §4.3, §12.4).
+ *
+ * What:       prefix + two digits (01..99) or A0.. for 100+.
+ * Why:        samples, loops and wavetables share one code layout; the
+ *             catalogue holds at most 128 of each.
+ * Inputs:     prefix 's'/'l'/'w', zero-based index, buf[3].
+ * Outputs:    3 characters.
+ * Accessors:  menu_formatWaveCell(), getMenuItemNameForValue().
+ * Affiliates: storage_displayNameFromLfn().
+ */
+static void menu_formatUserShortName(char prefix, uint8_t index, char *buf)
 {
-    uint8_t display = (uint8_t)(sampleIndex + 1u);
+    uint8_t display = (uint8_t)(index + 1u);
 
-    buf[0] = 's';
+    buf[0] = prefix;
     if (display <= 99u) {
         buf[1] = (char)('0' + (display / 10u));
         buf[2] = (char)('0' + (display % 10u));
         return;
     }
 
-    sampleIndex = (uint8_t)(display - 100u);
-    buf[1] = (char)('A' + (sampleIndex / 10u));
-    buf[2] = (char)('0' + (sampleIndex % 10u));
+    index = (uint8_t)(display - 100u);
+    buf[1] = (char)('A' + (index / 10u));
+    buf[2] = (char)('0' + (index % 10u));
+}
+
+/*
+ * Format one oscillator wave cell (S087 stage D).
+ *
+ * What:       the 8-character name on the left and the s/l/w code on the
+ *             right. osc1 shows the stock name under wav, or the item name and
+ *             code under smp/slp/wtb. A modulator shows the stock name for
+ *             0..7 and the flat-list item for 8+ (s, then l, then w).
+ * Why:        S087 P0 §4.3/§12.4: one formatter for the edit line and the
+ *             automation display; the wav byte is read as it is.
+ * Inputs:     cell (instrument cell), value, nameDst[8], codeDst[3].
+ * Outputs:    nameDst and codeDst.
+ * Accessors:  the edit-line display, the automation display.
+ * Affiliates: instrumentManager_osc1Type(), sampleMemory_getDisplayName(),
+ *             sampleMemory_getWavetableName(), menu_formatUserShortName().
+ */
+static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
+                                char *nameDst, char *codeDst)
+{
+    const uint8_t samples = sampleMemory_getNumSamples();
+    const uint8_t tables = sampleMemory_getNumWavetables();
+
+    memset(nameDst, ' ', SAMPLE_DISPLAY_NAME_LEN);
+    memset(codeDst, ' ', 3u);
+    if (!cell || cell->kind != MENU_CELL_INSTRUMENT || !cell->descriptor) {
+        const uint8_t stock = (uint8_t)waveformNames[0][0];
+
+        if (value < stock)
+            memcpy(nameDst, waveformNames[value + 1u], 3u);
+        return;
+    }
+    if (strcmp(cell->descriptor->file_key, "osc1_wave") == 0) {
+        const uint8_t type = instrumentManager_osc1Type(cell->slot);
+
+        if (type == OSC_TYPE_WAV) {
+            const uint8_t stock = (uint8_t)waveformNames[0][0];
+            if (value < stock)
+                memcpy(nameDst, waveformNames[value + 1u], 3u);
+            return;
+        }
+        {
+            char code[3];
+            const char prefix = (type == OSC_TYPE_SMP) ? 's'
+                              : (type == OSC_TYPE_SLP) ? 'l' : 'w';
+
+            if (type == OSC_TYPE_WTB)
+                sampleMemory_getWavetableName(value, nameDst);
+            else
+                sampleMemory_getDisplayName(value, nameDst);
+            menu_formatUserShortName(prefix, value, code);
+            memcpy(codeDst, code, 3u);
+        }
+        return;
+    }
+    {
+        const uint8_t stock = (uint8_t)waveformNames[0][0];
+
+        if (value < stock) {
+            memcpy(nameDst, waveformNames[value + 1u], 3u);
+            return;
+        }
+        {
+            const uint8_t entry = (uint8_t)(value - stock);
+            char code[3];
+
+            if (entry < samples) {
+                sampleMemory_getDisplayName(entry, nameDst);
+                menu_formatUserShortName('s', entry, code);
+            } else if (entry < (uint8_t)(2u * samples)) {
+                const uint8_t index = (uint8_t)(entry - samples);
+                sampleMemory_getDisplayName(index, nameDst);
+                menu_formatUserShortName('l', index, code);
+            } else {
+                const uint8_t index = (uint8_t)(entry - 2u * samples);
+                if (index >= tables)
+                    return;
+                sampleMemory_getWavetableName(index, nameDst);
+                menu_formatUserShortName('w', index, code);
+            }
+            memcpy(codeDst, code, 3u);
+        }
+    }
 }
 
 static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *buf)
@@ -11500,9 +11681,14 @@ static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *bu
         if (curParmVal < (uint8_t)waveformNames[0][0]) {
             p = waveformNames[curParmVal+1]; break;
         } else {
-            menu_formatSampleShortName((uint8_t)(curParmVal - waveformNames[0][0]), buf);
+            menu_formatUserShortName('s',
+                (uint8_t)(curParmVal - waveformNames[0][0]), buf);
             return;
         }
+    case MENU_OSC_TYPE:
+        /* S087 B: the typ table. */
+        p = oscTypeNames[(curParmVal < OSC_TYPE_COUNT ? curParmVal : 0) + 1];
+        break;
     case MENU_SYNC_RATES:     p = syncRateNames[curParmVal+1];      break;
     case MENU_LFO_WAVES:      p = lfoWaveNames[curParmVal+1];       break;
     case MENU_RETRIGGER:      p = retriggerNames[curParmVal+1];     break;
@@ -11606,6 +11792,9 @@ _Static_assert(sizeof(mixFmNames) / sizeof(mixFmNames[0]) == 5u,
 /* S086 P2: the wav list (stock waves) ends where the user samples start. */
 _Static_assert((sizeof(waveformNames) / sizeof(waveformNames[0])) - 1u == OSC_SAMPLE_START,
                "waveformNames must list every waveform below OSC_SAMPLE_START");
+/* S087 B: the typ table and the OSC_TYPE_* list must stay in step. */
+_Static_assert((sizeof(oscTypeNames) / sizeof(oscTypeNames[0])) - 1u == OSC_TYPE_COUNT,
+               "oscTypeNames must list every OSC_TYPE");
 
 /*
  * Format one per-track run-mode value into a three-character field.
@@ -12959,6 +13148,9 @@ static uint8_t menu_automationValueMax(const ParamDescriptor *descriptor)
         case MENU_LFO_WAVES:  return (uint8_t)(lfoWaveNames[0][0] - 1u);
         case MENU_RETRIGGER:  return (uint8_t)(retriggerNames[0][0] - 1u);
         case MENU_SYNC_RATES: return (uint8_t)(syncRateNames[0][0] - 1u);
+        case MENU_OSC_TYPE:
+            /* S087 B: step automation of typ, one value per step. */
+            return (uint8_t)(OSC_TYPE_SELECTABLE - 1u);
         default: return 127u;
         }
     }
@@ -14099,14 +14291,12 @@ static void menu_repaintGeneric(void)
                 break;
             case DTYPE_MENU: {
                 uint8_t menuId = (uint8_t)(menu_cellDtype(&cell) >> 4);
-                if (menuId == MENU_WAVEFORM && value >= (uint8_t)waveformNames[0][0]) {
-                    char sampleName[SAMPLE_DISPLAY_NAME_LEN + 1u];
-                    uint8_t sampleIndex =
-                        (uint8_t)(value - (uint8_t)waveformNames[0][0]);
-
-                    sampleMemory_getDisplayName(sampleIndex, sampleName);
-                    memcpy(&editDisplayBuffer[1][0], sampleName,
-                           SAMPLE_DISPLAY_NAME_LEN);
+                if (menuId == MENU_WAVEFORM) {
+                    /* S087 D: name + s/l/w code from the cell's type/list. */
+                    menu_formatWaveCell(&cell, (uint8_t)value,
+                                        &editDisplayBuffer[1][0],
+                                        &editDisplayBuffer[1][13]);
+                    break;
                 }
                 getMenuItemNameForValue(menuId, value, &editDisplayBuffer[1][13]);
                 break; }
@@ -18941,7 +19131,6 @@ void menu_setActiveVoice(uint8_t v)
 }
 uint8_t menu_areMuteLedsShown(void){ return menu_muteModeActive; }
 uint8_t menu_getSubPage(void)      { return (uint8_t)((menuIndex & MASK_PAGE) >> PAGE_SHIFT); }
-void    menu_setNumSamples(uint8_t n) { menu_numSamples = n; }
 void menu_setVoiceModeShowMorph(uint8_t onOff)
 {
     /*

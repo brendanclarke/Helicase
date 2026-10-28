@@ -240,4 +240,17 @@ uint32_t modNode_getWaveInterpGeneration(void);
  * packing rules.
  */
 uint8_t modNode_getMaxWaveformIndex(void);
+/*
+ * Claim one of the two interpolation slots for this block (S087 stage E).
+ *
+ * What:       returns 1 and stamps osc->interpStamp with this block's
+ *             generation when a slot is granted; 0 otherwise. The global
+ *             toggle off grants nothing; a holder keeps a reserved slot; a
+ *             newcomer needs a free slot.
+ * Why:        wavetable frame blending takes a slot and steps without one.
+ * Inputs:     osc.  Outputs: grant flag, interpStamp, the counters.
+ * Accessors:  osc_renderTyped*() (wtb branch).
+ * Affiliates: modNode_resetTargets(); OSC_WAVE_INTERP_MAX_ACTIVE.
+ */
+uint8_t modNode_interpClaim(void* osc);
 #endif /* VELOCITYMODULATION_H_ */

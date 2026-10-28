@@ -64,6 +64,63 @@
 #define OSC_STOCK_LAST		SW3
 #define OSC_SAMPLE_START 	0x08
 
+/*
+ * Oscillator type: the typ row (S087 stage B).
+ *
+ * What:       OSC_TYPE_WAV 0 (stock waves, today's oscillator), OSC_TYPE_SMP 1
+ *             (one-shot sample), OSC_TYPE_SLP 2 (looped sample), OSC_TYPE_WTB 3
+ *             (wavetable), OSC_TYPE_COUNT 4. OSC_TYPE_MODLIST 4 is not a typ
+ *             value: it marks a modulator (Drum osc2, Cymbal/HiHat osc2/osc3),
+ *             whose wav list is the stock waves followed by the user entries
+ *             s01.., l01.., w01.. (S087 P0 §12.4). OSC_TYPE_SELECTABLE is the
+ *             number of typ values the menu and the writer accept in this
+ *             build: 1 after stage B, 3 after stage D, 4 after stage E.
+ * Why:        S087 P0 §4, A21/A22: osc1 selects its type with typ; the
+ *             modulators have no typ row and select user content through
+ *             their wav list. One byte in OscInfo carries both meanings so
+ *             osc_setFreq() and the renderers can tell them apart.
+ * Inputs:     the osc1_type descriptor (osc1) and the engine init functions
+ *             (modulators).
+ * Outputs:    OscInfo.oscType.
+ * Accessors:  osc_setType(), osc_isTyped(), osc_setFreq(), the engines'
+ *             typed branches, menu.c (count), InstrumentManager.c (writer).
+ * Affiliates: MENU_OSC_TYPE and oscTypeNames (MenuText.h); the osc1_type rows
+ *             in the four *Parameters.c files.
+ */
+#define OSC_TYPE_WAV         0u
+#define OSC_TYPE_SMP         1u
+#define OSC_TYPE_SLP         2u
+#define OSC_TYPE_WTB         3u
+#define OSC_TYPE_COUNT       4u
+#define OSC_TYPE_MODLIST     4u
+#define OSC_TYPE_SELECTABLE  4u   /* S087 E: wav smp slp wtb */
+_Static_assert(OSC_TYPE_SELECTABLE >= 1u && OSC_TYPE_SELECTABLE <= OSC_TYPE_COUNT,
+               "OSC_TYPE_SELECTABLE out of range");
+
+/*
+ * Sample reader constants (S087 stage D).
+ *
+ * What:       OSC_SAMPLE_PHASE_SHIFT 12 (Q19.12 phase: point index << 12 +
+ *             fraction); OSC_BIND_NONE/SMP/SLP/WTB8/WTB16; OSC_POS_SAMPLE_SPEED_CAP
+ *             4 (D5: a pos glide moves the playhead at most 4x the playback
+ *             speed, at least one step per block); OSC_FM_SAMPLE_SHIFT 9 (the
+ *             FM read offset: the same fraction of a 1,024-point nominal period
+ *             as the table loops' << 19 on a 2^32 cycle and v1's << 14 on << 17).
+ * Why:        S087 P0 D1, D5, A17 addendum (amt means the same on every
+ *             type). SAMPLE_MAX_FRAMES (SampleMemory.h) keeps every phase
+ *             below 2^31, so the readers use signed compares.
+ * Accessors:  the S087 readers, osc_userBind(), the typed pos helpers.
+ * Affiliates: SampleMemory.h SAMPLE_MAX_FRAMES; test_osc_sample.c.
+ */
+#define OSC_SAMPLE_PHASE_SHIFT    12u
+#define OSC_BIND_NONE             0u
+#define OSC_BIND_SMP              1u
+#define OSC_BIND_SLP              2u
+#define OSC_BIND_WTB8             3u
+#define OSC_BIND_WTB16            4u
+#define OSC_POS_SAMPLE_SPEED_CAP  4
+#define OSC_FM_SAMPLE_SHIFT       9u
+
 #define phaseShift 1000
 
 //-----------------------------------------------------------
@@ -125,6 +182,35 @@ typedef struct OscStruct
 	 * Affiliates: the four voice render functions; 086_SESSION_HANDOFF_LOG.md §9.
 	 */
 	int8_t		positionBendStep;
+	/*
+	 * Oscillator type (S087 stage B).
+	 *
+	 * What:       OSC_TYPE_WAV/SMP/SLP/WTB for osc1 (the typ row);
+	 *             OSC_TYPE_MODLIST for a modulator (set once by the engine
+	 *             init). 0 after a runtime-slot reset, i.e. wav.
+	 * Why:        the renderers, osc_setFreq() and the pos helpers need the
+	 *             type every block; the byte sits in the padding after
+	 *             positionBendStep (offset 34), so OscInfo stays 72 bytes.
+	 * Inputs:     osc_setType() (osc1, through IM_SPECIAL_OSC_TYPE); the
+	 *             engine init functions (modulators).
+	 * Outputs:    read by osc_isTyped(), osc_setFreq(), the typed renderers.
+	 * Accessors:  osc_setType() is the only writer for osc1.
+	 * Affiliates: OSC_TYPE_* above; S087 P0 §12.1 A22.
+	 */
+	uint8_t		oscType;
+	/*
+	 * Interpolation slot stamp (S087 stage E).
+	 *
+	 * What:       low 8 bits of the block generation in which this oscillator
+	 *             last held one of the two interpolation slots; 0 = none.
+	 * Why:        sticky claims (S087 P0 A8): a holder keeps its slot from
+	 *             block to block, so it does not flip between blending and
+	 *             stepping. Byte 35 is padding before waveInterpFrac.
+	 * Inputs:     modNode_interpClaim(); osc_setType() clears it.
+	 * Outputs:    read by modNode_interpClaim().
+	 * Affiliates: modNode_resetTargets(); OSC_WAVE_INTERP_MAX_ACTIVE.
+	 */
+	uint8_t		interpStamp;
 	float		waveInterpFrac;			/* blend amount [0..1] between waveform and next */
 	uint32_t	waveInterpGeneration;	/* audio-block generation stamp */
 	float		freqCacheValue;
@@ -167,6 +253,10 @@ _Static_assert(offsetof(OscInfo, positionApplied) + 1u == offsetof(OscInfo, pitc
                "OscInfo.positionApplied must end the padding before pitchMod");
 _Static_assert(offsetof(OscInfo, positionBendStep) == offsetof(OscInfo, waveInterpNext) + 1u,
                "OscInfo.positionBendStep must follow waveInterpNext (padding)");
+_Static_assert(offsetof(OscInfo, oscType) == offsetof(OscInfo, positionBendStep) + 1u,
+               "OscInfo.oscType must follow positionBendStep (padding, S087 B)");
+_Static_assert(offsetof(OscInfo, interpStamp) == offsetof(OscInfo, oscType) + 1u,
+               "OscInfo.interpStamp must follow oscType (padding, S087 E)");
 _Static_assert(offsetof(OscInfo, waveInterpFrac) == offsetof(OscInfo, waveInterpNext) + 4u,
                "OscInfo.positionBendStep must not move waveInterpFrac");
 #if defined(__arm__)
@@ -483,6 +573,12 @@ _Static_assert(OSC_POS_BEND_CAP >= 1 && OSC_POS_BEND_CAP <= 64,
  * Accessors:  osc_positionTrigger(), osc_positionBendApply().
  * Affiliates: osc_isTableWave(), 086_SESSION_HANDOFF_LOG.md §5.
  */
+/* S087 D: forward declarations (the definitions follow the pos helpers). */
+static inline uint8_t osc_isTyped(const OscInfo* osc);
+void osc_typedPositionApply(OscInfo* osc, uint8_t bend);
+void osc_typedPositionRestore(OscInfo* osc);
+uint32_t osc_typedTriggerPhase(OscInfo* osc);
+
 static inline uint8_t osc_positionIsPhase(const uint8_t waveform)
 {
 	return (uint8_t)(waveform == SINE || waveform == CRASH ||
@@ -505,6 +601,9 @@ static inline uint8_t osc_positionIsPhase(const uint8_t waveform)
  */
 static inline uint32_t osc_positionTrigger(OscInfo* osc)
 {
+	/* S087 D: typed start: osc_typedTriggerPhase() (out of line). */
+	if (osc_isTyped(osc))
+		return 0u;
 	const uint32_t pos = (uint32_t)(osc->position & 127u);
 
 	osc->positionApplied = (uint8_t)pos;
@@ -544,6 +643,11 @@ static inline uint32_t osc_positionTrigger(OscInfo* osc)
  */
 static inline void osc_positionBendApply(OscInfo* osc, const uint8_t bend)
 {
+	/* S087 D: smp/slp/wtb take the out-of-line rules (D3-D5, D8). */
+	if (osc_isTyped(osc)) {
+		osc_typedPositionApply(osc, bend);
+		return;
+	}
 	const uint32_t u = ((uint32_t)(osc->position & 127u) -
 	                    (uint32_t)osc->positionApplied + 64u) & 127u;
 	int32_t d = (int32_t)u - 64;
@@ -576,9 +680,120 @@ static inline void osc_positionBendApply(OscInfo* osc, const uint8_t bend)
  */
 static inline void osc_positionBendRestore(OscInfo* osc)
 {
+	/* S087 D: smp/slp/wtb restore their own step (D8). */
+	if (osc_isTyped(osc)) {
+		osc_typedPositionRestore(osc);
+		return;
+	}
 	osc->phaseInc -= (uint32_t)((int32_t)osc->positionBendStep *
 	                            (int32_t)OSC_POS_BEND_PER_STEP);
 	osc->positionBendStep = 0;
 }
+
+/*
+ * Whether osc1 plays a user type (S087 stage B).
+ *
+ * What:       1 for OSC_TYPE_SMP, OSC_TYPE_SLP and OSC_TYPE_WTB; 0 for wav and
+ *             for modulators (OSC_TYPE_MODLIST).
+ * Why:        the engines branch on it once per block to call the typed
+ *             renderers instead of the existing dispatchers (S087 P0 A2), and
+ *             the pos helpers use it to choose the rule (D3).
+ * Inputs:     osc.  Outputs: 0 or 1.
+ * Accessors:  the four engine renders and triggers; osc_positionBendApply()/
+ *             Restore(); osc_setFreq().
+ * Affiliates: OSC_TYPE_*; osc_setType().
+ */
+static inline uint8_t osc_isTyped(const OscInfo* osc)
+{
+	return (uint8_t)(osc->oscType >= OSC_TYPE_SMP &&
+	                 osc->oscType <= OSC_TYPE_WTB);
+}
+
+/*
+ * Change osc1's type (S087 stage B; extended in D-8 and E-6).
+ *
+ * What:       clamps `type` to OSC_TYPE_SELECTABLE - 1; when it differs from
+ *             osc->oscType:
+ *             - stores it;
+ *             - clamps osc->waveform to an entry that exists for the new type
+ *               (wav: OSC_STOCK_LAST; smp/slp: sample count - 1; wtb: table
+ *               count - 1; none installed: 0) - the value is otherwise used
+ *               as it is: nothing is remembered or restored (S087 P0 r8);
+ *             - re-anchors pos: positionApplied = position (D7);
+ *             - re-anchors the phase for the new phase units: into smp/slp
+ *               the pos start point; from smp/slp into wav/wtb the pos
+ *               trigger phase; between wav and wtb the phase is kept
+ *               (S087 P0 §12.5);
+ *             - invalidates the frequency cache and the bind
+ *               (freqCacheValid = 0; bind generation 0, stage D);
+ *             - releases a held interpolation slot (interpStamp = 0,
+ *               stage E).
+ *             An unchanged type does nothing, so repeated writes (apply,
+ *             restore, automation) are idempotent.
+ * Why:        the single place where a type change happens, used by the menu,
+ *             Kit apply, the trigger restore and step automation alike.
+ * Inputs:     osc (osc1 of a runtime slot), type 0..255.
+ * Outputs:    oscType, waveform, positionApplied, phase, caches.
+ * Accessors:  instrumentManager_writeSpecialRuntime() (IM_SPECIAL_OSC_TYPE).
+ * Affiliates: osc_isTyped(); osc_userCount() (stage D); S087 P0 §12.5.
+ */
+void osc_setType(OscInfo* osc, uint8_t type);
+
+/*
+ * Bind the oscillator's catalogue item for this block (S087 stage D).
+ *
+ * What:       resolves (kind, index) from oscType and waveform (or the
+ *             modulator flat list), clamps to an entry that exists, and on a
+ *             kind/index/generation change re-reads the entry and re-anchors
+ *             the phase. Every block it sets phaseInc from the sample law.
+ * Why:        S087 P0 §6.3, D7, A23/A24: one bind serves osc1 and the
+ *             modulators; a reinstall can never leave a pointer outside flash.
+ * Inputs:     osc, the catalogue.  Outputs: bind fields, phaseInc.
+ * Accessors:  osc_setFreq().
+ * Affiliates: SampleMemory.h; osc_userCount()/osc_userListCount().
+ */
+void osc_userBind(OscInfo* osc);
+
+/*
+ * Number of user entries for a type (S087 stage D).
+ *
+ * What:       wav -> 8 stock entries; smp/slp -> sample count; wtb -> table
+ *             count (stage E); 0 when nothing installed.
+ * Why:        the type writer, the bind and the menu/InstrumentManager ranges
+ *             must agree.
+ * Inputs:     type.  Outputs: count.
+ * Accessors:  osc_setType(), osc_userBind(), InstrumentManager.
+ * Affiliates: osc_userListCount(), SampleMemory.h.
+ */
+uint8_t osc_userCount(uint8_t type);
+
+/*
+ * Length of a modulator's flat wav list (S087 stage D).
+ *
+ * What:       min(8 + 2 x samples + tables, 128): stock waves, then s01.., then
+ *             l01.., then w01.. (stage E).
+ * Why:        S087 P0 §12.4/A24: the modulator list order and cut-off.
+ * Inputs:     none.  Outputs: count.
+ * Accessors:  osc_userBind(), InstrumentManager.
+ * Affiliates: osc_userCount().
+ */
+uint8_t osc_userListCount(void);
+
+/* S087 D: typed render entries (one per role). */
+void osc_renderTyped(OscInfo* osc, int16_t* buf, uint8_t size, float gain);
+void osc_renderTypedFm(OscInfo* osc, const int16_t* mod, int16_t* buf,
+                       uint8_t size, float gain);
+void osc_renderTypedSync(OscInfo* osc, const uint32_t* over,
+                         uint32_t clockInc, int32_t depthQ30,
+                         int16_t* buf, uint8_t size);
+void osc_renderTypedRing(OscInfo* osc, const int16_t* modBuf, int16_t* buf,
+                         uint8_t size, int32_t depthQ15,
+                         int32_t depthStepQ15);
+void osc_renderUserList(OscInfo* osc, int16_t* buf, uint8_t size, float gain);
+
+/* S087 D: sync-master rules for a modulator list entry. */
+uint8_t osc_syncMasterIsLoop(const OscInfo* master);
+uint32_t osc_buildLoopSyncList(OscInfo* master, uint32_t pos,
+                               uint32_t* over, uint8_t size);
 
 #endif /* OSCILLATOR_H_ */

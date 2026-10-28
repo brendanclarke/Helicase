@@ -34,6 +34,9 @@ def expected(t, key):
     if osc:
         if key == 'noise_freq':
             return {'IM_SPECIAL_NOISE_FREQ', osc}
+        # S087 B: osc1_type has its own writer (osc_setType()).
+        if key == 'osc1_type':
+            return {'IM_SPECIAL_OSC_TYPE', osc}
         if 'pitch_coarse' in key:
             return {'IM_SPECIAL_PITCH_COARSE', osc}
         if 'pitch_fine' in key:

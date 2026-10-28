@@ -117,6 +117,18 @@ void Drum_initVoice(DrumVoice *voice, uint8_t seed_index)
 	voice->modOsc.midiFreq = 70<<8;
 	voice->modOsc.pitchMod = 1.0f;
 	voice->modOsc.modNodeValue = 1;
+	/*
+	 * Modulator role (S087 stage B, A22).
+	 *
+	 * What:       marks the FM-page oscillator as OSC_TYPE_MODLIST: its wav
+	 *             list is the stock waves followed by the user entries (S087
+	 *             P0 §12.4); it has no typ or pos row.
+	 * Why:        osc_setFreq() and the dispatcher's user branch read the mark
+	 *             to bind a list entry; a runtime-slot reset (memset + init)
+	 *             restores it.
+	 * Affiliates: OSC_TYPE_MODLIST; osc_userListBind() (stage D).
+	 */
+	voice->modOsc.oscType = OSC_TYPE_MODLIST;
 
 	voice->volumeMod = 1;
 
@@ -204,6 +216,19 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 			setOnePoleCoef(&voice->ampFilter,ampSmoothValue);
 #endif
 		}
+		/*
+		 * Typed osc1 start (S087 stage D).
+		 *
+		 * What:       a typed osc1 starts at osc_typedTriggerPhase(): the pos
+		 *             start point (D1), no transient offset; wav keeps the
+		 *             chain below unchanged.
+		 * Why:        the chain below tests waveform, which is a sample index
+		 *             under smp/slp.
+		 * Affiliates: osc_typedTriggerPhase(); D-6.
+		 */
+		if (osc_isTyped(&voice->osc))
+			voice->osc.phase = osc_typedTriggerPhase(&voice->osc);
+		else {
 		if(voice->osc.waveform == SINE)
 			voice->osc.phase = 1024 + ( (0x3ff<<20) - 1024)*offset;//voice->osc.startPhase ;
 		else if(osc_isTableWave(voice->osc.waveform))
@@ -233,6 +258,7 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 		 *             in Drum_calcVoiceSyncBlock(); the osc1_position row.
 		 */
 		voice->osc.phase += osc_positionTrigger(&voice->osc);
+		}
 
 	}
 
@@ -458,7 +484,11 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 		//calc next mod osc sampleBlock
 		calcNextOscSampleBlock(&voice->modOsc,modBuf,size,voice->fmModAmount);
 		//calc main osc buffer
-		calcNextOscSampleBlock(&voice->osc,buf,size, (1.f-voice->fmModAmount));
+		/* S087 D (A2): a typed osc1 renders through the S087 renderers. */
+		if (osc_isTyped(&voice->osc))
+			osc_renderTyped(&voice->osc, buf, size, 1.f - voice->fmModAmount);
+		else
+			calcNextOscSampleBlock(&voice->osc,buf,size, (1.f-voice->fmModAmount));
 		//add mod buffer to main osc buffer
 		bufferTool_addBuffersSaturating(buf,modBuf,size);
 		break;
@@ -466,14 +496,34 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	case DRUM_MOD_SNC:
 	{
 		uint32_t syncOver[OUTPUT_DMA_SIZE];
-		const uint32_t clockInc = osc_syncClockInc(&voice->modOsc);
+		const uint8_t loopMaster = osc_syncMasterIsLoop(&voice->modOsc);
+		const uint32_t clockInc = loopMaster
+			? voice->modOsc.phaseInc : osc_syncClockInc(&voice->modOsc);
 
-		voice->syncClock = osc_buildSyncList(voice->syncClock, clockInc,
-		                                     syncOver, size);
+		/*
+		 * snc master builder by kind (S087 stage D, A12).
+		 *
+		 * What:       an l-entry master resets the slave each time its loop
+		 *             wraps (osc_buildLoopSyncList()); every other master uses
+		 *             the periodic clock as before (s entries act as noise).
+		 * Affiliates: osc_buildLoopSyncList(), osc_syncClockInc().
+		 */
+		if (loopMaster)
+			voice->syncClock = osc_buildLoopSyncList(&voice->modOsc,
+			                                         voice->syncClock,
+			                                         syncOver, size);
+		else
+			voice->syncClock = osc_buildSyncList(voice->syncClock, clockInc,
+			                                     syncOver, size);
 		/* sync depth = amt^2 x mod envelope (Drum_modEnvDepth()) */
-		calcNextOscSampleSyncBlock(&voice->osc, syncOver, clockInc,
-		                           osc_syncDepthQ30(Drum_modEnvDepth(voice)),
-		                           buf, size);
+		if (osc_isTyped(&voice->osc))
+			osc_renderTypedSync(&voice->osc, syncOver, clockInc,
+			                    osc_syncDepthQ30(Drum_modEnvDepth(voice)),
+			                    buf, size);
+		else
+			calcNextOscSampleSyncBlock(&voice->osc, syncOver, clockInc,
+			                           osc_syncDepthQ30(Drum_modEnvDepth(voice)),
+			                           buf, size);
 		break;
 	}
 
@@ -498,8 +548,11 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 
 		voice->ringSnap = 0u;
 		calcNextOscSampleBlock(&voice->modOsc,modBuf,size,1.0f);
-		calcNextOscSampleRingBlock(&voice->osc, modBuf, buf, size,
-		                           start, step);
+		if (osc_isTyped(&voice->osc))
+			osc_renderTypedRing(&voice->osc, modBuf, buf, size, start, step);
+		else
+			calcNextOscSampleRingBlock(&voice->osc, modBuf, buf, size,
+			                           start, step);
 		voice->ringDepthQ15 = start + step * (int32_t)size;
 		break;
 	}
@@ -508,7 +561,10 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	default:
 		//calc next mod osc sampleBlock
 		calcNextOscSampleBlock(&voice->modOsc,modBuf,size,voice->fmModAmount);
-		calcNextOscSampleFmBlock(&voice->osc,modBuf,buf,size,1.0f);
+		if (osc_isTyped(&voice->osc))
+			osc_renderTypedFm(&voice->osc, modBuf, buf, size, 1.0f);
+		else
+			calcNextOscSampleFmBlock(&voice->osc,modBuf,buf,size,1.0f);
 		break;
 	}
 

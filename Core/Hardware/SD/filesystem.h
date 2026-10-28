@@ -1368,8 +1368,24 @@ bool filesystem_requestLoadInstrumentMorphTemp(uint8_t destination_scene,
                                                uint8_t destination_slot,
                                                instrument_type_t type,
                                                fs_completion_cb_t cb);
-uint8_t filesystem_installSamplesBlocking(void);
-uint8_t filesystem_installLoopsBlocking(void);
+/*
+ * Install samples/ and wavetables/ into catalogue v2 (S087 stage C).
+ *
+ * What:       one blocking pass, audio suspended by the caller: erase the
+ *             sample sectors, walk samples/ (depth <= 3: files in natural
+ *             order, then subfolders) into sample items, then walk wavetables/
+ *             the same way where every folder holding .wav files is one table
+ *             (frames in natural order), and commit the header last.
+ * Why:        S087 P0 §5.2: natural order, folders, wavetables as folders; one
+ *             unreadable file skips its item only; /loops is retired (every
+ *             sample can loop, A6).
+ * Inputs:     the card.  Outputs: catalogue v2; 1 on success.
+ * Accessors:  menu_loadSamplesModal().
+ * Affiliates: SampleInstall.h, storage_naturalCompare(),
+ *             filesystem_parseWav(), filesystem_blockOpenDirLfn().
+ * RAM:        per-depth last/best names and counters (R-C3).
+ */
+uint8_t filesystem_installUserContentBlocking(void);
 
 /* Return the most recent eight-character name produced by a load-name request.
  *

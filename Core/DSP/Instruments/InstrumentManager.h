@@ -147,6 +147,12 @@ typedef enum {
      * instead of the raw TYPE_UINT32 store that made 127 effectively zero.
      */
     IM_SPECIAL_LFO_OFFSET,
+    /*
+     * S087 B: osc1_type writer. Calls osc_setType() on the tagged oscillator,
+     * then refreshes the wave rows' modulation domains for the slot
+     * (instrumentManager_waveDomainChanged()).
+     */
+    IM_SPECIAL_OSC_TYPE,
     IM_SPECIAL_WRITER_COUNT
 } instrument_special_writer_t;
 
@@ -181,6 +187,25 @@ typedef struct {
 #define INSTRUMENT_PARAM_FLAG_MORPHABLE       0x01u
 #define INSTRUMENT_PARAM_FLAG_MODULATABLE     0x02u
 #define INSTRUMENT_PARAM_FLAG_AUTOMATABLE     0x04u
+/*
+ * Selector descriptor flag (S087 stage B).
+ *
+ * What:       0x08 marks a row that chooses what an oscillator is (osc1_type)
+ *             rather than tuning it. Such a row is never morphable (its
+ *             in-between values are other choices), is stored single-ended
+ *             (Normal image only), is applied before the Morph image on every
+ *             voice apply, and may be step-automated as one value per step.
+ * Why:        S087 P0 §12.5: the automation gate admitted only morphable rows,
+ *             and Morph interpolates every morphable row linearly; a separate
+ *             flag lets typ be automated without being morphed.
+ * Inputs:     the ROW_SELECT_SPECIAL rows.  Outputs: flag bit.
+ * Accessors:  instrumentManager_targetValid(), preset_setSupplementalParameter-
+ *             Internal(), preset_applyKitVoiceSelectors(),
+ *             preset_applyKitVoiceSupplementalInternal().
+ * Affiliates: INSTRUMENT_PARAM_FLAG_MORPHABLE/AUTOMATABLE; seq_rampDtypeOk()
+ *             (ramps are excluded by dtype, not by this flag).
+ */
+#define INSTRUMENT_PARAM_FLAG_SELECTOR        0x08u
 
 #define INSTRUMENT_FLAG_BASIC                 0x01u
 #define INSTRUMENT_FLAG_ADVANCED              0x02u
@@ -622,6 +647,57 @@ void instrumentManager_dispatchRuntimeLfos(void);
 void instrumentManager_recalcRuntimeLfoSync(void);
 void instrumentManager_retriggerRuntimeLfos(uint8_t trigger_track);
 void instrumentManager_recalcSlotFilter(uint8_t slot);
+
+/*
+ * Refresh the modulation domains of a slot's wave rows (S087 stage B).
+ *
+ * What:       for every active LFO adapter on `slot` whose descriptor has
+ *             INSTRUMENT_MOD_DOMAIN_DYNAMIC_MAX, recompute adapter->domain
+ *             with instrumentManager_descriptorModDomain(slot, ...) and clamp
+ *             base_value into it; for a direct ModulationNode target on the
+ *             same id, call modNode_directOriginalValueChanged() with the new
+ *             range.
+ * Why:        a typ change (or an install, C-31) changes how many entries the
+ *             wave row has; an LFO set up for 8 stock waves must not keep
+ *             sweeping 0..7 over a 3-sample list, nor stop short of a
+ *             100-sample list.
+ * Inputs:     slot 0..INSTRUMENT_SLOT_COUNT-1.  Outputs: refreshed adapter
+ *             domains and ranges.
+ * Accessors:  IM_SPECIAL_OSC_TYPE writer (B-8); the post-install refresh
+ *             (C-31).
+ * Affiliates: instrumentManager_updateLfoAdapters(),
+ *             instrumentManager_resolveModulationTarget().
+ */
+void instrumentManager_waveDomainChanged(uint8_t slot);
+
+/*
+ * Number of legal values of an oscillator wave row (S087 stage B).
+ *
+ * What:       instrumentManager_waveDomainMax(slot, descriptor) + 1, i.e. the
+ *             menu's entry count for osc1_wave under its current type or for a
+ *             modulator's flat list.
+ * Why:        menu_clampCellValue() and the typ-switch clamp need the count
+ *             without owning the descriptor-domain rule.
+ * Inputs:     slot (INSTRUMENT_SLOT_COUNT = unknown), descriptor.
+ * Outputs:    count, at least 1.
+ * Accessors:  menu.c (cell clamp, typ-switch clamp).
+ * Affiliates: instrumentManager_waveDomainMax().
+ */
+uint8_t instrumentManager_waveCellCount(uint8_t slot,
+                                        const ParamDescriptor *descriptor);
+
+/*
+ * osc1's current type for a slot (S087 stage D).
+ *
+ * What:       returns the runtime osc1 OSC_TYPE_* value, or OSC_TYPE_WAV for
+ *             an invalid slot.
+ * Why:        Menu formats osc1_wave by the type in force without owning the
+ *             tagged runtime mapping.
+ * Inputs:     slot.  Outputs: type.
+ * Accessors:  menu_formatWaveCell().
+ * Affiliates: osc_setType(), OSC_TYPE_*.
+ */
+uint8_t instrumentManager_osc1Type(uint8_t slot);
 void instrumentManager_calcSlotAsync(uint8_t slot);
 void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
                                          uint8_t size);

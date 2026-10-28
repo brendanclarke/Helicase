@@ -2448,3 +2448,110 @@ void storage_instrumentCopyMainToMorphFallback(storage_instrument_type_t type,
         }
     }
 }
+
+/*
+ * Natural-order name compare (S087 stage C; see the header).
+ *
+ * What:       case-insensitive text compare with digit runs compared as
+ *             numbers.
+ * Why:        S087 P0 §5.2 natural order for items, frames and folders.
+ * Inputs:     two NUL-terminated names.  Outputs: <0, 0, >0.
+ * Accessors:  the install walker; test_natural_order.c.
+ * Affiliates: tools/sampleoptimize.py natural_key().
+ */
+static char storage_naturalLower(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+}
+
+int8_t storage_naturalCompare(const char *a, const char *b)
+{
+    while (*a != '\0' && *b != '\0') {
+        if (*a >= '0' && *a <= '9' && *b >= '0' && *b <= '9') {
+            const char *ad = a;
+            const char *bd = b;
+            uint32_t av = 0u;
+            uint32_t bv = 0u;
+            uint8_t alen = 0u;
+            uint8_t blen = 0u;
+
+            while (*ad == '0')
+                ad++;
+            while (*bd == '0')
+                bd++;
+            while (ad[alen] >= '0' && ad[alen] <= '9')
+                alen++;
+            while (bd[blen] >= '0' && bd[blen] <= '9')
+                blen++;
+            if (alen != blen)
+                return (alen < blen) ? -1 : 1;
+            for (uint8_t i = 0u; i < alen; i++) {
+                av = av * 10u + (uint32_t)(ad[i] - '0');
+                bv = bv * 10u + (uint32_t)(bd[i] - '0');
+            }
+            if (av != bv)
+                return (av < bv) ? -1 : 1;
+            a = ad + alen;
+            b = bd + blen;
+            continue;
+        }
+        {
+            char ca = storage_naturalLower(*a);
+            char cb = storage_naturalLower(*b);
+
+            if (ca != cb)
+                return (ca < cb) ? -1 : 1;
+        }
+        a++;
+        b++;
+    }
+    if (*a != '\0')
+        return 1;
+    if (*b != '\0')
+        return -1;
+    return 0;
+}
+
+/*
+ * Catalogue display name from a long filename (S087 stage C; see the header).
+ *
+ * What:       optional extension strip, numeric-prefix strip, 8-character
+ *             copy, space padding.
+ * Why:        S087 P0 §5.2 names; the 8-character catalogue field is fixed.
+ * Inputs:     lfn, strip_ext.  Outputs: dst[8].
+ * Accessors:  the install walker; test_natural_order.c.
+ * Affiliates: storage_naturalCompare().
+ */
+void storage_displayNameFromLfn(char dst[8u], const char *lfn, uint8_t strip_ext)
+{
+    uint8_t len = 0u;
+    uint8_t start = 0u;
+    uint8_t i;
+
+    if (!dst)
+        return;
+    if (lfn) {
+        while (lfn[len] != '\0')
+            len++;
+        if (strip_ext) {
+            uint8_t dot = len;
+
+            while (dot > 0u && lfn[dot - 1u] != '.')
+                dot--;
+            if (dot > 0u && dot < len)
+                len = (uint8_t)(dot - 1u);
+        }
+        while (start < len && lfn[start] >= '0' && lfn[start] <= '9')
+            start++;
+        if (start > 0u && start < len &&
+            (lfn[start] == '_' || lfn[start] == '-' || lfn[start] == ' '))
+            start++;
+        else
+            start = 0u;
+    }
+    for (i = 0u; i < 8u; i++) {
+        uint8_t at = (uint8_t)(start + i);
+
+        dst[i] = (lfn && at < len) ? lfn[at] : ' ';
+    }
+}

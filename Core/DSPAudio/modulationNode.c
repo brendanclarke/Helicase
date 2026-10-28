@@ -56,16 +56,17 @@
 // #include "sequencer.h"
 
 INCCMZ ModulationNode velocityModulators[6];
-/* Oscillator waveform interpolation budget for one 32-frame DSP block.
+/* Oscillator waveform interpolation slots for one 32-frame DSP block.
 **
-** modNode_resetTargets() starts a new generation at the top of each mixer
-** block. The first OSC_WAVE_INTERP_MAX_ACTIVE eligible oscillator waveform
-** targets receive a fractional base/next pair; later eligible targets fall
-** back to integer waveform IDs for that block. This bounds CPU cost while
-** preserving the headline user-sample interpolation path. */
+** S087 D: the two slots now serve wavetable frame blending (stage E) and, from
+** S088, the run mode; a wav LFO steps. modNode_resetTargets() still starts a
+** new generation per block. */
 static INCCMZ uint8_t modNode_waveInterpEnabled = 0;
 static INCCMZ uint32_t modNode_waveInterpGeneration = 1u;
 static INCCMZ uint8_t modNode_waveInterpActiveCount = 0u;
+/* S087 E: sticky slot reservations (A8). */
+static INCCMZ uint8_t modNode_interpReserved = 0u;
+static INCCMZ uint32_t modNode_interpLastGen = 0u;
 
 static OscInfo* modNode_getWaveTargetOsc(uint16_t param)
 {
@@ -81,6 +82,41 @@ uint8_t modNode_getMaxWaveformIndex(void)
 		return CRASH;
 	}
 	return (uint8_t)(maxWave - 1u);
+}
+
+/*
+ * Claim one of the two interpolation slots for this block (S087 stage E; see
+ * the header).
+ *
+ * What:       a holder takes a reserved slot; a newcomer is granted only when
+ *             grants plus unclaimed reservations leave room.
+ * Why:        sticky grants avoid block-rate flipping; S088's run mode shares
+ *             the same slots (ongoing crossfades are holders).
+ * Inputs:     osc.  Outputs: grant flag, interpStamp, counters.
+ * Accessors:  osc_renderTyped*() (wtb branch).
+ * Affiliates: modNode_resetTargets(); OSC_WAVE_INTERP_MAX_ACTIVE.
+ */
+uint8_t modNode_interpClaim(void* oscp)
+{
+	OscInfo* osc = (OscInfo*)oscp;
+
+	if (!osc || !modNode_waveInterpEnabled)
+		return 0u;
+	if (osc->interpStamp != 0u &&
+	    osc->interpStamp == (uint8_t)modNode_interpLastGen &&
+	    modNode_interpReserved != 0u) {
+		modNode_interpReserved--;
+		modNode_waveInterpActiveCount++;
+		osc->interpStamp = (uint8_t)modNode_waveInterpGeneration;
+		return 1u;
+	}
+	if ((uint16_t)modNode_waveInterpActiveCount + modNode_interpReserved <
+	    OSC_WAVE_INTERP_MAX_ACTIVE) {
+		modNode_waveInterpActiveCount++;
+		osc->interpStamp = (uint8_t)modNode_waveInterpGeneration;
+		return 1u;
+	}
+	return 0u;
 }
 
 static float modNode_clampFloat(float value, float min, float max)
@@ -435,6 +471,9 @@ void modNode_resetTargets()
 	modNode_waveInterpGeneration++;
 	if (modNode_waveInterpGeneration == 0u)
 		modNode_waveInterpGeneration = 1u;
+	/* S087 E: last block's grants are reserved for their holders. */
+	modNode_interpReserved = modNode_waveInterpActiveCount;
+	modNode_interpLastGen = modNode_waveInterpGeneration - 1u;
 	modNode_waveInterpActiveCount = 0u;
 	for(i=0;i<6;i++)
 		modNode_restoreTarget(&velocityModulators[i]);
@@ -764,37 +803,6 @@ void modNode_updateValuePolarity(ModulationNode* vm, float val, uint8_t polarity
 
 		if (modulated < 0.f) {
 			modulated = 0.f;
-		}
-
-		if (modNode_waveInterpEnabled) {
-			OscInfo *osc = (vm->destinationMode == MOD_NODE_DEST_DIRECT_PARAMETER)
-				? (OscInfo *)vm->waveInterpTarget
-				: modNode_getWaveTargetOsc(vm->destination);
-			if (osc && modNode_waveInterpActiveCount < OSC_WAVE_INTERP_MAX_ACTIVE) {
-				const uint8_t maxWave = modNode_getMaxWaveformIndex();
-					if (modulated > maxWave) {
-						modulated = maxWave;
-					}
-
-					uint8_t base = (uint8_t)modulated;
-					if (base > maxWave) {
-						base = maxWave;
-					}
-					float frac = modulated - (float)base;
-					uint8_t next = base;
-					if (base < maxWave) {
-						next = (uint8_t)(base + 1u);
-					} else {
-						frac = 0.f;
-					}
-
-					*dst = base;
-					osc->waveInterpNext = next;
-					osc->waveInterpFrac = frac;
-					osc->waveInterpGeneration = modNode_waveInterpGeneration;
-					modNode_waveInterpActiveCount++;
-					break;
-				}
 		}
 
 		*dst = (uint8_t)modulated;

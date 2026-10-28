@@ -100,6 +100,19 @@ void Cymbal_initVoice(CymbalVoice *voice)
 	voice->modOsc2.midiFreq = 70<<8;
 	voice->modOsc2.pitchMod = 1.0f;
 	voice->modOsc2.modNodeValue = 1;
+	/*
+	 * Modulator roles (S087 stage B, A22).
+	 *
+	 * What:       marks both Mod Osc oscillators as OSC_TYPE_MODLIST: their wav
+	 *             list is the stock waves followed by the user entries (S087
+	 *             P0 §12.4); they have no typ or pos row.
+	 * Why:        osc_setFreq() and the dispatcher's user branch read the mark
+	 *             to bind a list entry; a runtime-slot reset (memset + init)
+	 *             restores it.
+	 * Affiliates: OSC_TYPE_MODLIST; osc_userListBind() (stage D).
+	 */
+	voice->modOsc.oscType = OSC_TYPE_MODLIST;
+	voice->modOsc2.oscType = OSC_TYPE_MODLIST;
 
 	voice->osc.freq = 440;
 	voice->osc.waveform = 1;
@@ -150,6 +163,10 @@ void Cymbal_triggerVoice(CymbalVoice *voice, const uint8_t source_slot,
 	{
 		offset -= voice->transGen.volume;
 	}
+	/* S087 D: a typed osc1 starts at its pos start point. */
+	if (osc_isTyped(&voice->osc))
+		voice->osc.phase = osc_typedTriggerPhase(&voice->osc);
+	else {
 	if(voice->osc.waveform == SINE)
 		voice->osc.phase = (0x3ff<<20)*offset;
 	else if(osc_isTableWave(voice->osc.waveform))
@@ -178,6 +195,7 @@ void Cymbal_triggerVoice(CymbalVoice *voice, const uint8_t source_slot,
 	 *             in Cymbal_calcSyncBlockVoice(); the osc1_position row.
 	 */
 	voice->osc.phase += osc_positionTrigger(&voice->osc);
+	}
 
 	voice->modOsc.phase = 0;
 	voice->modOsc2.phase = 0;
@@ -290,7 +308,10 @@ void Cymbal_calcSyncBlockVoice(CymbalVoice *voice, int16_t* buf,
 	 *             Cymbal_triggerVoice() (osc_positionTrigger()).
 	 */
 	osc_positionBendApply(&voice->osc, 1u);
-	calcNextOscSampleFmBlock(&voice->osc,mod,buf,size,1.f) ;
+	if (osc_isTyped(&voice->osc))
+		osc_renderTypedFm(&voice->osc, mod, buf, size, 1.f);
+	else
+		calcNextOscSampleFmBlock(&voice->osc,mod,buf,size,1.f) ;
 	osc_positionBendRestore(&voice->osc);	/* S086 P3: exact restore */
 	SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);
 

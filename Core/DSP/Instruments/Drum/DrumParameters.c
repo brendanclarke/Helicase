@@ -87,6 +87,25 @@ const uint8_t drum_instrument_type_flags = DRUM_INSTRUMENT_TYPE_FLAGS;
     { key_, short_, long_, cat_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), FLAGS_IMAGE, mod_, BIND_SPECIAL(member_, type_, special_) }
 
 /*
+ * ROW_SELECT_SPECIAL: a selector row with a special writer (S087 stage B).
+ *
+ * What:       DTYPE_MENU with the menu id in the high nibble; flags
+ *             AUTOMATABLE | SELECTOR (not MORPHABLE, not MODULATABLE);
+ *             MOD_NONE; a BIND_SPECIAL runtime binding.
+ * Why:        osc1_type is chosen, not tuned: no Morph, no LFO or velocity,
+ *             one step-automation value per step (S087 P0 §12.5).
+ * Inputs:     key, category, long and short label, menu id, member, scalar
+ *             type, IM_SPECIAL_* tag.
+ * Outputs:    one ParamDescriptor initializer.
+ * Accessors:  the osc1_type row below.
+ * Affiliates: INSTRUMENT_PARAM_FLAG_SELECTOR; instrumentManager_targetValid().
+ */
+#define ROW_SELECT_SPECIAL(key_, cat_, long_, short_, menu_, member_, type_, special_) \
+    { key_, short_, long_, cat_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), \
+      (INSTRUMENT_PARAM_FLAG_AUTOMATABLE | INSTRUMENT_PARAM_FLAG_SELECTOR), \
+      MOD_NONE, BIND_SPECIAL(member_, type_, special_) }
+
+/*
  * ROW_NOBIND is for descriptor-owned cells that do not write a DrumVoice
  * member directly. These are single-endpoint supplemental values such as
  * modulation target selectors, so they intentionally start with flags=0 rather
@@ -170,6 +189,7 @@ typedef enum {
     DRUM_PARAM_TRANSIENT_VOL,
     DRUM_PARAM_TRANSIENT_FREQ,
     DRUM_PARAM_OSC1_POSITION, /* S086 P3: appended; preserve all prior IDs. */
+    DRUM_PARAM_OSC1_TYPE, /* S087 B: appended; preserve all prior IDs. */
     DRUM_PARAM_COUNT
 } drum_param_index_t;
 
@@ -266,6 +286,27 @@ const ParamDescriptor drum_param_descriptors[] = {
      *             086_SESSION_HANDOFF_LOG.md §4.
      */
     ROW("osc1_position", "Oscilltr", "Position", "pos", DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
+    /*
+     * osc1_type: typ, the oscillator type (S087 stage B).
+     *
+     * What:       0 wav, 1 smp, 2 slp, 3 wtb (OSC_TYPE_*), stored in
+     *             osc.oscType through IM_SPECIAL_OSC_TYPE (osc_setType()).
+     *             The menu offers the first OSC_TYPE_SELECTABLE values.
+     * Why:        S087 P0 §4: osc1 selects stock waves, samples, loops or
+     *             wavetables. A selector: never morphed, stored in the Normal
+     *             image only, applied before the Morph image, step-automatable
+     *             (one value per step, no ramp), not an LFO/velocity target.
+     *             Appended last, so every existing descriptor index,
+     *             automation ID, token, NRPN ID and Learn row is unchanged; a
+     *             file without the key loads 0 (wav, today's sound).
+     * Inputs:     menu edit, Kit/Scene/Instrument apply, the trigger restore,
+     *             step automation.
+     * Outputs:    osc.oscType and the type state (osc_setType()).
+     * Accessors:  instrumentManager_writeSpecialRuntime().
+     * Affiliates: the typed renderers (Oscillator.c S087 section);
+     *             FILESYSTEM_SPEC.md (the key); S087 P0 §12.5.
+     */
+    ROW_SELECT_SPECIAL("osc1_type", "Oscilltr", "Type", "typ", MENU_OSC_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -283,8 +324,8 @@ const uint8_t drum_param_descriptor_count =
  * can be resolved by Menu as non-instrument cells.
  */
 const instrument_menu_page_t drum_menu_pages[] = {
-    /* S086 P3: first oscillator screen is coa fin wav pos. */
-    {{ DRUM_PARAM_OSC1_PITCH_COARSE, DRUM_PARAM_OSC1_PITCH_FINE, DRUM_PARAM_OSC1_WAVE, DRUM_PARAM_OSC1_POSITION, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* S086 P3: first oscillator screen is coa fin wav pos. S087 B: screen 2 is typ. */
+    {{ DRUM_PARAM_OSC1_PITCH_COARSE, DRUM_PARAM_OSC1_PITCH_FINE, DRUM_PARAM_OSC1_WAVE, DRUM_PARAM_OSC1_POSITION, DRUM_PARAM_OSC1_TYPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ DRUM_PARAM_AMP_ENVELOPE_ATTACK, DRUM_PARAM_AMP_ENVELOPE_DECAY, DRUM_PARAM_AMP_ENVELOPE_SLOPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ DRUM_PARAM_PITCH_ENVELOPE_DECAY, DRUM_PARAM_PITCH_ENVELOPE_SLOPE, DRUM_PARAM_PITCH_ENVELOPE_AMOUNT, INSTRUMENT_MENU_SKIP, DRUM_PARAM_VELO_MOD_DEST, DRUM_PARAM_VELO_MOD_AMOUNT, DRUM_PARAM_VELO_VOL_ON_OFF, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ DRUM_PARAM_OSC2_MOD_AMOUNT, DRUM_PARAM_OSC2_PITCH_COARSE, DRUM_PARAM_OSC2_WAVE, DRUM_PARAM_OSC2_MOD_TYPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},

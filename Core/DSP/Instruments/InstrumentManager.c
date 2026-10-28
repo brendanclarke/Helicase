@@ -695,7 +695,29 @@ void instrumentManager_resetSlot(struct kit_instrument_slot *raw_slot,
     }
 }
 
+/*
+ * Highest legal value of an oscillator wave row (S087 stage B; typed in D-40).
+ *
+ * What:       for "osc1_wave": the last entry of osc1's current type (wav:
+ *             OSC_STOCK_LAST; smp/slp: samples - 1; wtb: tables - 1; 0 when
+ *             none); for a modulator wave row: the last entry of the flat list
+ *             (osc_userListCount() - 1, S087 P0 §12.4). Stage B returns
+ *             modNode_getMaxWaveformIndex() for every row (no change).
+ * Why:        LFO and velocity ranges, the menu clamp and automation display
+ *             must all agree on what exists.
+ * Inputs:     slot (INSTRUMENT_SLOT_COUNT = unknown: 127), descriptor.
+ * Outputs:    max value.
+ * Accessors:  instrumentManager_descriptorModDomain(); menu.c via
+ *             instrumentManager_waveCellCount() (D-41).
+ * Affiliates: instrumentManager_osc(); osc_userCount(); osc_userListCount().
+ */
+static OscInfo *instrumentManager_osc(uint8_t slot, const char *key);
+
+static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
+                                               const ParamDescriptor *descriptor);
+
 static uint8_t instrumentManager_descriptorModDomain(
+    uint8_t slot,
     const ParamDescriptor *descriptor,
     instrument_mod_domain_t *domain_out)
 {
@@ -719,7 +741,7 @@ static uint8_t instrumentManager_descriptorModDomain(
     if (domain.flags == INSTRUMENT_MOD_DOMAIN_NONE)
         return 0u;
     if (domain.flags & INSTRUMENT_MOD_DOMAIN_DYNAMIC_MAX) {
-        domain.max_value = modNode_getMaxWaveformIndex();
+        domain.max_value = instrumentManager_waveDomainMax(slot, descriptor);
     }
     if (domain.max_value < domain.min_value)
         return 0u;
@@ -739,7 +761,89 @@ static uint8_t instrumentManager_descriptorSupportsModulationRange(
      * this helper so enum selectors do not leak back into the LFO target list
      * just because their storage happens to be a byte.
      */
-    return instrumentManager_descriptorModDomain(descriptor, 0);
+    return instrumentManager_descriptorModDomain(INSTRUMENT_SLOT_COUNT,
+                                                 descriptor, 0);
+}
+
+/*
+ * Stage-B body of instrumentManager_waveDomainMax() (see the declaration).
+ *
+ * What:       every wave row still reports the stock waveform list's last
+ *             index, so no range changes before the user content exists.
+ * Why:        the signature and its one call site land in stage B; stage D
+ *             replaces the body with the per-type and modulator-list counts.
+ * Inputs:     slot, descriptor (both unused here).
+ * Outputs:    modNode_getMaxWaveformIndex().
+ * Accessors:  instrumentManager_descriptorModDomain().
+ * Affiliates: osc_userCount()/osc_userListCount() (stage D).
+ */
+static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
+                                               const ParamDescriptor *descriptor)
+{
+    /*
+     * Typed wave-row maximum (S087 stage D, D-40).
+     *
+     * What:       osc1_wave -> osc_userCount(osc1's type) - 1; a modulator
+     *             wave row -> osc_userListCount() - 1; otherwise the stock
+     *             list's last index.
+     * Why:        LFO/velocity ranges, the menu clamp and automation display
+     *             must agree on what exists for the type/list in force.
+     * Inputs:     slot (INSTRUMENT_SLOT_COUNT = unknown), descriptor.
+     * Outputs:    max value (0 when nothing installed).
+     * Accessors:  instrumentManager_descriptorModDomain().
+     * Affiliates: osc_userCount(), osc_userListCount().
+     */
+    if (descriptor && descriptor->file_key &&
+        strstr(descriptor->file_key, "_wave")) {
+        if (strcmp(descriptor->file_key, "osc1_wave") == 0 &&
+            slot < INSTRUMENT_SLOT_COUNT) {
+            const OscInfo *osc = instrumentManager_osc(slot, "osc1_wave");
+            const uint8_t count = osc ? osc_userCount(osc->oscType)
+                                      : (uint8_t)OSC_SAMPLE_START;
+
+            return count ? (uint8_t)(count - 1u) : 0u;
+        }
+        {
+            const uint8_t count = osc_userListCount();
+
+            return count ? (uint8_t)(count - 1u) : 0u;
+        }
+    }
+    return modNode_getMaxWaveformIndex();
+}
+
+/*
+ * Number of legal values of an oscillator wave row (S087 stage B).
+ *
+ * What:       waveDomainMax + 1, so callers get a count for clamps and menu
+ *             entry limits.
+ * Why:        the count rule belongs beside the range rule; Menu and the
+ *             typ-switch clamp must agree with it.
+ * Inputs:     slot (INSTRUMENT_SLOT_COUNT = unknown), descriptor.
+ * Outputs:    at least 1.
+ * Accessors:  menu.c (cell clamp, typ-switch clamp).
+ * Affiliates: instrumentManager_waveDomainMax().
+ */
+uint8_t instrumentManager_waveCellCount(uint8_t slot,
+                                        const ParamDescriptor *descriptor)
+{
+    return (uint8_t)(instrumentManager_waveDomainMax(slot, descriptor) + 1u);
+}
+
+/*
+ * osc1's current type for a slot (S087 stage D; see the header).
+ *
+ * What:       OSC_TYPE_* of the slot's osc1, or OSC_TYPE_WAV when absent.
+ * Why:        Menu's wave-cell formatter needs the type, not a pointer.
+ * Inputs:     slot.  Outputs: type.
+ * Accessors:  menu_formatWaveCell().
+ * Affiliates: osc_setType().
+ */
+uint8_t instrumentManager_osc1Type(uint8_t slot)
+{
+    const OscInfo *osc = instrumentManager_osc(slot, "osc1_wave");
+
+    return osc ? osc->oscType : (uint8_t)OSC_TYPE_WAV;
 }
 
 static uint8_t instrumentManager_descriptorIsSlotDecimationTarget(
@@ -794,8 +898,29 @@ uint8_t instrumentManager_targetValid(uint8_t scene_index,
         return 0u;
     descriptor = instrumentManager_descriptor(slot->type,
                                                instrumentParam_local(id));
-    if (!descriptor ||
-        !(descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)) {
+    /*
+     * Selector rows are automation targets only (S087 stage B).
+     *
+     * What:       a voice row must be MORPHABLE to be any target, except a
+     *             SELECTOR row with AUTOMATABLE set, which is valid for
+     *             INSTRUMENT_TARGET_AUTOMATION only. Modulation (LFO,
+     *             velocity) still requires MORPHABLE and MODULATABLE.
+     * Why:        S087 P0 §12.5: typ is step-automatable, one value per step,
+     *             but never an LFO/velocity target and never morphed.
+     * Inputs:     descriptor flags, use.  Outputs: validity.
+     * Accessors:  every caller of this gate: sequencer.c (drain, ramp
+     *             service); menu.c (automation target picker, live record,
+     *             display); PatternData.c (step writer);
+     *             InstrumentManager.c (runtime and target resolution).
+     * Affiliates: INSTRUMENT_PARAM_FLAG_SELECTOR; seq_rampDtypeOk().
+     */
+    if (!descriptor)
+        return 0u;
+    if (!(descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)) {
+        if (use == INSTRUMENT_TARGET_AUTOMATION &&
+            (descriptor->flags & INSTRUMENT_PARAM_FLAG_SELECTOR) &&
+            (descriptor->flags & INSTRUMENT_PARAM_FLAG_AUTOMATABLE))
+            return 1u;
         return 0u;
     }
     if (use == INSTRUMENT_TARGET_MODULATION) {
@@ -2199,7 +2324,7 @@ static void instrumentManager_noteRuntimeValueChanged(
                                                   &target)) {
         modNode_directOriginalValueChanged(id, target.range);
     }
-    if (!instrumentManager_descriptorModDomain(descriptor, &domain))
+    if (!instrumentManager_descriptorModDomain(slot, descriptor, &domain))
         return;
     if (value < domain.min_value)
         value = domain.min_value;
@@ -2260,6 +2385,7 @@ static void *instrumentManager_waveInterpTarget(
 }
 
 static uint8_t instrumentManager_buildModulationRange(
+    uint8_t slot,
     const ParamDescriptor *descriptor,
     void *waveInterpTarget,
     mod_node_range_t *range_out)
@@ -2283,7 +2409,7 @@ static uint8_t instrumentManager_buildModulationRange(
         range_out->valid = 0u;
     }
     if (!descriptor || !range_out ||
-        !instrumentManager_descriptorModDomain(descriptor, &domain)) {
+        !instrumentManager_descriptorModDomain(slot, descriptor, &domain)) {
         return 0u;
     }
 
@@ -2375,16 +2501,84 @@ static uint8_t instrumentManager_resolveModulationTarget(
     target_out->parameter.type = descriptor->runtime.parameter_type;
     target_out->waveInterpTarget =
         instrumentManager_waveInterpTarget(target_slot, descriptor);
-    if (!instrumentManager_descriptorModDomain(descriptor,
+    if (!instrumentManager_descriptorModDomain(target_slot, descriptor,
                                                &target_out->domain)) {
         return 0u;
     }
-    if (!instrumentManager_buildModulationRange(descriptor,
+    if (!instrumentManager_buildModulationRange(target_slot, descriptor,
                                                 target_out->waveInterpTarget,
                                                 &target_out->range)) {
         return 0u;
     }
     return (uint8_t)(target_out->parameter.ptr != 0);
+}
+
+/*
+ * Refresh the modulation domains of a slot's wave rows (S087 stage B).
+ *
+ * What:       for every active LFO adapter whose target is `slot` and whose
+ *             descriptor has INSTRUMENT_MOD_DOMAIN_DYNAMIC_MAX, recompute the
+ *             adapter's domain with instrumentManager_descriptorModDomain()
+ *             and clamp its base_value; then, for every such descriptor row,
+ *             refresh a live direct ModulationNode target with
+ *             modNode_directOriginalValueChanged().
+ * Why:        a typ change (and, from stage C, an install) changes how many
+ *             entries a wave row has. Without this an LFO set up for the stock
+ *             list keeps a stale range.
+ * Inputs:     slot 0..INSTRUMENT_SLOT_COUNT-1 (out of range is ignored).
+ * Outputs:    refreshed adapter domains/base values and direct target ranges.
+ * Accessors:  IM_SPECIAL_OSC_TYPE writer (B-8); the post-install refresh
+ *             (C-31).
+ * Affiliates: instrumentManager_descriptorModDomain(),
+ *             instrumentManager_resolveModulationTarget(),
+ *             modNode_directOriginalValueChanged().
+ */
+void instrumentManager_waveDomainChanged(uint8_t slot)
+{
+    instrument_type_t type;
+    uint8_t i;
+
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    type = instrumentManager_slotType(slot);
+    for (i = 0u; i < INSTRUMENT_PARAM_COUNT; i++) {
+        const ParamDescriptor *descriptor =
+            instrumentManager_descriptor(type, i);
+        instrument_mod_domain_t domain;
+        instrument_param_id_t id;
+        uint8_t source;
+        uint8_t pair;
+        instrument_runtime_target_t target;
+
+        if (!descriptor)
+            break;
+        if (!(descriptor->mod_domain.flags &
+              INSTRUMENT_MOD_DOMAIN_DYNAMIC_MAX))
+            continue;
+        if (!instrumentManager_descriptorModDomain(slot, descriptor, &domain))
+            continue;
+        id = instrumentParam_make(slot, i);
+        if (id == INSTRUMENT_PARAM_INVALID)
+            continue;
+        for (source = 0u; source < INSTRUMENT_SLOT_COUNT; source++) {
+            for (pair = 0u; pair < 2u; pair++) {
+                instrument_lfo_target_adapter_t *adapter =
+                    &lfo_descriptor_targets[source][pair];
+
+                if (!adapter->active || adapter->slot != slot ||
+                    adapter->id != id)
+                    continue;
+                adapter->domain = domain;
+                if (adapter->base_value < domain.min_value)
+                    adapter->base_value = domain.min_value;
+                else if (adapter->base_value > domain.max_value)
+                    adapter->base_value = domain.max_value;
+            }
+        }
+        if (instrumentManager_resolveModulationTarget(
+                scene_getActiveIndex(), id, &target))
+            modNode_directOriginalValueChanged(id, target.range);
+    }
 }
 
 static uint8_t instrumentManager_isSlotDecimationTarget(
@@ -3382,6 +3576,27 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         lfo->phaseOffset =
             (uint32_t)(((uint64_t)byteValue * 0xFFFFFFFFu) / 127u);
         return 1u; }
+    case IM_SPECIAL_OSC_TYPE: {
+        /*
+         * osc1_type writer (S087 stage B).
+         *
+         * What:       osc_setType() on the tagged oscillator, then
+         *             instrumentManager_waveDomainChanged(slot) so LFO adapters
+         *             and direct targets on the slot's wave rows pick up the
+         *             new type's range.
+         * Why:        every typ write (menu, Kit apply, restore, step
+         *             automation) must change the type the same way.
+         * Inputs:     slot, descriptor tag (IM_SPECIAL_OSC1), byte value.
+         * Outputs:    the oscillator's type state; refreshed wave domains.
+         * Callers:    instrumentManager_writeRuntimeInternal() via the tag.
+         * Affiliates: osc_setType(); the osc1_type rows; S087 P0 §12.5.
+         */
+        OscInfo *osc = instrumentManager_oscBySelector(
+            slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
+        if (!osc) return 0u;
+        osc_setType(osc, byteValue);
+        instrumentManager_waveDomainChanged(slot);
+        return 1u; }
     case IM_SPECIAL_NONE:
     default:
         return 0u;
@@ -3446,6 +3661,9 @@ static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
             return IM_SPECIAL_PITCH_EG_AMOUNT;
     }
     if (strcmp(key, "transient_wave") == 0) return IM_SPECIAL_TRANSIENT_WAVE;
+    /* S087 B: osc1_type. */
+    if (osc != 0xFFu && strcmp(key, "osc1_type") == 0)
+        return IM_SPECIAL_OSC_TYPE | osc;
     if (strcmp(key, "transient_freq") == 0) return IM_SPECIAL_TRANSIENT_FREQ;
     if (strcmp(key, "instrument_drive") == 0)
         return IM_SPECIAL_INSTRUMENT_DRIVE;

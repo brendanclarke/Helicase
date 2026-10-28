@@ -142,6 +142,10 @@ void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
 	{
 		offset -= voice->transGen.volume;
 	}
+	/* S087 D: a typed osc1 starts at its pos start point. */
+	if (osc_isTyped(&voice->osc))
+		voice->osc.phase = osc_typedTriggerPhase(&voice->osc);
+	else {
 	if(voice->osc.waveform == SINE)
 		voice->osc.phase = (0x3ff<<20)*offset;
 	else if(osc_isTableWave(voice->osc.waveform))
@@ -169,6 +173,7 @@ void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
 	 *             in Snare_calcSyncBlockVoice(); the osc1_position row.
 	 */
 	voice->osc.phase += osc_positionTrigger(&voice->osc);
+	}
 
 	DecayEg_trigger(&voice->oscPitchEg);
 	slopeEg2_trigger(&voice->oscVolEg);
@@ -277,7 +282,10 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 	 */
 	osc_positionBendApply(&voice->osc, 1u);
 	//calc next osc sample
-	calcNextOscSampleBlock(&voice->osc,transBuf,size,(1.f-voice->mix));
+	if (osc_isTyped(&voice->osc))
+		osc_renderTyped(&voice->osc, transBuf, size, 1.f - voice->mix);
+	else
+		calcNextOscSampleBlock(&voice->osc,transBuf,size,(1.f-voice->mix));
 	osc_positionBendRestore(&voice->osc);	/* S086 P3: exact restore */
 	//--AS apply filter to synthesized sound as well here if desired, or combine code for more efficiency
 

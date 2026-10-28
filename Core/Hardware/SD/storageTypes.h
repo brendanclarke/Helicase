@@ -652,4 +652,32 @@ void storage_makeSavedInstrumentDisplayFilename(char *dst,
                                                 uint8_t one_based_voice,
                                                 uint8_t force_voice_suffix);
 
+/*
+ * Natural-order name compare (S087 stage C).
+ *
+ * What:       compares two names case-insensitively, with every run of
+ *             digits compared as a number ("w2" < "w10").
+ * Why:        S087 P0 §5.2: items, frames and folders install in natural
+ *             order, so a numeric prefix orders them as the user expects.
+ * Inputs:     two NUL-terminated names.  Outputs: <0, 0, >0.
+ * Accessors:  the install walker; tools/dsp_test/test_natural_order.c.
+ * Affiliates: tools/sampleoptimize.py natural_key() (the same order).
+ */
+int8_t storage_naturalCompare(const char *a, const char *b);
+
+/*
+ * Catalogue display name from a long filename (S087 stage C).
+ *
+ * What:       optionally drops the extension, strips a leading numeric prefix
+ *             followed by '_', '-' or a space, copies up to 8 characters and
+ *             pads with spaces.
+ * Why:        a sample's catalogue name is its LFN without the extension; a
+ *             wavetable's name is its folder name (S087 P0 §5.2).
+ * Inputs:     lfn, strip_ext.  Outputs: dst[8], always space-padded.
+ * Accessors:  the install walker; test_natural_order.c.
+ * Affiliates: storage_naturalCompare().
+ */
+void storage_displayNameFromLfn(char dst[8u],
+                                const char *lfn, uint8_t strip_ext);
+
 #endif /* STORAGETYPES_H_ */

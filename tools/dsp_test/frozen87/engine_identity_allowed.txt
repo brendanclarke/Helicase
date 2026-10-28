@@ -1,0 +1,13 @@
+Core/DSP/Instruments/Drum/DrumVoice.c:< 		calcNextOscSampleBlock(&voice->osc,buf,size, (1.f-voice->fmModAmount));
+Core/DSP/Instruments/Drum/DrumVoice.c:< 		const uint32_t clockInc = osc_syncClockInc(&voice->modOsc);
+Core/DSP/Instruments/Drum/DrumVoice.c:< 		voice->syncClock = osc_buildSyncList(voice->syncClock, clockInc,
+Core/DSP/Instruments/Drum/DrumVoice.c:< 		                                     syncOver, size);
+Core/DSP/Instruments/Drum/DrumVoice.c:< 		calcNextOscSampleSyncBlock(&voice->osc, syncOver, clockInc,
+Core/DSP/Instruments/Drum/DrumVoice.c:< 		                           osc_syncDepthQ30(Drum_modEnvDepth(voice)),
+Core/DSP/Instruments/Drum/DrumVoice.c:< 		                           buf, size);
+Core/DSP/Instruments/Drum/DrumVoice.c:< 		calcNextOscSampleRingBlock(&voice->osc, modBuf, buf, size,
+Core/DSP/Instruments/Drum/DrumVoice.c:< 		                           start, step);
+Core/DSP/Instruments/Drum/DrumVoice.c:< 		calcNextOscSampleFmBlock(&voice->osc,modBuf,buf,size,1.0f);
+Core/DSP/Instruments/Snare/Snare.c:< 	calcNextOscSampleBlock(&voice->osc,transBuf,size,(1.f-voice->mix));
+Core/DSP/Instruments/Cymbal/CymbalVoice.c:< 	calcNextOscSampleFmBlock(&voice->osc,mod,buf,size,1.f) ;
+Core/DSP/Instruments/HiHat/HiHat.c:< 	calcNextOscSampleFmBlock(&voice->osc,mod1,buf,size,0.5f) ;

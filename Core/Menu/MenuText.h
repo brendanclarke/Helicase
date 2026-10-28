@@ -26,6 +26,10 @@
 #define MENU_FILTER         1
 #define MENU_WAVEFORM       2
 #define MENU_AUDIO_OUT      3
+/* S087 B: osc1_type table. Id 4 was unused; DTYPE_MENU keeps typ out of
+** S081 ramps (seq_rampDtypeOk() ramps numeric dtypes only) and avoids a new
+** dtype, which would wrap the 4-bit dtype field (S087 P0 §12.5). */
+#define MENU_OSC_TYPE       4
 #define MENU_SYNC_RATES     5
 #define MENU_LFO_WAVES      6
 #define MENU_RETRIGGER      7
@@ -142,6 +146,20 @@ static const char trackPlayModeNames[][4] = {
 ** OSC_SAMPLE_START (asserted in menu.c). User samples follow as sNN. */
 static const char waveformNames[][4] = {
     {8}, {"Sin"},{"Tri"},{"Saw"},{"Rec"},{"Noi"},{"Cym"},{"Re3"},{"Sw3"},
+};
+/*
+ * osc1_type names (S087 stage B).
+ *
+ * What:       [0] = count (OSC_TYPE_COUNT), then wav smp slp wtb.
+ * Why:        the typ cell, its automation display and the single-parameter
+ *             view share one table; the menu shows only the first
+ *             OSC_TYPE_SELECTABLE entries.
+ * Accessors:  getMaxEntriesForMenu(), getMenuItemNameForValue(),
+ *             menu_automationValueMax() (menu.c).
+ * Affiliates: OSC_TYPE_* (Oscillator.h); MENU_OSC_TYPE.
+ */
+static const char oscTypeNames[][4] = {
+    {4}, {"wav"},{"smp"},{"slp"},{"wtb"},
 };
 static const char outputNames[][7] = {
     {6}, {"St1"},{"St2"},{"L1"},{"R1"},{"L2"},{"R2"},

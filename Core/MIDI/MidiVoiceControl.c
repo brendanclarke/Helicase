@@ -82,7 +82,7 @@ static uint8_t active_voices=0;	// which voices are currently playing a note
  * voiceControl_processPending() when consumed. Outputs: gates the call
  * to seq_restoreAutomatedParameters() and the menu-override clear.
  * Affiliates: seq_triggerVoice() reset argument, main.c audio loop
- * ordering (voiceControl_processPending -> seq_drainPendingAutomation).
+ * ordering (voiceControl_processPending -> seq_drainPendingAutomationTo()).
  * RAM: +1 B SRAM1.
  */
 static uint8_t voiceControl_pendingReset;
@@ -154,59 +154,82 @@ static void voiceControl_dropPendingLocked(uint8_t voice)
 }
 
 /*
- * Atomic reset consumption (S081 §5.8, §19.15).
+ * Pop every queued trigger in one masked section (S087 stage A).
  *
- * What: voiceControl_popPending() gains an out-parameter `reset`. Inside its
- * existing PRIMASK section it copies the event, then tests and clears
- * voiceControl_pendingReset's bit for ev.voice in the same section. TIM3
- * sets bits concurrently (seq_triggerVoice() runs in the ISR), so every
- * read-modify-write of the mask is under PRIMASK, as the ring cursors
- * already are. Inputs: ring, mask. Outputs: the popped event and its reset
- * decision.
+ * What:       copies up to VOICE_TRIGGER_RING_SIZE events into `events`, with
+ *             each voice's test-and-clear of voiceControl_pendingReset in the
+ *             same PRIMASK section as its pop; then copies and clears the
+ *             remaining reset bits into `leftover` and takes the automation
+ *             mark into `markOut`. The pop logic replaces
+ *             voiceControl_popPending(), which S087 deleted: this is its only
+ *             caller and the batch must be taken atomically with the
+ *             automation mark (voiceControl_processPending()).
+ * Why:        D6 (S087 P0 §6.5): a step's trigger and its automation entries
+ *             are published by TIM3 in one interrupt run; taking all pops, the
+ *             leftover reset bits and seq_pendingAutomationMark() under one
+ *             mask guarantees the drained entries belong to the popped
+ *             triggers.
+ * Inputs:     the ring cursors and voiceControl_pendingReset. Returns the
+ *             number of events copied; *leftoverOut receives the old reset
+ *             mask and *markOut the automation producer count.
+ * Outputs:    the batch, *leftoverOut, *markOut, the advanced tail, a cleared
+ *             mask.
+ * Accessors:  voiceControl_processPending() only.
+ * Affiliates: voiceControl_prepareTrigger(), voiceControl_fireTrigger(),
+ *             seq_pendingAutomationMark(). RAM: the batch lives in
+ *             voiceControl_processPending()'s frame (R-A2).
  */
-static uint8_t voiceControl_popPending(VoiceTriggerEvent *event, uint8_t *resetOut)
+static uint8_t voiceControl_popPendingBatch(VoiceTriggerEvent *events,
+											 uint8_t *resetFlags,
+											 uint8_t *leftoverOut,
+											 uint8_t *markOut)
 {
+	uint8_t n = 0u;
 	uint32_t primask = voiceControl_irqSave();
 
-	if (voiceTriggerTail == voiceTriggerHead) {
-		voiceControl_irqRestore(primask);
-		return 0;
-	}
+	while (voiceTriggerTail != voiceTriggerHead) {
+		VoiceTriggerEvent ev = voiceTriggerRing[voiceTriggerTail];
 
-	*event = voiceTriggerRing[voiceTriggerTail];
-	voiceTriggerTail = (uint8_t)((voiceTriggerTail + 1u) & VOICE_TRIGGER_RING_MASK);
-	/* Test-and-clear this voice's pending-reset bit in the same PRIMASK
-	** section as the pop so the decision matches the popped event. */
-	*resetOut = (uint8_t)((voiceControl_pendingReset >> event->voice) & 1u);
-	voiceControl_pendingReset &= (uint8_t)~(1u << event->voice);
+		voiceTriggerTail = (uint8_t)((voiceTriggerTail + 1u) &
+									  VOICE_TRIGGER_RING_MASK);
+		events[n] = ev;
+		/* Test-and-clear this voice's pending-reset bit in the same PRIMASK
+		** section as the pop so the decision matches the popped event. */
+		resetFlags[n] = (uint8_t)((voiceControl_pendingReset >> ev.voice) & 1u);
+		voiceControl_pendingReset &= (uint8_t)~(1u << ev.voice);
+		n++;
+	}
+	*leftoverOut = voiceControl_pendingReset;
+	voiceControl_pendingReset = 0u;
+	*markOut = seq_pendingAutomationMark();
 	voiceControl_irqRestore(primask);
-	return 1;
+	return n;
 }
 
 /*
- * Trigger funnel with conditional automation reset (S081 §5.8, §19.15).
+ * Prepare one popped trigger (S087 stage A; first half of the old
+ * voiceControl_triggerNow()).
  *
- * What: preset_applyDeferredSceneSlotForTrigger() first (unchanged), then
- * seq_restoreAutomatedParameters() only when `reset` is set, then
- * instrumentManager_triggerTrack(), the sidechain and the LED pulse
- * (unchanged). Why: only a step's first trigger, a roll renewal or a live
- * press may restore the Morph base (F-L). Keeping the deferred Scene apply
- * ahead of the restore preserves the pre-S081 order: the restore reads the
- * played Scene's morph_interpolation[] after a pending Scene image is
- * installed. Inputs: voice, note, vel, reset. Outputs: as before.
- * Affiliates: voiceControl_processPending() (the only caller).
+ * What:       preset_applyDeferredSceneSlotForTrigger(voice), then
+ *             seq_restoreAutomatedParameters(voice) when `reset` is set.
+ * Why:        the restore must run before the step's own automation is
+ *             drained (D6). The deferred Scene apply keeps its place ahead
+ *             of the restore, so the restore reads the played Scene's
+ *             morph_interpolation[] (S081 §5.8 order, unchanged).
+ * Inputs:     voice 0..6, reset flag from the trigger batch.
+ * Outputs:    the installed Scene slot image; restored runtime values;
+ *             cleared menu override for the voice.
+ * Accessors:  voiceControl_processPending().
+ * Affiliates: voiceControl_fireTrigger(), seq_drainPendingAutomationTo().
  */
-static void voiceControl_triggerNow(uint8_t voice, uint8_t note, uint8_t vel, uint8_t reset)
+static void voiceControl_prepareTrigger(uint8_t voice, uint8_t reset)
 {
 	/*
-	 * Trigger through the dynamic instrument runtime dispatcher.
-	 *
-	 * Inputs: queued visible voice/track number, note, and velocity. Output:
-	 * Preset first has a chance to force-apply a pending deferred Scene slot for
-	 * this track, then InstrumentManager maps tracks 1..6 to storage slots 1..6
-	 * and track 7 to slot 6's alternate/choke trigger. This keeps Scene changes
-	 * smooth while guaranteeing the new Scene pattern's first trigger uses the
-	 * new Scene's instrument parameters.
+	 * Preset first has a chance to force-apply a pending deferred Scene slot
+	 * for this track, then InstrumentManager maps tracks 1..6 to storage slots
+	 * 1..6 and track 7 to slot 6's alternate/choke trigger. This keeps Scene
+	 * changes smooth while guaranteeing the new Scene pattern's first trigger
+	 * uses the new Scene's instrument parameters.
 	 */
 	preset_applyDeferredSceneSlotForTrigger(voice);
 	/*
@@ -217,6 +240,23 @@ static void voiceControl_triggerNow(uint8_t voice, uint8_t note, uint8_t vel, ui
 	 */
 	if (reset)
 		seq_restoreAutomatedParameters(voice);
+}
+
+/*
+ * Fire one popped trigger (S087 stage A; second half of the old
+ * voiceControl_triggerNow()).
+ *
+ * What:       instrumentManager_triggerTrack(), the S074 sidechain offer and
+ *             the LED pulse, exactly as before.
+ * Why:        runs after the drain, so the voice starts with its step's
+ *             automation already applied (D6).
+ * Inputs:     voice, note, vel.
+ * Outputs:    the triggered voice; sidechain weight; LED pulse.
+ * Accessors:  voiceControl_processPending().
+ * Affiliates: voiceControl_prepareTrigger().
+ */
+static void voiceControl_fireTrigger(uint8_t voice, uint8_t note, uint8_t vel)
+{
 	instrumentManager_triggerTrack(voice, note, vel);
 
 	/*
@@ -358,31 +398,50 @@ uint8_t voiceControl_isVoicePlaying(uint8_t voice)
 	return result;
 }
 
-//----------------------------------------------------------------
+/*
+ * Process all pending triggers for one render pass (S087 stage A order).
+ *
+ * What:       1. under one PRIMASK section: pop every ring entry with its
+ *                reset bit into a local batch (at most the ring size, 32),
+ *                take the leftover reset bits, and mark the automation queue
+ *                (seq_pendingAutomationMark());
+ *             2. prepare each popped trigger (deferred Scene apply, restore
+ *                when reset), then restore each leftover reset voice;
+ *             3. seq_drainPendingAutomationTo(mark);
+ *             4. fire each popped trigger in pop order.
+ * Why:        D6 (S087 P0 §6.5): a step's automation must be applied before
+ *             its trigger fires; before S087 the drain ran after the trigger
+ *             and every hit's first block used the previous values. Taking
+ *             the pops and the mark together keeps a step's trigger and its
+ *             entries in the same pass (TIM3 publishes them in one
+ *             interrupt run).
+ * Inputs:     the trigger ring, voiceControl_pendingReset, the automation
+ *             queue.
+ * Outputs:    restored, then automated, then triggered voices.
+ * Cost:       one PRIMASK section of at most 32 event copies; the batch is
+ *             128 B of stack (R-A2).
+ * Edge:       two triggers of one voice in one pass: both prepares run
+ *             before the drain, so the drain's values serve both hits
+ *             (last writer wins, as in step order).
+ * Accessors:  main.c render loop (once per OUTPUT_DMA_SIZE block).
+ * Affiliates: seq_pendingAutomationMark(), seq_drainPendingAutomationTo(),
+ *             seq_restoreAutomatedParameters(), voiceControl_popPendingBatch().
+ */
 void voiceControl_processPending(void)
 {
-	VoiceTriggerEvent ev;
-	uint8_t reset;
+	VoiceTriggerEvent batch[VOICE_TRIGGER_RING_SIZE];
+	uint8_t resetFlags[VOICE_TRIGGER_RING_SIZE];
 	uint8_t leftover;
+	uint8_t mark;
+	uint8_t n;
+	uint8_t i;
 
-	while (voiceControl_popPending(&ev, &reset)) {
-		voiceControl_triggerNow(ev.voice, ev.note, ev.vel, reset);
-	}
+	/* Pop the ring and take the automation mark in one masked section. */
+	n = voiceControl_popPendingBatch(batch, resetFlags, &leftover, &mark);
 
-	/*
-	 * After the ring is empty, take the remaining reset bits under PRIMASK
-	 * (copy, then store 0) and run the restore for each bit taken: reset-only
-	 * renewals and resets whose trigger entry was dropped by
-	 * voiceControl_noteOff(). All of this precedes
-	 * seq_drainPendingAutomation() (main.c:212-213), so a step's own
-	 * automation still lands after its reset.
-	 */
-	{
-		uint32_t primask = voiceControl_irqSave();
-		leftover = voiceControl_pendingReset;
-		voiceControl_pendingReset = 0u;
-		voiceControl_irqRestore(primask);
-	}
+	/* 2. Restore state first: popped triggers, then reset-only voices. */
+	for (i = 0u; i < n; i++)
+		voiceControl_prepareTrigger(batch[i].voice, resetFlags[i]);
 	while (leftover) {
 		uint8_t voice = 0u;
 		while ((leftover & (uint8_t)(1u << voice)) == 0u)
@@ -390,4 +449,11 @@ void voiceControl_processPending(void)
 		leftover &= (uint8_t)~(1u << voice);
 		seq_restoreAutomatedParameters(voice);
 	}
+
+	/* 3. Apply this step's own automation before any of its triggers. */
+	seq_drainPendingAutomationTo(mark);
+
+	/* 4. Fire. */
+	for (i = 0u; i < n; i++)
+		voiceControl_fireTrigger(batch[i].voice, batch[i].note, batch[i].vel);
 }

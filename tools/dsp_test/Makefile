@@ -249,8 +249,8 @@ oscmod_identity:
 # Host behaviour of the new code against the unchanged plain loops.
 # S086 P3: OscInfo is 71-143 (position, positionApplied, positionBendStep).
 osc_mod: | $(GEN)
-	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 49-65 --out $(GEN)/om_defs.inc
-	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 71-143 --out $(GEN)/om_oscinfo.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 49-124 --out $(GEN)/om_defs.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 128-229 --out $(GEN)/om_oscinfo.inc
 	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c --object osc_stockTables \
 	  --out $(GEN)/om_stock.inc
 	$(EX) --src $(ROOT)/Core/SampleRom/SampleMemory.h --lines 104-109 \
@@ -455,3 +455,255 @@ elf86_mixer_check: | $(GEN)
 	python3 elf_loopdump.py --elf $(FW_ELF) --sym mixer_calcNextSampleBlock \
 	  --out build/elf_mixer_now.txt
 	python3 elf_hotloops.py --compare $(FROZEN86)/elf_mixer_p2.txt build/elf_mixer_now.txt
+
+# ---------------------------------------------------------------------------
+# S087: oscillator types (samples, loops, wavetables).
+#
+# What:       freezes the pre-S087 image, then compares every later build with
+#             it: the oscillator functions and their per-sample loops, the
+#             voice engines, and the per-sample loops inlined into the mixer
+#             (the S086 F1 register-pressure gate).
+# Why:        S087 adds new loops and dispatchers but may not edit an existing
+#             per-sample loop (P0 §2 rule 2) or change what the engines do for
+#             wav (Q5). The allow-lists are empty until stage D, whose removals
+#             are ratified there.
+# Inputs:     frozen87/ (snapshot87.sh), build/lxr02.elf.
+# Outputs:    frozen87/elf_osc.txt, elf_loops.txt, elf_mixer.txt; per-build
+#             comparisons under build/.
+# Accessors:  make -C tools/dsp_test <target>.
+# Affiliates: snapshot87.sh, elf_symdump.py, elf_loopdump.py, elf_hotloops.py.
+# ---------------------------------------------------------------------------
+FROZEN87 := frozen87
+OSC87_ELF_SYMS := $(OSC86_ELF_SYMS) calcUserSampleOscBlock calcUserSampleOscFmBlock \
+                  calcUserSampleOscRingBlock osc_renderTyped osc_renderTypedFm \
+                  osc_renderTypedSync osc_renderTypedRing osc_renderUserList \
+                  osc_userBind osc_setType osc_typedTriggerPhase \
+                  osc_typedPositionApply osc_typedPositionRestore \
+                  osc_buildLoopSyncList osc_syncClockInc
+ENGINES87 := $(ENGINES86)
+.PHONY: osc87_identity engine87_identity elf87_baseline elf87_check \
+        elf87_mixer_snapshot elf87_mixer_check
+
+osc87_identity:
+	@for f in Core/DSPAudio/Oscillator.c Core/DSPAudio/Oscillator.h; do \
+	  diff $(FROZEN87)/$$f $(ROOT)/$$f | grep '^<' | sed "s|^|$$f:|" ; \
+	done > build/osc87_removed.txt || true
+	@if diff -q build/osc87_removed.txt $(FROZEN87)/identity_allowed.txt >/dev/null; then \
+	  echo "osc87_identity: removed/changed lines = the $$(wc -l < build/osc87_removed.txt | tr -d ' ') allowed"; \
+	else echo "osc87_identity: unexpected removed/changed lines:"; \
+	  diff build/osc87_removed.txt $(FROZEN87)/identity_allowed.txt; exit 1; fi
+
+engine87_identity: | $(GEN)
+	@for f in $(ENGINES87); do \
+	  diff $(FROZEN87)/$$f $(ROOT)/$$f | grep '^<' | sed "s|^|$$f:|" ; \
+	done > build/engine87_removed.txt || true
+	@if diff -q build/engine87_removed.txt $(FROZEN87)/engine_identity_allowed.txt >/dev/null; then \
+	  echo "engine87_identity: removed/changed lines = the $$(wc -l < build/engine87_removed.txt | tr -d ' ') allowed"; \
+	else echo "engine87_identity: unexpected removed/changed lines:"; \
+	  diff build/engine87_removed.txt $(FROZEN87)/engine_identity_allowed.txt; exit 1; fi
+
+elf87_baseline:
+	python3 elf_symdump.py --elf $(FW_ELF) $(foreach s,$(OSC87_ELF_SYMS),--sym $(s)) \
+	  --out $(FROZEN87)/elf_osc.txt
+	python3 elf_loopdump.py --elf $(FW_ELF) $(foreach s,$(OSC87_ELF_SYMS),--sym $(s)) \
+	  --out $(FROZEN87)/elf_loops.txt
+
+elf87_check: | $(GEN)
+	python3 elf_symdump.py --elf $(FW_ELF) $(foreach s,$(OSC87_ELF_SYMS),--sym $(s)) \
+	  --out build/elf_osc87_now.txt
+	python3 elf_loopdump.py --elf $(FW_ELF) $(foreach s,$(OSC87_ELF_SYMS),--sym $(s)) \
+	  --out build/elf_loops87_now.txt
+	python3 elf_symdump.py --compare $(FROZEN87)/elf_osc.txt build/elf_osc87_now.txt
+	python3 elf_loopdump.py --compare $(FROZEN87)/elf_loops.txt build/elf_loops87_now.txt
+
+elf87_mixer_snapshot:
+	python3 elf_loopdump.py --elf $(FW_ELF) --sym mixer_calcNextSampleBlock \
+	  --out $(FROZEN87)/elf_mixer.txt
+
+elf87_mixer_check: | $(GEN)
+	python3 elf_loopdump.py --elf $(FW_ELF) --sym mixer_calcNextSampleBlock \
+	  --out build/elf_mixer87_now.txt
+	python3 elf_hotloops.py --compare $(FROZEN87)/elf_mixer.txt build/elf_mixer87_now.txt
+
+# S087 stage A: a step's automation lands before its trigger (D6).
+# What:       stepauto_order records the call order of the real trigger
+#             funnel; drain_cursor proves the mark/limit cursor applies each
+#             queued record exactly once.
+# Why:        per-sample code is untouched, but the order of the foreground
+#             passes decides whether a sample slice starts at its own step's
+#             pos. The break builds prove the tests fail on the old order
+#             (drain after the triggers) and on the pre-S087 cursor start.
+# Inputs:     MidiVoiceControl.c, sequencer.c, extract.py.
+# Outputs:    two host programs and their pass/fail lines.
+# Accessors:  make -C tools/dsp_test stepauto_order drain_cursor.
+# Affiliates: test_stepauto_order.c, test_drain_cursor.c, DSP_TEST.md.
+.PHONY: stepauto_order drain_cursor
+
+$(GEN)/stepauto_voice.c: $(ROOT)/Core/MIDI/MidiVoiceControl.c | $(GEN)
+	$(EX) --src $(ROOT)/Core/MIDI/MidiVoiceControl.c \
+	  --func voiceControl_popPendingBatch --func voiceControl_prepareTrigger \
+	  --func voiceControl_fireTrigger --func voiceControl_processPending \
+	  --rename voiceControl_irqSave=sta_irqSave \
+	  --rename voiceControl_irqRestore=sta_irqRestore \
+	  --out $(GEN)/stepauto_voice.c
+
+stepauto_order: $(GEN)/stepauto_voice.c
+	$(HOSTCC) $(HOSTFLAGS) test_stepauto_order.c -o build/stepauto_order -lm
+	./build/stepauto_order
+	$(HOSTCC) $(HOSTFLAGS) -DBREAK_DRAIN_AFTER_FIRE test_stepauto_order.c \
+	  -o build/stepauto_order_break -lm
+	./build/stepauto_order_break
+
+$(GEN)/drain_cursor.c: $(ROOT)/Core/Sequencer/sequencer.c | $(GEN)
+	$(EX) --src $(ROOT)/Core/Sequencer/sequencer.c \
+	  --func seq_drainPendingAutomationTo --func seq_pendingAutomationMark \
+	  --out $(GEN)/drain_cursor.c
+
+drain_cursor: $(GEN)/drain_cursor.c
+	$(HOSTCC) $(HOSTFLAGS) test_drain_cursor.c -o build/drain_cursor -lm
+	./build/drain_cursor
+	mkdir -p build/break_inc
+	sed 's/uint8_t i = seq_pending_automation_done;/uint8_t i = 0u;/' \
+	  $(GEN)/drain_cursor.c > build/break_inc/drain_cursor.c
+	$(HOSTCC) -Ibuild/break_inc $(HOSTFLAGS) test_drain_cursor.c \
+	  -o build/drain_cursor_break -lm
+	@if ./build/drain_cursor_break >/dev/null 2>&1; then \
+	  echo "drain_cursor_break: FAILED (the cursor-start break was not caught)"; \
+	  exit 1; else echo "drain_cursor_break: caught (law 2 fails as expected)"; fi
+
+# S087 stage B: osc1_type, the selector gate and no-ramp rule.
+# What:       the real OSC_TYPE_* block, OscInfo, osc_setType(), the gate and
+#             seq_rampDtypeOk(), with the real ROW_SELECT_SPECIAL macro and the
+#             Drum descriptor enum.
+# Why:        the type is a selector, step-automatable only; laws 3 and 4 are
+#             the ones a wrong flag or dtype breaks.
+# Inputs:     Oscillator.h/.c, InstrumentManager.c, sequencer.c, menu.h,
+#             MenuText.h, DrumParameters.c.
+# Outputs:    the osc_type host program.
+# Accessors:  make -C tools/dsp_test osc_type.
+# Affiliates: test_osc_type.c, INSTRUMENTS_DSP_REFERENCE.md §4.
+.PHONY: osc_type
+
+osc_type: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 49-124 --out $(GEN)/ot_defs.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 128-229 --out $(GEN)/ot_oscinfo.inc
+	$(EX) --src $(ROOT)/Core/Menu/menu.h --lines 357-383 --out $(GEN)/ot_dtypes.inc
+	$(EX) --src $(ROOT)/Core/Menu/MenuText.h --lines 32-32 --out $(GEN)/ot_menuid.inc
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Drum/DrumParameters.c --lines 89-106 \
+	  --out $(GEN)/ot_rowmacro.inc
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Drum/DrumParameters.c --lines 151-194 \
+	  --out $(GEN)/ot_index.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --func osc_isTableWave \
+	  --func osc_positionIsPhase --func osc_positionTrigger --out $(GEN)/ot_pos.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c --func osc_setType \
+	  --out $(GEN)/ot_settype.c
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/InstrumentManager.c \
+	  --func instrumentManager_targetValid --out $(GEN)/ot_gate.c
+	$(EX) --src $(ROOT)/Core/Sequencer/sequencer.c --func seq_rampDtypeOk \
+	  --out $(GEN)/ot_ramp.c
+	$(HOSTCC) $(HOSTFLAGS) test_osc_type.c -o build/osc_type -lm
+	./build/osc_type
+	mkdir -p build/break_gate build/break_row
+	sed 's/(descriptor->flags & INSTRUMENT_PARAM_FLAG_SELECTOR)/0/' \
+	  $(GEN)/ot_gate.c > build/break_gate/ot_gate.c
+	$(HOSTCC) -Ibuild/break_gate $(HOSTFLAGS) test_osc_type.c \
+	  -o build/osc_type_break_gate -lm
+	@if ./build/osc_type_break_gate >/dev/null 2>&1; then \
+	  echo "osc_type_break_gate: FAILED (selector branch break not caught)"; exit 1; \
+	else echo "osc_type_break_gate: caught (law 3 fails as expected)"; fi
+	sed 's/(uint8_t)(DTYPE_MENU | (menu_ << 4))/(uint8_t)DTYPE_0B127/' \
+	  $(GEN)/ot_rowmacro.inc > build/break_row/ot_rowmacro.inc
+	$(HOSTCC) -Ibuild/break_row $(HOSTFLAGS) test_osc_type.c \
+	  -o build/osc_type_break_row -lm
+	@if ./build/osc_type_break_row >/dev/null 2>&1; then \
+	  echo "osc_type_break_row: FAILED (dtype break not caught)"; exit 1; \
+	else echo "osc_type_break_row: caught (law 4 fails as expected)"; fi
+
+# S087 stage C: catalogue v2, the installer conversions and natural order.
+# What:       the real SampleMemory.c/SampleInstall.c over a RAM flash image,
+#             plus the real natural-order helpers.
+# Why:        the catalogue is what the stage-D bind reads; a layout, count or
+#             conversion mistake is a playback fault. Break proof: the aborted
+#             install programs the magic early and law 3 must fail.
+# Inputs:     cat_host.h, catalogue_host.c, the real sample sources.
+# Outputs:    catalogue, wav_install and natural_order host programs.
+# Accessors:  make -C tools/dsp_test catalogue wav_install natural_order.
+# Affiliates: test_catalogue.c, test_wav_install.c, test_natural_order.c.
+.PHONY: catalogue wav_install natural_order
+
+CAT_HOST_SRC := $(ROOT)/Core/SampleRom/SampleMemory.c \
+                $(ROOT)/Core/SampleRom/SampleInstall.c catalogue_host.c
+CAT_HOST_INC := -I. -I$(ROOT)/Core/SampleRom -include cat_host.h
+
+catalogue: | $(GEN)
+	$(HOSTCC) $(HOSTFLAGS) $(CAT_HOST_INC) test_catalogue.c $(CAT_HOST_SRC) \
+	  -o build/catalogue -lm
+	./build/catalogue
+	mkdir -p build/break_cat
+	sed 's/header.magic = 0xFFFFFFFFu;/header.magic = SAMPLE_CATALOGUE_MAGIC;/' \
+	  $(ROOT)/Core/SampleRom/SampleInstall.c > build/break_cat/SampleInstall.c
+	$(HOSTCC) $(HOSTFLAGS) -I$(ROOT)/Core/SampleRom $(CAT_HOST_INC) \
+	  test_catalogue.c $(ROOT)/Core/SampleRom/SampleMemory.c \
+	  build/break_cat/SampleInstall.c catalogue_host.c \
+	  -o build/catalogue_break -lm
+	@if ./build/catalogue_break >/dev/null 2>&1; then \
+	  echo "catalogue_break: FAILED (magic-first break not caught)"; exit 1; \
+	else echo "catalogue_break: caught (law 3 fails as expected)"; fi
+
+wav_install: | $(GEN)
+	$(HOSTCC) $(HOSTFLAGS) $(CAT_HOST_INC) test_wav_install.c $(CAT_HOST_SRC) \
+	  -o build/wav_install -lm
+	./build/wav_install
+
+natural_order: | $(GEN)
+	$(EX) --src $(ROOT)/Core/Hardware/SD/storageTypes.c \
+	  --func storage_naturalLower --func storage_naturalCompare \
+	  --func storage_displayNameFromLfn --out $(GEN)/natural_order.c
+	$(HOSTCC) $(HOSTFLAGS) test_natural_order.c -o build/natural_order -lm
+	./build/natural_order
+
+sampleoptimize: | $(GEN)
+	python3 test_sampleoptimize.py
+
+# S087 stage D: the sample readers, bind and pos rules.
+# What:       the real S087 section of Oscillator.c plus osc_setType(), over
+#             the real catalogue code.
+# Why:        the readers are the sound of smp/slp; the laws are D-45.
+# Inputs:     Oscillator.c/.h, SampleMemory.c, SampleInstall.c.
+# Outputs:    the osc_sample host program.
+# Accessors:  make -C tools/dsp_test osc_sample.
+# Affiliates: test_osc_sample.c.
+.PHONY: osc_sample
+
+osc_sample: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 49-124 \
+	  --out $(GEN)/osc_sample_defs.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 128-229 \
+	  --out $(GEN)/osc_sample_info.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c --func osc_syncPull \
+	  --func osc_ringSample --func osc_syncRatioQ16 \
+	  --out $(GEN)/osc_sample_helpers.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --func osc_isTableWave \
+	  --func osc_positionIsPhase --func osc_positionTrigger --func osc_isTyped \
+	  --out $(GEN)/osc_sample_pos.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c --lines 1988-5000 \
+	  --out $(GEN)/osc_sample_section.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c --func osc_setType \
+	  --out $(GEN)/osc_sample_settype.c
+	$(HOSTCC) $(HOSTFLAGS) $(CAT_HOST_INC) test_osc_sample.c $(CAT_HOST_SRC) \
+	  -o build/osc_sample -lm
+	./build/osc_sample
+
+.PHONY: osc_wtb
+osc_wtb: osc_sample
+	$(HOSTCC) $(HOSTFLAGS) $(CAT_HOST_INC) test_osc_wtb.c $(CAT_HOST_SRC) \
+	  -o build/osc_wtb -lm
+	./build/osc_wtb
+
+.PHONY: interp_slots
+interp_slots: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/modulationNode.c \
+	  --func modNode_setWaveInterpEnabled --func modNode_resetTargets \
+	  --func modNode_interpClaim --out $(GEN)/interp_slots.c
+	$(HOSTCC) $(HOSTFLAGS) test_interp_slots.c -o build/interp_slots -lm
+	./build/interp_slots

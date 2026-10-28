@@ -176,7 +176,7 @@ static void seq_fxPublishReset(void)
  * effects_automationReset() (overlays, fxm override, menuHold). seq_fxEvent is
  * not touched. Why: R13 says a re-align clears track overlays, but the FX
  * sequence position must survive (seq_fxRealignToMasterClock() realigns it).
- * Affiliates: seq_drainPendingAutomation(), effects_automationReset().
+ * Affiliates: seq_drainPendingAutomationTo(), effects_automationReset().
  */
 static void seq_requestEffectOverlayReset(void)
 {
@@ -883,7 +883,7 @@ uint8_t seq_newPatternAvailable = 0; //indicate that a new pattern has loaded in
  * What: 128 four-byte identity/payload records and two publication bytes. Why:
  * seq_advanceTrackStep() must only decode the bounded Pattern block and queue
  * raw values; descriptor validation/runtime writes belong to foreground code.
- * Lifetime: static until seq_drainPendingAutomation() consumes the queue.
+ * Lifetime: static until seq_drainPendingAutomationTo() consumes the queue.
  * Owner: Sequencer. Affiliate: PatternTrace is optional diagnostics only and
  * owns a separate 32-record, 256-byte DEV ring.
  */
@@ -902,6 +902,28 @@ static volatile uint8_t seq_pending_automation_count = 0u;
 static volatile uint8_t seq_pending_automation_drain = 0u;
 
 /*
+ * Foreground drain cursor for the TIM3 automation queue (S087 stage A).
+ *
+ * What:       index of the first seq_pending_automation[] record not yet
+ *             applied. 0 when the queue is empty. Records below it have
+ *             been applied; records from it up to the producer count have
+ *             not.
+ * Why:        the trigger funnel now drains only up to a mark taken with
+ *             its trigger pops (seq_drainPendingAutomationTo()), so a pass
+ *             can end with records left over. The queue is still reset to
+ *             zero only when it is fully drained; until then this cursor
+ *             stops a later pass from applying the same records twice.
+ * Inputs:     seq_drainPendingAutomationTo() (advances it), seq_init() and
+ *             the transport reset (zero it with the count).
+ * Outputs:    the start index of the next drain.
+ * Accessors:  seq_drainPendingAutomationTo() only, under the same PRIMASK
+ *             handoff as seq_pending_automation_count.
+ * Affiliates: seq_pending_automation_count, seq_pendingAutomationMark(),
+ *             voiceControl_processPending(). RAM: +1 B SRAM1 (R-A1).
+ */
+static volatile uint8_t seq_pending_automation_done = 0u;
+
+/*
  * Per-voice automation restore bitmap (+48 B static SRAM1).
  *
  * What: six 64-bit bitmaps, one bit per descriptor-local parameter image.
@@ -909,7 +931,7 @@ static volatile uint8_t seq_pending_automation_drain = 0u;
  * trigger must restore only the descriptor images changed since that trigger.
  * Lifetime: static until the matching trigger restores the set bits or a
  * transport/pattern reset clears them. Owner: Sequencer. Affiliate:
- * seq_drainPendingAutomation() and seq_restoreAutomatedParameters().
+ * seq_drainPendingAutomationTo() and seq_restoreAutomatedParameters().
  * S075 F3: the bitmap is also the "automation holds this value" record that
  * enforces "automation always wins": the Morph sweep, the per-parameter menu
  * apply and synchronous voice applies consult it through
@@ -932,7 +954,7 @@ static uint64_t seq_automation_dirty[INSTRUMENT_SLOT_COUNT];
  * menu_cellCommitValue). Cleared by seq_restoreAutomatedParameters()
  * (on trigger), and by seq_setStepIndexToStart / seq_selectActivePattern
  * / seq_alignActivePatternToScene / seq_setTrackPlayedScene (on
- * transport/Scene events). Outputs: read by seq_drainPendingAutomation
+ * transport/Scene events). Outputs: read by seq_drainPendingAutomationTo()
  * to skip entries. RAM: +48 B SRAM1.
  * Affiliates: seq_automation_dirty[], presetMorph_writeRuntimeBase().
  */
@@ -1449,7 +1471,7 @@ void seq_clearSceneAutomationBit(uint8_t index)
  * Common caller: seq_setStepIndexToStart(), used by transport start/stop,
  * Pattern-boundary changes, and external reset. Boot continues to call
  * seq_clearAutomationDirty() directly because no runtime overlays exist yet.
- * Affiliates: seq_drainPendingAutomation() publishes the dirty bits,
+ * Affiliates: seq_drainPendingAutomationTo() publishes the dirty bits,
  * seq_restoreAutomatedParameters() implements the one-trigger variant,
  * scene_instrumentSlotConst() resolves the active slot image, and
  * instrumentManager_descriptor()/instrumentManager_writeRuntime() apply the
@@ -1817,6 +1839,8 @@ void seq_init()
 	seq_perTrackActive = 0u;
 	seq_pending_automation_count = 0u;
 	seq_pending_automation_drain = 0u;
+	/* S087 A: the drain cursor starts with the queue. */
+	seq_pending_automation_done = 0u;
 	seq_clearAutomationDirty();
 }
 //------------------------------------------------------------------------------
@@ -2471,7 +2495,7 @@ void seq_moveTracksToBackgroundScene(uint8_t track_mask)
  * identity/type bit; no Scene target application or descriptor/runtime write
  * occurs in TIM3 context. Full-queue events are retained as PatternTrace
  * overflow witnesses when DEV_MODE_LOGGING is enabled. Affiliates:
- * PatternData's dynamic block format and seq_drainPendingAutomation().
+ * PatternData's dynamic block format and seq_drainPendingAutomationTo().
  */
 static void seq_queueStepAutomations(uint8_t track, uint8_t step)
 {
@@ -2574,7 +2598,7 @@ static void seq_queueStepAutomations(uint8_t track, uint8_t step)
  * seq_perTrackPattern[track]. Output: 1 when the types match (or either record
  * is unavailable is treated as no-match), 0 otherwise. Context: safe in TIM3
  * ISR - scene_effectConst() returns a const SRAM1 pointer with no allocation
- * or I/O. Affiliate: seq_drainPendingAutomation().
+ * or I/O. Affiliate: seq_drainPendingAutomationTo().
  */
 static uint8_t seq_trackEffectTypeMatchesActive(uint8_t track)
 {
@@ -2598,7 +2622,7 @@ static uint8_t seq_trackEffectTypeMatchesActive(uint8_t track)
  * effects_automationStepBegin() on these. Under R13, Effect overlays are
  * last-writer-wins with no per-step ownership tracking, so markers are
  * unnecessary. Affiliates: seq_advanceTrackStep caller (removed),
- * SEQ_PENDING_TYPE_FX_STEP_BIT (removed), seq_drainPendingAutomation marker
+ * SEQ_PENDING_TYPE_FX_STEP_BIT (removed), seq_drainPendingAutomationTo() marker
  * branch (removed).
  */
 
@@ -2935,7 +2959,7 @@ static void seq_rollBegin(uint8_t track, const pat_step_specials_t *sp)
  * uninitialized region never causes a stuck or runaway cursor.
  *
  * Affiliates: PatternData (region ownership, step trigger/automation data),
- * seq_drainPendingAutomation() (foreground consumer of queued automation and
+ * seq_drainPendingAutomationTo() (foreground consumer of queued automation and
  * Effect overlay markers).
  */
 static void seq_advanceTrackStep(uint8_t track)
@@ -3489,7 +3513,7 @@ static void seq_advanceTrackStep(uint8_t track)
  * remains reachable. A successful runtime overlay sets the corresponding bit
  * for transport-boundary restoration. FX_SEND updates the transient send
  * overlay consumed by the mixer on the next block. Common caller:
- * seq_drainPendingAutomation(). Affiliates: SceneModTargets, Preset, and
+ * seq_drainPendingAutomationTo(). Affiliates: SceneModTargets, Preset, and
  * InstrumentManager runtime overlay APIs.
  */
 static uint8_t seq_applySceneAutomation(uint16_t target, uint8_t value)
@@ -3589,25 +3613,37 @@ static uint8_t seq_applySceneAutomation(uint16_t target, uint8_t value)
 }
 
 /*
- * Apply queued step automation after front-panel service.
+ * Apply queued step automation up to a mark (S087 stage A; was
+ * seq_drainPendingAutomationTo()).
  *
- * Inputs: the volatile four-byte queue published by TIM3. Output: valid voice
- * descriptor targets update their owning runtime image through
- * InstrumentManager; Scene targets dispatch through seq_applySceneAutomation()
- * to their Preset/Scene owners and never enter the voice retrigger-restore
- * bitmap. FX reset is taken before this pass; FX step markers bracket Effect
- * overlay end candidates, and the final marker group is flushed after the
- * queue handoff. The foreground follows the live producer count and atomically
- * resets only after no append raced the drain. Affiliate: main.c's pre-audio
- * foreground sequence.
- * S081 P2: before applying entries it ends the ramps of tracks whose next
- * step has applied; each written Instrument entry of an rmp track may start a
- * ramp toward the same target on the predicted next step
- * (seq_rampStartIfPaired()).
+ * What:       applies the TIM3 automation records from the drain cursor
+ *             (seq_pending_automation_done) up to, but not including,
+ *             index `limit` (or the producer count if smaller). Valid voice
+ *             descriptor targets update their owning runtime image through
+ *             seq_writeInstrumentAutomation() and may start an S081 P2
+ *             ramp; Scene targets go to seq_applySceneAutomation(); Effect
+ *             targets to effects_applyAutomation() behind the type gate.
+ *             When every published record is applied the queue resets
+ *             under PRIMASK; otherwise the cursor keeps the position.
+ * Why:        D6 (S087 P0 §6.5): a step's own automation must be applied
+ *             after the restore of its resetting trigger and before the
+ *             trigger fires. voiceControl_processPending() takes the mark
+ *             together with its trigger pops (seq_pendingAutomationMark()),
+ *             restores, calls this, then fires the triggers. Records after
+ *             the mark belong to triggers not yet popped and wait one
+ *             block with them, so a later restore cannot undo them.
+ * Inputs:     limit (0..SEQ_PENDING_BUF_COUNT; 0xFF = everything published),
+ *             the queue, the latch/erase filters, seq_menuOverride[].
+ * Outputs:    runtime descriptor values, Scene/Effect automation, ramp
+ *             starts, held bits (seq_automation_dirty[]), the cursor.
+ * Accessors:  voiceControl_processPending() (the only caller since S087).
+ * Affiliates: seq_pendingAutomationMark(), seq_restoreAutomatedParameters(),
+ *             seq_rampStartIfPaired(), main.c render loop,
+ *             PATTERN_DYNAMIC_STACK.md §6.1.
  */
-void seq_drainPendingAutomation(void)
+void seq_drainPendingAutomationTo(uint8_t limit)
 {
-    uint8_t i = 0u;
+    uint8_t i = seq_pending_automation_done;
 
     /* Reset Effect overlays before any records from the new pass apply. */
     if (seq_effectAutomationReset) {
@@ -3631,7 +3667,7 @@ void seq_drainPendingAutomation(void)
      * read and queue reset is detected and left for this same drain pass.
      */
     for (;;) {
-        while (i < seq_pending_automation_count) {
+        while (i < seq_pending_automation_count && i < limit) {
             uint16_t identity = seq_pending_automation[i].identity;
             uint16_t packed = seq_pending_automation[i].payload;
             uint16_t target = (uint16_t)(packed & 0x01FFu);
@@ -3749,21 +3785,43 @@ void seq_drainPendingAutomation(void)
         }
 
         {
-            uint32_t primask;
+            uint32_t primask = __get_PRIMASK();
 
-            __asm volatile("mrs %0, primask\n\tcpsid i"
-                           : "=r"(primask) :: "memory");
-            if (i == seq_pending_automation_count) {
+            __disable_irq();
+            if (i >= seq_pending_automation_count) {
                 seq_pending_automation_count = 0u;
                 seq_pending_automation_drain = 0u;
-                __asm volatile("msr primask, %0" :: "r"(primask)
-                               : "memory");
+                seq_pending_automation_done = 0u;
+                __set_PRIMASK(primask);
                 return;
             }
-            __asm volatile("msr primask, %0" :: "r"(primask)
-                           : "memory");
+            if (i >= limit) {
+                seq_pending_automation_done = i;
+                __set_PRIMASK(primask);
+                return;
+            }
+            __set_PRIMASK(primask);
         }
     }
+}
+
+/*
+ * Mark the automation published so far (S087 stage A).
+ *
+ * What:       returns seq_pending_automation_count.
+ * Why:        voiceControl_processPending() calls it inside the PRIMASK
+ *             section that pops the trigger ring. TIM3 publishes a step's
+ *             trigger and its entries in one interrupt run
+ *             (seq_advanceTrackStep(), seq_fireDeferred()), so the popped
+ *             triggers and the marked entries always belong together.
+ * Inputs:     none. Must be called with interrupts masked.
+ * Outputs:    the producer count (0..SEQ_PENDING_BUF_COUNT).
+ * Accessors:  voiceControl_processPending().
+ * Affiliates: seq_drainPendingAutomationTo(), seq_queueStepAutomations().
+ */
+uint8_t seq_pendingAutomationMark(void)
+{
+    return seq_pending_automation_count;
 }
 
 /*
@@ -4134,7 +4192,7 @@ static uint16_t seq_rampNowQ4(void)
  * seq_rampStartIfPaired() consumes A's own flag when TIM3 set it after the
  * drain's consume. Context: foreground. Affiliates: seq_rampStepEvent(),
  * seq_fireDeferred(), seq_restoreAutomatedParameters(),
- * seq_drainPendingAutomation().
+ * seq_drainPendingAutomationTo().
  */
 static void seq_rampEndTrack(uint8_t track)
 {
@@ -4245,7 +4303,7 @@ static uint8_t seq_rampTrackOn(uint8_t track)
  * automation values under the binding priority rule (MEMORY.md): the same
  * write path keeps the Morph sweep and menu apply from overwriting them.
  * The caller has already validated the target and the R12 override.
- * Context: foreground. Accessors: seq_drainPendingAutomation(),
+ * Context: foreground. Accessors: seq_drainPendingAutomationTo(),
  * seq_rampService(). Affiliates: instrumentManager_writeRuntime(),
  * seq_automation_dirty[].
  */
@@ -4360,7 +4418,7 @@ static void seq_rampStartIfPaired(uint8_t track, uint8_t scene, uint8_t step,
  * values are held automation values (binding priority rule). Cost: at most
  * 64 runtime writes per pass (every ramp changing value each pass), the worst
  * case measured on the stress Scene (DSP CPU policy; plan §7). Context: foreground, audio render loop, right
- * after seq_drainPendingAutomation(). Accessors: main.c
+ * after seq_drainPendingAutomationTo(). Accessors: main.c
  * audio_check_and_render(). Affiliates: seq_rampConsumeSteps(),
  * seq_rampStartIfPaired().
  */
@@ -4437,7 +4495,7 @@ void seq_rampService(void)
  * Foreground only - the drain and restore are foreground too, so no
  * PRIMASK. Inputs: slot 0..5, local parameter index. Outputs: override
  * and dirty bitmaps updated. Affiliates: menu_cellCommitValue
- * INSTRUMENT branch, seq_drainPendingAutomation filter,
+ * INSTRUMENT branch, seq_drainPendingAutomationTo() filter,
  * seq_restoreAutomatedParameters clear.
  */
 void seq_menuOverrideSet(uint8_t slot, uint8_t local)
@@ -5932,7 +5990,7 @@ void seq_chainRepeatSelf(uint8_t restart)
  * deferred step always keeps its automation and its roll. Queueing in TIM3
  * right beside the trigger keeps the foreground order
  * voiceControl_processPending() (reset + trigger) ->
- * seq_drainPendingAutomation() (entries), so the step's own automation
+ * seq_drainPendingAutomationTo() (entries), so the step's own automation
  * lands after its reset. Context: TIM3 only. Inputs:
  * seq_trackShuffleStep/Roll/Vel/Note. Outputs: entries queued, trigger
  * enqueued, pending cleared. Affiliates: seq_processDeferredTriggers()

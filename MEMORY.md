@@ -20,6 +20,19 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
+**S087 in progress (2026-10-28).** Stages A-E of
+S087_P0_IMPLEMENTATION.md are implemented in the working tree: the
+step-automation order, osc1 typ, catalogue v2 + installer, smp/slp
+readers and wtb frame blending. Host gates pass (osc_type, osc_sample,
+osc_wtb, interp_slots, catalogue, wav_install, natural_order,
+sampleoptimize, stepauto_order, drain_cursor, special_tags). Build:
+text 672,080 / data 424 / bss 412,396 (RAM -17,900 B from the v1
+catalogue), flash 672,504 (headroom 81,160), ITCM 15,032 / 16,384.
+Hardware lists §7.1-§7.5 are pending. Open: elf87_check has no symbol
+allow-list for the removed v1 sample paths; one mixer hot loop grew
+14->15 instructions (needs the user's CPU decision); the automation
+wave display is not yet type-aware. See S087_P0_IMPLEMENTATION.md §10.
+
 **Current working source**: **Session 086 (stock table waves `Re3`/`Sw3`,
 the oscillator `pos` row) is closed** (2026-10-28) on
 `dev-ph7-voice_expansion`:
