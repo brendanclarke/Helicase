@@ -47,7 +47,7 @@
  * Inputs:     none; this is the public flash-array contract.
  * Outputs:    the array size seen by Oscillator.c and host/build probes.
  * Accessors:  calcSampleOscBlock() and the crash FM/sync/ring readers.
- * Affiliates: Samples.c; S086_P3_WAV_OSC_POS_PARAMETER.md §2.4.
+ * Affiliates: Samples.c; 086_SESSION_HANDOFF_LOG.md §4.6.
  */
 extern const unsigned char crashSample[32769];
 

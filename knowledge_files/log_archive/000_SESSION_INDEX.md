@@ -2100,3 +2100,38 @@ S085 P1 then added only the Drum `mod` values `snc` and `rng`, under the user ru
   `STORAGE_SRAM_MANIFEST.md`, `MIDI_SPEC.md` §5.5, `FILESYSTEM_SPEC.md`
   (`osc2_mod_type`), `tools/dsp_test/DSP_TEST.md`,
   `S086_P1_OSC_TYPE_EXPANSION.md`, `MEMORY.md`.
+
+### 086 — Stock Table Waves `Re3`/`Sw3`; Continuous Oscillator `pos` (Phase Offset, Cym Sample Position); Mixer Hot-Loop Gate; S087 Sample/Wavetable Plan (2026-10-27/28)
+
+Session 086 began stage S1 of the S086 oscillator type-expansion plan, on `dev-ph7-voice_expansion`, under the S085 "no CPU increase" rule. Commits: `703941cb` (P2 + P3 plans), `e67879e2` (P3/P4 implementation); the assessment fixes and close-out documents are uncommitted. Final DEV link `text=658,872`, `data=424`, `bss=430,296`; payload 659,296 B (**headroom 94,368 B**); ITCM 8,512 / 16,384 B. Everything passed on hardware (2026-10-28).
+
+- **P2, stock waves:**
+  - A first attempt generated the S084 spike's five 303/analog waves at **Load:[Samples]** into sample flash. The user rejected it: not the same mechanism as Tri/Saw/Rec. It was reverted.
+  - **Redone as `const int16_t [11][1024]` program-flash tables**, played by the existing table loops. **Only `Re3` (`SQ3`) and `Sw3` (`SW3`)**, `wav` 6–7, +45,056 B; `ReA`/`TrA`/`SwA` deferred.
+  - **Generator:** `tools/gen_stock_tables.py` turns the spike's harmonic CSV into the tables, with a band limit **measured from `sawTable`**. Only the saw matched; Rec/Tri use a looser taper. Plot tools copied to `tools/plots/`.
+  - **Dispatch:** `osc_stockTables[]` with one variable-pointer case per dispatcher.
+  - **Fixes and moves:** `osc_syncClockInc()` no longer treats the stock waves as sample clocks. `OSC_SAMPLE_START` 6 → 8: user samples moved, no migration.
+  - **Cost:** the same loops (24 / 35 / sync / ring); ITCM +720 B.
+- **P3/P4, `pos` (`osc1_position`, `Oscilltr Position`):**
+  - **Placement:** cell 4 of the first oscillator screen on all four instruments; Snare becomes `coa fin wav pos` / `noi mix`.
+  - **Behaviour:** continuous, `pos`/128 of a cycle.
+    - **At the hit:** start phase + `pos << 25`.
+    - **While playing:** each change is spread over one 32-sample block by bending `phaseInc` (`osc_positionBendApply/Restore`). The circular difference makes 127 → 0 one step; the cap constant is off. Drum `snc` consumes the change without bending.
+  - **Storage:** `OscInfo.position`/`positionApplied`/`positionBendStep` in existing padding (no RAM).
+  - **`Cym` (P4):** the crash sample is one full 2³² phase, so `pos`/128 is a sample position. A 32,769th guard byte was added.
+  - **Not affected:** noise and v1 samples.
+- **Assessment findings, fixed:**
+  - **F1:** a local variable live across the renders LTO inlines into `mixer_calcNextSampleBlock()` added reloads to two inlined per-sample loops. Fixed by keeping the step in `OscInfo`; new gate `elf86_mixer_check` (`elf_hotloops.py`).
+  - **F3:** the host test now compiles the header's constants.
+  - **F2:** the host test was strengthened (P1–P8).
+- **Tooling:** `snapshot86.sh`/`frozen86/`, `elf_loopdump.py`, `elf_hotloops.py`, `test_osc_stock.c`, `test_osc_pos.c`, `extract.py --object` for declarators; targets `stock_tables osc_stock osc_pos osc86_identity engine86_identity elf86_*`.
+- **Next:** `S087_P0_OSC_TYPE_SAMPLES_WAVETABLES.md`: the step-automation order fix, the `typ` rows, catalogue v2, `smp`/`slp` with `pos` decisions D1–D10, `wtb`.
+
+- **Find here**: [086_SESSION_HANDOFF_LOG.md](086_SESSION_HANDOFF_LOG.md),
+  `INSTRUMENTS_DSP_REFERENCE.md` (§5 engines, §6.1 oscillator: stock waves
+  and `pos`, §8 costs, §9.3, §10 pitfalls, §11), `CPU_USE_DSP_AUDIT.md`
+  (items 41–44), `STORAGE_SRAM_MANIFEST.md`, `FILESYSTEM_SPEC.md`
+  (`osc1_position`, descriptor counts, `wav` values), `MIDI_SPEC.md` §5.5,
+  `OSC_INTERP_AUDIT.md`, `tools/dsp_test/DSP_TEST.md`,
+  `tools/plots/README.md`, `S087_P0_OSC_TYPE_SAMPLES_WAVETABLES.md`,
+  `MEMORY.md`.

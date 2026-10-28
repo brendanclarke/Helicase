@@ -7,7 +7,7 @@ Copied unchanged from the S084 spike (`Helicase-dev-ph7-spike/`) in S086.
 `stock_wave_harmonics.csv` is the harmonic recipe for the five new stock
 waves. In S086 it is turned into fixed `[11][1024]` octave tables in program
 flash, built the same way as `triTable`/`sawTable`/`recTable`. It is not used
-by an install-time generator. See `S086_P2_ADD_STOCK_WAVES_CORRECTLY.md`.
+by an install-time generator. See `086_SESSION_HANDOFF_LOG.md §3`.
 
 ## Requirements
 
@@ -25,6 +25,7 @@ cd tools/plots && /tmp/lxrplots/bin/python plot_current_drive.py   # etc.
 |---|---|---|
 | `plot_current_drive.py` | `current_drive_profiles.png` | Today's filter `drv` soft clip, the Voice/Mix `drv` distortion, the real ZDF LP/HP loops driven by a full-scale sine, and small-signal gain against the control value |
 | `plot_stock_waves.py` | `stock_waves_303_analog.png`, `stock_wave_harmonics.csv` | The new stock waves `sq3 sw3 sqa tra swa`: reference trace, the level-0 table, how they band-limit at 1 kHz and 4 kHz, harmonic spectra; the CSV is the harmonic recipe (k = 1..511) the install-time generator would use |
+| `plot_stock_tables.py` | `stock_tables_levels.png` | The firmware's generated stock tables (`Core/DSPAudio/wavetableStock.c`, written by `tools/gen_stock_tables.py` from `stock_wave_harmonics.csv`): levels 0/4/8/10 beside Rec/Saw and the per-level spectra (S086) |
 | `plot_pwm.py` | `pwm_families.png` | The `pwm` type families `prc psw ptr pq3 pw3 swp` at four control values, as played at 220 Hz |
 | `plot_wavetable_formats.py` | `wavetable_formats.png` (+ printed table; `--stock` prints the stock-wave layouts) | Wavetable storage formats played as the oscillator would play them: aliasing/images and brightness per note against flash size, on a folder of single cycles (default `SD_CARD/loops`) |
 | `plot_waveshapers.py` | `waveshapers_static.png`, `waveshapers_stateful.png` | The proposed filter drive types (`dty`): memoryless shapers with transfer curves, and the stateful ones (zero-crossing, trackers) on a sine and a kick-like glide |

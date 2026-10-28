@@ -2,8 +2,9 @@
 
 **Session:** 086, phase P4 (follows `S086_P3_WAV_OSC_POS_PARAMETER.md`, Q2)
 **Written:** 2026-10-28
-**Status:** reviewed (user, 2026-10-28). Q1 is decided (`pos`/128); Q2–Q4
-follow the recommendations unless changed. No code yet.
+**Status:** **implemented with P3 and passed on hardware (user, 2026-10-28)**;
+record `S086_P3_IMPLEMENTATION.md` (C1-C5, §8-§9). Q1-Q4 decided as below.
+§6 lists the architectural decisions `pos` on samples still needs (for S2).
 
 ---
 
@@ -132,6 +133,40 @@ byte) in the same change (Q4).
 | # | Question | Recommendation |
 |---|---|---|
 | **Q1** | Scale `pos`/128 of the length (127 plays the last 1/128 of the sample), not `pos`/127 (where 127 would be the very end)? | **Decided (user, 2026-10-28): `/128`.** It is the same as the stock waves, 64 is exactly the middle, and every value is a distinct start. With `/127`, 127 would be the end of a looping sample, which is the start again (same as 0) |
-| **Q2** | User samples (`wav` 8+): include them now? | **No: S2.** The v1 user samples are replaced by `smp`/`slp` in S2. The rule is worked out for S2: start = (`pos` × size) << 10; per-sample bend = d × size × 32, exact in the `<< 17` units. But one-shot samples need a block-level clamp at both ends: a backward bend near the start must not wrap the phase past 0, because the one-shot reader would then index far beyond the sample |
-| **Q3** | Implement P4 with P3 (one condition in the helper)? | **Yes** |
-| **Q4** | Add the crash guard byte (`crashSample[32769]`, wrap value) in the same change? | **Yes**: one byte of flash, and it removes a one-past-the-end read that `pos` would make reachable on purpose |
+| **Q2** | User samples (`wav` 8+): include them now? | **Decided: no, S2.** The v1 user samples are replaced by `smp`/`slp` in S2. *(Revised 2026-10-28: the rule first written here used the v1 `<< 17` phase; S2 uses the Q20.12 phase of S086 P1 §4.2. See §6 D1.)* |
+| **Q3** | Implement P4 with P3 (one condition in the helper)? | **Decided: yes** (done) |
+| **Q4** | Add the crash guard byte (`crashSample[32769]`, wrap value) in the same change? | **Decided: yes** (done) |
+
+---
+
+## 6. Open architectural decisions: `pos` on samples (for S2)
+
+**`Cym` needs no further decisions:** it is implemented and passed. The
+crash sample is exactly one full 2³² phase range and loops, so it behaves
+like a periodic wave.
+
+**Real samples (`smp`/`slp`, S2) do not have those properties:**
+- arbitrary length;
+- a one-shot end;
+- a loop region that is not the whole range.
+
+So the P3 rule cannot be reused unchanged. These decisions belong in the S2
+plan, before any sample code. Each has a recommendation.
+
+| # | Decision | Why it is open | Recommendation |
+|---|---|---|---|
+| **D1** | **Phase format and arithmetic.** The S2 reader uses Q20.12 (S086 P1 §4.2; the spike's `OscillatorSample.c`), not the v1 `<< 17` units. | P4 Q2's first rule used the v1 units, which also cap samples at 32,768 points. | Start = ((`pos` × len) >> 7) << 12. One step held over one 32-sample block is exactly **d × len** per sample (len/128 points × 2¹² / 32). It is exact for every length up to 2²⁰ points, and \|d × len\| ≤ 2²⁶ fits `int32`. Record it in the S2 plan. |
+| **D2** | **Which length `pos` refers to in `slp`.** The spike loops from the `pos` start to the end, so its loop moves with `pos`. S086 P1 Q7 recommends a fixed loop region. | With continuous `pos`, a moving loop region shifts on every LFO step. | **Fixed loop region** (P1 Q7). `pos` is a fraction of the **whole sample**. A start before the loop plays the lead-in, then loops. A bend moves the playhead and then wraps it into the loop region. |
+| **D3** | **Circular or linear difference.** P3 treats 127 → 0 as +1 step, because a phase wraps. | A one-shot is not periodic: 127 → 0 must be a jump back of almost the whole sample, not 1/128 forward past the end. | **Per type:** circular for periodic content (stock waves, `Cym`); **linear** (−127..+127) for `smp` and `slp`, followed by the edge rule (D4) and the loop wrap (D2). The `typ`/waveform chooses the rule inside the apply helper. |
+| **D4** | **One-shot edges.** Behaviour when a bend crosses the end or the start, and whether a finished one-shot can be revived by moving `pos` back. | The v1 reader stops advancing at the end. A backward bend near 0 must not wrap the phase into an out-of-range index. | Clamp at the start (0). Moving past the end ends the hit early. **A finished one-shot stays finished until the next trigger** (no revival by `pos`). The clamp is applied to the block's total bend, at block level. |
+| **D5** | **Bend size scales with sample length.** One `pos` step is len/128 points. | For a 1 s sample one step plays 344 points in 32 samples (≈ 11× speed); for 10 s, ≈ 108×. An LFO on a long sample becomes a fast smear that also aliases (samples are not band-limited). | **A time-based cap for samples** (points per block, e.g. ≤ 4× playback speed), separate from P3's phase cap. A larger change glides over several blocks. Tune by ear in S2 hardware tests. |
+| **D6** | **Step automation must be exact at the hit** (P3 Q14). Today the trigger fires before the step's values are drained, so the hit starts at the base `pos` and glides within 0.7 ms. | Inaudible for a phase offset (hardware passed). For samples, **per-step start positions (slicing)** are the main use; each slice would start at the wrong place and smear. | **Fix the ordering before S2's `smp`**, as its own small step: a step's own automation must land before its trigger (drain first, or let the trigger consume the voice's pending values). It affects every trigger-time parameter, so it needs its own plan and tests. |
+| **D7** | **Re-anchoring on a type or source change.** `positionApplied` means a phase offset for `wav`, a point offset for `smp`/`slp`, and nothing for `wtb` (`pos` is the frame position there). | A `typ`, waveform or sample change in the middle of a hit could release a stale bend in the wrong units. | **Rule:** any change of `typ`, waveform family or sample re-anchors: `positionApplied = position`, no bend that block. Today's non-phase waves already consume the delta, which is the same rule. |
+| **D8** | **No live state across the render** (assessment F1). | The sample bend needs the length factor at restore. | Keep the step in `positionBendStep` (`int8_t`, already there) and recompute step × len at restore from `sampleCacheSize`, which cannot change inside a block. No new field, nothing live across the render. Gate with `elf86_mixer_check`. |
+| **D9** | **Sync slave reset target.** The spike restarts a synced sample at its start + overshoot. | With continuous `pos`, "start" could mean the trigger start or the current offset. | The reset target is the **`pos` start point** (as at a trigger). No bend in `snc` (P3 Q12), so the two agree. Decide with the S2 sync master rules (S086 P1 §2.2). |
+| **D10** | **Modulators that never reset** (Drum FM, HiHat; P3 Q10, P1 Q5). | For `smp` on those oscillators the trigger start never happens. | Decide together with `typ` and the modulator `pos` rows (the next step), not in S2. |
+
+**Order:**
+1. D6 (automation order): a small standalone step.
+2. D10, with the `typ` rows.
+3. D1–D5 and D7–D9 in the S2 plan.

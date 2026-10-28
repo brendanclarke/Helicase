@@ -842,3 +842,35 @@ the new copy/clear work is foreground-only and bounded.
       overall", gated per stage on the device. Record:
       `085_SESSION_HANDOFF_LOG.md` §2; the failed tree
       `Helicase-dev-ph7-voice-pwm-spike/` (post-mortems there).
+
+### Session 086 additions (record in `086_SESSION_HANDOFF_LOG.md`)
+
+41. **ADDED (S086 P2): stock table waves `Re3`/`Sw3`.** Two `[11][1024]`
+    tables in program flash (+45,056 B), played by the existing table
+    loops through a variable table pointer (`osc_stockTables[]`): plain
+    24 / 23, FM 35, the same sync and ring functions. No existing loop
+    gained an instruction (`elf_osc86_check`, `elf_loops86_check`; the
+    dispatchers changed by register allocation only). ITCM +720 B (the
+    generic copies inlined into the ITCM dispatchers). Rejected before it:
+    install-time generation into sample flash with new variable-shift
+    readers (the sync copy was +2/+3, and the mechanism differed from the
+    existing waves).
+42. **ADDED (S086 P3/P4): `pos`, a continuous oscillator phase offset.** No
+    per-sample cost: a shift and an add per trigger, and a per-block
+    `phaseInc` bend (about 10 instructions per block per voice, ≈ 0.3 per
+    sample) outside the loops. The alternative, a phase offset added inside
+    every loop, would have cost +1 per sample (+3 with a per-sample ramp)
+    in new loop copies.
+43. **FOUND AND FIXED (S086 assessment F1): register pressure in the
+    mixer.** The voice renders are inlined into
+    `mixer_calcNextSampleBlock()`. The first `pos` version kept the bend in
+    a local variable across the render; two inlined per-sample loops
+    gained reloads (an FM loop with a Sine carrier 29 → 31, two flash
+    literal loads; a noise loop 15 → 16, one stack reload). Keeping the
+    step in `OscInfo` restored both to their P2 lengths.
+44. **ADDED (S086): mixer hot-loop gate.** `tools/dsp_test/elf_hotloops.py`
+    (`make elf86_mixer_check`) pairs the per-sample do-while loops of
+    `mixer_calcNextSampleBlock()` with a P2 baseline by opcode sequence
+    (layout-insensitive) and fails if one grew. Hardware (user): the
+    six-slot worst-case Scene with an LFO on every `pos` reads the same
+    `cpu` as before.

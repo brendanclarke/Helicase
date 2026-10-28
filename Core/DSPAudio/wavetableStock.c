@@ -5,7 +5,7 @@
  *             sawTable/recTable/triTable (wavetable.c): level n is the
  *             octave below 16.3516 * 2^n Hz (osc_octaveEdgeHz), peak 32767.
  *             Waves: sq3Table = Re3, sw3Table = Sw3.
- * Why:        S086_P2_ADD_STOCK_WAVES_CORRECTLY.md: the new stock waves are
+ * Why:        086_SESSION_HANDOFF_LOG.md §3: the new stock waves are
  *             fixed tables in program flash, read by the Tri/Saw/Rec loops.
  * Inputs:     tools/plots/stock_wave_harmonics.csv
  *             SHA-256 8e3be774c9cc4836068daf48bde53dad8d376ba248dbddb82c666c812fd7e602

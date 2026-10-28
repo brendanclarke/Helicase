@@ -77,6 +77,11 @@ for testing.
 | `snapshot85.sh`, `frozen85/` | S085 P1: the pre-change `Oscillator.c/.h`, `BufferTools.c/.h`, `DrumVoice.c/.h`, `DrumParameters.c`, `MenuText.h`, and `elf_osc.txt` (the normalised firmware disassembly of every existing oscillator loop). `snapshot85.sh` refuses to run if `frozen85/` exists. |
 | `elf_symdump.py` | Dumps or compares the normalised disassembly of listed firmware symbols (all LTO clones), with addresses removed (S085 P1 G-A). |
 | `test_osc_mod.c` | Drum `snc`/`rng` oscillator support: the ring and sync copies against the unchanged plain loops, the builder, the clock and the mappings (S085 P1). |
+| `snapshot86.sh`, `frozen86/` | S086: the pre-change sources (taken at `e56bb957`: `Oscillator.c/.h`, `BufferTools.c/.h`, `SampleMemory.c/.h`, the four voice `.c` files, `MenuText.h`), the identity allow-lists (`identity_allowed.txt`, `engine_identity_allowed.txt`), the S085-end ELF dumps (`elf_osc.txt`, `elf_loops.txt`, `armcheck_oscmod_baseline.txt`) and the P2-image dumps (`elf_osc_p2.txt`, `elf_loops_p2.txt`, `elf_mixer_p2.txt`). |
+| `elf_loopdump.py` | Dumps or compares the per-sample loop bodies inside listed firmware symbols, with addresses removed and branch targets relative; `--compare` reports EXACT / RENAMED (registers only) / MISSING (S086). |
+| `elf_hotloops.py` | Compares two `elf_loopdump.py` dumps of one large function by pairing its per-sample do-while loops on opcode sequences (layout-insensitive); fails when a loop grew. Used for `mixer_calcNextSampleBlock()`, where LTO inlines the voice renders (S086 F1). |
+| `test_osc_stock.c` | Stock table waves: dispatcher routing, partitions, interpolation, `osc_setFreq()` (S086 P2). |
+| `test_osc_pos.c` | `pos`: the trigger offset, the per-block bend and its restore, compiled with the header's own constants (S086 P3/P4). |
 | `armcheck/postchain.c`, `armcheck/mixer.c` | ARM translation units that include old and new code side by side for `fpseq.py`. |
 | `build/` | Generated fragments, objects and programs. Git-ignored; `make clean` deletes it. |
 | `DSP_TEST.md` | This document. |
@@ -217,7 +222,7 @@ S073 tree.
 | `elf86_p3_check` | Compares P3's linked oscillator functions and per-sample loops with the P2 snapshot. | seconds | `0 missing, 0 changed`; `61 exact` loops |
 | `elf86_mixer_snapshot` | Saves the P2 loop bodies of `mixer_calcNextSampleBlock()` (run once, `FW_ELF=<P2 build>`) to `frozen86/elf_mixer_p2.txt` | seconds | `97 loops` |
 | `elf86_mixer_check` | `elf_hotloops.py`: every per-sample do-while loop of the mixer (where LTO inlines the voice renders) paired with P2 by opcode sequence; fails if one is longer (S086 P3 assessment F1). Other fragments (jump tables, setup paths, cold stubs) are not compared | seconds | `0 grew` (shrank entries are pairing of fragment variants; informational) |
-| `elf_osc86_check` / `elf_loops86_check` | whole functions (`elf_symdump.py`) and per-sample loop bodies (`elf_loopdump.py`) of the oscillator symbols, against `frozen86/` (an `e56bb957` build). Supersede `elf_osc_check` from S086 on | seconds | exit 1 by design after S086 P2: 11 CHANGED (8 dispatchers; 3 user-sample functions with `subs #6` → `#8`), 1 ADDED (`calcFmBlock.constprop.3`); loops: 47 exact, 1 renamed, 10 noise-loop fragments moved (hand-checked equal counts, `S086_P2_IMPLEMENTATION.md` §4) |
+| `elf_osc86_check` / `elf_loops86_check` | whole functions (`elf_symdump.py`) and per-sample loop bodies (`elf_loopdump.py`) of the oscillator symbols, against `frozen86/` (an `e56bb957` build). Supersede `elf_osc_check` from S086 on | seconds | exit 1 by design after S086 P2: 11 CHANGED (8 dispatchers; 3 user-sample functions with `subs #6` → `#8`), 1 ADDED (`calcFmBlock.constprop.3`); loops: 47 exact, 1 renamed, 10 noise-loop fragments moved (hand-checked equal counts, `086_SESSION_HANDOFF_LOG.md` §3.5) |
 | `clean` | Deletes `build/` | — | — |
 
 These targets are specific to the S073 changes. They stay valid as

@@ -21,7 +21,7 @@ Why:        S086 P3 assessment F1: adding code around the voice renders made
 Inputs:     --compare BASE NOW (elf_loopdump.py outputs).
 Outputs:    a report; exit 1 when a hot path grew, else 0.
 Accessors:  tools/dsp_test/Makefile elf86_mixer_check.
-Affiliates: elf_loopdump.py (the dumps); S086_P3_IMPLEMENTATION.md §8-§9.
+Affiliates: elf_loopdump.py (the dumps); 086_SESSION_HANDOFF_LOG.md §8-§9.
 """
 import argparse
 import difflib

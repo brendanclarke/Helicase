@@ -223,7 +223,7 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 		 * Why:        the hit starts exactly at today's start phase + pos;
 		 *             position 0 adds 0, so today's start is kept bit for bit.
 		 *             It is added after the transient offset-mode scaling
-		 *             (S086 P3 Q6). Velocity modulation has already run at the
+		 *             (086 log §4.2). Velocity modulation has already run at the
 		 *             top of this function, so a velocity target on pos is exact
 		 *             for this hit.
 		 * Inputs:     voice->osc.position (velocity-modulated), osc.waveform.
@@ -436,8 +436,8 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	 *             the delta is consumed (positionApplied follows pos) but
 	 *             phaseInc is not changed, because every master reset sets the
 	 *             slave's phase to a target without pos, and osc_syncRatioQ16()
-	 *             reads the slave's phaseInc (S086 P3 Q12).
-	 * Why:        pos is continuous (S086 P3 §2.3). The step lives in the
+	 *             reads the slave's phaseInc (086 log §4.6).
+	 * Why:        pos is continuous (086 log §4.3). The step lives in the
 	 *             oscillator, not in a local, so nothing stays live across the
 	 *             renders that LTO inlines into mixer_calcNextSampleBlock()
 	 *             (assessment F1). modOsc is a separate OscInfo and is never

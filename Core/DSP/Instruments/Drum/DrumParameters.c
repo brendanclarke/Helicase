@@ -263,7 +263,7 @@ const ParamDescriptor drum_param_descriptors[] = {
      *             osc_positionBendRestore() (Oscillator.h).
      * Affiliates: DrumVoice.c: Drum_triggerVoice() and
      *             Drum_calcVoiceSyncBlock(); FILESYSTEM_SPEC.md (the key);
-     *             S086_P3_WAV_OSC_POS_PARAMETER.md.
+     *             086_SESSION_HANDOFF_LOG.md §4.
      */
     ROW("osc1_position", "Oscilltr", "Position", "pos", DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
 };

@@ -5,7 +5,8 @@
 **Branch:** `dev-ph7-voice_expansion`, after S086 P2 (Re3/Sw3; uncommitted)
 **Written:** 2026-10-27; **revised 2026-10-28**: `pos` is now continuous
 (user), §2.3–§2.5.
-**Status:** reviewed (user, 2026-10-28). Every recommendation in §9 is
+**Status:** **implemented and passed on hardware (user, 2026-10-28)**;
+record `S086_P3_IMPLEMENTATION.md`. Reviewed (user, 2026-10-28). Every recommendation in §9 is
 accepted. Q2 is split: `Cym` is planned in `S086_P4_SAMPLE_CYM_POS.md`
 (implemented together with this step), and the v1 user samples go to S2.
 No code yet.

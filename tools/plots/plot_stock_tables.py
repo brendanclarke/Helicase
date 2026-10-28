@@ -9,7 +9,7 @@ What:       reads the tables the device plays (Core/DSPAudio/wavetableStock.c,
               right  the harmonic levels (dB re. the fundamental) of each
                      level, the counterpart's in grey, and each level's
                      Nyquist harmonic count H as a tick.
-Why:        S086_P2_ADD_STOCK_WAVES_CORRECTLY.md §3.2: the review picture of
+Why:        086_SESSION_HANDOFF_LOG.md §3.3: the review picture of
             what the firmware will play, level by level.
 Inputs:     Core/DSPAudio/wavetableStock.c, Core/DSPAudio/wavetable.c.
 Outputs:    tools/plots/stock_tables_levels.png.

@@ -96,8 +96,8 @@ typedef struct OscStruct
 	 * Outputs:    read by the same helpers only.
 	 * Accessors:  osc_positionTrigger(), osc_positionBendApply().
 	 * Affiliates: positionBendStep below; the osc1_position rows in the four
-	 *             *Parameters.c files; S086_P3_WAV_OSC_POS_PARAMETER.md and
-	 *             S086_P4_SAMPLE_CYM_POS.md.
+	 *             *Parameters.c files; 086_SESSION_HANDOFF_LOG.md §4 and
+	 *             086_SESSION_HANDOFF_LOG.md §5.
 	 */
 	uint8_t		position;
 	uint8_t		positionApplied;
@@ -122,7 +122,7 @@ typedef struct OscStruct
 	 *             padding after waveInterpNext, so OscInfo keeps its size.
 	 * Inputs:     osc_positionBendApply().  Outputs: osc_positionBendRestore().
 	 * Accessors:  those two helpers only; never stored in a file.
-	 * Affiliates: the four voice render functions; S086_P3_IMPLEMENTATION.md §9.
+	 * Affiliates: the four voice render functions; 086_SESSION_HANDOFF_LOG.md §9.
 	 */
 	int8_t		positionBendStep;
 	float		waveInterpFrac;			/* blend amount [0..1] between waveform and next */
@@ -452,7 +452,7 @@ static inline uint8_t osc_isTableWave(const uint8_t waveform)
  *             without drift; the asserts pin both constants in the firmware
  *             build, and test_osc_pos.c compiles this same block (assessment
  *             F3), so a wrong value fails the build and the host test. The
- *             cap stays available for listening tests (S086 P3 Q11).
+ *             cap stays available for listening tests (086 log §4.5).
  * Inputs:     OUTPUT_DMA_SIZE from config.h; OSC_POS_BEND_CAP may be
  *             predefined (the host cap build uses 8).
  * Outputs:    the two constants.
@@ -481,7 +481,7 @@ _Static_assert(OSC_POS_BEND_CAP >= 1 && OSC_POS_BEND_CAP <= 64,
  * Inputs:     waveform ID.
  * Outputs:    1 for phase waves, otherwise 0.
  * Accessors:  osc_positionTrigger(), osc_positionBendApply().
- * Affiliates: osc_isTableWave(), S086_P4_SAMPLE_CYM_POS.md.
+ * Affiliates: osc_isTableWave(), 086_SESSION_HANDOFF_LOG.md §5.
  */
 static inline uint8_t osc_positionIsPhase(const uint8_t waveform)
 {
@@ -531,7 +531,7 @@ static inline uint32_t osc_positionTrigger(OscInfo* osc)
  *             for non-phase waves, and for Drum snc (bend = 0), means a later
  *             waveform or mode switch cannot release a stale bend.
  * Inputs:     osc->position, osc->positionApplied, osc->waveform; bend: 1 to
- *             bend, 0 to consume the delta only (Drum snc, S086 P3 Q12).
+ *             bend, 0 to consume the delta only (Drum snc, 086 log §4.6).
  * Outputs:    osc->phaseInc (bent), osc->positionBendStep,
  *             osc->positionApplied.
  * Accessors:  Drum_calcVoiceSyncBlock(), Snare_calcSyncBlockVoice(),
@@ -540,7 +540,7 @@ static inline uint32_t osc_positionTrigger(OscInfo* osc)
  * Affiliates: osc_positionBendRestore() (must follow the render);
  *             osc_setFreq() (its cache would keep a bend left in phaseInc);
  *             calcPeriodicInterp*() (end the block at start + phaseInc x size,
- *             which includes the bend); S086 P3 §2.3.
+ *             which includes the bend); 086 log §4.3.
  */
 static inline void osc_positionBendApply(OscInfo* osc, const uint8_t bend)
 {

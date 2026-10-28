@@ -5,7 +5,8 @@
 implemented together (P4 Q3).
 **Branch:** `dev-ph7-voice_expansion`, P2 state (Re3/Sw3; uncommitted)
 **Written:** 2026-10-28
-**Status:** implemented; hardware tests pending. Step 0 baseline recorded;
+**Status:** **passed** (2026-10-28): implemented, assessed (§8), fixed (§9),
+and hardware P3 H1–H10 and P4 C1–C4 passed (user). Step 0 baseline recorded;
 firmware changes were applied bottom-up and verified against the P2 image.
 
 ## Implementation notes
@@ -1236,8 +1237,12 @@ confirmed byte-identical afterwards:
 | `armcheck-postchain`, `armcheck-mixer`, `armcheck-filter` | MATCH / MATCH / 81→39 |
 | `filter` | S1 PASS (SDR 91.6896 / 86.5468) |
 
-### 9.6 Still open
+### 9.6 Hardware result
 
-- **Hardware:** P3 H1–H10 and P4 C1–C4. H10 (G-C, the six-slot worst case)
-  is still the CPU gate. The static evidence now shows no per-sample loop
-  longer than P2, in the oscillator code or in the mixer.
+- **Passed (user, 2026-10-28):** P3 H1–H10, including H10 (G-C, the six-slot
+  worst case), and P4 C1–C4, on the fixed image of §9.5.
+- **As built:**
+  - The bend cap stays at 64 (off); no change was asked for (P3 Q11).
+  - The step-automation glide at the hit stays as designed (P3 Q14).
+- **Remaining forward questions** are recorded in `S086_P4_SAMPLE_CYM_POS.md`
+  §6 (pos on samples, for S2) and P3 Q10 (modulator `pos`, with `typ`).

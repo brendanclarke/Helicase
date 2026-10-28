@@ -407,6 +407,14 @@ unchanged (identity, as in step automation).
   enumerated lists, target tokens), the same rule step automation applies.
 - Drum `osc2_mod_type` (`mod`): 0 `fm`, 1 `mix`, 2 `snc`, 3–127 `rng`
   (S085 P1; before S085, 1–127 gave `mix`).
+- `oscN_wave` (`wav`): 0–7 the built-in waves (`Sin Tri Saw Rec Noi Cym Re3
+  Sw3`), 8 on the installed user samples (since S086; before, samples
+  started at 6); values above the last sample clamp to it.
+- `osc1_position` (`pos`, S086): 0–127, identity. It was appended as the
+  last descriptor of each instrument (local index 39; Snare 38), so its NRPN
+  number is slot × 64 + that index; every earlier NRPN number and MIDI Learn
+  row is unchanged. A move glides the oscillator phase within one block
+  (`INSTRUMENTS_DSP_REFERENCE.md` §6.1.1).
 - The only translation is the Morph amounts (§5.2).
 - WIDE8 Effect rows expand through the Effect type's 7-bit expansion, as
   automation does.

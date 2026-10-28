@@ -1,85 +1,119 @@
-# S085 Inter-Session Working Notes — carry-over after the Session 085 close
+# S086 Inter-Session Working Notes — carry-over after the Session 086 close
 
-Last updated: 2026-10-27 (Session 085 closure; for Session 086). This file
-was the S078 → S079 … S084 → S085 carry-over and has been rewritten in place
-again. The full Session 085 record is
-`knowledge_files/log_archive/085_SESSION_HANDOFF_LOG.md`. Authorities:
+Last updated: 2026-10-28 (Session 086 closure; for Session 087). This file
+was the S078 → S079 … S085 → S086 carry-over and has been rewritten in place
+again. The full Session 086 record is
+`knowledge_files/log_archive/086_SESSION_HANDOFF_LOG.md`. The S087 startup
+document is `S087_P0_OSC_TYPE_SAMPLES_WAVETABLES.md` (root).
+
+**Authorities:**
 - `INSTRUMENTS_DSP_REFERENCE.md`:
-  - §5.1.1 (Drum mod modes `fm mix snc rng`, the mod envelope, the `rng`
-    ramp);
-  - §6.1 (the sync/ring oscillator family and its placement rules);
-  - §8 (per-mode costs);
-  - §9.3 (adding an oscillator mode or type under the CPU rule);
-  - §10 (pitfalls);
-- `CPU_USE_DSP_AUDIT.md` items 36–40;
-- `STORAGE_SRAM_MANIFEST.md` (the S085 rows, the ITCM table);
-- `OSC_INTERP_AUDIT.md` (interpolation in `snc`/`rng`);
-- `MIDI_SPEC.md` §5.5; `FILESYSTEM_SPEC.md` (`osc2_mod_type`);
-- `tools/dsp_test/DSP_TEST.md` (the S085 targets).
+  - §6.1.1 (`pos`);
+  - §6.1.2 (stock table waves and their generator);
+  - §5 (engines);
+  - §8 (costs);
+  - §9.3 (adding a stock wave, oscillator work under the CPU rule);
+  - §10 (pitfalls: state live across an inlined render, the Apply/Restore
+    pairing, header constants in tests);
+- `CPU_USE_DSP_AUDIT.md` items 41–44;
+- `STORAGE_SRAM_MANIFEST.md` (S086 rows, ITCM table, flash option 4:
+  sector 7);
+- `FILESYSTEM_SPEC.md` (`osc1_position`, `wav` values);
+- `MIDI_SPEC.md` §5.5;
+- `OSC_INTERP_AUDIT.md`;
+- `tools/dsp_test/DSP_TEST.md`.
 
-## Build metrics at S085 closure
+## Build metrics at S086 closure
 
 | Metric | Value |
 |---|---|
-| text / data / bss (DEV config) | 613,536 / 424 / 430,296 |
-| Flash payload | 613,960 B of 753,664 B; **headroom 139,704 B** |
-| ITCM | 7,792 / 16,384 B (8,592 free; S084 4,168) |
+| text / data / bss (DEV config) | 658,872 / 424 / 430,296 |
+| Flash payload | 659,296 B of 753,664 B; **headroom 94,368 B** (the stock tables took 45,056 B) |
+| ITCM | 8,512 / 16,384 B (7,872 free) |
 | DTCM statics / FX-arena margin | 4,472 B / 3,712 B (unchanged) |
-| S085 SRAM | `DrumVoice` 588 → 596 B, so `runtime_slots` +96 B (`.bss` +96); approved (plan r3; ramp +48 B confirmed) |
-| Branch | `dev-ph7-voice_expansion`; commits `1ea234ea` (planning), `b450d76a` (pre-implement), `8812bffd` (P1). The mod-envelope and ramp follow-ups, the F1/F4 doc fixes and the close-out documents are uncommitted |
-| Production build (`DEV_MODE_LOGGING 0`) | last measured at S075 F1; re-measure (S081–S085 unmeasured) |
-| Host checks | `make -C tools/dsp_test oscmod_identity osc_mod elf_osc_check special_tags armcheck-oscmod`: all pass (`osc_mod failures: 0`; `elf_osc` 0 missing / 0 changed, one known `PADDING` line; tags 155/0) |
+| RAM | no change (`OscInfo` 72 B; voices 596 / 420 / 476 / 484 B) |
+| Branch | `dev-ph7-voice_expansion`. Commits `703941cb` (P2 + P3 plans), `e67879e2` (P3/P4 implementation). Uncommitted: the assessment fixes, comment re-pointing, close-out documents |
+| Production build (`DEV_MODE_LOGGING 0`) | last measured at S075 F1; re-measure (S081–S086 unmeasured) |
+| Host checks | `make -C tools/dsp_test osc_mod osc_stock osc_pos osc86_identity engine86_identity special_tags stock_tables elf86_p3_check elf86_mixer_check`: all pass (159 tag rows; mixer 0 grew) |
+
+## Carry-over from Session 086 (stock waves, `pos`)
+
+1. **Hardware: everything passed** (user, 2026-10-28): P3 H1–H10 including
+   the six-slot G-C with an LFO on every `pos`, and P4 C1–C4.
+   - **As built:** the bend cap is off (64); the step-automation glide at
+     the hit is kept for `pos`.
+2. **Next: Session 087** from `S087_P0_OSC_TYPE_SAMPLES_WAVETABLES.md`.
+   - **Stages:**
+     - A: step automation lands before its trigger (D6; needed for sample
+       slicing);
+     - B: the `typ` rows and modulator `pos` rows, with the reset decision
+       for Drum FM / HiHat modulators;
+     - C: catalogue v2 + installer + RAM release (≈ −16 KB); the spike's
+       61,120 B stock block at the sample-flash floor is obsolete;
+     - D: `smp`/`slp` (Q20.12, padding, fixed loop region, copies,
+       sync-master rules) with `pos` D1–D5, D7–D9;
+     - E: `wtb` (power-of-two frames, one-frame loop, blending through the
+       interpolation pool).
+   - **Answer its Q1–Q13 first;** freeze the user-sample ceilings (§1.4
+     there) before stage D removes those loops.
+3. **The sample `pos` decisions** (S087 P0 §6.5; log §15.2):
+
+   | # | Recommendation |
+   |---|---|
+   | D1 | Q20.12, start = ((`pos` × len) >> 7) << 12, bend = d × len per sample |
+   | D2 | fixed loop region; `pos` over the whole sample |
+   | D3 | linear difference for samples |
+   | D4 | clamp at 0; past the end ends the hit; no revival |
+   | D5 | a time-based cap |
+   | D6 | stage A |
+   | D7 | re-anchor on type/source change |
+   | D8 | step in `positionBendStep`, length at restore |
+   | D9 | sync reset target = the `pos` start |
+   | D10 | stage B |
+
+4. **Binding rules added in S086** (`MEMORY.md`, "Oscillator work under the
+   CPU rule"):
+   - no state live across a voice render (keep it in `OscInfo`; free
+     padding at offsets 34–35, 75);
+   - `osc_positionBendApply()` / `osc_positionBendRestore()` always pair
+     around one render;
+   - host tests compile the header's constants;
+   - new waveforms use the existing mechanism.
+5. **Reference material:** the spike trees and the S085/S086_P1 planning
+   documents were removed from the working tree at the close.
+   - **Recover:** `git show e56bb957:S086_P1_OSC_TYPE_EXPANSION.md`,
+     `git show b450d76a:S085_SAMPLE_INDEX_SPEEDUP.md`,
+     `git show 1ea234ea:S085_OSC_MOD_CHERRYPICK.md`.
+   - **Spike code:** `26fb7c3` / `4ad2f850` / `ef7d5445` in their own
+     repositories (S087 P0 Q1).
+   - **`.gitignore`** still names `Helicase-dev-ph7-spike/`; the pwm-spike
+     gitlink deletion is unstaged.
+6. **Disposable (user):** the five root S086 task documents (carried by the
+   086 log and the specifications; code comments point to the log).
+7. **Deferred S086 items:**
+   - `ReA`/`TrA`/`SwA`: one generator line + ID/name/table each, +22,528 B
+     each;
+   - the Re3/Sw3 level difference (≈ 8 / 2 dB quieter than Rec/Saw);
+   - LFO depth wrap on `pos` (clamped today);
+   - `OscInfo.startPhase` / `Drum_setPhaseVoice()` clean-up;
+   - the sector-7 flash option if flash runs out
+     (`STORAGE_SRAM_MANIFEST.md` §3.6).
+8. **Accepted S086 limits** (086 log §12):
+   - old kits' `wav` 6+ remapped (no migration);
+   - Drum slot-5 seed = Re3;
+   - large `pos` jumps blip and alias for 0.7 ms;
+   - `snc` is trigger-only for `pos`;
+   - a slot reload may glide silently from 0.
 
 ## Carry-over from Session 085 (Drum `snc`/`rng`)
 
-1. **Hardware:**
-   - P1 passed ("checks out completely fine").
-   - **Re-test the final build:**
-     - `rng` with a very short PitchMod decay (no crunch: the D10 ramp);
-     - the attack per hit (snap);
-     - the `amt` response, compared with `fm`;
-     - `snc` `amt` sweeps and a slave pitch sweep;
-     - `fm`/`mix` A/B against the S084 build;
-     - the row (names, clamps, step automation 0–3, MIDI 0–3 and 127,
-       Morph, kit reload);
-     - the six-slot `cpu` comparison, especially `rng` with user samples on
-       both oscillators: the narrowest margin, 1–2 instructions in the
-       linked image (`085_SESSION_HANDOFF_LOG.md` §12).
-2. **Next: Session 086** from `S086_P1_OSC_TYPE_EXPANSION.md` (root).
-   - **Stages, each with its own device CPU gate:**
-     - S1: stock waves `Re3 Sw3 ReA TrA SwA` + the `typ`/`pos` rows;
-     - S2: the sample rework (`smp`/`slp`, catalogue v2, the installer);
-     - S3: `wtb`;
-     - S4: the sample/wavetable optimizer with the RIFF flag chunk and the
-       zero-crossing bitmap;
-     - S5: a `pwm` evaluation (no code until a candidate fits).
-   - **Menu (user):** `pos` (`Oscilltr` `Position`: the sample start, the
-     wavetable position, maybe the stock-wave phase offset) is the fourth
-     cell of the first oscillator screen; `typ` (and S087's `run`) go on the
-     second.
-   - **Answer its Q1–Q11 first.**
-   - **Freeze the ceiling numbers before the v1 sample loops are replaced.**
-3. **S087:** run modes `rst fre itp` and the render pool. **The free-run
-   mode is to try "ramp always"** for the `rng` depth instead of the
-   trigger snap (user).
-4. **Binding rules from S085** (`MEMORY.md`, "Oscillator work under the CPU
-   rule"):
-   - no CPU increase overall;
-   - copies, not edits; a `.itcm.sNNN` subsection; no new constant-argument
-     calls into `calcNextOscSampleBlock()`;
-   - measure standalone and linked, then on the device;
-   - Drum `modOsc` is never reset on a trigger unless the user tests and
-     asks.
-5. **Keep until S086 is done** (root):
-   - `S085_OSC_MOD_CHERRYPICK.md`, `S085_SAMPLE_INDEX_SPEEDUP.md`,
-     `S086_P1_OSC_TYPE_EXPANSION.md`;
-   - `Helicase-dev-ph7-spike/` (`26fb7c3`, ignored);
-   - `Helicase-dev-ph7-voice-pwm-spike/` (`4ad2f850`/`ef7d5445`, **not**
-     ignored: it shows as untracked; add it to `.gitignore` if wanted).
-   - **Disposable:** `S085_P1_OSC_MOD_SNC_RNG.md`,
-     `S085_P1_OSC_MOD_IMPLEMENTATION.md` (carried by the 085 log and the
-     specs).
-6. **Accepted S085 limits** (`085_SESSION_HANDOFF_LOG.md` §16):
+1. **Hardware:** P1 passed. The S085 ramp re-test was not reported
+   separately; S086 H9 exercised Drum `fm`/`mix`/`rng`/`snc` on the final
+   image with no issue reported.
+2. **S087 → later: run modes** `rst fre itp` and the render pool (no longer
+   S087; after the sample/wavetable types). **The free-run mode is to try
+   "ramp always"** for the `rng` depth (user).
+3. **Accepted S085 limits** (`085_SESSION_HANDOFF_LOG.md` §16):
    - **`snc`:**
      - the FM-page `wav` has no audible effect; crash and user-sample
        masters act as noise;
@@ -88,14 +122,12 @@ again. The full Session 085 record is
      - an LFO on the FM-page `wav` claims an interpolation unit.
    - **Drum FM oscillator:** a one-shot user sample there plays once after
      selection or power-up (no `modOsc` reset).
-   - **The row:** MIDI 2 = `snc`, 3–127 = `rng`; a Morph steps through the
-     modes.
-7. **Unassigned spike items** (S084, still open):
+   - **The row:** MIDI 2 = `snc`, 3–127 = `rng`.
+4. **Unassigned spike items** (S084, still open):
    - LFO one-shots and the Scene-activation fire / `rnd` fix;
    - the deferred instrument swap fixes and DEV swap trace `v`;
    - the elastic Effect contract;
-   - the effects chain (`S086_EFFECTS_CHAIN_POST_MORTEM_EVAL.md` in the
-     spike), now after the oscillator stages.
+   - the effects chain (after the oscillator stages).
 
 ## Carry-over from Session 084 (roll fix-up)
 
@@ -317,11 +349,12 @@ LiveRecord). Authorities: `PATTERN_DYNAMIC_STACK.md` §6.1–§6.2b, §6.5, §6.
 
 ## Next session recommended goal
 
-1. Re-test the S085 final build (Session 085 item 1), especially the `rng`
-   ramp and the six-slot `rng` user-sample `cpu` check.
-2. Then Session 086: `S086_P1_OSC_TYPE_EXPANSION.md` (answer Q1–Q11, freeze
-   the baseline, then stage S1).
-3. Open items worth a look when convenient:
+1. Session 087 from `S087_P0_OSC_TYPE_SAMPLES_WAVETABLES.md`:
+   - answer Q1–Q13 (Q1: the spike references);
+   - take the step-0 baseline (`snapshot87.sh`, the frozen user-sample
+     ceilings, the mixer hot-loop baseline);
+   - then stage A (automation before trigger).
+2. Open items worth a look when convenient:
    - confirm the S084 V1–V7 status;
    - F5 (Scene 2 Case-3 invalidation);
    - S082 P3 A2;

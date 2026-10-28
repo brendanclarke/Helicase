@@ -60,3 +60,4 @@ tools/dsp_test/build/
 
 # S084 reference copy of the abandoned dev-ph7 spike (not part of this tree)
 Helicase-dev-ph7-spike/
+Helicase-dev-ph7-voice-pwm-spike/

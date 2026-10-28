@@ -1819,8 +1819,17 @@ Current keys by family:
   `osc3_pitch_coarse`, `osc3_mod_amount`, `noise_freq`,
   `osc1_noise_mix`.
   `osc1_position` (S086 P3) is 0..127 and moves osc1 by position/128 of the
-  phase range (for Cym, the crash sample range). An absent key loads 0,
-  preserving the old sound; older firmware skips the key.
+  phase range (for Cym, the crash sample range). It is the last descriptor
+  of each table (index 39; Snare 38), so no existing index moved. An
+  absent key loads 0 (`instrumentManager_resetSlot()` zeroes the slot
+  before parsing), preserving the old sound; older firmware skips the key.
+  It is written in `[params]` and `[morph]` like any image row.
+  `oscN_wave` values: 0 `Sin`, 1 `Tri`, 2 `Saw`, 3 `Rec`, 4 `Noi`, 5 `Cym`,
+  6 `Re3`, 7 `Sw3` (S086), then the installed user samples from 8
+  (`OSC_SAMPLE_START`). **Before S086 the user samples started at 6:** a
+  file saved earlier that selected user sample *n* (value 6 + *n*) now
+  plays `Re3`/`Sw3` (*n* ≤ 1) or user sample *n* − 2. There is no
+  migration (decided S085/S086).
   `osc2_mod_type` (Drum) stores 0 `fm`, 1 `mix`, 2 `snc`, 3 `rng`
   (S085). 0 and 1 keep their pre-S085 meaning; the key is written by
   every save, so older files carry 0 or 1. A byte above 3 plays and shows

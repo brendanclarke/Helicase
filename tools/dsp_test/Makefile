@@ -291,7 +291,7 @@ elf_osc_check: | $(GEN)
 	python3 elf_symdump.py --compare $(FROZEN85)/elf_osc.txt build/elf_osc_now.txt
 
 # ---------------------------------------------------------------------------
-# S086 P2: the stock table waves Re3/Sw3 (S086_P2_ADD_STOCK_WAVES_CORRECTLY.md).
+# S086 P2: the stock table waves Re3/Sw3 (086_SESSION_HANDOFF_LOG.md §3).
 #
 # What:       stock_tables      gen_stock_tables.py --check (C1-C4: the method
 #                               reproduces sawTable; peak/DC; out-of-band; the
@@ -308,7 +308,7 @@ elf_osc_check: | $(GEN)
 #                               the per-sample loop bodies inside them
 #                               (elf_loopdump.py): the dispatchers may change,
 #                               the loops may not.
-# Why:        S086 P1 §1.3/§5: no existing loop changes; the new waves run the
+# Why:        085 log §13; DSP ref §9.3: no existing loop changes; the new waves run the
 #             Tri/Saw/Rec loops.
 # Inputs:     frozen86/ (snapshot86.sh, at e56bb957), the current sources,
 #             build/lxr02.elf. Run the *_baseline targets with FW_ELF pointing

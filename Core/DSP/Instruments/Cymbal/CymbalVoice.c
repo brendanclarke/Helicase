@@ -168,7 +168,7 @@ void Cymbal_triggerVoice(CymbalVoice *voice, const uint8_t source_slot,
 	 * Why:        the hit starts exactly at today's start phase + pos;
 	 *             position 0 adds 0, so today's start is kept bit for bit.
 	 *             It is added after the transient offset-mode scaling
-	 *             (S086 P3 Q6). Velocity modulation has already run, so a
+	 *             (086 log §4.2). Velocity modulation has already run, so a
 	 *             velocity target on pos is exact for this hit.
 	 *             The modulators are reset to phase 0 just below, as before.
 	 * Inputs:     voice->osc.position (velocity-modulated), osc.waveform.
@@ -276,11 +276,11 @@ void Cymbal_calcSyncBlockVoice(CymbalVoice *voice, int16_t* buf,
 	 *             the block, and osc_positionBendRestore() removes the bend
 	 *             exactly.
 	 * Why:        changing phase directly would click; bending phaseInc for one
-	 *             block is continuous and needs no loop change (S086 P3 §2.3).
+	 *             block is continuous and needs no loop change (086 log §4.3).
 	 *             The step lives in the oscillator, not a local, so nothing
 	 *             stays live across the render LTO inlines into the mixer
 	 *             (assessment F1). modOsc and modOsc2 are separate OscInfo and
-	 *             are not bent (their pos rows wait for the typ step, P3 Q10).
+	 *             are not bent (their pos rows wait for the typ step, 086 log §4.8).
 	 * Inputs:     voice->osc position state; osc.phaseInc from osc_setFreq() in
 	 *             Cymbal_calcAsyncVoice() this block.
 	 * Outputs:    buf (the carrier block, rendered with the bend); osc.phaseInc

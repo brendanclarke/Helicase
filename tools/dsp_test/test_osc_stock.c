@@ -25,7 +25,7 @@
  *                  at every test frequency.
  *             The stock tables hold different random data per wave in D1,
  *             so a wrong pointer or a swapped osc_stockTables[] order fails.
- * Why:        S086_P2_ADD_STOCK_WAVES_CORRECTLY.md §7: the new waves must run
+ * Why:        086_SESSION_HANDOFF_LOG.md §3.5: the new waves must run
  *             the existing loops, unchanged, through every path.
  * Inputs:     generated fragments (Makefile osc_stock).
  * Outputs:    one line per failure (first 40); "osc_stock failures: N";

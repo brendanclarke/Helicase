@@ -13,6 +13,9 @@ part costs, and how to change or extend it.
   and actions). S076 added
   LFO retrigger value 7 (`scn`, Scene-change phase handoff) and fixed
   the LFO phase offset scaling (§7.1).
+  S085 added the Drum mod modes `snc`/`rng` (§5.1.1). S086 (2026-10-28)
+  added the stock table waves `Re3`/`Sw3` (§6.1.2) and the oscillator
+  position row `pos` (§6.1.1), and moved the user samples to `wav` 8+.
 - **Related documents:**
   - `EFFECTS_MIXER_DSP_REFERENCE.md`: what happens to a voice block after it
     leaves the instrument (decimation, mixer, FX bus, output);
@@ -310,9 +313,15 @@ fused post-chain: amp EG ramp → velocity gain → distortion       --> buf (pr
   (`slopeEg2_calc`), keeping `lastGain` and the new value for the per-sample
   ramp; `osc_setFreq()` for both oscillators.
 - **Trigger:** retriggers LFOs whose retrigger track matches; applies velocity
-  modulation; resets the oscillator phase (with the transient offset mode);
-  triggers pitch and amp envelopes, transient and snap; sets `ringSnap`
-  (§5.1.1); `SVF_reset()` clears filter state to avoid a wrong transient.
+  modulation; resets the oscillator phase (with the transient offset mode),
+  then adds the `pos` offset (`osc_positionTrigger()`, §6.1.1); triggers
+  pitch and amp envelopes, transient and snap; sets `ringSnap` (§5.1.1);
+  `SVF_reset()` clears filter state to avoid a wrong transient.
+- **`pos` while playing (S086):** `Drum_calcVoiceSyncBlock()` calls
+  `osc_positionBendApply(&osc, modMode != DRUM_MOD_SNC)` before the mod-mode
+  switch and `osc_positionBendRestore(&osc)` after it, so the carrier glides
+  to a changed `pos` within the block (§6.1.1). In `snc` the change is
+  consumed without bending.
   Only the carrier (`osc`) phase is reset; **`modOsc` is never reset**, in
   any mode (user rule, S085 Q6b: change only after a hardware trial).
 - **Velocity:** `velo = vel/127`; with `volumeMod` on it scales the output
@@ -458,6 +467,11 @@ fused post-chain: buf·mix + transBuf (saturating) → amp gain → distortion
 
 `ampGain = volumeMod ? velo·EG : EG`, chosen once per block.
 
+**`pos` (S086):** the trigger adds `osc_positionTrigger()` to the tonal
+oscillator's start phase; `Snare_calcSyncBlockVoice()` wraps the tonal
+oscillator render in `osc_positionBendApply(&osc, 1)` /
+`osc_positionBendRestore()`. The noise oscillator is not affected.
+
 ### 5.3 Cymbal (`CymbalVoice.c`, Advanced)
 
 ```
@@ -474,6 +488,13 @@ As Cymbal, with the FM carrier at gain 0.5. Two amp-decay caches: `decayClosed`
 (`amp_envelope_decay`) and `decayOpen` (the `_choke` row). The trigger's
 alternate flag (visible track 7) selects the open decay.
 
+**`pos` in Cymbal and HiHat (S086):** the trigger adds
+`osc_positionTrigger()` to the carrier's start phase, and the carrier's FM
+render is wrapped in `osc_positionBendApply(&osc, 1)` /
+`osc_positionBendRestore()`. The modulators have no `pos` row yet.
+**Modulator resets:** Cymbal resets `modOsc`/`modOsc2` to phase 0 on every
+trigger; **HiHat does not** (and the Drum FM oscillator never resets).
+
 ### 5.5 Where each engine's hot code runs
 
 The oscillator block functions are in ITCM (`INITCM`), zero wait states
@@ -484,6 +505,15 @@ filter, distortion and post-chains are flash code, inlined by LTO into
 `mixer_calcNextSampleBlock()`. ITCM for the filter and distortion was tried
 in Session 023 and measured worse.
 
+**The engine render functions themselves** (`Drum_calcVoiceSyncBlock()` and
+the others) are also inlined by LTO into `mixer_calcNextSampleBlock()`,
+together with some oscillator dispatchers (an FM dispatcher, noise loops).
+Code added around a voice render therefore changes register allocation in
+that one large function. In S086 a local variable kept live across the
+render added reloads to two inlined per-sample loops (§10, "State live
+across a render"). `make -C tools/dsp_test elf86_mixer_check` compares the
+function's per-sample loops with a P2 baseline and fails if one grew.
+
 ---
 
 ## 6. Building blocks (`Core/DSPAudio/`)
@@ -493,28 +523,39 @@ in Session 023 and measured worse.
 - **`OscInfo`** holds a 32-bit phase accumulator, `phaseInc`, `freq`,
   `pitchMod`, `fmMod`, `modNodeValue`, the waveform, the wavetable octave
   (`tableOffset`), a frequency cache, and a sample cache.
-- S086 P3 adds the plain-byte `position` and runtime `positionApplied` fields
-  in the existing `OscInfo` padding. The `osc1_position` row is 0..127 and is
-  appended to each instrument descriptor, so existing IDs remain stable.
-- For Sine, Tri, Saw, Rec, Re3, Sw3 and the Crash sample, a trigger adds
-  `position << 25` to the engine's existing start phase. A changed value is
-  applied as a temporary `phaseInc` bend over the next 32-sample block and is
-  removed afterward; position 0 and a held value are unchanged. Drum `snc`
-  advances the position tracker but does not bend the slave because sync
-  resets own its phase. Noise and v1 user samples ignore the row in this
-  stage. Crash interpolation has a repeated guard point at sample 32768.
-- **Waveforms:** `SINE` 0, `TRI` 1, `SAW` 2, `REC` 3, `NOISE` 4, `CRASH` 5
-  (the built-in crash sample), `SQ3` 6 (`Re3`), `SW3` 7 (`Sw3`), then user
-  samples from 8
-  (`OSC_SAMPLE_START`).
+- **`OscInfo` padding is in use (S086):** `position` (offset 18),
+  `positionApplied` (19) and `positionBendStep` (33, after `waveInterpNext`).
+  `sizeof(OscInfo)` is 72 on ARM, asserted together with the field offsets
+  after the struct. Free padding left: 2 B at 34–35 and 1 B at 75.
+- **Waveforms:**
+
+  | `wav` | Constant | Display | Reader |
+  |---:|---|---|---|
+  | 0 | `SINE` | `Sin` | `calcSineBlock` |
+  | 1–3 | `TRI SAW REC` | `Tri Saw Rec` | `calcWavetableOscBlock(table)` |
+  | 4 | `NOISE` | `Noi` | `calcNoiseBlock` |
+  | 5 | `CRASH` | `Cym` | `calcSampleOscBlock` (the built-in crash sample) |
+  | 6–7 | `SQ3 SW3` (`OSC_STOCK_FIRST`..`OSC_STOCK_LAST`) | `Re3 Sw3` | the table loops, through `osc_stockTables[]` (S086) |
+  | 8+ | user samples (`OSC_SAMPLE_START`) | `s01…` | `calcUserSampleOsc*Block` |
+
+  `waveformNames` (`MenuText.h`) must have exactly `OSC_SAMPLE_START`
+  entries (a `_Static_assert` in `menu.c`). The menu's sample tail,
+  `modulationNode.c`'s maximum and the interpolation range follow
+  `OSC_SAMPLE_START`. Inserting a waveform renumbers the user samples
+  (S086 did, 6+ → 8+, with no kit migration).
 - **Effective frequency:** `freq · pitchMod · modNodeValue`, where `freq`
   comes from the base note plus coarse/fine tuning
   (`MidiNoteFrequencies[note] · detune`).
 - **Phase formats:** sine uses a 4,096-entry table (`<<20`), wavetables 1,024
-  entries (`<<22`), samples a `<<17` index. Long samples are not fully
-  32-bit clean yet (the `phase >> 17` index path).
-- **Wavetables:** `sawTable`, `triTable`, `recTable` are 11 band-limited
-  octaves × 1,024 samples (22,528 B each, flash). `osc_setFreq()` picks the
+  entries (`<<22`), samples a `<<17` index (so a v1 user sample is at most
+  32,768 points). For sine and the tables one cycle is the full 2³² phase.
+  The crash sample is 32,768 points, so it too spans exactly 2³² and loops
+  at its end; `crashSample[]` has a 32,769th guard entry (= entry 0) for the
+  interpolators' `itg + 1` read (S086).
+- **Wavetables:** `sawTable`, `triTable`, `recTable` (`wavetable.c`) and the
+  stock waves `sq3Table`, `sw3Table` (`wavetableStock.c`, generated) are 11
+  band-limited octaves × 1,024 samples (22,528 B each, program flash), every
+  level peaking at 32,767. `osc_isTableWave()` names this set. `osc_setFreq()` picks the
   octave with `freqToTableIndex()`: the number of the ten edges
   `osc_octaveEdgeHz[k] = 440·2^(k − 5.75)` Hz (16.35 Hz … 8,372 Hz) at or
   below the frequency. All ten compares always run. (Before S073 this was
@@ -569,6 +610,143 @@ in Session 023 and measured worse.
   scratch buffers, then blend). Each costs about two oscillator renders.
   Details: `OSC_INTERP_AUDIT.md`.
 - **ITCM:** the block renderers and (since S073) `osc_setFreq()`.
+
+#### 6.1.1 `pos`: the oscillator position (S086)
+
+The `osc1_position` row (`Oscilltr` / `Position`, short `pos`, 0..127) is
+the fourth cell of the first oscillator screen on every instrument. Today it
+is a **continuous phase offset** of `pos`/128 of a cycle on the main
+oscillator. The same byte is meant to become the sample start (`smp`/`slp`),
+the wavetable frame position (`wtb`) and possibly the `pwm` width when those
+types arrive (`S087_P0_OSC_TYPE_SAMPLES_WAVETABLES.md`).
+
+**Which waves.** `osc_positionIsPhase(w)` is 1 for `SINE`, `CRASH` and the
+table waves. For all of them one cycle (for `CRASH`, the whole 32,768-point
+sample) is the full 2³² phase, so `pos << 25` is `pos`/128 of it at every
+octave. Noise and v1 user samples ignore `pos`.
+
+**At a trigger** (`osc_positionTrigger(osc)`, called by all four
+`*_triggerVoice()` after the start-phase block):
+
+```
+osc.phase += (position & 127) << 25;      /* 0 for non-phase waves */
+osc.positionApplied = position & 127;
+```
+
+It is added after the transient offset-mode scaling of the start phase, so
+offset mode keeps its meaning. `pos` 0 adds 0: the old start phase, bit for
+bit. Velocity modulation runs earlier in the trigger, so a velocity target
+on `pos` is exact for the hit.
+
+**While playing: the per-block bend.** Modulation reaches `pos` once per
+block (the LFO dispatch at the start of `mixer_calcNextSampleBlock()`;
+knob, automation, velocity and Morph between blocks). Adding a change to the
+phase at a block edge would click. Instead each render is wrapped:
+
+```
+osc_positionBendApply(&osc, bend);   /* before the osc1 render */
+render osc1 (any mode);
+osc_positionBendRestore(&osc);       /* immediately after */
+```
+
+- `osc_positionBendApply()` computes the **circular** difference
+  d = ((position − positionApplied + 64) & 127) − 64, in −64..+63 (127 → 0
+  is +1 step), limits it to ±`OSC_POS_BEND_CAP`, advances
+  `positionApplied` by d, stores d in `positionBendStep` and adds
+  d × `OSC_POS_BEND_PER_STEP` to `phaseInc`. With `bend` = 0 or a non-phase
+  wave it stores 0 and leaves `phaseInc` alone, but still consumes the
+  change.
+- `OSC_POS_BEND_PER_STEP` = (1 << 25) / `OUTPUT_DMA_SIZE` = 1 << 20. Held
+  for the 32-sample block it moves the phase by exactly d << 25, so the
+  oscillator lands on the new offset with no drift. Both constants are
+  asserted in `Oscillator.h`.
+- `osc_positionBendRestore()` subtracts the stored step and clears it.
+  **It must follow the same render:** `osc_setFreq()` caches `phaseInc`
+  (it returns early when the frequency is unchanged), so a bend left in it
+  would become a lasting pitch error.
+- The step lives in `OscInfo`, not in a local variable, so nothing stays
+  live across the render that LTO inlines into the mixer (§5.5, §10).
+
+**What it sounds like.** A held `pos` is a phase shift. A moving `pos` is a
+frequency change for that block: an LFO on `pos` is phase modulation (a
+4 Hz LFO with ¼-cycle depth ≈ ±6 Hz vibrato). There is no added latency
+against pitch modulation: the change starts on the first sample of the
+block in which it arrives and completes at the block end. A large step
+(e.g. 64 at once) is squeezed into 0.7 ms, a short pitch blip that also
+aliases (the octave table follows the frequency, not the bend);
+`OSC_POS_BEND_CAP` (64 = off) would spread it over several blocks. On
+`Cym` a change scrubs through the sample (one step = 256 points per block,
+about 8× speed).
+
+**Per engine and mode.**
+
+| Oscillator / mode | Trigger | Bend |
+|---|---|---|
+| Drum/Snare/Cymbal/HiHat `osc1` | yes | yes |
+| Drum `fm`/`mix`/`rng` carrier | yes | yes (the carrier moves against the unbent modulator) |
+| Drum `snc` slave | yes | **no**: each master reset sets the phase to a target without `pos`, and `osc_syncRatioQ16()` reads the slave `phaseInc` |
+| Waveform interpolation | the base waveform decides | both partners render with the bent `phaseInc`; `calcPeriodicInterp*` ends the block at start + `phaseInc` × size |
+| Modulators (Drum FM, Cymbal/HiHat) | no row yet | — |
+
+**Modulation sources.** Per block `main.c` runs triggers
+(`voiceControl_processPending()`), then step automation
+(`seq_drainPendingAutomation()`), then the mixer (LFOs, async, renders).
+So: velocity is exact at the hit; an LFO glides continuously (its depth is
+**clamped** at 0/127, not wrapped); with LFO retrigger the hit starts at the
+previous LFO value and glides to the restarted one within 0.7 ms; a
+step-automated `pos` starts at the Morph base (the trigger restores it) and
+glides to the step value within the first block. That last point is the
+S087 stage-A item (it matters for sample slicing).
+
+**Slot reset.** A runtime slot reset `memset`s the voice, so
+`positionApplied` starts at 0 and the first block may glide from 0 to the
+loaded `pos`; the voice is silent until triggered, and the trigger
+re-anchors.
+
+**Tests.** `make -C tools/dsp_test osc_pos` (P1–P8, an uncapped and a cap-8
+build; it compiles the header's own constants block) and
+`elf86_mixer_check`.
+
+#### 6.1.2 Stock table waves (S086)
+
+`Re3` (`SQ3`, a TB-303 square) and `Sw3` (`SW3`, a 303 saw) are fixed
+`const int16_t [11][1024]` tables like `sawTable`, read by the same loops
+(plain, FM, sync and ring) at the same cost.
+
+- **Dispatch:** `osc_stockTables[]` (`Oscillator.c`) maps `waveform −
+  OSC_STOCK_FIRST` to the table, with a `_Static_assert` on its length.
+  Each dispatcher (`calcNextOscSampleBlock`, `calcNextOscSampleFmBlock`,
+  `osc_renderPlainWave`, `osc_renderSyncWave`, `calcNextOscSampleRingBlock`)
+  has one case group for all stock waves with this **variable** pointer;
+  `osc_setFreq()` gives them `osc_calcWavetableFreqValue()`. One
+  variable-pointer site per dispatcher avoids constant-argument call sites
+  (which make LTO re-specialise the existing clones, §10).
+- **Sync:** `osc_syncWaveform()` includes them (an interpolated stock slave
+  takes the synced phase rule). `osc_syncClockInc()` scales only `CRASH`
+  and user samples by `<< 5`; the stock waves are 2³²-per-cycle clocks like
+  the tables (testing `>= CRASH` would make a stock master reset 32× too
+  often).
+- **Trigger start phase:** the engines test `osc_isTableWave()`, so the
+  stock waves restart at `0xff << 20` × offset like the tables.
+- **Generation:** `tools/gen_stock_tables.py` reads
+  `tools/plots/stock_wave_harmonics.csv` (the harmonic recipe made by
+  `tools/plots/plot_stock_waves.py` from the user's reference captures) and
+  writes `Core/DSPAudio/wavetableStock.c`. Each level is the recipe's
+  harmonics through a per-level gain curve **measured from `sawTable`**
+  (g = |SAW(k)|·k/|SAW(1)|, a Hann-like taper), synthesised at 1,024
+  points, scaled to a 32,767 peak. Built-in checks: C1 rebuilds `sawTable`
+  within 6 LSB (`recTable`/`triTable` do not follow this taper: they roll
+  off more slowly and carry a −20…−60 dB tail above the level's Nyquist
+  harmonic, so they are printed for information), C2 peak/DC, C3
+  out-of-band, C4 `--check` (regenerates byte-identical;
+  `make -C tools/dsp_test stock_tables`). Review plot:
+  `tools/plots/plot_stock_tables.py`.
+- **Level:** peak-normalised like every table, so `Re3` plays about 8 dB and
+  `Sw3` about 2 dB quieter than `Rec`/`Saw` (crest factor).
+- **Flash:** 22,528 B per wave. The fixed `phase >> 22` / `& 1023` indexing
+  needs 1,024 points at every level; shorter upper levels would need a new
+  reader (and change the sound by −35…−67 dB at the top octaves).
+  `ReA`/`TrA`/`SwA` from the same recipe are deferred.
 
 ### 6.2 Resonant filter (`ResonantFilter.c/.h`)
 
@@ -790,7 +968,7 @@ display and runtime resolution.
 
 ## 8. Cost
 
-### 8.1 Measured instruction counts (S073; S085 rows)
+### 8.1 Measured instruction counts (S073; S085 and S086 rows)
 
 Per-sample loop instruction totals from `fpseq.py --report --all` on
 standalone `-Ofast` ARM objects. Instructions, not cycles: the Cortex-M7
@@ -798,7 +976,7 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 
 | Stage | Instructions per sample | Divisions |
 |---|---:|---:|
-| Sine / wavetable oscillator | 23 / 24 | 0 |
+| Sine / wavetable oscillator (incl. the stock waves `Re3`/`Sw3`, S086) | 23 / 24 | 0 |
 | FM wavetable / FM sine carrier | 35 / 30 | 0 |
 | Noise | 12–13 | 0 |
 | Crash sample / FM crash | 30 / 38 | 0 |
@@ -806,6 +984,7 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 | Transient sample | 22 | 0 |
 | Saturating buffer add | about 4–5 (two samples per step) | 0 |
 | Sync reset-list builder (S085) | 7 | 0 |
+| `pos` (S086): trigger offset / per-block bend | a few per trigger / about 10 per block per voice (≈ 0.3 per sample), outside the loops | 0 |
 | Sync slave Tri/Saw/Rec / sine / crash (no reset / reset path) | 34/39 / 33/38 / 36/41 | 0 (+1 per block) |
 | Ring carrier, depth ramped (S085 follow-up) Tri/Saw/Rec / sine / crash / noise / user sample | 31 / 30 / 33 / 16–19 / 46–48 (linked 49–50) | 0 (+1 per block) |
 | ZDF filter (per type) | 85–104 (was 73–89) | 2 (was 5) |
@@ -842,7 +1021,16 @@ user-sample loops by 1–3):
 
 `rng` with user samples has the narrowest margin against `fm` (1–2 in the
 linked image): re-measure it after any change to the ring copies or the
-sample loops. In `rng` the modulator call (gain 1) binds to the baseline
+sample loops.
+
+**S086:** the stock waves use the table loops (plain 24 / gain-1 23, FM 35,
+the existing sync and ring functions), so no voice's dearest setting
+changed. `pos` adds nothing per sample; its per-block bend is outside the
+loops. The oscillator code is byte-identical to the S086 P2 image
+(`elf86_p3_check`), and the per-sample loops inlined into
+`mixer_calcNextSampleBlock()` match it (`elf86_mixer_check`, after the F1
+fix, §10). The six-slot worst-case Scene with an LFO on every `pos` read
+the same `cpu` as before on hardware. In `rng` the modulator call (gain 1) binds to the baseline
 gain-1 clone `calcNextOscSampleBlock.constprop.1`, which is slightly cheaper
 than the `.constprop.0` that `fm`/`mix` use.
 
@@ -895,7 +1083,9 @@ General rules for every change:
 1. Add the engine struct member if the DSP needs new state (check the struct
    still fits the slot reserve, 2 × `sizeof(DrumVoice)` = 1,192 B; the
    `_Static_assert` will tell you). A byte added to `DrumVoice` itself
-   grows all six slots by 2 B each.
+   grows all six slots by 2 B each. Per-oscillator state can often go into
+   `OscInfo` padding at no cost (S086 used offsets 18–19 and 33; 34–35 and
+   75 are free); assert the offsets as `Oscillator.h` does.
 2. Add the row in `<Type>Parameters.c` at the end of the table (appending
    keeps existing descriptor indices, which are stored in Scene images,
    automation and LFO tokens), and the matching enum entry. Update
@@ -905,7 +1095,9 @@ General rules for every change:
 4. If the value needs conversion, give the row a special tag (`ROW_SPECIAL`)
    or add a new writer (§9.2). If the key would match an old string rule,
    the tag must agree: run `make -C tools/dsp_test special_tags`.
-5. Place it on a menu page (`*_menu_pages[]`).
+5. Place it on a menu page (`*_menu_pages[]`; each page row has exactly 16
+   cells, four screens of four). Keep the row on one line in the table:
+   `check_special_tags.py` matches rows line by line.
 6. Storage, Morph, automation and LFO pickers are registry-driven. Check the
    file round trip, AutoSave restore and old files without the key
    (`FILESYSTEM_SPEC.md`: missing keys take defaults).
@@ -928,11 +1120,24 @@ General rules for every change:
 - Filter: add the type to `filterTypeEnum`, the output `switch` in **both**
   ZDF twins, and the `MENU_FILTER` text; keep the batched solver untouched.
 - Oscillator: add the waveform constant, the render `case` in
-  `calcNextOscSampleBlock()` / `calcNextOscSampleFmBlock()` and
-  `calcNextOscSample()`, the frequency `case` in `osc_setFreq()`, and the menu
-  text. Waveform numbers above `CRASH` are user samples; inserting a waveform
-  shifts them, which changes stored values. Prefer a design that does not
-  renumber.
+  `calcNextOscSampleBlock()` / `calcNextOscSampleFmBlock()` (and the S085
+  dispatchers `osc_renderPlainWave()`, `osc_renderSyncWave()`,
+  `calcNextOscSampleRingBlock()`), the frequency `case` in `osc_setFreq()`,
+  the sync rules (`osc_syncWaveform()`, `osc_syncClockInc()`), the
+  `pos` rule (`osc_positionIsPhase()`), and the menu text. Waveform numbers
+  from `OSC_SAMPLE_START` on are user samples; inserting a waveform shifts
+  them, which changes stored values. (`calcNextOscSample()`/`calcFm()`, the
+  per-sample variants, have no callers.)
+- **Another stock table wave** (`ReA`/`TrA`/`SwA` are ready in the recipe):
+  1. add a line to `WAVES` in `tools/gen_stock_tables.py` and run it (then
+     `make -C tools/dsp_test stock_tables`);
+  2. add the `extern` in `wavetable.h`;
+  3. add the constant after `SW3`, move `OSC_STOCK_LAST` and
+     `OSC_SAMPLE_START`;
+  4. add the table to `osc_stockTables[]` (the assert checks the length);
+  5. add the name to `waveformNames` (the assert checks the count);
+  6. extend the host tests (`test_osc_stock.c`, `test_osc_pos.c` P1).
+  It costs 22,528 B of program flash and renumbers the user samples.
 - **Oscillator modes and types under the CPU rule (S085, user):** "no
   increase in CPU cycles overall".
   - **The gate:** the dearest setting of a voice in any mode ≤ that voice's
@@ -962,6 +1167,14 @@ General rules for every change:
     builder; the slave copies stay as they are.
   - **A per-block parameter that scales amplitude** needs a per-sample
     ramp, or it zippers (the `rng` depth).
+  - **A per-block phase or position change** can be spread through
+    `phaseInc` for one block instead of a per-sample ramp (the `pos` bend,
+    §6.1.1): zero per-sample cost, exact landing. Keep its state in the
+    oscillator, never in a local that lives across the render.
+  - **Check the mixer too:** the voice renders are inlined into
+    `mixer_calcNextSampleBlock()`; run `elf86_mixer_check` (and refresh its
+    baseline with `elf86_mixer_snapshot` on a known-good build when the
+    mixer itself is meant to change).
 - Distortion: add a mode selector rather than changing
   `distortion_curveSample16()`; keep the fused post-chains using one shared
   expression per mode.
@@ -1029,6 +1242,23 @@ fields from `ModulationNode`.
   `calcNextOscSampleBlock()` can re-clone the existing specialisations and
   change `fm`/`mix` code. Call the leaf loops instead.
 - **Per-block amplitude steps zipper** (S085): ramp per sample.
+- **State live across a render** (S086 F1): the voice renders are inlined
+  into `mixer_calcNextSampleBlock()`. A local variable kept from before a
+  render to after it (the first `pos` version kept the bend that way) raised
+  register pressure in that function, and two unrelated inlined per-sample
+  loops gained reloads (an FM sine loop 29 → 31, a noise loop 15 → 16). Keep
+  such state in the oscillator structure (`positionBendStep`).
+- **A bend left in `phaseInc` sticks** (S086): `osc_setFreq()` recomputes
+  `phaseInc` only when the frequency changes. Every
+  `osc_positionBendApply()` needs its `osc_positionBendRestore()` after the
+  same render, with no early return in between.
+- **Host tests must compile the header's constants** (S086 F3): a test that
+  restates a constant passes even when the header's value is wrong. Extract
+  the header block (`osc_pos` cuts it with `sed`), and keep a
+  `_Static_assert` in the header.
+- **The bench extracts `Oscillator.h` by line range** (`osc_mod`: defines
+  49–65, `OscInfo` 71–143). Edits above or inside the struct must update the
+  ranges in `tools/dsp_test/Makefile`.
 - **LFO noise range (suspected issue, not verified):** `lfo_calc()` divides the
   signed `GetRngValue()` by 32767, so noise spans −1..1 while every other
   waveform is 0..1. The descriptor shaper clamps its source to 0..1, so about
@@ -1061,3 +1291,10 @@ fields from `ModulationNode`.
   the no-CPU-increase gate and its tooling (`085_SESSION_HANDOFF_LOG.md`).
   An earlier S085 attempt (oscillator types, run modes, render pool) reached
   100 % CPU on hardware and was rolled back (§9.3; the 085 log §2).
+- Session 086: stock table waves `Re3`/`Sw3` (`SQ3`/`SW3`, `wav` 6–7; user
+  samples moved to 8+), generated by `tools/gen_stock_tables.py` and played
+  by the table loops; `osc_syncClockInc()` fixed for them. The `pos` row
+  (`osc1_position`): a trigger phase offset plus a per-block `phaseInc`
+  bend, on the phase waves and the crash sample (whose array gained a guard
+  entry). The F1 lesson (no state live across an inlined render) and the
+  mixer hot-loop gate (`086_SESSION_HANDOFF_LOG.md`).

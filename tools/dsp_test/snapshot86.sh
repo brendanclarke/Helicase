@@ -10,7 +10,7 @@
 #             S086 source edit. Run from anywhere; it cds to the repository
 #             root.
 # Outputs:    tools/dsp_test/frozen86/<same relative paths>.
-# Accessors:  the implementer, once (S086_P2_ADD_STOCK_WAVES.md §2).
+# Accessors:  the implementer, once (086_SESSION_HANDOFF_LOG.md §2).
 # Affiliates: Makefile osc86_identity, elf_osc86_baseline (writes
 #             frozen86/elf_osc.txt).
 set -eu

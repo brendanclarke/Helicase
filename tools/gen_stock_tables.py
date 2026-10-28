@@ -12,7 +12,7 @@ What:       reads the harmonic recipe tools/plots/stock_wave_harmonics.csv
             the existing tables' taper, by construction. Each level is
             sum_k g_lv(k) * c_k, evaluated at 1,024 points, scaled to a peak
             of 32,767 (as every existing level is), rounded.
-Why:        S086_P2_ADD_STOCK_WAVES_CORRECTLY.md §3.2: the new waves are added
+Why:        086_SESSION_HANDOFF_LOG.md §3.3: the new waves are added
             the same way as Tri/Saw/Rec, so they band-limit, switch octaves
             and interpolate against the existing waves alike.
 Checks:     (the script exits 1 if one fails)
@@ -173,7 +173,7 @@ def emit(tables, sha):
     out.append(" *             sawTable/recTable/triTable (wavetable.c): level n is the")
     out.append(" *             octave below 16.3516 * 2^n Hz (osc_octaveEdgeHz), peak 32767.")
     out.append(" *             Waves: %s." % ", ".join("%s = %s" % (c, d) for _, c, d in WAVES))
-    out.append(" * Why:        S086_P2_ADD_STOCK_WAVES_CORRECTLY.md: the new stock waves are")
+    out.append(" * Why:        086_SESSION_HANDOFF_LOG.md §3: the new stock waves are")
     out.append(" *             fixed tables in program flash, read by the Tri/Saw/Rec loops.")
     out.append(" * Inputs:     tools/plots/stock_wave_harmonics.csv")
     out.append(" *             SHA-256 %s" % sha)

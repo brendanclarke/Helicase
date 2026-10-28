@@ -447,7 +447,7 @@ int16_t calcFm(OscInfo* osc, OscInfo* modOsc, const int16_t table[][1024])
  *             passes osc_stockTables[waveform - OSC_STOCK_FIRST] to the
  *             Tri/Saw/Rec loop. A variable pointer adds one call site per
  *             dispatcher instead of one constant-argument site per wave
- *             (S086 P1 §1.3.3: constant sites make LTO re-specialise).
+ *             (085 log §13; DSP ref §10: constant sites make LTO re-specialise).
  * Accessors:  calcNextOscSampleFmBlock(), calcNextOscSampleBlock(),
  *             osc_renderPlainWave(), osc_renderSyncWave(),
  *             calcNextOscSampleRingBlock().

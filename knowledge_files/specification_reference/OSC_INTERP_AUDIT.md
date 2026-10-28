@@ -15,6 +15,17 @@ Session 074 note: unchanged. The DSP references now live in
 
 Session 075 note: unchanged.
 
+Session 086 note: the interpolation domain now includes the stock table
+waves `Re3`/`Sw3` (`wav` 6–7); user samples start at 8 (`OSC_SAMPLE_START`).
+A `Rec ↔ Re3` or `Cym → Re3` blend needs no new code: the partners render
+through the dispatchers, which route the stock waves to the table loops.
+The `pos` bend (`INSTRUMENTS_DSP_REFERENCE.md` §6.1.1) applies to an
+interpolated oscillator as a whole: both partners render with the bent
+`phaseInc`, and `calcPeriodicInterp*` ends the block at start + `phaseInc` ×
+size, so the bend is consistent. The base waveform (`osc.waveform`) decides
+whether `pos` applies. Host proof: `test_osc_stock.c` D3 (`Tri → SQ3/SW3`
+equals `Tri → Saw` on the same data, in all four Drum modes).
+
 ## Goal
 Add simple/fast/dirty oscillator waveform interpolation for modulation-driven waveform automation, with a global ON/OFF setting that persists in global save/load.
 

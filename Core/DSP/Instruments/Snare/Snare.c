@@ -160,7 +160,7 @@ void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
 	 * Why:        the hit starts exactly at today's start phase + pos;
 	 *             position 0 adds 0, so today's start is kept bit for bit.
 	 *             It is added after the transient offset-mode scaling
-	 *             (S086 P3 Q6). Velocity modulation has already run, so a
+	 *             (086 log §4.2). Velocity modulation has already run, so a
 	 *             velocity target on pos is exact for this hit.
 	 * Inputs:     voice->osc.position (velocity-modulated), osc.waveform.
 	 * Outputs:    voice->osc.phase, voice->osc.positionApplied.
@@ -263,7 +263,7 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 	 *             then glides the phase to the new offset over the block, and
 	 *             osc_positionBendRestore() removes the bend exactly.
 	 * Why:        changing phase directly would click; bending phaseInc for one
-	 *             block is continuous and needs no loop change (S086 P3 §2.3).
+	 *             block is continuous and needs no loop change (086 log §4.3).
 	 *             The step lives in the oscillator, not a local, so nothing
 	 *             stays live across the render LTO inlines into the mixer
 	 *             (assessment F1). noiseOsc is a separate OscInfo, not bent.

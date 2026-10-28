@@ -4,13 +4,25 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 085 close: Drum `snc`/`rng` with the mod envelope and the `rng` depth ramp (2026-10-27),
-  `dev-ph7-voice_expansion`. DEV link: `text=613,536`, `data=424`,
-  `bss=430,296`; flash payload 613,960 B of 753,664 B (**headroom
-  139,704 B**). ITCM 7,792 / 16,384 B; DTCM statics
+- **Current as of:** Session 086 close: stock table waves `Re3`/`Sw3` and the
+  oscillator `pos` row (2026-10-28), `dev-ph7-voice_expansion`. DEV link:
+  `text=658,872`, `data=424`, `bss=430,296`; flash payload 659,296 B of
+  753,664 B (**headroom 94,368 B**). ITCM 8,512 / 16,384 B; DTCM statics
   4,472 B; FXBUF 126,592 B at 0x20001180 (margin 3,712 B). The entries below
   run newest first; the S083 assessment fixes (2026-10-21) changed text to
   604,200 and bss to 430,112 (−8 B alignment) with no new statics.
+- **S086 changes (2026-10-27/28):** no RAM. Program flash +45,336 B:
+  - the stock tables `sq3Table` and `sw3Table` (`wavetableStock.c`,
+    22,528 B each, `.rodata`, below the sample-flash floor);
+  - the `pos` code and four descriptor rows;
+  - `crashSample` +1 B (a guard entry, 32,769 B).
+
+  ITCM 7,792 → 8,512 B (+720 B): the stock waves' generic table-loop copies
+  were inlined into the ITCM dispatchers, and `calcFmBlock.constprop.3` is
+  new (184 B). The `pos` state uses `OscInfo` padding: `position`/
+  `positionApplied` at offsets 18–19 and `positionBendStep` at 33.
+  `sizeof(OscInfo)` stays 72 and every voice keeps its size (asserted in
+  `Oscillator.h`). text 613,536 → 658,872, headroom 139,704 → 94,368 B.
 - **S085 P1 follow-up, `rng` depth ramp (2026-10-27):** `DrumVoice` 592 →
   596 B (`ringDepthQ15`, +4 B; `ringSnap` sits in padding), so
   `runtime_slots` 7,104 → 7,152 B (+48 B SRAM1 bss: 430,248 → 430,296).
@@ -177,8 +189,8 @@ changing any of it.
   `python3 tools/link_budget.py arm-none-eabi-nm build/lxr02.elf`
 
   ```
-  Flash : 613,960 / 753,664 B used, headroom 139,704 B
-  ITCM  : 7,792 / 16,384 B
+  Flash : 659,296 / 753,664 B used, headroom 94,368 B
+  ITCM  : 8,512 / 16,384 B
   DTCM  : statics 4,472 B
   FXBUF : 126,592 B at 0x20001180 (min 122,880, margin 3,712)
   ```
@@ -222,7 +234,9 @@ is 128 KiB, sectors 5–11 are 256 KiB.
 
 - **Window:** `0x08008000–0x080BFFFF` (753,664 B), sectors 1–6. Session 073
   added sector 6 (it was sample storage before); the window was 480 KiB.
-- **Use at the S075 close DEV link:** 532,824 B; **headroom 220,840 B**.
+- **Use at the S086 close DEV link:** 659,296 B; **headroom 94,368 B**
+  (S085 close 139,704 B; S086 added the 45,056 B stock tables).
+- **Use at the S075 close DEV link:** 532,824 B; headroom 220,840 B.
 - **History:** 34,356 B free at S072 Step 1; 8,080 B at the S072 close;
   269,504 B after the S073 expansion; 266,560 B after the S073 DSP
   refactor; 250,736 B at the S074 close; 221,312 B at the S075 F2 DEV link;
@@ -373,6 +387,16 @@ Ranked growth paths (S072 study):
    install path and a reserved span.
 3. Dead legacy code: the Euklid and SOM generators are compiled in although
    `ENABLE_EUKLID_PAGE 0` hides their page.
+4. **Grow the application window into sector 7** (S086 study): app 736 →
+   992 KiB, sample flash 1,280 → 1,024 KiB. Every table stays an ordinary
+   `const` array (no code or CPU change). Changes: the linker `FLASH`
+   length and `__sample_flash_start`, `SampleMemory.h`
+   `SAMPLE_ROM_START_ADDRESS`/`SAMPLE_FIRST_SECTOR`, `build_lxrv2_img.py`
+   `SECTOR_ENDS` and the image-check CRC block (seven sectors). Needs a
+   hardware check that the closed LXRV2 bootloader writes the longer image,
+   and one reinstall of samples. (Option 2's install-time generation was
+   tried for the stock waves in S086 and rejected: not the existing
+   mechanism.)
 
 Do not erase sector 6 before updates to work around a bootloader problem: it
 only works while sector 6 holds no code.
@@ -432,7 +456,7 @@ only works while sector 6 holds no code.
 | DTCM `.dtcmz` | `0x20000200` | part of DTCM | 3,960 | — |
 | DTCM `.dtcm_fxbuf` (arena) | `0x20001180` | part of DTCM | 126,592 | 0 (reserved arena) |
 | **DTCM total** | `0x20000000` | **131,072** | **131,064** | **8** |
-| ITCM `.itcm` (code) | `0x00000000` | 16,384 | **7,792** | 8,592 |
+| ITCM `.itcm` (code) | `0x00000000` | 16,384 | **8,512** (S086) | 7,872 |
 | SRAM2 `.devwdg_noinit` | `0x2007c000` | 16,384 | 0 | see stack note |
 
 - Static data RAM (SRAM1 + DTCM including the arena) is 428,900 B;
@@ -506,16 +530,21 @@ and runs with zero wait states.
 
 | Function | Bytes |
 |---|---:|
-| `calcNextOscSampleBlock` (two specialisations) | 876 + 824 |
+Sizes at the S086 close (the S085 close figure, where different, in
+brackets; the S086 growth is the stock-wave case in each dispatcher):
+
+| Function | Bytes |
+|---|---:|
+| `calcNextOscSampleBlock` (two specialisations) | 1,016 + 960 (876 + 824) |
 | `calcUserSampleOscFmBlock` | 444 |
-| `calcNextOscSampleFmBlock` | 440 |
-| `osc_setFreq` (standalone since S073) | 400 |
+| `calcNextOscSampleFmBlock` | 468 (440) |
+| `osc_setFreq` (standalone since S073) | 404 (400) |
 | `calcUserSampleOscBlock` | 396 |
 | `calcSampleOscFmBlock` | 196 |
-| `calcFmBlock` (three specialisations) | 192 × 3 |
-| Veneers for the interpolation blocks | 8 × 2 |
-| S085 P1: `calcNextOscSampleSyncBlock` / `calcNextOscSampleRingBlock` (dispatchers) | 396 / 552 (ramped ring) |
-| S085 P1: `osc_renderSyncWave` / `osc_renderPlainWave` | 232 / 728 (both LTO `.constprop.0`) |
+| `calcFmBlock` (three specialisations, plus S086's variable-table one) | 192 × 3 + 184 |
+| Veneers for the interpolation blocks, `memcpy` | 8 × 3 |
+| S085 P1: `calcNextOscSampleSyncBlock` / `calcNextOscSampleRingBlock` (dispatchers) | 404 / 576 (396 / 552) |
+| S085 P1: `osc_renderSyncWave` / `osc_renderPlainWave` | 276 / 876 (232 / 728; both LTO `.constprop.0`) |
 | S085 P1: `osc_buildSyncList` | 54 |
 | S085 P1: sync copies (table / sine / crash) | 176 / 172 / 176 |
 | S085 P1: ring copies, depth ramped (table / sine / noise / crash / user sample) | 192 / 184 / 108 / 196 / 448 |

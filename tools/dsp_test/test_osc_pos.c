@@ -29,11 +29,11 @@
  *                  blocks of 8, exactly.
  *               P8 consume only (Drum snc, bend argument 0): no bend, step 0,
  *                  positionApplied follows pos.
- * Why:        S086 P3 §7 and S086 P4 §4, with the S086 P3 assessment fixes
+ * Why:        086 log §9.3 and §5, with the S086 P3 assessment fixes
  *             F2 (independent P1, P2 identity, all phase waves) and F3 (the
  *             header's constants are compiled here, so a wrong constant fails
  *             the build or P3/P5). Each check names the break that must fail
- *             it (S086_P3_IMPLEMENTATION.md §9).
+ *             it (086_SESSION_HANDOFF_LOG.md §9).
  * Inputs:     generated fragments from the Makefile's osc_mod/osc_pos rules.
  * Outputs:    one line per failure (first 40); "osc_pos failures: N";
  *             exit 1 if N > 0.

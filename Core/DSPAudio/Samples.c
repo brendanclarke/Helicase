@@ -62,7 +62,7 @@
  * Inputs:     the original 32,768-point crash ROM data and crashSample[0].
  * Outputs:    the flash-resident sample and its repeated guard point.
  * Accessors:  calcSampleOscBlock() and its FM, sync and ring copies.
- * Affiliates: Samples.h; osc_positionIsPhase(); S086_P4_SAMPLE_CYM_POS.md.
+ * Affiliates: Samples.h; osc_positionIsPhase(); 086_SESSION_HANDOFF_LOG.md §5.
  */
 const unsigned char crashSample[32769] = {
 	0x80, 0x84, 0x81, 0x7D, 0x7A, 0x80, 0x8D, 0x74, 0x6E, 0x8A, 0x88, 0x7A, 0x7F, 0x8E, 0x81, 0x73,
