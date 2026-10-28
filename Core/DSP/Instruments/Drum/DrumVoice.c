@@ -211,6 +211,29 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 		else
 			voice->osc.phase = 0;
 
+		/*
+		 * Apply osc1 position at the hit (S086 P3/P4).
+		 *
+		 * What:       adds osc_positionTrigger() to the start phase set above:
+		 *             position << 25 (position/128 of the phase range) for Sin,
+		 *             Tri, Saw, Rec, Re3, Sw3 and Cym (the whole crash sample),
+		 *             0 for noise and v1 user samples. The helper also sets
+		 *             positionApplied = position, so the first block after the
+		 *             hit does not bend.
+		 * Why:        the hit starts exactly at today's start phase + pos;
+		 *             position 0 adds 0, so today's start is kept bit for bit.
+		 *             It is added after the transient offset-mode scaling
+		 *             (S086 P3 Q6). Velocity modulation has already run at the
+		 *             top of this function, so a velocity target on pos is exact
+		 *             for this hit.
+		 * Inputs:     voice->osc.position (velocity-modulated), osc.waveform.
+		 * Outputs:    voice->osc.phase, voice->osc.positionApplied.
+		 * Accessors:  this trigger.
+		 * Affiliates: osc_positionTrigger() (Oscillator.h); the per-block bend
+		 *             in Drum_calcVoiceSyncBlock(); the osc1_position row.
+		 */
+		voice->osc.phase += osc_positionTrigger(&voice->osc);
+
 	}
 
 	osc_setBaseNote(&voice->osc,note);
@@ -402,6 +425,33 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	 * Affiliates: Oscillator.h S085 P1 block; DrumVoice.h DRUM_MOD_*;
 	 *             DrumParameters.c osc2_mod_type.
 	 */
+	/*
+	 * Start the osc1 position bend for this block (S086 P3).
+	 *
+	 * What:       osc_positionBendApply() adds this block's change of pos to
+	 *             osc.phaseInc (circular, capped by OSC_POS_BEND_CAP) and
+	 *             stores the step in osc.positionBendStep; the switch below
+	 *             renders the carrier with it, and osc_positionBendRestore()
+	 *             after the switch removes it. In snc the bend argument is 0:
+	 *             the delta is consumed (positionApplied follows pos) but
+	 *             phaseInc is not changed, because every master reset sets the
+	 *             slave's phase to a target without pos, and osc_syncRatioQ16()
+	 *             reads the slave's phaseInc (S086 P3 Q12).
+	 * Why:        pos is continuous (S086 P3 §2.3). The step lives in the
+	 *             oscillator, not in a local, so nothing stays live across the
+	 *             renders that LTO inlines into mixer_calcNextSampleBlock()
+	 *             (assessment F1). modOsc is a separate OscInfo and is never
+	 *             bent, so in fm, mix and rng only the carrier moves.
+	 * Inputs:     voice->osc position state; voice->modMode; osc.phaseInc as
+	 *             set by osc_setFreq() in Drum_calcVoiceAsync() this block.
+	 * Outputs:    osc.phaseInc bent for the render; osc.positionBendStep;
+	 *             osc.positionApplied.
+	 * Accessors:  this function only.
+	 * Affiliates: osc_positionBendApply()/Restore() (Oscillator.h);
+	 *             Drum_triggerVoice() (osc_positionTrigger()).
+	 */
+	osc_positionBendApply(&voice->osc, (uint8_t)(voice->modMode != DRUM_MOD_SNC));
+
 	switch (voice->modMode)
 	{
 	case DRUM_MOD_MIX:
@@ -461,6 +511,9 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 		calcNextOscSampleFmBlock(&voice->osc,modBuf,buf,size,1.0f);
 		break;
 	}
+
+	/* S086 P3: end the pos bend started before the switch (exact restore). */
+	osc_positionBendRestore(&voice->osc);
 
 	//calc transient sample
 	transient_calcBlock(&voice->transGen,modBuf,size);

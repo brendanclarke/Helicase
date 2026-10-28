@@ -38,6 +38,22 @@ closed** (2026-10-27) on `dev-ph7-voice_expansion`:
   - Record: `S086_P2_IMPLEMENTATION.md`; hardware H1–H8 pending.
   - Build: text 658,664; flash headroom 94,576 B; ITCM 8,512.
   - `ReA`/`TrA`/`SwA` are deferred.
+- **S086 P3/P4 (implemented, assessed and fixed, hardware pending,
+  uncommitted, 2026-10-28):** appended `osc1_position` (`pos`) rows put
+  `coa fin wav pos` on the first oscillator screen for Drum, Snare, Cymbal
+  and HiHat. `position`/`positionApplied` live in `OscInfo` padding; a
+  trigger adds `pos << 25` for the phase waves (Sin/Tri/Saw/Rec/Re3/Sw3 and
+  the whole Cym sample); each osc1 render is wrapped in
+  `osc_positionBendApply()`/`osc_positionBendRestore()`, which glide a change
+  over one 32-sample block through phaseInc. The block's step is kept in
+  `OscInfo.positionBendStep` (padding), not a local: a live local made LTO add
+  reloads to two per-sample loops inlined into `mixer_calcNextSampleBlock()`
+  (assessment F1); `elf86_mixer_check` now guards those loops. Drum `snc`
+  consumes the delta without bending. Noise and v1 user samples ignore it.
+  Cym has a 32,769th guard byte. Build: text 658,872, data 424, bss 430,296,
+  flash headroom 94,368 B, ITCM 8,512 B. Record:
+  `S086_P3_IMPLEMENTATION.md` §8–§9; hardware P3 H1–H10 and P4 C1–C4
+  remain pending.
 - **Hardware:** S085 P1 passed ("checks out completely fine"); the `rng` ramp
   re-test was not reported before the close. The S084 matrix V1–V7 is still
   recorded as open (confirm closed or waived).

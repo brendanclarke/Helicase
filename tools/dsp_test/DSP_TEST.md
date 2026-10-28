@@ -165,7 +165,8 @@ Each instrument parameter row carries a tag that picks its DSP setter
 four tables (`DrumParameters.c`, `SnareParameters.c`, `CymbalParameters.c`,
 `HiHatParameters.c`), classifies each `file_key` with the pre-S073
 string rules, and compares the result with the row's tag. Output:
-`special tags OK (155 rows, 0 mismatches)`.
+`special tags OK (159 rows, 0 mismatches)` (S086 P3 adds four
+`osc1_position` rows).
 
 Run it after adding or changing any instrument parameter row. The diagnostic
 firmware build does the same comparison at boot (the `s` digit on the `FxBf`
@@ -196,7 +197,7 @@ S073 tree.
 | `selftest` | Frozen filter against itself (old == old), 276,480,000 samples per variant | about 50 s | `differing=0` for int16 and float |
 | `filter` | Rounding baseline, then frozen filter against the batched solver; S1 report | about 2.5 min | `int16 ... SDR=91.6896 dB`, `float ... SDR=86.5468 dB`, `S1 acceptance: PASS (0 failures)` |
 | `armcheck-filter` | `vdiv` count in the old and new ARM filter objects | seconds | `vdiv old: 81`, `vdiv new: 39` |
-| `special_tags` | §4.4 | seconds | `special tags OK (155 rows, 0 mismatches)` |
+| `special_tags` | §4.4 | seconds | `special tags OK (159 rows, 0 mismatches)` (S086 P3: four `osc1_position` rows) |
 | `pack` | DMA pack, old against new, including clamp values | seconds | `pack differing bytes: 0` |
 | `postchain` | Fused post-chains, four engines, all distortion shapes, gain ramps, `volumeMod` both ways | seconds | `post-chain differing samples: 0` |
 | `armcheck-postchain` | ARM `MATCH` for Drum, Snare and Cymbal/HiHat | seconds | three `MATCH` lines |
@@ -210,6 +211,12 @@ S073 tree.
 | `stock_tables` | `tools/gen_stock_tables.py --check` (S086 P2): C1 the method rebuilds `sawTable` (Rec/Tri printed for information), C2 peak/DC, C3 out-of-band, C4 the committed `wavetableStock.c` regenerates byte-identical | seconds | `C1 ... sawTable 0 0 2 4 4 4 4 5 4 4 3`, `C2 ... OK`, `C4 ... OK` |
 | `osc86_identity` | `Oscillator.c/.h` against `frozen86/`: the removed/changed lines equal `frozen86/identity_allowed.txt`; `BufferTools.c/.h` identical. Supersedes `oscmod_identity` from S086 on | seconds | `osc86_identity: OK` |
 | `osc_stock` | `test_osc_stock.c` (S086 P2): D1 every dispatcher routes Re3/Sw3 to the Tri/Saw/Rec loop with the wave's own table; D2 stock == Rec on Rec's data; D3 interpolation in all four modes; D4 the waveform partitions; D5 `osc_setFreq()`. Runs `osc_mod` first | seconds | `osc_stock failures: 0` (plus the same expected cast warning) |
+| `osc_pos` | `test_osc_pos.c` (S086 P3/P4): P1 trigger offset against an independent truth table (waveforms 0–15, pos 0/1/64/127/128/255); P2 held-pos identity; P3 no drift on all seven phase waves; P4 circular step and exact restore; P5 continuity; P6 non-phase waves; P7 cap (cap-8 build); P8 consume-only (Drum `snc`). The pos constants are cut from `Oscillator.h` itself (`op_consts.inc`, with its asserts), not restated. Runs uncapped and cap-8 builds | seconds | `osc_pos failures: 0` twice |
+| `engine86_identity` | The four voice sources against `frozen86/`: the only removed or changed lines are the four P2 waveform-condition lines; P3 only adds lines | seconds | `engine86_identity: OK` |
+| `elf86_p2_snapshot` | Saves the current P2 oscillator symbols and loop bodies before P3. | seconds | `26 symbols`, `61 loops` written to `frozen86/` |
+| `elf86_p3_check` | Compares P3's linked oscillator functions and per-sample loops with the P2 snapshot. | seconds | `0 missing, 0 changed`; `61 exact` loops |
+| `elf86_mixer_snapshot` | Saves the P2 loop bodies of `mixer_calcNextSampleBlock()` (run once, `FW_ELF=<P2 build>`) to `frozen86/elf_mixer_p2.txt` | seconds | `97 loops` |
+| `elf86_mixer_check` | `elf_hotloops.py`: every per-sample do-while loop of the mixer (where LTO inlines the voice renders) paired with P2 by opcode sequence; fails if one is longer (S086 P3 assessment F1). Other fragments (jump tables, setup paths, cold stubs) are not compared | seconds | `0 grew` (shrank entries are pairing of fragment variants; informational) |
 | `elf_osc86_check` / `elf_loops86_check` | whole functions (`elf_symdump.py`) and per-sample loop bodies (`elf_loopdump.py`) of the oscillator symbols, against `frozen86/` (an `e56bb957` build). Supersede `elf_osc_check` from S086 on | seconds | exit 1 by design after S086 P2: 11 CHANGED (8 dispatchers; 3 user-sample functions with `subs #6` → `#8`), 1 ADDED (`calcFmBlock.constprop.3`); loops: 47 exact, 1 renamed, 10 noise-loop fragments moved (hand-checked equal counts, `S086_P2_IMPLEMENTATION.md` §4) |
 | `clean` | Deletes `build/` | — | — |
 

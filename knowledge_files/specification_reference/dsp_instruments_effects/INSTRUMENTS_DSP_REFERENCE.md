@@ -493,8 +493,19 @@ in Session 023 and measured worse.
 - **`OscInfo`** holds a 32-bit phase accumulator, `phaseInc`, `freq`,
   `pitchMod`, `fmMod`, `modNodeValue`, the waveform, the wavetable octave
   (`tableOffset`), a frequency cache, and a sample cache.
+- S086 P3 adds the plain-byte `position` and runtime `positionApplied` fields
+  in the existing `OscInfo` padding. The `osc1_position` row is 0..127 and is
+  appended to each instrument descriptor, so existing IDs remain stable.
+- For Sine, Tri, Saw, Rec, Re3, Sw3 and the Crash sample, a trigger adds
+  `position << 25` to the engine's existing start phase. A changed value is
+  applied as a temporary `phaseInc` bend over the next 32-sample block and is
+  removed afterward; position 0 and a held value are unchanged. Drum `snc`
+  advances the position tracker but does not bend the slave because sync
+  resets own its phase. Noise and v1 user samples ignore the row in this
+  stage. Crash interpolation has a repeated guard point at sample 32768.
 - **Waveforms:** `SINE` 0, `TRI` 1, `SAW` 2, `REC` 3, `NOISE` 4, `CRASH` 5
-  (the built-in crash sample), then user samples from 6
+  (the built-in crash sample), `SQ3` 6 (`Re3`), `SW3` 7 (`Sw3`), then user
+  samples from 8
   (`OSC_SAMPLE_START`).
 - **Effective frequency:** `freq · pitchMod · modNodeValue`, where `freq`
   comes from the base note plus coarse/fine tuning

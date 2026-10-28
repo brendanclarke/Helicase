@@ -171,6 +171,7 @@ typedef enum {
     HIHAT_PARAM_TRANSIENT_WAVE,
     HIHAT_PARAM_TRANSIENT_VOL,
     HIHAT_PARAM_TRANSIENT_FREQ,
+    HIHAT_PARAM_OSC1_POSITION, /* S086 P3: appended; preserve all prior IDs. */
     HIHAT_PARAM_COUNT
 } hihat_param_index_t;
 
@@ -237,6 +238,29 @@ const ParamDescriptor hihat_param_descriptors[] = {
     ROW_MENU_SPECIAL("transient_wave", "Transnt", "Waveform", "wav", MENU_TRANS, MOD_NONE, transGen.waveform, TYPE_UINT8, IM_SPECIAL_TRANSIENT_WAVE),
     ROW("transient_vol", "Transnt", "Volume", "vol", DTYPE_0B127, MOD_0_127, transGen.volume, TYPE_FLT),
     ROW_SPECIAL("transient_freq", "Transnt", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, transGen.pitch, TYPE_FLT, IM_SPECIAL_TRANSIENT_FREQ),
+    /*
+     * osc1_position: pos, the oscillator's continuous position (S086 P3/P4).
+     *
+     * What:       0..127, stored in osc.position. For Sin, Tri, Saw, Rec, Re3
+     *             and Sw3 it is a phase offset of pos/128 of a cycle; for Cym
+     *             pos/128 of the whole crash sample (S086 P4). A hit starts at
+     *             today's start phase + pos; while the voice plays, a change
+     *             glides over one block through a temporary phaseInc bend.
+     *             Noise and v1 user samples ignore it (user samples: S2).
+     * Why:        S086 P3: the fourth cell of the first oscillator screen. The
+     *             row is appended last, so every existing descriptor index,
+     *             automation ID, LFO/velocity token, NRPN ID and MIDI Learn row
+     *             is unchanged; a file without the key loads 0 (today's sound).
+     * Inputs:     menu edit, Morph, step automation, LFO adapter (MOD_0_127),
+     *             velocity node (the 0..127 range of a TYPE_UINT8 row).
+     * Outputs:    osc.position (TYPE_UINT8, plain store; no special writer).
+     * Accessors:  osc_positionTrigger(), osc_positionBendApply() and
+     *             osc_positionBendRestore() (Oscillator.h).
+     * Affiliates: HiHat.c: HiHat_triggerVoice() and
+     *             HiHat_calcSyncBlockVoice(); FILESYSTEM_SPEC.md (the key);
+     *             S086_P3_WAV_OSC_POS_PARAMETER.md.
+     */
+    ROW("osc1_position", "Oscilltr", "Position", "pos", DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -253,7 +277,8 @@ const uint8_t hihat_param_descriptor_count =
  * private open-hat menu fork now that `_choke` is the registry convention.
  */
 const instrument_menu_page_t hihat_menu_pages[] = {
-    {{ HIHAT_PARAM_OSC1_PITCH_COARSE, HIHAT_PARAM_OSC1_PITCH_FINE, HIHAT_PARAM_OSC1_WAVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* S086 P3: first oscillator screen is coa fin wav pos. */
+    {{ HIHAT_PARAM_OSC1_PITCH_COARSE, HIHAT_PARAM_OSC1_PITCH_FINE, HIHAT_PARAM_OSC1_WAVE, HIHAT_PARAM_OSC1_POSITION, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ HIHAT_PARAM_AMP_ENVELOPE_ATTACK, HIHAT_PARAM_AMP_ENVELOPE_DECAY, HIHAT_PARAM_AMP_ENVELOPE_SLOPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ HIHAT_PARAM_VELO_MOD_DEST, HIHAT_PARAM_VELO_MOD_AMOUNT, HIHAT_PARAM_VELO_VOL_ON_OFF, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ HIHAT_PARAM_OSC2_PITCH_COARSE, HIHAT_PARAM_OSC3_PITCH_COARSE, HIHAT_PARAM_OSC2_MOD_AMOUNT, HIHAT_PARAM_OSC3_MOD_AMOUNT, HIHAT_PARAM_OSC2_WAVE, HIHAT_PARAM_OSC3_WAVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},

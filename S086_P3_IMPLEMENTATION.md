@@ -5,7 +5,82 @@
 implemented together (P4 Q3).
 **Branch:** `dev-ph7-voice_expansion`, P2 state (Re3/Sw3; uncommitted)
 **Written:** 2026-10-28
-**Status:** schedule only. No code has been changed.
+**Status:** implemented; hardware tests pending. Step 0 baseline recorded;
+firmware changes were applied bottom-up and verified against the P2 image.
+
+## Implementation notes
+
+### Step 0 — P2 baseline (2026-10-28)
+
+- `make all` passed before the P3 edits.
+- `make img` passed and rebuilt `build/LXRV2_lxr02.img` at 659,088 bytes.
+- Baseline build figures match the P2 report: `text=658,664`, `data=424`,
+  `bss=430,296`, flash headroom `94,576` bytes, ITCM `8,512` bytes,
+  DTCM statics `4,472` bytes, and FX margin `3,712` bytes.
+- Added the test-bench targets for the P2 ELF snapshot and P3 comparisons;
+  the snapshot will be written now from this unchanged P2-linked image.
+
+### Step 1 — P2 linked-image snapshot (2026-10-28)
+
+- Saved `frozen86/elf_osc_p2.txt` with 26 oscillator symbols and
+  `frozen86/elf_loops_p2.txt` with 61 loop bodies from the P2 image.
+- Added the engine identity allow-list for the four P2 waveform-condition
+  replacements; the later P3 additions are required to be additions only.
+
+### Step 2 — oscillator storage and helpers (2026-10-28)
+
+- Added `position` and `positionApplied` to the existing `OscInfo` padding at
+  offsets 18–19. Compile-time offset checks and the ARM `sizeof(OscInfo)==72`
+  check passed.
+- Added the phase-wave classification, trigger offset, circular per-block
+  bend, cap constant (`64`, uncapped), and exact step-size assertion in
+  `Oscillator.h`. `Oscillator.c` and all per-sample loops remain untouched.
+
+### Step 3 — crash endpoint and engine integration (2026-10-28)
+
+- Added the crash guard point and changed its public array contract to 32,769
+  bytes. The guard repeats sample zero and does not alter the loop code.
+- Added trigger-time position application to Drum, Snare, Cymbal, and HiHat.
+  Added the temporary bend/restore around each osc1 render; Drum `snc`
+  advances the tracker but intentionally renders with no bend.
+- `make all` passed. Build after firmware integration: `text=658,832`,
+  `data=424`, `bss=430,296`, flash headroom `94,408` bytes, ITCM `8,512`,
+  DTCM statics `4,472`, FX margin `3,712`. `OscInfo` and `DrumVoice` did not
+  grow.
+
+### Step 4 — descriptors and menu layout (2026-10-28)
+
+- Appended one plain `TYPE_UINT8` `osc1_position` row to each instrument;
+  existing descriptor IDs remain stable. Counts are now Drum 40, Snare 39,
+  Cymbal 40, HiHat 40.
+- Put `pos` in the fourth cell of each first oscillator screen. Snare now
+  shows `coa fin wav pos` on screen 1 and moves `noi mix` to screen 2.
+- `special_tags` passed with 159 rows and 0 mismatches. The filesystem
+  specification now documents the key, default, and updated descriptor counts.
+
+### Step 5 — host and linked-image gates (2026-10-28)
+
+- Added `test_osc_pos.c`, covering trigger offsets, held-value identity,
+  circular wrapping, exact continuity, 4,096-block no-drift checks for Sine,
+  Saw and Crash, non-phase waveforms, and a cap-8 build.
+- `osc_pos` passed both builds (`osc_pos failures: 0` twice); `osc_stock`
+  passed; `engine86_identity` passed after recording the one superseded P2
+  Snare comment line; `elf86_p3_check` passed with 26 symbols unchanged and
+  61 oscillator loops exact.
+- The ordinary host build emits only the pre-existing extracted sample-pointer
+  cast warning from `osc_updateSampleCache()`.
+
+### Step 6 — final image and regression suite (2026-10-28)
+
+- Final `make all` passed with the same resource figures recorded in Step 3.
+- `make img` passed and wrote `build/LXRV2_lxr02.img` at 659,256 bytes.
+- The combined regression run passed: `osc_mod`, `osc_stock`, `osc_pos`,
+  `engine86_identity`, `special_tags`, `stock_tables`, `elf86_p3_check`,
+  `selftest`, `pack`, `postchain`, `octave`, `mixer`, `armcheck-postchain`,
+  `armcheck-mixer`, and `armcheck-oscmod`.
+- The octave target reports its documented 16 edge cases within 2 ulps;
+  this is unchanged from the P2/S086 baseline. No hardware checks have been
+  run in this session; P3 H1–H10 and P4 C1–C4 remain for the user.
 
 ---
 
@@ -303,8 +378,9 @@ This adds exactly 22 lines, so `} OscInfo;` moves from 102 to 124 (C-T1).
 
 ### C4. `Core/DSPAudio/Samples.c` (P4 Q4)
 
-**ADD before line 2104** (`};`), after the last data row (line 2103, which
-ends in a comma):
+**ADD before line 2104** (`};`), after the last data row (line 2103). That
+row ends without a comma, so add one to it (correction made after the
+assessment, F5b):
 
 ```c
 	/*
@@ -915,3 +991,253 @@ per-sample loop. Otherwise stop and report.
 | After a slot reset, `positionApplied` = 0 while the loaded `pos` ≠ 0, so the first block glides from 0 | harmless: the voice is silent until a trigger, and the trigger resets `positionApplied`; noted, not fixed |
 | A `pos` byte above 127 (corrupt file) | masked with `& 127` in both helpers |
 | The crash guard byte moves rodata | addresses only; the ELF gates compare normalised code |
+
+---
+
+## 8. Assessment (2026-10-28)
+
+**Scope.** Checked independently against this schedule and against the P3/P4
+plans:
+- the full diff against `703941cb` (P2 + the P3 documents);
+- a clean rebuild;
+- a pristine P2 build from `git archive HEAD`;
+- the whole bench;
+- the break proofs;
+- the linked-image comparisons.
+
+No source file was changed by the assessment. The image rebuilt from a clean
+tree is byte-identical to the delivered `build/LXRV2_lxr02.img`.
+
+### 8.1 Verdict
+
+**The implementation matches the schedule and is correct.**
+- Every firmware change C1–C17 is present, in the right place, with a
+  comment block.
+- The oscillator code and every oscillator per-sample loop are
+  byte-identical to P2.
+- All host and ARM gates pass.
+
+**Two things need attention before the work is called finished:**
+- **F1:** LTO re-laid out `mixer_calcNextSampleBlock()`, which contains the
+  inlined voice renders. Two inlined per-sample loops there are statically
+  slightly dearer. The device G-C reading (H10) decides; a cheap mitigation
+  is ready (§8.4).
+- **F3:** a test gap lets a wrong bend constant in `Oscillator.h` pass.
+
+### 8.2 Verified
+
+| Item | Result | Evidence |
+|---|---|---|
+| C1 helpers, constants, divisibility assert | as scheduled; masks, circular difference in `uint32_t`, cap clamp, `positionApplied` advance | diff |
+| C2 layout asserts, `<stddef.h>` after the struct | present; the ARM `sizeof == 72` assert passes | build |
+| C3 `OscInfo` fields | 22 lines inserted; `} OscInfo;` at 124, matching `osc_mod --lines 71-124` | diff, `osc_mod` passes |
+| Struct sizes | `OscInfo` 72; Drum/Snare/Cymbal/HiHat voices 596 / 420 / 476 / 484 B, all unchanged | ARM probe |
+| C4/C5 crash guard | `crashSample` 32,769 B; guard 0x80 = entry 0 | diff, `nm` |
+| C6–C9 engines | trigger line after each start-phase block; bend added and restored around exactly the `osc1` render; Drum `snc` calls the helper and zeroes the bend; modulators are never bent; no early return between add and restore | diff |
+| C10–C17 tables | the enum entry is last before `*_COUNT`; the row is last and on one line; page 1 cell 4 = position (Snare `coa fin wav pos` / `noi mix`); every page row still has 16 cells; counts 40/39/40/40 | diff, script |
+| Build | text 658,832 (+168 B on P2), data 424, bss 430,296, flash headroom 94,408, **ITCM 8,512 (unchanged)**; no warnings in the changed files | clean `make all` |
+| P2 snapshot is genuine | `frozen86/elf_osc_p2.txt`, `elf_loops_p2.txt` are byte-identical to dumps of a fresh pristine P2 build | `make elf86_p3_check FW_ELF=<P2 build>` |
+| Oscillator code unchanged | P3 against P2: 26 symbols, 0 changed; 61 loops, 61 exact; the dumps are byte-identical | `elf86_p3_check` |
+| `armcheck-oscmod` | identical to `frozen86/armcheck_oscmod_baseline.txt` | diff |
+| Host bench | `osc_mod` 0, `osc_stock` 0, `osc_pos` 0 ×2, `osc86_identity` OK, `engine86_identity` OK, `special_tags` 159/0, `stock_tables` C1–C4 OK, `selftest` 0 differing, `pack` 0, `postchain` 0, `octave` 16 / 2 ulps (documented), `mixer` 0, `armcheck-postchain` 3 MATCH, `armcheck-mixer` MATCH, `armcheck-filter` 81/39, `filter` S1 PASS (SDR 91.6896 / 86.5468) | full run |
+| Docs | `FILESYSTEM_SPEC.md` key list and counts; `INSTRUMENTS_DSP_REFERENCE.md`; `MEMORY.md`; `DSP_TEST.md` rows | diff |
+
+### 8.3 Findings
+
+| # | Severity | Finding |
+|---|---|---|
+| **F1** | medium: decide at G-C | **The mixer's inlined loops moved.** The four render functions are inlined into `mixer_calcNextSampleBlock()` (flash, not ITCM), which grew 12,576 → 13,036 B (+460) as LTO re-allocated registers. `elf86_p3_check` covers only the oscillator symbols, so the schedule's "no per-sample loop changes" holds there and not for this function. Comparing its loops P2 → P3 by opcode sequence, most are identical. Two real per-sample loops are dearer: (1) an **inlined FM loop with a Sine carrier** (`ubfx #20`, the `calcFmSineBlock` body) now reloads **two literal-pool constants every sample** (+2, and the loads go to flash); (2) an **inlined noise loop** now reloads **one stack spill every sample** (+1). The other length differences are jump-table and setup fragments, not savings. Cause: `posBend` stays live in a register across the inlined render, which raises register pressure in this one very large function. It is not a source-level loop change. The dearest setting of each voice (the user-sample loops) is not among the affected loops, so rule (a) probably still holds. But rule (b) shows +1/+2, and the plan's claim of "nothing per sample" is not exact for these inlined copies. |
+| **F2** | low (test) | **`test_osc_pos.c` has three gaps against schedule C-T3:** (a) **P2 identity** (held `pos` renders bit-identical to no helpers) is not implemented as its own case, although the report says it is; (b) **P1** samples `pos` 0, 17 … 119, so it never tests 127 or a value above 127 (the `& 127` mask); (c) **P1's expected value** is computed with `osc_positionIsPhase()` itself, so the wave set is not checked independently. Only P3 catches a missing wave, and only for Sine, Saw and Cym. |
+| **F3** | low (test) | **The header's constants are untested.** `test_osc_pos.c` redefines `OSC_POS_BEND_PER_STEP` (and `OSC_POS_BEND_CAP`) itself, and the extracted helpers use the test's copy. The break proof "step size ×2 in `Oscillator.h`" therefore **passes** the bench, although on the device it would bend the pitch and leave the offset wrong. |
+| F4 | info | **Break proofs** (schedule §6 step 8) were not recorded by the implementation. Run now on `Oscillator.h`: `pos << 24` fails P1; table waves dropped from `osc_positionIsPhase()` fails P3 (Saw); `CRASH` dropped fails P3 (Cym); linear difference fails P4; `positionApplied` not advanced fails P4; cap ignored fails P4 (cap build). **Step size ×2 passes (F3).** The source was restored byte-identical. |
+| F5 | info | **Deviations from the schedule, all acceptable:** (a) the Snare edit replaced the `//calc next osc sample` comment instead of adding above it; this is documented in `engine_identity_allowed.txt` and `DSP_TEST.md`; (b) schedule error: C4 said the last crash data row ended with a comma, but it did not; the implementation correctly added one; (c) the comment blocks are reworded and shorter than the schedule's text but carry What/Why/Inputs/Outputs/Accessors/Affiliates. |
+| F6 | info | **Trigger functions:** Drum/Cymbal/HiHat `*_triggerVoice.part.0` +20 B each. `Snare_triggerVoice.part.0` is 812 → 324 B, as LTO split the Snare trigger differently. These run per trigger, not per sample. No action. |
+
+### 8.4 Recommended actions
+
+1. **F3 (one line, firmware build).** Pin the constant where it is defined.
+   In `Oscillator.h`, after `OSC_POS_BEND_PER_STEP`:
+
+   ```c
+   _Static_assert(OSC_POS_BEND_PER_STEP * OUTPUT_DMA_SIZE == (1u << 25),
+                  "one pos step over one block must move exactly 1/128 cycle");
+   ```
+
+   In `test_osc_pos.c`, take the two `#define`s from the header (`extract.py
+   --lines`) instead of redefining them. Re-run the "×2" break proof; it must
+   then fail the build.
+2. **F2.** In `test_osc_pos.c`:
+   - add P2 as its own case;
+   - make P1 cover `pos` 0, 1, 64, 127, 128, 255 against an **independent**
+     expected wave set (`SINE TRI SAW REC CRASH SQ3 SW3` → `pos << 25`,
+     masked; everything else → 0);
+   - run P3 also for TRI, REC, SQ3, SW3.
+3. **F1: measure first (H10, six-slot worst case, with Cymbal/HiHat carriers
+   on Sine and Snare noise), then decide.**
+   - **If the `cpu` reading is worse than P2,** remove the live register: keep
+     the block's step `d` in `OscInfo` instead of a local. There are 3 free
+     padding bytes after `waveInterpNext`, for example `int8_t positionBendStep`.
+   - Split the helper into `osc_positionBendApply()`: compute `d`, store it,
+     add `d × step` to `phaseInc`. Add `osc_positionBendRestore()`: subtract
+     `positionBendStep × step`.
+   - Nothing is then live across the inlined render. Re-run `elf86_p3_check`
+     and the mixer loop comparison; the two loops should return to their P2
+     form.
+   - Extend the ELF gates to `mixer_calcNextSampleBlock`, with an
+     opcode-sequence comparison: register- and offset-insensitive, so layout
+     moves don't flag.
+4. **Hardware:** P3 H1–H10 and P4 C1–C4 are unchanged. H10 now carries F1's
+   decision.
+
+### 8.5 Resources (P2 → P3)
+
+| | P2 | P3 | Change |
+|---|---:|---:|---:|
+| text | 658,664 | 658,832 | +168 |
+| flash headroom | 94,576 | 94,408 | −168 |
+| ITCM | 8,512 | 8,512 | 0 |
+| bss / data / DTCM | 430,296 / 424 / 4,472 | same | 0 |
+| `OscInfo`; voices | 72; 596 / 420 / 476 / 484 | same | 0 |
+| descriptors (D/S/C/H) | 39 / 38 / 39 / 39 | 40 / 39 / 40 / 40 | +1 each |
+| `special_tags` rows | 155 | 159 | +4 |
+
+---
+
+## 9. Fixes after the assessment (2026-10-28)
+
+All findings of §8.3 are fixed except F6, which needs no action. In this
+section "P3 as delivered" means the tree assessed in §8.
+
+**API change:** this section supersedes the helper API of C1 and the engine
+code of C6–C9. `osc_positionBend()` (which returned the bend) is replaced by
+`osc_positionBendApply(osc, bend)` / `osc_positionBendRestore(osc)`, which
+keep the step in the oscillator.
+
+### 9.1 F1: no live state across the inlined render
+
+**Change:**
+
+| File | What |
+|---|---|
+| `Core/DSPAudio/Oscillator.h` | new `int8_t positionBendStep` in the padding after `waveInterpNext`, with a full comment block; two new layout asserts (it follows `waveInterpNext`; `waveInterpFrac` does not move). `osc_positionBend()` replaced by `osc_positionBendApply(OscInfo*, uint8_t bend)` (computes the circular, capped step, advances `positionApplied`, stores the step and adds it to `phaseInc`; `bend = 0` or a non-phase wave stores 0 and only consumes the delta) and `osc_positionBendRestore(OscInfo*)` (subtracts the stored step from `phaseInc` and clears it). All related comment blocks rewritten |
+| `DrumVoice.c` | `osc_positionBendApply(&voice->osc, modMode != DRUM_MOD_SNC)` before the mode switch; `osc_positionBendRestore()` after it. No local variable |
+| `Snare.c`, `CymbalVoice.c`, `HiHat.c` | `osc_positionBendApply(&voice->osc, 1u)` before and `osc_positionBendRestore()` after the osc1 render. No local variable |
+
+**Why it works:**
+- The step is read back from the oscillator after the render.
+- So no value has to stay in a register across the voice render that LTO
+  inlines into `mixer_calcNextSampleBlock()`.
+- That register pressure was what made two inlined per-sample loops reload
+  values.
+
+**Result, measured on the linked image** against the pristine P2 build:
+
+| Loop in `mixer_calcNextSampleBlock()` | P2 | P3 as delivered | After the fix |
+|---|---:|---:|---:|
+| inlined FM loop, Sine carrier (`calcFmSineBlock` body) | 29 | 31 | **29** |
+| inlined noise loops | 15 / 17 / 18 | 16 / … | **15 / 17 / 18** |
+| per-sample do-while loops compared by `elf86_mixer_check` | — | 3 grew | **0 grew** (33 equal; 6 "shrank" are fragment-variant pairings) |
+
+**The remaining textual differences** in that function are:
+- register renaming and scheduling;
+- cold saturation stubs that the extractor appends to fragments, with equal
+  hot-path instruction multisets (§8 analysis, repeated);
+- one extra stack store in a per-block setup path, which is not per sample.
+
+**New permanent gate** (assessment recommendation 3):
+- `tools/dsp_test/elf_hotloops.py` and the Makefile targets
+  `elf86_mixer_snapshot` / `elf86_mixer_check`.
+- **Baseline:** `frozen86/elf_mixer_p2.txt`, taken from the pristine P2
+  build (`git archive 703941cb`).
+- **What it checks:** it pairs the mixer's per-sample do-while loops with P2
+  by opcode sequence and fails if one is longer.
+- **Break proof:** on P3 as delivered it fails, naming the noise loop (15 → 16)
+  and the FM-sine loop (29 → 31); on the fixed tree it passes.
+
+### 9.2 F3: the header's constants are what the test compiles
+
+- **`Oscillator.h`:** two new asserts in the constants block.
+  - `OSC_POS_BEND_PER_STEP * OUTPUT_DMA_SIZE == 1 << 25`: one step over one
+    block is exactly 1/128 cycle.
+  - `OSC_POS_BEND_CAP` must be in 1..64, because `positionBendStep` is an
+    `int8_t`.
+- **`tools/dsp_test/Makefile` `osc_pos`:**
+  - `op_consts.inc` is now cut from `Oscillator.h` (from
+    `#ifndef OSC_POS_BEND_CAP` to the cap-range assert), with a check that
+    the block was found;
+  - `test_osc_pos.c` no longer defines the constants itself.
+- **Break proof:** the "step size ×2" mutation, which passed in §8, now
+  stops the build at the new assert, both in the firmware and in the host
+  test.
+
+### 9.3 F2: `test_osc_pos.c` rewritten for the new API
+
+| Check | Now |
+|---|---|
+| P1 | waveforms 0–15 × `pos` 0, 1, 64, 127, 128, 255 against an **independent** truth table (Sin Tri Saw Rec Cym Re3 Sw3 → `(pos & 127) << 25`, else 0) |
+| P2 | **new:** a held `pos` (16 random values × 7 phase waves × 8 blocks) renders bit-identically to the plain loop from start + `pos << 25`; `phaseInc` and `positionBendStep` untouched |
+| P3 | no drift on **all seven** phase waves (Re3/Sw3 tables now hold distinct data, so a wrong table would show) |
+| P4 | circular steps, the stored step, the `phaseInc` change, and the exact restore |
+| P5 | continuity on all seven phase waves, plus "lands exactly on the offset" |
+| P6 | non-phase waves: no bend, step 0, the delta is consumed, the restore is a no-op |
+| P7 | cap build: a step of 40 moves 8 per block (checked each block) and lands |
+| P8 | **new:** consume only (`bend = 0`, Drum `snc`): no bend, step 0, `positionApplied` follows |
+
+**Break proofs**, each applied to `Oscillator.h` and reverted; the source was
+confirmed byte-identical afterwards:
+
+| Mutation | Fails |
+|---|---|
+| `pos << 24` at the trigger | P1 |
+| the trigger's `& 127` mask removed | P1 (pos 128/255) |
+| table waves dropped from `osc_positionIsPhase()` | P1 |
+| `CRASH` dropped | P1 |
+| linear instead of circular difference | P4 |
+| `positionApplied` not advanced | P3 |
+| step size ×2 | **build (assert)** |
+| cap ignored | P4 (cap build) |
+| Restore does not subtract | P3 |
+| Restore keeps the step | P3 |
+| the `bend` argument ignored | P8 |
+
+### 9.4 Minors
+
+- **F5a:** the original Snare `//calc next osc sample` line is back, directly
+  above its render. `frozen86/engine_identity_allowed.txt` is again exactly
+  the four P2 lines, and P3 only adds lines to the engines.
+- **F5b:** the schedule's C4 text (§3) is corrected: the last crash data row
+  had no trailing comma.
+- **F5c, comment blocks:**
+  - All P3 comment blocks now state what the code does after the fix: the
+    four trigger blocks, the four render blocks, the `OscInfo` blocks, the
+    constants block, the helpers, and the four descriptor-row blocks.
+  - The row blocks were three compressed one-liners; they are now full
+    What/Why/Inputs/Outputs/Accessors/Affiliates blocks.
+  - No stale reference to `osc_positionBend()` remains.
+- **Docs:** `DSP_TEST.md` rows for `osc_pos`, `engine86_identity`,
+  `elf86_mixer_snapshot`, `elf86_mixer_check`; `MEMORY.md` (S086 P3 entry and
+  build figures).
+
+### 9.5 Verification (clean build of the fixed tree)
+
+| Gate | Result |
+|---|---|
+| `make all && make img` | text **658,872** (+208 on P2, +40 on P3 as delivered), data 424, bss 430,296, flash headroom **94,368**, **ITCM 8,512** (unchanged), DTCM 4,472; no warnings in the changed files; image 659,296 B |
+| Sizes | `OscInfo` 72; voices 596 / 420 / 476 / 484 (unchanged) |
+| `elf86_p3_check` | 26 symbols, 0 changed; 61 loops, 61 exact (oscillator code still byte-identical to P2) |
+| `elf86_mixer_check` | 0 grew |
+| `armcheck-oscmod` | identical to the frozen baseline |
+| `osc_mod`, `osc_stock`, `osc_pos` ×2 | 0 failures each |
+| `osc86_identity`, `engine86_identity` | OK |
+| `special_tags` | 159 rows, 0 mismatches |
+| `stock_tables` | C1–C4 OK |
+| `selftest`, `pack`, `postchain`, `mixer` | 0 differing |
+| `octave` | 16 / 2 ulps (documented) |
+| `armcheck-postchain`, `armcheck-mixer`, `armcheck-filter` | MATCH / MATCH / 81→39 |
+| `filter` | S1 PASS (SDR 91.6896 / 86.5468) |
+
+### 9.6 Still open
+
+- **Hardware:** P3 H1–H10 and P4 C1–C4. H10 (G-C, the six-slot worst case)
+  is still the CPU gate. The static evidence now shows no per-sample loop
+  longer than P2, in the oscillator code or in the mixer.

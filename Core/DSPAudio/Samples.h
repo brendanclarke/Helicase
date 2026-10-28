@@ -37,6 +37,18 @@
 #ifndef SAMPLES_H_
 #define SAMPLES_H_
 
-extern const unsigned char crashSample[32768];
+/*
+ * Crash sample declaration (S086 P4).
+ *
+ * What:       entries 0..32767 are the original sample; entry 32768 repeats
+ *             entry 0 for the interpolator's final itg + 1 read.
+ * Why:        P3 position can place the phase at any point in the complete
+ *             crash sample, so the endpoint must be a valid interpolant.
+ * Inputs:     none; this is the public flash-array contract.
+ * Outputs:    the array size seen by Oscillator.c and host/build probes.
+ * Accessors:  calcSampleOscBlock() and the crash FM/sync/ring readers.
+ * Affiliates: Samples.c; S086_P3_WAV_OSC_POS_PARAMETER.md §2.4.
+ */
+extern const unsigned char crashSample[32769];
 
 #endif /* SAMPLES_H_ */

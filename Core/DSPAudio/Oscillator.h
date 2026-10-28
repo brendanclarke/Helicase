@@ -78,12 +78,53 @@ typedef struct OscStruct
 
 	uint8_t		tableOffset;	//overtone table
 
+	/*
+	 * pos runtime state (S086 P3/P4).
+	 *
+	 * What:       position is the 0..127 osc1_position value. For the phase
+	 *             waves (osc_positionIsPhase()) it is position/128 of a cycle;
+	 *             for CRASH the cycle is the complete sample. positionApplied
+	 *             is the part of position already contained in phase.
+	 * Why:        a descriptor value can change once per audio block. Keeping
+	 *             the applied value lets the engine spread each change through
+	 *             phaseInc instead of jumping phase at a block boundary. These
+	 *             bytes occupy the existing padding before pitchMod, so OscInfo
+	 *             and every runtime voice keep their size (asserted below).
+	 * Inputs:     position: the generic descriptor writer (menu, Morph, LFO,
+	 *             velocity, step automation). positionApplied:
+	 *             osc_positionTrigger() and osc_positionBendApply().
+	 * Outputs:    read by the same helpers only.
+	 * Accessors:  osc_positionTrigger(), osc_positionBendApply().
+	 * Affiliates: positionBendStep below; the osc1_position rows in the four
+	 *             *Parameters.c files; S086_P3_WAV_OSC_POS_PARAMETER.md and
+	 *             S086_P4_SAMPLE_CYM_POS.md.
+	 */
+	uint8_t		position;
+	uint8_t		positionApplied;
 
 	float		pitchMod;	// modulation value for frequency
 	float 		fmMod;
 
 	float		modNodeValue;
 	uint8_t		waveInterpNext;			/* next waveform used for morph blend */
+	/*
+	 * pos bend of the block being rendered (S086 P3, assessment F1).
+	 *
+	 * What:       the signed number of 1/128-cycle steps that
+	 *             osc_positionBendApply() added to phaseInc for this block
+	 *             (-64..+64; 0 outside a render). osc_positionBendRestore()
+	 *             subtracts the same amount after the render and clears it.
+	 * Why:        the step is kept in the oscillator instead of a local
+	 *             variable, so no register stays live across the render that
+	 *             LTO inlines into mixer_calcNextSampleBlock(). A live local
+	 *             raised register pressure there and added reloads to two
+	 *             inlined per-sample loops (assessment F1). It sits in the
+	 *             padding after waveInterpNext, so OscInfo keeps its size.
+	 * Inputs:     osc_positionBendApply().  Outputs: osc_positionBendRestore().
+	 * Accessors:  those two helpers only; never stored in a file.
+	 * Affiliates: the four voice render functions; S086_P3_IMPLEMENTATION.md §9.
+	 */
+	int8_t		positionBendStep;
 	float		waveInterpFrac;			/* blend amount [0..1] between waveform and next */
 	uint32_t	waveInterpGeneration;	/* audio-block generation stamp */
 	float		freqCacheValue;
@@ -100,6 +141,37 @@ typedef struct OscStruct
 	uint8_t baseNote;		// the last played midi note
 	uint32_t startPhase;		// the OSC is reset to this phase on retrigger
 } OscInfo;
+
+/*
+ * OscInfo layout checks (S086 P3).
+ *
+ * What:       verify that position and positionApplied fill the padding
+ *             between tableOffset (17) and pitchMod (20), that
+ *             positionBendStep sits in the padding after waveInterpNext
+ *             (before the 4-byte-aligned waveInterpFrac), and the ARM size.
+ * Why:        pos is deliberately a zero-RAM feature; a moved field would
+ *             silently grow every oscillator in every runtime slot.
+ * Inputs:     the OscInfo declaration above.
+ * Outputs:    compile-time diagnostics only.
+ * Accessors:  the compiler.
+ * Affiliates: runtime_slots and the four voice structs; tools/dsp_test's
+ *             extracted OscInfo fragment.
+ * Note:       <stddef.h> is included here, after the struct, so the line
+ *             ranges the test bench extracts from the top of this header do
+ *             not move.
+ */
+#include <stddef.h>
+_Static_assert(offsetof(OscInfo, position) == offsetof(OscInfo, tableOffset) + 1u,
+               "OscInfo.position must follow tableOffset (padding)");
+_Static_assert(offsetof(OscInfo, positionApplied) + 1u == offsetof(OscInfo, pitchMod),
+               "OscInfo.positionApplied must end the padding before pitchMod");
+_Static_assert(offsetof(OscInfo, positionBendStep) == offsetof(OscInfo, waveInterpNext) + 1u,
+               "OscInfo.positionBendStep must follow waveInterpNext (padding)");
+_Static_assert(offsetof(OscInfo, waveInterpFrac) == offsetof(OscInfo, waveInterpNext) + 4u,
+               "OscInfo.positionBendStep must not move waveInterpFrac");
+#if defined(__arm__)
+_Static_assert(sizeof(OscInfo) == 72u, "OscInfo must stay 72 bytes (S086 P3)");
+#endif
 //-----------------------------------------------------------
 
 //extern OscInfo osc1;
@@ -366,6 +438,147 @@ static inline uint8_t osc_isTableWave(const uint8_t waveform)
 {
 	return (uint8_t)((waveform >= TRI && waveform <= REC) ||
 	                 (waveform >= OSC_STOCK_FIRST && waveform <= OSC_STOCK_LAST));
+}
+
+/*
+ * Position bend constants (S086 P3/P4).
+ *
+ * What:       OSC_POS_BEND_CAP limits the number of 1/128-cycle steps moved
+ *             in one block; 64 disables the cap because the circular delta
+ *             is already in -64..+63. OSC_POS_BEND_PER_STEP is the per-sample
+ *             phaseInc for one step held over one OUTPUT_DMA_SIZE block, so
+ *             the block moves the phase by exactly 1 << 25 (1/128 cycle).
+ * Why:        the exact integer step lands each block on the requested phase
+ *             without drift; the asserts pin both constants in the firmware
+ *             build, and test_osc_pos.c compiles this same block (assessment
+ *             F3), so a wrong value fails the build and the host test. The
+ *             cap stays available for listening tests (S086 P3 Q11).
+ * Inputs:     OUTPUT_DMA_SIZE from config.h; OSC_POS_BEND_CAP may be
+ *             predefined (the host cap build uses 8).
+ * Outputs:    the two constants.
+ * Accessors:  osc_positionBendApply(), osc_positionBendRestore().
+ * Affiliates: tools/dsp_test/Makefile osc_pos (extracts this block from
+ *             "#ifndef OSC_POS_BEND_CAP" to the cap-range assert).
+ */
+#ifndef OSC_POS_BEND_CAP
+#define OSC_POS_BEND_CAP 64
+#endif
+#define OSC_POS_BEND_PER_STEP (0x2000000u / OUTPUT_DMA_SIZE)
+_Static_assert((0x2000000u % OUTPUT_DMA_SIZE) == 0u,
+               "the pos bend must divide one 1/128-cycle step exactly");
+_Static_assert(OSC_POS_BEND_PER_STEP * OUTPUT_DMA_SIZE == (1u << 25),
+               "one pos step over one block must move exactly 1/128 cycle");
+_Static_assert(OSC_POS_BEND_CAP >= 1 && OSC_POS_BEND_CAP <= 64,
+               "OSC_POS_BEND_CAP must be 1..64 (positionBendStep is int8_t)");
+
+/*
+ * Return whether position is a phase offset for this waveform (S086 P3/P4).
+ *
+ * What:       SINE, CRASH and all table waves use the full 32-bit phase range;
+ *             NOISE and v1 user samples retain their existing no-position
+ *             behaviour until the later sample stage.
+ * Why:        one phase unit is position/128 of the wave or complete sample.
+ * Inputs:     waveform ID.
+ * Outputs:    1 for phase waves, otherwise 0.
+ * Accessors:  osc_positionTrigger(), osc_positionBendApply().
+ * Affiliates: osc_isTableWave(), S086_P4_SAMPLE_CYM_POS.md.
+ */
+static inline uint8_t osc_positionIsPhase(const uint8_t waveform)
+{
+	return (uint8_t)(waveform == SINE || waveform == CRASH ||
+	                 osc_isTableWave(waveform));
+}
+
+/*
+ * Apply position at a trigger (S086 P3/P4).
+ *
+ * What:       records the current position as applied and returns position
+ *             << 25 for phase waves, which is position/128 of 2^32.
+ * Why:        the trigger starts at today's phase plus the requested offset;
+ *             position 0 returns zero and is bit-for-bit today's start.
+ * Inputs:     osc->position and osc->waveform, after velocity modulation and
+ *             after the engine's existing transient offset scaling.
+ * Outputs:    phase offset for the caller and osc->positionApplied.
+ * Accessors:  Drum/Snare/Cymbal/HiHat_triggerVoice().
+ * Affiliates: osc_positionBendApply() (the continuous part), the
+ *             osc1_position descriptor rows.
+ */
+static inline uint32_t osc_positionTrigger(OscInfo* osc)
+{
+	const uint32_t pos = (uint32_t)(osc->position & 127u);
+
+	osc->positionApplied = (uint8_t)pos;
+	if (!osc_positionIsPhase(osc->waveform))
+		return 0u;
+	return pos << 25;
+}
+
+/*
+ * Start the continuous position bend for one block (S086 P3/P4).
+ *
+ * What:       computes the circular delta d from positionApplied to position
+ *             (-64..+63; 127 -> 0 is +1), limits it to +-OSC_POS_BEND_CAP,
+ *             advances positionApplied by d, and, for a phase wave with
+ *             bend != 0, adds d x OSC_POS_BEND_PER_STEP to phaseInc and
+ *             stores d in positionBendStep. Otherwise it stores 0 and leaves
+ *             phaseInc alone, while still consuming the delta.
+ * Why:        LFO, knob, velocity, Morph and automation values arrive once
+ *             per block. Bending phaseInc for one block makes the phase
+ *             glide and land exactly on the new offset after OUTPUT_DMA_SIZE
+ *             samples, with no loop change. Storing the step in the
+ *             oscillator (not returning it) means the caller keeps nothing
+ *             live across the render (assessment F1). Consuming the delta
+ *             for non-phase waves, and for Drum snc (bend = 0), means a later
+ *             waveform or mode switch cannot release a stale bend.
+ * Inputs:     osc->position, osc->positionApplied, osc->waveform; bend: 1 to
+ *             bend, 0 to consume the delta only (Drum snc, S086 P3 Q12).
+ * Outputs:    osc->phaseInc (bent), osc->positionBendStep,
+ *             osc->positionApplied.
+ * Accessors:  Drum_calcVoiceSyncBlock(), Snare_calcSyncBlockVoice(),
+ *             Cymbal_calcSyncBlockVoice(), HiHat_calcSyncBlockVoice(),
+ *             immediately before their osc1 render.
+ * Affiliates: osc_positionBendRestore() (must follow the render);
+ *             osc_setFreq() (its cache would keep a bend left in phaseInc);
+ *             calcPeriodicInterp*() (end the block at start + phaseInc x size,
+ *             which includes the bend); S086 P3 §2.3.
+ */
+static inline void osc_positionBendApply(OscInfo* osc, const uint8_t bend)
+{
+	const uint32_t u = ((uint32_t)(osc->position & 127u) -
+	                    (uint32_t)osc->positionApplied + 64u) & 127u;
+	int32_t d = (int32_t)u - 64;
+
+	if (d > (int32_t)OSC_POS_BEND_CAP)
+		d = (int32_t)OSC_POS_BEND_CAP;
+	else if (d < -(int32_t)OSC_POS_BEND_CAP)
+		d = -(int32_t)OSC_POS_BEND_CAP;
+	osc->positionApplied =
+		(uint8_t)(((uint32_t)osc->positionApplied + (uint32_t)d) & 127u);
+	if (!bend || !osc_positionIsPhase(osc->waveform))
+		d = 0;
+	osc->positionBendStep = (int8_t)d;
+	osc->phaseInc += (uint32_t)(d * (int32_t)OSC_POS_BEND_PER_STEP);
+}
+
+/*
+ * End the continuous position bend after the block's render (S086 P3/P4).
+ *
+ * What:       subtracts positionBendStep x OSC_POS_BEND_PER_STEP from
+ *             phaseInc, restoring it exactly, and clears positionBendStep.
+ * Why:        phaseInc is cached by osc_setFreq(); a bend left in it would
+ *             become a lasting pitch error. Reading the step from the
+ *             oscillator keeps the caller free of live state (assessment F1).
+ * Inputs:     osc->positionBendStep, osc->phaseInc.
+ * Outputs:    osc->phaseInc (unbent), osc->positionBendStep = 0.
+ * Accessors:  the same four render functions, immediately after the osc1
+ *             render that osc_positionBendApply() preceded.
+ * Affiliates: osc_positionBendApply().
+ */
+static inline void osc_positionBendRestore(OscInfo* osc)
+{
+	osc->phaseInc -= (uint32_t)((int32_t)osc->positionBendStep *
+	                            (int32_t)OSC_POS_BEND_PER_STEP);
+	osc->positionBendStep = 0;
 }
 
 #endif /* OSCILLATOR_H_ */

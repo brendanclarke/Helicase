@@ -11,7 +11,7 @@
  * diagnostics. Keep these macros aligned with the descriptor/page arrays in
  * SnareParameters.c whenever rows/pages are added.
  */
-#define SNARE_PARAM_DESCRIPTOR_COUNT 38u
+#define SNARE_PARAM_DESCRIPTOR_COUNT 39u /* S086 P3: + osc1_position. */
 #define SNARE_MENU_PAGE_COUNT       8u
 #define SNARE_INSTRUMENT_TYPE_FLAGS INSTRUMENT_FLAG_BASIC
 

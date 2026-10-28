@@ -1795,10 +1795,10 @@ The physical SD-card key vocabulary lives in each instrument descriptor table:
 
 Current descriptor counts:
 
-- Drum: 39 descriptors.
-- Snare: 38 descriptors.
-- Cymbal: 39 descriptors.
-- HiHat: 39 descriptors.
+- Drum: 40 descriptors.
+- Snare: 39 descriptors.
+- Cymbal: 40 descriptors.
+- HiHat: 40 descriptors.
 
 Descriptor key lookup is type-local. The same key may exist in multiple
 instrument types but resolves against the loaded slot type.
@@ -1814,10 +1814,13 @@ those siblings remain separate normal modulation targets.
 Current keys by family:
 
 - Oscillator and noise: `osc1_wave`, `osc1_pitch_coarse`,
-  `osc1_pitch_fine`, `osc2_wave`, `osc2_pitch_coarse`,
+  `osc1_pitch_fine`, `osc1_position`, `osc2_wave`, `osc2_pitch_coarse`,
   `osc2_mod_amount`, `osc2_mod_type`, `osc3_wave`,
   `osc3_pitch_coarse`, `osc3_mod_amount`, `noise_freq`,
   `osc1_noise_mix`.
+  `osc1_position` (S086 P3) is 0..127 and moves osc1 by position/128 of the
+  phase range (for Cym, the crash sample range). An absent key loads 0,
+  preserving the old sound; older firmware skips the key.
   `osc2_mod_type` (Drum) stores 0 `fm`, 1 `mix`, 2 `snc`, 3 `rng`
   (S085). 0 and 1 keep their pre-S085 meaning; the key is written by
   every save, so older files carry 0 or 1. A byte above 3 plays and shows

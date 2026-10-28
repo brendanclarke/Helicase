@@ -247,9 +247,10 @@ oscmod_identity:
 	@echo "oscmod_identity: OK"
 
 # Host behaviour of the new code against the unchanged plain loops.
+# S086 P3: OscInfo is 71-143 (position, positionApplied, positionBendStep).
 osc_mod: | $(GEN)
 	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 49-65 --out $(GEN)/om_defs.inc
-	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 71-102 --out $(GEN)/om_oscinfo.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 71-143 --out $(GEN)/om_oscinfo.inc
 	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c --object osc_stockTables \
 	  --out $(GEN)/om_stock.inc
 	$(EX) --src $(ROOT)/Core/SampleRom/SampleMemory.h --lines 104-109 \
@@ -377,3 +378,80 @@ elf_loops86_check: | $(GEN)
 	python3 elf_loopdump.py --elf $(FW_ELF) $(foreach s,$(OSC86_ELF_SYMS),--sym $(s)) \
 	  --out build/elf_loops86_now.txt
 	python3 elf_loopdump.py --compare $(FROZEN86)/elf_loops.txt build/elf_loops86_now.txt
+
+# ---------------------------------------------------------------------------
+# S086 P3/P4: continuous oscillator position and the Cym crash guard.
+#
+# What:       osc_pos tests the trigger offset and exact per-block bend with
+#             the header's own constants (op_consts.inc is cut from
+#             Oscillator.h between "#ifndef OSC_POS_BEND_CAP" and the cap
+#             range assert, so a wrong constant fails here; assessment F3);
+#             engine86_identity proves the four voice files only add the P3
+#             blocks on top of P2's waveform-condition changes;
+#             elf86_p2_snapshot saves the P2 linked-image reference before the
+#             oscillator engines are edited; elf86_p3_check compares the P3
+#             linked oscillator functions and loop bodies against that copy.
+# Why:        P3 requires no oscillator loop edits, no phaseInc residue after
+#             rendering, and no accidental change to existing loop code.
+# Inputs:     Oscillator.h/.c, the four voice files, frozen86/, and lxr02.elf.
+# Outputs:    host pass/fail lines and normalised P2/P3 ELF comparisons.
+# Accessors:  make -C tools/dsp_test <target>.
+# Affiliates: test_osc_pos.c, extract.py, elf_symdump.py, elf_loopdump.py.
+# ---------------------------------------------------------------------------
+OSC_POS86 := osc_isTableWave osc_positionIsPhase osc_positionTrigger \
+             osc_positionBendApply osc_positionBendRestore
+ENGINES86 := Core/DSP/Instruments/Drum/DrumVoice.c Core/DSP/Instruments/Snare/Snare.c \
+             Core/DSP/Instruments/Cymbal/CymbalVoice.c Core/DSP/Instruments/HiHat/HiHat.c
+.PHONY: osc_pos engine86_identity elf86_p2_snapshot elf86_p3_check
+
+osc_pos: osc_mod
+	sed -n '/^#ifndef OSC_POS_BEND_CAP/,/OSC_POS_BEND_CAP must be 1\.\.64/p' \
+	  $(ROOT)/Core/DSPAudio/Oscillator.h > $(GEN)/op_consts.inc
+	@grep -q 'OSC_POS_BEND_PER_STEP \* OUTPUT_DMA_SIZE' $(GEN)/op_consts.inc || \
+	  { echo "osc_pos: constants block not found in Oscillator.h"; exit 1; }
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h $(call fn,$(OSC_POS86)) \
+	  --out $(GEN)/op_helpers.c
+	$(HOSTCC) $(HOSTFLAGS) test_osc_pos.c -o build/osc_pos -lm
+	$(HOSTCC) $(HOSTFLAGS) -DOSC_POS_BEND_CAP=8 -DOSC_POS_TEST_CAP test_osc_pos.c \
+	  -o build/osc_pos_cap -lm
+	./build/osc_pos
+	./build/osc_pos_cap
+
+engine86_identity: | $(GEN)
+	@for f in $(ENGINES86); do \
+	  diff $(FROZEN86)/$$f $(ROOT)/$$f | grep '^<' | sed "s|^|$$f:|" ; \
+	done > build/engine86_removed.txt || true
+	@if diff -q build/engine86_removed.txt $(FROZEN86)/engine_identity_allowed.txt >/dev/null; then \
+	  echo "engine86_identity: OK (removed/changed lines = the allowed P2 lines)"; \
+	else echo "engine86_identity: unexpected removed/changed lines:"; \
+	 diff build/engine86_removed.txt $(FROZEN86)/engine_identity_allowed.txt; exit 1; fi
+
+elf86_p2_snapshot:
+	python3 elf_symdump.py --elf $(FW_ELF) $(foreach s,$(OSC86_ELF_SYMS),--sym $(s)) \
+	  --out $(FROZEN86)/elf_osc_p2.txt
+	python3 elf_loopdump.py --elf $(FW_ELF) $(foreach s,$(OSC86_ELF_SYMS),--sym $(s)) \
+	  --out $(FROZEN86)/elf_loops_p2.txt
+
+elf86_p3_check: | $(GEN)
+	python3 elf_symdump.py --elf $(FW_ELF) $(foreach s,$(OSC86_ELF_SYMS),--sym $(s)) \
+	  --out build/elf_osc86_p3.txt
+	python3 elf_symdump.py --compare $(FROZEN86)/elf_osc_p2.txt build/elf_osc86_p3.txt
+	python3 elf_loopdump.py --elf $(FW_ELF) $(foreach s,$(OSC86_ELF_SYMS),--sym $(s)) \
+	  --out build/elf_loops86_p3.txt
+	python3 elf_loopdump.py --compare $(FROZEN86)/elf_loops_p2.txt build/elf_loops86_p3.txt
+
+# S086 P3 assessment F1: the per-sample hot loops of mixer_calcNextSampleBlock(),
+# where LTO inlines the four voice renders. elf86_mixer_snapshot is run once,
+# on a P2 build (FW_ELF=<P2 lxr02.elf>); elf86_mixer_check fails when any
+# per-sample do-while loop in the mixer is longer than in P2 (elf_hotloops.py:
+# opcode pairing, layout-insensitive). Fragments closing with an unconditional
+# branch (jump tables, setup paths, cold saturation stubs) are not compared.
+.PHONY: elf86_mixer_snapshot elf86_mixer_check
+elf86_mixer_snapshot:
+	python3 elf_loopdump.py --elf $(FW_ELF) --sym mixer_calcNextSampleBlock \
+	  --out $(FROZEN86)/elf_mixer_p2.txt
+
+elf86_mixer_check: | $(GEN)
+	python3 elf_loopdump.py --elf $(FW_ELF) --sym mixer_calcNextSampleBlock \
+	  --out build/elf_mixer_now.txt
+	python3 elf_hotloops.py --compare $(FROZEN86)/elf_mixer_p2.txt build/elf_mixer_now.txt

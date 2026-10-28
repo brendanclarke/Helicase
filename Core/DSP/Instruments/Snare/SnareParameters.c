@@ -167,6 +167,7 @@ typedef enum {
     SNARE_PARAM_TRANSIENT_WAVE,
     SNARE_PARAM_TRANSIENT_VOL,
     SNARE_PARAM_TRANSIENT_FREQ,
+    SNARE_PARAM_OSC1_POSITION, /* S086 P3: appended; preserve all prior IDs. */
     SNARE_PARAM_COUNT
 } snare_param_index_t;
 
@@ -232,6 +233,29 @@ const ParamDescriptor snare_param_descriptors[] = {
     ROW_MENU_SPECIAL("transient_wave", "Transnt", "Waveform", "wav", MENU_TRANS, MOD_NONE, transGen.waveform, TYPE_UINT8, IM_SPECIAL_TRANSIENT_WAVE),
     ROW("transient_vol", "Transnt", "Volume", "vol", DTYPE_0B127, MOD_0_127, transGen.volume, TYPE_FLT),
     ROW_SPECIAL("transient_freq", "Transnt", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, transGen.pitch, TYPE_FLT, IM_SPECIAL_TRANSIENT_FREQ),
+    /*
+     * osc1_position: pos, the oscillator's continuous position (S086 P3/P4).
+     *
+     * What:       0..127, stored in osc.position. For Sin, Tri, Saw, Rec, Re3
+     *             and Sw3 it is a phase offset of pos/128 of a cycle; for Cym
+     *             pos/128 of the whole crash sample (S086 P4). A hit starts at
+     *             today's start phase + pos; while the voice plays, a change
+     *             glides over one block through a temporary phaseInc bend.
+     *             Noise and v1 user samples ignore it (user samples: S2).
+     * Why:        S086 P3: the fourth cell of the first oscillator screen. The
+     *             row is appended last, so every existing descriptor index,
+     *             automation ID, LFO/velocity token, NRPN ID and MIDI Learn row
+     *             is unchanged; a file without the key loads 0 (today's sound).
+     * Inputs:     menu edit, Morph, step automation, LFO adapter (MOD_0_127),
+     *             velocity node (the 0..127 range of a TYPE_UINT8 row).
+     * Outputs:    osc.position (TYPE_UINT8, plain store; no special writer).
+     * Accessors:  osc_positionTrigger(), osc_positionBendApply() and
+     *             osc_positionBendRestore() (Oscillator.h).
+     * Affiliates: Snare.c: Snare_triggerVoice() and
+     *             Snare_calcSyncBlockVoice(); FILESYSTEM_SPEC.md (the key);
+     *             S086_P3_WAV_OSC_POS_PARAMETER.md.
+     */
+    ROW("osc1_position", "Oscilltr", "Position", "pos", DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -247,7 +271,8 @@ const uint8_t snare_param_descriptor_count =
  * in this instrument-owned table so Menu can keep those owners separate.
  */
 const instrument_menu_page_t snare_menu_pages[] = {
-    {{ SNARE_PARAM_OSC1_PITCH_COARSE, SNARE_PARAM_OSC1_PITCH_FINE, SNARE_PARAM_NOISE_FREQ, SNARE_PARAM_OSC1_NOISE_MIX, SNARE_PARAM_OSC1_WAVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* S086 P3 Q3: coa fin wav pos; noi mix move to screen 2. */
+    {{ SNARE_PARAM_OSC1_PITCH_COARSE, SNARE_PARAM_OSC1_PITCH_FINE, SNARE_PARAM_OSC1_WAVE, SNARE_PARAM_OSC1_POSITION, SNARE_PARAM_NOISE_FREQ, SNARE_PARAM_OSC1_NOISE_MIX, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ SNARE_PARAM_AMP_ENVELOPE_ATTACK, SNARE_PARAM_AMP_ENVELOPE_DECAY, SNARE_PARAM_AMP_ATTACK_REPEAT, SNARE_PARAM_AMP_ENVELOPE_SLOPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ SNARE_PARAM_PITCH_ENVELOPE_DECAY, SNARE_PARAM_PITCH_ENVELOPE_SLOPE, SNARE_PARAM_PITCH_ENVELOPE_AMOUNT, INSTRUMENT_MENU_SKIP, SNARE_PARAM_VELO_MOD_DEST, SNARE_PARAM_VELO_MOD_AMOUNT, SNARE_PARAM_VELO_VOL_ON_OFF, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},

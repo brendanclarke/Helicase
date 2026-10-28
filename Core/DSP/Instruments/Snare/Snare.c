@@ -149,6 +149,27 @@ void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
 	else
 		voice->osc.phase = 0;
 
+	/*
+	 * Apply osc1 position at the hit (S086 P3/P4).
+	 *
+	 * What:       adds osc_positionTrigger() to the start phase set above:
+	 *             position << 25 (position/128 of the phase range) for Sin,
+	 *             Tri, Saw, Rec, Re3, Sw3 and Cym (the whole crash sample),
+	 *             0 for noise and v1 user samples. The helper also sets
+	 *             positionApplied = position, so the first block does not bend.
+	 * Why:        the hit starts exactly at today's start phase + pos;
+	 *             position 0 adds 0, so today's start is kept bit for bit.
+	 *             It is added after the transient offset-mode scaling
+	 *             (S086 P3 Q6). Velocity modulation has already run, so a
+	 *             velocity target on pos is exact for this hit.
+	 * Inputs:     voice->osc.position (velocity-modulated), osc.waveform.
+	 * Outputs:    voice->osc.phase, voice->osc.positionApplied.
+	 * Accessors:  this trigger.
+	 * Affiliates: osc_positionTrigger() (Oscillator.h); the per-block bend
+	 *             in Snare_calcSyncBlockVoice(); the osc1_position row.
+	 */
+	voice->osc.phase += osc_positionTrigger(&voice->osc);
+
 	DecayEg_trigger(&voice->oscPitchEg);
 	slopeEg2_trigger(&voice->oscVolEg);
 	voice->velo = vel/127.f;
@@ -233,8 +254,31 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 	transient_calcBlock(&voice->transGen,transBuf,size);
 	bufferTool_addBuffersSaturating(buf,transBuf,size);
 
+	/*
+	 * osc1 position bend around the render below (S086 P3).
+	 *
+	 * What:       osc_positionBendApply() adds this block's change of pos to
+	 *             osc.phaseInc (circular, capped by OSC_POS_BEND_CAP) and
+	 *             stores the step in osc.positionBendStep; the existing render
+	 *             then glides the phase to the new offset over the block, and
+	 *             osc_positionBendRestore() removes the bend exactly.
+	 * Why:        changing phase directly would click; bending phaseInc for one
+	 *             block is continuous and needs no loop change (S086 P3 §2.3).
+	 *             The step lives in the oscillator, not a local, so nothing
+	 *             stays live across the render LTO inlines into the mixer
+	 *             (assessment F1). noiseOsc is a separate OscInfo, not bent.
+	 * Inputs:     voice->osc position state; osc.phaseInc from osc_setFreq() in
+	 *             Snare_calcAsyncVoice() this block.
+	 * Outputs:    transBuf (the oscillator block, rendered with the bend);
+	 *             osc.phaseInc unchanged afterwards; osc.positionApplied.
+	 * Accessors:  this function only.
+	 * Affiliates: osc_positionBendApply()/Restore() (Oscillator.h);
+	 *             Snare_triggerVoice() (osc_positionTrigger()).
+	 */
+	osc_positionBendApply(&voice->osc, 1u);
 	//calc next osc sample
 	calcNextOscSampleBlock(&voice->osc,transBuf,size,(1.f-voice->mix));
+	osc_positionBendRestore(&voice->osc);	/* S086 P3: exact restore */
 	//--AS apply filter to synthesized sound as well here if desired, or combine code for more efficiency
 
 	/*
