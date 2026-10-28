@@ -248,8 +248,10 @@ oscmod_identity:
 
 # Host behaviour of the new code against the unchanged plain loops.
 osc_mod: | $(GEN)
-	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 49-55 --out $(GEN)/om_defs.inc
-	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 61-92 --out $(GEN)/om_oscinfo.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 49-65 --out $(GEN)/om_defs.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --lines 71-102 --out $(GEN)/om_oscinfo.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c --object osc_stockTables \
+	  --out $(GEN)/om_stock.inc
 	$(EX) --src $(ROOT)/Core/SampleRom/SampleMemory.h --lines 104-109 \
 	  --out $(GEN)/om_sampleinfo.inc
 	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c --lines 123-124 --out $(GEN)/om_scratch.inc
@@ -286,3 +288,92 @@ elf_osc_check: | $(GEN)
 	python3 elf_symdump.py --elf $(FW_ELF) $(foreach s,$(OSC_ELF_SYMS),--sym $(s)) \
 	  --out build/elf_osc_now.txt
 	python3 elf_symdump.py --compare $(FROZEN85)/elf_osc.txt build/elf_osc_now.txt
+
+# ---------------------------------------------------------------------------
+# S086 P2: the stock table waves Re3/Sw3 (S086_P2_ADD_STOCK_WAVES_CORRECTLY.md).
+#
+# What:       stock_tables      gen_stock_tables.py --check (C1-C4: the method
+#                               reproduces sawTable; peak/DC; out-of-band; the
+#                               committed wavetableStock.c regenerates
+#                               byte-identical);
+#             osc86_identity    Oscillator.c/.h against frozen86/: only the
+#                               lines in frozen86/identity_allowed.txt are
+#                               removed or changed; BufferTools identical;
+#             osc_stock         host routing and law checks (test_osc_stock.c);
+#             elf_osc86_baseline / elf_osc86_check
+#                               whole-function text of the oscillator symbols
+#                               (incl. the S085 sync/ring copies), before/after;
+#             elf_loops86_baseline / elf_loops86_check
+#                               the per-sample loop bodies inside them
+#                               (elf_loopdump.py): the dispatchers may change,
+#                               the loops may not.
+# Why:        S086 P1 §1.3/§5: no existing loop changes; the new waves run the
+#             Tri/Saw/Rec loops.
+# Inputs:     frozen86/ (snapshot86.sh, at e56bb957), the current sources,
+#             build/lxr02.elf. Run the *_baseline targets with FW_ELF pointing
+#             at an e56bb957 build only (they rewrite frozen86/).
+# Accessors:  make -C tools/dsp_test <target>.
+# Affiliates: elf_symdump.py, elf_loopdump.py, extract.py, gen_stock_tables.py.
+# ---------------------------------------------------------------------------
+FROZEN86 := frozen86
+OSC86_ELF_SYMS := calcFmBlock calcNextOscSampleBlock calcNextOscSampleFmBlock \
+                  calcNextOscSampleRingBlock calcNextOscSampleSyncBlock \
+                  calcNoiseRingBlock calcPeriodicInterpBlock calcPeriodicInterpFmBlock \
+                  calcSampleOscFmBlock calcSampleOscRingBlock calcSampleOscSyncBlock \
+                  calcSineRingBlock calcSineSyncBlock calcUserSampleOscBlock \
+                  calcUserSampleOscFmBlock calcUserSampleOscRingBlock \
+                  calcWavetableOscRingBlock calcWavetableOscSyncBlock \
+                  osc_buildSyncList osc_renderPlainWave osc_renderSyncWave osc_setFreq \
+                  calcSineBlock calcFmSineBlock calcWavetableOscBlock calcNoiseBlock \
+                  calcSampleOscBlock calcPeriodicInterpSyncBlock \
+                  calcPeriodicInterpRingBlock bufferTool_addBuffersSaturating
+.PHONY: stock_tables osc86_identity osc_stock elf_osc86_baseline elf_osc86_check \
+        elf_loops86_baseline elf_loops86_check
+
+stock_tables:
+	cd $(ROOT) && python3 tools/gen_stock_tables.py --check
+
+OSC_FM86   := calcFmSineBlock calcFmBlock calcSampleOscFmBlock calcUserSampleOscFmBlock \
+              calcPeriodicInterpFmBlock calcNextOscSampleFmBlock
+OSC_FREQ86 := freqToTableIndex osc_calcSineFreqValue osc_calcNoiseFreqValue \
+              osc_calcWavetableFreqValue osc_calcSampleFreqValue \
+              osc_calcUserSampleFreqValue osc_setFreq
+osc_stock: osc_mod
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c $(call fn,$(OSC_FM86)) --out $(GEN)/os_fm.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c --lines 108-111 --out $(GEN)/os_inc4096.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c --object osc_octaveEdgeHz \
+	  $(call fn,$(OSC_FREQ86)) --out $(GEN)/os_freq.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.h --func osc_isTableWave \
+	  --out $(GEN)/os_tablewave.c
+	$(HOSTCC) $(HOSTFLAGS) test_osc_stock.c -o build/osc_stock -lm
+	./build/osc_stock
+
+osc86_identity:
+	@for f in Core/DSPAudio/Oscillator.c Core/DSPAudio/Oscillator.h; do \
+	  diff $(FROZEN86)/$$f $(ROOT)/$$f | grep '^<' | sed "s|^|$$f:|" ; \
+	done > build/osc86_removed.txt || true
+	@if diff -q build/osc86_removed.txt $(FROZEN86)/identity_allowed.txt >/dev/null; then \
+	  echo "osc86_identity: removed/changed lines = the $$(wc -l < build/osc86_removed.txt | tr -d ' ') allowed"; \
+	else echo "osc86_identity: unexpected removed/changed lines:"; \
+	  diff build/osc86_removed.txt $(FROZEN86)/identity_allowed.txt; exit 1; fi
+	cmp $(FROZEN86)/Core/DSPAudio/BufferTools.c $(ROOT)/Core/DSPAudio/BufferTools.c
+	cmp $(FROZEN86)/Core/DSPAudio/BufferTools.h $(ROOT)/Core/DSPAudio/BufferTools.h
+	@echo "osc86_identity: OK"
+
+elf_osc86_baseline:
+	python3 elf_symdump.py --elf $(FW_ELF) $(foreach s,$(OSC86_ELF_SYMS),--sym $(s)) \
+	  --out $(FROZEN86)/elf_osc.txt
+
+elf_osc86_check: | $(GEN)
+	python3 elf_symdump.py --elf $(FW_ELF) $(foreach s,$(OSC86_ELF_SYMS),--sym $(s)) \
+	  --out build/elf_osc86_now.txt
+	python3 elf_symdump.py --compare $(FROZEN86)/elf_osc.txt build/elf_osc86_now.txt
+
+elf_loops86_baseline:
+	python3 elf_loopdump.py --elf $(FW_ELF) $(foreach s,$(OSC86_ELF_SYMS),--sym $(s)) \
+	  --out $(FROZEN86)/elf_loops.txt
+
+elf_loops86_check: | $(GEN)
+	python3 elf_loopdump.py --elf $(FW_ELF) $(foreach s,$(OSC86_ELF_SYMS),--sym $(s)) \
+	  --out build/elf_loops86_now.txt
+	python3 elf_loopdump.py --compare $(FROZEN86)/elf_loops.txt build/elf_loops86_now.txt

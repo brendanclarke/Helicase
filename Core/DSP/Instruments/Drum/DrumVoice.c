@@ -206,7 +206,7 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 		}
 		if(voice->osc.waveform == SINE)
 			voice->osc.phase = 1024 + ( (0x3ff<<20) - 1024)*offset;//voice->osc.startPhase ;
-		else if(voice->osc.waveform > SINE && voice->osc.waveform <= REC)
+		else if(osc_isTableWave(voice->osc.waveform))
 			voice->osc.phase = (0xff<<20)*offset;
 		else
 			voice->osc.phase = 0;

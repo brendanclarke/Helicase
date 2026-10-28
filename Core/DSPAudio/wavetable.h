@@ -71,4 +71,9 @@ extern const int16_t recTable[11][1024];
 extern const int16_t triTable[11][1024];
 extern const int16_t sawTable[11][1024];
 
+/* Stock table waves (S086 P2), same layout; generated into wavetableStock.c
+** by tools/gen_stock_tables.py. Re3 (303 square), Sw3 (303 saw). */
+extern const int16_t sq3Table[11][1024];
+extern const int16_t sw3Table[11][1024];
+
 #endif /* WAVETABLES_H_ */

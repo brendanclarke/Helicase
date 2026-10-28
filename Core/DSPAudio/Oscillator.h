@@ -52,7 +52,17 @@
 #define REC					0x03
 #define NOISE				0x04
 #define CRASH				0x05
-#define OSC_SAMPLE_START 	0x06
+/*
+ * Stock table waves (S086 P2): [11][1024] octave tables like Tri/Saw/Rec,
+ * in wavetableStock.c, read by the same table loops. SQ3 = Re3 (303
+ * square), SW3 = Sw3 (303 saw). OSC_STOCK_FIRST..OSC_STOCK_LAST index
+ * osc_stockTables[] (Oscillator.c); ReA/TrA/SwA follow later.
+ */
+#define SQ3					0x06
+#define SW3					0x07
+#define OSC_STOCK_FIRST		SQ3
+#define OSC_STOCK_LAST		SW3
+#define OSC_SAMPLE_START 	0x08
 
 #define phaseShift 1000
 
@@ -187,7 +197,8 @@ void osc_recalcFreq(OscInfo* osc);
  * Sync clock increment for the FM-page (master) oscillator (S085 P1).
  *
  * What:       master->phaseInc, in "2^32 per nominal period" units.
- *             - Sine, table and noise phases already are.
+ *             - Sine, table (incl. the stock table waves) and noise phases
+ *               already are.
  *             - Crash and user samples (a <<17 point index; 1,024 points per
  *               nominal period) are scaled << 5. They are first clamped to
  *               0x07FFFFFF so the shift cannot overflow; a master at or above
@@ -235,7 +246,8 @@ uint32_t osc_buildSyncList(uint32_t clock, const uint32_t clockInc,
  *                 target = over[i] x ratio, ratio = osc->phaseInc / clockInc;
  *                 phase += depth x (signed)(target - phase).
  *             The reset therefore lands on sample i + 1 (plan K4).
- *             - Synced: Sin, Tri, Saw, Rec, Crash.
+ *             - Synced: Sin, Tri, Saw, Rec, Crash, the stock table waves
+ *               (S086 P2).
  *             - Rendered plain (no sync): Noi, user samples (plan A3/A4).
  *             - Waveform interpolation: both partners use the same list.
  * Why:        plan Q10: the Drum amount is the sync depth (0 free-running,
@@ -336,6 +348,24 @@ static inline int32_t osc_ringDepthQ15(const float amount)
 	if (amount >= 1.0f)
 		return 32768;
 	return (int32_t)(amount * 32768.0f + 0.5f);
+}
+
+/*
+ * Whether a waveform is read from a [11][1024] octave table (S086 P2).
+ *
+ * What:       1 for TRI, SAW, REC and the stock table waves
+ *             (OSC_STOCK_FIRST..OSC_STOCK_LAST); 0 for SINE, NOISE, CRASH
+ *             and user samples.
+ * Why:        the engines' trigger start phase (0xff << 20 x the transient
+ *             offset) applies to every table wave alike.
+ * Inputs:     waveform.  Outputs: 0 or 1.
+ * Accessors:  Drum/Snare/Cymbal/HiHat _triggerVoice().
+ * Affiliates: osc_setFreq() (the same set takes the table frequency path).
+ */
+static inline uint8_t osc_isTableWave(const uint8_t waveform)
+{
+	return (uint8_t)((waveform >= TRI && waveform <= REC) ||
+	                 (waveform >= OSC_STOCK_FIRST && waveform <= OSC_STOCK_LAST));
 }
 
 #endif /* OSCILLATOR_H_ */

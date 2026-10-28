@@ -64,6 +64,7 @@
 #include "MidiOut.h"
 #include "MidiLearn.h"
 #include "modulationNode.h"
+#include "Oscillator.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -11601,6 +11602,10 @@ static void menu_getMixFmName(uint8_t value, char *buf)
 /* S085 P1: mixFmNames holds the count plus fm, mix, snc, rng (DRUM_MOD_COUNT). */
 _Static_assert(sizeof(mixFmNames) / sizeof(mixFmNames[0]) == 5u,
                "mixFmNames must list the four Drum osc2 mod modes");
+
+/* S086 P2: the wav list (stock waves) ends where the user samples start. */
+_Static_assert((sizeof(waveformNames) / sizeof(waveformNames[0])) - 1u == OSC_SAMPLE_START,
+               "waveformNames must list every waveform below OSC_SAMPLE_START");
 
 /*
  * Format one per-track run-mode value into a three-character field.

@@ -166,7 +166,8 @@ DSP_SRCS = \
   Core/DSPAudio/squareRootLut.c \
   Core/DSPAudio/transientGenerator.c \
   Core/DSPAudio/transientTables.c \
-  Core/DSPAudio/wavetable.c
+  Core/DSPAudio/wavetable.c \
+  Core/DSPAudio/wavetableStock.c
 
 # -Ofast for DSP: enables -ffast-math (float reordering, NaN/Inf assumptions)
 CFLAGS_DSP = $(subst -O2,-Ofast,$(CFLAGS))

@@ -48,6 +48,8 @@ int16_t sine_table[4097];
 int16_t sawTable[11][1024];
 int16_t triTable[11][1024];
 int16_t recTable[11][1024];
+int16_t sq3Table[11][1024];             /* S086 P2: the dispatchers name them */
+int16_t sw3Table[11][1024];
 unsigned char crashSample[32769];       /* +1: the plain loop reads [32768] */
 static int16_t host_sample[4097];       /* 4,096 points + the zero pad word */
 static uint32_t host_rng = 0x0850001u;
@@ -71,6 +73,7 @@ void calcNextOscSampleBlock(OscInfo* osc, int16_t* buf, const uint8_t size,
                             const float gain);
 
 #include "om_scratch.inc"
+#include "om_stock.inc"
 #include "om_plain.c"
 #include "om_map.c"
 #include "om_s085.c"

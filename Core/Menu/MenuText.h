@@ -138,8 +138,10 @@ static const char extSyncNames[][4] = {
 static const char trackPlayModeNames[][4] = {
     {6}, {"fwd"},{"rev"},{"pip"},{"rnd"},{"onc"},{"1fr"},
 };
+/* S086 P2: Re3/Sw3 = SQ3/SW3 (Oscillator.h); the count must equal
+** OSC_SAMPLE_START (asserted in menu.c). User samples follow as sNN. */
 static const char waveformNames[][4] = {
-    {6}, {"Sin"},{"Tri"},{"Saw"},{"Rec"},{"Noi"},{"Cym"},
+    {8}, {"Sin"},{"Tri"},{"Saw"},{"Rec"},{"Noi"},{"Cym"},{"Re3"},{"Sw3"},
 };
 static const char outputNames[][7] = {
     {6}, {"St1"},{"St2"},{"L1"},{"R1"},{"L2"},{"R2"},
