@@ -119,6 +119,26 @@ static INDTCMZ float mixer_send_last_gain[6];
  * origins for mixer_addFxReturnToOutput().
  */
 static INDTCMZ float mixer_fx_return_last_gain[2];
+
+/*
+ * Block-rate one-pole filter state for the six hardware faders (S088 P1).
+ *
+ * What: smoothed version of slider_vol[slot], converging toward the raw ADC
+ *       LUT value at the audio block rate (1378 Hz) instead of the foreground
+ *       main-loop rate (~460 Hz). Endpoints (0 and 1) snap immediately.
+ * Why:  adc_checkPots() updates slider_vol[] once per main-loop pass. The
+ *       mixer renders ~3 blocks per pass, so 2 out of 3 blocks see no change
+ *       and the 3rd block's ramp carries the entire step. This staircase at
+ *       ~460 Hz creates audible AM sidebands of the voice signal. Smoothing
+ *       at the block rate distributes each step over several blocks, making
+ *       the per-sample ramp continuous and eliminating the staircase energy.
+ * Inputs:  slider_vol[slot] (raw fader), updated by adc_checkPots().
+ * Outputs: the fader value used by mixer_faderGains() for gain computation.
+ * Affiliates: mixer_init() (seed), mixer_faderGains() (filter tick).
+ */
+static INDTCMZ float mixer_fader_smooth[6];
+#define MIXER_FADER_SMOOTH_ALPHA 0.15f
+
 static volatile uint8_t mixer_out_l1_available = 1u; /* PD6 */
 static volatile uint8_t mixer_out_r1_available = 1u; /* PD7 */
 static volatile uint8_t mixer_out_l2_available = 1u; /* PB4 */
@@ -143,6 +163,7 @@ void mixer_init()
 		/* Seed the ramp at the combined gain so the first block does not fade
 		** in; requires instrumentManager_runtimeInit() first (dsp_init order). */
 		mixer_voice_last_gain[i]    = slider_vol[i] * instrumentManager_runtimeVolume(i);
+		mixer_fader_smooth[i]       = slider_vol[i];
 	}
 #endif
 }
@@ -425,7 +446,10 @@ static void mixer_addVoiceInt16ToOutput(uint8_t dest,
 	**   1. interpolate the output gain from the previous 32-frame block
 	**      (slider_vol x channel volume since Session 072 step 2; `gain` and
 	**      `lastGain` are that combined value),
-	**   2. convert legacy int16 voice output into signed-24 sample_mx_t,
+	**   2. convert gained voice output directly into signed-24 sample_mx_t
+	**      (S088 P1: the gain multiply and the x256 shift are one float
+	**      expression, avoiding the int16 truncation that created
+	**      signal-correlated intermodulation artifacts when gain changed),
 	**   3. pan/route/add to the four output buses.
 	**
 	** Keeping this as one loop preserves sound quality while reducing memory
@@ -440,8 +464,7 @@ static void mixer_addVoiceInt16ToOutput(uint8_t dest,
 		for(i=0;i<OUTPUT_DMA_SIZE;i++)
 		{
 			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
-			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
-			const sample_mx_t sm = sampleMix_fromInt16(s16);
+			const sample_mx_t sm = (sample_mx_t)((float)data[i] * currentGain * 256.0f);
 			*outL2 = bufferTool_satAdd32(*outL2, (sample_mx_t)((float)sm * panL));
 			outL2 += 2;
 			*outR2 = bufferTool_satAdd32(*outR2, (sample_mx_t)((float)sm * panR));
@@ -453,8 +476,7 @@ static void mixer_addVoiceInt16ToOutput(uint8_t dest,
 		for(i=0;i<OUTPUT_DMA_SIZE;i++)
 		{
 			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
-			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
-			const sample_mx_t sm = sampleMix_fromInt16(s16);
+			const sample_mx_t sm = (sample_mx_t)((float)data[i] * currentGain * 256.0f);
 			*outL = bufferTool_satAdd32(*outL, (sample_mx_t)((float)sm * panL));
 			outL += 2;
 			*outR = bufferTool_satAdd32(*outR, (sample_mx_t)((float)sm * panR));
@@ -466,8 +488,8 @@ static void mixer_addVoiceInt16ToOutput(uint8_t dest,
 		for(i=0;i<OUTPUT_DMA_SIZE;i++)
 		{
 			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
-			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
-			*outL2 = bufferTool_satAdd32(*outL2, sampleMix_fromInt16(s16));
+			const sample_mx_t sm = (sample_mx_t)((float)data[i] * currentGain * 256.0f);
+			*outL2 = bufferTool_satAdd32(*outL2, sm);
 			outL2 += 2;
 		}
 		break;
@@ -476,8 +498,8 @@ static void mixer_addVoiceInt16ToOutput(uint8_t dest,
 		for(i=0;i<OUTPUT_DMA_SIZE;i++)
 		{
 			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
-			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
-			*outR2 = bufferTool_satAdd32(*outR2, sampleMix_fromInt16(s16));
+			const sample_mx_t sm = (sample_mx_t)((float)data[i] * currentGain * 256.0f);
+			*outR2 = bufferTool_satAdd32(*outR2, sm);
 			outR2 += 2;
 		}
 		break;
@@ -486,8 +508,8 @@ static void mixer_addVoiceInt16ToOutput(uint8_t dest,
 		for(i=0;i<OUTPUT_DMA_SIZE;i++)
 		{
 			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
-			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
-			*outL = bufferTool_satAdd32(*outL, sampleMix_fromInt16(s16));
+			const sample_mx_t sm = (sample_mx_t)((float)data[i] * currentGain * 256.0f);
+			*outL = bufferTool_satAdd32(*outL, sm);
 			outL += 2;
 		}
 		break;
@@ -496,8 +518,8 @@ static void mixer_addVoiceInt16ToOutput(uint8_t dest,
 		for(i=0;i<OUTPUT_DMA_SIZE;i++)
 		{
 			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
-			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
-			*outR = bufferTool_satAdd32(*outR, sampleMix_fromInt16(s16));
+			const sample_mx_t sm = (sample_mx_t)((float)data[i] * currentGain * 256.0f);
+			*outR = bufferTool_satAdd32(*outR, sm);
 			outR += 2;
 		}
 		break;
@@ -523,7 +545,13 @@ static void mixer_faderGains(uint8_t slot,
 		float *mix_gain,
 		float *send_gain)
 {
-	const float fader = slider_vol[slot];
+	const float fader_raw = slider_vol[slot];
+	if (fader_raw <= 0.0f || fader_raw >= 1.0f)
+		mixer_fader_smooth[slot] = fader_raw;
+	else
+		mixer_fader_smooth[slot] += MIXER_FADER_SMOOTH_ALPHA
+				* (fader_raw - mixer_fader_smooth[slot]);
+	const float fader = mixer_fader_smooth[slot];
 	const float volume = instrumentManager_runtimeVolume(slot);
 	const float send = (float)preset_getEffectiveFxSendAmount(scene_index, slot)
 			/ 127.0f;
@@ -571,11 +599,11 @@ static void mixer_faderGains(uint8_t slot,
  *             mixer_addVoiceInt16ToOutput() and the pre-S073
  *             mixer_addVoiceToFxBus() produced when both ran, reading each
  *             sample once:
- *             - dry: the voice gain ramp, int16 truncation, sample_mx_t
- *               conversion, pan/route/saturating add to the routed DAC
- *               pair;
+ *             - dry: the voice gain ramp, float x 256 straight to
+ *               sample_mx_t (S088 P1: same path as the send, avoiding the
+ *               int16 truncation that created intermodulation artifacts),
+ *               pan/route/saturating add to the routed DAC pair;
  *             - send: its own ramp, float x 256 straight to sample_mx_t
- *               without the int16 truncation (on purpose), stereo-input
  *               types panned into bus L/R, mono-input types unpanned into L
  *               only, saturating adds. This is the click-free send ramp
  *               the removed mixer_addVoiceToFxBus() provided.
@@ -643,8 +671,7 @@ static void mixer_addVoiceInt16ToOutputAndFx(uint8_t dest,
 		for(i=0;i<OUTPUT_DMA_SIZE;i++)
 		{
 			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
-			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
-			const sample_mx_t sm = sampleMix_fromInt16(s16);
+			const sample_mx_t sm = (sample_mx_t)((float)data[i] * currentGain * 256.0f);
 			MIXER_FX_SEND_SAMPLE();
 			*outL2 = bufferTool_satAdd32(*outL2, (sample_mx_t)((float)sm * panL));
 			outL2 += 2;
@@ -656,8 +683,7 @@ static void mixer_addVoiceInt16ToOutputAndFx(uint8_t dest,
 		for(i=0;i<OUTPUT_DMA_SIZE;i++)
 		{
 			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
-			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
-			const sample_mx_t sm = sampleMix_fromInt16(s16);
+			const sample_mx_t sm = (sample_mx_t)((float)data[i] * currentGain * 256.0f);
 			MIXER_FX_SEND_SAMPLE();
 			*outL = bufferTool_satAdd32(*outL, (sample_mx_t)((float)sm * panL));
 			outL += 2;
@@ -669,9 +695,9 @@ static void mixer_addVoiceInt16ToOutputAndFx(uint8_t dest,
 		for(i=0;i<OUTPUT_DMA_SIZE;i++)
 		{
 			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
-			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
+			const sample_mx_t sm = (sample_mx_t)((float)data[i] * currentGain * 256.0f);
 			MIXER_FX_SEND_SAMPLE();
-			*outL2 = bufferTool_satAdd32(*outL2, sampleMix_fromInt16(s16));
+			*outL2 = bufferTool_satAdd32(*outL2, sm);
 			outL2 += 2;
 		}
 		break;
@@ -679,9 +705,9 @@ static void mixer_addVoiceInt16ToOutputAndFx(uint8_t dest,
 		for(i=0;i<OUTPUT_DMA_SIZE;i++)
 		{
 			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
-			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
+			const sample_mx_t sm = (sample_mx_t)((float)data[i] * currentGain * 256.0f);
 			MIXER_FX_SEND_SAMPLE();
-			*outR2 = bufferTool_satAdd32(*outR2, sampleMix_fromInt16(s16));
+			*outR2 = bufferTool_satAdd32(*outR2, sm);
 			outR2 += 2;
 		}
 		break;
@@ -689,9 +715,9 @@ static void mixer_addVoiceInt16ToOutputAndFx(uint8_t dest,
 		for(i=0;i<OUTPUT_DMA_SIZE;i++)
 		{
 			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
-			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
+			const sample_mx_t sm = (sample_mx_t)((float)data[i] * currentGain * 256.0f);
 			MIXER_FX_SEND_SAMPLE();
-			*outL = bufferTool_satAdd32(*outL, sampleMix_fromInt16(s16));
+			*outL = bufferTool_satAdd32(*outL, sm);
 			outL += 2;
 		}
 		break;
@@ -699,9 +725,9 @@ static void mixer_addVoiceInt16ToOutputAndFx(uint8_t dest,
 		for(i=0;i<OUTPUT_DMA_SIZE;i++)
 		{
 			const float currentGain = lastGain + ((float)i * inv_size * gain_delta);
-			const int16_t s16 = (int16_t)((float)data[i] * currentGain);
+			const sample_mx_t sm = (sample_mx_t)((float)data[i] * currentGain * 256.0f);
 			MIXER_FX_SEND_SAMPLE();
-			*outR = bufferTool_satAdd32(*outR, sampleMix_fromInt16(s16));
+			*outR = bufferTool_satAdd32(*outR, sm);
 			outR += 2;
 		}
 		break;

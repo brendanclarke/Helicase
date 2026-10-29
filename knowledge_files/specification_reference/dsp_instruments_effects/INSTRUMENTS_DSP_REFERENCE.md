@@ -4,13 +4,19 @@ How the six instrument voices are rendered, how their parameters reach the
 DSP, how modulation (LFO, velocity, Morph, step automation) works, what each
 part costs, and how to change or extend it.
 
-- **Current as of:** Session 087 close (2026-10-29). S087 added the
-  oscillator type system (`osc1_type`: `wav`/`smp`/`slp`/`wtb`, §6.1),
-  sample flash catalogue v2 and installer, Q20.12 sample and wavetable
-  readers with `pos` on samples (§6.1.1), the step-automation order fix
-  (§2, §7.5), the modulator `wav` list expansion (§6.1.3), one-shot
-  sample mod oscillators, the transient click sample list (§6.4),
-  display/naming corrections, and v1 sample loop removal.
+- **Current as of:** Session 088 close (2026-10-29). S088 added the
+  oscillator run modes `osc1_run` (`rst`/`fre`/`itp`, §6.1), gain-matched
+  retrigger (`slopeEg2_retriggerFrom()`, §6.3), post-chain gain ramps
+  and float-through distortion (§6.5, §6.6), FM depth ramp, filter
+  coefficient slew (`SVF_recalcFreqSlew()`, §6.2), itp crossfade
+  (`OscCarrierSnapshot`, `oscSection_renderOldCarrier()`), and block-rate
+  fader smoothing in the mixer. S087 added the oscillator type system
+  (`osc1_type`: `wav`/`smp`/`slp`/`wtb`, §6.1), sample flash catalogue
+  v2 and installer, Q20.12 sample and wavetable readers with `pos` on
+  samples (§6.1.1), the step-automation order fix (§2, §7.5), the
+  modulator `wav` list expansion (§6.1.3), one-shot sample mod
+  oscillators, the transient click sample list (§6.4), display/naming
+  corrections, and v1 sample loop removal.
   Earlier: S085 added the Drum mod modes `snc`/`rng` (§5.1.1). S086
   added the stock table waves `Re3`/`Sw3` (§6.1.2) and the oscillator
   position row `pos` (§6.1.1), and moved the user samples to `wav` 8+.
@@ -991,14 +997,22 @@ a built-in click and a sample mid-hit stays silent until the next trigger.
   `bufferTool_interpolatedGain()` (the per-sample ramp).
 - `bufferTool_addBuffersSaturating()` processes two samples per step with
   packed saturating adds.
-- **`voicePostChain.h` (S073 Step 4)** fuses each engine's final stages into
-  one loop. It keeps every int16 truncation and saturation point the old
-  separate passes had, so the output is bit-identical:
-  - `voicePost_drum()`: amp ramp → velocity gain → distortion;
-  - `voicePost_mixAddGainDist()` (Snare): mix gain → saturating add → amp
-    gain → distortion;
-  - `voicePost_addGainDist()` (Cymbal, HiHat): saturating add → amp gain →
-    distortion.
+- **`voicePostChain.h` (S073 Step 4; S088 P0 ramps; S088 P1 float-through)**
+  fuses each engine's final stages into one loop. S088 P0 added per-sample
+  gain ramps (from `lastGain`/`lastVeloGain`/`lastAmpGain` to current,
+  via `bufferTool_interpolatedGain()`). S088 P1 replaced the intermediate
+  int16 truncation with a float-through path to `distortion_curveSampleF()`:
+  - `voicePost_drum()`: amp ramp × velocity ramp (merged float multiply) →
+    `distortion_curveSampleF()`. 35 instructions/sample (was 32 pre-S088).
+  - `voicePost_mixAddGainDist()` (Snare): mix gain → int16 → saturating
+    add → float amp ramp → `distortion_curveSampleF()`. 35 instr/sample
+    (was 30).
+  - `voicePost_addGainDist()` (Cymbal, HiHat): saturating add → float amp
+    ramp → `distortion_curveSampleF()`. 30 instr/sample (was 25).
+  All three: `inv_size = (size > 1u) ? 1.f/(size-1.f) : 0.f` guards the
+  host-only `size == 1` case. With equal ramp endpoints (`rst`, or any
+  non-armed block), the ramp is the identity and the output is
+  bit-identical to S073.
 
 ### 6.6 Distortion (`distortion.c/.h`)
 
@@ -1007,8 +1021,12 @@ a built-in click and a sample mid-hit stays silent until the next trigger.
 - One division per sample, always run. There is deliberately **no bypass at
   drive 0**: it would make cost depend on a control, and the round trip at
   `k = 0` can move one LSB, so a bypass would change the sound.
-- `distortion_curveSample16()` is shared by `calcDistBlock()` and the fused
-  post-chains so both evaluate the same expression.
+- `distortion_curveSample16()` is shared by `calcDistBlock()` and used when
+  the input is already int16.
+- `distortion_curveSampleF()` (S088 P1) is the float-input variant: same
+  curve, accepts a pre-gained float in ±32767 range, returns int16. Used by
+  all three fused post-chains to avoid the int16→float→int16 round-trip that
+  quantized small-amplitude attack onsets to ±1 LSB.
 
 ---
 

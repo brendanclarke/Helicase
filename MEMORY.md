@@ -20,11 +20,12 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
-**S088 P0 implemented** (2026-10-29, uncommitted on `2ab359eb`): oscillator
-run modes (`osc1_run` = `rst`/`fre`/`itp`). Plan and implementation notes:
-`S088_P0_OSC_RUN_MODES.md`, `S088_P0_IMPLEMENTATION.md` (progress log and
-measured RAM). S087 log: `knowledge_files/log_archive/087_SESSION_HANDOFF_LOG.md`.
-Working notes: `knowledge_files/volatile/S087_WORKING_NOTES.md`.
+**S088 implemented** (2026-10-29, uncommitted on `80029d31`): oscillator
+run modes (`osc1_run` = `rst`/`fre`/`itp`), block-rate fader smoothing,
+float-through distortion. P0 hardware matrix H1–H17 pending.
+S088 log: `knowledge_files/log_archive/088_SESSION_HANDOFF_LOG.md`.
+S087 log: `knowledge_files/log_archive/087_SESSION_HANDOFF_LOG.md`.
+Working notes: `knowledge_files/volatile/S088_WORKING_NOTES.md`.
 Host tests: `tools/dsp_test/modules/` (one file per module, `make -C tools/dsp_test all`);
 effects retry kit (transient, filter drive, D+S): `tools/dsp_test/spike/README.md`.
 No frozen snapshots are kept; copy the files to `build/` before an edit that needs a before/after.

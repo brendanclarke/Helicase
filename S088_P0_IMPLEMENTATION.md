@@ -2329,3 +2329,71 @@ matrix H1–H17 from the plan §10, in particular:
   hardware stress confirms).
 - G2: resonance step in `fre`/`itp` (if audible, extend
   `SVF_recalcFreqSlew()` to step `q`).
+
+---
+
+## Post-implementation fix: Drum instant-attack ramp bypass
+
+**Found during:** hardware listening (H7-equivalent: fre/itp retrigger
+with amp attack knob at 0).
+
+**Symptom:** all three run modes clicked identically at amp attack 0
+(knob value 0, internal `attack == 1.0`). At amp attack 1 the fre/itp
+gain match worked correctly — no click.
+
+**Root cause:** the Drum render function's amp-envelope update has a
+legacy "no interpolation" shortcut for instant attacks
+(`DrumVoice.c`, inside `Drum_calcVoiceSyncBlock()`):
+
+```c
+if ( (voice->oscVolEg.attack == 1) && (state == EG_A || state == EG_REPEAT) )
+{
+    voice->ampFilterInput = slopeEg2_calc(&voice->oscVolEg);
+    voice->lastGain = voice->ampFilterInput;   // both get the NEW value
+}
+```
+
+When `attack == 1.0`, `slopeEg2_calc()` overshoots `val` from the
+`retriggerFrom` start point to 1.0 in one step. The shortcut then sets
+`lastGain = ampFilterInput = 1.0`, discarding the previous block's gain
+(e.g. 0.5). The post-chain receives equal endpoints and applies no ramp —
+the output jumps from 0.5 to 1.0 in one block boundary. This is correct
+for `rst` (the voice starts fresh from silence) but defeats the fre/itp
+gain-matched retrigger.
+
+Snare, Cymbal and HiHat do not have this shortcut — they always take the
+`lastGain = old; ampFilterInput = calc()` path — so their ramps already
+work at attack 0.
+
+**The fix** (`DrumVoice.c:488`): add `!voice->ampRampArm` to the
+instant-attack condition:
+
+```c
+if ( (voice->oscVolEg.attack == 1) && !voice->ampRampArm
+     && (state == EG_A || state == EG_REPEAT) )
+```
+
+When the ramp is armed (the one block after a fre/itp retrigger), the
+shortcut is bypassed: `lastGain` keeps the previous block's gain,
+`ampFilterInput` gets the new calc (1.0), and `voicePost_drum()` ramps
+between them over 32 samples (~0.73 ms). When the ramp is not armed
+(every `rst` trigger and every subsequent fre/itp block), the shortcut
+fires exactly as before — bit-identical S0 behaviour.
+
+**Scope:** one guard added, one comment block rewritten. No change to
+any other engine, header, or test file.
+
+**Build:** `text 676,352` (+8 B vs pre-fix 676,344). No new warnings.
+
+**Attack rise time reference** (for context):
+
+| Knob | `data2` | `attack` increment | Blocks 0→1 | Rise time |
+|------|---------|-------------------|------------|-----------|
+| 0 | 0 | 1.000 | 1 | 0.73 ms |
+| 1 | 1 | 0.388 | 3 | 2.2 ms |
+| 2 | 2 | 0.239 | 5 | 3.6 ms |
+| 5 | 5 | 0.106 | 10 | 7.3 ms |
+| 10 | 10 | 0.054 | 19 | 13.8 ms |
+
+Block rate: 44,108 / 32 = 1,378 Hz (~0.726 ms per block).
+`slopeEg2_calcTime(data2, TIME_K_ATTACK)` with `TIME_K_ATTACK = 198`.

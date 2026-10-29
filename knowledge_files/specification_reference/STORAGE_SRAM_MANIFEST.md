@@ -4,11 +4,20 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 088 P0 (2026-10-29),
-  `dev-ph7-voice_expansion`, uncommitted on `2ab359eb`. DEV link:
-  `text=676,344`, `data=420`, `bss=412,892`; flash payload 676,344 B of
-  753,664 B (**headroom 77,320 B**). ITCM 12,656 / 16,384 B; DTCM statics
+- **Current as of:** Session 088 close (2026-10-29),
+  `dev-ph7-voice_expansion`, uncommitted on `80029d31`. DEV link:
+  `text=676,264`, `data=420`, `bss=412,884`; flash payload 676,264 B of
+  753,664 B (**headroom 77,400 B**). ITCM 12,656 / 16,384 B; DTCM statics
   4,345 B; FXBUF arena margin 3,839 B. The entries below run newest first.
+- **S088 P1 changes (2026-10-29):** fader smoothing and float-through
+  distortion.
+  - DTCM: `mixer_fader_smooth[6]` (24 B, `INDTCMZ`) for the block-rate
+    one-pole fader EMA. Arena margin unchanged (these are `static`, not arena).
+  - Program flash: `distortion_curveSampleF()` is `static inline` (no new
+    symbol); the three post-chain functions shrank slightly from the merged
+    float path. Net text −80 B vs P0 close.
+  - bss: −8 B vs P0 close (the LUT was restored to 1,024 entries after the
+    failed 2,048-entry attempt).
 - **S088 P0 changes (2026-10-29):** run modes (`osc1_run`). Measured with an
   ARM `sizeof` probe: `DrumVoice` 596 → **632 B** (+36: `runMode` 1,
   `ampRampArm` 1, `lastVeloGain` 4, `lastFmDepth` 4, `OscCarrierSnapshot` 28,

@@ -481,13 +481,36 @@ void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
 	 */
 	voice->osc.fmMod = voice->fmModAmount * egPitchVal;
 
-	//calc the osc + noise vol eg
+	/*
+	 * Amp envelope gain update (osc + noise vol EG).
+	 *
+	 * What:       computes the next shaped EG output and updates the
+	 *             ampFilterInput / lastGain pair that the post-chain ramps
+	 *             between. Two branches:
+	 *             - instant attack (attack == 1, knob 0) AND no armed ramp
+	 *               AND in the attack or repeat phase: the EG completes in
+	 *               one block, so lastGain = ampFilterInput (no inter-block
+	 *               ramp needed — the gain jumps to 1.0 intentionally).
+	 *             - every other case: lastGain keeps the previous block's
+	 *               output, ampFilterInput gets the new calc — the
+	 *               post-chain interpolates between them.
+	 *             The ampRampArm guard (S088 P0) ensures that a fre/itp
+	 *             retrigger with attack 0 takes the else branch: lastGain
+	 *             keeps the previous block's gain, ampFilterInput jumps to
+	 *             1.0, and voicePost_drum() ramps between them over 32
+	 *             samples (~0.73 ms). Without the guard the instant-attack
+	 *             shortcut would set both to 1.0, discarding the previous
+	 *             gain and producing a click.
+	 * Why:        rst needs the instant attack (bit-identical S0). fre/itp
+	 *             need a one-block ramp when the EG completes in one step.
+	 * Inputs:     voice->oscVolEg, voice->ampRampArm.
+	 * Outputs:    voice->ampFilterInput, voice->lastGain.
+	 * Affiliates: voicePost_drum(); slopeEg2_retriggerFrom(); ampRampArm.
+	 */
 #if (AMP_EG_SYNC==0)
 
-	//check if in attack phase
-	if( (voice->oscVolEg.attack == 1 ) && ((voice->oscVolEg.state == EG_A) || (voice->oscVolEg.state == EG_REPEAT)) )
+	if( (voice->oscVolEg.attack == 1 ) && !voice->ampRampArm && ((voice->oscVolEg.state == EG_A) || (voice->oscVolEg.state == EG_REPEAT)) )
 	{
-			//if attack is set to 0 -> no interpolation
 		voice->ampFilterInput = slopeEg2_calc(&voice->oscVolEg);
 		voice->lastGain = voice->ampFilterInput;
 	}

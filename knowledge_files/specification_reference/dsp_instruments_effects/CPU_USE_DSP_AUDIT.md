@@ -904,7 +904,7 @@ the new copy/clear work is foreground-only and bounded.
     S087 close: text 670,628, Flash headroom 83,036 B, ITCM 12,640 /
     16,384 B.
 
-### Session 088 additions (record in `S088_P0_IMPLEMENTATION.md`)
+### Session 088 additions (record in `088_SESSION_HANDOFF_LOG.md`)
 
 50. **ADDED (S088 P0): gain-matched amp retrigger.**
     `slopeEg2_retriggerFrom()` (control rate, one divide per trigger) and the
@@ -935,6 +935,17 @@ the new copy/clear work is foreground-only and bounded.
     `SVF_recalcFreqSlew()` replaces `SVF_recalcFreq()` at the same call site
     (once per block per slot): one `fastTan` (unchanged) plus one
     multiply-add. `rst` keeps the original function.
+55. **CHANGED (S088 P1): float-through distortion.** All three post-chains
+    now pass the pre-gained float directly to `distortion_curveSampleF()`
+    instead of truncating to int16 first. Removes one int16 store per sample
+    in the Drum chain (the two gain multiplies are merged). Snare and
+    Cymbal/HiHat chains keep the saturation add as int16 but the amp gain ×
+    distortion path is float. Net: text −80 B vs the P0 close. No per-sample
+    cost increase (the division and the curve are unchanged).
+56. **ADDED (S088 P1): block-rate fader smoothing.** One-pole EMA
+    (`MIXER_FADER_SMOOTH_ALPHA` 0.15) on `mixer_fader_smooth[6]` in
+    `mixer_faderGains()`, once per slot per block: one multiply-add and one
+    compare per slot. Negligible; no per-sample cost.
 
 ---
 

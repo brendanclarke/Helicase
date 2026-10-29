@@ -6,10 +6,12 @@ the master bus compressor, and the path to the two DACs. It covers the
 arithmetic, the number formats, what each stage costs, and how to change or
 extend it.
 
-- **Current as of:** Session 075 close (2026-10-03; F3 changed nothing in
-  the mixer or Effect DSP). S074 added CrumpBit
-  (§4.4, the first type using the arena), the master bus compressor (§5A),
-  the `xfd` fader mode (§3.2) and the closure of the arena gaps (§5.3).
+- **Current as of:** Session 088 close (2026-10-29). S088 added block-rate
+  fader smoothing in `mixer_faderGains()` (§3), itp slot accounting before
+  `modNode_resetTargets()`, and the `* 256.0f` direct float-to-24-bit mixer
+  conversion. S074 added CrumpBit (§4.4, the first type using the arena),
+  the master bus compressor (§5A), the `xfd` fader mode (§3.2) and the
+  closure of the arena gaps (§5.3).
 - **Scope split with `EFFECTS_BUS_REFERENCE.md`:** that document is the
   authority for the Effect system's control side: the type registry,
   parameters and resolution order, the Effect page, the FX sequencer,
@@ -117,12 +119,19 @@ Policy).
    rate 1.0 every sample passes (the loop still runs: the constant-CPU rule
    and audit item 11).
 3. **Fader gains** (`mixer_faderGains()`):
-   - `volume` = the instrument's `vol` (0..1); `fader` = the slider;
-     `send` = the effective FX send amount / 127
-     (`preset_getEffectiveFxSendAmount()`: the step override, else, since
-     S075 F2, the voice's Normal and Morph send endpoints interpolated by
-     its resolved Morph amount, `round(n + (m − n)·a/255)`; read every
-     block);
+   - `volume` = the instrument's `vol` (0..1); `fader` = the slider
+     (after block-rate smoothing, see below); `send` = the effective FX
+     send amount / 127 (`preset_getEffectiveFxSendAmount()`: the step
+     override, else, since S075 F2, the voice's Normal and Morph send
+     endpoints interpolated by its resolved Morph amount,
+     `round(n + (m − n)·a/255)`; read every block);
+   - **Block-rate fader smoothing (S088 P1):** `slider_vol[slot]` from the
+     ADC LUT is filtered through a one-pole EMA (`mixer_fader_smooth[6]`,
+     DTCM, α = `MIXER_FADER_SMOOTH_ALPHA` 0.15, τ ≈ 4.5 ms, fc ≈ 35 Hz)
+     once per block (1,378 Hz). At exact 0.0 or 1.0 the filter snaps to
+     the endpoint (true silence / full gain). This eliminates the
+     staircase zipper artifact from the main-loop ADC update rate
+     (≈ 460 Hz). Cost: one multiply-add per slot per block;
    - mode `pre`: dry = volume × fader, send = send × fader;
    - mode `pst`: dry = volume × fader, send = send;
    - mode `fx`: dry = volume, send = send × fader;

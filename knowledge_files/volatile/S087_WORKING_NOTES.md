@@ -1,7 +1,8 @@
-# S087 Inter-Session Working Notes — carry-over after Session 087 close
+# S087 Inter-Session Working Notes — SUPERSEDED by S088_WORKING_NOTES.md
 
-Last updated: 2026-10-29 (Session 087 closure; for Session 088). The full
-Session 087 record is `knowledge_files/log_archive/087_SESSION_HANDOFF_LOG.md`.
+Last updated: 2026-10-29 (Session 087 closure; for Session 088). **Superseded
+by `S088_WORKING_NOTES.md` after Session 088 close.** The full Session 087
+record is `knowledge_files/log_archive/087_SESSION_HANDOFF_LOG.md`.
 
 **Authorities (updated in S087):**
 - `INSTRUMENTS_DSP_REFERENCE.md`:

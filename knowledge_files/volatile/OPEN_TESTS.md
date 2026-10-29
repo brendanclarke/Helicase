@@ -7,7 +7,16 @@ be performed when the opportunity arises, not blocking items for current work.
 
 ## Hardware soak / confirmation
 
-- **S087 full hardware testing (HIGH PRIORITY):**
+- **S088 P0 run modes hardware matrix H1–H17 (HIGH PRIORITY):**
+  - H1: `rst` A/B (bit-identical to pre-S088 on real hardware)
+  - H7/H8: `itp` audible / decayed retrigger
+  - H11: carrier-only `itp` on Drum `fm`
+  - H15: step automation of `run`
+  - H16: worst-case CPU with all six voices in `itp`, both fade slots held
+  - G1: Drum `fm` ceiling with depth ramp (hardware stress)
+  - G2: resonance step in `fre`/`itp` (if audible, extend
+    `SVF_recalcFreqSlew()` to step `q`)
+- **S087 full hardware testing:**
   - P0+P1: sample install, playback (smp/slp/wtb), pos on samples, wavetable
     frame blending, modulator s/l/w list, type switching, step-automation
     order (verify a step's automation lands before its trigger for sample
