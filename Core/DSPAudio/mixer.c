@@ -863,6 +863,29 @@ void mixer_calcNextSampleBlockTest(sample_mx_t *output, sample_mx_t *output2)
 void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 {
 
+	/*
+	 * itp crossfade slot accounting (S088 P0 §3 Layer 3b).
+	 *
+	 * What:       counts the itp crossfades that are active for this block
+	 *             across the six render slots and hands the count to
+	 *             modNode_resetTargets(); that call reserves last block's
+	 *             wavetable grants plus these fades, so modNode_interpClaim()
+	 *             cannot give a fade's slot to a wavetable blend.
+	 * Why:        the two interpolation slots are shared between wtb frame
+	 *             blending and itp crossfades (S088 P0 §1.3). Priority per
+	 *             block: ongoing itp (never cut), wavetable blending, new itp.
+	 *             Two fades already fill the budget, so wtb steps (inaudible for
+	 *             the 3 ms, R5).
+	 * Inputs:     the six slots' snapshot.active flags through
+	 *             instrumentManager_activeItpFadeCount().
+	 * Outputs:    modNode_itpReserved, consumed by modNode_resetTargets().
+	 * Cost:       six type reads per block (control rate, outside the inner
+	 *             sample loops).
+	 * Accessors:  this block-start sequence.
+	 * Affiliates: modNode_setItpReserved(), modNode_resetTargets(),
+	 *             OSC_WAVE_INTERP_MAX_ACTIVE.
+	 */
+	modNode_setItpReserved(instrumentManager_activeItpFadeCount());
 	modNode_resetTargets();
 	//re assign velocity modulation
 	modNode_reassignVeloMod();

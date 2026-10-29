@@ -11,6 +11,9 @@
  *               3. a holder that stops claiming frees the slot after one block;
  *               4. the toggle off grants nothing;
  *               5. (S087 P1, F11) both holders survive the 255-stamp wrap.
+ *               6. (S088 P0 §3 3b) slots reserved for ongoing itp crossfades
+ *                  are not granted to wavetable blending; two fades leave
+ *                  none.
  * Why:        S087 P0 A7/A8: a wavetable blend must not flip between blending
  *             and stepping at the block rate.
  * Inputs:     build/gen/modulation_interp.c, osc_host.h.
@@ -29,6 +32,7 @@ static uint8_t modNode_waveInterpEnabled = 0u;
 static uint32_t modNode_waveInterpGeneration = 1u;
 static uint8_t modNode_waveInterpActiveCount = 0u;
 static uint8_t modNode_interpReserved = 0u;
+static uint8_t modNode_itpReserved = 0u;
 static uint8_t modNode_interpLastStamp = 0u;
 static int velocityModulators[6];
 
@@ -108,6 +112,30 @@ int main(void)
             }
         }
         expect(kept, "L5: holders survive the 255-stamp wrap");
+    }
+
+    /* Law 6 (S088 P0 §3 3b): itp fades pre-claim shared slots. */
+    {
+        OscInfo d;
+
+        memset(&a, 0, sizeof(a));
+        memset(&d, 0, sizeof(d));
+        modNode_setWaveInterpEnabled(1u);
+        modNode_waveInterpActiveCount = 0u;  /* no wtb grant last block */
+        modNode_setItpReserved(1u);
+        modNode_resetTargets();              /* reserved = 1 */
+        expect(modNode_interpClaim(&d) == 1u,
+               "L6: one wavetable grant fits beside a fade");
+        expect(modNode_interpClaim(&a) == 0u,
+               "L6: the fade's slot is not stolen");
+
+        memset(&d, 0, sizeof(d));
+        modNode_waveInterpActiveCount = 0u;
+        modNode_setItpReserved(2u);
+        modNode_resetTargets();              /* reserved = 2 */
+        expect(modNode_interpClaim(&d) == 0u,
+               "L6: two fades leave no wavetable slot");
+        modNode_setItpReserved(0u);
     }
 
     printf("modulation failures: %d\n", failures);

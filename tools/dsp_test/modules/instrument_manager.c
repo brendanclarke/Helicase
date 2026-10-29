@@ -13,8 +13,11 @@
  *               4. seq_rampDtypeOk(osc1_type) is 0 (no ramp);
  *               5. the row dtype's low nibble is DTYPE_MENU and its menu id
  *                  is MENU_OSC_TYPE (4);
- *               6. DRUM_PARAM_OSC1_TYPE is appended last (value + 1 ==
- *                  DRUM_PARAM_COUNT).
+ *               6. DRUM_PARAM_OSC1_RUN is appended last (value + 1 ==
+ *                  DRUM_PARAM_COUNT), directly after osc1_type;
+ *               7. the osc1_run row is a tagged DTYPE_ON_OFF selector whose
+ *                  high nibble is ONOFF_TAG_OSC_RUN, with AUTOMATABLE |
+ *                  SELECTOR and no ramp.
  *             (Laws 1-2, osc_setType(), are the oscillator module's type
  *             group.)
  * Why:        S087 P0 §12.5: typ is a selector, step-automatable, never
@@ -39,6 +42,7 @@
 #define INSTRUMENT_TOTAL_ID_COUNT 256u
 #define TYPE_UINT8 3u
 #define IM_SPECIAL_OSC_TYPE 20u
+#define IM_SPECIAL_OSC_RUN 21u
 #define IM_SPECIAL_OSC1 0x00u
 #define MOD_NONE { 0u, 0u, INSTRUMENT_MOD_DOMAIN_NONE }
 #define BIND_SPECIAL(member_, type_, special_) \
@@ -107,11 +111,18 @@ typedef struct {
 #include "im_dtypes.inc"
 #include "im_menuid.inc"
 #include "im_rowmacro.inc"
+#include "im_onoffmacro.inc"
+#include "im_onofftag.inc"
 #include "im_index.inc"
 
 static const ParamDescriptor g_typ_row = ROW_SELECT_SPECIAL(
     "osc1_type", "Oscilltr", "Type", "typ", MENU_OSC_TYPE, osc.oscType,
     TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1);
+
+/* S088 P0: the run-mode row, from the real tag macro. */
+static const ParamDescriptor g_run_row = ROW_SELECT_ONOFF_SPECIAL(
+    "osc1_run", "Oscilltr", "Run Mode", "run", ONOFF_TAG_OSC_RUN,
+    runMode, TYPE_UINT8, IM_SPECIAL_OSC_RUN | IM_SPECIAL_OSC1);
 
 /* A non-morphable, non-selector row (the pre-S087 gate's refusal). */
 static const ParamDescriptor g_plain_row = {
@@ -182,9 +193,22 @@ int main(void)
     expect((g_typ_row.dtype >> 4) == MENU_OSC_TYPE, "law 5: typ menu id 4");
     expect(MENU_OSC_TYPE == 4, "law 5: MENU_OSC_TYPE is 4");
 
-    /* 6: appended last. */
-    expect(DRUM_PARAM_OSC1_TYPE + 1u == DRUM_PARAM_COUNT,
-           "law 6: osc1_type is the last Drum row");
+    /* 6: appended last, after osc1_type (S088 P0 D9: engine-struct byte). */
+    expect(DRUM_PARAM_OSC1_RUN == DRUM_PARAM_OSC1_TYPE + 1u,
+           "law 6: osc1_run follows osc1_type");
+    expect(DRUM_PARAM_OSC1_RUN + 1u == DRUM_PARAM_COUNT,
+           "law 6: osc1_run is the last Drum row");
+
+    /* 7: the tagged ONOFF row (S088 P0 §2.1 D12). */
+    expect((g_run_row.dtype & 0x0fu) == DTYPE_ON_OFF,
+           "law 7: run dtype low nibble is DTYPE_ON_OFF");
+    expect((g_run_row.dtype >> 4) == ONOFF_TAG_OSC_RUN,
+           "law 7: run dtype high nibble is ONOFF_TAG_OSC_RUN");
+    expect(g_run_row.flags ==
+               (INSTRUMENT_PARAM_FLAG_AUTOMATABLE |
+                INSTRUMENT_PARAM_FLAG_SELECTOR),
+           "law 7: run is automatable+selector, never morph/mod");
+    expect(seq_rampDtypeOk(&g_run_row) == 0u, "law 7: run never ramps");
 
     /* 3: the gate. */
     expect(instrumentManager_targetValid(0u,

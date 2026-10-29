@@ -4,11 +4,28 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 087 close (2026-10-29),
-  `dev-ph7-voice_expansion`, uncommitted on `f3805478`. DEV link:
-  `text=670,628`, `data=420`, `bss=412,392`; flash payload 670,628 B of
-  753,664 B (**headroom 83,036 B**). ITCM 12,640 / 16,384 B; DTCM statics
-  4,344 B; FXBUF arena margin 3,840 B. The entries below run newest first.
+- **Current as of:** Session 088 P0 (2026-10-29),
+  `dev-ph7-voice_expansion`, uncommitted on `2ab359eb`. DEV link:
+  `text=676,344`, `data=420`, `bss=412,892`; flash payload 676,344 B of
+  753,664 B (**headroom 77,320 B**). ITCM 12,656 / 16,384 B; DTCM statics
+  4,345 B; FXBUF arena margin 3,839 B. The entries below run newest first.
+- **S088 P0 changes (2026-10-29):** run modes (`osc1_run`). Measured with an
+  ARM `sizeof` probe: `DrumVoice` 596 → **632 B** (+36: `runMode` 1,
+  `ampRampArm` 1, `lastVeloGain` 4, `lastFmDepth` 4, `OscCarrierSnapshot` 28,
+  alignment); `SnareVoice` **452 B**, `CymbalVoice` **508 B**, `HiHatVoice`
+  **516 B**, all with the same added fields (their snapshot fits existing
+  padding). `OscCarrierSnapshot` is 28 B on ARM, asserted `<= 32`.
+  - SRAM1: `runtime_slots` 7,152 → **7,584 B** (6 × 2 × 632; +432 B), plus
+    `osc_itpScratch[OUTPUT_DMA_SIZE]` in `Oscillator.c` (**+64 B** `.bss`,
+    the one shared itp old-carrier block, plan I1). Net **+496 B SRAM1**.
+  - DTCM: `modNode_itpReserved` (+1 B, `INCCMZ`), next to
+    `modNode_interpReserved`. Arena margin 3,840 → 3,839 B.
+  - ITCM: 12,640 → 12,656 B (+16 B: LTO re-specialised `osc_wtbBlendBlock`
+    +8 and `osc_wtbFmBlendBlock` +8, `osc_wtbRingBlendBlock` -4, because the
+    new helper calls the plain wavetable copy). The helper and
+    `SVF_recalcFreqSlew()` are flash code.
+  - Program flash: descriptor rows, writer case, menu branches, helper;
+    re-measure with `make all`.
 - **S087 changes (2026-10-28/29):** major oscillator rewrite. Net RAM:
   - SRAM1: −13,441 (removed `sample_manifest[120]` + count) −5,040
     (SampleMemory caches) +560 (installer walker) +1 (install_fault) +128
@@ -683,7 +700,7 @@ byte, including alignment and small variables omitted here.
 | `filesystem.c`: `fs_identity_name`, `fs_identity_valid_mask` | 74 | Eight × 9 Scene/Kit/Instrument identity strings plus a 16-bit validity mask; the Bank's nine-byte name is held separately by BankData. |
 | `filesystem.c`: `op_bank_child_scratch` | 144 | One union: 16 × 9 Bank-child names or 16 × 6 boot-reader Instrument types, with disjoint lifetimes. |
 | `asyncfatfs.c`: `afatfs` | 6,984 | FAT state, caches, and five file handles in one owner. |
-| `InstrumentManager.c`: `runtime_slots` | 7,152 | Six tagged 1,192 B engine slots; no parallel native engine array. The largest engine (`DrumVoice`) is 596 B (588 + the S085 P1 `syncClock` + the follow-up `ringDepthQ15`); the reserve is twice that. |
+| `InstrumentManager.c`: `runtime_slots` | 7,584 | Six tagged 1,264 B engine slots; no parallel native engine array. The largest engine (`DrumVoice`) is 632 B (596 + the S088 P0 run-mode state: `runMode`, `ampRampArm`, `lastVeloGain`, `lastFmDepth`, the 28 B `OscCarrierSnapshot`); the reserve is twice that. |
 | `adcPots.c`: `slider_lut` | 4,096 | 1,024 `float` slider conversion values. |
 | `SampleMemory.c`: resident and install caches | 5,040 | 1,440 B `sample_info_cache`, 1,080 B `sample_name_cache`, 120 B loop flags, 1,440 B `install_info`, and 960 B `install_names`. |
 | `usb_manager.c`: `USB_OTG_dev` | 1,524 | USB core/device handle. |

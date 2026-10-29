@@ -161,6 +161,42 @@ static const char waveformNames[][4] = {
 static const char oscTypeNames[][4] = {
     {4}, {"wav"},{"smp"},{"slp"},{"wtb"},
 };
+/*
+ * DTYPE_ON_OFF high-nibble sub-type tag (S088 P0 §2.1 D12).
+ *
+ * What:       ONOFF_TAG_OSC_RUN = 1u. The descriptor dtype byte stores
+ *             DTYPE_ON_OFF | (ONOFF_TAG_OSC_RUN << 4) = 0x16 so that menu.c
+ *             can tell a run-mode cell from an ordinary on/off cell. The low
+ *             nibble (& 0x0f) is 6 = DTYPE_ON_OFF; the high nibble (>> 4)
+ *             is 1.
+ * Why:        all 16 DTYPE_MENU ids and all 16 dtype enum values are taken
+ *             (S078 binding mandate). The high nibble of DTYPE_ON_OFF was
+ *             unused: every existing >> 4 read of the dtype byte sits inside
+ *             a DTYPE_MENU case (verified S088 P0 §2.1).
+ * Inputs:     the four engine *Parameters.c osc1_run descriptor rows.
+ * Outputs:    read by the six DTYPE_ON_OFF switch sites in menu.c.
+ * Accessors:  ROW_SELECT_ONOFF_SPECIAL (each *Parameters.c).
+ * Affiliates: oscRunNames below; S088_P0_OSC_RUN_MODES.md §2.1.
+ */
+#define ONOFF_TAG_OSC_RUN   1u
+/*
+ * Oscillator run-mode names (S088 P0 §2.1).
+ *
+ * What:       [0] = count (3), then rst, fre, itp. Same shape as mixFmNames:
+ *             a leading count byte and 3+1 character entries.
+ * Why:        the six tagged DTYPE_ON_OFF sites in menu.c use this table for
+ *             display and clamping; the step-automation display and the
+ *             single-parameter view read it too.
+ * Accessors:  menu.c menu_formatCellValue3(), menu_repaintGeneric(),
+ *             menu_clampCellValue(), menu_automationValueMax(),
+ *             menu_formatAutomationValue3() and the step-automation edit
+ *             display.
+ * Affiliates: ONOFF_TAG_OSC_RUN above; the osc1_run descriptor rows;
+ *             OSC_RUN_COUNT (Oscillator.h) is the same 3.
+ */
+static const char oscRunNames[][4] = {
+    {3}, {"rst"},{"fre"},{"itp"},
+};
 static const char outputNames[][7] = {
     {6}, {"St1"},{"St2"},{"L1"},{"R1"},{"L2"},{"R2"},
 };

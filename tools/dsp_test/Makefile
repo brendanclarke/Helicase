@@ -32,9 +32,10 @@ CAT_HOST_INC := -I. -I$(ROOT)/Core/SampleRom -include cat_host.h
 OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
 
 .PHONY: all clean oscillator modulation voice_control sequencer \
-        instrument_manager samples sampleoptimize special_tags stock_tables
+        instrument_manager samples sampleoptimize run_modes special_tags \
+        stock_tables
 all: oscillator modulation voice_control sequencer instrument_manager samples \
-     sampleoptimize special_tags stock_tables
+     sampleoptimize run_modes special_tags stock_tables
 
 $(GEN):
 	mkdir -p $(GEN)
@@ -59,7 +60,8 @@ oscillator: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c
 modulation: $(GEN)/Oscillator.host.h
 	$(EX) --src $(ROOT)/Core/DSPAudio/modulationNode.c \
 	  --func modNode_interpStampOf --func modNode_setWaveInterpEnabled \
-	  --func modNode_resetTargets --func modNode_interpClaim \
+	  --func modNode_setItpReserved --func modNode_resetTargets \
+	  --func modNode_interpClaim \
 	  --out $(GEN)/modulation_interp.c
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/modulation.c -o build/modulation -lm
 	./build/modulation
@@ -103,6 +105,10 @@ instrument_manager: | $(GEN)
 	$(EX) --src $(ROOT)/Core/DSP/Instruments/Drum/DrumParameters.c \
 	  --macro ROW_SELECT_SPECIAL --out $(GEN)/im_rowmacro.inc
 	$(EX) --src $(ROOT)/Core/DSP/Instruments/Drum/DrumParameters.c \
+	  --macro ROW_SELECT_ONOFF_SPECIAL --out $(GEN)/im_onoffmacro.inc
+	$(EX) --src $(ROOT)/Core/Menu/MenuText.h \
+	  --macro ONOFF_TAG_OSC_RUN --out $(GEN)/im_onofftag.inc
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Drum/DrumParameters.c \
 	  --typedef drum_param_index_t --out $(GEN)/im_index.inc
 	$(EX) --src $(ROOT)/Core/DSP/Instruments/InstrumentManager.c \
 	  --func instrumentManager_targetValid --out $(GEN)/im_gate.c
@@ -125,6 +131,14 @@ instrument_manager: | $(GEN)
 	@if ./build/instrument_manager_break_row >/dev/null 2>&1; then \
 	  echo "instrument_manager_break_row: FAILED (dtype break not caught)"; exit 1; \
 	else echo "instrument_manager_break_row: caught (law 4 fails as expected)"; fi
+	mkdir -p build/break_onoff
+	sed 's/DTYPE_ON_OFF | ((tag_) << 4)/DTYPE_ON_OFF/' \
+	  $(GEN)/im_onoffmacro.inc > build/break_onoff/im_onoffmacro.inc
+	$(HOSTCC) -Ibuild/break_onoff $(HOSTFLAGS) modules/instrument_manager.c \
+	  -o build/instrument_manager_break_onoff -lm
+	@if ./build/instrument_manager_break_onoff >/dev/null 2>&1; then \
+	  echo "instrument_manager_break_onoff: FAILED (on/off tag break not caught)"; exit 1; \
+	else echo "instrument_manager_break_onoff: caught (law 7 fails as expected)"; fi
 
 # Break: the header is published in begin() (after the erase), so an
 # uncommitted install no longer reads EMPTY (catalogue law 3 must fail).
@@ -148,6 +162,40 @@ samples: | $(GEN)
 
 sampleoptimize:
 	python3 modules/sampleoptimize.py
+
+# S088 P0: gain-matched retrigger (slopeEg2_retriggerFrom) and the ramped
+# post-chains (voicePostChain.h). Break: `currentGain / denom` -> `currentGain`,
+# which must make law A1 fail.
+run_modes: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/SlopeEg2.h \
+	  --typedef SlopeEg2 --out $(GEN)/rm_slope_type.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/SlopeEg2.h \
+	  --macro EG_STOPPED --macro EG_A --macro EG_D --macro EG_REPEAT \
+	  --out $(GEN)/rm_slope_consts.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/SlopeEg2.c \
+	  --func slopeEg2_setSlope --func slopeEg2_init \
+	  --func slopeEg2_trigger \
+	  --func slopeEg2_retriggerFrom --func slopeEg2_calcSlopeValue \
+	  --func slopeEg2_calc \
+	  --out $(GEN)/rm_slope_eg.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/SlopeEg2.h \
+	  --func slopeEg2_isAudibleGain --out $(GEN)/rm_audible.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/BufferTools.h \
+	  --func bufferTool_floatToInt16Store --func bufferTool_satAdd16 \
+	  --func bufferTool_interpolatedGain --out $(GEN)/rm_buffertools.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/voicePostChain.h \
+	  --func voicePost_drum --func voicePost_mixAddGainDist \
+	  --func voicePost_addGainDist --out $(GEN)/rm_postchain.c
+	$(HOSTCC) $(HOSTFLAGS) modules/run_modes.c -o build/run_modes -lm
+	./build/run_modes
+	mkdir -p build/break_rm
+	sed 's|v = currentGain / denom;|v = currentGain;|' \
+	  $(GEN)/rm_slope_eg.c > build/break_rm/rm_slope_eg.c
+	$(HOSTCC) -Ibuild/break_rm $(HOSTFLAGS) modules/run_modes.c \
+	  -o build/run_modes_break -lm
+	@if ./build/run_modes_break >/dev/null 2>&1; then \
+	  echo "run_modes_break: FAILED (gain-match break not caught)"; exit 1; \
+	else echo "run_modes_break: caught (law A1 fails as expected)"; fi
 
 special_tags:
 	cd $(ROOT) && python3 tools/dsp_test/check_special_tags.py

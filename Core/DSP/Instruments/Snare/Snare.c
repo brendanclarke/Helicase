@@ -107,6 +107,48 @@ void Snare_initVoice(SnareVoice *voice)
 	SVF_init(&voice->filter);
 
 	lfo_init(&voice->lfo);
+	/*
+	 * Run mode default (S088 P0 §2.4): 0 rst, today's behaviour.
+	 * What: one store so a runtime-slot reset starts in rst, which is what a
+	 * file without the osc1_run key must load.
+	 * Accessors: Snare_triggerVoice(), Snare_calcSyncBlockVoice().
+	 */
+	voice->runMode = OSC_RUN_RST;
+	/* S088 P0: no armed ramp until a fre/itp retrigger asks for one. */
+	voice->ampRampArm = 0u;
+	voice->lastAmpGain = 0.0f;
+	voice->snapshot.active = 0u;
+	voice->snapshot.counter = 0u;
+}
+//---------------------------------------------------
+/*
+ * Fill the itp old-carrier snapshot (S088 P0 §3 Layer 3a).
+ *
+ * What:       copies osc's phase/phaseInc/waveform/table/type/frozen-pos and
+ *             sample bind fields into voice->snapshot and activates it for
+ *             OSC_RUN_ITP_FADE_BLOCKS blocks.
+ * Why:        the old carrier keeps playing beside the reset live carrier for
+ *             about 3 ms; the snapshot is the only state the plain renderer
+ *             needs. Taken before the phase reset (Snare_triggerVoice()).
+ * Inputs:     voice->osc.  Outputs: voice->snapshot.
+ * Accessors:  Snare_triggerVoice() (itp, audible, slot granted).
+ * Affiliates: OscCarrierSnapshot; oscSection_renderOldCarrier().
+ */
+static void Snare_fillItpSnapshot(SnareVoice *voice)
+{
+	voice->snapshot.phase = voice->osc.phase;
+	voice->snapshot.phaseInc = voice->osc.phaseInc;
+	voice->snapshot.waveform = voice->osc.waveform;
+	voice->snapshot.tableOffset = voice->osc.tableOffset;
+	voice->snapshot.oscType = voice->osc.oscType;
+	voice->snapshot.sampleCacheIndex = voice->osc.sampleCacheIndex;
+	voice->snapshot.sampleCacheLooped = voice->osc.sampleCacheLooped;
+	voice->snapshot.sampleCacheGeneration = voice->osc.sampleCacheGeneration;
+	voice->snapshot.sampleCacheSize = voice->osc.sampleCacheSize;
+	voice->snapshot.sampleCacheData = voice->osc.sampleCacheData;
+	voice->snapshot.positionApplied = voice->osc.positionApplied;
+	voice->snapshot.active = 1u;
+	voice->snapshot.counter = OSC_RUN_ITP_FADE_BLOCKS;
 }
 //---------------------------------------------------
 void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
@@ -137,6 +179,36 @@ void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
 	 */
 	instrumentManager_applyVelocityModulationTarget(source_slot, vel/127.f);
 
+	/*
+	 * Run-mode decision for this retrigger (S088 P0 §1, §3 Layers 2a/2c/3a).
+	 *
+	 * What:       reads the amp gain of the last block (egValueOscVol), derives
+	 *             ampAudible, itpRequested, takes the itp snapshot BEFORE the
+	 *             phase reset when a slot is free, and derives phaseReset
+	 *             (never in fre; an itp fade that was refused behaves as fre).
+	 * Why:        fre must keep the carrier running; itp restarts the live
+	 *             carrier while the snapshot crossfades the old one out.
+	 * Inputs:     runMode, egValueOscVol, the itp slot query.
+	 * Outputs:    ampRampArm, snapshot and the local decisions.
+	 * Accessors:  this trigger only.
+	 * Affiliates: slopeEg2_isAudibleGain(), slopeEg2_retriggerFrom(),
+	 *             instrumentManager_itpFadeSlotAvailable().
+	 */
+	const float prevGain = voice->egValueOscVol;
+	const uint8_t ampAudible = slopeEg2_isAudibleGain(prevGain);
+	const uint8_t itpRequested =
+		(uint8_t)(voice->runMode == OSC_RUN_ITP && ampAudible);
+	uint8_t itpFade = 0u;
+
+	voice->ampRampArm = 0u;
+	if (itpRequested && instrumentManager_itpFadeSlotAvailable(source_slot)) {
+		Snare_fillItpSnapshot(voice);
+		itpFade = 1u;
+	}
+	const uint8_t phaseReset =
+		(uint8_t)(voice->runMode != OSC_RUN_FRE && !(itpRequested && !itpFade));
+
+	if (phaseReset) {
 	float offset = 1;
 	if(voice->transGen.waveform==1) //offset mode
 	{
@@ -174,9 +246,25 @@ void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
 	 */
 	voice->osc.phase += osc_positionTrigger(&voice->osc);
 	}
+	}
 
 	DecayEg_trigger(&voice->oscPitchEg);
-	slopeEg2_trigger(&voice->oscVolEg);
+	/*
+	 * Gain-matched amp retrigger (S088 P0 §3 Layer 2a).
+	 * What: in fre/itp with an audible tail, restart the attack at prevGain
+	 *       and arm the one-block post-chain ramp; otherwise (rst, decayed
+	 *       tail, repeat fallback) use slopeEg2_trigger() as before.
+	 * Why:  the attack enters where the decay left off, so the retrigger does
+	 *       not cut the tail to silence for a block.
+	 * Inputs: runMode, ampAudible, prevGain. Outputs: oscVolEg, ampRampArm.
+	 * Affiliates: slopeEg2_retriggerFrom(); voicePost_mixAddGainDist().
+	 */
+	if (voice->runMode != OSC_RUN_RST && ampAudible) {
+		slopeEg2_retriggerFrom(&voice->oscVolEg, prevGain);
+		voice->ampRampArm = 1u;
+	} else {
+		slopeEg2_trigger(&voice->oscVolEg);
+	}
 	voice->velo = vel/127.f;
 
 	osc_setBaseNote(&voice->osc,note);
@@ -288,24 +376,48 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 		calcNextOscSampleBlock(&voice->osc,transBuf,size,(1.f-voice->mix));
 	osc_positionBendRestore(&voice->osc);	/* S086 P3: exact restore */
 	//--AS apply filter to synthesized sound as well here if desired, or combine code for more efficiency
+	/*
+	 * itp crossfade blend (S088 P0 §3 Layers 3a/3c).
+	 *
+	 * What:       while snapshot.active, render the frozen carrier plainly and
+	 *             crossfade the carrier block (transBuf) toward it over 132
+	 *             samples; the helper advances the snapshot and releases it.
+	 * Why:        removes the click of the reset carrier; carrier-only (Q14).
+	 *             The noise oscillator keeps running (A7: slew, no snapshot).
+	 * Inputs:     voice->snapshot, transBuf, size.
+	 * Outputs:    transBuf blended; snapshot advanced.
+	 * Accessors:  this render.  Affiliates: oscSection_renderOldCarrier().
+	 */
+	if (voice->snapshot.active)
+		oscSection_renderOldCarrier(&voice->snapshot, transBuf, size);
 
 	/*
-	 * Fused Snare post-chain (S073 Step 4).
+	 * Fused Snare post-chain (S073 Step 4; amp ramp S088 P0 §3 Layer 2b).
 	 *
-	 * What:       mix gain, saturating add, amp gain and distortion in one pass.
+	 * What:       mix gain, saturating add, amp gain ramp and distortion in one
+	 *             pass. The ramp start is the previous block's ampGain only
+	 *             when the trigger armed it; otherwise the endpoints are equal
+	 *             and the samples are the S073 ones exactly.
 	 * Why:        removes one intermediate post-chain pass while preserving
 	 *             the old int16 conversion and saturation points (S0).
 	 * Inputs:     filtered buf, transBuf, mix, volumeMod/velo/EG and distortion.
-	 * Outputs:    pre-volume buf.
-	 * Accessors:  this render function.
-	 * Affiliates: voicePostChain.h and the Step 4 host/ARM checks.
+	 * Outputs:    pre-volume buf; lastAmpGain updated; ampRampArm cleared.
+	 * Accessors:  this render function through InstrumentManager.
+	 * Affiliates: voicePostChain.h, voicePost_mixAddGainDist(), Snare's
+	 *             lastAmpGain/ampRampArm and the Step 4 host/ARM checks.
 	 */
 	{
 		const float ampGain = voice->volumeMod
 			? voice->velo * voice->egValueOscVol
 			: voice->egValueOscVol;
+		const float lastAmpGain = voice->ampRampArm
+			? voice->lastAmpGain : ampGain;
+
 		voicePost_mixAddGainDist(buf, transBuf, voice->mix, ampGain,
+		                         lastAmpGain,
 		                         &voice->distortion, size);
+		voice->lastAmpGain = ampGain;
+		voice->ampRampArm = 0u;
 	}
 }
 //------------------------------------------------------------------------

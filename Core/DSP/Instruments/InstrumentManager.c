@@ -1772,6 +1772,39 @@ float instrumentManager_runtimeVolume(uint8_t slot)
     }
 }
 
+/*
+ * Read one slot's current engine run mode (S088 P0 §3 Layer 2d).
+ *
+ * What:       returns voice->runMode for the engine that occupies the slot;
+ *             0 (rst) for an unknown type or a missing instance.
+ * Why:        the cutoff writer needs the mode too (it must not jump g in
+ *             fre/itp); one accessor keeps that decision identical to the
+ *             per-block recalc's rule.
+ * Inputs:     slot (0..5).  Outputs: OSC_RUN_* (0..2).
+ * Accessors:  instrumentManager_recalcSlotFilter(),
+ *             IM_SPECIAL_FILTER_FREQ.
+ * Affiliates: the four engine structs' runMode; OSC_RUN_RST.
+ */
+static uint8_t instrumentManager_slotRunMode(uint8_t slot)
+{
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? voice->runMode : (uint8_t)OSC_RUN_RST; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? voice->runMode : (uint8_t)OSC_RUN_RST; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        return voice ? voice->runMode : (uint8_t)OSC_RUN_RST; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? voice->runMode : (uint8_t)OSC_RUN_RST; }
+    default:
+        return (uint8_t)OSC_RUN_RST;
+    }
+}
+
 void instrumentManager_recalcSlotFilter(uint8_t slot)
 {
     /*
@@ -1782,27 +1815,107 @@ void instrumentManager_recalcSlotFilter(uint8_t slot)
      * rather than folded into mixer.c because filter ownership depends on the
      * instrument currently loaded into the slot, not on the physical voice
      * number.
+     *
+     * S088 P0 §3 Layer 2d: when the slot's engine is in fre or itp the filter
+     * state is kept, so the coefficient is slewed (SVF_recalcFreqSlew()) to
+     * avoid a transient; rst keeps the original instant SVF_recalcFreq().
+     * The cost is the same one fastTan per block on either path.
      */
     switch (instrumentManager_slotType(slot)) {
     case INSTRUMENT_TYPE_DRM: {
         DrumVoice *voice = instrumentManager_drumRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) {
+            if (voice->runMode != OSC_RUN_RST)
+                SVF_recalcFreqSlew(&voice->filter);
+            else
+                SVF_recalcFreq(&voice->filter);
+        }
         break; }
     case INSTRUMENT_TYPE_SNR: {
         SnareVoice *voice = instrumentManager_snareRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) {
+            if (voice->runMode != OSC_RUN_RST)
+                SVF_recalcFreqSlew(&voice->filter);
+            else
+                SVF_recalcFreq(&voice->filter);
+        }
         break; }
     case INSTRUMENT_TYPE_CYM: {
         CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) {
+            if (voice->runMode != OSC_RUN_RST)
+                SVF_recalcFreqSlew(&voice->filter);
+            else
+                SVF_recalcFreq(&voice->filter);
+        }
         break; }
     case INSTRUMENT_TYPE_HAT: {
         HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) {
+            if (voice->runMode != OSC_RUN_RST)
+                SVF_recalcFreqSlew(&voice->filter);
+            else
+                SVF_recalcFreq(&voice->filter);
+        }
         break; }
     default:
         break;
     }
+}
+
+/*
+ * itp crossfade slot queries (S088 P0 §3 Layer 3b; contract in the header).
+ *
+ * What:       read snapshot.active from the engine that currently occupies the
+ *             slot. Unknown types and missing instances report 0.
+ * Why:        one place resolves the tagged slot's engine struct, so mixer.c
+ *             and the engine triggers do not duplicate the type switch.
+ * Inputs:     slot, or the triggering slot to exclude.
+ * Outputs:    0/1; the active fade count; the availability flag.
+ * Accessors:  mixer_calcNextSampleBlock() and the four engine triggers.
+ * Affiliates: OscCarrierSnapshot; OSC_WAVE_INTERP_MAX_ACTIVE.
+ */
+uint8_t instrumentManager_slotHasActiveItpFade(uint8_t slot)
+{
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? voice->snapshot.active : 0u; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? voice->snapshot.active : 0u; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        return voice ? voice->snapshot.active : 0u; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? voice->snapshot.active : 0u; }
+    default:
+        return 0u;
+    }
+}
+
+uint8_t instrumentManager_activeItpFadeCount(void)
+{
+    uint8_t slot;
+    uint8_t count = 0u;
+
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++)
+        count = (uint8_t)(count + instrumentManager_slotHasActiveItpFade(slot));
+    return count;
+}
+
+uint8_t instrumentManager_itpFadeSlotAvailable(uint8_t exclude_slot)
+{
+    uint8_t slot;
+    uint8_t count = 0u;
+
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        if (slot == exclude_slot)
+            continue;
+        count = (uint8_t)(count + instrumentManager_slotHasActiveItpFade(slot));
+    }
+    return (uint8_t)(count < OSC_WAVE_INTERP_MAX_ACTIVE);
 }
 
 void instrumentManager_calcSlotAsync(uint8_t slot)
@@ -3438,8 +3551,21 @@ static uint8_t instrumentManager_writeSpecialRuntime(
     case IM_SPECIAL_FILTER_FREQ: {
         ResonantFilter *filter = instrumentManager_filter(slot);
         if (!filter) return 0u;
-        SVF_directSetFilterValue(filter,
-            valueShaperF2F(byteValue / 127.0f, FILTER_SHAPER));
+        /*
+         * S088 P0 §3 Layer 2d: in fre/itp set only the target cutoff.
+         * What: rst keeps SVF_directSetFilterValue() (f and g together, the
+         *       filter has just been cleared so the jump is correct). fre/itp
+         *       use SVF_setFrequencyTarget(): f only, and the next block's
+         *       SVF_recalcFreqSlew() moves g there without a transient.
+         * Why:  a writer-time g jump would bypass the slew and put the
+         *       discontinuity at the control-rate write.
+         */
+        if (instrumentManager_slotRunMode(slot) != OSC_RUN_RST)
+            SVF_setFrequencyTarget(filter,
+                valueShaperF2F(byteValue / 127.0f, FILTER_SHAPER));
+        else
+            SVF_directSetFilterValue(filter,
+                valueShaperF2F(byteValue / 127.0f, FILTER_SHAPER));
         return 1u; }
     case IM_SPECIAL_FILTER_RESO: {
         ResonantFilter *filter = instrumentManager_filter(slot);
@@ -3587,6 +3713,34 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         osc_setType(osc, byteValue);
         instrumentManager_waveDomainChanged(slot);
         return 1u; }
+    case IM_SPECIAL_OSC_RUN: {
+        /*
+         * osc1_run writer (S088 P0 §2.4).
+         *
+         * What:       clamps byteValue to 0..OSC_RUN_COUNT-1 (0 rst, 1 fre,
+         *             2 itp) and stores it in the engine's runMode field
+         *             through the descriptor's instance offset, using the
+         *             generic TYPE_UINT8 store.
+         * Why:        every osc1_run write (menu, Kit/Scene/Instrument apply,
+         *             step automation, MIDI) must clamp and store the same
+         *             way. There is no DSP side effect: the engines read
+         *             runMode at the next trigger and each render block.
+         * Inputs:     slot, the osc selector (IM_SPECIAL_OSC1), byteValue.
+         * Outputs:    the engine struct's runMode byte.
+         * Accessors:  instrumentManager_writeRuntimeInternal() via the tag.
+         * Affiliates: OSC_RUN_* (Oscillator.h); the four osc1_run rows;
+         *             instrumentManager_slotHasActiveItpFade() (Layer 3).
+         */
+        void *instance = instrumentManager_runtimeInstance(slot);
+        uint8_t run = (byteValue >= OSC_RUN_COUNT)
+            ? (uint8_t)(OSC_RUN_COUNT - 1u) : byteValue;
+
+        if (!instance || !descriptor) return 0u;
+        instrumentManager_writeParameter(
+            (Parameter){ (void *)((uint8_t *)instance +
+                                  descriptor->runtime.offset),
+                         descriptor->runtime.parameter_type }, run);
+        return 1u; }
     case IM_SPECIAL_NONE:
     default:
         return 0u;
@@ -3654,6 +3808,13 @@ static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
     /* S087 B: osc1_type. */
     if (osc != 0xFFu && strcmp(key, "osc1_type") == 0)
         return IM_SPECIAL_OSC_TYPE | osc;
+    /*
+     * S088 P0: osc1_run. The classifier is the independent pre-S073 key rule
+     * the boot diagnostic compares every descriptor tag against, so the
+     * run-mode row must be named here too.
+     */
+    if (osc != 0xFFu && strcmp(key, "osc1_run") == 0)
+        return IM_SPECIAL_OSC_RUN | osc;
     if (strcmp(key, "transient_freq") == 0) return IM_SPECIAL_TRANSIENT_FREQ;
     if (strcmp(key, "instrument_drive") == 0)
         return IM_SPECIAL_INSTRUMENT_DRIVE;

@@ -20,8 +20,10 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
-**S087 complete** (2026-10-29, uncommitted on `f3805478`). Log:
-`knowledge_files/log_archive/087_SESSION_HANDOFF_LOG.md`.
+**S088 P0 implemented** (2026-10-29, uncommitted on `2ab359eb`): oscillator
+run modes (`osc1_run` = `rst`/`fre`/`itp`). Plan and implementation notes:
+`S088_P0_OSC_RUN_MODES.md`, `S088_P0_IMPLEMENTATION.md` (progress log and
+measured RAM). S087 log: `knowledge_files/log_archive/087_SESSION_HANDOFF_LOG.md`.
 Working notes: `knowledge_files/volatile/S087_WORKING_NOTES.md`.
 Host tests: `tools/dsp_test/modules/` (one file per module, `make -C tools/dsp_test all`);
 effects retry kit (transient, filter drive, D+S): `tools/dsp_test/spike/README.md`.
@@ -170,6 +172,15 @@ is in the referenced session logs and specification documents.
   truncation/saturation; DMA Normal non-cacheable + `DSB` after pack; ITCM
   growth = RAM under approval policy.
 - **Measuring flash:** `link_budget.py` warns < 16 KiB. Use `make all` first.
+- **Oscillator run modes (S088, `osc1_run`):** `rst` must stay bit-identical.
+  `fre` never resets the carrier phase; `itp` resets it and crossfades the
+  old carrier (`OscCarrierSnapshot`, 28 B) for 132 samples, rendered plain
+  (no FM/sync/ring on the old copy). A decayed `itp` is exactly `rst`; a
+  refused `itp` claim falls back to `fre`. The two interpolation slots are
+  shared: ongoing `itp` fades are reserved in `modNode_resetTargets()` before
+  wavetable blending. `ampRampArm` arms one block of post-chain/FM ramps;
+  never pass unequal ramp endpoints when it is clear. Filter coefficient
+  changes in `fre`/`itp` use `SVF_recalcFreqSlew()` (0.28 per block).
 
 ---
 

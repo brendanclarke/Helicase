@@ -585,6 +585,38 @@ function's per-sample loops with a P2 baseline and fails if one grew.
   `osc_setType()` clears the interpolation slot stamp when the type
   changes, and rebinds the oscillator to the selected catalogue entry.
 
+- **Oscillator run modes (S088, `osc1_run`):** a selector row (`run`,
+  `DTYPE_ON_OFF` with the high-nibble tag `ONOFF_TAG_OSC_RUN`, flags
+  `AUTOMATABLE | SELECTOR`) chooses what a retrigger does to the carrier.
+  The value lives in `runMode` on the engine struct (DrumVoice, SnareVoice,
+  CymbalVoice, HiHatVoice) - not in `OscInfo`; the special writer
+  `IM_SPECIAL_OSC_RUN` clamps 0..2 and stores it.
+
+  | `run` | Constant | Retrigger behaviour |
+  |---|---|---|
+  | `rst` (0) | `OSC_RUN_RST` | today's behaviour, bit-identical |
+  | `fre` (1) | `OSC_RUN_FRE` | carrier phase is never reset; modulators slew; amp EG gain-matched; filter keeps ringing with a slewed coefficient |
+  | `itp` (2) | `OSC_RUN_ITP` | carrier phase resets; the old carrier plays on for 132 samples (`OSC_RUN_ITP_SAMPLES`) in a linear crossfade; modulators slew; amp EG gain-matched |
+
+  Shared rules for `fre`/`itp` when the amp gain is audible (`>= 1/32768`,
+  `slopeEg2_isAudibleGain()`): `slopeEg2_retriggerFrom()` inverts the attack
+  curve so the attack enters at the current gain, and the engine arms one
+  block of post-chain ramps (`ampRampArm`): Drum velocity, Snare/Cymbal/HiHat
+  compound amp gain, and the Drum FM depth. `rst` passes equal endpoints, so
+  every ramp is the identity and the output is unchanged. A fully decayed
+  `itp` retrigger behaves exactly as `rst` (D6). A refused `itp` claim (both
+  interpolation slots held) falls back to `fre` (no crossfade, no phase
+  reset). Filter coefficient slew is `SVF_recalcFreqSlew()`
+  (`OSC_RUN_FILTER_SLEW` 0.28 per block); `rst` keeps `SVF_recalcFreq()`.
+
+  The `itp` old-carrier copy is `OscCarrierSnapshot` (28 B on ARM) and is
+  rendered PLAIN (`oscSection_renderOldCarrier()`): no FM, sync or ring on
+  the old copy (S085 P1 Q14). It uses the same two interpolation slots as
+  wavetable frame blending. Per-block claim priority: ongoing `itp` fades
+  (counted by the mixer, reserved in `modNode_resetTargets()`), then wavetable
+  blending, then new `itp` fades. A `wtb` snapshot plays its frozen pos frame
+  through the plain copy and never claims.
+
 - **Modulator `wav` list (S087, §6.1.3):** modulators get no `typ` or `pos`
   rows. Their `wav` list is: stock 0–7, then `s01..sNN`, `l01..lNN`,
   `w01..wNN`, up to 127 entries. The type is inferred from the entry

@@ -415,6 +415,10 @@ unchanged (identity, as in step automation).
   number is slot × 64 + that index; every earlier NRPN number and MIDI Learn
   row is unchanged. A move glides the oscillator phase within one block
   (`INSTRUMENTS_DSP_REFERENCE.md` §6.1.1).
+- `osc1_run` (`run`, S088): 0 `rst`, 1 `fre`, 2 `itp`; values above 2 clamp
+  to `itp`. Appended after `osc1_type`, so its NRPN number (slot × 64 +
+  index) and MIDI Learn row follow automatically with no renumbering. It is
+  a selector: one value per step when automated, never morphed.
 - The only translation is the Morph amounts (§5.2).
 - WIDE8 Effect rows expand through the Effect type's 7-bit expansion, as
   automation does.

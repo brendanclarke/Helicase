@@ -129,6 +129,43 @@ void Cymbal_initVoice(CymbalVoice *voice)
 
 	lfo_init(&voice->lfo);
 
+	/* Run mode default (S088 P0 §2.4): 0 rst, today's behaviour. */
+	voice->runMode = OSC_RUN_RST;
+	/* S088 P0: no armed ramp until a fre/itp retrigger asks for one. */
+	voice->ampRampArm = 0u;
+	voice->lastAmpGain = 0.0f;
+	voice->snapshot.active = 0u;
+	voice->snapshot.counter = 0u;
+}
+//---------------------------------------------------
+/*
+ * Fill the itp old-carrier snapshot (S088 P0 §3 Layer 3a).
+ *
+ * What:       copies the carrier state into voice->snapshot and activates it
+ *             for OSC_RUN_ITP_FADE_BLOCKS blocks. The modulator oscillators
+ *             are deliberately NOT snapshotted (A4): they keep running and
+ *             serve only the new carrier.
+ * Why:        the old carrier plays beside the reset carrier for about 3 ms;
+ *             a plain render needs only the copied fields.
+ * Inputs:     voice->osc.  Outputs: voice->snapshot.
+ * Accessors:  Cymbal_triggerVoice() (itp, audible, slot granted).
+ * Affiliates: OscCarrierSnapshot; oscSection_renderOldCarrier().
+ */
+static void Cymbal_fillItpSnapshot(CymbalVoice *voice)
+{
+	voice->snapshot.phase = voice->osc.phase;
+	voice->snapshot.phaseInc = voice->osc.phaseInc;
+	voice->snapshot.waveform = voice->osc.waveform;
+	voice->snapshot.tableOffset = voice->osc.tableOffset;
+	voice->snapshot.oscType = voice->osc.oscType;
+	voice->snapshot.sampleCacheIndex = voice->osc.sampleCacheIndex;
+	voice->snapshot.sampleCacheLooped = voice->osc.sampleCacheLooped;
+	voice->snapshot.sampleCacheGeneration = voice->osc.sampleCacheGeneration;
+	voice->snapshot.sampleCacheSize = voice->osc.sampleCacheSize;
+	voice->snapshot.sampleCacheData = voice->osc.sampleCacheData;
+	voice->snapshot.positionApplied = voice->osc.positionApplied;
+	voice->snapshot.active = 1u;
+	voice->snapshot.counter = OSC_RUN_ITP_FADE_BLOCKS;
 }
 //---------------------------------------------------
 void Cymbal_triggerVoice(CymbalVoice *voice, const uint8_t source_slot,
@@ -158,6 +195,40 @@ void Cymbal_triggerVoice(CymbalVoice *voice, const uint8_t source_slot,
 	 */
 	instrumentManager_applyVelocityModulationTarget(source_slot, vel/127.f);
 
+	/*
+	 * Run-mode decision for this retrigger (S088 P0 §1, §3 Layers 2a/2c/3a).
+	 *
+	 * What:       ampAudible from the last block's egValueOscVol; itpRequested;
+	 *             behavesAsRst (rst, or itp with a decayed amp = exactly rst);
+	 *             the itp snapshot is taken before the phase reset; phaseReset
+	 *             is never set in fre and not set when an itp fade was refused.
+	 * Why:        fre keeps the carrier running; itp restarts it while the old
+	 *             copy crossfades; the modulators follow behavesAsRst (they keep
+	 *             running in fre and in an itp fade).
+	 * Inputs:     runMode, egValueOscVol, the itp slot query.
+	 * Outputs:    ampRampArm, snapshot and the local decisions.
+	 * Accessors:  this trigger only.
+	 * Affiliates: slopeEg2_isAudibleGain(), slopeEg2_retriggerFrom(),
+	 *             instrumentManager_itpFadeSlotAvailable(); A4.
+	 */
+	const float prevGain = voice->egValueOscVol;
+	const uint8_t ampAudible = slopeEg2_isAudibleGain(prevGain);
+	const uint8_t itpRequested =
+		(uint8_t)(voice->runMode == OSC_RUN_ITP && ampAudible);
+	const uint8_t behavesAsRst =
+		(uint8_t)(voice->runMode == OSC_RUN_RST ||
+		          (voice->runMode == OSC_RUN_ITP && !itpRequested));
+	uint8_t itpFade = 0u;
+
+	voice->ampRampArm = 0u;
+	if (itpRequested && instrumentManager_itpFadeSlotAvailable(source_slot)) {
+		Cymbal_fillItpSnapshot(voice);
+		itpFade = 1u;
+	}
+	const uint8_t phaseReset =
+		(uint8_t)(voice->runMode != OSC_RUN_FRE && !(itpRequested && !itpFade));
+
+	if (phaseReset) {
 	float offset = 1;
 	if(voice->transGen.waveform==1) //offset mode
 	{
@@ -196,15 +267,39 @@ void Cymbal_triggerVoice(CymbalVoice *voice, const uint8_t source_slot,
 	 */
 	voice->osc.phase += osc_positionTrigger(&voice->osc);
 	}
+	}
 
-	voice->modOsc.phase = 0;
-	voice->modOsc2.phase = 0;
+	/*
+	 * Modulator phase reset (S088 P0 §3 Layer 2c, A4).
+	 * What: rst (and itp with a decayed amp, which is exactly rst) restarts
+	 *       both modulators as before; fre and an audible itp keep them
+	 *       running, so they slew to the new pitch instead of stepping.
+	 * Why:  the crossfade is carrier-only (Q14); restarting the modulators
+	 *       would add an unrelated transient under it.
+	 */
+	if (behavesAsRst) {
+		voice->modOsc.phase = 0;
+		voice->modOsc2.phase = 0;
+	}
 
 	osc_setBaseNote(&voice->osc,note);
 	osc_setBaseNote(&voice->modOsc,note);
 	osc_setBaseNote(&voice->modOsc2,note);
 
-	slopeEg2_trigger(&voice->oscVolEg);
+	/*
+	 * Gain-matched amp retrigger (S088 P0 §3 Layer 2a).
+	 * What: fre/itp with an audible tail restart the attack at prevGain and
+	 *       arm the one-block post-chain ramp; everything else keeps
+	 *       slopeEg2_trigger() (rst, decayed tail, repeat fallback).
+	 * Inputs: runMode, ampAudible, prevGain. Outputs: oscVolEg, ampRampArm.
+	 * Affiliates: slopeEg2_retriggerFrom(); voicePost_addGainDist().
+	 */
+	if (voice->runMode != OSC_RUN_RST && ampAudible) {
+		slopeEg2_retriggerFrom(&voice->oscVolEg, prevGain);
+		voice->ampRampArm = 1u;
+	} else {
+		slopeEg2_trigger(&voice->oscVolEg);
+	}
 	voice->velo = vel/127.f;
 
 	transient_trigger(&voice->transGen);
@@ -313,27 +408,50 @@ void Cymbal_calcSyncBlockVoice(CymbalVoice *voice, int16_t* buf,
 	else
 		calcNextOscSampleFmBlock(&voice->osc,mod,buf,size,1.f) ;
 	osc_positionBendRestore(&voice->osc);	/* S086 P3: exact restore */
+	/*
+	 * itp crossfade blend (S088 P0 §3 Layers 3a/3c).
+	 *
+	 * What:       while snapshot.active, render the frozen carrier plainly and
+	 *             crossfade the carrier block (buf) toward it over 132 samples;
+	 *             the helper advances the snapshot and releases it.
+	 * Why:        removes the click of the reset carrier; the modulators keep
+	 *             driving only the live carrier (carrier-only, Q14).
+	 * Inputs:     voice->snapshot, buf, size.  Outputs: buf blended.
+	 * Accessors:  this render.  Affiliates: oscSection_renderOldCarrier().
+	 */
+	if (voice->snapshot.active)
+		oscSection_renderOldCarrier(&voice->snapshot, buf, size);
 	SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);
 
 	//calc transient sample
 	transient_calcBlock(&voice->transGen,mod,size);
 
 	/*
-	 * Fused Cymbal post-chain (S073 Step 4).
+	 * Fused Cymbal post-chain (S073 Step 4; amp ramp S088 P0 §3 Layer 2b).
 	 *
-	 * What:       saturating add, amp gain and distortion in one pass.
+	 * What:       saturating add, amp gain ramp and distortion in one pass. The
+	 *             ramp start is the previous block's ampGain only when the
+	 *             trigger armed it; otherwise the endpoints are equal and the
+	 *             samples are the S073 ones exactly.
 	 * Why:        removes an intermediate post-chain pass while preserving the
 	 *             old int16 conversion/saturation points and constant cost (S0).
 	 * Inputs:     filtered buf, mod, volumeMod/velo/EG and distortion.
-	 * Outputs:    pre-volume buf.
-	 * Accessors:  this render function.
-	 * Affiliates: voicePostChain.h and the Step 4 host/ARM checks.
+	 * Outputs:    pre-volume buf; lastAmpGain updated; ampRampArm cleared.
+	 * Accessors:  this render function through InstrumentManager.
+	 * Affiliates: voicePostChain.h, voicePost_addGainDist(), the
+	 *             lastAmpGain/ampRampArm fields and the Step 4 host/ARM checks.
 	 */
 	{
 		const float ampGain = voice->volumeMod
 			? voice->velo * voice->egValueOscVol
 			: voice->egValueOscVol;
-		voicePost_addGainDist(buf, mod, ampGain, &voice->distortion, size);
+		const float lastAmpGain = voice->ampRampArm
+			? voice->lastAmpGain : ampGain;
+
+		voicePost_addGainDist(buf, mod, ampGain, lastAmpGain,
+		                      &voice->distortion, size);
+		voice->lastAmpGain = ampGain;
+		voice->ampRampArm = 0u;
 	}
 }
 //---------------------------------------------------

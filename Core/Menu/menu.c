@@ -3344,7 +3344,28 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
         menu_getMixFmName(value, out);
         break;
     case DTYPE_ON_OFF:
-        memcpy(out, (value == 1u) ? menuText_on : menuText_off, 3);
+        /*
+         * S088 P0 §2.1 D12: high-nibble tag on DTYPE_ON_OFF.
+         *
+         * What:       when the descriptor's dtype high nibble is non-zero the
+         *             cell is a tagged on/off sub-type (currently only
+         *             ONOFF_TAG_OSC_RUN = 1) and shows the tag table's name
+         *             (rst/fre/itp). With a zero high nibble the ordinary
+         *             on/off path runs unchanged, bit for bit.
+         * Why:        all 16 DTYPE_MENU ids are taken; the tag reuses the same
+         *             packing pattern on a dtype whose high nibble was free.
+         * Inputs:     the cell's dtype byte and value.
+         * Outputs:    3 characters into out[].
+         * Accessors:  every DTYPE_ON_OFF cell whose descriptor is tagged.
+         * Affiliates: oscRunNames, ONOFF_TAG_OSC_RUN (MenuText.h).
+         */
+        if ((uint8_t)(menu_cellDtype(cell) >> 4) != 0u) {
+            const uint8_t idx = (value < (uint8_t)oscRunNames[0][0])
+                ? (uint8_t)value : 0u;
+            memcpy(out, oscRunNames[1 + idx], 3);
+        } else {
+            memcpy(out, (value == 1u) ? menuText_on : menuText_off, 3);
+        }
         break;
     case DTYPE_LFO_POLARITY:
         menu_getLfoPolarityName(value, out);
@@ -6489,8 +6510,17 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         menu_getMixFmName(value, valueAsText);
         break;
     case DTYPE_ON_OFF:
-        if (value == 1u) memcpy(valueAsText, menuText_on, 3);
-        else            memcpy(valueAsText, menuText_off, 3);
+        /*
+         * S088 P0 §2.1 D12: tagged on/off sub-type display.
+         * What: high nibble != 0 shows the tag table's name (oscRunNames),
+         *       otherwise on/off as before. Same rule as va_formatValue3().
+         */
+        if ((uint8_t)(menu_cellDtype(cell) >> 4) != 0u) {
+            const uint8_t idx = (value < (uint8_t)oscRunNames[0][0])
+                ? (uint8_t)value : 0u;
+            memcpy(valueAsText, oscRunNames[1 + idx], 3);
+        } else if (value == 1u) memcpy(valueAsText, menuText_on, 3);
+        else                    memcpy(valueAsText, menuText_off, 3);
         break;
     case DTYPE_LFO_POLARITY:
         menu_getLfoPolarityName(value, valueAsText);
@@ -6757,6 +6787,25 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
             *value = (uint16_t)(mixFmNames[0][0] - 1u);
         break;
     case DTYPE_ON_OFF:
+        /*
+         * S088 P0 §2.1 D12: tagged on/off sub-type clamp.
+         *
+         * What:       with a non-zero high nibble, clamp to 0..count-1 from
+         *             the tag's name table (oscRunNames: 0..2). With a zero
+         *             nibble, clamp to 0..1 exactly as before.
+         * Why:        MIDI CC/NRPN writes can carry 0..127; the clamp keeps
+         *             the stored run mode inside rst..itp.
+         * Inputs:     the cell's dtype byte, *value.
+         * Outputs:    *value clamped in place.
+         * Affiliates: oscRunNames[0][0] (count); ONOFF_TAG_OSC_RUN.
+         */
+        if ((uint8_t)(menu_cellDtype(cell) >> 4) != 0u) {
+            const uint8_t n = (uint8_t)oscRunNames[0][0];
+            if (*value >= n) *value = (uint16_t)(n - 1u);
+        } else if (*value > 1u) {
+            *value = 1u;
+        }
+        break;
     case DTYPE_0b1:
         if (*value > 1u) *value = 1u;
         break;
@@ -13255,6 +13304,19 @@ static uint8_t menu_automationValueMax(const ParamDescriptor *descriptor)
         }
     }
     case DTYPE_ON_OFF:
+        /*
+         * S088 P0 §2.1 D12: tagged on/off automation max.
+         *
+         * What:       with a non-zero dtype high nibble the automation max is
+         *             count-1 from the tag's name table (oscRunNames: 2); a
+         *             plain on/off stays 1.
+         * Why:        step automation needs the max for its bar and for the
+         *             encoder increment clamp (rst/fre/itp are three values).
+         * Inputs:     descriptor->dtype.  Outputs: the uint8_t maximum.
+         * Affiliates: oscRunNames[0][0]; ONOFF_TAG_OSC_RUN.
+         */
+        if ((uint8_t)(descriptor->dtype >> 4) != 0u)
+            return (uint8_t)(oscRunNames[0][0] - 1u);
         return 1u;
     case DTYPE_MIX_FM:
         /* S085 P1: osc2 mod mode 0..3; step automation may select snc/rng. */
@@ -13296,7 +13358,14 @@ static void menu_formatAutomationValue3(const ParamDescriptor *descriptor,
         return;
     }
     case DTYPE_ON_OFF:
-        memcpy(buf, value ? menuText_on : menuText_off, 3);
+        /* S088 P0 §2.1 D12: tagged on/off automation display. */
+        if ((uint8_t)(descriptor->dtype >> 4) != 0u) {
+            const uint8_t idx = (value < (uint8_t)oscRunNames[0][0])
+                ? value : 0u;
+            memcpy(buf, oscRunNames[1 + idx], 3);
+        } else {
+            memcpy(buf, value ? menuText_on : menuText_off, 3);
+        }
         return;
     case DTYPE_MIX_FM:
         /* S085 P1: fm / mix / snc / rng (menu_getMixFmName()). */
@@ -14415,8 +14484,17 @@ static void menu_repaintGeneric(void)
                 menu_getMixFmName(value, &editDisplayBuffer[1][13]);
                 break;
             case DTYPE_ON_OFF:
-                if (value==1) memcpy(&editDisplayBuffer[1][13], menuText_on, 3);
-                else               memcpy(&editDisplayBuffer[1][13], menuText_off, 3);
+                /* S088 P0 §2.1 D12: tagged on/off step-edit display.
+                 * The local `dtype` is the masked low nibble; read the high
+                 * nibble from the cell itself (same rule as va_formatValue3()). */
+                if ((uint8_t)(menu_cellDtype(&cell) >> 4) != 0u) {
+                    const uint8_t idx = (value < (uint8_t)oscRunNames[0][0])
+                        ? (uint8_t)value : 0u;
+                    memcpy(&editDisplayBuffer[1][13], oscRunNames[1 + idx], 3);
+                } else if (value==1)
+                    memcpy(&editDisplayBuffer[1][13], menuText_on, 3);
+                else
+                    memcpy(&editDisplayBuffer[1][13], menuText_off, 3);
                 break;
             case DTYPE_LFO_POLARITY:
                 menu_getLfoPolarityName(value, &editDisplayBuffer[1][13]);

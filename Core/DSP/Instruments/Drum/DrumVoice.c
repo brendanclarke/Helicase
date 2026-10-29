@@ -164,8 +164,58 @@ void Drum_initVoice(DrumVoice *voice, uint8_t seed_index)
 	** after a trigger snaps to its own depth (ringSnap). */
 	voice->ringDepthQ15 = 0;
 	voice->ringSnap = 1u;
+	/*
+	 * Run mode default (S088 P0 §2.4): 0 rst, today's behaviour.
+	 * What: one store so a runtime-slot reset (memset + init) starts in rst.
+	 * Why: a file or Scene without the osc1_run key must load exactly the
+	 * pre-S088 sound.
+	 * Accessors: Drum_triggerVoice(), Drum_calcVoiceSyncBlock().
+	 */
+	voice->runMode = OSC_RUN_RST;
+	/* S088 P0: no armed ramp until a fre/itp retrigger asks for one; the
+	** first rendered block starts from a full-scale velocity endpoint. */
+	voice->ampRampArm = 0u;
+	voice->lastVeloGain = 1.0f;
+	/* S088 P0: no itp fade and no FM depth history at reset. */
+	voice->snapshot.active = 0u;
+	voice->snapshot.counter = 0u;
+	voice->lastFmDepth = 0.0f;
 	voice->decimationCnt = 0;
 	voice->decimationRate = 1;
+}
+//---------------------------------------------------
+/*
+ * Fill the itp old-carrier snapshot (S088 P0 §3 Layer 3a).
+ *
+ * What:       copies the carrier's current phase, phase increment, waveform,
+ *             table, type, frozen pos frame and sample bind fields into
+ *             voice->snapshot, then activates it for
+ *             OSC_RUN_ITP_FADE_BLOCKS whole blocks.
+ * Why:        the old carrier must continue from exactly where it was while
+ *             the trigger resets the live carrier; the snapshot is the only
+ *             state oscSection_renderOldCarrier() needs for a plain render.
+ *             It is taken BEFORE the phase reset (see Drum_triggerVoice()).
+ * Inputs:     voice->osc (the live carrier, untouched by this call).
+ * Outputs:    voice->snapshot (active, counter = 5).
+ * Accessors:  Drum_triggerVoice() when runMode is itp, the amp is audible and
+ *             instrumentManager_itpFadeSlotAvailable() approves.
+ * Affiliates: OscCarrierSnapshot; OSC_RUN_ITP_*; oscSection_renderOldCarrier().
+ */
+static void Drum_fillItpSnapshot(DrumVoice *voice)
+{
+	voice->snapshot.phase = voice->osc.phase;
+	voice->snapshot.phaseInc = voice->osc.phaseInc;
+	voice->snapshot.waveform = voice->osc.waveform;
+	voice->snapshot.tableOffset = voice->osc.tableOffset;
+	voice->snapshot.oscType = voice->osc.oscType;
+	voice->snapshot.sampleCacheIndex = voice->osc.sampleCacheIndex;
+	voice->snapshot.sampleCacheLooped = voice->osc.sampleCacheLooped;
+	voice->snapshot.sampleCacheGeneration = voice->osc.sampleCacheGeneration;
+	voice->snapshot.sampleCacheSize = voice->osc.sampleCacheSize;
+	voice->snapshot.sampleCacheData = voice->osc.sampleCacheData;
+	voice->snapshot.positionApplied = voice->osc.positionApplied;
+	voice->snapshot.active = 1u;
+	voice->snapshot.counter = OSC_RUN_ITP_FADE_BLOCKS;
 }
 //---------------------------------------------------
 void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
@@ -198,12 +248,70 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 	 */
 	instrumentManager_applyVelocityModulationTarget(source_slot, vol/127.f);
 
-	//only reset phase if envelope is closed
+	/*
+	 * Run-mode decision for this retrigger (S088 P0 §1, §3 Layers 2a/2c/3a).
+	 *
+	 * What:       reads the amp gain the voice was playing at (ampFilterInput,
+	 *             set by the last Drum_calcVoiceAsync()), decides whether the
+	 *             amp is audible, whether this is an itp retrigger that may
+	 *             crossfade, and derives the two behaviours below:
+	 *               phaseReset   the main carrier starts at its trigger
+	 *                            phase (rst; itp with a requested fade; itp
+	 *                            that is fully decayed); fre and a refused itp
+	 *                            fade keep the running phase;
+	 *               behavesAsRst the mode is rst, or itp with a decayed amp
+	 *                            (D6/A3: bit-identical rst behaviour: filter
+	 *                            clear, ring snap, fresh attack).
+	 *             The snapshot is taken HERE, before the phase reset below.
+	 * Why:        fre must not reset the phase; itp resets the live carrier but
+	 *             keeps the old one alive in the snapshot; a refused itp falls
+	 *             back to fre (no crossfade, no reset). The amp ramp arm records
+	 *             that this block must glide from the previous gains.
+	 * Inputs:     voice->runMode, ampFilterInput, and the itp slot query.
+	 * Outputs:    voice->ampRampArm, voice->snapshot, and the local decisions.
+	 * Accessors:  this trigger only.
+	 * Affiliates: slopeEg2_isAudibleGain(), slopeEg2_retriggerFrom(),
+	 *             instrumentManager_itpFadeSlotAvailable(),
+	 *             Drum_fillItpSnapshot(), Drum_calcVoiceSyncBlock().
+	 */
+	const float prevGain = voice->ampFilterInput;
+	const uint8_t ampAudible = slopeEg2_isAudibleGain(prevGain);
+	const uint8_t itpRequested =
+		(uint8_t)(voice->runMode == OSC_RUN_ITP && ampAudible);
+	const uint8_t behavesAsRst =
+		(uint8_t)(voice->runMode == OSC_RUN_RST ||
+		          (voice->runMode == OSC_RUN_ITP && !itpRequested));
+	uint8_t itpFade = 0u;
+
+	voice->ampRampArm = 0u;
+	if (itpRequested && instrumentManager_itpFadeSlotAvailable(source_slot)) {
+		Drum_fillItpSnapshot(voice);
+		itpFade = 1u;
+	}
+
+	/* Phase reset guard (S088 P0 §3 Layer 2c): fre never resets; itp resets
+	** unless its fade was refused (then it behaves as fre). */
+	const uint8_t phaseReset =
+		(uint8_t)(voice->runMode != OSC_RUN_FRE && !(itpRequested && !itpFade));
+
+	/*
+	 * Start-phase block (S088 P0 §3 Layer 2c).
+	 * What: the S085/S086/S087 phase chain above runs only when the legacy
+	 *       "envelope closed" gate allows it (amp-filter builds) AND the run
+	 *       mode asks for a reset. Without USE_AMP_FILTER the legacy gate is
+	 *       open, exactly as before.
+	 * Why:  fre keeps the carrier running; itp with a granted fade starts the
+	 *       new carrier from 0 (the snapshot holds the old one); itp that is
+	 *       decayed or refused follows the rst/fre rule above.
+	 */
 #ifdef USE_AMP_FILTER
-	if((voice->volEgValueBlock[15]<=0.01f) || (voice->transGen.waveform==1))
+	const uint8_t ampClosed =
+		((voice->volEgValueBlock[15] <= 0.01f) ||
+		 (voice->transGen.waveform == 1)) ? 1u : 0u;
 #else
-		//if((voice->ampFilterInput<=0.01f) || (voice->transGen.waveform==1))
+	const uint8_t ampClosed = 1u;
 #endif
+	if(ampClosed && phaseReset)
 	{
 		float offset = 1;
 		if(voice->transGen.waveform==1) //offset mode
@@ -279,24 +387,56 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 
 	DecayEg_trigger(&voice->oscPitchEg);
 	/*
-	 * rng depth snap (S085 P1 follow-up; user choice "snap").
-	 * What: the mod envelope restarts at 1 here, so the next rng block starts
-	 * at its full depth instead of ramping up from the tail. Why: hits start
-	 * at full ring depth, as fm hits start at full FM depth; the carrier phase
-	 * resets on this trigger anyway. One store; no effect in fm/mix/snc.
-	 * Accessors: Drum_calcVoiceSyncBlock() (rng). Future: free-run run mode
-	 * ramps always (user, to try when the run modes return).
+	 * rng depth snap vs ramp (S085 P1 follow-up; S088 P0 A8/D7).
+	 * What: rst (and itp with a decayed amp, which is exactly rst) snaps the
+	 *       ring depth to the new target; fre and an audible itp ramp from the
+	 *       last block's depth ("ramp always in free-run").
+	 * Why:  snapping a decayed tail to full ring is a click in fre; the user
+	 *       asked for the ramp in free-run mode (S085 P1 follow-up).
+	 * Inputs: behavesAsRst. Outputs: voice->ringSnap.
+	 * Accessors: Drum_calcVoiceSyncBlock() (rng branch).
 	 */
-	voice->ringSnap = 1u;
-	slopeEg2_trigger(&voice->oscVolEg);
+	voice->ringSnap = behavesAsRst;
+	/*
+	 * Gain-matched amp retrigger (S088 P0 §3 Layer 2a).
+	 *
+	 * What:       in fre/itp with an audible tail, restart the attack at the
+	 *             gain the voice was playing (slopeEg2_retriggerFrom()) and arm
+	 *             the one-block post-chain/FM ramps. Every other case (rst, a
+	 *             decayed tail, repeat mode inside the helper) uses the original
+	 *             slopeEg2_trigger() from silence.
+	 * Why:        a retrigger into a tail must not click; the attack curve
+	 *             enters where the decay left off and the armed ramps absorb the
+	 *             rounding step.
+	 * Inputs:     voice->runMode, ampAudible, prevGain.
+	 * Outputs:    voice->oscVolEg state, voice->ampRampArm.
+	 * Math:       v = g / (1 + invSlope (1 - g)) - the inverse attack curve.
+	 * Affiliates: slopeEg2_retriggerFrom(); slopeEg2_isAudibleGain();
+	 *             voicePost_drum(); the FM depth ramp.
+	 */
+	if (voice->runMode != OSC_RUN_RST && ampAudible) {
+		slopeEg2_retriggerFrom(&voice->oscVolEg, prevGain);
+		voice->ampRampArm = 1u;
+	} else {
+		slopeEg2_trigger(&voice->oscVolEg);
+	}
 	voice->velo = vol/127.f;
 
 	transient_trigger(&voice->transGen);
 
 	SnapEg_trigger(&voice->snapEg);
 
-	//reset filter coeffs to prevent wrong transient
-	SVF_reset(&voice->filter);
+	/*
+	 * Filter reset guard (S088 P0 §3 Layer 2c).
+	 * What: rst (and itp with a decayed amp) clears the SVF state so the new
+	 *       hit cannot inherit the old tail; fre and an audible itp keep the
+	 *       filter ringing and slew its coefficient instead (Layer 2d).
+	 * Why:  clearing the filter in fre/itp would be an audible cut of the tail
+	 *       the crossfade/ramp is meant to preserve.
+	 * Inputs: behavesAsRst. Outputs: voice->filter state.
+	 */
+	if (behavesAsRst)
+		SVF_reset(&voice->filter);
 }
 //---------------------------------------------------
 void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
@@ -572,6 +712,52 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	default:
 		//calc next mod osc sampleBlock
 		calcNextOscSampleBlock(&voice->modOsc,modBuf,size,voice->fmModAmount);
+		/*
+		 * FM depth ramp (S088 P0 §3 Layer 2e, D1: constant cost).
+		 *
+		 * What:       scales the modulator block by a linear ramp that starts at
+		 *             lastFmDepth / osc.fmMod and ends at 1, so the FM index
+		 *             glides from the previous block's depth to this block's
+		 *             across the armed block. The FM renderer below still uses
+		 *             osc.fmMod as the block depth.
+		 * Why:        on a retrigger the mod envelope restarts, so osc.fmMod
+		 *             jumps; without the ramp that step is a click whose size
+		 *             follows the modulator amplitude. The loop runs in every
+		 *             mode and on every block (constant CPU): when the voice is
+		 *             not armed the start ratio is exactly 1.0f, so the multiply
+		 *             is the identity and rst stays bit-identical.
+		 * Inputs:     modBuf (modulator at fmModAmount), osc.fmMod (new depth),
+		 *             lastFmDepth, ampRampArm.
+		 * Outputs:    modBuf scaled; lastFmDepth = osc.fmMod afterwards.
+		 * Cost:       one float multiply per sample (plus the ramp add).
+		 * Accessors:  this fm branch only.
+		 * Affiliates: DrumVoice.lastFmDepth; ampRampArm;
+		 *             Drum_calcVoiceAsync() (sets osc.fmMod).
+		 */
+		{
+			const float newDepth = voice->osc.fmMod;
+			float start = 1.0f;
+
+			if (voice->ampRampArm && newDepth > 0.0001f) {
+				start = voice->lastFmDepth / newDepth;
+				if (start < 0.0f) start = 0.0f;
+				else if (start > 4.0f) start = 4.0f;
+			}
+			/* Always runs (constant cost, D1): with start == 1 the multiply
+			** is the identity and the output matches the pre-S088 block. */
+			{
+				const float dstep = (size > 1u)
+					? (1.0f - start) / (float)(size - 1u) : 0.0f;
+				uint8_t k;
+				float s = start;
+
+				for (k = 0u; k < size; k++) {
+					modBuf[k] = (int16_t)((float)modBuf[k] * s);
+					s += dstep;
+				}
+			}
+			voice->lastFmDepth = newDepth;
+		}
 		if (osc_isTyped(&voice->osc))
 			osc_renderTypedFm(&voice->osc, modBuf, buf, size, 1.0f);
 		else
@@ -581,6 +767,25 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 
 	/* S086 P3: end the pos bend started before the switch (exact restore). */
 	osc_positionBendRestore(&voice->osc);
+	/*
+	 * itp crossfade blend (S088 P0 §3 Layers 3a/3c).
+	 *
+	 * What:       while the snapshot is active, render its frozen carrier
+	 *             plainly and crossfade buf toward it over 132 samples
+	 *             (OSC_RUN_ITP_SAMPLES); the helper advances the snapshot
+	 *             phase, decrements its block counter and clears active at 0.
+	 * Why:        the retrigger reset the live carrier; blending the old copy
+	 *             out removes the click. The old copy is carrier-only (no FM,
+	 *             sync or ring) per S085 P1 Q14, so the cost is one plain
+	 *             carrier loop plus the blend.
+	 * Inputs:     voice->snapshot, buf (carrier section), size.
+	 * Outputs:    buf blended; snapshot advanced/reset.
+	 * Accessors:  this render only.
+	 * Affiliates: oscSection_renderOldCarrier(); OSC_RUN_ITP_FADE_BLOCKS;
+	 *             Drum_fillItpSnapshot(); the mixer's slot reserve.
+	 */
+	if (voice->snapshot.active)
+		oscSection_renderOldCarrier(&voice->snapshot, buf, size);
 
 	//calc transient sample
 	transient_calcBlock(&voice->transGen,modBuf,size);
@@ -605,21 +810,35 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	#endif
 	#else
 	/*
-	 * Fused Drum post-chain (S073 Step 4).
+	 * Fused Drum post-chain (S073 Step 4; velocity ramp S088 P0 §3 Layer 2b).
 	 *
-	 * What:       amp EG ramp, velocity gain and distortion in one pass.
+	 * What:       amp EG ramp, velocity ramp and distortion in one pass.
+	 *             The velocity endpoint is the previous block's gain only when
+	 *             the trigger armed the ramp; every other block passes equal
+	 *             endpoints so the sample values are the S073 ones exactly.
 	 * Why:        removes two intermediate int16 load/store passes while
-	 *             preserving all truncation points (S0). The velocity multiply
-	 *             always runs; its selected 1.0 gain is not a bypass.
-	 * Inputs:     filtered buf, amp gain endpoints, volumeMod/velo and dist.
-	 * Outputs:    pre-volume buf; the mixer still owns channel volume.
+	 *             preserving all truncation points (S0). A velocity change on a
+	 *             fre/itp retrigger glides over the armed block instead of
+	 *             clicking.
+	 * Inputs:     filtered buf, amp gain endpoints, veloGain/lastVeloGain, dist.
+	 * Outputs:    pre-volume buf; lastVeloGain updated; ampRampArm cleared by
+	 *             the shared tail below.
 	 * Accessors:  this render function through InstrumentManager.
-	 * Affiliates: voicePostChain.h, Drum gain bookkeeping and the Step 4 tests.
+	 * Affiliates: voicePostChain.h, voicePost_drum(), Drum.lastVeloGain,
+	 *             Drum.ampRampArm and the Step 4 tests.
 	 */
-	voicePost_drum(buf, voice->ampFilterInput, voice->lastGain,
-	               voice->volumeMod ? voice->velo : 1.0f,
-	               &voice->distortion, size);
+	{
+		const float veloGain = voice->volumeMod ? voice->velo : 1.0f;
+		const float lastVeloGain = voice->ampRampArm
+			? voice->lastVeloGain : veloGain;
+
+		voicePost_drum(buf, voice->ampFilterInput, voice->lastGain,
+		               veloGain, lastVeloGain, &voice->distortion, size);
+		voice->lastVeloGain = veloGain;
+	}
 	#endif
+	/* S088 P0: the armed block is done; later blocks use flat endpoints. */
+	voice->ampRampArm = 0u;
 	/*
 	 * Channel volume is intentionally not applied here (Session 072 step 2).
 	 * The mixer multiplies the decimated block by voice->vol x slider gain;

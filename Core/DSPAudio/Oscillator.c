@@ -2515,6 +2515,118 @@ void OSC_S087_SECTION osc_renderUserList(OscInfo* osc, int16_t* buf,
 }
 
 /*
+ * itp crossfade scratch (S088 P0 §3 Layer 3c).
+ *
+ * What:       the old-carrier block, rendered plain and then blended into the
+ *             live carrier block. One instance serves all four engines because
+ *             the DSP render path is single-context.
+ * Why:        the plan's I1 allows a small static buffer and forbids a VLA;
+ *             one 64-byte block keeps the cost at +64 B .bss (SRAM1) instead
+ *             of 64 B per engine. It is not DTCM and not in a DMA region.
+ * Accessors:  oscSection_renderOldCarrier() only.
+ * Affiliates: OscCarrierSnapshot; OSC_RUN_ITP_FADE_BLOCKS.
+ */
+static int16_t osc_itpScratch[OUTPUT_DMA_SIZE];
+
+/*
+ * oscSection_renderOldCarrier() - plain old-carrier render + itp blend
+ * (S088 P0 §3 Layer 3c; see the header for the contract).
+ *
+ * What:       builds a temporary OscInfo view from the snapshot, renders it
+ *             PLAIN into osc_itpScratch (typed smp/slp/wtb plain copies, or
+ *             calcNextOscSampleBlock() for the stock/one-shot waveforms), then
+ *             crossfades the live buf toward it:
+ *                 t = (elapsed x OUTPUT_DMA_SIZE + i) / (BLOCKS x 32)
+ *                 buf[i] = (1 - t) x old[i] + t x buf[i]
+ *             then decrements the counter and releases the snapshot at 0.
+ * Why:        the old carrier must keep its own phase and pitch while the new
+ *             one starts; no modulator may touch it (carrier-only, Q14). A
+ *             wtb snapshot plays its frozen pos frame through the plain copy,
+ *             so it never claims an interpolation slot (the slot is already
+ *             represented by the fade's reserve).
+ * Inputs:     snap (active, counter 1..OSC_RUN_ITP_FADE_BLOCKS), buf (live
+ *             carrier block), size (<= OUTPUT_DMA_SIZE).
+ * Outputs:    buf blended; snap->phase advanced by the old carrier's own
+ *             phaseInc x size; snap->counter decremented; active cleared at 0.
+ * Cost:       one plain carrier loop (the voice's own loop class) plus about
+ *             8 instructions per sample for the blend. No divide per sample
+ *             (the progress is accumulated); one convert to float per block.
+ * Accessors:  the four engines' calcSyncBlockVoice() when snapshot.active.
+ * Affiliates: OscCarrierSnapshot; OSC_RUN_ITP_FADE_BLOCKS; osc_itpScratch;
+ *             osc_smpPlainBlock()/osc_slpPlainBlock()/osc_wtbPlainBlock() /
+ *             calcNextOscSampleBlock(); the engine triggers that fill it.
+ */
+void oscSection_renderOldCarrier(OscCarrierSnapshot *snap, int16_t *buf,
+                                 uint8_t size)
+{
+	OscInfo view;
+	uint8_t i;
+	uint8_t elapsed;
+	float total_samples;
+	float t;
+	const float step = 1.0f / (float)((uint16_t)OSC_RUN_ITP_FADE_BLOCKS *
+	                                  OUTPUT_DMA_SIZE);
+
+	if (!snap || !buf || !snap->active || snap->counter == 0u || size == 0u)
+		return;
+	/* Defensive: a corrupted counter must not underflow `elapsed` below. */
+	if (snap->counter > OSC_RUN_ITP_FADE_BLOCKS)
+		snap->counter = OSC_RUN_ITP_FADE_BLOCKS;
+
+	/* The plain copies read only these OscInfo fields (and output for noise). */
+	view.phase = snap->phase;
+	view.phaseInc = snap->phaseInc;
+	view.waveform = snap->waveform;
+	view.tableOffset = snap->tableOffset;
+	view.oscType = snap->oscType;
+	view.sampleCacheIndex = snap->sampleCacheIndex;
+	view.sampleCacheLooped = snap->sampleCacheLooped;
+	view.sampleCacheGeneration = snap->sampleCacheGeneration;
+	view.sampleCacheSize = snap->sampleCacheSize;
+	view.sampleCacheData = snap->sampleCacheData;
+	view.positionApplied = snap->positionApplied;
+	view.positionBendStep = 0;
+	view.output = 0;
+
+	/* Plain carrier: typed copies keep their frozen frame, never claim. */
+	if (osc_isTyped(&view)) {
+		switch (snap->sampleCacheLooped) {
+		case OSC_BIND_SMP:
+			osc_smpPlainBlock(&view, osc_itpScratch, size, 1.0f);
+			break;
+		case OSC_BIND_SLP:
+			osc_slpPlainBlock(&view, osc_itpScratch, size, 1.0f);
+			break;
+		case OSC_BIND_WTB8:
+		case OSC_BIND_WTB16:
+			osc_wtbPlainBlock(&view, osc_itpScratch, size, 1.0f);
+			break;
+		default:
+			osc_zeroBlock(osc_itpScratch, size);
+			break;
+		}
+	} else {
+		calcNextOscSampleBlock(&view, osc_itpScratch, size, 1.0f);
+	}
+	snap->phase = view.phase;
+
+	/* Crossfade: t runs from this block's start toward 1 (full-block, D4). */
+	elapsed = (uint8_t)(OSC_RUN_ITP_FADE_BLOCKS - snap->counter);
+	total_samples = (float)((uint16_t)OSC_RUN_ITP_FADE_BLOCKS *
+	                        OUTPUT_DMA_SIZE);
+	t = ((float)((uint16_t)elapsed * OUTPUT_DMA_SIZE)) / total_samples;
+	for (i = 0u; i < size; i++) {
+		const float oldSample = (float)osc_itpScratch[i];
+		const float liveSample = (float)buf[i];
+		buf[i] = (int16_t)((1.0f - t) * oldSample + t * liveSample);
+		t += step;
+	}
+
+	if (--snap->counter == 0u)
+		snap->active = 0u;
+}
+
+/*
  * Whether a modulator master resets the slave on its loop wrap (S087 D).
  *
  * What:       1 for an l-entry master (SLP); 0 for stock/s entries.

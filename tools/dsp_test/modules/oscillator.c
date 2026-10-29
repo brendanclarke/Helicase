@@ -1154,6 +1154,144 @@ static void run_wtb(void)
     g_claim = 0u;
 }
 
+/*
+ * itp old-carrier crossfade helper (S088 P0 §3 Layer 3c).
+ *
+ * What:       exercises oscSection_renderOldCarrier() directly:
+ *               I1 the snapshot renders exactly the plain carrier (live ==
+ *                  old leaves every sample unchanged) and advances phase by
+ *                  the same amount as calcNextOscSampleBlock();
+ *               I2 the blend starts at t = 0 (the first sample of a fresh
+ *                  fade is the old carrier) and ends weighted toward the
+ *                  live block;
+ *               I3 the counter counts BLOCKS blocks to inactive;
+ *               I4 a wavetable snapshot renders the frozen frame through the
+ *                  plain copy with or without an interpolation slot (it never
+ *                  claims).
+ * Why:        the crossfade is the audible core of itp; these laws pin the
+ *             snapshot contract without the full engine. A wrong phase
+ *             advance, a blend that ignores the live side, a counter that
+ *             never releases the slot, or a wtb path that claims all fail.
+ * Inputs:     the real Oscillator.c (host build), the sine table and one
+ *             2-frame wavetable.
+ * Outputs:    failure lines; the group count.
+ * Affiliates: Oscillator.c oscSection_renderOldCarrier(); OscCarrierSnapshot.
+ */
+static void run_itp(void)
+{
+    static int16_t expectBuf[OUTPUT_DMA_SIZE];
+    static int16_t buf[OUTPUT_DMA_SIZE];
+    static int16_t f0[16];
+    static int16_t f1[16];
+    OscInfo live, ref, w;
+    OscCarrierSnapshot snap;
+    unsigned i;
+
+    fill_sine();
+    memset(&live, 0, sizeof(live));
+    live.waveform = SINE;
+    live.oscType = OSC_TYPE_WAV;
+    live.phase = 0x12345678u;
+    live.phaseInc = 0x00100000u;
+
+    ref = live;
+    calcNextOscSampleBlock(&ref, expectBuf, OUTPUT_DMA_SIZE, 1.0f);
+
+    memset(&snap, 0, sizeof(snap));
+    snap.phase = live.phase;
+    snap.phaseInc = live.phaseInc;
+    snap.waveform = live.waveform;
+    snap.oscType = live.oscType;
+    snap.active = 1u;
+    snap.counter = OSC_RUN_ITP_FADE_BLOCKS;
+
+    /* I1: live == old -> the block is unchanged; phase advances with ref. */
+    memcpy(buf, expectBuf, sizeof(buf));
+    oscSection_renderOldCarrier(&snap, buf, OUTPUT_DMA_SIZE);
+    /* Float rounding of (1 - t) x old + t x live allows one LSB either way. */
+    for (i = 0u; i < OUTPUT_DMA_SIZE; i++) {
+        const int diff = (int)buf[i] - (int)expectBuf[i];
+        expect(diff >= -1 && diff <= 1,
+               "I1 old carrier equals the plain render");
+    }
+    expect(snap.phase == ref.phase, "I1 the snapshot advances by its own phaseInc");
+    expect(snap.counter == (uint8_t)(OSC_RUN_ITP_FADE_BLOCKS - 1u),
+           "I1 one block consumed");
+
+    /* I2: a fresh fade starts at t = 0 on its first sample. */
+    memset(&snap, 0, sizeof(snap));
+    snap.phase = live.phase;
+    snap.phaseInc = live.phaseInc;
+    snap.waveform = live.waveform;
+    snap.oscType = live.oscType;
+    snap.active = 1u;
+    snap.counter = OSC_RUN_ITP_FADE_BLOCKS;
+    for (i = 0u; i < OUTPUT_DMA_SIZE; i++)
+        buf[i] = 1000;
+    oscSection_renderOldCarrier(&snap, buf, OUTPUT_DMA_SIZE);
+    expect(buf[0] == expectBuf[0], "I2 the first sample is the old carrier");
+    expect(buf[OUTPUT_DMA_SIZE - 1u] != 1000 &&
+           buf[OUTPUT_DMA_SIZE - 1u] != expectBuf[OUTPUT_DMA_SIZE - 1u],
+           "I2 later samples are a real blend (neither pure side)");
+
+    /* I3: BLOCKS blocks run to completion and release the snapshot. */
+    memset(&snap, 0, sizeof(snap));
+    snap.phase = live.phase;
+    snap.phaseInc = live.phaseInc;
+    snap.waveform = live.waveform;
+    snap.oscType = live.oscType;
+    snap.active = 1u;
+    snap.counter = OSC_RUN_ITP_FADE_BLOCKS;
+    for (i = 0u; i < OSC_RUN_ITP_FADE_BLOCKS; i++) {
+        for (unsigned k = 0u; k < OUTPUT_DMA_SIZE; k++)
+            buf[k] = 0;
+        oscSection_renderOldCarrier(&snap, buf, OUTPUT_DMA_SIZE);
+    }
+    expect(snap.counter == 0u, "I3 the counter reaches zero");
+    expect(snap.active == 0u, "I3 the slot is released");
+
+    /* I4: a wavetable snapshot uses the plain copy and never claims. */
+    for (i = 0u; i < 16u; i++) {
+        f0[i] = (int16_t)(i * 1000);
+        f1[i] = (int16_t)(30000 - i * 1000);
+    }
+    install_table(16u, 16u, f0, f1);
+    bind_wtb(&w, 0u);
+    w.positionApplied = 127u;   /* frozen on frame 1 */
+    w.positionBendStep = 0;
+    w.phase = 0u;
+    memset(&snap, 0, sizeof(snap));
+    snap.phase = w.phase;
+    snap.phaseInc = w.phaseInc;
+    snap.waveform = w.waveform;
+    snap.oscType = w.oscType;
+    snap.sampleCacheIndex = w.sampleCacheIndex;
+    snap.sampleCacheLooped = w.sampleCacheLooped;
+    snap.sampleCacheSize = w.sampleCacheSize;
+    snap.sampleCacheData = w.sampleCacheData;
+    snap.positionApplied = w.positionApplied;
+    snap.active = 1u;
+    snap.counter = 1u;          /* last block: t near 1, weight on live */
+    for (i = 0u; i < OUTPUT_DMA_SIZE; i++)
+        buf[i] = 0;
+    g_claim = 0u;
+    oscSection_renderOldCarrier(&snap, buf, OUTPUT_DMA_SIZE);
+    expect(buf[0] > 0, "I4 the frozen frame renders without a slot");
+    {
+        static int16_t bufB[OUTPUT_DMA_SIZE];
+        for (i = 0u; i < OUTPUT_DMA_SIZE; i++)
+            bufB[i] = 0;
+        snap.phase = w.phase;
+        snap.active = 1u;
+        snap.counter = 1u;
+        g_claim = 1u;
+        oscSection_renderOldCarrier(&snap, bufB, OUTPUT_DMA_SIZE);
+        for (i = 0u; i < OUTPUT_DMA_SIZE; i++)
+            expect(buf[i] == bufB[i], "I4 a slot grant changes nothing");
+    }
+    g_claim = 0u;
+}
+
 int main(void)
 {
 #ifdef OSC_POS_TEST_CAP
@@ -1166,6 +1304,7 @@ int main(void)
     group("type", run_type);
     group("sample", run_sample);
     group("wtb", run_wtb);
+    group("itp", run_itp);
 #endif
     printf("oscillator failures: %u\n", failures);
     return failures ? 1 : 0;

@@ -904,6 +904,38 @@ the new copy/clear work is foreground-only and bounded.
     S087 close: text 670,628, Flash headroom 83,036 B, ITCM 12,640 /
     16,384 B.
 
+### Session 088 additions (record in `S088_P0_IMPLEMENTATION.md`)
+
+50. **ADDED (S088 P0): gain-matched amp retrigger.**
+    `slopeEg2_retriggerFrom()` (control rate, one divide per trigger) and the
+    `slopeEg2_isAudibleGain()` threshold (1/32768). No per-sample cost.
+    `fre`/`itp` never cost more than `rst`: the comparison is per trigger.
+51. **ADDED (S088 P0): post-chain gain ramps (Layer 2b).**
+    `voicePost_drum()` gains a per-sample velocity ramp (+3 instructions per
+    sample, 32 → 35); `voicePost_mixAddGainDist()` and
+    `voicePost_addGainDist()` gain a per-sample amp ramp (+5, 30 → 35 and
+    25 → 30). Paid in every mode, every block (constant CPU); with equal
+    endpoints each ramp evaluates to exactly the block gain, so the S073
+    output is bit-identical (host law B1, `run_modes`).
+52. **ADDED (S088 P0): Drum FM depth ramp (D1).** The fm branch scales the
+    modulator block by a linear ratio `lastFmDepth / fmMod` → 1: one float
+    multiply plus the ramp add per sample on Drum `fm`, in every mode. When
+    the voice is not armed the ratio is exactly 1, so the multiply is the
+    identity and `rst` is unchanged. G1: the frozen Drum `fm` ceiling rises
+    from ≈ 92 to ≈ 107 linked instructions per sample; re-measure with
+    `fpseq.py` on the S088 ELF before acceptance.
+53. **ADDED (S088 P0): itp crossfade.** One `OscCarrierSnapshot` render
+    (the same plain carrier loop class the voice already runs) plus a linear
+    blend (float multiply-add per sample, ≈ 8). Budgeted as the two-slot
+    pool always full, exactly like the S087 E wavetable blend slots. The
+    two slots are shared; ongoing `itp` fades are reserved before
+    `modNode_resetTargets()`, so wavetable blending steps (3 ms) when both
+    are held.
+54. **CHANGED (S088 P0): filter coefficient path.** In `fre`/`itp`,
+    `SVF_recalcFreqSlew()` replaces `SVF_recalcFreq()` at the same call site
+    (once per block per slot): one `fastTan` (unchanged) plus one
+    multiply-add. `rst` keeps the original function.
+
 ---
 
 ## Binding Mandates — DSP CPU Policy

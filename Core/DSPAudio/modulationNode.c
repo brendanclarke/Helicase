@@ -66,6 +66,22 @@ static INCCMZ uint32_t modNode_waveInterpGeneration = 1u;
 static INCCMZ uint8_t modNode_waveInterpActiveCount = 0u;
 /* S087 E: sticky slot reservations (A8). */
 static INCCMZ uint8_t modNode_interpReserved = 0u;
+/*
+ * Slots held by ongoing itp crossfades (S088 P0 §3 Layer 3b).
+ *
+ * What:       the mixer's active fade count for the block about to render,
+ *             stored before modNode_resetTargets() folds it into
+ *             modNode_interpReserved (last block's wavetable grants + this).
+ * Why:        the itp fades are not wavetable grants, so the existing
+ *             "reserve last block's holders" rule cannot see them; without the
+ *             extra term a wtb blend could claim an itp-held slot (3 renders).
+ * Inputs:     modNode_setItpReserved().  Outputs: modNode_resetTargets().
+ * RAM:        1 B INCCMZ next to modNode_interpReserved.
+ * Accessors:  mixer_calcNextSampleBlock().
+ * Affiliates: modNode_interpClaim(); OSC_WAVE_INTERP_MAX_ACTIVE;
+ *             instrumentManager_activeItpFadeCount().
+ */
+static INCCMZ uint8_t modNode_itpReserved = 0u;
 
 /*
  * Stamp of the block that just ended (S087 P1).
@@ -487,6 +503,15 @@ static void modNode_restoreLfoPair(ModulationNode *primary,
 	modNode_restoreTarget(secondary);
 }
 
+/*
+ * Store the itp fade reservation for the coming block (S088 P0 §3 3b; see the
+ * header). One byte; modNode_resetTargets() folds it into the reserved count.
+ */
+void modNode_setItpReserved(uint8_t slots)
+{
+	modNode_itpReserved = slots;
+}
+
 void modNode_resetTargets()
 {
 	uint8_t i;
@@ -505,7 +530,19 @@ void modNode_resetTargets()
 	modNode_waveInterpGeneration++;
 	if (modNode_waveInterpGeneration == 0u)
 		modNode_waveInterpGeneration = 1u;
-	modNode_interpReserved = modNode_waveInterpActiveCount;
+	/*
+	 * S088 P0 §3 Layer 3b: ongoing itp crossfades are pre-claimed too.
+	 *
+	 * What:       reserves last block's wavetable grants plus the mixer's count
+	 *             of active itp fades (modNode_itpReserved), so
+	 *             modNode_interpClaim() can hand only the remaining slots to a
+	 *             wavetable blend. Claim order per block: ongoing itp, then
+	 *             wtb, then new itp.
+	 * Why:        a fade must never be cut mid-blend, and two fades already fill
+	 *             the two-slot budget. The sum is at most 2 + 2 (uint8_t).
+	 */
+	modNode_interpReserved =
+		(uint8_t)(modNode_waveInterpActiveCount + modNode_itpReserved);
 	modNode_waveInterpActiveCount = 0u;
 	for(i=0;i<6;i++)
 		modNode_restoreTarget(&velocityModulators[i]);

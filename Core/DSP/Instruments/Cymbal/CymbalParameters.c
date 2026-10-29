@@ -106,6 +106,24 @@ const uint8_t cymbal_instrument_type_flags = CYMBAL_INSTRUMENT_TYPE_FLAGS;
       MOD_NONE, BIND_SPECIAL(member_, type_, special_) }
 
 /*
+ * ROW_SELECT_ONOFF_SPECIAL: a tagged DTYPE_ON_OFF selector (S088 P0 §2.3 D12).
+ *
+ * What:       ROW_SELECT_SPECIAL's flags and binding with dtype
+ *             DTYPE_ON_OFF | (tag_ << 4); the high nibble names the on/off
+ *             sub-type (ONOFF_TAG_OSC_RUN) for menu.c's display and clamp.
+ * Why:        all DTYPE_MENU ids and dtype values are taken; the high nibble
+ *             of DTYPE_ON_OFF was unused.
+ * Inputs:     key, category, long/short label, tag, member, type, IM tag.
+ * Outputs:    one ParamDescriptor initializer.
+ * Accessors:  the osc1_run row below.
+ * Affiliates: ONOFF_TAG_OSC_RUN (MenuText.h); menu.c DTYPE_ON_OFF sites.
+ */
+#define ROW_SELECT_ONOFF_SPECIAL(key_, cat_, long_, short_, tag_, member_, type_, special_) \
+    { key_, short_, long_, cat_, (uint8_t)(DTYPE_ON_OFF | ((tag_) << 4)), \
+      (INSTRUMENT_PARAM_FLAG_AUTOMATABLE | INSTRUMENT_PARAM_FLAG_SELECTOR), \
+      MOD_NONE, BIND_SPECIAL(member_, type_, special_) }
+
+/*
  * ROW_NOBIND is for descriptor-owned cells that do not write a CymbalVoice
  * member directly. These are single-endpoint supplemental values such as
  * modulation target selectors, so they intentionally start with flags=0 rather
@@ -189,6 +207,7 @@ typedef enum {
     CYMBAL_PARAM_TRANSIENT_FREQ,
     CYMBAL_PARAM_OSC1_POSITION, /* S086 P3: appended; preserve all prior IDs. */
     CYMBAL_PARAM_OSC1_TYPE, /* S087 B: appended; preserve all prior IDs. */
+    CYMBAL_PARAM_OSC1_RUN, /* S088: appended; preserve all prior IDs. */
     CYMBAL_PARAM_COUNT
 } cymbal_param_index_t;
 
@@ -296,6 +315,21 @@ const ParamDescriptor cymbal_param_descriptors[] = {
      *             S087 P0 §12.5.
      */
     ROW_SELECT_SPECIAL("osc1_type", "Oscilltr", "Type", "typ", MENU_OSC_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
+    /*
+     * osc1_run: run, the oscillator run mode (S088 P0).
+     *
+     * What:       0 rst, 1 fre, 2 itp, stored in the engine runMode field through
+     *             IM_SPECIAL_OSC_RUN.
+     * Why:        S088 P0 §1: three trigger behaviours. A selector (never
+     *             morphed, Normal image only, applied before the Morph image,
+     *             one step-automation value per step, no LFO/velocity
+     *             target). Appended last: every existing index, automation ID,
+     *             token, NRPN ID and Learn row is unchanged; no key loads rst.
+     * Inputs:     menu edit, Kit/Scene/Instrument apply, step automation.
+     * Outputs:    runMode.  Accessors: the special writer.
+     * Affiliates: OSC_RUN_*; oscRunNames; ONOFF_TAG_OSC_RUN.
+     */
+    ROW_SELECT_ONOFF_SPECIAL("osc1_run", "Oscilltr", "Run Mode", "run", ONOFF_TAG_OSC_RUN, runMode, TYPE_UINT8, IM_SPECIAL_OSC_RUN | IM_SPECIAL_OSC1),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -310,8 +344,9 @@ const uint8_t cymbal_param_descriptor_count =
  * parameter IDs.
  */
 const instrument_menu_page_t cymbal_menu_pages[] = {
-    /* S086 P3: first oscillator screen is coa fin wav pos. */
-    {{ CYMBAL_PARAM_OSC1_PITCH_COARSE, CYMBAL_PARAM_OSC1_PITCH_FINE, CYMBAL_PARAM_OSC1_WAVE, CYMBAL_PARAM_OSC1_POSITION, CYMBAL_PARAM_OSC1_TYPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* S086 P3: first oscillator screen is coa fin wav pos.
+    ** S088: screen 2 is typ run (cells 4 and 5). */
+    {{ CYMBAL_PARAM_OSC1_PITCH_COARSE, CYMBAL_PARAM_OSC1_PITCH_FINE, CYMBAL_PARAM_OSC1_WAVE, CYMBAL_PARAM_OSC1_POSITION, CYMBAL_PARAM_OSC1_TYPE, CYMBAL_PARAM_OSC1_RUN, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ CYMBAL_PARAM_AMP_ENVELOPE_ATTACK, CYMBAL_PARAM_AMP_ENVELOPE_DECAY, CYMBAL_PARAM_AMP_ATTACK_REPEAT, CYMBAL_PARAM_AMP_ENVELOPE_SLOPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ CYMBAL_PARAM_VELO_MOD_DEST, CYMBAL_PARAM_VELO_MOD_AMOUNT, CYMBAL_PARAM_VELO_VOL_ON_OFF, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ CYMBAL_PARAM_OSC2_PITCH_COARSE, CYMBAL_PARAM_OSC3_PITCH_COARSE, CYMBAL_PARAM_OSC2_MOD_AMOUNT, CYMBAL_PARAM_OSC3_MOD_AMOUNT, CYMBAL_PARAM_OSC2_WAVE, CYMBAL_PARAM_OSC3_WAVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
@@ -346,3 +381,4 @@ _Static_assert(CYMBAL_MENU_PAGE_COUNT ==
 #undef MOD_PM63
 #undef MOD_0_127
 #undef MOD_NONE
+#undef ROW_SELECT_ONOFF_SPECIAL

@@ -98,6 +98,87 @@ _Static_assert(OSC_TYPE_SELECTABLE >= 1u && OSC_TYPE_SELECTABLE <= OSC_TYPE_COUN
                "OSC_TYPE_SELECTABLE out of range");
 
 /*
+ * Oscillator run modes (S088 P0 §1).
+ *
+ * What:       OSC_RUN_RST 0 (reset, today's behaviour), OSC_RUN_FRE 1
+ *             (free-run: the carrier phase is never reset and the amp EG is
+ *             retriggered gain-matched), OSC_RUN_ITP 2 (interpolate: the
+ *             carrier phase is reset and the previous carrier plays on for
+ *             132 samples (OSC_RUN_ITP_SAMPLES) in a linear crossfade).
+ *             OSC_RUN_COUNT 3 is the number of stored values.
+ * Why:        symbolic names for the four engine trigger and render
+ *             functions; the numbers 0..2 are what the engine struct's
+ *             runMode byte holds in every Kit/Scene/preset image.
+ * Inputs:     the IM_SPECIAL_OSC_RUN writer, which clamps to this range.
+ * Outputs:    read by the engine trigger and render functions.
+ * Accessors:  DrumVoice.c, Snare.c, CymbalVoice.c, HiHat.c;
+ *             InstrumentManager.c; oscRunNames (MenuText.h).
+ * Affiliates: S088_P0_OSC_RUN_MODES.md §1; the osc1_run descriptor rows.
+ */
+#define OSC_RUN_RST   0u
+#define OSC_RUN_FRE   1u
+#define OSC_RUN_ITP   2u
+#define OSC_RUN_COUNT 3u
+
+/*
+ * itp crossfade length (S088 P0 §3 Layer 3a, D10).
+ *
+ * What:       OSC_RUN_ITP_SAMPLES 132 (about 3 ms at 44,108 Hz);
+ *             OSC_RUN_ITP_FADE_BLOCKS is that rounded up to whole
+ *             OUTPUT_DMA_SIZE blocks (5 x 32 = 160 samples, D4: the last
+ *             block runs the blend to its end instead of stopping early).
+ * Why:        the crossfade counter is a block count (uint8_t, at most 5);
+ *             one constant keeps the trigger and the blend in step.
+ * Accessors: the four engine triggers (counter) and
+ *             oscSection_renderOldCarrier() (progress).
+ * Affiliates: OscCarrierSnapshot; OSC_WAVE_INTERP_MAX_ACTIVE.
+ */
+#define OSC_RUN_ITP_SAMPLES     132u
+#define OSC_RUN_ITP_FADE_BLOCKS \
+    ((uint8_t)((OSC_RUN_ITP_SAMPLES + OUTPUT_DMA_SIZE - 1u) / OUTPUT_DMA_SIZE))
+
+/*
+ * Carrier snapshot for the itp crossfade (S088 P0 §3 Layer 3a).
+ *
+ * What:       a frozen copy of the carrier render state at an itp retrigger:
+ *             phase and phaseInc (the old carrier keeps its own pitch), the
+ *             waveform/table/type bytes, the pos frame that was already
+ *             applied, and the sample bind fields for smp/slp/wtb. active is
+ *             1 while the crossfade runs; counter is the remaining whole
+ *             blocks (OSC_RUN_ITP_FADE_BLOCKS at the trigger).
+ * Why:        the old carrier plays on beside the new one for about 3 ms and
+ *             is crossfaded out, which removes the click of a phase reset.
+ *             The snapshot is rendered PLAIN (carrier only, S085 P1 Q14): FM,
+ *             sync and ring apply to the live carrier only.
+ * Inputs:     the engine trigger function (filled on an itp retrigger when
+ *             the amp gain is audible and an interpolation slot is free).
+ * Outputs:    oscSection_renderOldCarrier() (read each block while active).
+ * Accessors:  the four engines; InstrumentManager_slotHasActiveItpFade().
+ * Affiliates: OSC_RUN_ITP_SAMPLES; modNode interp slot accounting (Layer 3b);
+ *             the plan's A6 (all types snapshot; finished smp is silence).
+ * Layout:     28 bytes on ARM (32 on a 64-bit host); all four engines carry
+ *             one whether or not they use itp (constant struct size).
+ */
+typedef struct OscCarrierSnapshotStruct {
+	uint32_t phase;
+	uint32_t phaseInc;
+	const int16_t *sampleCacheData;
+	uint32_t sampleCacheSize;
+	uint32_t sampleCacheGeneration;
+	uint8_t waveform;
+	uint8_t tableOffset;
+	uint8_t oscType;
+	uint8_t sampleCacheIndex;
+	uint8_t sampleCacheLooped;
+	uint8_t positionApplied;
+	uint8_t active;
+	uint8_t counter;
+} OscCarrierSnapshot;
+
+_Static_assert(sizeof(OscCarrierSnapshot) <= 32u,
+               "OscCarrierSnapshot must fit in 32 bytes (slot margin)");
+
+/*
  * Sample reader constants (S087 stage D).
  *
  * What:       OSC_SAMPLE_PHASE_SHIFT 12 (Q19.12 phase: point index << 12 +
@@ -807,6 +888,41 @@ void osc_renderTypedRing(OscInfo* osc, const int16_t* modBuf, int16_t* buf,
                          uint8_t size, int32_t depthQ15,
                          int32_t depthStepQ15);
 void osc_renderUserList(OscInfo* osc, int16_t* buf, uint8_t size, float gain);
+
+/*
+ * Render the itp old-carrier snapshot and blend it into the live block
+ * (S088 P0 §3 Layer 3c).
+ *
+ * What:       renders the frozen carrier described by snap into an internal
+ *             scratch block, then crossfades it with the live carrier already
+ *             in buf:
+ *                 t_i  = (elapsed x size + i) / (BLOCKS x OUTPUT_DMA_SIZE)
+ *                 buf[i] = (1 - t_i) x old[i] + t_i x buf[i]
+ *             with elapsed = BLOCKS - snap->counter before this block. The
+ *             snapshot's own phase advances by size x phaseInc; the live
+ *             carrier is untouched. Afterwards counter is decremented and, at
+ *             zero, active is cleared (the slot is free again).
+ *             The old carrier is the PLAIN copy: for smp/slp/wtb it uses the
+ *             plain per-type block, otherwise calcNextOscSampleBlock(); no FM,
+ *             sync or ring is applied (S085 P1 Q14). A wtb snapshot plays its
+ *             frozen pos frame and never claims an interpolation slot.
+ * Why:        one dispatch site for all four engines; one internal scratch
+ *             block (64 B .bss) instead of one per engine. The blend is a
+ *             full-block operation (D4): the last of the five blocks runs to
+ *             its end even though 132 samples were requested.
+ * Inputs:     snap (active, counter 1..BLOCKS), buf (the live carrier block),
+ *             size (<= OUTPUT_DMA_SIZE).
+ * Outputs:    buf blended in place; snap->phase advanced; snap->counter--;
+ *             snap->active cleared at 0.
+ * Cost:       one plain carrier loop + about 8 instructions per sample for the
+ *             blend (fixed point, no divide: t is accumulated as a float).
+ * Accessors:  Drum_calcVoiceSyncBlock(), Snare_calcSyncBlockVoice(),
+ *             Cymbal_calcSyncBlockVoice(), HiHat_calcSyncBlockVoice().
+ * Affiliates: OscCarrierSnapshot; OSC_RUN_ITP_FADE_BLOCKS; the engine
+ *             triggers that fill the snapshot; the mixer's slot reserve.
+ */
+void oscSection_renderOldCarrier(OscCarrierSnapshot *snap, int16_t *buf,
+                                 uint8_t size);
 
 /* S087 D: sync-master rules for a modulator list entry. */
 uint8_t osc_syncMasterIsLoop(const OscInfo* master);

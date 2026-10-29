@@ -208,6 +208,89 @@ typedef struct VoiceStruct
 
 	uint8_t volumeMod;	//modulate volume by midi velocity if 1
 
+	/*
+	 * Oscillator run mode (S088 P0 §2.4).
+	 *
+	 * What:       0 rst (today), 1 fre (free-run), 2 itp (interpolate);
+	 *             OSC_RUN_* in Oscillator.h. Written by IM_SPECIAL_OSC_RUN
+	 *             through the osc1_run descriptor row.
+	 * Why:        the trigger and render functions branch on this byte to
+	 *             select phase behaviour, the gain-matched retrigger and the
+	 *             carrier crossfade. It is a selector: never morphed, no LFO
+	 *             or velocity target, one step-automation value per step.
+	 * Inputs:     instrumentManager_writeSpecialRuntime() via the descriptor.
+	 * Outputs:    read by Drum_triggerVoice() and Drum_calcVoiceSyncBlock().
+	 * Accessors:  Drum_initVoice() (0), the descriptor writer, trigger, render.
+	 * Affiliates: OSC_RUN_*; the osc1_run row (DrumParameters.c);
+	 *             InstrumentManager.c runtime-slot reserve (2 x sizeof(DrumVoice)).
+	 * Layout:     after volumeMod, before the Dither tail: grows the struct by
+	 *             1 B plus alignment.
+	 */
+	uint8_t runMode;
+
+	/*
+	 * Amp-ramp armed flag (S088 P0 §3 Layer 2a).
+	 *
+	 * What:       1 when the last trigger was a fre/itp retrigger into an
+	 *             audible tail; the next render ramps the post-chain endpoints
+	 *             and the FM depth from their previous values, then clears it.
+	 *             Cleared by every trigger before the mode branch, so a rst
+	 *             hit can never inherit a stale arm.
+	 * Why:        the render functions need one bit to know that the previous
+	 *             block's gain/velocity/depth are the correct ramp starts.
+	 * Inputs:     Drum_triggerVoice().
+	 * Outputs:    read/cleared by Drum_calcVoiceSyncBlock().
+	 * Affiliates: voicePost_drum(); lastVeloGain; lastFmDepth.
+	 */
+	uint8_t ampRampArm;
+
+	/*
+	 * Previous-block velocity gain (S088 P0 §3 Layer 2b).
+	 *
+	 * What:       the velocity gain the post-chain actually used on the last
+	 *             block (volumeMod ? velo : 1.0f). Updated after each
+	 *             voicePost_drum() call.
+	 * Why:        voice->velo is overwritten by the next trigger; keeping the
+	 *             value that was rendered lets the armed block ramp from it.
+	 * Inputs:     Drum_calcVoiceSyncBlock() after voicePost_drum().
+	 * Outputs:    passed as voicePost_drum()'s lastVeloGain when armed.
+	 * Affiliates: voicePost_drum(); ampRampArm; Drum_initVoice() (1.0f).
+	 */
+	float lastVeloGain;
+
+	/*
+	 * itp old-carrier snapshot (S088 P0 §3 Layer 3a).
+	 *
+	 * What:       the frozen carrier state filled on an itp retrigger while the
+	 *             amp gain is audible and an interpolation slot is free.
+	 *             active = 0 leaves it inert (no cost, no slot).
+	 * Why:        oscSection_renderOldCarrier() plays this copy beside the new
+	 *             carrier for 132 samples (OSC_RUN_ITP_SAMPLES) and blends.
+	 * Inputs:     Drum_triggerVoice().
+	 * Outputs:    Drum_calcVoiceSyncBlock() (blend); the mixer's slot count.
+	 * Layout:     OscCarrierSnapshot is 28 B on ARM; the four engine structs
+	 *             each carry one whether or not they use itp.
+	 * Affiliates: OscCarrierSnapshot (Oscillator.h); OSC_RUN_ITP_*;
+	 *             instrumentManager_slotHasActiveItpFade().
+	 */
+	OscCarrierSnapshot snapshot;
+
+	/*
+	 * Previous-block FM depth (S088 P0 §3 Layer 2e, D1).
+	 *
+	 * What:       voice->osc.fmMod (fmModAmount x the PitchMod decay envelope)
+	 *             from the block that just rendered.
+	 * Why:        the FM depth ramp starts the modulator block at
+	 *             lastFmDepth / fmMod and moves to 1 across the armed block, so
+	 *             the depth change of a retrigger glides instead of stepping.
+	 *             On every other block the start ratio is exactly 1, so the
+	 *             multiply is the identity and rst stays bit-identical.
+	 * Inputs:     Drum_calcVoiceSyncBlock() (fm branch), after the ramp.
+	 * Outputs:    the next fm block's ramp start.
+	 * Affiliates: the FM depth ramp; ampRampArm; Drum_calcVoiceAsync().
+	 */
+	float lastFmDepth;
+
 	Dither dither;
 } DrumVoice;
 //------------------------------------------------------------------------

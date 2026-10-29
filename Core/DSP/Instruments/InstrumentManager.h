@@ -153,6 +153,26 @@ typedef enum {
      * (instrumentManager_waveDomainChanged()).
      */
     IM_SPECIAL_OSC_TYPE,
+    /*
+     * S088 P0: osc1_run writer (run mode). Clamps the value to 0..2
+     * (OSC_RUN_RST..OSC_RUN_ITP) and stores it in the engine's runMode
+     * field through the descriptor's instance offset. No other side
+     * effects: the engine trigger and render functions read runMode at
+     * their own pace, so the mode takes effect on the next trigger.
+     *
+     * What:       IM_SPECIAL_OSC_RUN = 22 (next after IM_SPECIAL_OSC_TYPE).
+     * Why:        run mode is a selector, not a continuous parameter. It must
+     *             pass through the special writer so menu edits, Kit/Scene/
+     *             Instrument apply, step automation and MIDI writes all clamp
+     *             and store identically. Corrupt storage or an out-of-range
+     *             MIDI write becomes itp (2).
+     * Inputs:     slot, descriptor tag (IM_SPECIAL_OSC1), byte value.
+     * Outputs:    the engine struct's runMode field.
+     * Accessors:  instrumentManager_writeSpecialRuntime() switch.
+     * Affiliates: OSC_RUN_* (Oscillator.h); oscRunNames (MenuText.h); the four
+     *             osc1_run rows; the engine trigger/render functions.
+     */
+    IM_SPECIAL_OSC_RUN,
     IM_SPECIAL_WRITER_COUNT
 } instrument_special_writer_t;
 
@@ -647,6 +667,34 @@ void instrumentManager_dispatchRuntimeLfos(void);
 void instrumentManager_recalcRuntimeLfoSync(void);
 void instrumentManager_retriggerRuntimeLfos(uint8_t trigger_track);
 void instrumentManager_recalcSlotFilter(uint8_t slot);
+/*
+ * itp crossfade slot queries (S088 P0 §3 Layer 3b).
+ *
+ * What:       instrumentManager_slotHasActiveItpFade() reports whether the
+ *             given render slot's current engine instance holds an active itp
+ *             carrier crossfade (snapshot.active);
+ *             instrumentManager_activeItpFadeCount() counts them over all six
+ *             slots (mixer block-start reserve);
+ *             instrumentManager_itpFadeSlotAvailable(exclude) reports 1 when a
+ *             new fade may start (the fades held by other slots are fewer than
+ *             OSC_WAVE_INTERP_MAX_ACTIVE). exclude is the triggering voice's
+ *             own slot, because re-snapshotting an existing fade reuses its
+ *             slot instead of taking another.
+ * Why:        the two interpolation slots are shared with wavetable frame
+ *             blending (S087 E); ongoing itp fades are pre-claimed at the
+ *             block start so modNode_interpClaim() cannot hand their slot to
+ *             a wavetable blend. Claim order per block: ongoing itp, then wtb,
+ *             then new itp. A refused itp trigger falls back to fre.
+ * Inputs:     slot (0..5), exclude slot (0..5).
+ * Outputs:    0/1, or the fade count 0..OSC_WAVE_INTERP_MAX_ACTIVE.
+ * Accessors:  mixer_calcNextSampleBlock() (count), the four engine triggers
+ *             (available).
+ * Affiliates: OscCarrierSnapshot (Oscillator.h); modNode_setItpReserved()
+ *             (modulationNode.h); OSC_WAVE_INTERP_MAX_ACTIVE (config.h).
+ */
+uint8_t instrumentManager_slotHasActiveItpFade(uint8_t slot);
+uint8_t instrumentManager_activeItpFadeCount(void);
+uint8_t instrumentManager_itpFadeSlotAvailable(uint8_t exclude_slot);
 
 /*
  * Refresh the modulation domains of a slot's wave rows (S087 stage B).
