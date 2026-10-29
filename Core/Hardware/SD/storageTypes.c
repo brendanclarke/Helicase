@@ -2513,45 +2513,58 @@ int8_t storage_naturalCompare(const char *a, const char *b)
 }
 
 /*
- * Catalogue display name from a long filename (S087 stage C; see the header).
+ * Catalogue display name from a long filename (S087 stage C; S087 P2; see
+ * the header).
  *
- * What:       optional extension strip, numeric-prefix strip, 8-character
- *             copy, space padding.
+ * What:       optional extension strip, numeric-prefix strip, then a name of
+ *             up to 8 characters copied as it is, or a longer name shortened
+ *             to its first 4 and last 4 characters; space padding.
  * Why:        S087 P0 §5.2 names; the 8-character catalogue field is fixed.
+ *             S087 P2 (user rule): first 4 + last 4 keeps names that differ
+ *             only at the end distinct ("kick_hard_01" -> "kickd_01").
  * Inputs:     lfn, strip_ext.  Outputs: dst[8].
- * Accessors:  the install walker; test_natural_order.c.
+ * Accessors:  the install walker; tools/dsp_test/modules/samples.c.
  * Affiliates: storage_naturalCompare().
  */
 void storage_displayNameFromLfn(char dst[8u], const char *lfn, uint8_t strip_ext)
 {
     uint8_t len = 0u;
     uint8_t start = 0u;
+    uint8_t count;
     uint8_t i;
 
     if (!dst)
         return;
-    if (lfn) {
-        while (lfn[len] != '\0')
-            len++;
-        if (strip_ext) {
-            uint8_t dot = len;
+    for (i = 0u; i < 8u; i++)
+        dst[i] = ' ';
+    if (!lfn)
+        return;
+    while (lfn[len] != '\0')
+        len++;
+    if (strip_ext) {
+        uint8_t dot = len;
 
-            while (dot > 0u && lfn[dot - 1u] != '.')
-                dot--;
-            if (dot > 0u && dot < len)
-                len = (uint8_t)(dot - 1u);
-        }
-        while (start < len && lfn[start] >= '0' && lfn[start] <= '9')
-            start++;
-        if (start > 0u && start < len &&
-            (lfn[start] == '_' || lfn[start] == '-' || lfn[start] == ' '))
-            start++;
-        else
-            start = 0u;
+        while (dot > 0u && lfn[dot - 1u] != '.')
+            dot--;
+        if (dot > 0u && dot < len)
+            len = (uint8_t)(dot - 1u);
     }
-    for (i = 0u; i < 8u; i++) {
-        uint8_t at = (uint8_t)(start + i);
+    while (start < len && lfn[start] >= '0' && lfn[start] <= '9')
+        start++;
+    if (start > 0u && start < len &&
+        (lfn[start] == '_' || lfn[start] == '-' || lfn[start] == ' '))
+        start++;
+    else
+        start = 0u;
 
-        dst[i] = (lfn && at < len) ? lfn[at] : ' ';
+    count = (uint8_t)(len - start);
+    if (count <= 8u) {
+        for (i = 0u; i < count; i++)
+            dst[i] = lfn[start + i];
+    } else {
+        for (i = 0u; i < 4u; i++) {
+            dst[i] = lfn[start + i];
+            dst[4u + i] = lfn[len - 4u + i];
+        }
     }
 }

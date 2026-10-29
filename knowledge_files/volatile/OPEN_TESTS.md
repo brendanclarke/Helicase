@@ -7,10 +7,19 @@ be performed when the opportunity arises, not blocking items for current work.
 
 ## Hardware soak / confirmation
 
+- **S087 full hardware testing (HIGH PRIORITY):**
+  - P0+P1: sample install, playback (smp/slp/wtb), pos on samples, wavetable
+    frame blending, modulator s/l/w list, type switching, step-automation
+    order (verify a step's automation lands before its trigger for sample
+    slicing)
+  - P2: wav cell shows correct names under typed oscillators, modulator list
+    s/l/w distinction, first 4 + last 4 name rule for long sample names
+  - P3: one-shot sample mod oscillator restart, transient click sample
+    playback and speed/volume controls
 - **RV1-RV4 endless-pot noise** — long idle hardware soak needed, especially
   on global BPM page.
 - **Sample loader naming/display/order** — hardware soak after LFN changes
-  (sort is whole-filename lexicographic with ASCII case folded).
+  (sort is now natural order, `storage_naturalCompare()`).
 - **S084 matrix V1–V7 confirmation** — recorded as open since S084; confirm
   closed or waived.
 - **S081 hardware matrix** — every row from `081_SESSION_HANDOFF_LOG.md` §13.2.

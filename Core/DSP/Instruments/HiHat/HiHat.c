@@ -213,6 +213,19 @@ void HiHat_triggerVoice(HiHatVoice *voice, const uint8_t source_slot,
 	osc_setBaseNote(&voice->osc,note);
 	osc_setBaseNote(&voice->modOsc,note);
 	osc_setBaseNote(&voice->modOsc2,note);
+	/*
+	 * Restart one-shot modulators (S087 P3).
+	 *
+	 * What:       a modulator whose wav selects an s entry returns to phase 0
+	 *             so the sample starts again on this hit; any other selection
+	 *             keeps today's free-running phase.
+	 * Why:        the HiHat modulators never reset, so a one-shot played once
+	 *             and then stayed at its silent end pad (S087 P3 hardware
+	 *             report).
+	 * Affiliates: osc_modulatorTrigger() (Oscillator.c).
+	 */
+	osc_modulatorTrigger(&voice->modOsc);
+	osc_modulatorTrigger(&voice->modOsc2);
 
 	voice->isOpen = isOpen;
 	voice->oscVolEg.decay = isOpen?voice->decayOpen:voice->decayClosed;

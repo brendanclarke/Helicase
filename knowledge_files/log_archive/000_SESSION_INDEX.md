@@ -98,6 +98,10 @@ it belongs in the summary or the log, not here.
 | 081 | 2026-10-12/16 | `dev-ph6-cleanup`, `2a0fd86` (logged after S082) | Live record and live erase, step reset rule, R12/R13 automation priority, 96-PPQ roll table, linear automation ramps (`asm`), loop while record, VOICE bar pulse |
 | 082 | 2026-10-16/20 | `dev-ph6-midi`, `8a83df0` | Load/Save cleanup, Bank Replace/Merge, background Bank load through Scene 17, work while loading |
 | 083 | 2026-10-21/22 | `dev-ph6-midi`, `bbea23f` | MIDI rework: `Core/MIDI/` rebuild, note map, MIDI writes as menu edits, NRPN, MIDI Learn (`midilrn.cfg`), PC/CC0, Continue/SPP, transmit; track `ch`/`nte` `off`, CC2 = BAR overlay, `pv<`/`pv>` |
+| 084 | 2026-10-22/26 | `dev-ph6-midi`, `f2b80a9` | Roll fix-up, time-window roll engine, PERF/MIDI overlay rolls, per-track recorded spans, external clock interpolation; LXR1/LXR-02 import tools closed |
+| 085 | 2026-10-27 | `dev-ph7-voice_expansion`, `6bfa389` | Drum osc2 mod modes `snc`/`rng` under no-CPU-increase rule; mod envelope and `rng` depth ramp; S086 type-expansion plan |
+| 086 | 2026-10-27/28 | `dev-ph7-voice_expansion`, `e67879e2` + uncommitted | Stock table waves `Re3`/`Sw3`; continuous oscillator `pos`; mixer hot-loop gate; S087 sample/wavetable plan |
+| 087 | 2026-10-28/29 | `dev-ph7-voice_expansion`, uncommitted on `f3805478` | Oscillator `typ` row (`wav`/`smp`/`slp`/`wtb`), sample flash catalogue v2 + installer, step-automation order fix (D6), Q20.12 sample/wavetable readers, `pos` on samples, modulator `s`/`l`/`w` entries, one-shot sample mod oscillators, transient click sample list, display/naming corrections, MEMORY.md refactor |
 
 
 ---
@@ -557,6 +561,19 @@ Session 065 delivered the first working end-to-end step automation path: the exi
 | `LIVEREC_AUTOMATION_FIRST_CHANGE` (`config.h`, default 1): live record writes a parameter's first change in a step, at once | 081 |
 | The master morph `mrp` is never recorded or automatable; individual voice/FX Morph edits are recorded with their captured value (`liveRec_morphValue[7]`) | 081 |
 | LED pulse/flash deadlines compare by signed 16-bit distance (`led_timeReached()`); never `time_sysTick > end` | 081 |
+| `seq_drainPendingAutomationTo(limit)` replaces `seq_drainPendingAutomation()`; runs inside `voiceControl_processPending()` after restore and before fire. A step's own automation lands before its trigger (D6) | 087 |
+| `voiceControl_processPending()` is prepare → drain → fire: `voiceControl_prepareTrigger()` (restore), `seq_drainPendingAutomationTo(mark)`, `voiceControl_fireTrigger()` (trigger). The old `seq_drainPendingAutomation()` call in `main.c` is removed | 087 |
+| `osc1_type` (`typ`): selector row (not morphable, stored single-ended, applied before Morph image); `INSTRUMENT_PARAM_FLAG_SELECTOR` 0x08; `DTYPE_MENU` id 4 (`MENU_OSC_TYPE`); step-automatable (no ramp). A missing key loads 0 (`wav`) | 087 |
+| Sample flash catalogue v2: 8 KB at `0x081FE000`, magic `"LXC2"` (programmed last), 128 × 28 B sample entries, 128 × 20 B wavetable entries. Items from `0x080C0000` | 087 |
+| `sampleInstall_commit()` writes the header once (magic last); `sampleInstall_abortItem()` never rewinds the cursor onto programmed flash | 087 |
+| Sample/loop readers use Q20.12 phase (`OSC_SAMPLE_PHASE_SHIFT` 12); ≤ 2²⁰ points per sample. Eight loops: smp/slp × {plain, FM, sync, ring} in `.itcm.s087` | 087 |
+| Wavetable readers: any frame length (UMULL indexing). One-frame base loop. Frame blending claims one of two interpolation slots (sticky, stamps 1..255 never 0). `osc_wtbPlanBlock()` splits at frame crossings | 087 |
+| Modulator `wav` list after A21/A22: stock 0–7, then s01..sNN, l01..lNN, w01..wNN. 127-entry limit. Modulators get no `typ` or `pos` rows | 087 |
+| `pos` on samples: linear difference, one-shot edges clamped (0 / past end = ended), 4× speed cap, fixed loop region, re-anchor on type change. `pos` on `wtb` = frame position | 087 |
+| Display name rule (P2): first 4 + last 4 for names over 8 characters (`storage_displayNameFromLfn()`). Takes effect on next Sample upload | 087 |
+| `osc_modulatorTrigger()` restarts a modulator's sample at start on every hit for `s` entries. Called from Drum and HiHat triggers; stock waves and `l`/`w` return immediately | 087 |
+| Transient click sample list: Snp, Ofs, 12 built-in clicks, then s01..sNN. New sample loop 20 instr/sample; built-in click stays at 22. No worst-case CPU increase | 087 |
+| v1 sample loops and dormant `wav` interpolation removed in S087 P1 (`osc_interp_a/b`, `osc_syncWaveform()`, v1 cache, four dispatcher entries, `stub_silence_buffer`); ITCM dropped from 15,032 to 12,640 | 087 |
 
 ---
 
@@ -2135,3 +2152,70 @@ Session 086 began stage S1 of the S086 oscillator type-expansion plan, on `dev-p
   `OSC_INTERP_AUDIT.md`, `tools/dsp_test/DSP_TEST.md`,
   `tools/plots/README.md`, `S087_P0_OSC_TYPE_SAMPLES_WAVETABLES.md`,
   `MEMORY.md`.
+
+### 087 — Oscillator Type System (`typ`), Sample Flash Catalogue v2, Q20.12 Sample and Wavetable Readers, Step-Automation Order Fix, Modulator Sample/Wavetable Entries, One-Shot Mod Oscillators, Transient Click Samples, Display Corrections, MEMORY.md Refactor (2026-10-28/29)
+
+Session 087 implemented the full oscillator type expansion on `dev-ph7-voice_expansion` (base `0e2d61dd`, `f3805478` after P0+P1, uncommitted P2+P3). Five stages (A–E) plus three follow-up passes (P1–P3). Final DEV link `text=670,628`, `data=420`, `bss=412,392`; payload 670,628 B (**headroom 83,036 B**); ITCM 12,640 / 16,384 B; DTCM statics 4,344 B; FX arena margin 3,840 B. P2 hardware checks pending at session close.
+
+- **Stage A (D6), step-automation order:**
+  - A step's own automation now lands before its trigger fires. New order: pop triggers under PRIMASK + mark automation queue → prepare (deferred Scene apply, restore) → `seq_drainPendingAutomationTo(limit)` → fire triggers. `seq_drainPendingAutomation()` renamed to `seq_drainPendingAutomationTo(uint8_t limit)` with a drain cursor (`seq_pending_automation_done`). `voiceControl_processPending()` split into `voiceControl_prepareTrigger()` / `voiceControl_fireTrigger()` with a batch pop under one PRIMASK section.
+  - Host tests: `stepauto_order` (5 laws + break proof) and `drain_cursor` (4 laws + break proof).
+  - RAM: +1 B SRAM1 (drain cursor, R-A1); +128 B stack (trigger batch, R-A2).
+
+- **Stage B, the `osc1_type` row:**
+  - New `osc1_type` parameter per instrument (descriptor index 40; Snare 39). Values `wav`/`smp`/`slp`/`wtb` (0–3). Selector row: not morphable, stored single-ended, applied before the Morph image (`INSTRUMENT_PARAM_FLAG_SELECTOR` 0x08). `DTYPE_MENU` with free id 4 (`MENU_OSC_TYPE`) to avoid ramp eligibility.
+  - Step-automatable with no ramp and one value per step. `osc_setType()` clears the `wav` interpolation slot stamp when the type changes. The formatter reads the stored `typ` from the same image as the cell value.
+  - `OscInfo.oscType` at byte 34 (existing padding); `OscInfo.interpStamp` at byte 35 (existing padding). No RAM increase.
+  - Host test: `osc_type` (2 laws + 2 break proofs).
+
+- **Stage C, sample flash catalogue v2 + installer:**
+  - 8 KB at `0x081FE000`. 32 B header (`magic "LXC2"` programmed last). 128 × 28 B sample entries (`loop_start`, `loop_end`, `gain_code`, `flags` bit 0 = loop). 128 × 20 B wavetable entries (`frame_len`, `frame_count`, `bits`, `flags`).
+  - Items from `0x080C0000` upward (stock-wave flash block not needed: S086 moved them to program flash).
+  - Install walker: `samples/` and `wavetables/` folders, natural order (`storage_naturalCompare()`), depth limit 3. Wavetables: each folder is one table (any frame length, at most 128 frames). Gain code per sample: 2^(code/24), peak within 0.25 dB of full scale. One unreadable file skips the item, not the install.
+  - P1 fix: header programmed only by `sampleInstall_commit()` (magic last); abort never rewinds cursor onto programmed flash; 128-frame cap keeps advancing; third folder level no longer writes out of bounds.
+  - Boot notice: `Samples invalid` / `reload samples` when v1 detected.
+  - RAM: −13,441 B (`sample_manifest[120]` + count); −5,040 B (caches); +560 B (installer walker state). Net ≈ −18 KB.
+  - Host tests: `catalogue` (flash-accurate stub, F1/F2 laws), `wav_install`, `natural_order`, `sampleoptimize`.
+
+- **Stage D, `smp`/`slp` readers + `pos` on samples:**
+  - Q20.12 phase (`OSC_SAMPLE_PHASE_SHIFT` 12), ≤ 2²⁰ points per sample. Eight loops: smp/slp × {plain, FM, sync, ring}. Separate copies per type × use (rule 2). All in `.itcm.s087`, `noinline, noclone`.
+  - Install-time zero padding (2 frames after every sample) removes the played-out select. Fixed loop region (`smpl` points or whole sample). Per-block step conversion for backward glides (`osc_slpBlockInc()`).
+  - `pos` on samples: linear difference (D3), one-shot edges clamped at 0 / past end = ended (D4), time-based 4× speed cap (D5), fixed loop region (D2), re-anchor on type change (D7). Sync reset target = `pos` start point (D9).
+  - Modulator `wav` list expansion (A21/A22): stock waves 0–7, then `s01…sNN` (one-shot), `l01…lNN` (looped), `w01…wNN` (wavetable first frame). 127-entry limit. Modulators get no `typ` or `pos` rows.
+  - v1 sample loops and dormant `wav` interpolation (`osc_interp_a/b`, `osc_syncWaveform()`, v1 cache, four dispatcher entries) removed.
+  - P1 fixes: backward `slp` glide, `slp` FM absolute read, modulator `w` increment law, wavetable blend fractional frames (`osc_wtbPlanBlock()`/`osc_wtbFramePos()`), 8-bit wavetable rebind, per-step sample change bind, slot stamp collision (1..255 never 0), type-change stamp release, loop sync builder after master kind change, `slp` sync reset target past `smpl` loop end, modulator `wav` clamp past list end, ring-law depth add timing.
+  - RAM: −128 B DTCM (`osc_interp_a/b` R-D1 released).
+  - CPU: all section worst cases stay below their frozen ceilings. Drum `fm` with `slp` on both oscillators: 77 against 92. Cymbal/HiHat: 104 against 131. Per-slot blend cost +10..+13 over one frame, against ≈ +66 today.
+
+- **Stage E, `wtb` reader:**
+  - Any frame length (UMULL indexing, A16). One-frame base loop. Frame blending through two interpolation slots (sticky claims, stamps 1..255 never 0). `osc_wtbPlanBlock()` splits at frame crossings. Power-of-two not required.
+  - `pos` = frame position, read every block. Without a slot: nearest frame. Four blend copies (plain/FM/ring/sync).
+  - RAM: +2 B (`modNode_interpReserved`, `modNode_interpLastStamp`; R-E1).
+
+- **P2, display and naming corrections:**
+  - `wav` cell now shows `sNN`/`lNN`/`wNN` under typed oscillators (was showing stock names `sin`, `tri`, …). Compact cells and value overlays route `MENU_WAVEFORM` through `menu_formatWaveValue3()` built on `menu_formatWaveCell()`.
+  - Modulator list shows `s01 l01 w01` (was `s01 s02 s03`). 16-bit list arithmetic to avoid uint8 wrap at 128 samples.
+  - NUL write past 8-char buffer in the automation formatter: the catalogue getters write a terminating NUL at byte 8; the helper now owns a 9-byte local and copies 8 characters out.
+  - Name rule changed to first 4 + last 4 for names over 8 chars (`storage_displayNameFromLfn()`). Takes effect on next Sample upload.
+  - Sample level investigation (P2-5): no attenuation found; the peak is within 0.25 dB of full scale. Louder playback would need a new rule (RMS normalisation or a level row).
+  - Build: Flash 670,628 (headroom 83,036).
+
+- **P3, one-shot sample mod oscillators + transient click samples:**
+  - `osc_modulatorTrigger()` in `Oscillator.c/.h`: restarts the modulator's sample at its start on every hit when its `wav` selects an `s` entry. Binds the current selection first. Stock waves and `l`/`w` entries return immediately. Called from Drum and HiHat triggers.
+  - Transient click sample list: Snp, Ofs, 12 built-in clicks, then one entry per installed sample (`s01`, `s02`, …). One-shots only. New sample loop 20 instructions/sample; built-in click loop stays at 22.
+  - `frq` = speed (1.0 = file rate). `vol` on top of install normalisation. Silent at end until next hit. After reinstall: stored value past installed samples → last sample; no samples → last built-in click with one silent block first.
+  - CPU: no worst-case increase. One extra call per hit from Drum/HiHat (returns immediately for stock waves).
+
+- **MEMORY.md refactor:**
+  - Reduced from 2,773 to 525 lines. Session history deleted, specification content moved to reference documents, binding rules compressed, open items consolidated, agent mandates reviewed, stale volatile deleted.
+  - Created `REPOSITORY_LAYOUT.md`. Updated `HARDWARE_MAP.md`, `EFFECTS_MIXER_DSP_REFERENCE.md`, `MODULE_INTERCHANGE_SPEC.md`.
+  - Deleted `S070_WORKING_NOTES.md`, `S076_WORKING_NOTES.md`.
+
+- **Find here**: [087_SESSION_HANDOFF_LOG.md](087_SESSION_HANDOFF_LOG.md),
+  `INSTRUMENTS_DSP_REFERENCE.md` (oscillator types, sample/wavetable readers,
+  costs, modulator wav list), `CPU_USE_DSP_AUDIT.md` (S087 items),
+  `STORAGE_SRAM_MANIFEST.md` (catalogue v2, RAM changes),
+  `FILESYSTEM_SPEC.md` (catalogue v2, installer, `osc1_type`, wav values),
+  `MODULE_INTERCHANGE_SPEC.md` (stage A sequencer changes),
+  `PATTERN_DYNAMIC_STACK.md` (automation order),
+  `BANK_PRESET_ARCHITECTURE.md` (selector flag).

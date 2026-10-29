@@ -20,8 +20,9 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
-**S087 in progress.** Live document: `S087_P0_IMPLEMENTATION.md`;
-working notes: `knowledge_files/volatile/S078_WORKING_NOTES.md`.
+**S087 complete** (2026-10-29, uncommitted on `f3805478`). Log:
+`knowledge_files/log_archive/087_SESSION_HANDOFF_LOG.md`.
+Working notes: `knowledge_files/volatile/S087_WORKING_NOTES.md`.
 Host tests: `tools/dsp_test/modules/` (one file per module, `make -C tools/dsp_test all`);
 effects retry kit (transient, filter drive, D+S): `tools/dsp_test/spike/README.md`.
 No frozen snapshots are kept; copy the files to `build/` before an edit that needs a before/after.
@@ -176,8 +177,6 @@ is in the referenced session logs and specification documents.
 
 Unresolved decisions, code gaps, and deferred work.
 
-- **Long sample playback not 32-bit clean:** `SampleInfo.size` is `uint32_t`
-  but oscillator playback still uses the legacy `phase >> 17` index path.
 - **Flash image check (D-C1):** keep permanently or remove — still undecided.
   `flashImage.c` checks a stamped CRC32 per sector; mismatch shows
   `Img BAD s:…` and waits for BAR1.
@@ -324,21 +323,20 @@ One operation at a time; request functions return immediately. Full spec:
 
 ## Sample Flash
 
-Samples are installed from `Load:[Samples ]`: reads `/samples`, erases sectors
-7–11, installs, then reads `/loops` and appends looped samples.
+Samples and wavetables are installed from `Load:[Samples]`: walks `/samples`
+(natural order, depth 3) and `/wavetables` (each subfolder = one wavetable),
+erases sectors 7–11, installs, commits catalogue v2.
 
-- **Accepted formats:** mono 16-bit PCM WAV (8/16/24-bit and stereo accepted at
-  install and converted down). Any sample rate accepted; non-44.1 kHz plays
-  transposed.
-- **Catalogue v2 (S087):** `sample_catalogue_entry_t` with separate `flags`
-  field. `flags` bit 0 = loop present; loop bounds in `loop_start`/`loop_end`.
-  Maximum **128** entries (`SAMPLE_MAX_COUNT`).
-- Sort: whole-filename lexicographic with ASCII case folded (`Loop 10.wav`
-  before `Loop 2.wav`). Display names: compact `s01`–`sA0+`.
-- Audio payload from `0x080C0000` (sector 7) upward; metadata at top of sample
-  flash. Structure in `SampleMemory.h`.
-- Flash writes use `sampleFlash.c`; audio suspended before writes, reinitialized
-  after. Pre-S073 installs are rejected.
+- **Accepted formats:** mono 16-bit 44.1 kHz PCM WAV.
+- **Catalogue v2 (S087):** 8 KB at `0x081FE000`. 32 B header (magic "LXC2"
+  programmed last), 128 × 28 B sample entries, 128 × 20 B wavetable entries.
+  Details: `STORAGE_SRAM_MANIFEST.md` §4, `087_SESSION_HANDOFF_LOG.md` §5.
+- Sort: natural order (`storage_naturalCompare()`). Display names: first 4 +
+  last 4 for names over 8 chars; numeric prefix stripped.
+- Audio payload from `0x080C0000` (sector 7) upward; catalogue at top of
+  sample flash.
+- Flash writes use `sampleFlash.c`; audio suspended before writes,
+  reinitialized after. Pre-S073 installs are rejected.
 
 ---
 

@@ -4,18 +4,20 @@ How the six instrument voices are rendered, how their parameters reach the
 DSP, how modulation (LFO, velocity, Morph, step automation) works, what each
 part costs, and how to change or extend it.
 
-- **Current as of:** Session 076 close (2026-10-06). S074 changed nothing
-  in the voice engines; it added a sidechain tap in the trigger funnel
-  (§2) and a mirrored fader gain used by the mixer's `xfd` mode. S075
-  changed no engine either: it retired the global `srt` LFO/automation
-  target and fixed **who may write a voice parameter's runtime value
-  when** (§4.3, §7.5). S083 Q1 made a MIDI write a menu edit (same priority
-  and actions). S076 added
-  LFO retrigger value 7 (`scn`, Scene-change phase handoff) and fixed
-  the LFO phase offset scaling (§7.1).
-  S085 added the Drum mod modes `snc`/`rng` (§5.1.1). S086 (2026-10-28)
+- **Current as of:** Session 087 close (2026-10-29). S087 added the
+  oscillator type system (`osc1_type`: `wav`/`smp`/`slp`/`wtb`, §6.1),
+  sample flash catalogue v2 and installer, Q20.12 sample and wavetable
+  readers with `pos` on samples (§6.1.1), the step-automation order fix
+  (§2, §7.5), the modulator `wav` list expansion (§6.1.3), one-shot
+  sample mod oscillators, the transient click sample list (§6.4),
+  display/naming corrections, and v1 sample loop removal.
+  Earlier: S085 added the Drum mod modes `snc`/`rng` (§5.1.1). S086
   added the stock table waves `Re3`/`Sw3` (§6.1.2) and the oscillator
   position row `pos` (§6.1.1), and moved the user samples to `wav` 8+.
+  S076 added LFO retrigger value 7 (`scn`) and fixed the LFO phase
+  offset scaling (§7.1). S075 fixed runtime-write priority (§4.3, §7.5).
+  S074 added the sidechain tap (§2). S083 Q1 made a MIDI write a menu
+  edit.
 - **Related documents:**
   - `EFFECTS_MIXER_DSP_REFERENCE.md`: what happens to a voice block after it
     leaves the instrument (decimation, mixer, FX bus, output);
@@ -42,8 +44,8 @@ part costs, and how to change or extend it.
 - **Rendering runs in the main loop**, never in an ISR.
   `audio_check_and_render()` (`main.c`) fills each free 96-frame DMA slot
   with three calls to `mixer_calcNextSampleBlock()`. Before each call it
-  drains pending triggers (`voiceControl_processPending()`) and pending step
-  automation (`seq_drainPendingAutomation()`), in that order. Each call runs
+  runs `voiceControl_processPending()`, which internally handles triggers
+  and step automation in the correct order (S087 D6, see below). Each call runs
   with `BASEPRI` masking low-priority interrupts only (timing-critical
   sources such as TIM3, TIM1, audio DMA and USART3 stay live). If rendering
   falls behind, the DMA ISR replays the last slot and counts an underrun
@@ -103,11 +105,28 @@ triggers slot 6 as its alternate: a Choke instrument (HiHat) gets the open
 variant; any other instrument borrows a hidden Scene decay value for that hit
 (step automation, then LFO, then the retained Kit setting, in that priority).
 
-**Sidechain tap (S074).** `voiceControl_triggerNow()` (`MidiVoiceControl.c`),
-the single trigger funnel for the sequencer, rolls, MIDI and front-panel
-previews, also calls `busComp_sidechainTrigger(track, velocity)`. The master
-bus compressor records the largest `(velocity/127)³` weight for the track
-selected by the active Scene's `csc` and applies it in the next block
+**Trigger / automation order (S087 D6).** Before S087, `main.c` ran
+`voiceControl_processPending()` (triggers) and then
+`seq_drainPendingAutomation()` as two separate calls. A step's own automation
+landed one block after its trigger — inaudible for phase-based parameters,
+but wrong for per-step sample starts (slicing). S087 merged both into
+`voiceControl_processPending()` with this order per render pass:
+
+1. Pop every pending trigger + snapshot the automation count, under one
+   PRIMASK section
+2. Prepare each popped trigger (deferred Scene apply, restore when reset)
+3. `seq_drainPendingAutomationTo(mark)` — drain automation up to the mark
+4. Fire each popped trigger in pop order
+
+Entries queued after the mark wait one block with their own triggers. The
+`seq_drainPendingAutomation()` call was removed from `main.c`.
+
+**Sidechain tap (S074).** `voiceControl_fireTrigger()` (split from the
+former `voiceControl_triggerNow()` in S087), the trigger funnel for the
+sequencer, rolls, MIDI and front-panel previews, calls
+`busComp_sidechainTrigger(track, velocity)`. The master bus compressor
+records the largest `(velocity/127)³` weight for the track selected by the
+active Scene's `csc` and applies it in the next block
 (`EFFECTS_MIXER_DSP_REFERENCE.md` §5A). Track 6 (visible track 7) counts as
 voice 6, a working assumption not yet confirmed on hardware (BC11). The
 tap is foreground-only, like the rest of the funnel.
@@ -523,11 +542,11 @@ function's per-sample loops with a P2 baseline and fails if one grew.
 - **`OscInfo`** holds a 32-bit phase accumulator, `phaseInc`, `freq`,
   `pitchMod`, `fmMod`, `modNodeValue`, the waveform, the wavetable octave
   (`tableOffset`), a frequency cache, and a sample cache.
-- **`OscInfo` padding is in use (S086):** `position` (offset 18),
-  `positionApplied` (19) and `positionBendStep` (33, after `waveInterpNext`).
-  `sizeof(OscInfo)` is 72 on ARM, asserted together with the field offsets
-  after the struct. Free padding left: 2 B at 34–35 and 1 B at 75.
-- **Waveforms:**
+- **`OscInfo` padding (S087):** `position` (offset 18), `positionApplied`
+  (19), `positionBendStep` (33, after `waveInterpNext`), `oscType` (34),
+  `interpStamp` (35). `sizeof(OscInfo)` is 72 on ARM, asserted together
+  with the field offsets after the struct. Free padding left: 1 B at 75.
+- **Waveforms (stock, `wav` 0–7):**
 
   | `wav` | Constant | Display | Reader |
   |---:|---|---|---|
@@ -536,22 +555,57 @@ function's per-sample loops with a P2 baseline and fails if one grew.
   | 4 | `NOISE` | `Noi` | `calcNoiseBlock` |
   | 5 | `CRASH` | `Cym` | `calcSampleOscBlock` (the built-in crash sample) |
   | 6–7 | `SQ3 SW3` (`OSC_STOCK_FIRST`..`OSC_STOCK_LAST`) | `Re3 Sw3` | the table loops, through `osc_stockTables[]` (S086) |
-  | 8+ | user samples (`OSC_SAMPLE_START`) | `s01…` | `calcUserSampleOsc*Block` |
 
   `waveformNames` (`MenuText.h`) must have exactly `OSC_SAMPLE_START`
-  entries (a `_Static_assert` in `menu.c`). The menu's sample tail,
-  `modulationNode.c`'s maximum and the interpolation range follow
-  `OSC_SAMPLE_START`. Inserting a waveform renumbers the user samples
-  (S086 did, 6+ → 8+, with no kit migration).
+  entries (a `_Static_assert` in `menu.c`). Inserting a waveform renumbers
+  the catalogue entries (S086 did, 6+ → 8+, with no kit migration).
+
+- **Oscillator type system (S087, `osc1_type`):** the `typ` row on the main
+  oscillator selects which reader serves `wav` values ≥ `OSC_SAMPLE_START`:
+
+  | `typ` | Constant | Reader family |
+  |---|---|---|
+  | `wav` (0) | `OSC_TYPE_WAV` | stock waves only; catalogue entries unused |
+  | `smp` (1) | `OSC_TYPE_SMP` | one-shot sample reader (`osc_smp*Block`, §6.1.4) |
+  | `slp` (2) | `OSC_TYPE_SLP` | looped sample reader (`osc_slp*Block`, §6.1.4) |
+  | `wtb` (3) | `OSC_TYPE_WTB` | wavetable reader with frame blending (§6.1.5) |
+
+  `typ` is a **selector row**: `INSTRUMENT_PARAM_FLAG_SELECTOR` (0x08),
+  `DTYPE_MENU` with id `MENU_OSC_TYPE`. Not morphable, stored single-ended,
+  applied before the Morph image on every slot reset. Step-automatable with
+  no ramp and one value per step (held until the voice's next trigger).
+  `OscInfo.oscType` at byte 34.
+
+  Under `typ` = `wav`, `wav` values ≥ `OSC_SAMPLE_START` are ignored (the
+  oscillator stays on its last stock wave). Under `smp`/`slp`/`wtb`, `wav`
+  8+ selects catalogue entries: `s01..sNN` (samples), `l01..lNN` (looped
+  samples), `w01..wNN` (wavetables). The type determines which entries are
+  meaningful; out-of-range entries are clamped.
+
+  `osc_setType()` clears the interpolation slot stamp when the type
+  changes, and rebinds the oscillator to the selected catalogue entry.
+
+- **Modulator `wav` list (S087, §6.1.3):** modulators get no `typ` or `pos`
+  rows. Their `wav` list is: stock 0–7, then `s01..sNN`, `l01..lNN`,
+  `w01..wNN`, up to 127 entries. The type is inferred from the entry
+  prefix.
+
+- **v1 sample loops removed (S087):** `calcUserSampleOscBlock`,
+  `calcUserSampleOscFmBlock`, `calcUserSampleOscRingBlock`,
+  `calcUserSampleOscSyncBlock` and `osc_syncWaveform()` are deleted.
+  `osc_interp_a/b` DTCM scratch (128 B) released. `stub_silence_buffer`
+  (512 B flash) removed. v1 `SampleInfo` shims in `SampleMemory.c/.h`
+  removed.
 - **Effective frequency:** `freq · pitchMod · modNodeValue`, where `freq`
   comes from the base note plus coarse/fine tuning
   (`MidiNoteFrequencies[note] · detune`).
 - **Phase formats:** sine uses a 4,096-entry table (`<<20`), wavetables 1,024
-  entries (`<<22`), samples a `<<17` index (so a v1 user sample is at most
-  32,768 points). For sine and the tables one cycle is the full 2³² phase.
+  entries (`<<22`). For sine and the tables one cycle is the full 2³² phase.
   The crash sample is 32,768 points, so it too spans exactly 2³² and loops
   at its end; `crashSample[]` has a 32,769th guard entry (= entry 0) for the
-  interpolators' `itg + 1` read (S086).
+  interpolators' `itg + 1` read (S086). The S087 sample/wavetable readers
+  use Q20.12 phase (`OSC_SAMPLE_PHASE_SHIFT` 12), supporting up to 2²⁰
+  points per sample (§6.1.4).
 - **Wavetables:** `sawTable`, `triTable`, `recTable` (`wavetable.c`) and the
   stock waves `sq3Table`, `sw3Table` (`wavetableStock.c`, generated) are 11
   band-limited octaves × 1,024 samples (22,528 B each, program flash), every
@@ -571,21 +625,23 @@ function's per-sample loops with a P2 baseline and fails if one grew.
   would change it.
 - **FM:** `calcNextOscSampleFmBlock()` phase-modulates the carrier by a
   modulator block (`calcFmBlock` for wavetables, `calcFmSineBlock`,
-  `calcSampleOscFmBlock`, `calcUserSampleOscFmBlock`).
+  `calcSampleOscFmBlock`). The v1 `calcUserSampleOscFmBlock` is removed
+  (S087); sample/wavetable FM uses the new type-aware readers (§6.1.4,
+  §6.1.5).
 - **Sync and ring support (S085; used by the Drum `snc`/`rng` modes,
   §5.1.1).** A separate family of functions; the plain and FM loops above
   were not edited.
 
   | Function | Role |
   |---|---|
-  | `osc_syncClockInc(master)` | the clock increment (2^32 per nominal period; `<< 5` for crash and user samples) |
+  | `osc_syncClockInc(master)` | the clock increment (2^32 per nominal period; `<< 5` for crash) |
   | `osc_buildSyncList(clock, inc, over, size)` | the per-block reset list (`OSC_SYNC_NONE` = no reset); returns the end clock; 7 instructions per sample |
   | `calcNextOscSampleSyncBlock(osc, over, clockInc, depthQ30, buf, size)` | the slave render: ratio (one VDIV), interpolation entry, then `osc_renderSyncWave()` |
   | `calcSineSyncBlock`, `calcWavetableOscSyncBlock` (table as argument), `calcSampleOscSyncBlock` | the sync copies: the plain read verbatim, the store at gain 1, the phase through `osc_syncPull()` |
   | `osc_renderSyncWave()` / `osc_renderPlainWave()` | the per-waveform dispatch without the interpolation check; the plain one calls the leaf loops at gain 1 (unsynced slaves, ring interpolation partners) |
   | `calcPeriodicInterpSyncBlock` / `calcPeriodicInterpRingBlock` | interpolated variants (partners from one list / the ring applied in the blend) |
   | `calcNextOscSampleRingBlock(osc, modBuf, buf, size, depthQ15, depthStepQ15)` | the carrier render with the ring law and a per-sample depth ramp; mirrors `calcNextOscSampleBlock()` including its user-sample range check |
-  | `calcSineRingBlock`, `calcWavetableOscRingBlock`, `calcNoiseRingBlock`, `calcSampleOscRingBlock`, `calcUserSampleOscRingBlock` | the ring copies |
+  | `calcSineRingBlock`, `calcWavetableOscRingBlock`, `calcNoiseRingBlock`, `calcSampleOscRingBlock` | the ring copies (v1 `calcUserSampleOscRingBlock` removed S087) |
   | `osc_syncDepthQ30(amount)`, `osc_ringDepthQ15(amount)` (header, static inline) | the amount → Q30 sync depth / Q15 ring depth (clamped; NaN → 0) |
 
   **Placement and build rules:**
@@ -611,19 +667,36 @@ function's per-sample loops with a P2 baseline and fails if one grew.
   Details: `OSC_INTERP_AUDIT.md`.
 - **ITCM:** the block renderers and (since S073) `osc_setFreq()`.
 
-#### 6.1.1 `pos`: the oscillator position (S086)
+#### 6.1.1 `pos`: the oscillator position (S086; extended S087)
 
 The `osc1_position` row (`Oscilltr` / `Position`, short `pos`, 0..127) is
-the fourth cell of the first oscillator screen on every instrument. Today it
-is a **continuous phase offset** of `pos`/128 of a cycle on the main
-oscillator. The same byte is meant to become the sample start (`smp`/`slp`),
-the wavetable frame position (`wtb`) and possibly the `pwm` width when those
-types arrive (`S087_P0_OSC_TYPE_SAMPLES_WAVETABLES.md`).
+the fourth cell of the first oscillator screen on every instrument. Its
+meaning depends on the oscillator type:
 
-**Which waves.** `osc_positionIsPhase(w)` is 1 for `SINE`, `CRASH` and the
-table waves. For all of them one cycle (for `CRASH`, the whole 32,768-point
-sample) is the full 2³² phase, so `pos << 25` is `pos`/128 of it at every
-octave. Noise and v1 user samples ignore `pos`.
+| Type | `pos` meaning |
+|---|---|
+| `wav` (stock waves) | continuous phase offset of `pos`/128 of a cycle |
+| `smp` | sample start at `pos`/128 of the sample; linear bend, 4× speed cap |
+| `slp` | sample start at `pos`/128 of the whole sample; linear bend, wrapped into loop region |
+| `wtb` | frame position, read every block |
+
+**Phase waves (`wav`).** `osc_positionIsPhase(w)` is 1 for `SINE`, `CRASH`
+and the table waves. For all of them one cycle (for `CRASH`, the whole
+32,768-point sample) is the full 2³² phase, so `pos << 25` is `pos`/128 of
+it at every octave. Noise ignores `pos`.
+
+**Sample waves (S087, `smp`/`slp`).** Q20.12 phase. Start =
+`((pos × len) >> 7) << 12`. **Linear** difference (not circular): 127 → 0
+is a jump back, not +1 step. One-shot edges: clamped at 0; past end = ended;
+finished one-shot stays finished until the next trigger. Time-based 4× speed
+cap; larger change glides over several blocks via `osc_slpBlockInc()`.
+`slp` wraps into the fixed loop region. `smp` clamps at ends.
+
+**Wavetable waves (S087, `wtb`).** `pos` = frame position, proportional to
+the wavetable's frame count. Read every block by the blend planner.
+
+**Type/source change re-anchor (D7):** `positionApplied` = `position`,
+no bend that block. Sync reset target = `pos` start point (D9).
 
 **At a trigger** (`osc_positionTrigger(osc)`, called by all four
 `*_triggerVoice()` after the start-phase block):
@@ -688,15 +761,15 @@ about 8× speed).
 | Waveform interpolation | the base waveform decides | both partners render with the bent `phaseInc`; `calcPeriodicInterp*` ends the block at start + `phaseInc` × size |
 | Modulators (Drum FM, Cymbal/HiHat) | no row yet | — |
 
-**Modulation sources.** Per block `main.c` runs triggers
-(`voiceControl_processPending()`), then step automation
-(`seq_drainPendingAutomation()`), then the mixer (LFOs, async, renders).
-So: velocity is exact at the hit; an LFO glides continuously (its depth is
-**clamped** at 0/127, not wrapped); with LFO retrigger the hit starts at the
-previous LFO value and glides to the restarted one within 0.7 ms; a
-step-automated `pos` starts at the Morph base (the trigger restores it) and
-glides to the step value within the first block. That last point is the
-S087 stage-A item (it matters for sample slicing).
+**Modulation sources.** Per block `main.c` runs
+`voiceControl_processPending()` (which internally: prepare triggers → drain
+automation to mark → fire triggers, S087 D6), then the mixer (LFOs, async,
+renders). So: a step's automation lands before its trigger fires; velocity
+is exact at the hit; an LFO glides continuously (its depth is **clamped** at
+0/127, not wrapped); with LFO retrigger the hit starts at the previous LFO
+value and glides to the restarted one within 0.7 ms; a step-automated `pos`
+starts at the Morph base (the trigger restores it) and glides to the step
+value within the first block.
 
 **Slot reset.** A runtime slot reset `memset`s the voice, so
 `positionApplied` starts at 0 and the first block may glide from 0 to the
@@ -747,6 +820,72 @@ build; it compiles the header's own constants block) and
   needs 1,024 points at every level; shorter upper levels would need a new
   reader (and change the sound by −35…−67 dB at the top octaves).
   `ReA`/`TrA`/`SwA` from the same recipe are deferred.
+
+#### 6.1.3 Modulator `wav` list (S087)
+
+Drum FM, Cymbal and HiHat modulators share an extended `wav` list:
+- Stock waves 0–7 (as above)
+- `s01..sNN` — one-shot samples from the catalogue
+- `l01..lNN` — looped samples (same catalogue items, looped playback)
+- `w01..wNN` — wavetable first frame
+
+Up to 127 entries total. Modulators get no `typ` or `pos` rows (A22).
+A value past the list end is clamped to the last entry that exists.
+
+Sync master rules by entry: stock → phase clock (as before); `sNN` → as
+noise (one reset per nominal period at `frq`); `lNN` → loop wrap; `wNN` →
+frame wrap. `osc_modulatorTrigger()` (S087 P3) restarts a modulator's
+one-shot sample on every hit when its `wav` selects an `s` entry; stock
+waves and `l`/`w` entries return immediately. Called from Drum and HiHat
+triggers (whose modulators never reset); Cymbal needed no change (it
+already resets both modulators to phase 0 on every hit).
+
+#### 6.1.4 `smp`/`slp` sample readers (S087)
+
+Q20.12 phase (`OSC_SAMPLE_PHASE_SHIFT` 12). Up to 2²⁰ points per sample.
+Eight loops in `.itcm.s087`, `noinline, noclone`:
+
+| Loop | Function |
+|---|---|
+| smp plain | `osc_smpPlainBlock` |
+| smp FM | `osc_smpFmBlock` |
+| smp sync | `osc_smpSyncBlock` |
+| smp ring | `osc_smpRingBlock` |
+| slp plain | `osc_slpPlainBlock` |
+| slp FM | `osc_slpFmBlock` |
+| slp sync | `osc_slpSyncBlock` |
+| slp ring | `osc_slpRingBlock` |
+
+Install-time preparation (catalogue v2, `FILESYSTEM_SPEC.md`):
+- Two zero frames after every sample: removes played-out select and
+  next-point hold
+- Fixed loop region: `smpl` loop 1 when present, else the whole sample;
+  stored as `loop_start`/`loop_end` in the entry
+- Gain code: per block, `2^(code/24)`, peak within 0.25 dB of full scale
+
+`smp` (one-shot): plays once from the trigger start point; past end = ended;
+finished one-shot stays finished until the next trigger.
+`slp` (looped): loops within the fixed region; lead-in plays before the
+loop, not frozen at loop start. FM on `slp` reads absolute (picks
+loop/lead-in per block).
+
+`pos` on samples: see §6.1.1 (updated for S087).
+
+#### 6.1.5 `wtb` wavetable reader (S087)
+
+- Any frame length (UMULL indexing, A16). One-frame base loop.
+- Frame blending through two interpolation slots (`OscInfo.interpStamp`,
+  byte 35). Sticky claims: a grant made this block is kept. Stamps 1..255,
+  never 0 (stamp 0 = "no claim"). Without a slot: nearest frame (Q9
+  fallback).
+- `osc_wtbPlanBlock()` splits at frame crossings (at most two segments per
+  block).
+- `pos` on wavetables = frame position, read every block.
+- Four blend copies: plain, FM, ring, sync (in `.itcm.s087`).
+- Interpolation slot management: `modNode_interpStampOf()` gives 1..255
+  (wraps from 255 to 1); `modNode_interpLastStamp` (1 B DTCM) +
+  `modNode_interpReserved` (1 B). Claims are first come, first served.
+  `osc_setType()` clears the stamp when the type changes.
 
 ### 6.2 Resonant filter (`ResonantFilter.c/.h`)
 
@@ -800,6 +939,17 @@ to avoid zipper noise.
 Plays one of the `transientData` samples (26,460 B in flash) from its start
 on trigger, at pitch `transient->pitch`, scaled by `volume`. Modes 0 (snap
 envelope) and 1 (phase offset at trigger) produce no sample.
+
+**Sample click list (S087 P3).** The click/transient selector is extended:
+Snp, Ofs, 12 built-in clicks, then one entry per installed sample (`s01`,
+`s02`, …). One-shots only, no loop or wavetable entries. Compact cells show
+`sNN`; the single-parameter view shows the sample's 8-character name on the
+left. `frq` sets the speed (1.0 = file's own rate); `vol` applied on top of
+install normalisation. Silent at the end until the next hit. After a
+reinstall: stored value past installed samples → last sample; no samples →
+last built-in click with one silent block first. CPU: 20 instructions per
+sample for the new sample loop vs 22 for built-in clicks. Switching between
+a built-in click and a sample mid-hit stays silent until the next trigger.
 
 ### 6.5 Buffer tools and post-chains
 
@@ -910,9 +1060,10 @@ local token in that namespace. Install:
 ### 7.5 Step automation and Morph
 
 - **Step automation:** TIM3 queues values; the foreground drain
-  (`seq_drainPendingAutomation()`, after trigger processing in the render
-  loop) writes voice targets with `instrumentManager_writeRuntime()` and
-  marks them dirty. The voice's next **resetting** trigger
+  (`seq_drainPendingAutomationTo(mark)`, inside
+  `voiceControl_processPending()` between prepare and fire, S087 D6) writes
+  voice targets with `instrumentManager_writeRuntime()` and marks them
+  dirty. The voice's next **resetting** trigger
   (`seq_restoreAutomatedParameters()` in the trigger funnel), transport
   restart and Pattern changes restore dirty parameters from
   `morph_interpolation[]` (not from the normal image).
@@ -968,7 +1119,7 @@ display and runtime resolution.
 
 ## 8. Cost
 
-### 8.1 Measured instruction counts (S073; S085 and S086 rows)
+### 8.1 Measured instruction counts (S073; S085, S086 and S087 rows)
 
 Per-sample loop instruction totals from `fpseq.py --report --all` on
 standalone `-Ofast` ARM objects. Instructions, not cycles: the Cortex-M7
@@ -980,8 +1131,9 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 | FM wavetable / FM sine carrier | 35 / 30 | 0 |
 | Noise | 12–13 | 0 |
 | Crash sample / FM crash | 30 / 38 | 0 |
-| User sample (non-looped to looped paths) | about 28–49 | 0 |
-| Transient sample | 22 | 0 |
+| S087 `slp` plain / FM (inside loop) / ring / `smp` ring | 27 / 49–50 / 42 / 38 | 0 |
+| S087 `wtb` blend inner (plain/FM/ring/sync) | 34–38 / 42–46 / 43–47 / 44–48 | 0 |
+| Transient sample / S087 sample click | 22 / 20 | 0 |
 | Saturating buffer add | about 4–5 (two samples per step) | 0 |
 | Sync reset-list builder (S085) | 7 | 0 |
 | `pos` (S086): trigger offset / per-block bend | a few per trigger / about 10 per block per voice (≈ 0.3 per sample), outside the loops | 0 |
@@ -1026,13 +1178,20 @@ sample loops.
 **S086:** the stock waves use the table loops (plain 24 / gain-1 23, FM 35,
 the existing sync and ring functions), so no voice's dearest setting
 changed. `pos` adds nothing per sample; its per-block bend is outside the
-loops. The oscillator code is byte-identical to the S086 P2 image
-(`elf86_p3_check`), and the per-sample loops inlined into
-`mixer_calcNextSampleBlock()` match it (`elf86_mixer_check`, after the F1
-fix, §10). The six-slot worst-case Scene with an LFO on every `pos` read
-the same `cpu` as before on hardware. In `rng` the modulator call (gain 1) binds to the baseline
-gain-1 clone `calcNextOscSampleBlock.constprop.1`, which is slightly cheaper
-than the `.constprop.0` that `fm`/`mix` use.
+loops.
+
+**S087:** the v1 user-sample loops are removed and replaced by type-aware
+readers (§6.1.4, §6.1.5). The Drum oscillator section worst cases stay
+below their frozen ceilings (A1):
+- Drum `fm` with `slp` on both oscillators: 27 + 50 = **77**, against
+  frozen ceiling **≈ 92**
+- Cymbal/HiHat with samples on all three: 27 + 27 + 50 = **104**, against
+  frozen ceiling **≈ 131**
+- Per-slot wavetable blend cost: +10..+13 over one frame, against ≈ +66 today
+
+ITCM went from 8,512 (S086) to 15,032 (S087 D, before P1 v1 removal) to
+12,640 (after P1). The transient sample click adds 20 instructions per
+sample vs 22 for built-in clicks.
 
 ### 8.3 Share of the budget (audit estimates, ±50 %)
 
@@ -1084,8 +1243,8 @@ General rules for every change:
    still fits the slot reserve, 2 × `sizeof(DrumVoice)` = 1,192 B; the
    `_Static_assert` will tell you). A byte added to `DrumVoice` itself
    grows all six slots by 2 B each. Per-oscillator state can often go into
-   `OscInfo` padding at no cost (S086 used offsets 18–19 and 33; 34–35 and
-   75 are free); assert the offsets as `Oscillator.h` does.
+   `OscInfo` padding at no cost (S086 used offsets 18–19 and 33; S087
+   used 34–35; 75 is free); assert the offsets as `Oscillator.h` does.
 2. Add the row in `<Type>Parameters.c` at the end of the table (appending
    keeps existing descriptor indices, which are stored in Scene images,
    automation and LFO tokens), and the matching enum entry. Update
@@ -1298,6 +1457,17 @@ fields from `ModulationNode`.
   bend, on the phase waves and the crash sample (whose array gained a guard
   entry). The F1 lesson (no state live across an inlined render) and the
   mixer hot-loop gate (`086_SESSION_HANDOFF_LOG.md`).
+- Session 087: oscillator type system (`osc1_type`: `wav`/`smp`/`slp`/`wtb`,
+  §6.1), sample flash catalogue v2 (128 samples + 128 wavetables, 8 KB at
+  `0x081FE000`), Q20.12 sample and wavetable readers (8 loops in
+  `.itcm.s087`, §6.1.4–§6.1.5), `pos` extended to samples/wavetables
+  (§6.1.1), step-automation order fix D6 (§2, §7.5), modulator `wav` list
+  expansion to s/l/w entries (§6.1.3), `osc_modulatorTrigger()` for
+  one-shot sample mod oscillators, transient click sample list (§6.4),
+  display/naming corrections (first 4 + last 4 for names over 8 chars),
+  v1 user-sample loops and `osc_interp_a/b` removed, MEMORY.md refactored.
+  Build at close: Flash 670,628 (headroom 83,036), ITCM 12,640
+  (`087_SESSION_HANDOFF_LOG.md`).
 
 ---
 
@@ -1309,11 +1479,11 @@ fields from `ModulationNode`.
 - **"Absolutely no increase in CPU cycles overall."** The gate: the dearest
   setting of a voice in any mode must not exceed that voice's dearest
   setting before the change. Per-same-wave comparisons are reported only.
-  - Freeze the ceiling figures before replacing a loop that sets them
-    (S087 stage D replaces the v1 user-sample loops; the figures are in
-    `S087_P0_OSC_TYPE_SAMPLES_WAVETABLES.md` §1.4).
-  - At the S085 close the Drum ceiling is `fm` with user samples, ≈ 90 per
-    sample standalone / ≈ 92 linked.
+  - Freeze the ceiling figures before replacing a loop that sets them.
+  - The Drum ceiling is `fm` with user samples, ≈ 90 per sample standalone
+    / ≈ 92 linked (frozen at S085 close). S087 D replaced the v1
+    user-sample loops; the new `slp` + FM carrier reads 77 against the 92
+    ceiling (§8.2).
 - **Proof:**
   - `fpseq.py` counts on the standalone object **and** the linked ELF;
   - `oscmod_identity` + `elf_osc_check` (the old loops unchanged); since
@@ -1335,7 +1505,7 @@ fields from `ModulationNode`.
     inlined into `mixer_calcNextSampleBlock()`, so a local kept from before
     a render to after it raises register pressure there and slows unrelated
     inlined loops. Keep such state in `OscInfo` (the `positionBendStep`
-    pattern; free padding: offsets 34–35 and 75);
+    pattern; free padding: offset 75; 34–35 used by S087 `oscType`/`interpStamp`);
   - **every `osc_positionBendApply()` needs its `osc_positionBendRestore()`
     after the same render** (`osc_setFreq()`'s cache would keep a bend);
   - host tests compile the header's own constants (extract them; S086 F3);

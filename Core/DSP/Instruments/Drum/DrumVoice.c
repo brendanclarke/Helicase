@@ -264,6 +264,17 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 
 	osc_setBaseNote(&voice->osc,note);
 	osc_setBaseNote(&voice->modOsc,note);
+	/*
+	 * Restart a one-shot modulator (S087 P3).
+	 *
+	 * What:       when osc2's wav selects an s entry, its phase returns to 0
+	 *             so the sample starts again on this hit; any other osc2
+	 *             selection keeps today's free-running phase.
+	 * Why:        osc2 never resets, so a one-shot played once and then stayed
+	 *             at its silent end pad (S087 P3 hardware report).
+	 * Affiliates: osc_modulatorTrigger() (Oscillator.c).
+	 */
+	osc_modulatorTrigger(&voice->modOsc);
 
 
 	DecayEg_trigger(&voice->oscPitchEg);

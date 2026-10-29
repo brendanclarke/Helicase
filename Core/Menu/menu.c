@@ -65,6 +65,7 @@
 #include "MidiLearn.h"
 #include "modulationNode.h"
 #include "Oscillator.h"
+#include "transientGenerator.h"   /* S087 P3: transient list with user one-shots */
 #include <string.h>
 #include <stdint.h>
 
@@ -2246,6 +2247,9 @@ static void menu_applyEffectMarkers(void);
 static void menu_applyPerfMarkers(void);
 static void va_writeAutomationFromKnob(uint8_t knobNr, int8_t delta);
 static void va_formatValue3(const menu_cell_t *cell, uint8_t value, char out[3]);
+/* S087 P2: wave value text; defined beside menu_formatWaveCell(). */
+static void menu_formatWaveValue3(const menu_cell_t *cell, uint8_t value,
+                                  char out[3]);
 
 /* S078 P2 §B STEP overlay helpers. Definitions stay adjacent to the va_*
  * state/logic below; these declarations keep the same forward-reference style
@@ -3346,6 +3350,12 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
         menu_getLfoPolarityName(value, out);
         break;
     case DTYPE_MENU:
+        /* S087 P2: wav follows osc1's type or the modulator list
+         * (menu_formatWaveValue3()), as in menu_formatCellValue3(). */
+        if ((uint8_t)(menu_cellDtype(cell) >> 4) == MENU_WAVEFORM) {
+            menu_formatWaveValue3(cell, value, out);
+            break;
+        }
         getMenuItemNameForValue((uint8_t)(menu_cellDtype(cell) >> 4),
                                 value, out);
         break;
@@ -6486,6 +6496,12 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         menu_getLfoPolarityName(value, valueAsText);
         break;
     case DTYPE_MENU:
+        /* S087 P2: wav follows osc1's type or the modulator list
+         * (menu_formatWaveValue3()); every other menu uses its table. */
+        if ((uint8_t)(menu_cellDtype(cell) >> 4) == MENU_WAVEFORM) {
+            menu_formatWaveValue3(cell, value, valueAsText);
+            break;
+        }
         getMenuItemNameForValue((uint8_t)(menu_cellDtype(cell) >> 4),
                                 value, valueAsText);
         break;
@@ -11538,7 +11554,9 @@ static void setNoteName(uint8_t num, char *buf)
 static uint8_t getMaxEntriesForMenu(uint8_t menuId)
 {
     switch (menuId) {
-    case MENU_TRANS:         return (uint8_t)transientNames[0][0];
+    /* S087 P3: the built-in transients, then one sNN entry per installed
+     * sample (transient_entryCount()); the menu clamp uses this count. */
+    case MENU_TRANS:         return transient_entryCount();
     case MENU_AUDIO_OUT:     return (uint8_t)outputNames[0][0];
     case MENU_FILTER:        return (uint8_t)filterTypes[0][0];
     case MENU_SYNC_RATES:    return (uint8_t)syncRateNames[0][0];
@@ -11588,93 +11606,169 @@ static void menu_formatUserShortName(char prefix, uint8_t index, char *buf)
 }
 
 /*
- * Format one oscillator wave cell (S087 stage D).
+ * Format one oscillator wave cell (S087 stage D; S087 P2).
  *
- * What:       the 8-character name on the left and the s/l/w code on the
- *             right. osc1 shows the stock name under wav, or the item name and
- *             code under smp/slp/wtb. A modulator shows the stock name for
- *             0..7 and the flat-list item for 8+ (s, then l, then w).
- * Why:        S087 P0 §4.3/§12.4: one formatter for the edit line and the
- *             automation display; the wav byte is read as it is.
- * Inputs:     cell (instrument cell), value, nameDst[8], codeDst[3].
- * Outputs:    nameDst and codeDst.
- * Accessors:  the edit-line display, the automation display.
+ * What:       the 8-character name and the 3-character code of the entry a
+ *             wave value selects:
+ *             - osc1 under wav: the stock name, no code;
+ *             - osc1 under smp/slp/wtb: the item's catalogue name and
+ *               sNN/lNN/wNN; both blank when the type has no item at that
+ *               value;
+ *             - a modulator: the stock name for 0..OSC_SAMPLE_START-1, then the
+ *               flat list: every sample (s), every sample as a loop (l), every
+ *               wavetable (w) (S087 P0 §12.4); blank past the end;
+ *             - no instrument cell: the stock name, else blank.
+ * Why:        S087 P0 §4.3/§12.4: one formatter for the single-parameter view,
+ *             the compact cells and the automation display. S087 P2: the
+ *             catalogue getters write a terminating NUL after 8 characters, so
+ *             the name is read into a 9-byte local and 8 characters are copied
+ *             out (the single-parameter view showed character 0 in column 9);
+ *             the list bounds are computed in 16 bits (2 x 128 samples wrapped
+ *             a uint8_t to 0).
+ * Inputs:     cell (instrument cell, or NULL), value, nameDst[8], codeDst[3].
+ * Outputs:    nameDst[0..7] and codeDst[0..2], space-padded, not terminated.
+ * Accessors:  menu_formatWaveValue3(), the single-parameter edit painter.
  * Affiliates: instrumentManager_osc1Type(), sampleMemory_getDisplayName(),
  *             sampleMemory_getWavetableName(), menu_formatUserShortName().
  */
 static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
                                 char *nameDst, char *codeDst)
 {
-    const uint8_t samples = sampleMemory_getNumSamples();
-    const uint8_t tables = sampleMemory_getNumWavetables();
+    const uint8_t stock = (uint8_t)waveformNames[0][0];
+    const uint16_t samples = sampleMemory_getNumSamples();
+    const uint16_t tables = sampleMemory_getNumWavetables();
+    const uint8_t isInstrument = (uint8_t)(cell &&
+        cell->kind == MENU_CELL_INSTRUMENT && cell->descriptor);
+    const uint8_t isOsc1 = (uint8_t)(isInstrument &&
+        strcmp(cell->descriptor->file_key, "osc1_wave") == 0);
+    const uint8_t type = isOsc1 ? instrumentManager_osc1Type(cell->slot)
+                                : (uint8_t)OSC_TYPE_WAV;
+    char name[SAMPLE_DISPLAY_NAME_LEN + 1u];
+    char prefix;
+    uint8_t index;
 
     memset(nameDst, ' ', SAMPLE_DISPLAY_NAME_LEN);
     memset(codeDst, ' ', 3u);
-    if (!cell || cell->kind != MENU_CELL_INSTRUMENT || !cell->descriptor) {
-        const uint8_t stock = (uint8_t)waveformNames[0][0];
-
-        if (value < stock)
-            memcpy(nameDst, waveformNames[value + 1u], 3u);
+    if (isOsc1 && type != OSC_TYPE_WAV) {
+        /* osc1 under smp/slp/wtb: the value is the item index. */
+        if (type == OSC_TYPE_WTB) {
+            if (value >= tables)
+                return;
+            prefix = 'w';
+        } else {
+            if (value >= samples)
+                return;
+            prefix = (type == OSC_TYPE_SMP) ? 's' : 'l';
+        }
+        index = value;
+    } else if (value < stock) {
+        /* A stock wave: osc1 under wav, a modulator, or no cell. */
+        memcpy(nameDst, waveformNames[value + 1u], 3u);
         return;
-    }
-    if (strcmp(cell->descriptor->file_key, "osc1_wave") == 0) {
-        const uint8_t type = instrumentManager_osc1Type(cell->slot);
+    } else if (isInstrument && !isOsc1) {
+        /* A modulator's flat list after the stock waves. */
+        const uint16_t entry = (uint16_t)(value - stock);
 
-        if (type == OSC_TYPE_WAV) {
-            const uint8_t stock = (uint8_t)waveformNames[0][0];
-            if (value < stock)
-                memcpy(nameDst, waveformNames[value + 1u], 3u);
+        if (entry < samples) {
+            prefix = 's';
+            index = (uint8_t)entry;
+        } else if (entry < (uint16_t)(2u * samples)) {
+            prefix = 'l';
+            index = (uint8_t)(entry - samples);
+        } else if (entry < (uint16_t)(2u * samples + tables)) {
+            prefix = 'w';
+            index = (uint8_t)(entry - 2u * samples);
+        } else {
             return;
         }
-        {
-            char code[3];
-            const char prefix = (type == OSC_TYPE_SMP) ? 's'
-                              : (type == OSC_TYPE_SLP) ? 'l' : 'w';
-
-            if (type == OSC_TYPE_WTB)
-                sampleMemory_getWavetableName(value, nameDst);
-            else
-                sampleMemory_getDisplayName(value, nameDst);
-            menu_formatUserShortName(prefix, value, code);
-            memcpy(codeDst, code, 3u);
-        }
+    } else {
+        /* osc1 under wav past the stock list, or no cell: nothing. */
         return;
     }
-    {
-        const uint8_t stock = (uint8_t)waveformNames[0][0];
 
-        if (value < stock) {
-            memcpy(nameDst, waveformNames[value + 1u], 3u);
-            return;
-        }
-        {
-            const uint8_t entry = (uint8_t)(value - stock);
-            char code[3];
+    if (prefix == 'w')
+        sampleMemory_getWavetableName(index, name);
+    else
+        sampleMemory_getDisplayName(index, name);
+    memcpy(nameDst, name, SAMPLE_DISPLAY_NAME_LEN);
+    menu_formatUserShortName(prefix, index, codeDst);
+}
 
-            if (entry < samples) {
-                sampleMemory_getDisplayName(entry, nameDst);
-                menu_formatUserShortName('s', entry, code);
-            } else if (entry < (uint8_t)(2u * samples)) {
-                const uint8_t index = (uint8_t)(entry - samples);
-                sampleMemory_getDisplayName(index, nameDst);
-                menu_formatUserShortName('l', index, code);
-            } else {
-                const uint8_t index = (uint8_t)(entry - 2u * samples);
-                if (index >= tables)
-                    return;
-                sampleMemory_getWavetableName(index, nameDst);
-                menu_formatUserShortName('w', index, code);
-            }
-            memcpy(codeDst, code, 3u);
-        }
-    }
+/*
+ * Three-character text of an oscillator wave value (S087 P2).
+ *
+ * What:       the entry's code (sNN/lNN/wNN) for user content, the stock name
+ *             for a stock wave, "---" when the value selects nothing (osc1
+ *             under smp/slp/wtb with no item at that value).
+ * Why:        the compact cells and the value overlays formatted wav through
+ *             getMenuItemNameForValue(), which knows only the stock names and
+ *             sNN: osc1 under smp/slp/wtb showed a stock name for its item,
+ *             and the modulators' l and w entries showed sNN (S087 P2 hardware
+ *             report).
+ * Inputs:     cell (an instrument wave cell), value, out[3].
+ * Outputs:    out[0..2], not terminated.
+ * Accessors:  va_formatValue3(), menu_formatCellValue3(),
+ *             menu_formatVoiceAutomationValue3().
+ * Affiliates: menu_formatWaveCell(); MENU_WAVEFORM.
+ */
+static void menu_formatWaveValue3(const menu_cell_t *cell, uint8_t value,
+                                  char out[3])
+{
+    char name[SAMPLE_DISPLAY_NAME_LEN];
+    char code[3];
+
+    menu_formatWaveCell(cell, value, name, code);
+    if (code[0] != ' ')
+        memcpy(out, code, 3u);
+    else if (name[0] != ' ')
+        memcpy(out, name, 3u);
+    else
+        memcpy(out, menuText_dash, 3u);
+}
+
+/*
+ * Name of a user one-shot transient entry (S087 P3).
+ *
+ * What:       for a transient value from TRANSIENT_USER_FIRST on that selects
+ *             an installed sample, copies the sample's 8-character catalogue
+ *             name into nameDst; any other value leaves nameDst unchanged.
+ * Why:        the single-parameter view names the selected sample, as it does
+ *             for a modulator s entry. The catalogue getter writes a NUL after
+ *             8 characters, so the name is read into a 9-byte local first.
+ * Inputs:     value (the transient row value), nameDst[8].
+ * Outputs:    nameDst[0..7], not terminated.
+ * Accessors:  the single-parameter edit painter (MENU_TRANS).
+ * Affiliates: sampleMemory_getDisplayName(), TRANSIENT_USER_FIRST,
+ *             getMenuItemNameForValue() (the sNN code).
+ */
+static void menu_formatTransientName(uint8_t value, char *nameDst)
+{
+    char name[SAMPLE_DISPLAY_NAME_LEN + 1u];
+
+    if (value < TRANSIENT_USER_FIRST ||
+        (uint8_t)(value - TRANSIENT_USER_FIRST) >= sampleMemory_getNumSamples())
+        return;
+    sampleMemory_getDisplayName((uint8_t)(value - TRANSIENT_USER_FIRST), name);
+    memcpy(nameDst, name, SAMPLE_DISPLAY_NAME_LEN);
 }
 
 static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *buf)
 {
     const char *p = menuText_dash;
     switch (menuId) {
-    case MENU_TRANS:          p = transientNames[curParmVal+1];     break;
+    case MENU_TRANS:
+        /* S087 P3: past the built-in names, the user one-shots as sNN
+         * (menu_formatTransientName() gives the 8-character name). */
+        if (curParmVal < (uint8_t)transientNames[0][0]) {
+            p = transientNames[curParmVal+1]; break;
+        }
+        if ((uint8_t)(curParmVal - TRANSIENT_USER_FIRST) <
+            sampleMemory_getNumSamples()) {
+            menu_formatUserShortName('s',
+                (uint8_t)(curParmVal - TRANSIENT_USER_FIRST), buf);
+            return;
+        }
+        break;   /* no such sample: "---" */
     case MENU_AUDIO_OUT:      p = outputNames[curParmVal+1];        break;
     case MENU_FILTER:         p = filterTypes[curParmVal+1];        break;
     case MENU_WAVEFORM:
@@ -11792,6 +11886,10 @@ _Static_assert(sizeof(mixFmNames) / sizeof(mixFmNames[0]) == 5u,
 /* S086 P2: the wav list (stock waves) ends where the user samples start. */
 _Static_assert((sizeof(waveformNames) / sizeof(waveformNames[0])) - 1u == OSC_SAMPLE_START,
                "waveformNames must list every waveform below OSC_SAMPLE_START");
+/* S087 P3: the user one-shots follow the last built-in transient name. */
+_Static_assert((sizeof(transientNames) / sizeof(transientNames[0])) - 1u ==
+               TRANSIENT_USER_FIRST,
+               "transientNames must list Snp, Ofs and every built-in click");
 /* S087 B: the typ table and the OSC_TYPE_* list must stay in step. */
 _Static_assert((sizeof(oscTypeNames) / sizeof(oscTypeNames[0])) - 1u == OSC_TYPE_COUNT,
                "oscTypeNames must list every OSC_TYPE");
@@ -13144,7 +13242,9 @@ static uint8_t menu_automationValueMax(const ParamDescriptor *descriptor)
 
         switch (menuId) {
         case MENU_FILTER:     return (uint8_t)(filterTypes[0][0] - 1u);
-        case MENU_TRANS:      return (uint8_t)(transientNames[0][0] - 1u);
+        case MENU_TRANS:
+            /* S087 P3: step automation reaches the user one-shots too. */
+            return (uint8_t)(transient_entryCount() - 1u);
         case MENU_LFO_WAVES:  return (uint8_t)(lfoWaveNames[0][0] - 1u);
         case MENU_RETRIGGER:  return (uint8_t)(retriggerNames[0][0] - 1u);
         case MENU_SYNC_RATES: return (uint8_t)(syncRateNames[0][0] - 1u);
@@ -13218,21 +13318,21 @@ static void menu_formatAutomationValue3(const ParamDescriptor *descriptor,
 }
 
 /*
- * Format a voice parameter's 7-bit automation value (S087 P1).
+ * Format a voice parameter's 7-bit automation value (S087 P1; S087 P2).
  *
  * What:       for an oscillator wave row (DTYPE_MENU, MENU_WAVEFORM) of a voice
- *             target: the 3-character code of the entry the value selects for
- *             that slot's oscillator - sNN/lNN/wNN for user content, the stock
- *             name for a stock wave, the number when the value selects nothing
- *             (menu_formatWaveCell() on a cell built for the target). Every
- *             other row: menu_formatAutomationValue3().
- * Why:        S087 P0 §12.4 and impl. §10.7: the automation display read every
- *             wave value as stock or sNN, so osc1 under slp/wtb and the
- *             modulators' l/w entries showed the wrong item.
+ *             target: menu_formatWaveValue3() on a cell built for the target
+ *             (sNN/lNN/wNN, the stock name, or "---" when the value selects
+ *             nothing). Every other row: menu_formatAutomationValue3().
+ * Why:        S087 P0 §12.4 and impl. §10.7: the automation display must name
+ *             the entry the value selects for that slot's oscillator. S087 P2:
+ *             this function's 8-byte name buffer received the catalogue
+ *             getters' terminating NUL one byte past its end; the shared helper
+ *             now owns the buffers.
  * Inputs:     target (canonical voice parameter ID), descriptor, value, buf[3].
- * Outputs:    buf (3 characters).
+ * Outputs:    buf (3 characters, not terminated).
  * Accessors:  the step-automation amount display and the automation edit line.
- * Affiliates: menu_formatWaveCell(), menu_formatAutomationValue3(),
+ * Affiliates: menu_formatWaveValue3(), menu_formatAutomationValue3(),
  *             instrumentParam_slot()/instrumentParam_local().
  */
 static void menu_formatVoiceAutomationValue3(uint16_t target,
@@ -13244,21 +13344,13 @@ static void menu_formatVoiceAutomationValue3(uint16_t target,
         (uint8_t)(descriptor->dtype >> 4) == MENU_WAVEFORM &&
         instrumentParam_isVoiceParameter(target)) {
         menu_cell_t cell;
-        char name[SAMPLE_DISPLAY_NAME_LEN];
-        char code[3];
 
         memset(&cell, 0, sizeof(cell));
         cell.kind = MENU_CELL_INSTRUMENT;
         cell.slot = instrumentParam_slot(target);
         cell.descriptor_index = instrumentParam_local(target);
         cell.descriptor = descriptor;
-        menu_formatWaveCell(&cell, value, name, code);
-        if (code[0] != ' ')
-            memcpy(buf, code, 3u);
-        else if (name[0] != ' ')
-            memcpy(buf, name, 3u);
-        else
-            numtostrpu(buf, value, ' ');
+        menu_formatWaveValue3(&cell, value, buf);
         return;
     }
     menu_formatAutomationValue3(descriptor, value, buf);
@@ -14347,6 +14439,11 @@ static void menu_repaintGeneric(void)
                                         &editDisplayBuffer[1][13]);
                     break;
                 }
+                /* S087 P3: a user one-shot transient shows its name on the
+                 * left; the sNN code goes on the right as for every menu. */
+                if (menuId == MENU_TRANS)
+                    menu_formatTransientName((uint8_t)value,
+                                             &editDisplayBuffer[1][0]);
                 getMenuItemNameForValue(menuId, value, &editDisplayBuffer[1][13]);
                 break; }
             case DTYPE_PM63:

@@ -1,8 +1,9 @@
 # LXR-02 DSP Performance Audit
 
-> **Where to start (Session 075 close).** This document is the cost audit and
+> **Where to start (Session 087 close).** This document is the cost audit and
 > the record of every DSP optimisation and cost addition (the priority list
-> at the end; S074 added items 27–31, S075 items 32–35). For how the DSP works today, what each
+> at the end; S074 items 27–31, S075 items 32–35, S085 items 36–40, S086
+> items 41–44, S087 items 45–49). For how the DSP works today, what each
 > stage costs and how to change it, read `INSTRUMENTS_DSP_REFERENCE.md` and
 > `EFFECTS_MIXER_DSP_REFERENCE.md` (both in this folder). The S073
 > refactor's full record is `073_SESSION_HANDOFF_LOG.md` §6; the S074 DSP
@@ -874,6 +875,34 @@ the new copy/clear work is foreground-only and bounded.
     (layout-insensitive) and fails if one grew. Hardware (user): the
     six-slot worst-case Scene with an LFO on every `pos` reads the same
     `cpu` as before.
+
+### Session 087 additions (record in `087_SESSION_HANDOFF_LOG.md`)
+
+45. **REPLACED (S087): v1 user-sample loops removed.** The four v1
+    dispatchers (`calcUserSampleOscBlock`, `calcUserSampleOscFmBlock`,
+    `calcUserSampleOscRingBlock`, `calcUserSampleOscSyncBlock`) and
+    `osc_syncWaveform()` are deleted. `osc_interp_a/b` (128 B DTCM)
+    released. `stub_silence_buffer` (512 B flash) removed. Replaced by
+    the type-aware readers below.
+46. **ADDED (S087): `smp`/`slp` sample readers.** Eight loops in
+    `.itcm.s087` (`osc_smpPlainBlock`, `osc_smpFmBlock`,
+    `osc_smpSyncBlock`, `osc_smpRingBlock`, `osc_slpPlainBlock`,
+    `osc_slpFmBlock`, `osc_slpSyncBlock`, `osc_slpRingBlock`). Q20.12
+    phase, install-time zero padding, fixed loop region. Per-sample
+    counts: `slp` plain 27, FM 49–50, ring 42; `smp` ring 38. All below
+    the frozen Drum `fm` ceiling (≈ 92 linked).
+47. **ADDED (S087): `wtb` wavetable reader.** Frame blending through two
+    interpolation slots (stamps 1..255). `osc_wtbPlanBlock()` splits at
+    frame crossings. Four blend copies (plain, FM, ring, sync). Blend
+    inner loops: 34–38 / 42–46 / 43–47 / 44–48. Per-slot blend cost
+    +10..+13 over one frame, against ≈ +66 today.
+48. **ADDED (S087 P3): transient click sample list.** New sample loop: 20
+    instructions per sample. Built-in click loop: 22 (unchanged). No
+    worst-case increase.
+49. **CHANGED (S087): ITCM.** 8,512 (S086) → 15,032 (S087 D, before P1
+    v1 removal) → 12,640 (after P1). Net +4,128 B from S086. Build at
+    S087 close: text 670,628, Flash headroom 83,036 B, ITCM 12,640 /
+    16,384 B.
 
 ---
 

@@ -1825,11 +1825,16 @@ Current keys by family:
   before parsing), preserving the old sound; older firmware skips the key.
   It is written in `[params]` and `[morph]` like any image row.
   `oscN_wave` values: 0 `Sin`, 1 `Tri`, 2 `Saw`, 3 `Rec`, 4 `Noi`, 5 `Cym`,
-  6 `Re3`, 7 `Sw3` (S086), then the installed user samples from 8
-  (`OSC_SAMPLE_START`). **Before S086 the user samples started at 6:** a
-  file saved earlier that selected user sample *n* (value 6 + *n*) now
-  plays `Re3`/`Sw3` (*n* ≤ 1) or user sample *n* − 2. There is no
-  migration (decided S085/S086).
+  6 `Re3`, 7 `Sw3` (S086), then installed catalogue entries from 8
+  (`OSC_SAMPLE_START`): `s01..sNN` (samples), `l01..lNN` (looped),
+  `w01..wNN` (wavetables). Under `typ` = `wav`, values ≥ 8 are ignored.
+  Under `smp`/`slp`/`wtb`, the entry type determines what plays.
+  **Before S086 the user samples started at 6:** a file saved earlier that
+  selected user sample *n* (value 6 + *n*) now plays `Re3`/`Sw3`
+  (*n* ≤ 1) or catalogue entry *n* − 2. There is no migration.
+  `osc1_type` (S087): 0 `wav`, 1 `smp`, 2 `slp`, 3 `wtb`. Missing key
+  defaults to 0 (`wav`). `INSTRUMENT_PARAM_FLAG_SELECTOR` — not morphable,
+  stored single-ended. Step-automatable with no ramp.
   `osc2_mod_type` (Drum) stores 0 `fm`, 1 `mix`, 2 `snc`, 3 `rng`
   (S085). 0 and 1 keep their pre-S085 meaning; the key is written by
   every save, so older files carry 0 or 1. A byte above 3 plays and shows
@@ -2302,48 +2307,55 @@ Current Pattern notes:
 
 ## Sample
 
-Status: legacy sample/loop install path exists; this target root pool naming is
-part of the future typed layout.
+Status: catalogue v2 installed by `Load:[Samples]` (S087). Root pool naming
+is part of the future typed layout.
 
-`Sample/` contains an alphanumerically sorted list of `.wav` files to write to
-flash:
+`/samples/` contains `.wav` files to write to flash. The installer walks
+files first, then subfolders, in natural order (`storage_naturalCompare()`),
+depth limit 3. Only mono 16-bit 44.1 kHz PCM WAV files are accepted.
 
 ```text
-Sample/
-  <sample name>.wav
+/samples/
+  01_kick.wav
+  02_snare.wav
+  subfolder/
+    hat_open.wav
 ```
 
-Samples play from normal oscillators. Looping is an oscillator-level option,
-not a directory-level distinction.
+Numeric prefixes are stripped from display names (`01_kick.wav` → `kick`).
+Names over 8 characters show first 4 + last 4 (`longfilename.wav` →
+`longname`). Up to 128 samples.
+
+The `osc1_type` selector chooses how samples play: `smp` (one-shot), `slp`
+(looped, from `smpl` loop or whole file), `wtb` (wavetable, see below).
+The modulator `wav` list and the transient click list also reference
+installed samples. Looping is determined by the `slp` type and the `.wav`
+file's `smpl` loop chunk (loop 1 when present, else the whole sample).
 
 ## Wavetable
 
-Status: settled target; the library/browser remains deferred, while Scene and
-Bank child `.fx` v2 storage is implemented in Session 072 ST6.
+Status: catalogue v2 (S087). The library/browser remains deferred.
 
-`Wavetable/` contains numbered wavetable folders:
-
-```text
-Wavetable/
-  000 <wavetable name>/
-  001 <wavetable name>/
-```
-
-Each wavetable folder contains an alphanumerically sorted set of `.wav` files:
+`/wavetables/` contains one subfolder per wavetable; the `.wav` files inside
+are frames. Natural order. At most 128 frames per wavetable, any frame
+length (A16). Up to 128 wavetables.
 
 ```text
-Wavetable/000 <wavetable name>/
-  <sample a>.wav
-  <sample b>.wav
-  <sample c>.wav
+/wavetables/
+  000_saw_morph/
+    001.wav
+    002.wav
+    ...
+  001_pad_evolve/
+    001.wav
+    002.wav
 ```
 
-Wavetables are loaded during the sample-load process and written to flash. They
-behave like normal samples in storage, but are only read by wavetable
-oscillators. A wavetable oscillator operates on one wavetable at a time and can
-be modulated across all samples inside that wavetable. Wavetable samples always
-play looped. The menu shows the wavetable name when selecting the wavetable
-used by the oscillator.
+Wavetables are loaded during the sample-load process and written to flash
+with catalogue v2 entries. A `wtb` oscillator operates on one wavetable at a
+time; `pos` selects the frame position, and frame blending uses the
+interpolation slots. `w` entries in the modulator `wav` list use the
+wavetable's first frame. The menu shows the wavetable name.
 
 ## Effect
 

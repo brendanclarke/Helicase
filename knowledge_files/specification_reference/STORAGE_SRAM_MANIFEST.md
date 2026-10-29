@@ -4,13 +4,23 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 086 close: stock table waves `Re3`/`Sw3` and the
-  oscillator `pos` row (2026-10-28), `dev-ph7-voice_expansion`. DEV link:
-  `text=658,872`, `data=424`, `bss=430,296`; flash payload 659,296 B of
-  753,664 B (**headroom 94,368 B**). ITCM 8,512 / 16,384 B; DTCM statics
-  4,472 B; FXBUF 126,592 B at 0x20001180 (margin 3,712 B). The entries below
-  run newest first; the S083 assessment fixes (2026-10-21) changed text to
-  604,200 and bss to 430,112 (−8 B alignment) with no new statics.
+- **Current as of:** Session 087 close (2026-10-29),
+  `dev-ph7-voice_expansion`, uncommitted on `f3805478`. DEV link:
+  `text=670,628`, `data=420`, `bss=412,392`; flash payload 670,628 B of
+  753,664 B (**headroom 83,036 B**). ITCM 12,640 / 16,384 B; DTCM statics
+  4,344 B; FXBUF arena margin 3,840 B. The entries below run newest first.
+- **S087 changes (2026-10-28/29):** major oscillator rewrite. Net RAM:
+  - SRAM1: −13,441 (removed `sample_manifest[120]` + count) −5,040
+    (SampleMemory caches) +560 (installer walker) +1 (install_fault) +128
+    (trigger batch stack in `voiceControl_processPending`) +1
+    (`seq_pending_automation_done`) = **net ≈ −17,791 B SRAM1**
+  - DTCM: −128 B (`osc_interp_a/b` removed) +2 B (`modNode_interpLastStamp`
+    + `modNode_interpReserved`) = **net −126 B DTCM**, arena margin
+    3,712 → 3,840 B
+  - Program flash: +11,756 B net (new readers, type system, catalogue v2
+    code, menu formatters; minus v1 loops, `stub_silence_buffer`)
+  - ITCM: 8,512 → 12,640 B (+4,128 B; S087 sample/wavetable loops in
+    `.itcm.s087`, minus v1 user-sample loops removed in P1)
 - **S086 changes (2026-10-27/28):** no RAM. Program flash +45,336 B:
   - the stock tables `sq3Table` and `sw3Table` (`wavetableStock.c`,
     22,528 B each, `.rodata`, below the sample-flash floor);
@@ -405,19 +415,32 @@ only works while sector 6 holds no code.
 
 ## 4. Sample flash (sectors 7–11)
 
-### 4.1 Layout
+### 4.1 Layout (catalogue v2, S087)
 
 | Region | Range | Size |
 |---|---|---:|
-| Sample audio | `0x080C0000–0x081FF69F` | 1,308,320 B (about 14.8 s of 44.1 kHz 16-bit mono) |
-| `SampleInfo[120]` | `0x081FF6A0–0x081FFC3F` | 1,440 B (12 B each: 3-char name, pad, 32-bit size in samples with bit 31 = loop flag, absolute offset) |
-| Display names `[120][8]` | `0x081FFC40–0x081FFFFF` | 960 B |
+| Sample/wavetable audio | `0x080C0000–0x081FDFFF` | up to 1,302,528 B |
+| Catalogue v2 | `0x081FE000–0x081FFFFF` | 8,192 B |
 
-- Before Session 073 the audio started at `0x08080000` (sector 6) and held
-  1,570,464 B.
-- Macros: `Core/SampleRom/SampleMemory.h` (`SAMPLE_ROM_START_ADDRESS
-  0x080C0000`, `SAMPLE_FIRST_SECTOR 7u`, `SAMPLE_MAX_COUNT 120`).
-- RAM caches of this table live in SRAM1 (§8, `SampleMemory.c`, 5,040 B).
+**Catalogue v2 structure (8 KB at `SAMPLE_CATALOGUE_START_ADDRESS`):**
+- Header (32 B): magic `0x4C584332` ("LXC2", programmed last),
+  version, `sample_entry_bytes` (28), `wavetable_entry_bytes` (20),
+  `sample_count`, `wavetable_count`, `data_end`, flags, reserved
+- Sample entries (128 × 28 B): `start_address`, `frame_count`,
+  `loop_start`, `loop_end`, `gain_code`, `bits`, `flags` (bit 0 = loop
+  present), `name[8]`
+- Wavetable entries (128 × 20 B): `start_address`, `frame_len`,
+  `frame_count`, `bits`, `flags`, `name[8]`, padding
+
+Items from `0x080C0000` (sector 7) upward. The v1 layout
+(`SampleInfo[120]` at `0x081FF6A0`, display names at `0x081FFC40`) is
+removed; a v1 catalogue at boot shows `Samples invalid` / `reload
+samples`. The S086 stock-wave flash block is not needed.
+
+- Before Session 073 the audio started at `0x08080000` (sector 6).
+- RAM caches of the v1 table (SRAM1, `SampleMemory.c`, 5,040 B) are
+  removed in S087. The catalogue v2 entries live in flash and are read
+  directly.
 
 ### 4.2 Guards
 
@@ -430,12 +453,23 @@ only works while sector 6 holds no code.
 - `memtest.c` uses the same floor (`ERASE_SECTOR_FLOOR`).
 - D-cache is invalidated over the erased or programmed range.
 
-### 4.3 Installing
+### 4.3 Installing (S087 catalogue v2)
 
-- Load:[Samples] (Load page only) runs `menu_loadSamplesModal()`: it waits up
-  to 10 s for a storage operation already running, suspends audio, erases
-  sectors 7–11, installs `/samples` then appends `/loops`, and reinitialises
-  audio. Only mono 16-bit 44.1 kHz PCM WAV files are accepted.
+- Load:[Samples] runs `menu_loadSamplesModal()`: suspends audio, erases
+  sectors 7–11, walks `/samples` (files first, subfolders, natural order,
+  depth limit 3) then `/wavetables` (each subfolder = one wavetable, `.wav`
+  files inside = frames), and commits the catalogue.
+- Only mono 16-bit 44.1 kHz PCM WAV files are accepted.
+- `sampleInstall_begin()`: erases sectors 7–11; nothing programmed.
+- `sampleInstall_commit()`: programs header words 1–7 first, magic word 0
+  last. An interrupted install reads as EMPTY.
+- `sampleInstall_abortItem()`: discards buffered bytes, never rewinds the
+  cursor onto programmed flash. Lost space is accepted.
+- `install_fault`: set by failed erase or write; stops further writes.
+- Display names: numeric prefix stripped (`01_kick.wav` → `kick`); names
+  over 8 chars show first 4 + last 4 characters.
+- Wavetable limits: any frame length, at most 128 frames.
+- Gain code: `2^(code/24)`, peak within 0.25 dB of full scale.
 - A pre-S073 install is rejected (0 samples): its entry 0 is at
   `0x08080004`, below the floor.
 - **Rollback hazard:** a pre-S073 firmware on a unit that has a pre-S073
@@ -456,7 +490,7 @@ only works while sector 6 holds no code.
 | DTCM `.dtcmz` | `0x20000200` | part of DTCM | 3,960 | — |
 | DTCM `.dtcm_fxbuf` (arena) | `0x20001180` | part of DTCM | 126,592 | 0 (reserved arena) |
 | **DTCM total** | `0x20000000` | **131,072** | **131,064** | **8** |
-| ITCM `.itcm` (code) | `0x00000000` | 16,384 | **8,512** (S086) | 7,872 |
+| ITCM `.itcm` (code) | `0x00000000` | 16,384 | **12,640** (S087) | 3,744 |
 | SRAM2 `.devwdg_noinit` | `0x2007c000` | 16,384 | 0 | see stack note |
 
 - Static data RAM (SRAM1 + DTCM including the arena) is 428,900 B;
@@ -530,25 +564,29 @@ and runs with zero wait states.
 
 | Function | Bytes |
 |---|---:|
-Sizes at the S086 close (the S085 close figure, where different, in
-brackets; the S086 growth is the stock-wave case in each dispatcher):
+Sizes at the S087 close (12,640 B total; the v1 user-sample loops are
+removed, replaced by the `.itcm.s087` readers):
 
 | Function | Bytes |
 |---|---:|
-| `calcNextOscSampleBlock` (two specialisations) | 1,016 + 960 (876 + 824) |
-| `calcUserSampleOscFmBlock` | 444 |
-| `calcNextOscSampleFmBlock` | 468 (440) |
-| `osc_setFreq` (standalone since S073) | 404 (400) |
-| `calcUserSampleOscBlock` | 396 |
+| `calcNextOscSampleBlock` (two specialisations) | 1,016 + 960 |
+| `calcNextOscSampleFmBlock` | 468 |
+| `osc_setFreq` (standalone since S073) | 404 |
 | `calcSampleOscFmBlock` | 196 |
 | `calcFmBlock` (three specialisations, plus S086's variable-table one) | 192 × 3 + 184 |
 | Veneers for the interpolation blocks, `memcpy` | 8 × 3 |
-| S085 P1: `calcNextOscSampleSyncBlock` / `calcNextOscSampleRingBlock` (dispatchers) | 404 / 576 (396 / 552) |
-| S085 P1: `osc_renderSyncWave` / `osc_renderPlainWave` | 276 / 876 (232 / 728; both LTO `.constprop.0`) |
+| S085 P1: `calcNextOscSampleSyncBlock` / `calcNextOscSampleRingBlock` (dispatchers) | 404 / 576 |
+| S085 P1: `osc_renderSyncWave` / `osc_renderPlainWave` | 276 / 876 |
 | S085 P1: `osc_buildSyncList` | 54 |
 | S085 P1: sync copies (table / sine / crash) | 176 / 172 / 176 |
-| S085 P1: ring copies, depth ramped (table / sine / noise / crash / user sample) | 192 / 184 / 108 / 196 / 448 |
+| S085 P1: ring copies, depth ramped (table / sine / noise / crash) | 192 / 184 / 108 / 196 |
 | S085 P1: interpolated sync/ring variants | inlined into the two dispatchers |
+| S087: `osc_smp*Block` / `osc_slp*Block` (8 loops) | in `.itcm.s087` |
+| S087: `wtb` blend copies (plain / FM / ring / sync) | in `.itcm.s087` |
+
+Removed in S087 P1: `calcUserSampleOscBlock` (396 B),
+`calcUserSampleOscFmBlock` (444 B), v1 user-sample ring copy (448 B),
+`osc_syncWaveform()`. Net ITCM: 8,512 → 12,640 B.
 
 - Only oscillator code is placed here. Filter and distortion ITCM placement
   (`ENABLE_EFFECT_INITCM_CODE`) is off: it measured worse in Session 023,
@@ -571,7 +609,8 @@ DTCM is single-cycle, uncached, and not reachable by DMA.
 | `mixer_fx_bus` | 256 | `.dtcmz`; two 32-frame channels, `sample_mx_t` while voices sum, float while the Effect runs |
 | `effects_runtime` | 76 | `.dtcmz`; union holding the active Effect type's DSP state (StereoFilter 76 B: two filter states; CrumpBit 56 B, S074). Only 20 B spare before the union grows. |
 | `busComp` | 32 | `.dtcmz` (S074); master bus compressor state: smoothed power, fast and memory gain reduction, previous gain, pending sidechain weight, crossover low-pass per channel, active pair. Approved up to 32 B; `_Static_assert(<= 32)`. Owner `BusCompressor.c`. |
-| `osc_interp_a`, `osc_interp_b` | 64 each | `.dtcmz`; waveform-interpolation scratch |
+| ~~`osc_interp_a`, `osc_interp_b`~~ | ~~64 each~~ | removed S087 P1; 128 B released to arena |
+| `modNode_interpLastStamp`, `modNode_interpReserved` | 1 + 1 | `.dtcmz` (S087); wavetable interpolation slot management |
 | `mixer_decimation_rate` [7], `mixer_decimation_cnt` [6], `mixer_voice_samples` [6] | 28 + 24 + 12 | `.dtcmz`; per-slot decimators |
 | `mixer_voice_last_gain`, `mixer_send_last_gain` | 24 each | `.dtcmz`; per-slot dry and send ramp origins |
 | `mixer_fx_return_last_gain` | 8 | `.dtcmz`; Effect return ramp origins |

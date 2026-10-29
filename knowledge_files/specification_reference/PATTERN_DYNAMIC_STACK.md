@@ -628,8 +628,9 @@ When the step's own trigger is deferred (shuffle or micro-timing, §6.4), the
 entries are queued at the **deferred fire time**, in TIM3, by
 `seq_fireDeferred(track)`, together with the resetting trigger. The
 foreground order `voiceControl_processPending()` →
-`seq_drainPendingAutomation()` then gives reset → trigger → that step's
-automation, exactly as for an on-time step. Before S081 a delayed trigger
+`seq_drainPendingAutomationTo(mark)` (inside `voiceControl_processPending()`,
+S087 D6) then gives prepare → automation → fire, exactly as for an on-time
+step. Before S081 a delayed trigger
 fired after its own step's automation had landed and restored it away.
 
 - A step with automation but no trigger still queues at its step start
@@ -656,9 +657,11 @@ without a condition plays unconditionally. A step whose condition fails
 produces no trigger and no automation entries; previously held automation
 values persist through the skipped step. Erase is independent of condition.
 
-The foreground drain (`seq_drainPendingAutomation()`) runs inside
-`audio_check_and_render()` immediately after `voiceControl_processPending()`,
-within the per-chunk render loop. For each entry, it validates the target and
+The foreground drain (`seq_drainPendingAutomationTo(mark)`, S087 D6) runs
+inside `voiceControl_processPending()`, between prepare and fire, within
+the per-chunk render loop. Before S087 it was a separate
+`seq_drainPendingAutomation()` call in `main.c` after
+`voiceControl_processPending()`. For each entry, it validates the target and
 dispatches by target range. Values stay in descriptor space (identity
 mapping, no MIDI-CC-style 7→8-bit expansion); only voice Morph Scene targets
 expand to 0..255:
@@ -706,9 +709,11 @@ start new ramps (§6.2b).
 
 ### 6.2 Automation reset on voice retrigger and transport restart
 
-All trigger sources funnel through `voiceControl_triggerNow()` in
-`MidiVoiceControl.c`. When the trigger carries a **reset**, it calls
-`seq_restoreAutomatedParameters(voice)` before
+All trigger sources funnel through `voiceControl_prepareTrigger()` →
+`voiceControl_fireTrigger()` in `MidiVoiceControl.c` (split from
+`voiceControl_triggerNow()` in S087 D6; automation drains between the two).
+When the trigger carries a **reset**, `voiceControl_prepareTrigger()` calls
+`seq_restoreAutomatedParameters(voice)` before the fire stage calls
 `instrumentManager_triggerTrack()`. The restore iterates set bits in the dirty
 bitmap using `__builtin_ctzll`, writes the `morph_interpolation[]` value for
 each dirty descriptor back to the runtime, and clears the bitmap. The dirty
@@ -751,10 +756,10 @@ step's first trigger**:
 - `voiceControl_popPending()` tests and clears the voice's bit inside its
   existing PRIMASK section (TIM3 sets bits concurrently) and returns it as
   `reset`.
-- `voiceControl_triggerNow(voice, note, vel, reset)` keeps the order
-  `preset_applyDeferredSceneSlotForTrigger()` → restore (only if `reset`) →
-  trigger, sidechain, LED. The restore must not move ahead of the deferred
-  Scene-slot apply.
+- `voiceControl_prepareTrigger(voice, note, vel, reset)` (S087 D6) keeps
+  the order `preset_applyDeferredSceneSlotForTrigger()` → restore (only if
+  `reset`). `voiceControl_fireTrigger()` then does trigger, sidechain, LED.
+  The restore must not move ahead of the deferred Scene-slot apply.
 - After the ring is empty, `voiceControl_processPending()` takes the
   remaining mask under PRIMASK (copy, store 0) and restores each voice it
   took: reset-only renewals, and resets whose trigger entry was dropped.
@@ -768,8 +773,9 @@ step's first trigger**:
   can be consumed by a still-queued roll retrigger of step N; both run
   before the drain, so that retrigger only sounds with the base values.
 
-All of this precedes `seq_drainPendingAutomation()` in `main.c`, so a step's
-own automation always lands after its reset.
+All of this precedes the automation drain inside
+`voiceControl_processPending()` (S087 D6), so a step's own automation always
+lands after its reset and before the trigger fires.
 
 On transport restart (Session 070), `seq_setStepIndexToStart()` calls
 `seq_restoreAllAutomation()` (walks all 6 voice dirty bitmaps and restores
@@ -805,7 +811,7 @@ never reverted by anything (also not when recording or overdub ends).
   (6 × `u64`, 48 B, foreground only).
 - The cleared held bit lets the edit's own interpolated write through
   `presetMorph_writeRuntimeBase()`, so the new value sounds at once.
-- While the override bit is set, `seq_drainPendingAutomation()` skips that
+- While the override bit is set, `seq_drainPendingAutomationTo()` skips that
   target, and an automation ramp on it is cancelled (§6.2b).
 - The override is cleared by any trigger of the voice
   (`seq_restoreAutomatedParameters()` clears `seq_menuOverride[slot]`
@@ -915,7 +921,7 @@ other choices, not intermediate settings.
 | `seq_rampConsumeTrack()` / `seq_rampConsumeSteps()` | foreground | consume the stepped flag and free that track's ramps (values stay where they are) |
 | `seq_writeInstrumentAutomation(scene, target, value)` | foreground | the drain's Instrument write (descriptor in the played Scene, `instrumentManager_writeRuntime()`, held bit) — shared by the drain and the ramp service |
 | `seq_rampStartIfPaired()` | foreground, drain | start a ramp for a just-written entry of A |
-| `seq_rampService()` | foreground, `main.c` render loop right after `seq_drainPendingAutomation()` | write running ramps |
+| `seq_rampService()` | foreground, `main.c` render loop right after `voiceControl_processPending()` (which includes the drain, S087 D6) | write running ramps |
 | `seq_rampNowQ4()` | foreground | master position ×16 plus the sub-tick fraction from the PPQ µs stamp |
 
 **Predicting B (TIM3, at A's step start).** `seq_rampNextStep()` mirrors the

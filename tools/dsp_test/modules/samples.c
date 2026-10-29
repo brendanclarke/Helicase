@@ -28,8 +28,9 @@
  *               order      1. digits compare as numbers (w2 < w10);
  *                          2. case-insensitive text order;
  *                          3. a numeric prefix plus '_', '-' or ' ' is
- *                             stripped, the extension dropped when asked, the
- *                             name padded to 8 characters.
+ *                             stripped, the extension dropped when asked; up
+ *                             to 8 characters kept, a longer name shortened
+ *                             to its first 4 and last 4; padded to 8.
  * Why:        the catalogue is what the oscillator bind reads; a layout,
  *             count or conversion mistake is a playback fault (S087 P0 C-50,
  *             A15, §5.2). Break proof: the Makefile's samples rule builds a
@@ -355,7 +356,9 @@ static void run_order(void)
     storage_displayNameFromLfn(name, "3 wave.wav", 1u);
     expect(memcmp(name, "wave    ", 8u) == 0, "law 3: space prefix");
     storage_displayNameFromLfn(name, "longer_than_eight.wav", 1u);
-    expect(memcmp(name, "longer_t", 8u) == 0, "law 3: truncation");
+    expect(memcmp(name, "longight", 8u) == 0, "law 3: first 4 + last 4");
+    storage_displayNameFromLfn(name, "kick_hard_01.wav", 1u);
+    expect(memcmp(name, "kickd_01", 8u) == 0, "law 3: names differing at the end stay distinct");
 }
 
 int main(void)

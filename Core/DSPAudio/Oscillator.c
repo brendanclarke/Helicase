@@ -1675,6 +1675,29 @@ void osc_userBind(OscInfo* osc)
 }
 
 /*
+ * Restart a modulator's one-shot sample on a trigger (S087 P3; see the
+ * header).
+ *
+ * What:       stock-wave modulators return at once (no change to today's
+ *             trigger). A user entry is bound by osc_setFreq() first, so an s
+ *             entry selected on this hit's own step (automation drains before
+ *             the trigger) is the one that restarts; then phase 0 for s.
+ * Why:        a one-shot reaches its end pad and holds it; without a reset a
+ *             never-reset modulator stayed silent after its first hit.
+ * Inputs:     osc (modulator).  Outputs: bind, phaseInc; phase for s.
+ * Accessors:  Drum_trigger(), HiHat_trigger().
+ * Affiliates: osc_setFreq(), osc_userBind().
+ */
+void osc_modulatorTrigger(OscInfo* osc)
+{
+	if (osc->oscType != OSC_TYPE_MODLIST || osc->waveform < OSC_SAMPLE_START)
+		return;
+	osc_setFreq(osc);
+	if (osc->sampleCacheLooped == OSC_BIND_SMP)
+		osc->phase = 0u;
+}
+
+/*
  * Typed trigger start (S087 stage D; see the header).
  *
  * What:       pos start = ((pos x frames) >> 7) << 12; slp clamps a start at

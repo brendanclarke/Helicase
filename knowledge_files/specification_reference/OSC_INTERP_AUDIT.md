@@ -159,5 +159,14 @@ the blend fraction and `next` > base.
 - **Cost:** an interpolated `snc` or `rng` render is two copies + the
   blend, below the interpolated FM carrier (two FM renders + the blend).
   The variants are inlined into their ITCM dispatchers.
-- **Future (S086 plan):** wavetable frame blending is to claim the same
-  interpolation units, with stepping as the fallback when none is free.
+- **S087: wavetable frame blending.** Wavetable (`wtb`) oscillators now
+  claim the interpolation slots for frame blending. `OscInfo.interpStamp`
+  (byte 35) holds 1..255 (never 0; 0 = "no claim"); stamps are managed by
+  `modNode_interpStampOf()` (wraps 255→1). Claims are sticky: a grant made
+  this block is kept. Without a slot: nearest frame (the Q9 fallback).
+  `osc_setType()` clears the stamp when the type changes (A18).
+  `osc_interp_a/b` (128 B DTCM) was removed; the wavetable blend runs
+  in-line in the `.itcm.s087` copies.
+  The v1 `calcUserSampleOsc*Block` functions, `osc_syncWaveform()`,
+  `modNode_getWaveTargetOsc()`, `modNode_getMaxWaveformIndex()` and the
+  `stub_silence_buffer` are all deleted.

@@ -666,15 +666,17 @@ void storage_makeSavedInstrumentDisplayFilename(char *dst,
 int8_t storage_naturalCompare(const char *a, const char *b);
 
 /*
- * Catalogue display name from a long filename (S087 stage C).
+ * Catalogue display name from a long filename (S087 stage C; S087 P2).
  *
  * What:       optionally drops the extension, strips a leading numeric prefix
- *             followed by '_', '-' or a space, copies up to 8 characters and
- *             pads with spaces.
+ *             followed by '_', '-' or a space, then keeps a name of up to 8
+ *             characters as it is and shortens a longer one to its first 4 and
+ *             last 4 characters; pads with spaces.
  * Why:        a sample's catalogue name is its LFN without the extension; a
- *             wavetable's name is its folder name (S087 P0 §5.2).
+ *             wavetable's name is its folder name (S087 P0 §5.2). First 4 +
+ *             last 4 keeps numbered sets distinct (S087 P2).
  * Inputs:     lfn, strip_ext.  Outputs: dst[8], always space-padded.
- * Accessors:  the install walker; test_natural_order.c.
+ * Accessors:  the install walker; tools/dsp_test/modules/samples.c.
  * Affiliates: storage_naturalCompare().
  */
 void storage_displayNameFromLfn(char dst[8u],

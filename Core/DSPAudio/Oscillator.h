@@ -751,6 +751,27 @@ void osc_setType(OscInfo* osc, uint8_t type);
 void osc_userBind(OscInfo* osc);
 
 /*
+ * Restart a modulator's one-shot sample on a trigger (S087 P3).
+ *
+ * What:       for a modulator (OSC_TYPE_MODLIST) whose wav value selects a
+ *             user entry, binds the entry selected now (osc_setFreq(): list
+ *             clamp, bind, phaseInc) and, when it is an s entry (one-shot,
+ *             OSC_BIND_SMP), sets the phase to 0 so the sample plays from its
+ *             start on every hit. Stock waves and l/w entries are untouched:
+ *             they keep the engine's existing free-run or reset behaviour.
+ * Why:        Drum osc2 and the HiHat modulators never reset on a trigger
+ *             (S085 R11/R12), so an s entry played once after selection and
+ *             then held its end pad (silence) for every later hit (S087 P3
+ *             hardware report).
+ * Inputs:     osc (a modulator), after the trigger's osc_setBaseNote().
+ * Outputs:    the bind fields and phaseInc; phase = 0 for an s entry.
+ * Accessors:  Drum_trigger(), HiHat_trigger() (Cymbal already zeroes its
+ *             modulator phases on every trigger).
+ * Affiliates: osc_setFreq(), osc_userBind(), OSC_BIND_SMP.
+ */
+void osc_modulatorTrigger(OscInfo* osc);
+
+/*
  * Number of user entries for a type (S087 stage D).
  *
  * What:       wav -> 8 stock entries; smp/slp -> sample count; wtb -> table

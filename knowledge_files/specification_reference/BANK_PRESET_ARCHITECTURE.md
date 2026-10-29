@@ -4,7 +4,11 @@
 
 This is the authoritative reference for how parameters are stored in resident
 memory across the Bank, Scene, Kit, Instrument, and Effect hierarchy, current
-as of the **Session 080 close** (2026-10-11). S073 changed nothing here. S074
+as of the **Session 087 close** (2026-10-29). S087 added the
+`INSTRUMENT_PARAM_FLAG_SELECTOR` (0x08) flag for the `osc1_type` row: a
+selector parameter is not morphable, stored single-ended, and applied before
+the Morph image on every slot reset; `morph_interpolation[]` for a selector
+always reads the Normal value. S073 changed nothing here. S074
 added the bus compressor Scene settings and the fourth fader mode. S075
 added:
 
