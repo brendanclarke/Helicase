@@ -56,31 +56,105 @@
 // #include "sequencer.h"
 
 INCCMZ ModulationNode velocityModulators[6];
-/* Oscillator waveform interpolation budget for one 32-frame DSP block.
+/* Oscillator waveform interpolation slots for one 32-frame DSP block.
 **
-** modNode_resetTargets() starts a new generation at the top of each mixer
-** block. The first OSC_WAVE_INTERP_MAX_ACTIVE eligible oscillator waveform
-** targets receive a fractional base/next pair; later eligible targets fall
-** back to integer waveform IDs for that block. This bounds CPU cost while
-** preserving the headline user-sample interpolation path. */
+** S087 D: the two slots now serve wavetable frame blending (stage E) and, from
+** S088, the run mode; a wav LFO steps. modNode_resetTargets() still starts a
+** new generation per block. */
 static INCCMZ uint8_t modNode_waveInterpEnabled = 0;
 static INCCMZ uint32_t modNode_waveInterpGeneration = 1u;
 static INCCMZ uint8_t modNode_waveInterpActiveCount = 0u;
+/* S087 E: sticky slot reservations (A8). */
+static INCCMZ uint8_t modNode_interpReserved = 0u;
+/*
+ * Slots held by ongoing itp crossfades (S088 P0 §3 Layer 3b).
+ *
+ * What:       the mixer's active fade count for the block about to render,
+ *             stored before modNode_resetTargets() folds it into
+ *             modNode_interpReserved (last block's wavetable grants + this).
+ * Why:        the itp fades are not wavetable grants, so the existing
+ *             "reserve last block's holders" rule cannot see them; without the
+ *             extra term a wtb blend could claim an itp-held slot (3 renders).
+ * Inputs:     modNode_setItpReserved().  Outputs: modNode_resetTargets().
+ * RAM:        1 B INCCMZ next to modNode_interpReserved.
+ * Accessors:  mixer_calcNextSampleBlock().
+ * Affiliates: modNode_interpClaim(); OSC_WAVE_INTERP_MAX_ACTIVE;
+ *             instrumentManager_activeItpFadeCount().
+ */
+static INCCMZ uint8_t modNode_itpReserved = 0u;
 
-static OscInfo* modNode_getWaveTargetOsc(uint16_t param)
+/*
+ * Stamp of the block that just ended (S087 P1).
+ *
+ * What:       modNode_interpStampOf() of the previous block's generation, taken
+ *             by modNode_resetTargets() before the generation advances.
+ * Why:        a holder of last block is recognised by this stamp (sticky
+ *             claims, A8); one byte is the approved R-E1 size (impl. §11 F18:
+ *             a uint32_t made R-E1 +5 B).
+ * Inputs:     modNode_resetTargets().  Outputs: read by modNode_interpClaim().
+ * RAM:        1 B INCCMZ (R-E1, with modNode_interpReserved: +2 B).
+ */
+static INCCMZ uint8_t modNode_interpLastStamp = 0u;
+
+/*
+ * Slot stamp of a block generation (S087 P1).
+ *
+ * What:       (generation % 255) + 1: 1..255, never 0; consecutive generations
+ *             (also across the 32-bit wrap that skips 0) give different stamps.
+ * Why:        OscInfo.interpStamp uses 0 for "no slot" (impl. §11 F11).
+ * Inputs:     generation.  Outputs: stamp.
+ * Accessors:  modNode_resetTargets(), modNode_interpClaim().
+ * Affiliates: OscInfo.interpStamp.
+ */
+static inline uint8_t modNode_interpStampOf(uint32_t generation)
 {
-	(void)param;
-	return 0;
+	return (uint8_t)((generation % 255u) + 1u);
 }
 
-uint8_t modNode_getMaxWaveformIndex(void)
+/*
+ * Claim one of the two interpolation slots for this block (S087 P1; S087
+ * stage E; see the header).
+ *
+ * What:       with the global toggle on: an oscillator already granted in this
+ *             block keeps its grant; a holder of last block (its stamp equals
+ *             modNode_interpLastStamp) takes one of the reserved slots; a
+ *             newcomer is granted only when grants plus unclaimed reservations
+ *             leave room under OSC_WAVE_INTERP_MAX_ACTIVE. A grant stamps the
+ *             oscillator with this block's stamp (1..255).
+ * Why:        S087 P0 A3/A7/A8: wavetable blending takes one of the two slots
+ *             and steps without one; sticky grants avoid block-rate flipping;
+ *             S088's run mode shares the slots. impl. §11 F11: stamps are never
+ *             0, so a holder is always recognised.
+ * Inputs:     osc (OscInfo*); the generation, the counters.
+ * Outputs:    grant flag; osc->interpStamp; the counters.
+ * Accessors:  osc_wtbBlendBlock(), osc_wtbFmBlendBlock(),
+ *             osc_wtbRingBlendBlock(), osc_wtbSyncBlendBlock().
+ * Affiliates: modNode_resetTargets(), modNode_interpStampOf();
+ *             OscInfo.interpStamp; osc_setType() (clears the stamp).
+ */
+uint8_t modNode_interpClaim(void* oscp)
 {
-	const uint8_t sampleCount = sampleMemory_getNumSamples();
-	const uint16_t maxWave = (uint16_t)OSC_SAMPLE_START + sampleCount;
-	if (maxWave == 0u) {
-		return CRASH;
+	OscInfo* osc = (OscInfo*)oscp;
+	const uint8_t stamp = modNode_interpStampOf(modNode_waveInterpGeneration);
+
+	if (!osc || !modNode_waveInterpEnabled)
+		return 0u;
+	if (osc->interpStamp == stamp)
+		return 1u;
+	if (osc->interpStamp == modNode_interpLastStamp &&
+	    modNode_interpReserved != 0u) {
+		modNode_interpReserved--;
+		modNode_waveInterpActiveCount++;
+		osc->interpStamp = stamp;
+		return 1u;
 	}
-	return (uint8_t)(maxWave - 1u);
+	if ((uint16_t)modNode_waveInterpActiveCount + modNode_interpReserved <
+	    OSC_WAVE_INTERP_MAX_ACTIVE) {
+		modNode_waveInterpActiveCount++;
+		osc->interpStamp = stamp;
+		return 1u;
+	}
+	return 0u;
 }
 
 static float modNode_clampFloat(float value, float min, float max)
@@ -429,12 +503,46 @@ static void modNode_restoreLfoPair(ModulationNode *primary,
 	modNode_restoreTarget(secondary);
 }
 
+/*
+ * Store the itp fade reservation for the coming block (S088 P0 §3 3b; see the
+ * header). One byte; modNode_resetTargets() folds it into the reserved count.
+ */
+void modNode_setItpReserved(uint8_t slots)
+{
+	modNode_itpReserved = slots;
+}
+
 void modNode_resetTargets()
 {
 	uint8_t i;
+	/*
+	 * Slot reservations for the new block (S087 P1; S087 stage E).
+	 *
+	 * What:       records the stamp of the block that just ended, advances the
+	 *             generation (skipping 0), and reserves last block's grants for
+	 *             their holders before clearing the grant count.
+	 * Why:        sticky claims (S087 P0 A8). impl. §11 F11: the stamp was the
+	 *             generation's low byte, 0 every 256 blocks, which is also
+	 *             "no slot"; both holders lost their slots for one block.
+	 * Affiliates: modNode_interpClaim(), modNode_interpStampOf().
+	 */
+	modNode_interpLastStamp = modNode_interpStampOf(modNode_waveInterpGeneration);
 	modNode_waveInterpGeneration++;
 	if (modNode_waveInterpGeneration == 0u)
 		modNode_waveInterpGeneration = 1u;
+	/*
+	 * S088 P0 §3 Layer 3b: ongoing itp crossfades are pre-claimed too.
+	 *
+	 * What:       reserves last block's wavetable grants plus the mixer's count
+	 *             of active itp fades (modNode_itpReserved), so
+	 *             modNode_interpClaim() can hand only the remaining slots to a
+	 *             wavetable blend. Claim order per block: ongoing itp, then
+	 *             wtb, then new itp.
+	 * Why:        a fade must never be cut mid-blend, and two fades already fill
+	 *             the two-slot budget. The sum is at most 2 + 2 (uint8_t).
+	 */
+	modNode_interpReserved =
+		(uint8_t)(modNode_waveInterpActiveCount + modNode_itpReserved);
 	modNode_waveInterpActiveCount = 0u;
 	for(i=0;i<6;i++)
 		modNode_restoreTarget(&velocityModulators[i]);
@@ -764,37 +872,6 @@ void modNode_updateValuePolarity(ModulationNode* vm, float val, uint8_t polarity
 
 		if (modulated < 0.f) {
 			modulated = 0.f;
-		}
-
-		if (modNode_waveInterpEnabled) {
-			OscInfo *osc = (vm->destinationMode == MOD_NODE_DEST_DIRECT_PARAMETER)
-				? (OscInfo *)vm->waveInterpTarget
-				: modNode_getWaveTargetOsc(vm->destination);
-			if (osc && modNode_waveInterpActiveCount < OSC_WAVE_INTERP_MAX_ACTIVE) {
-				const uint8_t maxWave = modNode_getMaxWaveformIndex();
-					if (modulated > maxWave) {
-						modulated = maxWave;
-					}
-
-					uint8_t base = (uint8_t)modulated;
-					if (base > maxWave) {
-						base = maxWave;
-					}
-					float frac = modulated - (float)base;
-					uint8_t next = base;
-					if (base < maxWave) {
-						next = (uint8_t)(base + 1u);
-					} else {
-						frac = 0.f;
-					}
-
-					*dst = base;
-					osc->waveInterpNext = next;
-					osc->waveInterpFrac = frac;
-					osc->waveInterpGeneration = modNode_waveInterpGeneration;
-					modNode_waveInterpActiveCount++;
-					break;
-				}
 		}
 
 		*dst = (uint8_t)modulated;

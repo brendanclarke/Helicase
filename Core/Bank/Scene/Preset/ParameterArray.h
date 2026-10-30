@@ -214,8 +214,10 @@ enum ParamEnums
 	 * S080 BAR overlay settings (perf_btn_lt/rt, perf_note_lt/rt).
 	 *
 	 * What: four persisted global parameters for the SHIFT+REC overlay page.
-	 * The *_BTN ids select a trigger type (vmx, v10, v64, v32, flm, fls, r/8,
-	 * r16, r32, r64, r6t, 128); the *_NOTE ids select a MIDI note (0 = def, else
+	 * The *_BTN ids select a trigger type 0..14 (vmx, v10, v64, v32, flm,
+	 * fls, then the nine STEP roll rates 1/8 8tr 16 16t 32 32t 64 64t 128 =
+	 * step-roll index type - 5; S084 P3, no migration of older values);
+	 * the *_NOTE ids select a MIDI note (0 = def, else
 	 * 0..127). Why: the overlay behaviour must survive power cycles, so it is
 	 * written to settings.cfg alongside the existing globals. Inputs: SHIFT+REC
 	 * edits and settings load/default. Outputs: parameter_values[] reads by

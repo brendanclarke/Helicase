@@ -26,6 +26,10 @@
 #define MENU_FILTER         1
 #define MENU_WAVEFORM       2
 #define MENU_AUDIO_OUT      3
+/* S087 B: osc1_type table. Id 4 was unused; DTYPE_MENU keeps typ out of
+** S081 ramps (seq_rampDtypeOk() ramps numeric dtypes only) and avoids a new
+** dtype, which would wrap the 4-bit dtype field (S087 P0 §12.5). */
+#define MENU_OSC_TYPE       4
 #define MENU_SYNC_RATES     5
 #define MENU_LFO_WAVES      6
 #define MENU_RETRIGGER      7
@@ -40,8 +44,6 @@
 static const char menuText_ok[]    = "ok ";
 static const char menuText_off[]   = "off";
 static const char menuText_on[]    = "on ";
-static const char menuText_mix[]   = "mix";
-static const char menuText_fm[]    = "fm ";
 static const char menuText_dash[]  = "---";
 static const char menuText_blank[] = "   ";
 static const char menuText_any[]   = "any";
@@ -106,6 +108,21 @@ static const char lfoWaveNames[][4] = {
 static const char lfoPolarityNames[][4] = {
     {3}, {"neg"},{"pos"},{"bi"},
 };
+/*
+ * Drum osc2 mod mode names (S085 P1).
+ *
+ * What:       [0] = count (4), then "fm ", "mix", "snc", "rng" in stored
+ *             order (DrumVoice.h DRUM_MOD_FM .. DRUM_MOD_RNG).
+ * Why:        DTYPE_MIX_FM grew from two values to four. One table replaces
+ *             the two literals menuText_fm / menuText_mix, so the names,
+ *             clamp and automation maximum share one count.
+ * Accessors:  menu.c menu_getMixFmName(), menu_clampCellValue(),
+ *             menu_automationValueMax().
+ * Affiliates: DrumParameters.c osc2_mod_type; DrumVoice.h DRUM_MOD_COUNT.
+ */
+static const char mixFmNames[][4] = {
+    {4}, {"fm "},{"mix"},{"snc"},{"rng"},
+};
 /* rollRateNames / MENU_ROLL_RATES retired in place (S081 A3-5, Q14). */
 static const char syncRateNames[][4] = {
     {12},
@@ -125,8 +142,60 @@ static const char extSyncNames[][4] = {
 static const char trackPlayModeNames[][4] = {
     {6}, {"fwd"},{"rev"},{"pip"},{"rnd"},{"onc"},{"1fr"},
 };
+/* S086 P2: Re3/Sw3 = SQ3/SW3 (Oscillator.h); the count must equal
+** OSC_SAMPLE_START (asserted in menu.c). User samples follow as sNN. */
 static const char waveformNames[][4] = {
-    {6}, {"Sin"},{"Tri"},{"Saw"},{"Rec"},{"Noi"},{"Cym"},
+    {8}, {"Sin"},{"Tri"},{"Saw"},{"Rec"},{"Noi"},{"Cym"},{"Re3"},{"Sw3"},
+};
+/*
+ * osc1_type names (S087 stage B).
+ *
+ * What:       [0] = count (OSC_TYPE_COUNT), then wav smp slp wtb.
+ * Why:        the typ cell, its automation display and the single-parameter
+ *             view share one table; the menu shows only the first
+ *             OSC_TYPE_SELECTABLE entries.
+ * Accessors:  getMaxEntriesForMenu(), getMenuItemNameForValue(),
+ *             menu_automationValueMax() (menu.c).
+ * Affiliates: OSC_TYPE_* (Oscillator.h); MENU_OSC_TYPE.
+ */
+static const char oscTypeNames[][4] = {
+    {4}, {"wav"},{"smp"},{"slp"},{"wtb"},
+};
+/*
+ * DTYPE_ON_OFF high-nibble sub-type tag (S088 P0 §2.1 D12).
+ *
+ * What:       ONOFF_TAG_OSC_RUN = 1u. The descriptor dtype byte stores
+ *             DTYPE_ON_OFF | (ONOFF_TAG_OSC_RUN << 4) = 0x16 so that menu.c
+ *             can tell a run-mode cell from an ordinary on/off cell. The low
+ *             nibble (& 0x0f) is 6 = DTYPE_ON_OFF; the high nibble (>> 4)
+ *             is 1.
+ * Why:        all 16 DTYPE_MENU ids and all 16 dtype enum values are taken
+ *             (S078 binding mandate). The high nibble of DTYPE_ON_OFF was
+ *             unused: every existing >> 4 read of the dtype byte sits inside
+ *             a DTYPE_MENU case (verified S088 P0 §2.1).
+ * Inputs:     the four engine *Parameters.c osc1_run descriptor rows.
+ * Outputs:    read by the six DTYPE_ON_OFF switch sites in menu.c.
+ * Accessors:  ROW_SELECT_ONOFF_SPECIAL (each *Parameters.c).
+ * Affiliates: oscRunNames below; S088_P0_OSC_RUN_MODES.md §2.1.
+ */
+#define ONOFF_TAG_OSC_RUN   1u
+/*
+ * Oscillator run-mode names (S088 P0 §2.1).
+ *
+ * What:       [0] = count (3), then rst, fre, itp. Same shape as mixFmNames:
+ *             a leading count byte and 3+1 character entries.
+ * Why:        the six tagged DTYPE_ON_OFF sites in menu.c use this table for
+ *             display and clamping; the step-automation display and the
+ *             single-parameter view read it too.
+ * Accessors:  menu.c menu_formatCellValue3(), menu_repaintGeneric(),
+ *             menu_clampCellValue(), menu_automationValueMax(),
+ *             menu_formatAutomationValue3() and the step-automation edit
+ *             display.
+ * Affiliates: ONOFF_TAG_OSC_RUN above; the osc1_run descriptor rows;
+ *             OSC_RUN_COUNT (Oscillator.h) is the same 3.
+ */
+static const char oscRunNames[][4] = {
+    {3}, {"rst"},{"fre"},{"itp"},
 };
 static const char outputNames[][7] = {
     {6}, {"St1"},{"St2"},{"L1"},{"R1"},{"L2"},{"R2"},
@@ -292,7 +361,8 @@ static const char conditionNames[][4] = {
  * Add "64t" and "128". Why: the table indices and names must match the new
  * 10-entry seq_rollPpq table. Stored bytes shift with no migration. Inputs:
  * roll index 0..9. Affiliates: seq_rollPpq, menu_getRollRateName, STEP roll
- * clamp.
+ * clamp, perfBtnTypeNames (overlay roll types 6..14 = these indices 1..9,
+ * S084 P3).
  */
 static const char stepRollRateNames[][4] = {
     {10},
@@ -300,17 +370,24 @@ static const char stepRollRateNames[][4] = {
 };
 
 /*
- * S080 E4: PERF BAR overlay trigger-type names.
+ * PERF BAR overlay trigger-type names (S080 E4; S084 P3 one roll list).
  *
- * [0]=count; [1..12] = stored value 0..11. Rendered by the static-param
- * special case in menu.c (S080 E6) because all 16 DTYPE_MENU ids are taken.
- * Order: vmx, v10, v64, v32, flm, fls, then the held roll rates r/8..128.
- * Affiliates: PAR_PERF_BTN_LT/RT, the overlay trigger dispatch (E12).
+ * [0] = count 15; [1..15] = stored value 0..14. 0..3 single velocities
+ * (vmx v10 v64 v32), 4..5 flams (flm fls), 6..14 held rolls with exactly
+ * the STEP roll labels and rates: value v is step-roll index v - 5 (1/8,
+ * 8tr, 16, 16t, 32, 32t, 64, 64t, 128). Why: PERF offered only six of the
+ * nine step rates under different names (S084 P0 F1); one list makes every
+ * step roll playable live and keeps one vocabulary (Q1). Stored values
+ * 6..11 changed meaning; no migration (user Q2, 2026-10-24). Rendered by
+ * the static-param special case in menu.c (all DTYPE_MENU ids are taken),
+ * which reads the count from [0][0]. Affiliates: PAR_PERF_BTN_LT/RT,
+ * stepRollRateNames, seq_rollPpq(), buttonHandler_overlayStart()
+ * (BH_OVERLAY_TYPE_* layout), menu_clampCellValue().
  */
 static const char perfBtnTypeNames[][4] = {
-    {12},
+    {15},
     {"vmx"},{"v10"},{"v64"},{"v32"},{"flm"},{"fls"},
-    {"r/8"},{"r16"},{"r32"},{"r64"},{"r6t"},{"128"},
+    {"1/8"},{"8tr"},{" 16"},{"16t"},{" 32"},{"32t"},{" 64"},{"64t"},{"128"},
 };
 
 /*

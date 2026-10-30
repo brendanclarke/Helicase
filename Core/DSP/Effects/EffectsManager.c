@@ -1428,7 +1428,7 @@ uint8_t effects_applyAutomation(uint8_t track, uint8_t local, uint8_t value7)
      * after a menu edit clears the menu hold and applies. The track argument is
      * unused after owner removal but kept for signature stability. Inputs:
      * owner_track, local, value. Outputs: overlay set, menuHold cleared.
-     * Affiliates: seq_drainPendingAutomation Effect branch, effects_service
+     * Affiliates: seq_drainPendingAutomationTo() Effect branch, effects_service
      * resolution.
      */
     if (track >= EFFECT_AUTOMATION_TRACK_LIMIT ||

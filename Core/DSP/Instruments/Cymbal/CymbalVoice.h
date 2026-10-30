@@ -87,6 +87,53 @@ typedef struct CymbalStruct
 
 	uint8_t 	volumeMod;	//modulate volume by midi velocity if 1
 
+	/*
+	 * Oscillator run mode (S088 P0 §2.4).
+	 *
+	 * What:       0 rst, 1 fre, 2 itp (OSC_RUN_*); stored by the osc1_run
+	 *             descriptor row through IM_SPECIAL_OSC_RUN.
+	 * Why:        Cymbal_triggerVoice() and Cymbal_calcSyncBlockVoice() branch
+	 *             on it for the carrier phase reset, the modulator phase
+	 *             reset (rst only), the gain-matched retrigger and the itp
+	 *             carrier crossfade.
+	 * Inputs:     the descriptor writer.  Outputs: read by trigger and render.
+	 * Accessors:  Cymbal_initVoice() (0), the writer, trigger, render.
+	 * Affiliates: OSC_RUN_* (Oscillator.h); the osc1_run row
+	 *             (CymbalParameters.c); InstrumentManager.c runtime-slot reserve.
+	 */
+	uint8_t runMode;
+
+	/*
+	 * Amp-ramp armed flag / previous-block compound amp gain (S088 P0 §3 2a/2b).
+	 *
+	 * What:       ampRampArm = 1 when the last trigger was a fre/itp retrigger
+	 *             into an audible tail; lastAmpGain is the ampGain
+	 *             (velo x egValueOscVol, or egValueOscVol) used on the previous
+	 *             block.
+	 * Why:        the armed render ramps the post-chain gain from lastAmpGain;
+	 *             every other block passes equal endpoints, so the rst output
+	 *             stays bit-identical.
+	 * Inputs:     Cymbal_triggerVoice() (arm), Cymbal_calcSyncBlockVoice()
+	 *             (update).  Outputs: voicePost_addGainDist() endpoints.
+	 * Affiliates: voicePostChain.h; Cymbal_initVoice() (0u / 0.0f).
+	 */
+	uint8_t ampRampArm;
+	float lastAmpGain;
+
+	/*
+	 * itp old-carrier snapshot (S088 P0 §3 Layer 3a).
+	 *
+	 * What:       the frozen carrier state filled on an itp retrigger while the
+	 *             amp gain is audible and a slot is free; inert when active = 0.
+	 * Why:        oscSection_renderOldCarrier() blends it into the new carrier;
+	 *             the modulators keep running and are not snapshotted.
+	 * Inputs:     Cymbal_triggerVoice().
+	 * Outputs:    Cymbal_calcSyncBlockVoice(); the mixer's slot count.
+	 * Affiliates: OscCarrierSnapshot; OSC_RUN_ITP_SAMPLES;
+	 *             instrumentManager_slotHasActiveItpFade().
+	 */
+	OscCarrierSnapshot snapshot;
+
 	SnapEg 		snapEg;
 
 } CymbalVoice;

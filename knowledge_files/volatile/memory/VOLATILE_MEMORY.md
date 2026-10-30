@@ -31,7 +31,130 @@ Do not recommend bumping `AUTOSAVE_PARAMETER_GETS_PER_WRITE` or adjusting
 capture timing unless the user explicitly asks. The section-based CRC
 format redesign is the chosen path for write performance.
 
-## Current carryover after Session 083
+## Current carryover after Session 085
+
+Session 085 (2026-10-27, `dev-ph7-voice_expansion`) added the Drum `mod`
+values `snc` (hard sync) and `rng` (ring) under the user rule "absolutely no
+increase in CPU cycles overall".
+- **Before it:** a first S085 attempt (the full oscillator cherry-pick:
+  types, run modes, render pool) hit 100 % CPU on hardware with `pwm`
+  everywhere and was rolled back
+  (`Helicase-dev-ph7-voice-pwm-spike/`, reference only).
+- **`snc`:** the FM-page oscillator is a clock (`syncClock`), not rendered;
+  a reset list drives sync copies of the stock loops; only the slave is
+  heard.
+- **`rng`:** the ring law folded into per-waveform carrier copies.
+- **After the P1 hardware pass:** both follow the mod envelope with the `fm`
+  response (amt² × env); the `rng` depth is ramped per sample and snapped at
+  a trigger.
+- **The S086 plan** (oscillator type expansion) was written.
+
+**State and records:**
+- **State:** P1 is `8812bffd`. The follow-ups and the close-out documents
+  are uncommitted (fact only).
+- **Final link (DEV):** `text=613,536`, `data=424`, `bss=430,296`; payload
+  613,960 B (139,704 B free); ITCM 7,792 / 16,384 B.
+- **Hardware:** P1 passed. The ramp re-test was not reported. The S084
+  V1–V7 matrix is still recorded as open.
+- **Durable authorities:** `085_SESSION_HANDOFF_LOG.md`;
+  `INSTRUMENTS_DSP_REFERENCE.md` §5.1.1, §6.1, §8, §9.3, §10;
+  `CPU_USE_DSP_AUDIT.md` items 36–40.
+- **Carry-over list:** `knowledge_files/volatile/S078_WORKING_NOTES.md`
+  (rewritten as the S085 → S086 notes).
+- **Next:** S086 (`S086_P1_OSC_TYPE_EXPANSION.md`), then S087 (run modes;
+  free-run "ramp always" trial).
+
+### Working preferences confirmed in Session 085
+
+- **The CPU rule is absolute for oscillator work.**
+  - Present the gate as numbers (the dearest setting before vs after, per
+    voice).
+  - Measure before claiming: `fpseq.py` on standalone and linked objects,
+    then the user's device check.
+  - When the margin is thin, say so plainly (the `rng` margin is 1–2
+    instructions).
+- **"Let me know how you're going to implement it before writing code":**
+  - for a behaviour change, propose the change with its cost and the
+    decisions needed, numbered with a recommendation each;
+  - code only after the user answers;
+  - then implement narrowly ("direct, narrowly focused implementation"),
+    with comment blocks documenting it.
+- **Corrections arrive tersely and are binding:**
+  - "leave it as it is, let's not confuse things": the trigger is not
+    changed for new modes;
+  - "use amt² for all three": match the existing `fm` response exactly;
+  - "don't do it for the crash, just treat it as noise".
+- **Answer "what's complicated about it?" questions with the mechanism,**
+  then give the cheaper design that dissolves the problem (sync = a reset at
+  the cycle start; why sample masters were hard; the clock design).
+- **Show size and cost with real numbers** when the user questions them
+  ("24 KB for the crash is huge: how big is the sample?"): measure, tabulate
+  the alternatives, recommend.
+- **Verify a schedule's code before hand-over:** compile it with the
+  firmware flags and run its host test and break proofs in the scratchpad.
+  Fix the test, not the code, when the test is wrong (two test bugs were
+  found that way).
+- **Assessments:** rebuild the baseline in a scratch git worktree for a
+  linked-image comparison when a claim depends on LTO. Remove the worktree
+  afterwards.
+- **Future decisions are recorded where they will be found,** for example
+  the S087 "ramp always" note in the code comment, the DSP reference, the
+  log and `MEMORY.md`.
+
+## Carryover from Session 084 (closed)
+
+Session 084 (2026-10-22..26) fixed live and step rolls: a time-window step
+roll engine on the master tick (carry rule Q4), PERF/MIDI overlay rolls and
+flam mains fired in TIM3 by a Sequencer live engine, one roll list (PERF
+types = the nine STEP rates), every held roll recorded as a per-track span
+with its `pv` rhythm, external clock ticks interpolated, and the B1
+re-configure fix. It ran twice: the first tree also carried the voice
+expansions, went over budget and was rolled back (the spike,
+`../Helicase-dev-ph7-spike/`, `26fb7c3`, reference only); the roll fix-up
+was re-implemented alone. The LXR1 and LXR-02 import tools (host only) were
+logged in this session.
+
+- **State:** `dev-ph7-voice_expansion`, base `91265e9c`; S084 code and
+  close-out documents uncommitted at the S084 close (fact only).
+- **Final link (DEV):** `text=609,288`, `data=424`, `bss=430,200`; payload
+  609,712 B (143,952 B free).
+- **Hardware:** V1–V7 (`084_SESSION_HANDOFF_LOG.md` §9.2) still recorded as
+  open at the S085 close (confirm closed or waived).
+- **Durable authorities:** `084_SESSION_HANDOFF_LOG.md`;
+  `PATTERN_DYNAMIC_STACK.md` §6/§6.7.4; `MODULE_INTERCHANGE_SPEC.md` "BAR
+  overlay trigger engine"; `MIDI_SPEC.md`; `FILESYSTEM_SPEC.md` "Import
+  tools".
+- **Carry-over list:** `knowledge_files/volatile/S078_WORKING_NOTES.md`
+  (rewritten as the S084 → S085 notes).
+- **Next sessions (post-mortem plan):** S085 oscillator/modulation-mode
+  cherry-pick; S086 the effects chain inside ≈ 88 cycles per voice.
+
+### Working preferences confirmed in Session 084
+
+- **Re-implementation from a schedule:** when a branch is abandoned, the
+  user re-implements from the schedule on a clean tree. Before that, check
+  every entry against the reference code and the current tree (line
+  anchors), fold approved assessment fixes in as full entries with code
+  (not summaries), fix build-order claims, define the host check the gate
+  needs, and mark the documents "not yet implemented".
+- **Reference trees are read-only:** copy only the hunks the session
+  document names; shared files carry other phases' changes. Keep reference
+  directories out of commits (`.gitignore`).
+- **Schedule comments never cite entry IDs** (`P1-12`): the schedule is
+  deleted at close-out, so in-code text names functions.
+- **RAM:** the user approves the itemised table explicitly ("mark the ram as
+  approved"); record the approval date in the schedule and the log.
+- **Assessments** check conformance against the reviewed reference, re-run
+  the build and the host check independently, then look for new defects in
+  code written after the last review (here the A1–A3 fixes: B1). Fixes are
+  "narrow, targeted" and appended as a new schedule section.
+- **A host check counts only if the old code fails it** (post-mortem rule).
+- **Session gating:** each session ends with a hardware check before the
+  next starts.
+- **Close-out keeps every detail** of the task handoffs (the user deletes
+  them), including tasks done between sessions (the converters).
+
+## Carryover from Session 083 (closed)
 
 Session 083 (2026-10-21/22, `dev-ph6-midi`) implemented the MIDI rework:
 `Core/MIDI/` rebuilt as single-role modules, consume-then-route, the N1–N5
@@ -49,7 +172,7 @@ Morph sets FX Morph, SHIFT+REC `pv<`/`pv>`, CC2 sets the PERF BAR overlay).
 - **Durable authorities:** `083_SESSION_HANDOFF_LOG.md`; `MIDI_SPEC.md` (the
   complete MIDI use and code reference); `FILESYSTEM_SPEC.md` "`midilrn.cfg`".
 - **Carry-over list:** `knowledge_files/volatile/S078_WORKING_NOTES.md`
-  (rewritten as the S083 → S084 notes).
+  (S083 section).
 
 ## Carryover from Session 082 (closed)
 

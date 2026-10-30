@@ -211,8 +211,8 @@ static void audio_check_and_render(void)
         for (uint32_t frame = 0; frame < AUDIO_DMA_FRAMES; frame += OUTPUT_DMA_SIZE) {
             uint32_t basepri;
             voiceControl_processPending();
-            seq_drainPendingAutomation();
-            /* S081 P2: automation ramps, after the step values land. */
+            /* S081 P2 / S087 A: ramps after the step values land (the drain
+            ** runs inside voiceControl_processPending()). */
             seq_rampService();
             basepri = dsp_maskLowPriorityIrqs();
             mixer_calcNextSampleBlock(&buf[frame * 2], &buf2[frame * 2]);
@@ -541,6 +541,36 @@ static void boot_showFilesystemSubstep(uint8_t substep)
 #define BOOT_SUBSTEP_DIAGNOSTIC_CALLBACK NULL
 #endif
 
+/*
+ * Sample catalogue boot notice (S087 stage C).
+ *
+ * What:       when sampleMemory_catalogueState() is STALE (a v1 install from
+ *             an older firmware), show "Samples invalid" / "reload samples"
+ *             for about two seconds; EMPTY and V2 show nothing.
+ * Why:        S087 P0 §5.2: v1 data is not readable as catalogue v2; the user
+ *             must reinstall from the card.
+ * Inputs:     the catalogue state.  Outputs: the LCD notice.
+ * Affiliates: SampleMemory.c sampleMemory_catalogueState();
+ *             menu_loadSamplesModal().
+ */
+static void boot_showSampleCatalogueNotice(void)
+{
+    uint16_t t0;
+
+    if (sampleMemory_catalogueState() != SAMPLE_CATALOGUE_STALE)
+        return;
+    lcd_clear();
+    lcd_home();
+    lcd_string("Samples invalid");
+    lcd_setcursor(0, 2);
+    lcd_string("reload samples");
+    lcd_waitForIdle();
+    t0 = time_sysTick;
+    while ((uint16_t)(time_sysTick - t0) < 2000u) {
+        /* Hold the notice long enough to read before the splash continues. */
+    }
+}
+
 int main(void)
 {
     #define EXTI_IMR (*((volatile uint32_t *)0x40013C00UL))
@@ -580,6 +610,7 @@ int main(void)
 
     triggerJacks_init();
     sampleMemory_init();
+    boot_showSampleCatalogueNotice();
     /*
      * Establish retained Scene type ownership before constructing tagged DSP
      * runtime members.
@@ -660,7 +691,6 @@ int main(void)
 
         /* Menu init — must be before preset load (memsets parameter_values) */
         menu_init();
-        menu_setNumSamples(sampleMemory_getNumSamples());
         /*
          * Mount can publish a timeout before Menu initialization, but Menu is
          * still required by the runtime path reached after recovery. Input is

@@ -1,9 +1,9 @@
 # Helicase SD Card Filesystem Specification
 
 This is the authoritative product-level filesystem and instrument-file
-reference through Session 082 (Session 069 for every phase before Phase 5;
-the Session 072, 073, 074, 075, 078, 080, 081 and 082 additions are noted
-below). It includes the Session 058 Bank
+reference through Session 084 (Session 069 for every phase before Phase 5;
+the Session 072, 073, 074, 075, 078, 080, 081, 082, 083 and 084 additions
+are noted below or in their sections). It includes the Session 058 Bank
 I/O and stopped-playback speedups, the Session 059 typed Instrument-index
 repair, and Session 060's `.hcnames` atomic safe-write/refreshed flag, the boot
 Instrument `.hcindex` generation fix, and system-wide macOS AppleDouble
@@ -74,8 +74,9 @@ Session 080 (PERF performance surface, `MODULE_INTERCHANGE_SPEC.md` "PERF
 performance surface"):
 
 - `settings.cfg` gains seven Global keys — `perf_btn_lt`, `perf_note_lt`,
-  `perf_btn_rt`, `perf_note_rt` (BAR overlay trigger type 0..11 / note
-  0..127, 0 = the track's note), `scd` (direct scene change division 0..9),
+  `perf_btn_rt`, `perf_note_rt` (BAR overlay trigger type 0..14 since S084
+  P3 / note 0..127, 0 = the track's note), `scd` (direct scene change
+  division 0..9),
   `qcd` (queued change division 0..17), `qac` (queue action 0..8) — and the
   terminator becomes `lines=24` (see "settings.cfg"). A P1-era file's `pcr=`
   line (a duplicate PC reset, removed) is skipped as an unknown key; the PC
@@ -106,6 +107,19 @@ Session 081 (live record, automation ramps; `081_SESSION_HANDOFF_LOG.md`;
 - The recording track `rtk` is runtime only; nothing new is saved for live
   record. Pattern AutoSave is gated only while live record is writing
   (armed and running), not merely armed.
+
+Session 084 (roll fix-up; `084_SESSION_HANDOFF_LOG.md`):
+
+- `settings.cfg` `perf_btn_lt`/`perf_btn_rt` range **0..14**: 0..3 single
+  velocities, 4..5 flams, 6..14 the nine STEP roll rates (step-roll index =
+  value − 5). Values 6..11 written by older firmware now name different
+  rates; they are **not migrated** (user Q2). The parser does not clamp;
+  a value above 14 plays as type 0 and the menu clamps it on the first
+  edit.
+- Live-recorded roll steps now store the overlay's `pv` velocity rhythm in
+  the step's `rtm` special (PAT4 unchanged: the special already existed).
+- Host-only import tools for LXR1 and LXR-02 card content write Kits,
+  library Patterns and Banks in this document's formats ("Import tools").
 
 - AsyncFATFS stores a cluster-rounded size while a file is open for writing,
   so an interrupted write leaves an overlong file;
@@ -713,7 +727,9 @@ midi_routing (S083: 0..7 = off UtD DtD DtU bth DtA AtD all),
 screensaver_on_off, bar_reset_mode, prescaler_clock_in,
 prescaler_clock_out1, prescaler_clock_out2, follow, and osc_wave_interp, and
 since Session 080 `perf_btn_lt`, `perf_note_lt`, `perf_btn_rt`,
-`perf_note_rt`, `scd`, `qcd`, `qac` (writer cases 17..23; defaults 0), and
+`perf_note_rt`, `scd`, `qcd`, `qac` (writer cases 17..23; defaults 0; the
+`perf_btn_*` range is 0..14 since S084 P3 and older values are not
+migrated), and
 since the S083 follow-up `perf_vel_lt`, `perf_vel_rt` (cases 24/25: the
 SHIFT+REC `pv<`/`pv>` overlay roll velocity rhythm, a packed roll-rhythm
 byte as the step `rtm` special, 0 = off; the menu snaps an unlisted byte and
@@ -1779,10 +1795,10 @@ The physical SD-card key vocabulary lives in each instrument descriptor table:
 
 Current descriptor counts:
 
-- Drum: 39 descriptors.
-- Snare: 38 descriptors.
-- Cymbal: 39 descriptors.
-- HiHat: 39 descriptors.
+- Drum: 40 descriptors.
+- Snare: 39 descriptors.
+- Cymbal: 40 descriptors.
+- HiHat: 40 descriptors.
 
 Descriptor key lookup is type-local. The same key may exist in multiple
 instrument types but resolves against the loaded slot type.
@@ -1798,10 +1814,38 @@ those siblings remain separate normal modulation targets.
 Current keys by family:
 
 - Oscillator and noise: `osc1_wave`, `osc1_pitch_coarse`,
-  `osc1_pitch_fine`, `osc2_wave`, `osc2_pitch_coarse`,
+  `osc1_pitch_fine`, `osc1_position`, `osc2_wave`, `osc2_pitch_coarse`,
   `osc2_mod_amount`, `osc2_mod_type`, `osc3_wave`,
   `osc3_pitch_coarse`, `osc3_mod_amount`, `noise_freq`,
   `osc1_noise_mix`.
+  `osc1_position` (S086 P3) is 0..127 and moves osc1 by position/128 of the
+  phase range (for Cym, the crash sample range). It is the last descriptor
+  of each table (index 39; Snare 38), so no existing index moved. An
+  absent key loads 0 (`instrumentManager_resetSlot()` zeroes the slot
+  before parsing), preserving the old sound; older firmware skips the key.
+  It is written in `[params]` and `[morph]` like any image row.
+  `oscN_wave` values: 0 `Sin`, 1 `Tri`, 2 `Saw`, 3 `Rec`, 4 `Noi`, 5 `Cym`,
+  6 `Re3`, 7 `Sw3` (S086), then installed catalogue entries from 8
+  (`OSC_SAMPLE_START`): `s01..sNN` (samples), `l01..lNN` (looped),
+  `w01..wNN` (wavetables). Under `typ` = `wav`, values ≥ 8 are ignored.
+  Under `smp`/`slp`/`wtb`, the entry type determines what plays.
+  **Before S086 the user samples started at 6:** a file saved earlier that
+  selected user sample *n* (value 6 + *n*) now plays `Re3`/`Sw3`
+  (*n* ≤ 1) or catalogue entry *n* − 2. There is no migration.
+  `osc1_type` (S087): 0 `wav`, 1 `smp`, 2 `slp`, 3 `wtb`. Missing key
+  defaults to 0 (`wav`). `INSTRUMENT_PARAM_FLAG_SELECTOR` — not morphable,
+  stored single-ended. Step-automatable with no ramp.
+  `osc1_run` (S088): 0 `rst`, 1 `fre`, 2 `itp`. Missing key defaults to 0
+  (`rst`, the pre-S088 sound). `INSTRUMENT_PARAM_FLAG_SELECTOR` — not
+  morphable, not an LFO/velocity target, stored single-ended, applied before
+  the Morph image. Step-automatable with one value per step and no ramp.
+  Values above 2 clamp to `itp`. Dtype: `DTYPE_ON_OFF` with the high-nibble
+  tag `ONOFF_TAG_OSC_RUN` (1); the low nibble stays `DTYPE_ON_OFF`, so an
+  older firmware that ignores the tag reads it as a 0/1 on/off cell.
+  `osc2_mod_type` (Drum) stores 0 `fm`, 1 `mix`, 2 `snc`, 3 `rng`
+  (S085). 0 and 1 keep their pre-S085 meaning; the key is written by
+  every save, so older files carry 0 or 1. A byte above 3 plays and shows
+  `fm`. An older firmware plays 2/3 as `mix` (its boolean test).
 - Filter: `filter_freq`, `filter_reso`, `filter_drive`, `filter_type`.
 - Amp envelope: `amp_envelope_attack`, `amp_envelope_decay`,
   `amp_envelope_decay_choke`, `amp_envelope_slope`, `amp_attack_repeat`.
@@ -2270,48 +2314,55 @@ Current Pattern notes:
 
 ## Sample
 
-Status: legacy sample/loop install path exists; this target root pool naming is
-part of the future typed layout.
+Status: catalogue v2 installed by `Load:[Samples]` (S087). Root pool naming
+is part of the future typed layout.
 
-`Sample/` contains an alphanumerically sorted list of `.wav` files to write to
-flash:
+`/samples/` contains `.wav` files to write to flash. The installer walks
+files first, then subfolders, in natural order (`storage_naturalCompare()`),
+depth limit 3. Only mono 16-bit 44.1 kHz PCM WAV files are accepted.
 
 ```text
-Sample/
-  <sample name>.wav
+/samples/
+  01_kick.wav
+  02_snare.wav
+  subfolder/
+    hat_open.wav
 ```
 
-Samples play from normal oscillators. Looping is an oscillator-level option,
-not a directory-level distinction.
+Numeric prefixes are stripped from display names (`01_kick.wav` → `kick`).
+Names over 8 characters show first 4 + last 4 (`longfilename.wav` →
+`longname`). Up to 128 samples.
+
+The `osc1_type` selector chooses how samples play: `smp` (one-shot), `slp`
+(looped, from `smpl` loop or whole file), `wtb` (wavetable, see below).
+The modulator `wav` list and the transient click list also reference
+installed samples. Looping is determined by the `slp` type and the `.wav`
+file's `smpl` loop chunk (loop 1 when present, else the whole sample).
 
 ## Wavetable
 
-Status: settled target; the library/browser remains deferred, while Scene and
-Bank child `.fx` v2 storage is implemented in Session 072 ST6.
+Status: catalogue v2 (S087). The library/browser remains deferred.
 
-`Wavetable/` contains numbered wavetable folders:
-
-```text
-Wavetable/
-  000 <wavetable name>/
-  001 <wavetable name>/
-```
-
-Each wavetable folder contains an alphanumerically sorted set of `.wav` files:
+`/wavetables/` contains one subfolder per wavetable; the `.wav` files inside
+are frames. Natural order. At most 128 frames per wavetable, any frame
+length (A16). Up to 128 wavetables.
 
 ```text
-Wavetable/000 <wavetable name>/
-  <sample a>.wav
-  <sample b>.wav
-  <sample c>.wav
+/wavetables/
+  000_saw_morph/
+    001.wav
+    002.wav
+    ...
+  001_pad_evolve/
+    001.wav
+    002.wav
 ```
 
-Wavetables are loaded during the sample-load process and written to flash. They
-behave like normal samples in storage, but are only read by wavetable
-oscillators. A wavetable oscillator operates on one wavetable at a time and can
-be modulated across all samples inside that wavetable. Wavetable samples always
-play looped. The menu shows the wavetable name when selecting the wavetable
-used by the oscillator.
+Wavetables are loaded during the sample-load process and written to flash
+with catalogue v2 entries. A `wtb` oscillator operates on one wavetable at a
+time; `pos` selects the frame position, and frame blending uses the
+interpolation slots. `w` entries in the modulator `wav` list use the
+wavetable's first frame. The menu shows the wavetable name.
 
 ## Effect
 
@@ -2653,6 +2704,48 @@ ceiling would time out a healthy busy card and make AsyncFATFS re-dirty/retry
 the same sector forever. The low-level rule is authoritative in
 `ASYNCFATFS_REFERENCE.md`.
 
+## Import tools (host only; LXR1 and LXR-02 content)
+
+Two Python tool sets convert legacy card content into the formats of this
+document. They run on a computer, never on the device; nothing in the
+firmware reads legacy formats ("no backward compatibility" applies to the
+firmware only). Both are documented fully (usage, options, file formats,
+mapping tables, troubleshooting, maintenance) in their own manuals:
+
+| Tool set | Converts | Manual |
+|---|---|---|
+| `tools/lxr1_converters/` (2026-10-22) | Sonic Potions LXR: `pNNN.snd` → `Kit/NNN <name>/`; `pNNN.pat` (8 patterns) → `Pattern/NNN <name> <n>.pat` (PAT4); `pNNN.all`/`.prf` → `Bank/NNN <name>/` (Scenes 00..07, the same Kit in every Scene, all voice edit masks tied). | `LXR1_CONVERTERS.md` |
+| `tools/lxr2_converters/` (2026-10-23) | Erica Synths LXR-02: `NN-NAME.snd` → Kit; `NN-NAME.pat` → PAT4; `projNN/` → Banks of 16 patterns (A..D); `NN-NAME.sng` → a Bank whose Scenes play the song through `xNN` chains. | `LXR2_CONVERTERS.md` |
+
+**How they fit this filesystem.**
+- Output defaults to `SD_CARD/<Library>`; library slots are allocated free
+  (`--start-slot`) or kept (`--keep-numbers`, never overwriting unless
+  `--overwrite`); `--dry-run` writes nothing.
+- The Helicase writers (Kit/Instrument, PAT4 builder and verifier,
+  `sceneset.scg`, `bankset.bcg`, slot allocator) live in
+  `tools/lxr1_converters/lxr1_common.py`; the LXR-02 tools import them, so
+  a change there affects both sets.
+- Instrument keys, morphable rows, target validity and automation IDs are
+  parsed from the firmware's `Core/DSP/Instruments/*/*Parameters.c` at run
+  time; start-up fails, naming the keys, if the converter key map and the
+  firmware disagree (`Firmware._check_key_coverage()`). **Adding,
+  renaming or removing an Instrument key therefore needs the converters
+  checked** (Drum 39, Snare 38, Cymbal 39, HiHat 39 rows at S084).
+- Every PAT4 is re-decoded and verified (CRC32C, back-references, bitmap,
+  specials, automation) before it is written. A PAT4 or `sceneset.scg`
+  format change must be mirrored in `lxr1_common.py`.
+- Scene settings that legacy files carry (voice audio out, track MIDI
+  channel and note) go into `sceneset.scg`; BPM and other true globals are
+  not converted. LXR-02 tracks left at the default MIDI note (48 on all
+  seven) are written as `nte on`.
+- Rolls: evenly spaced whole-step sub-step rolls (LXR1) and LXR-02 flams
+  become step rolls at fill 100; adjacent roll steps carry evenly since the
+  S084 roll engine (`PATTERN_DYNAMIC_STACK.md` §6).
+
+Both sets are host-tested only (synthetic files built from the original
+firmware sources; the factory LXR1 kits). Hardware checks and the full
+design and test record: `084_SESSION_HANDOFF_LOG.md` §12–§13.
+
 ## Verification Anchors
 
 Use these as smoke tests when changing filesystem, descriptor storage, or
@@ -2847,3 +2940,38 @@ Instrument/
   909kik.drm
   snap.snr
 ```
+
+---
+
+## Binding Mandates — Load/Save Slot Scrolling
+
+> **Any session that touches Load/Save UI or per-slot preview must read and
+> follow these rules.** (User, repeated 2026-10-19)
+
+- **Scrolling a slot number (encoder or endless pot) must never block or lag.**
+  Every slot change runs, in this order and each asynchronously:
+  1. **number** updates immediately;
+  2. **name** loads (it may be blank briefly);
+  3. **LED array** loads after the name.
+- **The next turn disposes whatever is still running, in the same order.**
+  It increments the number, blanks the name, cancels the LED load, and
+  restarts the name load. Name and LEDs may be blank for a moment until the
+  item settles. No stage may hold the input gate (`menu_storageBusy`) while
+  the user scrolls.
+- **Bank is the case that keeps breaking**, because its LED array is a card
+  scan (the child preview: up to 16 child folders plus PAT4 reads). Since
+  2026-10-19:
+  - the Bank name comes from the resident Bank index;
+  - the preview never takes `menu_storageBusy`;
+  - each new selection cancels it (`filesystem_cancelScanBankScenes()`,
+    called from `menu_requestCurrentLoadSaveSelection()`,
+    `menu_requestBankChildPreview()` and the Load/Save exit);
+  - the cancelled scan unwinds at a callback-free phase and finishes ERROR;
+  - the latest slot is served by the deferred retry.
+- **Bank OK stays gated** by a valid preview of the shown slot (Load). On
+  Save, OK cancels a running preview and needs a second press.
+- **Why:** the user has had to restate this rule several times; Scene and
+  Kit scrolling already behave this way.
+- **How to apply:** any new per-slot work (preview, probe, name read) must
+  follow it; check the encoder gate (`menu_parseEncoder()`) and the pot gate
+  (`menu_handleLoadSaveKnobDelta()`) for the page.

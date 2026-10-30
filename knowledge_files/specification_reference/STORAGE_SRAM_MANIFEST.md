@@ -4,12 +4,88 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 083 close (2026-10-22), `dev-ph6-midi`. DEV
-  link: `text=608,744`, `data=424`, `bss=430,112`; flash payload 608,848 B of
-  753,664 B (**headroom 144,816 B**). ITCM 4,168 / 16,384 B; DTCM statics
-  4,472 B; FXBUF 126,592 B at 0x20001180 (margin 3,712 B). The entries below
-  run newest first; the S083 assessment fixes (2026-10-21) changed text to
-  604,200 and bss to 430,112 (−8 B alignment) with no new statics.
+- **Current as of:** Session 088 close (2026-10-29),
+  `dev-ph7-voice_expansion`, uncommitted on `80029d31`. DEV link:
+  `text=676,264`, `data=420`, `bss=412,884`; flash payload 676,264 B of
+  753,664 B (**headroom 77,400 B**). ITCM 12,656 / 16,384 B; DTCM statics
+  4,345 B; FXBUF arena margin 3,839 B. The entries below run newest first.
+- **S088 P1 changes (2026-10-29):** fader smoothing and float-through
+  distortion.
+  - DTCM: `mixer_fader_smooth[6]` (24 B, `INDTCMZ`) for the block-rate
+    one-pole fader EMA. Arena margin unchanged (these are `static`, not arena).
+  - Program flash: `distortion_curveSampleF()` is `static inline` (no new
+    symbol); the three post-chain functions shrank slightly from the merged
+    float path. Net text −80 B vs P0 close.
+  - bss: −8 B vs P0 close (the LUT was restored to 1,024 entries after the
+    failed 2,048-entry attempt).
+- **S088 P0 changes (2026-10-29):** run modes (`osc1_run`). Measured with an
+  ARM `sizeof` probe: `DrumVoice` 596 → **632 B** (+36: `runMode` 1,
+  `ampRampArm` 1, `lastVeloGain` 4, `lastFmDepth` 4, `OscCarrierSnapshot` 28,
+  alignment); `SnareVoice` **452 B**, `CymbalVoice` **508 B**, `HiHatVoice`
+  **516 B**, all with the same added fields (their snapshot fits existing
+  padding). `OscCarrierSnapshot` is 28 B on ARM, asserted `<= 32`.
+  - SRAM1: `runtime_slots` 7,152 → **7,584 B** (6 × 2 × 632; +432 B), plus
+    `osc_itpScratch[OUTPUT_DMA_SIZE]` in `Oscillator.c` (**+64 B** `.bss`,
+    the one shared itp old-carrier block, plan I1). Net **+496 B SRAM1**.
+  - DTCM: `modNode_itpReserved` (+1 B, `INCCMZ`), next to
+    `modNode_interpReserved`. Arena margin 3,840 → 3,839 B.
+  - ITCM: 12,640 → 12,656 B (+16 B: LTO re-specialised `osc_wtbBlendBlock`
+    +8 and `osc_wtbFmBlendBlock` +8, `osc_wtbRingBlendBlock` -4, because the
+    new helper calls the plain wavetable copy). The helper and
+    `SVF_recalcFreqSlew()` are flash code.
+  - Program flash: descriptor rows, writer case, menu branches, helper;
+    re-measure with `make all`.
+- **S087 changes (2026-10-28/29):** major oscillator rewrite. Net RAM:
+  - SRAM1: −13,441 (removed `sample_manifest[120]` + count) −5,040
+    (SampleMemory caches) +560 (installer walker) +1 (install_fault) +128
+    (trigger batch stack in `voiceControl_processPending`) +1
+    (`seq_pending_automation_done`) = **net ≈ −17,791 B SRAM1**
+  - DTCM: −128 B (`osc_interp_a/b` removed) +2 B (`modNode_interpLastStamp`
+    + `modNode_interpReserved`) = **net −126 B DTCM**, arena margin
+    3,712 → 3,840 B
+  - Program flash: +11,756 B net (new readers, type system, catalogue v2
+    code, menu formatters; minus v1 loops, `stub_silence_buffer`)
+  - ITCM: 8,512 → 12,640 B (+4,128 B; S087 sample/wavetable loops in
+    `.itcm.s087`, minus v1 user-sample loops removed in P1)
+- **S086 changes (2026-10-27/28):** no RAM. Program flash +45,336 B:
+  - the stock tables `sq3Table` and `sw3Table` (`wavetableStock.c`,
+    22,528 B each, `.rodata`, below the sample-flash floor);
+  - the `pos` code and four descriptor rows;
+  - `crashSample` +1 B (a guard entry, 32,769 B).
+
+  ITCM 7,792 → 8,512 B (+720 B): the stock waves' generic table-loop copies
+  were inlined into the ITCM dispatchers, and `calcFmBlock.constprop.3` is
+  new (184 B). The `pos` state uses `OscInfo` padding: `position`/
+  `positionApplied` at offsets 18–19 and `positionBendStep` at 33.
+  `sizeof(OscInfo)` stays 72 and every voice keeps its size (asserted in
+  `Oscillator.h`). text 613,536 → 658,872, headroom 139,704 → 94,368 B.
+- **S085 P1 follow-up, `rng` depth ramp (2026-10-27):** `DrumVoice` 592 →
+  596 B (`ringDepthQ15`, +4 B; `ringSnap` sits in padding), so
+  `runtime_slots` 7,104 → 7,152 B (+48 B SRAM1 bss: 430,248 → 430,296).
+  ITCM 7,560 → 7,792 B (+232 B: the ramped ring copies). text 613,232 →
+  613,536 B (headroom 139,704 B). RAM approved by the user (S085 P1 plan
+  r3).
+- **S085 P1 changes (2026-10-27):** `DrumVoice` 588 → 592 B
+  (`syncClock`, +4 B), so `runtime_slots` 7,056 → 7,104 B (+48 B SRAM1
+  bss). ITCM 4,168 → 7,560 B (+3,392 B: the `.itcm.s085` sync/ring
+  copies, their dispatchers, `osc_renderSyncWave`, `osc_renderPlainWave`
+  and `osc_buildSyncList`). DTCM unchanged. The `snc` render puts
+  `syncOver[32]` (128 B) on the audio stack (SRAM2) for one block. RAM
+  approved by the user (S085 P1 plan r3).
+- **S084 P0 changes (2026-10-26):** +88 B measured SRAM1 `.bss` (430,112 →
+  430,200), text 608,744 → 609,288; image 609,712 B (headroom 143,952 B).
+  Step roll state: `seq_rollRemaining[7]` u8 removed (−7 B),
+  `seq_rollWindow[7]` u16 added (+14 B), and the three duck arrays removed
+  (−21 B), a net −14 B. Live overlay engine:
+  `seq_liveMode/Rate/Accum/Pos/Note/Vel[7]` (42 B) + `seq_liveRhythm` (1 B)
+  + the TIM2 mailbox `seq_liveHitCount[7]`, `seq_liveFlamMask`,
+  `seq_liveHitUs[7]` (36 B) = 79 B. `bh_overlay[7]` 8 B → 4 B per track
+  (−28 B). LiveRecord `liveRec_roll[7]` 8 B per track (+56 B) replacing
+  11 B of scalars (−11 B). `pat_record_spec_t` gains `rhythm` (+4 B in the
+  four staging slots). `seq_extTicksOwed` (1 B, A1). Net +87 B approved,
+  +88 B measured with alignment; the P1-only build measured 430,096 B
+  (−16 from the S083 close). The S084 B1 fix (overlay re-configure order) changed
+  no RAM or size.
 - **S083 follow-up (2026-10-22):** −1 B SRAM1. `MidiNotes` no longer has
   a `midiNotes_action` CC2 state: CC2 sets `buttonHandler`
   `bh_overlayActive`. The overlay entry field `vel` (always 100) became the
@@ -96,6 +172,8 @@ changing any of it.
   (24 B) + `gateDuck[6]` (6 B) = 54 B padded to 56 B; `sequencer.c`
   `seq_rollDuckDelta/Delay/Active[7]` = 21 B padded to 24 B; total +80 B.
   Flash: P1 +3,968 B text, P2 +168 B text (removals offset new code).
+  S084 P1 removed the duck arrays and replaced `seq_rollRemaining` with the
+  u16 `seq_rollWindow` (net −14 B before alignment).
 - **S078 changes (approved at plan acceptance):** +608 B BSS from S077.
   `sequencer.c` +76 B ISR-static timing state (per-track Q8.8 accumulators
   14 B, FX accumulator 2 B, FX step counter 4 B, shuffle delay/pending/
@@ -147,8 +225,8 @@ changing any of it.
   `python3 tools/link_budget.py arm-none-eabi-nm build/lxr02.elf`
 
   ```
-  Flash : 532,824 / 753,664 B used, headroom 220,840 B
-  ITCM  : 4,168 / 16,384 B
+  Flash : 659,296 / 753,664 B used, headroom 94,368 B
+  ITCM  : 8,512 / 16,384 B
   DTCM  : statics 4,472 B
   FXBUF : 126,592 B at 0x20001180 (min 122,880, margin 3,712)
   ```
@@ -192,7 +270,9 @@ is 128 KiB, sectors 5–11 are 256 KiB.
 
 - **Window:** `0x08008000–0x080BFFFF` (753,664 B), sectors 1–6. Session 073
   added sector 6 (it was sample storage before); the window was 480 KiB.
-- **Use at the S075 close DEV link:** 532,824 B; **headroom 220,840 B**.
+- **Use at the S086 close DEV link:** 659,296 B; **headroom 94,368 B**
+  (S085 close 139,704 B; S086 added the 45,056 B stock tables).
+- **Use at the S075 close DEV link:** 532,824 B; headroom 220,840 B.
 - **History:** 34,356 B free at S072 Step 1; 8,080 B at the S072 close;
   269,504 B after the S073 expansion; 266,560 B after the S073 DSP
   refactor; 250,736 B at the S074 close; 221,312 B at the S075 F2 DEV link;
@@ -343,6 +423,16 @@ Ranked growth paths (S072 study):
    install path and a reserved span.
 3. Dead legacy code: the Euklid and SOM generators are compiled in although
    `ENABLE_EUKLID_PAGE 0` hides their page.
+4. **Grow the application window into sector 7** (S086 study): app 736 →
+   992 KiB, sample flash 1,280 → 1,024 KiB. Every table stays an ordinary
+   `const` array (no code or CPU change). Changes: the linker `FLASH`
+   length and `__sample_flash_start`, `SampleMemory.h`
+   `SAMPLE_ROM_START_ADDRESS`/`SAMPLE_FIRST_SECTOR`, `build_lxrv2_img.py`
+   `SECTOR_ENDS` and the image-check CRC block (seven sectors). Needs a
+   hardware check that the closed LXRV2 bootloader writes the longer image,
+   and one reinstall of samples. (Option 2's install-time generation was
+   tried for the stock waves in S086 and rejected: not the existing
+   mechanism.)
 
 Do not erase sector 6 before updates to work around a bootloader problem: it
 only works while sector 6 holds no code.
@@ -351,19 +441,32 @@ only works while sector 6 holds no code.
 
 ## 4. Sample flash (sectors 7–11)
 
-### 4.1 Layout
+### 4.1 Layout (catalogue v2, S087)
 
 | Region | Range | Size |
 |---|---|---:|
-| Sample audio | `0x080C0000–0x081FF69F` | 1,308,320 B (about 14.8 s of 44.1 kHz 16-bit mono) |
-| `SampleInfo[120]` | `0x081FF6A0–0x081FFC3F` | 1,440 B (12 B each: 3-char name, pad, 32-bit size in samples with bit 31 = loop flag, absolute offset) |
-| Display names `[120][8]` | `0x081FFC40–0x081FFFFF` | 960 B |
+| Sample/wavetable audio | `0x080C0000–0x081FDFFF` | up to 1,302,528 B |
+| Catalogue v2 | `0x081FE000–0x081FFFFF` | 8,192 B |
 
-- Before Session 073 the audio started at `0x08080000` (sector 6) and held
-  1,570,464 B.
-- Macros: `Core/SampleRom/SampleMemory.h` (`SAMPLE_ROM_START_ADDRESS
-  0x080C0000`, `SAMPLE_FIRST_SECTOR 7u`, `SAMPLE_MAX_COUNT 120`).
-- RAM caches of this table live in SRAM1 (§8, `SampleMemory.c`, 5,040 B).
+**Catalogue v2 structure (8 KB at `SAMPLE_CATALOGUE_START_ADDRESS`):**
+- Header (32 B): magic `0x4C584332` ("LXC2", programmed last),
+  version, `sample_entry_bytes` (28), `wavetable_entry_bytes` (20),
+  `sample_count`, `wavetable_count`, `data_end`, flags, reserved
+- Sample entries (128 × 28 B): `start_address`, `frame_count`,
+  `loop_start`, `loop_end`, `gain_code`, `bits`, `flags` (bit 0 = loop
+  present), `name[8]`
+- Wavetable entries (128 × 20 B): `start_address`, `frame_len`,
+  `frame_count`, `bits`, `flags`, `name[8]`, padding
+
+Items from `0x080C0000` (sector 7) upward. The v1 layout
+(`SampleInfo[120]` at `0x081FF6A0`, display names at `0x081FFC40`) is
+removed; a v1 catalogue at boot shows `Samples invalid` / `reload
+samples`. The S086 stock-wave flash block is not needed.
+
+- Before Session 073 the audio started at `0x08080000` (sector 6).
+- RAM caches of the v1 table (SRAM1, `SampleMemory.c`, 5,040 B) are
+  removed in S087. The catalogue v2 entries live in flash and are read
+  directly.
 
 ### 4.2 Guards
 
@@ -376,12 +479,23 @@ only works while sector 6 holds no code.
 - `memtest.c` uses the same floor (`ERASE_SECTOR_FLOOR`).
 - D-cache is invalidated over the erased or programmed range.
 
-### 4.3 Installing
+### 4.3 Installing (S087 catalogue v2)
 
-- Load:[Samples] (Load page only) runs `menu_loadSamplesModal()`: it waits up
-  to 10 s for a storage operation already running, suspends audio, erases
-  sectors 7–11, installs `/samples` then appends `/loops`, and reinitialises
-  audio. Only mono 16-bit 44.1 kHz PCM WAV files are accepted.
+- Load:[Samples] runs `menu_loadSamplesModal()`: suspends audio, erases
+  sectors 7–11, walks `/samples` (files first, subfolders, natural order,
+  depth limit 3) then `/wavetables` (each subfolder = one wavetable, `.wav`
+  files inside = frames), and commits the catalogue.
+- Only mono 16-bit 44.1 kHz PCM WAV files are accepted.
+- `sampleInstall_begin()`: erases sectors 7–11; nothing programmed.
+- `sampleInstall_commit()`: programs header words 1–7 first, magic word 0
+  last. An interrupted install reads as EMPTY.
+- `sampleInstall_abortItem()`: discards buffered bytes, never rewinds the
+  cursor onto programmed flash. Lost space is accepted.
+- `install_fault`: set by failed erase or write; stops further writes.
+- Display names: numeric prefix stripped (`01_kick.wav` → `kick`); names
+  over 8 chars show first 4 + last 4 characters.
+- Wavetable limits: any frame length, at most 128 frames.
+- Gain code: `2^(code/24)`, peak within 0.25 dB of full scale.
 - A pre-S073 install is rejected (0 samples): its entry 0 is at
   `0x08080004`, below the floor.
 - **Rollback hazard:** a pre-S073 firmware on a unit that has a pre-S073
@@ -402,7 +516,7 @@ only works while sector 6 holds no code.
 | DTCM `.dtcmz` | `0x20000200` | part of DTCM | 3,960 | — |
 | DTCM `.dtcm_fxbuf` (arena) | `0x20001180` | part of DTCM | 126,592 | 0 (reserved arena) |
 | **DTCM total** | `0x20000000` | **131,072** | **131,064** | **8** |
-| ITCM `.itcm` (code) | `0x00000000` | 16,384 | **4,168** | 12,216 |
+| ITCM `.itcm` (code) | `0x00000000` | 16,384 | **12,640** (S087) | 3,744 |
 | SRAM2 `.devwdg_noinit` | `0x2007c000` | 16,384 | 0 | see stack note |
 
 - Static data RAM (SRAM1 + DTCM including the arena) is 428,900 B;
@@ -476,14 +590,29 @@ and runs with zero wait states.
 
 | Function | Bytes |
 |---|---:|
-| `calcNextOscSampleBlock` (two specialisations) | 876 + 824 |
-| `calcUserSampleOscFmBlock` | 444 |
-| `calcNextOscSampleFmBlock` | 440 |
-| `osc_setFreq` (standalone since S073) | 400 |
-| `calcUserSampleOscBlock` | 396 |
+Sizes at the S087 close (12,640 B total; the v1 user-sample loops are
+removed, replaced by the `.itcm.s087` readers):
+
+| Function | Bytes |
+|---|---:|
+| `calcNextOscSampleBlock` (two specialisations) | 1,016 + 960 |
+| `calcNextOscSampleFmBlock` | 468 |
+| `osc_setFreq` (standalone since S073) | 404 |
 | `calcSampleOscFmBlock` | 196 |
-| `calcFmBlock` (three specialisations) | 192 × 3 |
-| Veneers for the interpolation blocks | 8 × 2 |
+| `calcFmBlock` (three specialisations, plus S086's variable-table one) | 192 × 3 + 184 |
+| Veneers for the interpolation blocks, `memcpy` | 8 × 3 |
+| S085 P1: `calcNextOscSampleSyncBlock` / `calcNextOscSampleRingBlock` (dispatchers) | 404 / 576 |
+| S085 P1: `osc_renderSyncWave` / `osc_renderPlainWave` | 276 / 876 |
+| S085 P1: `osc_buildSyncList` | 54 |
+| S085 P1: sync copies (table / sine / crash) | 176 / 172 / 176 |
+| S085 P1: ring copies, depth ramped (table / sine / noise / crash) | 192 / 184 / 108 / 196 |
+| S085 P1: interpolated sync/ring variants | inlined into the two dispatchers |
+| S087: `osc_smp*Block` / `osc_slp*Block` (8 loops) | in `.itcm.s087` |
+| S087: `wtb` blend copies (plain / FM / ring / sync) | in `.itcm.s087` |
+
+Removed in S087 P1: `calcUserSampleOscBlock` (396 B),
+`calcUserSampleOscFmBlock` (444 B), v1 user-sample ring copy (448 B),
+`osc_syncWaveform()`. Net ITCM: 8,512 → 12,640 B.
 
 - Only oscillator code is placed here. Filter and distortion ITCM placement
   (`ENABLE_EFFECT_INITCM_CODE`) is off: it measured worse in Session 023,
@@ -506,7 +635,8 @@ DTCM is single-cycle, uncached, and not reachable by DMA.
 | `mixer_fx_bus` | 256 | `.dtcmz`; two 32-frame channels, `sample_mx_t` while voices sum, float while the Effect runs |
 | `effects_runtime` | 76 | `.dtcmz`; union holding the active Effect type's DSP state (StereoFilter 76 B: two filter states; CrumpBit 56 B, S074). Only 20 B spare before the union grows. |
 | `busComp` | 32 | `.dtcmz` (S074); master bus compressor state: smoothed power, fast and memory gain reduction, previous gain, pending sidechain weight, crossover low-pass per channel, active pair. Approved up to 32 B; `_Static_assert(<= 32)`. Owner `BusCompressor.c`. |
-| `osc_interp_a`, `osc_interp_b` | 64 each | `.dtcmz`; waveform-interpolation scratch |
+| ~~`osc_interp_a`, `osc_interp_b`~~ | ~~64 each~~ | removed S087 P1; 128 B released to arena |
+| `modNode_interpLastStamp`, `modNode_interpReserved` | 1 + 1 | `.dtcmz` (S087); wavetable interpolation slot management |
 | `mixer_decimation_rate` [7], `mixer_decimation_cnt` [6], `mixer_voice_samples` [6] | 28 + 24 + 12 | `.dtcmz`; per-slot decimators |
 | `mixer_voice_last_gain`, `mixer_send_last_gain` | 24 each | `.dtcmz`; per-slot dry and send ramp origins |
 | `mixer_fx_return_last_gain` | 8 | `.dtcmz`; Effect return ramp origins |
@@ -579,7 +709,7 @@ byte, including alignment and small variables omitted here.
 | `filesystem.c`: `fs_identity_name`, `fs_identity_valid_mask` | 74 | Eight × 9 Scene/Kit/Instrument identity strings plus a 16-bit validity mask; the Bank's nine-byte name is held separately by BankData. |
 | `filesystem.c`: `op_bank_child_scratch` | 144 | One union: 16 × 9 Bank-child names or 16 × 6 boot-reader Instrument types, with disjoint lifetimes. |
 | `asyncfatfs.c`: `afatfs` | 6,984 | FAT state, caches, and five file handles in one owner. |
-| `InstrumentManager.c`: `runtime_slots` | 7,056 | Six tagged 1,176 B engine slots; no parallel native engine array. The largest engine (`DrumVoice`) is 588 B; the reserve is twice that. |
+| `InstrumentManager.c`: `runtime_slots` | 7,584 | Six tagged 1,264 B engine slots; no parallel native engine array. The largest engine (`DrumVoice`) is 632 B (596 + the S088 P0 run-mode state: `runMode`, `ampRampArm`, `lastVeloGain`, `lastFmDepth`, the 28 B `OscCarrierSnapshot`); the reserve is twice that. |
 | `adcPots.c`: `slider_lut` | 4,096 | 1,024 `float` slider conversion values. |
 | `SampleMemory.c`: resident and install caches | 5,040 | 1,440 B `sample_info_cache`, 1,080 B `sample_name_cache`, 120 B loop flags, 1,440 B `install_info`, and 960 B `install_names`. |
 | `usb_manager.c`: `USB_OTG_dev` | 1,524 | USB core/device handle. |
@@ -588,9 +718,11 @@ byte, including alignment and small variables omitted here.
 | `sequencer.c`: R12 menu override (S081) | 48 | `seq_menuOverride[6]` (`u64`): Instrument parameters whose automation a menu edit suppresses until the voice's next resetting trigger. Foreground only. |
 | `sequencer.c`: step reset / deferral (S081) | 15 | `seq_trackShuffleStep[7]`, `seq_trackShuffleRoll[7]` (deferred step index and roll flag), `seq_trackShuffleMuteMask` (1 B, a live hit muted the pending deferral). |
 | `sequencer.c`: live-record services (S081) | ≈ 94 | Boundary ring `seq_recRing[16]` (`u16`) + cursors (≈ 34 B), `seq_recTrack`/`seq_recWriting`, `seq_echoStep[7]` (`int8`) + `seq_echoDeadline[7]` (`u16`, 14 B), `seq_liveHoldMask`, `seq_eraseSpecialsMask`/`FullMask`, `seq_ppqStampUs`/`PeriodUs` (8 B), `seq_playbackEpoch`, `seq_sceneEpoch`, filter pointers (9 B). TIM3-shared fields are `volatile` bytes or PRIMASK-published pairs. |
+| `sequencer.c`: live overlay engine (S084 P2) | 79 | `seq_liveMode/Rate/Accum/Pos/Note/Vel[7]` (42 B), `seq_liveRhythm` (1 B), and the TIM3-to-foreground mailbox `seq_liveHitCount[7]` + `seq_liveFlamMask` + `seq_liveHitUs[7]` (`u32`, 36 B). Runtime-only; the foreground arms/drains under PRIMASK and TIM3 services it (`PATTERN_DYNAMIC_STACK.md` §6). |
+| `sequencer.c`: external-clock interpolation (S084 P0 A1) | 1 | `seq_extTicksOwed` (volatile u8): scheduler ticks of the current external clock period still to interpolate. Written in TIM3; cleared by transport start/stop/continue and the external reset. |
 | `sequencer.c`: automation ramps (S081 P2) | 669 | `seq_ramps[64]` (`seq_ramp_t`, 10 B: id, from, to, last, start/end 1/16-tick times; 640 B), `seq_rampCtx[7]` (4 B TIM3 hand-off, 28 B), `seq_rampBlockDiv` (1 B). Static, written by the drain/ramp service (slots) and TIM3 (contexts). |
-| `LiveRecord.c`: live record state (S081) | ≈ 250 | `latch`/`dirty`/`erase` bitmaps (3 × 64 B over the 9-bit target space), mode/`rtk`/target/origin/epochs, roll capture (track, step, index, start delay, span, hits, pending index, note, velocity, note-default), flam grace (delta, tick, velocity, valid), `liveRec_prevStep[7]`/`liveRec_prevFlags[7]`, erase gesture state (specials, full, knob FX lanes 2 B, FX SEQ count, SEQ count and track). Static runtime-only. |
-| `PatternStackService.c`: live-record staging (S081) | 36 | `patSvc_recordStage[4]` (a `pat_record_spec_t` + scene/track/step/used each) and `service_target_request` (recording-target override). |
+| `LiveRecord.c`: live record state (S081; S084 P4) | ≈ 291 | `latch`/`dirty`/`erase` bitmaps (3 × 64 B over the 9-bit target space), mode/`rtk`/target/origin/epochs, per-track roll capture `liveRec_roll[7]` (8 B each: flags, step, index, start delay, note, velocity, hits, rhythm; S084 P4), flam grace (delta, tick, velocity, valid), `liveRec_prevStep[7]`/`liveRec_prevFlags[7]`, erase gesture state (specials, full, knob FX lanes 2 B, FX SEQ count, SEQ count and track). Static runtime-only. |
+| `PatternStackService.c`: live-record staging (S081; S084 P4) | 40 | `patSvc_recordStage[4]` (a `pat_record_spec_t` + scene/track/step/used each; the spec gained `rhythm` in S084, +1 B per slot) and `service_target_request` (recording-target override). |
 | `MidiVoiceControl.c`: `voiceControl_pendingReset` (S081) | 1 | Per-voice pending-reset mask (bits 0..6), set by TIM3 and the foreground, tested and cleared under the queue's PRIMASK. |
 | `EffectsManager.c`: R13 and live erase (S081) | ≈ 43 | `menuHold` (`u64`) + `menuHoldMorph` (inside `effects_automation`), `effects_eraseLanes` (2 B), `effects_erasedLanes[16]` (`u16`, 32 B). |
 | `buttonHandler.c`: live record UI (S081) | ≈ 13 | REC hold timer (`bh_recPressTick` `u16`, `bh_recArmed`), `bh_shiftHeld`/`bh_clearHeld`, erase gesture masks `bh_eraseSeqMask`/`bh_eraseFxSeqMask`/`bh_eraseVoiceMask` (5 B), `bh_overlayHeldType`, `bh_overlayNoteDefault`. |
@@ -609,7 +741,7 @@ byte, including alignment and small variables omitted here.
 | `MidiDin.c`: DIN buffers (S083) | 334 | RX `midiBuffer_rx_t` 194 B (66 B + 64 × 2 B arrival stamps); TX normal and realtime lanes 2 × 66 B; two 4 B drop counters. |
 | `MidiTransport.c`: realtime ring (S083, moved from MidiRealtime) | ≈ 270 | 32 × 8 B events + head/tail/drop counter, MTC and AUTO-sync state. |
 | `MidiIn.c`: configuration and framer (S083) | 10 | `midiIn_config` (G, filters, MRT) 3 B, framer state 1 B, in-progress `MidiMsg` 6 B. |
-| `buttonHandler.c`: `bh_overlay[7]` (S083 Q5) | 56 | Per-track overlay repeat table, 8 B per track (held MIDI note, note + `def`, roll rhythm position `pos`, count, interval, next); shared by panel and MIDI. |
+| `buttonHandler.c`: `bh_overlay[7]` (S083 Q5; S084 P2) | 28 | Per-track overlay gesture table, 4 B per track (held MIDI note, note + `def`, count, rate); shared by panel and MIDI. The hit timing, rhythm position and repeats live in the Sequencer's live engine. |
 | `sequencer.c`: `seq_resumeTick`, `seq_sceneChangeFromMidi` (S083) | 5 | Continue/SPP resume tick (4 B) and the MIDI-origin PC flag (1 B). |
 | `filesystem.c`: `fs_midilearn_write` (S083) | 1 | `midilrn.cfg` write request (PENDING, RETRIED). |
 | ~~`MidiParser.c`: `midiParser_originalCcValues`~~ | 0 | Retired in S083 with `MidiParser.c` (was 255 B). |

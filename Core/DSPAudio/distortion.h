@@ -73,4 +73,14 @@ static inline int16_t distortion_curveSample16(const Distortion *dist,
 	return (int16_t)(int32_t)(x*32767);
 }
 //--------------------------------------------------
+/* Float-input variant (S088 P1): same curve, accepts a pre-gained float
+ * in ±32767 range to avoid the int16 round-trip in fused post-chains. */
+static inline int16_t distortion_curveSampleF(const Distortion *dist,
+										const float in)
+{
+	float x = in * (1.f/32767.f);
+	x = (1+dist->shape)*x/(1+dist->shape*fabsf(x));
+	return (int16_t)(int32_t)(x*32767);
+}
+//--------------------------------------------------
 #endif /* DISTORTION_H_ */

@@ -227,17 +227,37 @@ uint16_t modNode_shapeRangeU16(uint16_t base,
 							   float amount_0_1,
 							   uint8_t polarity);
 void modNode_setWaveInterpEnabled(uint8_t enabled);
+/*
+ * Reserve interpolation slots for ongoing itp crossfades (S088 P0 §3 3b).
+ *
+ * What:       stores the number of itp fades that are active for the coming
+ *             block; modNode_resetTargets() adds it to last block's wavetable
+ *             grants when it recomputes modNode_interpReserved.
+ * Why:        an itp fade must keep its slot for the whole 132-sample blend;
+ *             without the reserve a wavetable blend could take the same slot
+ *             and push the block over the two-slot budget. Claim order:
+ *             ongoing itp, then wtb, then new itp.
+ * Inputs:     the mixer's per-block active fade count (0..2).
+ * Outputs:    modNode_interpReserved (via modNode_resetTargets()).
+ * Accessors:  mixer_calcNextSampleBlock() before modNode_resetTargets().
+ * Affiliates: modNode_interpClaim(); OSC_WAVE_INTERP_MAX_ACTIVE;
+ *             instrumentManager_activeItpFadeCount().
+ */
+void modNode_setItpReserved(uint8_t slots);
 uint8_t modNode_getWaveInterpEnabled(void);
 uint32_t modNode_getWaveInterpGeneration(void);
 /*
- * Return the current maximum waveform index for oscillator waveform modulation.
+ * Claim one of the two interpolation slots for this block (S087 stage E).
  *
- * Inputs: none; the value follows SampleMemory's current sample count. Output:
- * the highest waveform id that a modulated oscillator waveform field may hold.
- * InstrumentManager uses this while building a direct-target range, and
- * ModulationNode uses it again for the interpolation write path. Keeping one
- * accessor prevents Menu or InstrumentManager from duplicating sample/waveform
- * packing rules.
+ * What:       returns 1 and stamps osc->interpStamp with this block's stamp
+ *             (1..255) when a slot is granted; 0 otherwise. The global toggle
+ *             off grants nothing; a grant already made this block is kept; a
+ *             holder of last block keeps a reserved slot; a newcomer needs a
+ *             free slot (S087 P1).
+ * Why:        wavetable frame blending takes a slot and steps without one.
+ * Inputs:     osc.  Outputs: grant flag, interpStamp, the counters.
+ * Accessors:  osc_renderTyped*() (wtb branch).
+ * Affiliates: modNode_resetTargets(); OSC_WAVE_INTERP_MAX_ACTIVE.
  */
-uint8_t modNode_getMaxWaveformIndex(void);
+uint8_t modNode_interpClaim(void* osc);
 #endif /* VELOCITYMODULATION_H_ */

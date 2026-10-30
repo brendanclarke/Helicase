@@ -97,6 +97,24 @@ void SVF_init();
 void SVF_setDrive(ResonantFilter* filter, uint8_t drive);
 //------------------------------------------------------------------------------------
 void SVF_directSetFilterValue(ResonantFilter* filter, float val);
+/*
+ * Set only the cutoff target (S088 P0 §3 Layer 2d).
+ *
+ * What:       computes filter->f exactly as SVF_directSetFilterValue() does
+ *             but leaves filter->g untouched, so the per-block
+ *             SVF_recalcFreqSlew() can move the coefficient toward it.
+ * Why:        SVF_directSetFilterValue() also jumps g. In rst that is correct
+ *             (the trigger has just cleared the filter). In fre/itp the state
+ *             is kept, so a writer-time jump would defeat the slew and put a
+ *             transient at the control-rate write instead of the block
+ *             boundary.
+ * Inputs:     filter, val (the same shaped value the direct setter takes).
+ * Outputs:    filter->f only.
+ * Accessors:  InstrumentManager.c IM_SPECIAL_FILTER_FREQ when the slot's
+ *             runMode is not rst.
+ * Affiliates: SVF_directSetFilterValue(); SVF_recalcFreqSlew().
+ */
+void SVF_setFrequencyTarget(ResonantFilter* filter, float val);
 //------------------------------------------------------------------------------------
 void SVF_calcBlockZDF(ResonantFilter* filter, const uint8_t type, int16_t* buf, const uint8_t size);
 //------------------------------------------------------------------------------------
@@ -116,6 +134,29 @@ void SVF_calcBlockZDFFloat(ResonantFilter* filter, const uint8_t type,
                            float* buf, const uint8_t size);
 //------------------------------------------------------------------------------------
 void SVF_recalcFreq(ResonantFilter* filter);
+/*
+ * Filter coefficient slew (S088 P0 §3 Layer 2d).
+ *
+ * What:       steps filter->g from its current value toward fastTan(pi x f)
+ *             by a fixed per-block fraction (OSC_RUN_FILTER_SLEW, 0.28), so
+ *             a cutoff change converges over a few blocks instead of jumping.
+ *             filter->f must already hold the new cutoff (the special writer
+ *             / SVF_directSetFilterValue() set it on the value change).
+ * Why:        in rst the trigger clears the filter and SVF_recalcFreq() jumps
+ *             g, which is correct because there is no state to disturb. In
+ *             fre/itp the state is kept, so a g jump is a transient whose size
+ *             follows the frequency change and the resonance; the slew
+ *             (about 2 ms) removes it.
+ * Inputs:     filter (f, g, drive).
+ * Outputs:    filter->g stepped toward the target; the shaper refreshed when
+ *             USE_SHAPER_NONLINEARITY is on (same as SVF_recalcFreq).
+ * Cost:       one fastTan plus one multiply-add per block, in place of
+ *             SVF_recalcFreq(); called once per block per slot either way.
+ * Accessors:  instrumentManager_recalcSlotFilter() when runMode != rst.
+ * Affiliates: SVF_recalcFreq(); the engine runMode bytes; A2 (0.28 is the
+ *             starting value and may be tuned on hardware).
+ */
+void SVF_recalcFreqSlew(ResonantFilter* filter);
 //------------------------------------------------------------------------------------
 void SVF_reset(ResonantFilter* filter);
 

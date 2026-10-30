@@ -95,6 +95,54 @@ typedef struct HiHatStruct
 	uint8_t volumeMod;	//modulate volume by midi velocity if 1
 	uint8_t isOpen;		//is 1 if urrent playing voice is open hihat, 0 for closed
 
+	/*
+	 * Oscillator run mode (S088 P0 §2.4).
+	 *
+	 * What:       0 rst, 1 fre, 2 itp (OSC_RUN_*); stored by the osc1_run
+	 *             descriptor row through IM_SPECIAL_OSC_RUN.
+	 * Why:        HiHat_triggerVoice() and HiHat_calcSyncBlockVoice() branch
+	 *             on it for the carrier/modulator phase resets, the
+	 *             gain-matched retrigger (open/closed decay still selected
+	 *             every hit, A9) and the itp carrier crossfade.
+	 * Inputs:     the descriptor writer.  Outputs: read by trigger and render.
+	 * Accessors:  HiHat_initVoice() (0), the writer, trigger, render.
+	 * Affiliates: OSC_RUN_* (Oscillator.h); the osc1_run row
+	 *             (HiHatParameters.c); InstrumentManager.c runtime-slot reserve.
+	 */
+	uint8_t runMode;
+
+	/*
+	 * Amp-ramp armed flag / previous-block compound amp gain (S088 P0 §3 2a/2b).
+	 *
+	 * What:       ampRampArm = 1 when the last trigger was a fre/itp retrigger
+	 *             into an audible tail; lastAmpGain is the ampGain
+	 *             (velo x egValueOscVol, or egValueOscVol) used on the previous
+	 *             block.
+	 * Why:        the armed render ramps the post-chain gain from lastAmpGain;
+	 *             every other block passes equal endpoints, so the rst output
+	 *             stays bit-identical. The open/closed decay is still selected
+	 *             on every hit (A9).
+	 * Inputs:     HiHat_triggerVoice() (arm), HiHat_calcSyncBlockVoice()
+	 *             (update).  Outputs: voicePost_addGainDist() endpoints.
+	 * Affiliates: voicePostChain.h; HiHat_initVoice() (0u / 0.0f).
+	 */
+	uint8_t ampRampArm;
+	float lastAmpGain;
+
+	/*
+	 * itp old-carrier snapshot (S088 P0 §3 Layer 3a).
+	 *
+	 * What:       the frozen carrier state filled on an itp retrigger while the
+	 *             amp gain is audible and a slot is free; inert when active = 0.
+	 * Why:        oscSection_renderOldCarrier() blends it into the new carrier;
+	 *             the modulators keep running and are not snapshotted.
+	 * Inputs:     HiHat_triggerVoice().
+	 * Outputs:    HiHat_calcSyncBlockVoice(); the mixer's slot count.
+	 * Affiliates: OscCarrierSnapshot; OSC_RUN_ITP_SAMPLES;
+	 *             instrumentManager_slotHasActiveItpFade().
+	 */
+	OscCarrierSnapshot snapshot;
+
 } HiHatVoice;
 
 /*

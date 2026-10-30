@@ -112,6 +112,35 @@ INITCM_EFFECT void SVF_recalcFreq(ResonantFilter* filter)
 #endif
 }
 //------------------------------------------------------------------------------------
+/*
+ * SVF_recalcFreqSlew() - filter coefficient slew (S088 P0 §3 Layer 2d; see the
+ * header for the contract).
+ *
+ * What:       computes the same target as SVF_recalcFreq() and moves the
+ *             current g a fixed fraction of the way toward it:
+ *                 g += OSC_RUN_FILTER_SLEW x (fastTan(pi f) - g)
+ * Why:        in fre/itp the filter state is kept, so an instant g change is a
+ *             transient at high resonance. 0.28 per block reaches ~90% in
+ *             about seven blocks (about 5 ms at 44,108 Hz / 32 samples); 1.0
+ *             would be SVF_recalcFreq() and 0.0 would freeze the cutoff.
+ * Inputs:     filter->f (already the new cutoff), filter->g.
+ * Outputs:    filter->g; the shaper refreshed when enabled.
+ * Cost:       one fastTan + one multiply-add per block (same call site as
+ *             SVF_recalcFreq()).
+ * Accessors:  instrumentManager_recalcSlotFilter() for runMode fre/itp.
+ * Affiliates: SVF_recalcFreq(); A2 (hardware tuning constant).
+ */
+#define OSC_RUN_FILTER_SLEW  0.28f
+INITCM_EFFECT void SVF_recalcFreqSlew(ResonantFilter* filter)
+{
+	const float target = fastTan(M_PI * filter->f);
+
+	filter->g += OSC_RUN_FILTER_SLEW * (target - filter->g);
+#if USE_SHAPER_NONLINEARITY
+	setDistortionShape(&filter->shaper, filter->drive);
+#endif
+}
+//------------------------------------------------------------------------------------
 void SVF_setDrive(ResonantFilter* filter,uint8_t drive)
 {
 #if USE_SHAPER_NONLINEARITY
@@ -128,6 +157,21 @@ void SVF_directSetFilterValue(ResonantFilter* filter, float val)
 	filter->f = val*(0.5f*0.90f);
 	filter->g  = fastTan(M_PI * filter->f );
 
+}
+/*
+ * SVF_setFrequencyTarget() - cutoff target without the coefficient jump (S088
+ * P0 §3 Layer 2d; see the header).
+ *
+ * What:       the f half of SVF_directSetFilterValue(); g is left alone.
+ * Why:        in fre/itp the live filter state must not see a step in g; the
+ *             per-block SVF_recalcFreqSlew() moves it from the current value.
+ * Inputs:     filter, val.  Outputs: filter->f.
+ * Accessors:  IM_SPECIAL_FILTER_FREQ for runMode fre/itp.
+ * Affiliates: SVF_directSetFilterValue(); SVF_recalcFreqSlew().
+ */
+void SVF_setFrequencyTarget(ResonantFilter* filter, float val)
+{
+	filter->f = val*(0.5f*0.90f);
 }
 //------------------------------------------------------------------------------------
 //#if ENABLE_NONLINEAR_INTEGRATORS

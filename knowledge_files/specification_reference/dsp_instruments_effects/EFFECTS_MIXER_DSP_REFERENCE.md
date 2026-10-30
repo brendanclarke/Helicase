@@ -6,10 +6,12 @@ the master bus compressor, and the path to the two DACs. It covers the
 arithmetic, the number formats, what each stage costs, and how to change or
 extend it.
 
-- **Current as of:** Session 075 close (2026-10-03; F3 changed nothing in
-  the mixer or Effect DSP). S074 added CrumpBit
-  (§4.4, the first type using the arena), the master bus compressor (§5A),
-  the `xfd` fader mode (§3.2) and the closure of the arena gaps (§5.3).
+- **Current as of:** Session 088 close (2026-10-29). S088 added block-rate
+  fader smoothing in `mixer_faderGains()` (§3), itp slot accounting before
+  `modNode_resetTargets()`, and the `* 256.0f` direct float-to-24-bit mixer
+  conversion. S074 added CrumpBit (§4.4, the first type using the arena),
+  the master bus compressor (§5A), the `xfd` fader mode (§3.2) and the
+  closure of the arena gaps (§5.3).
 - **Scope split with `EFFECTS_BUS_REFERENCE.md`:** that document is the
   authority for the Effect system's control side: the type registry,
   parameters and resolution order, the Effect page, the FX sequencer,
@@ -117,12 +119,19 @@ Policy).
    rate 1.0 every sample passes (the loop still runs: the constant-CPU rule
    and audit item 11).
 3. **Fader gains** (`mixer_faderGains()`):
-   - `volume` = the instrument's `vol` (0..1); `fader` = the slider;
-     `send` = the effective FX send amount / 127
-     (`preset_getEffectiveFxSendAmount()`: the step override, else, since
-     S075 F2, the voice's Normal and Morph send endpoints interpolated by
-     its resolved Morph amount, `round(n + (m − n)·a/255)`; read every
-     block);
+   - `volume` = the instrument's `vol` (0..1); `fader` = the slider
+     (after block-rate smoothing, see below); `send` = the effective FX
+     send amount / 127 (`preset_getEffectiveFxSendAmount()`: the step
+     override, else, since S075 F2, the voice's Normal and Morph send
+     endpoints interpolated by its resolved Morph amount,
+     `round(n + (m − n)·a/255)`; read every block);
+   - **Block-rate fader smoothing (S088 P1):** `slider_vol[slot]` from the
+     ADC LUT is filtered through a one-pole EMA (`mixer_fader_smooth[6]`,
+     DTCM, α = `MIXER_FADER_SMOOTH_ALPHA` 0.15, τ ≈ 4.5 ms, fc ≈ 35 Hz)
+     once per block (1,378 Hz). At exact 0.0 or 1.0 the filter snaps to
+     the endpoint (true silence / full gain). This eliminates the
+     staircase zipper artifact from the main-loop ADC update rate
+     (≈ 460 Hz). Cost: one multiply-add per slot per block;
    - mode `pre`: dry = volume × fader, send = send × fader;
    - mode `pst`: dry = volume × fader, send = send;
    - mode `fx`: dry = volume, send = send × fader;
@@ -249,6 +258,35 @@ are queued for the DMA pack.
   with the DWT cycle counter. It is audio-queue pressure, not general CPU
   load. The two DMA streams are not synchronised with each other (DAC1 and
   DAC2 can drift by up to one ISR period; a known, accepted limitation).
+
+### Render loop and output pipeline quick reference
+
+**Main loop pattern** (`main.c` `audio_check_and_render()`, called ~14× per main-loop iteration):
+
+```c
+if (audioCodec_isSuspended()) return;
+while (audioCodec_queueFreeSlots() > 0) {
+    for (frame = 0; frame < AUDIO_DMA_FRAMES; frame += OUTPUT_DMA_SIZE) {
+        voiceControl_processPending();        // triggers + seq_drainPendingAutomationTo (internal)
+        seq_rampService();                    // automation ramps (S081 P2)
+        basepri = dsp_maskLowPriorityIrqs();  // BASEPRI 6 << 4: timing-critical IRQs stay live
+        mixer_calcNextSampleBlock(&buf[frame * 2], &buf2[frame * 2]);
+        irq_setBasepri(basepri);              // restore
+    }
+    audioCodec_commitRenderBuffer();
+}
+```
+
+Note: `seq_drainPendingAutomationTo(mark)` is called *inside* `voiceControl_processPending()` (MidiVoiceControl.c:454), not as a separate top-level step.
+
+**Constants:**
+- `OUTPUT_DMA_SIZE = 32` — DSP frames per mixer block (0.73 ms @ 44108 Hz; config.h:840)
+- `AUDIO_DMA_FRAMES = 96` — hardware frames per DMA half (2.18 ms budget = 471,288 cycles @ 216 MHz; config.h:846)
+- `AUDIO_RENDER_IN_DMA_ISR = 0` — diagnostic only (config.h:853)
+
+**SPSC queue** (AudioCodecManager.c:237–241): 2-slot queue. `ready_queue[2]` backing array; `ready_head` (ISR-owned), `ready_tail` (main-loop-owned), `ready_count` (0–2). `audioCodec_getQueueFreePercent()` uses DWT cycle-counter accounting — an audio queue-free pressure meter, not generic MCU utilisation.
+
+**Critical rule: DSP render must remain in the main loop.** Moving it to the DMA ISR creates a hard 2.18 ms ceiling — when DSP expands beyond the budget the system locks up with no graceful degradation. Main loop allows unlimited expansion with underruns as the graceful signal.
 
 ---
 

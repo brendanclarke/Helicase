@@ -417,7 +417,6 @@ extern uint8_t paramToModTarget[END_OF_SOUND_PARAMETERS];
 
 void menu_repaintAll(void);
 void menu_repaint(void);
-void menu_setNumSamples(uint8_t num);
 void menu_resetSaveParameters(void);
 void menu_init(void);
 void menu_start(void);

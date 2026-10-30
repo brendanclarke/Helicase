@@ -1,195 +1,204 @@
-# S073 golden harness and ARM codegen check (Step 0).
+# Module host tests (tools/dsp_test).
 #
-# What:       builds host old-vs-new tests and ARM loop checks.
-# Why:        the plan permits only the existing cc and arm-none-eabi tools.
-# Inputs:     frozen snapshot, current sources, extract.py and test files.
-# Outputs:    generated fragments and binaries under build/.
-# Accessors:  make -C tools/dsp_test <target>.
-# Affiliates: fpseq.py, armcheck/, and the per-step test programs.
+# What:       one host program per firmware module, built from the real
+#             source text (extract.py, by name; never by line range):
+#               oscillator          modules/oscillator.c (+ the pos cap build)
+#               modulation          modules/modulation.c
+#               voice_control       modules/voice_control.c (+ break build)
+#               sequencer           modules/sequencer.c (+ break build)
+#               instrument_manager  modules/instrument_manager.c (+ 2 breaks)
+#               samples             modules/samples.c (+ break build)
+#               sampleoptimize      modules/sampleoptimize.py
+#               special_tags        check_special_tags.py
+#               stock_tables        tools/plots/gen_stock_tables.py --check
+#             A break build compiles a deliberately broken copy and must fail.
+# Why:        keeps the laws earlier sessions proved runnable against today's
+#             source. The effects retry kit is spike/ (its own Makefile).
+# Inputs:     Core/ sources, prelude.h, osc_host.h, cat_host.h,
+#             catalogue_host.c, extract.py.
+# Outputs:    generated fragments and programs under build/.
+# Accessors:  make -C tools/dsp_test <target> (or all).
+# Affiliates: DSP_TEST.md, spike/Makefile, fpseq.py, elf_*.py.
 ROOT   := ../..
-FROZEN := frozen
 GEN    := build/gen
 HOSTCC ?= cc
 HOSTFLAGS := -O2 -std=gnu11 -Wall -Wno-unused-function -fno-vectorize -fno-slp-vectorize \
              -include prelude.h -I$(GEN)
-ARMCC  := arm-none-eabi-gcc
-ARMFLAGS := -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard -Ofast -std=gnu11 \
-            -fdata-sections -ffunction-sections -I$(ROOT) -I$(ROOT)/Core \
-            -I$(ROOT)/Core/DSPAudio -I$(ROOT)/Core/compat -I$(GEN)
 EX := python3 extract.py
-FP := python3 fpseq.py
 
-FILTER_SYMS := fastTanh fastTan tanhXdX softClipTwo SVF_setReso \
-               SVF_directSetFilterValue SVF_init SVF_reset SVF_recalcFreq \
-               SVF_setDrive SVF_calcBlockZDF SVF_calcBlockZDFFloat
-NEW_FILTER_SYMS := svf_padeNum svf_padeDen $(FILTER_SYMS)
-fn = $(foreach s,$(1),--func $(s))
-rn = $(foreach s,$(2),--rename $(s)=$(1)$(s))
+CAT_HOST_SRC := $(ROOT)/Core/SampleRom/SampleMemory.c \
+                $(ROOT)/Core/SampleRom/SampleInstall.c catalogue_host.c
+CAT_HOST_INC := -I. -I$(ROOT)/Core/SampleRom -include cat_host.h
+OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
 
-.PHONY: selftest filter special_tags pack postchain octave mixer \
-        armcheck-filter armcheck-postchain armcheck-mixer clean
+.PHONY: all clean oscillator modulation voice_control sequencer \
+        instrument_manager samples sampleoptimize run_modes special_tags \
+        stock_tables
+all: oscillator modulation voice_control sequencer instrument_manager samples \
+     sampleoptimize run_modes special_tags stock_tables
+
 $(GEN):
 	mkdir -p $(GEN)
-
-# Step 0 gate: exact frozen source against itself.
-selftest: | $(GEN)
-	$(EX) --src $(FROZEN)/Core/DSPAudio/ResonantFilter.c $(call fn,$(FILTER_SYMS)) \
-	  $(call rn,A_,$(FILTER_SYMS)) --out $(GEN)/filter_a.c
-	$(EX) --src $(FROZEN)/Core/DSPAudio/ResonantFilter.c $(call fn,$(FILTER_SYMS)) \
-	  $(call rn,B_,$(FILTER_SYMS)) --out $(GEN)/filter_b.c
-	$(HOSTCC) $(HOSTFLAGS) -c $(GEN)/filter_a.c -o build/filter_a.o
-	$(HOSTCC) $(HOSTFLAGS) -c $(GEN)/filter_b.c -o build/filter_b.o
-	$(HOSTCC) $(HOSTFLAGS) test_filter.c build/filter_a.o build/filter_b.o -o build/selftest -lm
-	./build/selftest --expect-identical
 
 clean:
 	rm -rf build
 
-# Step 2 host proof: tagged rows equal the pre-S073 key classifier.
+# The whole real Oscillator.h/.c, firmware includes and ITCM sections removed.
+$(GEN)/Oscillator.host.h: $(ROOT)/Core/DSPAudio/Oscillator.h | $(GEN)
+	$(EX) --src $< --body --out $@
+$(GEN)/Oscillator.host.c: $(ROOT)/Core/DSPAudio/Oscillator.c | $(GEN)
+	$(EX) --src $< --body --out $@
+
+oscillator: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c
+	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c $(CAT_HOST_SRC) \
+	  -o build/oscillator -lm
+	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) -DOSC_POS_BEND_CAP=8 -DOSC_POS_TEST_CAP \
+	  modules/oscillator.c $(CAT_HOST_SRC) -o build/oscillator_cap -lm
+	./build/oscillator
+	./build/oscillator_cap
+
+modulation: $(GEN)/Oscillator.host.h
+	$(EX) --src $(ROOT)/Core/DSPAudio/modulationNode.c \
+	  --func modNode_interpStampOf --func modNode_setWaveInterpEnabled \
+	  --func modNode_setItpReserved --func modNode_resetTargets \
+	  --func modNode_interpClaim \
+	  --out $(GEN)/modulation_interp.c
+	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/modulation.c -o build/modulation -lm
+	./build/modulation
+
+# Break: the old trigger-then-drain order (-DBREAK_DRAIN_AFTER_FIRE); the
+# program reports law 1 failing and exits 0 only when it does.
+voice_control: | $(GEN)
+	$(EX) --src $(ROOT)/Core/MIDI/MidiVoiceControl.c \
+	  --func voiceControl_popPendingBatch --func voiceControl_prepareTrigger \
+	  --func voiceControl_fireTrigger --func voiceControl_processPending \
+	  --rename voiceControl_irqSave=sta_irqSave \
+	  --rename voiceControl_irqRestore=sta_irqRestore \
+	  --out $(GEN)/voice_control_pending.c
+	$(HOSTCC) $(HOSTFLAGS) modules/voice_control.c -o build/voice_control -lm
+	./build/voice_control
+	$(HOSTCC) $(HOSTFLAGS) -DBREAK_DRAIN_AFTER_FIRE modules/voice_control.c \
+	  -o build/voice_control_break -lm
+	./build/voice_control_break
+
+# Break: the drain starts at 0 instead of the cursor (law 2 must fail).
+sequencer: | $(GEN)
+	$(EX) --src $(ROOT)/Core/Sequencer/sequencer.c \
+	  --func seq_drainPendingAutomationTo --func seq_pendingAutomationMark \
+	  --out $(GEN)/sequencer_drain.c
+	$(HOSTCC) $(HOSTFLAGS) modules/sequencer.c -o build/sequencer -lm
+	./build/sequencer
+	mkdir -p build/break_seq
+	sed 's/uint8_t i = seq_pending_automation_done;/uint8_t i = 0u;/' \
+	  $(GEN)/sequencer_drain.c > build/break_seq/sequencer_drain.c
+	$(HOSTCC) -Ibuild/break_seq $(HOSTFLAGS) modules/sequencer.c \
+	  -o build/sequencer_break -lm
+	@if ./build/sequencer_break >/dev/null 2>&1; then \
+	  echo "sequencer_break: FAILED (the cursor-start break was not caught)"; \
+	  exit 1; else echo "sequencer_break: caught (law 2 fails as expected)"; fi
+
+# Breaks: the gate without its SELECTOR branch (law 3); the row as
+# DTYPE_0B127 (law 4).
+instrument_manager: | $(GEN)
+	$(EX) --src $(ROOT)/Core/Menu/menu.h --enum Datatypes --out $(GEN)/im_dtypes.inc
+	$(EX) --src $(ROOT)/Core/Menu/MenuText.h --macro MENU_OSC_TYPE --out $(GEN)/im_menuid.inc
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Drum/DrumParameters.c \
+	  --macro ROW_SELECT_SPECIAL --out $(GEN)/im_rowmacro.inc
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Drum/DrumParameters.c \
+	  --macro ROW_SELECT_ONOFF_SPECIAL --out $(GEN)/im_onoffmacro.inc
+	$(EX) --src $(ROOT)/Core/Menu/MenuText.h \
+	  --macro ONOFF_TAG_OSC_RUN --out $(GEN)/im_onofftag.inc
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Drum/DrumParameters.c \
+	  --typedef drum_param_index_t --out $(GEN)/im_index.inc
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/InstrumentManager.c \
+	  --func instrumentManager_targetValid --out $(GEN)/im_gate.c
+	$(EX) --src $(ROOT)/Core/Sequencer/sequencer.c --func seq_rampDtypeOk \
+	  --out $(GEN)/im_ramp.c
+	$(HOSTCC) $(HOSTFLAGS) modules/instrument_manager.c -o build/instrument_manager -lm
+	./build/instrument_manager
+	mkdir -p build/break_gate build/break_row
+	sed 's/(descriptor->flags & INSTRUMENT_PARAM_FLAG_SELECTOR)/0/' \
+	  $(GEN)/im_gate.c > build/break_gate/im_gate.c
+	$(HOSTCC) -Ibuild/break_gate $(HOSTFLAGS) modules/instrument_manager.c \
+	  -o build/instrument_manager_break_gate -lm
+	@if ./build/instrument_manager_break_gate >/dev/null 2>&1; then \
+	  echo "instrument_manager_break_gate: FAILED (selector branch break not caught)"; exit 1; \
+	else echo "instrument_manager_break_gate: caught (law 3 fails as expected)"; fi
+	sed 's/(uint8_t)(DTYPE_MENU | (menu_ << 4))/(uint8_t)DTYPE_0B127/' \
+	  $(GEN)/im_rowmacro.inc > build/break_row/im_rowmacro.inc
+	$(HOSTCC) -Ibuild/break_row $(HOSTFLAGS) modules/instrument_manager.c \
+	  -o build/instrument_manager_break_row -lm
+	@if ./build/instrument_manager_break_row >/dev/null 2>&1; then \
+	  echo "instrument_manager_break_row: FAILED (dtype break not caught)"; exit 1; \
+	else echo "instrument_manager_break_row: caught (law 4 fails as expected)"; fi
+	mkdir -p build/break_onoff
+	sed 's/DTYPE_ON_OFF | ((tag_) << 4)/DTYPE_ON_OFF/' \
+	  $(GEN)/im_onoffmacro.inc > build/break_onoff/im_onoffmacro.inc
+	$(HOSTCC) -Ibuild/break_onoff $(HOSTFLAGS) modules/instrument_manager.c \
+	  -o build/instrument_manager_break_onoff -lm
+	@if ./build/instrument_manager_break_onoff >/dev/null 2>&1; then \
+	  echo "instrument_manager_break_onoff: FAILED (on/off tag break not caught)"; exit 1; \
+	else echo "instrument_manager_break_onoff: caught (law 7 fails as expected)"; fi
+
+# Break: the header is published in begin() (after the erase), so an
+# uncommitted install no longer reads EMPTY (catalogue law 3 must fail).
+samples: | $(GEN)
+	$(EX) --src $(ROOT)/Core/Hardware/SD/storageTypes.c \
+	  --func storage_naturalLower --func storage_naturalCompare \
+	  --func storage_displayNameFromLfn --out $(GEN)/samples_order.c
+	$(HOSTCC) $(HOSTFLAGS) $(CAT_HOST_INC) modules/samples.c $(CAT_HOST_SRC) \
+	  -o build/samples -lm
+	./build/samples
+	mkdir -p build/break_cat
+	sed 's|install_fault = (uint8_t)(sampleFlash_eraseAllSamples() != 0);|install_fault = (uint8_t)(sampleFlash_eraseAllSamples() != 0); { sample_catalogue_header_t bh; uint32_t ba; memset(\&bh, 0, sizeof(bh)); bh.magic = SAMPLE_CATALOGUE_MAGIC; bh.version = SAMPLE_CATALOGUE_VERSION; bh.sample_entry_bytes = SAMPLE_ENTRY_BYTES; bh.wavetable_entry_bytes = WAVETABLE_ENTRY_BYTES; ba = SAMPLE_CATALOGUE_START_ADDRESS; (void)sampleFlash_writeBytes(\&ba, (const uint8_t *)\&bh, sizeof(bh)); }|' \
+	  $(ROOT)/Core/SampleRom/SampleInstall.c > build/break_cat/SampleInstall.c
+	$(HOSTCC) $(HOSTFLAGS) -I$(ROOT)/Core/SampleRom $(CAT_HOST_INC) \
+	  modules/samples.c $(ROOT)/Core/SampleRom/SampleMemory.c \
+	  build/break_cat/SampleInstall.c catalogue_host.c \
+	  -o build/samples_break -lm
+	@if ./build/samples_break >/dev/null 2>&1; then \
+	  echo "samples_break: FAILED (early-header break not caught)"; exit 1; \
+	else echo "samples_break: caught (catalogue law 3 fails as expected)"; fi
+
+sampleoptimize:
+	python3 modules/sampleoptimize.py
+
+# S088 P0: gain-matched retrigger (slopeEg2_retriggerFrom) and the ramped
+# post-chains (voicePostChain.h). Break: `currentGain / denom` -> `currentGain`,
+# which must make law A1 fail.
+run_modes: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/SlopeEg2.h \
+	  --typedef SlopeEg2 --out $(GEN)/rm_slope_type.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/SlopeEg2.h \
+	  --macro EG_STOPPED --macro EG_A --macro EG_D --macro EG_REPEAT \
+	  --out $(GEN)/rm_slope_consts.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/SlopeEg2.c \
+	  --func slopeEg2_setSlope --func slopeEg2_init \
+	  --func slopeEg2_trigger \
+	  --func slopeEg2_retriggerFrom --func slopeEg2_calcSlopeValue \
+	  --func slopeEg2_calc \
+	  --out $(GEN)/rm_slope_eg.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/SlopeEg2.h \
+	  --func slopeEg2_isAudibleGain --out $(GEN)/rm_audible.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/BufferTools.h \
+	  --func bufferTool_floatToInt16Store --func bufferTool_satAdd16 \
+	  --func bufferTool_interpolatedGain --out $(GEN)/rm_buffertools.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/voicePostChain.h \
+	  --func voicePost_drum --func voicePost_mixAddGainDist \
+	  --func voicePost_addGainDist --out $(GEN)/rm_postchain.c
+	$(HOSTCC) $(HOSTFLAGS) modules/run_modes.c -o build/run_modes -lm
+	./build/run_modes
+	mkdir -p build/break_rm
+	sed 's|v = currentGain / denom;|v = currentGain;|' \
+	  $(GEN)/rm_slope_eg.c > build/break_rm/rm_slope_eg.c
+	$(HOSTCC) -Ibuild/break_rm $(HOSTFLAGS) modules/run_modes.c \
+	  -o build/run_modes_break -lm
+	@if ./build/run_modes_break >/dev/null 2>&1; then \
+	  echo "run_modes_break: FAILED (gain-match break not caught)"; exit 1; \
+	else echo "run_modes_break: caught (law A1 fails as expected)"; fi
+
 special_tags:
 	cd $(ROOT) && python3 tools/dsp_test/check_special_tags.py
 
-# Step 3a gate: old and word-store packers must produce identical bytes.
-pack: | $(GEN)
-	$(EX) --src $(FROZEN)/Core/Hardware/AudioCodecManager.c \
-	  --func sampleMix_toS24 --func pack_half \
-	  --rename sampleMix_toS24=old_sampleMix_toS24 --rename pack_half=old_pack_half \
-	  --out $(GEN)/pack_old.c
-	$(EX) --src $(ROOT)/Core/Hardware/AudioCodecManager.c \
-	  --func sampleMix_toS24 --func pack_frameWord --func pack_half \
-	  --rename sampleMix_toS24=new_sampleMix_toS24 --rename pack_frameWord=new_pack_frameWord \
-	  --rename pack_half=new_pack_half --out $(GEN)/pack_new.c
-	$(HOSTCC) $(HOSTFLAGS) test_pack.c -o build/pack -lm
-	./build/pack
-
-# Step 4 host gate: frozen multi-pass voice chains equal fused helpers.
-postchain: | $(GEN)
-	$(EX) --src $(FROZEN)/Core/DSPAudio/BufferTools.h --func bufferTool_satAdd16 \
-	  --out $(GEN)/pc_sat.c
-	$(EX) --src $(FROZEN)/Core/DSPAudio/BufferTools.c \
-	  --func bufferTool_addGainInterpolated --func bufferTool_addGain \
-	  --rename bufferTool_addGainInterpolated=old_addGainInterpolated \
-	  --rename bufferTool_addGain=old_addGain --out $(GEN)/pc_old_bt.c
-	$(EX) --src $(FROZEN)/Core/DSPAudio/distortion.c --func calcDistBlock \
-	  --rename calcDistBlock=old_calcDistBlock --out $(GEN)/pc_old_dist.c
-	$(EX) --src $(FROZEN)/Core/DSP/Instruments/Snare/Snare.c --lines 239-262 \
-	  --rename calcDistBlock=old_calcDistBlock --out $(GEN)/pc_old_snare_body.inc
-	$(EX) --src $(FROZEN)/Core/DSP/Instruments/Cymbal/CymbalVoice.c --lines 252-272 \
-	  --rename calcDistBlock=old_calcDistBlock --out $(GEN)/pc_old_cym_body.inc
-	$(EX) --src $(FROZEN)/Core/DSP/Instruments/HiHat/HiHat.c --lines 270-291 \
-	  --rename calcDistBlock=old_calcDistBlock --out $(GEN)/pc_old_hat_body.inc
-	$(EX) --src $(ROOT)/Core/DSPAudio/BufferTools.h \
-	  --func bufferTool_floatToInt16Store --func bufferTool_interpolatedGain \
-	  --out $(GEN)/pc_new_bt.c
-	$(EX) --src $(ROOT)/Core/DSPAudio/distortion.h \
-	  --func distortion_curveSample16 --out $(GEN)/pc_new_dist.c
-	$(EX) --src $(ROOT)/Core/DSPAudio/voicePostChain.h \
-	  --func voicePost_drum --func voicePost_mixAddGainDist --func voicePost_addGainDist \
-	  --out $(GEN)/pc_new_chain.c
-	$(HOSTCC) $(HOSTFLAGS) test_postchain.c -o build/postchain -lm
-	./build/postchain
-
-# Step 4 ARM gate: compare frozen pass loops with fused target codegen.
-armcheck-postchain: postchain
-	$(EX) --src $(FROZEN)/Core/DSPAudio/BufferTools.c \
-	  --func bufferTool_addGainInterpolated --func bufferTool_addGain \
-	  --rename bufferTool_addGainInterpolated=old_addGainInterpolated \
-	  --rename bufferTool_addGain=old_addGain --rename static= \
-	  --out $(GEN)/pc_old_bt_arm.c
-	$(EX) --src $(FROZEN)/Core/DSPAudio/distortion.c --func calcDistBlock \
-	  --rename calcDistBlock=old_calcDistBlock --out $(GEN)/pc_old_dist_arm.c
-	$(ARMCC) $(ARMFLAGS) -c armcheck/postchain.c -o build/ac_postchain.o
-	$(FP) --obj build/ac_postchain.o --ref old_addGainInterpolated \
-	  --ref old_addGain --ref old_calcDistBlock --new new_drum
-	$(FP) --obj build/ac_postchain.o --ref ref_snare:0 --ref old_calcDistBlock \
-	  --new new_snare
-	$(FP) --obj build/ac_postchain.o --ref ref_cymbal:0 --ref old_calcDistBlock \
-	  --new new_addgain
-
-# Step 1 gate: rounding baseline, then frozen (A) against the current batched
-# solver (B) over the full S1 grid and both I/O twins.
-filter: selftest | $(GEN)
-	$(HOSTCC) $(HOSTFLAGS) -ffp-contract=off -c $(GEN)/filter_b.c \
-	  -o build/filter_b_strict.o
-	$(HOSTCC) $(HOSTFLAGS) test_filter.c build/filter_a.o build/filter_b_strict.o \
-	  -o build/filter_baseline -lm
-	./build/filter_baseline --baseline-out build/baseline_div.txt
-	$(EX) --src $(ROOT)/Core/DSPAudio/ResonantFilter.c $(call fn,$(NEW_FILTER_SYMS)) \
-	  $(call rn,B_,$(NEW_FILTER_SYMS)) --out $(GEN)/filter_b_new.c
-	$(HOSTCC) $(HOSTFLAGS) -c $(GEN)/filter_b_new.c -o build/filter_b_new.o
-	$(HOSTCC) $(HOSTFLAGS) test_filter.c build/filter_a.o build/filter_b_new.o -o build/filter -lm
-	./build/filter --s1-report build/baseline_div.txt
-
-# Step 1 report: target division count before and after the algebraic batch.
-armcheck-filter:
-	$(ARMCC) $(ARMFLAGS) -c $(FROZEN)/Core/DSPAudio/ResonantFilter.c -o build/rf_old.o
-	$(ARMCC) $(ARMFLAGS) -c $(ROOT)/Core/DSPAudio/ResonantFilter.c -o build/rf_new.o
-	@echo "vdiv old: $$(arm-none-eabi-objdump -d build/rf_old.o | grep -c vdiv)"
-	@echo "vdiv new: $$(arm-none-eabi-objdump -d build/rf_new.o | grep -c vdiv)"
-
-# Step 6 host gate: the edge-count wavetable selector is good enough at all
-# changed inputs; see test_octave.c for the full float-domain report.
-octave: | $(GEN)
-	$(EX) --src $(FROZEN)/Core/DSPAudio/Oscillator.c --func freqToTableIndex \
-	  --rename freqToTableIndex=old_freqToTableIndex --out $(GEN)/oct_old.c
-	$(EX) --src $(ROOT)/Core/DSPAudio/Oscillator.c --object osc_octaveEdgeHz \
-	  --func freqToTableIndex --rename osc_octaveEdgeHz=new_osc_octaveEdgeHz \
-	  --rename freqToTableIndex=new_freqToTableIndex --out $(GEN)/oct_new.c
-	$(HOSTCC) $(HOSTFLAGS) test_octave.c -o build/octave -lm
-	./build/octave
-
-# Step 5 host gate: dry + send old versus combined, bit-identical.
-mixer: | $(GEN)
-	$(EX) --src $(FROZEN)/Core/DSPAudio/BufferTools.h --func bufferTool_satAdd32 \
-	  --out $(GEN)/mx_sat.c
-	$(EX) --src $(FROZEN)/Core/DSPAudio/squareRootLut.c --object squareRootLut \
-	  --out $(GEN)/mx_lut.c
-	$(EX) --src $(FROZEN)/Core/DSPAudio/mixer.c --func mixer_addVoiceInt16ToOutput \
-	  --func mixer_addVoiceToFxBus --rename mixer_addVoiceInt16ToOutput=old_dry \
-	  --rename mixer_addVoiceToFxBus=old_send --rename mixer_fx_bus=old_bus \
-	  --out $(GEN)/mx_old.c
-	$(EX) --src $(ROOT)/Core/DSPAudio/mixer.c --func mixer_addVoiceInt16ToOutputAndFx \
-	  --rename mixer_addVoiceInt16ToOutputAndFx=new_combined \
-	  --rename mixer_fx_bus=new_bus --out $(GEN)/mx_new.c
-	$(HOSTCC) $(HOSTFLAGS) test_mixer.c -o build/mixer -lm
-	./build/mixer
-
-# Step 5 ARM gate: one loop of each dry x send combination, plus the default
-# (send-only) case, and the D-5 instruction counts for each combination.
-# Loop indices were chosen from their printed multisets (fpseq.py prints one
-# line per backward branch; loop rotation gives several per case):
-#   old_dry:1 single-output routing   old_dry:4  stereo routing
-#   old_send:0 mono-input send        old_send:3 stereo-input send
-#   new_combined:0 / 22 / 2 / 27      the four combinations, in that order
-#   new_combined:87 / 12              default case, mono / stereo send
-# A code change that moves a loop makes its line DIFF rather than pass.
-# The combined loop converts the input sample and the loop index once, where
-# the old dry and send loops each converted them (see fpseq.py --shared-op).
-MX_SHARED = --shared-op vcvt.f32.s32 --shared-op vcvt.f32.u32
-armcheck-mixer: mixer
-	$(EX) --src $(FROZEN)/Core/DSPAudio/mixer.c --func mixer_addVoiceInt16ToOutput \
-	  --func mixer_addVoiceToFxBus --rename mixer_addVoiceInt16ToOutput=old_dry \
-	  --rename mixer_addVoiceToFxBus=old_send --rename mixer_fx_bus=old_bus \
-	  --rename static= --out $(GEN)/mx_old_arm.c
-	$(EX) --src $(ROOT)/Core/DSPAudio/mixer.c --func mixer_addVoiceInt16ToOutputAndFx \
-	  --rename mixer_addVoiceInt16ToOutputAndFx=new_combined \
-	  --rename mixer_fx_bus=new_bus --rename static= --out $(GEN)/mx_new_arm.c
-	$(ARMCC) $(ARMFLAGS) -c armcheck/mixer.c -o build/ac_mixer.o
-	$(FP) --obj build/ac_mixer.o --ref old_dry:1 --ref old_send:0 \
-	  --new new_combined:0 $(MX_SHARED)
-	$(FP) --obj build/ac_mixer.o --ref old_dry:1 --ref old_send:3 \
-	  --new new_combined:22 $(MX_SHARED)
-	$(FP) --obj build/ac_mixer.o --ref old_dry:4 --ref old_send:0 \
-	  --new new_combined:2 $(MX_SHARED)
-	$(FP) --obj build/ac_mixer.o --ref old_dry:4 --ref old_send:3 \
-	  --new new_combined:27 $(MX_SHARED)
-	$(FP) --obj build/ac_mixer.o --ref old_send:0 --new new_combined:87
-	$(FP) --obj build/ac_mixer.o --ref old_send:3 --new new_combined:12
-	$(FP) --obj build/ac_mixer.o --ref old_dry:1 --ref old_send:0 --new new_combined:0 \
-	  --report --all
-	$(FP) --obj build/ac_mixer.o --ref old_dry:1 --ref old_send:3 --new new_combined:22 \
-	  --report --all
-	$(FP) --obj build/ac_mixer.o --ref old_dry:4 --ref old_send:0 --new new_combined:2 \
-	  --report --all
-	$(FP) --obj build/ac_mixer.o --ref old_dry:4 --ref old_send:3 --new new_combined:27 \
-	  --report --all
+stock_tables:
+	cd $(ROOT) && python3 tools/plots/gen_stock_tables.py --check

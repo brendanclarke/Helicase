@@ -138,6 +138,7 @@ SRCS = \
 	  Core/Sequencer/clockSync.c \
 	  Core/Sequencer/LiveRecord.c \
   Core/SampleRom/SampleMemory.c \
+  Core/SampleRom/SampleInstall.c \
   Core/SampleRom/sampleFlash.c \
   Core/Src/startup_stm32f765xx.s
 
@@ -166,7 +167,8 @@ DSP_SRCS = \
   Core/DSPAudio/squareRootLut.c \
   Core/DSPAudio/transientGenerator.c \
   Core/DSPAudio/transientTables.c \
-  Core/DSPAudio/wavetable.c
+  Core/DSPAudio/wavetable.c \
+  Core/DSPAudio/wavetableStock.c
 
 # -Ofast for DSP: enables -ffast-math (float reordering, NaN/Inf assumptions)
 CFLAGS_DSP = $(subst -O2,-Ofast,$(CFLAGS))

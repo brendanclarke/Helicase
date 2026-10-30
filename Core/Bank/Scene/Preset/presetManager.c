@@ -1088,10 +1088,29 @@ static uint8_t preset_setSupplementalParameterInternal(
     if (!descriptor)
         return 0u;
 
-    if (descriptor->runtime.kind == INSTRUMENT_BIND_INSTANCE_OFFSET ||
-        (descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)) {
+    /*
+     * Selector rows use the supplemental path (S087 stage B).
+     *
+     * What:       a SELECTOR row is accepted although it is member-bound
+     *             (INSTANCE_OFFSET). It is stored in the Normal image only and
+     *             its value is also written to
+     *             parameter_images.morph_interpolation[descriptor_index].
+     * Why:        seq_restoreAutomatedParameters() rewrites every held row from
+     *             morph_interpolation[]; the Morph sweep skips non-morphable
+     *             rows, so the selector path must keep that cell equal to the
+     *             stored value, or a trigger after a typ automation step would
+     *             restore a stale type (S087 P0 §12.5).
+     * Inputs:     scene, slot, descriptor index, value, force.
+     * Outputs:    stored Normal value, morph_interpolation cell, runtime write
+     *             (active Scene or forced).
+     * Affiliates: preset_applyKitVoiceSelectors();
+     *             INSTRUMENT_PARAM_FLAG_SELECTOR.
+     */
+    if (descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)
         return 0u;
-    }
+    if (descriptor->runtime.kind == INSTRUMENT_BIND_INSTANCE_OFFSET &&
+        !(descriptor->flags & INSTRUMENT_PARAM_FLAG_SELECTOR))
+        return 0u;
 
     /*
      * Supplemental target cells are retained as byte tokens.
@@ -1106,6 +1125,9 @@ static uint8_t preset_setSupplementalParameterInternal(
      */
     preset_storeInstrumentEndpoint(
         scene_index, slot, descriptor_index, INSTRUMENT_IMAGE_MAIN, value);
+    if (descriptor->flags & INSTRUMENT_PARAM_FLAG_SELECTOR)
+        instrument->parameter_images.morph_interpolation[descriptor_index] =
+            value;
     /* force > 0 lets the per-track single-voice apply install this source's
      * target tokens into the runtime even when the Scene is not active
      * (S077 P2 §3.4, Q13). */
@@ -1752,6 +1774,9 @@ static void preset_applyKitVoiceSupplementalInternal(uint8_t scene_index,
         const ParamDescriptor *descriptor = &entry->descriptors[i];
         if (descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)
             continue;
+        /* S087 B: selectors are applied by preset_applyKitVoiceSelectors(). */
+        if (descriptor->flags & INSTRUMENT_PARAM_FLAG_SELECTOR)
+            continue;
         (void)preset_setSupplementalParameterInternal(
             scene_index, voice, i,
             instrument->parameter_images.instrument_parameters[i], force);
@@ -1786,6 +1811,48 @@ static void preset_applyKitVoiceSupplementalForced(uint8_t scene_index,
                                                    uint8_t voice)
 {
     preset_applyKitVoiceSupplementalInternal(scene_index, voice, 1u);
+}
+
+/*
+ * Apply a voice's selector rows before its Morph image (S087 stage B).
+ *
+ * What:       for every descriptor of the slot's instrument with
+ *             INSTRUMENT_PARAM_FLAG_SELECTOR, writes the stored Normal value
+ *             to morph_interpolation[i] and to the runtime
+ *             (instrumentManager_writeRuntime(), always: the runtime was just
+ *             rebuilt for this Scene).
+ * Why:        S087 P0 §4.3: a selector is applied before the Morph image on
+ *             every voice apply, so a typ change is in place before wave and
+ *             position values reach the oscillator.
+ * Inputs:     scene index, voice slot.
+ * Outputs:    runtime selector state; morph_interpolation cells.
+ * Accessors:  preset_resetAndApplyKitVoiceImage(), right after
+ *             instrumentManager_resetRuntimeSlotFromScene() and
+ *             preset_applyKitAudioRouting(), before presetMorph_applyVoiceNow*().
+ * Affiliates: preset_setSupplementalParameterInternal() (B-33).
+ */
+static void preset_applyKitVoiceSelectors(uint8_t scene_index, uint8_t voice)
+{
+    kit_instrument_slot_t *instrument =
+        scene_instrumentSlot(scene_index, voice);
+    const instrument_registry_entry_t *entry;
+    uint8_t i;
+
+    if (!instrument || voice >= INSTRUMENT_SLOT_COUNT)
+        return;
+    entry = instrumentManager_registryEntry(instrument->type);
+    if (!entry)
+        return;
+    for (i = 0u; i < entry->descriptor_count; i++) {
+        const ParamDescriptor *descriptor = &entry->descriptors[i];
+        instrument_param_value_t value =
+            instrument->parameter_images.instrument_parameters[i];
+
+        if (!(descriptor->flags & INSTRUMENT_PARAM_FLAG_SELECTOR))
+            continue;
+        instrument->parameter_images.morph_interpolation[i] = value;
+        (void)instrumentManager_writeRuntime(voice, descriptor, value);
+    }
 }
 
 /* Reset and apply one loaded Scene slot's descriptor image, without binding
@@ -1826,6 +1893,9 @@ static void preset_resetAndApplyKitVoiceImage(uint8_t scene_index,
      */
     instrumentManager_resetRuntimeSlotFromScene(voice, scene_index);
     (void)preset_applyKitAudioRouting(scene_index, voice);
+    /* S087 B: selector rows (typ) before the Morph image reaches the
+     * oscillator, so wav/pos are interpreted under the applied type. */
+    preset_applyKitVoiceSelectors(scene_index, voice);
     /*
      * Commit the Morph interpolation image. An inactive played Scene uses the
      * forced variant so the runtime receives that Scene's descriptor values;

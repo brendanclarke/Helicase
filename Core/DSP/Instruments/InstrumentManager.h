@@ -147,6 +147,32 @@ typedef enum {
      * instead of the raw TYPE_UINT32 store that made 127 effectively zero.
      */
     IM_SPECIAL_LFO_OFFSET,
+    /*
+     * S087 B: osc1_type writer. Calls osc_setType() on the tagged oscillator,
+     * then refreshes the wave rows' modulation domains for the slot
+     * (instrumentManager_waveDomainChanged()).
+     */
+    IM_SPECIAL_OSC_TYPE,
+    /*
+     * S088 P0: osc1_run writer (run mode). Clamps the value to 0..2
+     * (OSC_RUN_RST..OSC_RUN_ITP) and stores it in the engine's runMode
+     * field through the descriptor's instance offset. No other side
+     * effects: the engine trigger and render functions read runMode at
+     * their own pace, so the mode takes effect on the next trigger.
+     *
+     * What:       IM_SPECIAL_OSC_RUN = 22 (next after IM_SPECIAL_OSC_TYPE).
+     * Why:        run mode is a selector, not a continuous parameter. It must
+     *             pass through the special writer so menu edits, Kit/Scene/
+     *             Instrument apply, step automation and MIDI writes all clamp
+     *             and store identically. Corrupt storage or an out-of-range
+     *             MIDI write becomes itp (2).
+     * Inputs:     slot, descriptor tag (IM_SPECIAL_OSC1), byte value.
+     * Outputs:    the engine struct's runMode field.
+     * Accessors:  instrumentManager_writeSpecialRuntime() switch.
+     * Affiliates: OSC_RUN_* (Oscillator.h); oscRunNames (MenuText.h); the four
+     *             osc1_run rows; the engine trigger/render functions.
+     */
+    IM_SPECIAL_OSC_RUN,
     IM_SPECIAL_WRITER_COUNT
 } instrument_special_writer_t;
 
@@ -181,6 +207,25 @@ typedef struct {
 #define INSTRUMENT_PARAM_FLAG_MORPHABLE       0x01u
 #define INSTRUMENT_PARAM_FLAG_MODULATABLE     0x02u
 #define INSTRUMENT_PARAM_FLAG_AUTOMATABLE     0x04u
+/*
+ * Selector descriptor flag (S087 stage B).
+ *
+ * What:       0x08 marks a row that chooses what an oscillator is (osc1_type)
+ *             rather than tuning it. Such a row is never morphable (its
+ *             in-between values are other choices), is stored single-ended
+ *             (Normal image only), is applied before the Morph image on every
+ *             voice apply, and may be step-automated as one value per step.
+ * Why:        S087 P0 §12.5: the automation gate admitted only morphable rows,
+ *             and Morph interpolates every morphable row linearly; a separate
+ *             flag lets typ be automated without being morphed.
+ * Inputs:     the ROW_SELECT_SPECIAL rows.  Outputs: flag bit.
+ * Accessors:  instrumentManager_targetValid(), preset_setSupplementalParameter-
+ *             Internal(), preset_applyKitVoiceSelectors(),
+ *             preset_applyKitVoiceSupplementalInternal().
+ * Affiliates: INSTRUMENT_PARAM_FLAG_MORPHABLE/AUTOMATABLE; seq_rampDtypeOk()
+ *             (ramps are excluded by dtype, not by this flag).
+ */
+#define INSTRUMENT_PARAM_FLAG_SELECTOR        0x08u
 
 #define INSTRUMENT_FLAG_BASIC                 0x01u
 #define INSTRUMENT_FLAG_ADVANCED              0x02u
@@ -622,6 +667,85 @@ void instrumentManager_dispatchRuntimeLfos(void);
 void instrumentManager_recalcRuntimeLfoSync(void);
 void instrumentManager_retriggerRuntimeLfos(uint8_t trigger_track);
 void instrumentManager_recalcSlotFilter(uint8_t slot);
+/*
+ * itp crossfade slot queries (S088 P0 §3 Layer 3b).
+ *
+ * What:       instrumentManager_slotHasActiveItpFade() reports whether the
+ *             given render slot's current engine instance holds an active itp
+ *             carrier crossfade (snapshot.active);
+ *             instrumentManager_activeItpFadeCount() counts them over all six
+ *             slots (mixer block-start reserve);
+ *             instrumentManager_itpFadeSlotAvailable(exclude) reports 1 when a
+ *             new fade may start (the fades held by other slots are fewer than
+ *             OSC_WAVE_INTERP_MAX_ACTIVE). exclude is the triggering voice's
+ *             own slot, because re-snapshotting an existing fade reuses its
+ *             slot instead of taking another.
+ * Why:        the two interpolation slots are shared with wavetable frame
+ *             blending (S087 E); ongoing itp fades are pre-claimed at the
+ *             block start so modNode_interpClaim() cannot hand their slot to
+ *             a wavetable blend. Claim order per block: ongoing itp, then wtb,
+ *             then new itp. A refused itp trigger falls back to fre.
+ * Inputs:     slot (0..5), exclude slot (0..5).
+ * Outputs:    0/1, or the fade count 0..OSC_WAVE_INTERP_MAX_ACTIVE.
+ * Accessors:  mixer_calcNextSampleBlock() (count), the four engine triggers
+ *             (available).
+ * Affiliates: OscCarrierSnapshot (Oscillator.h); modNode_setItpReserved()
+ *             (modulationNode.h); OSC_WAVE_INTERP_MAX_ACTIVE (config.h).
+ */
+uint8_t instrumentManager_slotHasActiveItpFade(uint8_t slot);
+uint8_t instrumentManager_activeItpFadeCount(void);
+uint8_t instrumentManager_itpFadeSlotAvailable(uint8_t exclude_slot);
+
+/*
+ * Refresh the modulation domains of a slot's wave rows (S087 stage B).
+ *
+ * What:       for every active LFO adapter on `slot` whose descriptor has
+ *             INSTRUMENT_MOD_DOMAIN_DYNAMIC_MAX, recompute adapter->domain
+ *             with instrumentManager_descriptorModDomain(slot, ...) and clamp
+ *             base_value into it; for a direct ModulationNode target on the
+ *             same id, call modNode_directOriginalValueChanged() with the new
+ *             range.
+ * Why:        a typ change (or an install, C-31) changes how many entries the
+ *             wave row has; an LFO set up for 8 stock waves must not keep
+ *             sweeping 0..7 over a 3-sample list, nor stop short of a
+ *             100-sample list.
+ * Inputs:     slot 0..INSTRUMENT_SLOT_COUNT-1.  Outputs: refreshed adapter
+ *             domains and ranges.
+ * Accessors:  IM_SPECIAL_OSC_TYPE writer (B-8); the post-install refresh
+ *             (C-31).
+ * Affiliates: instrumentManager_updateLfoAdapters(),
+ *             instrumentManager_resolveModulationTarget().
+ */
+void instrumentManager_waveDomainChanged(uint8_t slot);
+
+/*
+ * Number of legal values of an oscillator wave row (S087 stage B).
+ *
+ * What:       instrumentManager_waveDomainMax(slot, descriptor) + 1, i.e. the
+ *             menu's entry count for osc1_wave under its current type or for a
+ *             modulator's flat list.
+ * Why:        menu_clampCellValue() and the typ-switch clamp need the count
+ *             without owning the descriptor-domain rule.
+ * Inputs:     slot (INSTRUMENT_SLOT_COUNT = unknown), descriptor.
+ * Outputs:    count, at least 1.
+ * Accessors:  menu.c (cell clamp, typ-switch clamp).
+ * Affiliates: instrumentManager_waveDomainMax().
+ */
+uint8_t instrumentManager_waveCellCount(uint8_t slot,
+                                        const ParamDescriptor *descriptor);
+
+/*
+ * osc1's current type for a slot (S087 stage D).
+ *
+ * What:       returns the runtime osc1 OSC_TYPE_* value, or OSC_TYPE_WAV for
+ *             an invalid slot.
+ * Why:        Menu formats osc1_wave by the type in force without owning the
+ *             tagged runtime mapping.
+ * Inputs:     slot.  Outputs: type.
+ * Accessors:  menu_formatWaveCell().
+ * Affiliates: osc_setType(), OSC_TYPE_*.
+ */
+uint8_t instrumentManager_osc1Type(uint8_t slot);
 void instrumentManager_calcSlotAsync(uint8_t slot);
 void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
                                          uint8_t size);

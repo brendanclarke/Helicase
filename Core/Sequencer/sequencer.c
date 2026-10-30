@@ -176,7 +176,7 @@ static void seq_fxPublishReset(void)
  * effects_automationReset() (overlays, fxm override, menuHold). seq_fxEvent is
  * not touched. Why: R13 says a re-align clears track overlays, but the FX
  * sequence position must survive (seq_fxRealignToMasterClock() realigns it).
- * Affiliates: seq_drainPendingAutomation(), effects_automationReset().
+ * Affiliates: seq_drainPendingAutomationTo(), effects_automationReset().
  */
 static void seq_requestEffectOverlayReset(void)
 {
@@ -607,24 +607,47 @@ uint8_t seq_pendingSceneIsChain(void)
 }
 
 /*
- * Per-track roll playback state (S079 §4).
+ * Per-track step-roll playback state (S079 §4; time window S084 P1).
  *
- * What: seq_rollActive is nonzero while a per-step roll chain is running.
- * seq_rollTickAccum counts down the PPQ ticks to the next retrigger.
- * seq_rollVelPos is the position in the rhythm velocity cycle. seq_rollRemaining
- * is the number of additional retriggers queued for the current chain.
- * seq_rollLastRate/Rhythm/Fill store the previous step's roll parameters for
- * carry-over detection. seq_rollStepVel/Note hold the step payload each
- * retrigger fires with. Why: roll retriggers fire from seq_processSchedulerTick
- * using the same tick-driven mechanism as shuffle, at absolute note rates
- * independent of the track's step scale. Inputs: set by seq_rollBegin() from
- * seq_advanceTrackStep(). Outputs: seq_triggerVoice() with rhythm-modified
- * velocity. RAM: ~72 B SRAM1 static. Affiliates:
- * seq_processRollTicks(), seq_rollComputeVelocity().
+ * What: seq_rollActive holds two flags. SEQ_ROLL_RUN: the roll's window is
+ * open and retriggers fire. SEQ_ROLL_CARRY: the roll's step had fill 100,
+ * so the track's next step may carry it (user Q4, 2026-10-24: a carry needs
+ * the same rate and rhythm, and is refused when the previous roll step's
+ * fill was below 100). CARRY set with RUN clear is "parked": the window has
+ * closed and no hit fires, but seq_rollTickAccum keeps counting down to 0,
+ * so a carry resumes on phase. Parking lasts until the track's next step
+ * event (the carry-eligibility check in seq_advanceTrackStep()).
+ * seq_rollTickAccum counts the 96-PPQ ticks to the next retrigger.
+ * seq_rollWindow counts the master ticks left in which retriggers may fire:
+ * the step interval x fill / 100 from the step's (possibly deferred) fire,
+ * replaced by each carrying step and extended over a carrying step's
+ * deferral (seq_advanceTrackStep()). seq_rollVelPos is the position in the
+ * rhythm velocity cycle. seq_rollLastRate/Rhythm/Fill are the running
+ * roll's parameters (carry test, window-end duck). seq_rollStepVel/Note are
+ * the payload each retrigger fires with.
+ * Why: S079-S083 counted hits per step (seq_rollRemaining). A carry added
+ * slots - 1 hits and resumed from an accumulator frozen at ppq - 1, so every
+ * carried step lost its boundary hit and started almost one roll period
+ * late. Recorded rolls (stored as carried steps) fell to about one hit per
+ * step, and the loss depended on the track's step scale (S084 P0 F2). A
+ * time window keeps the rate on the master clock at any step scale and needs
+ * no per-step count; a rate that does not divide the step (16t in a 1/16
+ * step) is exact.
+ * Inputs: seq_rollBegin() at a step's fire or deferred fire; the
+ * carry-eligibility check and the deferred-carry extension in
+ * seq_advanceTrackStep(); the F-R cut; seq_rollClearTrack().
+ * Outputs: retriggers and the window-end duck from seq_processRollTicks().
+ * Context: written and read in TIM3 only. RAM: 8 x 7 u8 + 7 u16 = 70 B
+ * SRAM1 static (S084: +14 B window, -7 B remaining, -21 B duck arrays).
+ * Affiliates: seq_rollClearTrack(), seq_rollCarries(), seq_rollBegin(),
+ * seq_processRollTicks(), seq_rollComputeVelocity(),
+ * instrumentManager_requestGateDuck().
  */
+#define SEQ_ROLL_RUN    0x01u   /* window open: retriggers fire */
+#define SEQ_ROLL_CARRY  0x02u   /* fill 100: the next step may carry it */
 static uint8_t seq_rollTickAccum[NUM_TRACKS];
 static uint8_t seq_rollVelPos[NUM_TRACKS];
-static uint8_t seq_rollRemaining[NUM_TRACKS];
+static uint16_t seq_rollWindow[NUM_TRACKS];
 static uint8_t seq_rollActive[NUM_TRACKS];
 static uint8_t seq_rollLastRate[NUM_TRACKS];
 static uint8_t seq_rollLastRhythm[NUM_TRACKS];
@@ -633,19 +656,75 @@ static uint8_t seq_rollStepVel[NUM_TRACKS];
 static uint8_t seq_rollStepNote[NUM_TRACKS];
 
 /*
- * Per-track roll fill duck countdown (S079 P2 fix 4).
+ * End one track's step roll and clear its runtime state (S084 P1).
  *
- * What: seq_rollDuckDelta is the number of PPQ ticks from the last retrigger
- * of a fill < 100 step to the fill-window end; seq_rollDuckDelay is the live
- * countdown and seq_rollDuckActive marks it running. Why: the fill boundary
- * must duck the sounding voice with a fast fade instead of the removed gated
- * trigger. Inputs: set by seq_rollBegin()/seq_rollArmDuck(). Outputs:
- * instrumentManager_requestGateDuck() when the countdown expires. RAM: 21 B
- * SRAM1 static. Affiliates: seq_processRollTicks().
+ * What: zeroes the track's roll flags, accumulator, rhythm position,
+ * window and last-roll parameters, so no retrigger, duck or carry follows.
+ * seq_rollStepVel/Note are left as they are (only read while a roll runs).
+ * Why: the same ten-line clear was repeated at four sites (boot, per-track
+ * Scene change and its choke partner, whole-Scene change, transport
+ * reset), and each site had to change when the state changed. Inputs:
+ * track 0..6 (callers guarantee the range). Outputs: the per-track roll
+ * state. Context: TIM3, or the foreground with TIM3 masked (the existing
+ * call sites). Accessors: seq_init(), seq_setTrackPlayedScene(),
+ * seq_selectActivePattern(), seq_setStepIndexToStart(). Affiliates: the
+ * step roll state block above. Live overlay rolls (seq_live*) are a
+ * separate state and are never cleared here.
  */
-static uint8_t seq_rollDuckDelta[NUM_TRACKS];
-static uint8_t seq_rollDuckDelay[NUM_TRACKS];
-static uint8_t seq_rollDuckActive[NUM_TRACKS];
+static void seq_rollClearTrack(uint8_t track)
+{
+    seq_rollActive[track] = 0u;
+    seq_rollTickAccum[track] = 0u;
+    seq_rollVelPos[track] = 0u;
+    seq_rollWindow[track] = 0u;
+    seq_rollLastRate[track] = 0u;
+    seq_rollLastRhythm[track] = 0u;
+    seq_rollLastFill[track] = 0u;
+}
+
+/*
+ * Live (PERF BAR overlay / MIDI note) roll and flam engine (S084 P2).
+ *
+ * What: one entry per track for a held overlay gesture, driven by the
+ * 96-PPQ master tick. seq_liveMode: SEQ_LIVE_IDLE, SEQ_LIVE_ROLL (repeats
+ * until stopped) or SEQ_LIVE_FLAM (one pending main hit). seq_liveRate: the
+ * step-roll index 1..9 (seq_rollPpq()). seq_liveAccum: ticks to the next
+ * hit. seq_livePos: the roll's velocity-rhythm position. seq_liveNote/Vel:
+ * the internal pitch and base velocity of the hits. seq_liveRhythm: the
+ * packed rhythm byte of the active overlay (`pv<`/`pv>`), one for all
+ * tracks, because every held entry follows the one overlay state.
+ * Mailbox to the foreground: seq_liveHitCount counts roll hits fired since
+ * the last take (saturating at 255), seq_liveFlamMask has bit N set when
+ * track N's flam main fired, and seq_liveHitUs is the TIM2 µs stamp of the
+ * latest hit.
+ * Why: S080-S083 timed overlay repeats with a 1 ms foreground timer from
+ * the menu tempo PAR_BPM, with integer division. Rolls ran 2-7 % fast,
+ * ignored external sync, and jittered with render load, while recorded rolls
+ * play from this master tick, so live and recorded rolls never matched
+ * (S084 P0 F4). Running both on one clock makes them identical. LiveRecord
+ * never runs in TIM3, so hits are published here and reported by the
+ * foreground (buttonHandler_overlayDrain()) with their arrival age.
+ * Inputs: the seq_live* API below (foreground, PRIMASK sections) and
+ * seq_processLiveTicks() (TIM3). Outputs: seq_triggerVoice() hits and the
+ * mailbox. Not cleared by Scene changes or transport resets: a held gesture
+ * belongs to the panel or MIDI, not to the Pattern. RAM: 6 x 7 u8 + 1 +
+ * 7 u8 + 1 + 7 u32 = 79 B SRAM1 static. Affiliates: buttonHandler overlay
+ * (start, re-configure, drain, end), seq_rollPpq(),
+ * seq_rollRhythmVelocity(), LiveRecord (through buttonHandler).
+ */
+#define SEQ_LIVE_IDLE  0u
+#define SEQ_LIVE_ROLL  1u
+#define SEQ_LIVE_FLAM  2u
+static volatile uint8_t  seq_liveMode[NUM_TRACKS];
+static uint8_t           seq_liveRate[NUM_TRACKS];
+static uint8_t           seq_liveAccum[NUM_TRACKS];
+static uint8_t           seq_livePos[NUM_TRACKS];
+static uint8_t           seq_liveNote[NUM_TRACKS];
+static uint8_t           seq_liveVel[NUM_TRACKS];
+static volatile uint8_t  seq_liveRhythm;
+static volatile uint8_t  seq_liveHitCount[NUM_TRACKS];
+static volatile uint8_t  seq_liveFlamMask;
+static volatile uint32_t seq_liveHitUs[NUM_TRACKS];
 
 /*
  * Per-track play state (S078 §4.4).
@@ -691,6 +770,28 @@ static uint32_t	seq_lastTick = 0;			/**< stores the time the last step change oc
 static float	seq_deltaT;					/**< time in [ms] until the next step
  	 	 	 	 	 	 	 	 	 	 	 1000ms = 1 sec
  	 	 	 	 	 	 	 	 	 	 	 1 min = 60 sec*/
+/*
+ * External-clock ticks still to interpolate (S084 P0 A1).
+ *
+ * What: the 96-PPQ scheduler ticks of the current external clock period
+ * (MIDI clock: 4 per clock; pulse input: stepSize x 3 per pulse) that have
+ * not been processed yet. A clock or pulse processes its first tick at once
+ * (seq_extClockTicks()); seq_tick()'s tempo timer, whose period follows the
+ * measured external tempo (seq_tempo), processes the rest one by one; the
+ * next clock first catches up any tick still owed, so no clock period ever
+ * runs more or fewer ticks than before. Why: the scheduler used to run all
+ * ticks of a clock back to back, so every hit inside one clock period fired
+ * at the same instant: live rolls of 64/128 bunched or lost hits under MIDI
+ * clock, and under pulse sync (24 ticks per pulse at 4 PPQ) every roll,
+ * shuffle and micro-timing finer than the pulse collapsed. Inputs: written
+ * in TIM3 (clock/pulse handlers, seq_tick()); cleared by transport
+ * start/stop/continue and the external reset (foreground or TIM3, a single
+ * byte store). Output: interpolated seq_processSchedulerTick() calls. RAM:
+ * 1 B SRAM1 static. Affiliates: seq_resetDeltaAndTick(),
+ * seq_triggerNextMasterStep(), seq_tick(), seq_calcDeltaT().
+ */
+static volatile uint8_t seq_extTicksOwed = 0u;
+
 uint8_t seq_delayedSyncStepFlag = 0;		//normally sync steps will only be advanced by external midi clocks in ext. sync mode
 											//if the shuffle needs a delayed sync step, it is indicated here.
 
@@ -782,7 +883,7 @@ uint8_t seq_newPatternAvailable = 0; //indicate that a new pattern has loaded in
  * What: 128 four-byte identity/payload records and two publication bytes. Why:
  * seq_advanceTrackStep() must only decode the bounded Pattern block and queue
  * raw values; descriptor validation/runtime writes belong to foreground code.
- * Lifetime: static until seq_drainPendingAutomation() consumes the queue.
+ * Lifetime: static until seq_drainPendingAutomationTo() consumes the queue.
  * Owner: Sequencer. Affiliate: PatternTrace is optional diagnostics only and
  * owns a separate 32-record, 256-byte DEV ring.
  */
@@ -801,6 +902,28 @@ static volatile uint8_t seq_pending_automation_count = 0u;
 static volatile uint8_t seq_pending_automation_drain = 0u;
 
 /*
+ * Foreground drain cursor for the TIM3 automation queue (S087 stage A).
+ *
+ * What:       index of the first seq_pending_automation[] record not yet
+ *             applied. 0 when the queue is empty. Records below it have
+ *             been applied; records from it up to the producer count have
+ *             not.
+ * Why:        the trigger funnel now drains only up to a mark taken with
+ *             its trigger pops (seq_drainPendingAutomationTo()), so a pass
+ *             can end with records left over. The queue is still reset to
+ *             zero only when it is fully drained; until then this cursor
+ *             stops a later pass from applying the same records twice.
+ * Inputs:     seq_drainPendingAutomationTo() (advances it), seq_init() and
+ *             the transport reset (zero it with the count).
+ * Outputs:    the start index of the next drain.
+ * Accessors:  seq_drainPendingAutomationTo() only, under the same PRIMASK
+ *             handoff as seq_pending_automation_count.
+ * Affiliates: seq_pending_automation_count, seq_pendingAutomationMark(),
+ *             voiceControl_processPending(). RAM: +1 B SRAM1 (R-A1).
+ */
+static volatile uint8_t seq_pending_automation_done = 0u;
+
+/*
  * Per-voice automation restore bitmap (+48 B static SRAM1).
  *
  * What: six 64-bit bitmaps, one bit per descriptor-local parameter image.
@@ -808,7 +931,7 @@ static volatile uint8_t seq_pending_automation_drain = 0u;
  * trigger must restore only the descriptor images changed since that trigger.
  * Lifetime: static until the matching trigger restores the set bits or a
  * transport/pattern reset clears them. Owner: Sequencer. Affiliate:
- * seq_drainPendingAutomation() and seq_restoreAutomatedParameters().
+ * seq_drainPendingAutomationTo() and seq_restoreAutomatedParameters().
  * S075 F3: the bitmap is also the "automation holds this value" record that
  * enforces "automation always wins": the Morph sweep, the per-parameter menu
  * apply and synchronous voice applies consult it through
@@ -831,7 +954,7 @@ static uint64_t seq_automation_dirty[INSTRUMENT_SLOT_COUNT];
  * menu_cellCommitValue). Cleared by seq_restoreAutomatedParameters()
  * (on trigger), and by seq_setStepIndexToStart / seq_selectActivePattern
  * / seq_alignActivePatternToScene / seq_setTrackPlayedScene (on
- * transport/Scene events). Outputs: read by seq_drainPendingAutomation
+ * transport/Scene events). Outputs: read by seq_drainPendingAutomationTo()
  * to skip entries. RAM: +48 B SRAM1.
  * Affiliates: seq_automation_dirty[], presetMorph_writeRuntimeBase().
  */
@@ -1348,7 +1471,7 @@ void seq_clearSceneAutomationBit(uint8_t index)
  * Common caller: seq_setStepIndexToStart(), used by transport start/stop,
  * Pattern-boundary changes, and external reset. Boot continues to call
  * seq_clearAutomationDirty() directly because no runtime overlays exist yet.
- * Affiliates: seq_drainPendingAutomation() publishes the dirty bits,
+ * Affiliates: seq_drainPendingAutomationTo() publishes the dirty bits,
  * seq_restoreAutomatedParameters() implements the one-trigger variant,
  * scene_instrumentSlotConst() resolves the active slot image, and
  * instrumentManager_descriptor()/instrumentManager_writeRuntime() apply the
@@ -1668,6 +1791,8 @@ void seq_refreshTrackEffectiveParams(void)
 //------------------------------------------------------------------------------
 void seq_init()
 {
+	uint8_t i;
+
 	memset(seq_stepIndex,0,sizeof(seq_stepIndex));
 	memset(seq_lastMasterStep,0,NUM_TRACKS);
 	/* S078: clear every per-track DDA, shuffle, and play-mode byte at boot. */
@@ -1682,16 +1807,14 @@ void seq_init()
 	memset(seq_trackRndStepCount, 0, sizeof(seq_trackRndStepCount));
 	memset(seq_trackLastConditionFired, 0,
 	       sizeof(seq_trackLastConditionFired));
-	memset(seq_rollActive, 0, sizeof(seq_rollActive));
-	memset(seq_rollTickAccum, 0, sizeof(seq_rollTickAccum));
-	memset(seq_rollVelPos, 0, sizeof(seq_rollVelPos));
-	memset(seq_rollRemaining, 0, sizeof(seq_rollRemaining));
-	memset(seq_rollLastRate, 0, sizeof(seq_rollLastRate));
-	memset(seq_rollLastRhythm, 0, sizeof(seq_rollLastRhythm));
-	memset(seq_rollLastFill, 0, sizeof(seq_rollLastFill));
-	memset(seq_rollDuckActive, 0, sizeof(seq_rollDuckActive));
-	memset(seq_rollDuckDelay, 0, sizeof(seq_rollDuckDelay));
-	memset(seq_rollDuckDelta, 0, sizeof(seq_rollDuckDelta));
+	/* S079/S084 P1: no step roll runs at boot. */
+	for (i = 0u; i < NUM_TRACKS; i++)
+		seq_rollClearTrack(i);
+	/* S084 P2: no live overlay roll or flam is armed at boot. */
+	memset((void *)seq_liveMode, 0, sizeof(seq_liveMode));
+	memset((void *)seq_liveHitCount, 0, sizeof(seq_liveHitCount));
+	seq_liveFlamMask = 0u;
+	seq_liveRhythm = 0u;
 	seq_fillActive = 0u;
 	seq_fxAccumulator = 0u;
 	seq_fxStepCounter = 0u;
@@ -1716,6 +1839,8 @@ void seq_init()
 	seq_perTrackActive = 0u;
 	seq_pending_automation_count = 0u;
 	seq_pending_automation_drain = 0u;
+	/* S087 A: the drain cursor starts with the queue. */
+	seq_pending_automation_done = 0u;
 	seq_clearAutomationDirty();
 }
 //------------------------------------------------------------------------------
@@ -1811,29 +1936,11 @@ void seq_setTrackPlayedScene(uint8_t track, uint8_t scene_index)
         seq_trackRndStepCount[6] = 0u;
         seq_trackLastConditionFired[6] = 0u;
     }
-    /* S079 P2 fix 4: per-track Scene change cancels the track's roll + duck. */
-    seq_rollActive[track] = 0u;
-    seq_rollTickAccum[track] = 0u;
-    seq_rollVelPos[track] = 0u;
-    seq_rollRemaining[track] = 0u;
-    seq_rollLastRate[track] = 0u;
-    seq_rollLastRhythm[track] = 0u;
-    seq_rollLastFill[track] = 0u;
-    seq_rollDuckActive[track] = 0u;
-    seq_rollDuckDelay[track] = 0u;
-    seq_rollDuckDelta[track] = 0u;
+    /* S079 P2 fix 4 / S084 P1: a per-track Scene change ends the track's
+     * step roll, and its choke partner's (tracks 5 and 6). */
+    seq_rollClearTrack(track);
     if (track >= 5u) {
-        uint8_t pair = (track == 5u) ? 6u : 5u;
-        seq_rollActive[pair] = 0u;
-        seq_rollTickAccum[pair] = 0u;
-        seq_rollVelPos[pair] = 0u;
-        seq_rollRemaining[pair] = 0u;
-        seq_rollLastRate[pair] = 0u;
-        seq_rollLastRhythm[pair] = 0u;
-        seq_rollLastFill[pair] = 0u;
-        seq_rollDuckActive[pair] = 0u;
-        seq_rollDuckDelay[pair] = 0u;
-        seq_rollDuckDelta[pair] = 0u;
+        seq_rollClearTrack((uint8_t)((track == 5u) ? 6u : 5u));
     }
 	/*
 	 * Clear the affected slot's R12 menu override at the per-track Scene change
@@ -1955,8 +2062,9 @@ void seq_assignTracksToScene(uint8_t trackMask, uint8_t scene_index)
  * (F-L). Inputs: voiceNr 0..6, vol, note, reset 0/1. Outputs: voice
  * queued in the trigger ring, pending-reset bit set if reset=1.
  * Affiliates: voiceControl_noteOn/noteOnNoReset, seq_advanceTrackStep
- * callers, seq_processRollTicks, buttonHandler overlay,
- * seq_previewVoice.
+ * callers, seq_processRollTicks, seq_processLiveTicks (S084 P2: overlay
+ * roll repeats reset = 0, flam main reset = 1, from TIM3), the
+ * buttonHandler overlay start (first hits, foreground), seq_previewVoice.
  */
 void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note, uint8_t reset)
 {
@@ -2120,17 +2228,10 @@ void seq_selectActivePattern(uint8_t pattern)
 	memset(seq_trackRndStepCount, 0, sizeof(seq_trackRndStepCount));
 	memset(seq_trackLastConditionFired, 0,
 	       sizeof(seq_trackLastConditionFired));
-	/* S079 P2 fix 4: a Scene change cancels running rolls and pending ducks. */
-	memset(seq_rollActive, 0, sizeof(seq_rollActive));
-	memset(seq_rollTickAccum, 0, sizeof(seq_rollTickAccum));
-	memset(seq_rollVelPos, 0, sizeof(seq_rollVelPos));
-	memset(seq_rollRemaining, 0, sizeof(seq_rollRemaining));
-	memset(seq_rollLastRate, 0, sizeof(seq_rollLastRate));
-	memset(seq_rollLastRhythm, 0, sizeof(seq_rollLastRhythm));
-	memset(seq_rollLastFill, 0, sizeof(seq_rollLastFill));
-	memset(seq_rollDuckActive, 0, sizeof(seq_rollDuckActive));
-	memset(seq_rollDuckDelay, 0, sizeof(seq_rollDuckDelay));
-	memset(seq_rollDuckDelta, 0, sizeof(seq_rollDuckDelta));
+	/* S079 P2 fix 4 / S084 P1: a Scene change ends every running step roll
+	 * (its window, duck and carry with it). Live overlay rolls continue. */
+	for (uint8_t track = 0u; track < NUM_TRACKS; track++)
+		seq_rollClearTrack(track);
 	/*
 	 * Clear the menu override at transport/Scene change (S081 §5.1).
 	 *
@@ -2394,7 +2495,7 @@ void seq_moveTracksToBackgroundScene(uint8_t track_mask)
  * identity/type bit; no Scene target application or descriptor/runtime write
  * occurs in TIM3 context. Full-queue events are retained as PatternTrace
  * overflow witnesses when DEV_MODE_LOGGING is enabled. Affiliates:
- * PatternData's dynamic block format and seq_drainPendingAutomation().
+ * PatternData's dynamic block format and seq_drainPendingAutomationTo().
  */
 static void seq_queueStepAutomations(uint8_t track, uint8_t step)
 {
@@ -2497,7 +2598,7 @@ static void seq_queueStepAutomations(uint8_t track, uint8_t step)
  * seq_perTrackPattern[track]. Output: 1 when the types match (or either record
  * is unavailable is treated as no-match), 0 otherwise. Context: safe in TIM3
  * ISR - scene_effectConst() returns a const SRAM1 pointer with no allocation
- * or I/O. Affiliate: seq_drainPendingAutomation().
+ * or I/O. Affiliate: seq_drainPendingAutomationTo().
  */
 static uint8_t seq_trackEffectTypeMatchesActive(uint8_t track)
 {
@@ -2521,7 +2622,7 @@ static uint8_t seq_trackEffectTypeMatchesActive(uint8_t track)
  * effects_automationStepBegin() on these. Under R13, Effect overlays are
  * last-writer-wins with no per-step ownership tracking, so markers are
  * unnecessary. Affiliates: seq_advanceTrackStep caller (removed),
- * SEQ_PENDING_TYPE_FX_STEP_BIT (removed), seq_drainPendingAutomation marker
+ * SEQ_PENDING_TYPE_FX_STEP_BIT (removed), seq_drainPendingAutomationTo() marker
  * branch (removed).
  */
 
@@ -2671,9 +2772,13 @@ static uint8_t seq_conditionPassesPure(const pat_step_specials_t *sp,
  * values were 24-PPQ quantities applied to the 96-PPQ tick, so every roll played
  * 4x its label (confirmed on hardware). Every existing stored roll slows to its
  * labelled rate. Stored indices shift with no migration (F-H). Inputs: rate
- * index 0..9. Outputs: ticks between roll hits. Affiliates: seq_processRollTicks,
- * seq_rollBegin, stepRollRateNames (MenuText.h), menu_getRollRateName, STEP roll
- * clamp.
+ * index 0..9. Outputs: ticks between roll hits.
+ * Affiliates: seq_processRollTicks, seq_rollBegin, seq_processLiveTicks
+ * and seq_liveRollStart/SetRate (S084 P2: PERF/MIDI overlay rolls use the
+ * same table), stepRollRateNames and perfBtnTypeNames (MenuText.h; the
+ * overlay roll types are step index + 5, S084 P3), menu_getRollRateName,
+ * STEP roll clamp. LiveRecord's copy (liveRec_rollPpqTicks) is removed
+ * (S084 P4).
  */
 static uint8_t seq_rollPpq(uint8_t rate)
 {
@@ -2740,91 +2845,82 @@ uint8_t seq_rollRhythmVelocity(uint8_t rhythm, uint8_t vel, uint8_t pos)
 }
 
 /*
- * Test whether an incoming roll step continues the running roll (S079 §4.2).
+ * Does an incoming roll step continue the running roll? (S079 §4.2;
+ * carry rule S084 P1, user Q4.)
  *
- * A carry requires an active chain and identical rate, rhythm, and fill.
- * Inputs: track, incoming specials. Output: nonzero for a carry.
+ * What: true when the running roll may be carried (SEQ_ROLL_CARRY: its
+ * step had fill 100 and the track has not had a non-carrying step since)
+ * and the incoming step has a roll with the same rate and rhythm. The
+ * incoming step's fill does NOT have to match; it only sets that step's
+ * window. Why: a recorded roll ends on a step whose fill is the release
+ * point (< 100). S079 refused that carry, so the last step restarted the
+ * roll at the step boundary, which jumped the phase and reset the velocity
+ * rhythm (S084 P0 F3). User decision Q4 (2026-10-24): carry unless the
+ * previous step's fill was below 100. Inputs: track, the incoming step's
+ * resolved specials. Output: nonzero for a carry. Context: TIM3. Accessors:
+ * seq_rollBegin(), the carry-eligibility check and the deferred-carry
+ * extension in seq_advanceTrackStep(). Affiliates: SEQ_ROLL_CARRY (set by
+ * seq_rollBegin(), cleared at the next non-carrying step event).
  */
 static uint8_t seq_rollCarries(uint8_t track, const pat_step_specials_t *sp)
 {
-    return (uint8_t)(seq_rollActive[track] && sp->roll != 0u &&
+    return (uint8_t)((seq_rollActive[track] & SEQ_ROLL_CARRY) != 0u &&
+                     sp->roll != 0u &&
                      seq_rollLastRate[track] == sp->roll &&
-                     seq_rollLastRhythm[track] == sp->rhythm &&
-                     seq_rollLastFill[track] == sp->fill);
+                     seq_rollLastRhythm[track] == sp->rhythm);
 }
 
 /*
- * Arm the fill-window duck for one track (S079 P2 fix 4).
+ * Begin or carry a per-step roll at the step's fire time (S079 §4, §6;
+ * time window S084 P1).
  *
- * What: starts the duck countdown from the step's stored delta when the roll
- * is active and the fill is below 100. Why: the duck is scheduled when the
- * last retrigger of the fill window has fired. Inputs: per-track roll state.
- * Output: seq_rollDuckDelay/Active armed. Affiliates: seq_processRollTicks().
- */
-static void seq_rollArmDuck(uint8_t track)
-{
-    if (!seq_rollActive[track] || seq_rollLastFill[track] >= 100u)
-        return;
-    seq_rollDuckDelay[track] = seq_rollDuckDelta[track];
-    seq_rollDuckActive[track] = 1u;
-}
-
-/*
- * Begin or continue a per-step roll at the step's fire time (S079 §4, §6).
- *
- * What: computes the number of retrigger slots for the step's fill window
- * (interval x fill / 100, at the roll's PPQ spacing) and fires retrigger #1
- * unless this step carries the previous chain. Every retrigger fires normally;
- * a fill < 100 window instead arms a duck countdown so the sounding voice is
- * faded out (S079 P2 fix 4) at the fill-window end. fill 0 collapses to a
- * single hit ducked within the first block. The remaining slots are queued for
- * seq_processRollTicks(). On a carry the velocity-pattern position and tick
- * accumulator are preserved and only the slot count is extended, so the roll
- * is seamless across the step boundary. Inputs: track and resolved specials.
- * Outputs: the per-track roll state arrays. Context: TIM3 ISR. Affiliates:
- * seq_processRollTicks(), seq_rollArmDuck().
+ * What: computes the step's roll window, the step interval x fill / 100 in
+ * whole 96-PPQ ticks, from the track's effective step scale. Without a
+ * carry it fires hit #1 (reset = 1) and starts the retrigger accumulator at
+ * the rate's tick interval. With a carry it fires nothing, requests the
+ * reset-only renewal and leaves the accumulator and the rhythm position
+ * running, so the hits continue on the same phase across the step
+ * boundary. Either way the window is replaced by this step's window,
+ * measured from now: the new step owns the roll from here (F-R). The step's
+ * fill sets the carry flag for the next step (fill 100 only, user Q4).
+ * Fill 0 gives a zero window: a single hit, ducked on the same tick.
+ * Why: the S079 engine counted hits per step, and its carry lost the
+ * boundary hit of every carried step (S084 P0 F2). The rate is the master
+ * clock (seq_rollPpq()); the step scale only sets how long the roll lasts.
+ * Inputs: track, the step's resolved specials (roll, rhythm, fill,
+ * velocity, note), seq_effectiveTrackScale[track]. Outputs: hit #1 or a
+ * reset-only renewal; seq_rollActive/TickAccum/VelPos/Window and the last
+ * roll parameters. Context: TIM3 (seq_advanceTrackStep() on time,
+ * seq_fireDeferred() when deferred). Affiliates: seq_rollCarries(),
+ * seq_processRollTicks(), voiceControl_resetOnly(), stepScale_ticksQ8().
  */
 static void seq_rollBegin(uint8_t track, const pat_step_specials_t *sp)
 {
     uint8_t ppq = seq_rollPpq(sp->roll);
     uint8_t carry = seq_rollCarries(track, sp);
-    uint16_t interval;
-    uint16_t filled;
-    uint16_t slots;
+    uint16_t window;
 
     if (ppq == 0u) {
         seq_rollActive[track] = 0u;
+        seq_rollWindow[track] = 0u;
         return;
     }
-    interval = (uint16_t)(stepScale_ticksQ8(seq_effectiveTrackScale[track])
-                          >> 8u);
-    if (interval == 0u)
-        interval = 1u;
-    filled = (uint16_t)(((uint32_t)interval * sp->fill) / 100u);
-    if (sp->fill == 0u)
-        slots = 1u;                             /* single retrigger */
-    else
-        slots = (uint16_t)((filled + ppq - 1u) / ppq);
-    if (slots == 0u)
-        slots = 1u;
-    if (slots > 255u)
-        slots = 255u;
-
+    /* Step interval x fill / 100 in whole ticks, rounded from Q8.8. */
+    window = (uint16_t)(((uint32_t)stepScale_ticksQ8(
+                 seq_effectiveTrackScale[track]) * sp->fill + 12800u)
+                 / 25600u);
     if (!carry) {
         seq_rollTickAccum[track] = ppq;
         seq_rollVelPos[track] = 0u;
-        seq_rollRemaining[track] = (uint8_t)(slots - 1u);
-        /* Retrigger #1 is the step's own hit; it always fires normally. */
         seq_triggerVoice(track, sp->velocity, sp->note, 1);
         seq_rollVelPos[track] = 1u;
     } else {
         /*
          * Roll renewal requests a reset-only (no new trigger) (S081 §5.8).
          *
-         * What: when a roll carries across a step boundary (same rate/rhythm/
-         * fill), the carry path adds the new step's remaining slots but fires
-         * no new first hit. It now calls voiceControl_resetOnly(track) so that
-         * the pending-reset mask is set, causing the next
+         * What: when a roll carries across a step boundary, the carry path
+         * fires no new first hit. It calls voiceControl_resetOnly(track) so
+         * that the pending-reset mask is set, causing the next
          * voiceControl_processPending pass to restore automation and clear the
          * menu override without an audible trigger. Why: the new step may have
          * different automation entries; the restore ensures the old step's
@@ -2832,27 +2928,16 @@ static void seq_rollBegin(uint8_t track, const pat_step_specials_t *sp)
          * set. Affiliates: voiceControl_resetOnly,
          * seq_restoreAutomatedParameters, the ring push in seq_advanceTrackStep.
          */
-        voiceControl_resetOnly(track);
-        seq_rollRemaining[track] =
-            (uint8_t)(seq_rollRemaining[track] + (uint8_t)(slots - 1u));
+        voiceControl_resetOnly(track);   /* S081 §5.8 renewal, no hit */
     }
-    seq_rollActive[track] = 1u;
+    seq_rollWindow[track] = window;
+    seq_rollActive[track] = (uint8_t)(SEQ_ROLL_RUN |
+        ((sp->fill >= 100u) ? SEQ_ROLL_CARRY : 0u));
     seq_rollLastRate[track] = sp->roll;
     seq_rollLastRhythm[track] = sp->rhythm;
     seq_rollLastFill[track] = sp->fill;
     seq_rollStepVel[track] = sp->velocity;
     seq_rollStepNote[track] = sp->note;
-
-    /* S079 P2 fix 4: the fill-window end schedules a duck, not a gated hit. */
-    seq_rollDuckActive[track] = 0u;              /* cancel any interior duck */
-    if (sp->fill < 100u)
-        seq_rollDuckDelta[track] = (uint8_t)(
-            filled - (uint16_t)((slots - 1u) * ppq));
-    else
-        seq_rollDuckDelta[track] = 0u;
-
-    if (seq_rollRemaining[track] == 0u)
-        seq_rollArmDuck(track);                  /* slots == 1 case */
 }
 
 /*
@@ -2874,7 +2959,7 @@ static void seq_rollBegin(uint8_t track, const pat_step_specials_t *sp)
  * uninitialized region never causes a stuck or runaway cursor.
  *
  * Affiliates: PatternData (region ownership, step trigger/automation data),
- * seq_drainPendingAutomation() (foreground consumer of queued automation and
+ * seq_drainPendingAutomationTo() (foreground consumer of queued automation and
  * Effect overlay markers).
  */
 static void seq_advanceTrackStep(uint8_t track)
@@ -3120,19 +3205,21 @@ static void seq_advanceTrackStep(uint8_t track)
 		 * including empty and automation-only steps. The new code ends a roll
 		 * only when the step has a trigger (bit 15 set) and its condition passes.
 		 * An empty step does not cut the roll; the roll engine ends it naturally
-		 * after its fill window (seq_rollRemaining reaches 0). Why: a roll delayed
+		 * after its fill window (seq_rollWindow reaches 0). Why: a roll delayed
 		 * into the next step's time was immediately cut by that boundary, losing
 		 * the last hits. With this change, a roll runs its own length from its
 		 * delayed first hit, as designed. Inputs: sp.roll, step trigger state,
 		 * condition result. Outputs: seq_rollActive may be cleared. Affiliates:
-		 * seq_rollBegin carry path, seq_rollRemaining, seq_processRollTicks.
+		 * seq_rollBegin carry path, seq_rollWindow, seq_processRollTicks.
+		 * S084 P1: the cut clears the window and both flags, so neither a
+		 * retrigger nor a duck nor a carry follows the plain hit.
 		 */
 		if (seq_rollActive[track] && sp.roll == 0u &&
 		    pat_isStepActive(track, (uint8_t)seq_stepIndex[track],
 		                     seq_perTrackPattern[track]) &&
 		    step_allowed) {
 			seq_rollActive[track] = 0u;
-			seq_rollDuckActive[track] = 0u;
+			seq_rollWindow[track] = 0u;
 		}
 
 		/*
@@ -3164,6 +3251,34 @@ static void seq_advanceTrackStep(uint8_t track)
 			    (echo_hit ||
 			     (seq_liveHoldMask & (uint8_t)(1u << track)) != 0u));
 		}
+
+		/*
+		 * Carry eligibility lasts exactly one step (S084 P1).
+		 *
+		 * What: at every step event of the track, a roll that could be
+		 * carried keeps that right only if THIS step will carry it: its
+		 * trigger fires (bit 15 and the condition, rec_fired), it is not
+		 * suppressed by an echo mark or a live hold, it is not being erased,
+		 * and its roll has the same rate and rhythm (seq_rollCarries()). If
+		 * not, SEQ_ROLL_CARRY is cleared. A roll whose window is still open
+		 * keeps running to its window end (F-R: an empty step does not cut
+		 * it); a parked roll (window already closed) ends here. Why: a
+		 * fill-100 roll parks at its window end so that the ±1 tick jitter of
+		 * a fractional step interval, or a shuffled or micro-timed carrying
+		 * step, cannot break the carry. Without this check a parked roll would
+		 * stay carryable across empty steps and resume on a stale phase.
+		 * Inputs: rec_fired, trigger_suppressed, seq_eraseFullMask,
+		 * seq_eraseSpecialsMask, sp. Output: SEQ_ROLL_CARRY cleared or kept.
+		 * Context: TIM3. Affiliates: seq_rollCarries(), seq_rollBegin(),
+		 * seq_processRollTicks() (parking), the deferred-carry extension
+		 * below.
+		 */
+		if ((seq_rollActive[track] & SEQ_ROLL_CARRY) != 0u &&
+		    !(rec_fired && !trigger_suppressed &&
+		      ((seq_eraseFullMask | seq_eraseSpecialsMask) &
+		       (uint8_t)(1u << track)) == 0u &&
+		      seq_rollCarries(track, &sp)))
+			seq_rollActive[track] &= (uint8_t)~SEQ_ROLL_CARRY;
 
 		if (pat_isStepActive(track, (uint8_t)seq_stepIndex[track], seq_perTrackPattern[track])) {
 			if ((seq_eraseFullMask & (uint8_t)(1u << track)) != 0u) {
@@ -3267,6 +3382,34 @@ static void seq_advanceTrackStep(uint8_t track)
 						    (uint8_t)seq_stepIndex[track];
 						seq_trackShuffleRoll[track] =
 						    (uint8_t)(sp.roll > 0u);
+						/*
+						 * Keep a carried roll sounding through its deferral
+						 * (S084 P1).
+						 *
+						 * What: when a step that will carry the running roll
+						 * is deferred by shuffle and/or micro-timing, the
+						 * roll's window is stretched (never shortened) to
+						 * reach the deferred fire, and a parked roll is
+						 * reopened. At the fire, seq_rollBegin() carries it
+						 * and sets the step's own window. Why: the previous
+						 * step's window ends at this step's boundary; without
+						 * the stretch the hits that fall between the boundary
+						 * and the deferred fire would be lost, which is the
+						 * F2 gap again on every shuffled step. Inputs:
+						 * total_delay (ticks to the fire), sp. Outputs:
+						 * seq_rollWindow, SEQ_ROLL_RUN. A muted fire
+						 * (seq_cancelPendingTrigger()) carries nothing, so the
+						 * roll parks at the stretched window end and the next
+						 * step event ends it. Context: TIM3. Affiliates:
+						 * seq_fireDeferred(), seq_rollBegin(),
+						 * seq_rollCarries().
+						 */
+						if (sp.roll > 0u &&
+						    seq_rollCarries(track, &sp)) {
+							if (seq_rollWindow[track] < total_delay)
+								seq_rollWindow[track] = total_delay;
+							seq_rollActive[track] |= SEQ_ROLL_RUN;
+						}
 						/* A fresh deferral is never muted (P1B item 7). */
 						seq_trackShuffleMuteMask &= (uint8_t)~(1u << track);
 						deferred_this_step = 1u;
@@ -3370,7 +3513,7 @@ static void seq_advanceTrackStep(uint8_t track)
  * remains reachable. A successful runtime overlay sets the corresponding bit
  * for transport-boundary restoration. FX_SEND updates the transient send
  * overlay consumed by the mixer on the next block. Common caller:
- * seq_drainPendingAutomation(). Affiliates: SceneModTargets, Preset, and
+ * seq_drainPendingAutomationTo(). Affiliates: SceneModTargets, Preset, and
  * InstrumentManager runtime overlay APIs.
  */
 static uint8_t seq_applySceneAutomation(uint16_t target, uint8_t value)
@@ -3470,25 +3613,37 @@ static uint8_t seq_applySceneAutomation(uint16_t target, uint8_t value)
 }
 
 /*
- * Apply queued step automation after front-panel service.
+ * Apply queued step automation up to a mark (S087 stage A; was
+ * seq_drainPendingAutomationTo()).
  *
- * Inputs: the volatile four-byte queue published by TIM3. Output: valid voice
- * descriptor targets update their owning runtime image through
- * InstrumentManager; Scene targets dispatch through seq_applySceneAutomation()
- * to their Preset/Scene owners and never enter the voice retrigger-restore
- * bitmap. FX reset is taken before this pass; FX step markers bracket Effect
- * overlay end candidates, and the final marker group is flushed after the
- * queue handoff. The foreground follows the live producer count and atomically
- * resets only after no append raced the drain. Affiliate: main.c's pre-audio
- * foreground sequence.
- * S081 P2: before applying entries it ends the ramps of tracks whose next
- * step has applied; each written Instrument entry of an rmp track may start a
- * ramp toward the same target on the predicted next step
- * (seq_rampStartIfPaired()).
+ * What:       applies the TIM3 automation records from the drain cursor
+ *             (seq_pending_automation_done) up to, but not including,
+ *             index `limit` (or the producer count if smaller). Valid voice
+ *             descriptor targets update their owning runtime image through
+ *             seq_writeInstrumentAutomation() and may start an S081 P2
+ *             ramp; Scene targets go to seq_applySceneAutomation(); Effect
+ *             targets to effects_applyAutomation() behind the type gate.
+ *             When every published record is applied the queue resets
+ *             under PRIMASK; otherwise the cursor keeps the position.
+ * Why:        D6 (S087 P0 §6.5): a step's own automation must be applied
+ *             after the restore of its resetting trigger and before the
+ *             trigger fires. voiceControl_processPending() takes the mark
+ *             together with its trigger pops (seq_pendingAutomationMark()),
+ *             restores, calls this, then fires the triggers. Records after
+ *             the mark belong to triggers not yet popped and wait one
+ *             block with them, so a later restore cannot undo them.
+ * Inputs:     limit (0..SEQ_PENDING_BUF_COUNT; 0xFF = everything published),
+ *             the queue, the latch/erase filters, seq_menuOverride[].
+ * Outputs:    runtime descriptor values, Scene/Effect automation, ramp
+ *             starts, held bits (seq_automation_dirty[]), the cursor.
+ * Accessors:  voiceControl_processPending() (the only caller since S087).
+ * Affiliates: seq_pendingAutomationMark(), seq_restoreAutomatedParameters(),
+ *             seq_rampStartIfPaired(), main.c render loop,
+ *             PATTERN_DYNAMIC_STACK.md §6.1.
  */
-void seq_drainPendingAutomation(void)
+void seq_drainPendingAutomationTo(uint8_t limit)
 {
-    uint8_t i = 0u;
+    uint8_t i = seq_pending_automation_done;
 
     /* Reset Effect overlays before any records from the new pass apply. */
     if (seq_effectAutomationReset) {
@@ -3512,7 +3667,7 @@ void seq_drainPendingAutomation(void)
      * read and queue reset is detected and left for this same drain pass.
      */
     for (;;) {
-        while (i < seq_pending_automation_count) {
+        while (i < seq_pending_automation_count && i < limit) {
             uint16_t identity = seq_pending_automation[i].identity;
             uint16_t packed = seq_pending_automation[i].payload;
             uint16_t target = (uint16_t)(packed & 0x01FFu);
@@ -3630,21 +3785,43 @@ void seq_drainPendingAutomation(void)
         }
 
         {
-            uint32_t primask;
+            uint32_t primask = __get_PRIMASK();
 
-            __asm volatile("mrs %0, primask\n\tcpsid i"
-                           : "=r"(primask) :: "memory");
-            if (i == seq_pending_automation_count) {
+            __disable_irq();
+            if (i >= seq_pending_automation_count) {
                 seq_pending_automation_count = 0u;
                 seq_pending_automation_drain = 0u;
-                __asm volatile("msr primask, %0" :: "r"(primask)
-                               : "memory");
+                seq_pending_automation_done = 0u;
+                __set_PRIMASK(primask);
                 return;
             }
-            __asm volatile("msr primask, %0" :: "r"(primask)
-                           : "memory");
+            if (i >= limit) {
+                seq_pending_automation_done = i;
+                __set_PRIMASK(primask);
+                return;
+            }
+            __set_PRIMASK(primask);
         }
     }
+}
+
+/*
+ * Mark the automation published so far (S087 stage A).
+ *
+ * What:       returns seq_pending_automation_count.
+ * Why:        voiceControl_processPending() calls it inside the PRIMASK
+ *             section that pops the trigger ring. TIM3 publishes a step's
+ *             trigger and its entries in one interrupt run
+ *             (seq_advanceTrackStep(), seq_fireDeferred()), so the popped
+ *             triggers and the marked entries always belong together.
+ * Inputs:     none. Must be called with interrupts masked.
+ * Outputs:    the producer count (0..SEQ_PENDING_BUF_COUNT).
+ * Accessors:  voiceControl_processPending().
+ * Affiliates: seq_drainPendingAutomationTo(), seq_queueStepAutomations().
+ */
+uint8_t seq_pendingAutomationMark(void)
+{
+    return seq_pending_automation_count;
 }
 
 /*
@@ -4015,7 +4192,7 @@ static uint16_t seq_rampNowQ4(void)
  * seq_rampStartIfPaired() consumes A's own flag when TIM3 set it after the
  * drain's consume. Context: foreground. Affiliates: seq_rampStepEvent(),
  * seq_fireDeferred(), seq_restoreAutomatedParameters(),
- * seq_drainPendingAutomation().
+ * seq_drainPendingAutomationTo().
  */
 static void seq_rampEndTrack(uint8_t track)
 {
@@ -4126,7 +4303,7 @@ static uint8_t seq_rampTrackOn(uint8_t track)
  * automation values under the binding priority rule (MEMORY.md): the same
  * write path keeps the Morph sweep and menu apply from overwriting them.
  * The caller has already validated the target and the R12 override.
- * Context: foreground. Accessors: seq_drainPendingAutomation(),
+ * Context: foreground. Accessors: seq_drainPendingAutomationTo(),
  * seq_rampService(). Affiliates: instrumentManager_writeRuntime(),
  * seq_automation_dirty[].
  */
@@ -4241,7 +4418,7 @@ static void seq_rampStartIfPaired(uint8_t track, uint8_t scene, uint8_t step,
  * values are held automation values (binding priority rule). Cost: at most
  * 64 runtime writes per pass (every ramp changing value each pass), the worst
  * case measured on the stress Scene (DSP CPU policy; plan §7). Context: foreground, audio render loop, right
- * after seq_drainPendingAutomation(). Accessors: main.c
+ * after seq_drainPendingAutomationTo(). Accessors: main.c
  * audio_check_and_render(). Affiliates: seq_rampConsumeSteps(),
  * seq_rampStartIfPaired().
  */
@@ -4318,7 +4495,7 @@ void seq_rampService(void)
  * Foreground only - the drain and restore are foreground too, so no
  * PRIMASK. Inputs: slot 0..5, local parameter index. Outputs: override
  * and dirty bitmaps updated. Affiliates: menu_cellCommitValue
- * INSTRUMENT branch, seq_drainPendingAutomation filter,
+ * INSTRUMENT branch, seq_drainPendingAutomationTo() filter,
  * seq_restoreAutomatedParameters clear.
  */
 void seq_menuOverrideSet(uint8_t slot, uint8_t local)
@@ -5813,7 +5990,7 @@ void seq_chainRepeatSelf(uint8_t restart)
  * deferred step always keeps its automation and its roll. Queueing in TIM3
  * right beside the trigger keeps the foreground order
  * voiceControl_processPending() (reset + trigger) ->
- * seq_drainPendingAutomation() (entries), so the step's own automation
+ * seq_drainPendingAutomationTo() (entries), so the step's own automation
  * lands after its reset. Context: TIM3 only. Inputs:
  * seq_trackShuffleStep/Roll/Vel/Note. Outputs: entries queued, trigger
  * enqueued, pending cleared. Affiliates: seq_processDeferredTriggers()
@@ -5880,62 +6057,256 @@ static void seq_processDeferredTriggers(void)
 }
 
 /*
- * Tick-driven per-step roll retrigger engine (S079 §4).
+ * Tick-driven per-step roll retrigger engine (S079 §4; time window
+ * S084 P1).
  *
- * What: services the per-track fill-window duck countdown, then for each track
- * with an active roll and queued retriggers decrements the tick accumulator.
- * When it reaches zero, fires one retrigger with rhythm-modified velocity,
- * resets the accumulator to the roll rate's PPQ interval, advances the
- * velocity-pattern position, and decrements the queued count. When the queued
- * count reaches zero on a step whose fill is below 100, the duck is armed so
- * the voice fades out at the fill-window end (S079 P2 fix 4). Why: roll
- * retriggers run from the PPQ tick clock, same as the deferred-trigger engine,
- * at absolute note rates. A chain whose slots are exhausted stays "active" (so
- * the next step can carry it over) until the next step's begin clears or
- * extends it (the duck countdown lives outside that remaining check so it can
- * still expire). Inputs: seq_rollActive, seq_rollTickAccum, seq_rollVelPos,
- * seq_rollRemaining, seq_rollStepVel/Note, seq_rollLastRate/Fill,
- * seq_rollDuck*. Outputs: seq_triggerVoice() and
- * instrumentManager_requestGateDuck(). Context: TIM3 ISR via
- * seq_processSchedulerTick(). Affiliates: seq_rollBegin() roll setup.
+ * What: once per 96-PPQ master tick, for each track with a step roll:
+ *  - window end: when an open window (SEQ_ROLL_RUN) has no ticks left it
+ *    closes. A fill < 100 roll requests the voice duck here (the fill
+ *    boundary, S079 P2 fix 4) and ends; a fill-100 roll parks
+ *    (SEQ_ROLL_CARRY only) until the track's next step decides on a carry;
+ *  - parked: the accumulator keeps counting down to 0 and holds there, and
+ *    no hit fires, so a carry resumes exactly on phase (a hit that fell due
+ *    while parked fires on the carry's tick);
+ *  - running: one window tick is used, and when the accumulator reaches 0
+ *    a retrigger fires (reset = 0) at the rhythm-shaped velocity, the
+ *    accumulator restarts at the rate's interval and the rhythm position
+ *    advances.
+ * Hits therefore sit at first-hit + k x interval for as long as windows
+ * stay open, independent of the track's step scale.
+ * Why: the S079 engine counted hits per step and froze its accumulator
+ * between steps, so carried steps lost their boundary hit (S084 P0 F2).
+ * Inputs: seq_rollActive, seq_rollWindow, seq_rollTickAccum,
+ * seq_rollVelPos, seq_rollLastRate/Fill, seq_rollStepNote. Outputs:
+ * seq_triggerVoice(), instrumentManager_requestGateDuck(). Context: TIM3,
+ * from seq_processSchedulerTick() after the DDA, so a step that carries the
+ * roll renews its window before the window-end test on the same tick.
+ * Affiliates: seq_rollBegin(), seq_rollCarries(), seq_rollComputeVelocity(),
+ * seq_rollPpq().
  */
 static void seq_processRollTicks(void)
 {
 	uint8_t track;
 
 	for (track = 0u; track < NUM_TRACKS; track++) {
+		uint8_t st = seq_rollActive[track];
 		uint8_t ppq;
 		uint8_t vel;
 
-		if (!seq_rollActive[track])
+		if (st == 0u)
 			continue;
-		if (seq_rollDuckActive[track]) {
-			if (seq_rollDuckDelay[track] == 0u) {
+		if ((st & SEQ_ROLL_RUN) != 0u && seq_rollWindow[track] == 0u) {
+			st = (uint8_t)(st & ~SEQ_ROLL_RUN);
+			seq_rollActive[track] = st;
+			if (seq_rollLastFill[track] < 100u)
 				instrumentManager_requestGateDuck(track);
-				seq_rollDuckActive[track] = 0u;
-			} else {
-				seq_rollDuckDelay[track]--;
-			}
+			if (st == 0u)
+				continue;
 		}
-		if (seq_rollRemaining[track] == 0u)
-			continue;               /* chain idle, awaiting next step */
+		if ((st & SEQ_ROLL_RUN) == 0u) {
+			if (seq_rollTickAccum[track] > 0u)
+				seq_rollTickAccum[track]--;       /* parked: phase only */
+			continue;
+		}
+		seq_rollWindow[track]--;
+		if (seq_rollTickAccum[track] > 0u) {
+			seq_rollTickAccum[track]--;
+			continue;
+		}
 		ppq = seq_rollPpq(seq_rollLastRate[track]);
 		if (ppq == 0u) {
 			seq_rollActive[track] = 0u;
 			continue;
 		}
-		if (seq_rollTickAccum[track] > 0u) {
-			seq_rollTickAccum[track]--;
-			continue;
-		}
 		vel = seq_rollComputeVelocity(track);
-		seq_rollRemaining[track]--;
-		if (seq_rollRemaining[track] == 0u)
-			seq_rollArmDuck(track);
 		seq_triggerVoice(track, vel, seq_rollStepNote[track], 0);
 		seq_rollTickAccum[track] = (uint8_t)(ppq - 1u);
 		seq_rollVelPos[track]++;
 	}
+}
+
+/*
+ * Live overlay roll/flam tick (S084 P2).
+ *
+ * What: once per 96-PPQ master tick, for every armed live entry: count the
+ * accumulator down; at 0, a flam fires its main hit (reset = 1, it is the
+ * gesture's main trigger) and goes idle, and a roll fires a retrigger
+ * (reset = 0) at the overlay rhythm's velocity for its position, then
+ * restarts the accumulator at the rate's interval. Each hit updates the
+ * mailbox (count or flam bit, µs stamp). Why: overlay hits on the master
+ * clock, exactly the step-roll rate table and spacing, so a live roll and
+ * its recording sound the same at any tempo and under external sync (S084
+ * P0 F4). Inputs: seq_live* state, seq_liveRhythm. Outputs:
+ * seq_triggerVoice(), the mailbox. Context: TIM3 only. Called from
+ * seq_processSchedulerTick() before the running gate (internal sync, or
+ * external sync while running) and from seq_tick() under external sync
+ * while stopped, never both on one tick. Affiliates: seq_liveRollStart(),
+ * seq_liveTakeHits(), buttonHandler_overlayDrain().
+ */
+static void seq_processLiveTicks(void)
+{
+	uint8_t track;
+
+	for (track = 0u; track < NUM_TRACKS; track++) {
+		uint8_t mode = seq_liveMode[track];
+		uint8_t ppq;
+		uint8_t vel;
+
+		if (mode == SEQ_LIVE_IDLE)
+			continue;
+		if (seq_liveAccum[track] > 0u) {
+			seq_liveAccum[track]--;
+			continue;
+		}
+		if (mode == SEQ_LIVE_FLAM) {
+			seq_triggerVoice(track, seq_liveVel[track],
+			                 seq_liveNote[track], 1);
+			seq_liveMode[track] = SEQ_LIVE_IDLE;
+			seq_liveFlamMask |= (uint8_t)(1u << track);
+		} else {
+			ppq = seq_rollPpq(seq_liveRate[track]);
+			if (ppq == 0u) {
+				seq_liveMode[track] = SEQ_LIVE_IDLE;
+				continue;
+			}
+			vel = seq_rollRhythmVelocity(seq_liveRhythm,
+			                             seq_liveVel[track],
+			                             seq_livePos[track]);
+			if (seq_livePos[track] < 0xFFu)
+				seq_livePos[track]++;
+			else
+				seq_livePos[track] = 16u;   /* 256 mod 60: same phase */
+			seq_triggerVoice(track, vel, seq_liveNote[track], 0);
+			seq_liveAccum[track] = (uint8_t)(ppq - 1u);
+			if (seq_liveHitCount[track] < 0xFFu)
+				seq_liveHitCount[track]++;
+		}
+		seq_liveHitUs[track] = timebase_tim2Now();
+	}
+}
+
+/*
+ * Live overlay engine API (S084 P2). Contracts in sequencer.h.
+ *
+ * What: the foreground arms, re-rates, stops and drains the per-track live
+ * entries. Each call that writes more than one byte masks TIM3 (PRIMASK),
+ * so seq_processLiveTicks() never sees a half-written entry. Start values:
+ * a roll's first repeat is ppq - 1 ticks after the next tick boundary, so
+ * the first gap from the press is between ppq - 1 and ppq ticks and every
+ * later gap is exactly ppq (Q3: hits are spaced from the press). A rate
+ * change keeps the time since the last hit (the S081 F-B rule "new interval
+ * from the last hit time"). Why: buttonHandler owns the gesture, the
+ * Sequencer owns the clock. Inputs/outputs: see each contract. Context:
+ * foreground. Accessors: buttonHandler_overlayStart(),
+ * buttonHandler_overlayReconfigure(), buttonHandler_overlayEndTrack(),
+ * buttonHandler_overlayDrain(), buttonHandler_overlayTick(). Affiliates:
+ * seq_processLiveTicks(), the live engine state block.
+ */
+void seq_liveRollStart(uint8_t track, uint8_t rate, uint8_t note,
+                       uint8_t vel, uint8_t pos)
+{
+	uint8_t ppq;
+	uint32_t primask;
+
+	if (track >= NUM_TRACKS)
+		return;
+	ppq = seq_rollPpq(rate);
+	primask = __get_PRIMASK();
+	__disable_irq();
+	seq_liveHitCount[track] = 0u;
+	seq_liveFlamMask &= (uint8_t)~(1u << track);
+	if (ppq == 0u) {
+		seq_liveMode[track] = SEQ_LIVE_IDLE;
+	} else {
+		seq_liveMode[track] = SEQ_LIVE_ROLL;
+		seq_liveRate[track] = rate;
+		seq_liveAccum[track] = (uint8_t)(ppq - 1u);
+		seq_livePos[track] = pos;
+		seq_liveNote[track] = note;
+		seq_liveVel[track] = vel;
+	}
+	__set_PRIMASK(primask);
+}
+
+void seq_liveRollSetRate(uint8_t track, uint8_t rate)
+{
+	uint8_t newPpq;
+	uint8_t oldPpq;
+	int16_t n;
+	uint32_t primask;
+
+	if (track >= NUM_TRACKS)
+		return;
+	newPpq = seq_rollPpq(rate);
+	if (newPpq == 0u)
+		return;
+	primask = __get_PRIMASK();
+	__disable_irq();
+	if (seq_liveMode[track] == SEQ_LIVE_ROLL) {
+		oldPpq = seq_rollPpq(seq_liveRate[track]);
+		n = (int16_t)((int16_t)seq_liveAccum[track] +
+		              (int16_t)newPpq - (int16_t)oldPpq);
+		if (n < 0)
+			n = 0;
+		if (n > (int16_t)(newPpq - 1u))
+			n = (int16_t)(newPpq - 1u);
+		seq_liveAccum[track] = (uint8_t)n;
+		seq_liveRate[track] = rate;
+	}
+	__set_PRIMASK(primask);
+}
+
+void seq_liveFlamArm(uint8_t track, uint8_t note, uint8_t vel,
+                     uint8_t ticks)
+{
+	uint32_t primask;
+
+	if (track >= NUM_TRACKS)
+		return;
+	primask = __get_PRIMASK();
+	__disable_irq();
+	seq_liveMode[track] = SEQ_LIVE_FLAM;
+	seq_liveAccum[track] = (uint8_t)((ticks != 0u) ? (ticks - 1u) : 0u);
+	seq_liveNote[track] = note;
+	seq_liveVel[track] = vel;
+	seq_liveHitCount[track] = 0u;
+	seq_liveFlamMask &= (uint8_t)~(1u << track);
+	__set_PRIMASK(primask);
+}
+
+void seq_liveStop(uint8_t track)
+{
+	if (track < NUM_TRACKS)
+		seq_liveMode[track] = SEQ_LIVE_IDLE;
+}
+
+void seq_liveSetRhythm(uint8_t rhythm)
+{
+	seq_liveRhythm = rhythm;
+}
+
+uint8_t seq_liveTakeHits(uint8_t track, uint32_t *stampUs,
+                         uint8_t *flamMain)
+{
+	uint8_t n;
+	uint32_t primask;
+
+	if (flamMain)
+		*flamMain = 0u;
+	if (track >= NUM_TRACKS)
+		return 0u;
+	primask = __get_PRIMASK();
+	__disable_irq();
+	n = seq_liveHitCount[track];
+	seq_liveHitCount[track] = 0u;
+	if (flamMain) {
+		*flamMain = (uint8_t)((seq_liveFlamMask >> track) & 1u);
+		seq_liveFlamMask &= (uint8_t)~(1u << track);
+	}
+	if (stampUs)
+		*stampUs = seq_liveHitUs[track];
+	__set_PRIMASK(primask);
+	return n;
 }
 
 static void seq_processSchedulerTick(void)
@@ -5956,6 +6327,20 @@ static void seq_processSchedulerTick(void)
 		seq_ppqPeriodUs = now - seq_ppqStampUs;
 		seq_ppqStampUs = now;
 	}
+
+	/*
+	 * Live overlay rolls and flams first, running or stopped (S084 P2).
+	 *
+	 * What: services the PERF/MIDI overlay entries on this master tick,
+	 * before the running gate, so a held roll repeats at the tempo while the
+	 * transport is stopped (internal sync) and follows every external clock
+	 * tick while running. Why: the overlay must be playable stopped, as
+	 * before S084, but on the master clock. Order: it touches no Pattern,
+	 * DDA or step-roll state; a stored step on the same track this tick
+	 * triggers after it. Context: TIM3. Affiliates: seq_processLiveTicks(),
+	 * seq_tick() (external sync, stopped).
+	 */
+	seq_processLiveTicks();
 
 	if (!seq_running)
 		return;
@@ -6051,8 +6436,9 @@ static void seq_processSchedulerTick(void)
     }
 
     /*
-     * S079 §4: roll retriggers run after the DDA advance so a carry-over step
-     * can extend its chain before the tick that would otherwise exhaust it.
+     * S079 §4 / S084 P1: step roll retriggers run after the DDA advance, so
+     * a step that carries a roll renews its window before the window-end
+     * test on the same tick.
      */
     seq_processRollTicks();
 
@@ -6130,6 +6516,41 @@ void seq_setDeltaT(float delta)
 }
 //------------------------------------------------------------------------------
 
+/*
+ * Run one external clock period's scheduler ticks, interpolated (S084 P0 A1).
+ *
+ * What: first processes every tick still owed from the previous period
+ * (catch-up when the clock ran faster than the measured tempo), then the
+ * tick that belongs on this clock edge, and leaves the remaining ticks - 1
+ * owed for seq_tick() to process one per tempo-timer period. The timer is
+ * re-anchored on this edge (seq_lastTick, seq_calcDeltaT()), so the
+ * interpolated ticks are spaced by the measured external tempo from here.
+ * Each period therefore runs exactly `ticks` scheduler ticks, as before;
+ * only their timing within the period changes. Why: back-to-back ticks put
+ * every hit, roll retrigger, shuffle and micro-timing inside one clock
+ * period on the same instant (S084 P0 assessment A1). Inputs: ticks (4 per
+ * MIDI clock; stepSize x 3 per pulse, at most 96). Outputs:
+ * seq_processSchedulerTick() calls, seq_extTicksOwed, the tempo timer
+ * anchor. Context: TIM3 (clockSync via midiTransport_processRealtime(),
+ * triggerJacks_tick()); runs only while the transport runs. Accessors:
+ * seq_resetDeltaAndTick(), seq_triggerNextMasterStep(). Affiliates:
+ * seq_tick() (interpolation), seq_setRunningEx()/seq_continueRunning()/
+ * seq_resetToPatternStart() (clear the owed ticks).
+ */
+static void seq_extClockTicks(uint16_t ticks)
+{
+	while (seq_extTicksOwed != 0u) {
+		seq_extTicksOwed--;
+		seq_processSchedulerTick();
+	}
+	if (ticks != 0u) {
+		seq_processSchedulerTick();
+		seq_extTicksOwed = (uint8_t)((ticks > 256u) ? 255u : (ticks - 1u));
+	}
+	seq_lastTick = systick_ticks;
+	seq_calcDeltaT(seq_tempo);
+}
+
 void seq_triggerNextMasterStep(uint8_t stepSize)
 {
 	/*
@@ -6140,30 +6561,22 @@ void seq_triggerNextMasterStep(uint8_t stepSize)
 	 * PPQ, so one native unit equals three internal ticks. Processing those
 	 * ticks through the same scheduler path keeps track-scale timing, every-step
 	 * visitation, and master-clock loop correction identical between internal,
-	 * MIDI, and pulse sync.
+	 * MIDI, and pulse sync. S084 P0 A1: the ticks are spread over the pulse
+	 * period (seq_extClockTicks()), not run back to back.
 	 */
-	uint16_t ticks = (uint16_t)stepSize * 3u;
-	while (ticks--) {
-		seq_processSchedulerTick();
-	}
-	seq_lastTick = systick_ticks;
-	seq_calcDeltaT(seq_tempo);
+	seq_extClockTicks((uint16_t)((uint16_t)stepSize * 3u));
 }
 //------------------------------------------------------------------------------
 void seq_resetDeltaAndTick()
 {
-	uint8_t i;
-
 	/*
 	 * MIDI clock is 24 PPQ while the internal scheduler is 96 PPQ, so every
 	 * external MIDI clock pulse advances four internal scheduler ticks. This
 	 * replaces the old "4 steps every 3 clocks" bridge, which belonged to the
-	 * previous 32-steps-per-beat grid.
+	 * previous 32-steps-per-beat grid. S084 P0 A1: the first tick runs on the
+	 * clock, the other three are interpolated by seq_tick().
 	 */
-	for (i = 0u; i < SEQ_INTERNAL_TICKS_PER_MIDI_CLOCK; i++)
-		seq_processSchedulerTick();
-	seq_lastTick = systick_ticks;
-	seq_calcDeltaT(seq_tempo);
+	seq_extClockTicks(SEQ_INTERNAL_TICKS_PER_MIDI_CLOCK);
 }
 //------------------------------------------------------------------------------
 void seq_resetToPatternStart(void)
@@ -6173,6 +6586,7 @@ void seq_resetToPatternStart(void)
 	** pattern start according to each track's rotation. */
 	seq_barCounter = 0;
 	seq_delayedSyncStepFlag = 0;
+	seq_extTicksOwed = 0u;          /* S084 P0 A1: no tick of the old period */
 	seq_setStepIndexToStart();
 	seq_resetStepScheduler();
 	seq_deltaT = 0;
@@ -6190,8 +6604,29 @@ void seq_tick()
 		seq_calcDeltaT(seq_tempo);
 		seq_deltaT = seq_deltaT - rest;
 
-		if (!seq_getExtSync())
+		/*
+		 * External sync, transport stopped (S084 P2, Q9): no clock reaches
+		 * the scheduler (clockSync and the pulse input tick it only while
+		 * running), so live overlay rolls run from this tempo timer.
+		 * seq_tempo follows the incoming clock (sync_calcBpm(),
+		 * trigger_applyPulseTempo()), so the rate matches the external
+		 * tempo. With no clock at all they keep the last measured tempo.
+		 *
+		 * External sync, transport running (S084 P0 A1): the clock edge ran
+		 * the period's first tick (seq_extClockTicks()); each tempo-timer
+		 * period here runs one of the ticks still owed, so the period's
+		 * ticks are spread evenly instead of bunched on the edge. Internal
+		 * sync never owes ticks; a switch to internal drops any left over.
+		 */
+		if (!seq_getExtSync()) {
+			seq_extTicksOwed = 0u;
 			seq_processSchedulerTick();
+		} else if (!seq_running) {
+			seq_processLiveTicks();
+		} else if (seq_extTicksOwed != 0u) {
+			seq_extTicksOwed--;
+			seq_processSchedulerTick();
+		}
 
 		if(!seq_getExtSync()) //only send internal MIDI clock to output when external sync is off
 		{
@@ -6264,6 +6699,9 @@ uint8_t seq_isRunning() {
  */
 void seq_setRunningEx(uint8_t isRunning, uint8_t sendRealtime)
 {
+	/* S084 P0 A1: a transport change drops external ticks still owed, so a
+	 * restart never replays the old clock period's remainder. */
+	seq_extTicksOwed = 0u;
 	/* S081 §19.1 item 6: a transport change is a take boundary. */
 	seq_playbackEpoch++;
 	/* S081 P2: a playhead break ends automation ramps (no B will follow). */
@@ -6374,6 +6812,7 @@ void seq_continueRunning(uint8_t sendRealtime)
 
 	if (seq_running)
 		return;
+	seq_extTicksOwed = 0u;          /* S084 P0 A1: see seq_setRunningEx() */
 	seq_playbackEpoch++;
 	seq_rampBreakAll();
 	seq_resetStepScheduler();
@@ -6572,16 +7011,7 @@ static void seq_setStepIndexToStart()
 		seq_trackRepeatCount[i] = 0u;
 		seq_trackRndStepCount[i] = 0u;
 		seq_trackLastConditionFired[i] = 0u;
-		seq_rollActive[i] = 0u;
-		seq_rollTickAccum[i] = 0u;
-		seq_rollVelPos[i] = 0u;
-		seq_rollRemaining[i] = 0u;
-		seq_rollLastRate[i] = 0u;
-		seq_rollLastRhythm[i] = 0u;
-		seq_rollLastFill[i] = 0u;
-		seq_rollDuckActive[i] = 0u;
-		seq_rollDuckDelay[i] = 0u;
-		seq_rollDuckDelta[i] = 0u;
+		seq_rollClearTrack(i);
 	}
 	/*
 	 * Seed the FX DDA the same way so its step zero plays on the first tick,

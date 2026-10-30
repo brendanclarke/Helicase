@@ -70,6 +70,61 @@ void slopeEg2_trigger(SlopeEg2* eg)
 	eg->repeatCnt = eg->repeat;
 }
 //--------------------------------------------------
+/*
+ * slopeEg2_retriggerFrom() - gain-matched retrigger (S088 P0 §3 Layer 2a).
+ *
+ * What:       restarts the attack with the raw value that the attack slope
+ *             curve maps to currentGain, so the next slopeEg2_calc() returns
+ *             the gain the voice was already playing at (plus one attack
+ *             step) instead of starting again from 0.
+ * Why:        in fre/itp a retrigger into an audible tail must not click. The
+ *             output is continuous across the trigger boundary; the armed
+ *             one-block post-chain ramp absorbs the float rounding.
+ * Math:       the forward attack curve is
+ *                 g = (1 + k) v / (1 + k |v|),  k = invSlope, 0 <= v <= 1
+ *             so with 0 <= g <= 1 the inverse is
+ *                 v = g / (1 + k (1 - g))
+ *             The denominator is >= 1 for k >= 0, and v(0) = 0, v(1) = 1.
+ *             The result is clamped to [0, 1] against float rounding, so a
+ *             caller value slightly outside the domain cannot wrap the state.
+ *             The attack curve is invertible for every slope value:
+ *             slopeEg2_setSlope() produces k = 2a / (1 - a) for a net amount
+ *             a in (-1, 1), so k > -1 strictly (knob 0 gives +3998, knob 127
+ *             gives -0.99975) and 1 + k (1 - g) > 0 for all g in [0, 1].
+ * Inputs:     eg, currentGain (the shaped output gain from the previous
+ *             block, nominally 0..1; callers gate it with
+ *             slopeEg2_isAudibleGain()).
+ * Outputs:    eg->value, eg->state = EG_A, eg->repeatCnt = 0.
+ * Cost:       control rate; one divide per trigger.
+ * Accessors:  the four engine trigger functions (runMode != rst, audible).
+ * Affiliates: slopeEg2_calcSlopeValue() (the forward curve);
+ *             slopeEg2_trigger() (the repeat fallback); voicePostChain.h.
+ */
+void slopeEg2_retriggerFrom(SlopeEg2* eg, float currentGain)
+{
+	/* Repeat mode: the repeat leg starts at 1.0 and loops the decay; there
+	 * is no attack entry point to match (A10). */
+	if (eg->repeat)
+	{
+		slopeEg2_trigger(eg);
+		return;
+	}
+
+	const float k = eg->invSlope;
+	float denom;
+	float v;
+
+	denom = 1.f + k * (1.f - currentGain);
+	v = currentGain / denom;
+
+	if (v < 0.f) v = 0.f;
+	else if (v > 1.f) v = 1.f;
+
+	eg->value = v;
+	eg->state = EG_A;
+	eg->repeatCnt = 0;
+}
+//--------------------------------------------------
 float slopeEg2_calcSlopeValue(float val, float slope)
 {
 	return (1+slope)*val/(1+slope*fabsf(val));

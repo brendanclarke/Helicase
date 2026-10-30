@@ -227,10 +227,44 @@ void seq_triggerVoice(uint8_t voiceNr, uint8_t vol, uint8_t note, uint8_t reset)
  * vel*2 (clamp 127). 0x00 and any full > cycle are off (always `vel`).
  * Why: step rolls (step special `rtm`) and the PERF BAR overlay rolls
  * (`pv<`/`pv>`) must use one rule. Pure, no state. Callers:
- * seq_rollComputeVelocity() (step rolls, TIM3), buttonHandler's overlay
- * roll tick (foreground).
+ * seq_rollComputeVelocity() (step rolls) and seq_processLiveTicks()
+ * (overlay rolls, S084 P2), both TIM3.
  */
 uint8_t seq_rollRhythmVelocity(uint8_t rhythm, uint8_t vel, uint8_t pos);
+/*
+ * Live overlay roll/flam engine (S084 P2). Contracts; the definitions in
+ * sequencer.c carry the full description.
+ *
+ * seq_liveRollStart(track, rate, note, vel, pos): arm a held roll on the
+ * master tick. The caller has already fired hit 0. rate is the step-roll
+ * index 1..9 (0 or invalid: stops). The first repeat follows one rate
+ * interval after the press (ppq - 1 whole ticks from the next tick); pos is
+ * the rhythm position of that repeat (1 after a fired hit 0). Clears the
+ * track's mailbox.
+ * seq_liveRollSetRate(track, rate): change a running roll's rate and keep
+ * the time since its last hit (S081 F-B). No effect unless a roll runs.
+ * seq_liveFlamArm(track, note, vel, ticks): arm a flam main hit `ticks`
+ * master ticks after the press (12 = 1/32), fired with reset = 1. Clears
+ * the mailbox.
+ * seq_liveStop(track): disarm the track; the mailbox keeps unreported hits
+ * for a final seq_liveTakeHits().
+ * seq_liveSetRhythm(rhythm): the packed rhythm byte applied to every live
+ * roll from its next hit (the active overlay's `pv<`/`pv>`).
+ * seq_liveTakeHits(track, &stampUs, &flamMain): returns the roll hits
+ * fired since the last take (0..255), sets flamMain when the flam main
+ * fired, and stampUs to the TIM2 µs time of the latest hit; clears them.
+ * Context: foreground; TIM3-safe (PRIMASK). Accessor: buttonHandler
+ * overlay. Affiliates: seq_processLiveTicks().
+ */
+void    seq_liveRollStart(uint8_t track, uint8_t rate, uint8_t note,
+                          uint8_t vel, uint8_t pos);
+void    seq_liveRollSetRate(uint8_t track, uint8_t rate);
+void    seq_liveFlamArm(uint8_t track, uint8_t note, uint8_t vel,
+                        uint8_t ticks);
+void    seq_liveStop(uint8_t track);
+void    seq_liveSetRhythm(uint8_t rhythm);
+uint8_t seq_liveTakeHits(uint8_t track, uint32_t *stampUs,
+                         uint8_t *flamMain);
 /*
  * Stopped-transport voice preview.
  *
@@ -348,7 +382,17 @@ void seq_moveTracksToBackgroundScene(uint8_t track_mask);
  * written Instrument entry of an rmp track may start a linear ramp toward the
  * same target on the predicted next step.
  */
-void seq_drainPendingAutomation(void);
+void seq_drainPendingAutomationTo(uint8_t limit);
+/*
+ * Mark the automation published so far (S087 stage A).
+ *
+ * What: returns seq_pending_automation_count. Must be called with
+ * interrupts masked; voiceControl_processPending() calls it inside the same
+ * PRIMASK section as its trigger pops. Output: the producer count, to pass as
+ * the limit of seq_drainPendingAutomationTo(). Affiliates:
+ * seq_drainPendingAutomationTo(), seq_queueStepAutomations().
+ */
+uint8_t seq_pendingAutomationMark(void);
 /*
  * Automation ramp service (S081 P2, rmp).
  *
@@ -362,7 +406,7 @@ void seq_drainPendingAutomation(void);
  * TIM3's per-track ramp contexts, the master tick clock. Outputs: runtime
  * Instrument writes, seq_automation_dirty bits. Context: foreground only.
  * Client: main.c audio_check_and_render(), right after
- * seq_drainPendingAutomation().
+ * seq_drainPendingAutomationTo().
  */
 void seq_rampService(void);
 /*
@@ -383,7 +427,7 @@ void seq_restoreAutomatedParameters(uint8_t trigger_track);
  * (S075 F3).
  *
  * What: nonzero when seq_automation_dirty[slot] has bit `local` set, that is,
- * seq_drainPendingAutomation() wrote a step value into this descriptor's
+ * seq_drainPendingAutomationTo() wrote a step value into this descriptor's
  * runtime and the voice has not been triggered since.
  * Why: automation always wins (user rule). The overlay lasts until the next
  * trigger, so writers of the Morph base update morph_interpolation[] but
@@ -395,7 +439,7 @@ void seq_restoreAutomatedParameters(uint8_t trigger_track);
  * (voiceControl_processPending()), the transport restores and the Morph sweep
  * all run in the main loop, so the 64-bit bitmap is never read half-written.
  * Client: presetMorph_writeRuntimeBase() (presetMorphEngine.c).
- * Affiliates: seq_drainPendingAutomation(), seq_restoreAutomatedParameters(),
+ * Affiliates: seq_drainPendingAutomationTo(), seq_restoreAutomatedParameters(),
  * seq_restoreAllAutomation().
  */
 uint8_t seq_automationHoldsParameter(uint8_t slot, uint8_t local);
@@ -409,7 +453,7 @@ uint8_t seq_automationHoldsParameter(uint8_t slot, uint8_t local);
  * Inputs: slot 0..5, descriptor-local index. Context: foreground only.
  * Client: menu_cellCommitValue() INSTRUMENT branch. Affiliates:
  * seq_restoreAutomatedParameters() (per-trigger clear),
- * seq_drainPendingAutomation() (skip filter).
+ * seq_drainPendingAutomationTo() (skip filter).
  */
 void seq_menuOverrideSet(uint8_t slot, uint8_t local);
 /*

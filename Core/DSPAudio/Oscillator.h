@@ -52,7 +52,155 @@
 #define REC					0x03
 #define NOISE				0x04
 #define CRASH				0x05
-#define OSC_SAMPLE_START 	0x06
+/*
+ * Stock table waves (S086 P2): [11][1024] octave tables like Tri/Saw/Rec,
+ * in wavetableStock.c, read by the same table loops. SQ3 = Re3 (303
+ * square), SW3 = Sw3 (303 saw). OSC_STOCK_FIRST..OSC_STOCK_LAST index
+ * osc_stockTables[] (Oscillator.c); ReA/TrA/SwA follow later.
+ */
+#define SQ3					0x06
+#define SW3					0x07
+#define OSC_STOCK_FIRST		SQ3
+#define OSC_STOCK_LAST		SW3
+#define OSC_SAMPLE_START 	0x08
+
+/*
+ * Oscillator type: the typ row (S087 stage B).
+ *
+ * What:       OSC_TYPE_WAV 0 (stock waves, today's oscillator), OSC_TYPE_SMP 1
+ *             (one-shot sample), OSC_TYPE_SLP 2 (looped sample), OSC_TYPE_WTB 3
+ *             (wavetable), OSC_TYPE_COUNT 4. OSC_TYPE_MODLIST 4 is not a typ
+ *             value: it marks a modulator (Drum osc2, Cymbal/HiHat osc2/osc3),
+ *             whose wav list is the stock waves followed by the user entries
+ *             s01.., l01.., w01.. (S087 P0 §12.4). OSC_TYPE_SELECTABLE is the
+ *             number of typ values the menu and the writer accept in this
+ *             build: 1 after stage B, 3 after stage D, 4 after stage E.
+ * Why:        S087 P0 §4, A21/A22: osc1 selects its type with typ; the
+ *             modulators have no typ row and select user content through
+ *             their wav list. One byte in OscInfo carries both meanings so
+ *             osc_setFreq() and the renderers can tell them apart.
+ * Inputs:     the osc1_type descriptor (osc1) and the engine init functions
+ *             (modulators).
+ * Outputs:    OscInfo.oscType.
+ * Accessors:  osc_setType(), osc_isTyped(), osc_setFreq(), the engines'
+ *             typed branches, menu.c (count), InstrumentManager.c (writer).
+ * Affiliates: MENU_OSC_TYPE and oscTypeNames (MenuText.h); the osc1_type rows
+ *             in the four *Parameters.c files.
+ */
+#define OSC_TYPE_WAV         0u
+#define OSC_TYPE_SMP         1u
+#define OSC_TYPE_SLP         2u
+#define OSC_TYPE_WTB         3u
+#define OSC_TYPE_COUNT       4u
+#define OSC_TYPE_MODLIST     4u
+#define OSC_TYPE_SELECTABLE  4u   /* S087 E: wav smp slp wtb */
+_Static_assert(OSC_TYPE_SELECTABLE >= 1u && OSC_TYPE_SELECTABLE <= OSC_TYPE_COUNT,
+               "OSC_TYPE_SELECTABLE out of range");
+
+/*
+ * Oscillator run modes (S088 P0 §1).
+ *
+ * What:       OSC_RUN_RST 0 (reset, today's behaviour), OSC_RUN_FRE 1
+ *             (free-run: the carrier phase is never reset and the amp EG is
+ *             retriggered gain-matched), OSC_RUN_ITP 2 (interpolate: the
+ *             carrier phase is reset and the previous carrier plays on for
+ *             132 samples (OSC_RUN_ITP_SAMPLES) in a linear crossfade).
+ *             OSC_RUN_COUNT 3 is the number of stored values.
+ * Why:        symbolic names for the four engine trigger and render
+ *             functions; the numbers 0..2 are what the engine struct's
+ *             runMode byte holds in every Kit/Scene/preset image.
+ * Inputs:     the IM_SPECIAL_OSC_RUN writer, which clamps to this range.
+ * Outputs:    read by the engine trigger and render functions.
+ * Accessors:  DrumVoice.c, Snare.c, CymbalVoice.c, HiHat.c;
+ *             InstrumentManager.c; oscRunNames (MenuText.h).
+ * Affiliates: S088_P0_OSC_RUN_MODES.md §1; the osc1_run descriptor rows.
+ */
+#define OSC_RUN_RST   0u
+#define OSC_RUN_FRE   1u
+#define OSC_RUN_ITP   2u
+#define OSC_RUN_COUNT 3u
+
+/*
+ * itp crossfade length (S088 P0 §3 Layer 3a, D10).
+ *
+ * What:       OSC_RUN_ITP_SAMPLES 132 (about 3 ms at 44,108 Hz);
+ *             OSC_RUN_ITP_FADE_BLOCKS is that rounded up to whole
+ *             OUTPUT_DMA_SIZE blocks (5 x 32 = 160 samples, D4: the last
+ *             block runs the blend to its end instead of stopping early).
+ * Why:        the crossfade counter is a block count (uint8_t, at most 5);
+ *             one constant keeps the trigger and the blend in step.
+ * Accessors: the four engine triggers (counter) and
+ *             oscSection_renderOldCarrier() (progress).
+ * Affiliates: OscCarrierSnapshot; OSC_WAVE_INTERP_MAX_ACTIVE.
+ */
+#define OSC_RUN_ITP_SAMPLES     132u
+#define OSC_RUN_ITP_FADE_BLOCKS \
+    ((uint8_t)((OSC_RUN_ITP_SAMPLES + OUTPUT_DMA_SIZE - 1u) / OUTPUT_DMA_SIZE))
+
+/*
+ * Carrier snapshot for the itp crossfade (S088 P0 §3 Layer 3a).
+ *
+ * What:       a frozen copy of the carrier render state at an itp retrigger:
+ *             phase and phaseInc (the old carrier keeps its own pitch), the
+ *             waveform/table/type bytes, the pos frame that was already
+ *             applied, and the sample bind fields for smp/slp/wtb. active is
+ *             1 while the crossfade runs; counter is the remaining whole
+ *             blocks (OSC_RUN_ITP_FADE_BLOCKS at the trigger).
+ * Why:        the old carrier plays on beside the new one for about 3 ms and
+ *             is crossfaded out, which removes the click of a phase reset.
+ *             The snapshot is rendered PLAIN (carrier only, S085 P1 Q14): FM,
+ *             sync and ring apply to the live carrier only.
+ * Inputs:     the engine trigger function (filled on an itp retrigger when
+ *             the amp gain is audible and an interpolation slot is free).
+ * Outputs:    oscSection_renderOldCarrier() (read each block while active).
+ * Accessors:  the four engines; InstrumentManager_slotHasActiveItpFade().
+ * Affiliates: OSC_RUN_ITP_SAMPLES; modNode interp slot accounting (Layer 3b);
+ *             the plan's A6 (all types snapshot; finished smp is silence).
+ * Layout:     28 bytes on ARM (32 on a 64-bit host); all four engines carry
+ *             one whether or not they use itp (constant struct size).
+ */
+typedef struct OscCarrierSnapshotStruct {
+	uint32_t phase;
+	uint32_t phaseInc;
+	const int16_t *sampleCacheData;
+	uint32_t sampleCacheSize;
+	uint32_t sampleCacheGeneration;
+	uint8_t waveform;
+	uint8_t tableOffset;
+	uint8_t oscType;
+	uint8_t sampleCacheIndex;
+	uint8_t sampleCacheLooped;
+	uint8_t positionApplied;
+	uint8_t active;
+	uint8_t counter;
+} OscCarrierSnapshot;
+
+_Static_assert(sizeof(OscCarrierSnapshot) <= 32u,
+               "OscCarrierSnapshot must fit in 32 bytes (slot margin)");
+
+/*
+ * Sample reader constants (S087 stage D).
+ *
+ * What:       OSC_SAMPLE_PHASE_SHIFT 12 (Q19.12 phase: point index << 12 +
+ *             fraction); OSC_BIND_NONE/SMP/SLP/WTB8/WTB16; OSC_POS_SAMPLE_SPEED_CAP
+ *             4 (D5: a pos glide moves the playhead at most 4x the playback
+ *             speed, at least one step per block); OSC_FM_SAMPLE_SHIFT 9 (the
+ *             FM read offset: the same fraction of a 1,024-point nominal period
+ *             as the table loops' << 19 on a 2^32 cycle and v1's << 14 on << 17).
+ * Why:        S087 P0 D1, D5, A17 addendum (amt means the same on every
+ *             type). SAMPLE_MAX_FRAMES (SampleMemory.h) keeps every phase
+ *             below 2^31, so the readers use signed compares.
+ * Accessors:  the S087 readers, osc_userBind(), the typed pos helpers.
+ * Affiliates: SampleMemory.h SAMPLE_MAX_FRAMES; test_osc_sample.c.
+ */
+#define OSC_SAMPLE_PHASE_SHIFT    12u
+#define OSC_BIND_NONE             0u
+#define OSC_BIND_SMP              1u
+#define OSC_BIND_SLP              2u
+#define OSC_BIND_WTB8             3u
+#define OSC_BIND_WTB16            4u
+#define OSC_POS_SAMPLE_SPEED_CAP  4
+#define OSC_FM_SAMPLE_SHIFT       9u
 
 #define phaseShift 1000
 
@@ -68,14 +216,85 @@ typedef struct OscStruct
 
 	uint8_t		tableOffset;	//overtone table
 
+	/*
+	 * pos runtime state (S086 P3/P4).
+	 *
+	 * What:       position is the 0..127 osc1_position value. For the phase
+	 *             waves (osc_positionIsPhase()) it is position/128 of a cycle;
+	 *             for CRASH the cycle is the complete sample. positionApplied
+	 *             is the part of position already contained in phase.
+	 * Why:        a descriptor value can change once per audio block. Keeping
+	 *             the applied value lets the engine spread each change through
+	 *             phaseInc instead of jumping phase at a block boundary. These
+	 *             bytes occupy the existing padding before pitchMod, so OscInfo
+	 *             and every runtime voice keep their size (asserted below).
+	 * Inputs:     position: the generic descriptor writer (menu, Morph, LFO,
+	 *             velocity, step automation). positionApplied:
+	 *             osc_positionTrigger() and osc_positionBendApply().
+	 * Outputs:    read by the same helpers only.
+	 * Accessors:  osc_positionTrigger(), osc_positionBendApply().
+	 * Affiliates: positionBendStep below; the osc1_position rows in the four
+	 *             *Parameters.c files; 086_SESSION_HANDOFF_LOG.md §4 and
+	 *             086_SESSION_HANDOFF_LOG.md §5.
+	 */
+	uint8_t		position;
+	uint8_t		positionApplied;
 
 	float		pitchMod;	// modulation value for frequency
 	float 		fmMod;
 
 	float		modNodeValue;
-	uint8_t		waveInterpNext;			/* next waveform used for morph blend */
-	float		waveInterpFrac;			/* blend amount [0..1] between waveform and next */
-	uint32_t	waveInterpGeneration;	/* audio-block generation stamp */
+	uint8_t		waveInterpNext;			/* S087 P1: unused (A7); kept: positionBendStep, oscType and interpStamp follow it in the padding */
+	/*
+	 * pos bend of the block being rendered (S086 P3, assessment F1).
+	 *
+	 * What:       the signed number of 1/128-cycle steps that
+	 *             osc_positionBendApply() added to phaseInc for this block
+	 *             (-64..+64; 0 outside a render). osc_positionBendRestore()
+	 *             subtracts the same amount after the render and clears it.
+	 * Why:        the step is kept in the oscillator instead of a local
+	 *             variable, so no register stays live across the render that
+	 *             LTO inlines into mixer_calcNextSampleBlock(). A live local
+	 *             raised register pressure there and added reloads to two
+	 *             inlined per-sample loops (assessment F1). It sits in the
+	 *             padding after waveInterpNext, so OscInfo keeps its size.
+	 * Inputs:     osc_positionBendApply().  Outputs: osc_positionBendRestore().
+	 * Accessors:  those two helpers only; never stored in a file.
+	 * Affiliates: the four voice render functions; 086_SESSION_HANDOFF_LOG.md §9.
+	 */
+	int8_t		positionBendStep;
+	/*
+	 * Oscillator type (S087 stage B).
+	 *
+	 * What:       OSC_TYPE_WAV/SMP/SLP/WTB for osc1 (the typ row);
+	 *             OSC_TYPE_MODLIST for a modulator (set once by the engine
+	 *             init). 0 after a runtime-slot reset, i.e. wav.
+	 * Why:        the renderers, osc_setFreq() and the pos helpers need the
+	 *             type every block; the byte sits in the padding after
+	 *             positionBendStep (offset 34), so OscInfo stays 72 bytes.
+	 * Inputs:     osc_setType() (osc1, through IM_SPECIAL_OSC_TYPE); the
+	 *             engine init functions (modulators).
+	 * Outputs:    read by osc_isTyped(), osc_setFreq(), the typed renderers.
+	 * Accessors:  osc_setType() is the only writer for osc1.
+	 * Affiliates: OSC_TYPE_* above; S087 P0 §12.1 A22.
+	 */
+	uint8_t		oscType;
+	/*
+	 * Interpolation slot stamp (S087 stage E).
+	 *
+	 * What:       the stamp (modNode_interpStampOf(), 1..255) of the block in
+	 *             which this oscillator last held one of the two interpolation
+	 *             slots; 0 = none (S087 P1: a stamp is never 0).
+	 * Why:        sticky claims (S087 P0 A8): a holder keeps its slot from
+	 *             block to block, so it does not flip between blending and
+	 *             stepping. Byte 35 is padding before waveInterpFrac.
+	 * Inputs:     modNode_interpClaim(); osc_setType() clears it.
+	 * Outputs:    read by modNode_interpClaim().
+	 * Affiliates: modNode_resetTargets(); OSC_WAVE_INTERP_MAX_ACTIVE.
+	 */
+	uint8_t		interpStamp;
+	float		waveInterpFrac;			/* S087 P1: unused (wav interpolation retired, A7); kept for the OscInfo layout */
+	uint32_t	waveInterpGeneration;	/* S087 P1: unused; kept for the OscInfo layout */
 	float		freqCacheValue;
 	uint8_t		freqCacheWaveform;
 	uint8_t		freqCacheValid;
@@ -90,6 +309,41 @@ typedef struct OscStruct
 	uint8_t baseNote;		// the last played midi note
 	uint32_t startPhase;		// the OSC is reset to this phase on retrigger
 } OscInfo;
+
+/*
+ * OscInfo layout checks (S086 P3).
+ *
+ * What:       verify that position and positionApplied fill the padding
+ *             between tableOffset (17) and pitchMod (20), that
+ *             positionBendStep sits in the padding after waveInterpNext
+ *             (before the 4-byte-aligned waveInterpFrac), and the ARM size.
+ * Why:        pos is deliberately a zero-RAM feature; a moved field would
+ *             silently grow every oscillator in every runtime slot.
+ * Inputs:     the OscInfo declaration above.
+ * Outputs:    compile-time diagnostics only.
+ * Accessors:  the compiler.
+ * Affiliates: runtime_slots and the four voice structs; tools/dsp_test's
+ *             extracted OscInfo fragment.
+ * Note:       <stddef.h> is included here, after the struct, so the line
+ *             ranges the test bench extracts from the top of this header do
+ *             not move.
+ */
+#include <stddef.h>
+_Static_assert(offsetof(OscInfo, position) == offsetof(OscInfo, tableOffset) + 1u,
+               "OscInfo.position must follow tableOffset (padding)");
+_Static_assert(offsetof(OscInfo, positionApplied) + 1u == offsetof(OscInfo, pitchMod),
+               "OscInfo.positionApplied must end the padding before pitchMod");
+_Static_assert(offsetof(OscInfo, positionBendStep) == offsetof(OscInfo, waveInterpNext) + 1u,
+               "OscInfo.positionBendStep must follow waveInterpNext (padding)");
+_Static_assert(offsetof(OscInfo, oscType) == offsetof(OscInfo, positionBendStep) + 1u,
+               "OscInfo.oscType must follow positionBendStep (padding, S087 B)");
+_Static_assert(offsetof(OscInfo, interpStamp) == offsetof(OscInfo, oscType) + 1u,
+               "OscInfo.interpStamp must follow oscType (padding, S087 E)");
+_Static_assert(offsetof(OscInfo, waveInterpFrac) == offsetof(OscInfo, waveInterpNext) + 4u,
+               "OscInfo.positionBendStep must not move waveInterpFrac");
+#if defined(__arm__)
+_Static_assert(sizeof(OscInfo) == 72u, "OscInfo must stay 72 bytes (S086 P3)");
+#endif
 //-----------------------------------------------------------
 
 //extern OscInfo osc1;
@@ -136,10 +390,6 @@ int16_t calcNextOscSampleFm(OscInfo* osc, OscInfo* modOsc);
 //-----------------------------------------------------------
 void calcSampleOscBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain);
 //-----------------------------------------------------------
-void calcUserSampleOscFmBlock(OscInfo* osc,int16_t* modBuffer, int16_t* buf, uint8_t size ,const float gain);
-//-----------------------------------------------------------
-void calcUserSampleOscBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,const float gain);
-//-----------------------------------------------------------
 int16_t calcSampleOsc(OscInfo* osc);
 //-----------------------------------------------------------
 /** set the played midi note.*/
@@ -147,5 +397,536 @@ void osc_setBaseNote(OscInfo* osc, uint8_t baseNote);
 //-----------------------------------------------------------
 /** recalculate the frequency if either the base note or the offset note value changed*/
 void osc_recalcFreq(OscInfo* osc);
+
+//-----------------------------------------------------------
+/*
+ * Drum osc2 mod modes snc (hard sync) and rng (ring): oscillator side
+ * (S085 P1).
+ *
+ * What:       OSC_SYNC_NONE; the sync clock (osc_syncClockInc,
+ *             osc_buildSyncList); the sync and ring dispatchers
+ *             (calcNextOscSampleSyncBlock, calcNextOscSampleRingBlock); and
+ *             the amount mappings (osc_syncDepthQ30, osc_ringDepthQ15). The
+ *             dispatchers mirror calcNextOscSampleBlock(): the same
+ *             waveform-interpolation entry, the same waveform switch and the
+ *             same user-sample range check.
+ * Why:        S085_P1_OSC_MOD_SNC_RNG.md §4; S085_P1_OSC_MOD_IMPLEMENTATION.md.
+ *             The session rule is no increase in CPU. snc renders only the
+ *             slave: the FM-page oscillator is a phase clock and is never
+ *             rendered. rng folds the ring product into the carrier's own
+ *             store instead of a separate pass. The existing plain and FM
+ *             loops are not edited, so fm and mix compile unchanged.
+ * Accessors:  Drum_calcVoiceSyncBlock() (DrumVoice.c) only.
+ * Affiliates: Oscillator.c S085 P1 section; tools/dsp_test targets osc_mod,
+ *             oscmod_identity, armcheck-oscmod, elf_osc_check.
+ */
+
+/*
+ * "No reset after this sample" marker in a sync reset list (S085 P1).
+ *
+ * What:       over[i] == OSC_SYNC_NONE: the clock did not wrap after sample
+ *             i. Any other value is the clock's overshoot past its wrap.
+ *             That overshoot is always < the clock increment, so it can
+ *             never equal this marker.
+ * Accessors:  osc_buildSyncList() writes it; the sync copies in
+ *             Oscillator.c read it.
+ */
+#define OSC_SYNC_NONE 0xFFFFFFFFu
+
+/*
+ * Sync clock increment for the FM-page (master) oscillator (S085 P1).
+ *
+ * What:       master->phaseInc, in "2^32 per nominal period" units.
+ *             - Sine, table (incl. the stock table waves) and noise phases
+ *               already are.
+ *             - Crash and user samples (a <<17 point index; 1,024 points per
+ *               nominal period) are scaled << 5. They are first clamped to
+ *               0x07FFFFFF so the shift cannot overflow; a master at or above
+ *               fs then resets the slave on every sample.
+ * Why:        plan A1/A4: in P1 every master is a clock at its frequency.
+ *             Crash and user samples act as noise (one reset per nominal
+ *             period), not as their audio.
+ * Inputs:     master (read only). Its phaseInc is current:
+ *             Drum_calcVoiceAsync() runs osc_setFreq() on both Drum
+ *             oscillators every block, in every mode.
+ * Outputs:    the clock increment.
+ * Accessors:  Drum_calcVoiceSyncBlock().
+ * Affiliates: osc_buildSyncList(); calcNextOscSampleSyncBlock() (the ratio).
+ */
+uint32_t osc_syncClockInc(const OscInfo* master);
+
+/*
+ * Build one block's sync reset list (S085 P1).
+ *
+ * What:       advances clock by clockInc once per sample. When the addition
+ *             wraps (the clock passed 2^32 between samples i and i + 1),
+ *             over[i] = the new clock value: the overshoot past the wrap.
+ *             Otherwise over[i] = OSC_SYNC_NONE.
+ * Why:        plan §4.3.1 / Q11: one list per block serves every slave copy.
+ *             Later master kinds (looped samples, wavetable frames, the
+ *             zero-crossing bitmap; plan §12) add a builder, not new slave
+ *             loops.
+ * Inputs:     clock (the clock phase at block start), clockInc, over[size],
+ *             size (<= OUTPUT_DMA_SIZE).
+ * Outputs:    over[0..size-1]; returns the clock phase at block end (the
+ *             caller stores it in DrumVoice.syncClock).
+ * Cost:       constant per sample (an add, a compare, a select, a store).
+ * Accessors:  Drum_calcVoiceSyncBlock().
+ * Affiliates: calcNextOscSampleSyncBlock(); OSC_SYNC_NONE.
+ */
+uint32_t osc_buildSyncList(uint32_t clock, const uint32_t clockInc,
+                           uint32_t* over, const uint8_t size);
+
+/*
+ * Render one slave block under hard sync (S085 P1).
+ *
+ * What:       renders osc at gain 1, exactly as calcNextOscSampleBlock()
+ *             would. After sample i, when over[i] != OSC_SYNC_NONE, the
+ *             advanced phase is pulled toward the reset target:
+ *                 target = over[i] x ratio, ratio = osc->phaseInc / clockInc;
+ *                 phase += depth x (signed)(target - phase).
+ *             The reset therefore lands on sample i + 1 (plan K4).
+ *             - Synced: Sin, Tri, Saw, Rec, Crash, the stock table waves
+ *               (S086 P2).
+ *             - Rendered plain (no sync): Noi, user samples (plan A3/A4).
+ *             - Waveform interpolation: both partners use the same list.
+ * Why:        plan Q10: the Drum amount is the sync depth (0 free-running,
+ *             1 hard sync); the Drum passes amt^2 x the PitchMod decay
+ *             envelope, the fm response (DrumVoice.c Drum_modEnvDepth()).
+ *             Only the slave is heard.
+ * Inputs:     osc (the carrier), over[size] from osc_buildSyncList(),
+ *             clockInc (the same value the list was built with), depthQ30
+ *             (osc_syncDepthQ30()), buf[size], size.
+ * Outputs:    buf; osc->phase (and osc->output for the plain fallbacks).
+ * Cost:       one divide per call (the ratio), then the waveform's sync
+ *             copy: S085_P1_OSC_MOD_IMPLEMENTATION.md §1.
+ * Accessors:  Drum_calcVoiceSyncBlock().
+ * Affiliates: the sync copies and osc_renderSyncWave() in Oscillator.c.
+ */
+void calcNextOscSampleSyncBlock(OscInfo* osc, const uint32_t* over,
+                                const uint32_t clockInc, const int32_t depthQ30,
+                                int16_t* buf, const uint8_t size);
+
+/*
+ * Render one carrier block with the ring law applied (S085 P1; per-sample
+ * depth ramp, S085 P1 follow-up).
+ *
+ * What:       renders osc exactly as calcNextOscSampleBlock() would at
+ *             gain 1, but stores, for sample i,
+ *                 d_i    = depthQ15 + (i + 1) x depthStepQ15
+ *                 G_i    = (32768 - d_i) + ((d_i x modBuf[i]) >> 15)
+ *                 buf[i] = SSAT16((osc_i x G_i) >> 15)
+ *             instead of osc_i x gain. With modBuf = the modulator at gain 1
+ *             and d in Q15 this is
+ *                 carrier x (1 - d) + carrier x modulator x d
+ *             (plan K5), with d moving linearly across the block. d = 0 gives
+ *             the carrier exactly. Every waveform is supported, including
+ *             noise, user samples and waveform interpolation.
+ * Why:        D1: a separate ring pass made rng as expensive as fm or more
+ *             with user-sample oscillators, so the law is folded into the
+ *             carrier's store. The ramp (follow-up): d follows the mod
+ *             envelope, and a d that stepped once per block was audible as a
+ *             zipper; ramping costs about 3 instructions per sample and keeps
+ *             rng under the fm worst case (implementation §14).
+ * Inputs:     osc (the carrier); modBuf[size] (the modulator block at gain
+ *             1); buf[size]; size; depthQ15 (d at the end of the previous
+ *             block, 0..32768); depthStepQ15 (per-sample increment; the
+ *             block ends at depthQ15 + size x depthStepQ15). The Drum's d is
+ *             amt^2 x the PitchMod decay envelope (Drum_modEnvDepth(),
+ *             osc_ringDepthQ15()).
+ * Outputs:    buf; osc->phase / osc->output as the plain render.
+ * Accessors:  Drum_calcVoiceSyncBlock().
+ * Affiliates: the ring copies and osc_ringSample() in Oscillator.c;
+ *             DrumVoice.ringDepthQ15 / ringSnap (the ramp state).
+ */
+void calcNextOscSampleRingBlock(OscInfo* osc, const int16_t* modBuf,
+                                int16_t* buf, const uint8_t size,
+                                const int32_t depthQ15,
+                                const int32_t depthStepQ15);
+
+/*
+ * Sync depth from the Drum amount (S085 P1).
+ *
+ * What:       amount (0..1; the Drum passes amt^2 x the PitchMod decay
+ *             envelope, Drum_modEnvDepth()) as Q30: 0 -> 0 (no pull), 1 ->
+ *             0x40000000 (exact hard sync). Out-of-range or non-positive
+ *             input clamps.
+ * Why:        Q30 makes both ends exact. depth 0 is bit-identical to the
+ *             free-running slave, and depth 1 lands exactly on the target.
+ * Inputs:     amount.  Outputs: depthQ30.
+ * Accessors:  Drum_calcVoiceSyncBlock() (once per block).
+ * Affiliates: osc_syncPull() in Oscillator.c.
+ */
+static inline int32_t osc_syncDepthQ30(const float amount)
+{
+	if (!(amount > 0.0f))
+		return 0;
+	if (amount >= 1.0f)
+		return 0x40000000;
+	return (int32_t)(amount * 1073741824.0f);
+}
+
+/*
+ * Ring depth in Q15 from the Drum amount (S085 P1 follow-up; replaces the
+ * dry gain osc_ringK()).
+ *
+ * What:       d = round(amount x 32768), 0..32768. 0 at amount 0 (the carrier
+ *             exactly), 32768 at amount 1 (the pure ring product).
+ *             Out-of-range or non-positive input clamps.
+ * Why:        the ring copies now take the depth itself and ramp it per
+ *             sample (calcNextOscSampleRingBlock()); Q15 keeps every product
+ *             in int32.
+ * Inputs:     amount (0..1; the Drum passes amt^2 x the PitchMod decay
+ *             envelope, Drum_modEnvDepth()).  Outputs: d in Q15.
+ * Accessors:  Drum_calcVoiceSyncBlock() (once per block).
+ * Affiliates: osc_ringSample() in Oscillator.c.
+ */
+static inline int32_t osc_ringDepthQ15(const float amount)
+{
+	if (!(amount > 0.0f))
+		return 0;
+	if (amount >= 1.0f)
+		return 32768;
+	return (int32_t)(amount * 32768.0f + 0.5f);
+}
+
+/*
+ * Whether a waveform is read from a [11][1024] octave table (S086 P2).
+ *
+ * What:       1 for TRI, SAW, REC and the stock table waves
+ *             (OSC_STOCK_FIRST..OSC_STOCK_LAST); 0 for SINE, NOISE, CRASH
+ *             and user samples.
+ * Why:        the engines' trigger start phase (0xff << 20 x the transient
+ *             offset) applies to every table wave alike.
+ * Inputs:     waveform.  Outputs: 0 or 1.
+ * Accessors:  Drum/Snare/Cymbal/HiHat _triggerVoice().
+ * Affiliates: osc_setFreq() (the same set takes the table frequency path).
+ */
+static inline uint8_t osc_isTableWave(const uint8_t waveform)
+{
+	return (uint8_t)((waveform >= TRI && waveform <= REC) ||
+	                 (waveform >= OSC_STOCK_FIRST && waveform <= OSC_STOCK_LAST));
+}
+
+/*
+ * Position bend constants (S086 P3/P4).
+ *
+ * What:       OSC_POS_BEND_CAP limits the number of 1/128-cycle steps moved
+ *             in one block; 64 disables the cap because the circular delta
+ *             is already in -64..+63. OSC_POS_BEND_PER_STEP is the per-sample
+ *             phaseInc for one step held over one OUTPUT_DMA_SIZE block, so
+ *             the block moves the phase by exactly 1 << 25 (1/128 cycle).
+ * Why:        the exact integer step lands each block on the requested phase
+ *             without drift; the asserts pin both constants in the firmware
+ *             build, and test_osc_pos.c compiles this same block (assessment
+ *             F3), so a wrong value fails the build and the host test. The
+ *             cap stays available for listening tests (086 log §4.5).
+ * Inputs:     OUTPUT_DMA_SIZE from config.h; OSC_POS_BEND_CAP may be
+ *             predefined (the host cap build uses 8).
+ * Outputs:    the two constants.
+ * Accessors:  osc_positionBendApply(), osc_positionBendRestore().
+ * Affiliates: tools/dsp_test/Makefile osc_pos (extracts this block from
+ *             "#ifndef OSC_POS_BEND_CAP" to the cap-range assert).
+ */
+#ifndef OSC_POS_BEND_CAP
+#define OSC_POS_BEND_CAP 64
+#endif
+#define OSC_POS_BEND_PER_STEP (0x2000000u / OUTPUT_DMA_SIZE)
+_Static_assert((0x2000000u % OUTPUT_DMA_SIZE) == 0u,
+               "the pos bend must divide one 1/128-cycle step exactly");
+_Static_assert(OSC_POS_BEND_PER_STEP * OUTPUT_DMA_SIZE == (1u << 25),
+               "one pos step over one block must move exactly 1/128 cycle");
+_Static_assert(OSC_POS_BEND_CAP >= 1 && OSC_POS_BEND_CAP <= 64,
+               "OSC_POS_BEND_CAP must be 1..64 (positionBendStep is int8_t)");
+
+/*
+ * Return whether position is a phase offset for this waveform (S086 P3/P4).
+ *
+ * What:       SINE, CRASH and all table waves use the full 32-bit phase range;
+ *             NOISE and v1 user samples retain their existing no-position
+ *             behaviour until the later sample stage.
+ * Why:        one phase unit is position/128 of the wave or complete sample.
+ * Inputs:     waveform ID.
+ * Outputs:    1 for phase waves, otherwise 0.
+ * Accessors:  osc_positionTrigger(), osc_positionBendApply().
+ * Affiliates: osc_isTableWave(), 086_SESSION_HANDOFF_LOG.md §5.
+ */
+/* S087 D: forward declarations (the definitions follow the pos helpers). */
+static inline uint8_t osc_isTyped(const OscInfo* osc);
+void osc_typedPositionApply(OscInfo* osc, uint8_t bend);
+void osc_typedPositionRestore(OscInfo* osc);
+uint32_t osc_typedTriggerPhase(OscInfo* osc);
+
+static inline uint8_t osc_positionIsPhase(const uint8_t waveform)
+{
+	return (uint8_t)(waveform == SINE || waveform == CRASH ||
+	                 osc_isTableWave(waveform));
+}
+
+/*
+ * Apply position at a trigger (S086 P3/P4).
+ *
+ * What:       records the current position as applied and returns position
+ *             << 25 for phase waves, which is position/128 of 2^32.
+ * Why:        the trigger starts at today's phase plus the requested offset;
+ *             position 0 returns zero and is bit-for-bit today's start.
+ * Inputs:     osc->position and osc->waveform, after velocity modulation and
+ *             after the engine's existing transient offset scaling.
+ * Outputs:    phase offset for the caller and osc->positionApplied.
+ * Accessors:  Drum/Snare/Cymbal/HiHat_triggerVoice().
+ * Affiliates: osc_positionBendApply() (the continuous part), the
+ *             osc1_position descriptor rows.
+ */
+static inline uint32_t osc_positionTrigger(OscInfo* osc)
+{
+	/* S087 D: typed start: osc_typedTriggerPhase() (out of line). */
+	if (osc_isTyped(osc))
+		return 0u;
+	const uint32_t pos = (uint32_t)(osc->position & 127u);
+
+	osc->positionApplied = (uint8_t)pos;
+	if (!osc_positionIsPhase(osc->waveform))
+		return 0u;
+	return pos << 25;
+}
+
+/*
+ * Start the continuous position bend for one block (S086 P3/P4).
+ *
+ * What:       computes the circular delta d from positionApplied to position
+ *             (-64..+63; 127 -> 0 is +1), limits it to +-OSC_POS_BEND_CAP,
+ *             advances positionApplied by d, and, for a phase wave with
+ *             bend != 0, adds d x OSC_POS_BEND_PER_STEP to phaseInc and
+ *             stores d in positionBendStep. Otherwise it stores 0 and leaves
+ *             phaseInc alone, while still consuming the delta.
+ * Why:        LFO, knob, velocity, Morph and automation values arrive once
+ *             per block. Bending phaseInc for one block makes the phase
+ *             glide and land exactly on the new offset after OUTPUT_DMA_SIZE
+ *             samples, with no loop change. Storing the step in the
+ *             oscillator (not returning it) means the caller keeps nothing
+ *             live across the render (assessment F1). Consuming the delta
+ *             for non-phase waves, and for Drum snc (bend = 0), means a later
+ *             waveform or mode switch cannot release a stale bend.
+ * Inputs:     osc->position, osc->positionApplied, osc->waveform; bend: 1 to
+ *             bend, 0 to consume the delta only (Drum snc, 086 log §4.6).
+ * Outputs:    osc->phaseInc (bent), osc->positionBendStep,
+ *             osc->positionApplied.
+ * Accessors:  Drum_calcVoiceSyncBlock(), Snare_calcSyncBlockVoice(),
+ *             Cymbal_calcSyncBlockVoice(), HiHat_calcSyncBlockVoice(),
+ *             immediately before their osc1 render.
+ * Affiliates: osc_positionBendRestore() (must follow the render);
+ *             osc_setFreq() (its cache would keep a bend left in phaseInc);
+ *             osc_typedPositionApply() (typed osc1, S087); 086 log §4.3.
+ */
+static inline void osc_positionBendApply(OscInfo* osc, const uint8_t bend)
+{
+	/* S087 D: smp/slp/wtb take the out-of-line rules (D3-D5, D8). */
+	if (osc_isTyped(osc)) {
+		osc_typedPositionApply(osc, bend);
+		return;
+	}
+	const uint32_t u = ((uint32_t)(osc->position & 127u) -
+	                    (uint32_t)osc->positionApplied + 64u) & 127u;
+	int32_t d = (int32_t)u - 64;
+
+	if (d > (int32_t)OSC_POS_BEND_CAP)
+		d = (int32_t)OSC_POS_BEND_CAP;
+	else if (d < -(int32_t)OSC_POS_BEND_CAP)
+		d = -(int32_t)OSC_POS_BEND_CAP;
+	osc->positionApplied =
+		(uint8_t)(((uint32_t)osc->positionApplied + (uint32_t)d) & 127u);
+	if (!bend || !osc_positionIsPhase(osc->waveform))
+		d = 0;
+	osc->positionBendStep = (int8_t)d;
+	osc->phaseInc += (uint32_t)(d * (int32_t)OSC_POS_BEND_PER_STEP);
+}
+
+/*
+ * End the continuous position bend after the block's render (S086 P3/P4).
+ *
+ * What:       subtracts positionBendStep x OSC_POS_BEND_PER_STEP from
+ *             phaseInc, restoring it exactly, and clears positionBendStep.
+ * Why:        phaseInc is cached by osc_setFreq(); a bend left in it would
+ *             become a lasting pitch error. Reading the step from the
+ *             oscillator keeps the caller free of live state (assessment F1).
+ * Inputs:     osc->positionBendStep, osc->phaseInc.
+ * Outputs:    osc->phaseInc (unbent), osc->positionBendStep = 0.
+ * Accessors:  the same four render functions, immediately after the osc1
+ *             render that osc_positionBendApply() preceded.
+ * Affiliates: osc_positionBendApply().
+ */
+static inline void osc_positionBendRestore(OscInfo* osc)
+{
+	/* S087 D: smp/slp/wtb restore their own step (D8). */
+	if (osc_isTyped(osc)) {
+		osc_typedPositionRestore(osc);
+		return;
+	}
+	osc->phaseInc -= (uint32_t)((int32_t)osc->positionBendStep *
+	                            (int32_t)OSC_POS_BEND_PER_STEP);
+	osc->positionBendStep = 0;
+}
+
+/*
+ * Whether osc1 plays a user type (S087 stage B).
+ *
+ * What:       1 for OSC_TYPE_SMP, OSC_TYPE_SLP and OSC_TYPE_WTB; 0 for wav and
+ *             for modulators (OSC_TYPE_MODLIST).
+ * Why:        the engines branch on it once per block to call the typed
+ *             renderers instead of the existing dispatchers (S087 P0 A2), and
+ *             the pos helpers use it to choose the rule (D3).
+ * Inputs:     osc.  Outputs: 0 or 1.
+ * Accessors:  the four engine renders and triggers; osc_positionBendApply()/
+ *             Restore(); osc_setFreq().
+ * Affiliates: OSC_TYPE_*; osc_setType().
+ */
+static inline uint8_t osc_isTyped(const OscInfo* osc)
+{
+	return (uint8_t)(osc->oscType >= OSC_TYPE_SMP &&
+	                 osc->oscType <= OSC_TYPE_WTB);
+}
+
+/*
+ * Change osc1's type (S087 stage B; extended in D-8 and E-6).
+ *
+ * What:       clamps `type` to OSC_TYPE_SELECTABLE - 1; when it differs from
+ *             osc->oscType:
+ *             - stores it;
+ *             - clamps osc->waveform to an entry that exists for the new type
+ *               (wav: OSC_STOCK_LAST; smp/slp: sample count - 1; wtb: table
+ *               count - 1; none installed: 0) - the value is otherwise used
+ *               as it is: nothing is remembered or restored (S087 P0 r8);
+ *             - re-anchors pos: positionApplied = position (D7);
+ *             - re-anchors the phase for the new phase units: into smp/slp
+ *               the pos start point; from smp/slp into wav/wtb the pos
+ *               trigger phase; between wav and wtb the phase is kept
+ *               (S087 P0 §12.5);
+ *             - invalidates the frequency cache and the bind
+ *               (freqCacheValid = 0; bind generation 0, stage D);
+ *             - releases a held interpolation slot (interpStamp = 0,
+ *               stage E).
+ *             An unchanged type does nothing, so repeated writes (apply,
+ *             restore, automation) are idempotent.
+ * Why:        the single place where a type change happens, used by the menu,
+ *             Kit apply, the trigger restore and step automation alike.
+ * Inputs:     osc (osc1 of a runtime slot), type 0..255.
+ * Outputs:    oscType, waveform, positionApplied, phase, caches.
+ * Accessors:  instrumentManager_writeSpecialRuntime() (IM_SPECIAL_OSC_TYPE).
+ * Affiliates: osc_isTyped(); osc_userCount() (stage D); S087 P0 §12.5.
+ */
+void osc_setType(OscInfo* osc, uint8_t type);
+
+/*
+ * Bind the oscillator's catalogue item for this block (S087 stage D).
+ *
+ * What:       resolves (kind, index) from oscType and waveform (or the
+ *             modulator flat list), clamps to an entry that exists, and on a
+ *             kind/index/generation change re-reads the entry and re-anchors
+ *             the phase. Every block it sets phaseInc from the sample law.
+ * Why:        S087 P0 §6.3, D7, A23/A24: one bind serves osc1 and the
+ *             modulators; a reinstall can never leave a pointer outside flash.
+ * Inputs:     osc, the catalogue.  Outputs: bind fields, phaseInc.
+ * Accessors:  osc_setFreq().
+ * Affiliates: SampleMemory.h; osc_userCount()/osc_userListCount().
+ */
+void osc_userBind(OscInfo* osc);
+
+/*
+ * Restart a modulator's one-shot sample on a trigger (S087 P3).
+ *
+ * What:       for a modulator (OSC_TYPE_MODLIST) whose wav value selects a
+ *             user entry, binds the entry selected now (osc_setFreq(): list
+ *             clamp, bind, phaseInc) and, when it is an s entry (one-shot,
+ *             OSC_BIND_SMP), sets the phase to 0 so the sample plays from its
+ *             start on every hit. Stock waves and l/w entries are untouched:
+ *             they keep the engine's existing free-run or reset behaviour.
+ * Why:        Drum osc2 and the HiHat modulators never reset on a trigger
+ *             (S085 R11/R12), so an s entry played once after selection and
+ *             then held its end pad (silence) for every later hit (S087 P3
+ *             hardware report).
+ * Inputs:     osc (a modulator), after the trigger's osc_setBaseNote().
+ * Outputs:    the bind fields and phaseInc; phase = 0 for an s entry.
+ * Accessors:  Drum_trigger(), HiHat_trigger() (Cymbal already zeroes its
+ *             modulator phases on every trigger).
+ * Affiliates: osc_setFreq(), osc_userBind(), OSC_BIND_SMP.
+ */
+void osc_modulatorTrigger(OscInfo* osc);
+
+/*
+ * Number of user entries for a type (S087 stage D).
+ *
+ * What:       wav -> 8 stock entries; smp/slp -> sample count; wtb -> table
+ *             count (stage E); 0 when nothing installed.
+ * Why:        the type writer, the bind and the menu/InstrumentManager ranges
+ *             must agree.
+ * Inputs:     type.  Outputs: count.
+ * Accessors:  osc_setType(), osc_userBind(), InstrumentManager.
+ * Affiliates: osc_userListCount(), SampleMemory.h.
+ */
+uint8_t osc_userCount(uint8_t type);
+
+/*
+ * Length of a modulator's flat wav list (S087 stage D).
+ *
+ * What:       min(8 + 2 x samples + tables, 128): stock waves, then s01.., then
+ *             l01.., then w01.. (stage E).
+ * Why:        S087 P0 §12.4/A24: the modulator list order and cut-off.
+ * Inputs:     none.  Outputs: count.
+ * Accessors:  osc_userBind(), InstrumentManager.
+ * Affiliates: osc_userCount().
+ */
+uint8_t osc_userListCount(void);
+
+/* S087 D: typed render entries (one per role). */
+void osc_renderTyped(OscInfo* osc, int16_t* buf, uint8_t size, float gain);
+void osc_renderTypedFm(OscInfo* osc, const int16_t* mod, int16_t* buf,
+                       uint8_t size, float gain);
+void osc_renderTypedSync(OscInfo* osc, const uint32_t* over,
+                         uint32_t clockInc, int32_t depthQ30,
+                         int16_t* buf, uint8_t size);
+void osc_renderTypedRing(OscInfo* osc, const int16_t* modBuf, int16_t* buf,
+                         uint8_t size, int32_t depthQ15,
+                         int32_t depthStepQ15);
+void osc_renderUserList(OscInfo* osc, int16_t* buf, uint8_t size, float gain);
+
+/*
+ * Render the itp old-carrier snapshot and blend it into the live block
+ * (S088 P0 §3 Layer 3c).
+ *
+ * What:       renders the frozen carrier described by snap into an internal
+ *             scratch block, then crossfades it with the live carrier already
+ *             in buf:
+ *                 t_i  = (elapsed x size + i) / (BLOCKS x OUTPUT_DMA_SIZE)
+ *                 buf[i] = (1 - t_i) x old[i] + t_i x buf[i]
+ *             with elapsed = BLOCKS - snap->counter before this block. The
+ *             snapshot's own phase advances by size x phaseInc; the live
+ *             carrier is untouched. Afterwards counter is decremented and, at
+ *             zero, active is cleared (the slot is free again).
+ *             The old carrier is the PLAIN copy: for smp/slp/wtb it uses the
+ *             plain per-type block, otherwise calcNextOscSampleBlock(); no FM,
+ *             sync or ring is applied (S085 P1 Q14). A wtb snapshot plays its
+ *             frozen pos frame and never claims an interpolation slot.
+ * Why:        one dispatch site for all four engines; one internal scratch
+ *             block (64 B .bss) instead of one per engine. The blend is a
+ *             full-block operation (D4): the last of the five blocks runs to
+ *             its end even though 132 samples were requested.
+ * Inputs:     snap (active, counter 1..BLOCKS), buf (the live carrier block),
+ *             size (<= OUTPUT_DMA_SIZE).
+ * Outputs:    buf blended in place; snap->phase advanced; snap->counter--;
+ *             snap->active cleared at 0.
+ * Cost:       one plain carrier loop + about 8 instructions per sample for the
+ *             blend (fixed point, no divide: t is accumulated as a float).
+ * Accessors:  Drum_calcVoiceSyncBlock(), Snare_calcSyncBlockVoice(),
+ *             Cymbal_calcSyncBlockVoice(), HiHat_calcSyncBlockVoice().
+ * Affiliates: OscCarrierSnapshot; OSC_RUN_ITP_FADE_BLOCKS; the engine
+ *             triggers that fill the snapshot; the mixer's slot reserve.
+ */
+void oscSection_renderOldCarrier(OscCarrierSnapshot *snap, int16_t *buf,
+                                 uint8_t size);
+
+/* S087 D: sync-master rules for a modulator list entry. */
+uint8_t osc_syncMasterIsLoop(const OscInfo* master);
+uint32_t osc_buildLoopSyncList(OscInfo* master, uint32_t pos,
+                               uint32_t* over, uint8_t size);
 
 #endif /* OSCILLATOR_H_ */

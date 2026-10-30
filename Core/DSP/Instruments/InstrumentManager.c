@@ -695,7 +695,29 @@ void instrumentManager_resetSlot(struct kit_instrument_slot *raw_slot,
     }
 }
 
+/*
+ * Highest legal value of an oscillator wave row (S087 stage B; typed in D-40).
+ *
+ * What:       for "osc1_wave": the last entry of osc1's current type (wav:
+ *             OSC_STOCK_LAST; smp/slp: samples - 1; wtb: tables - 1; 0 when
+ *             none); for a modulator wave row: the last entry of the flat list
+ *             (osc_userListCount() - 1, S087 P0 §12.4). Stage B returns
+ *             modNode_getMaxWaveformIndex() for every row (no change).
+ * Why:        LFO and velocity ranges, the menu clamp and automation display
+ *             must all agree on what exists.
+ * Inputs:     slot (INSTRUMENT_SLOT_COUNT = unknown: 127), descriptor.
+ * Outputs:    max value.
+ * Accessors:  instrumentManager_descriptorModDomain(); menu.c via
+ *             instrumentManager_waveCellCount() (D-41).
+ * Affiliates: instrumentManager_osc(); osc_userCount(); osc_userListCount().
+ */
+static OscInfo *instrumentManager_osc(uint8_t slot, const char *key);
+
+static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
+                                               const ParamDescriptor *descriptor);
+
 static uint8_t instrumentManager_descriptorModDomain(
+    uint8_t slot,
     const ParamDescriptor *descriptor,
     instrument_mod_domain_t *domain_out)
 {
@@ -719,7 +741,7 @@ static uint8_t instrumentManager_descriptorModDomain(
     if (domain.flags == INSTRUMENT_MOD_DOMAIN_NONE)
         return 0u;
     if (domain.flags & INSTRUMENT_MOD_DOMAIN_DYNAMIC_MAX) {
-        domain.max_value = modNode_getMaxWaveformIndex();
+        domain.max_value = instrumentManager_waveDomainMax(slot, descriptor);
     }
     if (domain.max_value < domain.min_value)
         return 0u;
@@ -739,7 +761,79 @@ static uint8_t instrumentManager_descriptorSupportsModulationRange(
      * this helper so enum selectors do not leak back into the LFO target list
      * just because their storage happens to be a byte.
      */
-    return instrumentManager_descriptorModDomain(descriptor, 0);
+    return instrumentManager_descriptorModDomain(INSTRUMENT_SLOT_COUNT,
+                                                 descriptor, 0);
+}
+
+/*
+ * Highest legal value of an oscillator wave row (S087 stage D; S087 P1).
+ *
+ * What:       osc1_wave: the last entry of osc1's current type (wav:
+ *             OSC_STOCK_LAST; smp/slp: samples - 1; wtb: tables - 1; 0 when
+ *             none); a modulator wave row: the last entry of the flat list
+ *             (osc_userListCount() - 1). Any other row: OSC_STOCK_LAST.
+ * Why:        LFO and velocity ranges, the menu clamp and the automation
+ *             display must agree on what exists (S087 P0 r8, §12.4).
+ * Inputs:     slot (INSTRUMENT_SLOT_COUNT = unknown), descriptor.
+ * Outputs:    the highest value.
+ * Accessors:  instrumentManager_descriptorModDomain(),
+ *             instrumentManager_waveCellCount().
+ * Affiliates: osc_userCount(), osc_userListCount().
+ */
+static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
+                                               const ParamDescriptor *descriptor)
+{
+    if (descriptor && descriptor->file_key &&
+        strstr(descriptor->file_key, "_wave")) {
+        if (strcmp(descriptor->file_key, "osc1_wave") == 0 &&
+            slot < INSTRUMENT_SLOT_COUNT) {
+            const OscInfo *osc = instrumentManager_osc(slot, "osc1_wave");
+            const uint8_t count = osc ? osc_userCount(osc->oscType)
+                                      : (uint8_t)OSC_SAMPLE_START;
+
+            return count ? (uint8_t)(count - 1u) : 0u;
+        }
+        {
+            const uint8_t count = osc_userListCount();
+
+            return count ? (uint8_t)(count - 1u) : 0u;
+        }
+    }
+    return OSC_STOCK_LAST;   /* S087 P1: only wave rows reach here (above); the stock list is the safe range */
+}
+
+/*
+ * Number of legal values of an oscillator wave row (S087 stage B).
+ *
+ * What:       waveDomainMax + 1, so callers get a count for clamps and menu
+ *             entry limits.
+ * Why:        the count rule belongs beside the range rule; Menu and the
+ *             typ-switch clamp must agree with it.
+ * Inputs:     slot (INSTRUMENT_SLOT_COUNT = unknown), descriptor.
+ * Outputs:    at least 1.
+ * Accessors:  menu.c (cell clamp, typ-switch clamp).
+ * Affiliates: instrumentManager_waveDomainMax().
+ */
+uint8_t instrumentManager_waveCellCount(uint8_t slot,
+                                        const ParamDescriptor *descriptor)
+{
+    return (uint8_t)(instrumentManager_waveDomainMax(slot, descriptor) + 1u);
+}
+
+/*
+ * osc1's current type for a slot (S087 stage D; see the header).
+ *
+ * What:       OSC_TYPE_* of the slot's osc1, or OSC_TYPE_WAV when absent.
+ * Why:        Menu's wave-cell formatter needs the type, not a pointer.
+ * Inputs:     slot.  Outputs: type.
+ * Accessors:  menu_formatWaveCell().
+ * Affiliates: osc_setType().
+ */
+uint8_t instrumentManager_osc1Type(uint8_t slot)
+{
+    const OscInfo *osc = instrumentManager_osc(slot, "osc1_wave");
+
+    return osc ? osc->oscType : (uint8_t)OSC_TYPE_WAV;
 }
 
 static uint8_t instrumentManager_descriptorIsSlotDecimationTarget(
@@ -794,8 +888,29 @@ uint8_t instrumentManager_targetValid(uint8_t scene_index,
         return 0u;
     descriptor = instrumentManager_descriptor(slot->type,
                                                instrumentParam_local(id));
-    if (!descriptor ||
-        !(descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)) {
+    /*
+     * Selector rows are automation targets only (S087 stage B).
+     *
+     * What:       a voice row must be MORPHABLE to be any target, except a
+     *             SELECTOR row with AUTOMATABLE set, which is valid for
+     *             INSTRUMENT_TARGET_AUTOMATION only. Modulation (LFO,
+     *             velocity) still requires MORPHABLE and MODULATABLE.
+     * Why:        S087 P0 §12.5: typ is step-automatable, one value per step,
+     *             but never an LFO/velocity target and never morphed.
+     * Inputs:     descriptor flags, use.  Outputs: validity.
+     * Accessors:  every caller of this gate: sequencer.c (drain, ramp
+     *             service); menu.c (automation target picker, live record,
+     *             display); PatternData.c (step writer);
+     *             InstrumentManager.c (runtime and target resolution).
+     * Affiliates: INSTRUMENT_PARAM_FLAG_SELECTOR; seq_rampDtypeOk().
+     */
+    if (!descriptor)
+        return 0u;
+    if (!(descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE)) {
+        if (use == INSTRUMENT_TARGET_AUTOMATION &&
+            (descriptor->flags & INSTRUMENT_PARAM_FLAG_SELECTOR) &&
+            (descriptor->flags & INSTRUMENT_PARAM_FLAG_AUTOMATABLE))
+            return 1u;
         return 0u;
     }
     if (use == INSTRUMENT_TARGET_MODULATION) {
@@ -1657,6 +1772,39 @@ float instrumentManager_runtimeVolume(uint8_t slot)
     }
 }
 
+/*
+ * Read one slot's current engine run mode (S088 P0 §3 Layer 2d).
+ *
+ * What:       returns voice->runMode for the engine that occupies the slot;
+ *             0 (rst) for an unknown type or a missing instance.
+ * Why:        the cutoff writer needs the mode too (it must not jump g in
+ *             fre/itp); one accessor keeps that decision identical to the
+ *             per-block recalc's rule.
+ * Inputs:     slot (0..5).  Outputs: OSC_RUN_* (0..2).
+ * Accessors:  instrumentManager_recalcSlotFilter(),
+ *             IM_SPECIAL_FILTER_FREQ.
+ * Affiliates: the four engine structs' runMode; OSC_RUN_RST.
+ */
+static uint8_t instrumentManager_slotRunMode(uint8_t slot)
+{
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? voice->runMode : (uint8_t)OSC_RUN_RST; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? voice->runMode : (uint8_t)OSC_RUN_RST; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        return voice ? voice->runMode : (uint8_t)OSC_RUN_RST; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? voice->runMode : (uint8_t)OSC_RUN_RST; }
+    default:
+        return (uint8_t)OSC_RUN_RST;
+    }
+}
+
 void instrumentManager_recalcSlotFilter(uint8_t slot)
 {
     /*
@@ -1667,27 +1815,107 @@ void instrumentManager_recalcSlotFilter(uint8_t slot)
      * rather than folded into mixer.c because filter ownership depends on the
      * instrument currently loaded into the slot, not on the physical voice
      * number.
+     *
+     * S088 P0 §3 Layer 2d: when the slot's engine is in fre or itp the filter
+     * state is kept, so the coefficient is slewed (SVF_recalcFreqSlew()) to
+     * avoid a transient; rst keeps the original instant SVF_recalcFreq().
+     * The cost is the same one fastTan per block on either path.
      */
     switch (instrumentManager_slotType(slot)) {
     case INSTRUMENT_TYPE_DRM: {
         DrumVoice *voice = instrumentManager_drumRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) {
+            if (voice->runMode != OSC_RUN_RST)
+                SVF_recalcFreqSlew(&voice->filter);
+            else
+                SVF_recalcFreq(&voice->filter);
+        }
         break; }
     case INSTRUMENT_TYPE_SNR: {
         SnareVoice *voice = instrumentManager_snareRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) {
+            if (voice->runMode != OSC_RUN_RST)
+                SVF_recalcFreqSlew(&voice->filter);
+            else
+                SVF_recalcFreq(&voice->filter);
+        }
         break; }
     case INSTRUMENT_TYPE_CYM: {
         CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) {
+            if (voice->runMode != OSC_RUN_RST)
+                SVF_recalcFreqSlew(&voice->filter);
+            else
+                SVF_recalcFreq(&voice->filter);
+        }
         break; }
     case INSTRUMENT_TYPE_HAT: {
         HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
-        if (voice) SVF_recalcFreq(&voice->filter);
+        if (voice) {
+            if (voice->runMode != OSC_RUN_RST)
+                SVF_recalcFreqSlew(&voice->filter);
+            else
+                SVF_recalcFreq(&voice->filter);
+        }
         break; }
     default:
         break;
     }
+}
+
+/*
+ * itp crossfade slot queries (S088 P0 §3 Layer 3b; contract in the header).
+ *
+ * What:       read snapshot.active from the engine that currently occupies the
+ *             slot. Unknown types and missing instances report 0.
+ * Why:        one place resolves the tagged slot's engine struct, so mixer.c
+ *             and the engine triggers do not duplicate the type switch.
+ * Inputs:     slot, or the triggering slot to exclude.
+ * Outputs:    0/1; the active fade count; the availability flag.
+ * Accessors:  mixer_calcNextSampleBlock() and the four engine triggers.
+ * Affiliates: OscCarrierSnapshot; OSC_WAVE_INTERP_MAX_ACTIVE.
+ */
+uint8_t instrumentManager_slotHasActiveItpFade(uint8_t slot)
+{
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? voice->snapshot.active : 0u; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? voice->snapshot.active : 0u; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        return voice ? voice->snapshot.active : 0u; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? voice->snapshot.active : 0u; }
+    default:
+        return 0u;
+    }
+}
+
+uint8_t instrumentManager_activeItpFadeCount(void)
+{
+    uint8_t slot;
+    uint8_t count = 0u;
+
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++)
+        count = (uint8_t)(count + instrumentManager_slotHasActiveItpFade(slot));
+    return count;
+}
+
+uint8_t instrumentManager_itpFadeSlotAvailable(uint8_t exclude_slot)
+{
+    uint8_t slot;
+    uint8_t count = 0u;
+
+    for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        if (slot == exclude_slot)
+            continue;
+        count = (uint8_t)(count + instrumentManager_slotHasActiveItpFade(slot));
+    }
+    return (uint8_t)(count < OSC_WAVE_INTERP_MAX_ACTIVE);
 }
 
 void instrumentManager_calcSlotAsync(uint8_t slot)
@@ -2199,7 +2427,7 @@ static void instrumentManager_noteRuntimeValueChanged(
                                                   &target)) {
         modNode_directOriginalValueChanged(id, target.range);
     }
-    if (!instrumentManager_descriptorModDomain(descriptor, &domain))
+    if (!instrumentManager_descriptorModDomain(slot, descriptor, &domain))
         return;
     if (value < domain.min_value)
         value = domain.min_value;
@@ -2260,6 +2488,7 @@ static void *instrumentManager_waveInterpTarget(
 }
 
 static uint8_t instrumentManager_buildModulationRange(
+    uint8_t slot,
     const ParamDescriptor *descriptor,
     void *waveInterpTarget,
     mod_node_range_t *range_out)
@@ -2283,7 +2512,7 @@ static uint8_t instrumentManager_buildModulationRange(
         range_out->valid = 0u;
     }
     if (!descriptor || !range_out ||
-        !instrumentManager_descriptorModDomain(descriptor, &domain)) {
+        !instrumentManager_descriptorModDomain(slot, descriptor, &domain)) {
         return 0u;
     }
 
@@ -2375,16 +2604,84 @@ static uint8_t instrumentManager_resolveModulationTarget(
     target_out->parameter.type = descriptor->runtime.parameter_type;
     target_out->waveInterpTarget =
         instrumentManager_waveInterpTarget(target_slot, descriptor);
-    if (!instrumentManager_descriptorModDomain(descriptor,
+    if (!instrumentManager_descriptorModDomain(target_slot, descriptor,
                                                &target_out->domain)) {
         return 0u;
     }
-    if (!instrumentManager_buildModulationRange(descriptor,
+    if (!instrumentManager_buildModulationRange(target_slot, descriptor,
                                                 target_out->waveInterpTarget,
                                                 &target_out->range)) {
         return 0u;
     }
     return (uint8_t)(target_out->parameter.ptr != 0);
+}
+
+/*
+ * Refresh the modulation domains of a slot's wave rows (S087 stage B).
+ *
+ * What:       for every active LFO adapter whose target is `slot` and whose
+ *             descriptor has INSTRUMENT_MOD_DOMAIN_DYNAMIC_MAX, recompute the
+ *             adapter's domain with instrumentManager_descriptorModDomain()
+ *             and clamp its base_value; then, for every such descriptor row,
+ *             refresh a live direct ModulationNode target with
+ *             modNode_directOriginalValueChanged().
+ * Why:        a typ change (and, from stage C, an install) changes how many
+ *             entries a wave row has. Without this an LFO set up for the stock
+ *             list keeps a stale range.
+ * Inputs:     slot 0..INSTRUMENT_SLOT_COUNT-1 (out of range is ignored).
+ * Outputs:    refreshed adapter domains/base values and direct target ranges.
+ * Accessors:  IM_SPECIAL_OSC_TYPE writer (B-8); the post-install refresh
+ *             (C-31).
+ * Affiliates: instrumentManager_descriptorModDomain(),
+ *             instrumentManager_resolveModulationTarget(),
+ *             modNode_directOriginalValueChanged().
+ */
+void instrumentManager_waveDomainChanged(uint8_t slot)
+{
+    instrument_type_t type;
+    uint8_t i;
+
+    if (slot >= INSTRUMENT_SLOT_COUNT)
+        return;
+    type = instrumentManager_slotType(slot);
+    for (i = 0u; i < INSTRUMENT_PARAM_COUNT; i++) {
+        const ParamDescriptor *descriptor =
+            instrumentManager_descriptor(type, i);
+        instrument_mod_domain_t domain;
+        instrument_param_id_t id;
+        uint8_t source;
+        uint8_t pair;
+        instrument_runtime_target_t target;
+
+        if (!descriptor)
+            break;
+        if (!(descriptor->mod_domain.flags &
+              INSTRUMENT_MOD_DOMAIN_DYNAMIC_MAX))
+            continue;
+        if (!instrumentManager_descriptorModDomain(slot, descriptor, &domain))
+            continue;
+        id = instrumentParam_make(slot, i);
+        if (id == INSTRUMENT_PARAM_INVALID)
+            continue;
+        for (source = 0u; source < INSTRUMENT_SLOT_COUNT; source++) {
+            for (pair = 0u; pair < 2u; pair++) {
+                instrument_lfo_target_adapter_t *adapter =
+                    &lfo_descriptor_targets[source][pair];
+
+                if (!adapter->active || adapter->slot != slot ||
+                    adapter->id != id)
+                    continue;
+                adapter->domain = domain;
+                if (adapter->base_value < domain.min_value)
+                    adapter->base_value = domain.min_value;
+                else if (adapter->base_value > domain.max_value)
+                    adapter->base_value = domain.max_value;
+            }
+        }
+        if (instrumentManager_resolveModulationTarget(
+                scene_getActiveIndex(), id, &target))
+            modNode_directOriginalValueChanged(id, target.range);
+    }
 }
 
 static uint8_t instrumentManager_isSlotDecimationTarget(
@@ -3254,8 +3551,21 @@ static uint8_t instrumentManager_writeSpecialRuntime(
     case IM_SPECIAL_FILTER_FREQ: {
         ResonantFilter *filter = instrumentManager_filter(slot);
         if (!filter) return 0u;
-        SVF_directSetFilterValue(filter,
-            valueShaperF2F(byteValue / 127.0f, FILTER_SHAPER));
+        /*
+         * S088 P0 §3 Layer 2d: in fre/itp set only the target cutoff.
+         * What: rst keeps SVF_directSetFilterValue() (f and g together, the
+         *       filter has just been cleared so the jump is correct). fre/itp
+         *       use SVF_setFrequencyTarget(): f only, and the next block's
+         *       SVF_recalcFreqSlew() moves g there without a transient.
+         * Why:  a writer-time g jump would bypass the slew and put the
+         *       discontinuity at the control-rate write.
+         */
+        if (instrumentManager_slotRunMode(slot) != OSC_RUN_RST)
+            SVF_setFrequencyTarget(filter,
+                valueShaperF2F(byteValue / 127.0f, FILTER_SHAPER));
+        else
+            SVF_directSetFilterValue(filter,
+                valueShaperF2F(byteValue / 127.0f, FILTER_SHAPER));
         return 1u; }
     case IM_SPECIAL_FILTER_RESO: {
         ResonantFilter *filter = instrumentManager_filter(slot);
@@ -3382,6 +3692,55 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         lfo->phaseOffset =
             (uint32_t)(((uint64_t)byteValue * 0xFFFFFFFFu) / 127u);
         return 1u; }
+    case IM_SPECIAL_OSC_TYPE: {
+        /*
+         * osc1_type writer (S087 stage B).
+         *
+         * What:       osc_setType() on the tagged oscillator, then
+         *             instrumentManager_waveDomainChanged(slot) so LFO adapters
+         *             and direct targets on the slot's wave rows pick up the
+         *             new type's range.
+         * Why:        every typ write (menu, Kit apply, restore, step
+         *             automation) must change the type the same way.
+         * Inputs:     slot, descriptor tag (IM_SPECIAL_OSC1), byte value.
+         * Outputs:    the oscillator's type state; refreshed wave domains.
+         * Callers:    instrumentManager_writeRuntimeInternal() via the tag.
+         * Affiliates: osc_setType(); the osc1_type rows; S087 P0 §12.5.
+         */
+        OscInfo *osc = instrumentManager_oscBySelector(
+            slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
+        if (!osc) return 0u;
+        osc_setType(osc, byteValue);
+        instrumentManager_waveDomainChanged(slot);
+        return 1u; }
+    case IM_SPECIAL_OSC_RUN: {
+        /*
+         * osc1_run writer (S088 P0 §2.4).
+         *
+         * What:       clamps byteValue to 0..OSC_RUN_COUNT-1 (0 rst, 1 fre,
+         *             2 itp) and stores it in the engine's runMode field
+         *             through the descriptor's instance offset, using the
+         *             generic TYPE_UINT8 store.
+         * Why:        every osc1_run write (menu, Kit/Scene/Instrument apply,
+         *             step automation, MIDI) must clamp and store the same
+         *             way. There is no DSP side effect: the engines read
+         *             runMode at the next trigger and each render block.
+         * Inputs:     slot, the osc selector (IM_SPECIAL_OSC1), byteValue.
+         * Outputs:    the engine struct's runMode byte.
+         * Accessors:  instrumentManager_writeRuntimeInternal() via the tag.
+         * Affiliates: OSC_RUN_* (Oscillator.h); the four osc1_run rows;
+         *             instrumentManager_slotHasActiveItpFade() (Layer 3).
+         */
+        void *instance = instrumentManager_runtimeInstance(slot);
+        uint8_t run = (byteValue >= OSC_RUN_COUNT)
+            ? (uint8_t)(OSC_RUN_COUNT - 1u) : byteValue;
+
+        if (!instance || !descriptor) return 0u;
+        instrumentManager_writeParameter(
+            (Parameter){ (void *)((uint8_t *)instance +
+                                  descriptor->runtime.offset),
+                         descriptor->runtime.parameter_type }, run);
+        return 1u; }
     case IM_SPECIAL_NONE:
     default:
         return 0u;
@@ -3446,6 +3805,16 @@ static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
             return IM_SPECIAL_PITCH_EG_AMOUNT;
     }
     if (strcmp(key, "transient_wave") == 0) return IM_SPECIAL_TRANSIENT_WAVE;
+    /* S087 B: osc1_type. */
+    if (osc != 0xFFu && strcmp(key, "osc1_type") == 0)
+        return IM_SPECIAL_OSC_TYPE | osc;
+    /*
+     * S088 P0: osc1_run. The classifier is the independent pre-S073 key rule
+     * the boot diagnostic compares every descriptor tag against, so the
+     * run-mode row must be named here too.
+     */
+    if (osc != 0xFFu && strcmp(key, "osc1_run") == 0)
+        return IM_SPECIAL_OSC_RUN | osc;
     if (strcmp(key, "transient_freq") == 0) return IM_SPECIAL_TRANSIENT_FREQ;
     if (strcmp(key, "instrument_drive") == 0)
         return IM_SPECIAL_INSTRUMENT_DRIVE;

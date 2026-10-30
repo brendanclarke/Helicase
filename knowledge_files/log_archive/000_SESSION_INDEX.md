@@ -98,6 +98,11 @@ it belongs in the summary or the log, not here.
 | 081 | 2026-10-12/16 | `dev-ph6-cleanup`, `2a0fd86` (logged after S082) | Live record and live erase, step reset rule, R12/R13 automation priority, 96-PPQ roll table, linear automation ramps (`asm`), loop while record, VOICE bar pulse |
 | 082 | 2026-10-16/20 | `dev-ph6-midi`, `8a83df0` | Load/Save cleanup, Bank Replace/Merge, background Bank load through Scene 17, work while loading |
 | 083 | 2026-10-21/22 | `dev-ph6-midi`, `bbea23f` | MIDI rework: `Core/MIDI/` rebuild, note map, MIDI writes as menu edits, NRPN, MIDI Learn (`midilrn.cfg`), PC/CC0, Continue/SPP, transmit; track `ch`/`nte` `off`, CC2 = BAR overlay, `pv<`/`pv>` |
+| 084 | 2026-10-22/26 | `dev-ph6-midi`, `f2b80a9` | Roll fix-up, time-window roll engine, PERF/MIDI overlay rolls, per-track recorded spans, external clock interpolation; LXR1/LXR-02 import tools closed |
+| 085 | 2026-10-27 | `dev-ph7-voice_expansion`, `6bfa389` | Drum osc2 mod modes `snc`/`rng` under no-CPU-increase rule; mod envelope and `rng` depth ramp; S086 type-expansion plan |
+| 086 | 2026-10-27/28 | `dev-ph7-voice_expansion`, `e67879e2` + uncommitted | Stock table waves `Re3`/`Sw3`; continuous oscillator `pos`; mixer hot-loop gate; S087 sample/wavetable plan |
+| 087 | 2026-10-28/29 | `dev-ph7-voice_expansion`, uncommitted on `f3805478` | Oscillator `typ` row (`wav`/`smp`/`slp`/`wtb`), sample flash catalogue v2 + installer, step-automation order fix (D6), Q20.12 sample/wavetable readers, `pos` on samples, modulator `s`/`l`/`w` entries, one-shot sample mod oscillators, transient click sample list, display/naming corrections, MEMORY.md refactor |
+| 088 | 2026-10-29 | `dev-ph7-voice_expansion`, uncommitted on `80029d31` | Oscillator run modes `rst`/`fre`/`itp` (P0); fader zipper fix with block-rate one-pole smoothing (P1); float-through distortion for retrigger HF puff (P1) |
 
 
 ---
@@ -247,6 +252,10 @@ Session 035 completed the next Phase 3 filesystem/runtime pass, but Session 036 
 ### 036 — asyncfatfs LFN/Case Expansion, Kit/Instrument Load-Save Restoration (2026-07-14)
 Session 036 rebuilt the save/load filesystem foundation after Kit Save exposed incomplete long-name support. asyncfatfs now preserves short-name case bits, creates VFAT LFN file and directory entries, exposes case-sensitive LFN open/create helpers with returned 8.3 aliases, and provides an LFN-aware object iterator used by generic diagnostics and restored production Kit/Instrument scans. Temporary `Load:[File]`, `Load:[Dir]`, `Save:[File]`, and `Save:[Dir]` diagnostics proved exact-case root scans, reads, writes, directory creation, dot-prefixed object visibility, and flush persistence. Kit Save was repaired to create visible `Kit/NNN Name/` folders and mixed-case member files, write `kitset.kcg` after aliases are known, update scan caches, and avoid duplicate visible folders on occupied-slot saves. Numbered library slots are now direct `000..999`; `000` is real for all filetypes, while instrument file voice coordinates remain one-based `1..6`. The Load/Save type cycler now deliberately exposes only File, Dir, and Kit; root Instrument Save was added from the Save page VOICE gesture using the same descriptor-keyed text writer as Kit member files. Morph Save and Scene Load/Save must be redone deliberately on this filesystem foundation before Bank work begins.
 - **Find here**: `036_SESSION_HANDOFF_LOG.md`, `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`, `SCOPING_TARGETS.md`, `MEMORY.md`, `Core/Hardware/SD/asyncfatfs/`, `Core/Hardware/SD/filesystem.c/h`, `Core/Hardware/SD/storageTypes.c/h`, `Core/Hardware/SD/kitBrowser.h`, `Core/Menu/menu.c/h`, `Core/Scene/Preset/presetManager.c/h`, `Core/Hardware/frontPanel/buttonHandler.c`
+
+### 088 — Oscillator Run Modes, Fader Zipper Fix, Retrigger HF Puff Fix (2026-10-29)
+Session 088 implemented three oscillator run modes (`osc1_run`: `rst`/`fre`/`itp`) across all four engine types, following a four-layer plan (parameter/menu/storage → fre mode → itp mode → tests/specs). `rst` is the default, bit-identical to the pre-S088 tree (host law B1). `fre` continues the carrier phase on retrigger with gain-matched `slopeEg2_retriggerFrom()`, one-block post-chain ramps (`ampRampArm`), Drum FM depth ramp, and `SVF_recalcFreqSlew()` filter coefficient slew. `itp` resets the phase but crossfades the old carrier (`OscCarrierSnapshot`, 28 B) for 132 samples via `oscSection_renderOldCarrier()` rendered plain (no FM/sync/ring). The two interpolation slots are shared between `itp` fades and wavetable blending; a refused claim falls back to `fre`. The parameter uses `DTYPE_ON_OFF` with a high-nibble tag (`ONOFF_TAG_OSC_RUN`). Separately, the fader zipper artifact was fixed with block-rate one-pole smoothing (`mixer_fader_smooth[6]`, alpha=0.15, τ≈4.5 ms) in `mixer_faderGains()`, and a retrigger HF puff was addressed with float-through distortion (`distortion_curveSampleF()` in all three post-chains). Build: text 676,264, bss 412,884; host tests pass; P1 hardware-confirmed, P0 hardware matrix H1–H17 pending.
+- **Find here**: `088_SESSION_HANDOFF_LOG.md`, `INSTRUMENTS_DSP_REFERENCE.md` §6.1, `CPU_USE_DSP_AUDIT.md` items 50–54, `STORAGE_SRAM_MANIFEST.md`, `FILESYSTEM_SPEC.md` (`osc1_run`), `MIDI_SPEC.md` §5.5, `Core/DSP/Instruments/*/`, `Core/DSPAudio/SlopeEg2.c`, `Core/DSPAudio/Oscillator.c`, `Core/DSPAudio/voicePostChain.h`, `Core/DSPAudio/distortion.h`, `Core/DSPAudio/mixer.c`
 
 ### 065 — Step Automation Editing + Sequencer Playback (2026-09-15)
 Session 065 delivered the first working end-to-end step automation path: the existing pool block `bits 5..0` automation count field is now live, `PatternData.c` has `pat_readStepAutomations()`, `pat_writeStepAutomation()`, `pat_removeStepAutomation()`, `pat_removeTrackAutomationByTarget()`, and `pat_stepAutomationCount()` — all of which enforce the uniqueness invariant at write time and preserve automation entries across specials edits. Four AVR-era stubs were removed. `instrumentManager_targetValid()` now accepts Scene-range IDs (`384+`) for `INSTRUMENT_TARGET_AUTOMATION`. The TIM3 ISR step-advance path copies decoded automation entries into a 32-entry debounced pending buffer (192 B, `sequencer.c`), and the foreground drain applies them via `instrumentManager_writeRuntime()` inside `audio_check_and_render()` (moved there after a 50% success-rate ordering race was identified and fixed). A `uint64_t` per-slot dirty bitmap (48 B, 6 slots) tracks which descriptor indices have been overridden; `seq_restoreAutomatedParameters()` restores the morph-interpolated image value before each voice trigger, covering all trigger sources through the `voiceControl_triggerNow` funnel. The step-edit menu has a full cursor (5 items: number, del/clr, voice, parameter, amount), number-lock mode, single-field detail views with `category+long_name` labels, dtype-aware 3-character value display (waveform/filter/on-off/polarity/note names), and per-dtype upper-bound clamping in the value editor. A `numtostrpu` 3-character overflow bug was found and fixed during the audit. PAT4 persistence is automatic (pool bytes are opaque to the file layer). Hardware-tested: automation fires reliably, restore-on-trigger works, menu navigation and value display are correct.
@@ -557,6 +566,19 @@ Session 065 delivered the first working end-to-end step automation path: the exi
 | `LIVEREC_AUTOMATION_FIRST_CHANGE` (`config.h`, default 1): live record writes a parameter's first change in a step, at once | 081 |
 | The master morph `mrp` is never recorded or automatable; individual voice/FX Morph edits are recorded with their captured value (`liveRec_morphValue[7]`) | 081 |
 | LED pulse/flash deadlines compare by signed 16-bit distance (`led_timeReached()`); never `time_sysTick > end` | 081 |
+| `seq_drainPendingAutomationTo(limit)` replaces `seq_drainPendingAutomation()`; runs inside `voiceControl_processPending()` after restore and before fire. A step's own automation lands before its trigger (D6) | 087 |
+| `voiceControl_processPending()` is prepare → drain → fire: `voiceControl_prepareTrigger()` (restore), `seq_drainPendingAutomationTo(mark)`, `voiceControl_fireTrigger()` (trigger). The old `seq_drainPendingAutomation()` call in `main.c` is removed | 087 |
+| `osc1_type` (`typ`): selector row (not morphable, stored single-ended, applied before Morph image); `INSTRUMENT_PARAM_FLAG_SELECTOR` 0x08; `DTYPE_MENU` id 4 (`MENU_OSC_TYPE`); step-automatable (no ramp). A missing key loads 0 (`wav`) | 087 |
+| Sample flash catalogue v2: 8 KB at `0x081FE000`, magic `"LXC2"` (programmed last), 128 × 28 B sample entries, 128 × 20 B wavetable entries. Items from `0x080C0000` | 087 |
+| `sampleInstall_commit()` writes the header once (magic last); `sampleInstall_abortItem()` never rewinds the cursor onto programmed flash | 087 |
+| Sample/loop readers use Q20.12 phase (`OSC_SAMPLE_PHASE_SHIFT` 12); ≤ 2²⁰ points per sample. Eight loops: smp/slp × {plain, FM, sync, ring} in `.itcm.s087` | 087 |
+| Wavetable readers: any frame length (UMULL indexing). One-frame base loop. Frame blending claims one of two interpolation slots (sticky, stamps 1..255 never 0). `osc_wtbPlanBlock()` splits at frame crossings | 087 |
+| Modulator `wav` list after A21/A22: stock 0–7, then s01..sNN, l01..lNN, w01..wNN. 127-entry limit. Modulators get no `typ` or `pos` rows | 087 |
+| `pos` on samples: linear difference, one-shot edges clamped (0 / past end = ended), 4× speed cap, fixed loop region, re-anchor on type change. `pos` on `wtb` = frame position | 087 |
+| Display name rule (P2): first 4 + last 4 for names over 8 characters (`storage_displayNameFromLfn()`). Takes effect on next Sample upload | 087 |
+| `osc_modulatorTrigger()` restarts a modulator's sample at start on every hit for `s` entries. Called from Drum and HiHat triggers; stock waves and `l`/`w` return immediately | 087 |
+| Transient click sample list: Snp, Ofs, 12 built-in clicks, then s01..sNN. New sample loop 20 instr/sample; built-in click stays at 22. No worst-case CPU increase | 087 |
+| v1 sample loops and dormant `wav` interpolation removed in S087 P1 (`osc_interp_a/b`, `osc_syncWaveform()`, v1 cache, four dispatcher entries, `stub_silence_buffer`); ITCM dropped from 15,032 to 12,640 | 087 |
 
 ---
 
@@ -2043,3 +2065,162 @@ Session 083 ran on `dev-ph6-midi`: planning commit `f9aaeec`, the implementation
   (`settings.cfg`, `midilrn.cfg`, `sceneset.scg` rows 4/5), `PATTERN_DYNAMIC_STACK.md`,
   `BANK_PRESET_ARCHITECTURE.md`, `DEV_MODES.md` (stage `m`),
   `STORAGE_SRAM_MANIFEST.md`, `MEMORY.md`.
+
+### 084 — Roll Fix-up: Time-Window Roll Engine, Master-Tick PERF/MIDI Overlay Rolls, One Roll List, Per-Track Recorded Spans, External Clock Interpolation; LXR1/LXR-02 Import Tools Closed (2026-10-22..26)
+
+Session 084 ran in two attempts. The first (2026-10-24..26, `dev-ph6-midi`) implemented the roll fix-up and then the S084 voice expansions (P1–P5) on one tree; that tree went over the voice CPU budget and froze on hardware, so it was rolled back whole (spike commit `26fb7c3`, kept next to the repository as `../Helicase-dev-ph7-spike/`, reference only; `S084_POST-MORTEM.md` there). The roll fix-up was re-implemented alone on `dev-ph7-voice_expansion` from `91265e9c` (pre-implementation commit, code = `59406a4`); the implementation is uncommitted at close. Final DEV link `text=609,288`, `data=424`, `bss=430,200` (payload 609,712 B of 753,664 B, **headroom 143,952 B**; `bss` +88 B vs S083, approved +87 B plus alignment). Not hardware-tested.
+
+- **Problem (user):** the PERF roll list did not match the STEP list; a recorded roll did not play back at the played rate; roll rate must follow the master clock, not the track's step scale.
+- **Findings F1–F8:** PERF had 6 of 9 rates (F1); a carried roll step lost its boundary hit and started a roll period late, so recorded rolls fell to about one hit per step (F2, root cause); a recorded roll's end step restarted the roll (F3); overlay rolls ran on a 1 ms foreground timer from `PAR_BPM` (2–7 % fast, no external sync) (F4); LiveRecord had one roll slot for 7 concurrent tracks (F5); slow rolls were recorded hit by hit and lost their rate under `qnt` (F6); `pv` rhythm not recorded (F7); a take boundary left the recorded roll open (F8).
+- **P1 step engine:** a roll's length is a master-tick window (`seq_rollWindow[7]`, interval × fill from the step's or deferred fire); a carry fires no hit and keeps phase; fill-100 rolls park at the window end; carry needs the same rate and rhythm and is refused after a fill < 100 step (user Q4); duck arrays folded into the window; `seq_rollClearTrack()`.
+- **P2 live engine:** PERF/MIDI overlay rolls and flam mains fire in TIM3 (`seq_live*`, `seq_processLiveTicks()` first in the scheduler tick, before the running gate); per-track mailbox drained by `buttonHandler_overlayDrain()` with TIM2 age; `bh_overlay[7]` 8 → 4 B; ms timers retired.
+- **P3:** PERF `pb<`/`pb>` = 15 types: `vmx v10 v64 v32 flm fls` + the nine STEP rates (index = type − 5); no migration (user Q2).
+- **P4 recording:** every held roll is a per-track span at any rate (user Q7, `liveRec_roll[7]`); the `pv` rhythm is stored in `rtm` (Q8); a take boundary ends rolls with no end write.
+- **Assessment fixes:** A1 external clock ticks interpolated between edges (`seq_extClockTicks()`, `seq_extTicksOwed`); A2 slow-roll early release keeps spans covered; A3 drain before an overlay switch; B1 reconfigure drains before judging a held entry (no unreleasable MIDI roll); doc nits A4/B2.
+- **Checks:** host check H1 (real roll functions, old vs new) reproduces F2 on the base and passes on the new code; hardware V1–V7 carried.
+- **Import tools (host only, logged here):** `tools/lxr1_converters/` (LXR1 `.snd`/`.pat`/`.all`/`.prf`, 2026-10-22, `efea1bf`) and `tools/lxr2_converters/` (LXR-02 kits, patterns, projects, songs, 2026-10-23, `59406a4`).
+
+- **Find here**: [084_SESSION_HANDOFF_LOG.md](084_SESSION_HANDOFF_LOG.md),
+  `PATTERN_DYNAMIC_STACK.md` (§6 roll engine, live engine, external clock,
+  §6.7.4 roll recording), `MODULE_INTERCHANGE_SPEC.md` (PERF overlay
+  engine, `seq_live*`, LiveRecord rows), `MIDI_SPEC.md` (overlay types,
+  clock, buttonHandler integration), `FILESYSTEM_SPEC.md` (`perf_btn_*`,
+  import tools), `STORAGE_SRAM_MANIFEST.md`, `BANK_PRESET_ARCHITECTURE.md`,
+  `tools/lxr1_converters/LXR1_CONVERTERS.md`,
+  `tools/lxr2_converters/LXR2_CONVERTERS.md`, `MEMORY.md`.
+
+### 085 — Drum Osc2 Mod Modes `snc` (Hard Sync) and `rng` (Ring) Under a No-CPU-Increase Rule; Mod Envelope and `rng` Depth Ramp; S086 Type-Expansion Plan (2026-10-27)
+
+Session 085 restarted the oscillator work after a second failed attempt. The first S085 tree (the full cherry-pick of oscillator types, run modes and the render pool from the S084 spike) drove the device to 100 % CPU with `pwm` on every instrument and was rolled back. It is kept at `Helicase-dev-ph7-voice-pwm-spike/` in the repository root (`4ad2f850`, post-mortems `ef7d5445`), reference only; the original spike `Helicase-dev-ph7-spike/` (`26fb7c3`) also moved into the root.
+
+S085 P1 then added only the Drum `mod` values `snc` and `rng`, under the user rule **"absolutely no increase in CPU cycles overall"**. Commits: planning `1ea234ea`, pre-implementation `b450d76a`, implementation `8812bffd`. The mod-envelope and ramp follow-ups and the close-out documents are uncommitted. Final DEV link `text=613,536`, `data=424`, `bss=430,296`; payload 613,960 B (**headroom 139,704 B**); ITCM 7,792 / 16,384 B. P1 passed on hardware; the ramp re-test was not reported before the close.
+
+- **Gate (Q1 (a)):** the dearest setting of a voice in any mode ≤ today's dearest Drum `fm` (user samples: ≈ 90 standalone, ≈ 92 linked). Per-same-wave comparisons are reported only. Measured by `fpseq` (standalone and linked) plus the device `cpu` widget; no cycle probe (Q2).
+- **`osc2_mod_type` (`mixOscs` → `modMode`):** 0 `fm`, 1 `mix`, 2 `snc`, 3 `rng`; any other byte plays `fm`. `fm`/`mix` keep their calls and compiled loops (`elf_osc_check`: 0 changed).
+- **`snc`:**
+  - The FM-page oscillator is not rendered. A dedicated `DrumVoice.syncClock` (D2; not `modOsc.phase`, to avoid a one-shot-sample over-read) runs at the FM-page frequency (`osc_syncClockInc()`, `<< 5` for crash and user samples: they act as noise).
+  - A per-block reset list (`osc_buildSyncList()`, `OSC_SYNC_NONE`) drives sync copies of the Sin/Tri/Saw/Rec/Crash loops. Noise and user samples render unsynced.
+  - The reset lands on i + 1 at overshoot × ratio (Q4), pulled by the depth (Q10, Q30); only the slave is heard.
+- **`rng`:** carrier × (1 − d) + carrier × modulator × d, folded into per-waveform carrier copies (D1; a separate pass was measured at 7.5–9 and failed the gate). Every waveform supported.
+- **Follow-ups:**
+  - `snc`/`rng` depth d = amt² × env (`Drum_modEnvDepth()`, the `fm` response, D9);
+  - the `rng` depth ramped per sample (`ringDepthQ15`) and snapped after a trigger (`ringSnap`) after the user heard crunch (D10). Dearest `rng` ≈ 90–91 vs `fm` ≈ 92 linked (narrowest margin).
+- **Implementation deviations:** new ITCM code in `.itcm.s085` (D7); `osc_renderPlainWave()` and `noinline` dispatchers to keep the baseline LTO clones (D8).
+- **Tooling:** `snapshot85.sh`/`frozen85/`, `elf_symdump.py` (`elf_osc_baseline/check`), `test_osc_mod.c` (R1–R3, S1–S7, M1, with break proofs), `oscmod_identity`, `armcheck-oscmod`.
+- **Menu:** `mixFmNames` (`fm mix snc rng`) via `menu_getMixFmName()`; clamp and automation max 3; MIDI 3–127 → `rng`.
+- **RAM:** `DrumVoice` 588 → 596 B (`runtime_slots` +96 B); stack +128 B in `snc`; ITCM +3,624 B. Approved (plan r3).
+- **Decisions:**
+  - the trigger is unchanged (Drum `modOsc` never resets, Q6b);
+  - crash as master = noise; crash slave syncs;
+  - plan §12 (future sample/wavetable sync: the optimizer-flagged zero-crossing bitmap; otherwise one-shot = noise, loop resets at the loop, wavetable at the frame wrap).
+- **S086 plan written:** `S086_P1_OSC_TYPE_EXPANSION.md` (stock waves, samples, wavetables, optimizer, then `pwm`; `pos` = `Oscilltr Position` as the fourth cell of the oscillator screen; `typ` on screen 2).
+
+- **Find here**: [085_SESSION_HANDOFF_LOG.md](085_SESSION_HANDOFF_LOG.md),
+  `INSTRUMENTS_DSP_REFERENCE.md` (§5.1 Drum mod modes, §6.1 sync/ring
+  oscillator support, §8 costs, §9.3 adding an oscillator mode or type,
+  §10 pitfalls), `CPU_USE_DSP_AUDIT.md` (items 36–39),
+  `STORAGE_SRAM_MANIFEST.md`, `MIDI_SPEC.md` §5.5, `FILESYSTEM_SPEC.md`
+  (`osc2_mod_type`), `tools/dsp_test/DSP_TEST.md`,
+  `S086_P1_OSC_TYPE_EXPANSION.md`, `MEMORY.md`.
+
+### 086 — Stock Table Waves `Re3`/`Sw3`; Continuous Oscillator `pos` (Phase Offset, Cym Sample Position); Mixer Hot-Loop Gate; S087 Sample/Wavetable Plan (2026-10-27/28)
+
+Session 086 began stage S1 of the S086 oscillator type-expansion plan, on `dev-ph7-voice_expansion`, under the S085 "no CPU increase" rule. Commits: `703941cb` (P2 + P3 plans), `e67879e2` (P3/P4 implementation); the assessment fixes and close-out documents are uncommitted. Final DEV link `text=658,872`, `data=424`, `bss=430,296`; payload 659,296 B (**headroom 94,368 B**); ITCM 8,512 / 16,384 B. Everything passed on hardware (2026-10-28).
+
+- **P2, stock waves:**
+  - A first attempt generated the S084 spike's five 303/analog waves at **Load:[Samples]** into sample flash. The user rejected it: not the same mechanism as Tri/Saw/Rec. It was reverted.
+  - **Redone as `const int16_t [11][1024]` program-flash tables**, played by the existing table loops. **Only `Re3` (`SQ3`) and `Sw3` (`SW3`)**, `wav` 6–7, +45,056 B; `ReA`/`TrA`/`SwA` deferred.
+  - **Generator:** `tools/gen_stock_tables.py` turns the spike's harmonic CSV into the tables, with a band limit **measured from `sawTable`**. Only the saw matched; Rec/Tri use a looser taper. Plot tools copied to `tools/plots/`.
+  - **Dispatch:** `osc_stockTables[]` with one variable-pointer case per dispatcher.
+  - **Fixes and moves:** `osc_syncClockInc()` no longer treats the stock waves as sample clocks. `OSC_SAMPLE_START` 6 → 8: user samples moved, no migration.
+  - **Cost:** the same loops (24 / 35 / sync / ring); ITCM +720 B.
+- **P3/P4, `pos` (`osc1_position`, `Oscilltr Position`):**
+  - **Placement:** cell 4 of the first oscillator screen on all four instruments; Snare becomes `coa fin wav pos` / `noi mix`.
+  - **Behaviour:** continuous, `pos`/128 of a cycle.
+    - **At the hit:** start phase + `pos << 25`.
+    - **While playing:** each change is spread over one 32-sample block by bending `phaseInc` (`osc_positionBendApply/Restore`). The circular difference makes 127 → 0 one step; the cap constant is off. Drum `snc` consumes the change without bending.
+  - **Storage:** `OscInfo.position`/`positionApplied`/`positionBendStep` in existing padding (no RAM).
+  - **`Cym` (P4):** the crash sample is one full 2³² phase, so `pos`/128 is a sample position. A 32,769th guard byte was added.
+  - **Not affected:** noise and v1 samples.
+- **Assessment findings, fixed:**
+  - **F1:** a local variable live across the renders LTO inlines into `mixer_calcNextSampleBlock()` added reloads to two inlined per-sample loops. Fixed by keeping the step in `OscInfo`; new gate `elf86_mixer_check` (`elf_hotloops.py`).
+  - **F3:** the host test now compiles the header's constants.
+  - **F2:** the host test was strengthened (P1–P8).
+- **Tooling:** `snapshot86.sh`/`frozen86/`, `elf_loopdump.py`, `elf_hotloops.py`, `test_osc_stock.c`, `test_osc_pos.c`, `extract.py --object` for declarators; targets `stock_tables osc_stock osc_pos osc86_identity engine86_identity elf86_*`.
+- **Next:** `S087_P0_OSC_TYPE_SAMPLES_WAVETABLES.md`: the step-automation order fix, the `typ` rows, catalogue v2, `smp`/`slp` with `pos` decisions D1–D10, `wtb`.
+
+- **Find here**: [086_SESSION_HANDOFF_LOG.md](086_SESSION_HANDOFF_LOG.md),
+  `INSTRUMENTS_DSP_REFERENCE.md` (§5 engines, §6.1 oscillator: stock waves
+  and `pos`, §8 costs, §9.3, §10 pitfalls, §11), `CPU_USE_DSP_AUDIT.md`
+  (items 41–44), `STORAGE_SRAM_MANIFEST.md`, `FILESYSTEM_SPEC.md`
+  (`osc1_position`, descriptor counts, `wav` values), `MIDI_SPEC.md` §5.5,
+  `OSC_INTERP_AUDIT.md`, `tools/dsp_test/DSP_TEST.md`,
+  `tools/plots/README.md`, `S087_P0_OSC_TYPE_SAMPLES_WAVETABLES.md`,
+  `MEMORY.md`.
+
+### 087 — Oscillator Type System (`typ`), Sample Flash Catalogue v2, Q20.12 Sample and Wavetable Readers, Step-Automation Order Fix, Modulator Sample/Wavetable Entries, One-Shot Mod Oscillators, Transient Click Samples, Display Corrections, MEMORY.md Refactor (2026-10-28/29)
+
+Session 087 implemented the full oscillator type expansion on `dev-ph7-voice_expansion` (base `0e2d61dd`, `f3805478` after P0+P1, uncommitted P2+P3). Five stages (A–E) plus three follow-up passes (P1–P3). Final DEV link `text=670,628`, `data=420`, `bss=412,392`; payload 670,628 B (**headroom 83,036 B**); ITCM 12,640 / 16,384 B; DTCM statics 4,344 B; FX arena margin 3,840 B. P2 hardware checks pending at session close.
+
+- **Stage A (D6), step-automation order:**
+  - A step's own automation now lands before its trigger fires. New order: pop triggers under PRIMASK + mark automation queue → prepare (deferred Scene apply, restore) → `seq_drainPendingAutomationTo(limit)` → fire triggers. `seq_drainPendingAutomation()` renamed to `seq_drainPendingAutomationTo(uint8_t limit)` with a drain cursor (`seq_pending_automation_done`). `voiceControl_processPending()` split into `voiceControl_prepareTrigger()` / `voiceControl_fireTrigger()` with a batch pop under one PRIMASK section.
+  - Host tests: `stepauto_order` (5 laws + break proof) and `drain_cursor` (4 laws + break proof).
+  - RAM: +1 B SRAM1 (drain cursor, R-A1); +128 B stack (trigger batch, R-A2).
+
+- **Stage B, the `osc1_type` row:**
+  - New `osc1_type` parameter per instrument (descriptor index 40; Snare 39). Values `wav`/`smp`/`slp`/`wtb` (0–3). Selector row: not morphable, stored single-ended, applied before the Morph image (`INSTRUMENT_PARAM_FLAG_SELECTOR` 0x08). `DTYPE_MENU` with free id 4 (`MENU_OSC_TYPE`) to avoid ramp eligibility.
+  - Step-automatable with no ramp and one value per step. `osc_setType()` clears the `wav` interpolation slot stamp when the type changes. The formatter reads the stored `typ` from the same image as the cell value.
+  - `OscInfo.oscType` at byte 34 (existing padding); `OscInfo.interpStamp` at byte 35 (existing padding). No RAM increase.
+  - Host test: `osc_type` (2 laws + 2 break proofs).
+
+- **Stage C, sample flash catalogue v2 + installer:**
+  - 8 KB at `0x081FE000`. 32 B header (`magic "LXC2"` programmed last). 128 × 28 B sample entries (`loop_start`, `loop_end`, `gain_code`, `flags` bit 0 = loop). 128 × 20 B wavetable entries (`frame_len`, `frame_count`, `bits`, `flags`).
+  - Items from `0x080C0000` upward (stock-wave flash block not needed: S086 moved them to program flash).
+  - Install walker: `samples/` and `wavetables/` folders, natural order (`storage_naturalCompare()`), depth limit 3. Wavetables: each folder is one table (any frame length, at most 128 frames). Gain code per sample: 2^(code/24), peak within 0.25 dB of full scale. One unreadable file skips the item, not the install.
+  - P1 fix: header programmed only by `sampleInstall_commit()` (magic last); abort never rewinds cursor onto programmed flash; 128-frame cap keeps advancing; third folder level no longer writes out of bounds.
+  - Boot notice: `Samples invalid` / `reload samples` when v1 detected.
+  - RAM: −13,441 B (`sample_manifest[120]` + count); −5,040 B (caches); +560 B (installer walker state). Net ≈ −18 KB.
+  - Host tests: `catalogue` (flash-accurate stub, F1/F2 laws), `wav_install`, `natural_order`, `sampleoptimize`.
+
+- **Stage D, `smp`/`slp` readers + `pos` on samples:**
+  - Q20.12 phase (`OSC_SAMPLE_PHASE_SHIFT` 12), ≤ 2²⁰ points per sample. Eight loops: smp/slp × {plain, FM, sync, ring}. Separate copies per type × use (rule 2). All in `.itcm.s087`, `noinline, noclone`.
+  - Install-time zero padding (2 frames after every sample) removes the played-out select. Fixed loop region (`smpl` points or whole sample). Per-block step conversion for backward glides (`osc_slpBlockInc()`).
+  - `pos` on samples: linear difference (D3), one-shot edges clamped at 0 / past end = ended (D4), time-based 4× speed cap (D5), fixed loop region (D2), re-anchor on type change (D7). Sync reset target = `pos` start point (D9).
+  - Modulator `wav` list expansion (A21/A22): stock waves 0–7, then `s01…sNN` (one-shot), `l01…lNN` (looped), `w01…wNN` (wavetable first frame). 127-entry limit. Modulators get no `typ` or `pos` rows.
+  - v1 sample loops and dormant `wav` interpolation (`osc_interp_a/b`, `osc_syncWaveform()`, v1 cache, four dispatcher entries) removed.
+  - P1 fixes: backward `slp` glide, `slp` FM absolute read, modulator `w` increment law, wavetable blend fractional frames (`osc_wtbPlanBlock()`/`osc_wtbFramePos()`), 8-bit wavetable rebind, per-step sample change bind, slot stamp collision (1..255 never 0), type-change stamp release, loop sync builder after master kind change, `slp` sync reset target past `smpl` loop end, modulator `wav` clamp past list end, ring-law depth add timing.
+  - RAM: −128 B DTCM (`osc_interp_a/b` R-D1 released).
+  - CPU: all section worst cases stay below their frozen ceilings. Drum `fm` with `slp` on both oscillators: 77 against 92. Cymbal/HiHat: 104 against 131. Per-slot blend cost +10..+13 over one frame, against ≈ +66 today.
+
+- **Stage E, `wtb` reader:**
+  - Any frame length (UMULL indexing, A16). One-frame base loop. Frame blending through two interpolation slots (sticky claims, stamps 1..255 never 0). `osc_wtbPlanBlock()` splits at frame crossings. Power-of-two not required.
+  - `pos` = frame position, read every block. Without a slot: nearest frame. Four blend copies (plain/FM/ring/sync).
+  - RAM: +2 B (`modNode_interpReserved`, `modNode_interpLastStamp`; R-E1).
+
+- **P2, display and naming corrections:**
+  - `wav` cell now shows `sNN`/`lNN`/`wNN` under typed oscillators (was showing stock names `sin`, `tri`, …). Compact cells and value overlays route `MENU_WAVEFORM` through `menu_formatWaveValue3()` built on `menu_formatWaveCell()`.
+  - Modulator list shows `s01 l01 w01` (was `s01 s02 s03`). 16-bit list arithmetic to avoid uint8 wrap at 128 samples.
+  - NUL write past 8-char buffer in the automation formatter: the catalogue getters write a terminating NUL at byte 8; the helper now owns a 9-byte local and copies 8 characters out.
+  - Name rule changed to first 4 + last 4 for names over 8 chars (`storage_displayNameFromLfn()`). Takes effect on next Sample upload.
+  - Sample level investigation (P2-5): no attenuation found; the peak is within 0.25 dB of full scale. Louder playback would need a new rule (RMS normalisation or a level row).
+  - Build: Flash 670,628 (headroom 83,036).
+
+- **P3, one-shot sample mod oscillators + transient click samples:**
+  - `osc_modulatorTrigger()` in `Oscillator.c/.h`: restarts the modulator's sample at its start on every hit when its `wav` selects an `s` entry. Binds the current selection first. Stock waves and `l`/`w` entries return immediately. Called from Drum and HiHat triggers.
+  - Transient click sample list: Snp, Ofs, 12 built-in clicks, then one entry per installed sample (`s01`, `s02`, …). One-shots only. New sample loop 20 instructions/sample; built-in click loop stays at 22.
+  - `frq` = speed (1.0 = file rate). `vol` on top of install normalisation. Silent at end until next hit. After reinstall: stored value past installed samples → last sample; no samples → last built-in click with one silent block first.
+  - CPU: no worst-case increase. One extra call per hit from Drum/HiHat (returns immediately for stock waves).
+
+- **MEMORY.md refactor:**
+  - Reduced from 2,773 to 525 lines. Session history deleted, specification content moved to reference documents, binding rules compressed, open items consolidated, agent mandates reviewed, stale volatile deleted.
+  - Created `REPOSITORY_LAYOUT.md`. Updated `HARDWARE_MAP.md`, `EFFECTS_MIXER_DSP_REFERENCE.md`, `MODULE_INTERCHANGE_SPEC.md`.
+  - Deleted `S070_WORKING_NOTES.md`, `S076_WORKING_NOTES.md`.
+
+- **Find here**: [087_SESSION_HANDOFF_LOG.md](087_SESSION_HANDOFF_LOG.md),
+  `INSTRUMENTS_DSP_REFERENCE.md` (oscillator types, sample/wavetable readers,
+  costs, modulator wav list), `CPU_USE_DSP_AUDIT.md` (S087 items),
+  `STORAGE_SRAM_MANIFEST.md` (catalogue v2, RAM changes),
+  `FILESYSTEM_SPEC.md` (catalogue v2, installer, `osc1_type`, wav values),
+  `MODULE_INTERCHANGE_SPEC.md` (stage A sequencer changes),
+  `PATTERN_DYNAMIC_STACK.md` (automation order),
+  `BANK_PRESET_ARCHITECTURE.md` (selector flag).

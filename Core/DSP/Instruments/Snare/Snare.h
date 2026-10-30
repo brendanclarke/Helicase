@@ -97,6 +97,53 @@ typedef struct SnareStruct
 
 	uint8_t volumeMod;	//modulate volume by midi velocity if 1
 
+	/*
+	 * Oscillator run mode (S088 P0 §2.4).
+	 *
+	 * What:       0 rst, 1 fre, 2 itp (OSC_RUN_*); stored by the osc1_run
+	 *             descriptor row through IM_SPECIAL_OSC_RUN.
+	 * Why:        Snare_triggerVoice() and Snare_calcSyncBlockVoice() branch
+	 *             on it for the phase reset, the gain-matched amp retrigger
+	 *             and the itp carrier crossfade.
+	 * Inputs:     the descriptor writer.  Outputs: read by trigger and render.
+	 * Accessors:  Snare_initVoice() (0), the writer, trigger, render.
+	 * Affiliates: OSC_RUN_* (Oscillator.h); the osc1_run row
+	 *             (SnareParameters.c); InstrumentManager.c runtime-slot reserve.
+	 */
+	uint8_t runMode;
+
+	/*
+	 * Amp-ramp armed flag / previous-block compound amp gain (S088 P0 §3 2a/2b).
+	 *
+	 * What:       ampRampArm = 1 when the last trigger was a fre/itp retrigger
+	 *             into an audible tail; lastAmpGain is the ampGain
+	 *             (velo x egValueOscVol, or egValueOscVol) actually used on the
+	 *             previous block.
+	 * Why:        the armed render ramps the post-chain amp gain from
+	 *             lastAmpGain to the new ampGain; every other block passes
+	 *             lastAmpGain == ampGain, which keeps the rst output
+	 *             bit-identical. velo itself is overwritten by the trigger, so
+	 *             the rendered value must be retained.
+	 * Inputs:     Snare_triggerVoice() (arm), Snare_calcSyncBlockVoice()
+	 *             (update).  Outputs: voicePost_mixAddGainDist() endpoints.
+	 * Affiliates: voicePostChain.h; Snare_initVoice() (0u / 0.0f).
+	 */
+	uint8_t ampRampArm;
+	float lastAmpGain;
+
+	/*
+	 * itp old-carrier snapshot (S088 P0 §3 Layer 3a).
+	 *
+	 * What:       the frozen carrier state filled on an itp retrigger while the
+	 *             amp gain is audible and a slot is free; inert when active = 0.
+	 * Why:        oscSection_renderOldCarrier() blends it into the new carrier.
+	 * Inputs:     Snare_triggerVoice().
+	 * Outputs:    Snare_calcSyncBlockVoice(); the mixer's slot count.
+	 * Affiliates: OscCarrierSnapshot; OSC_RUN_ITP_SAMPLES;
+	 *             instrumentManager_slotHasActiveItpFade().
+	 */
+	OscCarrierSnapshot snapshot;
+
 } SnareVoice;
 
 /*

@@ -87,6 +87,49 @@ const uint8_t drum_instrument_type_flags = DRUM_INSTRUMENT_TYPE_FLAGS;
     { key_, short_, long_, cat_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), FLAGS_IMAGE, mod_, BIND_SPECIAL(member_, type_, special_) }
 
 /*
+ * ROW_SELECT_SPECIAL: a selector row with a special writer (S087 stage B).
+ *
+ * What:       DTYPE_MENU with the menu id in the high nibble; flags
+ *             AUTOMATABLE | SELECTOR (not MORPHABLE, not MODULATABLE);
+ *             MOD_NONE; a BIND_SPECIAL runtime binding.
+ * Why:        osc1_type is chosen, not tuned: no Morph, no LFO or velocity,
+ *             one step-automation value per step (S087 P0 §12.5).
+ * Inputs:     key, category, long and short label, menu id, member, scalar
+ *             type, IM_SPECIAL_* tag.
+ * Outputs:    one ParamDescriptor initializer.
+ * Accessors:  the osc1_type row below.
+ * Affiliates: INSTRUMENT_PARAM_FLAG_SELECTOR; instrumentManager_targetValid().
+ */
+#define ROW_SELECT_SPECIAL(key_, cat_, long_, short_, menu_, member_, type_, special_) \
+    { key_, short_, long_, cat_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), \
+      (INSTRUMENT_PARAM_FLAG_AUTOMATABLE | INSTRUMENT_PARAM_FLAG_SELECTOR), \
+      MOD_NONE, BIND_SPECIAL(member_, type_, special_) }
+
+/*
+ * ROW_SELECT_ONOFF_SPECIAL: a tagged DTYPE_ON_OFF selector (S088 P0 §2.3 D12).
+ *
+ * What:       like ROW_SELECT_SPECIAL but the dtype byte is
+ *             DTYPE_ON_OFF | (tag_ << 4) instead of DTYPE_MENU | (menu_ << 4).
+ *             The high nibble marks the cell as the tagged on/off sub-type
+ *             (ONOFF_TAG_OSC_RUN), so menu.c shows oscRunNames rather than
+ *             on/off, and the flags are AUTOMATABLE | SELECTOR (not morphable,
+ *             not modulatable, like osc1_type).
+ * Why:        all 16 DTYPE_MENU ids and all 16 dtype enum values are taken
+ *             (S078 binding mandate); this reuses DTYPE_ON_OFF's unused high
+ *             nibble with the same packing pattern DTYPE_MENU uses.
+ * Inputs:     SD key, category, long/short label, ONOFF_TAG constant, struct
+ *             member, scalar type, IM_SPECIAL tag.
+ * Outputs:    one ParamDescriptor initializer.
+ * Accessors:  the osc1_run row below.
+ * Affiliates: ONOFF_TAG_OSC_RUN (MenuText.h); the six DTYPE_ON_OFF sites in
+ *             menu.c; ROW_SELECT_SPECIAL above.
+ */
+#define ROW_SELECT_ONOFF_SPECIAL(key_, cat_, long_, short_, tag_, member_, type_, special_) \
+    { key_, short_, long_, cat_, (uint8_t)(DTYPE_ON_OFF | ((tag_) << 4)), \
+      (INSTRUMENT_PARAM_FLAG_AUTOMATABLE | INSTRUMENT_PARAM_FLAG_SELECTOR), \
+      MOD_NONE, BIND_SPECIAL(member_, type_, special_) }
+
+/*
  * ROW_NOBIND is for descriptor-owned cells that do not write a DrumVoice
  * member directly. These are single-endpoint supplemental values such as
  * modulation target selectors, so they intentionally start with flags=0 rather
@@ -169,6 +212,9 @@ typedef enum {
     DRUM_PARAM_TRANSIENT_WAVE,
     DRUM_PARAM_TRANSIENT_VOL,
     DRUM_PARAM_TRANSIENT_FREQ,
+    DRUM_PARAM_OSC1_POSITION, /* S086 P3: appended; preserve all prior IDs. */
+    DRUM_PARAM_OSC1_TYPE, /* S087 B: appended; preserve all prior IDs. */
+    DRUM_PARAM_OSC1_RUN, /* S088: appended; preserve all prior IDs. */
     DRUM_PARAM_COUNT
 } drum_param_index_t;
 
@@ -189,7 +235,14 @@ const ParamDescriptor drum_param_descriptors[] = {
     ROW_MENU("osc2_wave", "FM", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, modOsc.waveform, TYPE_UINT8),
     ROW_SPECIAL("osc2_pitch_coarse", "FM", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, modOsc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC2),
     ROW("osc2_mod_amount", "FM", "Amount", "amt", DTYPE_0B127, MOD_0_127, fmModAmount, TYPE_FLT),
-    ROW("osc2_mod_type", "FM", "Mode", "mod", DTYPE_MIX_FM, MOD_NONE, mixOscs, TYPE_UINT8),
+    /*
+     * S085 P1: osc2 mod mode, stored 0 fm, 1 mix, 2 snc, 3 rng
+     * (DRUM_MOD_*). The key, row index, automation ID and NRPN ID are
+     * unchanged. DTYPE_MIX_FM's clamp, automation max and names come from
+     * MenuText.h mixFmNames (menu.c menu_getMixFmName()). The bound member
+     * was renamed mixOscs -> modMode.
+     */
+    ROW("osc2_mod_type", "FM", "Mode", "mod", DTYPE_MIX_FM, MOD_NONE, modMode, TYPE_UINT8),
     ROW_SPECIAL("filter_freq", "Filter", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, filter.f, TYPE_FLT, IM_SPECIAL_FILTER_FREQ),
     ROW_SPECIAL("filter_reso", "Filter", "Resnance", "res", DTYPE_0B127, MOD_0_127, filter.q, TYPE_FLT, IM_SPECIAL_FILTER_RESO),
     ROW_SPECIAL("filter_drive", "Filter", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, filter.drive, TYPE_FLT, IM_SPECIAL_FILTER_DRIVE),
@@ -235,6 +288,69 @@ const ParamDescriptor drum_param_descriptors[] = {
     ROW_MENU_SPECIAL("transient_wave", "Transnt", "Waveform", "wav", MENU_TRANS, MOD_NONE, transGen.waveform, TYPE_UINT8, IM_SPECIAL_TRANSIENT_WAVE),
     ROW("transient_vol", "Transnt", "Volume", "vol", DTYPE_0B127, MOD_0_127, transGen.volume, TYPE_FLT),
     ROW_SPECIAL("transient_freq", "Transnt", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, transGen.pitch, TYPE_FLT, IM_SPECIAL_TRANSIENT_FREQ),
+    /*
+     * osc1_position: pos, the oscillator's continuous position (S086 P3/P4).
+     *
+     * What:       0..127, stored in osc.position. For Sin, Tri, Saw, Rec, Re3
+     *             and Sw3 it is a phase offset of pos/128 of a cycle; for Cym
+     *             pos/128 of the whole crash sample (S086 P4). A hit starts at
+     *             today's start phase + pos; while the voice plays, a change
+     *             glides over one block through a temporary phaseInc bend.
+     *             Noise and v1 user samples ignore it (user samples: S2).
+     * Why:        S086 P3: the fourth cell of the first oscillator screen. The
+     *             row is appended last, so every existing descriptor index,
+     *             automation ID, LFO/velocity token, NRPN ID and MIDI Learn row
+     *             is unchanged; a file without the key loads 0 (today's sound).
+     * Inputs:     menu edit, Morph, step automation, LFO adapter (MOD_0_127),
+     *             velocity node (the 0..127 range of a TYPE_UINT8 row).
+     * Outputs:    osc.position (TYPE_UINT8, plain store; no special writer).
+     * Accessors:  osc_positionTrigger(), osc_positionBendApply() and
+     *             osc_positionBendRestore() (Oscillator.h).
+     * Affiliates: DrumVoice.c: Drum_triggerVoice() and
+     *             Drum_calcVoiceSyncBlock(); FILESYSTEM_SPEC.md (the key);
+     *             086_SESSION_HANDOFF_LOG.md §4.
+     */
+    ROW("osc1_position", "Oscilltr", "Position", "pos", DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
+    /*
+     * osc1_type: typ, the oscillator type (S087 stage B).
+     *
+     * What:       0 wav, 1 smp, 2 slp, 3 wtb (OSC_TYPE_*), stored in
+     *             osc.oscType through IM_SPECIAL_OSC_TYPE (osc_setType()).
+     *             The menu offers the first OSC_TYPE_SELECTABLE values.
+     * Why:        S087 P0 §4: osc1 selects stock waves, samples, loops or
+     *             wavetables. A selector: never morphed, stored in the Normal
+     *             image only, applied before the Morph image, step-automatable
+     *             (one value per step, no ramp), not an LFO/velocity target.
+     *             Appended last, so every existing descriptor index,
+     *             automation ID, token, NRPN ID and Learn row is unchanged; a
+     *             file without the key loads 0 (wav, today's sound).
+     * Inputs:     menu edit, Kit/Scene/Instrument apply, the trigger restore,
+     *             step automation.
+     * Outputs:    osc.oscType and the type state (osc_setType()).
+     * Accessors:  instrumentManager_writeSpecialRuntime().
+     * Affiliates: the typed renderers (Oscillator.c S087 section);
+     *             FILESYSTEM_SPEC.md (the key); S087 P0 §12.5.
+     */
+    ROW_SELECT_SPECIAL("osc1_type", "Oscilltr", "Type", "typ", MENU_OSC_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
+    /*
+     * osc1_run: run, the oscillator run mode (S088 P0).
+     *
+     * What:       0 rst (reset, today), 1 fre (free-run), 2 itp (interpolate),
+     *             stored in the engine runMode field through IM_SPECIAL_OSC_RUN.
+     * Why:        S088 P0 §1: three oscillator trigger behaviours. A selector:
+     *             never morphed, Normal image only, applied before the Morph
+     *             image, step-automatable one value per step, not an LFO or
+     *             velocity target. Appended last, so every existing descriptor
+     *             index, automation ID, token, NRPN ID and Learn row is
+     *             unchanged; a file without the key loads 0 (rst, today's
+     *             sound).
+     * Inputs:     menu edit, Kit/Scene/Instrument apply, step automation.
+     * Outputs:    runMode (the engine struct field).
+     * Accessors:  instrumentManager_writeSpecialRuntime().
+     * Affiliates: OSC_RUN_* (Oscillator.h); oscRunNames (MenuText.h);
+     *             ONOFF_TAG_OSC_RUN; the six DTYPE_ON_OFF sites in menu.c.
+     */
+    ROW_SELECT_ONOFF_SPECIAL("osc1_run", "Oscilltr", "Run Mode", "run", ONOFF_TAG_OSC_RUN, runMode, TYPE_UINT8, IM_SPECIAL_OSC_RUN | IM_SPECIAL_OSC1),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -252,7 +368,9 @@ const uint8_t drum_param_descriptor_count =
  * can be resolved by Menu as non-instrument cells.
  */
 const instrument_menu_page_t drum_menu_pages[] = {
-    {{ DRUM_PARAM_OSC1_PITCH_COARSE, DRUM_PARAM_OSC1_PITCH_FINE, DRUM_PARAM_OSC1_WAVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* S086 P3: first oscillator screen is coa fin wav pos. S087 B: screen 2 is typ. */
+    /* S088: screen 2 is typ run (cells 4 and 5). */
+    {{ DRUM_PARAM_OSC1_PITCH_COARSE, DRUM_PARAM_OSC1_PITCH_FINE, DRUM_PARAM_OSC1_WAVE, DRUM_PARAM_OSC1_POSITION, DRUM_PARAM_OSC1_TYPE, DRUM_PARAM_OSC1_RUN, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ DRUM_PARAM_AMP_ENVELOPE_ATTACK, DRUM_PARAM_AMP_ENVELOPE_DECAY, DRUM_PARAM_AMP_ENVELOPE_SLOPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ DRUM_PARAM_PITCH_ENVELOPE_DECAY, DRUM_PARAM_PITCH_ENVELOPE_SLOPE, DRUM_PARAM_PITCH_ENVELOPE_AMOUNT, INSTRUMENT_MENU_SKIP, DRUM_PARAM_VELO_MOD_DEST, DRUM_PARAM_VELO_MOD_AMOUNT, DRUM_PARAM_VELO_VOL_ON_OFF, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ DRUM_PARAM_OSC2_MOD_AMOUNT, DRUM_PARAM_OSC2_PITCH_COARSE, DRUM_PARAM_OSC2_WAVE, DRUM_PARAM_OSC2_MOD_TYPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
@@ -287,3 +405,4 @@ _Static_assert(DRUM_MENU_PAGE_COUNT ==
 #undef MOD_PM63
 #undef MOD_0_127
 #undef MOD_NONE
+#undef ROW_SELECT_ONOFF_SPECIAL

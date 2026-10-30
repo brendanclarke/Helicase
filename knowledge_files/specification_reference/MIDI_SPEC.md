@@ -1,7 +1,10 @@
 # MIDI Specification and Code Reference
 
-> **Current as of Session 083 close (2026-10-22), branch `dev-ph6-midi`.**
-> Implemented and hardware-checked. Where this document and the code
+> **Current as of Session 084 close (2026-10-26), branch
+> `dev-ph7-voice_expansion`.** The S083 MIDI implementation is
+> hardware-checked; the S084 changes (overlay rolls and flams on the master
+> tick, 15 overlay types, external clock interpolation) are built and
+> host-checked, hardware pending. Where this document and the code
 > disagree, the code wins; fix this document in the same change.
 
 The LXR-02 MIDI interface:
@@ -21,6 +24,9 @@ test it. **Part III** records the decisions and their history.
   - Built in Session 083 (2026-10-21/22).
   - The full decision and implementation record is
     `knowledge_files/log_archive/083_SESSION_HANDOFF_LOG.md`.
+  - Session 084 (2026-10-26) moved overlay roll/flam timing onto the
+    master tick, unified the overlay roll list with the STEP list, and
+    interpolated external clock ticks (`084_SESSION_HANDOFF_LOG.md`).
   - The background Bank load and Scene 17 that MIDI uses were built in
     Session 082 (`082_SESSION_HANDOFF_LOG.md`).
 - **Related documents:**
@@ -145,7 +151,7 @@ The page reads `ch nte lop rmp`.
 
 | Cell | Key | Meaning |
 |------|-----|---------|
-| `pb<` / `pb>` | `perf_btn_lt/rt` | Trigger type of overlay `<` / `>` (12 types: 4 single velocities, 2 flams, 6 rolls). |
+| `pb<` / `pb>` | `perf_btn_lt/rt` | Trigger type of overlay `<` / `>` (15 types: 4 single velocities, 2 flams, and the nine STEP roll rates `1/8 8tr 16 16t 32 32t 64 64t 128` = step index type − 5, S084 P3). Stored values 6..11 changed meaning; no migration. The first hit fires in the foreground, repeats and flam mains on the 96-PPQ master tick (so they follow the internal tempo or the external clock; S084 P2). |
 | `pn<` / `pn>` | `perf_note_lt/rt` | Panel note of the overlay (`def` = default pitch). MIDI notes always use their own resolved pitch. |
 | `pv<` / `pv>` | `perf_vel_lt/rt` | Roll velocity rhythm (the step `rtm` list: `off`, `1-2`..`4-5` halve, `1+2`..`4+5` double); roll types only. |
 
@@ -275,14 +281,18 @@ at +64.
 **Overlay action:**
 - When the BAR overlay is `<` or `>` (one state, set by the PERF BAR
   buttons or by CC2 on G, §5.3, in any mode), the note performs that
-  overlay's action instead: one of 12 trigger types.
+  overlay's action instead: one of 15 trigger types (S084 P3).
 - It plays at the note's resolved pitch, not the overlay's `pn` setting.
 - Each track has its own repeat state, shared with the panel's VOICE
   overlay: rolls on several tracks run at once, and a new hit on a track
   replaces only that track's roll.
 - A roll repeats until that note's note-off. Its velocity starts at 100
-  and follows the overlay's `pv` rhythm.
-- A flam ignores its note-off (the main hit always plays).
+  and follows the overlay's `pv` rhythm. Since S084 the repeats fire on the
+  sequencer's 96-PPQ master tick at exactly the STEP roll rates, spaced from
+  the note's arrival, so they follow the internal tempo or an external
+  clock and play the same as a recorded or STEP roll.
+- A flam ignores its note-off (the main hit always plays, 12 master ticks
+  = 1/32 after the grace hit).
 - MIDI-held rolls are not VOICE holds: they neither hold nor join the
   looper.
 
@@ -395,6 +405,20 @@ All MIDI parameter values are **absolute 7-bit** and pass to the parameter
 unchanged (identity, as in step automation).
 - They are clamped to the parameter's own domain (descriptor maximum,
   enumerated lists, target tokens), the same rule step automation applies.
+- Drum `osc2_mod_type` (`mod`): 0 `fm`, 1 `mix`, 2 `snc`, 3–127 `rng`
+  (S085 P1; before S085, 1–127 gave `mix`).
+- `oscN_wave` (`wav`): 0–7 the built-in waves (`Sin Tri Saw Rec Noi Cym Re3
+  Sw3`), 8 on the installed user samples (since S086; before, samples
+  started at 6); values above the last sample clamp to it.
+- `osc1_position` (`pos`, S086): 0–127, identity. It was appended as the
+  last descriptor of each instrument (local index 39; Snare 38), so its NRPN
+  number is slot × 64 + that index; every earlier NRPN number and MIDI Learn
+  row is unchanged. A move glides the oscillator phase within one block
+  (`INSTRUMENTS_DSP_REFERENCE.md` §6.1.1).
+- `osc1_run` (`run`, S088): 0 `rst`, 1 `fre`, 2 `itp`; values above 2 clamp
+  to `itp`. Appended after `osc1_type`, so its NRPN number (slot × 64 +
+  index) and MIDI Learn row follow automatically with no renumbering. It is
+  a selector: one value per step when automated, never morphed.
 - The only translation is the Morph amounts (§5.2).
 - WIDE8 Effect rows expand through the Effect type's 7-bit expansion, as
   automation does.
@@ -622,6 +646,15 @@ Scene (not resident, or still loading) and PC 16..127 are not consumed.
 - **AUTO source selection:** a jack clock suppresses MIDI clocks, and DIN
   suppresses USB while DIN sync is fresh (500 ms hold).
 - While slaved to external clock, the LXR does not generate its own clock.
+- **Clock ticks are interpolated (S084):** each incoming clock owns 4 of the
+  96-PPQ scheduler ticks (a jack pulse owns `stepSize × 3`). The clock edge
+  runs the first; the sequencer's tempo timer, whose period is the measured
+  external tempo, runs the other three between clocks; a tick still owed
+  when the next clock arrives is caught up first. Rolls (STEP and overlay),
+  shuffle and micro-timing are therefore even within a clock period. Start,
+  Stop, Continue and an external reset drop any owed ticks.
+- While stopped under external sync, PERF/MIDI overlay rolls keep playing at
+  the measured tempo (the last measured one if no clock arrives).
 - Received Start/Stop/Continue are forwarded per MRT but not re-sent by
   the LXR, so there are no duplicates downstream.
 
@@ -1206,9 +1239,23 @@ for the current type.
   - `midiOut_trackNoteOff(0xFF)` at whole-Scene changes and Stop;
     `seq_setMute()` ends the muted track's voice and MIDI note.
 - **`seq_rollRhythmVelocity(rhythm, vel, pos)`:** the shared roll-rhythm
-  rule (step rolls and overlay rolls).
-- **`clockSync.c`:** `sync_midiStartStop()` (arms on the next clock) and
-  `sync_midiContinue()`.
+  rule (step rolls and overlay rolls, both TIM3).
+- **Live overlay engine (S084):** `seq_liveRollStart()`,
+  `seq_liveRollSetRate()`, `seq_liveFlamArm()`, `seq_liveStop()`,
+  `seq_liveSetRhythm()`, `seq_liveTakeHits()`; `seq_processLiveTicks()`
+  fires overlay roll repeats (reset 0) and flam mains (reset 1) in TIM3,
+  first in `seq_processSchedulerTick()` (before the running gate) and from
+  `seq_tick()` under external sync while stopped
+  (`PATTERN_DYNAMIC_STACK.md` §6).
+- **`clockSync.c`:** `sync_tickTimestamp()` measures the tempo
+  (`seq_setBpm(sync_calcBpm(avg))`) and, while running, calls
+  `seq_resetDeltaAndTick()`; `sync_midiStartStop()` (arms on the next
+  clock) and `sync_midiContinue()`.
+- **Clock tick interpolation (S084):** `seq_resetDeltaAndTick()` and
+  `seq_triggerNextMasterStep()` call `seq_extClockTicks(ticks)` (catch up
+  owed ticks, run the edge tick, owe `ticks − 1`, re-anchor the tempo
+  timer); `seq_tick()` runs one owed tick per tempo period
+  (`seq_extTicksOwed`).
 - **`sequencerTimer.c`:** calls `midiTransport_processRealtime()` in TIM3.
 - **LiveRecord:**
   - `liveRec_trigger_t.age_us` (0 for panel and repeat hits);
@@ -1226,15 +1273,26 @@ for the current type.
   PERF while `!seq_loopActive`, then `buttonHandler_overlaySwitchHeld()`.
 - `buttonHandler_overlayActive()` reads it in any mode.
 
-**Per-track executor:** `bh_overlay[7]` of 8 B: `heldMidiNote` (note + 1,
-0 = panel/none), `note` (bit 7 = `def`), `pos` (roll hit position for the
-`pv` rhythm), `count` (0 idle, 1 flam main pending, 0xFF roll), `interval`,
-`next`.
-- `buttonHandler_overlayStart()` fires the first hit.
-- `buttonHandler_overlayTick()` fires repeats. A roll repeat plays
-  `seq_rollRhythmVelocity(pv of the active overlay, BH_OVERLAY_VEL, pos)`.
+**Per-track executor** (S083 Q5; timing moved to the Sequencer in S084;
+full walkthrough `MODULE_INTERCHANGE_SPEC.md` "BAR overlay trigger
+engine"): `bh_overlay[7]` of 4 B: `heldMidiNote` (note + 1, 0 =
+panel/none), `note` (bit 7 = `def`), `count` (0 idle, 1 flam main pending,
+0xFF roll), `rate` (step-roll index 1..9).
+- `buttonHandler_overlayStart()` fires the first hit (foreground) and arms
+  the Sequencer's live engine (`seq_liveFlamArm()` /
+  `seq_liveRollStart()`); a gesture already on the track ends first.
+- Repeats and flam mains fire in TIM3 (`seq_processLiveTicks()`), each
+  repeat at `seq_rollRhythmVelocity(pv of the active overlay, 100, pos)`.
+- `buttonHandler_overlayDrain(track)` reports the TIM3 hits to LiveRecord
+  (one `ROLL_HIT` per drain, or `FLAM_MAIN`) with the latest hit's age;
+  `buttonHandler_overlayTick()` drains every track each foreground pass and
+  publishes the active overlay's `pv` rhythm (`seq_liveSetRhythm()`).
+- `buttonHandler_overlayDrainAll()` runs before every overlay state change
+  (CC2, BAR presses, overflow recovery) so hits keep the old rhythm.
 - `buttonHandler_overlayReconfigure(which)` re-configures every held entry
-  on an overlay change.
+  on an overlay change; it drains each entry **before** judging it held, so
+  a MIDI flam whose main already fired is not turned into a roll its
+  note-off cannot stop.
 - **MIDI entry points:** `buttonHandler_overlayMidiNoteOn()` and
   `buttonHandler_overlayMidiNoteOff()` (ends a roll; a flam's main hit
   still plays).
@@ -1306,7 +1364,7 @@ for the current type.
 |---------|-----------|
 | USART3 ISR (prio 5) | DIN RX stamp and push; DIN TX drain (realtime lane first). |
 | OTG ISR | USB RX: realtime push, ring insert with stamp. |
-| TIM3 | `midiTransport_processRealtime()` (clock/transport, realtime forwarding); sequencer triggers → `midiOut_trackTrigger()`; LXR clock/transport TX; `midiTransport_checkMtc()`. |
+| TIM3 | `midiTransport_processRealtime()` (clock/transport, realtime forwarding; the clock edge runs its first scheduler tick, `seq_tick()` the interpolated rest); sequencer triggers → `midiOut_trackTrigger()`, including overlay roll repeats and flam mains from the live engine (S084); LXR clock/transport TX; `midiTransport_checkMtc()`. |
 | Foreground (main loop) | `midiIn_service()`: framing, dispatch, every consumer, Learn, parameter TX, CC0 TX, USB flush; menu, Learn capture; panel overlays. |
 
 **Rules:**
@@ -1407,14 +1465,21 @@ Run with RXF/TXF = `all` and a DAW plus a DIN loopback.
 - **Routing:** the MRT matrix for the 8 values (only routed paths; SysEx
   and SPP intact on USB; never USB → USB).
 - **Clock:** clock slave on DIN, USB and AUT; Start/Continue/Stop; DAW
-  locate (SPP) then Continue; MTC start/stop.
+  locate (SPP) then Continue; MTC start/stop; (S084) `64`/`128` rolls even
+  under MIDI clock, rolls/shuffle/micro-timing even within each 4-PPQ jack
+  pulse, no extra or missing tick after Start or Continue.
 - **Notes:**
   - each §4.2 example;
   - muted and unmapped notes;
   - `ch off` / `nte off`;
   - overlay rolls on several tracks from MIDI and the panel;
   - CC2 0/1/2 with the LEDs;
-  - `pv` rhythms.
+  - `pv` rhythms;
+  - (S084) every one of the 15 overlay types at its STEP rate, with the
+    transport stopped and running, internal and external clock; a CC2
+    switch to a roll type while tapping notes under a flam overlay (every
+    roll stops at its note-off); recorded overlay rolls replay at the played
+    rate and `pv` shape.
 - **Recording:** LATCH placement of MIDI notes on step boundaries under CPU
   load.
 - **NRPN:** a sweep of IDs per type; R12/R13 against automation; the
@@ -1446,7 +1511,9 @@ Run with RXF/TXF = `all` and a DAW plus a DIN loopback.
 | Item | Bytes | Owner |
 |------|------:|-------|
 | Learn table 128 × 4 B + count/state/target/deadline | 518 (528 aligned) | `MidiLearn` |
-| Per-track overlay table 7 × 8 B | 56 | `buttonHandler` |
+| Per-track overlay table 7 × 4 B (S084; was 7 × 8 B) | 28 | `buttonHandler` |
+| Live overlay engine + mailbox (S084): 6 × 7 B state, rhythm 1 B, 7 hit counts, flam mask 1 B, 7 × 4 B stamps | 79 | Sequencer |
+| External clock owed ticks (S084) | 1 | Sequencer |
 | NRPN RX contexts 2 × 8 × 3 B | 48 | `MidiControl` |
 | Parameter TX: NRPN key cache 2 × 2 B, pending 2 B, last send 2 B | 8 | `MidiOut` |
 | TX note-off record 7 × 2 B | 14 | `MidiOut` |
@@ -1460,7 +1527,8 @@ Run with RXF/TXF = `all` and a DAW plus a DIN loopback.
 **Retired:** the pre-S083 USB ring (256 × 8 B = 2,048 B), the legacy
 parser arrays (`midiParser_originalCcValues[255]`, `midi_NoteOverride[7]`,
 `midi_MidiChannels[8]`), the sequencer's channel note cache (18 B), the
-single overlay slot (9 B), and the S083 P1 CC2 state (1 B). A release does
+single overlay slot (9 B), the S083 P1 CC2 state (1 B), and (S084) the
+overlay table's `pos`/`interval`/`next` fields (28 B). A release does
 not authorise reuse.
 
 The measured totals are in `STORAGE_SRAM_MANIFEST.md`. Anything larger than
@@ -1489,6 +1557,9 @@ listed needs a new acknowledgement.
   changed through a voice edit mask from an active Scene or track (user
   rule, S083 Q2).
 - MIDI code never caches a Scene index.
+- Overlay hits fire in TIM3; LiveRecord is called only from the foreground
+  drain. An external clock edge runs only the first tick of its period;
+  never run a period's ticks back to back (S084).
 
 ---
 
@@ -1529,6 +1600,10 @@ in `083_SESSION_HANDOFF_LOG.md` §4.
 | C-10 | SysEx to USB as single-byte packets. |
 | C-11 | Received transport is not re-sent. |
 | 2026-10-22 | Track `ch off` / `nte off`, `def` renamed `on`; Learn in `midilrn.cfg`, written after every Learn; global Morph sets FX Morph; `pv<`/`pv>`; CC2 sets the BAR overlay itself (the earlier C-9 "held BAR beats CC2" is retired). |
+| S084 Q1, Q2 | Overlay roll types are the nine STEP rates with the STEP labels (`pb<`/`pb>` 0..14); stored 6..11 not migrated. |
+| S084 Q3, Q6, Q9 | Overlay roll repeats and the flam main run on the master tick, spaced from the press; while stopped under external sync they follow the measured tempo. |
+| S084 Q7, Q8 | Every held overlay/MIDI roll records as a span; the `pv` rhythm is recorded into the step `rtm`. |
+| S084 A1 | External clock ticks are interpolated between edges. |
 
 **Accepted limits:**
 - a hanging downstream note after a mid-note map change (R9);
@@ -1537,7 +1612,10 @@ in `083_SESSION_HANDOFF_LOG.md` §4.
 - NRPN numbers are type-dependent (R7);
 - MIDI-held rolls are not looper holds;
 - a BAR overlay set in PERF also applies to MIDI notes in other modes;
-- `pv` rhythms are not recorded into steps.
+- live overlay rolls are spaced from the note's arrival, not locked to the
+  rate's grid (a quantised recording starts on the grid).
+
+(`pv` rhythms are recorded into steps since S084 Q8.)
 
 **Out of scope:** external MIDI sequencing tracks, one-shot LFOs, MMC,
 SysEx dump/restore, MIDI 2.0, multi-cable USB.

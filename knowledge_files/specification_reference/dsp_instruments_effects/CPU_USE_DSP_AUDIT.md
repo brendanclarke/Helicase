@@ -1,8 +1,9 @@
 # LXR-02 DSP Performance Audit
 
-> **Where to start (Session 075 close).** This document is the cost audit and
+> **Where to start (Session 087 close).** This document is the cost audit and
 > the record of every DSP optimisation and cost addition (the priority list
-> at the end; S074 added items 27–31, S075 items 32–35). For how the DSP works today, what each
+> at the end; S074 items 27–31, S075 items 32–35, S085 items 36–40, S086
+> items 41–44, S087 items 45–49). For how the DSP works today, what each
 > stage costs and how to change it, read `INSTRUMENTS_DSP_REFERENCE.md` and
 > `EFFECTS_MIXER_DSP_REFERENCE.md` (both in this folder). The S073
 > refactor's full record is `073_SESSION_HANDOFF_LOG.md` §6; the S074 DSP
@@ -798,3 +799,176 @@ the new copy/clear work is foreground-only and bounded.
     test per Morph-worker parameter write; a menu edit now does one
     interpolation instead of queueing up to 64 parameter writes (less
     foreground work).
+
+### Session 085 P1 additions (record in `085_SESSION_HANDOFF_LOG.md`)
+
+36. **ADDED (S085 P1): Drum `rng`.** The ring law is folded into
+    per-waveform carrier copies. It costs the plain loop + 0…4 per sample
+    and has no separate pass. A separate pass (9 scalar, 7.5 packed) was
+    measured and rejected: with user-sample oscillators it made `rng` ≥
+    `fm` (89.5–91 vs 90).
+37. **ADDED (S085 P1): Drum `snc`.** The FM-page oscillator is not
+    rendered. The cost is a 7-instruction reset-list builder plus the
+    slave's sync copy (plain + 10…11 on the reset path) and one VDIV per
+    block. The dearest `snc` (crash slave, 48) is below the dearest `fm`
+    (user samples, 90).
+38. **UNCHANGED (S085 P1): `fm` and `mix`.** The existing loops are
+    byte-identical in the linked firmware (`elf_osc_check`; one unused
+    trailing literal-pool word is the only diff at
+    `calcNextOscSampleBlock.constprop.0`). Device check: the user reported
+    P1 "checks out completely fine on the hardware"; no `cpu` figures were
+    recorded.
+39. **CHANGED (S085 P1 follow-up): `rng` depth ramp.** `snc`/`rng` follow
+    the mod envelope (d = amt² × env, the `fm` response; one multiply per
+    block). The `rng` ring depth is ramped per sample from the last block's
+    value: the ring copies cost about +3 per sample (table 31, sine 30,
+    crash 33, noise 16–19, user sample 46–48 standalone / 49–50 linked)
+    and one divide per block. The modulator renders at gain 1 through the
+    baseline gain-1 clone. Dearest `rng` (user samples) ≈ 90–91 vs dearest
+    `fm` ≈ 92 in the linked image: under `fm`, by the narrowest margin of
+    any mode. Hardware (user): P1 passed; the ramp is to be re-tested.
+40. **REJECTED (S085, first attempt, rolled back): the full oscillator
+    cherry-pick from the S084 spike.** It added the types `pwm`/`smp`/`slp`/
+    `wtb`, the run modes `rst`/`fre`/`itp`, a two-unit render pool and the
+    first `snc`/`rng`.
+    - **On hardware:** all instruments on `pwm` reached 100 % CPU and
+      stalled the interface.
+    - **Static worst cases:** Cymbal/HiHat 98 → 178 per sample; Drum `fm`
+      68 → 135; `snc` 162; `rng` 135; system ≈ 1,278 per sample with the
+      pool. `pwm` loops 42–58 plain.
+    - **Shared plain/sync loops** added +2 to every plain render. ITCM
+      reached 16,272 / 16,384 B before sharing.
+    - **The cost was never measured on hardware before acceptance.**
+    - **The rule that replaced it (user):** "no increase in CPU cycles
+      overall", gated per stage on the device. Record:
+      `085_SESSION_HANDOFF_LOG.md` §2; the failed tree
+      `Helicase-dev-ph7-voice-pwm-spike/` (post-mortems there).
+
+### Session 086 additions (record in `086_SESSION_HANDOFF_LOG.md`)
+
+41. **ADDED (S086 P2): stock table waves `Re3`/`Sw3`.** Two `[11][1024]`
+    tables in program flash (+45,056 B), played by the existing table
+    loops through a variable table pointer (`osc_stockTables[]`): plain
+    24 / 23, FM 35, the same sync and ring functions. No existing loop
+    gained an instruction (`elf_osc86_check`, `elf_loops86_check`; the
+    dispatchers changed by register allocation only). ITCM +720 B (the
+    generic copies inlined into the ITCM dispatchers). Rejected before it:
+    install-time generation into sample flash with new variable-shift
+    readers (the sync copy was +2/+3, and the mechanism differed from the
+    existing waves).
+42. **ADDED (S086 P3/P4): `pos`, a continuous oscillator phase offset.** No
+    per-sample cost: a shift and an add per trigger, and a per-block
+    `phaseInc` bend (about 10 instructions per block per voice, ≈ 0.3 per
+    sample) outside the loops. The alternative, a phase offset added inside
+    every loop, would have cost +1 per sample (+3 with a per-sample ramp)
+    in new loop copies.
+43. **FOUND AND FIXED (S086 assessment F1): register pressure in the
+    mixer.** The voice renders are inlined into
+    `mixer_calcNextSampleBlock()`. The first `pos` version kept the bend in
+    a local variable across the render; two inlined per-sample loops
+    gained reloads (an FM loop with a Sine carrier 29 → 31, two flash
+    literal loads; a noise loop 15 → 16, one stack reload). Keeping the
+    step in `OscInfo` restored both to their P2 lengths.
+44. **ADDED (S086): mixer hot-loop gate.** `tools/dsp_test/elf_hotloops.py`
+    (`make elf86_mixer_check`) pairs the per-sample do-while loops of
+    `mixer_calcNextSampleBlock()` with a P2 baseline by opcode sequence
+    (layout-insensitive) and fails if one grew. Hardware (user): the
+    six-slot worst-case Scene with an LFO on every `pos` reads the same
+    `cpu` as before.
+
+### Session 087 additions (record in `087_SESSION_HANDOFF_LOG.md`)
+
+45. **REPLACED (S087): v1 user-sample loops removed.** The four v1
+    dispatchers (`calcUserSampleOscBlock`, `calcUserSampleOscFmBlock`,
+    `calcUserSampleOscRingBlock`, `calcUserSampleOscSyncBlock`) and
+    `osc_syncWaveform()` are deleted. `osc_interp_a/b` (128 B DTCM)
+    released. `stub_silence_buffer` (512 B flash) removed. Replaced by
+    the type-aware readers below.
+46. **ADDED (S087): `smp`/`slp` sample readers.** Eight loops in
+    `.itcm.s087` (`osc_smpPlainBlock`, `osc_smpFmBlock`,
+    `osc_smpSyncBlock`, `osc_smpRingBlock`, `osc_slpPlainBlock`,
+    `osc_slpFmBlock`, `osc_slpSyncBlock`, `osc_slpRingBlock`). Q20.12
+    phase, install-time zero padding, fixed loop region. Per-sample
+    counts: `slp` plain 27, FM 49–50, ring 42; `smp` ring 38. All below
+    the frozen Drum `fm` ceiling (≈ 92 linked).
+47. **ADDED (S087): `wtb` wavetable reader.** Frame blending through two
+    interpolation slots (stamps 1..255). `osc_wtbPlanBlock()` splits at
+    frame crossings. Four blend copies (plain, FM, ring, sync). Blend
+    inner loops: 34–38 / 42–46 / 43–47 / 44–48. Per-slot blend cost
+    +10..+13 over one frame, against ≈ +66 today.
+48. **ADDED (S087 P3): transient click sample list.** New sample loop: 20
+    instructions per sample. Built-in click loop: 22 (unchanged). No
+    worst-case increase.
+49. **CHANGED (S087): ITCM.** 8,512 (S086) → 15,032 (S087 D, before P1
+    v1 removal) → 12,640 (after P1). Net +4,128 B from S086. Build at
+    S087 close: text 670,628, Flash headroom 83,036 B, ITCM 12,640 /
+    16,384 B.
+
+### Session 088 additions (record in `088_SESSION_HANDOFF_LOG.md`)
+
+50. **ADDED (S088 P0): gain-matched amp retrigger.**
+    `slopeEg2_retriggerFrom()` (control rate, one divide per trigger) and the
+    `slopeEg2_isAudibleGain()` threshold (1/32768). No per-sample cost.
+    `fre`/`itp` never cost more than `rst`: the comparison is per trigger.
+51. **ADDED (S088 P0): post-chain gain ramps (Layer 2b).**
+    `voicePost_drum()` gains a per-sample velocity ramp (+3 instructions per
+    sample, 32 → 35); `voicePost_mixAddGainDist()` and
+    `voicePost_addGainDist()` gain a per-sample amp ramp (+5, 30 → 35 and
+    25 → 30). Paid in every mode, every block (constant CPU); with equal
+    endpoints each ramp evaluates to exactly the block gain, so the S073
+    output is bit-identical (host law B1, `run_modes`).
+52. **ADDED (S088 P0): Drum FM depth ramp (D1).** The fm branch scales the
+    modulator block by a linear ratio `lastFmDepth / fmMod` → 1: one float
+    multiply plus the ramp add per sample on Drum `fm`, in every mode. When
+    the voice is not armed the ratio is exactly 1, so the multiply is the
+    identity and `rst` is unchanged. G1: the frozen Drum `fm` ceiling rises
+    from ≈ 92 to ≈ 107 linked instructions per sample; re-measure with
+    `fpseq.py` on the S088 ELF before acceptance.
+53. **ADDED (S088 P0): itp crossfade.** One `OscCarrierSnapshot` render
+    (the same plain carrier loop class the voice already runs) plus a linear
+    blend (float multiply-add per sample, ≈ 8). Budgeted as the two-slot
+    pool always full, exactly like the S087 E wavetable blend slots. The
+    two slots are shared; ongoing `itp` fades are reserved before
+    `modNode_resetTargets()`, so wavetable blending steps (3 ms) when both
+    are held.
+54. **CHANGED (S088 P0): filter coefficient path.** In `fre`/`itp`,
+    `SVF_recalcFreqSlew()` replaces `SVF_recalcFreq()` at the same call site
+    (once per block per slot): one `fastTan` (unchanged) plus one
+    multiply-add. `rst` keeps the original function.
+55. **CHANGED (S088 P1): float-through distortion.** All three post-chains
+    now pass the pre-gained float directly to `distortion_curveSampleF()`
+    instead of truncating to int16 first. Removes one int16 store per sample
+    in the Drum chain (the two gain multiplies are merged). Snare and
+    Cymbal/HiHat chains keep the saturation add as int16 but the amp gain ×
+    distortion path is float. Net: text −80 B vs the P0 close. No per-sample
+    cost increase (the division and the curve are unchanged).
+56. **ADDED (S088 P1): block-rate fader smoothing.** One-pole EMA
+    (`MIXER_FADER_SMOOTH_ALPHA` 0.15) on `mixer_fader_smooth[6]` in
+    `mixer_faderGains()`, once per slot per block: one multiply-add and one
+    compare per slot. Negligible; no per-sample cost.
+
+---
+
+## Binding Mandates — DSP CPU Policy
+
+> **Any session that changes DSP cost must read and follow these rules.**
+> (User, 2026-09-28)
+
+- **Never save CPU by skipping, bypassing or switching off DSP work** because
+  an element is currently inactive, silent, or set to zero (distortion at 0,
+  a silent voice, a send at 0, and so on).
+- **Why:** freed CPU gets filled by other features. Then, when everything is
+  requested at once, the result is underruns or features dropped at random.
+- **Headroom is only the worst case with everything active** (the stress
+  Scene peak), never the average.
+- **Any proposal** that turns processing off for a feature that can be active
+  must be raised with the user. The expected answer is no.
+- **CPU reductions must also meet the sound rules** agreed for each change
+  (classes S0 bit-identical … S4 audible). The S073 decisions are in
+  `073_SESSION_HANDOFF_LOG.md` §6.
+- **How to prove a DSP change:** `tools/dsp_test/` (host comparison plus the
+  ARM `fpseq.py` check; `DSP_TEST.md`).
+- **The one approved exception (S074):** the master bus compressor does no
+  work while `cmp` is off. With it on, its cost (about 1.4–1.8 %) counts
+  against the worst-case Scene; the user accounts for it on the `cpu`
+  widget.

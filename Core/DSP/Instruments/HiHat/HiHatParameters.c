@@ -88,6 +88,43 @@ const uint8_t hihat_instrument_type_flags = HIHAT_INSTRUMENT_TYPE_FLAGS;
     { key_, short_, long_, cat_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), FLAGS_IMAGE, mod_, BIND_SPECIAL(member_, type_, special_) }
 
 /*
+ * ROW_SELECT_SPECIAL: a selector row with a special writer (S087 stage B).
+ *
+ * What:       DTYPE_MENU with the menu id in the high nibble; flags
+ *             AUTOMATABLE | SELECTOR (not MORPHABLE, not MODULATABLE);
+ *             MOD_NONE; a BIND_SPECIAL runtime binding.
+ * Why:        osc1_type is chosen, not tuned: no Morph, no LFO or velocity,
+ *             one step-automation value per step (S087 P0 §12.5).
+ * Inputs:     key, category, long and short label, menu id, member, scalar
+ *             type, IM_SPECIAL_* tag.
+ * Outputs:    one ParamDescriptor initializer.
+ * Accessors:  the osc1_type row below.
+ * Affiliates: INSTRUMENT_PARAM_FLAG_SELECTOR; instrumentManager_targetValid().
+ */
+#define ROW_SELECT_SPECIAL(key_, cat_, long_, short_, menu_, member_, type_, special_) \
+    { key_, short_, long_, cat_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), \
+      (INSTRUMENT_PARAM_FLAG_AUTOMATABLE | INSTRUMENT_PARAM_FLAG_SELECTOR), \
+      MOD_NONE, BIND_SPECIAL(member_, type_, special_) }
+
+/*
+ * ROW_SELECT_ONOFF_SPECIAL: a tagged DTYPE_ON_OFF selector (S088 P0 §2.3 D12).
+ *
+ * What:       ROW_SELECT_SPECIAL's flags and binding with dtype
+ *             DTYPE_ON_OFF | (tag_ << 4); the high nibble names the on/off
+ *             sub-type (ONOFF_TAG_OSC_RUN) for menu.c's display and clamp.
+ * Why:        all DTYPE_MENU ids and dtype values are taken; the high nibble
+ *             of DTYPE_ON_OFF was unused.
+ * Inputs:     key, category, long/short label, tag, member, type, IM tag.
+ * Outputs:    one ParamDescriptor initializer.
+ * Accessors:  the osc1_run row below.
+ * Affiliates: ONOFF_TAG_OSC_RUN (MenuText.h); menu.c DTYPE_ON_OFF sites.
+ */
+#define ROW_SELECT_ONOFF_SPECIAL(key_, cat_, long_, short_, tag_, member_, type_, special_) \
+    { key_, short_, long_, cat_, (uint8_t)(DTYPE_ON_OFF | ((tag_) << 4)), \
+      (INSTRUMENT_PARAM_FLAG_AUTOMATABLE | INSTRUMENT_PARAM_FLAG_SELECTOR), \
+      MOD_NONE, BIND_SPECIAL(member_, type_, special_) }
+
+/*
  * ROW_NOBIND is for descriptor-owned cells that do not write a HiHatVoice
  * member directly. These are single-endpoint supplemental values such as
  * modulation target selectors, so they intentionally start with flags=0 rather
@@ -171,6 +208,9 @@ typedef enum {
     HIHAT_PARAM_TRANSIENT_WAVE,
     HIHAT_PARAM_TRANSIENT_VOL,
     HIHAT_PARAM_TRANSIENT_FREQ,
+    HIHAT_PARAM_OSC1_POSITION, /* S086 P3: appended; preserve all prior IDs. */
+    HIHAT_PARAM_OSC1_TYPE, /* S087 B: appended; preserve all prior IDs. */
+    HIHAT_PARAM_OSC1_RUN, /* S088: appended; preserve all prior IDs. */
     HIHAT_PARAM_COUNT
 } hihat_param_index_t;
 
@@ -237,6 +277,63 @@ const ParamDescriptor hihat_param_descriptors[] = {
     ROW_MENU_SPECIAL("transient_wave", "Transnt", "Waveform", "wav", MENU_TRANS, MOD_NONE, transGen.waveform, TYPE_UINT8, IM_SPECIAL_TRANSIENT_WAVE),
     ROW("transient_vol", "Transnt", "Volume", "vol", DTYPE_0B127, MOD_0_127, transGen.volume, TYPE_FLT),
     ROW_SPECIAL("transient_freq", "Transnt", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, transGen.pitch, TYPE_FLT, IM_SPECIAL_TRANSIENT_FREQ),
+    /*
+     * osc1_position: pos, the oscillator's continuous position (S086 P3/P4).
+     *
+     * What:       0..127, stored in osc.position. For Sin, Tri, Saw, Rec, Re3
+     *             and Sw3 it is a phase offset of pos/128 of a cycle; for Cym
+     *             pos/128 of the whole crash sample (S086 P4). A hit starts at
+     *             today's start phase + pos; while the voice plays, a change
+     *             glides over one block through a temporary phaseInc bend.
+     *             Noise and v1 user samples ignore it (user samples: S2).
+     * Why:        S086 P3: the fourth cell of the first oscillator screen. The
+     *             row is appended last, so every existing descriptor index,
+     *             automation ID, LFO/velocity token, NRPN ID and MIDI Learn row
+     *             is unchanged; a file without the key loads 0 (today's sound).
+     * Inputs:     menu edit, Morph, step automation, LFO adapter (MOD_0_127),
+     *             velocity node (the 0..127 range of a TYPE_UINT8 row).
+     * Outputs:    osc.position (TYPE_UINT8, plain store; no special writer).
+     * Accessors:  osc_positionTrigger(), osc_positionBendApply() and
+     *             osc_positionBendRestore() (Oscillator.h).
+     * Affiliates: HiHat.c: HiHat_triggerVoice() and
+     *             HiHat_calcSyncBlockVoice(); FILESYSTEM_SPEC.md (the key);
+     *             086_SESSION_HANDOFF_LOG.md §4.
+     */
+    ROW("osc1_position", "Oscilltr", "Position", "pos", DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
+    /*
+     * osc1_type: typ, the oscillator type (S087 stage B).
+     *
+     * What:       0 wav, 1 smp, 2 slp, 3 wtb (OSC_TYPE_*), stored in
+     *             osc.oscType through IM_SPECIAL_OSC_TYPE (osc_setType()).
+     * Why:        S087 P0 §4: osc1 selects stock waves, samples, loops or
+     *             wavetables. A selector (never morphed, Normal image only,
+     *             applied before the Morph image, step-automatable, not an
+     *             LFO/velocity target), appended last so every existing ID
+     *             and file key is unchanged; a file without the key loads 0.
+     * Inputs:     menu edit, Kit/Scene/Instrument apply, the trigger restore,
+     *             step automation.
+     * Outputs:    osc.oscType and the type state (osc_setType()).
+     * Accessors:  instrumentManager_writeSpecialRuntime().
+     * Affiliates: the typed renderers (Oscillator.c S087 section);
+     *             S087 P0 §12.5.
+     */
+    ROW_SELECT_SPECIAL("osc1_type", "Oscilltr", "Type", "typ", MENU_OSC_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
+    /*
+     * osc1_run: run, the oscillator run mode (S088 P0).
+     *
+     * What:       0 rst, 1 fre, 2 itp, stored in the engine runMode field through
+     *             IM_SPECIAL_OSC_RUN.
+     * Why:        S088 P0 §1: three trigger behaviours. A selector (never
+     *             morphed, Normal image only, applied before the Morph image,
+     *             one step-automation value per step, no LFO/velocity
+     *             target). Appended last: every existing index, automation ID,
+     *             token, NRPN ID and Learn row is unchanged; no key loads rst.
+     * Inputs:     menu edit, Kit/Scene/Instrument apply, step automation.
+     * Outputs:    runMode.  Accessors: the special writer.
+     * Affiliates: OSC_RUN_*; oscRunNames; ONOFF_TAG_OSC_RUN; A9 (the
+     *             open/closed decay is re-selected on every hit).
+     */
+    ROW_SELECT_ONOFF_SPECIAL("osc1_run", "Oscilltr", "Run Mode", "run", ONOFF_TAG_OSC_RUN, runMode, TYPE_UINT8, IM_SPECIAL_OSC_RUN | IM_SPECIAL_OSC1),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -253,7 +350,9 @@ const uint8_t hihat_param_descriptor_count =
  * private open-hat menu fork now that `_choke` is the registry convention.
  */
 const instrument_menu_page_t hihat_menu_pages[] = {
-    {{ HIHAT_PARAM_OSC1_PITCH_COARSE, HIHAT_PARAM_OSC1_PITCH_FINE, HIHAT_PARAM_OSC1_WAVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* S086 P3: first oscillator screen is coa fin wav pos.
+    ** S088: screen 2 is typ run (cells 4 and 5). */
+    {{ HIHAT_PARAM_OSC1_PITCH_COARSE, HIHAT_PARAM_OSC1_PITCH_FINE, HIHAT_PARAM_OSC1_WAVE, HIHAT_PARAM_OSC1_POSITION, HIHAT_PARAM_OSC1_TYPE, HIHAT_PARAM_OSC1_RUN, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ HIHAT_PARAM_AMP_ENVELOPE_ATTACK, HIHAT_PARAM_AMP_ENVELOPE_DECAY, HIHAT_PARAM_AMP_ENVELOPE_SLOPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ HIHAT_PARAM_VELO_MOD_DEST, HIHAT_PARAM_VELO_MOD_AMOUNT, HIHAT_PARAM_VELO_VOL_ON_OFF, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ HIHAT_PARAM_OSC2_PITCH_COARSE, HIHAT_PARAM_OSC3_PITCH_COARSE, HIHAT_PARAM_OSC2_MOD_AMOUNT, HIHAT_PARAM_OSC3_MOD_AMOUNT, HIHAT_PARAM_OSC2_WAVE, HIHAT_PARAM_OSC3_WAVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
@@ -288,3 +387,4 @@ _Static_assert(HIHAT_MENU_PAGE_COUNT ==
 #undef MOD_PM63
 #undef MOD_0_127
 #undef MOD_NONE
+#undef ROW_SELECT_ONOFF_SPECIAL

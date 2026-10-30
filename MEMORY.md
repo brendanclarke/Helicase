@@ -1,8 +1,8 @@
-# LXR-02 Firmware Port — Project Context
+# Helicase LXR — Project Context
 
 This file is the working memory for Codex/Claude Code/LLM Agent sessions on this project.
 Read it fully at the start of every session before touching any code.
-Update it whenever something is confirmed, fixed, or decided.
+Do not append session history or resolved-issue narrative to this file; those belong in `knowledge_files/log_archive/`.
 
 ---
 
@@ -20,1509 +20,281 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
-**Current working source**: **Session 083 (MIDI) is closed** (2026-10-22)
-on `dev-ph6-midi`. Record: `knowledge_files/log_archive/083_SESSION_HANDOFF_LOG.md`;
-authority: `MIDI_SPEC.md` (the complete MIDI use and code reference, Parts
-I–III). `Core/MIDI/` was rebuilt as the single-role modules listed under
-"MIDI / Clock Reminders" below; `MidiParser`, `Uart`, `FIFO`, `MidiRealtime`,
-`MidiMessages`, `MidiNoteNumbers` and the legacy LXR CC/CC2 map are gone.
+**S088 implemented** (2026-10-29, uncommitted on `80029d31`): oscillator
+run modes (`osc1_run` = `rst`/`fre`/`itp`), block-rate fader smoothing,
+float-through distortion. P0 hardware matrix H1–H17 pending.
+S088 log: `knowledge_files/log_archive/088_SESSION_HANDOFF_LOG.md`.
+S087 log: `knowledge_files/log_archive/087_SESSION_HANDOFF_LOG.md`.
+Working notes: `knowledge_files/volatile/S088_WORKING_NOTES.md`.
+Host tests: `tools/dsp_test/modules/` (one file per module, `make -C tools/dsp_test all`);
+effects retry kit (transient, filter drive, D+S): `tools/dsp_test/spike/README.md`.
+No frozen snapshots are kept; copy the files to `build/` before an edit that needs a before/after.
 
-- **Commits:** S083 planning `f9aaeec`; implementation `d007027`;
-  assessment fixes and all P2 follow-ups `bbea23f`. The final close-out
-  document edits came after it. The user manages commits.
-- **Build at S083 close (DEV config):** `text=608,744`, `data=424`,
-  `bss=430,112`; flash payload 608,848 B of 753,664 (**144,816 B free**).
-  S082 baseline was `598,120 / 420 / 430,928`. Production build
-  (`DEV_MODE_LOGGING 0`) last measured at S075 F1; needs a rebuild.
-- **Hardware (user):** the S083 P1 build was tested ("seems ok", leading to
-  the P2 follow-ups) and the final build "checks out" (2026-10-22). S081 and
-  S082 passed their checks (2026-10-21). Open since S082: F5 (Scene 2 Case-3
-  invalidation); S082 P3 A2 (frozen-screen blink loss, low).
-- **S083 in brief:**
-  - **Rebuild:** the `Core/MIDI/` rebuild with consume-then-route and the
-    new MRT list.
-  - **Notes:** the N1–N5 note map with the Q4 TX inverse; the per-track
-    overlay executor (panel + MIDI); arrival stamps for record placement.
-  - **Control:** a MIDI write is a menu edit (Q1); NRPN = 9-bit target ID;
-    MIDI Learn.
-  - **PC/CC0/transport:** PC/CC0 via S082; Continue/SPP gated by `snc`.
-  - **Transmit:** per-track note-off; parameter TX (learned CC else NRPN);
-    no echo.
-  - **Follow-ups:** track `ch off`/`nte off` (`def` → `on`), `asm` →
-    `rmp`; Learn in `midilrn.cfg`; global Morph sets FX Morph; SHIFT+REC
-    `pv<`/`pv>`; CC2 sets the PERF BAR overlay itself.
-- **Automated Scene changes (user, S083 Q2, 2026-10-21) — binding:**
-  "Scenes or tracks from Scenes are not automatable unless they are changed
-  via a voice edit mask from an active Scene or track." A queued action whose
-  target Scene is unavailable is skipped whole (S082 P3 A1, fixed).
-- **Session 081 is closed** (`081_SESSION_HANDOFF_LOG.md`): live record and
-  erase, the step reset rule, R12/R13, the 96-PPQ roll table, `qnt trk`,
-  automation ramps (now labelled `rmp`), loop while record, G-1, VOICE bar
-  pulse.
+## RAM and CPU Budget
 
-Session 082 in one paragraph:
+Any new or enlarged RAM allocation needs user sign-off: identify the byte
+count, memory region, and owner. Free DTCM is earmarked for future delay-line
+buffers; free SRAM1 for future Pattern data — check before proposing reuse.
 
-- **Bank Load/Save** take act/empty masks: Replace (default, all 16 as they
-  are; deselected = emptied / child removed) or Merge (COPY tap; only
-  selected Scenes with pattern content). COPY hold peeks the other view; SEQ
-  LEDs show content from a cancellable child PAT4 probe. The active/viewed
-  Scene never changes because of a load or save; `active_scene` is
-  boot-only; the present mask is assigned; edit masks stay mutually
-  exclusive; HCNAMES Scene rows gain `bNNN`/`x`.
-- **Background Bank load:** Scene 17 (index 16, `scene_background` +
-  `pat_background_region`) is an exact per-track copy of what plays,
-  switched to without an activation; nothing loads into it; it is never
-  AutoSaved; the first whole-Scene change releases it forever. AutoSave is
-  aborted at callback-free phases only; MIDI is filtered/deferred during a
-  load. P3: from phase 5 of a Scene 17 or running direct load the panel is
-  free, loaded children become available one by one, Load/Save shows a
-  frozen Bank screen with 1-based `NN.`, `LED_MODE4` fast-blinks elsewhere,
-  chains wait for the end of the load.
+Logging/trace allocations require `DEV_MODE_LOGGING` enabled; a logging-off
+build must not allocate those rings, cursors, or timing records.
 
-**Permanent authority:**
+## Binding Mandates
 
-- `knowledge_files/log_archive/083_SESSION_HANDOFF_LOG.md`, `082_…` (and 081 —
-  written after S082 —, 080, 079, 078, 077, 076, 075, 074, 073, 072);
-- `knowledge_files/specification_reference/COPYCLEAR_UTILITIES.md` (new in
-  S075);
-- `knowledge_files/specification_reference/dsp_instruments_effects/`:
-  `EFFECTS_BUS_REFERENCE.md`, `EFFECTS_MIXER_DSP_REFERENCE.md`,
-  `INSTRUMENTS_DSP_REFERENCE.md`, `CPU_USE_DSP_AUDIT.md`;
-- `knowledge_files/specification_reference/`: `AUTOSAVE.md`,
-  `ASYNCFATFS_REFERENCE.md`, `DEV_MODES.md`, `STORAGE_SRAM_MANIFEST.md`,
-  `FILESYSTEM_SPEC.md`, `MODULE_INTERCHANGE_SPEC.md`,
-  `BANK_PRESET_ARCHITECTURE.md`, `PATTERN_DYNAMIC_STACK.md`,
-  `OSC_INTERP_AUDIT.md`;
-- `tools/dsp_test/DSP_TEST.md`;
-- `EFFECTS_BUS_FEATURE_PLAN.md` (the Phase 5 design record) was deleted in
-  `ca77891`; read it with `git show f3a3105:EFFECTS_BUS_FEATURE_PLAN.md`.
-- The ten root `S075_*.md` documents are superseded (the user deletes them);
-  their pre-implementation versions are in `00bd078`, `b1216db`, `822bbc9`,
-  `b8f08db`.
-- The eight root `S076_*.md` task documents are superseded by
-  `076_SESSION_HANDOFF_LOG.md` (the user deletes them).
-- The eleven root `S077_*.md` task documents are superseded by
-  `077_SESSION_HANDOFF_LOG.md` (the user deletes them after hardware test
-  results are recorded).
-- The root `S078_*.md` task documents (P1–P4 plans/schedules and
-  `S078_RETEST_CHECKLIST.md`) are superseded by `078_SESSION_HANDOFF_LOG.md`
-  and the updated specifications (the user deletes them).
-- The four root `S080_*.md` task documents (`S080_P1_PERF_MODE_UPDATES.md`,
-  `S080_P1_IMPLEMENTATION.md`, `S080_P2_PERF_EXPANSION_DEFECTS.md`,
-  `S080_P2_IMPLEMENTATION.md`) are superseded by `080_SESSION_HANDOFF_LOG.md`
-  and the updated specifications (the user deletes them).
-- The eight root `S082_*.md` task documents (`S082_P0_LOAD_SAVE_MENU_CLEANUP.md`,
-  `S082_P0_IMPLEMENTATION.md`, `S082_P1_LOAD_SAVE.md`,
-  `S082_P1_IMPLEMENTATION.md`, `S082_P2_LOAD_SAVE_FOLLOWUP.md`,
-  `S082_P2_IMPLEMENTATION.md`, `S082_P3_WORK_WHILE_BG_LOAD.md`,
-  `S082_P3_IMPLEMENTATION.md`) and the card copies `SD_CARD_082_P0/` and
-  `SD_CARD_082_P1/` are superseded by `082_SESSION_HANDOFF_LOG.md` and the
-  updated specifications (the user deletes them; versions in `b25ffbe`,
-  `8a83df0`).
-- The ten root `S081_*.md` task documents (`S081_P1_LIVE_RECORD.md`,
-  `S081_P1_IMPLEMENTATION.md`, `S081_P1B_IMPLEMENTATION.md`,
-  `S081_P1C_IMPLEMENTATION.md`, `S081_P2_LINEAR_AUTOMATION.md`,
-  `S081_P2_IMPLEMENTATION.md`, `S081_P3_LOOP_WHILE_RECORD.md`,
-  `S081_P3_IMPLEMENTATION.md`, `S081_P4_VOICE_MODE_BAR_LED.md`,
-  `S081_P4_IMPLEMENTATION.md`) are superseded by `081_SESSION_HANDOFF_LOG.md`
-  and the updated specifications (the user deletes them).
-- The three root `S083_*.md` task documents
-  (`S083_P1_MIDI_IMPLEMENTATION_PLAN.md`, `S083_P1_IMPLEMENTATION.md`,
-  `S083_P2_MIDI_TRACK_FIXUPS.md`) are superseded by
-  `083_SESSION_HANDOFF_LOG.md` and `MIDI_SPEC.md` (the user deletes them;
-  the plan and schedule are in `f9aaeec`/`d007027`).
-- The four root `S079_*.md` task documents (`S079_P1_STEP_CONDITIONS_SPECIALS.md`,
-  `S079_P1_IMPLEMENTATION.md`, `S079_P2_ROLL_FOLLOWUP_REMEDIATION.md`,
-  `S079_P2_IMPLEMENTATION.md`) are superseded by `079_SESSION_HANDOFF_LOG.md`
-  and the updated specifications (the user deletes them).
+Before touching a module, read the mandates in its reference document.
 
-Per-track step scale/shuffle playback, deferred since S068, was implemented in
-S078 (`PATTERN_DYNAMIC_STACK.md` §6.4).
+| Policy | Document |
+|--------|----------|
+| DSP CPU: constant, predictable cost | `CPU_USE_DSP_AUDIT.md` §Binding Mandates |
+| Oscillator work under the CPU rule | `INSTRUMENTS_DSP_REFERENCE.md` §12 |
+| Load/Save slot scrolling | `FILESYSTEM_SPEC.md` §Binding Mandates |
 
-## RAM Allocation Approval Policy
+---
 
-All presently uncommitted on-chip RAM capacity is reserved, not general feature
-headroom: free DTCM (including capacity released by moving `transientData` to
-FLASH) is reserved exclusively for future delay-line buffers, while free normal
-SRAM1 is reserved exclusively for future Pattern data. Before implementing any
-new or enlarged RAM allocation in this project, explicitly identify its exact
-byte count, memory region, lifetime, and owner, then obtain the user's
-acknowledgement. This applies to globals, static storage, linker sections,
-pools/unions, DMA buffers, and any material stack-budget increase, in this and
-future sessions. A change that releases RAM does not authorise reuse of that
-capacity for another subsystem.
+## Binding Rules
 
-Logging/trace allocations are approved only while `DEV_MODE_LOGGING` is
-enabled and the corresponding logging path is compiled. A logging-off build
-must not allocate those rings, cursors, or timing records.
+Rules below are binding project constraints from confirmed sessions. Full detail
+is in the referenced session logs and specification documents.
 
-## DSP CPU Policy: constant, predictable cost (user, 2026-09-28)
+### Sequencer / Timing
 
-- **Never save CPU by skipping, bypassing or switching off DSP work** because
-  an element is currently inactive, silent, or set to zero (distortion at 0,
-  a silent voice, a send at 0, and so on).
-- **Why:** freed CPU gets filled by other features. Then, when everything is
-  requested at once, the result is underruns or features dropped at random.
-- **Headroom is only the worst case with everything active** (the stress
-  Scene peak), never the average.
-- **Any proposal** that turns processing off for a feature that can be active
-  must be raised with the user specifically. The expected answer is no.
-- **CPU reductions must also meet the sound rules** agreed for each change
-  (classes S0 bit-identical … S4 audible, `CPU_USE_DSP_AUDIT.md`). The S073
-  decisions are in `073_SESSION_HANDOFF_LOG.md` §6.
-- **How to prove a DSP change:** `tools/dsp_test/` (host comparison plus the
-  ARM `fpseq.py` check; `DSP_TEST.md`). No new utilities are installed for
-  testing, and no per-stage profiler or extra CPU widgets (user).
-- **The one approved exception (S074):** the master bus compressor does no
-  work while `cmp` is off. With it on, its cost (about 1.4–1.8 %) counts
-  against the worst-case Scene; the user accounts for it on the `cpu`
-  widget. Do not generalise this exception to anything else.
+- **Step reset (S081 §5.8):** once per step at first trigger; retriggers 2+
+  never reset; live presses always reset. Reset in `voiceControl_pendingReset`.
+  Render order: `voiceControl_processPending` (triggers + automation drain) →
+  `seq_rampService` must not change. `PATTERN_DYNAMIC_STACK.md` §6.1.
+- **Automation ramps (S081 P2):** held-bit writes, priority applies; end at
+  next played step and every position break; never cross a loop wrap.
+- **FX sequence = master clock (user, S081):** Scene change keeps FX aligned
+  via `seq_fxRealignToMasterClock()`, never `seq_fxPublishReset()`.
+- **Per-track timing (S078):** read only `seq_effectiveTrack*[]`; never write
+  the Pattern region from Morph/automation. DDA seed `interval − 256`;
+  shuffle stored `delay − 1`. `PATTERN_DYNAMIC_STACK.md` §6.4.
+- **Roll engine (S084):** window-based length, not hit count. Carry fires no
+  hit; carry = same rate+rhythm, refused when previous step fill < 100%.
+  PERF/MIDI overlay rolls fire in TIM3 first, before running gate. Types
+  0..14 = singles, flams, then STEP rates (type − 5).
+- **Automation priority (S075/S081 R12/S083 Q1):** step auto → menu edit;
+  a MIDI write is a menu edit. R12 suppresses until next
+  trigger/transport/Scene change. Effects: R13. Morphable writes via
+  `presetMorph_writeRuntimeBase()`.
+- **External clock interpolation (S084 A1):** first tick on edge, rest via
+  tempo timer from `seq_extTicksOwed`; never back-to-back.
 
-## Load/Save Slot Scrolling Policy (user, repeated 2026-10-19) — binding
+### Live Record
 
-- **Scrolling a slot number (encoder or endless pot) must never block or lag.**
-  Every slot change runs, in this order and each asynchronously:
-  1. **number** updates immediately;
-  2. **name** loads (it may be blank briefly);
-  3. **LED array** loads after the name.
-- **The next turn disposes whatever is still running, in the same order.**
-  It increments the number, blanks the name, cancels the LED load, and
-  restarts the name load. Name and LEDs may be blank for a moment until the
-  item settles. No stage may hold the input gate (`menu_storageBusy`) while
-  the user scrolls.
-- **Bank is the case that keeps breaking**, because its LED array is a card
-  scan (the child preview: up to 16 child folders plus PAT4 reads). Since
-  2026-10-19:
-  - the Bank name comes from the resident Bank index;
-  - the preview never takes `menu_storageBusy`;
-  - each new selection cancels it (`filesystem_cancelScanBankScenes()`,
-    called from `menu_requestCurrentLoadSaveSelection()`,
-    `menu_requestBankChildPreview()` and the Load/Save exit);
-  - the cancelled scan unwinds at a callback-free phase and finishes ERROR;
-  - the latest slot is served by the deferred retry.
-- **Bank OK stays gated** by a valid preview of the shown slot (Load). On
-  Save, OK cancels a running preview and needs a second press.
-- **Why:** the user has had to restate this rule several times; Scene and
-  Kit scrolling already behave this way.
-- **How to apply:** any new per-slot work (preview, probe, name read) must
-  follow it; check the encoder gate (`menu_parseEncoder()`) and the pot gate
-  (`menu_handleLoadSaveKnobDelta()`) for the page.
-
-## Volatile Notes
-
-**Session 083 is closed.** Durable record: `083_SESSION_HANDOFF_LOG.md`;
-MIDI behaviour and code: `MIDI_SPEC.md`; `midilrn.cfg` and settings keys:
-`FILESYSTEM_SPEC.md`. Carry-over notes:
-`knowledge_files/volatile/S078_WORKING_NOTES.md` (rewritten as the S083 →
-S084 notes). Short
-points:
-
-* **LXR1 import tools (2026-10-22, host only, not yet hardware-tested):**
-  `tools/lxr1_converters/` converts LXR1 `.snd` → Kit, `.pat` → PAT4
-  library Patterns, `.all`/`.prf` → Banks (manual `LXR1_CONVERTERS.md`
-  there; handoff log `LXR1_CONVERTERS_IMPLEMENTATION.md` at the root).
-  The 2013 factory kits use page-reference LFO/velocity targets, not
-  modTargets indices.
-* **LXR-02 import tools (2026-10-23, closed; host only, not yet hardware-tested):**
-  `tools/lxr2_converters/` converts Erica LXR-02 `NN-*.snd` → Kit, `.pat`
-  → PAT4, `projNN/` → Banks (16 patterns each), `.sng` → chained Banks
-  (manual `LXR2_CONVERTERS.md` there; handoff log
-  `LXR2_CONVERTERS_IMPLEMENTATION.md` at the root). It imports the Helicase
-  writers from `tools/lxr1_converters/lxr1_common.py`: editing that module
-  affects both converter sets. User decision: LXR-02 track MIDI notes still
-  at the default (48 on all tracks) are written as `nte on`.
-* **MIDI testing needs RXF/TXF = `all`:** a card without the keys defaults
-  to off (consumes and sends nothing).
-* **Card files:** `midilrn.cfg` appears with the first Learn; `settings.cfg`
-  is 26 lines (`lines=26`); `learn=`/`l` lines left by the first S083 build
-  are ignored and dropped on the next settings write.
-* **Open product decisions (no action unless asked):** RXF/TXF defaults;
-  whether a PERF BAR overlay should also shape MIDI notes outside PERF (it
-  does today); whether recorded overlay rolls should carry the `pv` rhythm;
-  publishing a per-type NRPN chart.
-* **Still open from S082:** F5 Scene 2 Case-3 invalidation (instrumented);
-  P3 A2 frozen-screen blink loss (low). P3 A1 is fixed (S083 Q2).
-* **S082 binding rules** (Load/Save repaint coalescing, active Scene never
-  changes on load/save, Scene 17 rules, cached Scene indices, AsyncFATFS
-  abort safety, HCNAMES reset after acceptance, availability vs presence, no
-  chains during a load) remain in force: `082_SESSION_HANDOFF_LOG.md` and the
-  specifications.
-
-This section is for short carryover points only. Flush or rewrite it at session
-end; durable facts belong in `knowledge_files/log_archive/` or
-`knowledge_files/specification_reference/`.
-
-- **Session 081 is closed** (logged after S082). Durable record:
-  `081_SESSION_HANDOFF_LOG.md`; live record: `PATTERN_DYNAMIC_STACK.md` §6.7;
-  reset rule and R12: §6.1/§6.2/§6.2a; ramps: §6.2b; Effects R13:
-  `EFFECTS_BUS_REFERENCE.md` §6/§10; module APIs: `MODULE_INTERCHANGE_SPEC.md`
-  "Core/Sequencer/LiveRecord (S081)". Carry-over:
-  `knowledge_files/volatile/S078_WORKING_NOTES.md` (S081 section). Binding
-  rules from S081:
-- **Step reset rule (S081 §5.8) — binding:** Instrument automation resets
-  once per step, at its **first** trigger (a delayed hit, a roll's first hit,
-  each step's renewal of a carried roll); roll retriggers 2+ never reset;
-  live presses always reset. The reset travels in the per-voice mask
-  `voiceControl_pendingReset`, never as a flag inside a voice-queue entry
-  (`voiceControl_noteOff()` drops entries). A deferred step's automation is
-  queued at its deferred fire (`seq_fireDeferred()`), and the render order
-  `voiceControl_processPending()` → `seq_drainPendingAutomation()` →
-  `seq_rampService()` must not change. A roll runs its own length; only the
-  next step's trigger cuts it (F-R).
-- **Live record invariants (S081; S083 names) — binding:** buttonHandler,
-  Menu and MidiNotes/MidiControl call LiveRecord; the Sequencer never calls
-  LiveRecord (it reads registered bitmaps); LiveRecord never calls
-  buttonHandler or the MIDI modules and
-  calls Menu only for `menu_automationTargetRecorded()` (hardware fix 1,
-  recorded deviation). LiveRecord never runs in TIM3; TIM3 never touches pool
-  bytes for record/erase (TIM3-safe service enqueues only). Values recorded
-  are the origin Scene A's menu values (Normal endpoint), never T's.
-  Placement walks the track's **live** cursor (`seq_placeFromSnapshot()`),
-  never the canonical master-clock position; shuffle is never used in
-  placement (playback adds it). Echo marks always carry a deadline. Only a
-  Scene epoch starts a new take; transport start/stop is only a position
-  break. Pattern data written by live record never fans out; FX-sequence
-  erase does. The muted-`rtk` condition check (`seq_conditionPassesPure()`)
-  must stay in step with `seq_evaluateStepCondition()`.
+- **Invariants (S081):** buttonHandler/Menu/MidiNotes/MidiControl call
+  LiveRecord; Sequencer never does; never in TIM3. Live cursor for placement,
+  no shuffle; echo marks carry deadlines; only Scene epoch = new take. Pattern
+  writes never fan out; FX-sequence erase does.
 - **First-change switch (S081 D12):** `LIVEREC_AUTOMATION_FIRST_CHANGE` in
-  `config.h` (default 1) — live record writes a parameter's first change in
-  a step at once into that step; 0 = the value at the step's end (P1).
-- **Automation ramps (S081 P2) — binding:** ramp samples are automation
-  writes (`seq_writeInstrumentAutomation()`, held bit), so the priority rules
-  apply to them; keep `seq_rampNextStep()` in step with the play-mode switch
-  in `seq_advanceTrackStep()`; ramps end at the next played step and at every
-  position break (`seq_rampBreakTrack/All()`), never cross a loop wrap; the
-  64-ramp CPU worst case is not yet measured.
-- **Effect automation R13 (S081) — binding:** Effect parameters resolve
-  menuHold > FX lock (its own step only) > track overlay > menu; a lock start
-  clears the track overlay; the held Morph lane, step markers and overlay
-  owners are gone. Realign realigns the FX sequence
-  (`seq_fxRealignToMasterClock()`), never via `seq_fxPublishReset()`.
-- **LED deadlines (S081 P4):** pulse and flash expiry compare by signed
-  16-bit distance (`led_timeReached()`); never `time_sysTick > end` (lost
-  effects near the 65.536 s wrap).
-- **FX sequence follows the master clock like the tracks (user, 2026-10-21)
-  — binding:** with `pcr` off, a Scene change keeps every track **and the FX
-  sequence** aligned to the master clock (the realign calls
-  `seq_fxRealignToMasterClock()`); correct as implemented in S081 (P1 review
-  item 29, closed).
-- **S081 open items:** P3 A-1 (tapping an already-looped VOICE
-  drops it on release — confirm); stale previous step when REC is armed while
-  running; P4 B-2; stage `W` missing from `tools/decode_devlogs.py`; every
-  S081 hardware matrix (`081_SESSION_HANDOFF_LOG.md` §13.2).
+  `config.h` (default 1).
+- **Global Morph never recorded (S081 G-1):** `mrp` has no recording target.
+  Each individual edit via `liveRec_morphValue[7]` / `liveRec_recordValue7()`.
 
-- **Session 080 is closed.** Durable record: `080_SESSION_HANDOFF_LOG.md`;
-  looper and scene change/chain engine: `PATTERN_DYNAMIC_STACK.md` §6.5/§6.6;
-  PERF gestures, LEDs, pages, executor: `MODULE_INTERCHANGE_SPEC.md` "PERF
-  performance surface". Carry-over: `knowledge_files/volatile/S078_WORKING_NOTES.md`
-  (rewritten as the S080 → S081 notes).
-- **Looper invariants (S080) — binding:** the looper is master-clock
-  anchored (per-track anchor tick + pre-advance snapshot); never reintroduce a
-  shared loop tick counter, an un-anchored snapshot at the press, or resume
-  via `seq_realignTrackToMasterClock()` (all caused the S080 P2 sync
-  failures). Every looper publish holds PRIMASK; the wrap runs before the DDA
-  advance; `seq_setStepIndexToStart()` rebases (does not end) an engaged loop;
-  transport stop ends it. FX/Effects are never looped.
-- **Looper while recording (S081 P3) — binding:** the looper and live record
-  (LATCH or OVERDUB) or live erase run together; engaging, swapping, changing
-  division or releasing the loop never changes the record mode (plan L-2). The
-  loop is held until **every** SELECT, VOICE and BAR button is released or the
-  mode leaves PERF (plan Q1), with or without record; while it is engaged
-  SELECT/BAR/TRACK(=`VOICE`) keep their looper functions — a VOICE press with
-  no SELECT held adds its track, a release drops it, and a VOICE never fires
-  the overlay trigger, toggles a mute or starts an erase gesture (plan Q4,
-  FQ1, FQ2). Live-record boundary-ring entries have **one** producer function,
-  `seq_recRingPush()`: TIM3 for a step advance and for a mid-step loop wrap
-  (the jump flag), the foreground only inside the looper's PRIMASK for a
-  resume. PERF-page Morph cells (`1VM`..`6VM`, `fxm`) are recorded like the
-  same targets on the VOICE and Effect pages (plan FQ5); `mrp` is not (FQ7).
-- **Global Morph is never recorded (user, S081 P3 G-1) — binding:** `mrp`
-  (`PAR_MORPH`) has no recording target and no path into LiveRecord, from
-  the menu or MIDI. A global change writes all six voice Morph amounts and
-  the FX Morph amount (`preset_morphScene()`), so LiveRecord must never write
-  a re-read Morph value: each individual Morph edit (`1VM`..`6VM`/`Nvm`,
-  `fxm`, the Effect page Morph cell) is captured in `liveRec_morphValue[7]`
-  and every dirty Morph write uses it (`liveRec_recordValue7()`). Any new
-  write path or MIDI CC recording must keep this.
-- **One PC reset (S080, user):** `pcr` = `PAR_BAR_RESET_MODE` (key
-  `bar_reset_mode`); with it on, **direct and chain-fired** scene changes
-  restart tracks and the master clock. **Queued** changes ignore pcr and use
-  the qac reset bit (`res u+r o+r mmr r+r`). Do not add another PC reset
-  parameter (the S080 P1 duplicate caused the "restart from bar 0" report).
-- **PERF SEQ LEDs (S080):** the queued Scene uses `LED_LAYER_FAST`
-  (owner `menu_syncQueuedSceneLed()`); `menu_refreshPerfSceneLeds()` never
-  restarts a running blink (`led_isBlinkLed()`); never start/stop SEQ blinks
-  from a per-beat path. SELECT row in PERF = looper division only.
-- **Latched menus (S080):** SHIFT+REC and the chain editor stay open after
-  release; SHIFT release is ignored while open; SHIFT press closes and its
-  release is consumed (`bh_shiftReleaseConsume`); MODE closes first. The PERF
-  SHIFT-release path re-enters PERFORMANCE_PAGE — any new latched PERF menu
-  must bypass it.
-- **Parameter mirrors after the Globals (S080):** `PAR_CHAIN_*` and
-  `PAR_TRACK_LOOPABLE` sit after `PAR_BEGINNING_OF_GLOBALS`, so
-  `menu_sendAllGlobals()` replays them on every settings load; they are
-  no-ops in `menu_parseGlobalParam()` and commit in `menu_cellCommitValue()`
-  (bus-compressor precedent). Follow the same pattern for any new mirror.
-- **Active Scene (user definition, S075):** active means the Scene being
-  viewed and written to, not playback. Any Scene and track may be read; only
-  one Scene's Pattern is modified at a time. Today a PERF Scene press selects
-  the viewed and played Scene together, and the Pattern Stack Service target
-  follows `seq_activePattern`; if viewing and playback are ever split, the
-  write target must follow the active Scene.
-- **Edit-mask intent (user, S075):** Scenes in one VOICE edit mask are meant
-  to match in parameters and FX settings, so edits, pastes and clears of
-  Scene children (Instrument, Kit, Effect, FX sequence, `send`) fan out;
-  Pattern data never does. `copy scene`/`settings` exchange the mask entry;
-  `clear scene`/`settings` reset it to self. **Scene morph** copy/reset fans
-  out through `bank_sceneFanoutMask()` like kit/fx, NOT like scene/settings
-  (S077 P4 correction).
-- **Session 078 is closed.** Durable record: `078_SESSION_HANDOFF_LOG.md`;
-  per-track timing authority: `PATTERN_DYNAMIC_STACK.md` §6.4/§6.3a; Morph
-  rules: `BANK_PRESET_ARCHITECTURE.md` §5. The root `S078_*.md` task
-  documents are superseded (the user deletes them). Inter-session notes:
-  `knowledge_files/volatile/S078_WORKING_NOTES.md` (rewritten at the S078
-  close as the carry-over for Session 079).
-- **SHIFT Morph-view rule (user, S078 P4) — binding, project-wide:** in ANY
-  SHIFT Morph view only morphable parameters are redirected to their Morph
-  endpoint; a non-morphable parameter shows and edits its **Normal** value
-  and is never blanked (`---`) or locked. VOICE is the reference behaviour.
-- **STEP Morph view is momentary (S078 P4):**
-  `menu_patternTrackMorphViewActive()` = flag && SEQ_PAGE &&
-  `buttonHandler_getShift()`. SHIFT-derived view state must not rely on the
-  SHIFT release alone: `handleModeButtons()` changes mode while SHIFT is held
-  (`(mode + 4) & 7`), so the release runs in the new mode. No STEP Morph
-  latch: SHIFT+MODE STEP is the only SOM entry.
-- **Per-track timing (S078):** the sequencer reads timing only from
-  `seq_effectiveTrackLength/Scale/Shuffle[]` (Normal + Scene endpoint +
-  retained voice Morph amount, or a step override), refreshed by
-  `seq_refreshTrackEffectiveParams()`; Morph/automation never write the
-  Pattern region. DDA accumulators are seeded `interval − 256`; shuffle delay
-  is stored `delay − 1`. `track_scale` is a CC 0..127 (76 = 1/16); pre-S078
-  PAT4 bytes are not migrated on device (`tools/convert_scene_scale.py`).
-- **Menu dtype space is full (S078):** all 16 `DTYPE_MENU` table ids and all
-  16 `DTYPE_*` nibbles are used. New enumerated cells use an existing dtype
-  plus static-param special cases (the run-mode precedent:
-  `MENU_CELL_STATIC + PAR_TRACK_PLAY_MODE`).
-- **STEP underline search (S078 P3):** bits `VA_SEARCH_SCENE_TRACK_BIT(0..2)`
-  = 0x10/0x20/0x40 in `va_searchSceneMask`, set/cleared only via
-  `va_seqTrackSearchBit()`; `va_scanService()` never re-validates a completed
-  result, so every context/content change needs an explicit
-  `va_searchRestart()`. `menu_automationTargetCleared()` is for whole-Scene
-  removals only. Open finding: the deferred CGRAM marker retry in
-  `menu_serviceRuntimeWidgets()` excludes SEQ_PAGE (one-line fix not applied).
-- **Session 077 is closed.** Durable record: `077_SESSION_HANDOFF_LOG.md`;
-  copy/clear reference: `COPYCLEAR_UTILITIES.md`. The eleven root `S077_*.md`
-  task documents are superseded (the user deletes them after hardware test
-  results are recorded). The eight root `S076_*.md` and ten root `S075_*.md`
-  documents were also superseded at their respective session closes.
-- **Per-track Scene playback (S077 P2):** `seq_perTrackPattern[7]` maps each
-  track to its played Scene. ISR reads are single-byte SRAM1 (atomic on
-  Cortex-M7). Since S081 live record writes into the recording track's
-  played Scene through the Pattern Stack Service target override (Q13 refuses
-  STEP edits of the viewed Pattern meanwhile). The mixer reads
-  the played Scene per voice via `preset_getSlotPlayedScene()`. Known
-  limitation: LFO/velocity Scene-namespace target tokens still resolve
-  through the active Scene in InstrumentManager.
-- **Background .hcnames (S077 P3):** the background rewrite must NOT raise
-  `menu_storageBusy`. The correct path is
+### Looper
+
+- **Invariants (S080):** master-clock anchored; never reintroduce shared loop
+  counter, un-anchored snapshot, or resume via `seq_realignTrackToMasterClock()`.
+  Wrap before DDA; transport stop ends it. FX/Effects never looped.
+- **While recording (S081 P3):** runs with LATCH/OVERDUB. Held until every
+  SELECT/VOICE/BAR released. VOICE adds/drops tracks only, never fires
+  overlay or toggles mute. One producer `seq_recRingPush()`.
+
+### Effects
+
+- **R13 (S081):** menuHold > FX lock (own step) > track overlay > menu. Lock
+  start clears overlay; held lane/markers/owners removed. Realign via
+  `seq_fxRealignToMasterClock()`, never `seq_fxPublishReset()`.
+- **Effect page (S074):** type UI in registry hooks, not `menu.c` branches;
+  SELECT LEDs via `menuEffects_renderSelectLeds()`; underline via
+  `menu_repaint()`; 20 B union spare.
+- **Invariants:** SceneData only writes `scene_t.effect`. EffectsManager /
+  FxBuffer foreground-only. DTCM arena never cleared; local indices
+  type-relative; mask gate keeps fan-out safe.
+
+### Menu / UI
+
+- **SHIFT Morph-view (S078, binding, project-wide):** non-morphable params
+  show/edit Normal value, never blanked or locked.
+- **STEP Morph view (S078):** momentary (flag && SEQ_PAGE && shift). No latch;
+  SHIFT+MODE STEP is only SOM entry.
+- **LED deadlines (S081 P4):** signed 16-bit distance `led_timeReached()`;
+  never `time_sysTick > end`.
+- **PERF SEQ LEDs (S080):** queued Scene = `LED_LAYER_FAST`; never restart
+  running blinks; never start/stop from per-beat path.
+- **Latched menus (S080):** SHIFT+REC/chain stay open; SHIFT release ignored
+  while open; SHIFT press closes (release consumed); MODE closes first.
+- **Menu dtype full (S078):** all 16 ids/nibbles used. New cells: existing
+  dtype + static-param special cases.
+- **STEP underline search (S078):** `va_searchSceneMask` bits; every
+  context/content change needs `va_searchRestart()`.
+- **Active Scene (S075):** = viewed and written to, not playback.
+
+### Scene / Bank
+
+- **Edit-mask intent (S075):** Scenes in mask match; child edits fan out;
+  Pattern data never does. Scene morph fans out like kit/fx (S077 P4).
+- **One PC reset (S080):** `pcr` = `PAR_BAR_RESET_MODE`; direct/chain-fired
+  restart; queued use qac reset bit. No second reset param.
+- **Automated Scenes (S083 Q2):** only via voice edit mask from active
+  Scene/track. Unavailable target skipped.
+- **Per-track Scene playback (S077):** `seq_perTrackPattern[7]`, atomic SRAM1.
+  Live record via Stack target override; mixer via
+  `preset_getSlotPlayedScene()`. LFO/velocity resolve through active Scene.
+- **Background .hcnames (S077):** must not raise `menu_storageBusy`; use
   `menu_residentNameDeferredFlushComplete()`.
-  `menu_endResidentNameScratchSession()` must guard `filesystem_status() ==
-  BUSY`.
-- **pat_background_region (S077 P1):** 10,528 B since S081 (17th region), replaces
-  `pat_autosave_snapshot`. Three non-concurrent uses: AutoSave snapshot,
-  overlap paste pool, and (since S082) Scene 17's Pattern; never two at once.
-  `filesystem_patternSnapshotInUse()`
-  gates overlap availability.
-- **Automation priority (user, S075 F3, amended by S081 R12 and S083 Q1) —
-  binding:** step automation, then menu edits, and **a MIDI write is a menu
-  edit** (S083 Q1, built): same priority and actions against automation and
-  recording through `menu_commitTargetEdit()`; MIDI_SPEC §5.6. A menu edit of
-  an automated Instrument parameter now sounds at once and suppresses that
-  parameter's automation until the voice's next trigger, a transport change
-  or a Scene change** (R12: `seq_menuOverrideSet()` clears the held bit and
-  sets `seq_menuOverride[slot]`; the drain skips it; a menu value is never
-  reverted). Non-Instrument targets take the menu value until their next
-  automation (per-target override clears). Effects: R13. Otherwise a held
-  voice-parameter automation value is never overwritten before the voice's
-  next trigger: every Morph-base runtime write
-  goes through `presetMorph_writeRuntimeBase()` (checks
-  `seq_automationHoldsParameter()`). A menu edit only sets an endpoint and
-  applies that one parameter's interpolation at the resolved Morph amount
-  (`presetMorph_applyParameterNow()`); it never writes the raw value. External
-  MIDI CC/NRPN stores the active Scene's clamped Normal endpoint (retained,
-  AutoSaved) and the Morph sweep applies it. Do not add a runtime write of a
-  morphable instrument parameter that bypasses this.
-- **One pan rule (user, S075 F2):** every pan stores 0..127, displays value −
-  63 (`DTYPE_PM63`), stored 63 is the absolute centre and the default. Stereo
-  and mono maths may differ (stereo balance laws are centred on 63; mono
-  laws use `squareRootLut`), but display and default must match. Do not
-  change instrument defaults casually (user).
-- **No backward compatibility, ever (user, standing; restated S081):** stored
-  formats and stored values (PAT4, settings, AutoSave, specials indices) may
-  change meaning freely. Do not offer migration, aliasing or converter
-  options in plans, and do not raise compatibility as a follow-up question.
-- **Wording (user, S081):** stored data are *files* (PAT4 files, settings
-  files, AutoSave records), not "cards". "Card" means only the physical SD
-  card.
-- **No backward compatibility for S075 F2 storage (user):** before testing
-  this firmware on an older card, delete `.hcprms1`/`.hcprms2` and other
-  temporary records (AutoSave Scene cells 45..50 are not migrated).
-- **Copy/clear invariants:** only the exclusive holder
-  (`patSvc_beginExclusive()`) may use the PatternData raw block API; the top
-  132 B of every pool is the swap block; Pattern writes publish before free;
-  while `copyClear_backgroundSuspended()` is set no AutoSave, Pattern
-  AutoSave, trace, settings write or repair epoch starts; the 9 kB name cache
-  may be lent (other filesystem ops are refused while lent). Since S077 the
-  paste source table is a static `uint16_t[128]` and source blocks use
-  `pat_backgroundPoolMut()`; the name buffer loan now carries only the 161 B
-  HCNAMES remap.
-- **S078 open items:** decide the STEP marker retry one-liner; track length
-  128 cannot be step-automated (7-bit, accepted). P1–P4 hardware PASS.
-- **S077 open items:** S077 P4 re-test rows 3.10/3.14/3.15; S077 P5
-  (bar-to-step) and P6 (PERF morph underline) never had checklist rows;
-  carry-over C1–C6. (S076 P4, S077 P1 and S077 P2 checklist sections all
-  PASS at the S078 close.)
-- **S075 open items** (details in the log §13 and `SCOPING_TARGETS.md`
-  "Session 075 carry-forward"): overlay follow-up re-test; the case list
-  (`COPYCLEAR_UTILITIES.md` §16); an F2-card validator PASS; production
-  build measurement; Pattern Load fan-out tear (not fixed); O1 per-voice
-  Morph equalisation on Settings Load; MIDI-entered values reach the LCD
-  only at the next repaint; Effects saved at pan 64 show `1`.
-- **S074 open items still open:** the unexplained boot timeout (reproduce
-  with `DEV_MODE_DIAGNOSTIC 1`, then `DEV_LOGGING_IWDG 1`); the `cpu` widget
-  with `cmp` on; BC11; F4 trace-ring priorities; saturator α 0.35 A/B;
-  CrumpBit minimum-share run; stale comments (`BusCompressor.h` 24 B,
-  `BusCompressor.c` +0.45 %, `CrumpBitEffect.h` 73,632 B, the S074 C4 comment
-  placement in `menu.c`, `main.c` about 532).
-- **AutoSave rule (S074):** every validator proves exact length with a
-  one-byte end-of-file probe. AsyncFATFS stores a cluster-rounded size while
-  a file is open for writing, so an interrupted write leaves an overlong
-  file. The drain's stall observer counts only polls without progress.
-  Self-recovering failures get trace records, not user screens (user
-  policy).
-- **Bus compressor rules (S074):** St1 = `output2`, St2 = `output`; the
-  settings page stays last and holds only the four Scene cells
-  (`MENU_GLOBAL_SCENE_SUBPAGE` = 3 since S080, cue `+`; the scd/qcd/qac
-  sub-page before it shows `^`; new global pages go before it); the four `PAR_BUS_COMP_*` ids never commit through
-  `menu_parseGlobalParam()` (refresh-only there).
-- **Effect page (S074):** type UI lives in the registry (layout +
-  `effect_ui_hooks_t`), never in `menu.c` branches; every SELECT LED write
-  goes through `menuEffects_renderSelectLeds()`; any redraw that can move an
-  underline between rows uses `menu_repaint()`; held values come from the
-  last step held; the runtime union has 20 B spare.
-- **Phase 5 hardware acceptance** for S072 Steps 6–10 is still not reported
-  (`072_SESSION_HANDOFF_LOG.md` §11).
-- **Flash and image.**
-  - The window is `0x08008000–0x080BFFFF` (736 KiB); samples start at sector
-    7 (`0x080C0000`, 1,308,320 B of audio).
-  - At the S074 close the image ends at `0x08082C90`, 11,408 B into sector 6.
-    Every S074 image booted: **the LXRV2 bootloader writes sector 6.** Its
-    contents are in `STORAGE_SRAM_MANIFEST.md` §3.2a.
-  - **Rollback hazard:** a pre-S073 firmware over a grown image with a
-    pre-S073 sample install plays program code as audio. Reinstall samples
-    at low volume before rolling back past S073.
-  - Every boot checks a stamped CRC32 per application sector (`flashImage.c`;
-    `tools/build_lxrv2_img.py` stamps it in `make img`; `lxr02.bin` stays
-    unstamped). A mismatch shows `Img BAD s:…` and waits for BAR1. D-C1
-    (keep the check permanently) is still undecided; it stays.
-- **S073 DSP refactor invariants.**
-  - New instrument descriptor rows need the right `IM_SPECIAL_*` tag
-    (`ROW_SPECIAL`); run `make -C tools/dsp_test special_tags`.
-  - The int16 voice filter and the float Effect filter are twins with the same
-    batched solver; change both or neither.
-  - The fused post-chains keep every old int16 truncation and saturation
-    point; the distortion division stays (no bypass at drive 0).
-  - The DMA region is Normal non-cacheable; `pack_audio_half()` ends with
-    `DSB`.
-  - ITCM growth is RAM under the approval policy.
-- **Measuring flash.** `link_budget.py` warns below 16 KiB. Measure every
-  change with
-  `python3 tools/link_budget.py arm-none-eabi-nm build/lxr02.elf`. Use
-  `make all`: bare `make` can stop at `build/main.o` in an incremental tree.
-- **Effect invariants.**
-  - SceneData is the only writer of `scene_t.effect`.
-  - UI and type hooks write through the EffectsManager edit API, which fans
-    out and marks AutoSave.
-  - EffectsManager and FxBuffer are foreground-only.
-  - The DTCM arena is never cleared by the system ("clear unless you
-    adopt"; masking unwritten reads, as CrumpBit does, counts as clearing).
-  - Local Effect indices are type-relative, and the mask gate keeps fan-out
-    safe.
-- **Blank names** save as `none.drm`/`none.fx` (all-space stem); an empty
-  stem becomes `inst`. Pass explicit spaces for blank rows.
+- **pat_background_region (S077):** 10,528 B, three non-concurrent uses
+  (AutoSave snapshot, overlap paste, Scene 17 Pattern);
+  `filesystem_patternSnapshotInUse()` gates.
+- **Parameter mirrors (S080):** `PAR_CHAIN_*` / `PAR_TRACK_LOOPABLE` after
+  Globals; commit in `menu_cellCommitValue()`, not `menu_parseGlobalParam()`.
+
+### Storage / Filesystem
+
+- **Copy/clear:** exclusive holder for raw block API; top 132 B = swap block;
+  publish before free; `copyClear_backgroundSuspended()` blocks
+  AutoSave/trace/settings/repair. Name cache lent for 161 B HCNAMES remap.
+- **No backward compatibility, ever (user, standing):** no migration, aliasing,
+  or converters.
+- **Wording (user, S081):** stored data are *files*, not "cards."
+- **AutoSave (S074):** validators probe exact length; AsyncFATFS stores
+  cluster-rounded size while open; self-recovering failures → trace only.
+- **Bus compressor (S074):** St1 (panel) = `output2` = DAC1; St2 (panel) =
+  `output` = DAC2. Settings page last (`MENU_GLOBAL_SCENE_SUBPAGE` 3, `+`);
+  `PAR_BUS_COMP_*` never commit through `menu_parseGlobalParam()`.
+- **Blank names:** `none.drm`/`none.fx`; empty stem → `inst`.
+- **One pan rule (S075):** 0..127, display − 63 (`DTYPE_PM63`), stored 63 =
+  centre. Stereo/mono laws may differ; display and default must match.
+
+### DSP
+
+- **S073 invariants:** new rows need `IM_SPECIAL_*` tag; int16 voice filter
+  and float Effect filter are twins; fused chains keep every
+  truncation/saturation; DMA Normal non-cacheable + `DSB` after pack; ITCM
+  growth = RAM under approval policy.
+- **Measuring flash:** `link_budget.py` warns < 16 KiB. Use `make all` first.
+- **Oscillator run modes (S088, `osc1_run`):** `rst` must stay bit-identical.
+  `fre` never resets the carrier phase; `itp` resets it and crossfades the
+  old carrier (`OscCarrierSnapshot`, 28 B) for 132 samples, rendered plain
+  (no FM/sync/ring on the old copy). A decayed `itp` is exactly `rst`; a
+  refused `itp` claim falls back to `fre`. The two interpolation slots are
+  shared: ongoing `itp` fades are reserved in `modNode_resetTargets()` before
+  wavetable blending. `ampRampArm` arms one block of post-chain/FM ramps;
+  never pass unequal ramp endpoints when it is clear. Filter coefficient
+  changes in `fre`/`itp` use `SVF_recalcFreqSlew()` (0.28 per block).
+
+---
+
+## Open Items
+
+Unresolved decisions, code gaps, and deferred work.
+
+- **Flash image check (D-C1):** keep permanently or remove — still undecided.
+  `flashImage.c` checks a stamped CRC32 per sector; mismatch shows
+  `Img BAD s:…` and waits for BAR1.
+- **Rollback hazard:** pre-S073 firmware over a grown image plays program code
+  as audio. Reinstall samples at low volume before rolling back past S073.
+- **`AUTOSAVE_TRACE_RECORD_COUNT`** is still the temporary 2,048-record
+  expansion in `config.h` (normal default 64). Needs a decision.
+- **Production SD timing holds:** 250 ms pre-SD, paced ACMD41 (1 s timeout),
+  50 ms post-mount, 50 ms pre-Bank. Motivating hang not reproducible.
+- **Deferred tooling:** when logging formats settle, add a read-only `/tools/`
+  script that turns copied card outputs into dated `dev_log_date.txt`.
 - **Card preparation for older cards:** HCPR v2 and 145-row HCNAMES are
-  rejected. Delete root `.hcnames`, `.hcnamtmp`, `.hcprms1` and `.hcprms2`
-  once, and firmware rebuilds them.
-- **Carried small debt** (SCOPING_TARGETS "Session 072 carried debt"; status
-  in `074_SESSION_HANDOFF_LOG.md` §13.3):
-  - Makefile echoed comments and the default goal;
-  - the `mixer.c` and `ResonantFilter.c` duplicated comment lines;
-  - `presetManager.c` comment indentation;
-  - ~~stale `verify_bank_autosave.py`~~ (fixed in S075 F2: format 3, 161
-    rows, 51 Scene cells);
-  - unreachable Scene Save phases 33–36.
-  - Closed in S074: the `fxbuf_init()` order and the FX return ramp while
-    `off`.
-- **Repository hygiene:** the card copies `SD_CARD_ATS_BOOT_BUG/` and
-  `SD_CARD_ATS_CORRECTION_OUTPUT/` (with macOS `.Spotlight-V100`) are
-  committed; they are the evidence for the S074 AutoSave fix.
-- S070 and S071 task documents are superseded by their handoff logs and may
-  be deleted.
-- The Phase 4.5 no-op copy surface (`pat_copyTrack/Pattern/Bar`) and
-  `copyClearTools.c/h` were removed in Session 075 and replaced by
-  `Core/Menu/CopyClear/`.
-- S069 planning documents (`S069_ATS_PAT_BOUNDED_CPU.md`,
-  `S069_NON_SEMANTIC_MAINTENANCE.md`, `S069_SLACK_REACTIVE_COMPACTION.md`,
-  and their CLAUDE variants/implementation docs) are superseded by
-  `069_SESSION_HANDOFF_LOG.md` and may be deleted.
-- S068 planning documents (`S068_PAT_ASSIGN_BUG*.md`,
-  `S068_MISSING_CHASELIGHT.md`, `S068_TRACK_SETTINGS_IGNORED.md`) are
-  superseded by `068_SESSION_HANDOFF_LOG.md` and may be deleted.
-
-- Read `knowledge_files/log_archive/040_SESSION_HANDOFF_LOG.md` before
-  continuing Scene/Bank or filesystem work. It preserves the verified
-  Session 040 implementation, the Bank Load fix, and archived root notes.
-- Session 042 completed the HCNAMES/name-SRAM and filesystem-cache refactor.
-  Read `042_SESSION_HANDOFF_LOG.md` before changing identity ownership,
-  `.hcindex`, `.hcnames`, typed staging, canonical-name repair, Bank masks, or
-  Instrument Load's reversible `kit` row. Archive that handoff before deleting
-  the Session 042 working plans/logs.
-- Current filesystem authority:
-  `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` and
-  `knowledge_files/specification_reference/ASYNCFATFS_REFERENCE.md`. API
-  boundaries and live memory ownership are in `MODULE_INTERCHANGE_SPEC.md` and
-  `STORAGE_SRAM_MANIFEST.md`; the latter records the current (S073) flash,
-  sample-flash and RAM layout and totals. Dynamic Pattern storage is in
-  `PATTERN_DYNAMIC_STACK.md` and its Session-069 reservation/repair update.
-  AutoSave format/reader/writer authority is
-  `AUTOSAVE.md`; development-mode and logging authority is `DEV_MODES.md`. Read
-  `SESSION_040_AFATFS_FOLLOWUP.md` before extending AsyncFATFS. The complete
-  reference set is indexed below, including the historical DSP audit, live
-  memory manifest, module map, and oscillator-interpolation document.
-- Session 061 historical reader authority is
-  `knowledge_files/log_archive/061_SESSION_HANDOFF_LOG.md` plus the updated
-  specs. Its then-current HCNAMES covered rows 0..128; Session 064 authority
-  expands the live schema to 161 rows with Pattern rows 129..144 and Effect
-  rows 145..160. ST6 uses HCPR v3 and strictly rejects the old 145-row/v2
-  card state; first-card preparation may delete `.hcnames`, `.hcnamtmp`,
-  `.hcprms1`, and `.hcprms2`.
-  Instrument rows require their type field. Boot uses matching HCPR winner,
-  all-refreshed settings-Bank-matching HCNAMES, then canonical fallback in that
-  order. Case 3 always empties the whole Scene. Preserve all 96 HCNAMES types
-  outside destructive payload staging for the full traversal.
-- `SD_CARD_READER_9/` is the strong post-boot fixture for the completed
-  HCNAMES-authoritative path and the outstanding matching-winner mixed-path
-  reboot. Its generation-10 mask and HCNAMES R flags agree exactly. Do not use
-  static-Bank-tree comparison alone to judge its intentional Rollin overlays.
-- The hardware has no real-time clock. FAT timestamps may retain fixed/default
-  values and must not be used to order or validate device operations. Use file
-  contents, CRC/generation fields, structural comparison, and trace order.
-- Source layout is now `Core/Bank/Scene/` and `Core/Bank/BankData.*`, not
-  `Core/Scene/`.
-- Scene/Bank saves persist exact 10,656-byte PAT4 files containing the complete
-  dynamic Pattern region. Legacy v1-v3 text is import-only. Scene directories
-  contain exactly one `<Pattern name>.pat`; root library files are
-  `Pattern/NNN <name>.pat`.
-- Session 062 completed the Phase 4 dynamic Pattern storage system.
-  PatternData now owns a per-Scene address array, event pool, bit-packed free
-  bitmap, and Pattern/track parameters in `pat_regions` (168,304 B). Read
-  `062_SESSION_HANDOFF_LOG.md` and `PATTERN_DYNAMIC_STACK.md` before changing
-  PatternData internals, pool block format, or allocator behavior. The
-  Session 062 no-op copy APIs were replaced by S075 copy/clear
-  (`COPYCLEAR_UTILITIES.md`).
-- Session 064 functional Pattern AutoSave testing closed PASS on 2026-09-14 using the
-  full 16-Scene Test Card B hardware output. All 19 root PAT4 candidates were
-  valid; every Scene winner differed from its fixture Pattern; all Pattern
-  HCNAMES rows were `@|R`; both HCPR v2 records were valid; and every Scene had
-  committed scalar changes. The retained trace had no operation errors or
-  phase stalls, though its bounded diagnostic ring reported 6,513 dropped
-  records. TC5 power-fail and TC9 REC/erase gating require instrumentation and
-  are explicitly not part of this functional closeout. See
-  `knowledge_files/log_archive/064_SESSION_HANDOFF_LOG.md`; raw fixture/output
-  directories may be removed after archival.
-- Session 043 completed the bitmap Pattern/LUT/tagged-runtime/transient-ROM
-  storage pass (now superseded by Session 062 for Pattern storage). Read
-  `043_SESSION_HANDOFF_LOG.md` before changing slider conversion,
-  InstrumentManager runtime ownership, DTCM placement, or the RAM-allocation
-  approval policy. `transientData` is FLASH-resident; target-audio stress
-  validation of that placement remains pending.
-- Session 044 completed the cold-boot tagged-runtime/LFO activation and runtime
-  Scene/Bank Load terminal ordering. Read
-  `044_SESSION_HANDOFF_LOG.md` before changing Scene activation,
-  `preset_startDrumsetApply()`, Load:Bank preview masks, HCNAMES/index ordering,
-  or the accepted OK/OW command UI.
-- Resident Instrument parameter values and target selectors are compact bytes:
-  instrument_param_value_t and instrument_target_token_t. Target off is 0xff;
-  wide descriptor/Scene IDs exist only for lookup/runtime resolution. Velocity
-  targeting is self-scoped plus its Morph token, while LFO voice selection
-  supports self, voices 1..6, and scn.
-- Bank has a 16-Scene resident workspace. Its v2 manifest carries
-  active_scene and a 16-bit scene_mask_voice_edit; Bank-local Scene folders
-  are 00..15. Bank Load delegates each selected local payload through the
-  shared Scene loader, and Bank Save serializes the selected children through
-  root-Bank reuse plus per-selected-child delete/rewrite. This is not a crash-recoverable
-  transaction; temporary/old promotion names are not used.
-- Instrument membership is fully dynamic at boot and runtime. SceneData must
-  initialize before InstrumentManager constructs tagged members. Scene
-  activation clears outgoing targets, image-applies all six incoming types,
-  then performs one all-source two-LFO-pair/velocity rebind; cold boot starts
-  that exact ordinary Scene worker after audio startup. Never assume a fixed
-  Drum/Snare/Cymbal/HiHat slot arrangement.
-- Bank Load must reset shared Scene child-discovery scratch before every
-  Bank-local Scene payload. Otherwise a full Bank reuses child 00's embedded
-  Kit/pattern/effect names for child 01, which surfaces as BnkL14 (the Bank
-  wrapper's decimal phase 20 rendered in hexadecimal). The saved Bank tree is
-  valid; this is a loader-state isolation requirement. The reset helper is
-  implemented in filesystem.c, documented in filesystem.h, and was confirmed
-  by the user on hardware in Session 040.
-- Instrument, Kit, root Scene, and root Bank Load/Save now share exactly one
-  `fs_list_cache_name[1000][9]` display-name cache (9,000 bytes). Instrument
-  rows are sorted; numbered-library rows are direct `000..999` slot rows with
-  blank rows preserved. HCNAMES has its separate 161-by-9 mirror and never
-  borrows this disposable browser cache. Menu entry/type changes and exit
-  dispose or reload the same browser cache; no per-instrument or per-library
-  name cache is allowed.
-- Root `/.hcnames` is the authoritative active identity **and provenance**
-  register: row 0 Bank; rows 1..16 Scene; rows 17..32 Kit; rows 33..128 six
-  Instruments per Scene; rows 129..144 one Pattern per Scene; rows 145..160
-  one Effect per Scene. Its physical schema is one
-  `#types<TAB>drm<TAB>snr<TAB>cym<TAB>hat` header plus 161 rows.
-  Bank/Scene/Kit rows are `name<TAB>source[<TAB>R]`; Instrument rows are
-  `name<TAB>source<TAB>type[<TAB>R]`; Pattern rows use the non-Instrument form.
-  `-`, `?`, `000..999`, and `@` are its only source tokens. Pattern `@`
-  (`0x1ffc`) is distinct in RAM from Instrument-direct `@` (`0x1ffd`). The
-  322-byte filesystem-owned source
-  register survives name-cache reuse and replaces the retired 32-byte
-SceneData source array. Runtime holds 90 bytes of active identity: one Bank,
-  one Scene, one Kit, six Instrument names, and one Effect filename stem.
-  `scene_t` and `kit_t`
-  contain no display names or retained filename stems. Because text rows have
-  variable length, a targeted update reads the header and all 161 paired rows, overlays only
-  its owned rows, and rewrites the file.
-- HCNAMES paired source correction: a successful non-empty root Bank Load must
-  stage row 0 to its direct `op_slot` before the Bank-owned HCNAMES close gate,
-  just as the empty-Bank branch does. `settings.cfg` is the 17-line
-  source-free system file: it supplies `active_bank` for boot selection and
-  never stores Scene sources. Legacy `scene_source_NN` keys are accepted only
-  to be ignored during migration.
-- Instrument Load AutoSave root-Instrument and InstrumentMrp fixtures are
-  hardware-confirmed:
-  root-pool Instrument commit marks type plus owned Normal/Morphable Morph
-  endpoints for every committed destination; InstrumentMrp marks only committed
-  Morphable Morph endpoints; hidden `kit` restore marks nothing. Authority:
-  `048_SESSION_HANDOFF_LOG.md` and `AUTOSAVE.md`. Hardware inspection must leave both nested
-  Instrument Load and the parent Load/Save page, then wait through both the
-  normal five-second debounce and the bounded record transaction. That page
-  intentionally holds the canonical mask and trace in RAM, while HCNAMES
-  defers its `@` publication until the nested session closes. A copied card
-  while browsing—or after a lone trace `S` but before `A...T`—cannot disprove
-  an immediate marker. Field evidence on 2026-08-11 showed HCNAMES `@` for a
-  normal pool file while tracking was live but its Instrument offsets were
-  absent; Menu's temporary-operation latch was therefore rejected as request
-  provenance. The corrective path reads the existing filesystem request flag,
-  without allocating new state. The same field pass exposed the map's
-  Bank-present precondition, so the final commit also publishes each actual
-  destination before marking it. A subsequent current-image capture still had
-  no Instrument `D` offsets, so no further persistence-path guess is allowed:
-  `autosave_markWholeInstrumentDirty()` now emits a fixed-size `I` trace
-  summary with map-valid/tracking/all-published flags and expected/accepted
-  counts. The acknowledgement fix was then hardware-confirmed: a normal root
-  load at Scene 5/slot 0 produced `J flags=0x03`, `I flags=0x07` with 76
-  expected/accepted bytes, and a successful `A/V/M/C/P/T` sequence; the newly
-  committed `.hcprms2` generation 2 persisted `drm` Normal/Morph bytes matching
-  `brezeld1.drm`, while HCNAMES row 63 was `brezeld1 @`. The preserved AutoSave
-  name `rollind1` is correct because names/sources remain HCNAMES authority.
-  A later combined hardware fixture wrote generation 3 in `.hcprms1`: Scene
-  5/slot 0 Normal and Morph values matched `brezeld3.drm`, while Scene 5/slot
-  1 changed only its Morph allocation and matched `casiopd3.drm`; its type,
-  AutoSave name allocation, and Normal allocation were byte-for-byte
-  unchanged from generation 2. The retained 64-entry trace ring wrapped the
-  earlier root `I`/`J` records behind two Drum-Morphable dirty sweeps, but its
-  `A/V/M/C/P/T` sequence reached successful generation-3 publication. Only
-  the reversible-`kit` fixture remains pending; the observer has no new RAM
-  allocation or record-size change.
-- The first nested Instrument-entry `kit` label delay is now observed with
-  trace stage `N`: paired entry, HCNAMES read/flush, `.hctmp` snapshot, and
-  typed-index request/completion ticks, each with Scene/slot/type. It is a
-  diagnostic-only producer in the existing logging ring and must identify the
-  slow step before entry behavior changes.
-- Root Instrument commits additionally emit `J` immediately after SceneData
-  assignment: requested/called flags prove whether the whole-marker gate was
-  reached before its `I` map/tracking/publication outcome. This is diagnostic
-  only and exists because clean-card captures currently retain only `S`.
-- User-approved Menu exit queue: one normal-SRAM1 byte,
-  `menu_pendingPageSwitch` (zero none; page-plus-one encoding), retains the latest requested
-  non-Load page only while a Load/Save owner holds `menu_storageBusy`. The
-  Menu poll consumes it via the ordinary page-switch exit path before any
-  browser retry. This prevents a physical mode-button exit from being silently
-  dropped during Instrument I/O/apply; it owns no payload or name data.
-- Every create-capable HCNAMES path first completes and closes a
-  case-insensitive root absence proof. A NULL read open is not absence; one
-  folded match permits one read retry, while duplicate matches and every
-  scan/open/close/FAT failure remain errors and authorize no creation.
-- Typed load staging is a separate aligned 2,048-byte union, never the
-  9,000-byte name cache. It holds one Kit, one Instrument candidate, or Scene
-  settings plus one Kit. Scene Pattern data is excluded: after settings and
-  the embedded Kit validate and commit, PAT4 streams into the selected Pattern
-  region and is fanned out only after complete validation. Pattern AutoSave
-  writes only from its separate immutable snapshot.
-- Boot writes `/Kit/.hcindex`, `/Scene/.hcindex`, `/Bank/.hcindex`, and the
-  four registry-owned Instrument indexes one at a time, then reloads
-  `/Bank/.hcindex` before initial Bank selection because Instrument generation
-  disposes the shared cache. Kit/Scene/Bank Save performs a physical parent
-  rescan and complete `.hcindex` rewrite before releasing its callback, then
-  refreshes the current Save slot display. Runtime Instrument entry opens the
-  selected type's index directly and repairs only missing/empty/corrupt
-  metadata; it does not regenerate every index.
-- A pure root Scene/Bank Load does not use the Save rebuild. It commits
-  payload/HCNAMES, publishes the completed result, applies the active Scene
-  through the shared runtime worker, then reloads the unchanged selected
-  `.hcindex` read-only as the accepted command's final step. Load:Bank entry
-  must also preview the highlighted Bank's children before OK is accepted (a
-  resident Bank index alone is not selection readiness), but the preview must
-  **not** hold input: see the Load/Save Slot Scrolling Policy (2026-10-19).
-- Accepted OK/OW requests alone own `menu_loadSaveCommandActive`: render `...`,
-  suppress every cursor, and retain input locking until true terminal work
-  finishes. Preparatory index/preview work may use `menu_storageBusy` without
-  showing `...`. Every completion resets to the bracketed type row.
-- Sessions 045–064's committed AutoSave implementation is the
-  accepted baseline, not rejected work: exact 34,768-byte A/B records, one 3,856-byte
-  canonical mutation mask, bounded mask/value capture with atomic
-  take/re-dirty behavior, typed scalar markers, source-free v1 settings, and
-  the AutoSave lifecycle trace, typed 161-row HCNAMES, scalar/Effect and Pattern boot
-  readers, and per-Scene Pattern A/B files.
-  Available scalar controls are accepted as
-  hardware tested: Scene; Kit/Instrument; and MIDI channel/note, which are
-  Scene values. There is no user-changeable Bank scalar control for another UI
-  test. Do not reopen this as a vague coverage matrix. Authority:
-  `knowledge_files/specification_reference/AUTOSAVE.md`.
-- Production currently includes four pre-audio SD timing holds (250 ms before
-  SD init, paced ACMD41 with one-second timeout, 50 ms post-mount, and 50 ms
-  pre-Bank). The intermittent boot hang that motivated them is not reproducible
-  or localized. If it recurs, capture a non-perturbing stage/operation deadline
-  before adding more delays; Dev Mode's `lcd_waitForIdle()` changes timing at
-  many internal transitions.
-- The former Kit/Scene/Bank per-slot presence/display/alias arrays are retired
-  (69,000 bytes combined). Session 042 also removed the dead `kitBrowser`
-  compatibility bridge and its 1,000-entry `kb_map`, releasing the linked
-  2,004-byte SRAM allocation. Kit browsing now uses only the filesystem-owned
-  slot cache/index accessors.
-- The former Bank child alias/presence arrays, 64-entry File/Dir list caches,
-  and firmware recursive-delete stacks are gone. Session 058 added one bounded
-  16-by-9 display-name capture so Bank Load scans the selected Bank once.
-  Two unreachable 49-byte File/Dir Menu strings plus nine result bytes still
-  link (107 bytes total).
-- Never add object self-name fields to `sceneset.scg`, `bankset.bcg`, or
-  instrument files. Object identity comes from directory/file names.
-- For overwrite code, enter the correct parent root first, parse visible child
-  names with the right product parser, prove zero/one candidate, capture the
-  complete selected afatfsObjectInfo_t, and delete only that exact same-slot
-  object. Native afatfs_deleteTree copies its identity and completes
-  asynchronously; its false return means no callback. This is documented in
-  `FILESYSTEM_SPEC.md` and `ASYNCFATFS_REFERENCE.md`.
-- File/Dir/sDir are no longer in the normal type cycle; their compatibility
-  filesystem/Preset calls do no work, although residual Menu display code and
-  the two 49-byte strings remain linked. There are exactly two development
-  flags: `DEV_MODE_DIAGNOSTIC` is screen-only and `DEV_MODE_LOGGING` is
-  file-only; trace is logging. The current configuration is
-  diagnostic 0 and logging 1, with the temporarily approved 2,048-record
-  trace ring (normal default: 64). Current file outputs are `/bootlog.bin` and
-  `/asavetrc.bin`; there is no implemented `/devlog.bin`. A timed-out
-  `ASENSURE` may append a 64-byte raw diagnostic capsule to its normal
-  eight-byte boot token (72 bytes total). The completed read-only decoder is
-  `tools/decode_devlogs.py`; it decodes `/bootlog.bin` and `/asavetrc.bin` and
-  is the tool to use for card analysis. Authority:
-  `knowledge_files/specification_reference/DEV_MODES.md`.
-- Session 050 is closed in
-  `knowledge_files/log_archive/050_SESSION_HANDOFF_LOG.md`. Its verification
-  supersedes the disposable root planning/evidence files for Scene Load
-  publication. Those files may be deleted after retaining the handoff and
-  specification references; they are not future authority.
-- Session 051 implemented the Scene HCNAMES follow-up: Menu now admits a
-  nonzero Scene dirty mask at the physical Load/Save exit boundary, and flushes
-  that mask before a later Kit-family type can overwrite the operation-scoped
-  identity block. The existing filesystem writer and identity publication are
-  unchanged. A single-destination Scene 015 Machine -> Scene 15 fixture is
-  hardware-confirmed: Scene/Kit/Instrument HCNAMES rows and generation-2
-  publication are correct. Multi-destination, deferred-exit, toggle, hazard,
-  and failure fixtures still need hardware evidence.
-- Session 051 also implemented the InstrumentMrp reversible `kit` row. It
-  displays the selected slot's HCNAMES Instrument name, writes a Morph-only
-  projection to the existing `Instrument/<type>/.hctmp.<ext>` transport, and
-  restores only Morphable Morph endpoint cells. The first hardware pass exposed
-  that the restore copied the staged normal image into the Morph endpoints;
-  presetManager.c now dispatches a Morph-to-Morph staged commit when
-  filesystem_loadedInstrumentWasMorphTemporary() is set. The repaired image is
-  hardware-confirmed. Type, Normal image, HCNAMES identity/source, and routing
-  remain untouched.
-- Session 052 closed Bank Load persistence. `settings.cfg` now re-serializes
-  `active_bank` after a successful Bank Load/Save, and the AutoSave Bank
-  scene-present mask equals the effective selected-child union.
-  `bank_setScenePresentMask()` now returns whether it changed, and Bank Load
-  re-marks the two present-mask bytes on a no-op union. Hardware-verified with
-  Bank 008: active_bank=8, scene_present_mask=0xffff, B trace commit/drain
-  0xffff, and `tools/verify_bank_autosave.py` PASS. Deferred to
-  `SCOPING_TARGETS.md`: the boot Kit-quarantine refactor (KQ019KST), the Bank
-  Save present-mask union (P1), and the boot settings-mark redundancy (P2).
-The disposable `SESSION_052_PRE_PLAN.md` and `SESSION_052_POST_ANALYSIS.md`
-are superseded by `knowledge_files/log_archive/052_SESSION_HANDOFF_LOG.md`.
-- Session 053 reimplemented AsyncFATFS recursive delete and the Bank/Scene/Kit
-  overwrite path (exact-object delete/recreate, direct Bank Save, structured
-  remove/rename results, no tmp/old promotion) and relaxed the LFN shape
-  validator to accept 0xffff padding. Source builds (text 379,660, data 396,
-  bss 94,612) but the overwrite matrix is UNPROVEN on hardware: Scene overwrite
-  returned ScnS05 though the slot was replaced, Kit Save did not materialize,
-  Kit Save menu was empty, and boot Bank Load still times out (B012S09I).
-  HCNAMES source provenance is not updated on Save (reports loaded slot, not
-  saved). The AutoSave boot Bank section is empty by design (tracking enabled
-  after the boot Bank Load) and is deferred to the AutoSave reader milestone.
-  Deferred targets are in SCOPING_TARGETS.md; durable closeout is
-  knowledge_files/log_archive/053_SESSION_HANDOFF_LOG.md. The four working docs
-  (SESSION_053_PRE_PLANNING.md, RECURSIVE_TREE_DELETE_REIMPLEMENT.md,
-  KIT_PARSE_BOOTLOCK_RESOLVE.md, LOAD_SAVE_AUTO_ELEMENT_TEST_REPORT.md) may be
-  deleted; their durable facts are preserved in the handoff and SCOPING_TARGETS.
-- 2026-08-21: investigated a boot hang/timeout with no `/bootlog.bin` on the
-  card. `tools/devlog_unpack.py` (new, low-token sibling of
-  `decode_devlogs.py`, same lookup tables) showed the captured
-  `/asavetrc.bin` was an ordinary clean prior session with no `X`/`E`
-  records — the actual finding was that a raw blocking call inside the
-  pre-audio window that never returns (`SD_init()`, bit-bang SPI, or a fixed
-  `timebase_holdPreAudioMs()` hold) skips every cooperative check, so nothing
-  ever runs to log it. Added `DEV_LOGGING_IWDG` (config.h, default 1) as the
-  fix: starts the STM32F765 IWDG once at boot, fed from both foreground pumps
-  (`filesystem_tick()` and `filesystem_blockPoll()`, never an ISR) so a genuine
-  hang stops feeding and the IWDG resets the MCU on its own ~32.8s native
-  period; a software `DEV_LOGGING_IWDG_EXPIRE` (2 minutes, config.h) ceiling
-  separately catches a foreground loop that keeps ticking forever without
-  finishing boot. **The flag now defaults to 0 and is UNVERIFIED on hardware.**
-  Its first version caused an indefinite boot-splash hang (IWDG init spun on
-  `IWDG_SR` before writing the `0xCCCC` key that starts the LSI; nothing else
-  in this firmware enables the LSI). The init is now correctly ordered, bounds
-  every handshake against TIM6 ms, and starts nothing if `LSIRDY` never
-  appears. The `filesystem_blockPoll()` feed is mandatory: modal sample install
-  bypasses `filesystem_tick()` and would otherwise be reset mid `sampleFlash`
-  erase/program. Enable deliberately, not as a default. Since the IWDG has no early-warning interrupt on this part, a 12-byte
-  capsule in a new `.devwdg_noinit` SRAM2 section (approved ceiling 32 bytes;
-  see STORAGE_SRAM_MANIFEST.md) survives the reset and is replayed to `/bootlog.bin`
-  on the next boot via the existing `filesystem_writeBootFailureLogBlocking()`
-  path — no new on-card format. No NVIC/interrupt configuration is touched;
-  the IWDG has no interrupt line on this part. Full contract in DEV_MODES.md
-  and config.h. UNPROVEN on hardware — this has not yet been exercised
-  through an actual reproduced hang.
-- **Build-system footgun (resolved Session 070 Phase 1):** the Makefile now
-  has `-MMD -MP` plus `-include $(OBJS:.o=.d)` header dependency tracking.
-  Editing a header correctly triggers recompilation. `make clean` is no
-  longer required after header edits.
-- Session 2026-08-21 Scene-Pattern fix: Pattern is the only Scene payload
-  playback/UI address through `seq_activePattern`/`menu_shownPattern` instead
-  of `scene_getActiveIndex()`. Bank Load committed a new active Scene without
-  realigning them, so Scene Load wrote the committed Scene while the sequencer
-  read Scene 0 — presenting as "Scene Load never loads the pattern". Fixed by
-  new `seq_alignActivePatternToScene()` (state realign only: no LED notify, no
-  MIDI program change, no note-off) plus `menu_setShownPattern()`, called at
-  the Bank Load phase-20 commit. Scene Load itself was correct and unchanged.
-  Confirmed by trace (`R DONE=1 mask=0x0020 {5}`) and by Session 055's
-  hardware round-trip testing (loading a Scene after a PERF Scene switch now
-  plays/displays immediately). Authority: `SCENE_LOAD_PAT_RESTORE.md`,
-  `knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md`.
-- Session 054 closed the pinned recursive-delete/overwrite target
-  (`SCOPING_TARGETS.md`'s "duplicate-slot overwrite"), through five
-  successive bugs found by an iterative card-driven diagnostic process, not
-  by inspection alone:
-  - **Bug #1** — `filesystem_deleteSlotDirectory_tick()` had two completion
-    gates that treated its own diagnostic-only 50,000-poll stall latch
-    (`op_delete_slot_timeout_observed`) as a hard failure by itself, so a
-    nested Scene delete slow enough to trip the counter reported
-    `FS_STATUS_ERROR` even after finishing correctly (`ScnS05`, seen even
-    though the slot was actually replaced). Fixed: only the scan's own
-    error/duplicate latches or the native result now decide pass/fail; the
-    stall is purely observational and durably traced (see the `'X'`
-    `PHASE_STALL` stage below).
-  - **Bug #2** — none of the four Save paths (Kit/Scene/Bank/root
-    Instrument) staged `filesystem_setResidentSource()`, so a saved row kept
-    reporting its previously *loaded* slot as HCNAMES source. Root Instrument
-    Save's gap was deeper: it never reached any HCNAMES publish path at all
-    (`filesystem_requestUpdateResidentInstrumentNames()` had zero callers
-    repo-wide) — fixed by adding a hand-off into
-    `FS_INTERNAL_OP_UPDATE_HCNAMES_INSTRUMENT` plus a new type-filtered
-    index-rebuild path. See `FILESYSTEM_SPEC.md`'s Save/Overwrite Safety
-    section.
-  - **Bugs #3/#4/#5 — the actual `ScnS05` root cause**, found only after
-    building exhaustive failure-site instrumentation into the native
-    `afatfs_deleteTree()` traversal (17-value
-    `afatfsDeleteTreeFailureSite_e`) and iterating repeated card retests: the
-    descend/ascend path depends on one invariant —
-    `file->directoryEntryPos` must always identify whichever directory the
-    handle currently has open, since that is the only thing distinguishing
-    "the delete root just emptied, finish" from "a nested child just
-    emptied, ascend". Two *sequential* bug fixes (Bug #3: stop
-    reconstructing a resume target from an unset `parentCluster`; Bug #4:
-    remove a redundant, apparently-unreliable parent re-scan) each correctly
-    fixed their own symptom but broke one half of that invariant in the
-    process — Bug #3's fix cleared `directoryEntryPos` as a side effect of
-    reusing `OPEN_DIR`'s reset code, and Bug #4's fix assumed
-    `op->currentTarget` survived a descent untouched, when the descended-into
-    child's own internal deletes overwrite that register with every object
-    they process. **Bug #5** is the real fix: snapshot the child's identity
-    and directory-entry pointer at the moment of descent
-    (`descendTarget`/`parentEntry` on the persistent `afatfs.deleteTreeState`
-    singleton) and restore both on ascend, one level deep only (matching the
-    existing `parentCluster` depth bound; `afatfs_deleteTree()` has exactly
-    one caller, never more than one nested directory below a delete root).
-    **Hardware-confirmed Session 055**: a full Kit-modify-save,
-    Instrument-modify, Scene-modify-save, and Bank-save-then-load round trip
-    reported no errors. The dedicated low-level acceptance matrix (malformed
-    LFN, cyclic/broken-parent, injected FAT/cache error) is still unexercised
-    as its own fixture set — see `ASYNCFATFS_REFERENCE.md`.
-  - Extensive new, permanent diagnostics were added while chasing this:
-    delete-slot failure-reason classification (`fs_delete_slot_reason_t`),
-    the native 17-site failure-site enum above, a shared
-    `filesystem_pollPhaseStall()` edge-triggered stall detector (also used at
-    Bank Save entry and the runtime AutoSave drain — the drain site is the
-    one place a stall now forces a real error completion instead of only
-    observing, since it previously had no bounded escape at all), an ordered
-    per-Save-type lifecycle trace (`'O'`), and a universal `'E'` backstop on
-    both of filesystem.c's shared terminal-completion functions so a future
-    failure path nobody thought to instrument still gets caught by
-    construction. All documented in `DEV_MODES.md`'s stage-letter list.
-  - Card damage found and repaired along the way: six root Scene folders were
-  missing legacy `effects.fx` and/or their embedded Kit contents, all consistent
-    with an *earlier* interrupted, non-atomic Scene Save (the old tree is
-    deleted first, and the legacy `effects.fx` was written last of ~12 sequential file
-    operations, so an interruption anywhere in between leaves a stub that
-    Load's current all-or-nothing child check permanently rejects). Repaired
-    on-card; **no save-path hardening was implemented** — four ranked options
-    (tolerate a missing `.fx`; write it earlier; clean up a failed save;
-    real atomic commit) are recorded but deferred. See
-    `knowledge_files/log_archive/054_SESSION_HANDOFF_LOG.md` for the full
-    round-by-round trail and every file/line changed.
-  - `AUTOSAVE_TRACE_RECORD_COUNT` is still the temporary, approved 2,048-record
-    expansion (`config.h:255`, normal default 64) adopted for this
-    investigation. **Needs a decision**, not yet reverted: keep it while any
-    further recursive-delete/Save-path work is plausible, or shrink back to
-    64 now that the pinned target is hardware-confirmed closed.
-- Session 055 hardware round-trip testing (Kit/Instrument/Scene/Bank
-  load-modify-save) confirmed Session 054's fixes above and surfaced a new
-  Load-menu freeze, root-caused across two rounds — **do not re-litigate as
-  one bug, they are different defects**:
-  - **Round 1 (real, but not the freeze)**: an unbounded, no-backoff retry
-    livelock — Menu re-posted a doomed Kit/Scene entry request once per
-    foreground pass for as long as AutoSave held the filesystem facade,
-    destructively clearing the shared name cache each time before
-    discovering the refusal. Self-recovering in under a second once AutoSave
-    released, but it visibly rendered the page against a cleared cache (a
-    Scene stem appearing on the Kit row) and burned the foreground. Fixed by
-    gating the deferred-selection dispatch on `filesystem_status() !=
-    FS_STATUS_BUSY` and adding a non-destructive early busy-check to
-    `menu_requestResidentNameScratch()`.
-  - **Round 2 (the actual freeze)**: `menu_showFilesystemErrorOverlay()` —
-    the shared terminal path for nearly every failed Menu filesystem
-    operation — never called `filesystem_ack()`, so one failed read parked
-    the facade at `FS_STATUS_ERROR` **permanently**, silently killing both
-    the AutoSave writer and the trace flush from that moment on (both are
-    admitted only while the facade is `IDLE`). This is why *both* freeze
-    captures ended cleanly with a normal AutoSave completion and contained
-    zero evidence of the freeze itself. Separately, two request helpers
-    (`menu_requestInstrumentIndexLoad()`, `menu_requestLibraryIndexLoad()`)
-    raised `menu_storageBusy` expecting acceptance and left it stuck on
-    refusal, self-deadlocking their own only retry path. Fixed (6 sites
-    total, all in `menu.c`, no RAM cost). **Closed per user hardware
-    confirmation** — freeze no longer reproduces. General rule this
-    reinforces, now stated once in `AUTOSAVE.md`: every Menu-side filesystem
-    terminal path, success or failure, must `filesystem_ack()`.
-  - **Deferred, not fixed**: the AutoSave writer reads the shared 9,000-byte
-    name cache live while serializing its record, and Menu clears that same
-    cache directly (bypassing facade arbitration) from 18 call sites. Only
-    the two hottest callers were closed. The general hazard (a torn AutoSave
-    record, not a hang) needs a proper ownership interlock — deliberately
-    left as a `SCOPING_TARGETS.md` item rather than an architecture change
-    riding along with a freeze fix.
-  - Also fixed this session: a permanent (not merely delayed) failure to
-    restore the cached `kit` row in Load: Instrument/InstrumentMrp when
-    scrolling back to it while the previewed pool file's apply was still
-    draining — the cursor latched to `kit` before the restore was even
-    attempted, and a declined attempt was never retried. Fixed by tracking
-    restore-owed-ness as slot state (data), not as one call's outcome.
-    Preliminary hardware check looked correct; full test matrix (endless pot,
-    InstrumentMrp, stopping dead on `kit`) not yet exhaustively run.
-  - Also fixed (provable race, root cause of the exact symptom shape but not
-    confirmed as the *only* contributor — no trace record survived from the
-    actual incident): a stale Bank/Scene/Kit name briefly shown with the
-    correct slot number on fresh Load/Save entry, because the page's shared
-    tail repaint ran unconditionally before the async `.hcindex` reload it
-    had just posted could complete. Fixed by gating that one repaint behind
-    `!menu_storageBusy`, matching the convention already used elsewhere in
-    `menu.c`.
-  - Full investigation, evidence, and rejected-first-attempt record:
-    `knowledge_files/log_archive/055_SESSION_HANDOFF_LOG.md`.
-- Root-directory working docs for Sessions 054-055 (`SESSION_054_PREPLAN_ASYNC_RECURSIVE_CLEANUP.md`,
-  `SESSION_054_PLAN_DEFECT_EVIDENCE_FIX.md`, `AFAT_RECURSIVE_WHITEPAPER.md`,
-  `SCENE_LOAD_PAT_RESTORE.md`, `LOAD_SAVE_AUTO_ELEMENT_TEST_REPORT.md`,
-  `SESSION_054-055_TESTING.md`, `S055_KIT_LOAD_FREEZE_FIX.md`,
-  `S055_INST_RESTORE_FIX.md`, `S055_BANK_NAME_ENTRY_FIX.md`) are superseded by
-  `054_SESSION_HANDOFF_LOG.md`/`055_SESSION_HANDOFF_LOG.md` and the
-  specification-reference updates above; their durable facts are preserved
-  there and they may be deleted.
-- Session 056 fixed two independent AsyncFATFS bugs and added the autosave
-  page-exit expedite:
-  - **LFN duplicate-creation fix**: `afatfs_createFileContinue()` exited the
-    directory scan early when a viable free-run of deleted entries was found,
-    before checking whether the target file already existed later in the
-    directory. Fixed with a latch-and-continue approach (4 sites, 2 new struct
-    fields). Hardware-verified: no duplicate files across two-boot test.
-  - **Cluster-boundary file-size fix**: `afatfs_fseekAtomic()` did not call
-    `afatfs_fileUpdateFilesize()`, leaving `logicalSize` at 0 for new files so
-    only `physicalSize` (cluster-rounded) was persisted. This was the root cause
-    of the previously unexplained 32,768-byte `.hcprms` files. Fixed with one
-    added call. Hardware-verified: all `.hcprms` files now 34,768 bytes.
-  - **Page-exit expedite**: `fs_autosave_page_suppressed` flag in
-    `filesystem_autosaveWriterSchedule_tick()` resets the writer deadline to
-    250 ms after leaving the Load/Save page, instead of waiting for the original
-    5-second debounce. Pending hardware verification. Does not reduce the
-    inherent two-cycle recovery cost (~12 s) but eliminates wasted gap time.
-  - Root-directory working docs `S056_AFATFS_DUPLICATE_CORRECTION.md` and
-    `S056_AFATFS_FILE_CLUSTER_CORRECTION.md` are superseded by
-    `056_SESSION_HANDOFF_LOG.md` and may be deleted.
-- Session 057 closed the wrap-session punch list (P1 Bank Save present-mask
-  union; P2 redundant settings write accepted as-is; the AutoSave writer's
-  Bank-identity-mismatch case now copy-forwards instead of forcing full
-  regeneration), then implemented and mostly-tested three larger items and
-  root-caused a live Bank Save screen freeze:
-  - **`settings.cfg` safe write** (temp file `settings.tmp` + `afatfs_sync()`
-    + remove-old/rename-promote, plus a boot recovery prelude and a
-    self-checking `lines=17` terminator) — hardware-tested with a deliberate
-    mid-promotion power-cut simulation, PASS. The only fully closed-loop
-    hardware-verified item from this session.
-  - **Empty-Scene/Bank overwrite guard** — `filesystem_requestSaveBank()`
-    filters the save mask against `bank_scenePresentMask()`
-    (`bank_hasResidentBank()`-gated) before the state machine starts; root
-    Scene Save's case 0 refuses outright if the source isn't present. Code
-    landed, build-verified, **not hardware-tested**.
-  - **Boot Kit-directory sanitizer replaced with lazy quarantine-on-failed-
-    load.** Boot no longer opens/parses any Kit payload (closes a real
-    false-boot-failure risk that scaled with library size — 308 blocking ops
-    on the 44-Kit test card, one shared 10 s deadline); a folder is renamed
-    `err...` only when an actual Load attempt proves it invalid. Root Scene
-    Load cascades a Kit-layer failure to the owning Scene; Bank Load never
-    renames a Bank-local Scene folder (positional identity) and never fails
-    the whole Bank for one bad child — `filesystem_lastBankLoadFailedSceneMask()`/
-    `preset_bankLoadFailedSceneMask()` surface it through the existing error
-    overlay instead. Build-verified; hardware-tested only for
-    boot-timing/regression (checklist items 1/2/4/5/6). **The behavioral
-    tests — including the single most important one, the boot-safety
-    regression test — were not run.** Treat the false-boot-failure fix as
-    verified by code review only, not by hardware evidence, until that test
-    runs.
-  - **Bank Save rebuilt as per-Scene delete-then-write**, replacing
-    total-tree-delete-then-recreate. Fixes `ErrS05` (a quarantined
-    `errKit` directory's rewritten LFN entries broke `afatfs_deleteTree()`'s
-    scan on the next Bank Save) and an independent, previously-undocumented
-    bug: a partial `Save:[Bank]` (subset mask) used to silently delete every
-    **non-selected** resident child too. Hardware-tested via a full 16-Scene
-    Bank Save producing a byte-identical, uncorrupted 161-file tree.
-  - **Bank Save/Load screen freeze — root-caused and closed.** A user-visible
-    freeze (static `...`, no recovery short of hard reboot) was first
-    misdiagnosed as AsyncFATFS handle exhaustion (the operation reliably
-    stalled after exactly 5 children, matching `AFATFS_MAX_OPEN_FILES`);
-    built out into a full diagnostic build (pool bumped 5->8, a handle
-    census accessor, a phase-20 hard check) that then **disproved its own
-    hypothesis** — handle count stayed at exactly 1 per child, never
-    accumulating. Actual cause: a total-duration watchdog
-    (`op_bank_total_ticks`/`FS_BANK_TOTAL_TICK_LIMIT`) counted
-    `filesystem_tick()` foreground polls and treated the count as an
-    elapsed-millisecond budget; at the measured ~7,600 polls/second its
-    300,000-poll limit fired at a fixed ~39.5s regardless of Bank size,
-    aborting otherwise-healthy operations mid-write (the 32,768-byte all-
-    `0xFF` "corrupt" instrument files from earlier hardware tests were this
-    watchdog's provisional-write artifact, not an oversized serializer).
-    Fix: removed the watchdog outright (no replacement counter/timer of any
-    kind — see the CRITICAL REMINDERS in `057_SESSION_HANDOFF_LOG.md`), made
-    the two stall detectors whose abort could fire mid-callback during a Bank
-    operation (`BkSt` Bank Save entry, `ScSv` Scene Save)
-    **trace-only**, and reverted the handle-pool bump. **Verified directly
-    against current source, not merely restated from the closeout document**:
-    six sibling stall detectors added the same session (`KtSv`, `KtLd`,
-    `ScLd`, `BkLd`, `StWr`, `Flsh`) were *not* reverted and still abort on a
-    stall; a handle-census hard-abort (`BkHd`) at Bank Save's per-child entry
-    also remains permanently live, ungated by the new `DEV_STALL_DETECTION`
-    toggle. Hardware-accepted: full 16-Scene Bank Save now completes in
-    ~2.5 minutes with no corruption (latency itself is deferred to Session
-    058, `S058_BANK_LOAD_SPEEDUP_PROPOSAL.md`).
-  - `sizeof(afatfsFile_t)` is corrected to **188 bytes** (was recorded as 328
-    in `ASYNCFATFS_REFERENCE.md`; the old figure predated moving expanded
-    delete state out of every handle). Final build, independently re-verified
-    this logging pass by running `arm-none-eabi-size` directly:
-    `text=380,436 data=408 bss=94,848`, a net -832 text/+8 data/+48 bss versus
-    the Session 056 close-out build.
-  - **The Session 056 page-exit expedite was never re-verified on hardware
-    this session**, despite being first on this session's own priority list
-    at the outset. Still exactly where Session 056 left it: code-complete,
-    not hardware-tested.
-  - Still open, not touched this session: the sequencer chaselight
-    disappearing bug (traced but not root-caused — top hypothesis connects to
-    the still-open "single-source-of-truth Pattern/Scene index" item below);
-    an HCNAMES-row-0-vs-`settings.cfg` Bank-identity discrepancy on the
-    current test card (no trace evidence exists to root-cause it); the
-    `bootlog.bin`/`asavetrc.bin` duplicate-name re-verification (plausibly
-    narrowed by the Session 056 LFN fix, but not actually re-checked); the
-    name-cache ownership interlock; the top-level Load/Save entry trace gap;
-    `AUTOSAVE_TRACE_RECORD_COUNT` (still 2048, deferred again).
-  - Full detail, including every point above independently re-verified
-    against current source rather than only summarized from the session's own
-    planning documents:
-    `knowledge_files/log_archive/057_SESSION_HANDOFF_LOG.md`. The six
-    `S057_*.md` root planning documents this session produced are superseded
-    by that log and by the `specification_reference/` updates it made
-    (`FILESYSTEM_SPEC.md`, `ASYNCFATFS_REFERENCE.md`, `DEV_MODES.md`,
-    `MODULE_INTERCHANGE_SPEC.md`, `STORAGE_SRAM_MANIFEST.md`) and may be deleted.
-
-- Session 061 typed HCNAMES and AutoSave boot restore are implemented and the
-  original HCNAMES-authoritative failure is hardware-verified. `.hcnames` has
-  the exact `#types` header and Instrument rows 33..128 serialize/validate
-  `name<TAB>source<TAB>type[<TAB>R]`. The matching-winner reader applies clean
-  HCPR objects and narrow-loads refreshed rows; the all-refreshed special path
-  loads entirely from HCNAMES/library sources. Direct numeric Instrument
-  sources are invalid only when the Instrument row itself supplied them.
-  Pattern files are loaded best effort at boot but are not stored in HCPR;
-  Effects remain absent. All 96 parsed types live in the alternate view of the
-  existing 144-byte Bank-child scratch through the final Scene. See
-  `knowledge_files/log_archive/061_SESSION_HANDOFF_LOG.md` and `AUTOSAVE.md`.
+  rejected. Delete root `.hcnames`, `.hcnamtmp`, `.hcprms1`, `.hcprms2` once.
+- **Carried small debt** (status in `074_SESSION_HANDOFF_LOG.md` §13.3):
+  Makefile echoed comments and default goal; `mixer.c`/`ResonantFilter.c`
+  duplicate comment lines; `presetManager.c` comment indentation; unreachable
+  Scene Save phases 33–36.
+- **S074 deferred:** BC11; F4 trace-ring priorities; saturator α 0.35 A/B;
+  CrumpBit minimum-share run.
 
 ---
 
-## Repository Layout
+## References
 
-```
-./
-├── MEMORY.md                        ← this file
-├── README.md                        ← confirmed hardware, known issues, critical reminders
-├── main.c
-├── config.h
-├── Makefile
-├── STM32F765VIHx_FLASH.ld
-├── requirements.txt
-├── tools/
-│   ├── build_lxrv2_img.py          ← stamps the boot image check and packages the .bin → LXRV2_lxr02.img
-│   ├── link_budget.py              ← flash/ITCM/DTCM/arena report after every build
-│   ├── decode_devlogs.py           ← decodes /bootlog.bin and /asavetrc.bin
-│   └── dsp_test/                   ← host DSP test bench (DSP_TEST.md, S073)
-├── build/                           ← generated, not in VCS
-├── knowledge_files/
-│   ├── SESSION_HANDOFF_TEMPLATE.md ← template for writing new session handoff logs
-│   ├── ENHANCED_FEATURES.md        ← future enhancement notes
-│   ├── OSC_INTERP_AUDIT.md         ← oscillator interpolation audit
-│   ├── specification_reference/
-│   │   ├── ASYNCFATFS_REFERENCE.md    ← low-level async FAT/VFAT API contracts, pumping, LFN/object identity, deletion, and caller rules
-│   │   ├── AUTOSAVE.md                 ← authoritative hidden A/B format, boot readers, dirty ownership, writer lifecycle, limitations, and validation status
-│   │   ├── BANK_PRESET_ARCHITECTURE.md ← parameter storage across Bank/Scene/Kit/Instrument/Effect, Morph, runtime overlays, Scene targets, dirty marking
-│   │   ├── COPYCLEAR_UTILITIES.md     ← Phase 6 copy/clear: behaviour, menus, gestures, engines, fan-out, names, trace stage `c` (S075)
-│   │   ├── CPU_USE_DSP_AUDIT.md       ← DSP cost audit (S073 section, sound classes) and the ordered optimization record (items 1–26)
-│   │   ├── DEV_MODES.md                ← authoritative screen-diagnostic versus file-logging policy and current log formats
-│   │   ├── FILESYSTEM_SPEC.md         ← authoritative product filesystem, kit/instrument files, Scene/Bank storage, and save/load target spec
-│   │   ├── EFFECTS_BUS_REFERENCE.md   ← as-built Effect system: registry, resolution, page, FX sequencer, storage, add-a-type tutorial
-│   │   ├── EFFECTS_MIXER_DSP_REFERENCE.md ← mixer, FX bus and Effect DSP, output pipeline, DTCM arena contract, costs (S073)
-│   │   ├── INSTRUMENTS_DSP_REFERENCE.md ← instrument DSP, parameters, modulation/LFO, costs, how to extend (S073)
-│   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map through Session 078
-│   │   ├── OSC_INTERP_AUDIT.md        ← oscillator waveform interpolation implementation, persistence, runtime behavior, risks, and validation
-│   │   ├── PATTERN_DYNAMIC_STACK.md   ← dynamic Pattern storage, PAT4, Pattern Stack Service, step automation encoding and drain
-│   │   └── STORAGE_SRAM_MANIFEST.md   ← flash, sample flash and RAM map, linker guards, image check, reservation/approval policy (S073)
-│   ├── hardware_archive/
-│   │   ├── HARDWARE_MAP.md         ← full confirmed pin table, IRQ numbers
-│   │   ├── AVR_TO_F765_MIGRATION.md ← architectural notes, sequencer ISR design baseline
-│   │   ├── FRONTPANEL_AUDIT.md     ← legacy front-panel bridge elimination audit
-│   │   ├── SD_CARD_INVESTIGATION.md ← SD false-positive analysis (PA8, 74HC165)
-│   │   └── XP_CONNECTOR_MAPS.md   ← ribbon cable pin mappings
-│   └── log_archive/
-│       ├── 000_SESSION_INDEX.md    ← index of all sessions with keyword lookup
-│       ├── 001_SESSION_HANDOFF_LOG.md
-│       ├── 002_SESSION_HANDOFF_LOG.md
-│       ├── 003_SESSION_HANDOFF_LOG.md
-│       └── ...
-└── Core/
-    ├── globals.h
-    ├── datatypes.h
-    ├── Src/
-    │   └── startup_stm32f765xx.s
-    ├── Hardware/
-    │   ├── clocks.c/h               ← sysclk_init(), FPU enable via CPACR
-    │   ├── timebase.c/h             ← SysTick 4kHz mainboard tick, TIM6 1kHz counters + 500Hz foreground service, TIM7 5kHz LCD drain
-    │   ├── AudioCodecManager.c/h    ← consolidated audio: DMA ISRs, I2S/GPIO/DMA init, SPSC queue
-    │   ├── triggerJacks.c/h         ← CLK OUT/IN, RST IN; OUT jack detect is foreground-polled
-    │   ├── memtest.c/h              ← flash sector probe (boot-time, MEMTEST_ENABLED gate)
-    │   ├── flashImage.c/h           ← boot-time per-sector CRC32 check of the app image (S073)
-    │   ├── frontPanel/
-    │   │   ├── buttonHandler.c/h    ← ISR-safe event ring, main-loop processEvents()
-    │   │   ├── lcd.c/h              ← TIM7-driven async queue, 128-entry SPSC ring
-    │   │   ├── ledHandler.c/h
-    │   │   └── IO/
-    │   │       ├── adcPots.c/h      ← sliders RV5-10, ADC1 DMA
-    │   │       ├── din.c/h          ← 74HC165×5 buttons, SPI1
-    │   │       ├── dout.c/h         ← 74HC595×5 LEDs, SPI1
-    │   │       ├── encoder.c/h      ← SW42, TIM1 IC, Dannegger, accel + rebound suppression
-    │   │       └── endlessPots.c/h  ← RV1-4, atan2 delta tracking
-    │   ├── SD/
-    │   │   ├── filesystem.c/h       ← public facade: typed async load/save/name/scan operations; Kit load/save uses root Kit/ directories; root Instrument load/save exists
-    │   │   ├── storageTypes.c/h     ← Kit/instrument text parser+writer, numbered-folder parser, descriptor file schema helpers
-    │   │   ├── SPI/
-    │   │   │   ├── spi_sd.c/h       ← bit-bang SPI: PC12/PD2/PC8/PD0
-    │   │   │   └── sd_routines.c/h  ← SD_init() only; blocking read/write superseded
-    │   │   └── asyncfatfs/
-    │   │       ├── asyncfatfs.c/h   ← Betaflight asyncfatfs modified for LXR-02, with LFN/case object APIs
-    │   │       ├── fat_standard.c/h
-    │   │       ├── sdcard.h
-    │   │       └── sdcard_lxr02.c/h ← SD block-device shim over bit-bang SPI
-    │   └── USB/
-    │       ├── OTG_Driver/
-    │       ├── Device_Library/
-    │       └── App/                 ← usb_manager, usb_midi_core, etc.
-    ├── Menu/
-    │   ├── menu.c/h                 ← full port, all pages, load/save UI
-    │   ├── menuPages.h              ← 16-page × 8-subpage table
-    │   ├── MenuText.h               ← all label strings
-    │   ├── Cc2Text.c                ← modTargets[] 205 entries
-    │   ├── CcNr2Text.h
-    │   ├── CopyClear/               ← S075 Phase 6 copy/clear: session (routing, range rule, menus, LEDs, suspension), copyOps, clearOps, copyClearService (queue, Pattern engines, register, name buffer, HCNAMES write)
-    │   ├── menuEffects.c/h          ← SHIFT+PERF Effect page: SELECT layout, `typ` transaction, SHIFT Morph view, SEQ lock editing/LEDs
-    │   └── screensaver.c/h          ← screensaver with explicit LCD off/on phases
-    ├── MIDI/                        ← S083 rebuild, single-role modules
-    │   ├── MidiDefs.h               ← MidiMsg (6 B, arrival stamp), statuses, CCs, filters, MRT
-    │   ├── MidiBuffer.c/h           ← DIN TX lanes and stamped RX buffer
-    │   ├── MidiDin.c/h              ← USART3 driver (PB10/PB11)
-    │   ├── MidiIn.c/h               ← framing, RXF, S082 drop filter, consume-then-route, MRT
-    │   ├── MidiTransport.c/h        ← realtime ring, TIM3 handler, Start/Continue/Stop, SPP, MTC
-    │   ├── MidiNoteMap.c/h          ← N1-N5 note map and Q4 TX inverse
-    │   ├── MidiNotes.c/h            ← triggers, overlays, CC2, LiveRecord age
-    │   ├── MidiControl.c/h          ← NRPN, CC1, value rules, menu-edit writes
-    │   ├── MidiLearn.c/h            ← 128-row Learn table, gesture, midilrn.cfg lines
-    │   ├── MidiProgram.c/h          ← PC and CC0
-    │   ├── MidiOut.c/h              ← all TX, forwarding, framing, no echo
-    │   ├── MidiPitch.h              ← default note 63, frequency table, detune
-    │   └── MidiVoiceControl.c/h     ← trigger funnel (unchanged)
-    ├── Bank/
-    │   ├── BankData.c/h             ← resident Bank display name, active Bank-local Scene slot, loaded-bank flag
-    │   └── Scene/
-    │       ├── SceneData.c/h        ← Scene-owned settings, kit slots, descriptor images, MIDI routing
-    │       ├── SceneModTargets.c/h  ← Scene-level target namespace: 1vm..6vm, 390 retired `srt` placeholder (S075), 7dc, 1ou..6ou, 1fx..6fx, fxm (404)
-    │       ├── Pattern/
-    │       │   ├── PatternData.c/h      ← pattern/track/step storage and edit API
-    │       │   ├── EuklidGenerator.c/h  ← pattern generator
-    │       │   ├── SomData.c/h          ← SOM data tables
-    │       │   └── SomGenerator.c/h     ← SOM pattern/performance generator
-    │       └── Preset/
-    │           ├── ParameterArray.h/c   ← supersedes Parameters.h; NUM_PARAMS=275
-    │           └── presetManager.c/h    ← typed load/save for kit, morph, pattern, performance, all, globals
-    ├── DSP/
-    │   ├── Effects/
-    │   │   ├── EffectTypes.h          ← retained 420 B Effect record contract, block-7 target IDs
-    │   │   ├── EffectsManager.c/h     ← registry (off/flt), per-block resolution, edit API + fan-out, FX-seq, automation/LFO overlays
-    │   │   ├── EffectParamRows.h      ← common/type descriptor row macros
-    │   │   ├── FxBuffer.c/h           ← DTCM `.dtcm_fxbuf` arena, voice units, Effect share, handoff record
-    │   │   └── StereoFilter/          ← `flt` descriptors (…Parameters.c/h) and runtime/ops (…Effect.c/h, -Ofast)
-    │   └── Instruments/
-    │       ├── InstrumentManager.c/h ← descriptor registry, VOICE menu lookup, Scene-to-DSP apply bridge
-    │       ├── Drum/                 ← Drum descriptor keys, flags, menu layout, runtime metadata
-    │       ├── Snare/                ← Snare descriptor keys, flags, menu layout, runtime metadata
-    │       ├── Cymbal/               ← Cymbal descriptor keys, flags, menu layout, runtime metadata
-    │       └── HiHat/                ← HiHat/open-hat descriptor keys, flags, menu layout, runtime metadata
-    ├── SampleRom/
-    │   ├── SampleMemory.c/h         ← sample flash metadata/runtime cache, 120 entries, loop flags
-    │   └── sampleFlash.c/h          ← guarded F765 sector 7-11 erase/program helpers
-    ├── Sequencer/
-    │   ├── sequencerTimer.c/h       ← TIM3 4kHz sequencer timing owner (IRQ29, priority 2) — Session 019
-    │   ├── sequencer.c/h            ← original LXR sequencer source (driven by TIM3_IRQHandler); FX step latch, Effect automation markers
-    │   ├── StepScale.c/h            ← shared 14-entry 96-PPQ step-scale table (tracks + FX sequencer)
-    │   ├── clockSync.c/h
-    ├── DSPAudio/
-    │   ├── random.c/h               ← F765 RNG port (PLL48CLK, bare register)
-    │   └── [all DSP voice files]    ← ported; mixer_calcNextSampleBlock wired to AudioCodecManager
-    └── compat/
-        ├── stm32f4xx.h              ← vestigial-include shim via <stdint.h>
-        └── cmsis_intrinsics.h
-```
-
-### Where to look for things
-
-| Question | File |
-|----------|------|
-| Which session introduced a fix? | `knowledge_files/log_archive/000_SESSION_INDEX.md` |
-| Full details of a fix or decision? | `knowledge_files/log_archive/00x_SESSION_HANDOFF_LOG.md` |
-| Current filesystem, instrument/kit file, Scene storage, menu, and DSP propagation spec? | `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` |
-| Current AutoSave format, ownership, writer, and limitations? | `knowledge_files/specification_reference/AUTOSAVE.md` |
-| Development screen diagnostics and file logging? | `knowledge_files/specification_reference/DEV_MODES.md` |
-| Current module/API ownership boundaries? | `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md` |
-| Master bus compressor, `xfd` fader mode, CrumpBit DSP? | `knowledge_files/specification_reference/dsp_instruments_effects/EFFECTS_MIXER_DSP_REFERENCE.md` (§3.2, §4.4, §5A) |
-| Phase 6 copy/clear behaviour, architecture, trace? | `knowledge_files/specification_reference/COPYCLEAR_UTILITIES.md`; history and decisions: `075_SESSION_HANDOFF_LOG.md` |
-| Who may write a voice parameter's runtime value (automation vs menu vs MIDI)? | `PATTERN_DYNAMIC_STACK.md` §6.2a, `BANK_PRESET_ARCHITECTURE.md` §3 |
-| Live record / live erase / REC gestures / `rtk` (S081)? | `PATTERN_DYNAMIC_STACK.md` §6.7; APIs: `MODULE_INTERCHANGE_SPEC.md` "Core/Sequencer/LiveRecord (S081)"; history: `081_SESSION_HANDOFF_LOG.md` |
-| Automation ramps `asm`, step reset rule, menu-vs-automation R12, Effect R13 (S081)? | `PATTERN_DYNAMIC_STACK.md` §6.2b, §6.1–§6.2a; `EFFECTS_BUS_REFERENCE.md` §6 |
-| Per-track step scale, shuffle, run modes, track Morph/automation (S078)? | `PATTERN_DYNAMIC_STACK.md` §6.4; Morph architecture and the Morph-view rule: `BANK_PRESET_ARCHITECTURE.md` §5, §8; history: `078_SESSION_HANDOFF_LOG.md` |
-| STEP-page held-step editing, track automation overlay, STEP underlines? | `PATTERN_DYNAMIC_STACK.md` §6.3a; APIs: `MODULE_INTERCHANGE_SPEC.md` (menu, buttonHandler) |
-| PERF looper, scene change/queue divisions, queue actions, PC reset, scene chaining (S080)? | Engine: `PATTERN_DYNAMIC_STACK.md` §6.5 (looper), §6.6 (scene change, queue, chain); gestures/LEDs/pages/executor: `MODULE_INTERCHANGE_SPEC.md` "PERF performance surface"; history: `080_SESSION_HANDOFF_LOG.md` |
-| Effect system (types, FX bus, FX sequencer, Effect automation/LFO, adding a type)? | `knowledge_files/specification_reference/dsp_instruments_effects/EFFECTS_BUS_REFERENCE.md` |
-| Instrument DSP, modulation/LFO, their costs, adding parameters or types? | `knowledge_files/specification_reference/dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md` |
-| Mixer, FX bus and Effect DSP, output pipeline, buffer-using Effects? | `knowledge_files/specification_reference/dsp_instruments_effects/EFFECTS_MIXER_DSP_REFERENCE.md` |
-| Flash, sample flash and RAM layout; allocation rules? | `knowledge_files/specification_reference/STORAGE_SRAM_MANIFEST.md` |
-| Proving a DSP change on the host? | `tools/dsp_test/DSP_TEST.md` |
-| Confirmed pin assignments / IRQs? | `knowledge_files/hardware_archive/HARDWARE_MAP.md` |
-| Sequencer / DSP architecture plans? | `knowledge_files/hardware_archive/AVR_TO_F765_MIGRATION.md` |
-| Current known issues and reminders? | `MEMORY.md` |
-
-### Specification-reference index
-
-These are the fifteen authoritative/reference documents under
-`knowledge_files/specification_reference/`. Since Session 074 the four DSP
-and Effects documents (`EFFECTS_BUS_REFERENCE.md`,
-`EFFECTS_MIXER_DSP_REFERENCE.md`, `INSTRUMENTS_DSP_REFERENCE.md`,
-`CPU_USE_DSP_AUDIT.md`) live in its `dsp_instruments_effects/` subfolder. `FILESYSTEM_SPEC.md` is the
-product-level source of truth; `ASYNCFATFS_REFERENCE.md` is its low-level
-filesystem implementation companion. For AutoSave specifically,
-`AUTOSAVE.md` is authoritative and `FILESYSTEM_SPEC.md` contains only the
-product-filesystem boundary. `DEV_MODES.md` exclusively owns development-mode and
-logging behavior. The remaining documents are audits or API/feature references
-and may contain historical snapshots as noted below.
-
-| File | What it contains | Use it when |
-|------|------------------|------------|
-| `ASYNCFATFS_REFERENCE.md` | Foreground-pumped async FAT32/VFAT contracts: component paths, LFN/SFN identity, object iteration, removal, terminator-aware directory-entry publication, lazy directory-cluster initialization, flush boundaries, and (S074) the cluster-rounded size of a file open for writing and the one-byte length-probe rule. | Changing `Core/Hardware/SD/asyncfatfs/` or adding filesystem operations. |
-| `AUTOSAVE.md` | Implemented scalar HCPR and per-Scene PAT4 hidden A/B formats, boot readers, ownership, dirty masks, writer lifecycle, power-loss behavior (including torn records), and validation status, including the S072 v3 Effect region, the S074 bus compressor cells 41..44, the S074 torn-record fix and the `V` flag layout, (S075) reserved cell 7, FX-send Morph cells 45..50 (no migration) and the copy/clear suspension gates, (S077) the snapshot gate, (S078) the track Morph endpoint cells 51..71, and (S080) the Scene chain cells 72..75 and the restore-loop `continue` fix. Updated through Session 080. | Changing AutoSave format, boot restore, dirty hooks, capture, scheduling, or recovery. |
-| `COPYCLEAR_UTILITIES.md` | Phase 6 copy/clear (S075; S076 morph copy/reset and reload scene; S077 background-region snapshot, Scene morph fan-out, bar-to-step; S078 track run mode and track Morph endpoints in track/morph copy/clear, STEP pot clears; S080 Loopable flag in track copy/clear, Scene chain in Scene settings copy/clear): mental model, terms, gestures by mode, operation lifecycle, sources/ranges, every copy and clear selection, pot clears, screens/LEDs, fan-out and the present rule, architecture and entry points, the service tick and suspension, the name-buffer loan, Pattern engines (exclusive boundary, swap block, raw block API, sliding compaction, paste/clear/region engines, early triggers), Scene-level executors, HCNAMES names, trace stage `c` layouts, verification list, resources, limits, how to modify, and a map of the `spec §N`/decision tags used in code comments. | Changing copy/clear, the Pattern pool rewrite rules, or reading a stage-`c` trace. |
-| `BANK_PRESET_ARCHITECTURE.md` | Hierarchy overview (Bank → Scene → Kit → Instrument), BankData voice-edit mask, SceneData parameter images, morph engine, runtime overlay architecture, Scene mod targets, `parameter_values[]` legacy bridge, dirty marking, boot restore order, the Scene target table (incl. `fxm` and the S078 track targets 405..425), Effect overlays, the S072 edit-mask layout gate, the S074 bus compressor settings and the Settings-Load bulk-apply hazard (O1), (S075) the copy/clear edit-mask rules, St1/compressor defaults, FX-send Normal/Morph endpoints, VOICE Morph views and the automation-priority rules, (S076/S077) override clear rules and per-track Scene playback, (S078) track Morph endpoints, the track effective-value architecture, the STEP Morph view and the project-wide Morph-view rule, and (S080) the Scene chain settings, the S080 `parameter_values[]` Globals/mirrors and their dirty marking. Updated through Session 080. | Understanding parameter storage, morph interpolation, runtime overlays, Scene activation, or dirty marking. |
-| `dsp_instruments_effects/CPU_USE_DSP_AUDIT.md` | DSP performance audit (S074 cost additions items 27–31, S075 items 32–35): the Session 073 cost audit (findings F1–F10, sound classes S0–S4, checked-and-rejected ideas) above the 2026-05 historical audit (render scheduling, IRQ priorities, caches/MPU, ITCM/DTCM, SIMD/FPU, DMA), and the ordered optimization record (items 1–26, including the S073 results). | Investigating audio underruns or planning an optimization. For how the DSP works now, use the two DSP references. |
-| `DEV_MODES.md` | Screen-only diagnostic versus file-only logging contract, current `bootlog.bin`/`asavetrc.bin` formats (including the S074 `V` flag layout and the S075 copy/clear stage `c`), the stall-detection sites (the drain is progress-aware since S074), the BC18 settings-page check, duplicate limitation, and failed unified-log warning. | Adding or interpreting diagnostics, trace, or logging output. |
-| `dsp_instruments_effects/EFFECTS_BUS_REFERENCE.md` | (S078: FX sequencer Q8.8 DDA on the 128-position step-scale curve, `.fx` token→CC map.) (S081: R13 resolution — menuHold > lock > overlay > menu, one-step Morph lane, markers/owners removed; FX realign; live FX-sequence erase.) As-built Phase 5 Effect system through S075 (registry `off/flt/cbt`, the page hook/layout contract, the automation-underline rule, CrumpBit's page; S075 Effect copy/clear and fan-out, the pan rule, full views, the SHIFT+TRACK overlay): module map, signal flow and fader modes, type contract and registry self-check codes, retained data and type change, resolution order, DTCM arena and handoff, Effect page, fan-out and layout gate, FX sequencer, IDs/automation/LFO, `.fx`/HCNAMES/AutoSave, lifecycle, design rationale, debugging, and the add-a-type tutorial. | Adding an Effect type or changing anything in the Effect/bus/FX-sequencer path. |
-| `FILESYSTEM_SPEC.md` | Current product storage specification through Session 083 (S083: `settings.cfg` G off/MRT list/`perf_vel_*`/`lines=26`, the new root `midilrn.cfg` MIDI Learn file with its safe write and boot recovery, `sceneset.scg` track `midi_channel` 0..17 / `midi_note` 0..128; S081: PAT4 track byte 5 `asm`, `quantisation` 5 = `trk`; S080: settings.cfg `perf_*`/`scd`/`qcd`/`qac` keys and `lines=24`, `sceneset.scg` chain lines 18/19, PAT4 track byte 4 loop exclusion; S078: PAT4 `track_scale` as a step-scale CC and run-mode byte 3, `sceneset.scg` `track_morph_*` lines 15..17, `.fx` `step_scale` token→CC map, the offline converter; earlier: the `sceneset.scg` line table with the `bus_comp_*` keys, `fader_setting` 0..3, retired `voice_decimation_all` and `fx_send_morph`; the `cbt` `.fx` keys; the copy/clear name-buffer loan and `HNcU`; retained MIDI endpoint entries): root layout, typed 161-row HCNAMES, PAT4, `.fx` v2 Effect children, name indexes and typed-index recovery, Kit/Instrument schemas, Scene/Bank storage, boot restore, load/save reachability, overwrite safety, and verification anchors. | Changing product storage, serialization, load/save, or instrument propagation. |
-| `MODULE_INTERCHANGE_SPEC.md` | Live direct-call ownership map through Session 083 (S083: the "Core/MIDI" section and data flow, shared menu commit, transport/per-track Scene APIs, overlay entry points and one overlay state, Learn gesture, SHIFT+REC page, `midilrn.cfg` APIs; S081: the "Core/Sequencer/LiveRecord (S081)" section, live-record/ramp/reset/R12 Sequencer services, MidiVoiceControl reset mask, PatternData/Service record ops and target override, EffectsManager R13 and live FX erase, REC/erase/overlay buttonHandler rows, Menu record hooks; S082: background Bank load; S080: the "PERF performance surface" section — button map, latched menus, pages, LED rules, scene change execution, how to add a PERF gesture — plus looper/scene/chain sequencer APIs, `LED_LAYER_FAST`, chain editor and Loopable APIs; S078: the 128-position StepScale contract, sequencer DDA/shuffle/run-mode/effective-cache helpers, track Morph/override APIs, the STEP Morph view, STEP held-step overlay, multi-step broadcast, `copyClear_isClearMode()`; earlier: including EffectsManager, FxBuffer, menuEffects and its S074 page extensions, BusCompressor, StepScale, the S075 CopyClear module, the FX-send Morph/overlay APIs and the automation-priority guard) for Pattern, UI, sequencer, Preset, instruments, modulation, MIDI, filesystem, AsyncFATFS, storageTypes, and boot. | Connecting modules or deciding which layer owns a new API/state transition. |
-| `MIDI_SPEC.md` | Complete MIDI use and code reference, current as of S083 close: Part I behaviour (settings, receive pipeline, note map, CC1/CC2/NRPN, Learn and `midilrn.cfg`, PC/CC0, transport, transmit, Scene 17, storage); Part II code reference (module map and data flow, every `Core/MIDI/` module's API and internals, integration points in menu/sequencer/buttonHandler/Preset/Effects/filesystem/USB, contexts and concurrency, extension recipes, host test and diagnostics, RAM, binding rules); Part III decisions (F/Q/C ids). | Any MIDI work: behaviour, channels, note map, NRPN/Learn, transport, TX, or adding a MIDI feature. |
-| `OSC_INTERP_AUDIT.md` | Implemented oscillator waveform interpolation feature: global parameter/UI/runtime state, render behavior, settings persistence, file-level changes, risks, and hardware validation checklist. | Changing oscillator interpolation or its global save/load behavior. |
-| `PATTERN_DYNAMIC_STACK.md` | Dynamic Pattern storage (address array, pool, bitmap), PAT4, Pattern Stack Service, step automation encoding and drain, including S072 Effect targets and Effect step markers, (S075) the swap block, exclusive boundary, raw block API, sliding compaction and the automation-priority rule (§6.2a), (S077) the background region, (S078) per-track timing as played — continuous step scale, DDA, shuffle, run modes, effective cache, track automation (§6.4) — and STEP-page multi-step editing/track automation overlay/underlines (§6.3a), (S079) the 7-special block, trigger conditions and roll engine, and (S080) the 41-entry conditions, the master-clock-anchored PERF looper (§6.5), scene change/queue timing and scene chaining (§6.6) and the `track_loop_exclude` byte. (S081) the step reset rule and deferred automation (§6.1/§6.2), R12 (§6.2a), automation ramps `asm` (§6.2b), live record and live erase (§6.7), looping while recording, the 96-PPQ roll table, `qnt trk`, PAT4 byte 5, the corrected queue format and the live-record service ops/target override (§12). Updated through Session 081 (with S082 Scene 17 notes). | Changing Pattern storage, step automation, or the automation drain. |
-| `STORAGE_SRAM_MANIFEST.md` | (S083 MIDI statics have per-item rows; header bullets carry S081–S083 deltas. Ledger table otherwise current through S080; S081 and S082 changes in the header bullets and §8.2.) On-chip storage map (renamed from `SRAM_MANIFEST.md` in S073; S074 and S075 ledgers, sector 6 contents, the swap block and name-buffer loan): program flash window, image layout, linker guards, boot image check, bootloader facts and growth paths; sample flash layout and guards; the static RAM ledger (SRAM1, DTCM and the FX arena, ITCM contents, DMA region); SRAM1 owners; the reservation and approval policy. SD card storage is only referenced. | Changing retained state, flash layout or sample storage, adding caches/names, or evaluating memory cost. Update it in the same change. |
-| `dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md` | Instrument DSP (S073; S074 sidechain tap in the trigger funnel; S075 runtime-write priority: automation, menu, MIDI): timing model and constant-CPU rule, per-block sequence, tagged runtime slots, descriptors and the write path (special-writer tags), the four voice engines, oscillator/filter/envelope/transient/distortion building blocks, LFO/velocity/Morph/automation modulation, measured costs, and how to add parameters, writers, modes and instrument types. | Changing or extending voices, parameters, modulation or their cost. |
-| `dsp_instruments_effects/EFFECTS_MIXER_DSP_REFERENCE.md` | Mixer and Effect DSP (S073, S074: CrumpBit DSP, the master bus compressor, `xfd`; S075: pan laws centred on 63, global decimation removed, FX-send Morph): number formats and headroom, jack routing, fader modes, dry/send arithmetic, the FX bus and return, output buffers, DMA pack and MPU, the StereoFilter DSP, the DTCM arena contract for buffer-using Effects, measured costs, and how to add Effect DSP or change the mixer and output pipeline. | Changing the mixer, the FX bus, an Effect's DSP, or the output path. |
+- **Repository layout:** `knowledge_files/specification_reference/REPOSITORY_LAYOUT.md`
+- **Session index / per-topic lookup:** `knowledge_files/log_archive/000_SESSION_INDEX.md`
+- **Specification documents:** `knowledge_files/specification_reference/`
+- **Open tests / hardware verification:** `knowledge_files/volatile/OPEN_TESTS.md`
 
 ---
 
-## Project Goal
+## Project
 
-Port LXR 0.37 to the LXR-02 hardware (STM32F765VIH6). Original LXR: STM32F4 audio + ATmega644 AVR front panel. LXR-02: single STM32F765.
+Helicase LXR — new firmware for the LXR-02 hardware (STM32F765VIH6).
+Not a port of preceding LXR-01 or LXR-02 firmware.
 
 - This folder is the repository/codebase.
-- `knowledge_files/LXR-master/` is read-only reference material only. Do not modify it.
-- Knowledge docs should be updated when architecture changes; session logs live under `knowledge_files/log_archive/`, current direct-call API boundaries live in `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md`, and filesystem plus descriptor instrument/kit storage rules live in `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`.
-- **Original source reference**: `knowledge_files/LXR-master/` — AVR in `front/LxrAvr/`, STM32F4 in `mainboard/LxrStm32/src/`
+- `knowledge_files/LXR-master/` is read-only reference material from the
+  original LXR (STM32F4 + ATmega644). Do not modify it.
+- Session logs: `knowledge_files/log_archive/`. Specifications:
+  `knowledge_files/specification_reference/`.
 
 ## General Process Reminders
 
 - Always verify the local working repository directory before writing code.
-- **Header dependency tracking is active (Session 070 Phase 1).** The Makefile
-  uses `-MMD -MP` in `CFLAGS` plus `-include $(OBJS:.o=.d)`, so editing a
-  header correctly triggers recompilation of dependent `.o` files on the next
-  `make`. A `make clean` is no longer required after header edits. This was
-  confirmed working 2026-09-18.
-- Blocking for 1ms anywhere in the main loop or any ISR at priority <= 4 is unacceptable.
+- **Header dependency tracking is active (S070).** The Makefile uses
+  `-MMD -MP` plus `-include $(OBJS:.o=.d)`, so editing a header triggers
+  recompilation. `make clean` is no longer required after header edits.
+- Blocking for 1 ms anywhere in the main loop or any ISR at priority ≤ 4 is unacceptable.
 - Runtime SD/file work must remain asynchronous; boot-only synchronous polling is allowed before audio starts.
-- New code should be commented at detailed contract level: why the function,
-  variable, or storage type exists; what it does; inputs/outputs; and
-  clients/accessors/affiliates. Do this proactively, not as a cleanup after the
-  user asks again.
-- Agent volatile memory lives in `knowledge_files/volatile/memory/` (use it
-  the way you would `.claude/memory/`). Do not use `.claude/memory/` or
-  `.claude/projects/*/memory/` for this project.
 
 ---
 
 ## Hardware
 
+Full pin table, IRQ assignments and priorities, and encoder rules:
+`knowledge_files/hardware_archive/HARDWARE_MAP.md`.
+
 ### MCU: STM32F765VIH6, TFBGA100
 
-- SYSCLK = 216MHz (HSE 16MHz, PLLM=16, PLLN=432, PLLP=2)
-- PCLK1 = 54MHz (APB1/4) — TIM6, USART3, I2S2, I2S3
-- PCLK2 = 108MHz (APB2/2) — SPI1, ADC
-- PLL48CLK = 48MHz (PLLQ=9) — USB, RNG
-- PLLI2S: N=271, R=2 → 135.5MHz → Fs=44108Hz
+- SYSCLK = 216 MHz (HSE 16 MHz, PLLM=16, PLLN=432, PLLP=2)
+- PCLK1 = 54 MHz (APB1/4) — TIM6, USART3, I2S2, I2S3
+- PCLK2 = 108 MHz (APB2/2) — SPI1, ADC
+- PLL48CLK = 48 MHz (PLLQ=9) — USB, RNG
+- PLLI2S: N=271, R=2 → 135.5 MHz → Fs=44108 Hz
 - Application origin: **0x08008000** — VTOR must be set at startup
 - Stack top (SP): **0x20080000**
-- DTCM 128KB (not DMA-accessible) + SRAM1 368KB + SRAM2 16KB
-- I-Cache enabled (16KB, ICIALLU invalidate) — Session 13.
-- D-Cache enabled (16KB) with MPU (WT for SRAM, Normal non-cacheable for DMA
-  buffers) — Session 13/S073.
-- DMA buffers live in the `.dma_nocache` linker section, marked Normal
-  non-cacheable via MPU region 1 (S073).
-- `audioOutBuffer` lives in DTCM (`INDTCMZ`) for single-cycle access.
+- DTCM 128 KB (not DMA-accessible) + SRAM1 368 KB + SRAM2 16 KB
+- I-Cache / D-Cache enabled (16 KB each); MPU WT for SRAM, Normal
+  non-cacheable for DMA (`.dma_nocache` region).
+- `audioOutBuffer` lives in DTCM (`INDTCMZ`).
 
-### Flash Sector Layout (single-bank, confirmed via memtest)
+### Flash Sector Layout
 
 | Sector | Range | Size | Use |
 |--------|-------|------|-----|
-| 0 | 0x08000000–0x08007FFF | 32KB | LXRV2 Bootloader |
-| 1–6 | 0x08008000–0x080BFFFF | 736KB | Application (sector 6 added in Session 073) |
-| 7–11 | 0x080C0000–0x081FFFFF | 5×256KB | Sample storage (Session 18; sectors 6–11 until S073) |
+| 0 | 0x08000000–0x08007FFF | 32 KB | LXRV2 Bootloader |
+| 1–6 | 0x08008000–0x080BFFFF | 736 KB | Application |
+| 7–11 | 0x080C0000–0x081FFFFF | 5×256 KB | Sample storage |
 
-**Erase floor: sector 7** (`SAMPLE_FIRST_SECTOR`). `sampleFlash.c` must
-hard-reject any erase or write below sector 7. It also refuses every erase and
-write if `SAMPLE_ROM_START_ADDRESS` differs from the linker's
-`__sample_flash_start`. `Reset_Handler` is linked first in `.text`, so the
-reset vector stays in sector 1.
+**Erase floor: sector 7** (`SAMPLE_FIRST_SECTOR`). `sampleFlash.c` rejects any
+erase or write below sector 7 and refuses if `SAMPLE_ROM_START_ADDRESS` differs
+from the linker's `__sample_flash_start`.
 
-### Confirmed GPIO
+### Internal DAC — Must Never Be Enabled
 
-| Peripheral | Pins | Notes |
-|-----------|------|-------|
-| LCD (4-bit parallel) | PE7-PE10 (DB4-7), PE11 (E), PE12 (RS) | TIM7 async driver |
-| LEDs — 74HC595×5 | PA7 MOSI, PB3 SCK, PB2 LATCH | SPI1 |
-| Buttons — 74HC165×5 | PA6 MISO, PB3 SCK, PB2 LATCH | SPI1, shared with LEDs |
-| SW43 SHIFT/BAR1 | PB7 switch (active HIGH), PB8 LED | |
-| Main encoder SW42 A/B | PE13/PE14 | AF1 TIM1_CH3/CH4, external 10kΩ pull-ups (R75/R76), NO internal pull-up |
-| Main encoder SW42 SW | PE15 | Internal pull-up |
-| Endless pots RV1-4 | PB0/1, PC4/5, PC2/3, PC0/1 | ADC1, atan2 delta tracking |
-| Sliders RV5-10 | PA0-PA5 | ADC1 DMA (RV5↔RV6 label swap corrected in config.h) |
-| DAC2 (CS4344, U24) | PB12 WS, PB13 CK, PB15 SD, PC6 MCK | I2S2, AF5 |
-| DAC1 (CS4344, U23) | PA15 WS, PC10 CK, **PB5** SD, PC7 MCK | I2S3, AF6. **SD=PB5 not PC12** |
-| SD card (bit-bang) | PC12 SCLK, PD2 MOSI, PC8 MISO, PD0 CS, PD1 DETECT | NOT SPI1. Hardware SPI remapping impossible on this board. |
-| USB MIDI | PA11 D-, PA12 D+ | OTG_FS, ADUM3160 isolator, VBUS sensing disabled |
-| MIDI DIN | PB10 TX, PB11 RX | USART3, 31250 baud |
-| CLK OUT | PC13 | |
-| CLK IN | PD4 | GPIO input pull-up, EXTI4 rising edge on low-to-high transition |
-| RST IN | PD5 | GPIO input pull-up, EXTI5 rising edge on low-to-high transition |
-| OUT1 L detect | PD6 | GPIO input pull-up; no plug=LOW, plug inserted=HIGH, sampled by 500Hz foreground service |
-| OUT1 R detect | PD7 | GPIO input pull-up; no plug=LOW, plug inserted=HIGH, sampled by 500Hz foreground service |
-| OUT2 L detect | PB4 | No plug=LOW, plug inserted=HIGH, sampled by 500Hz foreground service |
-| OUT2 R detect | PB6 | No plug=LOW, plug inserted=HIGH, sampled by 500Hz foreground service |
-
-### IRQ Assignments (current — Session 025)
-
-| IRQ | Priority | Handler | Function |
-|-----|----------|---------|----------|
-| IRQ10 | 3 | EXTI4_IRQHandler | CLK IN — PD4 rising edge, push to trigger event ring |
-| IRQ15 | 4 | DMA1_Stream4_IRQHandler | I2S2/DAC2 — audio refill master |
-| IRQ23 | 3 | EXTI9_5_IRQHandler | RST IN — PD5 rising edge; PD6/PD7 masked and polled as jack state |
-| IRQ27 | 1 | TIM1_CC_IRQHandler | Main encoder A/B input capture |
-| IRQ29 | 2 | TIM3_IRQHandler | 4kHz sequencer timing owner: processRealtimeEvents → triggerJacks_tick → seq_tick |
-| IRQ39 | 5 | USART3_IRQHandler | MIDI DIN RX/TX; timestamps bytes with TIM2; realtime bytes → MidiTransport ring, others → stamped MidiBuffer |
-| IRQ47 | 4 | DMA1_Stream7_IRQHandler | I2S3/DAC1 — audio slave (flags only) |
-| IRQ54 | 6 | TIM6_DAC_IRQHandler | 1kHz — counters + foreground front-panel service flag |
-| IRQ55 | 7 | TIM7_IRQHandler | 5kHz — LCD queue drain |
-| IRQ67 | 5 | OTG_FS_IRQHandler | USB MIDI |
-
-TIM6 now schedules `timebase_serviceFrontPanel()` from the foreground loop.
-Shift-register exchange, PD6/PD7/PB4/PB6 jack detect, encoder-button debounce, and
-endless-pot angle processing no longer run in the TIM6 ISR.
+PA4/PA5 are slider ADC inputs (RV5/RV6). The internal DAC must never be enabled;
+`TIM6_DAC_IRQHandler` shares the vector by ST hardware design, not because the
+DAC is in use.
 
 ---
 
-## Audio Pipeline (AudioCodecManager.c)
+## Audio Pipeline
 
-`audioCodec_init()` is the **single hardware entry point**.
+Full signal path, costs, and render-loop reference:
+`EFFECTS_MIXER_DSP_REFERENCE.md` (§3 mixer, §3.5 render loop).
 
 **Main loop pattern** (`main.c` `audio_check_and_render()`):
 ```c
 if (audioCodec_isSuspended()) return;
 while (audioCodec_queueFreeSlots() > 0) {
-    // Fill one AUDIO_DMA_FRAMES hardware slot as three OUTPUT_DMA_SIZE blocks.
     for (frame = 0; frame < AUDIO_DMA_FRAMES; frame += OUTPUT_DMA_SIZE) {
-        voiceControl_processPending();      // triggers first
-        seq_drainPendingAutomation();       // then step automation (S065 order)
-        seq_rampService();                  // then automation ramps (S081 P2)
-        basepri = dsp_maskLowPriorityIrqs(); // BASEPRI 6: timing-critical IRQs stay live
+        voiceControl_processPending();        // triggers + automation drain
+        // (seq_drainPendingAutomationTo() runs inside voiceControl)
+        seq_rampService();                    // automation ramps (S081 P2)
+        basepri = dsp_maskLowPriorityIrqs();  // BASEPRI 6
         mixer_calcNextSampleBlock(&buf[frame * 2], &buf2[frame * 2]);
         irq_setBasepri(basepri);
     }
@@ -1530,263 +302,75 @@ while (audioCodec_queueFreeSlots() > 0) {
 }
 ```
 
-**DMA pack (S073):** `pack_audio_half()` writes one rotated 32-bit word per
-channel frame (`pack_frameWord()`), same memory image as the old two
-halfwords, into the Normal non-cacheable `.dma_nocache` region, and ends with
-`DSB`. Full signal path and costs: `EFFECTS_MIXER_DSP_REFERENCE.md`.
-
-**Mixer output names (S074, easy to get wrong):** `mixer_calcNextSampleBlock(output, output2)`:
-`output` = `audioOutBuffer` = DAC2 = **St2** (OUT2); `output2` = `audioOutBuffer2` =
-DAC1 = **St1** (MAIN jacks and headphones). The master bus compressor runs last
-in the mixer, on one of these pairs, before the pack.
-
-**OUTPUT_DMA_SIZE = 32** is the effective LXR-master DSP/control block (confirmed correct in Session 019 — do NOT revert to 16).
-**AUDIO_DMA_FRAMES = 96** is the hardware DMA half; render budget per queued hardware slot is **2.18ms** = 471,288 cycles at 216MHz.
-
-**DSP render must remain in the main loop.** Moving it to the DMA ISR creates a hard 2.18ms ceiling — when DSP expands beyond the budget the system locks up with no graceful degradation. Main loop allows unlimited expansion with underruns as the graceful signal.
-
-**SPSC queue**: 2-slot queue. `ready_head` is owned by ISR, `ready_tail` by main loop, and `ready_count` tracks free/full state for queueing and diagnostics.
-
-**CPU-use widget**: `audioCodec_getQueueFreePercent()` uses DWT cycle-counter accounting of `ready_count < 2`. This is an audio queue-free pressure meter, not generic MCU utilization.
-
-**24-bit output path (Session 022)**: `audioOutBuffer`/`audioOutBuffer2` are `sample_mx_t` (int32_t, signed-24 value in container). `pack_half()` emits a true 24-bit payload in both halfwords of each I2S frame. Do NOT re-add `LSW = 0` zeroing. Do NOT add a `>> 8` shift in `sampleMix_toS24()` — int16 voice values enter the mixer already scaled as `int16 << 8` via `bufferTool_convertInt16ToSampleMix()`; adding `>>8` at pack time was the loudness regression fixed in session 022.
-
-**Zero startup underruns**: boot SD operations complete before `audioCodec_init()`.
-Runtime kit/all/performance sound-apply completion is chunked after audio starts
-(Session 027). Session 044 made the worker type-safe: it clears outgoing
-targets, reset/image-applies at most one quiet pending slot per pass, then keeps
-the Scene gate active while the existing Instrument cursor rebinds all sources.
-Boot establishes a synchronous pre-audio image, then starts this exact ordinary
-worker after `audioCodec_init()` so LFO/velocity installation matches a manual
-Scene switch.
-
-### Internal DAC — Must Never Be Enabled
-
-The STM32F765 has an internal 12-bit DAC on PA4 (DAC1_OUT) and PA5 (DAC2_OUT). These pins are also ADC1_IN4 and ADC1_IN5, used as slider inputs for RV6 and RV5. **The internal DAC must never be enabled.** Accidental DAC peripheral clock enable or pin mode change silently corrupts slider ADC readings.
-
-`TIM6_DAC_IRQHandler` is the vector table name for IRQ54 because TIM6 and the internal DAC share an IRQ line by ST hardware design. **This does not mean the DAC is in use.** Audio is handled entirely by external CS4344 codecs via I2S2 and I2S3.
+- **OUTPUT_DMA_SIZE = 32** — DSP/control block (do NOT revert to 16).
+- **AUDIO_DMA_FRAMES = 96** — DMA half; render budget 2.18 ms = 471,288 cycles.
+- **SPSC queue**: 2 slots; `ready_head` ISR, `ready_tail` main loop.
+- **DSP render must remain in the main loop.** DMA ISR = hard ceiling with no
+  graceful degradation.
+- **Mixer output names:** `output` = DAC2 = St2 (OUT2); `output2` = DAC1 = St1
+  (MAIN/headphones). St1/St2 are panel labels; DAC1/DAC2 are the code names.
+- **24-bit path:** `sample_mx_t` (int32_t) is signed-24; `int16 << 8` via
+  `bufferTool_convertInt16ToSampleMix()`. Do NOT add `>> 8` at pack.
+- **CPU-use widget:** `audioCodec_getQueueFreePercent()` — audio queue-free
+  pressure, not generic MCU utilization.
 
 ---
 
-## SD Card Architecture (implemented Sessions 12, 17, and Phase 2 start in 030)
+## SD Card Architecture
 
 **SD operations must never block the main loop or any ISR at priority ≤ 4.**
 
-**Implemented solution**: asyncfatfs (Betaflight/Cleanflight library), fronted by `filesystem.c/h`. Ground-up FAT16/FAT32 reimplementation with polling-based non-blocking I/O. Replaces ChaN FatFS entirely. Decision made in Session 11, implemented in Session 12, and reorganized behind the filesystem facade in Session 17.
+Architecture: `asyncfatfs` (Betaflight-derived), fronted by `filesystem.c`.
+One operation at a time; request functions return immediately. Full spec:
+`FILESYSTEM_SPEC.md`; low-level API: `ASYNCFATFS_REFERENCE.md`.
 
-**Card format policy (Session 025)**: FAT16 and FAT32 are supported; MBR-FAT32 is recommended. FAT12 and exFAT are unsupported. Boot detection for unsupported layouts shows `Unsupported card` / `use MBR-FAT32` for 5 seconds and the filesystem is not mounted, so no boot load is attempted from that card.
-
-**Architecture:**
-```
-Core/Bank/Scene/Preset/presetManager.c / Menu
-  → filesystem.c (typed operations: Bank/Scene/Kit/Instrument/Morph/legacy globals)
-    → asyncfatfs/asyncfatfs.c (afatfs_fopen/fread/fwrite/fclose/mkdir/chdir/poll)
-      → asyncfatfs/sdcard_lxr02.c (sector transfer FSM, 16 bytes/burst)
-        → SPI/spi_sd.c (bit-bang SPI)
-```
-
-**Key design points:**
-- `afatfs_poll()` is the single entry point for all SD background work. Called from main loop initially; can migrate to TIM5 ISR later if throughput is insufficient.
-- `afatfs_poll()` must be called from **one context only** — never both main loop and ISR simultaneously.
-- Session 023 rate-limits idle foreground polling to reduce CPU use. Active/busy operations and filesystem initialization still poll every pass.
-- 8-sector LRU cache (4KB) between filesystem logic and SD card. Cache hits are free (no SPI traffic).
-- `sdcard_lxr02.c` implements `sdcard_readBlock`/`sdcard_writeBlock`/`sdcard_poll` on top of `SPI/spi_sd.c`. Each `sdcard_poll()` call clocks a burst of 16 SPI bytes (~9µs). A 512-byte sector completes in 32 polls.
-- `filesystem.c` serializes operations — one SD operation at a time. Request functions return immediately; completion is signalled via callback/status.
-- Asyncfatfs has five open-file slots (`AFATFS_MAX_OPEN_FILES`). Each
-  `afatfsFile_t` is **188 bytes** (corrected Session 057; previously recorded
-  as 328 bytes — that figure predated moving expanded delete state out of
-  every handle), so the increase from three slots costs 376 bytes.
-  `afatfs_chdir()` copies directory state into `currentDirectory`, so callers
-  must close explicit parent/child directory handles after entering them;
-  handle capacity is not a substitute for correct lifetimes. **Do not raise
-  this pool to fix a stall without new evidence** — a Session 057 Bank Save
-  freeze looked exactly like handle exhaustion (stalled after precisely 5
-  children) and was disproven by trace evidence after bumping the pool to 8;
-  the real cause was unrelated (`057_SESSION_HANDOFF_LOG.md` §13-§14).
-- `filesystem.c` owns the filetype registry and add-a-filetype checklist. Non-SD clients include `filesystem.h` only.
-- Authoritative filesystem and instrument-file spec lives in
-  `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`. The former
-  root `FILESYSTEM_SPEC.md` compatibility pointer was deleted in Session 033.
-  Target root directories are `Bank`, `Scene`, `Kit`, `Pattern`, `Sample`,
-  `Wavetable`, `Effect`, `Instrument`, and root `settings.cfg`. Current work
-  includes root `Kit/`, `Instrument/`, `Scene/`, 16-Scene `Bank/` load/save,
-  Kit/Instrument Morph Save, and the strict allowlisted settings.cfg format;
-  current global restore is not legacy glo.cfg.
-- `storageTypes.c/h` owns text storage schemas, parser/writer helpers, and
-  descriptor-keyed parameter maps. Keep it free of `asyncfatfs` calls and keep
-  function names prefixed `storage_`.
-- Normal kit load now scans root `Kit/` directories named `NNN Name` or
-  compatibility `NNN_Name`, then loads `kitset.kcg` plus six instrument files.
-  Normal Kit Save now creates/opens a numbered Kit directory and writes
-  `kitset.kcg` plus six instrument files. Numbered library slots are direct
-  `000..999`; slot `000` is real for all filetypes. KitMrp Save uses the same
-  directory shape and writes the current interpolated Morph state into both
-  normal and morph endpoint sections.
-- Scene Load/Save uses root `Scene/NNN Name/` folders with `sceneset.scg`,
-  embedded `Kit <name>/`, exactly one named PAT4 file, and an optional named
-  `.fx` v2 child (blank name saves as `none.fx`).
-  `sceneset.scg` never stores `name`.
-- Bank Load/Save uses root Bank/NNN Name/ folders with bankset.bcg and
-  Bank-local two-digit Scene children 00..15. It loads/saves the selected set
-  of resident Scenes using the version-2 manifest rather than a one-Scene
-  bridge. Bank Load is always mask-selective: it intersects the requested mask
-  with discovered children and never treats an empty intersection as “all.”
-  Unselected resident Scene payloads, HCNAMES rows, and present-state remain
-  unchanged.
-- Session 036 adds asyncfatfs LFN component creation/object iteration through
-  `afatfs_mkdir_lfn()`, `afatfs_fopen_lfn()`, `afatfs_opendir_lfn()`, and
-  `afatfs_findNextObject()`. These preserve SFN display case, create VFAT LFN
-  entries, support case-sensitive matching for production LFN opens, return
-  generated 8.3 aliases for identity opens, and expose file/directory object
-  kind. They are now used by product name repair, Kit/Scene/Bank
-  scan/load/save, root Instrument scan/load/save, and the hidden Instrument
-  temporary file. Future save code should
-  reuse/extend these filesystem-owned primitives rather than creating local FAT
-  writers in callers.
-- Dot-prefixed files/directories are real filesystem objects. asyncfatfs
-  exposes them; product scanners filter only after object iteration. In
-  particular `.hctmp.<ext>` is excluded from Instrument indexes and repair.
-- Filesystem-level exact-object recursive delete/recreate now exists for Kit
-  and root Scene replacement. It is non-atomic; no old/temporary promotion or
-  power-loss-safe commit is claimed. **Root Bank replacement is different as
-  of Session 057**: the Bank directory itself is scanned/reused (not deleted
-  and recreated), and each selected child is individually deleted-then-
-  written in place — non-selected resident children are never touched. See
-  `057_SESSION_HANDOFF_LOG.md` §10.
-  Hidden AutoSave A/B publication uses its separate commit-last contract in
-  `AUTOSAVE.md`; it is not the abandoned per-library-file dot-backer design.
-- Root `Instrument/` is a separately scanned, type-filtered source pool.
-  Instrument Load shows a `kit` row above numbered row `000`. On menu entry or
-  voice change, the original voice is saved as
-  `Instrument/<type>/.hctmp.<ext>` and its name is retained in one nine-byte
-  Menu label. Returning to `kit` reloads that exact file through the ordinary
-  one-candidate stage. The reversible source is invalidated on Scene, voice,
-  type, load-type, mode, or nested-menu exit; the dirty hidden file may remain
-  on SD. A rapid negative encoder delta at the upper boundary must clamp to
-  `kit` and clear stale deferred pool requests so it can scroll downward again.
-- Root Instrument Save is entered from Save-page VOICE press and writes one
-  resident Scene/voice slot to `Instrument/<stem.ext>` using the same
-  descriptor-keyed text writer and `self` serialization rule as Kit Save.
-- Instrument Load is not merely a raw one-slot memcpy. Preset owns its completion
-  transaction: clear every runtime modulation owner referencing the outgoing
-  slot before the type/image replacement, reset the incoming runtime, request
-  all six Morph/runtime applies, and normalize/rebind all source targets after
-  the images exist. Keep mode, Scene, destination, and source request locked
-  through both read and commit phases.
-- Instrument metadata is firmware-owned registry data, not file content.
-  Basic types are unrestricted; at most two Advanced types may be present;
-  Choke enables generic VOICE7 `<base>_choke` lookup. Current flags are Drum
-  and Snare Basic, Cymbal Advanced, HiHat Advanced|Choke.
-- Canonical HiHat decay file keys are `amp_envelope_decay` and
-  `amp_envelope_decay_choke`; accept legacy `amp_envelope_decay_closed/open`
-  aliases in storage. Non-Choke slot 6 uses generated Scene setting/morph
-  endpoint `slot6_track7_amp_envelope_decay` when its descriptor table has the
-  base decay; that alternate is Scene-modulatable as `7dc`.
-- Kit scan keeps display names in the shared cache and uses FAT short open
-  aliases only as operation-local compatibility state. If a card only exposes
-  a short alias such as `001SLA~1`, scan falls back to the leading three-digit
-  slot so the kit remains loadable.
-- Product name repair canonicalizes root numbered folders as `NNN Name`,
-  Bank-local children as `SS Name`, and Instrument leaf names as at most eight
-  stem cells plus the registry extension. It repairs one rename candidate,
-  flushes, and rescans; decimal suffixes remain within eight cells. This is
-  ordered FAT mutation, not journaled/crash-atomic repair. No `.hcrepair`
-  transaction file exists.
-- Large pattern/performance/all files are streamed in bounded chunks and are not staged wholesale in RAM.
-- The legacy `kitBrowser.c/h` bridge is retired. Kit, pattern, performance,
-  and all-file paths use typed filesystem/Menu accessors and direct slot
-  handling.
-- Boot path: synchronous polling loop before `audioCodec_init()` (audio not
-  running, blocking OK). After a successful mount, boot scans the root Kit,
-  Scene, and Bank libraries, writes their slot-ordered `.hcindex` files, then
-  scans and writes each registry-owned Instrument index one type at a time.
-  Because the one shared name cache is disposed between Instrument types, boot
-  reloads `/Bank/.hcindex` before initial Bank selection. There is no opaque
-  root `.hcindex` RNG marker in the current design. Boot does not rewrite
-  `/.hcnames` from resident SRAM after the initial load: doing so would erase
-  names for mask-unselected Scenes that no longer exist in `scene_t`.
-- Historical globals compatibility (Session 025): the former glo.cfg/ALL
-  binary 22/23-byte behavior is retained here only as an archive note.
-  Current filesystem globals use strict keyed settings.cfg version 1 with
-  an allowlisted global scope and no glo.cfg fallback.
-
-**SD_init() from `SPI/sd_routines.c` still needed** at boot to bring card to SPI mode (CMD0/CMD1/CMD8/ACMD41). Called before `afatfs_init()`. The rest of sd_routines.c (SD_readSingleBlock, busy-wait loops) is superseded.
-
-**Hardware SPI is impossible** — SD pins have no mapping to any free SPI peripheral on this board, and SPI5/6 are on unbonded TFBGA100 ports. See Session 10 log for full analysis.
-
-**ISR migration path** (future): move `afatfs_poll()` from main loop to TIM5 ISR at priority 6, 10kHz. Everything at priority ≤ 5 preempts it. SD cards tolerate arbitrary SPI clock stretching from preemption. To migrate: init TIM5, move call site, remove main-loop call. No asyncfatfs code changes needed.
-
-**Approaches confirmed wrong** (do not retry):
-- Blocking SD calls in main loop — f_open blocks 1–50ms, kills audio
-- "Chunking at FatFS-call granularity in main loop" — f_open is still one blocking call, insufficient
-- Forking ChaN FatFS for async conversion — 20+ functions, 28 yield points, 6 levels of nesting, unacceptable risk
-- NB_FatFS — C++ with heap alloc, lambdas, no FAT16, no _FS_TINY support, 9500 lines
+- **Hardware SPI impossible** — SD pins (PC12/PD2/PC8/PD0) have no free SPI
+  mapping. Bit-bang only.
+- **`afatfs_poll()`** from one context only (currently main loop). Future ISR
+  migration: TIM5 at priority 6, 10 kHz.
+- **Five open-file slots** (188 B each). Close directory handles after `chdir`.
+  S057 disproved handle exhaustion; five suffice.
 
 ---
 
-## Sample Flash Loading (implemented Session 18)
+## Sample Flash
 
-User samples are installed with explicit modal operations from the Load page:
+Samples and wavetables are installed from `Load:[Samples]`: walks `/samples`
+(natural order, depth 3) and `/wavetables` (each subfolder = one wavetable),
+erases sectors 7–11, installs, commits catalogue v2.
 
-- `Load:[Samples ]` reads `/samples`, erases sectors 7-11, installs the accepted files, then reads `/loops`, preserves the normal samples, appends as many looped samples as fit, and skips the rest.
-- The separate visible `SampLoop` menu item was removed in Session 023; the two existing loaders still run sequentially under the single Samples operation.
-- Both loaders accept only mono PCM 16-bit 44.1kHz WAV files. Unsupported files are silently skipped.
-- Directory entries are sorted lexicographic by the full long filename when LFN data is present, with ASCII case folded for sort. This is not natural numeric sort; e.g. `Loop 10.wav` sorts before `Loop 2.wav`.
-- Installed sample menu labels are compact waveform names: `s01` through `s99`, then `sA0` upward.
-- The full encoder-click parameter display shows the filename-derived 8-character display name. Stems longer than 8 characters are compressed as first 4 chars, CGRAM char `0x00`, last 3 chars, preserving case.
-- `SampleInfo.size` is now `uint32_t`; the high bit is currently used as `SAMPLE_INFO_LOOP_FLAG`, leaving 31 bits for frame count.
-- Metadata and display-name tables live at the top of sample flash; audio payload grows up from `0x080C0000` (sector 7, since Session 073). Installs made before S073 are rejected (0 samples) because their first entry lies below the new floor.
-- Flash writes use `sampleFlash.c/h`, which hard-rejects sectors below 7 and invalidates D-cache after erase/program.
-- Audio is suspended before flash writes and fully reinitialized after. Hardware testing confirmed audio now comes back without reboot after sample load.
-
-Sample flash map:
-
-| Region | Range |
-|--------|-------|
-| App flash | `0x08008000-0x080BFFFF` |
-| Sample data | `0x080C0000-0x081FF69F` |
-| `SampleInfo[120]` | `0x081FF6A0-0x081FFC3F` |
-| Display names[120][8] | `0x081FFC40-0x081FFFFF` |
-
-Important caveat: long samples are not fully solved. `SampleInfo.size` is 32-bit, but oscillator playback still uses the legacy `phase >> 17` index path. Treat long-sample support as unfinished until oscillator phase/index math is widened and hardware tested.
+- **Accepted formats:** mono 16-bit 44.1 kHz PCM WAV.
+- **Catalogue v2 (S087):** 8 KB at `0x081FE000`. 32 B header (magic "LXC2"
+  programmed last), 128 × 28 B sample entries, 128 × 20 B wavetable entries.
+  Details: `STORAGE_SRAM_MANIFEST.md` §4, `087_SESSION_HANDOFF_LOG.md` §5.
+- Sort: natural order (`storage_naturalCompare()`). Display names: first 4 +
+  last 4 for names over 8 chars; numeric prefix stripped.
+- Audio payload from `0x080C0000` (sector 7) upward; catalogue at top of
+  sample flash.
+- Flash writes use `sampleFlash.c`; audio suspended before writes,
+  reinitialized after. Pre-S073 installs are rejected.
 
 ---
 
 ## Encoder (SW42)
 
-- **Algorithm**: Dannegger difference — NOT LUT
-- **Seed**: `last = new & 3` in `encode_init()` — NOT `(new+3)&3`
-- **Divide**: round-toward-zero in `encode_read4()` — NOT `>>= 2`
-- **Acceleration**: 8-entry `ts_dirs[]` timestamp buffer, 1×–4× linear multiplier, 100ms decay
-- **Rebound suppression**: `ts_dirs[]` majority-direction check — do not remove
-- `encode_read1/read2` permanently removed — do not re-add
-- When moving `encode_read4()` to any interrupt context: TIM1 (priority 1) can
-  preempt lower-priority service code and corrupt `enc_delta` mid-read. The
-  current `cpsid/cpsie` guards are acceptable from foreground; an ISR caller
-  should use a shadow-copy handoff instead.
+Full operational rules in `HARDWARE_MAP.md` "Main Encoder" section.
+Dannegger difference algorithm; `encode_read1/read2` permanently removed.
 
 ---
 
 ## Display / Menu
 
-- Full menu system is wired: voice pages, global/MIDI page, load/save page.
-- **LCD queue**: head/tail-only SPSC — do NOT reintroduce `lcd_q_count`
-- `sendDisplayBuffer` emits `lcd_setcursor` before every data byte
-- `buttonHandler_processEvents()`: `if` not `while` — intentional
-- **Knob repaint**: `menu_knobs_dirty` + `menu_serviceKnobRepaint()` is RV1-4 only
-- **endlessPots**: `atan2f(b, a)` — do NOT change argument order
-- Saturation in `menu_encoderChangeParameter` / `menu_handleLoadSaveMenu`: int16 sum + clamp
-- MODE/SELECT/VOICE button navigation and LED feedback are wired.
-- The cosmetic boot splash sequence is all LEDs → title → menu.
-- Canonical `.SND` save length is restored to 236 bytes; short kits load with zero-filled tails.
-- Display stability under rapid button mashing depends on the SPSC LCD ring behavior above.
-- Multi-knob RV1-RV4 repaint collapse is intentional and should remain scoped to that input path.
-- Global `cpu` is a read-only audio queue-free pressure widget, not a general MCU utilization meter.
-- Runtime kit/all/performance load completion should use
-  `menu_startSoundApply()` / `preset_tickDrumsetApply()`; do not reintroduce
-  direct `preset_sendDrumsetParameters()` calls in post-audio completion paths.
-  The worker must remain active after the six image bits clear until the
-  all-source LFO/velocity rebind cursor also drains.
+- Full menu system wired: voice pages, global/MIDI, load/save.
+- **LCD queue**: head/tail-only SPSC — do NOT reintroduce `lcd_q_count`.
+- `sendDisplayBuffer` emits `lcd_setcursor` before every data byte.
+- `buttonHandler_processEvents()`: `if` not `while` — intentional.
+- **Knob repaint**: `menu_knobs_dirty` + `menu_serviceKnobRepaint()` is RV1-4 only.
+- **endlessPots**: `atan2f(b, a)` — do NOT change argument order.
+- Saturation in `menu_encoderChangeParameter` / `menu_handleLoadSaveMenu`: int16 sum + clamp.
+- Runtime load: `menu_startSoundApply()` / `preset_tickDrumsetApply()`;
+  do not reintroduce direct `preset_sendDrumsetParameters()` after audio.
+  Worker stays active until the all-source LFO/velocity rebind cursor drains.
 
 ---
 
@@ -1794,159 +378,76 @@ Important caveat: long samples are not fully solved. `SampleInfo.size` is 32-bit
 
 - **Compiler**: global flags are `-O2 -flto`; DSP source files use the Makefile's more-specific `-Ofast` rule.
 - **FPU**: explicitly enabled in `sysclk_init()` via CPACR
-- **VLAs**: forbidden in DSP voice files. Use `static int16_t buf[OUTPUT_DMA_SIZE]`. Snare/Cymbal fixed Session 8, HiHat fixed Session 12.
-- **`GetRngValue()`**: returns `int16_t` (the RNG data register truncated).
-  Audio-rate noise (`calcNoiseBlock()`) uses the full signed value; the
-  sequencer masks with `& 0x7FFF`. The hardware RNG is the accepted noise
-  character: a software PRNG was rejected in S073.
-- **LFO noise** currently divides the *signed* value by 32767
-  (`lfo.c` `lfo_calc()`), so it ranges −1..1 while other LFO waveforms are
-  0..1; the old `& 0x7FFF` mask is commented out. Suspected issue, not
-  verified: `SCOPING_TARGETS.md` "Session 073 carry-forward".
-- **Constant CPU** (DSP CPU Policy above) and the **special-writer tags**
-  (`INSTRUMENTS_DSP_REFERENCE.md` §4.4) apply to every DSP change; prove
-  refactors with `tools/dsp_test/`.
+- **VLAs**: forbidden in DSP voice files. Use `static int16_t buf[OUTPUT_DMA_SIZE]`.
+- **`GetRngValue()`**: returns `int16_t` (truncated RNG data register).
+  Audio-rate noise uses the full signed value; sequencer masks `& 0x7FFF`.
+  Hardware RNG is the accepted noise character (software PRNG rejected S073).
+- **Constant CPU** (DSP CPU Policy above) and **special-writer tags**
+  (`INSTRUMENTS_DSP_REFERENCE.md` §4.4) apply to every DSP change.
 - **`RCC_AHB2ENR`**: address is `0x40023834` — NOT `0x40023830`
 - **`RNG_CR`**: direct write `RNG_CR = RNG_CR_RNGEN` — NOT `|=`
 - **DTCM**: not DMA-accessible
 
 ---
 
-## Boot / Init Order (do not reorder)
+## Boot / Init Order
 
-```c
-EXTI_IMR = 0;          // MUST be first
-sysclk_init();
-lcd_init();            // MUST be before lcd_tim7_init()
-lcd_tim7_init();
-encode_init(); din_init(); dout_init(); adc_init(); endlessPots_init();
-triggerJacks_init();
-dsp_init();
-seq_init();            // seeds pattern/sub-step defaults; required before sequencer use
-euklid_init();
-som_init();
-initMidiUart(); usb_init();
-filesystem_initCardAndMountBlocking(); // card SPI mode + afatfs mount, pre-audio
-menu_init();           // calls memset on parameter_values — do NOT also memset in main()
-// Boot scans Kit/Scene/Bank, writes their slot-ordered .hcindex files, then
-// scans/writes each Instrument type index one at a time; reload Bank index
-// after Instrument generation disposes the shared name cache.
-// Synchronous boot load tries lowest Bank, then lowest Scene, then lowest Kit, then defaults
-// Do NOT snapshot resident names to /.hcnames here; targeted load/save operations own it.
-// Synchronous globals load (settings.cfg) via preset_loadGlobals + polling + menu_pollPresetStatus
-audioCodec_init();     // single audio entry point — AFTER all SD boot ops
-sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
-// main loop: filesystem_tick() + menu_pollPresetStatus() every iteration
-// main loop: midi_service() for DIN/USB drain + flush
-// main loop: led_processSeqLedState() (NOT seq_tick — TIM3 owns that)
-```
+Full 58-step annotated boot sequence: `MODULE_INTERCHANGE_SPEC.md`
+"Boot / Init Order". Critical ordering constraints:
 
-### Sequencer / PATGEN Reminders
-- Sequencer-to-LED feedback uses `seq_ledState` in `ledHandler.c`; do not reintroduce the removed front-panel parser bridge.
-- `led_processSeqLedState()` drains sequencer LED events in the main loop. Do not move it to an ISR without auditing PatternData and LED RMW races.
-- `Core/MIDI/frontPanelParser.c/h` is deleted. Do not replace it with a generic bridge; call owner APIs directly.
-- New pattern/track/step/automation work should enter through `pat_*` APIs in `Core/Bank/Scene/Pattern/PatternData.c/h`.
-- Sequencer no longer exposes `seq_patternSet`, `seq_tmpPattern`, or `seq_selectedStep` compatibility names in live code. Playback uses PatternData helpers such as `pat_readStepSpecials()`; live recording goes through LiveRecord and the Pattern Stack Service (`patSvc_recordStep()` → `pat_recordStep()`, `pat_eraseSpecials()`; S081). `pat_recordNote()`, `pat_eraseMainStepSubSteps()` and `pat_getEffectiveTrackLength()` no longer exist; track timing uses the sequencer's effective cache, next bullet.
-- **Per-track timing (S078):** sequencer track timing (length wrap, DDA scale interval, shuffle delay, realignment) reads only `seq_effectiveTrackLength/Scale/Shuffle[]`, refreshed by `seq_refreshTrackEffectiveParams()` from each track's played Scene; the run mode is read from `region->track_play_mode[]`. Do not read `track_length/scale/shuffle` from the region in ISR timing code, and never write the region from Morph or automation (`PATTERN_DYNAMIC_STACK.md` §6.4).
-- `pat_tmpPattern` is the remaining active-pattern load buffer. Leave it until the 17th Scene/background-bank-load design replaces it; it should be the only temporary pattern storage needed.
-- `seq_offsetTrackStepIndexForRotation()` is a narrow runtime hook used by PatternData; UI code should call `pat_setTrackRotation()`.
-- `Core/Bank/Scene/Preset/` owns Preset code location. Public names intentionally remain `preset_*`, `parameterArray_*`, and `paramArray_*`; do not rename only part of this API.
-- `parameter_values[]` and `parameters2[]` still live in Menu and are known future migration targets for the instrument/file redesign, not a cleanup to do casually.
-- Normal Kit/KitMrp load is directory-based through root `Kit/`. Legacy flat
-  `.SND` morph paths remain implementation leftovers, not the current promoted
-  filesystem model.
-- MIDI notes/channels do not belong in `kitset.kcg` or instrument files. They
-  belong in future scene settings.
-- `BUTTON_TIMEOUT` is milliseconds on this port (`500u`), not original AVR ticks (`38 * 13.107ms`).
-- `EuklidGenerator.c` matches original LXR. PATGEN distribution depends on `__CLZ(0) == 32`; do not replace the shim with `__builtin_clz()`.
-- `seq_tick()` is owned by `TIM3_IRQHandler`. **Do NOT add seq_tick() back to the main loop.**
-- **S080 TIM3 order in `seq_processSchedulerTick()`:** master boundary (scene
-  change fire detection) → `seq_chainServiceTick()` → deferred triggers →
-  (unless chain `stp`) `seq_loopProcessTick()` → per-track DDA → rolls → FX
-  clock. Scene changes themselves run in the foreground
-  (`menu_serviceDeferredSceneChange()` from `buttonHandler_tick()`).
-- `midiTransport_processRealtime()` and `triggerJacks_tick()` are also owned by TIM3. Do NOT call them from the main loop.
-- `voiceControl_processPending()` is called only inside `audio_check_and_render()` before `mixer_calcNextSampleBlock()`. Do NOT call from ISR context.
-- DIN TX FIFO inserts and USB MIDI writes from foreground code must use short critical-section wrappers to avoid corruption from TIM3 clock/note output.
+1. `EXTI_IMR = 0` must be first.
+2. `lcd_init()` before `lcd_tim7_init()`.
+3. All SD boot ops complete before `audioCodec_init()`.
+4. `sequencerTimer_init()` (TIM3) after `audioCodec_init()`.
 
-### MIDI / Clock Reminders (S083; supersedes the Session 019 notes)
-- TIM2 is a shared free-running 1 µs counter. Do NOT reset it on each pulse. Use unsigned subtraction for deltas.
-- TIM5 is free and reserved for future `afatfs_poll()` ISR migration. Do NOT use it for anything else.
-- PAR_EXT_SYNC values in order: `off` / `usb` / `din` / `pls` / `aut`. PAR_BPM minimum is 1; value 0 no longer means external sync.
-- **`Core/MIDI/` is rebuilt (S083).** Modules: `MidiDefs.h`, `MidiBuffer`,
-  `MidiDin`, `MidiIn`, `MidiTransport`, `MidiNoteMap`, `MidiNotes`,
-  `MidiControl`, `MidiLearn`, `MidiProgram`, `MidiOut`, `MidiPitch.h`;
-  `MidiVoiceControl` is unchanged. `MidiParser`, `Uart`, `FIFO`,
-  `MidiRealtime`, `MidiMessages` and `MidiNoteNumbers` are gone, as is the
-  legacy LXR CC/CC2 map. Authority: `MIDI_SPEC.md`.
-- **Consume-then-route:** `midiIn_dispatch()` offers a message to its
-  consumers first and forwards it per MRT only if no consumer acted. The
-  S082 Bank-load drop filter runs before the consumers; a dropped message
-  counts as not consumed and is forwarded. Never forward before parsing.
-- **Channels are 1..16 with 0 = off/unassigned everywhere in MIDI code** (the
-  wire nibble is channel - 1). G is 0..16 (0 = `off`); a track's `ch` stores
-  0 = `glb`, 17 = `off`. `SceneData` no longer falls back to track+1.
-- **Never cache a Scene index in MIDI code:** `midiNoteMap_load()` reads the
-  active (RX) or played (TX) Scene per message (Scene changes, Scene 17).
-- `midiTransport_processRealtime()` runs in TIM3 only. Port writes go only
-  through `MidiOut` (PRIMASK sections; TIM3 also sends).
-- **Note map:** a track's `nte` is the root of its receive range, not a pitch
-  (`MidiNoteMap`). A note triggers at most one track (lowest wins). A note is
-  transmitted only when the inverse lands on the same track and pitch (Q4).
-  Default internal note 63 is the default pitch for stripe hits, overlay
-  `def` and preview (C-1).
-- **Track `ch`/`nte` lists (user, 2026-10-22) — binding:** the STEP track
-  settings second page is `ch nte lop rmp`. Track `ch` = `off`, `glb`,
-  1..16; track `nte` = `off`, `on` (default; was `def`), notes; `nte` has
-  category Track. Menu order is off first; the Scene stores `ch` 0 glb,
-  1..16, 17 off and `nte` 0 on, 1..127, 128 off (`MIDI_TRACK_*_OFF`), and
-  menu.c converts. `ch off` = no MIDI channel at all; `nte off` = no notes
-  in or out, channel kept for CC/NRPN/PC. The automation ramp cell is
-  labelled `rmp` / category `Automtn` / long name `Ramp` (was `asm`).
-- **A MIDI parameter write is a menu edit (Q1).** `MidiControl` calls
-  `menu_commitTargetEdit()`: Normal image, R12/R13 and Scene-target clears,
-  edit-mask fan-out, LiveRecord in LATCH/OVERDUB, target-ID LCD repaint. It
-  is never echoed. The S075 F3 "MIDI lowest" path is retired.
-- **CC1:** on G it is global Morph through `menu_commitGlobalMorphFromMidi()`
-  (fan-out, never recorded, G-1); on a voice channel it is that voice's Morph
-  and is recorded.
-- **CC2** (0 off/single, 1 BAR <, 2 BAR >) is G-only and sets the PERF BAR
-  overlay itself, like a BAR press: LEDs follow in PERF, panel and MIDI
-  notes share the one state, and the last BAR press or CC2 wins.
-- **Global Morph** (`mrp`, CC1 on G) sets all Morph, the Effect Morph
-  included (as an `fxm` menu edit). It is never recorded.
-- **SHIFT+REC:** page 2 is `pv< pv> qnt rtk`. `pv<`/`pv>` set the overlay
-  roll velocity rhythm, using the step `rtm` list
-  (`settings.cfg` `perf_vel_lt/rt`, `lines=26`); one rule for step and
-  overlay rolls: `seq_rollRhythmVelocity()`.
-- **CC0** on G requests the S082 background Bank load under RXF P. **PC**
-  0..15 on G is a whole-Scene change; on a voice channel it moves that
-  channel's tracks (`seq_assignTracksToScene()`, realigned, new take). PC/CC0
-  are dropped during a Bank load (forwarded, not consumed).
-- **SHIFT+PLAY no longer toggles the transport in any mode** (it arms the
-  chord; +REC = Learn, +SEQ in PERF = chain editor).
-- **RXF/TXF/MRT default to off** on a card without the keys.
-- **MIDI Learn** is global: 128 type-tagged rows in the root file
-  `midilrn.cfg`, not `settings.cfg` (26 lines, `lines=26`).
-  - The file has a `format=helicase.midilearn`/`version=1` header, then
-    `learn=` rows, then `lines=2+N`.
-  - Every stored Learn rewrites it at once with the safe method
-    (`midilrn.tmp`, sync, remove, rename). The write waits for an idle
-    facade, and a Learn made during a write queues one more.
-  - Boot loads it right after `settings.cfg`, with `.tmp` recovery.
-  - Trace stage `m`.
-  - Gesture: SHIFT+PLAY+REC; `LRN`/`FUL`; one parameter has at most one CC.
-- **Arrival time** is carried in `MidiMsg.stamp` (low 16 bits of TIM2 µs) and
-  used only for live-record placement (`liveRec_trigger_t.age_us`, clamped to
-  `MIDI_ARRIVAL_MAX_AGE_US`).
+---
+
+## Sequencer / PATGEN Reminders
+
+- `seq_tick()` is owned by `TIM3_IRQHandler`. **Do NOT add it to the main loop.**
+- `midiTransport_processRealtime()` and `triggerJacks_tick()` also TIM3-owned.
+- `voiceControl_processPending()` only inside `audio_check_and_render()`.
+- Sequencer LED feedback: `seq_ledState` → foreground `led_processSeqLedState()`.
+- **S080/S084 TIM3 order:** live overlay ticks (first) → master boundary →
+  chain service → deferred triggers → looper → per-track DDA → step rolls →
+  FX clock.
+- New pattern/track/step work through `pat_*` APIs in `PatternData.c/h`.
+  `seq_patternSet`, `seq_tmpPattern`, `seq_selectedStep` are gone.
+- **Per-track timing (S078):** read `seq_effectiveTrack*[]` only; never write
+  the region from Morph/automation.
+- DIN TX and USB MIDI writes from foreground use short critical sections.
+- `EuklidGenerator.c` depends on `__CLZ(0) == 32`; do not replace the shim.
+- `BUTTON_TIMEOUT` is milliseconds (`500u`), not original AVR ticks.
+
+---
+
+## MIDI / Clock Reminders
+
+Full specification: `MIDI_SPEC.md` (Parts I–III). Module reference:
+`MODULE_INTERCHANGE_SPEC.md` "Core/MIDI".
+
+- `Core/MIDI/` rebuilt in S083 as single-role modules. `MidiParser`, `Uart`,
+  `FIFO`, `MidiRealtime`, `MidiMessages`, `MidiNoteNumbers` are gone.
+- **Consume-then-route:** `midiIn_dispatch()` offers to consumers first;
+  forwards per MRT only if unconsumed. Never forward before parsing.
+- **Channels 1..16, 0 = off** in MIDI code. G 0..16; track `ch` stores
+  0 glb, 17 off.
+- **Never cache a Scene index in MIDI code.**
+- **A MIDI write is a menu edit (Q1):** through `menu_commitTargetEdit()`.
+- **Note map:** `nte` is root of receive range, not a pitch. Lowest track
+  wins. Default internal note 63. `MidiNoteMap` authority.
+- **Track `ch`/`nte` (S083):** `ch` off/glb/1..16; `nte` off/on/notes.
+  Scene stores `ch` 0..17, `nte` 0..128.
+- **CC1:** on G = global Morph (fan-out, never recorded); on voice = that
+  Morph (recorded). **CC2** (G only): sets PERF BAR overlay.
+- **MIDI Learn:** 128 rows in `midilrn.cfg` (safe write); gesture SHIFT+PLAY+REC.
 - **Transport:** Start restarts, Continue resumes from `seq_resumeTick`, SPP
-  sets it while stopped (x24), and all are gated by `snc`. Received START/
-  STOP/CONTINUE are forwarded per MRT but never re-sent by the LXR (C-11).
-- BAR1/BAR2 overlay triggers go through the per-track executor
-  (`buttonHandler_overlay[7]`), shared with MIDI notes; the legacy default
-  notes 36..42 are gone.
-- RST IN semantics: GPIO input with pull-up; low-to-high rising edge resets pattern position without toggling transport or sending MIDI stop/start.
-- MIDI realtime bytes (0xF8/FA/FB/FC) are routed to the MidiTransport ring in the USART3/OTG ISRs and must NOT disturb the channel-message running-status parser state.
+  while stopped; gated by `snc`. Received Start/Stop/Continue forwarded per
+  MRT but never re-sent.
+- **TIM2:** shared 1 µs counter. Never reset; unsigned subtraction for deltas.
+- TIM5 reserved for future `afatfs_poll()` ISR migration.
+- Realtime bytes (0xF8/FA/FB/FC) route to MidiTransport ring; must not
+  disturb running-status parser.
 
 ---
 
@@ -1959,502 +460,17 @@ sequencerTimer_init(); // TIM3 4kHz sequencer owner — AFTER audioCodec_init()
 
 ---
 
-## Known Issues / Technical Debt
-
-### Session 051 carryover and known defects
-
-- **Root Scene Load trace and AutoSave publication are hardware-accepted.**
-  The final direct Scene/Bank `.hcindex` callback now snapshots status then
-  calls `filesystem_ack()` before Menu teardown. A SeaWaked/024 load into
-  resident Scene 15 emitted `R=0x8000`, Kit/Scene `L`, `F/W`, and successful
-  `A/V/M/C/P/T`; `.hcprms2` advanced from generation 5 to 6. The terminal
-  acknowledgement is mandatory in this existing callback and must not be
-  moved into a new load/persistence path.
-- **Root Scene HCNAMES exit fix is implemented and single-destination
-  hardware-confirmed.**
-  `menu_switchPage()` now admits a nonzero
-  `menu_residentNameDirtySceneMask`, and the Scene type boundary flushes before
-  a later Kit-family payload can overwrite the identity block. Scene 015
-  Machine -> Scene 15 produced correct Scene/Kit/Instrument rows and
-  generation-2 publication. Multi-destination, deferred/toggle exit,
-  Scene->KitMrp->Kit hazard, and failed-load preservation still need evidence.
-  Do not add another writer.
-  The current `-` token remains the valid inherited HCNAMES source token.
-- **Bank Load persistence is implemented and hardware-verified (Session 052).**
-  `settings.cfg active_bank` follows the committed restore slot and the AutoSave
-  Bank scene-present mask equals the effective selected-child union (re-marked
-  on a no-op). See `052_SESSION_HANDOFF_LOG.md`. The three refactor targets
-  this bullet used to list as deferred in `SCOPING_TARGETS.md` are now all
-  **resolved in Session 057**: Bank Save present-mask union (P1) is fixed, the
-  once-per-boot settings mark is accepted deliberately (P2, not gated), and
-  the boot Kit-quarantine pass (`KQ019KST`) was replaced with lazy
-  quarantine-on-failed-load. See `057_SESSION_HANDOFF_LOG.md` §2-§3, §8-§9 —
-  note the boot-safety regression test for the quarantine replacement was not
-  yet hardware-run.
-- The current diagnostic build retains 2,048 trace records (16,384 B) and
-  64-record/512-B append batches. This is temporary approved logging-only RAM.
-  The Session 052 B-witness diagnosis is complete; restore the 64-record default
-  and regenerate the memory manifest on the next rebuild.
-- **InstrumentMrp `kit` row fix is implemented and hardware-confirmed.**
-  It displays the selected slot's HCNAMES name, uses a Morph-only hidden
-  snapshot, and restores only Morphable Morph endpoints. The first pass showed
-  the restore committed the staged normal image into the Morph endpoints; the
-  repaired build dispatches a Morph-to-Morph staged commit via
-  `filesystem_loadedInstrumentWasMorphTemporary()`. Type, Normal image, name,
-  and source remain unchanged.
-- Root Instrument and InstrumentMrp AutoSave are now accepted hardware work,
-  not future whole-object scope. The root fixture proved `J=0x03`, `I=0x07`,
-  and 76/76 accepted bytes; the combined generation-3 fixture proved Drum-2
-  Morph-only persistence. That historical 64-entry trace could wrap under
-  multiple loads; the current temporary diagnostic ring is 2,048 entries, but
-  compare durable HCPRMS generations as the final proof in either build.
-
-- Every AutoSave CRC path is now byte-bounded at 128 bytes per filesystem
-  tick: initial creation, neither-valid recovery, candidate validation, and
-  transformed-copy generation. It uses retained cursors and no delay,
-  record-sized buffer, or ordinary-runtime pacing. Never restore the rejected
-  generic one-millisecond pacing layer; it made Bank operations extremely slow
-  and did not eliminate audio glitches.
-- A missing-record setup selector defect was fixed: creation now uses the
-  retained A/B target selector, not the CRC accumulator that later reuses the
-  same scratch field. The later successful card fixture has both hidden files
-  at exactly 34,768 bytes with committed headers.
-- One reproduction after that correction timed out during initial B creation:
-  A was complete (34,768 bytes) and B stopped at exactly 32,768 bytes. The
-  resulting eight-byte `ASENSURE` `/bootlog.bin` proves that the ten-second
-  boot deadline fired while ensure was active. It supports, but does not prove,
-  an AsyncFATFS cluster-extension/cache/SD transport stall. Several later
-  boots succeeded and produced no bootlog, so this is intermittent and not
-  resolved. The logging-only 64-byte capsule plus read-only AsyncFATFS/SD
-  snapshots are in the build to capture a recurrence; they make no retry,
-  allocator, timing, or recovery-policy change.
-- The one-second debounced `settings.cfg` writer was re-tested by the user and
-  is fine. It is now source-free; make no settings change without new contrary
-  evidence.
-- Repeated runtime loading of `000 Full` and `013 LoadTst` while playing, plus
-  saves over slots 024 and 009, produced no heard audio glitch after the trace
-  flush admission guard. This is a useful stability result, not proof that all
-  Bank Save/Load or AutoSave interactions are complete.
-- Native recursive tree delete was reimplemented on 2026-08-19. Card-fixture
-  and hardware acceptance remain pending; do not claim power-loss atomicity or
-  reintroduce `old*`/temporary promotion as a workaround.
-**Closed in S082 — runtime Bank Load no longer switches the playing Scene.**
-A runtime load never applies `bankset.bcg` `active_scene` and never calls
-`seq_alignActivePatternToScene()` / `menu_setShownPattern()`; only the boot
-load keeps that behavior. If playback runs and a played Scene would be
-replaced, the Menu/MIDI request builds Scene 17 and switches to it
-seamlessly first. See `082_SESSION_HANDOFF_LOG.md` §4 (D25–D27) and the
-Scene 17 invariants in the Volatile Notes.
-- **Deferred tooling — developer-log converter.** When AutoSave is complete
-  and logging formats are stable, add a read-only `/tools/` script that turns
-  copied `SD_CARD/` development outputs into dated project-root
-  `dev_log_date.txt`. Do not implement it yet; it must target the settled
-  `asavetrc.bin` and bootlog/capsule contracts.
-- The settled future semantic rule remains: Bank slot/name are payload, not
-  record-selection identity. The current live-Bank validator boundary still
-  needs reconciliation before Phase-2 whole-object Bank publication.
-
-### Session 059 closeout (2026-08-31)
-
-- Gate A makes short create, LFN create, and same-parent rename reserve a full
-  sector-local `0xE5`/`0x00` run. A moved terminator run clears and persists its
-  target sector before retiring the old tail. A stopped-playback Bank Save was
-  about 10 seconds; Kit Load/Save, Scene Load/Save, and Instrument Save were
-  reported working.
-- Gate B initializes only the first sector of an appended directory cluster.
-  Later sectors remain hidden behind `0x00` until Gate A clears one before
-  exposure. A future roughly 20 KiB Scene Pattern uses the regular-file path
-  and does not change this directory rule.
-- Typed Instrument indexes reject blank/nonprintable/overlength, temporary,
-  duplicate, and unsorted rows. Missing, empty, or corrupt metadata rebuilds
-  only the selected type; real FAT/SD/read/scan/close/write faults remain
-  errors. Menu acknowledges failure and cannot dispatch a deferred payload.
-- Healthy Instrument index loads now open `.hcindex` directly without the
-  former physical directory prescan. The repair and direct-open path were not
-  hardware-retested. `tools/verify_instrument_indexes.py` remains the read-only
-  card-copy validator.
-- Gate B was subsequently hardware-tested through a failed-child Bank Load,
-  full `04x Full` Bank Load, and full save as `Bank/050 Full`. The copied card
-  passes Bank-tree, root-index, HCNAMES, settings, and AutoSave CRC/generation
-  checks; see `059_SESSION_HANDOFF_LOG.md` section 13. Raw-sector/FAT16/
-  fragmented-chain coverage remains unrun. One nonreproducible Kit-list error
-  after rapid scrolling remains explicitly deferred.
-- That capture has a valid 99-row Drum `.hcindex`, but Snare, Cymbal, and HiHat
-  `.hcindex` files remain absent. The Bank path is accepted; the documented
-  all-types boot refresh and runtime recovery for those three Instrument types
-  remain unverified.
-- Final build: `text=385,420`, `data=404`, `bss=96,176`, image 385,840 bytes;
-  `afatfs=6,984`, `fs_list_cache_name=9,000`. Both gates add zero retained
-  SRAM and use no Pattern-reserved SRAM1 or delay-line-reserved DTCM.
-- Durable detail: `knowledge_files/log_archive/059_SESSION_HANDOFF_LOG.md`.
-  The four root `S059_*` working documents are superseded and may be deleted.
-
-### Session 060 Phase C source fields (2026-09-03)
-
-- Implemented the zero-growth Scene/Kit/Instrument HCNAMES source projection:
-  two little-endian source bytes are routed from the filesystem-owned masked
-  source register and marked through the canonical AutoSave dirty mask. Scene
-  and Kit parameter starts move from 8 to 10; Instrument normal starts from
-  11 to 13; section, payload, mask, and record sizes remain unchanged.
-- Whole Instrument, Kit, and Scene-without-Pattern commit markers now include
-  source bytes while HCNAMES-owned names remain excluded. Instrument, Kit, and
-  Scene Save completions pair source-register staging with one, seven, and
-  eight source dirty marks respectively; Bank row zero remains source-free.
-- Clean build and image packaging passed: `text=389,036`, `data=400`,
-  `bss=96,192`; firmware payload 389,436 bytes and packaged image 389,452
-  bytes. The approved RAM impact is about 20 bytes of automatic foreground
-  stack only, with no persistent allocation or wire-record growth.
-- Card round-trip evidence from the 2026-09-03 Phase C hardware pass is
-  recorded in `S060PHASE_C_AUTOSAVE_SOURCE.md`: source bytes verified at the
-  wire offsets (Scene +8, Kit +8, Instrument +11), INHERIT/direct tokens
-  correct, record sizes unchanged, and an in-place first-drain upgrade
-  observed. Phase D's dedicated load/save-to-convergence fixtures (Section 5
-  tests 1-4 in `S060PHASE_D_RE_DIRTY.md`) remain pending on hardware.
-
-### Session 060 Phase D re-dirty audit (2026-09-03)
-
-- `S060PHASE_D_RE_DIRTY.md` was re-verified against commit `fe0eedc`: every
-  inventory site in its Section 4a exists and is wired as claimed (immediate
-  compound load markers, save-completion source marking, refreshed-flag set
-  at all load/save terminal boundaries, post-drain
-  `objectFullyCaptured()` gating, phases 70-76 `.hcnamtmp` → `.hcnames`
-  safe rewrite, and terminal-callback witness clearing).
-- No source change was required and none was made; Phase D adds zero
-  persistent SRAM and zero wire-format growth. The deferred re-dirty request
-  mask from the parent plan is unnecessary because load/save completions
-  run while the filesystem facade owns the operation, so their immediate
-  atomic dirty marks cannot race an active drain.
-- Clean rebuild and image packaging reproduced the Phase C linked sizes
-  (`text=389,036`, `data=400`, `bss=96,192`; 389,452-byte image).
-- Remaining Phase D work is hardware verification only: Section 5 tests 1-4
-  (load-to-convergence, save-to-convergence, load-during-drain race, and
-  overlapping loads), each ending with a card-copy check of `.hcnames`
-  sources, missing `R` suffixes after convergence, and matching autosave
-  source bytes.
-
-### Resolved / Changed in Session 048
-
-- HCNAMES is now the paired name/source authority. The filesystem-owned 258-B
-  register replaces the retired 32-B SceneData source array; `settings.cfg`
-  writes no Scene-source values and legacy keys are ignored only for migration.
-- Root-pool Instrument commits mark type plus owned Normal/Morphable Morph
-  bytes immediately; compatible InstrumentMrp commits mark only Morphable
-  Morph bytes. Hidden temporary `kit` restore remains non-marking.
-- Corrected the direct HCNAMES completion acknowledgement and added the
-  approved one-byte queued page exit, so normal hardware exit releases the
-  facade for trace and AutoSave scheduling. Added trace stages `I`, `J`, and
-  `N` without a logging-off allocation.
-- The permanent detail and hardware fixtures are in
-  `knowledge_files/log_archive/048_SESSION_HANDOFF_LOG.md`.
-
-### Resolved / Changed in Session 047
-
-- Replaced the remaining unbounded whole-record CRC work with a uniform
-  retained, 128-byte-per-tick implementation across all AutoSave setup,
-  validation, recovery, and copy paths.
-- Fixed the boot ensure A/B filename selector corruption caused by reusing the
-  selector scratch field as a CRC accumulator.
-- Kept the accepted settings persistence path unchanged after user retest.
-- Added a logging-only `ASENSURE` forensic capsule, read-only lower-layer
-  snapshot APIs, and `tools/decode_bootlog.py`; both logging-on and logging-off
-  builds passed. The normal logging-on image was rebuilt after the change.
-- The permanent detail and hardware chronology are in
-  `knowledge_files/log_archive/047_SESSION_HANDOFF_LOG.md`.
-
-### Resolved / Changed in Session 046
-
-- Boot Kit quarantine and Bank Load have one ten-second operation deadline plus
-  non-rearming substep labels. Ordinary operation failure and timeout reach the
-  same bounded best-effort boot failure writer without being converted into
-  success.
-- Kit validation distinguishes valid content, invalid content, and I/O abort.
-  Only proven invalid content may reach quarantine rename; an interrupted FAT
-  operation leaves the Kit intact and aborts index publication.
-- Boot consumes failed index/load request acceptance and terminal status before
-  Menu acknowledgement or empty-library fallback can hide the failure.
-- HCNAMES direct access is case-insensitive and every create-capable path uses
-  one shared root absence proof. Duplicate or failed proof never mutates the
-  card. Hardware retest did not reproduce the dual HCNAMES entry.
-- The `DEV_MODE_LOGGING`-only 520-byte AutoSave lifecycle trace is present at
-  `c9807fa`. Its autonomous append has a completion callback that returns the
-  facade to `IDLE`; failed appends retain pending records.
-- User-testable scalar owner coverage is accepted complete: Scene,
-  Kit/Instrument, and Scene-owned MIDI channel/note. No separate Bank scalar UI
-  test exists. Whole-object publication remained future work at the Session
-  046 close; Session 048 later accepted the Instrument boundaries.
-- The deletion-safe Session 046 record is
-  `knowledge_files/log_archive/046_SESSION_HANDOFF_LOG.md`.
-
-### Resolved / Changed in Session 045
-
-- Accepted foundation at `326a8a1`, retained by `c9807fa`: exact 34,768-byte hidden A/B records; one
-  canonical 3,856-byte dirty mask; bounded asynchronous mask/value capture
-  with atomic take/re-dirty semantics; typed Bank/Scene/Kit/Instrument scalar
-  markers; and the then-33-line v1 settings schema.
-- Pattern and Effect persistence, applying a hidden winner at boot, and
-  crash-recoverable promotion into explicit library files remain unimplemented.
-  `AUTOSAVE.md` is authoritative; stale historical plans and the old AutoSave
-  section in `FILESYSTEM_SPEC.md` are not.
-
-### Resolved / Changed in Session 044
-- Cold boot initializes SceneData before tagged runtime construction. DRM's
-  zero enum value can no longer turn raw Scene BSS into six accidental Drum
-  owners.
-- Boot and deferred Scene activation share the same clear -> all incoming
-  type/image apply -> all-source LFO/velocity rebind lifecycle. Hardware
-  confirmed the initial active Scene's Snare controls and both reported LFO
-  destinations now work without a Scene/target round trip.
-- Top-level Load:Bank chains Bank index completion into its child preview and
-  gates **OK** (not scrolling) until the destination mask is resident, fixing
-  unchanged-slot zero-mask rejection. Superseded input gating: Load/Save Slot
-  Scrolling Policy (2026-10-19).
-- Root Scene/Bank Load finishes HCNAMES, preserves the completed Bank result,
-  applies DSP, and reloads the unchanged root index read-only last. Save alone
-  owns physical numbered-root scan/index rebuild.
-- Accepted OK/OW operations display `...`, suppress cursors, and reset to the
-  bracketed type row only after their real terminal work.
-- Four SD boot-pacing holds are present, but the motivating intermittent hang
-  was seen once and is not reproducible. Do not claim it resolved.
-- Session 044's final static allocation was 12,280 B DTCM and 66,776 B SRAM1.
-  That SRAM1 value is historical. The current Session 051 logging-on linked
-  build reports `bss=95,176 B`; no RAM owner or allocation moved, and
-  `STORAGE_SRAM_MANIFEST.md` remains the binding allocation record.
-
-### Resolved / Changed in Session 042
-- `/.hcnames` is the authoritative fixed-row name register. Runtime identity is
-  one Bank + one Scene + one Kit + six Instrument names (81 bytes), never
-  per-Scene arrays or retained keys.
-- Session 042 separated the 9,000-byte browser cache from the 2,048-byte
-  non-Pattern validation stage; do not recombine them. Session 058 later gave
-  HCNAMES its own 1,161-byte mirror, so HCNAMES no longer borrows the browser
-  cache.
-- Scene/Kit/Instrument share that stage; Scene Pattern reads directly into the
-  final Scene after settings+Kit commit. Pattern load is intentionally
-  non-atomic for now.
-- Bank Load preserves every unselected Scene and HCNAMES block. Session 058
-  replaced the former one-child rescans with one bounded 16-name capture.
-- Instrument Load's original `kit` source is an on-card `.hctmp.<ext>` plus one
-  nine-byte label, not a second staged Instrument. A prior two-image preview
-  design was removed.
-- Five asyncfatfs handles are linked (+376 bytes versus three), but directory
-  handles must still be closed after `chdir`.
-- Final rapid-backspin boundary handling was build-verified but was not
-  hardware-retested before Session 042 closed.
-
-### Resolved / Changed in Session 034
-- Instrument Load is complete for current instrument types. The root pool holds
-  converted `.drm`, `.snr`, `.cym`, and `.hat` files; browser order is
-  per-type alphanumeric with a one-based display number saturated at 999.
-  New-format root Instrument Save was added in Session 036.
-- The visible Load/Save menu no longer exposes Pattern, MorphKit, Perform, and
-  All. The promoted top-level type cycler is Kit/Scene/Bank; Instrument Load is
-  entered by VOICE press on Load, and Instrument Save
-  is entered by VOICE press on Save. Kit/Instrument Load scenes use
-  `pat_sceneHasActiveSteps()` for LED base state. Kit Load permits a
-  zero-or-more Scene toggle mask; Instrument Load/Save selects exactly one
-  Scene. A selected Scene blinks.
-- `kit_t` no longer retains Instrument display names or file stems.
-  Provenance/display identity comes from HCNAMES and the one 72-byte
-  filesystem identity block.
-- The direct Instrument loader caused the observed Voice 2 long-decay/locked
-  parameter condition: loading any Drum file into that slot stayed bad, while
-  loading a Kit repaired it. The new staged transaction prevents live Scene
-  mutation during I/O and clears/rebuilds all modulation/runtime ownership on
-  commit. It also prevents rapid encoder, destination, Scene, mode, or preview
-  events from interleaving with a load.
-- (Closed) `AutomationNode` and the legacy byte CC/CC2 path no longer exist
-  (old pattern storage removed; MIDI CC map retired in S083); step automation
-  uses canonical 9-bit targets. Direct descriptor LFO writes were repaired in
-  Session 035 through InstrumentManager descriptor-domain adapters, but normal
-  modulation-node reset/original-value paths still enumerate fixed global
-  pools rather than InstrumentManager's dynamic pools.
-- Converter follow-up: regenerate instrument values by live descriptor key/ID,
-  not a hardcoded descriptor order. The Session 034 investigation found 42
-  mismatched finite LFO target pairs among 55 active first pairs in the
-  generated pool; this did not cause the long-decay fault, but the files need
-  conversion-path repair before trusting their assignment data.
-
-### Resolved / Changed in Session 030
-- Phase 2 root filesystem spec began in `FILESYSTEM_SPEC.md`; after the
-  Session 032 documentation consolidation and Session 033 closeout, the
-  authoritative filesystem and instrument-file spec is
-  `knowledge_files/specification_reference/FILESYSTEM_SPEC.md`.
-  The old root pointer file was deleted in Session 033.
-  Target root layout is `Bank`, `Scene`, `Kit`,
-  `Pattern`, `Sample`, `Wavetable`, `Effect`, `Instrument`, plus future root
-  `settings.cfg`. At Session 030 this covered root `Kit/` and root
-  `Instrument/` load work; later Sessions 035-038 added new-format Kit Save,
-  root Instrument Save, KitMrp Save, and InstrumentMrp Save.
-- `SD_CARD/Kit/` generated from legacy `Pxxx.SND` files. Folders use preferred
-  `NNN Name` convention, for example `004 Moch to`; `_` remains accepted for
-  compatibility.
-- New `Core/Hardware/SD/storageTypes.c/h` owns Phase 2 kit text schemas,
-  numbered-folder parsing, kitset/instrument validation, and instrument
-  descriptor-key parsing. After Session 032, instrument values write Scene
-  descriptor storage rather than a `ParameterArray` key map. All functions in
-  this layer use the `storage_` prefix and must remain independent of
-  `asyncfatfs`.
-- Normal kit load now reads root `Kit/` directories: scan cache ->
-  `kitset.kcg` -> six instrument files. Normal Kit Save writes the same
-  directory shape; KitMrp Save writes the same directory shape with current
-  interpolated Morph values duplicated into both endpoint sections. Legacy
-  `FS_FILE_MORPH` / MorphKit compatibility still uses legacy `.SND`.
-- `asyncfatfs` now sets opened handle type from the FAT directory entry so
-  opened directories can be entered/scanned reliably.
-- Kit scan has a FAT short-alias fallback for space-named folders when LFN
-  reconstruction is unavailable.
-- MIDI note/channel settings were intentionally removed from `kitset.kcg`; they
-  are future scene settings. Directory kit loads leave `PAR_MIDI_NOTE1..7`
-  unchanged for now.
-- Final hardware status: menu/init directory kit load worked after discovery
-  fixes; final short-alias fallback still needs hardware smoke-test.
-
-### Resolved / Changed in Session 032
-- Descriptor-backed VOICE pages are populated from
-  `Core/DSP/Instruments/*/*Parameters.c` layouts. `menuPages.h` remains the
-  static-page table, but instrument cells resolve through InstrumentManager and
-  the active Scene slot.
-- Instrument files load into Scene descriptor images. `kitset.kcg` owns slot
-  type/file/audio route; `[params]` and `[morph]` instrument sections own
-  descriptor values.
-- `InstrumentManager` owns descriptor registry lookups, dynamic menu layouts,
-  and descriptor-to-DSP runtime apply. Direct runtime writes use descriptor
-  binds; special non-offset parameters use explicit shaper/setter handling.
-- `instrument_decimation` and `velo_mod_amount` are `ROW_NOBIND_IMAGE`
-  parameters: morphable, modulatable, and automatable image values without a
-  direct struct-offset bind.
-- Parser keys allow at least 32 bytes. Session 034 canonicalized HiHat decay
-  to `amp_envelope_decay` / `amp_envelope_decay_choke` and retains legacy
-  closed/open aliases for compatibility.
-- Session 033 resolved the known descriptor Morph and LFO/velocity runtime
-  modulation gaps. The remaining descriptor target runtime gap is step
-  automation.
-
-### Resolved / Changed in Session 029
-- Pattern storage ownership moved further into `Core/Bank/Scene/Pattern/PatternData.c/h`. Live code no longer uses `seq_patternSet`, `seq_tmpPattern`, `seq_selectedStep`, `SEQ_DEFAULT_NOTE`, or `SEQ_NEXT_RANDOM*`.
-- PatternData now owns staged pattern commit, playback-safe step reads, effective-length reads, live note record mutation, live erase mutation, and legacy file shuffle import through `pat_commitStagedPattern()`, `pat_readStep()`, `pat_getStepProbability()`, `pat_getStepNote()`, `pat_getStepVolume()`, `pat_getEffectiveTrackLength()`, `pat_recordNote()`, `pat_eraseMainStepSubSteps()`, and `pat_setAllShuffle()`.
-- Sequencer still owns timing, transport, quantization, runtime step indices, MIDI output, random next-pattern resolution, and recording/erase gates, but storage mutation/readbacks now go through `pat_*` helpers.
-- `Core/Preset/` moved to `Core/Bank/Scene/Preset/`. `Makefile` uses `-ICore/Bank/Scene/Preset` and sources `Core/Bank/Scene/Preset/presetManager.c` / `Core/Bank/Scene/Preset/ParameterArray.c`. `main.c` includes `ParameterArray.h` directly for `parameterArray_init()`.
-- Staging/global audits written: active-pattern load staging stays until the 17th Scene/background-bank-load design; new `filesystem.c` scratch/snapshot buffers and load/save menu polling are intentionally left alone; globals should eventually become canonical scene-level, bank-level, and system-level settings structs.
-
-### Resolved / Changed in Session 028
-- `Core/MIDI/frontPanelParser.c/h` removed from live code. Former protocol opcodes are now direct owner calls documented in `knowledge_files/specification_reference/MODULE_INTERCHANGE_SPEC.md`.
-- New `Core/Bank/Scene/Pattern/PatternData.c/h` owns Pattern storage/edit APIs; Euklid and SOM moved from `Core/Sequencer/` to `Core/Bank/Scene/Pattern/`.
-- Sequencer LED feedback no longer uses parser callbacks. Sequencer writes `seq_ledState`; foreground `led_processSeqLedState()` performs LED/Menu/Button-aware rendering in ledHandler.
-- Sound parameter application is direct through Preset (`preset_applySoundParameter`, `preset_applyVelocityModTarget`, `preset_applyLfoModTarget`); MIDI channel/routing/filter config is direct through MidiParser setters.
-- Pattern file serialization reaches PatternData through pointer helpers and uses `PATTERNDATA_STAGING_PATTERN` for active-pattern load staging.
-
-### Resolved / Changed in Session 027
-- Runtime kit/all/performance load completion no longer applies all six sound modulation-routing voices in one foreground burst. After audio starts, `menu_startSoundApply()` arms the chunked apply and `menu_tickSoundApply()` lets `preset_tickDrumsetApply()` apply one voice per foreground pass before operation-specific UI/global/pattern follow-up runs. `AUDIO_DMA_FRAMES` remains 96; direct 64-frame latency testing is deferred until this path is hardware-tested.
-
-### Resolved / Changed in Session 023
-- CPU scheduling refactor completed: TIM6 keeps only 1ms counters and a foreground service due flag; shift-register exchange, PB jack detect, encoder-button debounce, and endless-pot scanning run from `timebase_serviceFrontPanel()` at about 500Hz.
-- LCD servicing reduced to 5kHz at priority 7. `lcd_waitForIdle()` is used only in modal sample/loop load screens after audio has been suspended, so status text fully renders before flash work blocks.
-- Slider taper mapping now uses a 4096-entry boot LUT derived from `SLIDER_LOG_TAPER_DB`, removing repeated foreground `powf()` calls.
-- Oscillator interpolation is bounded by `OSC_WAVE_INTERP_MAX_ACTIVE=2` in the current test build and limited to audible oscillator waveform targets; user-sample interpolation remains enabled.
-- Oscillator-only ITCM is enabled. Filter/distortion ITCM annotations remain present but disabled through `ENABLE_EFFECT_INITCM_CODE=0` after hardware CPU monitor testing looked worse.
-- `Load:[Samples ]` now uses the sample/loop flow documented in Sample Flash Loading.
-- Main encoder direction reversals clear only sub-detent residue, avoiding the persistent two-click feel after fast direction changes.
-
-### Resolved in Session 022
-- ~~24-bit DMA frame LSW forced to 0x0000~~ — **RESOLVED**. `pack_half()` now emits true signed-24 payload in both halfwords. `sample_mx_t` (int32_t) carries signed-24 audio; int16 voice values enter mixer as `int16<<8` via `bufferTool_convertInt16ToSampleMix()`.
-
-### Pending from Session 022 (not resolved)
-- **dth global menu option not yet wired** — complete plan in DITHER_AUDIT.md Steps 1–8. Prerequisite infrastructure (`sample_mx_t` path) is now in place. Next step: PAR_16BIT_DITHER enum + menu text + menuPages.h slot + dtype/default + mixer gate.
-- **Voice sync-block and distortion widening deferred** — DrumVoice/Snare/CymbalVoice/HiHat/distortion remain int16_t* for now. Pinned plan in DITHER_AUDIT.md. Revisit when voice/distortion gain staging can be validated after widening.
-- **Hardware listening test for 24-bit path needed** — loudness regression was fixed analytically (removed extra >>8); hardware confirmation still required.
-
-### Resolved in Session 16
-- ~~preset_morph() stub / burst risk~~ — **RESOLVED**. Morph now uses original interpolation and a one-parameter-per-main-loop worker.
-- ~~preset_sendModTarget() fall-through bug~~ — **RESOLVED**. `CC_VELO_TARGET` now breaks before `CC_LFO_TARGET`.
-- ~~Morph return-to-zero could leave late DSP parameters stale~~ — **RESOLVED**. No skip cache; request/pass generations guarantee a full final pass at latest morph value.
-- ~~RV1-RV4 page-change and idle ghost edits~~ — **RESOLVED** by raw A/B snapshots, page-change `snapshotAll()`, post-delta rebaseline, and pre-delta false-start cancellation.
-- ~~Global BPM drift from broad endless-pot double-speed rule~~ — **RESOLVED**. Double angular speed now applies only to `PAR_MORPH`.
-
-### Resolved in Session 17
-- ~~Preset save/load pattern/all/performance stubs~~ — **RESOLVED**. Kit, MorphKit, Pattern, Performance, All, and Globals now route through typed async filesystem operations.
-- ~~Morph-kit load/save not connected~~ — **RESOLVED**. Morph load writes `parameters2[]`; morph save writes interpolated values with mod-target exceptions.
-- ~~Slow envelopes from widened DSP block~~ — **RESOLVED**. `OUTPUT_DMA_SIZE` matches the effective LXR-master block size of 32 frames; `AUDIO_DMA_FRAMES` remains 96 for hardware DMA.
-- ~~Sequencer/mainboard tick drift from reference~~ — **RESOLVED**. `systick_ticks` is 4kHz again; TIM6 `time_sysTick` remains 1kHz for UI/service timing.
-- ~~Screensaver display glitches~~ — **RESOLVED** with explicit LCD off/on phases and clear-on-exit.
-- ~~Load-page empty slots and fast-spin name/display races~~ — **RESOLVED** by typed async request tagging and whole-frame LCD queue preflight.
-
-### Resolved in Session 019
-- ~~USART3 RX not configured~~ — **RESOLVED**. Interrupt-driven RX/TX, dual TX FIFO, non-blocking.
-- ~~DIN TX polled/blocking~~ — **RESOLVED**. TXE interrupt drains realtime FIFO before normal FIFO.
-- ~~USB MIDI RX/TX not serviced~~ — **RESOLVED**. midi_service() in main loop.
-- ~~BAR1/BAR2 DSP race~~ — **RESOLVED**. Voice trigger pending ring + audio-boundary drain.
-- ~~BAR1/BAR2 not through MIDI recording path~~ — **RESOLVED**. midiParser_playVoiceMidiNote() with assigned/default note numbers.
-- ~~PD3 EXTI3 diagnostic in production~~ — **RESOLVED**. Real PC13/PD4/PD5 backend.
-- ~~EXTI4/EXTI9_5 pointing at Default_Handler~~ — **RESOLVED**. IRQ10/IRQ23 wired.
-- ~~seq_tick() in main loop~~ — **RESOLVED**. TIM3 4kHz ISR owns it.
-- ~~MIDI realtime bytes processed without timestamp~~ — **RESOLVED**. USART3 ISR timestamps every byte; realtime bytes route to the MidiRealtime ring.
-- ~~PAR_BPM=0 external sync toggle~~ — **RESOLVED**. PAR_EXT_SYNC global (SyncInpt).
-- ~~CC1 MORPH double-fire~~ — **RESOLVED**. CC1→MORPH in incoming channel path only.
-- ~~OUTPUT_DMA_SIZE=16 (2× EG/LFO rate)~~ — **RESOLVED**. Corrected to 32.
-
-### Resolved in Session 020
-- ~~Slider-to-parameter mapping not designed~~ — **RESOLVED**. RV5-RV10 now feed dedicated `slider_vol[]` gains and are applied as independent post-voice multipliers in `mixer.c` (not as base `voice.vol` writes).
-- ~~Slider zipper from block-edge gain jumps~~ — **MITIGATED**. Per-block interpolation (`last_gain -> current_gain`) added in mixer; log taper mapping added in adc path (`SLIDER_LOG_TAPER_DB`).
-
-### Resolved in Session 18
-- ~~SampleMemory.c no-op stub~~ — **RESOLVED**. SampleMemory now validates/caches flash metadata and display names for up to 120 installed samples.
-- ~~Sample flash region only proposed~~ — **RESOLVED**. Linker caps app flash at `0x080BFFFF` (Session 073; `0x0807FFFF` before); sectors 7-11 are reserved for sample storage.
-- ~~Load:[Samples] no-op~~ — **RESOLVED**. `/samples` full reinstall and `/loops` append-loop installer are wired through the Load page.
-- ~~Audio resume after modal sample writes failed~~ — **RESOLVED**. `audioCodec_suspend()`/`audioCodec_resume()` now fully stop/reset/restart DMA, I2S, and PLLI2S.
-
-### Resolved in Refactor Session
-- ~~audioTest.c, sineBufferTest.c, duplicate copy files~~ — **RESOLVED** by consolidation into `AudioCodecManager.c`.
-- ~~Scattered DMA ISRs~~ — **RESOLVED**. DMA1 Stream 4 and Stream 7 ISRs now live in `AudioCodecManager.c`.
-- ~~audioCodec_packHalf() public wrapper~~ — **RESOLVED**. Removed; ISRs call `pack_audio_half()` directly.
-
-### Resolved in Session 15
-- ~~Sequencer step buttons unreliable / no sequenced voices~~ — **RESOLVED**. `BUTTON_TIMEOUT` corrected to 500ms and missing `seq_init()` added at boot.
-- ~~Sequencer tempo 4x slow~~ — **RESOLVED** for gross BPM in Session 15; Session 17 restored `systick_ticks` to the original 4kHz LXR mainboard tick while UI millisecond timing stays on `time_sysTick`.
-- ~~PATGEN/Euklid writes steps but LEDs do not update~~ — **RESOLVED**. Visible generated main-step LEDs refresh after steps/rotation changes.
-- ~~PATGEN/Euklid generated steps front-stacked~~ — **RESOLVED**. `__CLZ` shim now emits ARM `clz`; `__CLZ(0)` returns 32 as original Euklid expects.
-- ~~copyClearTools.c frontPanel calls commented out~~ — **RESOLVED**. Direct `seq_clear*` / `seq_copy*` calls wired.
-- Euclid and SOM parser backends are wired. Trigger backend was still stubbed at Session 15 and was later resolved in Session 019.
-
-### Resolved in Session 14
-- ~~buttonHandler/menu/LED audit connectivity gaps~~ — **RESOLVED** for audit-defined paths. Connections documented in `BUTTONHANDLER_MENU_AUDIT_RESULTS.md` and `LED_AUDIT_SUMMARY.md`.
-
-### Resolved in Session 13
-- ~~PAR_VOICE_LFO1-6 not reaching modulation targets during kit load~~ — **RESOLVED**. Preset modulation-target helpers call `modNode_setDestination()` directly.
-
-### Resolved in Session 12
-- ~~SD card operations block the main loop~~ — **RESOLVED** by asyncfatfs.
-- ~~HiHat VLA stack corruption~~ — **RESOLVED**. Static arrays.
-- ~~preset_morph() index 127 memory corruption~~ — **RESOLVED**. Index 127 skipped.
-
-### High Priority
-1. ~~No hi-hat/wrong tagged Instrument at startup~~ — **RESOLVED in Session
-   044** by SceneData-before-DSP initialization plus the complete post-audio
-   Scene clear/image/rebind lifecycle.
-2. ~~Trigger backend still stubbed~~ — **RESOLVED in Session 019 Phase 5**. PC13 CLK OUT, PD4 CLK IN, PD5 RST IN, and trigger PPQ menu wiring are implemented; hardware bench validation still needed.
-3. ~~BAR1/BAR2 race condition~~ — **RESOLVED in Session 019 Phase 7**. All voice triggers deferred through voiceControl pending ring; drained at audio boundary.
-4. **Long sample playback is not 32-bit clean yet** — `SampleInfo.size` is `uint32_t`, but `Oscillator.c` still derives the address index with the legacy `phase >> 17` path.
-5. **MIDI/clock/jack bring-up only** — All Session 019 features are build-verified only. Hardware bench testing required before claiming correctness.
-6. **Load/save button display glitch fix NOT YET APPLIED** — Fix is a two-line reorder in `menu_switchPage()` `case LOAD_PAGE:`: update `menu_activePage` BEFORE calling `menu_resetSaveParameters()`. Full details in `LOAD_SAVE_GLITCH_ASSESSMENT.md`. Do not restructure further.
-
-### Medium Priority
-5. ~~ResonantFilter.c double literals~~ — **RESOLVED** (audit item 3; the remaining `1.4` literal in the naive filter is loop-invariant and hoisted).
-6. ~~DrumVoice.c VLA~~ — **RESOLVED** (audit item 7; `static int16_t modBuf[OUTPUT_DMA_SIZE]`).
-7. ~~BufferTools.c float division~~ — **RESOLVED** (audit item 6; `inv_size` precomputed, shared by the fused post-chain since S073).
-8. ~~TIM2 not initialised~~ — **RESOLVED in Session 019**. TIM2 is the shared 1 MHz free-running timestamp source. Do NOT reset on pulse. Do NOT use for SD ISR (TIM5 reserved for that).
-9. ~~MidiParser RX not connected~~ — **RESOLVED in Session 019**. Full MIDI in/out including clock, sync, CC1→MORPH, and BAR1/BAR2 MIDI path implemented. Hardware validation pending.
-14. Final RV1-RV4 endless-pot noise fix needs long idle hardware soak, especially on global BPM page.
-15. Synced LFO tempo still needs audit/fix: current code path has used a hardcoded 130 BPM instead of `seq_getBpm()`.
-16. **PAR_EXT_SYNC / PAR_FETCH slot conflict with LXR037** — `PAR_EXT_SYNC` (MIDI auto-sync) occupies the parameter array slot where `PAR_FETCH` lived in LXR037. `.SND`, `.ALL`, `.PRF` files saved on LXR-02 and loaded on an LXR037 (or vice versa) may have that byte misinterpreted. No fix needed now; resolve before any cross-system file interchange.
-
-### Lower Priority
-16. Sample loader naming/display/order needs hardware soak after Session 18 LFN changes. Sort is whole-filename lexicographic with ASCII case folded; display names preserve case.
-17. SELECT_1 LED dark at boot — enhanced-firmware-only fix
-18. ~~Sequencer needs dedicated TIM ISR~~ — **RESOLVED in Session 019**. TIM3 owns sequencer timing.
-
----
-
 ## Failed Approaches — Do Not Retry
+
+- **Stock waveforms generated at Load:[Samples] into sample flash** (S086
+  first P2): recipes in program flash, a generator, a validity tag,
+  fallback tables and new variable-shift reader loops. Rejected by the user:
+  not the mechanism of the existing waves. Use fixed `[11][1024]` tables
+  played by the existing table loops (`tools/gen_stock_tables.py`).
+- **A local variable live across a voice render** (S086 P3 as first
+  delivered): LTO inlines the renders into `mixer_calcNextSampleBlock()`;
+  the extra live register made two unrelated inlined per-sample loops
+  reload values (+1/+2). Keep the state in the oscillator structure.
 
 - **Boot-reader Instrument types in `fs_stage_workspace`, or six-type snapshots
   taken one Scene at a time**: Case-2 payload loads overwrite the shared union.
