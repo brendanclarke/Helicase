@@ -769,6 +769,27 @@ uint8_t instrumentManager_runtimePan(uint8_t slot);
  * DrumVoice/SnareVoice/CymbalVoice/HiHatVoice vol members.
  */
 float instrumentManager_runtimeVolume(uint8_t slot);
+/*
+ * Report whether a slot's voice chain includes sample-rate reduction (S089 P0).
+ *
+ * What: 1 when the instrument type that owns the slot's live runtime runs a
+ * voice chain whose last stage is the mixer's S&H decimator
+ * (mixer_decimateBlock()); 0 otherwise. SRR is off by default: an unknown or
+ * empty slot, and any type or chain that does not list it, returns 0. Drum,
+ * Snare, Cymbal and HiHat return 1 under their default chain.
+ *
+ * Why: lets an instrument give the S&H cost to another chain stage
+ * (S089 P1) without moving the decimator state out of the mixer's DTCM
+ * arrays. Constant CPU: the answer depends only on the runtime type (and,
+ * from P1, the chain selector), never on the srt value or voice activity.
+ *
+ * Inputs: zero-based render slot 0..5. Output: 0 or 1. Clients:
+ * mixer_calcNextSampleBlock(), once per slot per 32-frame block, foreground
+ * render context only. Affiliates: instrumentManager_slotType(),
+ * INSTRUMENT_BIND_SLOT_DECIMATION (still writes mixer_decimation_rate[] for
+ * every type, so the srt value is kept across chain changes).
+ */
+uint8_t instrumentManager_slotUsesSrr(uint8_t slot);
 void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
                                     uint8_t velocity);
 

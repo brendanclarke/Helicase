@@ -1974,7 +1974,8 @@ void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
      *
      * Inputs: zero-based render slot, output buffer, and block size. Output:
      * the selected engine writes a mono voice block WITHOUT channel volume, or
-     * silence for unknown slot/type. Mixer remains responsible for decimation,
+     * silence for unknown slot/type. Mixer remains responsible for decimation
+     * (only for slots where instrumentManager_slotUsesSrr() is set),
      * channel volume (instrumentManager_runtimeVolume(), Session 072 step 2),
      * pan, routing, and slider interpolation after this call. The pre-volume
      * block is also the FX-send tap point from Phase 5 step 5 onward.
@@ -1997,6 +1998,24 @@ void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
     default:
         memset(buf, 0, size * sizeof(buf[0]));
         break;
+    }
+}
+
+uint8_t instrumentManager_slotUsesSrr(uint8_t slot)
+{
+    /*
+     * Each type's default voice chain ends in SRR (S089 P0). P1 adds the
+     * chain selector here: a type returns 1 only when its selected chain
+     * includes SRR. Unknown/empty slots and new types default to 0.
+     */
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM:
+    case INSTRUMENT_TYPE_SNR:
+    case INSTRUMENT_TYPE_CYM:
+    case INSTRUMENT_TYPE_HAT:
+        return 1u;
+    default:
+        return 0u;
     }
 }
 

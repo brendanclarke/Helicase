@@ -184,7 +184,7 @@ all: $(BUILD)/$(TARGET).bin
 	# Link budget (Session 072): flash headroom vs the 736 KiB application
 	# region (S073) and the DTCM FX arena size. Report only; the linker ASSERTs
 	# in STM32F765VIHx_FLASH.ld are the enforcing guards.
-	python3 tools/link_budget.py $(PREFIX)nm $(BUILD)/$(TARGET).elf
+	python3 tools/diagnostic_tools/link_budget.py $(PREFIX)nm $(BUILD)/$(TARGET).elf
 
 # The .bin is the raw objcopy output. `make img` stamps the image check and
 # packages it (tools/build_lxrv2_img.py).
