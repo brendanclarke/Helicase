@@ -1,8 +1,17 @@
 # S089 Phase 0 — SRR Move: Implementation Schedule
 
-**Parent plan:** S089_P0_SRR_MOVE.md  
-**Status:** Implemented 2026-10-30 — builds, host checks pass, hardware
-verification pending. See the Implementation Record at the end of this file.
+> **DISUSED — superseded (2026-10-30).** None of the changes in this file are
+> in the tree: they were reverted after the hardware freezes recorded below.
+> The SRR change that shipped is `S089_P0_NEW_SRR_DISABLE.md` (a
+> per-instrument SRR enable that leaves the S&H in the mixer; hardware
+> passed). The analysis that replaced this file's I-cache explanation is
+> that document's §1. The S089 outcome is summarised at the end of this file
+> ("S089 outcome").
+
+**Parent plan:** `S089_P0_SRR_MOVE_DISUSED.md` (renamed; was `S089_P0_SRR_MOVE.md`)
+**Status:** DISUSED. As originally recorded: "implemented 2026-10-30 — builds,
+host checks pass, hardware verification pending"; hardware then froze, and
+the change was reverted.
 **Scope:** move sample-rate reduction state from mixer globals into each voice
 engine struct; move the S&H processing loop from `mixer_decimateBlock()` into
 each engine's `calcSyncBlock`; rewire the `INSTRUMENT_BIND_SLOT_DECIMATION`
@@ -1044,3 +1053,33 @@ decimation members and operates on the same buffer at the same pipeline position
 **Constant CPU rule:** unchanged. The function always runs, even at rate = 1.0.
 **P1 compatibility:** the voice chain dispatch can call `voice_decimateBlock()` as
 one of its chain stages, or replace it with an alternative final stage.
+
+> **Correction (2026-10-30, `S089_P0_NEW_SRR_DISABLE.md` §1).** The "root
+> cause" above (an I-cache conflict threshold in a 13.9 KB mixer function) was
+> never demonstrated and does not fit the later measurements:
+> - **The build was not rebuilding the image.** `make all` exited with an
+>   error after linking (the moved `tools/link_budget.py`), so
+>   `make all && make img` never repackaged it. Hardware tests may have
+>   flashed a stale image.
+> - **Attempt E froze while doing less work.** It froze at boot even though
+>   its render did *less* work than baseline (SRR off at boot because of an
+>   init-order bug), so neither cycles nor the I-cache explain it.
+> - **The "cross-TU barrier" was inlining budget.** The +1,352 B mixer growth
+>   of the later attempts came from LTO spending freed inlining budget on
+>   `busComp_processBlock()`, not from register spills.
+> - **Every attempt also shifted the SRAM1 `.bss` layout.**
+>
+> The measured numbers in this file stand; the explanation does not.
+
+---
+
+## S089 outcome (what replaced this plan, and what followed)
+
+| Step | Document | Result |
+|---|---|---|
+| P0 (this file) | `S089_P0_IMPLEMENTATION_DISUSED.md`, `S089_P0_SRR_MOVE_DISUSED.md` | Moving SRR into the engines. Attempts A–E froze on hardware; all reverted. |
+| P0 (new) | `S089_P0_NEW_SRR_DISABLE.md` | **Shipped, hardware passed.** `instrumentManager_slotUsesSrr()` (off by default; on for the four types' chains) gates the unchanged mixer S&H. No RAM, layout-identical, S&H loop opcode-identical. Also fixed the Makefile `link_budget.py` path so the documented build repackages the image. |
+| P0 follow-up | `S089_P0_NEW_SRR_DISABLE.md` §8 | An integer (Q31) S&H, 10 → 7 instructions per sample, sound class S3: built, measured, then **reverted by user decision** (little overall CPU difference; the original preferred). A log `srt` curve was proposed and dropped. |
+| P1 | `S089_P1_VOICE_CHAIN_PLAN.md` | The voice-chain architecture and the measured per-type budgets (§1, re-based on the P0 build; the SRR credit is 10 instructions). |
+| P2 | `S089_P2_WAVEFOLDER_CHAIN.md`, `S089_P2_IMPLEMENTATION.md` | **Shipped, hardware passed.** The `chn` selector (`T+D` / `WFd`) and eight wavefolder types in place of the transient. **CPU is now at its ceiling**: the worst-case Scene reads 100 %, and no per-sample cost may increase (P2 plan §8, binding). |
+| P3 | `S089_P3_FM_RAMP_EFFICIENCY.md` | Direction plan only: fold the Drum FM depth ramp into the FM carrier loops (≈ −9 per sample per Drum-`fm` voice), within the ITCM limits. |

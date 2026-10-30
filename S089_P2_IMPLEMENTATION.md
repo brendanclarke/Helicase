@@ -2171,7 +2171,9 @@ fixed before the HiHat hardware checks.
 
 ## 19. Assessment fixes F1–F5 (2026-10-30)
 
-All five §18.3 findings are resolved. Hardware re-test is pending.
+All five §18.3 findings are resolved. **Hardware re-test passed (user,
+2026-10-30).** The worst-case Scene reaches 100 % on the `cpu` widget,
+which is now a binding ceiling (`S089_P2_WAVEFOLDER_CHAIN.md` §8).
 
 ### 19.1 Changes
 
