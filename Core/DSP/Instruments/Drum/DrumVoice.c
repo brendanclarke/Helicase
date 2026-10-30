@@ -46,6 +46,7 @@
 #include "modulationNode.h"
 #include "InstrumentManager.h"
 #include "voicePostChain.h"
+#include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_*, voiceFold_process() */
 // TODO DSP_PORT
 // #include "TriggerOut.h"
 
@@ -172,6 +173,11 @@ void Drum_initVoice(DrumVoice *voice, uint8_t seed_index)
 	 * Accessors: Drum_triggerVoice(), Drum_calcVoiceSyncBlock().
 	 */
 	voice->runMode = OSC_RUN_RST;
+	/* S089 P2: default chain (T+D). The slot reset memset already cleared it;
+	 * the explicit store documents the default like runMode above. Under WFd
+	 * transGen.midiFreq (the fold's last depth) relies on the same memset
+	 * being 0 = "no previous depth" (voiceFold_process()). */
+	voice->chainType = VOICE_CHAIN_DEFAULT;
 	/* S088 P0: no armed ramp until a fre/itp retrigger asks for one; the
 	** first rendered block starts from a full-scale velocity endpoint. */
 	voice->ampRampArm = 0u;
@@ -307,14 +313,24 @@ void Drum_triggerVoice(DrumVoice *voice, const uint8_t source_slot,
 #ifdef USE_AMP_FILTER
 	const uint8_t ampClosed =
 		((voice->volEgValueBlock[15] <= 0.01f) ||
-		 (voice->transGen.waveform == 1)) ? 1u : 0u;
+		 (voice->chainType == VOICE_CHAIN_DEFAULT &&
+		  voice->transGen.waveform == 1)) ? 1u : 0u;
 #else
 	const uint8_t ampClosed = 1u;
 #endif
 	if(ampClosed && phaseReset)
 	{
 		float offset = 1;
-		if(voice->transGen.waveform==1) //offset mode
+		/*
+		 * Ofs transient (offset mode) belongs to T+D only (S089 P2).
+		 * What: under WFd transGen.waveform is a fold type, and value 1 is TrD,
+		 *       not "offset"; the start offset must not follow transient_vol
+		 *       (which is fold depth there).
+		 * Why:  plan §1: the shared stored byte means different things per
+		 *       chain. Affiliates: VOICE_CHAIN_*; voiceFold.h.
+		 */
+		if(voice->chainType == VOICE_CHAIN_DEFAULT &&
+		   voice->transGen.waveform==1) //offset mode
 		{
 			offset -= voice->transGen.volume;
 #ifdef USE_AMP_FILTER
@@ -458,8 +474,15 @@ void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
 	const float pitchEgValue = egPitchVal*voice->egPitchModAmount;
 	voice->osc.pitchMod = 1+pitchEgValue;
 
-	//calc snap EG if transient sample 0 is activated
-	if(voice->transGen.waveform == 0)
+	/*
+	 * Snp transient (snap pitch envelope) belongs to T+D only (S089 P2).
+	 * What: under WFd value 0 is the Tri fold, and snapEg.value is the TrD/SnD
+	 *       depth envelope stepped by voiceFold_process(); SnapEg_calc() must
+	 *       not also decay it or bend the pitch. Drum reassigns pitchMod every
+	 *       block above, so skipping the += leaves no stale bend.
+	 * Affiliates: voiceFold_process(); SnapEg_trigger() in Drum_triggerVoice().
+	 */
+	if(voice->chainType == VOICE_CHAIN_DEFAULT && voice->transGen.waveform == 0)
 	{
 		const float snapVal = SnapEg_calc(&voice->snapEg, voice->transGen.pitch);
 		voice->osc.pitchMod += snapVal*voice->transGen.volume;
@@ -612,7 +635,8 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	 *             Here d = Drum_modEnvDepth() = amt^2 x the PitchMod decay
 	 *             envelope: the response fm already has (S085 P1 follow-up).
 	 *             modBuf is still fully rewritten by transient_calcBlock()
-	 *             below, so its contents in snc do not matter.
+	 *             below under T+D, and is not read after the oscillator section
+	 *             under WFd (S089 P2), so its contents in snc do not matter.
 	 * Why:        S085_P1_OSC_MOD_SNC_RNG.md §4. The session rule: no mode may
 	 *             cost more than today's dearest fm setting (implementation
 	 *             §1). The envelope adds one multiply per block.
@@ -810,11 +834,34 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 	if (voice->snapshot.active)
 		oscSection_renderOldCarrier(&voice->snapshot, buf, size);
 
-	//calc transient sample
-	transient_calcBlock(&voice->transGen,modBuf,size);
+	/*
+	 * Stage ahead of the filter, by voice chain (S089 P2).
+	 *
+	 * What:       T+D: the transient click into modBuf and its saturating
+	 *             mix-in, exactly as before (S0). WFd: the oscillator section
+	 *             (including the itp blend above) is folded in place; no
+	 *             transient, no mix-in. The filter drive (sft), the filter and
+	 *             the post-chain below are unchanged in both chains.
+	 * Why:        the WFd chain spends the click's budget (22 + 2 = 24 per
+	 *             sample, P1 §1.1) on the fold. modBuf is not read after this
+	 *             point, so leaving it unwritten under WFd is safe.
+	 * Inputs:     voice->chainType; buf (oscillator section); transGen,
+	 *             snapEg (fold controls/state under WFd).
+	 * Outputs:    buf (pre-filter block).
+	 * Accessors:  this render.
+	 * Affiliates: voiceFold_process() (gains 1/1: the Drum oscillator is
+	 *             rendered at full scale); transient_calcBlock().
+	 */
+	if (voice->chainType == VOICE_CHAIN_WAVEFOLDER) {
+		voiceFold_process(&voice->transGen, &voice->snapEg, buf, size,
+		                  1.0f, 1.0f);
+	} else {
+		//calc transient sample
+		transient_calcBlock(&voice->transGen,modBuf,size);
 
-	//Mix with transient buffer
-	bufferTool_addBuffersSaturating(buf,modBuf,size);
+		//Mix with transient buffer
+		bufferTool_addBuffersSaturating(buf,modBuf,size);
+	}
 
 	//calc filter block
 	SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);

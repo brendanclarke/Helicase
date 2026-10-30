@@ -147,7 +147,27 @@ SECTIONS {
     _siitcm = LOADADDR(.itcm);
     .itcm : {
         . = ALIGN(4); _sitcm = .;
-        *(.itcm) *(.itcm.*)
+        /*
+         * ITCM input order (S089 P2).
+         *
+         * What:       .itcm first, then the named S085 and S087 subsections
+         *             (and their linker-generated .itcm.s087.* stubs) in
+         *             their current order, then every other .itcm.*
+         *             subsection, which from S089 P2 is .itcm.s089.
+         * Why:        a bare *(.itcm.*) lays subsections out in LTRANS
+         *             partition order, so a new subsection in another
+         *             partition could land before .itcm.s085 and move
+         *             every existing ITCM loop, changing their short (b.n)
+         *             tail branches. That is the S085 failure this rule
+         *             exists to prevent (Oscillator.c S085 ITCM note).
+         *             Naming the existing subsections keeps today's
+         *             addresses exactly; new code is always appended.
+         * Check:      with no other change the image must be byte-identical
+         *             to the previous build (S089 P2 schedule step 1).
+         * Affiliates: Oscillator.c OSC_S085_SECTION / OSC_S087_SECTION;
+         *             voiceFold.c VOICE_FOLD_SECTION; the ASSERT below.
+         */
+        *(.itcm) *(.itcm.s085) *(.itcm.s087 .itcm.s087.*) *(.itcm.*)
         . = ALIGN(4); _eitcm = .;
     } >ITCM AT> FLASH
     ASSERT(_eitcm <= ORIGIN(ITCM) + LENGTH(ITCM),

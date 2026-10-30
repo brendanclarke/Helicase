@@ -66,6 +66,7 @@
 #include "modulationNode.h"
 #include "Oscillator.h"
 #include "transientGenerator.h"   /* S087 P3: transient list with user one-shots */
+#include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* (name asserts) */
 #include <string.h>
 #include <stdint.h>
 
@@ -2250,6 +2251,13 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value, char out[3])
 /* S087 P2: wave value text; defined beside menu_formatWaveCell(). */
 static void menu_formatWaveValue3(const menu_cell_t *cell, uint8_t value,
                                   char out[3]);
+/* S089 P2: tagged on/off tables and the WFd transient-cell rules; defined
+ * beside getMenuItemNameForValue() / menu_formatTransientName(). */
+static const char (*menu_onoffTagNames(uint8_t tag))[4];
+static uint8_t menu_cellIsFoldWave(const menu_cell_t *cell);
+static void menu_instrumentCellLabels(uint8_t slot,
+                                      const ParamDescriptor *descriptor,
+                                      const char **cat, const char **lng);
 
 /* S078 P2 §B STEP overlay helpers. Definitions stay adjacent to the va_*
  * state/logic below; these declarations keep the same forward-reference style
@@ -3357,12 +3365,16 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
          * Inputs:     the cell's dtype byte and value.
          * Outputs:    3 characters into out[].
          * Accessors:  every DTYPE_ON_OFF cell whose descriptor is tagged.
-         * Affiliates: oscRunNames, ONOFF_TAG_OSC_RUN (MenuText.h).
+         * Affiliates: menu_onoffTagNames(), oscRunNames, voiceChainNames,
+         *             ONOFF_TAG_* (MenuText.h).
          */
         if ((uint8_t)(menu_cellDtype(cell) >> 4) != 0u) {
-            const uint8_t idx = (value < (uint8_t)oscRunNames[0][0])
+            /* S089 P2: the table follows the tag (run mode or voice chain). */
+            const char (*names)[4] = menu_onoffTagNames(
+                (uint8_t)(menu_cellDtype(cell) >> 4));
+            const uint8_t idx = (value < (uint8_t)names[0][0])
                 ? (uint8_t)value : 0u;
-            memcpy(out, oscRunNames[1 + idx], 3);
+            memcpy(out, names[1 + idx], 3);
         } else {
             memcpy(out, (value == 1u) ? menuText_on : menuText_off, 3);
         }
@@ -3373,6 +3385,12 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
     case DTYPE_MENU:
         /* S087 P2: wav follows osc1's type or the modulator list
          * (menu_formatWaveValue3()), as in menu_formatCellValue3(). */
+        /* S089 P2: a WFd slot's wav cell shows the fold type. */
+        if (menu_cellIsFoldWave(cell)) {
+            memcpy(out, foldTypeNames[1u + ((value < VOICE_FOLD_COUNT)
+                                            ? value : VOICE_FOLD_COUNT - 1u)], 3);
+            break;
+        }
         if ((uint8_t)(menu_cellDtype(cell) >> 4) == MENU_WAVEFORM) {
             menu_formatWaveValue3(cell, value, out);
             break;
@@ -6287,8 +6305,15 @@ static void menu_displayInstrumentTargetFull(uint16_t target)
      * menu_copyPaddedField() keeps short category/long-name strings bounded to
      * their fixed LCD fields.
      */
-    menu_copyPaddedField(&editDisplayBuffer[1][0], descriptor->category, 8u);
-    menu_copyPaddedField(&editDisplayBuffer[1][8], descriptor->long_name, 8u);
+    {
+        /* S089 P2: WFd relabels the transient cells. */
+        const char *cat = descriptor->category;
+        const char *lng = descriptor->long_name;
+
+        menu_instrumentCellLabels(slot, descriptor, &cat, &lng);
+        menu_copyPaddedField(&editDisplayBuffer[1][0], cat, 8u);
+        menu_copyPaddedField(&editDisplayBuffer[1][8], lng, 8u);
+    }
 }
 
 /*
@@ -6512,13 +6537,17 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
     case DTYPE_ON_OFF:
         /*
          * S088 P0 §2.1 D12: tagged on/off sub-type display.
-         * What: high nibble != 0 shows the tag table's name (oscRunNames),
-         *       otherwise on/off as before. Same rule as va_formatValue3().
+         * What: high nibble != 0 shows the tag table's name
+         *       (menu_onoffTagNames(): run modes or voice chains), otherwise
+         *       on/off as before. Same rule as va_formatValue3().
          */
         if ((uint8_t)(menu_cellDtype(cell) >> 4) != 0u) {
-            const uint8_t idx = (value < (uint8_t)oscRunNames[0][0])
+            /* S089 P2: the table follows the tag (run mode or voice chain). */
+            const char (*names)[4] = menu_onoffTagNames(
+                (uint8_t)(menu_cellDtype(cell) >> 4));
+            const uint8_t idx = (value < (uint8_t)names[0][0])
                 ? (uint8_t)value : 0u;
-            memcpy(valueAsText, oscRunNames[1 + idx], 3);
+            memcpy(valueAsText, names[1 + idx], 3);
         } else if (value == 1u) memcpy(valueAsText, menuText_on, 3);
         else                    memcpy(valueAsText, menuText_off, 3);
         break;
@@ -6528,6 +6557,12 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
     case DTYPE_MENU:
         /* S087 P2: wav follows osc1's type or the modulator list
          * (menu_formatWaveValue3()); every other menu uses its table. */
+        /* S089 P2: a WFd slot's wav cell shows the fold type. */
+        if (menu_cellIsFoldWave(cell)) {
+            memcpy(valueAsText, foldTypeNames[1u + ((value < VOICE_FOLD_COUNT)
+                                                    ? value : VOICE_FOLD_COUNT - 1u)], 3);
+            break;
+        }
         if ((uint8_t)(menu_cellDtype(cell) >> 4) == MENU_WAVEFORM) {
             menu_formatWaveValue3(cell, value, valueAsText);
             break;
@@ -6791,16 +6826,20 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
          * S088 P0 §2.1 D12: tagged on/off sub-type clamp.
          *
          * What:       with a non-zero high nibble, clamp to 0..count-1 from
-         *             the tag's name table (oscRunNames: 0..2). With a zero
+         *             the tag's name table (menu_onoffTagNames(): run modes
+         *             or voice chains). With a zero
          *             nibble, clamp to 0..1 exactly as before.
          * Why:        MIDI CC/NRPN writes can carry 0..127; the clamp keeps
          *             the stored run mode inside rst..itp.
          * Inputs:     the cell's dtype byte, *value.
          * Outputs:    *value clamped in place.
-         * Affiliates: oscRunNames[0][0] (count); ONOFF_TAG_OSC_RUN.
+         * Affiliates: menu_onoffTagNames(); ONOFF_TAG_* (MenuText.h).
          */
         if ((uint8_t)(menu_cellDtype(cell) >> 4) != 0u) {
-            const uint8_t n = (uint8_t)oscRunNames[0][0];
+            /* S089 P2: the count follows the tag (run mode or voice chain). */
+            const char (*names)[4] = menu_onoffTagNames(
+                (uint8_t)(menu_cellDtype(cell) >> 4));
+            const uint8_t n = (uint8_t)names[0][0];
             if (*value >= n) *value = (uint16_t)(n - 1u);
         } else if (*value > 1u) {
             *value = 1u;
@@ -6825,6 +6864,9 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
         if (menuId == MENU_WAVEFORM &&
             cell && cell->kind == MENU_CELL_INSTRUMENT && cell->descriptor)
             n = instrumentManager_waveCellCount(cell->slot, cell->descriptor);
+        /* S089 P2: a WFd wav cell holds a fold type (0..VOICE_FOLD_COUNT-1). */
+        if (menu_cellIsFoldWave(cell))
+            n = (uint8_t)VOICE_FOLD_COUNT;
         if (n == 0u)
             *value = 0u;
         else if (*value >= n)
@@ -11776,6 +11818,73 @@ static void menu_formatWaveValue3(const menu_cell_t *cell, uint8_t value,
 }
 
 /*
+ * Whether a cell is the transient wav cell of a WFd slot (S089 P2).
+ *
+ * What:       1 for an instrument cell whose descriptor is transient_wave on a
+ *             slot whose chain is VOICE_CHAIN_WAVEFOLDER; else 0.
+ * Why:        under WFd the wav byte selects a fold type, so its names
+ *             (foldTypeNames) and count (VOICE_FOLD_COUNT) replace the
+ *             transient list's; every other cell keeps the MENU_TRANS path.
+ * Inputs:     cell (may be NULL).  Outputs: 0/1.
+ * Accessors:  menu_formatCellValue3(), va_formatValue3(), menu_clampCellValue(),
+ *             the single-parameter edit painter, menu_instrumentCellLabels().
+ * Affiliates: instrumentManager_slotVoiceChain(); foldTypeNames.
+ */
+static uint8_t menu_cellIsFoldWave(const menu_cell_t *cell)
+{
+    return (uint8_t)(cell && cell->kind == MENU_CELL_INSTRUMENT &&
+        cell->descriptor &&
+        strcmp(cell->descriptor->file_key, "transient_wave") == 0 &&
+        instrumentManager_slotVoiceChain(cell->slot) ==
+            VOICE_CHAIN_WAVEFOLDER);
+}
+
+/*
+ * Category and long name of an instrument cell, by chain (S089 P2).
+ *
+ * What:       the descriptor's category/long name, except for the three
+ *             transient rows of a WFd slot, which read "WavFldr" and:
+ *               transient_wave  "FoldType"
+ *               transient_vol   "Depth"
+ *               transient_freq  by fold type: "Bias" (Tri, Sin, TrI),
+ *                               "Decay" (TrD, SnD), "Asymmtry" (Asn),
+ *                               "Harmonic" (Chb), "Ratio" (Fd2).
+ *             The 3-character short names (wav vol frq) are unchanged.
+ * Why:        plan §5 step 5: the same three cells mean different things per
+ *             chain; only the labels change, never the stored values.
+ * Inputs:     slot, descriptor, cat/lng (outputs, never NULL on return).
+ * Outputs:    *cat, *lng.
+ * Accessors:  the single-parameter view header (menu.c:14452-14456), the
+ *             step-automation target line (14168-14182) and the modulation
+ *             target full display (6290-6291).
+ * Affiliates: instrumentManager_slotVoiceChain(), instrumentManager_slotFoldType().
+ */
+static void menu_instrumentCellLabels(uint8_t slot,
+                                      const ParamDescriptor *descriptor,
+                                      const char **cat, const char **lng)
+{
+    static const char *const frqNames[VOICE_FOLD_COUNT] = {
+        "Bias", "Decay", "Bias", "Decay", "Asymmtry", "Harmonic", "Bias",
+        "Ratio",
+    };
+
+    *cat = descriptor->category;
+    *lng = descriptor->long_name;
+    if (instrumentManager_slotVoiceChain(slot) != VOICE_CHAIN_WAVEFOLDER)
+        return;
+    if (strcmp(descriptor->file_key, "transient_wave") == 0) {
+        *cat = "WavFldr";
+        *lng = "FoldType";
+    } else if (strcmp(descriptor->file_key, "transient_vol") == 0) {
+        *cat = "WavFldr";
+        *lng = "Depth";
+    } else if (strcmp(descriptor->file_key, "transient_freq") == 0) {
+        *cat = "WavFldr";
+        *lng = frqNames[instrumentManager_slotFoldType(slot)];
+    }
+}
+
+/*
  * Name of a user one-shot transient entry (S087 P3).
  *
  * What:       for a transient value from TRANSIENT_USER_FIRST on that selects
@@ -11799,6 +11908,28 @@ static void menu_formatTransientName(uint8_t value, char *nameDst)
         return;
     sampleMemory_getDisplayName((uint8_t)(value - TRANSIENT_USER_FIRST), name);
     memcpy(nameDst, name, SAMPLE_DISPLAY_NAME_LEN);
+}
+
+/*
+ * Name table of a tagged DTYPE_ON_OFF cell (S088 D12; S089 P2).
+ *
+ * What:       returns the 3-character name table for a dtype high-nibble tag:
+ *             ONOFF_TAG_VOICE_CHAIN -> voiceChainNames (T+D, WFd); every other
+ *             non-zero tag -> oscRunNames (rst, fre, itp), exactly as before.
+ *             Entry [0][0] is the count; names start at [1].
+ * Why:        the six tagged on/off sites in this file used oscRunNames
+ *             directly ("tag != 0 means run mode"); the second tag needs its
+ *             own table, and one helper keeps display, clamp, automation max
+ *             and the step-edit line in agreement.
+ * Inputs:     tag (dtype >> 4, non-zero).  Outputs: the table.
+ * Accessors:  menu_formatCellValue3(), va_formatValue3(), menu_clampCellValue(),
+ *             menu_automationValueMax(), menu_formatAutomationValue3(), the
+ *             single-parameter step-edit display.
+ * Affiliates: ONOFF_TAG_* / oscRunNames / voiceChainNames (MenuText.h).
+ */
+static const char (*menu_onoffTagNames(uint8_t tag))[4]
+{
+    return (tag == ONOFF_TAG_VOICE_CHAIN) ? voiceChainNames : oscRunNames;
 }
 
 static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *buf)
@@ -11939,6 +12070,15 @@ _Static_assert((sizeof(waveformNames) / sizeof(waveformNames[0])) - 1u == OSC_SA
 _Static_assert((sizeof(transientNames) / sizeof(transientNames[0])) - 1u ==
                TRANSIENT_USER_FIRST,
                "transientNames must list Snp, Ofs and every built-in click");
+/* S089 P2: the chain and fold name tables must list every stored value. */
+_Static_assert((sizeof(voiceChainNames) / sizeof(voiceChainNames[0])) - 1u ==
+                   VOICE_CHAIN_COUNT,
+               "voiceChainNames must list every VOICE_CHAIN_* value");
+_Static_assert((sizeof(foldTypeNames) / sizeof(foldTypeNames[0])) - 1u ==
+                   VOICE_FOLD_COUNT &&
+               (sizeof(foldTypeLongNames) / sizeof(foldTypeLongNames[0])) - 1u ==
+                   VOICE_FOLD_COUNT,
+               "fold name tables must list every VOICE_FOLD_* type");
 /* S087 B: the typ table and the OSC_TYPE_* list must stay in step. */
 _Static_assert((sizeof(oscTypeNames) / sizeof(oscTypeNames[0])) - 1u == OSC_TYPE_COUNT,
                "oscTypeNames must list every OSC_TYPE");
@@ -13308,15 +13448,18 @@ static uint8_t menu_automationValueMax(const ParamDescriptor *descriptor)
          * S088 P0 §2.1 D12: tagged on/off automation max.
          *
          * What:       with a non-zero dtype high nibble the automation max is
-         *             count-1 from the tag's name table (oscRunNames: 2); a
+         *             count-1 from the tag's name table
+         *             (menu_onoffTagNames(): run modes or voice chains); a
          *             plain on/off stays 1.
          * Why:        step automation needs the max for its bar and for the
          *             encoder increment clamp (rst/fre/itp are three values).
          * Inputs:     descriptor->dtype.  Outputs: the uint8_t maximum.
-         * Affiliates: oscRunNames[0][0]; ONOFF_TAG_OSC_RUN.
+         * Affiliates: menu_onoffTagNames(); ONOFF_TAG_* (MenuText.h).
          */
+        /* S089 P2: the max follows the tag (run mode or voice chain). */
         if ((uint8_t)(descriptor->dtype >> 4) != 0u)
-            return (uint8_t)(oscRunNames[0][0] - 1u);
+            return (uint8_t)(menu_onoffTagNames(
+                (uint8_t)(descriptor->dtype >> 4))[0][0] - 1u);
         return 1u;
     case DTYPE_MIX_FM:
         /* S085 P1: osc2 mod mode 0..3; step automation may select snc/rng. */
@@ -13360,9 +13503,12 @@ static void menu_formatAutomationValue3(const ParamDescriptor *descriptor,
     case DTYPE_ON_OFF:
         /* S088 P0 §2.1 D12: tagged on/off automation display. */
         if ((uint8_t)(descriptor->dtype >> 4) != 0u) {
-            const uint8_t idx = (value < (uint8_t)oscRunNames[0][0])
+            /* S089 P2: the table follows the tag (run mode or voice chain). */
+            const char (*names)[4] = menu_onoffTagNames(
+                (uint8_t)(descriptor->dtype >> 4));
+            const uint8_t idx = (value < (uint8_t)names[0][0])
                 ? value : 0u;
-            memcpy(buf, oscRunNames[1 + idx], 3);
+            memcpy(buf, names[1 + idx], 3);
         } else {
             memcpy(buf, value ? menuText_on : menuText_off, 3);
         }
@@ -13420,6 +13566,15 @@ static void menu_formatVoiceAutomationValue3(uint16_t target,
         cell.descriptor_index = instrumentParam_local(target);
         cell.descriptor = descriptor;
         menu_formatWaveValue3(&cell, value, buf);
+        return;
+    }
+    /* S089 P2: a WFd slot's automated wav value names its fold type. */
+    if (descriptor && instrumentParam_isVoiceParameter(target) &&
+        strcmp(descriptor->file_key, "transient_wave") == 0 &&
+        instrumentManager_slotVoiceChain(instrumentParam_slot(target)) ==
+            VOICE_CHAIN_WAVEFOLDER) {
+        memcpy(buf, foldTypeNames[1u + ((value < VOICE_FOLD_COUNT)
+                                        ? value : VOICE_FOLD_COUNT - 1u)], 3);
         return;
     }
     menu_formatAutomationValue3(descriptor, value, buf);
@@ -13970,6 +14125,17 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
         if (menu_stepAutomationTargetOff(vt))
             return 0u;
         max_val = menu_automationValueMax(desc);
+        /*
+         * S089 P2: under WFd the transient wav byte is a fold type, so step
+         * automation stops at the last fold type. menu_automationValueMax()
+         * has no slot; this caller knows it. Values that arrive another
+         * way are clamped by voiceFold_process() at render.
+         */
+        if (desc && instrumentParam_isVoiceParameter(vt) &&
+            strcmp(desc->file_key, "transient_wave") == 0 &&
+            instrumentManager_slotVoiceChain(instrumentParam_slot(vt)) ==
+                VOICE_CHAIN_WAVEFOLDER)
+            max_val = (uint8_t)(VOICE_FOLD_COUNT - 1u);
         if (sceneModTarget_isSceneTarget(vt)) {
             const scene_mod_target_descriptor_t *scene_desc =
                 sceneModTarget_descriptor(vt);
@@ -14166,19 +14332,21 @@ static void menu_repaintStepAutomation(void)
                           instrument->type, instrumentParam_local(target))
                     : 0;
                 if (descriptor) {
+                    /* S089 P2: WFd relabels the transient cells. */
+                    const char *cat = descriptor->category;
+                    const char *lng = descriptor->long_name;
                     uint8_t i = 0u;
                     uint8_t j = 0u;
 
-                    while (i < 14u && descriptor->category &&
-                           descriptor->category[i]) {
+                    menu_instrumentCellLabels(slot, descriptor, &cat, &lng);
+                    while (i < 14u && cat && cat[i]) {
                         editDisplayBuffer[1][2u + i] =
-                            descriptor->category[i];
+                            cat[i];
                         i++;
                     }
-                    while (i < 14u && descriptor->long_name &&
-                           descriptor->long_name[j]) {
+                    while (i < 14u && lng && lng[j]) {
                         editDisplayBuffer[1][2u + i] =
-                            descriptor->long_name[j++];
+                            lng[j++];
                         i++;
                     }
                 } else {
@@ -14450,10 +14618,15 @@ static void menu_repaintGeneric(void)
             } else if (cell.kind == MENU_CELL_INSTRUMENT ||
                        cell.kind == MENU_CELL_KIT_SETTING ||
                        cell.kind == MENU_CELL_EFFECT) {
-                menu_copyPaddedField(&editDisplayBuffer[0][0],
-                                     cell.descriptor->category, 8u);
-                menu_copyPaddedField(&editDisplayBuffer[0][8],
-                                     cell.descriptor->long_name, 8u);
+                /* S089 P2: WFd relabels the transient cells. */
+                const char *cat = cell.descriptor->category;
+                const char *lng = cell.descriptor->long_name;
+
+                if (cell.kind == MENU_CELL_INSTRUMENT)
+                    menu_instrumentCellLabels(cell.slot, cell.descriptor,
+                                              &cat, &lng);
+                menu_copyPaddedField(&editDisplayBuffer[0][0], cat, 8u);
+                menu_copyPaddedField(&editDisplayBuffer[0][8], lng, 8u);
             } else {
                 const char *cat = catNames[valueNames[cell.text_id].category];
                 const char *lng = longNames[valueNames[cell.text_id].longName];
@@ -14488,9 +14661,12 @@ static void menu_repaintGeneric(void)
                  * The local `dtype` is the masked low nibble; read the high
                  * nibble from the cell itself (same rule as va_formatValue3()). */
                 if ((uint8_t)(menu_cellDtype(&cell) >> 4) != 0u) {
-                    const uint8_t idx = (value < (uint8_t)oscRunNames[0][0])
+                    /* S089 P2: the table follows the tag. */
+                    const char (*names)[4] = menu_onoffTagNames(
+                        (uint8_t)(menu_cellDtype(&cell) >> 4));
+                    const uint8_t idx = (value < (uint8_t)names[0][0])
                         ? (uint8_t)value : 0u;
-                    memcpy(&editDisplayBuffer[1][13], oscRunNames[1 + idx], 3);
+                    memcpy(&editDisplayBuffer[1][13], names[1 + idx], 3);
                 } else if (value==1)
                     memcpy(&editDisplayBuffer[1][13], menuText_on, 3);
                 else
@@ -14515,6 +14691,16 @@ static void menu_repaintGeneric(void)
                     menu_formatWaveCell(&cell, (uint8_t)value,
                                         &editDisplayBuffer[1][0],
                                         &editDisplayBuffer[1][13]);
+                    break;
+                }
+                /* S089 P2: a WFd wav cell: the long fold name on the left, the
+                 * 3-character code on the right. */
+                if (menu_cellIsFoldWave(&cell)) {
+                    const uint8_t t = (value < VOICE_FOLD_COUNT)
+                        ? (uint8_t)value : (uint8_t)(VOICE_FOLD_COUNT - 1u);
+
+                    memcpy(&editDisplayBuffer[1][0], foldTypeLongNames[1u + t], 8);
+                    memcpy(&editDisplayBuffer[1][13], foldTypeNames[1u + t], 3);
                     break;
                 }
                 /* S087 P3: a user one-shot transient shows its name on the

@@ -142,6 +142,8 @@ SRCS = \
   Core/SampleRom/sampleFlash.c \
   Core/Src/startup_stm32f765xx.s
 
+# S089 P2: voiceFold.c (WFd chain DSP, .itcm.s089) and its generated table
+# use the Core/DSPAudio -Ofast rule below like every other voice DSP file.
 DSP_SRCS = \
   Core/DSPAudio/1PoleLp.c \
   Core/DSPAudio/BufferTools.c \
@@ -167,6 +169,8 @@ DSP_SRCS = \
   Core/DSPAudio/squareRootLut.c \
   Core/DSPAudio/transientGenerator.c \
   Core/DSPAudio/transientTables.c \
+  Core/DSPAudio/voiceFold.c \
+  Core/DSPAudio/voiceFoldTables.c \
   Core/DSPAudio/wavetable.c \
   Core/DSPAudio/wavetableStock.c
 

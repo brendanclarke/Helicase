@@ -52,6 +52,8 @@ def expected(t, key):
         'transient_wave': 'TRANSIENT_WAVE',
         'transient_freq': 'TRANSIENT_FREQ',
         'instrument_drive': 'INSTRUMENT_DRIVE', 'lfo_rate': 'LFO_RATE',
+        # S089 P2: the voice chain selector has its own clamping writer.
+        'voice_chain': 'VOICE_CHAIN',
         # S076 P2: lfo_offset now scales its byte through IM_SPECIAL_LFO_OFFSET.
         'lfo_offset': 'LFO_OFFSET'}
     if t == 'HAT' and key == 'amp_envelope_decay_choke':

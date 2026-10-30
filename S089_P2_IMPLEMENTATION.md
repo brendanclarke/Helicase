@@ -1937,11 +1937,13 @@ its ELF first.
 3. **RAM:** `runtime_slots` 7,584 B; `.bss`/`.data` sizes unchanged; only
    one data symbol is new (none expected).
 4. **Mixer (P0 §4.2):**
-   - **Inlined set:** compared with P0, `busComp_processBlock` and
-     `mixer_decimateBlock` must not appear as standalone symbols, and no
-     other function may leave or join the set inlined into the mixer.
-     `mixer_calcNextSampleBlock` itself grows, by the two chain branches and
-     `voicePost_gainDist`.
+   - **Inlined set:** identical to P0. No function may leave or join the
+     set inlined into the mixer; in particular `busComp_processBlock` stays
+     standalone (as in P0) and `mixer_decimateBlock` stays inlined (as in
+     P0). `mixer_calcNextSampleBlock` itself grows, by the two chain branches
+     and `voicePost_gainDist`. (Wording corrected by assessment F5: the
+     first version said `busComp_processBlock` must not be standalone, but
+     it already is in P0.)
    - **Hot loops:** every P0 hot loop is unchanged or layout-only, and one
      new ≈21-instruction loop (`voicePost_gainDist`) appears.
 5. **Fold costs:** `elf_loopdump.py --sym voiceFold_triLoop
@@ -1983,3 +1985,226 @@ its ELF first.
 | `S089_P1_VOICE_CHAIN_PLAN.md` | mark §2–§5 phase 1 as delivered by P2, with the §1 deviations here |
 | `MEMORY.md` | Binding Rules / DSP: "WFd chain (S089 P2): the transient rows and `transGen`/`snapEg` state belong to the fold under WFd; every `transGen.waveform` read outside the generator must test `chainType`." |
 | Open item | T+D latent: Cymbal/HiHat `pitchMod` keeps the last snap value when `wav` leaves `Snp` mid-snap (pre-existing; not changed in P2) |
+
+---
+
+## 17. Implementation progress (this session, 2026-10-30)
+
+Working notes, appended as the schedule is executed. All figures are from this
+tree; the P0 baseline ELF/BIN/map are kept at `/tmp/s089p2_baseline/`.
+
+### Step 1 — linker ITCM order: PASS
+
+- `STM32F765VIHx_FLASH.ld` now names `.itcm`, `.itcm.s085`,
+  `.itcm.s087 .itcm.s087.*` in that order, then the catch-all `.itcm.*`.
+- `make all` relinked. `build/lxr02.bin` is byte-identical to the P0 build
+  (SHA-256 `680fed3f93f9313c08eb6c50f81825b60cb89e37199079b157b2542910d064fb`),
+  and so is `build/lxr02.elf`
+  (`40959fcbf4222a6c8c4d8337358aa2f6cc0b16ed195d43f8b44320c1d1f45f05`).
+  ITCM stays 12,656 / 16,384 B.
+
+### Step 2 — voiceFold.h/.c, tables, generator, Makefile: PASS
+
+- Added `Core/DSPAudio/voiceFold.h`, `voiceFold.c`,
+  `voiceFoldTables.c` (generated) and `tools/plots/gen_fold_tables.py`;
+  listed both sources in `DSP_SRCS`.
+- `gen_fold_tables.py`: C1 (entry 0 = 0.1450982, entry 127 = 0.0003627) and
+  C2 (strictly decreasing) pass, and `--check` reproduces the committed file
+  byte for byte.
+- Deviation from the schedule's expectation: with the new (unreferenced)
+  sources in the build, the image is **not** byte-identical. The only
+  differences are the link-order of LTO-generated `__*_veneer` stubs (same
+  sizes, same code addresses). Step 1, the linker-only gate, *was*
+  byte-identical, so the rule itself is proved.
+
+### Step 3 — engine fields and init: PASS
+
+- `chainType` added after `ampRampArm` in all four headers; default set in
+  all four `*_initVoice()`; `voiceFold.h` included by each engine.
+- Probe sizes: Drum 632, Snare 452, Cymbal 508 B unchanged; HiHat 516 -> 520 B.
+  `runtime_slots` = 7,584 B (0x1da0) unchanged. `.bss` 412,884 B unchanged.
+  `.data` is 420 -> 424 B, but the named data total is 403 B in both: LTO
+  moved one small local between partitions (+4 B in ltrans7, -1 B in
+  ltrans6) and the section end padded to 4 B. No new data object.
+
+### Step 4 — `voicePost_gainDist()`: PASS
+
+- Added as the no-add twin in `voicePostChain.h`, adjacent to
+  `voicePost_addGainDist()`.
+
+### Step 5 — engine guards and dispatch: PASS
+
+- All eight `transGen.waveform` reads outside the generator now test
+  `chainType == VOICE_CHAIN_DEFAULT`: Drum 317/333, Snare 221/317, Cymbal
+  241/358, HiHat 251/377.
+- Drum folds `buf` after the `itp` blend; Snare folds `transBuf` (D1) with
+  `1/(1-mix)` input normalisation; Cymbal/HiHat fold `buf` before the ZDF
+  filter and use `voicePost_gainDist()` under WFd.
+- Cymbal/HiHat also write `pitchMod = 1.0f` every WFd block, so a chain
+  switch during a snap cannot leave the carrier detuned.
+- The schedule's Cymbal/HiHat fold call uses gains 1/1. Note for hardware H5:
+  HiHat renders its FM carrier at gain 0.5 (unchanged), so for the same `vol`
+  its fold drive is 6 dB below Cymbal's. The `vol` range still spans the full
+  fold depth; this is called out so it is judged by ear, not mistaken for a
+  wiring error.
+
+### Step 6 — descriptors, MenuText, InstrumentManager, menu: PASS
+
+- Counts 43/42/43/43; `*_PARAM_VOICE_CHAIN` appended; `voice_chain` row
+  uses `ROW_SELECT_ONOFF_SPECIAL` with tag 2 and
+  `IM_SPECIAL_VOICE_CHAIN`; the transient page is `wav vol frq chn` on all
+  four engines.
+- `IM_SPECIAL_VOICE_CHAIN = 22`, `IM_SPECIAL_WRITER_COUNT = 23`; the writer
+  clamps and clears `transGen.midiFreq` on a chain change; the diagnostic
+  classifier returns the tag by key alone.
+- Menu: `menu_onoffTagNames()` replaces the six direct `oscRunNames` reads;
+  `menu_cellIsFoldWave()` / `menu_instrumentCellLabels()` name the fold
+  type, depth and per-type frq; the step-automation max and display use
+  `VOICE_FOLD_COUNT` under WFd. Name-table `_Static_assert`s added.
+- `special tags OK (171 rows, 0 mismatches)`;
+  `instrument_manager failures: 0` (laws 3–8, all three break builds caught).
+
+### Step 7 — host tests and cost gate: PASS
+
+- `tools/dsp_test/modules/voicefold.c` runs F1–F10 against the real
+  `voiceFold.c`; `voicefold failures: 0`; the DC-term break build is
+  caught by F3.
+- `fold_tables OK`.
+- `elf_loopdump.py` per-sample counts (this build):
+
+  | Loop | Types | Instructions | Limit |
+  |---|---|---:|---:|
+  | `voiceFold_triLoop` | Tri, TrD, TrI | 12 | 24 |
+  | `voiceFold_chbLoop` | Chb | 14 | 24 |
+  | `voiceFold_fd2Loop` | Fd2 | 20 | 24 |
+  | `voiceFold_sinLoop` | Sin, SnD, Asn | 23 | 24 (25 accepted on Drum/Snare) |
+
+- Mixer hot-path gate (`elf_hotloops.py`, P0 mixer vs this mixer):
+  **31 equal, 6 shrank, 0 grew**. The 23-instruction add post loops appear as
+  two 21-instruction no-add twins (Cymbal and HiHat inlined separately), as
+  expected.
+- `busComp_processBlock` is standalone in both P0 and P2;
+  `mixer_decimateBlock` is inlined in both, so the inlined set is unchanged
+  for those two. New standalone symbols are the fold code, the voice-chain
+  accessor and the name tables.
+- ITCM: 12,656 -> 13,960 B (+1,304 B), within D4. No existing ITCM function
+  moved; only the linker-generated veneer stubs moved to after
+  `.itcm.s089` (they are stubs, not loops). The S085 rule is intact.
+- `run_modes` still fails to compile at its pre-existing S088 gap
+  (`distortion_curveSampleF` vs the `...16` stub in the module); it is
+  unchanged and out of P2 scope.
+- Firmware: `make all && make img` -> `Written:build/LXRV2_lxr02.img
+  (681512b) OK`. Flash headroom 72,152 B; DTCM statics 4,372 B; FX arena
+  margin 3,808 B.
+
+---
+
+## 18. Post-implementation assessment (2026-10-30)
+
+An independent review of the tree against §3–§14. It was rebuilt and
+re-measured here and compared with the hardware-passed S089 P0 ELF.
+
+### 18.1 Verdict
+
+The implementation **follows the schedule and is ready for hardware
+testing.**
+- `voiceFold.h` and `voiceFold.c` match §4–§5 exactly; a diff shows blank
+  lines between blocks only.
+- Every engine, descriptor, InstrumentManager, MenuText, menu, linker,
+  Makefile and host-test change is present at the scheduled site, with its
+  comment block.
+- No defect blocks testing.
+
+One finding (F1, a gain error that came from the schedule itself) should be
+fixed before the HiHat hardware checks.
+
+### 18.2 Verified
+
+| Area | Result |
+|---|---|
+| Build | `make all` exit 0; `make img` → `Written:build/LXRV2_lxr02.img (681512b) OK`. All 12 changed C files recompiled syntax-only with their own Makefile flags: **0 warnings**. |
+| Host tests | `instrument_manager` 0 failures (all three break builds caught); `voicefold` 0 failures, F1–F10 present, DC-term break caught by F3; `fold_tables OK`; `special tags OK (171 rows, 0 mismatches)`. |
+| Fold loops (linked ELF) | `triLoop` 12, `chbLoop` 14, `fd2Loop` 20, `sinLoop` 23: all ≤ 24, matching §17. Every loop is branch-free; the absolute value compiles to `cmp; it lt; neglt` (constant time), and `smmul` to `smull`. |
+| Mixer hot loops vs P0 | 31 equal, 6 shrank, 0 grew. The P0/P2 loop multisets differ in 8 loops, and **in every one only integer/move instructions differ; the float operations are identical in count and order**, so the T+D audio arithmetic is unchanged (S0 by inspection; H1 confirms). One new 21-instruction loop ×2 is `voicePost_gainDist()` (Cymbal and HiHat inlined separately). |
+| Inlined set | No DSP function joined or left the mixer's inlined set. `busComp_processBlock` is standalone in P0 and P2; `mixer_decimateBlock` is inlined in both. The other symbol changes are menu/UI LTO partitioning (`checkScrollSign`, `sa_applyTrackMarkers`, `va_*`) and the new fold/menu helpers. `mixer_calcNextSampleBlock` 13,848 → 14,412 B. |
+| ITCM | 12,656 → 13,960 B. All 35 existing ITCM functions keep their address and size. Only the three linker veneers (`__osc_wtbPlanBlock…`, `__memset`, `__osc_userBind`) moved, to after `.itcm.s089`. The byte differences inside the old range are the `b.w`/`bl` targets of those veneers and the SRAM addresses in literal pools (§18.3 F3); no loop changed shape. |
+| RAM | Struct sizes as scheduled (HiHat 520 B); `runtime_slots` 7,584 B; `.bss` size 412,884 B; DTCM statics 4,372 B. **But see F3**: `.data` 420 → 424 B. |
+| `pitchMod` safety | The only `osc.pitchMod` writers are init, the pitch envelope (Drum/Snare reassign it every block) and the snap; the LFO acts through `modNodeValue`. The Cymbal/HiHat `pitchMod = 1.0f` under WFd therefore cannot override anything. |
+| Descriptor space | 43 rows per type against `INSTRUMENT_PARAM_COUNT` 64 (firmware); the host test's 240-ID stub is unrelated. |
+
+### 18.3 Findings
+
+| # | Severity | Finding | Recommendation |
+|---|---|---|---|
+| F1 | **Medium** (sound; a schedule error) | HiHat renders its FM carrier at gain **0.5** (`HiHat.c` `osc_renderTypedFm(..., 0.5f)` / `calcNextOscSampleFmBlock(..., 0.5f)`), but §8.4 copied Cymbal's gains 1/1. So HiHat folds at half Cymbal's depth for the same `vol`. Worse, at high depth the folded output reaches full scale, **+6 dB above the T+D HiHat level**. §17 noted the gain difference but left it to be judged by ear. | In `HiHat_calcSyncBlockVoice()`, pass `inGain = 2.0f, outGain = 0.5f`, with a comment naming the 0.5 carrier gain. The fold then sees full scale (the same character as Cymbal) and its output returns to the carrier's level (vol 0 stays identity at the T+D level). There is no per-sample cost: both factors are per-block constants. Drum (full scale in every mode) and Cymbal (1.0) are correct. |
+| F2 | Low (ITCM use) | `voiceFold_process()` is **1,016 B** of the +1,304 B ITCM (§1 estimated the whole file at ≈1.4 KB, but the per-block setup alone at ~250 B). It runs once per voice per block, and the per-sample work is all in the 290 B of loops. ITCM headroom is now 2,424 B. | Optional: drop `VOICE_FOLD_SECTION` from `voiceFold_process()` (keep `noinline, noclone`) so the setup runs from flash and only the loops stay in ITCM. That recovers ≈1 KB. The call from the engines then goes flash → flash, and the loops are reached through ITCM veneers. Re-run the §15 gates. |
+| F3 | Low (layout; a gate not met as written) | §15 gate 3 expected "no data symbol moved". LTO partition order put one 1-byte `.data` object (`pm_instrument_request_type`) on a 4-byte boundary, so `.data` grows 4 B and `.bss` (8-byte aligned) starts at `0x20020dc8` instead of `0x20020dc0`. **851 SRAM1 data symbols move by +1…+8 B.** No object was added or resized, and DTCM did not move. This is the layout-shift pattern S089 P0 F4 named as a possible latent-fault trigger. | No code fix: the shift comes from LTO placement, not from P2 data. Treat it as a hardware discriminator: if anything misbehaves on hardware with every slot on `T+D`, suspect layout (P0 F4) before the fold. Record the shift in `STORAGE_SRAM_MANIFEST.md`. |
+| F4 | Info (cost) | `sinLoop` measured 23 against the 20 estimate: three `vmov.f32` accumulator copies before the `vfma`s, plus one instruction for the IT-block absolute value. | None needed; it is within 24 on every engine. If headroom is wanted later, the polynomial can be reordered so two of the copies disappear. |
+| F5 | Info (schedule wording) | §15 gate 4 said `busComp_processBlock` "must not appear as a standalone symbol". It is standalone in P0 as well; the gate means **unchanged from P0**, which holds. | Read gate 4 as "the inlined set is identical to P0". |
+
+### 18.4 Corrections to §17 and `CPU_USE_DSP_AUDIT.md`
+
+- **§17 Step 7 and audit item 58** say the no-add loops replace
+  "23-instruction add versions". The Cymbal/HiHat add post loops are **25**
+  instructions in both P0 and P2, so `voicePost_gainDist()` saves 4 per
+  sample, as planned. The 23 → 22 loops that "shrank" are unrelated loops
+  (a signed-byte table read with a conditional add) that changed by
+  register allocation only.
+- **Audit item 60** says "Text 679,088 → 681,088 B". The P0 text was
+  **676,600 B**, so text grew **+4,488 B**. 681,088 is correct.
+- **§17 Step 3 RAM bullet:** add that the 4 B `.data` growth moves the start
+  of `.bss` by 8 B (F3). The *size* of `.bss` is unchanged, but its layout
+  is not.
+
+### 18.5 Hardware notes (§15 matrix)
+
+- **H1 first:** every slot on `T+D`. A pass also clears the F3 layout shift.
+- **H5 (Cymbal/HiHat):** run after the F1 fix. Without it, HiHat `WFd`
+  sounds weaker in fold depth than Cymbal at the same `vol`, and up to 6 dB
+  louder than its own `T+D` level at high depth.
+- **H9 (CPU):** the dearest WFd loop is `sinLoop` at 23, against the
+  click's 22 + 2, so an all-`Asn`/`Sin` Scene should read at or below
+  all-`T+D` on Drum/Snare and clearly below on Cymbal/HiHat (no-add post
+  loop −4).
+
+---
+
+## 19. Assessment fixes F1–F5 (2026-10-30)
+
+All five §18.3 findings are resolved. Hardware re-test is pending.
+
+### 19.1 Changes
+
+| # | File | Change |
+|---|---|---|
+| F1 | `Core/DSP/Instruments/HiHat/HiHat.c` (`HiHat_calcSyncBlockVoice()`, the WFd fold call) | `voiceFold_process(..., 1.0f, 1.0f)` → **`(..., 2.0f, 0.5f)`**. The comment names the 0.5 carrier render gain: `inGain` 2 restores full scale into the fold (the same depth per `vol` as Cymbal), and `outGain` 0.5 returns the folded block to the T+D carrier level (`vol` 0 is still the identity there). Both are per-block constants, so there is no per-sample cost. Drum and Cymbal are unchanged (full-scale oscillator sections). |
+| F2 | `Core/DSPAudio/voiceFold.c` | New `VOICE_FOLD_ENTRY` (`noinline, noclone`, no section). `voiceFold_process()` uses it and now runs from flash; the loops keep `VOICE_FOLD_LOOP` (`.itcm.s089`). The placement comment is updated. |
+| F3 | `knowledge_files/specification_reference/STORAGE_SRAM_MANIFEST.md` | No code change (the shift comes from LTO placement). New S089 P2 entry and "current as of" figures: struct sizes, ITCM, text, and the `.data` 420 → 424 B / `.bss` start +8 B layout shift, with the P0 F4 hardware note. |
+| F4 | `Core/DSPAudio/voiceFold.c`, `tools/dsp_test/Makefile` | The sine loop is split. `voiceFold_sinLoop()` (Sin, SnD): `y = t·P − kC`. **New `voiceFold_asnLoop()`** (Asn): `y = t·P + kA·t²`, with no bias. The combined `kA·t² − kC` term had cost one extra accumulator copy per sample. `voiceFold_process()` dispatches by type. The `voicefold` break build now removes `kC` from `t * p - kC`, and still fails law F3 as intended. |
+| F5 | this document, §15 gate 4 | The gate now reads "inlined set identical to P0: `busComp_processBlock` stays standalone, `mixer_decimateBlock` stays inlined". |
+| — | `CPU_USE_DSP_AUDIT.md` items 57, 58, 60 | §18.4 corrections applied (25-instruction add loops, P0 text 676,600 B), plus the F2/F4 figures. |
+| — | repository root | Removed 12 stray `*.d` dependency files left by the §18 syntax-only recompiles (`-MMD` without `-o`). They were git-ignored, but not created by the implementation. |
+
+### 19.2 Measured (rebuilt; compared with P0 and with P2 as first delivered)
+
+| Check | Result |
+|---|---|
+| Build | `make all` exit 0, no warnings in the changed files; `make img` → `Written:build/LXRV2_lxr02.img (681656b) OK` |
+| Host tests | `instrument_manager` 0 failures (3 breaks caught); `voicefold` 0 failures, and the break is caught by F3; `fold tables OK`; `special tags OK (171 rows, 0 mismatches)` |
+| Fold loops | `triLoop` 12, `chbLoop` 14, `fd2Loop` 20, **`sinLoop` 22**, **`asnLoop` 22** (was 23 combined) |
+| ITCM | **13,032 / 16,384 B** (was 13,960; −928 B). Only the loops are in `.itcm.s089`; `voiceFold_process()` (1,036 B) is in flash. Every P0 ITCM function keeps its address and size; only the three linker veneers moved, as before. Headroom 3,352 B. |
+| Flash | text 681,088 → 681,232 B (+144: the entry's flash veneers to the five loops); headroom 72,008 B |
+| Mixer | `elf_hotloops.py`: vs P0, 31 equal, 6 shrank, **0 grew**; vs P2 as first delivered, **39 equal, 0 shrank, 0 grew** (the F1 constant change and F2/F4 do not touch the inlined renders). |
+| RAM layout | no data symbol moved relative to P2 as first delivered; DTCM unchanged from P0 (F3 shift as recorded) |
+
+### 19.3 Re-test focus (§15 matrix)
+
+- **H1:** every slot on `T+D`, first. A pass also clears the F3 layout
+  shift.
+- **H5:** HiHat now folds like Cymbal for the same `vol`, and its WFd level
+  matches its T+D level at `vol` 0. At full depth, HiHat stays at its
+  carrier level instead of +6 dB.
+- **H3/H4:** `Sin`, `SnD` and `Asn` now come from two loops; they must
+  sound as before (the arithmetic is the same, minus one register copy).
+- **H9:** the dearest WFd loop is now 22 (`Sin`/`SnD`/`Asn`), equal to the
+  click it replaces, plus the click's mix-in 2 saved.

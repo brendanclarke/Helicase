@@ -947,6 +947,45 @@ the new copy/clear work is foreground-only and bounded.
     `mixer_faderGains()`, once per slot per block: one multiply-add and one
     compare per slot. Negligible; no per-sample cost.
 
+### Session 089 P2 additions (record in `S089_P2_IMPLEMENTATION.md`)
+
+57. **ADDED (S089 P2): WFd fold loops.** `voiceFold.c`: five per-sample
+    loops in `.itcm.s089` (one is selected per block) and one non-inlined
+    per-block entry, `voiceFold_process()`, in flash. Measured on the
+    linked build with `elf_loopdump.py`:
+
+    | Loop | Types | Instructions |
+    |---|---|---:|
+    | `voiceFold_triLoop` | Tri, TrD, TrI | 12 |
+    | `voiceFold_chbLoop` | Chb | 14 |
+    | `voiceFold_fd2Loop` | Fd2 | 20 |
+    | `voiceFold_sinLoop` | Sin, SnD | 22 |
+    | `voiceFold_asnLoop` | Asn | 22 |
+
+    All are within the P2 limit (24 per sample, the click's 22 + mix-in 2;
+    Cymbal/HiHat 26). The sine family was one loop at 23 as first
+    delivered; splitting Sin/SnD from Asn removed one accumulator copy per
+    sample (assessment F4). Every loop is branch-free (|x| is an IT block).
+    `voiceFold_process()` does the per-block setup (type, frq, depth,
+    decay, ramp constants) once per voice per block.
+58. **ADDED (S089 P2): `voicePost_gainDist()`.** The no-add twin of
+    `voicePost_addGainDist()`, used by Cymbal/HiHat under WFd. The linked
+    mixer shows two 21-instruction per-sample loops (one inlined per
+    engine), in place of the 25-instruction add versions under T+D
+    (−4 per sample).
+59. **CHANGED (S089 P2): chain dispatch.** One `chainType` branch per
+    engine render (and per trigger/async snap path). With `chainType` 0 the
+    T+D path runs as before: `elf_hotloops.py` on the P0 mixer vs this
+    mixer reports 31 hot loops equal, 6 shrank, 0 grew.
+60. **CHANGED (S089 P2): ITCM and flash.** ITCM 12,656 → 13,032 B
+    (+376 B; D4): the fold loops only, after `voiceFold_process()` (1,036 B)
+    moved to flash (assessment F2; it was 13,960 B as first delivered). No
+    existing ITCM function moved; only the three linker veneers were laid
+    out after `.itcm.s089`. Text 676,600 → 681,232 B (+4,632 B), flash
+    headroom 72,008 B. `.bss` size 412,884 B and `runtime_slots` 7,584 B are
+    unchanged, but `.data` 420 → 424 B shifts the start of `.bss` by 8 B
+    (`STORAGE_SRAM_MANIFEST.md`, S089 P2).
+
 ---
 
 ## Binding Mandates — DSP CPU Policy

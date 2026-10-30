@@ -11,7 +11,7 @@
  * diagnostics. Keep these macros aligned with the descriptor/page arrays in
  * CymbalParameters.c whenever rows/pages are added.
  */
-#define CYMBAL_PARAM_DESCRIPTOR_COUNT 42u /* S088: + osc1_run. */
+#define CYMBAL_PARAM_DESCRIPTOR_COUNT 43u /* S088: + osc1_run. S089 P2: + voice_chain. */
 #define CYMBAL_MENU_PAGE_COUNT       8u
 #define CYMBAL_INSTRUMENT_TYPE_FLAGS INSTRUMENT_FLAG_ADVANCED
 

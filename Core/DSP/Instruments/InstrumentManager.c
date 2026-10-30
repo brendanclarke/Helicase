@@ -12,6 +12,7 @@
 #include "Snare.h"
 #include "CymbalVoice.h"
 #include "HiHat.h"
+#include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* clamps */
 #include "mixer.h"
 #include "modulationNode.h"
 #include "menu.h"
@@ -1805,6 +1806,34 @@ static uint8_t instrumentManager_slotRunMode(uint8_t slot)
     }
 }
 
+/*
+ * Read one slot's voice chain (S089 P2). Contract in InstrumentManager.h.
+ *
+ * What:       voice->chainType of the engine in the slot; VOICE_CHAIN_DEFAULT
+ *             for an unknown type or a missing instance.
+ * Why:        same shape as instrumentManager_slotRunMode(), so the chain
+ *             decision is read one way everywhere.
+ */
+uint8_t instrumentManager_slotVoiceChain(uint8_t slot)
+{
+    switch (instrumentManager_slotType(slot)) {
+    case INSTRUMENT_TYPE_DRM: {
+        DrumVoice *voice = instrumentManager_drumRuntime(slot);
+        return voice ? voice->chainType : (uint8_t)VOICE_CHAIN_DEFAULT; }
+    case INSTRUMENT_TYPE_SNR: {
+        SnareVoice *voice = instrumentManager_snareRuntime(slot);
+        return voice ? voice->chainType : (uint8_t)VOICE_CHAIN_DEFAULT; }
+    case INSTRUMENT_TYPE_CYM: {
+        CymbalVoice *voice = instrumentManager_cymbalRuntime(slot);
+        return voice ? voice->chainType : (uint8_t)VOICE_CHAIN_DEFAULT; }
+    case INSTRUMENT_TYPE_HAT: {
+        HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? voice->chainType : (uint8_t)VOICE_CHAIN_DEFAULT; }
+    default:
+        return (uint8_t)VOICE_CHAIN_DEFAULT;
+    }
+}
+
 void instrumentManager_recalcSlotFilter(uint8_t slot)
 {
     /*
@@ -2004,9 +2033,12 @@ void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
 uint8_t instrumentManager_slotUsesSrr(uint8_t slot)
 {
     /*
-     * Each type's default voice chain ends in SRR (S089 P0). P1 adds the
-     * chain selector here: a type returns 1 only when its selected chain
-     * includes SRR. Unknown/empty slots and new types default to 0.
+     * Each type's default voice chain ends in SRR (S089 P0). Both chains of
+     * the four types (T+D and the S089 P2 WFd chain, which keeps the full
+     * post-chain) include SRR, so the answer does not depend on chainType
+     * yet; a future chain without SRR adds its test here
+     * (instrumentManager_slotVoiceChain()). Unknown/empty slots and new types
+     * default to 0.
      */
     switch (instrumentManager_slotType(slot)) {
     case INSTRUMENT_TYPE_DRM:
@@ -2380,6 +2412,23 @@ static TransientGenerator *instrumentManager_transient(uint8_t slot)
     default:
         return 0;
     }
+}
+
+/*
+ * A slot's fold type (S089 P2). Contract in InstrumentManager.h.
+ *
+ * What:       the transient generator's stored waveform byte, clamped exactly
+ *             as voiceFold_process() clamps it, so the label names the type
+ *             that plays.
+ */
+uint8_t instrumentManager_slotFoldType(uint8_t slot)
+{
+    const TransientGenerator *transient = instrumentManager_transient(slot);
+
+    if (!transient)
+        return (uint8_t)VOICE_FOLD_TRI;
+    return (transient->waveform < VOICE_FOLD_COUNT)
+        ? transient->waveform : (uint8_t)(VOICE_FOLD_COUNT - 1u);
 }
 
 static uint8_t instrumentManager_descriptorIndexForPointer(
@@ -3760,6 +3809,44 @@ static uint8_t instrumentManager_writeSpecialRuntime(
                                   descriptor->runtime.offset),
                          descriptor->runtime.parameter_type }, run);
         return 1u; }
+    case IM_SPECIAL_VOICE_CHAIN: {
+        /*
+         * voice_chain writer (S089 P2).
+         *
+         * What:       clamps byteValue to 0..VOICE_CHAIN_COUNT-1 (0 T+D,
+         *             1 WFd) and stores it in the engine's chainType through
+         *             the descriptor's instance offset (generic TYPE_UINT8
+         *             store). When the stored chain changes, clears
+         *             transGen.midiFreq so the WFd depth ramp does not start
+         *             from a depth left by an earlier WFd period.
+         * Why:        every voice_chain write (menu, Kit/Scene/Instrument
+         *             apply, step automation, MIDI) must clamp and store the
+         *             same way; corrupt storage or an out-of-range MIDI write
+         *             becomes WFd (1). The engines read chainType at their own
+         *             pace (next block / next trigger), so there is no other
+         *             side effect. A switch mid-note changes the stage ahead
+         *             of the filter at the next block boundary, like any
+         *             selector (step automation applies at steps).
+         * Inputs:     slot, descriptor (instance offset), byteValue.
+         * Outputs:    chainType; transGen.midiFreq (on change).
+         * Accessors:  instrumentManager_writeRuntimeInternal() via the tag.
+         * Affiliates: VOICE_CHAIN_* (voiceFold.h); the four voice_chain rows;
+         *             voiceFold_process() (midiFreq 0 = no previous depth).
+         */
+        void *instance = instrumentManager_runtimeInstance(slot);
+        TransientGenerator *transient = instrumentManager_transient(slot);
+        uint8_t chain = (byteValue >= VOICE_CHAIN_COUNT)
+            ? (uint8_t)(VOICE_CHAIN_COUNT - 1u) : byteValue;
+        uint8_t *field;
+
+        if (!instance || !descriptor) return 0u;
+        field = (uint8_t *)instance + descriptor->runtime.offset;
+        if (*field != chain && transient)
+            transient->midiFreq = 0u;
+        instrumentManager_writeParameter(
+            (Parameter){ (void *)field, descriptor->runtime.parameter_type },
+            chain);
+        return 1u; }
     case IM_SPECIAL_NONE:
     default:
         return 0u;
@@ -3834,6 +3921,12 @@ static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
      */
     if (osc != 0xFFu && strcmp(key, "osc1_run") == 0)
         return IM_SPECIAL_OSC_RUN | osc;
+    /*
+     * S089 P2: voice_chain. Not an oscillator row (no IM_SPECIAL_OSC* bits),
+     * so it is classified by key alone, like transient_freq; the boot
+     * diagnostic compares every descriptor tag against this rule.
+     */
+    if (strcmp(key, "voice_chain") == 0) return IM_SPECIAL_VOICE_CHAIN;
     if (strcmp(key, "transient_freq") == 0) return IM_SPECIAL_TRANSIENT_FREQ;
     if (strcmp(key, "instrument_drive") == 0)
         return IM_SPECIAL_INSTRUMENT_DRIVE;

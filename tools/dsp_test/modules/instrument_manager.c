@@ -18,6 +18,9 @@
  *               7. the osc1_run row is a tagged DTYPE_ON_OFF selector whose
  *                  high nibble is ONOFF_TAG_OSC_RUN, with AUTOMATABLE |
  *                  SELECTOR and no ramp.
+ *               8. the voice_chain row (S089 P2) is appended after osc1_run,
+ *                  is a tagged DTYPE_ON_OFF selector (tag 2) with
+ *                  AUTOMATABLE | SELECTOR and no ramp.
  *             (Laws 1-2, osc_setType(), are the oscillator module's type
  *             group.)
  * Why:        S087 P0 §12.5: typ is a selector, step-automatable, never
@@ -43,6 +46,7 @@
 #define TYPE_UINT8 3u
 #define IM_SPECIAL_OSC_TYPE 20u
 #define IM_SPECIAL_OSC_RUN 21u
+#define IM_SPECIAL_VOICE_CHAIN 22u
 #define IM_SPECIAL_OSC1 0x00u
 #define MOD_NONE { 0u, 0u, INSTRUMENT_MOD_DOMAIN_NONE }
 #define BIND_SPECIAL(member_, type_, special_) \
@@ -124,6 +128,11 @@ static const ParamDescriptor g_run_row = ROW_SELECT_ONOFF_SPECIAL(
     "osc1_run", "Oscilltr", "Run Mode", "run", ONOFF_TAG_OSC_RUN,
     runMode, TYPE_UINT8, IM_SPECIAL_OSC_RUN | IM_SPECIAL_OSC1);
 
+/* S089 P2: the voice chain row, from the real tag macro. */
+static const ParamDescriptor g_chn_row = ROW_SELECT_ONOFF_SPECIAL(
+    "voice_chain", "Voice", "Chain", "chn", ONOFF_TAG_VOICE_CHAIN,
+    chainType, TYPE_UINT8, IM_SPECIAL_VOICE_CHAIN);
+
 /* A non-morphable, non-selector row (the pre-S087 gate's refusal). */
 static const ParamDescriptor g_plain_row = {
     "plain", "pln", "Plain", "Test", DTYPE_0B127, 0u,
@@ -193,11 +202,13 @@ int main(void)
     expect((g_typ_row.dtype >> 4) == MENU_OSC_TYPE, "law 5: typ menu id 4");
     expect(MENU_OSC_TYPE == 4, "law 5: MENU_OSC_TYPE is 4");
 
-    /* 6: appended last, after osc1_type (S088 P0 D9: engine-struct byte). */
+    /* 6: osc1_run after osc1_type; S089 P2: voice_chain is now last. */
     expect(DRUM_PARAM_OSC1_RUN == DRUM_PARAM_OSC1_TYPE + 1u,
            "law 6: osc1_run follows osc1_type");
-    expect(DRUM_PARAM_OSC1_RUN + 1u == DRUM_PARAM_COUNT,
-           "law 6: osc1_run is the last Drum row");
+    expect(DRUM_PARAM_VOICE_CHAIN == DRUM_PARAM_OSC1_RUN + 1u,
+           "law 6: voice_chain follows osc1_run");
+    expect(DRUM_PARAM_VOICE_CHAIN + 1u == DRUM_PARAM_COUNT,
+           "law 6: voice_chain is the last Drum row");
 
     /* 7: the tagged ONOFF row (S088 P0 §2.1 D12). */
     expect((g_run_row.dtype & 0x0fu) == DTYPE_ON_OFF,
@@ -209,6 +220,19 @@ int main(void)
                 INSTRUMENT_PARAM_FLAG_SELECTOR),
            "law 7: run is automatable+selector, never morph/mod");
     expect(seq_rampDtypeOk(&g_run_row) == 0u, "law 7: run never ramps");
+
+    /* 8: the voice chain row (S089 P2): tag 2, selector, no ramp. */
+    expect((g_chn_row.dtype & 0x0fu) == DTYPE_ON_OFF,
+           "law 8: chn dtype low nibble is DTYPE_ON_OFF");
+    expect((g_chn_row.dtype >> 4) == ONOFF_TAG_VOICE_CHAIN,
+           "law 8: chn dtype high nibble is ONOFF_TAG_VOICE_CHAIN");
+    expect(ONOFF_TAG_VOICE_CHAIN != ONOFF_TAG_OSC_RUN,
+           "law 8: chn and run tags differ");
+    expect(g_chn_row.flags ==
+               (INSTRUMENT_PARAM_FLAG_AUTOMATABLE |
+                INSTRUMENT_PARAM_FLAG_SELECTOR),
+           "law 8: chn is automatable+selector, never morph/mod");
+    expect(seq_rampDtypeOk(&g_chn_row) == 0u, "law 8: chn never ramps");
 
     /* 3: the gate. */
     expect(instrumentManager_targetValid(0u,

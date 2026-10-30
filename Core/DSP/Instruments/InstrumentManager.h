@@ -173,6 +173,24 @@ typedef enum {
      *             osc1_run rows; the engine trigger/render functions.
      */
     IM_SPECIAL_OSC_RUN,
+    /*
+     * S089 P2: voice_chain writer. Clamps the value to 0..VOICE_CHAIN_COUNT-1
+     * and stores it in the engine's chainType field through the descriptor's
+     * instance offset. On a change of chain it clears transGen.midiFreq so
+     * the fold's depth ramp starts flat (voiceFold_process()).
+     *
+     * What:       IM_SPECIAL_VOICE_CHAIN = 22 (next after IM_SPECIAL_OSC_RUN,
+     *             21); IM_SPECIAL_WRITER_COUNT becomes 23 (<= 32, the 5-bit
+     *             writer field).
+     * Why:        a selector must pass through the special writer so menu
+     *             edits, Kit/Scene/Instrument apply, step automation and MIDI
+     *             writes all clamp and store identically.
+     * Inputs:     slot, byte value.  Outputs: chainType; transGen.midiFreq.
+     * Accessors:  instrumentManager_writeSpecialRuntime() switch.
+     * Affiliates: VOICE_CHAIN_* (voiceFold.h); voiceChainNames (MenuText.h);
+     *             the four voice_chain rows; tools/dsp_test/check_special_tags.py.
+     */
+    IM_SPECIAL_VOICE_CHAIN,
     IM_SPECIAL_WRITER_COUNT
 } instrument_special_writer_t;
 
@@ -746,6 +764,31 @@ uint8_t instrumentManager_waveCellCount(uint8_t slot,
  * Affiliates: osc_setType(), OSC_TYPE_*.
  */
 uint8_t instrumentManager_osc1Type(uint8_t slot);
+/*
+ * A slot's current voice chain (S089 P2).
+ *
+ * What:       the chainType of the engine occupying the slot
+ *             (VOICE_CHAIN_*); VOICE_CHAIN_DEFAULT for an unknown type or slot.
+ * Why:        Menu relabels and re-lists the transient cells by chain without
+ *             owning the tagged runtime mapping (as instrumentManager_osc1Type()).
+ * Inputs:     slot.  Outputs: VOICE_CHAIN_*.
+ * Accessors:  menu.c (menu_cellIsFoldWave(), menu_instrumentCellLabels(),
+ *             the step-automation max); instrumentManager_slotUsesSrr().
+ * Affiliates: the engines' chainType; IM_SPECIAL_VOICE_CHAIN.
+ */
+uint8_t instrumentManager_slotVoiceChain(uint8_t slot);
+/*
+ * A slot's fold type under WFd (S089 P2).
+ *
+ * What:       transGen.waveform clamped to VOICE_FOLD_COUNT - 1 (the type the
+ *             fold actually plays); VOICE_FOLD_TRI for an unknown slot.
+ * Why:        the single-parameter view names frq by fold type ("Bias",
+ *             "Decay", ...).
+ * Inputs:     slot.  Outputs: VOICE_FOLD_*.
+ * Accessors:  menu_instrumentCellLabels() (menu.c).
+ * Affiliates: voiceFold_process() (the same clamp).
+ */
+uint8_t instrumentManager_slotFoldType(uint8_t slot);
 void instrumentManager_calcSlotAsync(uint8_t slot);
 void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
                                          uint8_t size);

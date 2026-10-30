@@ -1,6 +1,7 @@
 # S089 P2 — Wavefolder Voice Chain (`WFd`)
 
-**Status:** Initial plan (2026-10-30). Not implemented.
+**Status:** Implemented and tested on hardware (2026-10-30). Code record:
+`S089_P2_IMPLEMENTATION.md` §17–§19. **CPU is at its ceiling: see §8.**
 **Depends on:** S089 P0 (per-instrument SRR enable; hardware passed) and the
 P1 chain architecture (`S089_P1_VOICE_CHAIN_PLAN.md` §2–§3: the `chn`
 selector, the engine dispatch and the cell relabelling).
@@ -268,3 +269,41 @@ has not landed yet.
 | D5 | The type list: the six core types, or with `TrI`/`Fd2` | six core types first |
 | D6 | Depth mapping: linear ×1–×8 (spike) or squared, for finer control near clean | linear first; adjust by ear |
 | D7 | The `frq` display for bias: raw 0–127 or centred ±63 | 0–127 first (no new display type) |
+
+---
+
+## 8. Hardware result and CPU ceiling (user, 2026-10-30) — binding
+
+**Result.** The WFd chain and the S089 P2 fixes (`S089_P2_IMPLEMENTATION.md`
+§19) passed on hardware. **CPU is within budget, but only just.** The user's
+worst-case Scene reaches **100 % on the `cpu` widget**. At that point the
+interface occasionally becomes slightly slow. That is acceptable, but it is
+the edge.
+
+**Rule: no per-sample DSP cost may increase from here** (user: "absolutely no
+possibility to increase anything at this point").
+- **What it covers:** every voice engine, every chain (`T+D` and `WFd`),
+  every oscillator mode and type, the mixer, the bus and the Effects.
+- **Size of a change:** it applies to small additions too. One instruction
+  per sample in a per-voice loop is six per frame across the slots.
+- **New features:** any new DSP feature must be paid for by an equal or
+  larger measured saving elsewhere, gated with the S089 P0 §4.2 tools
+  (`elf_loopdump.py`, `elf_hotloops.py`, the inlined-set diff) and confirmed
+  on the `cpu` widget against this worst-case Scene.
+- **Within an existing budget:** a new voice chain or fold type may only
+  replace stages within its §2 budget, never exceed it. The +1 accepted
+  for the sine family in D2 is withdrawn; the measured loops (22) do not
+  need it.
+- **Margin left:** the unused margin under the WFd budgets (Drum/Snare 24
+  against the dearest fold 22; Cymbal/HiHat 26 + 4 against 22) is not
+  headroom to spend. The worst-case Scene is set by the dearest settings
+  across the whole system (for example Drum `fm` at ≈90 per sample in the
+  oscillator section), not by WFd.
+
+**Where measured savings could come from, if a feature ever needs room:**
+- the `itp` crossfade pool;
+- the Drum FM depth-ramp loop (10 per sample, constant);
+- the S089 P0 integer S&H (−3 per slot, built and reverted,
+  `S089_P0_NEW_SRR_DISABLE.md` §8).
+
+Each is a separate decision for the user.

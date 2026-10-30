@@ -41,6 +41,7 @@
 #include "modulationNode.h"
 #include "InstrumentManager.h"
 #include "voicePostChain.h"
+#include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_*, voiceFold_process() */
 // #include "TriggerOut.h"
 
 
@@ -114,6 +115,11 @@ void Snare_initVoice(SnareVoice *voice)
 	 * Accessors: Snare_triggerVoice(), Snare_calcSyncBlockVoice().
 	 */
 	voice->runMode = OSC_RUN_RST;
+	/* S089 P2: default chain (T+D). The slot reset memset already cleared it;
+	 * the explicit store documents the default like runMode above. Under WFd
+	 * transGen.midiFreq (the fold's last depth) relies on the same memset
+	 * being 0 = "no previous depth" (voiceFold_process()). */
+	voice->chainType = VOICE_CHAIN_DEFAULT;
 	/* S088 P0: no armed ramp until a fre/itp retrigger asks for one. */
 	voice->ampRampArm = 0u;
 	voice->lastAmpGain = 0.0f;
@@ -210,7 +216,9 @@ void Snare_triggerVoice(SnareVoice *voice, const uint8_t source_slot,
 
 	if (phaseReset) {
 	float offset = 1;
-	if(voice->transGen.waveform==1) //offset mode
+	/* Ofs belongs to T+D only (S089 P2; see DrumVoice.c offset guard). */
+	if(voice->chainType == VOICE_CHAIN_DEFAULT &&
+	   voice->transGen.waveform==1) //offset mode
 	{
 		offset -= voice->transGen.volume;
 	}
@@ -305,8 +313,8 @@ void Snare_calcAsyncVoice(SnareVoice *voice)
 	}
 	*/
 
-	//calc snap EG if transient sample 0 is activated
-	if(voice->transGen.waveform == 0)
+	/* Snp belongs to T+D only; under WFd snapEg is the fold's decay (S089 P2). */
+	if(voice->chainType == VOICE_CHAIN_DEFAULT && voice->transGen.waveform == 0)
 	{
 		const float snapVal = SnapEg_calc(&voice->snapEg, voice->transGen.pitch);
 		voice->osc.pitchMod += snapVal*voice->transGen.volume;;
@@ -343,9 +351,17 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 	calcNoiseBlock(&voice->noiseOsc,buf,size,0.9f);
 	SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);
 
-	//calc transient sample
-	transient_calcBlock(&voice->transGen,transBuf,size);
-	bufferTool_addBuffersSaturating(buf,transBuf,size);
+	/*
+	 * Transient (T+D only) (S089 P2).
+	 * What: T+D adds the click to the filtered noise as before (S0). WFd has
+	 *       no transient: its fold runs on the tone oscillator below (D1).
+	 * Why:  Snare's only pre-filter signal is noise; folding it does little.
+	 */
+	if (voice->chainType != VOICE_CHAIN_WAVEFOLDER) {
+		//calc transient sample
+		transient_calcBlock(&voice->transGen,transBuf,size);
+		bufferTool_addBuffersSaturating(buf,transBuf,size);
+	}
 
 	/*
 	 * osc1 position bend around the render below (S086 P3).
@@ -390,6 +406,32 @@ void Snare_calcSyncBlockVoice(SnareVoice *voice, int16_t* buf,
 	 */
 	if (voice->snapshot.active)
 		oscSection_renderOldCarrier(&voice->snapshot, transBuf, size);
+
+	/*
+	 * WFd: fold the tone oscillator (S089 P2, D1).
+	 *
+	 * What:       folds transBuf (the tone oscillator, already blended by
+	 *             itp) in place before the post-chain mixes it with the noise.
+	 * Why:        the tone oscillator is Snare's tonal, unfiltered body. It is
+	 *             rendered at gain (1 - mix), which would make the fold depth
+	 *             follow the noise mix; inGain = 1/(1 - mix) restores full
+	 *             scale into the fold (capped at VOICE_FOLD_IN_GAIN_MAX = 16,
+	 *             i.e. mix > 0.9375, where the tone is near silence) and
+	 *             outGain = (1 - mix) restores the mix level after it. Both
+	 *             are per-block constants inside voiceFold_process(), so they
+	 *             cost nothing per sample.
+	 * Inputs:     transBuf, voice->mix (0..1), transGen/snapEg (fold state).
+	 * Outputs:    transBuf folded; read by voicePost_mixAddGainDist() below.
+	 * Affiliates: voiceFold_process(); the osc render above (1 - mix gain).
+	 */
+	if (voice->chainType == VOICE_CHAIN_WAVEFOLDER) {
+		const float tone = 1.0f - voice->mix;
+
+		voiceFold_process(&voice->transGen, &voice->snapEg, transBuf, size,
+		                  (tone > (1.0f / VOICE_FOLD_IN_GAIN_MAX))
+		                      ? (1.0f / tone) : VOICE_FOLD_IN_GAIN_MAX,
+		                  tone);
+	}
 
 	/*
 	 * Fused Snare post-chain (S073 Step 4; amp ramp S088 P0 §3 Layer 2b).

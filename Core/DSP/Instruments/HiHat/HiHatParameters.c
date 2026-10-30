@@ -211,6 +211,7 @@ typedef enum {
     HIHAT_PARAM_OSC1_POSITION, /* S086 P3: appended; preserve all prior IDs. */
     HIHAT_PARAM_OSC1_TYPE, /* S087 B: appended; preserve all prior IDs. */
     HIHAT_PARAM_OSC1_RUN, /* S088: appended; preserve all prior IDs. */
+    HIHAT_PARAM_VOICE_CHAIN, /* S089 P2: appended; preserve all prior IDs. */
     HIHAT_PARAM_COUNT
 } hihat_param_index_t;
 
@@ -334,6 +335,30 @@ const ParamDescriptor hihat_param_descriptors[] = {
      *             open/closed decay is re-selected on every hit).
      */
     ROW_SELECT_ONOFF_SPECIAL("osc1_run", "Oscilltr", "Run Mode", "run", ONOFF_TAG_OSC_RUN, runMode, TYPE_UINT8, IM_SPECIAL_OSC_RUN | IM_SPECIAL_OSC1),
+    /*
+     * voice_chain: chn, the voice chain selector (S089 P2).
+     *
+     * What:       0 T+D (transient + filter drive + distortion, the S089 P0
+     *             chain), 1 WFd (wavefolder in place of the transient),
+     *             stored in the engine chainType field through
+     *             IM_SPECIAL_VOICE_CHAIN (clamped to VOICE_CHAIN_COUNT - 1).
+     *             Shown on the transient page as the fourth cell
+     *             (wav vol frq chn); under WFd those three cells drive the fold
+     *             (voiceFold.h) and the single-parameter view relabels them.
+     * Why:        S089 P1/P2: one selector, one chain, one budget. A selector:
+     *             never morphed, Normal image only, applied before the Morph
+     *             image by preset_applyKitVoiceSelectors(), step-automatable
+     *             one value per step, not an LFO or velocity target. Appended
+     *             last, so every existing descriptor index, automation ID,
+     *             token, NRPN ID and Learn row is unchanged; a file without the
+     *             key loads 0 (T+D, today's sound).
+     * Inputs:     menu edit, Kit/Scene/Instrument apply, step automation, MIDI.
+     * Outputs:    chainType (the engine struct field).
+     * Accessors:  instrumentManager_writeSpecialRuntime().
+     * Affiliates: VOICE_CHAIN_* (voiceFold.h); voiceChainNames (MenuText.h);
+     *             ONOFF_TAG_VOICE_CHAIN; menu_onoffTagNames() in menu.c.
+     */
+    ROW_SELECT_ONOFF_SPECIAL("voice_chain", "Voice", "Chain", "chn", ONOFF_TAG_VOICE_CHAIN, chainType, TYPE_UINT8, IM_SPECIAL_VOICE_CHAIN),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -356,7 +381,8 @@ const instrument_menu_page_t hihat_menu_pages[] = {
     {{ HIHAT_PARAM_AMP_ENVELOPE_ATTACK, HIHAT_PARAM_AMP_ENVELOPE_DECAY, HIHAT_PARAM_AMP_ENVELOPE_SLOPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ HIHAT_PARAM_VELO_MOD_DEST, HIHAT_PARAM_VELO_MOD_AMOUNT, HIHAT_PARAM_VELO_VOL_ON_OFF, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ HIHAT_PARAM_OSC2_PITCH_COARSE, HIHAT_PARAM_OSC3_PITCH_COARSE, HIHAT_PARAM_OSC2_MOD_AMOUNT, HIHAT_PARAM_OSC3_MOD_AMOUNT, HIHAT_PARAM_OSC2_WAVE, HIHAT_PARAM_OSC3_WAVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
-    {{ HIHAT_PARAM_TRANSIENT_WAVE, HIHAT_PARAM_TRANSIENT_VOL, HIHAT_PARAM_TRANSIENT_FREQ, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* S089 P2: the transient page is wav vol frq chn (the chain selector). */
+    {{ HIHAT_PARAM_TRANSIENT_WAVE, HIHAT_PARAM_TRANSIENT_VOL, HIHAT_PARAM_TRANSIENT_FREQ, HIHAT_PARAM_VOICE_CHAIN, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ HIHAT_PARAM_FILTER_FREQ, HIHAT_PARAM_FILTER_RESO, HIHAT_PARAM_FILTER_TYPE, HIHAT_PARAM_FILTER_DRIVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     /*
      * One wide LFO sub-page: oscillator controls, application shape/amounts,

@@ -4,11 +4,35 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 088 close (2026-10-29),
-  `dev-ph7-voice_expansion`, uncommitted on `80029d31`. DEV link:
-  `text=676,264`, `data=420`, `bss=412,884`; flash payload 676,264 B of
-  753,664 B (**headroom 77,400 B**). ITCM 12,656 / 16,384 B; DTCM statics
-  4,345 B; FXBUF arena margin 3,839 B. The entries below run newest first.
+- **Current as of:** Session 089 P2 (2026-10-30, hardware pending),
+  `dev-ph7-voice_expansion`, uncommitted on `b4d3db8f`. DEV link:
+  `text=681,232`, `data=424`, `bss=412,884`; flash payload 681,656 B of
+  753,664 B (**headroom 72,008 B**). ITCM 13,032 / 16,384 B; DTCM statics
+  4,372 B; FXBUF arena margin 3,808 B. The entries below run newest first.
+- **S089 P2 changes (2026-10-30):** the WFd wavefolder voice chain
+  (`S089_P2_IMPLEMENTATION.md`).
+  - Engine structs: `chainType` (1 B) after `ampRampArm`. `DrumVoice` 632,
+    `SnareVoice` 452, `CymbalVoice` 508 B unchanged (existing padding);
+    `HiHatVoice` 516 → **520 B**, still under the 2 × `DrumVoice` slot, so
+    `runtime_slots` stays **7,584 B**. No new RAM object: the fold reuses
+    `transGen.midiFreq` (last depth, Q11) and `snapEg.value` (decay).
+  - ITCM: 12,656 → **13,032 B** (+376 B): the five fold loops in
+    `.itcm.s089` (`voiceFold_triLoop` 52, `sinLoop` 96, `asnLoop` 92,
+    `chbLoop` 60, `fd2Loop` 78 B), placed after `.itcm.s085`/`.itcm.s087`
+    by the linker script, so no existing ITCM function moved (only the three
+    linker veneers moved to the end). The per-block entry
+    `voiceFold_process()` (1,036 B) is in flash.
+  - Program flash: text 676,600 → 681,232 B (+4,632 B), including the fold
+    entry, the 512 B `voiceFold_decayStep` table, the descriptor rows, the
+    menu helpers and the name tables.
+  - **SRAM1 layout shift (not growth).** LTO placed the 1-byte `.data`
+    object `pm_instrument_request_type` on a 4-byte boundary, so `.data`
+    is 420 → **424 B** and `.bss` (8-byte aligned) starts at `0x20020dc8`
+    instead of `0x20020dc0`. Its size is unchanged (412,884 B), but every
+    `.bss` symbol (851 SRAM1 data symbols in all) sits 1–8 B higher than in
+    S089 P0. DTCM is unchanged. This is the layout-shift pattern named in
+    `S089_P0_NEW_SRR_DISABLE.md` F4; if hardware misbehaves with every slot
+    on `T+D`, suspect layout before the fold code.
 - **S088 P1 changes (2026-10-29):** fader smoothing and float-through
   distortion.
   - DTCM: `mixer_fader_smooth[6]` (24 B, `INDTCMZ`) for the block-rate
