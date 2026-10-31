@@ -499,8 +499,10 @@ void Drum_calcVoiceAsync(DrumVoice *voice, const uint8_t amp_eg_sync)
 	 *             scaled by amt, so the fm response is amt^2 x env.
 	 *             Drum_modEnvDepth() reuses it so that snc and rng follow the
 	 *             same amt^2 x env response.
-	 * Accessors:  calcNextOscSampleFmBlock() (fm); Drum_modEnvDepth() (snc,
-	 *             rng), both in Drum_calcVoiceSyncBlock().
+	 * Accessors:  calcNextOscSampleFmBlock() or, for a typed osc1 (S089 P3),
+	 *             osc_renderTypedFmRamp() (fm); Drum_modEnvDepth() (snc, rng),
+	 *             all in Drum_calcVoiceSyncBlock(); the fm depth ramp also
+	 *             stores it in lastFmDepth.
 	 */
 	voice->osc.fmMod = voice->fmModAmount * egPitchVal;
 
@@ -760,55 +762,113 @@ void Drum_calcVoiceSyncBlock(DrumVoice *voice, int16_t* buf, const uint8_t size)
 		//calc next mod osc sampleBlock
 		calcNextOscSampleBlock(&voice->modOsc,modBuf,size,voice->fmModAmount);
 		/*
-		 * FM depth ramp (S088 P0 §3 Layer 2e, D1: constant cost).
+		 * FM depth ramp, by carrier type (S088 P0 §3 Layer 2e, D1; S089 P3).
 		 *
-		 * What:       scales the modulator block by a linear ramp that starts at
-		 *             lastFmDepth / osc.fmMod and ends at 1, so the FM index
-		 *             glides from the previous block's depth to this block's
-		 *             across the armed block. The FM renderer below still uses
-		 *             osc.fmMod as the block depth.
+		 * What:       the FM index glides from the previous block's depth
+		 *             (lastFmDepth) to this block's (osc.fmMod) across the
+		 *             block after a fre/itp retrigger (ampRampArm). The first
+		 *             sample's depth is lastFmDepth, clamped to [0, 4 x fmMod]
+		 *             (the S088 start-ratio clamp 0..4); the last sample's is
+		 *             fmMod. Two mechanisms, chosen by the carrier type:
+		 *             - typed carrier (smp, slp, wtb): the ramp is folded into
+		 *               the carrier's own depth multiply.
+		 *               osc_renderTypedFmRamp() reads d0 (the first sample's
+		 *               depth) and dStep (the change per sample) and the
+		 *               modulator block is used as rendered; no pass.
+		 *             - stock carrier (wav: table waves, sine, crash, noise):
+		 *               the S088 pass scales modBuf by a ratio that moves
+		 *               from lastFmDepth / fmMod to 1, then the unchanged
+		 *               calcNextOscSampleFmBlock() applies fmMod.
 		 * Why:        on a retrigger the mod envelope restarts, so osc.fmMod
 		 *             jumps; without the ramp that step is a click whose size
-		 *             follows the modulator amplitude. The loop runs in every
-		 *             mode and on every block (constant CPU): when the voice is
-		 *             not armed the start ratio is exactly 1.0f, so the multiply
-		 *             is the identity and rst stays bit-identical.
-		 * Inputs:     modBuf (modulator at fmModAmount), osc.fmMod (new depth),
-		 *             lastFmDepth, ampRampArm.
-		 * Outputs:    modBuf scaled; lastFmDepth = osc.fmMod afterwards.
-		 * Cost:       one float multiply per sample (plus the ramp add).
+		 *             follows the modulator amplitude. The fold-in (S089 P3)
+		 *             removes the 10-instruction pass from the three dearest
+		 *             carriers, which set the CPU ceiling (slp 90 -> 81, wtb
+		 *             blend 86 -> 77, smp 82 -> 73 per sample, including the
+		 *             crash modulator). The cheaper stock carriers keep the
+		 *             pass: they are already below the new worst case, and
+		 *             their loops are shared with Cymbal/HiHat.
+		 * Cost:       constant per configuration: the branch depends on the
+		 *             oscillator type, never on whether the ramp is armed.
+		 *             Every block computes its ramp and runs the same loops.
+		 *             Unarmed, the typed path gets d0 = fmMod and dStep =
+		 *             exactly 0 (x - x == 0), and the stock path a ratio of
+		 *             exactly 1, so rst stays bit-identical on both (S0).
+		 * Inputs:     modBuf (modulator at fmModAmount), osc.fmMod (this
+		 *             block's depth, from Drum_calcVoiceAsync()), lastFmDepth,
+		 *             ampRampArm (cleared later by voicePost_drum()), size.
+		 * Outputs:    buf (carrier section); modBuf scaled on the stock path
+		 *             only; lastFmDepth = osc.fmMod for the next block (both
+		 *             paths store it before their carrier call).
 		 * Accessors:  this fm branch only.
-		 * Affiliates: DrumVoice.lastFmDepth; ampRampArm;
-		 *             Drum_calcVoiceAsync() (sets osc.fmMod).
+		 * Affiliates: osc_renderTypedFmRamp() (Oscillator.c S089 P3 block);
+		 *             osc_renderTypedFm() (Cymbal/HiHat, unramped);
+		 *             calcNextOscSampleFmBlock(); DrumVoice.lastFmDepth;
+		 *             ampRampArm; Drum_triggerVoice() (arms it).
 		 */
 		{
 			const float newDepth = voice->osc.fmMod;
-			float start = 1.0f;
 
-			if (voice->ampRampArm && newDepth > 0.0001f) {
-				start = voice->lastFmDepth / newDepth;
-				if (start < 0.0f) start = 0.0f;
-				else if (start > 4.0f) start = 4.0f;
-			}
-			/* Always runs (constant cost, D1): with start == 1 the multiply
-			** is the identity and the output matches the pre-S088 block. */
-			{
-				const float dstep = (size > 1u)
-					? (1.0f - start) / (float)(size - 1u) : 0.0f;
-				uint8_t k;
-				float s = start;
+			if (osc_isTyped(&voice->osc)) {
+				/*
+				 * Typed carrier: ramp endpoints for the carrier's own
+				 * multiply. d0 is the depth on sample 0; armed, it is the
+				 * previous block's depth, bounded to [0, 4 x newDepth] so
+				 * the first sample's FM index is the same as the S088
+				 * ratio clamp (0..4) gave. Unarmed, or with a depth too
+				 * small to ramp from, d0 = newDepth.
+				 */
+				float d0 = newDepth;
+				float dStep;
 
-				for (k = 0u; k < size; k++) {
-					modBuf[k] = (int16_t)((float)modBuf[k] * s);
-					s += dstep;
+				if (voice->ampRampArm && newDepth > 0.0001f) {
+					d0 = voice->lastFmDepth;
+					if (d0 < 0.0f) d0 = 0.0f;
+					else if (d0 > 4.0f * newDepth) d0 = 4.0f * newDepth;
 				}
+				/*
+				 * Linear step so that sample size - 1 reads newDepth
+				 * (d0 + (size - 1) x dStep), as the S088 ratio reached 1 on
+				 * the last sample. Computed on every block (constant cost);
+				 * unarmed, newDepth - d0 is exactly 0.0f, so dStep is 0 and
+				 * the carrier's depth never moves. No divide by the depth
+				 * (the S088 lastFmDepth / newDepth is gone on this path).
+				 */
+				dStep = (size > 1u)
+					? (newDepth - d0) / (float)(size - 1u) : 0.0f;
+				/* This block's depth is the next ramp's start. Stored
+				 * before the render, as the S088 code did, so newDepth is
+				 * not live across the carrier call (MEMORY.md S086 P3). */
+				voice->lastFmDepth = newDepth;
+				osc_renderTypedFmRamp(&voice->osc, modBuf, buf, size, 1.0f,
+				                      d0, dStep);
+			} else {
+				/* Stock carrier: the S088 pass, unchanged. */
+				float start = 1.0f;
+
+				if (voice->ampRampArm && newDepth > 0.0001f) {
+					start = voice->lastFmDepth / newDepth;
+					if (start < 0.0f) start = 0.0f;
+					else if (start > 4.0f) start = 4.0f;
+				}
+				/* Always runs (constant cost, D1): with start == 1 the
+				** multiply is the identity and the output matches the
+				** pre-S088 block. */
+				{
+					const float dstep = (size > 1u)
+						? (1.0f - start) / (float)(size - 1u) : 0.0f;
+					uint8_t k;
+					float s = start;
+
+					for (k = 0u; k < size; k++) {
+						modBuf[k] = (int16_t)((float)modBuf[k] * s);
+						s += dstep;
+					}
+				}
+				voice->lastFmDepth = newDepth;
+				calcNextOscSampleFmBlock(&voice->osc,modBuf,buf,size,1.0f);
 			}
-			voice->lastFmDepth = newDepth;
 		}
-		if (osc_isTyped(&voice->osc))
-			osc_renderTypedFm(&voice->osc, modBuf, buf, size, 1.0f);
-		else
-			calcNextOscSampleFmBlock(&voice->osc,modBuf,buf,size,1.0f);
 		break;
 	}
 

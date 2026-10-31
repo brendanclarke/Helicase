@@ -1,8 +1,8 @@
 # S089 P3 — Fold the Drum FM Depth Ramp into the FM Carrier Loops
 
-**Status:** Direction plan (2026-10-30). Not implemented. A later session
-does the deep-dive and writes the full schedule (as `S089_P2_IMPLEMENTATION.md`
-did for P2).
+**Status:** Direction plan (2026-10-30). Not implemented. **Decision (user):
+option B on three carriers** (§5.1). A later session does the deep-dive and
+writes the full schedule (as `S089_P2_IMPLEMENTATION.md` did for P2).
 **Constraint:** CPU is at its ceiling (`S089_P2_WAVEFOLDER_CHAIN.md` §8,
 binding). This plan is allowed only because it **lowers** the cost; no
 voice may get any dearer.
@@ -113,26 +113,73 @@ carrier. The separate 10-instruction pass goes away.
   (471,288 per 96 frames). 9 instructions per sample per Drum-`fm` voice is
   about **0.2 % CPU per voice**, and at most about **1.1 %** with all six
   slots on Drum `fm`.
-- **It only helps scenes with Drum voices in `fm`.** **Before starting,
-  find out the worst-case Scene's composition** (types, mod modes, osc
-  types, run modes, which Effect). If its slots are not Drum `fm`, P3
-  frees nothing that matters for the ceiling, and the effort belongs
-  elsewhere.
+- **It only helps scenes with Drum voices in `fm`.** **Answered (user,
+  2026-10-30):** the worst-case Scene uses exactly the three dearest FM
+  carriers, `slp`, `smp` and `wtb` (sample and wavetable types). Reducing
+  them is a real reduction of the worst case that sets the ceiling. The
+  cheaper carriers do not matter, because they already cost less than the
+  new worst case.
 
 ## 5. Options to decide in the implementation session
 
 | Option | Saving per Drum-`fm` voice | ITCM | Risk |
 |---|---:|---:|---|
 | **A. Full fold-in:** ramped copies of every FM carrier loop | ≈ −9 | ≈ +3.0 KB (≈99 % full) | the most code; ITCM nearly exhausted for future work |
-| **B. Partial fold-in:** ramped copies only for the carriers that set the worst case (`slp` FM, `wtb` FM blend, `smp` FM, crash FM); keep the pass for the cheap carriers (sine, table) | the worst case drops ≈ −9; the cheap carriers keep today's cost | ≈ +2.0 KB | two mechanisms in one branch; the worst case must be re-derived for every carrier type |
+| **B. Partial fold-in:** ramped copies only for the carriers above the new worst case (`slp`, `wtb` blend with its plain-`wtb` fallback, `smp`; §5.1); keep the pass for the cheaper carriers | the worst case drops ≈ −9 (90 → 81); the cheaper carriers keep today's cost | ≈ +2.2 KB | two mechanisms in one branch; the worst case must be re-derived for every carrier type |
 | **C. Cheaper pass, no fold-in:** an integer `SMULWB` ramp (≈6–7 per sample), or packed two-per-word (≈4.5) | ≈ −3 to −5.5 | 0 | tiny change; armed-block rounding differs slightly (S2); unarmed `s` = 1.0 must stay exact (Q16 65536 → identity) |
 | D. Leave it | 0 | 0 | — |
 
-Recommendation for the next session:
-1. Measure the worst-case Scene composition (§4).
-2. If Drum `fm` is in it, prototype **C** first (an hour, no ITCM, no shared
-   code), then decide whether **A**/**B**'s extra ≈4–5 per sample is worth
-   the ITCM.
+### 5.1 Decision: option B, three carriers (user, 2026-10-30)
+
+The carrier ranking, measured in the S089 P2 build. "Today" includes the
+dearest modulator (Crash, 30) and the depth-ramp pass (10); "Folded" is the
+carrier loop + 1, without the pass.
+
+| Carrier (osc 1 type) | FM loop | Today | Folded | Covered by B |
+|---|---:|---:|---:|:-:|
+| `slp` (looped sample), `osc_slpFmBlock` | 50 | **90** | 81 | ✓ |
+| `wtb` blending, `osc_wtbFmBlendBlock` | 46 | **86** | 77 | ✓ |
+| `smp` (one-shot sample), `osc_smpFmBlock` | 42 | **82** | 73 | ✓ |
+| Crash, `calcSampleOscFmBlock` | 38 | 78 | — | keeps the pass |
+| Table waves, `calcFmBlock` | 35 | 75 | — | keeps the pass |
+| `wtb` not blending, `osc_wtbFmBlock` | 32–34 | 74 | (73–75 as the blend fallback) | the fallback copy only |
+| Sine (in `calcNextOscSampleFmBlock`) | 29 | 69 | — | keeps the pass |
+| Noise (FM ignored) | 10 | 50 | — | keeps the pass |
+
+**Why exactly these three.** Every carrier above the new worst case (≈81,
+`slp` folded) must be covered; every carrier already at or below it may
+keep the pass. Crash (78) was in the first draft of option B, but it does
+not need a copy. The user's worst-case Scene uses exactly `slp`, `smp` and
+`wtb`, so this is a real reduction of the ceiling.
+
+**What to build (for the implementation session to confirm in its
+deep-dive):**
+- **Ramped copies** (new functions, own ITCM subsection, Drum `fm` only)
+  of `osc_slpFmBlock`, `osc_smpFmBlock` and `osc_wtbFmBlendBlock`.
+  `osc_wtbFmBlendBlock` falls back to `osc_wtbFmBlock` when no blend slot
+  is free, so the copy needs a ramped fallback as well; otherwise those
+  blocks would need the old pass, two mechanisms on one path. ITCM:
+  604 + 324 + 860 + 412 B ≈ **2.2 KB** of the 3,352 B free (≈ 1.1 KB left).
+- **A ramped typed-FM dispatcher**, in flash, that selects among the three
+  by `oscType`.
+- **Drum `fm` branch.** When osc 1 is `slp`/`smp`/`wtb`, call the ramped
+  dispatcher with (d0, dStep) and **skip** the modulator-scaling pass. For
+  every other carrier, keep today's pass and the existing loops unchanged.
+  The choice depends on the oscillator type (a configuration), not on
+  whether the ramp is armed, so it does not conflict with the
+  constant-cost rule.
+- **Unchanged:** Cymbal/HiHat and every existing loop. All existing ITCM
+  addresses stay as they are (pin `.itcm.s089`, then the new subsection,
+  in the linker script).
+- **Gate:**
+  - each ramped loop is at most its original + 1;
+  - Drum `fm` with `slp`/`wtb`-blend/`smp` drops by about 9 per sample;
+  - the uncovered carriers and Cymbal/HiHat are byte-identical;
+  - unarmed blocks are S0 (a host law per covered carrier);
+  - on hardware, the worst-case Scene's `cpu` reading is **below** today's
+    100 %.
+
+The other options remain recorded for reference only.
 
 ## 6. Where to look
 

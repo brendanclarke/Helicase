@@ -2,7 +2,8 @@
 #
 # What:       one host program per firmware module, built from the real
 #             source text (extract.py, by name; never by line range):
-#               oscillator          modules/oscillator.c (+ the pos cap build)
+#               oscillator          modules/oscillator.c (+ the pos cap build,
+#                                   + 2 breaks: S089 P3 FR1/FR2)
 #               modulation          modules/modulation.c
 #               voice_control       modules/voice_control.c (+ break build)
 #               sequencer           modules/sequencer.c (+ break build)
@@ -49,6 +50,10 @@ $(GEN)/Oscillator.host.h: $(ROOT)/Core/DSPAudio/Oscillator.h | $(GEN)
 $(GEN)/Oscillator.host.c: $(ROOT)/Core/DSPAudio/Oscillator.c | $(GEN)
 	$(EX) --src $< --body --out $@
 
+# S089 P3 breaks (fmramp group): the ramp dispatcher sending wtb to the
+# one-frame twin must fail FR1; the depth stepped before its first use
+# (d = d0 + dStep) must fail FR2. Each break edits the generated
+# Oscillator.host.c and is found first through its own -I directory.
 oscillator: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c $(CAT_HOST_SRC) \
 	  -o build/oscillator -lm
@@ -56,6 +61,21 @@ oscillator: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c
 	  modules/oscillator.c $(CAT_HOST_SRC) -o build/oscillator_cap -lm
 	./build/oscillator
 	./build/oscillator_cap
+	mkdir -p build/break_fmr1 build/break_fmr2
+	sed 's/osc_wtbFmBlendRampBlock(osc, mod, buf, size, gain, d0, dStep);/osc_wtbFmRampBlock(osc, mod, buf, size, gain, d0, dStep);/' \
+	  $(GEN)/Oscillator.host.c > build/break_fmr1/Oscillator.host.c
+	$(HOSTCC) -Ibuild/break_fmr1 $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c \
+	  $(CAT_HOST_SRC) -o build/oscillator_break_fmr1 -lm
+	@if ./build/oscillator_break_fmr1 >/dev/null 2>&1; then \
+	  echo "oscillator_break_fmr1: FAILED (ramp wtb routing break not caught)"; exit 1; \
+	else echo "oscillator_break_fmr1: caught (law FR1 fails as expected)"; fi
+	sed 's/float d = d0;/float d = d0 + dStep;/' \
+	  $(GEN)/Oscillator.host.c > build/break_fmr2/Oscillator.host.c
+	$(HOSTCC) -Ibuild/break_fmr2 $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c \
+	  $(CAT_HOST_SRC) -o build/oscillator_break_fmr2 -lm
+	@if ./build/oscillator_break_fmr2 >/dev/null 2>&1; then \
+	  echo "oscillator_break_fmr2: FAILED (ramp step-order break not caught)"; exit 1; \
+	else echo "oscillator_break_fmr2: caught (law FR2 fails as expected)"; fi
 
 modulation: $(GEN)/Oscillator.host.h
 	$(EX) --src $(ROOT)/Core/DSPAudio/modulationNode.c \

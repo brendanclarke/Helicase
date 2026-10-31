@@ -240,7 +240,9 @@ typedef struct VoiceStruct
 	 *             block's gain/velocity/depth are the correct ramp starts.
 	 * Inputs:     Drum_triggerVoice().
 	 * Outputs:    read/cleared by Drum_calcVoiceSyncBlock().
-	 * Affiliates: voicePost_drum(); lastVeloGain; lastFmDepth.
+	 * Affiliates: voicePost_drum(); lastVeloGain; lastFmDepth; the fm branch's
+	 *             depth ramp (the S088 pass for a stock osc1, the d0/dStep of
+	 *             osc_renderTypedFmRamp() for a typed one, S089 P3).
 	 */
 	uint8_t ampRampArm;
 
@@ -305,14 +307,21 @@ typedef struct VoiceStruct
 	 *
 	 * What:       voice->osc.fmMod (fmModAmount x the PitchMod decay envelope)
 	 *             from the block that just rendered.
-	 * Why:        the FM depth ramp starts the modulator block at
-	 *             lastFmDepth / fmMod and moves to 1 across the armed block, so
-	 *             the depth change of a retrigger glides instead of stepping.
-	 *             On every other block the start ratio is exactly 1, so the
-	 *             multiply is the identity and rst stays bit-identical.
-	 * Inputs:     Drum_calcVoiceSyncBlock() (fm branch), after the ramp.
+	 * Why:        the FM depth ramp glides the FM index from this value to
+	 *             the new fmMod across the armed block, so the depth change of
+	 *             a retrigger glides instead of stepping:
+	 *             - stock osc1 (wav): the S088 pass scales the modulator block
+	 *               by a ratio from lastFmDepth / fmMod to 1;
+	 *             - typed osc1 (smp, slp, wtb; S089 P3): the carrier's depth
+	 *               runs from d0 = lastFmDepth (clamped to [0, 4 x fmMod]) to
+	 *               fmMod inside osc_renderTypedFmRamp(), with no pass.
+	 *             On every other block the ratio is exactly 1 / the step is
+	 *             exactly 0, so rst stays bit-identical on both paths.
+	 * Inputs:     Drum_calcVoiceSyncBlock() (fm branch), stored before the
+	 *             carrier call on both paths.
 	 * Outputs:    the next fm block's ramp start.
-	 * Affiliates: the FM depth ramp; ampRampArm; Drum_calcVoiceAsync().
+	 * Affiliates: the FM depth ramp; ampRampArm; Drum_calcVoiceAsync();
+	 *             osc_renderTypedFmRamp().
 	 */
 	float lastFmDepth;
 

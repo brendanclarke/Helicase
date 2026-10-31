@@ -1672,11 +1672,15 @@ static void filesystem_autosavePatternDrainSchedule_tick(void);
 static void filesystem_autosavePatternDrainCompleted(void);
 static void filesystem_autosaveNonSemanticPatternDrainCompleted(void);
 static void filesystem_autosaveTraceFlushSchedule_tick(void);
+#if DEV_MODE_LOGGING
 static void filesystem_autosaveTraceFlushCompleted(void);
+#endif
 static void filesystem_autosaveTraceCaptured(uint8_t budget_exhausted);
 static void filesystem_patternTraceFlush_tick(void);
 static void filesystem_patternTraceFlushSchedule_tick(void);
+#if DEV_MODE_LOGGING
 static void filesystem_patternTraceFlushCompleted(void);
+#endif
 static void filesystem_autosaveSetupCompleted(void);
 static void filesystem_clearResidentSourceDirtyFlags(void);
 /* Boot Pattern/Effect restore resolves the 161-row HCNAMES hierarchy below. */
@@ -5709,6 +5713,7 @@ static void filesystem_writeBootLog_tick(void)
  * buffer without introducing another retained allocation; repeated flushes
  * drain a larger retained ring. Affiliate: filesystem_autosaveTraceFlush_tick().
  */
+#if DEV_MODE_LOGGING
 static void filesystem_autosaveTraceSerialize(uint16_t record_count,
                                               uint16_t *byte_count)
 {
@@ -5720,6 +5725,7 @@ static void filesystem_autosaveTraceSerialize(uint16_t record_count,
     }
     *byte_count = (uint16_t)(record_count * AUTOSAVE_TRACE_RECORD_BYTES);
 }
+#endif
 
 /*
  * Append one bounded RAM trace batch to root `asavetrc.bin`.
@@ -5838,6 +5844,7 @@ static void filesystem_autosaveTraceFlush_tick(void)
  * PatternTrace retains its ring until the caller reaches the post-sync cursor
  * acknowledgement. Affiliate: filesystem_patternTraceFlush_tick().
  */
+#if DEV_MODE_LOGGING
 static void filesystem_patternTraceSerialize(uint16_t record_count,
                                              uint16_t *byte_count)
 {
@@ -5848,6 +5855,7 @@ static void filesystem_patternTraceSerialize(uint16_t record_count,
             i, staging_buf + (i * PAT_TRACE_RECORD_BYTES));
     *byte_count = (uint16_t)(record_count * PAT_TRACE_RECORD_BYTES);
 }
+#endif
 
 /*
  * Append one bounded PatternTrace batch to root pattrace.bin.
@@ -5948,15 +5956,15 @@ static void filesystem_patternTraceFlush_tick(void)
  * filesystem facade returns to IDLE; failed appends retain their ring because
  * the cursor advances only after sync. Affiliate: the PatternTrace scheduler.
  */
+#if DEV_MODE_LOGGING
 static void filesystem_patternTraceFlushCompleted(void)
 {
-#if DEV_MODE_LOGGING
     if (status == FS_STATUS_DONE &&
         patternTrace_pendingCount() >= PAT_TRACE_FLUSH_BATCH_RECORDS)
         fs_pattern_trace_next_due_tick = 0u;
-#endif
     filesystem_ack();
 }
+#endif
 
 /*
  * Schedule the lowest-priority PatternTrace append.
@@ -25860,6 +25868,7 @@ static void filesystem_saveTestSimpleDir_tick(void)
 ** Public API
 ** ======================================================================= */
 
+#if DEV_MODE_LOGGING
 /*
  * Discard facade ownership after the diagnostic transport/filesystem reset.
  *
@@ -25936,6 +25945,7 @@ static void filesystem_resetFacadeForBootLogRecovery(void)
     fs_midilearn_write = 0u;
     memset(fs_error_code, 0, sizeof(fs_error_code));
 }
+#endif /* DEV_MODE_LOGGING */
 
 void filesystem_initAfterCardReady(void)
 {
@@ -27196,9 +27206,9 @@ static void filesystem_autosaveTraceCaptured(uint8_t budget_exhausted)
  * so the next low-priority cadence retains and retries the pending records.
  * Affiliate: filesystem_autosaveTraceFlushSchedule_tick().
  */
+#if DEV_MODE_LOGGING
 static void filesystem_autosaveTraceFlushCompleted(void)
 {
-#if DEV_MODE_LOGGING
     if (status == FS_STATUS_DONE) {
         /* A full batch leaves work pending and should receive the existing
          * immediate continuation cadence rather than waiting another interval. */
@@ -27234,9 +27244,9 @@ static void filesystem_autosaveTraceFlushCompleted(void)
                              0u);
         fs_trace_suppress_witness = 1u;
     }
-#endif
     filesystem_ack();
 }
+#endif
 
 /*
  * Give durable trace flushing the last claim on an otherwise idle facade.
