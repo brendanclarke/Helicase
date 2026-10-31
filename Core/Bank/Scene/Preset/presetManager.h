@@ -57,15 +57,10 @@ typedef enum {
     PRESET_OP_PERFORMANCE_SAVE,
     PRESET_OP_INSTRUMENT_LOAD,
     PRESET_OP_INSTRUMENT_SAVE,
-    /* Hidden `.hctmp.<ext>` save that prepares Menu's reversible `kit` row. */
-    PRESET_OP_INSTRUMENT_TEMP_SAVE,
-    /* Hidden Morph-only `.hctmp` save/load for InstrumentMrp's reversible row. */
-    PRESET_OP_INSTRUMENT_MORPH_TEMP_SAVE,
     PRESET_OP_KIT_SAVE,
     PRESET_OP_KIT_MORPH_LOAD,
     PRESET_OP_KIT_MORPH_SAVE,
     PRESET_OP_INSTRUMENT_MORPH_LOAD,
-    PRESET_OP_INSTRUMENT_MORPH_TEMP_LOAD,
     /*
      * New-format Morph Save completions.
      *
@@ -331,39 +326,47 @@ uint8_t preset_loadInstrumentForScenes(uint16_t destination_scene_mask,
                                        instrument_type_t type,
                                        uint16_t browser_index);
 /*
- * Restore the original one-voice normal Instrument Load image from the
- * filesystem staging preview.
+ * Reversible `kit` row snapshot for nested Instrument Load (S090 P1).
  *
- * Inputs: the Menu session's unchanged Scene/voice. Output: nonzero when a
- * valid preview image was committed and the ordinary bounded runtime apply was
- * armed; no file is opened and no name/key is stored in Preset. The preview is
- * intentionally available only until Menu changes load mode/type, instrument
- * type, Scene, voice, or leaves nested Instrument Load.
+ * What: the entry voice of a nested Instrument Load session is held as one
+ * 129-byte RAM image (registry type plus the Normal and Morph parameter
+ * images) instead of the former hidden `.hctmp.<ext>` file. Capture is a
+ * synchronous copy; a restore commits the image through the same Preset paths
+ * the file restore used, so the resident result is the same and no card
+ * access happens at entry, on a voice change, or on a `kit` restore.
  *
- * Affiliates: filesystem_instrumentLoadPreviewOriginal(),
- * preset_tickInstrumentApply(), and Core/Menu/menu.c's `kit` browser row.
+ * preset_captureInstrumentSnapshot(): copies the resident slot at
+ * scene_index/slot into the snapshot. Used by both the normal and the Morph
+ * (InstrumentMrp) session; the Morph restore reads only the Morph image.
+ * Output: nonzero when the slot exists and holds a registered type; zero
+ * leaves the previous snapshot untouched.
+ *
+ * preset_restoreInstrumentSnapshot(): rebuilds one kit_instrument_slot_t on
+ * the stack (instrumentManager_resetSlot() defaults, then exactly the cells
+ * the former temp file carried) and commits it through
+ * preset_startInstrumentApplyImage() to the same destination Scene mask the
+ * last Instrument load used, without the whole-Instrument AutoSave mark. When
+ * the active Scene is touched the bounded runtime apply is armed; the caller
+ * drives preset_tickInstrumentApply() until it returns 0.
+ *
+ * preset_restoreInstrumentMorphSnapshot(): copies the snapshot's Morphable
+ * Morph cells into the resident slot when its type still matches, then runs
+ * the shared InstrumentMrp commit tail (Morph AutoSave mark, card-clean bit,
+ * Morph-only worker for the active Scene).
+ *
+ * Both restores refuse destination_scene >= SCENE_COUNT (Scene 17 is never a
+ * destination, S082 P1 R1) and a type that differs from the captured type, and
+ * then return 0 without changing any state.
+ * Callers: Core/Menu/menu.c menu_prepareInstrumentLoadTemp() and
+ * menu_restoreInstrumentLoadTemp() (the nested Instrument Load `kit` row).
  */
-/*
- * Start the hidden reversible `kit` save/load operations for Instrument Load.
- * Inputs: Menu's selected Scene/voice/type. Output: ordinary asynchronous
- * completion; temporary files do not alter HCNAMES or `.hcindex`. Affiliates:
- * filesystem temp APIs and Menu's one nine-byte kit-name lifetime.
- */
-uint8_t preset_saveInstrumentTemp(uint8_t source_scene, uint8_t source_slot);
-/*
- * S082 P1 R1: destination_scene >= SCENE_COUNT is rejected (returns 0).
- */
-uint8_t preset_loadInstrumentTemp(uint8_t destination_scene,
-                                  uint8_t destination_slot,
-                                  instrument_type_t type);
-/* Save/load only the current Morphable Morph endpoints for the reversible
- * InstrumentMrp `kit` row.
- * S082 P1 R1: destination_scene >= SCENE_COUNT is rejected (returns 0). */
-uint8_t preset_saveInstrumentMorphTemp(uint8_t source_scene,
-                                       uint8_t source_slot);
-uint8_t preset_loadInstrumentMorphTemp(uint8_t destination_scene,
-                                       uint8_t destination_slot,
-                                       instrument_type_t type);
+uint8_t preset_captureInstrumentSnapshot(uint8_t scene_index, uint8_t slot);
+uint8_t preset_restoreInstrumentSnapshot(uint8_t destination_scene,
+                                         uint8_t destination_slot,
+                                         instrument_type_t type);
+uint8_t preset_restoreInstrumentMorphSnapshot(uint8_t destination_scene,
+                                              uint8_t destination_slot,
+                                              instrument_type_t type);
 /*
  * Save one resident kit voice into the root Instrument/ pool.
  *
@@ -600,11 +603,12 @@ void    preset_applyDeferredSceneSlotForTrigger(uint8_t trigger_track);
  * Commit and start bounded runtime application for one staged Instrument slot.
  *
  * Inputs: immutable request Scene/slot, filesystem's validated staging payload,
- * and a root-pool versus hidden-temporary persistence decision that Menu reads
- * from filesystem's immutable completed-request flag. Output: inactive Scenes receive retained
- * state only. A root-pool commit marks its complete type/Normal/Morph payload
- * for AutoSave immediately at each retained Scene destination; hidden `kit`
- * restore is deliberately non-marking. Active Scene commits clear all outgoing
+ * and the caller's AutoSave decision (Menu passes 1 for every root-pool load;
+ * since S090 the reversible `kit` restore never reaches this function, it
+ * commits through preset_restoreInstrumentSnapshot()). Output: inactive Scenes
+ * receive retained state only. A root-pool commit marks its complete
+ * type/Normal/Morph payload for AutoSave immediately at each retained Scene
+ * destination. Active Scene commits clear all outgoing
  * modulation owners, replace/reset the incoming runtime, rebuild all six Morph
  * images, and rebind one normalized source per tick. Client: Menu's Instrument
  * Load completion handler.

@@ -406,7 +406,13 @@ typedef enum {
     FS_INTERNAL_OP_REPAIR_NAMES,
     FS_INTERNAL_OP_LOAD_INSTRUMENT,
     FS_INTERNAL_OP_SAVE_INSTRUMENT,
-    /* Temporary `kit` row file; it never updates HCNAMES or `.hcindex`. */
+    /*
+     * Retired in S090 P1 (the `.hctmp` `kit` file is now a RAM snapshot in
+     * Preset). The value is kept, never started and never dispatched, so the
+     * numbering of every later operation stays what
+     * tools/diagnostic_tools/decode_devlogs.py FS_INTERNAL_OPS expects
+     * (declaration order) and trace records need no decoder change.
+     */
     FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP,
     FS_INTERNAL_OP_LOAD_NAME,
     FS_INTERNAL_OP_LOAD_INDEX,
@@ -1038,8 +1044,8 @@ typedef struct {
 typedef union {
     uint8_t raw[FS_STAGE_CACHE_BYTES];
     kit_t kit_stage;
-    /* One parsed Instrument candidate; its original `kit` source is now an
-     * on-card `.hctmp.<ext>` file, so staging never owns a second image. */
+    /* One parsed Instrument candidate; the reversible `kit` source is Preset's
+     * RAM snapshot (S090 P1), so staging never owns a second image. */
     kit_instrument_slot_t instrument_stage;
     filesystem_scene_stage_t scene_stage;
     filesystem_autosave_writer_state_t autosave_writer;
@@ -1453,6 +1459,24 @@ static uint8_t op_bank_flags = 0u;
  */
 #define FS_BANK_FLAG_PREVIEW_CANCEL  0x08u
 /*
+ * Cancel request for a running Menu `.hcindex` read (S090 P1, item 7).
+ *
+ * What: the same op-scoped bit as FS_BANK_FLAG_PREVIEW_CANCEL, named for its
+ * second user. filesystem_cancelBrowseRead() sets it only while
+ * FS_INTERNAL_OP_LOAD_INDEX or FS_INTERNAL_OP_LOAD_LIBRARY_INDEX runs; those
+ * readers then stop at their next phase with no callback outstanding, close
+ * any open handle, return to root, clear the browser cache and finish ERROR.
+ * Why: a Load/Save type step disposes the list read for the type it left, so
+ * only the type the user settles on is read. op_bank_flags is the per-
+ * operation flag byte that filesystem_start() clears; index reads never use
+ * any Bank bit, so sharing the bit costs no RAM and cannot leak into another
+ * operation (a rebuild started from an index read is a new operation and
+ * starts with the bit clear, so it can never be cancelled).
+ * Accessors: filesystem_cancelBrowseRead(), filesystem_browseCancelRequested(),
+ * filesystem_browseReadWasCancelled().
+ */
+#define FS_OP_FLAG_BROWSE_CANCEL     FS_BANK_FLAG_PREVIEW_CANCEL
+/*
  * Progressive Bank Load (S082 P3 W4, D44).
  *
  * What: set by Preset for an unlocked background Bank load. The request
@@ -1860,11 +1884,6 @@ static uint16_t fs_list_cache_count;
 static uint8_t op_instrument_load_destination_slot = 0u;
 static uint8_t op_instrument_load_destination_scene = 0u;
 static instrument_type_t op_instrument_load_type = INSTRUMENT_TYPE_UNKNOWN;
-/* Hidden reversible-load origin: ordinary temp, or Morph-only temp snapshot. */
-#define FS_INSTRUMENT_LOAD_TEMP_NONE  0u
-#define FS_INSTRUMENT_LOAD_TEMP_NORMAL 1u
-#define FS_INSTRUMENT_LOAD_TEMP_MORPH  2u
-static uint8_t op_instrument_load_temporary = 0u;
 /* A browser index addresses any row in the shared 1,000-entry cache. */
 static uint16_t op_instrument_load_index = 0u;
 /* Registry indices, rather than enum values, drive folder iteration. */
@@ -1903,8 +1922,6 @@ static char op_instrument_save_display_name[AFATFS_LONG_FILENAME_MAX + 1u];
 static char op_instrument_save_open_name[AFATFS_SHORT_FILENAME_MAX];
 static storage_instrument_save_mode_t op_instrument_save_mode =
     STORAGE_INSTRUMENT_SAVE_NORMAL;
-/* True only for the hidden reversible-load save; skip cache/name publication. */
-static uint8_t op_instrument_save_temporary = 0u;
 /*
  * Running raw-byte fingerprint for one normal root Instrument Save.
  *
@@ -4855,6 +4872,40 @@ static void filesystem_createBootIndex_tick(void)
 }
 
 /*
+ * Report whether the running index read has been asked to stop (S090 item 7).
+ *
+ * Inputs: FS_OP_FLAG_BROWSE_CANCEL in the op-scoped flags. Output: nonzero once
+ * filesystem_cancelBrowseRead() has run for this operation. Callers: the
+ * cancel checkpoints in filesystem_loadInstrumentIndex_tick() and
+ * filesystem_loadLibraryIndex_tick().
+ */
+static uint8_t filesystem_browseCancelRequested(void)
+{
+    return (uint8_t)((op_bank_flags & FS_OP_FLAG_BROWSE_CANCEL) != 0u);
+}
+
+/*
+ * End a cancelled index read (S090 item 7).
+ *
+ * What: clears the browser cache (its rows are partial and its tag names the
+ * type that was left) and finishes the operation ERROR through the normal
+ * completion, so the Menu callback runs exactly once.
+ * Why: a cancelled read must never leave a domain tag that a reader or the
+ * S090 cache hit could trust. ERROR (not DONE) skips the final flush, which is
+ * correct for a read-only operation.
+ * Preconditions: no file handle is open, no callback is outstanding and the
+ * current directory is root (each caller reaches this only from such a phase).
+ * Callers: the cancel phases of the two index-read state machines.
+ * Affiliates: filesystem_browseReadWasCancelled(), Menu's
+ * menu_instrumentIndexLoadComplete() / menu_libraryIndexLoadComplete().
+ */
+static void filesystem_finishCancelledBrowseRead(void)
+{
+    filesystem_clearNameCacheStorage();
+    filesystem_finish(FS_STATUS_ERROR);
+}
+
+/*
  * Load or repair one registry-defined Instrument `.hcindex`.
  *
  * What: the fast path enters the selected type directory, releases the
@@ -4898,6 +4949,11 @@ static void filesystem_loadInstrumentIndex_tick(void)
         return;
 
     case 1: /* OPEN Instrument/ */
+        /* S090 item 7 cancel point: root, no handle, nothing outstanding. */
+        if (filesystem_browseCancelRequested()) {
+            filesystem_finishCancelledBrowseRead();
+            return;
+        }
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_opendir_lfn(STORAGE_ROOT_INSTRUMENT,
@@ -4945,6 +5001,14 @@ static void filesystem_loadInstrumentIndex_tick(void)
         return;
 
     case 6: /* OPEN the registry-defined type directory */
+        /*
+         * S090 item 7 cancel point: Instrument/ is the current directory and
+         * its handle is closed; phase 25 returns to root and ends the read.
+         */
+        if (filesystem_browseCancelRequested()) {
+            op_phase = 25u;
+            return;
+        }
         op_file_ready = false;
         op_file = NULL;
         if (!directory ||
@@ -5018,6 +5082,14 @@ static void filesystem_loadInstrumentIndex_tick(void)
             return;
         }
         op_kit_root_dir = NULL;
+        /*
+         * S090 item 7 cancel point: the type directory is current and its
+         * handle is closed; skip the `.hcindex` open and end through phase 25.
+         */
+        if (filesystem_browseCancelRequested()) {
+            op_phase = 25u;
+            return;
+        }
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen_lfn(".hcindex", "r",
@@ -5111,6 +5183,14 @@ static void filesystem_loadInstrumentIndex_tick(void)
 
     case 17: /* READ AND VALIDATE COMPACT ROWS */
     {
+        /*
+         * S090 item 7 cancel point: `.hcindex` is open and no read is
+         * outstanding between polls; close it through phases 26-27, then 25.
+         */
+        if (filesystem_browseCancelRequested()) {
+            op_phase = 26u;
+            return;
+        }
         uint8_t line_ready = 0u;
         uint8_t eof = 0u;
         storage_status_t read_status = filesystem_readTextLine(
@@ -5235,6 +5315,35 @@ static void filesystem_loadInstrumentIndex_tick(void)
             return;
         }
         filesystem_beginInstrumentIndexRecovery();
+        return;
+
+    case 25: /* S090 item 7: CANCELLED - RETURN ROOT + ERROR */
+        /*
+         * Entered only from a cancel point with no handle open. A fatal volume
+         * cannot chdir; end at once, as phase 16 does, rather than wait.
+         */
+        if (!afatfs_chdir(NULL) &&
+            !filesystem_instrumentIndexFATFatal())
+            return;
+        filesystem_finishCancelledBrowseRead();
+        return;
+
+    case 26: /* S090 item 7: CANCELLED - CLOSE the open `.hcindex` */
+        op_close_done = false;
+        if (afatfs_fclose(op_file, on_file_closed))
+            op_phase = 27u;
+        else if (filesystem_instrumentIndexFATFatal())
+            filesystem_finishCancelledBrowseRead();
+        return;
+
+    case 27: /* S090 item 7: CANCELLED - WAIT CLOSE, then phase 25 */
+        if (!op_close_done) {
+            if (filesystem_instrumentIndexFATFatal())
+                filesystem_finishCancelledBrowseRead();
+            return;
+        }
+        op_file = NULL;
+        op_phase = 25u;
         return;
 
     default:
@@ -7071,6 +7180,31 @@ static void filesystem_residentNames_tick(void)
      */
     switch (op_phase) {
     case 0: /* RETURN ROOT + OPEN EXISTING REGISTER */
+        /*
+         * Serve a Menu read from a VALID mirror (S090 P1, Q1).
+         *
+         * What: a load-mode operation whose request left the mirror VALID
+         * finishes DONE here without opening `/.hcnames`; the completion
+         * callback then copies its rows from hcnames_name_mirror exactly as
+         * after a card read.
+         * Why: the read took 2.7 s while playing (S090 trace). VALID is set
+         * only after a complete read or after a writer's final sync, and every
+         * writer marks the mirror INVALID before it touches a row, so a VALID
+         * mirror equals the card. Menu also writes its own dirty rows before
+         * this read (menu_endResidentNameScratchSession()).
+         * Only filesystem_requestLoadResidentKitName() and
+         * filesystem_requestLoadResidentSceneName() leave the mirror VALID
+         * (they skip the reset when it is VALID); every other load or update
+         * request resets it first, so it reaches the card read below unchanged.
+         * Side effect (accepted, S090 §10 Q1): fs_resident_source[] is not
+         * reloaded from the card on this path; it keeps its RAM state.
+         * Affiliates: filesystem_prepareResidentNamesCache(),
+         * menu_residentNameScratchLoaded(), menu_sceneResidentNameLoaded().
+         */
+        if (!update && hcnames_mirror_valid == FS_HCNAMES_MIRROR_VALID) {
+            filesystem_finish(FS_STATUS_DONE);
+            return;
+        }
         if (!afatfs_chdir(NULL))
             return;
         op_file_ready = false;
@@ -10426,6 +10560,11 @@ static void filesystem_loadLibraryIndex_tick(void)
         return;
 
     case 1: /* OPEN ROOT DIRECTORY */
+        /* S090 item 7 cancel point: root, no handle, nothing outstanding. */
+        if (filesystem_browseCancelRequested()) {
+            filesystem_finishCancelledBrowseRead();
+            return;
+        }
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_opendir_lfn(root,
@@ -10463,6 +10602,14 @@ static void filesystem_loadLibraryIndex_tick(void)
         if (!op_close_done)
             return;
         op_kit_root_dir = NULL;
+        /*
+         * S090 item 7 cancel point: the library directory is current and its
+         * handle is closed; skip the `.hcindex` open and end through phase 9.
+         */
+        if (filesystem_browseCancelRequested()) {
+            op_phase = 9u;
+            return;
+        }
         op_file_ready = false;
         op_file = NULL;
         if (!afatfs_fopen_lfn(".hcindex",
@@ -10488,6 +10635,16 @@ static void filesystem_loadLibraryIndex_tick(void)
 
     case 7: /* READ ONE ROW PER SLOT */
     {
+        /*
+         * S090 item 7 cancel point: `.hcindex` is open and no read is
+         * outstanding between polls; close it, then phase 10 and 9.
+         */
+        if (filesystem_browseCancelRequested()) {
+            op_close_done = false;
+            if (afatfs_fclose(op_file, on_file_closed))
+                op_phase = 10u;
+            return;
+        }
         uint8_t line_ready = 0u;
         uint8_t eof = 0u;
         storage_status_t st = filesystem_readTextLine(
@@ -10527,6 +10684,19 @@ static void filesystem_loadLibraryIndex_tick(void)
         if (!afatfs_chdir(NULL))
             return;
         filesystem_finish(FS_STATUS_DONE);
+        return;
+
+    case 9: /* S090 item 7: CANCELLED - RETURN ROOT + ERROR */
+        if (!afatfs_chdir(NULL))
+            return;
+        filesystem_finishCancelledBrowseRead();
+        return;
+
+    case 10: /* S090 item 7: CANCELLED - WAIT CLOSE, then phase 9 */
+        if (!op_close_done)
+            return;
+        op_file = NULL;
+        op_phase = 9u;
         return;
 
     default:
@@ -11178,8 +11348,10 @@ static void filesystem_makeInstrumentTemporaryFilename(
  * Inputs: one component and the already classified registry Instrument type.
  * Outputs: nonzero only for the reserved temporary object; no cache or
  * filesystem state changes. Affiliates: filesystem_makeInstrumentTemporaryFilename(),
- * filesystem_recordInstrumentFile(), the one-type Instrument scanner, and
- * filesystem_requestSave/LoadInstrumentTemp().
+ * filesystem_recordInstrumentFile() and the one-type Instrument scanner.
+ * S090 P1: firmware no longer writes this object (the `kit` source is a RAM
+ * snapshot), but the test stays so `.hctmp.<ext>` files left on cards by older
+ * firmware remain invisible; they are safe to delete.
  */
 static uint8_t filesystem_isReservedInstrumentTemporaryName(
     instrument_type_t type, const char *name)
@@ -17098,28 +17270,15 @@ static void filesystem_loadInstrument_tick(void)
              * Derive the one immediate LFN open key after staging has claimed
              * the separate typed stage.
              *
-             * Normal-input path: a captured pool display stem plus type is
-             * formatted into its `<stem>.<ext>` leaf. Temporary-input path:
-             * the request already contains the complete reserved
-             * `.hctmp.<ext>` component, so it must be copied verbatim. Why:
-             * storage_makeSavedInstrumentDisplayFilename() correctly treats a
-             * leading dot as an empty normal stem and substitutes `none`; using
-             * it for the hidden name therefore attempted to open `none.<ext>`
-             * and made the direct `kit` row fail as `InsL00`. Output: `lfn` is
-             * the exact selected pool leaf or the exact temporary leaf for the
-             * following asyncfatfs open. Affiliates:
-             * filesystem_requestLoadInstrument(),
-             * filesystem_requestLoadInstrumentTemp(), and
-             * filesystem_makeInstrumentTemporaryFilename().
+             * A captured pool display stem plus type is formatted into its
+             * `<stem>.<ext>` leaf. (S090 P1: the verbatim `.hctmp.<ext>` branch
+             * is gone with the temp file.) Output: `lfn` is the exact selected
+             * pool leaf for the following asyncfatfs open. Affiliate:
+             * filesystem_requestLoadInstrument().
              */
-            if (op_instrument_load_temporary) {
-                strncpy(lfn, display_name, sizeof(lfn) - 1u);
-                lfn[sizeof(lfn) - 1u] = '\0';
-            } else {
-                storage_makeSavedInstrumentDisplayFilename(
-                    lfn, sizeof(lfn), display_name,
-                    op_instrument_load_type, 0u, 0u);
-            }
+            storage_makeSavedInstrumentDisplayFilename(
+                lfn, sizeof(lfn), display_name,
+                op_instrument_load_type, 0u, 0u);
 
             if (!afatfs_fopen_lfn(lfn, "r", AFATFS_MATCH_CASE_INSENSITIVE,
                                   NULL, on_file_opened))
@@ -17180,16 +17339,15 @@ static void filesystem_loadInstrument_tick(void)
                  * Affiliates: preset completion and Instrument menu exit.
                  */
                 /*
-                 * Publish a normal pool load name, never the hidden temp name.
+                 * Publish the pool load name.
                  *
-                 * Inputs: validated selected filename and request-time hidden
-                 * temporary flag. Output: ordinary pool loads update one
-                 * identity row immediately; `.hctmp.<ext>` restores parameters
-                 * only, leaving Menu's separate nine-byte `kit` label intact.
-                 * Affiliates: filesystem_requestLoadInstrumentTemp(), Menu's
-                 * session invalidation, and the exit-time HCNAMES writer.
+                 * Inputs: validated selected filename. Output: the pool load
+                 * updates one identity row immediately. (S090 P1: every load
+                 * here is a pool load; the hidden temp restore that skipped
+                 * this is gone.) Affiliates: Menu's session invalidation and the
+                 * exit-time HCNAMES writer.
                  */
-                if (!op_instrument_load_temporary) {
+                {
                     char display[STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
                     filesystem_copyInstrumentStemDisplay(
                         display, op_instrument_save_display_name);
@@ -17228,12 +17386,9 @@ static void filesystem_loadInstrument_tick(void)
     case 16: /* RETURN ROOT + FINISH */
         if (!afatfs_chdir(NULL))
             return;
-        if (op_close_status == FS_STATUS_DONE &&
-            !op_instrument_load_temporary) {
+        if (op_close_status == FS_STATUS_DONE) {
             /* The normal Instrument payload is now past its close boundary
-             * and is about to be handed to the completion callback. Morph and
-             * hidden temporary restores deliberately remain identity-neutral.
-             */
+             * and is about to be handed to the completion callback. */
             filesystem_setResidentRefreshed(
                 filesystem_residentInstrumentRow(
                     op_instrument_load_destination_scene,
@@ -17578,19 +17733,6 @@ static void filesystem_saveInstrument_tick(void)
     case 21: /* RETURN ROOT + UPDATE CACHE */
         if (!afatfs_chdir(NULL))
             return;
-        /*
-         * Finish a hidden `kit` snapshot without publishing library state.
-         *
-         * Inputs: `.hctmp.<ext>` has been written in the current type folder.
-         * Output: normal filesystem completion only. Why: the temporary file
-         * must not rename the live Instrument identity or alter `.hcindex`;
-         * it is excluded from future scans and is read only by the direct
-         * `kit` row. Affiliates: Menu entry sequencing and temp load request.
-         */
-        if (op_instrument_save_temporary) {
-            filesystem_finish(FS_STATUS_DONE);
-            return;
-        }
         filesystem_updateInstrumentCacheAfterSave(
             op_instrument_save_display_name,
             op_instrument_save_open_name);
@@ -17753,8 +17895,7 @@ static uint8_t filesystem_writeTextLine(uint8_t (*next_line)(char *, uint16_t,
      * untouched. Affiliates: Autosave.h's raw-byte helper and the O
      * CREATE_RESULT record in filesystem_saveInstrument_tick().
      */
-    if (current_op == FS_INTERNAL_OP_SAVE_INSTRUMENT &&
-        !op_instrument_save_temporary) {
+    if (current_op == FS_INTERNAL_OP_SAVE_INSTRUMENT) {
         uint32_t i;
 
         for (i = 0u; i < written; i++) {
@@ -27962,7 +28103,6 @@ void filesystem_tick(void)
         break;
     case FS_INTERNAL_OP_SAVE_INSTRUMENT:
     case FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH:
-    case FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP:
         filesystem_saveInstrument_tick();
         break;
     case FS_INTERNAL_OP_LOAD_MORPH:
@@ -28292,9 +28432,6 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
     op_remove_done = 0u;
     op_bank_payload_active = 0u;
     op_bank_cwd_at_parent = 0u;
-    /* A new request is ordinary until its dedicated temp request opts in. */
-    op_instrument_load_temporary = 0u;
-    op_instrument_save_temporary = 0u;
     op_kit_save_source_scene = 0u;
     op_kit_save_mode = STORAGE_INSTRUMENT_SAVE_NORMAL;
     memset(op_save_kit_dir_display_name, 0,
@@ -32962,6 +33099,44 @@ void filesystem_cancelScanBankScenes(void)
         op_bank_flags = (uint8_t)(op_bank_flags | FS_BANK_FLAG_PREVIEW_CANCEL);
 }
 
+/*
+ * Menu `.hcindex` read state and disposal (S090 P1, item 7; contract in
+ * filesystem.h).
+ *
+ * filesystem_browseReadRunning(): the facade is BUSY with a Menu-requested
+ * index read (typed Instrument or numbered library). Those two operations
+ * are read-only until they hand off to a rebuild, which is a new operation.
+ */
+uint8_t filesystem_browseReadRunning(void)
+{
+    return (uint8_t)(status == FS_STATUS_BUSY &&
+                     (current_op == FS_INTERNAL_OP_LOAD_INDEX ||
+                      current_op == FS_INTERNAL_OP_LOAD_LIBRARY_INDEX));
+}
+
+/*
+ * filesystem_cancelBrowseRead(): ask a running index read to stop at its next
+ * phase with no callback outstanding. No-op when none runs, so it is safe on
+ * every type step. Callers: Menu's type-row handlers.
+ */
+void filesystem_cancelBrowseRead(void)
+{
+    if (filesystem_browseReadRunning())
+        op_bank_flags = (uint8_t)(op_bank_flags | FS_OP_FLAG_BROWSE_CANCEL);
+}
+
+/*
+ * filesystem_browseReadWasCancelled(): in the completion window (before
+ * filesystem_ack()), nonzero when the finished read had been asked to stop
+ * and ended ERROR. A read that still finished DONE reports zero and is judged
+ * by its caller's own staleness check. Callers: the Menu index completions.
+ */
+uint8_t filesystem_browseReadWasCancelled(void)
+{
+    return (uint8_t)(filesystem_browseCancelRequested() &&
+                     status == FS_STATUS_ERROR);
+}
+
 uint16_t filesystem_bankChildSceneMask(void)
 {
     /*
@@ -33094,8 +33269,16 @@ bool filesystem_requestLoadResidentKitName(uint8_t scene_index,
         filesystem_clearNameCacheStorage();
         return false;
     }
-    /* S082 review F9: reset the register only after the request is accepted. */
-    filesystem_prepareResidentNamesCache();
+    /*
+     * S082 review F9: reset the register only after the request is accepted.
+     *
+     * S090 P1 (Q1): a VALID mirror already equals the card, so it is not
+     * reset; filesystem_residentNames_tick() phase 0 then finishes this read
+     * from the mirror with no card access. An INVALID or PUBLISH_PENDING
+     * mirror is reset and read from the card exactly as before.
+     */
+    if (hcnames_mirror_valid != FS_HCNAMES_MIRROR_VALID)
+        filesystem_prepareResidentNamesCache();
     op_kit_load_scene_mask = (uint16_t)(1u << scene_index);
     return true;
 }
@@ -33169,8 +33352,14 @@ bool filesystem_requestLoadResidentSceneName(uint8_t scene_index,
         filesystem_clearNameCacheStorage();
         return false;
     }
-    /* S082 review F9: reset the register only after the request is accepted. */
-    filesystem_prepareResidentNamesCache();
+    /*
+     * S082 review F9: reset the register only after the request is accepted.
+     * S090 P1 (Q1): a VALID mirror is kept and served by
+     * filesystem_residentNames_tick() phase 0 (see
+     * filesystem_requestLoadResidentKitName()).
+     */
+    if (hcnames_mirror_valid != FS_HCNAMES_MIRROR_VALID)
+        filesystem_prepareResidentNamesCache();
     return true;
 }
 
@@ -33376,6 +33565,31 @@ bool filesystem_libraryNameCacheLoaded(fs_library_index_kind_t kind)
     if (kind == FS_LIBRARY_INDEX_PATTERN)
         return fs_list_cache_kind == FS_NAME_CACHE_PATTERN;
     return false;
+}
+
+/*
+ * Report whether the browser cache holds a completed index of one Instrument
+ * type (S090 P1, 6a-i; contract in filesystem.h).
+ *
+ * What: true when the cache domain is INSTRUMENT, its type is `type`, and the
+ * facade is not BUSY.
+ * Why: the tag is set when a request starts (filesystem_requestLoadInstrumentIndex(),
+ * filesystem_startInstrumentIndexRebuildScan()), so while any operation runs
+ * the rows may be partial: an index read, a rebuild scan, or an Instrument
+ * Save updating the cache. Refusing on any BUSY facade is the simple,
+ * provable rule; a failed or cancelled read clears the tag (Menu completion /
+ * filesystem_finishCancelledBrowseRead()), so an idle facade with this tag
+ * means the last writer published the whole index.
+ * Inputs: type. Output: nonzero when Menu may publish the cached browser
+ * without a read. Callers: menu_requestInstrumentIndexLoad(),
+ * menu_instrumentIndexLoadComplete().
+ */
+uint8_t filesystem_instrumentNameCacheLoaded(instrument_type_t type)
+{
+    return (uint8_t)(type < INSTRUMENT_TYPE_UNKNOWN &&
+                     fs_list_cache_kind == FS_NAME_CACHE_INSTRUMENT &&
+                     fs_list_cache_type == type &&
+                     status != FS_STATUS_BUSY);
 }
 
 void filesystem_clearInstrumentCache(void)
@@ -33726,24 +33940,19 @@ static bool filesystem_requestSaveInstrumentMode(fs_internal_op_t op,
      * filesystem_requestSaveInstrumentMorph(), filesystem_saveInstrument_tick().
      */
     if (op != FS_INTERNAL_OP_SAVE_INSTRUMENT &&
-        op != FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH &&
-        op != FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP) {
+        op != FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH) {
         return false;
     }
     if (!instrument ||
         source_slot >= STORAGE_KIT_SLOT_COUNT ||
         instrument->type >= INSTRUMENT_TYPE_UNKNOWN)
         return false;
-    if (op == FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP) {
-        filesystem_makeInstrumentTemporaryFilename(display, instrument->type);
-    } else {
-        storage_makeSavedInstrumentDisplayFilename(display,
-                                                   sizeof(display),
-                                                   display_name,
-                                                   instrument->type,
-                                                   (uint8_t)(source_slot + 1u),
-                                                   0u);
-    }
+    storage_makeSavedInstrumentDisplayFilename(display,
+                                               sizeof(display),
+                                               display_name,
+                                               instrument->type,
+                                               (uint8_t)(source_slot + 1u),
+                                               0u);
     if (display[0] == '\0')
         return false;
     if (!filesystem_start(op, FS_FILE_KIT, 0u, cb))
@@ -33780,14 +33989,11 @@ static bool filesystem_requestSaveInstrumentMode(fs_internal_op_t op,
         (op == FS_INTERNAL_OP_SAVE_INSTRUMENT_MORPH)
             ? STORAGE_INSTRUMENT_SAVE_MORPH
             : STORAGE_INSTRUMENT_SAVE_NORMAL;
-    /* This flag is consumed by save phase 21 to suppress cache/name changes. */
-    op_instrument_save_temporary =
-        (uint8_t)(op == FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP);
     strncpy(op_instrument_save_display_name, display,
             sizeof(op_instrument_save_display_name) - 1u);
     op_instrument_save_display_name[
         sizeof(op_instrument_save_display_name) - 1u] = '\0';
-    if (op != FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP) {
+    {
         /* Record accepted root Instrument Save/Morph request. */
         autosaveTrace_record(
             AUTOSAVE_TRACE_STAGE_SAVE_LIFECYCLE,
@@ -33822,100 +34028,6 @@ bool filesystem_requestSaveInstrument(uint8_t source_scene,
                                                 source_slot,
                                                 display_name,
                                                 cb);
-}
-
-bool filesystem_requestSaveInstrumentTemp(uint8_t source_scene,
-                                          uint8_t source_slot,
-                                          fs_completion_cb_t cb)
-{
-    /*
-     * Write one current voice as its hidden reversible Load source.
-     *
-     * Inputs: active Scene/voice and completion callback captured by Preset.
-     * Output: `Instrument/<type>/.hctmp.<ext>` is atomically rewritten through
-     * the normal Instrument serializer, but never enters `.hcindex` or
-     * HCNAMES. Affiliates: Menu's `kit` row and the matching temp-load API.
-     */
-    return filesystem_requestSaveInstrumentMode(
-        FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP, source_scene, source_slot, NULL, cb);
-}
-
-bool filesystem_requestSaveInstrumentMorphTemp(uint8_t source_scene,
-                                               uint8_t source_slot,
-                                               fs_completion_cb_t cb)
-{
-    /*
-     * Write the hidden Morph-only baseline for InstrumentMrp.
-     *
-     * Inputs: the resident Scene/voice and the existing temporary-file
-     * completion callback. Output: `.hctmp.<ext>` contains one parser anchor
-     * plus the current Morphable Morph endpoints, never a second persistent
-     * RAM image or a normal-load snapshot. The same filename is intentional:
-     * only one nested Instrument mode can own this reversible source.
-     */
-    if (!filesystem_requestSaveInstrumentMode(
-            FS_INTERNAL_OP_SAVE_INSTRUMENT_TEMP, source_scene, source_slot,
-            NULL, cb)) {
-        return false;
-    }
-    op_instrument_save_mode = STORAGE_INSTRUMENT_SAVE_MORPH_SNAPSHOT;
-    return true;
-}
-
-bool filesystem_requestLoadInstrumentTemp(uint8_t destination_scene,
-                                          uint8_t destination_slot,
-                                          instrument_type_t type,
-                                          fs_completion_cb_t cb)
-{
-    /*
-     * Load the hidden `kit` source without touching its display identity.
-     *
-     * Inputs: the same Scene/voice/type that created the temporary file.
-     * Output: the regular Instrument parser populates the one candidate stage;
-     * its normal completion applies parameters, while its temp flag suppresses
-     * HCNAMES publication. Affiliates: Menu lower-row decrement and save API.
-     */
-    if (!scene_indexValid(destination_scene) ||
-        destination_slot >= STORAGE_KIT_SLOT_COUNT ||
-        type >= INSTRUMENT_TYPE_UNKNOWN ||
-        !filesystem_start(FS_INTERNAL_OP_LOAD_INSTRUMENT, FS_FILE_KIT, 0u, cb))
-        return false;
-    filesystem_makeInstrumentTemporaryFilename(op_instrument_save_display_name,
-                                               type);
-    op_instrument_load_destination_scene = destination_scene;
-    op_instrument_load_destination_slot = destination_slot;
-    op_instrument_load_type = type;
-    op_instrument_load_index = 0u;
-    op_instrument_load_temporary = 1u;
-    return true;
-}
-
-bool filesystem_requestLoadInstrumentMorphTemp(uint8_t destination_scene,
-                                               uint8_t destination_slot,
-                                               instrument_type_t type,
-                                               fs_completion_cb_t cb)
-{
-    /*
-     * Load the hidden Morph-only baseline through the existing Instrument
-     * parser/staging union.
-     *
-     * Inputs: the current destination Scene/slot/type and callback. Output:
-     * the staged candidate is consumed by the Morph-only Preset commit; type,
-     * Normal image, and HCNAMES identity are never copied to the resident slot.
-     */
-    if (!scene_indexValid(destination_scene) ||
-        destination_slot >= STORAGE_KIT_SLOT_COUNT ||
-        type >= INSTRUMENT_TYPE_UNKNOWN ||
-        !filesystem_start(FS_INTERNAL_OP_LOAD_INSTRUMENT, FS_FILE_KIT, 0u, cb))
-        return false;
-    filesystem_makeInstrumentTemporaryFilename(op_instrument_save_display_name,
-                                               type);
-    op_instrument_load_destination_scene = destination_scene;
-    op_instrument_load_destination_slot = destination_slot;
-    op_instrument_load_type = type;
-    op_instrument_load_index = 0u;
-    op_instrument_load_temporary = FS_INSTRUMENT_LOAD_TEMP_MORPH;
-    return true;
 }
 
 bool filesystem_requestSaveInstrumentMorph(uint8_t source_scene,
@@ -33982,31 +34094,6 @@ const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void)
      * targets have been cleared.
      */
     return &op_staged_instrument;
-}
-
-uint8_t filesystem_loadedInstrumentWasTemporary(void)
-{
-    /*
-     * Expose the filesystem-captured origin of the completed Instrument.
-     *
-     * Inputs: the existing request-local flag, which filesystem_start() resets
-     * for every new operation and filesystem_requestLoadInstrumentTemp() alone
-     * sets. Output: the exact normal-pool versus `.hctmp` classification remains
-     * available beside the validated staging image until a subsequent request
-     * reuses operation storage. Why: Menu's temporary save/restore sequencing
-     * latch can remain set for UI reasons even when this completed file was a
-     * normal root-pool load, so it is not safe AutoSave provenance. This getter
-     * copies no payload and allocates no state. Affiliate: Menu completion.
-     */
-    return op_instrument_load_temporary;
-}
-
-uint8_t filesystem_loadedInstrumentWasMorphTemporary(void)
-{
-    /* The origin flag remains valid beside the staged Instrument until the
-     * next filesystem request reuses operation storage. */
-    return (uint8_t)(op_instrument_load_temporary ==
-                     FS_INSTRUMENT_LOAD_TEMP_MORPH);
 }
 
 /* Query whether the active Kit name cache contains a numbered folder.

@@ -20,9 +20,12 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
-**S088 implemented** (2026-10-29, uncommitted on `80029d31`): oscillator
-run modes (`osc1_run` = `rst`/`fre`/`itp`), block-rate fader smoothing,
-float-through distortion. P0 hardware matrix H1–H17 pending.
+**S090 P1 implemented** (2026-10-31, on `7f8b5d07`): Load/Save names while
+playing. The Instrument `kit` source is a 129 B Preset RAM snapshot instead of
+`.hctmp.<ext>`, Menu `.hcnames` entry reads are served from a VALID mirror,
+same-type Instrument index reuse, and type steps are admitted over (and cancel)
+a running index read. Static gates pass; hardware H1–H27 pending.
+S090 log: `knowledge_files/log_archive/090_SESSION_HANDOFF_LOG.md`.
 S088 log: `knowledge_files/log_archive/088_SESSION_HANDOFF_LOG.md`.
 S087 log: `knowledge_files/log_archive/087_SESSION_HANDOFF_LOG.md`.
 Working notes: `knowledge_files/volatile/S088_WORKING_NOTES.md`.
@@ -157,6 +160,22 @@ is in the referenced session logs and specification documents.
 - **No backward compatibility, ever (user, standing):** no migration, aliasing,
   or converters.
 - **Wording (user, S081):** stored data are *files*, not "cards."
+- **Names in RAM (S090 P1):** reuse is allowed only through
+  `hcnames_mirror_valid == FS_HCNAMES_MIRROR_VALID` for resident names, or the
+  `fs_list_cache_name` domain/tag plus an idle facade after a DONE index load.
+  Never infer validity from a cursor or from a request having started. Do not
+  change AutoSave, Pattern, Bank, copy/clear or boot uses of either cache
+  unless the speed-up directly needs it (user U12). A card edited on a computer
+  is seen after a power cycle; nothing remounts at runtime.
+- **Instrument `kit` snapshot (S090 P1):** `pm_instrument_snapshot` (129 B,
+  Preset) owns the reversible `kit` row; `.hctmp.<ext>` is no longer written.
+  The restore rebuilds a stack slot through `instrumentManager_resetSlot()` plus
+  only the former file's cells and commits with AutoSave mark 0. Legacy
+  `.hctmp` files stay filtered and are safe to delete.
+- **Load/Save type steps (S090 P1):** a type turn is admitted over a running
+  Menu `.hcindex` read, cancels it (`filesystem_cancelBrowseRead()`), and only
+  the settled type is read. Names stay blank while busy. Writes, `.hcnames`
+  reads/flushes, payload loads, previews, applies and pots keep the full lock.
 - **AutoSave (S074):** validators probe exact length; AsyncFATFS stores
   cluster-rounded size while open; self-recovering failures → trace only.
 - **Bus compressor (S074):** St1 (panel) = `output2` = DAC1; St2 (panel) =
@@ -522,6 +541,11 @@ Full specification: `MIDI_SPEC.md` (Parts I–III). Module reference:
 - **Morph skip cache**: can skip necessary DSP restores after returning to morph 0. Morph must send a complete final pass at the latest value. Session 16.
 - **Endless-pot double speed for all `DTYPE_0B255`**: made global BPM drift more visible. Only `PAR_MORPH` gets double angular speed. Session 16.
 - **Bare `n == 0` as asyncfatfs EOF test**: `afatfs_fread()` returns 0 while the SD buffer is still being populated — it is not an EOF signal. All EOF checks must use `n == 0 && afatfs_feof(op_file)`. Session 026.
+- **Caching every library index in RAM, or loading indexes at boot**: rejected
+  in S090. Each slot-numbered type allows 1,000 entries (≈9 KB per index) and
+  new Instrument types keep adding indexes, so a fixed pool is not a design;
+  with one browser cache, boot loading is overwritten by the next entry or type
+  change and saves nothing.
 
 ---
 

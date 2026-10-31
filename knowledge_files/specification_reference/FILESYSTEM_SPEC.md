@@ -142,7 +142,8 @@ Use this document to distinguish three things:
   slot-ordered `.hcindex` name indexes for every Instrument type plus root Kit,
   Scene, and Bank, root `/.hcnames`, canonical eight-character name repair, a
   separate 2,048-byte non-Pattern validation stage, the reversible Instrument
-  Load and InstrumentMrp `kit` rows backed by `.hctmp.<ext>`, and the root
+  Load and InstrumentMrp `kit` rows backed by Preset's 129-byte RAM snapshot,
+  and the root
   `/.hcprms1`/`/.hcprms2` AutoSave pair and boot readers, the 16 hidden
   Pattern A/B pairs specified in `AUTOSAVE.md`, and `.fx` v2 Scene/Bank Effect
   storage.
@@ -225,9 +226,9 @@ Implemented through Session 064:
   images, then normalizes and reinstalls all source target relationships.
 - Filesystem Instrument parsing/staging never marks AutoSave. After Preset
   commits a successful root-pool Instrument into each destination, it marks
-  that typed payload immediately; the hidden `.hctmp.<ext>` `kit` restore is
-  non-marking. HCNAMES remains the independent identity/provenance owner and
-  its deferred session rewrite is not a parameter-mutation hook.
+  that typed payload immediately; the RAM `kit` restore is non-marking.
+  HCNAMES remains the independent identity/provenance owner and its deferred
+  session rewrite is not a parameter-mutation hook.
 - Kit Morph Load is a Load menu entry `Load:[KitMrp  ]`. It parses the same
   root Kit directory as normal Kit Load, but Preset copies source normal
   endpoint values into resident morph endpoints only for slots whose instrument
@@ -303,15 +304,19 @@ Implemented through Session 064:
   staging. Pattern streams directly to final Scene SRAM after Scene
   settings/Kit validation and commit.
 - Instrument Load exposes a synthetic `kit` row above typed pool row `000`.
-  Normal entry writes the original voice to
-  `Instrument/<type>/.hctmp.<ext>` and retains one nine-byte label. The hidden
-  file is excluded from name repair and `.hcindex`; returning to `kit` parses
-  it through the ordinary one-candidate Instrument stage and restores the full
-  slot image. InstrumentMrp uses the same hidden filename but writes a
-  Morph-only projection (one parser anchor plus every Morphable `[morph]`
-  endpoint), displays the selected slot's HCNAMES name directly, and restores
-  only the Morphable Morph endpoint cells through the existing Morph worker.
-  Type, Normal image, HCNAMES name/source, and routing remain unchanged.
+  Normal entry captures the original voice into Preset's 129-byte RAM snapshot
+  (registry type plus the Normal and Morph parameter images) and retains one
+  nine-byte label; no card file is written. Returning to `kit` rebuilds one
+  `kit_instrument_slot_t` on the stack through
+  `instrumentManager_resetSlot()` plus exactly the cells the former temp file
+  carried, then commits it through `preset_startInstrumentApplyImage()` to the
+  same destination Scene mask, without the whole-Instrument AutoSave mark.
+  InstrumentMrp displays the selected slot's HCNAMES name directly and
+  restores only the Morphable Morph endpoint cells through the shared Morph
+  commit tail. Type, Normal image, HCNAMES name/source, and routing remain
+  unchanged. `.hctmp.<ext>` files left by older firmware stay excluded from
+  name repair and `.hcindex` (they are safe to delete). Entry, voice change and
+  `kit` restore therefore perform no SD access.
 - Explicit Scene/Bank OK commands keep `...`, cursor suppression, and the
   Menu input gate active through payload/HCNAMES work, shared runtime apply,
   and one final read-only reload of the unchanged root `.hcindex`. A pure Load
@@ -421,8 +426,9 @@ Bank/.hcindex
 
 Instrument indexes contain 1..1,000 compact, strictly increasing display stems,
 one per line. A valid stem is 1..8 printable characters, contains at least one
-non-space character, is unique, and is not the selected type's reserved
-`.hctmp.<ext>` display or generated short-alias form. Blank, non-printable,
+  non-space character, is unique, and is not the selected type's reserved
+  `.hctmp.<ext>` display (legacy files only; firmware no longer writes it) or
+  generated short-alias form. Blank, non-printable,
 overlength, duplicate, unsorted, and reserved rows invalidate the complete
 typed index. Kit, root Scene, and root Bank indexes are slot ordered from 000
 through 999; each line contains only the eight-character display name,
@@ -909,8 +915,10 @@ Trailing fixed-width display padding is trimmed when building FAT components.
 When the canonical target collides, decimal suffix digits replace the shortest
 possible tail inside the eight-character display stem.
 
-`Instrument/<type>/.hctmp.<ext>` is reserved product scratch and is ignored by
-both repair and typed index insertion.
+`Instrument/<type>/.hctmp.<ext>` is legacy product scratch. Firmware no longer
+writes it (S090 P1 replaced it with Preset's RAM snapshot), but the reserved
+name filter and repair/index exclusion stay so files left by older firmware
+remain invisible; they are safe to delete.
 
 `/.hcrepair` roll-forward was planned but is not implemented. Current repair is
 ordered rename/sync behavior, not a journal or power-loss recovery protocol.
@@ -2063,14 +2071,15 @@ request drains; Scene, voice, type, and mode changes remain session boundaries.
 Filesystem remains single-operation, and completion must use the accepted
 operation tag rather than the mutable cursor.
 
-Normal Instrument Load entry serializes the current voice to the hidden typed
-file `.hctmp.<ext>` and retains one nine-byte original label. The synthetic
-`kit` row sits above pool `000`. Returning to it loads the exact hidden
-component through the normal candidate stage and ordered Preset apply. Negative
-turns already clamped at `kit` are no-ops, and crossing to `kit` cancels any
-obsolete deferred pool retry. Voice/type/mode/Scene/exit invalidates the SRAM
-session; the dirty hidden file may remain on SD but is never indexed or
-authoritative.
+Normal Instrument Load entry captures the current voice into Preset's RAM
+snapshot (type, Normal image, Morph image) and retains one nine-byte original
+label. The synthetic `kit` row sits above pool `000`. Returning to it rebuilds
+the staged slot from the snapshot and commits it through the ordered Preset
+apply, waiting for the same idle point the former file restore's completion
+used. Negative turns already clamped at `kit` are no-ops, and crossing to `kit`
+cancels any obsolete deferred pool retry. Voice/type/mode/Scene/exit
+invalidates the SRAM session. Legacy `.hctmp.<ext>` files may remain on SD but
+are never indexed or authoritative.
 
 ## Runtime Apply Path
 
@@ -2475,6 +2484,20 @@ whitelists `menu_loadSaveLoadTypes[]` and `menu_loadSaveSaveTypes[]` in
   browser index into `fs_list_cache_name`. Normal actions mark rows dirty;
   Scene Load actions accumulate their destination mask; leaving the family
   performs at most one HCNAMES rewrite.
+- When `hcnames_mirror_valid` is VALID, the Menu's seven-row entry requests are
+  served from that mirror and finish DONE on their first facade step with no
+  card read (S090 P1). Every row overlay marks the mirror INVALID first and
+  VALID is set only after a complete read or a writer's final sync, so VALID
+  means the mirror equals the card. The Menu also writes its dirty rows before
+  the entry read. This path does not reload `fs_resident_source[]` from the
+  card; the RAM register is kept. Scope limit: a card edited on a computer is
+  seen after a power cycle; the card is not hot-swappable.
+- Within one Load/Save session, a VOICE change between two voices of the same
+  Instrument type (and a Morph toggle) reuses the loaded Instrument index from
+  `fs_list_cache_name` instead of reading `.hcindex` again (S090 P1, 6a-i).
+  The reuse test requires the INSTRUMENT domain, the exact type and an idle
+  facade, because the domain tag is set when a request starts. The cache is
+  still cleared on Load/Save exit; A -> B -> A costs one read per switch.
 
 - **`Load:[Samples]`** (Load page only; restored in Session 073, missing
   from `menu_loadSaveLoadTypes[]` since July): OK runs the modal
@@ -2777,14 +2800,14 @@ instrument runtime propagation:
   Confirm fatal/read/scan/close/write faults report ERROR, do not start a
   metadata writer, clear partial cache state, and cannot dispatch a deferred
   Instrument load.
-- Confirm Instrument entry writes `.hctmp.<ext>`, neither repair nor
-  `.hcindex` publishes it, decrementing `000 -> kit` restores the original
+- Confirm Instrument entry captures Preset's RAM snapshot and writes no
+  `.hctmp.<ext>`, decrementing `000 -> kit` restores the original
   parameters/name, repeated negative detents remain clamped, and a rapid
   backspin still permits a later positive move into the pool.
 - Confirm InstrumentMrp entry shows the current HCNAMES instrument name beside
-  `kit`, writes a Morph-only `.hctmp.<ext>` projection, and `000 -> kit`
-  restores only the entry Morphable Morph endpoint cells. Type, Normal image,
-  HCNAMES name/source, and AutoSave's scope remain unchanged.
+  `kit`, captures the RAM snapshot, and `000 -> kit` restores only the entry
+  Morphable Morph endpoint cells. Type, Normal image, HCNAMES name/source, and
+  AutoSave's scope remain unchanged.
 - Confirm an accepted Instrument transaction keeps immutable Scene/voice/type
   coordinates while number-only cursor movement coalesces the newest desired
   pool row; Scene, VOICE, type, and mode boundaries must invalidate the
@@ -2958,6 +2981,17 @@ Instrument/
   restarts the name load. Name and LEDs may be blank for a moment until the
   item settles. No stage may hold the input gate (`menu_storageBusy`) while
   the user scrolls.
+- **Type steps never wait for a list (S090 P1, user U17).** While the only
+  storage work is a Menu `.hcindex` read (`filesystem_browseReadRunning()`),
+  a plain turn of the Load/Save type row (top level or nested Instrument Load)
+  is admitted at once. The type label follows every step and names stay blank
+  while their read runs (blank means busy, U18). A step to another type asks
+  the running read to stop at its next callback-free phase
+  (`filesystem_cancelBrowseRead()`); it finishes ERROR with the browser cache
+  and its tag cleared, its completion retires it quietly, and one deferred
+  retry reads the type the user settles on. Index rebuilds, `.hcnames`
+  reads/flushes, payload loads, previews and applies keep the full input lock.
+  Pots keep their existing lock.
 - **Bank is the case that keeps breaking**, because its LED array is a card
   scan (the child preview: up to 16 child folders plus PAT4 reads). Since
   2026-10-19:

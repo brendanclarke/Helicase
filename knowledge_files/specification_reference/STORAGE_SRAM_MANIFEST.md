@@ -4,11 +4,30 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 089 P2 (2026-10-30, hardware pending),
-  `dev-ph7-voice_expansion`, uncommitted on `b4d3db8f`. DEV link:
-  `text=681,232`, `data=424`, `bss=412,884`; flash payload 681,656 B of
-  753,664 B (**headroom 72,008 B**). ITCM 13,032 / 16,384 B; DTCM statics
-  4,372 B; FXBUF arena margin 3,808 B. The entries below run newest first.
+- **Current as of:** Session 090 P1 (2026-10-31, hardware pending),
+  `dev-ph7-voice_expansion`, on `7f8b5d07`. DEV link: `text=683,616`,
+  `data=420`, `bss=413,020`; flash payload 684,036 B of 753,664 B
+  (**headroom 69,628 B**). ITCM 15,240 / 16,384 B; DTCM statics 4,372 B;
+  FXBUF arena margin 3,808 B. The entries below run newest first.
+- **S090 P1 changes (2026-10-31):** Load/Save name-fetch speed-up.
+  - **Added (approved U4/U5/U9):** Preset `pm_instrument_snapshot`, **129 B**
+    SRAM1 `.bss` (`presetManager.c`): one `uint8_t` registry type plus the
+    64-byte Normal and 64-byte Morph images. It replaces the hidden
+    `.hctmp.<ext>` entry voice, so the `kit` row needs no card file. A static
+    assert pins `sizeof` to 129.
+  - **Removed:** `filesystem.c` `op_instrument_load_temporary` 1 B and
+    `op_instrument_save_temporary` 1 B; `op_instrument_load_index` 2 B was
+    already write-only and LTO now drops it. Net static `.data` + `.bss`
+    change is **+132 B** (by symbol +129 − 1 − 1 − 2 = +125, plus 7 B of
+    linker alignment), while measured text grew 104 B and data fell 4 B.
+  - **Stack, restore only:** one `kit_instrument_slot_t` (196 B) in
+    `preset_restoreInstrumentSnapshot()`, foreground, lifetime bounded by the
+    call because `preset_startInstrumentApplyImage()` copies it immediately.
+  - **No RAM for the other items:** the index-read cancel bit reuses
+    `op_bank_flags` (`FS_OP_FLAG_BROWSE_CANCEL`), the browser cache remains the
+    single 9,000 B `fs_list_cache_name`, and the `.hcnames` mirror sizing is
+    unchanged (1,449 B names + 322 B sources).
+  - Logging off: text 666,920, data 420, bss 396,184.
 - **S089 P2 changes (2026-10-30):** the WFd wavefolder voice chain
   (`S089_P2_IMPLEMENTATION.md`).
   - Engine structs: `chainType` (1 B) after `ampRampArm`. `DrumVoice` 632,
