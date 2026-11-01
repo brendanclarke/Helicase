@@ -277,11 +277,97 @@ typedef enum {
      * ('m' branch).
      */
     AUTOSAVE_TRACE_STAGE_MIDI_LEARN_FILE = 'm',
+
+    /*
+     * Pre-audio AutoSave settle stage (S090 P2, decisions D4/Q6). DEV logging
+     * only; no product state depends on these records.
+     * flags = event:
+     *   0x01 START: value32 = classes pending when the stage began
+     *        (AUTOSAVE_TRACE_SETTLE_CLASS_* bits).
+     *   0x03 FAIL: one operation of a class ended in error. value32 = class
+     *        bit | internal op << 8 | stage elapsed ms (saturated 0xFFFF)
+     *        << 16. The stage then stops admitting work (one attempt).
+     *   0x02 END: upper flag bits AUTOSAVE_TRACE_SETTLE_FLAG_* (FAILED,
+     *        STALL, CAP, BUSY). value32 = stage elapsed ms (saturated
+     *        0xFFFFFF) | classes still pending << 24. A nonzero pending byte
+     *        means the boot-settle hold was set (Q2b).
+     * Why: user D4: "no notice, trace is evidence"; also measures boot cost
+     * (P3). Producer: filesystem_settleAutosaveBlocking(). Consumer:
+     * tools/diagnostic_tools/decode_devlogs.py ('s' branch).
+     */
+    AUTOSAVE_TRACE_STAGE_BOOT_SETTLE = 's',
+    /*
+     * Boot directory tail trim (S090 P3, D3 root cause). DEV logging only.
+     * Written only when a directory was repaired or its check failed.
+     * flags = directory id (AUTOSAVE_TRACE_DIRTRIM_DIR_*, bits 0..3) |
+     *         AUTOSAVE_TRACE_DIRTRIM_FLAG_TRIMMED (end marker written) |
+     *         AUTOSAVE_TRACE_DIRTRIM_FLAG_FAILED (open/scan/write failed).
+     * value32 = live entries (bits 0..15, LFN fragments included) |
+     *           deleted entries cut from the tail (bits 16..31), both
+     *           saturating. Every subdirectory of /Instrument shares the id
+     *           AUTOSAVE_TRACE_DIRTRIM_DIR_INSTRUMENT_CHILD; its live count
+     *           tells which one it was.
+     * Producer: filesystem_trimDirectoryTailsBlocking(). Consumer:
+     * tools/diagnostic_tools/decode_devlogs.py ('d' branch).
+     */
+    AUTOSAVE_TRACE_STAGE_DIR_TRIM = 'd',
+    /*
+     * Facade owner transition (S090 P5, F5). DEV logging only.
+     * Written each time the filesystem facade changes owner, including the
+     * direct hand-offs that bypass filesystem_start() (Save -> HCNAMES ->
+     * Flush Finish -> scan -> index write -> Flush Finish), so consecutive
+     * records time every step of a Load/Save chain from their own ticks.
+     * flags = new owner (fs_internal_op_t; 0 = facade idle).
+     * value32 = previous owner bits 0..7 | facade status bits 8..15
+     *           (fs_status_t at the transition) | previous owner's last
+     *           phase bits 16..23.
+     * Only transitions with a Load/Save-covered owner on either side are
+     * written (filesystem_traceOwnerCounted(): never a trace flush, AutoSave
+     * or Flush Finish), so a record can never start the next trace flush
+     * (SD_CARD_TEST_6 boot freeze). Flush Finish is attributed to the
+     * operation that entered it: one record with new owner = Flush Finish,
+     * and the next record shows that operation as previous owner with last
+     * phase 0xFF ("in its final flush").
+     * Producer: filesystem_traceOwnerTransition(). Consumer:
+     * tools/diagnostic_tools/decode_devlogs.py ('w' branch).
+     */
+    AUTOSAVE_TRACE_STAGE_FS_OWNER = 'w',
 } autosave_trace_stage_t;
 
 #define AUTOSAVE_TRACE_MLRN_WRITE    0x01u
 #define AUTOSAVE_TRACE_MLRN_RECOVERY 0x02u
 #define AUTOSAVE_TRACE_MLRN_LOAD     0x03u
+
+/* S090 P2 settle record events (low nibble of flags) and END flag bits. */
+#define AUTOSAVE_TRACE_SETTLE_START          0x01u
+#define AUTOSAVE_TRACE_SETTLE_END            0x02u
+#define AUTOSAVE_TRACE_SETTLE_FAIL           0x03u
+#define AUTOSAVE_TRACE_SETTLE_FLAG_FAILED    0x10u
+#define AUTOSAVE_TRACE_SETTLE_FLAG_STALL     0x20u
+#define AUTOSAVE_TRACE_SETTLE_FLAG_CAP       0x40u
+#define AUTOSAVE_TRACE_SETTLE_FLAG_BUSY      0x80u
+
+/* S090 P3 boot directory tail trim ('d') directory ids and flag bits. */
+#define AUTOSAVE_TRACE_DIRTRIM_DIR_ROOT             0u
+#define AUTOSAVE_TRACE_DIRTRIM_DIR_SCENE            1u
+#define AUTOSAVE_TRACE_DIRTRIM_DIR_KIT              2u
+#define AUTOSAVE_TRACE_DIRTRIM_DIR_BANK             3u
+#define AUTOSAVE_TRACE_DIRTRIM_DIR_PATTERN          4u
+#define AUTOSAVE_TRACE_DIRTRIM_DIR_INSTRUMENT       5u
+#define AUTOSAVE_TRACE_DIRTRIM_DIR_INSTRUMENT_CHILD 6u
+#define AUTOSAVE_TRACE_DIRTRIM_FLAG_TRIMMED         0x10u
+#define AUTOSAVE_TRACE_DIRTRIM_FLAG_FAILED          0x20u
+/* Work classes the settle stage drives (value bits of START/END/FAIL). */
+#define AUTOSAVE_TRACE_SETTLE_CLASS_SCALAR      0x01u
+#define AUTOSAVE_TRACE_SETTLE_CLASS_SETUP       0x02u
+#define AUTOSAVE_TRACE_SETTLE_CLASS_PATTERN     0x04u
+#define AUTOSAVE_TRACE_SETTLE_CLASS_NONSEMANTIC 0x08u
+#define AUTOSAVE_TRACE_SETTLE_CLASS_REPAIR      0x10u
+#define AUTOSAVE_TRACE_SETTLE_CLASS_SETTINGS    0x20u
+#define AUTOSAVE_TRACE_SETTLE_CLASS_AUTOSAVE \
+    (AUTOSAVE_TRACE_SETTLE_CLASS_SCALAR | AUTOSAVE_TRACE_SETTLE_CLASS_SETUP | \
+     AUTOSAVE_TRACE_SETTLE_CLASS_PATTERN | \
+     AUTOSAVE_TRACE_SETTLE_CLASS_NONSEMANTIC)
 
 #define AUTOSAVE_TRACE_HCN_REFRESHED_RESET        0x01u
 #define AUTOSAVE_TRACE_HCN_WRITE_UNKNOWN_REFRESHED 0x02u
@@ -355,6 +441,36 @@ typedef enum {
 #define AUTOSAVE_TRACE_PHASE_STALL_SITE_SETTINGS 8u
 #define AUTOSAVE_TRACE_PHASE_STALL_SITE_FLUSH 9u
 #define AUTOSAVE_TRACE_PHASE_STALL_SITE_BANK_PREVIEW 10u  /* S082 review F4 */
+/*
+ * Site 11 (S090 P3, C3-1/C3-2): HCNAMES read/update/publication
+ * (filesystem_residentNames_tick()). It aborts with FS_STATUS_ERROR (named
+ * error "HNst") after 50,000 polls in one phase and writes four records, one
+ * per part (flags bits 5..6), instead of the common phase/slot/extra layout:
+ * - part 0, summary: phase bits 0..7, current_op bits 8..15, AsyncFATFS
+ *   rename phase bits 16..20, remove phase bits 21..23, rename active bit
+ *   24, remove active bit 25, currentDirectory busy bit 26, filesystem state
+ *   bits 27..28 (afatfsFilesystemState_e), last error bits 29..30;
+ * - part 1, cache: slot counts, 4 bits each: locked 0..3, retained 4..7,
+ *   dirty 8..11, reading 12..15, writing 16..19, empty 20..23; then
+ *   currentDirectory retain index + 1 bits 24..27 and lock index + 1 bits
+ *   28..31 (0 = none);
+ * - part 2, SD transport: state bits 0..3, operation bits 4..5, callback
+ *   pending bit 6, consecutive refused commands bits 7..15 (saturating 511),
+ *   wait_ms bits 16..28 (saturating 8,191; the driver's longest wait is
+ *   5,000 ms), open AsyncFATFS file handles bits 29..31 (S090 P5; 0..5);
+ * - part 3, SD transport: the current/last block index (32 bits).
+ */
+#define AUTOSAVE_TRACE_PHASE_STALL_SITE_HCNAMES 11u
+/*
+ * Site 12 (S090 P5, F4): the runtime Load/Save watchdog
+ * (filesystem_loadSaveWatchdog()). It ends a Load/Save-owned facade
+ * operation that made no progress for FS_LOADSAVE_WATCHDOG_MS and writes the
+ * same four parts as site 11 (part 0 phase/current_op = the operation it
+ * ended). It exists in every build; the records only with DEV logging.
+ */
+#define AUTOSAVE_TRACE_PHASE_STALL_SITE_LOADSAVE_WATCHDOG 12u
+#define AUTOSAVE_TRACE_PHASE_STALL_PART_SHIFT 5u
+#define AUTOSAVE_TRACE_PHASE_STALL_PART_MASK (3u << 5u)
 #define AUTOSAVE_TRACE_PHASE_STALL_FLAG_IN_NATIVE_DELETE (1u << 4u)
 #define AUTOSAVE_TRACE_PHASE_STALL_PHASE_SHIFT 0u
 #define AUTOSAVE_TRACE_PHASE_STALL_SLOT_SHIFT 8u

@@ -1699,6 +1699,30 @@ uint8_t patSvc_idle(void)
                      bulk_op == PATSVC_OP_NONE && !reactive_active);
 }
 
+uint8_t patSvc_repairEpochIdle(void)
+{
+    /*
+     * The repair epoch is idle (S090 P2; contract in PatternStackService.h).
+     *
+     * Each term mirrors a branch of patSvc_tick() that returns before the
+     * repair section, plus the section's own continuation condition:
+     * - service_open && !service_handover: the epoch belongs to an open
+     *   service Scene (a handover restarts it);
+     * - !reactive_active, bulk_op NONE, empty queue: patSvc_tick() would serve
+     *   these first and not reach the repair section;
+     * - !reservation_rebuild_pending: a pending rebuild restarts the cursor;
+     * - tier1_scan_cursor >= PATSVC_ADDRESS_COUNT: every address entry has
+     *   been inspected, so no further relocation (and no non-semantic mark)
+     *   can come from this epoch.
+     */
+    return (uint8_t)(service_open && !service_handover &&
+                     !reactive_active &&
+                     bulk_op == PATSVC_OP_NONE &&
+                     patSvc_queueCount() == 0u &&
+                     !reservation_rebuild_pending &&
+                     tier1_scan_cursor >= PATSVC_ADDRESS_COUNT);
+}
+
 /* Submit one automation add/update with target/value packed into sixteen bits. */
 uint8_t patSvc_writeStepAutomation(uint8_t scene, uint8_t track,
                                    uint8_t step, uint16_t target,

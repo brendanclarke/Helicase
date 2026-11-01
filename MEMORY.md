@@ -26,6 +26,19 @@ playing. The Instrument `kit` source is a 129 B Preset RAM snapshot instead of
 same-type Instrument index reuse, and type steps are admitted over (and cancel)
 a running index read. Static gates pass; hardware H1–H27 pending.
 S090 log: `knowledge_files/log_archive/090_SESSION_HANDOFF_LOG.md`.
+**S090 P2 implemented** (2026-10-31): Load/Save drops a running AutoSave drain;
+all start-up AutoSave work runs in boot stage 13 before `audioCodec_init()`
+(full CPU, bounded 30 s no-progress / 120 s cap); a failed settle sets the 1 B
+`autosave_boot_hold` so nothing is written until the user changes something.
+Static gates pass (payload 685,388 B); hardware P1–P17 pending. Notes:
+`S090_P2_IMPLEMENTATION.md` §14.
+**S090 P3/P4/P5** (2026-11-01): P3 boot directory trim works; Scene Save
+still hung and type changes took 5–6 s (P4, `SD_CARD_TEST_5`). P5 batches
+cached rows/lines/entries per tick (15 µs), adds a production 12 s Load/Save
+watchdog (`W<op><phase>` error), Load/Save use of the full-queue window, and
+the `w` owner trace. The first image froze at boot (`w` fed the trace
+flush; fixed, §9). Hardware T1–T9 pending. Notes:
+`S090_P5_IMPLEMENTATION.md`; the hang's root cause waits for the `W…` code.
 S088 log: `knowledge_files/log_archive/088_SESSION_HANDOFF_LOG.md`.
 S087 log: `knowledge_files/log_archive/087_SESSION_HANDOFF_LOG.md`.
 Working notes: `knowledge_files/volatile/S088_WORKING_NOTES.md`.
@@ -176,6 +189,27 @@ is in the referenced session logs and specification documents.
   Menu `.hcindex` read, cancels it (`filesystem_cancelBrowseRead()`), and only
   the settled type is read. Names stay blank while busy. Writes, `.hcnames`
   reads/flushes, payload loads, previews, applies and pots keep the full lock.
+- **Load/Save drops AutoSave (S090 P2):** entering `LOAD_PAGE`/`SAVE_PAGE`
+  aborts a running scalar or Pattern drain at the next callback-free phase via
+  the existing error close-down. Scalar cut set = Bank-load allow-list plus
+  HCNAMES 70, 77, and 72 while rows remain; 73–76 are never cut (74 would
+  leave a promotable `.hcnamtmp`). The 250 ms continuation restarts from
+  phase 0 after exit, only if work is still owed. Never wait for the drain.
+- **Start-up AutoSave settle (S090 P2):** boot stage 13
+  (`filesystem_settleAutosaveBlocking()`) runs the recovery drain, runtime
+  setup, both Pattern drains, the repair epoch and a pending `settings.cfg`
+  synchronously before `audioCodec_init()`, with the budget lifted and
+  debounces bypassed. It ends with an idle facade after each operation's final
+  sync (R4/R5). Nothing AutoSave-related runs after boot without a user
+  change; a failed settle sets `autosave_boot_hold` (1 B, SRAM1, `Autosave.c`),
+  cleared only by an accepted scalar/Pattern mark or a tracking lifecycle
+  change. `bank_revalidateVoiceEditMasks()` runs before the stage (D3).
+- **Load/Save never freezes (S090 P5, user):** covered facade operations end
+  after `FS_LOADSAVE_WATCHDOG_MS` without progress (every build). Load/Save
+  row/line/entry loops batch cached work per tick
+  (`filesystem_batchHasTime()`); never go back to one row per tick. While
+  playing there is no free render time (CPU widget 99–100 %): do not add SD
+  polls per pass.
 - **AutoSave (S074):** validators probe exact length; AsyncFATFS stores
   cluster-rounded size while open; self-recovering failures → trace only.
 - **Bus compressor (S074):** St1 (panel) = `output2` = DAC1; St2 (panel) =
@@ -208,6 +242,10 @@ is in the referenced session logs and specification documents.
 
 Unresolved decisions, code gaps, and deferred work.
 
+- **M1, Load/Save pot 1 (user, 2026-11-01, deferred):** knob 0 steps the
+  combined `menu_loadSaveLogicalCount()` list; it must give the encoder's
+  type sequence for the context (top level, or the selected track's
+  Instrument types). `S090_P4_STILL_NOT_FIXED.md` §0.
 - **Flash image check (D-C1):** keep permanently or remove — still undecided.
   `flashImage.c` checks a stamped CRC32 per sector; mismatch shows
   `Img BAD s:…` and waits for BAR1.
@@ -418,6 +456,9 @@ Full 58-step annotated boot sequence: `MODULE_INTERCHANGE_SPEC.md`
 2. `lcd_init()` before `lcd_tim7_init()`.
 3. All SD boot ops complete before `audioCodec_init()`.
 4. `sequencerTimer_init()` (TIM3) after `audioCodec_init()`.
+5. `bank_revalidateVoiceEditMasks()` then boot stage 13
+   (`filesystem_settleAutosaveBlocking()`) run between `liveRec_init()` and
+   `audioCodec_init()`; `preset_startDrumsetApply()` stays after the codec.
 
 ---
 
@@ -541,6 +582,11 @@ Full specification: `MIDI_SPEC.md` (Parts I–III). Module reference:
 - **Morph skip cache**: can skip necessary DSP restores after returning to morph 0. Morph must send a complete final pass at the latest value. Session 16.
 - **Endless-pot double speed for all `DTYPE_0B255`**: made global BPM drift more visible. Only `PAR_MORPH` gets double angular speed. Session 16.
 - **Bare `n == 0` as asyncfatfs EOF test**: `afatfs_fread()` returns 0 while the SD buffer is still being populated — it is not an EOF signal. All EOF checks must use `n == 0 && afatfs_feof(op_file)`. Session 026.
+- **A trace record that a trace flush itself can produce** (S090 P5 first
+  image): the `w` owner witness recorded the trace flush's own
+  `FLUSH_FINISH -> idle` edge, so every flush queued the next; boot froze at
+  stage 12 with no bootlog (SD_CARD_TEST_6). Any record written from
+  `filesystem_tick()` must be unable to schedule its own flush.
 - **Caching every library index in RAM, or loading indexes at boot**: rejected
   in S090. Each slot-numbered type allows 1,000 entries (≈9 KB per index) and
   new Instrument types keep adding indexes, so a fixed pool is not a design;

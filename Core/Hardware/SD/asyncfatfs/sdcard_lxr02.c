@@ -131,6 +131,20 @@ static uint16_t       wait_started_tick;
 static sdcard_operationCompleteCallback_c xfer_callback;
 static uint32_t       xfer_callbackData;
 static sdcardBlockOperation_e xfer_operation;
+/*
+ * Consecutive refused block commands (S090 P3, C3-2). SRAM: 2 B (approved).
+ *
+ * What: counts READ_SINGLE_BLOCK / WRITE_SINGLE_BLOCK commands whose R1 was
+ * nonzero since the last accepted command, saturating at 0xFFFF.
+ * Why: a refused command returns false/FAILURE with no timeout and no
+ * re-init, and AsyncFATFS retries it on every poll. A card that stopped
+ * completing commands therefore stalls storage silently while the rest of
+ * the unit runs (SD_CARD_TEST_3 defect 3, cause 1). A climbing count in the
+ * stall record proves that case; 0 rules it out.
+ * Owner: sdcard_lxr02.c. Lifetime: static. Accessors: sdcard_readBlock(),
+ * sdcard_writeBlock() (update), sdcard_getTransportSnapshot() (read).
+ */
+static uint16_t refused_run;
 
 /*
  * Test one active SD response wait against foreground-independent time.
@@ -178,6 +192,7 @@ void sdcard_getTransportSnapshot(sdcardTransportSnapshot_t *snapshot)
         (state == SDCARD_STATE_READING_WAIT_TOKEN ||
          state == SDCARD_STATE_WRITING_WAIT_BUSY)
         ? (uint16_t)(time_sysTick - wait_started_tick) : 0u;
+    snapshot->refused_run = refused_run;
 }
 
 void sdcard_abortTransferForBootLog(void)
@@ -269,8 +284,11 @@ bool sdcard_readBlock(uint32_t blockIndex, uint8_t *buffer,
     if (r1 != 0x00) {
         SD_CS_DEASSERT;
         SPI_transmit(0xFF);
+        if (refused_run != 0xFFFFu)
+            refused_run++;      /* S090 P3 C3-2: one more refusal in a row */
         return false;
     }
+    refused_run = 0u;           /* S090 P3 C3-2: the card accepted a command */
 
     /* CS is asserted, command accepted — now wait for data token */
     xfer_buffer       = buffer;
@@ -308,8 +326,11 @@ sdcardOperationStatus_e sdcard_writeBlock(uint32_t blockIndex, uint8_t *buffer,
     if (r1 != 0x00) {
         SD_CS_DEASSERT;
         SPI_transmit(0xFF);
+        if (refused_run != 0xFFFFu)
+            refused_run++;      /* S090 P3 C3-2: one more refusal in a row */
         return SDCARD_OPERATION_FAILURE;
     }
+    refused_run = 0u;           /* S090 P3 C3-2: the card accepted a command */
 
     /* CS is asserted, command accepted — send data token then data */
     xfer_buffer       = buffer;

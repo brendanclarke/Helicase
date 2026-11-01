@@ -2032,6 +2032,9 @@ static void menu_requestBankChildPreview(uint16_t slot);
 static void menu_requestLibraryIndexLoad(uint8_t what);
 static void menu_requestSceneEntryName(void);
 static void menu_requestSceneIndexAfterName(void);
+static uint8_t menu_loadSaveSlotIndexKind(uint8_t what,
+                                          fs_library_index_kind_t *kind);
+static uint8_t menu_libraryIndexResident(fs_library_index_kind_t kind);
 static void menu_instrumentLoadClampIndex(void);
 static void menu_instrumentLoadRequestSelection(void);
 static void menu_instrumentLoadCommitChange(void);
@@ -3053,6 +3056,14 @@ void menu_copyClearMenuClosed(void)
 uint8_t menu_isStorageBusy(void)
 {
     return menu_storageBusy;
+}
+
+/* Load/Save page open or command active (S090 P5 F2; contract in menu.h). */
+uint8_t menu_loadSaveStorageWaiting(void)
+{
+    return (uint8_t)(menu_activePage == LOAD_PAGE ||
+                     menu_activePage == SAVE_PAGE ||
+                     menu_loadSaveCommandActive != 0u);
 }
 
 /*
@@ -7456,20 +7467,30 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
         menu_requestLibraryIndexLoad(what);
         return;
     }
-    if (what == SAVE_TYPE_SCENE &&
-        !filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_SCENE)) {
-        menu_requestLibraryIndexLoad(what);
-        return;
-    }
-    if (what == SAVE_TYPE_BANK &&
-        !filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_BANK)) {
-        menu_requestLibraryIndexLoad(what);
-        return;
-    }
-    if (what == SAVE_TYPE_PATTERN &&
-        !filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_PATTERN)) {
-        menu_requestLibraryIndexLoad(what);
-        return;
+    /*
+     * Scene/Bank/Pattern use their rows only once the index is resident
+     * (S090 P3, C2-1).
+     *
+     * What: the index counts as resident when the cache carries the type's
+     * tag and no Menu index read is running; otherwise the index load is
+     * (re)requested, which refuses non-destructively while busy and leaves
+     * one deferred retry.
+     * Why: the tag is set when a read starts, so during the read the rows are
+     * partial. Since P3 a number turn can arrive during that read; without
+     * this check it would copy a not-yet-read row ("Empty") and, for Bank,
+     * post a child preview against the busy facade. The landing read clears
+     * the retry it satisfies (menu_libraryIndexLoadComplete(), C1-2).
+     * Inputs: what, cache tag, filesystem_browseReadRunning().
+     * Affiliates: menu_libraryIndexResident(), menu_requestLibraryIndexLoad().
+     */
+    {
+        fs_library_index_kind_t kind;
+
+        if (menu_loadSaveSlotIndexKind(what, &kind) &&
+            !menu_libraryIndexResident(kind)) {
+            menu_requestLibraryIndexLoad(what);
+            return;
+        }
     }
     /*
      * Kit and KitMrp share the same browser slot but have different commit
@@ -8802,11 +8823,140 @@ static void menu_requestKitEntryNames(void)
     }
 }
 
+/*
+ * Map a top-level Load/Save type to its slot-independent root index
+ * (S090 P3, C2-4).
+ *
+ * What: returns 1 and the index kind for Scene, Bank and Pattern; 0 for
+ * every other type.
+ * Why: these three browsers read one `.hcindex` for the whole numbered root,
+ * so the same index serves every slot, and a scroll on them never loads
+ * anything (explicit OK). Kit/KitMrp are excluded because Kit Load loads on
+ * scroll and its stale-read path must keep resolving the newest slot.
+ * Inputs: what (SAVE_TYPE_*). Outputs: *kind when 1 is returned.
+ * Accessors: menu_loadSaveSlotIndexReady(), menu_blankLoadSaveNameWhileUnloaded(),
+ * menu_parseEncoder() (allow_browse_nav).
+ */
+static uint8_t menu_loadSaveSlotIndexKind(uint8_t what,
+                                          fs_library_index_kind_t *kind)
+{
+    switch (what) {
+    case SAVE_TYPE_SCENE:   *kind = FS_LIBRARY_INDEX_SCENE;   return 1u;
+    case SAVE_TYPE_BANK:    *kind = FS_LIBRARY_INDEX_BANK;    return 1u;
+    case SAVE_TYPE_PATTERN: *kind = FS_LIBRARY_INDEX_PATTERN; return 1u;
+    default:                                                   return 0u;
+    }
+}
+
+/*
+ * Report whether a numbered root's index is completely resident (S090 P3).
+ *
+ * What: 1 when the shared cache carries this kind's tag and no Menu index
+ * read is running.
+ * Why: filesystem_requestReloadLibraryIndex() tags the cache when the read
+ * starts, so filesystem_libraryNameCacheLoaded() is already true while rows
+ * are still being read. Since P3 the encoder can act during that read, so
+ * Menu must tell "tagged" from "complete". A failed or cancelled read clears
+ * the tag, so an idle tag means the whole index landed.
+ * Inputs: kind. Accessors: menu_requestCurrentLoadSaveSelection(),
+ * menu_blankLoadSaveNameWhileUnloaded().
+ * Affiliates: filesystem_libraryNameCacheLoaded(),
+ * filesystem_browseReadRunning().
+ */
+static uint8_t menu_libraryIndexResident(fs_library_index_kind_t kind)
+{
+    return (uint8_t)(filesystem_libraryNameCacheLoaded(kind) &&
+                     !filesystem_browseReadRunning());
+}
+
+/*
+ * Report whether the shown top-level Scene/Bank/Pattern browser already has
+ * its own index resident (S090 P3, C2-4).
+ *
+ * What: 1 when the page is Load or Save, no nested Instrument mode is active,
+ * the type is Scene/Bank/Pattern, and the shared cache carries that type's
+ * domain tag.
+ * Why: a read completing after the user turned the slot number is stale only
+ * by generation; its rows are still exactly the rows of the current type.
+ * Accepting it avoids a second 2.4-3 s read per number turn. A read for a
+ * type the user has left carries the old type's tag (or none after a cancel),
+ * so it never matches.
+ * Inputs: page, nested flag, menu_saveOptions.what, cache tag.
+ * Accessors: menu_libraryIndexLoadComplete().
+ * Affiliates: filesystem_libraryNameCacheLoaded(),
+ * filesystem_finishCancelledBrowseRead().
+ */
+static uint8_t menu_loadSaveSlotIndexReady(void)
+{
+    fs_library_index_kind_t kind;
+
+    if ((menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) ||
+        menu_instrumentLoadActive ||
+        !menu_loadSaveSlotIndexKind(menu_saveOptions.what, &kind))
+        return 0u;
+    return (uint8_t)filesystem_libraryNameCacheLoaded(kind);
+}
+
+/*
+ * Blank the Save page's name field while the shown browser's index is not
+ * resident (S090 P3, C2-5 / Q1; blank means busy).
+ *
+ * What: on the top-level Save page for Scene/Bank/Pattern, and on the Load
+ * page for Kit/KitMrp, writes eight spaces to preset_currentName when the
+ * type's index is not completely resident (menu_libraryIndexResident()).
+ * Why: those pages paint preset_currentName rather than a cache row
+ * (menu_repaintLoadSavePage()), so after a type step or a number turn during
+ * a read the field kept the previous type's or slot's name, which reads as a
+ * real name. The Load page's cache-row types already show blanks. The name
+ * is filled again by menu_libraryIndexLoadComplete() (C1-1) or by the Kit
+ * Load copy when the read lands.
+ * Inputs: page, nested flag, menu_saveOptions.what, cache tags.
+ * Outputs: preset_currentName.
+ * Accessors: menu_paintTypeStepWhileBusy(), menu_parseEncoder() busy repaint
+ * (C2-3).
+ */
+static void menu_blankLoadSaveNameWhileUnloaded(void)
+{
+    fs_library_index_kind_t kind;
+    uint8_t what = menu_saveOptions.what;
+
+    if (menu_instrumentLoadActive)
+        return;
+    if (menu_activePage == SAVE_PAGE &&
+        menu_loadSaveSlotIndexKind(what, &kind) &&
+        !menu_libraryIndexResident(kind)) {
+        memset(preset_currentName, ' ', 8u);
+    } else if (menu_activePage == LOAD_PAGE &&
+               (what == SAVE_TYPE_KIT || what == SAVE_TYPE_KIT_MORPH) &&
+               !menu_libraryIndexResident(FS_LIBRARY_INDEX_KIT)) {
+        memset(preset_currentName, ' ', 8u);
+    }
+}
+
 static void menu_libraryIndexLoadComplete(void)
 {
     uint8_t index_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+    /*
+     * A completed Scene/Bank/Pattern read is current for any slot of the
+     * same type (S090 P3, C2-4).
+     *
+     * What: besides an unchanged selection generation, a DONE read whose
+     * cache tag equals the shown top-level Scene/Bank/Pattern type counts as
+     * current.
+     * Why: since P3 the slot number may be turned while the read runs
+     * (allow_browse_nav in menu_parseEncoder()). Each turn bumps the
+     * generation, and the stale branch below would clear the cache and read
+     * the whole index again, 2.4-3 s per turn. The index of a numbered root
+     * is slot-independent, so only the shown slot changed. Kit/KitMrp keep
+     * the generation rule (Kit Load loads on scroll). A read for a type the
+     * user has left carries the old tag, or none after a cancel, and stays
+     * stale. Generation bumps from page switches and nested Instrument
+     * entry/exit are excluded by the page and nested checks.
+     * Inputs: index_ok, generation pair, menu_loadSaveSlotIndexReady().
+     */
     uint8_t coordinate_current = (uint8_t)(
-        menu_selectionGenerationSnapshot == menu_selectionGeneration);
+        menu_selectionGenerationSnapshot == menu_selectionGeneration ||
+        (index_ok && menu_loadSaveSlotIndexReady()));
     uint8_t continue_bank_preview;
 
     /*
@@ -8885,6 +9035,51 @@ static void menu_libraryIndexLoadComplete(void)
                filesystem_kitSlotName(
                    menu_currentPresetNr[menu_saveOptions.what]),
                8u);
+    }
+    if (index_ok && menu_loadSaveSlotIndexReady()) {
+        uint8_t what = menu_saveOptions.what;
+        uint16_t slot = menu_currentPresetNr[what];
+
+        /*
+         * Show the Save page's slot name when the index lands (S090 P3,
+         * C1-1).
+         *
+         * What: on the Save page, copies the current slot's name for
+         * Scene/Bank/Pattern into preset_currentName, the buffer that page
+         * paints.
+         * Why: only a number turn made this copy
+         * (menu_requestCurrentLoadSaveSelection(), Scene/Bank/Pattern
+         * branch), so after entry or a type step the Save page showed blanks
+         * or the previous name until the encoder moved (SD_CARD_TEST_3
+         * defect 1). The copy is the same one the number path makes, so the
+         * page shows what a turn would show. The Load page paints these
+         * types from the cache directly. Kit/KitMrp Save is untouched: its
+         * field is seeded from the resident Kit row by design.
+         * Inputs: the now-resident index and the shown slot.
+         * Outputs: preset_currentName (Save page only).
+         */
+        if (menu_activePage == SAVE_PAGE) {
+            if (what == SAVE_TYPE_SCENE)
+                memcpy(preset_currentName,
+                       filesystem_sceneSlotName(slot), 8u);
+            else if (what == SAVE_TYPE_BANK)
+                memcpy(preset_currentName,
+                       filesystem_bankSlotName(slot), 8u);
+            else
+                memcpy(preset_currentName,
+                       filesystem_patternSlotName(slot), 8u);
+        }
+        /*
+         * Retire the retry this read satisfies (S090 P3, C1-2).
+         *
+         * What: clears the deferred selection request.
+         * Why: a number turn admitted during the read re-requested the
+         * selection, was refused while busy and left this retry. The read
+         * that just landed is the read it wanted; running the retry after the
+         * repaint would redo the selection and, for Bank, post a second child
+         * preview (continue_bank_preview below already posts one).
+         */
+        menu_deferSelectionRequest = 0u;
     }
     menu_storageBusy = 0u;
     if (continue_bank_preview) {
@@ -15547,8 +15742,12 @@ checkvalid:
  * see each step at once. Blank names mean busy (user rule, S090 U18): the
  * other types' names are blank already, because their slot readers check the
  * cache domain and the step clears the cache.
+ * S090 P3 (C2-5, Q1): the top-level Save page's Scene/Bank/Pattern name is
+ * blanked too while that type's index is not resident, because the Save page
+ * also paints preset_currentName (menu_blankLoadSaveNameWhileUnloaded()).
  * Inputs: menu_storageBusy, page, nested mode, menu_saveOptions.what.
- * Outputs: preset_currentName (top-level Kit Load only) and the LCD frame.
+ * Outputs: preset_currentName (top-level Kit Load; top-level Save
+ * Scene/Bank/Pattern while unloaded) and the LCD frame.
  * Callers: menu_handleLoadSaveMenu() type-row branches (top-level and nested
  * Instrument Load). Affiliates: menu_repaintAll(),
  * menu_libraryIndexLoadComplete() (which fills the name when the read lands).
@@ -15562,6 +15761,7 @@ static void menu_paintTypeStepWhileBusy(void)
         (menu_saveOptions.what == SAVE_TYPE_KIT ||
          menu_saveOptions.what == SAVE_TYPE_KIT_MORPH))
         memset(preset_currentName, ' ', 8u);
+    menu_blankLoadSaveNameWhileUnloaded();
     menu_repaintAll();
 }
 
@@ -16331,17 +16531,29 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
     uint8_t btnClicked = 0;
     uint8_t oldPage = menu_activePage;
     uint8_t oldIndex = menuIndex;
+    /* S090 P3 (C2-3): set when allow_browse_nav admitted this event while
+     * storage is busy, so the tail paints it. */
+    uint8_t browse_nav_admitted = 0u;
 
     /* S082 P3: an unlocked background Bank load blocks only Load/Save; other
      * pages take the encoder (menu_backgroundLoadReleasesPanel()). */
     if ((menu_storageBusy || preset_getStatus() != PRESET_IDLE) &&
         !menu_backgroundLoadReleasesPanel()) {
+        /*
+         * S090 P3 (C2-2): Kit/KitMrp Load and nested Instrument Load number
+         * turns wait for the names. While a Menu index read runs
+         * (filesystem_browseReadRunning()) the names are not resident, and a
+         * turn on these rows would load a slot the user cannot see (user,
+         * SD_CARD_TEST_3 defect 2). Turns during a payload load stay admitted,
+         * so load-on-scroll is unchanged once names exist.
+         */
         uint8_t allow_load_number_scroll = (uint8_t)(
             inc != 0 &&
             button == lastEncoderButton &&
             menu_activePage == LOAD_PAGE &&
             editModeActive &&
             menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR &&
+            !filesystem_browseReadRunning() &&
             ((menu_instrumentLoadActive && !menu_instrumentSaveMode) ||
              (!menu_instrumentLoadActive &&
               (menu_saveOptions.what == SAVE_TYPE_KIT ||
@@ -16385,10 +16597,84 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
             preset_getStatus() == PRESET_IDLE &&
             !copyClear_ownsEncoder() &&
             filesystem_browseReadRunning());
+        /*
+         * Navigation and slot choice never wait for a list (S090 P3, C2-1;
+         * user, SD_CARD_TEST_3 defect 2).
+         *
+         * What: while a Menu index read runs, under the same context guards
+         * as allow_type_step, admits:
+         * - a click on the type or number row (edit mode toggles only);
+         * - a cursor move between the type and number rows (edit mode off);
+         * - a slot-number turn on top-level Scene, Bank or Pattern, on either
+         *   page (no scroll on these loads anything).
+         * Why: after a type step the user could only keep stepping types; a
+         * click, a move to the number and a number change were all refused
+         * for the 2.4-3 s of the read. Rows where a scroll loads or commits
+         * (Kit/KitMrp, nested Instrument Load, its `chg` row) admit the click
+         * and the move but not the turn: their numbers wait for the names
+         * (C2-2 above). Save:Kit/KitMrp turns also wait: their selection path
+         * runs the Kit name session or preset_loadName(), neither of which may
+         * run against a read. A click on the nested `chg` number row commits
+         * a type change, so it waits too.
+         * Still refused: OK/execute clicks (the state is limited to the type
+         * and number rows), name rows, File/Dir/Settings/Samples (they have
+         * no index read), and pots (P1 decision).
+         * Inputs: button/inc, edit mode, state, type, nested source, page.
+         * Outputs: admission; browse_nav_admitted for the tail repaint.
+         * Affiliates: menu_handleLoadSaveMenu() (state moves, number branch),
+         * menu_requestCurrentLoadSaveSelection() (refuses a non-resident
+         * index without touching state), menu_libraryIndexLoadComplete()
+         * (C1-1, C1-2, C2-4).
+         */
+        uint8_t allow_browse_nav = 0u;
+        if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+            !(menu_instrumentLoadActive && menu_instrumentSaveMode) &&
+            !menu_loadSaveCommandActive &&
+            !menu_instrumentApplyActive &&
+            preset_getStatus() == PRESET_IDLE &&
+            !copyClear_ownsEncoder() &&
+            filesystem_browseReadRunning()) {
+            fs_library_index_kind_t kind;
+            uint8_t state = menu_saveOptions.state;
+            uint8_t what = menu_saveOptions.what;
+            /* Rows backed by an index read: nested Instrument Load, Kit,
+             * KitMrp, Scene, Bank, Pattern. */
+            uint8_t indexed_row = (uint8_t)(
+                menu_instrumentLoadActive ||
+                what == SAVE_TYPE_KIT || what == SAVE_TYPE_KIT_MORPH ||
+                menu_loadSaveSlotIndexKind(what, &kind));
+
+            if (button != lastEncoderButton) {
+                allow_browse_nav = (uint8_t)(
+                    indexed_row &&
+                    (state == SAVE_STATE_EDIT_TYPE ||
+                     state == SAVE_STATE_EDIT_PRESET_NR) &&
+                    !(menu_instrumentLoadActive &&
+                      state == SAVE_STATE_EDIT_PRESET_NR &&
+                      menu_instrumentLoadSource ==
+                          MENU_INSTRUMENT_SOURCE_CHANGE));
+                /* A click and a turn can arrive in one event; admit only the
+                 * click, so a turn on a waiting row (Kit Load, nested
+                 * Instrument) cannot ride along. */
+                if (allow_browse_nav)
+                    inc = 0;
+            } else if (inc != 0 && !editModeActive) {
+                allow_browse_nav = (uint8_t)(
+                    indexed_row &&
+                    ((state == SAVE_STATE_EDIT_TYPE && inc > 0) ||
+                     (state == SAVE_STATE_EDIT_PRESET_NR && inc < 0)));
+            } else if (inc != 0 && editModeActive &&
+                       state == SAVE_STATE_EDIT_PRESET_NR &&
+                       !menu_instrumentLoadActive) {
+                allow_browse_nav = menu_loadSaveSlotIndexKind(what, &kind);
+            }
+        }
+        browse_nav_admitted = allow_browse_nav;
 
         /*
          * Storage exclusivity blocks every control except Load-number turns
-         * and, since S090, type steps over an index read (above).
+         * and, since S090, type steps and P3 browse navigation over an index
+         * read (above).
          *
          * Kit and nested Instrument payloads can take long enough that a hard
          * encoder lock makes sparse libraries painful to browse. A plain turn
@@ -16400,7 +16686,8 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
          * and name repaint immediately; only entry/exit waits for shared-cache
          * restoration.
          */
-        if (!allow_load_number_scroll && !allow_type_step) {
+        if (!allow_load_number_scroll && !allow_type_step &&
+            !allow_browse_nav) {
             lastEncoderButton = button;
             return;
         }
@@ -16510,8 +16797,25 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
         }
     }
 
-    if (menu_storageBusy)
+    if (menu_storageBusy) {
+        /*
+         * Paint browse navigation admitted over a read (S090 P3, C2-3).
+         *
+         * What: an event admitted by allow_browse_nav is painted now, with a
+         * not-yet-resident name blanked first.
+         * Why: the tail otherwise skips painting while busy, so an admitted
+         * click, move or number turn would stay invisible until the read
+         * lands. Same treatment as the P1 type step
+         * (menu_paintTypeStepWhileBusy()). The number appears at once and the
+         * name stays blank until menu_libraryIndexLoadComplete() fills it
+         * (load order: number, then name, then LEDs).
+         */
+        if (browse_nav_admitted) {
+            menu_blankLoadSaveNameWhileUnloaded();
+            menu_repaintAll();
+        }
         return;
+    }
 
     /* Full refresh only when edit mode toggled (layout changes completely).
     ** Encoder movement uses incremental repaint — only sends changed chars,

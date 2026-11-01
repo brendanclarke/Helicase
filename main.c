@@ -224,7 +224,7 @@ static void audio_check_and_render(void)
 
 /*
  * Give a background Bank load the idle time between audio renders
- * (S082 P2 fix 3).
+ * (S082 P2 fix 3), and since S090 P5 (F2) also Load/Save storage work.
  *
  * What: while a background Bank load runs and the filesystem facade is BUSY,
  * runs extra (stall-uncounted) filesystem steps as long as both render slots
@@ -249,14 +249,25 @@ static void audio_check_and_render(void)
 static void main_serviceBackgroundLoadIdle(void)
 {
     uint32_t start;
+    uint32_t budget;
 
-    if (!preset_backgroundBankLoadRunning() || audioCodec_isSuspended())
+    if (audioCodec_isSuspended())
+        return;
+    /*
+     * S090 P5 F2: the same window also serves Load/Save (page open or
+     * command active) with LOADSAVE_IDLE_FS_BUDGET_US, the user's "50% more"
+     * over the background Bank load budget. Identical render-first rule.
+     */
+    if (preset_backgroundBankLoadRunning())
+        budget = BG_LOAD_IDLE_FS_BUDGET_US;
+    else if (menu_loadSaveStorageWaiting())
+        budget = LOADSAVE_IDLE_FS_BUDGET_US;
+    else
         return;
     start = timebase_tim2Now();
     while (filesystem_status() == FS_STATUS_BUSY &&
            audioCodec_queueFreeSlots() == 0u &&
-           timebase_tim2Delta(timebase_tim2Now(), start) <
-               BG_LOAD_IDLE_FS_BUDGET_US) {
+           timebase_tim2Delta(timebase_tim2Now(), start) < budget) {
         filesystem_tickUncounted();
     }
 }
@@ -712,6 +723,25 @@ int main(void)
              * filesystem status, or retained SRAM state changes during it.
              */
             timebase_holdPreAudioMs(BOOT_SD_POST_MOUNT_SETTLE_MS);
+
+            /*
+             * Repair directory tails before the first traversal (S090 P3).
+             *
+             * What: writes the FAT end marker after the last live entry of
+             * the root, /Scene, /Kit, /Bank, /Pattern, /Instrument and every
+             * /Instrument subdirectory when deleted entries follow it.
+             * Why: a used card's root had 922 trailing deleted entries and no
+             * marker, so every miss scanned 64 sectors and a Scene Save took
+             * tens of seconds while playing (SD_CARD_TEST_3/4). Running first
+             * makes every later boot read benefit too. No display change; a
+             * deadline expiry takes the common timeout path like every other
+             * pre-audio stage.
+             * Affiliates: filesystem_trimDirectoryTailsBlocking(),
+             * afatfs_trimDirectoryTailBegin()/Continue().
+             */
+            (void)filesystem_trimDirectoryTailsBlocking();
+            if (filesystem_bootLoggingTimedOut())
+                goto boot_filesystem_timeout;
 
             /*
              * Load keyed settings before any initial Bank choice or autosave
@@ -1400,6 +1430,42 @@ boot_filesystem_done:
      */
     liveRec_init(menu_getActiveVoice());
 
+    /*
+     * Repair the directional VOICE edit masks before the AutoSave settle stage
+     * (S090 P2, decision D3: moved from after audioCodec_init()).
+     *
+     * What: boot has restored Scene types and VOICE edit masks through
+     * AutoSave, bankset.bcg, or Scene/Kit fallback; any directional member
+     * whose layout diverged is dropped before the first live edit can fan out
+     * (S072 Step 10 F5). This is RAM-only retained-state work; it marks the
+     * Bank edit-mask AutoSave field only when it changes something.
+     * Why here: a mark made after the settle stage would start an AutoSave
+     * write after boot with no user action (R1). Running it first lets the
+     * stage write any such mark before audio. The live runtime replay
+     * (preset_startDrumsetApply()) stays after audioCodec_init(): it makes no
+     * retained or AutoSave writes, and hardware proved it must run live.
+     * Affiliates: bank_revalidateVoiceEditMasks(),
+     * filesystem_settleAutosaveBlocking(), preset_startDrumsetApply().
+     */
+    bank_revalidateVoiceEditMasks();
+
+    /*
+     * AutoSave settle stage (S090 P2, R1): boot stage 13.
+     *
+     * What: performs every AutoSave job the runtime would otherwise start by
+     * itself after boot (the boot recovery drain, Pattern repair and drains,
+     * runtime setup, a pending settings.cfg write) synchronously, with the full
+     * CPU, before the interface unlocks and audio starts. Returns the classes
+     * still pending; failures are recorded in the DEV trace only (user D4: no
+     * notice, the trace is the evidence) and owed work then waits for the
+     * user's next change (Q2b). The result is deliberately unused here.
+     * Why: the post-boot recovery drain held the SD card for 23.7 s while
+     * playing (S090 P2 §1) and blocked Load/Save name reads.
+     * Affiliates: filesystem_settleAutosaveBlocking(), config.h BOOT_SETTLE_*.
+     */
+    boot_showFilesystemStage(13u);  /* pre-audio AutoSave settle */
+    (void)filesystem_settleAutosaveBlocking();
+
     /* Initialise audio path: PLLI2S, GPIO, DMA circular streams, I2S.
     ** AFTER all blocking SD operations. From this point forward, SD
     ** operations are non-blocking via filesystem_tick() in the main loop. */
@@ -1429,13 +1495,10 @@ boot_filesystem_done:
      * menu_pollPresetStatus().
      */
     /*
-     * Boot has restored Scene types and VOICE edit masks through AutoSave,
-     * bankset.bcg, or Scene/Kit fallback. Repair any directional members whose
-     * layouts diverged before the first live edit can fan out (S072 Step 10
-     * F5). The deterministic RAM repair repeats next boot if tracking was not
-     * yet enabled for this restore path.
+     * S090 P2 (D3): the VOICE edit-mask repair (bank_revalidateVoiceEditMasks())
+     * that ran here now runs before the AutoSave settle stage, so any mark it
+     * makes is written before audio starts. The live replay below stays here.
      */
-    bank_revalidateVoiceEditMasks();
     preset_startDrumsetApply();
 #if DEV_MODE_DIAGNOSTIC && (DEV_EFFECT_FORCE_TYPE != 0u)
     /*

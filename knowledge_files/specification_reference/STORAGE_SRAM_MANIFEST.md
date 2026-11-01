@@ -4,11 +4,29 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 090 P1 (2026-10-31, hardware pending),
-  `dev-ph7-voice_expansion`, on `7f8b5d07`. DEV link: `text=683,616`,
-  `data=420`, `bss=413,020`; flash payload 684,036 B of 753,664 B
-  (**headroom 69,628 B**). ITCM 15,240 / 16,384 B; DTCM statics 4,372 B;
+- **Current as of:** Session 090 P2 (2026-10-31, hardware pending),
+  `dev-ph7-voice_expansion`. DEV link: `text=684,968`, `data=420`,
+  `bss=413,020`; flash payload 685,388 B of 753,664 B
+  (**headroom 68,276 B**). ITCM 15,240 / 16,384 B; DTCM statics 4,372 B;
   FXBUF arena margin 3,808 B. The entries below run newest first.
+- **S090 P5 changes (2026-11-01):** Load/Save batching, watchdog, idle window
+  (`S090_P5_IMPLEMENTATION.md`).
+  - **Added (approved, Q5):** `fs_ls_wd_signature` + `fs_ls_wd_mark`, **2 B**
+    SRAM1 `.bss` (`filesystem.c`), every build; `fs_trace_owner_op` +
+    `fs_trace_owner_phase`, **2 B** SRAM1 `.bss`, `DEV_MODE_LOGGING` only.
+    DEV link bss 413,020 -> 413,028 (alignment); text 690,072.
+- **S090 P2 changes (2026-10-31):** Load/Save drops AutoSave; start-up
+  AutoSave work moves before audio (`S090_P2_IMPLEMENTATION.md`).
+  - **Added (approved):** `autosave_boot_hold`, **1 B** SRAM1 `.bss`
+    (`Autosave.c`), set when the pre-audio settle ends with AutoSave work
+    owed and cleared by the first user mutation. It landed in existing
+    alignment padding, so the `.bss` section size is unchanged (413,020 B).
+  - **Stack only:** `filesystem_settleAutosaveBlocking()` keeps its loop
+    state (about 40 B: TIM2 stamps, signature, class/op bookkeeping) in
+    locals; no other static storage is added.
+  - **Not RAM:** `audioCodec_isInitialized()` reads the existing
+    `audio_hw_initialized`; the Pattern epoch query reads existing statics.
+  - Logging off: text 668,488, data 420, bss 396,176.
 - **S090 P1 changes (2026-10-31):** Load/Save name-fetch speed-up.
   - **Added (approved U4/U5/U9):** Preset `pm_instrument_snapshot`, **129 B**
     SRAM1 `.bss` (`presetManager.c`): one `uint8_t` registry type plus the

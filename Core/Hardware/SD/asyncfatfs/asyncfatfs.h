@@ -579,3 +579,94 @@ uint8_t afatfs_getDeleteTreeFailureSite(void);
  * boundaries to detect handle accumulation.
  */
 uint8_t afatfs_countOpenHandles(void);
+
+/*
+ * Stall snapshot of the AsyncFATFS state (S090 P3, C3-2).
+ *
+ * What: a read-only copy of the gates and cache state that decide whether a
+ * waiting operation can still progress.
+ * Why: SD_CARD_TEST_3 froze in the `/.hcnames` publication tail (remove done,
+ * rename never written) with the main loop alive. A host replay of this
+ * library on the card's exact layout completes, so the cause is runtime
+ * state: either the card stopped completing commands, or a cache slot /
+ * FATAL state blocked progress. This snapshot, taken when filesystem.c's
+ * HCNAMES stall bound fires, tells the two apart.
+ * Fields:
+ * - fs_state: afatfsFilesystemState_e (READY, FATAL, ...); last_error:
+ *   afatfsError_e;
+ * - rename_active/rename_phase, remove_active/remove_phase: the two
+ *   directory-mutation slots;
+ * - cwd_busy: currentDirectory has an operation queued; cwd_retain/cwd_lock:
+ *   its cache retain/lock index (-1 none);
+ * - cache_*: number of the AFATFS_NUM_CACHE_SECTORS slots that are locked,
+ *   retained (retainCount > 0), dirty, reading or writing; cache_empty:
+ *   slots in EMPTY state.
+ * Affiliates: afatfs_getStallSnapshot(), filesystem.c
+ * filesystem_residentNamesRecordStall().
+ */
+typedef struct {
+    uint8_t fs_state;
+    uint8_t last_error;
+    uint8_t rename_active;
+    uint8_t rename_phase;
+    uint8_t remove_active;
+    uint8_t remove_phase;
+    uint8_t cwd_busy;
+    int8_t cwd_retain;
+    int8_t cwd_lock;
+    uint8_t cache_locked;
+    uint8_t cache_retained;
+    uint8_t cache_dirty;
+    uint8_t cache_reading;
+    uint8_t cache_writing;
+    uint8_t cache_empty;
+    uint8_t open_files;     /* S090 P5: openFiles[] slots in use (0..5) */
+} afatfsStallSnapshot_t;
+
+/* Fill *snapshot; no I/O, no state change (S090 P3, C3-2). */
+void afatfs_getStallSnapshot(afatfsStallSnapshot_t *snapshot);
+
+/*
+ * Directory tail trim (S090 P3, D3 root cause).
+ *
+ * What: scans afatfs.currentDirectory once and, when deleted (0xE5) entries
+ * follow the last live entry, writes the FAT end-of-directory marker (0x00)
+ * into the first of them.
+ * Why: SD_CARD_TEST_3/4 had a root directory of one 1,024-entry cluster with
+ * 102 live entries, 922 trailing deleted entries and no end marker, left by
+ * an older allocator that placed every new name at the end marker. Without a
+ * marker every lookup that misses early (create, absence probe, remove
+ * rescan, rename collision scan) reads the whole directory: 64 sectors at 16
+ * bytes per main-loop pass while playing. A Scene Save's HCNAMES update took
+ * 8,296 polls instead of 1,187, so the save showed `...` for tens of seconds.
+ * A marker after the last live entry ends every scan there. The current
+ * allocator reuses deleted holes first and only takes the marker when no
+ * hole fits, so a trimmed directory stays short.
+ * Safety: entries after the first 0x00 are free by FAT definition and this
+ * library already treats them as stale (create zeroes the next sector before
+ * moving the marker). Only one byte of one directory sector changes; no FAT
+ * or cluster state changes, so power loss leaves either the old or the new
+ * sector. Live entries are never touched.
+ * Use: caller-owned state (no static RAM), boot only, facade idle:
+ * afatfs_trimDirectoryTailBegin() (false while currentDirectory is busy),
+ * then afatfs_trimDirectoryTailContinue() until it returns SUCCESS or
+ * FAILURE, pumping afatfs_poll() between calls. The caller syncs afterwards.
+ * Fields: finder (scan cursor), candidate (first deleted entry after the last
+ * live entry), have_candidate, phase, trimmed (marker written), live_count
+ * (live entries, LFN fragments included), tail_count (deleted entries after
+ * the last live entry, up to the old end).
+ * Affiliates: filesystem_trimDirectoryTailsBlocking(), afatfs_findNext(),
+ * afatfs_noteDeletedDirectoryEntry() (hole-first placement).
+ */
+typedef struct {
+    afatfsFinder_t finder;
+    afatfsFinder_t candidate;
+    uint8_t phase;
+    uint8_t have_candidate;
+    uint8_t trimmed;
+    uint16_t live_count;
+    uint16_t tail_count;
+} afatfsTrimTail_t;
+
+bool afatfs_trimDirectoryTailBegin(afatfsTrimTail_t *state);
+afatfsOperationStatus_e afatfs_trimDirectoryTailContinue(afatfsTrimTail_t *state);

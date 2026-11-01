@@ -333,6 +333,30 @@ individual Pattern moves or every tick. The decoder's stage-`c` branch is
 `tools/decode_devlogs.py`; production builds compile the copy/clear trace
 state and filesystem latches out when `DEV_MODE_LOGGING=0`.
 
+S090 P5 adds lowercase `w` (`AUTOSAVE_TRACE_STAGE_FS_OWNER`): one record per
+filesystem facade owner change, including the direct Save -> HCNAMES ->
+Flush -> scan -> index hand-offs. `flags` = new owner (`fs_internal_op_t`,
+0 idle); `value` = previous owner | status << 8 | previous owner's last phase
+<< 16. The decoder prints how long the previous owner held the facade.
+Only transitions with a Load/Save-covered owner on either side are written.
+Flush Finish is attributed to the operation that entered it (last phase
+0xFF). Recording a trace flush's own Flush Finish edge made each flush queue
+the next and froze boot (SD_CARD_TEST_6). 2 B of state, logging only.
+
+S090 P2 adds lowercase `s` (`AUTOSAVE_TRACE_STAGE_BOOT_SETTLE`) for the
+pre-audio AutoSave settle stage. It is logging-only and compiles out with the
+other `DEV_MODE_LOGGING` state. `flags` selects the event:
+
+| Code | Event | value |
+|------|-------|-------|
+| 0x01 | START | classes pending at stage entry (bit 0 scalar, 1 setup, 2 semantic Pattern, 3 non-semantic Pattern, 4 repair, 5 settings) |
+| 0x03 | FAIL | failed class bit, internal op << 8, stage elapsed ms (saturated 0xFFFF) << 16 |
+| 0x02 | END | elapsed ms (saturated 0xFFFFFF) \| pending classes << 24; flags bit 4 FAILED, 5 STALL, 6 CAP, 7 BUSY |
+
+A nonzero pending byte in END means `autosave_boot_hold` was set (owned work
+waits for the next user mutation). The decoder's stage-`s` branch is in
+`tools/diagnostic_tools/decode_devlogs.py`.
+
 The S075 value vocabulary is:
 
 | Group | Codes |
@@ -594,6 +618,8 @@ delta when disabled: -840 bytes text, -56 bytes BSS.
 | MIDI Learn write (site 8, shared with Settings; the two writers never overlap) | `filesystem_saveMidiLearn_tick()` | 30,000 polls | `MlWr` | Abort (S083) |
 | Flush Finish | `filesystem_flushFinish_tick()` | 50,000 polls | `Flsh` | Abort (added Session 057) — shared completion gate for every successful operation |
 | Bank child preview (site 10, `AUTOSAVE_TRACE_PHASE_STALL_SITE_BANK_PREVIEW`) | `filesystem_scanBankScenes_tick()` | 20,000 polls | `BkPv` | Abort (S082 F4): closes the preview's directory/file handles, returns to root and finishes ERROR, so a wedged probe never holds the facade. Observer storage 5 B, DEV only. |
+| HCNAMES (site 11, S090 P3) | `filesystem_residentNames_tick()` | 50,000 polls | `HNst` | Abort; four snapshot records (parts 0..3) |
+| Runtime Load/Save watchdog (site 12, S090 P5) | `filesystem_loadSaveWatchdog()` | 12 s (TIM6) with no progress signature change | `W<op><phase>` | Abort in **every build** (not DEV-only); closes held handles, finishes ERROR; DEV logging writes the site-11 snapshot layout, part 2 with the open-handle count. 2 B. |
 
 **The drain is progress-aware since S074; every other site is not.**
 

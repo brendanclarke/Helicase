@@ -208,6 +208,52 @@ quiet window scheduling, and shared background CPU budget):
   it and re-marks the whole Bank. Recovery writes may leave both A/B files
   invalid — accepted because the old Bank's records are ignored after the
   load anyway (identity mismatch, D21).
+- Load/Save drain drop (S090 P2, R2, 2026-10-31): opening `LOAD_PAGE` or
+  `SAVE_PAGE` (top level or nested Instrument) aborts an in-flight scalar or
+  Pattern drain through the same error close-downs described above. **Scalar
+  cut set** = the Bank-load allow-list **plus** the start of the HCNAMES
+  convergence: 70 (before the temp is opened), 77 (header written, no
+  callback), and 72 only while rows remain (`op_item_offset <
+  FS_RESIDENT_NAMES_ROW_COUNT`). 71, 73, 74, 75 and 76 are never cut: 73
+  waits for a close, 75/76 are the live remove/rename, and a cut at 74 would
+  leave a complete `.hcnamtmp` that the next boot promotes while carrying
+  `R` suppression for a record commit whose marker may not yet be durable.
+  **Pattern drain:** the same page condition aborts at the existing phases.
+  No RAM or on-card marker is added: a torn inactive A/B file is simply not
+  the winner, the captured dirty bits are restored, the winner cache is
+  cleared, and the Pattern Scene bit is kept; the page guard prevents a restart
+  until the user leaves, when the 250 ms continuation retries from phase 0.
+- Pre-audio AutoSave settle stage (S090 P2, R1/R4/R5, 2026-10-31): boot
+  stage 13 calls `filesystem_settleAutosaveBlocking()` between `liveRec_init()`
+  and `audioCodec_init()`. It loops `patSvc_tick()` +
+  `filesystem_tickUncounted()` with every AutoSave debounce made due and the
+  background CPU budget lifted, driving the existing scalar recovery/dirty
+  drain, runtime AutoSave ensure, semantic and non-semantic Pattern drains,
+  the Pattern repair epoch, and a pending `settings.cfg` write to completion.
+  It performs no new write protocol: it ends with the facade idle after each
+  operation's own final `afatfs_sync()`, so every active record is complete
+  and durable before audio starts (R4), and a power loss at any point is
+  covered by the existing safe-write protocols (R5). Bounds (D2):
+  `BOOT_SETTLE_NO_PROGRESS_MS` (30 s) without a progress-signature change, or
+  `BOOT_SETTLE_CAP_MS` (120 s) overall, stop admission and let the running
+  operation unwind through its error close-down; the poll-count stall
+  detectors are bypassed only while the stage is progressing (counted ticks
+  after a stall/cap). Failures are trace-only (`s` START/FAIL/END, D4). The
+  edit-mask repair `bank_revalidateVoiceEditMasks()` runs before this stage
+  (D3); `preset_startDrumsetApply()` stays after `audioCodec_init()`.
+- Boot-settle hold (S090 P2, Q2b): if stage 13 ends with any AutoSave class
+  still owed (scalar, setup, Pattern, non-semantic; repair alone does not set
+  it), `autosave_setBootHold(1)` (1 byte, SRAM1 `.bss`, owner `Autosave.c`)
+  makes the scalar, semantic and non-semantic schedulers admit nothing after
+  boot. The first user-caused mutation clears it: an accepted mark in
+  `autosave_markPayloadOffsetDirty()`, `autosave_maskPayloadRangeDirty()`,
+  `autosave_markPatternDirty()`, or a change in
+  `autosave_setMutationTrackingEnabled()`. A drain's error restore
+  (`autosave_maskRestoreCaptured()`) and repair relocations
+  (`autosave_markNonSemanticPatternDirty()`) do not clear it. Owed state is
+  kept and is written together with the next user change; the next boot
+  retries stage 13. There is no autonomous runtime retry after a failed
+  settle.
 - exact-length validation by a one-byte end-of-file probe in both scalar
   validators, silent self-repair of a torn record by the next drain, `V`
   trace bits 4..5, and a progress-aware drain stall observer (Session 074);
@@ -441,6 +487,17 @@ not converted into Case 3 mass invalidation. An empty winner Bank and an empty
 HCNAMES-authoritative Bank both decline so the existing empty-Bank fallback
 semantics remain intact.
 
+Boot stage 13 (S090 P2) then settles all remaining start-up AutoSave work
+before `audioCodec_init()`: the expected recovery drain (the ensure arms
+`fs_autosave_recovery_pending` on every boot), any Pattern drains and the
+repair epoch, runtime setup if the boot ensure did not run, and a pending
+`settings.cfg` write. It runs the existing operations synchronously and
+unthrottled, bounded by 30 s without progress or 120 s overall. On success no
+AutoSave write follows boot until the user changes something; on failure the
+owed state stays and the boot-settle hold keeps it idle until the first user
+mutation. This replaces the previous every-boot post-audio recovery drain
+that could hold the card for tens of seconds while playing.
+
 ### Matching-winner reader
 
 The reader first validates `.hcnamtmp`, then `.hcnames`. A valid temp is adopted
@@ -628,6 +685,16 @@ close/flush boundary. All background work (scalar drain, Pattern drain, and
 Pattern repair) is additionally gated by the shared elapsed-time CPU budget
 (`filesystem_backgroundBudgetAvailable()`); a denied admission is charged
 nothing and retries on the next scheduler tick after credit accumulates.
+
+Before audio starts, the budget is not a limit: `audioCodec_isInitialized()`
+is still 0, so `filesystem_backgroundBudgetAvailable()` returns available and
+pre-audio slices are not charged. This keys the bypass to the codec's
+lifetime init flag, not its suspend flag, so runtime audio-suspended storage
+commands stay budgeted. The boot settle stage (§ Boot restore and policy
+lifecycle) uses this to finish all start-up work before the interface
+unlocks. After it, the schedulers have nothing to arm; a write starts only
+after a mutation mark, and the boot-settle hold (below) suppresses even owed
+work after a failed settle until the user changes something.
 
 When the page guard suppresses the writer, `fs_autosave_page_suppressed` is
 set. On the first scheduler tick after the user leaves the Load/Save page,

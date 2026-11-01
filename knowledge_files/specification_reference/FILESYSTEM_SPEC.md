@@ -121,6 +121,37 @@ Session 084 (roll fix-up; `084_SESSION_HANDOFF_LOG.md`):
 - Host-only import tools for LXR1 and LXR-02 card content write Kits,
   library Patterns and Banks in this document's formats ("Import tools").
 
+Session 090 P5 (Load/Save speed and no-freeze; `S090_P5_IMPLEMENTATION.md`):
+
+- **Row/entry batching:** the `.hcindex` readers and writer, the HCNAMES row
+  read/write, `filesystem_writeTextLine()` and the Kit/Scene/Bank/Pattern
+  scans handle rows, lines or directory entries in a loop per tick, on bytes
+  AsyncFATFS already holds, until the first wait for the card or
+  `FS_LOADSAVE_BATCH_BUDGET_US` (15 us; 500 us before audio). Formats and
+  results are unchanged.
+- **Runtime Load/Save watchdog:** once audio runs, a Load/Save-covered
+  operation with no visible progress for `FS_LOADSAVE_WATCHDOG_MS` (12 s)
+  finishes ERROR with code `W<op><phase>`; Menu shows its error overlay.
+- **Idle window:** `main_serviceBackgroundLoadIdle()` also serves Load/Save
+  (`menu_loadSaveStorageWaiting()`) with `LOADSAVE_IDLE_FS_BUDGET_US` (300 us),
+  only while both render slots are full.
+
+Session 090 P2 (Load/Save drops AutoSave, pre-audio settle;
+`S090_P2_LOAD_SAVE_ATS_DROP_PRE-BOOT_WORK.md`):
+
+- entering `LOAD_PAGE`/`SAVE_PAGE` **drops** an in-flight scalar or Pattern
+  AutoSave drain through its existing error close-down at the next
+  callback-free phase (scalar: Bank-load allow-list plus HCNAMES phases 70,
+  77, and 72 only while rows remain; 73–76 never cut); the page guard still
+  prevents a new start, and the 250 ms continuation restarts it from phase 0
+  after exit only if work is still owed (`AUTOSAVE.md`);
+- the boot recovery drain and Pattern/repair work no longer run after audio
+  starts: boot stage 13 (`filesystem_settleAutosaveBlocking()`) drives them
+  to completion before `audioCodec_init()`, with the background budget
+  lifted and a pending `settings.cfg` write included;
+- a failed settle keeps its owed state and sets `autosave_boot_hold`, so no
+  AutoSave write follows boot until the user changes something.
+
 - AsyncFATFS stores a cluster-rounded size while a file is open for writing,
   so an interrupted write leaves an overlong file;
 - validators must therefore prove the exact length with a one-byte
@@ -3006,6 +3037,19 @@ Instrument/
   Save, OK cancels a running preview and needs a second press.
 - **Why:** the user has had to restate this rule several times; Scene and
   Kit scrolling already behave this way.
+- **Load/Save entry drops a running AutoSave drain (S090 P2, user R2).** The
+  scalar and Pattern drains abort at their next callback-free phase when
+  `LOAD_PAGE`/`SAVE_PAGE` opens, so name and list reads get the facade at
+  once. The restart after exit is the existing 250 ms continuation, from
+  phase 0 and only if work is still owed. Do not make the drop wait for a
+  drain to finish, and do not cut the HCNAMES live remove/rename window
+  (`AUTOSAVE.md` has the exact scalar cut set).
+- **A Load/Save step never freezes the page (S090 P5, user 2026-11-01).**
+  Every covered facade operation is ended by the runtime watchdog after
+  `FS_LOADSAVE_WATCHDOG_MS` without progress. Row, line and entry loops on
+  the Load/Save chain batch cached work per tick; do not reintroduce
+  one-row-per-tick loops there, and do not add per-pass SD polls while
+  playing (the CPU widget reads 99-100 %: there is no free render time).
 - **How to apply:** any new per-slot work (preview, probe, name read) must
   follow it; check the encoder gate (`menu_parseEncoder()`) and the pot gate
   (`menu_handleLoadSaveKnobDelta()`) for the page.

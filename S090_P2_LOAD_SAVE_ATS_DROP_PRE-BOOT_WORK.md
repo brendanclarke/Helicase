@@ -1,9 +1,9 @@
 # S090 P2 — Load/Save Drops AutoSave; Start-Up AutoSave Work Moves Before Boot Completes
 
-**Status:** plan (2026-10-31; revised the same day with decisions D1–D5,
-§0.3). Not implemented. All §11 questions decided (D1–D5). Implementation
-schedule: `S090_P2_IMPLEMENTATION.md`; it needs one RAM sign-off (1 B boot
-hold, its §0.1) and narrows Q1's cut set (its §1 F1).
+**Status:** implemented (2026-10-31; static gates pass, hardware P1–P17
+pending). Decisions D1–D5 (§0.3) applied; the 1 B boot hold was approved by
+the user. Implementation record: `S090_P2_IMPLEMENTATION.md` §14; Q1's cut
+set is narrowed by its §1 F1 (70/77/72-while-rows-remain, 74 excluded).
 **This file is the authority** for S090 P2 decisions and findings.
 **Follows:** S090 P1 (`S090_P1_LOAD_SAVE_SPEEDUP.md`,
 `S090_P1_IMPLEMENTATION.md`), implemented and building at 684,068 B.

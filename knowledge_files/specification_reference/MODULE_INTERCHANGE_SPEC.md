@@ -1966,8 +1966,11 @@ Relevant interchange points:
   InstrumentManager constructs each tagged runtime member from a defined
   retained type rather than zeroed BSS (`DRM == 0`).
 - Pre-audio loading establishes a coherent six-slot image synchronously.
-  Immediately after `audioCodec_init()`, `preset_startDrumsetApply()` starts the
-  same live clear/image/all-source-rebind worker used by a manual Scene switch.
+  Boot stage 13 then settles all start-up AutoSave work before
+  `audioCodec_init()` (S090 P2); `bank_revalidateVoiceEditMasks()` runs just
+  before it. Immediately after `audioCodec_init()`,
+  `preset_startDrumsetApply()` starts the same live
+  clear/image/all-source-rebind worker used by a manual Scene switch.
 - `audio_check_and_render()` returns immediately while
   `audioCodec_isSuspended()` is true (Session 058): suspend empties the DMA/
   render queue, so the renderer must not advance queue, trigger, DSP/control,
@@ -2206,8 +2209,10 @@ filesystem_bootLoggingEnd();
 // --- Post-SD, pre-main-loop ---
 patSvc_init(); copyClear_init();
 liveRec_init(menu_getActiveVoice());
+bank_revalidateVoiceEditMasks();     // S090 P2 D3: before the settle stage
+boot_showFilesystemStage(13u);
+filesystem_settleAutosaveBlocking(); // S090 P2: all start-up AutoSave, full CPU
 audioCodec_init();           // PLLI2S, GPIO, DMA, I2S — AFTER all SD boot ops
-bank_revalidateVoiceEditMasks();
 preset_startDrumsetApply();  // arms the chunked Scene apply worker
 menu_start();
 sequencerTimer_init();       // TIM3 4 kHz (priority 2) — LAST init before main loop
@@ -2216,5 +2221,13 @@ sequencerTimer_init();       // TIM3 4 kHz (priority 2) — LAST init before mai
 **Critical ordering constraints:**
 - `EXTI_IMR = 0` must be the first executable statement.
 - `audioCodec_init()` must follow all blocking SD operations (SD boot ends at `filesystem_bootLoggingEnd()`).
+- **AutoSave settle stage 13 (S090 P2):** `filesystem_settleAutosaveBlocking()`
+  runs every start-up AutoSave job (recovery drain, Pattern drains and repair
+  epoch, runtime setup, pending `settings.cfg`) synchronously before
+  `audioCodec_init()`. `bank_revalidateVoiceEditMasks()` runs before it so any
+  edit-mask mark is written there; `preset_startDrumsetApply()` stays after
+  the codec start because hardware proved the live apply must run with audio.
+  Do not move the settle stage after `audioCodec_init()`: the budget bypass is
+  keyed on `audioCodec_isInitialized()`.
 - `sequencerTimer_init()` must follow `audioCodec_init()` — it is the very last call before the `for(;;)` main loop.
 - `seq_tick()` is owned by TIM3 — never add it to the main loop.

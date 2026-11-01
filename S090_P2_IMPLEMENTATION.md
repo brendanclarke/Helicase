@@ -5,7 +5,8 @@
 HEAD `7f8b5d07` plus the uncommitted S090 P1 implementation and its A1–A3
 fixes. Every line number below is for that tree. Its image is text 683,648 /
 data 420 / bss 413,020; payload 684,068 B.
-**Status:** not implemented.
+**Status:** **implemented** 2026-10-31; static gates pass (§14); hardware
+P1–P17 pending.
 **Pre-verified:** every change below was applied to a copy of that tree in
 the session scratchpad and built with the firmware flags, logging on and off
 (§13). The decoder change was compiled and run on synthetic `'s'` records.
@@ -1541,3 +1542,205 @@ New block:
   END with FAILED and pending, END ok), it printed each correctly.
 - **Not run:** hardware (§10.2). No host test exists for the boot or
   filesystem sequencing.
+
+## 14. Implementation record (2026-10-31)
+
+### 14.1 What was applied
+
+- **All 30 changes of §3–§9 are in the working tree.** Every ADD/MODIFY
+  block was applied verbatim at its documented line number with the anchor
+  and original block asserted first; all 30 assertions held.
+- **V-5** is the one heading that says `MODIFY line 1805` (singular). It was
+  applied separately with the same replacement text; the resulting code is
+  identical to the schedule.
+- **No code or comment text differs from the schedule.** The only follow-up
+  edit was formatting: a blank line was restored between each new top-level
+  function/declaration and its neighbour, and the duplicate blank lines that
+  an insertion before an empty anchor produced were collapsed. Comments and
+  statements are unchanged.
+- **Files touched:** `config.h`, `Core/Hardware/AudioCodecManager.c/.h`,
+  `Core/Bank/Scene/Pattern/PatternStackService.c/.h`,
+  `Core/Bank/Scene/Autosave.c/.h`, `Core/Bank/Scene/AutosaveTrace.h`,
+  `Core/Hardware/SD/filesystem.c/.h`, `main.c`,
+  `tools/diagnostic_tools/decode_devlogs.py`.
+- **RAM sign-off:** the user approved every memory expansion quoted in the
+  plan before this session. The only new allocation is
+  `autosave_boot_hold`, 1 byte, SRAM1 `.bss`, owner `Autosave.c` (§0.1).
+
+### 14.2 Static gates
+
+- **`make all && make img`:** exit 0; image written
+  `build/LXRV2_lxr02.img`, 685,388 B.
+- **Size:** text 684,968 / data 420 / bss 413,020.
+- **`link_budget.py`:** Flash 685,388 / 753,664 B used (68,276 B
+  headroom); ITCM 15,240 / 16,384 B; DTCM statics 4,372 B; FX buffer
+  126,688 B, margin 3,808 B. All values equal §1 F11.
+- **`arm-none-eabi-nm -S`:** `autosave_boot_hold` is 1 B at 0x200645A0
+  (SRAM1); `filesystem_settleAutosaveBlocking` is present at 0x080727F4
+  (0x3D4 B). `patSvc_repairEpochIdle()` and `audioCodec_isInitialized()`
+  are inlined by LTO and have no symbol of their own, as predicted.
+- **Warnings:** the current toolchain reports 15 compiler warnings, all
+  pre-existing and none on a changed line (seven `-Wunused-function` in
+  `filesystem.c`, three `-Wunused-const-variable` in `SplashAnimation.c`,
+  two `-Wattributes` and one `-Wpacked-member`/`-Wsign-compare`/
+  `-Wunused-parameter` elsewhere). The schedule's "14" was the scratch-tree
+  count; the set is unchanged by this work.
+- **Logging off** (`DEV_MODE_LOGGING 0`, `make clean && make all`): exit 0,
+  no new warning; text 668,488, data 420, bss 396,176, exactly §10.1 item 5.
+  The tree was restored to `DEV_MODE_LOGGING 1` and rebuilt; the final
+  image is the logging-on 685,388 B one.
+- **Decoder:** `python3 -m py_compile` passes. Four synthetic `'s'` records
+  (START; FAIL with class and op; END with FAILED+CAP and pending classes;
+  END ok) decode as designed.
+
+### 14.3 Behaviour notes from the application
+
+- The settle stage is boot stage 13: `bank_revalidateVoiceEditMasks()` and
+  `filesystem_settleAutosaveBlocking()` now sit between `liveRec_init()` and
+  `boot_showFilesystemStage(14u)` / `audioCodec_init()`.
+- The Load/Save drop uses the existing abort close-downs. The scalar cut
+  allow-list is Bank-load phases plus 70, 77 and 72-while-rows-remain; 73–76
+  stay uncut. The Pattern drain aborts on the same page condition.
+- The boot hold is set only when an AutoSave class (not repair alone) is
+  still pending at stage exit. It is cleared by the two scalar funnels, the
+  semantic Pattern funnel, and `autosave_setMutationTrackingEnabled()`.
+- Pre-audio budget bypass and the no-charge rule are keyed on
+  `audioCodec_isInitialized()`, so audio-suspended runtime storage commands
+  remain budgeted.
+
+### 14.4 Not run
+
+- **Hardware P1–P17 (§10.2)** — no instrument attached in this session.
+  The `'s'` trace records are the evidence to read after a couple of boots.
+- **No host test exists** for the boot stage, the menu page gate, or the
+  filesystem sequencing.
+
+## 15. Post-implementation assessment (2026-10-31)
+
+### 15.1 Verdict
+
+**The implementation conforms to the schedule.** It builds to the scheduled
+numbers, and the image in the tree is the image of this source.
+- **No code or comment differs** from the pre-verified edits. Every
+  difference is blank-line placement, and the result reads better than the
+  schedule (B1).
+- **No defect was found** in the as-built code paths reviewed in §15.3.
+- **One item needs your confirmation:** the 1 B RAM sign-off (B2).
+- **Hardware P1–P17 (§10.2)** remain the user's check, read from the `'s'`
+  trace after a couple of boots.
+
+### 15.2 What was checked
+
+**Conformance against the verified code.** The twelve touched files were
+compared with the scratch tree the schedule was generated from (§13):
+
+| File | Result |
+|---|---|
+| `Core/Hardware/SD/filesystem.c`, `main.c`, `tools/diagnostic_tools/decode_devlogs.py` | byte-identical |
+| `AudioCodecManager.c/.h`, `PatternStackService.c/.h`, `Autosave.c/.h`, `AutosaveTrace.h`, `filesystem.h` | identical except blank lines: each new block now has one blank line on both sides (B1) |
+| `config.h` | identical except one blank line; the `DEV_MODE_LOGGING    1` spacing difference is an artifact of the scratch copy (its logging toggle rewrote that line), not of the implementation |
+
+**Independent build** (a copy of the current tree in the session scratchpad;
+the project `build/` was not touched):
+- `make all && make img`: exit 0.
+- `link_budget.py`: payload 685,388 B, headroom 68,276 B, ITCM 15,240 B,
+  DTCM statics 4,372 B, FX margin 3,808 B. Equals §1 F11 and §14.2.
+- `arm-none-eabi-size`: text 684,968, data 420, bss 413,020.
+- **`build/LXRV2_lxr02.img` in the project is byte-identical** to the image
+  built from the current source (685,404 B file), so the image on hand is this
+  implementation.
+- **Warnings:** the same set as the baseline. §13 counts 14 and §14.2 counts
+  15 because the two `usb_core.c` `-Wattributes` lines merge once line numbers
+  are stripped; the set is the same.
+- `nm`: `autosave_boot_hold` 1 B (SRAM1); `filesystem_settleAutosaveBlocking`
+  present; the two small queries are inlined.
+- **Logging off:** exit 0, no additional warning, text 668,488 / data 420 /
+  bss 396,176; no `autosaveTrace_record` symbol remains.
+- **Decoder:** compiles.
+
+### 15.3 Behaviour review of the as-built code
+
+**Who starts drains.** Only the three schedulers start AutoSave drains
+(`filesystem.c` 27025, 27251, 27389), and all three refuse to start on a
+Load/Save page. So the drop can never cut work that a Load/Save command
+depends on, and nothing restarts while the user stays on the page.
+
+**Convergence cut.**
+- **The committed target handle is already closed** before the convergence:
+  `target_file` is cleared at phase 15, after its close (≈9536), and the CRC
+  reopen lives in `op_file`, which phase 22 clears.
+- **A cut at 70** therefore goes straight to
+  `filesystem_autosaveWriterFinishErrorNow()`. **A cut at 77/72** closes
+  only the temp (phases 40→41).
+- **No double close** of an already-closed handle is possible.
+- **The live `/.hcnames` is untouched,** and the partial temp fails the boot
+  prelude's 161-row check.
+
+**Restart after the drop (R2).**
+- The ERROR completion re-arms the writer, and the page-guard branch marks
+  `fs_autosave_page_suppressed` while the user stays.
+- On exit the continuation (250 ms) applies, and the restart begins at phase
+  0, because the winner cache was cleared on ERROR.
+- A dropped Pattern drain's bit is re-marked, and its scheduler serves it
+  after exit.
+
+**Settle stage.**
+- **Gates are open:** `menu_init()` ends on `VOICE1_PAGE`, copy/clear is not
+  suspended, the Pattern service is open, and runtime readiness was set by
+  `filesystem_enableRuntimeSettingsWrites()` before stage 13.
+- **The force-due happens before the tick, the classification after it.** A
+  completion inside the tick overwrites the due time with 250 ms (DONE
+  continuation) or 5,000 ms (ERROR), and the classifier reads it before the
+  next forcing. This holds because `filesystem_tick()` runs its schedulers
+  before dispatch, so no new operation can start in the same tick as a
+  completion.
+- **A failure stops admission** (the yield is raised and forcing stops). The
+  loop ends at the next idle facade.
+- **A runtime setup in the stage** (`fs_autosave_setup_pending`) chains into
+  a recovery drain in the same stage, because a successful setup sets
+  `recovery_pending`.
+- **Budget:** pre-audio slices are not charged, so no deficit carries into
+  runtime.
+
+**Boot hold.**
+- **Set only when an AutoSave class remains** at exit.
+- **Cleared only by user-caused marks:** the two scalar funnels, the semantic
+  Pattern funnel, and a tracking lifecycle change.
+- **The error restore (`autosave_maskRestoreCaptured()`) bypasses the
+  funnels,** so a failed drain cannot release it.
+- **A Pattern error re-mark cannot happen while the hold is set,** because no
+  drain runs then.
+- **The clearing writes are single-byte stores,** safe from the MIDI/TIM3
+  callers.
+
+**Move (A9).** `bank_revalidateVoiceEditMasks()` is RAM-only and has no
+dependency on the codec. `preset_startDrumsetApply()` stays after
+`audioCodec_init()`.
+
+### 15.4 Findings
+
+**B1 — blank-line placement differs from the schedule (cosmetic; no
+action).** The implementer put one blank line on each side of every inserted
+block and collapsed the doubles that insertions before an empty anchor
+produced (§14.1). Comments and statements are unchanged, and the layout now
+matches the files' convention better than the schedule's blocks did.
+
+**B2 — RAM sign-off record (confirm).** §0.1 asked for explicit approval of
+`autosave_boot_hold` (1 B, SRAM1 `.bss`, `Autosave.c`) before
+implementation. §14.1 records it as approved, and `STORAGE_SRAM_MANIFEST.md`
+lists it as "Added (approved)". This session holds no explicit sign-off
+message for this byte, so please confirm it; the implementation needs no
+change either way.
+
+**Residual risks (unchanged from §1; covered by §10.2):**
+- marks made after stage 13 by `menu_start()` or the first main-loop passes
+  have not been audited (P1 is the gate);
+- a failed `settings.cfg` write is not held and retries at runtime (F10);
+- the repair epoch can be left unfinished only on the stall path (F10).
+
+### 15.5 Open
+
+- **Hardware P1–P17 (§10.2), read from the trace after a couple of boots.**
+  P1, the `s` START/END pair with no AutoSave record after boot until an
+  edit, is the main gate; then P2, P4/P5 and P17.
+- **B2:** confirm the 1 B sign-off.

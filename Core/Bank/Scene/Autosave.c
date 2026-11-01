@@ -173,6 +173,30 @@ static volatile uint8_t autosave_dirty_mask[AUTOSAVE_MASK_BYTES];
  */
 static volatile uint16_t autosave_dirty_count;
 static volatile uint8_t autosave_mutation_tracking_enabled;
+
+/*
+ * Boot-settle hold (S090 P2, decision Q2b). RAM: 1 byte, SRAM1 .bss, owner
+ * Autosave.c. Requires user sign-off before implementation.
+ *
+ * What: nonzero after the pre-audio settle stage ended with start-up AutoSave
+ * work still owed (an operation failed, stalled or hit the stage cap). While
+ * set, filesystem's scalar, Pattern and non-semantic Pattern schedulers start
+ * nothing. The first user-caused mutation clears it: an accepted mark in
+ * autosave_markPayloadOffsetDirty() or autosave_maskPayloadRangeDirty() (the
+ * two scalar funnels), autosave_markPatternDirty() (semantic Pattern edits),
+ * or a tracking lifecycle change (autosave_setMutationTrackingEnabled()).
+ * Why: R1 forbids AutoSave work after boot "unless the user does something",
+ * and Q2b chose no autonomous retry after a boot-stage failure. The owed state
+ * itself (dirty bits, recovery_pending) is kept, so the first drain after a
+ * user action writes it together with the new change; the next boot retries
+ * the stage. autosave_maskRestoreCaptured() (a drain's error restore) and
+ * autosave_markNonSemanticPatternDirty() (repair relocations) are not user
+ * actions and do not clear it.
+ * Lifetime: set once at the end of boot or never; cleared by the first user
+ * mutation. Accessors: autosave_setBootHold(), autosave_bootHoldActive().
+ * Affiliates: filesystem_settleAutosaveBlocking() and the three schedulers.
+ */
+static volatile uint8_t autosave_boot_hold;
 /*
  * Per-Scene dirty register for Pattern AutoSave.
  *
@@ -262,6 +286,9 @@ void autosave_markPatternDirty(uint8_t scene_index)
     primask = autosave_irqSave();
     autosave_pattern_dirty_mask |= (uint16_t)(1u << scene_index);
     autosave_last_pattern_semantic_us = timebase_tim2Now();
+    /* S090 P2: a semantic Pattern edit is a user action; release the
+     * boot-settle hold so the owed and new Pattern work can be written. */
+    autosave_boot_hold = 0u;
     /* Keep the dirty bit, quiet-window stamp, and HCNAMES witness clear in
      * one IRQ-safe boundary; recording/MIDI mutation work can reach this API. */
     (void)filesystem_clearResidentRefreshed(
@@ -417,6 +444,14 @@ static uint8_t autosave_markPayloadOffsetDirty(uint16_t payload_offset)
         (uint16_t)(payload_offset >> 3u),
         (uint8_t)(1u << (payload_offset & 7u)));
     /*
+     * S090 P2: an accepted scalar mark is the user "doing something" (R1).
+     * Release the boot-settle hold so the scheduler may write the owed and
+     * the new work together. Only marks past the tracking/range guard reach
+     * this point; the drain's error restore uses autosave_maskByteOr()
+     * directly and never passes here.
+     */
+    autosave_boot_hold = 0u;
+    /*
      * Record only dirty bits that passed this helper's tracking/range guard.
      * Input is the canonical payload offset just ORed into the retained mask;
      * output is a RAM-only trace point with no scheduler or filesystem side
@@ -491,6 +526,9 @@ static uint16_t autosave_maskPayloadRangeDirty(uint16_t first, uint16_t count)
     }
     autosave_dirty_count = (uint16_t)(autosave_dirty_count + fresh_total);
     autosave_irqRestore(primask);
+    /* S090 P2: an accepted range mark (Scene/Bank replacement by a load) is a
+     * user action; release the boot-settle hold, as the per-cell funnel does. */
+    autosave_boot_hold = 0u;
     return fresh_total;
 }
 
@@ -1803,7 +1841,26 @@ void autosave_setMutationTrackingEnabled(uint8_t enabled)
      */
     primask = autosave_irqSave();
     autosave_mutation_tracking_enabled = enabled ? 1u : 0u;
+    /* S090 P2: a tracking lifecycle change (AutoSave OFF/ON, Bank lifecycle)
+     * starts a new session; any boot-settle hold from an earlier one ends. */
+    autosave_boot_hold = 0u;
     autosave_irqRestore(primask);
+}
+
+void autosave_setBootHold(uint8_t hold)
+{
+    /*
+     * Set or clear the boot-settle hold (S090 P2; contract in Autosave.h).
+     * Single-byte store: readers in foreground schedulers and the clearing
+     * markers (some called from interrupt context) see it atomically.
+     */
+    autosave_boot_hold = hold ? 1u : 0u;
+}
+
+uint8_t autosave_bootHoldActive(void)
+{
+    /* Read the boot-settle hold (S090 P2). */
+    return autosave_boot_hold;
 }
 
 void autosave_discardDirtyMask(void)

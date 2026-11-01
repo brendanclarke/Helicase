@@ -269,6 +269,44 @@ void        filesystem_initAfterCardReady(void);
  * a zero-byte fwrite retry.
  */
 uint8_t     filesystem_ensureAutosaveFilesBlocking(void);
+
+/*
+ * Drive all start-up AutoSave work to completion before audio (S090 P2, R1).
+ *
+ * What: a blocking pre-audio stage, called once from main.c after
+ * patSvc_init()/copyClear_init()/liveRec_init() and before
+ * audioCodec_init(). It repeatedly calls patSvc_tick() and
+ * filesystem_tickUncounted() with every AutoSave debounce made due and the
+ * background CPU budget lifted (audio not started), until no start-up work
+ * remains: the scalar recovery/dirty drain, runtime AutoSave setup, semantic
+ * and non-semantic Pattern drains, the Pattern repair epoch, and a pending
+ * settings.cfg write (Q3). The existing operations run unchanged and each
+ * ends with its own final sync, so every record is complete and durable when
+ * this returns with an idle facade (R4); a power loss at any point is covered
+ * by their existing safe-write protocols (R5).
+ * Bounds (D2): BOOT_SETTLE_NO_PROGRESS_MS without progress or
+ * BOOT_SETTLE_CAP_MS overall stop admission and let the running operation
+ * unwind (see config.h). One attempt per operation: the first failure stops
+ * admission (Q2b).
+ * Output: the classes still pending (0 normally). When AutoSave work is still
+ * owed, the boot-settle hold is set (autosave_setBootHold()) so nothing runs
+ * after boot until the user changes something. DEV logging records 's'
+ * START/FAIL/END (D4: the trace is the evidence; nothing is displayed).
+ * Affiliates: filesystem_backgroundBudgetAvailable(), patSvc_repairEpochIdle(),
+ * autosave_bootHoldActive(), the four AutoSave/settings schedulers.
+ */
+uint8_t     filesystem_settleAutosaveBlocking(void);
+
+/*
+ * Repair directory tails at boot (S090 P3, D3 root cause): for the volume
+ * root, /Scene, /Kit, /Bank, /Pattern, /Instrument and every subdirectory of
+ * /Instrument, writes the FAT end marker right after the last live entry
+ * when deleted entries follow it, so no lookup scans a tombstone tail.
+ * Pre-audio only, idle facade, blocking; returns 1 when every check
+ * completed. Caller: main.c after the post-mount settle.
+ */
+uint8_t     filesystem_trimDirectoryTailsBlocking(void);
+
 /*
  * Boot-time .hcprms candidate validation and winner selection.
  *

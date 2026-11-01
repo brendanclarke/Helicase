@@ -123,3 +123,116 @@ the fix is fewer card operations, not faster ones.
   - A3: the S090 arithmetic in `STORAGE_SRAM_MANIFEST.md` was corrected.
 - Build after the fixes: text 683,648, data 420, bss 413,020; payload
   684,068 B; `build/LXRV2_lxr02.img` 684,084 B. Hardware H1–H27 pending.
+
+## P2 — Load/Save drops AutoSave; start-up work before boot (2026-10-31)
+
+**Goal:** `S090_P2_LOAD_SAVE_ATS_DROP_PRE-BOOT_WORK.md` (R1–R6, D1–D5).
+Start-up AutoSave work must finish before `audioCodec_init()` (full CPU,
+synchronous, power-loss safe); entering Load/Save must drop a running drain
+as soon as its callbacks allow; no autonomous AutoSave write after boot until
+the user changes something; a failed settle must not be silent (the DEV trace
+is the evidence, D4).
+
+**Implemented** from `S090_P2_IMPLEMENTATION.md` (all 30 changes):
+
+- **Boot stage 13:** `filesystem_settleAutosaveBlocking()` between
+  `liveRec_init()` and `audioCodec_init()`. It makes every AutoSave debounce
+  due, uses uncounted ticks, runs `patSvc_tick()` and the filesystem tick until
+  no class is pending and the facade is idle, and includes a pending
+  `settings.cfg` write. `bank_revalidateVoiceEditMasks()` moved before it;
+  `preset_startDrumsetApply()` stays after the codec.
+- **Budget:** `filesystem_backgroundBudgetAvailable()` reports full budget and
+  `filesystem_backgroundBudgetCharge()` does not deduct while
+  `audioCodec_isInitialized()` is 0 (lifetime flag, not suspend).
+- **Bounds:** 30 s without a progress-signature change (`BOOT_SETTLE_NO_PROGRESS_MS`),
+  120 s overall (`BOOT_SETTLE_CAP_MS`); after either, admission stops, counted
+  ticks let the existing detectors/hooks unwind. One attempt per class; the
+  stage never cuts a callback.
+- **Load/Save drop:** the scalar and Pattern drain abort checks also fire on
+  `LOAD_PAGE`/`SAVE_PAGE`. The scalar cut set adds HCNAMES 70, 77 and 72 while
+  rows remain; 73–76 are never cut (74 would leave a promotable temp).
+- **Boot hold:** 1 B `autosave_boot_hold` (SRAM1, `Autosave.c`), set only when
+  an AutoSave class is still owed at stage exit; cleared by the two scalar
+  funnels, the semantic Pattern funnel and a tracking lifecycle change. The
+  three schedulers honour it.
+- **Trace:** `s` START/FAIL/END records and decoder support. No LCD notice
+  (D4).
+
+**Static verification:** `make all && make img` exit 0; text 684,968, data
+420, bss 413,020; payload 685,388 B (+1,320); ITCM 15,240; DTCM statics
+4,372; FX margin 3,808. Logging off: text 668,488, bss 396,176. `nm`:
+`autosave_boot_hold` 1 B and `filesystem_settleAutosaveBlocking` present;
+the two accessors are LTO-inlined. Decoder compiles and decodes synthetic
+START/FAIL/END records. No new compiler warning (the 15 reported are all
+pre-existing).
+
+**Pending:** hardware P1–P17 (`S090_P2_IMPLEMENTATION.md` §10.2). No host test
+exists for boot/menu/filesystem sequencing.
+
+**Documents updated:** `AUTOSAVE.md` (settle, drop cut set, hold, no post-boot
+work), `FILESYSTEM_SPEC.md` (session note + Load/Save binding bullet),
+`MODULE_INTERCHANGE_SPEC.md` (boot order), `STORAGE_SRAM_MANIFEST.md`
+(1 B hold), `DEV_MODES.md` (`s` record), `MEMORY.md` (status + rules),
+`S090_P2_IMPLEMENTATION.md` §14.
+
+**Files changed:** `config.h`, `Core/Hardware/AudioCodecManager.c/.h`,
+`Core/Bank/Scene/Pattern/PatternStackService.c/.h`,
+`Core/Bank/Scene/Autosave.c/.h`, `Core/Bank/Scene/AutosaveTrace.h`,
+`Core/Hardware/SD/filesystem.c/.h`, `main.c`,
+`tools/diagnostic_tools/decode_devlogs.py`.
+
+## P3/P4 — defect re-tests (2026-10-31 / 2026-11-01)
+
+- **P3** (`S090_P3_LOAD_SAVE_DEFECT_CORRECTION.md`): Save-page names, input
+  during a list read, HCNAMES stall bound (DEV), boot directory tail trim. The
+  trim worked on SD_CARD_TEST_5 (920 root entries cut), and the HCNAMES
+  publish now completes.
+- **P4** (`S090_P4_STILL_NOT_FIXED.md`, SD_CARD_TEST_5):
+  - **User report:** type changes still take 5–6 s; Scene Save still never
+    completes (well over 20 s, PLAY running).
+  - **Cause of the slowness:** with audio running the facade gets one tick
+    and one 16-byte poll per main-loop pass (~460/s). Text rows, lines and
+    directory entries were one per tick: a 1,000-row `.hcindex` cost ≥1,000
+    passes for three sectors.
+  - **The Save stopped** between the HCNAMES publish and the `.hcindex`
+    writer's open (Flush, `SCAN_SCENES`, or `CREATE_LIBRARY_INDEX` 0–4).
+    None of those had a production bound.
+
+## P5 — Load/Save speed and no-freeze (2026-11-01)
+
+**Goal:** the user's Q1–Q5 answers to P4: as much speed as can never break
+audio or freeze; "50% more" budget; CPU widget 99–100 % (no free render
+time, so no extra SD polls per pass).
+
+**Implemented** (`S090_P5_IMPLEMENTATION.md`):
+
+- **F1 batching:** the index read/write, HCNAMES read/write, the text line
+  writer and the four library scans loop over cached work per tick, until the
+  first card wait or 15 µs (`FS_LOADSAVE_BATCH_BUDGET_US`; 500 µs pre-audio).
+- **F2 idle window:** `main_serviceBackgroundLoadIdle()` also serves Load/Save
+  (`menu_loadSaveStorageWaiting()`), 300 µs, only with both render slots full.
+- **F4 watchdog (every build):** a covered Load/Save operation with no
+  progress-signature change for 12 s finishes ERROR with code
+  `W<op><phase>`; it closes the handles it holds. 2 B.
+- **F5 (logging only):**
+  - stage `w`, one record per facade owner change, with durations in the
+    decoder;
+  - the stall snapshot gains a site parameter (site 12) and an open-handle
+    count. 2 B.
+- **Not built:** F3 (extra polls per pass). The root-cause fix of the hang
+  waits for the next `W…` code and snapshot.
+
+**Static verification:** `make all && make img` exit 0; text 690,072, data
+420, bss 413,028; flash headroom 63,172 B; logging/stall off builds clean;
+host test of the batched list read on the four TEST_5 indexes passes; the
+decoder decodes synthetic `w` and site-12 records.
+
+**Pending:** hardware T1–T9 (`S090_P5_IMPLEMENTATION.md` §6).
+
+**P5 hotfix (2026-11-01, SD_CARD_TEST_6):** the first P5 image froze at boot.
+The `w` witness recorded the trace flush's own `FLUSH_FINISH -> idle` edge,
+so each trace flush queued the next (every ~11 ms). The boot step after the
+boot reader never got the facade, and the boot deadline was re-armed by every
+flush. Fixed: only Load/Save-covered owners are recorded, and Flush Finish is
+attributed to its entering operation. Host-tested against a
+flush-on-pending model. `S090_P5_IMPLEMENTATION.md` §9.
