@@ -173,6 +173,24 @@ typedef enum {
      *             osc1_run rows; the engine trigger/render functions.
      */
     IM_SPECIAL_OSC_RUN,
+    /*
+     * S089 P2: voice_chain writer. Clamps the value to 0..VOICE_CHAIN_COUNT-1
+     * and stores it in the engine's chainType field through the descriptor's
+     * instance offset. On a change of chain it clears transGen.midiFreq so
+     * the fold's depth ramp starts flat (voiceFold_process()).
+     *
+     * What:       IM_SPECIAL_VOICE_CHAIN = 22 (next after IM_SPECIAL_OSC_RUN,
+     *             21); IM_SPECIAL_WRITER_COUNT becomes 23 (<= 32, the 5-bit
+     *             writer field).
+     * Why:        a selector must pass through the special writer so menu
+     *             edits, Kit/Scene/Instrument apply, step automation and MIDI
+     *             writes all clamp and store identically.
+     * Inputs:     slot, byte value.  Outputs: chainType; transGen.midiFreq.
+     * Accessors:  instrumentManager_writeSpecialRuntime() switch.
+     * Affiliates: VOICE_CHAIN_* (voiceFold.h); voiceChainNames (MenuText.h);
+     *             the four voice_chain rows; tools/dsp_test/check_special_tags.py.
+     */
+    IM_SPECIAL_VOICE_CHAIN,
     IM_SPECIAL_WRITER_COUNT
 } instrument_special_writer_t;
 
@@ -746,6 +764,31 @@ uint8_t instrumentManager_waveCellCount(uint8_t slot,
  * Affiliates: osc_setType(), OSC_TYPE_*.
  */
 uint8_t instrumentManager_osc1Type(uint8_t slot);
+/*
+ * A slot's current voice chain (S089 P2).
+ *
+ * What:       the chainType of the engine occupying the slot
+ *             (VOICE_CHAIN_*); VOICE_CHAIN_DEFAULT for an unknown type or slot.
+ * Why:        Menu relabels and re-lists the transient cells by chain without
+ *             owning the tagged runtime mapping (as instrumentManager_osc1Type()).
+ * Inputs:     slot.  Outputs: VOICE_CHAIN_*.
+ * Accessors:  menu.c (menu_cellIsFoldWave(), menu_instrumentCellLabels(),
+ *             the step-automation max); instrumentManager_slotUsesSrr().
+ * Affiliates: the engines' chainType; IM_SPECIAL_VOICE_CHAIN.
+ */
+uint8_t instrumentManager_slotVoiceChain(uint8_t slot);
+/*
+ * A slot's fold type under WFd (S089 P2).
+ *
+ * What:       transGen.waveform clamped to VOICE_FOLD_COUNT - 1 (the type the
+ *             fold actually plays); VOICE_FOLD_TRI for an unknown slot.
+ * Why:        the single-parameter view names frq by fold type ("Bias",
+ *             "Decay", ...).
+ * Inputs:     slot.  Outputs: VOICE_FOLD_*.
+ * Accessors:  menu_instrumentCellLabels() (menu.c).
+ * Affiliates: voiceFold_process() (the same clamp).
+ */
+uint8_t instrumentManager_slotFoldType(uint8_t slot);
 void instrumentManager_calcSlotAsync(uint8_t slot);
 void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
                                          uint8_t size);
@@ -769,6 +812,27 @@ uint8_t instrumentManager_runtimePan(uint8_t slot);
  * DrumVoice/SnareVoice/CymbalVoice/HiHatVoice vol members.
  */
 float instrumentManager_runtimeVolume(uint8_t slot);
+/*
+ * Report whether a slot's voice chain includes sample-rate reduction (S089 P0).
+ *
+ * What: 1 when the instrument type that owns the slot's live runtime runs a
+ * voice chain whose last stage is the mixer's S&H decimator
+ * (mixer_decimateBlock()); 0 otherwise. SRR is off by default: an unknown or
+ * empty slot, and any type or chain that does not list it, returns 0. Drum,
+ * Snare, Cymbal and HiHat return 1 under their default chain.
+ *
+ * Why: lets an instrument give the S&H cost to another chain stage
+ * (S089 P1) without moving the decimator state out of the mixer's DTCM
+ * arrays. Constant CPU: the answer depends only on the runtime type (and,
+ * from P1, the chain selector), never on the srt value or voice activity.
+ *
+ * Inputs: zero-based render slot 0..5. Output: 0 or 1. Clients:
+ * mixer_calcNextSampleBlock(), once per slot per 32-frame block, foreground
+ * render context only. Affiliates: instrumentManager_slotType(),
+ * INSTRUMENT_BIND_SLOT_DECIMATION (still writes mixer_decimation_rate[] for
+ * every type, so the srt value is kept across chain changes).
+ */
+uint8_t instrumentManager_slotUsesSrr(uint8_t slot);
 void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
                                     uint8_t velocity);
 

@@ -66,6 +66,7 @@
 #include "modulationNode.h"
 #include "Oscillator.h"
 #include "transientGenerator.h"   /* S087 P3: transient list with user one-shots */
+#include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* (name asserts) */
 #include <string.h>
 #include <stdint.h>
 
@@ -1803,30 +1804,32 @@ static menu_instrument_source_t menu_instrumentLoadSource =
 static instrument_type_t menu_instrumentLoadShownType = INSTRUMENT_TYPE_DRM;
 static uint16_t menu_instrumentLoadShownIndex = 0u;
 /*
- * One Menu-owned identity for the hidden reversible `kit` file.
+ * One Menu-owned identity for the reversible `kit` row.
  *
- * Inputs: copied once from the existing HCNAMES identity row after Instrument
- * Load entry succeeds. Output: the `kit` row label remains stable while pool
- * loads update the normal identity row. Why: `.hctmp.<ext>` carries parameters
- * on SD, but must never become another name cache or HCNAMES row. Affiliates:
- * preset_save/loadInstrumentTemp() and all voice/type/exit invalidations.
+ * Inputs: copied once from the existing HCNAMES identity row when nested
+ * Instrument Load entry captures its snapshot. Output: the `kit` row label
+ * remains stable while pool loads update the normal identity row. Why: since
+ * S090 the parameters live in Preset's RAM snapshot (pm_instrument_snapshot),
+ * which holds no name; this field must never become another name cache or
+ * HCNAMES row. Affiliates: preset_captureInstrumentSnapshot(),
+ * preset_restoreInstrumentSnapshot() and all voice/type/exit invalidations.
  */
 static char menu_instrumentTempName[MENU_INSTRUMENT_SAVE_NAME_LEN + 1u];
 static instrument_type_t menu_instrumentTempType = INSTRUMENT_TYPE_UNKNOWN;
 static uint8_t menu_instrumentTempValid = 0u;
 /*
- * One operation tag shared by the temporary save and its later temporary load.
+ * "A snapshot `kit` restore is applying" (S090 P1: meaning narrowed).
  *
- * Inputs: Menu posts either the entry `.hctmp.<ext>` save or the direct `kit`
- * restore. Output: completion/application code can identify that accepted
- * operation without consulting the mutable encoder cursor. Why: Load-number
- * turns are deliberately accepted while a pool Instrument operation drains;
- * `menu_instrumentLoadSource` may therefore say `kit` when that *pool* load
- * completes. This latch sequences temporary save/restore UI work only; it
- * must not classify AutoSave provenance, which comes from filesystem's
- * immutable request flag. Affiliates: menu_prepareInstrumentLoadTemp(),
- * menu_restoreInstrumentLoadTemp(), menu_tickInstrumentApply(), and
- * PRESET_OP_INSTRUMENT_TEMP_SAVE / PRESET_OP_INSTRUMENT_LOAD handling.
+ * Inputs: set by menu_restoreInstrumentLoadTemp() when it commits the RAM
+ * snapshot and arms the bounded Instrument apply. Output:
+ * menu_finishInstrumentApplySession() reads it once when that apply drains,
+ * so it can tell the completed restore from a completed pool load without
+ * consulting the mutable encoder cursor (Load-number turns stay accepted while
+ * an apply drains, so `menu_instrumentLoadSource` may say `kit` when a *pool*
+ * apply completes). Before S090 it also tagged the asynchronous `.hctmp`
+ * save and load; both are gone. It never classifies AutoSave provenance.
+ * Affiliates: menu_restoreInstrumentLoadTemp(), menu_tickInstrumentApply(),
+ * menu_finishInstrumentApplySession(), menu_invalidateInstrumentLoadTemp().
  */
 static uint8_t menu_instrumentTempOperationPending = 0u;
 /*
@@ -1839,22 +1842,23 @@ static uint8_t menu_instrumentTempOperationPending = 0u;
  * restore attempt failed to post.
  *
  * Inputs: set when a pool preview (normal or Morph) commits over the browsed
- * slot; cleared when a `.hctmp.<ext>` restore actually reaches a completion
- * for that slot, and at every session boundary through
- * menu_invalidateInstrumentLoadTemp(). Output: three independent places
- * consult it — the pool-to-`kit` crossing, the "already on `kit`" repeat-turn
- * branch, and the idle retry at the top of menu_pollPresetStatus() — so the
- * restore lands whether the user keeps scrolling or stops dead on `kit`.
+ * slot; cleared when a snapshot restore is committed for that slot (S090:
+ * menu_restoreInstrumentLoadTemp() clears it as it commits), and at every
+ * session boundary through menu_invalidateInstrumentLoadTemp(). Output: three
+ * independent places consult it — the pool-to-`kit` crossing, the "already on
+ * `kit`" repeat-turn branch, and the idle retry at the top of
+ * menu_pollPresetStatus() — so the restore lands whether the user keeps
+ * scrolling or stops dead on `kit`.
  *
  * Why it exists: the crossing handler latches menu_instrumentLoadSource to
  * MENU_INSTRUMENT_SOURCE_KIT *before* attempting the restore. If that attempt
- * could not post — the filesystem was busy with the pool preview the user just
- * scrolled through, or filesystem_requestLoadInstrumentTemp() itself rejected
- * the request — the UI was already "on `kit`" while the parameters were never
- * restored, and every subsequent detent hit the idempotent no-op branch and
- * did nothing. Playback made this the common case rather than a rare one,
- * because a sounding voice lengthens the preview's apply and therefore widens
- * the busy window the crossing lands in. Tracking owed-ness instead of a
+ * cannot run — a pool preview the user just scrolled through is still
+ * loading or applying, or another apply worker is active (S090: the RAM
+ * restore waits for the same idle point the file restore's completion did) —
+ * the UI is already "on `kit`" while the parameters were never restored, and
+ * every subsequent detent hits the idempotent no-op branch. Playback made this
+ * the common case, because a sounding voice lengthens the preview's apply and
+ * widens the busy window the crossing lands in. Tracking owed-ness instead of a
  * single call's outcome closes every one of those drop paths with one rule.
  * Affiliates: the nested Instrument Load encoder handler,
  * menu_restoreInstrumentLoadTemp(), menu_invalidateInstrumentLoadTemp(),
@@ -2028,6 +2032,9 @@ static void menu_requestBankChildPreview(uint16_t slot);
 static void menu_requestLibraryIndexLoad(uint8_t what);
 static void menu_requestSceneEntryName(void);
 static void menu_requestSceneIndexAfterName(void);
+static uint8_t menu_loadSaveSlotIndexKind(uint8_t what,
+                                          fs_library_index_kind_t *kind);
+static uint8_t menu_libraryIndexResident(fs_library_index_kind_t kind);
 static void menu_instrumentLoadClampIndex(void);
 static void menu_instrumentLoadRequestSelection(void);
 static void menu_instrumentLoadCommitChange(void);
@@ -2250,6 +2257,13 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value, char out[3])
 /* S087 P2: wave value text; defined beside menu_formatWaveCell(). */
 static void menu_formatWaveValue3(const menu_cell_t *cell, uint8_t value,
                                   char out[3]);
+/* S089 P2: tagged on/off tables and the WFd transient-cell rules; defined
+ * beside getMenuItemNameForValue() / menu_formatTransientName(). */
+static const char (*menu_onoffTagNames(uint8_t tag))[4];
+static uint8_t menu_cellIsFoldWave(const menu_cell_t *cell);
+static void menu_instrumentCellLabels(uint8_t slot,
+                                      const ParamDescriptor *descriptor,
+                                      const char **cat, const char **lng);
 
 /* S078 P2 §B STEP overlay helpers. Definitions stay adjacent to the va_*
  * state/logic below; these declarations keep the same forward-reference style
@@ -3044,6 +3058,14 @@ uint8_t menu_isStorageBusy(void)
     return menu_storageBusy;
 }
 
+/* Load/Save page open or command active (S090 P5 F2; contract in menu.h). */
+uint8_t menu_loadSaveStorageWaiting(void)
+{
+    return (uint8_t)(menu_activePage == LOAD_PAGE ||
+                     menu_activePage == SAVE_PAGE ||
+                     menu_loadSaveCommandActive != 0u);
+}
+
 /*
  * Panel free during a background Bank load (S082 P3 W2, W3).
  *
@@ -3357,12 +3379,16 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
          * Inputs:     the cell's dtype byte and value.
          * Outputs:    3 characters into out[].
          * Accessors:  every DTYPE_ON_OFF cell whose descriptor is tagged.
-         * Affiliates: oscRunNames, ONOFF_TAG_OSC_RUN (MenuText.h).
+         * Affiliates: menu_onoffTagNames(), oscRunNames, voiceChainNames,
+         *             ONOFF_TAG_* (MenuText.h).
          */
         if ((uint8_t)(menu_cellDtype(cell) >> 4) != 0u) {
-            const uint8_t idx = (value < (uint8_t)oscRunNames[0][0])
+            /* S089 P2: the table follows the tag (run mode or voice chain). */
+            const char (*names)[4] = menu_onoffTagNames(
+                (uint8_t)(menu_cellDtype(cell) >> 4));
+            const uint8_t idx = (value < (uint8_t)names[0][0])
                 ? (uint8_t)value : 0u;
-            memcpy(out, oscRunNames[1 + idx], 3);
+            memcpy(out, names[1 + idx], 3);
         } else {
             memcpy(out, (value == 1u) ? menuText_on : menuText_off, 3);
         }
@@ -3373,6 +3399,12 @@ static void va_formatValue3(const menu_cell_t *cell, uint8_t value,
     case DTYPE_MENU:
         /* S087 P2: wav follows osc1's type or the modulator list
          * (menu_formatWaveValue3()), as in menu_formatCellValue3(). */
+        /* S089 P2: a WFd slot's wav cell shows the fold type. */
+        if (menu_cellIsFoldWave(cell)) {
+            memcpy(out, foldTypeNames[1u + ((value < VOICE_FOLD_COUNT)
+                                            ? value : VOICE_FOLD_COUNT - 1u)], 3);
+            break;
+        }
         if ((uint8_t)(menu_cellDtype(cell) >> 4) == MENU_WAVEFORM) {
             menu_formatWaveValue3(cell, value, out);
             break;
@@ -6287,8 +6319,15 @@ static void menu_displayInstrumentTargetFull(uint16_t target)
      * menu_copyPaddedField() keeps short category/long-name strings bounded to
      * their fixed LCD fields.
      */
-    menu_copyPaddedField(&editDisplayBuffer[1][0], descriptor->category, 8u);
-    menu_copyPaddedField(&editDisplayBuffer[1][8], descriptor->long_name, 8u);
+    {
+        /* S089 P2: WFd relabels the transient cells. */
+        const char *cat = descriptor->category;
+        const char *lng = descriptor->long_name;
+
+        menu_instrumentCellLabels(slot, descriptor, &cat, &lng);
+        menu_copyPaddedField(&editDisplayBuffer[1][0], cat, 8u);
+        menu_copyPaddedField(&editDisplayBuffer[1][8], lng, 8u);
+    }
 }
 
 /*
@@ -6512,13 +6551,17 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
     case DTYPE_ON_OFF:
         /*
          * S088 P0 §2.1 D12: tagged on/off sub-type display.
-         * What: high nibble != 0 shows the tag table's name (oscRunNames),
-         *       otherwise on/off as before. Same rule as va_formatValue3().
+         * What: high nibble != 0 shows the tag table's name
+         *       (menu_onoffTagNames(): run modes or voice chains), otherwise
+         *       on/off as before. Same rule as va_formatValue3().
          */
         if ((uint8_t)(menu_cellDtype(cell) >> 4) != 0u) {
-            const uint8_t idx = (value < (uint8_t)oscRunNames[0][0])
+            /* S089 P2: the table follows the tag (run mode or voice chain). */
+            const char (*names)[4] = menu_onoffTagNames(
+                (uint8_t)(menu_cellDtype(cell) >> 4));
+            const uint8_t idx = (value < (uint8_t)names[0][0])
                 ? (uint8_t)value : 0u;
-            memcpy(valueAsText, oscRunNames[1 + idx], 3);
+            memcpy(valueAsText, names[1 + idx], 3);
         } else if (value == 1u) memcpy(valueAsText, menuText_on, 3);
         else                    memcpy(valueAsText, menuText_off, 3);
         break;
@@ -6528,6 +6571,12 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
     case DTYPE_MENU:
         /* S087 P2: wav follows osc1's type or the modulator list
          * (menu_formatWaveValue3()); every other menu uses its table. */
+        /* S089 P2: a WFd slot's wav cell shows the fold type. */
+        if (menu_cellIsFoldWave(cell)) {
+            memcpy(valueAsText, foldTypeNames[1u + ((value < VOICE_FOLD_COUNT)
+                                                    ? value : VOICE_FOLD_COUNT - 1u)], 3);
+            break;
+        }
         if ((uint8_t)(menu_cellDtype(cell) >> 4) == MENU_WAVEFORM) {
             menu_formatWaveValue3(cell, value, valueAsText);
             break;
@@ -6791,16 +6840,20 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
          * S088 P0 §2.1 D12: tagged on/off sub-type clamp.
          *
          * What:       with a non-zero high nibble, clamp to 0..count-1 from
-         *             the tag's name table (oscRunNames: 0..2). With a zero
+         *             the tag's name table (menu_onoffTagNames(): run modes
+         *             or voice chains). With a zero
          *             nibble, clamp to 0..1 exactly as before.
          * Why:        MIDI CC/NRPN writes can carry 0..127; the clamp keeps
          *             the stored run mode inside rst..itp.
          * Inputs:     the cell's dtype byte, *value.
          * Outputs:    *value clamped in place.
-         * Affiliates: oscRunNames[0][0] (count); ONOFF_TAG_OSC_RUN.
+         * Affiliates: menu_onoffTagNames(); ONOFF_TAG_* (MenuText.h).
          */
         if ((uint8_t)(menu_cellDtype(cell) >> 4) != 0u) {
-            const uint8_t n = (uint8_t)oscRunNames[0][0];
+            /* S089 P2: the count follows the tag (run mode or voice chain). */
+            const char (*names)[4] = menu_onoffTagNames(
+                (uint8_t)(menu_cellDtype(cell) >> 4));
+            const uint8_t n = (uint8_t)names[0][0];
             if (*value >= n) *value = (uint16_t)(n - 1u);
         } else if (*value > 1u) {
             *value = 1u;
@@ -6825,6 +6878,9 @@ static void menu_clampCellValue(const menu_cell_t *cell, uint16_t *value)
         if (menuId == MENU_WAVEFORM &&
             cell && cell->kind == MENU_CELL_INSTRUMENT && cell->descriptor)
             n = instrumentManager_waveCellCount(cell->slot, cell->descriptor);
+        /* S089 P2: a WFd wav cell holds a fold type (0..VOICE_FOLD_COUNT-1). */
+        if (menu_cellIsFoldWave(cell))
+            n = (uint8_t)VOICE_FOLD_COUNT;
         if (n == 0u)
             *value = 0u;
         else if (*value >= n)
@@ -7411,20 +7467,30 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
         menu_requestLibraryIndexLoad(what);
         return;
     }
-    if (what == SAVE_TYPE_SCENE &&
-        !filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_SCENE)) {
-        menu_requestLibraryIndexLoad(what);
-        return;
-    }
-    if (what == SAVE_TYPE_BANK &&
-        !filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_BANK)) {
-        menu_requestLibraryIndexLoad(what);
-        return;
-    }
-    if (what == SAVE_TYPE_PATTERN &&
-        !filesystem_libraryNameCacheLoaded(FS_LIBRARY_INDEX_PATTERN)) {
-        menu_requestLibraryIndexLoad(what);
-        return;
+    /*
+     * Scene/Bank/Pattern use their rows only once the index is resident
+     * (S090 P3, C2-1).
+     *
+     * What: the index counts as resident when the cache carries the type's
+     * tag and no Menu index read is running; otherwise the index load is
+     * (re)requested, which refuses non-destructively while busy and leaves
+     * one deferred retry.
+     * Why: the tag is set when a read starts, so during the read the rows are
+     * partial. Since P3 a number turn can arrive during that read; without
+     * this check it would copy a not-yet-read row ("Empty") and, for Bank,
+     * post a child preview against the busy facade. The landing read clears
+     * the retry it satisfies (menu_libraryIndexLoadComplete(), C1-2).
+     * Inputs: what, cache tag, filesystem_browseReadRunning().
+     * Affiliates: menu_libraryIndexResident(), menu_requestLibraryIndexLoad().
+     */
+    {
+        fs_library_index_kind_t kind;
+
+        if (menu_loadSaveSlotIndexKind(what, &kind) &&
+            !menu_libraryIndexResident(kind)) {
+            menu_requestLibraryIndexLoad(what);
+            return;
+        }
     }
     /*
      * Kit and KitMrp share the same browser slot but have different commit
@@ -7547,6 +7613,67 @@ static void menu_requestCurrentLoadSaveSelection(uint8_t loadKitOnLoadPage)
     }
 }
 
+/*
+ * Publish a ready typed Instrument index to the nested browser (S090 P1).
+ *
+ * What: clamps the remembered row of the loaded type, mirrors it into the
+ * shown row for a pool cursor, releases the input gate and either posts the
+ * one coalesced pool selection or repaints.
+ * Why: two paths now reach a ready index: a completed `.hcindex` read and
+ * the S090 cache hit in menu_requestInstrumentIndexLoad() (a same-type voice
+ * change reuses the index already in the browser cache). Both must leave the
+ * browser in exactly the same state, so they share this tail.
+ * Inputs: menu_instrumentLoadType/Source, menu_saveOptions.state,
+ * menu_deferSelectionRequest; the browser cache must hold the loaded type
+ * (checked by both callers). Outputs: menu_instrumentLoadShownIndex,
+ * menu_storageBusy (cleared, or re-raised by an accepted selection), LCD.
+ * Callers: menu_instrumentIndexLoadComplete(), menu_requestInstrumentIndexLoad().
+ * Affiliates: menu_instrumentLoadClampIndex(),
+ * menu_instrumentLoadRequestSelection(), the deferred dispatcher in
+ * menu_pollPresetStatus().
+ */
+static void menu_instrumentIndexReady(void)
+{
+    menu_instrumentLoadClampIndex();
+    if (menu_instrumentLoadActive &&
+        !menu_instrumentSaveMode &&
+        menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_POOL) {
+        menu_instrumentLoadShownIndex =
+            menu_instrumentLoadIndex[menu_instrumentLoadType];
+    }
+    menu_storageBusy = 0u;
+    /*
+     * Start only the newest Instrument number after the index is ready.
+     *
+     * Keeping this beside the index ensures the newest number is paired with
+     * its freshly loaded `.hcindex` name before
+     * menu_instrumentLoadRequestSelection() posts the payload. That helper
+     * clears the defer flag and reasserts storage busy if Preset accepts the
+     * coalesced request.
+     *
+     * S090 P1: the post is limited to a pool cursor on the number row, the
+     * same condition the deferred dispatcher in menu_pollPresetStatus() uses.
+     * Before S090 a defer could only have been raised here by a Load-number
+     * turn (which always leaves that state), so this is unchanged for every
+     * earlier path. Type steps are now accepted while an index read runs
+     * (S090 item 7), and their refused requests also raise the defer flag
+     * while the cursor rests on the type row or on `kit`; posting a pool load
+     * then would replace the voice with a row the user never selected. Such a
+     * defer is left for the dispatcher, which re-enters
+     * menu_requestInstrumentEntryNames() and lands on the cache hit.
+     */
+    if (menu_deferSelectionRequest &&
+        menu_instrumentLoadActive &&
+        !menu_instrumentSaveMode &&
+        menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_POOL &&
+        menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR) {
+        menu_instrumentLoadRequestSelection();
+        if (menu_storageBusy)
+            return;
+    }
+    menu_repaintAll();
+}
+
 static void menu_instrumentIndexLoadComplete(void)
 {
     /*
@@ -7565,76 +7692,78 @@ static void menu_instrumentIndexLoadComplete(void)
      * attempt an Instrument load from a partial or empty cache after
      * `.hcindex` failed.
      *
-     * Inputs: the terminal filesystem result, current nested Load/Save mode,
-     * selected voice/type/source, and menu_deferSelectionRequest. Outputs: on
+     * S090 P1 (item 7): a type step may now arrive while this read runs. Two
+     * outcomes are therefore not the user's current request and are retired
+     * quietly instead of being published or reported:
+     * - the read was cancelled by that step (filesystem_cancelBrowseRead()),
+     *   which ends it ERROR with the cache already cleared;
+     * - the read finished DONE before the cancel took effect, but for a type
+     *   that is no longer the selected one.
+     * Both clear the cache, release input and leave one deferred retry, which
+     * the dispatcher in menu_pollPresetStatus() serves for the type on screen.
+     *
+     * Inputs: the terminal filesystem result (read before filesystem_ack()),
+     * the browse-read cancel witness, current nested Load/Save mode, selected
+     * voice/type/source, and menu_deferSelectionRequest. Outputs: on
      * success, one safe typed browser and optional coalesced selection; on
      * failure, no payload request and one visible error with the filesystem
-     * facade returned to IDLE.
-     * Affiliates: menu_requestInstrumentIndexLoad(),
+     * facade returned to IDLE; on a cancelled or stale read, a silent retry.
+     * Affiliates: menu_requestInstrumentIndexLoad(), menu_instrumentIndexReady(),
      * menu_instrumentLoadRequestSelection(), menu_instrumentLoadClampIndex(),
-     * menu_showFilesystemErrorOverlay(), filesystem_ack(), and both
-     * Instrument Load render paths.
+     * filesystem_browseReadWasCancelled(),
+     * filesystem_instrumentNameCacheLoaded().
      */
-    /* Snapshot the terminal result before acknowledgement can change it. */
     uint8_t index_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+    /* Read the cancel witness while the terminal status is still visible:
+     * filesystem_ack() below returns the facade to IDLE. */
+    uint8_t cancelled = filesystem_browseReadWasCancelled();
 
     filesystem_ack();
     menu_traceInstrumentEntry(
         AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_INDEX_COMPLETE,
         (uint8_t)!index_ok);
     if (menu_pendingPageSwitch != MENU_PENDING_PAGE_NONE) {
-        /* A physical exit owns the next safe boundary; do not reopen `.hcindex`. */
         filesystem_clearNameCache();
         menu_deferSelectionRequest = 0u;
         menu_storageBusy = 0u;
         return;
     }
+    /*
+     * A read cancelled by a later type step is not a failure (S090 item 7).
+     *
+     * Its own cancel path already cleared the cache; the type step that
+     * cancelled it left the newer request deferred. Release input and keep
+     * one retry armed; no overlay. menu_pendingPageSwitch above still wins.
+     */
+    if (cancelled) {
+        filesystem_clearNameCache();
+        menu_storageBusy = 0u;
+        menu_deferSelectionRequest = 1u;
+        return;
+    }
     if (!index_ok) {
-        /*
-         * Preserve the nested session while making a failed list inert.
-         * Clearing only the shared cache prevents a partial index from being
-         * selected; retaining voice/type, the resident `kit` label, and the
-         * hidden temporary snapshot leaves the existing retry/exit workflow
-         * available after the overlay is dismissed. No deferred payload may
-         * be posted from an error result.
-         */
         filesystem_clearNameCache();
         menu_deferSelectionRequest = 0u;
         menu_storageBusy = 0u;
         menu_showFilesystemErrorOverlay();
         return;
     }
-
-    /* The shared cache is valid again; reconcile the existing browser cursor. */
-    menu_instrumentLoadClampIndex();
-    if (menu_instrumentLoadActive &&
-        !menu_instrumentSaveMode &&
-        menu_instrumentLoadSource == MENU_INSTRUMENT_SOURCE_POOL) {
-        /* The shared cache is valid again, so reconcile a freely-scrolled
-         * provisional 0..999 position with the real typed index count. The
-         * renderer reads the pool stem directly from that cache: do not copy it
-         * into the identity row, which must remain the reversible `kit` name
-         * until a session boundary finalizes the selected pool file. */
-        menu_instrumentLoadShownIndex =
-            menu_instrumentLoadIndex[menu_instrumentLoadType];
+    /*
+     * A completed read for a type the user has already stepped away from
+     * (S090 item 7).
+     *
+     * The step's own cache clear may also have emptied it mid-read. Either
+     * way the cache does not hold the selected type, so it is discarded and
+     * the selected type is retried; publishing it would pair the shown type
+     * with another type's names.
+     */
+    if (!filesystem_instrumentNameCacheLoaded(menu_instrumentLoadType)) {
+        filesystem_clearNameCache();
+        menu_storageBusy = 0u;
+        menu_deferSelectionRequest = 1u;
+        return;
     }
-    menu_storageBusy = 0u;
-    if (menu_deferSelectionRequest &&
-        menu_instrumentLoadActive &&
-        !menu_instrumentSaveMode) {
-        /*
-         * Start only the newest Instrument number after restoring `.hcindex`.
-         * Keeping this inside the completion callback ensures the newest
-         * number is paired with its freshly copied `.hcindex` name before
-         * menu_instrumentLoadRequestSelection() posts the payload. That helper
-         * clears the defer flag and reasserts storage busy if Preset accepts
-         * the coalesced request.
-         */
-        menu_instrumentLoadRequestSelection();
-        if (menu_storageBusy)
-            return;
-    }
-    menu_repaintAll();
+    menu_instrumentIndexReady();
 }
 
 static void menu_traceInstrumentEntry(uint8_t phase, uint8_t failed)
@@ -7647,7 +7776,7 @@ static void menu_traceInstrumentEntry(uint8_t phase, uint8_t failed)
      * chain. Inputs: the phase's request/callback result and Menu's current
      * Scene/slot/type coordinate. Output: one existing eight-byte RAM trace
      * record; no filesystem request, UI state, or persistence decision changes.
-     * Why: HCNAMES, hidden `.hctmp`, and `.hcindex` are serialized but otherwise
+     * Why: HCNAMES and `.hcindex` are serialized but otherwise
      * indistinguishable to a user watching the blank `kit` label. Affiliates:
      * the matching request/completion sites and AutosaveTrace's logging stubs.
      */
@@ -7759,7 +7888,20 @@ static void menu_residentNameScratchFlushComplete(void)
     menu_residentNameScratchValid = 0u;
     menu_residentNameScratchScene =
         MENU_RESIDENT_NAME_SCRATCH_INVALID_SCENE;
-    filesystem_clearNameCache();
+    /*
+     * Keep the browser cache across the flush (S090 P1, 6a-i).
+     *
+     * What: the `.hcindex` cache is no longer cleared here.
+     * Why: this clear dates from before S058 Option 1C, when `.hcnames`
+     * transactions borrowed the browser cache. They now use the dedicated
+     * hcnames_name_mirror, so a flush cannot change any cached index row; the
+     * cache tag still names the domain it holds, and every browser reader
+     * checks that tag. Clearing here threw away the Instrument index on every
+     * VOICE change after a preview (LSR-01 flushes dirty rows on that change)
+     * and forced a 2.4-3 s index read for a type that was already loaded.
+     * Affiliates: menu_requestInstrumentIndexLoad() cache hit,
+     * filesystem_instrumentNameCacheLoaded(), filesystem_residentNames_tick().
+     */
     menu_storageBusy = 0u;
 
     if (menu_pendingPageSwitch == MENU_PENDING_PAGE_NONE &&
@@ -8123,7 +8265,16 @@ static uint8_t menu_requestResidentNameScratch(uint8_t scene)
     }
     menu_residentNameScratchScene = scene;
     menu_residentNameScratchValid = 0u;
-    filesystem_clearNameCache();
+    /*
+     * S090 P1 (6a-i): the browser cache is kept across this `.hcnames` read.
+     * The read fills only the dedicated hcnames_name_mirror (S058 Option 1C);
+     * the clear that stood here is from the time the read borrowed the
+     * browser cache. Keeping it lets the nested Instrument entry reuse a
+     * same-type index after a VOICE change. Index rows do not depend on the
+     * Scene, and every browser reader checks the cache domain, so a kept cache
+     * can never show a wrong name; a clean Scene change still disposes it
+     * through menu_endResidentNameScratchSession() above.
+     */
     prior_busy = menu_storageBusy;
     menu_storageBusy = 1u;
     menu_selectionGenerationSnapshot = menu_selectionGeneration;
@@ -8204,14 +8355,15 @@ static uint8_t menu_requestAppliedInstrumentNameUpdate(uint8_t slot)
 static void menu_invalidateInstrumentLoadTemp(void)
 {
     /*
-     * Dispose one Menu-visible temporary `kit` identity.
+     * Dispose one Menu-visible `kit` identity.
      *
      * Inputs: voice/type/mode/exit boundaries. Output: the nine-byte label and
-     * validity/type state are blanked, so no later cursor move can load a
-     * `.hctmp.<ext>` from a different session. The on-card file is deliberately
-     * treated as dirty scratch and is overwritten on the next same-type entry;
-     * it is excluded from `.hcindex` and never affects HCNAMES.
-     * Affiliates: menu_prepareInstrumentLoadTemp() and all nested boundaries.
+     * validity/type state are blanked, so no later cursor move can restore a
+     * snapshot from a different session. The RAM snapshot itself is simply
+     * left in place and overwritten by the next capture (S090 P1); stale
+     * `.hctmp.<ext>` files from older firmware stay hidden by the scanner and
+     * are safe to delete. Affiliates: menu_prepareInstrumentLoadTemp() and all
+     * nested boundaries.
      */
     memset(menu_instrumentTempName, 0, sizeof(menu_instrumentTempName));
     menu_instrumentTempType = INSTRUMENT_TYPE_UNKNOWN;
@@ -8254,111 +8406,131 @@ static uint8_t menu_instrumentLoadKitRowAvailable(void)
 static uint8_t menu_prepareInstrumentLoadTemp(void)
 {
     /*
-     * Persist the entry Instrument before exposing its `kit` row.
+     * Capture the entry voice for the `kit` row (S090 P1: RAM, synchronous).
      *
-     * Inputs: completed seven-row HCNAMES entry fetch plus current normal Load
-     * Scene/voice/type. Output: the original name is copied once into the
-     * nine-byte Menu field and Preset writes `.hctmp.<ext>`; caller returns
-     * while storage is busy and resumes typed-index loading after completion.
-     * Affiliates: menu_requestInstrumentEntryNames() and temp-save completion.
+     * What: copies the session voice into Preset's RAM snapshot and makes the
+     * `kit` row valid at once; the normal Load also keeps the original name in
+     * the nine-byte Menu field. Always returns 1, so the caller continues
+     * straight to the typed `.hcindex` in the same pass.
+     * Why: the former `.hctmp.<ext>` write was the longest phase of nested
+     * entry while playing (9-10 s in the S090 trace) and also blocked every
+     * VOICE change. A capture failure (only possible for an invalid slot or
+     * an unregistered type) leaves the `kit` row unavailable but no longer
+     * stops the browser from opening.
+     * Inputs: completed seven-row name scratch plus the current Load
+     * Scene/voice/type/mode. Outputs: menu_instrumentTempValid/Type/Name.
+     * Save mode has no reversible row and skips the capture. A valid snapshot
+     * from this session is kept (voice/type/mode boundaries invalidate it).
+     * Affiliates: menu_requestInstrumentEntryNames(),
+     * preset_captureInstrumentSnapshot(), menu_restoreInstrumentLoadTemp().
      */
-    if (menu_instrumentSaveMode)
+    if (menu_instrumentSaveMode || menu_instrumentTempValid)
         return 1u;
-    if (menu_instrumentLoadMorphMode) {
-        if (menu_instrumentTempValid)
-            return 1u;
-        if (menu_instrumentTempOperationPending)
-            return 0u;
-        menu_instrumentTempType = menu_instrumentLoadType;
-        if (!preset_saveInstrumentMorphTemp(menu_instrumentLoadScene,
-                                             menu_instrumentLoadSlot)) {
-            menu_traceInstrumentEntry(
-                AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_TEMP_REQUEST, 1u);
-            menu_invalidateInstrumentLoadTemp();
-            return 0u;
-        }
-        menu_traceInstrumentEntry(
-            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_TEMP_REQUEST, 0u);
-        menu_instrumentTempOperationPending = 1u;
-        menu_storageBusy = 1u;
-        return 0u;
+    /*
+     * InstrumentMrp displays the existing HCNAMES identity cell, so only the
+     * normal Load keeps its own copy of the original name for the `kit` row.
+     */
+    if (!menu_instrumentLoadMorphMode) {
+        memcpy(menu_instrumentTempName, menu_instrumentSaveName,
+               MENU_INSTRUMENT_SAVE_NAME_LEN);
+        menu_instrumentTempName[MENU_INSTRUMENT_SAVE_NAME_LEN] = '\0';
     }
-    if (menu_instrumentTempValid)
-        return 1u;
-    if (menu_instrumentTempOperationPending)
-        return 0u;
-    memcpy(menu_instrumentTempName, menu_instrumentSaveName,
-           MENU_INSTRUMENT_SAVE_NAME_LEN);
-    menu_instrumentTempName[MENU_INSTRUMENT_SAVE_NAME_LEN] = '\0';
     menu_instrumentTempType = menu_instrumentLoadType;
-    if (!preset_saveInstrumentTemp(menu_instrumentLoadScene,
-                                   menu_instrumentLoadSlot)) {
-        menu_traceInstrumentEntry(
-            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_TEMP_REQUEST, 1u);
+    if (!preset_captureInstrumentSnapshot(menu_instrumentLoadScene,
+                                          menu_instrumentLoadSlot)) {
         menu_invalidateInstrumentLoadTemp();
-        return 0u;
+        return 1u;
     }
-    menu_traceInstrumentEntry(
-        AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_TEMP_REQUEST, 0u);
-    menu_instrumentTempOperationPending = 1u;
-    menu_storageBusy = 1u;
-    return 0u;
+    menu_instrumentTempValid = 1u;
+    return 1u;
 }
 
 static void menu_restoreInstrumentLoadTemp(void)
 {
     /*
-     * Re-read the session-matched hidden source after cursor reaches `kit`.
+     * Restore the session snapshot after the cursor reaches `kit`
+     * (S090 P1: from RAM, committed in this call).
      *
-     * Inputs: an idle filesystem plus a valid Menu temporary type/name whose
-     * type still equals the current Load type and whose Scene/voice are
-     * unchanged by the surrounding session boundaries. Output: normal
-     * Instrument parsing/application restores parameters without changing
-     * HCNAMES; the original visible name remains menu-owned. Why: a direct
-     * `kit` row cannot safely repost its file while an earlier restore owns the
-     * one filesystem operation, nor may it read an old type's same-directory
-     * scratch after a type change. Affiliates: preset_loadInstrumentTemp(),
-     * menu_invalidateInstrumentLoadTemp(), and lower-row decrement handling.
+     * What: commits Preset's RAM snapshot to the browsed voice and arms the
+     * same bounded Instrument apply the file restore's completion armed. The
+     * normal Load first makes the original visible name authoritative again
+     * in the seven-name scratch (the row is marked dirty for the session's
+     * exit write); InstrumentMrp restores only its Morphable Morph cells.
+     *
+     * Why the guards: the file restore committed only from Preset's
+     * completion switch, which runs once every apply worker is idle and no
+     * Preset operation is in flight. A RAM restore is called directly (lower
+     * row crossing, the idle retry at the top of menu_pollPresetStatus(), and
+     * menu_finishInstrumentApplySession()), so it checks that same idle point
+     * itself: no Menu input owner, no Instrument or whole-Sound apply, no
+     * Preset operation, no Scene/Instrument apply worker. If it cannot run
+     * now, menu_instrumentKitRestorePending (set by every committed preview)
+     * keeps it owed and the idle retry runs it later. A snapshot from another
+     * type is refused, as the type-matched file name used to be.
+     *
+     * Inputs: menu_instrumentTempValid/Type/Name, the session
+     * Scene/voice/type/mode, menu_kitLoadSceneMask. Outputs: SceneData slot(s)
+     * through Preset, menu_instrumentSaveName, the dirty name scratch,
+     * menu_instrumentTempOperationPending (read once by
+     * menu_finishInstrumentApplySession()), menu_storageBusy for the apply.
+     * Affiliates: preset_restoreInstrumentSnapshot(),
+     * preset_restoreInstrumentMorphSnapshot(), menu_tickInstrumentApply(),
+     * menu_invalidateInstrumentLoadTemp(), lower-row decrement handling.
      */
-    if (menu_instrumentLoadMorphMode) {
-        if (menu_storageBusy ||
-            !menu_instrumentTempValid ||
-            menu_instrumentTempType >= INSTRUMENT_TYPE_UNKNOWN ||
-            menu_instrumentTempType != menu_instrumentLoadType)
-            return;
-        if (preset_loadInstrumentMorphTemp(
-                menu_instrumentLoadScene,
-                menu_instrumentLoadSlot,
-                menu_instrumentTempType)) {
-            /* The shared pending tag is consumed after the Morph worker
-             * drains, just like the normal reversible restore. */
-            menu_instrumentTempOperationPending = 1u;
-            menu_storageBusy = 1u;
-        }
-        return;
-    }
+    uint8_t accepted;
+
     if (menu_storageBusy ||
+        menu_instrumentApplyActive ||
+        menu_soundApplyActive ||
+        preset_getStatus() != PRESET_IDLE ||
+        !preset_applyWorkersIdle() ||
         !menu_instrumentTempValid ||
         menu_instrumentTempType >= INSTRUMENT_TYPE_UNKNOWN ||
         menu_instrumentTempType != menu_instrumentLoadType)
         return;
-    if (preset_loadInstrumentTemp(menu_instrumentLoadScene,
-                                 menu_instrumentLoadSlot,
-                                 menu_instrumentTempType)) {
+    accepted = menu_instrumentLoadMorphMode
+        ? preset_restoreInstrumentMorphSnapshot(menu_instrumentLoadScene,
+                                                menu_instrumentLoadSlot,
+                                                menu_instrumentTempType)
+        : preset_restoreInstrumentSnapshot(menu_instrumentLoadScene,
+                                           menu_instrumentLoadSlot,
+                                           menu_instrumentTempType);
+    if (!accepted)
+        return;
+    /*
+     * The restore is committed: the owed state is settled, and the shared tag
+     * tells menu_finishInstrumentApplySession() that the apply now starting
+     * belongs to this restore (it clears the tag and posts nothing more).
+     */
+    menu_instrumentKitRestorePending = 0u;
+    menu_instrumentTempOperationPending = 1u;
+    if (!menu_instrumentLoadMorphMode) {
         /*
-         * Preserve the accepted operation's identity through asynchronous
-         * parsing and bounded DSP apply.
-         *
-         * Input: Preset accepted the exact `.hctmp.<ext>` restore request.
-         * Output: completion can restore the retained name, and the apply
-         * finisher knows this request is already the requested `kit` state.
-         * Why: the visible source row can change under free encoder scrolling,
-         * so it is not a safe completion discriminator. Affiliates: the shared
-         * declaration above and PRESET_OP_INSTRUMENT_LOAD below.
+         * The original visible identity becomes authoritative again before the
+         * bounded runtime apply starts (as the file restore's completion did):
+         * one Instrument HCNAMES row is marked dirty for the session exit.
          */
-        menu_instrumentTempOperationPending = 1u;
-        menu_storageBusy = 1u;
+        memcpy(menu_instrumentSaveName, menu_instrumentTempName,
+               MENU_INSTRUMENT_SAVE_NAME_LEN);
+        menu_instrumentSaveName[MENU_INSTRUMENT_SAVE_NAME_LEN] = '\0';
+        menu_refreshResidentNameScratchInstrument(menu_kitLoadSceneMask,
+                                                  menu_instrumentLoadSlot);
+        /*
+         * The committed image can change one slot's layout. Drop stale members
+         * from every directional VOICE mask before the next edit (S072 Step 10
+         * F5), as menu_startInstrumentApply() does for a pool load.
+         */
+        bank_revalidateVoiceEditMasks();
     }
+    /*
+     * Hold input through the bounded apply, exactly as
+     * menu_startInstrumentApply() / menu_startInstrumentMorphApply() do;
+     * menu_tickInstrumentApply() releases it when Preset's worker drains.
+     */
+    menu_instrumentApplyActive = 1u;
+    menu_instrumentApplySlot = menu_instrumentLoadSlot;
+    menu_storageBusy = 1u;
+    menu_refreshLoadSceneLeds();
 }
 
 static uint8_t menu_finishInstrumentApplySession(void)
@@ -8463,10 +8635,10 @@ static void menu_requestInstrumentEntryNames(void)
             return;
     }
     /*
-     * Normal Instrument Load must finish the durable `kit` snapshot before
-     * `.hcindex` browsing begins. This serializes the SD operations and keeps
-     * the one temporary filename out of the browser cache. Save/Morph paths
-     * bypass it because neither offers the reversible parameter row.
+     * Normal Instrument Load captures its `kit` snapshot before `.hcindex`
+     * browsing begins (S090 P1: a RAM copy, so the index request follows in
+     * the same pass). Save/Morph paths bypass the name copy because neither
+     * offers the reversible name row.
      */
     if (!menu_prepareInstrumentLoadTemp())
         return;
@@ -8482,7 +8654,43 @@ static void menu_requestInstrumentIndexLoad(instrument_type_t type)
      * machine has loaded that type's general-purpose name cache. A rejected
      * request is deferred through the existing selection retry path, which
      * handles a still-busy filesystem without inventing a second queue.
-    */
+     */
+    /*
+     * Reuse an index that is already loaded (S090 P1, 6a-i).
+     *
+     * What: when the browser cache already holds a completed index of this
+     * type, the browser is published at once with no card access.
+     * Why: a VOICE change between two voices of the same type, a Morph
+     * toggle, or a return to the same type re-requested the same file
+     * (2.4-3 s while playing). Kit has reused its index the same way since
+     * S054 ("Branch B" in menu_requestKitEntryNames()).
+     * Safety: filesystem_instrumentNameCacheLoaded() is true only for the
+     * INSTRUMENT domain of this exact type while the facade is idle, so a read
+     * or rebuild still in flight is never reused; every writer of the cache
+     * either republishes it whole or clears its tag.
+     */
+    if (filesystem_instrumentNameCacheLoaded(type)) {
+        menu_instrumentIndexReady();
+        return;
+    }
+    /*
+     * Refuse non-destructively while the facade is busy (S090 P1, item 7).
+     *
+     * What: arm the one deferred retry and leave the cache, the generation
+     * snapshot and menu_storageBusy exactly as they are.
+     * Why: a type step is now accepted while an older index read runs. That
+     * read owns menu_storageBusy until its completion; the former refusal
+     * path below cleared the flag and the cache under it, which reopened
+     * every input while the read was still in flight (the S082 first-boot
+     * freeze route recorded in menu_handleLoadSaveKnobDelta()). The same
+     * pattern as menu_requestResidentNameScratch() (S054).
+     */
+    if (filesystem_status() == FS_STATUS_BUSY) {
+        menu_traceInstrumentEntry(
+            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_INDEX_REQUEST, 1u);
+        menu_deferSelectionRequest = 1u;
+        return;
+    }
     filesystem_clearNameCache();
     menu_storageBusy = 1u;
     menu_selectionGenerationSnapshot = menu_selectionGeneration;
@@ -8500,7 +8708,8 @@ static void menu_requestInstrumentIndexLoad(instrument_type_t type)
          * path this function relies on can never fire, and nothing else clears
          * the flag. The result is a permanently locked nested Instrument menu
          * with no error overlay and no trace. Clearing it here restores the
-         * intended "wait, then retry once idle" behaviour.
+         * intended "wait, then retry once idle" behaviour. Since S090 this is
+         * reached only with an idle facade (an invalid type or directory).
          */
         menu_storageBusy = 0u;
         menu_deferSelectionRequest = 1u;
@@ -8614,11 +8823,140 @@ static void menu_requestKitEntryNames(void)
     }
 }
 
+/*
+ * Map a top-level Load/Save type to its slot-independent root index
+ * (S090 P3, C2-4).
+ *
+ * What: returns 1 and the index kind for Scene, Bank and Pattern; 0 for
+ * every other type.
+ * Why: these three browsers read one `.hcindex` for the whole numbered root,
+ * so the same index serves every slot, and a scroll on them never loads
+ * anything (explicit OK). Kit/KitMrp are excluded because Kit Load loads on
+ * scroll and its stale-read path must keep resolving the newest slot.
+ * Inputs: what (SAVE_TYPE_*). Outputs: *kind when 1 is returned.
+ * Accessors: menu_loadSaveSlotIndexReady(), menu_blankLoadSaveNameWhileUnloaded(),
+ * menu_parseEncoder() (allow_browse_nav).
+ */
+static uint8_t menu_loadSaveSlotIndexKind(uint8_t what,
+                                          fs_library_index_kind_t *kind)
+{
+    switch (what) {
+    case SAVE_TYPE_SCENE:   *kind = FS_LIBRARY_INDEX_SCENE;   return 1u;
+    case SAVE_TYPE_BANK:    *kind = FS_LIBRARY_INDEX_BANK;    return 1u;
+    case SAVE_TYPE_PATTERN: *kind = FS_LIBRARY_INDEX_PATTERN; return 1u;
+    default:                                                   return 0u;
+    }
+}
+
+/*
+ * Report whether a numbered root's index is completely resident (S090 P3).
+ *
+ * What: 1 when the shared cache carries this kind's tag and no Menu index
+ * read is running.
+ * Why: filesystem_requestReloadLibraryIndex() tags the cache when the read
+ * starts, so filesystem_libraryNameCacheLoaded() is already true while rows
+ * are still being read. Since P3 the encoder can act during that read, so
+ * Menu must tell "tagged" from "complete". A failed or cancelled read clears
+ * the tag, so an idle tag means the whole index landed.
+ * Inputs: kind. Accessors: menu_requestCurrentLoadSaveSelection(),
+ * menu_blankLoadSaveNameWhileUnloaded().
+ * Affiliates: filesystem_libraryNameCacheLoaded(),
+ * filesystem_browseReadRunning().
+ */
+static uint8_t menu_libraryIndexResident(fs_library_index_kind_t kind)
+{
+    return (uint8_t)(filesystem_libraryNameCacheLoaded(kind) &&
+                     !filesystem_browseReadRunning());
+}
+
+/*
+ * Report whether the shown top-level Scene/Bank/Pattern browser already has
+ * its own index resident (S090 P3, C2-4).
+ *
+ * What: 1 when the page is Load or Save, no nested Instrument mode is active,
+ * the type is Scene/Bank/Pattern, and the shared cache carries that type's
+ * domain tag.
+ * Why: a read completing after the user turned the slot number is stale only
+ * by generation; its rows are still exactly the rows of the current type.
+ * Accepting it avoids a second 2.4-3 s read per number turn. A read for a
+ * type the user has left carries the old type's tag (or none after a cancel),
+ * so it never matches.
+ * Inputs: page, nested flag, menu_saveOptions.what, cache tag.
+ * Accessors: menu_libraryIndexLoadComplete().
+ * Affiliates: filesystem_libraryNameCacheLoaded(),
+ * filesystem_finishCancelledBrowseRead().
+ */
+static uint8_t menu_loadSaveSlotIndexReady(void)
+{
+    fs_library_index_kind_t kind;
+
+    if ((menu_activePage != LOAD_PAGE && menu_activePage != SAVE_PAGE) ||
+        menu_instrumentLoadActive ||
+        !menu_loadSaveSlotIndexKind(menu_saveOptions.what, &kind))
+        return 0u;
+    return (uint8_t)filesystem_libraryNameCacheLoaded(kind);
+}
+
+/*
+ * Blank the Save page's name field while the shown browser's index is not
+ * resident (S090 P3, C2-5 / Q1; blank means busy).
+ *
+ * What: on the top-level Save page for Scene/Bank/Pattern, and on the Load
+ * page for Kit/KitMrp, writes eight spaces to preset_currentName when the
+ * type's index is not completely resident (menu_libraryIndexResident()).
+ * Why: those pages paint preset_currentName rather than a cache row
+ * (menu_repaintLoadSavePage()), so after a type step or a number turn during
+ * a read the field kept the previous type's or slot's name, which reads as a
+ * real name. The Load page's cache-row types already show blanks. The name
+ * is filled again by menu_libraryIndexLoadComplete() (C1-1) or by the Kit
+ * Load copy when the read lands.
+ * Inputs: page, nested flag, menu_saveOptions.what, cache tags.
+ * Outputs: preset_currentName.
+ * Accessors: menu_paintTypeStepWhileBusy(), menu_parseEncoder() busy repaint
+ * (C2-3).
+ */
+static void menu_blankLoadSaveNameWhileUnloaded(void)
+{
+    fs_library_index_kind_t kind;
+    uint8_t what = menu_saveOptions.what;
+
+    if (menu_instrumentLoadActive)
+        return;
+    if (menu_activePage == SAVE_PAGE &&
+        menu_loadSaveSlotIndexKind(what, &kind) &&
+        !menu_libraryIndexResident(kind)) {
+        memset(preset_currentName, ' ', 8u);
+    } else if (menu_activePage == LOAD_PAGE &&
+               (what == SAVE_TYPE_KIT || what == SAVE_TYPE_KIT_MORPH) &&
+               !menu_libraryIndexResident(FS_LIBRARY_INDEX_KIT)) {
+        memset(preset_currentName, ' ', 8u);
+    }
+}
+
 static void menu_libraryIndexLoadComplete(void)
 {
     uint8_t index_ok = (uint8_t)(filesystem_status() == FS_STATUS_DONE);
+    /*
+     * A completed Scene/Bank/Pattern read is current for any slot of the
+     * same type (S090 P3, C2-4).
+     *
+     * What: besides an unchanged selection generation, a DONE read whose
+     * cache tag equals the shown top-level Scene/Bank/Pattern type counts as
+     * current.
+     * Why: since P3 the slot number may be turned while the read runs
+     * (allow_browse_nav in menu_parseEncoder()). Each turn bumps the
+     * generation, and the stale branch below would clear the cache and read
+     * the whole index again, 2.4-3 s per turn. The index of a numbered root
+     * is slot-independent, so only the shown slot changed. Kit/KitMrp keep
+     * the generation rule (Kit Load loads on scroll). A read for a type the
+     * user has left carries the old tag, or none after a cancel, and stays
+     * stale. Generation bumps from page switches and nested Instrument
+     * entry/exit are excluded by the page and nested checks.
+     * Inputs: index_ok, generation pair, menu_loadSaveSlotIndexReady().
+     */
     uint8_t coordinate_current = (uint8_t)(
-        menu_selectionGenerationSnapshot == menu_selectionGeneration);
+        menu_selectionGenerationSnapshot == menu_selectionGeneration ||
+        (index_ok && menu_loadSaveSlotIndexReady()));
     uint8_t continue_bank_preview;
 
     /*
@@ -8658,6 +8996,30 @@ static void menu_libraryIndexLoadComplete(void)
         memset(preset_currentName, ' ', 8u);
         return;
     }
+    /*
+     * Dispose the cache of a failed read (S090 P1 assessment A2).
+     *
+     * What: when the current request ended ERROR, the browser cache is
+     * cleared before input is released.
+     * Why: filesystem_requestReloadLibraryIndex() tags the cache with its
+     * domain when the request starts, so a failed read left that tag over
+     * empty rows. The slot readers then showed `Empty` for every slot, and
+     * filesystem_libraryNameCacheLoaded() (Kit Branch B in
+     * menu_requestKitEntryNames(), menu_requestCurrentLoadSaveSelection())
+     * treated the domain as loaded, so no retry was made. Since S090 the Kit
+     * path can also reach Branch B after a dirty-name flush without any
+     * other clear (M-05/M-06). With the tag gone, the slot readers show blank
+     * names and the next entry or selection reads the index again. This
+     * mirrors menu_instrumentIndexLoadComplete()'s failure branch; no
+     * overlay is added, so the page behaves as before apart from the names.
+     * A read cancelled by a type step was already cleared by filesystem, so
+     * clearing again is harmless.
+     * Inputs: index_ok. Output: an untagged cache.
+     * Affiliates: filesystem_prepareLibraryNameCache(),
+     * filesystem_finishCancelledBrowseRead().
+     */
+    if (!index_ok)
+        filesystem_clearNameCache();
     continue_bank_preview = (uint8_t)(
         index_ok &&
         (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
@@ -8673,6 +9035,51 @@ static void menu_libraryIndexLoadComplete(void)
                filesystem_kitSlotName(
                    menu_currentPresetNr[menu_saveOptions.what]),
                8u);
+    }
+    if (index_ok && menu_loadSaveSlotIndexReady()) {
+        uint8_t what = menu_saveOptions.what;
+        uint16_t slot = menu_currentPresetNr[what];
+
+        /*
+         * Show the Save page's slot name when the index lands (S090 P3,
+         * C1-1).
+         *
+         * What: on the Save page, copies the current slot's name for
+         * Scene/Bank/Pattern into preset_currentName, the buffer that page
+         * paints.
+         * Why: only a number turn made this copy
+         * (menu_requestCurrentLoadSaveSelection(), Scene/Bank/Pattern
+         * branch), so after entry or a type step the Save page showed blanks
+         * or the previous name until the encoder moved (SD_CARD_TEST_3
+         * defect 1). The copy is the same one the number path makes, so the
+         * page shows what a turn would show. The Load page paints these
+         * types from the cache directly. Kit/KitMrp Save is untouched: its
+         * field is seeded from the resident Kit row by design.
+         * Inputs: the now-resident index and the shown slot.
+         * Outputs: preset_currentName (Save page only).
+         */
+        if (menu_activePage == SAVE_PAGE) {
+            if (what == SAVE_TYPE_SCENE)
+                memcpy(preset_currentName,
+                       filesystem_sceneSlotName(slot), 8u);
+            else if (what == SAVE_TYPE_BANK)
+                memcpy(preset_currentName,
+                       filesystem_bankSlotName(slot), 8u);
+            else
+                memcpy(preset_currentName,
+                       filesystem_patternSlotName(slot), 8u);
+        }
+        /*
+         * Retire the retry this read satisfies (S090 P3, C1-2).
+         *
+         * What: clears the deferred selection request.
+         * Why: a number turn admitted during the read re-requested the
+         * selection, was refused while busy and left this retry. The read
+         * that just landed is the read it wanted; running the retry after the
+         * repaint would redo the selection and, for Bank, post a second child
+         * preview (continue_bank_preview below already posts one).
+         */
+        menu_deferSelectionRequest = 0u;
     }
     menu_storageBusy = 0u;
     if (continue_bank_preview) {
@@ -8863,6 +9270,21 @@ static void menu_requestLibraryIndexLoad(uint8_t what)
     } else {
         kind = (what == SAVE_TYPE_BANK)
             ? FS_LIBRARY_INDEX_BANK : FS_LIBRARY_INDEX_KIT;
+    }
+    /*
+     * Refuse non-destructively while the facade is busy (S090 P1, item 7).
+     *
+     * What: arm the deferred retry before touching the generation snapshot,
+     * the cache or menu_storageBusy.
+     * Why: a type step may now arrive while an older index read runs. Keeping
+     * the snapshot unchanged lets that read's completion recognise itself as
+     * stale (menu_libraryIndexLoadComplete()'s coordinate check), so it clears
+     * the cache, releases input and keeps the retry, instead of being taken
+     * for the current request.
+     */
+    if (filesystem_status() == FS_STATUS_BUSY) {
+        menu_deferSelectionRequest = 1u;
+        return;
     }
     menu_selectionGenerationSnapshot = menu_selectionGeneration;
     filesystem_clearNameCache();
@@ -9266,6 +9688,9 @@ static void menu_instrumentLoadStepType(int8_t inc)
     uint8_t current_index = 0u;
     uint8_t i;
     int8_t direction = (inc < 0) ? -1 : 1;
+    /* S090 item 7: the type before this step, to tell a real type change
+     * (which disposes a running index read) from a Morph toggle. */
+    instrument_type_t previous_type = menu_instrumentLoadType;
 
     /*
      * Step through the logical Instrument Load type list.
@@ -9366,6 +9791,21 @@ static void menu_instrumentLoadStepType(int8_t inc)
                 menu_instrumentLoadShownType = entry->type;
             }
             menu_selectionGeneration++;
+            /*
+             * Dispose the index read for the type just left (S090 item 7).
+             *
+             * What: a step to another type asks a running `.hcindex` read to
+             * stop at its next safe phase (it finishes ERROR with the cache
+             * cleared, and its completion retires it quietly).
+             * Why: only the type the user settles on needs its list; reading
+             * each type passed over cost a full read per step. A step that
+             * lands on the same type (Morph toggle) keeps the read, because
+             * its result is still the one needed.
+             * Affiliates: filesystem_cancelBrowseRead(),
+             * menu_instrumentIndexLoadComplete().
+             */
+            if (menu_instrumentLoadType != previous_type)
+                filesystem_cancelBrowseRead();
             if (menu_residentNameDirtySceneMask != 0u &&
                 menu_endResidentNameScratchSession())
                 return;
@@ -11311,7 +11751,7 @@ static void menu_handleLoadSaveKnobDelta(uint8_t knobNr, int8_t delta)
      * allow_load_number_scroll). Pot behaviour is otherwise unchanged (S14).
      * Why: the pots bypassed this gate, so pot 1 could change page, type or
      * nested Instrument mode and clear the shared name cache while an index
-     * load, HCNAMES read, `.hctmp` save, Instrument apply or Bank preview
+     * load, HCNAMES read, `.hctmp` save (removed in S090), Instrument apply or Bank preview
      * owned the filesystem facade. Completions then ran against a changed
      * context and the busy owner could be lost - the most probable route to
      * the S082 first-boot Load/Save freeze (review section 12.3).
@@ -11776,6 +12216,73 @@ static void menu_formatWaveValue3(const menu_cell_t *cell, uint8_t value,
 }
 
 /*
+ * Whether a cell is the transient wav cell of a WFd slot (S089 P2).
+ *
+ * What:       1 for an instrument cell whose descriptor is transient_wave on a
+ *             slot whose chain is VOICE_CHAIN_WAVEFOLDER; else 0.
+ * Why:        under WFd the wav byte selects a fold type, so its names
+ *             (foldTypeNames) and count (VOICE_FOLD_COUNT) replace the
+ *             transient list's; every other cell keeps the MENU_TRANS path.
+ * Inputs:     cell (may be NULL).  Outputs: 0/1.
+ * Accessors:  menu_formatCellValue3(), va_formatValue3(), menu_clampCellValue(),
+ *             the single-parameter edit painter, menu_instrumentCellLabels().
+ * Affiliates: instrumentManager_slotVoiceChain(); foldTypeNames.
+ */
+static uint8_t menu_cellIsFoldWave(const menu_cell_t *cell)
+{
+    return (uint8_t)(cell && cell->kind == MENU_CELL_INSTRUMENT &&
+        cell->descriptor &&
+        strcmp(cell->descriptor->file_key, "transient_wave") == 0 &&
+        instrumentManager_slotVoiceChain(cell->slot) ==
+            VOICE_CHAIN_WAVEFOLDER);
+}
+
+/*
+ * Category and long name of an instrument cell, by chain (S089 P2).
+ *
+ * What:       the descriptor's category/long name, except for the three
+ *             transient rows of a WFd slot, which read "WavFldr" and:
+ *               transient_wave  "FoldType"
+ *               transient_vol   "Depth"
+ *               transient_freq  by fold type: "Bias" (Tri, Sin, TrI),
+ *                               "Decay" (TrD, SnD), "Asymmtry" (Asn),
+ *                               "Harmonic" (Chb), "Ratio" (Fd2).
+ *             The 3-character short names (wav vol frq) are unchanged.
+ * Why:        plan §5 step 5: the same three cells mean different things per
+ *             chain; only the labels change, never the stored values.
+ * Inputs:     slot, descriptor, cat/lng (outputs, never NULL on return).
+ * Outputs:    *cat, *lng.
+ * Accessors:  the single-parameter view header (menu.c:14452-14456), the
+ *             step-automation target line (14168-14182) and the modulation
+ *             target full display (6290-6291).
+ * Affiliates: instrumentManager_slotVoiceChain(), instrumentManager_slotFoldType().
+ */
+static void menu_instrumentCellLabels(uint8_t slot,
+                                      const ParamDescriptor *descriptor,
+                                      const char **cat, const char **lng)
+{
+    static const char *const frqNames[VOICE_FOLD_COUNT] = {
+        "Bias", "Decay", "Bias", "Decay", "Asymmtry", "Harmonic", "Bias",
+        "Ratio",
+    };
+
+    *cat = descriptor->category;
+    *lng = descriptor->long_name;
+    if (instrumentManager_slotVoiceChain(slot) != VOICE_CHAIN_WAVEFOLDER)
+        return;
+    if (strcmp(descriptor->file_key, "transient_wave") == 0) {
+        *cat = "WavFldr";
+        *lng = "FoldType";
+    } else if (strcmp(descriptor->file_key, "transient_vol") == 0) {
+        *cat = "WavFldr";
+        *lng = "Depth";
+    } else if (strcmp(descriptor->file_key, "transient_freq") == 0) {
+        *cat = "WavFldr";
+        *lng = frqNames[instrumentManager_slotFoldType(slot)];
+    }
+}
+
+/*
  * Name of a user one-shot transient entry (S087 P3).
  *
  * What:       for a transient value from TRANSIENT_USER_FIRST on that selects
@@ -11799,6 +12306,28 @@ static void menu_formatTransientName(uint8_t value, char *nameDst)
         return;
     sampleMemory_getDisplayName((uint8_t)(value - TRANSIENT_USER_FIRST), name);
     memcpy(nameDst, name, SAMPLE_DISPLAY_NAME_LEN);
+}
+
+/*
+ * Name table of a tagged DTYPE_ON_OFF cell (S088 D12; S089 P2).
+ *
+ * What:       returns the 3-character name table for a dtype high-nibble tag:
+ *             ONOFF_TAG_VOICE_CHAIN -> voiceChainNames (T+D, WFd); every other
+ *             non-zero tag -> oscRunNames (rst, fre, itp), exactly as before.
+ *             Entry [0][0] is the count; names start at [1].
+ * Why:        the six tagged on/off sites in this file used oscRunNames
+ *             directly ("tag != 0 means run mode"); the second tag needs its
+ *             own table, and one helper keeps display, clamp, automation max
+ *             and the step-edit line in agreement.
+ * Inputs:     tag (dtype >> 4, non-zero).  Outputs: the table.
+ * Accessors:  menu_formatCellValue3(), va_formatValue3(), menu_clampCellValue(),
+ *             menu_automationValueMax(), menu_formatAutomationValue3(), the
+ *             single-parameter step-edit display.
+ * Affiliates: ONOFF_TAG_* / oscRunNames / voiceChainNames (MenuText.h).
+ */
+static const char (*menu_onoffTagNames(uint8_t tag))[4]
+{
+    return (tag == ONOFF_TAG_VOICE_CHAIN) ? voiceChainNames : oscRunNames;
 }
 
 static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *buf)
@@ -11939,6 +12468,15 @@ _Static_assert((sizeof(waveformNames) / sizeof(waveformNames[0])) - 1u == OSC_SA
 _Static_assert((sizeof(transientNames) / sizeof(transientNames[0])) - 1u ==
                TRANSIENT_USER_FIRST,
                "transientNames must list Snp, Ofs and every built-in click");
+/* S089 P2: the chain and fold name tables must list every stored value. */
+_Static_assert((sizeof(voiceChainNames) / sizeof(voiceChainNames[0])) - 1u ==
+                   VOICE_CHAIN_COUNT,
+               "voiceChainNames must list every VOICE_CHAIN_* value");
+_Static_assert((sizeof(foldTypeNames) / sizeof(foldTypeNames[0])) - 1u ==
+                   VOICE_FOLD_COUNT &&
+               (sizeof(foldTypeLongNames) / sizeof(foldTypeLongNames[0])) - 1u ==
+                   VOICE_FOLD_COUNT,
+               "fold name tables must list every VOICE_FOLD_* type");
 /* S087 B: the typ table and the OSC_TYPE_* list must stay in step. */
 _Static_assert((sizeof(oscTypeNames) / sizeof(oscTypeNames[0])) - 1u == OSC_TYPE_COUNT,
                "oscTypeNames must list every OSC_TYPE");
@@ -13308,15 +13846,18 @@ static uint8_t menu_automationValueMax(const ParamDescriptor *descriptor)
          * S088 P0 §2.1 D12: tagged on/off automation max.
          *
          * What:       with a non-zero dtype high nibble the automation max is
-         *             count-1 from the tag's name table (oscRunNames: 2); a
+         *             count-1 from the tag's name table
+         *             (menu_onoffTagNames(): run modes or voice chains); a
          *             plain on/off stays 1.
          * Why:        step automation needs the max for its bar and for the
          *             encoder increment clamp (rst/fre/itp are three values).
          * Inputs:     descriptor->dtype.  Outputs: the uint8_t maximum.
-         * Affiliates: oscRunNames[0][0]; ONOFF_TAG_OSC_RUN.
+         * Affiliates: menu_onoffTagNames(); ONOFF_TAG_* (MenuText.h).
          */
+        /* S089 P2: the max follows the tag (run mode or voice chain). */
         if ((uint8_t)(descriptor->dtype >> 4) != 0u)
-            return (uint8_t)(oscRunNames[0][0] - 1u);
+            return (uint8_t)(menu_onoffTagNames(
+                (uint8_t)(descriptor->dtype >> 4))[0][0] - 1u);
         return 1u;
     case DTYPE_MIX_FM:
         /* S085 P1: osc2 mod mode 0..3; step automation may select snc/rng. */
@@ -13360,9 +13901,12 @@ static void menu_formatAutomationValue3(const ParamDescriptor *descriptor,
     case DTYPE_ON_OFF:
         /* S088 P0 §2.1 D12: tagged on/off automation display. */
         if ((uint8_t)(descriptor->dtype >> 4) != 0u) {
-            const uint8_t idx = (value < (uint8_t)oscRunNames[0][0])
+            /* S089 P2: the table follows the tag (run mode or voice chain). */
+            const char (*names)[4] = menu_onoffTagNames(
+                (uint8_t)(descriptor->dtype >> 4));
+            const uint8_t idx = (value < (uint8_t)names[0][0])
                 ? value : 0u;
-            memcpy(buf, oscRunNames[1 + idx], 3);
+            memcpy(buf, names[1 + idx], 3);
         } else {
             memcpy(buf, value ? menuText_on : menuText_off, 3);
         }
@@ -13420,6 +13964,15 @@ static void menu_formatVoiceAutomationValue3(uint16_t target,
         cell.descriptor_index = instrumentParam_local(target);
         cell.descriptor = descriptor;
         menu_formatWaveValue3(&cell, value, buf);
+        return;
+    }
+    /* S089 P2: a WFd slot's automated wav value names its fold type. */
+    if (descriptor && instrumentParam_isVoiceParameter(target) &&
+        strcmp(descriptor->file_key, "transient_wave") == 0 &&
+        instrumentManager_slotVoiceChain(instrumentParam_slot(target)) ==
+            VOICE_CHAIN_WAVEFOLDER) {
+        memcpy(buf, foldTypeNames[1u + ((value < VOICE_FOLD_COUNT)
+                                        ? value : VOICE_FOLD_COUNT - 1u)], 3);
         return;
     }
     menu_formatAutomationValue3(descriptor, value, buf);
@@ -13970,6 +14523,17 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
         if (menu_stepAutomationTargetOff(vt))
             return 0u;
         max_val = menu_automationValueMax(desc);
+        /*
+         * S089 P2: under WFd the transient wav byte is a fold type, so step
+         * automation stops at the last fold type. menu_automationValueMax()
+         * has no slot; this caller knows it. Values that arrive another
+         * way are clamped by voiceFold_process() at render.
+         */
+        if (desc && instrumentParam_isVoiceParameter(vt) &&
+            strcmp(desc->file_key, "transient_wave") == 0 &&
+            instrumentManager_slotVoiceChain(instrumentParam_slot(vt)) ==
+                VOICE_CHAIN_WAVEFOLDER)
+            max_val = (uint8_t)(VOICE_FOLD_COUNT - 1u);
         if (sceneModTarget_isSceneTarget(vt)) {
             const scene_mod_target_descriptor_t *scene_desc =
                 sceneModTarget_descriptor(vt);
@@ -14166,19 +14730,21 @@ static void menu_repaintStepAutomation(void)
                           instrument->type, instrumentParam_local(target))
                     : 0;
                 if (descriptor) {
+                    /* S089 P2: WFd relabels the transient cells. */
+                    const char *cat = descriptor->category;
+                    const char *lng = descriptor->long_name;
                     uint8_t i = 0u;
                     uint8_t j = 0u;
 
-                    while (i < 14u && descriptor->category &&
-                           descriptor->category[i]) {
+                    menu_instrumentCellLabels(slot, descriptor, &cat, &lng);
+                    while (i < 14u && cat && cat[i]) {
                         editDisplayBuffer[1][2u + i] =
-                            descriptor->category[i];
+                            cat[i];
                         i++;
                     }
-                    while (i < 14u && descriptor->long_name &&
-                           descriptor->long_name[j]) {
+                    while (i < 14u && lng && lng[j]) {
                         editDisplayBuffer[1][2u + i] =
-                            descriptor->long_name[j++];
+                            lng[j++];
                         i++;
                     }
                 } else {
@@ -14450,10 +15016,15 @@ static void menu_repaintGeneric(void)
             } else if (cell.kind == MENU_CELL_INSTRUMENT ||
                        cell.kind == MENU_CELL_KIT_SETTING ||
                        cell.kind == MENU_CELL_EFFECT) {
-                menu_copyPaddedField(&editDisplayBuffer[0][0],
-                                     cell.descriptor->category, 8u);
-                menu_copyPaddedField(&editDisplayBuffer[0][8],
-                                     cell.descriptor->long_name, 8u);
+                /* S089 P2: WFd relabels the transient cells. */
+                const char *cat = cell.descriptor->category;
+                const char *lng = cell.descriptor->long_name;
+
+                if (cell.kind == MENU_CELL_INSTRUMENT)
+                    menu_instrumentCellLabels(cell.slot, cell.descriptor,
+                                              &cat, &lng);
+                menu_copyPaddedField(&editDisplayBuffer[0][0], cat, 8u);
+                menu_copyPaddedField(&editDisplayBuffer[0][8], lng, 8u);
             } else {
                 const char *cat = catNames[valueNames[cell.text_id].category];
                 const char *lng = longNames[valueNames[cell.text_id].longName];
@@ -14488,9 +15059,12 @@ static void menu_repaintGeneric(void)
                  * The local `dtype` is the masked low nibble; read the high
                  * nibble from the cell itself (same rule as va_formatValue3()). */
                 if ((uint8_t)(menu_cellDtype(&cell) >> 4) != 0u) {
-                    const uint8_t idx = (value < (uint8_t)oscRunNames[0][0])
+                    /* S089 P2: the table follows the tag. */
+                    const char (*names)[4] = menu_onoffTagNames(
+                        (uint8_t)(menu_cellDtype(&cell) >> 4));
+                    const uint8_t idx = (value < (uint8_t)names[0][0])
                         ? (uint8_t)value : 0u;
-                    memcpy(&editDisplayBuffer[1][13], oscRunNames[1 + idx], 3);
+                    memcpy(&editDisplayBuffer[1][13], names[1 + idx], 3);
                 } else if (value==1)
                     memcpy(&editDisplayBuffer[1][13], menuText_on, 3);
                 else
@@ -14515,6 +15089,16 @@ static void menu_repaintGeneric(void)
                     menu_formatWaveCell(&cell, (uint8_t)value,
                                         &editDisplayBuffer[1][0],
                                         &editDisplayBuffer[1][13]);
+                    break;
+                }
+                /* S089 P2: a WFd wav cell: the long fold name on the left, the
+                 * 3-character code on the right. */
+                if (menu_cellIsFoldWave(&cell)) {
+                    const uint8_t t = (value < VOICE_FOLD_COUNT)
+                        ? (uint8_t)value : (uint8_t)(VOICE_FOLD_COUNT - 1u);
+
+                    memcpy(&editDisplayBuffer[1][0], foldTypeLongNames[1u + t], 8);
+                    memcpy(&editDisplayBuffer[1][13], foldTypeNames[1u + t], 3);
                     break;
                 }
                 /* S087 P3: a user one-shot transient shows its name on the
@@ -15144,6 +15728,43 @@ checkvalid:
     (void)needLock; /* lockPotentiometerFetch stubbed */
 }
 
+/*
+ * Paint a Load/Save type step while storage is busy (S090 P1, item 7).
+ *
+ * What: when menu_storageBusy is set after a type step, repaint the whole
+ * page now: the new type label appears and its names are blank. For a
+ * top-level Kit/KitMrp Load the name buffer is blanked first, because that
+ * page shows preset_currentName rather than a cache row.
+ * Why: the encoder path repaints only when storage is idle
+ * (menu_parseEncoder() returns before its repaint while busy), so a type step
+ * that started a read, or that was accepted while an older read runs, left
+ * the previous type's frame on screen until the read completed. The user must
+ * see each step at once. Blank names mean busy (user rule, S090 U18): the
+ * other types' names are blank already, because their slot readers check the
+ * cache domain and the step clears the cache.
+ * S090 P3 (C2-5, Q1): the top-level Save page's Scene/Bank/Pattern name is
+ * blanked too while that type's index is not resident, because the Save page
+ * also paints preset_currentName (menu_blankLoadSaveNameWhileUnloaded()).
+ * Inputs: menu_storageBusy, page, nested mode, menu_saveOptions.what.
+ * Outputs: preset_currentName (top-level Kit Load; top-level Save
+ * Scene/Bank/Pattern while unloaded) and the LCD frame.
+ * Callers: menu_handleLoadSaveMenu() type-row branches (top-level and nested
+ * Instrument Load). Affiliates: menu_repaintAll(),
+ * menu_libraryIndexLoadComplete() (which fills the name when the read lands).
+ */
+static void menu_paintTypeStepWhileBusy(void)
+{
+    if (!menu_storageBusy)
+        return;
+    if (menu_activePage == LOAD_PAGE &&
+        !menu_instrumentLoadActive &&
+        (menu_saveOptions.what == SAVE_TYPE_KIT ||
+         menu_saveOptions.what == SAVE_TYPE_KIT_MORPH))
+        memset(preset_currentName, ' ', 8u);
+    menu_blankLoadSaveNameWhileUnloaded();
+    menu_repaintAll();
+}
+
 /* -----------------------------------------------------------------------
 ** menu_handleLoadSaveMenu
 **
@@ -15262,8 +15883,11 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
         }
         if (editModeActive) {
             if (menu_saveOptions.state == SAVE_STATE_EDIT_TYPE) {
-                if (inc != 0)
+                if (inc != 0) {
                     menu_instrumentLoadStepType(inc);
+                    /* S090 item 7: show the step at once while busy. */
+                    menu_paintTypeStepWhileBusy();
+                }
             } else {
                 uint16_t cached_count = filesystem_instrumentCount(
                     menu_instrumentLoadType);
@@ -15331,19 +15955,19 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                          * Inputs: a negative lower-row turn, the current source
                          * row, and the still-valid one-voice normal-load
                          * snapshot. Output: only the first pool-to-`kit`
-                         * crossing posts the hidden-file restore; subsequent
+                         * crossing commits the snapshot restore; subsequent
                          * decrements while `kit` is already selected alter
-                         * neither filesystem nor Preset state. Why: Load-number
+                         * neither SceneData nor Preset state. Why: Load-number
                          * turns remain intentionally accepted while an earlier
-                         * request drains. Reposting `.hctmp.<ext>` from every
-                         * detent of a large decrement could repeatedly contend
-                         * with that request and leave a stale restore eligible
-                         * after the user re-entered Instrument Load. The
-                         * existing identity row remains its original HCNAMES
-                         * stem, so no name copy or HCNAMES write is needed.
-                         * Affiliates: menu_restoreInstrumentLoadTemp(), the
-                         * hidden `.hctmp.<ext>` parser request, and the `kit`
-                         * renderer in menu_repaintLoadSavePage().
+                         * request drains. Re-running the restore from every
+                         * detent of a large decrement would re-apply the voice
+                         * on every detent and could leave a stale restore
+                         * eligible after the user re-entered Instrument Load.
+                         * The existing identity row remains its original
+                         * HCNAMES stem, so no name copy or HCNAMES write is
+                         * needed. Affiliates: menu_restoreInstrumentLoadTemp(),
+                         * preset_restoreInstrumentSnapshot() (S090 P1), and the
+                         * `kit` renderer in menu_repaintLoadSavePage().
                          *
                          * Rapid turns can reach this boundary while an older
                          * pool load still owns storage. Pool-to-pool turns
@@ -15656,8 +16280,18 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                 uint8_t previous_type = menu_saveOptions.what;
                 menu_saveOptions.what =
                     menu_nextRestoredLoadSaveType(menu_saveOptions.what, inc);
-                if (menu_saveOptions.what != previous_type)
+                if (menu_saveOptions.what != previous_type) {
                     menu_selectionGeneration++;
+                    /*
+                     * Dispose the index read for the type just left
+                     * (S090 item 7): it stops at its next safe phase and its
+                     * completion retires it quietly; only the type the user
+                     * settles on is read. Affiliates:
+                     * filesystem_cancelBrowseRead(),
+                     * menu_libraryIndexLoadComplete().
+                     */
+                    filesystem_cancelBrowseRead();
+                }
                 /*
                  * A top-level type change is a name-session boundary only when
                  * it leaves Kit/KitMrp. The new type is installed first so an
@@ -15670,6 +16304,8 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     menu_endResidentNameScratchSession()) {
                     menu_resetLoadSaveSceneSelection();
                     menu_refreshLoadSceneLeds();
+                    /* S090 item 7: the flush owns storage; show the step. */
+                    menu_paintTypeStepWhileBusy();
                     break;
                 }
                 /*
@@ -15706,6 +16342,8 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
                     menu_endResidentNameScratchSession()) {
                     menu_resetLoadSaveSceneSelection();
                     menu_refreshLoadSceneLeds();
+                    /* S090 item 7: the flush owns storage; show the step. */
+                    menu_paintTypeStepWhileBusy();
                     break;
                 }
                 if (menu_saveOptions.what != previous_type)
@@ -15716,6 +16354,8 @@ static void menu_handleLoadSaveMenu(int8_t inc, uint8_t btnClicked)
             menu_resetLoadSaveSceneSelection();
             menu_requestCurrentLoadSaveSelection(0);
             menu_refreshLoadSceneLeds();
+            /* S090 item 7: show the step at once while busy. */
+            menu_paintTypeStepWhileBusy();
             break;
         case SAVE_STATE_EDIT_PRESET_NR: {
             if (menu_saveOptions.what == SAVE_TYPE_FILE ||
@@ -15891,36 +16531,163 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
     uint8_t btnClicked = 0;
     uint8_t oldPage = menu_activePage;
     uint8_t oldIndex = menuIndex;
+    /* S090 P3 (C2-3): set when allow_browse_nav admitted this event while
+     * storage is busy, so the tail paints it. */
+    uint8_t browse_nav_admitted = 0u;
 
     /* S082 P3: an unlocked background Bank load blocks only Load/Save; other
      * pages take the encoder (menu_backgroundLoadReleasesPanel()). */
     if ((menu_storageBusy || preset_getStatus() != PRESET_IDLE) &&
         !menu_backgroundLoadReleasesPanel()) {
+        /*
+         * S090 P3 (C2-2): Kit/KitMrp Load and nested Instrument Load number
+         * turns wait for the names. While a Menu index read runs
+         * (filesystem_browseReadRunning()) the names are not resident, and a
+         * turn on these rows would load a slot the user cannot see (user,
+         * SD_CARD_TEST_3 defect 2). Turns during a payload load stay admitted,
+         * so load-on-scroll is unchanged once names exist.
+         */
         uint8_t allow_load_number_scroll = (uint8_t)(
             inc != 0 &&
             button == lastEncoderButton &&
             menu_activePage == LOAD_PAGE &&
             editModeActive &&
             menu_saveOptions.state == SAVE_STATE_EDIT_PRESET_NR &&
+            !filesystem_browseReadRunning() &&
             ((menu_instrumentLoadActive && !menu_instrumentSaveMode) ||
              (!menu_instrumentLoadActive &&
               (menu_saveOptions.what == SAVE_TYPE_KIT ||
                menu_saveOptions.what == SAVE_TYPE_KIT_MORPH))));
+        /*
+         * Type steps never wait for a list (S090 P1, item 7; user U17).
+         *
+         * What: a plain turn of the type row in edit mode, on the Load or Save
+         * page (top level) or the nested Instrument Load type row, is admitted
+         * while the only storage work is a Menu `.hcindex` read.
+         * Why: each read takes 2.4-3 s while playing, and the gate refused
+         * every step until it finished, so reaching a type three steps away
+         * cost three reads. The step installs the new type at once; the type
+         * handlers cancel the running read and their refused requests leave
+         * one deferred retry for the type the user settles on.
+         * Guards (all must hold):
+         * - filesystem_browseReadRunning(): the facade runs a Menu index read
+         *   (Instrument or numbered library), which is cancellable and whose
+         *   completion handlers retire a stale result. Writes, `.hcnames`
+         *   reads, payload loads, previews and rebuilds keep the full lock;
+         * - Preset idle, no Instrument apply and no Load/Save command: nothing
+         *   else owns the coordinates this step changes;
+         * - copy/clear does not own the encoder;
+         * - nested Instrument Save is excluded: its type row only toggles
+         *   Morph and never needs a read.
+         * Pots (menu_handleLoadSaveKnobDelta()) keep their lock: Pot 1 also
+         * crosses voices and pages, whose entry paths are transaction-guarded.
+         * Affiliates: menu_handleLoadSaveMenu() type branches,
+         * menu_paintTypeStepWhileBusy(), filesystem_cancelBrowseRead(),
+         * menu_instrumentIndexLoadComplete(), menu_libraryIndexLoadComplete().
+         */
+        uint8_t allow_type_step = (uint8_t)(
+            inc != 0 &&
+            button == lastEncoderButton &&
+            (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+            editModeActive &&
+            menu_saveOptions.state == SAVE_STATE_EDIT_TYPE &&
+            !(menu_instrumentLoadActive && menu_instrumentSaveMode) &&
+            !menu_loadSaveCommandActive &&
+            !menu_instrumentApplyActive &&
+            preset_getStatus() == PRESET_IDLE &&
+            !copyClear_ownsEncoder() &&
+            filesystem_browseReadRunning());
+        /*
+         * Navigation and slot choice never wait for a list (S090 P3, C2-1;
+         * user, SD_CARD_TEST_3 defect 2).
+         *
+         * What: while a Menu index read runs, under the same context guards
+         * as allow_type_step, admits:
+         * - a click on the type or number row (edit mode toggles only);
+         * - a cursor move between the type and number rows (edit mode off);
+         * - a slot-number turn on top-level Scene, Bank or Pattern, on either
+         *   page (no scroll on these loads anything).
+         * Why: after a type step the user could only keep stepping types; a
+         * click, a move to the number and a number change were all refused
+         * for the 2.4-3 s of the read. Rows where a scroll loads or commits
+         * (Kit/KitMrp, nested Instrument Load, its `chg` row) admit the click
+         * and the move but not the turn: their numbers wait for the names
+         * (C2-2 above). Save:Kit/KitMrp turns also wait: their selection path
+         * runs the Kit name session or preset_loadName(), neither of which may
+         * run against a read. A click on the nested `chg` number row commits
+         * a type change, so it waits too.
+         * Still refused: OK/execute clicks (the state is limited to the type
+         * and number rows), name rows, File/Dir/Settings/Samples (they have
+         * no index read), and pots (P1 decision).
+         * Inputs: button/inc, edit mode, state, type, nested source, page.
+         * Outputs: admission; browse_nav_admitted for the tail repaint.
+         * Affiliates: menu_handleLoadSaveMenu() (state moves, number branch),
+         * menu_requestCurrentLoadSaveSelection() (refuses a non-resident
+         * index without touching state), menu_libraryIndexLoadComplete()
+         * (C1-1, C1-2, C2-4).
+         */
+        uint8_t allow_browse_nav = 0u;
+        if ((menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE) &&
+            !(menu_instrumentLoadActive && menu_instrumentSaveMode) &&
+            !menu_loadSaveCommandActive &&
+            !menu_instrumentApplyActive &&
+            preset_getStatus() == PRESET_IDLE &&
+            !copyClear_ownsEncoder() &&
+            filesystem_browseReadRunning()) {
+            fs_library_index_kind_t kind;
+            uint8_t state = menu_saveOptions.state;
+            uint8_t what = menu_saveOptions.what;
+            /* Rows backed by an index read: nested Instrument Load, Kit,
+             * KitMrp, Scene, Bank, Pattern. */
+            uint8_t indexed_row = (uint8_t)(
+                menu_instrumentLoadActive ||
+                what == SAVE_TYPE_KIT || what == SAVE_TYPE_KIT_MORPH ||
+                menu_loadSaveSlotIndexKind(what, &kind));
+
+            if (button != lastEncoderButton) {
+                allow_browse_nav = (uint8_t)(
+                    indexed_row &&
+                    (state == SAVE_STATE_EDIT_TYPE ||
+                     state == SAVE_STATE_EDIT_PRESET_NR) &&
+                    !(menu_instrumentLoadActive &&
+                      state == SAVE_STATE_EDIT_PRESET_NR &&
+                      menu_instrumentLoadSource ==
+                          MENU_INSTRUMENT_SOURCE_CHANGE));
+                /* A click and a turn can arrive in one event; admit only the
+                 * click, so a turn on a waiting row (Kit Load, nested
+                 * Instrument) cannot ride along. */
+                if (allow_browse_nav)
+                    inc = 0;
+            } else if (inc != 0 && !editModeActive) {
+                allow_browse_nav = (uint8_t)(
+                    indexed_row &&
+                    ((state == SAVE_STATE_EDIT_TYPE && inc > 0) ||
+                     (state == SAVE_STATE_EDIT_PRESET_NR && inc < 0)));
+            } else if (inc != 0 && editModeActive &&
+                       state == SAVE_STATE_EDIT_PRESET_NR &&
+                       !menu_instrumentLoadActive) {
+                allow_browse_nav = menu_loadSaveSlotIndexKind(what, &kind);
+            }
+        }
+        browse_nav_admitted = allow_browse_nav;
 
         /*
-         * Storage exclusivity blocks every control except Load-number turns.
+         * Storage exclusivity blocks every control except Load-number turns
+         * and, since S090, type steps and P3 browse navigation over an index
+         * read (above).
          *
          * Kit and nested Instrument payloads can take long enough that a hard
          * encoder lock makes sparse libraries painful to browse. A plain turn
          * on the already-selected number field may therefore update only the
          * Menu-owned desired number while the immutable older request drains.
-         * Clicks, type changes, Scene/voice changes, Save editing, and all
-         * non-Load pages remain blocked. The handler leaves one existing defer
-         * flag. The resident typed/Kit index normally stays active, so the
-         * latest number and name repaint immediately; only entry/exit waits for
-         * shared-cache restoration.
+         * Clicks, Scene/voice changes, Save editing, and all non-Load pages
+         * remain blocked. The handler leaves one existing defer flag. The
+         * resident typed/Kit index normally stays active, so the latest number
+         * and name repaint immediately; only entry/exit waits for shared-cache
+         * restoration.
          */
-        if (!allow_load_number_scroll) {
+        if (!allow_load_number_scroll && !allow_type_step &&
+            !allow_browse_nav) {
             lastEncoderButton = button;
             return;
         }
@@ -16030,8 +16797,25 @@ void menu_parseEncoder(int8_t inc, uint8_t button)
         }
     }
 
-    if (menu_storageBusy)
+    if (menu_storageBusy) {
+        /*
+         * Paint browse navigation admitted over a read (S090 P3, C2-3).
+         *
+         * What: an event admitted by allow_browse_nav is painted now, with a
+         * not-yet-resident name blanked first.
+         * Why: the tail otherwise skips painting while busy, so an admitted
+         * click, move or number turn would stay invisible until the read
+         * lands. Same treatment as the P1 type step
+         * (menu_paintTypeStepWhileBusy()). The number appears at once and the
+         * name stays blank until menu_libraryIndexLoadComplete() fills it
+         * (load order: number, then name, then LEDs).
+         */
+        if (browse_nav_admitted) {
+            menu_blankLoadSaveNameWhileUnloaded();
+            menu_repaintAll();
+        }
         return;
+    }
 
     /* Full refresh only when edit mode toggled (layout changes completely).
     ** Encoder movement uses incremental repaint — only sends changed chars,
@@ -17129,21 +17913,22 @@ void menu_pollPresetStatus(void)
      *
      * Input: menu_instrumentKitRestorePending together with a cursor that is
      * still resting on the `kit` row of an active nested Instrument Load.
-     * Output: the `.hctmp.<ext>` restore is re-posted; the owed flag is left
-     * alone here and cleared only by the completion that actually restores the
-     * slot, so a request rejected again this pass is simply retried on the
-     * next one. Why: the user may stop turning the moment they reach `kit`, so
-     * the restore cannot depend on another detent arriving to carry it. This
-     * check deliberately sits ahead of every tick function below because those
+     * Output: the snapshot restore is retried; the owed flag is left alone
+     * here and cleared only when a restore is actually committed, so a restore
+     * that still cannot run this pass is simply retried on the next one. Why:
+     * the user may stop turning the moment they reach `kit`, so the restore
+     * cannot depend on another detent arriving to carry it. This check
+     * deliberately sits ahead of every tick function below because those
      * return early as soon as any one of them does work — in particular
      * preset_tickDrumsetApply(), whose Scene-switch quiet-gate can stay active
      * for seconds while a pattern keeps re-triggering the browsed voice, which
      * is exactly the condition under which this bug was reported. Placing the
-     * retry here makes it unstarvable. menu_restoreInstrumentLoadTemp() is
-     * itself a no-op unless the snapshot is valid and its type still matches,
-     * so an unusable snapshot cannot spin. Morph mode is included: the same
-     * owed-state rule drives preset_loadInstrumentMorphTemp() through that
-     * function's own morph branch. See S054_INST_RESTORE_FIX.md.
+     * retry here makes it unstarvable; since S090 the restore itself waits for
+     * idle apply workers (preset_applyWorkersIdle()), so committing it here
+     * cannot overlap one. menu_restoreInstrumentLoadTemp() is a no-op unless
+     * the snapshot is valid and its type still matches, so an unusable
+     * snapshot cannot spin. Morph mode is included through that function's
+     * Morph branch. See S054_INST_RESTORE_FIX.md.
      */
     if (menu_instrumentKitRestorePending &&
         menu_instrumentLoadActive &&
@@ -17271,8 +18056,8 @@ void menu_pollPresetStatus(void)
                  * (S082 review F6).
                  *
                  * What: any other deferral raised while nested Instrument
-                 * Load/Save is open (HCNAMES seven-row read, `.hctmp` snapshot,
-                 * typed index) resumes through menu_requestInstrumentEntryNames(),
+                 * Load/Save is open (HCNAMES seven-row read, typed index,
+                 * a cancelled or stale read) resumes through menu_requestInstrumentEntryNames(),
                  * which skips the steps already complete.
                  * Why: the generic retry used the last top-level type, so a
                  * refused Instrument entry could be re-posted as, e.g., a Bank
@@ -17323,38 +18108,6 @@ void menu_pollPresetStatus(void)
             (menu_activePage == LOAD_PAGE || menu_activePage == SAVE_PAGE)) {
             filesystem_clearNameCache();
             menu_resetSaveParameters();
-        }
-        if (preset_getCompletedOp() == PRESET_OP_INSTRUMENT_TEMP_SAVE ||
-            preset_getCompletedOp() == PRESET_OP_INSTRUMENT_MORPH_TEMP_SAVE) {
-            /* A failed baseline write must not leave the shared pending tag
-             * blocking the next nested Instrument entry. */
-            menu_invalidateInstrumentLoadTemp();
-        } else if (preset_getCompletedOp() == PRESET_OP_INSTRUMENT_LOAD ||
-                   preset_getCompletedOp() ==
-                       PRESET_OP_INSTRUMENT_MORPH_TEMP_LOAD) {
-            /* Keep a valid baseline available for a retry, but release the
-             * accepted restore tag after a failed hidden-file read. */
-            menu_instrumentTempOperationPending = 0u;
-            /*
-             * Bound the owed-restore retry at a genuine terminal failure.
-             *
-             * Input: a hidden `.hctmp.<ext>` read that was accepted and then
-             * failed — proven for the normal op by the filesystem's immutable
-             * temporary-origin flag, and implicit for the Morph temp op. Output:
-             * the owed state is released so the idle retry in
-             * menu_pollPresetStatus() stops re-posting a read that just failed;
-             * the user sees the ERR overlay and can scroll off and back onto
-             * `kit` to try again. A *failed pool* load is deliberately excluded:
-             * it never replaced the slot, so whatever was owed before it stays
-             * owed. This branch is the failure counterpart of the owed-state
-             * updates in the PRESET_OP_INSTRUMENT_*_LOAD success cases, which
-             * this early return would otherwise skip entirely.
-             */
-            if (preset_getCompletedOp() ==
-                    PRESET_OP_INSTRUMENT_MORPH_TEMP_LOAD ||
-                filesystem_loadedInstrumentWasTemporary()) {
-                menu_instrumentKitRestorePending = 0u;
-            }
         }
         menu_showFilesystemErrorOverlay();
         preset_ackStatus();
@@ -17655,61 +18408,10 @@ void menu_pollPresetStatus(void)
                              FS_STALE_WARNING_NONE);
         break;
 
-    case PRESET_OP_INSTRUMENT_TEMP_SAVE:
-        /*
-         * Release the `kit` row only after its typed temporary file is closed.
-         *
-         * Inputs: dedicated Preset completion for the entry Scene/voice. Output:
-         * the retained nine-byte name becomes valid, then the ordinary typed
-         * `.hcindex` load starts. A failed temp write leaves `kit` unavailable
-         * rather than allowing a stale file/name from another session.
-         */
-        menu_instrumentTempOperationPending = 0u;
-        menu_instrumentTempValid = preset_getCompletedOk();
-        menu_traceInstrumentEntry(
-            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_TEMP_COMPLETE,
-            (uint8_t)!menu_instrumentTempValid);
-        menu_storageBusy = 0u;
-        if (menu_instrumentTempValid && menu_instrumentLoadActive &&
-            !menu_instrumentSaveMode && !menu_instrumentLoadMorphMode) {
-            menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
-        } else if (!menu_instrumentTempValid) {
-            menu_invalidateInstrumentLoadTemp();
-        }
-        if (!menu_storageBusy)
-            menu_repaintAll();
-        break;
-
-    case PRESET_OP_INSTRUMENT_MORPH_TEMP_SAVE:
-        /*
-         * Release the Morph-only baseline after its hidden file closes.
-         *
-         * The selected InstrumentMrp row uses the existing HCNAMES identity
-         * cell for display, so this completion only validates the reversible
-         * endpoint snapshot and resumes the selected typed index.
-         */
-        menu_instrumentTempOperationPending = 0u;
-        menu_instrumentTempValid = preset_getCompletedOk();
-        menu_traceInstrumentEntry(
-            AUTOSAVE_TRACE_INSTRUMENT_ENTRY_PHASE_TEMP_COMPLETE,
-            (uint8_t)!menu_instrumentTempValid);
-        menu_storageBusy = 0u;
-        if (menu_instrumentTempValid && menu_instrumentLoadActive &&
-            !menu_instrumentSaveMode && menu_instrumentLoadMorphMode) {
-            menu_requestInstrumentIndexLoad(menu_instrumentLoadType);
-        } else if (!menu_instrumentTempValid) {
-            menu_invalidateInstrumentLoadTemp();
-        }
-        if (!menu_storageBusy)
-            menu_repaintAll();
-        break;
-
     case PRESET_OP_INSTRUMENT_LOAD:
     {
         uint8_t selection_stale = (uint8_t)(
             menu_selectionGenerationSnapshot != menu_selectionGeneration);
-        uint8_t mark_autosave_whole_instrument = (uint8_t)(
-            !filesystem_loadedInstrumentWasTemporary());
 
         if (selection_stale && menu_activePage == LOAD_PAGE &&
             menu_instrumentLoadActive && !menu_instrumentSaveMode) {
@@ -17722,21 +18424,14 @@ void menu_pollPresetStatus(void)
         /*
          * Track whether the resident slot still matches the `kit` snapshot.
          *
-         * Input: the filesystem's immutable record of which request opened the
-         * staged file — the only trustworthy discriminator here, because the
-         * visible cursor may have moved while this load drained. Output: a
-         * completed pool load marks a restore as owed; a completed `.hctmp`
-         * restore clears it. The restore clears on failure too: the request
-         * genuinely reached a terminal failed completion (the user also gets
-         * the ERR overlay), so continuing to retry it would spin rather than
-         * recover. A transient inability to *post* the request never reaches
-         * this point and therefore correctly leaves the owed state standing.
-         * Why here rather than at request time: only completion proves what
-         * actually landed in the slot. Affiliate: the owed-state declaration.
+         * Since S090 every completion here is a root-pool load: the `kit`
+         * restore is committed from RAM by menu_restoreInstrumentLoadTemp()
+         * and never passes through this completion. A successful pool load
+         * therefore always makes a restore owed; a failed one never reaches
+         * this case (the early failure return above), so whatever was owed
+         * before it stays owed. Affiliate: the owed-state declaration.
          */
-        if (filesystem_loadedInstrumentWasTemporary())
-            menu_instrumentKitRestorePending = 0u;
-        else if (preset_getCompletedOk())
+        if (preset_getCompletedOk())
             menu_instrumentKitRestorePending = 1u;
 
         /*
@@ -17745,38 +18440,13 @@ void menu_pollPresetStatus(void)
          * Inputs: Preset request slot retained when the Instrument/ file load
          * was posted. Output: only that slot is applied through Preset's
          * one-slot cursor. This must not call menu_startSoundApply(), because
-         * that path is intentionally a whole-Kit/Scene apply operation.
-         */
-        /*
-         * A successful hidden-temp restore makes the original visible identity
-         * authoritative again before the normal bounded runtime apply starts.
-         * Inputs: direct `kit` source plus its valid nine-byte session label.
-         * Output: one Instrument HCNAMES row is marked dirty for normal menu
-         * exit; pool loads continue through their existing apply completion.
-         */
-        if (preset_getCompletedOk() &&
-            menu_instrumentTempOperationPending &&
-            menu_instrumentTempValid) {
-            memcpy(menu_instrumentSaveName, menu_instrumentTempName,
-                   MENU_INSTRUMENT_SAVE_NAME_LEN);
-            menu_instrumentSaveName[MENU_INSTRUMENT_SAVE_NAME_LEN] = '\0';
-            menu_refreshResidentNameScratchInstrument(
-                menu_kitLoadSceneMask, menu_instrumentLoadSlot);
-        }
-        /*
-         * Carry the filesystem-captured persistence meaning into the shared
-         * staged-Instrument commit. The visible Load cursor may have moved
-         * while I/O completed, and Menu's temporary-operation latch sequences
-         * UI work rather than the loaded file's origin; neither can identify
-         * root-pool versus hidden `kit` data. The filesystem flag remains valid
-         * through this completion window and says exactly which request opened
-         * the staged file: ordinary pool loads mark their committed payload
-         * now, while a temporary restore produces no new whole-Instrument
-         * mutation mark.
+         * that path is intentionally a whole-Kit/Scene apply operation. A
+         * root-pool load replaces retained Instrument data, so its committed
+         * payload is marked for AutoSave (the third argument, 1).
          */
         menu_startInstrumentApply(preset_getRequestScene(),
                                   preset_getRequestSlot(),
-                                  mark_autosave_whole_instrument);
+                                  1u);
         menu_refreshLoadSceneLeds();
         break;
     }
@@ -17804,19 +18474,6 @@ void menu_pollPresetStatus(void)
          */
         if (preset_getCompletedOk())
             menu_instrumentKitRestorePending = 1u;
-        menu_startInstrumentMorphApply(preset_getRequestScene(),
-                                       preset_getRequestSlot());
-        menu_refreshLoadSceneLeds();
-        break;
-
-    case PRESET_OP_INSTRUMENT_MORPH_TEMP_LOAD:
-        /* The hidden snapshot is already a Morph-only request; preserve the
-         * name/type/Normal image and run the ordinary bounded Morph worker. */
-        /* The owed Morph restore has now reached its terminal completion.
-         * Cleared on failure as well as success for the same reason as the
-         * normal path: a failed terminal completion must not be retried
-         * forever, and the user already receives the ERR overlay. */
-        menu_instrumentKitRestorePending = 0u;
         menu_startInstrumentMorphApply(preset_getRequestScene(),
                                        preset_getRequestSlot());
         menu_refreshLoadSceneLeds();

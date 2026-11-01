@@ -2029,7 +2029,9 @@ static OSC_S087_LOOP void osc_slpPlainBlock(OscInfo* osc, int16_t *buf,
  * Why:        D-13, L5/L6: amt means the same as on a table wave.
  * Inputs:     osc, mod, buf, size, gain.  Outputs: buf; phase.
  * Accessors:  osc_renderTypedFm().
- * Affiliates: calcFmBlock(); test_osc_sample.c.
+ * Affiliates: calcFmBlock(); test_osc_sample.c; osc_smpFmRampBlock() (the
+ *             S089 P3 Drum twin with a per-sample depth ramp: a change to
+ *             this loop is made to the twin too).
  */
 static OSC_S087_LOOP void osc_smpFmBlock(OscInfo* osc, const int16_t *mod,
                                          int16_t *buf, uint8_t size, float gain)
@@ -2091,7 +2093,9 @@ static OSC_S087_LOOP void osc_smpFmBlock(OscInfo* osc, const int16_t *mod,
  *             the lead-in read rule (clamp) for its remaining samples.
  * Accessors:  osc_renderTypedFm().
  * Affiliates: osc_slpBlockInc(), osc_slpPlainBlock(), osc_smpFmBlock() (the
- *             same FM scale, A17 addendum).
+ *             same FM scale, A17 addendum); osc_slpFmRampBlock() (the S089
+ *             P3 Drum twin with a per-sample depth ramp: a change to this
+ *             loop is made to the twin too).
  */
 static OSC_S087_LOOP void osc_slpFmBlock(OscInfo* osc, const int16_t *mod,
                                          int16_t *buf, uint8_t size, float gain)
@@ -2424,6 +2428,9 @@ void OSC_S087_SECTION osc_renderTyped(OscInfo* osc, int16_t* buf, uint8_t size,
 	}
 }
 
+/* S089 P3: osc_renderTypedFmRamp() (end of file) is this dispatcher's Drum
+** twin with a per-sample FM depth ramp; keep their cases in step. Cymbal and
+** HiHat keep calling this one (no ramp, no extra per-sample cost). */
 void OSC_S087_SECTION osc_renderTypedFm(OscInfo* osc, const int16_t* mod,
                                         int16_t* buf, uint8_t size, float gain)
 {
@@ -2961,6 +2968,9 @@ static OSC_S087_LOOP void osc_wtbBlendBlock(OscInfo* osc, int16_t* buf,
  *             of a cycle as the table FM.
  * Why:        A17 addendum: amt means the same on every type.
  * Accessors:  osc_renderTypedFm().
+ * Affiliates: osc_wtbFmRampBlock() / osc_wtbFmBlendRampBlock() (the S089 P3
+ *             Drum twins with a per-sample depth ramp: a change to these
+ *             loops is made to the twins too).
  */
 static OSC_S087_LOOP void osc_wtbFmBlock(OscInfo* osc, const int16_t* mod,
                                          int16_t* buf, uint8_t size, float gain)
@@ -3004,7 +3014,9 @@ static OSC_S087_LOOP void osc_wtbFmBlock(OscInfo* osc, const int16_t* mod,
  * Outputs:    buf; osc->phase.
  * Accessors:  osc_renderTypedFm().
  * Affiliates: osc_wtbPlanBlock(), osc_wtbFmBlock(), calcFmBlock() (the same
- *             FM scale), modNode_interpClaim().
+ *             FM scale), modNode_interpClaim(); osc_wtbFmBlendRampBlock()
+ *             (the S089 P3 Drum twin with a per-sample depth ramp: a change
+ *             to this loop is made to the twin too).
  */
 static OSC_S087_LOOP void osc_wtbFmBlendBlock(OscInfo* osc,
                                               const int16_t* mod,
@@ -3252,5 +3264,460 @@ static OSC_S087_LOOP void osc_wtbSyncBlendBlock(OscInfo* osc,
 		}
 	}
 	osc->phase = ph;
+}
+/*
+ * ===========================================================================
+ * Drum FM depth-ramp carriers (S089 P3).
+ * ===========================================================================
+ *
+ * What:       ramped twins of the four typed FM carrier loops (smp, slp, wtb
+ *             blend and its one-frame wtb fallback) and the flash dispatcher
+ *             osc_renderTypedFmRamp() that selects among them. Each twin is
+ *             its original with exactly one change: the loop-invariant FM
+ *             depth osc->fmMod becomes a per-sample depth d that starts at
+ *             d0 and moves by dStep after every sample (d_i = d0 + i x dStep,
+ *             accumulated). Everything else - the read rule, the clamps, the
+ *             phase advance, the gain, the zero-block guards - is copied
+ *             unchanged.
+ * Why:        Drum's fm branch used to scale the whole modulator block by a
+ *             per-sample ramp (S088 P0 Layer 2e) before the carrier read it:
+ *             a separate 10-instruction pass on every block, although the
+ *             ramp only moves on the one block after a fre/itp retrigger.
+ *             Folding the ramp into the carrier's existing depth multiply
+ *             costs one vadd per sample instead, so Drum fm with an smp, slp
+ *             or wtb carrier drops by about 9 instructions per sample (the
+ *             dearest carriers: slp 90 -> 81, wtb blend 86 -> 77, smp 82 ->
+ *             73; S089_P3_FM_RAMP_EFFICIENCY.md §5.1). The CPU is at its
+ *             ceiling (S089_P2_WAVEFOLDER_CHAIN.md §8), so this is a saving
+ *             that lowers the worst case.
+ * Rules:      - The originals stay byte-identical: Cymbal and HiHat call them
+ *               through osc_renderTypedFm(), and an added per-sample vadd
+ *               would cost them +1 for nothing (the ceiling rule). New
+ *               per-sample code is a new function, never an edit to an
+ *               existing loop (S087 rule).
+ *             - Unarmed blocks (every rst block and almost every other):
+ *               the caller passes d0 = osc->fmMod and dStep = 0.0f, so d is
+ *               exactly fmMod on every sample (x + 0.0f == x) and every
+ *               product is the same expression as the original's:
+ *               bit-identical output (S0; host law FR1).
+ *             - Armed blocks: S2. The modulator is no longer truncated to
+ *               int16 after the ramp scale (less quantisation), and a ramp
+ *               start above 1 x fmMod now saturates in the existing __SSAT
+ *               instead of wrapping in the old (int16_t) cast.
+ *             - Keep each twin in step with its original: a fix to one is
+ *               a fix to both (the originals name their twin in Affiliates).
+ * Placement:  the four loops in .itcm.s089p3, pinned after .itcm.s089 in
+ *             STM32F765VIHx_FLASH.ld so no existing ITCM function moves
+ *             (S085 rule); the dispatcher runs once per block from flash.
+ * Accessors:  Drum_calcVoiceSyncBlock() (fm branch, typed carrier) only.
+ * Affiliates: osc_smpFmBlock(), osc_slpFmBlock(), osc_wtbFmBlock(),
+ *             osc_wtbFmBlendBlock() (the originals); osc_renderTypedFm()
+ *             (their dispatcher, still used by Cymbal/HiHat); DrumVoice.c
+ *             lastFmDepth / ampRampArm; tools/dsp_test/modules/oscillator.c
+ *             group fmramp (FR1-FR3).
+ */
+
+/*
+ * S089 P3 ITCM placement.
+ *
+ * What:       .itcm.s089p3 for the four ramped carrier loops; noinline and
+ *             noclone keep each loop its own symbol (elf_loopdump.py measures
+ *             it by name) and stop LTO from folding it into a caller or
+ *             cloning it per call site (as OSC_S087_LOOP).
+ * Why:        S087 P0 §2 rules 2-3 and the S089 P2 linker pin: a new
+ *             subsection is appended after every existing one, so the S085,
+ *             S087 and S089 P2 loops keep their addresses. The name must not
+ *             match the exact *(.itcm.s089) pattern (voiceFold.c).
+ * Accessors:  osc_smpFmRampBlock(), osc_slpFmRampBlock(),
+ *             osc_wtbFmRampBlock(), osc_wtbFmBlendRampBlock().
+ * Affiliates: OSC_S085_SECTION, OSC_S087_SECTION, voiceFold.c
+ *             VOICE_FOLD_SECTION; STM32F765VIHx_FLASH.ld ITCM input order;
+ *             link_budget.py.
+ */
+#define OSC_S089P3_SECTION 
+#define OSC_S089P3_LOOP    OSC_S089P3_SECTION __attribute__((noinline, noclone))
+
+/*
+ * smp FM carrier with a per-sample depth ramp (S089 P3; twin of
+ * osc_smpFmBlock()).
+ *
+ * What:       the one-shot read at ph + (ssat(mod x d) << 9), clamped to
+ *             [0, endPh], with d = d0 on the first sample and d += dStep
+ *             after each sample. The phase advance is the plain one.
+ * Why:        the Drum FM depth ramp folded into the carrier's own depth
+ *             multiply (see the block comment above).
+ * Inputs:     osc (bound smp: sampleCacheData/Size/Index, phase, phaseInc),
+ *             mod[size] (the modulator block at fmModAmount, unscaled by any
+ *             ramp), size, gain, d0 (depth on sample 0), dStep (depth change
+ *             per sample; 0.0f when not armed).
+ * Outputs:    buf[size]; osc->phase.
+ * Cost:       the original's 42 instructions per sample + 1 (the vadd).
+ * Accessors:  osc_renderTypedFmRamp().
+ * Affiliates: osc_smpFmBlock() (keep in step); osc_smpReadPhase(),
+ *             osc_frac12(), osc_bindGain().
+ */
+static OSC_S089P3_LOOP void osc_smpFmRampBlock(OscInfo* osc,
+                                               const int16_t *mod,
+                                               int16_t *buf, uint8_t size,
+                                               float gain, float d0,
+                                               float dStep)
+{
+	const int16_t *data = (const int16_t *)osc->sampleCacheData;
+	/* The last valid read position: the zero pad after the item. */
+	const uint32_t endPh = osc->sampleCacheSize << OSC_SAMPLE_PHASE_SHIFT;
+	/* Render gain x the item's stored gain code, once per block. */
+	const float g = gain * osc_bindGain(osc);
+	uint32_t ph = osc->phase;
+	const uint32_t inc = osc->phaseInc;
+	/* The ramped FM depth: d0 here, d0 + i x dStep at sample i. */
+	float d = d0;
+	uint8_t i;
+
+	if (!data || osc->sampleCacheSize == 0u) {
+		osc_zeroBlock(buf, size);
+		return;
+	}
+	for (i = 0u; i < size; i++) {
+		/*
+		 * FM read offset: modulator x this sample's depth, saturated to
+		 * int16 and scaled to read-phase units (<< 9, the S087 A17 scale
+		 * shared with every typed carrier). Unarmed, d == fmMod exactly,
+		 * so this is the original's expression bit for bit.
+		 */
+		const int32_t off = (int32_t)__SSAT(
+			(int32_t)((float)mod[i] * d), 16) << OSC_FM_SAMPLE_SHIFT;
+		int32_t rp = (int32_t)ph + off;
+		uint32_t idx;
+		int16_t a;
+		int16_t b;
+		float out;
+
+		/* Step the depth after its use: sample 0 reads d0 and sample
+		 * size - 1 reads d0 + (size - 1) x dStep = the block's fmMod. */
+		d += dStep;
+		/* One-shot clamp: never before the start, never past the pad. */
+		if (rp < 0)
+			rp = 0;
+		else if ((uint32_t)rp > endPh)
+			rp = (int32_t)endPh;
+		idx = (uint32_t)rp >> OSC_SAMPLE_PHASE_SHIFT;
+		a = data[idx];
+		b = data[idx + 1u];
+		/* Linear interpolation on the 12-bit phase fraction. */
+		out = (float)a + osc_frac12((uint32_t)rp) * (float)(b - a);
+		buf[i] = (int16_t)(out * g);
+		ph = osc_smpReadPhase(ph + inc, endPh);
+	}
+	osc->phase = ph;
+}
+
+/*
+ * slp FM carrier with a per-sample depth ramp (S089 P3; twin of
+ * osc_slpFmBlock()).
+ *
+ * What:       the looped read at phase + (ssat(mod x d) << 9), with d = d0 on
+ *             the first sample and d += dStep after each sample. The read
+ *             rule is chosen once per block, from where the block starts:
+ *             - inside the loop (phase >= loop_start): the offset is bounded
+ *               to half a loop and the read, relative to loop_start, wraps
+ *               once each way; the index is loop_start + that point;
+ *             - in the lead-in (phase < loop_start): the absolute read is
+ *               clamped to [0, loop_end - 1].
+ *             The seam reads loop_start. The phase takes the per-block step
+ *             from osc_slpBlockInc() and wraps once at loop_end.
+ * Why:        the Drum FM depth ramp folded into the carrier's own depth
+ *             multiply (see the block comment above). slp is the dearest
+ *             Drum fm carrier (50 + 30 modulator + 10 pass = 90 before).
+ * Inputs:     osc (bound slp), mod[size], size, gain, d0, dStep (as
+ *             osc_smpFmRampBlock()).
+ * Outputs:    buf[size]; osc->phase.
+ * Edge:       a block that starts in the lead-in and enters the loop keeps
+ *             the lead-in read rule (clamp) for its remaining samples (as the
+ *             original).
+ * Cost:       the original's 50 (in the loop) / 39 (lead-in) instructions per
+ *             sample + 1.
+ * Accessors:  osc_renderTypedFmRamp().
+ * Affiliates: osc_slpFmBlock() (keep in step); osc_slpBlockInc(),
+ *             sampleMemory_sampleEntry() (loop points).
+ */
+static OSC_S089P3_LOOP void osc_slpFmRampBlock(OscInfo* osc,
+                                               const int16_t *mod,
+                                               int16_t *buf, uint8_t size,
+                                               float gain, float d0,
+                                               float dStep)
+{
+	const int16_t *data = (const int16_t *)osc->sampleCacheData;
+	const sample_catalogue_entry_t *entry =
+		sampleMemory_sampleEntry(osc->sampleCacheIndex);
+	/* Loop region in frames; a missing entry loops the whole item. */
+	const uint32_t ls = entry ? entry->loop_start : 0u;
+	const uint32_t le = entry ? entry->loop_end : osc->sampleCacheSize;
+	const uint32_t len = le - ls;
+	/* The same region in read-phase units (frames << 12). */
+	const uint32_t lenPh = len << OSC_SAMPLE_PHASE_SHIFT;
+	const uint32_t loopStartPh = ls << OSC_SAMPLE_PHASE_SHIFT;
+	const uint32_t loopEndPh = le << OSC_SAMPLE_PHASE_SHIFT;
+	const float g = gain * osc_bindGain(osc);
+	uint32_t ph = osc->phase;
+	/* The ramped FM depth: d0 here, d0 + i x dStep at sample i. */
+	float d = d0;
+	uint32_t inc;
+	uint8_t i;
+
+	if (!data || osc->sampleCacheSize == 0u || len == 0u) {
+		osc_zeroBlock(buf, size);
+		return;
+	}
+	/* Per-block step: forward modulo the loop (a backward pos glide is a
+	 * forward wrap), so the per-sample wrap below needs one compare. */
+	inc = osc_slpBlockInc(osc->phaseInc, ph, loopStartPh, lenPh);
+	if (ph >= loopStartPh) {
+		const int32_t loopLen = (int32_t)lenPh;
+		/* Half a loop: the largest offset that still wraps only once. */
+		const int32_t half = loopLen >> 1;
+
+		for (i = 0u; i < size; i++) {
+			/* FM read offset at this sample's depth (S0 when d == fmMod). */
+			int32_t off = (int32_t)__SSAT(
+				(int32_t)((float)mod[i] * d), 16) << OSC_FM_SAMPLE_SHIFT;
+			int32_t rp;
+			uint32_t idx;
+			uint32_t next;
+			int16_t a;
+			int16_t b;
+			float out;
+
+			/* Depth steps after its use (sample 0 = d0). */
+			d += dStep;
+			/* Bound the offset to +/- half a loop, then wrap the read
+			 * point (relative to loop_start) once in either direction. */
+			off = (off > half) ? half : off;
+			off = (off < -half) ? -half : off;
+			rp = (int32_t)(ph - loopStartPh) + off;
+			rp = (rp < 0) ? rp + loopLen : rp;
+			rp = (rp >= loopLen) ? rp - loopLen : rp;
+			idx = ls + ((uint32_t)rp >> OSC_SAMPLE_PHASE_SHIFT);
+			/* The seam interpolates toward loop_start, not loop_end. */
+			next = (idx + 1u == le) ? ls : idx + 1u;
+			a = data[idx];
+			b = data[next];
+			out = (float)a + osc_frac12((uint32_t)rp) * (float)(b - a);
+			buf[i] = (int16_t)(out * g);
+			ph += inc;
+			if (ph >= loopEndPh)
+				ph -= lenPh;
+		}
+	} else {
+		/* The last readable point before loop_end (lead-in clamp). */
+		const int32_t lastPh = (int32_t)loopEndPh - 1;
+
+		for (i = 0u; i < size; i++) {
+			/* FM read offset at this sample's depth (S0 when d == fmMod). */
+			const int32_t off = (int32_t)__SSAT(
+				(int32_t)((float)mod[i] * d), 16) << OSC_FM_SAMPLE_SHIFT;
+			int32_t rp = (int32_t)ph + off;
+			uint32_t idx;
+			uint32_t next;
+			int16_t a;
+			int16_t b;
+			float out;
+
+			/* Depth steps after its use (sample 0 = d0). */
+			d += dStep;
+			/* Lead-in: absolute read clamped to [0, loop_end - 1]. */
+			rp = (rp < 0) ? 0 : rp;
+			rp = (rp > lastPh) ? lastPh : rp;
+			idx = (uint32_t)rp >> OSC_SAMPLE_PHASE_SHIFT;
+			next = (idx + 1u == le) ? ls : idx + 1u;
+			a = data[idx];
+			b = data[next];
+			out = (float)a + osc_frac12((uint32_t)rp) * (float)(b - a);
+			buf[i] = (int16_t)(out * g);
+			ph += inc;
+			if (ph >= loopEndPh)
+				ph -= lenPh;
+		}
+	}
+	osc->phase = ph;
+}
+
+/*
+ * One-frame wavetable FM carrier with a per-sample depth ramp (S089 P3;
+ * twin of osc_wtbFmBlock()).
+ *
+ * What:       reads the nearest pos frame at ph + (ssat(mod x d) << 19), the
+ *             table-FM fraction of a cycle, with d = d0 on the first sample
+ *             and d += dStep after each sample.
+ * Why:        osc_wtbFmBlendRampBlock() falls back to this when it has no
+ *             interpolation slot or the table has one frame. Without a ramped
+ *             fallback those blocks would need the old modulator pass, two
+ *             mechanisms on one path (S089 P3 plan §5.1).
+ * Inputs:     osc (bound wtb: sampleCacheIndex/Data, positionApplied, phase,
+ *             phaseInc), mod[size], size, gain, d0, dStep.
+ * Outputs:    buf[size]; osc->phase.
+ * Cost:       the original's 32 (8-bit) / 34 (16-bit) instructions per
+ *             sample + 1.
+ * Accessors:  osc_wtbFmBlendRampBlock() (fallback).
+ * Affiliates: osc_wtbFmBlock() (keep in step); osc_wtbFrameOf(),
+ *             osc_wtbFrame(), osc_wtbRead().
+ */
+static OSC_S089P3_LOOP void osc_wtbFmRampBlock(OscInfo* osc,
+                                               const int16_t* mod,
+                                               int16_t* buf, uint8_t size,
+                                               float gain, float d0,
+                                               float dStep)
+{
+	const wavetable_catalogue_entry_t *wt =
+		sampleMemory_wavetableEntry(osc->sampleCacheIndex);
+	uint32_t ph = osc->phase;
+	const uint32_t inc = osc->phaseInc;
+	/* The ramped FM depth: d0 here, d0 + i x dStep at sample i. */
+	float d = d0;
+	uint8_t i;
+
+	if (!wt || !osc->sampleCacheData) {
+		osc_zeroBlock(buf, size);
+		return;
+	}
+	{
+		/* The nearest frame to pos (no blend in the fallback). */
+		const uint32_t frame = osc_wtbFrameOf(osc->positionApplied,
+		                                      wt->frame_count);
+		const uint8_t *base = osc_wtbFrame(osc, wt, frame);
+
+		for (i = 0u; i < size; i++) {
+			/* Read phase + FM offset: ssat(mod x d) << 19 is the same
+			 * fraction of a cycle as the table-wave FM (S087 A17). */
+			const uint32_t rp = ph + ((uint32_t)__SSAT(
+				(int32_t)((float)mod[i] * d), 16) << 19);
+
+			/* Depth steps after its use (sample 0 = d0). */
+			d += dStep;
+			buf[i] = (int16_t)(osc_wtbRead(base, wt->bits, wt->frame_len, rp) *
+			                   gain);
+			ph += inc;
+		}
+	}
+	osc->phase = ph;
+}
+
+/*
+ * Wavetable FM carrier with frame blending and a per-sample depth ramp
+ * (S089 P3; twin of osc_wtbFmBlendBlock()).
+ *
+ * What:       the S087 P1 frame plan (osc_wtbPlanBlock(): one or two
+ *             segments, each blending one frame pair with ff stepping by
+ *             plan.step); both frames are read at ph + (ssat(mod x d) << 19),
+ *             with d = d0 on the first sample and d += dStep after each
+ *             sample. d runs across the segment boundary unchanged: it is a
+ *             per-sample ramp over the whole block, not per segment.
+ *             Without a slot, or with one frame, the ramped one-frame copy
+ *             runs with the same d0/dStep.
+ * Why:        the Drum FM depth ramp folded into the carrier's own depth
+ *             multiply (see the block comment above).
+ * Inputs:     osc (bound wtb), mod[size], size, gain, d0, dStep.
+ * Outputs:    buf[size]; osc->phase; one interpolation slot claimed for this
+ *             block (modNode_interpClaim()), exactly as the original.
+ * Cost:       the original's 46 (16-bit) / 42 (8-bit) instructions per
+ *             sample + 1.
+ * Accessors:  osc_renderTypedFmRamp().
+ * Affiliates: osc_wtbFmBlendBlock() (keep in step); osc_wtbPlanBlock(),
+ *             osc_wtbFmRampBlock() (fallback), modNode_interpClaim().
+ */
+static OSC_S089P3_LOOP void osc_wtbFmBlendRampBlock(OscInfo* osc,
+                                                    const int16_t* mod,
+                                                    int16_t* buf,
+                                                    uint8_t size, float gain,
+                                                    float d0, float dStep)
+{
+	const wavetable_catalogue_entry_t *wt =
+		sampleMemory_wavetableEntry(osc->sampleCacheIndex);
+	uint32_t ph = osc->phase;
+	const uint32_t inc = osc->phaseInc;
+	const uint32_t count = wt ? wt->frame_count : 0u;
+	osc_wtbPlan_t plan;
+	/* The ramped FM depth: d0 here, d0 + i x dStep at sample i. */
+	float d = d0;
+	uint8_t i = 0u;
+	uint8_t s;
+
+	/* The claim is the last test, so a slot is only taken when the blend
+	 * really runs (as the original). */
+	if (!wt || !osc->sampleCacheData || count < 2u ||
+	    !modNode_interpClaim(osc)) {
+		osc_wtbFmRampBlock(osc, mod, buf, size, gain, d0, dStep);
+		return;
+	}
+	{
+		const uint8_t bits = wt->bits;
+		const uint32_t len = wt->frame_len;
+
+		osc_wtbPlanBlock(osc, count, size, &plan);
+		/* i runs on across the segments: segment s ends at plan.end[s]. */
+		for (s = 0u; s < plan.segments; s++) {
+			const uint8_t *a = osc_wtbFrame(osc, wt, plan.pair[s]);
+			const uint8_t *b = osc_wtbFrame(osc, wt, plan.pair[s] + 1u);
+			float ff = plan.ff[s];
+
+			for (; i < plan.end[s]; i++) {
+				/* One FM read point for both frames (S0 when d == fmMod). */
+				const uint32_t rp = ph + ((uint32_t)__SSAT(
+					(int32_t)((float)mod[i] * d), 16) << 19);
+				const float x0 = osc_wtbRead(a, bits, len, rp);
+				const float x1 = osc_wtbRead(b, bits, len, rp);
+				/* Frame blend at this sample's fractional position. */
+				const float out = x0 + ff * (x1 - x0);
+
+				/* Depth steps after its use (sample 0 = d0). */
+				d += dStep;
+				buf[i] = (int16_t)(out * gain);
+				ff += plan.step;
+				ph += inc;
+			}
+		}
+	}
+	osc->phase = ph;
+}
+
+/*
+ * Typed FM render with a per-sample depth ramp (S089 P3; see the header).
+ *
+ * What:       selects the ramped carrier by the oscillator's bind kind, as
+ *             osc_renderTypedFm() does for the originals: smp, slp, wtb
+ *             (8- and 16-bit, blend with its one-frame fallback); anything
+ *             else (no item installed) renders a zero block.
+ * Why:        one per-block entry for Drum's fm branch. noinline/noclone and
+ *             no section attribute: it runs from flash once per block, and
+ *             keeping it out of mixer_calcNextSampleBlock() (where the Drum
+ *             render is inlined) means the change adds one call there, not a
+ *             switch of three calls that LTO would re-allocate registers
+ *             around (the S086 P3 failure). The call costs a few cycles per
+ *             block (well under 1 per sample).
+ * Inputs:     osc (typed: osc_isTyped()), mod[size], buf, size, gain, d0,
+ *             dStep.
+ * Outputs:    buf[size]; osc->phase (and a wtb interpolation slot claim).
+ * Accessors:  Drum_calcVoiceSyncBlock() (fm branch, typed carrier).
+ * Affiliates: osc_renderTypedFm() (the unramped dispatcher; keep the cases
+ *             in step); OSC_BIND_*.
+ */
+void __attribute__((noinline, noclone)) osc_renderTypedFmRamp(
+	OscInfo* osc, const int16_t* mod, int16_t* buf, uint8_t size,
+	float gain, float d0, float dStep)
+{
+	switch (osc->sampleCacheLooped) {
+	case OSC_BIND_SMP:
+		osc_smpFmRampBlock(osc, mod, buf, size, gain, d0, dStep);
+		break;
+	case OSC_BIND_SLP:
+		osc_slpFmRampBlock(osc, mod, buf, size, gain, d0, dStep);
+		break;
+	case OSC_BIND_WTB8:
+	case OSC_BIND_WTB16:
+		osc_wtbFmBlendRampBlock(osc, mod, buf, size, gain, d0, dStep);
+		break;
+	default:
+		osc_zeroBlock(buf, size);
+		break;
+	}
 }
 

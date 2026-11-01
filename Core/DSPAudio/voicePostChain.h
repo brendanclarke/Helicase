@@ -117,4 +117,38 @@ static inline void voicePost_addGainDist(int16_t *buf, const int16_t *add,
 	}
 }
 
+/*
+ * Cymbal/HiHat amp gain ramp -> distortion, no add (S089 P2).
+ *
+ * What:       voicePost_addGainDist() without the saturating add: the same
+ *             per-sample amp ramp (bufferTool_interpolatedGain()) and the
+ *             same float-through distortion, sample for sample.
+ * Why:        under the WFd chain Cymbal and HiHat render no transient, and
+ *             their transient buffer (mod / mod1) still holds the FM
+ *             modulator signal, so the add must not run. Removing it also
+ *             frees the add's ≈4 per sample, which is part of the fold's
+ *             budget (26 for Cymbal/HiHat, S089 P2 plan §2). The ramp rule
+ *             is unchanged: equal endpoints unless the trigger armed it.
+ * Inputs:     filtered buf, current/previous amp gain, distortion state, block
+ *             size.
+ * Outputs:    buf overwritten in place.
+ * Accessors:  Cymbal_calcSyncBlockVoice(), HiHat_calcSyncBlockVoice() (WFd).
+ * Affiliates: voicePost_addGainDist() (its T+D twin);
+ *             bufferTool_interpolatedGain(); distortion_curveSampleF().
+ */
+static inline void voicePost_gainDist(int16_t *buf,
+		const float ampGain, const float lastAmpGain,
+		const Distortion *dist, const uint8_t size)
+{
+	uint8_t j;
+	/* size is OUTPUT_DMA_SIZE in the mixer; see voicePost_drum(). */
+	const float inv_size = (size > 1u) ? 1.f/(size-1.f) : 0.f;
+	for(j=0;j<size;j++)
+	{
+		const float ag = bufferTool_interpolatedGain(j, inv_size,
+		                                              ampGain, lastAmpGain);
+		buf[j] = distortion_curveSampleF(dist, (float)buf[j] * ag);
+	}
+}
+
 #endif /* VOICE_POST_CHAIN_H_ */

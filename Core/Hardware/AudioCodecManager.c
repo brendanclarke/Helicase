@@ -696,6 +696,17 @@ uint8_t audioCodec_isSuspended(void)
     return audio_hw_suspended;
 }
 
+uint8_t audioCodec_isInitialized(void)
+{
+    /*
+     * Read-only view of the lifetime init flag (S090 P2; contract in
+     * AudioCodecManager.h). audio_hw_initialized is set once at the end of
+     * audioCodec_init() and never cleared, so 0 means "boot has not started
+     * audio yet".
+     */
+    return audio_hw_initialized;
+}
+
 void audioCodec_suspend(void)
 {
     uint32_t primask;

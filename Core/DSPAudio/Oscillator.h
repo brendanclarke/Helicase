@@ -888,6 +888,38 @@ void osc_renderTypedRing(OscInfo* osc, const int16_t* modBuf, int16_t* buf,
                          uint8_t size, int32_t depthQ15,
                          int32_t depthStepQ15);
 void osc_renderUserList(OscInfo* osc, int16_t* buf, uint8_t size, float gain);
+/*
+ * Typed FM render with a per-sample depth ramp (S089 P3).
+ *
+ * What:       renders a typed carrier (smp, slp, wtb) with FM, exactly as
+ *             osc_renderTypedFm() except that the FM depth is not the
+ *             loop-invariant osc->fmMod: sample i uses d0 + i x dStep
+ *             (accumulated in float, stepped after each sample). The
+ *             carrier is chosen by the bind kind (osc->sampleCacheLooped):
+ *             smp, slp, or wtb with frame blending (falling back to the
+ *             nearest frame without an interpolation slot or with one
+ *             frame); no item renders a zero block.
+ * Why:        Drum's fm FM-depth ramp (S088 P0 Layer 2e) folded into the
+ *             carrier's existing depth multiply: one vadd per sample instead
+ *             of a separate 10-instruction modulator pass (S089 P3). Separate
+ *             ramped loops, because the originals are shared with Cymbal and
+ *             HiHat and must not get dearer (the S089 P2 §8 ceiling).
+ * Inputs:     osc (osc_isTyped(); bound by osc_userBind()); mod[size] (the
+ *             modulator block, not pre-scaled); buf; size (<=
+ *             OUTPUT_DMA_SIZE); gain (render gain, x the item's gain code);
+ *             d0 (FM depth on sample 0); dStep (depth change per sample).
+ *             With d0 = osc->fmMod and dStep = 0.0f the output is
+ *             bit-identical to osc_renderTypedFm() (host law FR1).
+ * Outputs:    buf[size]; osc->phase; a wtb blend claims one interpolation
+ *             slot for the block (modNode_interpClaim()).
+ * Cost:       per sample, each carrier's osc_renderTypedFm() loop + 1; one
+ *             flash call per block.
+ * Accessors:  Drum_calcVoiceSyncBlock() (fm branch) only.
+ * Affiliates: osc_renderTypedFm(); the four ramped loops in Oscillator.c
+ *             (S089 P3 block, .itcm.s089p3); DrumVoice.lastFmDepth.
+ */
+void osc_renderTypedFmRamp(OscInfo* osc, const int16_t* mod, int16_t* buf,
+                           uint8_t size, float gain, float d0, float dStep);
 
 /*
  * Render the itp old-carrier snapshot and blend it into the live block

@@ -197,6 +197,49 @@ static const char oscTypeNames[][4] = {
 static const char oscRunNames[][4] = {
     {3}, {"rst"},{"fre"},{"itp"},
 };
+/*
+ * DTYPE_ON_OFF tag for the voice chain selector (S089 P2).
+ *
+ * What:       ONOFF_TAG_VOICE_CHAIN = 2u: the voice_chain rows' dtype byte is
+ *             DTYPE_ON_OFF | (2 << 4) = 0x26. Tag 1 stays osc1_run.
+ * Why:        S088 D12 reserved further tags as 2, 3, ... for tagged on/off
+ *             selectors; menu.c resolves the name table per tag through
+ *             menu_onoffTagNames().
+ * Accessors:  ROW_SELECT_ONOFF_SPECIAL (the four voice_chain rows).
+ * Affiliates: voiceChainNames below; ONOFF_TAG_OSC_RUN above.
+ */
+#define ONOFF_TAG_VOICE_CHAIN   2u
+/*
+ * Voice chain names (S089 P2).
+ *
+ * What:       [0] = count (2), then T+D, WFd. Same shape as oscRunNames.
+ * Why:        display, clamp and automation max of the chn cell; the count
+ *             must equal VOICE_CHAIN_COUNT (asserted in menu.c).
+ * Accessors:  menu_onoffTagNames() (menu.c).
+ * Affiliates: VOICE_CHAIN_* (voiceFold.h).
+ */
+static const char voiceChainNames[][4] = {
+    {2}, {"T+D"},{"WFd"},
+};
+/*
+ * Wavefolder type names: the wav cell under WFd (S089 P2).
+ *
+ * What:       foldTypeNames: [0] = count (8), then the 3-character codes;
+ *             foldTypeLongNames: the same order, 8 characters for the
+ *             single-parameter view (left field).
+ * Why:        under WFd the transient_wave byte is a fold type
+ *             (VOICE_FOLD_*); the counts must equal VOICE_FOLD_COUNT
+ *             (asserted in menu.c).
+ * Accessors:  menu_cellIsFoldWave() users in menu.c.
+ * Affiliates: VOICE_FOLD_* (voiceFold.h).
+ */
+static const char foldTypeNames[][4] = {
+    {8}, {"Tri"},{"TrD"},{"Sin"},{"SnD"},{"Asn"},{"Chb"},{"TrI"},{"Fd2"},
+};
+static const char foldTypeLongNames[][9] = {
+    {8}, {"TriFold "},{"TriDecay"},{"SinFold "},{"SinDecay"},
+         {"AsymFold"},{"Chebyshv"},{"IntFold "},{"Fold2x  "},
+};
 static const char outputNames[][7] = {
     {6}, {"St1"},{"St2"},{"L1"},{"R1"},{"L2"},{"R2"},
 };

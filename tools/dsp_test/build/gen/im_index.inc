@@ -42,5 +42,6 @@ typedef enum {
     DRUM_PARAM_OSC1_POSITION, /* S086 P3: appended; preserve all prior IDs. */
     DRUM_PARAM_OSC1_TYPE, /* S087 B: appended; preserve all prior IDs. */
     DRUM_PARAM_OSC1_RUN, /* S088: appended; preserve all prior IDs. */
+    DRUM_PARAM_VOICE_CHAIN, /* S089 P2: appended; preserve all prior IDs. */
     DRUM_PARAM_COUNT
 } drum_param_index_t;

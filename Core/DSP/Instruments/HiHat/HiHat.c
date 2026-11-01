@@ -53,6 +53,7 @@
 #include "modulationNode.h"
 #include "InstrumentManager.h"
 #include "voicePostChain.h"
+#include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_*, voiceFold_process() */
 // TODO DSP_PORT
 // #include "TriggerOut.h"
 
@@ -143,6 +144,11 @@ void HiHat_initVoice(HiHatVoice *voice)
 	lfo_init(&voice->lfo);
 	/* Run mode default (S088 P0 §2.4): 0 rst, today's behaviour. */
 	voice->runMode = OSC_RUN_RST;
+	/* S089 P2: default chain (T+D). The slot reset memset already cleared it;
+	 * the explicit store documents the default like runMode above. Under WFd
+	 * transGen.midiFreq (the fold's last depth) relies on the same memset
+	 * being 0 = "no previous depth" (voiceFold_process()). */
+	voice->chainType = VOICE_CHAIN_DEFAULT;
 	/* S088 P0: no armed ramp until a fre/itp retrigger asks for one. */
 	voice->ampRampArm = 0u;
 	voice->lastAmpGain = 0.0f;
@@ -240,7 +246,9 @@ void HiHat_triggerVoice(HiHatVoice *voice, const uint8_t source_slot,
 
 	if (phaseReset) {
 	float offset = 1;
-	if(voice->transGen.waveform==1) //offset mode
+	/* Ofs belongs to T+D only (S089 P2; see DrumVoice.c offset guard). */
+	if(voice->chainType == VOICE_CHAIN_DEFAULT &&
+	   voice->transGen.waveform==1) //offset mode
 	{
 		offset -= voice->transGen.volume;
 	}
@@ -351,8 +359,22 @@ void HiHat_calcAsyncVoice(HiHatVoice *voice)
 	}
 	*/
 
-	//calc snap EG if transient sample 0 is activated
-	if(voice->transGen.waveform == 0)
+	/*
+	 * Snap pitch envelope (T+D Snp only) (S089 P2).
+	 *
+	 * What:       T+D: unchanged (S0). WFd: no snap; pitchMod is held at
+	 *             1.0 and snapEg.value is left to voiceFold_process() (the
+	 *             TrD/SnD decay).
+	 * Why:        unlike Drum/Snare, HiHat *assigns* pitchMod only here and
+	 *             nothing else resets it after init. Without the else, a chain
+	 *             change during a snap would leave the carrier detuned
+	 *             indefinitely (S089 P2 §1 item 6). The T+D Snp-to-click
+	 *             variant of that latent issue is recorded, not changed (§16).
+	 * Affiliates: HiHat_initVoice() (pitchMod = 1); voiceFold_process().
+	 */
+	if (voice->chainType == VOICE_CHAIN_WAVEFOLDER)
+		voice->osc.pitchMod = 1.0f;
+	else if(voice->transGen.waveform == 0)
 	{
 		const float snapVal = SnapEg_calc(&voice->snapEg, voice->transGen.pitch);
 		voice->osc.pitchMod = 1 + snapVal*voice->transGen.volume;
@@ -440,10 +462,30 @@ void HiHat_calcSyncBlockVoice(HiHatVoice *voice, int16_t* buf,
 	if (voice->snapshot.active)
 		oscSection_renderOldCarrier(&voice->snapshot, buf, size);
 
+	/*
+	 * WFd: fold the FM carrier ahead of the filter (S089 P2).
+	 * What: the carrier block (with the itp blend) is folded in place; the
+	 *       filter drive (sft), the filter and the distortion run unchanged.
+	 * Why:  plan §1: the fold takes the transient's place and budget
+	 *       (22 + 4 = 26 per sample with the no-add post loop below).
+	 * Gains:  HiHat renders its FM carrier at 0.5 (the osc render above), so
+	 *       inGain 2.0 restores full scale into the fold (the same fold depth
+	 *       per vol as Cymbal) and outGain 0.5 returns the folded block to the
+	 *       carrier's T+D level (vol 0 is still the identity at that level).
+	 *       Both are per-block constants in voiceFold_process(): no
+	 *       per-sample cost (S089 P2 assessment F1).
+	 * Affiliates: voiceFold_process(); the 0.5 carrier gain in the
+	 *       osc_renderTypedFm() / calcNextOscSampleFmBlock() calls above.
+	 */
+	if (voice->chainType == VOICE_CHAIN_WAVEFOLDER)
+		voiceFold_process(&voice->transGen, &voice->snapEg, buf, size,
+		                  2.0f, 0.5f);
 	SVF_calcBlockZDF(&voice->filter,voice->filterType,buf,size);
 
-	//calc transient sample
-	transient_calcBlock(&voice->transGen,mod1,size);
+	/* Transient (T+D only, S089 P2). Under WFd mod1 still holds the modulator
+	 * sum, so the post loop below must not add it. */
+	if (voice->chainType != VOICE_CHAIN_WAVEFOLDER)
+		transient_calcBlock(&voice->transGen,mod1,size);
 
 	/*
 	 * Fused HiHat post-chain (S073 Step 4; amp ramp S088 P0 §3 Layer 2b).
@@ -467,8 +509,19 @@ void HiHat_calcSyncBlockVoice(HiHatVoice *voice, int16_t* buf,
 		const float lastAmpGain = voice->ampRampArm
 			? voice->lastAmpGain : ampGain;
 
-		voicePost_addGainDist(buf, mod1, ampGain, lastAmpGain,
-		                      &voice->distortion, size);
+		/*
+		 * Post-chain by voice chain (S089 P2).
+		 * T+D: transient add + amp ramp + distortion, unchanged (S0).
+		 * WFd: the no-add twin. mod1 is the FM modulator here, not a
+		 *      transient, and must not reach the output (plan §1 hazard).
+		 * Affiliates: voicePost_gainDist() (voicePostChain.h).
+		 */
+		if (voice->chainType == VOICE_CHAIN_WAVEFOLDER)
+			voicePost_gainDist(buf, ampGain, lastAmpGain,
+			                   &voice->distortion, size);
+		else
+			voicePost_addGainDist(buf, mod1, ampGain, lastAmpGain,
+			                      &voice->distortion, size);
 		voice->lastAmpGain = ampGain;
 		voice->ampRampArm = 0u;
 	}

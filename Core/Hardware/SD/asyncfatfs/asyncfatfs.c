@@ -3231,6 +3231,181 @@ uint8_t afatfs_countOpenHandles(void)
     return count;
 }
 
+/*
+ * Copy the progress gates and cache-slot state for a stall record
+ * (S090 P3, C3-2; contract in asyncfatfs.h).
+ *
+ * What: reads the filesystem state, last error, the rename and remove slots,
+ * currentDirectory's busy/retain/lock, and counts each cache-slot condition.
+ * Why: a waiting operation can be held by FATAL (every request refused), an
+ * active slot that never finishes, a busy current directory, or a cache with
+ * no evictable slot (allocation returns IN_PROGRESS forever). Counting slots
+ * shows the last case directly. A cache that looks healthy while the
+ * operation waits points at the SD transport instead (sdcard snapshot).
+ * Inputs: none. Output: *snapshot. Pure read: no I/O, no allocation, no
+ * state change; safe from any foreground context.
+ * Affiliates: afatfs_allocateCacheSector(), afatfs_renameObject_lfn(),
+ * afatfs_removeObjects_lfn(), filesystem_residentNamesRecordStall().
+ */
+void afatfs_getStallSnapshot(afatfsStallSnapshot_t *snapshot)
+{
+    if (!snapshot)
+        return;
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->fs_state = (uint8_t)afatfs.filesystemState;
+    snapshot->last_error = (uint8_t)afatfs.lastError;
+    snapshot->rename_active = afatfs.renameObject.active;
+    snapshot->rename_phase = (uint8_t)afatfs.renameObject.phase;
+    snapshot->remove_active = afatfs.removeObjects.active;
+    snapshot->remove_phase = (uint8_t)afatfs.removeObjects.phase;
+    snapshot->cwd_busy = (uint8_t)afatfs_fileIsBusy(&afatfs.currentDirectory);
+    snapshot->cwd_retain = (int8_t)afatfs.currentDirectory.readRetainCacheIndex;
+    snapshot->cwd_lock = (int8_t)afatfs.currentDirectory.writeLockedCacheIndex;
+    /* One pass over the fixed cache descriptors; a slot can count in several
+     * columns (for example dirty and locked). */
+    for (int i = 0; i < AFATFS_NUM_CACHE_SECTORS; i++) {
+        const afatfsCacheBlockDescriptor_t *d = &afatfs.cacheDescriptor[i];
+        if (d->locked)
+            snapshot->cache_locked++;
+        if (d->retainCount != 0u)
+            snapshot->cache_retained++;
+        switch (d->state) {
+        case AFATFS_CACHE_STATE_DIRTY:   snapshot->cache_dirty++;   break;
+        case AFATFS_CACHE_STATE_READING: snapshot->cache_reading++; break;
+        case AFATFS_CACHE_STATE_WRITING: snapshot->cache_writing++; break;
+        case AFATFS_CACHE_STATE_EMPTY:   snapshot->cache_empty++;   break;
+        default:                                                    break;
+        }
+    }
+    /* S090 P5: a leaked handle shows as a count that stays above zero while
+     * the facade is idle; five in use refuses every further open. */
+    for (int i = 0; i < AFATFS_MAX_OPEN_FILES; i++) {
+        if (afatfs.openFiles[i].type != AFATFS_FILE_TYPE_NONE)
+            snapshot->open_files++;
+    }
+}
+
+/* Trim phases (afatfsTrimTail_t.phase). */
+#define AFATFS_TRIM_PHASE_SCAN  0u
+#define AFATFS_TRIM_PHASE_WRITE 1u
+#define AFATFS_TRIM_PHASE_DONE  2u
+
+/*
+ * Start a directory tail trim on currentDirectory (S090 P3; contract in
+ * asyncfatfs.h).
+ *
+ * What: refuses while the filesystem is not READY or currentDirectory is
+ * busy; otherwise rewinds currentDirectory's raw finder and clears the
+ * caller-owned state.
+ * Why: the scan uses currentDirectory's cursor like remove/rename do, so it
+ * must not start under another queued directory operation.
+ * Inputs: state (caller storage). Output: true when the scan is armed.
+ */
+bool afatfs_trimDirectoryTailBegin(afatfsTrimTail_t *state)
+{
+    if (!state ||
+        afatfs.filesystemState != AFATFS_FILESYSTEM_STATE_READY ||
+        afatfs_fileIsBusy(&afatfs.currentDirectory))
+        return false;
+    memset(state, 0, sizeof(*state));
+    state->candidate.entryIndex = -1;
+    afatfs_findFirst(&afatfs.currentDirectory, &state->finder);
+    state->phase = AFATFS_TRIM_PHASE_SCAN;
+    return true;
+}
+
+/*
+ * Advance a directory tail trim (S090 P3; contract in asyncfatfs.h).
+ *
+ * What:
+ * - SCAN: walks raw entries until the first 0x00 or the end of the allocated
+ *   directory. A live entry (LFN fragments, volume label and dot entries
+ *   included) clears the candidate; the first deleted entry after a live one
+ *   becomes the candidate. At the end, the candidate (if any) is the first
+ *   entry after the last live entry and everything from it on is deleted.
+ * - WRITE: zeroes that entry in its cached sector (marking it dirty), which
+ *   publishes the end marker there.
+ * Why: see asyncfatfs.h. A directory whose last live entry is already
+ *   followed by 0x00, or that ends with a live entry, needs nothing.
+ * Inputs: state from afatfs_trimDirectoryTailBegin().
+ * Outputs: SUCCESS (state->trimmed tells whether a marker was written),
+ *   FAILURE on an I/O error, IN_PROGRESS while a sector is being read.
+ * The finder's sector retain is always released (afatfs_findLast()) before
+ *   SUCCESS/FAILURE or the write.
+ */
+afatfsOperationStatus_e afatfs_trimDirectoryTailContinue(afatfsTrimTail_t *state)
+{
+    afatfsOperationStatus_e status;
+
+    if (!state)
+        return AFATFS_OPERATION_FAILURE;
+    if (state->phase == AFATFS_TRIM_PHASE_SCAN) {
+        /* Process every entry of each cached sector in one call; findNext
+         * returns IN_PROGRESS when the next sector still has to be read. */
+        for (;;) {
+            fatDirectoryEntry_t *entry = NULL;
+
+            status = afatfs_findNext(&afatfs.currentDirectory,
+                                     &state->finder, &entry);
+            if (status == AFATFS_OPERATION_IN_PROGRESS)
+                return status;
+            if (status == AFATFS_OPERATION_FAILURE) {
+                afatfs_findLast(&afatfs.currentDirectory);
+                state->phase = AFATFS_TRIM_PHASE_DONE;
+                return AFATFS_OPERATION_FAILURE;
+            }
+            if (entry == NULL || fat_isDirectoryEntryTerminator(entry))
+                break;
+            if (fat_isDirectoryEntryEmpty(entry)) {
+                if (!state->have_candidate) {
+                    state->candidate = state->finder;
+                    state->have_candidate = 1u;
+                    state->tail_count = 0u;
+                }
+                if (state->tail_count != 0xFFFFu)
+                    state->tail_count++;
+            } else {
+                state->have_candidate = 0u;
+                state->tail_count = 0u;
+                if (state->live_count != 0xFFFFu)
+                    state->live_count++;
+            }
+        }
+        afatfs_findLast(&afatfs.currentDirectory);
+        if (!state->have_candidate) {
+            state->phase = AFATFS_TRIM_PHASE_DONE;
+            return AFATFS_OPERATION_SUCCESS;
+        }
+        state->phase = AFATFS_TRIM_PHASE_WRITE;
+    }
+    if (state->phase == AFATFS_TRIM_PHASE_WRITE) {
+        uint8_t *sector;
+
+        status = afatfs_cacheSector(state->candidate.sectorNumberPhysical,
+                                    &sector,
+                                    AFATFS_CACHE_READ | AFATFS_CACHE_WRITE,
+                                    0);
+        if (status == AFATFS_OPERATION_IN_PROGRESS)
+            return status;
+        if (status == AFATFS_OPERATION_FAILURE ||
+            state->candidate.entryIndex < 0 ||
+            state->candidate.entryIndex >=
+                (int16_t)AFATFS_FILES_PER_DIRECTORY_SECTOR) {
+            state->phase = AFATFS_TRIM_PHASE_DONE;
+            return AFATFS_OPERATION_FAILURE;
+        }
+        /* The whole 32-byte entry becomes zero: first byte 0x00 is the end
+         * marker; the rest is cleared so no stale name bytes remain in it. */
+        memset(&((fatDirectoryEntry_t *)sector)[state->candidate.entryIndex],
+               0, sizeof(fatDirectoryEntry_t));
+        afatfs_cacheSectorMarkDirty(afatfs_getCacheDescriptorForBuffer(sector));
+        state->trimmed = 1u;
+        state->phase = AFATFS_TRIM_PHASE_DONE;
+        return AFATFS_OPERATION_SUCCESS;
+    }
+    return AFATFS_OPERATION_SUCCESS;
+}
+
 /**
  * Continue the file truncation.
  *

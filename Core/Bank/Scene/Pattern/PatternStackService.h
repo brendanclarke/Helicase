@@ -51,6 +51,23 @@ void patSvc_tick(void);
 uint8_t patSvc_idle(void);
 
 /*
+ * Report whether the bounded repair epoch has finished (S090 P2).
+ *
+ * What: nonzero when the service is open (no handover), has no reactive,
+ * bulk or queued work, no rebuild is pending, and the tier-1 repair cursor
+ * has walked every address entry. Finite by construction: the cursor only
+ * advances, through PATSVC_ADDRESS_COUNT entries, and only a mutation,
+ * handover or replacement (none of which happens before audio starts)
+ * restarts it.
+ * Why: the pre-audio AutoSave settle stage runs the repair epoch to its end
+ * so any relocation it makes (each marks non-semantic Pattern AutoSave work)
+ * is written before boot completes instead of seconds after audio starts.
+ * Accessors: filesystem_settleAutosaveBlocking() (through
+ * filesystem_settlePendingClasses()). Affiliates: patSvc_tick() repair section.
+ */
+uint8_t patSvc_repairEpochIdle(void);
+
+/*
  * Quiesce the service before a filesystem replaces resident Pattern bytes.
  *
  * What: close admission and drain the current service Scene's queue/barrier

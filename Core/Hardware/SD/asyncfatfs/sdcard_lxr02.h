@@ -73,6 +73,9 @@ typedef struct {
     uint32_t block;
     uint16_t offset;
     uint16_t wait_ms;
+    /* S090 P3 (C3-2): consecutive READ/WRITE commands the card refused
+     * (R1 != 0), saturating; 0 after any accepted command. */
+    uint16_t refused_run;
 } sdcardTransportSnapshot_t;
 
 void sdcard_getTransportSnapshot(sdcardTransportSnapshot_t *snapshot);

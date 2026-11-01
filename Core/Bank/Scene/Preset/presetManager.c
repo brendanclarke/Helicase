@@ -531,25 +531,6 @@ static void on_instrument_save_complete(void)
     preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_SAVE);
 }
 
-static void on_instrument_temp_save_complete(void)
-{
-    /*
-     * Report completion of the hidden normal Instrument Load source write.
-     *
-     * Input: filesystem has closed `.hctmp.<ext>` in one type directory.
-     * Output: Menu may now load that type's `.hcindex` and permit the `kit`
-     * row. No Scene/DSP/HCNAMES work occurs here. Affiliates: Menu entry
-     * sequencing and filesystem_requestSaveInstrumentTemp().
-     */
-    preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_TEMP_SAVE);
-}
-
-static void on_instrument_morph_temp_save_complete(void)
-{
-    /* Report completion of the hidden Morph-only InstrumentMrp baseline. */
-    preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_MORPH_TEMP_SAVE);
-}
-
 static void on_instrument_morph_save_complete(void)
 {
     /*
@@ -575,12 +556,6 @@ static void on_instrument_morph_load_complete(void)
      * bindings.
      */
     preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_MORPH_LOAD);
-}
-
-static void on_instrument_morph_temp_load_complete(void)
-{
-    /* The staged hidden file is committed through the Morph-only path. */
-    preset_completeFilesystemOp(PRESET_OP_INSTRUMENT_MORPH_TEMP_LOAD);
 }
 
 static void on_scene_load_complete(void)
@@ -2393,66 +2368,6 @@ static uint8_t preset_commitStagedInstrumentNormalToMorph(
     return preset_copyInstrumentNormalToMorphIfSameType(destination, staged);
 }
 
-static uint8_t preset_copyInstrumentMorphToMorphIfSameType(
-    kit_instrument_slot_t *destination,
-    const kit_instrument_slot_t *source)
-{
-    const instrument_registry_entry_t *entry;
-    uint8_t index;
-    uint8_t copied = 0u;
-
-    /*
-     * Copy one staged source Morph endpoint into a resident Morph endpoint.
-     *
-     * Inputs: destination resident slot and staged source slot. Output:
-     * Morphable descriptor cells are copied from the staged Morph image only
-     * when the instrument types match. This restores the entry endpoint domain
-     * captured by the hidden InstrumentMrp kit snapshot. A mismatch is a
-     * complete no-change for that slot, which keeps InstrumentMrp
-     * per-instrument and avoids inventing cross-type parameter mapping.
-     */
-    if (!destination || !source || destination->type != source->type)
-        return 0u;
-    entry = instrumentManager_registryEntry(destination->type);
-    if (!entry)
-        return 0u;
-    for (index = 0u; index < entry->descriptor_count; index++) {
-        const ParamDescriptor *descriptor = &entry->descriptors[index];
-        if (!(descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE))
-            continue;
-        destination->parameter_images.morph_instrument_parameters[index] =
-            source->parameter_images.morph_instrument_parameters[index];
-        copied = 1u;
-    }
-    return copied;
-}
-
-static uint8_t preset_commitStagedInstrumentMorphToMorph(
-    uint8_t scene_index,
-    uint8_t slot)
-{
-    const kit_instrument_slot_t *staged =
-        (const kit_instrument_slot_t *)filesystem_loadedInstrumentSlot();
-    kit_instrument_slot_t *destination = scene_instrumentSlot(scene_index, slot);
-
-    /*
-     * Commit the staged hidden InstrumentMrp baseline as a Morph restore.
-     *
-     * The hidden snapshot's meaningful payload is its [morph] section, whose
-     * cells are the entry-time Morphable Morph endpoints. Unlike a pool
-     * InstrumentMrp load, which copies the file's normal endpoints, this path
-     * copies the staged Morph image back into the same resident Morph domain.
-     * Type, Normal image, display name, HCNAMES source, and routing remain
-     * untouched while the previewed endpoints return to their entry values.
-     */
-    if (!destination || !staged || slot >= INSTRUMENT_SLOT_COUNT ||
-        staged->type != destination->type ||
-        staged->type != (instrument_type_t)pm_instrument_request_type) {
-        return 0u;
-    }
-    return preset_copyInstrumentMorphToMorphIfSameType(destination, staged);
-}
-
 static uint8_t preset_commitStagedKitNormalToMorph(void)
 {
     const kit_t *source = filesystem_loadedKit();
@@ -2573,53 +2488,80 @@ void preset_startKitMorphApply(void)
     }
 }
 
+/*
+ * Finish one InstrumentMrp-style endpoint commit (S090 P1: shared tail).
+ *
+ * What: when `copied` is nonzero, marks the destination's Morphable Morph
+ * domain dirty for AutoSave, clears the destination Scene's card-clean bit
+ * and, for the active Scene, requests that voice's Morph rebuild and arms the
+ * bounded Morph-only apply worker. When `copied` is zero (type mismatch or no
+ * Morphable cell) nothing changes and the worker stays inactive, so Menu's
+ * apply tick finishes on its next poll.
+ * Why: these steps were the tail of preset_startInstrumentMorphApply(). The
+ * RAM `kit` Morph restore must run exactly the same steps after its own copy,
+ * so the tail is shared rather than duplicated.
+ * Inputs: destination Scene/slot and the result of the caller's copy.
+ * Outputs: AutoSave Morph marks, Bank card-clean state, the Morph engine voice
+ * request and the instrument_apply_* worker state.
+ * Callers: preset_startInstrumentMorphApply() (pool InstrumentMrp load) and
+ * preset_restoreInstrumentMorphSnapshot() (`kit` row restore).
+ * Affiliates: autosave_markInstrumentMorphDirty(),
+ * bank_invalidateSdCleanScene(), presetMorph_requestVoice(),
+ * preset_tickInstrumentApply().
+ */
+static void preset_armInstrumentMorphCommit(uint8_t scene_index,
+                                            uint8_t slot,
+                                            uint8_t copied)
+{
+    if (!copied)
+        return;
+    /*
+     * InstrumentMrp copied only compatible Morphable endpoint values into
+     * the retained destination. Mark precisely that same descriptor domain
+     * now: type, Normal endpoints, name, HCNAMES source, routing, and
+     * runtime interpolation did not change. This remains outside the
+     * active-Scene branch because inactive resident Scene data still needs
+     * persistence even though it requires no immediate audible refresh.
+     */
+    autosave_markInstrumentMorphDirty(scene_index, slot);
+    /*
+     * Option 2: InstrumentMrp changed the resident Morph image. The
+     * destination Scene's card-clean bit clears because its saved payload
+     * no longer equals the on-card Bank child. Affiliate:
+     * bank_invalidateSdCleanScene().
+     */
+    bank_invalidateSdCleanScene(scene_index);
+    if (scene_index == scene_getActiveIndex()) {
+        presetMorph_requestVoice(scene_index, slot);
+        instrument_apply_active = 1u;
+        instrument_apply_scene = scene_index;
+        instrument_apply_phase = INSTRUMENT_APPLY_PHASE_MORPH_REBUILD;
+        instrument_apply_rebind_source = 0u;
+        instrument_apply_morph_only = 1u;
+    }
+}
+
 void preset_startInstrumentMorphApply(uint8_t scene_index, uint8_t slot)
 {
     /*
-     * Commit staged InstrumentMrp endpoints and arm a morph-only refresh.
+     * Commit a staged pool InstrumentMrp file and arm a morph-only refresh.
      *
      * InstrumentMrp preserves the destination slot identity. It copies no
      * display name, performs no routing apply, and does not clear/rebind
      * modulation targets. A type mismatch is a no-change operation; the cursor
      * remains inactive and Menu will simply unlock on the next poll.
      *
-     * The staged-image source is origin-dependent. A pool InstrumentMrp load
-     * commits the file's normal endpoints into the resident Morph endpoints,
-     * while the hidden reversible kit baseline commits its captured entry
-     * Morph endpoints through the matching Morph-to-Morph copy. The filesystem
-     * origin flag remains valid until the next request reuses operation
-     * scratch, and this completion runs before any new request is posted.
+     * Since S090 the staged image is always a pool file: its normal endpoints
+     * become the resident Morph endpoints. The reversible `kit` baseline no
+     * longer passes through filesystem staging; it is restored from RAM by
+     * preset_restoreInstrumentMorphSnapshot(), which shares the commit tail
+     * preset_armInstrumentMorphCommit().
      */
     instrument_apply_active = 0u;
     preset_ensureMorphInitialized();
-    if (filesystem_loadedInstrumentWasMorphTemporary()
-            ? preset_commitStagedInstrumentMorphToMorph(scene_index, slot)
-            : preset_commitStagedInstrumentNormalToMorph(scene_index, slot)) {
-        /*
-         * InstrumentMrp copied only compatible Morphable endpoint values into
-         * the retained destination. Mark precisely that same descriptor domain
-         * now: type, Normal endpoints, name, HCNAMES source, routing, and
-         * runtime interpolation did not change. This remains outside the
-         * active-Scene branch because inactive resident Scene data still needs
-         * persistence even though it requires no immediate audible refresh.
-        */
-        autosave_markInstrumentMorphDirty(scene_index, slot);
-        /*
-         * Option 2: InstrumentMrp changed the resident Morph image. The
-         * destination Scene's card-clean bit clears because its saved payload
-         * no longer equals the on-card Bank child. Affiliate:
-         * bank_invalidateSdCleanScene().
-         */
-        bank_invalidateSdCleanScene(scene_index);
-        if (scene_index == scene_getActiveIndex()) {
-            presetMorph_requestVoice(scene_index, slot);
-            instrument_apply_active = 1u;
-            instrument_apply_scene = scene_index;
-            instrument_apply_phase = INSTRUMENT_APPLY_PHASE_MORPH_REBUILD;
-            instrument_apply_rebind_source = 0u;
-            instrument_apply_morph_only = 1u;
-        }
-    }
+    preset_armInstrumentMorphCommit(
+        scene_index, slot,
+        preset_commitStagedInstrumentNormalToMorph(scene_index, slot));
 }
 
 /*
@@ -2681,12 +2623,12 @@ static void preset_startInstrumentApplyImage(const kit_instrument_slot_t *staged
      * apply. The public normal loader and the reversible `kit` restore both
      * use this one lifecycle path, so a restore cannot leave stale runtime
      * targets or differ from a file load. Only a root-pool load enables the
-     * whole-Instrument AutoSave marker; temporary restore deliberately does
-     * not manufacture a new retained-data mutation.
+     * whole-Instrument AutoSave marker; the snapshot `kit` restore deliberately
+     * does not manufacture a new retained-data mutation.
      *
      * Affiliates: preset_startInstrumentApply(),
-     * preset_loadInstrumentTemp(), filesystem_loadedInstrumentSlot(),
-     * and filesystem_instrumentLoadPreviewOriginal().
+     * preset_restoreInstrumentSnapshot() (S090 P1, RAM `kit` restore),
+     * filesystem_loadedInstrumentSlot() and preset_startInstrumentCopy().
      *
      * S075: source_slot names the slot the image came from. Loads pass
      * source_slot == slot (unchanged behaviour); preset_startInstrumentCopy()
@@ -2820,8 +2762,8 @@ void preset_startInstrumentApply(uint8_t scene_index,
      * image commit helper.
      *
      * Inputs: callback-captured Scene/slot plus Preset's immutable request
-     * type/mask plus Menu's immutable root-pool versus temporary-restore
-     * decision. Output: the Instrument result commits through the same safe
+     * type/mask plus Menu's AutoSave decision (1 for every root-pool load since
+     * S090). Output: the Instrument result commits through the same safe
      * runtime ordering, while only a root-pool replacement marks its complete
      * retained Instrument payload for AutoSave. Affiliates:
      * on_instrument_load_complete() and Menu completion polling.
@@ -2853,128 +2795,209 @@ void preset_startInstrumentCopy(uint8_t src_scene, uint8_t src_slot,
                                      1u);
 }
 
-uint8_t preset_saveInstrumentTemp(uint8_t source_scene, uint8_t source_slot)
+/*
+ * The reversible `kit` row snapshot (S090 P1; 129 B SRAM1 .bss, approved by
+ * the user 2026-10-31, owner Preset).
+ *
+ * What: the entry voice of one nested Instrument Load session: its registry
+ * type and its Normal and Morph parameter images, byte for byte.
+ * Why: it replaces the hidden `.hctmp.<ext>` file. While audio plays the
+ * facade gets one 16-byte bit-banged burst per main-loop pass, so that file's
+ * create/write/close/sync took 9-10 s at every entry and voice change and the
+ * restore paid a file read. morph_interpolation is not stored: the file path
+ * never restored it either (the loader resets the staged slot and the apply
+ * rebuilds interpolation through presetMorph_requestAll()).
+ * Lifetime: meaningful while Menu's menu_instrumentTempValid is set; Menu owns
+ * that validity and the original nine-byte name (menu_instrumentTempName).
+ * Only one nested Instrument session exists at a time, so one image suffices;
+ * a new capture simply overwrites it.
+ * Writer: preset_captureInstrumentSnapshot(). Readers:
+ * preset_restoreInstrumentSnapshot(), preset_restoreInstrumentMorphSnapshot().
+ */
+static struct {
+    uint8_t type;                                            /* instrument_type_t */
+    instrument_param_value_t normal[INSTRUMENT_PARAM_COUNT]; /* instrument_parameters */
+    instrument_param_value_t morph[INSTRUMENT_PARAM_COUNT];  /* morph_instrument_parameters */
+} pm_instrument_snapshot;
+/* The approved allocation is exactly 129 B: one type byte plus two images of
+ * INSTRUMENT_PARAM_COUNT one-byte cells; the struct has no padding. */
+_Static_assert(sizeof(pm_instrument_snapshot) == 129u,
+               "S090 P1: the approved kit snapshot is 129 B");
+
+/*
+ * Decide whether the former temp file carried one descriptor cell (S090 P1).
+ *
+ * What: true for a Normal cell when the descriptor has a file key, and for a
+ * Morph cell when it has a file key and is Morphable.
+ * Why: the `.hctmp` file was written by storage_formatInstrumentLineView(),
+ * which emits [params] for every descriptor with a file key and [morph] only
+ * for Morphable ones (storageTypes.c storage_descriptorWritableInSection()).
+ * On restore the loader reset the slot first, so every other cell came back
+ * as its instrumentManager_resetSlot() default. Copying exactly the cells the
+ * file carried keeps the RAM restore identical to the file restore it
+ * replaces, including for cells the file never held.
+ * Inputs: one registry descriptor and the section (0 Normal, 1 Morph).
+ * Output: nonzero when that cell is restored from the snapshot.
+ * Callers: preset_restoreInstrumentSnapshot(),
+ * preset_restoreInstrumentMorphSnapshot().
+ */
+static uint8_t preset_snapshotCellRestored(const ParamDescriptor *descriptor,
+                                           uint8_t morph_section)
 {
-    /*
-     * Save one voice as the hidden reversible normal-Load source.
-     *
-     * Inputs: Menu's entry Scene/voice. Output: Preset holds the immutable
-     * coordinates until filesystem writes `.hctmp.<ext>`; completion is a
-     * dedicated UI sequencing event, not an Instrument Save or name update.
-     * Affiliates: on_instrument_temp_save_complete() and Menu entry handling.
-     */
-    filesystem_ack();
-    if (!filesystem_requestSaveInstrumentTemp(source_scene, source_slot,
-                                              on_instrument_temp_save_complete))
+    if (!descriptor || !descriptor->file_key)
         return 0u;
-    pm_status = PRESET_LOAD_IN_PROGRESS;
-    pm_completed_op = PRESET_OP_NONE;
-    pm_request_slot = source_slot;
-    pm_instrument_request_scene = source_scene;
-    pm_instrument_request_slot = source_slot;
+    if (!morph_section)
+        return 1u;
+    return (uint8_t)((descriptor->flags & INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u);
+}
+
+uint8_t preset_captureInstrumentSnapshot(uint8_t scene_index, uint8_t slot)
+{
+    const kit_instrument_slot_t *source =
+        scene_instrumentSlotConst(scene_index, slot);
+
+    /*
+     * Capture the entry voice for the `kit` row (S090 P1).
+     *
+     * What: copies the resident slot's type and both endpoint images into the
+     * one RAM snapshot; nothing else changes and no filesystem request is made.
+     * Why: it replaces preset_saveInstrumentTemp() /
+     * preset_saveInstrumentMorphTemp(), whose `.hctmp` write blocked the
+     * nested entry chain for 9-10 s while playing.
+     * Inputs: the session's Scene and voice (Menu's menu_instrumentLoadScene /
+     * menu_instrumentLoadSlot). scene_instrumentSlotConst() rejects an
+     * invalid Scene or slot. Output: 1 when captured; 0 leaves the previous
+     * snapshot unchanged and Menu keeps the `kit` row unavailable.
+     * Caller: menu_prepareInstrumentLoadTemp() (normal and Morph sessions).
+     */
+    if (!source || source->type >= INSTRUMENT_TYPE_UNKNOWN)
+        return 0u;
+    pm_instrument_snapshot.type = (uint8_t)source->type;
+    memcpy(pm_instrument_snapshot.normal,
+           source->parameter_images.instrument_parameters,
+           sizeof(pm_instrument_snapshot.normal));
+    memcpy(pm_instrument_snapshot.morph,
+           source->parameter_images.morph_instrument_parameters,
+           sizeof(pm_instrument_snapshot.morph));
     return 1u;
 }
 
-uint8_t preset_saveInstrumentMorphTemp(uint8_t source_scene,
-                                       uint8_t source_slot)
+uint8_t preset_restoreInstrumentSnapshot(uint8_t destination_scene,
+                                         uint8_t destination_slot,
+                                         instrument_type_t type)
 {
     /*
-     * Save the entry Morph endpoints for the reversible InstrumentMrp row.
-     *
-     * Inputs: Menu's entry Scene/voice. Output: the existing hidden temporary
-     * filename receives a Morph-only projection; no normal image is staged or
-     * persisted as the restore contract. Completion is UI sequencing only.
+     * One staged slot on the foreground stack (196 B, approved 2026-10-31).
+     * preset_startInstrumentApplyImage() copies it into every destination
+     * Scene before returning, so it does not need to outlive this call.
      */
-    filesystem_ack();
-    if (!filesystem_requestSaveInstrumentMorphTemp(
-            source_scene, source_slot, on_instrument_morph_temp_save_complete))
+    kit_instrument_slot_t staged;
+    const instrument_registry_entry_t *entry;
+    uint16_t destination_mask;
+    uint8_t i;
+
+    /*
+     * Restore the entry voice from RAM through the normal Instrument commit
+     * (S090 P1; replaces preset_loadInstrumentTemp() and its `.hctmp` read).
+     *
+     * Nothing loads into Scene 17 (S082 P1 R1, D36): a destination outside
+     * the resident range is refused before any state changes, as the file
+     * path did. A type that differs from the captured type is refused too,
+     * so a snapshot can never be applied to a different instrument family.
+     */
+    if (destination_scene >= SCENE_COUNT ||
+        destination_slot >= INSTRUMENT_SLOT_COUNT ||
+        type >= INSTRUMENT_TYPE_UNKNOWN ||
+        pm_instrument_snapshot.type != (uint8_t)type)
         return 0u;
-    pm_status = PRESET_LOAD_IN_PROGRESS;
-    pm_completed_op = PRESET_OP_NONE;
-    pm_request_slot = source_slot;
-    pm_instrument_request_scene = source_scene;
-    pm_instrument_request_slot = source_slot;
+    entry = instrumentManager_registryEntry(type);
+    if (!entry)
+        return 0u;
+    /*
+     * Rebuild the slot exactly as the file loader staged it: reset to the
+     * type's defaults, then lay in only the cells the file carried (see
+     * preset_snapshotCellRestored()). The loop bound is the type's own
+     * descriptor count, the same domain the loader and serializer walk.
+     */
+    instrumentManager_resetSlot(&staged, type);
+    for (i = 0u; i < entry->descriptor_count && i < INSTRUMENT_PARAM_COUNT; i++) {
+        const ParamDescriptor *descriptor = &entry->descriptors[i];
+
+        if (preset_snapshotCellRestored(descriptor, 0u))
+            staged.parameter_images.instrument_parameters[i] =
+                pm_instrument_snapshot.normal[i];
+        if (preset_snapshotCellRestored(descriptor, 1u))
+            staged.parameter_images.morph_instrument_parameters[i] =
+                pm_instrument_snapshot.morph[i];
+    }
+    /*
+     * Commit to the same Scenes the file restore committed to.
+     *
+     * The file restore completed through preset_startInstrumentApply(), which
+     * targets pm_kit_request_scene_mask (the mask of the last accepted
+     * Instrument load, i.e. the previews this restore undoes) and falls back
+     * to the one destination Scene when that mask is empty. The same
+     * expression is used here so the set of restored Scenes is unchanged.
+     * The final 0 is the AutoSave decision: a restore returns to the session
+     * baseline and must not create a whole-Instrument mutation mark (S090 F4).
+     */
+    destination_mask = pm_kit_request_scene_mask
+        ? pm_kit_request_scene_mask
+        : (uint16_t)(1u << destination_scene);
+    preset_startInstrumentApplyImage(&staged, destination_mask,
+                                     destination_slot, destination_slot,
+                                     type, 0u);
     return 1u;
 }
 
-uint8_t preset_loadInstrumentTemp(uint8_t destination_scene,
-                                  uint8_t destination_slot,
-                                  instrument_type_t type)
+uint8_t preset_restoreInstrumentMorphSnapshot(uint8_t destination_scene,
+                                              uint8_t destination_slot,
+                                              instrument_type_t type)
 {
-    /*
-     * Nothing loads into Scene 17 (S082 P1 R1, D36).
-     *
-     * What: a destination Scene outside the resident range (index 16) is
-     * refused before any Preset or filesystem state changes.
-     * Why: this loader takes a Scene index, and scene_get(16) is valid while
-     * Scene 17 exists, so a stray caller could otherwise write into 17 (and a
-     * 16-bit 1u << 16 destination mask would be undefined). The Menu passes
-     * the home Scene (menu_instrumentEntryScene()); this is the backstop.
-     * Inputs: destination_scene. Outputs: 0 (refused) for index >= SCENE_COUNT.
-     * Affiliates: menu_instrumentEntryScene(), scene_backgroundHomeIndex().
-     */
-    if (destination_scene >= SCENE_COUNT)
-        return 0u;
-    /*
-     * Route the direct `kit` row through the normal Instrument apply path.
-     *
-     * Inputs: the exact temporary-file Scene/voice/type context retained by
-     * Menu. Output: the regular Instrument completion applies parsed data to
-     * that voice, while filesystem suppresses HCNAMES publication for the
-     * hidden file. Affiliates: on_instrument_load_complete() and Menu cursor.
-     */
-    filesystem_ack();
-    if (!filesystem_requestLoadInstrumentTemp(destination_scene,
-                                              destination_slot,
-                                              type,
-                                              on_instrument_load_complete))
-        return 0u;
-    pm_status = PRESET_LOAD_IN_PROGRESS;
-    pm_completed_op = PRESET_OP_NONE;
-    pm_request_slot = destination_slot;
-    pm_instrument_request_scene = destination_scene;
-    pm_instrument_request_slot = destination_slot;
-    pm_instrument_request_type = type;
-    return 1u;
-}
+    kit_instrument_slot_t *destination;
+    const instrument_registry_entry_t *entry;
+    uint8_t copied = 0u;
+    uint8_t i;
 
-uint8_t preset_loadInstrumentMorphTemp(uint8_t destination_scene,
-                                       uint8_t destination_slot,
-                                       instrument_type_t type)
-{
     /*
-     * Nothing loads into Scene 17 (S082 P1 R1, D36).
+     * Restore the entry Morph endpoints for the InstrumentMrp `kit` row
+     * (S090 P1; replaces preset_loadInstrumentMorphTemp(), its `.hctmp` read
+     * and the former staged Morph-to-Morph commit).
      *
-     * What: a destination Scene outside the resident range (index 16) is
-     * refused before any Preset or filesystem state changes.
-     * Why: this loader takes a Scene index, and scene_get(16) is valid while
-     * Scene 17 exists, so a stray caller could otherwise write into 17 (and a
-     * 16-bit 1u << 16 destination mask would be undefined). The Menu passes
-     * the home Scene (menu_instrumentEntryScene()); this is the backstop.
-     * Inputs: destination_scene. Outputs: 0 (refused) for index >= SCENE_COUNT.
-     * Affiliates: menu_instrumentEntryScene(), scene_backgroundHomeIndex().
+     * Same refusals as the normal restore: no Scene 17 destination and no
+     * restore into a type other than the captured one.
      */
-    if (destination_scene >= SCENE_COUNT)
+    if (destination_scene >= SCENE_COUNT ||
+        destination_slot >= INSTRUMENT_SLOT_COUNT ||
+        type >= INSTRUMENT_TYPE_UNKNOWN ||
+        pm_instrument_snapshot.type != (uint8_t)type)
+        return 0u;
+    destination = scene_instrumentSlot(destination_scene, destination_slot);
+    entry = instrumentManager_registryEntry(type);
+    if (!destination || !entry)
         return 0u;
     /*
-     * Load the hidden Morph-only InstrumentMrp baseline.
-     *
-     * Inputs: the exact destination Scene/slot/type retained by Menu. Output:
-     * the existing Instrument stage receives the Morph snapshot and the
-     * completion path performs the same-type Morph-only commit, preserving
-     * type, Normal image, and HCNAMES identity.
+     * Same entry sequence as preset_startInstrumentMorphApply(): stop any
+     * previous worker, make sure the Morph engine is initialised, copy, then
+     * run the shared commit tail.
      */
-    filesystem_ack();
-    if (!filesystem_requestLoadInstrumentMorphTemp(
-            destination_scene, destination_slot, type,
-            on_instrument_morph_temp_load_complete))
-        return 0u;
-    pm_status = PRESET_LOAD_IN_PROGRESS;
-    pm_completed_op = PRESET_OP_NONE;
-    pm_request_slot = destination_slot;
-    pm_instrument_request_scene = destination_scene;
-    pm_instrument_request_slot = destination_slot;
-    pm_instrument_request_type = type;
+    instrument_apply_active = 0u;
+    preset_ensureMorphInitialized();
+    /*
+     * Copy only Morphable Morph cells the former file carried, and only when
+     * the resident slot still holds the captured type (a mismatch is a
+     * complete no-change, as the staged Morph-to-Morph commit was).
+     */
+    if (destination->type == type) {
+        for (i = 0u; i < entry->descriptor_count && i < INSTRUMENT_PARAM_COUNT; i++) {
+            if (!preset_snapshotCellRestored(&entry->descriptors[i], 1u))
+                continue;
+            destination->parameter_images.morph_instrument_parameters[i] =
+                pm_instrument_snapshot.morph[i];
+            copied = 1u;
+        }
+    }
+    preset_armInstrumentMorphCommit(destination_scene, destination_slot, copied);
     return 1u;
 }
 

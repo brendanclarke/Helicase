@@ -103,6 +103,7 @@ it belongs in the summary or the log, not here.
 | 086 | 2026-10-27/28 | `dev-ph7-voice_expansion`, `e67879e2` + uncommitted | Stock table waves `Re3`/`Sw3`; continuous oscillator `pos`; mixer hot-loop gate; S087 sample/wavetable plan |
 | 087 | 2026-10-28/29 | `dev-ph7-voice_expansion`, uncommitted on `f3805478` | Oscillator `typ` row (`wav`/`smp`/`slp`/`wtb`), sample flash catalogue v2 + installer, step-automation order fix (D6), Q20.12 sample/wavetable readers, `pos` on samples, modulator `s`/`l`/`w` entries, one-shot sample mod oscillators, transient click sample list, display/naming corrections, MEMORY.md refactor |
 | 088 | 2026-10-29 | `dev-ph7-voice_expansion`, uncommitted on `80029d31` | Oscillator run modes `rst`/`fre`/`itp` (P0); fader zipper fix with block-rate one-pole smoothing (P1); float-through distortion for retrigger HF puff (P1) |
+| 090 | 2026-10-31 | `dev-ph7-voice_expansion`, on `7f8b5d07` | Load/Save names while playing: RAM `kit` snapshot replaces `.hctmp`, VALID-mirror `.hcnames` entry reads, same-type index reuse, type steps over a cancelled index read |
 
 
 ---

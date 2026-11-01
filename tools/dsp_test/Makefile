@@ -2,7 +2,8 @@
 #
 # What:       one host program per firmware module, built from the real
 #             source text (extract.py, by name; never by line range):
-#               oscillator          modules/oscillator.c (+ the pos cap build)
+#               oscillator          modules/oscillator.c (+ the pos cap build,
+#                                   + 2 breaks: S089 P3 FR1/FR2)
 #               modulation          modules/modulation.c
 #               voice_control       modules/voice_control.c (+ break build)
 #               sequencer           modules/sequencer.c (+ break build)
@@ -33,9 +34,9 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
 
 .PHONY: all clean oscillator modulation voice_control sequencer \
         instrument_manager samples sampleoptimize run_modes special_tags \
-        stock_tables
+        stock_tables voicefold fold_tables
 all: oscillator modulation voice_control sequencer instrument_manager samples \
-     sampleoptimize run_modes special_tags stock_tables
+     sampleoptimize run_modes special_tags stock_tables voicefold fold_tables
 
 $(GEN):
 	mkdir -p $(GEN)
@@ -49,6 +50,10 @@ $(GEN)/Oscillator.host.h: $(ROOT)/Core/DSPAudio/Oscillator.h | $(GEN)
 $(GEN)/Oscillator.host.c: $(ROOT)/Core/DSPAudio/Oscillator.c | $(GEN)
 	$(EX) --src $< --body --out $@
 
+# S089 P3 breaks (fmramp group): the ramp dispatcher sending wtb to the
+# one-frame twin must fail FR1; the depth stepped before its first use
+# (d = d0 + dStep) must fail FR2. Each break edits the generated
+# Oscillator.host.c and is found first through its own -I directory.
 oscillator: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c $(CAT_HOST_SRC) \
 	  -o build/oscillator -lm
@@ -56,6 +61,21 @@ oscillator: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c
 	  modules/oscillator.c $(CAT_HOST_SRC) -o build/oscillator_cap -lm
 	./build/oscillator
 	./build/oscillator_cap
+	mkdir -p build/break_fmr1 build/break_fmr2
+	sed 's/osc_wtbFmBlendRampBlock(osc, mod, buf, size, gain, d0, dStep);/osc_wtbFmRampBlock(osc, mod, buf, size, gain, d0, dStep);/' \
+	  $(GEN)/Oscillator.host.c > build/break_fmr1/Oscillator.host.c
+	$(HOSTCC) -Ibuild/break_fmr1 $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c \
+	  $(CAT_HOST_SRC) -o build/oscillator_break_fmr1 -lm
+	@if ./build/oscillator_break_fmr1 >/dev/null 2>&1; then \
+	  echo "oscillator_break_fmr1: FAILED (ramp wtb routing break not caught)"; exit 1; \
+	else echo "oscillator_break_fmr1: caught (law FR1 fails as expected)"; fi
+	sed 's/float d = d0;/float d = d0 + dStep;/' \
+	  $(GEN)/Oscillator.host.c > build/break_fmr2/Oscillator.host.c
+	$(HOSTCC) -Ibuild/break_fmr2 $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c \
+	  $(CAT_HOST_SRC) -o build/oscillator_break_fmr2 -lm
+	@if ./build/oscillator_break_fmr2 >/dev/null 2>&1; then \
+	  echo "oscillator_break_fmr2: FAILED (ramp step-order break not caught)"; exit 1; \
+	else echo "oscillator_break_fmr2: caught (law FR2 fails as expected)"; fi
 
 modulation: $(GEN)/Oscillator.host.h
 	$(EX) --src $(ROOT)/Core/DSPAudio/modulationNode.c \
@@ -107,7 +127,8 @@ instrument_manager: | $(GEN)
 	$(EX) --src $(ROOT)/Core/DSP/Instruments/Drum/DrumParameters.c \
 	  --macro ROW_SELECT_ONOFF_SPECIAL --out $(GEN)/im_onoffmacro.inc
 	$(EX) --src $(ROOT)/Core/Menu/MenuText.h \
-	  --macro ONOFF_TAG_OSC_RUN --out $(GEN)/im_onofftag.inc
+	  --macro ONOFF_TAG_OSC_RUN --macro ONOFF_TAG_VOICE_CHAIN \
+	  --out $(GEN)/im_onofftag.inc
 	$(EX) --src $(ROOT)/Core/DSP/Instruments/Drum/DrumParameters.c \
 	  --typedef drum_param_index_t --out $(GEN)/im_index.inc
 	$(EX) --src $(ROOT)/Core/DSP/Instruments/InstrumentManager.c \
@@ -202,3 +223,29 @@ special_tags:
 
 stock_tables:
 	cd $(ROOT) && python3 tools/plots/gen_stock_tables.py --check
+
+# S089 P2: the real voiceFold.c (ITCM sections stripped) against reference
+# models; break proof: dropping the bias DC term ("t * p - kC" in
+# voiceFold_sinLoop(), S089 P2 F4) must fail law F3.
+voicefold: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/transientGenerator.h \
+	  --typedef TransientGenerator --out $(GEN)/vf_transient.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/snapEg.h --typedef SnapEg --out $(GEN)/vf_snap.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/voiceFold.h --body --out $(GEN)/voiceFold.host.h
+	$(EX) --src $(ROOT)/Core/DSPAudio/voiceFold.c --body --out $(GEN)/voiceFold.host.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/voiceFoldTables.c --body \
+	  --out $(GEN)/voiceFoldTables.host.c
+	$(HOSTCC) $(HOSTFLAGS) -Wno-unknown-attributes modules/voicefold.c \
+	  -o build/voicefold -lm
+	./build/voicefold
+	mkdir -p build/break_vf
+	sed 's/(t \* p - kC)/(t * p)/' $(GEN)/voiceFold.host.c \
+	  > build/break_vf/voiceFold.host.c
+	$(HOSTCC) -Ibuild/break_vf $(HOSTFLAGS) -Wno-unknown-attributes \
+	  modules/voicefold.c -o build/voicefold_break -lm
+	@if ./build/voicefold_break >/dev/null 2>&1; then \
+	  echo "voicefold_break: FAILED (DC-term break not caught)"; exit 1; \
+	else echo "voicefold_break: caught (law F3 fails as expected)"; fi
+
+fold_tables:
+	cd $(ROOT) && python3 tools/plots/gen_fold_tables.py --check

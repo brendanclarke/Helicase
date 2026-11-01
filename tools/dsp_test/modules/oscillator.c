@@ -1,6 +1,6 @@
 /*
  * Oscillator module host tests (S085 snc/rng, S086 stock waves and pos,
- * S087 typ, samples and wavetables).
+ * S087 typ, samples and wavetables, S088 itp, S089 P3 Drum FM ramp).
  *
  * What:       compiles the whole real Oscillator.c over the real catalogue
  *             (SampleMemory.c/SampleInstall.c on a RAM flash image) and runs
@@ -32,6 +32,12 @@
  *                      W4 the blend ends; W5 the ramp cap; W6 no slot is the
  *                      nearest frame; W7 a held pos between frames blends;
  *                      W8 a modulator w entry plays frame 0.
+ *               fmramp FR1 the ramped typed FM carriers with d0 = fmMod,
+ *                      dStep = 0 equal osc_renderTypedFm() bit for bit (every
+ *                      carrier, depth and gain); FR2 sample i of a ramped
+ *                      block equals a one-sample original at d0 + i x dStep.
+ *                      Breaks (Makefile): wtb routed to the one-frame twin
+ *                      fails FR1; the depth stepped before use fails FR2.
  * Why:        the oscillator is the voice's sound; these are the laws each
  *             session proved, kept runnable against today's source.
  * Inputs:     build/gen/Oscillator.host.h/.c (extract.py --body), osc_host.h,
@@ -1292,6 +1298,169 @@ static void run_itp(void)
     g_claim = 0u;
 }
 
+/*
+ * Drum FM depth-ramp carriers (S089 P3).
+ *
+ * What:       the ramped typed FM carriers (osc_renderTypedFmRamp() and its
+ *             four loops) against the unramped originals they copy:
+ *               FR1 S0: with d0 = fmMod and dStep = 0 the ramped render is
+ *                   bit-identical to osc_renderTypedFm() - same samples, same
+ *                   end phase - for every carrier case (smp; slp in the loop
+ *                   and in the lead-in; wtb 16-bit blend with a slot, wtb
+ *                   8-bit blend, wtb without a slot (the one-frame fallback);
+ *                   no item), several depths (0 .. 3.9), two gains and
+ *                   full-scale random modulators;
+ *               FR2 the ramp schedule: with d0 != d1, sample i of one ramped
+ *                   block equals a one-sample osc_renderTypedFm() at depth
+ *                   d_i, where d_0 = d0 and d_(i+1) = d_i + dStep (the float
+ *                   accumulation the loops perform), for the same cases
+ *                   (wtb with a held pos, so a one-sample plan is the block's
+ *                   plan); a ramp down (2.5 x d1 -> d1) and up (0 -> d1).
+ *             Break proofs (Makefile oscillator rule): the dispatcher sending
+ *             wtb to the one-frame copy must fail FR1; the depth stepped
+ *             before its first use (d = d0 + dStep) must fail FR2.
+ * Why:        S089 P3 plan §5.1 gate: unarmed blocks are S0 (a host law per
+ *             covered carrier), and the armed ramp must start at d0 on
+ *             sample 0 and reach d1 on sample N - 1 (the S088 ramp's ends).
+ * Inputs:     the real Oscillator.c (host build) over the real catalogue;
+ *             g_claim (the modNode_interpClaim() stub).
+ * Outputs:    failure lines; the group count.
+ * Affiliates: Oscillator.c S089 P3 block; osc_renderTypedFm();
+ *             DrumVoice.c fm branch (computes d0/dStep).
+ */
+
+/* One FR case: how to bind and where the block starts. */
+typedef struct {
+    const char *name;
+    uint8_t     kind;      /* 0 smp, 1 slp, 2 wtb16, 3 wtb8, 4 none */
+    uint8_t     claim;     /* g_claim for the block (wtb) */
+    uint32_t    phase;     /* start phase */
+    uint32_t    inc;       /* phaseInc */
+} FmrCase;
+
+/* Bind o for case c on the item installed by fmr_install(c->kind). */
+static void fmr_bind(OscInfo *o, const FmrCase *c)
+{
+    if (c->kind == 2u || c->kind == 3u) {
+        bind_wtb(o, 0u);
+        o->position = 64u;          /* between the two frames: a real blend */
+        o->positionApplied = 64u;
+        o->positionBendStep = 0;    /* held pos: one segment, constant ff */
+    } else if (c->kind == 4u) {
+        memset(o, 0, sizeof(*o));
+        o->oscType = OSC_TYPE_SMP;  /* typed, but bound to nothing */
+        o->sampleCacheLooped = OSC_BIND_NONE;
+    } else {
+        bind_typed(o, c->kind == 0u ? OSC_TYPE_SMP : OSC_TYPE_SLP, 0u, c->inc);
+    }
+    o->phase = c->phase;
+    o->phaseInc = c->inc;
+}
+
+/* Install the item case c plays: a 100-point random sample (peak 32767 so
+** the gain code is 0), loop 40..60 for slp; or a 2-frame 64-point table. */
+static void fmr_install(uint8_t kind)
+{
+    static int16_t smp[100];
+    static int16_t f0[64];
+    static int16_t f1[64];
+    static int8_t  f0b[64];
+    static int8_t  f1b[64];
+    uint32_t s = 0x08903u;
+
+    if (kind <= 1u || kind == 4u) {
+        for (unsigned i = 0u; i < 100u; i++)
+            smp[i] = (int16_t)(golden_rand(&s) >> 17);
+        smp[50] = 32767;
+        install_sample(smp, 100u, 40u, 60u, 1u);
+    } else if (kind == 2u) {
+        for (unsigned i = 0u; i < 64u; i++) {
+            f0[i] = (int16_t)(golden_rand(&s) >> 16);
+            f1[i] = (int16_t)(golden_rand(&s) >> 16);
+        }
+        install_table(64u, 16u, f0, f1);
+    } else {
+        for (unsigned i = 0u; i < 64u; i++) {
+            f0b[i] = (int8_t)(golden_rand(&s) >> 24);
+            f1b[i] = (int8_t)(golden_rand(&s) >> 24);
+        }
+        install_table(64u, 8u, (const int16_t *)f0b, (const int16_t *)f1b);
+    }
+}
+
+static void run_fmramp(void)
+{
+    /* Phases in Q19.12 for the sample cases; full 32-bit for wtb. */
+    static const FmrCase cases[] = {
+        { "smp",      0u, 0u, 3u << OSC_SAMPLE_PHASE_SHIFT,  1500u },
+        { "smp end",  0u, 0u, 96u << OSC_SAMPLE_PHASE_SHIFT, 4096u },
+        { "slp loop", 1u, 0u, 45u << OSC_SAMPLE_PHASE_SHIFT, 3000u },
+        { "slp lead", 1u, 0u, 10u << OSC_SAMPLE_PHASE_SHIFT,  512u },
+        { "wtb16",    2u, 1u, 0x12345678u, 0x01234567u },
+        { "wtb16 ns", 2u, 0u, 0x12345678u, 0x01234567u },
+        { "wtb8",     3u, 1u, 0x87654321u, 0x00F00000u },
+        { "none",     4u, 0u, 0u, 0u },
+    };
+    static const float depths[] = { 0.0f, 0.37f, 1.0f, 3.9f };
+    static const float gains[] = { 1.0f, 0.5f };
+    int16_t mod[N];
+    int16_t ra[N];
+    int16_t rb[N];
+    OscInfo a;
+    OscInfo b;
+    uint32_t seed = 0x0890003u;
+
+    for (unsigned c = 0u; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        const FmrCase *fc = &cases[c];
+
+        fmr_install(fc->kind);
+        g_claim = fc->claim;
+
+        /* FR1: unarmed (d0 = fmMod, dStep = 0) == the original, exactly. */
+        for (unsigned di = 0u; di < 4u; di++) {
+            for (unsigned gi = 0u; gi < 2u; gi++) {
+                for (unsigned r = 0u; r < 8u; r++) {
+                    random_mod(mod, &seed);
+                    fmr_bind(&a, fc);
+                    a.fmMod = depths[di];
+                    b = a;
+                    for (unsigned i = 0u; i < N; i++)
+                        ra[i] = rb[i] = 0x5A5A;
+                    osc_renderTypedFm(&a, mod, ra, N, gains[gi]);
+                    osc_renderTypedFmRamp(&b, mod, rb, N, gains[gi],
+                                          b.fmMod, 0.0f);
+                    if (!same_buf(ra, rb) || a.phase != b.phase)
+                        fail("FR1 unarmed ramp == original", c, di, gi);
+                }
+            }
+        }
+
+        /* FR2: the armed schedule, against one-sample original renders. */
+        for (unsigned dir = 0u; dir < 2u; dir++) {
+            for (unsigned r = 0u; r < 8u; r++) {
+                const float d1 = 0.8f;
+                const float d0 = dir ? 0.0f : 2.5f * d1;
+                const float dStep = (d1 - d0) / (float)(N - 1u);
+                float d = d0;
+
+                random_mod(mod, &seed);
+                fmr_bind(&a, fc);
+                a.fmMod = d1;
+                b = a;
+                osc_renderTypedFmRamp(&b, mod, rb, N, 1.0f, d0, dStep);
+                for (unsigned i = 0u; i < N; i++) {
+                    a.fmMod = d;
+                    osc_renderTypedFm(&a, &mod[i], &ra[i], 1u, 1.0f);
+                    d += dStep;
+                }
+                if (!same_buf(ra, rb) || a.phase != b.phase)
+                    fail("FR2 ramp sample i reads d0 + i x dStep", c, dir, r);
+            }
+        }
+    }
+    g_claim = 0u;
+}
+
 int main(void)
 {
 #ifdef OSC_POS_TEST_CAP
@@ -1305,6 +1474,7 @@ int main(void)
     group("sample", run_sample);
     group("wtb", run_wtb);
     group("itp", run_itp);
+    group("fmramp", run_fmramp);
 #endif
     printf("oscillator failures: %u\n", failures);
     return failures ? 1 : 0;

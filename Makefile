@@ -142,6 +142,8 @@ SRCS = \
   Core/SampleRom/sampleFlash.c \
   Core/Src/startup_stm32f765xx.s
 
+# S089 P2: voiceFold.c (WFd chain DSP, .itcm.s089) and its generated table
+# use the Core/DSPAudio -Ofast rule below like every other voice DSP file.
 DSP_SRCS = \
   Core/DSPAudio/1PoleLp.c \
   Core/DSPAudio/BufferTools.c \
@@ -167,6 +169,8 @@ DSP_SRCS = \
   Core/DSPAudio/squareRootLut.c \
   Core/DSPAudio/transientGenerator.c \
   Core/DSPAudio/transientTables.c \
+  Core/DSPAudio/voiceFold.c \
+  Core/DSPAudio/voiceFoldTables.c \
   Core/DSPAudio/wavetable.c \
   Core/DSPAudio/wavetableStock.c
 
@@ -184,7 +188,7 @@ all: $(BUILD)/$(TARGET).bin
 	# Link budget (Session 072): flash headroom vs the 736 KiB application
 	# region (S073) and the DTCM FX arena size. Report only; the linker ASSERTs
 	# in STM32F765VIHx_FLASH.ld are the enforcing guards.
-	python3 tools/link_budget.py $(PREFIX)nm $(BUILD)/$(TARGET).elf
+	python3 tools/diagnostic_tools/link_budget.py $(PREFIX)nm $(BUILD)/$(TARGET).elf
 
 # The .bin is the raw objcopy output. `make img` stamps the image check and
 # packages it (tools/build_lxrv2_img.py).

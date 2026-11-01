@@ -11,7 +11,7 @@
  * diagnostics. Keep these macros aligned with the descriptor/page arrays in
  * DrumParameters.c whenever rows/pages are added.
  */
-#define DRUM_PARAM_DESCRIPTOR_COUNT 42u /* S088: + osc1_run. */
+#define DRUM_PARAM_DESCRIPTOR_COUNT 43u /* S088: + osc1_run. S089 P2: + voice_chain. */
 #define DRUM_MENU_PAGE_COUNT       8u
 #define DRUM_INSTRUMENT_TYPE_FLAGS INSTRUMENT_FLAG_BASIC
 

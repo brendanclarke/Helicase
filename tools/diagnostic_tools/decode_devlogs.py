@@ -131,6 +131,11 @@ STAGE_ENUM = {
     "h": "AUTOSAVE_TRACE_STAGE_HCNAMES_PROVENANCE",
     # m: S083 midilrn.cfg (MIDI Learn table) writes and boot recovery.
     "m": "AUTOSAVE_TRACE_STAGE_MIDI_LEARN_FILE",
+    # s: S090 P2 pre-audio AutoSave settle stage (START / FAIL / END).
+    "s": "AUTOSAVE_TRACE_STAGE_BOOT_SETTLE",
+    "d": "AUTOSAVE_TRACE_STAGE_DIR_TRIM",
+    # w: S090 P5 F5 filesystem facade owner transitions (Load/Save timing).
+    "w": "AUTOSAVE_TRACE_STAGE_FS_OWNER",
 }
 
 STAGE_PRODUCER = {
@@ -172,6 +177,9 @@ STAGE_PRODUCER = {
     "h": "filesystem HCNAMES register / Menu Load/Save (S082 review F5)",
     "m": "filesystem_midiLearnWriterCompleted() / "
          "filesystem_loadMidiLearn_tick() (S083)",
+    "s": "filesystem_settleAutosaveBlocking() (S090 P2)",
+    "d": "filesystem_trimDirectoryTailsBlocking() (S090 P3)",
+    "w": "filesystem_traceOwnerTransition() (S090 P5)",
 }
 
 # AUTOSAVE_TRACE_PHASE_STALL_SITE_* (AutosaveTrace.h). Session 057 widened the
@@ -191,6 +199,8 @@ PHASE_STALL_SITES = {
     8: "settings write (filesystem_saveGlobals_tick)",
     9: "flush finish (filesystem_flushFinish_tick)",
     10: "Bank child preview (filesystem_scanBankScenes_tick)",
+    11: "HCNAMES read/update/publication (filesystem_residentNames_tick)",
+    12: "runtime Load/Save watchdog (filesystem_loadSaveWatchdog, S090 P5)",
 }
 
 PHASE_STALL_BEHAVIOUR = {
@@ -208,7 +218,70 @@ PHASE_STALL_BEHAVIOUR = {
     8: "abort (FS_STATUS_ERROR)",
     9: "abort (FS_STATUS_ERROR)",
     10: "abort: preview finishes with error BkPv after 20,000 polls (S082 review F4)",
+    11: ("abort: HCNAMES operation finishes with error HNst after 50,000 polls "
+         "in one phase; four snapshot records (parts 0..3) (S090 P3)"),
+    12: ("abort: the covered Load/Save operation made no progress for "
+         "FS_LOADSAVE_WATCHDOG_MS and finished FS_STATUS_ERROR with error "
+         "W<op><phase>; four snapshot records (parts 0..3) (S090 P5)"),
 }
+
+# S090 P3 site-11 snapshot decoding (AutosaveTrace.h layout).
+AFATFS_FS_STATES = {0: "UNKNOWN", 1: "FATAL", 2: "INITIALIZATION", 3: "READY"}
+AFATFS_ERRORS = {0: "NONE", 1: "GENERIC", 2: "BAD_MBR", 3: "BAD_FILESYSTEM_HEADER"}
+AFATFS_RENAME_PHASES = [
+    "INITIAL", "FIND_SOURCE", "LOAD_SOURCE_ENTRY", "PREPARE_NEW_NAME",
+    "COLLISION_SCAN_BEGIN", "COLLISION_SCAN", "PREPARE_NEW_RUN_SEEK",
+    "PREPARE_NEW_RUN_TARGET", "WAIT_TARGET_PERSISTENCE",
+    "RETIRE_OLD_TERMINATOR_TAIL", "WRITE_NEW_RUN", "RETIRE_OLD_RUN", "FINISH",
+]
+AFATFS_REMOVE_PHASES = [
+    "INITIAL", "SCAN", "LOAD_ENTRY", "TRUNCATE_FILE", "RETIRE_NAME_RUN",
+    "RESTART_SCAN", "FINISH",
+]
+SDCARD_STATES = [
+    "IDLE", "SENDING_CMD", "READING_WAIT_TOKEN", "READING_DATA",
+    "READING_CRC", "WRITING_TOKEN", "WRITING_DATA", "WRITING_CRC",
+    "WRITING_WAIT_BUSY",
+]
+SDCARD_OPERATIONS = {0: "READ", 1: "WRITE", 2: "ERASE"}
+
+
+def _nth(names, i):
+    return names[i] if 0 <= i < len(names) else f"#{i}"
+
+
+def decode_hcnames_stall(flags, value):
+    """Decode one PHASE_STALL site-11 (S090 P3) or site-12 (S090 P5) part
+    (flags bits 5..6). Part 2 carries wait_ms in bits 16..28 and the open
+    AsyncFATFS handle count in bits 29..31 since S090 P5."""
+    part = (flags >> 5) & 0x03
+    if part == 0:
+        return (f"part 0 summary: op_phase={value & 0xFF}, "
+                f"current_op={(value >> 8) & 0xFF}, "
+                f"rename active={(value >> 24) & 1} phase="
+                f"{_nth(AFATFS_RENAME_PHASES, (value >> 16) & 0x1F)}, "
+                f"remove active={(value >> 25) & 1} phase="
+                f"{_nth(AFATFS_REMOVE_PHASES, (value >> 21) & 0x07)}, "
+                f"cwd busy={(value >> 26) & 1}, fs_state="
+                f"{AFATFS_FS_STATES.get((value >> 27) & 0x03)}, last_error="
+                f"{AFATFS_ERRORS.get((value >> 29) & 0x03)}")
+    if part == 1:
+        def idx(v):
+            return "none" if v == 0 else str(v - 1)
+        return (f"part 1 cache (of 8): locked={value & 0xF}, "
+                f"retained={(value >> 4) & 0xF}, dirty={(value >> 8) & 0xF}, "
+                f"reading={(value >> 12) & 0xF}, writing={(value >> 16) & 0xF}, "
+                f"empty={(value >> 20) & 0xF}; cwd retain={idx((value >> 24) & 0xF)}, "
+                f"cwd lock={idx((value >> 28) & 0xF)}")
+    if part == 2:
+        return (f"part 2 SD: state={_nth(SDCARD_STATES, value & 0xF)}, "
+                f"operation={SDCARD_OPERATIONS.get((value >> 4) & 0x3)}, "
+                f"callback_pending={(value >> 6) & 1}, consecutive refused "
+                f"commands={(value >> 7) & 0x1FF}"
+                f"{'+' if ((value >> 7) & 0x1FF) == 511 else ''}, "
+                f"wait_ms={(value >> 16) & 0x1FFF}, "
+                f"open AsyncFATFS handles={(value >> 29) & 0x7} of 5")
+    return f"part 3 SD: block={value}"
 
 SAVE_LIFECYCLE_TYPES = {0: "Kit", 1: "Scene", 2: "Bank", 3: "Instrument"}
 
@@ -675,6 +748,10 @@ def cc_record_text(flags: int, v: int) -> str:
     return f"{ev}: raw value"
 
 
+# Tick of the previous 'w' record, for the per-owner duration (S090 P5).
+FS_OWNER_LAST_TICK = {}
+
+
 def trace_record_text(index: int, stage: int, flags: int, tick: int,
                       value: int) -> str:
     """Decode one eight-byte AutoSave trace record into one text line."""
@@ -846,7 +923,10 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
         detail = (f"{enum_name} via {producer}: site={site_name}, "
                   f"phase={phase}, slot={slot}; "
                   f"IN_NATIVE_DELETE={int(in_native_delete)}")
-        if site == 0 and in_native_delete:
+        if site in (11, 12):
+            detail = (f"{enum_name} via {producer}: site={site_name}; "
+                      + decode_hcnames_stall(flags, value))
+        elif site == 0 and in_native_delete:
             detail += f", afatfs_getDeleteTreePhase() subphase={extra & 0xFF}"
         elif site == 2:
             detail += f", stream_offset~={extra * 16} bytes"
@@ -1019,6 +1099,62 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
                       f"present={(value >> 8) & 0xFF} "
                       f"result={results.get(result, result)} "
                       f"lines={(value >> 24) & 0xFF}")
+        else:
+            detail = f"{enum_name}: unknown event 0x{flags:02x}"
+    elif ch == "w":
+        # S090 P5 F5 facade owner transition; layout in AutosaveTrace.h ('w').
+        statuses = {0: "IDLE", 1: "BUSY", 2: "DONE", 3: "ERROR"}
+        new_owner = _nth(FS_INTERNAL_OPS, flags) if flags else "idle"
+        prev = value & 0xFF
+        prev_owner = _nth(FS_INTERNAL_OPS, prev) if prev else "idle"
+        last = FS_OWNER_LAST_TICK.get("tick")
+        since = f"{(tick - last) & 0xFFFF} ms" if last is not None else "n/a"
+        FS_OWNER_LAST_TICK["tick"] = tick
+        detail = (f"{enum_name} via {producer}: {prev_owner} (last phase "
+                  f"{(value >> 16) & 0xFF}) -> {new_owner}; status="
+                  f"{statuses.get((value >> 8) & 0xFF, (value >> 8) & 0xFF)}; "
+                  f"previous owner held the facade {since} "
+                  f"(time since the previous 'w' record)")
+    elif ch == "d":
+        # S090 P3 boot directory tail trim; layout in AutosaveTrace.h ('d').
+        dirs = {0: "SD root", 1: "/Scene", 2: "/Kit", 3: "/Bank",
+                4: "/Pattern", 5: "/Instrument", 6: "/Instrument subdirectory"}
+        dir_name = dirs.get(flags & 0x0F, f"dir {flags & 0x0F}")
+        if flags & 0x20:
+            detail = (f"{enum_name} via {producer}: {dir_name} check FAILED "
+                      f"(live entries seen={value & 0xFFFF})")
+        else:
+            detail = (f"{enum_name} via {producer}: {dir_name} repaired: end "
+                      f"marker written after {value & 0xFFFF} live entries, "
+                      f"{(value >> 16) & 0xFFFF} trailing deleted entries cut")
+    elif ch == "s":
+        # S090 P2 settle stage; layout in AutosaveTrace.h ('s').
+        classes = [(0x01, "scalar"), (0x02, "setup"), (0x04, "pattern"),
+                   (0x08, "nonsemantic"), (0x10, "repair"),
+                   (0x20, "settings")]
+
+        def class_names(mask: int) -> str:
+            names = [name for bit, name in classes if mask & bit]
+            return ",".join(names) if names else "none"
+
+        event = flags & 0x0F
+        if event == 0x01:
+            detail = (f"{enum_name}: START pending="
+                      f"{class_names(value & 0xFF)}")
+        elif event == 0x03:
+            op = (value >> 8) & 0xFF
+            op_name = (FS_INTERNAL_OPS[op] if op < len(FS_INTERNAL_OPS)
+                       else f"op {op}")
+            detail = (f"{enum_name}: FAIL class={class_names(value & 0xFF)} "
+                      f"op={op_name} at {(value >> 16) & 0xFFFF} ms")
+        elif event == 0x02:
+            end_bits = [(0x10, "FAILED"), (0x20, "STALL"), (0x40, "CAP"),
+                        (0x80, "BUSY")]
+            outcome = [name for bit, name in end_bits if flags & bit]
+            detail = (f"{enum_name}: END after {value & 0xFFFFFF} ms, "
+                      f"still pending={class_names((value >> 24) & 0xFF)}"
+                      f"{' (boot hold set)' if (value >> 24) & 0x0F else ''}, "
+                      f"outcome={','.join(outcome) if outcome else 'ok'}")
         else:
             detail = f"{enum_name}: unknown event 0x{flags:02x}"
     else:

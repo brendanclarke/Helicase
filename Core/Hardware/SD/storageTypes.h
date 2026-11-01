@@ -515,9 +515,9 @@ const char *storage_instrumentTypeExtension(storage_instrument_type_t type);
  */
 typedef enum {
     STORAGE_INSTRUMENT_SAVE_NORMAL = 0u,
-    STORAGE_INSTRUMENT_SAVE_MORPH,
-    /* Hidden `.hctmp` projection containing only the Morph endpoint image. */
-    STORAGE_INSTRUMENT_SAVE_MORPH_SNAPSHOT
+    STORAGE_INSTRUMENT_SAVE_MORPH
+    /* S090 P1: STORAGE_INSTRUMENT_SAVE_MORPH_SNAPSHOT (the hidden `.hctmp`
+     * Morph projection) was removed with the temp file. */
 } storage_instrument_save_mode_t;
 
 /*

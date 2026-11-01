@@ -526,6 +526,21 @@ uint8_t autosave_getLivePayloadByte(uint16_t payload_offset, uint8_t *value);
  * phases 54-56.
  */
 void autosave_setMutationTrackingEnabled(uint8_t enabled);
+
+/*
+ * Boot-settle hold (S090 P2, Q2b).
+ *
+ * autosave_setBootHold(1) is called by filesystem_settleAutosaveBlocking()
+ * when the pre-audio stage ends with start-up AutoSave work still owed.
+ * While autosave_bootHoldActive() is nonzero the filesystem scalar, Pattern
+ * and non-semantic Pattern schedulers admit nothing. The first user-caused
+ * mutation (an accepted scalar or semantic Pattern mark, or a tracking
+ * lifecycle change) clears it. Why: no autonomous AutoSave retry after boot
+ * (R1, Q2b); owed work is written with the user's next change.
+ */
+void autosave_setBootHold(uint8_t hold);
+uint8_t autosave_bootHoldActive(void);
+
 /*
  * Discard pending SRAM work only at a safe autosave transaction boundary.
  *

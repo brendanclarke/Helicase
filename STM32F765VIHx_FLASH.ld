@@ -147,7 +147,37 @@ SECTIONS {
     _siitcm = LOADADDR(.itcm);
     .itcm : {
         . = ALIGN(4); _sitcm = .;
-        *(.itcm) *(.itcm.*)
+        /*
+         * ITCM input order (S089 P2; S089 P3).
+         *
+         * What:       .itcm first, then the named S085 and S087 subsections
+         *             (and their linker-generated .itcm.s087.* stubs) in
+         *             their current order, then .itcm.s089 (S089 P2, the
+         *             voiceFold loops), then .itcm.s089p3 (S089 P3, the Drum
+         *             ramped FM carriers), then any other .itcm.*
+         *             subsection.
+         * Why:        a bare *(.itcm.*) lays subsections out in LTRANS
+         *             partition order, so a new subsection in another
+         *             partition could land before .itcm.s085 and move
+         *             every existing ITCM loop, changing their short (b.n)
+         *             tail branches. That is the S085 failure this rule
+         *             exists to prevent (Oscillator.c S085 ITCM note).
+         *             Naming the existing subsections keeps today's
+         *             addresses exactly; new code is always appended.
+         *             S089 P3: .itcm.s089 was reached only through the
+         *             catch-all; it is named so that .itcm.s089p3 always
+         *             follows it. The exact pattern *(.itcm.s089) does not
+         *             match .itcm.s089p3.
+         * Check:      with no other change the image must be byte-identical
+         *             to the previous build (S089 P2 schedule step 1; S089
+         *             P3 schedule step 1). The linker's ITCM -> flash veneer
+         *             stubs are laid out after the last subsection, so they
+         *             move when a subsection is added; no function moves.
+         * Affiliates: Oscillator.c OSC_S085_SECTION / OSC_S087_SECTION;
+         *             Oscillator.c OSC_S089P3_SECTION; voiceFold.c
+         *             VOICE_FOLD_SECTION; the ASSERT below.
+         */
+        *(.itcm) *(.itcm.s085) *(.itcm.s087 .itcm.s087.*) *(.itcm.s089) *(.itcm.s089p3) *(.itcm.*)
         . = ALIGN(4); _eitcm = .;
     } >ITCM AT> FLASH
     ASSERT(_eitcm <= ORIGIN(ITCM) + LENGTH(ITCM),

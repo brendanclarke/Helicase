@@ -5,18 +5,13 @@ static inline void voicePost_drum(int16_t *buf, const float gain,
 		const Distortion *dist, const uint8_t size)
 {
 	uint8_t i;
-	/* size is OUTPUT_DMA_SIZE in the mixer; the size==1 guard keeps a host
-	 * call from evaluating 0 x infinity (NaN) in the ramp fraction. */
 	const float inv_size = (size > 1u) ? 1.f/(size-1.f) : 0.f;
 	for(i=0;i<size;i++)
 	{
-		const int16_t eg = bufferTool_floatToInt16Store(
-			buf[i] * bufferTool_interpolatedGain(i, inv_size, gain, lastGain));
-		/* Velocity ramp: flat (exactly veloGain) unless the caller arms it. */
+		const float ag = bufferTool_interpolatedGain(i, inv_size, gain, lastGain);
 		const float vg = bufferTool_interpolatedGain(i, inv_size,
 		                                              veloGain, lastVeloGain);
-		const int16_t vel = bufferTool_floatToInt16Store(eg * vg);
-		buf[i] = distortion_curveSample16(dist, vel);
+		buf[i] = distortion_curveSampleF(dist, (float)buf[i] * ag * vg);
 	}
 }
 
@@ -31,11 +26,9 @@ static inline void voicePost_mixAddGainDist(int16_t *buf, const int16_t *add,
 	{
 		const int16_t m = bufferTool_floatToInt16Store(buf[j] * mix);
 		const int16_t s = bufferTool_satAdd16(m, add[j]);
-		/* Amp ramp: flat (exactly ampGain) unless the caller arms it. */
 		const float ag = bufferTool_interpolatedGain(j, inv_size,
 		                                              ampGain, lastAmpGain);
-		const int16_t g = bufferTool_floatToInt16Store(s * ag);
-		buf[j] = distortion_curveSample16(dist, g);
+		buf[j] = distortion_curveSampleF(dist, (float)s * ag);
 	}
 }
 
@@ -49,10 +42,8 @@ static inline void voicePost_addGainDist(int16_t *buf, const int16_t *add,
 	for(j=0;j<size;j++)
 	{
 		const int16_t s = bufferTool_satAdd16(buf[j], add[j]);
-		/* Amp ramp: flat (exactly ampGain) unless the caller arms it. */
 		const float ag = bufferTool_interpolatedGain(j, inv_size,
 		                                              ampGain, lastAmpGain);
-		const int16_t g = bufferTool_floatToInt16Store(s * ag);
-		buf[j] = distortion_curveSample16(dist, g);
+		buf[j] = distortion_curveSampleF(dist, (float)s * ag);
 	}
 }

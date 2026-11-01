@@ -563,6 +563,39 @@
 #define AUTOSAVE_WRITER_CONTINUATION_INTERVAL_MS 250u
 
 /*
+ * Pre-audio AutoSave settle stage bounds (S090 P2, user decision D2).
+ *
+ * What: filesystem_settleAutosaveBlocking() drives every start-up AutoSave
+ * operation to completion before audioCodec_init(). These three values bound
+ * it without cutting legitimate work:
+ * - BOOT_SETTLE_NO_PROGRESS_MS: an operation whose progress signature (phase,
+ *   byte and row cursors, pending classes) has not changed for this long is
+ *   treated as stalled. The stage then stops admitting work and lets the
+ *   existing stall detectors and abort hooks unwind it; if nothing moves for
+ *   another such window, boot continues with the operation still owning the
+ *   facade (it finishes or aborts at runtime).
+ * - BOOT_SETTLE_CAP_MS: the whole stage, about ten times the estimated worst
+ *   case of legitimate pre-audio work (~10-12 s: a full scalar drain plus
+ *   sixteen Pattern drains). It exists only so a card that keeps making tiny
+ *   progress forever cannot hold boot indefinitely ("let the boot process
+ *   finish").
+ * - BOOT_SETTLE_ERROR_DUE_MS: how the stage tells a failed scalar drain from a
+ *   successful one that still has work. filesystem_autosaveWriterCompleted()
+ *   re-arms an ERROR with AUTOSAVE_WRITER_INTERVAL_MS (5,000 ms) and a DONE
+ *   with remaining dirt with AUTOSAVE_WRITER_CONTINUATION_INTERVAL_MS (250 ms);
+ *   1,000 ms lies safely between the two.
+ * Why time, not polls: the existing stall detectors count polls, and the
+ * pre-audio loop polls far faster than the runtime loop, so a poll threshold
+ * would be a much shorter time there (S090 P2 §2.8).
+ * Affiliates: filesystem_settleAutosaveBlocking(), main.c boot stage 13.
+ * The 16-bit time_sysTick comparison limit (32,768 ms) does not apply: the
+ * stage measures these with the 32-bit TIM2 microsecond counter.
+ */
+#define BOOT_SETTLE_NO_PROGRESS_MS  30000u
+#define BOOT_SETTLE_CAP_MS         120000u
+#define BOOT_SETTLE_ERROR_DUE_MS     1000u
+
+/*
  * Trailing debounce for autonomous settings.cfg persistence.
  *
  * What: supplies the one-second delay restarted by every changed Global-menu
@@ -866,6 +899,53 @@
  * Accessors: main_serviceBackgroundLoadIdle() (main.c).
  */
 #define BG_LOAD_IDLE_FS_BUDGET_US  200u
+
+/*
+ * Load/Save idle-time filesystem budget (S090 P5 F2).
+ *
+ * What: the same full-queue window as BG_LOAD_IDLE_FS_BUDGET_US, used while
+ * a Load/Save page is open or a Load/Save command runs. 300 us is the
+ * user's "50% more" (2026-11-01) over the background Bank load value.
+ * Why: Load/Save browsing and saving wait on the card; the window runs only
+ * while both render slots are full, so it never delays a render by more
+ * than one bounded filesystem step. With the CPU widget at 99-100 % while
+ * playing the window rarely opens; it costs nothing when closed.
+ * Accessors: main_serviceBackgroundLoadIdle() (main.c).
+ */
+#define LOADSAVE_IDLE_FS_BUDGET_US 300u
+
+/*
+ * Per-tick text batch budget (S090 P5 F1).
+ *
+ * What: after the first row, directory entry or line of an operation tick,
+ * the row/entry/line loops of the Load/Save chain keep going only while
+ * less than this many microseconds (TIM2) have passed in that tick, and only
+ * on bytes AsyncFATFS already holds in its cache (they stop at the first
+ * wait for the card).
+ * Why: those loops handled one row per main-loop pass. A 1,000-row
+ * `.hcindex` therefore took >= 1,000 passes (about 2.2 s while playing) for
+ * three sectors of data. 15 us is about half of one 16-byte SD burst, the
+ * user's "50% more" per pass; it bounds how much longer one pass can get.
+ * Before audio starts the pre-audio value applies (boot polls at loop
+ * speed, nothing to protect).
+ * Accessors: filesystem_batchHasTime() (filesystem.c).
+ */
+#define FS_LOADSAVE_BATCH_BUDGET_US  15u
+#define FS_PREAUDIO_BATCH_BUDGET_US  500u
+
+/*
+ * Runtime Load/Save watchdog (S090 P5 F4).
+ *
+ * What: a Load/Save-owned facade operation that shows no progress (no
+ * change of operation, phase, row/byte cursor, or SD block) for this long
+ * while audio runs is ended with FS_STATUS_ERROR: Menu shows its error
+ * overlay with the operation and phase, and the facade is released.
+ * Why: user, 2026-11-01: a Scene Save that never completes is unacceptable;
+ * no healthy step waits this long (the SD driver's longest wait is 5 s).
+ * Kept in 64 ms units in one byte (FS_LOADSAVE_WATCHDOG_MS / 64 < 256).
+ * Accessors: filesystem_loadSaveWatchdog() (filesystem.c).
+ */
+#define FS_LOADSAVE_WATCHDOG_MS  12000u
 
 // wether to interpolate the oscillator wavetables or not
 // TODO DAC_PORT - I think ok to leave this, setting to 0 will cause other ifndef

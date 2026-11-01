@@ -127,6 +127,31 @@ typedef struct HiHatStruct
 	 * Affiliates: voicePostChain.h; HiHat_initVoice() (0u / 0.0f).
 	 */
 	uint8_t ampRampArm;
+
+	/*
+	 * Voice chain selector (S089 P2).
+	 *
+	 * What:       VOICE_CHAIN_DEFAULT (0, T+D: transient + filter drive +
+	 *             distortion, S089 P0 behaviour) or VOICE_CHAIN_WAVEFOLDER
+	 *             (1, WFd: a wavefolder in place of the transient). Written by
+	 *             IM_SPECIAL_VOICE_CHAIN through the voice_chain row, which
+	 *             clamps to VOICE_CHAIN_COUNT - 1.
+	 * Why:        the sync render, the trigger and the async calc branch on it
+	 *             once per block/trigger; under WFd the transient_* rows and
+	 *             transGen/snapEg state belong to the fold (voiceFold.h). A
+	 *             selector: never morphed, no LFO/velocity target, one
+	 *             step-automation value per step.
+	 * Inputs:     instrumentManager_writeSpecialRuntime() via the descriptor.
+	 * Outputs:    read by HiHat_triggerVoice(), HiHat_calcAsyncVoice(),
+	 *             HiHat_calcSyncBlockVoice(); instrumentManager_slotVoiceChain().
+	 * Layout:     after ampRampArm, in existing alignment padding (Drum 571,
+	 *             Snare 419, Cymbal 471); HiHat grows 516 -> 520 B, still
+	 *             under the 2 x sizeof(DrumVoice) slot reserve, so
+	 *             runtime_slots is unchanged (7,584 B).
+	 * Affiliates: VOICE_CHAIN_* (voiceFold.h); the voice_chain rows;
+	 *             InstrumentManager.c slot-reserve _Static_asserts.
+	 */
+	uint8_t chainType;
 	float lastAmpGain;
 
 	/*

@@ -647,6 +647,16 @@ void menu_copyClearMenuChanged(void);
 void menu_copyClearMenuClosed(void);
 uint8_t menu_isStorageBusy(void);
 /*
+ * Load/Save is waiting on storage (S090 P5 F2).
+ * What: nonzero while a Load/Save page is open or a Load/Save command is
+ * active (its `...` may outlive the page). Why: the main loop's full-queue
+ * window (main_serviceBackgroundLoadIdle()) then gives the busy facade
+ * extra steps (LOADSAVE_IDLE_FS_BUDGET_US). AutoSave drains do not run on
+ * those pages (S090 P2), so the window serves the user's own work.
+ * Clients: main.c.
+ */
+uint8_t menu_loadSaveStorageWaiting(void);
+/*
  * Background Bank load panel state (S082 P3).
  * menu_backgroundLoadReleasesPanel(): unlocked load and not on Load/Save.
  * menu_bankLoadFrozenPageActive(): unlocked load on the frozen Load:[Bank].

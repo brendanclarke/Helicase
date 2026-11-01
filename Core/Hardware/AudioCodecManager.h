@@ -102,6 +102,22 @@ void audioCodec_suspend(void);
 void audioCodec_resume(void);
 uint8_t audioCodec_isSuspended(void);
 
+/*
+ * Report whether audioCodec_init() has run (S090 P2).
+ *
+ * What: returns the existing audio_hw_initialized flag: 0 from reset until
+ * audioCodec_init() completes, 1 afterwards for the rest of the session.
+ * Unlike audioCodec_isSuspended(), a later audioCodec_suspend() (no-playback
+ * storage commands, sample installs) does not clear it.
+ * Why: the pre-audio AutoSave settle stage runs with the background CPU
+ * budget lifted ("using the full CPU", user R1). Keying that on this flag
+ * makes the bypass impossible at runtime, including during audio-suspended
+ * storage commands, which keep their budgeted behaviour. No new RAM.
+ * Accessors: filesystem_backgroundBudgetAvailable(),
+ * filesystem_backgroundBudgetCharge().
+ */
+uint8_t audioCodec_isInitialized(void);
+
 /* Legacy buffer-reset wrapper, retained for DSP source compatibility.
 ** Does not touch hardware. Prefer audioCodec_init() for a full reset. */
 int  CodecInit(void);

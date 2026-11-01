@@ -208,6 +208,7 @@ typedef enum {
     CYMBAL_PARAM_OSC1_POSITION, /* S086 P3: appended; preserve all prior IDs. */
     CYMBAL_PARAM_OSC1_TYPE, /* S087 B: appended; preserve all prior IDs. */
     CYMBAL_PARAM_OSC1_RUN, /* S088: appended; preserve all prior IDs. */
+    CYMBAL_PARAM_VOICE_CHAIN, /* S089 P2: appended; preserve all prior IDs. */
     CYMBAL_PARAM_COUNT
 } cymbal_param_index_t;
 
@@ -330,6 +331,30 @@ const ParamDescriptor cymbal_param_descriptors[] = {
      * Affiliates: OSC_RUN_*; oscRunNames; ONOFF_TAG_OSC_RUN.
      */
     ROW_SELECT_ONOFF_SPECIAL("osc1_run", "Oscilltr", "Run Mode", "run", ONOFF_TAG_OSC_RUN, runMode, TYPE_UINT8, IM_SPECIAL_OSC_RUN | IM_SPECIAL_OSC1),
+    /*
+     * voice_chain: chn, the voice chain selector (S089 P2).
+     *
+     * What:       0 T+D (transient + filter drive + distortion, the S089 P0
+     *             chain), 1 WFd (wavefolder in place of the transient),
+     *             stored in the engine chainType field through
+     *             IM_SPECIAL_VOICE_CHAIN (clamped to VOICE_CHAIN_COUNT - 1).
+     *             Shown on the transient page as the fourth cell
+     *             (wav vol frq chn); under WFd those three cells drive the fold
+     *             (voiceFold.h) and the single-parameter view relabels them.
+     * Why:        S089 P1/P2: one selector, one chain, one budget. A selector:
+     *             never morphed, Normal image only, applied before the Morph
+     *             image by preset_applyKitVoiceSelectors(), step-automatable
+     *             one value per step, not an LFO or velocity target. Appended
+     *             last, so every existing descriptor index, automation ID,
+     *             token, NRPN ID and Learn row is unchanged; a file without the
+     *             key loads 0 (T+D, today's sound).
+     * Inputs:     menu edit, Kit/Scene/Instrument apply, step automation, MIDI.
+     * Outputs:    chainType (the engine struct field).
+     * Accessors:  instrumentManager_writeSpecialRuntime().
+     * Affiliates: VOICE_CHAIN_* (voiceFold.h); voiceChainNames (MenuText.h);
+     *             ONOFF_TAG_VOICE_CHAIN; menu_onoffTagNames() in menu.c.
+     */
+    ROW_SELECT_ONOFF_SPECIAL("voice_chain", "Voice", "Chain", "chn", ONOFF_TAG_VOICE_CHAIN, chainType, TYPE_UINT8, IM_SPECIAL_VOICE_CHAIN),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -350,7 +375,8 @@ const instrument_menu_page_t cymbal_menu_pages[] = {
     {{ CYMBAL_PARAM_AMP_ENVELOPE_ATTACK, CYMBAL_PARAM_AMP_ENVELOPE_DECAY, CYMBAL_PARAM_AMP_ATTACK_REPEAT, CYMBAL_PARAM_AMP_ENVELOPE_SLOPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ CYMBAL_PARAM_VELO_MOD_DEST, CYMBAL_PARAM_VELO_MOD_AMOUNT, CYMBAL_PARAM_VELO_VOL_ON_OFF, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ CYMBAL_PARAM_OSC2_PITCH_COARSE, CYMBAL_PARAM_OSC3_PITCH_COARSE, CYMBAL_PARAM_OSC2_MOD_AMOUNT, CYMBAL_PARAM_OSC3_MOD_AMOUNT, CYMBAL_PARAM_OSC2_WAVE, CYMBAL_PARAM_OSC3_WAVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
-    {{ CYMBAL_PARAM_TRANSIENT_WAVE, CYMBAL_PARAM_TRANSIENT_VOL, CYMBAL_PARAM_TRANSIENT_FREQ, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* S089 P2: the transient page is wav vol frq chn (the chain selector). */
+    {{ CYMBAL_PARAM_TRANSIENT_WAVE, CYMBAL_PARAM_TRANSIENT_VOL, CYMBAL_PARAM_TRANSIENT_FREQ, CYMBAL_PARAM_VOICE_CHAIN, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     {{ CYMBAL_PARAM_FILTER_FREQ, CYMBAL_PARAM_FILTER_RESO, CYMBAL_PARAM_FILTER_TYPE, CYMBAL_PARAM_FILTER_DRIVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     /*
      * One wide LFO sub-page: oscillator controls, application shape/amounts,

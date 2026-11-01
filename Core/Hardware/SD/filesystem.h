@@ -269,6 +269,44 @@ void        filesystem_initAfterCardReady(void);
  * a zero-byte fwrite retry.
  */
 uint8_t     filesystem_ensureAutosaveFilesBlocking(void);
+
+/*
+ * Drive all start-up AutoSave work to completion before audio (S090 P2, R1).
+ *
+ * What: a blocking pre-audio stage, called once from main.c after
+ * patSvc_init()/copyClear_init()/liveRec_init() and before
+ * audioCodec_init(). It repeatedly calls patSvc_tick() and
+ * filesystem_tickUncounted() with every AutoSave debounce made due and the
+ * background CPU budget lifted (audio not started), until no start-up work
+ * remains: the scalar recovery/dirty drain, runtime AutoSave setup, semantic
+ * and non-semantic Pattern drains, the Pattern repair epoch, and a pending
+ * settings.cfg write (Q3). The existing operations run unchanged and each
+ * ends with its own final sync, so every record is complete and durable when
+ * this returns with an idle facade (R4); a power loss at any point is covered
+ * by their existing safe-write protocols (R5).
+ * Bounds (D2): BOOT_SETTLE_NO_PROGRESS_MS without progress or
+ * BOOT_SETTLE_CAP_MS overall stop admission and let the running operation
+ * unwind (see config.h). One attempt per operation: the first failure stops
+ * admission (Q2b).
+ * Output: the classes still pending (0 normally). When AutoSave work is still
+ * owed, the boot-settle hold is set (autosave_setBootHold()) so nothing runs
+ * after boot until the user changes something. DEV logging records 's'
+ * START/FAIL/END (D4: the trace is the evidence; nothing is displayed).
+ * Affiliates: filesystem_backgroundBudgetAvailable(), patSvc_repairEpochIdle(),
+ * autosave_bootHoldActive(), the four AutoSave/settings schedulers.
+ */
+uint8_t     filesystem_settleAutosaveBlocking(void);
+
+/*
+ * Repair directory tails at boot (S090 P3, D3 root cause): for the volume
+ * root, /Scene, /Kit, /Bank, /Pattern, /Instrument and every subdirectory of
+ * /Instrument, writes the FAT end marker right after the last live entry
+ * when deleted entries follow it, so no lookup scans a tombstone tail.
+ * Pre-audio only, idle facade, blocking; returns 1 when every check
+ * completed. Caller: main.c after the post-mount settle.
+ */
+uint8_t     filesystem_trimDirectoryTailsBlocking(void);
+
 /*
  * Boot-time .hcprms candidate validation and winner selection.
  *
@@ -852,6 +890,26 @@ uint16_t filesystem_bankChildContentMask(void);
 uint8_t filesystem_scanBankScenesRunning(void);
 void filesystem_cancelScanBankScenes(void);
 /*
+ * Menu `.hcindex` read state and disposal (S090 P1, item 7: type steps never
+ * wait for a list).
+ *
+ * filesystem_browseReadRunning(): nonzero while the facade runs a typed
+ * Instrument (FS_INTERNAL_OP_LOAD_INDEX) or numbered-library
+ * (FS_INTERNAL_OP_LOAD_LIBRARY_INDEX) index read. Menu admits type steps only
+ * then.
+ * filesystem_cancelBrowseRead(): asks that read to stop at its next phase with
+ * no callback outstanding; it closes its handle, returns to root, clears the
+ * browser cache and finishes ERROR. A rebuild that the read handed off to is a
+ * separate operation and is never cancelled. No-op when no index read runs.
+ * filesystem_browseReadWasCancelled(): valid in the completion callback before
+ * filesystem_ack(); nonzero when the read ended through that cancel.
+ * Accessors: Menu's type-row handlers, the encoder gate, and
+ * menu_instrumentIndexLoadComplete().
+ */
+uint8_t filesystem_browseReadRunning(void);
+void filesystem_cancelBrowseRead(void);
+uint8_t filesystem_browseReadWasCancelled(void);
+/*
  * Save one root Bank directory from resident Scene memory.
  *
  * Inputs: root Bank slot, source Scene, eight-cell Bank display name, future
@@ -1211,6 +1269,12 @@ bool filesystem_requestLoadBankIndex(fs_completion_cb_t cb);
 bool filesystem_requestLoadPatternIndex(fs_completion_cb_t cb);
 /* True when the requested root library currently owns the shared cache. */
 bool filesystem_libraryNameCacheLoaded(fs_library_index_kind_t kind);
+/*
+ * True when the shared cache holds a completed index of this Instrument type
+ * and the facade is idle (S090 P1, 6a-i). Lets Menu reuse the index on a
+ * same-type VOICE change or Morph toggle instead of reading it again.
+ */
+uint8_t filesystem_instrumentNameCacheLoaded(instrument_type_t type);
 /* Dispose the single shared Instrument/Kit/Scene/Bank/Pattern browser cache or its
  * temporary 161-row HCNAMES view; no second name allocation exists. */
 void filesystem_clearNameCache(void);
@@ -1328,46 +1392,6 @@ const kit_t *filesystem_loadedKit(void);
  * commit SceneData because storage must not choose DSP lifecycle order.
  */
 const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void);
-/*
- * Report whether the just-completed staged Instrument came from `.hctmp`.
- *
- * Inputs: none; valid only in the completion window after the successful
- * Instrument callback and before any later filesystem request starts. Output:
- * nonzero exactly for the hidden reversible `kit` source captured by
- * filesystem_requestLoadInstrumentTemp(). Why: Menu must distinguish a root
- * pool replacement, which changes retained Instrument owners and marks
- * AutoSave, from a temporary rollback without inferring it from the mutable
- * browser cursor or its separate UI-operation latch. Affiliate: Menu's
- * PRESET_OP_INSTRUMENT_LOAD completion handling.
- */
-uint8_t filesystem_loadedInstrumentWasTemporary(void);
-/* True only when the completed hidden Instrument load is the Morph-only
- * reversible `kit` baseline used by InstrumentMrp. */
-uint8_t filesystem_loadedInstrumentWasMorphTemporary(void);
-/*
- * Save/load the reversible normal Instrument Load `kit` source.
- *
- * Inputs: one Scene/voice and its typed family. Output: the normal Instrument
- * serializer/parser writes or reads the hidden `.hctmp.<ext>` inside that
- * family directory. The temporary operation never updates HCNAMES or the
- * typed `.hcindex`; Menu owns the one nine-byte original label and invalidates
- * it on voice/type/mode/exit boundaries. Affiliates: presetManager wrappers,
- * Menu's direct `kit` row, and filesystem_recordInstrumentFile() exclusion.
- */
-bool filesystem_requestSaveInstrumentTemp(uint8_t source_scene,
-                                          uint8_t source_slot,
-                                          fs_completion_cb_t cb);
-bool filesystem_requestSaveInstrumentMorphTemp(uint8_t source_scene,
-                                               uint8_t source_slot,
-                                               fs_completion_cb_t cb);
-bool filesystem_requestLoadInstrumentTemp(uint8_t destination_scene,
-                                          uint8_t destination_slot,
-                                          instrument_type_t type,
-                                          fs_completion_cb_t cb);
-bool filesystem_requestLoadInstrumentMorphTemp(uint8_t destination_scene,
-                                               uint8_t destination_slot,
-                                               instrument_type_t type,
-                                               fs_completion_cb_t cb);
 /*
  * Install samples/ and wavetables/ into catalogue v2 (S087 stage C).
  *

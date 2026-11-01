@@ -999,7 +999,8 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	 * Render each storage slot with its loaded instrument type.
 	 *
 	 * Inputs: slot index chooses SceneData/instrument runtime through
-	 * InstrumentManager; mixer state chooses routing, decimation, channel
+	 * InstrumentManager; mixer state chooses routing, decimation (when the
+	 * slot's chain includes it), channel
 	 * volume, pan tables, and the combined slider x volume gain ramp. Output:
 	 * each slot contributes one mono block to
 	 * the routed stereo output pair. This replaces the fixed sequence of three
@@ -1012,9 +1013,17 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		float voiceGain;
 		float sendGain;
 		instrumentManager_calcSlotSyncBlock(slot, sampleData, OUTPUT_DMA_SIZE);
-		mixer_decimateBlock(slot,sampleData);
 		/*
-		 * sampleData is the decimated, pre-volume voice block. The fader mode
+		 * S089 P0: SRR runs only when the slot's instrument chain includes it
+		 * (instrumentManager_slotUsesSrr(); off by default, on for the four
+		 * types' default chain). Decided by type/chain only, never by the
+		 * srt value, so the worst case stays constant.
+		 */
+		if (instrumentManager_slotUsesSrr(slot))
+			mixer_decimateBlock(slot,sampleData);
+		/*
+		 * sampleData is the pre-volume voice block (decimated when the chain
+		 * includes SRR). The fader mode
 		 * creates parallel dry/send gains: PRE scales both, POST scales only the
 		 * dry mix, and FX scales only the send. The send tap is accumulated before
 		 * channel volume, while the normal output keeps the combined voice ramp.
