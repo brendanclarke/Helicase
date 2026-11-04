@@ -354,10 +354,9 @@ control crossfades the bit-crushed signal with the delay.
 
 ```
 per sample, both channels:
-  code  = adc(x)                          x clamped to ±1; code = (u32)(x·128 + 128.5); code −= code>>8
+  code  = adc(x)                          x·128 + 128.5 truncated, then USAT to 0..255 (S091 R2; = the S074 clamp and 256 → 255 fold)
   code' = (code & keep) ^ invert          keep = ~(bit_off & ~bit_invert) & 0xFF   (invert wins)
-  y     = (code' − 128)/128               8-bit DAC, −1 … +127/128
-  h     = y − y[n−1] + 0.9985755·h[n−1]   AC coupling, ~10 Hz one-pole high-pass
+  h     = (code' − code'[n−1])/128 + 0.9985755·h[n−1]   DAC + AC coupling, ~10 Hz one-pole high-pass (S091 R4: the code difference is exactly y − y[n−1])
 per sample, the tape loop (mono):
   delay += (target − delay)·1.5113e-4     tape glide, τ 150 ms
   rp     = wp − delay (wrap by compare)   i0 = ⌊rp⌋, i1 = i0+1 (wrap), frac = rp − i0
@@ -409,20 +408,23 @@ per sample, the tape loop (mono):
   - it never adopts a previous owner's content;
   - a same-type Scene switch keeps everything, so tails ring on.
 - **Runtime (56 B):** `length`, `write_pos`, `valid`, `delay`, the four ramp
-  values, four AC states, and the raw row bytes (`bit_off`, `bit_invert`,
+  values, the two previous data-line codes (`ac_c_*`, seeded 128 in `init`)
+  and the two AC outputs (`ac_y_*`), and the raw row bytes (`bit_off`, `bit_invert`,
   `mix_raw`, `feedback_raw`, `rate`, `sync`, `pan_raw`) plus `primed`.
   `write_param` only stores raw bytes; conversions happen once per block, so
   an LFO costs nothing extra.
 - **Constant CPU:** every stage runs every sample whatever the settings (the
   delay at Mix 0, feedback at 0, the bit logic with all bits normal). There
   is no per-sample division or transcendental; per block there is one `expf`,
-  a 14-step division walk and one divide.
-- **Cost:** estimated 75–95 instructions per sample for both channels plus
-  the loop, against 160–206 for StereoFilter's two ZDF channels. Not
-  measured on hardware separately; the user accepted the type on the
-  worst-case listening checks. Flash: `crumpBit_process` 4,804 B and
-  `crumpBit_syncDivision` 3,684 B (`-Ofast` unrolling), 11.6 KB for the
-  whole type.
+  a fixed 7-step binary search over the 128 StepScale positions (S091 R1;
+  was a 128-step walk) and one divide.
+- **Cost (S091, measured on the linked image):**
+  - the per-sample loop is 98 instructions per frame (111 before S091)
+    with no VDIV;
+  - per block: the 117-instruction search, one `expf` and two divides;
+  - in total, about 106 per frame in the worst case;
+  - flash: `crumpBit_process` 996 B, `crumpBit_divisionFor` 404 B,
+    `crumpBit_syncDivision` 100 B.
 
 ## 5. The shared DTCM arena for buffer-using Effects
 
@@ -700,7 +702,7 @@ Effect.
 
 | Stage | Cost | Notes |
 |---|---|---|
-| CrumpBit `process` | est. 75–95 instructions per sample (both channels + loop); per block one `expf`, a 14-step walk, one divide | constant whatever the settings; not measured separately on hardware |
+| CrumpBit `process` | 98 per frame (both channels + loop, measured S091) + per block a 117-instruction search, one `expf`, two divides ≈ 106 per frame | constant whatever the settings |
 | Master bus compressor (on) | 71 instructions per stereo frame (was 34 before the band split) + about 350–450 cycles per block; ≈ 1.4–1.8 % of the CPU | 0 while `cmp` is off; `cpu` widget reading still to be taken |
 | `xfd` fader mode | one division per `xfd` slot per block | otherwise the same as `fx` |
 | Mixer `off` branch | two stores per block | the return ramp reset |

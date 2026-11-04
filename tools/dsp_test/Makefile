@@ -9,6 +9,8 @@
 #               sequencer           modules/sequencer.c (+ break build)
 #               instrument_manager  modules/instrument_manager.c (+ 2 breaks)
 #               samples             modules/samples.c (+ break build)
+#               crumpbit            modules/crumpbit.c (+ 2 breaks: S091 R1
+#                                   probe, R4 AC seed)
 #               sampleoptimize      modules/sampleoptimize.py
 #               special_tags        check_special_tags.py
 #               stock_tables        tools/plots/gen_stock_tables.py --check
@@ -34,9 +36,10 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
 
 .PHONY: all clean oscillator modulation voice_control sequencer \
         instrument_manager samples sampleoptimize run_modes special_tags \
-        stock_tables voicefold fold_tables
+        stock_tables voicefold fold_tables crumpbit crumpbit_elf_check
 all: oscillator modulation voice_control sequencer instrument_manager samples \
-     sampleoptimize run_modes special_tags stock_tables voicefold fold_tables
+     sampleoptimize run_modes special_tags stock_tables voicefold fold_tables \
+     crumpbit
 
 $(GEN):
 	mkdir -p $(GEN)
@@ -249,3 +252,66 @@ voicefold: | $(GEN)
 
 fold_tables:
 	cd $(ROOT) && python3 tools/plots/gen_fold_tables.py --check
+
+# S091 P1: the real CrumpBitEffect.c against the S074 reference in
+# modules/crumpbit.c (laws CB1-CB5, all bit-exact). Break proofs:
+#   - the Sync search probing one position too far (count + step instead
+#     of count + step - 1, an off-by-one in the binary search) must fail
+#     CB1;
+#   - the AC memory seeded 0 instead of 128 (a full-scale step on the first
+#     sample after init) must fail CB4/CB5.
+CB_GEN := $(GEN)/cb_fxbuf.c $(GEN)/cb_effects.c $(GEN)/cb_params.c \
+          $(GEN)/cb_stepscale.c $(GEN)/cb_stepscale.h \
+          $(GEN)/CrumpBitEffect.host.h $(GEN)/CrumpBitEffect.host.c
+crumpbit: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSP/Effects/FxBuffer.h \
+	  --typedef fx_share_t --typedef fxbuf_handoff_t \
+	  --macro FXBUF_VOICE_UNIT_COUNT --macro FXBUF_EFFECT_POINTER_COUNT \
+	  --macro FXBUF_HANDOFF_POINTER_COUNT \
+	  --macro FXBUF_HANDOFF_EFFECT_POINTER_BASE \
+	  --macro FXBUF_STATE_EFFECT_WRITTEN --out $(GEN)/cb_fxbuf.c
+	$(EX) --src $(ROOT)/Core/DSP/Effects/EffectsManager.h \
+	  --typedef effect_io_t --typedef effect_type_ops_t \
+	  --out $(GEN)/cb_effects.c
+	$(EX) --src $(ROOT)/Core/DSP/Effects/CrumpBit/CrumpBitParameters.h \
+	  --typedef crumpbit_param_t --out $(GEN)/cb_params.c
+	$(EX) --src $(ROOT)/Core/Sequencer/StepScale.h \
+	  --macro STEP_SCALE_COUNT --macro STEP_SCALE_DEFAULT \
+	  --out $(GEN)/cb_stepscale.h
+	$(EX) --src $(ROOT)/Core/Sequencer/StepScale.c \
+	  --object stepScale_q8Table --func stepScale_ticksQ8 \
+	  --out $(GEN)/cb_stepscale.c
+	$(EX) --src $(ROOT)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.h --body \
+	  --out $(GEN)/CrumpBitEffect.host.h
+	$(EX) --src $(ROOT)/Core/DSP/Effects/CrumpBit/CrumpBitEffect.c --body \
+	  --out $(GEN)/CrumpBitEffect.host.c
+	$(HOSTCC) $(HOSTFLAGS) modules/crumpbit.c -o build/crumpbit -lm
+	./build/crumpbit
+	mkdir -p build/break_cb1 build/break_cb2
+	sed 's/(uint8_t)(count + step - 1u)/(uint8_t)(count + step)/' \
+	  $(GEN)/CrumpBitEffect.host.c > build/break_cb1/CrumpBitEffect.host.c
+	@grep -q '(uint8_t)(count + step),' build/break_cb1/CrumpBitEffect.host.c
+	$(HOSTCC) -Ibuild/break_cb1 $(HOSTFLAGS) modules/crumpbit.c \
+	  -o build/crumpbit_break1 -lm
+	@if ./build/crumpbit_break1 >/dev/null 2>&1; then \
+	  echo "crumpbit_break1: FAILED (probe off-by-one not caught)"; exit 1; \
+	else echo "crumpbit_break1: caught (law CB1 fails as expected)"; fi
+	sed 's/rt->ac_c_l = CRUMPBIT_CODE_MID;/rt->ac_c_l = 0;/' \
+	  $(GEN)/CrumpBitEffect.host.c > build/break_cb2/CrumpBitEffect.host.c
+	@grep -q 'rt->ac_c_l = 0;' build/break_cb2/CrumpBitEffect.host.c
+	$(HOSTCC) -Ibuild/break_cb2 $(HOSTFLAGS) modules/crumpbit.c \
+	  -o build/crumpbit_break2 -lm
+	@if ./build/crumpbit_break2 >/dev/null 2>&1; then \
+	  echo "crumpbit_break2: FAILED (AC-seed break not caught)"; exit 1; \
+	else echo "crumpbit_break2: caught (law CB4/CB5 fails as expected)"; fi
+
+# S091 P1 ARM gate (needs `make all` at the repository root first): the
+# linked crumpBit_process() per-sample loop must stay at or below 98
+# instructions per frame on its longest path (111 before S091), and the
+# unrolled Sync search crumpBit_divisionFor() at or below 117 instructions
+# per block (the 128-step walk it replaced was up to ~2,430).
+crumpbit_elf_check:
+	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
+	  --sym crumpBit_process --top 2 --max 98
+	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
+	  --sym crumpBit_divisionFor --straight --max 117

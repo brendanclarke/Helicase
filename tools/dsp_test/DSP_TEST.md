@@ -35,6 +35,7 @@ tools/dsp_test/
 │   ├── sequencer.c          sequencer.c: the automation drain cursor
 │   ├── instrument_manager.c InstrumentManager.c gate + the osc1_type row
 │   ├── samples.c            SampleMemory/SampleInstall/storageTypes: catalogue, install, order
+│   ├── crumpbit.c           CrumpBitEffect.c: S091 R1–R4 bit-exact against the S074 reference
 │   └── sampleoptimize.py    tools/sampleoptimize.py
 ├── spike/                   retry kit: transient, filter drive, D+S (spike/README.md)
 ├── prelude.h                host stand-ins (placement macros, DSP mirrors)
@@ -46,6 +47,7 @@ tools/dsp_test/
 ├── elf_symdump.py           normalised disassembly of linked functions (compare mode)
 ├── elf_loopdump.py          normalised loop bodies of linked functions (compare mode)
 ├── elf_hotloops.py          hot-loop instruction report of the linked image
+├── elf_looppath.py          longest loop path / straight-line count of one linked function
 └── check_special_tags.py    descriptor special-tag consistency
 ```
 
@@ -86,7 +88,13 @@ Everything generated goes to `build/` (`make clean` removes it).
 | `sampleoptimize` | the optimizer never grows a table, keeps `smpl`, keeps subfolders |
 | `special_tags` | descriptor special tags |
 | `stock_tables` | `tools/plots/gen_stock_tables.py --check` |
+| `crumpbit` | S091 R1–R4: Sync division, ADC, code-difference DAC and whole blocks bit-exact against the S074 reference (CB1–CB5); two break builds |
+| `crumpbit_elf_check` | linked image: the `crumpBit_process` loop ≤ 98 per frame; `crumpBit_divisionFor` ≤ 117 instructions (needs `make all` first; not in `all`) |
 | `all` | all of the above |
+
+`elf_looppath.py --elf build/lxr02.elf --sym NAME [--top K] [--max N]
+[--straight]` reports the longest per-iteration path of a function's loops
+(following out-of-line blocks), or with `--straight` its instruction count.
 
 The ARM tools are run by hand on a build:
 `fpseq.py --obj FILE.o --ref FUNC[:loop] --new FUNC[:loop] --report --all`;

@@ -17,6 +17,7 @@
 #include "CrumpBitParameters.h"
 #include "StepScale.h"
 #include "sequencer.h"
+#include "cmsis_intrinsics.h"   /* __USAT: crumpBit_adc() (S091 R2) */
 #include <math.h>
 
 /*
@@ -42,9 +43,31 @@
 #define CRUMPBIT_LOOP_MIN          4u
 #define CRUMPBIT_DIVISION_NONE     0xFFu
 
+/*
+ * S091 R1-R4 constants (S091_P1_Reductions_Implementation.md).
+ *
+ * CRUMPBIT_CODE_MID the 8-bit code of silence: offset binary, mid-tread, so
+ * code 128 decodes to 0.0. crumpBit_init() seeds the AC-coupling memory with
+ * it, which is exactly the zeroed float state of the S074 form (R4).
+ * CRUMPBIT_LSB_FBITS fractional bits of one 8-bit step: 1/128 = 2^-7. The
+ * fixed-point VCVT in crumpBit_codeToFloat() scales by exactly 2^-7, so it
+ * equals the S074 `(float)d * CRUMPBIT_LSB` bit for bit (R4).
+ * Accessors: crumpBit_init(), crumpBit_codeToFloat(), crumpBit_process().
+ */
+#define CRUMPBIT_CODE_MID          128
+#define CRUMPBIT_LSB_FBITS         7
+
 _Static_assert(sizeof(CrumpBitRuntime) == 56u,
                "CrumpBitRuntime size is recorded in the S074 schedule and "
                "must stay inside the 76 B Effect union");
+/*
+ * The Sync search (R1) halves a power-of-two span: STEP_SCALE_COUNT steps
+ * starting at STEP_SCALE_COUNT/2 visit every position only if the count is a
+ * power of two. A future table of another size must change the search, not
+ * silently skip positions.
+ */
+_Static_assert(STEP_SCALE_COUNT == 128u,
+               "crumpBit_divisionFor() binary search assumes 128 positions");
 _Static_assert(CRUMPBIT_BUFFER_BYTES >=
                (uint32_t)CRUMPBIT_DELAY_MAX_SAMPLES + 2u,
                "the loop must hold the longest delay plus the interpolation "
@@ -53,20 +76,71 @@ _Static_assert(CRUMPBIT_BUFFER_BYTES >=
 /*
  * Simulated bipolar 8-bit ADC (offset binary).
  *
- * What: clamps the normalised sample to +-1.0 full scale and converts it to a
- * code 0..255 with round-half-up. Silence is code 128 (mid-tread); +1.0
- * (256 before the fold) becomes 255. Branch-free: two compare-selects, one
- * multiply-add, one convert, one shift-subtract. Input: float sample. Output:
- * code 0..255. Callers: crumpBit_process(). Affiliates: CRUMPBIT_LSB.
+ * What: converts the normalised sample to a code 0..255 with round-half-up.
+ * Silence is code 128 (mid-tread); +1.0 and above give 255, -1.0 and below
+ * give 0. Branch-free: one multiply-add, one float->int convert, one USAT.
+ * Why (S091 R2): the S074 form spent two float clamps and a shift-subtract
+ * (`code - (code >> 8)`, folding 256 to 255) per call, three calls per frame.
+ * USAT does all three jobs in one integer instruction, and the codes are the
+ * same for every input (bit-identical, class S0):
+ *   - |x| <= 1: y = x*128 + 128.5 lies in [0.5, 256.5]; truncation gives the
+ *     S074 code 0..256, and USAT folds 256 to 255 exactly as the
+ *     shift-subtract did;
+ *   - x > 1: y > 256.5, truncation >= 256, USAT -> 255 (S074: clamp -> 255);
+ *   - x < -1: y < 0.5; truncation toward zero gives 0 for y in (-1, 0.5) and
+ *     a negative integer below that; USAT -> 0 (S074: clamp -> 0).
+ * The multiply-add is the same single-rounding VFMA as before, applied to
+ * the unclamped x, which only differs from the clamped x where both forms
+ * saturate anyway.
+ * Range: (int32_t)y is exact while |y| < 2^31; the Effect input is a sum of
+ * at most six full-scale sends (|x| <= 6, |y| < 1,000). Beyond that range the
+ * M7 VCVT saturates to INT32_MIN/MAX, which USAT still maps to 0/255.
+ * Input: x, a normalised bus or loop-write sample. Output: code 0..255.
+ * Callers: crumpBit_process() (left, right and the loop write).
+ * Affiliates: __USAT (cmsis_intrinsics.h), CRUMPBIT_LSB,
+ * crumpBit_codeToFloat().
  */
 static inline uint32_t crumpBit_adc(float x)
 {
-    uint32_t code;
+    /* y: the analogue value on the code axis, +0.5 so truncation rounds. */
+    const float y = x * 128.0f + 128.5f;
 
-    x = (x > 1.0f) ? 1.0f : x;
-    x = (x < -1.0f) ? -1.0f : x;
-    code = (uint32_t)(x * 128.0f + 128.5f);
-    return code - (code >> 8);
+    /*
+     * Truncate toward zero (VCVT.S32), then clamp to 0..255 (USAT #8): the
+     * S074 clamp, convert and 256 -> 255 fold in two integer-side steps.
+     */
+    return __USAT((int32_t)y, 8);
+}
+
+/*
+ * Exact 8-bit code (or code difference) to normalised float.
+ *
+ * What: returns d / 128 as a float. On the M7 this is VMOV plus one VCVT
+ * with 7 fractional bits (CRUMPBIT_LSB_FBITS): the conversion itself scales by
+ * 2^-7. The value is exact for |d| < 2^24 (here |d| <= 255).
+ * Why (S091 R4): the S074 loop converted with VCVT and then multiplied by
+ * CRUMPBIT_LSB (a third instruction). The inline asm also fixes the shape of
+ * the AC-coupling expression: its result is a finished float, so -Ofast can
+ * only fuse it as `result + R*h` (one VFMA), which is the S074 rounding.
+ * Written in C, `(float)d * LSB + R*h` could be contracted the other way
+ * (round(R*h) first), which would not be bit-identical.
+ * Host builds (tools/dsp_test, no ARM VFP) use the exact C equivalent.
+ * Input: d, a signed integer, |d| <= 255. Output: d * 2^-7.
+ * Callers: crumpBit_process(). Affiliates: CRUMPBIT_LSB_FBITS, CRUMPBIT_LSB.
+ */
+static inline float crumpBit_codeToFloat(int32_t d)
+{
+#if defined(__arm__) && defined(__VFP_FP__) && !defined(__SOFTFP__)
+    float f;
+
+    __asm__("vmov %0, %1\n\t"
+            "vcvt.f32.s32 %0, %0, #7"
+            : "=t"(f)
+            : "r"(d));
+    return f;
+#else
+    return (float)d * CRUMPBIT_LSB;
+#endif
 }
 
 float crumpBit_rateSamples(uint8_t rate)
@@ -78,42 +152,95 @@ float crumpBit_rateSamples(uint8_t rate)
 }
 
 /*
- * Nearest fitting division for one free-running length.
+ * Length in samples of one StepScale position at the current tempo.
  *
- * What: walks the 128 ascending StepScale CC positions and keeps the longest
- * one <= target (low) and the shortest one > target (high), skipping any
- * longer than CRUMPBIT_DELAY_MAX_SAMPLES. It picks low when target^2 <
- * low*high, which is nearest in log time. Inputs: target length and samples per
- * tick at the current tempo. Output: a StepScale CC 0..127; 0 if nothing fits.
- * Callers: crumpBit_syncDivision(), crumpBit_targetSamples(). Affiliates:
- * stepScale_ticksQ8() (Q8.8 ticks).
+ * What: Q8.8 ticks / 256 * samples per tick. It is the S074 expression
+ * unchanged, in one place, so every length the Sync search compares is
+ * computed exactly as the S074 walk computed it. Division by 256 is exact
+ * (a power of two), so any reassociation -Ofast chooses gives the same bits.
+ * Inputs: cc 0..127 (callers never pass more), per_tick > 0. Output: length
+ * in samples. Callers: crumpBit_divisionFor(). Affiliates:
+ * stepScale_ticksQ8(), CRUMPBIT_SAMPLES_PER_TICK.
+ */
+static inline float crumpBit_divisionLength(uint8_t cc, float per_tick)
+{
+    return ((float)stepScale_ticksQ8(cc) / 256.0f) * per_tick;
+}
+
+/*
+ * Nearest fitting division for one free-running length (S091 R1).
+ *
+ * What: among the StepScale positions whose length fits
+ * CRUMPBIT_DELAY_MAX_SAMPLES, finds the longest one <= target (low) and the
+ * shortest one > target (high), and picks low when target^2 < low*high,
+ * which is nearest in log time. Returns 0 if nothing fits (below ~4 BPM).
+ * How: the 128 lengths ascend strictly with the CC (stepScale_q8Table is
+ * strictly ascending and per_tick > 0), so "fits and <= target" is a prefix
+ * of the table: every position below some count passes, none above it does.
+ * A fixed 7-step binary search finds that count; low is count - 1 and the
+ * only candidate for high is position count.
+ * Why: the S074/S078 form walked all 128 positions every audio block
+ * (12-19 instructions each, about 2,400 per block, ~76 per frame of the
+ * render), from crumpBit_process() via crumpBit_targetSamples(). This form
+ * costs about 7 search steps plus three lengths, and returns the same CC for
+ * every input (class S0; host law CB1 checks every rate at BPM 1..1000).
+ * Cost: constant to within the three early returns (a few instructions per
+ * block), never data-dependent in the search itself.
+ * Inputs: target length (samples), per_tick (samples per 96-PPQ tick at the
+ * current tempo). Output: a StepScale CC 0..127.
+ * Callers: crumpBit_syncDivision() (Effect-page label, foreground),
+ * crumpBit_targetSamples() (render, once per block).
+ * Affiliates: crumpBit_divisionLength(), stepScale_ticksQ8(),
+ * STEP_SCALE_COUNT.
  */
 static uint8_t crumpBit_divisionFor(float target, float per_tick)
 {
-    uint8_t low = CRUMPBIT_DIVISION_NONE;
-    uint8_t high = CRUMPBIT_DIVISION_NONE;
-    float t_low = 0.0f;
-    float t_high = 0.0f;
-    uint8_t i;
+    /*
+     * key: one threshold for both S074 tests. A position passed the S074 walk
+     * as a low candidate when it fitted (t <= MAX) and was not longer than
+     * the target (t <= target), i.e. exactly when t <= min(target, MAX).
+     */
+    const float key = (target < CRUMPBIT_DELAY_MAX_SAMPLES)
+        ? target : CRUMPBIT_DELAY_MAX_SAMPLES;
+    /*
+     * count: how many positions (from CC 0 up) have a length <= key. It is
+     * built from the top bit down: after the step of size s, every position
+     * below count is known to pass. Probing position count + s - 1 decides
+     * whether the next s positions all pass (the lengths ascend, so testing
+     * the last of them is enough). Steps 64, 32, ... 1 reach any count in
+     * 0..128.
+     */
+    uint32_t count = 0u;
+    uint32_t step;
+    float t_low;
+    float t_high;
 
-    for (i = 0u; i < STEP_SCALE_COUNT; i++) {
-        const float t = ((float)stepScale_ticksQ8(i) / 256.0f) * per_tick;
+    /* Fixed seven iterations; the add is a compare-select, not a branch. */
+    for (step = STEP_SCALE_COUNT / 2u; step != 0u; step >>= 1u)
+        count += (crumpBit_divisionLength((uint8_t)(count + step - 1u),
+                                          per_tick) <= key) ? step : 0u;
 
-        if (t > CRUMPBIT_DELAY_MAX_SAMPLES)
-            continue;
-        if (t <= target) {
-            low = i;
-            t_low = t;
-        } else if (high == CRUMPBIT_DIVISION_NONE) {
-            high = i;
-            t_high = t;
-        }
-    }
-    if (low == CRUMPBIT_DIVISION_NONE)
-        return (high == CRUMPBIT_DIVISION_NONE) ? 0u : high;
-    if (high == CRUMPBIT_DIVISION_NONE)
-        return low;
-    return (target * target < t_low * t_high) ? low : high;
+    /*
+     * No low candidate: S074 returned high if any position fitted, else 0.
+     * high could only be CC 0 here, so both cases return 0.
+     */
+    if (count == 0u)
+        return 0u;
+    t_low = crumpBit_divisionLength((uint8_t)(count - 1u), per_tick);
+    /* Every position passed: there is no longer one, so high is NONE. */
+    if (count == STEP_SCALE_COUNT)
+        return (uint8_t)(count - 1u);
+    /*
+     * Position count is the first that fails key. It is S074's high when it
+     * still fits (then it failed only "<= target"); if it is longer than
+     * MAX, no later position fits either, so high is NONE.
+     */
+    t_high = crumpBit_divisionLength((uint8_t)count, per_tick);
+    if (t_high > CRUMPBIT_DELAY_MAX_SAMPLES)
+        return (uint8_t)(count - 1u);
+    /* Nearest in log time: target below the geometric mean picks low. */
+    return (target * target < t_low * t_high)
+        ? (uint8_t)(count - 1u) : (uint8_t)count;
 }
 
 uint8_t crumpBit_syncDivision(uint8_t rate, uint16_t bpm)
@@ -192,6 +319,14 @@ static void crumpBit_init(void *rt_void, const fxbuf_handoff_t *handoff)
     rt->write_pos = 0u;
     rt->valid = 0u;
     rt->primed = 0u;
+    /*
+     * AC-coupling memory (S091 R4): the previous code of each channel. The
+     * zeroed union would mean code 0 (-1.0, a full-scale step into the
+     * high-pass on the first sample). Code 128 is silence, the exact
+     * equivalent of the S074 zeroed float input memory (0.0f).
+     */
+    rt->ac_c_l = CRUMPBIT_CODE_MID;
+    rt->ac_c_r = CRUMPBIT_CODE_MID;
 }
 
 /*
@@ -291,12 +426,25 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     float fb_inc;
     float gain_l_inc;
     float gain_r_inc;
-    float ac_xl;
-    float ac_xr;
+    /*
+     * ac_cl/ac_cr (S091 R4): the previous data-line code of each channel,
+     * 0..255. It replaces the S074 float input memory ac_x_* (= (code -
+     * 128)/128 of the previous sample); the code difference carries the same
+     * information exactly.
+     */
+    int32_t ac_cl;
+    int32_t ac_cr;
     float ac_yl;
     float ac_yr;
     float per_frame;
-    uint8_t n;
+    /*
+     * frames (S091 R3): io->frames read once. io->frames is a uint8_t, and a
+     * float store may alias any character-typed object, so the S074 loop
+     * re-read it from io (and re-extended a uint8_t counter) after every
+     * output store. A local copy and a 32-bit counter remove both.
+     */
+    uint32_t frames;
+    uint32_t n;
 
     if (!rt || !io || !io->l || !io->share || !io->share->base ||
         io->frames == 0u)
@@ -304,6 +452,7 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     len = crumpBit_seat(rt, io->share);
     if (len < CRUMPBIT_LOOP_MIN)
         return;
+    frames = io->frames;
     left = io->l;
     right = io->r ? io->r : io->l;
     loop = (int8_t *)io->share->base;
@@ -323,7 +472,8 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     }
 
     /* Block ramps (spec §3.5): 0..127 rows to gains. */
-    per_frame = 1.0f / (float)io->frames;
+    /* Ramp step per frame: the block's ramps land on their targets. */
+    per_frame = 1.0f / (float)frames;
     mix_to = (float)rt->mix_raw * (1.0f / 127.0f);
     fb_to = (float)rt->feedback_raw * (CRUMPBIT_FEEDBACK_MAX / 127.0f);
     /*
@@ -348,27 +498,47 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     delay = rt->delay;
     wp = rt->write_pos;
     valid = rt->valid;
-    ac_xl = rt->ac_x_l;
-    ac_xr = rt->ac_x_r;
+    ac_cl = rt->ac_c_l;
+    ac_cr = rt->ac_c_r;
     ac_yl = rt->ac_y_l;
     ac_yr = rt->ac_y_r;
 
-    for (n = 0u; n < io->frames; n++) {
-        const uint32_t code_l = (crumpBit_adc(left[n]) & keep) ^ invert;
-        const uint32_t code_r = (crumpBit_adc(right[n]) & keep) ^ invert;
-        const float yl = (float)((int32_t)code_l - 128) * CRUMPBIT_LSB;
-        const float yr = (float)((int32_t)code_r - 128) * CRUMPBIT_LSB;
-        const float hl = yl - ac_xl + CRUMPBIT_AC_R * ac_yl;
-        const float hr = yr - ac_xr + CRUMPBIT_AC_R * ac_yr;
+    /*
+     * One stereo frame per iteration. Every statement runs on every frame
+     * whatever the settings (constant CPU); the count comes from the
+     * hoisted local, so no output store forces a reload (R3).
+     */
+    for (n = 0u; n < frames; n++) {
+        /*
+         * ADC -> data lines per channel: the 8-bit code with the forced-off
+         * bits cleared (keep) and the inverted bits flipped (invert), 0..255.
+         */
+        const int32_t code_l =
+            (int32_t)((crumpBit_adc(left[n]) & keep) ^ invert);
+        const int32_t code_r =
+            (int32_t)((crumpBit_adc(right[n]) & keep) ^ invert);
+        /*
+         * DAC + AC coupling (S091 R4): h = (y - y_prev) + R*h_prev, where the
+         * S074 DAC gave y = (code - 128)/128. Both y values are exact
+         * multiples of 2^-7, so their difference is exactly
+         * (code - code_prev)/128: the integer difference, converted once.
+         * The "- 128" and one float subtract per channel disappear, and the
+         * sum with R*h_prev is the same single VFMA as before.
+         */
+        const float hl = crumpBit_codeToFloat(code_l - ac_cl) +
+                         CRUMPBIT_AC_R * ac_yl;
+        const float hr = crumpBit_codeToFloat(code_r - ac_cr) +
+                         CRUMPBIT_AC_R * ac_yr;
         float rp;
         float frac;
         float wet;
         uint32_t i0;
         uint32_t i1;
 
-        ac_xl = yl;
+        /* AC memories: this frame's code (input) and output, per channel. */
+        ac_cl = code_l;
         ac_yl = hl;
-        ac_xr = yr;
+        ac_cr = code_r;
         ac_yr = hr;
         mix += mix_inc;
         fb += fb_inc;
@@ -402,8 +572,9 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
     rt->delay = delay;
     rt->write_pos = wp;
     rt->valid = valid;
-    rt->ac_x_l = ac_xl;
-    rt->ac_x_r = ac_xr;
+    /* The last code of the block is the next block's AC input memory. */
+    rt->ac_c_l = ac_cl;
+    rt->ac_c_r = ac_cr;
     rt->ac_y_l = ac_yl;
     rt->ac_y_r = ac_yr;
     /* Land exactly on the targets so ramp rounding never accumulates. */

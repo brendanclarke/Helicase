@@ -15,7 +15,8 @@
   linked ELF, and its host laws and break proofs were run (§4). The numbers
   in this document come from that build. The code blocks were copied from
   the built files by script, not retyped.
-- **Status:** schedule only. No repository file is changed by this document.
+- **Status:** implemented 2026-11-04 (see §8 for the record and gate results);
+  hardware H1–H6 pending. The schedule below is unchanged.
 - **Constraint:** `S089_P2_WAVEFOLDER_CHAIN.md` §8 (no per-sample increase).
   This step only lowers cost.
 
@@ -1782,3 +1783,76 @@ decisions."
   on the host compiler. Reference and new code are compiled in one
   translation unit with the same flags, so a contraction choice applies to
   both. The `-Ofast` ARM shape is gated separately (§2, G4).
+
+---
+
+## 8. Implementation record (2026-11-04)
+
+**Status: implemented in the working tree. Hardware H1–H6 pending.**
+
+### Step 0 — baseline snapshot
+
+- Repository HEAD was `fb4a43d2`; its only difference from the schedule's
+  `93f35799` is the two S091 documents, so the firmware source is the
+  scheduled baseline.
+- `build/lxr02.elf` copied to `build/s091_base.elf` before any edit (G5).
+
+### Step 1 — firmware reductions (C1–C14, H1–H3)
+
+- `Core/DSP/Effects/CrumpBit/CrumpBitEffect.c`: C1 include, C2 constants,
+  C3 search-size guard, C4 `USAT` ADC + `crumpBit_codeToFloat()`, C5
+  binary-search Sync division, C6 AC seed, C7–C14 process/init changes.
+  Each change carries its comment block from §3.1.
+- `Core/DSP/Effects/CrumpBit/CrumpBitEffect.h`: H1 runtime description,
+  H2 `ac_c_*` fields, H3 `crumpBit_syncDivision()` contract text.
+- No other firmware file changed. `CrumpBitRuntime` stayed 56 B and the
+  Effect union stayed 76 B, as intended (0 B RAM).
+
+### Step 2 — host tests and tools (§4, T1–T3)
+
+- Added `tools/dsp_test/modules/crumpbit.c` (CB1–CB5, S074 reference
+  copy, two break builds).
+- Added `tools/dsp_test/elf_looppath.py`.
+- `tools/dsp_test/Makefile`: header list, `.PHONY`/`all`, `crumpbit` and
+  `crumpbit_elf_check` targets.
+
+### Step 3 — documentation (D1–D3)
+
+- `tools/dsp_test/DSP_TEST.md`: layout, target rows, `elf_looppath.py`
+  paragraph.
+- `EFFECTS_MIXER_DSP_REFERENCE.md` §4.4 and §6.2a: the R2/R4 equations,
+  the R1 search, the measured cost and symbol sizes.
+- `CPU_USE_DSP_AUDIT.md`: item 61 after item 60.
+- **D4 (`MEMORY.md`)** waits for the hardware result, as scheduled.
+
+### Gate results
+
+| # | Gate | Result |
+|---|---|---|
+| G1 | `make all` | exit 0; no warning from `CrumpBitEffect.c` (only the pre-existing `_close`/`_lseek`/`_read`/`_write` linker notes) |
+| G2 | `make img` | `Written:build/LXRV2_lxr02.img (690580b) OK` |
+| G3 | `make -C tools/dsp_test crumpbit` | `crumpbit failures: 0`; `crumpbit_break1: caught`; `crumpbit_break2: caught` |
+| G4 | `make -C tools/dsp_test crumpbit_elf_check` | `crumpBit_process`: longest 98 (vdiv 0), shortest 98 and 88; `crumpBit_divisionFor`: 117 straight-line |
+| G5 | mixer loops, base vs new | `86 baseline loops, 86 exact, 0 renamed, 0 missing`; hot loops `39 equal, 0 grew` |
+| G6 | `tools/link_budget.py` | ITCM 15,240 B; DTCM statics 4,372 B; FXBUF 126,688 B at `0x20001120` |
+| G7 | `arm-none-eabi-size` | text 690,160; data 420; bss 413,028 |
+
+Linked symbol sizes match §2: `crumpBit_process` 996 B,
+`crumpBit_divisionFor` 404 B, `crumpBit_syncDivision` 100 B,
+`crumpBit_init` 20 B.
+
+### Notes and deviations
+
+- No deviation from the scheduled code blocks. The existing
+  `/* Block ramps ... */` comment above `per_frame` was kept; C10's
+  comment is adjacent to the assignment.
+- `make -C tools/dsp_test all` still stops at the two carried-debt targets
+  (`run_modes`, `stock_tables`) recorded in §4.4. `crumpbit` and
+  `crumpbit_elf_check` were run by name, as the schedule anticipates.
+- Host float coverage is the C branch of `crumpBit_codeToFloat()`; the ARM
+  `vcvt #7` shape is proved by G4 (the loop counts at 98 with no VDIV).
+
+### Pending (user)
+
+- H0 baseline on the current image, then H1–H6 on the new image (§6).
+- After H1–H6: D4 (`MEMORY.md` status line) and the feature step (plan §3).

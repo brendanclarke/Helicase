@@ -986,6 +986,24 @@ the new copy/clear work is foreground-only and bounded.
     unchanged, but `.data` 420 → 424 B shifts the start of `.bss` by 8 B
     (`STORAGE_SRAM_MANIFEST.md`, S089 P2).
 
+### Session 091 P1 (record in `S091_P1_Reductions_Implementation.md`)
+
+61. **REDUCED (S091 P1): CrumpBit (`cbt`), bit-identical (S0).** Item 27
+    under-counted the type: the S078 Sync walk ran all 128 StepScale
+    positions every block (128 × 12–19 = 1,536–2,432 instructions,
+    ≈ 48–76 per frame), on top of a 111-instruction per-sample loop
+    (≈ 191 per frame in the worst case, not 75–95).
+    - R1: a fixed 7-step binary search returns the same division
+      (117 instructions per block, straight line).
+    - R2: the ADC uses `USAT` instead of two float clamps and a fold.
+    - R3: `io->frames` is read once.
+    - R4: AC coupling on integer code differences with a fixed-point
+      `vcvt #7`, the same single-rounding VFMA as before.
+    - Linked loop 111 → 98 per frame; total ≈ 191 → ≈ 106 per frame.
+      Text +40 B; RAM 0 B; mixer loops unchanged (86/86 exact).
+    - Host laws CB1–CB5 bit-exact (`make -C tools/dsp_test crumpbit`);
+      gate `crumpbit_elf_check`. Hardware: H1–H6 of the schedule.
+
 ---
 
 ## Binding Mandates — DSP CPU Policy

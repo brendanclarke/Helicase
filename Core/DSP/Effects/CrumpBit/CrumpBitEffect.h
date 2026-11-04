@@ -45,7 +45,10 @@
  *   target (tape style);
  * - mix, feedback, gain_l, gain_r: block-ramp values (end of the previous
  *   block);
- * - ac_x_*, ac_y_*: the AC-coupling (one-pole high-pass) state per channel;
+ * - ac_c_*: the previous data-line code per channel, 0..255 (S091 R4; it
+ *   replaced the float input memory ac_x_*). crumpBit_init() seeds 128,
+ *   silence; the zeroed union value 0 would be a full-scale step;
+ * - ac_y_*: the AC-coupling (one-pole high-pass) output memory per channel;
  * - bit_off .. pan_raw: the last row values from write_param();
  * - primed: 0 until the first block sets delay directly to its target (no
  *   glide on entry).
@@ -64,8 +67,8 @@ typedef struct {
     float feedback;
     float gain_l;
     float gain_r;
-    float ac_x_l;
-    float ac_x_r;
+    int32_t ac_c_l;
+    int32_t ac_c_r;
     float ac_y_l;
     float ac_y_r;
     uint8_t bit_off;
@@ -100,11 +103,13 @@ float crumpBit_rateSamples(uint8_t rate);
  * What: among the shared StepScale CC positions (0..127, 96 PPQ ticks) whose
  * length at the given tempo fits CRUMPBIT_DELAY_MAX_SAMPLES, returns the CC
  * nearest in log time to crumpBit_rateSamples(rate). It uses the bracketing
- * pair and the geometric-mean rule: no logarithms, and a constant 128-step
- * loop. If no division fits (below about 4 BPM) it returns 0, and the DSP
- * clamps that length to the maximum. Why shared: the Effect-page label must
- * show exactly the division the DSP plays. Inputs: rate 0..127, bpm from
- * seq_getBpm() (0 is treated as 1). Output: a StepScale CC 0..127.
+ * pair and the geometric-mean rule: no logarithms, and a fixed 7-step binary
+ * search over the 128 ascending positions (S091 R1; it replaced a 128-step
+ * walk and returns the same division). If no division fits (below about
+ * 4 BPM) it returns 0, and the DSP clamps that length to the maximum.
+ * Why shared: the Effect-page label must show exactly the division the DSP
+ * plays. Inputs: rate 0..127, bpm from seq_getBpm() (0 is treated as 1).
+ * Output: a StepScale CC 0..127.
  * Accessors: crumpBit_uiFormatValue3() (label), CrumpBitEffect.c (target).
  * Affiliates: stepScale_ticksQ8(), stepScale_formatShort().
  */
