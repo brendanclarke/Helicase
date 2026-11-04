@@ -8,6 +8,9 @@
 - **First implementation:** the CPU reductions only (§2), with nothing
   added. Schedule: `S091_P1_Reductions_Implementation.md`. The features
   (§3) follow after the reductions pass on hardware.
+- **Reductions implemented and assessed (2026-11-04, commit `5c9a92f9`):**
+  bit-identical output; the `cpu` widget reads 3–4 % lower with `cbt` on
+  hardware (user). Listening checks H2–H6 still to report. See §10.
 - **Request (user):** add to CrumpBit (`cbt`)
   1. a delay that uses the whole buffer, elastic against a possible 50 ms or
      100 ms voice reservation;
@@ -436,3 +439,72 @@ For steps 2–4:
     may move ±2–3 with register allocation.
 - **Not prototyped:** the soft knee (estimated), and per-block coefficient
   code (estimated ≈ 1–2 per frame).
+
+---
+
+## 10. Reductions: implementation assessment and hardware result (2026-11-04)
+
+Full record: `S091_P1_Reductions_Implementation.md` §8 (implementation) and
+§9 (assessment). The summary follows.
+
+### 10.1 Assessment
+
+- **The code matches the schedule.** Commit `5c9a92f9` changes only
+  `CrumpBitEffect.c/.h` in `Core/`, block for block as scheduled (C1–C14,
+  H1–H3).
+- **The AC seed cannot be skipped.** CrumpBit only becomes active through
+  `effects_switchRuntime()`, which zeroes the union and calls
+  `crumpBit_init()`.
+- **The gates pass when re-run.**
+  - Image 690,580 B, byte-identical to the committed image the board ran.
+  - Host `crumpbit`: 0 failures, both break builds caught.
+  - Linked loop **111 → 98** per frame (filling path 101 → 88), no VDIV.
+  - Sync search 117 instructions straight-line, replacing the 1,536–2,432
+    per block of the walk.
+  - RAM unchanged: `CrumpBitRuntime` 56 B, union 76 B, FXBUF 126,688 B at
+    `0x20001120`. Text +40 B.
+- **ARM cross-check.** `fb4a43d2` was rebuilt and its `crumpBit_process`
+  disassembled next to the new one. Every rounding float operation is
+  present in both, with the same operands and association. Only exact
+  operations were removed.
+- **No defect found.** One optional wording note: NaN is the single ADC
+  input where old and new codes differ, and it is unreachable (§10.3).
+
+### 10.2 Hardware result
+
+- **With `cbt` the `cpu` widget reads 3–4 % lower** (user). That is about
+  150–200 cycles per frame, against −85 instructions predicted (≈ 1.7 %).
+- **The extra saving is the walk's real cycle cost.** Its FPSCR transfers
+  (`vmrs`) and data-dependent branches ran at about 2 cycles per
+  instruction (§3.5 "Cycles, not only instructions").
+- **The widget is not linear near 100 %** (§1.3). The figure confirms the
+  direction and size, not an exact cycle count.
+- **Budget for the features.** The pre-S091 reading remains the baseline
+  for the no-increase rule. The recommended A + F package (≈ +45 straight-line
+  instructions per frame over S0) fits inside the measured saving. Each
+  feature step re-measures with G4 and on the board.
+- **Still to report:** H1 underruns and the `off` reading, and H2–H6
+  (listening, Sync labels, tempo glide, entry from `off`, tail on a
+  same-type Scene switch).
+
+### 10.3 Why the output is bit-identical
+
+**No change adds or moves a rounding step.** Each removes work that was
+already exact, or whose result the remaining code reproduces exactly.
+
+| # | What was removed | Why the result cannot change |
+|---|---|---|
+| R3 | Re-reading `io->frames` (and re-extending an 8-bit counter) after every store | The value is constant during the block; the same frames run on the same data. |
+| R2 | Two float clamps and the `code − (code >> 8)` fold in the ADC | Both forms compute `x·128 + 128.5` with the same FMA. For \|x\| ≤ 1 the truncation is the same 0..256, and `USAT #8` folds 256 → 255 as the fold did. Beyond ±1 the old clamp gave 255/0. The new truncation lands ≥ 256 or ≤ 0, and `USAT` gives the same 255/0 (±∞ too). Only NaN differs, and NaN cannot reach the Effect. |
+| R4 | `vmul` by 1/128 and the float `y − y_prev` per channel | Old `y = (c − 128)/128` values are integers × 2⁻⁷ in [−1, 1]. Their difference needs ≤ 9 of a float's 24 bits, so the old subtraction was exact. It equals `(c − c_prev)·2⁻⁷`, which `vcvt #7` produces exactly from the integer difference. Both images then do the same `fma(R, h_prev, ·)`. The asm fixes that shape so `-Ofast` cannot round `R·h_prev` first. Code 128, seeded in `init`, is the old zeroed 0.0. |
+| R1 | 121 of 128 walk steps | The lengths do not decrease along the table, so "fits and ≤ target" (`t ≤ min(target, MAX)`) is a prefix `[0, count)`. The binary search finds `count`; the old `low` was `count − 1`. The old `high` can only be position `count`, and only if it fits. Every length is `ticks·per_tick` rounded once and scaled by a power of two, which is exact. So each comparison, and the geometric-mean test, sees the same floats in both images. |
+
+- **Downstream is unchanged.** Read, glide, `valid` mute, loop write, mix
+  and pan get the same inputs and compile to the same operations. They give
+  the same samples, loop bytes and state.
+- **Evidence:**
+  - host CB1–CB5, bit for bit: every rate × BPM 0..1000 with ties; every
+    ADC code edge; all 65,536 code pairs; 60 s of random blocks with
+    parameter jumps, mono, short blocks and share changes;
+  - the ARM operation comparison
+    (`S091_P1_Reductions_Implementation.md` §9.3).

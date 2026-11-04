@@ -16,7 +16,9 @@
   in this document come from that build. The code blocks were copied from
   the built files by script, not retyped.
 - **Status:** implemented 2026-11-04 (see §8 for the record and gate results);
-  hardware H1–H6 pending. The schedule below is unchanged.
+  assessed 2026-11-04 (§9). Hardware: the `cpu` widget reads 3–4 % lower
+  with `cbt` (user). The listening checks H2–H6 have not been reported. The
+  schedule below is unchanged.
 - **Constraint:** `S089_P2_WAVEFOLDER_CHAIN.md` §8 (no per-sample increase).
   This step only lowers cost.
 
@@ -1856,3 +1858,188 @@ Linked symbol sizes match §2: `crumpBit_process` 996 B,
 
 - H0 baseline on the current image, then H1–H6 on the new image (§6).
 - After H1–H6: D4 (`MEMORY.md` status line) and the feature step (plan §3).
+
+---
+
+## 9. Post-implementation assessment (2026-11-04)
+
+**Verdict: the implementation matches the schedule, every gate passes when
+re-run, and the ARM code of the new image computes the same values as the
+old image, operation by operation. The output is bit-identical (class S0).
+On hardware, the `cpu` widget reads 3–4 % lower with `cbt` (user).**
+
+### 9.1 Code against the schedule
+
+- **The diff of commit `5c9a92f9` against `fb4a43d2`** touches only
+  `CrumpBitEffect.c` and `CrumpBitEffect.h` in `Core/`. Each change is the
+  scheduled block C1–C14 / H1–H3, comments included. There is no
+  unscheduled firmware change.
+- **The AC seed always runs.** `effects_state.runtime_type` is written in
+  only two places:
+  - `effects_init()`, which sets it to `off`;
+  - `effects_switchRuntime()`, which zeroes the union and then calls
+    `init()`.
+
+  So CrumpBit can only become active through `crumpBit_init()`, and the
+  seed of code 128 (C6) cannot be skipped. A same-type Scene switch keeps
+  the memory, as S074 did.
+- **No other reader of the old fields.** A repository search finds no
+  `ac_x_*` and no reader of `ac_c_*` outside `CrumpBitEffect.c/.h`.
+
+### 9.2 Gates re-run on the committed tree
+
+| # | Gate | Result |
+|---|---|---|
+| G1/G2 | `make all`, `make img` | `Written:build/LXRV2_lxr02.img (690580b) OK`. The rebuilt image is byte-identical to the committed `build/LXRV2_lxr02.img`, so the image tested on the board is this source. |
+| G3 | `make -C tools/dsp_test crumpbit` | `crumpbit failures: 0`; break 1 (CB1) and break 2 (CB4/CB5) both caught |
+| G4 | `crumpbit_elf_check` | loop longest 98, shortest 98 / 88, vdiv 0; `crumpBit_divisionFor` 117 straight-line |
+| G4 on the base | `elf_looppath.py` on a rebuild of `fb4a43d2` | loop longest 111, shortest 111 / 101: the §2 baseline is reproduced |
+| G6/G7 | `link_budget.py`, `arm-none-eabi-size` | text 690,160; data 420; bss 413,028; ITCM 15,240; DTCM statics 4,372; FXBUF 126,688 B at `0x20001120` |
+
+### 9.3 ARM comparison against the base image
+
+The host laws run on the host compiler at `-O2`. The board runs `-Ofast`
+ARM code, which may contract and reassociate. Host laws alone therefore do
+not prove the board's output. Two things are needed: the new code must not
+introduce a rounding of its own, and the compiler must not have chosen a
+different association. To check both, `fb4a43d2` was rebuilt in the session
+scratchpad and its `crumpBit_process` was disassembled next to the new one.
+
+| Part | Old image (`fb4a43d2`) | New image (`5c9a92f9`) | Same value? |
+|---|---|---|---|
+| ADC (×3) | `vminnm`, `vmaxnm`, `vfma` (x·128 + 128.5), `vcvt.u32`, fold | `vfma` (same operands, unclamped x), `vcvt.s32`, `usat #8` | Yes, for every non-NaN input (§9.4 R2) |
+| AC coupling (×2) | `vcvt.f32.s32`, `vmul` (×1/128), `vsub` (y − y_prev), `vfma` (+ R·h_prev) | `vcvt.f32.s32 #7`, `vfma` (+ R·h_prev) | Yes: the same single-rounding FMA on an exact addend |
+| Division length | `ticks·per_tick`, compared with `MAX·256` (‑Ofast scaled both sides by 256), then ×2⁻⁸ | `ticks·(per_tick·2⁻⁸)`, compared with `min(target, MAX)`; the high candidate compared as `ticks·per_tick` against `MAX·256` | Yes: power-of-two scaling is exact |
+| Geometric mean | `vmul target²`, `vmul t_low·t_high`, `vcmpe`, `movpl` | `vmul target²`, `(t_low·2⁻⁸)·(256·t_high)`, `vcmpe`, `movpl` | Yes: both products round once from the same exact value |
+| Interpolated read, glide, loop write, mix and pan output | `vrintz`/`vsub`/`vfma` read; `vfma` glide; `vfma(0.5, hL + hR, fb·wet)`; `vfma(mix, g·wet − h, h)` | the same operations in the same association | Yes |
+
+### 9.4 Why the output is bit-identical
+
+The principle is the same for all four changes. **None of them adds or moves
+a rounding step.** Each one removes work that was already exact, or work
+whose result the remaining code reproduces exactly:
+- a clamp that a later saturation already covers;
+- a subtraction of two values whose difference is exact;
+- a linear scan over a sorted table, replaced by a search that finds the
+  same index.
+
+Every float operation that rounds is still present, with the same operands
+and the same association (§9.3).
+
+**R3 (frame count): no arithmetic changes.** `io->frames` is read once
+instead of after every store. The value cannot change during the block, so
+the loop runs the same frames with the same data.
+
+**R2 (ADC): the same integer code for every real input.** Both forms
+compute `y = x·128 + 128.5` with one FMA.
+- **For |x| ≤ 1** the operands are the same, so `y` is the same float in
+  [0.5, 256.5]:
+  - truncation gives the same integer 0..256 whether the conversion is
+    signed or unsigned;
+  - S074 folded 256 to 255 with `code − (code >> 8)`; `USAT #8` maps 256
+    to 255 and leaves 0..255 alone.
+- **For x > 1** S074 clamped to 1 and produced 255. R2 has y > 256.5, which
+  truncates to at least 256, and `USAT` gives 255.
+- **For x < −1** S074 clamped to −1 and produced 0. R2 has y < 0.5, which
+  truncates to 0 or a negative integer, and `USAT` gives 0.
+- **±∞** gives 255 / 0 in both: the M7 `vcvt` saturates.
+- **The one input that differs is NaN** (S074 → 255, R2 → 0). It cannot
+  occur:
+  - the bus is built from integer voice samples;
+  - the loop write is a finite sum of bounded values;
+  - `-Ofast` already assumes finite math.
+
+  The C4 comment "the same for every input" means every number.
+
+**R4 (AC coupling): exact arithmetic, then the same FMA.**
+- **The S074 values are exact.** S074 formed `y = (c − 128)/128` and kept
+  the previous `y` as a float. Every such value is an integer times 2⁻⁷ in
+  [−1, 1].
+- **Their difference is exact.** `y − y_prev` is an integer times 2⁻⁷ in
+  [−2, 2]. That needs at most 9 significant bits, and a float has 24, so the
+  `vsub` did not round.
+- **R4 produces the same value directly.** It forms `c − c_prev` as an
+  integer, and `vcvt.f32.s32 #7` converts it as exactly
+  `(c − c_prev)·2⁻⁷`. That is the same float S074's subtraction produced.
+- **The FMA is unchanged.** Both images then compute
+  `fma(R, h_prev, that value)`: one rounding, the same operands (§9.3). The
+  inline asm is what fixes this shape. In C, `-Ofast` could have rounded
+  `R·h_prev` first.
+- **The state maps one to one.** The stored float `y_prev` and the stored
+  code `c_prev` are related by `y_prev = (c_prev − 128)/128`. The zeroed
+  S074 state (0.0) is code 128, which is what `crumpBit_init()` seeds.
+
+**R1 (Sync search): the same index, from the same floats.**
+- **The passing positions are a prefix.** StepScale ticks ascend strictly
+  and `per_tick > 0`. Float rounding is monotone, so the lengths
+  `t(cc)` do not decrease. S074 counted a position as a low candidate when
+  `t ≤ MAX` and `t ≤ target`, which is `t ≤ min(target, MAX)`. Because the
+  lengths do not decrease, the positions that pass form a prefix
+  `[0, count)` of the table.
+- **The search finds `count`.** The 7-step binary search finds `count`
+  exactly, and S074's `low` was its last element, `count − 1`.
+- **Only one position can be `high`.** S074's `high` was the first
+  position with `t > target` that still fits. Only position `count` can be
+  that, and only when `t(count) ≤ MAX`. If it does not fit, no later one
+  does either.
+- **The comparisons use the same floats.**
+  - Every `t` is `ticks·per_tick` rounded once and scaled by 2⁻⁸. A
+    power-of-two scale commutes with rounding (no overflow or subnormals in
+    this range), so each comparison sees the same value in both images,
+    even where `-Ofast` moved the 256 to the other side of the comparison.
+  - The geometric-mean test compares the same two once-rounded products.
+- **The shared label agrees.** `crumpBit_syncDivision()` uses the same
+  search, so the Effect-page label shows exactly the division the DSP
+  plays, as before.
+
+**Everything downstream is unchanged** (read, glide, `valid` mute, loop
+write, mix, pan, ramps). It receives the same codes, the same `h` values and
+the same target, so it produces the same output samples, the same loop bytes
+and the same stored state.
+
+**Evidence:**
+- **Host, CB1–CB5, bit for bit:**
+  - every rate at BPM 0..1000, including the exact ties;
+  - 2 million random division targets;
+  - every ADC code edge;
+  - all 65,536 code pairs;
+  - 60 s of random blocks with parameter jumps, mono, short blocks and
+    share changes: outputs, loop bytes and state.
+- **ARM:** the operation-by-operation comparison of §9.3.
+- **Break builds:** a wrong search or a missing seed is caught.
+
+### 9.5 Hardware result and what it means
+
+- **Reported (user, 2026-11-04):** with `cbt` on the device, the `cpu`
+  widget reads **3–4 % lower**.
+- **The instruction count predicted less.** 191 → 106 per frame is −85
+  instructions, about 1.7 % of the 4,897-cycle frame. A 3–4 % drop is about
+  150–200 cycles per frame.
+- **The difference fits the old walk's cost in cycles.** Each step had two
+  `vcmpe`/`vmrs` FPSCR transfers and data-dependent branches, so it ran at
+  roughly 2 cycles per instruction. §7 anticipated this.
+- **The widget is not a pure cycle meter** (plan §1.3). It also includes
+  foreground latency and is not linear near 100 %. Read the 3–4 % as a
+  confirmed direction and a magnitude, not as an exact cycle figure.
+- **Consequence for the features (plan §3.5).** The recommended package
+  (A + F, about +45 instructions per frame over S0) is straight-line FMA
+  code, about 1 cycle per instruction or a little more. It should land well
+  below the pre-S091 reading. The no-increase rule (§8 of S089 P2) is judged
+  against the pre-S091 baseline, so the measured saving is the budget.
+  Each feature step re-measures with G4 and on the board.
+
+### 9.6 Findings and what remains
+
+- **No defect found.**
+- **Comment precision (cosmetic, optional).** The C4 comment says the codes
+  are the same "for every input". NaN is the one exception (§9.4 R2), and it
+  is unreachable. A wording change is optional and does not affect the
+  image.
+- **Carried debt (unchanged):** `make -C tools/dsp_test all` still stops at
+  `run_modes` and `stock_tables` (§4.4).
+- **Still open (user):**
+  - H1: whether the underrun count was zero, and whether `off` reads the
+    same as before;
+  - H2–H6: listening, Sync labels, the tempo glide, a clean entry from
+    `off`, and the tail across a same-type Scene switch;
+  - D4: the `MEMORY.md` status line, once H1–H6 are confirmed.
