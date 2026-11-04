@@ -249,6 +249,23 @@ uint8_t effects_paramAutomatable(effect_type_id_t type, uint8_t index);
 uint8_t effects_paramModulatable(effect_type_id_t type, uint8_t index);
 
 /*
+ * Largest value a row may take now (S091 P2).
+ *
+ * What: the descriptor max_value, lowered for a BUFFER_DEPENDENT row by the
+ * type's effective_max op at the current FxBuffer share, the same clamp
+ * effects_service() applies to the resolved value. Why: the Effect page must
+ * not let a user set a value the DSP would clamp (user D2: a voice-unit
+ * reservation clamps the settable range as well as the DSP target). Stored
+ * values are never rewritten here (A30): a value saved above the clamp stays
+ * in the record and plays again when the share grows.
+ * Inputs: type, local index. Output: inclusive maximum (0 for an unknown
+ * row). Foreground only (reads the share with fxbuf_effectShare()).
+ * Accessors: menuEffects_clampValue().
+ * Affiliates: effect_type_ops_t.effective_max, EFFECT_PARAM_FLAG_BUFFER_DEPENDENT.
+ */
+uint8_t effects_paramEffectiveMax(effect_type_id_t type, uint8_t index);
+
+/*
  * `.fx` storage helpers (Session 072 step 6; plan §14.1).
  *
  * effects_recordDefaultsForType() builds one complete, unowned record for a

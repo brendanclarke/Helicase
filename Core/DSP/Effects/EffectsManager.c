@@ -51,7 +51,11 @@ static const effect_param_descriptor_t effects_off_descriptors[] = {
  */
 typedef union {
     StereoFilterRuntime stereo_filter;
-    /* S074: 56 B. Its audio lives in the FxBuffer share, not in this union. */
+    /*
+     * S074: 56 B; S091 P2: 76 B (tone, DC blocker, output SVF, four rows;
+     * paid for by trims, so the union stays 76 B). Its audio lives in the
+     * FxBuffer share, not in this union.
+     */
     CrumpBitRuntime crump_bit;
 } effects_runtime_t;
 
@@ -95,11 +99,16 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
         (uint16_t)sizeof(StereoFilterRuntime), 0u, 0u
     },
     /*
-     * CrumpBit (`cbt`, S074): stereo in and out. The 8-bit mono tape loop
-     * uses CRUMPBIT_BUFFER_BYTES of the FxBuffer Effect share (min = pref;
-     * the fixed range fits the minimum share). Lanes 1..9: bit off, bit
-     * invert, mix, feedback, rate, sync, vol, pan, delay pan. Lane 0 is
-     * Effect Morph.
+     * CrumpBit (`cbt`, S074; S091 P2): stereo in and out. The 8-bit mono
+     * tape loop is elastic (S091 P2 §5.1): it uses the whole Effect share up
+     * to CRUMPBIT_LOOP_MAX_BYTES (pref, the full arena) and still works at
+     * the share left with every voice unit claimed (min); the Rate row is
+     * clamped to the share through crumpBit_ops.effective_max. These two
+     * fields are declarative (no code reads them today).
+     * Lanes 1..13: bit off, bit invert, mix, feedback, rate, sync, vol, pan,
+     * delay pan, then (S091 P2) tone, filter type, filter freq, filter reso.
+     * Lane 0 is Effect Morph; lanes 14..15 stay free for the deferred drive
+     * rows (`drv`, `tdr`).
      */
     {
         crumpBit_token3, crumpBit_abbrev5, crumpBit_full8,
@@ -111,11 +120,12 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
           CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SYNC,
           CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN,
           CRUMPBIT_PARAM_DLY_PAN,
-          EFFECT_LANE_NONE, EFFECT_LANE_NONE, EFFECT_LANE_NONE,
-          EFFECT_LANE_NONE, EFFECT_LANE_NONE, EFFECT_LANE_NONE },
+          CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FILTER_TYPE,
+          CRUMPBIT_PARAM_FILTER_FREQ, CRUMPBIT_PARAM_FILTER_RESO,
+          EFFECT_LANE_NONE, EFFECT_LANE_NONE },
         &crumpBit_layout, &crumpBit_ops, &crumpBit_ui,
         (uint16_t)sizeof(CrumpBitRuntime),
-        CRUMPBIT_BUFFER_BYTES, CRUMPBIT_BUFFER_BYTES
+        CRUMPBIT_LOOP_MIN_SHARE_BYTES, CRUMPBIT_LOOP_MAX_BYTES
     },
 };
 
@@ -332,6 +342,35 @@ uint8_t effects_paramModulatable(effect_type_id_t type, uint8_t index)
     return (uint8_t)(descriptor &&
         (descriptor->base.flags & INSTRUMENT_PARAM_FLAG_MODULATABLE) != 0u &&
         descriptor->base.mod_domain.flags != INSTRUMENT_MOD_DOMAIN_NONE);
+}
+
+uint8_t effects_paramEffectiveMax(effect_type_id_t type, uint8_t index)
+{
+    const effect_registry_entry_t *entry = effects_registryEntry(type);
+    const effect_param_descriptor_t *descriptor =
+        effects_descriptor(type, index);
+    /* max: the descriptor's inclusive clamp, lowered by the share below. */
+    uint8_t max;
+
+    if (!entry || !descriptor)
+        return 0u;
+    max = descriptor->max_value;
+    /*
+     * The same rule effects_service() applies before write_param(): only a
+     * BUFFER_DEPENDENT row of a type with an effective_max op is clamped,
+     * against the share as it is now (a struct copy; no arena access).
+     */
+    if ((descriptor->effect_flags & EFFECT_PARAM_FLAG_BUFFER_DEPENDENT) != 0u &&
+        entry->ops && entry->ops->effective_max) {
+        fx_share_t share;
+        uint8_t limit;
+
+        fxbuf_effectShare(&share);
+        limit = entry->ops->effective_max(index, &share);
+        if (limit < max)
+            max = limit;
+    }
+    return max;
 }
 
 /* Resolve the retained Effect type of one resident Scene. */

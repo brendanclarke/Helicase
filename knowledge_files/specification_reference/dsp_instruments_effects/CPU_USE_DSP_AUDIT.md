@@ -1004,6 +1004,20 @@ the new copy/clear work is foreground-only and bounded.
     - Host laws CB1–CB5 bit-exact (`make -C tools/dsp_test crumpbit`);
       gate `crumpbit_elf_check`. Hardware: H1–H6 of the schedule.
 
+62. **GREW WITHIN THE S091 SAVING (S091 P2): CrumpBit expansion.**
+    Elastic delay (whole arena), feedback to 1.2, DC blocker, tone tilt
+    and a cubic soft knee on the return, and a stereo TPT output filter
+    (eight voice types, Q <= 8) as a second pass. Drives deferred.
+    - Linked: stage-2 loop 98 -> 126 per frame (register pressure: six
+      float constants and four literals re-materialised, five stack
+      slots), output-filter loop 31, per block ~15-19: ~106 -> ~172-176
+      per frame, below the pre-S091 ~191 (item 61). No per-sample VDIV.
+    - Per-block tables replace expf, fastTan and valueShaper divisions;
+      the Rate limit (101 instructions) runs once per block in
+      effects_service().
+    - RAM 0 B (runtime 76 B fills the union); text +3,576 B.
+    - Host CB1-CB9, five breaks; gate crumpbit_elf_check.
+
 ---
 
 ## Binding Mandates — DSP CPU Policy

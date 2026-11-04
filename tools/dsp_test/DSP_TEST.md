@@ -35,7 +35,7 @@ tools/dsp_test/
 │   ├── sequencer.c          sequencer.c: the automation drain cursor
 │   ├── instrument_manager.c InstrumentManager.c gate + the osc1_type row
 │   ├── samples.c            SampleMemory/SampleInstall/storageTypes: catalogue, install, order
-│   ├── crumpbit.c           CrumpBitEffect.c: S091 R1–R4 bit-exact against the S074 reference
+│   ├── crumpbit.c           CrumpBitEffect.c: S091 search/ADC/DAC laws and the S091 P2 reference (CB1–CB9)
 │   └── sampleoptimize.py    tools/sampleoptimize.py
 ├── spike/                   retry kit: transient, filter drive, D+S (spike/README.md)
 ├── prelude.h                host stand-ins (placement macros, DSP mirrors)
@@ -88,8 +88,9 @@ Everything generated goes to `build/` (`make clean` removes it).
 | `sampleoptimize` | the optimizer never grows a table, keeps `smpl`, keeps subfolders |
 | `special_tags` | descriptor special tags |
 | `stock_tables` | `tools/plots/gen_stock_tables.py --check` |
-| `crumpbit` | S091 R1–R4: Sync division, ADC, code-difference DAC and whole blocks bit-exact against the S074 reference (CB1–CB5); two break builds |
-| `crumpbit_elf_check` | linked image: the `crumpBit_process` loop ≤ 98 per frame; `crumpBit_divisionFor` ≤ 117 instructions (needs `make all` first; not in `all`) |
+| `crumpbit` | CB1 Sync search (live limit) against the S074 walk; CB2 ADC; CB3 code DAC; CB4 whole blocks bit-exact against the S091 P2 reference (stored ramp origins, branch tone, own filter table) with share changes and seat invariants; CB5 init; CB6 tables and Rate limit; CB7 Q ≤ 8; CB8 stability at feedback 1.2; CB9 row ownership. Five break builds |
+| `crumpbit_tables` | `gen_crumpbit_tables.py --check`: the committed tables equal the generator |
+| `crumpbit_elf_check` | linked image: every `crumpBit_process` loop ≤ 126 per frame, no VDIV (stage 2 126, output filter 31); `crumpBit_divisionFor` ≤ 117; `crumpBit_rateLimit` ≤ 101 (needs `make all` first; not in `all`) |
 | `all` | all of the above |
 
 `elf_looppath.py --elf build/lxr02.elf --sym NAME [--top K] [--max N]

@@ -39,6 +39,24 @@
     { { key_, short_, long_, cat_, (uint8_t)(dtype_), (uint8_t)(flags_), mod_, \
         EFFECT_BIND_NONE }, (uint8_t)(def_), (uint8_t)(max_), 0u, 0 }
 
+/*
+ * Generic row with Effect-only capability flags (S091 P2).
+ *
+ * What: EFFECT_ROW plus effect_flags_ (EFFECT_PARAM_FLAG_*), stored in
+ * effect_param_descriptor_t.effect_flags. Why: EFFECT_ROW always writes 0
+ * there, and CrumpBit's Rate is the first row that needs
+ * EFFECT_PARAM_FLAG_BUFFER_DEPENDENT (its resolved value is clamped to the
+ * live FxBuffer share through the type's effective_max op). expand7 stays 0:
+ * a WIDE8 row would also need an expand function and is not built here.
+ * Affiliates: EffectsManager.c effects_service() BUFFER_DEPENDENT clamp,
+ * effects_paramEffectiveMax(), crumpBit_descriptors.
+ */
+#define EFFECT_ROW_FLAGS(key_, cat_, long_, short_, dtype_, flags_, mod_, def_, \
+                         max_, effect_flags_) \
+    { { key_, short_, long_, cat_, (uint8_t)(dtype_), (uint8_t)(flags_), mod_, \
+        EFFECT_BIND_NONE }, (uint8_t)(def_), (uint8_t)(max_), \
+        (uint8_t)(effect_flags_), 0 }
+
 /* Menu dtype row; DTYPE_MENU stores the table id in its high nibble. */
 #define EFFECT_ROW_MENU(key_, cat_, long_, short_, menu_, flags_, mod_, def_, max_) \
     { { key_, short_, long_, cat_, \

@@ -309,7 +309,8 @@ and applies the common rows (route, level, pan) itself.
 ### 4.2 Runtime state
 
 - `effects_runtime` is a union of every type's runtime struct in DTCM
-  (`.dtcmz`), 76 B (StereoFilter is the largest; CrumpBit is 56 B). The
+  (`.dtcmz`), 76 B (StereoFilter is the largest; CrumpBit is 76 B since S091
+  P2 and fills the union). The
   manager zeroes it and calls the type's `init()` when the type becomes
   active. It does not zero or re-`init` on a same-type Scene switch: the
   runtime, and with it any tail, keeps running.
@@ -339,31 +340,41 @@ and applies the common rows (route, level, pan) itself.
 
 ---
 
-### 4.4 CrumpBit (`cbt`, Session 074)
+### 4.4 CrumpBit (`cbt`, Session 074; expanded S091 P2)
 
 Files: `Core/DSP/Effects/CrumpBit/CrumpBitEffect.c/.h` (compiled `-Ofast`
-through an explicit Makefile rule). Page, rows and lanes are in
-`EFFECTS_BUS_REFERENCE.md` §4.2a and §8.6. Design record:
-`074_SESSION_HANDOFF_LOG.md` §7.
+through an explicit Makefile rule) and the generated `CrumpBitTables.c/.h`.
+Page, rows and lanes are in `EFFECTS_BUS_REFERENCE.md` §4.2a and §8.6.
+Design record: `074_SESSION_HANDOFF_LOG.md` §7; expansion:
+`S091_P2_CrumpBit_Expanded_Plan.md`.
 
 **What it is.** The stereo send is converted as a bipolar 8-bit audio ADC
 would. The eight data lines can each be forced off or inverted, and an 8-bit
 DAC decodes the result. AC coupling removes the DC the masks create. The two
-channels also feed a mono 8-bit tape-style delay kept in the arena, and a Mix
-control crossfades the bit-crushed signal with the delay.
+channels then feed a mono 8-bit tape-style delay kept in the arena; its
+feedback return is DC-blocked, tilted and soft-kneed, and the Mix control
+crossfades the bit-crushed signal with the raw delay read. Finally a stereo
+TPT state-variable filter (eight voice types) shapes the Effect output.
+Three stages, one row owner each (S091 P2 §4).
 
 ```
 per sample, both channels:
   code  = adc(x)                          x·128 + 128.5 truncated, then USAT to 0..255 (S091 R2; = the S074 clamp and 256 → 255 fold)
   code' = (code & keep) ^ invert          keep = ~(bit_off & ~bit_invert) & 0xFF   (invert wins)
   h     = (code' − code'[n−1])/128 + 0.9985755·h[n−1]   DAC + AC coupling, ~10 Hz one-pole high-pass (S091 R4: the code difference is exactly y − y[n−1])
-per sample, the tape loop (mono):
-  delay += (target − delay)·1.5113e-4     tape glide, τ 150 ms
+per sample, the delay sub-type (the tape loop, mono):
+  delay += (target − delay)·1.5113e-4     tape glide, τ 150 ms; target ≤ length − 2
   rp     = wp − delay (wrap by compare)   i0 = ⌊rp⌋, i1 = i0+1 (wrap), frac = rp − i0
   wet    = (loop[i0] + frac·(loop[i1] − loop[i0]))/128,   muted unless delay + 2 ≤ valid
-  loop[wp] = adc(½(hL + hR) + fb·wet) − 128   (int8; re-quantised every pass, masks not re-applied)
+  dc   = wet − wet[n−1] + 0.99928775·dc[n−1]        DC blocker, ~5 Hz (in the loop)
+  s   += k(ton)·(dc − s);  t = a·s + b·dc            tilt: LP (1,0), flat (0,1), HP (−1,1)
+  v    = clamp(fb·t, ±1.5);  ret = v − (4/27)·v³     soft knee, ±1 at ±1.5
+  loop[wp] = adc(½(hL + hR) + ret) − 128   (int8; re-quantised every pass, masks not re-applied)
   wp++ (wrap), valid++ (saturating at the loop length)
-  out    = h + mix·(g·wet − h)             per channel; g = balance-law delay pan
+  out  = h + mix·(g·wet − h)                         first echo unshaped
+per sample, the shared output filter (second pass, both channels):
+  TPT SVF: v1 = a1·ic1 + a2·v3, v2 = ic2 + a2·ic1 + a3·v3, ic1 = 2·v1 − ic1, ic2 = 2·v2 − ic2
+  out = cx·x + cb·bp + cl·lp                         one 3-coefficient mix, ramped per block
 ```
 
 - **Offset binary** (user decision): code 128 is silence, the transfer is
@@ -378,53 +389,103 @@ per sample, the tape loop (mono):
   - The AC coupling returns the output to 0 in tens of ms. It cannot hide
     the step when a high bit switches (τ ≈ 16 ms, a thump). Without it the
     DC would also build to `DC/(1 − fb)` in the loop and pin it at a rail.
-- **Rate and Sync (per block):**
-  - `free = 70,573·e^(−rate·ln80/127)` samples: 1.60 s at rate 0, 20 ms at
-    127, about 180 ms at 64 (`crumpBit_rateSamples()`).
-  - `synced` = the StepScale division nearest in log time, at `seq_getBpm()`
-    (96-PPQ ticks × 27,567.5 / BPM samples), among divisions ≤ 1.60 s. Since
-    S078 the walk covers all 128 curve positions (`stepScale_ticksQ8(i) /
-    256.0f` ticks, fractional) instead of the 14 old table entries; the UI
-    label uses `stepScale_formatShort()`. The
-    bracketing pair is chosen with the geometric-mean test
-    `target² < low·high`, so no logarithms (`crumpBit_divisionFor()`).
+- **Rate and Sync (per block; S091 P2):**
+  - `free = rateTable[rte]` = 882·143.635^(rte/127) samples: 20 ms at 0,
+    0.244 s at 64, 2.872 s at 127 (the whole arena less the guard).
+    Higher `rte` is a longer delay (the S074 curve ran the other way).
+    (`crumpBit_rateSamples()`.)
+  - the target is clamped to `length − 2`; `rte` is
+    `EFFECT_PARAM_FLAG_BUFFER_DEPENDENT`, so EffectsManager lowers the
+    resolved value through `crumpBit_ops.effective_max`
+    (`crumpBit_rateLimit()`) and the page clamps edits through
+    `effects_paramEffectiveMax()`. A stored value above the clamp is kept
+    and plays when the share grows; the page shows the clamped value.
+  - `synced` = the StepScale division nearest in log time, at
+    `seq_getBpm()` (96-PPQ ticks × 27,567.5 / BPM samples), among divisions
+    that fit the live share's longest delay. The walk covers all 128 curve
+    positions (`stepScale_ticksQ8(i) / 256.0f` ticks, fractional); the UI
+    label uses `stepScale_formatShort()`. The bracketing pair is chosen with
+    the geometric-mean test `target² < low·high`, so no logarithms
+    (`crumpBit_divisionFor()`). Its fixed search takes the live maximum as
+    a parameter and has an eighth probe, which completes the 0..128 count
+    the seven steps cannot reach.
   - Both are computed every block and `sync` selects one (constant cost), so
-    tempo changes glide the delay. The target is clamped to `length − 2`.
-- **Mix, feedback, pan:** `mix = row/127`; `fb = row·0.99/127` (always < 1);
-  delay pan `gL = p ≤ 63 ? 1 : (127 − p)/64`, `gR = p ≥ 63 ? 1 : p/63`. All
-  four ramp linearly across the block and are stored as the exact targets at
-  the end.
+    tempo changes glide the delay.
+- **Feedback, tone and knee (per block; S091 P2):**
+  - `fb = v/100` up to 100, then `1 + (v − 100)·0.2/27`, so 100 is exactly
+    unity and 127 is 1.2. `mix = row/127`;
+    delay pan `gL = p ≤ 63 ? 1 : (127 − p)/64`, `gR = p ≥ 63 ? 1 : p/63`.
+    All ramp linearly across the block; their origins are recomputed from
+    the previous raw rows.
+  - the in-loop DC blocker (`R 0.99928775`, ~5 Hz) is always on: above unity
+    any offset would otherwise grow to a rail.
+  - `ton` is one pole `s += k·(v − s)` with `k` from
+    `crumpBit_toneK[]`: 0..62 low-pass, 63 flat (a bit-exact pass-through,
+    weights `(0, 1)`), 64..127 high-pass. The tilt is applied inside the
+    loop, so repeat *n* is shaped *n* − 1 times and the first echo is heard
+    raw.
+  - the return is clamped to ±1.5 and then `y = v − (4/27)·v³`: the fixed
+    soft knee (§0A D7). It reaches ±1 with zero slope at the clamp, so the
+    return alone never clips the 8-bit ADC and the loop gain falls below
+    unity at high level (self-oscillation settles). The deferred `tdr`
+    drive will replace it with the voice Padé knee.
+- **Output filter (`typ frq res`; per block, S091 P2):**
+  - `g = crumpBit_filterG[frq]`, the voice cutoff law
+    (`fastTan(π·0.45·valueShaperF2F(frq/127, FILTER_SHAPER))`) from a
+    table; `R` is the voice law `1 − res/127` with the low-end snap
+    redirected to 0.0625 (Q ≤ 8, plan Q4); `a1 = 1/(1 + g(g + 2R))`,
+    `a2 = g·a1`, `a3 = g·a2` (one division per block).
+  - the output mix is `out = cx·x + cb·bp + cl·lp` with the voice forms
+    (LP `lp`, HP `x − 2R·bp − lp`, BP `bp`, UBP `2R·bp`, Nch
+    `x − 2R·bp`, Pek `lp − (x − 2R·bp − lp)`); `LP2` plays as LP and
+    `off` passes the input. Every type runs the same arithmetic.
+  - the four coefficients ramp linearly over one block from the previous
+    block's set, so a `typ` Morph step, a Pattern type lock or a `res`
+    step is a one-block crossfade, not a click.
 - **Arena use:** one byte per sample. The loop length is
-  `min(share bytes, 70,592)` (1.60 s plus a 2-sample guard, 32-byte
-  rounded). It is declared as `buffer_min_bytes = buffer_pref_bytes`, and it
-  fits the minimum share (73,600 B) so a Scene sounds identical whatever
-  voice units are claimed.
+  `min(share bytes, 126,688)`. On a share change the newest audio is kept
+  when `write_pos` still fits (the tail), otherwise the loop is re-seated;
+  either way the gliding delay is clamped to `length − 2`. A voice-unit
+  reservation therefore shortens the loop and bends the delay, and the Rate
+  is clamped to the same limit.
 - **"Clear unless you adopt" by masking:**
-  - `init` marks the loop unseated (`length = 0`) and unprimed;
+  - `init` marks the loop unseated (`length = 0`) and unprimed, and seeds
+    a flat tone and the filter `off` (with `off` as its ramp origin);
   - the first block seats it (`write_pos = 0`, `valid = 0`) and starts the
     delay on its target, with no glide;
   - reads further back than `valid` are muted;
-  - `buffer_changed` re-seats and zeroes `valid` if the length changed;
+  - `buffer_changed` keeps or re-seats the loop as above;
   - it never adopts a previous owner's content;
   - a same-type Scene switch keeps everything, so tails ring on.
-- **Runtime (56 B):** `length`, `write_pos`, `valid`, `delay`, the four ramp
-  values, the two previous data-line codes (`ac_c_*`, seeded 128 in `init`)
-  and the two AC outputs (`ac_y_*`), and the raw row bytes (`bit_off`, `bit_invert`,
-  `mix_raw`, `feedback_raw`, `rate`, `sync`, `pan_raw`) plus `primed`.
+- **Runtime (76 B):** `length`, `write_pos`, `valid`, `delay`, the DC
+  memories `dc_x`/`dc_y`, the tone pole `tone_s`, the two AC outputs
+  (`ac_y_*`), the four TPT states (`svf_*`), the two previous data-line
+  codes (`ac_c_*`, int16, seeded 128 in `init`), the raw row bytes
+  (`bit_off`, `bit_invert`, `mix_raw`, `feedback_raw`, `rate`,
+  `sync`, `pan_raw`, `tone_raw`, `filter_type`, `filter_freq`,
+  `filter_reso`), the three delay ramp origins (`mix_prev`,
+  `feedback_prev`, `pan_prev`), the two filter ramp origins
+  (`filter_type_prev`, `filter_reso_prev`) and `primed`.
   `write_param` only stores raw bytes; conversions happen once per block, so
   an LFO costs nothing extra.
 - **Constant CPU:** every stage runs every sample whatever the settings (the
-  delay at Mix 0, feedback at 0, the bit logic with all bits normal). There
-  is no per-sample division or transcendental; per block there is one `expf`,
-  a fixed 7-step binary search over the 128 StepScale positions (S091 R1;
-  was a 128-step walk) and one divide.
-- **Cost (S091, measured on the linked image):**
-  - the per-sample loop is 98 instructions per frame (111 before S091)
-    with no VDIV;
-  - per block: the 117-instruction search, one `expf` and two divides;
-  - in total, about 106 per frame in the worst case;
-  - flash: `crumpBit_process` 996 B, `crumpBit_divisionFor` 404 B,
-    `crumpBit_syncDivision` 100 B.
+  delay at Mix 0, feedback at 0, the bit logic with all bits normal, the
+  filter with every type including `off`). There is no per-sample
+  division or transcendental; per block there is one divide for `a1`, the
+  Sync search, the Rate limit and table lookups. The filter is a second pass
+  over the block so the stage-2 loop's register pressure stays bounded.
+- **Cost (S091 P2, measured on the linked image):**
+  - the stage-2 per-sample loop is 126 instructions per frame (112–124 on
+    its shorter paths; 98 before S091 P2) with no VDIV;
+  - the output-filter loop is 31 instructions per frame;
+  - per block: the 113-instruction Sync search, the 101-instruction Rate
+    limit (through `effective_max` in `effects_service()`) and three
+    divides, about 15–19 per frame;
+  - in total, about 172–176 per frame in the worst case, below the
+    pre-S091 ≈ 191;
+  - flash: `crumpBit_process` 1,924 B, `crumpBit_divisionFor` 380 B,
+    `crumpBit_rateLimit` 312 B, the tables 1,664 B.
+
 
 ## 5. The shared DTCM arena for buffer-using Effects
 
@@ -450,7 +511,7 @@ none.
   |---|---:|---:|---:|---:|
   | Whole arena, 126,592 B | 1.44 s | 0.72 s | 2.87 s | 1.44 s |
   | Minimum, 73,600 B | 0.83 s | 0.42 s | 1.67 s | 0.83 s |
-  | CrumpBit's loop, 70,592 B | — | — | 1.60 s (+ guard) | — |
+  | CrumpBit's loop, the share up to 126,688 B | — | — | 2.872 s (whole arena) … 1.671 s (12 units) | — |
 
   (Seconds at 44,108 Hz, before any other use of the share.)
 
@@ -702,7 +763,7 @@ Effect.
 
 | Stage | Cost | Notes |
 |---|---|---|
-| CrumpBit `process` | 98 per frame (both channels + loop, measured S091) + per block a 117-instruction search, one `expf`, two divides ≈ 106 per frame | constant whatever the settings |
+| CrumpBit `process` | 126 per frame (stage 2) + 31 (output filter) + per block a 113-instruction search, a 101-instruction Rate limit and three divides ≈ 172–176 per frame (measured S091 P2) | constant whatever the settings |
 | Master bus compressor (on) | 71 instructions per stereo frame (was 34 before the band split) + about 350–450 cycles per block; ≈ 1.4–1.8 % of the CPU | 0 while `cmp` is off; `cpu` widget reading still to be taken |
 | `xfd` fader mode | one division per `xfd` slot per block | otherwise the same as `fx` |
 | Mixer `off` branch | two stores per block | the return ramp reset |

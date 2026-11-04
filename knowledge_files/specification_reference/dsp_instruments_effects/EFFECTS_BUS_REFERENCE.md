@@ -65,8 +65,9 @@ differences from the plan.
   - LFO (`fx` namespace, value 8);
   - `fxm` (Scene target 404) for Effect Morph.
 - **Shared DTCM arena.** The rest of DTCM after statics is shared between the
-  Effect (bottom) and future buffer voices (top). `cbt` uses 70,592 B of it
-  for its delay loop; `flt` uses none.
+  Effect (bottom) and future buffer voices (top). Since S091 P2 `cbt` uses
+  the whole share up to 126,688 B for its delay loop (elastic; the Rate is
+  clamped to what the share holds); `flt` uses none.
 - **Not part of the Effect system:** the master bus compressor (`cmp`, S074)
   is a Scene setting that processes an output pair after the Effect return.
   It has no registry row, send or lanes (`EFFECTS_MIXER_DSP_REFERENCE.md`
@@ -211,12 +212,12 @@ future, tokens never change meaning.
 |---:|---|---|---:|---|---|---:|---:|
 | 0 | `off` / `Off␣␣` / `Off` | none | 3 | — | default / none | 0 | 0 |
 | 1 | `flt` / `StFlt` / `StFilter` | stereo in, stereo out | 7 | freq, reso, drive, type, vol, pan | default / none | 76 B (two filter states) | 0 |
-| 2 | `cbt` / `CrmBt` / `CrumpBit` | stereo in, stereo out | 11 | bof, biv, mix, fbk, rte, snc, vol, pan, dpn | custom layout; `select`, `render_leds`, `paint_row0`, `format_value3`, flag `OWNS_SELECT_LEDS` | 56 B | 70,592 B |
+| 2 | `cbt` / `CrmBt` / `CrumpBit` | stereo in, stereo out | 15 | bof, biv, mix, fbk, rte, snc, vol, pan, dpn, ton, typ, frq, res | custom layout; `select`, `render_leds`, `paint_row0`, `format_value3`, flag `OWNS_SELECT_LEDS` | 76 B | elastic: min 73,696 B (12 units), pref 126,688 B |
 
 `effects_runtime_t` is a union of every runtime struct and is **76 B**
 (StereoFilter is the largest). `_Static_assert`s check each member against
-the union and pin CrumpBit at 56 B, so only 20 B remain for a larger future
-runtime before the union (and the arena beneath it) changes. The CrumpBit
+the union and pin CrumpBit at 76 B: it fills the union, so any larger
+runtime grows `.dtcmz` (RAM approval). The CrumpBit
 rows, DSP and page are in §8.6 and `EFFECTS_MIXER_DSP_REFERENCE.md` §4.4.
 
 ### 4.3 Operations (`effect_type_ops_t`)
@@ -611,14 +612,15 @@ underline reports stored data, not what is audible.
 | SELECT | Screen | Row 0 | Cells (row 1) |
 |---|---|---|---|
 | 1 | 0, 1 | `typ out vol pan`, `run len scl mrp` | manager (unchanged) |
-| 2 | 0 = **overlay** (home) | bit states `- - - - - - - ->` | `mix fbk rte mrp` |
-| 2 | 1 | `mix fbk rte sub` | the same rows, then the sub-type (`dly`) |
-| 2 | 2 | `snc dpn` | two empty cells |
+| 2 | 0 = **overlay** (home) | bit states `- - - - - - - ->` | `ton fbk rte mrp` |
+| 2 | 1 | `ton fbk rte sub` | the same rows, then the sub-type (`dly`) |
+| 2 | 2 | `snc dpn mix typ` | `mix` after `dpn`, then the filter type |
+| 2 | 3 | `frq res` | two empty cells, reserved for the drive rows |
 | 3..8 | — | (no screens) | SELECT 1..8 are bit buttons on this type |
 
-- **Layout:** `screen_count = {0, 3, 0, …}`, `custom_row0[1] = 0x01`, home
+- **Layout:** `screen_count = {0, 4, 0, …}`, `custom_row0[1] = 0x01`, home
   SELECT 2 screen 0. The encoder walks SELECT 1 s0 → s1 → overlay → page 2 →
-  page 3. `mrp` on the overlay is the Scene Effect Morph amount (0..255),
+  page 3 → page 4. `mrp` on the overlay is the Scene Effect Morph amount (0..255),
   resolved from `EFFECT_LAYOUT_CELL_MORPH`.
 - **Overlay row 0:** column 2*n* shows bit *n* (LSB left): `-` normal, `0`
   forced off, `!` inverted; odd columns are spaces; column 15 is the scroll
@@ -641,8 +643,10 @@ underline reports stored data, not what is audible.
 - **Value labels (`format_value3`):** `sub` shows `dly`. With the shown
   Sync on, `rte` shows the snapped division label (`/16`, `16t`, `1br` …),
   computed by `crumpBit_syncDivision()` with the same rule the DSP uses at
-  the current `seq_getBpm()`. The raw 0..127 stays underneath everywhere
-  else.
+  the current `seq_getBpm()`. The shown Rate (number or division) is
+  clamped to `crumpBit_rateLimit()` of the live share; page edits stop
+  there (`effects_paramEffectiveMax()`). The raw 0..127 stays underneath
+  everywhere else.
 - **Masks are not Pattern-automatable or LFO-modulatable** (7-bit Pattern
   values cannot reach bit 7; interpolated masks are meaningless). They are
   sequenced through FX lanes 1–2, which hold full 8-bit values.
@@ -652,7 +656,8 @@ underline reports stored data, not what is audible.
   and mono constant-power laws are unchanged. Effects saved at 64 display 1.
 
 CrumpBit's F2 defaults are mix 0, feedback 64, rate 64, delay pan 63
-(display 0), with the sync row labelled `snc`.
+(display 0), with the sync row labelled `snc`. S091 P2 defaults: tone 63
+(flat, shows 0), filter type `off`, frq 64, res 0.
 
 ---
 
@@ -1024,9 +1029,9 @@ all registry-driven.
 - **Measure flash.** Run `link_budget.py` after every addition. Since
   Session 073 the application window is 736 KiB (250,736 B free at the S074
   close; `STORAGE_SRAM_MANIFEST.md` §3).
-- **The runtime union has 20 B spare** (76 B, CrumpBit 56 B). Anything larger
-  grows the union and shrinks the arena by the same amount: RAM approval
-  first. Audio state belongs in the arena share.
+- **The runtime union has no spare** (76 B; CrumpBit 76 B since S091 P2
+  fills it). Anything larger grows the union and shrinks the arena by the
+  same amount: RAM approval first. Audio state belongs in the arena share.
 - **SELECT LEDs:** route every Effect-page SELECT LED write through
   `menuEffects_renderSelectLeds()`, or a type that owns them loses its
   display.

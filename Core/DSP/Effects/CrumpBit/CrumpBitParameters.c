@@ -19,6 +19,7 @@
 #include "StepScale.h"
 #include "sequencer.h"
 #include <string.h>
+#include "FxBuffer.h"   /* fxbuf_effectShare(): the Rate label clamp (S091 P2) */
 
 /* Persisted token (permanent), UI abbreviation (5) and full name (<= 8). */
 const char crumpBit_token3[] = "cbt";
@@ -28,7 +29,7 @@ const char crumpBit_full8[] = "CrumpBit";
 /*
  * CrumpBit descriptor table (S074_CRUMPBIT_EFFECT.md §4).
  *
- * What: rows 0..2 are the shared common rows; rows 3..10 are CrumpBit's.
+ * What: rows 0..2 are the shared common rows; rows 3..14 are CrumpBit's.
  * - bit off / bit invert (3, 4): 8-bit masks, one bit per ADC data line
  *   (bit 0 = LSB). Not Morphable (interpolating a mask gives unrelated
  *   bits), not modulatable, not Pattern-automatable (a Pattern value is
@@ -37,15 +38,29 @@ const char crumpBit_full8[] = "CrumpBit";
  *   in Stage 1 they show as plain 0..255 numbers.
  * - mix, feedback, rate, delay pan (5, 6, 7, 10): Morphable, LFO and
  *   Pattern automation, like voice rows.
+ * - rate (7) is BUFFER_DEPENDENT (S091 P2): a higher value is a longer
+ *   delay, up to the whole arena, and EffectsManager clamps the resolved
+ *   value to the live share through crumpBit_ops.effective_max; the page
+ *   clamps edits the same way (effects_paramEffectiveMax()).
  * - sub-type (8): only `dly` (max 0); its label comes from the format hook,
  *   because every DTYPE_MENU table id (4 bits) is already in use.
  * - sync (9): on/off; Pattern-automatable and sequenceable.
+ * - tone (11, S091 P2, delay sub-type): bipolar tilt on the feedback return,
+ *   DTYPE_PM63 so stored 63 is flat and shows 0; below 63 cuts highs, above
+ *   63 cuts lows. Morphable, LFO and Pattern, like `dpn`.
+ * - filter type / freq / reso (12..14, S091 P2, shared output stage): the
+ *   voice-filter rows by name, label and value law (user U1): `typ` is the
+ *   MENU_FILTER list (LP HP BP UBP Nch Pek LP2 off), Morphable and
+ *   Pattern-automatable but not LFO-modulatable, exactly like StereoFilter's
+ *   `typ` (user U2); `frq` and `res` are full image rows. Defaults match
+ *   StereoFilter (frq 64, res 0) except `typ`, which starts `off` so a
+ *   Scene's output is unfiltered until a type is chosen.
  * - Defaults (S075 F2-E, user): mix 0, feedback 64, rate 64, delay pan 63
  *   (the absolute centre, shows 0). The sync row's 3-letter label is `snc`;
  *   its file key remains `crump_sync`.
  * Why: the registry makes storage, AutoSave, the Effect page, lanes,
  * automation and LFO work without type-specific code elsewhere. Inputs:
- * none (const). Output: 11 rows. Accessors: EffectsManager (resolution,
+ * none (const). Output: 15 rows. Accessors: EffectsManager (resolution,
  * clamps, capabilities), menuEffects/menu.c (labels, dtypes), `.fx` and
  * AutoSave (file keys). Affiliates: EffectParamRows.h, CrumpBitEffect.c
  * write_param().
@@ -62,14 +77,31 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     EFFECT_ROW("crump_feedback", "Delay", "Feedback", "fbk", DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
-    EFFECT_ROW("crump_rate", "Delay", "Rate", "rte", DTYPE_0B127,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
+    /*
+     * S091 P2: EFFECT_ROW_FLAGS adds EFFECT_PARAM_FLAG_BUFFER_DEPENDENT, so
+     * the resolved Rate is clamped to the longest delay the live share holds.
+     */
+    EFFECT_ROW_FLAGS("crump_rate", "Delay", "Rate", "rte", DTYPE_0B127,
+                     EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u,
+                     EFFECT_PARAM_FLAG_BUFFER_DEPENDENT),
     EFFECT_ROW("crump_subtype", "CrumpBit", "SubType", "sub", DTYPE_0B127,
                0u, EFFECT_MOD_NONE, CRUMPBIT_SUBTYPE_DELAY, 0u),
     EFFECT_ROW("crump_sync", "Delay", "Sync", "snc", DTYPE_ON_OFF,
                INSTRUMENT_PARAM_FLAG_AUTOMATABLE, EFFECT_MOD_NONE, 0u, 1u),
     EFFECT_ROW("crump_dly_pan", "Delay", "DlyPan", "dpn", DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
+    /* S091 P2, delay sub-type: tone tilt on the feedback return. */
+    EFFECT_ROW("crump_tone", "Delay", "Tone", "ton", DTYPE_PM63,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, CRUMPBIT_TONE_FLAT, 127u),
+    /* S091 P2, output stage: voice-aligned filter rows (U1, U2). */
+    EFFECT_ROW_MENU("crump_filter_type", "Filter", "Type", "typ", MENU_FILTER,
+                    INSTRUMENT_PARAM_FLAG_MORPHABLE |
+                    INSTRUMENT_PARAM_FLAG_AUTOMATABLE,
+                    EFFECT_MOD_NONE, CRUMPBIT_FILTER_OFF, CRUMPBIT_FILTER_OFF),
+    EFFECT_ROW("crump_filter_freq", "Filter", "Frequncy", "frq", DTYPE_0B127,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
+    EFFECT_ROW("crump_filter_reso", "Filter", "Resnance", "res", DTYPE_0B127,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
 };
 
 _Static_assert(sizeof(crumpBit_descriptors) /
@@ -77,6 +109,19 @@ _Static_assert(sizeof(crumpBit_descriptors) /
                "CRUMPBIT_PARAM_COUNT must match the descriptor table");
 _Static_assert(CRUMPBIT_PARAM_ENUM_COUNT == CRUMPBIT_PARAM_COUNT,
                "crumpbit_param_t must match the descriptor table");
+
+/*
+ * Row-ownership guards (S091 P2 §4). The stage masks in
+ * CrumpBitParameters.h must not overlap, and together they must name every
+ * type row 3..COUNT-1 and nothing else, so appending a row without deciding
+ * its owner (shared or a sub-type) stops the build.
+ */
+_Static_assert((CRUMPBIT_ROWS_SHARED & CRUMPBIT_ROWS_DELAY) == 0u,
+               "a CrumpBit row cannot belong to two stages");
+_Static_assert((CRUMPBIT_ROWS_SHARED | CRUMPBIT_ROWS_DELAY) ==
+               (CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_COUNT) -
+                CRUMPBIT_ROW_BIT(EFFECT_COMMON_PARAM_COUNT)),
+               "every CrumpBit type row needs exactly one owner");
 
 /* Three states per data line, shown as `-`, `0` and `!`. */
 #define CRUMPBIT_BIT_NORMAL 0u
@@ -204,16 +249,28 @@ static void crumpBit_uiPaintRow0(uint8_t sub_page, uint8_t screen,
 }
 
 /*
- * Format hook: CrumpBit value text on the Effect page (Q7).
+ * Format hook: CrumpBit value text on the Effect page (Q7; S091 P2).
  *
- * What: `sub` shows `dly`; `rte` shows the snapped step division when the
- * shown Sync is on. crumpBit_syncDivision() applies the same rule the DSP
- * uses, at the current tempo. Everything else returns 0 for generic dtype
- * formatting. Why: the raw 0..127 Rate stays underneath (pots, storage,
- * automation, locks, LFO), and only the Effect page shows the division.
+ * What: `sub` shows `dly`. `rte` shows what the DSP plays (plan N1):
+ * - the value is first clamped to the longest Rate the live share holds
+ *   (crumpBit_rateLimit(), the same clamp EffectsManager applies before the
+ *   DSP sees the row), so a stored value above the clamp reads as the
+ *   clamped one;
+ * - with the shown Sync on, the label is the snapped step division at the
+ *   current tempo, searched among the divisions that fit the same share
+ *   (crumpBit_syncDivision() with crumpBit_shareMaxSamples()), the rule the
+ *   DSP uses;
+ * - with Sync off and no clamp the hook returns 0 and the generic number is
+ *   shown; with Sync off and a clamp it writes the clamped number.
+ * Everything else returns 0 for generic dtype formatting.
+ * Why: the raw 0..127 Rate stays underneath (pots, storage, automation,
+ * locks, LFO); a voice-unit reservation must not change a stored Scene, only
+ * what is played and shown.
  * Inputs: row index, value being shown, and a 3-character output. Output:
- * nonzero when out[0..2] was written. Affiliates: stepScale_shortName(),
- * seq_getBpm(), menuEffects_shownParam().
+ * nonzero when out[0..2] was written. Runs in foreground; the share read is
+ * a struct copy (no arena access).
+ * Affiliates: stepScale_formatShort(), seq_getBpm(), menuEffects_shownParam(),
+ * fxbuf_effectShare(), crumpBit_rateLimit(), numtostrpu().
  */
 static uint8_t crumpBit_uiFormatValue3(uint8_t index, uint8_t value,
                                        char *out)
@@ -222,37 +279,60 @@ static uint8_t crumpBit_uiFormatValue3(uint8_t index, uint8_t value,
         memcpy(out, (value == CRUMPBIT_SUBTYPE_DELAY) ? "dly" : "---", 3u);
         return 1u;
     }
-    if (index == CRUMPBIT_PARAM_RATE &&
-        menuEffects_shownParam(CRUMPBIT_PARAM_SYNC) != 0u) {
-        /* S078: nudge stops show their symbol, other CCs show the raw value. */
-        stepScale_formatShort(crumpBit_syncDivision(value, seq_getBpm()), out);
-        return 1u;
+    if (index == CRUMPBIT_PARAM_RATE) {
+        fx_share_t share;
+        /* limit: the largest `rte` whose delay fits this share. */
+        uint8_t limit;
+        /* shown: the Rate the DSP will play, never above the clamp. */
+        uint8_t shown;
+
+        fxbuf_effectShare(&share);
+        limit = crumpBit_rateLimit(&share);
+        shown = (value > limit) ? limit : value;
+        if (menuEffects_shownParam(CRUMPBIT_PARAM_SYNC) != 0u) {
+            /* S078: nudge stops show their symbol, other CCs the raw value. */
+            stepScale_formatShort(
+                crumpBit_syncDivision(shown, seq_getBpm(),
+                                      crumpBit_shareMaxSamples(&share)),
+                out);
+            return 1u;
+        }
+        if (shown != value) {
+            numtostrpu(out, shown, ' ');
+            return 1u;
+        }
     }
     return 0u;
 }
 
 /*
- * CrumpBit Effect-page layout (S074_CRUMPBIT_EFFECT.md §5.1).
+ * CrumpBit Effect-page layout (S074_CRUMPBIT_EFFECT.md §5.1; S091 P2 §3).
  *
- * What: SELECT 1 stays manager-owned. SELECT 2 holds three screens: home
- * overlay (mix/fbk/rte/mrp), page 2 (mix/fbk/rte/sub), and page 3 (snc/dpn).
- * Every other SELECT has zero screens because its buttons are bit toggles.
- * The encoder walks SELECT 1 s0 -> s1 -> overlay -> page 2 -> page 3.
- * The page-3 short labels are `snc` and `dpn` (S075 F2-E).
+ * What: SELECT 1 stays manager-owned. SELECT 2 holds four screens (the
+ * layout maximum):
+ *   s0 home overlay (bit row on top): ton fbk rte mrp
+ *   s1 standard page:                 ton fbk rte sub
+ *   s2:                               snc dpn mix typ
+ *   s3:                               frq res  -   -
+ * `ton` takes `mix`'s place on s0 and s1, and `mix` follows `dpn`, then the
+ * filter type, cutoff and resonance (user U4). The two empty s3 cells are
+ * kept for the deferred drive rows (`drv`, `tdr`). Every other SELECT has
+ * zero screens because its buttons are bit toggles. The encoder walks
+ * SELECT 1 s0 -> s1 -> overlay -> page 2 -> page 3 -> page 4.
  * Inputs: none (const). Output: registry layout consumed by menuEffects.
  * Affiliates: EFFECT_LAYOUT_CELL_MORPH, crumpBit_uiPaintRow0().
  */
 const effect_select_layout_t crumpBit_layout = {
-    .screen_count = { 0u, 3u, 0u, 0u, 0u, 0u, 0u, 0u },
+    .screen_count = { 0u, 4u, 0u, 0u, 0u, 0u, 0u, 0u },
     .cells = {
         [1] = {
-            { CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_FEEDBACK,
+            { CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FEEDBACK,
               CRUMPBIT_PARAM_RATE, EFFECT_LAYOUT_CELL_MORPH },
-            { CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_FEEDBACK,
+            { CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FEEDBACK,
               CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SUBTYPE },
             { CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_DLY_PAN,
-              EFFECT_LANE_NONE, EFFECT_LANE_NONE },
-            { EFFECT_LANE_NONE, EFFECT_LANE_NONE,
+              CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_FILTER_TYPE },
+            { CRUMPBIT_PARAM_FILTER_FREQ, CRUMPBIT_PARAM_FILTER_RESO,
               EFFECT_LANE_NONE, EFFECT_LANE_NONE },
         },
     },
@@ -266,7 +346,7 @@ const effect_select_layout_t crumpBit_layout = {
  *
  * What: SELECT toggles bits and returns EFFECT_UI_SHOW_HOME, render_leds owns
  * the SELECT row, paint_row0 draws the overlay row, and format_value3 labels
- * `sub` and Sync. TRACK and BAR keep the default page behaviour (NULL).
+ * `sub` and the (share-clamped, Sync-aware) Rate. TRACK and BAR keep the default page behaviour (NULL).
  * Why: the registry-driven hook contract keeps type UI out of menu.c.
  * Accessors: the registry row and menuEffects hook dispatchers. Affiliates:
  * buttonHandler FX SELECT paths.

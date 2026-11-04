@@ -15,104 +15,178 @@
 #include "EffectsManager.h"
 
 /*
- * CrumpBit loop geometry (S074_CRUMPBIT_EFFECT.md §3.4).
+ * CrumpBit loop geometry (S074_CRUMPBIT_EFFECT.md §3.4; elastic since S091
+ * P2 §5.1).
  *
- * CRUMPBIT_DELAY_MAX_SAMPLES: the longest delay, 1.60 s at 44,108 Hz. Rate 0
- * and every Sync division are clamped to it. It is fixed (not
- * share-dependent) so a Scene sounds the same whatever voice units future
- * instruments claim.
- * CRUMPBIT_BUFFER_BYTES: the loop length actually used, 1.60 s plus a
- * 2-sample interpolation guard, rounded up to 32 B. One byte per 8-bit mono
- * sample. It must stay <= the minimum Effect share (73,632 B with all twelve
- * voice units claimed). It is declared as buffer_min_bytes and
- * buffer_pref_bytes in the registry row.
+ * CRUMPBIT_DELAY_CURVE_MAX: the top of the Rate curve, 126,686 samples
+ * (2.872 s at 44,108 Hz) = crumpBit_rateTable[127]. It is the whole arena
+ * less the 2-sample interpolation guard, and it is a constant on purpose: a
+ * future small DTCM change moves the arena, not the meaning of a saved `rte`.
+ * CRUMPBIT_LOOP_MAX_BYTES: the longest loop CrumpBit seats, the curve top plus
+ * the guard (126,688 B, a multiple of 32, the arena size at S091). One byte
+ * per 8-bit mono sample. A larger share is not used beyond it; a smaller share
+ * (voice units claimed from the top) shortens the loop, and the Rate row and
+ * the DSP target are clamped to what it holds (the loop is elastic).
+ * CRUMPBIT_LOOP_MIN_SHARE_BYTES: the share left at this arena size with all
+ * twelve voice units claimed (73,696 B, 1.671 s): declared as
+ * buffer_min_bytes. CrumpBit still works below it (down to CRUMPBIT_LOOP_MIN
+ * samples); the field is declarative.
  * Accessors: CrumpBitEffect.c, EffectsManager.c (registry row).
+ * Affiliates: FxBuffer.h FXBUF_VOICE_UNIT_*, tools/plots/gen_crumpbit_tables.py
+ * (RATE_MAX), tools/diagnostic_tools/link_budget.py (FXBUF size).
  */
-#define CRUMPBIT_DELAY_MAX_SAMPLES   70573.0f
-#define CRUMPBIT_BUFFER_BYTES        70592u
+#define CRUMPBIT_DELAY_CURVE_MAX       126686.0f
+#define CRUMPBIT_LOOP_MAX_BYTES        126688u
+#define CRUMPBIT_LOOP_MIN_SHARE_BYTES                                   \
+    (CRUMPBIT_LOOP_MAX_BYTES -                                          \
+     FXBUF_VOICE_UNIT_COUNT * FXBUF_VOICE_UNIT_BYTES)
 
 /*
- * CrumpBit runtime (56 B, a member of EffectsManager's DTCM runtime union).
+ * CrumpBit runtime (76 B since S091 P2, a member of EffectsManager's DTCM
+ * runtime union; it fills the union exactly, so the union does not grow).
  *
  * What: the per-sample DSP state and the last resolved row values. Audio (the
- * 8-bit loop) lives in the FxBuffer Effect share, never here.
+ * 8-bit loop) lives in the FxBuffer Effect share, never here. Fields are
+ * ordered by size (no padding inside); the comment of each says its stage
+ * owner (S091 P2 §4: shared, delay sub-type, output).
+ * Delay sub-type:
  * - length: the loop length in samples/bytes (0 = not seated yet);
  * - write_pos: the next loop index to write (0..length-1);
  * - valid: samples written since the loop was last treated as empty,
  *   saturating at length. Reads further back than this are muted, which
  *   gives "clear unless you adopt" without a bulk clear;
  * - delay: the current delay in samples, gliding towards the per-block
- *   target (tape style);
- * - mix, feedback, gain_l, gain_r: block-ramp values (end of the previous
- *   block);
- * - ac_c_*: the previous data-line code per channel, 0..255 (S091 R4; it
- *   replaced the float input memory ac_x_*). crumpBit_init() seeds 128,
- *   silence; the zeroed union value 0 would be a full-scale step;
- * - ac_y_*: the AC-coupling (one-pole high-pass) output memory per channel;
- * - bit_off .. pan_raw: the last row values from write_param();
+ *   target (tape style); never above length - 2 (crumpBit_seat());
+ * - dc_x, dc_y: the in-loop DC blocker's previous input and output (S091
+ *   P2; mandatory once feedback can exceed unity);
+ * - tone_s: the one-pole state of the `ton` tilt on the feedback return;
+ * - mix_raw .. tone_raw: the delay rows from write_param();
+ * - mix_prev, feedback_prev, pan_prev: the raw rows the previous block
+ *   ramped to. S091 P2 recomputes each ramp origin from them instead of
+ *   storing four floats (-16 B; the origin is a pure function of the raw
+ *   row, so the result is the same);
  * - primed: 0 until the first block sets delay directly to its target (no
  *   glide on entry).
+ * Shared stages:
+ * - ac_y_*: the AC-coupling (one-pole high-pass) output memory per channel;
+ * - ac_c_*: the previous data-line code per channel, 0..255 (S091 R4; it
+ *   replaced the float input memory ac_x_*). int16_t since S091 P2 (-4 B;
+ *   loaded and stored once per block). crumpBit_init() seeds 128, silence;
+ *   the zeroed union value 0 would be a full-scale step;
+ * - bit_off, bit_invert: the data-line masks;
+ * - svf_*: the output filter's two TPT integrator states per channel;
+ * - filter_type, filter_freq, filter_reso: the output rows;
+ * - filter_type_prev, filter_reso_prev: the rows the previous block's output
+ *   mix ramped to (the origin of this block's coefficient ramp).
  * Why here: EffectsManager zeroes the union and calls init() when the type
- * becomes active; the union is 76 B (StereoFilter), so 56 B needs no RAM.
+ * becomes active; the union is 76 B (StereoFilter), so CrumpBit needs no
+ * RAM of its own.
  * Accessors: CrumpBitEffect.c only; no other module may keep a pointer.
  * Affiliates: effects_runtime_t, M4 (size guard),
- * EFFECTS_MIXER_DSP_REFERENCE.md §4.2.
+ * EFFECTS_MIXER_DSP_REFERENCE.md §4.2, STORAGE_SRAM_MANIFEST.md.
  */
 typedef struct {
-    uint32_t length;
-    uint32_t write_pos;
-    uint32_t valid;
-    float delay;
-    float mix;
-    float feedback;
-    float gain_l;
-    float gain_r;
-    int32_t ac_c_l;
-    int32_t ac_c_r;
-    float ac_y_l;
-    float ac_y_r;
-    uint8_t bit_off;
-    uint8_t bit_invert;
-    uint8_t mix_raw;
-    uint8_t feedback_raw;
-    uint8_t rate;
-    uint8_t sync;
-    uint8_t pan_raw;
-    uint8_t primed;
+    uint32_t length;           /* delay */
+    uint32_t write_pos;        /* delay */
+    uint32_t valid;            /* delay */
+    float delay;               /* delay */
+    float dc_x;                /* delay: DC blocker input memory */
+    float dc_y;                /* delay: DC blocker output memory */
+    float tone_s;              /* delay: tone tilt pole state */
+    float ac_y_l;              /* shared: AC coupling */
+    float ac_y_r;              /* shared: AC coupling */
+    float svf_l1;              /* output: TPT band integrator, left */
+    float svf_l2;              /* output: TPT low integrator, left */
+    float svf_r1;              /* output: TPT band integrator, right */
+    float svf_r2;              /* output: TPT low integrator, right */
+    int16_t ac_c_l;            /* shared: previous code, left */
+    int16_t ac_c_r;            /* shared: previous code, right */
+    uint8_t bit_off;           /* shared */
+    uint8_t bit_invert;        /* shared */
+    uint8_t mix_raw;           /* delay */
+    uint8_t feedback_raw;      /* delay */
+    uint8_t rate;              /* delay */
+    uint8_t sync;              /* delay */
+    uint8_t pan_raw;           /* delay */
+    uint8_t tone_raw;          /* delay */
+    uint8_t filter_type;       /* output */
+    uint8_t filter_freq;       /* output */
+    uint8_t filter_reso;       /* output */
+    uint8_t mix_prev;          /* delay: ramp origin */
+    uint8_t feedback_prev;     /* delay: ramp origin */
+    uint8_t pan_prev;          /* delay: ramp origin */
+    uint8_t filter_type_prev;  /* output: ramp origin */
+    uint8_t filter_reso_prev;  /* output: ramp origin */
+    uint8_t primed;            /* delay */
 } CrumpBitRuntime;
 
 /* DSP operations for the registry row (init, export, write, process, share). */
 extern const effect_type_ops_t crumpBit_ops;
 
 /*
- * Free-running delay for one Rate value.
+ * Free-running delay for one Rate value (reversed and extended in S091 P2).
  *
- * What: t = 1.60 s * 80^(-rate/127) in samples: rate 0 = 1.60 s (70,573),
- * rate 127 = 20 ms (882), about 20 steps per octave of time. Higher rate
- * means faster tape and a shorter delay (Q5). Why shared: the DSP and the
- * Effect-page Sync label must use one curve. Input: rate 0..127 (larger
- * values are treated as 127). Output: delay in samples.
+ * What: crumpBit_rateTable[rate], t = 20 ms * (2.872 s / 20 ms)^(rate/127)
+ * in samples: rate 0 = 882 (20 ms), rate 127 = 126,686 (2.872 s), about 18
+ * steps per octave of time. Higher rate now means a LONGER delay (plan Q2):
+ * a shrinking share then removes the top of the range, which the top-down
+ * effective_max clamp can express (plan N1). The value is not clamped to a
+ * share here. Why shared: the DSP, the share clamp and the Effect-page Sync
+ * label must use one curve. Input: rate 0..127 (larger values are treated as
+ * 127). Output: delay in samples.
  * Accessors: crumpBit_syncDivision(), CrumpBitEffect.c per-block target.
- * Affiliates: CRUMPBIT_DELAY_MAX_SAMPLES.
+ * Affiliates: crumpBit_rateTable, CRUMPBIT_DELAY_CURVE_MAX, crumpBit_rateLimit().
  */
 float crumpBit_rateSamples(uint8_t rate);
 
 /*
- * Step-scale division that Sync snaps a Rate to (Q7).
+ * Longest delay a share holds (S091 P2).
+ *
+ * What: min(share bytes, CRUMPBIT_LOOP_MAX_BYTES) - 2 samples (the
+ * interpolation guard), as a float; 0 when there is no share or it is
+ * smaller than the smallest usable loop. It is exactly the clamp
+ * crumpBit_process() applies to its target for the same share.
+ * Input: share (may be NULL). Output: samples.
+ * Accessors: crumpBit_rateLimit(), crumpBit_uiFormatValue3() (Sync label),
+ * crumpBit_process() (target clamp).
+ */
+float crumpBit_shareMaxSamples(const fx_share_t *share);
+
+/*
+ * Largest Rate whose free-running delay fits a share (S091 P2).
+ *
+ * What: the highest rate r with crumpBit_rateTable[r] <= the share's longest
+ * delay, by a fixed 7-step binary search of the ascending table (the same
+ * shape as the Sync search, constant cost); 0 if even the shortest delay does
+ * not fit. With the whole arena it is 127. Why: the manager clamps the
+ * resolved `rte` to it before write_param() (effective_max), the page clamps
+ * edits to it, and the label shows the clamped value, so a voice-unit
+ * reservation never plays or shows a delay the loop cannot hold.
+ * Input: share (may be NULL). Output: 0..127.
+ * Accessors: crumpBit_ops.effective_max, crumpBit_uiFormatValue3().
+ * Affiliates: crumpBit_shareMaxSamples(), crumpBit_rateTable.
+ */
+uint8_t crumpBit_rateLimit(const fx_share_t *share);
+
+/*
+ * Step-scale division that Sync snaps a Rate to (Q7; live maximum S091 P2).
  *
  * What: among the shared StepScale CC positions (0..127, 96 PPQ ticks) whose
- * length at the given tempo fits CRUMPBIT_DELAY_MAX_SAMPLES, returns the CC
- * nearest in log time to crumpBit_rateSamples(rate). It uses the bracketing
- * pair and the geometric-mean rule: no logarithms, and a fixed 7-step binary
- * search over the 128 ascending positions (S091 R1; it replaced a 128-step
- * walk and returns the same division). If no division fits (below about
- * 4 BPM) it returns 0, and the DSP clamps that length to the maximum.
+ * length at the given tempo fits max_samples, returns the CC nearest in log
+ * time to crumpBit_rateSamples(rate). It uses the bracketing pair and the
+ * geometric-mean rule: no logarithms, and a fixed 7-step binary search over
+ * the 128 ascending positions (S091 R1). If no division fits it returns 0,
+ * and the DSP clamps that length to the maximum. Since S091 P2 the limit is
+ * the live share (crumpBit_shareMaxSamples()), not a constant, so `1br` at
+ * 120 BPM (2.0 s) is offered while the share holds it.
  * Why shared: the Effect-page label must show exactly the division the DSP
- * plays. Inputs: rate 0..127, bpm from seq_getBpm() (0 is treated as 1).
+ * plays. Inputs: rate 0..127 (the caller passes the share-clamped value),
+ * bpm from seq_getBpm() (0 is treated as 1), max_samples from
+ * crumpBit_shareMaxSamples() for the same share the DSP uses.
  * Output: a StepScale CC 0..127.
  * Accessors: crumpBit_uiFormatValue3() (label), CrumpBitEffect.c (target).
  * Affiliates: stepScale_ticksQ8(), stepScale_formatShort().
  */
-uint8_t crumpBit_syncDivision(uint8_t rate, uint16_t bpm);
+uint8_t crumpBit_syncDivision(uint8_t rate, uint16_t bpm, float max_samples);
 
 #endif /* CRUMP_BIT_EFFECT_H_ */

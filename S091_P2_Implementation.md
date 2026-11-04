@@ -4457,5 +4457,108 @@ that this schedule verifies, so it needs its own measurement.
 
 ## 9. Implementation record
 
-To be filled in when the schedule is applied: the gate results against §5,
-any deviation, and the hardware results H0–H10.
+Applied 2026-11-04 on firmware baseline `5c9a92f9` (HEAD `6fa8f46e` adds
+this schedule and the plan). Before-image: `build/s091p2_base.elf`.
+
+**Units applied, in schedule order.** N1, N3, then N2 by
+`gen_crumpbit_tables.py`; H1–H4; E1–E13; P1–P3; C1–C6; R1; M1–M4; U1;
+K1; T1–T5; D1–D5. D6 waits for the hardware result (§6). D7 was already
+done. All comment blocks are in place beside the code in the `.c` and
+`.h` files.
+
+**Deviations.**
+
+- **None in code.** All values and shapes match §3.
+- **Documentation:** beyond D3's listed lines, two current-state bullets in
+  `EFFECTS_BUS_REFERENCE.md` §2 were brought into line (the arena bullet
+  that still said `cbt` uses 70,592 B, and "the runtime union has 20 B
+  spare"): both contradicted the S091 P2 geometry/union and are not
+  historical records.
+- **Build artefacts** under `tools/dsp_test/build/` and `build/` are
+  regenerated; they are not source.
+
+**Gates.**
+
+| # | Result |
+|---|---|
+| G1 | `make all` exit 0; no warning from a changed file |
+| G2 | `Written:build/LXRV2_lxr02.img (694156b) OK` |
+| G3 | `crumpbit failures: 0`; `crumpbit_break1`…`5: caught`; CB8 peak 1.000 with mean loop code −0.062 / −0.004 / −0.001 LSB |
+| G4 | `crumpbit tables OK` |
+| G5 | `crumpBit_process` heads 126 / 126 / 31 (vdiv 0; shortest 124 / 112); `crumpBit_divisionFor` 113; `crumpBit_rateLimit` 101 |
+| G6 | `39 hot loops equal, 0 shrank, 0 grew`; normalised dumps identical, 86 loops each |
+| G7 | ITCM 15,256 B; DTCM statics 4,372 B; FXBUF 126,688 B at `0x20001120` (margin 3,808 B); flash 694,156 / 753,664 B, headroom 59,508 B |
+| G8 | text 693,736; data 420; bss 413,028 |
+| G9 | `calcNextOscSampleSyncBlock` loops 11/9 and 9/9, as on the base |
+| — | `sizeof(CrumpBitRuntime) == 76` compiled (E3); the ownership guards compiled (C3) |
+| — | Linked sizes match §2: `crumpBit_process` 1,924 B, `crumpBit_divisionFor` 380 B, `crumpBit_rateLimit` and `crumpBit_effectiveMax` 312 B each, `rateTable`/`toneK`/`filterG` 512 B each, `filterMixTable` 128 B |
+
+**Hardware.** H0–H10 remain for the user; none is recorded here yet.
+
+---
+
+## 10. Post-implementation assessment (2026-11-04)
+
+**Verdict: the implementation matches the schedule.** The landed image is
+**byte-identical** to the pre-verified scratch build: `build/lxr02.bin` and
+`build/LXRV2_lxr02.img`, 694,156 B. Every gate passes when re-run here.
+Hardware H0–H10 are still open.
+
+### 10.1 Source against the verified build
+
+Each landed file was compared with the scratch tree the schedule was built
+and tested from (§0 header):
+
+| File | Result |
+|---|---|
+| `CrumpBitEffect.h`, `CrumpBitParameters.h`, `CrumpBitTables.h/.c`, `EffectParamRows.h`, `EffectsManager.h/.c`, `menuEffects.c`, `Makefile`, `tools/dsp_test/Makefile`, `tools/dsp_test/modules/crumpbit.c`, `tools/plots/gen_crumpbit_tables.py` | identical |
+| `CrumpBitEffect.c` | one extra blank line among the stage-3 loop locals (around line 980) |
+| `CrumpBitParameters.c` | C1's `#include "FxBuffer.h"` sits after `<string.h>` instead of after `"sequencer.h"`, and one extra blank line follows the descriptor guards. Cosmetic: same declarations, same image |
+
+No other firmware file changed. No unit is missing: the identical image
+rules that out, and §3's mechanical apply-check covered every unit.
+
+### 10.2 Gates re-run on the working tree
+
+| # | Result |
+|---|---|
+| G1/G2 | `make all` exit 0, no warning from a changed file; `Written:build/LXRV2_lxr02.img (694156b) OK`, identical to the scratch image |
+| G3 | `crumpbit failures: 0`; breaks 1–5 caught; CB8 peak 1.000, mean loop code −0.062 / −0.004 / −0.001 LSB |
+| G4 | `crumpbit tables OK` |
+| G5 | `crumpBit_process` heads 126 / 126 / 31 (vdiv 0); `crumpBit_divisionFor` 113; `crumpBit_rateLimit` 101 |
+| G6, G9 | inherited: the image is byte-identical to the build whose mixer loops (86/86 normalised, 39 hot loops equal) and oscillator ITCM loops (11/9, 9/9) were checked in §2 |
+| G7/G8 | ITCM 15,256 B; DTCM statics 4,372 B; FXBUF 126,688 B at `0x20001120`; text 693,736, data 420, bss 413,028 |
+
+### 10.3 Documentation
+
+- **D1–D5:** present and consistent with the code. Checked:
+  - the `DSP_TEST.md` targets;
+  - `EFFECTS_MIXER_DSP_REFERENCE.md` §4.2, §4.4 (return chain, Rate
+    table, costs), §5.1 and §6.2a;
+  - `EFFECTS_BUS_REFERENCE.md` §4.2a and §8.6;
+  - `STORAGE_SRAM_MANIFEST.md` lines 697 and 717–718;
+  - `CPU_USE_DSP_AUDIT.md` item 62.
+- **The two extra `EFFECTS_BUS_REFERENCE.md` §2 edits** recorded in §9
+  (arena bullet; "no spare" union bullet) are correct current-state
+  statements.
+- **Not introduced here:** `STORAGE_SRAM_MANIFEST.md` §3 still gives the
+  12-unit share as "at least 73,600 B". At the current arena it is
+  73,696 B. The figure predates S091 and is still a true lower bound.
+- **D6 (`MEMORY.md`)** correctly waits for the hardware result.
+
+### 10.4 Open items
+
+- **Untracked new sources.** These must be added with the change, or the
+  build fails at link (K1) and the gates cannot run:
+  - `Core/DSP/Effects/CrumpBit/CrumpBitTables.c`
+  - `Core/DSP/Effects/CrumpBit/CrumpBitTables.h`
+  - `tools/plots/gen_crumpbit_tables.py`
+
+  The new `tools/dsp_test/build/break_cb3..5` outputs follow the existing
+  convention for test build artefacts.
+- **Hardware H0–H10 (§5)**, especially:
+  - H1: `cpu` at or below the pre-S091 reading, no underruns;
+  - H5: self-oscillation settles (low monitor level);
+  - H7: filter types, Morph steps without clicks, `res` 127 bounded.
+- **After hardware:** D6, and the decision whether to add the deferred
+  drives (plan §0, §5.3–§5.5).

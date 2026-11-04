@@ -426,9 +426,14 @@ void menuEffects_clampValue(const menuEffects_cell_t *cell, uint16_t *value)
         break;
     case MENU_FX_CELL_PARAM: {
         const effect_record_t *record = menuEffects_record();
-        const effect_param_descriptor_t *descriptor = record
-            ? effects_descriptor(record->type, cell->index) : NULL;
-        max = descriptor ? descriptor->max_value : 0u;
+
+        /*
+         * S091 P2: the descriptor maximum, lowered for a BUFFER_DEPENDENT row
+         * (CrumpBit `rte`) to what the live FxBuffer share allows, so the
+         * encoder, pots and held-step edits stop where the DSP clamp is.
+         */
+        max = record ? effects_paramEffectiveMax(record->type, cell->index)
+                     : 0u;
         break; }
     case MENU_FX_CELL_RUN:
         max = (uint16_t)(EFFECT_SEQ_RUN_MODE_COUNT - 1u);
