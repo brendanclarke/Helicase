@@ -18,14 +18,27 @@
  *
  * What: three 128-entry float tables indexed by a 0..127 row value.
  * - crumpBit_rateTable[rte]: delay length in samples, 882 (20 ms) at 0 to
- *   126,686 (2.872 s, the whole arena less the 2-sample guard) at 127,
- *   exponential and strictly increasing. Higher `rte` = longer delay.
+ *   126,654 (2.871 s: the arena less one 32 B granule and the 2-sample
+ *   guard, S091 P3 N1) at 127, exponential and
+ *   strictly increasing. Higher `rte` = longer delay.
  * - crumpBit_toneK[ton]: the one-pole coefficient of the feedback-return
  *   tilt. 0..62 low-pass (150 Hz .. 18 kHz), 63 exactly 1.0 (flat),
  *   64..127 high-pass (20 Hz .. 2 kHz).
  * - crumpBit_filterG[frq]: the TPT pre-warped cutoff g of the output filter,
  *   the voice cutoff law (fastTan(pi * 0.45 * valueShaperF2F(frq/127,
  *   FILTER_SHAPER))). 0 at frq 0 (closed), strictly increasing.
+ * S091 P3 sub-type tables:
+ * - crumpBit_combTable[rte]: `cmb` comb length in samples. rte n plays MIDI
+ *   note 112 - n (n clamped at 96), L = fs / f, 8.36 .. 2,141 samples: a
+ *   higher rte is a longer comb and a lower note (plan A1).
+ * - crumpBit_pitchWindow[rte]: `pit` window in samples, 441 .. 8,822
+ *   (10 .. 200 ms), exponential.
+ * - crumpBit_semitoneRatio[s]: 2^((s - 24)/12), s = 0..48 (-24..+24 st).
+ * - crumpBit_grainFraction[d]: `grn` grain size / R, 1/32 .. 1 for
+ *   d = |sze - 63| = 0..64.
+ * - crumpBit_reverbSize[rte]: `rvb` delay scale 0.25 .. 2.5.
+ * - crumpBit_reverbDecay[fbk]: `rvb` log2 of the per-sample line gain for an
+ *   RT60 of 0.1 .. 10 s; a line of d samples has gain 2^(entry * d).
  * Why tables: CrumpBit's per-block work runs inside the render
  * (mixer_calcNextSampleBlock()); a lookup replaces an expf, a fastTan
  * division and a valueShaper division per block, and the Rate table makes the
@@ -36,11 +49,19 @@
  * Accessors: CrumpBitEffect.c only.
  * Affiliates: tools/plots/gen_crumpbit_tables.py.
  */
-#define CRUMPBIT_TABLE_SIZE 128u
+#define CRUMPBIT_TABLE_SIZE      128u
+#define CRUMPBIT_SEMITONE_SPAN   24u   /* semitoneRatio covers +-24 */
+#define CRUMPBIT_GRAIN_STEPS     64u   /* grainFraction covers 0..64 */
 
 extern const float crumpBit_rateTable[CRUMPBIT_TABLE_SIZE];
 extern const float crumpBit_toneK[CRUMPBIT_TABLE_SIZE];
 extern const float crumpBit_filterG[CRUMPBIT_TABLE_SIZE];
+extern const float crumpBit_combTable[CRUMPBIT_TABLE_SIZE];
+extern const float crumpBit_pitchWindow[CRUMPBIT_TABLE_SIZE];
+extern const float crumpBit_semitoneRatio[2u * CRUMPBIT_SEMITONE_SPAN + 1u];
+extern const float crumpBit_grainFraction[CRUMPBIT_GRAIN_STEPS + 1u];
+extern const float crumpBit_reverbSize[CRUMPBIT_TABLE_SIZE];
+extern const float crumpBit_reverbDecay[CRUMPBIT_TABLE_SIZE];
 
 #endif /* CRUMP_BIT_TABLES_H_ */
 

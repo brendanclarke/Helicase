@@ -39,6 +39,11 @@ watchdog (`W<op><phase>` error), Load/Save use of the full-queue window, and
 the `w` owner trace. The first image froze at boot (`w` fed the trace
 flush; fixed, §9). Hardware T1–T9 pending. Notes:
 `S090_P5_IMPLEMENTATION.md`; the hang's root cause waits for the `W…` code.
+**S091 P3 implemented** (2026-11-04): CrumpBit sub-types (`dly cmb pit grn
+rvb`), the shared MIX stage, per-sub-type names/layouts/lane maps, and the
+88 B runtime (56 B shared + 32 B union). Static gates pass (payload
+707,020 B; CB1–CB15, nine breaks; per-engine ELF counts); hardware H1–H9
+pending. Notes: `S091_P3_Implementation.md` §9.
 S088 log: `knowledge_files/log_archive/088_SESSION_HANDOFF_LOG.md`.
 S087 log: `knowledge_files/log_archive/087_SESSION_HANDOFF_LOG.md`.
 Working notes: `knowledge_files/volatile/S088_WORKING_NOTES.md`.
@@ -118,6 +123,12 @@ is in the referenced session logs and specification documents.
 
 ### Effects
 
+- **CrumpBit sub-types (S091 P3):** four stages: the shared dry path, one
+  sub-engine per block, the shared MIX stage (`mix`, lane 3 everywhere, never
+  freeable), the shared output filter. `sub` switches reinterpret the buffer
+  and keep every value. Lane maps are per stored `sub`
+  (`effects_laneTable()`). Row owners: `CRUMPBIT_ROWS_SHARED` /
+  `_SUBTYPE` / `_GRN`.
 - **R13 (S081):** menuHold > FX lock (own step) > track overlay > menu. Lock
   start clears overlay; held lane/markers/owners removed. Realign via
   `seq_fxRealignToMasterClock()`, never `seq_fxPublishReset()`.

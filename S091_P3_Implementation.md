@@ -28,7 +28,8 @@
   each unit onto the built file, and a check that applying every unit to
   HEAD, bottom-up, rebuilds each built file byte for byte. Nothing was
   retyped.
-- **Status:** schedule. No firmware file in the repository is changed.
+- **Status:** **implemented** on 2026-11-04 (HEAD `11397377`); static gates
+  pass, hardware H1–H9 pending. The running log is §9.
 - **Constraints:**
   - CPU: the user accepted **≈ 195 per frame for the whole Effect**
     (2026-11-04). Every sub-type measures ≤ ≈ 192 worst case (§2).
@@ -7899,3 +7900,135 @@ Add a status line, and under **Binding Rules → Effects**:
 - **`.fx` files:** P2 files load as `dly` with unchanged lanes (the `dly`
   map is the P2 table; self-check 11). A `grn` file saved here and loaded
   by P2 firmware would not be supported (no backward compatibility).
+
+---
+
+## 9. Implementation record (2026-11-04)
+
+Applied on HEAD `11397377` (S091 P3 pre-implementation check commit). The
+schedule's code blocks were applied by a parser that matched every explicit
+`Remove` block against the HEAD file before writing; all 75 replacements and
+14 insertions matched, with zero mismatches. The generated targets were then
+reviewed as diffs. This section is the running work log; the gates in §5 are
+the evidence.
+
+| Step | Done | Result |
+|---|---|---|
+| Firmware ports | H1–H2, E1–E10, P1–P3, C1–C10, B1–B2, MH1–MH5, M1–M16, S1–S3, N1–N4, U1–U9 | Applied; `old` blocks byte-matched HEAD |
+| Tables | G1–G4, R1 | Generator updated; `gen_crumpbit_tables.py --check` prints `crumpbit tables OK` |
+| Tools / host tests | L1–L3, T1–T6, X1–X12 | Applied; host laws and gates below |
+| Docs | D1–D5, D6 status + binding rule | Applied in the same step |
+
+**Small out-of-schedule fix.** `StereoFilterEffect.c` gained explicit
+`NULL, 0u, 0u` for the new `lane_map` / `lane_variant_row` /
+`lane_variant_count` ops fields. Without them `-Wmissing-field-initializers`
+reported the struct change in an otherwise unchanged file. No behaviour
+change (the fields are zero either way).
+
+**Build and static gates.**
+
+| Gate | Result |
+|---|---|
+| `make all` | exit 0; no warnings from any changed file |
+| `make img` | `Written:build/LXRV2_lxr02.img (707020b) OK` |
+| `crumpbit` | `crumpbit failures: 0`; CB8 peaks 1.000; CB15 decay 15.60 dB, freeze 1.98 dB; break builds 1–9 all caught |
+| `crumpbit_tables` | `crumpbit tables OK` |
+| `crumpbit_elf_check` | `runDelay` 124, `runComb` 124, `runPitch` 135, `runGrain` 131/125, `runReverb` 145, `process` 31, all vdiv 0; `divisionFor` 113; `tableLimit` 63 |
+| Link map | text 706,600; data 420; bss 413,040; flash 707,020 (headroom 46,644); ITCM 15,280; DTCM statics 4,384; FXBUF 126,688 B at `0x20001120` |
+| Mixer loops | 39 hot loops equal, 0 shrank, 0 grew; 86/86 normalised fragments identical |
+| Oscillator loop | `calcNextOscSampleSyncBlock` 11/9 and 9/9, as HEAD |
+| `make -C tools/dsp_test all` | checked after the change; the pre-existing `voice_control` second build (6 failures) and `run_modes` compile error remain identical to clean HEAD, so they are outside P3 |
+
+**Hardware.** H1–H9 of §5 remain to be run by the user. Nothing in this
+session was flashed.
+
+---
+
+## 10. Assessment (2026-11-04)
+
+**Verdict: the implementation is the schedule, byte for byte, and every
+static gate reproduces the schedule's numbers.** One deviation is
+documented and correct. It exposed a miss in the schedule. A few
+reference-doc lines are stale. Hardware H1–H9 is still open.
+
+### 10.1 Code against the schedule
+
+- **All 15 scheduled files are byte-identical** to the verified scratch
+  build the schedule was generated from:
+  - `CrumpBitEffect.c/.h`, `CrumpBitParameters.c/.h`,
+    `CrumpBitTables.c/.h`;
+  - `EffectsManager.c/.h`, `storageTypes.c`, `menu.c`, `menuEffects.c`;
+  - `gen_crumpbit_tables.py`, `elf_looppath.py`, `tools/dsp_test/Makefile`
+    and `modules/crumpbit.c`.
+
+  The comparison was `cmp` of the working tree against the scratch tree.
+  This agrees with §9's 75 replacements and 14 insertions (all 89 units).
+- **The only firmware change outside the schedule** is
+  `StereoFilterEffect.c`: an explicit `NULL, 0u, 0u` for the three new ops
+  fields (§9).
+  - It changes no code (the fields were zero before), and the image is
+    identical with and without it.
+  - It is needed: rebuilding the schedule's own scratch tree with
+    `StereoFilterEffect.c` touched reproduces
+    `warning: missing initializer for field 'lane_map' of 'effect_type_ops_t' [-Wmissing-field-initializers]`.
+- **Schedule miss.** MH3 said StereoFilter "compiles unchanged", and G1
+  promised no warnings from changed files.
+  - Both are true only in the narrow sense that `StereoFilterEffect.c` was
+    not a changed file.
+  - The pre-verification filtered warnings by CrumpBit file names, so it
+    missed a warning that the `EffectsManager.h` change caused in another
+    file.
+  - The implementer's fix is the right one. A future schedule's G1 should
+    grep every warning of a clean build against the baseline's list.
+
+### 10.2 Independent rebuild and gates
+
+The working tree was copied (without `.git` and `build/`) into the
+scratchpad, rebuilt clean, and every gate re-run there:
+
+| Gate | Result |
+|---|---|
+| G1 `make all` | exit 0; **0 warnings** from any CrumpBit, EffectsManager, StereoFilter, storage or menu file (the remaining warnings are the baseline's: asyncfatfs, usb_core, SplashAnimation, PatternData, EuklidGenerator, filesystem) |
+| G2 `make img` | `Written:build/LXRV2_lxr02.img (707020b) OK`; **byte-identical** to the image in the repository and to the schedule's verified image |
+| G3 `crumpbit` | 0 failures; CB8 peaks 1.000 (mean 0.061 / −0.002 / −0.001 LSB); CB15 decay 15.60 dB, freeze 1.98 dB; breaks 1–9 caught |
+| G4 `crumpbit_tables` | OK |
+| G5 `crumpbit_elf_check` | 124 / 124 / 135 / 131 + 125 / 145 / 31, vdiv 0; `divisionFor` 113; `tableLimit` 63 |
+| G6 mixer loops | 39 hot loops equal, 0 shrank, 0 grew; 86/86 normalised identical |
+| G7/G8 link | text 706,600, data 420, bss 413,040; flash 707,020 (headroom 46,644); ITCM 15,280; DTCM statics 4,384; FXBUF 126,688 B at `0x20001120` (≥ 126,656 holds) |
+| G9 oscillator | `calcNextOscSampleSyncBlock` 11/9, 9/9 |
+
+The §2 CPU table therefore stands for the implemented image. Worst case
+per frame for the whole Effect: `dly` 172 (HEAD 173), `cmb` 168, `pit` 181,
+`grn` 192, `rvb` 192, all within the accepted ≈ 195.
+
+### 10.3 Documentation (D1–D6)
+
+D1, D4, D5 and D6 match the schedule. D6's status line was added before the
+hardware result and says "hardware pending", which is accurate. D2 and D3
+are applied, but these lines are stale or wrong. Most were not named by the
+schedule's D-units:
+
+| File | Line | Now | Should be |
+|---|---|---|---|
+| `EFFECTS_BUS_REFERENCE.md` | 621 | screen 1 cell 4 "the sub-type (`dly`)" | "the sub-type (`dly cmb pit grn rvb`)" |
+| `EFFECTS_BUS_REFERENCE.md` | 626 | the layout bullet describes only the base layout | add: `pit` uses `crumpBit_layoutPitch` (`int` at s3/3); `grn` uses `crumpBit_layoutGrain`, `screen_count = {0, 4, 2, …}` |
+| `EFFECTS_BUS_REFERENCE.md` | 669 | "clamped to `crumpBit_rateLimit()`" | "clamped to `crumpBit_subtypeRateLimit()` for the shown sub-type"; and add the per-sub-type `rte` text (note, ms, division) |
+| `EFFECTS_BUS_REFERENCE.md` | hooks table, `format_target3` row | "…and its per-sub-type `rte` text" | `sub` names only (the hook returns 0 for every other row) |
+| `EFFECTS_BUS_REFERENCE.md` | 680 (defaults) | P2 defaults only | add "S091 P3: `sub` `dly`, `aux`/`st2`/`st3` 63 (0 st), `spr` 0, `den` 127, `amp` 0, `wid` 0" |
+| `EFFECTS_MIXER_DSP_REFERENCE.md` | 398 | comb "8 samples .. about 2,048" | "8.4 .. 2,141 samples" |
+| `EFFECTS_MIXER_DSP_REFERENCE.md` | 453 | Rate clamp through `crumpBit_rateLimit()` | through `crumpBit_subtypeRateLimit()` (`crumpBit_rateLimit()` is the `dly` case) |
+| `EFFECTS_MIXER_DSP_REFERENCE.md` | 499 | "`min(share bytes, 126,688)`" | "126,656" (N1) |
+| `EFFECTS_MIXER_DSP_REFERENCE.md` | §4.4a `grn` | "triangular windows half a grain apart that sum to 1" | they sum to 1 at `den` 127; below it each window covers the active part only (gaps between grains) |
+
+None of these affects code or gates.
+
+### 10.4 Open
+
+- **Hardware H1–H9 (§5).**
+  - H1 decides the CPU question for `grn` and `rvb` (≈ 192, about 20 above
+    `dly`).
+  - H2 covers switch blocks: `crumpBit_enter()` adds up to 194
+    instructions to the switching block only.
+- S091 P2 is still untested on hardware (H0). P3's `dly` is bit-exact to P2
+  on the host (CB4), so a P2 problem would show in both.
+- The doc lines in §10.3.

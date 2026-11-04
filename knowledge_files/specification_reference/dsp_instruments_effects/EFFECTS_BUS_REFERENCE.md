@@ -212,12 +212,12 @@ future, tokens never change meaning.
 |---:|---|---|---:|---|---|---:|---:|
 | 0 | `off` / `Off␣␣` / `Off` | none | 3 | — | default / none | 0 | 0 |
 | 1 | `flt` / `StFlt` / `StFilter` | stereo in, stereo out | 7 | freq, reso, drive, type, vol, pan | default / none | 76 B (two filter states) | 0 |
-| 2 | `cbt` / `CrmBt` / `CrumpBit` | stereo in, stereo out | 15 | bof, biv, mix, fbk, rte, snc, vol, pan, dpn, ton, typ, frq, res | custom layout; `select`, `render_leds`, `paint_row0`, `format_value3`, flag `OWNS_SELECT_LEDS` | 76 B | elastic: min 73,696 B (12 units), pref 126,688 B |
+| 2 | `cbt` / `CrmBt` / `CrumpBit` | stereo in, stereo out | 22 | per `sub` (`lane_map`): shared `mrp bof biv mix vol pan typ frq res`; pool `fbk rte snc dpn ton` (`dly`/`cmb`/`rvb`), + `aux` (`pit`), `st2 st3 snc dpn ton aux spr` (`grn`) | custom layout; `select`, `render_leds`, `paint_row0`, `format_value3`, `name3`, `layout`, `format_target3`, flag `OWNS_SELECT_LEDS` | 88 B | elastic: min 73,664 B (12 units), pref up to 126,656 B |
 
-`effects_runtime_t` is a union of every runtime struct and is **76 B**
-(StereoFilter is the largest). `_Static_assert`s check each member against
-the union and pin CrumpBit at 76 B: it fills the union, so any larger
-runtime grows `.dtcmz` (RAM approval). The CrumpBit
+`effects_runtime_t` is a union of every runtime struct and is **88 B** since
+S091 P3 (CrumpBit is the largest; StereoFilter 76 B). `_Static_assert`s check
+each member against the union and pin CrumpBit at 88 B: it fills the union,
+so any larger runtime grows `.dtcmz` (RAM approval). The CrumpBit
 rows, DSP and page are in §8.6 and `EFFECTS_MIXER_DSP_REFERENCE.md` §4.4.
 
 ### 4.3 Operations (`effect_type_ops_t`)
@@ -229,7 +229,9 @@ rows, DSP and page are in §8.6 and `EFFECTS_MIXER_DSP_REFERENCE.md` §4.4.
 | `write_param(rt, index, value)` | an effective value changed | **type rows 3..63 only**; EffectsManager applies 0..2 itself |
 | `process(rt, io)` | once per block when the type is not `off` | in place, float, `io->frames` = 32; `io->r` may be NULL for mono |
 | `buffer_changed(rt, share)` | the share moved or resized (voice units acquired/released) | re-seat positions; a forced re-resolution follows |
-| `effective_max(index, share)` | for BUFFER_DEPENDENT rows | runtime clamp only; stored values are never rewritten (A30) |
+| `effective_max(rt, index, share)` | for BUFFER_DEPENDENT rows | `rt` = the live runtime or NULL; a type with sub-engines clamps by the running one (S091 P3); stored values are never rewritten (A30) |
+| `lane_map(variant)` | for a type whose lanes follow a variant row | const 16-entry lane → row table per variant; NULL keeps `lanes[]`. Variant 0 must equal `lanes[]` (self-check 11). Every reader goes through `effects_laneTable(record)` |
+| `lane_variant_row`, `lane_variant_count` | with `lane_map` | the descriptor row whose stored value selects the table, and the number of variants (S091 P3: row 8 `sub`, 5 variants) |
 
 `effect_io_t`:
 
@@ -525,7 +527,10 @@ Everything is foreground-only.
   | `select` / `track` / `bar` `(button, shift, pressed)` | Nonzero = handled; zero falls back to the default page. `select` may return `EFFECT_UI_SHOW_HOME` (2): handled, show the layout's home screen. **Any nonzero `select` return abandons an open `typ` browse** without committing it. `EFFECT_UI_HANDLED` is 1. |
   | `render_leds()` | Runs after the page has drawn its own LEDs. With the flag below, it is also the only writer of the SELECT LED row. |
   | `paint_row0(sub_page, screen, row0)` | Writes columns 0..14 of the compact top row for screens flagged in `select_layout->custom_row0`. Column 15 keeps the page's scroll marker. Those screens show no automation name markers. |
-  | `format_value3(index, value, out)` | May replace a type row's 3-character value text on the Effect page only: compact cells, the full view and held-step values. Storage and the STEP automation page always show raw values. Nonzero = handled. |
+  | `format_value3(index, value, out)` | May replace a type row's 3-character value text on the Effect page only: compact cells, the full view and held-step values. Storage and the STEP automation page always show raw values (S091 P3 adds `format_target3`, used by the automation pages where `format_value3` is Effect-page-only). Nonzero = handled. |
+  | `name3(index, out)` | May replace a type row's descriptor 3-character name on the Effect page only, following the shown variant (S091 P3: CrumpBit's sub-type names). Other screens keep the descriptor name. Nonzero = handled. |
+  | `layout()` | Returns the `effect_select_layout_t` to show now (S091 P3: CrumpBit's per-sub-type layouts), or NULL for the registry's `select_layout`. The screen count, cell lookup, custom top row and home screen all read it through `menuEffects_layout()`. |
+  | `format_target3(index, value, out)` | Replaces a row's value text on the STEP automation page and in Pattern value entry (S091 P3: CrumpBit's `sub` names, and its per-sub-type `rte` text). Nonzero = handled. |
   | `flags` | `EFFECT_UI_FLAG_OWNS_SELECT_LEDS` (`0x01`): the page's active-SELECT LED is suppressed and `menuEffects_renderSelectLeds()` calls `render_leds` instead. |
 
   Hooks run in the foreground, must not block, must write retained data only
@@ -607,7 +612,7 @@ underline reports stored data, not what is audible.
   A deferred transaction is retried once the LCD queue has room (shared
   VOICE/Effect retry, `VA_MARKER_RETRY_BIT`).
 
-### 8.6 CrumpBit's page (`cbt`, Session 074)
+### 8.6 CrumpBit's page (`cbt`, Session 074; sub-types S091 P3)
 
 | SELECT | Screen | Row 0 | Cells (row 1) |
 |---|---|---|---|
@@ -640,7 +645,24 @@ underline reports stored data, not what is audible.
   retained masks, or the last held step's during a hold (never the live
   per-step playing value). They are re-rendered on each hold transition and
   after each SELECT edit.
-- **Value labels (`format_value3`):** `sub` shows `dly`. With the shown
+- **Sub-type-dependent page (S091 P3).** The five sub-type rows keep their
+  keys and ranges; only their name, value text, layout and lane change:
+
+  | Row | `dly` | `cmb` | `pit` | `grn` | `rvb` |
+  |---|---|---|---|---|---|
+  | `fbk` | feedback | resonance | regeneration | delay feedback | RT60 decay |
+  | `rte` | time | note | window | division | size |
+  | `snc` | Sync | polarity | snap | freeze | freeze |
+  | `dpn` | delay pan | wet pan | wet pan | position | width |
+  | `ton` | tone | damping | tone | grain size | damping |
+  | `aux` (15) | drive (later) | drive (later) | interval | root `st1` | — |
+
+  Page names: `dly` `ton fbk rte snc dpn`; `cmb` `ton fbk not pol dpn`;
+  `pit` `ton fbk win snp dpn` with `int` at SELECT 2 s3/3; `grn`
+  `sze fbk div frz pos` with SELECT 3 screens `st1 st2 st3 spr` and
+  `den amp wid`; `rvb` `dmp dcy siz frz wid`. `mix` (row 5) keeps its name,
+  cell and lane 3 in every sub-type. Rows 16..21 exist for `grn` only.
+- **Value labels (`format_value3`):** `sub` shows `dly cmb pit grn rvb`. With the shown
   Sync on, `rte` shows the snapped division label (`/16`, `16t`, `1br` …),
   computed by `crumpBit_syncDivision()` with the same rule the DSP uses at
   the current `seq_getBpm()`. The shown Rate (number or division) is
@@ -870,6 +892,15 @@ with no migration. The tokens differ from the on-screen names (`32t`,
 - `format=…/version=1/placeholder=1` (legacy) loads as `off`.
 - A missing file is valid: `off`, with a blank name.
 - The file carries no self-name.
+- **Lane keys follow the stored `sub` (S091 P3).** `[sequence]` keys are
+  lane → row file keys, so the reader maps them through the record's
+  `effects_laneTable()`. `[params]` precedes `[sequence]`, so `sub` is
+  known before the lanes are mapped. The `dly` map is the S091 P2 table, so
+  P2 files round-trip unchanged; `sub` 0 is `dly` in old files.
+- **BUFFER_DEPENDENT rows are re-applied every block** (`effects_service()`),
+  not only when their stored value changes: a sub-type switch or a share
+  change can alter the clamp without changing the byte. The re-apply costs
+  one `crumpBit_tableLimit()` per block (S091 P3).
 
 ### 12.2 Names
 
@@ -1029,8 +1060,8 @@ all registry-driven.
 - **Measure flash.** Run `link_budget.py` after every addition. Since
   Session 073 the application window is 736 KiB (250,736 B free at the S074
   close; `STORAGE_SRAM_MANIFEST.md` §3).
-- **The runtime union has no spare** (76 B; CrumpBit 76 B since S091 P2
-  fills it). Anything larger grows the union and shrinks the arena by the
+- **The runtime union has no spare** (88 B since S091 P3; CrumpBit fills it).
+  Anything larger grows the union and shrinks the arena by the
   same amount: RAM approval first. Audio state belongs in the arena share.
 - **SELECT LEDs:** route every Effect-page SELECT LED write through
   `menuEffects_renderSelectLeds()`, or a type that owns them loses its

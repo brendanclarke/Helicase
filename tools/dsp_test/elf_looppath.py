@@ -17,7 +17,12 @@ Inputs:     --elf PATH, --sym NAME (the base name; .lto_priv/.constprop
             suffixes are matched), optional --max N (fail if the longest
             loop path is above N), --straight (count the whole function),
             --top K (report the K longest loops), --show (print the longest
-            path).
+            path), --cond-heads (S091 P3: only targets of CONDITIONAL
+            backward branches are loop heads; a function whose cold blocks
+            are placed after its loops and jump back with an unconditional
+            `b` would otherwise seed a path search from every such target,
+            which explodes combinatorially; a frame loop always closes
+            with a conditional branch).
 Outputs:    one line per loop; exit 1 when --max is exceeded.
 Accessors:  tools/dsp_test/Makefile crumpbit_elf_check; by hand.
 Affiliates: elf_loopdump.py (loop text compare), fpseq.py (value ops).
@@ -98,6 +103,7 @@ def main():
     ap.add_argument('--straight', action='store_true')
     ap.add_argument('--top', type=int, default=1)
     ap.add_argument('--show', action='store_true')
+    ap.add_argument('--cond-heads', action='store_true')
     a = ap.parse_args()
     r = rows(a.elf, a.sym)
     if a.straight:
@@ -107,7 +113,8 @@ def main():
     idx = {addr: i for i, (addr, _, _) in enumerate(r)}
     heads = sorted({target(ops) for (addr, op, ops) in r
                     if BRANCH.match(op) and target(ops) is not None
-                    and target(ops) <= addr and target(ops) in idx})
+                    and target(ops) <= addr and target(ops) in idx
+                    and not (a.cond_heads and op in UNCOND)})
     loops = []
     for h in heads:
         p = loop_paths(r, idx, h)

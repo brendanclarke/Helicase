@@ -1491,8 +1491,13 @@ storage_status_t storage_effectParseLine(storage_effect_state_t *state,
                            STORAGE_EFFECT_LANE_PREFIX_LEN) == 0) {
             uint8_t lane;
 
+            /*
+             * S091 P3: lane keys map through the record's lane table. The
+             * writer emits [params] before [sequence], so `target` already
+             * holds its stored sub-type here.
+             */
             if (!effects_laneByFileKey(
-                    state->type, key + STORAGE_EFFECT_LANE_PREFIX_LEN,
+                    target, key + STORAGE_EFFECT_LANE_PREFIX_LEN,
                     &lane))
                 return STORAGE_STATUS_OK;
             return storage_effectParseLane(target, lane, value);
@@ -1548,14 +1553,15 @@ static uint8_t storage_effectMorphRow(const effect_registry_entry_t *entry,
     return index_out ? 0u : seen;
 }
 
-static uint8_t storage_effectNamedLane(effect_type_id_t type,
+static uint8_t storage_effectNamedLane(const effect_record_t *record,
                                        uint8_t ordinal, uint8_t *lane_out)
 {
     uint8_t lane;
     uint8_t seen = 0u;
 
+    /* S091 P3: the record's lane table (per stored sub-type for CrumpBit). */
     for (lane = 0u; lane < EFFECT_SEQ_LANE_COUNT; lane++) {
-        if (!effects_laneFileKey(type, lane))
+        if (!effects_laneFileKey(record, lane))
             continue;
         if (seen == ordinal) {
             *lane_out = lane;
@@ -1681,10 +1687,10 @@ uint8_t storage_formatEffectLine(char *dst, uint16_t capacity,
     }
     line_index = (uint16_t)(line_index - 5u);
     if (line_index >= EFFECT_SEQ_LANE_COUNT ||
-        !storage_effectNamedLane(type, (uint8_t)line_index, &index))
+        !storage_effectNamedLane(record, (uint8_t)line_index, &index))
         return 0u;
     return storage_formatEffectLaneLine(dst, capacity, record, index,
-                                        effects_laneFileKey(type, index));
+                                        effects_laneFileKey(record, index));
 }
 
 void storage_makeSavedEffectDisplayFilename(char *dst, uint8_t capacity,

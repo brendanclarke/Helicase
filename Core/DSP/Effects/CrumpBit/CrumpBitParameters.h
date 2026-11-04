@@ -33,12 +33,15 @@
  */
 
 /*
- * Descriptor rows: common rows 0..2 plus type rows 3..14.
- * S091 P2 appended rows 11..14 (`ton`, `typ`, `frq`, `res`); the drive rows
- * of S091_P2_CrumpBit_Expanded_Plan.md (`drv`, `tdr`) are a later addition
- * and would append as 15 and 16.
+ * Descriptor rows: common rows 0..2 plus type rows 3..21.
+ * S091 P2 appended rows 11..14 (`ton`, `typ`, `frq`, `res`). S091 P3
+ * appended row 15 (`aux`, the per-sub-type pitch/drive row) and the granular
+ * rows 16..21 (`st2 st3 spr den amp wid`). The deferred output-filter drive
+ * (`drv`) would append as 22; the tone drive (`tdr`) is the `aux` row's
+ * meaning in `dly`/`cmb` when the drives land
+ * (S091_P3_CrumpBit_SubType_Expansions.md §2.3).
  */
-#define CRUMPBIT_PARAM_COUNT 15u
+#define CRUMPBIT_PARAM_COUNT 22u
 
 /*
  * Local descriptor indices.
@@ -66,11 +69,35 @@ typedef enum {
     CRUMPBIT_PARAM_FILTER_TYPE,
     CRUMPBIT_PARAM_FILTER_FREQ,
     CRUMPBIT_PARAM_FILTER_RESO,
+    /* S091 P3: per-sub-type `aux` (pit interval, grn root `st1`). */
+    CRUMPBIT_PARAM_AUX,
+    /* S091 P3, `grn` only: second and third pitch, spread, density, level
+     * jitter and random pan. */
+    CRUMPBIT_PARAM_GRAIN_ST2,
+    CRUMPBIT_PARAM_GRAIN_ST3,
+    CRUMPBIT_PARAM_GRAIN_SPREAD,
+    CRUMPBIT_PARAM_GRAIN_DENSITY,
+    CRUMPBIT_PARAM_GRAIN_AMP,
+    CRUMPBIT_PARAM_GRAIN_WIDTH,
     CRUMPBIT_PARAM_ENUM_COUNT
 } crumpbit_param_t;
 
-/* Sub-effect behind Mix/Feedback/Rate; only the delay exists in v1. */
-#define CRUMPBIT_SUBTYPE_DELAY 0u
+/*
+ * Sub-engines (the `sub` row, index 8; S091 P3 §2.3).
+ *
+ * What: the stored values of `crump_subtype`. 0 is the S074 delay, so saved
+ * Scenes keep playing `dly`. The row is Pattern-automatable (not Morph, not
+ * LFO, never on an FX lane); a Pattern value above the last id is clamped to
+ * it by the manager (user OQ3: the ids are not spread over 0..127).
+ * Accessors: crumpBit_descriptors (max), crumpBit_process() dispatch,
+ * crumpBit_enter(), the page hooks (names, layouts, values).
+ */
+#define CRUMPBIT_SUBTYPE_DELAY    0u   /* `dly` tape delay (engine A) */
+#define CRUMPBIT_SUBTYPE_COMB     1u   /* `cmb` comb / resonator (engine A) */
+#define CRUMPBIT_SUBTYPE_PITCH    2u   /* `pit` pitch shifter (engine B) */
+#define CRUMPBIT_SUBTYPE_GRAIN    3u   /* `grn` granular + delay (engine B') */
+#define CRUMPBIT_SUBTYPE_REVERB   4u   /* `rvb` 4-line FDN reverb (engine C) */
+#define CRUMPBIT_SUBTYPE_COUNT    5u
 
 /*
  * Row ownership by stage (S091 P2 §4; the single record of which rows belong
@@ -78,36 +105,46 @@ typedef enum {
  *
  * What: one 32-bit mask per owner, bit n = descriptor index n.
  * - CRUMPBIT_ROWS_SHARED: the stages every sub-type runs: the ADC data-line
- *   masks (`bof`, `biv`), the sub-type selector itself (`sub`), and the
- *   output filter (`typ`, `frq`, `res`), which is the last element of the
- *   Effect whatever the sub-type is.
- * - CRUMPBIT_ROWS_DELAY: the delay sub-type's rows (`mix`, `fbk`, `rte`,
- *   `snc`, `dpn`, `ton`). `ton` belongs here because it sits on the delay's
- *   feedback return (user, 2026-11-04).
- * Why: a second sub-type must add its own mask here and may reuse delay rows
- * only deliberately; the _Static_asserts in CrumpBitParameters.c prove that
- * the masks are disjoint and cover every type row 3..COUNT-1, so a row
- * appended without an owner fails the build. The common rows 0..2 belong to
- * the manager and are in neither mask.
- * Accessors: CrumpBitParameters.c (guards), tools/dsp_test crumpbit (law).
- * Affiliates: crumpbit_param_t, CRUMPBIT_SUBTYPE_DELAY, crumpBit_process()
- * stage comments.
+ *   masks (`bof`, `biv`), the sub-type selector itself (`sub`), the MIX
+ *   STAGE (`mix`, S091 P3 §2.8: always dry <-> the sub-engine's wet, never a
+ *   sub-type row) and the output filter (`typ`, `frq`, `res`), which is the
+ *   last element of the Effect whatever the sub-type is.
+ * - CRUMPBIT_ROWS_SUBTYPE: rows whose meaning is set by the active sub-type
+ *   (`fbk`, `rte`, `snc`, `dpn`, `ton`, `aux`), aligned by role across
+ *   sub-types (plan §6, A1): `fbk` amount back, `rte` length (higher =
+ *   longer), `snc` the switch, `dpn` where the wet sits, `ton` colour/shape,
+ *   `aux` pitch. A sub-type change keeps their values (plan §2.4).
+ * - CRUMPBIT_ROWS_GRN: rows only `grn` reads (`st2 st3 spr den amp wid`).
+ * Why: a new sub-type adds its own mask here; the _Static_asserts in
+ * CrumpBitParameters.c prove the masks are disjoint and cover every type
+ * row 3..COUNT-1, so a row appended without an owner fails the build. The
+ * common rows 0..2 belong to the manager and are in no mask.
+ * Accessors: CrumpBitParameters.c (guards), tools/dsp_test crumpbit (CB9).
+ * Affiliates: crumpbit_param_t, CRUMPBIT_SUBTYPE_*, crumpBit_process().
  */
 #define CRUMPBIT_ROW_BIT(index_) (1UL << (uint32_t)(index_))
 #define CRUMPBIT_ROWS_SHARED                                  \
     (CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_BIT_OFF) |               \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_BIT_INVERT) |            \
+     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_MIX) |                   \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_SUBTYPE) |               \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_FILTER_TYPE) |           \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_FILTER_FREQ) |           \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_FILTER_RESO))
-#define CRUMPBIT_ROWS_DELAY                                   \
-    (CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_MIX) |                   \
-     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_FEEDBACK) |              \
+#define CRUMPBIT_ROWS_SUBTYPE                                 \
+    (CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_FEEDBACK) |              \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_RATE) |                  \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_SYNC) |                  \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_DLY_PAN) |               \
-     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_TONE))
+     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_TONE) |                  \
+     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_AUX))
+#define CRUMPBIT_ROWS_GRN                                     \
+    (CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_ST2) |             \
+     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_ST3) |             \
+     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_SPREAD) |          \
+     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_DENSITY) |         \
+     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_AMP) |             \
+     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_WIDTH))
 
 /*
  * Tone tilt centre (S091 P2 §5.3): stored 63 displays 0 through DTYPE_PM63
@@ -148,12 +185,14 @@ extern const char crumpBit_full8[];
  * Effect-page layout and hooks.
  *
  * crumpBit_layout places the overlay (home) and pages 2..4 on SELECT 2
- * (S091 P2: four screens, the layout maximum). crumpBit_ui owns the SELECT
+ * (S091 P2: four screens, the layout maximum); S091 P3 adds the `pit` and
+ * `grn` variants, chosen by crumpBit_ui.layout. crumpBit_ui owns the SELECT
  * buttons (bit toggles), the SELECT LEDs (bit states), the overlay's top row
  * and the `sub`/Rate value text (the Rate shows the share-clamped value and,
  * with Sync on, the division the DSP plays).
  */
 extern const effect_select_layout_t crumpBit_layout;
+
 extern const effect_ui_hooks_t crumpBit_ui;
 
 #endif /* CRUMP_BIT_PARAMETERS_H_ */

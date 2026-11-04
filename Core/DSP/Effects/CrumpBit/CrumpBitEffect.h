@@ -16,108 +16,203 @@
 
 /*
  * CrumpBit loop geometry (S074_CRUMPBIT_EFFECT.md §3.4; elastic since S091
- * P2 §5.1).
+ * P2 §5.1; retuned in S091 P3 N1).
  *
- * CRUMPBIT_DELAY_CURVE_MAX: the top of the Rate curve, 126,686 samples
- * (2.872 s at 44,108 Hz) = crumpBit_rateTable[127]. It is the whole arena
- * less the 2-sample interpolation guard, and it is a constant on purpose: a
- * future small DTCM change moves the arena, not the meaning of a saved `rte`.
+ * CRUMPBIT_DELAY_CURVE_MAX: the top of the Rate curve, 126,654 samples
+ * (2.871 s at 44,108 Hz) = crumpBit_rateTable[127]: the arena less one
+ * 32 B granule and the 2-sample interpolation guard. S091 P3 grew the
+ * runtime by 16 B; whether `.dtcmz` then crosses a 32 B boundary (moving
+ * `_sfxbuf` up one granule, 126,688 -> 126,656 B) depends on how LTO packs
+ * the DTCM statics (the measured S091 P3 build absorbed it in padding). The
+ * curve top is set to the smaller arena, so `rte` 127 fits either way (N1,
+ * user); a 126,688 B arena leaves 32 B unused.
  * CRUMPBIT_LOOP_MAX_BYTES: the longest loop CrumpBit seats, the curve top plus
- * the guard (126,688 B, a multiple of 32, the arena size at S091). One byte
- * per 8-bit mono sample. A larger share is not used beyond it; a smaller share
- * (voice units claimed from the top) shortens the loop, and the Rate row and
- * the DSP target are clamped to what it holds (the loop is elastic).
+ * the guard (126,656 B, a multiple of 32). A
+ * larger share is not used beyond it; a smaller share (voice units claimed
+ * from the top) shortens the loop, and the Rate row and the DSP target are
+ * clamped to what it holds (the loop is elastic).
  * CRUMPBIT_LOOP_MIN_SHARE_BYTES: the share left at this arena size with all
- * twelve voice units claimed (73,696 B, 1.671 s): declared as
- * buffer_min_bytes. CrumpBit still works below it (down to CRUMPBIT_LOOP_MIN
- * samples); the field is declarative.
+ * twelve voice units claimed (73,664 B): declared as buffer_min_bytes.
+ * CrumpBit still works below it (down to CRUMPBIT_LOOP_MIN samples); the
+ * field is declarative.
  * Accessors: CrumpBitEffect.c, EffectsManager.c (registry row).
  * Affiliates: FxBuffer.h FXBUF_VOICE_UNIT_*, tools/plots/gen_crumpbit_tables.py
  * (RATE_MAX), tools/diagnostic_tools/link_budget.py (FXBUF size).
  */
-#define CRUMPBIT_DELAY_CURVE_MAX       126686.0f
-#define CRUMPBIT_LOOP_MAX_BYTES        126688u
+#define CRUMPBIT_DELAY_CURVE_MAX       126654.0f
+#define CRUMPBIT_LOOP_MAX_BYTES        126656u
 #define CRUMPBIT_LOOP_MIN_SHARE_BYTES                                   \
     (CRUMPBIT_LOOP_MAX_BYTES -                                          \
      FXBUF_VOICE_UNIT_COUNT * FXBUF_VOICE_UNIT_BYTES)
 
 /*
- * CrumpBit runtime (76 B since S091 P2, a member of EffectsManager's DTCM
- * runtime union; it fills the union exactly, so the union does not grow).
+ * Single-line tape state: `dly` and `cmb` (engine A; S091 P3 §2.2).
  *
- * What: the per-sample DSP state and the last resolved row values. Audio (the
- * 8-bit loop) lives in the FxBuffer Effect share, never here. Fields are
- * ordered by size (no padding inside); the comment of each says its stage
- * owner (S091 P2 §4: shared, delay sub-type, output).
- * Delay sub-type:
- * - length: the loop length in samples/bytes (0 = not seated yet);
- * - write_pos: the next loop index to write (0..length-1);
- * - valid: samples written since the loop was last treated as empty,
- *   saturating at length. Reads further back than this are muted, which
- *   gives "clear unless you adopt" without a bulk clear;
- * - delay: the current delay in samples, gliding towards the per-block
- *   target (tape style); never above length - 2 (crumpBit_seat());
- * - dc_x, dc_y: the in-loop DC blocker's previous input and output (S091
- *   P2; mandatory once feedback can exceed unity);
- * - tone_s: the one-pole state of the `ton` tilt on the feedback return;
- * - mix_raw .. tone_raw: the delay rows from write_param();
- * - mix_prev, feedback_prev, pan_prev: the raw rows the previous block
- *   ramped to. S091 P2 recomputes each ramp origin from them instead of
- *   storing four floats (-16 B; the origin is a pure function of the raw
- *   row, so the result is the same);
- * - primed: 0 until the first block sets delay directly to its target (no
- *   glide on entry).
- * Shared stages:
- * - ac_y_*: the AC-coupling (one-pole high-pass) output memory per channel;
- * - ac_c_*: the previous data-line code per channel, 0..255 (S091 R4; it
- *   replaced the float input memory ac_x_*). int16_t since S091 P2 (-4 B;
- *   loaded and stored once per block). crumpBit_init() seeds 128, silence;
- *   the zeroed union value 0 would be a full-scale step;
- * - bit_off, bit_invert: the data-line masks;
- * - svf_*: the output filter's two TPT integrator states per channel;
- * - filter_type, filter_freq, filter_reso: the output rows;
- * - filter_type_prev, filter_reso_prev: the rows the previous block's output
- *   mix ramped to (the origin of this block's coefficient ramp).
- * Why here: EffectsManager zeroes the union and calls init() when the type
- * becomes active; the union is 76 B (StereoFilter), so CrumpBit needs no
- * RAM of its own.
- * Accessors: CrumpBitEffect.c only; no other module may keep a pointer.
- * Affiliates: effects_runtime_t, M4 (size guard),
- * EFFECTS_MIXER_DSP_REFERENCE.md §4.2, STORAGE_SRAM_MANIFEST.md.
+ * What: the S091 P2 delay state, now one member of the sub-type union.
+ * - length, write_pos, valid: the COMMON PREFIX of every single-line
+ *   sub-type (`dly`, `cmb`, `pit`): loop length in bytes (0 = unseated), the
+ *   next index to write, and the samples written since the loop was last
+ *   treated as empty (reads further back are muted). It sits at offset 0 in
+ *   each of them, so a switch between them keeps the recording (§2.4);
+ * - delay: the gliding delay in samples (tape glide; never above
+ *   length - 2);
+ * - dc_x, dc_y: the in-loop DC blocker memories (feedback can exceed 1);
+ * - tone_s: the one-pole state of the `ton` tilt on the feedback return.
+ * Size: 28 B. Accessors: CrumpBitEffect.c only.
  */
 typedef struct {
-    uint32_t length;           /* delay */
-    uint32_t write_pos;        /* delay */
-    uint32_t valid;            /* delay */
-    float delay;               /* delay */
-    float dc_x;                /* delay: DC blocker input memory */
-    float dc_y;                /* delay: DC blocker output memory */
-    float tone_s;              /* delay: tone tilt pole state */
-    float ac_y_l;              /* shared: AC coupling */
-    float ac_y_r;              /* shared: AC coupling */
-    float svf_l1;              /* output: TPT band integrator, left */
-    float svf_l2;              /* output: TPT low integrator, left */
-    float svf_r1;              /* output: TPT band integrator, right */
-    float svf_r2;              /* output: TPT low integrator, right */
-    int16_t ac_c_l;            /* shared: previous code, left */
-    int16_t ac_c_r;            /* shared: previous code, right */
-    uint8_t bit_off;           /* shared */
-    uint8_t bit_invert;        /* shared */
-    uint8_t mix_raw;           /* delay */
-    uint8_t feedback_raw;      /* delay */
-    uint8_t rate;              /* delay */
-    uint8_t sync;              /* delay */
-    uint8_t pan_raw;           /* delay */
-    uint8_t tone_raw;          /* delay */
-    uint8_t filter_type;       /* output */
-    uint8_t filter_freq;       /* output */
-    uint8_t filter_reso;       /* output */
-    uint8_t mix_prev;          /* delay: ramp origin */
-    uint8_t feedback_prev;     /* delay: ramp origin */
-    uint8_t pan_prev;          /* delay: ramp origin */
-    uint8_t filter_type_prev;  /* output: ramp origin */
-    uint8_t filter_reso_prev;  /* output: ramp origin */
-    uint8_t primed;            /* delay */
+    uint32_t length;
+    uint32_t write_pos;
+    uint32_t valid;
+    float delay;
+    float dc_x;
+    float dc_y;
+    float tone_s;
+} CrumpBitTapState;
+
+/*
+ * Pitch-shifter state: `pit` (engine B; S091 P3 §3.2).
+ *
+ * What: the common prefix (length, write_pos, valid, as CrumpBitTapState),
+ * then phase: the rotating-head phase, an unsigned 0.32 fraction of a turn
+ * that wraps by integer overflow (head A trails the write head by
+ * 2 + W*phase, head B by 2 + W*(phase + 1/2), the half turn being one
+ * 32-bit add), and the same feedback-return memories as the tape (dc_x,
+ * dc_y, tone_s).
+ * Size: 28 B. Accessors: CrumpBitEffect.c only.
+ */
+typedef struct {
+    uint32_t length;
+    uint32_t write_pos;
+    uint32_t valid;
+    uint32_t phase;
+    float dc_x;
+    float dc_y;
+    float tone_s;
+} CrumpBitPitchState;
+
+/*
+ * Granular state: `grn` (engine B'; S091 P3 §3.3).
+ *
+ * What: the share is split into a record line (first half) and a delay line
+ * (second half) of `length` samples each, written at the same write_pos.
+ * - write_pos, length, valid: 16-bit, because a line is at most 63,328
+ *   samples (half the arena);
+ * - age: the samples since grain A started (grain B is half a grain later);
+ * - pos_a, pos_b: the grains' read positions in the record line, 16.16 fixed
+ *   point (integer part = sample index; drop-sample reads, user G6);
+ * - inc_a, inc_b: their pitch steps, signed Q3.12 (ratio x 4096; negative =
+ *   reversed); pos += inc << 4 per sample;
+ * - dc_x, dc_y: the delay line's feedback DC blocker;
+ * - amp_a, amp_b, pan_a, pan_b: each grain's level and pan (0..255), drawn
+ *   at its restart from `amp` and `wid`.
+ * The delay-line tap has no state: it reads exactly D = R behind the write
+ * head, with no tape glide (user, 2026-11-04: not wanted in `grn`); a
+ * change of R jumps.
+ * Size: 32 B (the union's largest member). Accessors: CrumpBitEffect.c.
+ */
+typedef struct {
+    uint16_t write_pos;
+    uint16_t length;
+    uint16_t valid;
+    uint16_t age;
+    uint32_t pos_a;
+    uint32_t pos_b;
+    int16_t inc_a;
+    int16_t inc_b;
+    float dc_x;
+    float dc_y;
+    uint8_t amp_a;
+    uint8_t amp_b;
+    uint8_t pan_a;
+    uint8_t pan_b;
+} CrumpBitGrainState;
+
+/*
+ * Reverb state: `rvb` (engine C; S091 P3 §3.4).
+ *
+ * What: the share is used as 32-bit words, one per sample, each holding the
+ * four FDN lines' 8-bit values (one lane per line). write_pos and length are
+ * in words; valid counts words written since the loop was treated as empty
+ * (the wet path and the line feedback open per block once it covers the
+ * longest line); damp[4] are the per-line one-pole states of the `ton`
+ * damping.
+ * Size: 28 B. Accessors: CrumpBitEffect.c only.
+ */
+typedef struct {
+    uint32_t write_pos;
+    uint32_t length;
+    uint32_t valid;
+    float damp[4];
+} CrumpBitReverbState;
+
+/*
+ * CrumpBit runtime (88 B since S091 P3, a member of EffectsManager's DTCM
+ * runtime union; user-approved growth up to +32 B, 2026-11-04).
+ *
+ * What: a SHARED part used by every sub-type (stages 1, 3 and 4 and all row
+ * bytes), then a UNION of the sub-engines' DSP states (stage 2).
+ * Shared part (56 B):
+ * - ac_y_*, ac_c_*: stage 1 AC coupling (outputs; previous codes, int16,
+ *   seeded 128 by init);
+ * - svf_*: the output filter's two TPT integrators per channel (stage 4);
+ * - row bytes, written by write_param() whatever the sub-type: their
+ *   meaning changes per sub-type, their storage does not (plan §2.2);
+ * - subtype: the resolved `sub` row; active_subtype: the engine that ran
+ *   last block. A difference triggers crumpBit_enter() (plan §2.4);
+ * - *_prev: the raw rows the previous block ramped to (ramp origins);
+ * - primed: 0 until the first block of a tape sub-type starts its glide on
+ *   the target;
+ * - drv_reserved: the deferred output-filter drive row's byte (plan OQ6).
+ * Union (32 B): one of the five states above.
+ * Why here: EffectsManager zeroes the union and calls init() when the type
+ * becomes active. Accessors: CrumpBitEffect.c only; no other module may keep
+ * a pointer. Affiliates: effects_runtime_t, the size guard in
+ * CrumpBitEffect.c, STORAGE_SRAM_MANIFEST.md.
+ */
+typedef struct {
+    float ac_y_l;              /* stage 1 */
+    float ac_y_r;              /* stage 1 */
+    float svf_l1;              /* stage 4: TPT band integrator, left */
+    float svf_l2;              /* stage 4: TPT low integrator, left */
+    float svf_r1;              /* stage 4: TPT band integrator, right */
+    float svf_r2;              /* stage 4: TPT low integrator, right */
+    int16_t ac_c_l;            /* stage 1: previous code, left */
+    int16_t ac_c_r;            /* stage 1: previous code, right */
+    uint8_t bit_off;           /* row 3, shared */
+    uint8_t bit_invert;        /* row 4, shared */
+    uint8_t mix_raw;           /* row 5, shared: the mix stage */
+    uint8_t feedback_raw;      /* row 6, sub-type row */
+    uint8_t rate;              /* row 7, sub-type row */
+    uint8_t subtype;           /* row 8, shared: resolved sub-type */
+    uint8_t sync;              /* row 9, sub-type row */
+    uint8_t pan_raw;           /* row 10, sub-type row */
+    uint8_t tone_raw;          /* row 11, sub-type row */
+    uint8_t filter_type;       /* row 12, shared */
+    uint8_t filter_freq;       /* row 13, shared */
+    uint8_t filter_reso;       /* row 14, shared */
+    uint8_t aux_raw;           /* row 15, sub-type row (pitch) */
+    uint8_t grain_st2;         /* row 16, grn */
+    uint8_t grain_st3;         /* row 17, grn */
+    uint8_t grain_spread;      /* row 18, grn */
+    uint8_t grain_density;     /* row 19, grn */
+    uint8_t grain_amp;         /* row 20, grn */
+    uint8_t grain_width;       /* row 21, grn */
+    uint8_t active_subtype;    /* the engine that ran last block */
+    uint8_t mix_prev;          /* mix stage ramp origin */
+    uint8_t feedback_prev;     /* sub-type ramp origin */
+    uint8_t pan_prev;          /* sub-type ramp origin */
+    uint8_t filter_type_prev;  /* stage 4 ramp origin */
+    uint8_t filter_reso_prev;  /* stage 4 ramp origin */
+    uint8_t primed;            /* tape glide primed */
+    uint8_t drv_reserved;      /* deferred drive row (plan OQ6) */
+    uint8_t pad;               /* alignment of the union */
+    union {
+        CrumpBitTapState tap;      /* dly, cmb */
+        CrumpBitPitchState pit;    /* pit */
+        CrumpBitGrainState grn;    /* grn */
+        CrumpBitReverbState rvb;   /* rvb */
+    } u;
 } CrumpBitRuntime;
 
 /* DSP operations for the registry row (init, export, write, process, share). */
@@ -188,5 +283,36 @@ uint8_t crumpBit_rateLimit(const fx_share_t *share);
  * Affiliates: stepScale_ticksQ8(), stepScale_formatShort().
  */
 uint8_t crumpBit_syncDivision(uint8_t rate, uint16_t bpm, float max_samples);
+
+/*
+ * Sub-engine helpers shared with the page (S091 P3).
+ *
+ * crumpBit_subtypeRateLimit(): the largest `rte` whose length fits the share
+ * under one sub-type's law (delay curve, comb table, pitch window, a `grn`
+ * half line, the `rvb` word buffer); the effective_max op and the Rate label
+ * use it. crumpBit_grainMaxSamples(): the longest `grn` time, one half line
+ * less the guard. crumpBit_combNote(): the MIDI note a `cmb` `rte` plays
+ * (112 - rte, clamped at 96), for the note-name label.
+ * Inputs: sub-type id, share (may be NULL), or the raw `rte`. Outputs: as
+ * named. Accessors: CrumpBitEffect.c, crumpBit_uiFormatValue3().
+ */
+uint8_t crumpBit_subtypeRateLimit(uint8_t subtype, const fx_share_t *share);
+float crumpBit_grainMaxSamples(const fx_share_t *share);
+uint8_t crumpBit_combNote(uint8_t rate);
+
+/*
+ * Per-sub-type FX lane maps (S091 P3 §2.9).
+ *
+ * What: the 16-entry lane -> row table for one `sub` value. Nine lanes are
+ * shared by every map (0 Morph, 1 bof, 2 biv, 3 mix, 7 vol, 8 pan, 11 typ,
+ * 12 frq, 13 res; lane 3 `mix` is never freeable); the seven-lane pool
+ * (4, 5, 6, 9, 10, 14, 15) is assigned per sub-type (user L1/L2). The `dly`
+ * map is the S091 P2 table, so `.fx` files round-trip unchanged.
+ * Input: the `sub` value (anything above the last id reads the last map).
+ * Output: a const 16-entry table in flash.
+ * Accessors: crumpBit_ops.lane_map (EffectsManager's effects_laneTable());
+ * defined in CrumpBitEffect.c beside the ops table (host-tested, CB9).
+ */
+const uint8_t *crumpBit_laneMap(uint8_t variant);
 
 #endif /* CRUMP_BIT_EFFECT_H_ */

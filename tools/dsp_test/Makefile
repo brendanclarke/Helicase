@@ -9,9 +9,11 @@
 #               sequencer           modules/sequencer.c (+ break build)
 #               instrument_manager  modules/instrument_manager.c (+ 2 breaks)
 #               samples             modules/samples.c (+ break build)
-#               crumpbit            modules/crumpbit.c (+ 5 breaks: P2 Sync
+#               crumpbit            modules/crumpbit.c (+ 9 breaks: P2 Sync
 #                                   key, R4 AC seed, P2 flat tone, P2 seat
-#                                   delay clamp, P2 Rate-limit probe)
+#                                   delay clamp, P2 Rate-limit probe; P3
+#                                   wet around the mix stage, grain freeze,
+#                                   pitch direction, lane map)
 #               crumpbit_tables     tools/plots/gen_crumpbit_tables.py --check
 #               sampleoptimize      modules/sampleoptimize.py
 #               special_tags        check_special_tags.py
@@ -256,8 +258,9 @@ voicefold: | $(GEN)
 fold_tables:
 	cd $(ROOT) && python3 tools/plots/gen_fold_tables.py --check
 
-# S091 P1/P2: the real CrumpBitEffect.c and its generated tables against
-# the references in modules/crumpbit.c (laws CB1-CB9; CB1-CB4 bit-exact).
+# S091 P1/P2/P3: the real CrumpBitEffect.c and its generated tables against
+# the references in modules/crumpbit.c (laws CB1-CB15; CB1-CB4 and CB10
+# bit-exact).
 # Break proofs:
 #   - the Sync search key ignoring the live share limit (key = target
 #     instead of min(target, max)) must fail CB1 (S091 P2; the S091 P1
@@ -270,8 +273,16 @@ fold_tables:
 #   - the seat without its delay clamp (a share shrink leaves the delay
 #     longer than the loop) must fail the CB4 seat invariant;
 #   - the Rate-limit search without its eighth probe (seven steps reach
-#     only 127 entries, so the whole arena would give 126) must fail CB6.
-CB_GEN := $(GEN)/cb_fxbuf.c $(GEN)/cb_effects.c $(GEN)/cb_params.c \
+#     only 127 entries, so the whole arena would give 126) must fail CB6;
+#   - S091 P3: the `rvb` wet added around the mix stage (mix 0 no longer
+#     the dry signal) must fail CB10;
+#   - the `grn` freeze ignored (the record line keeps recording) must fail
+#     CB14;
+#   - the `pit` phase step with its sign flipped (+12 st plays -12) must
+#     fail CB13;
+#   - a granular row on a `pit` lane must fail CB9.
+CB_GEN := $(GEN)/cb_fxbuf.c $(GEN)/cb_efftypes.c $(GEN)/cb_effects.c \
+          $(GEN)/cb_params.c \
           $(GEN)/cb_stepscale.c $(GEN)/cb_stepscale.h \
           $(GEN)/cb_tables.h $(GEN)/cb_tables.c \
           $(GEN)/CrumpBitEffect.host.h $(GEN)/CrumpBitEffect.host.c
@@ -284,13 +295,20 @@ crumpbit: | $(GEN)
 	  --macro FXBUF_HANDOFF_POINTER_COUNT \
 	  --macro FXBUF_HANDOFF_EFFECT_POINTER_BASE \
 	  --macro FXBUF_STATE_EFFECT_WRITTEN --out $(GEN)/cb_fxbuf.c
+	$(EX) --src $(ROOT)/Core/DSP/Effects/EffectTypes.h \
+	  --macro EFFECT_SEQ_LANE_COUNT --out $(GEN)/cb_efftypes.c
 	$(EX) --src $(ROOT)/Core/DSP/Effects/EffectsManager.h \
+	  --macro EFFECT_LANE_MORPH_SOURCE --macro EFFECT_LANE_NONE \
 	  --typedef effect_io_t --typedef effect_type_ops_t \
 	  --out $(GEN)/cb_effects.c
 	$(EX) --src $(ROOT)/Core/DSP/Effects/CrumpBit/CrumpBitParameters.h \
 	  --typedef crumpbit_param_t --macro CRUMPBIT_PARAM_COUNT \
 	  --macro CRUMPBIT_ROW_BIT --macro CRUMPBIT_ROWS_SHARED \
-	  --macro CRUMPBIT_ROWS_DELAY --macro CRUMPBIT_TONE_FLAT \
+	  --macro CRUMPBIT_ROWS_SUBTYPE --macro CRUMPBIT_ROWS_GRN \
+	  --macro CRUMPBIT_SUBTYPE_DELAY --macro CRUMPBIT_SUBTYPE_COMB \
+	  --macro CRUMPBIT_SUBTYPE_PITCH --macro CRUMPBIT_SUBTYPE_GRAIN \
+	  --macro CRUMPBIT_SUBTYPE_REVERB --macro CRUMPBIT_SUBTYPE_COUNT \
+	  --macro CRUMPBIT_TONE_FLAT \
 	  --macro CRUMPBIT_FILTER_LP --macro CRUMPBIT_FILTER_HP \
 	  --macro CRUMPBIT_FILTER_BP --macro CRUMPBIT_FILTER_UBP \
 	  --macro CRUMPBIT_FILTER_NOTCH --macro CRUMPBIT_FILTER_PEAK \
@@ -340,7 +358,7 @@ crumpbit: | $(GEN)
 	@if ./build/crumpbit_break3 >/dev/null 2>&1; then \
 	  echo "crumpbit_break3: FAILED (flat-tone break not caught)"; exit 1; \
 	else echo "crumpbit_break3: caught (law CB4 fails as expected)"; fi
-	sed 's/rt->delay = (float)(len - CRUMPBIT_LOOP_GUARD);/(void)0;/' \
+	sed 's/t->delay = (float)(len - CRUMPBIT_LOOP_GUARD);/(void)0;/' \
 	  $(GEN)/CrumpBitEffect.host.c > build/break_cb4/CrumpBitEffect.host.c
 	@grep -q '(void)0;' build/break_cb4/CrumpBitEffect.host.c
 	$(HOSTCC) -Ibuild/break_cb4 $(HOSTFLAGS) modules/crumpbit.c \
@@ -350,7 +368,7 @@ crumpbit: | $(GEN)
 	  exit 1; \
 	else echo "crumpbit_break4: caught (law CB4 fails as expected)"; fi
 	mkdir -p build/break_cb5
-	sed 's/    count += (crumpBit_rateTable\[count\] <= max_samples) ? 1u : 0u;/    (void)0;/' \
+	sed 's/    count += (table\[count\] <= max_samples) ? 1u : 0u;/    (void)0;/' \
 	  $(GEN)/CrumpBitEffect.host.c > build/break_cb5/CrumpBitEffect.host.c
 	@grep -q '    (void)0;' build/break_cb5/CrumpBitEffect.host.c
 	$(HOSTCC) -Ibuild/break_cb5 $(HOSTFLAGS) modules/crumpbit.c \
@@ -359,26 +377,77 @@ crumpbit: | $(GEN)
 	  echo "crumpbit_break5: FAILED (Rate-limit probe break not caught)"; \
 	  exit 1; \
 	else echo "crumpbit_break5: caught (law CB6 fails as expected)"; fi
+	mkdir -p build/break_cb6 build/break_cb7 build/break_cb8 build/break_cb9
+	sed 's/left\[n\] = crumpBit_mixFrame(hl, mid_k \* (e + o) + side_k \* (e - o),/left[n] = mid_k * (e + o) + crumpBit_mixFrame(hl, side_k * (e - o),/' \
+	  $(GEN)/CrumpBitEffect.host.c > build/break_cb6/CrumpBitEffect.host.c
+	@grep -q 'left\[n\] = mid_k \* (e + o) + crumpBit_mixFrame' \
+	  build/break_cb6/CrumpBitEffect.host.c
+	$(HOSTCC) -Ibuild/break_cb6 $(HOSTFLAGS) modules/crumpbit.c \
+	  -o build/crumpbit_break6 -lm
+	@if ./build/crumpbit_break6 >/dev/null 2>&1; then \
+	  echo "crumpbit_break6: FAILED (wet-around-mix break not caught)"; \
+	  exit 1; \
+	else echo "crumpbit_break6: caught (law CB10 fails as expected)"; fi
+	sed 's/k.rec_w = rt->sync ? k.dline : b->base;/k.rec_w = b->base;/' \
+	  $(GEN)/CrumpBitEffect.host.c > build/break_cb7/CrumpBitEffect.host.c
+	@grep -q 'k.rec_w = b->base;' build/break_cb7/CrumpBitEffect.host.c
+	$(HOSTCC) -Ibuild/break_cb7 $(HOSTFLAGS) modules/crumpbit.c \
+	  -o build/crumpbit_break7 -lm
+	@if ./build/crumpbit_break7 >/dev/null 2>&1; then \
+	  echo "crumpbit_break7: FAILED (freeze break not caught)"; exit 1; \
+	else echo "crumpbit_break7: caught (law CB14 fails as expected)"; fi
+	sed 's/((1.0f - crumpBit_ratioOf(semis)) \/ window/((crumpBit_ratioOf(semis) - 1.0f) \/ window/' \
+	  $(GEN)/CrumpBitEffect.host.c > build/break_cb8/CrumpBitEffect.host.c
+	@grep -q '(crumpBit_ratioOf(semis) - 1.0f)' \
+	  build/break_cb8/CrumpBitEffect.host.c
+	$(HOSTCC) -Ibuild/break_cb8 $(HOSTFLAGS) modules/crumpbit.c \
+	  -o build/crumpbit_break8 -lm
+	@if ./build/crumpbit_break8 >/dev/null 2>&1; then \
+	  echo "crumpbit_break8: FAILED (pitch direction break not caught)"; \
+	  exit 1; \
+	else echo "crumpbit_break8: caught (law CB13 fails as expected)"; fi
+	sed 's/        CRUMPBIT_PARAM_AUX, EFFECT_LANE_NONE },/        CRUMPBIT_PARAM_GRAIN_ST2, EFFECT_LANE_NONE },/' \
+	  $(GEN)/CrumpBitEffect.host.c > build/break_cb9/CrumpBitEffect.host.c
+	@grep -q 'CRUMPBIT_PARAM_GRAIN_ST2, EFFECT_LANE_NONE },' \
+	  build/break_cb9/CrumpBitEffect.host.c
+	$(HOSTCC) -Ibuild/break_cb9 $(HOSTFLAGS) modules/crumpbit.c \
+	  -o build/crumpbit_break9 -lm
+	@if ./build/crumpbit_break9 >/dev/null 2>&1; then \
+	  echo "crumpbit_break9: FAILED (lane-map break not caught)"; exit 1; \
+	else echo "crumpbit_break9: caught (law CB9 fails as expected)"; fi
 
 # S091 P2: the committed CrumpBit tables must equal the generator's output.
 crumpbit_tables:
 	cd $(ROOT) && python3 tools/plots/gen_crumpbit_tables.py --check
 
 # S091 ARM gate (needs `make all` at the repository root first):
-#   - every crumpBit_process() loop at or below 126 instructions per frame
-#     on its longest path, with no VDIV: the stage-2 loop (ADC, AC, delay,
-#     feedback return) measures 126 and the stage-3 output-filter loop 31
-#     (S091 P2; the single S091 P1 loop was 98, 111 before S091). --top 3
-#     prints all three heads (stage 2 is entered at two rotated heads);
+#   - S091 P3: each sub-engine's frame loop (stages 1-3, one symbol each,
+#     CRUMPBIT_NOINLINE) at or below its measured longest path, no VDIV:
+#     `dly` 124 and `cmb` 124 (engine A; the S091 P2 loop was 126), `pit`
+#     135 (Q14 integer heads), `grn` 131 (two spans around the one restart
+#     a block can hold, no delay glide; --cond-heads: its cold blocks jump
+#     back with an unconditional `b`, which is not a loop), `rvb` 145;
+#   - crumpBit_process(): the stage-4 output-filter loop, 31 (S091 P2);
 #   - the unrolled Sync search crumpBit_divisionFor() at or below 117
 #     instructions per block (the 128-step walk it replaced was up to
-#     ~2,430), and the Rate-limit search crumpBit_rateLimit() at or below
-#     101 (S091 P2; eight probes, run once per block by effects_service()
-#     through effective_max).
+#     ~2,430), and the table-limit search crumpBit_tableLimit() at or below
+#     63 (S091 P3: the S091 P2 crumpBit_rateLimit() search generalised to
+#     every sub-type's table and kept out of line; eight probes, run once
+#     per block by effects_service() through effective_max).
 crumpbit_elf_check:
 	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
-	  --sym crumpBit_process --top 3 --max 126
+	  --sym crumpBit_runDelay --max 124
+	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
+	  --sym crumpBit_runComb --max 124
+	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
+	  --sym crumpBit_runPitch --max 135
+	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
+	  --sym crumpBit_runGrain --cond-heads --top 2 --max 131
+	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
+	  --sym crumpBit_runReverb --max 145
+	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
+	  --sym crumpBit_process --max 31
 	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
 	  --sym crumpBit_divisionFor --straight --max 117
 	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
-	  --sym crumpBit_rateLimit --straight --max 101
+	  --sym crumpBit_tableLimit --straight --max 63

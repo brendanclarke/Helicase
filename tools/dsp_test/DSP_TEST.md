@@ -35,7 +35,7 @@ tools/dsp_test/
 │   ├── sequencer.c          sequencer.c: the automation drain cursor
 │   ├── instrument_manager.c InstrumentManager.c gate + the osc1_type row
 │   ├── samples.c            SampleMemory/SampleInstall/storageTypes: catalogue, install, order
-│   ├── crumpbit.c           CrumpBitEffect.c: S091 search/ADC/DAC laws and the S091 P2 reference (CB1–CB9)
+│   ├── crumpbit.c           CrumpBitEffect.c: S091 search/ADC/DAC laws, the S091 P2 reference and the S091 P3 sub-type laws (CB1–CB15)
 │   └── sampleoptimize.py    tools/sampleoptimize.py
 ├── spike/                   retry kit: transient, filter drive, D+S (spike/README.md)
 ├── prelude.h                host stand-ins (placement macros, DSP mirrors)
@@ -88,14 +88,16 @@ Everything generated goes to `build/` (`make clean` removes it).
 | `sampleoptimize` | the optimizer never grows a table, keeps `smpl`, keeps subfolders |
 | `special_tags` | descriptor special tags |
 | `stock_tables` | `tools/plots/gen_stock_tables.py --check` |
-| `crumpbit` | CB1 Sync search (live limit) against the S074 walk; CB2 ADC; CB3 code DAC; CB4 whole blocks bit-exact against the S091 P2 reference (stored ramp origins, branch tone, own filter table) with share changes and seat invariants; CB5 init; CB6 tables and Rate limit; CB7 Q ≤ 8; CB8 stability at feedback 1.2; CB9 row ownership. Five break builds |
+| `crumpbit` | CB1 Sync search; CB2 ADC; CB3 code DAC; CB4 `dly` whole blocks bit-exact against the S091 P2 reference (with every P3 row written); CB5 init; CB6 tables and every sub-type's Rate limit; CB7 Q ≤ 8; CB8 stability at feedback 1.2; CB9 row ownership and the per-sub-type lane maps; CB10 the mix stage bit-exact in every sub-type; CB11 sub-type switch storm; CB12 `cmb` tuning and polarity; CB13 `pit` ratio; CB14 `grn` distributions, headroom, freeze, stability; CB15 `rvb` stability, decay, freeze. Nine break builds |
 | `crumpbit_tables` | `gen_crumpbit_tables.py --check`: the committed tables equal the generator |
-| `crumpbit_elf_check` | linked image: every `crumpBit_process` loop ≤ 126 per frame, no VDIV (stage 2 126, output filter 31); `crumpBit_divisionFor` ≤ 117; `crumpBit_rateLimit` ≤ 101 (needs `make all` first; not in `all`) |
+| `crumpbit_elf_check` | linked image: each sub-engine's frame loop at its measured length (`dly`/`cmb` 124, `pit` 135, `grn` 131 with `--cond-heads`, `rvb` 145), the output filter 31, no VDIV; `crumpBit_divisionFor` ≤ 117; `crumpBit_tableLimit` 63 (needs `make all` first; not in `all`) |
 | `all` | all of the above |
 
 `elf_looppath.py --elf build/lxr02.elf --sym NAME [--top K] [--max N]
 [--straight]` reports the longest per-iteration path of a function's loops
 (following out-of-line blocks), or with `--straight` its instruction count.
+`--cond-heads` counts only conditional backward branches as loop heads, for
+functions whose cold blocks jump back unconditionally (`crumpBit_runGrain`).
 
 The ARM tools are run by hand on a build:
 `fpseq.py --obj FILE.o --ref FUNC[:loop] --new FUNC[:loop] --report --all`;

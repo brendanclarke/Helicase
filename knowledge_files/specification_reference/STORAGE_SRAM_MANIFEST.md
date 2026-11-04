@@ -694,7 +694,7 @@ DTCM is single-cycle, uncached, and not reachable by DMA.
 | `audioOutBuffer`, `audioOutBuffer2` | 1,536 each | `.dtcmz`; the two render slots per DAC, `sample_mx_t`, written by the mixer and read by the DMA ISR's pack |
 | `velocityModulators` | 264 | `.dtcmz`; six velocity modulation nodes |
 | `mixer_fx_bus` | 256 | `.dtcmz`; two 32-frame channels, `sample_mx_t` while voices sum, float while the Effect runs |
-| `effects_runtime` | 76 | `.dtcmz`; union holding the active Effect type's DSP state (StereoFilter 76 B: two filter states; CrumpBit 76 B since S091 P2: DC blocker, tone and output-filter state paid for by trims). No spare: a larger member grows the union. |
+| `effects_runtime` | 88 | `.dtcmz`; union holding the active Effect type's DSP state (StereoFilter 76 B: two filter states; CrumpBit 88 B since S091 P3: 56 B shared + 32 B sub-engine union; +12 B, user-approved up to +32 B). No spare: a larger member grows the union. |
 | `busComp` | 32 | `.dtcmz` (S074); master bus compressor state: smoothed power, fast and memory gain reduction, previous gain, pending sidechain weight, crossover low-pass per channel, active pair. Approved up to 32 B; `_Static_assert(<= 32)`. Owner `BusCompressor.c`. |
 | ~~`osc_interp_a`, `osc_interp_b`~~ | ~~64 each~~ | removed S087 P1; 128 B released to arena |
 | `modNode_interpLastStamp`, `modNode_interpReserved` | 1 + 1 | `.dtcmz` (S087); wavetable interpolation slot management |
@@ -715,8 +715,10 @@ DTCM is single-cycle, uncached, and not reachable by DMA.
   the bottom and up to twelve 4,416 B voice units (2,208 16-bit samples,
   50.06 ms at 44,108 Hz; at most two per Instrument slot) from the top. The
   Effect share is at least 73,600 B with all twelve units claimed. CrumpBit
-  (S074), the first arena user, takes the whole share up to 126,688 B since
-  S091 P2 (elastic; its Rate is clamped to the share). The
+  (S074), the first arena user, takes the whole share up to
+  `CRUMPBIT_LOOP_MAX_BYTES` = 126,656 B (S091 P3 N1; the arena is 126,688 or
+  126,656 B depending on LTO's `.dtcmz` packing). It is elastic; its Rate is
+  clamped to the share. The
   system never clears the arena: an owner clears what it reads unless it
   adopts content the handoff record marks valid. Details:
   `EFFECTS_BUS_REFERENCE.md` §7 and `EFFECTS_MIXER_DSP_REFERENCE.md`.

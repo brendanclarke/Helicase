@@ -1018,6 +1018,20 @@ the new copy/clear work is foreground-only and bounded.
     - RAM 0 B (runtime 76 B fills the union); text +3,576 B.
     - Host CB1-CB9, five breaks; gate crumpbit_elf_check.
 
+63. **CHANGED (S091 P3): CrumpBit sub-types.** Four new sub-engines
+    (`cmb` comb, `pit` two-head pitch shifter, `grn` pitched granular
+    plus delay line, `rvb` 8-bit 4-line FDN), one per block by `sub`,
+    each its own frame loop; shared dry path, mix stage and output filter.
+    - Linked worst case per frame (loop + output 31 + per block):
+      `dly` 124 -> 172 (HEAD 173), `cmb` 124 -> 168, `pit` 135 -> 181,
+      `grn` 131 -> 192, `rvb` 145 -> 192. No per-sample VDIV.
+    - Reductions inside the engines: integer 0.32 head phase and Q14
+      head reads (`pit`), VCVT #7 lanes and packed XOR (`rvb`), two
+      spans around the block's one grain restart and no delay glide
+      (`grn`), block fields as locals (all).
+    - RAM +12 B (runtime 88 B); text +12,864 B.
+    - Host CB1-CB15, nine breaks; gate crumpbit_elf_check per engine.
+
 ---
 
 ## Binding Mandates — DSP CPU Policy

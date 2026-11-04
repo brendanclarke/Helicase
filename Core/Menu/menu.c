@@ -14027,8 +14027,15 @@ static uint8_t menu_effectAutomationIsWide(
 }
 
 static void menu_formatEffectAutomationValue3(
+    uint8_t scene, uint16_t target,
     const effect_param_descriptor_t *descriptor, uint8_t value, char *buf)
 {
+    /*
+     * S091 P3 (OQ5): the Scene type may name the value (CrumpBit's `sub`:
+     * dly cmb pit grn rvb instead of 0..4); otherwise the generic text.
+     */
+    if (effects_formatTargetValue3(scene, target, value, buf))
+        return;
     if (menu_effectAutomationIsWide(descriptor))
         numtostrpu(buf, descriptor->expand7(value), ' ');
     else
@@ -14799,6 +14806,7 @@ static void menu_repaintStepAutomation(void)
                     numtostrpu(amt_out, display_value, ' ');
                 } else if (menu_stepAutomationIsEffect(target)) {
                     menu_formatEffectAutomationValue3(
+                        scene, target,
                         menu_stepAutomationEffectDescriptor(scene, target),
                         amt_value, amt_out);
                 } else {
@@ -14907,6 +14915,7 @@ static void menu_repaintStepAutomation(void)
             numtostrpu(&editDisplayBuffer[1][13], display_value, ' ');
         } else if (menu_stepAutomationIsEffect(target)) {
             menu_formatEffectAutomationValue3(
+                scene, target,
                 menu_stepAutomationEffectDescriptor(scene, target),
                 autos[page].value, &editDisplayBuffer[1][13]);
         } else {
@@ -17253,8 +17262,9 @@ static uint8_t menu_cellClearTarget(uint8_t active_page, uint8_t position,
         !effects_paramAutomatable(effects_activeType(), cell.fx.index))
         return 0u;
     out->pattern_target = effectTarget_id(cell.fx.index);
-    (void)effects_laneOfParam(effects_activeType(), cell.fx.index,
-                               &out->fx_lane);
+    /* S091 P3: the active Scene record's lane table (per sub-type). */
+    (void)effects_laneOfParam(scene_effectConst(scene_getActiveIndex()),
+                              cell.fx.index, &out->fx_lane);
     return 1u;
 }
 
