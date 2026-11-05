@@ -28,8 +28,10 @@
   each unit onto the built file, and a check that applying every unit to
   HEAD, bottom-up, rebuilds each built file byte for byte. Nothing was
   retyped.
-- **Status:** **implemented** on 2026-11-04 (HEAD `11397377`); static gates
-  pass, hardware H1–H9 pending. The running log is §9.
+- **Status:** **implemented and accepted on hardware** (user,
+  2026-11-04). Implemented on HEAD `11397377`. Static gates pass (§10), and
+  on the board no sub-type exceeds the previous worst case (§11). The
+  running log is §9.
 - **Constraints:**
   - CPU: the user accepted **≈ 195 per frame for the whole Effect**
     (2026-11-04). Every sub-type measures ≤ ≈ 192 worst case (§2).
@@ -8032,3 +8034,20 @@ None of these affects code or gates.
 - S091 P2 is still untested on hardware (H0). P3's `dly` is bit-exact to P2
   on the host (CB4), so a P2 problem would show in both.
 - The doc lines in §10.3.
+
+---
+
+## 11. Acceptance (user, 2026-11-04)
+
+- **Hardware: accepted.** The user ran the image on the board.
+  - The sub-types work.
+  - No engine exceeds the previous worst case, so H1 is passed for every
+    sub-type, including `grn` and `rvb` (linked ≈ 192 per frame).
+- **S091 P2** (H0) is accepted with it.
+- **Deferred to a separate task (user):**
+  - how the parameters appear (names, value text, layouts);
+  - how individual parameters are handled;
+  - the stale reference-doc lines of §10.3.
+
+  `S091_P4_GRN_TWEAKS.md` describes `grn` as built, as the starting point
+  for its part of that work.

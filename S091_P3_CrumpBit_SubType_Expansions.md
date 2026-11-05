@@ -2,9 +2,12 @@
 
 - **Date:** 2026-11-04. **Branch:** `dev-ph7-voice_expansion`. The code
   baseline is S091 P2 as landed (`S091_P2_Implementation.md` §10).
-- **Status:** general plan; no code. S091 P2 is not yet tested on hardware
-  (H0–H10). Every budget below rests on P2's *linked* counts, so the P2
-  hardware result comes first.
+- **Status:** **accepted on hardware (user, 2026-11-04).** Implemented
+  per `S091_P3_Implementation.md` (assessment §10). On the board, no
+  sub-type exceeds the previous worst case. The parameter presentation and
+  handling are deferred to a separate task (`S091_P4_GRN_TWEAKS.md` for
+  `grn`). §11 records the acceptance. (Originally a general plan, written
+  while S091 P2 was untested.)
 - **Request (user):** sub-types besides the delay:
   - pitch shift;
   - comb filter and other buffer uses;
@@ -1169,3 +1172,32 @@ the sub-types allow:
 - **Budget:** `dly`, `cmb`, `pit`, `rvb` and core `grn` are below ≈ 191 by
   estimate. `grn` with rows 19–21 is the one open case (N2). The switching
   block is measured in P3.0.
+
+---
+
+## 11. Acceptance (user, 2026-11-04)
+
+- **Implemented** by `S091_P3_Implementation.md`.
+  - The repository code is byte-identical to the pre-verified schedule,
+    plus one warning fix in `StereoFilterEffect.c` (that document, §9–§10).
+  - Static gates: CB1–CB15, nine breaks, per-engine ELF counts, mixer and
+    oscillator loops unchanged, image 707,020 B.
+- **Hardware: accepted.**
+  - The five sub-types (`dly cmb pit grn rvb`) work on the board.
+  - None exceeds the previous worst case. The linked whole-Effect worst
+    cases per frame are `dly` 172, `cmb` 168, `pit` 181, `grn` 192,
+    `rvb` 192, against pre-S091 ≈ 191 and the accepted ≈ 195.
+  - S091 P2 is accepted with it: `dly` is bit-exact to P2 on the host.
+- **Differences from this plan, as built:**
+  - **No delay glide in `grn`** (user): the delay tap reads exactly D = R.
+    The runtime is therefore 88 B (+12 B), not 92 B.
+  - **The arena granule did not move** in the built image (FXBUF still
+    126,688 B at `0x20001120`). The N1 constants are correct either way.
+  - **`rte` is re-clamped every block** (BUFFER_DEPENDENT re-apply), not
+    through a new manager call.
+  - **One `grn` restart candidate per block,** with the frame loop split at
+    the block's single restart.
+- **Deferred to a separate task (user):** how the parameters appear
+  (names, value text, layouts) and how individual parameters are handled.
+  For `grn` the starting point is `S091_P4_GRN_TWEAKS.md`. The output-filter
+  and tone drives stay deferred (OQ6).
