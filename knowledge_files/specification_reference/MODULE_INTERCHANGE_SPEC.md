@@ -2198,6 +2198,7 @@ midiDin_init(); usb_init(); adc_checkPots();
 filesystem_bootLoggingBegin();
 filesystem_devIwdgBootCheck();
 filesystem_initCardAndMountBlocking();
+filesystem_trimDirectoryTailsBlocking(); // S090 P3: boot-time FAT directory tail repair
 menu_init();                 // memset on parameter_values — do NOT also memset in main()
 preset_loadGlobals();        // settings.cfg
 // Kit/Scene/Bank/Pattern library scans and .hcindex creation

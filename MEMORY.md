@@ -20,33 +20,7 @@ make all && make img   →   build/LXRV2_lxr02.img   (use `make all`: bare `make
 
 **Commits belong to the user.** Do not suggest or prompt when to commit.
 
-**S090 P1 implemented** (2026-10-31, on `7f8b5d07`): Load/Save names while
-playing. The Instrument `kit` source is a 129 B Preset RAM snapshot instead of
-`.hctmp.<ext>`, Menu `.hcnames` entry reads are served from a VALID mirror,
-same-type Instrument index reuse, and type steps are admitted over (and cancel)
-a running index read. Static gates pass; hardware H1–H27 pending.
-S090 log: `knowledge_files/log_archive/090_SESSION_HANDOFF_LOG.md`.
-**S090 P2 implemented** (2026-10-31): Load/Save drops a running AutoSave drain;
-all start-up AutoSave work runs in boot stage 13 before `audioCodec_init()`
-(full CPU, bounded 30 s no-progress / 120 s cap); a failed settle sets the 1 B
-`autosave_boot_hold` so nothing is written until the user changes something.
-Static gates pass (payload 685,388 B); hardware P1–P17 pending. Notes:
-`S090_P2_IMPLEMENTATION.md` §14.
-**S090 P3/P4/P5** (2026-11-01): P3 boot directory trim works; Scene Save
-still hung and type changes took 5–6 s (P4, `SD_CARD_TEST_5`). P5 batches
-cached rows/lines/entries per tick (15 µs), adds a production 12 s Load/Save
-watchdog (`W<op><phase>` error), Load/Save use of the full-queue window, and
-the `w` owner trace. The first image froze at boot (`w` fed the trace
-flush; fixed, §9). Hardware T1–T9 pending. Notes:
-`S090_P5_IMPLEMENTATION.md`; the hang's root cause waits for the `W…` code.
-**S091 P3 implemented** (2026-11-04): CrumpBit sub-types (`dly cmb pit grn
-rvb`), the shared MIX stage, per-sub-type names/layouts/lane maps, and the
-88 B runtime (56 B shared + 32 B union). Static gates pass (payload
-707,020 B; CB1–CB15, nine breaks; per-engine ELF counts); hardware H1–H9
-pending. Notes: `S091_P3_Implementation.md` §9.
-S088 log: `knowledge_files/log_archive/088_SESSION_HANDOFF_LOG.md`.
-S087 log: `knowledge_files/log_archive/087_SESSION_HANDOFF_LOG.md`.
-Working notes: `knowledge_files/volatile/S088_WORKING_NOTES.md`.
+Session logs: `knowledge_files/log_archive/` (index `000_SESSION_INDEX.md`).
 Host tests: `tools/dsp_test/modules/` (one file per module, `make -C tools/dsp_test all`);
 effects retry kit (transient, filter drive, D+S): `tools/dsp_test/spike/README.md`.
 No frozen snapshots are kept; copy the files to `build/` before an edit that needs a before/after.
@@ -215,6 +189,17 @@ is in the referenced session logs and specification documents.
   change; a failed settle sets `autosave_boot_hold` (1 B, SRAM1, `Autosave.c`),
   cleared only by an accepted scalar/Pattern mark or a tracking lifecycle
   change. `bank_revalidateVoiceEditMasks()` runs before the stage (D3).
+- **Boot-time directory tail trim (S090 P3):**
+  `filesystem_trimDirectoryTailsBlocking()` repairs FAT directories whose
+  trailing deleted entries lost the end-of-directory marker. It scans root,
+  `/Scene`, `/Kit`, `/Bank`, `/Pattern`, `/Instrument` and every Instrument
+  subdirectory. One-time repair; subsequent boots skip clean directories.
+  Without this, every FAT lookup that misses early reads the entire
+  directory at 16 bytes per main-loop pass.
+- **Stall detection (S090 P3/P5):** HCNAMES and Flush Finish have a 50,000-poll
+  stall bound (DEV). The runtime Load/Save watchdog (12 s, every build) covers
+  all chained operations and shows `W<op><phase>` on trip. Stall snapshots
+  include the open AsyncFATFS handle count and the SD refused-command counter.
 - **Load/Save never freezes (S090 P5, user):** covered facade operations end
   after `FS_LOADSAVE_WATCHDOG_MS` without progress (every build). Load/Save
   row/line/entry loops batch cached work per tick
@@ -237,6 +222,26 @@ is in the referenced session logs and specification documents.
   truncation/saturation; DMA Normal non-cacheable + `DSB` after pack; ITCM
   growth = RAM under approval policy.
 - **Measuring flash:** `link_budget.py` warns < 16 KiB. Use `make all` first.
+- **CPU ceiling (S089 P2, binding):** no per-sample DSP cost may increase.
+  Worst-case Scene reached 100 % on the `cpu` widget. Any new DSP feature
+  must be paid for by an equal or larger measured saving, gated with
+  `elf_loopdump.py`, `elf_hotloops.py`, and the inlined-set diff. The unused
+  margin under WFd budgets is not headroom. `CPU_USE_DSP_AUDIT.md` item 64.
+- **Mixer byte size is NOT a cost measure (S089 P0 F3).** LTO re-spends freed
+  inline budget. Gate mixer-path changes on `elf_hotloops.py` + inlined-set
+  symbol diff, not on the mixer function's byte size.
+- **Voice chain (`voice_chain`, S089 P1):** `chn` selector in each engine
+  struct (`chainType` uint8_t). `VOICE_CHAIN_DEFAULT` (0, T+D) =
+  bit-identical to pre-S089. `VOICE_CHAIN_WAVEFOLDER` (1, WFd) = wavefolder
+  replaces transient + drive. SRR gated by `instrumentManager_slotUsesSrr()`.
+  `voiceFold.c/.h` owns WFd fold types and loops.
+- **Drum FM ramp twins (S089 P3):** `osc_renderTypedFmRamp()` dispatches
+  ramped FM copies for `slp`/`smp`/`wtb` in Drum `fm` only. Stock carriers
+  keep the S088 pass. Originals are untouched (Cymbal/HiHat still use them).
+  ITCM 15,240 / 16,384 B after P3.
+- **ITCM subsection order (S089):** linker script pins `.itcm.s089` then
+  `.itcm.s089p3`. New ITCM code goes in a new `.itcm.sNNN` subsection after
+  the last one. Never edit an existing ITCM function's section attribute.
 - **Oscillator run modes (S088, `osc1_run`):** `rst` must stay bit-identical.
   `fre` never resets the carrier phase; `itp` resets it and crossfades the
   old carrier (`OscCarrierSnapshot`, 28 B) for 132 samples, rendered plain
@@ -257,6 +262,10 @@ Unresolved decisions, code gaps, and deferred work.
   combined `menu_loadSaveLogicalCount()` list; it must give the encoder's
   type sequence for the context (top level, or the selected track's
   Instrument types). `S090_P4_STILL_NOT_FIXED.md` §0.
+- **C3-3, Scene Save hang root-cause fix (S090 P3/P5, carried):** the
+  watchdog will show the stuck operation and phase (or the save will
+  complete) on the next hardware test. The leading hypothesis is AsyncFATFS
+  handle exhaustion. See `090_SESSION_HANDOFF_LOG.md` §4.4.
 - **Flash image check (D-C1):** keep permanently or remove — still undecided.
   `flashImage.c` checks a stamped CRC32 per sector; mismatch shows
   `Img BAD s:…` and waits for BAR1.
@@ -466,10 +475,12 @@ Full 58-step annotated boot sequence: `MODULE_INTERCHANGE_SPEC.md`
 1. `EXTI_IMR = 0` must be first.
 2. `lcd_init()` before `lcd_tim7_init()`.
 3. All SD boot ops complete before `audioCodec_init()`.
-4. `sequencerTimer_init()` (TIM3) after `audioCodec_init()`.
+4. `filesystem_trimDirectoryTailsBlocking()` runs after mount, before
+   `settings.cfg` and index reads (S090 P3).
 5. `bank_revalidateVoiceEditMasks()` then boot stage 13
    (`filesystem_settleAutosaveBlocking()`) run between `liveRec_init()` and
    `audioCodec_init()`; `preset_startDrumsetApply()` stays after the codec.
+6. `sequencerTimer_init()` (TIM3) after `audioCodec_init()`.
 
 ---
 

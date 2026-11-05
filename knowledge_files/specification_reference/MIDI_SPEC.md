@@ -419,6 +419,10 @@ unchanged (identity, as in step automation).
   to `itp`. Appended after `osc1_type`, so its NRPN number (slot × 64 +
   index) and MIDI Learn row follow automatically with no renumbering. It is
   a selector: one value per step when automated, never morphed.
+- `voice_chain` (`chn`, S089): 0 `T+D`, 1 `WFd`; values above 1 clamp to
+  `WFd`. Appended after `osc1_run`, same append-only numbering rule. A
+  selector: one value per step when automated, never morphed, not an LFO or
+  velocity target.
 - The only translation is the Morph amounts (§5.2).
 - WIDE8 Effect rows expand through the Effect type's 7-bit expansion, as
   automation does.

@@ -947,9 +947,22 @@ the new copy/clear work is foreground-only and bounded.
     `mixer_faderGains()`, once per slot per block: one multiply-add and one
     compare per slot. Negligible; no per-sample cost.
 
+### Session 089 P0 (per-instrument SRR enable)
+
+57. **CHANGED (S089 P0): conditional SRR.** `instrumentManager_slotUsesSrr()`
+    gates `mixer_decimateBlock()` per slot. Returns 1 for Drum/Snare/Cymbal/
+    HiHat default chains. The S&H loop (10 instructions/sample) is unchanged
+    and opcode-identical to HEAD. Mixer grew by 340 B (13,508 → 13,848) from
+    the predicate branch; inlined set unchanged; 36 hot loops equal, 0 shrank,
+    1 grew (dry-mix layout case 27→28, same executed instructions). `.bss`
+    412,884 B unchanged. No new RAM. Flash +336 B.
+58. **REVERTED (S089 P0 follow-up): integer S&H.** Q31 packed halfword pair
+    reduced the S&H from 10 to 7 instructions per slot. Built and verified;
+    reverted by user decision. Record: `S089_P0_NEW_SRR_DISABLE.md` §8.
+
 ### Session 089 P2 additions (record in `S089_P2_IMPLEMENTATION.md`)
 
-57. **ADDED (S089 P2): WFd fold loops.** `voiceFold.c`: five per-sample
+59. **ADDED (S089 P2): WFd fold loops.** `voiceFold.c`: five per-sample
     loops in `.itcm.s089` (one is selected per block) and one non-inlined
     per-block entry, `voiceFold_process()`, in flash. Measured on the
     linked build with `elf_loopdump.py`:
@@ -968,16 +981,16 @@ the new copy/clear work is foreground-only and bounded.
     sample (assessment F4). Every loop is branch-free (|x| is an IT block).
     `voiceFold_process()` does the per-block setup (type, frq, depth,
     decay, ramp constants) once per voice per block.
-58. **ADDED (S089 P2): `voicePost_gainDist()`.** The no-add twin of
+60. **ADDED (S089 P2): `voicePost_gainDist()`.** The no-add twin of
     `voicePost_addGainDist()`, used by Cymbal/HiHat under WFd. The linked
     mixer shows two 21-instruction per-sample loops (one inlined per
     engine), in place of the 25-instruction add versions under T+D
     (−4 per sample).
-59. **CHANGED (S089 P2): chain dispatch.** One `chainType` branch per
+61. **CHANGED (S089 P2): chain dispatch.** One `chainType` branch per
     engine render (and per trigger/async snap path). With `chainType` 0 the
     T+D path runs as before: `elf_hotloops.py` on the P0 mixer vs this
     mixer reports 31 hot loops equal, 6 shrank, 0 grew.
-60. **CHANGED (S089 P2): ITCM and flash.** ITCM 12,656 → 13,032 B
+62. **CHANGED (S089 P2): ITCM and flash.** ITCM 12,656 → 13,032 B
     (+376 B; D4): the fold loops only, after `voiceFold_process()` (1,036 B)
     moved to flash (assessment F2; it was 13,960 B as first delivered). No
     existing ITCM function moved; only the three linker veneers were laid
@@ -986,9 +999,43 @@ the new copy/clear work is foreground-only and bounded.
     unchanged, but `.data` 420 → 424 B shifts the start of `.bss` by 8 B
     (`STORAGE_SRAM_MANIFEST.md`, S089 P2).
 
+### Session 089 P3 (Drum FM depth ramp efficiency)
+
+63. **REDUCED (S089 P3): Drum FM depth ramp folded into carrier loops.**
+    Option B: ramped twins of the 3 dearest FM carriers (`slp`, `smp`, `wtb`
+    blend) replace the separate 10-instruction depth-ramp pass. Each twin =
+    original + 1 `vadd.f32`. Flash dispatcher `osc_renderTypedFmRamp()`
+    selects by `oscType`; stock carriers keep the S088 pass unchanged.
+
+    | Carrier | Today | Folded | Saving |
+    |---|---:|---:|---:|
+    | `slp` (`osc_slpFmRampBlock`) | 90 | 81 | −9 |
+    | `wtb` blend (`osc_wtbFmBlendRampBlock`) | 86 | 77 | −9 |
+    | `smp` (`osc_smpFmRampBlock`) | 82 | 73 | −9 |
+
+    Twin hot loops: `slp` 51/40, `smp` 43, `wtb` blend 47/43, `wtb`
+    fallback 33/35 — each original + 1. ITCM 13,032 → 15,240 B
+    (`.itcm.s089p3`, 2,208 B). Text 683,512 B (+2,280 B vs P2). `.bss`
+    412,884 B unchanged. Mixer: 39 hot loops equal, 0 shrank, 0 grew.
+    Host laws FR1 (unarmed = original, S0) and FR2 (armed ramp endpoints).
+    Hardware H1–H6 pending at S089 handoff.
+
+### Session 089 CPU ceiling (binding, S089 P2 §8)
+
+64. **BINDING (S089 P2): no per-sample DSP cost may increase.** The
+    worst-case Scene reached 100 % on the `cpu` widget after P2. The user
+    declared: "absolutely no possibility to increase anything at this point."
+    This covers every voice engine, chain, oscillator mode/type, the mixer,
+    the bus, and the Effects. Any new DSP feature must be paid for by an equal
+    or larger measured saving elsewhere, gated with `elf_loopdump.py`,
+    `elf_hotloops.py`, and the inlined-set diff, and confirmed on the `cpu`
+    widget. A new chain/fold may only replace stages within its measured
+    budget. The unused margin under WFd budgets is not headroom — the
+    worst-case Scene is set by the dearest settings across the system.
+
 ### Session 091 P1 (record in `S091_P1_Reductions_Implementation.md`)
 
-61. **REDUCED (S091 P1): CrumpBit (`cbt`), bit-identical (S0).** Item 27
+65. **REDUCED (S091 P1): CrumpBit (`cbt`), bit-identical (S0).** Item 27
     under-counted the type: the S078 Sync walk ran all 128 StepScale
     positions every block (128 × 12–19 = 1,536–2,432 instructions,
     ≈ 48–76 per frame), on top of a 111-instruction per-sample loop
@@ -1004,7 +1051,7 @@ the new copy/clear work is foreground-only and bounded.
     - Host laws CB1–CB5 bit-exact (`make -C tools/dsp_test crumpbit`);
       gate `crumpbit_elf_check`. Hardware: H1–H6 of the schedule.
 
-62. **GREW WITHIN THE S091 SAVING (S091 P2): CrumpBit expansion.**
+66. **GREW WITHIN THE S091 SAVING (S091 P2): CrumpBit expansion.**
     Elastic delay (whole arena), feedback to 1.2, DC blocker, tone tilt
     and a cubic soft knee on the return, and a stereo TPT output filter
     (eight voice types, Q <= 8) as a second pass. Drives deferred.
@@ -1018,7 +1065,7 @@ the new copy/clear work is foreground-only and bounded.
     - RAM 0 B (runtime 76 B fills the union); text +3,576 B.
     - Host CB1-CB9, five breaks; gate crumpbit_elf_check.
 
-63. **CHANGED (S091 P3): CrumpBit sub-types.** Four new sub-engines
+67. **CHANGED (S091 P3): CrumpBit sub-types.** Four new sub-engines
     (`cmb` comb, `pit` two-head pitch shifter, `grn` pitched granular
     plus delay line, `rvb` 8-bit 4-line FDN), one per block by `sub`,
     each its own frame loop; shared dry path, mix stage and output filter.
@@ -1032,7 +1079,7 @@ the new copy/clear work is foreground-only and bounded.
     - RAM +12 B (runtime 88 B); text +12,864 B.
     - Host CB1-CB15, nine breaks; gate crumpbit_elf_check per engine.
 
-64. **CHANGED (S091 P4): CrumpBit `grn` rework, filter balance.** Grains
+68. **CHANGED (S091 P4): CrumpBit `grn` rework, filter balance.** Grains
     triggered by Density independently of Length, flat-top windows with
     exact 128-frame crossfades, steal-oldest, per-grain overwrite clamp,
     anchored freeze, own delay-time curve; shared `bal` (per-channel
@@ -1043,7 +1090,7 @@ the new copy/clear work is foreground-only and bounded.
     - RAM +12 B (runtime 100 B); text +2,840 B.
     - Host CB1-CB16, twelve breaks.
 
-65. **REDUCED (S091 P5): CrumpBit sub-type efficiencies.** User cap: 170
+69. **REDUCED (S091 P5): CrumpBit sub-type efficiencies.** User cap: 170
     instructions per frame for the whole Effect, every sub-type, worst
     case, gated by `crumpbit_cpu_check`. Q14 tape read (`dly`/`cmb`);
     drop-sample `pit` heads; low-pass-only `rvb` damping; `fbk`/`dpn` per

@@ -357,6 +357,14 @@ A nonzero pending byte in END means `autosave_boot_hold` was set (owned work
 waits for the next user mutation). The decoder's stage-`s` branch is in
 `tools/diagnostic_tools/decode_devlogs.py`.
 
+S090 P3 adds lowercase `d` (`AUTOSAVE_TRACE_STAGE_DIRTRIM`): one record per
+repaired or failed directory during the boot-time FAT directory tail trim
+(`filesystem_trimDirectoryTailsBlocking()`). `flags` = directory id (0 root,
+1 /Scene, 2 /Kit, 3 /Bank, 4 /Pattern, 5 /Instrument, 6+ Instrument
+subdirectories) | status bits. `value` = live entry count | deleted entries
+cut << 16. The decoder's stage-`d` branch is in
+`tools/diagnostic_tools/decode_devlogs.py`. 0 B of state (boot only, stack).
+
 The S075 value vocabulary is:
 
 | Group | Codes |

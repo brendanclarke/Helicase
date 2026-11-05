@@ -7,6 +7,22 @@ be performed when the opportunity arises, not blocking items for current work.
 
 ## Hardware soak / confirmation
 
+- **S090 P5 Load/Save speed and watchdog T1–T9 (HIGH PRIORITY):**
+  - T1: Load page type cycling (Kit→Scene→Bank→Pattern) — names appear
+    faster than before; trace `w` lines give each index-read duration
+  - T2: Save page, same
+  - T3: Nested Instrument Load type steps — faster than before
+  - T4: Scene Save to a new slot — completes, OR within ~12 s the error
+    overlay shows `W...` code. **Write down the code.** Then wait 10 s, power off
+  - T5: T4 ×3, plus a save over an existing slot — each completes or ends
+    with a `W...` code; never a permanent `...`
+  - T6: Kit, Bank, Pattern Save — complete or end with a code
+  - T7: Listen — no audio dropouts (CPU widget should not change during
+    Load/Save)
+  - T8: Same tests with playback stopped — not slower than before
+  - T9: Leave a page during a save — no change in behaviour
+  - **Bring back:** the `W...` code(s) and the SD card (`asavetrc.bin`);
+    the `w` records and site-12 snapshot decide the C3-3 root-cause fix
 - **S091 P4 CrumpBit H1–H9 (still open):** the sub-type and `grn` checks in
   `S091_P4_IMPLEMENTATION.md`.
 - **S091 P5 CrumpBit efficiencies HW1–HW9:**
@@ -21,6 +37,13 @@ be performed when the opportunity arises, not blocking items for current work.
     audio (one-pole, `res` `---`, no extra click)
   - HW8: `bof`/`biv` from the page and fast FX lanes (table rebuild)
   - HW9: dense random Density with steals (no clicks at grain ends)
+- **S089 P3 Drum FM ramp efficiency H1–H6 (open):**
+  - H1: boot and play Drum `fm` with `slp`/`smp`/`wtb` — sounds correct
+  - H2: A/B against the P2 image with `fm` carriers — no audible difference
+  - H3: worst-case Scene `cpu` reads lower than P2
+  - H4: `itp` on `fm` carriers — smooth crossfade
+  - H5: Scene switch between `fm` types — no glitch
+  - H6: non-`fm` Drum sounds unchanged
 - **S088 P0 run modes hardware matrix H1–H17 (HIGH PRIORITY):**
   - H1: `rst` A/B (bit-identical to pre-S088 on real hardware)
   - H7/H8: `itp` audible / decayed retrigger

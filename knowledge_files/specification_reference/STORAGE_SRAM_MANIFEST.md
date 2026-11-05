@@ -23,6 +23,15 @@ changing any of it.
     SRAM1 `.bss` (`filesystem.c`), every build; `fs_trace_owner_op` +
     `fs_trace_owner_phase`, **2 B** SRAM1 `.bss`, `DEV_MODE_LOGGING` only.
     DEV link bss 413,020 -> 413,028 (alignment); text 690,072.
+- **S090 P3 changes (2026-10-31):** Load/Save defect correction — Save-page
+  names, input lock during index reads, Scene Save freeze from FAT directory
+  bloat (`S090_P3_LOAD_SAVE_DEFECT_CORRECTION.md`).
+  - **Added (approved):** `refused_run` in `sdcardTransportSnapshot_t`,
+    **2 B** SRAM1 `.bss` (`sdcard_lxr02.c`): consecutive refused READ/WRITE
+    commands, part of the stall snapshot. The 50,000-poll HCNAMES/Flush Finish
+    stall bound shares the existing Flush Finish observer statics (0 B new).
+  - **Stack only:** `afatfsTrimTail_t` and directory-trim locals (boot only).
+  - Build after P3: text 688,936, bss 413,020. Logging off: text 668,856.
 - **S090 P2 changes (2026-10-31):** Load/Save drops AutoSave; start-up
   AutoSave work moves before audio (`S090_P2_IMPLEMENTATION.md`).
   - **Added (approved):** `autosave_boot_hold`, **1 B** SRAM1 `.bss`
@@ -78,6 +87,16 @@ changing any of it.
     S089 P0. DTCM is unchanged. This is the layout-shift pattern named in
     `S089_P0_NEW_SRR_DISABLE.md` F4; if hardware misbehaves with every slot
     on `T+D`, suspect layout before the fold code.
+- **S089 P3 changes (2026-10-30):** Drum FM depth ramp efficiency.
+  - ITCM: 13,032 → **15,240 B** (+2,208 B): four ramped FM carrier twins
+    in `.itcm.s089p3` (`osc_smpFmRampBlock`, `osc_slpFmRampBlock`,
+    `osc_wtbFmBlendRampBlock`, `osc_wtbFmRampBlock`). Placed after
+    `.itcm.s089` by the linker script; all existing ITCM addresses stable.
+    ITCM free: **1,144 B**.
+  - Program flash: text 681,232 → **683,512 B** (+2,280 B): the dispatcher
+    `osc_renderTypedFmRamp()` in flash, plus the Drum `fm` branch rewrite.
+  - `.data` 424 B and `.bss` 412,884 B unchanged from P2.
+  - No new RAM. Engine structs unchanged.
 - **S088 P1 changes (2026-10-29):** fader smoothing and float-through
   distortion.
   - DTCM: `mixer_fader_smooth[6]` (24 B, `INDTCMZ`) for the block-rate

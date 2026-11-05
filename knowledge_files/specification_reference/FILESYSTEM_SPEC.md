@@ -954,6 +954,38 @@ remain invisible; they are safe to delete.
 `/.hcrepair` roll-forward was planned but is not implemented. Current repair is
 ordered rename/sync behavior, not a journal or power-loss recovery protocol.
 
+### Boot-time directory tail trim (S090 P3)
+
+FAT directories that accumulate trailing deleted entries with no
+end-of-directory marker degrade every lookup: a create, absence probe,
+remove rescan or rename collision scan that does not find its target early
+must read the entire directory (at 16 bytes per SD burst, one burst per
+main-loop pass while playing). The root cause is an older AsyncFATFS
+allocator that placed every new name at the end marker, leaving deleted pairs
+behind after each HCNAMES publication. The current allocator reuses deleted
+holes first, but an affected card stays slow until the trailing entries are
+cleaned.
+
+`filesystem_trimDirectoryTailsBlocking()` runs at boot before any `.hcnames`
+or index reads (before `settings.cfg`, before the settle stage). It calls
+`asyncfatfs_trimDirectoryTailBegin()` / `asyncfatfs_trimDirectoryTailContinue()`
+on each directory: root, `/Scene`, `/Kit`, `/Bank`, `/Pattern`,
+`/Instrument`, and every subdirectory found in `/Instrument` (enumerated so
+future instrument types need no code change; bound 64). The function scans
+to the marker or allocated end; if deleted entries follow the last live entry,
+it writes a zero (end-of-directory marker) in the first deleted slot (one
+sector write). Only free entries change; no FAT change. A sync follows.
+
+One-time repair: subsequent boots skip clean directories. Slot folders
+(Scene/Bank/Kit numbered directories and their Kit subfolders) are not
+visited — they are removed and recreated whole on overwrite, so they never
+gain a tail.
+
+Trace stage `d` records each repaired or failed directory (id, flags, live
+entries, deleted entries cut).
+
+RAM: 0 B (trim state on the stack; boot only).
+
 **Kit/Scene/Bank content validation is lazy, not boot-blocking (Session 057).**
 Boot no longer opens or parses any Kit/Instrument payload; it only
 canonicalizes names and generates `.hcindex` (the old
@@ -1881,6 +1913,16 @@ Current keys by family:
   Values above 2 clamp to `itp`. Dtype: `DTYPE_ON_OFF` with the high-nibble
   tag `ONOFF_TAG_OSC_RUN` (1); the low nibble stays `DTYPE_ON_OFF`, so an
   older firmware that ignores the tag reads it as a 0/1 on/off cell.
+  `voice_chain` (S089): 0 `T+D` (Trns+Drv, the default chain), 1 `WFd`
+  (WavFldr, wavefolder). Missing key defaults to 0 (the pre-S089 sound).
+  `INSTRUMENT_PARAM_FLAG_SELECTOR` — not morphable, not an LFO/velocity
+  target, stored single-ended, applied before the Morph image. Step-
+  automatable with one value per step and no ramp. Values above 1 clamp
+  to WFd. Dtype: `DTYPE_ON_OFF` with high-nibble tag `ONOFF_TAG_VOICE_CHAIN`
+  (2). Bound via `IM_SPECIAL_VOICE_CHAIN` to `chainType` in each engine
+  struct. Under WFd the transient page's `wav`/`vol`/`frq` cells drive the
+  fold type/depth/secondary control; the stored `transient_wave` byte is
+  reinterpreted as a fold type index (0–7) and clamped only when rendered.
   `osc2_mod_type` (Drum) stores 0 `fm`, 1 `mix`, 2 `snc`, 3 `rng`
   (S085). 0 and 1 keep their pre-S085 meaning; the key is written by
   every save, so older files carry 0 or 1. A byte above 3 plays and shows

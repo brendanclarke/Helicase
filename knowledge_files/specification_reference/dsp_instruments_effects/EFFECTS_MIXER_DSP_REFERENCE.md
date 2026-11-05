@@ -117,7 +117,15 @@ Policy).
    `srt`) was removed in S075; `mixer_decimation_rate[]` has six entries, and
    a Scene at the former neutral 127 is bit-identical (×1.0f is exact). At
    rate 1.0 every sample passes (the loop still runs: the constant-CPU rule
-   and audit item 11).
+   and audit item 11). **Since S089 P0:** the call is gated on
+   `instrumentManager_slotUsesSrr(slot)`, which returns 1 for Drum/Snare/
+   Cymbal/HiHat under their default chain and 0 otherwise. A chain without
+   SRR (e.g. a future chain type) skips the S&H and may spend its 10
+   instructions/sample in its own stages. The predicate depends only on the
+   instrument type and chain selector, never on the `srt` value or voice
+   activity. An unknown/empty slot outputs silence (no DC from a stale held
+   sample). The `srt` value is still written to `mixer_decimation_rate[]`
+   under all chains so switching back to T+D restores it.
 3. **Fader gains** (`mixer_faderGains()`):
    - `volume` = the instrument's `vol` (0..1); `fader` = the slider
      (after block-rate smoothing, see below); `send` = the effective FX
