@@ -92,41 +92,77 @@ typedef struct {
 } CrumpBitPitchState;
 
 /*
- * Granular state: `grn` (engine B'; S091 P3 §3.3).
+ * Granular state: `grn` (engine B'; S091 P3, reworked in S091 P4,
+ * S091_P4_GRN_TWEAKS.md Part A).
  *
  * What: the share is split into a record line (first half) and a delay line
- * (second half) of `length` samples each, written at the same write_pos.
- * - write_pos, length, valid: 16-bit, because a line is at most 63,328
- *   samples (half the arena);
- * - age: the samples since grain A started (grain B is half a grain later);
- * - pos_a, pos_b: the grains' read positions in the record line, 16.16 fixed
- *   point (integer part = sample index; drop-sample reads, user G6);
- * - inc_a, inc_b: their pitch steps, signed Q3.12 (ratio x 4096; negative =
- *   reversed); pos += inc << 4 per sample;
- * - dc_x, dc_y: the delay line's feedback DC blocker;
- * - amp_a, amp_b, pan_a, pan_b: each grain's level and pan (0..255), drawn
- *   at its restart from `amp` and `wid`.
- * The delay-line tap has no state: it reads exactly D = R behind the write
- * head, with no tape glide (user, 2026-11-04: not wanted in `grn`); a
- * change of R jumps.
- * Size: 32 B (the union's largest member). Accessors: CrumpBitEffect.c.
+ * (second half) of `length` samples each (N), written at the same
+ * write_pos. Two grain voices, A and B, read the record line; each is
+ * triggered by Density, independently of its Length.
+ * - pos_a, pos_b: the voices' read positions in the record line, 16.16
+ *   fixed point (integer part = sample index; drop-sample reads, user G6);
+ * - countdown: frames from the next block start to the next Density
+ *   trigger. 32-bit: a random interval reaches 2 N (126,656 frames);
+ * - fit_key (S091 P5 G6, in the 4 B the delay line's DC blocker `dc_x`
+ *   held until G4 removed it): the tempo and line length the cached
+ *   Position fit was worked out for, BPM | N << 16. A line is at least
+ *   CRUMPBIT_GRAIN_LINE_MIN long while the engine runs, so the zeroed key
+ *   (enter, init, the manager's union clear) never matches and the first
+ *   block works the fit out;
+ * - reserved (S091 P5): the 4 B of G4's former `dc_y`, free; kept so the
+ *   state stays 44 B and the runtime 100 B (no layout change elsewhere);
+ * - inc_a, inc_b: the voices' pitch steps, signed Q3.12 (ratio x 4096;
+ *   negative = reversed); pos += inc x 16 per frame;
+ * - age_a, age_b: frames since the voice started (saturating at its end);
+ * - end_a, end_b: the frames the voice sounds, L + 128, latched at its
+ *   start (0 = idle): a fade-in over the first 128 frames, flat, and a
+ *   fade-out over the 128 frames after its Length L, so back-to-back
+ *   grains crossfade with complementary fades (the copy setting is
+ *   seamless, plan A1.9). A steal sets end = age + 128 + pad (the
+ *   fade-out starts at once, from a held 1 for `pad` frames). S091 P5 G3:
+ *   every end lands on a block boundary (a grain's span is rounded down, a
+ *   steal's pad rounds its end up), so a voice never runs past its end
+ *   inside a block. A voice is free once age >= end;
+ * - write_pos, length (N), valid: 16-bit (a line is at most 63,328);
+ * - anchor: the record head position when freeze began (positions are
+ *   measured from it while frozen, plan A3.3); CRUMPBIT_GRAIN_NO_ANCHOR
+ *   (0xFFFF, above any line) while not frozen;
+ * - pan_a, pan_b: each voice's pan byte (0 left .. 127 centre .. 254
+ *   right), drawn at its start from `wid` (plan A1.4);
+ * - pending: a stolen voice's deferred trigger (plan A3.1): 0 = none, else
+ *   1 + the frames from the next block start to the trigger;
+ * - fit (S091 P5 G6, the former alignment byte): the cached Position fit,
+ *   how many rhythmic stops (0..16, shortest first) fit one line at the
+ *   tempo in fit_key (crumpBit_grainStopFit()).
+ * The delay-line tap has no state: it reads exactly D behind the write
+ * head, D from the `rte` delay-time curve (no glide, user).
+ * Size: 44 B (the union's largest member; S091 P4: +12 B over the S091 P3
+ * 32 B, inside the user's +32 B approval). Accessors: CrumpBitEffect.c.
  */
 typedef struct {
+    uint32_t pos_a;
+    uint32_t pos_b;
+    uint32_t countdown;
+    uint32_t fit_key;
+    uint32_t reserved;
+    int16_t inc_a;
+    int16_t inc_b;
+    uint16_t age_a;
+    uint16_t age_b;
+    uint16_t end_a;
+    uint16_t end_b;
     uint16_t write_pos;
     uint16_t length;
     uint16_t valid;
-    uint16_t age;
-    uint32_t pos_a;
-    uint32_t pos_b;
-    int16_t inc_a;
-    int16_t inc_b;
-    float dc_x;
-    float dc_y;
-    uint8_t amp_a;
-    uint8_t amp_b;
+    uint16_t anchor;
     uint8_t pan_a;
     uint8_t pan_b;
+    uint8_t pending;
+    uint8_t fit;
 } CrumpBitGrainState;
+
+/* `anchor` while not frozen: above any line length (lines <= 63,328). */
+#define CRUMPBIT_GRAIN_NO_ANCHOR   0xFFFFu
 
 /*
  * Reverb state: `rvb` (engine C; S091 P3 §3.4).
@@ -147,24 +183,33 @@ typedef struct {
 } CrumpBitReverbState;
 
 /*
- * CrumpBit runtime (88 B since S091 P3, a member of EffectsManager's DTCM
- * runtime union; user-approved growth up to +32 B, 2026-11-04).
+ * CrumpBit runtime (100 B since S091 P4; 88 B in S091 P3; a member of
+ * EffectsManager's DTCM runtime union; user-approved growth up to +32 B over
+ * 76 B, 2026-11-04).
  *
  * What: a SHARED part used by every sub-type (stages 1, 3 and 4 and all row
  * bytes), then a UNION of the sub-engines' DSP states (stage 2).
- * Shared part (56 B):
+ * Shared part (54 B used, 2 B padding before the union since S091 P5):
  * - ac_y_*, ac_c_*: stage 1 AC coupling (outputs; previous codes, int16,
  *   seeded 128 by init);
- * - svf_*: the output filter's two TPT integrators per channel (stage 4);
+ * - svf_*: the output filter's two TPT integrators per channel (stage 4).
+ *   S091 P5 F1: in `grn` and `rvb` the filter is a one-pole whose state is
+ *   svf_l1/svf_r1 (svf_*2 rest); crumpBit_enter() moves the state between
+ *   the two forms on a switch;
  * - row bytes, written by write_param() whatever the sub-type: their
  *   meaning changes per sub-type, their storage does not (plan §2.2);
  * - subtype: the resolved `sub` row; active_subtype: the engine that ran
  *   last block. A difference triggers crumpBit_enter() (plan §2.4);
- * - *_prev: the raw rows the previous block ramped to (ramp origins);
+ * - *_prev: the raw rows the previous block ramped to (ramp origins: the
+ *   mix stage and the output filter's type and resonance). S091 P5 S1 removed
+ *   feedback_prev and pan_prev: `fbk` and `dpn` take their target at the
+ *   block start, so they have no origin to keep;
  * - primed: 0 until the first block of a tape sub-type starts its glide on
  *   the target;
- * - drv_reserved: the deferred output-filter drive row's byte (plan OQ6).
- * Union (32 B): one of the five states above.
+ * - drv_reserved: the deferred output-filter drive row's byte (plan OQ6);
+ * - filter_bal: row 22 (S091 P4), the output filter's stereo balance; it
+ *   took the alignment byte, so the shared part stays 56 B.
+ * Union (44 B, `grn` the largest): one of the five states above.
  * Why here: EffectsManager zeroes the union and calls init() when the type
  * becomes active. Accessors: CrumpBitEffect.c only; no other module may keep
  * a pointer. Affiliates: effects_runtime_t, the size guard in
@@ -196,17 +241,15 @@ typedef struct {
     uint8_t grain_st3;         /* row 17, grn */
     uint8_t grain_spread;      /* row 18, grn */
     uint8_t grain_density;     /* row 19, grn */
-    uint8_t grain_amp;         /* row 20, grn */
+    uint8_t grain_length;      /* row 20, grn: Length (S091 P4) */
     uint8_t grain_width;       /* row 21, grn */
     uint8_t active_subtype;    /* the engine that ran last block */
     uint8_t mix_prev;          /* mix stage ramp origin */
-    uint8_t feedback_prev;     /* sub-type ramp origin */
-    uint8_t pan_prev;          /* sub-type ramp origin */
     uint8_t filter_type_prev;  /* stage 4 ramp origin */
     uint8_t filter_reso_prev;  /* stage 4 ramp origin */
     uint8_t primed;            /* tape glide primed */
     uint8_t drv_reserved;      /* deferred drive row (plan OQ6) */
-    uint8_t pad;               /* alignment of the union */
+    uint8_t filter_bal;        /* row 22, shared: filter balance (P4) */
     union {
         CrumpBitTapState tap;      /* dly, cmb */
         CrumpBitPitchState pit;    /* pit */
@@ -288,17 +331,55 @@ uint8_t crumpBit_syncDivision(uint8_t rate, uint16_t bpm, float max_samples);
  * Sub-engine helpers shared with the page (S091 P3).
  *
  * crumpBit_subtypeRateLimit(): the largest `rte` whose length fits the share
- * under one sub-type's law (delay curve, comb table, pitch window, a `grn`
- * half line, the `rvb` word buffer); the effective_max op and the Rate label
- * use it. crumpBit_grainMaxSamples(): the longest `grn` time, one half line
+ * under one sub-type's law (delay curve, comb table, pitch window, the `grn`
+ * delay-time curve within a half line at the current tempo (S091 P4), the
+ * `rvb` word buffer); the effective_max op and the Rate label use it.
+ * crumpBit_grainMaxSamples(): the longest `grn` delay or lag, one half line
  * less the guard. crumpBit_combNote(): the MIDI note a `cmb` `rte` plays
  * (112 - rte, clamped at 96), for the note-name label.
+ * crumpBit_grainPosLimit() (S091 P4): the largest `dpn` (Position) value in
+ * `grn` whose rhythmic lag fits a half line at the current tempo; values at
+ * or below 63 (follow, scatter) are never limited (plan A1.8, A3.4). S091
+ * P5 A: the page label and host law CB6 use it; the DSP clamps the stop
+ * itself with the same fit (crumpBit_grainStopFit()), so `dpn` is no longer
+ * BUFFER_DEPENDENT and the manager never clamps it.
  * Inputs: sub-type id, share (may be NULL), or the raw `rte`. Outputs: as
  * named. Accessors: CrumpBitEffect.c, crumpBit_uiFormatValue3().
  */
 uint8_t crumpBit_subtypeRateLimit(uint8_t subtype, const fx_share_t *share);
 float crumpBit_grainMaxSamples(const fx_share_t *share);
 uint8_t crumpBit_combNote(uint8_t rate);
+uint8_t crumpBit_grainPosLimit(const fx_share_t *share);
+
+/*
+ * `grn` rhythmic stop of a Position or Density value (S091 P4, plan A1.8).
+ *
+ * What: the knob value -> index into crumpBit_grainStopCc (0 = /64 .. 15 =
+ * 1br), or CRUMPBIT_GRAIN_NO_STOP outside the rhythmic half.
+ * - Position: 64..127 (positive) -> (v - 64) / 4: four values per stop,
+ *   shortest first, so turning up plays later.
+ * - Density: 64 is +1 (one trigger per N, not a stop); 65..127 -> 15 -
+ *   (v - 65) x 16 / 63: the longest stop (1br) first, shorter periods (more
+ *   grains) as the knob turns up.
+ * Why shared: the DSP and the page label must name the same division.
+ * Inputs: the stored row value. Output: 0..15 or CRUMPBIT_GRAIN_NO_STOP.
+ * Accessors: crumpBit_runGrain(), crumpBit_grainPosLimit(),
+ * crumpBit_uiFormatValue3().
+ */
+#define CRUMPBIT_GRAIN_NO_STOP   0xFFu
+
+static inline uint8_t crumpBit_grainPosStop(uint8_t value)
+{
+    return (value > 63u) ? (uint8_t)((value - 64u) / 4u)
+                         : (uint8_t)CRUMPBIT_GRAIN_NO_STOP;
+}
+
+static inline uint8_t crumpBit_grainDenStop(uint8_t value)
+{
+    return (value > 64u)
+        ? (uint8_t)(15u - ((uint32_t)(value - 65u) * 16u) / 63u)
+        : (uint8_t)CRUMPBIT_GRAIN_NO_STOP;
+}
 
 /*
  * Per-sub-type FX lane maps (S091 P3 §2.9).

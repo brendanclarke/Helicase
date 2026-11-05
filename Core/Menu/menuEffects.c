@@ -11,7 +11,8 @@
  * Effect page implementation (contract in menuEffects.h).
  *
  * Layout (plan §13.2, A39):
- *   SELECT 1  screen 0: typ out vol pan    screen 1: run len scl mrp
+ *   SELECT 1  screen 0: typ out vol pan    screen 1: mrp run len scl
+ *     (S091 P4, user: `mrp` first on the second page, for every type)
  *   SELECT 2..8: type-specific rows 3..63 (N <= 61), 4 per screen, S =
  *     ceil(N / 28) screens per button (1..3), filled button by button.
  *   A type with select_layout overrides SELECT 2..8 (up to 4 screens each;
@@ -179,9 +180,13 @@ static uint8_t menuEffects_cellAt(uint8_t sub_page, uint8_t screen,
         screen >= menuEffects_screenCount(sub_page))
         return 0u;
     if (sub_page == 0u) {
+        /*
+         * SELECT 1 screen 1, manager-owned for every type: S091 P4 (user)
+         * puts the Effect Morph amount first: mrp run len scl.
+         */
         static const uint8_t second[MENU_FX_CELLS] = {
-            MENU_FX_CELL_RUN, MENU_FX_CELL_LENGTH,
-            MENU_FX_CELL_SCALE, MENU_FX_CELL_MORPH_AMOUNT
+            MENU_FX_CELL_MORPH_AMOUNT, MENU_FX_CELL_RUN,
+            MENU_FX_CELL_LENGTH, MENU_FX_CELL_SCALE
         };
         if (screen == 1u) {
             out->kind = second[column];

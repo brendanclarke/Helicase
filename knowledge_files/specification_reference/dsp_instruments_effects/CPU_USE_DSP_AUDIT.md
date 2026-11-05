@@ -1032,6 +1032,35 @@ the new copy/clear work is foreground-only and bounded.
     - RAM +12 B (runtime 88 B); text +12,864 B.
     - Host CB1-CB15, nine breaks; gate crumpbit_elf_check per engine.
 
+64. **CHANGED (S091 P4): CrumpBit `grn` rework, filter balance.** Grains
+    triggered by Density independently of Length, flat-top windows with
+    exact 128-frame crossfades, steal-oldest, per-grain overwrite clamp,
+    anchored freeze, own delay-time curve; shared `bal` (per-channel
+    output-filter coefficients).
+    - Linked worst case per frame: `grn` 131 -> 136 loop, ~192 -> ~201
+      whole Effect; `dly`/`cmb`/`pit`/`rvb` +0.7 (`bal`). No per-sample
+      VDIV.
+    - RAM +12 B (runtime 100 B); text +2,840 B.
+    - Host CB1-CB16, twelve breaks.
+
+65. **REDUCED (S091 P5): CrumpBit sub-type efficiencies.** User cap: 170
+    instructions per frame for the whole Effect, every sub-type, worst
+    case, gated by `crumpbit_cpu_check`. Q14 tape read (`dly`/`cmb`);
+    drop-sample `pit` heads; low-pass-only `rvb` damping; `fbk`/`dpn` per
+    block (`mix` keeps its ramp, user); stage 1 through a 256 B table;
+    `grn`: Position clamped in the engine (cached fit), grain ends on block
+    boundaries and no window lower clamp, plain echo below unity; a one-pole
+    output filter in `grn`/`rvb`.
+    - Linked worst case per frame: `dly` 174.2 -> 160.0, `cmb` 170.3 ->
+      153.8, `pit` 183.6 -> 153.6, `grn` 203.0 -> 166.5, `rvb` 194.9 ->
+      163.9. No per-sample VDIV.
+    - RAM +260 B `.bss` (SRAM1); runtime 100 B unchanged; text +456 B.
+    - Rejected after measurement: X3 (filter in the engine loops, +6..+13),
+      R3 (+1.1), V2 (no saving), V4 (hardware: the reciprocal table is up
+      to 10 cycles per sample slower; `VDIV` overlaps other work on the
+      M7). Plan: `S091_P5_SUBTYPE_EFFICIENCIES.md` §5.
+    - Host CB1-CB19, eighteen breaks.
+
 ---
 
 ## Binding Mandates — DSP CPU Policy

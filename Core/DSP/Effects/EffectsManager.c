@@ -52,8 +52,9 @@ static const effect_param_descriptor_t effects_off_descriptors[] = {
 typedef union {
     StereoFilterRuntime stereo_filter;
     /*
-     * S074: 56 B; S091 P2: 76 B; S091 P3: 88 B (a shared part plus a 32 B
-     * union of five sub-engine states; user-approved growth up to +32 B).
+     * S074: 56 B; S091 P2: 76 B; S091 P3: 88 B; S091 P4: 100 B (a shared
+     * part plus a 44 B union of five sub-engine states, the reworked `grn`
+     * the largest; user-approved growth up to +32 B over 76 B).
      * Its audio lives in the FxBuffer share, not in this union.
      */
     CrumpBitRuntime crump_bit;
@@ -140,15 +141,16 @@ _Static_assert(sizeof(StereoFilterRuntime) <= sizeof(effects_runtime_t),
 _Static_assert(sizeof(CrumpBitRuntime) <= sizeof(effects_runtime_t),
                "Effect runtime union must hold CrumpBit");
 /*
- * RAM guard (S074; 88 B since S091 P3): the DTCM union size is recorded in
+ * RAM guard (S074; 100 B since S091 P4): the DTCM union size is recorded in
  * STORAGE_SRAM_MANIFEST.md. A larger member grows .dtcmz and shrinks the
  * FxBuffer arena by the same amount (in 32 B granules), which needs RAM
- * approval before it is merged. S091 P3 used 12 B of a 32 B approval; the
+ * approval before it is merged. S091 P3 and P4 used 24 B of a 32 B
+ * approval (P3 +12 B, P4 +12 B for the reworked `grn` state); the
  * arena loses one granule (126,688 -> 126,656 B) when .dtcmz crosses a 32 B
  * boundary, which depends on LTO's packing (CRUMPBIT_LOOP_MAX_BYTES assumes
  * the smaller arena).
  */
-_Static_assert(sizeof(effects_runtime_t) == 88u,
+_Static_assert(sizeof(effects_runtime_t) == 100u,
                "Effect runtime union size changed: RAM approval required");
 
 /*

@@ -9,6 +9,14 @@ changing any of it.
   `bss=413,020`; flash payload 685,388 B of 753,664 B
   (**headroom 68,276 B**). ITCM 15,240 / 16,384 B; DTCM statics 4,372 B;
   FXBUF arena margin 3,808 B. The entries below run newest first.
+- **S091 P5 changes (2026-11-05):** CrumpBit sub-type efficiencies
+  (`S091_P5_IMPLEMENTATION.md`).
+  - **Added (approved Q4):** `crumpBit_dataLines` (**256 B**) and
+    `crumpBit_dataLinesKey` (**4 B**) SRAM1 `.bss` (`CrumpBitEffect.c`):
+    stage 1's data-line table and the `bof`/`biv` key it was built for.
+    Measured `.bss` 413,016 -> 413,284 B (+268 with alignment), text
+    +456 B; the runtime stays 100 B and FXBUF stays 126,656 B at
+    `0x20001140`.
 - **S090 P5 changes (2026-11-01):** Load/Save batching, watchdog, idle window
   (`S090_P5_IMPLEMENTATION.md`).
   - **Added (approved, Q5):** `fs_ls_wd_signature` + `fs_ls_wd_mark`, **2 B**
@@ -694,7 +702,7 @@ DTCM is single-cycle, uncached, and not reachable by DMA.
 | `audioOutBuffer`, `audioOutBuffer2` | 1,536 each | `.dtcmz`; the two render slots per DAC, `sample_mx_t`, written by the mixer and read by the DMA ISR's pack |
 | `velocityModulators` | 264 | `.dtcmz`; six velocity modulation nodes |
 | `mixer_fx_bus` | 256 | `.dtcmz`; two 32-frame channels, `sample_mx_t` while voices sum, float while the Effect runs |
-| `effects_runtime` | 88 | `.dtcmz`; union holding the active Effect type's DSP state (StereoFilter 76 B: two filter states; CrumpBit 88 B since S091 P3: 56 B shared + 32 B sub-engine union; +12 B, user-approved up to +32 B). No spare: a larger member grows the union. |
+| `effects_runtime` | 100 | `.dtcmz`; union holding the active Effect type's DSP state (StereoFilter 76 B: two filter states; CrumpBit 100 B since S091 P4: 54 B shared (S091 P5 removed two ramp-origin bytes; 2 B padding) + 44 B sub-engine union (the `grn` member holds the Position-fit cache in the bytes its echo DC blocker held); +24 B of the user-approved +32 B over 76 B). No spare: a larger member grows the union. |
 | `busComp` | 32 | `.dtcmz` (S074); master bus compressor state: smoothed power, fast and memory gain reduction, previous gain, pending sidechain weight, crossover low-pass per channel, active pair. Approved up to 32 B; `_Static_assert(<= 32)`. Owner `BusCompressor.c`. |
 | ~~`osc_interp_a`, `osc_interp_b`~~ | ~~64 each~~ | removed S087 P1; 128 B released to arena |
 | `modNode_interpLastStamp`, `modNode_interpReserved` | 1 + 1 | `.dtcmz` (S087); wavetable interpolation slot management |
@@ -716,8 +724,9 @@ DTCM is single-cycle, uncached, and not reachable by DMA.
   50.06 ms at 44,108 Hz; at most two per Instrument slot) from the top. The
   Effect share is at least 73,600 B with all twelve units claimed. CrumpBit
   (S074), the first arena user, takes the whole share up to
-  `CRUMPBIT_LOOP_MAX_BYTES` = 126,656 B (S091 P3 N1; the arena is 126,688 or
-  126,656 B depending on LTO's `.dtcmz` packing). It is elastic; its Rate is
+  `CRUMPBIT_LOOP_MAX_BYTES` = 126,656 B (S091 P3 N1; in the S091 P4 build
+  FXBUF is 126,656 B at `0x20001140`, the boundary crossed as assumed). It
+  is elastic; its Rate is
   clamped to the share. The
   system never clears the arena: an owner clears what it reads unless it
   adopts content the handoff record marks valid. Details:
@@ -814,6 +823,7 @@ byte, including alignment and small variables omitted here.
 | `FxBuffer.c`: `fxbuf_state` | 28 | Linker arena base/size, twelve unit owners, count, and share callback. |
 | `FxBuffer.c`: `fxbuf_handoffRecord` | 180 | Effect/voice handoff metadata and arena-relative positions. |
 | `EffectsManager.c`: `effects_state` | 80 | Active type/Scene, force flag, 64-byte last-applied image, FX step/selection state, sequence signature, and common runtime values (84 B before S081 removed the held-Morph latch). |
+| `CrumpBitEffect.c`: `crumpBit_dataLines`, `crumpBit_dataLinesKey` | 260 | 256 B stage 1 data-line table (`(c & keep) ^ invert` per ADC code) plus a 4 B key (`bit_off | bit_invert << 8`; a `0xFFFFFFFF` sentinel forces the first build). Rebuilt only on a `bof`/`biv` change; owner `CrumpBitEffect.c` (S091 P5 X2, approved Q4, 2026-11-05). |
 | `EffectsManager.c`: `effects_automation` | 120 | Effect Pattern overlays (active/value), `menuHold` (`u64`) + `menuHoldMorph`, `fxm` override, and 6 × 2 base-independent LFO contribution entries (184 B before S081 removed the owner/end masks). |
 | `sequencer.c`: `seq_fxEvent` | 1 | TIM3-to-foreground newest-wins RESET/STEP latch; no Scene, DSP, or LED work occurs in the ISR. |
 | `sequencer.c`: `seq_effectAutomationReset` | 1 | Reset latch for the foreground Effect overlay drain (also set by `seq_requestEffectOverlayReset()` at a realign, S081). `seq_effectAutomationTracks` was removed in S081 with the step markers. |

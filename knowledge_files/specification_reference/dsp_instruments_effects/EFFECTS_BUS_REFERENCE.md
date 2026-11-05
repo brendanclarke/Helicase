@@ -66,7 +66,7 @@ differences from the plan.
   - `fxm` (Scene target 404) for Effect Morph.
 - **Shared DTCM arena.** The rest of DTCM after statics is shared between the
   Effect (bottom) and future buffer voices (top). Since S091 P2 `cbt` uses
-  the whole share up to 126,688 B for its delay loop (elastic; the Rate is
+  the whole share up to 126,656 B for its delay loop (elastic; the Rate is
   clamped to what the share holds); `flt` uses none.
 - **Not part of the Effect system:** the master bus compressor (`cmp`, S074)
   is a Scene setting that processes an output pair after the Effect return.
@@ -212,11 +212,12 @@ future, tokens never change meaning.
 |---:|---|---|---:|---|---|---:|---:|
 | 0 | `off` / `Off␣␣` / `Off` | none | 3 | — | default / none | 0 | 0 |
 | 1 | `flt` / `StFlt` / `StFilter` | stereo in, stereo out | 7 | freq, reso, drive, type, vol, pan | default / none | 76 B (two filter states) | 0 |
-| 2 | `cbt` / `CrmBt` / `CrumpBit` | stereo in, stereo out | 22 | per `sub` (`lane_map`): shared `mrp bof biv mix vol pan typ frq res`; pool `fbk rte snc dpn ton` (`dly`/`cmb`/`rvb`), + `aux` (`pit`), `st2 st3 snc dpn ton aux spr` (`grn`) | custom layout; `select`, `render_leds`, `paint_row0`, `format_value3`, `name3`, `layout`, `format_target3`, flag `OWNS_SELECT_LEDS` | 88 B | elastic: min 73,664 B (12 units), pref up to 126,656 B |
+| 2 | `cbt` / `CrmBt` / `CrumpBit` | stereo in, stereo out | 23 | per `sub` (`lane_map`): shared `mrp bof biv mix vol pan typ frq res`; pool `fbk rte snc dpn ton` (`dly`/`cmb`/`rvb`), + `aux` (`pit`), `den rte snc dpn lng aux spr` (`grn`); `bal` is lane-less | custom layout; `select`, `render_leds`, `paint_row0`, `format_value3`, `name3`, `layout`, `format_target3`, flag `OWNS_SELECT_LEDS` | 100 B | elastic: min 73,664 B (12 units), pref up to 126,656 B |
 
-`effects_runtime_t` is a union of every runtime struct and is **88 B** since
-S091 P3 (CrumpBit is the largest; StereoFilter 76 B). `_Static_assert`s check
-each member against the union and pin CrumpBit at 88 B: it fills the union,
+`effects_runtime_t` is a union of every runtime struct and is **100 B** since
+S091 P4 (CrumpBit is the largest: 56 B shared + 44 B union; StereoFilter
+76 B). `_Static_assert`s check
+each member against the union and pin CrumpBit at 100 B: it fills the union,
 so any larger runtime grows `.dtcmz` (RAM approval). The CrumpBit
 rows, DSP and page are in §8.6 and `EFFECTS_MIXER_DSP_REFERENCE.md` §4.4.
 
@@ -446,7 +447,8 @@ Everything is foreground-only.
 ### 8.1 Layout
 
 - **SELECT 1** holds screen 1 `typ out vol pan` and screen 2
-  `run len scl mrp`. Repeated SHIFT+PERF toggles between them. SELECT 1 is
+  `mrp run len scl` (S091 P4, user: the Effect Morph amount first, for
+  every type). Repeated SHIFT+PERF toggles between them. SELECT 1 is
   always manager-owned, even with a custom layout.
 - **SELECT 2..8** hold the type rows 3..63 in order, 4 per screen, with
   `ceil(N/28)` screens per button.
@@ -530,7 +532,7 @@ Everything is foreground-only.
   | `format_value3(index, value, out)` | May replace a type row's 3-character value text on the Effect page only: compact cells, the full view and held-step values. Storage and the STEP automation page always show raw values (S091 P3 adds `format_target3`, used by the automation pages where `format_value3` is Effect-page-only). Nonzero = handled. |
   | `name3(index, out)` | May replace a type row's descriptor 3-character name on the Effect page only, following the shown variant (S091 P3: CrumpBit's sub-type names). Other screens keep the descriptor name. Nonzero = handled. |
   | `layout()` | Returns the `effect_select_layout_t` to show now (S091 P3: CrumpBit's per-sub-type layouts), or NULL for the registry's `select_layout`. The screen count, cell lookup, custom top row and home screen all read it through `menuEffects_layout()`. |
-  | `format_target3(index, value, out)` | Replaces a row's value text on the STEP automation page and in Pattern value entry (S091 P3: CrumpBit's `sub` names, and its per-sub-type `rte` text). Nonzero = handled. |
+  | `format_target3(index, value, out)` | Replaces a row's value text on the STEP automation page and in Pattern value entry (S091 P3: CrumpBit's `sub` names). Nonzero = handled. |
   | `flags` | `EFFECT_UI_FLAG_OWNS_SELECT_LEDS` (`0x01`): the page's active-SELECT LED is suppressed and `menuEffects_renderSelectLeds()` calls `render_leds` instead. |
 
   Hooks run in the foreground, must not block, must write retained data only
@@ -616,17 +618,19 @@ underline reports stored data, not what is audible.
 
 | SELECT | Screen | Row 0 | Cells (row 1) |
 |---|---|---|---|
-| 1 | 0, 1 | `typ out vol pan`, `run len scl mrp` | manager (unchanged) |
-| 2 | 0 = **overlay** (home) | bit states `- - - - - - - ->` | `ton fbk rte mrp` |
-| 2 | 1 | `ton fbk rte sub` | the same rows, then the sub-type (`dly`) |
-| 2 | 2 | `snc dpn mix typ` | `mix` after `dpn`, then the filter type |
-| 2 | 3 | `frq res` | two empty cells, reserved for the drive rows |
+| 1 | 0, 1 | `typ out vol pan`, `mrp run len scl` | manager (S091 P4: `mrp` first) |
+| 2 | 0 = **overlay** (home) | bit states `- - - - - - - ->` | `mrp frq res bal` |
+| 2 | 1 | `typ frq res bal` | the output filter with its type |
+| 2 | 2 | `mix sub x y` | the MIX stage, the sub-type, then the sub-effect's first two controls |
+| 2 | 3 | the rest | the sub-effect's remaining controls (and SELECT 3 for `grn`) |
 | 3..8 | — | (no screens) | SELECT 1..8 are bit buttons on this type |
 
-- **Layout:** `screen_count = {0, 4, 0, …}`, `custom_row0[1] = 0x01`, home
-  SELECT 2 screen 0. The encoder walks SELECT 1 s0 → s1 → overlay → page 2 →
-  page 3 → page 4. `mrp` on the overlay is the Scene Effect Morph amount (0..255),
-  resolved from `EFFECT_LAYOUT_CELL_MORPH`.
+- **Layout:** `screen_count = {0, 4, 0, …}` (`grn`: `{0, 4, 2, …}`),
+  `custom_row0[1] = 0x01`, home SELECT 2 screen 0. Only sub-effect controls
+  follow `sub`; `frq` and `res` sit on the overlay and the filter page.
+  The encoder walks SELECT 1 s0 → s1 → overlay → page 2 → page 3 → page 4
+  (then SELECT 3's screens for `grn`). `mrp` on the overlay is the Scene
+  Effect Morph amount (0..255), resolved from `EFFECT_LAYOUT_CELL_MORPH`.
 - **Overlay row 0:** column 2*n* shows bit *n* (LSB left): `-` normal, `0`
   forced off, `!` inverted; odd columns are spaces; column 15 is the scroll
   marker. There is no cursor cue and no name underline on this row.
@@ -650,25 +654,37 @@ underline reports stored data, not what is audible.
 
   | Row | `dly` | `cmb` | `pit` | `grn` | `rvb` |
   |---|---|---|---|---|---|
-  | `fbk` | feedback | resonance | regeneration | delay feedback | RT60 decay |
-  | `rte` | time | note | window | division | size |
+  | `fbk` | feedback | resonance | regeneration | echo gain 0..0.98 (shown 0..98) | RT60 decay |
+  | `rte` | time | note | window | delay time | size |
   | `snc` | Sync | polarity | snap | freeze | freeze |
   | `dpn` | delay pan | wet pan | wet pan | position | width |
-  | `ton` | tone | damping | tone | grain size | damping |
-  | `aux` (15) | drive (later) | drive (later) | interval | root `st1` | — |
+  | `ton` | tone | damping | tone | — (not on the page) | damping (low-pass; above 63 flat, shown 0) |
+  | `typ` / `res` | as stored | as stored | as stored | LP/HP/off (mapped) / `---` | LP/HP/off (mapped) / `---` |
+  | `aux` (15) | drive (later) | drive (later) | interval | P1 `p1` | — |
+  | rows 16..21 | — | — | — | `p2 p3 spr den lng wid` | — |
+  | `bal` (22, shared) | balance | balance | balance | balance | balance |
 
-  Page names: `dly` `ton fbk rte snc dpn`; `cmb` `ton fbk not pol dpn`;
-  `pit` `ton fbk win snp dpn` with `int` at SELECT 2 s3/3; `grn`
-  `sze fbk div frz pos` with SELECT 3 screens `st1 st2 st3 spr` and
-  `den amp wid`; `rvb` `dmp dcy siz frz wid`. `mix` (row 5) keeps its name,
-  cell and lane 3 in every sub-type. Rows 16..21 exist for `grn` only.
-- **Value labels (`format_value3`):** `sub` shows `dly cmb pit grn rvb`. With the shown
-  Sync on, `rte` shows the snapped division label (`/16`, `16t`, `1br` …),
-  computed by `crumpBit_syncDivision()` with the same rule the DSP uses at
-  the current `seq_getBpm()`. The shown Rate (number or division) is
-  clamped to `crumpBit_rateLimit()` of the live share; page edits stop
-  there (`effects_paramEffectiveMax()`). The raw 0..127 stays underneath
-  everywhere else.
+  Page order after `mix sub` (S091 P4, plan A6.3): `dly` `rte fbk` then
+  `snc dpn ton`; `cmb` `not fbk` then `pol dpn ton`; `pit` `int win` then
+  `fbk snp dpn ton`; `rvb` `siz dcy` then `frz wid dmp`; `grn`
+  `frz pos` then `lng den p1 p2` and SELECT 3 `p3 spr wid tim`, `fbk`.
+  `mix` (row 5) keeps its name, cell and lane 3 in every sub-type. Rows
+  16..21 exist for `grn` only; row 22 (`bal`) is shared by every sub-type.
+- **Value labels (`format_value3`):** `sub` shows `dly cmb pit grn rvb`. In
+  `grn`, `rte` names the delay-time stop when its position is one (`/64`,
+  `32t`, … `d/2`, `1br`), else its position number; Position's rhythmic
+  half shows the stop it plays (the engine limits it to the line; `dpn` is
+  not BUFFER_DEPENDENT since S091 P5); Density shows `off`
+  (63), `buf` (64, one trigger per line) or its stop; `p2`/`p3` show signed
+  semitones. S091 P5 labels: in `grn`/`rvb`, `typ` shows the one-pole's
+  mapped type (`LP`, `HP`, `off`) and `res` shows `---`; in `rvb`,
+  `ton` above 63 shows the `0` that 63 shows (it plays flat); in `grn`,
+  `fbk` shows the echo gain 0..98. The other sub-types keep the S091 P3
+  labels: with Sync on,
+  `rte` shows the snapped division from `crumpBit_syncDivision()`. The
+  shown Rate is clamped to the sub-type's limit of the live share; page
+  edits stop there (`effects_paramEffectiveMax()`). The raw 0..127 stays
+  underneath everywhere else.
 - **Masks are not Pattern-automatable or LFO-modulatable** (7-bit Pattern
   values cannot reach bit 7; interpolated masks are meaningless). They are
   sequenced through FX lanes 1–2, which hold full 8-bit values.
@@ -679,7 +695,9 @@ underline reports stored data, not what is audible.
 
 CrumpBit's F2 defaults are mix 0, feedback 64, rate 64, delay pan 63
 (display 0), with the sync row labelled `snc`. S091 P2 defaults: tone 63
-(flat, shows 0), filter type `off`, frq 64, res 0.
+(flat, shows 0), filter type `off`, frq 64, res 0. S091 P4 `grn` defaults
+are Density 64 (+1, the copy setting), Length 127 (the whole line forward)
+and balance 63 (0).
 
 ---
 

@@ -7,6 +7,20 @@ be performed when the opportunity arises, not blocking items for current work.
 
 ## Hardware soak / confirmation
 
+- **S091 P4 CrumpBit H1–H9 (still open):** the sub-type and `grn` checks in
+  `S091_P4_IMPLEMENTATION.md`.
+- **S091 P5 CrumpBit efficiencies HW1–HW9:**
+  - HW1: FluxMax Scene, CrumpBit in each sub-type; `cpu` widget, DEV `UNR`
+    below P3's `dly` reading, no underruns
+  - HW2: `dly`/`cmb` A/B against P4 by ear (Q14 read)
+  - HW3: fast LFO on `fbk` and `dpn`; `mix` as the smooth control
+  - HW4: `pit` at ±12/±24 st (drop-sample heads)
+  - HW5: `rvb` `ton` sweep (dark below centre, flat above, shown 0)
+  - HW6: `grn` `fbk` sweep (shown 0..98; echo decays, no runaway)
+  - HW7: `grn`/`rvb` `typ`/`frq`/`bal` and sub-type switches under
+    audio (one-pole, `res` `---`, no extra click)
+  - HW8: `bof`/`biv` from the page and fast FX lanes (table rebuild)
+  - HW9: dense random Density with steals (no clicks at grain ends)
 - **S088 P0 run modes hardware matrix H1–H17 (HIGH PRIORITY):**
   - H1: `rst` A/B (bit-identical to pre-S088 on real hardware)
   - H7/H8: `itp` audible / decayed retrigger

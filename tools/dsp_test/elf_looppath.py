@@ -22,12 +22,24 @@ Inputs:     --elf PATH, --sym NAME (the base name; .lto_priv/.constprop
             are placed after its loops and jump back with an unconditional
             `b` would otherwise seed a path search from every such target,
             which explodes combinatorially; a frame loop always closes
-            with a conditional branch).
+            with a conditional branch), --in-range (S091 P4: a loop's path
+            search stays between its head and the furthest backward branch
+            that closes it; a cold block that closes a conditional branch
+            back into the function, which is not a frame loop, would
+            otherwise search every path of the whole function. Frame loops
+            laid out contiguously measure the same with it), --rank K
+            (S091 P5: --max applies to the K-th longest loop, default 1;
+            crumpBit_process() has two filter loops, the SVF and the
+            one-pole, each with its own limit).
 Outputs:    one line per loop; exit 1 when --max is exceeded.
-Accessors:  tools/dsp_test/Makefile crumpbit_elf_check; by hand.
+Accessors:  tools/dsp_test/Makefile crumpbit_elf_check; by hand; S091 P5:
+            imported by elf_blockpath.py and crumpbit_cpu.py (rows(),
+            successors(), loop_paths(); disassembly() runs objdump once per
+            ELF and process).
 Affiliates: elf_loopdump.py (loop text compare), fpseq.py (value ops).
 """
 import argparse
+import functools
 import re
 import subprocess
 import sys
@@ -39,10 +51,17 @@ UNCOND = {'b', 'b.n', 'b.w'}
 SUFFIX = r'(\.(lto_priv|constprop|isra|part|cold)\.\d+)*'
 
 
-def rows(elf, sym):
-    text = subprocess.run(['arm-none-eabi-objdump', '-d', '--no-show-raw-insn',
+@functools.lru_cache(maxsize=None)
+def disassembly(elf):
+    """The ELF's whole `objdump -d` text, once per process (S091 P5: the CPU
+    gate reads about twenty functions of one image)."""
+    return subprocess.run(['arm-none-eabi-objdump', '-d', '--no-show-raw-insn',
                            elf], check=True, capture_output=True,
                           text=True).stdout
+
+
+def rows(elf, sym):
+    text = disassembly(elf)
     m = re.search(r'^[0-9a-f]+ <' + re.escape(sym) + SUFFIX +
                   r'>:\n(?P<body>.*?)(?:\n\n|\Z)', text, re.S | re.M)
     if not m:
@@ -80,13 +99,49 @@ def successors(r, idx, i):
     return [i + 1] if i + 1 < len(r) else []
 
 
-def loop_paths(r, idx, head):
-    """Every simple path head -> ... -> head, as (length, vdivs, indices)."""
+def cycle_nodes(r, idx, h, inside):
+    """The instructions on some cycle through index h: reachable from h and
+    able to reach h, both through instructions accepted by inside(j). A
+    path h -> ... -> h can only use these, so loop_paths() searches no
+    other (S091 P5: the S091 P5 crumpBit_runGrain has cold blocks whose
+    conditional branches close far back into the function; the old search
+    walked every path through them that never returned, for minutes)."""
+    n = len(r)
+    succ = [[j for j in successors(r, idx, i) if inside(j)] if inside(i)
+            else [] for i in range(n)]
+    pred = [[] for _ in range(n)]
+    for i in range(n):
+        for j in succ[i]:
+            pred[j].append(i)
+    seen = []
+    for edges in (succ, pred):
+        mark = {h}
+        todo = [h]
+        while todo:
+            i = todo.pop()
+            for j in edges[i]:
+                if j not in mark:
+                    mark.add(j)
+                    todo.append(j)
+        seen.append(mark)
+    return seen[0] & seen[1]
+
+
+def loop_paths(r, idx, head, last=None):
+    """Every simple path head -> ... -> head, as (length, vdivs, indices).
+    With `last` (an index), only instructions idx[head]..last are followed.
+    Only instructions on a cycle through the head are followed
+    (cycle_nodes()): the result is the same, the search far smaller."""
     found = []
-    stack = [(idx[head], [idx[head]])]
+    h = idx[head]
+    on_cycle = cycle_nodes(r, idx, h,
+                           lambda j: last is None or h <= j <= last)
+    stack = [(h, [h])]
     while stack:
         i, path = stack.pop()
         for j in successors(r, idx, i):
+            if j not in on_cycle:
+                continue
             if r[j][0] == head:
                 found.append((len(path),
                               sum('vdiv' in r[k][1] for k in path), path))
@@ -104,6 +159,8 @@ def main():
     ap.add_argument('--top', type=int, default=1)
     ap.add_argument('--show', action='store_true')
     ap.add_argument('--cond-heads', action='store_true')
+    ap.add_argument('--in-range', action='store_true')
+    ap.add_argument('--rank', type=int, default=1)
     a = ap.parse_args()
     r = rows(a.elf, a.sym)
     if a.straight:
@@ -116,8 +173,14 @@ def main():
                     and target(ops) <= addr and target(ops) in idx
                     and not (a.cond_heads and op in UNCOND)})
     loops = []
+    # closer[h]: the index of the furthest backward branch to head h.
+    closer = {}
+    for i, (addr, op, ops) in enumerate(r):
+        t = target(ops) if BRANCH.match(op) else None
+        if t in heads and t <= addr:
+            closer[t] = max(closer.get(t, 0), i)
     for h in heads:
-        p = loop_paths(r, idx, h)
+        p = loop_paths(r, idx, h, closer[h] if a.in_range else None)
         if p:
             p.sort(key=lambda x: -x[0])
             loops.append((p[0][0], h, p))
@@ -130,9 +193,12 @@ def main():
     if a.show:
         for k in loops[0][2][0][2]:
             print('    ', r[k][1], r[k][2])
-    if a.max is not None and loops[0][0] > a.max:
-        print(f'elf_looppath.py: FAIL {a.sym} longest {loops[0][0]} > '
-              f'{a.max}')
+    if a.rank < 1 or a.rank > len(loops):
+        sys.exit(f'elf_looppath.py: {a.sym} has {len(loops)} loops, '
+                 f'no rank {a.rank}')
+    if a.max is not None and loops[a.rank - 1][0] > a.max:
+        print(f'elf_looppath.py: FAIL {a.sym} loop {a.rank} '
+              f'{loops[a.rank - 1][0]} > {a.max}')
         sys.exit(1)
 
 

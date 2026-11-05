@@ -309,7 +309,7 @@ and applies the common rows (route, level, pan) itself.
 ### 4.2 Runtime state
 
 - `effects_runtime` is a union of every type's runtime struct in DTCM
-  (`.dtcmz`), 88 B since S091 P3 (CrumpBit: 56 B shared + a 32 B sub-engine
+  (`.dtcmz`), 100 B since S091 P4 (CrumpBit: 56 B shared + a 44 B sub-engine
   union; StereoFilter 76 B). The
   manager zeroes it and calls the type's `init()` when the type becomes
   active. It does not zero or re-`init` on a same-type Scene switch: the
@@ -354,13 +354,15 @@ DAC decodes the result. AC coupling removes the DC the masks create. The two
 channels then feed a mono 8-bit tape-style delay kept in the arena; its
 feedback return is DC-blocked, tilted and soft-kneed, and the Mix control
 crossfades the bit-crushed signal with the raw delay read. Finally a stereo
-TPT state-variable filter (eight voice types) shapes the Effect output.
-Three stages, one row owner each (S091 P2 §4).
+output filter shapes the Effect output: a TPT state-variable filter (eight
+voice types) in `dly`/`cmb`/`pit`, and a one-pole (mapped type, no
+resonance) in `grn`/`rvb` (S091 P5 F1). Three stages, one row owner each
+(S091 P2 §4).
 
 ```
 per sample, both channels:
   code  = adc(x)                          x·128 + 128.5 truncated, then USAT to 0..255 (S091 R2; = the S074 clamp and 256 → 255 fold)
-  code' = (code & keep) ^ invert          keep = ~(bit_off & ~bit_invert) & 0xFF   (invert wins)
+  code' = lines[code]                     (code & keep) ^ invert for all 256 codes, rebuilt only on a bof/biv change (S091 P5 X2)
   h     = (code' − code'[n−1])/128 + 0.9985755·h[n−1]   DAC + AC coupling, ~10 Hz one-pole high-pass (S091 R4: the code difference is exactly y − y[n−1])
 per sample, the delay sub-type (the tape loop, mono):
   delay += (target − delay)·1.5113e-4     tape glide, τ 150 ms; target ≤ length − 2
@@ -372,17 +374,22 @@ per sample, the delay sub-type (the tape loop, mono):
   loop[wp] = adc(½(hL + hR) + ret) − 128   (int8; re-quantised every pass, masks not re-applied)
   wp++ (wrap), valid++ (saturating at the loop length)
   out  = h + mix·(g·wet − h)                         first echo unshaped
-per sample, the shared output filter (second pass, both channels):
-  TPT SVF: v1 = a1·ic1 + a2·v3, v2 = ic2 + a2·ic1 + a3·v3, ic1 = 2·v1 − ic1, ic2 = 2·v2 − ic2
-  out = cx·x + cb·bp + cl·lp                         one 3-coefficient mix, ramped per block
+per sample, the shared output filter (second pass, both channels; S091 P5 F1):
+  dly/cmb/pit: TPT SVF: v1 = a1·ic1 + a2·v3, v2 = ic2 + a2·ic1 + a3·v3, ic1 = 2·v1 − ic1, ic2 = 2·v2 − ic2
+               out = cx·x + cb·bp + cl·lp            one 3-coefficient mix, ramped per block
+  grn/rvb:     s += k·(x − s), k = crumpBit_onePoleK[frq]   (−3 dB matched to the SVF at res 0)
+               out = cx·x + cl·s                     LP (0, 1), HP (1, −1), flat (1, 0); the type crossfade ramps per block
 ```
 
-### 4.4a CrumpBit sub-types (S091 P3)
+### 4.4a CrumpBit sub-types (S091 P3; efficiencies S091 P5)
 
-Four stages per block. Stage 1 is the shared dry path (ADC, data-line masks,
-DAC, AC coupling) and stage 3 the shared MIX stage; stage 2 is exactly one
-sub-engine, chosen once per block by `sub`; stage 4 is the shared output
-filter. Within a sub-type every statement runs every frame (constant CPU).
+Four stages per block. Stage 1 is the shared dry path (ADC, the data-line
+table, DAC, AC coupling) and stage 3 the shared MIX stage; stage 2 is exactly
+one sub-engine, chosen once per block by `sub`; stage 4 is the output filter
+of that sub-type (the TPT SVF in `dly`/`cmb`/`pit`, a one-pole in
+`grn`/`rvb`). Within a sub-type every statement runs every frame (constant
+CPU). S091 P5 caps the whole Effect at 170 instructions per frame in every
+sub-type, worst case, gated by `crumpbit_cpu_check`.
 
 - **Switching.** A change of the resolved `sub` (menu, MIDI, Scene or
   Pattern automation) is detected per block, so it lands on a block boundary.
@@ -390,44 +397,70 @@ filter. Within a sub-type every statement runs every frame (constant CPU).
   cleared or gated; every row and FX-lane value carries over, rows are
   aligned by role, and only the new engine's DSP state is re-initialised and
   its prefix clamped to the new geometry. Cross-format glitches are wanted.
+  A switch between an SVF sub-type and `grn`/`rvb` hands the output
+  filter's state over (SVF low integrator ↔ one-pole state), so the filter
+  carries on instead of starting from a stale integrator (S091 P5 F1).
 - **MIX stage (binding, user).** `mix` is not a sub-type control: for every
   sub-type, `out = h + mix·(wet − h)`, where `h` is stage 1 and `wet` is the
   selected engine's output. The row keeps its name and lane 3 in every lane
-  map, and is never freeable.
-- **`cmb` comb / resonator / flanger (engine A, loop 124).** The tape loop
-  retuned to the semitone comb table (8 samples .. about 2,048) with a fast
-  glide `4.5245e-3`; the same return chain and fractional tap as `dly`;
+  map, and is never freeable. `mix` keeps its per-frame ramp in every
+  sub-type (user, S091 P5 Q9).
+- **`cmb` comb / resonator / flanger (engine A, loop 109).** The tape loop
+  retuned to the semitone comb table (8.4 .. 2,141 samples) with a fast
+  glide `4.5245e-3`; the same return chain and Q14 integer tap as `dly`;
   `snc` folds a negative feedback sign into the per-block gain. Per-block
   work is lower than `dly` (one table read instead of the Sync search).
-  Whole-Effect worst case 168 per frame.
-- **`pit` two-head pitch shifter (engine B, loop 135).** `φ += (1 − r)/W`
+  Whole-Effect worst case 153.8 per frame (S091 P5).
+- **`pit` two-head pitch shifter (engine B, loop 106).** `φ += (1 − r)/W`
   per sample in a wrapping 0.32 word; head A trails by `2 + W·φ`, head B by
-  `2 + W·frac(φ + ½)`; the reads are Q14 integer, and the triangular windows
-  `wA = 1 − |2φ − 1|`, `wB = 1 − wA` sum to 1. `aux` is the interval, `rte`
-  the window, `snc` semitone snap, `dpn` the wet balance; the return chain
-  is the tape's. Whole-Effect worst case 181 per frame.
-- **`grn` pitched granular plus delay (engine B', loop 131).** The share is
-  split into a record line and a delay line of equal length. Two grains read
-  the record line at 16.16 positions with Q3.12 increments (`pos += inc<<4`),
-  drop-sample with no interpolation (user G6), triangular windows
-  half a grain apart that sum to 1; the delay tap reads exactly `D = R`
-  behind the write head, with no glide. `snc` freezes the record line while
-  its `wp` advances (a redirected predicated store), `ton` is the bipolar
-  `sze`, `dpn` the position mode, and rows 15..21 set the pitch set, spread,
-  density, level jitter and random pan. One hardware RNG word per block is
-  expanded by an integer hash. Whole-Effect worst case 192 per frame.
-- **`rvb` 8-bit four-line FDN (engine C, loop 145).** Four integer taps from
+  `2 + W·frac(φ + ½)`; both reads are drop-sample (S091 P5 P1: no
+  interpolation), and the triangular windows `wA = 1 − |2φ − 1|`,
+  `wB = 1 − wA` sum to 1. `aux` is the interval, `rte` the window,
+  `snc` semitone snap, `dpn` the wet balance; the return chain is the
+  tape's. Whole-Effect worst case 153.6 per frame.
+- **`grn` granular plus delay (engine B', loop 116; S091 P4 model;
+  efficiencies S091 P5).** The
+  share is split into a record line and a delay line of equal length N.
+  Two voices read the record line at 16.16 positions with Q3.12 increments
+  (`pos += inc x 16`), drop-sample with no interpolation (user G6). Density
+  (`den`, bipolar) triggers each voice independently of its Length:
+  63 off, 64 (+1) one trigger per N, rhythmic above, random below (at least
+  one block). Length (`lng`, row 20, bipolar) is the grain size up to N,
+  reversed left of centre, at least ~5 ms. Position (`dpn`, bipolar) is 0
+  follow (two frames behind the head), a rhythmic lag to the right, and a
+  random scatter to the whole recorded line to the left. Each voice uses a
+  flat-top window with 128-frame complementary fades, so back-to-back
+  grains sum to exactly 1 (the copy setting). A trigger with both voices
+  busy steals the older one with a 128-frame fade and a deferred trigger;
+  the per-grain overwrite clamp keeps every read inside recorded, not
+  overwritten audio. `snc` freezes the record line and anchors Position at
+  the freeze head; rows 15..21 are the absolute P1-P3 pitches, spread
+  (with +/-1 st detune above 80), Density, Length and Width. The delay tap
+  reads its own `rte` time, the 6..384-tick generated curve with the
+  rhythmic stops marked, clamped to N, with no glide. S091 P5 A: a rhythmic
+  Position stop is limited to the last stop that fits the line (the engine
+  caches the fit per tempo and line); grain spans are rounded down to a
+  block boundary, steals are padded to one, and an idle voice's gains are 0
+  (the window needs no lower clamp). The echo is plain feedback with gain
+  0..0.98 over `fbk` (no DC blocker, no soft knee; it always decays). One
+  hardware RNG word per block is expanded by an integer hash. Whole-Effect
+  worst case 166.5 per frame.
+- **`rvb` 8-bit four-line FDN (engine C, loop 131).** Four integer taps from
   one packed 32-bit word per frame (one 8-bit lane per line), one-pole
-  damping per line, a 4 × 4 Hadamard mix scaled ½, and per-line decay gains
-  from `fbk` as RT60; the lanes are offset-binary so one XOR makes `ldrsb`
-  read signed values. `snc` freezes (`g_k` 0.999, input off) and the wet
-  path plus the line feedback open per block only once `valid` covers the
-  longest line. Whole-Effect worst case 192 per frame.
+  low-pass damping per line (S091 P5 R1: `ton` above 63 plays flat), a
+  4 × 4 Hadamard mix scaled ½, and per-line decay gains from `fbk` as
+  RT60; the lanes are offset-binary so one XOR makes `ldrsb` read signed
+  values. `snc` freezes (`g_k` 0.999, input off) and the wet path plus the
+  line feedback open per block only once `valid` covers the longest line.
+  Whole-Effect worst case 163.9 per frame.
 
 `rte` is clamped per sub-type by `crumpBit_subtypeRateLimit()` through the
 runtime-aware `effective_max(rt, index, share)`; BUFFER_DEPENDENT rows are
 re-applied every block, so a switch or share change is clamped one block
-later. The `dly` map is the S091 P2 lane table; every lane read goes through
+later. Since S091 P5 A `dpn` is not BUFFER_DEPENDENT: the `grn` engine
+limits its Position stop itself, while the page label shows the stop that
+plays (`crumpBit_grainPosLimit()`). The `dly` map is the S091 P2 lane table;
+every lane read goes through
 `effects_laneTable(record)`, keyed by the Scene's stored `sub`.
 
 - **Offset binary** (user decision): code 128 is silence, the transfer is
@@ -450,7 +483,8 @@ later. The `dly` map is the S091 P2 lane table; every lane read goes through
   - the target is clamped to `length − 2`; `rte` is
     `EFFECT_PARAM_FLAG_BUFFER_DEPENDENT`, so EffectsManager lowers the
     resolved value through `crumpBit_ops.effective_max`
-    (`crumpBit_rateLimit()`) and the page clamps edits through
+    (`crumpBit_subtypeRateLimit()`; `crumpBit_rateLimit()` is the `dly`
+    case) and the page clamps edits through
     `effects_paramEffectiveMax()`. A stored value above the clamp is kept
     and plays when the share grows; the page shows the clamped value.
   - `synced` = the StepScale division nearest in log time, at
@@ -482,12 +516,16 @@ later. The `dly` map is the S091 P2 lane table; every lane read goes through
     return alone never clips the 8-bit ADC and the loop gain falls below
     unity at high level (self-oscillation settles). The deferred `tdr`
     drive will replace it with the voice Padé knee.
-- **Output filter (`typ frq res`; per block, S091 P2):**
+- **Output filter (`typ frq res bal`; per block, S091 P2, balance S091 P4):**
   - `g = crumpBit_filterG[frq]`, the voice cutoff law
     (`fastTan(π·0.45·valueShaperF2F(frq/127, FILTER_SHAPER))`) from a
     table; `R` is the voice law `1 − res/127` with the low-end snap
     redirected to 0.0625 (Q ≤ 8, plan Q4); `a1 = 1/(1 + g(g + 2R))`,
-    `a2 = g·a1`, `a3 = g·a2` (one division per block).
+    `a2 = g·a1`, `a3 = g·a2` (one division per channel per block). S091 P4
+    `bal` (row 22, 63 = 0) splits the cutoff: the right channel uses
+    `frq + (bal − 63)`, the left `frq − (bal − 63)`, each clamped to
+    0..127. Both coefficient sets come from the same expression, so at
+    `bal` 63 the result is bit-identical to S091 P2. `bal` has no lane.
   - the output mix is `out = cx·x + cb·bp + cl·lp` with the voice forms
     (LP `lp`, HP `x − 2R·bp − lp`, BP `bp`, UBP `2R·bp`, Nch
     `x − 2R·bp`, Pek `lp − (x − 2R·bp − lp)`); `LP2` plays as LP and
@@ -496,7 +534,7 @@ later. The `dly` map is the S091 P2 lane table; every lane read goes through
     block's set, so a `typ` Morph step, a Pattern type lock or a `res`
     step is a one-block crossfade, not a click.
 - **Arena use:** one byte per sample. The loop length is
-  `min(share bytes, 126,688)`. On a share change the newest audio is kept
+  `min(share bytes, 126,656)`. On a share change the newest audio is kept
   when `write_pos` still fits (the tail), otherwise the loop is re-seated;
   either way the gliding delay is clamped to `length − 2`. A voice-unit
   reservation therefore shortens the loop and bends the delay, and the Rate
@@ -510,11 +548,12 @@ later. The `dly` map is the S091 P2 lane table; every lane read goes through
   - `buffer_changed` keeps or re-seats the loop as above;
   - it never adopts a previous owner's content;
   - a same-type Scene switch keeps everything, so tails ring on.
-- **Runtime (88 B since S091 P3):** 56 B shared (the AC outputs, the four TPT
-  states, the two previous data-line codes, every row byte 3..21, `subtype`
+- **Runtime (100 B since S091 P4):** 56 B shared (the AC outputs, the four TPT
+  states, the two previous data-line codes, every row byte 3..22, `subtype`
   and `active_subtype`, the ramp origins, `primed` and the deferred `drv`
-  byte) plus a 32 B union of the sub-engine states (`dly`/`cmb` and `pit` 28 B,
-  `grn` 32 B, `rvb` 28 B). `dly`, `cmb` and `pit` share the
+  byte, and the output filter's `bal`) plus a 44 B union of the sub-engine
+  states (`dly`/`cmb` and `pit` 28 B, `grn` 44 B, `rvb` 28 B). `dly`,
+  `cmb` and `pit` share the
   `length/write_pos/valid` prefix so a switch between them keeps the
   recording. `write_param` only stores raw bytes; conversions happen once per
   block, so an LFO costs nothing extra.
@@ -813,7 +852,7 @@ Effect.
 
 | Stage | Cost | Notes |
 |---|---|---|
-| CrumpBit `process` | per sub-type, worst case per frame: `dly` 172, `cmb` 168, `pit` 181, `grn` 192, `rvb` 192 (measured S091 P3; constant within a sub-type, which is chosen per block) | constant whatever the settings |
+| CrumpBit `process` | per sub-type, worst case per frame (S091 P5, gated by `crumpbit_cpu_check` at 170): `dly` 160.0, `cmb` 153.8, `pit` 153.6, `grn` 166.5, `rvb` 163.9 | constant whatever the settings |
 | Master bus compressor (on) | 71 instructions per stereo frame (was 34 before the band split) + about 350–450 cycles per block; ≈ 1.4–1.8 % of the CPU | 0 while `cmp` is off; `cpu` widget reading still to be taken |
 | `xfd` fader mode | one division per `xfd` slot per block | otherwise the same as `fx` |
 | Mixer `off` branch | two stores per block | the return ramp reset |

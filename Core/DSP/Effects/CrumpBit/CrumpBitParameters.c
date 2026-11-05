@@ -21,6 +21,7 @@
 #include <string.h>
 #include "FxBuffer.h"   /* fxbuf_effectShare(): the Rate label clamp (S091 P2) */
 #include <math.h>      /* powf(): the `pit` window label (S091 P3) */
+#include "CrumpBitTables.h" /* crumpBit_grainStopCc: `grn` labels (S091 P4) */
 
 /* Persisted token (permanent), UI abbreviation (5) and full name (<= 8). */
 const char crumpBit_token3[] = "cbt";
@@ -30,7 +31,7 @@ const char crumpBit_full8[] = "CrumpBit";
 /*
  * CrumpBit descriptor table (S074_CRUMPBIT_EFFECT.md §4).
  *
- * What: rows 0..2 are the shared common rows; rows 3..21 are CrumpBit's.
+ * What: rows 0..2 are the shared common rows; rows 3..22 are CrumpBit's.
  * - bit off / bit invert (3, 4): 8-bit masks, one bit per ADC data line
  *   (bit 0 = LSB). Not Morphable (interpolating a mask gives unrelated
  *   bits), not modulatable, not Pattern-automatable (a Pattern value is
@@ -38,7 +39,12 @@ const char crumpBit_full8[] = "CrumpBit";
  *   which store full 8-bit values. Edited by the SELECT buttons (Stage 2);
  *   in Stage 1 they show as plain 0..255 numbers.
  * - mix, feedback, rate, delay pan (5, 6, 7, 10): Morphable, LFO and
- *   Pattern automation, like voice rows.
+ *   Pattern automation, like voice rows. Delay pan (10) is Position in
+ *   `grn`, whose rhythmic lags must fit the line: S091 P4 clamped it in the
+ *   manager (BUFFER_DEPENDENT); S091 P5 A moved the clamp into the engine
+ *   (crumpBit_grainPick()), so the row is a plain image row again and the
+ *   manager's per-block Position search is gone. The page still shows the
+ *   stop that plays (crumpBit_grainPosLimit()).
  * - rate (7) is BUFFER_DEPENDENT (S091 P2): a higher value is a longer
  *   delay, up to the whole arena, and EffectsManager clamps the resolved
  *   value to the live share through crumpBit_ops.effective_max; the page
@@ -62,16 +68,24 @@ const char crumpBit_full8[] = "CrumpBit";
  * - aux (15, S091 P3): the per-sub-type pitch row, bipolar (63 = 0): the
  *   `pit` interval, the `grn` root `st1`; the tone drive in `dly`/`cmb`
  *   when the deferred drives land. Morph, LFO and Pattern.
- * - grain rows (16..21, S091 P3, `grn` only): `st2`, `st3` (bipolar,
- *   semitones from the root), `spr` spread/detune, `den` density (default
- *   127 = continuous grains), `amp` level jitter, `wid` random pan. Morph,
- *   LFO and Pattern; lanes from the `grn` lane map (st2 4, st3 5, spr 15).
+ * - grain rows (16..21, `grn` only; S091 P4 meanings, S091_P4_GRN_TWEAKS.md
+ *   Part A): `p2`, `p3` (rows 16, 17, keys `crump_grain_st2/st3`: absolute
+ *   pitches, bipolar semitones, Q4), `spr` spread/detune, `den` Density
+ *   (bipolar: 63 off, 64 +1 = one trigger per line, rhythmic above, random
+ *   below; default 64), `lng` Length (row 20, bipolar: size, reversed left
+ *   of 63; default 127 = the whole line forward; the retired level jitter
+ *   `amp` held this index), `wid` Width (mono at 0). Defaults give the copy
+ *   setting (A1.9). Morph, LFO and Pattern; lanes from the `grn` lane map
+ *   (den 4, lng 10, spr 15).
+ * - filter balance (22, S091 P4, shared output stage): `bal`, bipolar
+ *   (63 = 0): the right channel's cutoff index is frq + (bal - 63), the
+ *   left's frq - (bal - 63). Morph, LFO and Pattern, like `frq`; no lane.
  * - Defaults (S075 F2-E, user): mix 0, feedback 64, rate 64, delay pan 63
  *   (the absolute centre, shows 0). The sync row's 3-letter label is `snc`;
  *   its file key remains `crump_sync`.
  * Why: the registry makes storage, AutoSave, the Effect page, lanes,
  * automation and LFO work without type-specific code elsewhere. Inputs:
- * none (const). Output: 22 rows. Accessors: EffectsManager (resolution,
+ * none (const). Output: 23 rows. Accessors: EffectsManager (resolution,
  * clamps, capabilities), menuEffects/menu.c (labels, dtypes), `.fx` and
  * AutoSave (file keys). Affiliates: EffectParamRows.h, CrumpBitEffect.c
  * write_param().
@@ -101,6 +115,7 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
                CRUMPBIT_SUBTYPE_DELAY, CRUMPBIT_SUBTYPE_COUNT - 1u),
     EFFECT_ROW("crump_sync", "Delay", "Sync", "snc", DTYPE_ON_OFF,
                INSTRUMENT_PARAM_FLAG_AUTOMATABLE, EFFECT_MOD_NONE, 0u, 1u),
+    /* S091 P5 A: the `grn` Position clamp is the engine's; no flag. */
     EFFECT_ROW("crump_dly_pan", "Delay", "DlyPan", "dpn", DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
     /* S091 P2, delay sub-type: tone tilt on the feedback return. */
@@ -118,19 +133,25 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
     /* S091 P3: the per-sub-type pitch row (pit interval, grn root). */
     EFFECT_ROW("crump_aux", "CrumpBit", "Aux", "aux", DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
-    /* S091 P3, grn only: pitch set, spread, density, level, width. */
-    EFFECT_ROW("crump_grain_st2", "Grain", "Pitch2", "st2", DTYPE_PM63,
+    /*
+     * grn only (S091 P4): absolute pitches P2/P3, spread, bipolar Density,
+     * bipolar Length (row 20, was the level jitter), width.
+     */
+    EFFECT_ROW("crump_grain_st2", "Grain", "Pitch2", "p2", DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
-    EFFECT_ROW("crump_grain_st3", "Grain", "Pitch3", "st3", DTYPE_PM63,
+    EFFECT_ROW("crump_grain_st3", "Grain", "Pitch3", "p3", DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
     EFFECT_ROW("crump_grain_spread", "Grain", "Spread", "spr", DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
-    EFFECT_ROW("crump_grain_density", "Grain", "Density", "den", DTYPE_0B127,
+    EFFECT_ROW("crump_grain_density", "Grain", "Density", "den", DTYPE_PM63,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
+    EFFECT_ROW("crump_grain_length", "Grain", "Length", "lng", DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 127u, 127u),
-    EFFECT_ROW("crump_grain_amp", "Grain", "LvlJitr", "amp", DTYPE_0B127,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     EFFECT_ROW("crump_grain_width", "Grain", "Width", "wid", DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
+    /* S091 P4, output stage: stereo balance of the filter cutoff. */
+    EFFECT_ROW("crump_filter_bal", "Filter", "Balance", "bal", DTYPE_PM63,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
 };
 
 _Static_assert(sizeof(crumpBit_descriptors) /
@@ -298,9 +319,38 @@ static const char crumpBit_subtypeRowNames[CRUMPBIT_SUBTYPE_COUNT][6][4] = {
     [CRUMPBIT_SUBTYPE_DELAY]  = { "",    "",    "",    "",    "",    ""    },
     [CRUMPBIT_SUBTYPE_COMB]   = { "",    "not", "pol", "",    "",    ""    },
     [CRUMPBIT_SUBTYPE_PITCH]  = { "",    "win", "snp", "",    "",    "int" },
-    [CRUMPBIT_SUBTYPE_GRAIN]  = { "",    "div", "frz", "pos", "sze", "st1" },
+    /* S091 P4: delay time, freeze, Position, P1 (`ton` is not on its page). */
+    [CRUMPBIT_SUBTYPE_GRAIN]  = { "",    "tim", "frz", "pos", "",    "p1"  },
     [CRUMPBIT_SUBTYPE_REVERB] = { "dcy", "siz", "frz", "wid", "dmp", ""    },
 };
+
+/*
+ * `grn` rhythmic stop names (S091 P4, plan A1.6/A1.8): StepScale's 14 stops
+ * (stepScale_shortName()) plus d/2 and one bar, indexed by stop k as
+ * crumpBit_grainStopCc. Accessor: crumpBit_formatGrainStop().
+ */
+static const char crumpBit_grainStopNames[CRUMPBIT_GRAIN_STOPS][4] = {
+    "/64", "32t", "/32", "16t", "d32", "/16", "8Tr", "d16",
+    "/8 ", "4Tr", "d/8", "/4 ", "d/4", "/2 ", "d/2", "1br"
+};
+
+/*
+ * The `grn` delay-time label of an `rte` position: the stop's name when the
+ * position is a stop (the divisions are marked, Q8), else the position
+ * number, as StepScale's controls show them.
+ */
+static void crumpBit_formatGrainTime(uint8_t cc, char *out)
+{
+    uint32_t k;
+
+    for (k = 0u; k < CRUMPBIT_GRAIN_STOPS; k++) {
+        if (crumpBit_grainStopCc[k] == cc) {
+            memcpy(out, crumpBit_grainStopNames[k], 3u);
+            return;
+        }
+    }
+    numtostrpu(out, cc, ' ');
+}
 
 /* The shown sub-type (the page's view of the record), clamped. */
 static uint8_t crumpBit_shownSubtype(void)
@@ -345,8 +395,20 @@ static void crumpBit_formatNote(uint8_t note, char *out)
  *   the shown Sync on (as S091 P2), else the clamped number; `cmb` the note
  *   it plays (a higher value is a lower note); `pit` the window in ms;
  *   `grn` the step division it always snaps to (one half line);
- * - `aux` in `pit`/`grn`, and `st2`/`st3` in `grn`: signed semitones;
- * - `aux` where it has no meaning yet (`dly`, `cmb`, `rvb`): `---`.
+ * - `aux` in `pit`/`grn`, and `p2`/`p3` in `grn`: signed semitones;
+ * - S091 P4 `grn`: `rte` is the delay-time curve (a stop's name, else its
+ *   position); Position's rhythmic half the stop it plays (clamped);
+ *   Density `off`, `buf` (+1) or its stop;
+ * - `aux` where it has no meaning yet (`dly`, `cmb`, `rvb`): `---`;
+ * - S091 P5, what the two cheaper paths play:
+ *   - `typ` in `grn`/`rvb` (F1, Q5): the one-pole's mapped type, `LP`
+ *     (LP, LP2, BP, UBP), `HP` (HP, notch) or `off` (peak, off); the stored
+ *     value is untouched, so `dly`/`cmb`/`pit` still play it as stored;
+ *   - `res` in `grn`/`rvb` (F1): `---` (the one-pole has no resonance);
+ *   - `ton` (`dmp`) in `rvb` above 63 (R1, Q10): `  0`, as 63 shows (the
+ *     damping is low-pass only; values above 63 play flat);
+ *   - `fbk` in `grn` (G4, Q7): the echo gain in percent, 0..98
+ *     (crumpBit_grainFeedbackGain() x 100, rounded).
  * Everything else returns 0 for generic dtype formatting.
  * Why: the stored raw byte stays underneath (pots, storage, automation,
  * locks, LFO); only what is played and shown follows the sub-type.
@@ -386,10 +448,8 @@ static uint8_t crumpBit_uiFormatValue3(uint8_t index, uint8_t value,
                                                          127.0f) + 0.5f), ' ');
             return 1u;
         case CRUMPBIT_SUBTYPE_GRAIN:
-            stepScale_formatShort(
-                crumpBit_syncDivision(shown, seq_getBpm(),
-                                      crumpBit_grainMaxSamples(&share)),
-                out);
+            /* S091 P4: the delay-time curve, its divisions marked. */
+            crumpBit_formatGrainTime(shown, out);
             return 1u;
         case CRUMPBIT_SUBTYPE_REVERB:
             break;
@@ -420,6 +480,70 @@ static uint8_t crumpBit_uiFormatValue3(uint8_t index, uint8_t value,
     }
     if (index == CRUMPBIT_PARAM_GRAIN_ST2 || index == CRUMPBIT_PARAM_GRAIN_ST3) {
         crumpBit_formatSemitones(value, out);
+        return 1u;
+    }
+    /*
+     * S091 P4, `grn` Position and Density: the rhythmic half names its stop
+     * (Position after the live clamp, as the DSP plays it); Density 63 is
+     * `off` and 64 (+1) `buf` (one trigger per line); the rest generic.
+     */
+    if (sub == CRUMPBIT_SUBTYPE_GRAIN && index == CRUMPBIT_PARAM_DLY_PAN &&
+        value > 63u) {
+        fx_share_t share;
+        uint8_t limit;
+
+        fxbuf_effectShare(&share);
+        limit = crumpBit_grainPosLimit(&share);
+        if (limit > 63u) {
+            memcpy(out, crumpBit_grainStopNames[crumpBit_grainPosStop(
+                            (value > limit) ? limit : value)], 3u);
+            return 1u;
+        }
+        memcpy(out, "  0", 3u);
+        return 1u;
+    }
+    if (index == CRUMPBIT_PARAM_GRAIN_DENSITY && value >= 63u) {
+        if (value == 63u)
+            memcpy(out, "off", 3u);
+        else if (value == 64u)
+            memcpy(out, "buf", 3u);
+        else
+            memcpy(out, crumpBit_grainStopNames[crumpBit_grainDenStop(value)],
+                   3u);
+        return 1u;
+    }
+    /*
+     * S091 P5 F1: the one-pole sub-types show the type they play and no
+     * resonance. The mapping is crumpBit_onePoleMixTable's (CrumpBitEffect.c):
+     * the low-pass rows, then HP and notch as high-pass, the rest flat.
+     */
+    if (sub == CRUMPBIT_SUBTYPE_GRAIN || sub == CRUMPBIT_SUBTYPE_REVERB) {
+        if (index == CRUMPBIT_PARAM_FILTER_TYPE) {
+            const char *mapped = "off";
+
+            if (value == CRUMPBIT_FILTER_LP || value == CRUMPBIT_FILTER_LP2 ||
+                value == CRUMPBIT_FILTER_BP || value == CRUMPBIT_FILTER_UBP)
+                mapped = "LP ";
+            else if (value == CRUMPBIT_FILTER_HP ||
+                     value == CRUMPBIT_FILTER_NOTCH)
+                mapped = "HP ";
+            memcpy(out, mapped, 3u);
+            return 1u;
+        }
+        if (index == CRUMPBIT_PARAM_FILTER_RESO) {
+            memcpy(out, "---", 3u);
+            return 1u;
+        }
+    }
+    /* S091 P5 R1: `rvb` damping above 63 plays flat, so it shows 63's 0. */
+    if (sub == CRUMPBIT_SUBTYPE_REVERB && index == CRUMPBIT_PARAM_TONE &&
+        value > CRUMPBIT_TONE_FLAT) {
+        numtostrps(out, 0);
+        return 1u;
+    }
+    /* S091 P5 G4: `grn` echo gain 0..0.98 as a percentage, 0..98. */
+    if (sub == CRUMPBIT_SUBTYPE_GRAIN && index == CRUMPBIT_PARAM_FEEDBACK) {
+        numtostrpu(out, (uint8_t)((value * 98u + 63u) / 127u), ' ');
         return 1u;
     }
     return 0u;
@@ -467,34 +591,47 @@ static uint8_t crumpBit_uiFormatTarget3(uint8_t index, uint8_t value,
 }
 
 /*
- * CrumpBit Effect-page layout (S074_CRUMPBIT_EFFECT.md §5.1; S091 P2 §3).
+ * CrumpBit Effect-page layouts (S074 §5.1; S091 P2 §3; S091 P4 §A6 of
+ * S091_P4_GRN_TWEAKS.md, user 2026-11-04).
  *
- * What: SELECT 1 stays manager-owned. SELECT 2 holds four screens (the
- * layout maximum):
- *   s0 home overlay (bit row on top): ton fbk rte mrp
- *   s1 standard page:                 ton fbk rte sub
- *   s2:                               snc dpn mix typ
- *   s3:                               frq res  -   -
- * `ton` takes `mix`'s place on s0 and s1, and `mix` follows `dpn`, then the
- * filter type, cutoff and resonance (user U4). The two empty s3 cells are
- * kept for the deferred drive rows (`drv`, `tdr`). Every other SELECT has
- * zero screens because its buttons are bit toggles. The encoder walks
- * SELECT 1 s0 -> s1 -> overlay -> page 2 -> page 3 -> page 4.
- * Inputs: none (const). Output: registry layout consumed by menuEffects.
- * Affiliates: EFFECT_LAYOUT_CELL_MORPH, crumpBit_uiPaintRow0().
+ * What: SELECT 1 stays manager-owned (`typ out vol pan`, `mrp run len scl`).
+ * CrumpBit's pages follow, in encoder order:
+ *   SELECT 2 s0 home overlay (bit row on top, values only): mrp frq res bal
+ *   SELECT 2 s1 the output filter with its type:             typ frq res bal
+ *   SELECT 2 s2 the mix stage, the sub-type, then the sub-effect's first
+ *              two controls:                                 mix sub  x   y
+ *   SELECT 2 s3 (and SELECT 3 for `grn`): the rest of the sub-effect's
+ *              controls.
+ * Rule (user): only sub-effect controls follow `sub`. `frq` and `res` sit on
+ * s0 and s1; both cells edit the same rows. Every SELECT button stays a bit
+ * toggle (crumpBit_uiSelect()); the encoder walks cells across screens and
+ * SELECT groups, so SELECT 3's screens follow SELECT 2's last one.
+ * - crumpBit_layout (`dly`, `cmb`, `rvb`, same rows; names per sub-type
+ *   through crumpBit_uiName3()): s2 mix sub rte fbk; s3 snc dpn ton -.
+ * - crumpBit_layoutPitch: s2 mix sub aux(int) rte(win); s3 fbk snc(snp)
+ *   dpn ton.
+ * - crumpBit_layoutGrain (user order: freeze, position, length, density,
+ *   pitches, width, delay time, feedback): s2 mix sub snc(frz) dpn(pos);
+ *   s3 lng den aux(p1) p2; SELECT 3 s0 p3 spr wid rte(tim); s1 fbk.
+ * Inputs: none (const). Output: layouts consumed by menuEffects through
+ * crumpBit_uiLayout(). Affiliates: EFFECT_LAYOUT_CELL_MORPH,
+ * crumpBit_uiPaintRow0(), menuEffects_layout().
  */
+#define CRUMPBIT_LAYOUT_FILTER_SCREENS                              \
+    { EFFECT_LAYOUT_CELL_MORPH, CRUMPBIT_PARAM_FILTER_FREQ,         \
+      CRUMPBIT_PARAM_FILTER_RESO, CRUMPBIT_PARAM_FILTER_BAL },      \
+    { CRUMPBIT_PARAM_FILTER_TYPE, CRUMPBIT_PARAM_FILTER_FREQ,       \
+      CRUMPBIT_PARAM_FILTER_RESO, CRUMPBIT_PARAM_FILTER_BAL }
+
 const effect_select_layout_t crumpBit_layout = {
     .screen_count = { 0u, 4u, 0u, 0u, 0u, 0u, 0u, 0u },
     .cells = {
         [1] = {
-            { CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FEEDBACK,
-              CRUMPBIT_PARAM_RATE, EFFECT_LAYOUT_CELL_MORPH },
-            { CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FEEDBACK,
-              CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SUBTYPE },
+            CRUMPBIT_LAYOUT_FILTER_SCREENS,
+            { CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_SUBTYPE,
+              CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_FEEDBACK },
             { CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_DLY_PAN,
-              CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_FILTER_TYPE },
-            { CRUMPBIT_PARAM_FILTER_FREQ, CRUMPBIT_PARAM_FILTER_RESO,
-              EFFECT_LANE_NONE, EFFECT_LANE_NONE },
+              CRUMPBIT_PARAM_TONE, EFFECT_LANE_NONE },
         },
     },
     .custom_row0 = { 0u, 0x01u, 0u, 0u, 0u, 0u, 0u, 0u },
@@ -502,30 +639,15 @@ const effect_select_layout_t crumpBit_layout = {
     .home_screen = 0u,
 };
 
-/*
- * Sub-engine layouts (S091 P3 §2.5, S12).
- *
- * What: the registry's crumpBit_layout serves `dly`, `cmb` and `rvb` (their
- * rows sit in the same cells; names and values change through the hooks).
- * - `pit` adds its interval (`aux`, shown `int`) in SELECT 2 s3 cell 3.
- * - `grn` adds two SELECT 3 screens: `st1 st2 st3 spr` and `den amp wid`.
- *   The encoder walks cells across every SELECT group, so they are reached
- *   after SELECT 2's last screen; the SELECT 3 button keeps toggling data
- *   line 2 (crumpBit_uiSelect() owns every SELECT button).
- * Accessor: crumpBit_uiLayout(). Affiliates: menuEffects_layout().
- */
 static const effect_select_layout_t crumpBit_layoutPitch = {
     .screen_count = { 0u, 4u, 0u, 0u, 0u, 0u, 0u, 0u },
     .cells = {
         [1] = {
-            { CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FEEDBACK,
-              CRUMPBIT_PARAM_RATE, EFFECT_LAYOUT_CELL_MORPH },
-            { CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FEEDBACK,
-              CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SUBTYPE },
-            { CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_DLY_PAN,
-              CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_FILTER_TYPE },
-            { CRUMPBIT_PARAM_FILTER_FREQ, CRUMPBIT_PARAM_FILTER_RESO,
-              CRUMPBIT_PARAM_AUX, EFFECT_LANE_NONE },
+            CRUMPBIT_LAYOUT_FILTER_SCREENS,
+            { CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_SUBTYPE,
+              CRUMPBIT_PARAM_AUX, CRUMPBIT_PARAM_RATE },
+            { CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_SYNC,
+              CRUMPBIT_PARAM_DLY_PAN, CRUMPBIT_PARAM_TONE },
         },
     },
     .custom_row0 = { 0u, 0x01u, 0u, 0u, 0u, 0u, 0u, 0u },
@@ -537,20 +659,17 @@ static const effect_select_layout_t crumpBit_layoutGrain = {
     .screen_count = { 0u, 4u, 2u, 0u, 0u, 0u, 0u, 0u },
     .cells = {
         [1] = {
-            { CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FEEDBACK,
-              CRUMPBIT_PARAM_RATE, EFFECT_LAYOUT_CELL_MORPH },
-            { CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FEEDBACK,
-              CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SUBTYPE },
-            { CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_DLY_PAN,
-              CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_FILTER_TYPE },
-            { CRUMPBIT_PARAM_FILTER_FREQ, CRUMPBIT_PARAM_FILTER_RESO,
-              EFFECT_LANE_NONE, EFFECT_LANE_NONE },
+            CRUMPBIT_LAYOUT_FILTER_SCREENS,
+            { CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_SUBTYPE,
+              CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_DLY_PAN },
+            { CRUMPBIT_PARAM_GRAIN_LENGTH, CRUMPBIT_PARAM_GRAIN_DENSITY,
+              CRUMPBIT_PARAM_AUX, CRUMPBIT_PARAM_GRAIN_ST2 },
         },
         [2] = {
-            { CRUMPBIT_PARAM_AUX, CRUMPBIT_PARAM_GRAIN_ST2,
-              CRUMPBIT_PARAM_GRAIN_ST3, CRUMPBIT_PARAM_GRAIN_SPREAD },
-            { CRUMPBIT_PARAM_GRAIN_DENSITY, CRUMPBIT_PARAM_GRAIN_AMP,
-              CRUMPBIT_PARAM_GRAIN_WIDTH, EFFECT_LANE_NONE },
+            { CRUMPBIT_PARAM_GRAIN_ST3, CRUMPBIT_PARAM_GRAIN_SPREAD,
+              CRUMPBIT_PARAM_GRAIN_WIDTH, CRUMPBIT_PARAM_RATE },
+            { CRUMPBIT_PARAM_FEEDBACK, EFFECT_LANE_NONE,
+              EFFECT_LANE_NONE, EFFECT_LANE_NONE },
         },
     },
     .custom_row0 = { 0u, 0x01u, 0u, 0u, 0u, 0u, 0u, 0u },

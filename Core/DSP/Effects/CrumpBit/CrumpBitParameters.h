@@ -33,15 +33,16 @@
  */
 
 /*
- * Descriptor rows: common rows 0..2 plus type rows 3..21.
+ * Descriptor rows: common rows 0..2 plus type rows 3..22.
  * S091 P2 appended rows 11..14 (`ton`, `typ`, `frq`, `res`). S091 P3
  * appended row 15 (`aux`, the per-sub-type pitch/drive row) and the granular
- * rows 16..21 (`st2 st3 spr den amp wid`). The deferred output-filter drive
- * (`drv`) would append as 22; the tone drive (`tdr`) is the `aux` row's
- * meaning in `dly`/`cmb` when the drives land
- * (S091_P3_CrumpBit_SubType_Expansions.md §2.3).
+ * rows 16..21. S091 P4 (S091_P4_GRN_TWEAKS.md): row 20 is the grain Length
+ * (`crump_grain_length`; the retired level jitter `amp` held this index),
+ * and row 22 is the shared output-filter balance `bal`. The deferred
+ * output-filter drive (`drv`) would append as 23; the tone drive (`tdr`) is
+ * the `aux` row's meaning in `dly`/`cmb` when the drives land.
  */
-#define CRUMPBIT_PARAM_COUNT 22u
+#define CRUMPBIT_PARAM_COUNT 23u
 
 /*
  * Local descriptor indices.
@@ -71,14 +72,17 @@ typedef enum {
     CRUMPBIT_PARAM_FILTER_RESO,
     /* S091 P3: per-sub-type `aux` (pit interval, grn root `st1`). */
     CRUMPBIT_PARAM_AUX,
-    /* S091 P3, `grn` only: second and third pitch, spread, density, level
-     * jitter and random pan. */
+    /* S091 P3, `grn` only (S091 P4 meanings): pitches P2 and P3 (absolute),
+     * spread, density (bipolar: trigger rate), Length (bipolar: size and
+     * direction; index 20 was the retired level jitter) and width. */
     CRUMPBIT_PARAM_GRAIN_ST2,
     CRUMPBIT_PARAM_GRAIN_ST3,
     CRUMPBIT_PARAM_GRAIN_SPREAD,
     CRUMPBIT_PARAM_GRAIN_DENSITY,
-    CRUMPBIT_PARAM_GRAIN_AMP,
+    CRUMPBIT_PARAM_GRAIN_LENGTH,
     CRUMPBIT_PARAM_GRAIN_WIDTH,
+    /* S091 P4, shared output stage: the filter's stereo balance. */
+    CRUMPBIT_PARAM_FILTER_BAL,
     CRUMPBIT_PARAM_ENUM_COUNT
 } crumpbit_param_t;
 
@@ -107,14 +111,16 @@ typedef enum {
  * - CRUMPBIT_ROWS_SHARED: the stages every sub-type runs: the ADC data-line
  *   masks (`bof`, `biv`), the sub-type selector itself (`sub`), the MIX
  *   STAGE (`mix`, S091 P3 §2.8: always dry <-> the sub-engine's wet, never a
- *   sub-type row) and the output filter (`typ`, `frq`, `res`), which is the
- *   last element of the Effect whatever the sub-type is.
+ *   sub-type row) and the output filter (`typ`, `frq`, `res`, and since
+ *   S091 P4 its balance `bal`), which is the last element of the Effect
+ *   whatever the sub-type is.
  * - CRUMPBIT_ROWS_SUBTYPE: rows whose meaning is set by the active sub-type
  *   (`fbk`, `rte`, `snc`, `dpn`, `ton`, `aux`), aligned by role across
  *   sub-types (plan §6, A1): `fbk` amount back, `rte` length (higher =
  *   longer), `snc` the switch, `dpn` where the wet sits, `ton` colour/shape,
  *   `aux` pitch. A sub-type change keeps their values (plan §2.4).
- * - CRUMPBIT_ROWS_GRN: rows only `grn` reads (`st2 st3 spr den amp wid`).
+ * - CRUMPBIT_ROWS_GRN: rows only `grn` reads (`st2 st3 spr den len wid`;
+ *   S091 P4: `len` replaced the retired `amp`).
  * Why: a new sub-type adds its own mask here; the _Static_asserts in
  * CrumpBitParameters.c prove the masks are disjoint and cover every type
  * row 3..COUNT-1, so a row appended without an owner fails the build. The
@@ -130,7 +136,8 @@ typedef enum {
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_SUBTYPE) |               \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_FILTER_TYPE) |           \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_FILTER_FREQ) |           \
-     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_FILTER_RESO))
+     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_FILTER_RESO) |           \
+     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_FILTER_BAL))
 #define CRUMPBIT_ROWS_SUBTYPE                                 \
     (CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_FEEDBACK) |              \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_RATE) |                  \
@@ -143,7 +150,7 @@ typedef enum {
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_ST3) |             \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_SPREAD) |          \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_DENSITY) |         \
-     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_AMP) |             \
+     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_LENGTH) |          \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_WIDTH))
 
 /*
@@ -164,7 +171,11 @@ typedef enum {
  * 2-pole structure that would break constant CPU here (plan Q9).
  * CRUMPBIT_FILTER_OFF passes the input exactly once its one-block coefficient
  * ramp has settled; the filter still runs (constant CPU, warm state).
- * Accessors: crumpBit_descriptors (default/max), crumpBit_filterMix().
+ * S091 P5 F1: in `grn` and `rvb` the filter is a one-pole and the eight
+ * values map onto three: LP, LP2, BP, UBP low-pass; HP, notch high-pass;
+ * peak, off flat (the page shows LP/HP/off there).
+ * Accessors: crumpBit_descriptors (default/max), crumpBit_filterMix(),
+ * crumpBit_onePoleMixTable, crumpBit_uiFormatValue3().
  * Affiliates: MENU_FILTER, StereoFilterEffect.c stereoFilter_writeParam().
  */
 #define CRUMPBIT_FILTER_LP    0u
@@ -186,7 +197,9 @@ extern const char crumpBit_full8[];
  *
  * crumpBit_layout places the overlay (home) and pages 2..4 on SELECT 2
  * (S091 P2: four screens, the layout maximum); S091 P3 adds the `pit` and
- * `grn` variants, chosen by crumpBit_ui.layout. crumpBit_ui owns the SELECT
+ * `grn` variants, chosen by crumpBit_ui.layout. S091 P4 (user): the overlay
+ * is `mrp frq res bal`, then `typ frq res bal`, then `mix sub` and the
+ * sub-effect's controls (CrumpBitParameters.c). crumpBit_ui owns the SELECT
  * buttons (bit toggles), the SELECT LEDs (bit states), the overlay's top row
  * and the `sub`/Rate value text (the Rate shows the share-clamped value and,
  * with Sync on, the division the DSP plays).

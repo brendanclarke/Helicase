@@ -4764,3 +4764,161 @@ If H1 shows `grn` too heavy:
   - Lane maps follow the stored `sub` (S091 P3), so an older `grn` Scene's
     lanes 4/5/10 now drive Density, delay time and Length (no backward
     compatibility, user rule).
+
+---
+
+## 9. Implementation notes (2026-11-05 session)
+
+The tree was at `cc8ca99a` (docs only over `b0ed5701`); every firmware file
+matched the schedule's HEAD. The work below followed §3–§6 in order.
+
+### 9.1 Code application
+
+- **Method.** The 84 code units (H1–H6, E1–E18, P1–P6, C1–C10, B1–B4,
+  M1–M2, U1–U2, G1–G8, L1–L4, T1–T8, X1–X16) were extracted from this
+  schedule by a scratch script and applied mechanically: each unit's
+  `Remove (HEAD ...)` text was compared byte for byte with the current file
+  before replacement (`errors: 0`). E7, C10 and X14 give their removal as
+  an exact line range only, as the schedule says.
+- **Multi-block units.** E7's five sub-blocks were concatenated in order
+  (into `crumpBit_runGrain()`'s 647 lines) and X14's nine sub-blocks into
+  `law_cb14()` (406 lines). The first extraction pass took only E7.1 and
+  X14.1; the scripts were re-run from a clean `git archive HEAD` copy after
+  fixing the sub-block collection, so the final tree has all blocks.
+- **No manual code edits.** The applied text is the schedule's, including
+  every comment block. Verified files: `CrumpBitEffect.c/.h`,
+  `CrumpBitParameters.c/.h`, `CrumpBitTables.h`, `EffectsManager.c`,
+  `menuEffects.c`, `gen_crumpbit_tables.py`, `elf_looppath.py`,
+  `tools/dsp_test/Makefile`, `modules/crumpbit.c`.
+- **Generated table (R1).** `python3 tools/plots/gen_crumpbit_tables.py`
+  wrote the 353-line `CrumpBitTables.c`; `--check` prints `crumpbit
+  tables OK`. SHA-256 is exactly the schedule's
+  `193f047cd379ecb9f9b724152ca7d50a650d35b34c2e778f3b78a28f2d3f7f18`.
+
+### 9.2 Gates (run in this tree)
+
+| Gate | Result |
+|---|---|
+| G1 `make all` (clean) | exit 0. 20 warnings in both baseline and new logs; the only textual difference is LTO's `15` vs `16` LTRANS jobs. None in a changed file. |
+| G2 `make img` | `Written:build/LXRV2_lxr02.img (709860b) OK` |
+| G3 `make -C tools/dsp_test crumpbit` | `crumpbit failures: 0`; CB8 peaks 1.000; CB15 15.35 dB decay / 2.04 dB freeze; breaks 1–12 all caught |
+| G4 `crumpbit_tables` | `crumpbit tables OK` |
+| G5 `crumpbit_elf_check` | `runDelay` 124, `runComb` 124, `runPitch` 135, `runGrain` 136 and 133 (`--cond-heads --in-range`), `runReverb` 145, `process` 31, all vdiv 0; `divisionFor` 113; `tableLimit` 63 |
+| G6 mixer loops | baseline built from `git archive HEAD`: same ELF sizes as §2; `39 hot loops equal, 0 shrank, 0 grew`; 86/86 dumps |
+| G7 link budget | ITCM 15,328 B; DTCM statics 4,392 B; FXBUF 126,656 B at `0x20001140`; flash 709,860 / 753,664 B, headroom 43,804 B |
+| G8 `arm-none-eabi-size` | text 709,440; data 420; bss 413,016 |
+| G9 oscillator | `calcNextOscSampleSyncBlock` 11/9 and 9/9 |
+| G10 `make -C tools/dsp_test all` | same as HEAD: `voice_control` second build 6 failures, `run_modes` compile error; every other module 0 failures |
+
+The break-11 build emits one `-Wunused-variable` (`fl`) because the break
+removes its use; the production tree is warning-free in that file. G10's
+failures are the pre-existing ones named in §2.
+
+### 9.3 Documentation (D1–D5)
+
+- **D1** `tools/dsp_test/DSP_TEST.md`: `crumpbit` CB1–CB16 and the P4
+  laws, twelve breaks; `crumpbit_elf_check` `grn` 136 with
+  `--cond-heads --in-range`; the `--in-range` paragraph.
+- **D2** `EFFECTS_MIXER_DSP_REFERENCE.md`: runtime 100 B; the `grn` P4
+  model bullet; `bal` in the output-filter bullet; arena 126,656 B;
+  runtime union 44 B; §6.2a `grn` ≈ 201 and the others +0.7.
+- **D3** `EFFECTS_BUS_REFERENCE.md`: registry row 23 / 100 B / the `grn`
+  lane pool; SELECT 1 s1 `mrp run len scl`; the §8.6 page table; the
+  per-sub-type orders, names and labels; the `grn` defaults. The S091 P3
+  §10.3 stale lines were fixed in the same pass (comb 8.4..2,141,
+  `crumpBit_subtypeRateLimit()`).
+- **D4** `STORAGE_SRAM_MANIFEST.md`: `effects_runtime` 100 B; FXBUF
+  126,656 B at `0x20001140`.
+- **D5** `CPU_USE_DSP_AUDIT.md`: item 64.
+- **D6** `MEMORY.md`: deliberately not applied; the schedule puts the
+  status line after the hardware result, and H1–H9 are still open.
+
+### 9.4 Open (unchanged by this session)
+
+- Hardware H1–H9 (§5): H1 is the CPU decision for `grn` ≈ 201 per frame,
+  H2–H9 cover the copy setting, Position/Length/Density/Width, `bal`, the
+  pages and `.fx`/AutoSave.
+- `make -C tools/dsp_test all`'s `voice_control` and `run_modes` failures
+  are pre-existing on clean HEAD.
+
+---
+
+## 10. Assessment (2026-11-05)
+
+**Verdict:** the implementation is the schedule, byte for byte. No firmware
+file outside the schedule changed, and every static gate reproduces the
+schedule's numbers in an independent rebuild. Two reference-doc lines are
+still stale; hardware H1–H9 is open.
+
+### 10.1 Code against the schedule
+
+- **All 12 scheduled files are byte-identical** to the scratch build the
+  schedule was generated from (`cmp` of the working tree against it):
+  - `CrumpBitEffect.c/.h`, `CrumpBitParameters.c/.h`,
+    `CrumpBitTables.h/.c`;
+  - `EffectsManager.c`, `menuEffects.c`;
+  - `gen_crumpbit_tables.py`, `elf_looppath.py`, `tools/dsp_test/Makefile`
+    and `modules/crumpbit.c`.
+- **This agrees with §9.1:** the units applied by script against their
+  `Remove` text, and R1's SHA-256 matches.
+- **The first extraction pass** took only the first sub-block of E7 and
+  X14. §9.1 records it, and the re-run from a clean archive shows in the
+  byte-identical result: the multi-block units arrived whole.
+- **No firmware change outside the schedule.** `cc8ca99a` adds only
+  documents over `b0ed5701`, and the working tree's other changes are the
+  scheduled docs and the rebuilt image.
+
+### 10.2 Independent rebuild and gates
+
+I copied the working tree (without `.git` and `build/`) into the
+scratchpad, rebuilt it clean, and re-ran every gate:
+
+| Gate | Result |
+|---|---|
+| G1 `make all` | exit 0; 20 warnings, the baseline's 20; **none in a changed file** |
+| G2 `make img` | `Written:build/LXRV2_lxr02.img (709860b) OK`; **byte-identical** to the repository's image and to the schedule's verified image |
+| G3 `crumpbit` | 0 failures; CB8 peaks 1.000; CB15 15.35 dB / 2.04 dB; breaks 1–12 caught |
+| G4 `crumpbit_tables` | OK |
+| G5 `crumpbit_elf_check` | 124 / 124 / 135 / 136 + 133 / 145 / 31, vdiv 0; `divisionFor` 113; `tableLimit` 63 |
+| G6 mixer loops | 39 hot loops equal, 0 grew; 86/86 normalised identical (against the HEAD baseline ELF) |
+| G7/G8 link | text 709,440, data 420, bss 413,016; flash 709,860 (headroom 43,804); ITCM 15,328; DTCM statics 4,392; FXBUF 126,656 B at `0x20001140` |
+| G9 oscillator | 11/9, 9/9 |
+
+§2 therefore stands for the implemented image. Worst case per frame for
+the whole Effect:
+- `grn` ≈ 201 (P3 192, the user's ceiling ≈ 195);
+- `dly` 172.5, `cmb` 168.5, `pit` 181.9, `rvb` 193.1.
+
+### 10.3 Documentation (D1–D5)
+
+D1–D5 are applied as scheduled and read accurately against the code. The
+`grn` model, `bal`, the pages, the lane pool, the 100 B runtime, the
+126,656 B arena and the costs all match.
+
+The implementer also fixed most S091 P3 §10.3 lines in the same pass:
+- the comb range;
+- `crumpBit_subtypeRateLimit()`;
+- `min(share bytes, 126,656)`;
+- the page table, the layout bullet and the defaults;
+- the `grn` windows.
+
+D6 (`MEMORY.md`) correctly waits for the hardware result.
+
+Two lines in `EFFECTS_BUS_REFERENCE.md` are still stale:
+
+| Line | Now | Should be |
+|---|---|---|
+| 69 | "the whole share up to 126,688 B for its delay loop" | "up to 126,656 B (`CRUMPBIT_LOOP_MAX_BYTES`)" |
+| 535 (hooks table, `format_target3`) | "CrumpBit's `sub` names, and its per-sub-type `rte` text" | "CrumpBit's `sub` names only (the hook returns 0 for every other row)" |
+
+Neither affects code or gates.
+
+### 10.4 Open
+
+- **Hardware H1–H9 (§5).**
+  - H1 decides the CPU question: `grn` ≈ 201 per frame, ≈ 9 over S091 P3.
+  - H2 is the copy setting (seamless 1.44 s retriggers, unity level).
+  - H8 covers the pages, including the manager's `mrp run len scl` on
+    every Effect type.
+- **The two doc lines of §10.3.**
+- **D6 after hardware.**
