@@ -104,7 +104,7 @@ it belongs in the summary or the log, not here.
 | 087 | 2026-10-28/29 | `dev-ph7-voice_expansion`, uncommitted on `f3805478` | Oscillator `typ` row (`wav`/`smp`/`slp`/`wtb`), sample flash catalogue v2 + installer, step-automation order fix (D6), Q20.12 sample/wavetable readers, `pos` on samples, modulator `s`/`l`/`w` entries, one-shot sample mod oscillators, transient click sample list, display/naming corrections, MEMORY.md refactor |
 | 088 | 2026-10-29 | `dev-ph7-voice_expansion`, uncommitted on `80029d31` | Oscillator run modes `rst`/`fre`/`itp` (P0); fader zipper fix with block-rate one-pole smoothing (P1); float-through distortion for retrigger HF puff (P1) |
 | 089 | 2026-10-30 | `dev-ph7-voice_expansion`, uncommitted on `d944c87f` | Per-instrument SRR enable (P0); voice chain architecture + WFd wavefolder chain with 8 fold types (P1/P2); Drum FM depth ramp efficiency −9 instr/sample on 3 dearest carriers (P3); CPU at ceiling (binding) |
-
+| 090 | 2026-10-31/11-01 | `dev-ph7-voice_expansion`, uncommitted on `7f8b5d07` | Load/Save speed-up: RAM instrument snapshot replaces `.hctmp` (P1); mirror-served `.hcnames` reads, index reuse, type-step cancel (P1); AutoSave settle stage 13 + Load/Save drops AutoSave (P2); defect corrections — Save names, input lock, Scene Save freeze from FAT directory bloat, boot-time directory tail trim (P3); batch ticking 15 µs/500 µs, runtime watchdog 12 s every build, trace `w` owner (P5) |
 
 ---
 
@@ -2271,3 +2271,36 @@ Session 090 addressed Load/Save performance across five phases on `dev-ph7-voice
   `STORAGE_SRAM_MANIFEST.md` (S090 RAM entries),
   `MODULE_INTERCHANGE_SPEC.md` (boot stage 13, edit-mask move),
   `DEV_MODES.md` (trace stages `s`/`w`/`d`, sites 11/12).
+
+### 091 — CrumpBit Effect Expansion: CPU Reductions, Elastic Delay on Full Arena, DC Blocker / Tone Tilt / Cubic Soft Knee / Stereo TPT SVF Output Filter, Five Sub-Types (dly/cmb/pit/grn/rvb), Per-Sub-Type Lane Maps, Granular Rework (Flat-Top Windows, Density/Length/Freeze, Voice Stealing, Overwrite Clamp), Efficiency Pass to 170-Instruction Cap, Parameter Cleanup (Labels Hook, dly Delay Time Curve, grn Low Rows and Tap Fade) (2026-11-04/11-06)
+
+Session 091 expanded CrumpBit from a single tape-delay effect into a five sub-type multi-engine across six phases on `dev-ph7-voice_expansion` (base `5c9a92f9`, all uncommitted atop the S090 tree). The existing delay grew elastic on the entire FxBuffer arena (up to 126,656 B), gained a DC blocker, tone tilt, cubic soft-knee saturation, and a stereo resonant TPT SVF output filter. Four new sub-types (`cmb` comb/resonator/flanger, `pit` pitch shifter, `grn` granular, `rvb` lo-fi FDN reverb) were added behind a per-block sub-type dispatch with shared dry, mix, and output-filter stages. The granular engine was then redesigned with flat-top windows, absolute pitches, voice stealing, a Density/Length control model, freeze with anchor, and overwrite clamping. An efficiency pass brought every sub-type under the 170-instruction/frame cap. A final parameter cleanup added a labels hook (replacing `name3`), a new 128-step delay time curve for `dly`, and grain refinements (below /64 rows, tap fade on time changes). CrumpBitRuntime grew from 56 B to 100 B (within the user-approved +32 B over 76 B). Final CPU: dly 157.6, cmb 153.8, pit 154.1, grn 165.3, rvb 163.9 instructions/frame (worst 165.3 ≤ 170 cap). Flash 712,684 B (headroom 40,980 B). All hardware-tested and passed.
+
+- **P1, CPU reductions (plan `S091_P1_CrumpBit_Expansion.md`, schedule `S091_P1_Reductions_Implementation.md`):**
+  - R1: Binary-search Sync walk replaces linear scan (rateLimit → tableLimit, 101 → 63 instructions, −38/call). R2: Saturating ADC with `__USAT` (single instruction, −4 in stage 1). R3: Hoisted `io->frames` to local. R4: AC coupling on integer code differences (cheaper path). Stage-2 loop 126 → 111, per-frame 173 → 155, measured on hardware as a 3–4 % CPU reduction. Bit-identical to the pre-P1 output confirmed by host test (CB4).
+  - Flash: 694,156 → 693,504 B (−652 B). No RAM change.
+
+- **P2, CrumpBit expansion (plan `S091_P2_CrumpBit_Expanded_Plan.md`, schedule `S091_P2_Implementation.md`):**
+  - Elastic delay uses the whole FxBuffer arena (up to 126,688 B at the time; shrinks when voice units are claimed). Feedback raised to 1.20 (was 0.98). New signal chain: AC-coupling stage → tape delay loop → DC blocker → tone tilt → cubic soft-knee saturation → feedback → mix stage → stereo resonant TPT SVF output filter. Runtime grew 56 → 76 B (20 B of the approved +32 B). Stage-2 loop 126 instructions; output filter loop 31; whole Effect worst ≈172–176/frame. New host laws CB7–CB9, 5 break builds. New tables: `filterG[128]`, `filterR[128]`, `filterPan[128]`.
+  - Flash: 693,504 → 694,156 B (+652 B). Arena 126,688 B.
+
+- **P3, sub-type expansions (plan `S091_P3_CrumpBit_SubType_Expansions.md`, schedule `S091_P3_Implementation.md`):**
+  - Five sub-types (`dly` 0, `cmb` 1, `pit` 2, `grn` 3, `rvb` 4) behind a per-block `switch` in `crumpBit_process()`. Each engine a `static CRUMPBIT_NOINLINE void` function. Shared stages: stage 1 (ADC/AC), mix, and output filter (TPT SVF). Per-sub-type seven-lane pool on top of nine shared lanes; `sub` row is Pattern-automatable only, never LFO or Morph. Runtime reorganised: 56 B shared + 32 B union (grn largest) = 88 B. New per-sub-type row names via `name3` hook, per-sub-type layouts, per-sub-type Rate value text. 6 new tables (comb, pitchWindow, semitoneRatio, grainFraction, reverbSize, reverbDecay). New host laws CB10–CB15, 9 break builds. Engine worst/frame: dly 171.8, cmb 167.8, pit 181.2, grn 191.5, rvb 192.4.
+  - Flash: 694,156 → 707,020 B (+12,864 B). Runtime 76 → 88 B. Arena retuned to 126,656 B.
+
+- **P4, grn rework (plan `S091_P4_GRN_TWEAKS.md`, schedule `S091_P4_IMPLEMENTATION.md`):**
+  - Grain engine replaced: flat-top windows (128-frame fade), absolute pitches (P1/P2/P3 rows with spread-weighted selection and +/−1 st detune), Density/Length control model (random and rhythmic modes, 16 stops from /64 to 1br), voice stealing with 128-frame crossfade, freeze with write-head anchor, overwrite clamp (no read past recorded audio). New `countdown`, `age_a/b`, `end_a/b`, `anchor`, `pending` fields; `amp` removed. `filter_bal` (balance) added to shared output filter: per-channel TPT SVF cutoff offset. Delay line gets own time curve (`grainTime[128]`, 6–384 ticks in 96-PPQ). Runtime 88 → 100 B (used 24 of approved 32 B over 76 B base). Arena 126,656 B. grn worst ≈201/frame, triggering P5 efficiency pass. New host law CB16 (balance). 12 break builds.
+  - Flash: 707,020 → 709,860 B (+2,840 B).
+
+- **P5, efficiency pass — 170 cap (plan `S091_P5_SUBTYPE_EFFICIENCIES.md`, schedule `S091_P5_IMPLEMENTATION.md`):**
+  - B: Integer Q14 fixed-point tap read replaces float interpolation (−10 loop instructions in dly/cmb). P1: pit drop-sample heads without interpolation. R1: rvb damping LP-only (no high shelf). S1: feedback/pan gains stepped per block instead of per frame. X2: `bof`/`biv` 256-byte lookup table replaces per-sample branch. G3: grain window without lower clamp. G4: grn echo plain feedback (no tone on delay return). G6: Position fit cached per block. F1: one-pole output filter for grn/rvb (31 → 16 loop instructions; `res` shows `---`). ELF checks: CB17–CB20 added, elf_looppath `--q14` mode. Post-P5 costs: dly 158.3→160.0, cmb 152.2→153.8, pit 151.6→153.6, grn 167.5→166.5, rvb 163.1→163.9 (all ≤ 170).
+  - Flash: 709,860 → 710,240 B (+380 B). `.bss` unchanged.
+
+- **P6, parameter cleanup (plan `S091_P6_PARAM_CLEANUP.md`):**
+  - Labels hook replaces `name3` in EffectsManager registry (`effect_ui_hooks.labels`). `dpn` renamed to `spn` ("SubPan"). `snc` removed from `dly` sub-type lanes. New 128-step dly delay time table (`crumpBit_dlyTime[128]`) with tempo-relative curve and 13 stops (/64 through 2br); replaces the old Sync binary-search path and `rateLimit` call. `pit` interval labelled "pit"/"Shift"/"SemiPtch". grn below-/64 rows (4 positions below the lowest stop, showing their row number). Tap fade: one-block linear fade on time-parameter changes in grn via `tap_d`/`tap_on` state. New host law CB23, breaks 23–25, `runGrain` gate 114. Final CPU: dly 157.6, cmb 153.8, pit 154.1, grn 165.3, rvb 163.9 (worst 165.3 ≤ 170 cap). Flash 712,684 B (headroom 40,980 B). RAM unchanged from P5.
+
+- **Find here**: [091_SESSION_HANDOFF_LOG.md](091_SESSION_HANDOFF_LOG.md),
+  `EFFECTS_MIXER_DSP_REFERENCE.md` (CrumpBit DSP §4.4/§4.4a, arena §5.1, costs §6.2a),
+  `EFFECTS_BUS_REFERENCE.md` (labels hook §4.2a, CrumpBit page §8.6, pitfall §15),
+  `CPU_USE_DSP_AUDIT.md` (S091 items 65–70),
+  `STORAGE_SRAM_MANIFEST.md` (S091 flash/runtime entries).

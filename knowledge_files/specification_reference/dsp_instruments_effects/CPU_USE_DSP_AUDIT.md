@@ -5,7 +5,8 @@
 > at the end; S074 items 27–31, S075 items 32–35, S085 items 36–40, S086
 > items 41–44, S087 items 45–49). For how the DSP works today, what each
 > stage costs and how to change it, read `INSTRUMENTS_DSP_REFERENCE.md` and
-> `EFFECTS_MIXER_DSP_REFERENCE.md` (both in this folder). The S073
+> `MIXER_SYSTEM_DSP_REFERENCE.md` and `EFFECTS_MODULES_DSP_REFERENCE.md`
+(all in this folder). The S073
 > refactor's full record is `073_SESSION_HANDOFF_LOG.md` §6; the S074 DSP
 > additions are in `074_SESSION_HANDOFF_LOG.md` §7–§10; the host test bench
 > is `tools/dsp_test/DSP_TEST.md`.
@@ -1107,6 +1108,28 @@ the new copy/clear work is foreground-only and bounded.
       to 10 cycles per sample slower; `VDIV` overlaps other work on the
       M7). Plan: `S091_P5_SUBTYPE_EFFICIENCIES.md` §5.
     - Host CB1-CB19, eighteen breaks.
+    - **P5 follow-up (parameter pass):** all four pitch rows changed to ±36 st;
+      new `fin` row (row 23, ±52 cents fine pitch); `EFFECT_MOD_RANGE(lo,hi)`
+      macro replaces hand-coded range pairs; pitch window glide; `snp` inert in
+      `pit`. Host CB21 (pitch ±36), CB22 (band centre ratio). `pit`
+      153.6 → 154.1 per frame. Flash 710,240 → 710,876 B. Row count 23 → 24.
+
+### Session 091 P6 (CrumpBit parameter cleanup)
+
+70. **CHANGED (S091 P6): CrumpBit parameter cleanup.** Labels hook replaces
+    `name3` in EffectsManager registry. `dpn` renamed to `spn` ("SubPan").
+    `snc` removed from `dly` sub-type lanes. New 128-step dly delay time
+    table (`crumpBit_dlyTime[128]`) with tempo-relative curve and 13 stops
+    (/64 through 2br); replaces old Sync binary-search path and `rateLimit`
+    call for dly. `pit` interval labelled "pit"/"Shift"/"SemiPtch". `grn`
+    below /64: 4 positions below lowest stop, showing row number. Tap fade:
+    one-block linear fade on `grn` time-parameter changes via `tap_d`/`tap_on`
+    state; grain frame loop 116 → 114.
+    - New host law CB23 (tap fade), breaks 23–25, `runGrain` gate 114.
+    - Linked worst case per frame: `dly` 157.6, `cmb` 153.8, `pit` 154.1,
+      `grn` 165.3, `rvb` 163.9 (worst 165.3 ≤ 170 cap).
+    - Flash 712,684 B (headroom 40,980 B). RAM unchanged from P5.
+    - Host CB1–CB23, twenty-five breaks.
 
 ---
 

@@ -77,59 +77,31 @@ is in the referenced session logs and specification documents.
 
 ### Live Record
 
-- **Invariants (S081):** buttonHandler/Menu/MidiNotes/MidiControl call
-  LiveRecord; Sequencer never does; never in TIM3. Live cursor for placement,
-  no shuffle; echo marks carry deadlines; only Scene epoch = new take. Pattern
-  writes never fan out; FX-sequence erase does.
-- **First-change switch (S081 D12):** `LIVEREC_AUTOMATION_FIRST_CHANGE` in
-  `config.h` (default 1).
-- **Global Morph never recorded (S081 G-1):** `mrp` has no recording target.
-  Each individual edit via `liveRec_morphValue[7]` / `liveRec_recordValue7()`.
+Full specification: `PERFORMANCE_RECORD_SPEC.md` §3 (modes, placement,
+ownership, first-change switch, roll recording, Global Morph rule, echo marks).
+Internal engine maths: `PATTERN_DYNAMIC_STACK.md` §6.7.
 
 ### Looper
 
-- **Invariants (S080):** master-clock anchored; never reintroduce shared loop
-  counter, un-anchored snapshot, or resume via `seq_realignTrackToMasterClock()`.
-  Wrap before DDA; transport stop ends it. FX/Effects never looped.
-- **While recording (S081 P3):** runs with LATCH/OVERDUB. Held until every
-  SELECT/VOICE/BAR released. VOICE adds/drops tracks only, never fires
-  overlay or toggles mute. One producer `seq_recRingPush()`.
+Full specification: `PERFORMANCE_RECORD_SPEC.md` §1.2 (priority, overlay
+interaction) and §11 (invariants). Internal engine maths:
+`PATTERN_DYNAMIC_STACK.md` §6.5.
 
 ### Effects
 
-- **CrumpBit sub-types (S091 P3):** four stages: the shared dry path, one
-  sub-engine per block, the shared MIX stage (`mix`, lane 3 everywhere, never
-  freeable), the shared output filter. `sub` switches reinterpret the buffer
-  and keep every value. Lane maps are per stored `sub`
-  (`effects_laneTable()`). Row owners: `CRUMPBIT_ROWS_SHARED` /
-  `_SUBTYPE` / `_GRN`.
-- **R13 (S081):** menuHold > FX lock (own step) > track overlay > menu. Lock
-  start clears overlay; held lane/markers/owners removed. Realign via
-  `seq_fxRealignToMasterClock()`, never `seq_fxPublishReset()`.
-- **Effect page (S074):** type UI in registry hooks, not `menu.c` branches;
-  SELECT LEDs via `menuEffects_renderSelectLeds()`; underline via
-  `menu_repaint()`; 20 B union spare.
-- **Invariants:** SceneData only writes `scene_t.effect`. EffectsManager /
-  FxBuffer foreground-only. DTCM arena never cleared; local indices
-  type-relative; mask gate keeps fan-out safe.
+- **CrumpBit sub-types (S091):**
+  `EFFECTS_MODULES_DSP_REFERENCE.md` §6 (DSP and sub-type detail) and §6.2
+  (binding rules: sub-type dispatch, lane maps, labels hook, dly delay time
+  table, grn model, fin row, 170-cap, runtime 100 B, 24 rows, CB1–CB23).
+- **R13, Effect page, invariants:** `EFFECTS_BUS_REFERENCE.md` §6 (R13
+  resolution), §8 (Effect page), §9 (invariants).
 
 ### Menu / UI
 
-- **SHIFT Morph-view (S078, binding, project-wide):** non-morphable params
-  show/edit Normal value, never blanked or locked.
-- **STEP Morph view (S078):** momentary (flag && SEQ_PAGE && shift). No latch;
-  SHIFT+MODE STEP is only SOM entry.
-- **LED deadlines (S081 P4):** signed 16-bit distance `led_timeReached()`;
-  never `time_sysTick > end`.
-- **PERF SEQ LEDs (S080):** queued Scene = `LED_LAYER_FAST`; never restart
-  running blinks; never start/stop from per-beat path.
-- **Latched menus (S080):** SHIFT+REC/chain stay open; SHIFT release ignored
-  while open; SHIFT press closes (release consumed); MODE closes first.
-- **Menu dtype full (S078):** all 16 ids/nibbles used. New cells: existing
-  dtype + static-param special cases.
-- **STEP underline search (S078):** `va_searchSceneMask` bits; every
-  context/content change needs `va_searchRestart()`.
-- **Active Scene (S075):** = viewed and written to, not playback.
+Full specification: `MENU_UI_SPEC.md` (page system, dtype, LCD, buttons,
+LEDs, endless pots, Morph views, automation underline search, Active Scene
+rule). Effect page and R13: `EFFECTS_BUS_REFERENCE.md` §6, §8. PERF surface
+and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
 
 ### Scene / Bank
 
@@ -227,6 +199,8 @@ is in the referenced session logs and specification documents.
   must be paid for by an equal or larger measured saving, gated with
   `elf_loopdump.py`, `elf_hotloops.py`, and the inlined-set diff. The unused
   margin under WFd budgets is not headroom. `CPU_USE_DSP_AUDIT.md` item 64.
+- **CrumpBit 170-cap (S091 P5, binding):**
+  `EFFECTS_MODULES_DSP_REFERENCE.md` §6.2.
 - **Mixer byte size is NOT a cost measure (S089 P0 F3).** LTO re-spends freed
   inline budget. Gate mixer-path changes on `elf_hotloops.py` + inlined-set
   symbol diff, not on the mixer function's byte size.
@@ -361,7 +335,8 @@ DAC is in use.
 ## Audio Pipeline
 
 Full signal path, costs, and render-loop reference:
-`EFFECTS_MIXER_DSP_REFERENCE.md` (§3 mixer, §3.5 render loop).
+`MIXER_SYSTEM_DSP_REFERENCE.md` (§3 mixer, render loop quick reference).
+`EFFECTS_MODULES_DSP_REFERENCE.md` (per-module DSP, arena, binding rules).
 
 **Main loop pattern** (`main.c` `audio_check_and_render()`):
 ```c
@@ -438,16 +413,8 @@ Dannegger difference algorithm; `encode_read1/read2` permanently removed.
 
 ## Display / Menu
 
-- Full menu system wired: voice pages, global/MIDI, load/save.
-- **LCD queue**: head/tail-only SPSC — do NOT reintroduce `lcd_q_count`.
-- `sendDisplayBuffer` emits `lcd_setcursor` before every data byte.
-- `buttonHandler_processEvents()`: `if` not `while` — intentional.
-- **Knob repaint**: `menu_knobs_dirty` + `menu_serviceKnobRepaint()` is RV1-4 only.
-- **endlessPots**: `atan2f(b, a)` — do NOT change argument order.
-- Saturation in `menu_encoderChangeParameter` / `menu_handleLoadSaveMenu`: int16 sum + clamp.
-- Runtime load: `menu_startSoundApply()` / `preset_tickDrumsetApply()`;
-  do not reintroduce direct `preset_sendDrumsetParameters()` after audio.
-  Worker stays active until the all-source LFO/velocity rebind cursor drains.
+Full specification: `MENU_UI_SPEC.md` (LCD queue, buttons, endless pots,
+encoder saturation, knob repaint, runtime sound loading, all invariants).
 
 ---
 
@@ -537,8 +504,8 @@ Full specification: `MIDI_SPEC.md` (Parts I–III). Module reference:
 - `preset_morph()` is rate-limited by `preset_morphTick()`. Descriptor Morph now runs per voice from Scene-owned instrument images through `presetMorphEngine`; global `mrp` bulk-sets all six per-voice values and (S083) the Effect Morph as an `fxm` menu edit (`effects_setMorphAmountFromGlobal()`), and LFO Morph modulation is a hidden overlay centered on the retained per-voice base.
 - Do not add a morph skip cache. The request/pass generation scheduler must send a full final pass at the latest morph value.
 - Legacy MorphKit load/save still uses `parameters2[]` and flat `.SND` behavior. Do not treat it as the final descriptor instrument morph persistence path.
-- RV1-RV4 are analog endless pots, not the digital Gray-code encoder. The driver uses raw A/B snapshot baselines, `ENDLESS_POT_DEADZONE = 20`, `ENDLESS_POT_TIMEOUT_MS = 5000`, and `ENDLESS_POT_DELTA_TIMEOUT_MS = 20`.
-- Endless-pot double angular speed applies only to Morph amounts (`menu_paramIsMorphAmount()`: `PAR_MORPH`, `PAR_VOICE1..6_MORPH`, and since S075 `PAR_EFFECT_MORPH`/PERF `fxm`) and to Effect-page 0..255 cells. Do not apply it to all `DTYPE_0B255`; BPM drift exposed that as too broad.
+- **Endless pots and Morph views:** `MENU_UI_SPEC.md` §7 (driver, baselines,
+  deadzone, double angular speed rule), §9 (SHIFT Morph views).
 
 ---
 

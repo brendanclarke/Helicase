@@ -30,7 +30,7 @@
  *             settings; the mixer and trigger funnel are the only callers,
  *             both in the foreground.
  * Affiliates: mixer_calcNextSampleBlock(), voiceControl_triggerNow(),
- *             S074_BUS_COMP.md, EFFECTS_MIXER_DSP_REFERENCE.md.
+ *             S074_BUS_COMP.md, MIXER_SYSTEM_DSP_REFERENCE.md.
  */
 
 /*

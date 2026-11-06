@@ -4,11 +4,11 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 090 P2 (2026-10-31, hardware pending),
-  `dev-ph7-voice_expansion`. DEV link: `text=684,968`, `data=420`,
-  `bss=413,020`; flash payload 685,388 B of 753,664 B
-  (**headroom 68,276 B**). ITCM 15,240 / 16,384 B; DTCM statics 4,372 B;
-  FXBUF arena margin 3,808 B. The entries below run newest first.
+- **Current as of:** Session 091 P6 (2026-11-06),
+  `dev-ph7-voice_expansion`. DEV link: `text=712,264`, `data=420`,
+  `bss=413,284`; flash payload 712,684 B of 753,664 B
+  (**headroom 40,980 B**). ITCM 15,240 / 16,384 B; FXBUF 126,656 B at
+  `0x20001140` (margin 3,776 B). The entries below run newest first.
 - **S091 P5 changes (2026-11-05):** CrumpBit sub-type efficiencies
   (`S091_P5_IMPLEMENTATION.md`).
   - **Added (approved Q4):** `crumpBit_dataLines` (**256 B**) and
@@ -17,6 +17,12 @@ changing any of it.
     Measured `.bss` 413,016 -> 413,284 B (+268 with alignment), text
     +456 B; the runtime stays 100 B and FXBUF stays 126,656 B at
     `0x20001140`.
+- **S091 P6 changes (2026-11-06):** labels hook, `dly` delay time table,
+  `grn` tap fade, parameter cleanup.
+  - **No new RAM.** `.bss` 413,284 B and `.data` 420 B unchanged from P5.
+    Flash image 710,876 -> 712,684 B (+1,808 B); flash payload 712,684 B
+    of 753,664 B (**headroom 40,980 B**). ITCM 15,240 B and FXBUF
+    126,656 B at `0x20001140` unchanged.
 - **S090 P5 changes (2026-11-01):** Load/Save batching, watchdog, idle window
   (`S090_P5_IMPLEMENTATION.md`).
   - **Added (approved, Q5):** `fs_ls_wd_signature` + `fs_ls_wd_mark`, **2 B**
@@ -358,6 +364,7 @@ is 128 KiB, sectors 5–11 are 256 KiB.
 
 - **Window:** `0x08008000–0x080BFFFF` (753,664 B), sectors 1–6. Session 073
   added sector 6 (it was sample storage before); the window was 480 KiB.
+- **Use at the S091 P6 DEV link:** 712,684 B; **headroom 40,980 B**.
 - **Use at the S086 close DEV link:** 659,296 B; **headroom 94,368 B**
   (S085 close 139,704 B; S086 added the 45,056 B stock tables).
 - **Use at the S075 close DEV link:** 532,824 B; headroom 220,840 B.
@@ -749,7 +756,7 @@ DTCM is single-cycle, uncached, and not reachable by DMA.
   clamped to the share. The
   system never clears the arena: an owner clears what it reads unless it
   adopts content the handoff record marks valid. Details:
-  `EFFECTS_BUS_REFERENCE.md` §7 and `EFFECTS_MIXER_DSP_REFERENCE.md`.
+  `EFFECTS_BUS_REFERENCE.md` §7 and `EFFECTS_MODULES_DSP_REFERENCE.md` §3.
 - `sine_table` (8,194 B) moved from DTCM to flash in S072; `transientData`
   is flash-resident too.
 
@@ -768,7 +775,7 @@ DTCM is single-cycle, uncached, and not reachable by DMA.
 - MPU region 1 covers the first 4 KB of SRAM1 as **Normal non-cacheable**
   (TEX=001, C=0, B=0, S=1, XN=1) since Session 073; it was Strongly-Ordered
   before. Stores are bufferable, so the pack ISR ends with `DSB`
-  (`EFFECTS_MIXER_DSP_REFERENCE.md`).
+  (`MIXER_SYSTEM_DSP_REFERENCE.md` §3.4).
 - The whole section must stay ≤ 4,096 B (linker ASSERT).
 
 ### 8.2 Resident SRAM1 owners

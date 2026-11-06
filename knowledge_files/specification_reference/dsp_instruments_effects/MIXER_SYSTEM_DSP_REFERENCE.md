@@ -1,22 +1,24 @@
-# Effects and Mixer DSP Reference
+# Mixer System DSP Reference
 
 What happens to audio after an instrument voice renders it: decimation,
-gain, pan and routing, the FX bus and the Effect's DSP, the Effect return,
+gain, pan and routing, the FX bus and the Effect handoff, the Effect return,
 the master bus compressor, and the path to the two DACs. It covers the
-arithmetic, the number formats, what each stage costs, and how to change or
-extend it.
+arithmetic, the number formats, what each stage costs, and how to change it.
 
-- **Current as of:** Session 088 close (2026-10-29). S088 added block-rate
-  fader smoothing in `mixer_faderGains()` (§3), itp slot accounting before
-  `modNode_resetTargets()`, and the `* 256.0f` direct float-to-24-bit mixer
-  conversion. S074 added CrumpBit (§4.4, the first type using the arena),
-  the master bus compressor (§5A), the `xfd` fader mode (§3.2) and the
-  closure of the arena gaps (§5.3).
+- **Current as of:** Session 091 P6 close (2026-11-06). S088 added
+  block-rate fader smoothing in `mixer_faderGains()` (§3), itp slot
+  accounting before `modNode_resetTargets()`, and the `* 256.0f` direct
+  float-to-24-bit mixer conversion. S074 added the master bus compressor
+  (§4), the `xfd` fader mode (§3.2) and the `off`-branch return-ramp reset
+  (§3.3 item 6).
+- **Scope split with `EFFECTS_MODULES_DSP_REFERENCE.md`:** that document
+  covers each Effect module's DSP, binding rules, arena use, costs, and the
+  arena framework. CrumpBit, StereoFilter and future types live there.
 - **Scope split with `EFFECTS_BUS_REFERENCE.md`:** that document is the
   authority for the Effect system's control side: the type registry,
   parameters and resolution order, the Effect page, the FX sequencer,
   automation and LFO targets, storage and AutoSave, and the add-a-type
-  tutorial. This document covers the signal path and its DSP.
+  tutorial.
 - **Related:** `INSTRUMENTS_DSP_REFERENCE.md` (the voices and modulation),
   `STORAGE_SRAM_MANIFEST.md` (memory), `CPU_USE_DSP_AUDIT.md` (cost audit),
   `tools/dsp_test/DSP_TEST.md` (host test bench).
@@ -39,7 +41,7 @@ per 32-frame block (main loop, mixer_calcNextSampleBlock):
                                                                             ▼
   output buffers (DTCM): audioOutBuffer (`output`, DAC2 pair, St2) and
                          audioOutBuffer2 (`output2`, DAC1 pair, St1)
-  master bus compressor on St1 or St2, in place (§5A; nothing while `cmp` off)
+  master bus compressor on St1 or St2, in place (§4; nothing while `cmp` off)
 
 per 96 frames: commit the slot to the 2-slot ready queue
 
@@ -88,7 +90,7 @@ Policy).
 
 - Instrument control-rate work runs first (LFOs, filter coefficients, async
   updates), then `effects_service()` resolves the Effect's parameters
-  (§4.1).
+  (`EFFECTS_MODULES_DSP_REFERENCE.md` §1).
 - **Routing snapshot:** `effectiveRouting[slot] =
   mixer_checkOutJackAvailable(mixer_audioRouting[slot])`, once per block.
   Jack detect pins (PD6/PD7 for OUT1 L/R, PB4/PB6 for OUT2 L/R) are sampled
@@ -209,7 +211,8 @@ When the Effect is active:
    zeroed so the Effect can write a second output.
 2. Build `effect_io_t`: `l` (always), `r` (stereo-in, or the zeroed channel
    for mono-in/stereo-out; otherwise NULL), `frames = 32`, `channels` = the
-   input channel count, `share` = the current arena share (§5).
+   input channel count, `share` = the current arena share
+   (`EFFECTS_MODULES_DSP_REFERENCE.md` §3).
 3. `effects_process(&io)`: the type's `process()` works in place.
 4. **Return gains** (`level` = the common `vol` row / 127):
    - stereo-output type (balance, unity at stored centre 63):
@@ -230,7 +233,7 @@ When the Effect is active:
    CrumpBit's AC-coupled 8-bit output is never exactly silent. The
    active-Effect path is bit-identical.
 
-After the Effect return, the master bus compressor (§5A) processes one
+After the Effect return, the master bus compressor (§4) processes one
 output pair in place. It is the last mixer stage before the output buffers
 are queued for the DMA pack.
 
@@ -298,371 +301,7 @@ Note: `seq_drainPendingAutomationTo(mark)` is called *inside* `voiceControl_proc
 
 ---
 
-## 4. Effect DSP
-
-### 4.1 Resolution before processing
-
-`effects_service()` (every block, foreground) rescans every descriptor of
-the active type: Morph base → interpolation → FX-sequencer lock → Pattern
-overlay → LFO → clamps (`EFFECTS_BUS_REFERENCE.md` §6). It calls the type's
-`write_param(rt, index, value)` only when a row's effective value changed,
-and applies the common rows (route, level, pan) itself.
-
-- **Cost:** about 10–15 cycles per row per block (about 100 for the 7-row
-  `flt`, up to about 1,000 for a 64-row type), plus whatever `write_param`
-  does on a change.
-- **An LFO or a moving lock on a parameter makes `write_param` run every
-  block.** Budget coefficient recomputation as if it always runs.
-
-### 4.2 Runtime state
-
-- `effects_runtime` is a union of every type's runtime struct in DTCM
-  (`.dtcmz`), 100 B since S091 P4 (CrumpBit: 56 B shared + a 44 B sub-engine
-  union; StereoFilter 76 B). The
-  manager zeroes it and calls the type's `init()` when the type becomes
-  active. It does not zero or re-`init` on a same-type Scene switch: the
-  runtime, and with it any tail, keeps running.
-- **A larger runtime struct grows the union and shrinks the arena** by the
-  same amount (the linker ASSERT keeps the arena ≥ 120 KiB). It needs RAM
-  approval (`STORAGE_SRAM_MANIFEST.md` §10). Large audio state belongs in
-  the arena share, not in the union.
-
-### 4.3 StereoFilter (`flt`)
-
-- Stereo in, stereo out. Two `ResonantFilter` states (left, right) share
-  linked coefficients: `stereoFilter_linkCoefficients()` copies `f`, `g`, `q`
-  and `drive` from left to right after every coefficient write; the state
-  variables (`s1`, `s2`, `a`, `b`, `zi`) stay per channel.
-- `write_param` uses the same shaping as a voice filter:
-  `filter_freq` → `SVF_directSetFilterValue(valueShaperF2F(v/127, −0.9))`,
-  `filter_reso` → `SVF_setReso(v/127)`, `filter_drive` → `SVF_setDrive(v)`,
-  `filter_type` → `v + 1`.
-- `process` runs `SVF_calcBlockZDFFloat()` on `io->l`, and on `io->r` when
-  there are two channels.
-- **`SVF_calcBlockZDFFloat()`** is the float twin of the voice filter: the
-  same batched two-division solver (S073), normalised float in and out, no
-  `__SSAT`, float literals. Types 1..7 filter; any other value passes the
-  block through. Its arithmetic must stay identical to `SVF_calcBlockZDF()`;
-  both are described in `INSTRUMENTS_DSP_REFERENCE.md` §6.2. An `#error`
-  guards the shaper configuration it does not mirror.
-
----
-
-### 4.4 CrumpBit (`cbt`, Session 074; expanded S091 P2; sub-types S091 P3)
-
-Files: `Core/DSP/Effects/CrumpBit/CrumpBitEffect.c/.h` (compiled `-Ofast`
-through an explicit Makefile rule) and the generated `CrumpBitTables.c/.h`.
-Page, rows and lanes are in `EFFECTS_BUS_REFERENCE.md` §4.2a and §8.6.
-Design record: `074_SESSION_HANDOFF_LOG.md` §7; expansion:
-`S091_P2_CrumpBit_Expanded_Plan.md`.
-
-**What it is.** The stereo send is converted as a bipolar 8-bit audio ADC
-would. The eight data lines can each be forced off or inverted, and an 8-bit
-DAC decodes the result. AC coupling removes the DC the masks create. The two
-channels then feed a mono 8-bit tape-style delay kept in the arena; its
-feedback return is DC-blocked, tilted and soft-kneed, and the Mix control
-crossfades the bit-crushed signal with the raw delay read. Finally a stereo
-output filter shapes the Effect output: a TPT state-variable filter (eight
-voice types) in `dly`/`cmb`/`pit`, and a one-pole (mapped type, no
-resonance) in `grn`/`rvb` (S091 P5 F1). Three stages, one row owner each
-(S091 P2 §4).
-
-```
-per sample, both channels:
-  code  = adc(x)                          x·128 + 128.5 truncated, then USAT to 0..255 (S091 R2; = the S074 clamp and 256 → 255 fold)
-  code' = lines[code]                     (code & keep) ^ invert for all 256 codes, rebuilt only on a bof/biv change (S091 P5 X2)
-  h     = (code' − code'[n−1])/128 + 0.9985755·h[n−1]   DAC + AC coupling, ~10 Hz one-pole high-pass (S091 R4: the code difference is exactly y − y[n−1])
-per sample, the delay sub-type (the tape loop, mono):
-  delay += (target − delay)·1.5113e-4     tape glide, τ 150 ms; target ≤ length − 2
-  rp     = wp − delay (wrap by compare)   i0 = ⌊rp⌋, i1 = i0+1 (wrap), frac = rp − i0
-  wet    = (loop[i0] + frac·(loop[i1] − loop[i0]))/128,   muted unless delay + 2 ≤ valid
-  dc   = wet − wet[n−1] + 0.99928775·dc[n−1]        DC blocker, ~5 Hz (in the loop)
-  s   += k(ton)·(dc − s);  t = a·s + b·dc            tilt: LP (1,0), flat (0,1), HP (−1,1)
-  v    = clamp(fb·t, ±1.5);  ret = v − (4/27)·v³     soft knee, ±1 at ±1.5
-  loop[wp] = adc(½(hL + hR) + ret) − 128   (int8; re-quantised every pass, masks not re-applied)
-  wp++ (wrap), valid++ (saturating at the loop length)
-  out  = h + mix·(g·wet − h)                         first echo unshaped
-per sample, the shared output filter (second pass, both channels; S091 P5 F1):
-  dly/cmb/pit: TPT SVF: v1 = a1·ic1 + a2·v3, v2 = ic2 + a2·ic1 + a3·v3, ic1 = 2·v1 − ic1, ic2 = 2·v2 − ic2
-               out = cx·x + cb·bp + cl·lp            one 3-coefficient mix, ramped per block
-  grn/rvb:     s += k·(x − s), k = crumpBit_onePoleK[frq]   (−3 dB matched to the SVF at res 0)
-               out = cx·x + cl·s                     LP (0, 1), HP (1, −1), flat (1, 0); the type crossfade ramps per block
-```
-
-### 4.4a CrumpBit sub-types (S091 P3; efficiencies S091 P5)
-
-Four stages per block. Stage 1 is the shared dry path (ADC, the data-line
-table, DAC, AC coupling) and stage 3 the shared MIX stage; stage 2 is exactly
-one sub-engine, chosen once per block by `sub`; stage 4 is the output filter
-of that sub-type (the TPT SVF in `dly`/`cmb`/`pit`, a one-pole in
-`grn`/`rvb`). Within a sub-type every statement runs every frame (constant
-CPU). S091 P5 caps the whole Effect at 170 instructions per frame in every
-sub-type, worst case, gated by `crumpbit_cpu_check`.
-
-- **Switching.** A change of the resolved `sub` (menu, MIDI, Scene or
-  Pattern automation) is detected per block, so it lands on a block boundary.
-  `crumpBit_enter()` reinterprets the arena in the new format: nothing is
-  cleared or gated; every row and FX-lane value carries over, rows are
-  aligned by role, and only the new engine's DSP state is re-initialised and
-  its prefix clamped to the new geometry. Cross-format glitches are wanted.
-  A switch between an SVF sub-type and `grn`/`rvb` hands the output
-  filter's state over (SVF low integrator ↔ one-pole state), so the filter
-  carries on instead of starting from a stale integrator (S091 P5 F1).
-- **MIX stage (binding, user).** `mix` is not a sub-type control: for every
-  sub-type, `out = h + mix·(wet − h)`, where `h` is stage 1 and `wet` is the
-  selected engine's output. The row keeps its name and lane 3 in every lane
-  map, and is never freeable. `mix` keeps its per-frame ramp in every
-  sub-type (user, S091 P5 Q9).
-- **`cmb` comb / resonator / flanger (engine A, loop 109).** The tape loop
-  retuned to the semitone comb table (8.4 .. 2,141 samples) with a fast
-  glide `4.5245e-3`; the same return chain and Q14 integer tap as `dly`;
-  `snc` folds a negative feedback sign into the per-block gain. Per-block
-  work is lower than `dly` (one table read instead of the Sync search).
-  Whole-Effect worst case 153.8 per frame (S091 P5).
-- **`pit` two-head pitch shifter (engine B, loop 106).** `φ += (1 − r)/W`
-  per sample in a wrapping 0.32 word; head A trails by `2 + W·φ`, head B by
-  `2 + W·frac(φ + ½)`; both reads are drop-sample (S091 P5 P1: no
-  interpolation), and the triangular windows `wA = 1 − |2φ − 1|`,
-  `wB = 1 − wA` sum to 1. `aux` is the interval, `rte` the window,
-  `snc` semitone snap, `dpn` the wet balance; the return chain is the
-  tape's. Whole-Effect worst case 153.6 per frame.
-- **`grn` granular plus delay (engine B', loop 116; S091 P4 model;
-  efficiencies S091 P5).** The
-  share is split into a record line and a delay line of equal length N.
-  Two voices read the record line at 16.16 positions with Q3.12 increments
-  (`pos += inc x 16`), drop-sample with no interpolation (user G6). Density
-  (`den`, bipolar) triggers each voice independently of its Length:
-  63 off, 64 (+1) one trigger per N, rhythmic above, random below (at least
-  one block). Length (`lng`, row 20, bipolar) is the grain size up to N,
-  reversed left of centre, at least ~5 ms. Position (`dpn`, bipolar) is 0
-  follow (two frames behind the head), a rhythmic lag to the right, and a
-  random scatter to the whole recorded line to the left. Each voice uses a
-  flat-top window with 128-frame complementary fades, so back-to-back
-  grains sum to exactly 1 (the copy setting). A trigger with both voices
-  busy steals the older one with a 128-frame fade and a deferred trigger;
-  the per-grain overwrite clamp keeps every read inside recorded, not
-  overwritten audio. `snc` freezes the record line and anchors Position at
-  the freeze head; rows 15..21 are the absolute P1-P3 pitches, spread
-  (with +/-1 st detune above 80), Density, Length and Width. The delay tap
-  reads its own `rte` time, the 6..384-tick generated curve with the
-  rhythmic stops marked, clamped to N, with no glide. S091 P5 A: a rhythmic
-  Position stop is limited to the last stop that fits the line (the engine
-  caches the fit per tempo and line); grain spans are rounded down to a
-  block boundary, steals are padded to one, and an idle voice's gains are 0
-  (the window needs no lower clamp). The echo is plain feedback with gain
-  0..0.98 over `fbk` (no DC blocker, no soft knee; it always decays). One
-  hardware RNG word per block is expanded by an integer hash. Whole-Effect
-  worst case 166.5 per frame.
-- **`rvb` 8-bit four-line FDN (engine C, loop 131).** Four integer taps from
-  one packed 32-bit word per frame (one 8-bit lane per line), one-pole
-  low-pass damping per line (S091 P5 R1: `ton` above 63 plays flat), a
-  4 × 4 Hadamard mix scaled ½, and per-line decay gains from `fbk` as
-  RT60; the lanes are offset-binary so one XOR makes `ldrsb` read signed
-  values. `snc` freezes (`g_k` 0.999, input off) and the wet path plus the
-  line feedback open per block only once `valid` covers the longest line.
-  Whole-Effect worst case 163.9 per frame.
-
-`rte` is clamped per sub-type by `crumpBit_subtypeRateLimit()` through the
-runtime-aware `effective_max(rt, index, share)`; BUFFER_DEPENDENT rows are
-re-applied every block, so a switch or share change is clamped one block
-later. Since S091 P5 A `dpn` is not BUFFER_DEPENDENT: the `grn` engine
-limits its Position stop itself, while the page label shows the stop that
-plays (`crumpBit_grainPosLimit()`). The `dly` map is the S091 P2 lane table;
-every lane read goes through
-`effects_laneTable(record)`, keyed by the Scene's stored `sub`.
-
-- **Offset binary** (user decision): code 128 is silence, the transfer is
-  mid-tread, and one LSB is 1/128 of full scale. With every bit normal the
-  type is still an 8-bit quantiser: it is never transparent, and quiet sends
-  use few codes.
-- **What the data lines do:**
-  - bit 7 off or inverted moves even silence to −1.0 (full-scale DC);
-  - lower bits off remove weight 2ⁿ (coarser steps, DC about −2ⁿ⁻¹);
-  - lower bits inverted add a signal-correlated ±2ⁿ pattern, and silence
-    becomes +2ⁿ/128.
-  - The AC coupling returns the output to 0 in tens of ms. It cannot hide
-    the step when a high bit switches (τ ≈ 16 ms, a thump). Without it the
-    DC would also build to `DC/(1 − fb)` in the loop and pin it at a rail.
-- **Rate and Sync (per block; S091 P2):**
-  - `free = rateTable[rte]` = 882·143.635^(rte/127) samples: 20 ms at 0,
-    0.244 s at 64, 2.872 s at 127 (the whole arena less the guard).
-    Higher `rte` is a longer delay (the S074 curve ran the other way).
-    (`crumpBit_rateSamples()`.)
-  - the target is clamped to `length − 2`; `rte` is
-    `EFFECT_PARAM_FLAG_BUFFER_DEPENDENT`, so EffectsManager lowers the
-    resolved value through `crumpBit_ops.effective_max`
-    (`crumpBit_subtypeRateLimit()`; `crumpBit_rateLimit()` is the `dly`
-    case) and the page clamps edits through
-    `effects_paramEffectiveMax()`. A stored value above the clamp is kept
-    and plays when the share grows; the page shows the clamped value.
-  - `synced` = the StepScale division nearest in log time, at
-    `seq_getBpm()` (96-PPQ ticks × 27,567.5 / BPM samples), among divisions
-    that fit the live share's longest delay. The walk covers all 128 curve
-    positions (`stepScale_ticksQ8(i) / 256.0f` ticks, fractional); the UI
-    label uses `stepScale_formatShort()`. The bracketing pair is chosen with
-    the geometric-mean test `target² < low·high`, so no logarithms
-    (`crumpBit_divisionFor()`). Its fixed search takes the live maximum as
-    a parameter and has an eighth probe, which completes the 0..128 count
-    the seven steps cannot reach.
-  - Both are computed every block and `sync` selects one (constant cost), so
-    tempo changes glide the delay.
-- **Feedback, tone and knee (per block; S091 P2):**
-  - `fb = v/100` up to 100, then `1 + (v − 100)·0.2/27`, so 100 is exactly
-    unity and 127 is 1.2. `mix = row/127`;
-    delay pan `gL = p ≤ 63 ? 1 : (127 − p)/64`, `gR = p ≥ 63 ? 1 : p/63`.
-    All ramp linearly across the block; their origins are recomputed from
-    the previous raw rows.
-  - the in-loop DC blocker (`R 0.99928775`, ~5 Hz) is always on: above unity
-    any offset would otherwise grow to a rail.
-  - `ton` is one pole `s += k·(v − s)` with `k` from
-    `crumpBit_toneK[]`: 0..62 low-pass, 63 flat (a bit-exact pass-through,
-    weights `(0, 1)`), 64..127 high-pass. The tilt is applied inside the
-    loop, so repeat *n* is shaped *n* − 1 times and the first echo is heard
-    raw.
-  - the return is clamped to ±1.5 and then `y = v − (4/27)·v³`: the fixed
-    soft knee (§0A D7). It reaches ±1 with zero slope at the clamp, so the
-    return alone never clips the 8-bit ADC and the loop gain falls below
-    unity at high level (self-oscillation settles). The deferred `tdr`
-    drive will replace it with the voice Padé knee.
-- **Output filter (`typ frq res bal`; per block, S091 P2, balance S091 P4):**
-  - `g = crumpBit_filterG[frq]`, the voice cutoff law
-    (`fastTan(π·0.45·valueShaperF2F(frq/127, FILTER_SHAPER))`) from a
-    table; `R` is the voice law `1 − res/127` with the low-end snap
-    redirected to 0.0625 (Q ≤ 8, plan Q4); `a1 = 1/(1 + g(g + 2R))`,
-    `a2 = g·a1`, `a3 = g·a2` (one division per channel per block). S091 P4
-    `bal` (row 22, 63 = 0) splits the cutoff: the right channel uses
-    `frq + (bal − 63)`, the left `frq − (bal − 63)`, each clamped to
-    0..127. Both coefficient sets come from the same expression, so at
-    `bal` 63 the result is bit-identical to S091 P2. `bal` has no lane.
-  - the output mix is `out = cx·x + cb·bp + cl·lp` with the voice forms
-    (LP `lp`, HP `x − 2R·bp − lp`, BP `bp`, UBP `2R·bp`, Nch
-    `x − 2R·bp`, Pek `lp − (x − 2R·bp − lp)`); `LP2` plays as LP and
-    `off` passes the input. Every type runs the same arithmetic.
-  - the four coefficients ramp linearly over one block from the previous
-    block's set, so a `typ` Morph step, a Pattern type lock or a `res`
-    step is a one-block crossfade, not a click.
-- **Arena use:** one byte per sample. The loop length is
-  `min(share bytes, 126,656)`. On a share change the newest audio is kept
-  when `write_pos` still fits (the tail), otherwise the loop is re-seated;
-  either way the gliding delay is clamped to `length − 2`. A voice-unit
-  reservation therefore shortens the loop and bends the delay, and the Rate
-  is clamped to the same limit.
-- **"Clear unless you adopt" by masking:**
-  - `init` marks the loop unseated (`length = 0`) and unprimed, and seeds
-    a flat tone and the filter `off` (with `off` as its ramp origin);
-  - the first block seats it (`write_pos = 0`, `valid = 0`) and starts the
-    delay on its target, with no glide;
-  - reads further back than `valid` are muted;
-  - `buffer_changed` keeps or re-seats the loop as above;
-  - it never adopts a previous owner's content;
-  - a same-type Scene switch keeps everything, so tails ring on.
-- **Runtime (100 B since S091 P4):** 56 B shared (the AC outputs, the four TPT
-  states, the two previous data-line codes, every row byte 3..22, `subtype`
-  and `active_subtype`, the ramp origins, `primed` and the deferred `drv`
-  byte, and the output filter's `bal`) plus a 44 B union of the sub-engine
-  states (`dly`/`cmb` and `pit` 28 B, `grn` 44 B, `rvb` 28 B). `dly`,
-  `cmb` and `pit` share the
-  `length/write_pos/valid` prefix so a switch between them keeps the
-  recording. `write_param` only stores raw bytes; conversions happen once per
-  block, so an LFO costs nothing extra.
-- **Constant CPU:** every stage runs every sample whatever the settings (the
-  delay at Mix 0, feedback at 0, the bit logic with all bits normal, the
-  filter with every type including `off`). There is no per-sample
-  division or transcendental; per block there is one divide for `a1`, the
-  Sync search, the Rate limit and table lookups. The filter is a second pass
-  over the block so the stage-2 loop's register pressure stays bounded.
-- **Cost (`dly`, S091 P3, measured on the linked image):**
-  - the stage-2 per-sample loop is 124 instructions per frame with no VDIV
-    (the S091 P2 loop was 126);
-  - the output-filter loop is 31 instructions per frame;
-  - per block: `crumpBit_divisionFor()` 113, `crumpBit_tableLimit()` 63,
-    the engine 166 and `crumpBit_process()` 194, about 15–19 per frame;
-  - in total, about 172 per frame in the worst case, below the pre-S091
-    ≈ 191;
-  - flash: `crumpBit_process` 1,128 B, the five engines 1,192 / 1,138 /
-    1,408 / 3,196 / 1,560 B, `crumpBit_tableLimit` 192 B, the nine tables
-    4,040 B.
-
-
-## 5. The shared DTCM arena for buffer-using Effects
-
-CrumpBit (§4.4) is the first type that uses the arena; StereoFilter uses
-none.
-
-### 5.1 Geometry
-
-- `.dtcm_fxbuf`: **126,592 B from `0x20001180`** to the end of DTCM (S074;
-  it was 126,624 B from `0x20001160` until the bus compressor's 32 B DTCM
-  state was added), 32-byte aligned, NOLOAD (never copied, never zeroed).
-  DTCM is single-cycle, uncached and not reachable by DMA, which suits delay
-  lines.
-- **Effect share:** one contiguous region from the arena bottom up to the
-  lowest claimed voice unit, `fxbuf_effectShare(&share)` → `{base, offset,
-  bytes}`. Base is 32-byte aligned; `bytes` is a multiple of 32.
-- **Voice units** (for future buffer-using instruments): 4,416 B each
-  (2,208 16-bit samples, 50.06 ms), at most two per slot, twelve in total,
-  allocated from the top. With all twelve claimed the Effect keeps 73,600 B.
-- **What fits:**
-
-  | Share | 16-bit mono | 16-bit stereo | 8-bit mono | 8-bit stereo |
-  |---|---:|---:|---:|---:|
-  | Whole arena, 126,592 B | 1.44 s | 0.72 s | 2.87 s | 1.44 s |
-  | Minimum, 73,600 B | 0.83 s | 0.42 s | 1.67 s | 0.83 s |
-  | CrumpBit's loop, the share up to 126,656 B (N1); `grn` two half lines (≤ 1.436 s each); `rvb` words (31,664 frames of four 8-bit lines) | — | — | 2.871 s (whole arena) … 1.671 s (12 units) | — |
-
-  (Seconds at 44,108 Hz, before any other use of the share.)
-
-### 5.2 The contract a buffer-using type must meet
-
-| Registry / ops field | Duty |
-|---|---|
-| `buffer_min_bytes`, `buffer_pref_bytes` | Declare the need (0 = no arena use). The type must still work at the minimum share. |
-| `init(rt, handoff)` | Clear every region it will read, **unless** it deliberately adopts content that `handoff->state_flags` marks valid for it (`FXBUF_STATE_EFFECT_WRITTEN`) and whose type, channels, bits and rate match. Boot content is undefined. |
-| `export_handoff(rt, out)` | On exit, describe what it leaves: type, channels, bits, rate, share bounds, up to four read/write offsets (entries 12..15, arena-relative), and set `FXBUF_STATE_EFFECT_WRITTEN` if the region holds real audio. |
-| `buffer_changed(rt, share)` | Called synchronously when voice units are claimed or released and the share moves or shrinks. Re-seat positions and lengths; a forced re-resolution follows. |
-| `effective_max(index, share)` | For `EFFECT_PARAM_FLAG_BUFFER_DEPENDENT` rows (for example a delay time): the largest value the current share allows. It clamps at runtime only; stored values are never rewritten. |
-
-- **"Clear unless you adopt":** the system never clears the arena, even on a
-  type change. A delay can keep its tail across a same-type Scene switch,
-  and the next owner decides what is valid.
-- **Everything is foreground.** `FxBuffer` and `EffectsManager` must never be
-  called from an ISR. Share changes happen between render blocks.
-
-### 5.3 Gaps closed with the first buffer type (Session 074)
-
-1. **Same-type Scene switch:** `effects_activateScene()` now refreshes the
-   handoff (`effects_exportHandoff()`) without `init` when the type stays the
-   same.
-2. **FX return ramp while `off`:** the mixer's `off` branch zeroes
-   `mixer_fx_return_last_gain[]` every block (§3.3 item 6).
-3. **Diagnostic `fxbuf_init()` order:** `fxbuf_handoffResetAll()` runs
-   directly after `fxbuf_clearOwners()`, so diagnostic forced voice units
-   carry valid rates and the minimum-share test
-   (`DEV_MODE_DIAGNOSTIC 1`, `DEV_FXBUF_FORCE_VOICE_UNITS 12`) is valid.
-
-### 5.4 DSP guidance for delay-style Effects
-
-- **Constant cost:** the per-sample work must not depend on parameter values.
-  Delay time changes the read position, not the amount of work; feedback,
-  filtering and interpolation run every sample whatever their settings.
-- **Wrap without division:** the share is a multiple of 32 bytes, not a power
-  of two. Keep read and write indices in range with a compare-and-subtract,
-  which costs the same every sample.
-- **Parameter changes arrive once per block.** Ramp delay time (or crossfade
-  two taps) across the block to avoid clicks and pitch jumps; ramp gains as
-  the mixer does.
-- **Bounded feedback:** clamp or soft-clip inside the loop so the float state
-  cannot run away; the bus float is unbounded until the return's ±255 clamp.
-- **Mono input:** with `EFFECT_IO_MONO_IN`, `io->r` is NULL (or the zeroed
-  output channel for mono-in/stereo-out).
-- **8-bit storage** halves memory but needs explicit quantisation and
-  scaling; decide deliberately whether it should sound raw. CrumpBit
-  re-quantises its loop to 8 bits on every pass on purpose: that is its
-  character, and it bounds the feedback.
-
----
-
-## 5A. Master bus compressor (`cmp cam ctm csc`, Session 074)
+## 4. Master bus compressor (`cmp cam ctm csc`, Session 074)
 
 Files: `Core/DSPAudio/BusCompressor.c/.h` (`-Ofast` through `DSP_SRCS`).
 Settings: `scene_settings_t::bus_comp[4]` (SceneData). Design record:
@@ -674,7 +313,7 @@ Effect type**: no registry row, no send, no lanes, no arena. It is the one
 DSP stage the user allowed to do no work when it is off. With `cmp` on, its
 cost counts against the worst-case Scene.
 
-### 5A.1 Placement
+### 4.1 Placement
 
 - `busComp_processBlock(output2, output, scene)` is the last stage of
   `mixer_calcNextSampleBlock()`, after all voices and the Effect return (or
@@ -690,7 +329,7 @@ cost counts against the worst-case Scene.
   trigger queue immediately before each block, so the duck lands in its
   voice's own block.
 
-### 5A.2 Controls and macros
+### 4.2 Controls and macros
 
 `a = cam/127`, `t = ctm/127`, block `T_b` = 0.7255 ms. One-pole coefficient
 per block: `k(τ) = T_b/(τ + T_b/2)` (bilinear, within 0.2 % of
@@ -718,7 +357,7 @@ and the full-scale ceiling remain. Tuning revision 1 (user, after the first
 listen) reduced the top-end makeup (it was the full `−GR`, +15.8 dB at 127)
 and raised the drive from `0.4a²`.
 
-### 5A.3 Per block (control path)
+### 4.3 Per block (control path)
 
 1. **Off check.** If both the active pair and `cmp` are `off`: clear any
    pending sidechain weight and return.
@@ -756,7 +395,7 @@ Sidechain weight: `busComp_sidechainTrigger()` records the largest
 velocity 127: 2 dB at `cam` 0, 9.2 dB at 48, 21 dB at 127; at velocity 64
 it is one eighth of that.
 
-### 5A.4 Per sample (audio path, band-split saturation)
+### 4.4 Per sample (audio path, band-split saturation)
 
 ```
 x      = bus sample (int32 units)          detector: sum += xL² + xR²  (input, before gain)
@@ -789,7 +428,7 @@ out    = x + w·(wet − x)                   w = the one-block fade weight (1 w
 - **The dry path is exact:** `float(int32)` is exact to ±2²⁴, above the
   24-bit pack range.
 
-### 5A.5 State, storage and cost
+### 4.5 State, storage and cost
 
 - **State** `bus_comp_state_t busComp` (`INDTCMZ`, 32 B, asserted ≤ 32):
   power, fast and memory GR (dB), previous gain, pending sidechain weight,
@@ -806,7 +445,7 @@ out    = x + w·(wet − x)                   w = the one-block fade weight (1 w
     branches;
   - 0 while off. Not yet read on the `cpu` widget.
 
-### 5A.6 How to change it
+### 4.6 How to change it
 
 - The model constants are named at the top of `BusCompressor.c`
   (`BUS_COMP_KNEE_DB`, `_REF_LEVEL_DB`, `_RMS_MS`, `_CHARGE_MS`,
@@ -829,9 +468,9 @@ out    = x + w·(wet − x)                   w = the one-block fade weight (1 w
 
 ---
 
-## 6. Cost
+## 5. Cost
 
-### 6.1 Measured instruction counts (S073)
+### 5.1 Measured instruction counts (S073)
 
 Per-sample loop instruction totals (`fpseq.py --report --all`, standalone
 `-Ofast` objects). Instructions, not cycles.
@@ -846,7 +485,7 @@ Per-sample loop instruction totals (`fpseq.py --report --all`, standalone
 | Float ZDF filter per channel (StereoFilter runs two) | 80–103, 2 divisions (3 for LP) |
 | DMA pack, per frame per DAC buffer | about 33 (two word stores); both buffers about 66 |
 
-### 6.2 Share of the budget (audit estimates, ±50 %)
+### 5.2 Share of the budget (audit estimates, ±50 %)
 
 From `CPU_USE_DSP_AUDIT.md` (before the S073 refactor): the mixer dry path
 and decimation 2.5–3 % of the CPU; the FX send, bus conversion and return
@@ -856,16 +495,16 @@ and halved the ISR's stores into bufferable memory. On hardware the user
 measured about 10 % less CPU on the worst-case Scene with the stereo filter
 Effect.
 
-### 6.2a Session 074 additions
+### 5.3 Session 074+ additions
 
 | Stage | Cost | Notes |
 |---|---|---|
-| CrumpBit `process` | per sub-type, worst case per frame (S091 P5, gated by `crumpbit_cpu_check` at 170): `dly` 160.0, `cmb` 153.8, `pit` 153.6, `grn` 166.5, `rvb` 163.9 | constant whatever the settings |
+| CrumpBit `process` | `EFFECTS_MODULES_DSP_REFERENCE.md` §6, Cost | constant whatever the settings |
 | Master bus compressor (on) | 71 instructions per stereo frame (was 34 before the band split) + about 350–450 cycles per block; ≈ 1.4–1.8 % of the CPU | 0 while `cmp` is off; `cpu` widget reading still to be taken |
 | `xfd` fader mode | one division per `xfd` slot per block | otherwise the same as `fx` |
 | Mixer `off` branch | two stores per block | the return ramp reset |
 
-### 6.3 Paths whose cost varies (kept by user decision)
+### 5.4 Paths whose cost varies (kept by user decision)
 
 - The whole FX bus when the Effect is `off`.
 - The per-voice send when the send ramp is zero (the dry-only function runs).
@@ -880,43 +519,21 @@ parameter moving** (worst-case Scene, underrun count, `cpu` widget).
 
 ---
 
-## 7. How to modify
+## 6. How to modify
 
 Rules for every change here:
 
-- Constant CPU; RAM approval for any new or larger allocation (including the
-  Effect runtime union, which shrinks the arena); foreground only; no VLAs.
-- `-Ofast` applies to `mixer.c` (by the `Core/DSPAudio/` pattern rule) and to
-  each Effect DSP file only through an explicit Makefile rule (see §7.1).
+- Constant CPU; RAM approval for any new or larger allocation; foreground
+  only; no VLAs.
+- `-Ofast` applies to `mixer.c` (by the `Core/DSPAudio/` pattern rule).
+  Effect DSP files use explicit `-Ofast` rules
+  (`EFFECTS_MODULES_DSP_REFERENCE.md` §4).
 - Verify with `make clean && make all`, `arm-none-eabi-size`,
   `python3 tools/link_budget.py arm-none-eabi-nm build/lxr02.elf`, the
   `tools/dsp_test` targets that cover the code, and on hardware the
   worst-case Scene and a listening check.
 
-### 7.1 Add an Effect type (DSP side)
-
-Follow the tutorial in `EFFECTS_BUS_REFERENCE.md` §14 for the registry,
-descriptors, lanes, page layout and storage. For the DSP:
-
-1. `Core/DSP/Effects/<Type>/<Type>Effect.c/.h`: the runtime struct and the
-   `effect_type_ops_t`. Keep the struct small; add it to the
-   `effects_runtime_t` union with a `_Static_assert`.
-2. `process(rt, io)`: float, in place, `io->frames` samples, respect
-   `io->channels` and a NULL `io->r`. Never truncate to int16.
-3. `write_param(rt, index, value)`: rows 3..63 only; convert here; expect it
-   to run every block under an LFO.
-4. Buffer use: §5.2. `CrumpBitEffect.c` is the worked example: it seats its
-   loop from `io->share`, masks unwritten reads with a fill counter, wraps
-   by compare-and-subtract, ramps every gain across the block, and keeps
-   feedback bounded by re-quantising.
-5. Makefile: add `<Type>Effect.c` to `DSP_SRCS` **and** an explicit `-Ofast`
-   rule like StereoFilter's (the pattern rule only covers `Core/DSPAudio/`);
-   `<Type>Parameters.c` goes into the normal sources; add the include path.
-6. Test on the host first (`DSP_TEST.md` §6.3: stability, bounded output,
-   mono/stereo I/O, parameter jumps, cost), then on hardware with the
-   diagnostic registry self-check (`FxBf` screen, `DEV_MODES.md`).
-
-### 7.2 Change the mixer's arithmetic, routing or gain laws
+### 6.1 Change the mixer's arithmetic, routing or gain laws
 
 - Any change to `mixer_addVoiceInt16ToOutput()`,
   `mixer_addVoiceInt16ToOutputAndFx()`, the return, or the gain laws alters
@@ -928,7 +545,7 @@ descriptors, lanes, page layout and storage. For the DSP:
 - Routing fallbacks live in `mixer_checkOutJackAvailable()`; the Effect
   return uses the same function.
 
-### 7.3 Change the output pipeline
+### 6.2 Change the output pipeline
 
 - The pack must keep the exact memory image the halfword DMA expects; prove a
   change with the `pack` target and check the linked ELF's `pack_half` code.
@@ -939,16 +556,12 @@ descriptors, lanes, page layout and storage. For the DSP:
 
 ---
 
-## 8. Pitfalls
+## 7. Pitfalls
 
 - **Do not apply voice volume twice.** Engines render pre-volume; the mixer
   applies `vol`.
 - **The send ramp needs its origin.** Never skip the
   `mixer_send_last_gain[]` update, even when the Effect is `off`.
-- **`off` does no bus work at all.** Code that runs "every block" in an
-  Effect does not run while `off`; `init()` handles re-entry.
-- **Float overshoot is legal on the bus** and is clamped only at ±255 at the
-  return. Keep the Effect's own feedback bounded.
 - **The duplicated comment line** near the `effects_service()` call in
   `mixer_calcNextSampleBlock()` is cosmetic debt (S072), not a missing
   statement.
@@ -960,12 +573,11 @@ descriptors, lanes, page layout and storage. For the DSP:
   the last guarantee).
 - **Stale comments** at the S074 close: `BusCompressor.h` still says the
   state is 24 B (it is 32 B), and the loop comment in `BusCompressor.c` says
-  "~+0.45 %" (measured +0.6–0.8 %). `CrumpBitEffect.h` still quotes the old
-  73,632 B minimum share (now 73,600 B).
+  "~+0.45 %" (measured +0.6–0.8 %).
 
 ---
 
-## 9. History
+## 8. History
 
 - Session 008: SPSC audio queue; Session 010: render stays in the main loop.
 - Session 022: 24-bit output path (`sample_mx_t`, `int16 << 8`).
@@ -980,3 +592,6 @@ descriptors, lanes, page layout and storage. For the DSP:
   return-ramp reset; the master bus compressor with tuning revision 1 and
   band-split saturation; the `xfd` fader mode (`074_SESSION_HANDOFF_LOG.md`
   §7–§10).
+- **Split:** S091 close split `EFFECTS_MIXER_DSP_REFERENCE.md` into this
+  document (mixer and output pipeline) and
+  `EFFECTS_MODULES_DSP_REFERENCE.md` (Effect module DSP and arena framework).

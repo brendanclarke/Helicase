@@ -1138,7 +1138,7 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		 * per `off` block, unconditional. Inputs: fx_active == 0. Output:
 		 * mixer_fx_return_last_gain[0..1] = 0. Affiliates:
 		 * mixer_addFxReturnToOutput(), effects_activeIoFlags(),
-		 * EFFECTS_MIXER_DSP_REFERENCE.md §5.3 item 2.
+		 * EFFECTS_MODULES_DSP_REFERENCE.md §3.3 item 2.
 		 */
 		mixer_fx_return_last_gain[0] = 0.0f;
 		mixer_fx_return_last_gain[1] = 0.0f;

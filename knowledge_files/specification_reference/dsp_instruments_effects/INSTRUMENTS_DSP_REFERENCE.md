@@ -25,8 +25,10 @@ part costs, and how to change or extend it.
   S074 added the sidechain tap (§2). S083 Q1 made a MIDI write a menu
   edit.
 - **Related documents:**
-  - `EFFECTS_MIXER_DSP_REFERENCE.md`: what happens to a voice block after it
+  - `MIXER_SYSTEM_DSP_REFERENCE.md`: what happens to a voice block after it
     leaves the instrument (decimation, mixer, FX bus, output);
+  - `EFFECTS_MODULES_DSP_REFERENCE.md`: each Effect module's DSP, binding
+    rules, arena framework;
   - `BANK_PRESET_ARCHITECTURE.md`: where parameter values are stored (Scene
     images, Morph, dirty marking);
   - `FILESYSTEM_SPEC.md`: instrument files and descriptor keys on the card;
@@ -98,7 +100,7 @@ Budget against the expensive choice of each.
    recomputes the filter gain `g = tan(π·f)` with `fastTan()`.
 5. `instrumentManager_calcSlotAsync(slot)` × 6: each engine's control-rate
    update (envelopes, pitch modulation, oscillator frequencies).
-6. `effects_service()` (the Effect, see `EFFECTS_MIXER_DSP_REFERENCE.md`).
+6. `effects_service()` (the Effect, see `EFFECTS_MODULES_DSP_REFERENCE.md` §1).
 7. For each slot 0..5: `instrumentManager_calcSlotSyncBlock(slot, buf, 32)`
    renders one mono, **pre-volume** int16 block; the mixer then decimates,
    applies volume, pan and routing, and taps the FX send.
@@ -133,7 +135,7 @@ sequencer, rolls, MIDI and front-panel previews, calls
 `busComp_sidechainTrigger(track, velocity)`. The master bus compressor
 records the largest `(velocity/127)³` weight for the track selected by the
 active Scene's `csc` and applies it in the next block
-(`EFFECTS_MIXER_DSP_REFERENCE.md` §5A). Track 6 (visible track 7) counts as
+(`MIXER_SYSTEM_DSP_REFERENCE.md` §4). Track 6 (visible track 7) counts as
 voice 6, a working assumption not yet confirmed on hardware (BC11). The
 tap is foreground-only, like the rest of the funnel.
 
@@ -1296,7 +1298,7 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 
 Add waveform interpolation (about one extra oscillator render each, at most
 two per block) and the mixer per slot (decimator 12–18, dry path 28–46, plus
-the send; `EFFECTS_MIXER_DSP_REFERENCE.md`).
+the send; `MIXER_SYSTEM_DSP_REFERENCE.md`).
 
 **Drum oscillator section by mod mode (S085, instructions per sample).**
 Standalone objects, and in brackets the linked image (LTO moves the
@@ -1496,7 +1498,7 @@ General rules for every change:
    registry; check boot index creation and HCNAMES type fields
    (`FILESYSTEM_SPEC.md`).
 7. A type that needs audio memory uses FxBuffer voice units (4,416 B each, at
-   most two per slot; `EFFECTS_MIXER_DSP_REFERENCE.md` §5). It must clear
+   most two per slot; `EFFECTS_MODULES_DSP_REFERENCE.md` §3). It must clear
    what it reads unless it adopts content from the handoff record.
 
 ### 9.5 Add a modulation destination kind

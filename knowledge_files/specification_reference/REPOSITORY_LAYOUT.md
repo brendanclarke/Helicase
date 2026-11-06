@@ -30,11 +30,14 @@
 │   │   ├── DEV_MODES.md                ← authoritative screen-diagnostic versus file-only logging contract and current log formats
 │   │   ├── FILESYSTEM_SPEC.md         ← authoritative product filesystem, kit/instrument files, Scene/Bank storage, and save/load target spec
 │   │   ├── EFFECTS_BUS_REFERENCE.md   ← as-built Effect system: registry, resolution, page, FX sequencer, storage, add-a-type tutorial
-│   │   ├── EFFECTS_MIXER_DSP_REFERENCE.md ← mixer, FX bus and Effect DSP, output pipeline, DTCM arena contract, costs (S073)
+│   │   ├── MIXER_SYSTEM_DSP_REFERENCE.md  ← mixer, FX bus handoff, output pipeline, master bus compressor, costs (S073)
+│   │   ├── EFFECTS_MODULES_DSP_REFERENCE.md ← Effect module DSP, arena framework, binding rules, per-type reference (S074)
 │   │   ├── INSTRUMENTS_DSP_REFERENCE.md ← instrument DSP, parameters, modulation/LFO, costs, how to extend (S073)
+│   │   ├── MENU_UI_SPEC.md                ← menu system, LCD, LEDs, buttons, endless pots, Morph views, dtype, automation underline search
 │   │   ├── MODULE_INTERCHANGE_SPEC.md ← current direct-call API ownership/boundary map through Session 078
 │   │   ├── OSC_INTERP_AUDIT.md        ← oscillator waveform interpolation implementation, persistence, runtime behavior, risks, and validation
 │   │   ├── PATTERN_DYNAMIC_STACK.md   ← dynamic Pattern storage, PAT4, Pattern Stack Service, step automation encoding and drain
+│   │   ├── PERFORMANCE_RECORD_SPEC.md ← PERF surface, BAR overlay trigger engine, live record/erase, looper control, scene change flow
 │   │   ├── REPOSITORY_LAYOUT.md       ← this file
 │   │   └── STORAGE_SRAM_MANIFEST.md   ← flash, sample flash and RAM map, linker guards, image check, reservation/approval policy (S073)
 │   ├── hardware_archive/

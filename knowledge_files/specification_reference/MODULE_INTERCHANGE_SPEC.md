@@ -182,7 +182,8 @@ engine"):
   `pat_record_spec_t.rhythm`.
 
 The DSP internals behind these APIs are described in
-`INSTRUMENTS_DSP_REFERENCE.md` and `EFFECTS_MIXER_DSP_REFERENCE.md`.
+`INSTRUMENTS_DSP_REFERENCE.md`, `MIXER_SYSTEM_DSP_REFERENCE.md` and
+`EFFECTS_MODULES_DSP_REFERENCE.md`.
 Historical migrations belong in session logs; this document states which live
 module owns each call, state transition, and retained object.
 
@@ -1296,7 +1297,7 @@ bus, calls `effects_process()`, and returns the processed block through common
 level/pan and jack-resolved routing. While the Effect is `off` it zeroes the
 return ramp origin (S074). Its last stage is the master bus compressor
 (`busComp_processBlock(output2, output, scene)`). See
-`EFFECTS_BUS_REFERENCE.md` §3 and `EFFECTS_MIXER_DSP_REFERENCE.md` §3, §5A.
+`EFFECTS_BUS_REFERENCE.md` §3 and `MIXER_SYSTEM_DSP_REFERENCE.md` §3, §4.
 
 | API / data | Use | Usual callers / clients |
 |---|---|---|
@@ -1316,7 +1317,7 @@ Affiliate modules: mixer, MidiVoiceControl, SceneData, Preset, Menu.
 Purpose: the Scene-owned master bus compressor. It is not an Effect type (no
 registry row, send, lanes or arena). It reads the active Scene's four
 settings each block; nothing pushes settings into it. It owns its 32 B DTCM
-state (`busComp`). Full model: `EFFECTS_MIXER_DSP_REFERENCE.md` §5A.
+state (`busComp`). Full model: `MIXER_SYSTEM_DSP_REFERENCE.md` §4.
 
 | API | Use | Usual callers / clients |
 |---|---|---|

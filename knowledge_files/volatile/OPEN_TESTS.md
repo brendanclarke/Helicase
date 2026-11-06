@@ -23,20 +23,16 @@ be performed when the opportunity arises, not blocking items for current work.
   - T9: Leave a page during a save — no change in behaviour
   - **Bring back:** the `W...` code(s) and the SD card (`asavetrc.bin`);
     the `w` records and site-12 snapshot decide the C3-3 root-cause fix
-- **S091 P4 CrumpBit H1–H9 (still open):** the sub-type and `grn` checks in
-  `S091_P4_IMPLEMENTATION.md`.
-- **S091 P5 CrumpBit efficiencies HW1–HW9:**
-  - HW1: FluxMax Scene, CrumpBit in each sub-type; `cpu` widget, DEV `UNR`
-    below P3's `dly` reading, no underruns
-  - HW2: `dly`/`cmb` A/B against P4 by ear (Q14 read)
-  - HW3: fast LFO on `fbk` and `dpn`; `mix` as the smooth control
-  - HW4: `pit` at ±12/±24 st (drop-sample heads)
-  - HW5: `rvb` `ton` sweep (dark below centre, flat above, shown 0)
-  - HW6: `grn` `fbk` sweep (shown 0..98; echo decays, no runaway)
-  - HW7: `grn`/`rvb` `typ`/`frq`/`bal` and sub-type switches under
-    audio (one-pole, `res` `---`, no extra click)
-  - HW8: `bof`/`biv` from the page and fast FX lanes (table rebuild)
-  - HW9: dense random Density with steals (no clicks at grain ends)
+- **S091 P4 CrumpBit H1–H9: PASSED** — hardware-tested 2026-11-06, all
+  sub-types and grn checks confirmed.
+- **S091 P5 CrumpBit efficiencies HW1–HW16: PASSED** — hardware-tested
+  2026-11-06, all efficiency changes and follow-ups (pitch ±36 st, fine pitch,
+  window glide) confirmed.
+- **S091 P6 CrumpBit parameter cleanup: PASSED** — hardware-tested
+  2026-11-06. Labels hook display, dly delay time curve, dpn→spn rename,
+  snc removed from dly lanes, pit interval labels, grn below /64 rows, tap
+  fade, all confirmed. Final CPU: dly 157.6, cmb 153.8, pit 154.1, grn 165.3,
+  rvb 163.9 (worst 165.3 ≤ 170 cap).
 - **S089 P3 Drum FM ramp efficiency H1–H6 (open):**
   - H1: boot and play Drum `fm` with `slp`/`smp`/`wtb` — sounds correct
   - H2: A/B against the P2 image with `fm` carriers — no audible difference
