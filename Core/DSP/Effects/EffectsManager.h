@@ -155,10 +155,16 @@ typedef struct {
 
 /*
  * S091 P3 hooks (any may be NULL):
- * - name3(index, out): replaces a type row's 3-letter name on the Effect
- *   page only (cells, full view, held steps), e.g. CrumpBit's per-sub-type
- *   names; other screens keep the descriptor's short name. Nonzero when
- *   out[0..2] was written.
+ * - labels(index, variant, &short3, &category, &long_name) (S091 P6; it
+ *   replaced S091 P3's name3, which named a row on the Effect page only):
+ *   the row's names for one variant of the type (CrumpBit: the `sub`
+ *   value), used on every page that names an Effect row: Effect page
+ *   cells and the full view, STEP automation and modulation/LFO targets.
+ *   The caller sets the three pointers to the descriptor's names first; the
+ *   hook overwrites any it renames and returns nonzero if it renamed any.
+ *   variant is the type's lane_variant_row value in the record shown
+ *   (effects_rowLabels()). Strings are static, NUL-terminated, at most 3
+ *   (short) and 8 (category, long name) characters.
  * - layout(): the select layout to show now (CrumpBit: per shown sub-type);
  *   NULL return or no hook = the registry's select_layout.
  * - format_target3(index, value, out): value text for automation targets
@@ -176,7 +182,8 @@ struct effect_ui_hooks {
     void (*paint_row0)(uint8_t sub_page, uint8_t screen, char *row0);
     uint8_t (*format_value3)(uint8_t index, uint8_t value, char *out);
     uint8_t flags;
-    uint8_t (*name3)(uint8_t index, char *out);
+    uint8_t (*labels)(uint8_t index, uint8_t variant, const char **short3,
+                      const char **category, const char **long_name);
     const struct effect_select_layout *(*layout)(void);
     uint8_t (*format_target3)(uint8_t index, uint8_t value, char *out);
 };
@@ -294,6 +301,27 @@ uint8_t effects_paramModulatable(effect_type_id_t type, uint8_t index);
  * Affiliates: effect_type_ops_t.effective_max, EFFECT_PARAM_FLAG_BUFFER_DEPENDENT.
  */
 uint8_t effects_paramEffectiveMax(effect_type_id_t type, uint8_t index);
+
+/*
+ * Inclusive minimum of one Effect row (S091 P5 follow-up).
+ *
+ * What: the modulation domain's min_value for a row that has a domain, else
+ * 0. Effect rows had only an inclusive maximum (max_value); a row built with
+ * EFFECT_MOD_RANGE(lo, hi) (CrumpBit's pitch rows, -36..+36 st) also stops
+ * at lo. The domain already bounds the LFO (effects_lfoResolve()), so the
+ * same bound for every other writer keeps one range per row.
+ * Inputs: descriptor (may be NULL). Output: 0..max_value.
+ * Accessors: effects_setParameterScene(), effects_setSeqLaneLockScene(),
+ * effects_setAutomationValue(), effects_service() (resolution),
+ * menuEffects_clampValue(), menu.c STEP automation editing.
+ */
+static inline uint8_t effects_descriptorMin(
+    const effect_param_descriptor_t *descriptor)
+{
+    return (descriptor &&
+            descriptor->base.mod_domain.flags != INSTRUMENT_MOD_DOMAIN_NONE)
+        ? (uint8_t)descriptor->base.mod_domain.min_value : 0u;
+}
 
 /*
  * `.fx` storage helpers (Session 072 step 6; plan §14.1).
@@ -517,6 +545,34 @@ uint8_t effects_targetValid(uint8_t scene_index, uint16_t id,
                             instrument_target_use_t use);
 const effect_param_descriptor_t *effects_targetDescriptor(
     uint8_t scene_index, uint16_t id, instrument_target_use_t use);
+
+/*
+ * Names of one Effect row (S091 P6).
+ *
+ * What: the descriptor's short name, category and long name, then the
+ * type's labels hook for the given variant (a type whose rows mean
+ * different things per variant, CrumpBit per `sub`, names them per
+ * variant). Any output pointer may be NULL.
+ * - effects_rowLabels(type, variant, index, ...): an explicit variant (the
+ *   Effect page passes the variant it shows, held steps included);
+ * - effects_targetLabels(scene, target, use, ...): an Effect target of one
+ *   Scene, named by that Scene's stored variant (STEP automation,
+ *   modulation/LFO targets). Returns 0 when the target is not valid for
+ *   the use (the outputs are then untouched).
+ * - effects_recordVariant(record): the record's variant (its
+ *   lane_variant_row value, clamped), 0 for a type without variants; the
+ *   rule effects_laneTable() uses.
+ * Accessors: menuEffects_cellLabels(), menu.c (full view, STEP automation,
+ * modulation targets). Affiliates: effect_ui_hooks_t.labels.
+ */
+void effects_rowLabels(effect_type_id_t type, uint8_t variant, uint8_t index,
+                       const char **short3, const char **category,
+                       const char **long_name);
+uint8_t effects_targetLabels(uint8_t scene_index, uint16_t id,
+                             instrument_target_use_t use,
+                             const char **short3, const char **category,
+                             const char **long_name);
+uint8_t effects_recordVariant(const effect_record_t *record);
 uint16_t effects_stepTarget(uint8_t scene_index, uint16_t current,
                             int8_t direction, instrument_target_use_t use);
 

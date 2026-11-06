@@ -97,6 +97,17 @@ void menuEffects_clampValue(const menuEffects_cell_t *cell, uint16_t *value);
 uint8_t menuEffects_cellCommit(const menuEffects_cell_t *cell, uint16_t value);
 uint8_t menuEffects_formatValue3(const menuEffects_cell_t *cell, char *dst);
 void menuEffects_shortName(const menuEffects_cell_t *cell, char *dst);
+/*
+ * Names of a PARAM cell as this page shows it (S091 P6): the descriptor's
+ * short name, category and long name, renamed by the type's labels hook for
+ * the variant shown (the held step's or the record's `sub` for CrumpBit,
+ * menuEffects_shownParam()). Any output may be NULL; a non-PARAM cell
+ * leaves them untouched. Accessors: menuEffects_shortName(), menu.c full
+ * view header. Affiliates: effects_rowLabels().
+ */
+void menuEffects_cellLabels(const menuEffects_cell_t *cell,
+                            const char **short3, const char **category,
+                            const char **long_name);
 uint8_t menuEffects_paintEditView(const menuEffects_cell_t *cell);
 uint8_t menuEffects_cellWantsDoublePot(const menuEffects_cell_t *cell);
 

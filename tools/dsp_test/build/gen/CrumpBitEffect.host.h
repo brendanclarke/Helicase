@@ -18,8 +18,9 @@
  * CrumpBit loop geometry (S074_CRUMPBIT_EFFECT.md §3.4; elastic since S091
  * P2 §5.1; retuned in S091 P3 N1).
  *
- * CRUMPBIT_DELAY_CURVE_MAX: the top of the Rate curve, 126,654 samples
- * (2.871 s at 44,108 Hz) = crumpBit_rateTable[127]: the arena less one
+ * CRUMPBIT_DELAY_CURVE_MAX: the longest delay, 126,654 samples (2.871 s at
+ * 44,108 Hz; S091 P6: row 127 of the `dly` delay-time curve, t_max of
+ * crumpBit_delayCurve(); it was crumpBit_rateTable[127]): the arena less one
  * 32 B granule and the 2-sample interpolation guard. S091 P3 grew the
  * runtime by 16 B; whether `.dtcmz` then crosses a 32 B boundary (moving
  * `_sfxbuf` up one granule, 126,688 -> 126,656 B) depends on how LTO packs
@@ -79,7 +80,12 @@ typedef struct {
  * 2 + W*phase, head B by 2 + W*(phase + 1/2), the half turn being one
  * 32-bit add), and the same feedback-return memories as the tape (dc_x,
  * dc_y, tone_s).
- * Size: 28 B. Accessors: CrumpBitEffect.c only.
+ * - window (S091 P5 follow-up, user): the head window W in samples as it
+ *   glides towards the `rte` target (CRUMPBIT_PITCH_WIN_GLIDE, ~20 ms), so
+ *   a `win` change slides the heads instead of jumping them. Set to the
+ *   target on the first block (`primed`), clamped to the loop every block.
+ * Size: 32 B (28 B before; inside the 44 B union, no runtime growth).
+ * Accessors: CrumpBitEffect.c only.
  */
 typedef struct {
     uint32_t length;
@@ -89,6 +95,7 @@ typedef struct {
     float dc_x;
     float dc_y;
     float tone_s;
+    float window;
 } CrumpBitPitchState;
 
 /*
@@ -109,8 +116,15 @@ typedef struct {
  *   CRUMPBIT_GRAIN_LINE_MIN long while the engine runs, so the zeroed key
  *   (enter, init, the manager's union clear) never matches and the first
  *   block works the fit out;
- * - reserved (S091 P5): the 4 B of G4's former `dc_y`, free; kept so the
- *   state stays 44 B and the runtime 100 B (no layout change elsewhere);
+ * - tap_d, tap_on, tap_spare (S091 P6, in the 4 B of G4's former `dc_y`,
+ *   the S091 P5 `reserved` word, so the state stays 44 B and the runtime
+ *   100 B): the delay-line tap's fade (user: one block). tap_d is the
+ *   delay D (frames) the tap reads now; tap_on is its gain at the block
+ *   start, 1 or 0. When the `rte` delay time moves away from tap_d, the tap
+ *   fades to 0 over one block, tap_d jumps to the new D while silent, and
+ *   the tap fades back in over the next block (crumpBit_runGrain()). The
+ *   zeroed union (enter, init) and a reseat (crumpBit_seatActive()) leave
+ *   tap_on 0, so the tap starts silent at the current D. tap_spare is free;
  * - inc_a, inc_b: the voices' pitch steps, signed Q3.12 (ratio x 4096;
  *   negative = reversed); pos += inc x 16 per frame;
  * - age_a, age_b: frames since the voice started (saturating at its end);
@@ -134,8 +148,8 @@ typedef struct {
  * - fit (S091 P5 G6, the former alignment byte): the cached Position fit,
  *   how many rhythmic stops (0..16, shortest first) fit one line at the
  *   tempo in fit_key (crumpBit_grainStopFit()).
- * The delay-line tap has no state: it reads exactly D behind the write
- * head, D from the `rte` delay-time curve (no glide, user).
+ * The delay-line tap reads exactly tap_d behind the write head (whole
+ * frames, no glide); only its gain moves (the fade above).
  * Size: 44 B (the union's largest member; S091 P4: +12 B over the S091 P3
  * 32 B, inside the user's +32 B approval). Accessors: CrumpBitEffect.c.
  */
@@ -144,7 +158,9 @@ typedef struct {
     uint32_t pos_b;
     uint32_t countdown;
     uint32_t fit_key;
-    uint32_t reserved;
+    uint16_t tap_d;
+    uint8_t tap_on;
+    uint8_t tap_spare;
     int16_t inc_a;
     int16_t inc_b;
     uint16_t age_a;
@@ -189,7 +205,8 @@ typedef struct {
  *
  * What: a SHARED part used by every sub-type (stages 1, 3 and 4 and all row
  * bytes), then a UNION of the sub-engines' DSP states (stage 2).
- * Shared part (54 B used, 2 B padding before the union since S091 P5):
+ * Shared part (55 B used, 1 B padding before the union since the S091 P5
+ * follow-up's `pit_fine`):
  * - ac_y_*, ac_c_*: stage 1 AC coupling (outputs; previous codes, int16,
  *   seeded 128 by init);
  * - svf_*: the output filter's two TPT integrators per channel (stage 4).
@@ -205,10 +222,13 @@ typedef struct {
  *   feedback_prev and pan_prev: `fbk` and `dpn` take their target at the
  *   block start, so they have no origin to keep;
  * - primed: 0 until the first block of a tape sub-type starts its glide on
- *   the target;
+ *   the target (S091 P5: also `pit`'s window glide);
  * - drv_reserved: the deferred output-filter drive row's byte (plan OQ6);
+ * - pit_fine: row 23 (S091 P5 follow-up), `pit`'s fine pitch, in one of the
+ *   two padding bytes S1 freed (the runtime stays 100 B);
  * - filter_bal: row 22 (S091 P4), the output filter's stereo balance; it
- *   took the alignment byte, so the shared part stays 56 B.
+ *   took the alignment byte. Since S091 P5 (S1) freed two bytes, the used
+ *   shared bytes are 54 and 2 B of padding precede the union (56 B in all).
  * Union (44 B, `grn` the largest): one of the five states above.
  * Why here: EffectsManager zeroes the union and calls init() when the type
  * becomes active. Accessors: CrumpBitEffect.c only; no other module may keep
@@ -250,6 +270,7 @@ typedef struct {
     uint8_t primed;            /* tape glide primed */
     uint8_t drv_reserved;      /* deferred drive row (plan OQ6) */
     uint8_t filter_bal;        /* row 22, shared: filter balance (P4) */
+    uint8_t pit_fine;          /* row 23, pit: fine pitch (P5 follow-up) */
     union {
         CrumpBitTapState tap;      /* dly, cmb */
         CrumpBitPitchState pit;    /* pit */
@@ -262,20 +283,24 @@ typedef struct {
 extern const effect_type_ops_t crumpBit_ops;
 
 /*
- * Free-running delay for one Rate value (reversed and extended in S091 P2).
+ * `dly` delay time of one `rte` row at one tempo (S091 P6, user).
  *
- * What: crumpBit_rateTable[rate], t = 20 ms * (2.872 s / 20 ms)^(rate/127)
- * in samples: rate 0 = 882 (20 ms), rate 127 = 126,686 (2.872 s), about 18
- * steps per octave of time. Higher rate now means a LONGER delay (plan Q2):
- * a shrinking share then removes the top of the range, which the top-down
- * effective_max clamp can express (plan N1). The value is not clamped to a
- * share here. Why shared: the DSP, the share clamp and the Effect-page Sync
- * label must use one curve. Input: rate 0..127 (larger values are treated as
- * 127). Output: delay in samples.
- * Accessors: crumpBit_syncDivision(), CrumpBitEffect.c per-block target.
- * Affiliates: crumpBit_rateTable, CRUMPBIT_DELAY_CURVE_MAX, crumpBit_rateLimit().
+ * What: the row's delay in samples on `dly`'s 128-row curve: rows 0..3 from
+ * the 2-sample minimum up towards /64; rows 4..123 the tempo-synced core,
+ * StepScale's stops /64 .. /2 exact (crumpBit_delayTicks,
+ * crumpBit_delayStopCc); rows 124..127 from /2 up to
+ * CRUMPBIT_DELAY_CURVE_MAX (row 127). Every row is distinct (each step
+ * changes the delay and the label) and clamped to CRUMPBIT_DELAY_CURVE_MAX;
+ * the share clamp is the caller's. It replaced the S091 P2 free-running
+ * Rate curve and the Sync snap to StepScale (crumpBit_rateSamples(),
+ * crumpBit_syncDivision()), whose two curves gave dead knob travel and
+ * jumps of two positions.
+ * Why shared: the DSP target, the share clamp (crumpBit_subtypeRateLimit())
+ * and the Effect-page label read one curve.
+ * Inputs: rate 0..127 (above reads 127), bpm (0 = 1). Output: samples.
+ * Accessors: crumpBit_runDelay(), crumpBit_uiFormatValue3(), host law CB1.
  */
-float crumpBit_rateSamples(uint8_t rate);
+float crumpBit_delaySamples(uint8_t rate, uint16_t bpm);
 
 /*
  * Longest delay a share holds (S091 P2).
@@ -285,53 +310,17 @@ float crumpBit_rateSamples(uint8_t rate);
  * smaller than the smallest usable loop. It is exactly the clamp
  * crumpBit_process() applies to its target for the same share.
  * Input: share (may be NULL). Output: samples.
- * Accessors: crumpBit_rateLimit(), crumpBit_uiFormatValue3() (Sync label),
- * crumpBit_process() (target clamp).
+ * Accessors: crumpBit_subtypeRateLimit(), crumpBit_process() (target
+ * clamp).
  */
 float crumpBit_shareMaxSamples(const fx_share_t *share);
-
-/*
- * Largest Rate whose free-running delay fits a share (S091 P2).
- *
- * What: the highest rate r with crumpBit_rateTable[r] <= the share's longest
- * delay, by a fixed 7-step binary search of the ascending table (the same
- * shape as the Sync search, constant cost); 0 if even the shortest delay does
- * not fit. With the whole arena it is 127. Why: the manager clamps the
- * resolved `rte` to it before write_param() (effective_max), the page clamps
- * edits to it, and the label shows the clamped value, so a voice-unit
- * reservation never plays or shows a delay the loop cannot hold.
- * Input: share (may be NULL). Output: 0..127.
- * Accessors: crumpBit_ops.effective_max, crumpBit_uiFormatValue3().
- * Affiliates: crumpBit_shareMaxSamples(), crumpBit_rateTable.
- */
-uint8_t crumpBit_rateLimit(const fx_share_t *share);
-
-/*
- * Step-scale division that Sync snaps a Rate to (Q7; live maximum S091 P2).
- *
- * What: among the shared StepScale CC positions (0..127, 96 PPQ ticks) whose
- * length at the given tempo fits max_samples, returns the CC nearest in log
- * time to crumpBit_rateSamples(rate). It uses the bracketing pair and the
- * geometric-mean rule: no logarithms, and a fixed 7-step binary search over
- * the 128 ascending positions (S091 R1). If no division fits it returns 0,
- * and the DSP clamps that length to the maximum. Since S091 P2 the limit is
- * the live share (crumpBit_shareMaxSamples()), not a constant, so `1br` at
- * 120 BPM (2.0 s) is offered while the share holds it.
- * Why shared: the Effect-page label must show exactly the division the DSP
- * plays. Inputs: rate 0..127 (the caller passes the share-clamped value),
- * bpm from seq_getBpm() (0 is treated as 1), max_samples from
- * crumpBit_shareMaxSamples() for the same share the DSP uses.
- * Output: a StepScale CC 0..127.
- * Accessors: crumpBit_uiFormatValue3() (label), CrumpBitEffect.c (target).
- * Affiliates: stepScale_ticksQ8(), stepScale_formatShort().
- */
-uint8_t crumpBit_syncDivision(uint8_t rate, uint16_t bpm, float max_samples);
 
 /*
  * Sub-engine helpers shared with the page (S091 P3).
  *
  * crumpBit_subtypeRateLimit(): the largest `rte` whose length fits the share
- * under one sub-type's law (delay curve, comb table, pitch window, the `grn`
+ * under one sub-type's law (the `dly` delay-time curve at the current tempo
+ * (S091 P6), comb table, pitch window, the `grn`
  * delay-time curve within a half line at the current tempo (S091 P4), the
  * `rvb` word buffer); the effective_max op and the Rate label use it.
  * crumpBit_grainMaxSamples(): the longest `grn` delay or lag, one half line

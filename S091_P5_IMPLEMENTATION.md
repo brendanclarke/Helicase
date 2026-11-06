@@ -5733,3 +5733,366 @@ The landed code is the verified schedule, with one comment improved: the
 firmware image is byte-identical to the measured one, every host law and
 break holds, and every sub-type is under the 170 cap (worst `grn` 166.5).
 Ready for hardware.
+
+---
+
+## 11. Follow-up fixes: pitch rows ±36 and the `pit` window glide (user, 2026-11-05)
+
+Applied directly to the repository after §10 (not through a scratch
+schedule). Every figure below was measured on the repository build.
+
+### 11.1 Report, investigation and findings
+
+**User report:** some pitch intervals keep changing the sound while their
+displayed value has stopped (at 24): the three `grn` pitches and `pit`'s
+`int`. Check every other row for the same fault. Separately: adjusting `win`
+in `pit` steps or glitches.
+
+**Pitch rows, measured on the host for every row value 0..127:**
+
+| Row | Label (before) | Sound (before) |
+|---|---|---|
+| `pit` `int` (`aux`) | `row − 63`, held at ±24 from rows 39/87 | ±24 st spread over the whole row, 0.38 st per step (`snp` rounding it): row 75 showed +12 and played +4.6; from row 87 the label sat at 24 while the pitch kept rising to +24 |
+| `grn` P1 (`aux`), P2, P3 | `row − 63`, held at ±24 | the same: whole semitones, held at ±24; rows 0–39 and 87–127 did nothing |
+
+So `pit` `int` was the mismatch the user heard. The `grn` pitches agreed
+with their labels but had two dead outer thirds.
+
+**Every other row, checked the same way** (label law against the DSP law):
+no other row's label stops while its sound continues. Dead zones where both
+stop together:
+- `cmb` `rte` above 96 (the note holds at its lowest, 20.6 Hz): unchanged,
+  reported to the user;
+- `rvb` `ton` above 63 (flat by the P5 decision R1, shown `0`).
+The share-limited rows (`rte` everywhere, `grn` Position) show the clamped
+value, as designed.
+
+**`win` in `pit`:** each head trails the write head by `W × phase`. One
+`rte` step changes W by about 2.4 % (up to ~200 samples), so both read
+positions jumped in one block: a click. Measured as the largest second
+difference of the output in the two blocks after a `win` step, against
+steady blocks (a 220 Hz sine through `pit`, `win` stepping one value every
+20 blocks): **0.59 at a step against 0.031 steady (19×)**.
+
+### 11.2 Decisions (user) and choices made here
+
+- **All four pitch rows are ±36 st, one semitone per step, and clamped
+  there**, so the parameter shows and plays the same value and stops at
+  both ends.
+- **Add the window glide.**
+
+Choices made here:
+1. **A row minimum for Effect rows.** Effect rows had only an inclusive
+   maximum (`max_value`). The modulation domain already carries a
+   `min_value` (it bounds the LFO), so a row built with the new
+   `EFFECT_MOD_RANGE(lo, hi)` gets that `lo` as its floor everywhere a value
+   is set or resolved (`effects_descriptorMin()`): page edits and pots,
+   Morph-view edits, MIDI (through `effects_setParameter()`), FX-lane locks,
+   Pattern automation, STEP automation editing, and the manager's per-block
+   resolution (which also clamps a value that arrives another way, e.g. an
+   older file). Every existing row has min 0, so nothing else changes.
+2. **Stored 27..99** (63 = 0, `CRUMPBIT_PITCH_ROW_MIN/MAX`), so existing
+   Scenes keep their meaning within ±36 st (a stored `aux` 63 is still 0 st).
+   No backward compatibility is needed: a value saved outside 27..99 plays
+   at the end it exceeds and moves inside on its next edit.
+3. **`pit` `int` is whole semitones** (the `grn` law), so `snp` (`snc` in
+   `pit`) has nothing left to snap: it is inert and shows `---`. Open: give
+   it a new job or take it off the `pit` page (§11.6).
+4. **The `grn` Q3.12 step stops at 32,767.** At +36 st the ratio is exactly
+   8.0, one past `int16_t`; the step is held, so the very top plays 0.05
+   cent flat. Widening the step to 32 bits (into `reserved`) was not needed
+   for that.
+5. **The glide:** a 20 ms one-pole per block (`CRUMPBIT_PITCH_WIN_GLIDE`
+   0.03563 = 1 − e^(−32 / (0.020 × 44,108))), ramped linearly across the
+   block in the heads' Q14 distance (one integer add per frame). The first
+   `pit` block starts on the target (`primed`); the target and the stored
+   window are clamped to the loop every block (a share shrink never leaves a
+   head outside it). The phase step uses the block's end window. While `win`
+   moves, the pitch bends briefly (tape-like) instead of clicking. State:
+   `CrumpBitPitchState.window`, 28 → 32 B inside the 44 B union (no runtime
+   growth; the user noted the room).
+
+### 11.3 Changes by file (line numbers in the changed files)
+
+| File | Lines | Change |
+|---|---|---|
+| `Core/DSP/Effects/EffectParamRows.h` | 31–40 | **add** `EFFECT_MOD_RANGE(lo, hi)` and its comment |
+| `Core/DSP/Effects/EffectsManager.h` | 299–319 | **add** `effects_descriptorMin()` (inline; the domain's `min_value`, else 0) with its comment |
+| `Core/DSP/Effects/EffectsManager.c` | 731–733, 1142–1144, 1563–1565, 2099–2104 | **add** the floor next to the four `max_value` clamps: `effects_setParameterScene()`, `effects_setSeqLaneLockScene()`, the Pattern automation setter, `effects_service()` resolution |
+| | 1731–1733 | **modify** the registry self-check: code 7 also when the default is below the floor |
+| `Core/Menu/menuEffects.c` | 463–469 | **add** the floor for PARAM cells in `menuEffects_clampValue()` (encoder, pots, held-step edits stop at −36) |
+| `Core/Menu/menu.c` | 14321–14323 | **add** the floor in `menu_stepAutomationCurrentValue()` (a new STEP automation entry starts in range) |
+| | 14520–14521, 14559–14562, 14565–14566 | **add** `min_val` to the STEP automation value editor for 7-bit Effect targets |
+| `Core/DSP/Effects/CrumpBit/CrumpBitParameters.h` | 164–175 | **add** `CRUMPBIT_PITCH_ROW_MIN` (27) / `_MAX` (99) and their comment |
+| `Core/DSP/Effects/CrumpBit/CrumpBitParameters.c` | 70–73 | **modify** the `aux` description |
+| | 138–141, 143–156 | **modify** rows `aux`, `p2`, `p3`: `EFFECT_MOD_RANGE(27, 99)`, maximum 99 |
+| | 377–388 | **modify** `crumpBit_formatSemitones()`: clamp ±`CRUMPBIT_SEMITONE_SPAN` (36) |
+| | 417–420, 507–511 | **modify/add** the value-text comment and `snp` in `pit` → `---` |
+| `Core/DSP/Effects/CrumpBit/CrumpBitTables.h` | 37–38, 72 | **modify** `CRUMPBIT_SEMITONE_SPAN` 24 → 36 and the table comment |
+| `Core/DSP/Effects/CrumpBit/CrumpBitTables.c` | 184–204 | **regenerated** `crumpBit_semitoneRatio[73]` (−36..+36); every other table byte-identical |
+| `tools/plots/gen_crumpbit_tables.py` | 36–40, 93–94, 125–127, 190–191, 298, 330 | **modify** the semitone table to `SEMITONE_SPAN = 36` (docstring, constant, table, comment, check) |
+| `Core/DSP/Effects/CrumpBit/CrumpBitEffect.h` | 82–87, 97 | **add** `CrumpBitPitchState.window` (32 B) and its comment |
+| | 214 | **modify** the `primed` comment (also `pit`) |
+| `Core/DSP/Effects/CrumpBit/CrumpBitEffect.c` | 113–119, 151 | **add** `CRUMPBIT_PITCH_WIN_GLIDE` and its comment |
+| | 218–224 | **add** the static assert: rows 27..99 = 63 ± the table span |
+| | 1501–1506, 1522 | **modify** the `crumpBit_rowSemitones()`/`crumpBit_ratioOf()` comments (±36) |
+| | 1599–1610 | **modify** the `crumpBit_runPitch()` comment (whole semitones, the glide) |
+| | 1632–1639 | **modify** `runPitch` locals: `target`, `window`, `w_to`, `w14_inc` |
+| | 1669–1704 | **modify** `runPitch` per block: `semis = crumpBit_rowSemitones(aux)`; the glide; `dphi` on the end window (bound 7/441 turn at +36 st); `w14`/`w14_inc`; the gate on the longer window |
+| | 1736–1737 | **add** `w14 += w14_inc` per frame |
+| | 1782–1783, 1880–1889 | **modify** the `grn` pick: the ±36 comment; `q` held at 32,767 |
+| `tools/dsp_test/Makefile` | 12, 22–23, 269, 310–314 | **modify** comments (20 breaks, CB1–CB21, the two new proofs) |
+| | 343 | **add** `CRUMPBIT_PITCH_ROW_MIN/MAX` to the extracted macros |
+| | 431 | **modify** break 8's pattern (`/ window` → `/ w_to`) |
+| | 542–562 | **add** break 19 (glide 1.0, must fail CB21) and break 20 (no step guard, must fail CB20) |
+| `tools/dsp_test/modules/crumpbit.c` | 86–89, 125–134, 151 | **modify** the header: CB13 at ±36; CB20, CB21; 20 breaks |
+| | 1058–1063 | **modify** CB6: span 36, ratio[0] = 1/8, ratio[72] = 8 |
+| | 1538–1543 | **add** CB11: the `pit` window stays inside the loop |
+| | 1630–1654 | **modify** CB13: `aux` 75/51/63/99/27 → ratios 2, ½, 1, 8, ⅛ (no `snc`) |
+| | 1726–1731 | **modify** CB14 (a): slot steps from `CRUMPBIT_SEMITONE_SPAN` |
+| | 2759–2897, 2919–2920 | **add** CB20 and CB21; run them from `main()` |
+
+The central code, as landed:
+
+```c
+/* EffectsManager.h */
+static inline uint8_t effects_descriptorMin(
+    const effect_param_descriptor_t *descriptor)
+{
+    return (descriptor &&
+            descriptor->base.mod_domain.flags != INSTRUMENT_MOD_DOMAIN_NONE)
+        ? (uint8_t)descriptor->base.mod_domain.min_value : 0u;
+}
+```
+
+```c
+/* crumpBit_runPitch(), per block */
+    semis = (float)crumpBit_rowSemitones(rt->aux_raw);
+    target = (target > flen - 2.0f * CRUMPBIT_PITCH_GUARD)
+        ? flen - 2.0f * CRUMPBIT_PITCH_GUARD : target;
+    if (!rt->primed) {
+        ps->window = target;
+        rt->primed = 1u;
+    }
+    window = (ps->window > flen - 2.0f * CRUMPBIT_PITCH_GUARD)
+        ? flen - 2.0f * CRUMPBIT_PITCH_GUARD : ps->window;
+    w_to = window + (target - window) * CRUMPBIT_PITCH_WIN_GLIDE;
+    ps->window = w_to;
+    dphi = (uint32_t)(int32_t)((1.0f - crumpBit_ratioOf(semis)) / w_to *
+                               4294967296.0f);
+    w14 = (uint32_t)(window * 16384.0f);
+    w14_inc = (int32_t)((w_to - window) * 16384.0f * b->per_frame);
+/* per frame */
+        phase += dphi;
+        w14 += (uint32_t)w14_inc;
+```
+
+### 11.4 Measured (repository build)
+
+| | Before (§10) | After |
+|---|---:|---:|
+| `dly` / `cmb` / `grn` / `rvb` per frame | 160.0 / 153.8 / 166.5 / 163.9 | unchanged (`grn` engine 814 → 815 per block: the step guard) |
+| `pit` per frame | 153.6 | **153.8** (loop 106 unchanged; per block 195 → 201) |
+| Worst (`crumpbit_cpu_check`) | 166.5 | **166.5** ≤ 170 |
+| `.text` / Flash used (headroom) | 709,896 / 710,316 (43,348) | **710,320 / 710,740 (42,924)**: +424 B (the 96 B larger ratio table, code) |
+| `.bss`, ITCM, DTCM statics, FXBUF | 413,284; 15,280; 4,396; 126,656 B at `0x20001140` | unchanged |
+| Runtime / `pit` state | 100 B / 28 B | 100 B / **32 B** (union 44 B) |
+| Warnings (clean build) | 20 | 20, the same set |
+| `mixer_calcNextSampleBlock` | 43 loops | 43 loops, identical counts |
+| Image | 710,316 B | **710,740 B**, `Written … OK` (`build/LXRV2_lxr02.img` in the repository) |
+
+Gates: `crumpbit_tables` OK; `crumpbit` 0 failures with CB1–CB21 and all
+20 breaks caught; `crumpbit_elf_check` exit 0 (limits unchanged);
+`crumpbit_cpu_check` exit 0.
+
+Host evidence:
+- CB13: `pit` at +12, −12, 0, **+36 and −36** st moves a 441 Hz sine's
+  energy to 882, 220.5, 441, 3,528 and 55.1 Hz.
+- CB20: 128/128 rows give `clamp(row − 63, ±36)`; the ratio exact at all 73
+  semitones; the `grn` step right for every row 27..99, both directions.
+- CB21: the first block starts on the target; a 60 → 90 change glides
+  monotonically and settles within 0.1 % in 400 blocks; at a `win` step
+  the second difference is **0.065 against 0.031 steady (2.1×; 19× before,
+  law < 3×)**.
+
+### 11.5 Hardware checks (add to HW1–HW9)
+
+| # | Check | Expected |
+|---|---|---|
+| HW10 | Sweep `int` (`pit`) and P1/P2/P3 (`grn`) over the whole knob; also an LFO, a Pattern value and an FX lane on `aux` | the value runs −36..+36 and stops at both ends; each step is one semitone; what shows is what plays |
+| HW11 | Sweep `win` (`pit`) slowly and quickly with sustained input | no clicks; a brief pitch bend while it moves |
+| HW12 | `snp` in `pit` | shows `---`; no effect |
+| HW13 | An existing Scene with `aux`/`p2`/`p3` set before this change | values inside ±36 st sound as before (one semitone per step in `grn`; in `pit` the interval now equals the shown value) |
+
+### 11.6 Open
+
+- **`snp` in `pit` has no job** (choice 3). Give it a new role or remove it
+  from the `pit` page.
+- **`cmb` `rte` above 96** holds the lowest note (20.6 Hz); unchanged.
+- **Reference documents not yet updated** for this follow-up:
+  - `EFFECTS_BUS_REFERENCE.md` §8.6: `aux`/`p2`/`p3` ±36 st, one semitone
+    per step, stopping at 27..99; `snp` in `pit` `---`;
+  - `EFFECTS_MIXER_DSP_REFERENCE.md` §4.4a: `pit` whole semitones ±36 and
+    the window glide; `grn` pitches ±36; `pit` 153.8 per frame;
+  - `tools/dsp_test/DSP_TEST.md`: CB13 at ±36, CB20, CB21, twenty breaks;
+  - `STORAGE_SRAM_MANIFEST.md`: `pit` state 32 B (union unchanged);
+  - `CPU_USE_DSP_AUDIT.md` item 65: `pit` 153.8;
+  - and, with D6, the `MEMORY.md` CrumpBit binding line: Effect rows can
+    carry a floor (`EFFECT_MOD_RANGE`, `effects_descriptorMin()`).
+- **On hardware only:** the registry self-check (code 7, default within
+  [min, max]) runs at boot; the CrumpBit defaults (63) are inside 27..99.
+- §2–§10 describe P5 as scheduled; for `pit` and the image size, §11.4
+  supersedes them.
+
+---
+
+## 12. Follow-up: a fine pitch control in `pit` (user, 2026-11-05)
+
+Applied directly to the repository after §11. The §11.3 line numbers refer
+to the files before this section's edits; the numbers below are the
+current ones.
+
+### 12.1 Request and design
+
+**Request:** put a fine pitch control where `snp` was, "like the voice fine
+pitch".
+
+**The voice fine pitch** (`osc1_pitch_fine`, short `fin`, e.g.
+DrumParameters.c:235) is a DTYPE_PM63 row, 0..127, centre 63, shown
+−63..+64, Morph/LFO/Pattern. The oscillator plays it through
+`midiPitch_detune()` (MidiPitch.h:192, called by `osc_recalcFreq()`):
+
+    ratio = 1 + (fin / 127 − ½) · (2^(1/12) − 1)
+
+That is linear in ratio and spans about **−52 to +51 cents** (not ±1
+semitone, the first wording of the request); 63 sits 0.4 cent flat, exactly
+as on a voice.
+
+**Why a new row.** `snp`'s cell held `snc` (row 9), a shared on/off row
+(Sync in `dly`, polarity in `cmb`, freeze in `grn`/`rvb`), so it cannot carry
+a continuous value. CrumpBit gets **row 23, `fin`** (`crump_pit_fine`), a
+sub-type row read by `pit` only:
+- the descriptor is a copy of the voice row (DTYPE_PM63, `EFFECT_MOD_0_127`,
+  default 63, maximum 127, long name "Fine", category "Pitch");
+- the DSP multiplies the interval's ratio by `midiPitch_detune(fin)`, the
+  voices' own function (no copy of the law);
+- it takes `snp`'s place on the `pit` page (SELECT 2 screen 3: `fbk fin dpn
+  ton`) **and** on `pit`'s FX lane 6, which drove `snc`, dead in `pit` since
+  §11; `snc` itself is unchanged in the other sub-types;
+- outside `pit` the label is `---`; the row is on no other page or lane.
+
+**Costs:** the runtime byte `pit_fine` takes one of the two padding bytes S1
+freed, so the runtime stays 100 B (asserted). Row count 23 → 24 (within
+`EFFECT_PARAM_COUNT` 64, the 32-bit owner masks and the Pattern-local limit
+63). `.fx`/AutoSave: a file without `crump_pit_fine` loads 63. A `pit` `.fx`
+file saved before this change has its lane 6 under `lane.crump_sync`, which
+no longer names a `pit` lane, so those lane steps are skipped on load (no
+backward compatibility, user rule).
+
+### 12.2 Changes by file (current line numbers)
+
+| File | Lines | Change |
+|---|---|---|
+| `Core/DSP/Effects/CrumpBit/CrumpBitParameters.h` | 36, 42–43 | **modify** the row-range comment (3..23; `drv` would be 24) |
+| | 46–47 | **modify** `CRUMPBIT_PARAM_COUNT` 23 → 24 with its comment |
+| | 88–93 | **add** `CRUMPBIT_PARAM_PIT_FINE` (23) to the enum, with its comment |
+| | 129–130, 156–157 | **modify** `CRUMPBIT_ROWS_SUBTYPE`: `fin` is a sub-type row (comment and mask) |
+| `Core/DSP/Effects/CrumpBit/CrumpBitParameters.c` | 34, 91 | **modify** the descriptor comment (rows 3..23, 24 rows) |
+| | 168–176 | **add** the `crump_pit_fine` row (the voice `fin` copy) and its comment |
+| | 431–432, 524–528 | **add** `fin` outside `pit` → `---` (comment and code) |
+| | 655–656, 693 | **modify** `crumpBit_layoutPitch` screen 3: `fbk fin dpn ton` (comment and cells) |
+| `Core/DSP/Effects/CrumpBit/CrumpBitEffect.h` | 198–199, 217–218 | **modify** the runtime comment (55 B used, 1 B padding; `pit_fine`) |
+| | 263 | **add** `uint8_t pit_fine;` |
+| `Core/DSP/Effects/CrumpBit/CrumpBitEffect.c` | 33 | **add** `#include "MidiPitch.h"` |
+| | 790–792 | **add** init: `pit_fine = 63` |
+| | 935–936 | **add** `write_param`: row 23 → `pit_fine` |
+| | 1612–1616 | **add** the fine-pitch paragraph to the `crumpBit_runPitch()` comment |
+| | 1697–1707 | **modify** `dphi`: `(1 − ratioOf(semis) · midiPitch_detune(pit_fine)) / w_to`; the bound comment (7.24/441 turn at +36 st with the fine at its top) |
+| | 3186–3187, 3223 | **modify** the lane-map table comment and `pit` lane 6: `CRUMPBIT_PARAM_PIT_FINE` |
+| `tools/dsp_test/Makefile` | 12, 24, 270, 315–317 | **modify** comments (21 breaks, CB1–CB22, break 21's proof) |
+| | 321, 359–361 | **add** `cb_midipitch.c`: `midiPitch_detune()` and `MIDI_PITCH_SEMITONE_UP` extracted from MidiPitch.h |
+| | 437–440 | **modify** break 8's pattern for the new `dphi` line |
+| | 569–580 | **add** break 21 (the fine ignored, must fail CB22) |
+| `tools/dsp_test/modules/crumpbit.c` | 136–141, 158 | **modify** the header: CB22; 21 breaks |
+| | 206 | **add** `#include "cb_midipitch.c"` |
+| | 731–733, 759, 1423 | **modify** CB4 and CB10 write `fin` too (it must change neither); CB5: `pit_fine` 63 |
+| | 1283–1286, 1299–1302 | **add** CB9: `fin` is a lane of `pit` only; `pit` lane 6 is `fin` |
+| | 1362–1393 | **add** `band_power()`: band energy and centre (below) |
+| | CB13 (`law_cb13`) | **modify** the measurement to band energies ±25 % (below) |
+| | 2956–3022, 3046 | **add** CB22 and its call |
+
+The DSP change, as landed:
+
+```c
+    /*
+     * (1 - r)/W turns per sample, r = the interval's ratio times the fine
+     * detune: at most 7.24/441 of a turn (r = 8 x 1.0297, +36 st and fine
+     * at its top, 10 ms), so x 2^32 fits a signed word; ...
+     */
+    dphi = (uint32_t)(int32_t)((1.0f - crumpBit_ratioOf(semis) *
+                                           midiPitch_detune(rt->pit_fine)) /
+                               w_to * 4294967296.0f);
+```
+
+### 12.3 A test finding: `pit`'s crossfade sidebands
+
+Measuring the fine shift exposed a weakness in the pitch laws, not in the
+DSP. `pit`'s two heads sit half a window apart, and their triangular
+crossfade amplitude-modulates the shifted tone at the crossfade rate
+|1 − r|·fs/W (15.6 Hz at +12 st, 106 Hz at +36 st with `win` 80). Depending
+on the heads' relative phase the carrier partly cancels, and a sideband can
+become the strongest single frequency: the peak of a +12 st tone measured
+895 Hz (882 + 15.6). CB13 compared power at one frequency, and its +36 st
+case (added in §11) passed only by that phase: the fine's 0.4 cent at 63
+tipped it to a failure. The laws now measure bands (`band_power()`):
+- **CB13:** energy within ±25 % of the expected tone against the same band
+  around the input;
+- **CB22:** the power-weighted band centre, whose ratio to the `fin` 63
+  centre must equal `detune(fin) / detune(63)` within 0.2 % (3.5 cents; the
+  fine's ends are 3 % away), and whose absolute value must be within 1 %.
+  (Every centre sits the same ~4.5 Hz high because the sidebands are not
+  perfectly symmetric, hence the relative law.)
+
+CB21 (the window glide) also moved with the phase, 2.1× → 2.8× steady
+against its 3× bound, so it now compares equal two-block windows against a
+5× bound. Without the glide (break 19) it reads 1.54 against 0.031 (49×).
+
+### 12.4 Measured (repository build)
+
+| | Before (§11.4) | After |
+|---|---:|---:|
+| `pit` per frame | 153.8 | **154.1** (loop 106 unchanged; per block 201 → 211) |
+| `dly` / `cmb` / `grn` / `rvb` | 160.0 / 153.8 / 166.5 / 163.9 | unchanged; worst 166.5 ≤ 170 |
+| `.text` / Flash used (headroom) | 710,320 / 710,740 (42,924) | **710,456 / 710,876 (42,788)**: +136 B |
+| `.bss`, ITCM, DTCM statics, FXBUF | unchanged since §10 | unchanged |
+| Runtime | 100 B | 100 B (`pit_fine` in padding) |
+| Warnings (clean build) | 20 | 20, the same set |
+| `mixer_calcNextSampleBlock` | 43 loops | 43 loops, identical counts |
+| Image | 710,740 B | **710,876 B**, `Written … OK` (`build/LXRV2_lxr02.img`) |
+
+Gates: `crumpbit_tables` OK; `crumpbit` **0 failures, CB1–CB22, all 21
+breaks caught**; `crumpbit_elf_check` exit 0; `crumpbit_cpu_check` exit 0.
+
+CB22: band centre 886.51 Hz at `fin` 63; **×1.0292 at 127 (want ×1.0300)
+and ×0.9701 at 0 (want ×0.9705)**, i.e. +50 and −52 cents, the voice range.
+
+### 12.5 Hardware checks
+
+| # | Check | Expected |
+|---|---|---|
+| HW14 | `fin` on the `pit` page (SELECT 2 screen 3, where `snp` was): sweep with a held tone at `int` 0 and +12 | shows −63..+64 like a voice `fin`; the pitch moves about ±½ semitone, smoothly |
+| HW15 | `fin` from FX lane 6 in `pit`, an LFO, and a Pattern value | the same response; in other sub-types lane 6 still drives `snc` |
+| HW16 | `fin` with the Effect page on `dly`/`cmb`/`grn`/`rvb` | not on their pages; if shown elsewhere, `---` |
+
+### 12.6 Open
+
+- **Range.** This matches the voice exactly (about ±½ semitone). The first
+  wording asked for ±1 semitone: doubling the span would need its own law
+  (`1 + (fin/127 − ½)(2^(2/12) − 1)` or a symmetric cents law), no longer
+  "like the voice".
+- **`snc` in `pit`** stays stored but is now on no `pit` page or lane; its
+  `---` label (§11) remains for any other view.
+- **Reference documents** (add to the §11.6 list): `EFFECTS_BUS_REFERENCE.md`
+  §4.2a (24 rows; `pit` lane 6 `fin`) and §8.6 (the `pit` page `fbk fin dpn
+  ton`; `fin` row); `EFFECTS_MIXER_DSP_REFERENCE.md` §4.4a (`pit` fine,
+  the voice law); `DSP_TEST.md` (CB13 band law, CB22, 21 breaks).

@@ -28,6 +28,16 @@
 #define EFFECT_BIND_NONE  { INSTRUMENT_BIND_NONE, 0u, 0u, IM_SPECIAL_NONE }
 #define EFFECT_MOD_NONE   { 0u, 0u, INSTRUMENT_MOD_DOMAIN_NONE }
 #define EFFECT_MOD_0_127  { 0u, 127u, INSTRUMENT_MOD_DOMAIN_CONTINUOUS }
+/*
+ * A continuous row confined to [lo_, hi_] (S091 P5 follow-up, CrumpBit's
+ * +-36 st pitch rows). The domain's min_value is the row's inclusive
+ * minimum everywhere a value is set or resolved
+ * (effects_descriptorMin()), and hi_ must equal the row's max_value, so the
+ * page, Pattern automation, FX lanes, LFO and the DSP all stop at the same
+ * two ends. Every other row keeps min 0.
+ */
+#define EFFECT_MOD_RANGE(lo_, hi_) \
+    { (lo_), (hi_), INSTRUMENT_MOD_DOMAIN_CONTINUOUS }
 
 #define EFFECT_FLAGS_IMAGE \
     (INSTRUMENT_PARAM_FLAG_MORPHABLE | INSTRUMENT_PARAM_FLAG_MODULATABLE | \

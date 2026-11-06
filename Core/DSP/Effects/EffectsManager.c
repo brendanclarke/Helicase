@@ -124,9 +124,10 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
         { EFFECT_LANE_MORPH_SOURCE,
           CRUMPBIT_PARAM_BIT_OFF, CRUMPBIT_PARAM_BIT_INVERT,
           CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_FEEDBACK,
-          CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SYNC,
+          /* S091 P6: lane 6 empty (`dly` no longer has `snc`). */
+          CRUMPBIT_PARAM_RATE, EFFECT_LANE_NONE,
           CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN,
-          CRUMPBIT_PARAM_DLY_PAN,
+          CRUMPBIT_PARAM_SUB_PAN,
           CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FILTER_TYPE,
           CRUMPBIT_PARAM_FILTER_FREQ, CRUMPBIT_PARAM_FILTER_RESO,
           EFFECT_LANE_NONE, EFFECT_LANE_NONE },
@@ -430,6 +431,59 @@ const effect_param_descriptor_t *effects_targetDescriptor(
                               effectTarget_local(id));
 }
 
+uint8_t effects_recordVariant(const effect_record_t *record)
+{
+    const effect_registry_entry_t *entry =
+        effects_registryEntry(record ? record->type : EFFECT_TYPE_OFF);
+    uint8_t variant;
+
+    if (!record || !entry || !entry->ops || entry->ops->lane_variant_count == 0u)
+        return 0u;
+    variant = record->normal[entry->ops->lane_variant_row];
+    return (variant < entry->ops->lane_variant_count)
+        ? variant : (uint8_t)(entry->ops->lane_variant_count - 1u);
+}
+
+void effects_rowLabels(effect_type_id_t type, uint8_t variant, uint8_t index,
+                       const char **short3, const char **category,
+                       const char **long_name)
+{
+    const effect_registry_entry_t *entry = effects_registryEntry(type);
+    const effect_param_descriptor_t *descriptor =
+        effects_descriptor(type, index);
+    /* s, c, l: the names so far (the descriptor's, then the hook's). */
+    const char *s;
+    const char *c;
+    const char *l;
+
+    if (!descriptor)
+        return;
+    s = descriptor->base.short_name;
+    c = descriptor->base.category;
+    l = descriptor->base.long_name;
+    if (entry && entry->ui && entry->ui->labels)
+        (void)entry->ui->labels(index, variant, &s, &c, &l);
+    if (short3)
+        *short3 = s;
+    if (category)
+        *category = c;
+    if (long_name)
+        *long_name = l;
+}
+
+uint8_t effects_targetLabels(uint8_t scene_index, uint16_t id,
+                             instrument_target_use_t use,
+                             const char **short3, const char **category,
+                             const char **long_name)
+{
+    if (!effects_targetValid(scene_index, id, use))
+        return 0u;
+    effects_rowLabels(effects_sceneType(scene_index),
+                      effects_recordVariant(scene_effectConst(scene_index)),
+                      effectTarget_local(id), short3, category, long_name);
+    return 1u;
+}
+
 uint8_t effects_formatTargetValue3(uint8_t scene_index, uint16_t target,
                                    uint8_t value, char *out)
 {
@@ -728,6 +782,9 @@ static uint8_t effects_setParameterScene(uint8_t scene_index, uint8_t index,
         return 0u;
     if (value > descriptor->max_value)
         value = descriptor->max_value;
+    /* S091 P5: a ranged row's floor (effects_descriptorMin()). */
+    if (value < effects_descriptorMin(descriptor))
+        value = effects_descriptorMin(descriptor);
     if (image == EFFECT_IMAGE_MORPH &&
         (descriptor->base.flags & INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u) {
         before = record->morph[index];
@@ -1136,6 +1193,9 @@ static uint8_t effects_setSeqLaneLockScene(uint8_t scene_index, uint16_t step_ma
 
         if (descriptor && value > descriptor->max_value)
             value = descriptor->max_value;
+        /* S091 P5: a ranged row's floor. */
+        if (value < effects_descriptorMin(descriptor))
+            value = effects_descriptorMin(descriptor);
     }
     for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++) {
         const effect_seq_step_t *entry = &record->steps[step];
@@ -1554,6 +1614,9 @@ uint8_t effects_applyAutomation(uint8_t track, uint8_t local, uint8_t value7)
         value = descriptor->expand7(value);
     if (value > descriptor->max_value)
         value = descriptor->max_value;
+    /* S091 P5: a ranged row's floor. */
+    if (value < effects_descriptorMin(descriptor))
+        value = effects_descriptorMin(descriptor);
     effects_automation.value[local] = value;
     effects_automation.active |= (1ULL << local);
     effects_automation.menuHold &= ~(1ULL << local);
@@ -1719,7 +1782,9 @@ static uint8_t effects_registrySelfCheck(void)
                 (descriptor->effect_flags & EFFECT_PARAM_FLAG_WIDE8) != 0u &&
                 !descriptor->expand7)
                 return 4u;
-            if (descriptor->default_value > descriptor->max_value)
+            /* S091 P5: the default inside [min, max] (a ranged row). */
+            if (descriptor->default_value > descriptor->max_value ||
+                descriptor->default_value < effects_descriptorMin(descriptor))
                 return 7u;
         }
         /*
@@ -2085,6 +2150,12 @@ void effects_service(void)
                                        descriptor->base.mod_domain.max_value);
         if (value > descriptor->max_value)
             value = descriptor->max_value;
+        /*
+         * S091 P5: a ranged row's floor; this also covers values that reach
+         * the record another way (an older file, a copy).
+         */
+        if (value < effects_descriptorMin(descriptor))
+            value = effects_descriptorMin(descriptor);
         if ((descriptor->effect_flags & EFFECT_PARAM_FLAG_BUFFER_DEPENDENT) != 0u &&
             entry->ops && entry->ops->effective_max) {
             /*

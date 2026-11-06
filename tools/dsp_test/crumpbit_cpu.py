@@ -18,11 +18,16 @@ What:       measures the linked firmware ELF and prints, per sub-type, the
                 head (elf_blockpath.py --via-loop), so it includes that
                 branch's coefficient work only;
               - per block, every frame loop counts 0 (elf_blockpath.py), and
-                the callees add their own counts: `dly` the Sync search
-                crumpBit_divisionFor() (straight-line count); the manager
-                crumpBit_effectiveMax() (per-block path) plus the unrolled
-                crumpBit_tableLimit() (straight-line count), run once per
-                block for the BUFFER_DEPENDENT `rte`.
+                the callees add their own counts: the manager
+                crumpBit_effectiveMax() (per-block path) plus its sub-type's
+                Rate-limit search, run once per block for the
+                BUFFER_DEPENDENT `rte`: the unrolled crumpBit_tableLimit()
+                (straight-line count) for `cmb`/`pit`/`grn`/`rvb`, and
+                (S091 P6) `dly`'s crumpBit_delayLimit() (per-block path:
+                it is loop-free, and its straight-line count adds up every
+                row branch of its eight probes); `dly`'s own delay target
+                (crumpBit_delaySamples(), inlined; S091 P6 replaced the
+                Sync search crumpBit_divisionFor()) is in its engine path.
             It fails when any sub-type is above --cap (170, the user's cap,
             S091_P5_SUBTYPE_EFFICIENCIES.md §1).
 Why:        the cap is a gate, not a manual calculation (plan Q15).
@@ -40,13 +45,13 @@ import elf_blockpath as B
 import elf_looppath as E
 
 FRAMES = 32
-# Sub-type: (engine symbol, filter loop rank in process, Sync search).
+# Sub-type: (engine symbol, filter loop rank in process, Rate-limit search).
 SUBTYPES = [
-    ('dly', 'crumpBit_runDelay', 1, True),
-    ('cmb', 'crumpBit_runComb', 1, False),
-    ('pit', 'crumpBit_runPitch', 1, False),
-    ('grn', 'crumpBit_runGrain', 2, False),
-    ('rvb', 'crumpBit_runReverb', 2, False),
+    ('dly', 'crumpBit_runDelay', 1, 'crumpBit_delayLimit'),
+    ('cmb', 'crumpBit_runComb', 1, 'crumpBit_tableLimit'),
+    ('pit', 'crumpBit_runPitch', 1, 'crumpBit_tableLimit'),
+    ('grn', 'crumpBit_runGrain', 2, 'crumpBit_tableLimit'),
+    ('rvb', 'crumpBit_runReverb', 2, 'crumpBit_tableLimit'),
 ]
 
 
@@ -62,6 +67,17 @@ def straight(elf, sym):
     return len(E.rows(elf, sym))
 
 
+def limit_cost(elf, sym):
+    """A Rate-limit search's per-block cost (see the module docstring)."""
+    if sym == 'crumpBit_tableLimit':
+        return straight(elf, sym)
+    r = E.rows(elf, sym)
+    if B.frame_loops(r, {a: i for i, (a, _, _) in enumerate(r)}):
+        sys.exit(f'crumpbit_cpu.py: {sym} has a loop; the per-block path '
+                 f'no longer bounds it')
+    return B.block_path(elf, sym)[0]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--elf', required=True)
@@ -71,14 +87,13 @@ def main():
     if len(proc) != 2:
         sys.exit(f'crumpbit_cpu.py: crumpBit_process has {len(proc)} frame '
                  f'loops, expected 2 (SVF, one-pole)')
-    manager = (B.block_path(a.elf, 'crumpBit_effectiveMax')[0] +
-               straight(a.elf, 'crumpBit_tableLimit'))
-    sync = straight(a.elf, 'crumpBit_divisionFor')
+    effmax = B.block_path(a.elf, 'crumpBit_effectiveMax')[0]
     worst = 0.0
-    for name, sym, rank, has_sync in SUBTYPES:
+    for name, sym, rank, limit in SUBTYPES:
         loop = longest_loop(a.elf, sym)[0][0]
         filt = proc[rank - 1][0]
-        engine = B.block_path(a.elf, sym)[0] + (sync if has_sync else 0)
+        engine = B.block_path(a.elf, sym)[0]
+        manager = effmax + limit_cost(a.elf, limit)
         process = B.block_path(a.elf, 'crumpBit_process', rank)[0]
         total = loop + filt + (engine + process + manager) / FRAMES
         worst = max(worst, total)

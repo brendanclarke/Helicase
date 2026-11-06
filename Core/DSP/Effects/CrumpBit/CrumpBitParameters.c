@@ -16,7 +16,6 @@
 #include "EffectParamRows.h"
 #include "menuEffects.h"
 #include "ledHandler.h"
-#include "StepScale.h"
 #include "sequencer.h"
 #include <string.h>
 #include "FxBuffer.h"   /* fxbuf_effectShare(): the Rate label clamp (S091 P2) */
@@ -31,7 +30,7 @@ const char crumpBit_full8[] = "CrumpBit";
 /*
  * CrumpBit descriptor table (S074_CRUMPBIT_EFFECT.md §4).
  *
- * What: rows 0..2 are the shared common rows; rows 3..22 are CrumpBit's.
+ * What: rows 0..2 are the shared common rows; rows 3..23 are CrumpBit's.
  * - bit off / bit invert (3, 4): 8-bit masks, one bit per ADC data line
  *   (bit 0 = LSB). Not Morphable (interpolating a mask gives unrelated
  *   bits), not modulatable, not Pattern-automatable (a Pattern value is
@@ -46,15 +45,20 @@ const char crumpBit_full8[] = "CrumpBit";
  *   manager's per-block Position search is gone. The page still shows the
  *   stop that plays (crumpBit_grainPosLimit()).
  * - rate (7) is BUFFER_DEPENDENT (S091 P2): a higher value is a longer
- *   delay, up to the whole arena, and EffectsManager clamps the resolved
+ *   delay (note, window, size), and EffectsManager clamps the resolved
  *   value to the live share through crumpBit_ops.effective_max; the page
- *   clamps edits the same way (effects_paramEffectiveMax()).
+ *   clamps edits the same way (effects_paramEffectiveMax()). S091 P6: in
+ *   `dly` it is the delay-time curve (crumpBit_delaySamples(): tempo-synced
+ *   stops /64 .. /2 with four rows down to the 2-sample minimum and four up
+ *   to 2.871 s), clamped to the last row that fits at the current tempo.
  * - sub-type (8, S091 P3): the sub-engine, 0 dly, 1 cmb, 2 pit, 3 grn,
  *   4 rvb (max 4). Pattern-automatable (user S7: switches per step, with the
  *   buffer reinterpreted; glitches wanted), not Morph, not LFO, never on an
  *   FX lane (user OQ2); a Pattern value above 4 clamps to `rvb` (OQ3). Its
  *   labels come from the format hooks (every DTYPE_MENU id is in use).
- * - sync (9): on/off; Pattern-automatable and sequenceable.
+ * - sync (9): on/off; Pattern-automatable and sequenceable. Polarity in
+ *   `cmb`, freeze in `grn`/`rvb`; S091 P6: not read by `dly` (its Rate
+ *   curve is tempo-synced itself) nor by `pit`.
  * - tone (11, S091 P2, delay sub-type): bipolar tilt on the feedback return,
  *   DTYPE_PM63 so stored 63 is flat and shows 0; below 63 cuts highs, above
  *   63 cuts lows. Morphable, LFO and Pattern, like `dpn`.
@@ -67,7 +71,10 @@ const char crumpBit_full8[] = "CrumpBit";
  *   Scene's output is unfiltered until a type is chosen.
  * - aux (15, S091 P3): the per-sub-type pitch row, bipolar (63 = 0): the
  *   `pit` interval, the `grn` root `st1`; the tone drive in `dly`/`cmb`
- *   when the deferred drives land. Morph, LFO and Pattern.
+ *   when the deferred drives land. Morph, LFO and Pattern. S091 P5
+ *   follow-up (user): one semitone per step, -36..+36 (stored 27..99,
+ *   CRUMPBIT_PITCH_ROW_MIN/MAX), the same law in `pit` and `grn`, so the
+ *   value shown is the interval played; the row stops at both ends.
  * - grain rows (16..21, `grn` only; S091 P4 meanings, S091_P4_GRN_TWEAKS.md
  *   Part A): `p2`, `p3` (rows 16, 17, keys `crump_grain_st2/st3`: absolute
  *   pitches, bipolar semitones, Q4), `spr` spread/detune, `den` Density
@@ -85,7 +92,7 @@ const char crumpBit_full8[] = "CrumpBit";
  *   its file key remains `crump_sync`.
  * Why: the registry makes storage, AutoSave, the Effect page, lanes,
  * automation and LFO work without type-specific code elsewhere. Inputs:
- * none (const). Output: 23 rows. Accessors: EffectsManager (resolution,
+ * none (const). Output: 24 rows. Accessors: EffectsManager (resolution,
  * clamps, capabilities), menuEffects/menu.c (labels, dtypes), `.fx` and
  * AutoSave (file keys). Affiliates: EffectParamRows.h, CrumpBitEffect.c
  * write_param().
@@ -98,28 +105,40 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
                0u, EFFECT_MOD_NONE, 0u, 255u),
     EFFECT_ROW("crump_bit_invert", "Bits", "BitInv", "biv", DTYPE_0B255,
                0u, EFFECT_MOD_NONE, 0u, 255u),
-    EFFECT_ROW("crump_mix", "Delay", "Mix", "mix", DTYPE_0B127,
+    /*
+     * S091 P6: the sub-type rows' descriptor names are CrumpBit's neutral
+     * names (category "CrumpBit"); each sub-type renames them through
+     * crumpBit_ui.labels (crumpBit_labels). `mix` is the shared MIX stage,
+     * no longer filed under "Delay".
+     */
+    EFFECT_ROW("crump_mix", "CrumpBit", "Mix", "mix", DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
-    EFFECT_ROW("crump_feedback", "Delay", "Feedback", "fbk", DTYPE_0B127,
+    EFFECT_ROW("crump_feedback", "CrumpBit", "Feedback", "fbk", DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u),
     /*
      * S091 P2: EFFECT_ROW_FLAGS adds EFFECT_PARAM_FLAG_BUFFER_DEPENDENT, so
-     * the resolved Rate is clamped to the longest delay the live share holds.
+     * the resolved Rate is clamped to the longest value the live share holds
+     * (S091 P6: in `dly` the last row of its delay-time curve that fits at
+     * the current tempo).
      */
-    EFFECT_ROW_FLAGS("crump_rate", "Delay", "Rate", "rte", DTYPE_0B127,
+    EFFECT_ROW_FLAGS("crump_rate", "CrumpBit", "Rate", "rte", DTYPE_0B127,
                      EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 64u, 127u,
                      EFFECT_PARAM_FLAG_BUFFER_DEPENDENT),
     /* S091 P3: five sub-engines; Pattern-automatable only (S7, OQ2). */
     EFFECT_ROW("crump_subtype", "CrumpBit", "SubType", "sub", DTYPE_0B127,
                INSTRUMENT_PARAM_FLAG_AUTOMATABLE, EFFECT_MOD_NONE,
                CRUMPBIT_SUBTYPE_DELAY, CRUMPBIT_SUBTYPE_COUNT - 1u),
-    EFFECT_ROW("crump_sync", "Delay", "Sync", "snc", DTYPE_ON_OFF,
+    /* S091 P6: "Switch" (polarity in `cmb`, freeze in `grn`/`rvb`). */
+    EFFECT_ROW("crump_sync", "CrumpBit", "Switch", "snc", DTYPE_ON_OFF,
                INSTRUMENT_PARAM_FLAG_AUTOMATABLE, EFFECT_MOD_NONE, 0u, 1u),
-    /* S091 P5 A: the `grn` Position clamp is the engine's; no flag. */
-    EFFECT_ROW("crump_dly_pan", "Delay", "DlyPan", "dpn", DTYPE_PM63,
+    /*
+     * S091 P5 A: the `grn` Position clamp is the engine's; no flag. S091 P6:
+     * `spn` "SubPan" (the file key keeps its S074 name).
+     */
+    EFFECT_ROW("crump_dly_pan", "CrumpBit", "SubPan", "spn", DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
     /* S091 P2, delay sub-type: tone tilt on the feedback return. */
-    EFFECT_ROW("crump_tone", "Delay", "Tone", "ton", DTYPE_PM63,
+    EFFECT_ROW("crump_tone", "CrumpBit", "Tone", "ton", DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, CRUMPBIT_TONE_FLAT, 127u),
     /* S091 P2, output stage: voice-aligned filter rows (U1, U2). */
     EFFECT_ROW_MENU("crump_filter_type", "Filter", "Type", "typ", MENU_FILTER,
@@ -132,15 +151,25 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     /* S091 P3: the per-sub-type pitch row (pit interval, grn root). */
     EFFECT_ROW("crump_aux", "CrumpBit", "Aux", "aux", DTYPE_PM63,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
+               EFFECT_FLAGS_IMAGE,
+               EFFECT_MOD_RANGE(CRUMPBIT_PITCH_ROW_MIN,
+                                CRUMPBIT_PITCH_ROW_MAX),
+               63u, CRUMPBIT_PITCH_ROW_MAX),
     /*
-     * grn only (S091 P4): absolute pitches P2/P3, spread, bipolar Density,
-     * bipolar Length (row 20, was the level jitter), width.
+     * grn only (S091 P4): absolute pitches P2/P3 (S091 P5: -36..+36 st,
+     * as `aux`), spread, bipolar Density, bipolar Length (row 20, was the
+     * level jitter), width.
      */
     EFFECT_ROW("crump_grain_st2", "Grain", "Pitch2", "p2", DTYPE_PM63,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
+               EFFECT_FLAGS_IMAGE,
+               EFFECT_MOD_RANGE(CRUMPBIT_PITCH_ROW_MIN,
+                                CRUMPBIT_PITCH_ROW_MAX),
+               63u, CRUMPBIT_PITCH_ROW_MAX),
     EFFECT_ROW("crump_grain_st3", "Grain", "Pitch3", "p3", DTYPE_PM63,
-               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
+               EFFECT_FLAGS_IMAGE,
+               EFFECT_MOD_RANGE(CRUMPBIT_PITCH_ROW_MIN,
+                                CRUMPBIT_PITCH_ROW_MAX),
+               63u, CRUMPBIT_PITCH_ROW_MAX),
     EFFECT_ROW("crump_grain_spread", "Grain", "Spread", "spr", DTYPE_0B127,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     EFFECT_ROW("crump_grain_density", "Grain", "Density", "den", DTYPE_PM63,
@@ -151,6 +180,15 @@ const effect_param_descriptor_t crumpBit_descriptors[] = {
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 0u, 127u),
     /* S091 P4, output stage: stereo balance of the filter cutoff. */
     EFFECT_ROW("crump_filter_bal", "Filter", "Balance", "bal", DTYPE_PM63,
+               EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
+    /*
+     * S091 P5 follow-up (user), `pit` only: the fine pitch, a copy of the
+     * voice `fin` row (osc1_pitch_fine: DTYPE_PM63, 0..127, centre 63,
+     * Morph, LFO and Pattern) played through the same law,
+     * midiPitch_detune(). Default 63; an older file without the key loads
+     * it.
+     */
+    EFFECT_ROW("crump_pit_fine", "CrumpBit", "FinePtch", "fin", DTYPE_PM63,
                EFFECT_FLAGS_IMAGE, EFFECT_MOD_0_127, 63u, 127u),
 };
 
@@ -311,17 +349,80 @@ static const char crumpBit_subtypeNames[CRUMPBIT_SUBTYPE_COUNT][4] = {
 };
 
 /*
- * Per-sub-type names of the sub-type rows on the Effect page (plan §6,
- * S2): index 0 fbk, 1 rte, 2 snc, 3 dpn, 4 ton, 5 aux, per sub-type.
- * "" keeps the descriptor's own short name. Accessor: crumpBit_uiName3().
+ * Per-sub-type names of the sub-type rows (S091 P6; S091 P3's
+ * crumpBit_subtypeRowNames named them on the Effect page only, short name
+ * only).
+ *
+ * What: for each sub-type and each row whose meaning the sub-type sets
+ * (crumpBit_labelRows: fbk, rte, snc, dpn, ton, aux, fin), the short name
+ * (3), category and long name (8 each) shown on every page that names the
+ * row: Effect page cells and the full view, STEP automation and
+ * modulation/LFO targets (effects_rowLabels()). NULL keeps the
+ * descriptor's base name (CrumpBit's neutral names, crumpBit_descriptors).
+ * Every entry carries its sub-type's category ("Delay", "Comb", "Shift",
+ * "Grain", "Reverb"), so a row opened in a `cmb` Scene reads "Comb Note".
+ * The names (user, S091_P6_PARAM_CLEANUP.md §3.4):
+ *   row   dly             cmb             pit             grn             rvb
+ *   fbk   fbk Feedback    fbk Feedback    fbk Feedback    fbk EchoFdbk    dcy Decay
+ *   rte   tim Time        nte Note        win Window      tim EchoTime    siz Size
+ *   snc   (base)          pol Polarity    (base)          frz Freeze      frz Freeze
+ *   dpn   spn SubPan      spn SubPan      spn SubPan      pos Position    wid Width
+ *   ton   ton Tone        ton Tone        ton Tone        (base)          dmp Damping
+ *   aux   (base)          (base)          pit SemiPtch    p1  Pitch1      (base)
+ *   fin   (base)          (base)          fin FinePtch    (base)          (base)
+ * `snc` in `dly`/`pit`, `aux` in `dly`/`cmb`/`rvb` and `fin` outside `pit`
+ * are not read by that engine; their values show `---`
+ * (crumpBit_uiFormatValue3()).
+ * CB_S3()/CB_S8() fail to compile when a name is longer than its field (a
+ * negative array size), so no name can lose its terminator.
+ * Accessor: crumpBit_uiLabels(). Affiliates: crumpBit_subtypeNames.
  */
-static const char crumpBit_subtypeRowNames[CRUMPBIT_SUBTYPE_COUNT][6][4] = {
-    [CRUMPBIT_SUBTYPE_DELAY]  = { "",    "",    "",    "",    "",    ""    },
-    [CRUMPBIT_SUBTYPE_COMB]   = { "",    "not", "pol", "",    "",    ""    },
-    [CRUMPBIT_SUBTYPE_PITCH]  = { "",    "win", "snp", "",    "",    "int" },
-    /* S091 P4: delay time, freeze, Position, P1 (`ton` is not on its page). */
-    [CRUMPBIT_SUBTYPE_GRAIN]  = { "",    "tim", "frz", "pos", "",    "p1"  },
-    [CRUMPBIT_SUBTYPE_REVERB] = { "dcy", "siz", "frz", "wid", "dmp", ""    },
+#define CB_S3(str_) (sizeof(char[(sizeof(str_) <= 4u) ? 1 : -1]) ? (str_) : (str_))
+#define CB_S8(str_) (sizeof(char[(sizeof(str_) <= 9u) ? 1 : -1]) ? (str_) : (str_))
+#define CB_LABEL(s_, c_, l_) { CB_S3(s_), CB_S8(c_), CB_S8(l_) }
+#define CB_CAT(c_) { NULL, CB_S8(c_), NULL }
+
+typedef struct {
+    const char *short3;     /* NULL = the descriptor's */
+    const char *category;
+    const char *long_name;  /* NULL = the descriptor's */
+} crumpbit_label_t;
+
+#define CRUMPBIT_LABEL_ROWS 7u
+static const uint8_t crumpBit_labelRows[CRUMPBIT_LABEL_ROWS] = {
+    CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SYNC,
+    CRUMPBIT_PARAM_SUB_PAN, CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_AUX,
+    CRUMPBIT_PARAM_PIT_FINE
+};
+
+static const crumpbit_label_t
+crumpBit_labels[CRUMPBIT_SUBTYPE_COUNT][CRUMPBIT_LABEL_ROWS] = {
+    [CRUMPBIT_SUBTYPE_DELAY] = {
+        CB_LABEL("fbk", "Delay", "Feedback"), CB_LABEL("tim", "Delay", "Time"),
+        CB_CAT("Delay"), CB_LABEL("spn", "Delay", "SubPan"),
+        CB_LABEL("ton", "Delay", "Tone"), CB_CAT("Delay"), CB_CAT("Delay") },
+    [CRUMPBIT_SUBTYPE_COMB] = {
+        CB_LABEL("fbk", "Comb", "Feedback"), CB_LABEL("nte", "Comb", "Note"),
+        CB_LABEL("pol", "Comb", "Polarity"), CB_LABEL("spn", "Comb", "SubPan"),
+        CB_LABEL("ton", "Comb", "Tone"), CB_CAT("Comb"), CB_CAT("Comb") },
+    [CRUMPBIT_SUBTYPE_PITCH] = {
+        CB_LABEL("fbk", "Shift", "Feedback"),
+        CB_LABEL("win", "Shift", "Window"), CB_CAT("Shift"),
+        CB_LABEL("spn", "Shift", "SubPan"), CB_LABEL("ton", "Shift", "Tone"),
+        CB_LABEL("pit", "Shift", "SemiPtch"),
+        CB_LABEL("fin", "Shift", "FinePtch") },
+    [CRUMPBIT_SUBTYPE_GRAIN] = {
+        CB_LABEL("fbk", "Grain", "EchoFdbk"),
+        CB_LABEL("tim", "Grain", "EchoTime"),
+        CB_LABEL("frz", "Grain", "Freeze"),
+        CB_LABEL("pos", "Grain", "Position"), CB_CAT("Grain"),
+        CB_LABEL("p1", "Grain", "Pitch1"), CB_CAT("Grain") },
+    [CRUMPBIT_SUBTYPE_REVERB] = {
+        CB_LABEL("dcy", "Reverb", "Decay"), CB_LABEL("siz", "Reverb", "Size"),
+        CB_LABEL("frz", "Reverb", "Freeze"),
+        CB_LABEL("wid", "Reverb", "Width"),
+        CB_LABEL("dmp", "Reverb", "Damping"), CB_CAT("Reverb"),
+        CB_CAT("Reverb") },
 };
 
 /*
@@ -337,7 +438,8 @@ static const char crumpBit_grainStopNames[CRUMPBIT_GRAIN_STOPS][4] = {
 /*
  * The `grn` delay-time label of an `rte` position: the stop's name when the
  * position is a stop (the divisions are marked, Q8), else the position
- * number, as StepScale's controls show them.
+ * number, as StepScale's controls show them. S091 P6: the stops sit on rows
+ * 4..127; rows 0..3 (below /64) show their numbers, as in `dly`.
  */
 static void crumpBit_formatGrainTime(uint8_t cc, char *out)
 {
@@ -352,6 +454,27 @@ static void crumpBit_formatGrainTime(uint8_t cc, char *out)
     numtostrpu(out, cc, ' ');
 }
 
+/*
+ * The `dly` delay-time label of an `rte` row (S091 P6, plan Q10): a stop
+ * row (crumpBit_delayStopCc) shows the stop's name, the first 14 of
+ * crumpBit_grainStopNames (/64 .. /2); every other row, the end rows 0..3
+ * and 124..127 included, shows its row number, as `grn`'s `tim`.
+ * Inputs: the shown row (already clamped to the share's limit), 3-char out.
+ * Caller: crumpBit_uiFormatValue3().
+ */
+static void crumpBit_formatDelayTime(uint8_t row, char *out)
+{
+    uint32_t k;
+
+    for (k = 0u; k < CRUMPBIT_DELAY_STOPS; k++) {
+        if (crumpBit_delayStopCc[k] == row) {
+            memcpy(out, crumpBit_grainStopNames[k], 3u);
+            return;
+        }
+    }
+    numtostrpu(out, row, ' ');
+}
+
 /* The shown sub-type (the page's view of the record), clamped. */
 static uint8_t crumpBit_shownSubtype(void)
 {
@@ -361,12 +484,18 @@ static uint8_t crumpBit_shownSubtype(void)
                                           : (uint8_t)(CRUMPBIT_SUBTYPE_COUNT - 1u);
 }
 
-/* Signed semitones of a bipolar pitch row (63 = 0, clamped to +-24). */
+/*
+ * Signed semitones of a bipolar pitch row (63 = 0), clamped to +-36 as the
+ * DSP clamps it (crumpBit_rowSemitones(); S091 P5: +-24 before). The row
+ * itself stops at 27..99, so the clamp only matters for a value that
+ * arrived another way.
+ */
 static void crumpBit_formatSemitones(uint8_t value, char *out)
 {
+    const int32_t span = (int32_t)CRUMPBIT_SEMITONE_SPAN;
     int32_t s = (int32_t)value - 63;
 
-    s = (s > 24) ? 24 : ((s < -24) ? -24 : s);
+    s = (s > span) ? span : ((s < -span) ? -span : s);
     numtostrps(out, (int8_t)s);
 }
 
@@ -391,11 +520,18 @@ static void crumpBit_formatNote(uint8_t note, char *out)
  * - `sub` shows the sub-engine token (dly cmb pit grn rvb);
  * - `rte`, clamped first to the longest value the live share holds under the
  *   shown sub-type's law (crumpBit_subtypeRateLimit(), the clamp
- *   EffectsManager applies before the DSP): `dly` the step division with
- *   the shown Sync on (as S091 P2), else the clamped number; `cmb` the note
+ *   EffectsManager applies before the DSP): `dly` (S091 P6) a stop's name,
+ *   else the row number (crumpBit_formatDelayTime());
+ *   `cmb` the note
  *   it plays (a higher value is a lower note); `pit` the window in ms;
  *   `grn` the step division it always snaps to (one half line);
- * - `aux` in `pit`/`grn`, and `p2`/`p3` in `grn`: signed semitones;
+ * - `aux` in `pit`/`grn`, and `p2`/`p3` in `grn`: signed semitones (one
+ *   per step, -36..+36, exactly what plays; S091 P5);
+ * - `snc` in `pit` (`snp`): `---` since S091 P5 (the interval is whole
+ *   semitones already, so there is nothing to snap; `fin` took its cell and
+ *   lane); in `dly`: `---` since S091 P6 (no Sync);
+ * - `fin` outside `pit`: `---` (only `pit` reads it; in `pit` it keeps the
+ *   voice `fin` text, the generic PM63 value);
  * - S091 P4 `grn`: `rte` is the delay-time curve (a stop's name, else its
  *   position); Position's rhythmic half the stop it plays (clamped);
  *   Density `off`, `buf` (+1) or its stop;
@@ -414,7 +550,7 @@ static void crumpBit_formatNote(uint8_t note, char *out)
  * locks, LFO); only what is played and shown follows the sub-type.
  * Inputs: row index, value shown, 3-character output. Output: nonzero when
  * out[0..2] was written. Foreground; the share read is a struct copy.
- * Affiliates: stepScale_formatShort(), seq_getBpm(), menuEffects_shownParam(),
+ * Affiliates: crumpBit_formatDelayTime(), menuEffects_shownParam(),
  * fxbuf_effectShare(), crumpBit_subtypeRateLimit(), crumpBit_combNote().
  */
 static uint8_t crumpBit_uiFormatValue3(uint8_t index, uint8_t value,
@@ -454,15 +590,9 @@ static uint8_t crumpBit_uiFormatValue3(uint8_t index, uint8_t value,
         case CRUMPBIT_SUBTYPE_REVERB:
             break;
         default:
-            if (menuEffects_shownParam(CRUMPBIT_PARAM_SYNC) != 0u) {
-                /* S078: nudge stops show their symbol, others the raw CC. */
-                stepScale_formatShort(
-                    crumpBit_syncDivision(shown, seq_getBpm(),
-                                          crumpBit_shareMaxSamples(&share)),
-                    out);
-                return 1u;
-            }
-            break;
+            /* S091 P6: `dly`'s delay-time curve (stop name, else row). */
+            crumpBit_formatDelayTime(shown, out);
+            return 1u;
         }
         if (shown != value) {
             numtostrpu(out, shown, ' ');
@@ -483,11 +613,25 @@ static uint8_t crumpBit_uiFormatValue3(uint8_t index, uint8_t value,
         return 1u;
     }
     /*
+     * S091 P5: `snp` has no job in `pit` once the interval is integer;
+     * S091 P6: `dly` has no `snc` either.
+     */
+    if ((sub == CRUMPBIT_SUBTYPE_PITCH || sub == CRUMPBIT_SUBTYPE_DELAY) &&
+        index == CRUMPBIT_PARAM_SYNC) {
+        memcpy(out, "---", 3u);
+        return 1u;
+    }
+    /* S091 P5 follow-up: `fin` is `pit`'s; elsewhere it does nothing. */
+    if (sub != CRUMPBIT_SUBTYPE_PITCH && index == CRUMPBIT_PARAM_PIT_FINE) {
+        memcpy(out, "---", 3u);
+        return 1u;
+    }
+    /*
      * S091 P4, `grn` Position and Density: the rhythmic half names its stop
      * (Position after the live clamp, as the DSP plays it); Density 63 is
      * `off` and 64 (+1) `buf` (one trigger per line); the rest generic.
      */
-    if (sub == CRUMPBIT_SUBTYPE_GRAIN && index == CRUMPBIT_PARAM_DLY_PAN &&
+    if (sub == CRUMPBIT_SUBTYPE_GRAIN && index == CRUMPBIT_PARAM_SUB_PAN &&
         value > 63u) {
         fx_share_t share;
         uint8_t limit;
@@ -550,25 +694,40 @@ static uint8_t crumpBit_uiFormatValue3(uint8_t index, uint8_t value,
 }
 
 /*
- * Name hook: per-sub-type 3-letter names of the sub-type rows on the Effect
- * page only (S091 P3 S2; plan §6). Other screens keep the descriptor names.
- * Inputs: row index, 3-character output. Output: nonzero when written.
- * Accessor: menuEffects_shortName(). Affiliates: crumpBit_subtypeRowNames.
+ * Labels hook (S091 P6, replacing S091 P3's name3): the sub-type's names of
+ * one row.
+ *
+ * What: for a sub-type row (crumpBit_labelRows), overwrites the short name,
+ * category and long name the caller set from the descriptor with this
+ * sub-type's (crumpBit_labels; NULL entries keep the descriptor's). Every
+ * other row (the shared ones, the `grn`-only rows 16..21) keeps its
+ * descriptor names.
+ * Inputs: row index, variant (the `sub` value of the record shown, clamped
+ * here), the three name pointers (each may be NULL). Output: nonzero when
+ * the row is a sub-type row.
+ * Accessor: effects_rowLabels() (Effect page, full view, STEP automation,
+ * modulation targets). Affiliates: crumpBit_labels.
  */
-static uint8_t crumpBit_uiName3(uint8_t index, char *out)
+static uint8_t crumpBit_uiLabels(uint8_t index, uint8_t variant,
+                                 const char **short3, const char **category,
+                                 const char **long_name)
 {
-    static const uint8_t rows[6] = {
-        CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SYNC,
-        CRUMPBIT_PARAM_DLY_PAN, CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_AUX
-    };
-    const char (*names)[4] = crumpBit_subtypeRowNames[crumpBit_shownSubtype()];
+    const crumpbit_label_t *row;
     uint8_t i;
 
-    for (i = 0u; i < 6u; i++) {
-        if (rows[i] == index && names[i][0] != '\0') {
-            memcpy(out, names[i], 3u);
-            return 1u;
-        }
+    variant = (variant < CRUMPBIT_SUBTYPE_COUNT)
+        ? variant : (uint8_t)(CRUMPBIT_SUBTYPE_COUNT - 1u);
+    for (i = 0u; i < CRUMPBIT_LABEL_ROWS; i++) {
+        if (crumpBit_labelRows[i] != index)
+            continue;
+        row = &crumpBit_labels[variant][i];
+        if (short3 && row->short3)
+            *short3 = row->short3;
+        if (category && row->category)
+            *category = row->category;
+        if (long_name && row->long_name)
+            *long_name = row->long_name;
+        return 1u;
     }
     return 0u;
 }
@@ -606,10 +765,14 @@ static uint8_t crumpBit_uiFormatTarget3(uint8_t index, uint8_t value,
  * s0 and s1; both cells edit the same rows. Every SELECT button stays a bit
  * toggle (crumpBit_uiSelect()); the encoder walks cells across screens and
  * SELECT groups, so SELECT 3's screens follow SELECT 2's last one.
- * - crumpBit_layout (`dly`, `cmb`, `rvb`, same rows; names per sub-type
- *   through crumpBit_uiName3()): s2 mix sub rte fbk; s3 snc dpn ton -.
- * - crumpBit_layoutPitch: s2 mix sub aux(int) rte(win); s3 fbk snc(snp)
- *   dpn ton.
+ * Names per sub-type come from crumpBit_uiLabels(). S091 P6 (user): `dpn`
+ * (`spn`/`wid`) follows `ton` wherever both are on a screen.
+ * - crumpBit_layout (`dly`; also the registry's layout): s2 mix sub rte(tim)
+ *   fbk; s3 ton dpn(spn) - - (S091 P6: `snc` removed from `dly`).
+ * - crumpBit_layoutCombReverb (`cmb`, `rvb`): s2 mix sub rte fbk; s3 snc
+ *   ton dpn - (`cmb`: pol ton spn; `rvb`: frz dmp wid).
+ * - crumpBit_layoutPitch: s2 mix sub aux(pit) fin; s3 fbk rte(win) ton
+ *   dpn(spn) (S091 P6: the fine pitch next to the interval).
  * - crumpBit_layoutGrain (user order: freeze, position, length, density,
  *   pitches, width, delay time, feedback): s2 mix sub snc(frz) dpn(pos);
  *   s3 lng den aux(p1) p2; SELECT 3 s0 p3 spr wid rte(tim); s1 fbk.
@@ -630,8 +793,24 @@ const effect_select_layout_t crumpBit_layout = {
             CRUMPBIT_LAYOUT_FILTER_SCREENS,
             { CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_SUBTYPE,
               CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_FEEDBACK },
-            { CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_DLY_PAN,
-              CRUMPBIT_PARAM_TONE, EFFECT_LANE_NONE },
+            { CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_SUB_PAN,
+              EFFECT_LANE_NONE, EFFECT_LANE_NONE },
+        },
+    },
+    .custom_row0 = { 0u, 0x01u, 0u, 0u, 0u, 0u, 0u, 0u },
+    .home_sub_page = 1u,
+    .home_screen = 0u,
+};
+
+static const effect_select_layout_t crumpBit_layoutCombReverb = {
+    .screen_count = { 0u, 4u, 0u, 0u, 0u, 0u, 0u, 0u },
+    .cells = {
+        [1] = {
+            CRUMPBIT_LAYOUT_FILTER_SCREENS,
+            { CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_SUBTYPE,
+              CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_FEEDBACK },
+            { CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_TONE,
+              CRUMPBIT_PARAM_SUB_PAN, EFFECT_LANE_NONE },
         },
     },
     .custom_row0 = { 0u, 0x01u, 0u, 0u, 0u, 0u, 0u, 0u },
@@ -645,9 +824,9 @@ static const effect_select_layout_t crumpBit_layoutPitch = {
         [1] = {
             CRUMPBIT_LAYOUT_FILTER_SCREENS,
             { CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_SUBTYPE,
-              CRUMPBIT_PARAM_AUX, CRUMPBIT_PARAM_RATE },
-            { CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_SYNC,
-              CRUMPBIT_PARAM_DLY_PAN, CRUMPBIT_PARAM_TONE },
+              CRUMPBIT_PARAM_AUX, CRUMPBIT_PARAM_PIT_FINE },
+            { CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_RATE,
+              CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_SUB_PAN },
         },
     },
     .custom_row0 = { 0u, 0x01u, 0u, 0u, 0u, 0u, 0u, 0u },
@@ -661,7 +840,7 @@ static const effect_select_layout_t crumpBit_layoutGrain = {
         [1] = {
             CRUMPBIT_LAYOUT_FILTER_SCREENS,
             { CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_SUBTYPE,
-              CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_DLY_PAN },
+              CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_SUB_PAN },
             { CRUMPBIT_PARAM_GRAIN_LENGTH, CRUMPBIT_PARAM_GRAIN_DENSITY,
               CRUMPBIT_PARAM_AUX, CRUMPBIT_PARAM_GRAIN_ST2 },
         },
@@ -679,14 +858,17 @@ static const effect_select_layout_t crumpBit_layoutGrain = {
 
 /*
  * Layout hook (S091 P3): the layout of the shown sub-type. NULL never: the
- * base layout serves `dly`, `cmb` and `rvb`. Accessor: menuEffects_layout().
+ * base layout serves `dly` (S091 P6: `cmb` and `rvb` have their own, with
+ * `snc`). Accessor: menuEffects_layout().
  */
 static const struct effect_select_layout *crumpBit_uiLayout(void)
 {
     switch (crumpBit_shownSubtype()) {
-    case CRUMPBIT_SUBTYPE_PITCH: return &crumpBit_layoutPitch;
-    case CRUMPBIT_SUBTYPE_GRAIN: return &crumpBit_layoutGrain;
-    default:                     return &crumpBit_layout;
+    case CRUMPBIT_SUBTYPE_COMB:
+    case CRUMPBIT_SUBTYPE_REVERB: return &crumpBit_layoutCombReverb;
+    case CRUMPBIT_SUBTYPE_PITCH:  return &crumpBit_layoutPitch;
+    case CRUMPBIT_SUBTYPE_GRAIN:  return &crumpBit_layoutGrain;
+    default:                      return &crumpBit_layout;
     }
 }
 
@@ -695,8 +877,9 @@ static const struct effect_select_layout *crumpBit_uiLayout(void)
  *
  * What: SELECT toggles bits and returns EFFECT_UI_SHOW_HOME, render_leds owns
  * the SELECT row, paint_row0 draws the overlay row, and format_value3 labels
- * `sub` and the per-sub-type values. S091 P3: name3 renames the sub-type
- * rows per sub-type, layout picks the sub-type's screens, format_target3
+ * `sub` and the per-sub-type values. S091 P3: layout picks the sub-type's
+ * screens; S091 P6: labels names the sub-type rows per sub-type on every
+ * page (it replaced S091 P3's Effect-page-only name3), format_target3
  * names `sub` on automation pages. TRACK and BAR keep the default page
  * behaviour (NULL).
  * Why: the registry-driven hook contract keeps type UI out of menu.c.
@@ -711,7 +894,7 @@ const effect_ui_hooks_t crumpBit_ui = {
     .paint_row0 = crumpBit_uiPaintRow0,
     .format_value3 = crumpBit_uiFormatValue3,
     .flags = EFFECT_UI_FLAG_OWNS_SELECT_LEDS,
-    .name3 = crumpBit_uiName3,
+    .labels = crumpBit_uiLabels,
     .layout = crumpBit_uiLayout,
     .format_target3 = crumpBit_uiFormatTarget3,
 };

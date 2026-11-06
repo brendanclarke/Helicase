@@ -18,8 +18,9 @@
  * the step_scale_0_127.csv nudged multiplier column. Outputs: read by
  * stepScale_ticksQ8(cc). Range: min 1536 (CC 0, 0.25x), max 49152 (CC 127,
  * 8.0x); all fit uint16_t. Affiliates: sequencer.c per-track accumulator,
- * seq_fxClockTick(), seq_realignActivePatternToMasterClock(),
- * crumpBit_divisionFor().
+ * seq_fxClockTick(), seq_realignActivePatternToMasterClock(); CrumpBit's
+ * `dly` and `grn` delay-time curves pin these 14 stops' tick counts
+ * (crumpBit_delayTicks, crumpBit_grainTime; host laws CB1, CB6).
  */
 static const uint16_t stepScale_q8Table[STEP_SCALE_COUNT] = {
     /* Stage 2 true Q8.8 values: round(nudged_multiplier * 24 * 256). */

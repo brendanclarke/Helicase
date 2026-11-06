@@ -9,8 +9,8 @@
 #               sequencer           modules/sequencer.c (+ break build)
 #               instrument_manager  modules/instrument_manager.c (+ 2 breaks)
 #               samples             modules/samples.c (+ break build)
-#               crumpbit            modules/crumpbit.c (+ 18 breaks: P2
-#                                   Sync key, R4 AC seed, P2 flat tone, P2
+#               crumpbit            modules/crumpbit.c (+ 25 breaks: P6
+#                                   `dly` curve, R4 AC seed, P2 flat tone, P2
 #                                   seat delay clamp, P2 Rate-limit probe;
 #                                   P3 wet around the mix stage, grain
 #                                   freeze, pitch direction, lane map; P4
@@ -19,7 +19,11 @@
 #                                   table, `grn` echo curve, filter
 #                                   hand-over, grain block-aligned ends,
 #                                   one-pole `bal` side swap, dropped-
-#                                   trigger ages)
+#                                   trigger ages; P5 follow-up `pit` window
+#                                   glide, `grn` +36 st step guard, `pit`
+#                                   fine ignored; P6 `dly` limit plateau,
+#                                   `grn` tap fade, `grn` low rows, `grn`
+#                                   reseat tap)
 #               crumpbit_tables     tools/plots/gen_crumpbit_tables.py --check
 #               sampleoptimize      modules/sampleoptimize.py
 #               special_tags        check_special_tags.py
@@ -265,13 +269,13 @@ fold_tables:
 	cd $(ROOT) && python3 tools/plots/gen_fold_tables.py --check
 
 # S091 P1/P2/P3: the real CrumpBitEffect.c and its generated tables against
-# the references in modules/crumpbit.c (laws CB1-CB19; CB1-CB4, CB10, CB16,
+# the references in modules/crumpbit.c (laws CB1-CB22; CB1-CB4, CB10, CB16,
 # CB17 and the CB15/CB19 identity laws bit-exact).
 # Break proofs:
-#   - the Sync search key ignoring the live share limit (key = target
-#     instead of min(target, max)) must fail CB1 (S091 P2; the S091 P1
-#     probe off-by-one break no longer applies, because the eighth probe
-#     repairs a one-position overshoot);
+#   - S091 P6 (replacing the S091 P2 Sync-key break; the Sync search is
+#     gone): the `dly` curve's top step ratio with one square root instead
+#     of two ((t_max / t_/2)^(1/2), so rows 125..127 all play t_max) must
+#     fail CB1;
 #   - the AC memory seeded 0 instead of 128 (a full-scale step on the first
 #     sample after init) must fail CB4/CB5;
 #   - the flat tone weighted (1, 1) instead of (0, 1) (the return would be
@@ -306,11 +310,27 @@ fold_tables:
 #   - the one-pole's left k taken from the right cutoff must fail CB16 on
 #     `rvb`;
 #   - the ages of a dropped or retried trigger not put back to the block
-#     start (the P4 defect) must fail CB14's block-aligned law.
+#     start (the P4 defect) must fail CB14's block-aligned law;
+#   - S091 P5 follow-up: the `pit` window glide removed (the window jumps
+#     to each `win` value, as before) must fail CB21's step law;
+#   - the `grn` Q3.12 step not held at 32,767 (+36 st overflows int16 and
+#     plays reversed at a low pitch) must fail CB20;
+#   - `pit`'s fine pitch ignored (the ratio without midiPitch_detune())
+#     must fail CB22;
+#   - S091 P6: the `dly` knob limit counting the t_max plateau (the search
+#     on <= instead of <, so below 42 BPM the knob travels through rows that
+#     all play t_max, the dead travel of R6) must fail CB1;
+#   - the `grn` tap fade removed (the gain holds its block-start value, so
+#     a delay change steps) must fail CB23;
+#   - `grn` rows 0..3 all at the 2-sample minimum must fail CB23;
+#   - the `grn` tap's two line guards removed (the reseat no longer
+#     silences the tap, and the block no longer holds tap_d inside the
+#     line), so an old D outlives a shorter line, must fail CB23 (either
+#     guard alone keeps D inside the line).
 CB_GEN := $(GEN)/cb_fxbuf.c $(GEN)/cb_efftypes.c $(GEN)/cb_effects.c \
           $(GEN)/cb_params.c \
           $(GEN)/cb_stepscale.c $(GEN)/cb_stepscale.h \
-          $(GEN)/cb_tables.h $(GEN)/cb_tables.c \
+          $(GEN)/cb_tables.h $(GEN)/cb_tables.c $(GEN)/cb_midipitch.c \
           $(GEN)/CrumpBitEffect.host.h $(GEN)/CrumpBitEffect.host.c
 crumpbit: | $(GEN)
 	$(EX) --src $(ROOT)/Core/DSP/Effects/FxBuffer.h \
@@ -335,6 +355,7 @@ crumpbit: | $(GEN)
 	  --macro CRUMPBIT_SUBTYPE_PITCH --macro CRUMPBIT_SUBTYPE_GRAIN \
 	  --macro CRUMPBIT_SUBTYPE_REVERB --macro CRUMPBIT_SUBTYPE_COUNT \
 	  --macro CRUMPBIT_TONE_FLAT \
+	  --macro CRUMPBIT_PITCH_ROW_MIN --macro CRUMPBIT_PITCH_ROW_MAX \
 	  --macro CRUMPBIT_FILTER_LP --macro CRUMPBIT_FILTER_HP \
 	  --macro CRUMPBIT_FILTER_BP --macro CRUMPBIT_FILTER_UBP \
 	  --macro CRUMPBIT_FILTER_NOTCH --macro CRUMPBIT_FILTER_PEAK \
@@ -347,6 +368,9 @@ crumpbit: | $(GEN)
 	$(EX) --src $(ROOT)/Core/Sequencer/StepScale.h \
 	  --macro STEP_SCALE_COUNT --macro STEP_SCALE_DEFAULT \
 	  --out $(GEN)/cb_stepscale.h
+	$(EX) --src $(ROOT)/Core/MIDI/MidiPitch.h \
+	  --macro MIDI_PITCH_SEMITONE_UP --func midiPitch_detune \
+	  --out $(GEN)/cb_midipitch.c
 	$(EX) --src $(ROOT)/Core/Sequencer/StepScale.c \
 	  --object stepScale_q8Table --func stepScale_ticksQ8 \
 	  --out $(GEN)/cb_stepscale.c
@@ -357,13 +381,13 @@ crumpbit: | $(GEN)
 	$(HOSTCC) $(HOSTFLAGS) modules/crumpbit.c -o build/crumpbit -lm
 	./build/crumpbit
 	mkdir -p build/break_cb1 build/break_cb2
-	sed 's/const float key = (target < max_samples) ? target : max_samples;/const float key = target;/' \
+	sed 's/c->q_hi = sqrtf(sqrtf(/c->q_hi = (sqrtf(/' \
 	  $(GEN)/CrumpBitEffect.host.c > build/break_cb1/CrumpBitEffect.host.c
-	@grep -q 'const float key = target;' build/break_cb1/CrumpBitEffect.host.c
+	@grep -q 'c->q_hi = (sqrtf(' build/break_cb1/CrumpBitEffect.host.c
 	$(HOSTCC) -Ibuild/break_cb1 $(HOSTFLAGS) modules/crumpbit.c \
 	  -o build/crumpbit_break1 -lm
 	@if ./build/crumpbit_break1 >/dev/null 2>&1; then \
-	  echo "crumpbit_break1: FAILED (Sync live-limit break not caught)"; \
+	  echo "crumpbit_break1: FAILED (dly curve break not caught)"; \
 	  exit 1; \
 	else echo "crumpbit_break1: caught (law CB1 fails as expected)"; fi
 	sed 's/rt->ac_c_l = CRUMPBIT_CODE_MID;/rt->ac_c_l = 0;/' \
@@ -422,9 +446,9 @@ crumpbit: | $(GEN)
 	@if ./build/crumpbit_break7 >/dev/null 2>&1; then \
 	  echo "crumpbit_break7: FAILED (freeze break not caught)"; exit 1; \
 	else echo "crumpbit_break7: caught (law CB14 fails as expected)"; fi
-	sed 's/((1.0f - crumpBit_ratioOf(semis)) \/ window/((crumpBit_ratioOf(semis) - 1.0f) \/ window/' \
+	sed 's/((1.0f - crumpBit_ratioOf(semis) \*/((-1.0f + crumpBit_ratioOf(semis) */' \
 	  $(GEN)/CrumpBitEffect.host.c > build/break_cb8/CrumpBitEffect.host.c
-	@grep -q '(crumpBit_ratioOf(semis) - 1.0f)' \
+	@grep -q '((-1.0f + crumpBit_ratioOf(semis) \*' \
 	  build/break_cb8/CrumpBitEffect.host.c
 	$(HOSTCC) -Ibuild/break_cb8 $(HOSTFLAGS) modules/crumpbit.c \
 	  -o build/crumpbit_break8 -lm
@@ -533,6 +557,78 @@ crumpbit: | $(GEN)
 	  echo "crumpbit_break18: FAILED (dropped-trigger age break not caught)"; \
 	  exit 1; \
 	else echo "crumpbit_break18: caught (law CB14 fails as expected)"; fi
+	mkdir -p build/break_cb19 build/break_cb20
+	sed 's/#define CRUMPBIT_PITCH_WIN_GLIDE      0.03563f/#define CRUMPBIT_PITCH_WIN_GLIDE      1.0f/' \
+	  $(GEN)/CrumpBitEffect.host.c > build/break_cb19/CrumpBitEffect.host.c
+	@grep -q 'CRUMPBIT_PITCH_WIN_GLIDE      1.0f' \
+	  build/break_cb19/CrumpBitEffect.host.c
+	$(HOSTCC) -Ibuild/break_cb19 $(HOSTFLAGS) modules/crumpbit.c \
+	  -o build/crumpbit_break19 -lm
+	@if ./build/crumpbit_break19 >/dev/null 2>&1; then \
+	  echo "crumpbit_break19: FAILED (pit window glide break not caught)"; \
+	  exit 1; \
+	else echo "crumpbit_break19: caught (law CB21 fails as expected)"; fi
+	sed 's/        q = (q > 32767) ? 32767 : q;/        (void)0;/' \
+	  $(GEN)/CrumpBitEffect.host.c > build/break_cb20/CrumpBitEffect.host.c
+	@grep -q '        (void)0;' \
+	  build/break_cb20/CrumpBitEffect.host.c
+	$(HOSTCC) -Ibuild/break_cb20 $(HOSTFLAGS) modules/crumpbit.c \
+	  -o build/crumpbit_break20 -lm
+	@if ./build/crumpbit_break20 >/dev/null 2>&1; then \
+	  echo "crumpbit_break20: FAILED (grn step guard break not caught)"; \
+	  exit 1; \
+	else echo "crumpbit_break20: caught (law CB20 fails as expected)"; fi
+	mkdir -p build/break_cb21
+	sed 's/midiPitch_detune(rt->pit_fine)) \//1.0f) \//' \
+	  $(GEN)/CrumpBitEffect.host.c > build/break_cb21/CrumpBitEffect.host.c
+	@grep -q '1.0f) /' build/break_cb21/CrumpBitEffect.host.c
+	$(HOSTCC) -Ibuild/break_cb21 $(HOSTFLAGS) modules/crumpbit.c \
+	  -o build/crumpbit_break21 -lm
+	@if ./build/crumpbit_break21 >/dev/null 2>&1; then \
+	  echo "crumpbit_break21: FAILED (pit fine break not caught)"; \
+	  exit 1; \
+	else echo "crumpbit_break21: caught (law CB22 fails as expected)"; fi
+	mkdir -p build/break_cb22
+	sed 's/) < m)/) <= m)/' \
+	  $(GEN)/CrumpBitEffect.host.c > build/break_cb22/CrumpBitEffect.host.c
+	@test "$$(grep -c ') <= m)' build/break_cb22/CrumpBitEffect.host.c)" = 2
+	$(HOSTCC) -Ibuild/break_cb22 $(HOSTFLAGS) modules/crumpbit.c \
+	  -o build/crumpbit_break22 -lm
+	@if ./build/crumpbit_break22 >/dev/null 2>&1; then \
+	  echo "crumpbit_break22: FAILED (dly plateau limit break not caught)"; \
+	  exit 1; \
+	else echo "crumpbit_break22: caught (law CB1 fails as expected)"; fi
+	mkdir -p build/break_cb23 build/break_cb24 build/break_cb25
+	sed 's/k\.tap_inc = ((float)on - s\.tap_g) \* b->per_frame;/k.tap_inc = 0.0f;/' \
+	  $(GEN)/CrumpBitEffect.host.c > build/break_cb23/CrumpBitEffect.host.c
+	@grep -q 'k.tap_inc = 0.0f;' build/break_cb23/CrumpBitEffect.host.c
+	$(HOSTCC) -Ibuild/break_cb23 $(HOSTFLAGS) modules/crumpbit.c \
+	  -o build/crumpbit_break23 -lm
+	@if ./build/crumpbit_break23 >/dev/null 2>&1; then \
+	  echo "crumpbit_break23: FAILED (grn tap fade break not caught)"; \
+	  exit 1; \
+	else echo "crumpbit_break23: caught (law CB23 fails as expected)"; fi
+	sed 's/d = crumpBit_lowRowSamples(q, row);/d = crumpBit_lowRowSamples(q, 0u);/' \
+	  $(GEN)/CrumpBitEffect.host.c > build/break_cb24/CrumpBitEffect.host.c
+	@grep -q 'crumpBit_lowRowSamples(q, 0u);' \
+	  build/break_cb24/CrumpBitEffect.host.c
+	$(HOSTCC) -Ibuild/break_cb24 $(HOSTFLAGS) modules/crumpbit.c \
+	  -o build/crumpbit_break24 -lm
+	@if ./build/crumpbit_break24 >/dev/null 2>&1; then \
+	  echo "crumpbit_break24: FAILED (grn low rows break not caught)"; \
+	  exit 1; \
+	else echo "crumpbit_break24: caught (law CB23 fails as expected)"; fi
+	sed -e '/S091 P6: the tap restarts silent/{n;s/g->tap_on = 0u;/(void)0;/;}' \
+	  -e 's/(!g->tap_on || g->tap_d > len - 2u)/(!g->tap_on)/' \
+	  $(GEN)/CrumpBitEffect.host.c > build/break_cb25/CrumpBitEffect.host.c
+	@test "$$(grep -c 'g->tap_on = 0u;' build/break_cb25/CrumpBitEffect.host.c)" = 0
+	@grep -q '(!g->tap_on) ?' build/break_cb25/CrumpBitEffect.host.c
+	$(HOSTCC) -Ibuild/break_cb25 $(HOSTFLAGS) modules/crumpbit.c \
+	  -o build/crumpbit_break25 -lm
+	@if ./build/crumpbit_break25 >/dev/null 2>&1; then \
+	  echo "crumpbit_break25: FAILED (grn reseat tap break not caught)"; \
+	  exit 1; \
+	else echo "crumpbit_break25: caught (law CB23 fails as expected)"; fi
 
 # S091 P2: the committed CrumpBit tables must equal the generator's output.
 crumpbit_tables:
@@ -541,44 +637,47 @@ crumpbit_tables:
 # S091 ARM gate (needs `make all` at the repository root first):
 #   - each sub-engine's frame loop (stages 1-3, one symbol each,
 #     CRUMPBIT_NOINLINE) at or below its measured longest path, no VDIV
-#     (S091 P5 limits, measured on the implemented tree): `dly` 111 and
-#     `cmb` 109 (engine A with the Q14 read; P4 124), `pit` 106 (drop-sample
-#     heads; P4 135), `grn` 116 (two spans around the block's one trigger or
-#     steal; no window lower clamp, plain echo; P4 136; --cond-heads
+#     (S091 P5 limits, measured on the implemented tree): `dly` 109 (S091
+#     P6; P5 111) and `cmb` 109 (engine A with the Q14 read; P4 124), `pit` 106 (drop-sample
+#     heads; P4 135), `grn` 114 (two spans around the block's one trigger or
+#     steal; no window lower clamp, plain echo; P4 136; S091 P6 the tap
+#     gain multiply in place of the gate mask, P5 116; --cond-heads
 #     --in-range: its cold blocks close backward branches into the body,
 #     which are not frame loops), `rvb` 131 (low-pass damping; P4 145);
 #   - crumpBit_process(): the stage-4 output-filter loops, the SVF 31 (S091
 #     P2; loop 1) and the one-pole 16 (S091 P5 F1; --rank 2);
-#   - the unrolled Sync search crumpBit_divisionFor() at or below 117
-#     instructions per block (the 128-step walk it replaced was up to
-#     ~2,430), and the table-limit search crumpBit_tableLimit() at or below
-#     63 (S091 P3: the S091 P2 crumpBit_rateLimit() search generalised to
-#     every sub-type's table and kept out of line; eight probes, run once
-#     per block by effects_service() through effective_max).
+#   - the table-limit search crumpBit_tableLimit() at or below 63 (S091
+#     P3: the S091 P2 crumpBit_rateLimit() search generalised to every
+#     sub-type's table and kept out of line; eight probes, run once per
+#     block by effects_service() through effective_max), and (S091 P6)
+#     `dly`'s curve-limit search crumpBit_delayLimit() at or below 152 on
+#     its longest per-block path (loop-free: eight probes of the curve at
+#     the tempo, unrolled; it replaced the Sync search
+#     crumpBit_divisionFor(), 117, and the `dly` use of the table search).
 crumpbit_elf_check:
 	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
-	  --sym crumpBit_runDelay --max 111
+	  --sym crumpBit_runDelay --max 109
 	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
 	  --sym crumpBit_runComb --max 109
 	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
 	  --sym crumpBit_runPitch --max 106
 	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
-	  --sym crumpBit_runGrain --cond-heads --in-range --top 2 --max 116
+	  --sym crumpBit_runGrain --cond-heads --in-range --top 2 --max 114
 	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
 	  --sym crumpBit_runReverb --max 131
 	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
 	  --sym crumpBit_process --top 2 --max 31
 	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
 	  --sym crumpBit_process --top 2 --rank 2 --max 16
-	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
-	  --sym crumpBit_divisionFor --straight --max 117
+	python3 elf_blockpath.py --elf $(ROOT)/build/lxr02.elf \
+	  --sym crumpBit_delayLimit --max 152
 	python3 elf_looppath.py --elf $(ROOT)/build/lxr02.elf \
 	  --sym crumpBit_tableLimit --straight --max 63
 
 # S091 P5: the whole CrumpBit Effect at or below 170 instructions per frame
 # in every sub-type, worst case (the user's cap): engine loop + filter loop
 # + (engine per block + crumpBit_process() per block on that filter's
-# branch + the manager's clamps) / 32, `dly` adding its Sync search
+# branch + the manager's clamps, `dly`'s with its curve-limit search) / 32
 # (crumpbit_cpu.py; needs `make all` at the repository root first).
 crumpbit_cpu_check:
 	python3 crumpbit_cpu.py --elf $(ROOT)/build/lxr02.elf --cap 170

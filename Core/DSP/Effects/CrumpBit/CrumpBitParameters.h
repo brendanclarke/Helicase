@@ -33,16 +33,18 @@
  */
 
 /*
- * Descriptor rows: common rows 0..2 plus type rows 3..22.
+ * Descriptor rows: common rows 0..2 plus type rows 3..23.
  * S091 P2 appended rows 11..14 (`ton`, `typ`, `frq`, `res`). S091 P3
  * appended row 15 (`aux`, the per-sub-type pitch/drive row) and the granular
  * rows 16..21. S091 P4 (S091_P4_GRN_TWEAKS.md): row 20 is the grain Length
  * (`crump_grain_length`; the retired level jitter `amp` held this index),
  * and row 22 is the shared output-filter balance `bal`. The deferred
- * output-filter drive (`drv`) would append as 23; the tone drive (`tdr`) is
+ * output-filter drive (`drv`) would append as 24 (row 23 is `fin`, S091 P5
+ * follow-up); the tone drive (`tdr`) is
  * the `aux` row's meaning in `dly`/`cmb` when the drives land.
  */
-#define CRUMPBIT_PARAM_COUNT 23u
+/* S091 P5 follow-up: row 23 `fin`, `pit`'s fine pitch (user). */
+#define CRUMPBIT_PARAM_COUNT 24u
 
 /*
  * Local descriptor indices.
@@ -63,7 +65,7 @@ typedef enum {
     CRUMPBIT_PARAM_RATE,
     CRUMPBIT_PARAM_SUBTYPE,
     CRUMPBIT_PARAM_SYNC,
-    CRUMPBIT_PARAM_DLY_PAN,
+    CRUMPBIT_PARAM_SUB_PAN,
     /* S091 P2, delay sub-type: feedback-return tone tilt (63 = flat). */
     CRUMPBIT_PARAM_TONE,
     /* S091 P2, shared output stage: the last element of the Effect. */
@@ -83,6 +85,12 @@ typedef enum {
     CRUMPBIT_PARAM_GRAIN_WIDTH,
     /* S091 P4, shared output stage: the filter's stereo balance. */
     CRUMPBIT_PARAM_FILTER_BAL,
+    /*
+     * S091 P5 follow-up (user): `pit`'s fine pitch, the voice `fin` law
+     * (midiPitch_detune(): about -52..+51 cents over 0..127, 63 centre),
+     * on the `pit` page and FX lane 6 where `snp` was.
+     */
+    CRUMPBIT_PARAM_PIT_FINE,
     CRUMPBIT_PARAM_ENUM_COUNT
 } crumpbit_param_t;
 
@@ -118,7 +126,8 @@ typedef enum {
  *   (`fbk`, `rte`, `snc`, `dpn`, `ton`, `aux`), aligned by role across
  *   sub-types (plan §6, A1): `fbk` amount back, `rte` length (higher =
  *   longer), `snc` the switch, `dpn` where the wet sits, `ton` colour/shape,
- *   `aux` pitch. A sub-type change keeps their values (plan §2.4).
+ *   `aux` pitch. A sub-type change keeps their values (plan §2.4). S091 P5
+ *   follow-up: `fin` (row 23), read by `pit` only (its fine pitch).
  * - CRUMPBIT_ROWS_GRN: rows only `grn` reads (`st2 st3 spr den len wid`;
  *   S091 P4: `len` replaced the retired `amp`).
  * Why: a new sub-type adds its own mask here; the _Static_asserts in
@@ -142,9 +151,10 @@ typedef enum {
     (CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_FEEDBACK) |              \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_RATE) |                  \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_SYNC) |                  \
-     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_DLY_PAN) |               \
+     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_SUB_PAN) |               \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_TONE) |                  \
-     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_AUX))
+     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_AUX) |                   \
+     CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_PIT_FINE))
 #define CRUMPBIT_ROWS_GRN                                     \
     (CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_ST2) |             \
      CRUMPBIT_ROW_BIT(CRUMPBIT_PARAM_GRAIN_ST3) |             \
@@ -159,6 +169,18 @@ typedef enum {
  * Accessors: crumpBit_descriptors (default), crumpBit_process() (side select).
  */
 #define CRUMPBIT_TONE_FLAT 63u
+
+/*
+ * Pitch-row range (S091 P5 follow-up, user): `aux` (the `pit` interval and
+ * the `grn` P1) and the `grn` P2/P3 rows are one semitone per step, 63 = 0,
+ * clamped to -36..+36 st: stored 27..99. The rows stop there (descriptor
+ * maximum and EFFECT_MOD_RANGE floor), so the value shown is the value
+ * played everywhere. CrumpBitEffect.c asserts 63 +- CRUMPBIT_SEMITONE_SPAN.
+ * Accessors: crumpBit_descriptors, crumpBit_rowSemitones(),
+ * crumpBit_formatSemitones().
+ */
+#define CRUMPBIT_PITCH_ROW_MIN 27u
+#define CRUMPBIT_PITCH_ROW_MAX 99u
 
 /*
  * Output filter types (S091 P2 §5.4), stored by the `typ` row 0..7.

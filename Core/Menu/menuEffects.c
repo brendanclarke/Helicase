@@ -460,6 +460,13 @@ void menuEffects_clampValue(const menuEffects_cell_t *cell, uint16_t *value)
          */
         max = record ? effects_paramEffectiveMax(record->type, cell->index)
                      : 0u;
+        /*
+         * S091 P5: a ranged row (CrumpBit's +-36 st pitches) also stops at
+         * its floor, so the knob stops where the display and the DSP do.
+         */
+        min = record ? effects_descriptorMin(effects_descriptor(record->type,
+                                                                cell->index))
+                     : 0u;
         break; }
     case MENU_FX_CELL_RUN:
         max = (uint16_t)(EFFECT_SEQ_RUN_MODE_COUNT - 1u);
@@ -563,22 +570,43 @@ void menuEffects_shortName(const menuEffects_cell_t *cell, char *dst)
     case MENU_FX_CELL_SCALE:        text = "scl"; break;
     case MENU_FX_CELL_MORPH_AMOUNT: text = "mrp"; break;
     case MENU_FX_CELL_PARAM: {
-        const effect_ui_hooks_t *hooks = menuEffects_hooks();
-
         /*
-         * S091 P3: a type may rename its row on this page (CrumpBit's
-         * per-sub-type names); otherwise the descriptor's short name.
+         * S091 P6: the row's name for the variant shown (CrumpBit's
+         * per-sub-type names, menuEffects_cellLabels()); the descriptor's
+         * short name when the type does not rename it.
          */
-        if (hooks && hooks->name3 && hooks->name3(cell->index, dst))
-            return;
-        if (cell->descriptor && cell->descriptor->short_name)
-            text = cell->descriptor->short_name;
+        const char *name = cell->descriptor ? cell->descriptor->short_name
+                                            : NULL;
+
+        menuEffects_cellLabels(cell, &name, NULL, NULL);
+        if (name)
+            text = name;
         break; }
     default:
         break;
     }
     for (i = 0u; i < 3u; i++)
         dst[i] = (text[i] != '\0') ? text[i] : ' ';
+}
+
+void menuEffects_cellLabels(const menuEffects_cell_t *cell,
+                            const char **short3, const char **category,
+                            const char **long_name)
+{
+    const effect_record_t *record = menuEffects_record();
+    const effect_registry_entry_t *entry = menuEffects_entry();
+    /* variant: the shown value of the type's variant row (0 without one). */
+    uint8_t variant = 0u;
+
+    if (!cell || cell->kind != MENU_FX_CELL_PARAM || !record)
+        return;
+    if (entry->ops && entry->ops->lane_variant_count != 0u) {
+        variant = menuEffects_shownParam(entry->ops->lane_variant_row);
+        variant = (variant < entry->ops->lane_variant_count)
+            ? variant : (uint8_t)(entry->ops->lane_variant_count - 1u);
+    }
+    effects_rowLabels(record->type, variant, cell->index, short3, category,
+                      long_name);
 }
 
 /*

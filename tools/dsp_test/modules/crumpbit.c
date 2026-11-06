@@ -1,15 +1,23 @@
 /*
  * CrumpBit host tests (S091 P1 reductions; S091 P2 expansion; S091 P3
- * sub-types; S091 P4 `grn` rework and `bal`; S091 P5 efficiencies).
+ * sub-types; S091 P4 `grn` rework and `bal`; S091 P5 efficiencies;
+ * S091 P6 the `dly` delay-time curve).
  *
  * What:       compiles the real Core/DSP/Effects/CrumpBit/CrumpBitEffect.c
  *             and its generated tables (firmware includes stripped by
  *             extract.py) and checks:
- *               CB1  Sync division: crumpBit_divisionFor() and
- *                    crumpBit_syncDivision() against the 128-step S074 walk
- *                    (generalised to a live maximum, S091 P2), for every
- *                    rate at BPM 0..1000 and five share limits, every exact
- *                    division length (ties), and random targets/limits;
+ *               CB1  (S091 P6) the `dly` delay-time curve: the tick table
+ *                    6 .. 192 ascending with StepScale's 14 stops exact at
+ *                    crumpBit_delayStopCc; at every BPM 0..1000,
+ *                    crumpBit_delaySamples() equals the double-precision
+ *                    plan law (4e-6 relative; the core rows bit-exact as
+ *                    ticks x samples per tick), row 0 = 2 samples, row 127
+ *                    = t_max, every row below t_max a new delay, t_max
+ *                    first reached at row 127 from 42 BPM up; the knob
+ *                    limit (crumpBit_subtypeRateLimit(dly)) equals a linear
+ *                    scan (last row that fits, never past the first t_max
+ *                    row) for shares in 4 KiB steps, the whole arena, and
+ *                    200,000 random tempos and shares at row lengths +-1;
  *               CB2  8-bit ADC: crumpBit_adc() against the clamped S074 form
  *                    at every code edge (+-8 ulps), across +-3 and at large
  *                    magnitudes;
@@ -22,7 +30,8 @@
  *                    (which the firmware recomputes from raw bytes), and
  *                    (S091 P5, plan Q8) the Q14 tap read (B) and the
  *                    feedback and balance gains stepped per block (S1;
- *                    `mix` still ramps, Q9), over
+ *                    `mix` still ramps, Q9), and (S091 P6) the target from
+ *                    the delay curve at a random tempo, `snc` ignored, over
  *                    60 s of random blocks with parameter jumps (every row,
  *                    every filter type), out-of-range input, mono
  *                    io->r == NULL, short blocks and share changes (tail
@@ -37,9 +46,8 @@
  *                    ramp origin `off`); S091 P3: sub `dly`, aux/st2/st3 63;
  *                    S091 P4: den 64 (+1), len 127, bal 63 (the copy
  *                    setting and a centred balance);
- *               CB6  tables and Rate limit: crumpBit_rateTable endpoints
- *                    and strict order, crumpBit_rateSamples() is the table,
- *                    crumpBit_rateLimit() equals a linear scan for every
+ *               CB6  tables and Rate limit: the `dly` effective_max (S091
+ *                    P6: the CB1 scan at the test tempo) for every
  *                    share 0..CRUMPBIT_LOOP_MAX_BYTES in 32-byte steps (127
  *                    for the whole arena), the effective_max op clamps only
  *                    the Rate; toneK[63] == 1; filterG[0] == 0, increasing;
@@ -83,9 +91,10 @@
  *               CB12 `cmb` tuning: the first echo of an impulse arrives at
  *                    crumpBit_combTable[rte] (+-2 samples); `snc` inverts
  *                    the second echo; combNote() is 112 - rte, held at 96;
- *               CB13 `pit` ratio: +-12 st (snapped) moves a 441 Hz sine's
+ *               CB13 `pit` ratio: +-12 st moves a 441 Hz sine's
  *                    energy to 882 / 220.5 Hz (Goertzel, >= 10x the input
- *                    frequency), 0 st keeps it;
+ *                    frequency), 0 st keeps it; S091 P5: +-36 st (the row's
+ *                    ends) to 3,528 / 55.1 Hz;
  *               CB14 `grn` (S091 P4 model): the pitch-slot distribution
  *                    over the absolute P1..P3 (spr 0 P1 only, 40 halves,
  *                    80 thirds, 127 detune within +-1 st); the Width
@@ -121,6 +130,34 @@
  *                    0.98; with no input the delay line's peak never grows
  *                    echo to echo and settles inside the 8-bit rounding
  *                    floor, |code| < 0.5 / (1 - gain), at every `fbk`;
+ *               CB20 (S091 P5 follow-up) the pitch rows: one semitone per
+ *                    step, -36..+36 (row - 63 clamped); the ratio table
+ *                    exact at every semitone; the `grn` Q3.12 step equals
+ *                    round(2^(s/12) 4096), held at 32,767 at +36; CB13
+ *                    checks `pit` at +-12 and +-36;
+ *               CB21 (S091 P5 follow-up) the `pit` window glide: the first
+ *                    block starts on the target; a `win` change glides
+ *                    monotonically and settles within 0.1 %; the largest
+ *                    output step at a `win` change stays below 5x the
+ *                    steady crossfade texture over equal windows (it was
+ *                    ~19x without the glide);
+ *               CB22 (S091 P5 follow-up) `pit`'s fine pitch, the voice
+ *                    `fin` law: a +12 st sine's band centre at `fin` 127
+ *                    and 0 is detune(fin)/detune(63) times the one at 63
+ *                    (+-0.2 %), and near 882 x detune(fin) (+-1 %);
+ *                    CB13 and CB22 measure band energy/centre, robust to
+ *                    the heads' crossfade sidebands;
+ *               CB23 (S091 P6) `grn` below /64 and the tap fade: rows
+ *                    0..4 at 1/30/120/300 BPM play 2 samples, the `dly`
+ *                    bottom law (+-1 frame) and /64, strictly rising (at
+ *                    1 BPM /64 exceeds the line: the knob stops at 3); with
+ *                    the copy identity (fbk 0) and ~2,000 random `tim`
+ *                    changes (many on consecutive blocks), every frame
+ *                    equals rec[n-2] + g rec[n-2-D] for a reference model
+ *                    of the fade (a sounding tap falls to 0 over one block
+ *                    at its old D, a silent one takes the new D and rises
+ *                    over the next; 2e-6); a reseat silences the tap and
+ *                    keeps D inside the new line;
  *               CB19 (S091 P5 F1) the one-pole output filter of `grn`/
  *                    `rvb`: -3 dB at the SVF's res-0 frequency (+-0.3 dB,
  *                    sines through the whole Effect, mix 0); the type
@@ -137,7 +174,7 @@
  * Inputs:     build/gen/cb_*.c|h, CrumpBitEffect.host.h/.c (extract.py).
  * Outputs:    one line per failure (first 40); "crumpbit failures: N";
  *             exit 1 if N > 0.
- * Accessors:  make -C tools/dsp_test crumpbit (18 break builds follow).
+ * Accessors:  make -C tools/dsp_test crumpbit (21 break builds follow).
  * Affiliates: CrumpBitEffect.c/.h; CrumpBitTables.c; CrumpBitParameters.h;
  *             StepScale.c; S091_P2_Implementation.md §5;
  *             S091_P3_Implementation.md (host laws CB4-CB15);
@@ -185,6 +222,7 @@ int16_t GetRngValue(void)
 #include "cb_params.c"
 #include "cb_tables.h"
 #include "cb_tables.c"
+#include "cb_midipitch.c"   /* midiPitch_detune(): `pit` fine (S091 P5) */
 #include "CrumpBitEffect.host.h"
 #include "CrumpBitEffect.host.c"
 
@@ -202,50 +240,57 @@ static inline uint32_t ref_adc(float x)
 }
 
 /*
- * The S074 128-step Sync walk with its constant limit replaced by max (the
- * only S091 P2 change to the rule), for CB1 and the CB4 reference.
+ * S091 P6: the `dly` delay-time curve in double precision, written from the
+ * plan (S091_P6_PARAM_CLEANUP.md §3.5.2), for CB1: rows 0..3 geometric from
+ * t_min = 2 samples to /64, rows 4..123 the tick table x samples per tick,
+ * rows 124..127 geometric from /2 to t_max; every row held at t_max.
  */
-static uint8_t ref_divisionFor(float target, float per_tick, float max)
+static double ref_delayRow(uint8_t row, uint32_t bpm)
 {
-    uint8_t low = CRUMPBIT_DIVISION_NONE;
-    uint8_t high = CRUMPBIT_DIVISION_NONE;
-    float t_low = 0.0f;
-    float t_high = 0.0f;
-    uint8_t i;
+    const double tmax = (double)CRUMPBIT_DELAY_CURVE_MAX;
+    const double per_tick = (double)CRUMPBIT_SAMPLES_PER_TICK /
+                            (double)(bpm ? bpm : 1u);
+    const double t64 = fmin((double)crumpBit_delayTicks[0] * per_tick, tmax);
+    const double t2 = fmin((double)crumpBit_delayTicks[119] * per_tick, tmax);
+    double t;
 
-    for (i = 0u; i < STEP_SCALE_COUNT; i++) {
-        const float t = ((float)stepScale_ticksQ8(i) / 256.0f) * per_tick;
-
-        if (t > max)
-            continue;
-        if (t <= target) {
-            low = i;
-            t_low = t;
-        } else if (high == CRUMPBIT_DIVISION_NONE) {
-            high = i;
-            t_high = t;
-        }
-    }
-    if (low == CRUMPBIT_DIVISION_NONE)
-        return (high == CRUMPBIT_DIVISION_NONE) ? 0u : high;
-    if (high == CRUMPBIT_DIVISION_NONE)
-        return low;
-    return (target * target < t_low * t_high) ? low : high;
+    if (row < 4u)
+        t = 2.0 * pow(t64 / 2.0, (double)row / 4.0);
+    else if (row <= 123u)
+        t = (double)crumpBit_delayTicks[row - 4u] * per_tick;
+    else
+        t = t2 * pow(tmax / t2, (double)(row - 123u) / 4.0);
+    return fmin(t, tmax);
 }
 
-/* Rate limit by linear scan: the largest rate whose length fits. */
-static uint8_t ref_rateLimit(uint32_t bytes)
+/*
+ * The `dly` Rate limit by linear scan of the firmware curve (CB1 proves it
+ * against ref_delayRow()): the last row whose delay fits max, and no row
+ * past the first that plays t_max (plan Q8: no dead travel).
+ */
+static uint8_t ref_delayLimit(float max, uint32_t bpm)
 {
-    uint32_t len = (bytes > CRUMPBIT_LOOP_MAX_BYTES)
-        ? CRUMPBIT_LOOP_MAX_BYTES : bytes;
-    const float max = (len < CRUMPBIT_LOOP_MIN) ? 0.0f : (float)(len - 2u);
     uint8_t r = 0u;
-    uint8_t i;
+    uint32_t i;
 
-    for (i = 0u; i < 128u; i++)
-        if (crumpBit_rateTable[i] <= max)
-            r = i;
+    for (i = 0u; i < 128u; i++) {
+        const float t = crumpBit_delaySamples((uint8_t)i, (uint16_t)bpm);
+
+        if (t <= max)
+            r = (uint8_t)i;
+        if (t >= CRUMPBIT_DELAY_CURVE_MAX)
+            break;
+    }
     return r;
+}
+
+/* The longest delay a share holds (crumpBit_seat()'s rule, length - 2). */
+static float ref_shareMax(uint32_t bytes)
+{
+    const uint32_t len = (bytes > CRUMPBIT_LOOP_MAX_BYTES)
+        ? CRUMPBIT_LOOP_MAX_BYTES : bytes;
+
+    return (len < CRUMPBIT_LOOP_MIN) ? 0.0f : (float)(len - 2u);
 }
 
 /*
@@ -289,7 +334,6 @@ typedef struct {
     uint8_t mix_raw;
     uint8_t feedback_raw;
     uint8_t rate;
-    uint8_t sync;
     uint8_t pan_raw;
     uint8_t tone_raw;
     uint8_t filter_type;
@@ -356,8 +400,7 @@ static void ref2_writeParam(RefP2 *rt, uint8_t index, uint8_t value)
     case CRUMPBIT_PARAM_MIX:         rt->mix_raw = value;               break;
     case CRUMPBIT_PARAM_FEEDBACK:    rt->feedback_raw = value;          break;
     case CRUMPBIT_PARAM_RATE:        rt->rate = value;                  break;
-    case CRUMPBIT_PARAM_SYNC:        rt->sync = (uint8_t)(value != 0u); break;
-    case CRUMPBIT_PARAM_DLY_PAN:     rt->pan_raw = value;               break;
+    case CRUMPBIT_PARAM_SUB_PAN:     rt->pan_raw = value;               break;
     case CRUMPBIT_PARAM_TONE:        rt->tone_raw = value;              break;
     case CRUMPBIT_PARAM_FILTER_TYPE: rt->filter_type = value;           break;
     case CRUMPBIT_PARAM_FILTER_FREQ: rt->filter_freq = value;           break;
@@ -393,7 +436,7 @@ static void ref2_process(RefP2 *rt, float *io_l, float *io_r, uint32_t frames,
     float *right = io_r ? io_r : io_l;
     int8_t *loop = (int8_t *)base;
     const uint32_t len = ref2_seat(rt, bytes);
-    float max, target, per_tick, free_run, synced;
+    float max, target;
     float mix, fb, gl, gr, mix_to;
     float mix_inc, per_frame;
     float k_tone, g, r, a1, a2, a3, c_to[3], cx_inc, cb_inc, cl_inc;
@@ -406,11 +449,8 @@ static void ref2_process(RefP2 *rt, float *io_l, float *io_r, uint32_t frames,
     max = (float)(len - 2u);
     invert = rt->bit_invert;
     keep = (uint32_t)~((uint32_t)rt->bit_off & ~invert) & 0xFFu;
-    per_tick = CRUMPBIT_SAMPLES_PER_TICK / (float)(cb_bpm ? cb_bpm : 1u);
-    free_run = crumpBit_rateTable[rt->rate > 127u ? 127u : rt->rate];
-    synced = ((float)stepScale_ticksQ8(
-        ref_divisionFor(free_run, per_tick, max)) / 256.0f) * per_tick;
-    target = rt->sync ? synced : free_run;
+    /* S091 P6: one curve at the test tempo (CB1 proves it), no Sync. */
+    target = crumpBit_delaySamples(rt->rate, cb_bpm);
     target = (target > max) ? max : target;
     if (!rt->primed) {
         rt->delay = target;
@@ -568,61 +608,140 @@ static const uint32_t cb_shares[] = {
 };
 #define CB_SHARE_COUNT (sizeof cb_shares / sizeof cb_shares[0])
 
-/* CB1: the Sync division ------------------------------------------------- */
+/* CB1: the `dly` delay-time curve (S091 P6) ----------------------------- */
 static void law_cb1(void)
 {
     uint32_t bpm;
     uint32_t i;
     uint32_t s;
-    char msg[96];
+    char msg[112];
 
-    for (s = 0u; s < 5u; s++) {
-        fx_share_t share = { NULL, 0u, cb_shares[s] };
-        const float max = crumpBit_shareMaxSamples(&share);
+    /* The tick table: 6 .. 192, strictly increasing, the 14 stops exact. */
+    expect(crumpBit_delayTicks[0] == 6.0f &&
+           crumpBit_delayTicks[CRUMPBIT_DELAY_CORE_ROWS - 1u] == 192.0f,
+           "CB1 ticks: row 4 = /64 (6), row 123 = /2 (192)");
+    for (i = 1u; i < CRUMPBIT_DELAY_CORE_ROWS; i++) {
+        snprintf(msg, sizeof msg, "CB1 ticks ascend %u", i);
+        expect(crumpBit_delayTicks[i] > crumpBit_delayTicks[i - 1u], msg);
+    }
+    for (i = 0u; i < CRUMPBIT_DELAY_STOPS; i++) {
+        /* The plan's stops /64 32t /32 16t d32 /16 8Tr d16 /8 4Tr d/8 /4
+         * d/4 /2, in 96-PPQ ticks. */
+        static const float stop_ticks[CRUMPBIT_DELAY_STOPS] = {
+            6.0f, 8.0f, 12.0f, 16.0f, 18.0f, 24.0f, 32.0f, 36.0f, 48.0f,
+            64.0f, 72.0f, 96.0f, 144.0f, 192.0f };
+        const uint8_t cc = crumpBit_delayStopCc[i];
+        uint32_t k;
+        uint32_t hit = 0u;
 
-        for (bpm = 0u; bpm <= 1000u; bpm++) {
-            const float per_tick =
-                CRUMPBIT_SAMPLES_PER_TICK / (float)(bpm ? bpm : 1u);
-            uint32_t r;
+        snprintf(msg, sizeof msg, "CB1 stop %u at row %u", i, cc);
+        expect(cc >= CRUMPBIT_DELAY_LOW_ROWS &&
+               cc < CRUMPBIT_DELAY_LOW_ROWS + CRUMPBIT_DELAY_CORE_ROWS, msg);
+        expect(crumpBit_delayTicks[cc - CRUMPBIT_DELAY_LOW_ROWS] ==
+               stop_ticks[i], msg);
+        /* Each is a StepScale division, by tick count. */
+        for (k = 0u; k < STEP_SCALE_COUNT; k++)
+            hit |= (stepScale_ticksQ8((uint8_t)k) ==
+                    (uint16_t)(stop_ticks[i] * 256.0f)) ? 1u : 0u;
+        expect(hit != 0u, msg);
+        if (i)
+            expect(cc > crumpBit_delayStopCc[i - 1u], msg);
+    }
+    expect(crumpBit_delayStopCc[0] == CRUMPBIT_DELAY_LOW_ROWS &&
+           crumpBit_delayStopCc[CRUMPBIT_DELAY_STOPS - 1u] ==
+               CRUMPBIT_DELAY_LOW_ROWS + CRUMPBIT_DELAY_CORE_ROWS - 1u,
+           "CB1 stops: /64 at row 4, /2 at row 123");
 
-            for (r = 0u; r < 128u; r++) {
-                const float t = crumpBit_rateSamples((uint8_t)r);
+    /* The curve at every tempo, against the double-precision law. */
+    for (bpm = 0u; bpm <= 1000u; bpm++) {
+        const float per_tick =
+            CRUMPBIT_SAMPLES_PER_TICK / (float)(bpm ? bpm : 1u);
+        float prev = 0.0f;
+        uint32_t first_max = 128u;
 
-                snprintf(msg, sizeof msg, "CB1 share %u rate %u bpm %u",
-                         s, r, bpm);
-                expect(crumpBit_divisionFor(t, per_tick, max) ==
-                       ref_divisionFor(t, per_tick, max), msg);
-                expect(crumpBit_syncDivision((uint8_t)r, (uint16_t)bpm,
-                                             max) ==
-                       ref_divisionFor(t, per_tick, max), msg);
+        for (i = 0u; i < 128u; i++) {
+            const float t = crumpBit_delaySamples((uint8_t)i, (uint16_t)bpm);
+            const double want = ref_delayRow((uint8_t)i, bpm);
+
+            snprintf(msg, sizeof msg, "CB1 bpm %u row %u (%.3f vs %.3f)",
+                     bpm, i, (double)t, want);
+            expect(fabs((double)t - want) <= 4e-6 * want, msg);
+            expect(t <= CRUMPBIT_DELAY_CURVE_MAX, msg);
+            /* Below t_max every row is a new delay; t_max only holds. */
+            if (prev < CRUMPBIT_DELAY_CURVE_MAX)
+                expect(t > prev, msg);
+            else
+                expect(t == CRUMPBIT_DELAY_CURVE_MAX, msg);
+            if (first_max == 128u && t >= CRUMPBIT_DELAY_CURVE_MAX)
+                first_max = i;
+            /* The core rows are exactly ticks x samples per tick. */
+            if (i >= CRUMPBIT_DELAY_LOW_ROWS &&
+                i < CRUMPBIT_DELAY_LOW_ROWS + CRUMPBIT_DELAY_CORE_ROWS) {
+                const float core = crumpBit_delayTicks[i - 4u] * per_tick;
+
+                expect(same_bits(t, (core > CRUMPBIT_DELAY_CURVE_MAX)
+                                    ? CRUMPBIT_DELAY_CURVE_MAX : core), msg);
             }
-            for (i = 0u; i < STEP_SCALE_COUNT; i++) {
-                const float t = ((float)stepScale_ticksQ8((uint8_t)i) /
-                                 256.0f) * per_tick;
-                const float probe[3] = { t, nextafterf(t, 0.0f),
-                                         nextafterf(t, INFINITY) };
-                uint32_t k;
+            prev = t;
+        }
+        snprintf(msg, sizeof msg, "CB1 bpm %u ends", bpm);
+        expect(crumpBit_delaySamples(0u, (uint16_t)bpm) == 2.0f, msg);
+        expect(crumpBit_delaySamples(127u, (uint16_t)bpm) ==
+               CRUMPBIT_DELAY_CURVE_MAX, msg);
+        expect(crumpBit_delaySamples(200u, (uint16_t)bpm) ==
+               CRUMPBIT_DELAY_CURVE_MAX, msg);
+        /* t_max is reached only at row 127 from 42 BPM up (plan §3.5.2). */
+        if (bpm >= 42u)
+            expect(first_max == 127u, msg);
 
-                for (k = 0u; k < 3u; k++) {
-                    snprintf(msg, sizeof msg,
-                             "CB1 tie share %u cc %u bpm %u k %u",
-                             s, i, bpm, k);
-                    expect(crumpBit_divisionFor(probe[k], per_tick, max) ==
-                           ref_divisionFor(probe[k], per_tick, max), msg);
-                }
-            }
+        /* The knob limit equals the scan for every share. */
+        for (s = 0u; s <= CRUMPBIT_LOOP_MAX_BYTES + 64u; s += 4096u) {
+            const uint32_t bytes = (s > CRUMPBIT_LOOP_MAX_BYTES)
+                ? CRUMPBIT_LOOP_MAX_BYTES : s;
+            fx_share_t share = { NULL, 0u, bytes };
+
+            cb_bpm = (uint16_t)bpm;
+            snprintf(msg, sizeof msg, "CB1 limit bpm %u bytes %u", bpm,
+                     bytes);
+            expect(crumpBit_subtypeRateLimit(CRUMPBIT_SUBTYPE_DELAY,
+                                             &share) ==
+                   ref_delayLimit(ref_shareMax(bytes), bpm), msg);
+        }
+        /* The whole arena: the knob stops at the first t_max row. */
+        {
+            fx_share_t full = { NULL, 0u, CRUMPBIT_LOOP_MAX_BYTES };
+
+            snprintf(msg, sizeof msg, "CB1 whole arena bpm %u", bpm);
+            expect(crumpBit_subtypeRateLimit(CRUMPBIT_SUBTYPE_DELAY,
+                                             &full) == first_max, msg);
         }
     }
-    for (i = 0u; i < 2000000u; i++) {
-        const float per_tick = rndf(0.4f, 30000.0f);
-        const float max = rndf(0.0f, CRUMPBIT_DELAY_CURVE_MAX);
-        const float t = (i & 1u) ? rndf(0.0f, 2.0f * max)
-                                 : max * rndf(0.999f, 1.001f);
+    cb_bpm = 120u;
 
-        snprintf(msg, sizeof msg, "CB1 random %u", i);
-        expect(crumpBit_divisionFor(t, per_tick, max) ==
-               ref_divisionFor(t, per_tick, max), msg);
+    /* Random shares and tempos, and shares at exact row lengths. */
+    for (i = 0u; i < 200000u; i++) {
+        const uint32_t b = 1u + rnd() % 1000u;
+        uint32_t bytes = rnd() % (CRUMPBIT_LOOP_MAX_BYTES + 1u);
+        fx_share_t share;
+
+        if (i & 1u) {
+            /* A share whose longest delay is a row's length (+-1 byte). */
+            const float t = crumpBit_delaySamples((uint8_t)(rnd() % 128u),
+                                                  (uint16_t)b);
+            bytes = (uint32_t)t + 2u + (rnd() % 3u) - 1u;
+            bytes = (bytes > CRUMPBIT_LOOP_MAX_BYTES)
+                ? CRUMPBIT_LOOP_MAX_BYTES : bytes;
+        }
+        share.base = NULL;
+        share.offset = 0u;
+        share.bytes = bytes;
+        cb_bpm = (uint16_t)b;
+        snprintf(msg, sizeof msg, "CB1 random %u bpm %u bytes %u", i, b,
+                 bytes);
+        expect(crumpBit_subtypeRateLimit(CRUMPBIT_SUBTYPE_DELAY, &share) ==
+               ref_delayLimit(ref_shareMax(bytes), b), msg);
     }
+    cb_bpm = 120u;
 }
 
 /* CB2: the 8-bit ADC ----------------------------------------------------- */
@@ -690,7 +809,8 @@ static void cb4_write(CrumpBitRuntime *rt, RefP2 *ref, uint8_t row,
     if (row == CRUMPBIT_PARAM_RATE) {
         const uint8_t lim = crumpBit_ops.effective_max(rt, row, share);
 
-        expect(lim == ref_rateLimit(share->bytes), "CB4 rate limit");
+        expect(lim == ref_delayLimit(ref_shareMax(share->bytes), cb_bpm),
+               "CB4 rate limit");
         v = (v > lim) ? lim : v;
     }
     crumpBit_ops.write_param(rt, row, v);
@@ -702,14 +822,16 @@ static void law_cb4(void)
     static const uint8_t rows[] = {
         CRUMPBIT_PARAM_BIT_OFF, CRUMPBIT_PARAM_BIT_INVERT,
         CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_RATE,
-        CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_DLY_PAN, CRUMPBIT_PARAM_TONE,
+        CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_SUB_PAN, CRUMPBIT_PARAM_TONE,
         CRUMPBIT_PARAM_FILTER_TYPE, CRUMPBIT_PARAM_FILTER_FREQ,
         CRUMPBIT_PARAM_FILTER_RESO,
         /* S091 P3 rows: stored, never read by `dly`. */
         CRUMPBIT_PARAM_AUX, CRUMPBIT_PARAM_GRAIN_ST2,
         CRUMPBIT_PARAM_GRAIN_ST3, CRUMPBIT_PARAM_GRAIN_SPREAD,
         CRUMPBIT_PARAM_GRAIN_DENSITY, CRUMPBIT_PARAM_GRAIN_LENGTH,
-        CRUMPBIT_PARAM_GRAIN_WIDTH };
+        CRUMPBIT_PARAM_GRAIN_WIDTH,
+        /* S091 P5 follow-up: `pit`'s fine, never read by `dly`. */
+        CRUMPBIT_PARAM_PIT_FINE };
     CrumpBitRuntime rt;
     RefP2 ref;
     fx_share_t share;
@@ -735,12 +857,13 @@ static void law_cb4(void)
     expect(rt.grain_density == 64u && rt.grain_length == 127u,
            "CB5 grn copy setting (den +1, len full)");
     expect(rt.filter_bal == 63u, "CB5 balance centred");
+    expect(rt.pit_fine == 63u, "CB5 pit fine centred (S091 P5)");
     share.base = arena_new;
     share.offset = 0u;
     share.bytes = cb_shares[0];
     cb4_write(&rt, &ref, CRUMPBIT_PARAM_FEEDBACK, 64u, &share);
     cb4_write(&rt, &ref, CRUMPBIT_PARAM_RATE, rate_intended, &share);
-    cb4_write(&rt, &ref, CRUMPBIT_PARAM_DLY_PAN, 63u, &share);
+    cb4_write(&rt, &ref, CRUMPBIT_PARAM_SUB_PAN, 63u, &share);
 
     for (block = 0u; block < 82800u; block++) {    /* 60 s at 32 frames */
         effect_io_t io;
@@ -759,6 +882,7 @@ static void law_cb4(void)
                 v = ((rnd() & 3u) == 0u) ? (uint8_t)rnd() : 0u;
             if (row == CRUMPBIT_PARAM_FILTER_TYPE)
                 v = (uint8_t)(rnd() & 7u);
+            /* S091 P6: `dly` stores `snc` but never reads it. */
             if (row == CRUMPBIT_PARAM_SYNC)
                 v = (uint8_t)(rnd() & 1u);
             if (row == CRUMPBIT_PARAM_TONE && (rnd() & 3u) == 0u)
@@ -840,33 +964,23 @@ static void law_cb6(void)
     uint32_t bytes;
     char msg[96];
 
-    expect(crumpBit_rateTable[0] == 882.0f, "CB6 rate[0] = 882");
-    expect(crumpBit_rateTable[127] == CRUMPBIT_DELAY_CURVE_MAX,
-           "CB6 rate[127] = curve max");
-    for (i = 0u; i < 128u; i++) {
-        snprintf(msg, sizeof msg, "CB6 rate %u", i);
-        expect(same_bits(crumpBit_rateSamples((uint8_t)i),
-                         crumpBit_rateTable[i]), msg);
-        if (i)
-            expect(crumpBit_rateTable[i] > crumpBit_rateTable[i - 1u], msg);
-    }
-    expect(crumpBit_rateSamples(200u) == crumpBit_rateTable[127],
-           "CB6 rate > 127 reads the top");
+    /* S091 P6: the `dly` Rate limit (the delay curve at the test tempo). */
     for (bytes = 0u; bytes <= CRUMPBIT_LOOP_MAX_BYTES + 64u; bytes += 32u) {
         fx_share_t share = { NULL, 0u, bytes };
+        const uint8_t want = ref_delayLimit(ref_shareMax(bytes), cb_bpm);
 
         snprintf(msg, sizeof msg, "CB6 limit bytes %u", bytes);
-        expect(crumpBit_rateLimit(&share) == ref_rateLimit(bytes), msg);
         expect(crumpBit_ops.effective_max(NULL, CRUMPBIT_PARAM_RATE,
-                                          &share) == ref_rateLimit(bytes),
-               msg);
+                                          &share) == want, msg);
         expect(crumpBit_ops.effective_max(NULL, CRUMPBIT_PARAM_MIX, &share) ==
                255u, msg);
     }
     {
         fx_share_t full = { NULL, 0u, CRUMPBIT_LOOP_MAX_BYTES };
 
-        expect(crumpBit_rateLimit(&full) == 127u, "CB6 whole arena = 127");
+        expect(crumpBit_ops.effective_max(NULL, CRUMPBIT_PARAM_RATE,
+                                          &full) == 127u,
+               "CB6 whole arena = 127 at 120 BPM");
     }
     expect(crumpBit_toneK[CRUMPBIT_TONE_FLAT] == 1.0f, "CB6 toneK flat");
     expect(crumpBit_filterG[0] == 0.0f, "CB6 filterG[0] = 0");
@@ -913,7 +1027,7 @@ static void law_cb8(void)
         crumpBit_ops.init(&rt, NULL);
         crumpBit_ops.write_param(&rt, CRUMPBIT_PARAM_FEEDBACK, 127u);
         crumpBit_ops.write_param(&rt, CRUMPBIT_PARAM_MIX, 127u);
-        crumpBit_ops.write_param(&rt, CRUMPBIT_PARAM_DLY_PAN, 63u);
+        crumpBit_ops.write_param(&rt, CRUMPBIT_PARAM_SUB_PAN, 63u);
         crumpBit_ops.write_param(&rt, CRUMPBIT_PARAM_RATE, 20u);
         crumpBit_ops.write_param(&rt, CRUMPBIT_PARAM_TONE,
                                  (uint8_t)(40u + 40u * pass));
@@ -991,7 +1105,7 @@ static uint8_t ref_subtypeLimit(uint8_t sub, uint32_t bytes)
                                                        grain_ticks);
     case CRUMPBIT_SUBTYPE_REVERB: return ref_tableScan(crumpBit_reverbSize,
                                       (max * 0.25f - 2.0f) / 2053.0f);
-    default:                      return ref_tableScan(crumpBit_rateTable, max);
+    default:                      return ref_delayLimit(max, cb_bpm);
     }
 }
 
@@ -1044,17 +1158,28 @@ static void law_cb6_subtypes(void)
            "CB6 ratio 0 st = 1");
     expect(fabsf(crumpBit_semitoneRatio[CRUMPBIT_SEMITONE_SPAN + 12u] -
                  2.0f) < 1e-6f, "CB6 ratio +12 = 2");
-    expect(fabsf(crumpBit_semitoneRatio[0] - 0.25f) < 1e-7f,
-           "CB6 ratio -24 = 1/4");
+    /* S091 P5 follow-up: the table spans +-36 st. */
+    expect(CRUMPBIT_SEMITONE_SPAN == 36u, "CB6 semitone span 36");
+    expect(fabsf(crumpBit_semitoneRatio[0] - 0.125f) < 1e-7f,
+           "CB6 ratio -36 = 1/8");
     expect(fabsf(crumpBit_semitoneRatio[2u * CRUMPBIT_SEMITONE_SPAN] -
-                 4.0f) < 1e-6f, "CB6 ratio +24 = 4");
+                 8.0f) < 1e-6f, "CB6 ratio +36 = 8");
     expect(fabsf(crumpBit_grainFraction[0] - 1.0f / 256.0f) < 1e-9f,
            "CB6 grain length 1/256 of N");
     expect(crumpBit_grainFraction[CRUMPBIT_GRAIN_STEPS] == 1.0f,
            "CB6 grain length N");
-    /* S091 P4: the delay-time curve and its stops (Q8, Q10). */
-    expect(crumpBit_grainTime[0] == 6.0f && crumpBit_grainTime[127] == 384.0f,
-           "CB6 grain time 1/64 .. 1 bar");
+    /*
+     * S091 P4: the delay-time curve and its stops (Q8, Q10); S091 P6: on
+     * rows 4..127, rows 0..3 (below /64, computed by the engine) 0.0.
+     */
+    expect(crumpBit_grainTime[CRUMPBIT_GRAIN_LOW_ROWS] == 6.0f &&
+           crumpBit_grainTime[127] == 384.0f,
+           "CB6 grain time 1/64 (row 4) .. 1 bar");
+    expect(crumpBit_grainStopCc[0] == CRUMPBIT_GRAIN_LOW_ROWS &&
+           crumpBit_grainStopCc[CRUMPBIT_GRAIN_STOPS - 1u] == 127u,
+           "CB6 grain stops /64 at row 4, 1br at 127");
+    for (i = 0u; i < CRUMPBIT_GRAIN_LOW_ROWS; i++)
+        expect(crumpBit_grainTime[i] == 0.0f, "CB6 grain rows 0..3 = 0");
     {
         static const float stop_ticks[CRUMPBIT_GRAIN_STOPS] = {
             6, 8, 12, 16, 18, 24, 32, 36, 48, 64, 72, 96, 144, 192, 288, 384 };
@@ -1086,7 +1211,7 @@ static void law_cb6_subtypes(void)
         snprintf(msg, sizeof msg, "CB6 grain density %u", i);
         expect(crumpBit_grainDensity[i] < crumpBit_grainDensity[i - 1u], msg);
     }
-    for (i = 1u; i < 128u; i++) {
+    for (i = CRUMPBIT_GRAIN_LOW_ROWS + 1u; i < 128u; i++) {
         snprintf(msg, sizeof msg, "CB6 grain time %u", i);
         expect(crumpBit_grainTime[i] > crumpBit_grainTime[i - 1u], msg);
     }
@@ -1110,7 +1235,7 @@ static void law_cb6_subtypes(void)
         for (sub = 0u; sub < CRUMPBIT_SUBTYPE_COUNT; sub++) {
             crumpBit_ops.write_param(&rt, CRUMPBIT_PARAM_SUBTYPE,
                                      (uint8_t)sub);
-            expect(crumpBit_ops.effective_max(&rt, CRUMPBIT_PARAM_DLY_PAN,
+            expect(crumpBit_ops.effective_max(&rt, CRUMPBIT_PARAM_SUB_PAN,
                                               &share) == 255u, msg);
         }
     }
@@ -1190,12 +1315,15 @@ static void law_cb6_subtypes(void)
 /* CB9: row ownership and lane maps ---------------------------------------- */
 static void law_cb9(void)
 {
-    /* The S091 P2 CrumpBit lane table (EffectsManager.c at 080b1507). */
+    /*
+     * The S091 P2 CrumpBit lane table (EffectsManager.c at 080b1507), with
+     * S091 P6's change: lane 6 (`snc`, removed from `dly`) empty (Q9).
+     */
     static const uint8_t p2_lanes[EFFECT_SEQ_LANE_COUNT] = {
         EFFECT_LANE_MORPH_SOURCE, CRUMPBIT_PARAM_BIT_OFF,
         CRUMPBIT_PARAM_BIT_INVERT, CRUMPBIT_PARAM_MIX,
-        CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SYNC,
-        CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN, CRUMPBIT_PARAM_DLY_PAN,
+        CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_RATE, EFFECT_LANE_NONE,
+        CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN, CRUMPBIT_PARAM_SUB_PAN,
         CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FILTER_TYPE,
         CRUMPBIT_PARAM_FILTER_FREQ, CRUMPBIT_PARAM_FILTER_RESO,
         EFFECT_LANE_NONE, EFFECT_LANE_NONE };
@@ -1226,7 +1354,7 @@ static void law_cb9(void)
            crumpBit_ops.lane_variant_count == CRUMPBIT_SUBTYPE_COUNT,
            "CB9 lane variants are the sub-types");
     expect(memcmp(crumpBit_laneMap(CRUMPBIT_SUBTYPE_DELAY), p2_lanes,
-                  sizeof p2_lanes) == 0, "CB9 dly map = S091 P2 table");
+                  sizeof p2_lanes) == 0, "CB9 dly map = S091 P2/P6 table");
     for (v = 0u; v < CRUMPBIT_SUBTYPE_COUNT; v++) {
         const uint8_t *map = crumpBit_ops.lane_map((uint8_t)v);
         uint32_t seen = 0u;
@@ -1257,6 +1385,9 @@ static void law_cb9(void)
                        v == CRUMPBIT_SUBTYPE_GRAIN, msg);
             /* S091 P4: `bal` has no lane (Q11). */
             expect(row != CRUMPBIT_PARAM_FILTER_BAL, msg);
+            /* S091 P5 follow-up: `fin` is a lane of `pit` only. */
+            if (row == CRUMPBIT_PARAM_PIT_FINE)
+                expect(v == CRUMPBIT_SUBTYPE_PITCH, msg);
         }
     }
     {
@@ -1265,11 +1396,14 @@ static void law_cb9(void)
 
         expect(g[4] == CRUMPBIT_PARAM_GRAIN_DENSITY &&
                g[5] == CRUMPBIT_PARAM_RATE && g[6] == CRUMPBIT_PARAM_SYNC &&
-               g[9] == CRUMPBIT_PARAM_DLY_PAN &&
+               g[9] == CRUMPBIT_PARAM_SUB_PAN &&
                g[10] == CRUMPBIT_PARAM_GRAIN_LENGTH &&
                g[14] == CRUMPBIT_PARAM_AUX &&
                g[15] == CRUMPBIT_PARAM_GRAIN_SPREAD, "CB9 grn lane pool");
     }
+    /* S091 P5 follow-up: `pit` lane 6 is `fin`, where `snp` was. */
+    expect(crumpBit_laneMap(CRUMPBIT_SUBTYPE_PITCH)[6] ==
+           CRUMPBIT_PARAM_PIT_FINE, "CB9 pit lane 6 = fin");
 }
 
 /* Shared helpers for CB10-CB15 -------------------------------------------- */
@@ -1283,7 +1417,7 @@ static void p3_init(CrumpBitRuntime *rt, uint8_t sub)
     memset(rt, 0, sizeof *rt);
     crumpBit_ops.init(rt, NULL);
     crumpBit_ops.write_param(rt, CRUMPBIT_PARAM_SUBTYPE, sub);
-    crumpBit_ops.write_param(rt, CRUMPBIT_PARAM_DLY_PAN, 63u);
+    crumpBit_ops.write_param(rt, CRUMPBIT_PARAM_SUB_PAN, 63u);
 }
 
 /* Write a row, Rate through the sub-type-aware clamp (as the manager). */
@@ -1329,6 +1463,34 @@ static double goertzel(const float *x, uint32_t n, double f)
     return s1 * s1 + s2 * s2 - c * s1 * s2;
 }
 
+/*
+ * Goertzel power summed over [lo, hi] in 2 Hz steps (the half-second
+ * window's bin), and the power-weighted centre frequency of that band (S091
+ * P5 follow-up). Why: `pit`'s two heads sit half a window apart, so their
+ * crossfade amplitude-modulates the shifted tone at the crossfade rate
+ * |1 - r| fs / W; depending on the heads' phase the carrier can partly
+ * cancel and a sideband becomes the peak. A band's energy, and its centre
+ * (AM sidebands are symmetric), measure the shift robustly where one
+ * frequency's power does not.
+ */
+static double band_power(const float *x, uint32_t n, double lo, double hi,
+                         double *centre)
+{
+    double sum = 0.0;
+    double moment = 0.0;
+    double f;
+
+    for (f = lo; f <= hi; f += 2.0) {
+        const double p = goertzel(x, n, f);
+
+        sum += p;
+        moment += p * f;
+    }
+    if (centre)
+        *centre = (sum > 0.0) ? moment / sum : 0.0;
+    return sum;
+}
+
 /* CB10: the mix stage, every sub-type ------------------------------------- */
 static void law_cb10(void)
 {
@@ -1357,12 +1519,12 @@ static void law_cb10(void)
                 static const uint8_t rows[] = {
                     CRUMPBIT_PARAM_BIT_OFF, CRUMPBIT_PARAM_BIT_INVERT,
                     CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_RATE,
-                    CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_DLY_PAN,
+                    CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_SUB_PAN,
                     CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_AUX,
                     CRUMPBIT_PARAM_GRAIN_ST2, CRUMPBIT_PARAM_GRAIN_ST3,
                     CRUMPBIT_PARAM_GRAIN_SPREAD,
                     CRUMPBIT_PARAM_GRAIN_DENSITY, CRUMPBIT_PARAM_GRAIN_LENGTH,
-                    CRUMPBIT_PARAM_GRAIN_WIDTH };
+                    CRUMPBIT_PARAM_GRAIN_WIDTH, CRUMPBIT_PARAM_PIT_FINE };
                 const uint8_t row = rows[rnd() % sizeof rows];
                 uint8_t v = (uint8_t)(rnd() & 0x7Fu);
 
@@ -1522,6 +1684,12 @@ static void law_cb11(void)
                     rt.u.tap.valid <= rt.u.tap.length &&
                     (rt.active_subtype == CRUMPBIT_SUBTYPE_PITCH ||
                      rt.u.tap.delay <= (float)(rt.u.tap.length - 2u))), msg);
+            /* S091 P5: the gliding `pit` window never leaves the loop. */
+            if (rt.active_subtype == CRUMPBIT_SUBTYPE_PITCH &&
+                rt.u.pit.length >= CRUMPBIT_LOOP_MIN)
+                expect(rt.u.pit.window <=
+                       (float)rt.u.pit.length - 2.0f * CRUMPBIT_PITCH_GUARD,
+                       msg);
             break;
         }
     }
@@ -1608,16 +1776,19 @@ static void law_cb12(void)
 /* CB13: `pit` ratio --------------------------------------------------------- */
 static void law_cb13(void)
 {
-    /* aux 95 -> +12.19 st, 31 -> -12.19 st, snapped by snc to +-12. */
-    static const uint8_t aux[] = { 95u, 31u, 63u };
-    static const double ratio[] = { 2.0, 0.5, 1.0 };
+    /*
+     * S091 P5 follow-up: one semitone per `aux` step (63 = 0): 75 is +12,
+     * 51 is -12, and the row's ends 99/27 are +-36 (ratios 8 and 1/8).
+     */
+    static const uint8_t aux[] = { 75u, 51u, 63u, 99u, 27u };
+    static const double ratio[] = { 2.0, 0.5, 1.0, 8.0, 0.125 };
     fx_share_t share = { arena_p3, 0u, CRUMPBIT_LOOP_MAX_BYTES };
     const uint32_t total = 44108u;
     float *out = calloc(total + 32u, sizeof(float));
     uint32_t k;
     char msg[96];
 
-    for (k = 0u; k < 3u; k++) {
+    for (k = 0u; k < 5u; k++) {
         CrumpBitRuntime rt;
         float l[32], r[32];
         uint32_t got = 0u;
@@ -1630,7 +1801,6 @@ static void law_cb13(void)
         p3_write(&rt, CRUMPBIT_PARAM_FEEDBACK, 0u, &share);
         p3_write(&rt, CRUMPBIT_PARAM_MIX, 127u, &share);
         p3_write(&rt, CRUMPBIT_PARAM_RATE, 80u, &share);
-        p3_write(&rt, CRUMPBIT_PARAM_SYNC, 1u, &share);
         p3_write(&rt, CRUMPBIT_PARAM_AUX, aux[k], &share);
         while (got < total) {
             uint32_t n;
@@ -1644,14 +1814,20 @@ static void law_cb13(void)
             memcpy(out + got, l, sizeof l);
             got += 32u;
         }
-        /* The last half second. */
-        e_in = goertzel(out + total / 2u, total / 2u, 441.0);
-        e_out = goertzel(out + total / 2u, total / 2u, 441.0 * ratio[k]);
+        /*
+         * The last half second, as band energies +-25 % around the input
+         * and the expected tone (S091 P5 follow-up: robust to the heads'
+         * crossfade sidebands, band_power()).
+         */
+        e_in = band_power(out + total / 2u, total / 2u, 331.0, 551.0, NULL);
+        e_out = band_power(out + total / 2u, total / 2u,
+                           0.75 * 441.0 * ratio[k], 1.25 * 441.0 * ratio[k],
+                           NULL);
         snprintf(msg, sizeof msg, "CB13 aux %u: E(%.1f) %.3g vs E(441) %.3g",
                  aux[k], 441.0 * ratio[k], e_out, e_in);
         if (ratio[k] == 1.0)
-            expect(e_in > 10.0 * goertzel(out + total / 2u, total / 2u,
-                                          882.0), msg);
+            expect(e_in > 10.0 * band_power(out + total / 2u, total / 2u,
+                                             661.0, 1103.0, NULL), msg);
         else
             expect(e_out > 10.0 * e_in, msg);
     }
@@ -1702,9 +1878,12 @@ static void law_cb14(void)
     rt.pan_raw = 63u;                   /* Position 0 */
     for (s = 0u; s < sizeof spreads; s++) {
         const int32_t slot_inc[3] = {
-            (int32_t)(crumpBit_semitoneRatio[24] * 4096.0f + 0.5f),
-            (int32_t)(crumpBit_semitoneRatio[29] * 4096.0f + 0.5f),
-            (int32_t)(crumpBit_semitoneRatio[33] * 4096.0f + 0.5f) };
+            (int32_t)(crumpBit_semitoneRatio[CRUMPBIT_SEMITONE_SPAN] *
+                      4096.0f + 0.5f),
+            (int32_t)(crumpBit_semitoneRatio[CRUMPBIT_SEMITONE_SPAN + 5u] *
+                      4096.0f + 0.5f),
+            (int32_t)(crumpBit_semitoneRatio[CRUMPBIT_SEMITONE_SPAN + 9u] *
+                      4096.0f + 0.5f) };
         uint32_t count[4] = { 0u, 0u, 0u, 0u };
         uint32_t hash = 0x12345u;
         const uint32_t trials = 30000u;
@@ -1889,7 +2068,9 @@ static void law_cb14(void)
     {
         fx_share_t share = { arena_p3, 0u, CRUMPBIT_LOOP_MAX_BYTES };
         const uint32_t len = CRUMPBIT_LOOP_MAX_BYTES / 2u;
-        const uint32_t d = (uint32_t)(crumpBit_grainTime[0] * per_tick);
+        /* S091 P6: /64 is row 4 (rows 0..3 lie below it). */
+        const uint32_t d = (uint32_t)(
+            crumpBit_grainTime[CRUMPBIT_GRAIN_LOW_ROWS] * per_tick);
         const uint32_t total = 3u * len + 4096u;
         float *rec = calloc(total + 64u, sizeof(float));
         cb_dry_t dry = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -1901,7 +2082,7 @@ static void law_cb14(void)
         p3_init(&rt, CRUMPBIT_SUBTYPE_GRAIN);
         p3_write(&rt, CRUMPBIT_PARAM_MIX, 127u, &share);
         p3_write(&rt, CRUMPBIT_PARAM_FEEDBACK, 0u, &share);
-        p3_write(&rt, CRUMPBIT_PARAM_RATE, 0u, &share);
+        p3_write(&rt, CRUMPBIT_PARAM_RATE, CRUMPBIT_GRAIN_LOW_ROWS, &share);
         while (n < total) {
             float l[32], r[32];
             uint32_t k;
@@ -2119,7 +2300,7 @@ static void law_cb14(void)
                                                 : 90u + rnd() % 38u), &share);
                 p3_write(&rt, CRUMPBIT_PARAM_GRAIN_LENGTH,
                          (uint8_t)(rnd() & 0x7Fu), &share);
-                p3_write(&rt, CRUMPBIT_PARAM_DLY_PAN,
+                p3_write(&rt, CRUMPBIT_PARAM_SUB_PAN,
                          (uint8_t)(rnd() & 0x7Fu), &share);
                 p3_write(&rt, CRUMPBIT_PARAM_AUX, (uint8_t)(rnd() & 0x7Fu),
                          &share);
@@ -2213,7 +2394,7 @@ static void law_cb15(void)
         p3_write(&rt, CRUMPBIT_PARAM_SYNC, (uint8_t)((pass >> 2) & 1u),
                  &share);
         p3_write(&rt, CRUMPBIT_PARAM_TONE, (pass & 8u) ? 127u : 0u, &share);
-        p3_write(&rt, CRUMPBIT_PARAM_DLY_PAN, (pass & 16u) ? 127u : 0u,
+        p3_write(&rt, CRUMPBIT_PARAM_SUB_PAN, (pass & 16u) ? 127u : 0u,
                  &share);
         for (block = 0u; block < 6900u; block++) {
             for (n = 0u; n < 32u; n++) {
@@ -2436,8 +2617,9 @@ static void law_cb18(void)
     static const uint8_t fbks[4] = { 0u, 64u, 100u, 127u };
     fx_share_t share = { arena_p3, 0u, CRUMPBIT_LOOP_MAX_BYTES };
     const float per_tick = CRUMPBIT_SAMPLES_PER_TICK / 120.0f;
-    /* d: the echo period at rte 0 (1/64 at 120 BPM), whole frames. */
-    const uint32_t d = (uint32_t)(crumpBit_grainTime[0] * per_tick);
+    /* d: the echo period at /64 (row 4 since S091 P6) at 120 BPM. */
+    const uint32_t d = (uint32_t)(
+        crumpBit_grainTime[CRUMPBIT_GRAIN_LOW_ROWS] * per_tick);
     uint32_t t;
     char msg[160];
 
@@ -2459,7 +2641,7 @@ static void law_cb18(void)
         memset(arena_p3, 0, sizeof arena_p3);
         p3_init(&rt, CRUMPBIT_SUBTYPE_GRAIN);
         p3_write(&rt, CRUMPBIT_PARAM_MIX, 127u, &share);
-        p3_write(&rt, CRUMPBIT_PARAM_RATE, 0u, &share);
+        p3_write(&rt, CRUMPBIT_PARAM_RATE, CRUMPBIT_GRAIN_LOW_ROWS, &share);
         p3_write(&rt, CRUMPBIT_PARAM_FEEDBACK, fbks[t], &share);
         p3_write(&rt, CRUMPBIT_PARAM_GRAIN_LENGTH, 63u, &share);
         p3_write(&rt, CRUMPBIT_PARAM_GRAIN_DENSITY, 100u, &share);
@@ -2732,6 +2914,384 @@ static void law_cb19(void)
     }
 }
 
+/* CB20 (S091 P5 follow-up): the pitch rows, +-36 st -------------------- */
+static void law_cb20(void)
+{
+    CrumpBitRuntime rt;
+    const float per_tick = CRUMPBIT_SAMPLES_PER_TICK / 120.0f;
+    uint32_t v;
+    int32_t st;
+    uint32_t bad = 0u;
+    char msg[128];
+
+    /* (a) one semitone per step, clamped at +-36. */
+    for (v = 0u; v < 128u; v++) {
+        int32_t want = (int32_t)v - 63;
+
+        want = (want > 36) ? 36 : ((want < -36) ? -36 : want);
+        bad += (crumpBit_rowSemitones((uint8_t)v) != want);
+    }
+    snprintf(msg, sizeof msg, "CB20 row semitones: %u rows wrong", bad);
+    expect(bad == 0u, msg);
+    /* (b) the ratio at every whole semitone is 2^(s/12). */
+    bad = 0u;
+    for (st = -36; st <= 36; st++) {
+        const double want = pow(2.0, (double)st / 12.0);
+
+        bad += (fabs(crumpBit_ratioOf((float)st) - want) > 2e-6 * want);
+    }
+    snprintf(msg, sizeof msg, "CB20 ratio per semitone: %u wrong", bad);
+    expect(bad == 0u, msg);
+    /*
+     * (c) the `grn` candidate plays exactly the row's semitone (spread 0,
+     * forward and reversed), its Q3.12 step held at 32,767 at +36.
+     */
+    memset(&rt, 0, sizeof rt);
+    crumpBit_ops.init(&rt, NULL);
+    rt.grain_spread = 0u;
+    rt.pan_raw = 63u;
+    bad = 0u;
+    for (v = CRUMPBIT_PITCH_ROW_MIN; v <= CRUMPBIT_PITCH_ROW_MAX; v++) {
+        int32_t want = (int32_t)(pow(2.0, ((double)v - 63.0) / 12.0) *
+                                 4096.0 + 0.5);
+        uint32_t dir;
+
+        want = (want > 32767) ? 32767 : want;
+        for (dir = 0u; dir < 2u; dir++) {
+            crumpbit_grain_t c;
+            uint32_t hash = 0x2468u + v;
+
+            rt.aux_raw = (uint8_t)v;
+            rt.grain_length = dir ? 0u : 127u;    /* reversed / forward */
+            crumpBit_grainPick(&hash, &rt, 60000u, 30000u, 60000u, 0u,
+                               per_tick, CRUMPBIT_GRAIN_STOPS, &c);
+            bad += (c.inc != (int16_t)(dir ? -want : want));
+        }
+    }
+    snprintf(msg, sizeof msg, "CB20 grn steps per row: %u wrong", bad);
+    expect(bad == 0u, msg);
+}
+
+/* CB21 (S091 P5 follow-up): the `pit` window glide ------------------------- */
+static void law_cb21(void)
+{
+    fx_share_t share = { arena_p3, 0u, CRUMPBIT_LOOP_MAX_BYTES };
+    CrumpBitRuntime rt;
+    float l[32], r[32];
+    float y1 = 0.0f;
+    float y2 = 0.0f;
+    float last;
+    double step_worst = 0.0;
+    double steady_worst = 0.0;
+    uint32_t mono_bad = 0u;
+    uint32_t block;
+    uint32_t t = 0u;
+    uint32_t n;
+    uint8_t rte = 40u;
+    char msg[160];
+
+    memset(l, 0, sizeof l);
+    memset(r, 0, sizeof r);
+    /* (a) the first block starts on the target. */
+    memset(arena_p3, 0, sizeof arena_p3);
+    p3_init(&rt, CRUMPBIT_SUBTYPE_PITCH);
+    p3_write(&rt, CRUMPBIT_PARAM_RATE, 60u, &share);
+    p3_block(&rt, &share, l, r, 32u);
+    expect(rt.u.pit.window == crumpBit_pitchWindow[60],
+           "CB21 first pit block on the window target");
+    /* (b) a change glides monotonically and settles within 0.1 %. */
+    p3_write(&rt, CRUMPBIT_PARAM_RATE, 90u, &share);
+    last = rt.u.pit.window;
+    for (block = 0u; block < 400u; block++) {
+        p3_block(&rt, &share, l, r, 32u);
+        mono_bad += (rt.u.pit.window < last ||
+                     rt.u.pit.window > crumpBit_pitchWindow[90]);
+        last = rt.u.pit.window;
+    }
+    snprintf(msg, sizeof msg,
+             "CB21 glide: %u non-monotonic blocks, %.2f of %.2f", mono_bad,
+             (double)last, (double)crumpBit_pitchWindow[90]);
+    expect(mono_bad == 0u &&
+           fabsf(last - crumpBit_pitchWindow[90]) <
+           1e-3f * crumpBit_pitchWindow[90], msg);
+    /*
+     * (c) no click at a change: a 220 Hz sine at +7 st, `win` stepping one
+     * value every 20 blocks (40 -> 90 -> 40); the largest second difference
+     * of the output in the two blocks after a step, against steady blocks.
+     */
+    memset(arena_p3, 0, sizeof arena_p3);
+    p3_init(&rt, CRUMPBIT_SUBTYPE_PITCH);
+    p3_write(&rt, CRUMPBIT_PARAM_MIX, 127u, &share);
+    p3_write(&rt, CRUMPBIT_PARAM_FEEDBACK, 0u, &share);
+    p3_write(&rt, CRUMPBIT_PARAM_AUX, 70u, &share);
+    p3_write(&rt, CRUMPBIT_PARAM_RATE, rte, &share);
+    for (block = 0u; block < 4000u; block++) {
+        if (block >= 1000u && (block % 20u) == 0u) {
+            rte = (uint8_t)((((block / 20u) / 50u) & 1u) ? rte - 1u
+                                                         : rte + 1u);
+            p3_write(&rt, CRUMPBIT_PARAM_RATE, rte, &share);
+        }
+        for (n = 0u; n < 32u; n++, t++)
+            l[n] = r[n] = 0.5f * sinf(2.0f * (float)M_PI * 220.0f *
+                                      (float)t / 44108.0f);
+        p3_block(&rt, &share, l, r, 32u);
+        for (n = 0u; n < 32u; n++) {
+            const double d2 = fabs((double)l[n] - 2.0 * y1 + y2);
+
+            /*
+             * Equal windows: the two blocks after a step against two steady
+             * blocks mid-way between steps (the max over a longer steady
+             * window would favour the steady side).
+             */
+            if (block >= 1000u && (block % 20u) < 2u)
+                step_worst = (d2 > step_worst) ? d2 : step_worst;
+            else if (block >= 1000u && ((block % 20u) == 10u ||
+                                        (block % 20u) == 11u))
+                steady_worst = (d2 > steady_worst) ? d2 : steady_worst;
+            y2 = y1;
+            y1 = l[n];
+        }
+    }
+    snprintf(msg, sizeof msg,
+             "CB21 win step: second difference %.4f at a step, %.4f steady",
+             step_worst, steady_worst);
+    /* 5x: the glide measures ~2-3x, no glide ~19x (break 19). */
+    expect(step_worst < 5.0 * steady_worst, msg);
+    printf("%s\n", msg);
+}
+
+/* CB22 (S091 P5 follow-up): `pit`'s fine pitch, the voice `fin` law ----- */
+static void law_cb22(void)
+{
+    /* 63 first: the reference the other two are measured against. */
+    static const uint8_t fins[3] = { 63u, 127u, 0u };
+    fx_share_t share = { arena_p3, 0u, CRUMPBIT_LOOP_MAX_BYTES };
+    const uint32_t total = 44108u;
+    float *out = calloc(total + 32u, sizeof(float));
+    uint32_t k;
+    char msg[160];
+    /* centre63: the band centre at `fin` 63 (the reference). */
+    double centre63 = 0.0;
+
+    for (k = 0u; k < 3u; k++) {
+        CrumpBitRuntime rt;
+        /* want: +12 st (aux 75) times the voice detune of this `fin`. */
+        const double want = 882.0 * (double)midiPitch_detune(fins[k]);
+        uint32_t got = 0u;
+        uint32_t t = 0u;
+        double centre = 0.0;
+
+        memset(arena_p3, 0, sizeof arena_p3);
+        p3_init(&rt, CRUMPBIT_SUBTYPE_PITCH);
+        p3_write(&rt, CRUMPBIT_PARAM_FEEDBACK, 0u, &share);
+        p3_write(&rt, CRUMPBIT_PARAM_MIX, 127u, &share);
+        p3_write(&rt, CRUMPBIT_PARAM_RATE, 80u, &share);
+        p3_write(&rt, CRUMPBIT_PARAM_AUX, 75u, &share);
+        p3_write(&rt, CRUMPBIT_PARAM_PIT_FINE, fins[k], &share);
+        while (got < total) {
+            float l[32], r[32];
+            uint32_t n;
+
+            for (n = 0u; n < 32u; n++, t++) {
+                l[n] = 0.8f * sinf(2.0f * (float)M_PI * 441.0f *
+                                   (float)t / 44108.0f);
+                r[n] = l[n];
+            }
+            p3_block(&rt, &share, l, r, 32u);
+            memcpy(out + got, l, sizeof l);
+            got += 32u;
+        }
+        /*
+         * The band centre around the shifted tone (band_power()). The
+         * crossfade sidebands are not quite symmetric, which moves every
+         * centre by the same few hertz, so the law is relative: centre /
+         * centre(63) = detune(fin) / detune(63) within 0.2 % (3.5 cents;
+         * the fine's ends are 3 % away), and absolute within 1 %.
+         */
+        (void)band_power(out + total / 2u, total / 2u, want - 80.0,
+                         want + 80.0, &centre);
+        if (fins[k] == 63u)
+            centre63 = centre;
+        snprintf(msg, sizeof msg,
+                 "CB22 fin %u: centre %.2f Hz (x%.4f of fin 63; want %.2f Hz,"
+                 " x%.4f)", fins[k], centre,
+                 centre63 > 0.0 ? centre / centre63 : 0.0, want,
+                 (double)(midiPitch_detune(fins[k]) / midiPitch_detune(63u)));
+        expect(centre63 > 0.0 &&
+               fabs(centre / centre63 -
+                    (double)(midiPitch_detune(fins[k]) /
+                             midiPitch_detune(63u))) < 0.002 &&
+               fabs(centre / want - 1.0) < 0.01, msg);
+        printf("%s\n", msg);
+    }
+    free(out);
+}
+
+/* CB23 (S091 P6): `grn` below /64, and the delay tap's fade -------------- */
+static void law_cb23(void)
+{
+    static const uint16_t bpms[4] = { 1u, 30u, 120u, 300u };
+    fx_share_t share = { arena_p3, 0u, CRUMPBIT_LOOP_MAX_BYTES };
+    const uint32_t len = CRUMPBIT_LOOP_MAX_BYTES / 2u;
+    CrumpBitRuntime rt;
+    uint32_t t;
+    char msg[160];
+
+    /* (a) Rows 0..3: t_min (t_/64 / t_min)^(k/4) in whole frames; row 4 /64. */
+    for (t = 0u; t < 4u; t++) {
+        const double per_tick = (double)CRUMPBIT_SAMPLES_PER_TICK /
+                                (double)bpms[t];
+        uint32_t prev = 0u;
+        uint32_t row;
+
+        cb_bpm = bpms[t];
+        for (row = 0u; row <= CRUMPBIT_GRAIN_LOW_ROWS; row++) {
+            float l[32] = { 0.0f };
+            float r[32] = { 0.0f };
+            double want = (row < CRUMPBIT_GRAIN_LOW_ROWS)
+                ? 2.0 * pow(6.0 * per_tick / 2.0, (double)row / 4.0)
+                : 6.0 * per_tick;
+            uint32_t got;
+
+            memset(arena_p3, 0, sizeof arena_p3);
+            p3_init(&rt, CRUMPBIT_SUBTYPE_GRAIN);
+            /*
+             * At 1 BPM /64 is longer than the line: the knob stops at row 3
+             * (rows 0..3 always fit), so row 4 is not reachable.
+             */
+            if (want > (double)(len - 2u)) {
+                snprintf(msg, sizeof msg, "CB23 bpm %u: knob stops at row 3",
+                         bpms[t]);
+                expect(row == CRUMPBIT_GRAIN_LOW_ROWS &&
+                       crumpBit_ops.effective_max(&rt, CRUMPBIT_PARAM_RATE,
+                                                  &share) ==
+                           CRUMPBIT_GRAIN_LOW_ROWS - 1u, msg);
+                continue;
+            }
+            p3_write(&rt, CRUMPBIT_PARAM_RATE, (uint8_t)row, &share);
+            p3_block(&rt, &share, l, r, 32u);
+            got = rt.u.grn.tap_d;
+            snprintf(msg, sizeof msg, "CB23 bpm %u row %u: D %u want %.2f",
+                     bpms[t], row, got, want);
+            expect(fabs((double)got - floor(want)) <= 1.0, msg);
+            expect(row == 0u ? got == 2u : got > prev, msg);
+            prev = got;
+        }
+    }
+
+    /* (b) The fade against a reference model, over the copy identity. */
+    {
+        const float per_tick = CRUMPBIT_SAMPLES_PER_TICK / 120.0f;
+        /* q: the bottom rows' step ratio at 120 BPM ((a) checks the law). */
+        const float q = sqrtf(sqrtf(
+            crumpBit_grainTime[CRUMPBIT_GRAIN_LOW_ROWS] * per_tick * 0.5f));
+        /* The rows played: below /64 and up to /2 (all well inside N). */
+        const uint32_t top = crumpBit_grainStopCc[13];
+        const uint32_t warm = 2u * len;
+        const uint32_t total = warm + 8000u * 32u;
+        float *rec = calloc(total + 64u, sizeof(float));
+        cb_dry_t dry = { 0.0f, 0.0f, 0.0f, 0.0f };
+        uint32_t row = 40u;
+        uint32_t ref_d = 0u;
+        uint32_t ref_on = 0u;
+        uint32_t n = 0u;
+        uint32_t bad = 0u;
+        uint32_t state_bad = 0u;
+        uint32_t changes = 0u;
+        uint32_t fades = 0u;
+        float worst = 0.0f;
+
+        cb_bpm = 120u;
+        memset(arena_p3, 0, sizeof arena_p3);
+        p3_init(&rt, CRUMPBIT_SUBTYPE_GRAIN);
+        p3_write(&rt, CRUMPBIT_PARAM_MIX, 127u, &share);
+        p3_write(&rt, CRUMPBIT_PARAM_FEEDBACK, 0u, &share);
+        p3_write(&rt, CRUMPBIT_PARAM_RATE, (uint8_t)row, &share);
+        while (n < total) {
+            float l[32], r[32];
+            /* d_to: the D the row asks for; rec_ok: that D is recorded. */
+            float dt;
+            uint32_t d_to;
+            uint32_t rec_ok;
+            uint32_t on;
+            float g;
+            float inc;
+            uint32_t k;
+
+            /* After the warm-up, a change on about one block in 4. */
+            if (n >= warm && (rnd() % 4u) == 0u) {
+                row = (rnd() & 1u) ? rnd() % (top + 1u)
+                                   : rnd() % CRUMPBIT_GRAIN_LOW_ROWS;
+                p3_write(&rt, CRUMPBIT_PARAM_RATE, (uint8_t)row, &share);
+                changes++;
+            }
+            dt = (row < CRUMPBIT_GRAIN_LOW_ROWS)
+                ? 2.0f * ((row & 1u) ? q : 1.0f) * ((row & 2u) ? q * q : 1.0f)
+                : crumpBit_grainTime[row] * per_tick;
+            d_to = (uint32_t)dt;
+            /* The rule: a silent tap takes the new D; a sounding one fades. */
+            ref_d = ref_on ? ref_d : d_to;
+            rec_ok = (((n < len) ? n : len) >= ref_d + 32u) ? 1u : 0u;
+            on = (ref_d == d_to && rec_ok) ? 1u : 0u;
+            g = (ref_on && rec_ok) ? 1.0f : 0.0f;
+            inc = ((float)on - g) * (1.0f / 32.0f);
+            fades += (n >= warm && on != ref_on);
+            for (k = 0u; k < 32u; k++) {
+                l[k] = rndf(-0.9f, 0.9f);
+                r[k] = rndf(-0.9f, 0.9f);
+                rec[n + k] = cb_recorded(&dry, l[k], r[k]);
+            }
+            p3_block(&rt, &share, l, r, 32u);
+            state_bad += (rt.u.grn.tap_d != ref_d || rt.u.grn.tap_on != on);
+            for (k = 0u; k < 32u; k++, n++) {
+                if (n >= warm) {
+                    const float want = rec[n - 2u] + g * rec[n - 2u - ref_d];
+                    const float err = fabsf(l[k] - want);
+
+                    worst = (err > worst) ? err : worst;
+                    bad += (err > 2e-6f || fabsf(r[k] - want) > 2e-6f);
+                }
+                g += inc;
+            }
+            ref_on = on;
+        }
+        snprintf(msg, sizeof msg,
+                 "CB23 fade: %u frames off (worst %.3g), %u state "
+                 "mismatches, over %u changes, %u ramps", bad, (double)worst,
+                 state_bad, changes, fades);
+        expect(bad == 0u && state_bad == 0u && fades > 1000u, msg);
+        printf("%s\n", msg);
+        free(rec);
+    }
+
+    /* (c) A reseat silences the tap and keeps D inside the new line. */
+    {
+        fx_share_t small = { arena_p3, 0u, 40000u };
+        float l[32], r[32];
+        uint32_t b;
+
+        cb_bpm = 120u;
+        memset(arena_p3, 0, sizeof arena_p3);
+        p3_init(&rt, CRUMPBIT_SUBTYPE_GRAIN);
+        p3_write(&rt, CRUMPBIT_PARAM_RATE, crumpBit_grainStopCc[13], &share);
+        for (b = 0u; b < 4000u; b++) {
+            uint32_t k;
+
+            for (k = 0u; k < 32u; k++)
+                l[k] = r[k] = rndf(-0.5f, 0.5f);
+            p3_block(&rt, (b < 3000u) ? &share : &small, l, r, 32u);
+            if (b == 2999u)
+                expect(rt.u.grn.tap_on == 1u && rt.u.grn.tap_d > 20000u,
+                       "CB23 reseat: the tap sounds at /2 before");
+            if (b >= 3000u) {
+                snprintf(msg, sizeof msg, "CB23 reseat block %u: D %u",
+                         b, rt.u.grn.tap_d);
+                expect(rt.u.grn.tap_d <= 20000u - 2u, msg);
+            }
+        }
+    }
+}
+
 int main(void)
 {
     law_cb1();
@@ -2753,6 +3313,10 @@ int main(void)
     law_cb17();
     law_cb18();
     law_cb19();
+    law_cb20();
+    law_cb21();
+    law_cb22();
+    law_cb23();
     printf("crumpbit failures: %d\n", failures);
     return failures ? 1 : 0;
 }

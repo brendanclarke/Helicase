@@ -17,11 +17,15 @@
 /*
  * CrumpBit control tables (S091 P2; generated, CrumpBitTables.c).
  *
- * What: three 128-entry float tables indexed by a 0..127 row value.
- * - crumpBit_rateTable[rte]: delay length in samples, 882 (20 ms) at 0 to
- *   126,654 (2.871 s: the arena less one 32 B granule and the 2-sample
- *   guard, S091 P3 N1) at 127, exponential and
- *   strictly increasing. Higher `rte` = longer delay.
+ * What: tables indexed by a row value (0..127 unless noted).
+ * - crumpBit_delayTicks[rte - 4] (S091 P6; it replaced S091 P2's
+ *   free-running crumpBit_rateTable): the core of `dly`'s delay-time curve,
+ *   rows 4..123, in 96-PPQ ticks (samples = ticks x
+ *   CRUMPBIT_SAMPLES_PER_TICK / BPM): StepScale's 14 stops /64 .. /2 (6..192
+ *   ticks) exact at their rows, equal ratios between neighbouring stops.
+ *   Rows 0..3 and 124..127 bridge to the shortest and longest delays the
+ *   engine holds; they depend on tempo and are worked out per block
+ *   (crumpBit_delaySamples()). crumpBit_delayStopCc[k]: the row of stop k.
  * - crumpBit_toneK[ton]: the one-pole coefficient of the feedback-return
  *   tilt. 0..62 low-pass (150 Hz .. 18 kHz), 63 exactly 1.0 (flat),
  *   64..127 high-pass (20 Hz .. 2 kHz).
@@ -34,7 +38,8 @@
  *   higher rte is a longer comb and a lower note (plan A1).
  * - crumpBit_pitchWindow[rte]: `pit` window in samples, 441 .. 8,822
  *   (10 .. 200 ms), exponential.
- * - crumpBit_semitoneRatio[s]: 2^((s - 24)/12), s = 0..48 (-24..+24 st).
+ * - crumpBit_semitoneRatio[s]: 2^((s - 36)/12), s = 0..72 (-36..+36 st;
+ *   S091 P5 follow-up: +-24 before, so the pitch rows' whole range plays).
  * - crumpBit_grainFraction[m]: S091 P4: `grn` grain Length / N (the record
  *   line), 2^(-8 (1 - m/64)) = 1/256 .. 1 for m = |len - 63| = 0..64; the
  *   DSP holds a grain at 220 samples (~5 ms) or more (plan Q1).
@@ -43,9 +48,13 @@
  *   RT60 of 0.1 .. 10 s; a line of d samples has gain 2^(entry * d).
  * S091 P4 `grn` tables:
  * - crumpBit_grainTime[rte]: the delay time in 96-PPQ ticks (samples = ticks
- *   x CRUMPBIT_SAMPLES_PER_TICK / BPM), 6 (1/64) .. 384 (one bar): a
- *   continuous log curve whose 16 rhythmic stops sit exactly on their tick
- *   counts (plan Q8, Q10).
+ *   x CRUMPBIT_SAMPLES_PER_TICK / BPM), rows 4..127: 6 (1/64) .. 384 (one
+ *   bar), a continuous log curve whose 16 rhythmic stops sit exactly on
+ *   their tick counts (plan Q8, Q10). S091 P6: rows 0..3
+ *   (CRUMPBIT_GRAIN_LOW_ROWS) hold 0.0: they lie below /64, down to the
+ *   2-sample minimum, and crumpBit_runGrain() computes them from the tempo
+ *   (the `dly` bottom law); 0.0 keeps them inside the knob limit search,
+ *   which they always pass (CrumpBitEffect.c asserts it).
  * - crumpBit_grainStopCc[k]: the `rte` position of stop k (k = 0 /64 ..
  *   15 1br); Position and Density pick stops by k, the page labels them.
  * - crumpBit_grainDensity[d]: negative Density d = 1..63 -> the mean
@@ -59,8 +68,8 @@
  *   per block.
  * Why tables: CrumpBit's per-block work runs inside the render
  * (mixer_calcNextSampleBlock()); a lookup replaces an expf, a fastTan
- * division and a valueShaper division per block, and the Rate table makes the
- * share clamp and the DSP use bit-identical lengths.
+ * division and a valueShaper division per block, and one curve makes the
+ * share clamp, the label and the DSP use bit-identical lengths.
  * Regenerate with `python3 tools/plots/gen_crumpbit_tables.py` from the
  * repository root; `make -C tools/dsp_test crumpbit_tables` checks that the
  * committed file matches the generator byte for byte.
@@ -68,12 +77,17 @@
  * Affiliates: tools/plots/gen_crumpbit_tables.py.
  */
 #define CRUMPBIT_TABLE_SIZE      128u
-#define CRUMPBIT_SEMITONE_SPAN   24u   /* semitoneRatio covers +-24 */
+#define CRUMPBIT_DELAY_LOW_ROWS  4u    /* dly rows below /64 (S091 P6) */
+#define CRUMPBIT_DELAY_CORE_ROWS 120u  /* dly rows /64 .. /2 (delayTicks) */
+#define CRUMPBIT_DELAY_STOPS     14u   /* delayStopCc: /64 .. /2 */
+#define CRUMPBIT_SEMITONE_SPAN   36u   /* semitoneRatio covers +-36 */
 #define CRUMPBIT_GRAIN_STEPS     64u   /* grainFraction covers 0..64 */
 #define CRUMPBIT_GRAIN_STOPS     16u   /* grainStopCc: /64 .. 1br (P4) */
+#define CRUMPBIT_GRAIN_LOW_ROWS  4u    /* grn rows below /64 (S091 P6) */
 #define CRUMPBIT_DENSITY_STEPS   63u   /* grainDensity covers 1..63 (P4) */
 
-extern const float crumpBit_rateTable[CRUMPBIT_TABLE_SIZE];
+extern const float crumpBit_delayTicks[CRUMPBIT_DELAY_CORE_ROWS];
+extern const uint8_t crumpBit_delayStopCc[CRUMPBIT_DELAY_STOPS];
 extern const float crumpBit_toneK[CRUMPBIT_TABLE_SIZE];
 extern const float crumpBit_filterG[CRUMPBIT_TABLE_SIZE];
 extern const float crumpBit_combTable[CRUMPBIT_TABLE_SIZE];

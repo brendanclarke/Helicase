@@ -45,8 +45,10 @@
  * untouched (cannot happen with the guaranteed minimum share).
  * CRUMPBIT_LOOP_GUARD samples kept free behind the write position for the
  * interpolated read (i0 and i0 + 1); the longest delay is length - guard.
- * (S091 P2 removed CRUMPBIT_RATE_LN_SPAN, the expf curve, now
- * crumpBit_rateTable, and CRUMPBIT_FEEDBACK_MAX 0.99, now the curve below.)
+ * (S091 P2 removed CRUMPBIT_RATE_LN_SPAN, the expf curve, then
+ * crumpBit_rateTable, replaced in S091 P6 by the `dly` delay-time curve,
+ * crumpBit_delayCurve(); and CRUMPBIT_FEEDBACK_MAX 0.99, now the curve
+ * below.)
  */
 #define CRUMPBIT_SAMPLE_RATE_HZ    44108u
 #define CRUMPBIT_LSB               (1.0f / 128.0f)
@@ -55,7 +57,6 @@
 #define CRUMPBIT_AC_R              0.9985755f
 #define CRUMPBIT_LOOP_MIN          4u
 #define CRUMPBIT_LOOP_GUARD        2u
-#define CRUMPBIT_DIVISION_NONE     0xFFu
 
 /*
  * S091 P2 constants (S091_P2_CrumpBit_Expanded_Plan.md §5).
@@ -110,6 +111,13 @@
  * fast, so retuning and an Effects LFO on `rte` (flanging) follow quickly.
  * CRUMPBIT_PITCH_GUARD the shortest head delay of `pit` (2 samples, as the
  * tape's interpolation guard).
+ * CRUMPBIT_PITCH_WIN_GLIDE (S091 P5 follow-up) the per-block step of `pit`'s
+ * window glide, 1 - exp(-32 / (0.020 x 44,108)): a 20 ms one-pole per
+ * block, linear inside the block. A `win` (`rte`) step moves the window
+ * about 2.4 % (up to ~200 samples); unglided both heads jumped that far in
+ * one block (a click); glided they slide (a brief, tape-like bend).
+ * Measured: the largest output step at a `win` change fell from 19x to
+ * 1.6x the steady crossfade texture.
  * `grn` (S091 P4, S091_P4_GRN_TWEAKS.md Part A):
  * - CRUMPBIT_GRAIN_LINE_MIN the shortest record line `grn` plays in (below
  *   it the block passes through); also the smallest share the half-line
@@ -141,6 +149,7 @@
 #define CRUMPBIT_NOINLINE             __attribute__((noinline))
 #define CRUMPBIT_COMB_GLIDE_K         4.5245e-3f
 #define CRUMPBIT_PITCH_GUARD          2.0f
+#define CRUMPBIT_PITCH_WIN_GLIDE      0.03563f
 #define CRUMPBIT_GRAIN_LINE_MIN       512u
 #define CRUMPBIT_GRAIN_MIN_LEN        220.0f
 #define CRUMPBIT_GRAIN_FADE           128u
@@ -193,23 +202,38 @@ _Static_assert(__builtin_offsetof(CrumpBitTapState, valid) ==
                __builtin_offsetof(CrumpBitTapState, write_pos) ==
                __builtin_offsetof(CrumpBitPitchState, write_pos),
                "dly/cmb and pit must share the length/write_pos/valid prefix");
-/*
- * The Sync search (R1) halves a power-of-two span: STEP_SCALE_COUNT steps
- * starting at STEP_SCALE_COUNT/2 visit every position only if the count is a
- * power of two. A future table of another size must change the search, not
- * silently skip positions.
- */
-_Static_assert(STEP_SCALE_COUNT == 128u,
-               "crumpBit_divisionFor() binary search assumes 128 positions");
 _Static_assert(CRUMPBIT_LOOP_MAX_BYTES >=
                (uint32_t)CRUMPBIT_DELAY_CURVE_MAX + CRUMPBIT_LOOP_GUARD,
-               "the longest loop must hold the top of the Rate curve plus "
-               "the interpolation guard");
+               "the longest loop must hold the top of the delay-time curve "
+               "plus the interpolation guard");
 _Static_assert((CRUMPBIT_LOOP_MAX_BYTES % FXBUF_ALIGN_BYTES) == 0u,
                "the longest loop is a whole number of share granules");
-/* The Rate limit search halves the 128-entry table like the Sync search. */
+/*
+ * S091 P5 follow-up: the pitch rows stop at 63 +- the semitone table's span,
+ * so the row ends, the label clamp and the DSP clamp are one range.
+ */
+_Static_assert(CRUMPBIT_PITCH_ROW_MIN == 63u - CRUMPBIT_SEMITONE_SPAN &&
+               CRUMPBIT_PITCH_ROW_MAX == 63u + CRUMPBIT_SEMITONE_SPAN,
+               "pitch rows must span exactly the semitone table");
+/* The Rate limit searches halve a 128-row span (tables and the curve). */
 _Static_assert(CRUMPBIT_TABLE_SIZE == 128u,
-               "crumpBit_rateLimit() binary search assumes 128 entries");
+               "crumpBit_tableLimit()/crumpBit_delayLimit() assume 128 rows");
+/* S091 P6: the `dly` curve's three segments cover the 128 rows. */
+/*
+ * S091 P6: `grn` rows 0..3 (below /64) hold 0.0 in crumpBit_grainTime, so
+ * the knob-limit search (crumpBit_tableLimit()) always passes them. That is
+ * exact because they always fit: the longest, row 3, is 2 (3 x samples per
+ * tick)^(3/4) samples, at most 9,754 (1 BPM), and the smallest share
+ * (every voice unit claimed) gives a line of 36,830 usable frames. The
+ * low-row law also needs the same row count as `dly`'s.
+ */
+_Static_assert(CRUMPBIT_LOOP_MIN_SHARE_BYTES / 2u - CRUMPBIT_LOOP_GUARD >=
+               9755u, "grn rows below /64 fit the smallest share's line");
+_Static_assert(CRUMPBIT_GRAIN_LOW_ROWS == CRUMPBIT_DELAY_LOW_ROWS,
+               "grn and dly share the bottom-row law (4 rows)");
+_Static_assert(CRUMPBIT_DELAY_LOW_ROWS + CRUMPBIT_DELAY_CORE_ROWS + 4u ==
+               CRUMPBIT_TABLE_SIZE,
+               "dly rows: 4 below /64, the 120-row core, 4 above /2");
 
 /*
  * Simulated bipolar 8-bit ADC (offset binary).
@@ -281,13 +305,107 @@ static inline float crumpBit_codeToFloat(int32_t d)
 #endif
 }
 
-float crumpBit_rateSamples(uint8_t rate)
-{
-    /* r: the table index; a row value above 127 reads the top entry. */
-    const uint8_t r = (rate > 127u) ? 127u : rate;
+/*
+ * The `dly` delay-time curve at one tempo (S091 P6, user; it replaced
+ * S091 P2's free-running Rate curve and the Sync snap to StepScale).
+ *
+ * What: one 128-row curve, every row a distinct delay time:
+ * - rows 0..3: geometric from the shortest delay the engine plays,
+ *   CRUMPBIT_DELAY_MIN (the 2-sample interpolation guard, plan Q7), towards
+ *   /64: t(k) = t_min q_lo^k, q_lo = (t_/64 / t_min)^(1/4);
+ * - rows 4..123: crumpBit_delayTicks x samples per tick: StepScale's 14
+ *   stops /64 .. /2 exact at their rows (crumpBit_delayStopCc), equal ratios
+ *   between them (tempo-synced, so a stop stays on the beat through tempo
+ *   changes);
+ * - rows 124..127: geometric from /2 towards the longest delay the whole
+ *   arena holds, CRUMPBIT_DELAY_CURVE_MAX: t(k) = t_/2 q_hi^(k - 123),
+ *   q_hi = (t_max / t_/2)^(1/4); row 127 is t_max itself (exact).
+ * Every row is clamped to t_max: below 41.8 BPM /2 itself exceeds it, and
+ * the rows above it play t_max (crumpBit_delayLimit() stops the knob at the
+ * first of them). The ^(1/4) is two square roots.
+ * Why: the two-curve form (free time, or a snap of it to the nearest
+ * StepScale division) had dead travel at both ends and jumps of two CC
+ * positions in between (S091_P6_PARAM_CLEANUP.md §3.5.1).
+ * Inputs: bpm (0 = 1). Output: *c (the per-block constants of the curve).
+ * Callers: crumpBit_delaySamples(), crumpBit_delayLimit(),
+ * crumpBit_runDelay(). Affiliates: crumpBit_delayTicks, host law CB1.
+ */
+#define CRUMPBIT_DELAY_MIN   ((float)CRUMPBIT_LOOP_GUARD)
+#define CRUMPBIT_DELAY_HIGH0 (CRUMPBIT_DELAY_LOW_ROWS + \
+                              CRUMPBIT_DELAY_CORE_ROWS - 1u)
 
-    /* S091 P2: a lookup replaces the S074 expf (one per block). */
-    return crumpBit_rateTable[r];
+typedef struct {
+    float per_tick;     /* samples per 96-PPQ tick at this tempo */
+    float t2;           /* /2 in samples, held at t_max */
+    float q_lo;         /* the bottom rows' step ratio */
+    float q_hi;         /* the top rows' step ratio (1 when /2 >= t_max) */
+} crumpbit_delay_curve_t;
+
+static inline void crumpBit_delayCurve(crumpbit_delay_curve_t *c,
+                                       uint16_t bpm)
+{
+    /* t64: /64, the core's first row, in samples. */
+    float t64;
+
+    c->per_tick = CRUMPBIT_SAMPLES_PER_TICK / (float)(bpm ? bpm : 1u);
+    t64 = crumpBit_delayTicks[0] * c->per_tick;
+    t64 = (t64 > CRUMPBIT_DELAY_CURVE_MAX) ? CRUMPBIT_DELAY_CURVE_MAX : t64;
+    c->t2 = crumpBit_delayTicks[CRUMPBIT_DELAY_CORE_ROWS - 1u] * c->per_tick;
+    c->t2 = (c->t2 > CRUMPBIT_DELAY_CURVE_MAX) ? CRUMPBIT_DELAY_CURVE_MAX
+                                               : c->t2;
+    c->q_lo = sqrtf(sqrtf(t64 * (1.0f / CRUMPBIT_DELAY_MIN)));
+    c->q_hi = sqrtf(sqrtf(CRUMPBIT_DELAY_CURVE_MAX / c->t2));
+}
+
+/*
+ * One row of the curve in samples (crumpBit_delayCurve()): the bottom rows
+ * by powers of q_lo, the core from the tick table, the top rows by powers
+ * of q_hi, row 127 t_max itself (t_/2 q_hi^4, exact by construction);
+ * clamped to t_max. Loop-free: a power q^k (k 0..3) is q^1 and q^2 picked
+ * by k's two bits, so the straight-line count of a caller bounds its cost
+ * (crumpbit_cpu.py). Inputs: the curve, row (above 127 reads 127).
+ */
+/*
+ * A bottom row of a delay-time curve (S091 P6): t_min q^k for k = 0..3,
+ * q = (t_/64 / t_min)^(1/4), loop-free (q and q^2 picked by k's two bits).
+ * Shared by `dly` (crumpBit_delayRow()) and `grn` (crumpBit_runGrain(),
+ * user: `grn`'s delay time goes below /64 too), so both bottoms follow one
+ * law. Inputs: q, k (0..3). Output: samples.
+ */
+static inline float crumpBit_lowRowSamples(float q, uint32_t k)
+{
+    return CRUMPBIT_DELAY_MIN * ((k & 1u) ? q : 1.0f) *
+           ((k & 2u) ? q * q : 1.0f);
+}
+
+static inline float crumpBit_delayRow(const crumpbit_delay_curve_t *c,
+                                      uint8_t row)
+{
+    /* t: the row's delay; k: its step within an end segment (0..3). */
+    float t;
+    uint32_t k;
+
+    row = (row > 127u) ? 127u : row;
+    if (row < CRUMPBIT_DELAY_LOW_ROWS) {
+        t = crumpBit_lowRowSamples(c->q_lo, row);
+    } else if (row <= CRUMPBIT_DELAY_HIGH0) {
+        t = crumpBit_delayTicks[row - CRUMPBIT_DELAY_LOW_ROWS] * c->per_tick;
+    } else if (row < CRUMPBIT_TABLE_SIZE - 1u) {
+        k = row - CRUMPBIT_DELAY_HIGH0;
+        t = c->t2 * ((k & 1u) ? c->q_hi : 1.0f) *
+            ((k & 2u) ? c->q_hi * c->q_hi : 1.0f);
+    } else {
+        t = CRUMPBIT_DELAY_CURVE_MAX;
+    }
+    return (t > CRUMPBIT_DELAY_CURVE_MAX) ? CRUMPBIT_DELAY_CURVE_MAX : t;
+}
+
+float crumpBit_delaySamples(uint8_t rate, uint16_t bpm)
+{
+    crumpbit_delay_curve_t c;
+
+    crumpBit_delayCurve(&c, bpm);
+    return crumpBit_delayRow(&c, rate);
 }
 
 float crumpBit_shareMaxSamples(const fx_share_t *share)
@@ -307,7 +425,7 @@ float crumpBit_shareMaxSamples(const fx_share_t *share)
  * Largest index of an ascending 128-entry table whose value is <= max
  * (S091 P3: the S091 P2 Rate-limit search, generalised to every sub-type's
  * length table). Output 0..127; 0 also when even entry 0 does not fit.
- * Callers: crumpBit_rateLimit(), crumpBit_subtypeRateLimit().
+ * Callers: crumpBit_subtypeRateLimit() (`cmb`, `pit`, `grn`, `rvb`).
  */
 static CRUMPBIT_NOINLINE uint8_t crumpBit_tableLimit(const float *table,
                                                      float max_samples)
@@ -315,9 +433,8 @@ static CRUMPBIT_NOINLINE uint8_t crumpBit_tableLimit(const float *table,
     /*
      * count: how many table entries (from rate 0 up) are <= max_samples.
      * The table ascends strictly, so the fitting entries are a prefix; the
-     * search builds count from the top bit down exactly as
-     * crumpBit_divisionFor() does (probe count + step - 1, the last entry of
-     * the next step-sized run).
+     * search builds count from the top bit down (probe count + step - 1,
+     * the last entry of the next step-sized run).
      */
     uint32_t count = 0u;
     uint32_t step;
@@ -340,10 +457,42 @@ static CRUMPBIT_NOINLINE uint8_t crumpBit_tableLimit(const float *table,
     return (uint8_t)((count != 0u) ? count - 1u : 0u);
 }
 
-uint8_t crumpBit_rateLimit(const fx_share_t *share)
+/*
+ * The last `dly` row the knob reaches (S091 P6, plan Q8: the knob stops
+ * there, so no travel is dead): the last row whose delay fits the share,
+ * and never past the first row that plays t_max (below 41.8 BPM the rows
+ * above it all play t_max, a plateau of dead travel).
+ * How: below m = min(share's longest delay, t_max) the curve ascends
+ * strictly, so the rows below m are a prefix; the search of
+ * crumpBit_tableLimit() (seven halving probes and an eighth) counts them,
+ * probing the curve at this tempo instead of a table. The next row, the
+ * first at or above m, is the limit when it fits (it is m itself);
+ * otherwise the last row below m is.
+ * Inputs: the longest delay the share holds (crumpBit_shareMaxSamples()),
+ * bpm. Output: 0..127 (0 also when even row 0 does not fit).
+ * Callers: crumpBit_subtypeRateLimit() (the manager's effective_max, the
+ * page clamp and label). Affiliates: crumpBit_delayRow(), host law CB1.
+ */
+static CRUMPBIT_NOINLINE uint8_t crumpBit_delayLimit(float max_samples,
+                                                     uint16_t bpm)
 {
-    return crumpBit_tableLimit(crumpBit_rateTable,
-                               crumpBit_shareMaxSamples(share));
+    crumpbit_delay_curve_t c;
+    /* m: the search bound; count: the rows (from 0 up) known below m. */
+    const float m = (max_samples < CRUMPBIT_DELAY_CURVE_MAX)
+        ? max_samples : CRUMPBIT_DELAY_CURVE_MAX;
+    uint32_t count = 0u;
+    uint32_t step;
+
+    crumpBit_delayCurve(&c, bpm);
+    for (step = CRUMPBIT_TABLE_SIZE / 2u; step != 0u; step >>= 1u)
+        count += (crumpBit_delayRow(&c, (uint8_t)(count + step - 1u)) < m)
+            ? step : 0u;
+    count += (crumpBit_delayRow(&c, (uint8_t)count) < m) ? 1u : 0u;
+    /* Row count (the first at or above m) is reachable when it fits. */
+    if (count < CRUMPBIT_TABLE_SIZE &&
+        crumpBit_delayRow(&c, (uint8_t)count) <= max_samples)
+        return (uint8_t)count;
+    return (uint8_t)((count != 0u) ? count - 1u : 0u);
 }
 
 float crumpBit_grainMaxSamples(const fx_share_t *share)
@@ -389,7 +538,8 @@ uint8_t crumpBit_subtypeRateLimit(uint8_t subtype, const fx_share_t *share)
                                    (words - 2.0f) *
                                    (1.0f / (float)CRUMPBIT_RVB_BASE3));
     default:
-        return crumpBit_tableLimit(crumpBit_rateTable, max_samples);
+        /* S091 P6: `dly`'s delay-time curve at the current tempo. */
+        return crumpBit_delayLimit(max_samples, seq_getBpm());
     }
 }
 
@@ -457,149 +607,6 @@ uint8_t crumpBit_combNote(uint8_t rate)
 {
     /* rte n plays MIDI note 112 - n; n above 96 holds note 16 (20.6 Hz). */
     return (uint8_t)(112u - ((rate > 96u) ? 96u : rate));
-}
-
-/*
- * Length in samples of one StepScale position at the current tempo.
- *
- * What: Q8.8 ticks / 256 * samples per tick. It is the S074 expression
- * unchanged, in one place, so every length the Sync search compares is
- * computed exactly as the S074 walk computed it. Division by 256 is exact
- * (a power of two), so any reassociation -Ofast chooses gives the same bits.
- * Inputs: cc 0..127 (callers never pass more), per_tick > 0. Output: length
- * in samples. Callers: crumpBit_divisionFor(). Affiliates:
- * stepScale_ticksQ8(), CRUMPBIT_SAMPLES_PER_TICK.
- */
-static inline float crumpBit_divisionLength(uint8_t cc, float per_tick)
-{
-    return ((float)stepScale_ticksQ8(cc) / 256.0f) * per_tick;
-}
-
-/*
- * Nearest fitting division for one free-running length (S091 R1; S091 P2
- * takes the limit as a parameter).
- *
- * What: among the StepScale positions whose length fits max_samples (the
- * live share's longest delay, crumpBit_shareMaxSamples()), finds the longest
- * one <= target (low) and the shortest one > target (high), and picks low
- * when target^2 < low*high, which is nearest in log time. Returns 0 if
- * nothing fits.
- * How: the 128 lengths ascend strictly with the CC (stepScale_q8Table is
- * strictly ascending and per_tick > 0), so "fits and <= target" is a prefix
- * of the table: every position below some count passes, none above it does.
- * A fixed 7-step binary search finds that count; low is count - 1 and the
- * only candidate for high is position count.
- * Why: the S074/S078 form walked all 128 positions every audio block
- * (12-19 instructions each, about 2,400 per block, ~76 per frame of the
- * render), from crumpBit_process() via crumpBit_targetSamples(). This form
- * costs about 7 search steps plus three lengths, and returns the same CC for
- * every input (class S0; host law CB1 checks every rate at BPM 1..1000).
- * Cost: constant to within the three early returns (a few instructions per
- * block), never data-dependent in the search itself.
- * Inputs: target length (samples), per_tick (samples per 96-PPQ tick at the
- * current tempo), max_samples (the longest delay allowed; the S074 constant
- * 70,573 until S091 P2). Output: a StepScale CC 0..127.
- * Callers: crumpBit_syncDivision() (Effect-page label, foreground),
- * crumpBit_targetSamples() (render, once per block).
- * Affiliates: crumpBit_divisionLength(), stepScale_ticksQ8(),
- * STEP_SCALE_COUNT.
- */
-static uint8_t crumpBit_divisionFor(float target, float per_tick,
-                                    float max_samples)
-{
-    /*
-     * key: one threshold for both S074 tests. A position passed the S074 walk
-     * as a low candidate when it fitted (t <= MAX) and was not longer than
-     * the target (t <= target), i.e. exactly when t <= min(target, MAX).
-     * MAX is the live limit since S091 P2.
-     */
-    const float key = (target < max_samples) ? target : max_samples;
-    /*
-     * count: how many positions (from CC 0 up) have a length <= key. It is
-     * built from the top bit down: after the step of size s, every position
-     * below count is known to pass. Probing position count + s - 1 decides
-     * whether the next s positions all pass (the lengths ascend, so testing
-     * the last of them is enough). Steps 64, 32, ... 1 sum to 127, so they
-     * reach any count in 0..127; the eighth probe below completes 0..128
-     * (S091 P2: the S091 R1 comment claimed 0..128 for the seven steps).
-     */
-    uint32_t count = 0u;
-    uint32_t step;
-    float t_low;
-    float t_high;
-
-    /* Fixed seven iterations; the add is a compare-select, not a branch. */
-    for (step = STEP_SCALE_COUNT / 2u; step != 0u; step >>= 1u)
-        count += (crumpBit_divisionLength((uint8_t)(count + step - 1u),
-                                          per_tick) <= key) ? step : 0u;
-    /*
-     * Eighth probe (S091 P2): position count (<= 127, in range). Below 127 it
-     * is already known to fail and adds 0; at 127 it decides whether every
-     * position passes (count 128). Without it count stopped at 127 and the
-     * `count == STEP_SCALE_COUNT` branch below could not run; the result was
-     * still right, because position 127 then became `high` with
-     * t <= target, which the geometric-mean test always picks.
-     */
-    count += (crumpBit_divisionLength((uint8_t)count, per_tick) <= key)
-        ? 1u : 0u;
-
-    /*
-     * No low candidate: S074 returned high if any position fitted, else 0.
-     * high could only be CC 0 here, so both cases return 0.
-     */
-    if (count == 0u)
-        return 0u;
-    t_low = crumpBit_divisionLength((uint8_t)(count - 1u), per_tick);
-    /* Every position passed: there is no longer one, so high is NONE. */
-    if (count == STEP_SCALE_COUNT)
-        return (uint8_t)(count - 1u);
-    /*
-     * Position count is the first that fails key. It is S074's high when it
-     * still fits (then it failed only "<= target"); if it is longer than
-     * MAX, no later position fits either, so high is NONE.
-     */
-    t_high = crumpBit_divisionLength((uint8_t)count, per_tick);
-    if (t_high > max_samples)
-        return (uint8_t)(count - 1u);
-    /* Nearest in log time: target below the geometric mean picks low. */
-    return (target * target < t_low * t_high)
-        ? (uint8_t)(count - 1u) : (uint8_t)count;
-}
-
-uint8_t crumpBit_syncDivision(uint8_t rate, uint16_t bpm, float max_samples)
-{
-    const float per_tick =
-        CRUMPBIT_SAMPLES_PER_TICK / (float)(bpm ? bpm : 1u);
-
-    return crumpBit_divisionFor(crumpBit_rateSamples(rate), per_tick,
-                                max_samples);
-}
-
-/*
- * Per-block delay target in samples.
- *
- * What: computes both the free-running length and the snapped division every
- * block (constant control cost, whatever Sync is), selects one by `sync`, and
- * clamps it to max_samples, the live share's longest delay (S091 P2; it was
- * the constant 1.60 s). A tempo change therefore moves the target, and the
- * glide bends the pitch like a tape machine; a shrinking share does the same.
- * Inputs: row values rate (already share-clamped by effective_max) and sync,
- * bpm (seq_getBpm()), max_samples. Output: target length in samples.
- * Caller: crumpBit_process(). Affiliates: crumpBit_divisionFor(),
- * crumpBit_divisionLength(), crumpBit_shareMaxSamples().
- */
-static float crumpBit_targetSamples(uint8_t rate, uint8_t sync, uint16_t bpm,
-                                    float max_samples)
-{
-    const float per_tick =
-        CRUMPBIT_SAMPLES_PER_TICK / (float)(bpm ? bpm : 1u);
-    const float free_run = crumpBit_rateSamples(rate);
-    /* The division the label shows, at the same tempo and limit. */
-    const float synced = crumpBit_divisionLength(
-        crumpBit_divisionFor(free_run, per_tick, max_samples), per_tick);
-    const float target = sync ? synced : free_run;
-
-    return (target > max_samples) ? max_samples : target;
 }
 
 /*
@@ -772,6 +779,8 @@ static void crumpBit_init(void *rt_void, const fxbuf_handoff_t *handoff)
     rt->grain_density = 64u;
     rt->grain_length = 127u;
     rt->filter_bal = 63u;
+    /* S091 P5 follow-up: `pit` fine at its centre (the voice `fin` 63). */
+    rt->pit_fine = 63u;
     /*
      * S091 P5 X2: no table is trusted across an entry; the first block
      * builds it for the rows the forced resolution wrote.
@@ -895,7 +904,7 @@ static void crumpBit_writeParam(void *rt_void, uint8_t index, uint8_t value)
     case CRUMPBIT_PARAM_FEEDBACK:  rt->feedback_raw = value;          break;
     case CRUMPBIT_PARAM_RATE:       rt->rate = value;                  break;
     case CRUMPBIT_PARAM_SYNC:       rt->sync = (uint8_t)(value != 0u); break;
-    case CRUMPBIT_PARAM_DLY_PAN:    rt->pan_raw = value;               break;
+    case CRUMPBIT_PARAM_SUB_PAN:    rt->pan_raw = value;               break;
     /* S091 P2 rows: raw bytes only, converted per block. */
     case CRUMPBIT_PARAM_TONE:        rt->tone_raw = value;             break;
     case CRUMPBIT_PARAM_FILTER_TYPE: rt->filter_type = value;          break;
@@ -914,6 +923,8 @@ static void crumpBit_writeParam(void *rt_void, uint8_t index, uint8_t value)
     case CRUMPBIT_PARAM_GRAIN_LENGTH:   rt->grain_length = value;      break;
     case CRUMPBIT_PARAM_FILTER_BAL:     rt->filter_bal = value;        break;
     case CRUMPBIT_PARAM_GRAIN_WIDTH:    rt->grain_width = value;       break;
+    /* S091 P5 follow-up: `pit`'s fine pitch (row 23). */
+    case CRUMPBIT_PARAM_PIT_FINE:       rt->pit_fine = value;          break;
     default:                                                           break;
     }
 }
@@ -1435,20 +1446,23 @@ static inline __attribute__((always_inline)) void crumpBit_tapLoop(
 /*
  * `dly`: the S074/S091 tape delay (engine A).
  *
- * What: per block the Rate/Sync target clamped to this loop (the S091 P2
- * crumpBit_targetSamples()), the block's feedback (S091 P2 curve, up to
- * 1.2; one value per block since S091 P5 S1), then the shared tape loop with
- * the 150 ms glide.
+ * What: per block the delay-time target from `rte` on the S091 P6 curve at
+ * the current tempo (crumpBit_delayCurve(): tempo-synced stops /64 .. /2,
+ * four rows down to the 2-sample minimum and four up to the arena's
+ * longest), clamped to this loop; the block's feedback (S091 P2 curve, up
+ * to 1.2; one value per block since S091 P5 S1); then the shared tape loop
+ * with the 150 ms glide. S091 P6: `snc` is not read (no Sync).
  * Inputs: runtime, block. Outputs: as crumpBit_tapLoop(). Caller:
  * crumpBit_process() when the active sub-type is CRUMPBIT_SUBTYPE_DELAY.
  */
 static CRUMPBIT_NOINLINE void crumpBit_runDelay(CrumpBitRuntime *rt,
                                                 const crumpbit_block_t *b)
 {
-    const float target = crumpBit_targetSamples(
-        rt->rate, rt->sync, seq_getBpm(),
-        (float)(b->len - CRUMPBIT_LOOP_GUARD));
+    /* max: the longest delay this loop holds (len - guard). */
+    const float max = (float)(b->len - CRUMPBIT_LOOP_GUARD);
+    float target = crumpBit_delaySamples(rt->rate, seq_getBpm());
 
+    target = (target > max) ? max : target;
     crumpBit_tapLoop(rt, b, target, CRUMPBIT_GLIDE_K,
                      crumpBit_feedbackGain(rt->feedback_raw));
 }
@@ -1483,9 +1497,12 @@ static CRUMPBIT_NOINLINE void crumpBit_runComb(CrumpBitRuntime *rt,
 /*
  * The `pit` interval and `grn` pitches: semitones from a bipolar row.
  *
- * crumpBit_rowSemitones(): row - 63 clamped to +-24 (the `grn` rows st1,
- * st2, st3 and the integer `pit` interval; aligned on `aux`, A1).
- * crumpBit_ratioOf(): 2^(s/12) for fractional s in [-24, 24], by linear
+ * crumpBit_rowSemitones(): row - 63 clamped to +-36 (CRUMPBIT_SEMITONE_SPAN;
+ * S091 P5 follow-up: +-24 before): the `grn` rows st1, st2, st3 and, since
+ * the same change, the `pit` interval, one semitone per step (aligned on
+ * `aux`, A1). The rows themselves stop at 27..99, so the clamp only guards
+ * values that arrive another way.
+ * crumpBit_ratioOf(): 2^(s/12) for fractional s in [-36, 36], by linear
  * interpolation of crumpBit_semitoneRatio (error < 0.5 cent; no exp2f).
  */
 static inline int32_t crumpBit_rowSemitones(uint8_t row)
@@ -1501,7 +1518,7 @@ static inline int32_t crumpBit_rowSemitones(uint8_t row)
 
 static inline float crumpBit_ratioOf(float semitones)
 {
-    /* x: the table position, 0..48; i its integer part (<= 47). */
+    /* x: the table position, 0..72; i its integer part (<= 71). */
     float x = semitones + (float)CRUMPBIT_SEMITONE_SPAN;
     uint32_t i;
     float f;
@@ -1578,11 +1595,22 @@ static inline int32_t crumpBit_headRead(const int8_t *loop, uint32_t lim14,
  * `pit`: rotating-head pitch shifter (engine B, plan §3.2).
  *
  * What, per block: the window W from crumpBit_pitchWindow (`rte`, 10-200 ms,
- * higher = longer), the interval from `aux` (row 15, aligned with `grn`'s
- * root; continuous over +-24 st in 0.38 st steps, snapped to semitones while
- * `snc` is on: plan S6), the ratio r, and the phase step (1 - r)/W turns per
- * sample as a signed 0.32 word (one division per block); the wet path opens
- * once `valid` covers the window.
+ * higher = longer; S091 P5 follow-up: glided, CRUMPBIT_PITCH_WIN_GLIDE), the
+ * interval from `aux` (row 15, aligned with `grn`'s root; S091 P5 follow-up:
+ * whole semitones, row - 63, -36..+36, as `grn`; it was continuous over
+ * +-24 st in 0.38 st steps with `snc` snapping, and the label showed
+ * row - 63, so the two disagreed; `snc` now has no job in `pit`), the ratio
+ * r, and the phase step (1 - r)/W turns per sample as a signed 0.32 word
+ * (one division per block); the wet path opens once `valid` covers the
+ * window.
+ * The fine pitch (S091 P5 follow-up, user): `fin` (row 23) scales the
+ * ratio by midiPitch_detune(fin), the law the voices' `fin` row plays
+ * (osc_recalcFreq()): 1 + (fin/127 - 1/2)(2^(1/12) - 1), about -52 to +51
+ * cents, so `pit`'s fine behaves exactly like a voice's.
+ * The window glide: W moves from its stored value one 20 ms one-pole step
+ * towards the target per block, and the heads' Q14 distance w14 ramps
+ * linearly across the block (one integer add per frame), so the heads slide
+ * rather than jump.
  * Per frame: the phase word advances and wraps by integer overflow; head A
  * trails the write head by 2 + W phase, head B by 2 + W (phase + 1/2) (the
  * half turn is one integer add, its wrap free), each read drop-sample (S091
@@ -1604,9 +1632,14 @@ static CRUMPBIT_NOINLINE void crumpBit_runPitch(CrumpBitRuntime *rt,
     int8_t *loop = b->base;
     const uint32_t len = b->len;
     const float flen = (float)len;
-    /* window: the head sweep, clamped so both heads stay inside the loop. */
-    float window = crumpBit_pitchWindow[(rt->rate > 127u) ? 127u : rt->rate];
-    /* semis: the continuous interval, snapped while `snc` is on. */
+    /* target: the `rte` window, clamped so both heads stay inside the loop. */
+    float target = crumpBit_pitchWindow[(rt->rate > 127u) ? 127u : rt->rate];
+    /* window, w_to: the glided W at the block's start and end (samples). */
+    float window;
+    float w_to;
+    /* w14_inc: the per-frame step of w14 from window to w_to (Q14). */
+    int32_t w14_inc;
+    /* semis: the interval, whole semitones -36..+36 (S091 P5). */
     float semis;
     /* dphi: the signed phase step, (1 - r)/W turns in 0.32 (wraps). */
     uint32_t dphi;
@@ -1636,26 +1669,45 @@ static CRUMPBIT_NOINLINE void crumpBit_runPitch(CrumpBitRuntime *rt,
     uint32_t n;
 
     /*
-     * Interval: `aux` is the bipolar pitch row (63 = 0). The continuous law
-     * spreads +-24 st over 0..127 (24/63 st per step); `snc` rounds it.
+     * Interval (S091 P5 follow-up): `aux` is the bipolar pitch row (63 = 0),
+     * one semitone per step, as the label shows and as `grn` plays it.
      */
-    semis = ((float)rt->aux_raw - 63.0f) * (24.0f / 63.0f);
-    semis = (semis > 24.0f) ? 24.0f : ((semis < -24.0f) ? -24.0f : semis);
-    semis = rt->sync ? (float)(int32_t)(semis + ((semis < 0.0f) ? -0.5f
-                                                               : 0.5f))
-                     : semis;
-    window = (window > flen - 2.0f * CRUMPBIT_PITCH_GUARD)
-        ? flen - 2.0f * CRUMPBIT_PITCH_GUARD : window;
+    semis = (float)crumpBit_rowSemitones(rt->aux_raw);
     /*
-     * (1 - r)/W turns per sample, at most 3/441 of a turn (r = 4, 10 ms),
-     * so x 2^32 fits a signed word; the unsigned add then wraps the phase.
+     * The window glide. The target and the stored window are both clamped
+     * to the loop (a share shrink must not leave a head outside it); the
+     * first block of `pit` starts on the target. w_to is one one-pole step
+     * on, so the stored window approaches the target with tau ~20 ms.
      */
-    dphi = (uint32_t)(int32_t)((1.0f - crumpBit_ratioOf(semis)) / window *
-                               4294967296.0f);
+    target = (target > flen - 2.0f * CRUMPBIT_PITCH_GUARD)
+        ? flen - 2.0f * CRUMPBIT_PITCH_GUARD : target;
+    if (!rt->primed) {
+        ps->window = target;
+        rt->primed = 1u;
+    }
+    window = (ps->window > flen - 2.0f * CRUMPBIT_PITCH_GUARD)
+        ? flen - 2.0f * CRUMPBIT_PITCH_GUARD : ps->window;
+    w_to = window + (target - window) * CRUMPBIT_PITCH_WIN_GLIDE;
+    ps->window = w_to;
+    /*
+     * (1 - r)/W turns per sample, r = the interval's ratio times the fine
+     * detune: at most 7.24/441 of a turn (r = 8 x 1.0297, +36 st and fine
+     * at its top, 10 ms), so x 2^32 fits a signed word; the unsigned add
+     * then wraps the phase. W is the block's end value: the pitch the heads
+     * settle on.
+     */
+    dphi = (uint32_t)(int32_t)((1.0f - crumpBit_ratioOf(semis) *
+                                           midiPitch_detune(rt->pit_fine)) /
+                               w_to * 4294967296.0f);
+    /* w14 starts at the block-start window and steps to w_to by its end. */
     w14 = (uint32_t)(window * 16384.0f);
-    /* Per-block gate: both heads read written samples only (plan §2.7). */
-    gate = ((float)ps->valid >= window + 2.0f * CRUMPBIT_PITCH_GUARD +
-            (float)b->frames) ? -1 : 0;
+    w14_inc = (int32_t)((w_to - window) * 16384.0f * b->per_frame);
+    /*
+     * Per-block gate: both heads read written samples only (plan §2.7),
+     * for the longer of the two windows this block spans.
+     */
+    gate = ((float)ps->valid >= ((w_to > window) ? w_to : window) +
+            2.0f * CRUMPBIT_PITCH_GUARD + (float)b->frames) ? -1 : 0;
     crumpBit_toneSetup(rt->tone_raw, &tone_k, &tone_a, &tone_b);
 
     /*
@@ -1687,6 +1739,8 @@ static CRUMPBIT_NOINLINE void crumpBit_runPitch(CrumpBitRuntime *rt,
         mix += mix_inc;
         /* Head phase: the 32-bit add wraps the turn (either direction). */
         phase += dphi;
+        /* The window glide's ramp: the heads' distance slides, no jump. */
+        w14 += (uint32_t)w14_inc;
         /*
          * Triangle fold: below half a turn the phase itself, above it ~phase,
          * so the 0.31 reading is 2 phase rising, then 2 (1 - phase) falling.
@@ -1731,7 +1785,8 @@ static CRUMPBIT_NOINLINE void crumpBit_runPitch(CrumpBitRuntime *rt,
  * What: a pure function of the block's hashed random word and the rows, so
  * the host can test its laws directly (CB14):
  * - pitch slot by `spr` from the ABSOLUTE pitches P1 (`aux`), P2 (`st2`),
- *   P3 (`st3`), each row - 63 semitones clamped to +-24 (Q4): weights
+ *   P3 (`st3`), each row - 63 semitones clamped to +-36 (Q4; S091 P5
+ *   follow-up: +-24 before): weights
  *   1 : a : b with a = min(spr, 40)/40, b = clamp((spr - 40)/40, 0, 1), so
  *   P1 only at 0, P1/P2 halves at 40, equal thirds at 80; above 80 a
  *   uniform detune of up to +-(spr - 80) x 100/47 cents (+-1 st at 127);
@@ -1828,8 +1883,15 @@ static void crumpBit_grainPick(uint32_t *hash, const CrumpBitRuntime *rt,
         : 0.0f;
     ratio = crumpBit_ratioOf((float)semis + cents * 0.01f);
     {
-        /* q: the Q3.12 step; the clamps below use the ratio it plays. */
-        const int32_t q = (int32_t)(ratio * 4096.0f + 0.5f);
+        /*
+         * q: the Q3.12 step; the clamps below use the ratio it plays. S091
+         * P5 follow-up: at +36 st the ratio is 8.0, one past the int16
+         * range (32,768), so q stops at 32,767 (0.05 cent flat at the very
+         * top; detune is already clamped there by crumpBit_ratioOf()).
+         */
+        int32_t q = (int32_t)(ratio * 4096.0f + 0.5f);
+
+        q = (q > 32767) ? 32767 : q;
 
         out->inc = (int16_t)(reverse ? -q : q);
         ratio = (float)q * (1.0f / 4096.0f);
@@ -1958,6 +2020,7 @@ typedef struct {
     float glb;
     float grb;
     float fb;           /* echo gain, this block's (S1), below 1 (G4) */
+    float tap_g;        /* delay tap gain ramp (S091 P6 fade), 0..1 */
     float mix;          /* mix stage ramp */
     float ac_yl;        /* stage 1 AC outputs */
     float ac_yr;
@@ -1976,7 +2039,7 @@ typedef struct {
     const uint8_t *lines;   /* stage 1 data-line table (X2) */
     uint32_t d;         /* delay-line tap D, whole frames (2..len-2) */
     float mix_inc;
-    int32_t gate;       /* the delay tap's gate mask: all ones or zero */
+    float tap_inc;      /* tap_g step per frame: 0 or +-1/frames (S091 P6) */
 } crumpbit_grain_k_t;
 
 /*
@@ -1999,7 +2062,9 @@ typedef struct {
  * - the voices scaled by their windows (the scaling VCVT gives +-1) and
  *   their balance gains into the stereo grain signal;
  * - the delay line: the code exactly D behind the write head (one subtract
- *   and compare wrap), gate-masked, then (S091 P5 G4) re-recorded as the
+ *   and compare wrap), scaled by the tap gain ramp tap_g (S091 P6: the
+ *   fade around a delay change; 0 while the tap is unrecorded, which was
+ *   the gate mask), then (S091 P5 G4) re-recorded as the
  *   grains' mono sum plus fb x the tap: no DC blocker and no soft knee, the
  *   gain staying below 1 (CRUMPBIT_GRAIN_FB_MAX) and the ADC clamping any
  *   peak;
@@ -2061,14 +2126,17 @@ static inline void crumpBit_grainSpan(crumpbit_grain_run_t *s,
         grains_r = sa * s->gra + sb * s->grb;
         /*
          * Delay line: the sample D behind the write head (index wp - D,
-         * wrapped by compare: an unsigned underflow exceeds wp), the gate as
-         * a mask on the integer code, +-1 by the scaling VCVT.
+         * wrapped by compare: an unsigned underflow exceeds wp), +-1 by the
+         * scaling VCVT, times the tap gain; the gain ramps by tap_inc (S091
+         * P6 fade; the echo re-record below takes the faded tap too, so a
+         * delay change does not recirculate a step).
          */
         {
             uint32_t ri = s->wp - k->d;
 
             ri += (ri > s->wp) ? k->len : 0u;
-            tap = crumpBit_codeToFloat((int32_t)k->dline[ri] & k->gate);
+            tap = crumpBit_codeToFloat((int32_t)k->dline[ri]) * s->tap_g;
+            s->tap_g += k->tap_inc;
         }
         /* Echo (G4): grains' mono sum + fb x tap, fb < 1, ADC-clamped. */
         k->dline[s->wp] = (int8_t)((int32_t)crumpBit_adc(
@@ -2092,7 +2160,11 @@ static inline void crumpBit_grainSpan(crumpbit_grain_run_t *s,
  *   `valid` stops growing while frozen, and an unfreeze before the line was
  *   ever full restarts it at 0 (the frozen stretch was never written);
  * - the delay time D = crumpBit_grainTime[rte] ticks at the current tempo,
- *   clamped to [2, N - 2] (Q8, Q10); its tap is gated until D is recorded;
+ *   clamped to [2, N - 2] (Q8, Q10); S091 P6: rows 0..3 below /64 from 2
+ *   samples (crumpBit_lowRowSamples()). The tap fades (S091 P6, user: one
+ *   block): when D changes, the tap's gain falls to 0 over this block at
+ *   the old D, and the next block reads the new D and rises over that
+ *   block; a tap whose D is not yet recorded stays at 0 (the former gate);
  * - Density (`den`, row 19, bipolar): 63 off; 64 (+1) one trigger per N;
  *   65..127 a rhythmic period (crumpBit_grainDenStop(), longest first) of at
  *   most N; 0..62 a random interval uniform in [0, 2 M], M = N x
@@ -2194,16 +2266,48 @@ static CRUMPBIT_NOINLINE void crumpBit_runGrain(CrumpBitRuntime *rt,
         g->valid = (g->valid < len) ? 0u : g->valid;
     }
 
-    /* Delay time D (Q8, Q10): the tick curve at this tempo, in the line. */
+    /*
+     * Delay time D (Q8, Q10): the tick curve at this tempo, in the line;
+     * S091 P6: rows 0..3 below /64, the `dly` bottom law from 2 samples
+     * (crumpBit_lowRowSamples(), q from /64 at this tempo).
+     */
     {
-        float d = crumpBit_grainTime[(rt->rate > 127u) ? 127u : rt->rate] *
-                  per_tick;
+        const uint32_t row = (rt->rate > 127u) ? 127u : rt->rate;
+        float d;
+        /* d_to: the delay the `rte` row asks for, whole frames. */
+        uint32_t d_to;
+        /* on: the tap's gain at the block end, 1 or 0. */
+        uint32_t on;
 
+        if (row < CRUMPBIT_GRAIN_LOW_ROWS) {
+            const float q = sqrtf(sqrtf(
+                crumpBit_grainTime[CRUMPBIT_GRAIN_LOW_ROWS] * per_tick *
+                (1.0f / CRUMPBIT_DELAY_MIN)));
+
+            d = crumpBit_lowRowSamples(q, row);
+        } else {
+            d = crumpBit_grainTime[row] * per_tick;
+        }
         d = (d > flen - 2.0f) ? flen - 2.0f : d;
         d = (d < 2.0f) ? 2.0f : d;
-        k.d = (uint32_t)d;
+        d_to = (uint32_t)d;
+        /*
+         * The tap fade (S091 P6, user: one block). A silent tap takes the
+         * new D at once; a sounding one keeps its D and fades out first.
+         * tap_d is held inside the line as well (the reseat silences the
+         * tap, so this only guards the index). The tap ends this block on
+         * (gain 1) only while it reads the asked-for D and that D is
+         * recorded (the former gate: valid >= D + frames); it starts from
+         * tap_on, 0 when it was unrecorded at the start.
+         */
+        g->tap_d = (!g->tap_on || g->tap_d > len - 2u) ? (uint16_t)d_to
+                                                        : g->tap_d;
+        k.d = g->tap_d;
+        on = (g->tap_d == d_to && g->valid >= k.d + frames) ? 1u : 0u;
+        s.tap_g = (g->tap_on && g->valid >= k.d + frames) ? 1.0f : 0.0f;
+        k.tap_inc = ((float)on - s.tap_g) * b->per_frame;
+        g->tap_on = (uint8_t)on;
     }
-    k.gate = (g->valid >= k.d + frames) ? -1 : 0;
 
     /* One hardware RNG word per block, expanded by the hash (G9). */
     hash = ((uint32_t)(uint16_t)GetRngValue() << 16) ^ 0x9E3779B9u ^
@@ -2706,6 +2810,8 @@ static uint32_t crumpBit_seatActive(CrumpBitRuntime *rt, uint32_t bytes)
             g->age_b = 0u;
             g->pending = 0u;
             g->anchor = CRUMPBIT_GRAIN_NO_ANCHOR;
+            /* S091 P6: the tap restarts silent at the new line's D. */
+            g->tap_on = 0u;
         }
         return (len >= CRUMPBIT_GRAIN_LINE_MIN) ? len : 0u;
     }
@@ -3115,16 +3221,19 @@ static uint8_t crumpBit_effectiveMax(const void *rt_void, uint8_t index,
  *     lane   dly   cmb   pit   grn   rvb
  *       4    fbk   fbk   fbk   den   fbk     (grn: Density, S091 P4)
  *       5    rte   rte   rte   rte   rte     (grn: delay time `tim`)
- *       6    snc   snc   snc   snc   snc     (grn/rvb: freeze)
- *       9    dpn   dpn   dpn   dpn   dpn     (grn: Position; rvb: width)
+ *       6    -     snc   fin   snc   snc     (grn/rvb: freeze; pit: fine,
+ *                                              S091 P5 follow-up; dly: none,
+ *                                              S091 P6)
+ *       9    spn   spn   spn   dpn   dpn     (grn: Position; rvb: width)
  *      10    ton   ton   ton   lng   ton     (grn: Length, row 20)
  *      14    -     -     aux   aux   -       (pit: interval; grn: P1)
  *      15    -     -     -     spr   -
  *   S091 P4 (plan Q11, accepted): the `grn` pool carries its performance
  *   controls; P2, P3, Width and Feedback are lane-less in `grn`, and the
  *   shared `bal` (row 22) has no lane in any sub-type.
- *   `dly` equals the S091 P2 table exactly (lane 14 stays empty until the
- *   tone drive lands on `aux`), so `.fx` files round-trip unchanged.
+ *   `dly` was the S091 P2 table until S091 P6 emptied its lane 6 (no
+ *   `snc` in `dly`); a `dly` `.fx` file saved before that has its lane 6
+ *   under `lane.crump_sync`, skipped on load (no backward compatibility).
  * - Values carry over on a sub-type change (L4): a lane keeps its steps and
  *   drives whatever row the new map names on it.
  * Why here (DSP file): the host test (CB9) checks the maps, and the ops
@@ -3138,34 +3247,35 @@ static uint8_t crumpBit_effectiveMax(const void *rt_void, uint8_t index,
     CRUMPBIT_PARAM_BIT_INVERT, CRUMPBIT_PARAM_MIX
 static const uint8_t crumpBit_laneMaps[CRUMPBIT_SUBTYPE_COUNT]
                                       [EFFECT_SEQ_LANE_COUNT] = {
+    /* S091 P6: lane 6 empty (`dly` has no `snc`; plan Q9). */
     [CRUMPBIT_SUBTYPE_DELAY] = { CRUMPBIT_LANES_SHARED_HEAD,
-        CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SYNC,
-        CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN, CRUMPBIT_PARAM_DLY_PAN,
+        CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_RATE, EFFECT_LANE_NONE,
+        CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN, CRUMPBIT_PARAM_SUB_PAN,
         CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FILTER_TYPE,
         CRUMPBIT_PARAM_FILTER_FREQ, CRUMPBIT_PARAM_FILTER_RESO,
         EFFECT_LANE_NONE, EFFECT_LANE_NONE },
     [CRUMPBIT_SUBTYPE_COMB] = { CRUMPBIT_LANES_SHARED_HEAD,
         CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SYNC,
-        CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN, CRUMPBIT_PARAM_DLY_PAN,
+        CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN, CRUMPBIT_PARAM_SUB_PAN,
         CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FILTER_TYPE,
         CRUMPBIT_PARAM_FILTER_FREQ, CRUMPBIT_PARAM_FILTER_RESO,
         EFFECT_LANE_NONE, EFFECT_LANE_NONE },
     [CRUMPBIT_SUBTYPE_PITCH] = { CRUMPBIT_LANES_SHARED_HEAD,
-        CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SYNC,
-        CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN, CRUMPBIT_PARAM_DLY_PAN,
+        CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_PIT_FINE,
+        CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN, CRUMPBIT_PARAM_SUB_PAN,
         CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FILTER_TYPE,
         CRUMPBIT_PARAM_FILTER_FREQ, CRUMPBIT_PARAM_FILTER_RESO,
         CRUMPBIT_PARAM_AUX, EFFECT_LANE_NONE },
     [CRUMPBIT_SUBTYPE_GRAIN] = { CRUMPBIT_LANES_SHARED_HEAD,
         CRUMPBIT_PARAM_GRAIN_DENSITY, CRUMPBIT_PARAM_RATE,
         CRUMPBIT_PARAM_SYNC, CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN,
-        CRUMPBIT_PARAM_DLY_PAN, CRUMPBIT_PARAM_GRAIN_LENGTH,
+        CRUMPBIT_PARAM_SUB_PAN, CRUMPBIT_PARAM_GRAIN_LENGTH,
         CRUMPBIT_PARAM_FILTER_TYPE, CRUMPBIT_PARAM_FILTER_FREQ,
         CRUMPBIT_PARAM_FILTER_RESO, CRUMPBIT_PARAM_AUX,
         CRUMPBIT_PARAM_GRAIN_SPREAD },
     [CRUMPBIT_SUBTYPE_REVERB] = { CRUMPBIT_LANES_SHARED_HEAD,
         CRUMPBIT_PARAM_FEEDBACK, CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SYNC,
-        CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN, CRUMPBIT_PARAM_DLY_PAN,
+        CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN, CRUMPBIT_PARAM_SUB_PAN,
         CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FILTER_TYPE,
         CRUMPBIT_PARAM_FILTER_FREQ, CRUMPBIT_PARAM_FILTER_RESO,
         EFFECT_LANE_NONE, EFFECT_LANE_NONE },
