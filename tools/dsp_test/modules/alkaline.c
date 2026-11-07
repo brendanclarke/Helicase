@@ -13,8 +13,8 @@
  *                     output: ring period 2.0 ms +- 3 % (SPICE 2.034), the
  *                     second ring peak over the first 0.364 +- 0.03 (the
  *                     golden RK4 model, same metric; S093 P0 §5.2);
- *               AL-S  sequencing (S092 P0 §5.3): accent at velocity 100 not
- *                     99; a note after a slide-flagged note is legato (no
+ *               AL-S  sequencing (S092 P0 §5.3): accent at velocity 101 not
+ *                     100; a note after a slide-flagged note is legato (no
  *                     MEG strike, no VEG trigger, glide), the slid-to note's
  *                     own slide flag decides the next note; gate 7/12 of a
  *                     step, held through the next step's gate after a slide;
@@ -192,10 +192,10 @@ static void test_sequencing(void)
 
 	memset(&v, 0, sizeof(v));
 	Alkaline_initVoice(&v);
-	Alkaline_triggerVoice(&v, 99u, 63u, ALK_STEP);
-	if (v.accentOn) fail(G_S, "velocity 99 is not an accent", 99, 1);
 	Alkaline_triggerVoice(&v, 100u, 63u, ALK_STEP);
-	if (!v.accentOn) fail(G_S, "velocity 100 is an accent", 100, 0);
+	if (v.accentOn) fail(G_S, "velocity 100 (the default) is not an accent", 100, 1);
+	Alkaline_triggerVoice(&v, 101u, 63u, ALK_STEP);
+	if (!v.accentOn) fail(G_S, "velocity 101 is an accent", 101, 0);
 	if (v.gateLeft != 3217) fail(G_S, "gate = 7/12 of a step", v.gateLeft, 3217);
 	for (n = 0; n < 5; n++) block(&v, buf, 0);
 

@@ -333,6 +333,7 @@ unchanged from S093 P0 §6.2.
 | # | Decision | Status |
 |---|---|---|
 | **D2′** | The Alkaline filter | **Decided (user, S093): B-R, fitted under Drum.** The form is `B_n1rq_ota32`: B-R with the [3/2] OTA tanh, 230 per sample + 24 oscillator = 254, 3 VDIV, against Drum's ≈ 257. A-R stays as the documented fallback |
+| **D2″** | Control path (added after measurement) | **Decided (user, S093): Tier 1 + Tier 2 control-path reductions** (`S093_P2` §3A). The figures in §0 and §6 above are audio-loop only; the per-block control path adds about 94 per sample as built and 16–19 after the reductions (`S093_P2` §8, §3A.4) |
 | **D15** | Instrument class | **Decided (user, S093): Basic, for a listening trial.** Afterwards, either reduce further, or go Advanced (replacing Cymbal/HiHat in a Scene) and add post-distortion/FX types in the margin (B-R without the [3/2] OTA is 261, 9 inside Cymbal/HiHat) |
 | **D16** | Drive range | ×1 to ×8 (modelled); the mapping is in `S093_P2` §6 |
 | **D17** | Output full scale | 7 V |

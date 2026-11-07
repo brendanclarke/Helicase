@@ -5,7 +5,7 @@
  *             sawTable or the D8 square table), the diode-ladder VCF with its
  *             network and the OTA (DiodeLadder), and the control path (MEG,
  *             accent network, expo converter, VEG; AlkalineControl), with the
- *             303 sequencing rules: accent at velocity >= ALK_ACCENT_VELOCITY,
+ *             303 sequencing rules: accent at velocity >= ALK_ACCENT_VELOCITY (101),
  *             slide taken from the slide-flagged note, legato notes neither
  *             strike the MEG nor trigger the VEG, gate 3.5/6 of a step.
  *             Entry points follow the other engines (init / trigger / async /
@@ -30,8 +30,9 @@
 #include "DiodeLadder.h"
 #include "AlkalineControl.h"
 
-/* D1 (user, S092): velocity 100 or more is an accent. */
-#define ALK_ACCENT_VELOCITY   100u
+/* D1 (user, S093): velocity 101 or more is an accent (the default step
+ * velocity, PAT_DEFAULT_VELOCITY, is 100, so un-edited steps are not). */
+#define ALK_ACCENT_VELOCITY   101u
 /* D11 (user, S092): gate = 3.5 of 6 clocks = 7/12 of a step. */
 #define ALK_GATE_NUM          7u
 #define ALK_GATE_DEN          12u
