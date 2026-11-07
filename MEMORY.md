@@ -203,8 +203,10 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   cost per sample = audio loops + (control-rate work + render entry/exit) /
   32, measured the same way on both sides (static longest path with
   `elf_blockpath.py`/`elf_looppath.py`, loops × iterations, `bl` callees
-  added). Never compare audio loops alone. Measured S093: Drum ≈ 413 per
-  block, Cymbal/HiHat ≈ 525. `S093_P2_ALKALINE_B-R_PRE_IMPLEMENTATION.md` §8.
+  added). Count VDIV separately on both sides (≈ 14 cycles each; an
+  instruction total alone misprices forms with different division counts).
+  Never compare audio loops alone. Measured S093: Drum ≈ 413 per block,
+  Cymbal/HiHat ≈ 525. `S093_P2_ALKALINE_B-R_PRE_IMPLEMENTATION.md` §8.
 - **CrumpBit 170-cap (S091 P5, binding):**
   `EFFECTS_MODULES_DSP_REFERENCE.md` §6.2.
 - **Mixer byte size is NOT a cost measure (S089 P0 F3).** LTO re-spends freed

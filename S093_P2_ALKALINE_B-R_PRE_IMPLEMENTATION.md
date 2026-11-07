@@ -1,4 +1,4 @@
-# S093 P2 — Alkaline B-R: Pre-Implementation Brief
+# S093 P2 — Alkaline B2R: Pre-Implementation Brief
 
 - **Session:** 093, phase 2. This document is written for a **fresh session**
   that will write the code. It holds every detail needed, with
@@ -7,49 +7,24 @@
   (TB-303) instrument with the **B2R** filter (§3.5, §3B), as a **Basic** type
   fitted under the Drum CPU ceiling, so the user can listen to it.
 - **Decision of record (user, S093, final): B2R as Basic.**
-  - B2R is B-R with only rungs 0–1 nonlinear: loop 209 + 3 VDIV. With the
-    Tier 1 + Tier 2 control path its total is ≈ 264–267 per sample, against
-    Drum ≈ 275+.
-  - It supersedes "B-R under Drum" below, which does not fit (§3A.4).
+  - B2R is B-R with only rungs 0–1 nonlinear: loop 209 + 3 VDIV.
+  - **Accepted by the user after listening** to the §3B renders, including
+    its weak spot (low resonance at high drive).
+  - With the Tier 1 + Tier 2 control path (§3A) its total is ≈ 264–267
+    instructions per sample (≈ 303–306 cycles with VDIV at 14), against
+    Drum ≈ 275+ (≈ 327+). Projected, not yet measured (§12 R-1).
   - B-R and A-R stay in `DiodeLadder.c` as measurable alternatives (B-R as
-    Advanced; A-R as the cheaper Basic fallback).
-- **Decision (user, S093):**
-  - Implement B-R fitted under Drum, for a listening trial.
-  - **Measured correction (S093):** the per-block control path was never
-    counted against Drum. Measured, it is about 3,010 instructions per block
-    against Drum's 413, which puts B-R at about 348 per sample against
-    Drum's 270 (§8).
-  - **Decision (user, S093): B-R with control-path reductions Tier 1 and
-    Tier 2 (§3A).**
-  - **Corrected projection (S093, after review):** an earlier version of
-    this brief added the cuts up wrong ("500–600 per block, level with
-    Drum").
-    - Re-summed, with the measured render overheads and the drive included,
-      B-R + Tier 1 + Tier 2 is **≈ 285–288 per sample against Drum's ≈ 275**
-      (same accounting on both sides): **about 10–13 over Drum**.
-    - It fits under the Cymbal/HiHat envelope (≈ 291) by about 3–6.
-    - A-R with the same control path is ≈ 260–264, under Drum by about
-      11–15.
-    - **B-R under Drum is not reachable with the cuts known so far.** That
-      needs a user decision before integration (§9, §12 R-1).
-  - **Drive weighed (S093, §3B):**
-    - A-R's "weaker drive" is measured. Its level, compression, bass and
-      resonance follow the circuit under drive. **It is too bright when
-      driven:** 3–8 kHz is +1.5 dB at ×4 and +5.3 dB at ×8 (acid), because
-      its linear rungs pass the input pair's harmonics without the ladder's
-      own rounding.
-    - A new "B as Basic" option, **B2R**, makes only the two bottom rungs
-      nonlinear. Its loop is 209 (−21 against B-R) and its total ≈ 264–267,
-      **under Drum**. It sits between A-R and B-R at drive: +1.1/+1.6 dB at
-      3–8 kHz (acid), but it loses mids and resonance at low Res with high
-      drive.
-    - The other "accuracy-cost" cuts (T2-4, rung secants every second
-      sample) together give only −7.5, which is not enough.
-  - Afterwards the user chooses: reduce further, or make Alkaline Advanced
-    (replacing Cymbal/HiHat in a Scene) and add post-distortion/FX types in
-    the freed margin.
+    Advanced; A-R as the cheaper Basic fallback). Neither is called.
+- **How this was reached** (detail in §3A.4, §3B, §12 R-4):
+  - S093 P1 chose B-R under Drum on per-sample loop counts alone.
+  - The per-block control path had never been counted. Measured, it is
+    ≈ 3,010 instructions per block against Drum's 413, which put B-R at
+    ≈ 348 per sample against Drum's 270.
+  - Tier 1 + Tier 2 cuts (§3A) bring B-R to ≈ 285–288: still over Drum, but
+    under Cymbal/HiHat. B2R (§3.5) brings it under Drum.
   - Recorded in `S092_P0_ALKALINE_INSTRUMENT_PLAN.md` §9 D2 and
-    `S093_P1_ALKALINE_OVERHEAD_REDUCTIONS.md` §8.
+    `S093_P1_ALKALINE_OVERHEAD_REDUCTIONS.md` §8 (D2‴).
+- **All start-of-session decisions are made (user, S093):** §9.
 - **Project rules that bind this work** (`MEMORY.md`):
   - Commits belong to the user: do not commit or suggest commits.
   - Any new or enlarged RAM needs the user's sign-off (§9).
@@ -83,10 +58,11 @@
 
 | File | Status | Change in P2 |
 |---|---|---|
-| `Core/DSPAudio/DiodeLadder.h/.c` | S093 P0 options A and B (S092 P6 SplitNet, [5/4] secants, 3 V out). Not in the build | **Replace the kernels with B-R and A-R** (§3) |
+| `Core/DSPAudio/DiodeLadder.h/.c` | S093 P0 options A and B (S092 P6 SplitNet, [5/4] secants, 3 V out). Not in the build | **Replace the kernels with B2R (`renderB2`, called), B-R (`renderB`) and A-R (`renderA`)** (§3) |
 | `Core/DSP/Instruments/Alkaline/AlkalineControl.h/.c` | Control path (expo, MEG, accent network, VEG, prewarp). Validated (S093 P0) | **Rewritten for Tier 1/Tier 2** (§3A): fast maths, one-pass MEG/expo, the written-out accent solve, `alk_tanf` |
-| `Core/DSP/Instruments/Alkaline/AlkalineVoice.h/.c` | The engine (init, trigger, async, render) | Trigger signature, drive, quiet query, B-R call (§5) |
+| `Core/DSP/Instruments/Alkaline/AlkalineVoice.h/.c` | The engine (init, trigger, async, render) | Trigger signature, drive and make-up gains, quiet query, the B2R call, the direct oscillator setup (§5) |
 | `Core/DSP/Instruments/Alkaline/AlkalineTables.h/.c` | Generated (`gen_alk_tables.py`): SplitNet Res table, prewarp, VEG, fitted constants | **Regenerate as N1** (§4) |
+| `Core/DSPAudio/Oscillator.h/.c` | Existing | **One new exported function** `osc_setFreqDirect()` (T1-7, §3A.2). No existing function or loop changes |
 | `Core/DSP/Instruments/Alkaline/AlkalineSquareTable.c` | Generated: the D8 303 square `[11][1024]` (22,528 B) | None (Alkaline keeps its own square; D3) |
 | `tools/alkaline/` | Python model (`alk_model.py`), generator, validation (`validate.py`), C cross-check (`check_c.py`) | `gen_alk_tables.py` → N1 (and, if T2-2 is taken, the 64-sample table); `alk_model.py` gets the Tier 1/Tier 2 equations so `validate.py` V3/V5 test them; `check_c.py` gains drive cases |
 | `tools/alkaline/variants/` | The S093 P1 experiment kernel `dlv_kernel.c` (switches; MODEL 3 = B2), `run_variants.py`, `gen_n1.py`, `drive_character.py` (§3B) | Reference for the port; keep |
@@ -101,17 +77,18 @@ Nothing Alkaline is in the firmware build yet (`Makefile`,
 
 | Phase | Content | Gate |
 |---|---|---|
-| **P2-0** (recommended first) | Remove Re3/Sw3 (S093 P0 §10, decided by the user). Frees 45,056 B of flash, which Alkaline needs (§8) | S093 P0 §10.4 W1–W7 |
+| **P2-pre** | Freeze the Drum ceiling: its dearest per-sample loops and its render callees' per-block entries on the current `build/lxr02.elf` (§12 R-2, R-6). Record per sample and per block, instructions and VDIV | Figures written into §3A.4 and §8, replacing "≈ 275+" |
+| **P2-0** (decided first) | Remove Re3/Sw3 (S093 P0 §10, decided by the user). Frees 45,056 B of flash, which Alkaline needs (§8) | S093 P0 §10.4 W1–W7 |
 | **P2-1** | DSP port: N1 tables, the **B2R** kernel (`DiodeLadder_renderB2`, §3.5) plus B-R and A-R as alternatives, the 7 V output scale, drive | Bench `alkaline` green; `check_c.py`; ARM count of `DiodeLadder_renderB2` ≈ 209, 3 VDIV |
-| **P2-1A** | Control-path reductions Tier 1 and Tier 2 (§3A) | Per-block count ≈ 1,000 or less, all included (§3A.4; measured as in §8); S092 P6 V3/V5 control results held within the §3A tolerances |
+| **P2-1A** | Control-path reductions Tier 1 and Tier 2 (§3A) | Per-block count ≈ 1,000 or less, all included, with its VDIV count (§3A.4; measured as in §8); S092 P6 V3/V5 control results held within the §3A tolerances; `elf_osc_check` 0 changed loops after T1-7's new `Oscillator.c` function |
 | **P2-2** | Firmware integration: type, registry, union, dispatch, parameters, menu, sequencer query, Makefile | `make all`, `special_tags`, the instrument-manager bench |
 | **P2-3** | Gates: linked loop counts, mixer check, flash, device CPU, listening | §10 |
 
-Confirm §9's decisions at the start of the session before P2-2.
+§9's decisions are all made (user, S093).
 
 ---
 
-## 3. The B-R kernel (`DiodeLadder_renderB`)
+## 3. The kernels: B-R as the base description (§3.1–§3.3), B2R chosen (§3.5)
 
 ### 3.1 Definition
 
@@ -262,8 +239,36 @@ below.
 - **Accuracy (LSD60 against the golden model):**
   - acid ×1/×4/×8: 0.20/0.88/0.90 dB;
   - lowres ×1/×4: 0.22/1.15.
-- In the §3.2 pseudo-code: drop zC, zD, nC, dC, nD, dD from the batch
-  (`pAB = dA·dB`, `r = 1/(pAB·prod)`); `t2`, `t3` are the constant 1.
+- **Not yet measured for B2R:** the [SN] p7 calibration ring (AL-R; B-R
+  gives 2.018 ms / 0.372) and the lowres ×8 case of `run_variants.py`
+  (§3B.2 has it from `drive_character.py`: LSD60 2.28). P2-1 measures the
+  ring on the port.
+- **Per-sample pseudo-code:** §3.2 with these lines changed (t2 = t3 = 1
+  folded; the state t2, t3 is not kept). This is `dlv_kernel.c`'s
+  `MODEL == 3` branch.
+
+```
+a0 = t0*d01;  a1 = t1*d12                          // a2 = d23, a3 = x3
+r2 = x2 + w1*(a1 - d23)
+r3 = x3 + w1*(d23 - x3) + KL*(KG*zo - vhpL)
+e0 = w0*t0;  e1 = w1*t0;  e2 = w1*t1                // e3 = w1
+th3 = (1+e2+w1)*th2 - e2*e2*th1
+th4 = (1+2*w1+D3X)*th3 - w1*w1*th2
+n2 = (y2 + q2*xin + w1*n3)*ip2                      // m3 = w1*ip2
+// secants: rungs 0-1, input pair, OTA
+zA = n0-n1;  zB = n1-n2                             // unclamped
+nX = 27 + zX^2;  dX = 27 + 9*zX^2                   // X = A, B
+pAB = dA*dB;  prod = dE*dG
+r = 1/(pAB*prod)                                    // VDIV 3
+iP = r*pAB;   r *= prod                             // iP = 1/(dE dG); r = 1/pAB
+t1 = nB*r*dA
+t0 = nA*r*dB
+tin  = nE*iP*dG
+tota = nG*iP*dE
+```
+
+  Everything else (the ramps, the loop closure, the C27/C25 stage, the
+  network, the OTA, the output and the block exit) is §3.2 unchanged.
 
 ## 3A. Control-path reductions, Tier 1 and Tier 2 (decided)
 
@@ -301,8 +306,8 @@ about 1e-7. Each function is about 12–18 instructions.
 | T1-4 | Expo converter | 313 | ≈ 80 | Keep last block's ladder current; one Vbe pass from it; fast exp/log | V3a within 33 cents of the P4 DC map; C2 cutoff per step ±5 cents of today |
 | T1-5 | Prewarp | 132 | ≈ 15 | `alk_tanf` | Cutoff placement (S092 P6 §5.2 table) within ±10 cents |
 | T1-6 | Pitch | 254 | ≈ 180 | `alk_log2f`/`alk_exp2f` instead of `log2f`/`exp2f` | Pitch error ≤ 0.1 cent at every note; AL-S glide step |
-| T1-7 | Oscillator setup (new, S093 review) | (in T1-6's 180) | −≈ 110 | Bypass `osc_setFreq()` (139 worst path; its frequency cache misses every block during a glide). Set `osc.phaseInc` (the `freq2PhaseIncr1024` formula: f × 1024/fs × 2²²) and `osc.tableOffset` (the octave-edge count) directly in `AlkalineVoice`. `Oscillator.c` is not edited | The same phase increment and octave level as `osc_setFreq()` for every note (bench) |
-| T1-8 | Drive gain (new, S093 review) | 44 (`exp2f`) | ≈ 15 | `alk_exp2f(3·drive)` | — |
+| T1-7 | Oscillator setup (**decided, user S093**) | (in T1-6's 180) | −≈ 100 | Bypass `osc_setFreq()` (139 worst path; its frequency cache misses every block during a glide). **New exported function in `Oscillator.c`:** `void osc_setTableFreq(OscInfo *osc)` = `osc_calcWavetableFreqValue(osc, osc->freq * osc->pitchMod * osc->modNodeValue)`, reusing the existing static helper (phase increment and octave level); not ITCM. No copy of `osc_octaveEdgeHz[]` or `freq2PhaseIncr1024()` in `AlkalineVoice`, and no existing function or loop is edited. It applies `pitchMod` and `modNodeValue`, so an LFO or velocity target on `coa` keeps working | The same `phaseInc` and `tableOffset` as `osc_setFreq()` for every note and with `modNodeValue` ≠ 1 (bench); `elf_osc_check` 0 changed loops (LTO sees a second caller of the static helper) |
+| T1-8 | Drive and make-up gains | 44 (`exp2f`) | ≈ 30 | `driveGain = alk_exp2f(3·drive)`; `makeup = alk_exp2f(ALK_MAKEUP_OCT · (1 − drive))` (B-2, §5) | Drive ×1/×8 exact to 1e-4 |
 
 **Not Tier 1 (moved, S093 review):** the 17-point nearest Res table (old
 T1-3).
@@ -335,19 +340,26 @@ Per block after Tier 1 + Tier 2 (without T2-4), all included:
 | Prewarp (T1-5) | 15 |
 | `DiodeLadder_setNet` | 82 |
 | Slow network (blend kept; T2-2) | ≈ 300 |
-| Pitch (T1-6; with T1-7 ≈ 70) | 180 (70) |
-| Drive gain (T1-8) | 15 |
+| Pitch (T1-6 + T1-7, decided) | ≈ 80 |
+| Drive and make-up gains (T1-8) | 30 |
 | Render entry/exit: `dlv_render`'s non-loop part 113 + `Alkaline_calcVoiceSyncBlock` 19 + the oscillator block entry ≈ 15 (measured on the B-R kernel object) | ≈ 147 |
-| **Per block** | **≈ 1,090 (≈ 980 with T1-7)** |
-| ÷ 32 | ≈ 34 (≈ 31) |
+| **Per block** | **≈ 1,005** |
+| ÷ 32 | ≈ 31 (stated as 31–34 below: every figure above is an estimate) |
+| VDIV per block | Not yet counted (≈ 25 before the cuts). P2-1A counts it; the accent 2 × 2 solves, `alk_tanf` and the MEG softplus each hold one or more |
 
 | Per sample, same accounting on both sides | Drum | Cymbal/HiHat | Alkaline B-R | Alkaline B2R | Alkaline A-R |
 |---|---:|---:|---:|---:|---:|
 | Audio loop (+ oscillator) | 247 | ≈ 260 (DSP ref §8.2, not re-measured) | 254 | 233 | 230 |
+| VDIV per sample (audio loop) | 4 | 4 | 3 | 3 | 2 |
 | Per-block work ÷ 32 | 13 (413) | 16 (≈ 525: 26 + 3 × 139 + 28 + snap/filter/dispatch ≈ 54) | 31–34 | 31–34 | 31–34 |
 | Render entry/exit ÷ 32 | ≥ 5 (≥ 163; its callees' entries not counted) | ≥ 4 (≥ 134) | (in the 31–34) | (in the 31–34) | (in the 31–34) |
 | SRR | 10 | 10 | 0 | 0 | 0 |
 | **Total** | **≈ 275+** | **≈ 290+** | **≈ 285–288** | **≈ 264–267** | **≈ 261–264** |
+| Cycle proxy: total + 13 per audio-loop VDIV (a VDIV ≈ 14 cycles, already counted as 1) | ≈ 327+ | ≈ 342+ | ≈ 324–327 | ≈ 303–306 | ≈ 287–290 |
+
+Per-block VDIV are not in the proxy on either side (Alkaline's are counted in P2-1A). A-R's
+render entry also holds the first sample's pivots (4 VDIV per block, `dlv_render`), which
+the 147 measured on the B-R object does not include.
 
 **Result:**
 - **B-R + Tier 1 + Tier 2 is about 10–13 over Drum.** Drum's callee
@@ -355,7 +367,9 @@ Per block after Tier 1 + Tier 2 (without T2-4), all included:
 - **It fits under Cymbal/HiHat**, by about 3–6.
 - **A-R fits under Drum** with about 11–14 to spare.
 - T2-4 would take about 4 more off B-R (≈ 281–284), still over Drum.
-- **B2R fits under Drum** with about 8–11 to spare (§3B).
+- **B2R fits under Drum** with about 8–11 instructions (≈ 21–24 cycles by the proxy) to spare (§3B). **Chosen (user, S093).**
+- By the cycle proxy B-R is about level with Drum, because it has one VDIV fewer. The
+  instruction count and the device decide; this does not change the decision.
 - No further full-B-R cut is known without an accuracy cost; the rung
   secants every second sample give −3.5 (S093 P1 §4).
 
@@ -512,10 +526,13 @@ rU = lerp(cs[0])·zn − z8;   rV = lerp(cs[1])·zn − z9;   z[0..7] = zn
 |---|---|
 | Trigger | `Alkaline_triggerVoice(voice, source_slot, velocity, note, stepSamples)`. Add the platform part, as `Drum_triggerVoice()` does (`DrumVoice.c` ≈ l. 241–254): `lfo_retrigger(source_slot)`, `modNode_updateValue(&velocityModulators[source_slot], velocity/127.f)`, `instrumentManager_applyVelocityModulationTarget(source_slot, velocity/127.f)`. The rest stays as today (S093 P0 §4.2): accent ≥ 101, legato, slide latch, gate in samples |
 | Drive | New member `float drive` (0..1, TYPE_FLT). In `calcVoiceAsync`: `voice->driveGain = alk_exp2f(3.0f * voice->drive)` (×1..×8, D16; T1-8: not the library `exp2f`). In the render: `sScale × driveGain` |
-| Render | `DiodeLadder_renderB2(&ladder, buf, sScale * driveGain, iLadEnd, iAbcEnd)` (B2R, §3.5). `renderB` (B-R) and `renderA` (A-R) are not called |
-| Quiet query | `uint8_t Alkaline_isQuiet(const AlkalineVoice *v)`: `gateLeft == 0 && !accentOn && iAbcEnd < 1e-7f` (for `instrumentManager_ampEnvelopeQuiet()`, which otherwise returns 1 for a type without a `SlopeEg2`) |
+| Output make-up (B-2, **decided, user S093: option (b)**) | A make-up gain that falls as drive rises: `makeup = alk_exp2f(ALK_MAKEUP_OCT · (1 − drive))`, per block. `ALK_MAKEUP_OCT` = 1.0 to start (≈ +6 dB at ×1, 0 dB at ×8), set by ear in the listening trial. **Mechanism:** it scales the OTA current passed to the render, `iAbcEnd · makeup`, which the kernel already ramps per sample and which feeds only the output (`out = R_OTA · ia · zG · tota`). So the per-sample loop is unchanged: no new live value and no new constant. Not folded into `DL_OUT_SCALE` (that would be fixed, not drive-dependent) and not a per-block output scale (a new live value in a spill-bound loop). Headroom: at ×1 the accent peaks (≈ 1.7 V) reach ≈ 3.4 V of the 7 V scale; AL-D checks the peak at ×1/×2/×4/×8 stays under full scale |
+| Render | `DiodeLadder_renderB2(&ladder, buf, sScale * driveGain, iLadEnd, iAbcEnd * makeup)` (B2R, §3.5). `renderB` (B-R) and `renderA` (A-R) are not called |
+| Oscillator setup (T1-7, **decided, user S093**) | Per block: `osc_setBaseNote()`, the slide lag and Tuning set `osc.freq` as today; then `osc_setTableFreq(&voice->osc)` (the new `Oscillator.c` function, §3A.2) instead of `osc_setFreq()` |
+| Quiet query | `uint8_t Alkaline_isQuiet(const AlkalineVoice *v)`: `gateLeft == 0 && !accentOn && iAbcEnd < 1e-7f`, on the **unscaled** `iAbcEnd` (before the make-up) (for `instrumentManager_ampEnvelopeQuiet()`, which otherwise returns 1 for a type without a `SlopeEg2`) |
 | `noinline` | **Both** `Alkaline_calcVoiceSyncBlock()` and `Alkaline_calcVoiceAsync()` get `__attribute__((noinline))`. Both are called from inside `mixer_calcNextSampleBlock()` (S092 P0 §1.3: the LTO risk); the async is now the heavier of the two |
-| Struct | `DiodeLadder` loses y0/y1, tout and the fast-mode coefficients, and gains nothing (it was 220 B). `AlkalineVoice` stays about 500 B, inside the 1,264 B slot. Add `_Static_assert(sizeof(AlkalineVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES)` at integration |
+| Track 7 sharing (**accepted, user S093**) | Tracks 6 and 7 both trigger slot 5. An Alkaline there shares one slide latch, one gate and one legato state between the two tracks, and each trigger's gate length comes from the track that fired it. No special handling in the prototype (§12 B-9) |
+| Struct | `DiodeLadder` loses y0/y1, tout and the fast-mode coefficients (it was 220 B); t2/t3 stay for `renderB`. Tier 1/Tier 2 add a few control-state fields (the MEG stack current, the expo ladder current, the diode states, T2-2's saved z_old[8] and block phase), all inside the voice struct. `AlkalineVoice` stays about 500 B, inside the 1,264 B slot. Add `_Static_assert(sizeof(AlkalineVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES)` at integration |
 
 ---
 
@@ -599,7 +616,7 @@ Line numbers are from the S093 tree and will shift.
 |---|---|
 | `Core/Sequencer/sequencer.c/.h` | New read-only `uint32_t seq_trackStepSamples(uint8_t track)` = `stepScale_ticksQ8(seq_effectiveTrackScale[track]) × 44108 × 60 / (256 × 96 × seq_getBpm())` (96 PPQ, Q8.8 ticks; a 16th = 24 ticks). Clamp the BPM ≥ 1; track ≥ `NUM_TRACKS` → use the default scale. Never writes Pattern data (MEMORY.md S078). Check that `seq_tempo` follows external clock (S092 P0 §5.4) |
 | `Core/Menu/MenuText.h`, `menu.c` | `ONOFF_TAG_ALK_WAVE`, `alkWaveNames`, the tag-name branch (§6) |
-| `Core/Menu/menu.c` l. 1728 | `menu_instrumentLoadIndex[INSTRUMENT_TYPE_UNKNOWN]` grows by 1 entry: **+2 B `.bss` (needs sign-off, §9)** |
+| `Core/Menu/menu.c` l. 1728 | `menu_instrumentLoadIndex[INSTRUMENT_TYPE_UNKNOWN]` grows by 1 entry: **+2 B `.bss` (approved, user S093, §9)** |
 | `SceneData.c` 1128, `filesystem.c` 18242 | The default Scene stays Drum/Snare/Cymbal/HiHat (no change) |
 | `storageTypes.h` 141 | `#define STORAGE_INSTRUMENT_ALK INSTRUMENT_TYPE_ALK` |
 | `Makefile` | `-ICore/DSP/Instruments/Alkaline`. `DSP_SRCS` gets `Core/DSPAudio/DiodeLadder.c`, `Core/DSP/Instruments/Alkaline/AlkalineVoice.c`, `AlkalineControl.c`, `AlkalineTables.c`, `AlkalineSquareTable.c`, with explicit `-Ofast` rules for the three non-`DSPAudio` `.c` files (as `DrumVoice.o`). `AlkalineParameters.c` goes in `SRCS` |
@@ -611,22 +628,33 @@ Line numbers are from the S093 tree and will shift.
 
 | Resource | Figure |
 |---|---|
-| **CPU per sample** | B-R loop 230 + oscillator 24 = 254, 3 VDIV (standalone loop counts) |
+| **CPU per sample** | **B2R loop 209 + oscillator 24 = 233, 3 VDIV** (standalone loop counts). For reference: B-R 230 + 24 = 254, 3 VDIV; A-R 206 + 24 = 230, 2 VDIV |
 | **CPU per block (measured S093, static longest path on M7 code)** | **Drum: ≈ 413 instructions** (`Drum_calcVoiceAsync` 63 + `slopeEg2_calc` 28 + 2 × `osc_setFreq` 139 + dispatch 14 + filter tangent ≈ 30; firmware `build/lxr02.elf`). **Alkaline: ≈ 3,010** (async 115; MEG 713 incl. 8 `logf`, 2 `expf`, `log1pf`, `exp2f`; accent network 812 = 144 + 4 × 167; expo 313; VEG 45; prewarp ≈ 132 incl. `tanf`; setNet 82; slow network 547 = 155 + 8 × 49; `osc_setBaseNote`/`osc_setFreq`/`log2f`/`exp2f` ≈ 254), plus ≈ 25 VDIV |
 | **Render entry/exit per block (measured S093, standalone objects)** | Drum `Drum_calcVoiceSyncBlock` 163 (its callees' entries not counted); Cymbal `Cymbal_calcSyncBlockVoice` 134; Alkaline `dlv_render` (B-R kernel) 113 + `Alkaline_calcVoiceSyncBlock` 19. None of these is in any audio-loop figure |
 | **Cymbal/HiHat per block** | `Cymbal_calcAsyncVoice` 26 + 3 × `osc_setFreq` 139 + `slopeEg2_calc` 28 + snap, filter tangent and dispatch ≈ 54 ≈ **525** |
 | **Reproduce the per-block count** | Link `DiodeLadder.c`, `AlkalineControl.c`, `AlkalineVoice.c` and the generated tables with stubs for the oscillator calls, `-Ofast` with the firmware flags and `-specs=nano.specs -specs=nosys.specs -lm`. Then `tools/dsp_test/elf_blockpath.py` and `elf_looppath.py` on each function, multiplying loops by their iteration counts and adding each `bl` callee's own path. Drum: the same tools on `build/lxr02.elf` (`Drum_calcVoiceAsync`, `slopeEg2_calc`, `osc_setFreq`, `instrumentManager_calcSlotAsync`) |
-| **Total per sample** | See §3A.4: Drum ≈ 275+, Cymbal/HiHat ≈ 290+, B-R + Tier 1 + Tier 2 ≈ 285–288, A-R ≈ 261–264. As built (no cuts): B-R ≈ 348 |
-| Flash | `DiodeLadder.o` about 4.5 KB (both kernels); `AlkalineControl.o` 3,200; `AlkalineVoice.o` about 0.9 KB; N1 tables 3,888 + VEG and prewarp about 300; square table 22,528; parameters and menu about 2–3 KB. **About 37–38 KB against 40,980 B headroom**: without P2-0 only about 3 KB would remain, well below the 16 KiB `link_budget` warning. **With P2-0 (Re3/Sw3 removed), about 48 KB remain** |
-| RAM | `AlkalineVoice` about 500 B inside the existing slot union (no growth). `menu_instrumentLoadIndex` +2 B (sign-off) |
+| **Total per sample** | See §3A.4: **B2R + Tier 1 + Tier 2 ≈ 264–267 (cycle proxy ≈ 303–306)** against Drum ≈ 275+ (≈ 327+). Cymbal/HiHat ≈ 290+, B-R ≈ 285–288, A-R ≈ 261–264. As built (no cuts): B-R ≈ 348. Drum is frozen in P2-pre |
+| Flash | `DiodeLadder.o` about 4.5 KB with two kernels, about 6 KB with three (LTO's `--gc-sections` drops `renderA`/`renderB` from the image while unreferenced; T2-2's 64-sample table replaces the 32-sample one, same size); `Oscillator.o` + the small `osc_setTableFreq()`; `AlkalineControl.o` 3,200; `AlkalineVoice.o` about 0.9 KB; N1 tables 3,888 + VEG and prewarp about 300; square table 22,528; parameters and menu about 2–3 KB. **About 37–38 KB against 40,980 B headroom**: without P2-0 only about 3 KB would remain, well below the 16 KiB `link_budget` warning. **With P2-0 (Re3/Sw3 removed), about 48 KB remain** |
+| RAM | `AlkalineVoice` about 500 B inside the existing slot union (no growth). `menu_instrumentLoadIndex` +2 B (**approved, user S093**) |
 | ITCM | 0 (the oscillator reuses the existing ITCM table loop; the ladder runs from flash) |
 
 ---
 
-## 9. Decisions to confirm at the start of the session
+## 9. Decisions (all made, user S093)
 
-| # | Item | Proposed |
+| # | Item | Decision |
 |---|---|---|
+| **R-1** | **Filter and class** | **B2R as Basic** (§3.5, §3B), accepted after listening: ≈ 264–267 against Drum ≈ 275+. Alternatives kept measurable: A-R (Basic, ≈ 261–264), B-R (Advanced, ≈ 285–288) |
+| R1 | `menu_instrumentLoadIndex` +2 B, `.bss`, SRAM1, owner `menu.c` | **Approved** (the only new RAM) |
+| D14 | Re3/Sw3 removal renumbers user samples (S093 P0 §10.2) | **Approved; no migration** |
+| D16 | Drive mapping ×1..×8 as `8^(v/127)`, default 0 (×1) | **Accepted** |
+| B-2 | Output level against the other engines | **Option (b):** make-up gain falling with drive, applied through the OTA current (§5) |
+| T1-7 | Oscillator setup in the control path | **A new exported `osc_setTableFreq()`** in `Oscillator.c`, reusing its static helper; no copies, no existing code changed (§3A.2) |
+| B-9 | Tracks 6 and 7 share slot 5 | **Accepted** for the prototype; no special handling (§5) |
+| P2-0 order | Re3/Sw3 removal before the Alkaline integration | **Yes** (flash) |
+| D1 | Accent at velocity **≥ 101** | **Decided**; done in `AlkalineVoice.h` and the AL-S law |
+
+---|---|---|
 | **R-1** | **Filter and class** | **Decided (user, S093): B2R as Basic** (§3.5, §3B): ≈ 264–267 against Drum ≈ 275+. Alternatives kept measurable: A-R (Basic, ≈ 261–264), B-R (Advanced, ≈ 285–288) |
 | R1 | `menu_instrumentLoadIndex` +2 B, `.bss`, SRAM1, owner `menu.c` | Approve (the only new RAM) |
 | D14 | Re3/Sw3 removal renumbers user samples (S093 P0 §10.2) | Accept (no migration) |
@@ -639,19 +667,27 @@ Line numbers are from the S093 tree and will shift.
 ## 10. Verification and gates
 
 1. **Bench** (`make -C tools/dsp_test alkaline alkaline_tables special_tags oscillator`):
-   - **AL-R:** ring 2.0 ms ± 3 %, decay 0.364 ± 0.03 (B-R gives 0.372).
+   - **AL-R:** ring 2.0 ms ± 3 %, decay 0.364 ± 0.03, on B2R (its ring is
+     not yet measured; B-R gives 2.018 ms / 0.372).
    - **AL-AB:** B2R against B-R and against A-R within 0.3 dB at ×1
      (measured at ×1: their levels within 0.03 dB of each other, §3B.2).
-   - **New AL-D (drive):** at ×8, bounded, no NaN, output within full
-     scale, the input-pair tail active.
+   - **New AL-D (drive):** at ×8, bounded, no NaN, the input-pair tail
+     active; **with the make-up gain** (B-2), the acid pattern's peak at
+     ×1/×2/×4/×8 stays under full scale (7 V).
+   - **New AL-O (oscillator setup, T1-7):** `osc_setTableFreq()` gives the
+     same `phaseInc` and `tableOffset` as `osc_setFreq()` for every note and
+     with `modNodeValue` and `pitchMod` ≠ 1.
+   - **AL-Q (quiet query):** `Alkaline_isQuiet()` reads the unscaled
+     `iAbcEnd`: quiet after the gate closes at any drive.
    - **AL-S:** unchanged.
    - **Break build** kept.
    - `make all` stops at `run_modes` today (S093 P0 O7): run the targets
      individually, or fix O7 first.
 2. **`tools/alkaline/check_c.py`:**
-   - C1 against SPICE and the Python B_rt: B-R is N1, so compare with
-     `run_variants.py`'s `B_n1rq_ota32` instead (LSD60 against golden
-     ≈ 0.19 at ×1).
+   - C1 against the golden model through `run_variants.py`'s `B2R`
+     (MODEL 3): the C port matches it to ≤ 0.05 dB LSD60, and its LSD60
+     against golden is ≈ 0.20 at ×1 (acid). B-R and A-R against
+     `B_n1rq_ota32` and `A_n1q` the same way.
    - C2 pattern within S093 P0 §5.4's figures ± 0.3 dB.
    - Add drive cases ×4/×8.
 3. **ARM:**
@@ -660,16 +696,22 @@ Line numbers are from the S093 tree and will shift.
      reference).
    - After `make all`: `elf_looppath.py --elf build/lxr02.elf --sym DiodeLadder_renderB2`
      (the linked count).
-   - The per-block count after Tier 1 + Tier 2 (§3A.4, §8 method), and the
-     total against Drum.
+   - The per-block count after Tier 1 + Tier 2 (§3A.4, §8 method), **with
+     its VDIV count**, and the total against the frozen Drum (P2-pre), in
+     instructions and in the cycle proxy.
+   - `elf_osc_check`: 0 missing, 0 changed loops after `osc_setTableFreq()`
+     is added.
 4. **Mixer:** `make -C tools/dsp_test elf86_mixer_check` and
    `elf_hotloops.py`: 0 loops grew in the other engines (Alkaline's render
    is `noinline`).
 5. **Flash:** `make all` runs `link_budget.py`; record the headroom.
 6. **Device:**
-   - An Alkaline track plays the S092 P4 pattern. Compare with
-     `tools/alkaline/alk_c_acid_B.wav` (the S093 P0 render; B-R differs by
-     about 0.1–0.2 dB).
+   - An Alkaline track plays the S092 P4 pattern. Compare with the B2R
+     pattern render that `check_c.py` C2 writes after the port
+     (`alk_c_acid_*.wav`); `alk_c_acid_B.wav` is S093 P0's option B, not
+     B2R.
+   - Set `ALK_MAKEUP_OCT` by ear against a Drum at the same `vol` (B-2).
+   - An LFO on `coa` still moves the pitch (T1-7).
    - Worst-case Scene with **Alkaline in every Basic slot** (four), at its
      dearest settings, the two Advanced slots at theirs. The `cpu` widget ≤
      baseline and 0 underruns (S092 P0 §1.3). At a small margin, an excess
@@ -687,7 +729,7 @@ entry/exit + SRR), the same accounting on both sides (§3A.4).
 
 | Path | What it means |
 |---|---|
-| Stay Basic | **Chosen: B2R** (≈ 264–267). Further options if needed: A-R (≈ 261–264; brighter when driven). Full B-R (≈ 285–288) does not fit under Drum |
+| Stay Basic | **Chosen: B2R** (≈ 264–267; accepted after listening, S093). Further options if needed: A-R (≈ 261–264; brighter when driven). Full B-R (≈ 285–288) does not fit under Drum |
 | Advanced (replace Cymbal/HiHat in a Scene) | B-R with Tier 1 + Tier 2 fits under Cymbal/HiHat (≈ 290+) by about 3–6. B-R without the [3/2] OTA (+7) would be ≈ 292–295, about level. Post-distortion/FX types (E1: ≈ +22–25, +1 VDIV) do not fit inside that margin without further cuts. Cymbal/HiHat's audio-loop figure (≈ 260) is from DSP ref §8.2 and is not re-measured; measure it before relying on this |
 
 ---
@@ -702,9 +744,9 @@ to be outstanding.
 | # | Item | Why it matters | What is done about it |
 |---|---|---|---|
 | R-1 | **Margin.** B2R is ≈ 264–267 against Drum ≈ 275+ (8–11 to spare, §3A.4); full B-R did not fit, so the user chose B2R (S093) | The margin rests on R-2/R-6 (Drum not fully re-measured) and on Tier 1/Tier 2 reaching their estimates (R-5) | Measure first (R-2, R-6); if B2R comes out over: A-R as Basic (−3), or Alkaline as Advanced with B2R or B-R |
-| R-2 | **Drum's 247 per-sample figure was never re-measured** on the current image. S092 P0 §1.1 required a freeze before any Alkaline code; it was not done | The comparison rests on S089-era component figures | First task of P2: measure Drum's dearest per-sample loops on `build/lxr02.elf` (`elf_hotloops.py`/`elf_looppath.py`) and freeze them |
+| R-2 | **Drum's 247 per-sample figure was never re-measured** on the current image. S092 P0 §1.1 required a freeze before any Alkaline code; it was not done | The comparison rests on S089-era component figures | **P2-pre** (§2): measure Drum's dearest per-sample loops on `build/lxr02.elf` (`elf_hotloops.py`/`elf_looppath.py`), with VDIV, and freeze them |
 | R-3 | **All Alkaline costs are standalone or static estimates** (loop counts, longest static paths); LTO can add or remove a few | The decision depends on single digits | The linked count and the device `cpu` widget are the gate (§10) |
-| R-6 | **Render entry/exit and callee entries:** Drum's render callees' per-block entries (the ZDF filter, the oscillator blocks, the post-chain) are not yet counted, so Drum's ≈ 275 is a lower bound | B-R's excess may be a few less than 10–13 | Count them with `elf_blockpath.py` on the standalone objects (`ResonantFilter.o`, `Oscillator.o`, the post-chain) as for Alkaline |
+| R-6 | **Render entry/exit and callee entries:** Drum's render callees' per-block entries (the ZDF filter, the oscillator blocks, the post-chain) are not yet counted, so Drum's ≈ 275 is a lower bound | B-R's excess may be a few less than 10–13 | **P2-pre** (§2): count them with `elf_blockpath.py` on the standalone objects (`ResonantFilter.o`, `Oscillator.o`, the post-chain) as for Alkaline |
 | R-4 | **Control-path per-block cost was left out of every comparison until now** (S092 P0 §1.1 called it "shared"; S093 P0/P1 did not add it) | It was the 94-per-sample surprise | Now measured and in §8 and §3A. Every later comparison must include it |
 | R-5 | **Tier 2 cuts may fail their SPICE or listening checks** (T2-1, T2-4 above all) | Each failure adds back its saving (T2-1 ≈ +2, T2-2 ≈ +8, T2-4 ≈ +4 per sample) | Revert that cut; see R-1 |
 
@@ -713,13 +755,14 @@ to be outstanding.
 | # | Item | Detail |
 |---|---|---|
 | B-1 | Accent threshold against the default step velocity (100) | **Resolved (user, S093): accent at velocity ≥ 101**, so un-edited steps are not accented. Done in `AlkalineVoice.h` and the AL-S law |
-| B-2 | **Output level against the other engines: a trade-off** | Alkaline's output is pin-6 volts at a 7 V full scale (D17), chosen so drive ×8 (OTA up to ≈ 6.7 V) does not clip. At ×1 the 303 peaks at about 1.7 V, about −12 dB below full scale, so it sounds quieter than a Drum at the same `vol`. A fixed make-up gain costs nothing (it folds into the scale), but every dB of it is a dB of headroom lost at high drive: +6 dB clips drive above about ×4. **Options:** (a) no make-up, quieter at ×1; (b) make-up that falls as drive rises (`gain = f(drive)`, once per block, costs nothing per sample), level at ×1 and full headroom at ×8; (c) a fixed make-up with the drive range reduced. **Recommended: (b).** User choice |
+| B-2 | Output level against the other engines | **Decided (user, S093): option (b)**, a make-up gain that falls as drive rises, applied through the OTA current so the per-sample loop is unchanged (§5). `ALK_MAKEUP_OCT` starts at 1.0 (≈ +6 dB at ×1, 0 dB at ×8) and is set by ear in the device listening (§10.6) |
 | B-3 | Square wave under drive not run in the variant tests | S093 P1 P1-O3 |
 | B-4 | High cutoffs above about 6 kHz: the 1× ladder's shape near Nyquist (0.6–1.9 dB in band) | S092 P6 O9; listening |
 | B-5 | Track 7 alternate (slot 6) has no effect on Alkaline | S092 P0 §5.5 mapping to MEG decay deferred |
 | B-6 | MIDI note-off does not end the gate; MIDI and live notes use the current BPM's step length | P0 E4 extra, not in the prototype |
 | B-7 | Rolls: each roll hit is a trigger with a full 7/12-step gate, which overlaps the next roll hit | Untested; listen |
 | B-8 | Step length ignores shuffle and per-step timing offsets | **External clock: closed.** `seq_tempo` follows the incoming clock (`sequencer.c` ≈ l. 6611, `sync_calcBpm()`) |
+| B-9 | Tracks 6 and 7 share slot 5 | **Accepted (user, S093).** An Alkaline in slot 5 has one slide latch, gate and legato state for both tracks; each gate length comes from the triggering track's scale. No special handling |
 
 ### 12.3 Integration work beyond §7 (also needed)
 
@@ -734,8 +777,9 @@ to be outstanding.
 | I-7 | **Re3/Sw3 removal** (P2-0, S093 P0 §10): renumbering, bench and docs; needed for flash |
 | I-8 | **Documentation:** `INSTRUMENTS_DSP_REFERENCE.md` (§3, §5, §8), `FILESYSTEM_SPEC.md` (the keys), `MIDI_NRPN_TABLE.md`, `OPEN_TESTS.md` (device tests), the session log |
 
-### 12.4 Sign-offs needed (unchanged from §9)
+### 12.4 Sign-offs
 
-R-1 is decided (B2R as Basic). Still open: R1 (+2 B RAM), D14 (renumbering),
-D16 (the drive mapping) and **B-2** (the output make-up trade-off). B-1 is
-resolved (accent at ≥ 101).
+All given (user, S093; §9): R-1 (B2R as Basic), R1 (+2 B RAM), D14
+(renumbering, no migration), D16 (the drive mapping), B-2 (option (b)),
+T1-7 (`osc_setTableFreq()`), B-9 (track 7 sharing), P2-0 first. B-1 is
+resolved (accent at ≥ 101). Nothing is waiting on the user before P2-pre.
