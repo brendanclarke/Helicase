@@ -117,6 +117,7 @@ SRCS = \
   Core/DSP/Effects/EffectsManager.c \
   Core/DSP/Effects/StereoFilter/StereoFilterParameters.c \
   Core/DSP/Effects/CrumpBit/CrumpBitParameters.c \
+  Core/DSP/Effects/CrumpBit/CrumpBitTables.c \
   Core/MIDI/MidiBuffer.c \
   Core/MIDI/MidiDin.c \
   Core/MIDI/MidiTransport.c \

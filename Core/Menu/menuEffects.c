@@ -11,7 +11,8 @@
  * Effect page implementation (contract in menuEffects.h).
  *
  * Layout (plan §13.2, A39):
- *   SELECT 1  screen 0: typ out vol pan    screen 1: run len scl mrp
+ *   SELECT 1  screen 0: typ out vol pan    screen 1: mrp run len scl
+ *     (S091 P4, user: `mrp` first on the second page, for every type)
  *   SELECT 2..8: type-specific rows 3..63 (N <= 61), 4 per screen, S =
  *     ceil(N / 28) screens per button (1..3), filled button by button.
  *   A type with select_layout overrides SELECT 2..8 (up to 4 screens each;
@@ -102,6 +103,27 @@ static const effect_registry_entry_t *menuEffects_entry(void)
     return entry ? entry : effects_registryEntry(EFFECT_TYPE_OFF);
 }
 
+/*
+ * The select layout to show now (S091 P3).
+ *
+ * What: the type's layout hook when it has one (CrumpBit: per shown
+ * sub-type), else the registry's select_layout; NULL = the default layout.
+ * Why one accessor: the screen count, cell lookup, custom top row and home
+ * screen must all read the same layout, or a sub-type change would mix
+ * screens. Output: the layout or NULL. Callers: menuEffects_screenCount(),
+ * menuEffects_cellAt(), menuEffects_screenHasCustomRow0(), menuEffects_home().
+ */
+static const effect_ui_hooks_t *menuEffects_hooks(void);
+
+static const effect_select_layout_t *menuEffects_layout(void)
+{
+    const effect_registry_entry_t *entry = menuEffects_entry();
+    const effect_select_layout_t *layout =
+        (entry->ui && entry->ui->layout) ? entry->ui->layout() : NULL;
+
+    return layout ? layout : entry->select_layout;
+}
+
 /* Type-specific row count N (indices 3..descriptor_count-1). */
 static uint8_t menuEffects_typeRowCount(const effect_registry_entry_t *entry)
 {
@@ -130,8 +152,8 @@ static uint8_t menuEffects_screenCount(uint8_t sub_page)
         return 0u;
     if (sub_page == 0u)
         return 2u;
-    if (entry->select_layout) {
-        screens = entry->select_layout->screen_count[sub_page];
+    if (menuEffects_layout()) {
+        screens = menuEffects_layout()->screen_count[sub_page];
         return (screens > MENU_FX_SCREENS_MAX) ? MENU_FX_SCREENS_MAX : screens;
     }
     rows = menuEffects_typeRowCount(entry);
@@ -158,9 +180,13 @@ static uint8_t menuEffects_cellAt(uint8_t sub_page, uint8_t screen,
         screen >= menuEffects_screenCount(sub_page))
         return 0u;
     if (sub_page == 0u) {
+        /*
+         * SELECT 1 screen 1, manager-owned for every type: S091 P4 (user)
+         * puts the Effect Morph amount first: mrp run len scl.
+         */
         static const uint8_t second[MENU_FX_CELLS] = {
-            MENU_FX_CELL_RUN, MENU_FX_CELL_LENGTH,
-            MENU_FX_CELL_SCALE, MENU_FX_CELL_MORPH_AMOUNT
+            MENU_FX_CELL_MORPH_AMOUNT, MENU_FX_CELL_RUN,
+            MENU_FX_CELL_LENGTH, MENU_FX_CELL_SCALE
         };
         if (screen == 1u) {
             out->kind = second[column];
@@ -171,8 +197,8 @@ static uint8_t menuEffects_cellAt(uint8_t sub_page, uint8_t screen,
             return 1u;
         }
         index = (uint8_t)(column - 1u);
-    } else if (entry->select_layout) {
-        index = entry->select_layout->cells[sub_page][screen][column];
+    } else if (menuEffects_layout()) {
+        index = menuEffects_layout()->cells[sub_page][screen][column];
         /*
          * A layout may place the manager `mrp` cell (S074; CrumpBit's
          * overlay shows Effect Morph at the right). It resolves exactly like
@@ -426,9 +452,21 @@ void menuEffects_clampValue(const menuEffects_cell_t *cell, uint16_t *value)
         break;
     case MENU_FX_CELL_PARAM: {
         const effect_record_t *record = menuEffects_record();
-        const effect_param_descriptor_t *descriptor = record
-            ? effects_descriptor(record->type, cell->index) : NULL;
-        max = descriptor ? descriptor->max_value : 0u;
+
+        /*
+         * S091 P2: the descriptor maximum, lowered for a BUFFER_DEPENDENT row
+         * (CrumpBit `rte`) to what the live FxBuffer share allows, so the
+         * encoder, pots and held-step edits stop where the DSP clamp is.
+         */
+        max = record ? effects_paramEffectiveMax(record->type, cell->index)
+                     : 0u;
+        /*
+         * S091 P5: a ranged row (CrumpBit's +-36 st pitches) also stops at
+         * its floor, so the knob stops where the display and the DSP do.
+         */
+        min = record ? effects_descriptorMin(effects_descriptor(record->type,
+                                                                cell->index))
+                     : 0u;
         break; }
     case MENU_FX_CELL_RUN:
         max = (uint16_t)(EFFECT_SEQ_RUN_MODE_COUNT - 1u);
@@ -531,15 +569,44 @@ void menuEffects_shortName(const menuEffects_cell_t *cell, char *dst)
     case MENU_FX_CELL_LENGTH:       text = "len"; break;
     case MENU_FX_CELL_SCALE:        text = "scl"; break;
     case MENU_FX_CELL_MORPH_AMOUNT: text = "mrp"; break;
-    case MENU_FX_CELL_PARAM:
-        if (cell->descriptor && cell->descriptor->short_name)
-            text = cell->descriptor->short_name;
-        break;
+    case MENU_FX_CELL_PARAM: {
+        /*
+         * S091 P6: the row's name for the variant shown (CrumpBit's
+         * per-sub-type names, menuEffects_cellLabels()); the descriptor's
+         * short name when the type does not rename it.
+         */
+        const char *name = cell->descriptor ? cell->descriptor->short_name
+                                            : NULL;
+
+        menuEffects_cellLabels(cell, &name, NULL, NULL);
+        if (name)
+            text = name;
+        break; }
     default:
         break;
     }
     for (i = 0u; i < 3u; i++)
         dst[i] = (text[i] != '\0') ? text[i] : ' ';
+}
+
+void menuEffects_cellLabels(const menuEffects_cell_t *cell,
+                            const char **short3, const char **category,
+                            const char **long_name)
+{
+    const effect_record_t *record = menuEffects_record();
+    const effect_registry_entry_t *entry = menuEffects_entry();
+    /* variant: the shown value of the type's variant row (0 without one). */
+    uint8_t variant = 0u;
+
+    if (!cell || cell->kind != MENU_FX_CELL_PARAM || !record)
+        return;
+    if (entry->ops && entry->ops->lane_variant_count != 0u) {
+        variant = menuEffects_shownParam(entry->ops->lane_variant_row);
+        variant = (variant < entry->ops->lane_variant_count)
+            ? variant : (uint8_t)(entry->ops->lane_variant_count - 1u);
+    }
+    effects_rowLabels(record->type, variant, cell->index, short3, category,
+                      long_name);
 }
 
 /*
@@ -886,10 +953,10 @@ uint8_t menuEffects_screenHasCustomRow0(uint8_t sub_page)
     uint8_t screen;
 
     if (sub_page == 0u || sub_page >= MENU_FX_SELECT_COUNT ||
-        !entry->select_layout || !hooks || !hooks->paint_row0)
+        !menuEffects_layout() || !hooks || !hooks->paint_row0)
         return 0u;
     screen = menuEffects_screen[sub_page];
-    return (uint8_t)((entry->select_layout->custom_row0[sub_page] &
+    return (uint8_t)((menuEffects_layout()->custom_row0[sub_page] &
                       (uint8_t)(1u << screen)) != 0u);
 }
 
@@ -959,7 +1026,7 @@ void menuEffects_renderSelectLeds(uint8_t sub_page)
  */
 uint8_t menuEffects_home(uint8_t *sub_page, uint8_t *column)
 {
-    const effect_select_layout_t *layout = menuEffects_entry()->select_layout;
+    const effect_select_layout_t *layout = menuEffects_layout();
     uint8_t sp;
 
     if (!sub_page || !column || !layout)
@@ -1003,7 +1070,7 @@ static uint8_t menuEffects_cellLane(const menuEffects_cell_t *cell,
     }
     if (cell->kind != MENU_FX_CELL_PARAM)
         return 0u;
-    return effects_laneOfParam(record->type, cell->index, lane);
+    return effects_laneOfParam(record, cell->index, lane);
 }
 
 /* `sel` jumps on the press edge; other modes wait for the common hold timer. */
@@ -1098,7 +1165,7 @@ uint8_t menuEffects_shownParam(uint8_t index)
                                      ? EFFECT_IMAGE_MORPH
                                      : EFFECT_IMAGE_NORMAL);
     if (held != MENU_FX_STEP_NONE &&
-        effects_laneOfParam(record->type, index, &lane) &&
+        effects_laneOfParam(record, index, &lane) &&
         effects_getLaneLock(scene_index, held, lane, &stored))
         value = stored;
     return value;
@@ -1123,7 +1190,7 @@ uint8_t menuEffects_editParam(uint8_t index, uint8_t value)
         return 0u;
     if ((menuEffects_holdState & MENU_FX_HOLD_ACTIVE) != 0u) {
         if (menuEffects_holdMask == 0u ||
-            !effects_laneOfParam(record->type, index, &lane))
+            !effects_laneOfParam(record, index, &lane))
             return 0u;
         return effects_setSeqLaneLock(scene_index, menuEffects_holdMask,
                                       lane, value);

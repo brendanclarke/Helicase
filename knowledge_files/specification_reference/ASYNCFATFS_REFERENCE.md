@@ -471,6 +471,37 @@ transport snapshot's `wait_ms` field (Session 058, schema 2) reports elapsed
 wait milliseconds only while an SD read-token or write-busy wait is active and
 zero otherwise; it does not publish the retired poll-count value.
 
+### Stall snapshot additions (S090 P3)
+
+`afatfs_getStallSnapshot(snapshot)` populates an `afatfsStallSnapshot_t` with
+the current gate, state, cache-slot usage, and the **open handle count**
+(`open_files`, bits 29..31 of the part 2 word). The open-file count iterates
+`openFiles[]` and counts handles not in `AFATFS_FILE_NONE` state. This is
+read-only evidence for stall diagnosis: the leading hypothesis for the Scene
+Save hang is handle exhaustion (all 5 slots taken) causing `afatfs_fopen` or
+`afatfs_opendir_lfn` to refuse silently and retry forever.
+
+The SD transport snapshot (`sdcard_getTransportSnapshot`) now includes
+`refused_run` (uint16_t): the count of consecutive refused READ_SINGLE_BLOCK
+or WRITE_BLOCK commands, reset to zero when a command is accepted. This
+distinguishes a card that has stopped responding from normal busy waits.
+
+### Directory tail trim (S090 P3)
+
+API:
+
+- `afatfs_trimDirectoryTailBegin(trim_state)` — begin scanning the current
+  directory (`afatfs.currentDirectory`) for trailing deleted entries.
+- `afatfs_trimDirectoryTailContinue(trim_state)` — continue scanning; returns
+  `AFATFS_OPERATION_IN_PROGRESS` while scanning, `AFATFS_OPERATION_SUCCESS`
+  when done (trimmed or clean), `AFATFS_OPERATION_FAILURE` on error.
+
+The caller owns the `afatfsTrimTail_t` state struct (on the stack at boot).
+The function scans to the end marker or allocated end; if deleted entries
+follow the last live entry, it writes a zero byte (end-of-directory marker)
+in the first deleted slot. Only free entries change; no FAT allocation change.
+Slot folders are not visited (they are removed/recreated whole on overwrite).
+
 ## Rename
 
 API:

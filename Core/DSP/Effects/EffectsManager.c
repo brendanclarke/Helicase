@@ -51,11 +51,19 @@ static const effect_param_descriptor_t effects_off_descriptors[] = {
  */
 typedef union {
     StereoFilterRuntime stereo_filter;
-    /* S074: 56 B. Its audio lives in the FxBuffer share, not in this union. */
+    /*
+     * S074: 56 B; S091 P2: 76 B; S091 P3: 88 B; S091 P4: 100 B (a shared
+     * part plus a 44 B union of five sub-engine states, the reworked `grn`
+     * the largest; user-approved growth up to +32 B over 76 B).
+     * Its audio lives in the FxBuffer share, not in this union.
+     */
     CrumpBitRuntime crump_bit;
 } effects_runtime_t;
 
 static INDTCMZ effects_runtime_t effects_runtime;
+
+/* The live runtime member (defined below; S091 P3 needs it earlier). */
+static void *effects_runtimeMember(void);
 
 /*
  * Registry table, indexed by the append-only Effect type id.
@@ -95,11 +103,19 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
         (uint16_t)sizeof(StereoFilterRuntime), 0u, 0u
     },
     /*
-     * CrumpBit (`cbt`, S074): stereo in and out. The 8-bit mono tape loop
-     * uses CRUMPBIT_BUFFER_BYTES of the FxBuffer Effect share (min = pref;
-     * the fixed range fits the minimum share). Lanes 1..9: bit off, bit
-     * invert, mix, feedback, rate, sync, vol, pan, delay pan. Lane 0 is
-     * Effect Morph.
+     * CrumpBit (`cbt`, S074; S091 P2; S091 P3 sub-types): stereo in and
+     * out. The 8-bit buffer is elastic (S091 P2 §5.1): it uses the whole
+     * Effect share up to CRUMPBIT_LOOP_MAX_BYTES (pref, the full arena) and
+     * still works at the share left with every voice unit claimed (min);
+     * the Rate row is clamped to the share, under the live sub-type's law,
+     * through crumpBit_ops.effective_max. These two fields are declarative
+     * (no code reads them today).
+     * lanes[] below is the `dly` map (sub 0) and equals the S091 P2 table:
+     * lanes 1..13 bit off, bit invert, mix, feedback, rate, sync, vol, pan,
+     * delay pan, tone, filter type, filter freq, filter reso; lane 0 Effect
+     * Morph; lanes 14..15 free. The live table follows `sub`
+     * (crumpBit_ops.lane_map, effects_laneTable()); the self-check
+     * (code 11) holds this row equal to crumpBit_laneMap(0).
      */
     {
         crumpBit_token3, crumpBit_abbrev5, crumpBit_full8,
@@ -108,14 +124,16 @@ static const effect_registry_entry_t effects_registry[EFFECT_TYPE_COUNT] = {
         { EFFECT_LANE_MORPH_SOURCE,
           CRUMPBIT_PARAM_BIT_OFF, CRUMPBIT_PARAM_BIT_INVERT,
           CRUMPBIT_PARAM_MIX, CRUMPBIT_PARAM_FEEDBACK,
-          CRUMPBIT_PARAM_RATE, CRUMPBIT_PARAM_SYNC,
+          /* S091 P6: lane 6 empty (`dly` no longer has `snc`). */
+          CRUMPBIT_PARAM_RATE, EFFECT_LANE_NONE,
           CRUMPBIT_PARAM_LEVEL, CRUMPBIT_PARAM_PAN,
-          CRUMPBIT_PARAM_DLY_PAN,
-          EFFECT_LANE_NONE, EFFECT_LANE_NONE, EFFECT_LANE_NONE,
-          EFFECT_LANE_NONE, EFFECT_LANE_NONE, EFFECT_LANE_NONE },
+          CRUMPBIT_PARAM_SUB_PAN,
+          CRUMPBIT_PARAM_TONE, CRUMPBIT_PARAM_FILTER_TYPE,
+          CRUMPBIT_PARAM_FILTER_FREQ, CRUMPBIT_PARAM_FILTER_RESO,
+          EFFECT_LANE_NONE, EFFECT_LANE_NONE },
         &crumpBit_layout, &crumpBit_ops, &crumpBit_ui,
         (uint16_t)sizeof(CrumpBitRuntime),
-        CRUMPBIT_BUFFER_BYTES, CRUMPBIT_BUFFER_BYTES
+        CRUMPBIT_LOOP_MIN_SHARE_BYTES, CRUMPBIT_LOOP_MAX_BYTES
     },
 };
 
@@ -124,11 +142,16 @@ _Static_assert(sizeof(StereoFilterRuntime) <= sizeof(effects_runtime_t),
 _Static_assert(sizeof(CrumpBitRuntime) <= sizeof(effects_runtime_t),
                "Effect runtime union must hold CrumpBit");
 /*
- * RAM guard (S074): the DTCM union is 76 B (STORAGE_SRAM_MANIFEST.md). A
- * larger member grows .dtcmz and shrinks the FxBuffer arena by the same
- * amount, which needs RAM approval before it is merged.
+ * RAM guard (S074; 100 B since S091 P4): the DTCM union size is recorded in
+ * STORAGE_SRAM_MANIFEST.md. A larger member grows .dtcmz and shrinks the
+ * FxBuffer arena by the same amount (in 32 B granules), which needs RAM
+ * approval before it is merged. S091 P3 and P4 used 24 B of a 32 B
+ * approval (P3 +12 B, P4 +12 B for the reworked `grn` state); the
+ * arena loses one granule (126,688 -> 126,656 B) when .dtcmz crosses a 32 B
+ * boundary, which depends on LTO's packing (CRUMPBIT_LOOP_MAX_BYTES assumes
+ * the smaller arena).
  */
-_Static_assert(sizeof(effects_runtime_t) == 76u,
+_Static_assert(sizeof(effects_runtime_t) == 100u,
                "Effect runtime union size changed: RAM approval required");
 
 /*
@@ -334,6 +357,42 @@ uint8_t effects_paramModulatable(effect_type_id_t type, uint8_t index)
         descriptor->base.mod_domain.flags != INSTRUMENT_MOD_DOMAIN_NONE);
 }
 
+uint8_t effects_paramEffectiveMax(effect_type_id_t type, uint8_t index)
+{
+    const effect_registry_entry_t *entry = effects_registryEntry(type);
+    const effect_param_descriptor_t *descriptor =
+        effects_descriptor(type, index);
+    /* max: the descriptor's inclusive clamp, lowered by the share below. */
+    uint8_t max;
+
+    if (!entry || !descriptor)
+        return 0u;
+    max = descriptor->max_value;
+    /*
+     * The same rule effects_service() applies before write_param(): only a
+     * BUFFER_DEPENDENT row of a type with an effective_max op is clamped,
+     * against the share as it is now (a struct copy; no arena access).
+     */
+    if ((descriptor->effect_flags & EFFECT_PARAM_FLAG_BUFFER_DEPENDENT) != 0u &&
+        entry->ops && entry->ops->effective_max) {
+        fx_share_t share;
+        uint8_t limit;
+
+        fxbuf_effectShare(&share);
+        /*
+         * S091 P3: the live runtime when this type is the live one (its
+         * active sub-engine decides the law), else NULL (the type's default).
+         */
+        limit = entry->ops->effective_max(
+            (type == effects_state.runtime_type) ? effects_runtimeMember()
+                                                 : NULL,
+            index, &share);
+        if (limit < max)
+            max = limit;
+    }
+    return max;
+}
+
 /* Resolve the retained Effect type of one resident Scene. */
 static effect_type_id_t effects_sceneType(uint8_t scene_index)
 {
@@ -370,6 +429,76 @@ const effect_param_descriptor_t *effects_targetDescriptor(
         return NULL;
     return effects_descriptor(effects_sceneType(scene_index),
                               effectTarget_local(id));
+}
+
+uint8_t effects_recordVariant(const effect_record_t *record)
+{
+    const effect_registry_entry_t *entry =
+        effects_registryEntry(record ? record->type : EFFECT_TYPE_OFF);
+    uint8_t variant;
+
+    if (!record || !entry || !entry->ops || entry->ops->lane_variant_count == 0u)
+        return 0u;
+    variant = record->normal[entry->ops->lane_variant_row];
+    return (variant < entry->ops->lane_variant_count)
+        ? variant : (uint8_t)(entry->ops->lane_variant_count - 1u);
+}
+
+void effects_rowLabels(effect_type_id_t type, uint8_t variant, uint8_t index,
+                       const char **short3, const char **category,
+                       const char **long_name)
+{
+    const effect_registry_entry_t *entry = effects_registryEntry(type);
+    const effect_param_descriptor_t *descriptor =
+        effects_descriptor(type, index);
+    /* s, c, l: the names so far (the descriptor's, then the hook's). */
+    const char *s;
+    const char *c;
+    const char *l;
+
+    if (!descriptor)
+        return;
+    s = descriptor->base.short_name;
+    c = descriptor->base.category;
+    l = descriptor->base.long_name;
+    if (entry && entry->ui && entry->ui->labels)
+        (void)entry->ui->labels(index, variant, &s, &c, &l);
+    if (short3)
+        *short3 = s;
+    if (category)
+        *category = c;
+    if (long_name)
+        *long_name = l;
+}
+
+uint8_t effects_targetLabels(uint8_t scene_index, uint16_t id,
+                             instrument_target_use_t use,
+                             const char **short3, const char **category,
+                             const char **long_name)
+{
+    if (!effects_targetValid(scene_index, id, use))
+        return 0u;
+    effects_rowLabels(effects_sceneType(scene_index),
+                      effects_recordVariant(scene_effectConst(scene_index)),
+                      effectTarget_local(id), short3, category, long_name);
+    return 1u;
+}
+
+uint8_t effects_formatTargetValue3(uint8_t scene_index, uint16_t target,
+                                   uint8_t value, char *out)
+{
+    const effect_registry_entry_t *entry =
+        effects_registryEntry(effects_sceneType(scene_index));
+
+    /*
+     * S091 P3 (OQ5): a type may name a row's values on automation pages
+     * (CrumpBit's `sub`: dly cmb pit grn rvb). Only rows whose text needs no
+     * Effect-page context use this hook; everything else formats generically.
+     */
+    if (!out || !entry || !entry->ui || !entry->ui->format_target3 ||
+        !effectTarget_isEffectId(target))
+        return 0u;
+    return entry->ui->format_target3(effectTarget_local(target), value, out);
 }
 
 /* Walk a Scene's valid Effect targets in registry descriptor order. */
@@ -433,20 +562,51 @@ void effects_recordDefaultsForType(effect_record_t *record,
 }
 
 /*
+ * The lane -> row table of one record (S091 P3 §2.9).
+ *
+ * What: a type with a lane_map op maps its lanes by the record's STORED
+ * value of the variant row (CrumpBit: `sub`, record->normal[8]; a Pattern
+ * switch changes the active engine, not the Scene's lanes); any other type
+ * uses the registry's fixed lanes[]. Out-of-range variants read the last map.
+ * Input: record (NULL = `off`). Output: a 16-entry table (never NULL).
+ * Callers: every lane reader in this file and, through the lane-key helpers,
+ * `.fx` storage. Affiliates: effect_type_ops_t.lane_map, crumpBit_laneMap().
+ */
+const uint8_t *effects_laneTable(const effect_record_t *record)
+{
+    const effect_registry_entry_t *entry =
+        effects_registryEntry(record ? record->type : EFFECT_TYPE_OFF);
+
+    if (!entry)
+        entry = effects_registryEntry(EFFECT_TYPE_OFF);
+    if (record && entry->ops && entry->ops->lane_map &&
+        entry->ops->lane_variant_count != 0u) {
+        uint8_t variant = record->normal[entry->ops->lane_variant_row];
+
+        variant = (variant < entry->ops->lane_variant_count)
+            ? variant : (uint8_t)(entry->ops->lane_variant_count - 1u);
+        return entry->ops->lane_map(variant);
+    }
+    return entry->lanes;
+}
+
+/*
  * Resolve one retained FX-sequence lane to its `.fx` file key.
  *
- * Inputs: registry type and lane number. Output: the fixed Effect Morph key,
- * a descriptor key, or NULL for an unused lane. The registry remains the only
- * owner of lane meaning, so storage and future UI cannot drift apart.
+ * Inputs: the record (S091 P3: its lane table) and lane number. Output: the
+ * fixed Effect Morph key, a descriptor key, or NULL for an unused lane. The
+ * registry remains the only owner of lane meaning, so storage and future UI
+ * cannot drift apart.
  */
-const char *effects_laneFileKey(effect_type_id_t type, uint8_t lane)
+const char *effects_laneFileKey(const effect_record_t *record, uint8_t lane)
 {
-    const effect_registry_entry_t *entry = effects_registryEntry(type);
+    const effect_registry_entry_t *entry =
+        effects_registryEntry(record ? record->type : EFFECT_TYPE_OFF);
     uint8_t index;
 
     if (!entry || lane >= EFFECT_SEQ_LANE_COUNT)
         return NULL;
-    index = entry->lanes[lane];
+    index = effects_laneTable(record)[lane];
     if (index == EFFECT_LANE_MORPH_SOURCE)
         return EFFECT_LANE_MORPH_FILE_KEY;
     if (index == EFFECT_LANE_NONE || index >= entry->descriptor_count)
@@ -457,19 +617,20 @@ const char *effects_laneFileKey(effect_type_id_t type, uint8_t lane)
 /*
  * Resolve a `.fx` lane key to the registry's retained lane number.
  *
- * Inputs: registry type, key after the `lane.` prefix, and optional output
- * pointer. Output: nonzero on a named lane match; unused lanes and unknown
- * keys return zero. The bounded 16-entry scan runs only during file parsing.
+ * Inputs: the record being parsed (S091 P3: its stored sub-type selects the
+ * lane table), key after the `lane.` prefix, and optional output pointer.
+ * Output: nonzero on a named lane match; unused lanes and unknown keys return
+ * zero. The bounded 16-entry scan runs only during file parsing.
  */
-uint8_t effects_laneByFileKey(effect_type_id_t type, const char *file_key,
-                              uint8_t *lane_out)
+uint8_t effects_laneByFileKey(const effect_record_t *record,
+                              const char *file_key, uint8_t *lane_out)
 {
     uint8_t lane;
 
     if (!file_key)
         return 0u;
     for (lane = 0u; lane < EFFECT_SEQ_LANE_COUNT; lane++) {
-        const char *key = effects_laneFileKey(type, lane);
+        const char *key = effects_laneFileKey(record, lane);
 
         if (key && strcmp(key, file_key) == 0) {
             if (lane_out)
@@ -621,6 +782,9 @@ static uint8_t effects_setParameterScene(uint8_t scene_index, uint8_t index,
         return 0u;
     if (value > descriptor->max_value)
         value = descriptor->max_value;
+    /* S091 P5: a ranged row's floor (effects_descriptorMin()). */
+    if (value < effects_descriptorMin(descriptor))
+        value = effects_descriptorMin(descriptor);
     if (image == EFFECT_IMAGE_MORPH &&
         (descriptor->base.flags & INSTRUMENT_PARAM_FLAG_MORPHABLE) != 0u) {
         before = record->morph[index];
@@ -863,7 +1027,8 @@ static void effects_lockClearLayers(const effect_record_t *record, uint8_t step)
             effects_erasedLanes[step & 15u] |= (uint16_t)(1u << lane);
             continue;
         }
-        index = entry->lanes[lane];
+        /* S091 P3: the record's lane table (per stored sub-type). */
+        index = effects_laneTable(record)[lane];
         if (index >= EFFECT_PARAM_COUNT)
             continue;
         effects_automation.active &= ~(1ULL << index);
@@ -914,15 +1079,18 @@ static uint8_t effects_seqStepFor(const effect_record_t *record)
     return (uint8_t)(effects_state.seq_step % len);
 }
 
-/* Replace a descriptor value with a locked value from the active step. */
-static uint8_t effects_seqOverride(const effect_registry_entry_t *entry,
+/*
+ * Replace a descriptor value with a locked value from the active step.
+ * S091 P3: `lanes` is the record's lane table (effects_laneTable()).
+ */
+static uint8_t effects_seqOverride(const uint8_t *lanes,
                                    const effect_seq_step_t *step,
                                    uint8_t index, uint8_t *value)
 {
     uint8_t lane;
 
     for (lane = 1u; lane < EFFECT_SEQ_LANE_COUNT; lane++) {
-        if (entry->lanes[lane] == index &&
+        if (lanes[lane] == index &&
             (step->lock_mask & (uint16_t)(1u << lane)) != 0u &&
             (effects_eraseLanes & (uint16_t)(1u << lane)) == 0u) {
             *value = step->value[lane];
@@ -973,16 +1141,17 @@ uint8_t effects_seqSerial(void)
 }
 
 /* Resolve one type-specific descriptor index to its retained lane number. */
-uint8_t effects_laneOfParam(effect_type_id_t type, uint8_t index,
+uint8_t effects_laneOfParam(const effect_record_t *record, uint8_t index,
                             uint8_t *lane_out)
 {
-    const effect_registry_entry_t *entry = effects_registryEntry(type);
+    /* S091 P3: the record's lane table (per sub-type for CrumpBit). */
+    const uint8_t *lanes = effects_laneTable(record);
     uint8_t lane;
 
-    if (!entry)
+    if (!record)
         return 0u;
     for (lane = 1u; lane < EFFECT_SEQ_LANE_COUNT; lane++) {
-        if (entry->lanes[lane] == index) {
+        if (lanes[lane] == index) {
             if (lane_out)
                 *lane_out = lane;
             return 1u;
@@ -1015,16 +1184,18 @@ static uint8_t effects_setSeqLaneLockScene(uint8_t scene_index, uint16_t step_ma
     uint8_t changed = 0u;
 
     if (!record || lane >= EFFECT_SEQ_LANE_COUNT ||
-        !effects_laneFileKey(record->type, lane))
+        !effects_laneFileKey(record, lane))
         return 0u;
     if (lane != EFFECT_SEQ_LANE_MORPH) {
-        const effect_registry_entry_t *entry =
-            effects_registryEntry(record->type);
-        const effect_param_descriptor_t *descriptor = entry
-            ? effects_descriptor(record->type, entry->lanes[lane]) : NULL;
+        /* S091 P3: the lane's row in this record's lane table. */
+        const effect_param_descriptor_t *descriptor =
+            effects_descriptor(record->type, effects_laneTable(record)[lane]);
 
         if (descriptor && value > descriptor->max_value)
             value = descriptor->max_value;
+        /* S091 P5: a ranged row's floor. */
+        if (value < effects_descriptorMin(descriptor))
+            value = effects_descriptorMin(descriptor);
     }
     for (step = 0u; step < EFFECT_SEQ_STEP_COUNT; step++) {
         const effect_seq_step_t *entry = &record->steps[step];
@@ -1443,6 +1614,9 @@ uint8_t effects_applyAutomation(uint8_t track, uint8_t local, uint8_t value7)
         value = descriptor->expand7(value);
     if (value > descriptor->max_value)
         value = descriptor->max_value;
+    /* S091 P5: a ranged row's floor. */
+    if (value < effects_descriptorMin(descriptor))
+        value = effects_descriptorMin(descriptor);
     effects_automation.value[local] = value;
     effects_automation.active |= (1ULL << local);
     effects_automation.menuHold &= ~(1ULL << local);
@@ -1608,20 +1782,47 @@ static uint8_t effects_registrySelfCheck(void)
                 (descriptor->effect_flags & EFFECT_PARAM_FLAG_WIDE8) != 0u &&
                 !descriptor->expand7)
                 return 4u;
-            if (descriptor->default_value > descriptor->max_value)
+            /* S091 P5: the default inside [min, max] (a ranged row). */
+            if (descriptor->default_value > descriptor->max_value ||
+                descriptor->default_value < effects_descriptorMin(descriptor))
                 return 7u;
         }
-        if (entry->lanes[0] != EFFECT_LANE_MORPH_SOURCE)
-            return 5u;
-        for (lane = 1u; lane < EFFECT_SEQ_LANE_COUNT; lane++) {
-            uint8_t descriptor_index = entry->lanes[lane];
+        /*
+         * S091 P3: every lane table the type can present is checked: the
+         * registry's lanes[] and, for a type with a lane_map op, one map per
+         * variant (CrumpBit: per sub-type). Each has lane 0 = Morph and no
+         * row twice; variant 0's map must equal lanes[] (code 11), so a
+         * record without the variant row and the S091 P2 `.fx` keys keep
+         * their meaning.
+         */
+        {
+            const uint8_t variants =
+                (entry->ops && entry->ops->lane_map)
+                    ? entry->ops->lane_variant_count : 0u;
+            uint8_t variant;
 
-            if (descriptor_index == EFFECT_LANE_NONE)
-                continue;
-            if (descriptor_index >= entry->descriptor_count ||
-                (seen & ((uint64_t)1u << descriptor_index)) != 0u)
-                return 6u;
-            seen |= (uint64_t)1u << descriptor_index;
+            for (variant = 0u; variant <= variants; variant++) {
+                const uint8_t *lanes = (variant == variants)
+                    ? entry->lanes : entry->ops->lane_map(variant);
+
+                seen = 0u;
+                if (lanes[0] != EFFECT_LANE_MORPH_SOURCE)
+                    return 5u;
+                for (lane = 1u; lane < EFFECT_SEQ_LANE_COUNT; lane++) {
+                    uint8_t descriptor_index = lanes[lane];
+
+                    if (descriptor_index == EFFECT_LANE_NONE)
+                        continue;
+                    if (descriptor_index >= entry->descriptor_count ||
+                        (seen & ((uint64_t)1u << descriptor_index)) != 0u)
+                        return 6u;
+                    seen |= (uint64_t)1u << descriptor_index;
+                }
+            }
+            if (variants != 0u &&
+                memcmp(entry->ops->lane_map(0u), entry->lanes,
+                       EFFECT_SEQ_LANE_COUNT) != 0)
+                return 11u;
         }
         if (entry->runtime_bytes > sizeof(effects_runtime_t))
             return 8u;
@@ -1878,6 +2079,7 @@ void effects_service(void)
         effects_registryEntry(effects_state.runtime_type);
     fx_share_t share;
     uint64_t lfo_mask;
+    const uint8_t *lanes;
     uint8_t morph;
     uint8_t active_step;
     uint8_t index;
@@ -1916,6 +2118,8 @@ void effects_service(void)
     morph = effects_lfoResolve(EFFECT_LFO_TARGET_MORPH, morph, 0u, 255u);
     lfo_mask = effects_lfoTargetMask();
     fxbuf_effectShare(&share);
+    /* S091 P3: this record's lane table (per stored sub-type). */
+    lanes = effects_laneTable(record);
     for (index = 0u; index < entry->descriptor_count; index++) {
         const effect_param_descriptor_t *descriptor =
             &entry->descriptors[index];
@@ -1935,7 +2139,7 @@ void effects_service(void)
             if ((effects_automation.active & (1ULL << index)) != 0u)
                 value = effects_automation.value[index];
             if (step && (step->lock_mask & 0xFFFEu) != 0u)
-                (void)effects_seqOverride(entry, step, index, &value);
+                (void)effects_seqOverride(lanes, step, index, &value);
         }
         /* LFO resolves around the held value within its modulation domain. */
         if ((lfo_mask & (1ULL << index)) != 0u &&
@@ -1946,14 +2150,32 @@ void effects_service(void)
                                        descriptor->base.mod_domain.max_value);
         if (value > descriptor->max_value)
             value = descriptor->max_value;
+        /*
+         * S091 P5: a ranged row's floor; this also covers values that reach
+         * the record another way (an older file, a copy).
+         */
+        if (value < effects_descriptorMin(descriptor))
+            value = effects_descriptorMin(descriptor);
         if ((descriptor->effect_flags & EFFECT_PARAM_FLAG_BUFFER_DEPENDENT) != 0u &&
             entry->ops && entry->ops->effective_max) {
-            uint8_t limit = entry->ops->effective_max(index, &share);
+            /*
+             * S091 P3: the live runtime decides the law (CrumpBit clamps by
+             * its resolved sub-engine).
+             */
+            uint8_t limit = entry->ops->effective_max(effects_runtimeMember(),
+                                                      index, &share);
 
             if (value > limit)
                 value = limit;
         }
+        /*
+         * S091 P3: a BUFFER_DEPENDENT row is re-applied every block, changed
+         * or not, so its clamp follows a sub-type switch or a share change
+         * one block later without extra manager state (≈ 10 instructions per
+         * block for CrumpBit's `rte`).
+         */
         if (!effects_state.force_all &&
+            (descriptor->effect_flags & EFFECT_PARAM_FLAG_BUFFER_DEPENDENT) == 0u &&
             value == effects_state.last_applied[index])
             continue;
         effects_state.last_applied[index] = value;

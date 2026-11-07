@@ -35,6 +35,7 @@ tools/dsp_test/
 │   ├── sequencer.c          sequencer.c: the automation drain cursor
 │   ├── instrument_manager.c InstrumentManager.c gate + the osc1_type row
 │   ├── samples.c            SampleMemory/SampleInstall/storageTypes: catalogue, install, order
+│   ├── crumpbit.c           CrumpBitEffect.c: S091 search/ADC/DAC laws, the S091 P2 reference, the S091 P3 sub-type laws, the S091 P4 `grn`/`bal` laws and the S091 P5 laws (CB1–CB19)
 │   └── sampleoptimize.py    tools/sampleoptimize.py
 ├── spike/                   retry kit: transient, filter drive, D+S (spike/README.md)
 ├── prelude.h                host stand-ins (placement macros, DSP mirrors)
@@ -46,6 +47,9 @@ tools/dsp_test/
 ├── elf_symdump.py           normalised disassembly of linked functions (compare mode)
 ├── elf_loopdump.py          normalised loop bodies of linked functions (compare mode)
 ├── elf_hotloops.py          hot-loop instruction report of the linked image
+├── elf_looppath.py          longest loop path / straight-line count of one linked function (cycle-pruned search, `--rank`)
+├── elf_blockpath.py         longest per-block path of one function, frame loops weighted 0 (`--via-loop K`)
+├── crumpbit_cpu.py          the whole CrumpBit Effect per frame per sub-type against the 170 cap
 └── check_special_tags.py    descriptor special-tag consistency
 ```
 
@@ -86,7 +90,23 @@ Everything generated goes to `build/` (`make clean` removes it).
 | `sampleoptimize` | the optimizer never grows a table, keeps `smpl`, keeps subfolders |
 | `special_tags` | descriptor special tags |
 | `stock_tables` | `tools/plots/gen_stock_tables.py --check` |
+| `crumpbit` | CB1 Sync search; CB2 ADC; CB3 code DAC; CB4 `dly` whole blocks bit-exact against the S091 P2 reference with the S091 P5 Q14 read and per-block feedback/balance (with every P3/P4/P5 row written; `bal` has its own law); CB5 init; CB6 tables, the `grn` time curve and its stops, the Length/Density tables and every sub-type's Rate limit, `dpn` never clamped by the manager, the `grn` engine's cached Position fit equal to the label's, and the one-pole k table's −3 dB law; CB7 Q ≤ 8; CB8 stability at feedback 1.2; CB9 row ownership, `bal` shared and lane-less, and the per-sub-type lane maps; CB10 the mix stage bit-exact in every sub-type; CB11 sub-type switch storm and the scripted seat law; CB12 `cmb` tuning and polarity; CB13 `pit` ratio; CB14 `grn` P4 model: pitch slots (absolute), Width, Position beyond the line plays the last fitting stop, read safety, copy identity, Density, freeze anchor, stability, block-aligned grain ends; CB15 `rvb` stability, decay, freeze, `ton` above 63 = 63; CB16 `bal` on the SVF (`dly`) and the one-pole (`rvb`); CB17 the data-line table; CB18 the `grn` echo decays to the rounding floor; CB19 the one-pole filter (−3 dB match, type mapping, `res` inert, hand-over). Eighteen break builds |
+| `crumpbit_tables` | `gen_crumpbit_tables.py --check`: the committed tables equal the generator |
+| `crumpbit_elf_check` | linked image: each sub-engine's frame loop at its measured length (`dly` 111, `cmb` 109, `pit` 106, `grn` 116 with `--cond-heads --in-range`, `rvb` 131), the SVF output filter 31 and the one-pole 16 (`--rank 2`), no VDIV; `crumpBit_divisionFor` ≤ 117; `crumpBit_tableLimit` 63 (needs `make all` first; not in `all`) |
+| `crumpbit_cpu_check` | linked image: the whole CrumpBit Effect per frame per sub-type (engine loop + filter loop + per-block work / 32, `crumpbit_cpu.py`) at or below 170 (needs `make all` first; not in `all`) |
 | `all` | all of the above |
+
+`elf_looppath.py --elf build/lxr02.elf --sym NAME [--top K] [--rank K] [--max N]
+[--straight]` reports the longest per-iteration path of a function's loops
+(following out-of-line blocks), or with `--straight` its instruction count.
+`elf_blockpath.py --elf build/lxr02.elf --sym NAME [--via-loop K] [--max N]`
+reports the longest per-block path with every frame-loop instruction
+weighted 0.
+`--cond-heads` counts only conditional backward branches as loop heads, for
+functions whose cold blocks jump back unconditionally (`crumpBit_runGrain`).
+`--in-range` keeps a loop's path search between its head and the furthest
+backward branch that closes it (S091 P4: `crumpBit_runGrain`'s cold blocks
+close backward branches into the body, which are not frame loops).
 
 The ARM tools are run by hand on a build:
 `fpseq.py --obj FILE.o --ref FUNC[:loop] --new FUNC[:loop] --report --all`;

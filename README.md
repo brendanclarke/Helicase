@@ -230,7 +230,10 @@ make all && make img  → build/LXRV2_lxr02.img   (bare `make` can stop at build
 | Current known issues and reminders? | `MEMORY.md` |
 | Effect system (FX bus, Effect types, FX sequencer)? | `knowledge_files/specification_reference/dsp_instruments_effects/EFFECTS_BUS_REFERENCE.md` |
 | How the instrument DSP and modulation work, what they cost, how to extend them? | `knowledge_files/specification_reference/dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md` |
-| Mixer, FX bus and Effect DSP, output pipeline, costs? | `knowledge_files/specification_reference/dsp_instruments_effects/EFFECTS_MIXER_DSP_REFERENCE.md` |
+| Mixer, output pipeline, bus compressor, costs? | `knowledge_files/specification_reference/dsp_instruments_effects/MIXER_SYSTEM_DSP_REFERENCE.md` |
+| Effect module DSP, arena framework, binding rules? | `knowledge_files/specification_reference/dsp_instruments_effects/EFFECTS_MODULES_DSP_REFERENCE.md` |
+| PERF surface, looper, overlay engine, live record/erase? | `knowledge_files/specification_reference/PERFORMANCE_RECORD_SPEC.md` |
+| Menu system, LCD, LEDs, buttons, pots, Morph views? | `knowledge_files/specification_reference/MENU_UI_SPEC.md` |
 | Flash, sample flash and RAM layout? | `knowledge_files/specification_reference/STORAGE_SRAM_MANIFEST.md` |
 | Testing a DSP change on the host? | `tools/dsp_test/DSP_TEST.md` |
 | Module/API ownership and specifications? | `knowledge_files/specification_reference/` (indexed in `MEMORY.md`) |

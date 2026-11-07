@@ -7,6 +7,39 @@ be performed when the opportunity arises, not blocking items for current work.
 
 ## Hardware soak / confirmation
 
+- **S090 P5 Load/Save speed and watchdog T1–T9 (HIGH PRIORITY):**
+  - T1: Load page type cycling (Kit→Scene→Bank→Pattern) — names appear
+    faster than before; trace `w` lines give each index-read duration
+  - T2: Save page, same
+  - T3: Nested Instrument Load type steps — faster than before
+  - T4: Scene Save to a new slot — completes, OR within ~12 s the error
+    overlay shows `W...` code. **Write down the code.** Then wait 10 s, power off
+  - T5: T4 ×3, plus a save over an existing slot — each completes or ends
+    with a `W...` code; never a permanent `...`
+  - T6: Kit, Bank, Pattern Save — complete or end with a code
+  - T7: Listen — no audio dropouts (CPU widget should not change during
+    Load/Save)
+  - T8: Same tests with playback stopped — not slower than before
+  - T9: Leave a page during a save — no change in behaviour
+  - **Bring back:** the `W...` code(s) and the SD card (`asavetrc.bin`);
+    the `w` records and site-12 snapshot decide the C3-3 root-cause fix
+- **S091 P4 CrumpBit H1–H9: PASSED** — hardware-tested 2026-11-06, all
+  sub-types and grn checks confirmed.
+- **S091 P5 CrumpBit efficiencies HW1–HW16: PASSED** — hardware-tested
+  2026-11-06, all efficiency changes and follow-ups (pitch ±36 st, fine pitch,
+  window glide) confirmed.
+- **S091 P6 CrumpBit parameter cleanup: PASSED** — hardware-tested
+  2026-11-06. Labels hook display, dly delay time curve, dpn→spn rename,
+  snc removed from dly lanes, pit interval labels, grn below /64 rows, tap
+  fade, all confirmed. Final CPU: dly 157.6, cmb 153.8, pit 154.1, grn 165.3,
+  rvb 163.9 (worst 165.3 ≤ 170 cap).
+- **S089 P3 Drum FM ramp efficiency H1–H6 (open):**
+  - H1: boot and play Drum `fm` with `slp`/`smp`/`wtb` — sounds correct
+  - H2: A/B against the P2 image with `fm` carriers — no audible difference
+  - H3: worst-case Scene `cpu` reads lower than P2
+  - H4: `itp` on `fm` carriers — smooth crossfade
+  - H5: Scene switch between `fm` types — no glitch
+  - H6: non-`fm` Drum sounds unchanged
 - **S088 P0 run modes hardware matrix H1–H17 (HIGH PRIORITY):**
   - H1: `rst` A/B (bit-identical to pre-S088 on real hardware)
   - H7/H8: `itp` audible / decayed retrigger

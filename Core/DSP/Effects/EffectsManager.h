@@ -153,6 +153,27 @@ typedef struct {
 #define EFFECT_UI_SHOW_HOME               2u
 #define EFFECT_UI_FLAG_OWNS_SELECT_LEDS   0x01u
 
+/*
+ * S091 P3 hooks (any may be NULL):
+ * - labels(index, variant, &short3, &category, &long_name) (S091 P6; it
+ *   replaced S091 P3's name3, which named a row on the Effect page only):
+ *   the row's names for one variant of the type (CrumpBit: the `sub`
+ *   value), used on every page that names an Effect row: Effect page
+ *   cells and the full view, STEP automation and modulation/LFO targets.
+ *   The caller sets the three pointers to the descriptor's names first; the
+ *   hook overwrites any it renames and returns nonzero if it renamed any.
+ *   variant is the type's lane_variant_row value in the record shown
+ *   (effects_rowLabels()). Strings are static, NUL-terminated, at most 3
+ *   (short) and 8 (category, long name) characters.
+ * - layout(): the select layout to show now (CrumpBit: per shown sub-type);
+ *   NULL return or no hook = the registry's select_layout.
+ * - format_target3(index, value, out): value text for automation targets
+ *   outside the Effect page (the STEP automation page, Pattern value entry);
+ *   only rows whose text needs no page context (CrumpBit: `sub` names).
+ *   Nonzero when out[0..2] was written.
+ */
+struct effect_select_layout;
+
 struct effect_ui_hooks {
     uint8_t (*select)(uint8_t button, uint8_t shift, uint8_t pressed);
     uint8_t (*track)(uint8_t track, uint8_t shift, uint8_t pressed);
@@ -161,6 +182,10 @@ struct effect_ui_hooks {
     void (*paint_row0)(uint8_t sub_page, uint8_t screen, char *row0);
     uint8_t (*format_value3)(uint8_t index, uint8_t value, char *out);
     uint8_t flags;
+    uint8_t (*labels)(uint8_t index, uint8_t variant, const char **short3,
+                      const char **category, const char **long_name);
+    const struct effect_select_layout *(*layout)(void);
+    uint8_t (*format_target3)(uint8_t index, uint8_t value, char *out);
 };
 typedef struct effect_ui_hooks effect_ui_hooks_t;
 
@@ -181,7 +206,7 @@ typedef struct effect_ui_hooks effect_ui_hooks_t;
  */
 #define EFFECT_LAYOUT_CELL_MORPH         0xFDu
 
-typedef struct {
+typedef struct effect_select_layout {
     uint8_t screen_count[8];
     uint8_t cells[8][4][4];
     uint8_t custom_row0[8];
@@ -196,6 +221,14 @@ typedef struct {
  * only type-specific indices (3..63); EffectsManager owns common indices 0..2.
  * process handles one normalized block. buffer_changed and effective_max are
  * optional hooks for types affected by a changing FxBuffer share.
+ * S091 P3:
+ * - effective_max receives the live runtime (NULL when the caller has none,
+ *   e.g. a page edit of a Scene whose type is not live), so a type with
+ *   sub-engines can clamp by the engine it runs;
+ * - lane_map (optional) returns the FX lane -> row table for one variant;
+ *   the variant is the record's stored value of row lane_variant_row
+ *   (0..lane_variant_count-1). NULL keeps the registry's fixed lanes[].
+ *   Every lane reader goes through effects_laneTable(record).
  */
 typedef struct {
     void (*init)(void *rt, const fxbuf_handoff_t *handoff);
@@ -203,7 +236,11 @@ typedef struct {
     void (*write_param)(void *rt, uint8_t index, uint8_t value);
     void (*process)(void *rt, effect_io_t *io);
     void (*buffer_changed)(void *rt, const fx_share_t *share);
-    uint8_t (*effective_max)(uint8_t index, const fx_share_t *share);
+    uint8_t (*effective_max)(const void *rt, uint8_t index,
+                             const fx_share_t *share);
+    const uint8_t *(*lane_map)(uint8_t variant);
+    uint8_t lane_variant_row;
+    uint8_t lane_variant_count;
 } effect_type_ops_t;
 
 /*
@@ -249,6 +286,44 @@ uint8_t effects_paramAutomatable(effect_type_id_t type, uint8_t index);
 uint8_t effects_paramModulatable(effect_type_id_t type, uint8_t index);
 
 /*
+ * Largest value a row may take now (S091 P2).
+ *
+ * What: the descriptor max_value, lowered for a BUFFER_DEPENDENT row by the
+ * type's effective_max op at the current FxBuffer share, the same clamp
+ * effects_service() applies to the resolved value. Why: the Effect page must
+ * not let a user set a value the DSP would clamp (user D2: a voice-unit
+ * reservation clamps the settable range as well as the DSP target). Stored
+ * values are never rewritten here (A30): a value saved above the clamp stays
+ * in the record and plays again when the share grows.
+ * Inputs: type, local index. Output: inclusive maximum (0 for an unknown
+ * row). Foreground only (reads the share with fxbuf_effectShare()).
+ * Accessors: menuEffects_clampValue().
+ * Affiliates: effect_type_ops_t.effective_max, EFFECT_PARAM_FLAG_BUFFER_DEPENDENT.
+ */
+uint8_t effects_paramEffectiveMax(effect_type_id_t type, uint8_t index);
+
+/*
+ * Inclusive minimum of one Effect row (S091 P5 follow-up).
+ *
+ * What: the modulation domain's min_value for a row that has a domain, else
+ * 0. Effect rows had only an inclusive maximum (max_value); a row built with
+ * EFFECT_MOD_RANGE(lo, hi) (CrumpBit's pitch rows, -36..+36 st) also stops
+ * at lo. The domain already bounds the LFO (effects_lfoResolve()), so the
+ * same bound for every other writer keeps one range per row.
+ * Inputs: descriptor (may be NULL). Output: 0..max_value.
+ * Accessors: effects_setParameterScene(), effects_setSeqLaneLockScene(),
+ * effects_setAutomationValue(), effects_service() (resolution),
+ * menuEffects_clampValue(), menu.c STEP automation editing.
+ */
+static inline uint8_t effects_descriptorMin(
+    const effect_param_descriptor_t *descriptor)
+{
+    return (descriptor &&
+            descriptor->base.mod_domain.flags != INSTRUMENT_MOD_DOMAIN_NONE)
+        ? (uint8_t)descriptor->base.mod_domain.min_value : 0u;
+}
+
+/*
  * `.fx` storage helpers (Session 072 step 6; plan §14.1).
  *
  * effects_recordDefaultsForType() builds one complete, unowned record for a
@@ -263,16 +338,33 @@ uint8_t effects_paramModulatable(effect_type_id_t type, uint8_t index);
  * effects_laneFileKey() / effects_laneByFileKey() translate FX-sequence lane
  * numbers to and from their `.fx` `[sequence]` key (after the `lane.` prefix).
  * Lane 0 is always EFFECT_LANE_MORPH_FILE_KEY; other lanes use the descriptor
- * file_key the registry lane table names. EFFECT_LANE_NONE lanes have no key
+ * file_key the record's lane table names. EFFECT_LANE_NONE lanes have no key
  * (NULL / not found), so a file cannot address an unused lane. Why here: the
  * registry owns lane meaning; storage must not duplicate that table.
+ * S091 P3: both take the RECORD, because a type with a lane_map op (CrumpBit)
+ * maps lanes by the record's stored sub-type (plan §2.9). The `.fx` writer
+ * emits [params] before [sequence], so the reader knows `sub` by then.
+ *
+ * effects_laneTable() returns the record's 16-entry lane -> row table: the
+ * type's lane_map(variant) when it has one, else the registry's lanes[].
  */
 #define EFFECT_LANE_MORPH_FILE_KEY "effect_morph"
 void effects_recordDefaultsForType(effect_record_t *record,
                                    effect_type_id_t type);
-const char *effects_laneFileKey(effect_type_id_t type, uint8_t lane);
-uint8_t effects_laneByFileKey(effect_type_id_t type, const char *file_key,
-                              uint8_t *lane_out);
+const uint8_t *effects_laneTable(const effect_record_t *record);
+const char *effects_laneFileKey(const effect_record_t *record, uint8_t lane);
+uint8_t effects_laneByFileKey(const effect_record_t *record,
+                              const char *file_key, uint8_t *lane_out);
+
+/*
+ * Automation value text of an Effect target outside the Effect page (S091
+ * P3, OQ5): calls the Scene type's format_target3 hook for the target's row.
+ * Inputs: Scene, Effect target id, value, 3-character output. Output:
+ * nonzero when out[0..2] was written (else the caller formats generically).
+ * Accessors: menu.c STEP automation value formatting.
+ */
+uint8_t effects_formatTargetValue3(uint8_t scene_index, uint16_t target,
+                                   uint8_t value, char *out);
 
 /*
  * Retained Effect edit API (Session 072 step 7).
@@ -346,7 +438,7 @@ uint8_t effects_seqActiveStep(void);
 uint8_t effects_seqSelectedStep(void);
 void effects_seqSelect(uint8_t step);
 uint8_t effects_seqSerial(void);
-uint8_t effects_laneOfParam(effect_type_id_t type, uint8_t index,
+uint8_t effects_laneOfParam(const effect_record_t *record, uint8_t index,
                              uint8_t *lane_out);
 uint8_t effects_getLaneLock(uint8_t scene_index, uint8_t step, uint8_t lane,
                             uint8_t *value_out);
@@ -453,6 +545,34 @@ uint8_t effects_targetValid(uint8_t scene_index, uint16_t id,
                             instrument_target_use_t use);
 const effect_param_descriptor_t *effects_targetDescriptor(
     uint8_t scene_index, uint16_t id, instrument_target_use_t use);
+
+/*
+ * Names of one Effect row (S091 P6).
+ *
+ * What: the descriptor's short name, category and long name, then the
+ * type's labels hook for the given variant (a type whose rows mean
+ * different things per variant, CrumpBit per `sub`, names them per
+ * variant). Any output pointer may be NULL.
+ * - effects_rowLabels(type, variant, index, ...): an explicit variant (the
+ *   Effect page passes the variant it shows, held steps included);
+ * - effects_targetLabels(scene, target, use, ...): an Effect target of one
+ *   Scene, named by that Scene's stored variant (STEP automation,
+ *   modulation/LFO targets). Returns 0 when the target is not valid for
+ *   the use (the outputs are then untouched).
+ * - effects_recordVariant(record): the record's variant (its
+ *   lane_variant_row value, clamped), 0 for a type without variants; the
+ *   rule effects_laneTable() uses.
+ * Accessors: menuEffects_cellLabels(), menu.c (full view, STEP automation,
+ * modulation targets). Affiliates: effect_ui_hooks_t.labels.
+ */
+void effects_rowLabels(effect_type_id_t type, uint8_t variant, uint8_t index,
+                       const char **short3, const char **category,
+                       const char **long_name);
+uint8_t effects_targetLabels(uint8_t scene_index, uint16_t id,
+                             instrument_target_use_t use,
+                             const char **short3, const char **category,
+                             const char **long_name);
+uint8_t effects_recordVariant(const effect_record_t *record);
 uint16_t effects_stepTarget(uint8_t scene_index, uint16_t current,
                             int8_t direction, instrument_target_use_t use);
 

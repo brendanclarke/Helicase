@@ -111,4 +111,8 @@ const effect_type_ops_t stereoFilter_ops = {
     stereoFilter_process,
     NULL,
     NULL,
+    /* S091 P3: no sub-types, so no per-variant lane map. */
+    NULL,
+    0u,
+    0u,
 };

@@ -6223,9 +6223,14 @@ static void menu_formatInstrumentTargetShort(uint16_t target, char *valueAsText)
             effects_targetDescriptor(scene_getActiveIndex(), target,
                                      INSTRUMENT_TARGET_MODULATION);
 
-        if (effect_descriptor)
-            menu_copyPaddedField(valueAsText,
-                                 effect_descriptor->base.short_name, 3u);
+        /* S091 P6: named by the Scene's variant (CrumpBit's `sub`). */
+        const char *name = NULL;
+
+        if (effect_descriptor &&
+            effects_targetLabels(scene_getActiveIndex(), target,
+                                 INSTRUMENT_TARGET_MODULATION, &name, NULL,
+                                 NULL))
+            menu_copyPaddedField(valueAsText, name, 3u);
         else
             memcpy(valueAsText, menuText_off, 3);
         return;
@@ -6269,14 +6274,19 @@ static void menu_displayInstrumentTargetFull(uint16_t target)
             effects_targetDescriptor(scene_getActiveIndex(), target,
                                      INSTRUMENT_TARGET_MODULATION);
 
-        if (!effect_descriptor) {
+        /* S091 P6: named by the Scene's variant (CrumpBit's `sub`). */
+        const char *cat = NULL;
+        const char *lng = NULL;
+
+        if (!effect_descriptor ||
+            !effects_targetLabels(scene_getActiveIndex(), target,
+                                  INSTRUMENT_TARGET_MODULATION, NULL, &cat,
+                                  &lng)) {
             memcpy(&editDisplayBuffer[1][0], menuText_off, 3);
             return;
         }
-        menu_copyPaddedField(&editDisplayBuffer[1][0],
-                             effect_descriptor->base.category, 8u);
-        menu_copyPaddedField(&editDisplayBuffer[1][8],
-                             effect_descriptor->base.long_name, 8u);
+        menu_copyPaddedField(&editDisplayBuffer[1][0], cat, 8u);
+        menu_copyPaddedField(&editDisplayBuffer[1][8], lng, 8u);
         return;
     }
     if (target == INSTRUMENT_PARAM_INVALID ||
@@ -14027,8 +14037,15 @@ static uint8_t menu_effectAutomationIsWide(
 }
 
 static void menu_formatEffectAutomationValue3(
+    uint8_t scene, uint16_t target,
     const effect_param_descriptor_t *descriptor, uint8_t value, char *buf)
 {
+    /*
+     * S091 P3 (OQ5): the Scene type may name the value (CrumpBit's `sub`:
+     * dly cmb pit grn rvb instead of 0..4); otherwise the generic text.
+     */
+    if (effects_formatTargetValue3(scene, target, value, buf))
+        return;
     if (menu_effectAutomationIsWide(descriptor))
         numtostrpu(buf, descriptor->expand7(value), ' ');
     else
@@ -14071,21 +14088,26 @@ static instrument_param_id_t menu_stepAutomationEffectNext(
     return current;
 }
 
-/* Render an Effect category and long name into the detail target row. */
-static void menu_stepAutomationEffectLabel(
-    const effect_param_descriptor_t *descriptor)
+/*
+ * Render an Effect target's category and long name into the detail target
+ * row (S091 P6: named by the Scene's variant, effects_targetLabels(), so a
+ * CrumpBit row reads e.g. "Comb Note" in a `cmb` Scene).
+ */
+static void menu_stepAutomationEffectLabel(uint8_t scene, uint16_t target)
 {
+    const char *cat = NULL;
+    const char *lng = NULL;
     uint8_t i = 0u;
     uint8_t j = 0u;
 
-    while (i < 14u && descriptor->base.category &&
-           descriptor->base.category[i]) {
-        editDisplayBuffer[1][2u + i] = descriptor->base.category[i];
+    (void)effects_targetLabels(scene, target, INSTRUMENT_TARGET_AUTOMATION,
+                               NULL, &cat, &lng);
+    while (i < 14u && cat && cat[i]) {
+        editDisplayBuffer[1][2u + i] = cat[i];
         i++;
     }
-    while (i < 14u && descriptor->base.long_name &&
-           descriptor->base.long_name[j])
-        editDisplayBuffer[1][2u + i++] = descriptor->base.long_name[j++];
+    while (i < 14u && lng && lng[j])
+        editDisplayBuffer[1][2u + i++] = lng[j++];
 }
 
 /*
@@ -14311,6 +14333,9 @@ static uint8_t menu_stepAutomationCurrentValue(
             return menu_morphAutomationStore(value);
         if (value > descriptor->max_value)
             value = descriptor->max_value;
+        /* S091 P5: a ranged row's floor. */
+        if (value < effects_descriptorMin(descriptor))
+            value = effects_descriptorMin(descriptor);
         return (value > 127u) ? 127u : value;
     }
     if (instrumentParam_isVoiceParameter(target) &&
@@ -14507,6 +14532,8 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
         instrument_param_id_t vt = autos[page].target;
         const ParamDescriptor *desc = 0;
         uint8_t max_val = 127u;
+        /* min_val (S091 P5): a ranged Effect row's floor, else 0. */
+        uint8_t min_val = 0u;
         int16_t next;
 
         if (instrumentParam_isVoiceParameter(vt) &&
@@ -14544,10 +14571,14 @@ static uint8_t menu_stepAutomationEdit(uint8_t field, int8_t inc)
             /* Effect Pattern values remain seven-bit. */
             max_val = menu_effectAutomationMax(
                 menu_stepAutomationEffectDescriptor(scene, vt));
+            if (!menu_effectAutomationIsWide(
+                    menu_stepAutomationEffectDescriptor(scene, vt)))
+                min_val = effects_descriptorMin(
+                    menu_stepAutomationEffectDescriptor(scene, vt));
         }
         next = (int16_t)autos[page].value + inc;
-        if (next < 0)
-            next = 0;
+        if (next < (int16_t)min_val)
+            next = (int16_t)min_val;
         if (next > (int16_t)max_val)
             next = (int16_t)max_val;
         if ((uint8_t)next == autos[page].value)
@@ -14756,7 +14787,7 @@ static void menu_repaintStepAutomation(void)
                     menu_stepAutomationEffectDescriptor(scene, target);
 
                 if (effect_descriptor)
-                    menu_stepAutomationEffectLabel(effect_descriptor);
+                    menu_stepAutomationEffectLabel(scene, target);
                 else {
                     label = "Invalid";
                     label_width = 7u;
@@ -14799,6 +14830,7 @@ static void menu_repaintStepAutomation(void)
                     numtostrpu(amt_out, display_value, ' ');
                 } else if (menu_stepAutomationIsEffect(target)) {
                     menu_formatEffectAutomationValue3(
+                        scene, target,
                         menu_stepAutomationEffectDescriptor(scene, target),
                         amt_value, amt_out);
                 } else {
@@ -14907,6 +14939,7 @@ static void menu_repaintStepAutomation(void)
             numtostrpu(&editDisplayBuffer[1][13], display_value, ' ');
         } else if (menu_stepAutomationIsEffect(target)) {
             menu_formatEffectAutomationValue3(
+                scene, target,
                 menu_stepAutomationEffectDescriptor(scene, target),
                 autos[page].value, &editDisplayBuffer[1][13]);
         } else {
@@ -15023,6 +15056,9 @@ static void menu_repaintGeneric(void)
                 if (cell.kind == MENU_CELL_INSTRUMENT)
                     menu_instrumentCellLabels(cell.slot, cell.descriptor,
                                               &cat, &lng);
+                /* S091 P6: an Effect row named by the shown variant. */
+                if (cell.kind == MENU_CELL_EFFECT)
+                    menuEffects_cellLabels(&cell.fx, NULL, &cat, &lng);
                 menu_copyPaddedField(&editDisplayBuffer[0][0], cat, 8u);
                 menu_copyPaddedField(&editDisplayBuffer[0][8], lng, 8u);
             } else {
@@ -17253,8 +17289,9 @@ static uint8_t menu_cellClearTarget(uint8_t active_page, uint8_t position,
         !effects_paramAutomatable(effects_activeType(), cell.fx.index))
         return 0u;
     out->pattern_target = effectTarget_id(cell.fx.index);
-    (void)effects_laneOfParam(effects_activeType(), cell.fx.index,
-                               &out->fx_lane);
+    /* S091 P3: the active Scene record's lane table (per sub-type). */
+    (void)effects_laneOfParam(scene_effectConst(scene_getActiveIndex()),
+                              cell.fx.index, &out->fx_lane);
     return 1u;
 }
 

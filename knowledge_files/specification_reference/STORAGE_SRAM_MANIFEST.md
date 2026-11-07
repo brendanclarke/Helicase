@@ -4,17 +4,40 @@ Where every byte of the STM32F765VIH6's on-chip storage goes: program flash,
 sample flash, ITCM, DTCM, SRAM1 and SRAM2. It also records the rules for
 changing any of it.
 
-- **Current as of:** Session 090 P2 (2026-10-31, hardware pending),
-  `dev-ph7-voice_expansion`. DEV link: `text=684,968`, `data=420`,
-  `bss=413,020`; flash payload 685,388 B of 753,664 B
-  (**headroom 68,276 B**). ITCM 15,240 / 16,384 B; DTCM statics 4,372 B;
-  FXBUF arena margin 3,808 B. The entries below run newest first.
+- **Current as of:** Session 091 P6 (2026-11-06),
+  `dev-ph7-voice_expansion`. DEV link: `text=712,264`, `data=420`,
+  `bss=413,284`; flash payload 712,684 B of 753,664 B
+  (**headroom 40,980 B**). ITCM 15,240 / 16,384 B; FXBUF 126,656 B at
+  `0x20001140` (margin 3,776 B). The entries below run newest first.
+- **S091 P5 changes (2026-11-05):** CrumpBit sub-type efficiencies
+  (`S091_P5_IMPLEMENTATION.md`).
+  - **Added (approved Q4):** `crumpBit_dataLines` (**256 B**) and
+    `crumpBit_dataLinesKey` (**4 B**) SRAM1 `.bss` (`CrumpBitEffect.c`):
+    stage 1's data-line table and the `bof`/`biv` key it was built for.
+    Measured `.bss` 413,016 -> 413,284 B (+268 with alignment), text
+    +456 B; the runtime stays 100 B and FXBUF stays 126,656 B at
+    `0x20001140`.
+- **S091 P6 changes (2026-11-06):** labels hook, `dly` delay time table,
+  `grn` tap fade, parameter cleanup.
+  - **No new RAM.** `.bss` 413,284 B and `.data` 420 B unchanged from P5.
+    Flash image 710,876 -> 712,684 B (+1,808 B); flash payload 712,684 B
+    of 753,664 B (**headroom 40,980 B**). ITCM 15,240 B and FXBUF
+    126,656 B at `0x20001140` unchanged.
 - **S090 P5 changes (2026-11-01):** Load/Save batching, watchdog, idle window
   (`S090_P5_IMPLEMENTATION.md`).
   - **Added (approved, Q5):** `fs_ls_wd_signature` + `fs_ls_wd_mark`, **2 B**
     SRAM1 `.bss` (`filesystem.c`), every build; `fs_trace_owner_op` +
     `fs_trace_owner_phase`, **2 B** SRAM1 `.bss`, `DEV_MODE_LOGGING` only.
     DEV link bss 413,020 -> 413,028 (alignment); text 690,072.
+- **S090 P3 changes (2026-10-31):** Load/Save defect correction — Save-page
+  names, input lock during index reads, Scene Save freeze from FAT directory
+  bloat (`S090_P3_LOAD_SAVE_DEFECT_CORRECTION.md`).
+  - **Added (approved):** `refused_run` in `sdcardTransportSnapshot_t`,
+    **2 B** SRAM1 `.bss` (`sdcard_lxr02.c`): consecutive refused READ/WRITE
+    commands, part of the stall snapshot. The 50,000-poll HCNAMES/Flush Finish
+    stall bound shares the existing Flush Finish observer statics (0 B new).
+  - **Stack only:** `afatfsTrimTail_t` and directory-trim locals (boot only).
+  - Build after P3: text 688,936, bss 413,020. Logging off: text 668,856.
 - **S090 P2 changes (2026-10-31):** Load/Save drops AutoSave; start-up
   AutoSave work moves before audio (`S090_P2_IMPLEMENTATION.md`).
   - **Added (approved):** `autosave_boot_hold`, **1 B** SRAM1 `.bss`
@@ -70,6 +93,16 @@ changing any of it.
     S089 P0. DTCM is unchanged. This is the layout-shift pattern named in
     `S089_P0_NEW_SRR_DISABLE.md` F4; if hardware misbehaves with every slot
     on `T+D`, suspect layout before the fold code.
+- **S089 P3 changes (2026-10-30):** Drum FM depth ramp efficiency.
+  - ITCM: 13,032 → **15,240 B** (+2,208 B): four ramped FM carrier twins
+    in `.itcm.s089p3` (`osc_smpFmRampBlock`, `osc_slpFmRampBlock`,
+    `osc_wtbFmBlendRampBlock`, `osc_wtbFmRampBlock`). Placed after
+    `.itcm.s089` by the linker script; all existing ITCM addresses stable.
+    ITCM free: **1,144 B**.
+  - Program flash: text 681,232 → **683,512 B** (+2,280 B): the dispatcher
+    `osc_renderTypedFmRamp()` in flash, plus the Drum `fm` branch rewrite.
+  - `.data` 424 B and `.bss` 412,884 B unchanged from P2.
+  - No new RAM. Engine structs unchanged.
 - **S088 P1 changes (2026-10-29):** fader smoothing and float-through
   distortion.
   - DTCM: `mixer_fader_smooth[6]` (24 B, `INDTCMZ`) for the block-rate
@@ -331,6 +364,7 @@ is 128 KiB, sectors 5–11 are 256 KiB.
 
 - **Window:** `0x08008000–0x080BFFFF` (753,664 B), sectors 1–6. Session 073
   added sector 6 (it was sample storage before); the window was 480 KiB.
+- **Use at the S091 P6 DEV link:** 712,684 B; **headroom 40,980 B**.
 - **Use at the S086 close DEV link:** 659,296 B; **headroom 94,368 B**
   (S085 close 139,704 B; S086 added the 45,056 B stock tables).
 - **Use at the S075 close DEV link:** 532,824 B; headroom 220,840 B.
@@ -694,7 +728,7 @@ DTCM is single-cycle, uncached, and not reachable by DMA.
 | `audioOutBuffer`, `audioOutBuffer2` | 1,536 each | `.dtcmz`; the two render slots per DAC, `sample_mx_t`, written by the mixer and read by the DMA ISR's pack |
 | `velocityModulators` | 264 | `.dtcmz`; six velocity modulation nodes |
 | `mixer_fx_bus` | 256 | `.dtcmz`; two 32-frame channels, `sample_mx_t` while voices sum, float while the Effect runs |
-| `effects_runtime` | 76 | `.dtcmz`; union holding the active Effect type's DSP state (StereoFilter 76 B: two filter states; CrumpBit 56 B, S074). Only 20 B spare before the union grows. |
+| `effects_runtime` | 100 | `.dtcmz`; union holding the active Effect type's DSP state (StereoFilter 76 B: two filter states; CrumpBit 100 B since S091 P4: 54 B shared (S091 P5 removed two ramp-origin bytes; 2 B padding) + 44 B sub-engine union (the `grn` member holds the Position-fit cache in the bytes its echo DC blocker held); +24 B of the user-approved +32 B over 76 B). No spare: a larger member grows the union. |
 | `busComp` | 32 | `.dtcmz` (S074); master bus compressor state: smoothed power, fast and memory gain reduction, previous gain, pending sidechain weight, crossover low-pass per channel, active pair. Approved up to 32 B; `_Static_assert(<= 32)`. Owner `BusCompressor.c`. |
 | ~~`osc_interp_a`, `osc_interp_b`~~ | ~~64 each~~ | removed S087 P1; 128 B released to arena |
 | `modNode_interpLastStamp`, `modNode_interpReserved` | 1 + 1 | `.dtcmz` (S087); wavetable interpolation slot management |
@@ -715,10 +749,14 @@ DTCM is single-cycle, uncached, and not reachable by DMA.
   the bottom and up to twelve 4,416 B voice units (2,208 16-bit samples,
   50.06 ms at 44,108 Hz; at most two per Instrument slot) from the top. The
   Effect share is at least 73,600 B with all twelve units claimed. CrumpBit
-  (S074), the first arena user, takes 70,592 B of it. The
+  (S074), the first arena user, takes the whole share up to
+  `CRUMPBIT_LOOP_MAX_BYTES` = 126,656 B (S091 P3 N1; in the S091 P4 build
+  FXBUF is 126,656 B at `0x20001140`, the boundary crossed as assumed). It
+  is elastic; its Rate is
+  clamped to the share. The
   system never clears the arena: an owner clears what it reads unless it
   adopts content the handoff record marks valid. Details:
-  `EFFECTS_BUS_REFERENCE.md` §7 and `EFFECTS_MIXER_DSP_REFERENCE.md`.
+  `EFFECTS_BUS_REFERENCE.md` §7 and `EFFECTS_MODULES_DSP_REFERENCE.md` §3.
 - `sine_table` (8,194 B) moved from DTCM to flash in S072; `transientData`
   is flash-resident too.
 
@@ -737,7 +775,7 @@ DTCM is single-cycle, uncached, and not reachable by DMA.
 - MPU region 1 covers the first 4 KB of SRAM1 as **Normal non-cacheable**
   (TEX=001, C=0, B=0, S=1, XN=1) since Session 073; it was Strongly-Ordered
   before. Stores are bufferable, so the pack ISR ends with `DSB`
-  (`EFFECTS_MIXER_DSP_REFERENCE.md`).
+  (`MIXER_SYSTEM_DSP_REFERENCE.md` §3.4).
 - The whole section must stay ≤ 4,096 B (linker ASSERT).
 
 ### 8.2 Resident SRAM1 owners
@@ -811,6 +849,7 @@ byte, including alignment and small variables omitted here.
 | `FxBuffer.c`: `fxbuf_state` | 28 | Linker arena base/size, twelve unit owners, count, and share callback. |
 | `FxBuffer.c`: `fxbuf_handoffRecord` | 180 | Effect/voice handoff metadata and arena-relative positions. |
 | `EffectsManager.c`: `effects_state` | 80 | Active type/Scene, force flag, 64-byte last-applied image, FX step/selection state, sequence signature, and common runtime values (84 B before S081 removed the held-Morph latch). |
+| `CrumpBitEffect.c`: `crumpBit_dataLines`, `crumpBit_dataLinesKey` | 260 | 256 B stage 1 data-line table (`(c & keep) ^ invert` per ADC code) plus a 4 B key (`bit_off | bit_invert << 8`; a `0xFFFFFFFF` sentinel forces the first build). Rebuilt only on a `bof`/`biv` change; owner `CrumpBitEffect.c` (S091 P5 X2, approved Q4, 2026-11-05). |
 | `EffectsManager.c`: `effects_automation` | 120 | Effect Pattern overlays (active/value), `menuHold` (`u64`) + `menuHoldMorph`, `fxm` override, and 6 × 2 base-independent LFO contribution entries (184 B before S081 removed the owner/end masks). |
 | `sequencer.c`: `seq_fxEvent` | 1 | TIM3-to-foreground newest-wins RESET/STEP latch; no Scene, DSP, or LED work occurs in the ISR. |
 | `sequencer.c`: `seq_effectAutomationReset` | 1 | Reset latch for the foreground Effect overlay drain (also set by `seq_requestEffectOverlayReset()` at a realign, S081). `seq_effectAutomationTracks` was removed in S081 with the step markers. |
