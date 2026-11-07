@@ -59,9 +59,10 @@ def find_function(text, name):
 
 
 def find_object(text, name):
-    # name[...] = {, also inside a declarator such as (* const name[])[1024]
+    # name[...] = {, also name[11][1024] = { (S093) and inside a declarator
+    # such as (* const name[])[1024]
     m = re.search(r'^[^\n;#]*\b' + re.escape(name) +
-                  r'\s*\[[^\]]*\]\s*(?:\)\s*(?:\[[^\]]*\]\s*)*)?=\s*\{',
+                  r'\s*(?:\[[^\]]*\]\s*)+(?:\)\s*(?:\[[^\]]*\]\s*)*)?=\s*\{',
                   text, re.M)
     if not m:
         return None

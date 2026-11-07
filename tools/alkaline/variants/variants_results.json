@@ -1,0 +1,1350 @@
+{
+ "B0": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 0,
+   "GAU1": 1,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 318.0,
+   "vdiv": 3.0,
+   "mem": 76.0,
+   "mov": 39.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.116,
+    "level_db": -0.042
+   },
+   "acid_x4": {
+    "lsd60": 0.371,
+    "level_db": -0.059
+   },
+   "acid_x8": {
+    "lsd60": 3.448,
+    "level_db": 0.189
+   },
+   "lowres_x1": {
+    "lsd60": 0.129,
+    "level_db": -0.006
+   },
+   "lowres_x4": {
+    "lsd60": 0.482,
+    "level_db": -0.009
+   }
+  }
+ },
+ "A0": {
+  "flags": {
+   "MODEL": 0,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 0,
+   "GAU1": 1,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 246.0,
+   "vdiv": 2.0,
+   "mem": 65.0,
+   "mov": 28.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.334,
+    "level_db": -0.073
+   },
+   "acid_x4": {
+    "lsd60": 1.175,
+    "level_db": -0.105
+   },
+   "acid_x8": {
+    "lsd60": 4.795,
+    "level_db": 0.169
+   },
+   "lowres_x1": {
+    "lsd60": 0.066,
+    "level_db": -0.016
+   },
+   "lowres_x4": {
+    "lsd60": 0.676,
+    "level_db": -0.03
+   }
+  }
+ },
+ "B_xtail": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 1,
+   "GAU1": 1,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 325.0,
+   "vdiv": 3.0,
+   "mem": 77.0,
+   "mov": 41.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.116,
+    "level_db": -0.042
+   },
+   "acid_x4": {
+    "lsd60": 0.354,
+    "level_db": -0.059
+   },
+   "acid_x8": {
+    "lsd60": 0.572,
+    "level_db": -0.032
+   },
+   "lowres_x1": {
+    "lsd60": 0.129,
+    "level_db": -0.006
+   },
+   "lowres_x4": {
+    "lsd60": 0.482,
+    "level_db": -0.009
+   }
+  }
+ },
+ "B_gau1": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 0,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 310.0,
+   "vdiv": 3.0,
+   "mem": 75.0,
+   "mov": 36.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.117,
+    "level_db": -0.052
+   },
+   "acid_x4": {
+    "lsd60": 0.369,
+    "level_db": -0.072
+   },
+   "acid_x8": {
+    "lsd60": 3.447,
+    "level_db": 0.177
+   },
+   "lowres_x1": {
+    "lsd60": 0.131,
+    "level_db": -0.022
+   },
+   "lowres_x4": {
+    "lsd60": 0.482,
+    "level_db": -0.023
+   }
+  }
+ },
+ "B_p32rung": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 0,
+   "GAU1": 1,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 300.0,
+   "vdiv": 3.0,
+   "mem": 69.0,
+   "mov": 36.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.1,
+    "level_db": -0.045
+   },
+   "acid_x4": {
+    "lsd60": 0.438,
+    "level_db": -0.064
+   },
+   "acid_x8": {
+    "lsd60": 3.614,
+    "level_db": 0.188
+   },
+   "lowres_x1": {
+    "lsd60": 0.113,
+    "level_db": -0.007
+   },
+   "lowres_x4": {
+    "lsd60": 0.397,
+    "level_db": -0.008
+   }
+  }
+ },
+ "B_noclamp": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 0,
+   "XIN_TAIL": 0,
+   "GAU1": 1,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 314.0,
+   "vdiv": 3.0,
+   "mem": 77.0,
+   "mov": 42.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.116,
+    "level_db": -0.042
+   },
+   "acid_x4": {
+    "lsd60": 0.371,
+    "level_db": -0.059
+   },
+   "acid_x8": {
+    "lsd60": 3.448,
+    "level_db": 0.189
+   },
+   "lowres_x1": {
+    "lsd60": 0.129,
+    "level_db": -0.006
+   },
+   "lowres_x4": {
+    "lsd60": 0.482,
+    "level_db": -0.009
+   }
+  }
+ },
+ "B_p32io": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 54,
+   "PADE_IO": 32,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 0,
+   "GAU1": 1,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 315.0,
+   "vdiv": 3.0,
+   "mem": 74.0,
+   "mov": 42.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.134,
+    "level_db": -0.002
+   },
+   "acid_x4": {
+    "lsd60": 1.081,
+    "level_db": -0.002
+   },
+   "acid_x8": {
+    "lsd60": 4.048,
+    "level_db": 0.35
+   },
+   "lowres_x1": {
+    "lsd60": 0.062,
+    "level_db": 0.01
+   },
+   "lowres_x4": {
+    "lsd60": 0.45,
+    "level_db": 0.063
+   }
+  }
+ },
+ "B_split": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 0,
+   "GAU1": 1,
+   "SPLIT": 1,
+   "UNROLL": 1,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 337.0,
+   "vdiv": 4.0,
+   "mem": 52.0,
+   "mov": 48.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.132,
+    "level_db": -0.045
+   },
+   "acid_x4": {
+    "lsd60": 0.371,
+    "level_db": -0.059
+   },
+   "acid_x8": {
+    "lsd60": 3.447,
+    "level_db": 0.188
+   },
+   "lowres_x1": {
+    "lsd60": 0.131,
+    "level_db": -0.007
+   },
+   "lowres_x4": {
+    "lsd60": 0.483,
+    "level_db": -0.01
+   }
+  }
+ },
+ "B_unroll": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 0,
+   "GAU1": 1,
+   "SPLIT": 0,
+   "UNROLL": 2,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 334.0,
+   "vdiv": 3.0,
+   "mem": 80.5,
+   "mov": 43.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.116,
+    "level_db": -0.042
+   },
+   "acid_x4": {
+    "lsd60": 0.371,
+    "level_db": -0.059
+   },
+   "acid_x8": {
+    "lsd60": 3.448,
+    "level_db": 0.189
+   },
+   "lowres_x1": {
+    "lsd60": 0.129,
+    "level_db": -0.006
+   },
+   "lowres_x4": {
+    "lsd60": 0.482,
+    "level_db": -0.009
+   }
+  }
+ },
+ "B_half": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 0,
+   "GAU1": 1,
+   "SPLIT": 0,
+   "UNROLL": 2,
+   "RUNG_HALF": 1
+  },
+  "cost": {
+   "insn": 308.0,
+   "vdiv": 3.0,
+   "mem": 86.5,
+   "mov": 33.5
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.119,
+    "level_db": -0.045
+   },
+   "acid_x4": {
+    "lsd60": 0.395,
+    "level_db": -0.062
+   },
+   "acid_x8": {
+    "lsd60": 3.277,
+    "level_db": 0.183
+   },
+   "lowres_x1": {
+    "lsd60": 0.151,
+    "level_db": -0.006
+   },
+   "lowres_x4": {
+    "lsd60": 0.956,
+    "level_db": -0.012
+   }
+  }
+ },
+ "B_r1": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 0,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 286.0,
+   "vdiv": 3.0,
+   "mem": 68.0,
+   "mov": 31.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.098,
+    "level_db": -0.056
+   },
+   "acid_x4": {
+    "lsd60": 0.419,
+    "level_db": -0.078
+   },
+   "acid_x8": {
+    "lsd60": 0.564,
+    "level_db": -0.041
+   },
+   "lowres_x1": {
+    "lsd60": 0.112,
+    "level_db": -0.023
+   },
+   "lowres_x4": {
+    "lsd60": 0.398,
+    "level_db": -0.022
+   }
+  }
+ },
+ "B_r2": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 0,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 1,
+   "UNROLL": 1,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 305.0,
+   "vdiv": 4.0,
+   "mem": 46.0,
+   "mov": 37.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.116,
+    "level_db": -0.059
+   },
+   "acid_x4": {
+    "lsd60": 0.42,
+    "level_db": -0.079
+   },
+   "acid_x8": {
+    "lsd60": 0.564,
+    "level_db": -0.042
+   },
+   "lowres_x1": {
+    "lsd60": 0.12,
+    "level_db": -0.025
+   },
+   "lowres_x4": {
+    "lsd60": 0.401,
+    "level_db": -0.022
+   }
+  }
+ },
+ "B_r3": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 0,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 1,
+   "UNROLL": 2,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 299.0,
+   "vdiv": 4.0,
+   "mem": 52.0,
+   "mov": 37.5
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.116,
+    "level_db": -0.059
+   },
+   "acid_x4": {
+    "lsd60": 0.42,
+    "level_db": -0.079
+   },
+   "acid_x8": {
+    "lsd60": 0.564,
+    "level_db": -0.042
+   },
+   "lowres_x1": {
+    "lsd60": 0.12,
+    "level_db": -0.025
+   },
+   "lowres_x4": {
+    "lsd60": 0.401,
+    "level_db": -0.022
+   }
+  }
+ },
+ "B_r4": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 0,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 1,
+   "UNROLL": 2,
+   "RUNG_HALF": 1
+  },
+  "cost": {
+   "insn": 288.0,
+   "vdiv": 4.0,
+   "mem": 54.5,
+   "mov": 38.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.12,
+    "level_db": -0.062
+   },
+   "acid_x4": {
+    "lsd60": 0.433,
+    "level_db": -0.082
+   },
+   "acid_x8": {
+    "lsd60": 0.802,
+    "level_db": -0.046
+   },
+   "lowres_x1": {
+    "lsd60": 0.138,
+    "level_db": -0.025
+   },
+   "lowres_x4": {
+    "lsd60": 0.817,
+    "level_db": -0.025
+   }
+  }
+ },
+ "A_r": {
+  "flags": {
+   "MODEL": 0,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 1,
+   "UNROLL": 1,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 259.0,
+   "vdiv": 3.0,
+   "mem": 39.0,
+   "mov": 34.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.334,
+    "level_db": -0.087
+   },
+   "acid_x4": {
+    "lsd60": 1.16,
+    "level_db": -0.121
+   },
+   "acid_x8": {
+    "lsd60": 1.782,
+    "level_db": -0.037
+   },
+   "lowres_x1": {
+    "lsd60": 0.07,
+    "level_db": -0.034
+   },
+   "lowres_x4": {
+    "lsd60": 0.677,
+    "level_db": -0.044
+   }
+  }
+ },
+ "A_ru": {
+  "flags": {
+   "MODEL": 0,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 1,
+   "UNROLL": 2,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 264.0,
+   "vdiv": 3.0,
+   "mem": 51.5,
+   "mov": 38.5
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.334,
+    "level_db": -0.087
+   },
+   "acid_x4": {
+    "lsd60": 1.16,
+    "level_db": -0.121
+   },
+   "acid_x8": {
+    "lsd60": 1.782,
+    "level_db": -0.037
+   },
+   "lowres_x1": {
+    "lsd60": 0.07,
+    "level_db": -0.034
+   },
+   "lowres_x4": {
+    "lsd60": 0.677,
+    "level_db": -0.044
+   }
+  }
+ },
+ "A1": {
+  "flags": {
+   "MODEL": 2,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 1,
+   "GAU1": 1,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 284.0,
+   "vdiv": 2.0,
+   "mem": 75.0,
+   "mov": 34.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.091,
+    "level_db": -0.051
+   },
+   "acid_x4": {
+    "lsd60": 0.746,
+    "level_db": -0.091
+   },
+   "acid_x8": {
+    "lsd60": 1.294,
+    "level_db": -0.077
+   },
+   "lowres_x1": {
+    "lsd60": 0.142,
+    "level_db": -0.014
+   },
+   "lowres_x4": {
+    "lsd60": 0.773,
+    "level_db": -0.076
+   }
+  }
+ },
+ "A1_r": {
+  "flags": {
+   "MODEL": 2,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 1,
+   "UNROLL": 1,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 266.0,
+   "vdiv": 3.0,
+   "mem": 48.0,
+   "mov": 38.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.118,
+    "level_db": -0.067
+   },
+   "acid_x4": {
+    "lsd60": 0.775,
+    "level_db": -0.107
+   },
+   "acid_x8": {
+    "lsd60": 1.359,
+    "level_db": -0.082
+   },
+   "lowres_x1": {
+    "lsd60": 0.138,
+    "level_db": -0.032
+   },
+   "lowres_x4": {
+    "lsd60": 0.752,
+    "level_db": -0.084
+   }
+  }
+ },
+ "A1_ru": {
+  "flags": {
+   "MODEL": 2,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 1,
+   "UNROLL": 2,
+   "RUNG_HALF": 0
+  },
+  "cost": {
+   "insn": 286.0,
+   "vdiv": 3.0,
+   "mem": 53.5,
+   "mov": 43.5
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.118,
+    "level_db": -0.067
+   },
+   "acid_x4": {
+    "lsd60": 0.775,
+    "level_db": -0.107
+   },
+   "acid_x8": {
+    "lsd60": 1.359,
+    "level_db": -0.082
+   },
+   "lowres_x1": {
+    "lsd60": 0.138,
+    "level_db": -0.032
+   },
+   "lowres_x4": {
+    "lsd60": 0.752,
+    "level_db": -0.084
+   }
+  }
+ },
+ "B_n1": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 1,
+   "GAU1": 1,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0,
+   "NET1": 1,
+   "Q21_LIN": 0
+  },
+  "cost": {
+   "insn": 299.0,
+   "vdiv": 3.0,
+   "mem": 63.0,
+   "mov": 39.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.153,
+    "level_db": -0.105
+   },
+   "acid_x4": {
+    "lsd60": 0.385,
+    "level_db": -0.186
+   },
+   "acid_x8": {
+    "lsd60": 0.594,
+    "level_db": -0.189
+   },
+   "lowres_x1": {
+    "lsd60": 0.149,
+    "level_db": 0.079
+   },
+   "lowres_x4": {
+    "lsd60": 0.489,
+    "level_db": 0.106
+   }
+  }
+ },
+ "B_q21": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 1,
+   "GAU1": 1,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0,
+   "NET1": 0,
+   "Q21_LIN": 1
+  },
+  "cost": {
+   "insn": 307.0,
+   "vdiv": 3.0,
+   "mem": 76.0,
+   "mov": 39.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.145,
+    "level_db": -0.038
+   },
+   "acid_x4": {
+    "lsd60": 0.522,
+    "level_db": -0.041
+   },
+   "acid_x8": {
+    "lsd60": 0.537,
+    "level_db": 0.012
+   },
+   "lowres_x1": {
+    "lsd60": 0.137,
+    "level_db": 0.004
+   },
+   "lowres_x4": {
+    "lsd60": 0.521,
+    "level_db": 0.096
+   }
+  }
+ },
+ "B_n1r": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 0,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0,
+   "NET1": 1,
+   "Q21_LIN": 0
+  },
+  "cost": {
+   "insn": 261.0,
+   "vdiv": 3.0,
+   "mem": 54.0,
+   "mov": 30.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.138,
+    "level_db": -0.119
+   },
+   "acid_x4": {
+    "lsd60": 0.426,
+    "level_db": -0.204
+   },
+   "acid_x8": {
+    "lsd60": 0.55,
+    "level_db": -0.198
+   },
+   "lowres_x1": {
+    "lsd60": 0.145,
+    "level_db": 0.063
+   },
+   "lowres_x4": {
+    "lsd60": 0.413,
+    "level_db": 0.094
+   }
+  }
+ },
+ "B_n1rq": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 0,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0,
+   "NET1": 1,
+   "Q21_LIN": 1
+  },
+  "cost": {
+   "insn": 237.0,
+   "vdiv": 3.0,
+   "mem": 52.0,
+   "mov": 24.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.16,
+    "level_db": -0.115
+   },
+   "acid_x4": {
+    "lsd60": 0.578,
+    "level_db": -0.185
+   },
+   "acid_x8": {
+    "lsd60": 0.592,
+    "level_db": -0.154
+   },
+   "lowres_x1": {
+    "lsd60": 0.161,
+    "level_db": 0.072
+   },
+   "lowres_x4": {
+    "lsd60": 0.492,
+    "level_db": 0.196
+   }
+  }
+ },
+ "A_n1": {
+  "flags": {
+   "MODEL": 0,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0,
+   "NET1": 1,
+   "Q21_LIN": 0
+  },
+  "cost": {
+   "insn": 224.0,
+   "vdiv": 2.0,
+   "mem": 55.0,
+   "mov": 26.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.324,
+    "level_db": -0.148
+   },
+   "acid_x4": {
+    "lsd60": 1.117,
+    "level_db": -0.25
+   },
+   "acid_x8": {
+    "lsd60": 1.771,
+    "level_db": -0.204
+   },
+   "lowres_x1": {
+    "lsd60": 0.096,
+    "level_db": 0.053
+   },
+   "lowres_x4": {
+    "lsd60": 0.681,
+    "level_db": 0.071
+   }
+  }
+ },
+ "A_n1q": {
+  "flags": {
+   "MODEL": 0,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0,
+   "NET1": 1,
+   "Q21_LIN": 1
+  },
+  "cost": {
+   "insn": 206.0,
+   "vdiv": 2.0,
+   "mem": 56.0,
+   "mov": 24.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.305,
+    "level_db": -0.144
+   },
+   "acid_x4": {
+    "lsd60": 1.26,
+    "level_db": -0.232
+   },
+   "acid_x8": {
+    "lsd60": 1.976,
+    "level_db": -0.166
+   },
+   "lowres_x1": {
+    "lsd60": 0.097,
+    "level_db": 0.063
+   },
+   "lowres_x4": {
+    "lsd60": 0.876,
+    "level_db": 0.172
+   }
+  }
+ },
+ "A1_n1": {
+  "flags": {
+   "MODEL": 2,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0,
+   "NET1": 1,
+   "Q21_LIN": 0
+  },
+  "cost": {
+   "insn": 254.0,
+   "vdiv": 2.0,
+   "mem": 62.0,
+   "mov": 33.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.123,
+    "level_db": -0.128
+   },
+   "acid_x4": {
+    "lsd60": 0.777,
+    "level_db": -0.235
+   },
+   "acid_x8": {
+    "lsd60": 1.37,
+    "level_db": -0.246
+   },
+   "lowres_x1": {
+    "lsd60": 0.164,
+    "level_db": 0.055
+   },
+   "lowres_x4": {
+    "lsd60": 0.758,
+    "level_db": 0.033
+   }
+  }
+ },
+ "A1_n1q": {
+  "flags": {
+   "MODEL": 2,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0,
+   "NET1": 1,
+   "Q21_LIN": 1
+  },
+  "cost": {
+   "insn": 228.0,
+   "vdiv": 2.0,
+   "mem": 60.0,
+   "mov": 26.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.141,
+    "level_db": -0.123
+   },
+   "acid_x4": {
+    "lsd60": 0.94,
+    "level_db": -0.216
+   },
+   "acid_x8": {
+    "lsd60": 1.559,
+    "level_db": -0.206
+   },
+   "lowres_x1": {
+    "lsd60": 0.188,
+    "level_db": 0.065
+   },
+   "lowres_x4": {
+    "lsd60": 0.921,
+    "level_db": 0.134
+   }
+  }
+ },
+ "B_n1rq_hold": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 0,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0,
+   "NET1": 1,
+   "Q21_LIN": 1,
+   "RRAMP": 0,
+   "OTA_P32": 0
+  },
+  "cost": {
+   "insn": 228.0,
+   "vdiv": 3.0,
+   "mem": 46.0,
+   "mov": 23.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.49,
+    "level_db": -0.086
+   },
+   "acid_x4": {
+    "lsd60": 1.132,
+    "level_db": -0.121
+   },
+   "acid_x8": {
+    "lsd60": 1.102,
+    "level_db": -0.077
+   },
+   "lowres_x1": {
+    "lsd60": 1.079,
+    "level_db": 0.055
+   },
+   "lowres_x4": {
+    "lsd60": 2.323,
+    "level_db": 0.164
+   }
+  }
+ },
+ "B_n1rq_ota32": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 0,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0,
+   "NET1": 1,
+   "Q21_LIN": 1,
+   "RRAMP": 1,
+   "OTA_P32": 1
+  },
+  "cost": {
+   "insn": 230.0,
+   "vdiv": 3.0,
+   "mem": 47.0,
+   "mov": 24.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.186,
+    "level_db": -0.109
+   },
+   "acid_x4": {
+    "lsd60": 0.69,
+    "level_db": -0.142
+   },
+   "acid_x8": {
+    "lsd60": 0.636,
+    "level_db": -0.071
+   },
+   "lowres_x1": {
+    "lsd60": 0.174,
+    "level_db": 0.078
+   },
+   "lowres_x4": {
+    "lsd60": 0.574,
+    "level_db": 0.245
+   }
+  }
+ },
+ "B_n1rq_unroll": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 0,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 2,
+   "RUNG_HALF": 0,
+   "NET1": 1,
+   "Q21_LIN": 1,
+   "RRAMP": 1,
+   "OTA_P32": 0
+  },
+  "cost": {
+   "insn": 244.5,
+   "vdiv": 3.0,
+   "mem": 57.0,
+   "mov": 26.5
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.16,
+    "level_db": -0.115
+   },
+   "acid_x4": {
+    "lsd60": 0.578,
+    "level_db": -0.185
+   },
+   "acid_x8": {
+    "lsd60": 0.592,
+    "level_db": -0.154
+   },
+   "lowres_x1": {
+    "lsd60": 0.161,
+    "level_db": 0.072
+   },
+   "lowres_x4": {
+    "lsd60": 0.492,
+    "level_db": 0.196
+   }
+  }
+ },
+ "B_n1rq_half": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 0,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 2,
+   "RUNG_HALF": 1,
+   "NET1": 1,
+   "Q21_LIN": 1,
+   "RRAMP": 1,
+   "OTA_P32": 0
+  },
+  "cost": {
+   "insn": 233.5,
+   "vdiv": 3.0,
+   "mem": 61.5,
+   "mov": 25.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.167,
+    "level_db": -0.118
+   },
+   "acid_x4": {
+    "lsd60": 0.581,
+    "level_db": -0.189
+   },
+   "acid_x8": {
+    "lsd60": 0.678,
+    "level_db": -0.159
+   },
+   "lowres_x1": {
+    "lsd60": 0.177,
+    "level_db": 0.072
+   },
+   "lowres_x4": {
+    "lsd60": 0.815,
+    "level_db": 0.193
+   }
+  }
+ },
+ "A_xtail": {
+  "flags": {
+   "MODEL": 0,
+   "PADE_RUNG": 54,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 1,
+   "GAU1": 1,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0,
+   "NET1": 0,
+   "Q21_LIN": 0,
+   "RRAMP": 1,
+   "OTA_P32": 0
+  },
+  "cost": {
+   "insn": 258.0,
+   "vdiv": 2.0,
+   "mem": 69.0,
+   "mov": 32.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.334,
+    "level_db": -0.073
+   },
+   "acid_x4": {
+    "lsd60": 1.156,
+    "level_db": -0.106
+   },
+   "acid_x8": {
+    "lsd60": 1.781,
+    "level_db": -0.024
+   },
+   "lowres_x1": {
+    "lsd60": 0.066,
+    "level_db": -0.016
+   },
+   "lowres_x4": {
+    "lsd60": 0.676,
+    "level_db": -0.03
+   }
+  }
+ }
+}

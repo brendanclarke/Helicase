@@ -28,6 +28,11 @@
 #               sampleoptimize      modules/sampleoptimize.py
 #               special_tags        check_special_tags.py
 #               stock_tables        tools/plots/gen_stock_tables.py --check
+#               alkaline            modules/alkaline.c (S093 P0: DiodeLadder,
+#                                   AlkalineControl, AlkalineVoice over the
+#                                   real Oscillator.c; + 1 break: legato
+#                                   ignored must fail AL-S)
+#               alkaline_tables     tools/alkaline/gen_alk_tables.py --check
 #             A break build compiles a deliberately broken copy and must fail.
 # Why:        keeps the laws earlier sessions proved runnable against today's
 #             source. The effects retry kit is spike/ (its own Makefile).
@@ -51,10 +56,10 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
 .PHONY: all clean oscillator modulation voice_control sequencer \
         instrument_manager samples sampleoptimize run_modes special_tags \
         stock_tables voicefold fold_tables crumpbit crumpbit_tables \
-        crumpbit_elf_check crumpbit_cpu_check
+        crumpbit_elf_check crumpbit_cpu_check alkaline alkaline_tables
 all: oscillator modulation voice_control sequencer instrument_manager samples \
      sampleoptimize run_modes special_tags stock_tables voicefold fold_tables \
-     crumpbit crumpbit_tables
+     crumpbit crumpbit_tables alkaline alkaline_tables
 
 $(GEN):
 	mkdir -p $(GEN)
@@ -264,6 +269,46 @@ voicefold: | $(GEN)
 	@if ./build/voicefold_break >/dev/null 2>&1; then \
 	  echo "voicefold_break: FAILED (DC-term break not caught)"; exit 1; \
 	else echo "voicefold_break: caught (law F3 fails as expected)"; fi
+
+# S093 P0: the Alkaline engine (DiodeLadder.c, AlkalineControl.c,
+# AlkalineVoice.c, the generated tables) over the whole real Oscillator.c and
+# the real sawTable. Laws AL-B, AL-R, AL-S, AL-N, AL-AB (modules/alkaline.c).
+# Break: the legato rule ignored (every note retriggers) must fail AL-S.
+ALK := $(ROOT)/Core/DSP/Instruments/Alkaline
+ALK_GEN := $(GEN)/DiodeLadder.host.h $(GEN)/DiodeLadder.host.c \
+           $(GEN)/AlkalineControl.host.h $(GEN)/AlkalineControl.host.c \
+           $(GEN)/AlkalineTables.host.h $(GEN)/AlkalineTables.host.c \
+           $(GEN)/AlkalineSquareTable.host.c \
+           $(GEN)/AlkalineVoice.host.h $(GEN)/AlkalineVoice.host.c \
+           $(GEN)/alk_sawTable.c
+alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/DiodeLadder.h --body --out $(GEN)/DiodeLadder.host.h
+	$(EX) --src $(ROOT)/Core/DSPAudio/DiodeLadder.c --body --out $(GEN)/DiodeLadder.host.c
+	$(EX) --src $(ALK)/AlkalineControl.h --body --out $(GEN)/AlkalineControl.host.h
+	$(EX) --src $(ALK)/AlkalineControl.c --body --out $(GEN)/AlkalineControl.host.c
+	$(EX) --src $(ALK)/AlkalineTables.h --body --out $(GEN)/AlkalineTables.host.h
+	$(EX) --src $(ALK)/AlkalineTables.c --body --out $(GEN)/AlkalineTables.host.c
+	$(EX) --src $(ALK)/AlkalineSquareTable.c --body --out $(GEN)/AlkalineSquareTable.host.c
+	$(EX) --src $(ALK)/AlkalineVoice.h --body --out $(GEN)/AlkalineVoice.host.h
+	$(EX) --src $(ALK)/AlkalineVoice.c --body --out $(GEN)/AlkalineVoice.host.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object sawTable --out $(GEN)/alk_sawTable.raw.c
+	sed 's/const int16_t sawTable/int16_t sawTable/' $(GEN)/alk_sawTable.raw.c > $(GEN)/alk_sawTable.c
+	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c $(CAT_HOST_SRC) \
+	  -o build/alkaline -lm
+	./build/alkaline
+	mkdir -p build/break_alk
+	sed 's/const uint8_t legato = (uint8_t)(voice->slideLatch \&\& voice->gateLeft > 0);/const uint8_t legato = 0u;/' \
+	  $(GEN)/AlkalineVoice.host.c > build/break_alk/AlkalineVoice.host.c
+	@grep -q 'legato = 0u;' build/break_alk/AlkalineVoice.host.c || \
+	  { echo "alkaline_break: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break -lm
+	@if ./build/alkaline_break >/dev/null 2>&1; then \
+	  echo "alkaline_break: FAILED (legato break not caught)"; exit 1; \
+	else echo "alkaline_break: caught (law AL-S fails as expected)"; fi
+
+alkaline_tables:
+	cd $(ROOT) && python3 tools/alkaline/gen_alk_tables.py --check
 
 fold_tables:
 	cd $(ROOT) && python3 tools/plots/gen_fold_tables.py --check

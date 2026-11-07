@@ -1,0 +1,62 @@
+/*
+ * AlkalineControl.h - TB-303 control path at control rate (S093 P0).
+ *
+ * What:       the per-block state equations of S092_P6_DSP_EQUATIONS.md §4:
+ *             the expo converter (knobs -> ladder current), the MEG (C62 and
+ *             N53), the accent network (VR7 wiper shared by the C13 sweep and
+ *             the C36 VCA accent branch), the VEG (C42) and the TPT prewarp.
+ *             Ports of alk_model.py expo_current(), Meg, AccentNet, Veg and
+ *             prewarp() with the same constants and iteration counts.
+ * Why:        the validated model (S092 P6 V3, V5) is the reference; the C
+ *             keeps its structure so tools/alkaline/check_c.py can compare
+ *             block by block.
+ * Inputs:     knob values 0..1 (descriptor bytes / 127), the accent and gate
+ *             lanes, the previous block's expo node.
+ * Outputs:    the ladder current, the OTA control current, the VR4b wiper.
+ * Accessors:  AlkalineVoice.c (Alkaline_calcVoiceAsync, Alkaline_triggerVoice).
+ * Cost:       control rate only, the same work every block: no step depends
+ *             on a knob value except the MEG strike (a 1.3 ms state, like a
+ *             trigger) and the VEG attack window.
+ */
+#ifndef ALKALINECONTROL_H_
+#define ALKALINECONTROL_H_
+
+#include <stdint.h>
+
+#define ALK_DT        (32.0f / 44108.0f)       /* one control block, s */
+
+typedef struct {
+	float v;              /* C62, V */
+	float strikeLeft;     /* s of strike pulse left */
+} AlkMeg;
+
+typedef struct {
+	float v13;            /* C13, V */
+	float v36;            /* C36, V */
+} AlkAccentNet;
+
+typedef struct {
+	float v;              /* C42, V */
+	float delayLeft;      /* s before the trigger starts emptying C42 */
+	float attLeft;        /* s of discharge left */
+} AlkVeg;
+
+float alk_taper(float r);
+float alk_expoCurrent(float cut, float env, float n53, float vW4, float *dv);
+
+void  alkMeg_init(AlkMeg *m);
+void  alkMeg_trigger(AlkMeg *m);
+float alkMeg_step(AlkMeg *m, float decay, uint8_t accent);
+float alkMeg_n53(const AlkMeg *m);
+
+void  alkAcc_init(AlkAccentNet *a);
+void  alkAcc_step(AlkAccentNet *a, uint8_t accent, float accKnob, float res,
+                  float n53, float v134, float *vW4, float *iAcc);
+
+void  alkVeg_init(AlkVeg *g);
+void  alkVeg_trigger(AlkVeg *g);
+float alkVeg_step(AlkVeg *g, uint8_t gate);
+
+float alk_prewarp(float iLad, float res);
+
+#endif /* ALKALINECONTROL_H_ */
