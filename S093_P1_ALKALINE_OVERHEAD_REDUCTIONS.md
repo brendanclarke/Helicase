@@ -14,12 +14,23 @@
   - Each is costed on the M7 and heard against the golden model at drive
     ×1, ×4 and ×8.
   - Porting the chosen form into `DiodeLadder.c` is the next step (§7).
-- **Result:**
+- **Correction (S093, measured after this document):** every "fits" in
+  this document compares **audio loops only**. Each engine's per-block work
+  must be added, divided by 32: Drum ≈ 413 per block, Cymbal/HiHat ≈ 525,
+  Alkaline ≈ 3,010 as built. With it, and with render entry/exit counted
+  on both sides:
+  - B-R + the Tier 1/Tier 2 control-path cuts ≈ 285–288 per sample, against
+    Drum ≈ 275+ and Cymbal/HiHat ≈ 290+;
+  - A-R ≈ 261–264.
+
+  **B-R does not fit under Drum; A-R does.** The authoritative figures are
+  `S093_P2_ALKALINE_B-R_PRE_IMPLEMENTATION.md` §3A.4 and §8.
+- **Result (audio loops only, superseded by the correction above):**
   - A reduced option B ("B-R") costs **237 instructions per sample + 3
     VDIV** (261 with the oscillator). That is **inside the Cymbal/HiHat
     envelope (≈ 270 + 4 VDIV)**, with full drive behaviour, and 4 over the
     Basic ceiling.
-  - A cheaper OTA tanh brings it to 230 (254), just under Basic, at a small
+  - A cheaper OTA tanh brings it to 230 (254), just under Drum's audio loop, at a small
     cost in accuracy.
   - Option A gains drive only partly by emulation. The cheapest A ("A-R")
     is 206 (230), comfortably Basic.
@@ -32,10 +43,10 @@
 |---|---:|---:|---:|---|---|---|
 | S093 P0 option B, with the clamp fix (§2.1) | 325 | 349 | 3 | Neither | 0.12 / 0.35 / 0.57, 0.13 / 0.48 | 1.995 / 0.368 (the period is one sample shorter) |
 | **B-R** (`B_n1rq`) | **237** | **261** | 3 | **Cymbal/HiHat (≈ 270)** | 0.16 / 0.58 / 0.59, 0.16 / 0.49 | 2.018 / 0.372 |
-| B-R with the [3/2] OTA (`B_n1rq_ota32`) | 230 | 254 | 3 | Basic, by 3 (Drum ≈ 257) | 0.19 / 0.69 / 0.64, 0.17 / 0.57 | 2.018 / 0.372 |
+| B-R with the [3/2] OTA (`B_n1rq_ota32`) | 230 | 254 | 3 | Audio loop only: 3 under Drum's. **With per-block work: ≈ 285–288 with the control-path cuts, over Drum (≈ 275+)** | 0.19 / 0.69 / 0.64, 0.17 / 0.57 | 2.018 / 0.372 |
 | S093 P0 option A, with the clamp fix (`A_xtail`) | 258 | 282 | 2 | Neither (Cymbal/HiHat by instructions +12, with 2 fewer VDIV) | 0.33 / 1.16 / 1.78, 0.07 / 0.68 | — |
-| **A-R** (`A_n1q`) | **206** | **230** | 2 | **Basic, 27 spare** | 0.30 / 1.26 / 1.98, 0.10 / 0.88 | 2.018 / 0.370 |
-| A1-R, A with rung 0 nonlinear (`A1_n1q`) | 228 | 252 | 2 | Basic, by 5 | 0.14 / 0.94 / 1.56, 0.19 / 0.92 | 2.018 / 0.372 |
+| **A-R** (`A_n1q`) | **206** | **230** | 2 | **Audio loop: 27 under Drum's; with per-block work and cuts ≈ 261–264, fits Basic** | 0.30 / 1.26 / 1.98, 0.10 / 0.88 | 2.018 / 0.370 |
+| A1-R, A with rung 0 nonlinear (`A1_n1q`) | 228 | 252 | 2 | Audio loop only: 5 under Drum's | 0.14 / 0.94 / 1.56, 0.19 / 0.92 | 2.018 / 0.372 |
 
 **Findings:**
 
@@ -287,6 +298,9 @@ close to SPICE as before, and its ring is closer to SPICE's.
 
 ## 6. Where the candidates land
 
+**Superseded (S093):** this table is audio loops only. The totals with
+per-block work are in `S093_P2` §3A.4.
+
 Per-sample instructions with the oscillator (24); VDIV in brackets. The
 envelopes are S093 P0 §6.5's (Drum includes SRR; Alkaline has none).
 
@@ -334,6 +348,7 @@ unchanged from S093 P0 §6.2.
 |---|---|---|
 | **D2′** | The Alkaline filter | **Decided (user, S093): B-R, fitted under Drum.** The form is `B_n1rq_ota32`: B-R with the [3/2] OTA tanh, 230 per sample + 24 oscillator = 254, 3 VDIV, against Drum's ≈ 257. A-R stays as the documented fallback |
 | **D2″** | Control path (added after measurement) | **Decided (user, S093): Tier 1 + Tier 2 control-path reductions** (`S093_P2` §3A). The figures in §0 and §6 above are audio-loop only; the per-block control path adds about 94 per sample as built and 16–19 after the reductions (`S093_P2` §8, §3A.4) |
+| **D2‴** | The Alkaline filter, final | **Decided (user, S093): B2R as Basic** (`S093_P2` §3.5, §3B): rungs 0–1 nonlinear, loop 209, total ≈ 264–267 against Drum ≈ 275+. Supersedes D2′/D15's "B-R under Drum" |
 | **D15** | Instrument class | **Decided (user, S093): Basic, for a listening trial.** Afterwards, either reduce further, or go Advanced (replacing Cymbal/HiHat in a Scene) and add post-distortion/FX types in the margin (B-R without the [3/2] OTA is 261, 9 inside Cymbal/HiHat) |
 | **D16** | Drive range | ×1 to ×8 (modelled); the mapping is in `S093_P2` §6 |
 | **D17** | Output full scale | 7 V |

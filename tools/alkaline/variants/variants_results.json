@@ -1005,7 +1005,9 @@
    "UNROLL": 1,
    "RUNG_HALF": 0,
    "NET1": 1,
-   "Q21_LIN": 1
+   "Q21_LIN": 1,
+   "RRAMP": 1,
+   "OTA_P32": 0
   },
   "cost": {
    "insn": 206.0,
@@ -1344,6 +1346,186 @@
    "lowres_x4": {
     "lsd60": 0.676,
     "level_db": -0.03
+   }
+  }
+ },
+ "BR_half": {
+  "flags": {
+   "MODEL": 1,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 0,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 2,
+   "RUNG_HALF": 1,
+   "NET1": 1,
+   "Q21_LIN": 1,
+   "RRAMP": 1,
+   "OTA_P32": 1
+  },
+  "cost": {
+   "insn": 226.5,
+   "vdiv": 3.0,
+   "mem": 53.0,
+   "mov": 28.5
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.189,
+    "level_db": -0.112
+   },
+   "acid_x4": {
+    "lsd60": 0.706,
+    "level_db": -0.146
+   },
+   "acid_x8": {
+    "lsd60": 0.799,
+    "level_db": -0.076
+   },
+   "lowres_x1": {
+    "lsd60": 0.19,
+    "level_db": 0.078
+   },
+   "lowres_x4": {
+    "lsd60": 0.909,
+    "level_db": 0.242
+   }
+  }
+ },
+ "B2R": {
+  "flags": {
+   "MODEL": 3,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 0,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0,
+   "NET1": 1,
+   "Q21_LIN": 1,
+   "RRAMP": 1,
+   "OTA_P32": 1
+  },
+  "cost": {
+   "insn": 209.0,
+   "vdiv": 3.0,
+   "mem": 42.0,
+   "mov": 25.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.197,
+    "level_db": -0.111
+   },
+   "acid_x4": {
+    "lsd60": 0.883,
+    "level_db": -0.18
+   },
+   "acid_x8": {
+    "lsd60": 0.901,
+    "level_db": -0.212
+   },
+   "lowres_x1": {
+    "lsd60": 0.222,
+    "level_db": 0.067
+   },
+   "lowres_x4": {
+    "lsd60": 1.145,
+    "level_db": 0.111
+   }
+  }
+ },
+ "B2R_half": {
+  "flags": {
+   "MODEL": 3,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 0,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 2,
+   "RUNG_HALF": 1,
+   "NET1": 1,
+   "Q21_LIN": 1,
+   "RRAMP": 1,
+   "OTA_P32": 1
+  },
+  "cost": {
+   "insn": 214.0,
+   "vdiv": 3.0,
+   "mem": 51.0,
+   "mov": 28.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.195,
+    "level_db": -0.114
+   },
+   "acid_x4": {
+    "lsd60": 0.881,
+    "level_db": -0.183
+   },
+   "acid_x8": {
+    "lsd60": 0.856,
+    "level_db": -0.213
+   },
+   "lowres_x1": {
+    "lsd60": 0.227,
+    "level_db": 0.067
+   },
+   "lowres_x4": {
+    "lsd60": 1.269,
+    "level_db": 0.11
+   }
+  }
+ },
+ "A1R_ota32": {
+  "flags": {
+   "MODEL": 2,
+   "PADE_RUNG": 32,
+   "PADE_IO": 54,
+   "RUNG_CLAMP": 1,
+   "XIN_TAIL": 1,
+   "GAU1": 0,
+   "SPLIT": 0,
+   "UNROLL": 1,
+   "RUNG_HALF": 0,
+   "NET1": 1,
+   "Q21_LIN": 1,
+   "RRAMP": 1,
+   "OTA_P32": 1
+  },
+  "cost": {
+   "insn": 220.0,
+   "vdiv": 2.0,
+   "mem": 56.0,
+   "mov": 24.0
+  },
+  "sound": {
+   "acid_x1": {
+    "lsd60": 0.163,
+    "level_db": -0.117
+   },
+   "acid_x4": {
+    "lsd60": 1.005,
+    "level_db": -0.174
+   },
+   "acid_x8": {
+    "lsd60": 1.493,
+    "level_db": -0.126
+   },
+   "lowres_x1": {
+    "lsd60": 0.199,
+    "level_db": 0.071
+   },
+   "lowres_x4": {
+    "lsd60": 0.935,
+    "level_db": 0.181
    }
   }
  }

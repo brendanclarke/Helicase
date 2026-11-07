@@ -5,7 +5,9 @@
  *             reduction can be costed (ARM, fpseq-style loop counts) and
  *             heard (host, against the golden RK4 model) on its own:
  *               MODEL      0 = A (linear rungs), 1 = B (all rungs), 2 = A1
- *                          (rung 0 nonlinear, its secant one sample later)
+ *                          (rung 0 nonlinear, its secant one sample later),
+ *                          3 = B2 (rungs 0 and 1 nonlinear, 2 and 3 linear;
+ *                          per-sample continuants as B)
  *               PADE_RUNG  54 / 32: [5/4] or [3/2] Pade for the rung secants
  *               PADE_IO    54 / 32: the same for the input pair and Q21
  *               RUNG_CLAMP 1 / 0: clamp the rung arguments
@@ -170,6 +172,8 @@ static inline __attribute__((always_inline)) void step(Loc *L, int16_t *bj, cons
 	const float d01 = x0 - x1, d12 = x1 - x2, d23 = x2 - x3;
 #if MODEL == 1
 	const float t0 = L->t0, t1 = L->t1, t2 = L->t2, t3 = L->t3;
+#elif MODEL == 3
+	const float t0 = L->t0, t1 = L->t1, t2 = 1.0f, t3 = 1.0f;
 #elif MODEL == 2
 	const float t0 = L->tl0, t1 = 1.0f, t2 = 1.0f, t3 = 1.0f;
 #else
@@ -181,8 +185,8 @@ static inline __attribute__((always_inline)) void step(Loc *L, int16_t *bj, cons
 	const float r2 = x2 + w1 * (a1 - a2);
 	const float r3 = x3 + w1 * (a2 - a3) + KL * (KG * L->zo - L->vhpL);
 	const float e0 = w0 * t0, e1 = w1 * t0, e2 = w1 * t1, e3 = w1 * t2;
-#if MODEL == 1
-	/* B: this sample's continuants, own reciprocal */
+#if MODEL == 1 || MODEL == 3
+	/* B / B2: this sample's continuants, own reciprocal */
 	const float th1 = 1.0f + e0;
 	const float th2 = (1.0f + e1 + e2) * th1 - e1 * e0;
 	const float th3 = (1.0f + e2 + e3) * th2 - e2 * e2 * th1;
@@ -294,6 +298,40 @@ static inline __attribute__((always_inline)) void step(Loc *L, int16_t *bj, cons
 #endif
 #if !SPLIT
 		L->tota = nG * iG;
+#endif
+	} else {
+		float r = 1.0f / prod;
+#if !SPLIT
+		const float iG = r * (dE * dF);
+		r *= dG;
+		L->tota = nG * iG;
+#endif
+		L->tin = nE * r * dF;
+#if !Q21_LIN
+		L->tout = nF * r * dE;
+#endif
+	}
+#elif MODEL == 3
+	const int doR = RUNG_HALF ? !odd : 1;
+	const float zA = n0 - n1, zB = n1 - n2;
+	const float sA = zA * zA, sB = zB * zB;
+	const float nA = RPN(sA), dA = RPD(sA), nB = RPN(sB), dB = RPD(sB);
+	if (doR) {
+		const float pAB = dA * dB;
+		float r = 1.0f / (pAB * prod);
+		const float iP = r * pAB;      r *= prod;    /* r = 1/(dA dB) */
+		L->t1 = nB * r * dA;
+		L->t0 = nA * r * dB;
+#if !SPLIT
+		const float iG = iP * (dE * dF);
+		const float iEF = iP * dG;
+		L->tota = nG * iG;
+#else
+		const float iEF = iP;
+#endif
+		L->tin = nE * iEF * dF;
+#if !Q21_LIN
+		L->tout = nF * iEF * dE;
 #endif
 	} else {
 		float r = 1.0f / prod;
