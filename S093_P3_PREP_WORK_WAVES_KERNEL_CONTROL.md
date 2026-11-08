@@ -74,8 +74,8 @@ join.
 - **Not in the figure** (pool-limited system-wide, as S092 P0 §1.1): the
   `itp` old-carrier copy (15 per sample for 132 samples) and the wavetable
   blend.
-- **Record:** `build/s093p3/drum_freeze.txt` (not committed; `build/` is a
-  work area).
+- **Record:** `tools/dsp_test/baselines/s093p3/drum_freeze.txt` (tracked;
+  moved out of `build/`, which `make clean` removes, in S093 P5).
 
 ---
 

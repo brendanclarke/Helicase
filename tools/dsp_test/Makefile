@@ -351,14 +351,16 @@ alkaline_tables:
 # Why:        MEMORY.md (S089 ceiling): adding Alkaline must not lengthen any
 #             other engine's per-sample loop. The S086 targets were removed in
 #             f3805478; this is their replacement against a P4 baseline.
-# Inputs:     FW_ELF (default: the firmware build output); P4BASE (the
+# Inputs:     FW_ELF (default: the firmware build output); P4BASE (the tracked
 #             baseline folder).
 # Outputs:    $(P4BASE)/osc.txt, $(P4BASE)/mixer.txt; build/p4_*_now.txt;
 #             exit 1 on a MISSING or GREW.
 # Accessors:  make -C tools/dsp_test elf_p4_snapshot | elf_p4_check.
 # Affiliates: elf_loopdump.py, elf_hotloops.py, elf_loopsrc.py; S093_P3 §2.3.
 FW_ELF ?= $(ROOT)/build/lxr02.elf
-P4BASE ?= $(ROOT)/build/s093p4
+# The baselines are records, so they live in the tree, not in a build folder:
+# the root `make clean` removes $(ROOT)/build (S093 P5).
+P4BASE ?= baselines/s093p4
 P4_OSC_SYMS := SVF_calcBlockZDF calcFmBlock calcNextOscSampleBlock \
   calcNextOscSampleRingBlock calcNextOscSampleSyncBlock calcNoiseRingBlock \
   calcSampleOscFmBlock calcSampleOscRingBlock calcSampleOscSyncBlock \

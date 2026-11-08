@@ -249,7 +249,7 @@ Add `elf_p4_snapshot elf_p4_check seq_steplen` to the `.PHONY` list
 
 ```
 make all                                             # the P3 image (Alkaline not linked)
-make -C tools/dsp_test elf_p4_snapshot               # build/s093p4/{osc,mixer}.txt
+make -C tools/dsp_test elf_p4_snapshot               # tools/dsp_test/baselines/s093p4/{osc,mixer}.txt (S093 P5: was build/s093p4)
 cp build/lxr02.elf build/s093p4/base.elf
 make BUILD=build/s093p4/dbg MCU="-mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard -g" \
      build/s093p4/dbg/lxr02.elf                      # the -g twin (P5 §3.2)

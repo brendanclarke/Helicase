@@ -99,7 +99,7 @@ data 420 B, bss 413,280 B; flash headroom 49,412 B; ITCM 14,552 B.
 - `control_cost.py --elf` (G4) with the A4 audio-loop weight:
   async 872 + sync block 332 + dispatch 14 = 1,218, 9 VDIV.
 - `elf_loopsrc.py` (G6/G7 source attribution) and the P4 Drum ceiling
-  re-measurement (`build/s093p4/drum_ceiling.txt`).
+  re-measurement (`tools/dsp_test/baselines/s093p4/drum_ceiling.txt`).
 - Gates G1-G8: G1 clean (headroom 49,412 B; R1 +2 B), G2 all host laws,
   G3 214/3 VDIV, G4 1,218/9, G5 252.1 <= 261.3, G6 0 hot loops grew,
   G7 93/93 exact and osc_setFreq 128, G8 14,552 (+40, A1).

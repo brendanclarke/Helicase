@@ -400,7 +400,7 @@ for s in Drum_calcVoiceAsync slopeEg2_calc osc_setFreq instrumentManager_calcSlo
   python3 tools/dsp_test/elf_blockpath.py --elf build/lxr02.elf --sym $s; done
 ```
 
-Write the result as `build/s093p4/drum_ceiling.txt`, using the P3 §1 table
+Write the result as `tools/dsp_test/baselines/s093p4/drum_ceiling.txt` (a record, so not under `build/`), using the P3 §1 table
 form.
 
 ### 3.4 Gates G1–G8
@@ -950,3 +950,24 @@ here.
 
 **Unchanged:** the regeneration path itself. For a genuinely invalid
 register, flagging every row unproven is its design.
+
+**Records moved out of `build/` (user, S093).**
+- `make clean` removed `build/`, and commit `ac3241e0` recorded the loss of
+  the S093 records that the schedule had put there. The four that a re-run
+  cannot recreate were restored from `0d2aed78` into the tree:
+  - `tools/dsp_test/baselines/s093p3/drum_freeze.txt`;
+  - `tools/dsp_test/baselines/s093p4/drum_ceiling.txt`, with the P4-image
+    re-measurement (§9.3) appended;
+  - `tools/dsp_test/baselines/s093p4/osc.txt` and `mixer.txt` (the G6/G7
+    baselines, dumped from the P3 image).
+- `tools/dsp_test/Makefile` `P4BASE` now defaults to `baselines/s093p4`.
+  `elf_p4_check` against it passes on the current image: 93 / 93 exact; 30
+  hot loops, 0 grew.
+- The references in P3 §1, P4 §2.2, P5 §3.3, `INSTRUMENTS_DSP_REFERENCE.md`
+  and the 093 log point at the new paths. The rule is in `MEMORY.md`.
+- Still in `build/`, because commands regenerate them:
+  - the experiment copies (`control_cost.py`, `listen_bc.py`,
+    `listen_net.py` recreate them);
+  - the `-g` twins and `base.elf`. A base twin for `elf_loopsrc.py
+    --compare` must be rebuilt from `db98c287` in a separate worktree.
+- Historical lines in P4 §8 and P5 §8 still name `build/` as it was then.

@@ -311,6 +311,11 @@ Not a port of preceding LXR-01 or LXR-02 firmware.
 ## General Process Reminders
 
 - Always verify the local working repository directory before writing code.
+- **Nothing needed goes in `build/` (user, S093):** `make clean` removes
+  `build/`. Records, baselines, reference images and anything a later step
+  or document points at live in the tree (measurement records and loop
+  baselines: `tools/dsp_test/baselines/<session>/`). `build/` holds only
+  outputs a command regenerates (images, objects, scratch).
 - **No unverified items in a handed-over plan (user, S093):** anything that
   can be checked in the tree (a name, a line, a file format, a tool option, a
   include chain) is checked before the plan or schedule is handed over; "to

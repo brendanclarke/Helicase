@@ -1435,7 +1435,7 @@ measured on the linked image; the per-block part is counted by
 | G4 dispatch | 14 | 0 | `instrumentManager_calcSlotAsync` |
 | G4 per block | 1,218 | 9 | |
 | G5 whole voice | 214 + 1,218/32 = 252.1 | 3 + 9/32 | |
-| Drum ceiling (frozen and P4 re-measured) | 222.5 + 922/32 + 10 = 261.3 | 3 | `build/s093p4/drum_ceiling.txt` |
+| Drum ceiling (frozen and P4 re-measured) | 222.5 + 922/32 + 10 = 261.3 | 3 | `tools/dsp_test/baselines/s093p4/drum_ceiling.txt` |
 
 The stub-link count is 1,285 (async 915 + sync block 356 + dispatch 14). LTO
 inlines the fixed-count control helpers on the linked image, so the linked
