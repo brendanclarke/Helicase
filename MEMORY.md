@@ -295,6 +295,10 @@ Not a port of preceding LXR-01 or LXR-02 firmware.
 ## General Process Reminders
 
 - Always verify the local working repository directory before writing code.
+- **No unverified items in a handed-over plan (user, S093):** anything that
+  can be checked in the tree (a name, a line, a file format, a tool option, a
+  include chain) is checked before the plan or schedule is handed over; "to
+  confirm" lists are only for what needs the device or the user's ear.
 - **Header dependency tracking is active (S070).** The Makefile uses
   `-MMD -MP` plus `-include $(OBJS:.o=.d)`, so editing a header triggers
   recompilation. `make clean` is no longer required after header edits.
