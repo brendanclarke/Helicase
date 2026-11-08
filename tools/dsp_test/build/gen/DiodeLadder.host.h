@@ -59,21 +59,40 @@
  * One Resonance point of the real-time network, form N1 (S093 P1 §5),
  * generated.
  *
- * What:       the block system z' = phi z + gam_rows0..7 . w_mean (8 states,
- *             physical capacitor basis), plus the two asymptote copies (rows
- *             8, 9 of gam; decays ALK_NET_DECAY_U/V); block outputs
- *             r = cs . z - (z8, z9); the asymptote gains ga and the
- *             instantaneous gains d.
+ * What:       the block system z' = phi z + gam_rows0..ALK_NET_STATES-1 .
+ *             w_mean (ALK_NET_STATES states (6, r6: the common balanced
+ *             basis)), plus the two asymptote copies (rows ALK_NET_STATES and
+ *             ALK_NET_STATES+1 of gam; decays ALK_NET_DECAY_U/V); block
+ *             outputs r = cs . z - (the two asymptote states); the asymptote
+ *             gains ga and the instantaneous gains d.
  *             Rows/first index: 0 = u (into Q12), 1 = v (OTA input).
  *             Columns of gam, ga, d: 0 = tp_pre, 1 = s.
  * Why:        every entry depends on Resonance only and varies smoothly with
  *             it, so linear interpolation between points is valid (S092 P6
  *             §5.3). N1 has no per-sample fast modes, so S093 P0's alf, bef
  *             and cf fields are gone.
- * Layout:     108 floats (432 B) per point.
+ * Layout:     72 floats (288 B) per point at r6.
+ */
+/*
+ * Block-system states of the slow network (S093 P3/P4: r6).
+ *
+ * What:       the size of DiodeLadderNet's phi/gam/cs and of the state z[].
+ *             6 = the reduced network on one balanced basis common to all Res
+ *             points (gen_alk_tables.py reduced_basis()); 8 = the physical
+ *             capacitor basis.
+ * Why:        r6 costs about 3.3 instructions per sample less (P3 §9.2 S5),
+ *             its [SN] p7 ring is closer to the golden model (2.018 ms /
+ *             0.363) and it is inaudible against 8 states (-43..-49 dB).
+ *             Measured on the M7: DiodeLadderNet 288 B (432 at 8 states),
+ *             DiodeLadder 232 B (248), AlkalineVoice 540 B (556).
+ * Inputs:     none (compile time). The generated AlkalineTables.h #errors
+ *             when its tables were made for another count.
+ * Outputs:    the layouts of DiodeLadderNet and DiodeLadder.
+ * Affiliates: DL_NET_ROWS (DiodeLadder.c: 6 / 2 phases = 3 rows per block);
+ *             tools/alkaline/gen_alk_tables.py NET_STATES.
  */
 #ifndef ALK_NET_STATES
-#define ALK_NET_STATES 8u    /* block-system states (S093 P3: 6 = a reduced-order experiment) */
+#define ALK_NET_STATES 6u
 #endif
 typedef struct {
 	float phi[ALK_NET_STATES][ALK_NET_STATES];
@@ -89,8 +108,9 @@ typedef struct {
  * What:       x0..x3 the four ladder capacitor voltages / 2 Vt; t0..t3, tin,
  *             tota the secant gains of the previous sample (rungs, input
  *             pair, OTA; B2R keeps t2 = t3 = 1, A-R all four); zo the C27/C25
- *             coupling state (V); qu, qv the asymptote one-poles; z[10] the
- *             block system; rU/rV the block outputs (this block's end and the
+ *             coupling state (V); qu, qv the asymptote one-poles;
+ *             z[ALK_NET_STATES + 2] the block system; rU/rV the block outputs
+ *             (this block's end and the
  *             previous); the previous sample's tp_pre, x_in, v_hp, OTA
  *             argument and I_abc; the ladder current and I_abc reached at the
  *             last block end; the per-block coefficient set (setNet).
@@ -102,7 +122,7 @@ typedef struct {
  *             vStep, rk) over the next window.
  * Why:        S092 P0 §1.3: no state lives across a render outside the voice
  *             struct.
- * Layout:     about 270 B inside the voice's runtime slot (8 states).
+ * Layout:     232 B at r6 (measured, arm-none-eabi-gcc 14.2).
  */
 typedef struct {
 	float x0, x1, x2, x3;

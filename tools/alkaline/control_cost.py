@@ -66,9 +66,17 @@ STUBS = r"""
 #include <stdint.h>
 #include <string.h>
 #include "AlkalineVoice.h"
+#include "modulationNode.h"
 const int16_t sawTable[11][1024];
 const int16_t alkSqrTable[11][1024];
 void lfo_init(Lfo *l) { memset(l, 0, sizeof(*l)); }
+/* S093 P4: the trigger's platform calls (the trigger is not on the block
+ * path, so the stubs only satisfy the link) */
+ModulationNode velocityModulators[6];
+void lfo_retrigger(uint8_t voiceNr) { (void)voiceNr; }
+void modNode_updateValue(ModulationNode *vm, float val) { vm->lastVal = val; }
+void instrumentManager_applyVelocityModulationTarget(uint8_t source_slot, float velocity_0_1)
+{ (void)source_slot; (void)velocity_0_1; }
 void osc_setBaseNote(OscInfo *o, uint8_t n) { o->baseNote = n; }
 void osc_setFreq(OscInfo *o) { o->phaseInc = (uint32_t)o->freq; }
 void osc_setTableFreq(OscInfo *o) { o->phaseInc = (uint32_t)o->freq; }
@@ -81,7 +89,7 @@ int main(void)
 {
 	Alkaline_initVoice(&v);
 	for (;;) {
-		Alkaline_triggerVoice(&v, 101u, 63u, 5514u);
+		Alkaline_triggerVoice(&v, 0u, 101u, 63u, 5514u);
 		Alkaline_calcVoiceAsync(&v);
 		Alkaline_calcVoiceSyncBlock(&v, buf, 32u);
 		if (Alkaline_isQuiet(&v)) break;
@@ -203,7 +211,9 @@ def main():
     ap.add_argument("--kernel", default="renderB2", choices=("renderB2", "renderB", "renderA"))
     ap.add_argument("--tables", default=None, help="a directory with an experiment's AlkalineTables.h/.c")
     ap.add_argument("--define", action="append", default=[], help="-D for the build")
-    ap.add_argument("--rows", type=int, default=4, help="network rows solved per block (DL_NET_ROWS)")
+    ap.add_argument("--rows", type=int, default=3,
+                    help="network rows solved per block (DL_NET_ROWS = ALK_NET_STATES / "
+                         "phases: r6 at 64 samples = 6 / 2 = 3)")
     a = ap.parse_args()
     ITERS[("dl_slowUpdate", 1)] = a.rows      # the latch branch's chunk
     ITERS[("dl_slowUpdate", 2)] = a.rows      # the following branch's chunk (either/or)

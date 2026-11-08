@@ -289,6 +289,31 @@ void seq_setDeltaT(float delta);
 void seq_triggerNextMasterStep(uint8_t stepSize);
 void seq_setBpm(uint16_t bpm);
 uint16_t seq_getBpm(void);
+/*
+ * One step of a track in samples (S093 P4, the Alkaline gate).
+ *
+ * What:       stepScale_ticksQ8(seq_effectiveTrackScale[track]) (96 PPQ,
+ *             Q8.8: a 1/16 is 24 ticks = 6144) at the current tempo, in
+ *             samples at 44,108 Hz (AudioCodecManager.c: PLLI2S N=271, R=2,
+ *             /6), rounded to the nearest:
+ *               samples = ticksQ8 x 44108 x 60 / (256 x 96 x bpm).
+ *             A track >= NUM_TRACKS uses STEP_SCALE_DEFAULT (76, the 1/16).
+ *             BPM 0 is treated as 1.
+ * Why:        the 303 gate is 7/12 of a step (D11) and the ACCENT lane one
+ *             step; the sequencer has no gate, so the engine is told the
+ *             step length at each trigger (S092 P0 §5.4).
+ * Inputs:     track 0..6 (the triggering track; 6 = track 7 on slot 5).
+ *             Reads seq_effectiveTrackScale[] (the Morph-resolved scale,
+ *             S078) and seq_tempo (written only by seq_setBpm(): menu, clock
+ *             sync, trigger jacks).
+ * Outputs:    samples per step, 1..5,292,960 (CC 127 = 8x at 1 BPM).
+ *             120 BPM 1/16 = 5514.
+ * Accessors:  instrumentManager_triggerTrack() (main loop).
+ * Affiliates: StepScale.h; seq_getBpm(); Alkaline_triggerVoice(); host law
+ *             AL-T (tools/dsp_test seq_steplen). Read-only: never writes the
+ *             Pattern region (MEMORY.md S078).
+ */
+uint32_t seq_trackStepSamples(uint8_t track);
 void seq_sync(void);
 uint8_t seq_getExtSync(void);
 void seq_setQuantisation(uint8_t value);

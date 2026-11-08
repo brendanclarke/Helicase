@@ -1877,3 +1877,171 @@ Run the bench targets one by one; the bench `make all` stops at
 
 Left for the device or your ear: the CPU worst case, the make-up level, the
 listening checks, and the storage round trips on real hardware (P5 §4).
+
+---
+
+## 8. Implementation log (this session)
+
+Working tree: HEAD `db98c287` ("alkaline pre-implementation final", the P3
+code). Each entry names the phase gate and the evidence.
+
+### P4-0 (done)
+
+- **r6 applied.** `tools/alkaline/gen_alk_tables.py` `NET_STATES = 6` (the
+  `# was:` line in §2.1 is the schedule's annotation; the committed source
+  carries the new statement and its explanation only).
+  `gen_alk_tables.py` regenerated `AlkalineTables.h/.c`; `--check` passes and
+  `AlkalineSquareTable.c` is byte-identical, as expected.
+- **`DiodeLadder.h`.** `ALK_NET_STATES` is `6u` with the schedule's block
+  comment; layout text is 72 floats (288 B) per point and 232 B for
+  `DiodeLadder`. Also corrected the adjacent stale indices the count change
+  invalidates (`gam_rows0..ALK_NET_STATES-1`, the two asymptote rows,
+  `z[ALK_NET_STATES + 2]`), documentation only.
+- **C0 gate.** `python3 tools/alkaline/check_c.py` (all parts) rerun and the
+  device reference `alk_c_*_B2R.wav` regenerated. B2R against golden, LSD60:
+  acid ×1/×4/×8 = 0.239 / 0.877 / 0.931; lowres = 0.271 / 1.156 /
+  2.244. P3 §9.3 has 0.24 / 0.88 / 0.94 and 0.27 / 1.16 / 2.24: every point
+  within ±0.01 dB. C1/C2 move ≤ 0.03 dB from the 8-state run.
+- **Bench.** `make -C tools/dsp_test alkaline`: AL-R B2R and B-R 2.018 ms /
+  0.363 per ring cycle (was 2.040 / 0.364 at 8 states); all ten groups 0
+  failures; the legato break is still caught (AL-S).
+- **ELF targets.** `tools/dsp_test/Makefile`: `FW_ELF`, `P4BASE`,
+  `P4_OSC_SYMS`, `elf_p4_snapshot`, `elf_p4_check` added after
+  `alkaline_tables`; `elf_p4_snapshot elf_p4_check seq_steplen` added to
+  `.PHONY` (`seq_steplen` lands with P4-1).
+- **Baselines (before any P4-1 code).** `make all`: text 667,072 B, data
+  420 B, bss 413,284 B; flash headroom 86,172 B. `elf_p4_snapshot` wrote
+  `build/s093p4/osc.txt` (85 loops in 44 symbols at first, re-dumped to 93
+  loops in 48 symbols after the `elf_loopdump.py` normalisation below, from
+  the same image) and `mixer.txt` (51 loops); `build/s093p4/base.elf` is the
+  P3 image and
+  `build/s093p4/dbg/lxr02.elf` the `-g` twin (same text/data/bss).
+- **Drum ceiling re-measured on `base.elf`** (P4 §2.2): 51 + 30 + 22 + 2.5
+  + 92 (2 VDIV) + 25 (1 VDIV) = 222.5 per sample; 391 + 531 = 922 per block
+  (/32 = 28.8); SRR 10. Charged 261.3 per sample, 3 VDIV — identical to P3
+  §1. Recorded in `build/s093p4/drum_ceiling.txt`. (`elf_loopsrc.py`, the
+  source-paired GREW check, is a P4-6/P5 §3.2 deliverable and is not in the
+  tree yet.)
+- **Counter default.** `control_cost.py --rows` defaults to 3; the r6 voice
+  measures 1,285 per block (async 915 + sync 356 + dispatch 14), 9 VDIV,
+  40.2 per sample.
+
+### P4-1 (done)
+
+- **Trigger.** `AlkalineVoice.h` carries the new contract and signature;
+  `AlkalineVoice.c` adds the two direct includes (`modulationNode.h`,
+  `InstrumentManager.h`) and `Alkaline_triggerVoice(voice, source_slot,
+  velocity, note, stepSamples)`: the three platform calls of
+  `Drum_triggerVoice()` for `source_slot`, then the unchanged 303 rules. The
+  legato line the bench's break-build sed matches is still verbatim.
+- **Step length.** `sequencer.h` / `sequencer.c` add `seq_trackStepSamples()`
+  (96 PPQ Q8.8 x 44,108 Hz, 64-bit product, nearest sample, default 1/16 for
+  a track >= NUM_TRACKS, BPM 0 as 1), main-loop/read-only.
+- **Bench.** `modules/alkaline.c`: the Lfo stand-in block grew the
+  ModulationNode/InstrumentManager stand-ins with AL-P call counters; all 15
+  trigger calls pass `0u` as the slot; AL-P asserts one LFO retrigger, one
+  velocity target and slot 3 at velocity 127. `alkaline` reports 0 failures
+  in all ten groups (AL-S carries AL-P) and the legato break is still caught.
+- **`control_cost.py`** stubs add the platform calls; the trigger call is the
+  new signature. It still links for the M7 and measures 1,285 per block.
+- **AL-T.** New `modules/seq_steplen.c` and `seq_steplen` target (also in
+  `all:`): table + double-precision reference at 40/120/300 BPM x the 1/32,
+  1/16, 1/8 stops; out-of-range track; 5,292,960 longest step; BPM 0. The
+  generated 32-bit break build fails as designed. `seq_steplen: OK (0
+  failures)`.
+
+### P4-2 (done)
+
+- **`AlkalineParameters.h/.c`** added exactly as §4.1/§4.2: 26 rows (10
+  303/drive, vol/pan, 8 LFO, 2 velocity, 4 targets), eight `alkaline_menu_pages`
+  (OSC, empty amp, velocity, empty FM, empty transient, FILTER, LFO, MIX),
+  the display label/type flags, and the `_Static_assert`s (26 rows, fits 64
+  cells, 8 pages). `ROW_SELECT_ONOFF` is spelt without a `NONE` tag, as
+  required by `check_special_tags.py`'s `actual()`.
+- **Menu text.** `MenuText.h`: `ONOFF_TAG_ALK_WAVE 3u` and `alkWaveNames`
+  (Saw, Sqr). `menu.c`: `menu_onoffTagNames()` is a three-way switch and the
+  count assert follows the `voiceChainNames` assert. The six callers are
+  unchanged and take the range from `names[0][0]`.
+- **Host registry check.** `check_special_tags.py` gains `TABLES['ALK']`,
+  `ENUM`, `REGISTRY`, `registry_check()` and `bad = registry_check()` in
+  `main()`; `special_tags` now also runs `make_init_alk.py --check`.
+  **Ordering note:** between §4.4 and §5.3 the registry check can only see
+  the old non-designated rows, so the gate is red until P4-3 lands (it then
+  reads `[INSTRUMENT_TYPE_*]`). Final result after P4-3: `special tags OK
+  (197 rows, 0 mismatches)`; the init check matches.
+- **Init defaults.** `Alkaline_initVoice()` now loads the exact bytes of
+  `init.alk` (64/127 for the five 303 knobs, 63/127 tuning, drive 0, vol
+  100/127); pan, Saw and slide were already equal.
+- **`init.alk`.** `tools/alkaline/make_init_alk.py` added and run;
+  `SD_CARD/Instrument/Alkaline/init.alk` is 54 lines, LF, 26 `[params]` keys
+  and the 20 `[morph]` rows (`MORPHABLE` macros only), with `self` for the two
+  LFO voices and `255` for the target selectors. `--check` byte-compares it
+  to the table.
+- **Load label.** `menu_instrumentLoadCopyTypeLabel()` truncates the base
+  label to five before appending `Mrp`: Drum `DrumMrp `, HiHat `HiHatMrp`,
+  Cymbal now `CymbaMrp` (was `CymbalMr`), Alkaline `AlkalMrp`.
+
+### P4-3 (done)
+
+- `INSTRUMENT_TYPE_ALK` = 4 before `UNKNOWN` (= 5), with the full comment
+  block (arrays, guards, text-only storage, one-time `.hcnames` rebuild).
+- `InstrumentManager.c`: the two includes, the five designated registry rows
+  plus the ALK row and the count assert, the union member and its
+  `_Static_assert`, `instrumentManager_alkalineRuntime()`, and every listed
+  dispatch site (instance, LFO, runtime init, Scene reset, pan, volume,
+  async, sync block with the noinline/timing comment, trigger with the
+  `trigger_track` step length, `osc()` key form, `oscBySelector()`), plus the
+  Alkaline branch in `instrumentManager_ampEnvelopeQuiet()`. The
+  `registryCount()` comment now says rows are indexed by type.
+- The §5.7 sites are untouched; the build's `_Static_assert`s and
+  `special_tags` confirm the registry order/tokens, and the device
+  diagnostic path (`classifySpecialKey`) matches every ALK row.
+
+### P4-4 (done)
+
+- **Makefile:** `-ICore/DSP/Instruments/Alkaline`, `AlkalineParameters.c` in
+  `SRCS`, the four engine/table files in `DSP_SRCS` after `BusCompressor.c`,
+  `DiodeLadder.c` after `Decay.c`, and four per-file `-Ofast` rules after the
+  HiHat rule. `DiodeLadder.c` uses the `Core/DSPAudio/%.o` rule.
+- **`storageTypes.h`:** `STORAGE_INSTRUMENT_ALK`. **`storageTypes.c`:**
+  `storage_instrumentTypeToText()` is a registry lookup, so all five types
+  save and the `.hcnames` header walk gains `alk` and still stops at
+  `UNKNOWN` (NULL).
+- **Build (fresh `BUILD=build/s093p4/final`, identical to `make all`):**
+  text 703,832 B, data 420 B, bss 413,280 B; flash headroom **49,412 B**
+  (>= 16 KiB); ITCM 14,552 B; DTCM statics 4,392 B; FXBUF margin 3,776 B;
+  no warnings from the changed sources.
+- **RAM:** `menu_instrumentLoadIndex` 8 -> 10 B (**+2 B, R1**). The `.bss`
+  section total is unchanged (the +2 sits in its alignment slack); the
+  summary's `bss` figure is 4 B lower because LTO re-groups the
+  `modNode_*` DTCM zeroed symbols (.dtcmz 3,884 -> 3,880 B). No other
+  type-sized array exists (`rg '\[INSTRUMENT_TYPE_UNKNOWN'` finds only this
+  one).
+- **G2 (host laws), one by one:** `special_tags` (197 rows/0), `alkaline`
+  (ten groups/0, AL-S break caught), `alkaline_tables`, `oscillator`,
+  `sequencer`, `seq_steplen` (AL-T break caught), `stock_tables` all pass.
+- **`elf_p4_check`:** 93 baseline loops, **93 exact, 0 renamed, 0 missing**;
+  the mixer compares **30 hot loops equal, 0 grew** (no Alkaline loop leaked
+  into `mixer_calcNextSampleBlock`; the `noinline` boundary held).
+- **G3/G7 static figures:** `DiodeLadder_renderB2Osc` is inlined into
+  `Alkaline_calcVoiceSyncBlock.constprop.0`, whose fused loop is **214**
+  (expected ~213) with **3 VDIV**; `Alkaline_calcVoiceAsync`'s longest static
+  path is 872 (its loops are added by control_cost's `--elf` mode in P5);
+  `osc_setFreq`'s per-block path stays **128**.
+- **G6/G7 tooling correction (not in the literal schedule, documented here):**
+  LTO renamed the four existing wavetable blend functions to
+  `*.lto_priv.0` and moved long-branch/veneer distances when the fifth engine
+  joined, so `elf_loopdump.py` reported 15 loop bodies MISSING although every
+  per-sample loop is unchanged (46/47/48 instructions by `elf_looppath.py`).
+  `elf_loopdump.py` now (a) strips `.lto_priv.N` in `SUFFIX` like
+  `elf_looppath.py` already does and (b) writes a branch to a target outside
+  the body as `+EXIT` (layout, not loop cost). The baseline was re-dumped
+  from the same `base.elf` with the same extractor, so both sides are
+  normalised identically; the 93/93 result above is against that dump.
+- **G8 observation:** ITCM is **14,552 B, +40 B** over the P3 image. No ITCM
+  function or subsection was added: the four `.itcm.s087` blend functions
+  keep their per-sample loop lengths but grew 10-18 B each in their entry
+  code after `AlkalineVoice.c`'s new `modulationNode` references changed LTO
+  symbol internalisation/addressing. 1,832 B of ITCM remains; phase 2 should
+  record this against G8's "unchanged" wording (it is LTO layout, not new
+  ITCM code).

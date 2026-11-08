@@ -10,6 +10,8 @@
 
 
 
+
+
 /* slide lag: tau = 100 k x 0.22 uF = 22 ms (S092 P0 A9); kept per block */
 #define ALK_SLIDE_KEEP   0.967561f      /* e^(-0.7255 ms / 22 ms) */
 /* VCO -> volts at S1 (S092 P6 §3.6): sawTable ramps +-32,625 LSB for the
@@ -33,14 +35,19 @@ void Alkaline_initVoice(AlkalineVoice *voice)
 	alkVeg_init(&voice->veg);
 	lfo_init(&voice->lfo);
 
-	voice->cutoff = 0.5f;
-	voice->reso = 0.5f;
-	voice->envMod = 0.5f;
-	voice->decay = 0.5f;
-	voice->accent = 0.5f;
+	/* S093 P4: the bytes of SD_CARD/Instrument/Alkaline/init.alk, as TYPE_FLT
+	 * stores them (byte / 127), so a voice before its first apply and a
+	 * freshly loaded init.alk are the same sound: the five 303 knobs at 64
+	 * (the nearest byte to half rotation), Tuning at its centre 63, drive 0
+	 * (x1), vol 100 */
+	voice->cutoff = 64.0f / 127.0f;
+	voice->reso = 64.0f / 127.0f;
+	voice->envMod = 64.0f / 127.0f;
+	voice->decay = 64.0f / 127.0f;
+	voice->accent = 64.0f / 127.0f;
 	voice->tuning = 63.0f / 127.0f;
 	voice->drive = 0.0f;
-	voice->vol = 0.8f;
+	voice->vol = 100.0f / 127.0f;
 	voice->pan = 63u;
 	voice->wave = ALK_WAVE_SAW;
 	voice->slide = 0u;
@@ -65,25 +72,50 @@ void Alkaline_initVoice(AlkalineVoice *voice)
  * S092 P0 §5.3 / §5.4: accent from velocity; legato when the previous note
  * was slide-flagged and its gate is still held; the slide flag is latched
  * for the next trigger; the gate is 7/12 of a step, or the whole step plus
- * the next step's gate after a slide-flagged note.
+ * the next step's gate after a slide-flagged note. S093 P4: the platform
+ * part first, as Drum_triggerVoice(). Contract: AlkalineVoice.h.
  */
-void Alkaline_triggerVoice(AlkalineVoice *voice, const uint8_t velocity,
-                           const uint8_t note, const uint32_t stepSamples)
+void Alkaline_triggerVoice(AlkalineVoice *voice, const uint8_t source_slot,
+                           const uint8_t velocity, const uint8_t note,
+                           const uint32_t stepSamples)
 {
+	/* the velocity as the modulation system's 0..1 value (Drum: vol/127.f) */
+	const float vel = (float)velocity * (1.0f / 127.0f);
+	/* the normal gate: 7/12 of the step (3.5 of 6 clocks, D11), rounded to
+	 * the nearest sample; counted down by 32 per block, so it stays open for
+	 * every block that starts before its end (S093 P0 §5.3) */
 	const int32_t gate = (int32_t)((stepSamples * ALK_GATE_NUM + ALK_GATE_DEN / 2u)
 	                               / ALK_GATE_DEN);
+	/* legato: the previous note asked to slide (latched at its trigger) and
+	 * its gate is still open; a slide into a rest closes the gate first */
 	const uint8_t legato = (uint8_t)(voice->slideLatch && voice->gateLeft > 0);
 
+	/* --- platform part (S093 P4): LFO and velocity, per slot --- */
+	/* restart the slot's LFO phase when its rtg mode asks for it */
+	lfo_retrigger(source_slot);
+	/* the velocity node drives direct descriptor targets (velo_mod_dest) */
+	modNode_updateValue(&velocityModulators[source_slot], vel);
+	/* targets that are not direct nodes (slot decimation, Scene targets):
+	 * InstrumentManager applies or ignores them; it stays beside the node
+	 * update so no trigger client needs to know which kind is installed */
+	instrumentManager_applyVelocityModulationTarget(source_slot, vel);
+
+	/* --- the 303 rules (unchanged from S093 P0) --- */
 	voice->note = note;
+	/* D1: velocity 101+ is an accent; the default step velocity 100 is not */
 	voice->accentOn = (uint8_t)(velocity >= ALK_ACCENT_VELOCITY);
+	/* the ACCENT lane is high for one step (S092 P4 E3) */
 	voice->accentLeft = (int32_t)stepSamples;
 	voice->gliding = legato;
 	if (!legato) {
+		/* a new note: jump the pitch, strike the MEG, trigger the VEG */
 		voice->pitchJump = 1u;
 		alkMeg_trigger(&voice->meg);
 		alkVeg_trigger(&voice->veg);
 	}
+	/* this note's slide flag decides the next trigger (A10) */
 	voice->slideLatch = (uint8_t)(voice->slide != 0u);
+	/* a slide-flagged note holds its gate through the next step's gate */
 	voice->gateLeft = voice->slideLatch ? (int32_t)stepSamples + gate : gate;
 }
 

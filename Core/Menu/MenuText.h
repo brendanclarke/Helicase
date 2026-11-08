@@ -223,6 +223,34 @@ static const char voiceChainNames[][4] = {
     {2}, {"T+D"},{"WFd"},
 };
 /*
+ * DTYPE_ON_OFF tag for the Alkaline waveform selector (S093 P4).
+ *
+ * What:       ONOFF_TAG_ALK_WAVE = 3u: the alk_wave row's dtype byte is
+ *             DTYPE_ON_OFF | (3 << 4) = 0x36. Tags 1 (osc1_run) and 2
+ *             (voice_chain) stay.
+ * Why:        S088 D12 reserved the high nibble of DTYPE_ON_OFF for tagged
+ *             selectors (every DTYPE_MENU id and dtype value is taken, S078);
+ *             menu.c resolves the name table per tag in menu_onoffTagNames().
+ * Accessors:  ROW_SELECT_ONOFF (AlkalineParameters.c, alk_wave).
+ * Affiliates: alkWaveNames below; ALK_WAVE_SAW/ALK_WAVE_SQUARE
+ *             (AlkalineVoice.h l. 56-57).
+ */
+#define ONOFF_TAG_ALK_WAVE      3u
+/*
+ * Alkaline waveform names (S093 P4).
+ *
+ * What:       [0] = count (2), then Saw, Sqr. Same shape as voiceChainNames:
+ *             a leading count byte, then 3+1-character entries.
+ * Why:        display, clamp and automation range of the wav cell all come
+ *             from this count (the six tagged sites in menu.c), so 0..1 is
+ *             the whole domain; the count must equal ALK_WAVE_SQUARE + 1
+ *             (asserted in menu.c).
+ * Accessors:  menu_onoffTagNames() (menu.c).
+ */
+static const char alkWaveNames[][4] = {
+    {2}, {"Saw"},{"Sqr"},
+};
+/*
  * Wavefolder type names: the wav cell under WFd (S089 P2).
  *
  * What:       foldTypeNames: [0] = count (8), then the 3-character codes;

@@ -36,6 +36,7 @@ CFLAGS  = $(MCU) -O2 -flto -Wall -Wextra -std=gnu11 \
           -ICore/DSP/Instruments/Snare \
           -ICore/DSP/Instruments/Cymbal \
           -ICore/DSP/Instruments/HiHat \
+          -ICore/DSP/Instruments/Alkaline \
           -ICore/DSP/Effects \
           -ICore/DSP/Effects/StereoFilter \
           -ICore/DSP/Effects/CrumpBit \
@@ -113,6 +114,7 @@ SRCS = \
   Core/DSP/Instruments/Snare/SnareParameters.c \
   Core/DSP/Instruments/Cymbal/CymbalParameters.c \
   Core/DSP/Instruments/HiHat/HiHatParameters.c \
+  Core/DSP/Instruments/Alkaline/AlkalineParameters.c \
   Core/DSP/Effects/FxBuffer.c \
   Core/DSP/Effects/EffectsManager.c \
   Core/DSP/Effects/StereoFilter/StereoFilterParameters.c \
@@ -149,8 +151,13 @@ DSP_SRCS = \
   Core/DSPAudio/1PoleLp.c \
   Core/DSPAudio/BufferTools.c \
   Core/DSPAudio/BusCompressor.c \
+  Core/DSP/Instruments/Alkaline/AlkalineControl.c \
+  Core/DSP/Instruments/Alkaline/AlkalineSquareTable.c \
+  Core/DSP/Instruments/Alkaline/AlkalineTables.c \
+  Core/DSP/Instruments/Alkaline/AlkalineVoice.c \
   Core/DSP/Instruments/Cymbal/CymbalVoice.c \
   Core/DSPAudio/Decay.c \
+  Core/DSPAudio/DiodeLadder.c \
   Core/DSPAudio/distortion.c \
   Core/DSPAudio/dither.c \
   Core/DSP/Instruments/Drum/DrumVoice.c \
@@ -216,6 +223,23 @@ $(BUILD)/Core/DSP/Instruments/Cymbal/CymbalVoice.o: Core/DSP/Instruments/Cymbal/
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
 $(BUILD)/Core/DSP/Instruments/HiHat/HiHat.o: Core/DSP/Instruments/HiHat/HiHat.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+
+# S093 P4: the Alkaline engine and its control path are DSP: -Ofast like the
+# other engines (the P3 counts and the constant-cost loops assume it). The two
+# table files are data; -Ofast changes nothing for them and keeps them with
+# their users.
+$(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineVoice.o: Core/DSP/Instruments/Alkaline/AlkalineVoice.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+$(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineControl.o: Core/DSP/Instruments/Alkaline/AlkalineControl.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+$(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineTables.o: Core/DSP/Instruments/Alkaline/AlkalineTables.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+$(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineSquareTable.o: Core/DSP/Instruments/Alkaline/AlkalineSquareTable.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
 

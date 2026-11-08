@@ -3,6 +3,7 @@
 #include "SnareParameters.h"
 #include "CymbalParameters.h"
 #include "HiHatParameters.h"
+#include "AlkalineParameters.h"   /* S093 P4: registry row */
 #include "SceneData.h"
 #include "SceneModTargets.h"
 #include "presetManager.h"
@@ -12,6 +13,9 @@
 #include "Snare.h"
 #include "CymbalVoice.h"
 #include "HiHat.h"
+#include "AlkalineVoice.h"        /* S093 P4: the runtime member and its entry points */
+#include "sequencer.h"            /* S093 P4: seq_trackStepSamples() (read-only) for the
+                                   * Alkaline gate */
 #include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* clamps */
 #include "mixer.h"
 #include "modulationNode.h"
@@ -26,33 +30,63 @@
  * storage.
  *
  * ParameterArray/SceneData allocate the amount of per-slot storage. These
- * descriptors define what each storage cell means for a drum/snare/cymbal/hat
- * slot and how the value reaches that instrument's runtime instance. The
+ * descriptors define what each storage cell means for each instrument type
+ * and how the value reaches that instrument's runtime instance. The
  * extension and storage_directory fields are intentionally adjacent in every
  * row: filesystem.c can classify a filename and navigate to its `.hcindex`
  * folder through one registry record, with no parallel type-folder table.
+ *
+ * S093 P4 (F2: the type count is open-ended): rows are designated by their
+ * type, so row index == type value. The .hcnames header writer/validator
+ * walk the type values 0, 1, 2, ... through storage_instrumentTypeToText()
+ * until NULL (filesystem.c l. 6614, 24616); a gap or a reordering would end
+ * that walk early. The count assert below and check_special_tags.py
+ * registry_check() (3-character tokens, enum order) hold the invariants. A
+ * new type adds: an enum value before UNKNOWN, a row here, its
+ * <Type>Parameters.h/.c, its runtime member and dispatch cases, a TABLES
+ * entry, and its folder under SD_CARD/Instrument.
  */
 static const instrument_registry_entry_t instrument_registry[] = {
+    [INSTRUMENT_TYPE_DRM] =
     { INSTRUMENT_TYPE_DRM, "drm", drum_instrument_display_label, ".drm", "Drum",
       DRUM_INSTRUMENT_TYPE_FLAGS,
       drum_param_descriptors, DRUM_PARAM_DESCRIPTOR_COUNT,
       drum_menu_pages, DRUM_MENU_PAGE_COUNT },
+    [INSTRUMENT_TYPE_SNR] =
     { INSTRUMENT_TYPE_SNR, "snr", snare_instrument_display_label, ".snr", "Snare",
       SNARE_INSTRUMENT_TYPE_FLAGS,
       snare_param_descriptors, SNARE_PARAM_DESCRIPTOR_COUNT,
       snare_menu_pages, SNARE_MENU_PAGE_COUNT },
+    [INSTRUMENT_TYPE_CYM] =
     { INSTRUMENT_TYPE_CYM, "cym", cymbal_instrument_display_label, ".cym", "Cymbal",
       CYMBAL_INSTRUMENT_TYPE_FLAGS,
       cymbal_param_descriptors, CYMBAL_PARAM_DESCRIPTOR_COUNT,
       cymbal_menu_pages, CYMBAL_MENU_PAGE_COUNT },
+    [INSTRUMENT_TYPE_HAT] =
     { INSTRUMENT_TYPE_HAT, "hat", hihat_instrument_display_label, ".hat", "HiHat",
       HIHAT_INSTRUMENT_TYPE_FLAGS,
       hihat_param_descriptors, HIHAT_PARAM_DESCRIPTOR_COUNT,
       hihat_menu_pages, HIHAT_MENU_PAGE_COUNT },
+    /*
+     * S093 P4: Alkaline. Token/extension "alk"/".alk"; directory
+     * /Instrument/Alkaline (8 characters; SD_CARD/Instrument/Alkaline in the
+     * card image with init.alk). Basic: may take any slot.
+     */
+    [INSTRUMENT_TYPE_ALK] =
+    { INSTRUMENT_TYPE_ALK, "alk", alkaline_instrument_display_label, ".alk", "Alkaline",
+      ALKALINE_INSTRUMENT_TYPE_FLAGS,
+      alkaline_param_descriptors, ALKALINE_PARAM_DESCRIPTOR_COUNT,
+      alkaline_menu_pages, ALKALINE_MENU_PAGE_COUNT },
 };
 
 #define INSTRUMENT_REGISTRY_COUNT \
     ((uint8_t)(sizeof(instrument_registry) / sizeof(instrument_registry[0])))
+
+/* S093 P4: one row per real type and no gap. A designated row past the last
+ * type would grow the array (and fail here); a missing row would leave a
+ * zeroed hole (and fail here, or registry_check() for the order). */
+_Static_assert(INSTRUMENT_REGISTRY_COUNT == INSTRUMENT_TYPE_UNKNOWN,
+               "instrument_registry needs exactly one row per instrument_type_t value");
 
 /*
  * Resolved descriptor modulation target.
@@ -173,6 +207,7 @@ typedef union {
     SnareVoice snare;
     CymbalVoice cymbal;
     HiHatVoice hihat;
+    AlkalineVoice alkaline;   /* S093 P4: 540 B at r6 (measured); slot reserve 1,264 B */
     uint8_t reserved[INSTRUMENT_RUNTIME_SLOT_BYTES];
 } InstrumentRuntimeSlot;
 static InstrumentRuntimeSlot runtime_slots[INSTRUMENT_SLOT_COUNT];
@@ -185,6 +220,11 @@ _Static_assert(sizeof(CymbalVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
                "CymbalVoice exceeds tagged slot reserve");
 _Static_assert(sizeof(HiHatVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
                "HiHatVoice exceeds tagged slot reserve");
+/* S093 P4: the Alkaline voice fits the tagged slot (no RAM growth: the union
+ * is sized by INSTRUMENT_RUNTIME_SLOT_BYTES = 2 x sizeof(DrumVoice) =
+ * 2 x 632 B). */
+_Static_assert(sizeof(AlkalineVoice) <= INSTRUMENT_RUNTIME_SLOT_BYTES,
+               "AlkalineVoice exceeds tagged slot reserve");
 _Static_assert(sizeof(InstrumentRuntimeSlot) == INSTRUMENT_RUNTIME_SLOT_BYTES,
                "Tagged slot reserve changed through alignment or member size");
 
@@ -244,6 +284,19 @@ static HiHatVoice *instrumentManager_hihatRuntime(uint8_t slot)
     return (slot < INSTRUMENT_SLOT_COUNT) ? &runtime_slots[slot].hihat : 0;
 }
 
+/*
+ * The slot's Alkaline runtime (S093 P4).
+ *
+ * What:       the tagged union member for slot, or NULL out of range. Like
+ *             the four other accessors it does not check the slot's type:
+ *             every caller switches on instrumentManager_slotType() first.
+ * Accessors:  the dispatch sites of §5.6 (S093_P4).
+ */
+static AlkalineVoice *instrumentManager_alkalineRuntime(uint8_t slot)
+{
+    return (slot < INSTRUMENT_SLOT_COUNT) ? &runtime_slots[slot].alkaline : 0;
+}
+
 static char instrumentManager_lower(char c)
 {
     return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
@@ -295,8 +348,9 @@ uint8_t instrumentManager_registryCount(void)
      *
      * Inputs: none. Output: number of immutable registry rows. This is a thin
      * accessor, but it is the narrow boundary that lets Menu/filesystem
-     * enumerate supported types without duplicating the static registry array
-     * or depending on enum contiguity.
+     * enumerate supported types without duplicating the static registry array;
+     * rows are indexed by type (S093 P4); clients still enumerate through
+     * this accessor.
      */
     return INSTRUMENT_REGISTRY_COUNT;
 }
@@ -1406,6 +1460,7 @@ void *instrumentManager_runtimeInstance(uint8_t slot)
     case INSTRUMENT_TYPE_SNR: return instrumentManager_snareRuntime(slot);
     case INSTRUMENT_TYPE_CYM: return instrumentManager_cymbalRuntime(slot);
     case INSTRUMENT_TYPE_HAT: return instrumentManager_hihatRuntime(slot);
+    case INSTRUMENT_TYPE_ALK: return instrumentManager_alkalineRuntime(slot);
     default: return 0;
     }
 }
@@ -1424,6 +1479,9 @@ static Lfo *instrumentManager_runtimeLfo(uint8_t slot)
         return voice ? &voice->lfo : 0; }
     case INSTRUMENT_TYPE_HAT: {
         HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? &voice->lfo : 0; }
+    case INSTRUMENT_TYPE_ALK: {   /* S093 P4: the Alkaline voice owns its LFO like every engine */
+        AlkalineVoice *voice = instrumentManager_alkalineRuntime(slot);
         return voice ? &voice->lfo : 0; }
     default:
         return 0;
@@ -1493,6 +1551,9 @@ void instrumentManager_runtimeInit(void)
         case INSTRUMENT_TYPE_HAT:
             HiHat_initVoice(instrumentManager_hihatRuntime(slot));
             break;
+        case INSTRUMENT_TYPE_ALK:
+            Alkaline_initVoice(instrumentManager_alkalineRuntime(slot));
+            break;
         default:
             break;
         }
@@ -1513,6 +1574,16 @@ uint8_t instrumentManager_ampEnvelopeQuiet(uint8_t slot)
      */
     if (slot >= INSTRUMENT_SLOT_COUNT)
         return 1u;
+    /*
+     * S093 P4: Alkaline has no SlopeEg2, so the generic test below would call
+     * it quiet (no envelope) while a note sounds. Its own test: gate closed,
+     * ACCENT low and the OTA current (before the make-up) below 1e-7 A
+     * (Alkaline_isQuiet(), AlkalineVoice.h l. 119).
+     */
+    if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_ALK) {
+        const AlkalineVoice *voice = instrumentManager_alkalineRuntime(slot);
+        return voice ? Alkaline_isQuiet(voice) : 1u;
+    }
     ampEg = instrumentManager_ampEg(slot);
     if (!ampEg)
         return 1u;
@@ -1623,6 +1694,9 @@ void instrumentManager_resetRuntimeSlotFromScene(uint8_t slot,
         break;
     case INSTRUMENT_TYPE_HAT:
         HiHat_initVoice(instrumentManager_hihatRuntime(slot));
+        break;
+    case INSTRUMENT_TYPE_ALK:
+        Alkaline_initVoice(instrumentManager_alkalineRuntime(slot));
         break;
     default:
         break;
@@ -1739,6 +1813,9 @@ uint8_t instrumentManager_runtimePan(uint8_t slot)
     case INSTRUMENT_TYPE_HAT: {
         HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
         return voice ? voice->pan : 64u; }
+    case INSTRUMENT_TYPE_ALK: {
+        AlkalineVoice *voice = instrumentManager_alkalineRuntime(slot);
+        return voice ? voice->pan : 64u; }
     default:
         return 64u;
     }
@@ -1767,6 +1844,9 @@ float instrumentManager_runtimeVolume(uint8_t slot)
         return voice ? voice->vol : 0.0f; }
     case INSTRUMENT_TYPE_HAT: {
         HiHatVoice *voice = instrumentManager_hihatRuntime(slot);
+        return voice ? voice->vol : 0.0f; }
+    case INSTRUMENT_TYPE_ALK: {
+        AlkalineVoice *voice = instrumentManager_alkalineRuntime(slot);
         return voice ? voice->vol : 0.0f; }
     default:
         return 0.0f;
@@ -1990,6 +2070,9 @@ void instrumentManager_calcSlotAsync(uint8_t slot)
     case INSTRUMENT_TYPE_HAT:
         HiHat_calcAsyncVoice(instrumentManager_hihatRuntime(slot));
         break;
+    case INSTRUMENT_TYPE_ALK:   /* S093 P4: control rate; the audio loop is the sync block */
+        Alkaline_calcVoiceAsync(instrumentManager_alkalineRuntime(slot));
+        break;
     default:
         break;
     }
@@ -2023,6 +2106,18 @@ void instrumentManager_calcSlotSyncBlock(uint8_t slot, int16_t *buf,
         break;
     case INSTRUMENT_TYPE_HAT:
         HiHat_calcSyncBlockVoice(instrumentManager_hihatRuntime(slot), buf, size);
+        break;
+    case INSTRUMENT_TYPE_ALK:
+        /*
+         * S093 P4: Alkaline_calcVoiceAsync() (control rate: pitch, MEG,
+         * accent network, expo, VEG, prewarp, setNet; about 915 instructions
+         * per block, no libm) and Alkaline_calcVoiceSyncBlock() (the fused
+         * oscillator + B2R loop, 213 per sample, and the slow network chunk).
+         * Both are noinline (AlkalineVoice.h l. 106-107): LTO must not
+         * inline them into mixer_calcNextSampleBlock() (S086 F1 register
+         * pressure).
+         */
+        Alkaline_calcVoiceSyncBlock(instrumentManager_alkalineRuntime(slot), buf, size);
         break;
     default:
         memset(buf, 0, size * sizeof(buf[0]));
@@ -2150,6 +2245,19 @@ void instrumentManager_triggerTrack(uint8_t trigger_track, uint8_t note,
         HiHat_triggerVoice(instrumentManager_hihatRuntime(slot), slot,
                            velocity, alternate_slot6, note);
         break;
+    case INSTRUMENT_TYPE_ALK:
+        /*
+         * S093 P4: the Alkaline needs the triggering track's step length for
+         * its gate (7/12 of a step) and ACCENT lane (one step). trigger_track,
+         * not slot: track 7 plays slot 5 with its own scale (B-9: the two
+         * tracks share one voice's slide latch and gate). The platform part
+         * (LFO retrigger, velocity nodes) runs inside Alkaline_triggerVoice()
+         * for `slot`, as in Drum_triggerVoice(). The slot-5 alternate decay
+         * above finds no amp_envelope_decay row and does nothing.
+         */
+        Alkaline_triggerVoice(instrumentManager_alkalineRuntime(slot), slot,
+                              velocity, note, seq_trackStepSamples(trigger_track));
+        break;
     default:
         break;
     }
@@ -2269,6 +2377,11 @@ static OscInfo *instrumentManager_osc(uint8_t slot, const char *key)
         if (strncmp(key, "osc2_", 5) == 0) return &voice->modOsc;
         if (strncmp(key, "osc3_", 5) == 0) return &voice->modOsc2;
     }
+    if (type == INSTRUMENT_TYPE_ALK) {
+        AlkalineVoice *voice = instrumentManager_alkalineRuntime(slot);
+        if (!voice) return 0;
+        if (strncmp(key, "osc1_", 5) == 0) return &voice->osc;
+    }
     return 0;
 }
 
@@ -2314,6 +2427,11 @@ static OscInfo *instrumentManager_oscBySelector(uint8_t slot, uint8_t selector)
         if (selector == IM_SPECIAL_OSC1) return &voice->osc;
         if (selector == IM_SPECIAL_OSC2) return &voice->modOsc;
         if (selector == IM_SPECIAL_OSC3) return &voice->modOsc2;
+        return 0; }
+    case INSTRUMENT_TYPE_ALK: {
+        AlkalineVoice *voice = instrumentManager_alkalineRuntime(slot);
+        if (!voice) return 0;
+        if (selector == IM_SPECIAL_OSC1) return &voice->osc;
         return 0; }
     default:
         return 0;

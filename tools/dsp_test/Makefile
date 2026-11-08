@@ -56,8 +56,9 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
 .PHONY: all clean oscillator modulation voice_control sequencer \
         instrument_manager samples sampleoptimize run_modes special_tags \
         stock_tables voicefold fold_tables crumpbit crumpbit_tables \
-        crumpbit_elf_check crumpbit_cpu_check alkaline alkaline_tables
-all: oscillator modulation voice_control sequencer instrument_manager samples \
+        crumpbit_elf_check crumpbit_cpu_check alkaline alkaline_tables \
+        elf_p4_snapshot elf_p4_check seq_steplen
+all: oscillator modulation voice_control sequencer seq_steplen instrument_manager samples \
      sampleoptimize run_modes special_tags stock_tables voicefold fold_tables \
      crumpbit crumpbit_tables alkaline alkaline_tables
 
@@ -139,6 +140,26 @@ sequencer: | $(GEN)
 	@if ./build/sequencer_break >/dev/null 2>&1; then \
 	  echo "sequencer_break: FAILED (the cursor-start break was not caught)"; \
 	  exit 1; else echo "sequencer_break: caught (law 2 fails as expected)"; fi
+
+# S093 P4: law AL-T. seq_trackStepSamples() against the real step-scale table
+# and a double-precision reference. Break: the tick product in 32 bits (it
+# overflows at every tempo) must fail AL-T.
+seq_steplen: | $(GEN)
+	$(EX) --src $(ROOT)/Core/Sequencer/sequencer.c --func seq_trackStepSamples \
+	  --out $(GEN)/seq_stepsamples.c
+	$(HOSTCC) $(HOSTFLAGS) -I$(ROOT)/Core/Sequencer modules/seq_steplen.c \
+	  $(ROOT)/Core/Sequencer/StepScale.c -o build/seq_steplen -lm
+	./build/seq_steplen
+	mkdir -p build/break_steplen
+	sed 's/const uint64_t ticksQ8 = (uint64_t)stepScale_ticksQ8(scale);/const uint32_t ticksQ8 = stepScale_ticksQ8(scale);/' \
+	  $(GEN)/seq_stepsamples.c > build/break_steplen/seq_stepsamples.c
+	@grep -q 'const uint32_t ticksQ8' build/break_steplen/seq_stepsamples.c || \
+	  { echo "seq_steplen_break: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_steplen $(HOSTFLAGS) -I$(ROOT)/Core/Sequencer \
+	  modules/seq_steplen.c $(ROOT)/Core/Sequencer/StepScale.c -o build/seq_steplen_break -lm
+	@if ./build/seq_steplen_break >/dev/null 2>&1; then \
+	  echo "seq_steplen_break: FAILED (the 32-bit product was not caught)"; \
+	  exit 1; else echo "seq_steplen_break: caught (AL-T fails as expected)"; fi
 
 # Breaks: the gate without its SELECTOR branch (law 3); the row as
 # DTYPE_0B127 (law 4).
@@ -243,6 +264,7 @@ run_modes: | $(GEN)
 
 special_tags:
 	cd $(ROOT) && python3 tools/dsp_test/check_special_tags.py
+	cd $(ROOT) && python3 tools/alkaline/make_init_alk.py --check
 
 stock_tables:
 	cd $(ROOT) && python3 tools/plots/gen_stock_tables.py --check
@@ -309,6 +331,63 @@ alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c | $(GEN)
 
 alkaline_tables:
 	cd $(ROOT) && python3 tools/alkaline/gen_alk_tables.py --check
+
+# ---------------------------------------------------------------------------
+# S093 P4: linked-image loop gates for the Alkaline integration.
+#
+# What:       elf_p4_snapshot writes the baseline loop dumps of a known-good
+#             image (the P3 image, before any Alkaline code is linked):
+#               - every oscillator, filter, transient and fold symbol
+#                 (P4_OSC_SYMS), with elf_loopdump.py;
+#               - mixer_calcNextSampleBlock(), whose voice renders are inlined.
+#             elf_p4_check dumps the current image the same way and compares:
+#               - elf_loopdump.py --compare: 0 MISSING per-sample loops
+#                 (RENAMED passes; dispatch fragments may move);
+#               - elf_hotloops.py --compare on the mixer: 0 GREW. LTO re-lays
+#                 the mixer out when the set of inlined engines changes
+#                 (P3 §2.3), so a GREW is checked by source pairing on the -g
+#                 twins (elf_loopsrc.py, S093_P5 §3.2) before it is accepted or
+#                 rejected.
+# Why:        MEMORY.md (S089 ceiling): adding Alkaline must not lengthen any
+#             other engine's per-sample loop. The S086 targets were removed in
+#             f3805478; this is their replacement against a P4 baseline.
+# Inputs:     FW_ELF (default: the firmware build output); P4BASE (the
+#             baseline folder).
+# Outputs:    $(P4BASE)/osc.txt, $(P4BASE)/mixer.txt; build/p4_*_now.txt;
+#             exit 1 on a MISSING or GREW.
+# Accessors:  make -C tools/dsp_test elf_p4_snapshot | elf_p4_check.
+# Affiliates: elf_loopdump.py, elf_hotloops.py, elf_loopsrc.py; S093_P3 §2.3.
+FW_ELF ?= $(ROOT)/build/lxr02.elf
+P4BASE ?= $(ROOT)/build/s093p4
+P4_OSC_SYMS := SVF_calcBlockZDF calcFmBlock calcNextOscSampleBlock \
+  calcNextOscSampleRingBlock calcNextOscSampleSyncBlock calcNoiseRingBlock \
+  calcSampleOscFmBlock calcSampleOscRingBlock calcSampleOscSyncBlock \
+  calcSineRingBlock calcSineSyncBlock calcWavetableOscRingBlock \
+  calcWavetableOscSyncBlock oscSection_renderOldCarrier osc_buildLoopSyncList \
+  osc_buildSyncList osc_renderTypedFmRamp osc_setFreq osc_slpFmBlock \
+  osc_slpFmRampBlock osc_slpPlainBlock osc_slpRingBlock osc_slpSyncBlock \
+  osc_smpFmBlock osc_smpFmRampBlock osc_smpPlainBlock osc_smpRingBlock \
+  osc_smpSyncBlock osc_wtbBlendBlock osc_wtbFmBlendBlock osc_wtbFmBlendRampBlock \
+  osc_wtbFmBlock osc_wtbFmRampBlock osc_wtbPlainBlock osc_wtbPlanBlock \
+  osc_wtbRingBlendBlock osc_wtbRingBlock osc_wtbSyncBlendBlock osc_wtbSyncBlock \
+  transient_calcUserBlock voiceFold_asnLoop voiceFold_chbLoop voiceFold_fd2Loop \
+  voiceFold_process voiceFold_sinLoop voiceFold_triLoop busComp_processBlock
+
+elf_p4_snapshot:
+	mkdir -p $(P4BASE)
+	python3 elf_loopdump.py --elf $(FW_ELF) $(foreach s,$(P4_OSC_SYMS),--sym $(s)) \
+	  --out $(P4BASE)/osc.txt
+	python3 elf_loopdump.py --elf $(FW_ELF) --sym mixer_calcNextSampleBlock \
+	  --out $(P4BASE)/mixer.txt
+
+elf_p4_check:
+	mkdir -p build
+	python3 elf_loopdump.py --elf $(FW_ELF) $(foreach s,$(P4_OSC_SYMS),--sym $(s)) \
+	  --out build/p4_osc_now.txt
+	python3 elf_loopdump.py --compare $(P4BASE)/osc.txt build/p4_osc_now.txt
+	python3 elf_loopdump.py --elf $(FW_ELF) --sym mixer_calcNextSampleBlock \
+	  --out build/p4_mixer_now.txt
+	python3 elf_hotloops.py --compare $(P4BASE)/mixer.txt build/p4_mixer_now.txt
 
 fold_tables:
 	cd $(ROOT) && python3 tools/plots/gen_fold_tables.py --check

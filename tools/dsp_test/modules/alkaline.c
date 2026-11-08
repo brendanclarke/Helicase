@@ -72,10 +72,21 @@ uint8_t modNode_interpClaim(void* osc) { (void)osc; return 0u; }
 /* the real sawTable (wavetable.c), writable on the host as osc_host.h says */
 #include "alk_sawTable.c"
 
-/* lfo.h: a same-size stand-in (the engine only owns it and calls lfo_init();
- * the LFO itself belongs to the platform integration, S093 P0 §6) */
+/* lfo.h / modulationNode.h / InstrumentManager.h: same-shape stand-ins for
+ * what the engine references (S093 P4). The engine owns an Lfo and calls
+ * lfo_init(); the trigger makes the three platform calls of
+ * Drum_triggerVoice(). The bench counts the calls so law AL-P can prove the
+ * trigger makes them for its slot. */
 typedef struct { uint8_t bytes[124]; } Lfo;
+typedef struct { float value; } ModulationNode;
+ModulationNode velocityModulators[6];
+static unsigned host_lfoRetriggers, host_veloTargets;   /* AL-P call counters */
+static uint8_t host_lastSlot;                           /* AL-P: the slot the calls named */
 void lfo_init(Lfo *lfo) { memset(lfo, 0, sizeof(*lfo)); }
+void lfo_retrigger(uint8_t voiceNr) { host_lfoRetriggers++; host_lastSlot = voiceNr; }
+void modNode_updateValue(ModulationNode *vm, float val) { vm->value = val; }
+void instrumentManager_applyVelocityModulationTarget(uint8_t source_slot, float velocity_0_1)
+{ (void)velocity_0_1; host_veloTargets++; host_lastSlot = source_slot; }
 
 #include "DiodeLadder.host.h"
 #include "AlkalineControl.host.h"
@@ -158,7 +169,7 @@ static void test_bounds(void)
 					v.drive = ext[((a >> 5) & 1) ^ flip];
 					v.slide = (uint8_t)(n & 64 ? 1 : 0);
 					if (n % 37 == 0)
-						Alkaline_triggerVoice(&v, (uint8_t)((n * 13) & 127),
+						Alkaline_triggerVoice(&v, 0u, (uint8_t)((n * 13) & 127),
 						                      (uint8_t)((n * 29) & 127), ALK_STEP);
 					block(&v, buf, opt);
 					for (b = 0; b < BLK; b++)
@@ -227,23 +238,23 @@ static void test_sequencing(void)
 
 	memset(&v, 0, sizeof(v));
 	Alkaline_initVoice(&v);
-	Alkaline_triggerVoice(&v, 100u, 63u, ALK_STEP);
+	Alkaline_triggerVoice(&v, 0u, 100u, 63u, ALK_STEP);
 	if (v.accentOn) fail(G_S, "velocity 100 (the default) is not an accent", 100, 1);
-	Alkaline_triggerVoice(&v, 101u, 63u, ALK_STEP);
+	Alkaline_triggerVoice(&v, 0u, 101u, 63u, ALK_STEP);
 	if (!v.accentOn) fail(G_S, "velocity 101 is an accent", 101, 0);
 	if (v.gateLeft != 3217) fail(G_S, "gate = 7/12 of a step", v.gateLeft, 3217);
 	for (n = 0; n < 5; n++) block(&v, buf, 0);
 
 	/* slide-flagged note, then the next note is legato */
 	v.slide = 1u;
-	Alkaline_triggerVoice(&v, 80u, 63u, ALK_STEP);
+	Alkaline_triggerVoice(&v, 0u, 80u, 63u, ALK_STEP);
 	if (v.gateLeft != 5514 + 3217) fail(G_S, "slide holds the gate a step + 7/12", v.gateLeft, 8731);
 	for (n = 0; n < 172; n++) block(&v, buf, 0);
 	v.slide = 0u;
 	v.meg.strikeLeft = 0.0f;
 	v.veg.delayLeft = 0.0f;
 	v.veg.attLeft = 0.0f;
-	Alkaline_triggerVoice(&v, 80u, 75u, ALK_STEP);
+	Alkaline_triggerVoice(&v, 0u, 80u, 75u, ALK_STEP);
 	if (!v.gliding) fail(G_S, "note after a slide glides", v.gliding, 1);
 	if (v.meg.strikeLeft != 0.0f) fail(G_S, "legato: no MEG strike", v.meg.strikeLeft, 0);
 	if (v.veg.attLeft != 0.0f) fail(G_S, "legato: no VEG trigger", v.veg.attLeft, 0);
@@ -263,16 +274,27 @@ static void test_sequencing(void)
 	}
 	/* the slid-to note had slide 0: the next note is not legato */
 	for (n = 0; n < 171; n++) block(&v, buf, 0);
-	Alkaline_triggerVoice(&v, 80u, 63u, ALK_STEP);
+	Alkaline_triggerVoice(&v, 0u, 80u, 63u, ALK_STEP);
 	if (v.gliding) fail(G_S, "slide is taken from the flagged note only", v.gliding, 0);
 	if (v.meg.strikeLeft <= 0.0f) fail(G_S, "non-legato: MEG strike", v.meg.strikeLeft, 1);
 	/* a slide-flagged note followed by a rest: the gate closes at 1.58 steps */
 	v.slide = 1u;
-	Alkaline_triggerVoice(&v, 80u, 63u, ALK_STEP);
+	Alkaline_triggerVoice(&v, 0u, 80u, 63u, ALK_STEP);
 	for (n = 0; n < 273; n++) block(&v, buf, 0);
 	if (v.gateLeft != 0) fail(G_S, "slide into a rest: gate closes", v.gateLeft, 0);
-	Alkaline_triggerVoice(&v, 80u, 63u, ALK_STEP);
+	Alkaline_triggerVoice(&v, 0u, 80u, 63u, ALK_STEP);
 	if (v.gliding) fail(G_S, "after the gate closed: not legato", v.gliding, 0);
+
+	/* AL-P (S093 P4): the trigger makes the platform calls of
+	 * Drum_triggerVoice() for its own slot, with the velocity as 0..1 */
+	memset(&v, 0, sizeof(v));
+	Alkaline_initVoice(&v);
+	host_lfoRetriggers = host_veloTargets = 0u;
+	host_lastSlot = 0u;
+	Alkaline_triggerVoice(&v, 3u, 127u, 63u, ALK_STEP);
+	if (host_lfoRetriggers != 1u || host_veloTargets != 1u || host_lastSlot != 3u ||
+	    velocityModulators[3].value != 1.0f)
+		fail(G_S, "AL-P platform calls per trigger", host_lfoRetriggers, host_veloTargets);
 }
 
 /* ---------------------------------------------------------------- AL-N */
@@ -313,7 +335,7 @@ static double pattern_rms(int k, float drive, int *clipped)
 		*clipped = 0;
 	for (n = 0; n < 1400; n++) {
 		if (n % 172 == 0)
-			Alkaline_triggerVoice(&v, (n / 172) & 1 ? 127u : 80u, (uint8_t)(63 + (n / 172) % 5), ALK_STEP);
+			Alkaline_triggerVoice(&v, 0u, (n / 172) & 1 ? 127u : 80u, (uint8_t)(63 + (n / 172) % 5), ALK_STEP);
 		block(&v, buf, k);
 		for (int j = 0; j < BLK; j++) {
 			acc += (double)buf[j] * buf[j];
@@ -354,7 +376,7 @@ static void test_drive(void)
 		v.drive = 1.0f;
 		for (n = 0; n < 2000; n++) {
 			if (n % 172 == 0)
-				Alkaline_triggerVoice(&v, 127u, (uint8_t)(51 + (n / 172) % 24), ALK_STEP);
+				Alkaline_triggerVoice(&v, 0u, 127u, (uint8_t)(51 + (n / 172) % 24), ALK_STEP);
 			block(&v, buf, K_B2R);
 			if (fabsf(v.ladder.xinLast) > xmax)
 				xmax = fabsf(v.ladder.xinLast);
@@ -383,7 +405,7 @@ static void test_quiet(void)
 		block(&v, buf, K_B2R);
 		if (!Alkaline_isQuiet(&v))
 			fail(G_Q, "quiet before the first note", d, 0);
-		Alkaline_triggerVoice(&v, 127u, 63u, ALK_STEP);
+		Alkaline_triggerVoice(&v, 0u, 127u, 63u, ALK_STEP);
 		for (n = 0; n < 10; n++)
 			block(&v, buf, K_B2R);
 		if (Alkaline_isQuiet(&v))
@@ -500,9 +522,9 @@ static void test_fused(void)
 
 				if (n % 172 == 0) {
 					a.slide = b.slide = (uint8_t)((n / 172) & 1);
-					Alkaline_triggerVoice(&a, (n / 172) % 3 ? 80u : 127u,
+					Alkaline_triggerVoice(&a, 0u, (n / 172) % 3 ? 80u : 127u,
 					                      (uint8_t)(51 + (n * 7) % 30), ALK_STEP);
-					Alkaline_triggerVoice(&b, (n / 172) % 3 ? 80u : 127u,
+					Alkaline_triggerVoice(&b, 0u, (n / 172) % 3 ? 80u : 127u,
 					                      (uint8_t)(51 + (n * 7) % 30), ALK_STEP);
 				}
 				Alkaline_calcVoiceAsync(&a);
@@ -606,7 +628,7 @@ static int mode_pattern(int argc, char **argv)
 		while (next < 8 && next * step <= t + 1e-9) {
 			if (pat[next][0] >= 0) {
 				v.slide = (uint8_t)pat[next][2];
-				Alkaline_triggerVoice(&v, pat[next][1] ? 127u : 80u,
+				Alkaline_triggerVoice(&v, 0u, pat[next][1] ? 127u : 80u,
 				                      (uint8_t)(63 + pat[next][0]), ALK_STEP);
 			}
 			next++;
@@ -648,7 +670,7 @@ static int mode_sweep(int argc, char **argv)
 		v.reso = (float)(t < 6.0 ? t / 6.0 : 0.6 + 0.3 * sin(2.0 * M_PI * 1.5 * (t - 6.0)));
 		while ((double)step * ALK_STEP <= (double)b * BLK) {
 			v.slide = (uint8_t)((step & 3) == 2);
-			Alkaline_triggerVoice(&v, (step & 3) == 3 ? 127u : 80u,
+			Alkaline_triggerVoice(&v, 0u, (step & 3) == 3 ? 127u : 80u,
 			                      (uint8_t)(63 + semi[step & 3]), ALK_STEP);
 			step++;
 		}

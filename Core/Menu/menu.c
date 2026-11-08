@@ -9672,19 +9672,34 @@ static void menu_instrumentLoadCopyTypeLabel(char *dest)
     /*
      * Build the fixed eight-character Load label used by the LCD.
      *
-     * Normal rows show the instrument type label as before. The morph row
-     * appends "Mrp" to the captured base type, producing labels such as
-     * "DrumMrp ". Padding and truncation live here so repaint cannot resize or
-     * corrupt the LCD field.
+     * What:       normal rows show the instrument type label, padded to 8.
+     *             The morph row shows at most 5 characters of the label
+     *             followed by "Mrp": "DrumMrp ", "HiHatMrp", "CymbaMrp",
+     *             "AlkalMrp".
+     * Why:        S093 P4: with a fifth type (and more to come) the label
+     *             length is not bounded by the four originals. Before, "Mrp"
+     *             was appended only where it fitted: Cymbal showed "CymbalMr"
+     *             and an 8-character label such as "Alkaline" would show no
+     *             Mrp at all, identical to its normal row. Padding and
+     *             truncation live here so repaint cannot resize or corrupt the
+     *             LCD field.
+     * Inputs:     menu_instrumentLoadType, menu_instrumentLoadMorphMode.
+     * Outputs:    dest[0..7].
+     * Affiliates: instrumentManager_typeDisplayLabel(); FILESYSTEM_SPEC.md
+     *             l. 268 (`<Type>Mrp`).
      */
     menu_copyPaddedField(label, base_label, 8u);
     if (menu_instrumentLoadMorphMode) {
         uint8_t len = 0u;
+        /* the label's own length (padding is spaces) */
         while (len < 8u && label[len] != ' ')
             len++;
-        if (len < 8u) label[len++] = 'M';
-        if (len < 8u) label[len++] = 'r';
-        if (len < 8u) label[len++] = 'p';
+        /* keep room for the three-character suffix */
+        if (len > 5u)
+            len = 5u;
+        label[len++] = 'M';
+        label[len++] = 'r';
+        label[len++] = 'p';
         while (len < 8u)
             label[len++] = ' ';
         label[8] = '\0';
@@ -12319,25 +12334,30 @@ static void menu_formatTransientName(uint8_t value, char *nameDst)
 }
 
 /*
- * Name table of a tagged DTYPE_ON_OFF cell (S088 D12; S089 P2).
+ * Name table of a tagged DTYPE_ON_OFF cell (S088 D12; S089 P2; S093 P4).
  *
  * What:       returns the 3-character name table for a dtype high-nibble tag:
- *             ONOFF_TAG_VOICE_CHAIN -> voiceChainNames (T+D, WFd); every other
+ *             ONOFF_TAG_VOICE_CHAIN -> voiceChainNames (T+D, WFd);
+ *             ONOFF_TAG_ALK_WAVE -> alkWaveNames (Saw, Sqr); every other
  *             non-zero tag -> oscRunNames (rst, fre, itp), exactly as before.
  *             Entry [0][0] is the count; names start at [1].
- * Why:        the six tagged on/off sites in this file used oscRunNames
- *             directly ("tag != 0 means run mode"); the second tag needs its
- *             own table, and one helper keeps display, clamp, automation max
- *             and the step-edit line in agreement.
+ * Why:        one helper keeps display, clamp, automation max and the
+ *             step-edit line in agreement for every tag. Its six callers in
+ *             this file: l. 3387, 6570, 6864, 13869, 13915, 15099.
  * Inputs:     tag (dtype >> 4, non-zero).  Outputs: the table.
  * Accessors:  menu_formatCellValue3(), va_formatValue3(), menu_clampCellValue(),
  *             menu_automationValueMax(), menu_formatAutomationValue3(), the
  *             single-parameter step-edit display.
- * Affiliates: ONOFF_TAG_* / oscRunNames / voiceChainNames (MenuText.h).
+ * Affiliates: ONOFF_TAG_* / oscRunNames / voiceChainNames / alkWaveNames
+ *             (MenuText.h).
  */
 static const char (*menu_onoffTagNames(uint8_t tag))[4]
 {
-    return (tag == ONOFF_TAG_VOICE_CHAIN) ? voiceChainNames : oscRunNames;
+    switch (tag) {
+    case ONOFF_TAG_VOICE_CHAIN: return voiceChainNames;
+    case ONOFF_TAG_ALK_WAVE:    return alkWaveNames;
+    default:                    return oscRunNames;
+    }
 }
 
 static void getMenuItemNameForValue(uint8_t menuId, uint8_t curParmVal, char *buf)
@@ -12482,6 +12502,10 @@ _Static_assert((sizeof(transientNames) / sizeof(transientNames[0])) - 1u ==
 _Static_assert((sizeof(voiceChainNames) / sizeof(voiceChainNames[0])) - 1u ==
                    VOICE_CHAIN_COUNT,
                "voiceChainNames must list every VOICE_CHAIN_* value");
+/* S093 P4: the Alkaline waveform names list both stored values
+ * (ALK_WAVE_SAW 0, ALK_WAVE_SQUARE 1, AlkalineVoice.h). */
+_Static_assert((sizeof(alkWaveNames) / sizeof(alkWaveNames[0])) - 1u == 2u,
+               "alkWaveNames must list Saw and Sqr");
 _Static_assert((sizeof(foldTypeNames) / sizeof(foldTypeNames[0])) - 1u ==
                    VOICE_FOLD_COUNT &&
                (sizeof(foldTypeLongNames) / sizeof(foldTypeLongNames[0])) - 1u ==

@@ -13,8 +13,8 @@
 /* Resonance table of the real-time network, form N1 (S093 P1 §5). */
 #define ALK_RES_POINTS        9u
 #define ALK_NET_BLOCK         64u    /* samples per slow-network update */
-#if ALK_NET_STATES != 8u
-#error "AlkalineTables: generated for 8 network states (ALK_NET_STATES)"
+#if ALK_NET_STATES != 6u
+#error "AlkalineTables: generated for 6 network states (ALK_NET_STATES)"
 #endif
 extern const DiodeLadderNet alkResTable[ALK_RES_POINTS];
 /* N1 asymptote one-poles: per sample y+ = AL y + BE (x + x+); per update

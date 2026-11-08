@@ -98,8 +98,35 @@ typedef struct AlkalineVoiceStruct
 } AlkalineVoice;
 
 void Alkaline_initVoice(AlkalineVoice *voice);
-void Alkaline_triggerVoice(AlkalineVoice *voice, uint8_t velocity, uint8_t note,
-                           uint32_t stepSamples);
+/*
+ * Trigger the voice (S092 P0 §5.3/§5.4; the platform part S093 P4).
+ *
+ * What:       the LFO retrigger and the two velocity modulation paths for
+ *             source_slot, as Drum_triggerVoice() (DrumVoice.c l. 242-255);
+ *             then the 303 rules: accent at velocity >= ALK_ACCENT_VELOCITY
+ *             (101); legato when the previous note was slide-flagged and its
+ *             gate is still open (no MEG strike, no VEG trigger, the pitch
+ *             glides); the slide flag latched for the next trigger; the gate
+ *             7/12 of the step, or the step plus 7/12 after a slide-flagged
+ *             note; the ACCENT lane one step long.
+ * Why:        the LFO and the velocity nodes belong to the slot the voice
+ *             occupies, not to the voice instance (InstrumentManager's tagged
+ *             runtime), so the caller names the slot.
+ * Inputs:     voice (the slot's runtime member, non-NULL: the caller's slot
+ *             is always < INSTRUMENT_SLOT_COUNT); source_slot 0..5; velocity
+ *             0..127; note (the step/MIDI note, 63 = the default); stepSamples
+ *             (seq_trackStepSamples() of the triggering track, >= 1).
+ * Outputs:    the voice's sequencing state; the slot's LFO phase and velocity
+ *             nodes.
+ * Accessors:  instrumentManager_triggerTrack() (the single trigger funnel:
+ *             sequencer, MIDI, live and preview, InstrumentManager.c l. 2129).
+ * Affiliates: Drum_triggerVoice(); lfo_retrigger() (lfo.h l. 141),
+ *             modNode_updateValue() and velocityModulators[]
+ *             (modulationNode.h), instrumentManager_applyVelocityModulation-
+ *             Target() (InstrumentManager.h l. 543).
+ */
+void Alkaline_triggerVoice(AlkalineVoice *voice, uint8_t source_slot, uint8_t velocity,
+                           uint8_t note, uint32_t stepSamples);
 /* Both are called from inside mixer_calcNextSampleBlock(): noinline keeps
  * LTO from inlining them there (S092 P0 §1.3, the S086 F1 register-pressure
  * risk to the other engines' inlined loops). */

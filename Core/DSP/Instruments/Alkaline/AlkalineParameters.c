@@ -1,0 +1,254 @@
+#include "AlkalineParameters.h"
+#include "AlkalineVoice.h"
+#include "menu.h"
+#include "MenuText.h"
+#include <stddef.h>
+
+/*
+ * Alkaline parameter source of truth (S093 P4).
+ *
+ * What:       what each generic Kit storage cell means when the slot holds an
+ *             Alkaline: file key, menu text, dtype, Morph/modulation flags,
+ *             modulation domain and the runtime binding into AlkalineVoice.
+ *             The pattern is DrumParameters.c; every row is on one line
+ *             (check_special_tags.py and make_init_alk.py parse them).
+ * Why:        S092 P0 §5.2 / S093 P2 §6: the 303 controls (waveform, coarse,
+ *             tuning, slide, cutoff, resonance, env mod, decay, accent), the
+ *             drive extra (E2), and the platform rows every engine shares
+ *             (vol, pan, the LFO pair, velocity), so Morph, LFO, automation,
+ *             MIDI and storage work unchanged.
+ * Not offered (S092 P0 §5.5): srt (no SRR, D4), run, chn, pos, typ (the
+ *             oscillator stays a table wave, S093 P3 §9.5), fine pitch,
+ *             velo_vol_on_off (the 303's velocity is the accent, D1).
+ * Accessors:  InstrumentManager registry; Menu (pages); Preset/Morph/LFO/
+ *             automation through the registry; storage (keys, [morph] for
+ *             the MORPHABLE rows only, storageTypes.c l. 981-990).
+ * Affiliates: AlkalineVoice.h; MenuText.h (alkWaveNames, ONOFF_TAG_ALK_WAVE);
+ *             tools/alkaline/make_init_alk.py; SD_CARD/Instrument/Alkaline/
+ *             init.alk.
+ */
+
+/* Load-menu label and type flags, imported by the registry. "Alkaline" is 8
+ * cells; the Morph row shows "AlkalMrp" (§4.7). */
+const char alkaline_instrument_display_label[] = "Alkaline";
+const uint8_t alkaline_instrument_type_flags = ALKALINE_INSTRUMENT_TYPE_FLAGS;
+
+/* A normal sound cell: in both images, Morph-interpolated, a modulation
+ * destination and step-automatable; written under [params] and [morph]. */
+#define FLAGS_IMAGE \
+    (INSTRUMENT_PARAM_FLAG_MORPHABLE | INSTRUMENT_PARAM_FLAG_MODULATABLE | \
+     INSTRUMENT_PARAM_FLAG_AUTOMATABLE)
+
+/* Runtime binding into the slot's AlkalineVoice, with an optional
+ * special-writer tag (S073 Step 2). */
+#define BIND_SPECIAL(member_, type_, special_) \
+    { INSTRUMENT_BIND_INSTANCE_OFFSET, (uint16_t)offsetof(AlkalineVoice, member_), type_, special_ }
+#define BIND(member_, type_) BIND_SPECIAL(member_, type_, IM_SPECIAL_NONE)
+
+/* Modulation domains in descriptor units (DrumParameters.c l. 51-56). */
+#define MOD_NONE  { 0u, 0u, INSTRUMENT_MOD_DOMAIN_NONE }
+#define MOD_0_127 { 0u, 127u, INSTRUMENT_MOD_DOMAIN_CONTINUOUS }
+#define MOD_PM63  { 0u, 127u, INSTRUMENT_MOD_DOMAIN_CONTINUOUS }
+
+/* Row shapes (DrumParameters.c l. 70-98). */
+#define ROW(key_, cat_, long_, short_, dtype_, mod_, member_, type_) \
+    { key_, short_, long_, cat_, dtype_, FLAGS_IMAGE, mod_, BIND(member_, type_) }
+#define ROW_SPECIAL(key_, cat_, long_, short_, dtype_, mod_, member_, type_, special_) \
+    { key_, short_, long_, cat_, dtype_, FLAGS_IMAGE, mod_, BIND_SPECIAL(member_, type_, special_) }
+#define ROW_MENU(key_, cat_, long_, short_, menu_, mod_, member_, type_) \
+    { key_, short_, long_, cat_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), FLAGS_IMAGE, mod_, BIND(member_, type_) }
+/*
+ * A tagged DTYPE_ON_OFF selector without a special writer (S093 P4).
+ *
+ * What:       DTYPE_ON_OFF | (tag << 4) with AUTOMATABLE | SELECTOR: never
+ *             morphed (so not under [morph]), not an LFO/velocity target; the
+ *             tag picks the name table in menu_onoffTagNames(). Same as
+ *             DrumParameters.c ROW_SELECT_ONOFF_SPECIAL with IM_SPECIAL_NONE.
+ * Why:        a plain TYPE_UINT8 store needs no writer, and the host tag check
+ *             treats every *_SPECIAL row as tagged (check_special_tags.py
+ *             actual()), so a NONE tag must not be spelt out.
+ */
+#define ROW_SELECT_ONOFF(key_, cat_, long_, short_, tag_, member_, type_) \
+    { key_, short_, long_, cat_, (uint8_t)(DTYPE_ON_OFF | ((tag_) << 4)), \
+      (INSTRUMENT_PARAM_FLAG_AUTOMATABLE | INSTRUMENT_PARAM_FLAG_SELECTOR), \
+      MOD_NONE, BIND(member_, type_) }
+/* Cells with no AlkalineVoice member (target selectors), flags 0: [params]
+ * only. */
+#define ROW_NOBIND(key_, cat_, long_, short_, dtype_, bind_kind_) \
+    { key_, short_, long_, cat_, dtype_, 0u, MOD_NONE, { bind_kind_, 0u, 0u, IM_SPECIAL_NONE } }
+/* Image cells applied through a supplemental binding (velocity amount). */
+#define ROW_NOBIND_IMAGE(key_, cat_, long_, short_, dtype_, mod_, bind_kind_) \
+    { key_, short_, long_, cat_, dtype_, FLAGS_IMAGE, mod_, { bind_kind_, 0u, 0u, IM_SPECIAL_NONE } }
+
+/*
+ * Alkaline-local descriptor indices.
+ *
+ * What:       the order of alkaline_param_descriptors[]; Scene/Kit storage,
+ *             automation IDs, LFO/velocity tokens and NRPN numbers (slot x 64
+ *             + index) use these numbers, and the file writer emits keys in
+ *             this order.
+ * Why:        the menu layout names cells by enum, not by number; a new row
+ *             is appended before ALK_PARAM_COUNT so every stored index stays.
+ */
+typedef enum {
+    ALK_PARAM_WAVE = 0u,
+    ALK_PARAM_OSC1_PITCH_COARSE,
+    ALK_PARAM_TUNING,
+    ALK_PARAM_SLIDE,
+    ALK_PARAM_CUTOFF,
+    ALK_PARAM_RESO,
+    ALK_PARAM_ENVMOD,
+    ALK_PARAM_DECAY,
+    ALK_PARAM_ACCENT,
+    ALK_PARAM_DRIVE,
+    ALK_PARAM_INSTRUMENT_VOL,
+    ALK_PARAM_INSTRUMENT_PAN,
+    ALK_PARAM_LFO_RATE,
+    ALK_PARAM_LFO_AMOUNT,
+    ALK_PARAM_LFO_AMOUNT_2,
+    ALK_PARAM_LFO_WAVE,
+    ALK_PARAM_LFO_RETRIGGER_VOICE,
+    ALK_PARAM_LFO_POLARITY,
+    ALK_PARAM_LFO_SYNC,
+    ALK_PARAM_LFO_OFFSET,
+    ALK_PARAM_VELO_MOD_AMOUNT,
+    ALK_PARAM_VELO_MOD_DEST,
+    ALK_PARAM_LFO_TARGET_VOICE,
+    ALK_PARAM_LFO_TARGET_PARAM,
+    ALK_PARAM_LFO_TARGET_VOICE_2,
+    ALK_PARAM_LFO_TARGET_PARAM_2,
+    ALK_PARAM_COUNT
+} alkaline_param_index_t;
+
+_Static_assert(ALKALINE_PARAM_DESCRIPTOR_COUNT == ALK_PARAM_COUNT,
+               "ALKALINE_PARAM_DESCRIPTOR_COUNT must match alkaline_param_index_t");
+_Static_assert(ALK_PARAM_COUNT <= INSTRUMENT_PARAM_COUNT,
+               "Alkaline rows must fit the 64-cell Kit image");
+
+/*
+ * Alkaline parameter descriptors.
+ *
+ * TYPE_FLT rows store byte / 127 into a 0..1 float (instrumentManager_
+ * writeParameter(), InstrumentManager.c l. 2177); AlkalineVoice converts at
+ * control rate. Categories use the Drum vocabulary (Oscilltr, Filter, Voice,
+ * LFO, Velocity).
+ */
+const ParamDescriptor alkaline_param_descriptors[] = {
+    /* wav: 0 Saw (the stock sawTable, which matches the 303 ramp within
+     * 0.5 %), 1 Sqr (the D8 per-octave Q8 square, AlkalineSquareTable.c); a
+     * selector, so Morph never blends the two tables; any other stored value
+     * plays Saw (AlkalineVoice.c: square = (wave == ALK_WAVE_SQUARE)) */
+    ROW_SELECT_ONOFF("alk_wave", "Oscilltr", "Waveform", "wav", ONOFF_TAG_ALK_WAVE, wave, TYPE_UINT8),
+    /* coa: the existing coarse writer (midiFreq high byte, osc_recalcFreq(),
+     * which only sets osc.freq; the Alkaline async recomputes the pitch from
+     * midiFreq and the note every block); its LFO/velocity target is
+     * osc.modNodeValue, which osc_setTableFreq() multiplies in (T1-7);
+     * 36 = C2 at the default note 63 ([SN] p7) */
+    ROW_SPECIAL("osc1_pitch_coarse", "Oscilltr", "Coarse", "coa", DTYPE_0B127, MOD_0_127, osc.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_PITCH_COARSE | IM_SPECIAL_OSC1),
+    /* tun: +-700 cents ([SN] p1, D6) by (tuning x 127 - 63) / 63 x 7/12 octave
+     * at control rate; 63 = centre */
+    ROW("alk_tuning", "Oscilltr", "Tuning", "tun", DTYPE_PM63, MOD_PM63, tuning, TYPE_FLT),
+    /* sld: latched at each trigger, decides the next note (A10); an image
+     * ON/OFF cell like Drum's velo_vol_on_off */
+    ROW("alk_slide", "Oscilltr", "Slide", "sld", DTYPE_ON_OFF, MOD_NONE, slide, TYPE_UINT8),
+    /* the five 303 knobs: VR3 cutoff, VR4 resonance (both gangs), VR5 env
+     * mod, VR6 decay, VR7 accent, as tapers in AlkalineControl.c */
+    ROW("alk_cutoff", "Filter", "Cutoff", "cut", DTYPE_0B127, MOD_0_127, cutoff, TYPE_FLT),
+    ROW("alk_reso", "Filter", "Resnance", "res", DTYPE_0B127, MOD_0_127, reso, TYPE_FLT),
+    ROW("alk_envmod", "Filter", "Env Mod", "env", DTYPE_0B127, MOD_0_127, envMod, TYPE_FLT),
+    ROW("alk_decay", "Filter", "Decay", "dec", DTYPE_0B127, MOD_0_127, decay, TYPE_FLT),
+    ROW("alk_accent", "Voice", "Accent", "acc", DTYPE_0B127, MOD_0_127, accent, TYPE_FLT),
+    /* drv: the ladder input x 8^(v/127) (D16) with the output make-up
+     * 2^(ALK_MAKEUP_OCT (1 - v/127)) (B-2); 0 = the 303's own drive */
+    ROW("alk_drive", "Filter", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, drive, TYPE_FLT),
+    /* platform rows (DrumParameters.c l. 257-258): the mixer reads them
+     * through instrumentManager_runtimeVolume()/_runtimePan() */
+    ROW("instrument_vol", "Voice", "Volume", "vol", DTYPE_0B127, MOD_0_127, vol, TYPE_FLT),
+    ROW("instrument_pan", "Voice", "Panning", "pan", DTYPE_PM63, MOD_PM63, pan, TYPE_UINT8),
+    /* the LFO pair: one oscillator, two destinations (DrumParameters.c
+     * l. 270-281) */
+    ROW_SPECIAL("lfo_rate", "LFO", "Frequncy", "frq", DTYPE_0B127, MOD_0_127, lfo.modNodeValue, TYPE_SPECIAL_F, IM_SPECIAL_LFO_RATE),
+    ROW("lfo_amount", "LFO", "Amount", "am1", DTYPE_0B127, MOD_0_127, lfo.modTarget.amount, TYPE_FLT),
+    ROW("lfo_amount_2", "LFO", "Amount 2", "am2", DTYPE_0B127, MOD_0_127, lfo.modTarget2.amount, TYPE_FLT),
+    ROW_MENU("lfo_wave", "LFO", "Waveform", "wav", MENU_LFO_WAVES, MOD_NONE, lfo.waveform, TYPE_UINT8),
+    ROW_MENU("lfo_retrigger_voice", "LFO", "Retriggr", "rtg", MENU_RETRIGGER, MOD_NONE, lfo.retrigger, TYPE_UINT8),
+    ROW("lfo_polarity", "LFO", "Polarity", "pol", DTYPE_LFO_POLARITY, MOD_NONE, lfo.polarity, TYPE_UINT8),
+    ROW_MENU("lfo_sync", "LFO", "ClockSnc", "snc", MENU_SYNC_RATES, MOD_NONE, lfo.sync, TYPE_UINT8),
+    ROW_SPECIAL("lfo_offset", "LFO", "Offset", "ofs", DTYPE_0B127, MOD_NONE, lfo.phaseOffset, TYPE_UINT32, IM_SPECIAL_LFO_OFFSET),
+    /* velocity (DrumParameters.c l. 283-284) */
+    ROW_NOBIND_IMAGE("velo_mod_amount", "Velocity", "Amount", "amt", DTYPE_0B127, MOD_NONE, INSTRUMENT_BIND_VELOCITY_AMOUNT),
+    ROW_NOBIND("velo_mod_dest", "Velocity", "DstParam", "dst", DTYPE_TARGET_SELECTION_VELO, INSTRUMENT_BIND_VELOCITY_TARGET),
+    /* the LFO destinations (DrumParameters.c l. 285-288) */
+    ROW_NOBIND("lfo_target_voice", "LFO", "DstVoice", "vo1", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE),
+    ROW_NOBIND("lfo_target_param", "LFO", "DstParam", "ds1", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM),
+    ROW_NOBIND("lfo_target_voice_2", "LFO", "DstVoice2", "vo2", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE_2),
+    ROW_NOBIND("lfo_target_param_2", "LFO", "DstParam2", "ds2", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM_2),
+};
+
+/* Runtime registry count used by InstrumentManager bounds checks. */
+const uint8_t alkaline_param_descriptor_count =
+    (uint8_t)(sizeof(alkaline_param_descriptors) / sizeof(alkaline_param_descriptors[0]));
+
+_Static_assert(sizeof(alkaline_param_descriptors) / sizeof(alkaline_param_descriptors[0]) ==
+                   ALK_PARAM_COUNT,
+               "alkaline_param_descriptors must have one row per index");
+
+/* An empty 16-cell page (pages 1, 3, 4: no amp envelope, FM or transient
+ * controls; Snare ships an all-empty page 3 the same way). */
+#define ALK_PAGE_EMPTY \
+    {{ INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, \
+       INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, \
+       INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, \
+       INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }}
+
+/*
+ * Alkaline voice menu layout (F3: the user left the assignment open).
+ *
+ * What:       eight sub-pages at the index of the front-panel SELECT button
+ *             that means the same thing for every engine (menu.c ≈ l. 4608:
+ *             subPage = SELECTn - 1): 0 oscillator, 1 amp envelope, 2 pitch/
+ *             velocity, 3 FM, 4 transient, 5 filter, 6 LFO, 7 mix. Each page
+ *             is 16 cells shown as four-cell screens.
+ * Why:        a 303 voice in the places a Drum player looks: the 303 pitch
+ *             controls under OSC (coa tun wav sld), the filter under FILTER
+ *             (cut res env dec, then drv on the second screen), accent with
+ *             vol/pan under MIX.
+ */
+const instrument_menu_page_t alkaline_menu_pages[] = {
+    /* 0 OSC: coa tun wav sld */
+    {{ ALK_PARAM_OSC1_PITCH_COARSE, ALK_PARAM_TUNING, ALK_PARAM_WAVE, ALK_PARAM_SLIDE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* 1 amp envelope: none (the VEG is fixed, D10) */
+    ALK_PAGE_EMPTY,
+    /* 2 velocity: dst amt (Cymbal's layout: cells 0-1) */
+    {{ ALK_PARAM_VELO_MOD_DEST, ALK_PARAM_VELO_MOD_AMOUNT, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* 3 FM, 4 transient: none */
+    ALK_PAGE_EMPTY,
+    ALK_PAGE_EMPTY,
+    /* 5 FILTER: cut res env dec | drv */
+    {{ ALK_PARAM_CUTOFF, ALK_PARAM_RESO, ALK_PARAM_ENVMOD, ALK_PARAM_DECAY, ALK_PARAM_DRIVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* 6 LFO: the Drum layout (DrumParameters.c l. 411) */
+    {{ ALK_PARAM_LFO_RATE, ALK_PARAM_LFO_SYNC, ALK_PARAM_LFO_WAVE, ALK_PARAM_LFO_OFFSET, ALK_PARAM_LFO_RETRIGGER_VOICE, ALK_PARAM_LFO_POLARITY, ALK_PARAM_LFO_AMOUNT, ALK_PARAM_LFO_AMOUNT_2, ALK_PARAM_LFO_TARGET_VOICE, ALK_PARAM_LFO_TARGET_PARAM, ALK_PARAM_LFO_TARGET_VOICE_2, ALK_PARAM_LFO_TARGET_PARAM_2, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* 7 MIX: acc vol pan */
+    {{ ALK_PARAM_ACCENT, ALK_PARAM_INSTRUMENT_VOL, ALK_PARAM_INSTRUMENT_PAN, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+};
+
+const uint8_t alkaline_menu_page_count =
+    (uint8_t)(sizeof(alkaline_menu_pages) / sizeof(alkaline_menu_pages[0]));
+
+_Static_assert(ALKALINE_MENU_PAGE_COUNT ==
+                   (sizeof(alkaline_menu_pages) / sizeof(alkaline_menu_pages[0])),
+               "ALKALINE_MENU_PAGE_COUNT must match alkaline_menu_pages");
+
+#undef FLAGS_IMAGE
+#undef BIND_SPECIAL
+#undef BIND
+#undef ROW
+#undef ROW_SPECIAL
+#undef ROW_MENU
+#undef ROW_SELECT_ONOFF
+#undef ROW_NOBIND
+#undef ROW_NOBIND_IMAGE
+#undef ALK_PAGE_EMPTY
+#undef MOD_PM63
+#undef MOD_0_127
+#undef MOD_NONE

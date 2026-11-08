@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Verify S073 special-writer tags in the four instrument tables.
+"""Verify S073 special-writer tags in the instrument tables.
 
 What:       classifies each descriptor key with the pre-S073 string rules and
-            compares the result with its ROW_SPECIAL/ROW_MENU_SPECIAL tag.
+            compares the result with its ROW_SPECIAL/ROW_MENU_SPECIAL tag; and
+            (S093 P4) checks the instrument registry against the invariants
+            the storage code relies on: rows in enum order and contiguous
+            from 0 (the .hcnames header walks the type values until
+            storage_instrumentTypeToText() returns NULL), 3-character type
+            tokens (HCNAMES rows and AutoSave copy exactly 3 bytes), and one
+            TABLES entry per registered type.
 Why:        host proof that the flash tags preserve every old writer mapping.
-Inputs:     the four parameter tables in the repository root.
+Inputs:     the parameter tables in the repository root (five at S093 P4).
 Outputs:    a row count and mismatch diagnostics; failure exits 1.
 Accessors:  make -C tools/dsp_test special_tags.
 Affiliates: InstrumentManager.c's diagnostic classifier.
@@ -17,7 +23,14 @@ TABLES = {
     'SNR': 'Core/DSP/Instruments/Snare/SnareParameters.c',
     'CYM': 'Core/DSP/Instruments/Cymbal/CymbalParameters.c',
     'HAT': 'Core/DSP/Instruments/HiHat/HiHatParameters.c',
+    # S093 P4: the coarse row classifies as PITCH_COARSE | OSC1 (the osc1_
+    # branch is type-independent here and in the firmware classifier,
+    # InstrumentManager.c l. 3876); every alk_* key and the platform rows
+    # classify as NONE or as their Drum twins.
+    'ALK': 'Core/DSP/Instruments/Alkaline/AlkalineParameters.c',
 }
+ENUM = 'Core/DSP/Instruments/InstrumentManager.h'
+REGISTRY = 'Core/DSP/Instruments/InstrumentManager.c'
 ROW = re.compile(r'^\s*(ROW[A-Z_]*)\("([^"]+)"(.*)\),\s*$')
 
 
@@ -74,8 +87,42 @@ def actual(macro, rest):
     return {part.strip() for part in tag.split('|')}
 
 
+def registry_check():
+    """S093 P4 (F2): the registry invariants a further type must keep.
+
+    What:   reads instrument_type_t (InstrumentManager.h) and the registry
+            rows ([INSTRUMENT_TYPE_X] = { INSTRUMENT_TYPE_X, "tok", ...) of
+            InstrumentManager.c. Fails when the rows are not in enum order,
+            a designator disagrees with its row's type, a token is not 3
+            lowercase characters, the row count differs from the real types
+            (UNKNOWN excluded), or a registered type has no TABLES entry.
+    Returns the number of problems (each printed).
+    """
+    enum = re.search(r'typedef enum \{(.*?)\} instrument_type_t;',
+                     open(ENUM).read(), re.S).group(1)
+    types = [t for t in re.findall(r'INSTRUMENT_TYPE_(\w+)', enum) if t != 'UNKNOWN']
+    rows = re.findall(r'\[INSTRUMENT_TYPE_(\w+)\]\s*=\s*\{\s*INSTRUMENT_TYPE_(\w+),\s*"([^"]*)"',
+                      open(REGISTRY).read())
+    bad = 0
+    if [r[0] for r in rows] != types:
+        print(f'registry: rows {[r[0] for r in rows]} differ from enum {types}')
+        bad += 1
+    for desig, typ, tok in rows:
+        if desig != typ:
+            print(f'registry: [{desig}] holds INSTRUMENT_TYPE_{typ}')
+            bad += 1
+        if not re.fullmatch(r'[a-z0-9]{3}', tok):
+            print(f'registry: {typ} token "{tok}" is not 3 lowercase characters')
+            bad += 1
+        if typ not in TABLES:
+            print(f'registry: {typ} has no TABLES entry in check_special_tags.py')
+            bad += 1
+    return bad
+
+
 def main():
-    bad = rows = 0
+    bad = registry_check()
+    rows = 0
     for t, path in TABLES.items():
         with open(path) as source:
             for n, line in enumerate(source, 1):

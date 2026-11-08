@@ -65,6 +65,25 @@ typedef enum {
     INSTRUMENT_TYPE_SNR,
     INSTRUMENT_TYPE_CYM,
     INSTRUMENT_TYPE_HAT,
+    /*
+     * S093 P4: the Alkaline (TB-303) type, before UNKNOWN.
+     *
+     * What:       value 4; UNKNOWN moves from 4 to 5.
+     * Why:        UNKNOWN is the count of real types: every type-sized array
+     *             (menu_instrumentLoadIndex[], menu.c l. 1728: +2 B, R1) and
+     *             every `type >= INSTRUMENT_TYPE_UNKNOWN` guard grow with it.
+     *             A new type goes here, before UNKNOWN, with a registry row
+     *             at the same index (InstrumentManager.c static assert and
+     *             check_special_tags.py registry_check()).
+     * Stored data: no stored value changes meaning. Types are stored as text
+     *             tokens (AutoSave, .hcnames, instrument files, midilrn.cfg);
+     *             the numeric value lives only in RAM. The .hcnames header
+     *             lists the tokens in enum order, so a card's /.hcnames is
+     *             rebuilt once on the first boot with five types
+     *             (filesystem_validateHcnamesHeader(), filesystem.c l. 6591:
+     *             that is its purpose).
+     */
+    INSTRUMENT_TYPE_ALK,
     INSTRUMENT_TYPE_UNKNOWN
 } instrument_type_t;
 

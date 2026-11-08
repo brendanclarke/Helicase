@@ -42,7 +42,12 @@ OUT_DIR = os.path.join(ROOT, "Core", "DSP", "Instruments", "Alkaline")
 RES_POINTS = 9                      # S092 P6 §5.3: 9 points, LSD +0.016 dB
 NET_BLOCK = 64                      # samples per slow-network update (T2-2, S093 P3)
 A_U_HZ, A_V_HZ = 50.0, 120.0        # N1 asymptote poles (S093 P1 §5)
-NET_STATES = 8                      # block-system states (S093 P3 experiment: --states)
+# S093 P4: r6, the common balanced basis (user, S093). reduced_basis() builds
+# one basis for every Res point from the trace-normalised Gramians summed over
+# 33 points, so the 9 table points stay in one basis and the per-block Res
+# blend in dl_netChunk() stays exact. 8 restores the physical basis
+# (res_point()'s full path).
+NET_STATES = 6                      # block-system states: r6, the common balanced basis
 SQ_SCALE_V = 5.4                    # square table: int16 32767 = +5.4 V around
 SQ_MID_V = 4.0                      # a 4.0 V mid level (the network is AC)
 
