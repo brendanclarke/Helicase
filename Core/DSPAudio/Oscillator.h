@@ -53,16 +53,20 @@
 #define NOISE				0x04
 #define CRASH				0x05
 /*
- * Stock table waves (S086 P2): [11][1024] octave tables like Tri/Saw/Rec,
- * in wavetableStock.c, read by the same table loops. SQ3 = Re3 (303
- * square), SW3 = Sw3 (303 saw). OSC_STOCK_FIRST..OSC_STOCK_LAST index
- * osc_stockTables[] (Oscillator.c); ReA/TrA/SwA follow later.
+ * The built-in (stock) waves are SINE..CRASH (S093 P3).
+ *
+ * What:       OSC_STOCK_LAST is the last built-in wave: the wav-row clamp and
+ *             the menu range. User entries (modulator list) start at
+ *             OSC_SAMPLE_START.
+ * Why:        the S086 stock table waves Re3/Sw3 (0x06/0x07) were removed in
+ *             S093 (S093_P0_ALKALINE_C_FUNCTIONS_CODE.md §10): they were a
+ *             303's filtered output, not its oscillator, and their 45,056 B
+ *             of flash went to Alkaline. Their recipes and generator stay in
+ *             tools/plots/ (INSTRUMENTS_DSP_REFERENCE.md §6.1.2 lists the
+ *             restore steps); restoring them moves OSC_SAMPLE_START up again.
  */
-#define SQ3					0x06
-#define SW3					0x07
-#define OSC_STOCK_FIRST		SQ3
-#define OSC_STOCK_LAST		SW3
-#define OSC_SAMPLE_START 	0x08
+#define OSC_STOCK_LAST		CRASH
+#define OSC_SAMPLE_START 	0x06
 
 /*
  * Oscillator type: the typ row (S087 stage B).
@@ -382,6 +386,28 @@ void calcNextOscSampleBlock(OscInfo* osc, int16_t* buf, const uint8_t size ,cons
 int16_t calcNextOscSample(OscInfo* osc);
  //-----------------------------------------------------------
 void osc_setFreq(OscInfo* osc);
+/*
+ * Table-wave frequency, the direct form (S093 P3, Alkaline T1-7).
+ *
+ * What:       phaseInc and tableOffset for a [11][1024] table wave from
+ *             freq x pitchMod x modNodeValue, exactly as osc_setFreq() sets
+ *             them for Tri/Saw/Rec for every positive frequency, without its
+ *             waveform dispatch, type clamps and frequency cache; the octave
+ *             level from the float's exponent and mantissa (the edges are
+ *             exact doublings), not ten compares. A NaN frequency gives level
+ *             10 here, 0 there (never reached: the caller's pitch is finite).
+ * Why:        S093_P2 §3A.2 T1-7: an Alkaline glide changes the frequency
+ *             every block, so osc_setFreq()'s cache misses every block (its
+ *             worst path is 128-139 instructions); the caller plays one fixed
+ *             table wave.
+ * Inputs:     osc->freq, pitchMod, modNodeValue (an LFO or velocity target on
+ *             the coarse row keeps working).
+ * Outputs:    osc->phaseInc, osc->tableOffset.
+ * Accessors:  AlkalineVoice.c (Alkaline_calcVoiceAsync) only; a voice that
+ *             calls it must never need osc_setFreq()'s bind or clamp rules
+ *             (no user-sample types, waveform fixed to a table wave).
+ */
+void osc_setTableFreq(OscInfo* osc);
 //-----------------------------------------------------------
 void calcNextOscSampleFmBlock(OscInfo* osc, int16_t* modBuffer, int16_t* buf, uint8_t size ,const float gain);
  //-----------------------------------------------------------
@@ -593,9 +619,8 @@ static inline int32_t osc_ringDepthQ15(const float amount)
 /*
  * Whether a waveform is read from a [11][1024] octave table (S086 P2).
  *
- * What:       1 for TRI, SAW, REC and the stock table waves
- *             (OSC_STOCK_FIRST..OSC_STOCK_LAST); 0 for SINE, NOISE, CRASH
- *             and user samples.
+ * What:       1 for TRI, SAW, REC; 0 for SINE, NOISE, CRASH and user
+ *             samples (the S086 stock table waves were removed in S093).
  * Why:        the engines' trigger start phase (0xff << 20 x the transient
  *             offset) applies to every table wave alike.
  * Inputs:     waveform.  Outputs: 0 or 1.
@@ -604,8 +629,7 @@ static inline int32_t osc_ringDepthQ15(const float amount)
  */
 static inline uint8_t osc_isTableWave(const uint8_t waveform)
 {
-	return (uint8_t)((waveform >= TRI && waveform <= REC) ||
-	                 (waveform >= OSC_STOCK_FIRST && waveform <= OSC_STOCK_LAST));
+	return (uint8_t)(waveform >= TRI && waveform <= REC);
 }
 
 /*

@@ -3,7 +3,8 @@
 
 What:       models the 303 VCO saw and the Q8 transistor-shaped square, and
             plots them beside the Re3/Sw3 tables the firmware plays now
-            (Core/DSPAudio/wavetableStock.c), all at the octave level that
+            (tools/plots/archive/wavetableStock.c; S093 P3 removed them from
+            the firmware), all at the octave level that
             plays C2 (65.4 Hz, the proposed Alkaline root) and band-limited
             with the same per-level taper (measured from sawTable).
               row 1  saw: one cycle + harmonics 1-64
@@ -16,7 +17,7 @@ Why:        S092_P0_ALKALINE_INSTRUMENT_PLAN.md §2: Re3/Sw3 were digitised
             from a 303's filtered output, so they cannot serve as the
             Alkaline VCO. These are MODELS from circuit reasoning, not
             measurements; the open constants are marked in the figure.
-Inputs:     Core/DSPAudio/wavetableStock.c, Core/DSPAudio/wavetable.c.
+Inputs:     tools/plots/archive/wavetableStock.c, Core/DSPAudio/wavetable.c.
 Outputs:    tools/plots/303_raw_vco_vs_stock.png.
 Accessors:  python3 tools/plots/plot_303_raw_vco.py (numpy, matplotlib).
 Affiliates: plot_stock_waves.py (how Re3/Sw3 were made), gen_stock_tables.py.
@@ -140,8 +141,8 @@ def main():
     plt = L.setup_matplotlib()
     saw_t = read_table("sawTable", os.path.join(DSP, "wavetable.c"))
     rec_t = read_table("recTable", os.path.join(DSP, "wavetable.c"))
-    sq3_t = read_table("sq3Table", os.path.join(DSP, "wavetableStock.c"))
-    sw3_t = read_table("sw3Table", os.path.join(DSP, "wavetableStock.c"))
+    sq3_t = read_table("sq3Table", os.path.join(HERE, "archive", "wavetableStock.c"))
+    sw3_t = read_table("sw3Table", os.path.join(HERE, "archive", "wavetableStock.c"))
     taper = level_taper(saw_t[LEVEL])
 
     raw_saw = down(saw_model())

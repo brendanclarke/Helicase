@@ -1896,9 +1896,12 @@ Current keys by family:
   before parsing), preserving the old sound; older firmware skips the key.
   It is written in `[params]` and `[morph]` like any image row.
   `oscN_wave` values: 0 `Sin`, 1 `Tri`, 2 `Saw`, 3 `Rec`, 4 `Noi`, 5 `Cym`,
-  6 `Re3`, 7 `Sw3` (S086), then installed catalogue entries from 8
-  (`OSC_SAMPLE_START`): `s01..sNN` (samples), `l01..lNN` (looped),
-  `w01..wNN` (wavetables). Under `typ` = `wav`, values ≥ 8 are ignored.
+  then installed catalogue entries from 6 (`OSC_SAMPLE_START`):
+  `s01..sNN` (samples), `l01..lNN` (looped), `w01..wNN` (wavetables). Under
+  `typ` = `wav`, values ≥ 6 are ignored (clamped to `Cym`). **S093 P3
+  removed `Re3`/`Sw3` (6/7, S086):** a file saved between S086 and S093
+  that selected entry v ≥ 8 now plays entry v − 2's catalogue item
+  (v − 2 ≥ 6); 6/7 as osc1 `wav` clamp to `Cym`. There is no migration.
   Under `smp`/`slp`/`wtb`, the entry type determines what plays.
   **Before S086 the user samples started at 6:** a file saved earlier that
   selected user sample *n* (value 6 + *n*) now plays `Re3`/`Sw3`

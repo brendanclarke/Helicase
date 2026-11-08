@@ -39,8 +39,6 @@ extern int16_t sine_table[TABLESIZE + 1];
 extern int16_t sawTable[11][1024];
 extern int16_t triTable[11][1024];
 extern int16_t recTable[11][1024];
-extern int16_t sq3Table[11][1024];
-extern int16_t sw3Table[11][1024];
 extern unsigned char crashSample[32769];
 
 /* random.h */

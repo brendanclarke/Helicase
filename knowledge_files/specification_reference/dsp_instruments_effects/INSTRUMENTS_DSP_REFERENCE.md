@@ -579,11 +579,11 @@ function's per-sample loops with a P2 baseline and fails if one grew.
   | 1–3 | `TRI SAW REC` | `Tri Saw Rec` | `calcWavetableOscBlock(table)` |
   | 4 | `NOISE` | `Noi` | `calcNoiseBlock` |
   | 5 | `CRASH` | `Cym` | `calcSampleOscBlock` (the built-in crash sample) |
-  | 6–7 | `SQ3 SW3` (`OSC_STOCK_FIRST`..`OSC_STOCK_LAST`) | `Re3 Sw3` | the table loops, through `osc_stockTables[]` (S086) |
 
   `waveformNames` (`MenuText.h`) must have exactly `OSC_SAMPLE_START`
   entries (a `_Static_assert` in `menu.c`). Inserting a waveform renumbers
-  the catalogue entries (S086 did, 6+ → 8+, with no kit migration).
+  the catalogue entries (S086 did, 6+ → 8+; S093 P3 removed `Re3`/`Sw3`,
+  8+ → 6+; neither with a migration, §6.1.2).
 
 - **Oscillator type system (S087, `osc1_type`):** the `typ` row on the main
   oscillator selects which reader serves `wav` values ≥ `OSC_SAMPLE_START`:
@@ -663,8 +663,7 @@ function's per-sample loops with a P2 baseline and fails if one grew.
   interpolators' `itg + 1` read (S086). The S087 sample/wavetable readers
   use Q20.12 phase (`OSC_SAMPLE_PHASE_SHIFT` 12), supporting up to 2²⁰
   points per sample (§6.1.4).
-- **Wavetables:** `sawTable`, `triTable`, `recTable` (`wavetable.c`) and the
-  stock waves `sq3Table`, `sw3Table` (`wavetableStock.c`, generated) are 11
+- **Wavetables:** `sawTable`, `triTable`, `recTable` (`wavetable.c`) are 11
   band-limited octaves × 1,024 samples (22,528 B each, program flash), every
   level peaking at 32,767. `osc_isTableWave()` names this set. `osc_setFreq()` picks the
   octave with `freqToTableIndex()`: the number of the ten edges
@@ -837,46 +836,38 @@ re-anchors.
 build; it compiles the header's own constants block) and
 `elf86_mixer_check`.
 
-#### 6.1.2 Stock table waves (S086)
+#### 6.1.2 Stock table waves: removed in S093
 
-`Re3` (`SQ3`, a TB-303 square) and `Sw3` (`SW3`, a 303 saw) are fixed
-`const int16_t [11][1024]` tables like `sawTable`, read by the same loops
-(plain, FM, sync and ring) at the same cost.
+S086 added `Re3` (`SQ3`, `wav` 6) and `Sw3` (`SW3`, `wav` 7), two fixed
+`const int16_t [11][1024]` tables played by the Tri/Saw/Rec loops through a
+variable pointer (`osc_stockTables[]`). **S093 P3 removed them from the
+firmware** (`S093_P0_ALKALINE_C_FUNCTIONS_CODE.md` §10, user decision D14):
+they were digitised from a TB-303's *filtered output*, not its oscillator,
+and their 45,056 B of flash went to the Alkaline instrument, which plays the
+real 303 waves (its own square table and the stock `Saw`).
 
-- **Dispatch:** `osc_stockTables[]` (`Oscillator.c`) maps `waveform −
-  OSC_STOCK_FIRST` to the table, with a `_Static_assert` on its length.
-  Each dispatcher (`calcNextOscSampleBlock`, `calcNextOscSampleFmBlock`,
-  `osc_renderPlainWave`, `osc_renderSyncWave`, `calcNextOscSampleRingBlock`)
-  has one case group for all stock waves with this **variable** pointer;
-  `osc_setFreq()` gives them `osc_calcWavetableFreqValue()`. One
-  variable-pointer site per dispatcher avoids constant-argument call sites
-  (which make LTO re-specialise the existing clones, §10).
-- **Sync:** `osc_syncWaveform()` includes them (an interpolated stock slave
-  takes the synced phase rule). `osc_syncClockInc()` scales only `CRASH`
-  and user samples by `<< 5`; the stock waves are 2³²-per-cycle clocks like
-  the tables (testing `>= CRASH` would make a stock master reset 32× too
-  often).
-- **Trigger start phase:** the engines test `osc_isTableWave()`, so the
-  stock waves restart at `0xff << 20` × offset like the tables.
-- **Generation:** `tools/gen_stock_tables.py` reads
-  `tools/plots/stock_wave_harmonics.csv` (the harmonic recipe made by
-  `tools/plots/plot_stock_waves.py` from the user's reference captures) and
-  writes `Core/DSPAudio/wavetableStock.c`. Each level is the recipe's
-  harmonics through a per-level gain curve **measured from `sawTable`**
-  (g = |SAW(k)|·k/|SAW(1)|, a Hann-like taper), synthesised at 1,024
-  points, scaled to a 32,767 peak. Built-in checks: C1 rebuilds `sawTable`
-  within 6 LSB (`recTable`/`triTable` do not follow this taper: they roll
-  off more slowly and carry a −20…−60 dB tail above the level's Nyquist
-  harmonic, so they are printed for information), C2 peak/DC, C3
-  out-of-band, C4 `--check` (regenerates byte-identical;
-  `make -C tools/dsp_test stock_tables`). Review plot:
-  `tools/plots/plot_stock_tables.py`.
-- **Level:** peak-normalised like every table, so `Re3` plays about 8 dB and
-  `Sw3` about 2 dB quieter than `Rec`/`Saw` (crest factor).
-- **Flash:** 22,528 B per wave. The fixed `phase >> 22` / `& 1023` indexing
-  needs 1,024 points at every level; shorter upper levels would need a new
-  reader (and change the sound by −35…−67 dB at the top octaves).
-  `ReA`/`TrA`/`SwA` from the same recipe are deferred.
+- **Firmware now:** the built-in waves are `SINE..CRASH` (0–5);
+  `OSC_STOCK_LAST` = `CRASH` (the `wav` clamp and menu range);
+  `OSC_SAMPLE_START` = 6. `osc_isTableWave()` is Tri/Saw/Rec only.
+- **Stored data (no migration):** an osc1 `wav` of 6/7 clamps to `Cym`; a
+  modulator `wav` value v now selects what v + 2 selected (user entries
+  moved down two places).
+- **The specification is kept:** the recipe
+  `tools/plots/stock_wave_harmonics.csv` (also `ReA`/`TrA`/`SwA`), its
+  digitiser `tools/plots/plot_stock_waves.py` and source capture, and the
+  generator `tools/plots/gen_stock_tables.py`. The generator writes
+  `tools/plots/archive/wavetableStock.c` (outside the build); its checks C1
+  (rebuilds `sawTable` within 6 LSB), C2 peak/DC, C3 out-of-band and C4
+  (`--check`, byte-identical) still run as
+  `make -C tools/dsp_test stock_tables`.
+- **To restore them:** follow "Another stock table wave" (§9.3) with
+  `--out Core/DSPAudio/wavetableStock.c`: restore the externs, the
+  constants after `CRASH`, `osc_stockTables[]` and its case groups in the
+  five dispatchers and `osc_setFreq()`, the names, and move
+  `OSC_SAMPLE_START` up again (which renumbers the user samples back). The
+  S086 dispatch rule still applies: one variable-pointer case group per
+  dispatcher, never constant-argument sites (§10). Levels are
+  peak-normalised (`Re3` ≈ 8 dB, `Sw3` ≈ 2 dB quieter than `Rec`/`Saw`).
 
 #### 6.1.3 Modulator `wav` list (S087)
 
@@ -1267,7 +1258,7 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 
 | Stage | Instructions per sample | Divisions |
 |---|---:|---:|
-| Sine / wavetable oscillator (incl. the stock waves `Re3`/`Sw3`, S086) | 23 / 24 | 0 |
+| Sine / wavetable oscillator | 23 / 24 | 0 |
 | FM wavetable / FM sine carrier | 35 / 30 | 0 |
 | Noise | 12–13 | 0 |
 | Crash sample / FM crash | 30 / 38 | 0 |
@@ -1428,14 +1419,16 @@ General rules for every change:
   them, which changes stored values. (`calcNextOscSample()`/`calcFm()`, the
   per-sample variants, have no callers.)
 - **Another stock table wave** (`ReA`/`TrA`/`SwA` are ready in the recipe):
-  1. add a line to `WAVES` in `tools/gen_stock_tables.py` and run it (then
-     `make -C tools/dsp_test stock_tables`);
+  1. add a line to `WAVES` in `tools/plots/gen_stock_tables.py` and run it
+     with `--out Core/DSPAudio/wavetableStock.c` (and add that file to
+     `DSP_SRCS`);
   2. add the `extern` in `wavetable.h`;
-  3. add the constant after `SW3`, move `OSC_STOCK_LAST` and
-     `OSC_SAMPLE_START`;
-  4. add the table to `osc_stockTables[]` (the assert checks the length);
+  3. add the constant after `CRASH` (S093: the stock table waves were
+     removed, §6.1.2), move `OSC_STOCK_LAST` and `OSC_SAMPLE_START`;
+  4. restore `osc_stockTables[]` and its one case group per dispatcher (the
+     assert checks the length);
   5. add the name to `waveformNames` (the assert checks the count);
-  6. extend the host tests (`test_osc_stock.c`, `test_osc_pos.c` P1).
+  6. extend the host tests (`modules/oscillator.c` stock and pos groups).
   It costs 22,528 B of program flash and renumbers the user samples.
 - **Oscillator modes and types under the CPU rule (S085, user):** "no
   increase in CPU cycles overall".

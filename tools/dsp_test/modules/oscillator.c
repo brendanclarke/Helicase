@@ -1,5 +1,6 @@
 /*
- * Oscillator module host tests (S085 snc/rng, S086 stock waves and pos,
+ * Oscillator module host tests (S085 snc/rng, S086 pos (its stock waves
+ * Re3/Sw3 were removed in S093 P3),
  * S087 typ, samples and wavetables, S088 itp, S089 P3 Drum FM ramp).
  *
  * What:       compiles the whole real Oscillator.c over the real catalogue
@@ -13,10 +14,8 @@
  *                      S5 osc_syncClockInc() (<< 5 crash, << 10 sample
  *                      modulator, clamps); S6 noise is unsynced; M1 the
  *                      depth and ratio maps;
- *               stock  D1 SQ3/SW3 route to the table loops with their own
- *                      table on every path; D2 with Rec's data they equal
- *                      Rec; D4 the waveform partitions 0..15; D5
- *                      osc_setFreq() gives them Saw's increment and level;
+ *               stock  D4 the waveform partitions 0..15 (the S086 D1/D2/D5
+ *                      Re3/Sw3 checks went with the waves, S093 P3);
  *               pos    P1 the trigger truth table; P2 identity; P3 no drift;
  *                      P4 circular step; P5 continuity; P6 non-phase waves;
  *                      P7 the cap (cap build only); P8 consume only;
@@ -63,8 +62,6 @@ int16_t sine_table[TABLESIZE + 1];
 int16_t sawTable[11][1024];
 int16_t triTable[11][1024];
 int16_t recTable[11][1024];
-int16_t sq3Table[11][1024];
-int16_t sw3Table[11][1024];
 unsigned char crashSample[32769];
 
 static uint32_t host_rng = 0x0850001u;
@@ -120,8 +117,6 @@ static void fill_random_tables(uint32_t seed)
     fill_random(sawTable, &s);
     fill_random(triTable, &s);
     fill_random(recTable, &s);
-    fill_random(sq3Table, &s);
-    fill_random(sw3Table, &s);
     for (unsigned i = 0u; i < 32769u; ++i)
         crashSample[i] = (unsigned char)golden_rand(&s);
 }
@@ -136,8 +131,6 @@ static void fill_shape_tables(void)
             sawTable[o][i] = (int16_t)lrint(32767.0 * (2.0 * x - 1.0));
             triTable[o][i] = (int16_t)lrint(32767.0 * (1.0 - 4.0 * fabs(x - 0.5)));
             recTable[o][i] = (i < 512u) ? 32767 : -32768;
-            sq3Table[o][i] = (int16_t)lrint(32767.0 * sin(2.0 * M_PI * x * 3.0));
-            sw3Table[o][i] = (int16_t)lrint(32767.0 * (1.0 - 2.0 * x) * fabs(1.0 - 2.0 * x));
         }
     for (unsigned i = 0u; i < 32768u; ++i)
         crashSample[i] = (unsigned char)(128u + (i & 127u));
@@ -180,7 +173,7 @@ static int16_t ring_ref(int16_t car, int16_t mod, int32_t d)
  */
 static void test_ring(void)
 {
-    static const uint8_t waves[] = { SINE, TRI, SAW, REC, NOISE, CRASH, SQ3, SW3 };
+    static const uint8_t waves[] = { SINE, TRI, SAW, REC, NOISE, CRASH };
     static const float amts[] = { 0.0f, 1.0f / 127.0f, 0.5f, 126.0f / 127.0f, 1.0f };
     static const uint32_t phases[] = { 0x00000000u, 0x7fff1234u, 0xfffff000u };
     static const uint32_t incs[] = { 0x00800000u, 0x07000000u, 0x30000000u };
@@ -228,7 +221,7 @@ static void test_ring(void)
 /* S1 and S6. Break: the pull applied regardless of depth (or of NONE). */
 static void test_sync_depth0_and_unsynced(void)
 {
-    static const uint8_t waves[] = { SINE, TRI, SAW, REC, NOISE, CRASH, SQ3, SW3 };
+    static const uint8_t waves[] = { SINE, TRI, SAW, REC, NOISE, CRASH };
     static const uint32_t clockIncs[] = { 0x01000000u, 0x30000000u, 0xf0000000u };
 
     for (unsigned w = 0u; w < sizeof(waves); ++w)
@@ -419,11 +412,6 @@ static void run_sync(void)
 }
 
 /* ============================================================= stock -- */
-static int same_state(const OscInfo *a, const OscInfo *b)
-{
-    return a->phase == b->phase && a->output == b->output;
-}
-
 static int same_buf(const int16_t *a, const int16_t *b)
 {
     return memcmp(a, b, N * sizeof(int16_t)) == 0;
@@ -435,127 +423,15 @@ static void random_mod(int16_t *m, uint32_t *s)
         m[i] = (int16_t)(golden_rand(s) >> 16);
 }
 
-/* A reset list with resets on about a quarter of the samples. */
-static void random_over(uint32_t *over, uint32_t *s)
-{
-    for (unsigned i = 0u; i < N; ++i)
-        over[i] = (golden_rand(s) & 3u) ? OSC_SYNC_NONE : golden_rand(s);
-}
-
-typedef const int16_t (*TableRef)[1024];
-
-/* D1: each dispatcher -> the table loop with the wave's own table. Break: a
-** wrong pointer or a swapped osc_stockTables[] order. */
-static void d1_routing(void)
-{
-    static const uint8_t waves[2] = { SQ3, SW3 };
-    const TableRef tables[2] = { sq3Table, sw3Table };
-    uint32_t s = 0xd1d1d1u;
-    int16_t mod[N], ba[N], bb[N];
-    uint32_t over[N];
-
-    for (unsigned w = 0u; w < 2u; ++w)
-        for (uint8_t lv = 0u; lv < 11u; ++lv)
-            for (unsigned r = 0u; r < 24u; ++r) {
-                const uint32_t ph = golden_rand(&s);
-                const uint32_t inc = golden_rand(&s) >> (r % 12u);
-                const float gain = (float)(golden_rand(&s) >> 8) / 16777216.0f * 1.5f;
-                const uint32_t ratio = golden_rand(&s) >> 8;
-                const int32_t depth = (int32_t)(golden_rand(&s) >> 2);
-                const int32_t d15 = (int32_t)(golden_rand(&s) % 32769u);
-                const int32_t step = (int32_t)(golden_rand(&s) % 129u) - 64;
-                OscInfo a, b;
-
-                random_mod(mod, &s);
-                random_over(over, &s);
-
-                a = make_osc(waves[w], lv, ph, inc); b = a;
-                calcNextOscSampleBlock(&a, ba, N, gain);
-                calcWavetableOscBlock(&b, tables[w], bb, N, gain);
-                if (!same_buf(ba, bb) || !same_state(&a, &b)) fail("D1 plain", w, lv, r);
-
-                a = make_osc(waves[w], lv, ph, inc); b = a;
-                osc_renderPlainWave(&a, ba, N);
-                calcWavetableOscBlock(&b, tables[w], bb, N, 1.f);
-                if (!same_buf(ba, bb) || !same_state(&a, &b)) fail("D1 renderPlain", w, lv, r);
-
-                a = make_osc(waves[w], lv, ph, inc); b = a;
-                calcNextOscSampleFmBlock(&a, mod, ba, N, gain);
-                calcFmBlock(&b, tables[w], mod, bb, N, gain);
-                if (!same_buf(ba, bb) || !same_state(&a, &b)) fail("D1 fm", w, lv, r);
-
-                a = make_osc(waves[w], lv, ph, inc); b = a;
-                osc_renderSyncWave(&a, over, ratio, depth, ba, N);
-                calcWavetableOscSyncBlock(&b, tables[w], over, ratio, depth, bb, N);
-                if (!same_buf(ba, bb) || !same_state(&a, &b)) fail("D1 sync", w, lv, r);
-
-                a = make_osc(waves[w], lv, ph, inc); b = a;
-                calcNextOscSampleRingBlock(&a, mod, ba, N, d15, step);
-                calcWavetableOscRingBlock(&b, tables[w], mod, bb, N, d15, step);
-                if (!same_buf(ba, bb) || !same_state(&a, &b)) fail("D1 ring", w, lv, r);
-            }
-}
-
-/* Render one block of wave through all four top-level entry points. */
-static void render4(uint8_t wave, uint8_t lv, uint32_t ph, uint32_t inc,
-                    const int16_t *mod, const uint32_t *over, uint32_t clockInc,
-                    int32_t depth, int32_t d15, int32_t step,
-                    int16_t out[4][N], OscInfo st[4])
-{
-    for (unsigned m = 0u; m < 4u; ++m) {
-        OscInfo o = make_osc(wave, lv, ph, inc);
-
-        if (m == 0u) calcNextOscSampleBlock(&o, out[m], N, 0.8f);
-        if (m == 1u) calcNextOscSampleFmBlock(&o, (int16_t *)mod, out[m], N, 0.8f);
-        if (m == 2u) calcNextOscSampleSyncBlock(&o, over, clockInc, depth, out[m], N);
-        if (m == 3u) calcNextOscSampleRingBlock(&o, mod, out[m], N, d15, step);
-        st[m] = o;
-    }
-}
-
-/* D2: with REC's data, SQ3/SW3 behave exactly as REC on every entry point. */
-static void d2_equivalence(void)
-{
-    static const uint8_t waves[2] = { SQ3, SW3 };
-    int16_t (*const stock[2])[1024] = { sq3Table, sw3Table };
-    static int16_t keep[2][11][1024];
-    uint32_t s = 0xd2d3u;
-    int16_t mod[N], oa[4][N], ob[4][N];
-    OscInfo sa[4], sb[4];
-    uint32_t over[N];
-
-    memcpy(keep[0], sq3Table, sizeof(sq3Table));
-    memcpy(keep[1], sw3Table, sizeof(sw3Table));
-    for (unsigned w = 0u; w < 2u; ++w)
-        for (unsigned r = 0u; r < 64u; ++r) {
-            const uint8_t lv = (uint8_t)(r % 11u);
-            const uint32_t ph = golden_rand(&s);
-            const uint32_t inc = golden_rand(&s) >> (2u + r % 10u);
-            const uint32_t clockInc = (golden_rand(&s) >> (2u + r % 8u)) | 1u;
-            const int32_t depth = (int32_t)(golden_rand(&s) >> 2);
-            const int32_t d15 = (int32_t)(golden_rand(&s) % 32769u);
-            const int32_t step = (int32_t)(golden_rand(&s) % 129u) - 64;
-
-            random_mod(mod, &s);
-            random_over(over, &s);
-            memcpy(stock[w], recTable, sizeof(recTable));
-            render4(waves[w], lv, ph, inc, mod, over, clockInc, depth, d15, step, oa, sa);
-            render4(REC, lv, ph, inc, mod, over, clockInc, depth, d15, step, ob, sb);
-            for (unsigned m = 0u; m < 4u; ++m)
-                if (!same_buf(oa[m], ob[m]) || !same_state(&sa[m], &sb[m]))
-                    fail("D2 stock == Rec", w, m, r);
-        }
-    memcpy(sq3Table, keep[0], sizeof(sq3Table));
-    memcpy(sw3Table, keep[1], sizeof(sw3Table));
-}
-
-/* D4: the waveform partitions, 0..15, wav type. Break: a stock wave given
+/* D4: the waveform partitions, 0..15, wav type: the table waves are
+** Tri/Saw/Rec, user entries start at 6 (S093 P3). Break: a table wave given
 ** the sample clock; osc_isTableWave() missing a wave. */
 static void d4_partitions(void)
 {
-    if (OSC_SAMPLE_START != 8) fail("D4 OSC_SAMPLE_START", OSC_SAMPLE_START, 8u, 0u);
+    if (OSC_SAMPLE_START != 6) fail("D4 OSC_SAMPLE_START", OSC_SAMPLE_START, 6u, 0u);
+    if (OSC_STOCK_LAST != CRASH) fail("D4 OSC_STOCK_LAST", OSC_STOCK_LAST, CRASH, 0u);
     for (uint8_t wv = 0u; wv < 16u; ++wv) {
-        const int table = wv == TRI || wv == SAW || wv == REC || wv == SQ3 || wv == SW3;
+        const int table = wv == TRI || wv == SAW || wv == REC;
         OscInfo m = make_osc(wv, 0u, 0u, 0x00123456u);
         const uint32_t want = (wv == CRASH) ? (0x00123456u << 5) : 0x00123456u;
 
@@ -564,33 +440,10 @@ static void d4_partitions(void)
     }
 }
 
-/* D5: osc_setFreq() gives the stock waves Saw's increment and level. */
-static void d5_setfreq(void)
-{
-    for (unsigned i = 0u; i < 400u; ++i) {
-        const float f = 5.0f * powf(1.03f, (float)i);
-        OscInfo saw = make_osc(SAW, 0u, 0u, 0u);
-
-        saw.freq = f; saw.pitchMod = 1.f; saw.modNodeValue = 1.f;
-        osc_setFreq(&saw);
-        for (uint8_t wv = SQ3; wv <= SW3; ++wv) {
-            OscInfo o = saw;
-
-            o.waveform = wv; o.phaseInc = 0u; o.tableOffset = 0xFFu; o.freqCacheValid = 0u;
-            osc_setFreq(&o);
-            if (o.phaseInc != saw.phaseInc || o.tableOffset != saw.tableOffset)
-                fail("D5 osc_setFreq", i, wv, o.tableOffset);
-        }
-    }
-}
-
 static void run_stock(void)
 {
     fill_random_tables(0x5eed086u);
-    d1_routing();
-    d2_equivalence();
     d4_partitions();
-    d5_setfreq();
 }
 
 /* =============================================================== pos -- */
@@ -601,8 +454,6 @@ static int16_t (*wave_table(uint8_t waveform))[1024]
     case TRI: return triTable;
     case SAW: return sawTable;
     case REC: return recTable;
-    case SQ3: return sq3Table;
-    case SW3: return sw3Table;
     default:  return 0;
     }
 }
@@ -654,7 +505,7 @@ static int16_t expected_sample(uint8_t waveform, uint32_t phase)
     }
 }
 
-static const uint8_t phase_waves[] = { SINE, TRI, SAW, REC, CRASH, SQ3, SW3 };
+static const uint8_t phase_waves[] = { SINE, TRI, SAW, REC, CRASH };
 
 /* P1: trigger offset against an independent truth table. Break: pos << 24;
 ** a wave dropped from osc_positionIsPhase(); the & 127 mask removed. */
@@ -664,7 +515,7 @@ static void test_trigger(void)
 
     for (uint8_t w = 0u; w < 16u; ++w) {
         const int phase_wave = (w == SINE || w == TRI || w == SAW || w == REC ||
-                                w == CRASH || w == SQ3 || w == SW3);
+                                w == CRASH);
         for (unsigned i = 0u; i < sizeof(positions) / sizeof(positions[0]); ++i) {
             const unsigned p = positions[i];
             OscInfo osc = make_osc(w, 3u, 0x12345678u, 0u);

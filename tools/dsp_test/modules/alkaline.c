@@ -1,14 +1,17 @@
 /*
- * Alkaline host test (S093 P0).
+ * Alkaline host test (S093 P0; B2R, N1, drive and make-up since S093 P3).
  *
  * What:       compiles the real DiodeLadder.c, AlkalineControl.c,
  *             AlkalineVoice.c and the generated Alkaline tables, over the
  *             whole real Oscillator.c (as the oscillator module does) and the
  *             real sawTable, and checks:
- *               AL-B  bounded output, no NaN, at every knob extreme and on
- *                     minimum-to-maximum knob steps between blocks, both
- *                     waves, both ladder options, notes 0..127;
- *               AL-R  the [SN] p7 calibration (Res full, saw at C2, ladder
+ *               AL-B  bounded output, no NaN, at every knob extreme (drive
+ *                     included) and on minimum-to-maximum knob steps between
+ *                     blocks, both waves, the three kernels (B2R, A-R, B-R),
+ *                     notes 0..127;
+ *               AL-R  on B2R and B-R (A-R printed for information: it is not
+ *                     stable at Res full with the T2-2 64-sample network,
+ *                     S093 P3), the [SN] p7 calibration (Res full, saw at C2, ladder
  *                     current 7.375 uA, I_abc 50 uA) read on the OTA
  *                     output: ring period 2.0 ms +- 3 % (SPICE 2.034), the
  *                     second ring peak over the first 0.364 +- 0.03 (the
@@ -18,12 +21,32 @@
  *                     MEG strike, no VEG trigger, glide), the slid-to note's
  *                     own slide flag decides the next note; gate 7/12 of a
  *                     step, held through the next step's gate after a slide;
- *               AL-N  the Res table: setNet at a grid point reproduces the
+ *               AL-N  the N1 Res table: setNet at a grid point reproduces the
  *                     row; interpolation is continuous across a point;
- *               AL-AB options A and B within 0.3 dB RMS at the 303's drive.
+ *               AL-AB B2R against B-R and against A-R within 0.3 dB RMS at
+ *                     the 303's drive;
+ *               AL-D  drive (S093 P3): at x8 bounded and finite, the
+ *                     input-pair argument goes past its clamp (the tail is in
+ *                     use); with the output make-up the pattern never reaches
+ *                     full scale at x1, x2, x4, x8; drive raises the level;
+ *               AL-Q  Alkaline_isQuiet(): not quiet while the gate is open,
+ *                     quiet once the gate and ACCENT have closed and the OTA
+ *                     current has decayed, at x1 and x8;
+ *               AL-F  fast maths (S093 P3 T1): alk_log2f within 1e-5 absolute
+ *                     over 1e-12..1e12 (0.012 cent), alk_exp2f within 5e-7
+ *                     relative over -100..100, the prewarp ratio within 2e-5
+ *                     of tan(x)/x up to its 1.3 clamp;
+ *               AL-X  the fused oscillator read (DiodeLadder_renderB2Osc,
+ *                     S093 P3) is bit-identical to calcWavetableOscBlock()
+ *                     then DiodeLadder_renderB2;
+ *               AL-O  osc_setTableFreq() (T1-7) gives osc_setFreq()'s
+ *                     phaseInc and tableOffset for SAW at every note, with
+ *                     pitchMod and modNodeValue at 1 and away from 1.
  *             Modes for tools/alkaline/check_c.py:
- *               --traces IN OUT    ladder fed with SPICE e2e signals
- *               --pattern W C R E D A OUT   the P4 pattern through the voice
+ *               --traces IN OUT [DRV]   the three kernels fed with SPICE e2e
+ *                                       signals (input x DRV)
+ *               --pattern W C R E D A OUT [K [DRV]]   the P4 pattern through
+ *                     the voice; K 0 = B2R (the voice), 1 = A-R, 2 = B-R
  * Why:        S093 P0 §5: the C must reproduce the validated S092 model.
  * Inputs:     generated fragments (Makefile target alkaline).
  * Outputs:    failure counts per group; exit 1 on any failure.
@@ -42,8 +65,6 @@
 int16_t sine_table[TABLESIZE + 1];
 int16_t triTable[11][1024];
 int16_t recTable[11][1024];
-int16_t sq3Table[11][1024];
-int16_t sw3Table[11][1024];
 unsigned char crashSample[32769];
 int16_t GetRngValue(void) { return 0; }
 uint8_t modNode_interpClaim(void* osc) { (void)osc; return 0u; }
@@ -69,9 +90,23 @@ void lfo_init(Lfo *lfo) { memset(lfo, 0, sizeof(*lfo)); }
 #define BLK OUTPUT_DMA_SIZE
 #define ALK_STEP 5514u   /* a 16th at 120 BPM, samples */
 
-static unsigned g_fail[8];
-enum { G_B, G_R, G_S, G_N, G_AB };
-static const char *g_name[] = { "AL-B", "AL-R", "AL-S", "AL-N", "AL-AB" };
+static unsigned g_fail[12];
+enum { G_B, G_R, G_S, G_N, G_AB, G_D, G_Q, G_F, G_O, G_X };
+static const char *g_name[] = { "AL-B", "AL-R", "AL-S", "AL-N", "AL-AB", "AL-D", "AL-Q",
+                                "AL-F", "AL-O", "AL-X" };
+enum { K_B2R = 0, K_AR = 1, K_BR = 2 };
+static const char *k_name[] = { "B2R", "A-R", "B-R" };
+
+/* one kernel by number, the same arguments */
+static void render_k(int k, DiodeLadder *dl, int16_t *buf, float sScale, float il, float ia)
+{
+	if (k == K_AR)
+		DiodeLadder_renderA(dl, buf, sScale, il, ia);
+	else if (k == K_BR)
+		DiodeLadder_renderB(dl, buf, sScale, il, ia);
+	else
+		DiodeLadder_renderB2(dl, buf, sScale, il, ia);
+}
 
 static void fail(int g, const char *what, double a, double b)
 {
@@ -80,15 +115,17 @@ static void fail(int g, const char *what, double a, double b)
 	g_fail[g]++;
 }
 
-static void block(AlkalineVoice *v, int16_t *buf, int optionA)
+/* one block of the voice with kernel k: K_B2R is the voice's own sync block;
+ * the others repeat its arguments (drive, make-up) with another kernel */
+static void block(AlkalineVoice *v, int16_t *buf, int k)
 {
 	Alkaline_calcVoiceAsync(v);
-	if (optionA) {
+	if (k != K_B2R) {
 		const uint8_t sq = (uint8_t)(v->wave == ALK_WAVE_SQUARE);
 		calcWavetableOscBlock(&v->osc, sq ? alkSqrTable : (const int16_t (*)[1024])sawTable,
 		                      buf, BLK, 1.0f);
-		DiodeLadder_renderA(&v->ladder, buf, sq ? ALK_SQR_SCALE_V : ALK_SAW_SCALE_V,
-		                    v->iLadEnd, v->iAbcEnd);
+		render_k(k, &v->ladder, buf, (sq ? ALK_SQR_SCALE_V : ALK_SAW_SCALE_V) * v->driveGain,
+		         v->iLadEnd, v->iAbcEnd * v->makeup);
 	} else {
 		Alkaline_calcVoiceSyncBlock(v, buf, BLK);
 	}
@@ -100,9 +137,9 @@ static void test_bounds(void)
 	static const float ext[2] = { 0.0f, 1.0f };
 	int opt, w, a, b, n;
 
-	for (opt = 0; opt < 2; opt++)
+	for (opt = 0; opt < 3; opt++)
 		for (w = 0; w < 2; w++)
-			for (a = 0; a < 32; a++) {
+			for (a = 0; a < 64; a++) {
 				AlkalineVoice v;
 				int16_t buf[BLK];
 
@@ -118,6 +155,7 @@ static void test_bounds(void)
 					v.envMod = ext[((a >> 2) & 1) ^ flip];
 					v.decay = ext[((a >> 3) & 1)];
 					v.accent = ext[((a >> 4) & 1) ^ flip];
+					v.drive = ext[((a >> 5) & 1) ^ flip];
 					v.slide = (uint8_t)(n & 64 ? 1 : 0);
 					if (n % 37 == 0)
 						Alkaline_triggerVoice(&v, (uint8_t)((n * 13) & 127),
@@ -136,7 +174,7 @@ static void test_bounds(void)
 /* ---------------------------------------------------------------- AL-R
  * The ladder alone at the calibration point, the saw at C2 from the real
  * oscillator; the ring is read on the OTA output with I_abc constant. */
-static void test_ring(int optionA, double *period, double *decay)
+static void test_ring(int k, double *period, double *decay)
 {
 	static int16_t out[44108];
 	DiodeLadder dl;
@@ -157,10 +195,7 @@ static void test_ring(int optionA, double *period, double *decay)
 		int16_t *buf = &out[b * BLK];
 
 		calcWavetableOscBlock(&osc, (const int16_t (*)[1024])sawTable, buf, BLK, 1.0f);
-		if (optionA)
-			DiodeLadder_renderA(&dl, buf, ALK_SAW_SCALE_V, i0 * alk_prewarp(i0, 1.0f), 50e-6f);
-		else
-			DiodeLadder_renderB(&dl, buf, ALK_SAW_SCALE_V, i0 * alk_prewarp(i0, 1.0f), 50e-6f);
+		render_k(k, &dl, buf, ALK_SAW_SCALE_V, i0 * alk_prewarp(i0, 1.0f), 50e-6f);
 	}
 	/* one saw period after 0.5 s: find the reset (largest jump), then the
 	 * ring's local maxima after it */
@@ -250,7 +285,8 @@ static void test_net(void)
 	DiodeLadder_init(&b);
 	for (p = 0u; p + 1u < ALK_RES_POINTS; p++) {
 		DiodeLadder_setNet(&a, &alkResTable[p], &alkResTable[p + 1u], 0.0f);
-		if (a.alf0 != alkResTable[p].alf[0] || a.cfv1 != alkResTable[p].cf[1][1])
+		if (a.gau0 != alkResTable[p].ga[0][0] || a.gav0 != alkResTable[p].ga[1][0] ||
+		    a.dv0 != alkResTable[p].d[1][0] || a.ku1 != alkResTable[p].d[0][1])
 			fail(G_N, "setNet at a grid point reproduces the row", p, 0);
 		DiodeLadder_setNet(&a, &alkResTable[p], &alkResTable[p + 1u], 1.0f - 1e-6f);
 		if (p + 2u < ALK_RES_POINTS) {
@@ -262,7 +298,7 @@ static void test_net(void)
 }
 
 /* ---------------------------------------------------------------- AL-AB */
-static double pattern_rms(int optionA)
+static double pattern_rms(int k, float drive, int *clipped)
 {
 	AlkalineVoice v;
 	int16_t buf[BLK];
@@ -272,21 +308,228 @@ static double pattern_rms(int optionA)
 	memset(&v, 0, sizeof(v));
 	Alkaline_initVoice(&v);
 	v.cutoff = 0.35f; v.reso = 0.85f; v.envMod = 0.6f; v.decay = 0.45f; v.accent = 0.8f;
+	v.drive = drive;
+	if (clipped)
+		*clipped = 0;
 	for (n = 0; n < 1400; n++) {
 		if (n % 172 == 0)
 			Alkaline_triggerVoice(&v, (n / 172) & 1 ? 127u : 80u, (uint8_t)(63 + (n / 172) % 5), ALK_STEP);
-		block(&v, buf, optionA);
-		for (int j = 0; j < BLK; j++)
+		block(&v, buf, k);
+		for (int j = 0; j < BLK; j++) {
 			acc += (double)buf[j] * buf[j];
+			if (clipped && (buf[j] >= 32767 || buf[j] <= -32767))
+				(*clipped)++;
+		}
 	}
 	return sqrt(acc / (1400.0 * BLK));
 }
 
+/* ---------------------------------------------------------------- AL-D */
+static void test_drive(void)
+{
+	static const float drv[4] = { 0.0f, 1.0f / 3.0f, 2.0f / 3.0f, 1.0f };   /* x1 x2 x4 x8 */
+	double rms[4];
+	int d, clip;
+
+	for (d = 0; d < 4; d++) {
+		rms[d] = pattern_rms(K_B2R, drv[d], &clip);
+		printf("AL-D: drive x%.0f: %+.2f dBFS RMS, %d full-scale samples\n",
+		       exp2(3.0 * drv[d]), 20.0 * log10(rms[d] / 32767.0 + 1e-12), clip);
+		if (clip)
+			fail(G_D, "the make-up gain leaves headroom (no full-scale sample)", d, clip);
+		if (!isfinite(rms[d]) || rms[d] <= 0.0)
+			fail(G_D, "finite, non-silent output", d, rms[d]);
+		if (d && rms[d] <= rms[d - 1] * 0.9)
+			fail(G_D, "drive raises the level (net of the make-up)", rms[d], rms[d - 1]);
+	}
+	{	/* x8: bounded state, the input-pair argument past its clamp */
+		AlkalineVoice v;
+		int16_t buf[BLK];
+		float xmax = 0.0f;
+		int n;
+
+		memset(&v, 0, sizeof(v));
+		Alkaline_initVoice(&v);
+		v.cutoff = 0.5f; v.reso = 1.0f; v.envMod = 1.0f; v.decay = 1.0f; v.accent = 1.0f;
+		v.drive = 1.0f;
+		for (n = 0; n < 2000; n++) {
+			if (n % 172 == 0)
+				Alkaline_triggerVoice(&v, 127u, (uint8_t)(51 + (n / 172) % 24), ALK_STEP);
+			block(&v, buf, K_B2R);
+			if (fabsf(v.ladder.xinLast) > xmax)
+				xmax = fabsf(v.ladder.xinLast);
+			if (!isfinite(v.ladder.x0) || !isfinite(v.ladder.z[0]) || fabsf(v.ladder.x0) > 1e3f)
+				fail(G_D, "x8 state bounded and finite", n, v.ladder.x0);
+		}
+		printf("AL-D: x8 largest input-pair argument %.2f (clamp 3.5)\n", xmax);
+		if (xmax <= 3.5f)
+			fail(G_D, "x8 drives the input pair past its clamp (tail in use)", xmax, 3.5);
+	}
+}
+
+/* ---------------------------------------------------------------- AL-Q */
+static void test_quiet(void)
+{
+	static const float drv[2] = { 0.0f, 1.0f };
+	int d, n;
+
+	for (d = 0; d < 2; d++) {
+		AlkalineVoice v;
+		int16_t buf[BLK];
+
+		memset(&v, 0, sizeof(v));
+		Alkaline_initVoice(&v);
+		v.drive = drv[d];
+		block(&v, buf, K_B2R);
+		if (!Alkaline_isQuiet(&v))
+			fail(G_Q, "quiet before the first note", d, 0);
+		Alkaline_triggerVoice(&v, 127u, 63u, ALK_STEP);
+		for (n = 0; n < 10; n++)
+			block(&v, buf, K_B2R);
+		if (Alkaline_isQuiet(&v))
+			fail(G_Q, "not quiet while the gate is open", d, v.iAbcEnd);
+		for (n = 0; n < 400; n++)
+			block(&v, buf, K_B2R);
+		if (!Alkaline_isQuiet(&v))
+			fail(G_Q, "quiet after gate, ACCENT and the VEG have closed", d, v.iAbcEnd);
+	}
+}
+
+/* ---------------------------------------------------------------- AL-F */
+static void test_fastmath(void)
+{
+	double worst = 0.0, wexp = 0.0, wtan = 0.0;
+	int k;
+
+	for (k = 0; k <= 200000; k++) {
+		const float x = (float)pow(10.0, -12.0 + 24.0 * k / 200000.0);
+		const double e = fabs((double)alk_log2f(x) - log2((double)x));
+
+		if (e > worst) worst = e;
+	}
+	for (k = 0; k <= 200000; k++) {
+		const float x = (float)(-100.0 + 200.0 * k / 200000.0);
+		const double e = fabs((double)alk_exp2f(x) / exp2((double)x) - 1.0);
+
+		if (e > wexp) wexp = e;
+	}
+	for (k = 1; k <= 13000; k++) {
+		/* the prewarp ratio at theta = k / 1e4, through alk_prewarp's own
+		 * expression: invert theta for res 1 (c(1) = 1.47) */
+		const double th = k / 1e4;
+		const float il = (float)(th / 1.47 * 2.0 * 44108.0 * 4.0 * 0.02585 * 33e-9);
+		const double e = fabs((double)alk_prewarp(il, 1.0f) / (tan(th) / th) - 1.0);
+
+		if (e > wtan) wtan = e;
+	}
+	printf("AL-F: log2 abs %.2e, exp2 rel %.2e, prewarp rel %.2e\n", worst, wexp, wtan);
+	if (worst > 1e-5) fail(G_F, "alk_log2f accuracy", worst, 1e-5);
+	if (wexp > 5e-7) fail(G_F, "alk_exp2f accuracy", wexp, 5e-7);
+	if (wtan > 2e-5) fail(G_F, "prewarp tan ratio accuracy", wtan, 2e-5);
+}
+
+/* ---------------------------------------------------------------- AL-O */
+static void test_tablefreq(void)
+{
+	static const float mods[3][2] = { { 1.0f, 1.0f }, { 1.37f, 1.0f }, { 1.0f, 0.61f } };
+	unsigned n, m;
+
+	for (m = 0u; m < 3u; m++)
+		for (n = 0u; n < 128u; n++) {
+			OscInfo a, b;
+
+			memset(&a, 0, sizeof(a));
+			a.waveform = SAW;
+			a.freq = 440.0f * powf(2.0f, ((float)n - 69.0f) / 12.0f) * 1.0013f;
+			a.pitchMod = mods[m][0];
+			a.modNodeValue = mods[m][1];
+			b = a;
+			osc_setFreq(&a);
+			osc_setTableFreq(&b);
+			if (a.phaseInc != b.phaseInc || a.tableOffset != b.tableOffset)
+				fail(G_O, "osc_setTableFreq == osc_setFreq", n, m);
+		}
+	{	/* a dense sweep 1 Hz..20 kHz, and every octave edge and the float
+		 * just below it (the bit form of the octave count, S093 P3) */
+		unsigned k;
+
+		for (k = 0u; k < 200000u + 20u; k++) {
+			OscInfo a, b;
+
+			memset(&a, 0, sizeof(a));
+			a.waveform = SAW;
+			a.pitchMod = 1.0f;
+			a.modNodeValue = 1.0f;
+			if (k < 200000u)
+				a.freq = powf(20000.0f, (float)k / 200000.0f);
+			else
+				a.freq = nextafterf(16.3515987f * (float)(1u << ((k - 200000u) >> 1)),
+				                    ((k - 200000u) & 1u) ? 0.0f : 1e9f) ;
+			if (k >= 200000u && !(((k - 200000u) & 1u)))
+				a.freq = 16.3515987f * (float)(1u << ((k - 200000u) >> 1));
+			b = a;
+			osc_setFreq(&a);
+			osc_setTableFreq(&b);
+			if (a.phaseInc != b.phaseInc || a.tableOffset != b.tableOffset)
+				fail(G_O, "dense sweep / edges", a.freq, k);
+		}
+	}
+}
+
+/* ---------------------------------------------------------------- AL-X
+ * The fused oscillator read (DiodeLadder_renderB2Osc) against the separate
+ * path (calcWavetableOscBlock() then DiodeLadder_renderB2): bit-identical
+ * output, phase and ladder state over a pattern with glides, both waves,
+ * drive x1 and x8. */
+static void test_fused(void)
+{
+	int w, d, n;
+
+	for (w = 0; w < 2; w++)
+		for (d = 0; d < 2; d++) {
+			AlkalineVoice a, b;
+
+			memset(&a, 0, sizeof(a));
+			Alkaline_initVoice(&a);
+			a.wave = (uint8_t)w;
+			a.reso = 0.9f; a.cutoff = 0.4f; a.envMod = 0.7f; a.accent = 0.8f;
+			a.drive = (float)d;
+			b = a;
+			for (n = 0; n < 1500; n++) {
+				int16_t ba[BLK], bb[BLK];
+
+				if (n % 172 == 0) {
+					a.slide = b.slide = (uint8_t)((n / 172) & 1);
+					Alkaline_triggerVoice(&a, (n / 172) % 3 ? 80u : 127u,
+					                      (uint8_t)(51 + (n * 7) % 30), ALK_STEP);
+					Alkaline_triggerVoice(&b, (n / 172) % 3 ? 80u : 127u,
+					                      (uint8_t)(51 + (n * 7) % 30), ALK_STEP);
+				}
+				Alkaline_calcVoiceAsync(&a);
+				DiodeLadder_renderB2Osc(&a.ladder, ba,
+				                        (w ? alkSqrTable : (const int16_t (*)[1024])sawTable)[a.osc.tableOffset],
+				                        &a.osc.phase, a.osc.phaseInc,
+				                        (w ? ALK_SQR_SCALE_V : ALK_SAW_SCALE_V) * a.driveGain,
+				                        a.iLadEnd, a.iAbcEnd * a.makeup);
+				Alkaline_calcVoiceAsync(&b);
+				calcWavetableOscBlock(&b.osc, w ? alkSqrTable : (const int16_t (*)[1024])sawTable,
+				                      bb, BLK, 1.0f);
+				DiodeLadder_renderB2(&b.ladder, bb, (w ? ALK_SQR_SCALE_V : ALK_SAW_SCALE_V) * b.driveGain,
+				                     b.iLadEnd, b.iAbcEnd * b.makeup);
+				if (memcmp(ba, bb, sizeof(ba)) || a.osc.phase != b.osc.phase ||
+				    memcmp(&a.ladder, &b.ladder, sizeof(a.ladder)))
+					fail(G_X, "fused == separate (bit for bit)", w * 2 + d, n);
+			}
+		}
+}
+
 /* ------------------------------------------------------------ check modes */
-static int mode_traces(const char *in, const char *outp)
+static int mode_traces(const char *in, const char *outp, const float drv)
 {
 	/* IN: int32 n, float32 k, then n x (s volts, i_lad A, i_abc A).
-	 * OUT: n float32 OTA volts (option B) then n float32 (option A). */
+	 * OUT: n float32 OTA volts for each kernel in turn: B2R, A-R, B-R.
+	 * The input is s x drv, carried as int16 at 0.8 mV per LSB (+-26 V: room
+	 * for x8), as tools/alkaline/variants/dlv_host.c does. */
 	FILE *f = fopen(in, "rb");
 	int32_t n;
 	float k;
@@ -295,14 +538,14 @@ static int mode_traces(const char *in, const char *outp)
 		return 2;
 	{
 		float *d = malloc(sizeof(float) * 3u * (size_t)n);
-		float *o = malloc(sizeof(float) * 2u * (size_t)n);
-		const float sScale = 1e-4f;
+		float *o = malloc(sizeof(float) * 3u * (size_t)n);
+		const float sScale = 8e-4f;
 		int opt;
 
 		if (fread(d, sizeof(float), 3u * (size_t)n, f) != 3u * (size_t)n)
 			return 2;
 		fclose(f);
-		for (opt = 0; opt < 2; opt++) {
+		for (opt = 0; opt < 3; opt++) {
 			DiodeLadder dl;
 			const float kk = k * (float)(ALK_RES_POINTS - 1u);
 			const unsigned lo = (unsigned)fminf(kk, (float)(ALK_RES_POINTS - 2u));
@@ -316,17 +559,14 @@ static int mode_traces(const char *in, const char *outp)
 				const float ia = d[3 * (b + BLK - 1) + 2];
 
 				for (j = 0; j < BLK; j++)
-					buf[j] = (int16_t)lrintf(d[3 * (b + j)] / sScale);
-				if (opt)
-					DiodeLadder_renderA(&dl, buf, sScale, il * alk_prewarp(il, k), ia);
-				else
-					DiodeLadder_renderB(&dl, buf, sScale, il * alk_prewarp(il, k), ia);
+					buf[j] = (int16_t)lrintf(drv * d[3 * (b + j)] / sScale);
+				render_k(opt, &dl, buf, sScale, il * alk_prewarp(il, k), ia);
 				for (j = 0; j < BLK; j++)
 					o[opt * n + b + j] = (float)buf[j] / DL_OUT_SCALE;
 			}
 		}
 		f = fopen(outp, "wb");
-		fwrite(o, sizeof(float), 2u * (size_t)n, f);
+		fwrite(o, sizeof(float), 3u * (size_t)n, f);
 		fclose(f);
 		free(d);
 		free(o);
@@ -347,9 +587,10 @@ static int mode_pattern(int argc, char **argv)
 
 	if (argc < 9)
 		return 2;
-	opt = (argc > 9) ? atoi(argv[9]) : 0;
+	opt = (argc > 9) ? atoi(argv[9]) : K_B2R;
 	memset(&v, 0, sizeof(v));
 	Alkaline_initVoice(&v);
+	v.drive = (argc > 10) ? (float)atof(argv[10]) : 0.0f;
 	v.wave = (uint8_t)atoi(argv[2]);
 	v.cutoff = (float)atof(argv[3]);
 	v.reso = (float)atof(argv[4]);
@@ -380,35 +621,84 @@ static int mode_pattern(int argc, char **argv)
 	return 0;
 }
 
+/* --sweep W DRV OUT: the S093 P3 listening test for the Res table. A 16th
+ * bass line at 120 BPM (C2 C2 D#2 C3, the last accented, the third sliding),
+ * Res swept 0 -> 1 over 6 s, then 0.6 +- 0.3 at 1.5 Hz for 4 s (an LFO on
+ * res); cutoff 0.35, env 0.5, decay 0.4, accent 0.6. OUT: int16 per sample. */
+static int mode_sweep(int argc, char **argv)
+{
+	static const int semi[4] = { 0, 0, 3, 12 };
+	const int nb = (int)(10.0 * 44108.0 / BLK);
+	AlkalineVoice v;
+	FILE *fo;
+	int b, step = 0;
+
+	if (argc < 5)
+		return 2;
+	memset(&v, 0, sizeof(v));
+	Alkaline_initVoice(&v);
+	v.wave = (uint8_t)atoi(argv[2]);
+	v.drive = (float)atof(argv[3]);
+	v.cutoff = 0.35f; v.envMod = 0.5f; v.decay = 0.4f; v.accent = 0.6f;
+	fo = fopen(argv[4], "wb");
+	for (b = 0; b < nb; b++) {
+		const double t = (double)b * BLK / 44108.0;
+		int16_t buf[BLK];
+
+		v.reso = (float)(t < 6.0 ? t / 6.0 : 0.6 + 0.3 * sin(2.0 * M_PI * 1.5 * (t - 6.0)));
+		while ((double)step * ALK_STEP <= (double)b * BLK) {
+			v.slide = (uint8_t)((step & 3) == 2);
+			Alkaline_triggerVoice(&v, (step & 3) == 3 ? 127u : 80u,
+			                      (uint8_t)(63 + semi[step & 3]), ALK_STEP);
+			step++;
+		}
+		block(&v, buf, K_B2R);
+		fwrite(buf, sizeof(int16_t), BLK, fo);
+	}
+	fclose(fo);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	unsigned g, total = 0u;
 	double per, dec;
 
 	if (argc > 3 && !strcmp(argv[1], "--traces"))
-		return mode_traces(argv[2], argv[3]);
+		return mode_traces(argv[2], argv[3], argc > 4 ? (float)atof(argv[4]) : 1.0f);
 	if (argc > 1 && !strcmp(argv[1], "--pattern"))
 		return mode_pattern(argc, argv);
+	if (argc > 1 && !strcmp(argv[1], "--sweep"))
+		return mode_sweep(argc, argv);
 
 	test_bounds();
-	test_ring(0, &per, &dec);
-	printf("AL-R B: ring period %.3f ms, decay per cycle %.3f\n", per, dec);
-	if (fabs(per - 2.0) > 0.06) fail(G_R, "B ring period", per, 2.0);
-	if (fabs(dec - 0.364) > 0.03) fail(G_R, "B ring decay", dec, 0.364);
-	test_ring(1, &per, &dec);
-	printf("AL-R A: ring period %.3f ms, decay per cycle %.3f\n", per, dec);
-	if (fabs(per - 2.0) > 0.06) fail(G_R, "A ring period", per, 2.0);
-	if (fabs(dec - 0.364) > 0.03) fail(G_R, "A ring decay", dec, 0.364);
+	for (int k = 0; k < 3; k++) {
+		test_ring(k, &per, &dec);
+		printf("AL-R %s: ring period %.3f ms, decay per cycle %.3f%s\n", k_name[k], per, dec,
+		       k == K_AR ? " (information: A-R is not stable at Res full with the T2-2"
+		                   " 64-sample network, S093 P3)" : "");
+		if (k == K_AR)
+			continue;
+		if (fabs(per - 2.0) > 0.06) fail(G_R, "ring period", k, per);
+		if (fabs(dec - 0.364) > 0.03) fail(G_R, "ring decay", k, dec);
+	}
 	test_sequencing();
 	test_net();
 	{
-		const double rb = pattern_rms(0), ra = pattern_rms(1);
-		const double db = 20.0 * log10(ra / rb);
+		const double r2 = pattern_rms(K_B2R, 0.0f, 0);
+		const double rb = pattern_rms(K_BR, 0.0f, 0), ra = pattern_rms(K_AR, 0.0f, 0);
+		const double db = 20.0 * log10(rb / r2), da = 20.0 * log10(ra / r2);
 
-		printf("AL-AB: option A re B %+.3f dB RMS\n", db);
-		if (fabs(db) > 0.3) fail(G_AB, "A vs B at stock drive", db, 0.3);
+		printf("AL-AB: B-R re B2R %+.3f dB RMS, A-R re B2R %+.3f dB RMS\n", db, da);
+		if (fabs(db) > 0.3) fail(G_AB, "B-R vs B2R at the 303's drive", db, 0.3);
+		if (fabs(da) > 0.3) fail(G_AB, "A-R vs B2R at the 303's drive", da, 0.3);
 	}
-	for (g = 0u; g < 5u; g++) {
+	test_drive();
+	test_quiet();
+	test_fastmath();
+	test_tablefreq();
+	test_fused();
+	for (g = 0u; g < 10u; g++) {
 		printf("%s: %u failure(s)\n", g_name[g], g_fail[g]);
 		total += g_fail[g];
 	}

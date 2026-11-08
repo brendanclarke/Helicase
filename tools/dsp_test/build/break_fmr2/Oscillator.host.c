@@ -261,27 +261,6 @@ int16_t calcFm(OscInfo* osc, OscInfo* modOsc, const int16_t table[][1024])
 	return oscOut;
 }
 //-----------------------------------------------------------
-/*
- * Stock table waves by waveform (S086 P2).
- *
- * What:       the [11][1024] octave table of waveform OSC_STOCK_FIRST + i.
- * Why:        each dispatcher has one case group for the stock waves and
- *             passes osc_stockTables[waveform - OSC_STOCK_FIRST] to the
- *             Tri/Saw/Rec loop. A variable pointer adds one call site per
- *             dispatcher instead of one constant-argument site per wave
- *             (085 log §13; DSP ref §10: constant sites make LTO re-specialise).
- * Accessors:  calcNextOscSampleFmBlock(), calcNextOscSampleBlock(),
- *             osc_renderPlainWave(), osc_renderSyncWave(),
- *             calcNextOscSampleRingBlock().
- * Affiliates: wavetableStock.c (generated), Oscillator.h SQ3/SW3.
- */
-static const int16_t (* const osc_stockTables[])[1024] = {
-	sq3Table,	/* SQ3 */
-	sw3Table,	/* SW3 */
-};
-_Static_assert(sizeof(osc_stockTables) / sizeof(osc_stockTables[0]) ==
-               OSC_STOCK_LAST - OSC_STOCK_FIRST + 1,
-               "osc_stockTables must list OSC_STOCK_FIRST..OSC_STOCK_LAST");
 //-----------------------------------------------------------
 INITCM void calcNextOscSampleFmBlock(OscInfo* osc, int16_t* modBuffer, int16_t* buf, uint8_t size ,const float gain)
 {
@@ -301,10 +280,6 @@ INITCM void calcNextOscSampleFmBlock(OscInfo* osc, int16_t* modBuffer, int16_t* 
 
 		case REC:
 			calcFmBlock(osc,recTable,modBuffer,buf,size,gain);
-			break;
-
-		case SQ3: case SW3:
-			calcFmBlock(osc,osc_stockTables[osc->waveform - OSC_STOCK_FIRST],modBuffer,buf,size,gain);
 			break;
 
 		case NOISE:
@@ -435,10 +410,6 @@ INITCM void calcNextOscSampleBlock(OscInfo* osc, int16_t* buf, const uint8_t siz
 
 		case REC:
 			calcWavetableOscBlock(osc,recTable,buf,size, gain);
-			break;
-
-		case SQ3: case SW3:
-			calcWavetableOscBlock(osc,osc_stockTables[osc->waveform - OSC_STOCK_FIRST],buf,size, gain);
 			break;
 
 		case NOISE:
@@ -811,9 +782,6 @@ static OSC_S085_SECTION void osc_renderPlainWave(OscInfo* osc, int16_t* buf,
 	case REC:
 		calcWavetableOscBlock(osc, recTable, buf, size, 1.f);
 		break;
-	case SQ3: case SW3:
-		calcWavetableOscBlock(osc, osc_stockTables[osc->waveform - OSC_STOCK_FIRST], buf, size, 1.f);
-		break;
 	case NOISE:
 		calcNoiseBlock(osc, buf, size, 1.f);
 		break;
@@ -833,9 +801,7 @@ static OSC_S085_SECTION void osc_renderPlainWave(OscInfo* osc, int16_t* buf,
  * Sync clock increment for the FM-page oscillator (S085 P1).
  * Contract: Oscillator.h. Crash and user samples run in <<17 point units
  * (osc_calcSampleFreqValue: f/fs x 2^27), which is 1/32 of the 2^32-per-
- * period clock, hence << 5 after the clamp. The stock table waves sit
- * between CRASH and OSC_SAMPLE_START and are 2^32-per-period clocks like
- * Tri/Saw/Rec (S086 P2), so the test excludes them.
+ * period clock, hence << 5 after the clamp.
  */
 uint32_t osc_syncClockInc(const OscInfo* master)
 {
@@ -1020,10 +986,6 @@ static OSC_S085_SECTION void osc_renderSyncWave(OscInfo* osc, const uint32_t* ov
 		break;
 	case REC:
 		calcWavetableOscSyncBlock(osc, recTable, over, ratioQ16, depthQ30, buf, size);
-		break;
-	case SQ3: case SW3:
-		calcWavetableOscSyncBlock(osc, osc_stockTables[osc->waveform - OSC_STOCK_FIRST],
-		                          over, ratioQ16, depthQ30, buf, size);
 		break;
 	case CRASH:
 		calcSampleOscSyncBlock(osc, over, ratioQ16, depthQ30, buf, size);
@@ -1219,10 +1181,6 @@ OSC_S085_DISPATCH void calcNextOscSampleRingBlock(OscInfo* osc, const int16_t* m
 	case REC:
 		calcWavetableOscRingBlock(osc, recTable, modBuf, buf, size, depthQ15, depthStepQ15);
 		break;
-	case SQ3: case SW3:
-		calcWavetableOscRingBlock(osc, osc_stockTables[osc->waveform - OSC_STOCK_FIRST],
-		                          modBuf, buf, size, depthQ15, depthStepQ15);
-		break;
 	case NOISE:
 		calcNoiseRingBlock(osc, modBuf, buf, size, depthQ15, depthStepQ15);
 		break;
@@ -1255,6 +1213,28 @@ static void osc_calcWavetableFreqValue(OscInfo* osc, const float currentFreq)
 
 	const uint8_t overtoneIndex = freqToTableIndex(currentFreq);
 	osc->tableOffset = overtoneIndex>10?10:overtoneIndex;
+}
+//-----------------------------------------------------------
+/*
+ * Table-wave frequency without the dispatcher (S093 P3, Alkaline T1-7).
+ * Contract: Oscillator.h. Reuses osc_calcWavetableFreqValue(); not ITCM (a
+ * per-block call); osc_setFreq() and every loop are unchanged.
+ */
+void osc_setTableFreq(OscInfo* osc)
+{
+	/* The octave edges (osc_octaveEdgeHz[]) are 16.3516 Hz x 2^k exactly in
+	 * float32 (one mantissa, 0x02D013; exponents 4..13), so the number of
+	 * edges <= f is the exponent of f minus 4, plus 1 when f's mantissa
+	 * reaches the edges', clamped to 0..10: freqToTableIndex()'s result for
+	 * every positive f (including +inf), without its ten compares. */
+	const float f = osc->freq * osc->pitchMod * osc->modNodeValue;
+	union { float f; int32_t i; } v = { f };
+	int32_t k = ((v.i >> 23) & 0xFF) - (127 + 4)
+	          + (int32_t)((v.i & 0x007FFFFF) >= 0x0002D013);
+
+	k = (k < 0) ? 0 : ((k > 10) ? 10 : k);
+	osc->phaseInc = freq2PhaseIncr1024(f);
+	osc->tableOffset = (uint8_t)((v.i > 0) ? k : 0);
 }
 //-----------------------------------------------------------
 static void osc_calcSampleFreqValue(OscInfo* osc, const float currentFreq)
@@ -1340,10 +1320,6 @@ static void osc_calcSampleFreqValue(OscInfo* osc, const float currentFreq)
 			break;
 
 		case REC:
-			osc_calcWavetableFreqValue(osc, currentFreq);
-			break;
-
-		case SQ3: case SW3:
 			osc_calcWavetableFreqValue(osc, currentFreq);
 			break;
 

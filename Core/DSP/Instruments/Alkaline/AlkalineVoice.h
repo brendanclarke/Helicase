@@ -1,5 +1,6 @@
 /*
- * AlkalineVoice.h - the Alkaline (TB-303) voice engine (S093 P0).
+ * AlkalineVoice.h - the Alkaline (TB-303) voice engine (S093 P0; B2R, drive
+ * and the output make-up since S093 P3).
  *
  * What:       one Alkaline voice: the VCO (the existing ITCM table loop on
  *             sawTable or the D8 square table), the diode-ladder VCF with its
@@ -16,7 +17,10 @@
  *             and the track's step length in samples (the gate closes at the
  *             first block boundary at or after 7/12 of it).
  * Outputs:    one mono pre-volume int16 block per call (the mixer applies
- *             vol and pan, S072).
+ *             vol and pan, S072): the B2R ladder (DiodeLadder_renderB2), its
+ *             input scaled by the drive (x1..x8) and its OTA current by the
+ *             output make-up gain (S093_P2 §5, B-2 option (b)).
+ *             Alkaline_isQuiet() for instrumentManager_ampEnvelopeQuiet().
  * Accessors:  InstrumentManager dispatchers (integration, S093 P0 §6);
  *             tools/dsp_test modules/alkaline.c.
  * Affiliates: DiodeLadder.h, AlkalineControl.h, AlkalineTables.h.
@@ -36,6 +40,18 @@
 /* D11 (user, S092): gate = 3.5 of 6 clocks = 7/12 of a step. */
 #define ALK_GATE_NUM          7u
 #define ALK_GATE_DEN          12u
+/* Output make-up (S093_P2 §5, B-2 option (b), user S093): a gain on the OTA
+ * current that falls as drive rises, 2^(ALK_MAKEUP_OCT x (1 - drive)):
+ * +6 dB at drive x1, 0 dB at x8, so the level is closer to the other engines
+ * at the 303's own drive and the 7 V full scale (D17) keeps its headroom
+ * when driven. Set by ear in the device listening (S093 P4). */
+#define ALK_MAKEUP_OCT        1.0f
+/* S093 P3: 1 = the oscillator read fused into the B2R loop
+ * (DiodeLadder_renderB2Osc); 0 = calcWavetableOscBlock() then
+ * DiodeLadder_renderB2. Bit-identical output (AL-X). */
+#ifndef ALK_FUSED_OSC
+#define ALK_FUSED_OSC         1
+#endif
 /* Waveform selector values (row alk_wave). */
 #define ALK_WAVE_SAW          0u
 #define ALK_WAVE_SQUARE       1u
@@ -56,6 +72,7 @@ typedef struct AlkalineVoiceStruct
 	float   decay;             /* 0..1, VR6 */
 	float   accent;            /* 0..1, VR7 */
 	float   tuning;            /* 0..1, centre 63/127: +-700 cents ([SN] p1) */
+	float   drive;             /* 0..1: input gain 8^drive, x1..x8 (D16, E2) */
 	float   vol;               /* 0..1, read by the mixer only */
 	uint8_t pan;
 	uint8_t wave;              /* ALK_WAVE_* */
@@ -76,12 +93,29 @@ typedef struct AlkalineVoiceStruct
 	float   iLadRaw;           /* ladder current before the prewarp (cutoff) */
 	float   iLadEnd;           /* prewarped ladder current at the block end */
 	float   iAbcEnd;           /* OTA control current at the block end */
+	float   driveGain;         /* 8^drive, this block */
+	float   makeup;            /* 2^(ALK_MAKEUP_OCT (1 - drive)), this block */
 } AlkalineVoice;
 
 void Alkaline_initVoice(AlkalineVoice *voice);
 void Alkaline_triggerVoice(AlkalineVoice *voice, uint8_t velocity, uint8_t note,
                            uint32_t stepSamples);
-void Alkaline_calcVoiceAsync(AlkalineVoice *voice);
-void Alkaline_calcVoiceSyncBlock(AlkalineVoice *voice, int16_t *buf, uint8_t size);
+/* Both are called from inside mixer_calcNextSampleBlock(): noinline keeps
+ * LTO from inlining them there (S092 P0 §1.3, the S086 F1 register-pressure
+ * risk to the other engines' inlined loops). */
+void Alkaline_calcVoiceAsync(AlkalineVoice *voice) __attribute__((noinline));
+void Alkaline_calcVoiceSyncBlock(AlkalineVoice *voice, int16_t *buf, uint8_t size)
+	__attribute__((noinline));
+/*
+ * Whether the voice is silent enough to swap (S093_P2 §5).
+ *
+ * What:       1 when the gate is closed, the ACCENT lane is low and the OTA
+ *             current (before the make-up gain) is below 1e-7 A, so the OTA
+ *             passes nothing audible; else 0.
+ * Why:        instrumentManager_ampEnvelopeQuiet() otherwise returns 1 for a
+ *             type without a SlopeEg2, which would let a Scene swap cut a
+ *             sounding note.
+ */
+uint8_t Alkaline_isQuiet(const AlkalineVoice *voice);
 
 #endif /* ALKALINEVOICE_H_ */

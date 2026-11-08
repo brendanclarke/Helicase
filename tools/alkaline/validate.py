@@ -174,6 +174,9 @@ def v3():
     for row in p4["dc_map"]:
         for d in row:
             i, _ = M.expo_current(d["cut"], d["env"], 0.0, n53, v13)
+            if M.FAST_CONTROL:           # the warm start settled (a static map)
+                for _ in range(8):
+                    i, _ = M.expo_current(d["cut"], d["env"], 0.0, n53, v13, i)
             errs.append(1200 * math.log2(i / (d["i_uA"] * 1e-6)))
     out["expo_err_cents"] = dict(max=float(np.max(np.abs(errs))), rms=float(np.sqrt(np.mean(np.square(errs)))))
     print("V3a expo law vs P4: max", out["expo_err_cents"])
@@ -240,6 +243,7 @@ def control_run(res, n_steps=5, acc_steps=(0, 1, 2, 3)):
     mg, sw = M.Meg(), M.AccentNet(vca_branch=False)
     steps = int(0.125 / dt + 0.5)
     v134 = M.V561
+    i_prev = M.I_CAL
     peaks = []
     for k in range(n_steps):
         acc = k in acc_steps
@@ -248,7 +252,8 @@ def control_run(res, n_steps=5, acc_steps=(0, 1, 2, 3)):
         for b in range(steps):
             n53 = mg.step(dt, 0.5, acc)
             vw, _ = sw.step(dt, acc, 1.0, res, n53, v134)
-            i, dv = M.expo_current(0.5, 0.5, res, n53, vw)
+            i, dv = M.expo_current(0.5, 0.5, res, n53, vw, i_prev)
+            i_prev = i
             v134 = M.V561 + dv
             pk = max(pk, i)
         peaks.append(pk * 1e6)
@@ -408,7 +413,8 @@ def dsp_pattern(knobs, solver):
         gate_on = any(g0 <= t < g1 for g0, g1 in gates)
         n53 = mg.step(dt, knobs["dec"], acc_on)
         vw, i_acc = an.step(dt, acc_on, knobs["acc"], k, n53, v134)
-        i_lad, dv = M.expo_current(knobs["cut"], knobs["env"], k, n53, vw)
+        i_lad, dv = M.expo_current(knobs["cut"], knobs["env"], k, n53, vw,
+                                   M.I_CAL if i_prev is None else i_prev)
         v134 = M.V561 + dv
         # the C36 branch feeds pin 1 through D27 whether or not the gate is open
         i_vca = vg.step(dt, gate_on) + i_acc
@@ -541,12 +547,18 @@ def v6():
 
 
 def main():
-    sel = sys.argv[1:] or ["v1", "v2", "v3", "v4", "v5", "v6"]
+    args = sys.argv[1:]
+    if "--fast" in args:                 # S093 P3: the firmware's reduced control path
+        M.FAST_CONTROL = True
+        args = [a for a in args if a != "--fast"]
+    sel = args or ["v1", "v2", "v3", "v4", "v5", "v6"]
     path = os.path.join(HERE, "validate_results.json")
     if os.path.exists(path):
         RES.update(json.load(open(path)))
     for name in sel:
         globals()[name]()
+        if M.FAST_CONTROL and name in RES:   # keep the reference results apart
+            RES[name + "_fast"] = RES.pop(name)
         with open(path, "w") as fh:
             json.dump(RES, fh, indent=1, default=float)
 

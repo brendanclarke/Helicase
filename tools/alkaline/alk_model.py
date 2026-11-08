@@ -84,9 +84,24 @@ def taper_a(r):
 
 
 # =============================================================== control path
-def expo_current(cut, env, res, n53, v_w4):
+# S093 P3: FAST_CONTROL selects the firmware's reduced control path
+# (AlkalineControl.c, S093_P2 §3A Tier 1/Tier 2): expo by 2 fixed-point passes
+# warm-started from the last block's current (callers pass i_prev); the MEG
+# diode stack by one Newton step from the last block's current; the accent
+# network solved once per block with the diode states the last block's
+# solution implied (T2-3; the firmware default is the exact T1-1 since S093
+# P3, which equals the reference rule, so FAST_ACCENT_LAG selects T2-3 here).
+# The fast log2/exp2 and the rational prewarp are
+# within 1e-5 of exact and are not modelled. validate.py --fast runs V3/V5 on it.
+FAST_CONTROL = False
+FAST_ACCENT_LAG = True       # T2-3 (ALK_ACC_SOLVES 1); False = T1-1 (= reference)
+EXPO_PASSES_FAST = 2
+
+
+def expo_current(cut, env, res, n53, v_w4, i_prev=None):
     """Ladder current (A) from the knobs, the MEG (N53) and the accent
-    sweep's VR4b wiper voltage (S092 P6 §3.1). Static at control rate."""
+    sweep's VR4b wiper voltage (S092 P6 §3.1). Static at control rate.
+    FAST_CONTROL with i_prev: the firmware's warm-started passes."""
     r_lo3 = VR * taper_a(cut)
     v_th3 = V561 + (V12 - V561) * (R47 + r_lo3) / (R47 + VR)
     r_th3 = (VR - r_lo3) * (R47 + r_lo3) / (R47 + VR)
@@ -98,7 +113,10 @@ def expo_current(cut, env, res, n53, v_w4):
     dv = ((v_th5 - V561) * g5 + (v_w4 - V561) * g4) / (1.0 / R71 + g5 + g4)
     e = math.exp(dv / VT)
     i = I_CAL
-    for _ in range(3):                   # Q11's Vbe follows its current (log)
+    passes = 3
+    if FAST_CONTROL and i_prev is not None:
+        i, passes = max(i_prev, 1e-12), EXPO_PASSES_FAST
+    for _ in range(passes):              # Q11's Vbe follows its current (log)
         vbe = VBE11_CAL + VT * math.log(max(i, 1e-12) / I_CAL)
         i73 = max((v_th3 - (V561 + vbe)) / (r_th3 + TM3 + R73), 1e-12)
         # Q11's base current comes out of R73's current: I = (I73 - I/b) e
@@ -121,16 +139,28 @@ class Meg:
         self.drop, self.soft, self.v53_min = c["drop"], c["soft"], c["v53_min"]
         self.v = c["v_rest"]
         self.strike_left = 0.0
+        self.i = 0.0                     # FAST_CONTROL: the stack current
 
     def trigger(self):
         self.strike_left = self.t_strike
 
     def step(self, dt, decay, accent_on):
+        r = 68e3 + (R_4066 if accent_on else 1e6 * taper_a(decay))
         if self.strike_left > 0:
             self.v = self.v_peak
             self.strike_left -= dt
+            self.i = (self.v_peak - 1.3) / r
+        elif FAST_CONTROL:
+            # one Newton step on r i + vy(i) = v from the last block's i;
+            # vy at the new current by its tangent (AlkalineControl.c)
+            i = max(self.i, 0.0)
+            vy = ND_VT * (2 * math.log((I_R117 + i) / IS_D + 1.0) + math.log(i / IS_D + 1.0))
+            dvy = ND_VT * (2 / (I_R117 + i + IS_D) + 1 / (i + IS_D))
+            inew = max(i - (r * i + vy - self.v) / (r + dvy), 0.0)
+            vyn = vy + dvy * (inew - i)
+            self.i = inew
+            self.v = vyn + (self.v - vyn) * math.exp(-dt / (r * 1e-6))
         else:
-            r = 68e3 + (R_4066 if accent_on else 1e6 * taper_a(decay))
             # discharge into the D28 / (D27 + D26, biased by R117) stack: the
             # stack voltage follows its current (diode law); a few fixed-point
             # passes, then an exact exponential step towards it
@@ -163,6 +193,7 @@ class AccentNet:
         self.v36 = 0.0
         self.vd27 = constants()["vca_accent"]["v_drop"]
         self.vca_branch = vca_branch
+        self.d24 = self.d27 = 0          # FAST_CONTROL: the lagged diode states
 
     def step(self, dt, accent_on, acc_knob, res, n53, v134):
         ra7 = max(VR * acc_knob, 1.0)                    # wiper -> ground
@@ -171,7 +202,9 @@ class AccentNet:
         rb = max(VR * (1 - res), 1.0)                    # W -> C13
         g13, g36 = C13 / dt, C36 / dt
         g119 = 1.0 / R119 if self.vca_branch else 0.0
-        for d24, d27 in ((1, 1), (1, 0), (0, 1), (0, 0)):
+        states = (((self.d24, self.d27),) if FAST_CONTROL and FAST_ACCENT_LAG
+                  else ((1, 1), (1, 0), (0, 1), (0, 0)))
+        for d24, d27 in states:
             g46 = d24 / R46
             g120 = d27 / R120
             # unknowns W7, P, W, V13, V36
@@ -186,6 +219,8 @@ class AccentNet:
             w7, vp, vw, v13, v36 = np.linalg.solve(G, rhs)
             ok24 = (w7 - VD24 - vp >= 0) == bool(d24)
             ok27 = (v36 - self.vd27 >= 0) == bool(d27)
+            if FAST_CONTROL and FAST_ACCENT_LAG:   # the states it implies, next block
+                self.d24, self.d27 = int(w7 - VD24 - vp >= 0), int(v36 - self.vd27 >= 0)
             if ok24 and ok27:
                 break
         self.v13, self.v36 = v13, v36

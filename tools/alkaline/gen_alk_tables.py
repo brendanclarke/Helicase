@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Generate the Alkaline C tables from the S092 P6 model (S093 P0).
+"""Generate the Alkaline C tables from the S092 P6 model (S093 P0, P3).
 
 What:       writes, from tools/alkaline/alk_model.py and alk_constants.json:
               Core/DSP/Instruments/Alkaline/AlkalineTables.h/.c
-                - the Resonance table of the real-time network (SplitNet,
-                  S092 P6 §5.3) on ALK_RES_POINTS points: slow block system
-                  (Phi 8x8, Gamma 10x2, slow outputs 2x8), fast modes,
-                  asymptote gains and instantaneous gains per point;
+                - the Resonance table of the real-time network in form N1
+                  (S093 P1 §5; S093 P3 made it the firmware's): every network
+                  state at block rate, one asymptote one-pole per output per
+                  sample (u at A_U_HZ, v at A_V_HZ), on ALK_RES_POINTS points:
+                  slow block system (Phi 8x8, Gamma 10x2, slow outputs 2x8),
+                  asymptote gains and instantaneous gains per point; the N1
+                  per-sample and per-block asymptote constants;
                 - the TPT prewarp table c(k) (S092 P6 §5.2);
                 - the VEG current table and the fitted MEG/VEG/accent
                   constants (S092 P6 §4);
@@ -37,6 +40,9 @@ import alk_model as M  # noqa: E402
 
 OUT_DIR = os.path.join(ROOT, "Core", "DSP", "Instruments", "Alkaline")
 RES_POINTS = 9                      # S092 P6 §5.3: 9 points, LSD +0.016 dB
+NET_BLOCK = 64                      # samples per slow-network update (T2-2, S093 P3)
+A_U_HZ, A_V_HZ = 50.0, 120.0        # N1 asymptote poles (S093 P1 §5)
+NET_STATES = 8                      # block-system states (S093 P3 experiment: --states)
 SQ_SCALE_V = 5.4                    # square table: int16 32767 = +5.4 V around
 SQ_MID_V = 4.0                      # a 4.0 V mid level (the network is AC)
 
@@ -52,19 +58,85 @@ def f32(x):
     return s + "f"
 
 
+def n1_net(k):
+    """SplitNet in form N1 (S093 P1 §5): no per-sample fast modes."""
+    saved = (M.SplitNet.F_SPLIT, M.SplitNet.A_ASYM_U, M.SplitNet.A_ASYM_V)
+    M.SplitNet.F_SPLIT = 1e9
+    M.SplitNet.A_ASYM_U = 2 * math.pi * A_U_HZ
+    M.SplitNet.A_ASYM_V = 2 * math.pi * A_V_HZ
+    try:
+        return M.SplitNet(k, block=NET_BLOCK)
+    finally:
+        M.SplitNet.F_SPLIT, M.SplitNet.A_ASYM_U, M.SplitNet.A_ASYM_V = saved
+
+
+def asym(hz):
+    """Per-sample trapezoidal one-pole (al, be) and per-block decay at hz."""
+    a, h2 = 2 * math.pi * hz, 0.5 / M.FS
+    return (1 - a * h2) / (1 + a * h2), h2 / (1 + a * h2), math.exp(-a * NET_BLOCK / M.FS)
+
+
+def _lyap(A, Q):
+    """A X + X A^T + Q = 0 (small dense, by the Kronecker form)."""
+    n = A.shape[0]
+    K = np.kron(np.eye(n), A) + np.kron(A, np.eye(n))
+    return np.linalg.solve(K, -Q.reshape(-1, order="F")).reshape(n, n, order="F")
+
+
+def _sqrt_psd(Mx):
+    w, V = np.linalg.eigh((Mx + Mx.T) / 2)
+    return V @ np.diag(np.sqrt(np.clip(w, 0, None)))
+
+
+_BASIS = {}
+
+
+def reduced_basis(r):
+    """S093 P3 experiment (--states): one balanced basis for every Res point
+    (the trace-normalised Gramians summed over 33 points), so the reduced
+    tables stay in a common basis and interpolate between points as the
+    physical basis does. Returns (T 8 x r, Ti r x 8)."""
+    if r not in _BASIS:
+        P = Q = 0
+        for k in np.linspace(0, 1, 33):
+            sn = n1_net(k)
+            A, B, C = sn.Aa[:8, :8], sn.Bs, sn.Ca[:, :8]
+            p, q = _lyap(A, B @ B.T), _lyap(A.T, C.T @ C)
+            P, Q = P + p / np.trace(p), Q + q / np.trace(q)
+        L, Mq = _sqrt_psd(P), _sqrt_psd(Q)
+        U, S, Vt = np.linalg.svd(Mq.T @ L)
+        _BASIS[r] = (L @ Vt.T[:, :r] @ np.diag(S[:r] ** -0.5),
+                     np.diag(S[:r] ** -0.5) @ U[:, :r].T @ Mq.T)
+    return _BASIS[r]
+
+
+def reduced_point(k, r):
+    """The block system of res_point() on the reduced common basis."""
+    sn = n1_net(k)
+    T, Ti = reduced_basis(r)
+    Ar, Br, Cr = Ti @ sn.Aa[:8, :8] @ T, Ti @ sn.Bs, sn.Ca[:, :8] @ T
+    au, av = 2 * math.pi * A_U_HZ, 2 * math.pi * A_V_HZ
+    Aa = np.zeros((r + 2, r + 2))
+    Aa[:r, :r], Aa[r, r], Aa[r + 1, r + 1] = Ar, -au, -av
+    Ba = np.zeros((r + 2, 2))
+    Ba[:r], Ba[r], Ba[r + 1] = Br, sn.ga[0], sn.ga[1]
+    Phi = M._expm(Aa * NET_BLOCK / M.FS)
+    Gam = np.linalg.solve(Aa, (Phi - np.eye(r + 2)) @ Ba)
+    return dict(phi=Phi[:r, :r], gam=Gam, cs=Cr, ga=sn.ga, d=sn.D)
+
+
 def res_point(k):
-    sn = M.SplitNet(k)
-    assert np.max(np.abs(sn.bf[:, 1])) < 1e-9, "fast modes must not see s"
+    if NET_STATES != 8:
+        return reduced_point(k, NET_STATES)
+    sn = n1_net(k)
+    assert len(sn.p) == 0, "N1 has no per-sample fast modes"
     assert np.allclose(sn.Phi[:8, 8:], 0) and np.allclose(sn.Phi[8:, :8], 0)
-    assert len(sn.p) == 2
     # the kernel drops these (DiodeLadder.c): s never reaches the OTA input
     assert abs(sn.ga[1, 1]) < 1e-9 and abs(sn.D[1, 1]) < 1e-12
-    # DiodeLadder.c DL_ASYM_DECAY must be this network's asymptote decay
-    assert np.float32(sn.Phi[8, 8]) == np.float32(0.977465749), sn.Phi[8, 8]
-    return dict(
-        phi=sn.Phi[:8, :8], gam=sn.Gam, cs=sn.Ca[:, :8],
-        alf=sn.al_f, bef=sn.be_f, cf=sn.cf, ga=sn.ga, d=sn.D,
-        phi_a=float(sn.Phi[8, 8]))
+    # the emitted per-block decays (ALK_NET_DECAY_U/V) must be this network's
+    for row, hz in ((8, A_U_HZ), (9, A_V_HZ)):
+        assert np.float32(sn.Phi[row, row]) == np.float32(asym(hz)[2]), (row, sn.Phi[row, row])
+    return dict(phi=sn.Phi[:8, :8], gam=sn.Gam, cs=sn.Ca[:, :8], ga=sn.ga, d=sn.D)
 
 
 def square_table():
@@ -88,8 +160,9 @@ def emit_header():
     v42 = np.array(veg["v42"])
     lines = [
         "/*",
-        " * Alkaline tables (S093 P0) - GENERATED by tools/alkaline/gen_alk_tables.py,",
-        " * do not edit. Source model: S092_P6_DSP_EQUATIONS.md.",
+        " * Alkaline tables (S093 P0, P3) - GENERATED by tools/alkaline/gen_alk_tables.py,",
+        " * do not edit. Source model: S092_P6_DSP_EQUATIONS.md; network form N1:",
+        " * S093_P1_ALKALINE_OVERHEAD_REDUCTIONS.md §5.",
         " */",
         "#ifndef ALKALINE_TABLES_H_",
         "#define ALKALINE_TABLES_H_",
@@ -97,10 +170,21 @@ def emit_header():
         "#include <stdint.h>",
         "#include \"DiodeLadder.h\"",
         "",
-        "/* Resonance table of the real-time network (S092 P6 §5.3). */",
+        "/* Resonance table of the real-time network, form N1 (S093 P1 §5). */",
         f"#define ALK_RES_POINTS        {RES_POINTS}u",
-        f"#define ALK_NET_ASYM_DECAY    {f32(res_point(0.0)['phi_a'])}  /* e^(-aT), a = 2 pi 5 Hz, T = 32/fs */",
+        f"#define ALK_NET_BLOCK         {NET_BLOCK}u    /* samples per slow-network update */",
+        f"#if ALK_NET_STATES != {NET_STATES}u",
+        f"#error \"AlkalineTables: generated for {NET_STATES} network states (ALK_NET_STATES)\"",
+        "#endif",
         "extern const DiodeLadderNet alkResTable[ALK_RES_POINTS];",
+        "/* N1 asymptote one-poles: per sample y+ = AL y + BE (x + x+); per update",
+        " * z+ = DECAY z + ... (gen_alk_tables.py asserts DECAY against the table). */",
+        f"#define ALK_NET_AL_U          {f32(asym(A_U_HZ)[0])}  /* u (loop), {A_U_HZ:g} Hz */",
+        f"#define ALK_NET_BE_U          {f32(asym(A_U_HZ)[1])}",
+        f"#define ALK_NET_DECAY_U       {f32(asym(A_U_HZ)[2])}",
+        f"#define ALK_NET_AL_V          {f32(asym(A_V_HZ)[0])}  /* v (VCA input), {A_V_HZ:g} Hz */",
+        f"#define ALK_NET_BE_V          {f32(asym(A_V_HZ)[1])}",
+        f"#define ALK_NET_DECAY_V       {f32(asym(A_V_HZ)[2])}",
         "",
         "/* TPT prewarp c(k) at k = 0, 0.1 .. 1 (S092 P6 §5.2). */",
         "#define ALK_PREWARP_POINTS    11u",
@@ -154,10 +238,11 @@ def emit_source():
     c = M.constants()
     lines = [
         "/*",
-        " * Alkaline tables (S093 P0) - GENERATED by tools/alkaline/gen_alk_tables.py,",
+        " * Alkaline tables (S093 P0, P3) - GENERATED by tools/alkaline/gen_alk_tables.py,",
         " * do not edit.",
         " *",
-        " * What:       the Resonance table of the real-time feedback network, the",
+        " * What:       the Resonance table of the real-time feedback network (form",
+        " *             N1, S093 P1 §5), the",
         " *             TPT prewarp table and the VEG current table.",
         " * Why:        S092 P6 §4.4, §5.2, §5.3: every coefficient depends on",
         " *             Resonance only and varies smoothly with it, so one table",
@@ -180,9 +265,6 @@ def emit_source():
             f"        .phi = {mat(r['phi'], ind)},",
             f"        .gam = {mat(r['gam'], ind)},",
             f"        .cs = {mat(r['cs'], ind)},",
-            f"        .alf = {vec(r['alf'])},",
-            f"        .bef = {vec(r['bef'])},",
-            f"        .cf = {mat(r['cf'], ind)},",
             f"        .ga = {mat(r['ga'], ind)},",
             f"        .d = {mat(r['d'], ind)},",
             "    },",
@@ -236,7 +318,23 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true",
                     help="compare with the committed files; exit 1 on a difference")
+    ap.add_argument("--points", type=int, default=None,
+                    help="experiments only: Res points (the firmware uses RES_POINTS)")
+    ap.add_argument("--out", default=None, help="experiments only: output directory")
+    ap.add_argument("--states", type=int, default=None,
+                    help="experiments only: block-system states (a common reduced basis)")
+    ap.add_argument("--block", type=int, default=None,
+                    help="experiments only: samples per network update (the firmware uses NET_BLOCK)")
     a = ap.parse_args()
+    global RES_POINTS, OUT_DIR, NET_BLOCK, NET_STATES
+    if a.block:
+        NET_BLOCK = a.block
+    if a.states:
+        NET_STATES = a.states
+    if a.points:
+        RES_POINTS = a.points
+    if a.out:
+        OUT_DIR = a.out
     files = {
         "AlkalineTables.h": emit_header(),
         "AlkalineTables.c": emit_source(),

@@ -1,33 +1,51 @@
 /*
  * DiodeLadder.c - TB-303 diode-ladder VCF + feedback network + OTA, real-time
- * form (S093 P0). See DiodeLadder.h for the contract.
+ * form (S093 P0; B2R/B-R/A-R and network form N1 since S093 P3). See
+ * DiodeLadder.h for the contract.
  *
- * What:       DiodeLadder_renderA / _renderB: one 32-sample block of
- *             oscillator (in buf) -> ladder -> network -> OTA (out to buf).
+ * What:       DiodeLadder_renderB2 / _renderB / _renderA: one 32-sample block
+ *             of oscillator (in buf) -> ladder -> network -> OTA (out to buf).
  *             The equations are S092_P6_DSP_EQUATIONS.md §3 (circuit), §5.2
  *             (TPT step, secant linearisation, loop closure with one
- *             division) and §5.3 (SplitNet); the kernel follows the
- *             pseudo-code of §5.4 and tools/alkaline/alk_model.py
- *             LadderTPT._ladder_step / _process_block line for line.
+ *             division) and §5.3; the network is form N1 (S093 P1 §5). Each
+ *             kernel is tools/alkaline/variants/dlv_kernel.c with its #if
+ *             branches resolved (S093_P2_ALKALINE_B-R_PRE_IMPLEMENTATION.md
+ *             §3):
+ *               B2R  -DMODEL=3 -DPADE_RUNG=32 -DRUNG_CLAMP=0 -DXIN_TAIL=1
+ *                    -DGAU1=0 -DNET1=1 -DQ21_LIN=1 -DOTA_P32=1
+ *               B-R  the same with -DMODEL=1
+ *               A-R  -DMODEL=0 -DXIN_TAIL=1 -DGAU1=0 -DNET1=1 -DQ21_LIN=1
  * Why:        S092 P0 §4: a new function; ResonantFilter.c is not touched.
  *             State is loaded into locals and written back once per block;
- *             no switch in a loop; one int16 saturation at the end.
- * Approximations against the Python reference (S093 P0 §4.3):
- *             - tanh by the [5/4] Pade x(945 + 105x^2 + x^4)/(945 + 420x^2 +
- *               15x^4), argument clamped to +-3.5 (error <= 1e-3 there,
- *               < 2e-5 below 2);
- *             - the secant gains' reciprocals batched: one VDIV per sample
- *               for all of them;
- *             - the tridiagonal pivots from continuants with one shared
- *               reciprocal (option B) or batched with the secants (A);
- *             - the OTA output one sample late (its tanh shares the batch).
+ *             no switch in a loop; one int16 saturation per sample.
+ * Approximations against the Python reference (S093 P0 §3.3, S093 P1 §4.1):
+ *             - input pair: tanh by the [5/4] Pade, argument clamped to
+ *               +-3.5, its secant continued as tanh(3.5)/|z| beyond the
+ *               clamp (the denominator x max(|z|, 3.5)/3.5);
+ *             - rungs (B2R: 0-1; B-R: 0-3): the [3/2] Pade
+ *               (27 + z^2)/(27 + 9 z^2), unclamped (it stays in (1/9, 1]);
+ *             - Q21 linear (its argument stays below 0.32 even at x8 drive);
+ *             - OTA: [3/2] (B2R, B-R; clamp +-3) or [5/4] (A-R; clamp
+ *               +-3.5), one sample late (its secant shares the batch);
+ *             - all secant reciprocals batched: one VDIV per sample;
+ *             - B2R/B-R: the tridiagonal pivots from continuants with one
+ *               shared reciprocal; A-R: the next sample's pivots join the
+ *               secant batch (its rungs are linear, so they depend on the
+ *               ladder current only), the block's first pivots once per
+ *               block;
+ *             - network form N1: per sample only the instantaneous gains and
+ *               one asymptote one-pole per output (u 50 Hz, v 120 Hz); every
+ *               network state once per 64 samples, split over two blocks
+ *               (T2-2, S093 P3); the s input of the u asymptote (gau1) is
+ *               left to the block system.
  * Constant cost: every sample runs the same instructions; every block runs
  *             the full slow-network update (S092 P0 §1.3).
- * Affiliates: AlkalineTables.c (alkResTable); AlkalineVoice.c; the bench
- *             tools/dsp_test modules/alkaline.c; tools/alkaline/check_c.py.
+ * Affiliates: AlkalineTables.c (alkResTable, ALK_NET_*); AlkalineVoice.c; the
+ *             bench tools/dsp_test modules/alkaline.c; tools/alkaline/check_c.py.
  */
 #include <math.h>
 #include "DiodeLadder.h"
+#include "AlkalineTables.h"
 #include "config.h"
 #include "stm32f4xx.h"
 
@@ -39,8 +57,8 @@
  *   term L: wl = (h/2) / (2 R_in21 C26); KL = wl/(2Vt); D3X = wl KG
  *   Q21: A_OUT = 103.6 x 2Vt; KA = -A_OUT KG; KB = A_OUT KG / (2Vt)
  *   OTA load (47k + 22k) || 220k
- *   asymptote poles a = 2 pi 5 Hz: AL = (1 - a h/2)/(1 + a h/2),
- *   BE = (h/2)/(1 + a h/2), DECAY = e^(-a 32/fs) (gen_alk_tables.py checks it) */
+ * The N1 asymptote constants ALK_NET_AL/BE/DECAY_U/V are generated with the
+ * table (AlkalineTables.h), which asserts the decays against the network. */
 #define DL_K0          6090.59326f
 #define DL_K1          3322.14185f
 #define DL_KG          0.995162427f
@@ -51,22 +69,34 @@
 #define DL_KB          103.098831f
 #define DL_A_OUT       5.35612011f
 #define DL_R_OTA       52525.9531f
-#define DL_ASYM_AL     0.999288023f
-#define DL_ASYM_BE     1.13317765e-05f
-#define DL_ASYM_DECAY  0.977465749f
 #define DL_INV_2VT     (1.0f / DL_2VT)
 #define DL_INV_BLOCK   (1.0f / (float)OUTPUT_DMA_SIZE)
+/* the OTA output scale folded into its current (S093 P3): the kernels ramp
+ * DL_OA x I_abc, so the output is one product per sample */
+#define DL_OA          (DL_R_OTA * DL_OUT_SCALE)
+/* T2-2: the network window in render blocks and the rows solved per block */
+#define DL_NET_PHASES  (ALK_NET_BLOCK / OUTPUT_DMA_SIZE)
+#define DL_NET_ROWS    (ALK_NET_STATES / DL_NET_PHASES)
+_Static_assert(DL_NET_PHASES * OUTPUT_DMA_SIZE == ALK_NET_BLOCK, "network window = whole blocks");
+_Static_assert(DL_NET_ROWS * DL_NET_PHASES == ALK_NET_STATES, "rows split evenly");
+/* T2-4 (experiment, S093 P3): with the nearest Res point (lo == hi) the slow
+ * network needs one product per row, not the two of the blend */
+#ifndef ALK_RES_NEAREST
+#define ALK_RES_NEAREST 0
+#endif
 
 /* [5/4] Pade of tanh: tanh(z) = z N(z^2)/D(z^2); secant t = N/D. */
-#define DL_PN0 945.0f
-#define DL_PN1 105.0f
-#define DL_PD1 420.0f
-#define DL_PD2 15.0f
-#define DL_ZMAX 3.5f
+#define DL_P54N(s)     (945.0f + (s) * (105.0f + (s)))
+#define DL_P54D(s)     (945.0f + (s) * (420.0f + 15.0f * (s)))
+#define DL_P54_ZMAX    3.5f
+/* [3/2] Pade (27, 9: VFP immediates). */
+#define DL_P32N(s)     (27.0f + (s))
+#define DL_P32D(s)     (27.0f + 9.0f * (s))
+#define DL_P32_ZMAX    3.0f
 
-static inline float dl_clamp(const float z)
+static inline float dl_clamp(const float z, const float m)
 {
-	return fminf(fmaxf(z, -DL_ZMAX), DL_ZMAX);
+	return fminf(fmaxf(z, -m), m);
 }
 
 /* ------------------------------------------------------------------- init */
@@ -76,25 +106,37 @@ void DiodeLadder_init(DiodeLadder *dl)
 
 	dl->x0 = dl->x1 = dl->x2 = dl->x3 = 0.0f;
 	dl->t0 = dl->t1 = dl->t2 = dl->t3 = 1.0f;
-	dl->tin = dl->tout = dl->tota = 1.0f;
+	dl->tin = dl->tota = 1.0f;
 	dl->zo = 0.0f;
-	dl->y0 = dl->y1 = dl->qu = dl->qv = 0.0f;
-	for (i = 0u; i < 10u; i++)
+	dl->qu = dl->qv = 0.0f;
+	for (i = 0u; i < ALK_NET_STATES + 2u; i++)
 		dl->z[i] = 0.0f;
 	dl->rU = dl->rV = dl->rUPrev = dl->rVPrev = 0.0f;
-	dl->tpLast = dl->sLast = dl->xinLast = dl->vhpLast = 0.0f;
+	dl->tpLast = dl->xinLast = dl->vhpLast = 0.0f;
 	dl->vcaLast = dl->iAbcLast = 0.0f;
 	dl->iLad = 0.0f;
 	dl->iAbc = 0.0f;
 	dl->netLo = 0;
 	dl->netHi = 0;
 	dl->netFrac = 0.0f;
+	dl->gau0 = dl->gav0 = dl->ku0 = dl->ku1 = dl->dv0 = 0.0f;
+	for (i = 0u; i < ALK_NET_STATES; i++)
+		dl->zn[i] = 0.0f;
+	dl->ruAcc = dl->rvAcc = 0.0f;
+	dl->uStep = dl->vStep = 0.0f;
+	dl->accTp = dl->accS = dl->mTp = dl->mS = 0.0f;
+	dl->latLo = 0;
+	dl->latHi = 0;
+	dl->latFrac = 0.0f;
+	dl->rk = 0u;
+	dl->phase = 0u;
 }
 
 /* ------------------------------------------------------------ per block
- * DiodeLadder_setNet: the Res-interpolated per-sample coefficients.
- * Ku0/Ku1 are u's instantaneous gains on tp_pre+ and s+: D plus each
- * one-pole's share of its input this sample (S092 P6 §5.3). */
+ * DiodeLadder_setNet: the Res-interpolated per-sample coefficients (N1).
+ * ku0/ku1 are u's instantaneous gains on tp_pre+ and s+: D plus the u
+ * asymptote one-pole's share of its input this sample (gau1 is dropped, so
+ * ku1 is D alone). */
 void DiodeLadder_setNet(DiodeLadder *dl, const DiodeLadderNet *lo,
                         const DiodeLadderNet *hi, const float f)
 {
@@ -103,95 +145,305 @@ void DiodeLadder_setNet(DiodeLadder *dl, const DiodeLadderNet *lo,
 	dl->netLo = lo;
 	dl->netHi = hi;
 	dl->netFrac = f;
-	dl->alf0 = g * lo->alf[0] + f * hi->alf[0];
-	dl->alf1 = g * lo->alf[1] + f * hi->alf[1];
-	dl->bef0 = g * lo->bef[0] + f * hi->bef[0];
-	dl->bef1 = g * lo->bef[1] + f * hi->bef[1];
-	dl->cfu0 = g * lo->cf[0][0] + f * hi->cf[0][0];
-	dl->cfu1 = g * lo->cf[0][1] + f * hi->cf[0][1];
-	dl->cfv0 = g * lo->cf[1][0] + f * hi->cf[1][0];
-	dl->cfv1 = g * lo->cf[1][1] + f * hi->cf[1][1];
 	dl->gau0 = g * lo->ga[0][0] + f * hi->ga[0][0];
-	dl->gau1 = g * lo->ga[0][1] + f * hi->ga[0][1];
 	dl->gav0 = g * lo->ga[1][0] + f * hi->ga[1][0];
 	dl->dv0 = g * lo->d[1][0] + f * hi->d[1][0];
-	dl->ku0 = (g * lo->d[0][0] + f * hi->d[0][0])
-	        + dl->cfu0 * dl->bef0 + dl->cfu1 * dl->bef1
-	        + DL_ASYM_BE * dl->gau0;
-	dl->ku1 = (g * lo->d[0][1] + f * hi->d[0][1]) + DL_ASYM_BE * dl->gau1;
+	dl->ku0 = (g * lo->d[0][0] + f * hi->d[0][0]) + ALK_NET_BE_U * dl->gau0;
+	dl->ku1 = g * lo->d[0][1] + f * hi->d[0][1];
 }
 
 /*
- * The slow network, once per block (S092 P6 §5.3): zero-order hold on the
- * block means of tp_pre and s, Res-interpolated as a blend of the two
+ * The slow network (S092 P6 §5.3, form N1), T2-2 (S093 P3): the block system
+ * advances once per ALK_NET_BLOCK samples, a window of DL_NET_PHASES render
+ * blocks (2 for the shipped 64; 1 and 4 for 32 and 128): zero-order hold on
+ * the window means of tp_pre and s, Res-interpolated as a blend of the two
  * neighbouring points' products (exact: the system is linear in phi/gam).
+ * The work is split evenly over the blocks, so every block pays the same (the
+ * constant-CPU rule):
+ *   - the window's last block latches its means and the Res blend and solves
+ *     chunk 0 (DL_NET_ROWS rows of z_new, from z_old) with its share of the
+ *     outputs and the u asymptote copy z8;
+ *   - each following block solves the next chunk; the last chunk also
+ *     updates the v asymptote copy z9, commits z = z_new and the new
+ *     outputs, which then ramp over the next DL_NET_PHASES blocks.
+ * The u asymptote copy z8 takes tp_pre only (gau1 dropped, S093 P1 §4.1).
+ * Called once per block with the block's sums of tp_pre and s.
  */
-static void dl_slowUpdate(DiodeLadder *dl, const float m0, const float m1)
+
+/* one chunk of z_new: DL_NET_ROWS rows from z_old, the latched means and Res
+ * blend, and their share of the new outputs */
+static inline __attribute__((always_inline)) void dl_netChunk(DiodeLadder *dl, const uint8_t chunk)
 {
-	const DiodeLadderNet *lo = dl->netLo;
-	const DiodeLadderNet *hi = dl->netHi;
-	const float f = dl->netFrac;
+	const DiodeLadderNet *lo = dl->latLo;
+	const DiodeLadderNet *hi = dl->latHi;
+	const float f = dl->latFrac;
 	const float g = 1.0f - f;
-	float zn[8];
+	const float m0 = dl->mTp, m1 = dl->mS;
 	float ru = 0.0f, rv = 0.0f;
 	uint8_t r, c;
 
-	for (r = 0u; r < 8u; r++) {
+	for (r = (uint8_t)(chunk * DL_NET_ROWS); r < (uint8_t)((chunk + 1u) * DL_NET_ROWS); r++) {
 		float a = lo->gam[r][0] * m0 + lo->gam[r][1] * m1;
 		float b = hi->gam[r][0] * m0 + hi->gam[r][1] * m1;
 
-		for (c = 0u; c < 8u; c++) {
+		for (c = 0u; c < ALK_NET_STATES; c++) {
 			a += lo->phi[r][c] * dl->z[c];
 			b += hi->phi[r][c] * dl->z[c];
 		}
-		zn[r] = g * a + f * b;
+		dl->zn[r] = g * a + f * b;
+		ru += (g * lo->cs[0][r] + f * hi->cs[0][r]) * dl->zn[r];
+		rv += (g * lo->cs[1][r] + f * hi->cs[1][r]) * dl->zn[r];
 	}
-	dl->z[8] = DL_ASYM_DECAY * dl->z[8]
-	         + g * (lo->gam[8][0] * m0 + lo->gam[8][1] * m1)
-	         + f * (hi->gam[8][0] * m0 + hi->gam[8][1] * m1);
-	dl->z[9] = DL_ASYM_DECAY * dl->z[9]
-	         + g * (lo->gam[9][0] * m0 + lo->gam[9][1] * m1)
-	         + f * (hi->gam[9][0] * m0 + hi->gam[9][1] * m1);
-	for (c = 0u; c < 8u; c++) {
-		dl->z[c] = zn[c];
-		ru += (g * lo->cs[0][c] + f * hi->cs[0][c]) * zn[c];
-		rv += (g * lo->cs[1][c] + f * hi->cs[1][c]) * zn[c];
-	}
-	dl->rUPrev = dl->rU;
-	dl->rVPrev = dl->rV;
-	dl->rU = ru - dl->z[8];
-	dl->rV = rv - dl->z[9];
+	dl->ruAcc += ru;
+	dl->rvAcc += rv;
 }
 
-/* ------------------------------------------------------------- option B
- * All six nonlinearities (rungs, input pair, Q21) as secant gains; the OTA
- * is the seventh secant in the batch. 3 VDIV per sample. */
-void DiodeLadder_renderB(DiodeLadder *dl, int16_t *buf, const float sScale,
-                         const float iLadEnd, const float iAbcEnd)
+/* the last chunk's block: the v asymptote copy, z = z_new, the new outputs
+ * and their ramp over the next window */
+static inline __attribute__((always_inline)) void dl_netCommit(DiodeLadder *dl)
 {
+	const DiodeLadderNet *lo = dl->latLo;
+	const DiodeLadderNet *hi = dl->latHi;
+	const float f = dl->latFrac;
+	const float g = 1.0f - f;
+	const float m0 = dl->mTp, m1 = dl->mS;
+	uint8_t r;
+
+	dl->z[ALK_NET_STATES + 1u] = ALK_NET_DECAY_V * dl->z[ALK_NET_STATES + 1u]
+	    + g * (lo->gam[ALK_NET_STATES + 1u][0] * m0 + lo->gam[ALK_NET_STATES + 1u][1] * m1)
+	    + f * (hi->gam[ALK_NET_STATES + 1u][0] * m0 + hi->gam[ALK_NET_STATES + 1u][1] * m1);
+	for (r = 0u; r < ALK_NET_STATES; r++)
+		dl->z[r] = dl->zn[r];
+	dl->uStep = (dl->ruAcc - dl->z[ALK_NET_STATES] - dl->rU) * (1.0f / (float)DL_NET_PHASES);
+	dl->vStep = (dl->rvAcc - dl->z[ALK_NET_STATES + 1u] - dl->rV) * (1.0f / (float)DL_NET_PHASES);
+	dl->rk = (uint8_t)DL_NET_PHASES;
+}
+
+static void dl_slowUpdate(DiodeLadder *dl, const float sTp, const float sS)
+{
+	const uint8_t q = dl->phase;
+
+	dl->accTp += sTp;
+	dl->accS += sS;
+	if (q == DL_NET_PHASES - 1u) {
+		/* the window is complete: latch it, solve chunk 0 */
+		dl->mTp = dl->accTp * (1.0f / (float)ALK_NET_BLOCK);
+		dl->mS = dl->accS * (1.0f / (float)ALK_NET_BLOCK);
+		dl->accTp = dl->accS = 0.0f;
+		dl->latLo = dl->netLo;
+		dl->latHi = dl->netHi;
+		dl->latFrac = dl->netFrac;
+		dl->ruAcc = dl->rvAcc = 0.0f;
+		dl_netChunk(dl, 0u);
+		dl->z[ALK_NET_STATES] = ALK_NET_DECAY_U * dl->z[ALK_NET_STATES]
+		    + ((1.0f - dl->latFrac) * dl->latLo->gam[ALK_NET_STATES][0]
+		       + dl->latFrac * dl->latHi->gam[ALK_NET_STATES][0]) * dl->mTp;
+		if (DL_NET_PHASES == 1u)
+			dl_netCommit(dl);
+		dl->phase = 0u;
+	} else {
+		/* the following chunks; the last commits (nothing before the first
+		 * window has been latched) */
+		if (dl->latLo) {
+			if (DL_NET_PHASES == 2u) {      /* the shipped form: constant chunk 1 */
+				dl_netChunk(dl, 1u);
+				dl_netCommit(dl);
+			} else {
+				dl_netChunk(dl, (uint8_t)(q + 1u));
+				if (q + 1u == DL_NET_PHASES - 1u)
+					dl_netCommit(dl);
+			}
+		}
+		dl->phase = (uint8_t)(q + 1u);
+	}
+	/* the next block's end on the ramp to the latest outputs */
+	dl->rUPrev = dl->rU;
+	dl->rVPrev = dl->rV;
+	if (dl->rk) {
+		dl->rU += dl->uStep;
+		dl->rV += dl->vStep;
+		dl->rk--;
+	}
+}
+
+/* ------------------------------------------------------------------- B2R
+ * Rungs 0-1 nonlinear, rungs 2-3 linear (t2 = t3 = 1 folded); the input pair
+ * and the OTA. 3 VDIV per sample: the continuants' reciprocal, the loop
+ * closure, the secant batch (rungs 0-1, input pair, OTA). */
+static inline __attribute__((always_inline)) void dl_renderB2Body(
+	DiodeLadder *dl, int16_t *buf, const float sScale, const float iLadEnd,
+	const float iAbcEnd, const int fused, const int16_t *const row,
+	uint32_t *const phase, const uint32_t phaseInc)
+{
+	/* fused (a compile-time constant in each wrapper): the oscillator's
+	 * table read fused into the loop, calcWavetableOscBlock()'s arithmetic
+	 * exactly (gain 1: linear interpolation, truncation to int16) */
+	uint32_t ph = fused ? *phase : 0u;
 	float x0 = dl->x0, x1 = dl->x1, x2 = dl->x2, x3 = dl->x3;
-	float t0 = dl->t0, t1 = dl->t1, t2 = dl->t2, t3 = dl->t3;
-	float tin = dl->tin, tout = dl->tout, tota = dl->tota;
+	float t0 = dl->t0, t1 = dl->t1;
+	float tin = dl->tin, tota = dl->tota;
 	float zo = dl->zo;
-	float y0 = dl->y0, y1 = dl->y1, qu = dl->qu, qv = dl->qv;
-	float tpL = dl->tpLast, sL = dl->sLast, xinL = dl->xinLast;
+	float qu = dl->qu, qv = dl->qv;
+	float tpL = dl->tpLast, xinL = dl->xinLast;
 	float vhpL = dl->vhpLast, vcaL = dl->vcaLast, iaL = dl->iAbcLast;
-	float i = dl->iLad, ia = dl->iAbc;
+	float i = dl->iLad, oa = DL_OA * dl->iAbc;
 	float ru = dl->rUPrev, rv = dl->rVPrev;
 	const float di = (iLadEnd - i) * DL_INV_BLOCK;
-	const float dia = (iAbcEnd - ia) * DL_INV_BLOCK;
+	const float doa = DL_OA * (iAbcEnd - dl->iAbc) * DL_INV_BLOCK;
 	const float dru = (dl->rU - ru) * DL_INV_BLOCK;
 	const float drv = (dl->rV - rv) * DL_INV_BLOCK;
-	const float alf0 = dl->alf0, alf1 = dl->alf1, bef0 = dl->bef0, bef1 = dl->bef1;
-	const float cfu0 = dl->cfu0, cfu1 = dl->cfu1, cfv0 = dl->cfv0, cfv1 = dl->cfv1;
-	const float gau0 = dl->gau0, gau1 = dl->gau1, gav0 = dl->gav0;
+	const float gau0 = dl->gau0, gav0 = dl->gav0;
 	const float ku0 = dl->ku0, ku1 = dl->ku1, dv0 = dl->dv0;
 	float accTp = 0.0f, accS = 0.0f;
 	uint8_t j;
 
 	for (j = 0u; j < OUTPUT_DMA_SIZE; j++) {
 		i += di;
-		ia += dia;
+		oa += doa;
+		ru += dru;
+		rv += drv;
+		float s;
+
+		if (fused) {
+			const uint32_t itg = ph >> 22;
+			int16_t o = row[itg];
+
+			o += (ph & 0x003FFFFFu) * 2.384185791015625e-07f
+			   * (row[(itg + 1u) & 0x000003FFu] - o);
+			ph += phaseInc;
+			s = (float)o * sScale;
+		} else {
+			s = (float)buf[j] * sScale;
+		}
+		const float w0 = DL_K0 * i, w1 = DL_K1 * i;
+
+		/* right-hand side: the trapezoidal half step from the last sample */
+		const float d01 = x0 - x1, d12 = x1 - x2, d23 = x2 - x3;
+		const float a0 = t0 * d01, a1 = t1 * d12;
+		const float r0 = x0 - w0 * (a0 + tin * xinL);
+		const float r1 = x1 + w1 * (a0 - a1);
+		const float r2 = x2 + w1 * (a1 - d23);
+		const float r3 = x3 + w1 * (d23 - x3) + DL_KL * (DL_KG * zo - vhpL);
+
+		/* tridiagonal: continuants, one reciprocal (VDIV 1) */
+		const float e0 = w0 * t0, e1 = w1 * t0, e2 = w1 * t1;
+		const float th1 = 1.0f + e0;
+		const float th2 = (1.0f + e1 + e2) * th1 - e1 * e0;
+		const float th3 = (1.0f + e2 + w1) * th2 - e2 * e2 * th1;
+		const float th4 = (1.0f + 2.0f * w1 + DL_D3X) * th3 - w1 * w1 * th2;
+		const float p12 = th1 * th2, p123 = p12 * th3;
+		const float inv = 1.0f / (p123 * th4);
+		const float i123 = inv * th4;
+		const float i12 = i123 * th3;
+		const float ip0 = i12 * th2;              /* 1/th1 */
+		const float ip1 = i12 * th1 * th1;        /* th1/th2 */
+		const float ip2 = i123 * p12 * th2;       /* th2/th3 */
+		const float ip3 = inv * p123 * th3;       /* th3/th4 */
+
+		/* forward pass for the right-hand side and the x_in column */
+		const float m1 = e1 * ip0, m2 = e2 * ip1, m3 = w1 * ip2;
+		const float yy1 = r1 + m1 * r0, yy2 = r2 + m2 * yy1, yy3 = r3 + m3 * yy2;
+		const float q0 = -w0 * tin, q1 = m1 * q0, q2 = m2 * q1, q3 = m3 * q2;
+		const float pr3 = yy3 * ip3, pq3 = q3 * ip3;
+
+		/* close the loop through the network (VDIV 2) */
+		const float quk = ALK_NET_AL_U * qu + ALK_NET_BE_U * gau0 * tpL;
+		const float base = ru + quk + ku1 * s;
+		const float xin = (base + ku0 * (DL_KA * pr3 + DL_KB * zo))
+		                / (DL_2VT - ku0 * DL_KA * pq3);
+
+		/* back-substitution */
+		const float n3 = pr3 + pq3 * xin;
+		const float n2 = (yy2 + q2 * xin + w1 * n3) * ip2;
+		const float n1 = (yy1 + q1 * xin + e2 * n2) * ip1;
+		const float n0 = (r0 + q0 * xin + e0 * n1) * ip0;
+		const float vhp = (DL_2VT * n3 - zo) * DL_KG;
+		zo += DL_TWO_G * vhp;
+
+		/* secants: rungs 0-1, input pair (with its tail), OTA (VDIV 3) */
+		const float zE = dl_clamp(xin, DL_P54_ZMAX), sE = zE * zE;
+		const float nE = DL_P54N(sE);
+		const float dE = DL_P54D(sE) * (fmaxf(fabsf(xin), DL_P54_ZMAX) * (1.0f / DL_P54_ZMAX));
+		const float zG = dl_clamp(vcaL * DL_INV_2VT, DL_P32_ZMAX), sG = zG * zG;
+		const float nG = DL_P32N(sG), dG = DL_P32D(sG);
+		const float zA = n0 - n1, zB = n1 - n2;
+		const float sA = zA * zA, sB = zB * zB;
+		const float nA = DL_P32N(sA), dA = DL_P32D(sA);
+		const float nB = DL_P32N(sB), dB = DL_P32D(sB);
+		const float pAB = dA * dB, prod = dE * dG;
+		float r = 1.0f / (pAB * prod);
+		const float iP = r * pAB;      r *= prod;      /* iP = 1/(dE dG); r = 1/pAB */
+		t1 = nB * r * dA;
+		t0 = nA * r * dB;
+		tin = nE * iP * dG;
+		tota = nG * iP * dE;
+
+		/* linear Q21 output, network per-sample parts, OTA (one sample late) */
+		const float tp = -DL_A_OUT * vhp * DL_INV_2VT;
+		qu = quk + ALK_NET_BE_U * gau0 * tp;
+		qv = ALK_NET_AL_V * qv + ALK_NET_BE_V * gav0 * (tpL + tp);
+		const float vca = rv + qv + dv0 * tp;
+		buf[j] = (int16_t)__SSAT((int32_t)(iaL * zG * tota), 16);   /* R_OTA I_abc tanh(v/2Vt), scaled */
+
+		accTp += tp;
+		accS += s;
+		x0 = n0; x1 = n1; x2 = n2; x3 = n3;
+		tpL = tp; xinL = xin; vhpL = vhp; vcaL = vca; iaL = oa;
+	}
+	dl->x0 = x0; dl->x1 = x1; dl->x2 = x2; dl->x3 = x3;
+	dl->t0 = t0; dl->t1 = t1;
+	dl->tin = tin; dl->tota = tota;
+	dl->zo = zo;
+	dl->qu = qu; dl->qv = qv;
+	dl->tpLast = tpL; dl->xinLast = xinL;
+	dl->vhpLast = vhpL; dl->vcaLast = vcaL; dl->iAbcLast = iaL;
+	dl->iLad = iLadEnd; dl->iAbc = iAbcEnd;
+	if (fused)
+		*phase = ph;
+	dl_slowUpdate(dl, accTp, accS);
+}
+
+void DiodeLadder_renderB2(DiodeLadder *dl, int16_t *buf, const float sScale,
+                          const float iLadEnd, const float iAbcEnd)
+{
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 0, 0, 0, 0u);
+}
+
+/* B2R with the oscillator's table read fused (S093 P3 analysis): the voice's
+ * saw/square [11][1024] level row and phase; buf is output only. */
+void DiodeLadder_renderB2Osc(DiodeLadder *dl, int16_t *buf, const int16_t *row,
+                             uint32_t *phase, const uint32_t phaseInc, const float sScale,
+                             const float iLadEnd, const float iAbcEnd)
+{
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 1, row, phase, phaseInc);
+}
+
+/* ------------------------------------------------------------------- B-R
+ * All four rungs nonlinear; the input pair and the OTA. 3 VDIV per sample. */
+void DiodeLadder_renderB(DiodeLadder *dl, int16_t *buf, const float sScale,
+                         const float iLadEnd, const float iAbcEnd)
+{
+	float x0 = dl->x0, x1 = dl->x1, x2 = dl->x2, x3 = dl->x3;
+	float t0 = dl->t0, t1 = dl->t1, t2 = dl->t2, t3 = dl->t3;
+	float tin = dl->tin, tota = dl->tota;
+	float zo = dl->zo;
+	float qu = dl->qu, qv = dl->qv;
+	float tpL = dl->tpLast, xinL = dl->xinLast;
+	float vhpL = dl->vhpLast, vcaL = dl->vcaLast, iaL = dl->iAbcLast;
+	float i = dl->iLad, oa = DL_OA * dl->iAbc;
+	float ru = dl->rUPrev, rv = dl->rVPrev;
+	const float di = (iLadEnd - i) * DL_INV_BLOCK;
+	const float doa = DL_OA * (iAbcEnd - dl->iAbc) * DL_INV_BLOCK;
+	const float dru = (dl->rU - ru) * DL_INV_BLOCK;
+	const float drv = (dl->rV - rv) * DL_INV_BLOCK;
+	const float gau0 = dl->gau0, gav0 = dl->gav0;
+	const float ku0 = dl->ku0, ku1 = dl->ku1, dv0 = dl->dv0;
+	float accTp = 0.0f, accS = 0.0f;
+	uint8_t j;
+
+	for (j = 0u; j < OUTPUT_DMA_SIZE; j++) {
+		i += di;
+		oa += doa;
 		ru += dru;
 		rv += drv;
 		const float s = (float)buf[j] * sScale;
@@ -227,12 +479,10 @@ void DiodeLadder_renderB(DiodeLadder *dl, int16_t *buf, const float sScale,
 		const float pr3 = yy3 * ip3, pq3 = q3 * ip3;
 
 		/* close the loop through the network (VDIV 2) */
-		const float yk0 = alf0 * y0 + bef0 * tpL;
-		const float yk1 = alf1 * y1 + bef1 * tpL;
-		const float quk = DL_ASYM_AL * qu + DL_ASYM_BE * (gau0 * tpL + gau1 * sL);
-		const float base = ru + cfu0 * yk0 + cfu1 * yk1 + quk + ku1 * s;
-		const float at = DL_KA * tout, bt = DL_KB * tout * zo;
-		const float xin = (base + ku0 * (at * pr3 + bt)) / (DL_2VT - ku0 * at * pq3);
+		const float quk = ALK_NET_AL_U * qu + ALK_NET_BE_U * gau0 * tpL;
+		const float base = ru + quk + ku1 * s;
+		const float xin = (base + ku0 * (DL_KA * pr3 + DL_KB * zo))
+		                / (DL_2VT - ku0 * DL_KA * pq3);
 
 		/* back-substitution */
 		const float n3 = pr3 + pq3 * xin;
@@ -242,69 +492,60 @@ void DiodeLadder_renderB(DiodeLadder *dl, int16_t *buf, const float sScale,
 		const float vhp = (DL_2VT * n3 - zo) * DL_KG;
 		zo += DL_TWO_G * vhp;
 
-		/* seven secants, one shared reciprocal (VDIV 3) */
-		const float zA = dl_clamp(n0 - n1), zB = dl_clamp(n1 - n2);
-		const float zC = dl_clamp(n2 - n3), zD = dl_clamp(n3);
-		const float zE = dl_clamp(xin), zF = dl_clamp(vhp * DL_INV_2VT);
-		const float zG = dl_clamp(vcaL * DL_INV_2VT);
+		/* secants: four rungs, input pair (with its tail), OTA (VDIV 3) */
+		const float zE = dl_clamp(xin, DL_P54_ZMAX), sE = zE * zE;
+		const float nE = DL_P54N(sE);
+		const float dE = DL_P54D(sE) * (fmaxf(fabsf(xin), DL_P54_ZMAX) * (1.0f / DL_P54_ZMAX));
+		const float zG = dl_clamp(vcaL * DL_INV_2VT, DL_P32_ZMAX), sG = zG * zG;
+		const float nG = DL_P32N(sG), dG = DL_P32D(sG);
+		const float zA = n0 - n1, zB = n1 - n2, zC = n2 - n3, zD = n3;
 		const float sA = zA * zA, sB = zB * zB, sC = zC * zC, sD = zD * zD;
-		const float sE = zE * zE, sF = zF * zF, sG = zG * zG;
-		const float nA = DL_PN0 + sA * (DL_PN1 + sA), dA = DL_PN0 + sA * (DL_PD1 + DL_PD2 * sA);
-		const float nB = DL_PN0 + sB * (DL_PN1 + sB), dB = DL_PN0 + sB * (DL_PD1 + DL_PD2 * sB);
-		const float nC = DL_PN0 + sC * (DL_PN1 + sC), dC = DL_PN0 + sC * (DL_PD1 + DL_PD2 * sC);
-		const float nD = DL_PN0 + sD * (DL_PN1 + sD), dD = DL_PN0 + sD * (DL_PD1 + DL_PD2 * sD);
-		const float nE = DL_PN0 + sE * (DL_PN1 + sE), dE = DL_PN0 + sE * (DL_PD1 + DL_PD2 * sE);
-		const float nF = DL_PN0 + sF * (DL_PN1 + sF), dF = DL_PN0 + sF * (DL_PD1 + DL_PD2 * sF);
-		const float nG = DL_PN0 + sG * (DL_PN1 + sG), dG = DL_PN0 + sG * (DL_PD1 + DL_PD2 * sG);
+		const float nA = DL_P32N(sA), dA = DL_P32D(sA);
+		const float nB = DL_P32N(sB), dB = DL_P32D(sB);
+		const float nC = DL_P32N(sC), dC = DL_P32D(sC);
+		const float nD = DL_P32N(sD), dD = DL_P32D(sD);
 		const float pAB = dA * dB, pABC = pAB * dC, pABCD = pABC * dD;
-		const float pE = pABCD * dE, pF = pE * dF;
-		float r = 1.0f / (pF * dG);
-		const float iG = r * pF;       r *= dG;
-		const float iF = r * pE;       r *= dF;
-		const float iE = r * pABCD;    r *= dE;
-		const float iD = r * pABC;     r *= dD;
-		const float iC = r * pAB;      r *= dC;
-		const float iB = r * dA;
-		const float iA = r * dB;
-		t0 = nA * iA; t1 = nB * iB; t2 = nC * iC; t3 = nD * iD;
-		tin = nE * iE; tout = nF * iF;
-		const float tG = nG * iG;
+		const float prod = dE * dG;
+		float r = 1.0f / (pABCD * prod);
+		const float iP = r * pABCD;    r *= prod;      /* iP = 1/(dE dG); r = 1/pABCD */
+		t3 = nD * r * pABC;            r *= dD;
+		t2 = nC * r * pAB;             r *= dC;
+		t1 = nB * r * dA;
+		t0 = nA * r * dB;
+		tin = nE * iP * dG;
+		tota = nG * iP * dE;
 
-		/* Q21 output, network per-sample parts, OTA (one sample late) */
-		const float tp = -DL_A_OUT * zF * tout;
-		y0 = yk0 + bef0 * tp;
-		y1 = yk1 + bef1 * tp;
-		qu = quk + DL_ASYM_BE * (gau0 * tp + gau1 * s);
-		qv = DL_ASYM_AL * qv + DL_ASYM_BE * gav0 * (tpL + tp);
-		const float vca = rv + cfv0 * y0 + cfv1 * y1 + qv + dv0 * tp;
-		const float out = DL_R_OTA * iaL * zG * tG;
-		buf[j] = (int16_t)__SSAT((int32_t)(out * DL_OUT_SCALE), 16);
+		/* linear Q21 output, network per-sample parts, OTA (one sample late) */
+		const float tp = -DL_A_OUT * vhp * DL_INV_2VT;
+		qu = quk + ALK_NET_BE_U * gau0 * tp;
+		qv = ALK_NET_AL_V * qv + ALK_NET_BE_V * gav0 * (tpL + tp);
+		const float vca = rv + qv + dv0 * tp;
+		buf[j] = (int16_t)__SSAT((int32_t)(iaL * zG * tota), 16);   /* R_OTA I_abc tanh(v/2Vt), scaled */
 
 		accTp += tp;
 		accS += s;
 		x0 = n0; x1 = n1; x2 = n2; x3 = n3;
-		tpL = tp; sL = s; xinL = xin; vhpL = vhp; vcaL = vca; iaL = ia;
-		tota = tG;
+		tpL = tp; xinL = xin; vhpL = vhp; vcaL = vca; iaL = oa;
 	}
 	dl->x0 = x0; dl->x1 = x1; dl->x2 = x2; dl->x3 = x3;
 	dl->t0 = t0; dl->t1 = t1; dl->t2 = t2; dl->t3 = t3;
-	dl->tin = tin; dl->tout = tout; dl->tota = tota;
+	dl->tin = tin; dl->tota = tota;
 	dl->zo = zo;
-	dl->y0 = y0; dl->y1 = y1; dl->qu = qu; dl->qv = qv;
-	dl->tpLast = tpL; dl->sLast = sL; dl->xinLast = xinL;
+	dl->qu = qu; dl->qv = qv;
+	dl->tpLast = tpL; dl->xinLast = xinL;
 	dl->vhpLast = vhpL; dl->vcaLast = vcaL; dl->iAbcLast = iaL;
-	dl->iLad = i; dl->iAbc = ia;
-	dl_slowUpdate(dl, accTp * DL_INV_BLOCK, accS * DL_INV_BLOCK);
+	dl->iLad = iLadEnd; dl->iAbc = iAbcEnd;
+	dl_slowUpdate(dl, accTp, accS);
 }
 
-/* ------------------------------------------------------------- option A
- * Linear rungs (t = 1): the tridiagonal depends only on the ladder current,
- * so the next sample's pivot reciprocals share the secant batch. 2 VDIV per
- * sample. */
-static inline void dl_pivotsA(const float i, float *th)
+/* ------------------------------------------------------------------- A-R
+ * Linear rungs; the input pair and the OTA ([5/4]). With t = 1 the
+ * tridiagonal depends on the ladder current only, so the next sample's
+ * continuants join the secant batch: 2 VDIV per sample. The block's first
+ * pivots are computed once on entry (4 divisions per block). */
+static inline __attribute__((always_inline)) void dl_pivotsA(const float w0, const float w1,
+                                                             float th[4])
 {
-	const float w0 = DL_K0 * i, w1 = DL_K1 * i;
-
 	th[0] = 1.0f + w0;
 	th[1] = (1.0f + 2.0f * w1) * th[0] - w1 * w0;
 	th[2] = (1.0f + 2.0f * w1) * th[1] - w1 * w1 * th[0];
@@ -315,29 +556,27 @@ void DiodeLadder_renderA(DiodeLadder *dl, int16_t *buf, const float sScale,
                          const float iLadEnd, const float iAbcEnd)
 {
 	float x0 = dl->x0, x1 = dl->x1, x2 = dl->x2, x3 = dl->x3;
-	float tin = dl->tin, tout = dl->tout, tota = dl->tota;
+	float tin = dl->tin, tota = dl->tota;
 	float zo = dl->zo;
-	float y0 = dl->y0, y1 = dl->y1, qu = dl->qu, qv = dl->qv;
-	float tpL = dl->tpLast, sL = dl->sLast, xinL = dl->xinLast;
+	float qu = dl->qu, qv = dl->qv;
+	float tpL = dl->tpLast, xinL = dl->xinLast;
 	float vhpL = dl->vhpLast, vcaL = dl->vcaLast, iaL = dl->iAbcLast;
-	float i = dl->iLad, ia = dl->iAbc;
+	float i = dl->iLad, oa = DL_OA * dl->iAbc;
 	float ru = dl->rUPrev, rv = dl->rVPrev;
 	const float di = (iLadEnd - i) * DL_INV_BLOCK;
-	const float dia = (iAbcEnd - ia) * DL_INV_BLOCK;
+	const float doa = DL_OA * (iAbcEnd - dl->iAbc) * DL_INV_BLOCK;
 	const float dru = (dl->rU - ru) * DL_INV_BLOCK;
 	const float drv = (dl->rV - rv) * DL_INV_BLOCK;
-	const float alf0 = dl->alf0, alf1 = dl->alf1, bef0 = dl->bef0, bef1 = dl->bef1;
-	const float cfu0 = dl->cfu0, cfu1 = dl->cfu1, cfv0 = dl->cfv0, cfv1 = dl->cfv1;
-	const float gau0 = dl->gau0, gau1 = dl->gau1, gav0 = dl->gav0;
+	const float gau0 = dl->gau0, gav0 = dl->gav0;
 	const float ku0 = dl->ku0, ku1 = dl->ku1, dv0 = dl->dv0;
 	float accTp = 0.0f, accS = 0.0f;
 	float ip0, ip1, ip2, ip3;
 	uint8_t j;
 
-	{	/* the first sample's pivots (control rate: once per block) */
+	{	/* the first sample's pivots (once per block) */
 		float th[4];
 
-		dl_pivotsA(i + di, th);
+		dl_pivotsA(DL_K0 * (i + di), DL_K1 * (i + di), th);
 		ip0 = 1.0f / th[0];
 		ip1 = th[0] / th[1];
 		ip2 = th[1] / th[2];
@@ -345,30 +584,32 @@ void DiodeLadder_renderA(DiodeLadder *dl, int16_t *buf, const float sScale,
 	}
 	for (j = 0u; j < OUTPUT_DMA_SIZE; j++) {
 		i += di;
-		ia += dia;
+		oa += doa;
 		ru += dru;
 		rv += drv;
 		const float s = (float)buf[j] * sScale;
 		const float w0 = DL_K0 * i, w1 = DL_K1 * i;
 
+		/* right-hand side: the trapezoidal half step from the last sample */
 		const float d01 = x0 - x1, d12 = x1 - x2, d23 = x2 - x3;
 		const float r0 = x0 - w0 * (d01 + tin * xinL);
 		const float r1 = x1 + w1 * (d01 - d12);
 		const float r2 = x2 + w1 * (d12 - d23);
 		const float r3 = x3 + w1 * (d23 - x3) + DL_KL * (DL_KG * zo - vhpL);
 
+		/* forward pass with this sample's pivots (from the last batch) */
 		const float m1 = w1 * ip0, m2 = w1 * ip1, m3 = w1 * ip2;
 		const float yy1 = r1 + m1 * r0, yy2 = r2 + m2 * yy1, yy3 = r3 + m3 * yy2;
 		const float q0 = -w0 * tin, q1 = m1 * q0, q2 = m2 * q1, q3 = m3 * q2;
 		const float pr3 = yy3 * ip3, pq3 = q3 * ip3;
 
-		const float yk0 = alf0 * y0 + bef0 * tpL;
-		const float yk1 = alf1 * y1 + bef1 * tpL;
-		const float quk = DL_ASYM_AL * qu + DL_ASYM_BE * (gau0 * tpL + gau1 * sL);
-		const float base = ru + cfu0 * yk0 + cfu1 * yk1 + quk + ku1 * s;
-		const float at = DL_KA * tout, bt = DL_KB * tout * zo;
-		const float xin = (base + ku0 * (at * pr3 + bt)) / (DL_2VT - ku0 * at * pq3);
+		/* close the loop through the network (VDIV 1) */
+		const float quk = ALK_NET_AL_U * qu + ALK_NET_BE_U * gau0 * tpL;
+		const float base = ru + quk + ku1 * s;
+		const float xin = (base + ku0 * (DL_KA * pr3 + DL_KB * zo))
+		                / (DL_2VT - ku0 * DL_KA * pq3);
 
+		/* back-substitution */
 		const float n3 = pr3 + pq3 * xin;
 		const float n2 = (yy2 + q2 * xin + w1 * n3) * ip2;
 		const float n1 = (yy1 + q1 * xin + w1 * n2) * ip1;
@@ -376,55 +617,49 @@ void DiodeLadder_renderA(DiodeLadder *dl, int16_t *buf, const float sScale,
 		const float vhp = (DL_2VT * n3 - zo) * DL_KG;
 		zo += DL_TWO_G * vhp;
 
-		/* three secants + the next sample's four continuants: one VDIV */
+		/* secants (input pair with its tail, OTA) and the next sample's
+		 * pivots, one shared reciprocal (VDIV 2) */
+		const float zE = dl_clamp(xin, DL_P54_ZMAX), sE = zE * zE;
+		const float nE = DL_P54N(sE);
+		const float dE = DL_P54D(sE) * (fmaxf(fabsf(xin), DL_P54_ZMAX) * (1.0f / DL_P54_ZMAX));
+		const float zG = dl_clamp(vcaL * DL_INV_2VT, DL_P54_ZMAX), sG = zG * zG;
+		const float nG = DL_P54N(sG), dG = DL_P54D(sG);
+		const float prod = dE * dG;
 		float th[4];
-		dl_pivotsA(i + di, th);
-		const float zE = dl_clamp(xin), zF = dl_clamp(vhp * DL_INV_2VT);
-		const float zG = dl_clamp(vcaL * DL_INV_2VT);
-		const float sE = zE * zE, sF = zF * zF, sG = zG * zG;
-		const float nE = DL_PN0 + sE * (DL_PN1 + sE), dE = DL_PN0 + sE * (DL_PD1 + DL_PD2 * sE);
-		const float nF = DL_PN0 + sF * (DL_PN1 + sF), dF = DL_PN0 + sF * (DL_PD1 + DL_PD2 * sF);
-		const float nG = DL_PN0 + sG * (DL_PN1 + sG), dG = DL_PN0 + sG * (DL_PD1 + DL_PD2 * sG);
-		const float p1 = th[0] * th[1], p2 = p1 * th[2], p3 = p2 * th[3];
-		const float p4 = p3 * dE, p5 = p4 * dF;
-		float r = 1.0f / (p5 * dG);
-		const float iG = r * p5;       r *= dG;
-		const float iF = r * p4;       r *= dF;
-		const float iE = r * p3;       r *= dE;   /* r = 1/(th0 th1 th2 th3) */
-		const float i4 = r * p2;       r *= th[3];
-		const float i3 = r * p1;       r *= th[2];
-		const float i2 = r * th[0];
-		const float i1 = r * th[1];
-		ip0 = i1;
-		ip1 = th[0] * i2;
-		ip2 = th[1] * i3;
-		ip3 = th[2] * i4;
-		tin = nE * iE;
-		tout = nF * iF;
-		const float tG = nG * iG;
 
-		const float tp = -DL_A_OUT * zF * tout;
-		y0 = yk0 + bef0 * tp;
-		y1 = yk1 + bef1 * tp;
-		qu = quk + DL_ASYM_BE * (gau0 * tp + gau1 * s);
-		qv = DL_ASYM_AL * qv + DL_ASYM_BE * gav0 * (tpL + tp);
-		const float vca = rv + cfv0 * y0 + cfv1 * y1 + qv + dv0 * tp;
-		const float out = DL_R_OTA * iaL * zG * tG;
-		buf[j] = (int16_t)__SSAT((int32_t)(out * DL_OUT_SCALE), 16);
+		dl_pivotsA(DL_K0 * (i + di), DL_K1 * (i + di), th);
+		{
+			const float p1 = th[0] * th[1], p2 = p1 * th[2], p3 = p2 * th[3];
+			float r = 1.0f / (p3 * prod);
+			const float iP = r * p3;   r *= prod;      /* iP = 1/(dE dG); r = 1/p3 */
+			const float i4 = r * p2;   r *= th[3];     /* 1/th3 */
+			const float i3 = r * p1;   r *= th[2];     /* 1/th2 */
+			ip0 = r * th[1];                           /* 1/th0 */
+			ip1 = th[0] * (r * th[0]);                 /* th0/th1 */
+			ip2 = th[1] * i3;                          /* th1/th2 */
+			ip3 = th[2] * i4;                          /* th2/th3 */
+			tota = nG * iP * dE;
+			tin = nE * iP * dG;
+		}
+
+		/* linear Q21 output, network per-sample parts, OTA (one sample late) */
+		const float tp = -DL_A_OUT * vhp * DL_INV_2VT;
+		qu = quk + ALK_NET_BE_U * gau0 * tp;
+		qv = ALK_NET_AL_V * qv + ALK_NET_BE_V * gav0 * (tpL + tp);
+		const float vca = rv + qv + dv0 * tp;
+		buf[j] = (int16_t)__SSAT((int32_t)(iaL * zG * tota), 16);   /* R_OTA I_abc tanh(v/2Vt), scaled */
 
 		accTp += tp;
 		accS += s;
 		x0 = n0; x1 = n1; x2 = n2; x3 = n3;
-		tpL = tp; sL = s; xinL = xin; vhpL = vhp; vcaL = vca; iaL = ia;
-		tota = tG;
+		tpL = tp; xinL = xin; vhpL = vhp; vcaL = vca; iaL = oa;
 	}
 	dl->x0 = x0; dl->x1 = x1; dl->x2 = x2; dl->x3 = x3;
-	dl->t0 = dl->t1 = dl->t2 = dl->t3 = 1.0f;
-	dl->tin = tin; dl->tout = tout; dl->tota = tota;
+	dl->tin = tin; dl->tota = tota;
 	dl->zo = zo;
-	dl->y0 = y0; dl->y1 = y1; dl->qu = qu; dl->qv = qv;
-	dl->tpLast = tpL; dl->sLast = sL; dl->xinLast = xinL;
+	dl->qu = qu; dl->qv = qv;
+	dl->tpLast = tpL; dl->xinLast = xinL;
 	dl->vhpLast = vhpL; dl->vcaLast = vcaL; dl->iAbcLast = iaL;
-	dl->iLad = i; dl->iAbc = ia;
-	dl_slowUpdate(dl, accTp * DL_INV_BLOCK, accS * DL_INV_BLOCK);
+	dl->iLad = iLadEnd; dl->iAbc = iAbcEnd;
+	dl_slowUpdate(dl, accTp, accS);
 }

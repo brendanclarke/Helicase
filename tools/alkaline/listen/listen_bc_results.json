@@ -1,0 +1,630 @@
+{
+ "acid": {
+  "b": {
+   "level_db": 0.013,
+   "null_db": -26.3,
+   "lsd60_db": 0.387,
+   "segments": [
+    {
+     "level_db": 0.0,
+     "null_db": -296.1
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -28.2
+    },
+    {
+     "level_db": -0.0,
+     "null_db": -41.0
+    },
+    {
+     "level_db": -0.0,
+     "null_db": -50.3
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -24.2
+    },
+    {
+     "level_db": -0.01,
+     "null_db": -40.1
+    },
+    null,
+    {
+     "level_db": 0.05,
+     "null_db": -25.7
+    },
+    {
+     "level_db": -0.04,
+     "null_db": -44.4
+    }
+   ]
+  },
+  "c": {
+   "level_db": -0.011,
+   "null_db": -32.4,
+   "lsd60_db": 0.161,
+   "segments": [
+    {
+     "level_db": -0.0,
+     "null_db": -33.1
+    },
+    {
+     "level_db": -0.0,
+     "null_db": -32.6
+    },
+    {
+     "level_db": -0.01,
+     "null_db": -32.5
+    },
+    {
+     "level_db": -0.01,
+     "null_db": -33.2
+    },
+    {
+     "level_db": -0.02,
+     "null_db": -32.1
+    },
+    {
+     "level_db": -0.03,
+     "null_db": -33.8
+    },
+    null,
+    {
+     "level_db": -0.01,
+     "null_db": -32.2
+    },
+    {
+     "level_db": -0.05,
+     "null_db": -42.5
+    }
+   ]
+  },
+  "bc": {
+   "level_db": 0.003,
+   "null_db": -23.8,
+   "lsd60_db": 0.5,
+   "segments": [
+    {
+     "level_db": -0.0,
+     "null_db": -33.1
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -24.6
+    },
+    {
+     "level_db": -0.01,
+     "null_db": -30.1
+    },
+    {
+     "level_db": -0.01,
+     "null_db": -32.2
+    },
+    {
+     "level_db": -0.01,
+     "null_db": -22.2
+    },
+    {
+     "level_db": -0.04,
+     "null_db": -30.6
+    },
+    null,
+    {
+     "level_db": 0.05,
+     "null_db": -23.1
+    },
+    {
+     "level_db": -0.09,
+     "null_db": -37.5
+    }
+   ]
+  }
+ },
+ "lowres": {
+  "b": {
+   "level_db": 0.018,
+   "null_db": -30.6,
+   "lsd60_db": 0.204,
+   "segments": [
+    {
+     "level_db": 0.0,
+     "null_db": -299.2
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -36.8
+    },
+    {
+     "level_db": -0.01,
+     "null_db": -53.8
+    },
+    {
+     "level_db": -0.0,
+     "null_db": -57.7
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -28.8
+    },
+    {
+     "level_db": -0.02,
+     "null_db": -47.1
+    },
+    null,
+    {
+     "level_db": 0.05,
+     "null_db": -28.1
+    },
+    {
+     "level_db": -0.06,
+     "null_db": -41.4
+    }
+   ]
+  },
+  "c": {
+   "level_db": 0.16,
+   "null_db": -30.6,
+   "lsd60_db": 0.162,
+   "segments": [
+    {
+     "level_db": 0.16,
+     "null_db": -30.8
+    },
+    {
+     "level_db": 0.19,
+     "null_db": -30.5
+    },
+    {
+     "level_db": 0.17,
+     "null_db": -30.6
+    },
+    {
+     "level_db": 0.12,
+     "null_db": -30.8
+    },
+    {
+     "level_db": 0.13,
+     "null_db": -30.8
+    },
+    {
+     "level_db": -0.0,
+     "null_db": -30.8
+    },
+    null,
+    {
+     "level_db": 0.19,
+     "null_db": -30.5
+    },
+    {
+     "level_db": -0.13,
+     "null_db": -35.6
+    }
+   ]
+  },
+  "bc": {
+   "level_db": 0.178,
+   "null_db": -26.8,
+   "lsd60_db": 0.252,
+   "segments": [
+    {
+     "level_db": 0.16,
+     "null_db": -30.8
+    },
+    {
+     "level_db": 0.2,
+     "null_db": -28.7
+    },
+    {
+     "level_db": 0.16,
+     "null_db": -30.3
+    },
+    {
+     "level_db": 0.11,
+     "null_db": -30.6
+    },
+    {
+     "level_db": 0.14,
+     "null_db": -25.8
+    },
+    {
+     "level_db": -0.02,
+     "null_db": -29.8
+    },
+    null,
+    {
+     "level_db": 0.24,
+     "null_db": -25.2
+    },
+    {
+     "level_db": -0.19,
+     "null_db": -32.3
+    }
+   ]
+  }
+ },
+ "acid_x8": {
+  "b": {
+   "level_db": 0.015,
+   "null_db": -29.9,
+   "lsd60_db": 0.528,
+   "segments": [
+    {
+     "level_db": 0.0,
+     "null_db": -304.3
+    },
+    {
+     "level_db": -0.0,
+     "null_db": -34.3
+    },
+    {
+     "level_db": -0.0,
+     "null_db": -48.3
+    },
+    {
+     "level_db": -0.0,
+     "null_db": -55.6
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -27.6
+    },
+    {
+     "level_db": -0.01,
+     "null_db": -44.7
+    },
+    null,
+    {
+     "level_db": 0.06,
+     "null_db": -29.0
+    },
+    {
+     "level_db": -0.07,
+     "null_db": -42.0
+    }
+   ]
+  },
+  "c": {
+   "level_db": 0.014,
+   "null_db": -38.2,
+   "lsd60_db": 0.202,
+   "segments": [
+    {
+     "level_db": 0.02,
+     "null_db": -38.5
+    },
+    {
+     "level_db": 0.02,
+     "null_db": -38.4
+    },
+    {
+     "level_db": 0.02,
+     "null_db": -37.9
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -37.3
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -38.2
+    },
+    {
+     "level_db": -0.01,
+     "null_db": -37.3
+    },
+    null,
+    {
+     "level_db": 0.02,
+     "null_db": -38.4
+    },
+    {
+     "level_db": -0.08,
+     "null_db": -40.5
+    }
+   ]
+  },
+  "bc": {
+   "level_db": 0.029,
+   "null_db": -28.2,
+   "lsd60_db": 0.646,
+   "segments": [
+    {
+     "level_db": 0.02,
+     "null_db": -38.5
+    },
+    {
+     "level_db": 0.02,
+     "null_db": -30.9
+    },
+    {
+     "level_db": 0.02,
+     "null_db": -35.9
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -36.4
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -26.3
+    },
+    {
+     "level_db": -0.03,
+     "null_db": -34.4
+    },
+    null,
+    {
+     "level_db": 0.09,
+     "null_db": -27.5
+    },
+    {
+     "level_db": -0.14,
+     "null_db": -35.5
+    }
+   ]
+  }
+ },
+ "sweep": {
+  "b": {
+   "level_db": 0.008,
+   "null_db": -41.0,
+   "lsd60_db": 0.022,
+   "segments": [
+    {
+     "level_db": 0.01,
+     "null_db": -39.5
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -48.5
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -46.1
+    },
+    {
+     "level_db": 0.02,
+     "null_db": -37.9
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -39.6
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -49.4
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -48.1
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -43.5
+    },
+    {
+     "level_db": 0.02,
+     "null_db": -35.3
+    }
+   ]
+  },
+  "c": {
+   "level_db": -0.002,
+   "null_db": -31.5,
+   "lsd60_db": 0.061,
+   "segments": [
+    {
+     "level_db": -0.01,
+     "null_db": -27.6
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -33.8
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -36.3
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -37.7
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -34.3
+    },
+    {
+     "level_db": -0.01,
+     "null_db": -28.9
+    },
+    {
+     "level_db": -0.0,
+     "null_db": -34.2
+    },
+    {
+     "level_db": -0.01,
+     "null_db": -34.9
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -34.0
+    }
+   ]
+  },
+  "bc": {
+   "level_db": 0.006,
+   "null_db": -31.0,
+   "lsd60_db": 0.072,
+   "segments": [
+    {
+     "level_db": -0.0,
+     "null_db": -27.4
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -33.6
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -35.9
+    },
+    {
+     "level_db": 0.02,
+     "null_db": -34.7
+    },
+    {
+     "level_db": 0.02,
+     "null_db": -32.9
+    },
+    {
+     "level_db": -0.01,
+     "null_db": -28.9
+    },
+    {
+     "level_db": -0.0,
+     "null_db": -34.1
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -34.4
+    },
+    {
+     "level_db": 0.03,
+     "null_db": -31.9
+    }
+   ]
+  }
+ },
+ "sweep_x8": {
+  "b": {
+   "level_db": 0.007,
+   "null_db": -42.2,
+   "lsd60_db": 0.013,
+   "segments": [
+    {
+     "level_db": 0.01,
+     "null_db": -40.4
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -45.6
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -44.0
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -42.7
+    },
+    {
+     "level_db": 0.02,
+     "null_db": -36.5
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -48.3
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -45.0
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -46.4
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -39.8
+    }
+   ]
+  },
+  "c": {
+   "level_db": -0.002,
+   "null_db": -36.7,
+   "lsd60_db": 0.055,
+   "segments": [
+    {
+     "level_db": -0.02,
+     "null_db": -34.9
+    },
+    {
+     "level_db": -0.0,
+     "null_db": -36.4
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -38.0
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -40.0
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -37.9
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -34.5
+    },
+    {
+     "level_db": -0.0,
+     "null_db": -37.7
+    },
+    {
+     "level_db": -0.01,
+     "null_db": -36.9
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -37.0
+    }
+   ]
+  },
+  "bc": {
+   "level_db": 0.005,
+   "null_db": -35.7,
+   "lsd60_db": 0.061,
+   "segments": [
+    {
+     "level_db": -0.01,
+     "null_db": -34.0
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -35.9
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -37.1
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -37.9
+    },
+    {
+     "level_db": 0.03,
+     "null_db": -34.2
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -34.3
+    },
+    {
+     "level_db": 0.0,
+     "null_db": -37.0
+    },
+    {
+     "level_db": -0.0,
+     "null_db": -36.5
+    },
+    {
+     "level_db": 0.01,
+     "null_db": -35.4
+    }
+   ]
+  }
+ }
+}

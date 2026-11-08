@@ -90,7 +90,7 @@ Rows not listed here are continuous 0–127 (identity).
 
 | Key | Values |
 |---|---|
-| `osc1_wave` | 0–7 `Sin Tri Saw Rec Noi Cym Re3 Sw3`; 8+ = installed user samples (clamps to the last) |
+| `osc1_wave` | 0–5 `Sin Tri Saw Rec Noi Cym`; 6+ = installed user samples (clamps to the last; S093 P3 removed `Re3`/`Sw3`) |
 | `osc2_wave` | as `osc1_wave` |
 | `osc3_wave` | as `osc1_wave` |
 | `osc2_mod_type` | 0 `fm`, 1 `mix`, 2 `snc`, 3–127 `rng` (Drum only) |

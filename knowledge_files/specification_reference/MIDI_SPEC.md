@@ -407,9 +407,9 @@ unchanged (identity, as in step automation).
   enumerated lists, target tokens), the same rule step automation applies.
 - Drum `osc2_mod_type` (`mod`): 0 `fm`, 1 `mix`, 2 `snc`, 3–127 `rng`
   (S085 P1; before S085, 1–127 gave `mix`).
-- `oscN_wave` (`wav`): 0–7 the built-in waves (`Sin Tri Saw Rec Noi Cym Re3
-  Sw3`), 8 on the installed user samples (since S086; before, samples
-  started at 6); values above the last sample clamp to it.
+- `oscN_wave` (`wav`): 0–5 the built-in waves (`Sin Tri Saw Rec Noi Cym`),
+  6 on the installed user samples (S093 P3 removed `Re3`/`Sw3`, which were
+  6–7 from S086); values above the last sample clamp to it.
 - `osc1_position` (`pos`, S086): 0–127, identity. It was appended as the
   last descriptor of each instrument (local index 39; Snare 38), so its NRPN
   number is slot × 64 + that index; every earlier NRPN number and MIDI Learn

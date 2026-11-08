@@ -1,5 +1,11 @@
 # S093 P2 — Alkaline B2R: Pre-Implementation Brief
 
+> **Status (S093 P3):** the prep work of this brief (P2-pre, P2-0, P2-1,
+> P2-1A) is done and measured in `S093_P3_PREP_WORK_WAVES_KERNEL_CONTROL.md`
+> (with its deviations, §6). The firmware integration (P2-2 here) is now
+> `S093_P4_FIRMWARE_IMPLEMENTATION.md`. The frozen Drum ceiling is ≈ 261 per
+> sample, not "≈ 275+"; B2R measures ≈ 267 (P3 §5).
+
 - **Session:** 093, phase 2. This document is written for a **fresh session**
   that will write the code. It holds every detail needed, with
   back-references.

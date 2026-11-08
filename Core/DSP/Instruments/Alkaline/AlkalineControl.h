@@ -1,22 +1,35 @@
 /*
- * AlkalineControl.h - TB-303 control path at control rate (S093 P0).
+ * AlkalineControl.h - TB-303 control path at control rate (S093 P0; the
+ * Tier 1/Tier 2 reductions since S093 P3).
  *
  * What:       the per-block state equations of S092_P6_DSP_EQUATIONS.md §4:
  *             the expo converter (knobs -> ladder current), the MEG (C62 and
  *             N53), the accent network (VR7 wiper shared by the C13 sweep and
- *             the C36 VCA accent branch), the VEG (C42) and the TPT prewarp.
- *             Ports of alk_model.py expo_current(), Meg, AccentNet, Veg and
- *             prewarp() with the same constants and iteration counts.
- * Why:        the validated model (S092 P6 V3, V5) is the reference; the C
- *             keeps its structure so tools/alkaline/check_c.py can compare
- *             block by block.
+ *             the C36 VCA accent branch), the VEG (C42) and the TPT prewarp,
+ *             in the reduced form of S093_P2 §3A (S093 P3):
+ *               - fast log2/exp2 (alk_log2f/alk_exp2f below) in place of libm;
+ *               - expo: one fixed-point pass from the last block's ladder
+ *                 current (the pass contracts by about 0.01);
+ *               - MEG: one Newton step on the diode stack from the last
+ *                 block's stack current;
+ *               - accent network: the 5 x 5 nodal solve written out as a
+ *                 2 x 2 in (W7, W), one solve per block with the diode states
+ *                 of the last block, re-decided from this block's solution
+ *                 for the next (one block of lag, 0.73 ms);
+ *               - prewarp: tan(x)/x by a [4/4] rational.
+ *             tools/alkaline/alk_model.py holds the same reductions
+ *             (FastControl) so validate.py V3/V5 test them against SPICE.
+ * Why:        S093_P2 §3A: the S093 P0 control path cost about 3,010
+ *             instructions per block (libm, four MEG passes, four 5 x 5
+ *             solves), about 94 per sample over the voice.
  * Inputs:     knob values 0..1 (descriptor bytes / 127), the accent and gate
- *             lanes, the previous block's expo node.
+ *             lanes, the previous block's expo node and ladder current.
  * Outputs:    the ladder current, the OTA control current, the VR4b wiper.
  * Accessors:  AlkalineVoice.c (Alkaline_calcVoiceAsync, Alkaline_triggerVoice).
- * Cost:       control rate only, the same work every block: no step depends
- *             on a knob value except the MEG strike (a 1.3 ms state, like a
- *             trigger) and the VEG attack window.
+ * Cost:       control rate only. The MEG strike and the VEG attack are short
+ *             state windows (like a trigger); every other step does the same
+ *             work for every knob value. tools/alkaline/control_cost.py
+ *             counts the longest path.
  */
 #ifndef ALKALINECONTROL_H_
 #define ALKALINECONTROL_H_
@@ -28,11 +41,13 @@
 typedef struct {
 	float v;              /* C62, V */
 	float strikeLeft;     /* s of strike pulse left */
+	float i;              /* diode-stack current of the last block, A */
 } AlkMeg;
 
 typedef struct {
 	float v13;            /* C13, V */
 	float v36;            /* C36, V */
+	uint8_t d24, d27;     /* diode states for this block's solve */
 } AlkAccentNet;
 
 typedef struct {
@@ -41,8 +56,57 @@ typedef struct {
 	float attLeft;        /* s of discharge left */
 } AlkVeg;
 
+/*
+ * Fast log2 / exp2 (S093 P3, S093_P2 §3A.1).
+ *
+ * What:       alk_log2f(x), x > 0 normal: the exponent from the bits, the
+ *             mantissa folded to [sqrt(1/2), sqrt(2)), log2(1 + t) = t q(t)
+ *             with q of degree 5 (absolute error 8.2e-6 = 0.01 cent).
+ *             alk_exp2f(x): x clamped to [-126, 127], the integer part into
+ *             the exponent bits, 2^f by a degree-5 polynomial on [0, 1)
+ *             (relative error 3e-7). Least-squares fits, float32
+ *             coefficients; tools/dsp_test modules/alkaline.c AL-F checks
+ *             both over their ranges.
+ * Why:        the project has no fast log/exp (S093_P2 §3A.1); libm logf/expf
+ *             were most of the S093 P0 control cost.
+ */
+static inline float alk_log2f(const float x)
+{
+	union { float f; uint32_t u; } v = { x };
+	int32_t e = (int32_t)(v.u >> 23) - 127;
+	float m, t;
+
+	v.u = (v.u & 0x007FFFFFu) | 0x3F800000u;      /* m in [1, 2) */
+	m = v.f;
+	if (m > 1.41421356f) {                        /* a select, not a branch */
+		m *= 0.5f;
+		e += 1;
+	}
+	t = m - 1.0f;
+	return (float)e + t * (1.44269919f + t * (-0.721236646f + t * (0.480073959f
+	       + t * (-0.365929425f + t * (0.314705104f + t * -0.204383031f)))));
+}
+
+static inline float alk_exp2f(float x)
+{
+	union { float f; uint32_t u; } v;
+	float xi, f;
+
+	x = (x < -126.0f) ? -126.0f : ((x > 127.0f) ? 127.0f : x);
+	xi = __builtin_floorf(x);
+	f = x - xi;
+	v.u = (uint32_t)((int32_t)xi + 127) << 23;
+	return v.f * (0.999999762f + f * (0.693156779f + f * (0.240131676f
+	       + f * (0.055876568f + f * (0.00894057751f + f * 0.00189437857f)))));
+}
+
+#define ALK_LN2       0.693147181f
+#define ALK_LOG2E     1.44269504f
+static inline float alk_lnf(const float x) { return ALK_LN2 * alk_log2f(x); }
+static inline float alk_expf(const float x) { return alk_exp2f(ALK_LOG2E * x); }
+
 float alk_taper(float r);
-float alk_expoCurrent(float cut, float env, float n53, float vW4, float *dv);
+float alk_expoCurrent(float cut, float env, float n53, float vW4, float iPrev, float *dv);
 
 void  alkMeg_init(AlkMeg *m);
 void  alkMeg_trigger(AlkMeg *m);

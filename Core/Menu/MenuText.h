@@ -142,10 +142,11 @@ static const char extSyncNames[][4] = {
 static const char trackPlayModeNames[][4] = {
     {6}, {"fwd"},{"rev"},{"pip"},{"rnd"},{"onc"},{"1fr"},
 };
-/* S086 P2: Re3/Sw3 = SQ3/SW3 (Oscillator.h); the count must equal
-** OSC_SAMPLE_START (asserted in menu.c). User samples follow as sNN. */
+/* The built-in waves SINE..CRASH (Oscillator.h); the count must equal
+** OSC_SAMPLE_START (asserted in menu.c). User samples follow as sNN.
+** S093 P3: the S086 Re3/Sw3 entries were removed with their tables. */
 static const char waveformNames[][4] = {
-    {8}, {"Sin"},{"Tri"},{"Saw"},{"Rec"},{"Noi"},{"Cym"},{"Re3"},{"Sw3"},
+    {6}, {"Sin"},{"Tri"},{"Saw"},{"Rec"},{"Noi"},{"Cym"},
 };
 /*
  * osc1_type names (S087 stage B).
