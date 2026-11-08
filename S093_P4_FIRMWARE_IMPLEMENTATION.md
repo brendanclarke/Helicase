@@ -2045,3 +2045,203 @@ code). Each entry names the phase gate and the evidence.
   symbol internalisation/addressing. 1,832 B of ITCM remains; phase 2 should
   record this against G8's "unchanged" wording (it is LTO layout, not new
   ITCM code).
+
+---
+
+## 9. Assessment of the phase 1 implementation (commit `570f7926`)
+
+**Method.** An independent check of commit `570f7926` against this schedule
+and against `db98c287` (the P3 code), without relying on the §8 log:
+- the source diffs, read site by site;
+- the new files compared byte for byte with the schedule's code blocks;
+- a clean firmware build into a separate directory;
+- every host gate rerun;
+- the linked image measured with `elf_looppath.py`, `elf_blockpath.py`, the
+  `control_cost.py` walk and a `-g` twin (`build/s093p4/dbg_now`);
+- the original `elf_loopdump.py` (from `db98c287`) run beside the modified
+  one.
+
+Nothing in the tree was changed. Scratch work lives outside the repository;
+the `-g` twin and a clean build are under `build/s093p4/` (`dbg_now/`,
+`assess/`).
+
+### 9.1 Verdict
+
+Phase 1 is implemented as scheduled, and every gate that can run without the
+device passes. The Alkaline voice measures **252.1 per sample on the linked
+image** (214 + 1,218 / 32, 3 + 9 VDIV) against the Drum ceiling of 261.3.
+This is the first linked whole-voice figure.
+
+Three items need recording or a decision; none blocks phase 2:
+- **A1:** ITCM +40 B, and the per-block entry paths of three wavetable-blend
+  functions grew by 1–3 instructions. Recommendation: accept.
+- **A2:** an unscheduled change to `elf_loopdump.py`. Justified; keep it.
+- **A4:** `control_cost.py --elf` as scheduled in P5 §3.1 would exit on the
+  linked image; one `ITERS` entry fixes it.
+
+Two corrections to my own schedule follow, in A3 and A7.
+
+### 9.2 Conformance
+
+| Area | Result |
+|---|---|
+| `AlkalineParameters.h/.c`, `make_init_alk.py`, `modules/seq_steplen.c`, `SD_CARD/Instrument/Alkaline/init.alk` | **Byte-identical** to the §4.1, §4.2, §4.6 and §3.4 blocks |
+| `InstrumentManager.h/.c` (enum, includes, designated registry + count assert, union + assert, accessor, 11 dispatch cases, quiet test, trigger) | As §5, line for line |
+| `AlkalineVoice.h/.c` (prototype + contract, includes, trigger, init bytes) | As §3.1 / §4.5; the legato line is verbatim (the break sed applies) |
+| `sequencer.h/.c`, `storageTypes.h/.c`, `MenuText.h`, `menu.c` (tag helper, assert, Load label), `Makefile` | As §3.2, §6.2–§6.3, §4.3, §4.7, §6.1 |
+| `DiodeLadder.h`, `gen_alk_tables.py`, regenerated tables | As §2.1, plus documentation-only corrections of indices that the state count made stale (§8) |
+| `control_cost.py`, `check_special_tags.py`, bench `Makefile`, `modules/alkaline.c` (15 calls + AL-P) | As §2.2–§2.3, §3.3–§3.4, §4.4 |
+| `tools/dsp_test/elf_loopdump.py` | **Not in the schedule**: A2 |
+| Entry points in the image | `Alkaline_calcVoiceAsync` and `Alkaline_isQuiet` are reached by tail call (`b.w`) from `instrumentManager_calcSlotAsync` / `_ampEnvelopeQuiet`; `Alkaline_calcVoiceSyncBlock.constprop.0` is called from `mixer_calcNextSampleBlock` (an IPA-CP clone: `noinline` keeps it out of the mixer but does not prevent cloning); `Alkaline_triggerVoice` from the render path's trigger drain; `Alkaline_initVoice` from boot and the Scene reset |
+
+### 9.3 Gates, rerun
+
+| Gate | Measured here | Pass |
+|---|---|---|
+| G1 build | Clean build into `build/s093p4/assess`: image byte-identical to `build/lxr02.elf`; text 703,832 B, data 420 B, bss 413,280 B; flash headroom **49,412 B**; **0 warnings** from the changed sources (the 10 warnings in the log are all in untouched files) | Yes |
+| R1 | `menu_instrumentLoadIndex` 8 → 10 B. `.bss` section 279,644 B on both images; `.dtcmz` 3,884 → 3,880 B (A1) | Yes |
+| G2 host laws | `special_tags` 197 rows / 0; `alkaline` 10 groups / 0, legato break caught; `alkaline_tables`; `oscillator` (all groups 0, FR1/FR2 breaks caught); `sequencer` (break caught); `seq_steplen` OK, break caught; `stock_tables`; `gen_alk_tables.py --check` matches | Yes |
+| C0 (§2.1) | B2R against golden, LSD60: acid 0.239 / 0.877 / 0.931, lowres 0.271 / 1.156 / 2.244. Against P3 §9.3 every point is within ±0.01 | Yes (A3) |
+| G3 audio loop | Linked fused loop **214**, 3 VDIV, inside `Alkaline_calcVoiceSyncBlock.constprop.0` (standalone 213) | Yes (±3) |
+| G4 per block (linked) | **1,218** = async 872 + sync block 332 + dispatch 14, **9 VDIV**. The stub count is 1,285 (async 915 + 356 + 14) | Yes (A4) |
+| G5 whole voice | 214 + 1,218 / 32 = **252.1** against 261.3: margin ≈ 9 | Yes, statically. The device decides (K1) |
+| G6 mixer | `elf_p4_check`: 30 hot loops equal, 0 grew. The 21 other fragments are not compared (§9.5) | Yes |
+| G7 oscillators | Modified tool: 93 / 93 exact. The original tool: 15 MISSING, all explained (A2). Per-sample loops measured directly on both images are identical (A1 table). `osc_setFreq` per block 128 on both | Yes |
+| G8 ITCM | 14,512 → **14,552 B** (+40); 1,832 B free | **No, literally**; A1 |
+
+### 9.4 Findings
+
+**A1. ITCM +40 B; small per-block changes in the wavetable-blend functions.**
+- **What moved.** Only the five ITCM blend functions changed size:
+  `osc_wtbBlendBlock` +12, `osc_wtbFmBlendBlock` +10,
+  `osc_wtbFmBlendRampBlock` −6, `osc_wtbRingBlendBlock` +18,
+  `osc_wtbSyncBlendBlock` +12. Four of them are now `*.lto_priv.0`.
+- **Measured on both images:**
+
+  | Function | Per-sample loops (base → now) | Per block (base → now) |
+  |---|---|---|
+  | `osc_wtbBlendBlock` | 38, 34 → 38, 34 | 110 → 110 |
+  | `osc_wtbFmBlendBlock` | 46, 42 → 46, 42 | 120 → **121** |
+  | `osc_wtbFmBlendRampBlock` | 47, 43 → 47, 43 | 122 → 119 |
+  | `osc_wtbRingBlendBlock` | 47, 43 → 47, 43 | 134 → **137** |
+  | `osc_wtbSyncBlendBlock` | 48, 44 → 48, 44 | 109 → **111** |
+  | `osc_wtbPlainBlock` | 26, 24 → 26, 24 | 42 → 42 |
+  | `osc_setFreq` | — | 128 → 128 |
+
+- **Cause, confirmed in the disassembly.** The functions read four
+  interpolation globals: `modNode_waveInterpGeneration`,
+  `modNode_interpLastStamp`, `modNode_interpReserved` and
+  `modNode_waveInterpActiveCount`.
+  - In the base image they sat next to `wavetable_count` in SRAM1 and were
+    read through one literal-pool base pointer plus offsets.
+  - In the new image LTO placed them in the DTCM zero section
+    (`0x20001100–0x20001106`). Each now has its own literal load (three
+    `ldr rX, [pc]` in place of one), and `.dtcmz` changes by 4 B.
+
+  This is a data-layout consequence of the new LTO partition (AlkalineVoice.c
+  now references `modulationNode`), not new logic. The per-sample loops are
+  unchanged.
+- **Cost.** At most +3 instructions per block (+0.09 per sample) on a slot
+  that plays a wavetable blend. The loads now go to zero-wait DTCM rather
+  than SRAM1, so cycles may not grow at all. The blend is outside the
+  frozen Drum figure (pool-limited system-wide, P3 §1).
+- **Recommendation:** accept as LTO layout. Record G8 as "14,552 B, +40 B
+  of entry code in five existing functions, no new ITCM code". Because it
+  touches another engine's per-block path, it is listed here for the user's
+  sign-off. If it is not accepted, the remedy is to keep those globals
+  together (one struct in `modulationNode.c`) so a single base pointer
+  serves them, whatever partition LTO chooses.
+
+**A2. `elf_loopdump.py` change (unscheduled): justified; keep it.**
+- **What changed:**
+  - `SUFFIX` also strips `.lto_priv.N`, as `elf_looppath.py` already did;
+  - a branch target outside the loop body is written `+EXIT`.
+- **The original tool on the same two images:** 85 baseline loops, 70
+  exact, 15 MISSING, 74 loops now. Its 15 MISSING come from two effects:
+  - the four blend functions renamed `*.lto_priv.0` were not dumped at all,
+    because the old suffix pattern failed to match them (85 → 74 loops);
+  - exit offsets moved (`osc_setFreq`'s `b.w +14158`).
+- **With the change:** both images give 93 loops in 48 symbols, all exact,
+  and the direct measurements in A1 agree.
+- **What it gives up:** a change that only moves a loop exit is no longer
+  reported. That is layout, not loop cost.
+- **Baseline:** re-dumped with the new extractor from the same `base.elf`,
+  which is legitimate because both sides are normalised identically.
+- **Follow-up:** P5 should record the semantics change in the tool list
+  (`elf_loopdump.py` docstring done; P5 §3.4 G7 text).
+
+**A3. Schedule correction (mine): the C0 expectation in §2.1 named the
+wrong reference.**
+- §2.1 said C0 against the S093 P1 variants would be "about −45 dB and
+  LSD60 ≈ 0.01 dB".
+- In fact C0's "variant" is the frozen S093 P1 kernel. Before r6 the C build
+  already differed from it by LSD60 0.10–0.22 dB, from T2-2 and T2-3
+  (`db98c287` results: 0.118 / 0.168 / 0.207 / 0.101 / 0.137 / 0.216).
+- r6 moves those by at most 0.011 dB (now 0.112 / 0.160 / 0.197 / 0.102 /
+  0.140 / 0.221). The ≈ 0.01 figure is r6 against the 8-state C build
+  (P3 §9.3).
+- The gate (distance to golden) is right and passes; only the sentence was
+  wrong.
+
+**A4. G4 on the linked image: P5 §3.1 needs one more `ITERS` entry.**
+- LTO unrolled every fixed-count control loop (accent 4, MEG 4, expo 3, the
+  3-row network chunk) and inlined every callee, `DiodeLadder_renderB2Osc`
+  included.
+- So the linked `Alkaline_calcVoiceAsync` has no loops and no calls, and
+  `Alkaline_calcVoiceSyncBlock` has one loop: the 214-instruction audio
+  loop.
+- `control_cost.py --elf` as written in P5 §3.1 would exit on it ("no
+  iteration count for loop 1 of Alkaline_calcVoiceSyncBlock (length 214)").
+- **The fix:**
+  - add `("Alkaline_calcVoiceSyncBlock", 1): 0` to `ITERS`, the audio loop
+    weighted 0 like the other render loops;
+  - the `--iters` machinery stays for a future layout;
+  - correct the P5 §3.1 "why" text: the current image inlines everything,
+    so the standalone and linked counts differ by LTO, not by missing loops.
+- With that entry, the walk gives 872 (9 VDIV) + 332 + 14 = 1,218.
+
+**A5. Fused loop 214 against 213.**
+- +1 on the linked image.
+- Inside G3's ±3 tolerance, and already included in G5's 252.1.
+
+**A6. The Drum ceiling on the P4 image (P5 §3.3) is not yet re-measured
+end to end.**
+- §8 re-measured it on `base.elf` only.
+- On the new image:
+  - the parts outside the mixer are identical: `Drum_calcVoiceAsync` 63,
+    `slopeEg2_calc` 28, dispatch 14, `SVF_calcBlockZDF` per block 161,
+    `osc_setFreq` 128;
+  - the mixer's hot loops are 30 / 30 equal.
+- Still uncompared: the mixer's 21 non-hot fragments, which hold the
+  inlined Drum render entries (`Drum_calcVoiceSyncBlock` 163,
+  `voicePost_drum`'s entry).
+- P5 §3.3 does that with `elf_loopsrc.py`, which is not in the tree yet,
+  using the `-g` twin built for this assessment
+  (`build/s093p4/dbg_now/lxr02.elf`, identical text/data/bss).
+- G5's margin (≈ 9) is far larger than any plausible change there.
+
+**A7. Schedule ordering (mine).**
+- §4.4's `registry_check()` reads designated registry rows, which only
+  arrive with §5.3 (P4-3). So `special_tags` is red between P4-2 and P4-3,
+  as §8 notes.
+- "Do P4-1 to P4-4 in one sitting" covers it. For a later type, the
+  add-a-type checklist (P5 §5) should list the designated registry row
+  before the tag gate.
+
+**Note.**
+- The commit includes build outputs: `tools/dsp_test/build/*` (binaries and
+  generated host files), `build/s093p4/*` and `build/s093p3/cost/stubs.c`.
+- The `tools/dsp_test/build` files were already tracked; the `build/s093p4`
+  baselines are new.
+- They hold no source; record for awareness only.
+
+### 9.5 Carried to phase 2
+
+| Item | Where |
+|---|---|
+| `elf_loopsrc.py` (not in the tree) | P5 §3.2 |
+| `control_cost.py --elf` with the A4 `ITERS` entry | P5 §3.1 |
+| The Drum ceiling on the P4 image, the mixer's non-hot fragments by source | P5 §3.3, A6 |
+| G8 wording and the A1 decision | P5 §3.4, user |
+| `elf_loopdump.py` semantics in the gate text | P5 §3.4 G7, A2 |
+| Device trial (CPU worst case, listening, make-up, storage round trips, Load labels) | P5 §4 |
