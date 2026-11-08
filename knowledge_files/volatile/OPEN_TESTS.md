@@ -7,6 +7,27 @@ be performed when the opportunity arises, not blocking items for current work.
 
 ## Hardware soak / confirmation
 
+- **S093 P4 Alkaline (TB-303) device trial (HIGH PRIORITY):**
+  - A1: card from `SD_CARD/` (with `Instrument/Alkaline/init.alk`); boot
+    completes; `/Instrument/Alkaline/.hcindex` written
+  - A2: Instrument Load lists Alkaline after HiHat; `init` loads with the
+    init values on every page; Morph rows read `AlkalMrp` / `CymbaMrp`
+  - A3: S092 P4 pattern against `tools/alkaline/alk_c_acid_B2R.wav` and
+    `alk_c_lowres_B2R.wav`; `res` sweep; drive x1/x4/x8 at low resonance
+    first; saw and square
+  - A4: `ALK_MAKEUP_OCT` by ear against a Drum at the same `vol`
+  - A5: CPU worst case: Alkaline in the four Basic slots at Res full, drive
+    x8, accents and slides; `cpu` widget <= the Drum baseline; 0 underruns
+    over 5 min. **Write down the widget figures**
+  - A6: `.alk` save under a new name and reload; Kit/Scene/Bank; AutoSave
+    after power cycle; `kit` snapshot restore
+  - A7: Morph/LFO/automation on every row (LFO on `coa` moves the pitch);
+    velocity 101 accents, 100 does not; NRPN 0-25; `rtg` restarts per trigger
+  - A8: gate follows step scale and BPM changes; slide into a rest closes;
+    external clock
+  - A9 (W7): Kit with `sNN` modulators re-selected; Drum `wav` lists six waves
+  - Confirm, not fix: tracks 6/7 share slot 5; note-off does not end the gate;
+    roll hits get full gates
 - **S090 P5 Load/Save speed and watchdog T1–T9 (HIGH PRIORITY):**
   - T1: Load page type cycling (Kit→Scene→Bank→Pattern) — names appear
     faster than before; trace `w` lines give each index-read duration

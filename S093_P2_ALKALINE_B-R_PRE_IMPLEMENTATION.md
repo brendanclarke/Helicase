@@ -55,7 +55,7 @@
 | `S092_P6_DSP_EQUATIONS.md` | The model: §3 audio path, §4 control path, §5.2 prewarp, §5.3 the real-time network (SplitNet), §5.4 the kernel pseudo-code |
 | `S093_P0_ALKALINE_C_FUNCTIONS_CODE.md` | The existing C (§1–§4), the bench (§5), cost method (§6), integration plan (§7.1–§7.3), **the Re3/Sw3 removal plan (§10)** |
 | `S093_P1_ALKALINE_OVERHEAD_REDUCTIONS.md` | The reductions, network form N1 (§5), the two drive fixes (§2.1), the variant table (§4); **B-R = `B_n1rq_ota32`** |
-| `knowledge_files/specification_reference/dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md` | §3 runtime slots and dispatch, §4 descriptors and writers, §9.4 "Add an instrument type", §10 pitfalls |
+| `knowledge_files/specification_reference/dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md` | §3 runtime slots and dispatch, §4 descriptors and writers, §9.2 "Add an instrument type", §10 pitfalls |
 | `tools/dsp_test/DSP_TEST.md` | Bench conventions (extract by name, break builds, `fpseq.py`) |
 
 ---

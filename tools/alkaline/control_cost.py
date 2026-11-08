@@ -21,7 +21,14 @@ Why:        MEMORY.md (cost comparisons include per-block work, S093): the
             Basic gate is the whole voice, and the per-block part was counted
             by hand before S093 P3.
 Inputs:     the sources above; --kernel renderB2 (default), renderB,
-            renderA; --keep (leave the build in build/s093p3/cost).
+            renderA; --tables/--define (an experiment's build); --rows
+            (DL_NET_ROWS); --elf PATH (S093 P4: count a linked firmware image
+            instead of the stub link: the oscillator, LFO and platform calls
+            are then real and costed by their own paths, and the standalone
+            oscillator object is not used); --iters FUNC:RANK=N (an
+            iteration count for a loop that inlining moved, repeatable);
+            --dispatch N (instrumentManager_calcSlotAsync's own path to the
+            Alkaline case, default 14).
 Outputs:    a report on stdout; exit 0.
 Accessors:  python3 tools/alkaline/control_cost.py
 Affiliates: tools/dsp_test/elf_looppath.py and elf_blockpath.py (rows,
@@ -56,6 +63,9 @@ ITERS = {
     ("DiodeLadder_renderB2Osc", 1): 0,       # S093 P3: the fused oscillator read
     ("DiodeLadder_renderB", 1): 0,
     ("DiodeLadder_renderA", 1): 0,
+    # S093 P4 (G4): on the linked image LTO inlines the fused B2R read into
+    # the sync block, so its only loop is the audio loop; weight 0 (A4)
+    ("Alkaline_calcVoiceSyncBlock", 1): 0,
 }
 # functions whose loops sit on alternate branches (one runs per block): the
 # loop part is the largest loop's, not their sum (S093 P3 T2-2)
@@ -191,9 +201,21 @@ def total(elf, sym, memo, ext, trace, depth=0):
     for rank, (length, head, members) in enumerate(loops, 1):
         it = ITERS.get((base, rank))
         if it is None:
+            # S093 P4: on a linked image this is usually a helper's loop that
+            # LTO inlined (alkAcc_step 4, alkMeg_step 4, alk_expoCurrent 3,
+            # the network rows --rows): find it with elf_loopsrc.py on the -g
+            # twin and pass --iters FUNC:RANK=N
             sys.exit(f"control_cost.py: no iteration count for loop {rank} of {base} "
-                     f"(length {length}); add it to ITERS")
+                     f"(length {length}); add it to ITERS or pass --iters {base}:{rank}=N")
         lv = sum(1 for i in members if r[i][1].startswith("vdiv"))
+        # S093 P5 §9 B2: the weight-0 entry for the sync block assumes its
+        # longest loop is the fused B2R audio loop (3 VDIV, ~214). If a later
+        # layout stops inlining DiodeLadder_renderB2Osc, rank 1 would be a
+        # control loop and weight 0 would undercount G4 silently.
+        if base == "Alkaline_calcVoiceSyncBlock" and it == 0 and (lv != 3 or length < 200):
+            sys.exit(f"control_cost.py: loop {rank} of {base} (length {length}, {lv} VDIV) "
+                     f"is not the fused B2R audio loop; give it an iteration count "
+                     f"(--iters {base}:{rank}=N)")
         if any(r[i][1] == "bl" for i in members):
             sys.exit(f"control_cost.py: a call inside loop {rank} of {base}")
         parts.append((it * length, it * lv))
@@ -214,21 +236,44 @@ def main():
     ap.add_argument("--rows", type=int, default=3,
                     help="network rows solved per block (DL_NET_ROWS = ALK_NET_STATES / "
                          "phases: r6 at 64 samples = 6 / 2 = 3)")
+    # S093 P4 (G4): count a linked firmware image instead of the stub link
+    ap.add_argument("--elf", default=None, help="a linked image (build/lxr02.elf)")
+    # S093 P4: loops that LTO inlined into another function keep their
+    # iteration count but change owner and rank; name them here
+    ap.add_argument("--iters", action="append", default=[],
+                    help="FUNC:RANK=N, an iteration count for loop RANK of FUNC")
+    ap.add_argument("--dispatch", type=int, default=DISPATCH,
+                    help="instrumentManager_calcSlotAsync's own path to the Alkaline case")
     a = ap.parse_args()
     ITERS[("dl_slowUpdate", 1)] = a.rows      # the latch branch's chunk
     ITERS[("dl_slowUpdate", 2)] = a.rows      # the following branch's chunk (either/or)
-    elf, obj = build(a.tables, ["-D" + d for d in a.define])
-    # the oscillator calls, from the standalone object
+    # FUNC:RANK=N -> ITERS[(FUNC, RANK)] = N; a malformed item is an error,
+    # not a silent 0 (an uncounted loop would undercount the gate)
+    for item in a.iters:
+        m = re.fullmatch(r"([A-Za-z_]\w*):(\d+)=(\d+)", item)
+        if not m:
+            sys.exit(f"control_cost.py: --iters {item!r}: expected FUNC:RANK=N")
+        ITERS[(m.group(1), int(m.group(2)))] = int(m.group(3))
     ext = {}
-    dis = E.disassembly(obj)
-    for f in ("osc_setBaseNote", "osc_setFreq", "osc_setTableFreq"):
-        if re.search(r"<%s>:" % f, dis):
-            # straight paths; osc_setFreq's longest path is its user-sample
-            # bind branch (calls counted 1), a bound above Alkaline's WAV use
-            ext[f] = (B.block_path(obj, f)[0], 0)
-    osc_entry = B.block_path(obj, "calcWavetableOscBlock")[0]
-    ext["calcWavetableOscBlock"] = (osc_entry, 0)
-    ext["memset"] = (0, 0)
+    if a.elf:
+        # the linked image: every callee is real and counted by its own path;
+        # only memset keeps weight 0 (it is not on the Alkaline block path in
+        # the fused form; any call to it that does appear is listed in the
+        # trace and must be explained)
+        elf = a.elf
+        ext["memset"] = (0, 0)
+    else:
+        elf, obj = build(a.tables, ["-D" + d for d in a.define])
+        # the oscillator calls, from the standalone object
+        dis = E.disassembly(obj)
+        for f in ("osc_setBaseNote", "osc_setFreq", "osc_setTableFreq"):
+            if re.search(r"<%s>:" % f, dis):
+                # straight paths; osc_setFreq's longest path is its user-sample
+                # bind branch (calls counted 1), a bound above Alkaline's WAV use
+                ext[f] = (B.block_path(obj, f)[0], 0)
+        osc_entry = B.block_path(obj, "calcWavetableOscBlock")[0]
+        ext["calcWavetableOscBlock"] = (osc_entry, 0)
+        ext["memset"] = (0, 0)
     memo, trace = {}, []
     asy = total(elf, "Alkaline_calcVoiceAsync", memo, ext, trace)
     syn = total(elf, "Alkaline_calcVoiceSyncBlock", memo, ext, trace)
@@ -241,9 +286,10 @@ def main():
         print(f"  {'  ' * min(d, 3)}{name:34s} {ins:6d} insn {vd:3d} vdiv  ({nl} loops)")
     for f, (ins, vd) in ext.items():
         print(f"  [osc] {f:30s} {ins:6d} insn {vd:3d} vdiv")
-    per_block = asy[0] + syn[0] + DISPATCH
+    # whole per-block work: both entry points plus the dispatcher's own path
+    per_block = asy[0] + syn[0] + a.dispatch
     vdiv = asy[1] + syn[1]
-    print(f"per block: async {asy[0]} + sync block {syn[0]} + dispatch {DISPATCH} = "
+    print(f"per block: async {asy[0]} + sync block {syn[0]} + dispatch {a.dispatch} = "
           f"{per_block} instructions, {vdiv} VDIV")
     print(f"per sample (/32): {per_block / 32:.1f} instructions, {vdiv / 32:.2f} VDIV")
 

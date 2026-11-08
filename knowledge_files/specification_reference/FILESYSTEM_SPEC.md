@@ -271,6 +271,9 @@ Implemented through Session 064:
   slot type still matches. A successful compatible copy immediately marks only
   those Morphable destination endpoint bytes for AutoSave; it does not alter
   HCNAMES identity/source or the slot's Normal image.
+  The Morph row label is the type label's first **five** characters followed
+  by `Mrp`, so an eight-cell type name still shows the marker: `DrumMrp `,
+  `HiHatMrp`, `CymbaMrp`, `AlkalMrp` (S093 P4).
 - Normal `Save:[Kit     ]` writes the active Scene kit to the directory Kit
   format: a numbered `Kit/` folder, `kitset.kcg`, and six descriptor-keyed
   instrument files containing `[params]` and `[morph]`.
@@ -1744,7 +1747,7 @@ Required top-level fields:
 Required per-slot fields:
 
 - `[slot1]` through `[slot6]`
-- `type=drm|snr|cym|hat`
+- `type=drm|snr|cym|hat|alk`
 - `file=<8.3 instrument filename>`
 
 Validation rules:
@@ -1807,7 +1810,7 @@ Required top-level fields:
 
 - `format=helicase.instrument`
 - `version=1`
-- `type=drm|snr|cym|hat`
+- `type=drm|snr|cym|hat|alk`
 
 Section rules:
 
@@ -1855,6 +1858,33 @@ payloads for loading normal source endpoints into morph endpoints.
 payloads; their Morph Save projection writes the current interpolated value
 into both normal and morph endpoint fields.
 
+**Alkaline (S093 P4).** Token `alk`, extension `.alk`, folder
+`/Instrument/Alkaline/` (eight characters). The card image carries
+`SD_CARD/Instrument/Alkaline/init.alk`, the first instrument of the type
+(F1: Instrument Load lists files, so a type with no file could never be
+selected). It uses the writer's exact form: `format`, `version=1`,
+`type=alk`, `[params]` with all 26 keys in table order and `[morph]` with
+the 20 MORPHABLE rows (all but `alk_wave`, `velo_mod_dest` and the four LFO
+targets); the LFO voices are `self`, the target selectors `255`
+(`INSTRUMENT_TARGET_TOKEN_OFF`), LF endings and the final blank line.
+`tools/alkaline/make_init_alk.py --check` (run by
+`make -C tools/dsp_test special_tags`) byte-compares it with the table.
+
+**The type registry is the schema authority.** `storage_instrumentTypeToText()`
+reads the registry row's token, and the `.hcnames` header walks the type
+values until it returns NULL. Registry rows are designated by type, one per
+`instrument_type_t` value, in enum order, with 3-character lowercase tokens
+(`check_special_tags.py registry_check()` enforces order and width). New
+types are **appended** (before `INSTRUMENT_TYPE_UNKNOWN`). The header validator
+accepts a header whose tokens are a leading part of the current list
+(`#types drm snr cym hat` under five types), so a card's `/.hcnames` and
+AutoSave survive a type addition; the next register write emits the full
+header. A reordered, removed or unknown token, or more tokens than the
+registry, is rejected. A rejected header regenerates `/.hcnames` from the
+AutoSave winner with every row flagged `R`, which discards the record's
+payload for every Scene (AUTOSAVE.md Case 2/3): before S093 P4's fix, adding
+Alkaline did exactly that on the first boot.
+
 ## Canonical Instrument Keys
 
 The physical SD-card key vocabulary lives in each instrument descriptor table:
@@ -1863,13 +1893,15 @@ The physical SD-card key vocabulary lives in each instrument descriptor table:
 - `Core/DSP/Instruments/Snare/SnareParameters.c`
 - `Core/DSP/Instruments/Cymbal/CymbalParameters.c`
 - `Core/DSP/Instruments/HiHat/HiHatParameters.c`
+- `Core/DSP/Instruments/Alkaline/AlkalineParameters.c`
 
 Current descriptor counts:
 
-- Drum: 40 descriptors.
-- Snare: 39 descriptors.
-- Cymbal: 40 descriptors.
-- HiHat: 40 descriptors.
+- Drum: 43 descriptors.
+- Snare: 42 descriptors.
+- Cymbal: 43 descriptors.
+- HiHat: 43 descriptors.
+- Alkaline: 26 descriptors (S093 P4).
 
 Descriptor key lookup is type-local. The same key may exist in multiple
 instrument types but resolves against the loaded slot type.
@@ -1943,6 +1975,16 @@ Current keys by family:
   `lfo_target_param_2`.
 - Velocity: `velo_vol_on_off`, `velo_mod_amount`, `velo_mod_dest`.
 - Transient: `transient_wave`, `transient_vol`, `transient_freq`.
+- Alkaline (S093 P4; 26 rows, no filter object, amp envelope, distortion,
+  transient or `pos`): `alk_wave`, `osc1_pitch_coarse`, `alk_tuning`,
+  `alk_slide`, `alk_cutoff`, `alk_reso`, `alk_envmod`, `alk_decay`,
+  `alk_accent`, `alk_drive`, `instrument_vol`, `instrument_pan`, the eight
+  LFO rows, `velo_mod_amount`, `velo_mod_dest` and the four LFO targets.
+  `alk_wave`: 0 `Saw` (stock `sawTable`), 1 `Sqr` (the D8 per-octave Q8
+  table); `DTYPE_ON_OFF` with high-nibble tag `ONOFF_TAG_ALK_WAVE` (3), a
+  SELECTOR, so automation steps between the two and Morph never blends
+  them. `alk_tuning` is 0..127 with 63 centre (±700 cents); `alk_slide` is
+  a latched on/off; the five 303 knobs and `alk_drive` (x1..x8) are 0..127.
 
 ## Descriptor Ownership
 

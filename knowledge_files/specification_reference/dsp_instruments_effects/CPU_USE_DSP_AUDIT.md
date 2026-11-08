@@ -1131,6 +1131,36 @@ the new copy/clear work is foreground-only and bounded.
     - Flash 712,684 B (headroom 40,980 B). RAM unchanged from P5.
     - Host CB1–CB23, twenty-five breaks.
 
+### Session 093 P4 (Alkaline instrument; record in `S093_P5_FIRMWARE_IMPLEMENTATION_PHASE_2.md`)
+
+71. **ADDED (S093 P4): Alkaline (TB-303) voice, Basic, within the Drum
+    ceiling.** A fifth tagged engine (`AlkalineVoice` 540 B), its descriptor
+    table (26 rows), the B2R diode ladder and the N1 network (r6: 6 states on
+    one balanced basis, 64 samples).
+    - Linked per-sample loop (G3): fused oscillator + B2R, **214** (3 VDIV)
+      inside `Alkaline_calcVoiceSyncBlock.constprop.0`; standalone 213
+      (`DiodeLadder_renderB2Osc`, inlined by LTO).
+    - Linked per block (G4): `Alkaline_calcVoiceAsync` 872 (9 VDIV) +
+      sync-block entry/exit 332 + dispatch 14 = **1,218 (9 VDIV)**. The stub
+      link gives 1,285 (915 + 356 + 14).
+    - Whole voice (G5): 214 + 1,218/32 = **252.1 per sample, 3 + 9/32
+      VDIV**, against the Drum ceiling **261.3** (frozen in S093 P3 and
+      re-measured on the P4 image): margin ≈ 9.
+    - Text 703,832 B, data 420 B, bss 413,280 B; flash headroom 49,412 B;
+      ITCM 14,552 B (+40 B of entry code in five existing `.itcm.s087`
+      blend functions; no new ITCM code; accepted as LTO layout, A1);
+      `menu_instrumentLoadIndex` +2 B (R1).
+    - Mixer G6: 30 hot loops equal, 0 grew (`elf_p4_check`). By cyclic cost
+      (`elf_loopsrc.py --compare`, each loop's longest in-range cycle paired
+      by source line): 41 -> 42 cyclic loops, every group equal; the one
+      extra loop is a second 10-instruction `mixer_decimateBlock` copy (the
+      per-slot SRR stays 10); no loop grew. Oscillators G7: 93/93 exact
+      loops; `osc_setFreq` per block 128.
+    - **Device `cpu` result: pending** (OPEN_TESTS A5: Alkaline in the four
+      Basic slots at Res full, drive x8, accents and slides, against a Drum
+      baseline Scene; 0 underruns over 5 min). If the device confirms a
+      failure, the fallback is Advanced (K1, the user's decision).
+
 ---
 
 ## Binding Mandates — DSP CPU Policy

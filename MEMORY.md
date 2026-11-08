@@ -209,6 +209,22 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   removal): Drum dearest ≈ 222.5 loops + 922 per block / 32 + SRR 10 ≈ 261
   per sample, 3 VDIV (`S093_P3_PREP_WORK_WAVES_KERNEL_CONTROL.md` §1); the
   per-block count tool is `tools/alkaline/control_cost.py`. `S093_P2_ALKALINE_B-R_PRE_IMPLEMENTATION.md` §8.
+- **Alkaline (S093 P4, binding):** the voice is `AlkalineVoice` (540 B) in the
+  fifth tagged slot; Basic. Its oscillator is a **table wave**: `sawTable`,
+  or `alkSqrTable[octave]` for `alk_wave` 1, set with
+  `osc_setTableFreq()` — **never** `osc_setFreq()` (the async recomputes the
+  pitch from `midiFreq` and the note each block; the coarse writer only sets
+  `osc.freq`). `OSC_SAMPLE_START` stays **6**: the Alkaline tables are not
+  user-sample catalogue entries, and `typ`/`run` are not offered. The
+  oscillator read is fused into the B2R loop (`DiodeLadder_renderB2Osc`,
+  bit-identical, AL-X; `ALK_FUSED_OSC 1`). `ALK_NET_STATES` is **6** on one
+  balanced basis common to every Res point (r6) at 64 samples; any model
+  change regenerates the tables (`tools/alkaline/gen_alk_tables.py`) and
+  re-checks P3 §9.3. A switchable sample/wavetable Alkaline oscillator is a
+  **class decision** (P3 §9.5), not a parameter. The type registry is the
+  storage schema: designated rows in enum order, 3-character tokens, one
+  `TABLES` entry per type; the add-a-type checklist is
+  `INSTRUMENTS_DSP_REFERENCE.md` §9.2.
 - **CrumpBit 170-cap (S091 P5, binding):**
   `EFFECTS_MODULES_DSP_REFERENCE.md` §6.2.
 - **Mixer byte size is NOT a cost measure (S089 P0 F3).** LTO re-spends freed

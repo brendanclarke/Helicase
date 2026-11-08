@@ -78,10 +78,13 @@ typedef enum {
      * Stored data: no stored value changes meaning. Types are stored as text
      *             tokens (AutoSave, .hcnames, instrument files, midilrn.cfg);
      *             the numeric value lives only in RAM. The .hcnames header
-     *             lists the tokens in enum order, so a card's /.hcnames is
-     *             rebuilt once on the first boot with five types
-     *             (filesystem_validateHcnamesHeader(), filesystem.c l. 6591:
-     *             that is its purpose).
+     *             lists the tokens in enum order; a header written before a
+     *             type was appended is a leading part of the current list
+     *             and is accepted (filesystem_validateHcnamesHeader()), so
+     *             the register and AutoSave survive the addition. A
+     *             rejected header would regenerate /.hcnames with every row
+     *             flagged R and discard the AutoSave payload (S093 P4 field
+     *             report). New types are appended only.
      */
     INSTRUMENT_TYPE_ALK,
     INSTRUMENT_TYPE_UNKNOWN

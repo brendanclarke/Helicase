@@ -105,6 +105,7 @@ it belongs in the summary or the log, not here.
 | 088 | 2026-10-29 | `dev-ph7-voice_expansion`, uncommitted on `80029d31` | Oscillator run modes `rst`/`fre`/`itp` (P0); fader zipper fix with block-rate one-pole smoothing (P1); float-through distortion for retrigger HF puff (P1) |
 | 089 | 2026-10-30 | `dev-ph7-voice_expansion`, uncommitted on `d944c87f` | Per-instrument SRR enable (P0); voice chain architecture + WFd wavefolder chain with 8 fold types (P1/P2); Drum FM depth ramp efficiency −9 instr/sample on 3 dearest carriers (P3); CPU at ceiling (binding) |
 | 090 | 2026-10-31/11-01 | `dev-ph7-voice_expansion`, uncommitted on `7f8b5d07` | Load/Save speed-up: RAM instrument snapshot replaces `.hctmp` (P1); mirror-served `.hcnames` reads, index reuse, type-step cancel (P1); AutoSave settle stage 13 + Load/Save drops AutoSave (P2); defect corrections — Save names, input lock, Scene Save freeze from FAT directory bloat, boot-time directory tail trim (P3); batch ticking 15 µs/500 µs, runtime watchdog 12 s every build, trace `w` owner (P5) |
+| 093 | 2026-11-08 | `dev-ph7-instrument_types`, on `0d2aed78` (P4) | Alkaline (TB-303) instrument: B2R diode ladder + N1/r6 network, 26-row descriptor table, fifth tagged engine, `init.alk` card file, registry-driven five-type storage, host/tooling gates and docs; device trial open (OPEN_TESTS A1–A9) |
 
 ---
 

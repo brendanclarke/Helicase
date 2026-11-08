@@ -6576,17 +6576,30 @@ static uint8_t filesystem_parseResidentSourceToken(const char *token,
 /*
  * Validate the .hcnames instrument-type header against the firmware registry.
  *
- * What: the first line of .hcnames must be a #types header listing the
- * instrument file extensions in enum order. Why: if the firmware's
- * instrument_type_t enum has changed since the file was written (a type
- * added, removed, or reordered), every Instrument row's type field is
- * potentially wrong; regenerating the file from SceneData is the only
- * safe recovery. Inputs: the first line of the physical file and the
- * instrument registry (via storage_instrumentTypeToText). Outputs:
- * success (proceed to data rows) or failure (invalidate and regenerate).
+ * What: the first line of .hcnames must be a #types header listing
+ * instrument type tokens in enum order. The header is accepted when its
+ * tokens equal the registry's first N tokens, N >= 1: the full current list,
+ * or a leading part of it (a file written before later types were
+ * appended). A reordered, renamed or removed token, an unknown token, or more
+ * tokens than the registry has is rejected.
+ * Why: Instrument rows store their type as a text token, so a type appended
+ * to the registry (S093: alk after drm snr cym hat) changes the meaning of no
+ * existing row. Rejecting the shorter header sent every boot after a type
+ * addition into filesystem_regenerateHcnamesFromWinner_tick(), which flags
+ * every row R (unproven), and the AutoSave reader then discards the record's
+ * payload for every Scene (Case 2 library reload or Case 3 empty): the S093
+ * P4 field report "all of my autosave was invalidated on boot". Registry rows
+ * are designated by type and new types go before UNKNOWN
+ * (InstrumentManager.c static assert, check_special_tags.py
+ * registry_check()), so a leading part of the list keeps its positions. The
+ * next register write emits the full header.
+ * Inputs: the first line of the physical file and the instrument registry
+ * (via storage_instrumentTypeToText). Outputs: success (proceed to data
+ * rows; each row's own type token is still validated) or failure
+ * (invalidate and regenerate).
  * Affiliates: storage_instrumentTypeToText(), the bootstrap writer
  * (emits the header), filesystem_cacheResidentRecord() (reads data
- * rows after the header).
+ * rows after the header); the seven .hcnames readers that call this.
  */
 static uint8_t filesystem_validateHcnamesHeader(const char *line)
 {
@@ -6606,10 +6619,11 @@ static uint8_t filesystem_validateHcnamesHeader(const char *line)
     /*
      * Walk the instrument_type_t enum in order, comparing every registered
      * token against the corresponding tab field.  The enum walk ends when
-     * storage_instrumentTypeToText() returns NULL, so a header that lists
-     * fewer types than the current enum mismatches on the first missing
-     * token, while a header listing more tokens fails the trailing check
-     * below instead of being silently truncated.
+     * storage_instrumentTypeToText() returns NULL; a header that ends
+     * earlier (fewer types: written before later types were appended) stops
+     * the walk at its line end and is accepted below, while a header listing
+     * more tokens fails the trailing check instead of being silently
+     * truncated.
      */
     for (;;) {
         const char *token = storage_instrumentTypeToText(
@@ -6632,14 +6646,15 @@ static uint8_t filesystem_validateHcnamesHeader(const char *line)
     if (type_index == 0u)
         return 0u;
     /*
-     * Reject trailing tokens beyond the registry as well as a short header:
-     * both mean the vocabulary count differs, which is exactly the mismatch
-     * the header exists to detect.
+     * Reject trailing tokens beyond the registry: a token the firmware does
+     * not know means the file came from a vocabulary this build cannot read.
+     * A header that ended before the registry did (type_index tokens, all
+     * matching) is a leading part of the current list and is accepted
+     * (S093 P4: appended types must not invalidate the register).
      */
     if (*p != '\n' && *p != '\r' && *p != '\0')
         return 0u;
-    return (storage_instrumentTypeToText(
-        (storage_instrument_type_t)type_index) == NULL) ? 1u : 0u;
+    return 1u;
 }
 
 static uint8_t filesystem_cacheResidentRecord(uint16_t row, const char *line)
