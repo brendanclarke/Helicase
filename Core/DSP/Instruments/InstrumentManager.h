@@ -379,6 +379,12 @@ uint8_t instrumentManager_advancedCountForScene(uint8_t scene_index,
                                                 uint8_t ignore_slot);
 uint8_t instrumentManager_typeSelectableForSceneSlot(
     uint8_t scene_index, uint8_t destination_slot, instrument_type_t candidate);
+/* S093 P7 F1: 0 when a typed Alkaline osc1_type would exceed the Scene's two
+ * Advanced places (checked before the stored image changes); see the .c. */
+uint8_t instrumentManager_selectorValueAdmitted(uint8_t scene_index,
+                                                uint8_t slot,
+                                                uint8_t descriptor_index,
+                                                uint8_t value);
 uint8_t instrumentManager_filenameMatchesType(const char *filename,
                                                instrument_type_t type);
 /*

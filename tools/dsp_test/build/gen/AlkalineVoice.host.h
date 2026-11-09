@@ -53,13 +53,13 @@
 #ifndef ALK_FUSED_OSC
 #define ALK_FUSED_OSC         1
 #endif
-/* Waveform selector values (row alk_wave). */
+/* Waveform selector values under typ wav (S093 P7; was AlkalineVoice.wave). */
 #define ALK_WAVE_SAW          0u
 #define ALK_WAVE_SQUARE       1u
 
 typedef struct AlkalineVoiceStruct
 {
-	OscInfo      osc;          /* VCO: waveform SAW for the octave index */
+	OscInfo      osc;          /* VCO: typ (oscType), wav (waveform: Saw/Sqr under wav, the item under smp/slp/wtb), pos */
 	DiodeLadder  ladder;
 	AlkMeg       meg;
 	AlkAccentNet accNet;
@@ -77,7 +77,6 @@ typedef struct AlkalineVoiceStruct
 	float   attack;            /* 0..1 (S093 P6, alk_attack): VEG attack as the CPU trigger width, 0 = 0.70 ms (today), 1 = 0.55 ms */
 	float   vol;               /* 0..1, read by the mixer only */
 	uint8_t pan;
-	uint8_t wave;              /* ALK_WAVE_* */
 	uint8_t slide;             /* 0/1, latched at each trigger */
 
 	/* --- sequencing state --- */

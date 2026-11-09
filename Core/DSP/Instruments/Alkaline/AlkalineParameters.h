@@ -16,10 +16,10 @@
 
 #include "InstrumentManager.h"
 
-/* 28 rows: 10 Alkaline rows, vol/pan, 8 LFO rows, 2 velocity rows, 4 LFO
- * target rows, then (S093 P6, appended) alk_attack and osc1_position
- * (asserted against alkaline_param_index_t in the .c) */
-#define ALKALINE_PARAM_DESCRIPTOR_COUNT 28u
+/* 29 rows: 10 Alkaline rows, vol/pan, 8 LFO rows, 2 velocity rows, 4 LFO
+ * target rows, then (S093 P6, appended) alk_attack and osc1_position, then
+ * (S093 P7) osc1_type (asserted against alkaline_param_index_t in the .c) */
+#define ALKALINE_PARAM_DESCRIPTOR_COUNT 29u
 /* eight sub-pages: the front-panel SELECT1..8 buttons (menu.c ≈ l. 4608) */
 #define ALKALINE_MENU_PAGE_COUNT        8u
 /* Basic (S093 D2‴): may take any slot without counting towards the
@@ -32,5 +32,15 @@ extern const instrument_menu_page_t alkaline_menu_pages[];
 extern const uint8_t alkaline_menu_page_count;
 extern const char alkaline_instrument_display_label[];
 extern const uint8_t alkaline_instrument_type_flags;
+/*
+ * S093 P7: descriptor index of osc1_type in a stored Instrument image.
+ *
+ * What:       the local row index (28) used by the Advanced-place admission
+ *             rule, which reads a Scene slot's stored `typ` byte.
+ * Why:        the enum is private to AlkalineParameters.c; this accessor
+ *             keeps one definition of the index for InstrumentManager.c.
+ * Accessors:  instrumentManager_advancedCountForScene().
+ */
+uint8_t alkaline_osc1TypeParameterIndex(void);
 
 #endif /* ALKALINE_PARAMETERS_H_ */

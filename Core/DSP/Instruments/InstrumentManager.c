@@ -430,11 +430,35 @@ uint8_t instrumentManager_advancedCountForScene(uint8_t scene_index,
     if (!scene)
         return 0u;
     for (slot = 0u; slot < INSTRUMENT_SLOT_COUNT; slot++) {
+        const kit_instrument_slot_t *inst;
+
         if (slot == ignore_slot)
             continue;
-        if (instrumentManager_typeFlags(scene->kit.instruments[slot].type) &
+        inst = &scene->kit.instruments[slot];
+        if (instrumentManager_typeFlags(inst->type) &
             INSTRUMENT_FLAG_ADVANCED) {
             count++;
+        } else if (inst->type == INSTRUMENT_TYPE_ALK) {
+            /*
+             * S093 P7 (P7-D1 Option A): a typed Alkaline takes an Advanced
+             * place.
+             *
+             * What:       counts the slot when its stored osc1_type is not
+             *             wav (0), so the two-Advanced rule and the typ
+             *             writer's admission see the same budget.
+             * Why:        the typed modes are over the Basic CPU ceiling
+             *             (S093_P7... §0); wav, today's 303, stays Basic.
+             * Inputs:     the Scene's stored Instrument image (the main
+             *             image; osc1_type is a SELECTOR).
+             * Outputs:    +1 per typed Alkaline slot.
+             * Affiliates: alkaline_osc1TypeParameterIndex(); the osc1_type
+             *             writer's admission check.
+             */
+            uint8_t typ = inst->parameter_images.instrument_parameters[
+                alkaline_osc1TypeParameterIndex()];
+
+            if (typ != (uint8_t)OSC_TYPE_WAV)
+                count++;
         }
     }
     return count;
@@ -465,6 +489,42 @@ uint8_t instrumentManager_typeSelectableForSceneSlot(
     advanced_count =
         instrumentManager_advancedCountForScene(scene_index, destination_slot);
     return (uint8_t)(advanced_count < 2u);
+}
+
+/*
+ * Whether a selector value may be stored for a Scene slot (S093 P7 F1).
+ *
+ * What:       0 only for an Alkaline slot's osc1_type set to a typed value
+ *             (smp / slp / wtb) while the Scene's other slots already hold two
+ *             Advanced places (a typed Alkaline counts,
+ *             instrumentManager_advancedCountForScene()); 1 for every other
+ *             row, type and value (wav is always allowed).
+ * Why:        P7-D1 Option A: a typed Alkaline takes an Advanced place. The
+ *             check must run before the stored image changes: the count reads
+ *             the image, so a refused value left in it would hold a phantom
+ *             Advanced place (S093_P7 §14 F1) and the typ cell would show a
+ *             type the voice does not play.
+ * Inputs:     scene_index, slot, descriptor_index (of the slot's stored type),
+ *             value.
+ * Outputs:    admission flag.
+ * Accessors:  preset_setSupplementalParameterInternal() (before the store);
+ *             the IM_SPECIAL_OSC_TYPE runtime writer (the guard for paths
+ *             whose image comes from a file).
+ * Affiliates: alkaline_osc1TypeParameterIndex().
+ */
+uint8_t instrumentManager_selectorValueAdmitted(uint8_t scene_index,
+                                                uint8_t slot,
+                                                uint8_t descriptor_index,
+                                                uint8_t value)
+{
+    const kit_instrument_slot_t *instrument =
+        scene_instrumentSlotConst(scene_index, slot);
+
+    if (!instrument || instrument->type != INSTRUMENT_TYPE_ALK ||
+        descriptor_index != alkaline_osc1TypeParameterIndex() ||
+        value == (uint8_t)OSC_TYPE_WAV)
+        return 1u;
+    return (uint8_t)(instrumentManager_advancedCountForScene(scene_index, slot) < 2u);
 }
 
 uint8_t instrumentManager_filenameMatchesType(const char *filename,
@@ -826,7 +886,9 @@ static uint8_t instrumentManager_descriptorSupportsModulationRange(
  * What:       osc1_wave: the last entry of osc1's current type (wav:
  *             OSC_STOCK_LAST; smp/slp: samples - 1; wtb: tables - 1; 0 when
  *             none); a modulator wave row: the last entry of the flat list
- *             (osc_userListCount() - 1). Any other row: OSC_STOCK_LAST.
+ *             (osc_userListCount() - 1); an Alkaline slot under wav:
+ *             ALK_WAVE_SQUARE (Saw, Sqr; S093 P7). Any other row:
+ *             OSC_STOCK_LAST.
  * Why:        LFO and velocity ranges, the menu clamp and the automation
  *             display must agree on what exists (S087 P0 r8, §12.4).
  * Inputs:     slot (INSTRUMENT_SLOT_COUNT = unknown), descriptor.
@@ -846,6 +908,12 @@ static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
             const uint8_t count = osc ? osc_userCount(osc->oscType)
                                       : (uint8_t)OSC_SAMPLE_START;
 
+            /* S093 P7: an Alkaline slot under wav has two entries (Saw, Sqr):
+             * the LFO/velocity range, the menu clamp, the edit count and the
+             * typ-switch clamp (menu.c l. 5360) all take it from here */
+            if (osc && osc->oscType == OSC_TYPE_WAV &&
+                instrumentManager_slotType(slot) == INSTRUMENT_TYPE_ALK)
+                return (uint8_t)ALK_WAVE_SQUARE;
             return count ? (uint8_t)(count - 1u) : 0u;
         }
         {
@@ -3896,7 +3964,46 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         OscInfo *osc = instrumentManager_oscBySelector(
             slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
         if (!osc) return 0u;
+        /*
+         * S093 P7 (P7-D1 Option A): a typed Alkaline needs an Advanced place.
+         *
+         * What:       wav -> smp/slp/wtb (or typed -> typed) is admitted only
+         *             while the Active Scene has fewer than two other Advanced
+         *             places (a typed Alkaline counts, above). A refused write
+         *             is consumed (1) with the runtime type left unchanged; it
+         *             must not fall through to the generic offset store.
+         * Why:        the typed modes are over the Basic CPU ceiling; this is
+         *             the plan's §7.5 grant/refuse pattern pointed at the
+         *             two-Advanced budget. wav -> wav is always allowed.
+         *             A menu edit is refused earlier, before the stored image
+         *             changes (preset_setSupplementalParameterInternal(), §14
+         *             F1); this check is the guard for writes whose image came
+         *             from a file (Load, Copy, Scene apply: A-1/A-2 open).
+         * Inputs:     slot, byteValue. Outputs: 1 (consumed either way).
+         * Affiliates: instrumentManager_selectorValueAdmitted() (the rule);
+         *             instrumentManager_typeSelectableForSceneSlot().
+         */
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_ALK &&
+            !instrumentManager_selectorValueAdmitted(
+                scene_getActiveIndex(), slot,
+                alkaline_osc1TypeParameterIndex(), byteValue))
+            return 1u;
         osc_setType(osc, byteValue);
+        /*
+         * S093 P7: an Alkaline slot's wav list is Saw, Sqr.
+         *
+         * What:       after osc_setType() (which clamps wav to the stock list,
+         *             OSC_STOCK_LAST), an Alkaline oscillator under wav is
+         *             clamped to ALK_WAVE_SQUARE: an item index past 1 becomes
+         *             Sqr, the last entry, as Drum's clamp takes the last.
+         * Why:        typ wav after smp with item 5 would otherwise keep 5,
+         *             which names nothing and plays Saw.
+         * Affiliates: instrumentManager_waveDomainMax() (the same rule for the
+         *             range); menu.c l. 5323-5360 (clamps the stored images).
+         */
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_ALK &&
+            osc->oscType == OSC_TYPE_WAV && osc->waveform > ALK_WAVE_SQUARE)
+            osc->waveform = ALK_WAVE_SQUARE;
         instrumentManager_waveDomainChanged(slot);
         return 1u; }
     case IM_SPECIAL_OSC_RUN: {

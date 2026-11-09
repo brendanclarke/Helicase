@@ -212,7 +212,7 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
 - **Alkaline (S093 P4/P6, binding):** the voice is `AlkalineVoice` (548 B
   after P6) in the fifth tagged slot; Basic. Its oscillator is a **table
   wave**: `sawTable`,
-  or `alkSqrTable[octave]` for `alk_wave` 1, set with
+  or `alkSqrTable[octave]` for `osc1_wave` 1 (typ wav), set with
   `osc_setTableFreq()` — **never** `osc_setFreq()` (the async recomputes the
   pitch from `midiFreq` and the note each block; the coarse writer only sets
   `osc.freq`). `OSC_SAMPLE_START` stays **6**: the Alkaline tables are not
@@ -234,6 +234,20 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   goes through `alk_model.decay_knob_303()`. `pos` 0 on Saw/Sqr is
   free-running, 1..127 is the note-start phase. Stored `dec` / `res` / `drv`
   bytes keep their keys and change meaning, with no migration.
+- **Alkaline typed modes (S093 P7, binding):** `osc1_type` 0 `wav` (Saw/Sqr,
+  Basic, ≈ 253.6: loop 215, +1 accepted from linking the typed code) / 1
+  `smp` / 2 `slp` / 3 `wtb`. The typed modes are over the Basic ceiling
+  (loop alone 217–264; linked per block 1,900 here, so the dearest is about
+  323 per sample) and take an **Advanced** place:
+  `instrumentManager_selectorValueAdmitted()` refuses a typed value when the
+  Scene already has two other Advanced places (a typed Alkaline counts). A
+  menu edit is refused **before** the stored image changes (the count reads
+  the image); the runtime writer is the guard for file-sourced images. `wav`
+  frees the place.
+  The fused readers are `DiodeLadder_renderB2Smp/Slp/Wtb/WtbBlend`
+  (`DlSrc`), bit-identical to `osc_renderTyped(gain 1)` + plain B2R (AL-X2).
+  Stored-image Load/Copy policy (force `typ` to wav) is the open A-1/A-2
+  decision.
 - **CrumpBit 170-cap (S091 P5, binding):**
   `EFFECTS_MODULES_DSP_REFERENCE.md` §6.2.
 - **Mixer byte size is NOT a cost measure (S089 P0 F3).** LTO re-spends freed

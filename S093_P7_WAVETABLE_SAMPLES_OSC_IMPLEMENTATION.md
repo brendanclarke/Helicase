@@ -1396,3 +1396,251 @@ file changed):**
 | Per block | `control_cost.py --elf` on the link, §9.1 weights | typed 1,769; `wav` only 1,232 (P6 expects 1,230) |
 | Flash | `arm-none-eabi-nm -S` | sync block 2,996 → 9,228 B; Smp 1,370 B; async +354 B |
 | Bit-identity | AL-X2, host | 0 differing samples and phases in all seven modes; all groups pass |
+
+---
+
+## 13. Implementation log (2026-11-09)
+
+**Status: implemented; P7-D1 Option A core admission is in, A-1/A-2 (Load/
+Copy of a stored typed `typ`) remain the user's policy decision.**
+
+### 13.1 Files and order
+
+1. `AlkalineParameters.c/.h`: row 0 `osc1_wave` (ROW_MENU / MENU_WAVEFORM /
+   MOD_WAVE), `osc1_type` (28, ROW_SELECT_SPECIAL), `MOD_WAVE` added,
+   `ROW_SELECT_ONOFF` removed, page 0 gains `typ`; count 29.
+2. `MenuText.h`/`menu.c`: ONOFF tag removed; `osc1_wave` under wav names
+   Saw/Sqr from `alkWaveNames`; assert comment updated.
+3. `InstrumentManager.c`: `waveDomainMax()` returns ALK_WAVE_SQUARE for an
+   Alkaline under wav; the `IM_SPECIAL_OSC_TYPE` writer clamps an Alkaline
+   wav to Sqr and carries the Option A admission check; the Advanced count
+   counts typed Alkalines.
+4. `AlkalineVoice.h/.c`: `wave` removed; `osc.oscType = wav` and
+   `osc.waveform = Saw` in init; typed trigger/async; `alk_renderTyped()`
+   and the four fused-path calls.
+5. `DiodeLadder.h/.c`: `DlSrc`; `dl_wtbRead()`; `dl_renderB2Body()` source
+   enum; the four wrappers.
+6. `Oscillator.h/.c`: `osc_wtbPlan_t` moved to the header; five `osc_*For()`
+   accessors.
+7. `control_cost.py`: six sync-loop weights, four user-variant weights,
+   `osc_wtbPlanBlock` 2 segments, stubs for the typed path, and the guard
+   extended to the user variants.
+8. Bench: `modNode_interpClaim` switchable, `v.wave` -> `v.osc.waveform`,
+   AL-X2; 15 groups.
+9. `make_init_alk.py` regenerated `init.alk` (29 keys, 23 morph rows).
+
+### 13.2 Measured in the tree
+
+| Item | Measured |
+|---|---|
+| AL-X2 | 0 differing samples / phases in all 7 modes; RMS 729, 938, 1958, 2411, 2059, 2208, 0 LSB |
+| Sync audio loops | 264, 255, 238, 235, 229, 215 (wav is 214 by `elf_looppath` on the same symbol) |
+| `DiodeLadder_renderB2Smp` | 217 (3 VDIV), separate |
+| Per block (`control_cost.py --elf`) | async 1,248 + sync 638 + dispatch 14 = 1,900, 11 VDIV |
+| Whole typed voice | dearest 264 + 1,900/32 = **323.4** (Advanced); `wav` 252.5 Basic |
+| Flash | headroom 38,788 B; ITCM 14,552 B |
+| Host | 15 groups, 0 failures; legato break caught |
+| `special_tags` | 200 rows, 0 mismatches; `init.alk` 29 rows |
+
+### 13.3 Gate deviation: two mixer hot loops grew
+
+`elf_p4_check` is **not** 0-grew on this build:
+
+- `calcSampleOscFmBlock` (HiHat, `Oscillator.c:525`) 36 -> 37;
+- one `mixer_decimateBlock`/mixer.c loop 10 -> 11.
+
+Source pairing with `elf_loopsrc.py --compare` on exact P6
+(`9c2a3de2`) and current `-g` twins attributes both to LTO layout, not to a
+P7 loop. The isolation runs (scratch copy): P6 voice + P7 `Oscillator.c`
+wrappers + P7 `DiodeLadder.c` gives 0 grew; restoring the P7
+`AlkalineVoice.c` gives the two +1s. Neither `noinline` on the accessors,
+`noinline` on `alk_renderTyped`, `noclone` on the sync block, nor moving the
+wrappers changed it. The oscillator loop set is 93/93 exact. This is
+recorded for the user's acceptance decision; it is the only gate not met as
+written.
+
+### 13.4 Admission and open policy
+
+Implemented (Option A core):
+- `instrumentManager_advancedCountForScene()` counts an Alkaline slot whose
+  stored `osc1_type` is not wav (via
+  `alkaline_osc1TypeParameterIndex()`), so it shares the two-Advanced budget.
+- The `osc1_type` writer admits a typed value only with fewer than two other
+  Advanced places in the Active Scene; otherwise it consumes the write and
+  leaves the runtime type unchanged (returning 1, never falling through to
+  the generic offset store). `wav` is always allowed.
+
+Open (the schedule's A-1/A-2): what Load and Copy do with a stored typed
+`typ` when no Advanced place is free. The runtime writer already refuses it
+(the voice stays wav); the stored image may still carry the typed value, so
+the menu can show a type the runtime did not accept. A-3 (automation) is
+refused the same way as a menu edit.
+
+---
+
+## 14. Assessment of the implementation (2026-11-09)
+
+**Verdict:**
+- **The sound path is right.** The code is the schedule's: the fused loops
+  are identical to the scratch sources I verified, and AL-X2 is bit-exact in
+  all seven modes on the tree.
+- **The Option A admission has a defect (F1)** that locks out other
+  instruments.
+- **The `wav` path is not untouched (F2):** its loop grew 214 → 215, the §13
+  log says 214, and two other engines' loops grew by 1.
+- Nothing in the tree was changed by this assessment.
+
+I re-ran every gate myself on the working tree and read every diff.
+
+### 14.1 Code review against the schedule
+
+| Area | Verdict |
+|---|---|
+| Rows, macros, enum, count 29, page 0, header (§3.1–§3.2) | as written; adds `alkaline_osc1TypeParameterIndex()` for the count (sound) |
+| MenuText / menu (§3.3–§3.4) | as written |
+| `waveDomainMax()`, `typ` writer clamp (§3.5, §3.7) | as written |
+| Voice: init, trigger, async, `alk_renderTyped()`, sync dispatch (§4) | as written, line for line |
+| `DiodeLadder.c/.h` (§5) | code identical to the verified scratch sources (comment-stripped `diff`) |
+| `Oscillator.c/.h` (§6) | the type move and the five accessors, nothing else |
+| `control_cost.py` (§9.1) | as written, plus `osc_wtbPlanBlock` rank 1 = 2 (its segment loop, at most 2: correct; my scratch link had inlined it) |
+| Bench (§9.2) | as written; 15 groups |
+| Admission (§8.1) | count term and writer check implemented; see F1 |
+
+### 14.2 Gates, re-run for this assessment
+
+| Gate | Result |
+|---|---|
+| `make -C tools/dsp_test alkaline` | 15 groups, 0 failures; AL-X2: 0 differing samples and phases in all 7 modes (RMS 729 / 938 / 1,958 / 2,411 / 2,059 / 2,208 / 0); legato break caught |
+| `alkaline_tables`, `special_tags`, `make_init_alk --check` | match; 200 rows, 0 mismatches; `init.alk` 29 rows |
+| `oscillator`, `seq_steplen` | 0 failures in every group; breaks caught |
+| `make all` | clean, no warnings |
+| `link_budget.py` | flash headroom **38,788 B** (P6 47,836: −9,048 B; §0 estimated ≈ 8 KB); ITCM 14,552 B unchanged |
+| `control_cost.py --elf` | 1,248 + 638 + 14 = **1,900** per block, 11 VDIV (typed bound; scratch 1,769, the difference mostly the plan loop now counted) |
+| Sync-block loops (`elf_looppath.py --top 8`) | 264, 255 (blend), 238, 235 (wtb), 229 (slp), **215 (wav)**; `DiodeLadder_renderB2Smp` separate (0x54E B) |
+| Typed whole voice | dearest 264 + 1,900/32 = **323.4** (Advanced, Option A) |
+| `elf_p4_check` | oscillators 93/93 exact; mixer **28 equal, 2 grew** (F2) |
+
+The 215-instruction loop at `0x8074390` is the `wav` loop: it holds the
+table read's `lsr #22`, `ubfx #0, #22` and `ubfx #0, #10`.
+
+### 14.3 Findings
+
+- **F1 (major): a refused `typ` stays in the stored image and then holds a
+  phantom Advanced place.**
+  - **The path:** a menu edit of a selector row goes through
+    `preset_setSupplementalParameterInternal()` (`presetManager.c`
+    l. 1051–1112). It **stores the image first**
+    (`preset_storeInstrumentEndpoint()`, l. 1100), then calls the runtime
+    writer. Step automation is not affected: the sequencer writes the runtime
+    only (`instrumentManager_writeRuntime()`, `sequencer.c` l. 1506, 3937,
+    4353), so a refused step leaves the image alone.
+  - **The refusal** acts only on the runtime: `InstrumentManager.c`, the
+    `IM_SPECIAL_OSC_TYPE` case, returns 1 with the type unchanged. The image
+    keeps `smp`, the voice plays `wav`.
+  - **The count reads the image:** `instrumentManager_advancedCountForScene()`
+    now counts that slot as Advanced.
+  - **The consequence:** with Cymbal and HiHat in the kit, a refused `typ smp`
+    on an Alkaline makes the count 3. Loading a Cymbal preset into the
+    Cymbal's own slot then counts HiHat plus the phantom Alkaline = 2 against
+    the limit, and `instrumentManager_typeSelectableForSceneSlot()` refuses
+    it. The Load browser falls back to Drum (`menu.c` l. 9649–9655), and Copy
+    drops it (`copyOps.c` l. 706).
+  - **The display disagrees too:** the `typ` cell (image) shows `smp`, the
+    `wav` cell (runtime type) names Saw/Sqr, and the voice plays Saw.
+  - **Fix (recommended, not applied):** refuse before the store. In
+    `preset_setSupplementalParameterInternal()`, ahead of
+    `preset_storeInstrumentEndpoint()`, an Alkaline `osc1_type` value other
+    than `wav` is rejected (return 0, nothing stored) when
+    `instrumentManager_advancedCountForScene(scene_index, slot) >= 2`. The
+    runtime writer's check stays as the guard for Load, Copy and Scene apply,
+    whose images come from files (A-1/A-2).
+  - With the fix, the image never holds a refused value, so the count, the
+    display and the voice agree. Law AL-T needs a host harness for the
+    preset setter; none exists today, so this is a device test (OPEN_TESTS
+    A15).
+- **F2 (moderate): linking the typed code costs the `wav` path and two other
+  engines one instruction per sample each.**
+  - The `wav` loop is **215** (P6 image 214); the §13 log and
+    `CPU_USE_DSP_AUDIT.md` say 214.
+  - `elf_p4_check` reports two mixer hot loops grown: a decimation loop
+    10 → 11 (a new stack reload, `ldr r5, [sp, #20]`) and HiHat's
+    `calcSampleOscFmBlock` 36 → 37. The log records these two.
+  - **Cause, measured:** I built a copy of this tree with the three
+    `osc_isTyped()` branches compiled out. It gives loop **214**, per block
+    **1,230** and **0 grew**. So all three +1s come from the typed code being
+    linked, not from any edited loop. The mixer makes the same 42 calls in
+    both images but is 196 B smaller with P7, a register-allocation shift
+    under LTO. The implementer's attribute trials did not move it.
+  - **`wav` whole voice:** 215 + (1,230 + the typed-branch tests) / 32 ≈
+    **253.6**. That stays Basic, margin ≈ 7.7, against the 252.5 recorded.
+  - **Your call:** accept the three +1s (they keep every class within its
+    budget), or have the typed sync setup moved out of the LTO unit's way
+    (for example its own translation unit with `-fno-lto`, then re-measure).
+    The schedule's G3/G6 "unchanged / 0 grew" is not met as written.
+- **F3 (minor, documents):**
+  - `CPU_USE_DSP_AUDIT.md` (the S093 P7 item) and `MEMORY.md` give `wav` as
+    214 / 252.5 and the blend loops as 252/264. Measured: 215 / ≈ 253.6 and
+    255/264.
+  - The §13.4 log has an empty bullet.
+- **Open (yours, unchanged):** A-1/A-2 (Load and Copy of a stored typed
+  `typ` without a free Advanced place). F1's fix does not decide them. The
+  runtime guard still makes such a slot play `wav` with a typed image until
+  you choose: refuse the Load/Copy, or force `wav` into the image.
+
+### 14.4 Measurement record
+
+| What | Result |
+|---|---|
+| AL-X2 on the tree | bit-exact, 7/7 modes |
+| Loops, P7 image | 264 / 255 / 238 / 235 / 229 / 215 (wav) / 217 (smp, separate) |
+| Loops, P7 tree with typed branches compiled out (scratch copy) | wav 214 |
+| Per block, P7 image / typed-out copy | 1,900 / 1,230 |
+| Mixer hot loops, P7 image / typed-out copy | 2 grew / 0 grew |
+| Flash headroom | 38,788 B |
+
+### 14.5 Resolution (2026-11-09)
+
+- **F2: accepted by the user.** The `wav` loop's +1 (214 → 215) and the two
+  mixer hot loops' +1 stand; further reductions are to be looked at later.
+  `wav` ≈ 253.6, Basic.
+- **F1: fixed.** One rule now lives in
+  `instrumentManager_selectorValueAdmitted(scene, slot, descriptor_index, value)`
+  (`InstrumentManager.c`, after `instrumentManager_typeSelectableForSceneSlot()`;
+  declared in `InstrumentManager.h`). It returns 0 only for an Alkaline
+  `osc1_type` set to a typed value while the Scene's other slots hold two
+  Advanced places. Two callers:
+  - **`preset_setSupplementalParameterInternal()`** (`presetManager.c`)
+    calls it **before** `preset_storeInstrumentEndpoint()`. A refused menu
+    edit returns 0 with nothing stored, so the `typ` cell keeps `wav`, the
+    count stays truthful and the voice plays what the cell shows. The setter's
+    only other internal caller skips selector rows (l. 1752–1754), so
+    Load/Scene apply do not pass through this check.
+  - **The `IM_SPECIAL_OSC_TYPE` runtime writer** now calls the same helper
+    (Active Scene) as the guard for images that come from files (A-1/A-2
+    still open).
+- **Step automation:** unchanged. It writes the runtime only, so a refused
+  step leaves the image alone.
+- **F3: fixed.** The P7 statements now give `wav` as loop 215 / ≈ 253.6 and
+  the blend loops as 255/264, record the acceptance, and describe the
+  admission's two call sites:
+  - `MEMORY.md`;
+  - `CPU_USE_DSP_AUDIT.md`;
+  - `INSTRUMENTS_DSP_REFERENCE.md` (§5.5 and the loop table);
+  - the 093 log.
+
+  The P6 records (214 / 252.5) stay, since they describe P6. The §13.4 empty
+  bullet is removed. OPEN_TESTS A15 now checks the F1 behaviour (`typ` cell
+  stays `wav`, the Cymbal reloads into its own slot), and A16 names the
+  accepted `wav` figure.
+- **Re-verified after the fix:**
+  - `make all`: no warning in the two changed sources. The full recompile
+    also shows pre-existing warnings in untouched files (`PatternData.c`,
+    `EuklidGenerator.c`, `filesystem.c`).
+  - Flash headroom 38,796 B; ITCM 14,552 B.
+  - `control_cost.py --elf` 1,900 / 11 VDIV; sync loops
+    264/255/238/235/229/215, all unchanged.
+  - `elf_p4_check`: 93/93; mixer 28 equal / 2 grew (the accepted pair).
+  - `alkaline`: 15 groups, 0 failures; `special_tags`: 200 rows, 0
+    mismatches.
+- **No host law covers F1:** the preset/scene layer has no host harness, so
+  this is device test A15.

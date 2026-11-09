@@ -1154,6 +1154,22 @@ the new copy/clear work is foreground-only and bounded.
     - S093 P6 flash: +1,152 B (4 Res points) + 20 B (5 prewarp points) +
       108 B (attack table) and the code; headroom 47,836 B (the `make all`
       of this phase). Text 705,408 B, data 420 B, bss 413,280 B;
+    - **S093 P7 (typed oscillator) on this tree:** `wav` ≈ 253.6 (loop 215,
+      +1 from linking the typed code, accepted by the user; per block
+      1,230 plus the typed-branch tests, measured on a copy with the typed
+      branches compiled out: 214 / 1,230 / 0 grew). The six linked audio
+      loops are wav 215, smp 217 (separate function), slp 229, wtb 235/238
+      and wtb blend 255/264. Per block on our link:
+      1,900 (11 VDIV), so the dearest typed mode is about 323 per sample,
+      over the Basic ceiling; typed modes take an **Advanced** place (Option
+      A, `instrumentManager_selectorValueAdmitted()`: before the image store
+      for a menu edit, and in the `osc1_type` runtime writer as the guard). Flash headroom 38,788 B.
+      `elf_p4_check`: 93/93 oscillator loops exact, 0 missing; the mixer has
+      **2 grew** (HiHat `calcSampleOscFmBlock` 36→37 and one mixer
+      decimation loop 10→11), attributed by `elf_loopsrc.py --compare` on the
+      P6/current `-g` twins to LTO layout, not to a P7 loop. Together with
+      the `wav` loop's +1 these three are **accepted by the user** (S093 P7
+      §14 F2), with further reductions to be looked at later.
     - P4 flash: headroom 49,412 B;
       ITCM 14,552 B (+40 B of entry code in five existing `.itcm.s087`
       blend functions; no new ITCM code; accepted as LTO layout, A1);

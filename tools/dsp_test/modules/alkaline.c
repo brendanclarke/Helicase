@@ -77,7 +77,6 @@ int16_t triTable[11][1024];
 int16_t recTable[11][1024];
 unsigned char crashSample[32769];
 int16_t GetRngValue(void) { return 0; }
-uint8_t modNode_interpClaim(void* osc) { (void)osc; return 0u; }
 
 /* the real sawTable (wavetable.c), writable on the host as osc_host.h says */
 #include "alk_sawTable.c"
@@ -112,9 +111,10 @@ void instrumentManager_applyVelocityModulationTarget(uint8_t source_slot, float 
 #define ALK_STEP 5514u   /* a 16th at 120 BPM, samples */
 
 static unsigned g_fail[16];
-enum { G_B, G_R, G_S, G_N, G_AB, G_D, G_Q, G_F, G_O, G_X, G_A, G_M, G_SO, G_PS };
+enum { G_B, G_R, G_S, G_N, G_AB, G_D, G_Q, G_F, G_O, G_X, G_A, G_M, G_SO, G_PS, G_X2 };
 static const char *g_name[] = { "AL-B", "AL-R", "AL-S", "AL-N", "AL-AB", "AL-D", "AL-Q",
-                                "AL-F", "AL-O", "AL-X", "AL-A", "AL-M", "AL-SO", "AL-PS" };
+                                "AL-F", "AL-O", "AL-X", "AL-A", "AL-M", "AL-SO", "AL-PS",
+                                "AL-X2" };
 enum { K_B2R = 0, K_AR = 1, K_BR = 2 };
 static const char *k_name[] = { "B2R", "A-R", "B-R" };
 
@@ -142,7 +142,7 @@ static void block(AlkalineVoice *v, int16_t *buf, int k)
 {
 	Alkaline_calcVoiceAsync(v);
 	if (k != K_B2R) {
-		const uint8_t sq = (uint8_t)(v->wave == ALK_WAVE_SQUARE);
+		const uint8_t sq = (uint8_t)(v->osc.waveform == ALK_WAVE_SQUARE);
 		calcWavetableOscBlock(&v->osc, sq ? alkSqrTable : (const int16_t (*)[1024])sawTable,
 		                      buf, BLK, 1.0f);
 		render_k(k, &v->ladder, buf, (sq ? ALK_SQR_SCALE_V : ALK_SAW_SCALE_V) * v->driveGain,
@@ -166,7 +166,7 @@ static void test_bounds(void)
 
 				memset(&v, 0, sizeof(v));
 				Alkaline_initVoice(&v);
-				v.wave = (uint8_t)w;
+				v.osc.waveform = (uint8_t)w;
 				for (n = 0; n < 600; n++) {
 					/* knob pattern a, flipped every 50 blocks (min <-> max steps) */
 					const int flip = (n / 50) & 1;
@@ -531,7 +531,7 @@ static void test_fused(void)
 
 			memset(&a, 0, sizeof(a));
 			Alkaline_initVoice(&a);
-			a.wave = (uint8_t)w;
+			a.osc.waveform = (uint8_t)w;
 			a.reso = 0.9f; a.cutoff = 0.4f; a.envMod = 0.7f; a.accent = 0.8f;
 			a.drive = (float)d;
 			b = a;
@@ -744,6 +744,123 @@ static void test_pos(void)
 		fail(G_PS, "no lasting pitch change after a pos sweep", v.osc.phase - ph0, 32u * v.osc.phaseInc);
 }
 
+/* ---------------------------------------------------------------- AL-X2
+ * S093 P7: every fused user-source loop is bit-identical to the reader
+ * (osc_renderTyped(), gain 1) followed by the plain B2R, block for block:
+ * the same async, the same triggers (pos starts, slides), a pos sweep that
+ * bends a sample's playhead and glides a wavetable across frames; the phase
+ * after every block equal too. Modes: smp, slp, wtb 16-bit and 8-bit with
+ * the slot granted (blend) and refused (nearest frame), and smp with no
+ * sample installed (the silent block). */
+static uint8_t host_claim;
+uint8_t modNode_interpClaim(void* osc) { (void)osc; return host_claim; }
+
+/* one sample (3,000 frames, a decaying chirp, loop 700..2900) and two
+ * 3-frame wavetables (600 points 16-bit, 256 points 8-bit), through the
+ * installer the oscillator bench uses (modules/oscillator.c l. 747, 895) */
+static void x2_install(void)
+{
+	static int16_t smp[3000];
+	static int16_t f16[3][600];
+	static int8_t f8[3][256];
+	const sample_install_fmt_t fmt = { 1u, 1u, 44100u, 2u, 16u, 16u };
+	const sample_install_fmt_t fw16 = { 1u, 1u, 44100u, 2u, 16u, 16u };
+	const sample_install_fmt_t fw8 = { 1u, 1u, 44100u, 1u, 8u, 8u };
+	int i, f;
+
+	for (i = 0; i < 3000; i++)   /* peak 32767 keeps the gain code at 0 */
+		smp[i] = (int16_t)(32767.0 * exp(-i / 1500.0) * sin(0.002 * i * i / 30.0 + 0.3));
+	smp[0] = 32767;
+	for (f = 0; f < 3; f++) {   /* frames with different harmonic content */
+		for (i = 0; i < 600; i++)
+			f16[f][i] = (int16_t)(30000.0 * sin(6.2831853 * i / 600.0 * (f + 1)));
+		for (i = 0; i < 256; i++)
+			f8[f][i] = (int8_t)(120.0 * sin(6.2831853 * i / 256.0 * (2 * f + 1)));
+	}
+	catalogue_host_reset();
+	sampleInstall_begin();
+	(void)sampleInstall_beginSample("chirp   ", 3000u, &fmt);
+	(void)sampleInstall_writeFrames((const uint8_t *)smp, 3000u);
+	(void)sampleInstall_finishSample(700u, 2900u, 1u);
+	(void)sampleInstall_beginWavetable("w16     ", 600u, 3u, 16u, &fw16);
+	for (f = 0; f < 3; f++)
+		(void)sampleInstall_writeFrame((const uint8_t *)f16[f], 600u);
+	(void)sampleInstall_finishWavetable();
+	(void)sampleInstall_beginWavetable("w8      ", 256u, 3u, 8u, &fw8);
+	for (f = 0; f < 3; f++)
+		(void)sampleInstall_writeFrame((const uint8_t *)f8[f], 256u);
+	(void)sampleInstall_finishWavetable();
+	(void)sampleInstall_commit();
+	sampleMemory_refresh();
+}
+
+/* the reference block: the same async, then the reader and the plain B2R
+ * with the arguments the fused path uses */
+static void x2_ref(AlkalineVoice *v, int16_t *buf)
+{
+	Alkaline_calcVoiceAsync(v);
+	osc_renderTyped(&v->osc, buf, BLK, 1.0f);
+	DiodeLadder_renderB2(&v->ladder, buf, ALK_USER_SCALE_V * v->driveGain,
+	                     v->iLadEnd, v->iAbcEnd * v->makeup);
+}
+
+static void x2_run(const char *name, uint8_t type, uint8_t wave, uint8_t claim)
+{
+	AlkalineVoice a, b;
+	int16_t ba[BLK], bb[BLK];
+	unsigned diff = 0u, phd = 0u;
+	double rms = 0.0;
+	int n, j;
+
+	host_claim = claim;
+	memset(&a, 0, sizeof(a));
+	Alkaline_initVoice(&a);
+	a.cutoff = 0.55f; a.reso = 0.5f; a.envMod = 0.6f; a.decay = 0.4f; a.accent = 0.7f; a.drive = 0.4f;
+	osc_setType(&a.osc, type);
+	a.osc.waveform = wave;
+	b = a;                          /* two identical voices */
+	for (n = 0; n < 3000; n++) {    /* 3,000 blocks = 2.2 s */
+		if (n % 172 == 0) {         /* a 16th at 120 BPM: notes, accents, slides */
+			const uint8_t vel = (n / 172) % 3 ? 80u : 127u;
+			const uint8_t note = (uint8_t)(51 + (n * 7) % 30);
+
+			a.slide = b.slide = (uint8_t)((n / 172) % 4 == 2);
+			Alkaline_triggerVoice(&a, 0u, vel, note, ALK_STEP);
+			Alkaline_triggerVoice(&b, 0u, vel, note, ALK_STEP);
+		}
+		if (n % 23 == 0)   /* pos sweeps: bends the playhead, glides frames */
+			a.osc.position = b.osc.position = (uint8_t)((n * 37) & 127);
+		block(&a, ba, K_B2R);       /* the fused path */
+		x2_ref(&b, bb);             /* reader + plain B2R */
+		for (j = 0; j < BLK; j++) {
+			diff += (ba[j] != bb[j]);
+			rms += (double)ba[j] * ba[j];
+		}
+		phd += (a.osc.phase != b.osc.phase);
+	}
+	printf("AL-X2 %-14s: %u sample(s) differ, %u phase(s) differ, RMS %.0f LSB\n",
+	       name, diff, phd, sqrt(rms / (3000.0 * BLK)));
+	if (diff || phd)
+		fail(G_X2, name, diff, phd);
+	/* a mode that should sound must not pass by being silent */
+	if (rms == 0.0 && strcmp(name, "smp none") != 0)
+		fail(G_X2, "the mode is not silent", 0, 0);
+}
+
+static void test_fused_typed(void)
+{
+	x2_install();
+	x2_run("smp", OSC_TYPE_SMP, 0u, 0u);
+	x2_run("slp", OSC_TYPE_SLP, 0u, 0u);
+	x2_run("wtb16 blend", OSC_TYPE_WTB, 0u, 1u);
+	x2_run("wtb16 nearest", OSC_TYPE_WTB, 0u, 0u);
+	x2_run("wtb8 blend", OSC_TYPE_WTB, 1u, 1u);
+	x2_run("wtb8 nearest", OSC_TYPE_WTB, 1u, 0u);
+	catalogue_host_reset();      /* nothing installed: the silent block */
+	sampleMemory_refresh();
+	x2_run("smp none", OSC_TYPE_SMP, 0u, 0u);
+}
+
 /* ------------------------------------------------------------ check modes */
 static int mode_traces(const char *in, const char *outp, const float drv)
 {
@@ -812,7 +929,7 @@ static int mode_pattern(int argc, char **argv)
 	memset(&v, 0, sizeof(v));
 	Alkaline_initVoice(&v);
 	v.drive = (argc > 10) ? (float)atof(argv[10]) : 0.0f;
-	v.wave = (uint8_t)atoi(argv[2]);
+	v.osc.waveform = (uint8_t)atoi(argv[2]);
 	v.cutoff = (float)atof(argv[3]);
 	v.reso = (float)atof(argv[4]);
 	v.envMod = (float)atof(argv[5]);
@@ -858,7 +975,7 @@ static int mode_sweep(int argc, char **argv)
 		return 2;
 	memset(&v, 0, sizeof(v));
 	Alkaline_initVoice(&v);
-	v.wave = (uint8_t)atoi(argv[2]);
+	v.osc.waveform = (uint8_t)atoi(argv[2]);
 	v.drive = (float)atof(argv[3]);
 	v.cutoff = 0.35f; v.envMod = 0.5f; v.decay = 0.4f; v.accent = 0.6f;
 	fo = fopen(argv[4], "wb");
@@ -931,6 +1048,7 @@ int main(int argc, char **argv)
 	test_attack();
 	test_meg_range();
 	test_pos();
+	test_fused_typed();
 	/* every group in g_name (S093 P6: fourteen; was a literal 10) */
 	for (g = 0u; g < sizeof g_name / sizeof g_name[0]; g++) {
 		printf("%s: %u failure(s)\n", g_name[g], g_fail[g]);

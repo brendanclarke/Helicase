@@ -35,6 +35,16 @@ be performed when the opportunity arises, not blocking items for current work.
     self-oscillates with a high cutoff, bounded; `pos` 0 / 64 on Saw and Sqr
   - A13 (S093 P6): drive byte 0 / 64 / 127 (x1 / x4 / x16); the make-up
     level by ear (B-2)
+  - A14 (S093 P7): `typ` wav / smp / slp / wtb on an installed sample and
+    both wavetables; `wav` names Saw/Sqr, the user types name sNN/lNN/wNN;
+    `pos` starts a sample playhead and glides a wavetable frame
+  - A15 (S093 P7): admission: with two Advanced places taken, a third typed
+    Alkaline is refused: the `typ` cell stays `wav` (nothing stored, §14 F1)
+    and the voice plays Saw/Sqr; the kit's Cymbal can still be reloaded into
+    its own slot; `typ` back to wav frees a place;
+    Load/Copy of a stored typed `typ` (A-1/A-2 policy) behaves as decided
+  - A16 (S093 P7): CPU worst case `wav` (≈ 253.6, the accepted +1); two typed Alkalines in
+    their dearest mode (`wtb` blend) plus two blends running, 0 underruns
   - Confirm, not fix: tracks 6/7 share slot 5; note-off does not end the gate;
     roll hits get full gates
 - **S090 P5 Load/Save speed and watchdog T1–T9 (HIGH PRIORITY):**

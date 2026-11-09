@@ -12163,6 +12163,24 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
 
     memset(nameDst, ' ', SAMPLE_DISPLAY_NAME_LEN);
     memset(codeDst, ' ', 3u);
+    /*
+     * S093 P7: an Alkaline slot's osc1 under wav lists Saw, Sqr.
+     *
+     * What:       value 0 -> "Saw", 1 -> "Sqr" (alkWaveNames), no code;
+     *             any other value names nothing (blank, "---" in three
+     *             characters), as a Drum value past its list.
+     * Why:        the stock list (waveformNames: Sin, Tri, ...) is not
+     *             Alkaline's; the Alkaline voice plays Saw for 0 and Sqr
+     *             for 1 (Alkaline_calcVoiceSyncBlock()).
+     * Accessors:  menu_formatWaveValue3() (compact cells, overlays, the
+     *             voice automation display), the single-parameter painter.
+     */
+    if (isOsc1 && type == OSC_TYPE_WAV &&
+        instrumentManager_runtimeType(cell->slot) == INSTRUMENT_TYPE_ALK) {
+        if (value < (uint8_t)alkWaveNames[0][0])
+            memcpy(nameDst, alkWaveNames[value + 1u], 3u);
+        return;
+    }
     if (isOsc1 && type != OSC_TYPE_WAV) {
         /* osc1 under smp/slp/wtb: the value is the item index. */
         if (type == OSC_TYPE_WTB) {
@@ -12337,8 +12355,7 @@ static void menu_formatTransientName(uint8_t value, char *nameDst)
  * Name table of a tagged DTYPE_ON_OFF cell (S088 D12; S089 P2; S093 P4).
  *
  * What:       returns the 3-character name table for a dtype high-nibble tag:
- *             ONOFF_TAG_VOICE_CHAIN -> voiceChainNames (T+D, WFd);
- *             ONOFF_TAG_ALK_WAVE -> alkWaveNames (Saw, Sqr); every other
+ *             ONOFF_TAG_VOICE_CHAIN -> voiceChainNames (T+D, WFd); every other
  *             non-zero tag -> oscRunNames (rst, fre, itp), exactly as before.
  *             Entry [0][0] is the count; names start at [1].
  * Why:        one helper keeps display, clamp, automation max and the
@@ -12348,14 +12365,13 @@ static void menu_formatTransientName(uint8_t value, char *nameDst)
  * Accessors:  menu_formatCellValue3(), va_formatValue3(), menu_clampCellValue(),
  *             menu_automationValueMax(), menu_formatAutomationValue3(), the
  *             single-parameter step-edit display.
- * Affiliates: ONOFF_TAG_* / oscRunNames / voiceChainNames / alkWaveNames
+ * Affiliates: ONOFF_TAG_* / oscRunNames / voiceChainNames
  *             (MenuText.h).
  */
 static const char (*menu_onoffTagNames(uint8_t tag))[4]
 {
     switch (tag) {
     case ONOFF_TAG_VOICE_CHAIN: return voiceChainNames;
-    case ONOFF_TAG_ALK_WAVE:    return alkWaveNames;
     default:                    return oscRunNames;
     }
 }
@@ -12502,8 +12518,8 @@ _Static_assert((sizeof(transientNames) / sizeof(transientNames[0])) - 1u ==
 _Static_assert((sizeof(voiceChainNames) / sizeof(voiceChainNames[0])) - 1u ==
                    VOICE_CHAIN_COUNT,
                "voiceChainNames must list every VOICE_CHAIN_* value");
-/* S093 P4: the Alkaline waveform names list both stored values
- * (ALK_WAVE_SAW 0, ALK_WAVE_SQUARE 1, AlkalineVoice.h). */
+/* S093 P4/P7: the Alkaline wav names list both values of an Alkaline slot
+ * under typ wav (ALK_WAVE_SAW 0, ALK_WAVE_SQUARE 1, AlkalineVoice.h). */
 _Static_assert((sizeof(alkWaveNames) / sizeof(alkWaveNames[0])) - 1u == 2u,
                "alkWaveNames must list Saw and Sqr");
 _Static_assert((sizeof(foldTypeNames) / sizeof(foldTypeNames[0])) - 1u ==

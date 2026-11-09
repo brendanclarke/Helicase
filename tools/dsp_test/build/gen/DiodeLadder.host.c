@@ -271,15 +271,67 @@ static void dl_slowUpdate(DiodeLadder *dl, const float sTp, const float sS)
  * Rungs 0-1 nonlinear, rungs 2-3 linear (t2 = t3 = 1 folded); the input pair
  * and the OTA. 3 VDIV per sample: the continuants' reciprocal, the loop
  * closure, the secant batch (rungs 0-1, input pair, OTA). */
+/* the source of a B2R block (a compile-time constant in each wrapper):
+ * BUF reads buf (renderB2), TABLE the [11][1024] row (renderB2Osc), SMP/SLP
+ * a sample item, WTB one wavetable frame, WTBB a frame pair blended */
+enum { DL_SRC_BUF = 0, DL_SRC_TABLE, DL_SRC_SMP, DL_SRC_SLP, DL_SRC_WTB, DL_SRC_WTBB };
+
+/*
+ * osc_wtbRead() (Oscillator.c l. 2699) exactly (S093 P7).
+ *
+ * What:       one interpolated point at a cycle phase: index = (ph x len) >>
+ *             32, so 2^32 is one frame of any length; the fraction is the low
+ *             word of that product; the last point wraps to 0; 8-bit data x 256.
+ * Why:        the fused wtb loops must reproduce the reader bit for bit; the
+ *             reader's helper is static in Oscillator.c and stays unedited.
+ */
+static inline __attribute__((always_inline)) float dl_wtbRead(
+	const uint8_t *data, uint8_t bits, uint32_t len, uint32_t ph)
+{
+	const uint64_t m = (uint64_t)ph * len;          /* frame position, Q32 */
+	const uint32_t idx = (uint32_t)(m >> 32);       /* the point at or before ph */
+	const uint32_t n = (idx + 1u == len) ? 0u : idx + 1u;   /* its successor, wrapping */
+	const float fr = (float)(uint32_t)m * (1.0f / 4294967296.0f);   /* 0..1 between them */
+	int32_t a;
+	int32_t b;
+
+	if (bits == 8u) {
+		a = ((const int8_t *)data)[idx] << 8;
+		b = ((const int8_t *)data)[n] << 8;
+	} else {
+		a = ((const int16_t *)data)[idx];
+		b = ((const int16_t *)data)[n];
+	}
+	return (float)a + fr * (float)(b - a);
+}
+
 static inline __attribute__((always_inline)) void dl_renderB2Body(
 	DiodeLadder *dl, int16_t *buf, const float sScale, const float iLadEnd,
-	const float iAbcEnd, const int fused, const int16_t *const row,
-	uint32_t *const phase, const uint32_t phaseInc)
+	const float iAbcEnd, const int src, const int16_t *const row,
+	const DlSrc *const sp, uint32_t *const phase, const uint32_t phaseInc)
 {
-	/* fused (a compile-time constant in each wrapper): the oscillator's
-	 * table read fused into the loop, calcWavetableOscBlock()'s arithmetic
-	 * exactly (gain 1: linear interpolation, truncation to int16) */
+	/* src (a compile-time constant in each wrapper): DL_SRC_BUF reads buf;
+	 * every other source is the oscillator's read fused into the loop, its
+	 * reader's arithmetic exactly (linear interpolation, truncation to int16,
+	 * then x sScale as the separate path does) */
+	const int fused = (src != DL_SRC_BUF);
 	uint32_t ph = fused ? *phase : 0u;
+	/* the source's block constants, hoisted out of the loop; each is a
+	 * compile-time 0 for the sources that do not use it */
+	const int16_t *const d16 = (src == DL_SRC_SMP || src == DL_SRC_SLP) ? sp->d16 : 0;
+	const uint32_t endPh = (src == DL_SRC_SMP) ? sp->endPh : 0u;
+	const uint32_t ls = (src == DL_SRC_SLP) ? sp->ls : 0u;
+	const uint32_t le = (src == DL_SRC_SLP) ? sp->le : 0u;
+	const uint32_t loopEndPh = (src == DL_SRC_SLP) ? sp->loopEndPh : 0u;
+	const uint32_t lenPh = (src == DL_SRC_SLP) ? sp->lenPh : 0u;
+	const float g = (src == DL_SRC_SMP || src == DL_SRC_SLP) ? sp->gain : 1.0f;
+	const uint8_t *fa = (src == DL_SRC_WTB || src == DL_SRC_WTBB) ? sp->fa : 0;
+	const uint8_t *fb = (src == DL_SRC_WTBB) ? sp->fb : 0;
+	const uint32_t wlen = (src == DL_SRC_WTB || src == DL_SRC_WTBB) ? sp->len : 0u;
+	const uint8_t bits = (src == DL_SRC_WTB || src == DL_SRC_WTBB) ? sp->bits : 0u;
+	const uint8_t seg = (src == DL_SRC_WTBB) ? sp->seg : 0u;
+	float ff = (src == DL_SRC_WTBB) ? sp->ff : 0.0f;          /* the blend fraction */
+	const float ffStep = (src == DL_SRC_WTBB) ? sp->step : 0.0f;
 	float x0 = dl->x0, x1 = dl->x1, x2 = dl->x2, x3 = dl->x3;
 	float t0 = dl->t0, t1 = dl->t1;
 	float tin = dl->tin, tota = dl->tota;
@@ -305,7 +357,8 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 		rv += drv;
 		float s;
 
-		if (fused) {
+		if (src == DL_SRC_TABLE) {
+			/* calcWavetableOscBlock() (gain 1), unchanged from S093 P3 */
 			const uint32_t itg = ph >> 22;
 			int16_t o = row[itg];
 
@@ -313,6 +366,53 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 			   * (row[(itg + 1u) & 0x000003FFu] - o);
 			ph += phaseInc;
 			s = (float)o * sScale;
+		} else if (src == DL_SRC_SMP) {
+			/* osc_smpPlainBlock(): Q19.12 (frame = ph >> 12, fraction = the
+			 * low 12 bits / 4096); the two pad frames read 0; the playhead
+			 * holds at endPh */
+			const uint32_t idx = ph >> 12;
+			const int16_t a = d16[idx];
+			const int16_t b = d16[idx + 1u];
+			const float out = (float)a + (float)(ph & 0xFFFu) * (1.0f / 4096.0f) * (float)(b - a);
+			const uint32_t nx = ph + phaseInc;
+
+			/* truncated to int16 as the reader stores it, then volts */
+			s = (float)(int16_t)(out * g) * sScale;
+			ph = (nx > endPh) ? endPh : nx;
+		} else if (src == DL_SRC_SLP) {
+			/* osc_slpPlainBlock(): the seam reads loop_start (A6); one wrap at
+			 * loop_end with the block step (phaseInc = osc_slpBlockIncFor()) */
+			const uint32_t idx = ph >> 12;
+			const uint32_t nxt = (idx + 1u == le) ? ls : idx + 1u;
+			const int16_t a = d16[idx];
+			const int16_t b = d16[nxt];
+			const float out = (float)a + (float)(ph & 0xFFFu) * (1.0f / 4096.0f) * (float)(b - a);
+
+			s = (float)(int16_t)(out * g) * sScale;
+			ph += phaseInc;
+			if (ph >= loopEndPh)
+				ph -= lenPh;
+		} else if (src == DL_SRC_WTB) {
+			/* osc_wtbPlainBlock() at gain 1: the nearest frame */
+			s = (float)(int16_t)dl_wtbRead(fa, bits, wlen, ph) * sScale;
+			ph += phaseInc;
+		} else if (src == DL_SRC_WTBB) {
+			/* osc_wtbBlendBlock() at gain 1: the frame pair mixed by ff, which
+			 * steps per sample; from sample seg on, the second segment's pair
+			 * and its own starting ff (the reader restarts ff per segment) */
+			if (j == seg) {
+				fa = sp->fa2;
+				fb = sp->fb2;
+				ff = sp->ff2;
+			}
+			{
+				const float y0 = dl_wtbRead(fa, bits, wlen, ph);
+				const float y1 = dl_wtbRead(fb, bits, wlen, ph);
+
+				s = (float)(int16_t)(y0 + ff * (y1 - y0)) * sScale;
+			}
+			ff += ffStep;
+			ph += phaseInc;
 		} else {
 			s = (float)buf[j] * sScale;
 		}
@@ -407,7 +507,7 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 void DiodeLadder_renderB2(DiodeLadder *dl, int16_t *buf, const float sScale,
                           const float iLadEnd, const float iAbcEnd)
 {
-	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 0, 0, 0, 0u);
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, DL_SRC_BUF, 0, 0, 0, 0u);
 }
 
 /* B2R with the oscillator's table read fused (S093 P3 analysis): the voice's
@@ -416,7 +516,37 @@ void DiodeLadder_renderB2Osc(DiodeLadder *dl, int16_t *buf, const int16_t *row,
                              uint32_t *phase, const uint32_t phaseInc, const float sScale,
                              const float iLadEnd, const float iAbcEnd)
 {
-	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 1, row, phase, phaseInc);
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, DL_SRC_TABLE, row, 0, phase, phaseInc);
+}
+
+/* S093 P7 S1: the four user-source variants (DlSrc; AlkalineVoice.c
+ * alk_renderTyped()); each is the body with one compile-time source */
+void DiodeLadder_renderB2Smp(DiodeLadder *dl, int16_t *buf, const DlSrc *src,
+                             uint32_t *phase, const uint32_t phaseInc, const float sScale,
+                             const float iLadEnd, const float iAbcEnd)
+{
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, DL_SRC_SMP, 0, src, phase, phaseInc);
+}
+
+void DiodeLadder_renderB2Slp(DiodeLadder *dl, int16_t *buf, const DlSrc *src,
+                             uint32_t *phase, const uint32_t phaseInc, const float sScale,
+                             const float iLadEnd, const float iAbcEnd)
+{
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, DL_SRC_SLP, 0, src, phase, phaseInc);
+}
+
+void DiodeLadder_renderB2Wtb(DiodeLadder *dl, int16_t *buf, const DlSrc *src,
+                             uint32_t *phase, const uint32_t phaseInc, const float sScale,
+                             const float iLadEnd, const float iAbcEnd)
+{
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, DL_SRC_WTB, 0, src, phase, phaseInc);
+}
+
+void DiodeLadder_renderB2WtbBlend(DiodeLadder *dl, int16_t *buf, const DlSrc *src,
+                                  uint32_t *phase, const uint32_t phaseInc, const float sScale,
+                                  const float iLadEnd, const float iAbcEnd)
+{
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, DL_SRC_WTBB, 0, src, phase, phaseInc);
 }
 
 /* ------------------------------------------------------------------- B-R

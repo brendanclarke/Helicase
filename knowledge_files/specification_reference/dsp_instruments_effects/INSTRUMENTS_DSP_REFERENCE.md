@@ -564,30 +564,57 @@ trigger; **HiHat does not** (and the Drum FM oscillator never resets).
 
 ### 5.5 Alkaline (`AlkalineVoice.c`, Basic)
 
-The TB-303 voice (S093 P4; S093 P6 parameter tweaks). Its descriptor table is
-`AlkalineParameters.c`: 28 rows and eight sub-pages (S093 P6: `coa tun wav
-pos` under OSC, `atk dec` under AEG, `dst amt sld` under mod, `acc` under
+The TB-303 voice (S093 P4; S093 P6 parameter tweaks; S093 P7 oscillator
+types). Its descriptor table is `AlkalineParameters.c`: 29 rows and eight
+sub-pages (S093 P7: `coa tun wav pos | typ` under OSC, `atk dec` under AEG,
+`dst amt sld` under mod, `acc` under
 click, `cut res env drv` on one FILTER screen, the Drum LFO page, `vol pan`
-under MIX; the FM page is empty). `alk_attack` (26) and `osc1_position` (27)
-are appended, so every stored index, automation ID and NRPN number of rows
-0–25 is unchanged.
+under MIX; the FM page is empty). `alk_attack` (26), `osc1_position` (27)
+and `osc1_type` (28) are appended, so every stored index, automation ID and
+NRPN number of rows 0–25 is unchanged. Row 0 is `osc1_wave` (S093 P7; Drum's
+key, no migration).
 
 **Signal path.** After the trigger:
 
 ```
-osc table wave (sawTable | alkSqrTable[octave]) --x driveGain--> B2R ladder
+osc (wav: sawTable | alkSqrTable[octave]; smp/slp/wtb: a catalogue item)
+  --x driveGain--> B2R ladder
   --OTA (iAbc x makeup)--> prewarped ladder current --> int16 buf --mixer vol/pan-->
 ```
 
-- **Oscillator.** Stays a table wave (S093 P3 §9.5): `SAW` reads `sawTable`
+- **Oscillator.** Under `typ` `wav` (S093 P3 §9.5): `SAW` reads `sawTable`
   and `ALK_WAVE_SQUARE` reads `alkSqrTable[octave]` (the D8 per-octave Q8
-  table, `AlkalineSquareTable.c`). The pitch is computed at control rate
+  table, `AlkalineSquareTable.c`). Under `smp`/`slp`/`wtb` (S093 P7) the
+  bound catalogue item is read by a fused B2R variant (§ below). The pitch is computed at control rate
   from `midiFreq` (coarse) + the note + the fine byte, plus Tuning (±700
   cents centred at byte 63) and the slide lag (a 22 ms one-pole in log2 Hz);
   `osc_setTableFreq()` multiplies `pitchMod` and `modNodeValue` and sets
   `phaseInc`/`tableOffset` directly, without `osc_setFreq()`'s cache. The
   `coa` row's LFO/velocity target is `osc.modNodeValue`, so modulation moves
   the pitch (T1-7).
+- **`typ` (S093 P7).** 0 `wav`, 1 `smp`, 2 `slp`, 3 `wtb`; a selector with
+  `osc_setType()` as its writer. `wav` is Basic; the three user types are
+  over the whole-voice Basic ceiling (loop 217–262, per block 1,900 linked
+  here) and take an **Advanced** place: the `typ` writer admits a typed
+  Alkaline only while the Active Scene has fewer than two other Advanced
+  places (a typed Alkaline counts), and refuses otherwise (the type stays
+  as it was). `wav` frees the place at once. Stored-image Load/Copy policy
+  (whether to force `typ` back to `wav`) is the open A-1/A-2 decision.
+  Under `wav` the `wav` cell is Saw/Sqr (range 0..1 from the Alkaline wave
+  domain); under the user types it is the item index, named sNN/lNN/wNN.
+- **Fused user readers (S093 P7).** `alk_renderTyped()` builds a `DlSrc`
+  once per block from the bound item and calls one of four B2R variants:
+  `DiodeLadder_renderB2Smp/Slp/Wtb/WtbBlend()`. Each is
+  `dl_renderB2Body()` with a compile-time source, bit-identical to
+  `osc_renderTyped(gain 1)` + plain B2R (AL-X2, all modes). `smp` holds at
+  the item end; `slp` takes the reader's `osc_slpBlockIncFor()` step and one
+  loop wrap; `wtb` plays the nearest frame, or the plan's two-segment frame
+  blend when `modNode_interpClaim()` grants one of the two pool slots (else
+  it steps frames at the plain cost, as Drum's blend does). The no-item
+  case renders the two zero frames through the smp loop, so no plain-B2R
+  variant is linked. `osc_userBind()` (S2) supplies the direct pitch and
+  the item bind; `osc_typedPositionApply()` (S3) glides pos with no
+  restore, because `phaseInc` is recomputed every block.
 - **`pos` (S093 P6).** `osc1_position`: 0 leaves the oscillator free-running
   (the 303's VCO, the pre-P6 sound bit for bit); 1–127 sets the phase to
   pos/128 of a cycle at every non-legato trigger, so a note always starts at
@@ -664,19 +691,24 @@ osc table wave (sawTable | alkSqrTable[octave]) --x driveGain--> B2R ladder
   `modNode_updateValue(&velocityModulators[source_slot], vel)` and
   `instrumentManager_applyVelocityModulationTarget()`. Velocity is the
   accent, so there is no `velo_vol_on_off` row.
-- **Morph/storage.** The 22 image rows are MORPHABLE (28 rows minus
-  `alk_wave`,
-  `velo_mod_dest` and the four LFO targets); `alk_wave` is a SELECTOR, so
-  automation steps between Saw and Sqr and Morph never blends them.
+- **Morph/storage.** The 23 image rows are MORPHABLE (29 rows minus
+  `osc1_type`, `velo_mod_dest` and the four LFO targets); `osc1_wave` is an image row
+  now, so under `wav` Morph/LFO step between Saw and Sqr (S093 P7 changed it
+  from a tagged ON/OFF selector).
   `init.alk` writes every key in table order; `[morph]` holds the MORPHABLE
   rows; the LFO voices are `self` and the target selectors `255`.
   `Alkaline_initVoice()` loads the same bytes.
-- **Cost.** Whole voice, linked after S093 P6 (G3-G5): fused loop 214
+- **Cost.** `wav`, whole voice, linked after S093 P6 (G3-G5): fused loop 214
   (3 VDIV) + 1,230 per block / 32 (9 VDIV) = **252.5 per sample**, against
   the Drum ceiling 261.3 (frozen and P4 re-measured). The per-block part is
   async 884 + sync-block entry/exit 332 + dispatch 14: the `pos` bend +13,
-  the VEG factor −1, drive and MEG +0. `Alkaline_isQuiet()` is used for
-  a Scene swap. Basic: it may take any slot, and `slotUsesSrr()` is 0.
+  the VEG factor −1, drive and MEG +0. S093 P7 on the linked image: the
+  sync block has six audio loops, `wav` 215 (+1 from linking the typed code,
+  accepted; `wav` whole voice ≈ 253.6), slp 229, wtb 235/238, blend 255/264
+  and smp 217 as a separate function; per block 1,900 (11 VDIV) on this
+  build, so the dearest typed mode is about 323 per sample and takes an
+  Advanced place. `Alkaline_isQuiet()` is used for a Scene swap. `wav` is
+  Basic: it may take any slot, and `slotUsesSrr()` is 0.
 
 ### 5.6 Where each engine's hot code runs
 
@@ -1446,6 +1478,7 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 | Snare post-chain | 30 (was 35) | 1 |
 | Cymbal/HiHat post-chain | 25 (was 28) | 1 |
 | S093 Alkaline fused oscillator + B2R ladder (linked) | 214 | 3 |
+| S093 P7 Alkaline fused user reads (linked) | smp 217, slp 229, wtb 235/238, wtb blend 255/264; smp is a separate function | 3 |
 
 ### 8.2 Per-voice estimate (worst case, per sample)
 
@@ -1458,6 +1491,7 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 | Cymbal | 2 mod osc 48 + add 5 + FM carrier 35 + filter 95 + transient 22 + post 25 | 230 instructions, 3 divisions |
 | HiHat | as Cymbal | 230 instructions, 3 divisions |
 | Alkaline (B2R, r6, linked, S093 P6) | fused loop 214 + per block 1,230/32 = 38.4 | 252 instructions, 3 divisions + 9 per block |
+| Alkaline typed (S093 P7, linked) | dearest loop 264 + per block 1,900/32 = 59.4 | about 323, 3 divisions + 11 per block; Advanced |
 
 Add waveform interpolation (about one extra oscillator render each, at most
 two per block) and the mixer per slot (decimator 12–18, dry path 28–46, plus

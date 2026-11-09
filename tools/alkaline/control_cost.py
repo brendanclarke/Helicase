@@ -63,9 +63,25 @@ ITERS = {
     ("DiodeLadder_renderB2Osc", 1): 0,       # S093 P3: the fused oscillator read
     ("DiodeLadder_renderB", 1): 0,
     ("DiodeLadder_renderA", 1): 0,
-    # S093 P4 (G4): on the linked image LTO inlines the fused B2R read into
-    # the sync block, so its only loop is the audio loop; weight 0 (A4)
+    # S093 P4 (G4) / S093 P7: on the linked image LTO inlines the fused B2R
+    # reads into the sync block: wav (renderB2Osc), slp, wtb (8/16-bit
+    # copies) and the wtb blend (two copies) are its six loops, all audio
+    # loops (weight 0); smp stays its own function (two call sites)
     ("Alkaline_calcVoiceSyncBlock", 1): 0,
+    ("Alkaline_calcVoiceSyncBlock", 2): 0,
+    ("Alkaline_calcVoiceSyncBlock", 3): 0,
+    ("Alkaline_calcVoiceSyncBlock", 4): 0,
+    ("Alkaline_calcVoiceSyncBlock", 5): 0,
+    ("Alkaline_calcVoiceSyncBlock", 6): 0,
+    ("DiodeLadder_renderB2Smp", 1): 0,
+    ("DiodeLadder_renderB2Slp", 1): 0,
+    ("DiodeLadder_renderB2Wtb", 1): 0,
+    ("DiodeLadder_renderB2Wtb", 2): 0,       # the 8- and 16-bit read copies
+    ("DiodeLadder_renderB2WtbBlend", 1): 0,
+    ("DiodeLadder_renderB2WtbBlend", 2): 0,
+    # S093 P7: the blend plan's segment loop runs once or twice per block
+    # (a glide crossing one frame splits it); the constant cost is 2
+    ("osc_wtbPlanBlock", 1): 2,
 }
 # functions whose loops sit on alternate branches (one runs per block): the
 # loop part is the largest loop's, not their sum (S093 P3 T2-2)
@@ -90,6 +106,21 @@ void instrumentManager_applyVelocityModulationTarget(uint8_t source_slot, float 
 void osc_setBaseNote(OscInfo *o, uint8_t n) { o->baseNote = n; }
 void osc_setFreq(OscInfo *o) { o->phaseInc = (uint32_t)o->freq; }
 void osc_setTableFreq(OscInfo *o) { o->phaseInc = (uint32_t)o->freq; }
+/* S093 P7: the typed path (the user reads are fused; these satisfy the link) */
+void osc_userBind(OscInfo *o) { (void)o; }
+void osc_typedPositionApply(OscInfo *o, uint8_t bend) { (void)o; (void)bend; }
+uint32_t osc_typedTriggerPhase(OscInfo *o) { (void)o; return 0u; }
+uint32_t osc_slpBlockIncFor(uint32_t inc, uint32_t ph, uint32_t ls, uint32_t len)
+{ (void)ph; (void)ls; (void)len; return inc; }
+float osc_bindGainFor(const OscInfo *o) { (void)o; return 1.0f; }
+const uint8_t *osc_wtbFrameFor(const OscInfo *o, const wavetable_catalogue_entry_t *w,
+                               uint32_t f) { (void)o; (void)w; (void)f; return 0; }
+uint32_t osc_wtbNearestFrame(uint8_t p, uint32_t c) { (void)p; (void)c; return 0u; }
+void osc_wtbPlanFor(const OscInfo *o, uint32_t c, osc_wtbPlan_t *plan)
+{ (void)o; (void)c; (void)plan; }
+const sample_catalogue_entry_t *sampleMemory_sampleEntry(uint8_t i) { (void)i; return 0; }
+const wavetable_catalogue_entry_t *sampleMemory_wavetableEntry(uint8_t i) { (void)i; return 0; }
+uint8_t modNode_interpClaim(void *o) { (void)o; return 0u; }
 void calcWavetableOscBlock(OscInfo *o, const int16_t t[][1024], int16_t *b,
                            const uint8_t n, const float g)
 { (void)o; (void)t; (void)g; memset(b, 0, n * 2u); }
@@ -212,7 +243,8 @@ def total(elf, sym, memo, ext, trace, depth=0):
         # longest loop is the fused B2R audio loop (3 VDIV, ~214). If a later
         # layout stops inlining DiodeLadder_renderB2Osc, rank 1 would be a
         # control loop and weight 0 would undercount G4 silently.
-        if base == "Alkaline_calcVoiceSyncBlock" and it == 0 and (lv != 3 or length < 200):
+        if (base == "Alkaline_calcVoiceSyncBlock" or base.startswith("DiodeLadder_renderB2")) \
+                and it == 0 and (lv != 3 or length < 200):
             sys.exit(f"control_cost.py: loop {rank} of {base} (length {length}, {lv} VDIV) "
                      f"is not the fused B2R audio loop; give it an iteration count "
                      f"(--iters {base}:{rank}=N)")
@@ -266,7 +298,8 @@ def main():
         elf, obj = build(a.tables, ["-D" + d for d in a.define])
         # the oscillator calls, from the standalone object
         dis = E.disassembly(obj)
-        for f in ("osc_setBaseNote", "osc_setFreq", "osc_setTableFreq"):
+        for f in ("osc_setBaseNote", "osc_setFreq", "osc_setTableFreq",
+                  "osc_userBind", "osc_typedPositionApply"):
             if re.search(r"<%s>:" % f, dis):
                 # straight paths; osc_setFreq's longest path is its user-sample
                 # bind branch (calls counted 1), a bound above Alkaline's WAV use

@@ -390,10 +390,11 @@ is `pv<`/`pv>` (§2.3).
   current Effect type's parameter. The same NRPN means different parameters
   on different types, with no special casing. The voice chart is
   `MIDI_NRPN_TABLE.md`; an Effect chart is not yet published.
-- **Alkaline (S093 P4/P6)** has 28 rows (0–27); 28–63 are unused and ignored
-  in that block. `alk_wave` is a selector (0 `Saw`, 1 `Sqr`), `alk_tuning` is
-  0–127 with 63 centre (±700 cents), `alk_slide` is 0/1; S093 P6 appended
-  `alk_attack` (26) and `osc1_position` (27).
+- **Alkaline (S093 P4/P6/P7)** has 29 rows (0–28); 29–63 are unused and
+  ignored in that block. `osc1_wave` is the type-dependent wave/item cell,
+  `alk_tuning` is 0–127 with 63 centre (±700 cents), `alk_slide` is 0/1;
+  S093 P6 appended `alk_attack` (26) and `osc1_position` (27), S093 P7
+  `osc1_type` (28).
 - **Unused IDs** are ignored and the message is forwarded.
 - **Channels:**
   - Every ID works on G.
@@ -434,8 +435,17 @@ unchanged (identity, as in step automation).
   `WFd`. Appended after `osc1_run`, same append-only numbering rule. A
   selector: one value per step when automated, never morphed, not an LFO or
   velocity target.
-- `alk_wave` (S093 P4): 0 `Saw`, 1 `Sqr`; other stored values play `Saw`.
-  A selector: one value per step when automated, never morphed.
+- `osc1_wave` (S093 P4 as `alk_wave`; renamed S093 P7): an Alkaline slot
+  under typ wav lists 0 `Saw`, 1 `Sqr` (other values play `Saw`, and the
+  range/clamp come from the Alkaline case of the wave helpers); under
+  smp/slp/wtb the same byte is the catalogue item index. Image/Morph/LFO
+  cell, as Drum's.
+- `osc1_type` (S093 P7 on Alkaline, appended at 28): 0 `wav`, 1 `smp`,
+  2 `slp`, 3 `wtb`; values above 3 clamp to `wtb`. A selector: one value
+  per step when automated, never morphed, not an LFO or velocity target.
+  **Admission:** a typed Alkaline takes an Advanced place (Option A); with
+  two Advanced places already taken, the write is refused and the type stays
+  as it was (wav stays wav). `wav` is Basic.
 - `alk_tuning` (S093 P4): 0–127, 63 = centre (±700 cents); `alk_slide`:
   0 off, 1 on (latched at its own note's trigger; it decides whether the
   next note glides). The five 303 knobs and `alk_drive` (S093 P6: 16^drive,

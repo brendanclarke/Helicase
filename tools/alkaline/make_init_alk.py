@@ -8,7 +8,7 @@ What:       reads the descriptor rows of Core/DSP/Instruments/Alkaline/
               format=helicase.instrument / version=1 / type=alk / blank /
               [params] every key in table order / blank /
               [morph] the MORPHABLE rows only (macros ROW, ROW_SPECIAL,
-              ROW_MENU, ROW_NOBIND_IMAGE carry FLAGS_IMAGE; ROW_SELECT_ONOFF
+              ROW_MENU, ROW_NOBIND_IMAGE carry FLAGS_IMAGE; ROW_SELECT_SPECIAL
               and ROW_NOBIND do not) / blank; LF endings.
             Values (INIT): the five 303 knobs 64, Tuning 63, coarse 36 (C2),
             drive 0, Saw, slide off, vol 100, pan 63; LFO and velocity off:
@@ -44,7 +44,7 @@ MORPHABLE = {"ROW", "ROW_SPECIAL", "ROW_MENU", "ROW_NOBIND_IMAGE"}
 
 # init bytes per key; every key of the table must be here (and only those)
 INIT = {
-    "alk_wave": "0", "osc1_pitch_coarse": "36", "alk_tuning": "63", "alk_slide": "0",
+    "osc1_wave": "0", "osc1_pitch_coarse": "36", "alk_tuning": "63", "alk_slide": "0",
     "alk_cutoff": "64", "alk_reso": "64", "alk_envmod": "64", "alk_decay": "64",
     "alk_accent": "64", "alk_drive": "0", "instrument_vol": "100", "instrument_pan": "63",
     "lfo_rate": "0", "lfo_amount": "0", "lfo_amount_2": "0", "lfo_wave": "0",
@@ -55,6 +55,8 @@ INIT = {
     # S093 P6 (appended rows): attack at a 0.70 ms trigger (today's), pos 0
     # (free-running)
     "alk_attack": "0", "osc1_position": "0",
+    # S093 P7 (appended row): typ wav (Saw/Sqr), the former sound
+    "osc1_type": "0",
 }
 
 

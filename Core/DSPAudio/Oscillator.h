@@ -980,6 +980,39 @@ void osc_renderTypedFmRamp(OscInfo* osc, const int16_t* mod, int16_t* buf,
 void oscSection_renderOldCarrier(OscCarrierSnapshot *snap, int16_t *buf,
                                  uint8_t size);
 
+/*
+ * One wavetable blend block, split at a frame crossing (S087 P1; moved from
+ * Oscillator.c in S093 P7 so the Alkaline fused blend can take the plan).
+ *
+ * What:       segments (1 or 2); for each segment its exclusive end sample,
+ *             the lower frame of its pair, and ff at its first sample; step is
+ *             the per-sample change of the frame position.
+ * Why:        osc_typedPositionApply() limits one block's move to at most one
+ *             frame, so a glide crosses at most one frame boundary per block;
+ *             splitting there keeps every sample a blend of the two frames
+ *             around its own position.
+ * Accessors:  osc_wtbPlanBlock() (writes), the four blend copies and
+ *             osc_wtbPlanFor() (read).
+ */
+typedef struct {
+	uint8_t  segments;
+	uint8_t  end[2];
+	uint32_t pair[2];
+	float    ff[2];
+	float    step;
+} osc_wtbPlan_t;
+
+/* S093 P7: block-setup accessors for the Alkaline fused readers (Oscillator.c,
+ * after osc_wtbBlendBlock()); each returns its static helper's value. */
+uint32_t osc_slpBlockIncFor(uint32_t phaseInc, uint32_t phase,
+                            uint32_t loopStartPh, uint32_t lenPh);
+float osc_bindGainFor(const OscInfo* osc);
+const uint8_t *osc_wtbFrameFor(const OscInfo* osc,
+                               const wavetable_catalogue_entry_t *wt,
+                               uint32_t frame);
+uint32_t osc_wtbNearestFrame(uint8_t position, uint32_t count);
+void osc_wtbPlanFor(const OscInfo* osc, uint32_t count, osc_wtbPlan_t* plan);
+
 /* S087 D: sync-master rules for a modulator list entry. */
 uint8_t osc_syncMasterIsLoop(const OscInfo* master);
 uint32_t osc_buildLoopSyncList(OscInfo* master, uint32_t pos,

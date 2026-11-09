@@ -1863,8 +1863,8 @@ into both normal and morph endpoint fields.
 `SD_CARD/Instrument/Alkaline/init.alk`, the first instrument of the type
 (F1: Instrument Load lists files, so a type with no file could never be
 selected). It uses the writer's exact form: `format`, `version=1`,
-`type=alk`, `[params]` with all 28 keys in table order and `[morph]` with
-the 22 MORPHABLE rows (all but `alk_wave`, `velo_mod_dest` and the four LFO
+`type=alk`, `[params]` with all 29 keys in table order and `[morph]` with
+the 23 MORPHABLE rows (all but `osc1_type`, `velo_mod_dest` and the four LFO
 targets); the LFO voices are `self`, the target selectors `255`
 (`INSTRUMENT_TARGET_TOKEN_OFF`), LF endings and the final blank line.
 `tools/alkaline/make_init_alk.py --check` (run by
@@ -1901,8 +1901,8 @@ Current descriptor counts:
 - Snare: 42 descriptors.
 - Cymbal: 43 descriptors.
 - HiHat: 43 descriptors.
-- Alkaline: 28 descriptors (S093 P6; `alk_attack` 26 and `osc1_position`
-  27 appended after the 26 of S093 P4).
+- Alkaline: 29 descriptors (S093 P7; `alk_attack` 26, `osc1_position` 27
+  and `osc1_type` 28 appended after the 26 of S093 P4).
 
 Descriptor key lookup is type-local. The same key may exist in multiple
 instrument types but resolves against the loaded slot type.
@@ -1976,17 +1976,22 @@ Current keys by family:
   `lfo_target_param_2`.
 - Velocity: `velo_vol_on_off`, `velo_mod_amount`, `velo_mod_dest`.
 - Transient: `transient_wave`, `transient_vol`, `transient_freq`.
-- Alkaline (S093 P4/P6; 28 rows, no filter object, distortion or
-  transient): `alk_wave`, `osc1_pitch_coarse`, `alk_tuning`,
+- Alkaline (S093 P4/P6/P7; 29 rows, no filter object, distortion or
+  transient): `osc1_wave`, `osc1_pitch_coarse`, `alk_tuning`,
   `alk_slide`, `alk_cutoff`, `alk_reso`, `alk_envmod`, `alk_decay`,
   `alk_accent`, `alk_drive`, `instrument_vol`, `instrument_pan`, the eight
   LFO rows, `velo_mod_amount`, `velo_mod_dest`, the four LFO targets, then
-  (S093 P6) `alk_attack` and `osc1_position`. Appended: stored cell indices,
-  file keys before them, automation IDs and NRPN numbers are unchanged.
-  `alk_wave`: 0 `Saw` (stock `sawTable`), 1 `Sqr` (the D8 per-octave Q8
-  table); `DTYPE_ON_OFF` with high-nibble tag `ONOFF_TAG_ALK_WAVE` (3), a
-  SELECTOR, so automation steps between the two and Morph never blends
-  them. `alk_tuning` is 0..127 with 63 centre (±700 cents); `alk_slide` is
+  (S093 P6) `alk_attack` and `osc1_position`, then (S093 P7) `osc1_type`.
+  Appended: stored cell indices, file keys before them, automation IDs and
+  NRPN numbers are unchanged. **S093 P7 renames row 0 `alk_wave` to
+  `osc1_wave`** (Drum's key; no migration) and makes it the type-dependent
+  wave/item cell.
+  `osc1_wave`: under typ wav, 0 `Saw` (stock `sawTable`), 1 `Sqr` (the D8
+  per-octave Q8 table); DTYPE_MENU | MENU_WAVEFORM with MOD_WAVE (S093 P7),
+  so automation/Morph/LFO step through the list; under smp/slp/wtb it is the
+  catalogue item index.
+  `osc1_type` (28): 0 `wav`, 1 `smp`, 2 `slp`, 3 `wtb`, a SELECTOR.
+  `alk_tuning` is 0..127 with 63 centre (±700 cents); `alk_slide` is
   a latched on/off; the five 303 knobs and `alk_drive` (S093 P6: 16^drive,
   x1..x16) are 0..127. `alk_attack` is 0..127 (0 = the former 0.70 ms CPU
   trigger, 127 = 0.55 ms) and `osc1_position` is 0..127 (0 free-running,

@@ -1086,6 +1086,23 @@ static uint8_t preset_setSupplementalParameterInternal(
     if (descriptor->runtime.kind == INSTRUMENT_BIND_INSTANCE_OFFSET &&
         !(descriptor->flags & INSTRUMENT_PARAM_FLAG_SELECTOR))
         return 0u;
+    /*
+     * S093 P7 F1: refuse an inadmissible selector value before it is stored.
+     *
+     * What:       an Alkaline osc1_type set to smp/slp/wtb while the Scene's
+     *             other slots already hold two Advanced places is not stored
+     *             and not written (returns 0: the cell keeps its value).
+     * Why:        the Advanced count reads the stored image; storing the
+     *             value and refusing only the runtime left a phantom Advanced
+     *             place (a Cymbal could no longer be loaded into its own slot)
+     *             and a typ cell showing a type the voice did not play.
+     * Affiliates: instrumentManager_selectorValueAdmitted(); the
+     *             IM_SPECIAL_OSC_TYPE runtime guard.
+     */
+    if (!instrumentManager_selectorValueAdmitted(scene_index, slot,
+                                                 descriptor_index,
+                                                 (uint8_t)value))
+        return 0u;
 
     /*
      * Supplemental target cells are retained as byte tokens.

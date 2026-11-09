@@ -161,6 +161,62 @@ void DiodeLadder_renderB2(DiodeLadder *dl, int16_t *buf, float sScale,
 void DiodeLadder_renderB2Osc(DiodeLadder *dl, int16_t *buf, const int16_t *row,
                              uint32_t *phase, uint32_t phaseInc, float sScale,
                              float iLadEnd, float iAbcEnd);
+/*
+ * One block's user-source read for a fused B2R loop (S093 P7, S1).
+ *
+ * What:       the per-block constants of the oscillator reader that a fused
+ *             variant inlines; the caller fills it once per block from the
+ *             bound catalogue item; the phase lives in the oscillator (the
+ *             wrappers' phase pointer) and its step is their phaseInc.
+ * Why:        plan §7.3 S1: the read fused into the ladder loop, as
+ *             DiodeLadder_renderB2Osc() fused the table read (-9 per sample,
+ *             AL-X); one compile-time variant per source, no source branch
+ *             inside the loop.
+ * Fields:     d16      smp/slp: the int16 frames (the item's base);
+ *             endPh    smp: frames << 12, where the playhead holds;
+ *             ls, le   slp: loop start / end frames (the seam reads ls);
+ *             loopEndPh, lenPh  slp: le << 12 and (le - ls) << 12;
+ *             gain     smp/slp: the item's gain code (osc_bindGainFor());
+ *             fa, fb   wtb: frame base(s) (plain: fa only; blend: the pair);
+ *             fa2, fb2 wtb blend: the second segment's pair;
+ *             seg      wtb blend: the first sample of segment 2
+ *                      (OUTPUT_DMA_SIZE when the block has one segment);
+ *             ff, ff2, step  wtb blend: the frame fraction at each segment's
+ *                      first sample and its per-sample change;
+ *             len, bits  wtb: frame length (points) and depth (8 or 16).
+ * Accessors:  DiodeLadder_renderB2Smp/Slp/Wtb/WtbBlend(); filled by
+ *             AlkalineVoice.c alk_renderTyped().
+ * Affiliates: Oscillator.c osc_smpPlainBlock(), osc_slpPlainBlock(),
+ *             osc_wtbPlainBlock(), osc_wtbBlendBlock() (the arithmetic each
+ *             variant reproduces bit for bit; bench law AL-X2).
+ */
+typedef struct {
+	const int16_t *d16;
+	uint32_t endPh;
+	uint32_t ls, le, loopEndPh, lenPh;
+	float    gain;
+	const uint8_t *fa, *fb, *fa2, *fb2;
+	uint32_t len;
+	uint8_t  bits;
+	uint8_t  seg;
+	float    ff, ff2, step;
+} DlSrc;
+
+/* S093 P7: B2R with a user source's read fused (see DlSrc); buf is output
+ * only; phase/phaseInc are the oscillator's (slp: the block step from
+ * osc_slpBlockIncFor()). */
+void DiodeLadder_renderB2Smp(DiodeLadder *dl, int16_t *buf, const DlSrc *src,
+                             uint32_t *phase, uint32_t phaseInc, float sScale,
+                             float iLadEnd, float iAbcEnd);
+void DiodeLadder_renderB2Slp(DiodeLadder *dl, int16_t *buf, const DlSrc *src,
+                             uint32_t *phase, uint32_t phaseInc, float sScale,
+                             float iLadEnd, float iAbcEnd);
+void DiodeLadder_renderB2Wtb(DiodeLadder *dl, int16_t *buf, const DlSrc *src,
+                             uint32_t *phase, uint32_t phaseInc, float sScale,
+                             float iLadEnd, float iAbcEnd);
+void DiodeLadder_renderB2WtbBlend(DiodeLadder *dl, int16_t *buf, const DlSrc *src,
+                                  uint32_t *phase, uint32_t phaseInc, float sScale,
+                                  float iLadEnd, float iAbcEnd);
 void DiodeLadder_renderB(DiodeLadder *dl, int16_t *buf, float sScale,
                          float iLadEnd, float iAbcEnd);
 void DiodeLadder_renderA(DiodeLadder *dl, int16_t *buf, float sScale,

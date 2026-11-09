@@ -17,12 +17,17 @@
  * 303 saw's 5.35 V; the square table carries ALK_SQR_SCALE_V. */
 #define ALK_SAW_SCALE_V  (2.675f / 32625.0f)
 #define ALK_V561         3.263f
+/* S093 P7: a user item (sample, wavetable) enters the ladder at the saw's
+ * scale: a full-scale item swings as far as the stock saw (+-32,625 LSB =
+ * the 303 saw's 5.35 V), times this block's drive */
+#define ALK_USER_SCALE_V ALK_SAW_SCALE_V
 
 void Alkaline_initVoice(AlkalineVoice *voice)
 {
 	if (!voice)
 		return;
-	voice->osc.waveform = SAW;
+	voice->osc.oscType = OSC_TYPE_WAV;     /* S093 P7: typ wav (init.alk osc1_type 0) */
+	voice->osc.waveform = ALK_WAVE_SAW;    /* S093 P7: wav Saw (was the stock SAW, 2, for the octave index; osc_setTableFreq() never read it) */
 	voice->osc.freq = 65.406f;
 	voice->osc.pitchMod = 1.0f;
 	voice->osc.modNodeValue = 1.0f;
@@ -49,7 +54,6 @@ void Alkaline_initVoice(AlkalineVoice *voice)
 	voice->attack = 0.0f;   /* S093 P6: init.alk alk_attack = 0, today's attack */
 	voice->vol = 100.0f / 127.0f;
 	voice->pan = 63u;
-	voice->wave = ALK_WAVE_SAW;
 	voice->slide = 0u;
 
 	voice->note = MIDI_DEFAULT_TRIGGER_NOTE;
@@ -112,25 +116,23 @@ void Alkaline_triggerVoice(AlkalineVoice *voice, const uint8_t source_slot,
 		voice->pitchJump = 1u;
 		alkMeg_trigger(&voice->meg);
 		alkVeg_trigger(&voice->veg, voice->attack);
-		/*
-		 * S093 P6: pos, the note-start phase (user).
-		 *
-		 * What:       pos 0 leaves the oscillator free-running (the 303's VCO,
-		 *             today's sound bit for bit); pos 1..127 sets the phase to
-		 *             pos/128 of a cycle at every non-legato note, so each
-		 *             note starts at the same point of the waveform (a
-		 *             zero-crossing start and a peak start give a different
-		 *             onset into the ladder). positionApplied re-anchors to
-		 *             pos either way, so no bend follows the trigger.
-		 * Why:        a phase offset on a free-running oscillator is not heard
-		 *             (S093 P6 plan §8.1); the reset gives pos a sound.
-		 * Inputs:     osc.position (osc1_position, 0..127).
-		 * Outputs:    osc.phase (pos != 0), osc.positionApplied.
-		 * Affiliates: the per-block bend in Alkaline_calcVoiceAsync(); the
-		 *             fused loop's 32-bit cycle (DiodeLadder.c: index ph >> 22
-		 *             of 1024), so pos << 25 is pos/128 of it.
-		 */
-		{
+		if (osc_isTyped(&voice->osc)) {
+			/*
+			 * S093 P7: a typed note starts at the item's pos point.
+			 *
+			 * What:       osc_typedTriggerPhase() binds first (an item changed
+			 *             on this step starts correctly), then smp/slp start at
+			 *             pos/128 of the item (slp: inside its loop), wtb at
+			 *             phase 0 (pos is its frame position); positionApplied =
+			 *             pos, so the next block does not glide.
+			 * Why:        Drum's typed start (DrumVoice.c l. 353-354); a legato
+			 *             note keeps the playhead (no branch taken), as the
+			 *             303's VCO keeps running through a slide.
+			 * Affiliates: osc_typedTriggerPhase() (Oscillator.c l. 1689).
+			 */
+			voice->osc.phase = osc_typedTriggerPhase(&voice->osc);
+		} else {
+			/* S093 P6: pos on Saw/Sqr (S093_P6_IMPLEMENTATION.md §7.1) */
 			const uint8_t pos = (uint8_t)(voice->osc.position & 127u);
 
 			if (pos != 0u)
@@ -181,38 +183,64 @@ void Alkaline_calcVoiceAsync(AlkalineVoice *voice)
 	voice->pitchJump = 0u;
 	voice->osc.freq = alk_exp2f(voice->pitchLog2
 	                        + (voice->tuning * 127.0f - 63.0f) * (7.0f / 12.0f / 63.0f));
-	osc_setTableFreq(&voice->osc);
-	/*
-	 * S093 P6: pos while it moves: the per-block bend (the stock waves' rule,
-	 * Oscillator.h osc_positionBendApply(), INSTRUMENTS_DSP_REFERENCE §6.1.1).
-	 *
-	 * What:       d = the circular step from the applied position to pos,
-	 *             -64..+63 (127 -> 0 is +1); positionApplied advances by d and
-	 *             phaseInc gains d x OSC_POS_BEND_PER_STEP (2^25 / 32), which
-	 *             held for the 32-sample block moves the phase by exactly d/128
-	 *             of a cycle: the oscillator lands on the new offset, no drift.
-	 * Why:        a pos change at a block edge would click; the bend spreads it
-	 *             over the block as a small pitch excursion. The stock helper
-	 *             is not used: it requires osc_positionBendRestore() after the
-	 *             render, and Alkaline recomputes phaseInc every block
-	 *             (osc_setTableFreq() above), so the bend clears itself. That is
-	 *             S3 of the plan (§7.3), a saving shared with P7.
-	 * Cost:       13 instructions per block (+0.41 per sample; the block
-	 *             compiled alone for the M7 at -Ofast). The plan's +0.8
-	 *             counted the stock apply/restore pair; the linked count
-	 *             (control_cost.py) decides.
-	 *             No cap: |d| <= 64 = OSC_POS_BEND_CAP.
-	 * Constant:   at a steady pos d = 0 and phaseInc is unchanged (pos 0:
-	 *             today's oscillator bit for bit).
-	 */
-	{
-		const uint32_t u = ((uint32_t)(voice->osc.position & 127u) -
-		                    (uint32_t)voice->osc.positionApplied + 64u) & 127u;
-		const int32_t d = (int32_t)u - 64;
+	if (osc_isTyped(&voice->osc)) {
+		/*
+		 * S093 P7 S2 + S3: the typed pitch and pos.
+		 *
+		 * What:       osc_userBind() re-reads the item only when kind, index or
+		 *             the catalogue generation changed, and sets phaseInc from
+		 *             f = freq x pitchMod x modNodeValue (the product
+		 *             osc_setTableFreq() uses): wtb by the cycle law
+		 *             freq2PhaseIncr(f), smp/slp by f x 2^22 / REAL_FS
+		 *             (Q19.12 frames per sample). osc_typedPositionApply(.., 1)
+		 *             then glides pos: smp/slp bend phaseInc by d x frames
+		 *             (capped, D3-D5); wtb moves the frame position at most one
+		 *             frame per block, phaseInc untouched.
+		 * Why:        no restore (S3): phaseInc is recomputed here every block,
+		 *             so the bend clears itself; positionBendStep is read only by
+		 *             the restore (smp/slp) and by osc_wtbPlanBlock() right after
+		 *             this call (wtb), so leaving it set is exact.
+		 * Cost:       the measured +355 per block of §0 (the 64-bit cap
+		 *             division 213 of it, smp/slp only).
+		 * Affiliates: osc_userBind() l. 1552; osc_typedPositionApply() l. 1753;
+		 *             alk_renderTyped() (reads the bind).
+		 */
+		osc_userBind(&voice->osc);
+		osc_typedPositionApply(&voice->osc, 1u);
+	} else {
+		osc_setTableFreq(&voice->osc);
+		/*
+		 * S093 P6: pos while it moves: the per-block bend (the stock waves' rule,
+		 * Oscillator.h osc_positionBendApply(), INSTRUMENTS_DSP_REFERENCE §6.1.1).
+		 *
+		 * What:       d = the circular step from the applied position to pos,
+		 *             -64..+63 (127 -> 0 is +1); positionApplied advances by d and
+		 *             phaseInc gains d x OSC_POS_BEND_PER_STEP (2^25 / 32), which
+		 *             held for the 32-sample block moves the phase by exactly d/128
+		 *             of a cycle: the oscillator lands on the new offset, no drift.
+		 * Why:        a pos change at a block edge would click; the bend spreads it
+		 *             over the block as a small pitch excursion. The stock helper
+		 *             is not used: it requires osc_positionBendRestore() after the
+		 *             render, and Alkaline recomputes phaseInc every block
+		 *             (osc_setTableFreq() above), so the bend clears itself. That is
+		 *             S3 of the plan (§7.3), a saving shared with P7.
+		 * Cost:       13 instructions per block (+0.41 per sample; the block
+		 *             compiled alone for the M7 at -Ofast). The plan's +0.8
+		 *             counted the stock apply/restore pair; the linked count
+		 *             (control_cost.py) decides.
+		 *             No cap: |d| <= 64 = OSC_POS_BEND_CAP.
+		 * Constant:   at a steady pos d = 0 and phaseInc is unchanged (pos 0:
+		 *             today's oscillator bit for bit).
+		 */
+		{
+			const uint32_t u = ((uint32_t)(voice->osc.position & 127u) -
+			                    (uint32_t)voice->osc.positionApplied + 64u) & 127u;
+			const int32_t d = (int32_t)u - 64;
 
-		voice->osc.positionApplied =
-			(uint8_t)(((uint32_t)voice->osc.positionApplied + (uint32_t)d) & 127u);
-		voice->osc.phaseInc += (uint32_t)(d * (int32_t)OSC_POS_BEND_PER_STEP);
+			voice->osc.positionApplied =
+				(uint8_t)(((uint32_t)voice->osc.positionApplied + (uint32_t)d) & 127u);
+			voice->osc.phaseInc += (uint32_t)(d * (int32_t)OSC_POS_BEND_PER_STEP);
+		}
 	}
 
 	/* control path (S092 P6 §4) */
@@ -251,11 +279,164 @@ void Alkaline_calcVoiceAsync(AlkalineVoice *voice)
 	DiodeLadder_setNet(&voice->ladder, &alkResTable[lo], &alkResTable[lo + 1u], f);
 }
 
+/*
+ * The user sources' silent block (S093 P7).
+ *
+ * What:       two zero frames: the smp fused loop over them with end 0 reads 0
+ *             at every sample and holds its (local) phase at 0.
+ * Why:        osc_renderTyped() writes a zero block when nothing is bound or
+ *             the item has no data; B2R over a zero block equals B2R over the
+ *             smp read of these frames bit for bit (s = 0 x sScale = +0), so
+ *             no fifth loop (the plain B2R, 1,244 B) is linked for that case.
+ */
+static const int16_t alk_zeroFrames[2] = { 0, 0 };
+
+/*
+ * One block of a user oscillator type through its fused B2R loop (S093 P7).
+ *
+ * What:       fills a DlSrc from the bound catalogue item, exactly as the
+ *             typed reader reads it this block, and calls the variant:
+ *             - smp: data, end = frames << 12, the item gain;
+ *             - slp: data, the loop, the item gain; the step is the reader's
+ *               osc_slpBlockInc() of this block's (bent) phaseInc;
+ *             - wtb: with two or more frames and an interpolation slot granted
+ *               (modNode_interpClaim(), as osc_wtbBlendBlock()), the blend of
+ *               the plan's frame pair(s); else the nearest frame;
+ *             - nothing bound, or no data: the silent block.
+ * Why:        plan §7.3 S1/S4: one fused loop per source, each bit-identical
+ *             to osc_renderTyped(gain 1) + plain B2R (bench law AL-X2); the
+ *             per-block dispatch keeps every loop free of a source branch.
+ * Inputs:     voice (bound by Alkaline_calcVoiceAsync()); buf (output).
+ * Outputs:    buf; voice->osc.phase; the ladder state; a slot grant.
+ * Accessors:  Alkaline_calcVoiceSyncBlock().
+ * Affiliates: osc_renderTyped() and its readers (Oscillator.c l. 1921, 1965,
+ *             2855, 2901); osc_*For() accessors (§6);
+ *             DiodeLadder_renderB2Smp/Slp/Wtb/WtbBlend() (§5).
+ */
+static void alk_renderTyped(AlkalineVoice *voice, int16_t *buf)
+{
+	OscInfo *const osc = &voice->osc;
+	/* a full-scale item enters at the saw's level, times this block's drive */
+	const float sScale = ALK_USER_SCALE_V * voice->driveGain;
+	/* the ladder current and the OTA current (with the drive make-up), as the
+	 * wav path passes them */
+	const float iLad = voice->iLadEnd;
+	const float iAbc = voice->iAbcEnd * voice->makeup;
+	DlSrc src;
+
+	switch (osc->sampleCacheLooped) {
+	case OSC_BIND_SMP:
+		/* osc_smpPlainBlock()'s guard: data and a length */
+		if (osc->sampleCacheData && osc->sampleCacheSize != 0u) {
+			src.d16 = (const int16_t *)osc->sampleCacheData;
+			/* the playhead holds on the item's first pad frame */
+			src.endPh = osc->sampleCacheSize << OSC_SAMPLE_PHASE_SHIFT;
+			/* gain 1 x the item's gain code (the reader's g = gain x bind) */
+			src.gain = osc_bindGainFor(osc);
+			DiodeLadder_renderB2Smp(&voice->ladder, buf, &src, &osc->phase,
+			                        osc->phaseInc, sScale, iLad, iAbc);
+			return;
+		}
+		break;
+	case OSC_BIND_SLP: {
+		const sample_catalogue_entry_t *e = sampleMemory_sampleEntry(osc->sampleCacheIndex);
+		/* the reader's loop: the entry's, or the whole item without one */
+		const uint32_t ls = e ? e->loop_start : 0u;
+		const uint32_t le = e ? e->loop_end : osc->sampleCacheSize;
+
+		/* osc_slpPlainBlock()'s guard: data, a length, a loop */
+		if (osc->sampleCacheData && osc->sampleCacheSize != 0u && le != ls) {
+			src.d16 = (const int16_t *)osc->sampleCacheData;
+			src.ls = ls;
+			src.le = le;
+			/* Q19.12 loop length and end: the wrap subtracts one length */
+			src.lenPh = (le - ls) << OSC_SAMPLE_PHASE_SHIFT;
+			src.loopEndPh = le << OSC_SAMPLE_PHASE_SHIFT;
+			src.gain = osc_bindGainFor(osc);
+			/* the block step: forward modulo the loop, or a backward glide as
+			 * the equal forward step (osc_slpBlockInc(), F5) */
+			DiodeLadder_renderB2Slp(&voice->ladder, buf, &src, &osc->phase,
+			                        osc_slpBlockIncFor(osc->phaseInc, osc->phase,
+			                                           ls << OSC_SAMPLE_PHASE_SHIFT,
+			                                           src.lenPh),
+			                        sScale, iLad, iAbc);
+			return;
+		}
+		break; }
+	case OSC_BIND_WTB8:
+	case OSC_BIND_WTB16: {
+		const wavetable_catalogue_entry_t *wt = sampleMemory_wavetableEntry(osc->sampleCacheIndex);
+
+		/* osc_wtbPlainBlock()'s guard: an entry and data */
+		if (wt && osc->sampleCacheData) {
+			const uint32_t count = wt->frame_count;
+
+			src.len = wt->frame_len;
+			src.bits = wt->bits;
+			/* S4: the blend only with one of the two system slots; the claim
+			 * is the reader's (sticky across blocks), evaluated only for two
+			 * or more frames, as osc_wtbBlendBlock()'s guard order */
+			if (count >= 2u && modNode_interpClaim(osc)) {
+				osc_wtbPlan_t plan;
+
+				/* the block's glide from positionApplied - positionBendStep to
+				 * positionApplied, in 1 or 2 segments (osc_wtbPlanBlock()) */
+				osc_wtbPlanFor(osc, count, &plan);
+				src.fa = osc_wtbFrameFor(osc, wt, plan.pair[0]);
+				src.fb = osc_wtbFrameFor(osc, wt, plan.pair[0] + 1u);
+				src.ff = plan.ff[0];
+				src.step = plan.step;
+				if (plan.segments == 2u) {
+					/* the glide crosses a frame at sample end[0] */
+					src.seg = plan.end[0];
+					src.fa2 = osc_wtbFrameFor(osc, wt, plan.pair[1]);
+					src.fb2 = osc_wtbFrameFor(osc, wt, plan.pair[1] + 1u);
+					src.ff2 = plan.ff[1];
+				} else {
+					/* one segment: the switch sample is never reached */
+					src.seg = OUTPUT_DMA_SIZE;
+					src.fa2 = src.fa;
+					src.fb2 = src.fb;
+					src.ff2 = src.ff;
+				}
+				DiodeLadder_renderB2WtbBlend(&voice->ladder, buf, &src, &osc->phase,
+				                             osc->phaseInc, sScale, iLad, iAbc);
+				return;
+			}
+			/* no slot or one frame: the nearest frame (the Q9 fallback) */
+			src.fa = osc_wtbFrameFor(osc, wt, osc_wtbNearestFrame(osc->positionApplied, count));
+			DiodeLadder_renderB2Wtb(&voice->ladder, buf, &src, &osc->phase,
+			                        osc->phaseInc, sScale, iLad, iAbc);
+			return;
+		}
+		break; }
+	default:
+		break;
+	}
+	/* nothing bound or no data: the silent block; the oscillator's phase is
+	 * not advanced (osc_renderTyped()'s zero block leaves it) */
+	{
+		uint32_t still = 0u;
+
+		src.d16 = alk_zeroFrames;
+		src.endPh = 0u;
+		src.gain = 1.0f;
+		DiodeLadder_renderB2Smp(&voice->ladder, buf, &src, &still, 0u, sScale, iLad, iAbc);
+	}
+}
+
 void Alkaline_calcVoiceSyncBlock(AlkalineVoice *voice, int16_t *buf, const uint8_t size)
 {
-	const uint8_t square = (uint8_t)(voice->wave == ALK_WAVE_SQUARE);
+	/* S093 P7: Saw/Sqr is typ wav with wav 1 (was AlkalineVoice.wave) */
+	const uint8_t square = (uint8_t)(voice->osc.waveform == ALK_WAVE_SQUARE);
 
 	(void)size;   /* the ladder always renders OUTPUT_DMA_SIZE */
+	/* S093 P7: a user type takes its own fused loop; the branch is per block,
+	 * outside every loop */
+	if (osc_isTyped(&voice->osc)) {
+		alk_renderTyped(voice, buf);
+		return;
+	}
 	/* B2R (user, S093). The make-up scales the OTA current, which the kernel
 	 * already ramps per sample and which feeds only the output, so the
 	 * per-sample loop is the same with or without it. */

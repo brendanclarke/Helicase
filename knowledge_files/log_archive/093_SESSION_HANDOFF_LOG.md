@@ -143,6 +143,37 @@ data 420 B, bss 413,280 B; flash headroom 49,412 B; ITCM 14,552 B.
   decay ends, the resonance top/self-oscillation, drive ×16, `pos`, and
   the worst-case `cpu` with four Alkalines at Res and drive full.
 
+### P7 (samples/wavetables as oscillator types, implemented 2026-11-09)
+
+- **Rows/menu.** Row 0 renamed `alk_wave` -> `osc1_wave` (Drum's
+  `ROW_MENU`/`MENU_WAVEFORM`/`MOD_WAVE`, no migration); `osc1_type` (28)
+  appended; OSC page `coa tun wav pos | typ`; 29 rows, `init.alk` 29 keys /
+  23 morph rows. `ONOFF_TAG_ALK_WAVE` removed.
+- **Voice.** `AlkalineVoice.wave` removed (size stays 548); Saw/Sqr reads
+  `osc.waveform`; typed trigger/async paths call `osc_typedTriggerPhase()`,
+  `osc_userBind()` and `osc_typedPositionApply()` (S2/S3); sync block
+  dispatches to `alk_renderTyped()`.
+- **Fused readers.** `DlSrc` + `DiodeLadder_renderB2Smp/Slp/Wtb/WtbBlend`
+  in `dl_renderB2Body()` with a compile-time source; five `osc_*For()`
+  accessors; `osc_wtbPlan_t` moved to `Oscillator.h`.
+- **Measured.** AL-X2: 0 differing samples/phases in smp, slp, wtb16/8 blend
+  and nearest, smp none; RMS 729/938/1958/2411/2059/2208/0. Linked loops:
+  wav 215 (P6 214: +1 from linking the typed code, accepted by the user;
+  `wav` ≈ 253.6), smp 217, slp 229, wtb 235/238, blend 255/264; per block
+  1,900 (11 VDIV). Flash headroom 38,788 B; ITCM 14,552 B.
+- **Admission (P7-D1).** Option A core implemented: a typed Alkaline counts
+  as an Advanced place; `instrumentManager_selectorValueAdmitted()` refuses
+  a typed value when two other Advanced places exist, before the stored
+  image changes for a menu edit (S093 P7 §14 F1 fix) and in the runtime
+  writer as the guard. A-1/A-2 (Load/Copy of a stored typed
+  `typ` when no place is free) remain the user's open policy decision.
+- **Gates.** Host 15 groups 0 failures; special_tags 200 rows; `make all`
+  clean. `elf_p4_check`: 93/93 oscillator loops exact; **2 mixer hot loops
+  GREW by 1** (HiHat `calcSampleOscFmBlock` 36→37, one mixer decimation
+  10→11), source-paired with `elf_loopsrc.py --compare` on P6/current `-g`
+  twins: LTO layout, not a P7 loop. This is a deviation from the schedule's
+  0-grew expectation and is recorded for the user.
+
 ## Find here
 
 - `S093_P4_FIRMWARE_IMPLEMENTATION.md` - phase 1 schedule and the

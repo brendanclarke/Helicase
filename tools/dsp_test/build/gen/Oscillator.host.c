@@ -2750,25 +2750,7 @@ static float osc_wtbFramePos(uint8_t position, uint32_t count)
 	return (float)(position & 127u) * (float)(count - 1u) * (1.0f / 127.0f);
 }
 
-/*
- * One wavetable blend block, split at a frame crossing (S087 P1).
- *
- * What:       segments (1 or 2); for each segment its exclusive end sample,
- *             the lower frame of its pair, and ff at its first sample; step is
- *             the per-sample change of the frame position.
- * Why:        osc_typedPositionApply() limits one block's move to at most one
- *             frame (|d| <= 127 / (count - 1)), so a glide crosses at most one
- *             frame boundary per block; splitting there keeps every sample a
- *             blend of the two frames around its own position.
- * Accessors:  osc_wtbPlanBlock() (writes), the four blend copies (read).
- */
-typedef struct {
-	uint8_t  segments;
-	uint8_t  end[2];
-	uint32_t pair[2];
-	float    ff[2];
-	float    step;
-} osc_wtbPlan_t;
+/* S093 P7: osc_wtbPlan_t is in Oscillator.h (the Alkaline fused blend takes the plan) */
 
 /*
  * Plan one wavetable blend block (S087 P1).
@@ -3695,5 +3677,52 @@ void __attribute__((noinline, noclone)) osc_renderTypedFmRamp(
 		osc_zeroBlock(buf, size);
 		break;
 	}
+}
+
+/* ------------------------------------------------------------------------
+ * S093 P7: block-setup accessors for the Alkaline fused readers.
+ *
+ * What:       non-static wrappers over five static helpers of the typed
+ *             readers, so Alkaline_calcVoiceSyncBlock() fills a DlSrc with
+ *             exactly the values the readers compute: the slp block step,
+ *             the item gain, a wavetable frame's base, the nearest frame, the
+ *             blend plan (at OUTPUT_DMA_SIZE, the size every reader call
+ *             passes, so the existing constprop clone serves it).
+ * Why:        S093 P7 S1: the fused loops must be bit-identical to reader +
+ *             plain B2R (AL-X2); calling the readers' own helpers keeps one
+ *             definition of each rule. The helpers and the S087 loops are not
+ *             edited; these wrappers are flash code (no section attribute),
+ *             called once per block.
+ * Accessors:  AlkalineVoice.c alk_renderTyped().
+ * Affiliates: osc_slpBlockInc() l. 1895, osc_bindGain() l. 1861,
+ *             osc_wtbFrame() l. 2719, osc_wtbFrameOf() l. 2729,
+ *             osc_wtbPlanBlock() l. 2795; DlSrc (DiodeLadder.h).
+ * ------------------------------------------------------------------------ */
+uint32_t osc_slpBlockIncFor(const uint32_t phaseInc, const uint32_t phase,
+                            const uint32_t loopStartPh, const uint32_t lenPh)
+{
+	return osc_slpBlockInc(phaseInc, phase, loopStartPh, lenPh);
+}
+
+float osc_bindGainFor(const OscInfo* osc)
+{
+	return osc_bindGain(osc);
+}
+
+const uint8_t *osc_wtbFrameFor(const OscInfo* osc,
+                               const wavetable_catalogue_entry_t *wt,
+                               const uint32_t frame)
+{
+	return osc_wtbFrame(osc, wt, frame);
+}
+
+uint32_t osc_wtbNearestFrame(const uint8_t position, const uint32_t count)
+{
+	return osc_wtbFrameOf(position, count);
+}
+
+void osc_wtbPlanFor(const OscInfo* osc, const uint32_t count, osc_wtbPlan_t* plan)
+{
+	osc_wtbPlanBlock(osc, count, OUTPUT_DMA_SIZE, plan);
 }
 
