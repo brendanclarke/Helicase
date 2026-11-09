@@ -1,0 +1,22 @@
+# S093 P8 standalone loop counts (scratch variants of Core/DSPAudio/DiodeLadder.c, 2026-11-09)
+# arm-none-eabi-gcc -c -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard -Ofast -std=gnu11 -ffunction-sections (no LTO)
+# elf_looppath.py --elf DL.o --sym <fn> --cond-heads --in-range --top 1
+DiodeLadder_renderB2: loop head 0x16c: longest 198 (vdiv 3), shortest 198, paths 1
+DiodeLadder_renderB2Osc: loop head 0x184: longest 213 (vdiv 3), shortest 213, paths 1
+DiodeLadder_renderB2Smp: loop head 0x18c: longest 215 (vdiv 3), shortest 215, paths 1
+DiodeLadder_renderB2SmpT: loop head 0x184: longest 215 (vdiv 3), shortest 215, paths 1
+DiodeLadder_renderB2Slp: loop head 0x184: longest 226 (vdiv 3), shortest 226, paths 1
+DiodeLadder_renderB2SlpN: loop head 0x188: longest 222 (vdiv 3), shortest 222, paths 1
+DiodeLadder_renderB2SlpR: loop head 0x180: longest 227 (vdiv 3), shortest 227, paths 1
+DiodeLadder_renderB2SlpRN: loop head 0x184: longest 222 (vdiv 3), shortest 222, paths 1
+DiodeLadder_renderB2SlpR2: loop head 0x180: longest 226 (vdiv 3), shortest 226, paths 1
+# .text sizes (B)
+.text.DiodeLadder_renderB2         1244      0
+.text.DiodeLadder_renderB2Osc      1340      0
+.text.DiodeLadder_renderB2Smp      1344      0
+.text.DiodeLadder_renderB2Slp      1388      0
+.text.DiodeLadder_renderB2SlpN     1372      0
+.text.DiodeLadder_renderB2SmpT     1344      0
+.text.DiodeLadder_renderB2SlpR     1388      0
+.text.DiodeLadder_renderB2SlpRN    1368      0
+.text.DiodeLadder_renderB2SlpR2    1376      0
