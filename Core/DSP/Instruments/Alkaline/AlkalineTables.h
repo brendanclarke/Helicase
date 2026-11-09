@@ -10,7 +10,8 @@
 #include "DiodeLadder.h"
 
 /* Resonance table of the real-time network, form N1 (S093 P1 §5). */
-#define ALK_RES_POINTS        9u
+#define ALK_RES_POINTS        13u
+#define ALK_RES_KMAX          1.5f  /* S093 P6: knob 1 = feedback x1.5 */
 #define ALK_NET_BLOCK         64u    /* samples per slow-network update */
 #if ALK_NET_STATES != 6u
 #error "AlkalineTables: generated for 6 network states (ALK_NET_STATES)"
@@ -25,8 +26,9 @@ extern const DiodeLadderNet alkResTable[ALK_RES_POINTS];
 #define ALK_NET_BE_V          1.12397456e-05f
 #define ALK_NET_DECAY_V       0.334868908f
 
-/* TPT prewarp c(k) at k = 0, 0.1 .. 1 (S092 P6 §5.2). */
-#define ALK_PREWARP_POINTS    11u
+/* TPT prewarp c(k_eff) at k_eff = 0, 0.1 .. RES_KMAX, indexed by the knob
+ * (S092 P6 §5.2; S093 P6: held at c(1) above k_eff 1). */
+#define ALK_PREWARP_POINTS    16u
 extern const float alkPrewarpC[ALK_PREWARP_POINTS];
 
 /* VEG: Q31 current against C42 voltage, uniform grid (S092 P6 §4.4). */
@@ -39,6 +41,15 @@ extern const float alkVegCurrent[ALK_VEG_POINTS];   /* A */
 #define ALK_VEG_V_REC         12.1999998f
 #define ALK_VEG_TAU_REC_S     1.72000003f
 
+/* S093 P6: VEG attack against the CPU trigger width (alk_attack): knob
+ * 0 = 0.70 ms (the original fit, ALK_VEG_ATT_DELAY_S / ALK_VEG_TAU_ATT_S),
+ * knob 1 = 0.55 ms. Per point: the delay before C42 empties, the discharge
+ * length 8 tau, and the per-block factor exp(-ALK_DT / tau) as float32 so
+ * point 0 equals the compiler-folded constant of the former code. */
+typedef struct { float delay, len, keep; } AlkVegAttack;
+#define ALK_VEG_ATT_POINTS    9u
+extern const AlkVegAttack alkVegAttack[ALK_VEG_ATT_POINTS];
+
 /* MEG (S092 P6 §4.2). */
 #define ALK_MEG_V_PEAK        11.3764372f
 #define ALK_MEG_V_REST        0.706074953f
@@ -46,6 +57,11 @@ extern const float alkVegCurrent[ALK_VEG_POINTS];   /* A */
 #define ALK_MEG_DROP          1.21000004f
 #define ALK_MEG_SOFT          0.119999997f
 #define ALK_MEG_V53_MIN       0.0210128035f
+/* S093 P6: the decay law r = R_MIN + R_SPAN x alk_taper(decay), fitted by
+ * fit_meg_range.py (-20 % at decay 0, +50 % at decay 1 against the 303's
+ * 68 k + 1 M); the accent path keeps 68 k + the 4066. */
+#define ALK_MEG_R_MIN         54068.8398f
+#define ALK_MEG_R_SPAN        1560242.5f
 
 /* Accent network (S092 P6 §4.3). */
 #define ALK_ACC_V13_REST      3.2486999f

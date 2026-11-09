@@ -4,7 +4,8 @@
 What:       C0 (S093 P3): the firmware kernels (B2R, B-R, A-R) against their
             reference, the S093 P1 variant kernels (variants/dlv_kernel.c:
             B2R, B_n1rq_ota32, A_n1q), on identical inputs: the SPICE e2e
-            saw x drive and currents, acid x1/x4/x8 and lowres x1/x4/x8, the
+            saw x drive and currents, acid x1/x4/x8/x16 and lowres
+            x1/x4/x8/x16, the
             first 0.6 s (run_variants.py's cases and window); each also
             against the golden RK4 model (LSD60 and level).
             C1 (traces): the C ladder (B2R, B-R, A-R) driven by the
@@ -77,11 +78,12 @@ def c0():
     res = {}
     exes = {vname: RV.build_host(vname, RV.VARIANTS[vname]) for _, vname in KERNELS}
     for tag in ("acid", "lowres"):
-        for drv in (1.0, 4.0, 8.0):
+        for drv in (1.0, 4.0, 8.0, 16.0):
             tt, k, s, il, ia = RV.case_inputs(tag)
             n = len(s)
             fin, fout = os.path.join(TMP, "c0.in"), os.path.join(TMP, "c0.out")
-            np.concatenate([np.array([n], np.int32).view(np.float32), [np.float32(k)],
+            np.concatenate([np.array([n], np.int32).view(np.float32),
+                            [np.float32(k / M.RES_KMAX)],
                             np.stack([s, il, ia], 1).astype(np.float32).ravel()]
                            ).astype(np.float32).tofile(fin)
             subprocess.run([BIN, "--traces", fin, fout, str(drv)], check=True)
@@ -107,7 +109,7 @@ def c0():
 def c1():
     res = {}
     knobs = V.jload("e2e_results.json")
-    for tag in ("acid", "lowres"):
+    for tag in ("acid", "lowres", "acid_k15"):
         tn, d = V.load_traces(tag)
         k = knobs[tag]["knobs"]["res"]
         sel = tn > -0.05
@@ -115,7 +117,8 @@ def c1():
         s = d["saw"][sel] - np.mean(d["saw"][tn < 0])
         il, ia = np.abs(d["itail"][sel]), np.abs(d["iabc"][sel])
         n = (len(tt) // BLK) * BLK
-        blob = np.concatenate([np.array([n], np.int32).view(np.float32), [np.float32(k)],
+        blob = np.concatenate([np.array([n], np.int32).view(np.float32),
+                               [np.float32(k / M.RES_KMAX)],
                                np.stack([s[:n], il[:n], ia[:n]], 1).astype(np.float32).ravel()])
         fin, fout = os.path.join(TMP, f"{tag}.in"), os.path.join(TMP, f"{tag}.out")
         blob.astype(np.float32).tofile(fin)
@@ -161,8 +164,9 @@ def c1():
 def run_pattern(knobs, opt):
     fout = os.path.join(TMP, "pat.bin")
     subprocess.run([BIN, "--pattern", "0" if knobs["wave"] == "saw" else "1",
-                    str(knobs["cut"]), str(knobs["res"]), str(knobs["env"]),
-                    str(knobs["dec"]), str(knobs["acc"]), fout, str(opt)], check=True)
+                    str(knobs["cut"]), str(knobs["res"] / M.RES_KMAX), str(knobs["env"]),
+                    str(M.decay_knob_303(knobs["dec"])), str(knobs["acc"]), fout, str(opt)],
+                   check=True)
     raw = np.fromfile(fout, np.uint8)
     rec = 8 + 2 * BLK
     nb = len(raw) // rec

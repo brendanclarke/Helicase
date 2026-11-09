@@ -223,8 +223,12 @@ def main():
         print(f"VEG long, gate {vg} V:", res["veg"][f"long_vg{vg}"])
 
     # ---------- 3. attack against trigger width (gate 12 V)
+    # S093 P6: the 0.70 -> 0.55 ms range of the Alkaline atk knob (nine
+    # points, alk_constants.json veg.att_table) beside the coarse S092 widths
     res["attack"] = []
-    for tw in (50e-6, 200e-6, 500e-6, 1e-3, 2e-3, 5e-3):
+    widths = (50e-6, 200e-6, 500e-6, 1e-3, 2e-3, 5e-3) + tuple(
+        round(0.70e-3 - q * (0.15e-3 / 8.0), 9) for q in range(9))
+    for tw in widths:
         raw = run(f"vca_att_{int(tw * 1e6)}us", veg_netlist(12.0, tw, 5e-3, 0.5, 0.06, t_step=5e-6))
         t, iabc, v42 = raw[:, 0], np.abs(raw[:, 1]), raw[:, 3]
         m = t > 0.01

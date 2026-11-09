@@ -3,8 +3,8 @@
 
 What:       builds the Alkaline bench (tools/dsp_test modules/alkaline.c) four
             ways and renders the same material through each:
-              B2R  the current firmware sources (T1-1 accent, 9-point Res
-                   blend);
+              B2R  the current firmware sources (T1-1 accent, 13-point Res
+                   blend over k_eff 0..1.5 since S093 P6);
               b    T2-3, the accent solved once with lagged diode states
                    (-DALK_ACC_SOLVES=1);
               c    T2-4, the nearest of 33 Res points, one product per row
@@ -12,9 +12,10 @@ What:       builds the Alkaline bench (tools/dsp_test modules/alkaline.c) four
                    build/s093p3/t24, not the source tree);
               bc   both.
             Material: the S092 P4 pattern (acid and lowres knobs, the SPICE
-            run's) at drive x1 and acid at x8 (check_c.py C2's mode), and a
-            Res sweep (bench --sweep: a 16th bass line, Res 0 -> 1 over 6 s,
-            then an LFO-like 1.5 Hz wobble) at x1 and x8, the T2-4 risk.
+            run's) at drive x1 and acid at x8 and x16 (16^drive since S093
+            P6), and a Res sweep (bench --sweep: a 16th bass line, Res 0 -> 1
+            over 6 s, then an LFO-like 1.5 Hz wobble; S093 P6: the sweep now
+            reaches the x1.5 feedback top) at x1 and x8, the T2-4 risk.
             Every variant of a set is written with the B2R file's gain (peak
             0.8 of B2R), so level changes stay audible.
 Why:        the user asked what (b) and (c) do to the sound before choosing.
@@ -48,6 +49,7 @@ T24 = os.path.join(ROOT, "build", "s093p3", "t24")
 sys.argv = sys.argv[:1]
 sys.path.insert(0, HERE)
 import validate as V   # noqa: E402
+import alk_model as M  # noqa: E402
 
 FS = 44108
 BLK = 32
@@ -81,7 +83,8 @@ def build(name, defs, host33):
 def pattern(exe, knobs, drv):
     f = os.path.join(T24, "pat.bin")
     subprocess.run([exe, "--pattern", "0" if knobs["wave"] == "saw" else "1", str(knobs["cut"]),
-                    str(knobs["res"]), str(knobs["env"]), str(knobs["dec"]), str(knobs["acc"]),
+                    str(knobs["res"] / M.RES_KMAX), str(knobs["env"]),
+                    str(M.decay_knob_303(knobs["dec"])), str(knobs["acc"]),
                     f, "0", str(drv)], check=True)
     raw = np.fromfile(f, np.uint8)
     rec = 8 + 2 * BLK
@@ -149,9 +152,11 @@ def main():
     sets = {
         "acid": (lambda e: pattern(e, knobs["acid"]["knobs"], 0.0), int(0.125 * FS)),
         "lowres": (lambda e: pattern(e, knobs["lowres"]["knobs"], 0.0), int(0.125 * FS)),
-        "acid_x8": (lambda e: pattern(e, knobs["acid"]["knobs"], 1.0), int(0.125 * FS)),
+        # S093 P6: drive is 16^drv now: x8 is drv 0.75, x16 is drv 1.0
+        "acid_x8": (lambda e: pattern(e, knobs["acid"]["knobs"], 0.75), int(0.125 * FS)),
+        "acid_x16": (lambda e: pattern(e, knobs["acid"]["knobs"], 1.0), int(0.125 * FS)),
         "sweep": (lambda e: sweep(e, 0.0), FS),
-        "sweep_x8": (lambda e: sweep(e, 1.0), FS),
+        "sweep_x8": (lambda e: sweep(e, 0.75), FS),
     }
     res = {}
     for name, (render, seg) in sets.items():

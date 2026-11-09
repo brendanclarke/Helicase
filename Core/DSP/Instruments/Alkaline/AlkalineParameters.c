@@ -17,8 +17,9 @@
  *             drive extra (E2), and the platform rows every engine shares
  *             (vol, pan, the LFO pair, velocity), so Morph, LFO, automation,
  *             MIDI and storage work unchanged.
- * Not offered (S092 P0 §5.5): srt (no SRR, D4), run, chn, pos, typ (the
- *             oscillator stays a table wave, S093 P3 §9.5), fine pitch,
+ * Not offered (S092 P0 §5.5): srt (no SRR, D4), run, chn, typ (the
+ *             oscillator stays a table wave, S093 P3 §9.5; samples/wavetables
+ *             are S093 P7), fine pitch,
  *             velo_vol_on_off (the 303's velocity is the accent, D1).
  * Accessors:  InstrumentManager registry; Menu (pages); Preset/Morph/LFO/
  *             automation through the registry; storage (keys, [morph] for
@@ -117,6 +118,12 @@ typedef enum {
     ALK_PARAM_LFO_TARGET_PARAM,
     ALK_PARAM_LFO_TARGET_VOICE_2,
     ALK_PARAM_LFO_TARGET_PARAM_2,
+    /*
+     * S093 P6: appended rows. Indices 26 and 27 are new, so every stored cell,
+     * automation ID and NRPN number of rows 0..25 keeps its meaning.
+     */
+    ALK_PARAM_ATTACK,            /* 26: VEG attack as the CPU trigger width */
+    ALK_PARAM_OSC1_POSITION,     /* 27: note-start phase (0 = free-running) */
     ALK_PARAM_COUNT
 } alkaline_param_index_t;
 
@@ -183,6 +190,22 @@ const ParamDescriptor alkaline_param_descriptors[] = {
     ROW_NOBIND("lfo_target_param", "LFO", "DstParam", "ds1", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM),
     ROW_NOBIND("lfo_target_voice_2", "LFO", "DstVoice2", "vo2", DTYPE_VOICE_LFO, INSTRUMENT_BIND_LFO_TARGET_VOICE_2),
     ROW_NOBIND("lfo_target_param_2", "LFO", "DstParam2", "ds2", DTYPE_TARGET_SELECTION_LFO, INSTRUMENT_BIND_LFO_TARGET_PARAM_2),
+    /*
+     * S093 P6: atk, the VEG attack as the 303's CPU trigger-pulse width.
+     * Byte 0 = a 0.70 ms trigger, today's attack bit for bit; 127 = 0.55 ms
+     * (SPICE 10->90 % 2.11 -> 5.15 ms). The exponential C42 discharge stays;
+     * the trigger interpolates its delay, length and per-block factor from
+     * alkVegAttack[] (generated). Heard after rests and long notes; on running
+     * 16ths C42 has not recharged (the circuit's behaviour).
+     */
+    ROW("alk_attack", "Veloc EG", "Attack", "atk", DTYPE_0B127, MOD_0_127, attack, TYPE_FLT),
+    /*
+     * S093 P6: pos on Saw/Sqr, the Drum row shape (DrumParameters.c l. 314)
+     * bound to the oscillator's position byte. 0 = free-running (the 303's
+     * VCO, today's sound); 1..127 = every non-legato note starts at pos/128
+     * of a cycle; while it moves, the per-block bend (AlkalineVoice.c).
+     */
+    ROW("osc1_position", "Oscilltr", "Position", "pos", DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -193,8 +216,8 @@ _Static_assert(sizeof(alkaline_param_descriptors) / sizeof(alkaline_param_descri
                    ALK_PARAM_COUNT,
                "alkaline_param_descriptors must have one row per index");
 
-/* An empty 16-cell page (pages 1, 3, 4: no amp envelope, FM or transient
- * controls; Snare ships an all-empty page 3 the same way). */
+/* An empty 16-cell page (page 3 only after S093 P6: FM; Snare ships an
+ * all-empty page 3 the same way). */
 #define ALK_PAGE_EMPTY \
     {{ INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, \
        INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, \
@@ -202,34 +225,33 @@ _Static_assert(sizeof(alkaline_param_descriptors) / sizeof(alkaline_param_descri
        INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }}
 
 /*
- * Alkaline voice menu layout (F3: the user left the assignment open).
+ * Alkaline voice menu layout (S093 P4 F3; S093 P6 rearranged).
  *
  * What:       eight sub-pages at the index of the front-panel SELECT button
- *             that means the same thing for every engine (menu.c ≈ l. 4608:
- *             subPage = SELECTn - 1): 0 oscillator, 1 amp envelope, 2 pitch/
- *             velocity, 3 FM, 4 transient, 5 filter, 6 LFO, 7 mix. Each page
- *             is 16 cells shown as four-cell screens.
- * Why:        a 303 voice in the places a Drum player looks: the 303 pitch
- *             controls under OSC (coa tun wav sld), the filter under FILTER
- *             (cut res env dec, then drv on the second screen), accent with
- *             vol/pan under MIX.
+ *             (menu.c ≈ l. 4608): 0 oscillator, 1 amp envelope, 2 mod
+ *             (pitch/velocity), 3 FM, 4 click (transient), 5 filter, 6 LFO,
+ *             7 mix. Each page is 16 cells shown as four-cell screens.
+ * Why:        S093 P6 (user): sld on mod; atk and dec on AEG (dec is the MEG
+ *             decay and keeps its label: it moves so FILTER is one screen,
+ *             cut res env drv); acc on click; pos with the oscillator.
  */
 const instrument_menu_page_t alkaline_menu_pages[] = {
-    /* 0 OSC: coa tun wav sld */
-    {{ ALK_PARAM_OSC1_PITCH_COARSE, ALK_PARAM_TUNING, ALK_PARAM_WAVE, ALK_PARAM_SLIDE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
-    /* 1 amp envelope: none (the VEG is fixed, D10) */
+    /* 0 OSC: coa tun wav pos */
+    {{ ALK_PARAM_OSC1_PITCH_COARSE, ALK_PARAM_TUNING, ALK_PARAM_WAVE, ALK_PARAM_OSC1_POSITION, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* 1 AEG: atk dec */
+    {{ ALK_PARAM_ATTACK, ALK_PARAM_DECAY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* 2 mod: dst amt sld */
+    {{ ALK_PARAM_VELO_MOD_DEST, ALK_PARAM_VELO_MOD_AMOUNT, ALK_PARAM_SLIDE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* 3 FM: none */
     ALK_PAGE_EMPTY,
-    /* 2 velocity: dst amt (Cymbal's layout: cells 0-1) */
-    {{ ALK_PARAM_VELO_MOD_DEST, ALK_PARAM_VELO_MOD_AMOUNT, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
-    /* 3 FM, 4 transient: none */
-    ALK_PAGE_EMPTY,
-    ALK_PAGE_EMPTY,
-    /* 5 FILTER: cut res env dec | drv */
-    {{ ALK_PARAM_CUTOFF, ALK_PARAM_RESO, ALK_PARAM_ENVMOD, ALK_PARAM_DECAY, ALK_PARAM_DRIVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* 4 click: acc */
+    {{ ALK_PARAM_ACCENT, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* 5 FILTER: cut res env drv (one screen) */
+    {{ ALK_PARAM_CUTOFF, ALK_PARAM_RESO, ALK_PARAM_ENVMOD, ALK_PARAM_DRIVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     /* 6 LFO: the Drum layout (DrumParameters.c l. 411) */
     {{ ALK_PARAM_LFO_RATE, ALK_PARAM_LFO_SYNC, ALK_PARAM_LFO_WAVE, ALK_PARAM_LFO_OFFSET, ALK_PARAM_LFO_RETRIGGER_VOICE, ALK_PARAM_LFO_POLARITY, ALK_PARAM_LFO_AMOUNT, ALK_PARAM_LFO_AMOUNT_2, ALK_PARAM_LFO_TARGET_VOICE, ALK_PARAM_LFO_TARGET_PARAM, ALK_PARAM_LFO_TARGET_VOICE_2, ALK_PARAM_LFO_TARGET_PARAM_2, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
-    /* 7 MIX: acc vol pan */
-    {{ ALK_PARAM_ACCENT, ALK_PARAM_INSTRUMENT_VOL, ALK_PARAM_INSTRUMENT_PAN, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* 7 MIX: vol pan */
+    {{ ALK_PARAM_INSTRUMENT_VOL, ALK_PARAM_INSTRUMENT_PAN, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
 };
 
 const uint8_t alkaline_menu_page_count =

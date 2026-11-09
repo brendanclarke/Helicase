@@ -745,8 +745,10 @@ def decay_knob_303(d):
  * r i + vy(i) = v. ...
  * S093 P6: the decay range is stretched, -20 % at decay 0 and +50 % at
  * decay 1 (user): r = ALK_MEG_R_MIN + ALK_MEG_R_SPAN x taper (fitted,
- * fit_meg_range.py). The accent branch keeps 68 k + 250 R, so an accented
- * note's decay is the 303's.
+ * fit_meg_range.py). The accent branch keeps 68 k + 250 R: while the
+ * accent lane is high (one step) the discharge is the 303's; the tail after
+ * it follows the stretched law, as on the 303, where the 4066 shorts VR6
+ * only during the lane (decay 1: 0.83 s -> 1.17 s to 10 %, the model).
  */
 float alkMeg_step(AlkMeg *m, const float decay, const uint8_t accent)
 {
@@ -1196,8 +1198,8 @@ The peak search (l. 211–230) is unchanged.
 		/* the 303's maximum: the stock ring, as before */
 		test_ring(k, 1.0f / ALK_RES_KMAX, &per, &dec);
 		/* S093 P6: x1.5 feedback at the calibration point: a long ring that
-		 * still decays (measured on the 13-point tables: B2R 1.768 ms / 0.823,
-		 * B-R 1.791 / 0.823, A-R 1.791 / 0.831 per cycle) */
+		 * still decays (measured on the 13-point tables: B2R 1.791 ms / 0.823,
+		 * B-R 1.791 / 0.822, A-R 1.791 / 0.831 per cycle; corrected in §13) */
 		test_ring(k, 1.0f, &per15, &dec15);
 		printf("AL-R %s: ring period %.3f ms, decay per cycle %.3f; x1.5: %.3f ms, %.3f%s\n",
 		       k_name[k], per, dec, per15, dec15,
@@ -1649,3 +1651,187 @@ The scripts and outputs are in the session scratchpad (`p6chk/`).
 | C0–C2 | `check_c.py` copy with the §5.7 conversions | Stock cases within 0.01 dB / 0.1 cent of today |
 | SPICE transformer | static netlist; full e2e at 1.0 / 1.0001 / 1.5 | Sign correct; continuity 0.001 dB; ×1.5 against C −0.36 dB, LSD60 7.9 dB, peak +4.3 % |
 | Cost of the control edits | `arm-none-eabi-gcc -Ofast -mcpu=cortex-m7` on each edit | `pos` 13, drive 0, MEG 0, VEG −1 instructions |
+
+---
+
+## 12. Implementation log (2026-11-09)
+
+**Status: implemented in the tree and gated; the device listening/CPU trial
+is the only open item.**
+
+### 12.1 Order actually taken
+
+1. `alk_model.py`: `RES_KMAX`, `decay_knob_303()`, `Meg` decay law, `Veg`
+   attack table, `FeedbackNet` wiper transformer, prewarp comment.
+2. `fit_spice.py` per-width attack fit and `vca.py` sweep; ran both
+   (ngspice 47). `fit_meg_range.py` added and run (seed values, then the
+   fit). `gen_alk_tables.py` range/table/attack/MEG changes; regenerated
+   `AlkalineTables.h/.c` (and `--check`).
+3. Firmware: `AlkalineControl.c/.h`, `AlkalineVoice.c/.h`,
+   `AlkalineParameters.c/.h`; `make_init_alk.py` and `init.alk`.
+4. Bench: 14 groups, AL-A/M/SO/PS and the AL-R pair; drive x16; `pos`.
+5. Harnesses: `validate.py` V3b/V3c/V3d and `dsp_pattern`;
+   `check_c.py` C0/C1/C2; `listen_bc.py`; `listen_net.py`; `e2e.py`
+   (`vr4a()` and `acid_k15`); ran `e2e.py acid_k15`, `check_c.py`,
+   `validate.py --fast v3`.
+6. Build and static gates; documents.
+
+### 12.2 Measurements reproduced in the tree
+
+| Item | Measured | Schedule expectation |
+|---|---|---|
+| SPICE attack sweep | 2.105 → 5.150 ms | 2.105 → 5.150 ms |
+| VEG fitted table | delay 0.65→0.60 ms, tau 1.20→2.60 ms | same |
+| Firmware attack (AL-A / V3d) | 2.176 / 2.902 / 2.902 / 4.353 / 5.078 ms | same (one block) |
+| MEG fit | stock 174.1 ms / 2.569 s; targets 139.3 ms / 3.853 s; r_min 54,069, r_span 1,560,243 | same |
+| Firmware MEG (AL-M) | 139.3 ms / 3.852 s; accent held 174.8 ms | 140.0 ms / 3.852 s / 174.8 ms |
+| Transformer continuity | A/B 4.1e-8, C/D 7.2e-9 | 4e-8 / 7e-9 |
+| AL-R | 2.018 ms / 0.364 (stock); ×1.5 1.791 ms / 0.823 (B2R, B-R), A-R 1.791 / 0.831 | same |
+| AL-SO | tail 1,769.9 LSB, peak 4,448; 303 max 1.4 LSB | 1,770 / 4,454 / 1.4 |
+| AL-D | x1/x2/x4/x8/x16 = −29.18/−25.42/−21.98/−19.00/−17.13 dBFS; 0 clipped; corner 12.74 | same |
+| C1 acid / lowres | −0.105 / −0.021 dB; LSD60 11.768 / 4.681 | −0.105 / −0.021; 11.768 |
+| C1 acid_k15 | −0.361 dB, LSD60 7.906 dB | −0.36 dB, 7.9 dB |
+| C0 ×16 | added; B2R acid 5.317 dB LSD60 vs golden, level −0.15 dB | new case |
+| C2 | per-step within 0.01 dB / 0.1 cent of the committed run | same |
+| V3b | +0.93 % / +1.30 % of the new targets | within 4 % |
+| CPU | loop 214 (3 VDIV); per block 884+332+14 = 1,230 (9 VDIV); whole 252.5 | 252.5 |
+| Flash | headroom 47,836 B; ITCM 14,552 B | +1.4 KB, ≥16 KiB |
+
+### 12.3 Gates
+
+- `make -C tools/dsp_test alkaline`: 14 groups, 0 failures; the legato break
+  still caught.
+- `gen_alk_tables.py --check`, `make_init_alk.py --check`, `special_tags`
+  (199 rows), `alkaline_tables`: pass.
+- `check_c.py`: pass; `validate.py --fast v3`: V3b targets, V3c, V3d attack
+  per point all as expected.
+- `make all`: clean; `link_budget.py`: headroom 47,836 B.
+- `control_cost.py --elf`: 1,230 / 9 VDIV; `elf_looppath.py`: 214 / 3 VDIV.
+- `make -C tools/dsp_test elf_p4_check`: 93/93 exact oscillator loops and
+  30 hot mixer loops equal, 0 grew. `elf_loopsrc.py --compare` was not run:
+  it is the source-pairing check for a GREW, and there was none.
+- `oscillator`, `seq_steplen`: pass.
+
+### 12.4 Deviations / notes
+
+- `Meg.__init__` reads `r_min`/`r_span` with the stock defaults when the
+  keys are absent. `fit_spice.py` rewrites `alk_constants.json` from
+  scratch, so this keeps the documented `fit_spice.py` →
+  `fit_meg_range.py` order reproducible without a manual seed step; the
+  fitted values are still written back and used.
+- `MIDI_NRPN_TABLE.md` has no generator in `tools/`; rows 26–27, the counts
+  and the value notes were edited by hand from the descriptor table.
+- `listen_net.py` changed `acid_x8` and `sweep_x8` to drive 0.75 only, as
+  scheduled; the ×16 listening set lives in `listen_bc.py`.
+- The SPICE `.cir` files for the new runs were written under
+  `tools/spice/tb303/out/`, the tracked record folder.
+- Regenerated records: `alk_constants.json`, `vca_results.json`,
+  `e2e_results.json` (+`acid_k15`), `check_c_results.json`,
+  `validate_results.json`, the C comparison WAVs and the new plots.
+
+---
+
+## 13. Assessment of the implementation (2026-11-09)
+
+**Verdict: P6 is implemented as scheduled and every gate holds.** I read each
+source change against this schedule and re-ran every host and static gate
+myself on the working tree (not from the §12 log). Two figures in this
+schedule were wrong. Both came from my scratch runs, not from the
+implementation, and both are corrected below. One small robustness issue
+remains in the tools (F3). Open: the device trial (OPEN_TESTS A5, A10–A13).
+
+### 13.1 Code review against the schedule
+
+| Area | Schedule | Tree | Verdict |
+|---|---|---|---|
+| Rows, enum, count, pages | §2 | rows 26–27 appended; count 28; pages 0 `coa tun wav pos`, 1 `atk dec`, 2 `dst amt sld`, 4 `acc`, 5 `cut res env drv`, 7 `vol pan` | as written |
+| Attack | §3.6–§3.9 | `AlkVeg.keep`; `alkVeg_trigger(g, attack)` interpolation; `g->v *= g->keep`; `voice->attack` init 0; trigger passes it | as written |
+| Decay | §4.4 | `accent ? 68e3f + R_4066 : R_MIN + R_SPAN × taper` | as written (comment corrected, F2) |
+| Prewarp | §5.3 | both clamp lines use `ALK_PREWARP_POINTS` (C11) | as written |
+| VR4b | §5.4 | `fminf(ALK_RES_KMAX * reso, 1)` | as written |
+| Drive | §6.1 | `t2 * t2`; header comments ×16 | as written |
+| `pos` | §7.1–§7.2 | trigger reset in the non-legato branch; per-block bend after `osc_setTableFreq()` | as written |
+| Generated tables | §3.4, §4.3, §5.2 | 13 Res points (identical to the scratch set, 936 of 936 numbers); 16 prewarp points (stock range = `PW_C`); attack point 0 = today's constants; `ALK_MEG_R_MIN` 54,068.84 / `R_SPAN` 1,560,242.5 | as written |
+| Model, fits, harness conversions | §3.1–§3.5, §4.1–§4.5, §5.1–§5.7, §6.3 | transformer branch; `decay_knob_303()`; `k / RES_KMAX` at C0, C1, C2, `listen_bc`, `listen_net`; `decay_knob_303()` at C2, `listen_bc`, V3c, `dsp_pattern`; V3b to 8 s, accented target dropped; VR4B `min(res, 1)`; `acid_k15`; C0 ×16; x8 = drive 0.75 | as written; one deviation (F3) |
+| Bench | §3.10, §4.6, §5.8, §6.2, §7.3 | 14 groups; AL-A/M/SO/PS; AL-R pair; AL-D five steps; report loop over `g_name` | as written (comment corrected, F1) |
+
+### 13.2 Gates, re-run for this assessment
+
+| Gate | Result |
+|---|---|
+| `make -C tools/dsp_test alkaline` | 14 groups, 0 failures; legato break caught |
+| `alkaline_tables`, `gen_alk_tables.py --check` | match |
+| `fit_meg_range.py --check` | 0 (r_min 54,069, r_span 1,560,243) |
+| `special_tags`; `make_init_alk.py --check` | 199 rows, 0 mismatches; `init.alk` 28 rows (22 morph) |
+| `oscillator`, `seq_steplen` | every group 0 failures; breaks caught |
+| `make all` | clean, no warnings |
+| `link_budget.py` | flash headroom 47,836 B (P5 image 49,428: −1,592 B); ITCM 14,552 B (unchanged) |
+| `control_cost.py --elf` | 884 + 332 + 14 = **1,230** per block, 9 VDIV |
+| `elf_looppath.py` sync block | **214**, 3 VDIV |
+| Whole voice | 214 + 1,230/32 = **252.4**, against 261.3 |
+| `elf_p4_check` | oscillators 93/93 exact; mixer 30 hot loops equal, 0 grew |
+| Sizes | `Alkaline_calcVoiceAsync` 0xF4E, sync block 0xBB8 (as before) |
+
+### 13.3 Findings
+
+- **F1 (my schedule error; corrected).** §5.8 gave the ×1.5 ring on B2R as
+  1.768 ms / 0.823. That number came from my first scratch build, made
+  before the second prewarp clamp line (C11) was fixed. That build also failed
+  AL-F. The same scratch binary now prints **1.791 / 0.823**, as the tree
+  does, and as the P6 plan's experiment did (§5.5 there). The law's band
+  (1.78 ± 0.06) passes either way.
+  - The wrong value had reached the bench source as a comment: corrected at
+    `alkaline.c` l. 901–902 (B2R 1.791 / 0.823, B-R 1.791 / 0.822, A-R
+    1.791 / 0.831), and in §5.8 above.
+  - The §12.2 log is right.
+- **F2 (my wording; corrected).** §4.4's comment said "an accented note's
+  decay is the 303's". As C10 found, the 4066 shorts VR6 only while the
+  accent lane is high; the tail after it follows the stretched law (decay 1:
+  0.83 s → 1.17 s to 10 %, the model). The wording had reached two places:
+  - `AlkalineControl.c` l. 114–117;
+  - OPEN_TESTS A11, which expected "accent note decays as before", a device
+    test that would have reported a false failure.
+
+  Both are corrected (comment and test text only), and so is §4.4 above.
+- **F2b (scratch rounding; no action).** §4.6 quoted the C MEG at decay 0 as
+  140.02 ms. That scratch build stored `R_MIN` rounded to 54,069. With the
+  tree's 54,068.84 it is **139.29 ms**, one 0.73 ms block shorter, which I
+  confirmed by building the scratch bench against the tree's tables. The law
+  (2 % of 139.3 ms) passes either way.
+- **F3 (low; open for your call).**
+  - `fit_spice.py` rebuilds `alk_constants.json` from nothing (`main()`
+    l. 155–166), so a lone re-run drops `meg.r_min` / `meg.r_span`.
+  - The implementation then behaves three ways:
+    - `alk_model.Meg` falls back silently to the stock 303 law
+      (`c.get(..., 68e3)`, the §12.4 deviation);
+    - `decay_knob_303()` raises a `KeyError`;
+    - `gen_alk_tables.py` raises a `KeyError`.
+  - The generator protects the firmware, so this is a tooling hazard, not a
+    defect. But `validate.py` would compare the stock law against the new
+    targets without saying so.
+  - Recommended: `fit_spice.py` updates the existing file instead of
+    replacing it (load, set its keys, write), and `Meg` reads the two keys
+    without a default, as §4.2 specified. Not changed here.
+- **Notes, no action:**
+  - The 19 new `.cir` files under `tools/spice/tb303/out/` are untracked in a
+    folder that already tracks 123 of them, so they are records to add with
+    the commit.
+  - The `__pycache__` changes are noise from the runs.
+  - `elf_loopsrc.py --compare` was rightly skipped, since nothing grew.
+  - `MIDI_NRPN_TABLE.md` was edited by hand (no generator exists); rows
+    26–27 match the descriptor table.
+
+### 13.4 What P6 changes for P7
+
+`S093_P7_WAVETABLE_SAMPLES_OSC_IMPLEMENTATION.md` is updated for the landed
+tree:
+- line anchors in the Alkaline files, `make_init_alk.py` and the bench;
+- the `wav` baseline, 252.4 per voice and 1,230 per block (both from the P6
+  image);
+- flash headroom 47,836 B;
+- one missed edit: the parameter file's "Not offered" header still lists
+  `typ`.
+
+Its measured conclusion (§0 there: typed modes over the Basic ceiling;
+decision P7-D1) does not change. Its scratch base differs from the landed P6
+only in the `R_MIN` rounding above, which no P7 figure depends on.

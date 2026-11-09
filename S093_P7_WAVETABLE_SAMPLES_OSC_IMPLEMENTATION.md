@@ -9,12 +9,22 @@
   - S3, `pos` without the restore;
   - the S4 blend on the interpolation pool;
   - the conditional slot reserve (§7.5 of the plan).
-- **Prerequisite:** `S093_P6_IMPLEMENTATION.md` has landed. This schedule
-  edits the P6 versions of `AlkalineVoice.c` (attack, the `pos` bend, ×16
-  drive). Line numbers are from today's tree (before P6), so search the quoted
-  anchor.
+- **Prerequisite:** `S093_P6_IMPLEMENTATION.md`, **landed 2026-11-09** and
+  assessed (P6 doc §13). This schedule edits the P6 versions of
+  `AlkalineVoice.c` (attack, the `pos` bend, ×16 drive). Line numbers in the
+  Alkaline files, `make_init_alk.py` and the bench are from the tree **with
+  P6 applied**; the other files did not change in P6.
 - **Tags:** **ADD** / **MODIFY** / **REMOVE** / **NONE** (verified: no change,
   with the reason). Comment blocks are part of the change.
+- **Revision 2 (2026-11-09, after P6 landed):**
+  - line anchors moved to the post-P6 tree (`AlkalineParameters.c/.h`,
+    `AlkalineVoice.c/.h`, `make_init_alk.py`, the bench); the other files
+    are unchanged by P6;
+  - the `wav` baseline is the P6 image's (214 + 1,230/32 = 252.4) and so is
+    the flash headroom (47,836 B);
+  - added the "Not offered" header edit (§3.1).
+
+  Nothing in §0's conclusion or the code changes.
 - **Binding rules:**
   - the CPU ceiling (whole voice, per-block work included);
   - constant per-sample cost;
@@ -37,13 +47,14 @@ scratch build:
   `Oscillator.c` and `SampleMemory.c`, and counted with
   `control_cost.py --elf` and `elf_looppath.py`.
 
-The method reproduces today's figures: with the typed paths compiled out, the
-same link gives 1,232 per block (P6: 1,230) and a 2,996 B sync block
-(firmware: 3,000 B).
+The method reproduces the firmware: with the typed paths compiled out, the
+same link gives 1,232 per block against the landed P6 image's 1,230, and a
+2,996 B sync block against its 3,000 B (re-measured on the P6 image,
+2026-11-09).
 
 | Mode | Loop (linked, per sample) | Per block (/32) | **Whole voice** | Against 261.3 |
 |---|---:|---:|---:|---:|
-| `wav` (Saw/Sqr, P6) | 215 (firmware 214) | 1,232 → 38.5 | **253.5** | −7.8 |
+| `wav` (Saw/Sqr, P6) | 214 (firmware; 215 in the scratch link) | 1,230 → 38.4 (firmware; 1,232 scratch) | **252.4** | −8.9 |
 | `smp` | 217 | 1,769 → 55.3 | **≈ 272** | +11 |
 | `slp` | 229 | 1,769 → 55.3 | **≈ 284** | +23 |
 | `wtb` plain | 235 / 239 (16- / 8-bit copy) | ≤ 1,769 → ≤ 55.3 | **≈ 288–294** | +27…+33 |
@@ -70,8 +81,8 @@ How to read the table:
   premium, about 10–12 per sample (plan §7.3 S4), so two locked slots cover
   about 20–24, against +11 to +56 here.
 - **Flash:** the sync block grows from 2,996 to 9,228 B. The smp variant adds
-  1,370 B and the async 354 B. Alkaline code grows by **≈ +8 KB** (headroom
-  49,428 B; P6 takes ≈ 1.4 KB).
+  1,370 B and the async 354 B. Alkaline code grows by **≈ +8 KB**, against
+  a headroom of **47,836 B** after P6 (measured on the P6 image).
 - **ITCM:** no new ITCM code; all of it is flash.
 
 ### Decision P7-D1 (yours, before any of §3–§9 lands)
@@ -87,7 +98,7 @@ How to read the table:
 - It reuses the refusal pattern the plan already designed (§7.5) and that the
   two-Advanced rule already shows in the menu
   (`menu_instrumentTypeSelectableForMask()`).
-- It leaves `wav`, today's 303, untouched at 253.5.
+- It leaves `wav`, today's 303, untouched at 252.4.
 
 B is worth doing under A anyway (it lowers every typed voice by ≈ 7–10). It
 is scheduled as §4.6, optional.
@@ -125,7 +136,7 @@ The code in §3–§7 is the same under every option: only the admission rule
 
 ## 3. Rows and menu
 
-### 3.1 `Core/DSP/Instruments/Alkaline/AlkalineParameters.c` l. 137–141 — MODIFY (row 0)
+### 3.1 `Core/DSP/Instruments/Alkaline/AlkalineParameters.c` l. 144–148 — MODIFY (row 0)
 
 ```c
     /*
@@ -152,7 +163,7 @@ The code in §3–§7 is the same under every option: only the admission rule
     ROW_MENU("osc1_wave", "Oscilltr", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8),
 ```
 
-**l. 49–51 — ADD** (`MOD_WAVE`, as `DrumParameters.c` l. 57–59):
+**After l. 52 (`MOD_PM63`) — ADD** (`MOD_WAVE`, as `DrumParameters.c` l. 57–59):
 
 ```c
 /* S093 P7: a wave row's domain: integers, the max from the slot's type
@@ -160,7 +171,7 @@ The code in §3–§7 is the same under every option: only the admission rule
 #define MOD_WAVE  { 0u, 0u, (uint8_t)(INSTRUMENT_MOD_DOMAIN_INTEGER | INSTRUMENT_MOD_DOMAIN_DYNAMIC_MAX) }
 ```
 
-**After `ROW_SELECT_ONOFF` (l. 71–74) — ADD** (`ROW_SELECT_SPECIAL`, as
+**After `ROW_SELECT_ONOFF` (l. 72–75) — ADD** (`ROW_SELECT_SPECIAL`, as
 `DrumParameters.c` l. 103–106):
 
 ```c
@@ -178,25 +189,34 @@ The code in §3–§7 is the same under every option: only the admission rule
       MOD_NONE, BIND_SPECIAL(member_, type_, special_) }
 ```
 
-**l. 60–74 — REMOVE** `ROW_SELECT_ONOFF` and its comment block: its only
-user was the `alk_wave` row (l. 141), so no Alkaline row uses it after this
+**l. 61–75 — REMOVE** `ROW_SELECT_ONOFF` and its comment block: its only
+user was the `alk_wave` row (l. 148), so no Alkaline row uses it after this
 change.
 
-**The `#undef` list (l. 242–252) — MODIFY:** `#undef ROW_SELECT_ONOFF`
+**The file header, l. 20–23 — MODIFY** (missed in the first issue of this
+schedule): the "Not offered" list drops `typ` and its note:
+
+```c
+ * Not offered (S092 P0 §5.5): srt (no SRR, D4), run, chn, fine pitch,
+ *             velo_vol_on_off (the 303's velocity is the accent, D1).
+ *             typ is offered since S093 P7 (wav / smp / slp / wtb).
+```
+
+**The `#undef` list (l. 264–276) — MODIFY:** `#undef ROW_SELECT_ONOFF`
 becomes `#undef ROW_SELECT_SPECIAL`, and `#undef MOD_WAVE` is added after
 `#undef MOD_PM63`. Every macro the file defines stays undefined after the
 tables, as today.
 
 ### 3.2 `AlkalineParameters.c` — the enum, the new row, the page
 
-**Enum (after P6's `ALK_PARAM_OSC1_POSITION`) — ADD:**
+**Enum (after P6's `ALK_PARAM_OSC1_POSITION`, l. 126) — ADD:**
 
 ```c
     ALK_PARAM_OSC1_TYPE,         /* 28 (S093 P7): wav / smp / slp / wtb */
     ALK_PARAM_COUNT
 ```
 
-**Row (after P6's `osc1_position` row) — ADD:**
+**Row (after P6's `osc1_position` row, l. 208) — ADD:**
 
 ```c
     /*
@@ -214,10 +234,10 @@ tables, as today.
     ROW_SELECT_SPECIAL("osc1_type", "Oscilltr", "Type", "typ", MENU_OSC_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
 ```
 
-**`AlkalineParameters.h` l. 21 — MODIFY:** `#define ALKALINE_PARAM_DESCRIPTOR_COUNT 29u`.
+**`AlkalineParameters.h` l. 22 — MODIFY:** `#define ALKALINE_PARAM_DESCRIPTOR_COUNT 29u`.
 Its comment adds "osc1_type (S093 P7)".
 
-**Page 0 (P6: `coa tun wav pos`) — MODIFY** (Drum's screen 2 places `typ` at
+**Page 0 (P6: `coa tun wav pos`, l. 239–240) — MODIFY** (Drum's screen 2 places `typ` at
 cell 4, `DrumParameters.c` l. 396–398):
 
 ```c
@@ -233,7 +253,7 @@ cell 4, `DrumParameters.c` l. 396–398):
 The firmware classifier (`InstrumentManager.c` l. 3987–4034) returns the same
 values: `osc1_` gives OSC1 for every type.
 
-**The file header comment (l. 26):** "MenuText.h (alkWaveNames,
+**The file header comment (l. 27):** "MenuText.h (alkWaveNames,
 ONOFF_TAG_ALK_WAVE)" becomes "MenuText.h (alkWaveNames)".
 
 ### 3.3 `Core/Menu/MenuText.h` l. 225–238 — REMOVE; l. 239–252 — MODIFY
@@ -368,14 +388,14 @@ Under Option A (§8) the admission check precedes `osc_setType()`.
 `osc_setType()` clamps the stored item index to the new type's count after the
 byte is written.
 
-### 3.8 `tools/alkaline/make_init_alk.py` l. 46–55 — MODIFY (`INIT`)
+### 3.8 `tools/alkaline/make_init_alk.py` l. 47 and l. 57 — MODIFY (`INIT`)
 
 - `"alk_wave": "0"` → `"osc1_wave": "0"`;
 - ADD `"osc1_type": "0"` (wav).
 
 This gives 29 `[params]` keys. `osc1_wave` is now an image row, so it is
-written under `[morph]` too: 23 `[morph]` rows, against 26 / 20 today and
-28 / 22 after P6.
+written under `[morph]` too: 23 `[morph]` rows, against 28 / 22 in the landed
+P6 `init.alk` (verified).
 
 ---
 
@@ -385,11 +405,11 @@ written under `[morph]` too: 23 `[morph]` rows, against 26 / 20 today and
 
 - **l. 56–57:** the comment on `ALK_WAVE_SAW` / `ALK_WAVE_SQUARE` becomes
   "osc.waveform under typ wav (S093 P7; was AlkalineVoice.wave)".
-- **l. 60:** `OscInfo osc; /* VCO: typ (oscType), wav (waveform: Saw/Sqr under wav, the item under smp/slp/wtb), pos */`.
-- **l. 78 — REMOVE:** `uint8_t wave;              /* ALK_WAVE_* */`. Size
+- **l. 61:** `OscInfo osc; /* VCO: typ (oscType), wav (waveform: Saw/Sqr under wav, the item under smp/slp/wtb), pos */`.
+- **l. 79 — REMOVE:** `uint8_t wave;              /* ALK_WAVE_* */`. Size
   unchanged (K6).
 
-### 4.2 `AlkalineVoice.c` l. 13–19 — ADD (the user-source scale)
+### 4.2 `AlkalineVoice.c` after l. 18 (`ALK_SAW_SCALE_V`) — ADD (the user-source scale)
 
 ```c
 /* S093 P7: a user item (sample, wavetable) enters the ladder at the saw's
@@ -398,20 +418,20 @@ written under `[morph]` too: 23 `[morph]` rows, against 26 / 20 today and
 #define ALK_USER_SCALE_V ALK_SAW_SCALE_V
 ```
 
-### 4.3 `Alkaline_initVoice()` l. 25 and l. 51 — MODIFY / REMOVE
+### 4.3 `Alkaline_initVoice()` l. 25 and l. 52 — MODIFY / REMOVE
 
 ```c
 	voice->osc.oscType = OSC_TYPE_WAV;     /* S093 P7: typ wav (init.alk osc1_type 0) */
 	voice->osc.waveform = ALK_WAVE_SAW;    /* S093 P7: wav Saw (was the stock SAW, 2, for the octave index; osc_setTableFreq() never read it) */
 ```
 
-- **REMOVE** l. 51: `voice->wave = ALK_WAVE_SAW;`.
+- **REMOVE** l. 52: `voice->wave = ALK_WAVE_SAW;`.
 - `osc_setTableFreq()` does not read `waveform` (Oscillator.c l. 1225–1239).
   `calcWavetableOscBlock()` does not read it either. Nothing in the platform
   reads an Alkaline `waveform` as a stock wave: `InstrumentManager.c` has no
   `waveform` reads for oscillators.
 
-### 4.4 `Alkaline_triggerVoice()` — MODIFY (P6's non-legato branch)
+### 4.4 `Alkaline_triggerVoice()` l. 110–140 — MODIFY (P6's non-legato branch)
 
 ```c
 		alkVeg_trigger(&voice->veg, voice->attack);
@@ -441,7 +461,7 @@ written under `[morph]` too: 23 `[morph]` rows, against 26 / 20 today and
 	}
 ```
 
-### 4.5 `Alkaline_calcVoiceAsync()` — MODIFY (P6's pitch tail)
+### 4.5 `Alkaline_calcVoiceAsync()` l. 182–216 — MODIFY (P6's pitch tail: `osc_setTableFreq()` l. 184 and the bend block)
 
 ```c
 	voice->osc.freq = alk_exp2f(voice->pitchLog2
@@ -501,7 +521,7 @@ would get its own bench law against Drum's function before it lands.
   `osc_userBind()`'s test, and compute `phaseInc` inline. That saves the call
   and the generic dispatch (89 + callees).
 
-### 4.7 `Alkaline_calcVoiceSyncBlock()` l. 189–216 — MODIFY; `alk_renderTyped()` — ADD (before it)
+### 4.7 `Alkaline_calcVoiceSyncBlock()` l. 254–279 — MODIFY; `alk_renderTyped()` — ADD (before it)
 
 ```c
 /*
@@ -1169,15 +1189,15 @@ gate takes each mode's own loop (`elf_looppath.py --top 8`, mapped by
 
 ### 9.2 Bench `tools/dsp_test/modules/alkaline.c` — MODIFY
 
-- **l. 69 — REMOVE** the claim stub; **ADD** in the AL-X2 block:
+- **l. 80 — REMOVE** the claim stub; **ADD** in the AL-X2 block:
   `static uint8_t host_claim; uint8_t modNode_interpClaim(void* osc) { (void)osc; return host_claim; }`.
-- **l. 135, 159, 516, 616, 662:** `v->wave` / `v.wave` / `a.wave` →
+- **l. 145, 169, 534, 815, 861:** `v->wave` / `v.wave` / `a.wave` →
   `->osc.waveform` / `.osc.waveform`. The `--pattern` / `--sweep` argument 2
   keeps its meaning (0 Saw, 1 Sqr); `oscType` stays `OSC_TYPE_WAV` after
   `memset` + init.
-- **Groups (P6: 14) — MODIFY:** add `G_X2`, `"AL-X2"`.
+- **Groups (l. 114–117; P6: 14) — MODIFY:** add `G_X2`, `"AL-X2"`.
 - **ADD law AL-X2** (before `main()`; call `test_fused_typed();` after
-  `test_pos();`):
+  `test_pos();`, l. 933):
 
 ```c
 /* ---------------------------------------------------------------- AL-X2
@@ -1320,10 +1340,10 @@ new accessors reach the bench through `Oscillator.host.c`.
 |---|---|---|
 | Host | `make -C tools/dsp_test alkaline special_tags oscillator seq_steplen`, one by one | All groups 0 failures, AL-X2 included; the legato break still caught; oscillator laws unchanged |
 | G3 (loops) | `elf_looppath.py --elf build/lxr02.elf --sym Alkaline_calcVoiceSyncBlock.constprop.0 --cond-heads --in-range --top 8`; the same for `DiodeLadder_renderB2Smp`; `addr2line -i` on the `-g` twin maps each loop to its wrapper | `wav` loop 214 (unchanged); each user loop recorded |
-| G4 (per block) | `control_cost.py --elf build/lxr02.elf` (§9.1 weights) | `wav` path ≈ 1,230; typed bound recorded (scratch: 1,769) |
+| G4 (per block) | `control_cost.py --elf build/lxr02.elf` (§9.1 weights) | `wav` path 1,230 (the P6 image); typed bound recorded (scratch: 1,769) |
 | G5 (whole voice) | loop + per block / 32, per mode | `wav` ≤ 261.3 (Basic). Typed modes: as P7-D1 decides (Advanced under A; ≤ 261.3 for any mode kept Basic under B/C) |
 | G6/G7 (others unchanged) | `make -C tools/dsp_test elf_p4_check`; `elf_loopsrc.py --compare` on base/new `-g` twins | 0 MISSING, 0 grew; the S087 loops equal; ITCM 14,552 B |
-| Flash | `link_budget.py arm-none-eabi-nm build/lxr02.elf` | headroom ≥ 16 KiB (measured basis: ≈ +8 KB on 49,428 B, before P6's ≈ 1.4 KB) |
+| Flash | `link_budget.py arm-none-eabi-nm build/lxr02.elf` | headroom ≥ 16 KiB (measured basis: ≈ +8 KB on the P6 image's 47,836 B) |
 | G-dev | Device: four Alkalines (`wav`, Res and drive full) as today; plus the P7-D1 worst case (A: two typed Alkalines in the Advanced places in their dearest mode, `wtb` blend, with two blends running); 0 underruns over 5 min; listening per type | User |
 
 ---
@@ -1351,8 +1371,8 @@ new accessors reach the bench through `Oscillator.host.c`.
 
 | Fact | Where |
 |---|---|
-| `alk_wave` row, ON/OFF tag 3, `alkWaveNames`, tag switch, assert | `AlkalineParameters.c` l. 137–141; `MenuText.h` l. 225–252; `menu.c` l. 12336–12362, 12505–12508 |
-| `voice->wave` readers | `AlkalineVoice.c` l. 51, 191; bench l. 135, 159, 516, 616, 662 |
+| `alk_wave` row, ON/OFF tag 3, `alkWaveNames`, tag switch, assert | `AlkalineParameters.c` l. 144–148; `MenuText.h` l. 225–252; `menu.c` l. 12336–12362, 12505–12508 |
+| `voice->wave` readers (post-P6 lines) | `AlkalineVoice.c` l. 52, 256; bench l. 145, 169, 534, 815, 861 |
 | Drum `osc1_wave` / `osc1_type` rows and macros | `DrumParameters.c` l. 57–59, 103–106, 233, 335 |
 | Wave domain, cell count, `osc1Type`, `instrumentManager_osc()` for ALK | `InstrumentManager.c` l. 838–892, 2348–2385 |
 | `typ` writer, classifier | `InstrumentManager.c` l. 3881–3899, 3987–4034 |

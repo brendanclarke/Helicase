@@ -189,7 +189,7 @@ def v3():
         dt = M.BLOCK / FS
         t, peak, t10 = 0.0, None, None
         acc_left = 0.125 if acc else 0.0
-        while t < 4.0:
+        while t < 8.0:
             v = mg.step(dt, dec, acc_left > 0)
             acc_left -= dt
             t += dt
@@ -201,6 +201,15 @@ def v3():
     sp = {f"{m['decay_knob']}{'A' if m['accent'] else ''}": m["t_to_10pct_s"] for m in p4["meg"]}
     out["meg_t10"] = {k: dict(dsp=meg_t[k], spice=sp[k]) for k in meg_t}
     print("V3b MEG t10:", out["meg_t10"])
+    # S093 P6: decay 0 / 1 are -20 % / +50 % of the 303 (SPICE). The accented
+    # run (a 125 ms accent lane, then decay 1) has no target: the 4066 shorts
+    # VR6 only during the lane, so its tail follows the stretched law (model
+    # 0.826 s -> 1.170 s); AL-M checks the accent branch itself. Decay 0.5 has
+    # no SPICE target (P4 measured 0.0 / 0.5 / 1.0; 0.5 is reported).
+    want = {"0.0": 0.80 * sp["0.0"], "1.0": 1.50 * sp["1.0"]}
+    out["meg_t10_s093p6"] = {k: dict(dsp=meg_t[k], target=v, err=meg_t[k] / v - 1)
+                             for k, v in want.items()}
+    print("V3b S093 P6 targets:", out["meg_t10_s093p6"])
     # (c) accent run vs P4 (4 accented 16ths + 1 normal, Accent 1, Env Mod 0.5, Cutoff 0.5, Decay 0.5)
     out["accent_run"] = {}
     for rk in (0.0, 0.5, 1.0):
@@ -234,6 +243,22 @@ def v3():
                                  t_m40=p3["veg"]["long_vg12.0"]["t_m40db_s"],
                                  attack_10_90_ms="2.11-2.61 (trigger 0.65-0.70 ms)"))
     print("V3d VEG:", out["veg"])
+    # S093 P6: attack 10->90 % against SPICE per trigger width; the knob runs
+    # the att_table (0 = 0.70 ms, 1 = 0.55 ms); a 1-block (0.73 ms) tolerance
+    # because the model steps C42 per block
+    sp_att = {round(a["trigger_ms"], 4): a["attack_10_90_ms"] for a in p3["attack"]}
+    out["veg_attack"] = []
+    for q, e in enumerate(M.constants()["veg"]["att_table"]):
+        vg = M.Veg()
+        vg.trigger(q / (len(M.constants()["veg"]["att_table"]) - 1), dt)
+        cur = np.array([vg.step(dt, True) for _ in range(int(0.05 / dt))])
+        t = (np.arange(len(cur)) + 1) * dt
+        pk = cur.max()
+        a10 = t[np.where(cur > 0.1 * pk)[0][0]]
+        a90 = t[np.where(cur > 0.9 * pk)[0][0]]
+        out["veg_attack"].append(dict(trigger_ms=e["trigger_ms"], dsp_ms=1e3 * (a90 - a10),
+                                      spice_ms=sp_att.get(round(e["trigger_ms"], 4))))
+    print("V3d attack:", out["veg_attack"])
     RES["v3"] = out
 
 
@@ -250,7 +275,7 @@ def control_run(res, n_steps=5, acc_steps=(0, 1, 2, 3)):
         mg.trigger()
         pk = 0.0
         for b in range(steps):
-            n53 = mg.step(dt, 0.5, acc)
+            n53 = mg.step(dt, M.decay_knob_303(0.5), acc)
             vw, _ = sw.step(dt, acc, 1.0, res, n53, v134)
             i, dv = M.expo_current(0.5, 0.5, res, n53, vw, i_prev)
             i_prev = i
@@ -411,7 +436,7 @@ def dsp_pattern(knobs, solver):
         if gliding:
             cv = target + (cv - target) * math.exp(-dt / M.TAU_SLIDE)
         gate_on = any(g0 <= t < g1 for g0, g1 in gates)
-        n53 = mg.step(dt, knobs["dec"], acc_on)
+        n53 = mg.step(dt, M.decay_knob_303(knobs["dec"]), acc_on)
         vw, i_acc = an.step(dt, acc_on, knobs["acc"], k, n53, v134)
         i_lad, dv = M.expo_current(knobs["cut"], knobs["env"], k, n53, vw,
                                    M.I_CAL if i_prev is None else i_prev)

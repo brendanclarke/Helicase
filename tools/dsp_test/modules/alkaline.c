@@ -15,7 +15,8 @@
  *                     current 7.375 uA, I_abc 50 uA) read on the OTA
  *                     output: ring period 2.0 ms +- 3 % (SPICE 2.034), the
  *                     second ring peak over the first 0.364 +- 0.03 (the
- *                     golden RK4 model, same metric; S093 P0 §5.2);
+ *                     golden RK4 model, same metric; S093 P0 §5.2); S093 P6
+ *                     also the x1.5 feedback point (1.791 ms / 0.823);
  *               AL-S  sequencing (S092 P0 §5.3): accent at velocity 101 not
  *                     100; a note after a slide-flagged note is legato (no
  *                     MEG strike, no VEG trigger, glide), the slid-to note's
@@ -25,10 +26,10 @@
  *                     row; interpolation is continuous across a point;
  *               AL-AB B2R against B-R and against A-R within 0.3 dB RMS at
  *                     the 303's drive;
- *               AL-D  drive (S093 P3): at x8 bounded and finite, the
+ *               AL-D  drive (S093 P3/P6): at x16 bounded and finite, the
  *                     input-pair argument goes past its clamp (the tail is in
  *                     use); with the output make-up the pattern never reaches
- *                     full scale at x1, x2, x4, x8; drive raises the level;
+ *                     full scale at x1, x2, x4, x8, x16; drive raises the level;
  *               AL-Q  Alkaline_isQuiet(): not quiet while the gate is open,
  *                     quiet once the gate and ACCENT have closed and the OTA
  *                     current has decayed, at x1 and x8;
@@ -42,6 +43,15 @@
  *               AL-O  osc_setTableFreq() (T1-7) gives osc_setFreq()'s
  *                     phaseInc and tableOffset for SAW at every note, with
  *                     pitchMod and modNodeValue at 1 and away from 1.
+ *               AL-A  (S093 P6) the VEG attack as the CPU trigger width:
+ *                     attack 0 is the former VEG bit for bit; 10->90 % rises
+ *                     from 2.0..2.8 ms at 0 to 4.6..5.7 ms at 1;
+ *               AL-M  (S093 P6) the MEG decay range: 0.80 x / 1.50 x the
+ *                     303's stock times at decay 0 / 1; accent unchanged;
+ *               AL-SO (S093 P6) feedback x1.5 sustains after the input stops,
+ *                     bounded; the 303's maximum does not;
+ *               AL-PS (S093 P6) pos: 0 free-running, 64 half a cycle, legato
+ *                     keeps the phase, a sweep leaves no pitch error.
  *             Modes for tools/alkaline/check_c.py:
  *               --traces IN OUT [DRV]   the three kernels fed with SPICE e2e
  *                                       signals (input x DRV)
@@ -101,10 +111,10 @@ void instrumentManager_applyVelocityModulationTarget(uint8_t source_slot, float 
 #define BLK OUTPUT_DMA_SIZE
 #define ALK_STEP 5514u   /* a 16th at 120 BPM, samples */
 
-static unsigned g_fail[12];
-enum { G_B, G_R, G_S, G_N, G_AB, G_D, G_Q, G_F, G_O, G_X };
+static unsigned g_fail[16];
+enum { G_B, G_R, G_S, G_N, G_AB, G_D, G_Q, G_F, G_O, G_X, G_A, G_M, G_SO, G_PS };
 static const char *g_name[] = { "AL-B", "AL-R", "AL-S", "AL-N", "AL-AB", "AL-D", "AL-Q",
-                                "AL-F", "AL-O", "AL-X" };
+                                "AL-F", "AL-O", "AL-X", "AL-A", "AL-M", "AL-SO", "AL-PS" };
 enum { K_B2R = 0, K_AR = 1, K_BR = 2 };
 static const char *k_name[] = { "B2R", "A-R", "B-R" };
 
@@ -184,16 +194,23 @@ static void test_bounds(void)
 
 /* ---------------------------------------------------------------- AL-R
  * The ladder alone at the calibration point, the saw at C2 from the real
- * oscillator; the ring is read on the OTA output with I_abc constant. */
-static void test_ring(int k, double *period, double *decay)
+ * oscillator; the ring is read on the OTA output with I_abc constant.
+ * S093 P6: at a given Res knob (the table pair and fraction as
+ * Alkaline_calcVoiceAsync() forms them): knob 1/ALK_RES_KMAX is the 303's
+ * maximum, knob 1 the x1.5 feedback. */
+static void test_ring(int k, float knob, double *period, double *decay)
 {
 	static int16_t out[44108];
 	DiodeLadder dl;
 	OscInfo osc;
 	const int nb = (int)(sizeof(out) / sizeof(out[0])) / BLK;
 	const float i0 = 7.375e-6f;
+	const float kk = knob * (float)(ALK_RES_POINTS - 1u);
+	unsigned lo = (unsigned)kk;
 	int b, j;
 
+	if (lo > ALK_RES_POINTS - 2u)
+		lo = ALK_RES_POINTS - 2u;
 	memset(&osc, 0, sizeof(osc));
 	osc.waveform = SAW;
 	osc.freq = 65.406f;
@@ -201,12 +218,12 @@ static void test_ring(int k, double *period, double *decay)
 	osc.modNodeValue = 1.0f;
 	osc_setFreq(&osc);
 	DiodeLadder_init(&dl);
-	DiodeLadder_setNet(&dl, &alkResTable[ALK_RES_POINTS - 2u], &alkResTable[ALK_RES_POINTS - 1u], 1.0f);
+	DiodeLadder_setNet(&dl, &alkResTable[lo], &alkResTable[lo + 1u], kk - (float)lo);
 	for (b = 0; b < nb; b++) {
 		int16_t *buf = &out[b * BLK];
 
 		calcWavetableOscBlock(&osc, (const int16_t (*)[1024])sawTable, buf, BLK, 1.0f);
-		render_k(k, &dl, buf, ALK_SAW_SCALE_V, i0 * alk_prewarp(i0, 1.0f), 50e-6f);
+		render_k(k, &dl, buf, ALK_SAW_SCALE_V, i0 * alk_prewarp(i0, knob), 50e-6f);
 	}
 	/* one saw period after 0.5 s: find the reset (largest jump), then the
 	 * ring's local maxima after it */
@@ -329,7 +346,7 @@ static double pattern_rms(int k, float drive, int *clipped)
 
 	memset(&v, 0, sizeof(v));
 	Alkaline_initVoice(&v);
-	v.cutoff = 0.35f; v.reso = 0.85f; v.envMod = 0.6f; v.decay = 0.45f; v.accent = 0.8f;
+	v.cutoff = 0.35f; v.reso = 0.85f / ALK_RES_KMAX; v.envMod = 0.6f; v.decay = 0.45f; v.accent = 0.8f;
 	v.drive = drive;
 	if (clipped)
 		*clipped = 0;
@@ -349,14 +366,15 @@ static double pattern_rms(int k, float drive, int *clipped)
 /* ---------------------------------------------------------------- AL-D */
 static void test_drive(void)
 {
-	static const float drv[4] = { 0.0f, 1.0f / 3.0f, 2.0f / 3.0f, 1.0f };   /* x1 x2 x4 x8 */
-	double rms[4];
+	/* S093 P6: 16^drive: 0, 1/4, 1/2, 3/4, 1 are x1 x2 x4 x8 x16 */
+	static const float drv[5] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+	double rms[5];
 	int d, clip;
 
-	for (d = 0; d < 4; d++) {
+	for (d = 0; d < 5; d++) {
 		rms[d] = pattern_rms(K_B2R, drv[d], &clip);
 		printf("AL-D: drive x%.0f: %+.2f dBFS RMS, %d full-scale samples\n",
-		       exp2(3.0 * drv[d]), 20.0 * log10(rms[d] / 32767.0 + 1e-12), clip);
+		       exp2(4.0 * drv[d]), 20.0 * log10(rms[d] / 32767.0 + 1e-12), clip);
 		if (clip)
 			fail(G_D, "the make-up gain leaves headroom (no full-scale sample)", d, clip);
 		if (!isfinite(rms[d]) || rms[d] <= 0.0)
@@ -364,7 +382,7 @@ static void test_drive(void)
 		if (d && rms[d] <= rms[d - 1] * 0.9)
 			fail(G_D, "drive raises the level (net of the make-up)", rms[d], rms[d - 1]);
 	}
-	{	/* x8: bounded state, the input-pair argument past its clamp */
+	{	/* x16: bounded state, the input-pair argument past its clamp */
 		AlkalineVoice v;
 		int16_t buf[BLK];
 		float xmax = 0.0f;
@@ -381,11 +399,11 @@ static void test_drive(void)
 			if (fabsf(v.ladder.xinLast) > xmax)
 				xmax = fabsf(v.ladder.xinLast);
 			if (!isfinite(v.ladder.x0) || !isfinite(v.ladder.z[0]) || fabsf(v.ladder.x0) > 1e3f)
-				fail(G_D, "x8 state bounded and finite", n, v.ladder.x0);
+				fail(G_D, "x16 state bounded and finite", n, v.ladder.x0);
 		}
-		printf("AL-D: x8 largest input-pair argument %.2f (clamp 3.5)\n", xmax);
+		printf("AL-D: x16 largest input-pair argument %.2f (clamp 3.5)\n", xmax);
 		if (xmax <= 3.5f)
-			fail(G_D, "x8 drives the input pair past its clamp (tail in use)", xmax, 3.5);
+			fail(G_D, "x16 drives the input pair past its clamp (tail in use)", xmax, 3.5);
 	}
 }
 
@@ -545,6 +563,187 @@ static void test_fused(void)
 		}
 }
 
+/* ---------------------------------------------------------------- AL-A
+ * S093 P6: the VEG attack as the CPU trigger width.
+ *   - attack 0 is the former VEG bit for bit: delay, length and factor equal
+ *     the old constants (the factor against the compiler-folded expression);
+ *   - the 10->90 % OTA-current rise after silence grows monotonically from
+ *     knob 0 to 1 and lies in 2.0..2.8 ms at 0 and 4.6..5.7 ms at 1 (SPICE
+ *     2.11 / 5.15 ms, one block of resolution plus the fit);
+ *   - legato does not restart it (AL-S covers the trigger). */
+static void test_attack(void)
+{
+	AlkVeg g;
+	const float folded = expf(-ALK_DT / ALK_VEG_TAU_ATT_S);
+	double prev = 0.0;
+	int q;
+
+	alkVeg_init(&g);
+	alkVeg_trigger(&g, 0.0f);
+	if (g.keep != folded || g.delayLeft != ALK_VEG_ATT_DELAY_S ||
+	    g.attLeft != 8.0f * ALK_VEG_TAU_ATT_S)
+		fail(G_A, "attack 0 is the former VEG exactly", g.keep, folded);
+	for (q = 0; q <= 4; q++) {
+		const float knob = (float)q / 4.0f;
+		float cur[200], pk = 0.0f;
+		int n, i10 = -1, i90 = -1;
+
+		alkVeg_init(&g);
+		alkVeg_trigger(&g, knob);
+		for (n = 0; n < 200; n++) {
+			cur[n] = alkVeg_step(&g, 1u);
+			if (cur[n] > pk) pk = cur[n];
+		}
+		for (n = 0; n < 200; n++) {
+			if (i10 < 0 && cur[n] > 0.1f * pk) i10 = n;
+			if (i90 < 0 && cur[n] > 0.9f * pk) i90 = n;
+		}
+		{
+			/* 10->90 % in whole blocks (the VEG steps once per block) */
+			const double ms = (double)(i90 - i10) * ALK_DT * 1e3;
+
+			if (ms < prev)
+				fail(G_A, "attack grows with the knob", knob, ms);
+			if (q == 0 && (ms < 2.0 || ms > 2.8))
+				fail(G_A, "attack 0: 2.0..2.8 ms", knob, ms);
+			if (q == 4 && (ms < 4.6 || ms > 5.7))
+				fail(G_A, "attack 1: 4.6..5.7 ms", knob, ms);
+			prev = ms;
+		}
+	}
+}
+
+/* ---------------------------------------------------------------- AL-M
+ * S093 P6: the MEG decay range. Time from N53's peak to 10 % of its swing,
+ * the firmware MEG alone (one Newton step, per block): decay 0 is 0.80 x and
+ * decay 1 is 1.50 x the model's stock times (174.1 ms / 2.569 s,
+ * fit_meg_range.py), within 2 % (one block is 0.5 % at 140 ms). With accent
+ * held for the whole decay the 4066 path is the 303's (68 k + 250 R), so
+ * the time is the model's stock decay-0 time within 2 %. */
+static double meg_t10(float decay, uint8_t accent)
+{
+	/* steps the MEG from a strike; pk tracks N53's maximum and npk its block,
+	 * and the first block below rest + 10 % of the swing after it ends the
+	 * count (20,000 blocks = 14.5 s, past the 3.85 s longest decay) */
+	AlkMeg m;
+	float rest, pk = -1e9f;
+	int n, npk = 0;
+
+	alkMeg_init(&m);
+	rest = alkMeg_n53(&m);
+	alkMeg_trigger(&m);
+	for (n = 0; n < 20000; n++) {
+		const float v = alkMeg_step(&m, decay, accent);
+
+		if (v > pk) { pk = v; npk = n; }
+		else if (v < rest + 0.1f * (pk - rest))
+			return (double)(n - npk) * ALK_DT;
+	}
+	return 1e9;
+}
+
+static void test_meg_range(void)
+{
+	const double t0 = meg_t10(0.0f, 0u), t1 = meg_t10(1.0f, 0u), ta = meg_t10(1.0f, 1u);
+
+	if (fabs(t0 / (0.80 * 0.1741) - 1.0) > 0.02) fail(G_M, "decay 0 = 0.80 x 174.1 ms", t0, 0.80 * 0.1741);
+	if (fabs(t1 / (1.50 * 2.569) - 1.0) > 0.02) fail(G_M, "decay 1 = 1.50 x 2.569 s", t1, 1.50 * 2.569);
+	if (fabs(ta / 0.1741 - 1.0) > 0.02) fail(G_M, "accent held: the 303's short decay", ta, 0.1741);
+	printf("AL-M: t10 %.1f ms / %.3f s (accent %.1f ms)\n", t0 * 1e3, t1, ta * 1e3);
+}
+
+/* ---------------------------------------------------------------- AL-SO
+ * S093 P6: at knob 1 (feedback x1.5) with a high cutoff the loop sustains
+ * after its input stops, bounded below full scale; at the 303's maximum it
+ * does not. The ladder alone: a saw at C2 for 0.25 s, then silence for 0.5 s,
+ * the cutoff current 4 x the calibration current. (The pitch against the
+ * golden model is checked by check_c.py C1 with the acid_k15 case.) */
+static double sustain_rms(float knob, int16_t *peak)
+{
+	static int16_t out[3 * 11027];
+	DiodeLadder dl;
+	OscInfo osc;
+	const int nb = (int)(sizeof(out) / sizeof(out[0])) / BLK;
+	const float il = 4.0f * 7.375e-6f;
+	const float kk = knob * (float)(ALK_RES_POINTS - 1u);
+	unsigned lo = (unsigned)kk;
+	double acc = 0.0;
+	int b, j, n = 0;
+
+	if (lo > ALK_RES_POINTS - 2u)
+		lo = ALK_RES_POINTS - 2u;
+	memset(&osc, 0, sizeof(osc));
+	osc.waveform = SAW; osc.freq = 65.406f; osc.pitchMod = 1.0f; osc.modNodeValue = 1.0f;
+	osc_setFreq(&osc);
+	DiodeLadder_init(&dl);
+	DiodeLadder_setNet(&dl, &alkResTable[lo], &alkResTable[lo + 1u], kk - (float)lo);
+	*peak = 0;
+	for (b = 0; b < nb; b++) {
+		int16_t *buf = &out[b * BLK];
+
+		if (b * BLK < 11027)   /* 0.25 s of saw, then the input is silent */
+			calcWavetableOscBlock(&osc, (const int16_t (*)[1024])sawTable, buf, BLK, 1.0f);
+		else
+			memset(buf, 0, sizeof(int16_t) * BLK);
+		DiodeLadder_renderB2(&dl, buf, ALK_SAW_SCALE_V, il * alk_prewarp(il, knob), 50e-6f);
+		for (j = 0; j < BLK; j++) {
+			if (abs(buf[j]) > *peak) *peak = (int16_t)abs(buf[j]);
+			if (b * BLK + j >= 2 * 11027) { acc += (double)buf[j] * buf[j]; n++; }
+		}
+	}
+	return n ? sqrt(acc / n) : 0.0;
+}
+
+static void test_selfosc(void)
+{
+	int16_t pk15, pk10;
+	const double r15 = sustain_rms(1.0f, &pk15);
+	const double r10 = sustain_rms(1.0f / ALK_RES_KMAX, &pk10);
+
+	printf("AL-SO: tail RMS x1.5 %.1f LSB (peak %d), 303 max %.1f LSB\n", r15, pk15, r10);
+	if (r15 < 100.0) fail(G_SO, "x1.5 sustains after the input stops", r15, 100.0);
+	if (pk15 >= 32767) fail(G_SO, "x1.5 bounded below full scale", pk15, 32767);
+	if (r10 > 10.0) fail(G_SO, "the 303's maximum does not sustain", r10, 10.0);
+}
+
+/* ---------------------------------------------------------------- AL-PS
+ * S093 P6: pos on Saw/Sqr.
+ *   - pos 0: a note does not touch the phase (free-running, as before);
+ *   - pos 64: every non-legato note starts at half a cycle (phase 1 << 31);
+ *   - legato keeps the running phase;
+ *   - a pos sweep 0 -> 100 -> 0 leaves no lasting pitch change: after it,
+ *     one block advances the phase by exactly 32 x phaseInc. */
+static void test_pos(void)
+{
+	AlkalineVoice v;
+	int16_t buf[BLK];
+	uint32_t ph0;
+	int n;
+
+	memset(&v, 0, sizeof(v));
+	Alkaline_initVoice(&v);
+	v.osc.phase = 0x12345678u;
+	Alkaline_triggerVoice(&v, 0u, 80u, 63u, ALK_STEP);
+	if (v.osc.phase != 0x12345678u) fail(G_PS, "pos 0 leaves the phase alone", v.osc.phase, 0);
+	v.osc.position = 64u;
+	for (n = 0; n < 3; n++) block(&v, buf, K_B2R);     /* let the bend settle */
+	Alkaline_triggerVoice(&v, 0u, 80u, 63u, ALK_STEP);
+	if (v.osc.phase != (64u << 25)) fail(G_PS, "pos 64 starts at half a cycle", v.osc.phase, 64u << 25);
+	v.slide = 1u;
+	Alkaline_triggerVoice(&v, 0u, 80u, 63u, ALK_STEP);  /* latches the slide */
+	block(&v, buf, K_B2R);
+	ph0 = v.osc.phase;
+	Alkaline_triggerVoice(&v, 0u, 80u, 63u, ALK_STEP);  /* legato */
+	if (v.osc.phase != ph0) fail(G_PS, "legato keeps the phase", v.osc.phase, ph0);
+	for (n = 0; n <= 100; n += 10) { v.osc.position = (uint8_t)n; block(&v, buf, K_B2R); }
+	for (n = 100; n >= 0; n -= 10) { v.osc.position = (uint8_t)n; block(&v, buf, K_B2R); }
+	for (n = 0; n < 4; n++) block(&v, buf, K_B2R);
+	ph0 = v.osc.phase;
+	block(&v, buf, K_B2R);
+	if (v.osc.phase - ph0 != 32u * v.osc.phaseInc)
+		fail(G_PS, "no lasting pitch change after a pos sweep", v.osc.phase - ph0, 32u * v.osc.phaseInc);
+}
+
 /* ------------------------------------------------------------ check modes */
 static int mode_traces(const char *in, const char *outp, const float drv)
 {
@@ -684,7 +883,6 @@ static int mode_sweep(int argc, char **argv)
 int main(int argc, char **argv)
 {
 	unsigned g, total = 0u;
-	double per, dec;
 
 	if (argc > 3 && !strcmp(argv[1], "--traces"))
 		return mode_traces(argv[2], argv[3], argc > 4 ? (float)atof(argv[4]) : 1.0f);
@@ -695,15 +893,25 @@ int main(int argc, char **argv)
 
 	test_bounds();
 	for (int k = 0; k < 3; k++) {
-		test_ring(k, &per, &dec);
-		printf("AL-R %s: ring period %.3f ms, decay per cycle %.3f%s\n", k_name[k], per, dec,
-		       k == K_AR ? " (information: A-R is not stable at Res full with the T2-2"
-		                   " 64-sample network, S093 P3)" : "");
+		double per, dec, per15, dec15;
+
+		/* the 303's maximum: the stock ring, as before */
+		test_ring(k, 1.0f / ALK_RES_KMAX, &per, &dec);
+		/* S093 P6: x1.5 feedback at the calibration point: a long ring that
+		 * still decays (measured on the 13-point tables: B2R 1.791 ms / 0.823,
+		 * B-R 1.791 / 0.822, A-R 1.791 / 0.831 per cycle) */
+		test_ring(k, 1.0f, &per15, &dec15);
+		printf("AL-R %s: ring period %.3f ms, decay per cycle %.3f; x1.5: %.3f ms, %.3f%s\n",
+		       k_name[k], per, dec, per15, dec15,
+		       (k == K_AR) ? " (information: A-R is not stable at Res full with the T2-2 64-sample network, S093 P3)" : "");
 		if (k == K_AR)
 			continue;
 		if (fabs(per - 2.0) > 0.06) fail(G_R, "ring period", k, per);
 		if (fabs(dec - 0.364) > 0.03) fail(G_R, "ring decay", k, dec);
+		if (fabs(per15 - 1.78) > 0.06) fail(G_R, "x1.5 ring period", k, per15);
+		if (fabs(dec15 - 0.823) > 0.03) fail(G_R, "x1.5 ring decay", k, dec15);
 	}
+	test_selfosc();
 	test_sequencing();
 	test_net();
 	{
@@ -720,7 +928,11 @@ int main(int argc, char **argv)
 	test_fastmath();
 	test_tablefreq();
 	test_fused();
-	for (g = 0u; g < 10u; g++) {
+	test_attack();
+	test_meg_range();
+	test_pos();
+	/* every group in g_name (S093 P6: fourteen; was a literal 10) */
+	for (g = 0u; g < sizeof g_name / sizeof g_name[0]; g++) {
 		printf("%s: %u failure(s)\n", g_name[g], g_fail[g]);
 		total += g_fail[g];
 	}

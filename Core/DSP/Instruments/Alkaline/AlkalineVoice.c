@@ -46,6 +46,7 @@ void Alkaline_initVoice(AlkalineVoice *voice)
 	voice->accent = 64.0f / 127.0f;
 	voice->tuning = 63.0f / 127.0f;
 	voice->drive = 0.0f;
+	voice->attack = 0.0f;   /* S093 P6: init.alk alk_attack = 0, today's attack */
 	voice->vol = 100.0f / 127.0f;
 	voice->pan = 63u;
 	voice->wave = ALK_WAVE_SAW;
@@ -110,7 +111,32 @@ void Alkaline_triggerVoice(AlkalineVoice *voice, const uint8_t source_slot,
 		/* a new note: jump the pitch, strike the MEG, trigger the VEG */
 		voice->pitchJump = 1u;
 		alkMeg_trigger(&voice->meg);
-		alkVeg_trigger(&voice->veg);
+		alkVeg_trigger(&voice->veg, voice->attack);
+		/*
+		 * S093 P6: pos, the note-start phase (user).
+		 *
+		 * What:       pos 0 leaves the oscillator free-running (the 303's VCO,
+		 *             today's sound bit for bit); pos 1..127 sets the phase to
+		 *             pos/128 of a cycle at every non-legato note, so each
+		 *             note starts at the same point of the waveform (a
+		 *             zero-crossing start and a peak start give a different
+		 *             onset into the ladder). positionApplied re-anchors to
+		 *             pos either way, so no bend follows the trigger.
+		 * Why:        a phase offset on a free-running oscillator is not heard
+		 *             (S093 P6 plan §8.1); the reset gives pos a sound.
+		 * Inputs:     osc.position (osc1_position, 0..127).
+		 * Outputs:    osc.phase (pos != 0), osc.positionApplied.
+		 * Affiliates: the per-block bend in Alkaline_calcVoiceAsync(); the
+		 *             fused loop's 32-bit cycle (DiodeLadder.c: index ph >> 22
+		 *             of 1024), so pos << 25 is pos/128 of it.
+		 */
+		{
+			const uint8_t pos = (uint8_t)(voice->osc.position & 127u);
+
+			if (pos != 0u)
+				voice->osc.phase = (uint32_t)pos << 25;
+			voice->osc.positionApplied = pos;
+		}
 	}
 	/* this note's slide flag decides the next trigger (A10) */
 	voice->slideLatch = (uint8_t)(voice->slide != 0u);
@@ -156,10 +182,46 @@ void Alkaline_calcVoiceAsync(AlkalineVoice *voice)
 	voice->osc.freq = alk_exp2f(voice->pitchLog2
 	                        + (voice->tuning * 127.0f - 63.0f) * (7.0f / 12.0f / 63.0f));
 	osc_setTableFreq(&voice->osc);
+	/*
+	 * S093 P6: pos while it moves: the per-block bend (the stock waves' rule,
+	 * Oscillator.h osc_positionBendApply(), INSTRUMENTS_DSP_REFERENCE §6.1.1).
+	 *
+	 * What:       d = the circular step from the applied position to pos,
+	 *             -64..+63 (127 -> 0 is +1); positionApplied advances by d and
+	 *             phaseInc gains d x OSC_POS_BEND_PER_STEP (2^25 / 32), which
+	 *             held for the 32-sample block moves the phase by exactly d/128
+	 *             of a cycle: the oscillator lands on the new offset, no drift.
+	 * Why:        a pos change at a block edge would click; the bend spreads it
+	 *             over the block as a small pitch excursion. The stock helper
+	 *             is not used: it requires osc_positionBendRestore() after the
+	 *             render, and Alkaline recomputes phaseInc every block
+	 *             (osc_setTableFreq() above), so the bend clears itself. That is
+	 *             S3 of the plan (§7.3), a saving shared with P7.
+	 * Cost:       13 instructions per block (+0.41 per sample; the block
+	 *             compiled alone for the M7 at -Ofast). The plan's +0.8
+	 *             counted the stock apply/restore pair; the linked count
+	 *             (control_cost.py) decides.
+	 *             No cap: |d| <= 64 = OSC_POS_BEND_CAP.
+	 * Constant:   at a steady pos d = 0 and phaseInc is unchanged (pos 0:
+	 *             today's oscillator bit for bit).
+	 */
+	{
+		const uint32_t u = ((uint32_t)(voice->osc.position & 127u) -
+		                    (uint32_t)voice->osc.positionApplied + 64u) & 127u;
+		const int32_t d = (int32_t)u - 64;
+
+		voice->osc.positionApplied =
+			(uint8_t)(((uint32_t)voice->osc.positionApplied + (uint32_t)d) & 127u);
+		voice->osc.phaseInc += (uint32_t)(d * (int32_t)OSC_POS_BEND_PER_STEP);
+	}
 
 	/* control path (S092 P6 §4) */
 	n53 = alkMeg_step(&voice->meg, voice->decay, voice->accentOn);
-	alkAcc_step(&voice->accNet, voice->accentOn, voice->accent, voice->reso,
+	/* S093 P6: the accent sweep's VR4b gang stays on the 303's pot: the
+	 * knob's physical rotation is min(k_eff, 1), k_eff = ALK_RES_KMAX x knob
+	 * (above 1 only VR4a's virtual wiper stage grows) */
+	alkAcc_step(&voice->accNet, voice->accentOn, voice->accent,
+	            fminf(ALK_RES_KMAX * voice->reso, 1.0f),
 	            n53, voice->v134, &vW4, &iAcc);
 	iLad = alk_expoCurrent(voice->cutoff, voice->envMod, n53, vW4, voice->iLadRaw, &dv);
 	voice->v134 = ALK_V561 + dv;
@@ -167,13 +229,16 @@ void Alkaline_calcVoiceAsync(AlkalineVoice *voice)
 	voice->iLadRaw = iLad;
 	voice->iLadEnd = iLad * alk_prewarp(iLad, voice->reso);
 
-	/* drive x1..x8 (D16) and the output make-up falling with it (B-2) */
+	/* drive x1..x16 (S093 P6, user: twice the former x8 maximum; D16) and the
+	 * output make-up falling with it (B-2) */
 	{
 		const float drv = fminf(fmaxf(voice->drive, 0.0f), 1.0f);
 
 		const float t = alk_exp2f(drv);                             /* T1-8 */
+		const float t2 = t * t;
 
-		voice->driveGain = t * t * t;                               /* 8^drv */
+		/* 16^drv = (2^drv)^4: x1 at 0, x4 at the middle, x16 at 1 */
+		voice->driveGain = t2 * t2;
 		voice->makeup = alk_exp2f(ALK_MAKEUP_OCT * (1.0f - drv));
 	}
 

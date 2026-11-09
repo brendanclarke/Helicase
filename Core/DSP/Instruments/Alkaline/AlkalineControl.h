@@ -17,6 +17,9 @@
  *                 of the last block, re-decided from this block's solution
  *                 for the next (one block of lag, 0.73 ms);
  *               - prewarp: tan(x)/x by a [4/4] rational.
+ *             S093 P6: the VEG attack follows the 303's CPU trigger width
+ *             (alk_attack) through the generated alkVegAttack[] table, and the
+ *             MEG decay law is stretched (-20 % / +50 %, alkMeg_step()).
  *             tools/alkaline/alk_model.py holds the same reductions
  *             (FastControl) so validate.py V3/V5 test them against SPICE.
  * Why:        S093_P2 §3A: the S093 P0 control path cost about 3,010
@@ -54,6 +57,12 @@ typedef struct {
 	float v;              /* C42, V */
 	float delayLeft;      /* s before the trigger starts emptying C42 */
 	float attLeft;        /* s of discharge left */
+	/*
+	 * S093 P6: the per-block discharge factor exp(-ALK_DT / tau) of this
+	 * note's attack, set by alkVeg_trigger() from alkVegAttack[] (the CPU
+	 * trigger width, alk_attack). 4 B; approved.
+	 */
+	float keep;
 } AlkVeg;
 
 /*
@@ -118,7 +127,22 @@ void  alkAcc_step(AlkAccentNet *a, uint8_t accent, float accKnob, float res,
                   float n53, float v134, float *vW4, float *iAcc);
 
 void  alkVeg_init(AlkVeg *g);
-void  alkVeg_trigger(AlkVeg *g);
+/*
+ * Start the VEG attack (S092 P6 §4.4; S093 P6: the trigger width).
+ *
+ * What:       interpolates (delay, length, per-block factor) from
+ *             alkVegAttack[] at attack x (ALK_VEG_ATT_POINTS - 1) and stores
+ *             them in g; alkVeg_step() then holds C42 for the delay and
+ *             multiplies it by the factor once per block for the length.
+ * Why:        the 303's attack is set by how long the CPU trigger turns Q32
+ *             on (S092 P3 §3.2); the exponential shape stays, its timing
+ *             moves.
+ * Inputs:     g; attack 0..1 (alk_attack / 127): 0 = a 0.70 ms trigger
+ *             (bit-identical to the former constants), 1 = 0.55 ms.
+ * Outputs:    g->delayLeft, g->attLeft, g->keep.
+ * Accessors:  Alkaline_triggerVoice() (main loop, non-legato notes).
+ */
+void  alkVeg_trigger(AlkVeg *g, float attack);
 float alkVeg_step(AlkVeg *g, uint8_t gate);
 
 float alk_prewarp(float iLad, float res);

@@ -84,18 +84,32 @@ def fit_veg():
     grid = np.linspace(float(vv.min()), 12.0, 64)
     itab = np.interp(grid, vv, ii)
     itab[grid > vv.max()] = 0.0
-    # attack: trigger 0.70 ms (P3 §3.2), fit delay + exponential discharge of C42
-    raw = VCA.run("fit_veg_att", VCA.veg_netlist(12.0, 0.70e-3, 5e-3, 0.5, 0.04, t_step=5e-6))
-    t, v42 = raw[:, 0], raw[:, 3]
-    m = t >= 0.01
-    tt, vv2 = t[m] - 0.01, v42[m]
-    best = None
-    for delay in np.linspace(0.0, 2.0e-3, 41):
-        for tau in np.linspace(0.1e-3, 2.0e-3, 39):
-            mod = np.where(tt < delay, vv2[0], vv2[0] * np.exp(-(tt - delay) / tau))
-            e = float(np.mean((mod - vv2) ** 2))
-            if best is None or e < best[0]:
-                best = (e, delay, tau)
+    # attack (S093 P6): fit delay + exponential discharge of C42 per CPU
+    # trigger width, 0.70 ms (S092 P3 §3.2: today's attack) down to 0.55 ms in
+    # nine steps; the knob alk_attack interpolates this table.
+    #   model: v42(t) = v0 for t < delay, v0 exp(-(t - delay) / tau) after,
+    #   grid-searched for least squares on the SPICE C42 voltage after the
+    #   trigger edge (t = 10 ms). Point 0 is the S092 fit exactly (same width,
+    #   netlist and grid), so att_delay / tau_att keep their values.
+    def fit_att(tw):
+        raw = VCA.run(f"fit_veg_att_{int(round(tw * 1e7))}",
+                      VCA.veg_netlist(12.0, tw, 5e-3, 0.5, 0.04, t_step=5e-6))
+        t, v42 = raw[:, 0], raw[:, 3]
+        m = t >= 0.01
+        tt, vv2 = t[m] - 0.01, v42[m]
+        best = None
+        # the delay is searched to 4 ms and tau to 6 ms: a 0.55 ms trigger
+        # turns Q32 only just on (5.15 ms 10->90 %)
+        for delay in np.linspace(0.0, 4.0e-3, 81):
+            for tau in np.linspace(0.1e-3, 6.0e-3, 119):
+                mod = np.where(tt < delay, vv2[0], vv2[0] * np.exp(-(tt - delay) / tau))
+                e = float(np.mean((mod - vv2) ** 2))
+                if best is None or e < best[0]:
+                    best = (e, delay, tau)
+        return best
+    widths = [round(0.70e-3 - q * (0.15e-3 / 8.0), 9) for q in range(9)]
+    att = [fit_att(tw) for tw in widths]
+    best = att[0]
     # recharge: fit v42(t) = v_rec - (v_rec - v0) exp(-(t - t1) / tau) after the attack
     raw = VCA.run("fit_veg_long2", VCA.veg_netlist(12.0, 0.70e-3, 5e-3, 6.0, 6.0, t_step=200e-6))
     t3, v3 = raw[:, 0], raw[:, 3]
@@ -109,7 +123,11 @@ def fit_veg():
                 bestr = (e, v_rec, tau)
     return dict(v42=list(map(float, grid)), i_uA=list(map(float, 1e6 * itab)),
                 v_rec=float(bestr[1]), tau_rec=float(bestr[2]), rec_fit_mse=bestr[0],
-                att_delay=float(best[1]), tau_att=float(best[2]), att_fit_mse=best[0])
+                att_delay=float(best[1]), tau_att=float(best[2]), att_fit_mse=best[0],
+                # S093 P6: the knob table, point 0 = the two values above
+                att_table=[dict(trigger_ms=1e3 * tw, att_delay=float(b[1]),
+                                tau_att=float(b[2]), fit_mse=b[0])
+                           for tw, b in zip(widths, att)])
 
 
 def square_levels():

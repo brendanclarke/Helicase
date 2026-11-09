@@ -157,7 +157,7 @@ tap is foreground-only, like the rest of the funnel.
   | Snare | `SnareVoice` | 452 |
   | Cymbal | `CymbalVoice` | 508 |
   | HiHat | `HiHatVoice` | 520 |
-  | Alkaline | `AlkalineVoice` | 540 |
+  | Alkaline | `AlkalineVoice` | 548 |
 
   Building blocks: `OscInfo` 72 B, `ResonantFilter` 36 B, `Lfo` 124 B,
   `ModulationNode` 44 B, `SlopeEg2` 28 B, `DecayEg` 12 B,
@@ -564,10 +564,13 @@ trigger; **HiHat does not** (and the Drum FM oscillator never resets).
 
 ### 5.5 Alkaline (`AlkalineVoice.c`, Basic)
 
-The TB-303 voice (S093). Its descriptor table is `AlkalineParameters.c`: 26
-rows and eight sub-pages (`coa tun wav sld` under OSC, `dst amt` under
-velocity, `cut res env dec drv` under FILTER, the Drum LFO page, `acc vol
-pan` under MIX; the amp-envelope, FM and transient pages are empty).
+The TB-303 voice (S093 P4; S093 P6 parameter tweaks). Its descriptor table is
+`AlkalineParameters.c`: 28 rows and eight sub-pages (S093 P6: `coa tun wav
+pos` under OSC, `atk dec` under AEG, `dst amt sld` under mod, `acc` under
+click, `cut res env drv` on one FILTER screen, the Drum LFO page, `vol pan`
+under MIX; the FM page is empty). `alk_attack` (26) and `osc1_position` (27)
+are appended, so every stored index, automation ID and NRPN number of rows
+0–25 is unchanged.
 
 **Signal path.** After the trigger:
 
@@ -585,6 +588,13 @@ osc table wave (sawTable | alkSqrTable[octave]) --x driveGain--> B2R ladder
   `phaseInc`/`tableOffset` directly, without `osc_setFreq()`'s cache. The
   `coa` row's LFO/velocity target is `osc.modNodeValue`, so modulation moves
   the pitch (T1-7).
+- **`pos` (S093 P6).** `osc1_position`: 0 leaves the oscillator free-running
+  (the 303's VCO, the pre-P6 sound bit for bit); 1–127 sets the phase to
+  pos/128 of a cycle at every non-legato trigger, so a note always starts at
+  the same point of the waveform. A move bends `phaseInc` for one block
+  (13 instructions, +0.41 per sample), landing on the new offset with no
+  drift; Alkaline recomputes `phaseInc` each block, so no restore is needed.
+  Legato notes keep the running phase.
 - **Ladder.** `DiodeLadder_renderB2Osc()` fuses the oscillator's table read
   into the B2R per-sample loop (bit-identical to `calcWavetableOscBlock()`
   then `DiodeLadder_renderB2()`, law AL-X). B2R is the chosen kernel: rungs
@@ -592,7 +602,8 @@ osc table wave (sawTable | alkSqrTable[octave]) --x driveGain--> B2R ladder
   214 instructions including the oscillator (standalone 213; G3).
 - **Network.** N1 at 64 samples (T2-2), **6 block-system states on one
   balanced basis common to every Res point** (r6): `DiodeLadder_setNet()`
-  interpolates the 9 table points per block, `dl_slowUpdate()` solves
+  interpolates the 13 table points per block (S093 P6; 0.125 spacing in
+  k_eff over 0..1.5), `dl_slowUpdate()` solves
   `DL_NET_ROWS` = 3 rows per phase over the two phases, updates the u
   asymptote (50 Hz) at the latch and the v asymptote (120 Hz) at the
   commit, and ramps the new outputs over the next window. The audio loop
@@ -601,16 +612,37 @@ osc table wave (sawTable | alkSqrTable[octave]) --x driveGain--> B2R ladder
   scale is 7 V at OTA pin 6 (`DL_OUT_SCALE`), so a driven signal keeps its
   headroom. The output make-up is applied to the OTA current, not the
   buffer: `2^(ALK_MAKEUP_OCT (1 - drive))` (B-2), default
-  `ALK_MAKEUP_OCT 1.0` (+6 dB at x1, 0 dB at x8), set by ear on the device.
-- **Drive.** `driveGain = 8^drive` with `drive` = byte/127 (x1..x8, D16).
+  `ALK_MAKEUP_OCT 1.0` (+6 dB at x1, 0 dB at x16), set by ear on the device.
+- **Drive.** `driveGain = 16^drive = 2^(4 drive)` with `drive` = byte/127
+  (x1 at 0, x4 at mid, x16 at 1; S093 P6 doubled the former x8), cost 0.
+- **Resonance and self-oscillation (S093 P6).** The Res knob runs the
+  effective feedback `k_eff = ALK_RES_KMAX x knob` with `ALK_RES_KMAX` 1.5,
+  so the 303's maximum sits at byte ≈ 85 and above it is new. For k > 1 the
+  model adds an ideal transformer at the VR4a wiper (`V(W) = k V(TP6)`, TP6
+  supplying k x the W-side current); at k = 1 it is the stock wire to 4e-8.
+  The accent sweep's VR4b gang stays physical: `min(k_eff, 1)`. The 64-sample
+  network holds: at the calibration point k_eff 1.5 rings 1.791 ms at 0.823
+  per cycle, and above the threshold with a high cutoff it sustains a
+  bounded tone (AL-SO). The prewarp table has 16 points (k_eff 0.1 steps to
+  1.5, held at c(1) = 1.470 above 1). Cost 0 per sample (measured).
 - **Control path** (`AlkalineControl.c`, control rate; Tier 1/Tier 2): the
   expo converter (two fixed-point passes warm-started from the last ladder
   current, `ALK_EXPO_PASSES 2`; one pass was 20-30 cents off at strikes), MEG
-  (C62/N53, one Newton step on the diode stack), the accent network (VR7
+  (C62/N53, one Newton step on the diode stack; S093 P6 decay range:
+  `r = ALK_MEG_R_MIN + ALK_MEG_R_SPAN x taper(decay)`, fitted to −20 % at
+  decay 0 and +50 % at decay 1 against the 303's 68 k + 1 M; the accent
+  branch keeps 68 k + 250 Ω), the accent network (VR7
   shared by the C13 sweep and the C36 VCA branch; the 5 x 5 nodal solve
   written as a 2 x 2 in (W7, W), one solve per block, T2-3 lagged accent
   with `ALK_ACC_SOLVES 1`), VEG (C42 attack/recovery with its delay) and
-  the TPT prewarp `tan(x)/x`. Fast `alk_log2f()`/`alk_exp2f()` replace libm.
+  the TPT prewarp `tan(x)/x`. S093 P6 `alk_attack`: the VEG attack is the
+  303's CPU trigger-pulse width, interpolated from the generated 9-point
+  `alkVegAttack[]` (delay, 8 tau and the per-block factor). Byte 0 is the
+  former 0.70 ms trigger bit for bit (2.11 ms SPICE 10→90 %); 127 is 0.55 ms
+  (5.15 ms). The exponential shape stays; the attack is heard after rests
+  and long notes, as on the circuit. The interpolation runs in the trigger
+  (main loop), and `alkVeg_step()` multiplies by the stored factor (one
+  instruction fewer per block). Fast `alk_log2f()`/`alk_exp2f()` replace libm.
   The five 303 knobs use `alk_taper()`; `ALK_MAKEUP_OCT` is the only level
   trim.
 - **Sequencing (the 303 rules).** A trigger latches the note, ACCENT
@@ -623,21 +655,27 @@ osc table wave (sawTable | alkSqrTable[octave]) --x driveGain--> B2R ladder
   gate first. `stepSamples` comes from `seq_trackStepSamples(trigger_track)`
   (96 PPQ Q8.8 x 44,108 Hz, 64-bit product); a MIDI note-off does not end
   the gate (B-6).
+- **Attack after a rest (S093 P6).** The trigger-width attack changes the
+  C42 discharge after silence; on running 16ths C42 has not recharged
+  (τ 1.5 s), so those notes open almost at once whatever the setting. That
+  is the circuit's behaviour, kept on purpose.
 - **Platform.** The trigger makes the same three calls as
   `Drum_triggerVoice()` for its slot: `lfo_retrigger(source_slot)`,
   `modNode_updateValue(&velocityModulators[source_slot], vel)` and
   `instrumentManager_applyVelocityModulationTarget()`. Velocity is the
   accent, so there is no `velo_vol_on_off` row.
-- **Morph/storage.** The 20 image rows are MORPHABLE (all but `alk_wave`,
+- **Morph/storage.** The 22 image rows are MORPHABLE (28 rows minus
+  `alk_wave`,
   `velo_mod_dest` and the four LFO targets); `alk_wave` is a SELECTOR, so
   automation steps between Saw and Sqr and Morph never blends them.
   `init.alk` writes every key in table order; `[morph]` holds the MORPHABLE
   rows; the LFO voices are `self` and the target selectors `255`.
   `Alkaline_initVoice()` loads the same bytes.
-- **Cost.** Whole voice, linked (G3-G5): fused loop 214 (3 VDIV) + 1,218 per
-  block / 32 (9 VDIV) = **252.1 per sample**, against the Drum ceiling
-  261.3 (frozen and P4 re-measured). The per-block part is async 872 +
-  sync-block entry/exit 332 + dispatch 14. `Alkaline_isQuiet()` is used for
+- **Cost.** Whole voice, linked after S093 P6 (G3-G5): fused loop 214
+  (3 VDIV) + 1,230 per block / 32 (9 VDIV) = **252.5 per sample**, against
+  the Drum ceiling 261.3 (frozen and P4 re-measured). The per-block part is
+  async 884 + sync-block entry/exit 332 + dispatch 14: the `pos` bend +13,
+  the VEG factor −1, drive and MEG +0. `Alkaline_isQuiet()` is used for
   a Scene swap. Basic: it may take any slot, and `slotUsesSrr()` is 0.
 
 ### 5.6 Where each engine's hot code runs
@@ -1220,7 +1258,8 @@ byte is a fold type index, not a waveform selector.
 - **N1 network.** The linear 303 network is split from the per-sample ladder;
   each Res point stores the block system `phi`, `gam`, `cs`, `ga`, `d`
   (`DiodeLadderNet`). At r6 the system has 6 states on one balanced basis
-  (`gen_alk_tables.py reduced_basis()`): 288 B per point, 9 points.
+  (`gen_alk_tables.py reduced_basis()`): 288 B per point, 13 points over
+  k_eff 0..1.5 (S093 P6).
 - **T2-2 phases.** `dl_slowUpdate()` advances the block system once per
   `ALK_NET_BLOCK` (64) samples: the latched means and the Res blend, then
   `DL_NET_ROWS` (3) state rows per chunk, with the outputs committed on the
@@ -1237,7 +1276,8 @@ byte is a fold type index, not a waveform selector.
   not move them into the voice.
 - **Cost.** The linked B2R + fused oscillator read loop is 214 instructions
   (3 VDIV). `DiodeLadderNet` is 288 B and `DiodeLadder` 232 B at r6; both fit
-  the voice slot (540 B total for `AlkalineVoice`).
+  the voice slot (548 B total for `AlkalineVoice`, S093 P6: +4 B `keep`,
+  +4 B `attack`).
 
 ---
 
@@ -1417,7 +1457,7 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 | Snare | noise 13 + filter 95 + transient 22 + add 5 + osc 24 + post 30 | 190 instructions, 3 divisions |
 | Cymbal | 2 mod osc 48 + add 5 + FM carrier 35 + filter 95 + transient 22 + post 25 | 230 instructions, 3 divisions |
 | HiHat | as Cymbal | 230 instructions, 3 divisions |
-| Alkaline (B2R, r6, linked) | fused loop 214 + per block 1,218/32 = 38.1 | 252 instructions, 3 divisions + 9 per block |
+| Alkaline (B2R, r6, linked, S093 P6) | fused loop 214 + per block 1,230/32 = 38.4 | 252 instructions, 3 divisions + 9 per block |
 
 Add waveform interpolation (about one extra oscillator render each, at most
 two per block) and the mixer per slot (decimator 12–18, dry path 28–46, plus
@@ -1430,16 +1470,16 @@ measured on the linked image; the per-block part is counted by
 | Item | Instructions | VDIV | Where |
 |---|---:|---:|---|
 | G3 fused oscillator + B2R loop | 214 | 3 | `Alkaline_calcVoiceSyncBlock.constprop.0` |
-| G4 control async | 872 | 9 | `Alkaline_calcVoiceAsync`, helpers inlined |
+| G4 control async | 884 | 9 | `Alkaline_calcVoiceAsync`, helpers inlined |
 | G4 sync-block entry/exit | 332 | 0 | linked per block |
 | G4 dispatch | 14 | 0 | `instrumentManager_calcSlotAsync` |
-| G4 per block | 1,218 | 9 | |
-| G5 whole voice | 214 + 1,218/32 = 252.1 | 3 + 9/32 | |
+| G4 per block | 1,230 | 9 | (S093 P6; P4 was 1,218) |
+| G5 whole voice | 214 + 1,230/32 = 252.5 | 3 + 9/32 | (S093 P6) |
 | Drum ceiling (frozen and P4 re-measured) | 222.5 + 922/32 + 10 = 261.3 | 3 | `tools/dsp_test/baselines/s093p4/drum_ceiling.txt` |
 
 The stub-link count is 1,285 (async 915 + sync block 356 + dispatch 14). LTO
 inlines the fixed-count control helpers on the linked image, so the linked
-async is 872 with no loops of its own; the audio loop is excluded from the
+async is 884 (872 in P4) with no loops of its own; the audio loop is excluded from the
 per-block figure. G5 is static: the device `cpu` widget decides (K1).
 
 **Drum oscillator section by mod mode (S085, instructions per sample).**
@@ -1494,10 +1534,12 @@ divisions); `osc_setFreq()` when the frequency changed. Amortised over 32
 samples these are a few percent at most. The Morph worker and LFOs on voice
 Morph add foreground (non-render) cost.
 
-**S093 Alkaline (linked).** Per block: `Alkaline_calcVoiceAsync` 872 (9
-VDIV), the sync block's entry/exit 332 and the dispatcher 14 = **1,218 (9
+**S093 Alkaline (linked, P6).** Per block: `Alkaline_calcVoiceAsync` 884 (9
+VDIV), the sync block's entry/exit 332 and the dispatcher 14 = **1,230 (9
 VDIV)**. The fused audio loop (214, 3 VDIV) is the per-sample part and is
-excluded here. The stub-link count was 1,285 (915 + 356 + 14). LTO inlined
+excluded here. The P4 figure was 1,218; P6 adds 13 (`pos` bend) and removes
+1 (the VEG factor); drive and MEG are unchanged. The stub-link count was
+1,285 (915 + 356 + 14). LTO inlined
 `alkAcc_step()` (4), `alkMeg_step()` (4), `alk_expoCurrent()` (3) and the
 3-row network chunk into the async path, so `control_cost.py --elf` weights
 the sync block's audio loop at 0 and sees no loops in the async path.

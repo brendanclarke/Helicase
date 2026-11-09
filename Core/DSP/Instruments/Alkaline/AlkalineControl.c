@@ -109,10 +109,17 @@ float alkMeg_n53(const AlkMeg *m)
  * contracting near the floor, where Newton does not); vy at the new current
  * by its tangent. A strike leaves the cold estimate (v - 1.3)/r for the
  * first block after it.
+ * S093 P6: the decay range is stretched, -20 % at decay 0 and +50 % at
+ * decay 1 (user): r = ALK_MEG_R_MIN + ALK_MEG_R_SPAN x taper (fitted,
+ * fit_meg_range.py). The accent branch keeps 68 k + 250 R: while the
+ * accent lane is high (one step) the discharge is the 303's; the tail after
+ * it follows the stretched law, as on the 303, where the 4066 shorts VR6
+ * only during the lane (decay 1: 0.83 s -> 1.17 s to 10 %, the model).
  */
 float alkMeg_step(AlkMeg *m, const float decay, const uint8_t accent)
 {
-	const float r = 68e3f + (accent ? R_4066 : 1e6f * alk_taper(decay));
+	const float r = accent ? (68e3f + R_4066)
+	                       : (ALK_MEG_R_MIN + ALK_MEG_R_SPAN * alk_taper(decay));
 
 	if (m->strikeLeft > 0.0f) {
 		m->v = ALK_MEG_V_PEAK;
@@ -265,12 +272,31 @@ void alkVeg_init(AlkVeg *g)
 	g->v = 12.0f - 1e-3f;
 	g->delayLeft = 0.0f;
 	g->attLeft = 0.0f;
+	g->keep = alkVegAttack[0].keep;   /* the 0.70 ms attack until a trigger sets one */
 }
 
-void alkVeg_trigger(AlkVeg *g)
+void alkVeg_trigger(AlkVeg *g, const float attack)
 {
-	g->delayLeft = ALK_VEG_ATT_DELAY_S;
-	g->attLeft = 8.0f * ALK_VEG_TAU_ATT_S;
+	/* the knob over the table points; the clamp keeps a modulated value in
+	 * range, and k stops one short of the end so k + 1 is a point */
+	const float p = fminf(fmaxf(attack, 0.0f), 1.0f) * (float)(ALK_VEG_ATT_POINTS - 1u);
+	uint32_t k = (uint32_t)p;
+	float f;
+
+	if (k > ALK_VEG_ATT_POINTS - 2u)
+		k = ALK_VEG_ATT_POINTS - 2u;
+	f = p - (float)k;
+	{
+		const AlkVegAttack *a = &alkVegAttack[k];
+		const AlkVegAttack *b = &alkVegAttack[k + 1u];
+
+		/* linear in the knob between the fitted trigger widths; at attack 0
+		 * f is 0, so each is point 0 exactly: the former delay, 8 tau and
+		 * the folded exp(-ALK_DT / tau) */
+		g->delayLeft = a->delay + f * (b->delay - a->delay);
+		g->attLeft = a->len + f * (b->len - a->len);
+		g->keep = a->keep + f * (b->keep - a->keep);
+	}
 }
 
 float alkVeg_step(AlkVeg *g, const uint8_t gate)
@@ -278,7 +304,9 @@ float alkVeg_step(AlkVeg *g, const uint8_t gate)
 	if (g->delayLeft > 0.0f) {
 		g->delayLeft -= ALK_DT;
 	} else if (g->attLeft > 0.0f) {
-		g->v *= expf(-ALK_DT / ALK_VEG_TAU_ATT_S);     /* constant, folded */
+		/* S093 P6: this note's factor (alkVeg_trigger()); was the folded
+		 * expf(-ALK_DT / ALK_VEG_TAU_ATT_S), which is alkVegAttack[0].keep */
+		g->v *= g->keep;
 		g->attLeft -= ALK_DT;
 	}
 	g->v = ALK_VEG_V_REC + (g->v - ALK_VEG_V_REC) * expf(-ALK_DT / ALK_VEG_TAU_REC_S);
@@ -298,15 +326,19 @@ float alkVeg_step(AlkVeg *g, const uint8_t gate)
 
 /* ---- §5.2 TPT prewarp: the factor on the ladder current ----
  * T1-5: tan(th)/th = (945 - 105 th^2 + th^4) / (945 - 420 th^2 + 15 th^4)
- * (the [5/4] tan Pade over th; th <= 1.3, where it is within 1e-5). */
+ * (the [5/4] tan Pade over th; th <= 1.3, where it is within 1e-5).
+ * S093 P6: alkPrewarpC is indexed by the knob over ALK_PREWARP_POINTS (16:
+ * k_eff 0, 0.1 .. 1.5, held at c(1) above 1), not by a fixed 11 points. */
 float alk_prewarp(const float iLad, const float res)
 {
-	float p = fminf(fmaxf(res, 0.0f), 1.0f) * 10.0f;
+	/* the knob over the table: p = 15 x knob = 10 x k_eff, the same point
+	 * and fraction as the former 10 x k for every stock setting */
+	float p = fminf(fmaxf(res, 0.0f), 1.0f) * (float)(ALK_PREWARP_POINTS - 1u);
 	int32_t k = (int32_t)p;
 	float c, th, s;
 
-	if (k > 9)
-		k = 9;
+	if (k > (int32_t)ALK_PREWARP_POINTS - 2)
+		k = (int32_t)ALK_PREWARP_POINTS - 2;
 	c = alkPrewarpC[k] + (p - (float)k) * (alkPrewarpC[k + 1] - alkPrewarpC[k]);
 	/* theta = c w1 / (2 fs), w1 = I / (4 Vt C19) */
 	th = fminf(c * iLad * (1.0f / (4.0f * VT * 33e-9f)) / (2.0f * 44108.0f), 1.3f);

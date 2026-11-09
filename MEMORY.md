@@ -209,8 +209,9 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   removal): Drum dearest ≈ 222.5 loops + 922 per block / 32 + SRR 10 ≈ 261
   per sample, 3 VDIV (`S093_P3_PREP_WORK_WAVES_KERNEL_CONTROL.md` §1); the
   per-block count tool is `tools/alkaline/control_cost.py`. `S093_P2_ALKALINE_B-R_PRE_IMPLEMENTATION.md` §8.
-- **Alkaline (S093 P4, binding):** the voice is `AlkalineVoice` (540 B) in the
-  fifth tagged slot; Basic. Its oscillator is a **table wave**: `sawTable`,
+- **Alkaline (S093 P4/P6, binding):** the voice is `AlkalineVoice` (548 B
+  after P6) in the fifth tagged slot; Basic. Its oscillator is a **table
+  wave**: `sawTable`,
   or `alkSqrTable[octave]` for `alk_wave` 1, set with
   `osc_setTableFreq()` — **never** `osc_setFreq()` (the async recomputes the
   pitch from `midiFreq` and the note each block; the coarse writer only sets
@@ -225,6 +226,14 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   storage schema: designated rows in enum order, 3-character tokens, one
   `TABLES` entry per type; the add-a-type checklist is
   `INSTRUMENTS_DSP_REFERENCE.md` §9.2.
+- **Alkaline knob vs feedback (S093 P6, binding):** the C side takes the Res
+  **knob** (0..1); the model and SPICE take the effective feedback
+  `k_eff = ALK_RES_KMAX x knob` (`ALK_RES_KMAX` 1.5, a wiper transformer
+  above k = 1). Every harness that hands a SPICE `res` to the C bench divides
+  by `ALK_RES_KMAX`; a SPICE `dec` knob handed to the stretched decay model
+  goes through `alk_model.decay_knob_303()`. `pos` 0 on Saw/Sqr is
+  free-running, 1..127 is the note-start phase. Stored `dec` / `res` / `drv`
+  bytes keep their keys and change meaning, with no migration.
 - **CrumpBit 170-cap (S091 P5, binding):**
   `EFFECTS_MODULES_DSP_REFERENCE.md` §6.2.
 - **Mixer byte size is NOT a cost measure (S089 P0 F3).** LTO re-spends freed

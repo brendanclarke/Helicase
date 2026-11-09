@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.join(HERE, "variants"))
 import listen_bc as LB    # noqa: E402
 import run_variants as RV  # noqa: E402
 import validate as V      # noqa: E402
+import alk_model as M     # noqa: E402
 
 VARIANTS = {
     "B2R": dict(gen=[], defs=[], rows=4),
@@ -83,7 +84,8 @@ def golden(exe):
             n = len(s)
             fin = os.path.join(ROOT, "build", "s093p3", "g.in")
             fout = os.path.join(ROOT, "build", "s093p3", "g.out")
-            np.concatenate([np.array([n], np.int32).view(np.float32), [np.float32(k)],
+            np.concatenate([np.array([n], np.int32).view(np.float32),
+                            [np.float32(k / M.RES_KMAX)],
                             np.stack([s, il, ia], 1).astype(np.float32).ravel()]
                            ).astype(np.float32).tofile(fin)
             subprocess.run([exe, "--traces", fin, fout, str(drv)], check=True)
@@ -115,9 +117,9 @@ def main():
     sets = {
         "acid": (lambda e: LB.pattern(e, knobs["acid"]["knobs"], 0.0), int(0.125 * LB.FS)),
         "lowres": (lambda e: LB.pattern(e, knobs["lowres"]["knobs"], 0.0), int(0.125 * LB.FS)),
-        "acid_x8": (lambda e: LB.pattern(e, knobs["acid"]["knobs"], 1.0), int(0.125 * LB.FS)),
+        "acid_x8": (lambda e: LB.pattern(e, knobs["acid"]["knobs"], 0.75), int(0.125 * LB.FS)),
         "sweep": (lambda e: LB.sweep(e, 0.0), LB.FS),
-        "sweep_x8": (lambda e: LB.sweep(e, 1.0), LB.FS),
+        "sweep_x8": (lambda e: LB.sweep(e, 0.75), LB.FS),
     }
     res = dict(meta=meta)
     for name, (render, seg) in sets.items():

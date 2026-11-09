@@ -39,7 +39,9 @@ sys.path.insert(0, HERE)
 import alk_model as M  # noqa: E402
 
 OUT_DIR = os.path.join(ROOT, "Core", "DSP", "Instruments", "Alkaline")
-RES_POINTS = 9                      # S092 P6 §5.3: 9 points, LSD +0.016 dB
+RES_POINTS = 13                     # S093 P6: 0.125 spacing in k_eff over 0..RES_KMAX (= today's 9 over 0..1)
+RES_KMAX = M.RES_KMAX               # S093 P6: knob 1 = feedback x1.5
+PREWARP_POINTS = 16                 # S093 P6: k_eff 0, 0.1 .. 1.5 (today's 11 points plus 5 held at c(1))
 NET_BLOCK = 64                      # samples per slow-network update (T2-2, S093 P3)
 A_U_HZ, A_V_HZ = 50.0, 120.0        # N1 asymptote poles (S093 P1 §5)
 # S093 P4: r6, the common balanced basis (user, S093). reduced_basis() builds
@@ -64,13 +66,15 @@ def f32(x):
 
 
 def n1_net(k):
-    """SplitNet in form N1 (S093 P1 §5): no per-sample fast modes."""
+    """SplitNet in form N1 (S093 P1 §5): no per-sample fast modes.
+    k is the knob position 0..1 (S093 P6); the network is built at the
+    effective feedback RES_KMAX x k (alk_model.FeedbackNet)."""
     saved = (M.SplitNet.F_SPLIT, M.SplitNet.A_ASYM_U, M.SplitNet.A_ASYM_V)
     M.SplitNet.F_SPLIT = 1e9
     M.SplitNet.A_ASYM_U = 2 * math.pi * A_U_HZ
     M.SplitNet.A_ASYM_V = 2 * math.pi * A_V_HZ
     try:
-        return M.SplitNet(k, block=NET_BLOCK)
+        return M.SplitNet(RES_KMAX * k, block=NET_BLOCK)
     finally:
         M.SplitNet.F_SPLIT, M.SplitNet.A_ASYM_U, M.SplitNet.A_ASYM_V = saved
 
@@ -177,6 +181,7 @@ def emit_header():
         "",
         "/* Resonance table of the real-time network, form N1 (S093 P1 §5). */",
         f"#define ALK_RES_POINTS        {RES_POINTS}u",
+        f"#define ALK_RES_KMAX          {f32(RES_KMAX)}  /* S093 P6: knob 1 = feedback x{RES_KMAX:g} */",
         f"#define ALK_NET_BLOCK         {NET_BLOCK}u    /* samples per slow-network update */",
         f"#if ALK_NET_STATES != {NET_STATES}u",
         f"#error \"AlkalineTables: generated for {NET_STATES} network states (ALK_NET_STATES)\"",
@@ -191,8 +196,9 @@ def emit_header():
         f"#define ALK_NET_BE_V          {f32(asym(A_V_HZ)[1])}",
         f"#define ALK_NET_DECAY_V       {f32(asym(A_V_HZ)[2])}",
         "",
-        "/* TPT prewarp c(k) at k = 0, 0.1 .. 1 (S092 P6 §5.2). */",
-        "#define ALK_PREWARP_POINTS    11u",
+        "/* TPT prewarp c(k_eff) at k_eff = 0, 0.1 .. RES_KMAX, indexed by the knob",
+        " * (S092 P6 §5.2; S093 P6: held at c(1) above k_eff 1). */",
+        f"#define ALK_PREWARP_POINTS    {PREWARP_POINTS}u",
         "extern const float alkPrewarpC[ALK_PREWARP_POINTS];",
         "",
         "/* VEG: Q31 current against C42 voltage, uniform grid (S092 P6 §4.4). */",
@@ -205,6 +211,15 @@ def emit_header():
         f"#define ALK_VEG_V_REC         {f32(veg['v_rec'])}",
         f"#define ALK_VEG_TAU_REC_S     {f32(veg['tau_rec'])}",
         "",
+        "/* S093 P6: VEG attack against the CPU trigger width (alk_attack): knob",
+        " * 0 = 0.70 ms (the original fit, ALK_VEG_ATT_DELAY_S / ALK_VEG_TAU_ATT_S),",
+        " * knob 1 = 0.55 ms. Per point: the delay before C42 empties, the discharge",
+        " * length 8 tau, and the per-block factor exp(-ALK_DT / tau) as float32 so",
+        " * point 0 equals the compiler-folded constant of the former code. */",
+        "typedef struct { float delay, len, keep; } AlkVegAttack;",
+        f"#define ALK_VEG_ATT_POINTS    {len(veg['att_table'])}u",
+        "extern const AlkVegAttack alkVegAttack[ALK_VEG_ATT_POINTS];",
+        "",
         "/* MEG (S092 P6 §4.2). */",
         f"#define ALK_MEG_V_PEAK        {f32(meg['v_peak'])}",
         f"#define ALK_MEG_V_REST        {f32(meg['v_rest'])}",
@@ -212,6 +227,11 @@ def emit_header():
         f"#define ALK_MEG_DROP          {f32(meg['drop'])}",
         f"#define ALK_MEG_SOFT          {f32(meg['soft'])}",
         f"#define ALK_MEG_V53_MIN       {f32(meg['v53_min'])}",
+        "/* S093 P6: the decay law r = R_MIN + R_SPAN x alk_taper(decay), fitted by",
+        " * fit_meg_range.py (-20 % at decay 0, +50 % at decay 1 against the 303's",
+        " * 68 k + 1 M); the accent path keeps 68 k + the 4066. */",
+        f"#define ALK_MEG_R_MIN         {f32(meg['r_min'])}",
+        f"#define ALK_MEG_R_SPAN        {f32(meg['r_span'])}",
         "",
         "/* Accent network (S092 P6 §4.3). */",
         f"#define ALK_ACC_V13_REST      {f32(c['accent']['v13_rest'])}",
@@ -266,7 +286,7 @@ def emit_source():
         r = res_point(k)
         ind = "        "
         lines += [
-            f"    {{   /* Res k = {k:.3f} */",
+            f"    {{   /* Res knob {k:.4f}, k_eff {RES_KMAX * k:.4f} */",
             f"        .phi = {mat(r['phi'], ind)},",
             f"        .gam = {mat(r['gam'], ind)},",
             f"        .cs = {mat(r['cs'], ind)},",
@@ -274,12 +294,36 @@ def emit_source():
             f"        .d = {mat(r['d'], ind)},",
             "    },",
         ]
+    pw = [float(np.interp(RES_KMAX * n / (PREWARP_POINTS - 1), M.PW_K, M.PW_C))
+          for n in range(PREWARP_POINTS)]
+    assert all(abs(pw[q] - M.PW_C[q]) < 1e-12 for q in range(11)), \
+        "the stock range must keep every PW_C point (k_eff 0.1 steps)"
     lines += ["};", "",
-              "const float alkPrewarpC[ALK_PREWARP_POINTS] = " + vec(M.PW_C) + ";", "",
+              "const float alkPrewarpC[ALK_PREWARP_POINTS] = " + vec(pw) + ";", "",
               "const float alkVegCurrent[ALK_VEG_POINTS] = {"]
     i = np.array(c["veg"]["i_uA"]) * 1e-6
     for s in range(0, len(i), 6):
         lines.append("    " + ", ".join(f32(x) for x in i[s:s + 6]) + ",")
+    lines += ["};", ""]
+    # S093 P6: the attack table. dt and tau are rounded to float32 first and
+    # the quotient is formed in float32, as the C expression
+    # -ALK_DT / ALK_VEG_TAU_ATT_S is with float constants; exp() in double,
+    # then the correctly rounded float32 (what GCC's constant folding gives).
+    dt32 = np.float32(np.float32(32.0) / np.float32(44108.0))
+    att = c["veg"]["att_table"]
+    assert (f32(att[0]["att_delay"]) == f32(c["veg"]["att_delay"]) and
+            f32(att[0]["tau_att"]) == f32(c["veg"]["tau_att"])), \
+        "att_table point 0 must be the original attack fit"
+    lines += ["/* S093 P6: the VEG attack table (alk_attack): delay, discharge",
+              " * length 8 tau and the per-block factor exp(-ALK_DT / tau); point 0",
+              " * is the former 0.70 ms attack exactly (AlkalineControl.h). */",
+              "const AlkVegAttack alkVegAttack[ALK_VEG_ATT_POINTS] = {"]
+    for e in att:
+        tau = np.float32(e["tau_att"])
+        keep = np.float32(math.exp(float(np.float32(-dt32 / tau))))
+        length = np.float32(8.0) * tau          # exact: x8 is a power of two
+        lines.append(f"    {{ {f32(e['att_delay'])}, {f32(length)}, {f32(keep)} }},"
+                     f"   /* trigger {e['trigger_ms']:.4f} ms */")
     lines += ["};", ""]
     return "\n".join(lines)
 
@@ -324,13 +368,23 @@ def main():
     ap.add_argument("--check", action="store_true",
                     help="compare with the committed files; exit 1 on a difference")
     ap.add_argument("--points", type=int, default=None,
-                    help="experiments only: Res points (the firmware uses RES_POINTS)")
+                    help="experiments only: Res points (the firmware uses RES_POINTS = 13 over the knob)")
     ap.add_argument("--out", default=None, help="experiments only: output directory")
     ap.add_argument("--states", type=int, default=None,
                     help="experiments only: block-system states (a common reduced basis)")
     ap.add_argument("--block", type=int, default=None,
                     help="experiments only: samples per network update (the firmware uses NET_BLOCK)")
     a = ap.parse_args()
+    # S093 P6: the wiper transformer (k > 1) must continue the 303's pot
+    # (k <= 1) without a step: the network's A, B, C, D at k = 1 and just
+    # above, relative to their size. Measured 4.1e-8 (A, B) and 7.2e-9 (C, D);
+    # the reversed primary sign gives 8.2e-2 (A, B; measured), a VCVS in its
+    # place 2e-2 (P6 plan §5.5).
+    n0, n1 = M.FeedbackNet(1.0), M.FeedbackNet(1.0 + 1e-9)
+    for nm in "ABCD":
+        x, y = getattr(n0, nm), getattr(n1, nm)
+        rel = float(np.max(np.abs(x - y)) / np.max(np.abs(x)))
+        assert rel < 1e-6, f"FeedbackNet not continuous at k = 1 ({nm}: {rel:.2e})"
     global RES_POINTS, OUT_DIR, NET_BLOCK, NET_STATES
     if a.block:
         NET_BLOCK = a.block

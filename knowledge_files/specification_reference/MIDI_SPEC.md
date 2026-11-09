@@ -390,9 +390,10 @@ is `pv<`/`pv>` (§2.3).
   current Effect type's parameter. The same NRPN means different parameters
   on different types, with no special casing. The voice chart is
   `MIDI_NRPN_TABLE.md`; an Effect chart is not yet published.
-- **Alkaline (S093 P4)** has 26 rows (0–25); 26–63 are unused and ignored in
-  that block. `alk_wave` is a selector (0 `Saw`, 1 `Sqr`), `alk_tuning` is
-  0–127 with 63 centre (±700 cents), `alk_slide` is 0/1.
+- **Alkaline (S093 P4/P6)** has 28 rows (0–27); 28–63 are unused and ignored
+  in that block. `alk_wave` is a selector (0 `Saw`, 1 `Sqr`), `alk_tuning` is
+  0–127 with 63 centre (±700 cents), `alk_slide` is 0/1; S093 P6 appended
+  `alk_attack` (26) and `osc1_position` (27).
 - **Unused IDs** are ignored and the message is forwarded.
 - **Channels:**
   - Every ID works on G.
@@ -437,8 +438,18 @@ unchanged (identity, as in step automation).
   A selector: one value per step when automated, never morphed.
 - `alk_tuning` (S093 P4): 0–127, 63 = centre (±700 cents); `alk_slide`:
   0 off, 1 on (latched at its own note's trigger; it decides whether the
-  next note glides). The five 303 knobs and
-  `alk_drive` (x1..x8) are identity 0–127.
+  next note glides). The five 303 knobs and `alk_drive` (S093 P6: 16^drive,
+  x1..x16) are identity 0–127.
+- `alk_attack` (S093 P6, appended): 0–127, the VEG attack as the 303's CPU
+  trigger-pulse width. 0 = a 0.70 ms trigger, the former attack bit for bit;
+  127 = 0.55 ms. The exponential discharge stays. Appended after
+  `lfo_target_param_2`, so every earlier NRPN number and MIDI Learn row is
+  unchanged.
+- `osc1_position` (S093 P6 on Alkaline, appended at 27): 0 free-running (the
+  303's VCO); 1–127 sets the start phase to pos/128 of a cycle at every
+  non-legato note. A move bends the phase within one block, as on the other
+  instruments. Legato notes keep the running phase. Appended after
+  `alk_attack`; every earlier number is unchanged.
 - The only translation is the Morph amounts (§5.2).
 - WIDE8 Effect rows expand through the Effect type's 7-bit expansion, as
   automation does.

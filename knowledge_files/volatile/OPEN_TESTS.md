@@ -17,7 +17,7 @@ be performed when the opportunity arises, not blocking items for current work.
     first; saw and square
   - A4: `ALK_MAKEUP_OCT` by ear against a Drum at the same `vol`
   - A5: CPU worst case: Alkaline in the four Basic slots at Res full, drive
-    x8, accents and slides; `cpu` widget <= the Drum baseline; 0 underruns
+    x16 (S093 P6: 16^drive), accents and slides; `cpu` widget <= the Drum baseline; 0 underruns
     over 5 min. **Write down the widget figures**
   - A6: `.alk` save under a new name and reload; Kit/Scene/Bank; AutoSave
     after power cycle; `kit` snapshot restore
@@ -26,6 +26,15 @@ be performed when the opportunity arises, not blocking items for current work.
   - A8: gate follows step scale and BPM changes; slide into a rest closes;
     external clock
   - A9 (W7): Kit with `sNN` modulators re-selected; Drum `wav` lists six waves
+  - A10 (S093 P6): attack byte 0 against 127 after rests and long notes;
+    running 16ths open at once (the circuit's behaviour)
+  - A11 (S093 P6): decay byte 0 / 127 (−20 % / +50 %); an accented note
+    keeps the 303's fast drop during its step, then its tail follows the
+    stretched law (decay 127: ≈ 0.83 s → 1.17 s to 10 %, the model)
+  - A12 (S093 P6): Res from the 303's maximum (byte ≈ 85) to 127: the top
+    self-oscillates with a high cutoff, bounded; `pos` 0 / 64 on Saw and Sqr
+  - A13 (S093 P6): drive byte 0 / 64 / 127 (x1 / x4 / x16); the make-up
+    level by ear (B-2)
   - Confirm, not fix: tracks 6/7 share slot 5; note-off does not end the gate;
     roll hits get full gates
 - **S090 P5 Load/Save speed and watchdog T1–T9 (HIGH PRIORITY):**

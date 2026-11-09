@@ -1,6 +1,6 @@
 # MIDI NRPN Table — Voice Parameters
 
-Regenerated 2026-11-08 from the five descriptor tables in `Core/DSP/Instruments/*/*Parameters.c` (S093 P4 state: `voice_chain` and Alkaline included). Rules are in `knowledge_files/specification_reference/MIDI_SPEC.md` §5.4–§5.6.
+Regenerated 2026-11-09 from the five descriptor tables in `Core/DSP/Instruments/*/*Parameters.c` (S093 P6 state: `voice_chain`, Alkaline `alk_attack` and `osc1_position` included). Rules are in `knowledge_files/specification_reference/MIDI_SPEC.md` §5.4–§5.6.
 
 ## How the numbers work
 
@@ -10,7 +10,7 @@ Regenerated 2026-11-08 from the five descriptor tables in `Core/DSP/Instruments/
 - **Values** are absolute 7-bit, clamped to the parameter's own range. A MIDI write is a menu edit: it writes the Normal endpoint and suppresses that parameter's automation until the voice's next trigger, a transport change or a Scene change (R12).
 - **Any type can sit in any slot** (at most two Cymbal/HiHat per kit). Default kit: V1–V3 Drum, V4 Snare, V5 Cymbal, V6 HiHat. T6 and T7 both play V6.
 
-Descriptor counts: Drum 43 (0–42), Snare 42 (0–41), Cymbal 43 (0–42), HiHat 43 (0–42), Alkaline 26 (0–25). Indices above those, up to 63, are unused in that block: they are ignored and forwarded.
+Descriptor counts: Drum 43 (0–42), Snare 42 (0–41), Cymbal 43 (0–42), HiHat 43 (0–42), Alkaline 28 (0–27). Indices above those, up to 63, are unused in that block: they are ignored and forwarded.
 
 ### Voice block ranges
 
@@ -55,8 +55,8 @@ Each NRPN cell is `number (MSB/LSB)`. Type cells are `file key` category, long l
 | 23 | 23 (0/23) | 87 (0/87) | 151 (1/23) | 215 (1/87) | 279 (2/23) | 343 (2/87) | `lfo_amount_2` LFO Amount 2 (`am2`) | `lfo_wave` LFO Waveform (`wav`) | `lfo_amount_2` LFO Amount 2 (`am2`) | `lfo_amount_2` LFO Amount 2 (`am2`) | `lfo_target_param` LFO DstParam (`ds1`) |
 | 24 | 24 (0/24) | 88 (0/88) | 152 (1/24) | 216 (1/88) | 280 (2/24) | 344 (2/88) | `lfo_wave` LFO Waveform (`wav`) | `lfo_retrigger_voice` LFO Retriggr (`rtg`) | `lfo_wave` LFO Waveform (`wav`) | `lfo_wave` LFO Waveform (`wav`) | `lfo_target_voice_2` LFO DstVoice2 (`vo2`) |
 | 25 | 25 (0/25) | 89 (0/89) | 153 (1/25) | 217 (1/89) | 281 (2/25) | 345 (2/89) | `lfo_retrigger_voice` LFO Retriggr (`rtg`) | `lfo_polarity` LFO Polarity (`pol`) | `lfo_retrigger_voice` LFO Retriggr (`rtg`) | `lfo_retrigger_voice` LFO Retriggr (`rtg`) | `lfo_target_param_2` LFO DstParam2 (`ds2`) |
-| 26 | 26 (0/26) | 90 (0/90) | 154 (1/26) | 218 (1/90) | 282 (2/26) | 346 (2/90) | `lfo_polarity` LFO Polarity (`pol`) | `lfo_sync` LFO ClockSnc (`snc`) | `lfo_polarity` LFO Polarity (`pol`) | `lfo_polarity` LFO Polarity (`pol`) | — |
-| 27 | 27 (0/27) | 91 (0/91) | 155 (1/27) | 219 (1/91) | 283 (2/27) | 347 (2/91) | `lfo_sync` LFO ClockSnc (`snc`) | `lfo_offset` LFO Offset (`ofs`) | `lfo_sync` LFO ClockSnc (`snc`) | `lfo_sync` LFO ClockSnc (`snc`) | — |
+| 26 | 26 (0/26) | 90 (0/90) | 154 (1/26) | 218 (1/90) | 282 (2/26) | 346 (2/90) | `lfo_polarity` LFO Polarity (`pol`) | `lfo_sync` LFO ClockSnc (`snc`) | `lfo_polarity` LFO Polarity (`pol`) | `lfo_polarity` LFO Polarity (`pol`) | `alk_attack` Veloc EG Attack (`atk`) |
+| 27 | 27 (0/27) | 91 (0/91) | 155 (1/27) | 219 (1/91) | 283 (2/27) | 347 (2/91) | `lfo_sync` LFO ClockSnc (`snc`) | `lfo_offset` LFO Offset (`ofs`) | `lfo_sync` LFO ClockSnc (`snc`) | `lfo_sync` LFO ClockSnc (`snc`) | `osc1_position` Oscilltr Position (`pos`) |
 | 28 | 28 (0/28) | 92 (0/92) | 156 (1/28) | 220 (1/92) | 284 (2/28) | 348 (2/92) | `lfo_offset` LFO Offset (`ofs`) | `velo_vol_on_off` Velocity Vol mod (`vel`) | `lfo_offset` LFO Offset (`ofs`) | `lfo_offset` LFO Offset (`ofs`) | — |
 | 29 | 29 (0/29) | 93 (0/93) | 157 (1/29) | 221 (1/93) | 285 (2/29) | 349 (2/93) | `velo_vol_on_off` Velocity Vol mod (`vel`) | `velo_mod_amount` Velocity Amount (`amt`) | `velo_vol_on_off` Velocity Vol mod (`vel`) | `velo_vol_on_off` Velocity Vol mod (`vel`) | — |
 | 30 | 30 (0/30) | 94 (0/94) | 158 (1/30) | 222 (1/94) | 286 (2/30) | 350 (2/94) | `velo_mod_amount` Velocity Amount (`amt`) | `velo_mod_dest` Velocity DstParam (`dst`) | `velo_mod_amount` Velocity Amount (`amt`) | `velo_mod_amount` Velocity Amount (`amt`) | — |
@@ -88,7 +88,7 @@ HiHat 17–42, Snare 16–41. Between those, the blocks move:
 | Amp envelope | 11–13 atk, dec, slp | 9–12 atk, dec, slp, `amp_attack_repeat` | 13–16 atk, dec, slp, `amp_attack_repeat` | 13–16 atk, closed dec, open dec (`amp_envelope_decay_choke`), slp | — |
 | Pitch envelope (dec, amt, slp) | 14–16 | 13–15 | — | — | — |
 
-Alkaline (indices 0–25) has its own layout: 0 `alk_wave`, 1 `osc1_pitch_coarse`, 2 `alk_tuning`, 3 `alk_slide`, 4–9 cutoff/reso/env mod/decay/accent/drive, 10–11 vol/pan, 12–19 LFO, 20–25 velocity and the four LFO targets. It has no osc2/noise, filter object, amp envelope, pitch envelope, transient or `pos`; 26–63 are unused.
+Alkaline (indices 0–27) has its own layout: 0 `alk_wave`, 1 `osc1_pitch_coarse`, 2 `alk_tuning`, 3 `alk_slide`, 4–9 cutoff/reso/env mod/decay/accent/drive, 10–11 vol/pan, 12–19 LFO, 20–25 velocity and the four LFO targets, then (S093 P6) 26 `alk_attack` and 27 `osc1_position`. It has no osc2/noise, filter object, amp envelope, pitch envelope or transient; 28–63 are unused.
 
 ### Value notes
 
@@ -108,6 +108,8 @@ Rows not listed here are continuous 0–127 (identity).
 | `velo_vol_on_off` | 0 off, 1 on |
 | `transient_wave` | 0–13 `Snp Ofs Clk Ck2 Tik Kik Rim Drp Hat Clp Kk2 Snr Tom Sp2` |
 | `alk_wave` | 0 `Saw`, 1 `Sqr` (selector; other stored values play Saw) |
+| `alk_attack` | 0–127: 0 = 0.70 ms CPU trigger (the former attack), 127 = 0.55 ms (S093 P6) |
+| `osc1_position` | 0–127: 0 free-running, 1–127 start phase = pos/128 of a cycle (Alkaline Saw/Sqr, S093 P6) |
 | `osc1_type` | 0 `wav`, 1 `smp`, 2 `slp`, 3 `wtb` (selector, never morphed) |
 | `osc1_run` | 0 `rst`, 1 `fre`, 2 `itp`; 3–127 clamp to `itp` (selector) |
 | `instrument_pan` | 0–127, shown −63..+64, 63 = centre |

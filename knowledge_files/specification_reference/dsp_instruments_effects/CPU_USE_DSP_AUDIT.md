@@ -1134,30 +1134,39 @@ the new copy/clear work is foreground-only and bounded.
 ### Session 093 P4 (Alkaline instrument; record in `S093_P5_FIRMWARE_IMPLEMENTATION_PHASE_2.md`)
 
 71. **ADDED (S093 P4): Alkaline (TB-303) voice, Basic, within the Drum
-    ceiling.** A fifth tagged engine (`AlkalineVoice` 540 B), its descriptor
-    table (26 rows), the B2R diode ladder and the N1 network (r6: 6 states on
+    ceiling.** A fifth tagged engine (`AlkalineVoice` 540 B, 548 B after
+    S093 P6's `AlkVeg.keep` + `attack`), its descriptor table (26 rows, 28
+    after S093 P6), the B2R diode ladder and the N1 network (r6: 6 states on
     one balanced basis, 64 samples).
     - Linked per-sample loop (G3): fused oscillator + B2R, **214** (3 VDIV)
       inside `Alkaline_calcVoiceSyncBlock.constprop.0`; standalone 213
       (`DiodeLadder_renderB2Osc`, inlined by LTO).
-    - Linked per block (G4): `Alkaline_calcVoiceAsync` 872 (9 VDIV) +
-      sync-block entry/exit 332 + dispatch 14 = **1,218 (9 VDIV)**. The stub
-      link gives 1,285 (915 + 356 + 14).
-    - Whole voice (G5): 214 + 1,218/32 = **252.1 per sample, 3 + 9/32
+    - Linked per block (G4): `Alkaline_calcVoiceAsync` 884 (9 VDIV) +
+      sync-block entry/exit 332 + dispatch 14 = **1,230 (9 VDIV)** after
+      S093 P6 (`pos` bend +13, VEG factor −1, drive and MEG +0). The P4
+      figure was 1,218; the stub link gave 1,285 (915 + 356 + 14).
+    - Whole voice (G5): 214 + 1,230/32 = **252.5 per sample, 3 + 9/32
       VDIV**, against the Drum ceiling **261.3** (frozen in S093 P3 and
-      re-measured on the P4 image): margin ≈ 9.
-    - Text 703,832 B, data 420 B, bss 413,280 B; flash headroom 49,412 B;
+      re-measured on the P4 image): margin ≈ 8.8. The fused loop is still
+      214 after S093 P6 (no P6 edit is in the sync block); the attack
+      interpolation runs in the trigger, and Res ×1.5 was measured at 0 per
+      sample.
+    - S093 P6 flash: +1,152 B (4 Res points) + 20 B (5 prewarp points) +
+      108 B (attack table) and the code; headroom 47,836 B (the `make all`
+      of this phase). Text 705,408 B, data 420 B, bss 413,280 B;
+    - P4 flash: headroom 49,412 B;
       ITCM 14,552 B (+40 B of entry code in five existing `.itcm.s087`
       blend functions; no new ITCM code; accepted as LTO layout, A1);
       `menu_instrumentLoadIndex` +2 B (R1).
-    - Mixer G6: 30 hot loops equal, 0 grew (`elf_p4_check`). By cyclic cost
+    - Mixer G6: 30 hot loops equal, 0 grew (`elf_p4_check`), still 0 after
+      S093 P6. By cyclic cost
       (`elf_loopsrc.py --compare`, each loop's longest in-range cycle paired
       by source line): 41 -> 42 cyclic loops, every group equal; the one
       extra loop is a second 10-instruction `mixer_decimateBlock` copy (the
       per-slot SRR stays 10); no loop grew. Oscillators G7: 93/93 exact
       loops; `osc_setFreq` per block 128.
     - **Device `cpu` result: pending** (OPEN_TESTS A5: Alkaline in the four
-      Basic slots at Res full, drive x8, accents and slides, against a Drum
+      Basic slots at Res full, drive x16 after S093 P6, accents and slides, against a Drum
       baseline Scene; 0 underruns over 5 min). If the device confirms a
       failure, the fallback is Advanced (K1, the user's decision).
 

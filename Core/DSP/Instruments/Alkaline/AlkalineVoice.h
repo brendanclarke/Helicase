@@ -18,7 +18,7 @@
  *             first block boundary at or after 7/12 of it).
  * Outputs:    one mono pre-volume int16 block per call (the mixer applies
  *             vol and pan, S072): the B2R ladder (DiodeLadder_renderB2), its
- *             input scaled by the drive (x1..x8) and its OTA current by the
+ *             input scaled by the drive (x1..x16) and its OTA current by the
  *             output make-up gain (S093_P2 §5, B-2 option (b)).
  *             Alkaline_isQuiet() for instrumentManager_ampEnvelopeQuiet().
  * Accessors:  InstrumentManager dispatchers (integration, S093 P0 §6);
@@ -42,7 +42,7 @@
 #define ALK_GATE_DEN          12u
 /* Output make-up (S093_P2 §5, B-2 option (b), user S093): a gain on the OTA
  * current that falls as drive rises, 2^(ALK_MAKEUP_OCT x (1 - drive)):
- * +6 dB at drive x1, 0 dB at x8, so the level is closer to the other engines
+ * +6 dB at drive x1, 0 dB at x16, so the level is closer to the other engines
  * at the 303's own drive and the 7 V full scale (D17) keeps its headroom
  * when driven. Set by ear in the device listening (S093 P4). */
 #define ALK_MAKEUP_OCT        1.0f
@@ -67,12 +67,13 @@ typedef struct AlkalineVoiceStruct
 
 	/* --- parameters (descriptor bindings) --- */
 	float   cutoff;            /* 0..1, VR3 */
-	float   reso;              /* 0..1, VR4 */
+	float   reso;              /* 0..1 knob, VR4: feedback k_eff = ALK_RES_KMAX x knob (S093 P6: x1.5 at 1; the 303's max at 1/1.5) */
 	float   envMod;            /* 0..1, VR5 */
 	float   decay;             /* 0..1, VR6 */
 	float   accent;            /* 0..1, VR7 */
 	float   tuning;            /* 0..1, centre 63/127: +-700 cents ([SN] p1) */
-	float   drive;             /* 0..1: input gain 8^drive, x1..x8 (D16, E2) */
+	float   drive;             /* 0..1: input gain 16^drive, x1..x16 (D16, E2; S093 P6 x16) */
+	float   attack;            /* 0..1 (S093 P6, alk_attack): VEG attack as the CPU trigger width, 0 = 0.70 ms (today), 1 = 0.55 ms */
 	float   vol;               /* 0..1, read by the mixer only */
 	uint8_t pan;
 	uint8_t wave;              /* ALK_WAVE_* */
@@ -93,7 +94,7 @@ typedef struct AlkalineVoiceStruct
 	float   iLadRaw;           /* ladder current before the prewarp (cutoff) */
 	float   iLadEnd;           /* prewarped ladder current at the block end */
 	float   iAbcEnd;           /* OTA control current at the block end */
-	float   driveGain;         /* 8^drive, this block */
+	float   driveGain;         /* 16^drive, this block */
 	float   makeup;            /* 2^(ALK_MAKEUP_OCT (1 - drive)), this block */
 } AlkalineVoice;
 

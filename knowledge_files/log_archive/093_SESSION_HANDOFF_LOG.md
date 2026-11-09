@@ -107,6 +107,42 @@ data 420 B, bss 413,280 B; flash headroom 49,412 B; ITCM 14,552 B.
 - P4-8: the eight documentation targets updated with the measured static
   figures; device-only values are marked pending in OPEN_TESTS A5.
 
+### P6 (parameter tweaks, implemented 2026-11-09)
+
+- **Menu and rows.** `sld` to mod, `atk` + `dec` to AEG, `acc` to click,
+  FILTER on one screen (`cut res env drv`), `pos` with OSC; `alk_attack`
+  (26) and `osc1_position` (27) appended, 28 rows. `init.alk` regenerated
+  (28 params, 22 morph rows). `special_tags` OK.
+- **Attack.** SPICE trigger sweep 0.70..0.55 ms (`vca.py`), per-width fit
+  (`fit_spice.py`): delay 0.65 → 0.60 ms, tau 1.20 → 2.60 ms; SPICE
+  10→90 % 2.105 → 5.150 ms; firmware 2.176 → 5.078 ms. Byte 0 is the
+  former VEG bit for bit (AL-A).
+- **Decay.** `fit_meg_range.py` (new): stock t10 174.1 ms / 2.569 s,
+  targets 139.3 ms / 3.853 s; `r_min` 54,069 Ω, `r_span` 1,560,243 Ω.
+  Firmware AL-M: 139.3 ms / 3.852 s, accent 174.8 ms.
+- **Resonance ×1.5.** `FeedbackNet` wiper transformer (continuity at k = 1:
+  A/B 4.1e-8, C/D 7.2e-9); `RES_KMAX` 1.5; 13 Res points, 16 prewarp
+  points (c held at 1.470 above k = 1), VR4b `min(k_eff, 1)`, SPICE E/F
+  pair (`acid_k15`). Bench: stock ring 2.018 ms / 0.364, ×1.5 1.791 ms /
+  0.823; AL-SO 1,770 LSB tail (peak 4,448) against 1.4 LSB at the 303 max.
+- **Drive ×16.** `16^drive`; AL-D x1/x2/x4/x8/x16 = −29.18/−25.42/−21.98/
+  −19.00/−17.13 dBFS, 0 full-scale samples; corner input argument 12.74.
+- **`pos`.** Start phase at non-legato notes, 0 free-running; per-block
+  bend (13 instructions); AL-PS passes.
+- **Model and harnesses.** C0 adds ×16; C1 adds `acid_k15` (−0.361 dB,
+  LSD60 7.906 dB, recorded); C2 per step within 0.01 dB / 0.1 cent of the
+  committed results; V3b targets +0.9 % / +1.3 %; V3d attack per point.
+- **Static gates.** Host: 14 laws, 0 failures. Build: text 705,408 B, data
+  420 B, bss 413,280 B; headroom 47,836 B; ITCM 14,552 B. CPU: loop 214
+  (3 VDIV) unchanged, per block 884 + 332 + 14 = 1,230 (9 VDIV), whole
+  voice 252.5 ≤ 261.3. `elf_p4_check`: 0 missing, 0 grew.
+- **Docs.** `INSTRUMENTS_DSP_REFERENCE.md` §5.5/§8, `FILESYSTEM_SPEC.md`,
+  `MIDI_NRPN_TABLE.md`, `MIDI_SPEC.md` §5.5, `CPU_USE_DSP_AUDIT.md` item 71,
+  `MEMORY.md`.
+- **Device trial still pending** (OPEN_TESTS): the attack after rests, the
+  decay ends, the resonance top/self-oscillation, drive ×16, `pos`, and
+  the worst-case `cpu` with four Alkalines at Res and drive full.
+
 ## Find here
 
 - `S093_P4_FIRMWARE_IMPLEMENTATION.md` - phase 1 schedule and the

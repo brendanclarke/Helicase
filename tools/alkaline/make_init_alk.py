@@ -52,6 +52,9 @@ INIT = {
     "velo_mod_amount": "0", "velo_mod_dest": "255",
     "lfo_target_voice": "self", "lfo_target_param": "255",
     "lfo_target_voice_2": "self", "lfo_target_param_2": "255",
+    # S093 P6 (appended rows): attack at a 0.70 ms trigger (today's), pos 0
+    # (free-running)
+    "alk_attack": "0", "osc1_position": "0",
 }
 
 

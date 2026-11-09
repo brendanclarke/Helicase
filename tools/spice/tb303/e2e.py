@@ -81,6 +81,17 @@ def pot(name, p1, w, p3, total, frac):
     return f"R{name}A {p1} {w} {a:.3f}\nR{name}B {w} {p3} {b:.3f}\n"
 
 
+def vr4a(res):
+    """S093 P6: VR4A for res <= 1 as before; above 1 the pot at its top plus
+    an ideal transformer at the wiper (alk_model.FeedbackNet): E sets
+    V(f_wip) = res V(tp6), V_X senses the secondary current, F_X draws res x
+    that current from tp6; 50 k (the pot) loads the wiper."""
+    if res <= 1.0:
+        return pot("VR4A", "0", "f_wip", "tp6", 50e3, res)
+    return (f"E_X4 f_wipx 0 tp6 0 {res:.6f}\nV_X4 f_wipx f_wip 0\n"
+            f"F_X4 tp6 0 V_X4 {res:.6f}\nR_X4 f_wip 0 50k\n")
+
+
 def pwl(points):
     """points: list of (t, v), sorted; returns a PWL() string with steps of 1 us."""
     out = []
@@ -227,7 +238,7 @@ R108 f_e20 0 2.2k
 Q19 f_vtop f_c21R f_out19 QN
 R96 f_out19 0 10k
 C14 f_out19 tp6 1u
-{pot("VR4A", "0", "f_wip", "tp6", 50e3, res)}C15 f_wip f_n15 1u
+{vr4a(res)}C15 f_wip f_n15 1u
 R67 f_n15 f_b18 2.2k
 R99 f_b18 f_nb18 100k
 R66 vref f_nb18 100k
@@ -264,7 +275,7 @@ R63 c_w5 c_n134 220k
 SACC c_n53 c_v7p3 acc 0 S4066
 {pot("VR7", "0", "c_w7", "c_v7p3", 50e3, accent)}D24 c_w7 c_n24 DS
 R46 c_n24 c_v4p1 47k
-{pot("VR4B", "c_v4p1", "c_w4", "c_c13", 50e3, res)}C13 c_c13 0 1u
+{pot("VR4B", "c_v4p1", "c_w4", "c_c13", 50e3, min(res, 1.0))}C13 c_c13 0 1u
 R72 c_w4 c_n134 100k
 VTL c_nc11 c_nc11b 0
 R69 c_nc11b f_tail 2.2k
@@ -490,6 +501,8 @@ def main():
     runs = {
         "acid": dict(wave="saw", cut=0.35, res=0.85, env=0.6, dec=0.45, acc=0.8),
         "lowres": dict(wave="saw", cut=0.35, res=0.2, env=0.6, dec=0.45, acc=0.8),
+        # S093 P6: the x1.5 Res top (the acid knobs at k_eff 1.5) for C1
+        "acid_k15": dict(wave="saw", cut=0.35, res=1.5, env=0.6, dec=0.45, acc=0.8),
     }
     sel = sys.argv[1:] or list(runs)
     ev, steps, gates = build_events()

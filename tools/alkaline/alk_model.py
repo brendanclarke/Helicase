@@ -62,6 +62,13 @@ C13 = 1e-6
 VD24 = 0.48                  # D24 (1N4148, IS 2.52 nA, N 1.752) at ~0.1 mA
 R_4066 = 250.0
 
+# S093 P6: the Res knob runs the effective feedback k_eff = RES_KMAX x knob
+# (user: max resonance 50 % higher, self-oscillation allowed). k <= 1 is the
+# 303's pot; k > 1 adds a virtual ideal transformer at the VR4a wiper
+# (FeedbackNet). The model's k arguments are k_eff (SPICE knob positions are
+# k_eff <= 1); the C side takes the knob, k_eff / RES_KMAX.
+RES_KMAX = 1.5
+
 # Pitch
 F_C2 = 65.406
 TAU_SLIDE = 100e3 * 0.22e-6  # R-2R output resistance x C35 (P0 A9)
@@ -81,6 +88,28 @@ def constants():
 def taper_a(r):
     """Audio taper (VR3, VR5, VR6): 20 % of the track at half rotation."""
     return (16.0 ** r - 1.0) / 15.0
+
+
+def decay_knob_303(d):
+    """S093 P6: the decay knob that gives, under the stretched law, the
+    resistance the 303's VR6 has at knob d.
+
+    What:       r(d) = 68 k + 1 M taper(d) on the 303; the stretched law is
+                r_min + r_span taper(d'), so taper(d') = (r(d) - r_min) / r_span
+                and, with taper(x) = (16^x - 1) / 15,
+                d' = log16(15 (r(d) - r_min) / r_span + 1).
+    Why:        SPICE's runs (e2e, control) use the 303's knob; a harness that
+                hands that knob to the stretched model or C voice would
+                measure the range change as an error. Every comparison
+                against SPICE passes decay_knob_303(dec) instead.
+    Range:      d 0 -> 0.045, d 1 -> 0.857 (both inside 0..1 for the fitted
+                r_min / r_span; the -20 % / +50 % ends are beyond the 303's).
+    Accessors:  check_c.py C2, listen_bc.py pattern(), validate.py V3c and
+                dsp_pattern (S093_P6_IMPLEMENTATION.md §5.7).
+    """
+    c = constants()["meg"]
+    r = 68e3 + 1e6 * taper_a(d)
+    return math.log(15.0 * (r - c["r_min"]) / c["r_span"] + 1.0, 16.0)
 
 
 # =============================================================== control path
@@ -137,6 +166,10 @@ class Meg:
         c = constants()["meg"]
         self.v_peak, self.v_inf, self.t_strike = c["v_peak"], c["v_inf"], c["t_strike"]
         self.drop, self.soft, self.v53_min = c["drop"], c["soft"], c["v53_min"]
+        # S093 P6: the decay law's two resistances (fit_meg_range.py): the
+        # 303's R138 68 k + VR6 1 M stretched to -20 % / +50 % of its range
+        # (absent before fit_meg_range.py's first run: the 303's stock law)
+        self.r_min, self.r_span = c.get("r_min", 68e3), c.get("r_span", 1e6)
         self.v = c["v_rest"]
         self.strike_left = 0.0
         self.i = 0.0                     # FAST_CONTROL: the stack current
@@ -145,7 +178,9 @@ class Meg:
         self.strike_left = self.t_strike
 
     def step(self, dt, decay, accent_on):
-        r = 68e3 + (R_4066 if accent_on else 1e6 * taper_a(decay))
+        # accent: the 4066 shorts VR6 (68 k + 250 R, unchanged: an accented
+        # note decays as on the 303); otherwise the stretched range
+        r = (68e3 + R_4066) if accent_on else (self.r_min + self.r_span * taper_a(decay))
         if self.strike_left > 0:
             self.v = self.v_peak
             self.strike_left -= dt
@@ -230,29 +265,41 @@ class AccentNet:
 class Veg:
     """VCA envelope: C42 state (recharge tau R123 C42 = 1.5 s, emptied by the
     trigger with the fitted attack), current through Q31 from the gate as a
-    table fitted to SPICE (S092 P6 §3.4)."""
+    table fitted to SPICE (S092 P6 §3.4). S093 P6: the attack follows the CPU
+    trigger width through the fitted att_table (knob 0 = 0.70 ms = the
+    original single fit; knob 1 = 0.55 ms), interpolated as AlkalineControl.c
+    alkVeg_trigger() does: delay, discharge length 8 tau and the per-block
+    factor exp(-dt / tau), each linear in the knob between points."""
 
     def __init__(self):
         c = constants()["veg"]
         self.v = 12.0 - 1e-3
-        self.tau_att = c["tau_att"]
-        self.att_delay = c["att_delay"]
+        self.att_table = c["att_table"]
         self.v_tab = np.array(c["v42"])
         self.i_tab = np.array(c["i_uA"]) * 1e-6
         self.att_left = 0.0
         self.delay_left = 0.0
+        self.keep = 1.0
         self.tau_rec = c.get("tau_rec", 1.5)
         self.v_rec = c.get("v_rec", 12.0)
 
-    def trigger(self):
-        self.delay_left = self.att_delay
-        self.att_left = 8 * self.tau_att
+    def trigger(self, attack=0.0, dt=BLOCK / FS):
+        # knob position over the table points
+        n = len(self.att_table)
+        p = min(max(attack, 0.0), 1.0) * (n - 1)
+        k = min(int(p), n - 2)
+        f = p - k
+        a, b = self.att_table[k], self.att_table[k + 1]
+        lerp = lambda x, y: x + f * (y - x)
+        self.delay_left = lerp(a["att_delay"], b["att_delay"])
+        self.att_left = lerp(8 * a["tau_att"], 8 * b["tau_att"])
+        self.keep = lerp(math.exp(-dt / a["tau_att"]), math.exp(-dt / b["tau_att"]))
 
     def step(self, dt, gate_on):
         if self.delay_left > 0:
             self.delay_left -= dt
         elif self.att_left > 0:
-            self.v *= math.exp(-dt / self.tau_att)
+            self.v *= self.keep
             self.att_left -= dt
         self.v = self.v_rec + (self.v - self.v_rec) * math.exp(-dt / self.tau_rec)
         return float(np.interp(self.v, self.v_tab, self.i_tab)) if gate_on else 0.0
@@ -276,10 +323,22 @@ class FeedbackNet:
     NAMES = ("C14", "C21", "C15", "C22F", "C22", "C23", "C16", "C17")
 
     def __init__(self, k):
-        r_top = max(50e3 * (1 - k), 1e-3)
-        r_bot = max(50e3 * k, 1e-3)
+        """k: the effective feedback. k <= 1 is the 303's VR4a (wiper divider
+        TP6 -> W -> 0). k > 1 (S093 P6) is the pot at its top plus an ideal
+        transformer at the wiper: V(W) = k V(TP6), TP6 supplying k x the
+        W-side current, the pot's 50 k as the load on W. At k = 1 that is the
+        stock wire exactly (A, B, C, D within 4e-8, P6 plan §5.5); a plain
+        buffer (VCVS) moved the dynamics by 2 % at k = 1 because it stops
+        C15/C22 loading TP6, so the knob would step at the 303's maximum."""
+        self.gain = float(k) if k > 1.0 else None
         rin18 = 300 * (10e3 * 12.2e3 / 22.2e3)
-        self.res = (("TP6", "W", r_top), ("W", "0", r_bot), ("A1", "P3", 220e3),
+        if self.gain is None:
+            r_top = max(50e3 * (1 - k), 1e-3)
+            r_bot = max(50e3 * k, 1e-3)
+            pot = (("TP6", "W", r_top), ("W", "0", r_bot))
+        else:
+            pot = (("W", "0", 50e3),)
+        self.res = pot + (("A1", "P3", 220e3),
                     ("P3", "0", 2.2e3), ("B1", "B18", 2.2e3), ("B18", "NB18", 100e3),
                     ("NB18", "0", 100e3), ("B18", "0", rin18), ("A2", "P3", 100e3),
                     ("F1", "INR", 10e3), ("INR", "NB", 2.2e3), ("NB", "0", 2.2e3),
@@ -289,8 +348,10 @@ class FeedbackNet:
         nodes = [n for n in nodes if n != "0"]
         self.idx = {n: i for i, n in enumerate(nodes)}
         nn = len(nodes)
-        # MNA unknowns: node voltages, then branch currents of E, S, Q and the 8 caps
-        self.n_unk = nn + 3 + len(self.CAPS)
+        # MNA unknowns: node voltages, then the branch currents of E, S, Q
+        # (and the transformer secondary for k > 1), then the 8 caps
+        self.n_br = 3 + (1 if self.gain else 0)
+        self.n_unk = nn + self.n_br + len(self.CAPS)
         A = np.zeros((8, 8))
         B = np.zeros((8, 2))
         C = np.zeros((3, 8))
@@ -324,8 +385,12 @@ class FeedbackNet:
             for i, j, sgn in ((ia, ia, 1), (ib, ib, 1), (ia, ib, -1), (ib, ia, -1)):
                 if i is not None and j is not None:
                     G[i, j] += sgn * g
-        # voltage-defined branches: E = tp_pre, S = s, Q = 0.99 V(B18), caps V(a)-V(b) = z
-        branches = [("E", "0", ("v", w[0])), ("S", "0", ("v", w[1])), ("Q", "0", ("vcvs", 0.99))]
+        # voltage-defined branches: E = tp_pre, S = s, Q = 0.99 V(B18); for
+        # k > 1 the transformer secondary W = k V(TP6); caps V(a)-V(b) = z
+        branches = [("E", "0", ("v", w[0])), ("S", "0", ("v", w[1])),
+                    ("Q", "0", ("vcvs", "B18", 0.99))]
+        if self.gain:
+            branches.append(("W", "0", ("xfmr", "TP6", self.gain)))
         branches += [(a, b, ("v", z[q])) for q, (a, b, _) in enumerate(self.CAPS)]
         for q, (a, b, kind) in enumerate(branches):
             row = nn + q
@@ -338,13 +403,20 @@ class FeedbackNet:
                 G[row, ib] -= 1.0
             if kind[0] == "v":
                 rhs[row] = kind[1]
-            else:                           # V(Q) - gain V(B18) = 0
-                G[row, self.idx["B18"]] -= kind[1]
+            elif kind[0] == "vcvs":         # V(a) - gain V(ref) = 0
+                G[row, self.idx[kind[1]]] -= kind[2]
+            else:
+                # ideal transformer: V(W) - k V(TP6) = 0, and TP6 delivers k x
+                # the secondary current (power conserving): the KCL term of
+                # TP6 carries -k j. The sign is the one that makes k = 1 the
+                # stock wire (verified, P6 plan §5.5).
+                G[row, self.idx[kind[1]]] -= kind[2]
+                G[self.idx[kind[1]], row] -= kind[2]
         sol = np.linalg.solve(G, rhs)
         v = sol[:nn]
         # cap current (a -> b through the cap) = the branch current variable
         # (MNA convention: a branch current leaves node a)
-        ic = sol[nn + 3:]
+        ic = sol[nn + self.n_br:]
         return v, ic
 
     def discrete(self, fs):
@@ -506,6 +578,10 @@ def make_net(k, order=None):
 # that the response's -3 dB point (above the peak when there is one) lands
 # where the continuous model puts it. c(k) = f_-3dB / (w1 / 2 pi), measured on
 # the linearised model (S092 P6 §5.2). One tan per block in firmware.
+# S093 P6: above k = 1 the linearised loop can be unstable (self-
+# oscillation), where a -3 dB point does not exist; c is held at c(1)
+# (np.interp clamps). Measured: the self-oscillation pitch is then within
+# 0.35 % of the golden RK4 model (S093_P6_PARAMETER_TWEAKS.md §5.5).
 PW_K = tuple(q / 10.0 for q in range(11))
 PW_C = (0.256, 0.597, 0.911, 1.055, 1.153, 1.228, 1.287, 1.342, 1.387, 1.430, 1.470)
 PW_THETA_MAX = 1.3

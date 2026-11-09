@@ -16,9 +16,10 @@
 
 #include "InstrumentManager.h"
 
-/* 26 rows: 10 Alkaline rows, vol/pan, 8 LFO rows, 2 velocity rows, 4 LFO
- * target rows (asserted against alkaline_param_index_t in the .c) */
-#define ALKALINE_PARAM_DESCRIPTOR_COUNT 26u
+/* 28 rows: 10 Alkaline rows, vol/pan, 8 LFO rows, 2 velocity rows, 4 LFO
+ * target rows, then (S093 P6, appended) alk_attack and osc1_position
+ * (asserted against alkaline_param_index_t in the .c) */
+#define ALKALINE_PARAM_DESCRIPTOR_COUNT 28u
 /* eight sub-pages: the front-panel SELECT1..8 buttons (menu.c ≈ l. 4608) */
 #define ALKALINE_MENU_PAGE_COUNT        8u
 /* Basic (S093 D2‴): may take any slot without counting towards the
