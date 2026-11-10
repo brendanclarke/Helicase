@@ -4,11 +4,17 @@ How the six instrument voices are rendered, how their parameters reach the
 DSP, how modulation (LFO, velocity, Morph, step automation) works, what each
 part costs, and how to change or extend it.
 
-- **Current as of:** Session 088 close (2026-10-29). S088 added the
-  oscillator run modes `osc1_run` (`rst`/`fre`/`itp`, §6.1), gain-matched
-  retrigger (`slopeEg2_retriggerFrom()`, §6.3), post-chain gain ramps
-  and float-through distortion (§6.5, §6.6), FM depth ramp, filter
-  coefficient slew (`SVF_recalcFreqSlew()`, §6.2), itp crossfade
+- **Current as of:** Session 093 P6 (2026-11-10). S093 added the Alkaline
+  instrument (TB-303 emulation, §5.5): diode-ladder filter B2R, per-octave
+  Q8 square table, gate timer, 303 sequencing rules, `pos` and `alk_attack`
+  rows, extended resonance. S092 (pre-implementation) produced the circuit
+  models, SPICE simulations and DSP equations — see
+  `ALKALINE_MODELLING_REFERENCE.md`. S093 P3 removed the `Re3`/`Sw3` stock
+  table waves (§6.1.2). S088 added the oscillator run modes `osc1_run`
+  (`rst`/`fre`/`itp`, §6.1), gain-matched retrigger
+  (`slopeEg2_retriggerFrom()`, §6.3), post-chain gain ramps and
+  float-through distortion (§6.5, §6.6), FM depth ramp, filter coefficient
+  slew (`SVF_recalcFreqSlew()`, §6.2), itp crossfade
   (`OscCarrierSnapshot`, `oscSection_renderOldCarrier()`), and block-rate
   fader smoothing in the mixer. S087 added the oscillator type system
   (`osc1_type`: `wav`/`smp`/`slp`/`wtb`, §6.1), sample flash catalogue
@@ -25,6 +31,10 @@ part costs, and how to change or extend it.
   S074 added the sidechain tap (§2). S083 Q1 made a MIDI write a menu
   edit.
 - **Related documents:**
+  - `ALKALINE_MODELLING_REFERENCE.md`: circuit models, SPICE simulations
+    and DSP equations for the Alkaline (TB-303) instrument (S092);
+  - `ALKALINE_MODULE_REFERENCE.md`: Alkaline firmware module layout, files,
+    control path, sequencing rules, cost and extension guide (S093);
   - `MIXER_SYSTEM_DSP_REFERENCE.md`: what happens to a voice block after it
     leaves the instrument (decimation, mixer, FX bus, output);
   - `EFFECTS_MODULES_DSP_REFERENCE.md`: each Effect module's DSP, binding
@@ -564,7 +574,10 @@ trigger; **HiHat does not** (and the Drum FM oscillator never resets).
 
 ### 5.5 Alkaline (`AlkalineVoice.c`, Basic)
 
-The TB-303 voice (S093 P4; S093 P6 parameter tweaks). Its descriptor table is
+The TB-303 voice (S092 design; S093 P3–P6 implementation). For the circuit
+modelling, SPICE simulation and DSP equations see
+`ALKALINE_MODELLING_REFERENCE.md`; for the full module layout, control path
+and extension guide see `ALKALINE_MODULE_REFERENCE.md`. Its descriptor table is
 `AlkalineParameters.c`: 28 rows and eight sub-pages (S093 P6: `coa tun wav
 pos` under OSC, `atk dec` under AEG, `dst amt sld` under mod, `acc` under
 click, `cut res env drv` on one FILTER screen, the Drum LFO page, `vol pan`

@@ -1835,3 +1835,34 @@ tree:
 Its measured conclusion (§0 there: typed modes over the Basic ceiling;
 decision P7-D1) does not change. Its scratch base differs from the landed P6
 only in the `R_MIN` rounding above, which no P7 figure depends on.
+
+---
+
+## 14. Carried over from the 093 session log (2026-11-10)
+
+`knowledge_files/log_archive/093_SESSION_HANDOFF_LOG.md` was written without
+the user's request. Every detail in it was checked against the root S093
+handoff documents. The two P6 details that existed only in that log are kept
+here.
+
+- **The P6 build:** text 705,408 B, data 420 B, bss 413,280 B; flash
+  headroom 47,836 B; ITCM 14,552 B (§12.3 records the headroom).
+- **The P6 device trial items** (OPEN_TESTS A5, A10–A13; §13 gives only the
+  numbers):
+  - the attack after rests;
+  - the decay ends (shortest and longest);
+  - the resonance top and self-oscillation (×1.5);
+  - drive ×16;
+  - `pos` (start phase; 0 free-running);
+  - the worst-case `cpu` with four Alkalines at Res and drive full.
+
+Where the log's other entries are recorded:
+
+| Log entry | Root document |
+|---|---|
+| P0–P3 phase summaries | `S093_P0`…`S093_P3` documents |
+| P4 changes, build (text 703,832 B; headroom 49,412 B; ITCM 14,552 B, +40 accepted as A1), `elf_loopdump.py` normalisation (`.lto_priv` stripped, `+EXIT`), the `CymbaMrp` label | `S093_P4_FIRMWARE_IMPLEMENTATION.md`, `S093_P5_FIRMWARE_IMPLEMENTATION_PHASE_2.md` |
+| P5 gates G1–G8 (G4 1,218 / 9 VDIV; G5 252.1; G7 93/93), `control_cost.py --elf`, `elf_loopsrc.py`, `drum_ceiling.txt`, OPEN_TESTS A1–A9 | `S093_P5_FIRMWARE_IMPLEMENTATION_PHASE_2.md` |
+| The `/.hcnames` field report and fix (`filesystem_validateHcnamesHeader()`, 13 host headers) | `S093_P5_FIRMWARE_IMPLEMENTATION_PHASE_2.md` §10 |
+| Reminders: `osc_setTableFreq()` only; `OSC_SAMPLE_START` 6; `ALK_NET_STATES` 6; the registry rules and the add-a-type checklist; confirm-not-fix (tracks 6/7, note-off, roll gates); K1 (Advanced fallback); blockers A4 / A5 | `S093_P5_FIRMWARE_IMPLEMENTATION_PHASE_2.md` (§4, the `MEMORY.md` row of §6, K1), `S093_P8_IMPLEMENTATION.md` |
+| P6 figures (attack, decay, Res ×1.5, drive ×16, `pos`, harnesses C0–C2 and V3, 14 groups at 0 failures, per block 1,230) | this document |

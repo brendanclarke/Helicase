@@ -105,7 +105,8 @@ it belongs in the summary or the log, not here.
 | 088 | 2026-10-29 | `dev-ph7-voice_expansion`, uncommitted on `80029d31` | Oscillator run modes `rst`/`fre`/`itp` (P0); fader zipper fix with block-rate one-pole smoothing (P1); float-through distortion for retrigger HF puff (P1) |
 | 089 | 2026-10-30 | `dev-ph7-voice_expansion`, uncommitted on `d944c87f` | Per-instrument SRR enable (P0); voice chain architecture + WFd wavefolder chain with 8 fold types (P1/P2); Drum FM depth ramp efficiency −9 instr/sample on 3 dearest carriers (P3); CPU at ceiling (binding) |
 | 090 | 2026-10-31/11-01 | `dev-ph7-voice_expansion`, uncommitted on `7f8b5d07` | Load/Save speed-up: RAM instrument snapshot replaces `.hctmp` (P1); mirror-served `.hcnames` reads, index reuse, type-step cancel (P1); AutoSave settle stage 13 + Load/Save drops AutoSave (P2); defect corrections — Save names, input lock, Scene Save freeze from FAT directory bloat, boot-time directory tail trim (P3); batch ticking 15 µs/500 µs, runtime watchdog 12 s every build, trace `w` owner (P5) |
-| 093 | 2026-11-08 | `dev-ph7-instrument_types`, on `0d2aed78` (P4) | Alkaline (TB-303) instrument: B2R diode ladder + N1/r6 network, 26-row descriptor table, fifth tagged engine, `init.alk` card file, registry-driven five-type storage, host/tooling gates and docs; device trial open (OPEN_TESTS A1–A9) |
+| 091 | 2026-11-04/06 | `dev-ph7-voice_expansion`, uncommitted on `5c9a92f9` | CrumpBit sub-type expansion (dly/cmb/pit/grn/rvb), granular rework, efficiency pass to 170-cap, labels hook, parameter cleanup |
+| 092 | 2026-11-07/08 | `dev-ph7-voice_expansion`, HEAD `3abaece5` (no code changes) | Alkaline (TB-303) pre-implementation: plan (P0), ngspice circuit models of VCO/Q8 (P1), VCF diode ladder (P2), VCA/VEG (P3), control network + end-to-end run (P4), DSP equations with golden and real-time solvers validated against SPICE (P6) |
 
 ---
 
@@ -2305,3 +2306,30 @@ Session 091 expanded CrumpBit from a single tape-delay effect into a five sub-ty
   `EFFECTS_BUS_REFERENCE.md` (labels hook §4.2a, CrumpBit page §8.6, pitfall §15),
   `CPU_USE_DSP_AUDIT.md` (S091 items 65–70),
   `STORAGE_SRAM_MANIFEST.md` (S091 flash/runtime entries).
+
+### 092 — Alkaline (TB-303) Pre-Implementation: Circuit Modelling, DSP Equations, and Instrument Plan (2026-11-07/08)
+
+Session 092 defined the Alkaline instrument — a TB-303 emulation — through seven documents (P0 plan, P1–P4 circuit models, P4 end-to-end run, P6 DSP equations) without changing any firmware code. Branch `dev-ph7-voice_expansion`, HEAD `3abaece5`.
+
+The session began with the instrument plan (P0), which assessed the CPU budget (worst-case Drum ≈ 257 instructions/sample as the ceiling), determined that the existing `Re3`/`Sw3` stock waves are filtered output captures unsuitable as a VCO source, and proposed a new four-pole nonlinear diode-ladder ZDF filter as the central DSP element. It laid out parameter rows, trigger semantics (accent at velocity ≥ 101, slide latched from the previous note, gate 3.5/6 of a step), a gate timer (the sequencer has no native gate), and a six-phase implementation plan with host-test laws AL1–AL9.
+
+Four SPICE circuit models followed, each built from the Roland TB-303 Service Notes (first edition, 19 Feb 1982) with ngspice 47:
+
+- **P1 (VCO):** the saw core (C33/Q26/Q28) is straight to 0.5 % bow; `sawTable` confirmed as a match. The Q8 square shaper produces a pitch-dependent pulse (51 % on-time at C1, 23 % at C5) whose level rises with pitch (−2.5 dB to +3.2 dB against the saw). D8 encodes these per octave level. The VCF input network (R62 220 kΩ, C17 1 µF) divides by 101; corner 0.72 Hz (inaudible).
+- **P2 (VCF):** the diode ladder (C18 0.018 µF bottom, C19/C24/C26 0.033 µF) with R110 = **22 kΩ** (not the printed 2.2 kΩ; the only value the x0xb0x KiCad schematic disagrees on, and the only value that gives a resonance matching the [SN] p7 calibration). Loop gain 18.7 against a threshold of 19.1 at Res full, 98 % of oscillation. Resonance frequency ≈ 12× the ladder's −3 dB point. A high-pass inside the loop (C27/C25 into Q21, 60–120 Hz) causes low-cutoff resonance loss and a lightly damped lower peak at 7–9 Hz (Stinchcombe's "very real" peak).
+- **P3 (VCA):** VEG with 12 V gate (decided); attack 2.5–3 ms (trigger width 0.65–0.75 ms); decay τ 1.5 s with offset (−6 dB at 1.0 s, silent at 4.5 s); accent +5.9/+11.4 dB; release under 1 µs. The VCA input's high-pass corner moves from 66 Hz (Res 0) to 127 Hz (Res full), raising the level by 10 dB. The OTA is linear at the 303's levels. Roland constants chosen over [XB]'s x0xb0x-derived values (D10).
+- **P4 (Control network + end-to-end run):** the Cutoff/Env Mod/expo converter (Q9/Q10/Q11, TM3 calibrates to 153 kΩ), the MEG (decay 173 ms to 2.54 s), and the accent sweep (C13/R46/VR4b second gang). An 8-step pattern through all four models confirmed slide (τ 22 ms, legato), accent behaviour (Resonance-dependent: sharp spike at low Res, smooth swell at high Res with accumulation over consecutive accents), the VEG as a state not a restart, and the accent tail past gate-off.
+
+The DSP equations phase (P6) translated the SPICE models into a real-time DSP form:
+
+- The ladder equations with four spread-pole stages, secant-linearised nonlinearities (the "mystran" method), and a tridiagonal ZDF solve closed through the whole linear network.
+- The network around the ladder (eight capacitors: C14, C15, C16, C17, C21, C22, C22F, C23) solved as a state-space system and split by speed: two fast eigenmodes and two one-pole asymptotes per sample, the slow remainder per block.
+- Control-rate equations: expo converter (three fixed-point passes), MEG (RC with a diode-stack floor), accent network (5 × 5 nodal solve of both VR7 branches together, because separate solves put the first accent 27 % high), VEG (C42 state with a fitted current table), and TPT prewarp.
+- Two solver options validated against SPICE: A_rt (linear rungs, ≈ 145 total) and B_rt (all nonlinearities, ≈ 230 total). At the 303's own drive both match SPICE within 0.1 dB per step; B follows the reference under drive (LSD 0.22 dB at ×8) and A does not (0.78 dB).
+
+Eleven user decisions were recorded (D1–D11, D8), covering accent threshold (velocity 101), filter choice (B2R, decided in S093), flash trade-off, SRR, tuning range (±700 cents), gate length (3.5/6), VEG constants (Roland), release (one-block ramp), and extras (E1–E4).
+
+- **Find here**: [092_SESSION_HANDOFF_LOG.md](092_SESSION_HANDOFF_LOG.md),
+  `ALKALINE_MODELLING_REFERENCE.md` (circuit models, SPICE validation, DSP equations),
+  `ALKALINE_MODULE_REFERENCE.md` (firmware module design and signal path),
+  `INSTRUMENTS_DSP_REFERENCE.md` (§5.5 Alkaline, §9.2 add-a-type checklist).
