@@ -186,7 +186,8 @@ _Static_assert(sizeof(OscCarrierSnapshot) <= 32u,
  * Sample reader constants (S087 stage D).
  *
  * What:       OSC_SAMPLE_PHASE_SHIFT 12 (Q19.12 phase: point index << 12 +
- *             fraction); OSC_BIND_NONE/SMP/SLP/WTB8/WTB16; OSC_POS_SAMPLE_SPEED_CAP
+ *             fraction); OSC_BIND_NONE/SMP/SLP/WTB16 (S093 P8: WTB8 is
+ *             gone with 8-bit tables; 3 stays unused); OSC_POS_SAMPLE_SPEED_CAP
  *             4 (D5: a pos glide moves the playhead at most 4x the playback
  *             speed, at least one step per block); OSC_FM_SAMPLE_SHIFT 9 (the
  *             FM read offset: the same fraction of a 1,024-point nominal period
@@ -201,7 +202,6 @@ _Static_assert(sizeof(OscCarrierSnapshot) <= 32u,
 #define OSC_BIND_NONE             0u
 #define OSC_BIND_SMP              1u
 #define OSC_BIND_SLP              2u
-#define OSC_BIND_WTB8             3u
 #define OSC_BIND_WTB16            4u
 #define OSC_POS_SAMPLE_SPEED_CAP  4
 #define OSC_FM_SAMPLE_SHIFT       9u

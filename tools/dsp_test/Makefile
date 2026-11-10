@@ -8,7 +8,8 @@
 #               voice_control       modules/voice_control.c (+ break build)
 #               sequencer           modules/sequencer.c (+ break build)
 #               instrument_manager  modules/instrument_manager.c (+ 2 breaks)
-#               samples             modules/samples.c (+ break build)
+#               samples             modules/samples.c (+ catalogue and row
+#                                   resampler break builds)
 #               crumpbit            modules/crumpbit.c (+ 25 breaks: P6
 #                                   `dly` curve, R4 AC seed, P2 flat tone, P2
 #                                   seat delay clamp, P2 Rate-limit probe;
@@ -30,8 +31,8 @@
 #               stock_tables        tools/plots/gen_stock_tables.py --check
 #               alkaline            modules/alkaline.c (S093 P0: DiodeLadder,
 #                                   AlkalineControl, AlkalineVoice over the
-#                                   real Oscillator.c; + 1 break: legato
-#                                   ignored must fail AL-S)
+#                                   real Oscillator.c; + legato and wtb row
+#                                   stepping breaks)
 #               alkaline_tables     tools/alkaline/gen_alk_tables.py --check
 #             A break build compiles a deliberately broken copy and must fail.
 # Why:        keeps the laws earlier sessions proved runnable against today's
@@ -224,6 +225,18 @@ samples: | $(GEN)
 	@if ./build/samples_break >/dev/null 2>&1; then \
 	  echo "samples_break: FAILED (early-header break not caught)"; exit 1; \
 	else echo "samples_break: caught (catalogue law 3 fails as expected)"; fi
+	mkdir -p build/break_rows
+	sed 's|#define SAMPLE_INSTALL_ROW_HALF 32 |#define SAMPLE_INSTALL_ROW_HALF 16 |' \
+	  $(ROOT)/Core/SampleRom/SampleInstall.c > build/break_rows/SampleInstall.c
+	@grep -q 'SAMPLE_INSTALL_ROW_HALF 16 ' build/break_rows/SampleInstall.c || \
+	  { echo "samples_break_rows: sed did not apply"; exit 1; }
+	$(HOSTCC) $(HOSTFLAGS) -I$(ROOT)/Core/SampleRom $(CAT_HOST_INC) \
+	  modules/samples.c $(ROOT)/Core/SampleRom/SampleMemory.c \
+	  build/break_rows/SampleInstall.c catalogue_host.c \
+	  -o build/samples_break_rows -lm
+	@if ./build/samples_break_rows >/dev/null 2>&1; then \
+	  echo "samples_break_rows: FAILED (H = 16 kernel not caught)"; exit 1; \
+	else echo "samples_break_rows: caught (rows law 4 fails as expected)"; fi
 
 sampleoptimize:
 	python3 modules/sampleoptimize.py
@@ -328,6 +341,16 @@ alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c | $(GEN)
 	@if ./build/alkaline_break >/dev/null 2>&1; then \
 	  echo "alkaline_break: FAILED (legato break not caught)"; exit 1; \
 	else echo "alkaline_break: caught (law AL-S fails as expected)"; fi
+	mkdir -p build/break_alk_wtb
+	sed 's/osc->sampleCacheData += step \* (int32_t)WAVETABLE_ROW_POINTS;/(void)step;/' \
+	  $(GEN)/AlkalineVoice.host.c > build/break_alk_wtb/AlkalineVoice.host.c
+	@grep -q '(void)step;' build/break_alk_wtb/AlkalineVoice.host.c || \
+	  { echo "alkaline_break_wtb: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk_wtb $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break_wtb -lm
+	@if ./build/alkaline_break_wtb >/dev/null 2>&1; then \
+	  echo "alkaline_break_wtb: FAILED (a frame row that does not follow pos not caught)"; exit 1; \
+	else echo "alkaline_break_wtb: caught (law AL-W fails as expected)"; fi
 
 alkaline_tables:
 	cd $(ROOT) && python3 tools/alkaline/gen_alk_tables.py --check
@@ -359,8 +382,10 @@ alkaline_tables:
 # Affiliates: elf_loopdump.py, elf_hotloops.py, elf_loopsrc.py; S093_P3 §2.3.
 FW_ELF ?= $(ROOT)/build/lxr02.elf
 # The baselines are records, so they live in the tree, not in a build folder:
-# the root `make clean` removes $(ROOT)/build (S093 P5).
-P4BASE ?= baselines/s093p4
+# the root `make clean` removes $(ROOT)/build (S093 P5). S093 P8 re-baselines
+# the ten wavetable readers: removing their 8-bit copies (D9) and using the
+# fixed 1,024-point read replaces their P4 loops by design.
+P4BASE ?= baselines/s093p8
 P4_OSC_SYMS := SVF_calcBlockZDF calcFmBlock calcNextOscSampleBlock \
   calcNextOscSampleRingBlock calcNextOscSampleSyncBlock calcNoiseRingBlock \
   calcSampleOscFmBlock calcSampleOscRingBlock calcSampleOscSyncBlock \

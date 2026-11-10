@@ -44,7 +44,7 @@ MORPHABLE = {"ROW", "ROW_SPECIAL", "ROW_MENU", "ROW_NOBIND_IMAGE"}
 
 # init bytes per key; every key of the table must be here (and only those)
 INIT = {
-    "alk_wave": "0", "osc1_pitch_coarse": "36", "alk_tuning": "63", "alk_slide": "0",
+    "osc1_wave": "0", "osc1_pitch_coarse": "36", "alk_tuning": "63", "alk_slide": "0",
     "alk_cutoff": "64", "alk_reso": "64", "alk_envmod": "64", "alk_decay": "64",
     "alk_accent": "64", "alk_drive": "0", "instrument_vol": "100", "instrument_pan": "63",
     "lfo_rate": "0", "lfo_amount": "0", "lfo_amount_2": "0", "lfo_wave": "0",
@@ -55,6 +55,9 @@ INIT = {
     # S093 P6 (appended rows): attack at a 0.70 ms trigger (today's), pos 0
     # (free-running)
     "alk_attack": "0", "osc1_position": "0",
+    # S093 P8 (appended row): typ wav (Saw/Sqr); osc1_wave (row 0, was
+    # alk_wave) is an image row since P8, so it is under [morph] too
+    "osc1_type": "0",
 }
 
 

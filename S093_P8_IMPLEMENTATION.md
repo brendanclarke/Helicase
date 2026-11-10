@@ -10,9 +10,10 @@
   - 24-bit and stereo sources kept through the conversion.
 - **Revision 2 (2026-11-10):** amended for those decisions. The N2 layout
   (a copy beside the raw frames) of revision 1 is gone.
-- **Status:** a schedule. **No firmware file is changed by this document.**
-  Every change below was built and measured first, in a scratch copy of the
-  tree (§0). The code blocks are that measured code, copied from it.
+- **Status:** code implementation complete; host and linked firmware gates
+  passed. Device checks in §13 were not run, and document updates P8-6 were
+  omitted per the user's scope correction. Progress and measured deviations
+  are recorded in §17.
 - **Base:** the tree at `9c2a3de2` (P6 landed). Line numbers are that tree's.
 - **Tags:**
   - **ADD**, **MODIFY**, **REMOVE**: a change, with its line anchor;
@@ -30,6 +31,83 @@
   - no backward compatibility;
   - nothing needed goes in `build/`;
   - commits belong to the user.
+
+## 17. Session implementation notes
+
+- **2026-11-10, P8-0 complete:** read `MEMORY.md`, the P8 reassessment and
+  this schedule; the user decisions in reassessment §13 govern where the
+  earlier draft differs. Read the DSP CPU and oscillator mandates and checked
+  the name-cache loan contract. The working tree was clean before edits. The
+  schedule's only RAM use is the user-approved, temporary loan of the existing
+  9,000 B `fs_list_cache_name`; the frame occupies at most 4,096 B. No RAM
+  allocation is added. At P8-0, no source changes had been made.
+- **2026-11-10, P8-1 source changes complete:** catalogue v3 now validates
+  only 1,024-point, 16-bit wavetable rows; the installer converts each source
+  frame into that row, counts source points across read chunks, and rejects
+  8-bit WAV formats. The filesystem aligns and lends the existing name cache
+  for the at-most 4,096 B source frame and returns it after the blocking
+  install. This also fixes the old per-call frame counter that truncated the
+  104-frame, 600-point `ak_hvox` table. Host and linked gates remain pending.
+- **2026-11-10, P8-2 source changes complete:** removed the WTB8 bind kind and
+  its six dispatch paths. All ten existing wavetable readers now use the
+  fixed 1,024-point, 16-bit table read; `osc_wtbFrame()` advances by two bytes
+  per point. The `OscInfo` layout and existing ITCM section assignments are
+  unchanged. Host and linked loop gates remain pending.
+- **2026-11-10, P8-3 source changes complete:** added Alkaline `typ` control
+  with its own change-keyed wavetable bind, one-frame-per-block `pos` stepping,
+  note-start frame selection and a silent zero-row fallback. Saw/Sqr and
+  wtb now render through separate `noinline` wrappers, with the existing fused
+  table loop shared out of line. No new runtime state was added; the silent
+  row adds the scheduled 2,048 B of program flash. Host and linked gates
+  remain pending.
+- **2026-11-10, P8-4 source changes complete:** replaced Alkaline's selector
+  `alk_wave` with image row `osc1_wave`, appended `osc1_type` at row 28, and
+  connected the menu, dynamic wave domain and special writer to the Alkaline
+  runtime. The typ list and Saw/Sqr names now have separate display tables.
+  Host integration and linked gates remain pending.
+- **2026-11-10, P8-5 host coverage changes complete:** added resampler and
+  catalogue-v3 laws, 8-bit rejection coverage, Alkaline row-read/position/
+  rebind/silence/type laws, fixed-read oscillator checks, and the two planned
+  resampler and Alkaline row-step break builds. Updated the Alkaline init
+  generator and regenerated its 29-row `init.alk`. Host, firmware and linked
+  budget gates remain pending.
+- **2026-11-10, P8-5 host gates passed:** `samples` reports 0 failures
+  (harmonics within 0.0001 dB; non-harmonic bins −113.5 dBFS; band edge
+  −0.0010 dB / −85.2 dBFS); catalogue and H=16 break builds were caught.
+  `oscillator` and both FM break builds pass; `alkaline` reports 0 failures
+  including AL-W (0 samples, phase or frame differences; empty-table peak 0)
+  and catches both Alkaline breaks. `special_tags` reports 200 rows / 0
+  mismatches and `init.alk` has 29 rows; manager and step-length tests pass
+  with their break builds caught.
+- **2026-11-10, firmware and linked gates passed:** `make clean && make all`
+  links successfully with no new warning relative to the P6 build. The image
+  uses 709,108 B of the 753,664 B flash budget (44,556 B headroom), 12,128 B
+  ITCM, 4,392 B DTCM statics and 126,656 B FXBUF. The linked Alkaline fused
+  loop is 214 instructions with 3 VDIV and one loop path; its longest block
+  cost is 956 + 349 + 14 = 1,319, 9 VDIV, or at most 255.2 per whole voice.
+  The ten wavetable reader loops measure 22, 33, 30, 41, 30, 42, 32, 45, 31
+  and 42 instructions. Against P4, the first comparison found exactly the 31
+  expected old reader loops missing and no other mismatch; mixer hot loops
+  were 30 equal and 0 grown. Recorded the P8 oscillator and mixer snapshots
+  in `tools/dsp_test/baselines/s093p8/`, made that baseline the check default,
+  then `elf_p4_check` passed 77/77 exact loops and 32 mixer hot loops equal,
+  0 grown.
+- **2026-11-10, RAM sign-off:** built the unchanged P6 tree from `HEAD` in
+  `/private/tmp` and compared its ELF symbols with P8. `.data` is 420 B and
+  `.bss` is 413,280 B in both; no allocation was added. The only removed RAM
+  symbol is the former one-byte stored-depth state. `out_buf` remains 128 B;
+  its LTO-local symbol spelling differs. The approved frame-buffer loan is
+  temporary use of the existing aligned name cache, not a new allocation.
+- **2026-11-10, scope correction:** the user clarified “you don't edit logs
+  and specs.” Restored the incidental edits to `MEMORY.md` and the three
+  reference specifications. No project log or specification update was kept;
+  the requested progress record in this implementation schedule is retained.
+  The document-update phase P8-6 is therefore left out. No device-only checks
+  in §13 were run in this session.
+- **2026-11-10, comment audit:** expanded the public `.h` comments for the
+  wavetable begin/write/finish APIs and the catalogue row accessor to match
+  their detailed `.c` descriptions (format, buffer ownership, row layout,
+  return behavior and callers).
 
 ---
 
@@ -158,7 +236,7 @@ Aliases (`__aeabi_dadd` = `__adddf3`, …) are listed once.
 | O2 | The built-in 8-bit ROM sounds (crash wave, transients) are **out of scope** | user |
 | O3 | The catalogue's wavetable `frame_len` and `bits` **stay, as checked marks** (1,024 and 16) | user |
 | P8-D4 | `pos` on `wtb`: the frame, **one frame per block** toward the target; a non-legato note jumps to it | assessment |
-| P8-D6 | The P7 document is kept as a record, marked discarded (§14) | assessment |
+| P8-D6 | The P7 document is kept as a record; marking it discarded is the user's (§14.3) | assessment |
 | P8-D7 | **Catalogue v3:** magic `LXC3`, version 3; older cards read STALE and are reinstalled | this schedule (the format changes) |
 | S7 | **The readers use the fixed 1,024-point read** (§0.3) | **this schedule (my choice, flagged)** |
 
@@ -190,7 +268,7 @@ Aliases (`__aeabi_dadd` = `__adddf3`, …) are listed once.
 | **P8-3** | Alkaline voice (§6, §7) | `make -C tools/dsp_test alkaline` (16 groups; AL-X unchanged; AL-W, AL-TY; both breaks caught) |
 | **P8-4** | Rows, menu, writer (§8–§10) | `special_tags`; `instrument_manager`; `seq_steplen` |
 | **P8-5** | Tools, `init.alk` (§12); linked gates and the device (§13) | §13 |
-| **P8-6** | Documents (§14) | — |
+| **P8-6** | **None.** This schedule edits no `MEMORY.md` or `knowledge_files/` file (`MEMORY.md` "Document edits"). The statements P8 makes out of date are listed in §14 for the user to log | — |
 
 P8-1 builds on its own; P8-2 and P8-3 need P8-1.
 
@@ -2653,23 +2731,150 @@ re-run on the tree.
 
 ---
 
-## 14. Documents and comments (P8-6)
+## 14. Statements to be logged (P8-6: for the user; not edited by this schedule)
 
-| File | Change |
+`MEMORY.md` "Document edits (user, S093, binding)": no step of this schedule
+edits `MEMORY.md` or anything under `knowledge_files/`. Revision 2 first
+scheduled those edits here (a documents phase). During the implementation,
+`MEMORY.md` and three specifications were edited, then restored to the
+commit (§17, "scope correction"). Those edits, and every other statement P8
+makes out of date, are listed below **for the user to log**.
+
+Line numbers are those of the current files. For `MEMORY.md`, that includes
+its new "Document edits" section.
+
+### 14.1 Edits made during the implementation, then restored
+
+| File | What was edited | Where it is recorded now |
+|---|---|---|
+| `MEMORY.md`, the Alkaline rule (now l. 224–240) | replaced by the text quoted below | quoted below, verbatim as the implementer wrote it |
+| `MEMORY.md`, Sample Flash (now l. 444–459) | replaced by the text quoted below | quoted below, verbatim |
+| `knowledge_files/specification_reference/FILESYSTEM_SPEC.md` | edited and restored; its contents now equal commit `ff837fce` | the edited text is not kept in the tree. Its out-of-date statements are listed in §14.2 |
+| `knowledge_files/specification_reference/dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md` | edited and restored, as above | §14.2 |
+| `knowledge_files/specification_reference/dsp_instruments_effects/CPU_USE_DSP_AUDIT.md` | edited and restored, as above | §14.2 |
+
+**The implementer's `MEMORY.md` Alkaline rule (restored; to be logged):**
+
+```markdown
+- **Alkaline (S093 P4/P6/P8, binding):** the voice is `AlkalineVoice` (548 B
+  after P6) in the fifth tagged slot; Basic. Its `osc1_type` is `wav` or
+  `wtb`: `wav` reads the stock `sawTable` or `alkSqrTable[octave]` selected by
+  `osc1_wave` (row 0); `wtb` reads one installed wavetable frame's shared
+  1,024-point int16 row. `osc1_wave` selects Saw/Sqr in `wav` and the
+  catalogue table in `wtb`; `osc1_position` selects/steps the frame in `wtb`.
+  The pitch is set with `osc_setTableFreq()` — **never** `osc_setFreq()` (the
+  async recomputes pitch from `midiFreq` and the note each block; coarse only
+  sets `osc.freq`). `OSC_SAMPLE_START` stays **6**: the Alkaline's stock
+  tables are not user-sample catalogue entries. One-shot and looped samples,
+  and `run`, are not offered. The two modes render through separate noinline
+  functions and share the existing fused B2R table loop
+  (`DiodeLadder_renderB2Osc`, 214 instructions, bit-identical, AL-W/AL-X;
+  `ALK_FUSED_OSC 1`). The linked worst-case Alkaline block is 1,319
+  instructions / 9 VDIV; whole voice is ≤255.2 per sample against the 261.3
+  ceiling. `ALK_NET_STATES` is **6** on one balanced basis common to every Res
+  point (r6) at 64 samples; any model change regenerates the tables
+  (`tools/alkaline/gen_alk_tables.py`) and re-checks P3 §9.3. The type
+  registry is the storage schema: designated rows in enum order, 3-character
+  tokens, one `TABLES` entry per type; the add-a-type checklist is
+  `INSTRUMENTS_DSP_REFERENCE.md` §9.2.
+```
+
+**The implementer's `MEMORY.md` Sample Flash section (restored; to be logged):**
+
+```markdown
+Samples and wavetables are installed from `Load:[Samples]`: walks `/samples`
+(natural order, depth 3) and `/wavetables` (each subfolder = one wavetable),
+erases sectors 7–11, installs, commits catalogue v3.
+
+- **Accepted formats:** PCM WAV, 16- or 24-bit, mono or stereo. 8-bit PCM is
+  refused for both samples and wavetables. Samples store as 16-bit mono;
+  wavetables convert each source frame to one 1,024-point 16-bit mono row.
+- **Catalogue v3 (S093 P8):** 8 KB at `0x081FE000`. 32 B header (magic
+  "LXC3" programmed last), 128 × 28 B sample entries, 128 × 20 B wavetable
+  entries. Each wavetable entry stores `frame_count × 2,048 B`; `frame_len`
+  is 1,024 and `bits` is 16. P6/v2 catalogues read STALE and must be
+  reinstalled.
+  Details: `STORAGE_SRAM_MANIFEST.md` §4, `087_SESSION_HANDOFF_LOG.md` §5.
+- **Install RAM:** the modal installer temporarily borrows the existing
+  9,000 B `fs_list_cache_name` for the source frame (maximum 2,048 int16 / 4,096
+  B), then clears and returns it. No new RAM is allocated; the browser reloads
+  its index on the next entry.
+```
+
+(The rest of the section, from "Sort: natural order", was unchanged.)
+
+### 14.2 Statements now out of date (`MEMORY.md` and `knowledge_files/`)
+
+**`MEMORY.md`:**
+
+| Lines | Statement now | What P8 changed |
+|---|---|---|
+| 139–141 (Copy/clear) | "Name cache lent for 161 B HCNAMES remap" | the name cache is also lent to the modal sample install, for one wavetable source frame (≤ 4,096 B, D8) |
+| 145–151 (Names in RAM) | lists the cache's uses | the install is a new use of `fs_list_cache_name` (D8) |
+| 224–240 (Alkaline rule) | `alk_wave`; "a table wave"; "`typ`/`run` are not offered"; "a switchable sample/wavetable Alkaline oscillator is a class decision" | `osc1_wave` row 0 and `osc1_type` row 28 (`wav`/`wtb`); loop 214, per block 1,319, ≤ 255.2 (§14.1 text) |
+| 259–262 (Drum FM ramp twins) | "ITCM 15,240 / 16,384 B after P3" | ITCM 12,128 B after P8; the two twins' loops are 31 and 42 (§0.4) |
+| 444–459 (Sample Flash) | catalogue v2; "mono 16-bit 44.1 kHz PCM WAV" | catalogue v3; formats, rows, loan (§14.1 text) |
+
+**`knowledge_files/specification_reference/FILESYSTEM_SPEC.md`:**
+
+| Lines | Statement now | What P8 changed |
+|---|---|---|
+| 472 | `fs_list_cache_name` described as the browser-index cache | also lent to the sample install (D8) |
+| 858–862 | the name-buffer loan is copy/clear's | the sample install takes the same loan for its run (§4.9) |
+| 1866–1867 | `init.alk`: 28 keys, 22 MORPHABLE rows (all but `alk_wave`, …) | 29 keys, 23 `[morph]` rows (`osc1_wave` is an image row) |
+| 1979–1987 | Alkaline row 0 `alk_wave`, `DTYPE_ON_OFF`, tag `ONOFF_TAG_ALK_WAVE` (3) | row 0 `osc1_wave` (`MENU_WAVEFORM`); row 28 `osc1_type` (tag `ONOFF_TAG_ALK_TYPE` 3: `wav`/`wtb`) |
+| 2453, 2480, 2497 | "catalogue v2" | catalogue v3 |
+| 2458, 2634–2635 | "Only mono 16-bit 44.1 kHz PCM WAV files are accepted" | 16- or 24-bit, mono or stereo; 8-bit refused (D10, D11). Already inaccurate before P8, which accepted 8/16/24-bit, mono or stereo |
+| 2482–2484 | "any frame length (A16)" | source frames 16..2,048 points, stored as one 1,024-point 16-bit row each; frame count = points / frame length |
+| 2497–2501 | wavetables "written to flash with catalogue v2 entries"; blending uses the interpolation slots | stored as rows; Drum's blend is unchanged; the Alkaline steps frames, without a blend |
+
+**`knowledge_files/specification_reference/STORAGE_SRAM_MANIFEST.md`:**
+
+| Lines | Statement now | What P8 changed |
+|---|---|---|
+| 539–563 | catalogue v2 layout, magic `LXC2` | v3, `LXC3`; a wavetable entry's `frame_len` 1,024, `bits` 16, item = `frame_count × 2,048 B` |
+| 577–600 | "Only mono 16-bit 44.1 kHz PCM WAV files are accepted"; "Wavetable limits: any frame length" | formats as above; frames resampled to rows; frame count from points |
+| 802 | `fs_list_cache_name` lent to copy/clear | also lent to the sample install (≤ 4,096 B used) |
+
+**`knowledge_files/specification_reference/dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md`:**
+
+| Lines | Statement now | What P8 changed |
+|---|---|---|
+| 565–582 (§5.5) | 28 rows; the oscillator "stays a table wave (S093 P3 §9.5)" | 29 rows; `typ` `wav`/`wtb`; the `wtb` path (§6–§7 of this schedule) |
+| 667–669 | 22 image rows; `alk_wave` is a SELECTOR | 23 image rows; `osc1_wave` is an image row; `osc1_type` is the selector |
+| 675, 1460, 1476–1477, 1538 | Alkaline 1,230 per block, 252.5 per sample | per block 1,319, ≤ 255.2 (loop 214 unchanged) |
+| 890 onward (wavetable waves) | the any-length read, 8- and 16-bit frames | the fixed 1,024-point 16-bit read (§5.3) |
+| 1046 | install-time preparation, "catalogue v2" | v3; frames resampled to rows |
+| 1071–1072 | ramp twins "47 (16-bit) / 43 (8-bit)", "33 (8-bit) / 35 (16-bit)" | 42 and 31, one loop each (§0.4) |
+| 1823 | "sample flash catalogue v2" | v3 |
+
+**`knowledge_files/specification_reference/dsp_instruments_effects/CPU_USE_DSP_AUDIT.md`:**
+
+| Lines | Statement now | What P8 changed |
+|---|---|---|
+| 1014 | `wtb` blend FM ramp 86 → 77 | the twin's loop is now 42 (§0.4); the pass-versus-twin saving is to be re-derived |
+| 1136–1168 (item 71) | Alkaline per block 1,230, 252.5 per sample | per block 1,319, ≤ 255.2, the `wtb` mode; a P8 item: the readers' loops (§0.4), ITCM −2,424 B, flash +5,704 B |
+
+**Other files under `knowledge_files/`:**
+
+| File, lines | Statement now | What P8 changed |
+|---|---|---|
+| `MIDI_SPEC.md` 393–394 | "Alkaline … has 28 rows (0–27)"; `alk_wave` is a selector | 29 rows (0–28); `osc1_wave` (row 0), `osc1_type` (row 28) |
+| `MIDI_SPEC.md` 437 | "`alk_wave` (S093 P4): 0 `Saw`, 1 `Sqr`" | `osc1_wave`: Saw/Sqr under `wav`, the table under `wtb`; `osc1_type`: 0 `wav`, 1 `wtb` |
+| `MODULE_INTERCHANGE_SPEC.md` 1119, 1669 | the name-cache borrow API is listed under copy/clear | the sample install also takes the loan |
+| `COPYCLEAR_UTILITIES.md` 114, 723 | the 9 kB name buffer is lent to copy/clear | a second holder: the sample install |
+| `REPOSITORY_LAYOUT.md` 141 | `SampleMemory.c/h` "catalogue v2 flags" | catalogue v3 |
+| `volatile/OPEN_TESTS.md` | — | the device items of §13 |
+| `log_archive/` (the 093 log) | — | a P8 entry: the spike, S1–S7, the decisions (D1′–D11, O1–O3), the frame-count bug, the scope correction |
+
+### 14.3 Outside `MEMORY.md` and `knowledge_files/`
+
+| File | State |
 |---|---|
-| `MEMORY.md` l. 212–228 (Alkaline rule) | the oscillator is a table wave **or a wavetable frame's 1,024-point row** (`typ` `wav`/`wtb`, row 28; `osc1_wave` row 0, was `alk_wave`); `typ` is offered, `run` is not; the Saw/Sqr and `wtb` renders are separate `noinline` functions and `DiodeLadder_renderB2Osc()` stays out of line (loop 214; §0.3 S1); samples are not offered (S2/S3); the bind is the Alkaline's own |
-| `MEMORY.md` l. 432–446 (Sample Flash) | catalogue v3: every wavetable frame is one 1,024-point 16-bit row for every instrument; 8-bit WAV files are refused; 16/24-bit, mono/stereo accepted; the install borrows the name cache; v2 cards read STALE |
-| `MEMORY.md` (DSP) | the wavetable readers use the fixed 1,024-point read; the 8-bit reader copies are gone (ITCM 12,128 B) |
-| `CPU_USE_DSP_AUDIT.md` | the Alkaline P8 figures (loop 214, per block 1,319, ≤ 255.2); the readers' new loops (§0.4) |
-| `INSTRUMENTS_DSP_REFERENCE.md` §5.5 (l. 565; l. 668–669 name `alk_wave`) and the oscillator wavetable section | `osc1_wave`, `osc1_type`, the Alkaline wavetable path; the readers' 1,024-point read |
-| `FILESYSTEM_SPEC.md` l. 1867, 1980–1987, and the sample-install section | Alkaline keys (`osc1_wave`, `osc1_type`, 29 keys, 23 `[morph]` rows); install formats (16/24-bit only), the stored row format, the frame-count rule, the name-cache loan |
-| `STORAGE_SRAM_MANIFEST.md` l. 547 and l. 802 | header `LXC3`, version 3, the wavetable item layout (frame_count × 2,048 B); the name cache's second borrower (the sample install) |
-| `MIDI_NRPN_TABLE.md` l. 32, 86, 91, 110; `MIDI_SPEC.md` l. 394, 437 | row 0 `osc1_wave`, row 28 `osc1_type` (0 `wav`, 1 `wtb`) |
-| `filesystem.h` l. 1290–1299 (the loan contract), l. 1396, 1406; `filesystem.c` l. 25679, 25691; `menu.c` l. 1053 (comments) | the install as the loan's second client; "catalogue v2" becomes "catalogue v3" |
-| `tools/dsp_test/Makefile` (P4BASE) | `baselines/s093p8` after the re-baseline (§13) |
-| `S093_P7_WAVETABLE_SAMPLES_OSC_IMPLEMENTATION.md` (header) | "Discarded (user, S093 P8); kept as a record. Superseded by S093_P8_IMPLEMENTATION.md." |
-| `knowledge_files/volatile/OPEN_TESTS.md` | the device items of §13 |
-| The 093 log | the P8 entry: the spike, S1–S7, the decisions |
+| `MIDI_NRPN_TABLE.md` (root) l. 32, 86, 91, 110 | not edited. It still names `alk_wave` and indices 0–27; row 0 is `osc1_wave` and row 28 `osc1_type`. It is a specification-type document, so it is listed here for the user rather than scheduled |
+| `S093_P7_WAVETABLE_SAMPLES_OSC_IMPLEMENTATION.md` (header) | not edited: the "Discarded … superseded by S093_P8_IMPLEMENTATION.md" note (P8-D6) is the user's to add |
+| Code comments (`filesystem.h`, `filesystem.c`, `menu.c`, "catalogue v2" → v3, the loan's second client) | done in the implementation (§17) |
+| `tools/dsp_test/Makefile` `P4BASE` | moved to `baselines/s093p8` in the implementation (§17) |
 
 ---
 

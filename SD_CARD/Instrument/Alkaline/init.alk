@@ -3,7 +3,7 @@ version=1
 type=alk
 
 [params]
-alk_wave=0
+osc1_wave=0
 osc1_pitch_coarse=36
 alk_tuning=63
 alk_slide=0
@@ -31,8 +31,10 @@ lfo_target_voice_2=self
 lfo_target_param_2=255
 alk_attack=0
 osc1_position=0
+osc1_type=0
 
 [morph]
+osc1_wave=0
 osc1_pitch_coarse=36
 alk_tuning=63
 alk_slide=0

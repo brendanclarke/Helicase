@@ -64,7 +64,11 @@ ITERS = {
     ("DiodeLadder_renderB", 1): 0,
     ("DiodeLadder_renderA", 1): 0,
     # S093 P4 (G4): on the linked image LTO inlines the fused B2R read into
-    # the sync block, so its only loop is the audio loop; weight 0 (A4)
+    # the sync block, so its only loop is the audio loop; weight 0 (A4).
+    # S093 P8: DiodeLadder_renderB2Osc has two callers (alk_renderWav,
+    # alk_renderWtb) and stays out of line, so the audio loop is its rank 1
+    # (above) and the sync block has none; the entry stays for a layout that
+    # inlines it again (the guard below checks either)
     ("Alkaline_calcVoiceSyncBlock", 1): 0,
 }
 # functions whose loops sit on alternate branches (one runs per block): the
@@ -93,6 +97,16 @@ void osc_setTableFreq(OscInfo *o) { o->phaseInc = (uint32_t)o->freq; }
 void calcWavetableOscBlock(OscInfo *o, const int16_t t[][1024], int16_t *b,
                            const uint8_t n, const float g)
 { (void)o; (void)t; (void)g; memset(b, 0, n * 2u); }
+/* S093 P8: the catalogue calls of the wtb bind (control rate; the stub link
+ * only needs them to resolve; --elf costs the real ones) */
+static const int16_t stub_rows[2][1024];
+static const wavetable_catalogue_entry_t stub_entry = { 0u, 1024u, 2u, 16u, "stub    ", 0u, { 0u, 0u, 0u } };
+uint8_t sampleMemory_getNumWavetables(void) { return 1u; }
+uint32_t sampleMemory_getGeneration(void) { return 1u; }
+const wavetable_catalogue_entry_t *sampleMemory_wavetableEntry(uint8_t index)
+{ return index ? (const wavetable_catalogue_entry_t *)0 : &stub_entry; }
+const int16_t *sampleMemory_wavetableRows(const wavetable_catalogue_entry_t *entry)
+{ return entry ? stub_rows[0] : (const int16_t *)0; }
 AlkalineVoice v;
 int16_t buf[32];
 int main(void)
@@ -212,7 +226,9 @@ def total(elf, sym, memo, ext, trace, depth=0):
         # longest loop is the fused B2R audio loop (3 VDIV, ~214). If a later
         # layout stops inlining DiodeLadder_renderB2Osc, rank 1 would be a
         # control loop and weight 0 would undercount G4 silently.
-        if base == "Alkaline_calcVoiceSyncBlock" and it == 0 and (lv != 3 or length < 200):
+        # S093 P8: the same check for the out-of-line fused table loop
+        if base in ("Alkaline_calcVoiceSyncBlock", "DiodeLadder_renderB2Osc") \
+                and it == 0 and (lv != 3 or length < 200):
             sys.exit(f"control_cost.py: loop {rank} of {base} (length {length}, {lv} VDIV) "
                      f"is not the fused B2R audio loop; give it an iteration count "
                      f"(--iters {base}:{rank}=N)")

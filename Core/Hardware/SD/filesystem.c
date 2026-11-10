@@ -1063,8 +1063,11 @@ typedef union {
  * Affiliates: filesystem_prepareLibraryNameCache(), filesystem_residentNames,
  * and the separate filesystem_stage_workspace_t above.
  */
+/* S093 P8: 4-byte aligned, because the sample install lends it out as an
+ * int16 wavetable frame buffer (filesystem_installUserContentBlocking()) */
 static char fs_list_cache_name[FS_LIBRARY_NAME_CACHE_MAX]
-                              [STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+                              [STORAGE_KIT_DISPLAY_NAME_LEN + 1u]
+    __attribute__((aligned(4)));
 /*
  * Persistent HCNAMES provenance register: one two-byte source per logical
  * Bank/Scene/Kit/Instrument/Pattern/Effect row. This is the user-approved
@@ -1976,6 +1979,9 @@ _Static_assert(FS_HCNAMES_ROW_COUNT == FS_RESIDENT_NAMES_ROW_COUNT,
                "public HCNAMES row count must match the register");
 _Static_assert(sizeof(fs_list_cache_name) == FS_NAME_SCRATCH_BYTES,
                "copy/clear scratch size must match the name cache");
+/* S093 P8: the install's wavetable frame buffer fits the name cache */
+_Static_assert(sizeof(fs_list_cache_name) >= WAVETABLE_FRAME_MAX * sizeof(int16_t),
+               "a wavetable source frame must fit the name cache");
 
 /*
  * Lend the 9,000 B name cache to copy/clear as working storage (S075).
@@ -25394,7 +25400,10 @@ static uint8_t filesystem_installFrames(afatfsFilePtr_t file,
         if (kind == SAMPLE_INSTALL_KIND_SAMPLE) {
             if (!sampleInstall_writeFrames(sample_io_buf, n))
                 return 0u;
-        } else if (!sampleInstall_writeFrame(sample_io_buf, (uint16_t)n)) {
+        } else if (!sampleInstall_writeFrame(sample_io_buf, (uint16_t)n,
+                                             (int16_t *)(void *)fs_list_cache_name)) {
+            /* S093 P8 (D8): the frame is assembled in the name cache, which
+             * filesystem_installUserContentBlocking() holds for the install */
             return 0u;
         }
         frames -= n;
@@ -25455,10 +25464,12 @@ fail:
 /*
  * Install one wavetable folder (S087 stage C).
  *
- * What:       pass 1 counts the folder's .wav files and fixes the frame length,
- *             depth (8 only when every frame is 8-bit) and source format;
- *             pass 2 streams the frames in natural order. A folder with no
- *             frames, mixed lengths or mixed formats installs nothing.
+ * What:       pass 1 counts the folder's .wav files and fixes the frame length
+ *             and source format (S093 P8: 16- or 24-bit; an 8-bit file fails
+ *             filesystem_parseWav() and is not counted, so an 8-bit folder
+ *             installs nothing and a mixed one fails pass 2); pass 2 streams
+ *             the frames in natural order. A folder with no frames, mixed
+ *             lengths or mixed formats installs nothing.
  * Why:        S087 P0 §5.2, A16, A24: one folder = one table, one frame length
  *             per table, first frame = the modulator list entry.
  * Inputs:     open folder handle (cwd = that folder), folder display name.
@@ -25474,7 +25485,6 @@ static uint8_t filesystem_installWavetableHere(afatfsFilePtr_t dir,
     fs_install_wav_t wav;
     uint16_t frame_len = 0u;
     uint8_t count = 0u;
-    uint8_t bits = 8u;
     uint8_t found = 0u;
     uint8_t ok = 1u;
     uint8_t pick_ok;
@@ -25503,7 +25513,6 @@ static uint8_t filesystem_installWavetableHere(afatfsFilePtr_t dir,
             if (count == 0u) {
                 first = wav;
                 frame_len = (uint16_t)frames;
-                bits = (uint8_t)(wav.fmt.bits == 8u ? 8u : 16u);
                 count = 1u;
             } else if ((uint16_t)frames == frame_len &&
                        wav.fmt.bits == first.fmt.bits &&
@@ -25535,7 +25544,7 @@ static uint8_t filesystem_installWavetableHere(afatfsFilePtr_t dir,
         return 0u;
 
     storage_displayNameFromLfn(name, display_name, 0u);
-    if (!sampleInstall_beginWavetable(name, frame_len, count, bits, &first.fmt))
+    if (!sampleInstall_beginWavetable(name, frame_len, count, &first.fmt))
         return 0u;
     fs_install_last[depth][0] = '\0';
     {
@@ -25676,7 +25685,7 @@ static void filesystem_installWavetableFolder(afatfsFilePtr_t dir,
 }
 
 /*
- * Install samples/ and wavetables/ into catalogue v2 (S087 stage C).
+ * Install samples/ and wavetables/ into catalogue v3 (S087 stage C; S093 P8).
  *
  * What:       one blocking pass, audio suspended by the caller:
  *             sampleInstall_begin(); walk samples/ (depth <= 3; in each
@@ -25688,7 +25697,7 @@ static void filesystem_installWavetableFolder(afatfsFilePtr_t dir,
  *             folders; one unreadable file skips its item only; /loops is
  *             retired (every sample can loop, A6).
  * Inputs:     the card; the 512 B sample_io_buf.
- * Outputs:    catalogue v2; counts for the result screen; 1 on success.
+ * Outputs:    catalogue v3; counts for the result screen; 1 on success.
  * Accessors:  menu_loadSamplesModal().
  * Affiliates: SampleInstall.h, storage_naturalCompare(),
  *             filesystem_parseWav(), filesystem_blockOpenDirLfn(),
@@ -25705,6 +25714,29 @@ uint8_t filesystem_installUserContentBlocking(void)
         return 0u;
     if (!filesystem_blockFsOk())
         return 0u;
+
+    /*
+     * S093 P8 (user, D8): hold the 9,000 B name cache for the install.
+     *
+     * What:       the array is lent exactly as to copy/clear (cleared, tagged
+     *             FS_NAME_CACHE_COPYCLEAR, disposal ignored); the wavetable
+     *             walker assembles each source frame in it (up to 2,048 int16 =
+     *             4,096 B, sampleInstall_writeFrame()); it is returned and
+     *             cleared at the end, so Load/Save reloads its index on the
+     *             next entry, as after copy/clear.
+     * Why:        D1': the raw frame is not stored, so the resampler reads it
+     *             from RAM; no new RAM (D8). The public borrow requires an IDLE
+     *             facade; this pass only needs it not BUSY (checked above), so
+     *             it takes the loan here. A loan already held (copy/clear) is
+     *             refused, as a busy facade.
+     * Affiliates: filesystem_borrowNameCacheScratch() (the same steps),
+     *             filesystem_returnNameCacheScratch().
+     */
+    if (fs_name_cache_borrowed)
+        return 0u;
+    filesystem_clearNameCacheStorage();
+    fs_list_cache_kind = FS_NAME_CACHE_COPYCLEAR;
+    fs_name_cache_borrowed = 1u;
     status = FS_STATUS_BUSY;
     current_op = FS_INTERNAL_OP_NONE;
 
@@ -25724,6 +25756,8 @@ uint8_t filesystem_installUserContentBlocking(void)
     }
     if (!sampleInstall_commit())
         ok = 0u;
+    /* S093 P8: return the name cache (cleared, domain NONE) */
+    filesystem_returnNameCacheScratch();
 
     current_op = FS_INTERNAL_OP_NONE;
     status = FS_STATUS_IDLE;

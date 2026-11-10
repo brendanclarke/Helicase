@@ -1,5 +1,5 @@
 /*
- * AlkalineVoice.c - the Alkaline (TB-303) voice engine (S093 P0, P3).
+ * AlkalineVoice.c - the Alkaline (TB-303) voice engine (S093 P0, P3, P8).
  * See AlkalineVoice.h. Behaviour: S092_P6_DSP_EQUATIONS.md §4.6 and the
  * validated pattern driver tools/alkaline/validate.py dsp_pattern().
  */
@@ -18,11 +18,182 @@
 #define ALK_SAW_SCALE_V  (2.675f / 32625.0f)
 #define ALK_V561         3.263f
 
+/* S093 P8: a wavetable row enters the ladder at the saw's scale: a
+ * full-scale frame (+-32,767 LSB) swings as far as the stock saw (+-32,625
+ * LSB = the 303 saw's 5.35 V), times the block's drive */
+#define ALK_WTB_SCALE_V  ALK_SAW_SCALE_V
+
+/*
+ * The silent row (S093 P8).
+ *
+ * What:       one 1,024-point int16 row of zeros in flash (2,048 B).
+ * Why:        typ wtb with no wavetable installed still runs its ladder (the
+ *             resonance and the network ring out as on a rest): the bind
+ *             points at this row as a one-frame table, so the table loop
+ *             plays silence with no branch and no other loop.
+ * Accessors:  alk_wtbBind().
+ */
+static const int16_t alk_zeroRow[WAVETABLE_ROW_POINTS] = { 0 };
+
+/*
+ * pos -> the nearest frame of a table (S093 P8).
+ *
+ * What:       (pos x (frames - 1) + 63) / 127 for pos 0..127, so pos 0 is
+ *             frame 0 and pos 127 the last frame; 0 for a one-frame table.
+ * Why:        Drum's nearest-frame rule (Oscillator.c osc_wtbFrameOf(),
+ *             static there); the division by the constant 127 is an integer
+ *             multiply-shift or a UDIV, never a VDIV.
+ * Inputs:     pos (osc.position & 127), frames (1..128).
+ * Outputs:    the frame index, 0..frames - 1.
+ * Accessors:  alk_wtbBind(), alk_wtbTrigger(), alk_wtbControl().
+ */
+static inline uint32_t alk_wtbFrameOf(const uint32_t pos, const uint32_t frames)
+{
+	return (frames > 1u) ? ((pos * (frames - 1u) + 63u) / 127u) : 0u;
+}
+
+/*
+ * Bind the wavetable (S093 P8).
+ *
+ * What:       records the key (ALK_BIND_WTB, the table = osc.waveform
+ *             clamped to the last table, the catalogue generation), then
+ *             sampleCacheSize = the table's frame count, positionApplied =
+ *             pos's frame (a new table starts at its pos: no glide from the
+ *             old table's frame) and sampleCacheData = that frame's 1,024-point
+ *             row (sampleMemory_wavetableRows() + frame x 1,024). With no
+ *             table installed: alk_zeroRow as a one-frame table.
+ * Why:        S093 P8 §7: the Alkaline's own bind replaces Drum's
+ *             osc_userBind() (a generic dispatch and the increment every
+ *             block, P7 F3); it runs only when the key changes, has no
+ *             division by a variable and no 64-bit operation. noinline keeps
+ *             its registers out of the async's wav path; the cost gate counts
+ *             it as if it ran every block.
+ * Inputs:     voice->osc (waveform, position).
+ * Outputs:    osc.sampleCacheLooped, sampleCacheIndex, sampleCacheGeneration,
+ *             sampleCacheSize, sampleCacheData, positionApplied.
+ * Accessors:  alk_wtbControl() (the async), alk_wtbTrigger().
+ * Affiliates: ALK_BIND_*; alk_wtbKeyChanged(); SampleMemory.h
+ *             sampleMemory_wavetableEntry(), sampleMemory_wavetableRows().
+ */
+static __attribute__((noinline)) void alk_wtbBind(AlkalineVoice *voice)
+{
+	OscInfo *const osc = &voice->osc;
+	const uint8_t count = sampleMemory_getNumWavetables();
+	/* the table: the wav byte, clamped to the last one (0 with none) */
+	const uint8_t index = (osc->waveform < count) ? osc->waveform
+	                    : (uint8_t)(count ? count - 1u : 0u);
+	const wavetable_catalogue_entry_t *e = sampleMemory_wavetableEntry(index);
+	/* frames of the bound source: the table's, or 1 for the zero row */
+	const uint32_t frames = e ? e->frame_count : 1u;
+	const uint32_t frame = alk_wtbFrameOf((uint32_t)(osc->position & 127u), frames);
+
+	osc->sampleCacheLooped = ALK_BIND_WTB;
+	osc->sampleCacheIndex = index;
+	osc->sampleCacheGeneration = sampleMemory_getGeneration();
+	osc->sampleCacheSize = frames;
+	osc->positionApplied = (uint8_t)frame;
+	/* the row being played: the table's first row + frame x 1,024 */
+	osc->sampleCacheData = e ? sampleMemory_wavetableRows(e) + frame * WAVETABLE_ROW_POINTS
+	                         : alk_zeroRow;
+}
+
+/*
+ * Whether the bound table no longer matches the voice (S093 P8).
+ *
+ * What:       1 when nothing is bound (ALK_BIND_NONE after a typ switch or a
+ *             slot reset), the table (osc.waveform against the bound, clamped
+ *             index) or the catalogue generation (an install since the bind)
+ *             differ.
+ * Why:        the bind runs on a change only. A waveform past the last table
+ *             (a stored value after an install with fewer tables) never equals
+ *             the clamped index, so it rebinds every block: the worst case the
+ *             cost gate already counts, and the frame then follows pos at once
+ *             instead of stepping.
+ * Accessors:  alk_wtbControl(), alk_wtbTrigger().
+ */
+static inline uint8_t alk_wtbKeyChanged(const OscInfo *osc)
+{
+	return (uint8_t)(osc->sampleCacheLooped != ALK_BIND_WTB ||
+	                 osc->waveform != osc->sampleCacheIndex ||
+	                 sampleMemory_getGeneration() != osc->sampleCacheGeneration);
+}
+
+/*
+ * A non-legato note under typ wtb (S093 P8).
+ *
+ * What:       binds first when the key changed (a table chosen on this step
+ *             by automation drains before the trigger), then moves the frame
+ *             to pos's frame at once, the row pointer with it. The phase runs
+ *             on: the 303's VCO is free-running, and under wtb pos is the
+ *             frame, not the start phase (P6's pos reset is the wav rule).
+ * Why:        P8 D4: pos on wtb is the frame; a note starts on its frame
+ *             rather than stepping toward it.
+ * Inputs:     voice->osc (position, the bind).
+ * Outputs:    osc.positionApplied, osc.sampleCacheData.
+ * Accessors:  Alkaline_triggerVoice() (main loop: voiceControl_processPending(),
+ *             not the voice's per-block cost).
+ */
+static void alk_wtbTrigger(AlkalineVoice *voice)
+{
+	OscInfo *const osc = &voice->osc;
+	uint32_t frame;
+
+	if (alk_wtbKeyChanged(osc))
+		alk_wtbBind(voice);
+	frame = alk_wtbFrameOf((uint32_t)(osc->position & 127u), osc->sampleCacheSize);
+	/* the row pointer follows the frame: + (new - old) x 1,024 */
+	osc->sampleCacheData += ((int32_t)frame - (int32_t)osc->positionApplied)
+	                        * (int32_t)WAVETABLE_ROW_POINTS;
+	osc->positionApplied = (uint8_t)frame;
+}
+
+/*
+ * The per-block control of typ wtb (S093 P8 §7).
+ *
+ * What:       binds when the key changed; steps the frame at most one frame
+ *             per block toward pos's frame (P8 D4, Drum's no-slot stepping),
+ *             moving the row pointer with it; then phaseInc by
+ *             osc_setTableFreq(), the stock waves' cycle law (a row is 1,024
+ *             points, 2^32 per cycle; the octave index it also sets is not
+ *             used by a row).
+ * Why:        the replacement for Drum's per-block typed path (P7 measured
+ *             +670 per block): one key compare, one nearest-frame product, one
+ *             +1/-1/0 step and the frequency.
+ * Inputs:     voice->osc (waveform, position, freq, pitchMod, modNodeValue,
+ *             the bind).
+ * Outputs:    osc.phaseInc, osc.tableOffset (unused), osc.positionApplied,
+ *             osc.sampleCacheData; the bind.
+ * Accessors:  Alkaline_calcVoiceAsync().
+ */
+static inline void alk_wtbControl(AlkalineVoice *voice)
+{
+	OscInfo *const osc = &voice->osc;
+	uint32_t target;
+	uint32_t cur;
+	int32_t step;
+
+	if (alk_wtbKeyChanged(osc))
+		alk_wtbBind(voice);
+	/* pos's frame, and the frame being played */
+	target = alk_wtbFrameOf((uint32_t)(osc->position & 127u), osc->sampleCacheSize);
+	cur = osc->positionApplied;
+	/* one frame per block toward the target: +1, -1 or 0 */
+	step = (int32_t)(target > cur) - (int32_t)(target < cur);
+	osc->positionApplied = (uint8_t)((int32_t)cur + step);
+	/* the row being played moves with the frame (P8 §4.3) */
+	osc->sampleCacheData += step * (int32_t)WAVETABLE_ROW_POINTS;
+	osc_setTableFreq(osc);
+}
+
 void Alkaline_initVoice(AlkalineVoice *voice)
 {
 	if (!voice)
 		return;
-	voice->osc.waveform = SAW;
+	/* S093 P8: typ wav, wav Saw (init.alk osc1_type 0, osc1_wave 0). The
+	 * stock SAW (2) set here before was only an octave-index hint that
+	 * osc_setTableFreq() never read. */
+	voice->osc.oscType = OSC_TYPE_WAV;
+	voice->osc.waveform = ALK_WAVE_SAW;
 	voice->osc.freq = 65.406f;
 	voice->osc.pitchMod = 1.0f;
 	voice->osc.modNodeValue = 1.0f;
@@ -49,7 +220,6 @@ void Alkaline_initVoice(AlkalineVoice *voice)
 	voice->attack = 0.0f;   /* S093 P6: init.alk alk_attack = 0, today's attack */
 	voice->vol = 100.0f / 127.0f;
 	voice->pan = 63u;
-	voice->wave = ALK_WAVE_SAW;
 	voice->slide = 0u;
 
 	voice->note = MIDI_DEFAULT_TRIGGER_NOTE;
@@ -112,6 +282,11 @@ void Alkaline_triggerVoice(AlkalineVoice *voice, const uint8_t source_slot,
 		voice->pitchJump = 1u;
 		alkMeg_trigger(&voice->meg);
 		alkVeg_trigger(&voice->veg, voice->attack);
+		/* S093 P8: typ wtb starts on pos's frame (alk_wtbTrigger());
+		 * Saw/Sqr keep the P6 start-phase rule below */
+		if (voice->osc.oscType == OSC_TYPE_WTB) {
+			alk_wtbTrigger(voice);
+		} else
 		/*
 		 * S093 P6: pos, the note-start phase (user).
 		 *
@@ -181,38 +356,44 @@ void Alkaline_calcVoiceAsync(AlkalineVoice *voice)
 	voice->pitchJump = 0u;
 	voice->osc.freq = alk_exp2f(voice->pitchLog2
 	                        + (voice->tuning * 127.0f - 63.0f) * (7.0f / 12.0f / 63.0f));
-	osc_setTableFreq(&voice->osc);
-	/*
-	 * S093 P6: pos while it moves: the per-block bend (the stock waves' rule,
-	 * Oscillator.h osc_positionBendApply(), INSTRUMENTS_DSP_REFERENCE §6.1.1).
-	 *
-	 * What:       d = the circular step from the applied position to pos,
-	 *             -64..+63 (127 -> 0 is +1); positionApplied advances by d and
-	 *             phaseInc gains d x OSC_POS_BEND_PER_STEP (2^25 / 32), which
-	 *             held for the 32-sample block moves the phase by exactly d/128
-	 *             of a cycle: the oscillator lands on the new offset, no drift.
-	 * Why:        a pos change at a block edge would click; the bend spreads it
-	 *             over the block as a small pitch excursion. The stock helper
-	 *             is not used: it requires osc_positionBendRestore() after the
-	 *             render, and Alkaline recomputes phaseInc every block
-	 *             (osc_setTableFreq() above), so the bend clears itself. That is
-	 *             S3 of the plan (§7.3), a saving shared with P7.
-	 * Cost:       13 instructions per block (+0.41 per sample; the block
-	 *             compiled alone for the M7 at -Ofast). The plan's +0.8
-	 *             counted the stock apply/restore pair; the linked count
-	 *             (control_cost.py) decides.
-	 *             No cap: |d| <= 64 = OSC_POS_BEND_CAP.
-	 * Constant:   at a steady pos d = 0 and phaseInc is unchanged (pos 0:
-	 *             today's oscillator bit for bit).
-	 */
-	{
-		const uint32_t u = ((uint32_t)(voice->osc.position & 127u) -
-		                    (uint32_t)voice->osc.positionApplied + 64u) & 127u;
-		const int32_t d = (int32_t)u - 64;
+	/* S093 P8: Saw/Sqr (typ wav) keep the table law and the P6 pos bend;
+	 * typ wtb takes its own per-block control (alk_wtbControl()) */
+	if (voice->osc.oscType == OSC_TYPE_WAV) {
+		osc_setTableFreq(&voice->osc);
+		/*
+		 * S093 P6: pos while it moves: the per-block bend (the stock waves' rule,
+		 * Oscillator.h osc_positionBendApply(), INSTRUMENTS_DSP_REFERENCE §6.1.1).
+		 *
+		 * What:       d = the circular step from the applied position to pos,
+		 *             -64..+63 (127 -> 0 is +1); positionApplied advances by d and
+		 *             phaseInc gains d x OSC_POS_BEND_PER_STEP (2^25 / 32), which
+		 *             held for the 32-sample block moves the phase by exactly d/128
+		 *             of a cycle: the oscillator lands on the new offset, no drift.
+		 * Why:        a pos change at a block edge would click; the bend spreads it
+		 *             over the block as a small pitch excursion. The stock helper
+		 *             is not used: it requires osc_positionBendRestore() after the
+		 *             render, and Alkaline recomputes phaseInc every block
+		 *             (osc_setTableFreq() above), so the bend clears itself. That is
+		 *             S3 of the plan (§7.3), a saving shared with P7.
+		 * Cost:       13 instructions per block (+0.41 per sample; the block
+		 *             compiled alone for the M7 at -Ofast). The plan's +0.8
+		 *             counted the stock apply/restore pair; the linked count
+		 *             (control_cost.py) decides.
+		 *             No cap: |d| <= 64 = OSC_POS_BEND_CAP.
+		 * Constant:   at a steady pos d = 0 and phaseInc is unchanged (pos 0:
+		 *             today's oscillator bit for bit).
+		 */
+		{
+			const uint32_t u = ((uint32_t)(voice->osc.position & 127u) -
+			                    (uint32_t)voice->osc.positionApplied + 64u) & 127u;
+			const int32_t d = (int32_t)u - 64;
 
-		voice->osc.positionApplied =
-			(uint8_t)(((uint32_t)voice->osc.positionApplied + (uint32_t)d) & 127u);
-		voice->osc.phaseInc += (uint32_t)(d * (int32_t)OSC_POS_BEND_PER_STEP);
+			voice->osc.positionApplied =
+				(uint8_t)(((uint32_t)voice->osc.positionApplied + (uint32_t)d) & 127u);
+			voice->osc.phaseInc += (uint32_t)(d * (int32_t)OSC_POS_BEND_PER_STEP);
+		}
+	} else {
+		alk_wtbControl(voice);
 	}
 
 	/* control path (S092 P6 §4) */
@@ -251,18 +432,42 @@ void Alkaline_calcVoiceAsync(AlkalineVoice *voice)
 	DiodeLadder_setNet(&voice->ladder, &alkResTable[lo], &alkResTable[lo + 1u], f);
 }
 
-void Alkaline_calcVoiceSyncBlock(AlkalineVoice *voice, int16_t *buf, const uint8_t size)
+/*
+ * One block of typ wav: Saw or Sqr through the fused table loop (S093 P3;
+ * moved out of Alkaline_calcVoiceSyncBlock() in S093 P8).
+ *
+ * What:       the pre-P8 sync block body, unchanged: the octave's row of the
+ *             stock Saw or of the D8 square (tableOffset, set by
+ *             osc_setTableFreq() in the async), each at its own scale, times
+ *             the drive.
+ * Why:        noinline, and the row computed here as before: the S093 P8
+ *             spike measured the inlined table loop at 213 in this form, and
+ *             at 216 when the row was a pointer read from the oscillator or
+ *             when the type dispatch shared the function (register
+ *             allocation, one extra float spill). Keeping the Saw/Sqr render
+ *             in its own function, and the table loop out of line
+ *             (DiodeLadder_renderB2Osc() has two callers, this and
+ *             alk_renderWtb()), fixes the loop at the baseline's 214 whatever
+ *             the wtb code does.
+ * Inputs:     voice (the async ran this block); buf (output).
+ * Outputs:    buf; osc.phase; the ladder state.
+ * Accessors:  Alkaline_calcVoiceSyncBlock().
+ * Affiliates: bench law AL-X (bit-identical to calcWavetableOscBlock() +
+ *             DiodeLadder_renderB2()); control_cost.py ITERS (rank 1 of
+ *             DiodeLadder_renderB2Osc is the audio loop).
+ */
+static __attribute__((noinline)) void alk_renderWav(AlkalineVoice *voice, int16_t *buf)
 {
-	const uint8_t square = (uint8_t)(voice->wave == ALK_WAVE_SQUARE);
+	/* S093 P8: Saw/Sqr is osc.waveform under typ wav (was AlkalineVoice.wave) */
+	const uint8_t square = (uint8_t)(voice->osc.waveform == ALK_WAVE_SQUARE);
 
-	(void)size;   /* the ladder always renders OUTPUT_DMA_SIZE */
 	/* B2R (user, S093). The make-up scales the OTA current, which the kernel
 	 * already ramps per sample and which feeds only the output, so the
 	 * per-sample loop is the same with or without it. */
 #if ALK_FUSED_OSC
 	/* S093 P3: the oscillator's table read fused into the B2R loop (-9 per
-	 * sample, bit-identical: bench law AL-X). Only for the [11][1024] table
-	 * waves; another oscillator type would take the separate path below. */
+	 * sample, bit-identical: bench law AL-X). This wrapper is only the [11][1024]
+	 * Saw/Sqr path; typ wtb uses alk_renderWtb(). */
 	DiodeLadder_renderB2Osc(&voice->ladder, buf,
 	                        square ? alkSqrTable[voice->osc.tableOffset]
 	                               : sawTable[voice->osc.tableOffset],
@@ -278,8 +483,78 @@ void Alkaline_calcVoiceSyncBlock(AlkalineVoice *voice, int16_t *buf, const uint8
 #endif
 }
 
+/*
+ * One block of typ wtb: a wavetable frame through the fused table loop
+ * (S093 P8).
+ *
+ * What:       DiodeLadder_renderB2Osc() on the frame's 1,024-point row
+ *             (osc.sampleCacheData, kept on the frame being played by
+ *             alk_wtbBind(), alk_wtbTrigger() and alk_wtbControl()) at
+ *             ALK_WTB_SCALE_V (the Saw's), times the drive. With no table
+ *             installed the row is alk_zeroRow: silence.
+ * Why:        P8 §4: a frame's row has a sawTable row's layout, so the same
+ *             loop plays it with no new read code; the same function, too
+ *             (DiodeLadder_renderB2Osc(), out of line with two callers).
+ * Inputs:     voice (bound by the async); buf (output).
+ * Outputs:    buf; osc.phase; the ladder state.
+ * Accessors:  Alkaline_calcVoiceSyncBlock().
+ * Affiliates: bench law AL-W.
+ */
+static __attribute__((noinline)) void alk_renderWtb(AlkalineVoice *voice, int16_t *buf)
+{
+	DiodeLadder_renderB2Osc(&voice->ladder, buf, voice->osc.sampleCacheData,
+	                        &voice->osc.phase, voice->osc.phaseInc,
+	                        ALK_WTB_SCALE_V * voice->driveGain,
+	                        voice->iLadEnd, voice->iAbcEnd * voice->makeup);
+}
+
+void Alkaline_calcVoiceSyncBlock(AlkalineVoice *voice, int16_t *buf, const uint8_t size)
+{
+	(void)size;   /* the ladder always renders OUTPUT_DMA_SIZE */
+	/*
+	 * S093 P8: the per-block type dispatch.
+	 *
+	 * What:       wtb -> alk_renderWtb() (the frame's row), anything else
+	 *             -> alk_renderWav() (Saw/Sqr).
+	 * Why:        one branch per block, outside every loop; both feed the
+	 *             one out-of-line table loop (S093 P8 spike: 214, mixer 0
+	 *             grew; with the type code inlined beside it, 216).
+	 */
+	if (voice->osc.oscType == OSC_TYPE_WTB)
+		alk_renderWtb(voice, buf);
+	else
+		alk_renderWav(voice, buf);
+}
+
 uint8_t Alkaline_isQuiet(const AlkalineVoice *voice)
 {
 	return (uint8_t)(voice->gateLeft == 0 && !voice->accentOn &&
 	                 voice->iAbcEnd < 1e-7f);
+}
+
+/*
+ * Set the oscillator type from the typ byte (S093 P8; see the header).
+ */
+void Alkaline_setOscType(AlkalineVoice *voice, const uint8_t typ)
+{
+	OscInfo *const osc = &voice->osc;
+	/* the byte -> the platform type: 0 wav, 1 and above wtb */
+	const uint8_t type = (typ == ALK_TYP_WAV) ? OSC_TYPE_WAV : OSC_TYPE_WTB;
+	/* the number of entries of the new type's wav list */
+	const uint8_t count = (type == OSC_TYPE_WAV) ? (uint8_t)(ALK_WAVE_SQUARE + 1u)
+	                    : sampleMemory_getNumWavetables();
+	const uint8_t last = count ? (uint8_t)(count - 1u) : 0u;
+
+	if (type == osc->oscType)
+		return;
+	/* the phase runs on: wav and wtb are both 2^32 per cycle */
+	osc->oscType = type;
+	/* the stored byte is used as it is, clamped to an entry that exists
+	 * (the platform's typ rule, S087 P0 r8) */
+	if (osc->waveform > last)
+		osc->waveform = last;
+	/* bind on the next block or trigger; under wav, pos re-anchors so no
+	 * bend follows the switch (under wtb the bind sets the frame) */
+	osc->sampleCacheLooped = ALK_BIND_NONE;
+	osc->positionApplied = (uint8_t)(osc->position & 127u);
 }

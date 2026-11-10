@@ -4,6 +4,18 @@ This file is the working memory for Codex/Claude Code/LLM Agent sessions on this
 Read it fully at the start of every session before touching any code.
 Do not append session history or resolved-issue narrative to this file; those belong in `knowledge_files/log_archive/`.
 
+## Document edits (user, S093, binding)
+
+- **`MEMORY.md` and everything under `knowledge_files/` are never edited in
+  the same turn as any other file.** A turn that creates, edits, moves or
+  deletes any file outside those two (code, tools, tests, data, generated
+  outputs, root plans and schedules) must not touch `MEMORY.md` or
+  `knowledge_files/`. A turn that touches either of them must touch nothing
+  else.
+- Plans and schedules must not contain a step that edits `MEMORY.md` or
+  `knowledge_files/`. They may list the statements a change makes out of date,
+  for the user to act on.
+
 ---
 
 ## Quick Start

@@ -27,7 +27,8 @@
  *                      wraps forward; L6 slp FM reads the loop and lead-in;
  *                      L8/L9/L10/L11 typed pos; L12 the modulator list; L13
  *                      a typ switch clamps wav and re-anchors;
- *               wtb    W1 the UMULL index; W2 the wrap; W3 8-bit frames;
+ *               wtb    W1 the 1,024-point read equals the any-length read
+ *                      (S093 P8); W2 the wrap; W3 8-bit tables are refused;
  *                      W4 the blend ends; W5 the ramp cap; W6 no slot is the
  *                      nearest frame; W7 a held pos between frames blends;
  *                      W8 a modulator w entry plays frame 0.
@@ -892,17 +893,19 @@ static void run_sample(void)
 }
 
 /* =============================================================== wtb -- */
-static void install_table(uint16_t len, uint8_t bits, const int16_t *f0,
-                          const int16_t *f1)
+/* S093 P8: the install's frame buffer (the firmware borrows the name cache) */
+static int16_t g_frameBuf[WAVETABLE_FRAME_MAX];
+
+static void install_table(uint16_t len, const int16_t *f0, const int16_t *f1)
 {
-    const sample_install_fmt_t fmt = { 1u, 1u, 44100u,
-                                        (uint16_t)(bits / 8u), bits, bits };
+    /* S093 P8: 16-bit sources; the table is stored as 1,024-point rows */
+    const sample_install_fmt_t fmt = { 1u, 1u, 44100u, 2u, 16u, 16u };
 
     catalogue_host_reset();
     sampleInstall_begin();
-    (void)sampleInstall_beginWavetable("wt      ", len, 2u, bits, &fmt);
-    (void)sampleInstall_writeFrame((const uint8_t *)f0, len);
-    (void)sampleInstall_writeFrame((const uint8_t *)f1, len);
+    (void)sampleInstall_beginWavetable("wt      ", len, 2u, &fmt);
+    (void)sampleInstall_writeFrame((const uint8_t *)f0, len, g_frameBuf);
+    (void)sampleInstall_writeFrame((const uint8_t *)f1, len, g_frameBuf);
     (void)sampleInstall_finishWavetable();
     (void)sampleInstall_commit();
     sampleMemory_refresh();
@@ -923,41 +926,59 @@ static void run_wtb(void)
 {
     static int16_t f0[16];
     static int16_t f1[16];
-    static int8_t f0b[16];
+    static int16_t row[1024];
     int16_t buf[2];
     OscInfo o;
+    uint32_t s = 0x5093u;
 
     for (uint8_t i = 0u; i < 16u; i++) {
         f0[i] = (int16_t)(i * 1000);
         f1[i] = (int16_t)(30000 - i * 1000);
-        f0b[i] = (int8_t)i;
     }
-    install_table(16u, 16u, f0, f1);
+    for (uint32_t i = 0u; i < 1024u; i++)
+        row[i] = (int16_t)(golden_rand(&s) >> 16);
+    install_table(16u, f0, f1);
 
-    /* W1/W2: the index is exact and wraps at len. */
-    for (uint32_t k = 0u; k < 4u; k++) {
-        static const uint32_t lens[4] = { 16u, 600u, 1000u, 2048u };
-        const uint32_t len = lens[k];
-        const uint32_t ph = (uint32_t)((((uint64_t)len / 2u) << 32) / len);
-        const uint32_t want = (uint32_t)(((uint64_t)ph * len) >> 32);
+    /* W1 (S093 P8): the fixed 1,024-point read equals the any-length
+     * read at len 1,024 bit for bit (index (ph x 1,024) >> 32, fraction its
+     * low word / 2^32), at 100,000 phases */
+    for (uint32_t k = 0u; k < 100000u; k++) {
+        const uint32_t ph = golden_rand(&s);
+        const uint64_t m = (uint64_t)ph * 1024u;
+        const uint32_t idx = (uint32_t)(m >> 32);
+        const uint32_t n = (idx + 1u == 1024u) ? 0u : idx + 1u;
+        const float fr = (float)(uint32_t)m * (1.0f / 4294967296.0f);
+        const float want = (float)row[idx] + fr * (float)(row[n] - row[idx]);
 
-        expect(want == len / 2u, "W1 the exact index formula");
+        if (osc_wtbRead((const uint8_t *)row, ph) != want) {
+            expect(0, "W1 the 1,024-point read is the any-length read");
+            break;
+        }
     }
-    expect(osc_wtbRead((const uint8_t *)f0, 16u, 16u,
-                       (uint32_t)(15u * 4294967296ull / 16u)) == f0[15],
+    /* W2: the last point, and the wrap to point 0 */
+    expect(osc_wtbRead((const uint8_t *)row, 1023u << 22) == (float)row[1023],
            "W2 the last point");
-    expect(osc_wtbRead((const uint8_t *)f0, 16u, 16u,
-                       (uint32_t)(15.5 * 4294967296.0 / 16.0)) ==
-           (f0[15] + f0[0]) / 2, "W2 the wrap interpolates to point 0");
+    expect(osc_wtbRead((const uint8_t *)row, (1023u << 22) + (1u << 21)) ==
+           (float)row[1023] + 0.5f * (float)(row[0] - row[1023]),
+           "W2 the wrap interpolates to point 0");
 
-    /* W3: 8- and 16-bit depths agree (x256). */
-    install_table(16u, 8u, (const int16_t *)f0b, (const int16_t *)f0b);
-    bind_wtb(&o, 0u);
-    expect(o.sampleCacheLooped == OSC_BIND_WTB8, "W3 the 8-bit kind");
-    expect(osc_wtbRead((const uint8_t *)f0b, 8u, 16u, 0u) == 0.0f, "W3 8-bit zero");
+    /* W3 (S093 P8, D10): an 8-bit table is refused, before and at begin */
+    {
+        uint8_t fmt8[16] = { 1u, 0u, 1u, 0u, 0x44u, 0xACu, 0u, 0u,
+                             0x44u, 0xACu, 0u, 0u, 1u, 0u, 8u, 0u };
+        const sample_install_fmt_t f8 = { 1u, 1u, 44100u, 1u, 8u, 16u };
+        sample_install_fmt_t out;
+
+        expect(!sampleInstall_acceptFormat(fmt8, 16u, SAMPLE_INSTALL_KIND_WAVETABLE, &out),
+               "W3 an 8-bit wavetable format is refused");
+        catalogue_host_reset();
+        sampleInstall_begin();
+        expect(!sampleInstall_beginWavetable("w8      ", 16u, 1u, &f8),
+               "W3 an 8-bit table does not open");
+    }
 
     /* W6: no slot -> nearest frame (pos 127 picks frame 1). */
-    install_table(16u, 16u, f0, f1);
+    install_table(16u, f0, f1);
     bind_wtb(&o, 0u);
     g_claim = 0u;
     o.position = 127u;
@@ -1112,7 +1133,7 @@ static void run_itp(void)
         f0[i] = (int16_t)(i * 1000);
         f1[i] = (int16_t)(30000 - i * 1000);
     }
-    install_table(16u, 16u, f0, f1);
+    install_table(16u, f0, f1);
     bind_wtb(&w, 0u);
     w.positionApplied = 127u;   /* frozen on frame 1 */
     w.positionBendStep = 0;
@@ -1157,8 +1178,8 @@ static void run_itp(void)
  *               FR1 S0: with d0 = fmMod and dStep = 0 the ramped render is
  *                   bit-identical to osc_renderTypedFm() - same samples, same
  *                   end phase - for every carrier case (smp; slp in the loop
- *                   and in the lead-in; wtb 16-bit blend with a slot, wtb
- *                   8-bit blend, wtb without a slot (the one-frame fallback);
+ *                   and in the lead-in; wtb blend with a slot, wtb without
+ *                   a slot (the one-frame fallback);
  *                   no item), several depths (0 .. 3.9), two gains and
  *                   full-scale random modulators;
  *               FR2 the ramp schedule: with d0 != d1, sample i of one ramped
@@ -1183,7 +1204,7 @@ static void run_itp(void)
 /* One FR case: how to bind and where the block starts. */
 typedef struct {
     const char *name;
-    uint8_t     kind;      /* 0 smp, 1 slp, 2 wtb16, 3 wtb8, 4 none */
+    uint8_t     kind;      /* 0 smp, 1 slp, 2 wtb16, 4 none */
     uint8_t     claim;     /* g_claim for the block (wtb) */
     uint32_t    phase;     /* start phase */
     uint32_t    inc;       /* phaseInc */
@@ -1192,7 +1213,7 @@ typedef struct {
 /* Bind o for case c on the item installed by fmr_install(c->kind). */
 static void fmr_bind(OscInfo *o, const FmrCase *c)
 {
-    if (c->kind == 2u || c->kind == 3u) {
+    if (c->kind == 2u) {
         bind_wtb(o, 0u);
         o->position = 64u;          /* between the two frames: a real blend */
         o->positionApplied = 64u;
@@ -1215,8 +1236,6 @@ static void fmr_install(uint8_t kind)
     static int16_t smp[100];
     static int16_t f0[64];
     static int16_t f1[64];
-    static int8_t  f0b[64];
-    static int8_t  f1b[64];
     uint32_t s = 0x08903u;
 
     if (kind <= 1u || kind == 4u) {
@@ -1229,13 +1248,7 @@ static void fmr_install(uint8_t kind)
             f0[i] = (int16_t)(golden_rand(&s) >> 16);
             f1[i] = (int16_t)(golden_rand(&s) >> 16);
         }
-        install_table(64u, 16u, f0, f1);
-    } else {
-        for (unsigned i = 0u; i < 64u; i++) {
-            f0b[i] = (int8_t)(golden_rand(&s) >> 24);
-            f1b[i] = (int8_t)(golden_rand(&s) >> 24);
-        }
-        install_table(64u, 8u, (const int16_t *)f0b, (const int16_t *)f1b);
+        install_table(64u, f0, f1);
     }
 }
 
@@ -1249,7 +1262,6 @@ static void run_fmramp(void)
         { "slp lead", 1u, 0u, 10u << OSC_SAMPLE_PHASE_SHIFT,  512u },
         { "wtb16",    2u, 1u, 0x12345678u, 0x01234567u },
         { "wtb16 ns", 2u, 0u, 0x12345678u, 0x01234567u },
-        { "wtb8",     3u, 1u, 0x87654321u, 0x00F00000u },
         { "none",     4u, 0u, 0u, 0u },
     };
     static const float depths[] = { 0.0f, 0.37f, 1.0f, 3.9f };

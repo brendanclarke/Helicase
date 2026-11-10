@@ -86,7 +86,8 @@
 #define SAMPLE_DISPLAY_NAME_LEN     8u
 
 /*
- * Sample flash catalogue v2 (S087 stage C).
+ * Sample flash catalogue v3 (S087 stage C; S093 P8: wavetables stored as
+ * 1,024-point 16-bit rows).
  *
  * What:       the item region from SAMPLE_ROM_START_ADDRESS to
  *             SAMPLE_CATALOGUE_START_ADDRESS, and an 8 KB catalogue (32 B
@@ -106,8 +107,8 @@
 #define SAMPLE_CATALOGUE_END_ADDRESS   ((uint32_t)0x08200000)
 #define SAMPLE_CATALOGUE_SIZE          ((uint32_t)(SAMPLE_CATALOGUE_END_ADDRESS - \
                                                   SAMPLE_CATALOGUE_START_ADDRESS))
-#define SAMPLE_CATALOGUE_MAGIC         ((uint32_t)0x3243584C) /* "LXC2" */
-#define SAMPLE_CATALOGUE_VERSION       2u
+#define SAMPLE_CATALOGUE_MAGIC         ((uint32_t)0x3343584C) /* "LXC3" */
+#define SAMPLE_CATALOGUE_VERSION       3u
 #define SAMPLE_ENTRY_BYTES             28u
 #define WAVETABLE_ENTRY_BYTES          20u
 #define SAMPLE_MAX_COUNT               128u
@@ -115,6 +116,26 @@
 #define WAVETABLE_MAX_FRAMES           128u
 #define WAVETABLE_FRAME_MIN            16u
 #define WAVETABLE_FRAME_MAX            2048u
+/*
+ * The stored wavetable frame (S093 P8).
+ *
+ * What:       every installed wavetable frame is one int16 row of
+ *             WAVETABLE_ROW_POINTS points: the source frame (16..2,048 points,
+ *             16- or 24-bit, mono or stereo) converted to 16-bit mono and
+ *             resampled to 1,024 points (band-limited, periodic) at install
+ *             time. WAVETABLE_ROW_BYTES = 2,048 B per frame; an entry's
+ *             frame_len is WAVETABLE_ROW_POINTS and its bits 16.
+ * Why:        S093 P8 (user, D1'/D9): one format for every instrument. A row
+ *             has exactly the layout of a stock sawTable row, so the Alkaline
+ *             plays a frame through its existing fused table loop
+ *             (DiodeLadder_renderB2Osc()); Drum, Snare, Cymbal and HiHat read
+ *             it through their wavetable readers, which take any frame length
+ *             and now read 16-bit data only.
+ * Accessors:  SampleInstall.c (writes), sampleMemory_wavetableRows(),
+ *             sampleMemory_wavetableRangeValid(), the Oscillator readers.
+ */
+#define WAVETABLE_ROW_POINTS           1024u
+#define WAVETABLE_ROW_BYTES            (WAVETABLE_ROW_POINTS * 2u)
 #define SAMPLE_GAIN_STEPS_PER_OCTAVE   24u
 /* 2^19 - 2 points keeps every Q19.12 sample phase below 2^31. */
 #define SAMPLE_MAX_FRAMES              524286u
@@ -159,7 +180,7 @@ typedef struct {
     uint32_t offset;
     uint16_t frame_len;
     uint8_t  frame_count;
-    uint8_t  bits;          /* 8 or 16 */
+    uint8_t  bits;          /* S093 P8: 16 (checked format mark) */
     char     name[SAMPLE_DISPLAY_NAME_LEN];
     uint8_t  flags;         /* bit 1: bitmap; bits 4-7: mip levels */
     uint8_t  reserved[3];
@@ -176,7 +197,7 @@ _Static_assert(SAMPLE_CATALOGUE_START_ADDRESS +
                SAMPLE_MAX_COUNT * SAMPLE_ENTRY_BYTES +
                WAVETABLE_MAX_COUNT * WAVETABLE_ENTRY_BYTES <=
                SAMPLE_CATALOGUE_END_ADDRESS,
-               "catalogue v2 does not fit its 8 KB region");
+               "catalogue v3 does not fit its 8 KB region");
 /* The last playable point's phase stays below 2^31; the two pad frames are
  * read after the end, never phased. */
 _Static_assert((SAMPLE_MAX_FRAMES << 12u) < 0x7FFFFFFFu,
@@ -233,6 +254,21 @@ uint32_t   sampleMemory_getGeneration(void);
 sample_catalogue_state_t sampleMemory_catalogueState(void);
 const sample_catalogue_entry_t *sampleMemory_sampleEntry(uint8_t index);
 const wavetable_catalogue_entry_t *sampleMemory_wavetableEntry(uint8_t index);
+/*
+ * Get the first stored row of a wavetable (S093 P8).
+ *
+ * What:       returns a pointer to entry->offset, the first row of the table;
+ *             frame f begins at WAVETABLE_ROW_POINTS int16 points after it.
+ * Why:        centralises the v3 catalogue's fixed 1,024-point, 16-bit row
+ *             layout for clients that select a frame directly. The entry must
+ *             come from sampleMemory_wavetableEntry(), which validates it.
+ * Inputs:     entry (validated catalogue entry), or NULL.
+ * Outputs:    first-row pointer in sample flash, or NULL for a NULL entry.
+ * Accessors:  AlkalineVoice.c alk_wtbBind(). Drum's generic bind uses the same
+ *             entry offset through Oscillator.c.
+ * Affiliates: WAVETABLE_ROW_POINTS, wavetable_catalogue_entry_t.
+ */
+const int16_t *sampleMemory_wavetableRows(const wavetable_catalogue_entry_t *entry);
 void       sampleMemory_getDisplayName(uint8_t index,
                                        char name[SAMPLE_DISPLAY_NAME_LEN + 1u]);
 void       sampleMemory_getWavetableName(uint8_t index,

@@ -106,21 +106,39 @@ static uint8_t sampleMemory_wavetableRangeValid(
 {
     uint64_t bytes;
 
-    if (entry->frame_len < WAVETABLE_FRAME_MIN ||
-        entry->frame_len > WAVETABLE_FRAME_MAX)
+    /* S093 P8: a stored frame is always one 1,024-point 16-bit row (O3:
+     * the two fields stay as checked format marks) */
+    if (entry->frame_len != WAVETABLE_ROW_POINTS)
         return 0u;
     if (entry->frame_count == 0u || entry->frame_count > WAVETABLE_MAX_FRAMES)
         return 0u;
-    if (entry->bits != 8u && entry->bits != 16u)
+    if (entry->bits != 16u)
         return 0u;
     if ((entry->offset & 3u) != 0u)
         return 0u;
     if (entry->offset < SAMPLE_ROM_START_ADDRESS + 4u)
         return 0u;
-    bytes = (uint64_t)entry->frame_len * entry->frame_count *
-            (entry->bits / 8u);
-    bytes = (bytes + 3u) & ~(uint64_t)3u;
+    /* S093 P8: frame_count rows of 2,048 B (a whole number of words) */
+    bytes = (uint64_t)entry->frame_count * WAVETABLE_ROW_BYTES;
     return (uint8_t)(entry->offset + bytes <= SAMPLE_CATALOGUE_START_ADDRESS);
+}
+
+/*
+ * The first row of a wavetable (S093 P8; see the header).
+ *
+ * What:       the entry's offset as a pointer to its first 1,024-point row.
+ * Why:        one place states where a table's rows are, for the Alkaline
+ *             bind; Drum's bind reads the same address from the entry.
+ * Inputs:     entry (from sampleMemory_wavetableEntry(), so validated).
+ * Outputs:    the row pointer, or NULL.
+ * Accessors:  AlkalineVoice.c alk_wtbBind().
+ * Affiliates: WAVETABLE_ROW_POINTS; osc_userBind() (Oscillator.c).
+ */
+const int16_t *sampleMemory_wavetableRows(const wavetable_catalogue_entry_t *entry)
+{
+    if (!entry)
+        return (const int16_t *)0;
+    return (const int16_t *)SAMPLE_FLASH_PTR(entry->offset);
 }
 
 void sampleMemory_refresh(void)

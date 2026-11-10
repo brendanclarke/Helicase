@@ -824,7 +824,8 @@ static uint8_t instrumentManager_descriptorSupportsModulationRange(
  * Highest legal value of an oscillator wave row (S087 stage D; S087 P1).
  *
  * What:       osc1_wave: the last entry of osc1's current type (wav:
- *             OSC_STOCK_LAST; smp/slp: samples - 1; wtb: tables - 1; 0 when
+ *             OSC_STOCK_LAST; an Alkaline under wav: ALK_WAVE_SQUARE (Saw,
+ *             Sqr); smp/slp: samples - 1; wtb: tables - 1; 0 when
  *             none); a modulator wave row: the last entry of the flat list
  *             (osc_userListCount() - 1). Any other row: OSC_STOCK_LAST.
  * Why:        LFO and velocity ranges, the menu clamp and the automation
@@ -843,6 +844,14 @@ static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
         if (strcmp(descriptor->file_key, "osc1_wave") == 0 &&
             slot < INSTRUMENT_SLOT_COUNT) {
             const OscInfo *osc = instrumentManager_osc(slot, "osc1_wave");
+
+            /* S093 P8: an Alkaline slot under wav has two entries (Saw,
+             * Sqr): the LFO/velocity range, menu clamp, edit count and typ
+             * switch clamp all take it from here. */
+            if (osc && osc->oscType == OSC_TYPE_WAV &&
+                instrumentManager_slotType(slot) == INSTRUMENT_TYPE_ALK)
+                return (uint8_t)ALK_WAVE_SQUARE;
+
             const uint8_t count = osc ? osc_userCount(osc->oscType)
                                       : (uint8_t)OSC_SAMPLE_START;
 
@@ -3880,9 +3889,10 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         return 1u; }
     case IM_SPECIAL_OSC_TYPE: {
         /*
-         * osc1_type writer (S087 stage B).
+         * osc1_type writer (S087 stage B; S093 P8 Alkaline dispatch).
          *
-         * What:       osc_setType() on the tagged oscillator, then
+         * What:       osc_setType() on the tagged oscillator, or for an
+         *             Alkaline slot Alkaline_setOscType(), then
          *             instrumentManager_waveDomainChanged(slot) so LFO adapters
          *             and direct targets on the slot's wave rows pick up the
          *             new type's range.
@@ -3891,12 +3901,20 @@ static uint8_t instrumentManager_writeSpecialRuntime(
          * Inputs:     slot, descriptor tag (IM_SPECIAL_OSC1), byte value.
          * Outputs:    the oscillator's type state; refreshed wave domains.
          * Callers:    instrumentManager_writeRuntimeInternal() via the tag.
-         * Affiliates: osc_setType(); the osc1_type rows; S087 P0 §12.5.
+         * Affiliates: osc_setType(), Alkaline_setOscType(); the osc1_type
+         *             rows; S087 P0 §12.5, S093 P8.
          */
         OscInfo *osc = instrumentManager_oscBySelector(
             slot, (uint8_t)(special & IM_SPECIAL_OSC_MASK));
         if (!osc) return 0u;
-        osc_setType(osc, byteValue);
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_ALK) {
+            AlkalineVoice *alk = instrumentManager_alkalineRuntime(slot);
+
+            if (!alk) return 0u;
+            Alkaline_setOscType(alk, byteValue);
+        } else {
+            osc_setType(osc, byteValue);
+        }
         instrumentManager_waveDomainChanged(slot);
         return 1u; }
     case IM_SPECIAL_OSC_RUN: {

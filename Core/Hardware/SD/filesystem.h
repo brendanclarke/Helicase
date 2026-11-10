@@ -1293,7 +1293,8 @@ void filesystem_clearNameCache(void);
  * is already lent. Return clears the bytes and the domain. While lent, name
  * cache disposal requests are ignored and every filesystem operation except
  * the copy/clear name write is refused like a busy facade. Clients:
- * copyClearService.c only. Affiliates: filesystem_requestCopyResidentNames()
+ * copyClearService.c and the modal sample installer (S093 P8). Affiliates:
+ * filesystem_requestCopyResidentNames()
  * reads the remap at offset 0 and uses offsets 256.. during its own request.
  */
 #define FS_NAME_SCRATCH_BYTES 9000u
@@ -1393,7 +1394,7 @@ const kit_t *filesystem_loadedKit(void);
  */
 const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void);
 /*
- * Install samples/ and wavetables/ into catalogue v2 (S087 stage C).
+ * Install samples/ and wavetables/ into catalogue v3 (S087 stage C; S093 P8).
  *
  * What:       one blocking pass, audio suspended by the caller: erase the
  *             sample sectors, walk samples/ (depth <= 3: files in natural
@@ -1402,12 +1403,16 @@ const struct kit_instrument_slot *filesystem_loadedInstrumentSlot(void);
  *             (frames in natural order), and commit the header last.
  * Why:        S087 P0 §5.2: natural order, folders, wavetables as folders; one
  *             unreadable file skips its item only; /loops is retired (every
- *             sample can loop, A6).
- * Inputs:     the card.  Outputs: catalogue v2; 1 on success.
+ *             sample can loop, A6); wavetable frames are stored as 1,024-point
+ *             16-bit rows and 8-bit sources are refused (S093 P8).
+ * Inputs:     the card.  Outputs: catalogue v3; 1 on success.
  * Accessors:  menu_loadSamplesModal().
  * Affiliates: SampleInstall.h, storage_naturalCompare(),
  *             filesystem_parseWav(), filesystem_blockOpenDirLfn().
- * RAM:        per-depth last/best names and counters (R-C3).
+ * RAM:        per-depth last/best names and counters (R-C3); the existing
+ *             9,000 B fs_list_cache_name is temporarily borrowed for one
+ *             wavetable source frame (up to 4,096 B), then cleared and returned
+ *             for Load/Save to reload (S093 P8, user-approved D8).
  */
 uint8_t filesystem_installUserContentBlocking(void);
 

@@ -1050,7 +1050,7 @@ static void menu_setStorageMessage(const char *message, const char *detail)
 
 static void menu_loadSamplesModal(void)
 {
-    /* S087 C: one install for samples/ and wavetables/ (catalogue v2);
+    /* S087 C / S093 P8: one install for samples/ and wavetables/ (catalogue v3);
     ** /loops is retired and audio is reinitialized once after the flash work. */
     uint16_t t0;
     uint8_t ok;
@@ -6562,7 +6562,8 @@ static void menu_formatCellValue3(const menu_cell_t *cell, char *valueAsText)
         /*
          * S088 P0 §2.1 D12: tagged on/off sub-type display.
          * What: high nibble != 0 shows the tag table's name
-         *       (menu_onoffTagNames(): run modes or voice chains), otherwise
+         *       (menu_onoffTagNames(): run modes, voice chains or the
+         *       Alkaline type), otherwise
          *       on/off as before. Same rule as va_formatValue3().
          */
         if ((uint8_t)(menu_cellDtype(cell) >> 4) != 0u) {
@@ -12163,6 +12164,27 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
 
     memset(nameDst, ' ', SAMPLE_DISPLAY_NAME_LEN);
     memset(codeDst, ' ', 3u);
+    /*
+     * S093 P8: an Alkaline slot's osc1 under wav lists Saw, Sqr.
+     *
+     * What:       value 0 -> "Saw", 1 -> "Sqr" (alkWaveNames), copied to the
+     *             name and compact-code fields; any other value names nothing
+     *             (blank), as a Drum value past its list.
+     * Why:        the stock list (waveformNames: Sin, Tri, ...) is not the
+     *             Alkaline's; the voice plays Saw for 0 and Sqr for 1
+     *             (alk_renderWav()). Under wtb the Alkaline cell takes the
+     *             shared branch below (wNN, the table name).
+     * Accessors:  menu_formatWaveValue3() (compact cells, overlays, the voice
+     *             automation display), the single-parameter painter.
+     */
+    if (isOsc1 && type == OSC_TYPE_WAV &&
+        instrumentManager_runtimeType(cell->slot) == INSTRUMENT_TYPE_ALK) {
+        if (value < (uint8_t)alkWaveNames[0][0]) {
+            memcpy(nameDst, alkWaveNames[value + 1u], 3u);
+            memcpy(codeDst, alkWaveNames[value + 1u], 3u);
+        }
+        return;
+    }
     if (isOsc1 && type != OSC_TYPE_WAV) {
         /* osc1 under smp/slp/wtb: the value is the item index. */
         if (type == OSC_TYPE_WTB) {
@@ -12338,8 +12360,9 @@ static void menu_formatTransientName(uint8_t value, char *nameDst)
  *
  * What:       returns the 3-character name table for a dtype high-nibble tag:
  *             ONOFF_TAG_VOICE_CHAIN -> voiceChainNames (T+D, WFd);
- *             ONOFF_TAG_ALK_WAVE -> alkWaveNames (Saw, Sqr); every other
- *             non-zero tag -> oscRunNames (rst, fre, itp), exactly as before.
+ *             ONOFF_TAG_ALK_TYPE -> alkTypeNames (wav, wtb; S093 P8); every
+ *             other non-zero tag -> oscRunNames (rst, fre, itp), exactly as
+ *             before.
  *             Entry [0][0] is the count; names start at [1].
  * Why:        one helper keeps display, clamp, automation max and the
  *             step-edit line in agreement for every tag. Its six callers in
@@ -12348,14 +12371,14 @@ static void menu_formatTransientName(uint8_t value, char *nameDst)
  * Accessors:  menu_formatCellValue3(), va_formatValue3(), menu_clampCellValue(),
  *             menu_automationValueMax(), menu_formatAutomationValue3(), the
  *             single-parameter step-edit display.
- * Affiliates: ONOFF_TAG_* / oscRunNames / voiceChainNames / alkWaveNames
+ * Affiliates: ONOFF_TAG_* / oscRunNames / voiceChainNames / alkTypeNames
  *             (MenuText.h).
  */
 static const char (*menu_onoffTagNames(uint8_t tag))[4]
 {
     switch (tag) {
     case ONOFF_TAG_VOICE_CHAIN: return voiceChainNames;
-    case ONOFF_TAG_ALK_WAVE:    return alkWaveNames;
+    case ONOFF_TAG_ALK_TYPE:    return alkTypeNames;
     default:                    return oscRunNames;
     }
 }
@@ -12506,6 +12529,9 @@ _Static_assert((sizeof(voiceChainNames) / sizeof(voiceChainNames[0])) - 1u ==
  * (ALK_WAVE_SAW 0, ALK_WAVE_SQUARE 1, AlkalineVoice.h). */
 _Static_assert((sizeof(alkWaveNames) / sizeof(alkWaveNames[0])) - 1u == 2u,
                "alkWaveNames must list Saw and Sqr");
+/* S093 P8: the Alkaline typ list is wav, wtb (ALK_TYP_COUNT, AlkalineVoice.h) */
+_Static_assert((sizeof(alkTypeNames) / sizeof(alkTypeNames[0])) - 1u == 2u,
+               "alkTypeNames must list wav and wtb");
 _Static_assert((sizeof(foldTypeNames) / sizeof(foldTypeNames[0])) - 1u ==
                    VOICE_FOLD_COUNT &&
                (sizeof(foldTypeLongNames) / sizeof(foldTypeLongNames[0])) - 1u ==
@@ -13881,7 +13907,8 @@ static uint8_t menu_automationValueMax(const ParamDescriptor *descriptor)
          *
          * What:       with a non-zero dtype high nibble the automation max is
          *             count-1 from the tag's name table
-         *             (menu_onoffTagNames(): run modes or voice chains); a
+         *             (menu_onoffTagNames(): run modes, voice chains or the
+         *             Alkaline type); a
          *             plain on/off stays 1.
          * Why:        step automation needs the max for its bar and for the
          *             encoder increment clamp (rst/fre/itp are three values).

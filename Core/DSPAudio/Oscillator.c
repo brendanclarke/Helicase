@@ -1529,8 +1529,9 @@ uint8_t osc_userListCount(void)
  *
  * What:       resolves (kind, index) from oscType (osc1: smp/slp/wtb, the index
  *             clamped to the last item) or from the modulator's flat list
- *             (stock, s, l, w). A wavetable's kind is resolved to WTB8 or WTB16
- *             from its entry BEFORE the comparison with the stored bind. When
+ *             (stock, s, l, w). A wavetable binds as WTB16 only when its entry
+ *             exists (S093 P8: every table is 16-bit), checked BEFORE the
+ *             comparison with the stored bind. When
  *             kind, index or the catalogue generation differ, re-reads the item
  *             (base address, frames or frame length) and re-anchors (D7):
  *             positionApplied = position; a smp phase past the new end is
@@ -1539,8 +1540,9 @@ uint8_t osc_userListCount(void)
  *             cycle, freq2PhaseIncr()) for a wavetable bind or a wtb osc1, else
  *             the sample law f x 2^22 / REAL_FS (Q19.12).
  * Why:        one bind for osc1 and the modulators (S087 P0 §6.3, D7, A23, A24).
- *             impl. §11 F9: an 8-bit table compared its stored WTB8 with a
- *             provisional WTB16 and rebound every block (no frame glide).
+ *             impl. §11 F9: before S093 P8, an 8-bit table's stored WTB8
+ *             differed from the provisional WTB16, so it rebound every block
+ *             (no frame glide); P8 removes the depth choice with 8-bit tables.
  *             impl. §11 F7: a modulator w entry (oscType MODLIST) got the
  *             sample law, 1,024 x too slow; its sync clock was wrong likewise.
  * Inputs:     osc, the catalogue.  Outputs: bind fields, phaseInc,
@@ -1593,7 +1595,8 @@ void osc_userBind(OscInfo* osc)
 		}
 	}
 
-	/* F9: the stored kind of a wavetable is its entry's depth. */
+	/* F9: a wavetable binds only with an entry (S093 P8: 16-bit only, so
+	 * the entry no longer chooses a depth). */
 	if (kind == OSC_BIND_WTB16) {
 		const wavetable_catalogue_entry_t *w =
 			sampleMemory_wavetableEntry(index);
@@ -1601,8 +1604,6 @@ void osc_userBind(OscInfo* osc)
 		if (!w) {
 			kind = OSC_BIND_NONE;
 			index = 0u;
-		} else if (w->bits == 8u) {
-			kind = OSC_BIND_WTB8;
 		}
 	}
 
@@ -1613,8 +1614,7 @@ void osc_userBind(OscInfo* osc)
 		                                        kind == OSC_BIND_SLP)
 			? sampleMemory_sampleEntry(index)
 			: (const sample_catalogue_entry_t *)0;
-		const wavetable_catalogue_entry_t *wentry = (kind == OSC_BIND_WTB8 ||
-		                                             kind == OSC_BIND_WTB16)
+		const wavetable_catalogue_entry_t *wentry = (kind == OSC_BIND_WTB16)
 			? sampleMemory_wavetableEntry(index)
 			: (const wavetable_catalogue_entry_t *)0;
 
@@ -1644,7 +1644,7 @@ void osc_userBind(OscInfo* osc)
 		}
 	}
 	/* F7: the increment law follows what is bound, not the oscillator role. */
-	osc->phaseInc = (kind == OSC_BIND_WTB8 || kind == OSC_BIND_WTB16 ||
+	osc->phaseInc = (kind == OSC_BIND_WTB16 ||
 	                 osc->oscType == OSC_TYPE_WTB)
 		? freq2PhaseIncr(currentFreq)
 		: (uint32_t)((currentFreq * 4194304.0f) / REAL_FS);
@@ -2396,7 +2396,6 @@ void OSC_S087_SECTION osc_renderTyped(OscInfo* osc, int16_t* buf, uint8_t size,
 	case OSC_BIND_SLP:
 		osc_slpPlainBlock(osc, buf, size, gain);
 		break;
-	case OSC_BIND_WTB8:
 	case OSC_BIND_WTB16:
 		osc_wtbBlendBlock(osc, buf, size, gain);
 		break;
@@ -2419,7 +2418,6 @@ void OSC_S087_SECTION osc_renderTypedFm(OscInfo* osc, const int16_t* mod,
 	case OSC_BIND_SLP:
 		osc_slpFmBlock(osc, mod, buf, size, gain);
 		break;
-	case OSC_BIND_WTB8:
 	case OSC_BIND_WTB16:
 		osc_wtbFmBlendBlock(osc, mod, buf, size, gain);
 		break;
@@ -2442,7 +2440,6 @@ void OSC_S087_SECTION osc_renderTypedSync(OscInfo* osc, const uint32_t* over,
 	case OSC_BIND_SLP:
 		osc_slpSyncBlock(osc, over, ratioQ16, depthQ30, buf, size);
 		break;
-	case OSC_BIND_WTB8:
 	case OSC_BIND_WTB16:
 		osc_wtbSyncBlendBlock(osc, over, ratioQ16, depthQ30, buf, size);
 		break;
@@ -2464,7 +2461,6 @@ void OSC_S087_SECTION osc_renderTypedRing(OscInfo* osc, const int16_t* modBuf,
 	case OSC_BIND_SLP:
 		osc_slpRingBlock(osc, modBuf, buf, size, depthQ15, depthStepQ15);
 		break;
-	case OSC_BIND_WTB8:
 	case OSC_BIND_WTB16:
 		osc_wtbRingBlendBlock(osc, modBuf, buf, size, depthQ15, depthStepQ15);
 		break;
@@ -2487,8 +2483,7 @@ void OSC_S087_SECTION osc_renderTypedRing(OscInfo* osc, const int16_t* modBuf,
 void OSC_S087_SECTION osc_renderUserList(OscInfo* osc, int16_t* buf,
                                          uint8_t size, float gain)
 {
-	if (osc->sampleCacheLooped == OSC_BIND_WTB8 ||
-	    osc->sampleCacheLooped == OSC_BIND_WTB16) {
+	if (osc->sampleCacheLooped == OSC_BIND_WTB16) {
 		/* S087 E/A24: a modulator w entry plays frame 0 and never claims. */
 		osc->positionApplied = 0u;
 		osc_wtbPlainBlock(osc, buf, size, gain);
@@ -2580,8 +2575,7 @@ void oscSection_renderOldCarrier(OscCarrierSnapshot *snap, int16_t *buf,
 		case OSC_BIND_SLP:
 			osc_slpPlainBlock(&view, osc_itpScratch, size, 1.0f);
 			break;
-		case OSC_BIND_WTB8:
-		case OSC_BIND_WTB16:
+			case OSC_BIND_WTB16:
 			osc_wtbPlainBlock(&view, osc_itpScratch, size, 1.0f);
 			break;
 		default:
@@ -2685,34 +2679,43 @@ OSC_S087_LOOP uint32_t osc_buildLoopSyncList(OscInfo* master, uint32_t pos,
 }
 
 /*
- * Wavetable frame helpers (S087 stage E).
+ * Wavetable frame helpers (S087 stage E; S093 P8: one stored format).
  *
  * What:       one frame's base pointer and one interpolated point at a cycle
- *             phase (2^32 per frame, any length, A16).
- * Why:        the one-frame and blend copies share the exact read; 8-bit data
- *             is scaled by 256 so both depths land in int16 units.
- * Inputs:     data, bits, frame_len, phase.
+ *             phase (2^32 per frame).
+ * Why:        the one-frame and blend copies share the exact read. S093 P8
+ *             (user, D1'/D9): every stored frame is one 1,024-point 16-bit row
+ *             (WAVETABLE_ROW_POINTS; sampleMemory_wavetableRangeValid() refuses
+ *             any other entry), so the read is the stock table read: the point
+ *             is the phase's top 10 bits, its successor wraps by the mask, the
+ *             fraction is the low 22 bits. For a 1,024-point frame this is the
+ *             former any-length read ((ph x len) >> 32, its low word / 2^32)
+ *             bit for bit: the low word is (ph & 0x3FFFFF) << 10, exact in a
+ *             float. Without the multiply, the compare and the 8-bit branch
+ *             (which split every reader into an 8- and a 16-bit loop), each
+ *             reader has one loop, 1-3 instructions shorter than its former
+ *             16-bit loop in nine readers and 1 longer in the sync blend (S093
+ *             P8 schedule §0).
+ * Inputs:     data (a frame's first point), phase.
  * Outputs:    the interpolated value.
  * Accessors:  the wtb loops below.
- * Affiliates: SampleMemory.h wavetable entry.
+ * Affiliates: SampleMemory.h WAVETABLE_ROW_POINTS; the stock table loops
+ *             (calcWavetableOscBlock(), the same read).
  */
+_Static_assert(WAVETABLE_ROW_POINTS == 1024u,
+               "osc_wtbRead() takes the point from the phase's top 10 bits");
 static inline __attribute__((always_inline)) float osc_wtbRead(
-	const uint8_t *data, uint8_t bits, uint32_t len, uint32_t ph)
+	const uint8_t *data, uint32_t ph)
 {
-	const uint64_t m = (uint64_t)ph * len;
-	const uint32_t idx = (uint32_t)(m >> 32);
-	const uint32_t n = (idx + 1u == len) ? 0u : idx + 1u;
-	const float fr = (float)(uint32_t)m * (1.0f / 4294967296.0f);
-	int32_t a;
-	int32_t b;
+	/* the point at or before ph: the top 10 bits of the 2^32 cycle */
+	const uint32_t idx = ph >> 22;
+	/* its successor, point 1,023 wrapping to point 0 */
+	const uint32_t n = (idx + 1u) & (WAVETABLE_ROW_POINTS - 1u);
+	/* the fraction between them: the low 22 bits / 2^22, 0..1 */
+	const float fr = (float)(ph & 0x003FFFFFu) * (1.0f / 4194304.0f);
+	const int32_t a = ((const int16_t *)data)[idx];
+	const int32_t b = ((const int16_t *)data)[n];
 
-	if (bits == 8u) {
-		a = ((const int8_t *)data)[idx] << 8;
-		b = ((const int8_t *)data)[n] << 8;
-	} else {
-		a = ((const int16_t *)data)[idx];
-		b = ((const int16_t *)data)[n];
-	}
 	return (float)a + fr * (float)(b - a);
 }
 
@@ -2720,7 +2723,8 @@ static const uint8_t *osc_wtbFrame(const OscInfo* osc,
                                    const wavetable_catalogue_entry_t *wt,
                                    uint32_t frame)
 {
-	const uint32_t bytes = (uint32_t)wt->frame_len * (wt->bits / 8u);
+	/* S093 P8: 2 bytes per point (16-bit only) */
+	const uint32_t bytes = (uint32_t)wt->frame_len * 2u;
 
 	return (const uint8_t *)osc->sampleCacheData + frame * bytes;
 }
@@ -2871,7 +2875,7 @@ static OSC_S087_LOOP void osc_wtbPlainBlock(OscInfo* osc, int16_t* buf,
 		const uint8_t *base = osc_wtbFrame(osc, wt, frame);
 
 		for (i = 0u; i < size; i++) {
-			buf[i] = (int16_t)(osc_wtbRead(base, wt->bits, wt->frame_len, ph) *
+			buf[i] = (int16_t)(osc_wtbRead(base, ph) *
 			                   gain);
 			ph += inc;
 		}
@@ -2916,9 +2920,6 @@ static OSC_S087_LOOP void osc_wtbBlendBlock(OscInfo* osc, int16_t* buf,
 		return;
 	}
 	{
-		const uint8_t bits = wt->bits;
-		const uint32_t len = wt->frame_len;
-
 		osc_wtbPlanBlock(osc, count, size, &plan);
 		for (s = 0u; s < plan.segments; s++) {
 			const uint8_t *a = osc_wtbFrame(osc, wt, plan.pair[s]);
@@ -2926,8 +2927,8 @@ static OSC_S087_LOOP void osc_wtbBlendBlock(OscInfo* osc, int16_t* buf,
 			float ff = plan.ff[s];
 
 			for (; i < plan.end[s]; i++) {
-				const float x0 = osc_wtbRead(a, bits, len, ph);
-				const float x1 = osc_wtbRead(b, bits, len, ph);
+				const float x0 = osc_wtbRead(a, ph);
+				const float x1 = osc_wtbRead(b, ph);
 				const float out = x0 + ff * (x1 - x0);
 
 				buf[i] = (int16_t)(out * gain);
@@ -2972,7 +2973,7 @@ static OSC_S087_LOOP void osc_wtbFmBlock(OscInfo* osc, const int16_t* mod,
 			const uint32_t rp = ph + ((uint32_t)__SSAT(
 				(int32_t)((float)mod[i] * osc->fmMod), 16) << 19);
 
-			buf[i] = (int16_t)(osc_wtbRead(base, wt->bits, wt->frame_len, rp) *
+			buf[i] = (int16_t)(osc_wtbRead(base, rp) *
 			                   gain);
 			ph += inc;
 		}
@@ -3016,9 +3017,6 @@ static OSC_S087_LOOP void osc_wtbFmBlendBlock(OscInfo* osc,
 		return;
 	}
 	{
-		const uint8_t bits = wt->bits;
-		const uint32_t len = wt->frame_len;
-
 		osc_wtbPlanBlock(osc, count, size, &plan);
 		for (s = 0u; s < plan.segments; s++) {
 			const uint8_t *a = osc_wtbFrame(osc, wt, plan.pair[s]);
@@ -3028,8 +3026,8 @@ static OSC_S087_LOOP void osc_wtbFmBlendBlock(OscInfo* osc,
 			for (; i < plan.end[s]; i++) {
 				const uint32_t rp = ph + ((uint32_t)__SSAT(
 					(int32_t)((float)mod[i] * osc->fmMod), 16) << 19);
-				const float x0 = osc_wtbRead(a, bits, len, rp);
-				const float x1 = osc_wtbRead(b, bits, len, rp);
+				const float x0 = osc_wtbRead(a, rp);
+				const float x1 = osc_wtbRead(b, rp);
 				const float out = x0 + ff * (x1 - x0);
 
 				buf[i] = (int16_t)(out * gain);
@@ -3070,7 +3068,7 @@ static OSC_S087_LOOP void osc_wtbRingBlock(OscInfo* osc, const int16_t* modBuf,
 		const uint8_t *base = osc_wtbFrame(osc, wt, frame);
 
 		for (i = 0u; i < size; i++) {
-			const float out = osc_wtbRead(base, wt->bits, wt->frame_len, ph);
+			const float out = osc_wtbRead(base, ph);
 
 			/* S087 P1: S085 ring law, d_i = depthQ15 + (i + 1) x step. */
 			depth += depthStepQ15;
@@ -3121,9 +3119,6 @@ static OSC_S087_LOOP void osc_wtbRingBlendBlock(OscInfo* osc,
 		return;
 	}
 	{
-		const uint8_t bits = wt->bits;
-		const uint32_t len = wt->frame_len;
-
 		osc_wtbPlanBlock(osc, count, size, &plan);
 		for (s = 0u; s < plan.segments; s++) {
 			const uint8_t *a = osc_wtbFrame(osc, wt, plan.pair[s]);
@@ -3131,8 +3126,8 @@ static OSC_S087_LOOP void osc_wtbRingBlendBlock(OscInfo* osc,
 			float ff = plan.ff[s];
 
 			for (; i < plan.end[s]; i++) {
-				const float x0 = osc_wtbRead(a, bits, len, ph);
-				const float x1 = osc_wtbRead(b, bits, len, ph);
+				const float x0 = osc_wtbRead(a, ph);
+				const float x1 = osc_wtbRead(b, ph);
 				const float out = x0 + ff * (x1 - x0);
 
 				depth += depthStepQ15;
@@ -3171,7 +3166,7 @@ static OSC_S087_LOOP void osc_wtbSyncBlock(OscInfo* osc, const uint32_t* over,
 		const uint8_t *base = osc_wtbFrame(osc, wt, frame);
 
 		for (i = 0u; i < size; i++) {
-			buf[i] = (int16_t)osc_wtbRead(base, wt->bits, wt->frame_len, ph);
+			buf[i] = (int16_t)osc_wtbRead(base, ph);
 			ph = osc_syncPull(ph + inc, over[i], ratioQ16, depthQ30);
 		}
 	}
@@ -3221,9 +3216,6 @@ static OSC_S087_LOOP void osc_wtbSyncBlendBlock(OscInfo* osc,
 		return;
 	}
 	{
-		const uint8_t bits = wt->bits;
-		const uint32_t len = wt->frame_len;
-
 		osc_wtbPlanBlock(osc, count, size, &plan);
 		for (s = 0u; s < plan.segments; s++) {
 			const uint8_t *a = osc_wtbFrame(osc, wt, plan.pair[s]);
@@ -3231,8 +3223,8 @@ static OSC_S087_LOOP void osc_wtbSyncBlendBlock(OscInfo* osc,
 			float ff = plan.ff[s];
 
 			for (; i < plan.end[s]; i++) {
-				const float x0 = osc_wtbRead(a, bits, len, ph);
-				const float x1 = osc_wtbRead(b, bits, len, ph);
+				const float x0 = osc_wtbRead(a, ph);
+				const float x1 = osc_wtbRead(b, ph);
 				const float out = x0 + ff * (x1 - x0);
 
 				buf[i] = (int16_t)out;
@@ -3533,8 +3525,8 @@ static OSC_S089P3_LOOP void osc_slpFmRampBlock(OscInfo* osc,
  * Inputs:     osc (bound wtb: sampleCacheIndex/Data, positionApplied, phase,
  *             phaseInc), mod[size], size, gain, d0, dStep.
  * Outputs:    buf[size]; osc->phase.
- * Cost:       the original's 32 (8-bit) / 34 (16-bit) instructions per
- *             sample + 1.
+ * Cost:       31 instructions per sample with the S093 P8 fixed 1,024-point
+ *             16-bit read (linked S093 P8 schedule §0.4).
  * Accessors:  osc_wtbFmBlendRampBlock() (fallback).
  * Affiliates: osc_wtbFmBlock() (keep in step); osc_wtbFrameOf(),
  *             osc_wtbFrame(), osc_wtbRead().
@@ -3571,7 +3563,7 @@ static OSC_S089P3_LOOP void osc_wtbFmRampBlock(OscInfo* osc,
 
 			/* Depth steps after its use (sample 0 = d0). */
 			d += dStep;
-			buf[i] = (int16_t)(osc_wtbRead(base, wt->bits, wt->frame_len, rp) *
+			buf[i] = (int16_t)(osc_wtbRead(base, rp) *
 			                   gain);
 			ph += inc;
 		}
@@ -3596,8 +3588,8 @@ static OSC_S089P3_LOOP void osc_wtbFmRampBlock(OscInfo* osc,
  * Inputs:     osc (bound wtb), mod[size], size, gain, d0, dStep.
  * Outputs:    buf[size]; osc->phase; one interpolation slot claimed for this
  *             block (modNode_interpClaim()), exactly as the original.
- * Cost:       the original's 46 (16-bit) / 42 (8-bit) instructions per
- *             sample + 1.
+ * Cost:       42 instructions per sample with the S093 P8 fixed 1,024-point
+ *             16-bit read (linked S093 P8 schedule §0.4).
  * Accessors:  osc_renderTypedFmRamp().
  * Affiliates: osc_wtbFmBlendBlock() (keep in step); osc_wtbPlanBlock(),
  *             osc_wtbFmRampBlock() (fallback), modNode_interpClaim().
@@ -3627,9 +3619,6 @@ static OSC_S089P3_LOOP void osc_wtbFmBlendRampBlock(OscInfo* osc,
 		return;
 	}
 	{
-		const uint8_t bits = wt->bits;
-		const uint32_t len = wt->frame_len;
-
 		osc_wtbPlanBlock(osc, count, size, &plan);
 		/* i runs on across the segments: segment s ends at plan.end[s]. */
 		for (s = 0u; s < plan.segments; s++) {
@@ -3641,8 +3630,8 @@ static OSC_S089P3_LOOP void osc_wtbFmBlendRampBlock(OscInfo* osc,
 				/* One FM read point for both frames (S0 when d == fmMod). */
 				const uint32_t rp = ph + ((uint32_t)__SSAT(
 					(int32_t)((float)mod[i] * d), 16) << 19);
-				const float x0 = osc_wtbRead(a, bits, len, rp);
-				const float x1 = osc_wtbRead(b, bits, len, rp);
+				const float x0 = osc_wtbRead(a, rp);
+				const float x1 = osc_wtbRead(b, rp);
 				/* Frame blend at this sample's fractional position. */
 				const float out = x0 + ff * (x1 - x0);
 
@@ -3689,7 +3678,6 @@ void __attribute__((noinline, noclone)) osc_renderTypedFmRamp(
 	case OSC_BIND_SLP:
 		osc_slpFmRampBlock(osc, mod, buf, size, gain, d0, dStep);
 		break;
-	case OSC_BIND_WTB8:
 	case OSC_BIND_WTB16:
 		osc_wtbFmBlendRampBlock(osc, mod, buf, size, gain, d0, dStep);
 		break;

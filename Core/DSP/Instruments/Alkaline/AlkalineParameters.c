@@ -17,14 +17,15 @@
  *             drive extra (E2), and the platform rows every engine shares
  *             (vol, pan, the LFO pair, velocity), so Morph, LFO, automation,
  *             MIDI and storage work unchanged.
- * Not offered (S092 P0 §5.5): srt (no SRR, D4), run, chn, typ (the
- *             oscillator stays a table wave, S093 P3 §9.5; samples/wavetables
- *             are S093 P7), fine pitch,
+ * Not offered (S092 P0 §5.5): srt (no SRR, D4), run, chn, fine pitch,
  *             velo_vol_on_off (the 303's velocity is the accent, D1).
+ *             typ is offered since S093 P8 with two types, wav and wtb
+ *             (samples are not: S093_P8_IMPLEMENTATION.md §0).
  * Accessors:  InstrumentManager registry; Menu (pages); Preset/Morph/LFO/
  *             automation through the registry; storage (keys, [morph] for
  *             the MORPHABLE rows only, storageTypes.c l. 981-990).
- * Affiliates: AlkalineVoice.h; MenuText.h (alkWaveNames, ONOFF_TAG_ALK_WAVE);
+ * Affiliates: AlkalineVoice.h; MenuText.h (alkWaveNames, alkTypeNames,
+ *             ONOFF_TAG_ALK_TYPE);
  *             tools/alkaline/make_init_alk.py; SD_CARD/Instrument/Alkaline/
  *             init.alk.
  */
@@ -50,6 +51,10 @@ const uint8_t alkaline_instrument_type_flags = ALKALINE_INSTRUMENT_TYPE_FLAGS;
 #define MOD_NONE  { 0u, 0u, INSTRUMENT_MOD_DOMAIN_NONE }
 #define MOD_0_127 { 0u, 127u, INSTRUMENT_MOD_DOMAIN_CONTINUOUS }
 #define MOD_PM63  { 0u, 127u, INSTRUMENT_MOD_DOMAIN_CONTINUOUS }
+/* S093 P8: a wave row's domain (DrumParameters.c l. 57-59): integers, the
+ * maximum from the slot's type (instrumentManager_waveDomainMax(): Saw/Sqr
+ * under wav, the items under smp/wtb) */
+#define MOD_WAVE  { 0u, 0u, (uint8_t)(INSTRUMENT_MOD_DOMAIN_INTEGER | INSTRUMENT_MOD_DOMAIN_DYNAMIC_MAX) }
 
 /* Row shapes (DrumParameters.c l. 70-98). */
 #define ROW(key_, cat_, long_, short_, dtype_, mod_, member_, type_) \
@@ -59,20 +64,21 @@ const uint8_t alkaline_instrument_type_flags = ALKALINE_INSTRUMENT_TYPE_FLAGS;
 #define ROW_MENU(key_, cat_, long_, short_, menu_, mod_, member_, type_) \
     { key_, short_, long_, cat_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), FLAGS_IMAGE, mod_, BIND(member_, type_) }
 /*
- * A tagged DTYPE_ON_OFF selector without a special writer (S093 P4).
+ * A tagged DTYPE_ON_OFF selector with a special writer (S093 P8; Drum's
+ * ROW_SELECT_ONOFF_SPECIAL, DrumParameters.c l. 108-130).
  *
  * What:       DTYPE_ON_OFF | (tag << 4) with AUTOMATABLE | SELECTOR: never
  *             morphed (so not under [morph]), not an LFO/velocity target; the
- *             tag picks the name table in menu_onoffTagNames(). Same as
- *             DrumParameters.c ROW_SELECT_ONOFF_SPECIAL with IM_SPECIAL_NONE.
- * Why:        a plain TYPE_UINT8 store needs no writer, and the host tag check
- *             treats every *_SPECIAL row as tagged (check_special_tags.py
- *             actual()), so a NONE tag must not be spelt out.
+ *             tag picks the name table in menu_onoffTagNames(); the runtime
+ *             write goes to the IM_SPECIAL_* writer.
+ * Why:        the Alkaline typ list (wav wtb) is its own two names, and
+ *             every DTYPE_MENU id is taken (MenuText.h, S078), so the list is a
+ *             tagged on/off sub-type as osc1_run's is.
  */
-#define ROW_SELECT_ONOFF(key_, cat_, long_, short_, tag_, member_, type_) \
+#define ROW_SELECT_ONOFF_SPECIAL(key_, cat_, long_, short_, tag_, member_, type_, special_) \
     { key_, short_, long_, cat_, (uint8_t)(DTYPE_ON_OFF | ((tag_) << 4)), \
       (INSTRUMENT_PARAM_FLAG_AUTOMATABLE | INSTRUMENT_PARAM_FLAG_SELECTOR), \
-      MOD_NONE, BIND(member_, type_) }
+      MOD_NONE, BIND_SPECIAL(member_, type_, special_) }
 /* Cells with no AlkalineVoice member (target selectors), flags 0: [params]
  * only. */
 #define ROW_NOBIND(key_, cat_, long_, short_, dtype_, bind_kind_) \
@@ -124,6 +130,7 @@ typedef enum {
      */
     ALK_PARAM_ATTACK,            /* 26: VEG attack as the CPU trigger width */
     ALK_PARAM_OSC1_POSITION,     /* 27: note-start phase (0 = free-running) */
+    ALK_PARAM_OSC1_TYPE,         /* 28 (S093 P8): wav / wtb */
     ALK_PARAM_COUNT
 } alkaline_param_index_t;
 
@@ -141,11 +148,24 @@ _Static_assert(ALK_PARAM_COUNT <= INSTRUMENT_PARAM_COUNT,
  * LFO, Velocity).
  */
 const ParamDescriptor alkaline_param_descriptors[] = {
-    /* wav: 0 Saw (the stock sawTable, which matches the 303 ramp within
-     * 0.5 %), 1 Sqr (the D8 per-octave Q8 square, AlkalineSquareTable.c); a
-     * selector, so Morph never blends the two tables; any other stored value
-     * plays Saw (AlkalineVoice.c: square = (wave == ALK_WAVE_SQUARE)) */
-    ROW_SELECT_ONOFF("alk_wave", "Oscilltr", "Waveform", "wav", ONOFF_TAG_ALK_WAVE, wave, TYPE_UINT8),
+    /*
+     * wav (S093 P8: Drum's osc1_wave row shape, DrumParameters.c l. 233).
+     *
+     * What:       under typ wav: 0 Saw (the stock sawTable, the 303 ramp
+     *             within 0.5 %), 1 Sqr (the D8 per-octave Q8 square,
+     *             AlkalineSquareTable.c); under wtb: the wavetable, named
+     *             wNN. DTYPE_MENU | MENU_WAVEFORM, MOD_WAVE, an image cell
+     *             bound to osc.waveform.
+     * Why:        one cell names Saw/Sqr or the item by typ (P8 §8); the
+     *             shared wave helpers key on "osc1_wave" and know the
+     *             Alkaline case (instrumentManager_waveDomainMax(),
+     *             menu_formatWaveCell()). As on Drum, Morph and the LFO step
+     *             through the entries (under wav: Saw/Sqr switch).
+     * Accessors:  alk_renderWav() (square = wav 1); alk_wtbBind() (the
+     *             table); the menu wave helpers.
+     * Affiliates: ALK_WAVE_SAW / ALK_WAVE_SQUARE; alkWaveNames.
+     */
+    ROW_MENU("osc1_wave", "Oscilltr", "Waveform", "wav", MENU_WAVEFORM, MOD_WAVE, osc.waveform, TYPE_UINT8),
     /* coa: the existing coarse writer (midiFreq high byte, osc_recalcFreq(),
      * which only sets osc.freq; the Alkaline async recomputes the pitch from
      * midiFreq and the note every block); its LFO/velocity target is
@@ -206,6 +226,20 @@ const ParamDescriptor alkaline_param_descriptors[] = {
      * of a cycle; while it moves, the per-block bend (AlkalineVoice.c).
      */
     ROW("osc1_position", "Oscilltr", "Position", "pos", DTYPE_0B127, MOD_0_127, osc.position, TYPE_UINT8),
+    /*
+     * S093 P8: typ, the oscillator type.
+     *
+     * What:       0 wav (Saw/Sqr through the fused table loop), 1 wtb (a
+     *             wavetable frame's 1,024-point row through the same table
+     *             loop); names alkTypeNames (tag ONOFF_TAG_ALK_TYPE).
+     *             The writer (IM_SPECIAL_OSC_TYPE, an Alkaline slot) is
+     *             Alkaline_setOscType(), which maps the byte to osc.oscType.
+     * Why:        S093 P8: the wavetable oscillator under the Basic ceiling;
+     *             samples are not offered (S093_P8_IMPLEMENTATION.md §0).
+     * Accessors:  Alkaline_triggerVoice(), Alkaline_calcVoiceAsync(),
+     *             Alkaline_calcVoiceSyncBlock() (osc.oscType).
+     */
+    ROW_SELECT_ONOFF_SPECIAL("osc1_type", "Oscilltr", "Type", "typ", ONOFF_TAG_ALK_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -236,8 +270,8 @@ _Static_assert(sizeof(alkaline_param_descriptors) / sizeof(alkaline_param_descri
  *             cut res env drv); acc on click; pos with the oscillator.
  */
 const instrument_menu_page_t alkaline_menu_pages[] = {
-    /* 0 OSC: coa tun wav pos */
-    {{ ALK_PARAM_OSC1_PITCH_COARSE, ALK_PARAM_TUNING, ALK_PARAM_WAVE, ALK_PARAM_OSC1_POSITION, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* 0 OSC: coa tun wav pos | typ (S093 P8: Drum's second screen) */
+    {{ ALK_PARAM_OSC1_PITCH_COARSE, ALK_PARAM_TUNING, ALK_PARAM_WAVE, ALK_PARAM_OSC1_POSITION, ALK_PARAM_OSC1_TYPE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     /* 1 AEG: atk dec */
     {{ ALK_PARAM_ATTACK, ALK_PARAM_DECAY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     /* 2 mod: dst amt sld */
@@ -267,10 +301,11 @@ _Static_assert(ALKALINE_MENU_PAGE_COUNT ==
 #undef ROW
 #undef ROW_SPECIAL
 #undef ROW_MENU
-#undef ROW_SELECT_ONOFF
+#undef ROW_SELECT_ONOFF_SPECIAL
 #undef ROW_NOBIND
 #undef ROW_NOBIND_IMAGE
 #undef ALK_PAGE_EMPTY
+#undef MOD_WAVE
 #undef MOD_PM63
 #undef MOD_0_127
 #undef MOD_NONE
