@@ -274,12 +274,23 @@ static void dl_slowUpdate(DiodeLadder *dl, const float sTp, const float sS)
 static inline __attribute__((always_inline)) void dl_renderB2Body(
 	DiodeLadder *dl, int16_t *buf, const float sScale, const float iLadEnd,
 	const float iAbcEnd, const int fused, const int16_t *const row,
-	uint32_t *const phase, const uint32_t phaseInc)
+	uint32_t *const phase, const uint32_t phaseInc,
+	const int16_t *const rowB, const float ff0, const float ffStep)
 {
-	/* fused (a compile-time constant in each wrapper): the oscillator's
-	 * table read fused into the loop, calcWavetableOscBlock()'s arithmetic
-	 * exactly (gain 1: linear interpolation, truncation to int16) */
+	/* fused (a compile-time constant in each wrapper):
+	 *   0  buf is the input (the unfused B2R, DiodeLadder_renderB2());
+	 *   1  the oscillator's table read fused into the loop,
+	 *      calcWavetableOscBlock()'s arithmetic exactly (gain 1: linear
+	 *      interpolation, truncation to int16);
+	 *   2  S093 P8 revision 3: two wavetable rows (row, rowB) read at the
+	 *      same phase and mixed by ff (DiodeLadder_renderB2Osc2()).
+	 * rowB, ff0 and ffStep are read only under 2; the other wrappers pass
+	 * 0, 0.0f, 0.0f and the compiler drops them with the branch. */
 	uint32_t ph = fused ? *phase : 0u;
+	/* S093 P8 r3: the frame mix of fused 2, 0 = row, 1 = rowB; it starts at
+	 * ff0 and moves by ffStep per sample, so a block glides linearly from
+	 * its start position to its end position (no step at a block edge) */
+	float ff = ff0;
 	float x0 = dl->x0, x1 = dl->x1, x2 = dl->x2, x3 = dl->x3;
 	float t0 = dl->t0, t1 = dl->t1;
 	float tin = dl->tin, tota = dl->tota;
@@ -305,7 +316,36 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 		rv += drv;
 		float s;
 
-		if (fused) {
+		if (fused == 2) {
+			/*
+			 * S093 P8 revision 3: the frame blend.
+			 *
+			 * What:       the point at or before the phase (its top 10
+			 *             bits: a row is 1,024 points over the 2^32 cycle),
+			 *             its successor (point 1,023 wraps to 0) and the
+			 *             fraction between them (the low 22 bits / 2^22);
+			 *             each row interpolated at that point, in float;
+			 *             then a + ff (b - a), the mix of the two frames.
+			 * Why:        the wavetable blend of the other instruments
+			 *             (Oscillator.c osc_wtbBlendBlock(): two reads, two
+			 *             interpolations, one mix) inside the B2R loop, so
+			 *             the voice keeps one loop and no buffer. Float
+			 *             throughout: no int16 truncation between the read
+			 *             and the mix (fused 1 keeps its truncation for the
+			 *             AL-X bit-identity; there is no such law here).
+			 * Cost:       measured 228 per sample linked (fused 1: 213).
+			 */
+			const uint32_t itg = ph >> 22;
+			const uint32_t nx = (itg + 1u) & 0x000003FFu;
+			const float fr = (float)(ph & 0x003FFFFFu) * 2.384185791015625e-07f;
+			/* frame A (row) and frame B (rowB), linearly interpolated */
+			const float a = (float)row[itg] + fr * (float)(row[nx] - row[itg]);
+			const float b = (float)rowB[itg] + fr * (float)(rowB[nx] - rowB[itg]);
+
+			ph += phaseInc;
+			s = (a + ff * (b - a)) * sScale;
+			ff += ffStep;
+		} else if (fused) {
 			const uint32_t itg = ph >> 22;
 			int16_t o = row[itg];
 
@@ -407,7 +447,7 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 void DiodeLadder_renderB2(DiodeLadder *dl, int16_t *buf, const float sScale,
                           const float iLadEnd, const float iAbcEnd)
 {
-	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 0, 0, 0, 0u);
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 0, 0, 0, 0u, 0, 0.0f, 0.0f);
 }
 
 /* B2R with the oscillator's table read fused (S093 P3 analysis): the voice's
@@ -416,7 +456,45 @@ void DiodeLadder_renderB2Osc(DiodeLadder *dl, int16_t *buf, const int16_t *row,
                              uint32_t *phase, const uint32_t phaseInc, const float sScale,
                              const float iLadEnd, const float iAbcEnd)
 {
-	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 1, row, phase, phaseInc);
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 1, row, phase, phaseInc,
+	                0, 0.0f, 0.0f);
+}
+
+/*
+ * B2R with two wavetable rows blended (S093 P8 revision 3).
+ *
+ * What:       the fused loop of DiodeLadder_renderB2Osc() with the input
+ *             s_j = (A_j + ff_j (B_j - A_j)) x sScale, where A_j and B_j are
+ *             rowA and rowB linearly interpolated at the shared phase and
+ *             ff_j = ff0 + j x ffStep (j = 0..31). The phase advances by
+ *             phaseInc per sample and is written back.
+ * Why:        the Alkaline's frame blend while it holds an interpolation
+ *             slot (reassessment §14 D12). One more loop copy instead of a
+ *             blended row in RAM (2 KB per voice, refilled whenever pos
+ *             moves) or an unfused oscillator buffer (two loops).
+ *             noinline: inlined into alk_renderWtb() it measured 231; out of
+ *             line 228, and its registers stay out of the caller.
+ * Inputs:     dl (the ladder; DiodeLadder_setNet() ran this block), buf
+ *             (output only), rowA / rowB (two 1,024-point int16 rows: frame
+ *             p and frame p + 1 of one table), phase (in/out), phaseInc,
+ *             ff0 (0..1, the mix at sample 0), ffStep (the per-sample step;
+ *             0 holds the mix), sScale (the input scale x the drive),
+ *             iLadEnd, iAbcEnd (the block-end currents, as the other B2R
+ *             wrappers).
+ * Outputs:    buf (int16, the ladder's VCA output); *phase; the ladder
+ *             state.
+ * Accessors:  AlkalineVoice.c alk_renderWtb() (slot held).
+ * Affiliates: DiodeLadder_renderB2Osc() (the one-row form and the no-slot
+ *             fallback); control_cost.py ITERS (rank 1 is the audio loop).
+ */
+__attribute__((noinline)) void DiodeLadder_renderB2Osc2(DiodeLadder *dl, int16_t *buf,
+                              const int16_t *rowA, const int16_t *rowB,
+                              uint32_t *phase, const uint32_t phaseInc,
+                              const float ff0, const float ffStep, const float sScale,
+                              const float iLadEnd, const float iAbcEnd)
+{
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 2, rowA, phase, phaseInc,
+	                rowB, ff0, ffStep);
 }
 
 /* ------------------------------------------------------------------- B-R

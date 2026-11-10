@@ -1170,6 +1170,147 @@ the new copy/clear work is foreground-only and bounded.
       baseline Scene; 0 underruns over 5 min). If the device confirms a
       failure, the fallback is Advanced (K1, the user's decision).
 
+### Session 093 P8 budget findings (measured 2026-11-10; record in `S093_P8_WAVETABLE_REASSESSMENT.md` §14)
+
+Method for all items: linked P6 and P8 images, `elf_looppath.py
+--cond-heads --in-range` (per-sample loops), `elf_blockpath.py` and
+`control_cost.py --elf` (per block), and a `-g` twin of the P8 image for
+mixer-inlined loops (`elf_loopsrc.py` helpers, cyclic cost). "Dearest" is the
+most expensive choice an oscillator can make.
+
+72. **MEASURED (S093 P8): wavetable readers after the 8-bit removal.** One
+    16-bit loop per reader, with the fixed 1,024-point read:
+
+    | Reader | P6 (8-bit / 16-bit copy) | P8 |
+    |---|---:|---:|
+    | plain | 26 / 24 | 22 |
+    | blend | 38 / 34 | 33 |
+    | FM / FM blend | 34 / 46 | 30 / 41 |
+    | FM ramp / FM blend ramp | 35 / 47 | 31 / 42 |
+    | ring / ring blend | 34 / 47 | 30 / 42 |
+    | sync / sync blend | 36 / 48 | 32 / 45 |
+
+    - In P8 the blend readers also show an outer per-segment cycle (61–85,
+      shortest 14–19). It runs when a block crosses a frame (at most twice per
+      block), not per sample. `elf_looppath.py --top 1` reports it first; use
+      `--top 4` and take the per-sample inner loop.
+73. **MEASURED (S093 P8): the per-voice worst cases did not change.** No
+    wavetable reader was ever the dearest choice for its oscillator:
+
+    | Oscillator role | Dearest (P6 = P8) | Next | Wavetable reader (P8) |
+    |---|---|---|---|
+    | Plain (modulators, Snare tonal, Drum `mix`) | crash 30 | `slp` 27 | plain 22, blend 33 |
+    | Drum FM carrier | `slp` FM ramp 51 | `smp` 43 | FM blend ramp 42 |
+    | Cymbal/HiHat FM carrier | `slp` FM 50 | `smp` 42 | FM blend 41 |
+    | Drum `rng` carrier | `slp` 42 | `smp` 38 | ring blend 42 |
+    | Drum `snc` slave | `slp` 41 (no slot); the wavetable sync blend 45 with a slot | crash / `smp` 36 | sync 32, sync blend 45: the dearest slave, but the `snc` mode stays below Drum's dearest mode (item 77) |
+
+    Per voice, no slot held: Drum **261.3** (unchanged, the Basic ceiling);
+    Snare and Cymbal/HiHat unchanged; Alkaline 252.5 (P6) → **255.2** (P8
+    image, item 78).
+74. **MEASURED (S093 P8): the crash wave's cost.** `crashSample`
+    (unsigned 8-bit, 32,769 B flash) is read by:
+    - the plain path inside `calcNextOscSampleBlock` (the `ldrb` loop):
+      **30 per sample, the dearest plain read in the system**. Every
+      modulator and plain oscillator is budgeted at 30 because of it;
+    - `calcSampleOscFmBlock` 32, `calcSampleOscRingBlock` 33,
+      `calcSampleOscSyncBlock` 36 (ITCM 168 + 196 + 176 B). None is the
+      dearest in its mode.
+
+    Without crash: Drum 261.3 → 258.3, Snare −3, Cymbal/HiHat −6, and the
+    `itp` fade's per-slot cost 45 → 42 (item 75).
+75. **MEASURED (S093 P8): the interpolation pool's ceiling is the `itp`
+    fade.** What one slot adds on top of its voice's dearest no-slot
+    setting:
+
+    | Slot user | P6 | P8 |
+    |---|---:|---:|
+    | Wavetable blend on a plain oscillator | 38 − 30 = 8 | 33 − 30 = 3 |
+    | Wavetable blend on an FM, ring or sync carrier | 0 | 0 |
+    | `itp` fade: old carrier rendered plain (`oscSection_renderOldCarrier()`: crash 30 / `slp` 27 / `smp` 24 / wavetable plain) + the 15-instruction crossfade | **45** | **45** |
+
+    - A blended carrier is never dearer than its voice's dearest setting, so
+      it adds nothing. The `itp` fade runs on top of the live carrier, so all
+      of it is extra.
+    - The two-slot pool's worst case is **90** (84 without crash), set by the
+      `itp` fade on both images. Item 47's "+10..+13" is the blend premium
+      over the same reader, not the pool's charge.
+76. **MEASURED (S093 P8): the Advanced ceiling (dearest Cymbal; HiHat runs
+    the same loops).** T+D chain, both modulators on crash, `slp` FM
+    carrier. Not frozen into `tools/dsp_test/baselines/`.
+
+    | Per-sample loops | Instr. | VDIV |
+    |---|---:|---:|
+    | Modulators, crash × 2 (`calcNextOscSampleBlock`) | 60 | 0 |
+    | Modulator sum (`bufferTool_addBuffersSaturating`, unrolled) | ≈ 2.5 | 0 |
+    | Carrier `osc_slpFmBlock` | 50 | 0 |
+    | `SVF_calcBlockZDF.constprop.0`, dearest type | 92 | 2 |
+    | Transient click (mixer-inlined) | 22 | 0 |
+    | `voicePost_addGainDist` (mixer-inlined) | 25 | 1 |
+    | **Loops** | **251.5** | **3** |
+
+    - **Per block ≈ 1,006 (31.4 per sample):**
+      - async: `Cymbal_calcAsyncVoice` 62 + `osc_setFreq` × 3 at 128;
+      - dispatch 14; filter recalculation ≈ 30 (S093 P3 figure);
+      - `Cymbal_calcSyncBlockVoice` entry 133 (standalone `-Ofast`; LTO
+        inlines it into the mixer);
+      - render entries: `SVF_calcBlockZDF` 161, `calcNextOscSampleBlock`
+        17 × 2, `osc_slpFmBlock` 71 + `osc_renderTypedFm` ≈ 12 (P3);
+      - `pos`: `osc_typedPositionApply` 73 (`__aeabi_ldivmod` not counted, as
+        in P3) + restore ≈ 11 (P3);
+      - `transient_calcBlock` ≈ 21 (P3).
+    - **SRR:** 10 (Cymbal/HiHat use `mixer_decimateBlock`).
+    - **Total ≈ 292.9 per sample, 3 VDIV** (≈ 286.9 without crash). The WFd
+      chain (fold ≤ 22 + `voicePost_gainDist` 21) is 4 lower than T+D.
+    - The S093 P0 estimate (≈ 270) used `slp` modulators and no per-block
+      count.
+77. **MEASURED (S093 P8): the wavetable sync blend.** Inner loop 45: the
+    frame read (22) + `osc_syncPull()` (≈ 10: `over[i]`, `umull`, `smull`,
+    conditional add) + the second frame and mix (≈ 11) + **two stack
+    reloads** (`inc`, `ratioQ16`). The plain blend and the plain sync copy
+    have none; only their combination exceeds the integer registers.
+    - It runs only on Drum osc1 in `snc` with a slot. That mode totals
+      builder 7 + 45 = 52, against Drum's dearest 81 (FM): it sets no worst
+      case, and its slot excess is 0.
+    - Reading frame B through one pointer at +2,048 B measured 45 (no
+      change).
+78. **MEASURED (S093 P8): the Alkaline on the P8 image.**
+    - Fused loop `DiodeLadder_renderB2Osc` 214 (3 VDIV).
+    - Per block (`control_cost.py --elf`): async 956 + sync block 349 +
+      dispatch 14 = **1,319** (9 VDIV).
+    - Whole voice **214 + 41.2 = 255.2** (P6: 252.5), under 261.3.
+    - Per block by stage (standalone `control_cost.py`, LTO inlines them in
+      the image):
+
+      | Stage | Instr. | VDIV |
+      |---|---:|---:|
+      | `alkMeg_step` | 247 | 2 |
+      | `dl_slowUpdate` | 228 | 0 |
+      | `alk_expoCurrent` | 190 | 3 |
+      | `alkAcc_step` (`ALK_ACC_SOLVES` 1) | 129 | 3 |
+      | `alkMeg_n53` | 73 | 0 |
+      | `alkVeg_step` | 45 | 0 |
+      | `alk_prewarp` | 36 | 1 |
+      | `DiodeLadder_setNet` | 32 | 0 |
+
+    - **Decided, not yet in the tree** (S093 P8 revision 3, D12/D13): frame
+      blending with an interpolation slot.
+      - Prototype: blend loop 228, no-slot loop 213, per block 1,391.
+      - Whole voice 256.5 (no slot) / **271.5 (slot held)**. The slot-held
+        figure is over 261.3; the user accepts it for now. Its excess (+15)
+        is below the pool's per-slot ceiling (45, item 75).
+79. **METHOD (S093 P8): findings for later measurements.**
+    - **A call that writes `modulationNode` state from an engine's sync
+      render moves the mixer's register allocation.** The Alkaline
+      prototype called `modNode_interpClaim()` in `alk_renderWtb()`: two
+      mixer hot loops grew by 1 (a decimation loop 10 → 11, a table shaper
+      36 → 37). A stub with no global writes passed, and so did the claim
+      moved to the async. Engine-side claims belong in the async.
+    - **In a copied tree, plain `make` can build nothing.** With the
+      dependency files present, the default goal becomes `build/main.o`, and
+      copied timestamps look current. Use `rm -rf build && make all` in
+      every scratch copy.
+
 ---
 
 ## Binding Mandates — DSP CPU Policy

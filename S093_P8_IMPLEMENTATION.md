@@ -14,6 +14,12 @@
   passed. Device checks in §13 were not run, and document updates P8-6 were
   omitted per the user's scope correction. Progress and measured deviations
   are recorded in §17.
+- **Revision 3 (2026-11-10, after the hardware pass):** the Alkaline
+  wavetable blends frames while holding an interpolation slot
+  (`S093_P8_WAVETABLE_REASSESSMENT.md` §14, D12/D13). Implemented directly in
+  the tree. The change list, the gates and the working notes are in **§18**,
+  which overrides §6–§7 and §12.4 where they differ. **Status:** host and
+  linked firmware gates passed; device checks (§18.5) pending.
 - **Base:** the tree at `9c2a3de2` (P6 landed). Line numbers are that tree's.
 - **Tags:**
   - **ADD**, **MODIFY**, **REMOVE**: a change, with its line anchor;
@@ -2914,3 +2920,198 @@ erases sectors 7–11, installs, commits catalogue v3.
 | The `typ` writer, the wave domain, the classifier, `instrumentManager_osc()` for ALK | `InstrumentManager.c` l. 3881–3901, 838–857, 3987–4034, 2383 |
 | Unknown keys skipped; absent keys load 0 | `FILESYSTEM_SPEC.md` l. 1821, 1928 |
 | The built-in 8-bit ROM sounds | `Samples.c` l. 67; `transientTables.c` l. 63; `Oscillator.c` l. 529–554 |
+
+---
+
+## 18. Revision 3: Alkaline wavetable frame blending with an interpolation slot
+
+- **Decisions:** `S093_P8_WAVETABLE_REASSESSMENT.md` §14:
+  - D12: the Alkaline wavetable blends frames while it holds one of the two
+    interpolation slots, as Drum, Snare, Cymbal and HiHat do;
+  - D13: the slot-held voice's over-budget (271.5 against 261.3, measured on
+    the prototype) is accepted for now.
+- **Why:** on the device the P8 wavetables did not sound interpolated. By
+  design (P8-D4): the voice stepped one whole frame per block and never
+  claimed a slot.
+- **Base:** the tree at `1be8f375` (P8 implemented and passed). Line numbers
+  in §18.1 are that tree's.
+- **Binding rules** (as §0 header, plus):
+  - the claim is made in the async, never in the sync render. A claim in
+    the render moved two mixer hot loops by +1 in the prototype (reassessment
+    §14.1);
+  - no new RAM: the frame position reuses `OscInfo.waveInterpFrac`
+    (documented unused since S087 P1), and the grant flag fills the padding
+    byte after `AlkalineVoice.pitchJump`;
+  - no document under `knowledge_files/` or `MEMORY.md` is edited by this
+    revision. Statements made out of date are listed in §18.4.
+
+### 18.1 Change list
+
+| # | File | Change |
+|---|---|---|
+| R3-1 | `Core/DSPAudio/DiodeLadder.c` | `dl_renderB2Body()` gains `rowB`, `ff0`, `ffStep` and a `fused == 2` branch (two rows at one phase, mixed by a per-sample ramp); the existing wrappers pass `0, 0.0f, 0.0f`; ADD `DiodeLadder_renderB2Osc2()`, `noinline` |
+| R3-2 | `Core/DSPAudio/DiodeLadder.h` | ADD the `DiodeLadder_renderB2Osc2()` prototype with its contract |
+| R3-3 | `Core/DSP/Instruments/Alkaline/AlkalineVoice.h` | ADD `uint8_t wtbSlot` after `pitchJump` (padding); MODIFY the `osc` member's comment (the bind fields under wtb) |
+| R3-4 | `Core/DSPAudio/Oscillator.h` | MODIFY the `waveInterpFrac` comment (used by the Alkaline wtb) |
+| R3-5 | `AlkalineVoice.c` | REPLACE `alk_wtbFrameOf()` by `alk_wtbFramePos()` (the fractional frame position); MODIFY `alk_wtbBind()` (first row; position jumps to pos), `alk_wtbTrigger()` (position jumps to pos), `alk_wtbControl()` (no stepping; the claim); REPLACE `alk_renderWtb()` (glide, blend with a slot, nearest frame without); MODIFY `Alkaline_initVoice()` and `Alkaline_setOscType()` (clear the grant and the stamp) |
+| R3-6 | `tools/alkaline/control_cost.py` | ITERS: `DiodeLadder_renderB2Osc2` rank 1 = 0 (the audio loop), with the B2R guard; STUBS: `modNode_interpClaim()` |
+| R3-7 | `tools/dsp_test/modules/alkaline.c` | the claim stub switchable; AL-W rewritten for the glide and the blend (with and without a slot) |
+| R3-8 | `tools/dsp_test/Makefile` | the wtb break build retargeted (the row-pointer step is gone): the crossfade ramp and the one-frame glide limit |
+
+### 18.2 Gates
+
+| Gate | Pass |
+|---|---|
+| Host `make -C tools/dsp_test alkaline` | 0 failures; every break build caught |
+| Host `oscillator`, `samples` | unchanged, 0 failures |
+| `make clean && make all` | links; no new warning |
+| Loops (`elf_looppath.py`) | `DiodeLadder_renderB2Osc` ≤ 214; `DiodeLadder_renderB2Osc2` measured (prototype 228) |
+| Per block (`control_cost.py --elf`) | measured (prototype 1,391) |
+| `elf_p4_check` | oscillators 77/77 exact; mixer 0 grew |
+| `link_budget.py` | ITCM unchanged (12,128 B); flash headroom recorded |
+| RAM | `.data` / `.bss` unchanged |
+
+### 18.3 Working notes
+
+- **2026-11-10, R3-1/R3-2 (ladder) done:**
+  - `dl_renderB2Body()` takes `rowB`, `ff0`, `ffStep`, plus a `fused == 2`
+    branch: two rows interpolated in float at the shared phase, mixed by a
+    per-sample ramp `ff`;
+  - `DiodeLadder_renderB2()` and `DiodeLadder_renderB2Osc()` pass
+    `0, 0.0f, 0.0f`. `fused` is a constant in each wrapper, so their code is
+    unchanged;
+  - `DiodeLadder_renderB2Osc2()` is added `noinline` (the prototype measured
+    231 inlined, 228 out of line), and its prototype and contract are in
+    `DiodeLadder.h`.
+- **2026-11-10, R3-3/R3-4 (headers) done:**
+  - `AlkalineVoice.wtbSlot` is added after `pitchJump`, in the padding byte
+    before `gateLeft`, with its contract;
+  - the `osc` member's comment describes the revision-3 bind fields;
+  - `OscInfo.waveInterpFrac` gets a full comment block (the Alkaline wtb
+    frame position; still unused by the other instruments).
+- **2026-11-10, R3-5 (`AlkalineVoice.c`) done:**
+  - `alk_wtbFrameOf()` (nearest frame) is replaced by `alk_wtbFramePos()`
+    (fractional, Drum's `osc_wtbFramePos()` law);
+  - the bind keeps the first row and sets `waveInterpFrac` to pos's
+    position;
+  - the trigger sets `waveInterpFrac` to pos's position;
+  - `alk_wtbControl()` drops the per-block step and claims a slot after
+    `osc_setTableFreq()`, for tables of two frames or more, into
+    `wtbSlot`;
+  - `alk_renderWtb()` does the glide (≤ 1 frame per block, stopping at the
+    next frame boundary), the blend through `DiodeLadder_renderB2Osc2()`
+    with a slot, and the nearest frame without one;
+  - `Alkaline_initVoice()` and `Alkaline_setOscType()` clear `wtbSlot` and
+    `osc.interpStamp`. The type switch's clear matches Drum's
+    `osc_setType()` (S087 A18) and was not in the prototype.
+  - The code of the control and the render is the measured prototype's
+    (`v8`); the comments are new.
+- **2026-11-10, firmware gates (revision 3) passed:**
+  - **Build:** `make clean && make all` links. The warnings are the existing
+    set (newlib stubs, USB, filesystem, splash, pattern); none is in a
+    changed file.
+  - **Image:** text 710,416 B; flash 710,836 / 753,664 B (headroom 42,828 B;
+    P8 44,556 B, so −1,728 B for the second loop copy and the render). ITCM
+    12,128 B (unchanged). FXBUF 126,656 B, margin 3,776 B (unchanged).
+  - **Loops (`elf_looppath.py --cond-heads --in-range`):**
+    `DiodeLadder_renderB2Osc` **213**, 3 VDIV (P8: 214);
+    `DiodeLadder_renderB2Osc2` **228**, 3 VDIV. `alk_renderWtb` and the sync
+    block have no loop of their own.
+  - **Per block (`control_cost.py --elf --iters DiodeLadder_renderB2Osc2:1=0`):**
+    async 957 + sync block 407 + dispatch 14 = **1,378** (43.1 per sample),
+    9 VDIV. The prototype was 1,391; the bind no longer computes a frame
+    row (`alk_wtbBind` 46 → 33).
+  - **Whole voice:**
+    - no slot: 213 + 43.1 = **256.1** (≤ 261.3);
+    - slot held: 228 + 43.1 = **271.1**: over 261.3 by 9.8, the over-budget
+      accepted in D13. The +15 is charged to the pool, whose per-slot
+      ceiling is the `itp` fade's 45.
+  - **`elf_p4_check`:** oscillators 77/77 exact; mixer 32 hot loops equal,
+    0 shrank, 0 grew. Run on a copy of the ELF at a path without spaces
+    (the Makefile does not quote `FW_ELF`).
+  - **RAM:** every `.data` / `.bss` symbol has the same size as on the P8
+    image (`nm -S` diff empty). `.dtcmz` is 3,884 B against 3,880 B: the same
+    20 objects (3,879 B) in a different LTO order, with 5 B of alignment
+    gaps in place of 1 (DTCM statics 4,392 → 4,396 B). No object was added.
+- **2026-11-10, R3-6 (`control_cost.py`) done:**
+  - ITERS gives `DiodeLadder_renderB2Osc2` rank 1 weight 0 (the audio
+    loop), so `--elf` no longer needs an `--iters` override;
+  - the B2R guard (3 VDIV, length ≥ 200) covers it;
+  - STUBS add a granting `modNode_interpClaim()` for the standalone link.
+  - **Results:** `--elf` gives 1,378 per block; the standalone run (no LTO,
+    claim stub) gives 1,425 (async 1,001 + sync 410 + 14).
+- **2026-11-10, R3-7/R3-8 (bench) done:**
+  - **Claim stub:** `modNode_interpClaim()` grants by `w_grant` and counts
+    its calls.
+  - **AL-W, rewritten:**
+    - W1/W2: the voice against a reference over 3,000 blocks, three runs
+      (no slot, slot, a slot that comes and goes every 50 blocks). Without a
+      slot the reference is the table read of the nearest frame + the plain
+      B2R; with one, `DiodeLadder_renderB2Osc2()` on the restated pair and
+      ramp. The frame position is checked exactly against the restated
+      glide law;
+    - W5: the two-row loop against the frames mixed in float, truncated and
+      fed to the plain B2R, plus a check that frame B is really read;
+    - W3: an install rebinds (first row, position = pos);
+    - W4: an empty catalogue is silent and never claims.
+  - **AL-TY:** a type change clears `interpStamp` and `wtbSlot`.
+  - **Makefile:** the old row-step break is replaced by two:
+    `alkaline_break_wtb` (the blend's ramp held at 0) and
+    `alkaline_break_glide` (the frame boundary one frame further on). The
+    index comment is updated.
+- **2026-11-10, host gates (revision 3) passed:**
+  - `alkaline`: every law 0 failures, with these results:
+    - AL-W no slot / slot / slot on/off: 0 samples, 0 phases, 0 positions
+      differ (0 / 3,000 / 1,500 blended blocks; 2,840 blocks between frames;
+      RMS 1,739 / 1,412 / 1,583 LSB);
+    - two-row loop: at most 1 LSB from the float-mix reference (peak
+      5,270 LSB), 3,977 LSB from frame A alone at mix ≈ 1;
+    - empty catalogue: peak 0, 0 claims.
+  - `alkaline_break`, `alkaline_break_wtb` and `alkaline_break_glide` are all
+    caught.
+  - `oscillator`, `samples` and `instrument_manager`: 0 failures, every break
+    caught. `special_tags`: 200 rows, 0 mismatches.
+  - **Fixed along the way:** the first W5 run held the currents of the
+    note's first block (VEG closed), so the loop was compared on silence
+    (peak 0) and passed vacuously. It now holds the currents after 12 blocks
+    and fails on silence.
+  - **Tooling note:** the generated `tools/dsp_test/build/gen/Oscillator.host.c`
+    was older than the P8 `Oscillator.c` and still named `OSC_BIND_WTB8`,
+    and its make rule did not rebuild it. Deleting the generated pair fixed
+    it. Delete `build/gen/Oscillator.host.*` when an `Oscillator.c` edit
+    does not show up in a host build.
+- **2026-11-10, revision 3 complete in the tree.** Device checks are in
+  §18.5. No commit (commits belong to the user).
+
+### 18.4 Statements made out of date (for the user to log; not edited here)
+
+- `MEMORY.md`: the Alkaline wavetable rule (one frame per block, no slot).
+- `knowledge_files/specification_reference/`:
+  - `dsp_instruments_effects/INSTRUMENTS_DSP_REFERENCE.md` §5.5 (Alkaline
+    wtb: stepping) and the §8.2 S093 P8 block's "decided, not yet in the
+    tree" (now in the tree, 256.1 / 271.1 per sample);
+  - `dsp_instruments_effects/CPU_USE_DSP_AUDIT.md` item 78 (the same: now in
+    the tree, per block 1,378);
+  - `OSC_INTERP_AUDIT.md` "Slot budget": the Alkaline is now a slot user (in
+    the tree);
+  - `STORAGE_SRAM_MANIFEST.md`: `OscInfo.waveInterpFrac` is used again
+    (Alkaline wtb only); `AlkalineVoice.wtbSlot` sits in former padding;
+    `.dtcmz` is 3,884 B (LTO layout, no new object).
+- `S093_P8_WAVETABLE_REASSESSMENT.md` §14.1: the prototype figures (per
+  block 1,391; 256.5 / 271.5) are superseded by the tree's (1,378;
+  256.1 / 271.1).
+
+### 18.5 Device checks (user)
+
+| Check | Pass |
+|---|---|
+| A `pos` sweep on a wavetable (knob, then an LFO) | smooth morph, no stepping or zipper |
+| The global oscillator interpolation setting off | the nearest frame (stepping), as Drum |
+| Two Drum wavetables holding both slots, then the Alkaline | the Alkaline steps (no slot) until one is released |
+| Alkaline wtb with no table installed | silence, no claim |
+| `cpu` widget, worst-case Scene with the Alkaline holding a slot | ≤ 100 %, 0 underruns (D13 accepted the per-voice over-budget) |
+- **2026-11-10, card image:** the clean build removed the tracked
+  `build/LXRV2_lxr02.img` (`make clean` deletes `build/`). It was rebuilt
+  from the revision-3 image with `make img` (CRC-stamped, 710,836 B
+  payload), so the tracked image matches the source. Copy it to the SD card
+  root for the §18.5 checks.

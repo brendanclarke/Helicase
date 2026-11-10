@@ -103,9 +103,12 @@ typedef struct AlkalineVoiceStruct
 {
 	/* VCO (S093 P8): oscType (typ), waveform (wav: Saw/Sqr; wtb: the
 	 * table), position (pos), phase/phaseInc; under wtb the bind state in
-	 * the sampleCache* fields: sampleCacheData = the 1,024-point row of the
-	 * frame being played, sampleCacheSize = the table's frame count;
-	 * positionApplied = the frame being played */
+	 * the sampleCache* fields: sampleCacheData = the table's first
+	 * 1,024-point row (frame f at + f x 1,024), sampleCacheSize = the
+	 * table's frame count; waveInterpFrac = the frame position being played
+	 * (0..frames - 1, fractional: between two frames the render blends
+	 * them; revision 3); interpStamp = the interpolation slot stamp
+	 * (modNode_interpClaim()). positionApplied is the wav pos bend's only */
 	OscInfo      osc;
 	DiodeLadder  ladder;
 	AlkMeg       meg;
@@ -132,6 +135,22 @@ typedef struct AlkalineVoiceStruct
 	uint8_t gliding;           /* this note glides (legato) */
 	uint8_t accentOn;          /* ACCENT lane */
 	uint8_t pitchJump;         /* set the pitch to the target at the next block */
+	/*
+	 * The wavetable's interpolation slot, this block (S093 P8 revision 3).
+	 *
+	 * What:       1 when alk_wtbControl() (the async) was granted a slot by
+	 *             modNode_interpClaim() this block, 0 otherwise.
+	 * Why:        the claim must run in the async, not in the sync render: a
+	 *             claim in the render moved two mixer hot loops (+1 each;
+	 *             S093 P8 reassessment §14.1). The render reads this byte
+	 *             instead. It fills the padding byte before gateLeft, so the
+	 *             struct does not grow.
+	 * Inputs:     alk_wtbControl(); Alkaline_initVoice() and
+	 *             Alkaline_setOscType() clear it.
+	 * Outputs:    read by alk_renderWtb() (blend with a slot, nearest frame
+	 *             without).
+	 */
+	uint8_t wtbSlot;
 	int32_t gateLeft;          /* samples of gate left (counted per block) */
 	int32_t accentLeft;        /* samples of ACCENT left (one step) */
 	float   pitchLog2;         /* the slide-lagged pitch, log2 Hz */

@@ -1434,6 +1434,8 @@ dual-issues simple instructions, and `VDIV.F32` costs about 14 cycles.
 | Crash sample / FM crash | 30 / 38 | 0 |
 | S087 `slp` plain / FM (inside loop) / ring / `smp` ring | 27 / 49–50 / 42 / 38 | 0 |
 | S087 `wtb` blend inner (plain/FM/ring/sync) | 34–38 / 42–46 / 43–47 / 44–48 | 0 |
+| S093 P8 `wtb` readers, 16-bit only, fixed 1,024-point read (linked): plain / blend, FM / FM blend, FM ramp / FM blend ramp, ring / ring blend, sync / sync blend | 22 / 33, 30 / 41, 31 / 42, 30 / 42, 32 / 45 | 0 |
+| S093 P8 linked crash loops: plain (in `calcNextOscSampleBlock`) / FM / ring / sync | 30 / 32 / 33 / 36 | 0 |
 | Transient sample / S087 sample click | 22 / 20 | 0 |
 | Saturating buffer add | about 4–5 (two samples per step) | 0 |
 | Sync reset-list builder (S085) | 7 | 0 |
@@ -1514,6 +1516,38 @@ below their frozen ceilings (A1):
 ITCM went from 8,512 (S086) to 15,032 (S087 D, before P1 v1 removal) to
 12,640 (after P1). The transient sample click adds 20 instructions per
 sample vs 22 for built-in clicks.
+
+**S093 P8 (measured on the linked P6 and P8 images, 2026-11-10;
+`CPU_USE_DSP_AUDIT.md` items 72–79).**
+- **The dearest choice per oscillator** is set by crash and `slp`, never by
+  a wavetable reader:
+  - plain oscillators and modulators: crash 30 (the S087 figure "27" above
+    assumed `slp`; with crash selectable the dearest is 30);
+  - FM carriers: `slp` 51 (Drum, ramp twin) / 50 (Cymbal/HiHat);
+  - ring and sync carriers: `slp` 42 / 41.
+  
+  So P8's shorter wavetable readers (§8.1) changed no voice's worst case.
+- **Per voice, no slot held:**
+
+  | Voice | Dearest | Per sample |
+  |---|---|---:|
+  | Drum (Basic ceiling) | `fm`: `slp` FM ramp 51 + crash modulator 30 | 261.3, 3 VDIV |
+  | Cymbal / HiHat (Advanced; measured, not frozen) | T+D: crash modulators 30 + 30, sum ≈ 2.5, `slp` FM 50, filter 92, click 22, post 25; per block ≈ 1,006; SRR 10 | ≈ 292.9, 3 VDIV |
+  | Alkaline (P8 image) | fused loop 214 + per block 1,319 / 32 | 255.2, 3 + 9/32 VDIV |
+
+- **The interpolation slots:** the S087 "+10..+13" above is the blend's
+  premium over the same reader. It is not what a slot adds to the worst
+  case:
+  - a wavetable blend on a plain oscillator adds 33 − 30 = 3 (P6: 8);
+  - a blended carrier adds 0, being below its voice's dearest setting;
+  - an `itp` fade adds 45 (old carrier plain, up to 30, + the
+    15-instruction crossfade).
+
+  The two-slot pool is therefore charged **90**, set by the `itp` fade.
+- **Decided, not yet in the tree (S093 P8 revision 3):** the Alkaline
+  wavetable claims a slot and blends frames: 256.5 per sample without a
+  slot, 271.5 with one. The slot-held figure is over 261.3 and accepted for
+  now; its +15 is below the pool's per-slot 45.
 
 ### 8.3 Share of the budget (audit estimates, ±50 %)
 

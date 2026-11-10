@@ -112,8 +112,10 @@ float alkMeg_n53(const AlkMeg *m)
  * first block after it.
  * S093 P6: the decay range is stretched, -20 % at decay 0 and +50 % at
  * decay 1 (user): r = ALK_MEG_R_MIN + ALK_MEG_R_SPAN x taper (fitted,
- * fit_meg_range.py). The accent branch keeps 68 k + 250 R, so an accented
- * note's decay is the 303's.
+ * fit_meg_range.py). The accent branch keeps 68 k + 250 R: while the
+ * accent lane is high (one step) the discharge is the 303's; the tail after
+ * it follows the stretched law, as on the 303, where the 4066 shorts VR6
+ * only during the lane (decay 1: 0.83 s -> 1.17 s to 10 %, the model).
  */
 float alkMeg_step(AlkMeg *m, const float decay, const uint8_t accent)
 {

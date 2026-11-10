@@ -3,8 +3,9 @@
  * AlkalineVoice.h - the Alkaline (TB-303) voice engine (S093 P0; B2R, drive
  * and the output make-up since S093 P3).
  *
- * What:       one Alkaline voice: the VCO (the existing ITCM table loop on
- *             sawTable or the D8 square table), the diode-ladder VCF with its
+ * What:       one Alkaline voice: the VCO (the fused table loop on sawTable,
+ *             the D8 square table or, since S093 P8, a wavetable frame's
+ *             1,024-point row), the diode-ladder VCF with its
  *             network and the OTA (DiodeLadder), and the control path (MEG,
  *             accent network, expo converter, VEG; AlkalineControl), with the
  *             303 sequencing rules: accent at velocity >= ALK_ACCENT_VELOCITY (101),
@@ -47,19 +48,69 @@
  * at the 303's own drive and the 7 V full scale (D17) keeps its headroom
  * when driven. Set by ear in the device listening (S093 P4). */
 #define ALK_MAKEUP_OCT        1.0f
-/* S093 P3: 1 = the oscillator read fused into the B2R loop
+/* S093 P3: 1 = the wav oscillator read fused into the B2R loop
  * (DiodeLadder_renderB2Osc); 0 = calcWavetableOscBlock() then
- * DiodeLadder_renderB2. Bit-identical output (AL-X). */
+ * DiodeLadder_renderB2 for the wav reference build. Typ wtb stays fused in
+ * both builds and uses the same table loop. Bit-identical wav output (AL-X). */
 #ifndef ALK_FUSED_OSC
 #define ALK_FUSED_OSC         1
 #endif
-/* Waveform selector values (row alk_wave). */
+/* osc.waveform under typ wav (S093 P8: row osc1_wave; was the
+ * AlkalineVoice.wave byte of row alk_wave). Under typ wtb the same byte is
+ * the wavetable index. */
 #define ALK_WAVE_SAW          0u
 #define ALK_WAVE_SQUARE       1u
+/*
+ * The typ byte (row osc1_type, S093 P8).
+ *
+ * What:       the stored and displayed value of the Alkaline typ cell:
+ *             0 wav (Saw/Sqr, the 303's VCO), 1 wtb (a wavetable frame);
+ *             ALK_TYP_COUNT entries (alkTypeNames, MenuText.h).
+ *             Alkaline_setOscType() maps it to OSC_TYPE_WAV / OSC_TYPE_WTB in
+ *             osc.oscType.
+ * Why:        S093 P8: wavetables only. Looped samples are over the Basic
+ *             ceiling on their loop alone (P8 assessment §6); one-shot samples
+ *             fit (loop 215) but their render grew two mixer loops of other
+ *             engines by 1 (P8 schedule §0), so they are left out (user,
+ *             S093 P8). osc.oscType keeps the platform's values so the shared
+ *             wave-cell helpers (instrumentManager_osc1Type(), osc_userCount(),
+ *             menu_formatWaveCell()) need no Alkaline map.
+ * Accessors:  Alkaline_setOscType(); AlkalineParameters.c osc1_type row.
+ */
+#define ALK_TYP_WAV           0u
+#define ALK_TYP_WTB           1u
+#define ALK_TYP_COUNT         2u
+/*
+ * The Alkaline's wavetable bind state (S093 P8), kept in
+ * osc.sampleCacheLooped.
+ *
+ * What:       ALK_BIND_NONE (nothing bound: the next block or trigger binds),
+ *             ALK_BIND_WTB (a table's 1,024-point rows are bound). With
+ *             osc.sampleCacheIndex (the bound table) and
+ *             osc.sampleCacheGeneration (the catalogue generation) they are
+ *             the key alk_wtbKeyChanged() compares each block.
+ * Why:        the Alkaline binds its own tables (P8 §7): osc_userBind() is
+ *             never called on an Alkaline oscillator (its callers are
+ *             osc_setFreq(), osc_setType() and osc_typedTriggerPhase(), none of
+ *             which an Alkaline reaches), so these values never meet the
+ *             OSC_BIND_* ones in the same field.
+ * Accessors:  AlkalineVoice.c (alk_wtbBind(), alk_wtbKeyChanged(),
+ *             Alkaline_setOscType()).
+ */
+#define ALK_BIND_NONE         0u
+#define ALK_BIND_WTB          1u
 
 typedef struct AlkalineVoiceStruct
 {
-	OscInfo      osc;          /* VCO: waveform SAW for the octave index */
+	/* VCO (S093 P8): oscType (typ), waveform (wav: Saw/Sqr; wtb: the
+	 * table), position (pos), phase/phaseInc; under wtb the bind state in
+	 * the sampleCache* fields: sampleCacheData = the table's first
+	 * 1,024-point row (frame f at + f x 1,024), sampleCacheSize = the
+	 * table's frame count; waveInterpFrac = the frame position being played
+	 * (0..frames - 1, fractional: between two frames the render blends
+	 * them; revision 3); interpStamp = the interpolation slot stamp
+	 * (modNode_interpClaim()). positionApplied is the wav pos bend's only */
+	OscInfo      osc;
 	DiodeLadder  ladder;
 	AlkMeg       meg;
 	AlkAccentNet accNet;
@@ -77,7 +128,6 @@ typedef struct AlkalineVoiceStruct
 	float   attack;            /* 0..1 (S093 P6, alk_attack): VEG attack as the CPU trigger width, 0 = 0.70 ms (today), 1 = 0.55 ms */
 	float   vol;               /* 0..1, read by the mixer only */
 	uint8_t pan;
-	uint8_t wave;              /* ALK_WAVE_* */
 	uint8_t slide;             /* 0/1, latched at each trigger */
 
 	/* --- sequencing state --- */
@@ -86,6 +136,22 @@ typedef struct AlkalineVoiceStruct
 	uint8_t gliding;           /* this note glides (legato) */
 	uint8_t accentOn;          /* ACCENT lane */
 	uint8_t pitchJump;         /* set the pitch to the target at the next block */
+	/*
+	 * The wavetable's interpolation slot, this block (S093 P8 revision 3).
+	 *
+	 * What:       1 when alk_wtbControl() (the async) was granted a slot by
+	 *             modNode_interpClaim() this block, 0 otherwise.
+	 * Why:        the claim must run in the async, not in the sync render: a
+	 *             claim in the render moved two mixer hot loops (+1 each;
+	 *             S093 P8 reassessment §14.1). The render reads this byte
+	 *             instead. It fills the padding byte before gateLeft, so the
+	 *             struct does not grow.
+	 * Inputs:     alk_wtbControl(); Alkaline_initVoice() and
+	 *             Alkaline_setOscType() clear it.
+	 * Outputs:    read by alk_renderWtb() (blend with a slot, nearest frame
+	 *             without).
+	 */
+	uint8_t wtbSlot;
 	int32_t gateLeft;          /* samples of gate left (counted per block) */
 	int32_t accentLeft;        /* samples of ACCENT left (one step) */
 	float   pitchLog2;         /* the slide-lagged pitch, log2 Hz */
@@ -146,6 +212,26 @@ void Alkaline_calcVoiceSyncBlock(AlkalineVoice *voice, int16_t *buf, uint8_t siz
  *             sounding note.
  */
 uint8_t Alkaline_isQuiet(const AlkalineVoice *voice);
+
+/*
+ * Set the oscillator type from the typ byte (S093 P8).
+ *
+ * What:       maps ALK_TYP_* to osc.oscType (0 wav, 1 and above wtb); clamps
+ *             osc.waveform to the new type's list (wav: Saw/Sqr; wtb: the
+ *             installed tables); clears the bind so the next block (or
+ *             trigger) binds; re-anchors positionApplied to pos. The phase
+ *             runs on (both types are 2^32 per cycle). An unchanged type is a
+ *             no-op.
+ * Why:        the platform's osc_setType() binds through Drum's generic
+ *             osc_userBind() and reads the byte as OSC_TYPE_* (1 = smp); the
+ *             Alkaline binds its own tables (P8 §7) and offers wav and wtb.
+ * Inputs:     voice (non-NULL), typ (0..255).
+ * Outputs:    osc.oscType, waveform, positionApplied, sampleCacheLooped.
+ * Accessors:  InstrumentManager.c instrumentManager_writeSpecialRuntime()
+ *             (IM_SPECIAL_OSC_TYPE, an Alkaline slot); the host bench.
+ * Affiliates: ALK_TYP_*; alk_wtbBind() (AlkalineVoice.c).
+ */
+void Alkaline_setOscType(AlkalineVoice *voice, uint8_t typ);
 
 #endif /* ALKALINEVOICE_H_ */
 

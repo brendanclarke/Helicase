@@ -297,7 +297,23 @@ typedef struct OscStruct
 	 * Affiliates: modNode_resetTargets(); OSC_WAVE_INTERP_MAX_ACTIVE.
 	 */
 	uint8_t		interpStamp;
-	float		waveInterpFrac;			/* S087 P1: unused (wav interpolation retired, A7); kept for the OscInfo layout */
+	/*
+	 * The Alkaline wavetable's frame position (S093 P8 revision 3).
+	 *
+	 * What:       under the Alkaline's typ wtb only: the frame position being
+	 *             played, 0..frames - 1, fractional (2.25 = a quarter of the
+	 *             way from frame 2 to frame 3). It glides toward pos at most
+	 *             one frame per block.
+	 * Why:        S087 P1 retired the field (wav interpolation, A7) and kept
+	 *             it for the OscInfo layout; the Alkaline reuses it so its
+	 *             blend adds no RAM. Drum, Snare, Cymbal and HiHat do not
+	 *             read or write it (their wavetables keep the position in
+	 *             positionApplied / positionBendStep).
+	 * Inputs:     AlkalineVoice.c alk_wtbBind(), alk_wtbTrigger() (jump to
+	 *             pos), alk_renderWtb() (the glide).
+	 * Outputs:    read by alk_renderWtb().
+	 */
+	float		waveInterpFrac;
 	uint32_t	waveInterpGeneration;	/* S087 P1: unused; kept for the OscInfo layout */
 	float		freqCacheValue;
 	uint8_t		freqCacheWaveform;

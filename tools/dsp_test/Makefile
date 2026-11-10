@@ -31,8 +31,8 @@
 #               stock_tables        tools/plots/gen_stock_tables.py --check
 #               alkaline            modules/alkaline.c (S093 P0: DiodeLadder,
 #                                   AlkalineControl, AlkalineVoice over the
-#                                   real Oscillator.c; + legato and wtb row
-#                                   stepping breaks)
+#                                   real Oscillator.c; + legato, wtb blend
+#                                   ramp and wtb glide breaks)
 #               alkaline_tables     tools/alkaline/gen_alk_tables.py --check
 #             A break build compiles a deliberately broken copy and must fail.
 # Why:        keeps the laws earlier sessions proved runnable against today's
@@ -341,16 +341,31 @@ alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c | $(GEN)
 	@if ./build/alkaline_break >/dev/null 2>&1; then \
 	  echo "alkaline_break: FAILED (legato break not caught)"; exit 1; \
 	else echo "alkaline_break: caught (law AL-S fails as expected)"; fi
+# S093 P8 revision 3: two break proofs for the wavetable glide and blend.
+# (1) the blend's mix held at its start value (no per-sample ramp): law
+#     AL-W "slot" must fail (the reference ramps from start to end).
 	mkdir -p build/break_alk_wtb
-	sed 's/osc->sampleCacheData += step \* (int32_t)WAVETABLE_ROW_POINTS;/(void)step;/' \
+	sed 's/const float ffStep = (end - start) \* (1.0f \/ (float)OUTPUT_DMA_SIZE);/const float ffStep = 0.0f;/' \
 	  $(GEN)/AlkalineVoice.host.c > build/break_alk_wtb/AlkalineVoice.host.c
-	@grep -q '(void)step;' build/break_alk_wtb/AlkalineVoice.host.c || \
+	@grep -q 'const float ffStep = 0.0f;' build/break_alk_wtb/AlkalineVoice.host.c || \
 	  { echo "alkaline_break_wtb: sed did not apply"; exit 1; }
 	$(HOSTCC) -Ibuild/break_alk_wtb $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
 	  $(CAT_HOST_SRC) -o build/alkaline_break_wtb -lm
 	@if ./build/alkaline_break_wtb >/dev/null 2>&1; then \
-	  echo "alkaline_break_wtb: FAILED (a frame row that does not follow pos not caught)"; exit 1; \
+	  echo "alkaline_break_wtb: FAILED (a blend without its ramp not caught)"; exit 1; \
 	else echo "alkaline_break_wtb: caught (law AL-W fails as expected)"; fi
+# (2) the glide may cross a frame boundary inside a block (the boundary
+#     one frame further on): the position law of AL-W must fail.
+	mkdir -p build/break_alk_glide
+	sed 's/const float k = floorf(start) + 1.0f;/const float k = floorf(start) + 2.0f;/' \
+	  $(GEN)/AlkalineVoice.host.c > build/break_alk_glide/AlkalineVoice.host.c
+	@grep -q 'floorf(start) + 2.0f;' build/break_alk_glide/AlkalineVoice.host.c || \
+	  { echo "alkaline_break_glide: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk_glide $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break_glide -lm
+	@if ./build/alkaline_break_glide >/dev/null 2>&1; then \
+	  echo "alkaline_break_glide: FAILED (a glide across a frame boundary not caught)"; exit 1; \
+	else echo "alkaline_break_glide: caught (law AL-W fails as expected)"; fi
 
 alkaline_tables:
 	cd $(ROOT) && python3 tools/alkaline/gen_alk_tables.py --check

@@ -61,6 +61,10 @@ ITERS = {
     # per-block work: weight 0 here
     ("DiodeLadder_renderB2", 1): 0,
     ("DiodeLadder_renderB2Osc", 1): 0,       # S093 P3: the fused oscillator read
+    # S093 P8 revision 3: the two-row blend (alk_renderWtb() with a slot),
+    # noinline, so its only loop is the audio loop (228); weight 0 like
+    # the one-row loop, and the B2R guard below checks it the same way
+    ("DiodeLadder_renderB2Osc2", 1): 0,
     ("DiodeLadder_renderB", 1): 0,
     ("DiodeLadder_renderA", 1): 0,
     # S093 P4 (G4): on the linked image LTO inlines the fused B2R read into
@@ -107,6 +111,10 @@ const wavetable_catalogue_entry_t *sampleMemory_wavetableEntry(uint8_t index)
 { return index ? (const wavetable_catalogue_entry_t *)0 : &stub_entry; }
 const int16_t *sampleMemory_wavetableRows(const wavetable_catalogue_entry_t *entry)
 { return entry ? stub_rows[0] : (const int16_t *)0; }
+/* S093 P8 revision 3: the wtb control claims an interpolation slot every
+ * block (modulationNode.c on the device; --elf costs the real one). The stub
+ * grants, so a run with typ wtb takes the blend path */
+uint8_t modNode_interpClaim(void *osc) { (void)osc; return 1u; }
 AlkalineVoice v;
 int16_t buf[32];
 int main(void)
@@ -226,8 +234,10 @@ def total(elf, sym, memo, ext, trace, depth=0):
         # longest loop is the fused B2R audio loop (3 VDIV, ~214). If a later
         # layout stops inlining DiodeLadder_renderB2Osc, rank 1 would be a
         # control loop and weight 0 would undercount G4 silently.
-        # S093 P8: the same check for the out-of-line fused table loop
-        if base in ("Alkaline_calcVoiceSyncBlock", "DiodeLadder_renderB2Osc") \
+        # S093 P8: the same check for the out-of-line fused table loop,
+        # and (revision 3) for its two-row blend copy
+        if base in ("Alkaline_calcVoiceSyncBlock", "DiodeLadder_renderB2Osc",
+                    "DiodeLadder_renderB2Osc2") \
                 and it == 0 and (lv != 3 or length < 200):
             sys.exit(f"control_cost.py: loop {rank} of {base} (length {length}, {lv} VDIV) "
                      f"is not the fused B2R audio loop; give it an iteration count "

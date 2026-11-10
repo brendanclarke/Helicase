@@ -160,6 +160,24 @@ void DiodeLadder_renderB2(DiodeLadder *dl, int16_t *buf, float sScale,
 void DiodeLadder_renderB2Osc(DiodeLadder *dl, int16_t *buf, const int16_t *row,
                              uint32_t *phase, uint32_t phaseInc, float sScale,
                              float iLadEnd, float iAbcEnd);
+/*
+ * B2R with two wavetable rows blended (S093 P8 revision 3).
+ *
+ * What:       as DiodeLadder_renderB2Osc(), with two 1,024-point rows read
+ *             at the same phase and mixed per sample:
+ *             s_j = (A_j + ff_j (B_j - A_j)) x sScale, ff_j = ff0 + j ffStep.
+ * Why:        the Alkaline wavetable's frame blend while it holds one of the
+ *             two interpolation slots (Drum's wavetables blend the same way).
+ * Inputs:     rowA, rowB: frames p and p + 1 of one table; ff0 0..1; ffStep
+ *             per sample; the rest as DiodeLadder_renderB2Osc().
+ * Outputs:    buf, *phase, the ladder state.
+ * Accessors:  AlkalineVoice.c alk_renderWtb().
+ * Cost:       228 per sample linked, 3 VDIV (the one-row loop: 213).
+ */
+void DiodeLadder_renderB2Osc2(DiodeLadder *dl, int16_t *buf, const int16_t *rowA,
+                              const int16_t *rowB, uint32_t *phase, uint32_t phaseInc,
+                              float ff0, float ffStep, float sScale,
+                              float iLadEnd, float iAbcEnd);
 void DiodeLadder_renderB(DiodeLadder *dl, int16_t *buf, float sScale,
                          float iLadEnd, float iAbcEnd);
 void DiodeLadder_renderA(DiodeLadder *dl, int16_t *buf, float sScale,

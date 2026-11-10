@@ -30,6 +30,16 @@
 
   The linked measurements behind these are in `S093_P8_IMPLEMENTATION.md`
   §0, which is amended next.
+- **Revision 3 (user decisions, 2026-11-10, after the hardware pass): §14
+  overrides §0–§13 where they differ.**
+  - The Alkaline wavetable blends frames, holding an interpolation slot as
+    the other instruments do (D12). Supersedes P8-D4 and §4.3 "Blend between
+    frames: not offered".
+  - The slot-held Alkaline voice is over the per-voice ceiling (271.5
+    against 261.3); accepted for now (D13).
+  - The crash wave stays for now; its removal is studied in
+    `DRAFT_SAMPLE_VOICE_REDUCTIONS.md` (D14).
+  - `S093_P8_IMPLEMENTATION.md` is not yet amended for revision 3.
 
 ---
 
@@ -214,7 +224,8 @@ be resampled. Two storage options:
   - Per-octave copies would multiply the copy's flash by up to 11. Not
     planned. It is a listening item.
 - **Blend between frames:** not offered. It needs two reads per sample (P7
-  measured 252–262). Stepping is the price of the budget.
+  measured 252–262). Stepping is the price of the budget. **Superseded by
+  §14 D12 (revision 3): the frames blend while a slot is held.**
 
 ---
 
@@ -348,7 +359,7 @@ changes:
 | A per-voice RAM row, filled when the frame changes | 2 KB per voice (sign-off). The fill (≈ 1,024 × several cycles) lands in the block where `pos` moves, so an LFO on `pos` makes it every block. Not constant cost |
 | A runtime-shift loop for power-of-two frame lengths | Listed under Failed Approaches (S086: "new variable-shift reader loops"). It is also unnecessary once the data is 1,024 points |
 | Advanced class for typed modes (P7 Option A) | Against the brief |
-| The interpolation-slot lock (P6 §7.5) | A slot is worth ≈ 10–12 per sample of blend premium; there is no blend in P8 |
+| The interpolation-slot lock (P6 §7.5) | A slot is worth ≈ 10–12 per sample of blend premium; there is no blend in P8. **Taken in revision 3 (§14 D12)** |
 
 ---
 
@@ -359,7 +370,7 @@ changes:
 | **P8-D1** | Wavetable storage | N2: a copy beside the raw frames | **N1:** one 1,024-point 16-bit copy, used by every instrument; no raw frames (D1′) |
 | **P8-D2** | Looped samples | A: not offered in P8 | **Not offered** |
 | **P8-D3** | `pos` on `smp` | Start point at the note | **Void:** one-shot samples are not offered (D7) |
-| **P8-D4** | `pos` on `wtb` | One frame per block toward the target | **As recommended** |
+| **P8-D4** | `pos` on `wtb` | One frame per block toward the target | **As recommended**; **superseded by §14 D12** (revision 3: the position glides at most one frame per block and the frames blend while a slot is held) |
 | **P8-D5** | `typ` list | Alkaline-only three-entry list | **Alkaline-only two-entry list: `wav`, `wtb`** |
 | **P8-D6** | P7 document | Marked discarded, kept as a record | **As recommended** |
 
@@ -516,6 +527,9 @@ loads.
     (every stored frame is 1,024 points, O3). Each reader's worst case then
     falls by 3–5, and its loop is below the former 16-bit copy in nine
     readers (+1 in the sync blend).
+  - **Corrected in revision 3 (§14.3):** the readers' own loops drop, but no
+    voice's worst case does. No wavetable reader was ever the dearest choice
+    for its oscillator.
 - **CPU audit:** the Drum/Snare/Cymbal/HiHat `wtb` figures in
   `CPU_USE_DSP_AUDIT.md` are re-measured.
 
@@ -584,3 +598,108 @@ handling cut back step by step, `arm-none-eabi-size`; scratch builds):
 - the borrowed name cache (D8). Load/Save reloads its index after the loan,
   as after copy/clear.
 
+
+---
+
+## 14. Decisions, revision 3 (user, S093 P8, 2026-11-10, after the hardware pass)
+
+These override §0–§13 where they differ. The P8 implementation passes on the
+device, but the Alkaline wavetables did not sound interpolated. That was by
+design (P8-D4): the voice stepped one whole frame per block and never claimed
+a slot. Revision 3 adds the blend. `S093_P8_IMPLEMENTATION.md` is to be
+amended to match; it is not amended yet.
+
+| # | Decision | Detail |
+|---|---|---|
+| **D12** | **The Alkaline wavetable blends frames while holding an interpolation slot**, as Drum, Snare, Cymbal and HiHat do | Claim in the async, blend in a two-row ladder loop, nearest frame without a slot (§14.1) |
+| **D13** | **The slot-held voice's over-budget is accepted for now** | No slot: 256.5 per sample (under 261.3). Slot held: **271.5**. The +15 is charged to the 2-slot pool, whose ceiling is set by the `itp` fade (§14.2) |
+| **D14** | **The crash wave stays for now** | Its removal, the sync blend and further Alkaline reductions are studied in `DRAFT_SAMPLE_VOICE_REDUCTIONS.md` |
+
+### 14.1 D12: the design (prototyped and measured in scratch)
+
+- **Claim:** `alk_wtbControl()` (the async) calls `modNode_interpClaim(osc)`
+  when the table has two or more frames, and stores the grant in a new
+  `AlkalineVoice.wtbSlot` byte. The byte fills the padding after
+  `pitchJump`, so no object changes size.
+  - The async runs after `modNode_resetTargets()` and before the sync render
+    (`mixer.c` l. 915, 931).
+  - Claims are sticky and the setting is global, as for Drum.
+  - **The claim must not be in the sync render.** There, the mixer gate
+    failed (two hot loops +1: a decimation loop 10 → 11, a table shaper
+    36 → 37). Bisected: a stub claim with no global writes passed; the real
+    claim in the render failed; the claim in the async passed.
+- **Glide:** the frame position (`OscInfo.waveInterpFrac`, a float) moves
+  toward `pos` at most one frame per block. A block never crosses a frame
+  boundary; it ends on it, and the next block starts the next pair. A trigger
+  or a new table jumps to `pos`.
+  - `waveInterpFrac` is documented "S087 P1: unused, kept for layout"; it is
+    reused here (no new RAM). Its comment changes with the code.
+- **Render:** with a slot, `DiodeLadder_renderB2Osc2()` (new, out of line)
+  reads rows `p` and `p + 1` at the same phase and mixes them with a
+  per-sample ramp from the block's start to end position. Without a slot (or
+  one frame): the nearest frame through `DiodeLadder_renderB2Osc()`.
+- **Measured (linked, revision-3 build):**
+
+  | | Figure |
+  |---|---:|
+  | Loop, no slot (`DiodeLadder_renderB2Osc`) | 213 (P8: 214) |
+  | Loop, slot held (`DiodeLadder_renderB2Osc2`) | 228 |
+  | Per block (`control_cost.py --elf`) | 1,391 (P8: 1,319) |
+  | Whole voice, no slot / slot held | **256.5 / 271.5** (P8: 255.2) |
+  | `elf_p4_check` | oscillators 77/77 exact; mixer 32 equal |
+  | ITCM / flash headroom | 12,128 B / 42,804 B |
+
+  With two callers, LTO now keeps `dl_slowUpdate()` out of line; its
+  per-block cost is inside the 1,391.
+
+### 14.2 D13: the budget, per voice and per slot (measured, P6 and P8 images)
+
+**Per voice, no slot held:**
+
+| Voice | Dearest oscillator section | P6 | P8 | Without crash |
+|---|---|---:|---:|---:|
+| Drum (the Basic ceiling) | `slp` FM ramp carrier 51 + modulator 30 (crash) | 261.3 | 261.3 | 258.3 |
+| Snare | noise + tonal 30 (crash) | not frozen | Δ 0 | −3 |
+| Cymbal / HiHat | modulators 30 + 30 (crash) + `slp` FM carrier 50 | not frozen | Δ 0 | −6 |
+| Alkaline | fused loop | 252.5 | 255.2 → 256.5 (D12) | unchanged |
+
+**What one slot adds to its voice's dearest setting:**
+
+| Slot user | P6 | P8 | P8 without crash |
+|---|---:|---:|---:|
+| Wavetable blend on a plain oscillator | 38 − 30 = 8 | 33 − 30 = 3 | 6 |
+| Wavetable blend on an FM, ring or sync carrier | 0 | 0 | 0 |
+| `itp` fade (old carrier plain + 15-instruction crossfade) | **45** | **45** | 42 |
+| Alkaline wavetable blend (D12) | — | 15 | 15 |
+
+- The pool's worst case is two slots at the dearest user: **90** (84 without
+  crash), set by the `itp` fade on both images.
+- The Alkaline blend's +15 is below that, so it does not raise the pool's
+  worst case. Counted per voice, the slot-held Alkaline is 10.2 over 261.3:
+  this is the over-budget D13 accepts.
+
+### 14.3 Correction to §13.3
+
+- The wavetable readers' loops dropped 1–5 per sample (sync blend 48 → 45).
+- **No voice's worst case changed.** The dearest choice for each oscillator
+  is set elsewhere:
+  - plain oscillators and modulators: crash 30, then `slp` 27 (wavetable
+    plain was 26, now 22);
+  - FM carriers: `slp` 50/51 (wavetable FM blend ramp was 47, now 42);
+  - ring and sync carriers: `slp` 42 and 41, and those modes total below
+    Drum's FM mode.
+- So there was no voice-budget saving to move to the slots. The P8 saving
+  shows only in the blend's slot excess (8 → 3).
+
+### 14.4 Statements made out of date (for the user to log)
+
+- `INSTRUMENTS_DSP_REFERENCE.md` §5.5 (Alkaline wavetable: no blend) and
+  §8.2 (Alkaline whole voice); the S087 per-slot figure "+10..+13".
+- `CPU_USE_DSP_AUDIT.md` item 71 (Alkaline per block and whole voice) and
+  item 47 (blend premium; the pool's ceiling is the `itp` fade).
+- `OSC_INTERP_AUDIT.md`: the slot users now include the Alkaline.
+- `STORAGE_SRAM_MANIFEST.md`: `OscInfo.waveInterpFrac` used again (Alkaline
+  only); `AlkalineVoice.wtbSlot` in former padding.
+- `MEMORY.md`: the Alkaline wavetable rule (stepping, no slot).
+- `S093_P8_IMPLEMENTATION.md`: P8-D4 and the `alk_wtbControl()` /
+  `alk_renderWtb()` steps (to be amended as revision 3).

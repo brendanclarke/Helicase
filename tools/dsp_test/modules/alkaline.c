@@ -53,13 +53,20 @@
  *                     bounded; the 303's maximum does not;
  *               AL-PS (S093 P6) pos: 0 free-running, 64 half a cycle, legato
  *                     keeps the phase, a sweep leaves no pitch error.
- *               AL-W  (S093 P8) typ wtb: the voice is bit-identical to the
- *                     table read of the bound frame's 1,024-point row
- *                     (calcWavetableOscBlock()'s arithmetic) then
- *                     DiodeLadder_renderB2(), block for block, phase too; the
- *                     frame steps one per block toward pos and a non-legato
- *                     note jumps to it (legato does not); an install rebinds;
- *                     an empty catalogue plays silence;
+ *               AL-W  (S093 P8, revision 3) typ wtb: the frame position
+ *                     glides toward pos at most one frame per block and
+ *                     stops on the next frame boundary; a non-legato note
+ *                     jumps it to pos (legato does not). Without a slot the
+ *                     voice is bit-identical to the table read of the
+ *                     nearest frame's row (calcWavetableOscBlock()'s
+ *                     arithmetic) then DiodeLadder_renderB2(); with a slot
+ *                     it is bit-identical to DiodeLadder_renderB2Osc2() on
+ *                     the block's frame pair with the mix ramping from the
+ *                     start to the end position; phase too. The two-row loop
+ *                     itself plays frame A at mix 0 and frame B at mix 1
+ *                     (to the int16 truncation of the one-row read). An
+ *                     install rebinds; an empty catalogue plays silence and
+ *                     never claims a slot;
  *               AL-TY (S093 P8) Alkaline_setOscType(): 0 -> wav, 1 and above
  *                     -> wtb; wav clamps wav to Sqr, wtb to the last table;
  *                     the phase runs on; the bind is cleared; the same type
@@ -90,7 +97,19 @@ int16_t triTable[11][1024];
 int16_t recTable[11][1024];
 unsigned char crashSample[32769];
 int16_t GetRngValue(void) { return 0; }
-uint8_t modNode_interpClaim(void* osc) { (void)osc; return 0u; }
+/*
+ * The interpolation slot claim, host stand-in (S093 P8 revision 3).
+ *
+ * What:       grants when w_grant is 1 and refuses when it is 0, and counts
+ *             its calls in w_claims. The device's modNode_interpClaim()
+ *             (two system-wide slots, sticky grants) is not linked here.
+ * Why:        AL-W runs the Alkaline wavetable once with a slot (the blend)
+ *             and once without (the nearest frame), and checks that a
+ *             one-frame table never claims.
+ */
+static int w_grant = 0;
+static unsigned w_claims = 0u;
+uint8_t modNode_interpClaim(void* osc) { (void)osc; w_claims++; return (uint8_t)w_grant; }
 
 /* the real sawTable (wavetable.c), writable on the host as osc_host.h says */
 #include "alk_sawTable.c"
@@ -932,14 +951,33 @@ static void w_install(int second)
 	sampleMemory_refresh();
 }
 
-/* pos -> nearest frame, the law alk_wtbFrameOf() implements */
-static uint32_t w_frameOf(uint32_t pos, uint32_t frames)
+/* pos -> the frame position: the law alk_wtbFramePos() implements, restated */
+static float w_framePos(uint32_t pos, uint32_t frames)
 {
-	return (frames > 1u) ? ((pos * (frames - 1u) + 63u) / 127u) : 0u;
+	return (float)pos * (float)(frames - 1u) * (1.0f / 127.0f);
 }
 
-/* the reference block: the voice's async, then calcWavetableOscBlock()'s
- * table read (gain 1) of `row` and the plain B2R at the Saw scale */
+/* one block's glide, restated (revision 3): toward the target by at most one
+ * frame, then never past the next frame boundary in the direction of travel
+ * (the same float operations as alk_renderWtb(), so the result is exact) */
+static float w_glide(float start, float target)
+{
+	float d = target - start;
+	float end;
+
+	if (d > 1.0f) d = 1.0f;
+	if (d < -1.0f) d = -1.0f;
+	end = start + d;
+	if (end > start && end > floorf(start) + 1.0f)
+		end = floorf(start) + 1.0f;
+	if (end < start && end < ceilf(start) - 1.0f)
+		end = ceilf(start) - 1.0f;
+	return end;
+}
+
+/* the reference block without a slot: the voice's async, then
+ * calcWavetableOscBlock()'s table read (gain 1) of `row` and the plain B2R
+ * at the Saw scale */
 static void w_ref(AlkalineVoice *v, const int16_t *row, int16_t *buf)
 {
 	uint32_t ph;
@@ -961,29 +999,51 @@ static void w_ref(AlkalineVoice *v, const int16_t *row, int16_t *buf)
 	                     v->iLadEnd, v->iAbcEnd * v->makeup);
 }
 
-static void test_wavetable(void)
+/* the reference block with a slot: the voice's async, then the two-row loop
+ * on the frame pair holding [start, end] (its lower frame, capped at
+ * frames - 2), the mix ramping from start - p to end - p across the block */
+static void w_refBlend(AlkalineVoice *v, const int16_t *rows, uint32_t frames,
+                       float start, float end, int16_t *buf)
+{
+	uint32_t p = (uint32_t)(start < end ? start : end);
+
+	Alkaline_calcVoiceAsync(v);
+	if (p > frames - 2u)
+		p = frames - 2u;
+	DiodeLadder_renderB2Osc2(&v->ladder, buf, rows + p * WAVETABLE_ROW_POINTS,
+	                         rows + (p + 1u) * WAVETABLE_ROW_POINTS,
+	                         &v->osc.phase, v->osc.phaseInc,
+	                         start - (float)p, (end - start) * (1.0f / (float)BLK),
+	                         ALK_SAW_SCALE_V * v->driveGain,
+	                         v->iLadEnd, v->iAbcEnd * v->makeup);
+}
+
+/* W1/W2: the voice against the references, 3,000 blocks of 16ths with
+ * accents and slides; pos jumps every 23 blocks (the position glides toward
+ * it), a non-legato note jumps the position to it. grant: 0 never a slot (the
+ * nearest frame), 1 always (the blend), 2 a slot that comes and goes every 50
+ * blocks (the switch between the two paths keeps the phase and position) */
+static void w_run(const wavetable_catalogue_entry_t *e, int grant, const char *tag)
 {
 	AlkalineVoice a, b;
-	const wavetable_catalogue_entry_t *e;
-	uint32_t expect = 0u;
-	unsigned diff = 0u, phd = 0u, frd = 0u;
+	const int16_t *const rows = sampleMemory_wavetableRows(e);
+	const uint32_t frames = e->frame_count;
+	float expect = 0.0f;
+	unsigned diff = 0u, phd = 0u, pod = 0u, between = 0u, blends = 0u;
 	double rms = 0.0;
 	int n, j;
 
-	w_install(0);
-	e = sampleMemory_wavetableEntry(0u);
-	if (!e) { fail(G_W, "no table installed", 0, 0); return; }
 	memset(&a, 0, sizeof(a));
 	Alkaline_initVoice(&a);
 	a.cutoff = 0.55f; a.reso = 0.6f; a.envMod = 0.6f; a.accent = 0.7f; a.drive = 0.3f;
 	Alkaline_setOscType(&a, ALK_TYP_WTB);
 	a.osc.waveform = 0u;
 	b = a;
-	/* W1, W2: 3,000 blocks of 16ths with accents and slides; pos jumps
-	 * every 23 blocks (the frame steps toward it), a note jumps to it */
 	for (n = 0; n < 3000; n++) {
 		int16_t ba[BLK], bb[BLK];
+		float start;
 
+		w_grant = (grant == 2) ? ((n / 50) & 1) : grant;
 		if (n % 23 == 0)
 			a.osc.position = b.osc.position = (uint8_t)((n * 37) & 127);
 		if (n % 172 == 0) {
@@ -994,48 +1054,145 @@ static void test_wavetable(void)
 			                      (uint8_t)(40 + (n * 7) % 40), ALK_STEP);
 			Alkaline_triggerVoice(&b, 0u, (n / 172) % 3 ? 80u : 127u,
 			                      (uint8_t)(40 + (n * 7) % 40), ALK_STEP);
-			if (!legato)    /* a note starts on pos's frame */
-				expect = w_frameOf(a.osc.position & 127u, e->frame_count);
+			if (!legato)    /* a note starts on pos's position */
+				expect = w_framePos(a.osc.position & 127u, frames);
 		}
-		/* the block's frame: one step toward pos's frame */
-		{
-			const uint32_t target = w_frameOf(a.osc.position & 127u, e->frame_count);
-
-			expect = (target > expect) ? expect + 1u : ((target < expect) ? expect - 1u : expect);
-		}
+		/* the block: from where the last ended, one glide step toward pos */
+		start = expect;
+		expect = w_glide(start, w_framePos(a.osc.position & 127u, frames));
 		Alkaline_calcVoiceAsync(&a);
 		Alkaline_calcVoiceSyncBlock(&a, ba, BLK);
-		w_ref(&b, sampleMemory_wavetableRows(e) + expect * WAVETABLE_ROW_POINTS, bb);
+		if (w_grant) {
+			w_refBlend(&b, rows, frames, start, expect, bb);
+			blends++;
+		} else {
+			/* the nearest frame to the block's end position */
+			w_ref(&b, rows + (uint32_t)(expect + 0.5f) * WAVETABLE_ROW_POINTS, bb);
+		}
+		between += (expect != floorf(expect));
 		for (j = 0; j < BLK; j++) {
 			diff += (ba[j] != bb[j]);
 			rms += (double)ba[j] * ba[j];
 		}
 		phd += (a.osc.phase != b.osc.phase);
-		frd += (a.osc.positionApplied != expect);
+		pod += (a.osc.waveInterpFrac != expect);
 	}
-	printf("AL-W wtb: %u sample(s), %u phase(s), %u frame(s) differ; RMS %.0f LSB\n",
-	       diff, phd, frd, sqrt(rms / (3000.0 * BLK)));
-	if (diff || phd) fail(G_W, "fused wtb != table read + B2R", diff, phd);
-	if (frd) fail(G_W, "frame stepping law", frd, 0);
+	printf("AL-W %s: %u sample(s), %u phase(s), %u position(s) differ; "
+	       "%u blended block(s), %u between frames; RMS %.0f LSB\n",
+	       tag, diff, phd, pod, blends, between, sqrt(rms / (3000.0 * BLK)));
+	if (diff || phd) fail(G_W, "wtb voice != its reference", diff, phd);
+	if (pod) fail(G_W, "frame position glide law", pod, 0);
+	if (!between) fail(G_W, "the position never fell between frames", 0, 0);
 	if (rms == 0.0) fail(G_W, "wtb is silent", 0, 0);
+}
+
+/* W5: the two-row loop itself. Reference: the frames mixed in float with the
+ * same ramp, truncated to int16 and fed to the unfused B2R; the two differ
+ * only by that truncation (the one-row loop truncates the same way). Each
+ * block ramps the mix up or down across part of 0..1. The other check: the
+ * output is far from frame A alone when the mix is near 1. */
+static void w_loop(const int16_t *rowA, const int16_t *rowB)
+{
+	AlkalineVoice v;
+	DiodeLadder l1, l2, l3;
+	uint32_t p1 = 0x12345678u, p2 = 0x12345678u, p3 = 0x12345678u;
+	int maxd = 0, peak = 0, far = 0;
+	int n, j;
+
+	memset(&v, 0, sizeof(v));
+	Alkaline_initVoice(&v);
+	v.cutoff = 0.5f; v.reso = 0.5f; v.envMod = 0.3f; v.drive = 0.2f;
+	Alkaline_triggerVoice(&v, 0u, 100u, 48u, ALK_STEP);
+	/* a few blocks of the voice so the VEG is open, then its last block's
+	 * currents and network are held for the comparison */
+	for (n = 0; n < 12; n++) {
+		int16_t w[BLK];
+
+		block(&v, w, K_B2R);
+	}
+	l1 = l2 = l3 = v.ladder;
+	for (n = 0; n < 600; n++) {
+		const float ff0 = (float)((n * 7) % 9) / 8.0f;
+		const float ffStep = (n & 1) ? (1.0f - ff0) / (float)BLK : -ff0 / (float)BLK;
+		const float sc = ALK_SAW_SCALE_V * v.driveGain;
+		int16_t b1[BLK], b2[BLK], b3[BLK];
+		uint32_t ph = p1;
+		float ff = ff0;
+
+		for (j = 0; j < BLK; j++) {
+			const uint32_t itg = ph >> 22, nx = (itg + 1u) & 0x3FFu;
+			const float fr = (float)(ph & 0x003FFFFFu) * 2.384185791015625e-07f;
+			const float x = (float)rowA[itg] + fr * (float)(rowA[nx] - rowA[itg]);
+			const float y = (float)rowB[itg] + fr * (float)(rowB[nx] - rowB[itg]);
+
+			b1[j] = (int16_t)(x + ff * (y - x));
+			ff += ffStep;
+			ph += v.osc.phaseInc;
+		}
+		p1 = ph;
+		DiodeLadder_renderB2(&l1, b1, sc, v.iLadEnd, v.iAbcEnd * v.makeup);
+		DiodeLadder_renderB2Osc2(&l2, b2, rowA, rowB, &p2, v.osc.phaseInc, ff0, ffStep,
+		                         sc, v.iLadEnd, v.iAbcEnd * v.makeup);
+		DiodeLadder_renderB2Osc(&l3, b3, rowA, &p3, v.osc.phaseInc, sc,
+		                        v.iLadEnd, v.iAbcEnd * v.makeup);
+		for (j = 0; j < BLK; j++) {
+			const int d = abs(b1[j] - b2[j]);
+
+			if (d > maxd) maxd = d;
+			if (abs(b2[j]) > peak) peak = abs(b2[j]);
+			if (ff0 >= 0.875f && !(n & 1) && abs(b2[j] - b3[j]) > far)
+				far = abs(b2[j] - b3[j]);
+		}
+	}
+	printf("AL-W two-row loop: max %d LSB from the float-mix reference (peak %d); "
+	       "%d LSB from frame A alone at mix ~1\n", maxd, peak, far);
+	if (peak == 0) fail(G_W, "two-row loop test is silent", 0, 0);
+	if (p1 != p2) fail(G_W, "two-row loop phase", (double)p1, (double)p2);
+	if (maxd > peak / 256 + 2) fail(G_W, "two-row loop != mixed frames", maxd, peak);
+	if (far < peak / 8) fail(G_W, "two-row loop ignores frame B", far, peak);
+}
+
+static void test_wavetable(void)
+{
+	const wavetable_catalogue_entry_t *e;
+	int n, j;
+
+	w_install(0);
+	e = sampleMemory_wavetableEntry(0u);
+	if (!e) { fail(G_W, "no table installed", 0, 0); return; }
+	w_run(e, 0, "no slot");
+	w_run(e, 1, "slot");
+	w_run(e, 2, "slot on/off");
+	w_loop(sampleMemory_wavetableRows(e),
+	       sampleMemory_wavetableRows(e) + 2u * WAVETABLE_ROW_POINTS);
 
 	/* W3: an install rebinds at the next block: the table index 0 now names
-	 * the 1,024-point table (generation changed) */
-	w_install(1);
+	 * the 1,024-point table (generation changed); the bind keeps the first
+	 * row and jumps the position to pos */
 	{
+		AlkalineVoice a;
 		int16_t buf[BLK];
-		const wavetable_catalogue_entry_t *e2 = sampleMemory_wavetableEntry(0u);
+		const wavetable_catalogue_entry_t *e2;
 
+		memset(&a, 0, sizeof(a));
+		Alkaline_initVoice(&a);
+		Alkaline_setOscType(&a, ALK_TYP_WTB);
+		a.osc.waveform = 0u;
+		a.osc.position = 127u;
+		block(&a, buf, K_B2R);
+		w_install(1);
+		e2 = sampleMemory_wavetableEntry(0u);
 		Alkaline_calcVoiceAsync(&a);
-		Alkaline_calcVoiceSyncBlock(&a, buf, BLK);
 		if (!e2 || a.osc.sampleCacheGeneration != sampleMemory_getGeneration() ||
 		    a.osc.sampleCacheSize != e2->frame_count ||
-		    a.osc.sampleCacheData != sampleMemory_wavetableRows(e2) +
-		                             (uint32_t)a.osc.positionApplied * WAVETABLE_ROW_POINTS)
+		    a.osc.sampleCacheData != sampleMemory_wavetableRows(e2) ||
+		    a.osc.waveInterpFrac != w_framePos(127u, e2->frame_count))
 			fail(G_W, "an install does not rebind", 0, 0);
+		Alkaline_calcVoiceSyncBlock(&a, buf, BLK);
 	}
 
-	/* W4: an empty catalogue plays silence through the zero row */
+	/* W4: an empty catalogue plays silence through the zero row (one
+	 * frame), and never claims a slot even when one would be granted */
 	catalogue_host_reset();
 	sampleMemory_refresh();
 	{
@@ -1043,6 +1200,8 @@ static void test_wavetable(void)
 		int16_t buf[BLK];
 		int peak = 0;
 
+		w_grant = 1;
+		w_claims = 0u;
 		memset(&z, 0, sizeof(z));
 		Alkaline_initVoice(&z);
 		z.reso = 1.0f; z.drive = 1.0f;
@@ -1054,8 +1213,10 @@ static void test_wavetable(void)
 			for (j = 0; j < BLK; j++)
 				if (abs(buf[j]) > peak) peak = abs(buf[j]);
 		}
-		printf("AL-W empty catalogue: peak %d LSB\n", peak);
+		printf("AL-W empty catalogue: peak %d LSB, %u claim(s)\n", peak, w_claims);
 		if (peak != 0) fail(G_W, "no table is not silent", peak, 0);
+		if (w_claims != 0u) fail(G_W, "a one-frame table claims a slot", w_claims, 0);
+		w_grant = 0;
 	}
 }
 
@@ -1084,6 +1245,13 @@ static void test_typ(void)
 	if (v.osc.oscType != OSC_TYPE_WAV) fail(G_TY, "0 is wav", v.osc.oscType, 0);
 	if (v.osc.waveform != ALK_WAVE_SQUARE) fail(G_TY, "wav clamps to Sqr", v.osc.waveform, 0);
 	if (v.osc.phase != 0x12345678u) fail(G_TY, "the phase runs on (wtb -> wav)", 0, 0);
+	/* S093 P8 revision 3: a type change drops the interpolation slot (the
+	 * stamp and the grant), as Drum's osc_setType() does (S087 A18) */
+	v.osc.interpStamp = 7u;
+	v.wtbSlot = 1u;
+	Alkaline_setOscType(&v, ALK_TYP_WTB);
+	if (v.osc.interpStamp != 0u || v.wtbSlot != 0u)
+		fail(G_TY, "a type change keeps the slot", v.osc.interpStamp, v.wtbSlot);
 }
 
 int main(int argc, char **argv)
