@@ -1,0 +1,128 @@
+# S093 P8 linked spike (2026-11-10): S093_P8_IMPLEMENTATION.md applied to a scratch
+# copy of the P6 tree (HEAD 9c2a3de2), linked with the firmware Makefile (make clean;
+# make all), measured with the tree's tools. Baseline = the same tree unchanged.
+#
+# Baseline (P6): DiodeLadder fused loop 214 (inlined in Alkaline_calcVoiceSyncBlock);
+#   control_cost.py --elf: async 884 + sync 332 + dispatch 14 = 1230, 9 VDIV;
+#   link_budget: headroom 47,836 B, ITCM 14,552 B; elf_p4_check 93/93, mixer 0 grew.
+#
+# Variants measured on the way (each a full link):
+#   v1 all types, one sync function, smp loop inlined:      table loop 216, smp loop 217, per block 1,348
+#   v2 smp loop noinline:                                    table loop 216, smp 215
+#   v3 typed render out of line:                             table loop 213 (not reproducible: 216 after
+#                                                            an unrelated one-line edit)
+#   v4 row chosen in the async, one call site:               table loop 216
+#   v5 table render isolated, row read from the oscillator:  216; row computed in place: 213
+#   v6 alk_renderWav / alk_renderWtb / alk_renderSmp split:  renderB2Osc out of line 213, smp 215,
+#                                                            per block 1,364; mixer 2 grew
+#   bisect of the mixer growth (elf_p4_check):
+#     ladder + catalogue + installer only: 0 grew; + voice + menu: 2 grew;
+#     voice without the typed async path: 2 grew; without the typed sync dispatch: 0 grew;
+#     dispatch wav + wtb only (e3): 0 grew, table loop 214;
+#     dispatch wav + smp only (e4): 2 grew (decimation loop 10 -> 11, calcSampleOscFmBlock 36 -> 37),
+#                                   Saw/Sqr loop 216
+#   -> one-shot samples dropped (user, S093 P8: "you can drop one-shot if necessary").
+#   single-mode builds of the final code (control_cost --elf):
+#     wav only: async 890 + sync 333 + 14 = 1237 (loop 214)
+#     wtb only: async 960 + sync 325 + 14 = 1299 (loop 214)
+#
+# Final (wavetables only, the schedule's code):
+== warnings vs P6 clean build
+identical
+== link_budget
+Flash : 711,724 / 753,664 B used, headroom 41,940 B
+ITCM  : 14,552 / 16,384 B
+DTCM  : statics 4,392 B
+FXBUF : 126,656 B at 0x20001140 (min 122,880, margin 3,776)
+== loops
+DiodeLadder_renderB2Osc: loop head 0x8063958: longest 214 (vdiv 3), shortest 214, paths 1
+elf_looppath.py: no loop in alk_renderWav
+elf_looppath.py: no loop in alk_renderWtb
+elf_looppath.py: no loop in Alkaline_calcVoiceSyncBlock
+== control_cost --elf
+  Alkaline_calcVoiceAsync               964 insn   9 vdiv  (0 loops)
+  Alkaline_calcVoiceSyncBlock           349 insn   0 vdiv  (0 loops)
+    alk_renderWav                         345 insn   0 vdiv  (0 loops)
+    alk_renderWtb                         337 insn   0 vdiv  (0 loops)
+      DiodeLadder_renderB2Osc               320 insn   0 vdiv  (1 loops)
+    alk_wtbBind                            47 insn   0 vdiv  (0 loops)
+  [osc] memset                              0 insn   0 vdiv
+per block: async 964 + sync block 349 + dispatch 14 = 1327 instructions, 9 VDIV
+per sample (/32): 41.5 instructions, 0.28 VDIV
+== elf_p4_check
+elf_loops: 93 baseline loops, 93 exact, 0 renamed, 0 missing; 93 loops now
+elf_hotloops: 30 hot loops equal, 0 shrank, 0 grew (21 other fragments not compared)
+== sections
+.text              695752   134250984
+.itcm               14552           0
+.data                 420   537005084
+.bss               279652   537005504
+.dtcm                 512   536870912
+.dtcmz               3880   536871424
+# .text 689,856 -> 695,752 (+5,896 B); .bss +8 B is padding (LTO reordered
+#   the installer's existing statics; no new variable); .itcm/.data/.dtcm unchanged.
+# symbol deltas (aliases such as __aeabi_dsub/__subdf3 are one routine):
+#   Alkaline_calcVoiceSyncBlock.constprop.0            3000 ->     16 (-2984)
+#   DiodeLadder_renderB2Osc                               0 ->   2932 (+2932)
+#   alk_zeroRow                                           0 ->   2048 (+2048)
+#   filesystem_installWavetableFolder                  1212 ->   2064 (+852)
+#   __subdf3                                              0 ->    634 (+634)
+#   __aeabi_dsub                                          0 ->    634 (+634)
+#   __adddf3                                              0 ->    630 (+630)
+#   __aeabi_dadd                                          0 ->    630 (+630)
+#   sinf                                                  0 ->    492 (+492)
+#   cosf                                                  0 ->    436 (+436)
+#   __sincosf_table                                       0 ->    224 (+224)
+#   Alkaline_calcVoiceAsync                            3918 ->   4128 (+210)
+#   alk_wtbBind                                           0 ->    176 (+176)
+#   Alkaline_triggerVoice                               712 ->    824 (+112)
+#   __aeabi_ul2d                                          0 ->    106 (+106)
+#   __floatundidf                                         0 ->    106 (+106)
+#   alk_renderWav                                         0 ->    104 (+104)
+#   __inv_pio4                                            0 ->     96 (+96)
+#   __aeabi_l2d                                           0 ->     90 (+90)
+#   __floatdidf                                           0 ->     90 (+90)
+#   menu_formatWaveCell                                 440 ->    508 (+68)
+#   __extendsfdf2                                         0 ->     66 (+66)
+#   __aeabi_f2d                                           0 ->     66 (+66)
+#   instrumentManager_writeRuntimeInternal             3362 ->   3424 (+62)
+#   alk_renderWtb                                         0 ->     60 (+60)
+#   filesystem_installFrames                            436 ->    480 (+44)
+#   __floatsidf                                           0 ->     34 (+34)
+#   __aeabi_i2d                                           0 ->     34 (+34)
+#   __floatunsidf                                         0 ->     30 (+30)
+#   __aeabi_ui2d                                          0 ->     30 (+30)
+#   alkaline_param_descriptors                          784 ->    812 (+28)
+#   instrumentManager_waveDomainMax                     132 ->    152 (+20)
+#   alkTypeNames                                          0 ->     12 (+12)
+#   sampleMemory_refresh                                476 ->    488 (+12)
+#   stereoFilter_writeParam                             312 ->    316 (+4)
+#   menu_formatWaveValue3                                80 ->     84 (+4)
+#   sum of symbol deltas 8192
+
+# ======================================================================
+# Revision 2 (2026-11-10): the amended schedule (user D1', D8, D9, D10, D11, O1-O3):
+# one stored 1,024-point 16-bit row per frame for every instrument, the name cache
+# borrowed during install, 8-bit removed throughout, the readers' fixed 1,024-point read.
+# make clean && make all; warnings identical to the P6 clean build.
+Flash : 709,108 / 753,664 B used, headroom 44,556 B
+ITCM  : 12,128 / 16,384 B
+DiodeLadder_renderB2Osc: loop head 0x806370c: longest 214 (vdiv 3), shortest 214, paths 1
+per block: async 956 + sync block 349 + dispatch 14 = 1319 instructions, 9 VDIV
+per sample (/32): 41.2 instructions, 0.28 VDIV
+# wavetable readers (per-sample loop; blends also list their per-segment loop first):
+#   reader                 P6 16-bit/8-bit   8-bit branch removed only   fixed 1,024 read (schedule)
+#   plain                  24/26             25                          22
+#   blend                  34/38             37                          33 (segment loop 61)
+#   fm                     32/34             33                          30
+#   fm blend               42/46             45                          41 (75)
+#   ring                   32/34             33                          30
+#   ring blend             43/47             46                          42 (85)
+#   sync                   34/36             35                          32
+#   sync blend             44/48             48                          45 (73)
+#   fm ramp                33/35             34                          31
+#   fm blend ramp          43/47             46                          42 (74)
+# two other wrap forms of the any-length read measured 25..48 / 26..47 (no better)
+# elf_p4_check vs baselines/s093p4: oscillators 62 exact, 31 MISSING (all in the ten wtb readers, by design); mixer 30 equal, 0 grew
+# sections vs P6: .text +5,704 B; .itcm 14,552 -> 12,128 B; .bss/.data/.dtcm unchanged (item_stored_bits removed)
+# 8-bit source removal alone (P6 tree): .text +88 B (LTO); 24->16 conversion = 272 B, stereo sum = 96 B (kept, D11)

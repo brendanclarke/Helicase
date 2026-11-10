@@ -17,9 +17,19 @@
   - constant per-sample cost (the longest path counts);
   - RAM sign-off;
   - no new ITCM code;
-  - the S087 Oscillator loops and the ZDF twins are not edited;
+  - the S087 Oscillator loops and the ZDF twins are not edited, **except the
+    8-bit wavetable removal (§13, D9)**;
   - no backward compatibility;
   - nothing needed goes in `build/`.
+- **Revision 2 (user decisions, 2026-11-10): §13 overrides §0–§11 where they
+  differ.**
+  - Wavetables only: one-shot and looped samples are not offered.
+  - One 1,024-point 16-bit copy of each table, shared by every instrument.
+  - The install buffer is borrowed from the browser name cache.
+  - Wavetables are 16-bit only; the 8-bit wavetable code is removed.
+
+  The linked measurements behind these are in `S093_P8_IMPLEMENTATION.md`
+  §0, which is amended next.
 
 ---
 
@@ -344,14 +354,14 @@ changes:
 
 ## 10. Decisions
 
-| # | Question | Recommendation |
-|---|---|---|
-| **P8-D1** | Wavetable storage | **N2:** a 1,024 × int16 copy beside the raw frames; Drum unchanged, RAM 0, more sample flash. The copy is required (a table that cannot store both is refused) |
-| **P8-D2** | Looped samples | **A:** not offered in P8 |
-| **P8-D3** | `pos` on `smp` | **Start point at the note**, no playhead bend during the note |
-| **P8-D4** | `pos` on `wtb` | **One frame per block toward the target** (steps, no blend) |
-| **P8-D5** | `typ` list | **Alkaline-only three-entry list** (§8) |
-| **P8-D6** | P7 document | Mark it discarded in its header and keep it as a record (its §0 measurements stand) |
+| # | Question | Recommendation (revision 1) | Decided (revision 2, §13) |
+|---|---|---|---|
+| **P8-D1** | Wavetable storage | N2: a copy beside the raw frames | **N1:** one 1,024-point 16-bit copy, used by every instrument; no raw frames (D1′) |
+| **P8-D2** | Looped samples | A: not offered in P8 | **Not offered** |
+| **P8-D3** | `pos` on `smp` | Start point at the note | **Void:** one-shot samples are not offered (D7) |
+| **P8-D4** | `pos` on `wtb` | One frame per block toward the target | **As recommended** |
+| **P8-D5** | `typ` list | Alkaline-only three-entry list | **Alkaline-only two-entry list: `wav`, `wtb`** |
+| **P8-D6** | P7 document | Marked discarded, kept as a record | **As recommended** |
 
 ---
 
@@ -409,3 +419,168 @@ The `wav` loop has 14 stack references per sample and the `slp` loops 18
 **Not yet measured (P8-1):**
 - the linked loops: LTO may inline `renderB2Smp()` into the sync block;
 - the typed per-block path.
+
+---
+
+## 13. Decisions, revision 2 (user, S093 P8, 2026-11-10)
+
+These override §0–§11 where they differ. The linked spike that informed them
+is `S093_P8_IMPLEMENTATION.md` §0; that schedule is amended to match.
+
+| # | Decision | Detail |
+|---|---|---|
+| **D7** | **Wavetables only** on the Alkaline | One-shot samples fit the voice budget (loop 215, per block 1,364), but linking their render grew two mixer hot loops of other engines by 1 (a decimation loop 10 → 11, HiHat's `calcSampleOscFmBlock` 36 → 37; bisected in the spike). Looped samples are over the ceiling on their loop alone (§6). The Alkaline `typ` list is `wav`, `wtb` |
+| **D1′** | **One 1,024-point 16-bit copy per frame, shared by every instrument** (N1; replaces N2) | The installer stores each wavetable only as its resampled 1,024 × int16 frames. Drum, Snare, Cymbal and HiHat read them through their existing wavetable readers, which take any frame length; the Alkaline reads them through its fused table loop. The raw frames are not stored |
+| **D8** | **Install buffer: borrow `fs_list_cache_name` (9,000 B)** during the modal install | Holds the frame being resampled (up to 2,048 × int16 = 4,096 B). No new RAM. It follows the existing copy/clear loan (`STORAGE_SRAM_MANIFEST.md` l. 802: lent while an operation runs, cleared on return; Load/Save reloads its index) |
+| **D9** | **Wavetables are stored 16-bit only; the 8-bit wavetable code is removed** | An 8-bit wavetable folder is ignored (not installed); a 24-bit folder is converted to 16-bit and installed (O1, §13.6) |
+| **D10** | **8-bit support is off throughout: samples, loops and wavetables, for every instrument** | The installer does not read 8-bit files: an 8-bit file is skipped like any other refused format, and the 8-bit → 16-bit conversion is removed (§13.5) |
+| **D11** | **24-bit and stereo sources stay supported, through the existing conversion** | 24-bit → 16-bit and stereo → mono averaging are kept for samples and loops (≈ 270 B and ≈ 100 B, §13.5). Wavetables too (O1, §13.6) |
+
+### 13.1 D1′: what it means
+
+- **Sample flash per frame:** 2,048 B, whatever the source length. The card's
+  `ak_hvox` (104 frames of 600 points) takes 212,992 B, against 124,800 B
+  stored today and 337,792 B under N2.
+- **Other instruments' sound:**
+  - frames of 1,024 points or fewer (`ak_hvox`) play their harmonics within
+    0.0001 dB (spike, host law). The top 5 % of a short frame's band rolls off
+    (−1.2 dB at 0.483, −5.3 dB at 0.498 of its Nyquist);
+  - longer frames lose harmonics 512 and up. Above about 43 Hz those lie
+    beyond the output's Nyquist and alias in today's playback.
+- **Other instruments' CPU:** unchanged or lower.
+  - The readers' code is not changed except the 8-bit removal (D9).
+  - Frame length does not enter their loops (one `(phase × length) >> 32`
+    multiply for any length).
+  - Every table takes the 16-bit path, the cheaper one (§13.3).
+- **Catalogue:** each wavetable entry describes the copy itself (`frame_len`
+  1,024, `bits` 16, `offset` its first row). The amended schedule settles
+  whether those two fields stay as checked constants or are removed (the entry
+  size is asserted at 20 B).
+- **No backward compatibility:** a card installed by older firmware reads
+  STALE and must be reinstalled (catalogue version bump, as in the schedule).
+
+### 13.2 D9: scope of the 8-bit removal
+
+**Installer and catalogue:**
+- `SampleInstall.c`:
+  - `sampleInstall_beginWavetable()` accepts `bits` 16 only (today 8 or 16,
+    l. 370);
+  - the 8-bit store branch in `sampleInstall_writeFrame()` goes (l. 398–403).
+- `filesystem.c` `filesystem_installWavetableFolder()`: the folder's depth
+  test.
+  - Today `bits = (wav.fmt.bits == 8u ? 8u : 16u)` (l. 25506), so a 24-bit
+    source is converted to 16-bit and installed.
+  - **Under D9/D10 an 8-bit folder is ignored; a 24-bit folder is converted
+    to 16-bit and installed (O1).**
+- `SampleMemory.c` `sampleMemory_wavetableRangeValid()`: `bits` must be 16
+  (today 8 or 16, l. 114).
+
+**Oscillator (`Oscillator.c` / `.h`):**
+- `OSC_BIND_WTB8` (`Oscillator.h` l. 204) and its uses:
+  - the bind's depth choice (`Oscillator.c` l. 1604–1605) and its kind tests
+    (l. 1616, 1647);
+  - the render dispatch cases (l. 2399, 2422, 2445, 2467, 2490, 2583).
+- `osc_wtbRead()`'s 8-bit branch (l. 2709–2711) and `osc_wtbFrame()`'s
+  per-depth stride (l. 2719–2725).
+- The **8-bit loop copies** the compiler makes of every wavetable reader. The
+  readers test the depth inside the loop; it is loop-invariant, so each
+  reader links as two loops (§13.3).
+
+**Unaffected:**
+- **The channel rule:** a stereo wavetable source is still averaged to mono.
+  D9 decides the depth only.
+- **8-bit sample files** are covered by D10 (§13.5).
+
+### 13.3 The readers' two copies, measured on the P6 image
+
+`elf_looppath.py`; in each reader the 8-bit copy is the one with the `ldrsb`
+loads.
+
+| Reader | 8-bit copy (removed) | 16-bit copy (kept) |
+|---|---:|---:|
+| `osc_wtbPlainBlock` | 26 | 24 |
+| `osc_wtbBlendBlock` | 38 | 34 |
+| `osc_wtbFmBlock` | 34 | 32 |
+| `osc_wtbFmBlendBlock` | 46 | 42 |
+| `osc_wtbRingBlock` | 34 | 32 |
+| `osc_wtbRingBlendBlock` | 47 | 43 |
+| `osc_wtbSyncBlock` | 36 | 34 |
+| `osc_wtbSyncBlendBlock` | 48 | 44 |
+| `osc_wtbFmRampBlock` (S089 P3) | 35 | 33 |
+| `osc_wtbFmBlendRampBlock` (S089 P3) | 47 | 43 |
+
+- **The worst case drops** (measured in `S093_P8_IMPLEMENTATION.md` §0.4):
+  - removing the 8-bit branch alone left one loop per reader, but 1–4
+    instructions longer than its former 16-bit copy (codegen, S7 there);
+  - the schedule therefore gives the readers the fixed 1,024-point read
+    (every stored frame is 1,024 points, O3). Each reader's worst case then
+    falls by 3–5, and its loop is below the former 16-bit copy in nine
+    readers (+1 in the sync blend).
+- **CPU audit:** the Drum/Snare/Cymbal/HiHat `wtb` figures in
+  `CPU_USE_DSP_AUDIT.md` are re-measured.
+
+### 13.4 Consequences for the gates
+
+- **Binding rule:** "the S087 Oscillator loops are not edited" is lifted for
+  this removal only. The ten readers above are edited to read 16-bit frames;
+  no other loop changes.
+- **`elf_p4_check`:**
+  - against `baselines/s093p4`, the ten 8-bit copies report MISSING, by
+    design;
+  - the ten 16-bit copies and every other loop must stay exact;
+  - after that check, the baseline is re-snapshotted as
+    `baselines/s093p8/osc.txt` with the reason recorded;
+  - the mixer gate stays 0 grew.
+- **ITCM:**
+  - the readers live in `.itcm.s087` and `.itcm.s089p3`, so ITCM shrinks
+    (today 14,552 B; ITCM ends at `0x38d8`);
+  - subsections after `.itcm.s087` move to lower addresses;
+  - no section attribute changes;
+  - the gate compares loop text, not addresses.
+- **Host tests:**
+  - `samples` law 3 (an 8-bit frame stays 8-bit) becomes "an 8-bit or a
+    24-bit wavetable is refused";
+  - the `oscillator` bench's W3 (8-bit frames) is removed;
+  - the law sets and break proofs are listed in the amended schedule.
+
+### 13.5 D10: no 8-bit sources
+
+**Scope:**
+- `SampleInstall.c` `sampleInstall_acceptFormat()` refuses `bits` 8 for
+  every kind (l. 95: today 8, 16 or 24).
+- `sampleInstall_sourceSample()` loses its 8-bit branch (l. 187–188).
+- A refused file is skipped as today: an unaccepted `fmt` chunk fails
+  `filesystem_parseWav()` (`filesystem.c` l. 25249).
+- The `samples` host laws for 8-bit sources (install law 2: "8-bit stereo
+  average/peak", l. 280–305) become refusal laws.
+
+**Program space, measured** (linked `.text` of today's tree with the source
+handling cut back step by step, `arm-none-eabi-size`; scratch builds):
+
+| Removed (cumulative) | `.text` | Δ |
+|---|---:|---:|
+| — (P6 tree) | 689,856 B | — |
+| 8-bit sources (D10) | 689,944 B | +88 (LTO inlined the remaining helper into `filesystem_installFrames()`; no real saving) |
+| also the 24-bit → 16-bit conversion | 689,672 B | −272 |
+| also the stereo → mono sum | 689,576 B | −96 |
+
+- **Decided (D11, user):** the 24-bit conversion and the stereo sum stay.
+- **The mixer moved:** the D10 build alone changed
+  `mixer_calcNextSampleBlock` by 4 B (LTO layout), so even an installer-only
+  change runs `elf_p4_check`.
+
+### 13.6 Decisions before the implementation is amended (all decided, user, 2026-11-10)
+
+| # | Question | Options | Recommendation → **decided** |
+|---|---|---|---|
+| **O1** | **24-bit wavetable sources** | (a) converted to 16-bit and installed, like samples and loops (D11); (b) ignored, as D9 first said ("16-bit only") | **Decided (a)** (user). D11 keeps 24-bit support "through the conversion", and the 16-bit stored format of D1′ is the same either way. Stereo wavetable sources stay averaged under both |
+| **O2** | **The built-in 8-bit ROM sounds**: the stock crash wave `crashSample` (`Samples.c` l. 67: unsigned 8-bit, 32,769 B, read by the CRASH wave, `Oscillator.c` l. 529–554) and the 12 transient waveforms `transientData` (`transientTables.c` l. 63: signed 8-bit, 12 × 2,205 B) | (a) out of scope: D10 covers installed content (samples, loops, wavetables); (b) in scope: store both as 16-bit and change their readers | **Decided (a)** (user). They are firmware data, not installed content; (b) would double them in program flash (≈ +32.8 KB and +26.5 KB, against 41,940 B of headroom after P8) and edit the stock oscillator and transient loops, with no gain in the formats you load |
+| **O3** | **The catalogue's wavetable `frame_len` and `bits` fields** under D1′ (every stored table is 1,024 points, 16-bit) | (a) keep them, written as 1,024 and 16 and checked by `sampleMemory_wavetableRangeValid()`; (b) remove them (the entry size is asserted at 20 B, so they become reserved bytes) | **Decided (a)** (user): no layout change. The other instruments' readers read `frame_len` (their index is `(phase × frame_len) >> 32`), so they keep working unchanged; `bits` stays only as a checked format mark once the 8-bit branch is gone (D9), and a corrupt entry is refused |
+
+**Carried, not open:**
+- the catalogue version bump to v3 (older cards read STALE: no backward
+  compatibility);
+- the `elf_p4_check` re-baseline procedure (§13.4);
+- the borrowed name cache (D8). Load/Save reloads its index after the loan,
+  as after copy/clear.
+
