@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Generate the CrumpBit control tables (S091 P2; sub-type tables S091 P3;
-the `grn` rework tables S091 P4; the one-pole output filter S091 P5; the
-`dly` delay-time curve S091 P6).
+the `grn` rework tables S091 P4; the `dly` delay-time curve S091 P6; S094
+P2 AS-13 removed the S091 P5 one-pole output filter table: `grn` and `rvb`
+run the resonant SVF again).
 
 What:       writes Core/DSP/Effects/CrumpBit/CrumpBitTables.c with these
             tables (128 entries, one per 0..127 row value, unless noted):
@@ -79,17 +80,6 @@ What:       writes Core/DSP/Effects/CrumpBit/CrumpBitTables.c with these
                                      /62), N at -1 down to ~20 ms (882
                                      samples) at -63 with the whole arena
                                      (Q6); entry 0 (unused) is 1.
-            S091 P5 one-pole output filter (`grn`, `rvb`; plan F1, Q6):
-              crumpBit_onePoleK[v]   the coefficient k of s += k (x - s) for
-                                     `frq` index v, matched to the SVF at
-                                     `res` 0: that filter (R = 1, two equal
-                                     poles) is -3 dB where
-                                     tan(w/2) = g sqrt(sqrt(2) - 1), g =
-                                     crumpBit_filterG[v]; the one-pole with
-                                     pole a = 1 - k is -3 dB at w where
-                                     a = (2 - cos w) - sqrt((2 - cos w)^2 - 1).
-                                     0 at v 0 (closed, as filterG[0] = 0),
-                                     strictly increasing, below 1.
 Why:        crumpBit_process() runs inside mixer_calcNextSampleBlock(), so
             per-block expf/logf/fastTan cost render time. Lookups are
             constant-cost, and the Rate table also lets the share clamp
@@ -108,10 +98,8 @@ Checks:     C1 (S091 P6) delay ticks strictly increasing, 6 at row 4
             increasing over rows 4..127 (rows 0..3 0.0), equal to the
             stop's tick count at every stop position, 6 at 4 and 384 at
             127; grain density 1 at d = 1
-            (entry 0 unused, 1) and strictly decreasing from there; C7
-            (S091 P5) one-pole k: 0 at index 0, strictly increasing, below
-            1, and |H(w3)|^2 = 1/2 within 1e-9 at every index's SVF -3 dB
-            frequency; C5 --check: regenerate in memory and
+            (entry 0 unused, 1) and strictly decreasing from there (C7, the
+            S091 P5 one-pole k, went with its table in S094 P2); C5 --check: regenerate in memory and
             compare with the committed file byte for byte (exit 1 on any
             failure).
 Inputs:     the constants below (FS matches config.h REAL_FS; FILTER_SHAPER
@@ -264,34 +252,6 @@ def grain_density_table():
     return [1.0] + [ratio ** ((d - 1) / 62.0) for d in range(1, 64)]
 
 
-def svf_w3(g):
-    """The -3 dB angular frequency (radians per sample) of the TPT SVF
-    low-pass at R = 1 (`res` 0) with pre-warped cutoff g: the prototype
-    1/(s + 1)^2 is -3 dB at s = sqrt(sqrt(2) - 1), mapped back through
-    tan(w/2) = g s."""
-    return 2.0 * math.atan(g * math.sqrt(math.sqrt(2.0) - 1.0))
-
-
-def one_pole_k_table(filt):
-    """k for each `frq` index: the one-pole y += k (x - y) whose -3 dB point
-    is the SVF's at `res` 0 (S091 P5 F1, Q6)."""
-    vals = []
-    for g in filt:
-        if g == 0.0:
-            vals.append(0.0)
-            continue
-        c = math.cos(svf_w3(g))
-        a = (2.0 - c) - math.sqrt((2.0 - c) ** 2 - 1.0)
-        vals.append(1.0 - a)
-    return vals
-
-
-def one_pole_gain2(k, w):
-    """|H(w)|^2 of y += k (x - y): k^2 / (1 - 2 a cos w + a^2), a = 1 - k."""
-    a = 1.0 - k
-    return k * k / (1.0 - 2.0 * a * math.cos(w) + a * a)
-
-
 def reverb_size_table():
     return [RVB_SIZE_MIN * RVB_SIZE_RATIO ** (r / 127.0) for r in range(128)]
 
@@ -331,7 +291,7 @@ def render(dticks, dstop, tone, filt, extra):
                           "Tone tilt pole, ton 0..127: LP 150 Hz..18 kHz, 63 flat, HP 20 Hz..2 kHz.", tone)
     lines += render_table("crumpBit_filterG",
                           "Output filter TPT g, frq 0..127 (voice cutoff law).", filt)
-    comb, win, semi, frac, size, decay, gtime, gstop, gdens, opk = extra
+    comb, win, semi, frac, size, decay, gtime, gstop, gdens = extra
     lines += render_table("crumpBit_combTable",
                           "cmb comb length in samples, rte 0..127: note 112 - rte, clamped at 96.", comb)
     lines += render_table("crumpBit_pitchWindow",
@@ -350,8 +310,6 @@ def render(dticks, dstop, tone, filt, extra):
                        "grn rhythmic stop positions on the rte curve, /64 .. 1br.", gstop)
     lines += render_table("crumpBit_grainDensity",
                           "grn mean trigger interval / N, negative Density 1..63 (entry 0 unused).", gdens)
-    lines += render_table("crumpBit_onePoleK",
-                          "grn/rvb one-pole output filter k, frq 0..127: -3 dB at the SVF's (res 0).", opk)
     return "\n".join(lines) + "\n"
 
 
@@ -361,7 +319,6 @@ def main():
     comb, win, semi = comb_table(), pitch_window_table(), semitone_table()
     frac, size, decay = grain_fraction_table(), reverb_size_table(), reverb_decay_table()
     gtime, gstop, gdens = grain_time_table(), grain_stop_cc(), grain_density_table()
-    opk = one_pole_k_table(filt)
     ok = len(dticks) == DELAY_CORE_ROWS
     ok = ok and all(a < b for a, b in zip(dticks, dticks[1:]))
     ok = ok and dticks[0] == 6.0 and dticks[-1] == 192.0
@@ -388,19 +345,14 @@ def main():
     ok = ok and len(set(gstop)) == len(gstop)
     ok = ok and gdens[0] == 1.0 and gdens[1] == 1.0
     ok = ok and all(a > b for a, b in zip(gdens[1:], gdens[2:]))
-    ok = ok and opk[0] == 0.0 and all(a < b for a, b in zip(opk, opk[1:]))
-    ok = ok and all(0.0 <= k < 1.0 for k in opk)
-    ok = ok and all(abs(one_pole_gain2(k, svf_w3(g)) - 0.5) < 1e-9
-                    for k, g in zip(opk[1:], filt[1:]))
     text = render(dticks, dstop, tone, filt,
-                  (comb, win, semi, frac, size, decay, gtime, gstop, gdens,
-                   opk))
+                  (comb, win, semi, frac, size, decay, gtime, gstop, gdens))
     if "--check" in sys.argv:
         ok = ok and open(PATH).read() == text
         print("crumpbit tables", "OK" if ok else "FAILED")
         return 0 if ok else 1
     if not ok:
-        print("crumpbit tables: C1-C4/C6/C7 failed")
+        print("crumpbit tables: C1-C4/C6 failed")
         return 1
     open(PATH, "w").write(text)
     print("wrote", PATH)

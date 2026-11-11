@@ -15,13 +15,15 @@
  *   1 shared   ADC -> data lines -> DAC -> AC = dry h      (inline helper)
  *   2 sub-type one of dly | cmb | pit | grn | rvb -> wet   (per-block switch)
  *   3 shared   MIX: out = h + mix (wet - h)                 (inline helper)
- *   4 shared   output filter, a second pass: the resonant TPT SVF in
- *              dly | cmb | pit, a one-pole in grn | rvb (S091 P5 F1)
+ *   4 shared   output filter, a second pass: the resonant TPT SVF in every
+ *              sub-type (S094 P2 AS-13: grn | rvb back on the SVF; their
+ *              S091 P5 F1 one-pole is gone)
  * Within a sub-type every statement runs on every frame whatever its
  * settings (constant CPU); the sub-type is chosen once per block.
- * S091 P5 caps every sub-type at 170 instructions per frame for the whole
- * Effect, worst case (S091_P5_SUBTYPE_EFFICIENCIES.md); crumpbit_cpu_check
- * gates it on the linked image.
+ * S091 P5 capped every sub-type at 170 instructions per frame for the whole
+ * Effect; since S094 P2 the budget is the Effect's cycle share (16,634 per
+ * block, S094_P2_ALKALINE_SAVINGS.md §21), and crumpbit_cpu_check gates the
+ * instruction count on the linked image at the measured S094 P2 cap.
  */
 
 
@@ -1057,47 +1059,6 @@ static inline void crumpBit_filterMix(uint8_t type, float r,
     *cx = row[0];
     *cb = row[1] + row[2] * (2.0f * r);
     *cl = row[3];
-}
-
-/*
- * The one-pole output filter of `grn` and `rvb` (S091 P5 F1).
- *
- * What: in these two sub-types stage 4 is a one-pole per channel,
- * s += k (x - s), out = cx x + cl s, instead of the resonant TPT SVF:
- * - k from crumpBit_onePoleK[] at the channel's cutoff index (`frq` with the
- *   `bal` spread, as the SVF), matched so the one-pole's -3 dB point is the
- *   SVF's at `res` 0 (plan Q6; generated);
- * - every `typ` value keeps a meaning, because the row is shared and its
- *   stored value survives sub-type switches (plan Q5): LP, LP2, BP, UBP ->
- *   low-pass (cx 0, cl 1); HP, notch -> high-pass x - s (1, -1); peak, off
- *   -> flat (1, 0). The page shows the mapped type (LP/HP/off);
- * - `res` has no effect (the page shows `---`); the type crossfade still
- *   ramps over one block, as the SVF's.
- * Why: the SVF loop is 31 instructions per frame, the one-pole 16; `grn` and
- *   `rvb`, the two dearest engines, could not otherwise reach the 170 cap
- *   (S091_P5_SUBTYPE_EFFICIENCIES.md §2).
- * Index: CRUMPBIT_FILTER_* (MENU_FILTER order). Columns: cx, cl.
- * Accessors: crumpBit_process() (stage 4), crumpBit_filterIsOnePole() (also
- * crumpBit_enter()'s state hand-over). Affiliates: crumpBit_onePoleK,
- * crumpBit_uiFormatValue3() (`typ`/`res` labels), host law CB19.
- */
-static const float crumpBit_onePoleMixTable[CRUMPBIT_FILTER_OFF + 1u][2] = {
-    /*            cx     cl  */
-    /* LP   */ {  0.0f,  1.0f },
-    /* HP   */ {  1.0f, -1.0f },
-    /* BP   */ {  0.0f,  1.0f },
-    /* UBP  */ {  0.0f,  1.0f },
-    /* Nch  */ {  1.0f, -1.0f },
-    /* Pek  */ {  1.0f,  0.0f },
-    /* LP2  */ {  0.0f,  1.0f },
-    /* off  */ {  1.0f,  0.0f },
-};
-
-/* Nonzero when a sub-type's output filter is the one-pole (`grn`, `rvb`). */
-static inline uint32_t crumpBit_filterIsOnePole(uint8_t subtype)
-{
-    return (subtype == CRUMPBIT_SUBTYPE_GRAIN ||
-            subtype == CRUMPBIT_SUBTYPE_REVERB) ? 1u : 0u;
 }
 
 /*
@@ -2849,17 +2810,12 @@ static uint32_t crumpBit_seatActive(CrumpBitRuntime *rt, uint32_t bytes)
  * reinterpreted union bits become a NaN or a huge value); the tape glide is
  * re-primed. The rows are untouched: the new engine reads every stored row
  * value with its own meaning (plan §2.4, A1).
- * S091 P5 F1: a switch between an SVF sub-type and a one-pole one (`grn`,
- * `rvb`) hands the output filter's state over, so the filter carries on
- * from where it was instead of starting from a stale integrator: the
- * one-pole starts from the SVF's low integrator (svf_*2 -> svf_*1), the SVF
- * from the one-pole state as its low integrator with the band integrator
- * cleared (svf_*1 -> svf_*2, svf_*1 = 0); for a held input both are the
- * filter's steady state. No crossfade of the switch itself (S091 P3 S7: the
- * switch glitch is wanted); this only avoids an extra filter click.
+ * The output filter (stage 4) is the same SVF in every sub-type (S094 P2
+ * AS-13), so its state (svf_*) carries straight across a switch: no
+ * hand-over, no click from the filter. (S091 P5 F1's one-pole in `grn` and
+ * `rvb` needed one; it is gone.)
  * Inputs: runtime, the new sub-type, the seated bytes. Output: the union
- * holds the new engine's state; active_subtype = new; the stage 4 state in
- * the new filter's form.
+ * holds the new engine's state; active_subtype = new.
  * Cost: straight-line apart from one modulo, once in the switching block.
  * Caller: crumpBit_process().
  */
@@ -2869,19 +2825,7 @@ static void crumpBit_enter(CrumpBitRuntime *rt, uint8_t next, uint32_t bytes)
     uint32_t written;
     uint32_t len;
 
-    crumpBit_bytePosition(rt, &pos, &written);
-    /* F1: the output filter's state into the new sub-type's form. */
-    if (crumpBit_filterIsOnePole(next) &&
-        !crumpBit_filterIsOnePole(rt->active_subtype)) {
-        (void)0;
-        rt->svf_r1 = rt->svf_r2;
-    } else if (!crumpBit_filterIsOnePole(next) &&
-               crumpBit_filterIsOnePole(rt->active_subtype)) {
-        rt->svf_l2 = rt->svf_l1;
-        rt->svf_r2 = rt->svf_r1;
-        rt->svf_l1 = 0.0f;
-        rt->svf_r1 = 0.0f;
-    }
+    crumpBit_bytePosition(rt, &pos, &written); rt->svf_l1 = 0.0f;
     /* The whole union is rebuilt: zeroed floats and counters first. */
     memset(&rt->u, 0, sizeof(rt->u));
     rt->active_subtype = next;
@@ -2958,17 +2902,15 @@ static inline void crumpBit_filterCoeffs(float g, float r, float *a1,
  *    (origin from mix_prev);
  * 4. one sub-engine loop (stages 1, 2 and 3 per frame);
  * 5. stage 4, a second pass: the output filter's coefficients and its
- *    one-block type crossfade, then its loop. S091 P5 F1: `dly`/`cmb`/`pit`
- *    run the resonant TPT SVF (S091 P2, unchanged), `grn`/`rvb` the
- *    one-pole. Each branch computes its own coefficients and runs its own
- *    loop, so a block pays for one filter only, and the coefficients (now
- *    worked out after the engine, which never reads them) are not live
- *    across the engine call.
+ *    one-block type crossfade, then its loop: the resonant TPT SVF (S091
+ *    P2) in every sub-type (S094 P2 AS-13: `grn`/`rvb` back from the S091
+ *    P5 F1 one-pole, so `res` and all eight types act there again). The
+ *    coefficients are worked out after the engine, which never reads them,
+ *    so they are not live across the engine call.
  * Inputs: runtime and normalized stereo io. Output: io->l/io->r in place,
  * arena bytes, runtime. Caller: effects_process().
  * Affiliates: crumpBit_run*(), crumpBit_enter(), crumpBit_seatActive(),
- * crumpBit_dataLinesFor(), crumpBit_filterMix(), crumpBit_filterG,
- * crumpBit_onePoleMixTable, crumpBit_onePoleK.
+ * crumpBit_dataLinesFor(), crumpBit_filterMix(), crumpBit_filterG.
  */
 static void crumpBit_process(void *rt_void, effect_io_t *io)
 {
@@ -3019,10 +2961,10 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
      * 5. Stage 4 (shared): the output filter, a second pass over the block.
      * S091 P4 `bal` (row 22, 63 = 0): the right channel's cutoff index is
      * frq + (bal - 63), the left's frq - (bal - 63), each clamped to 0..127
-     * (S091_P4_GRN_TWEAKS.md A6.2), for both filter forms. In each loop both
-     * inputs are read before either output is stored, so a mono block
-     * (right aliases left) filters the same input on both states and keeps
-     * the left result, as the engines do.
+     * (S091_P4_GRN_TWEAKS.md A6.2). Both inputs are read before either
+     * output is stored, so a mono block (right aliases left) filters the
+     * same input on both states and keeps the left result, as the engines
+     * do.
      */
     {
         /* tilt: the balance in cutoff steps, -63..64. */
@@ -3034,52 +2976,13 @@ static void crumpBit_process(void *rt_void, effect_io_t *io)
         const int32_t fl = (f - tilt < 0) ? 0 : ((f - tilt > 127) ? 127 : f - tilt);
         const int32_t fr = (f + tilt < 0) ? 0 : ((f + tilt > 127) ? 127 : f + tilt);
 
-        if (crumpBit_filterIsOnePole(rt->active_subtype)) {
+        {
             /*
-             * F1, `grn`/`rvb`: k per channel from the generated table (no
-             * divide); the type's (cx, cl) ramp from the previous block's
-             * type to this one's over the block. Types above `off` read as
-             * `off`, as crumpBit_filterMix() does.
-             */
-            const float kl = crumpBit_onePoleK[fl];
-            const float kr = crumpBit_onePoleK[fr];
-            const float *from = crumpBit_onePoleMixTable[
-                (rt->filter_type_prev > CRUMPBIT_FILTER_OFF)
-                    ? CRUMPBIT_FILTER_OFF : rt->filter_type_prev];
-            const float *to = crumpBit_onePoleMixTable[
-                (rt->filter_type > CRUMPBIT_FILTER_OFF)
-                    ? CRUMPBIT_FILTER_OFF : rt->filter_type];
-            /* cx, cl: input and low-pass weights, ramped per frame. */
-            float cx = from[0];
-            float cl = from[1];
-            const float cx_inc = (to[0] - cx) * blk.per_frame;
-            const float cl_inc = (to[1] - cl) * blk.per_frame;
-            /* s_l, s_r: the one-pole states (the svf_*1 fields). */
-            float s_l = rt->svf_l1;
-            float s_r = rt->svf_r1;
-
-            for (n = 0u; n < blk.frames; n++) {
-                const float xl = blk.left[n];
-                const float xr = blk.right[n];
-
-                /* Output-mix ramp: lands on this block's type at the end. */
-                cx += cx_inc;
-                cl += cl_inc;
-                /* One-pole low-pass: s moves k of the way towards x. */
-                s_l += kl * (xl - s_l);
-                s_r += kr * (xr - s_r);
-                /* LP s, HP x - s, flat x: one weighted sum for all. */
-                blk.right[n] = cx * xr + cl * s_r;
-                blk.left[n] = cx * xl + cl * s_l;
-            }
-            rt->svf_l1 = s_l;
-            rt->svf_r1 = s_r;
-        } else {
-            /*
-             * `dly`/`cmb`/`pit`: the Simper TPT SVF (S091 P2): g from the
-             * voice-law table, k = 2R, a1 = 1/(1 + g(g + k)), a2 = g a1,
-             * a3 = g a2 per channel (at bal 63 both sets are the S091 P2
-             * set bit for bit); the output mix crossfades over the block.
+             * Every sub-type (S094 P2 AS-13): the Simper TPT SVF (S091 P2):
+             * g from the voice-law table, k = 2R, a1 = 1/(1 + g(g + k)),
+             * a2 = g a1, a3 = g a2 per channel (at bal 63 both sets are the
+             * S091 P2 set bit for bit); the output mix crossfades over the
+             * block.
              */
             const float r = crumpBit_filterDamping(rt->filter_reso);
             /* a1..a3 per channel (S091 P4 `bal`: each side its cutoff). */

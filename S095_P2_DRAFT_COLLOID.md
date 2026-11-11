@@ -1,6 +1,7 @@
-# DRAFT — Colloid, the Sixth Instrument
+# S095 P2 — Colloid, the Sixth Instrument (draft)
 
-- **Status:** draft plan and assessment for review (after S093 P8). **No
+- **Status:** draft plan and assessment for review (written after S093 P8;
+  **updated for S095 in §U, which wins over anything below**). **No
   firmware code is changed by this document.** Figures marked *measured* come
   from standalone scratch spikes compiled with the Makefile's DSP flags and
   counted with `elf_looppath.py --cond-heads --in-range` (§13). Figures
@@ -29,8 +30,204 @@
   - Append-only type registry; no backward compatibility.
   - `MEMORY.md` document rule: no step here edits `MEMORY.md` or
     `knowledge_files/`; §12 lists what would go out of date.
-- **Companion draft:** `DRAFT_PWM_IMPLEMENTATION.md`. It shares the
-  integer-interpolation finding and the two-read pulse.
+- **Companion draft:** `DRAFT_PWM_IMPLEMENTATION.md` *(superseded, §U.4: PWM
+  shipped in S094 P0/P1/P4; reuse `osc_pwmReadD()` and `oscPwmTables`)*.
+
+---
+
+## U. S095 update (2026-11-11): what changed since this draft, and what the next session does
+
+This draft was written on 2026-11-10, after S093 P8. S094 and the S095 P1
+plan have changed the ground under it. **Where this section conflicts with
+a figure or reference below, this section wins.** The superseded lines are
+marked *(superseded, §U)*.
+
+### U.1 Order of work and dependencies
+
+- S095 runs P1 first: the Delay, Reverb and Echo Effects, then the user's
+  compressor adjustments.
+- P2 (this document) comes after. It depends on the Advanced budget that P1
+  sets (U.2).
+- **Next session:**
+  1. Read U and `S095_P1_FX_DELAY_RVB_ECHO.md` §H, which has the standing
+     rules, the tree state and the tools.
+  2. Do the §11 spike, with U.2's measure.
+  3. Bring the counts back to the user for C-D1 and C-D2.
+  4. Then write the schedule.
+
+### U.2 The CPU gate is now measured cycles per block, not instruction ceilings
+
+**The rule** (S094 P2 §§18–21, AS-7) replaces S089's Basic 261.3 and the
+Advanced 285.9/292.9 instruction ceilings:
+
+- a type is measured on the device with the probe;
+- as the first instance in a Scene (cold), at its dearest settings, with a
+  stereo send;
+- counting block-rate work, render, SRR (none here) and its output/send
+  add;
+- instruction counts remain the host regression tool, not the gate.
+
+**Budget in force** (cycles per block, 97 % cap of 156,705):
+
+| Item | Budget |
+|---|---:|
+| Basic ×4 | 19,620 |
+| **Advanced ×2** | 21,803 → **21,635** after S095 P1 D19 |
+| Effect | 16,970 (after P1) |
+| Shared mixer | 12,784 |
+| Slack | 500 |
+
+**Translation of this draft's ≈ 278 (estimate, to be measured):**
+
+- **The reference.** The Alkaline at its worst (cold, `wtb` blend, about
+  276.9 whole-voice instructions per sample) measured 16,572 cycles of
+  render plus 3,037 of send add, 19,609 in all (S094 P2 §18). Its render is
+  about 1.87 cycles per instruction, including the cold I-cache penalty
+  (about 2,200 for the Alkaline).
+- **The Colloid's voice.** About 274 per sample without the mixer delta,
+  which is about 16,400 cycles of render.
+- **The send add.** It was 3,037 before `QADD`. `QADD` is now in the mixer
+  adds, so it is about 2,100–2,200 (estimate), plus the stereo delta.
+- **Total:** about **18,600–19,600 against 21,635** as Advanced.
+- **The Colloid has no VDIV per sample** (the Alkaline's ladder has 3, at
+  about 14 cycles each). Its cycles per instruction may therefore be lower
+  than the Alkaline's.
+
+**What follows (estimates):**
+
+- **As Advanced,** there are about 2,000–3,000 cycles of room. That is
+  roughly 2–3 more oscillator pairs, **about 16–18 plain or 10 PWM**.
+- **As Basic** (19,620), 14 plain may already fit.
+- **C-D1 (class) and C-D2 (count) are therefore reopened.** The spike plus
+  one device run decides them.
+
+### U.3 The Advanced list today
+
+- S094 P2 §22 moved Cymbal and HiHat from Advanced to Basic. No type is
+  Advanced today.
+- The Colloid would be the first. The other planned Advanced type is an
+  Alkaline variant with wavefolders and tone, estimated at 20,700–21,200.
+- The two-per-Scene limit is `instrumentManager_typeSelectableForSceneSlot()`
+  (`InstrumentManager.c:443`, the flag test at `:461-463`).
+- Text below that says "shared with Cymbal/HiHat" is superseded.
+
+### U.4 PWM is shipped, so reuse it
+
+- **The companion draft no longer exists under its old name.** The form
+  shipped as `S094_P0_PWM_IMPLEMENTATION.md` and S094 P1 S3. The width law
+  was redesigned in `S094_P4_PWM_OSC_INVESTIGATION.md` and
+  `S094_P4_IMPLEMENTATION.md`.
+- **The two-read pulse** is `osc_pwmReadD()` (`Oscillator.c:3809`).
+  - It uses a 15-bit fraction (`(ph >> 7) & 0x7FFF`), not this draft's
+    16-bit one.
+  - It stores through `OSC_PWM_STORE` (SSAT16, `:3827`).
+- **The width law (S094 P4):**
+  - pos 0 = 50 %, pos 127 = the narrowest: Rec 0.39 %, Saw/Tri 2.54 %;
+  - tables in `Core/DSPAudio/oscPwmTables.h`: `oscPwmDRec`/`oscPwmDSaw`
+    (pos → d), `oscPwmLevelRecQ14`/`oscPwmLevelSawQ14`, and the Tri warp
+    tables.
+- **For the Colloid:**
+  - `pwd` and `pws` map through `oscPwmDRec` (the saw-row pulse is the Rec
+    orientation), so every voice shares one law. This replaces the draft's
+    own "folded at 1 and 127" law.
+  - The width offsets fold or clamp in pos space, 0..127.
+  - The PWM pair loop is re-spiked with the shipped read.
+- **The level tables** offer optional loudness matching across widths.
+  §2.4's "no per-oscillator level" stays the default; the tables are an
+  option for C-D12.
+
+### U.5 Other changes since the draft
+
+| Item | Was | Now |
+|---|---|---|
+| Crash | "without crash: ceiling 286.9"; crash removal as an ITCM reserve | **Crash is removed** (S094 P1 S2). Those lines are superseded. |
+| Flash | headroom 42,828 B | **691,100 B used, 62,564 B headroom.** S095 P1 estimates about +16 KB, which leaves about 46.5 KB for the Colloid's 10–13 KB. |
+| ITCM | 12,128 / 16,384 | **13,984 / 16,384 B** (2,400 free). The Colloid's oscillator loops (about 900 B) fit, leaving about 1,500. |
+| Mixer | dry loop 42 / stereo 44 (measured before `QADD`) | `QADD` is in the adds (S094 P2), so **re-measure** the mono and stereo dry and send loops. |
+| Mixer anchors | | `sampleData` `mixer.c:1074` (`:860` is `mixer_calcNextSampleBlockTest()`'s); the stereo balance law `mixer.c:1236-1247` (was l. 1114–1117); `fx_active` `:1099`; the FX path `:1201-1255` |
+| D-cache | off | **On** (MPU region 0, write-through, non-shareable). The voice state in SRAM is cached. All earlier cycle reasoning predates this. |
+| `IM_SPECIAL_OSC_TYPE` Alkaline branch | l. 3890 | **`InstrumentManager.c:3925`** |
+| Verified unchanged | | type enum `InstrumentManager.h:89-90`; `runtime_slots` `InstrumentManager.c:213`; `ampEnvelopeQuiet` `:1572`; `seq_trackStepSamples(trigger_track)` `:2268`; ON_OFF tags 1–3 used (`MenuText.h:183`, `:213`, `:240`), 4–15 free |
+| S095 P1 interplay | | P1 locks one of the two interpolation slots while an Effect feed runs. The Colloid uses no slots (no interpolation), so it is unaffected. Its stereo voice feeds stereo-input Effects; all three P1 types are stereo in. |
+
+### U.6 Revised next steps (replaces §11, steps 1–2)
+
+1. **Spike (linked, a scratch copy outside the tree):**
+   - the oscillator loops, with the shipped `osc_pwmReadD()` form for PWM;
+   - both filter loops;
+   - the stereo mixer functions against the `QADD` loops;
+   - a stub voice.
+2. **Host gates:**
+   - linked loop counts, the per-block path (`elf_blockpath.py`,
+     `control_cost.py --elf`);
+   - the mixer gate (0 grew);
+   - ITCM and flash (`link_budget.py`).
+3. **One device run with the probe:**
+   - the stub voice at its dearest mode, cold, with a stereo send;
+   - measured against Basic 19,620 and Advanced 21,635;
+   - **output:** the oscillator counts per class and mode, for C-D1 and
+     C-D2.
+4. Then §11 steps 3–5.
+
+### U.7 Standing rules
+
+These are the same as `S095_P1_FX_DELAY_RVB_ECHO.md` §H.3:
+
+**Documents and commits**
+
+- No step edits `MEMORY.md` or `knowledge_files/`, and they are never
+  edited in the same turn as any other file.
+- Commits are the user's.
+- Nothing needed goes in `build/`. Records go in
+  `tools/dsp_test/baselines/`.
+- No `.claude` auto-memory. Project context is the root `MEMORY.md`; the
+  agent working notes are `knowledge_files/volatile/memory/VOLATILE_MEMORY.md`.
+
+**Resources**
+
+- RAM and ITCM growth need sign-off.
+- Logging allocations exist only under `DEV_MODE_LOGGING`.
+
+**Device runs and reporting**
+
+- One flash per question.
+- Report resource figures as one net total against the current build.
+
+**Code**
+
+- Every change carries an accurate comment block.
+
+### U.8 S095 review against the tree (2026-11-11)
+
+**Corrected references:**
+
+- `sampleData` is at `mixer.c:1074` (`:860` is the test function's);
+- the balance law is at `mixer.c:1236-1247`;
+- the noinline Alkaline renders are at `AlkalineVoice.h:243-248`;
+- `menu_instrumentLoadIndex[]` is at `menu.c:1729`;
+- `check_special_tags.py` `TABLES` is at `:21-32`;
+- `filesystem_trimInstrumentTreeBlocking()` is at `filesystem.c:24251`;
+- new ITCM code goes after `.itcm.s094p1`, now the last named subsection
+  (`STM32F765VIHx_FLASH.ld:182`), not after `.itcm.s089p3`.
+
+**Rechecked, unchanged:**
+
+- `osc_pwmReadD()` `Oscillator.c:3809` and `OSC_PWM_STORE` `:3827`;
+- `InstrumentManager.c`: `:213`, `:443`, `:461-463`, `:1572`, `:2268`,
+  `:3925`;
+- the slot reserve is 2 × `sizeof(DrumVoice)` = 1,264 B
+  (`InstrumentManager.c:195-232`);
+- ON_OFF tags 1–3 are used, and 4–15 are free;
+- `voiceControl_noteOff()` is at `MidiVoiceControl.c:357`.
+
+**From the P1 review (`S095_P1_FX_DELAY_RVB_ECHO.md` §13):**
+
+- None of A1–A3 changes this draft.
+- **A3:** no code claims FxBuffer voice units today. The Colloid needs none
+  (§9 item 7), so that stays true.
+- **The Advanced budget (21,635)** is final only after P1's device run.
+  §5.7 there takes any shortfall in what a locked slot frees from Advanced.
+
 
 ---
 
@@ -47,10 +244,10 @@
 | **Stereo spread** | `ste`: in parallel, the even and odd oscillators cross-fade between left and right | Folded into the filter loop (included in 72) |
 | **Amp envelope** | ADSR, per-block exponential segments with a per-sample ramp. **Sustain ends by a gate**: `gat` (length in steps of the triggering track) and `lgt` (tie/legato), the Alkaline gate mechanism (§4) | Ramp folded into the filter loop |
 | **Output** | True stereo voice: a second int16 block, a stereo path in the mixer | Mixer dry path +2 per sample (measured), send ≈ +2 (*estimate*) |
-| **Class** | **Advanced** (≈ 278 against the 292.9 Advanced ceiling). Basic would allow 12 / 7 oscillators (§6.3) | |
+| **Class** | **Advanced** (≈ 278 against the 292.9 Advanced ceiling). Basic would allow 12 / 7 oscillators (§6.3) *(superseded, §U.2: the gate is now cycles per block; Advanced 21,635, Basic 19,620; class and count are reopened)* | |
 | **RAM** | **0 B new.** The voice (≈ 990 B, *estimate*), its oscillator buses and right-channel block all fit the existing 1,264 B slot reserve | |
 | **ITCM** | ≈ 0.9 KB (the oscillator loops) | Sign-off |
-| **Flash** | ≈ 10–13 KB (*estimate*; Alkaline's engine is ≈ 14.5 KB) | Headroom 42,828 B |
+| **Flash** | ≈ 10–13 KB (*estimate*; Alkaline's engine is ≈ 14.5 KB) | Headroom 42,828 B *(superseded, §U.5: 62,564 B now, ≈ 46.5 KB after S095 P1)* |
 
 **The two findings that make 14 oscillators possible:**
 1. **Integer oscillators.** An interpolated table read accumulated into an
@@ -194,7 +391,7 @@ Per block, before the render:
 - Under `pwm` every oscillator plays the band-limited two-read pulse (the
   saw-row difference of `DRAFT_PWM_IMPLEMENTATION.md` §1.1, form D), with:
   - `pwd`: the centre width, read every block (an LFO on it moves every
-    oscillator together);
+    oscillator together); *mapped through the shipped S094 P4 law (§U.4)*;
   - `pws`: the width spread. Each oscillator draws its own offset `q_i` in
     −1..+1 at each non-legato trigger (main loop, like `r_i`); its width is
     `pwd + q_i · pws`, folded back at the 1 and 127 ends, recomputed every
@@ -316,19 +513,19 @@ measured*).
 ## 5. Stereo output and the mixer
 
 The mixer renders each slot into one mono stack block (`sampleData`,
-`mixer.c` l. ~1008). Colloid adds a right channel without new RAM:
+`mixer.c:1074`). Colloid adds a right channel without new RAM:
 
 | Item | Proposal |
 |---|---|
 | Right block | `int16_t right[32]` **inside `ColloidVoice`** (in the slot reserve) |
 | Accessor | `instrumentManager_slotRight(slot)`: the Colloid's block, or NULL for every other type |
 | Mixer slot loop | after `instrumentManager_calcSlotSyncBlock()`: `right ? stereo path : existing path`, one pointer test per slot per block. The existing calls keep their arguments |
-| Dry path | new noinline `mixer_addVoiceStereoToOutput()`: L → left bus, R → right bus, with the **balance law** of the stereo FX return (`mixer.c` l. 1114–1117, centre 63 = unity both sides). Single-side routes (`DAC1_L` …) take (L+R)/2 |
+| Dry path | new noinline `mixer_addVoiceStereoToOutput()`: L → left bus, R → right bus, with the **balance law** of the stereo FX return (`mixer.c:1236-1247`, centre 63 = unity both sides). Single-side routes (`DAC1_L` …) take (L+R)/2 |
 | FX send | new noinline `mixer_addVoiceStereoToOutputAndFx()`: a stereo-input Effect gets L/R; a mono-input Effect gets (L+R)/2 |
 | SRR | none (`instrumentManager_slotUsesSrr()` default 0; brief) |
 | `pan` row | `DTYPE_PM63`, stored 63 = centre; balance law for this stereo source (the one-pan rule allows a different stereo law) |
 
-- **Cost (*measured*):** the shipped mono dry loop (DAC1 stereo case) is
+- **Cost (*measured*, before `QADD`; re-measure, §U.5):** the shipped mono dry loop (DAC1 stereo case) is
   42; the stereo form is **44** (+2). The send is about the same again
   (*estimate* +2).
 - **Risk:** the engine renders are inlined into
@@ -336,7 +533,7 @@ The mixer renders each slot into one mono stack block (`sampleData`,
   inlined loops (S086 F1; the Alkaline render moved the mixer twice in P8).
   Mitigations:
   - `Colloid_calcVoiceAsync()` and `Colloid_calcVoiceSyncBlock()` are
-    noinline (the Alkaline precedent, `AlkalineVoice.h` l. 197–201);
+    noinline (the Alkaline precedent, `AlkalineVoice.h:243-248`);
   - the stereo functions are noinline;
   - the mixer gate (`elf_p4_check` / `elf86_mixer_check`, 0 grew) is a hard
     pass condition.
@@ -354,8 +551,8 @@ The mixer renders each slot into one mono stack block (`sampleData`,
 | Mixer stereo delta (dry + send) | ≈ 4 | ≈ 4 | dry +2 measured, send *estimate* |
 | Per block / 32 | ≈ 22 | ≈ 19 | *estimate*, below |
 | **Total** | **≈ 278** | **≈ 269** | |
-| Advanced ceiling (Cymbal/HiHat dearest, measured not frozen) | 292.9 | 292.9 | `DRAFT_SAMPLE_VOICE_REDUCTIONS.md` §4.7.1 |
-| Margin (without crash: ceiling 286.9) | 14.9 (8.9) | 23.9 (17.9) | |
+| Advanced ceiling (Cymbal/HiHat dearest, measured not frozen) *(superseded, §U.2)* | 292.9 | 292.9 | `DRAFT_SAMPLE_VOICE_REDUCTIONS.md` §4.7.1 |
+| Margin (without crash: ceiling 286.9) *(superseded, §U.2, U.5)* | 14.9 (8.9) | 23.9 (17.9) | |
 
 **Per block (*estimate*):**
 
@@ -390,8 +587,8 @@ The mixer renders each slot into one mono stack block (`sampleData`,
 
 | Class | Plain | PWM | Dense (truncated, *estimate*) | Placement |
 |---|---:|---:|---:|---|
-| **Advanced** (≤ 292.9) | **14** | **8** | ≈ 28 | at most two per Scene, shared with Cymbal/HiHat (`instrumentManager_typeSelectableForSceneSlot()`, `InstrumentManager.c` l. 443) |
-| Basic (≤ 261.3, the Drum ceiling) | 12 (≈ 250) | 7 (≈ 244) | ≈ 22 | any slot, any number |
+| **Advanced** (≤ 292.9) *(superseded, §U.2/U.3: 21,635 cycles; no other Advanced type today)* | **14** | **8** | ≈ 28 | at most two per Scene, shared with Cymbal/HiHat (`instrumentManager_typeSelectableForSceneSlot()`, `InstrumentManager.c` l. 443) |
+| Basic (≤ 261.3, the Drum ceiling) *(superseded, §U.2: 19,620 cycles)* | 12 (≈ 250) | 7 (≈ 244) | ≈ 22 | any slot, any number |
 
 - **The gap is small** (+2 / +1 oscillators). The filter pair, the mixer
   delta and the per-block work cost the same in either class.
@@ -399,7 +596,7 @@ The mixer renders each slot into one mono stack block (`sampleData`,
   possible").
 - Basic is a real alternative if two Colloids plus Cymbal/HiHat in one
   Scene matters more (C-D1).
-- A type cannot be both (l. 460–461 of the same file).
+- A type cannot be both (`:460-462` of the same file).
 
 ### 6.4 Constant-cost check
 
@@ -419,7 +616,7 @@ The mixer renders each slot into one mono stack block (`sampleData`,
 ### 7.1 RAM: inside the existing slot reserve
 
 `runtime_slots[6]` reserves 1,264 B per slot (2 × `sizeof(DrumVoice)`;
-`InstrumentManager.c` l. 203–228). A `ColloidVoice` adds a union member and
+`InstrumentManager.c:195-232`). A `ColloidVoice` adds a union member and
 an assert. It does not grow the union.
 
 | Member | Bytes (*estimate*) |
@@ -445,7 +642,7 @@ an assert. It does not grow the union.
 
 | | Bytes (*estimate*, from measured loop sizes) | Where |
 |---|---:|---|
-| Oscillator loops: pair store, pair add, single; PWM pair store, PWM pair add, PWM single | ≈ 900 | ITCM, new `.itcm.sNNN` after `.itcm.s089p3` (`STM32F765VIHx_FLASH.ld` l. 180) |
+| Oscillator loops: pair store, pair add, single; PWM pair store, PWM pair add, PWM single | ≈ 900 | ITCM, new `.itcm.sNNN` after `.itcm.s094p1`, the last one today (`STM32F765VIHx_FLASH.ld:182`) |
 | Dense pair (if adopted) | ≈ 90 | ITCM |
 | Filter/output loops (parallel 528 B, series 476 B measured) | ≈ 1,000 | flash, as the other filters and post-chains (ITCM measured worse for filters in S023); the spike measures both |
 | Mixer stereo dry and dry + send functions (six routing cases each) | ≈ 2,500 | flash |
@@ -453,7 +650,8 @@ an assert. It does not grow the union.
 
 ITCM total with PWM and Colloid: 12,128 + ≈ 2,000 + ≈ 900 ≈ 15.0 / 16.4 KB.
 Crash removal (≈ 540 B) and the reductions draft's S-C (≈ 2.2 KB) are the
-ITCM reserves if needed.
+ITCM reserves if needed. *(Superseded, §U.5: ITCM is 13,984 / 16,384 B with
+PWM shipped and crash removed; ≈ 14.9 KB with the Colloid.)*
 
 ---
 
@@ -485,7 +683,7 @@ ITCM reserves if needed.
 - The selectors (`typ`, `int`, `fmd`, filter types, `pmd`, `lgt`) are
   `SELECTOR`: automatable per step, never morphed.
 - `typ` reuses `IM_SPECIAL_OSC_TYPE` with a Colloid branch, as the Alkaline
-  branch at `InstrumentManager.c` l. 3890.
+  branch at `InstrumentManager.c:3925`.
 - `pos` and `wsp` are read at the trigger (§2.3). `pwd`, cutoffs,
   resonance, drive, detune and spread are read every block (smooth through
   the ramps and slews).
@@ -496,12 +694,12 @@ ITCM reserves if needed.
 
 | §9.2 item | Colloid |
 |---|---|
-| 1 Enum and registry | `INSTRUMENT_TYPE_COL` after `INSTRUMENT_TYPE_ALK`, before `UNKNOWN` (`InstrumentManager.h` l. 89–90); a designated row `"col"`, `".col"`, label `"Colloid"` (7 cells; Load Morph shows `ColloMrp`), directory `"Colloid"` (7 characters), `INSTRUMENT_FLAG_ADVANCED`. Type-sized arrays grow by one (e.g. `menu_instrumentLoadIndex[]`, `menu.c` l. 1728: +2 B, `.bss`) |
+| 1 Enum and registry | `INSTRUMENT_TYPE_COL` after `INSTRUMENT_TYPE_ALK`, before `UNKNOWN` (`InstrumentManager.h` l. 89–90); a designated row `"col"`, `".col"`, label `"Colloid"` (7 cells; Load Morph shows `ColloMrp`), directory `"Colloid"` (7 characters), `INSTRUMENT_FLAG_ADVANCED`. Type-sized arrays grow by one (e.g. `menu_instrumentLoadIndex[]`, `menu.c:1729`: +2 B, `.bss`) |
 | 2 Files | `Core/DSP/Instruments/Colloid/ColloidVoice.c/.h`, `ColloidParameters.c/.h`, and a control/table file if needed |
-| 3 Runtime | union member + assert (l. 203–228); `instrumentManager_colloidRuntime()`; a case in every §3.2 dispatcher; `ampEnvelopeQuiet()` branch (l. 1572); `seq_trackStepSamples(trigger_track)` passed to the trigger as for Alkaline (l. 2268); `instrumentManager_slotRight()` (new) |
+| 3 Runtime | union member + assert (`:195-232`); `instrumentManager_colloidRuntime()`; a case in every §3.2 dispatcher; `ampEnvelopeQuiet()` branch (l. 1572); `seq_trackStepSamples(trigger_track)` passed to the trigger as for Alkaline (l. 2268); `instrumentManager_slotRight()` (new) |
 | 4 Build | include path; parameters in `SRCS`; voice in `DSP_SRCS` with an explicit `-Ofast` rule (the pattern rule covers only `Core/DSPAudio/`) |
-| 5 Host proof | `check_special_tags.py` `TABLES['COL']` (l. 21–30 hold the five today); the tag gate; `init.col` generator/check |
-| 6 Storage | append-only token (the `.hcnames` header accepts an older header as a leading part); AutoSave stores `col`; `SD_CARD/Instrument/Colloid/init.col`. The boot directory trim enumerates every `/Instrument` subdirectory (`filesystem_trimInstrumentTreeBlocking()`, `filesystem.c` l. 24205), so the new folder is covered |
+| 5 Host proof | `check_special_tags.py` `TABLES['COL']` (`:21-32` hold the five today); the tag gate; `init.col` generator/check |
+| 6 Storage | append-only token (the `.hcnames` header accepts an older header as a leading part); AutoSave stores `col`; `SD_CARD/Instrument/Colloid/init.col`. The boot directory trim enumerates every `/Instrument` subdirectory (`filesystem_trimInstrumentTreeBlocking()`, `filesystem.c:24251`), so the new folder is covered |
 | 7 Class | Advanced (§6.3); no FxBuffer voice units needed (no delay line) |
 
 ---
@@ -514,7 +712,7 @@ ITCM reserves if needed.
 | The per-block estimate (≈ 700) is off | `elf_blockpath.py` / `control_cost.py`-style count in the spike; the oscillator count is set from the measured total |
 | The parallel filter loop's spills grow when linked | measured linked; layout candidates (§3) |
 | Summing 14 sources: level and headroom into the drive | per-block normalisation; host level law |
-| The Advanced ceiling is not frozen | freezing it (a baseline file under `tools/dsp_test/baselines/`) is the first schedule step |
+| The Advanced ceiling is not frozen *(superseded, §U.2: the gate is the measured 21,635-cycle budget)* | measure the stub voice with the probe (§U.6) |
 | User wavetables alias at high notes | as every `wtb` today; noted, not fixed |
 | The sound of the integer interpolation and the dense option | host laws (alias/noise floor against an oversampled reference), then the user's ear |
 
@@ -528,7 +726,7 @@ ITCM reserves if needed.
    - gates: linked loop counts, per-block path, `elf_p4_check` (mixer
      0 grew), ITCM/flash.
    - **Output:** the oscillator counts per class and mode.
-2. **Freeze the Advanced ceiling** as a baseline file.
+2. **Freeze the Advanced ceiling** as a baseline file. *(Superseded: see §U.6.)*
 3. **Host model and laws:**
    - filter stability under modulation and coefficient ramps;
    - ADSR smoothness (no step larger than the ramp allows);
@@ -552,9 +750,9 @@ ITCM reserves if needed.
 
 | # | Question | Recommendation |
 |---|---|---|
-| C-D1 | Class | Advanced (14 / 8). Basic gives 12 / 7 in any slot |
-| C-D2 | Oscillator count | 14 plain / 8 PWM, set finally from the linked spike |
-| C-D3 | Gate measure for a division-free voice | Instructions (established); the cycle proxy would allow ≈ 20 |
+| C-D1 | Class | Advanced (14 / 8). Basic gives 12 / 7 in any slot. **Reopened (§U.2):** under the cycle budgets ≈ 16–18 / 10 as Advanced and possibly 14 as Basic (estimates); decide from the spike and device run |
+| C-D2 | Oscillator count | 14 plain / 8 PWM, set finally from the linked spike **and the device run (§U.6)** |
+| C-D3 | Gate measure for a division-free voice | Instructions (established); the cycle proxy would allow ≈ 20. **Settled by S094 P2 (§U.2):** measured cycles per block with the probe |
 | C-D4 | Wavetable frames | latched at each non-legato trigger (no mid-note steps) |
 | C-D5 | "Spread" means frames within one table, or neighbouring tables | Frames within the selected table; neighbouring tables as a later mode (same cost) |
 | C-D6 | PWM on a wavetable frame (a comb) | Not offered at first: `pwm` plays the saw-row pulse |

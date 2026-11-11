@@ -214,9 +214,10 @@ typedef enum {
     FS_NAME_CACHE_BANK,
     FS_NAME_CACHE_PATTERN,
     /*
-     * S075: the array is lent to copy/clear as working storage
-     * (filesystem_borrowNameCacheScratch()); no browser accessor treats this
-     * domain as loaded, so Load/Save reloads its index on the next entry.
+     * S075: the array is lent as working storage; no browser accessor treats
+     * this domain as loaded, so Load/Save reloads its index on the next
+     * entry. Since S094 P3 only the modal sample/wavetable install takes the
+     * loan (copy/clear has its own scratch, fs_cc_scratch).
      */
     FS_NAME_CACHE_COPYCLEAR,
     /* Legacy tag retained for compatibility checks; HCNAMES storage is now dedicated. */
@@ -1878,8 +1879,47 @@ static uint8_t filesystem_patternHeaderValid(const uint8_t *header,
  * Menu and Preset access them only through filesystem accessors.
  */
 static fs_name_cache_kind_t fs_list_cache_kind = FS_NAME_CACHE_NONE;
-/* S075: nonzero while copy/clear holds fs_list_cache_name (1 B SRAM). */
+/* S075: nonzero while fs_list_cache_name is lent (1 B SRAM). Since S094 P3
+ * only the modal sample/wavetable install takes the loan. */
 static uint8_t fs_name_cache_borrowed;
+/*
+ * Dedicated copy/clear name-remap scratch (S094 P3, Proposal A).
+ *
+ * What:       the HCNAMES row remap copy/clear records during an interaction
+ *             (remap[row] = original row whose name and source the row takes,
+ *             0xFF = unchanged), plus the snapshot of the original names and
+ *             sources that filesystem_cacheCopyClearRemap() takes before it
+ *             applies the remap. 1,932 B SRAM1 .bss (user sign-off, S094 P3);
+ *             uint16_t first, so there is no padding.
+ * Why:        copy/clear used to borrow the whole 9,000 B fs_list_cache_name
+ *             for these 2,027 B. The loan made every paste's name phase wait
+ *             for an idle facade and no Load/Save command, refused every other
+ *             facade operation while held, and cleared the browser index on
+ *             return. Here nothing is shared, so none of that applies.
+ * Validity:   fs_cc_scratch_active (1 B) is set by
+ *             filesystem_copyClearRemapBegin() and cleared by
+ *             filesystem_copyClearRemapEnd(); the remap is meaningful only
+ *             while it is set. names/sources are operation-local to
+ *             filesystem_cacheCopyClearRemap().
+ * Accessors:  filesystem_copyClearRemapBegin()/End(),
+ *             filesystem_cacheCopyClearRemap(),
+ *             filesystem_requestCopyResidentNames().
+ * Affiliates: copyClearService.c (ccSvc_ensureScratch(), teardown).
+ */
+typedef struct {
+    uint16_t sources[FS_RESIDENT_NAMES_ROW_COUNT];
+    char names[FS_RESIDENT_NAMES_ROW_COUNT][STORAGE_KIT_DISPLAY_NAME_LEN + 1u];
+    uint8_t remap[FS_RESIDENT_NAMES_ROW_COUNT];
+} fs_copy_clear_scratch_t;
+static fs_copy_clear_scratch_t fs_cc_scratch;
+static uint8_t fs_cc_scratch_active;
+_Static_assert(sizeof(fs_copy_clear_scratch_t) == 1932u,
+               "copy/clear scratch is the approved 1,932 B");
+_Static_assert(sizeof(((fs_copy_clear_scratch_t *)0)->names) ==
+                   sizeof(hcnames_name_mirror) &&
+               sizeof(((fs_copy_clear_scratch_t *)0)->sources) ==
+                   sizeof(fs_resident_source),
+               "copy/clear snapshot must match the mirror and register");
 #if DEV_MODE_LOGGING
 /*
  * S075 trace debug (DEV only, 2 B): suspension edge state and one refusal
@@ -1962,10 +2002,11 @@ static void filesystem_clearNameCacheStorage(void)
      * are cleared without modifying the separate typed stage. Affiliates:
      * HCNAMES, `.hcindex`, menu browse state machines, and typed load stages.
      *
-     * S075: while the array is lent to copy/clear it is not a browser cache;
-     * a disposal request (Menu lifecycle, a refused request's cleanup) must
-     * not wipe the working storage, so it is ignored. The lender's return
-     * path clears the array after it has released the loan.
+     * S075: while the array is lent (since S094 P3, to the sample/wavetable
+     * install only) it is not a browser cache; a disposal request (Menu
+     * lifecycle, a refused request's cleanup) must not wipe the working
+     * storage, so it is ignored. The lender's return path clears the array
+     * after it has released the loan.
      */
     if (fs_name_cache_borrowed)
         return;
@@ -1978,39 +2019,44 @@ static void filesystem_clearNameCacheStorage(void)
 _Static_assert(FS_HCNAMES_ROW_COUNT == FS_RESIDENT_NAMES_ROW_COUNT,
                "public HCNAMES row count must match the register");
 _Static_assert(sizeof(fs_list_cache_name) == FS_NAME_SCRATCH_BYTES,
-               "copy/clear scratch size must match the name cache");
+               "the lent scratch size must match the name cache");
 /* S093 P8: the install's wavetable frame buffer fits the name cache */
 _Static_assert(sizeof(fs_list_cache_name) >= WAVETABLE_FRAME_MAX * sizeof(int16_t),
                "a wavetable source frame must fit the name cache");
 
 /*
- * Lend the 9,000 B name cache to copy/clear as working storage (S075).
+ * Return the lent 9,000 B name cache (S075; install only since S094 P3).
  *
- * Contract in filesystem.h. Borrow refuses while the facade is not idle (an
- * index read or HCNAMES transaction may be using the array) or while already
- * lent; otherwise the array is cleared, tagged FS_NAME_CACHE_COPYCLEAR and
- * handed out. Return clears it again (domain NONE) so no stale scratch bytes
- * can ever be read as names.
+ * Contract in filesystem.h. Clears the array and its domain (NONE) so no
+ * stale scratch bytes can ever be read as names. The loan itself is taken
+ * inline by filesystem_installUserContentBlocking().
  */
-uint8_t *filesystem_borrowNameCacheScratch(void)
-{
-    if (status != FS_STATUS_IDLE || fs_name_cache_borrowed)
-        return 0;
-    filesystem_clearNameCacheStorage();
-    fs_list_cache_kind = FS_NAME_CACHE_COPYCLEAR;
-    fs_name_cache_borrowed = 1u;
-#if DEV_MODE_LOGGING
-    fs_cc_refusal_reported = 0u;
-#endif
-    return (uint8_t *)fs_list_cache_name;
-}
-
 void filesystem_returnNameCacheScratch(void)
 {
     if (!fs_name_cache_borrowed)
         return;
     fs_name_cache_borrowed = 0u;
     filesystem_clearNameCacheStorage();
+}
+
+/*
+ * Start and end one copy/clear interaction's remap (S094 P3, Proposal A).
+ *
+ * Contract in filesystem.h. Begin clears the remap to "unchanged" (0xFF),
+ * marks it valid and returns it; it always succeeds, whatever the facade or
+ * Load/Save is doing. End marks it invalid. Affiliates: fs_cc_scratch.
+ */
+uint8_t *filesystem_copyClearRemapBegin(void)
+{
+    memset(fs_cc_scratch.remap, 0xFF, sizeof(fs_cc_scratch.remap));
+    fs_cc_scratch_active = 1u;
+    return fs_cc_scratch.remap;
+}
+
+void filesystem_copyClearRemapEnd(void)
+{
+    fs_cc_scratch_active = 0u;
+    memset(fs_cc_scratch.remap, 0xFF, sizeof(fs_cc_scratch.remap));
 }
 
 /*
@@ -2037,7 +2083,7 @@ static void filesystem_clearInstrumentCacheStorage(void)
  */
 static void filesystem_prepareLibraryNameCache(fs_name_cache_kind_t kind)
 {
-    /* S075: never retag the array while copy/clear holds it. */
+    /* S075: never retag the array while it is lent (install, S094 P3). */
     if (fs_name_cache_borrowed)
         return;
     filesystem_clearNameCacheStorage();
@@ -7127,38 +7173,28 @@ static void filesystem_cacheCurrentResidentPatternName(void)
  * Overlay copy/clear identity changes onto the freshly read register (S075).
  *
  * What: applies the session's row remap (destination row <- source row) from
- * the borrowed name buffer to the HCNAMES mirror and source register, using
- * a copy of the original rows so chained or swapped pastes resolve to the
- * pre-operation names. Copied rows take the source's name and source token;
+ * the dedicated copy/clear scratch (fs_cc_scratch, S094 P3) to the HCNAMES
+ * mirror and source register, using a copy of the original rows so chained
+ * or swapped pastes resolve to the pre-operation names. Copied rows take the source's name and source token;
  * their refreshed flag is cleared so the boot reader never reloads a library
  * object over pasted content (spec §9.10). Instrument type tokens are
  * formatted from the resident slot and follow automatically. Rows changed only
  * by clears already had their refreshed flag cleared in RAM and are written
  * as they are (names kept on clear, user).
- * Inputs: remap[161] at offset 0 of the borrowed buffer (0xFF = unchanged).
- * Scratch: original names at offset 256 (1,449 B) and original sources at
- * offset 1,705 (322 B) of the same buffer. Output: mirror and register rows;
- * the shared writer then rewrites `.hcnamtmp` and swaps it in. Caller:
+ * Inputs: fs_cc_scratch.remap[161] (0xFF = unchanged), valid while
+ * fs_cc_scratch_active. Scratch: fs_cc_scratch.names (1,449 B) and .sources
+ * (322 B) take the original rows. Output: mirror and register rows; the
+ * shared writer then rewrites `.hcnamtmp` and swaps it in. Caller:
  * filesystem_residentNames_tick() phases 3 and 7.
  */
-#define FS_COPY_REMAP_OFFSET        0u
-#define FS_COPY_NAMES_OFFSET        256u
-#define FS_COPY_SOURCES_OFFSET      (FS_COPY_NAMES_OFFSET + \
-                                     sizeof(hcnames_name_mirror))
-_Static_assert(FS_COPY_SOURCES_OFFSET + sizeof(fs_resident_source) <=
-                   FS_NAME_SCRATCH_BYTES,
-               "copy/clear HCNAMES scratch must fit the name buffer");
 static void filesystem_cacheCopyClearRemap(void)
 {
-    uint8_t *scratch = (uint8_t *)fs_list_cache_name;
-    const uint8_t *remap = &scratch[FS_COPY_REMAP_OFFSET];
-    char (*names)[STORAGE_KIT_DISPLAY_NAME_LEN + 1u] =
-        (char (*)[STORAGE_KIT_DISPLAY_NAME_LEN + 1u])
-            (void *)&scratch[FS_COPY_NAMES_OFFSET];
-    uint16_t *sources = (uint16_t *)(void *)&scratch[FS_COPY_SOURCES_OFFSET];
+    const uint8_t *remap = fs_cc_scratch.remap;
+    char (*names)[STORAGE_KIT_DISPLAY_NAME_LEN + 1u] = fs_cc_scratch.names;
+    uint16_t *sources = fs_cc_scratch.sources;
     uint16_t row;
 
-    if (!fs_name_cache_borrowed)
+    if (!fs_cc_scratch_active)
         return;
     memcpy(names, hcnames_name_mirror, sizeof(hcnames_name_mirror));
     memcpy(sources, fs_resident_source, sizeof(fs_resident_source));
@@ -7293,15 +7329,25 @@ static void filesystem_recordStallSnapshot(uint8_t site)
     autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
                          (uint8_t)(site | (0u << AUTOSAVE_TRACE_PHASE_STALL_PART_SHIFT)),
                          value);
-    /* Part 1: cache slots (8 total); an index of -1 encodes as 0. */
-    value = (uint32_t)(fs.cache_locked & 0x0Fu) |
-            ((uint32_t)(fs.cache_retained & 0x0Fu) << 4u) |
-            ((uint32_t)(fs.cache_dirty & 0x0Fu) << 8u) |
-            ((uint32_t)(fs.cache_reading & 0x0Fu) << 12u) |
-            ((uint32_t)(fs.cache_writing & 0x0Fu) << 16u) |
-            ((uint32_t)(fs.cache_empty & 0x0Fu) << 20u) |
-            ((uint32_t)((uint8_t)(fs.cwd_retain + 1) & 0x0Fu) << 24u) |
-            ((uint32_t)((uint8_t)(fs.cwd_lock + 1) & 0x0Fu) << 28u);
+    /*
+     * Part 1: cache slots (S094 P3: 16 total, 5-bit fields, good to 31).
+     *
+     * Layout: locked 0-4, retained 5-9, dirty 10-14, empty 15-19, reading
+     * bit 20, writing bit 21, cwd retain + 1 22-26, cwd lock + 1 27-31 (an
+     * index of -1 encodes as 0). Reading and writing are one bit each because
+     * the SD shim accepts one transfer at a time (sdcard_readBlock() and
+     * sdcard_writeBlock() refuse unless IDLE). The former 4-bit layout
+     * wrapped at 16 (cache_empty is 16 at boot). Decoder:
+     * decode_devlogs.py decode_hcnames_stall() part 1.
+     */
+    value = (uint32_t)(fs.cache_locked & 0x1Fu) |
+            ((uint32_t)(fs.cache_retained & 0x1Fu) << 5u) |
+            ((uint32_t)(fs.cache_dirty & 0x1Fu) << 10u) |
+            ((uint32_t)(fs.cache_empty & 0x1Fu) << 15u) |
+            ((uint32_t)(fs.cache_reading ? 1u : 0u) << 20u) |
+            ((uint32_t)(fs.cache_writing ? 1u : 0u) << 21u) |
+            ((uint32_t)((uint8_t)(fs.cwd_retain + 1) & 0x1Fu) << 22u) |
+            ((uint32_t)((uint8_t)(fs.cwd_lock + 1) & 0x1Fu) << 27u);
     autosaveTrace_record(AUTOSAVE_TRACE_STAGE_PHASE_STALL,
                          (uint8_t)(site | (1u << AUTOSAVE_TRACE_PHASE_STALL_PART_SHIFT)),
                          value);
@@ -25723,20 +25769,23 @@ uint8_t filesystem_installUserContentBlocking(void)
      *             walker assembles each source frame in it (up to 2,048 int16 =
      *             4,096 B, sampleInstall_writeFrame()); it is returned and
      *             cleared at the end, so Load/Save reloads its index on the
-     *             next entry, as after copy/clear.
+     *             next entry.
      * Why:        D1': the raw frame is not stored, so the resampler reads it
-     *             from RAM; no new RAM (D8). The public borrow requires an IDLE
-     *             facade; this pass only needs it not BUSY (checked above), so
-     *             it takes the loan here. A loan already held (copy/clear) is
-     *             refused, as a busy facade.
-     * Affiliates: filesystem_borrowNameCacheScratch() (the same steps),
-     *             filesystem_returnNameCacheScratch().
+     *             from RAM; no new RAM (D8). This pass only needs the facade
+     *             not BUSY (checked above), so it takes the loan here. Since
+     *             S094 P3 it is the only borrower (copy/clear has its own
+     *             scratch); a loan already held is refused, as a busy facade.
+     * Affiliates: filesystem_returnNameCacheScratch().
      */
     if (fs_name_cache_borrowed)
         return 0u;
     filesystem_clearNameCacheStorage();
     fs_list_cache_kind = FS_NAME_CACHE_COPYCLEAR;
     fs_name_cache_borrowed = 1u;
+#if DEV_MODE_LOGGING
+    /* One refusal witness per loan (was reset by the removed borrow call). */
+    fs_cc_refusal_reported = 0u;
+#endif
     status = FS_STATUS_BUSY;
     current_op = FS_INTERNAL_OP_NONE;
 
@@ -29311,12 +29360,12 @@ static bool filesystem_start(fs_internal_op_t op, fs_file_type_t type,
 
     if (status == FS_STATUS_BUSY) return false;
     /*
-     * S075: while copy/clear holds the 9 kB name buffer, no operation that
-     * could read or write browser names may start; only the copy/clear name
-     * write itself is admitted. Callers see the same refusal as a busy
-     * facade and retry; the loan lasts only until queued copy/clear work and
-     * its name write have finished. Affiliate:
-     * filesystem_borrowNameCacheScratch().
+     * S075: while the 9 kB name buffer is lent, no operation that could read
+     * or write browser names may start. Since S094 P3 only the modal
+     * sample/wavetable install takes the loan, and it holds the facade BUSY
+     * throughout, so this is a backstop; copy/clear uses its own scratch
+     * (fs_cc_scratch) and never blocks other operations. The copy/clear name
+     * write stays admitted. Affiliate: filesystem_installUserContentBlocking().
      */
     if (fs_name_cache_borrowed && op != FS_INTERNAL_OP_UPDATE_HCNAMES_COPY) {
 #if DEV_MODE_LOGGING
@@ -34680,7 +34729,8 @@ uint16_t filesystem_identityRow(fs_identity_row_class_t cls, uint8_t scene,
 
 bool filesystem_requestCopyResidentNames(fs_completion_cb_t cb)
 {
-    if (status == FS_STATUS_BUSY || !fs_name_cache_borrowed)
+    /* S094 P3: valid while copy/clear's dedicated remap is active. */
+    if (status == FS_STATUS_BUSY || !fs_cc_scratch_active)
         return false;
     if (!filesystem_start(FS_INTERNAL_OP_UPDATE_HCNAMES_COPY,
                           FS_FILE_SETTINGS, 0u, cb))

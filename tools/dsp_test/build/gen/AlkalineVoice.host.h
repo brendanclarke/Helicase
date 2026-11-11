@@ -4,8 +4,9 @@
  * and the output make-up since S093 P3).
  *
  * What:       one Alkaline voice: the VCO (the fused table loop on sawTable,
- *             the D8 square table or, since S093 P8, a wavetable frame's
- *             1,024-point row), the diode-ladder VCF with its
+ *             the D8 square table, the stock triangle rows (S094 P4) or,
+ *             since S093 P8, a wavetable frame's 1,024-point row), the
+ *             diode-ladder VCF with its
  *             network and the OTA (DiodeLadder), and the control path (MEG,
  *             accent network, expo converter, VEG; AlkalineControl), with the
  *             303 sequencing rules: accent at velocity >= ALK_ACCENT_VELOCITY (101),
@@ -55,17 +56,35 @@
 #ifndef ALK_FUSED_OSC
 #define ALK_FUSED_OSC         1
 #endif
-/* osc.waveform under typ wav (S093 P8: row osc1_wave; was the
- * AlkalineVoice.wave byte of row alk_wave). Under typ wtb the same byte is
- * the wavetable index. */
+/*
+ * osc.waveform: the Alkaline wave list (S093 P8 row osc1_wave; S094 P4).
+ *
+ * What:       under typ wav: 0 Saw, 1 Sqr (the 303 square table), 2 Tri (the
+ *             stock triangle rows). Under typ pwm: 0 Saw (two-saw sum), 1 Sqr
+ *             (the band-limited pulse: the stock Rec's pwm form), 2 Tri (the
+ *             warp form of the triangle). Under typ wtb the same byte is the
+ *             wavetable index.
+ * Why:        S094 P4 (user): Tri only under wav and pwm, no Rec (Sqr is
+ *             the pulse), no Sin under wav, and no Sin under pwm (the ladder's
+ *             low-pass makes a warped sine and a warped triangle practically
+ *             the same). Rec under pwm is Sqr; noise has no pwm form.
+ *             Appended, so stored Kits keep their wave; a type switch keeps
+ *             the value (one list size).
+ * Accessors:  alk_renderWav(), alk_renderPwm(), Alkaline_setOscType(),
+ *             InstrumentManager.c instrumentManager_waveDomainMax(),
+ *             MenuText.h alkWaveNames (ALK_WAVE_COUNT names).
+ */
 #define ALK_WAVE_SAW          0u
 #define ALK_WAVE_SQUARE       1u
+#define ALK_WAVE_TRI          2u
+#define ALK_WAVE_COUNT        3u   /* Saw Sqr Tri, under wav and pwm */
 /*
  * The typ byte (row osc1_type, S093 P8; S094 P1 S5 pwm).
  *
  * What:       the stored and displayed value of the Alkaline typ cell:
- *             0 wav (Saw/Sqr, the 303's VCO), 1 wtb (a wavetable frame),
- *             2 pwm (S094 P1: Saw = two-saw sum, Sqr = pulse, pos = width);
+ *             0 wav (Saw/Sqr, the 303's VCO; S094 P4 + Tri), 1 wtb (a
+ *             wavetable frame), 2 pwm (Saw two-saw sum, Sqr pulse, S094 P4
+ *             + Tri; pos = width index, 0 = 50 %);
  *             ALK_TYP_COUNT entries (alkTypeNames, MenuText.h).
  *             Alkaline_setOscType() maps it to OSC_TYPE_WAV / OSC_TYPE_WTB /
  *             OSC_TYPE_PWM in osc.oscType.

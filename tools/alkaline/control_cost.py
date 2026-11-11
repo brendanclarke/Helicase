@@ -68,6 +68,10 @@ ITERS = {
     # S094 P1 S5: the pwm read (alk_renderPwm()), noinline like Osc2: its
     # only loop is the audio loop; weight 0, checked by the same guard
     ("DiodeLadder_renderB2OscPwm", 1): 0,
+    # S094 P4: the pwm Tri warp copy (alk_renderPwm(), mode 4), noinline like
+    # OscPwm: the only loop is the audio loop; weight 0, checked by the same
+    # guard
+    ("DiodeLadder_renderB2OscPwmWt", 1): 0,
     ("DiodeLadder_renderB", 1): 0,
     ("DiodeLadder_renderA", 1): 0,
     # S093 P4 (G4): on the linked image LTO inlines the fused B2R read into
@@ -240,7 +244,8 @@ def total(elf, sym, memo, ext, trace, depth=0):
         # S093 P8: the same check for the out-of-line fused table loop,
         # and (revision 3) for its two-row blend copy
         if base in ("Alkaline_calcVoiceSyncBlock", "DiodeLadder_renderB2Osc",
-                    "DiodeLadder_renderB2Osc2", "DiodeLadder_renderB2OscPwm") \
+                    "DiodeLadder_renderB2Osc2", "DiodeLadder_renderB2OscPwm",
+                    "DiodeLadder_renderB2OscPwmWt") \
                 and it == 0 and (lv != 3 or length < 200):
             sys.exit(f"control_cost.py: loop {rank} of {base} (length {length}, {lv} VDIV) "
                      f"is not the fused B2R audio loop; give it an iteration count "

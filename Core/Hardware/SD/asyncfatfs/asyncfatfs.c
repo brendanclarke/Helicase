@@ -32,7 +32,22 @@
 
 #define ONLY_EXPOSE_FOR_TESTING static
 
-#define AFATFS_NUM_CACHE_SECTORS 8
+/*
+ * Sector cache size (S094 P3, Proposal B: 8 -> 16).
+ *
+ * What:       16 slots of 512 B data plus a 16 B descriptor each, inside the
+ *             afatfs static (SRAM1 .bss): 11,208 B in all, +4,224 B for the
+ *             change (user sign-off, S094 P3).
+ * Why:        with five handle pins and the current-directory retain, 8 slots
+ *             left 2 for directory and FAT sectors, so folder lookups re-read
+ *             the card. 16 leaves 10 in that worst case and about 12-13 with
+ *             one or two handles open, together with the discardable hint for
+ *             regular-file data (afatfs_fileRetainCursorSectorForRead()).
+ * Coupled:    index fields are int8_t; the stall and capsule snapshots count
+ *             in uint8_t; the DEV stall record part 1 in filesystem.c packs
+ *             the counts in 5-bit fields (good to 31).
+ */
+#define AFATFS_NUM_CACHE_SECTORS 16
 
 // FAT filesystems are allowed to differ from these parameters, but we choose not to support those weird filesystems:
 #define AFATFS_SECTOR_SIZE  512
@@ -2328,10 +2343,39 @@ static uint8_t* afatfs_fileRetainCursorSectorForRead(afatfsFilePtr_t file)
 
         afatfs_assert(physicalSector > 0); // We never read the root sector using files
 
+        /*
+         * Regular-file data is discardable in the cache (S094 P3, Proposal C).
+         *
+         * What:       a sector first cached through a regular file's read
+         *             cursor is marked AFATFS_CACHE_DISCARDABLE, so
+         *             afatfs_allocateCacheSector() evicts it before any LRU
+         *             slot. Directory reads (afatfs_findNext(), the FAT16 root)
+         *             keep plain LRU treatment: the test needs the type
+         *             NORMAL and no DIRECTORY attribute.
+         * Why:        streaming an index or payload file used to cycle its data
+         *             sectors through the LRU and evict every directory and FAT
+         *             sector, so the next folder lookup re-read the card. Data
+         *             now streams through one or two slots and metadata stays.
+         * Safety:     the sector at the cursor is retained (never evicted,
+         *             discardable or not). The flag is set only when a sector
+         *             is first cached, so a sector already cached as directory
+         *             or FAT data keeps its treatment. A seek back to an
+         *             evicted data sector re-reads it: only the boot AutoSave
+         *             reader and the modal sample install seek back on the
+         *             read path, once each (S094 P3 §12.3).
+         * Affiliates: afatfs_cacheSector(), AFATFS_NUM_CACHE_SECTORS (Proposal B).
+         */
+        uint8_t readFlags = AFATFS_CACHE_READ | AFATFS_CACHE_RETAIN;
+
+        if (file->type == AFATFS_FILE_TYPE_NORMAL &&
+            (file->attrib & FAT_FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            readFlags |= AFATFS_CACHE_DISCARDABLE;
+        }
+
         afatfsOperationStatus_e status = afatfs_cacheSector(
             physicalSector,
             &result,
-            AFATFS_CACHE_READ | AFATFS_CACHE_RETAIN,
+            readFlags,
             0
         );
 

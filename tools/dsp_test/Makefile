@@ -78,13 +78,17 @@ $(GEN)/oscPwmTables.host.h: $(ROOT)/Core/DSPAudio/oscPwmTables.h | $(GEN)
 	$(EX) --src $< --body --out $@
 $(GEN)/oscPwmTables.host.c: $(ROOT)/Core/DSPAudio/oscPwmTables.c | $(GEN)
 	$(EX) --src $< --body --out $@
+# S094 P4: the shared pwm warp (Oscillator.c and DiodeLadder.c include it).
+$(GEN)/oscPwmWarp.host.h: $(ROOT)/Core/DSPAudio/oscPwmWarp.h | $(GEN)
+	$(EX) --src $< --body --out $@
 
 # S089 P3 breaks (fmramp group): the ramp dispatcher sending wtb to the
 # one-frame twin must fail FR1; the depth stepped before its first use
 # (d = d0 + dStep) must fail FR2. Each break edits the generated
 # Oscillator.host.c and is found first through its own -I directory.
 oscillator: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
-	$(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c
+	$(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c \
+	$(GEN)/oscPwmWarp.host.h
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c $(CAT_HOST_SRC) \
 	  -o build/oscillator -lm
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) -DOSC_POS_BEND_CAP=8 -DOSC_POS_TEST_CAP \
@@ -126,6 +130,17 @@ oscillator: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
 	@if ./build/oscillator_break_pwm2 >/dev/null 2>&1; then \
 	  echo "oscillator_break_pwm2: FAILED (an unlimited width step not caught)"; exit 1; \
 	else echo "oscillator_break_pwm2: caught (law PW5 fails as expected)"; fi
+	# S094 P4 break: Rec planned on the Saw width table must fail PW2 and PW10.
+	mkdir -p build/break_pwm3
+	sed 's/pl->d = oscPwmDRec\[k\];/pl->d = oscPwmDSaw[k];/' \
+	  $(GEN)/Oscillator.host.c > build/break_pwm3/Oscillator.host.c
+	@grep -q 'pl->d = oscPwmDSaw\[k\];' build/break_pwm3/Oscillator.host.c || \
+	  { echo "oscillator_break_pwm3: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_pwm3 $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c \
+	  $(CAT_HOST_SRC) -o build/oscillator_break_pwm3 -lm
+	@if ./build/oscillator_break_pwm3 >/dev/null 2>&1; then \
+	  echo "oscillator_break_pwm3: FAILED (Rec width table break not caught)"; exit 1; \
+	else echo "oscillator_break_pwm3: caught (laws PW2/PW10 fail as expected)"; fi
 
 modulation: $(GEN)/Oscillator.host.h
 	$(EX) --src $(ROOT)/Core/DSPAudio/modulationNode.c \
@@ -372,10 +387,11 @@ ALK_GEN := $(GEN)/DiodeLadder.host.h $(GEN)/DiodeLadder.host.c \
            $(GEN)/AlkalineTables.host.h $(GEN)/AlkalineTables.host.c \
            $(GEN)/AlkalineSquareTable.host.c \
            $(GEN)/AlkalineVoice.host.h $(GEN)/AlkalineVoice.host.c \
-           $(GEN)/alk_sawTable.c $(GEN)/oscPwmTables.host.h \
-           $(GEN)/oscPwmTables.host.c
+	           $(GEN)/alk_sawTable.c $(GEN)/alk_triTable.c $(GEN)/oscPwmTables.host.h \
+	           $(GEN)/oscPwmTables.host.c $(GEN)/oscPwmWarp.host.h
 alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
-	$(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c | $(GEN)
+	$(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c \
+	$(GEN)/oscPwmWarp.host.h | $(GEN)
 	$(EX) --src $(ROOT)/Core/DSPAudio/DiodeLadder.h --body --out $(GEN)/DiodeLadder.host.h
 	$(EX) --src $(ROOT)/Core/DSPAudio/DiodeLadder.c --body --out $(GEN)/DiodeLadder.host.c
 	$(EX) --src $(ALK)/AlkalineControl.h --body --out $(GEN)/AlkalineControl.host.h
@@ -389,6 +405,9 @@ alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
 	$(EX) --src $(ALK)/AlkalineVoice.c --body --out $(GEN)/AlkalineVoice.host.c
 	$(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object sawTable --out $(GEN)/alk_sawTable.raw.c
 	sed 's/const int16_t sawTable/int16_t sawTable/' $(GEN)/alk_sawTable.raw.c > $(GEN)/alk_sawTable.c
+# S094 P4: the real triangle for the Tri laws (AL-XT, AL-PWW).
+	$(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object triTable --out $(GEN)/alk_triTable.raw.c
+	sed 's/const int16_t triTable/int16_t triTable/' $(GEN)/alk_triTable.raw.c > $(GEN)/alk_triTable.c
 # S094 P1 S5: the pwm read-form reference (ALK_PWM_READ_FORM 0, both reads
 # interpolated) renders build/alk_pwm_ref.bin for law AL-PW (P-D6 evidence).
 	$(HOSTCC) $(HOSTFLAGS) -DALK_PWM_READ_FORM=0 $(OSC_HOST_INC) modules/alkaline.c \
@@ -453,6 +472,29 @@ alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
 	@if ./build/alkaline_break_ovd >/dev/null 2>&1; then \
 	  echo "alkaline_break_ovd: FAILED (an overdrive gain off 1 at 0 not caught)"; exit 1; \
 	else echo "alkaline_break_ovd: caught (law AL-OD0 fails as expected)"; fi
+# S094 P4 breaks: a swapped warp (ra / rb) must fail AL-PWW; the Tri wav
+# read on the Saw row must fail AL-XT.
+	mkdir -p build/break_alk_pwmw
+	sed 's/osc_pwmWarp(ph, wPh, wRa, wRb)/osc_pwmWarp(ph, wPh, wRb, wRa)/' \
+	  $(GEN)/DiodeLadder.host.c > build/break_alk_pwmw/DiodeLadder.host.c
+	@grep -q 'osc_pwmWarp(ph, wPh, wRb, wRa)' build/break_alk_pwmw/DiodeLadder.host.c || \
+	  { echo "alkaline_break_pwmw: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk_pwmw $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break_pwmw -lm
+	@if ./build/alkaline_break_pwmw >/dev/null 2>&1; then \
+	  echo "alkaline_break_pwmw: FAILED (a swapped warp not caught)"; exit 1; \
+	else echo "alkaline_break_pwmw: caught (law AL-PWW fails as expected)"; fi
+	mkdir -p build/break_alk_tri
+	sed 's/\[1024\])triTable/[1024])sawTable/' \
+	  $(GEN)/AlkalineVoice.host.c > build/break_alk_tri/AlkalineVoice.host.c
+	@grep -qF 'ALK_WAVE_TRI) ? (const int16_t (*)[1024])sawTable' \
+	  build/break_alk_tri/AlkalineVoice.host.c || \
+	  { echo "alkaline_break_tri: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk_tri $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break_tri -lm
+	@if ./build/alkaline_break_tri >/dev/null 2>&1; then \
+	  echo "alkaline_break_tri: FAILED (a Tri read on the Saw row not caught)"; exit 1; \
+	else echo "alkaline_break_tri: caught (law AL-XT fails as expected)"; fi
 
 alkaline_tables:
 	cd $(ROOT) && python3 tools/alkaline/gen_alk_tables.py --check
@@ -784,14 +826,17 @@ crumpbit: | $(GEN)
 	  echo "crumpbit_break14: FAILED (grn echo curve break not caught)"; \
 	  exit 1; \
 	else echo "crumpbit_break14: caught (law CB18 fails as expected)"; fi
-	sed 's/        rt->svf_l1 = rt->svf_l2;/        (void)0;/' \
+	# S094 P2 AS-13: the one SVF keeps its state across a sub-type switch; a
+	# switch that clears it must fail CB19 (c). (Was the S091 P5 F1
+	# one-pole hand-over break; that code is gone.)
+	sed 's/^    crumpBit_bytePosition(rt, &pos, &written);$$/    crumpBit_bytePosition(rt, \&pos, \&written); rt->svf_l1 = 0.0f;/' \
 	  $(GEN)/CrumpBitEffect.host.c > build/break_cb15/CrumpBitEffect.host.c
-	@grep -q '        (void)0;' \
+	@grep -q '&written); rt->svf_l1 = 0.0f;' \
 	  build/break_cb15/CrumpBitEffect.host.c
 	$(HOSTCC) -Ibuild/break_cb15 $(HOSTFLAGS) modules/crumpbit.c \
 	  -o build/crumpbit_break15 -lm
 	@if ./build/crumpbit_break15 >/dev/null 2>&1; then \
-	  echo "crumpbit_break15: FAILED (filter hand-over break not caught)"; \
+	  echo "crumpbit_break15: FAILED (filter state on a switch not caught)"; \
 	  exit 1; \
 	else echo "crumpbit_break15: caught (law CB19 fails as expected)"; fi
 	mkdir -p build/break_cb16 build/break_cb17 build/break_cb18
@@ -805,16 +850,8 @@ crumpbit: | $(GEN)
 	  echo "crumpbit_break16: FAILED (grain block-end break not caught)"; \
 	  exit 1; \
 	else echo "crumpbit_break16: caught (law CB14 fails as expected)"; fi
-	sed 's/const float kl = crumpBit_onePoleK\[fl\];/const float kl = crumpBit_onePoleK[fr];/' \
-	  $(GEN)/CrumpBitEffect.host.c > build/break_cb17/CrumpBitEffect.host.c
-	@grep -q 'const float kl = crumpBit_onePoleK\[fr\];' \
-	  build/break_cb17/CrumpBitEffect.host.c
-	$(HOSTCC) -Ibuild/break_cb17 $(HOSTFLAGS) modules/crumpbit.c \
-	  -o build/crumpbit_break17 -lm
-	@if ./build/crumpbit_break17 >/dev/null 2>&1; then \
-	  echo "crumpbit_break17: FAILED (one-pole bal side break not caught)"; \
-	  exit 1; \
-	else echo "crumpbit_break17: caught (law CB16 fails as expected)"; fi
+	# break_cb17 (the S091 P5 one-pole's `bal` side) went with the one-pole in
+	# S094 P2 AS-13; the SVF's `bal` side break above covers every sub-type.
 	sed 's/        age_a = g->age_a;/        (void)0;/' \
 	  $(GEN)/CrumpBitEffect.host.c > build/break_cb18/CrumpBitEffect.host.c
 	@grep -q '        (void)0;' \
@@ -947,5 +984,32 @@ crumpbit_elf_check:
 # + (engine per block + crumpBit_process() per block on that filter's
 # branch + the manager's clamps, `dly`'s with its curve-limit search) / 32
 # (crumpbit_cpu.py; needs `make all` at the repository root first).
+# S094 P2 AS-13: `grn`/`rvb` run the resonant SVF again (the S091 P5 one-pole
+# is gone): `grn` measured 180.8 and `rvb` 179.4 per frame (were 165.6 /
+# 163.9); `dly`/`cmb`/`pit` 1 lower. The cap moves from S091 P5's 170 to 181,
+# inside the Effect's cycle share (16,634 per block,
+# S094_P2_ALKALINE_SAVINGS.md §21, §23).
 crumpbit_cpu_check:
-	python3 crumpbit_cpu.py --elf $(ROOT)/build/lxr02.elf --cap 170
+	python3 crumpbit_cpu.py --elf $(ROOT)/build/lxr02.elf --cap 181
+
+# ---------------------------------------------------------------------------
+# S094 P4: dump the shipped pwm and stock waves for the PWM investigation.
+#
+# What:       builds modules/pwm_dump.c on the real Oscillator.c (host build)
+#             and the real stock tables (extracted from wavetable.c, const
+#             removed), runs it, and writes build/pwm_dump.csv for
+#             tools/plots/plot_s094p4_pwm.py. Not part of `all`: it checks
+#             nothing.
+# Accessors:  make -C tools/dsp_test pwm_dump.
+pwm_dump: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
+	$(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c \
+	$(GEN)/oscPwmWarp.host.h | $(GEN)
+	for t in sine_table sawTable triTable recTable; do \
+	  $(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object $$t --out $(GEN)/pd_$$t.raw.c && \
+	  sed "s/const int16_t $$t/int16_t $$t/" $(GEN)/pd_$$t.raw.c > $(GEN)/pd_$$t.c || exit 1; \
+	done
+	$(EX) --src $(ROOT)/Core/DSP/Instruments/Alkaline/AlkalineSquareTable.c --body \
+	  --out $(GEN)/AlkalineSquareTable.host.c
+	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/pwm_dump.c $(CAT_HOST_SRC) \
+	  -o build/pwm_dump -lm
+	./build/pwm_dump > build/pwm_dump.csv

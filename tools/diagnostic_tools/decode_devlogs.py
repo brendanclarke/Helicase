@@ -271,11 +271,14 @@ def decode_hcnames_stall(flags, value):
     if part == 1:
         def idx(v):
             return "none" if v == 0 else str(v - 1)
-        return (f"part 1 cache (of 8): locked={value & 0xF}, "
-                f"retained={(value >> 4) & 0xF}, dirty={(value >> 8) & 0xF}, "
-                f"reading={(value >> 12) & 0xF}, writing={(value >> 16) & 0xF}, "
-                f"empty={(value >> 20) & 0xF}; cwd retain={idx((value >> 24) & 0xF)}, "
-                f"cwd lock={idx((value >> 28) & 0xF)}")
+        # S094 P3: 16 cache slots, 5-bit fields (filesystem.c part 1).
+        return (f"part 1 cache (of 16): locked={value & 0x1F}, "
+                f"retained={(value >> 5) & 0x1F}, "
+                f"dirty={(value >> 10) & 0x1F}, "
+                f"empty={(value >> 15) & 0x1F}, reading={(value >> 20) & 1}, "
+                f"writing={(value >> 21) & 1}; "
+                f"cwd retain={idx((value >> 22) & 0x1F)}, "
+                f"cwd lock={idx((value >> 27) & 0x1F)}")
     if part == 2:
         return (f"part 2 SD: state={_nth(SDCARD_STATES, value & 0xF)}, "
                 f"operation={SDCARD_OPERATIONS.get((value >> 4) & 0x3)}, "

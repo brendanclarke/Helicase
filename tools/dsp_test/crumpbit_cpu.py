@@ -12,11 +12,11 @@ What:       measures the linked firmware ELF and prints, per sub-type, the
               - the frame loops are elf_looppath.py's longest paths
                 (crumpBit_runGrain with --cond-heads --in-range: the longest
                 of its two span loops);
-              - crumpBit_process() has exactly two frame loops, the SVF
-                (longer, `dly`/`cmb`/`pit`) and the one-pole (`grn`/`rvb`);
-                its per-block count is the longest path through that loop's
-                head (elf_blockpath.py --via-loop), so it includes that
-                branch's coefficient work only;
+              - crumpBit_process() has exactly one frame loop, the SVF
+                output filter, shared by every sub-type since S094 P2 AS-13
+                (until then a second loop, the S091 P5 one-pole, served
+                `grn`/`rvb`); its per-block count is the longest path through
+                that loop's head (elf_blockpath.py --via-loop);
               - per block, every frame loop counts 0 (elf_blockpath.py), and
                 the callees add their own counts: the manager
                 crumpBit_effectiveMax() (per-block path) plus its sub-type's
@@ -28,13 +28,15 @@ What:       measures the linked firmware ELF and prints, per sub-type, the
                 row branch of its eight probes); `dly`'s own delay target
                 (crumpBit_delaySamples(), inlined; S091 P6 replaced the
                 Sync search crumpBit_divisionFor()) is in its engine path.
-            It fails when any sub-type is above --cap (170, the user's cap,
-            S091_P5_SUBTYPE_EFFICIENCIES.md §1).
+            It fails when any sub-type is above --cap (S091 P5: 170, the
+            user's cap, S091_P5_SUBTYPE_EFFICIENCIES.md §1; S094 P2: the
+            Makefile passes the cap measured with the SVF back in `grn`/`rvb`,
+            under the Effect's cycle share, S094_P2_ALKALINE_SAVINGS.md §21).
 Why:        the cap is a gate, not a manual calculation (plan Q15).
 Inputs:     --elf PATH, optional --cap N (default 170).
 Outputs:    one line per sub-type with its terms and total; exit 1 when a
             total is above the cap, or when crumpBit_process() does not have
-            exactly two frame loops (the method no longer applies).
+            exactly one frame loop (the method no longer applies).
 Accessors:  tools/dsp_test/Makefile crumpbit_cpu_check (after `make all`).
 Affiliates: elf_looppath.py, elf_blockpath.py, CrumpBitEffect.c.
 """
@@ -46,12 +48,13 @@ import elf_looppath as E
 
 FRAMES = 32
 # Sub-type: (engine symbol, filter loop rank in process, Rate-limit search).
+# S094 P2 AS-13: every sub-type runs the one SVF loop (rank 1).
 SUBTYPES = [
     ('dly', 'crumpBit_runDelay', 1, 'crumpBit_delayLimit'),
     ('cmb', 'crumpBit_runComb', 1, 'crumpBit_tableLimit'),
     ('pit', 'crumpBit_runPitch', 1, 'crumpBit_tableLimit'),
-    ('grn', 'crumpBit_runGrain', 2, 'crumpBit_tableLimit'),
-    ('rvb', 'crumpBit_runReverb', 2, 'crumpBit_tableLimit'),
+    ('grn', 'crumpBit_runGrain', 1, 'crumpBit_tableLimit'),
+    ('rvb', 'crumpBit_runReverb', 1, 'crumpBit_tableLimit'),
 ]
 
 
@@ -84,9 +87,9 @@ def main():
     ap.add_argument('--cap', type=float, default=170.0)
     a = ap.parse_args()
     proc = longest_loop(a.elf, 'crumpBit_process')
-    if len(proc) != 2:
+    if len(proc) != 1:
         sys.exit(f'crumpbit_cpu.py: crumpBit_process has {len(proc)} frame '
-                 f'loops, expected 2 (SVF, one-pole)')
+                 f'loops, expected 1 (the SVF, S094 P2 AS-13)')
     effmax = B.block_path(a.elf, 'crumpBit_effectiveMax')[0]
     worst = 0.0
     for name, sym, rank, limit in SUBTYPES:

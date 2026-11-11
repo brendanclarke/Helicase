@@ -1,0 +1,25 @@
+# S094 P4 S4 gate: the Alkaline pwm Tri, fused ladder mode 4 (2026-11-11)
+#
+# Baseline: a clean build of the pre-change tree (/tmp/p4base: the touched
+# files restored from HEAD, every other working-tree change kept), linked with
+# the firmware Makefile.
+#   flash headroom 67,548 B; ITCM 13,984 B; DTCM 4,396 B
+#   DiodeLadder_renderB2Osc   221 per sample, 3 VDIV
+#   DiodeLadder_renderB2Osc2  234 per sample, 3 VDIV
+#   DiodeLadder_renderB2OscPwm 215 per sample, 3 VDIV
+#   elf_p4_check against baselines/s094p4: 96/96 oscillator loops exact,
+#   mixer_calcNextSampleBlock 0 grew.
+#
+# Result (this tree, make clean; make all):
+#   DiodeLadder_renderB2OscPwmWt 227 per sample, 3 VDIV
+#     (gate: <= 234, the wtb slot path's loop)                 PASS
+#   control_cost.py --elf: async 935 + sync block 416 + dispatch 14
+#     = 1,365 instructions per block (42.7 per sample), 9 VDIV
+#   pwm Tri whole voice: 227 + 42.7 = 269.7 per sample
+#     (ceiling 276.9: the wtb-with-slot path, 234 + 42.7)      PASS
+#   the existing three loops are unchanged; ITCM 13,984 B
+#
+# No fallback was needed (ra/rb in one 64-bit pair, or a truncated read).
+#
+# Build: flash 691,100 / 753,664 B (headroom 62,564 B, +4,984 net against the
+# clean pre-change image); ITCM 13,984 B; DTCM statics 4,396 B.

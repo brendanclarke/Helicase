@@ -824,10 +824,10 @@ static uint8_t instrumentManager_descriptorSupportsModulationRange(
  * Highest legal value of an oscillator wave row (S087 stage D; S087 P1).
  *
  * What:       osc1_wave: the last entry of osc1's current type (wav:
- *             OSC_STOCK_LAST; an Alkaline under wav: ALK_WAVE_SQUARE (Saw,
- *             Sqr); smp/slp: samples - 1; wtb: tables - 1; 0 when
- *             none); a modulator wave row: the last entry of the flat list
- *             (osc_userListCount() - 1). Any other row: OSC_STOCK_LAST.
+ *             OSC_STOCK_LAST; an Alkaline under wav or pwm: ALK_WAVE_COUNT
+ *             - 1 (Saw, Sqr, Tri); smp/slp: samples - 1; wtb: tables - 1; 0
+ *             when none); a modulator wave row: the last entry of the flat
+ *             list (osc_userListCount() - 1). Any other row: OSC_STOCK_LAST.
  * Why:        LFO and velocity ranges, the menu clamp and the automation
  *             display must agree on what exists (S087 P0 r8, §12.4).
  * Inputs:     slot (INSTRUMENT_SLOT_COUNT = unknown), descriptor.
@@ -845,13 +845,12 @@ static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
             slot < INSTRUMENT_SLOT_COUNT) {
             const OscInfo *osc = instrumentManager_osc(slot, "osc1_wave");
 
-            /* S093 P8: an Alkaline slot under wav has two entries (Saw,
-             * Sqr): the LFO/velocity range, menu clamp, edit count and typ
-             * switch clamp all take it from here. S094 P1 S5: pwm has the
-             * same two (sum, pulse). */
+            /* S093 P8 / S094 P4: an Alkaline slot under wav or pwm lists
+             * Saw, Sqr, Tri. The LFO/velocity range, menu clamp, edit count
+             * and typ switch clamp all take it from here. */
             if (osc && (osc->oscType == OSC_TYPE_WAV || osc->oscType == OSC_TYPE_PWM) &&
                 instrumentManager_slotType(slot) == INSTRUMENT_TYPE_ALK)
-                return (uint8_t)ALK_WAVE_SQUARE;
+                return (uint8_t)(ALK_WAVE_COUNT - 1u);
 
             const uint8_t count = osc ? osc_userCount(osc->oscType)
                                       : (uint8_t)OSC_SAMPLE_START;

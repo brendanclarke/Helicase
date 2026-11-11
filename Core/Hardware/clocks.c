@@ -158,6 +158,11 @@ void sysclk_init(void)
     **   overrides Region 0. Stores are bufferable but never cached, so DMA
     **   coherency is unchanged.
     **
+    ** Region 2: SRAM2, the stack (S094 P3, Proposal D) — Normal, Write-Back
+    **   Write-Allocate, non-shareable. SIZE=13 → 16KB, 0x2007C000–0x20080000,
+    **   with sub-region 0 (the first 2KB, the DEV_LOGGING_IWDG capsule)
+    **   disabled so it stays on Region 0's write-through. Overrides Region 0.
+    **
     ** MPU register addresses (ARMv7-M):
     **   MPU_TYPE    0xE000ED90  (read-only, DREGION field)
     **   MPU_CTRL    0xE000ED94
@@ -211,6 +216,40 @@ void sysclk_init(void)
         MPU_RBAR = 0x20020000UL;
         MPU_RASR = (1UL << 28) | (3UL << 24) | (1UL << 19) |
                    (1UL << 18) | (11UL << 1) | 1UL;
+
+        /*
+         * Region 2: SRAM2, the stack — write-back (S094 P3, Proposal D).
+         *
+         * What:       TEX=001 C=1 B=1 S=0 (Normal, write-back, write-allocate,
+         *             non-shareable), AP=011, XN=0 as Region 0, SIZE=13
+         *             (16KB at 0x2007C000), SRD=0x01: sub-region 0
+         *             (0x2007C000–0x2007C7FF) is disabled, so Region 0's
+         *             write-through applies there.
+         * Why:        voice render loops spill to the stack every sample (the
+         *             Alkaline ladder makes 18 stack stores per sample, S094 P2
+         *             §13). Under write-through each store goes to the bus;
+         *             under write-back it stays in the D-cache.
+         * Safety:     no DMA touches SRAM2 (all DMA buffers are in .dma_nocache,
+         *             Region 1). The only D-cache maintenance in the tree is
+         *             DCIMVAC by address over flash ranges (memtest.c,
+         *             sampleFlash.c), never the stack. The D-cache is off
+         *             until the invalidate-then-enable below (the bootloader
+         *             leaves it off), so no dirty line predates it. The
+         *             DEV_LOGGING_IWDG capsule (.devwdg_noinit, at most 32 B at
+         *             the SRAM2 base, linker assert) is written just before a
+         *             reset; sub-region 0 keeps it write-through so the write
+         *             reaches SRAM before the reset.
+         * Inputs:     none; MPU is disabled while the region is configured.
+         * Outputs:    MPU region 2 attributes.
+         * Accessors:  sysclk_init() during boot.
+         * Affiliates: _estack and .devwdg_noinit (STM32F765VIHx_FLASH.ld);
+         *             any future DMA buffer or whole-cache invalidate must
+         *             keep away from SRAM2.
+         */
+        MPU_RNR  = 2;
+        MPU_RBAR = 0x2007C000UL;
+        MPU_RASR = (3UL << 24) | (1UL << 19) | (1UL << 17) | (1UL << 16) |
+                   (0x01UL << 8) | (13UL << 1) | 1UL;
 
         /* Enable MPU with default background map (PRIVDEFENA=1).
         ** Regions not covered by MPU use the default ARM memory map. */

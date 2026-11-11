@@ -111,7 +111,8 @@ _Static_assert(OSC_TYPE_MODLIST >= OSC_TYPE_COUNT,
  * What:       OSC_PWM_WAVE_COUNT 4: under pwm the wav list is Sin, Tri, Saw,
  *             Rec (0..3; a stored value past 3 clamps to Rec, the S087 r8
  *             rule). OSC_PWM_SLEW_STEPS 2: the most the applied width moves
- *             toward pos per block (P-D7: 64 steps in about 23 ms).
+ *             toward pos per block (P-D7; S094 P4: the full 127 steps take
+ *             about 46 ms, 64 blocks, since pos 0 is a width of its own).
  * Why:        width changes arrive at block rate; slew avoids waveform steps,
  *             and a trigger snaps to the requested value.
  * Accessors:  osc_userCount(), osc_typedPositionApply(), menu.c
@@ -246,8 +247,9 @@ typedef struct OscStruct
 	 *
 	 * What:       position is the 0..127 osc1_position value. For the phase
 	 *             waves (osc_positionIsPhase()) it is position/128 of a cycle;
-	 *             under typ pwm (S094 P1) it is the pulse width (1..127; 0 acts
-	 *             as 1). positionApplied
+	 *             under typ pwm it is the width index (S094 P4: 0 = the
+	 *             unmodified wave, 127 = the narrowest; oscPwmTables.h).
+	 *             positionApplied
 	 *             is the part of position already contained in phase.
 	 * Why:        a descriptor value can change once per audio block. Keeping
 	 *             the applied value lets the engine spread each change through

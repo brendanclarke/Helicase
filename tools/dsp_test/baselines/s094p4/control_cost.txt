@@ -1,0 +1,4 @@
+# S094 P4: tools/alkaline/control_cost.py --elf build/lxr02.elf (2026-11-11)
+# async 935 + sync block 416 + dispatch 14 = 1,365 per block, 9 VDIV
+# per sample (/32): 42.7 instructions, 0.28 VDIV
+# pwm Tri: 227 + 42.7 = 269.7 per sample (ceiling 276.9)

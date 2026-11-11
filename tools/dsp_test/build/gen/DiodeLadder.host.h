@@ -225,6 +225,16 @@ void DiodeLadder_renderB2OscPwm(DiodeLadder *dl, int16_t *buf, const int16_t *ro
                                 uint32_t *phase, uint32_t phaseInc, uint32_t pwD,
                                 float pwSign, float sScale, float iLadEnd,
                                 float iAbcEnd);
+/*
+ * B2R with the pwm warp fused (S094 P4): Tri (mode 4), a 1,024-point row
+ * read at psi = osc_pwmWarp(ph, wPh, wRa, wRb) (oscPwmWarp.h) and
+ * interpolated in float, s = value x sScale. Contract in DiodeLadder.c.
+ * Accessors: AlkalineVoice.c alk_renderPwm().
+ */
+void DiodeLadder_renderB2OscPwmWt(DiodeLadder *dl, int16_t *buf, const int16_t *row,
+                                  uint32_t *phase, uint32_t phaseInc, uint32_t wPh,
+                                  uint32_t wRa, uint32_t wRb, float sScale,
+                                  float iLadEnd, float iAbcEnd);
 void DiodeLadder_renderB(DiodeLadder *dl, int16_t *buf, float sScale,
                          float iLadEnd, float iAbcEnd);
 void DiodeLadder_renderA(DiodeLadder *dl, int16_t *buf, float sScale,

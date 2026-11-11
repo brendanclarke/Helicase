@@ -48,6 +48,7 @@
 #include "AlkalineTables.h"
 #include "config.h"
 #include "stm32f4xx.h"
+#include "oscPwmWarp.h"   /* S094 P4: the pwm warp, as the drum loops */
 
 /* ---------------------------------------------------------------- constants
  * Derived in S093 P0 §3.2 from S092 P6 §3 (alk_model.py values):
@@ -308,7 +309,8 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 	const float iAbcEnd, const int fused, const int16_t *const row,
 	uint32_t *const phase, const uint32_t phaseInc,
 	const int16_t *const rowB, const float ff0, const float ffStep,
-	const uint32_t pwD, const float pwSign)
+	const uint32_t pwD, const float pwSign,
+	const uint32_t wPh, const uint32_t wRa, const uint32_t wRb)
 {
 	/* fused (a compile-time constant in each wrapper):
 	 *   0  buf is the input (the unfused B2R, DiodeLadder_renderB2());
@@ -320,9 +322,12 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 	 *   3  S094 P1 S5: pwm, two reads of one saw row pwD points apart,
 	 *      summed (pwSign +1) or differenced (-1)
 	 *      (DiodeLadder_renderB2OscPwm()).
+	 *   4  S094 P4: pwm Tri, the warp: the 1,024-point row (the caller's
+	 *      lifted triTable row) read at psi = osc_pwmWarp(ph, wPh, wRa, wRb),
+	 *      interpolated in float (DiodeLadder_renderB2OscPwmWt()).
 	 * rowB, ff0 and ffStep are read only under 2, pwD and pwSign only under
-	 * 3; the other wrappers pass 0 / 0.0f and the compiler drops them with
-	 * the branch. */
+	 * 3, wPh, wRa and wRb only under 4; the other wrappers pass 0 / 0.0f and
+	 * the compiler drops them with the branch. */
 	uint32_t ph = fused ? *phase : 0u;
 	/* S093 P8 r3: the frame mix of fused 2, 0 = row, 1 = rowB; it starts at
 	 * ff0 and moves by ffStep per sample, so a block glides linearly from
@@ -433,6 +438,36 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 #endif
 			ph += phaseInc;
 			s = ((float)o + pwSign * b) * sScale;
+		} else if (fused == 4) {
+			/*
+			 * S094 P4: the Alkaline pwm Tri, the warp.
+			 *
+			 * What:       psi = osc_pwmWarp(ph, wPh, wRa, wRb) (oscPwmWarp.h,
+			 *             the drum loops' law): the rising half-cycle of the
+			 *             row plays over [0, W), the falling one over
+			 *             [W, 2^32). The row is read at psi >> 22 and its
+			 *             successor (point 1,023 wraps to 0), with the
+			 *             fraction from the low 22 bits, interpolated in float
+			 *             with no int16 truncation (as mode 2: no bit-identity
+			 *             law here); s = value x sScale.
+			 * Why:        the Alkaline's pwm Tri (user, S094 P4): the drum
+			 *             instruments' WT form inside the fused loop, so the
+			 *             voice keeps one loop and no buffer. The caller
+			 *             passes the lifted row (oscPwmTriLift). Sin is not
+			 *             offered on the Alkaline (user): the ladder's
+			 *             low-pass makes a warped sine and a warped triangle
+			 *             practically the same.
+			 * Cost:       measured in S4 (gate: <= 234 per sample, the wtb
+			 *             slot path's loop).
+			 */
+			const uint32_t ps = osc_pwmWarp(ph, wPh, wRa, wRb);
+			const uint32_t itg = ps >> 22;
+			const float a = (float)row[itg];
+			const float b = (float)row[(itg + 1u) & 0x000003FFu];
+			const float fr = (float)(ps & 0x003FFFFFu) * 2.384185791015625e-07f;
+
+			ph += phaseInc;
+			s = (a + fr * (b - a)) * sScale;
 		} else if (fused) {
 			const uint32_t itg = ph >> 22;
 			int16_t o = row[itg];
@@ -556,7 +591,8 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 void DiodeLadder_renderB2(DiodeLadder *dl, int16_t *buf, const float sScale,
                           const float iLadEnd, const float iAbcEnd)
 {
-	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 0, 0, 0, 0u, 0, 0.0f, 0.0f, 0u, 0.0f);
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 0, 0, 0, 0u, 0, 0.0f, 0.0f,
+	                0u, 0.0f, 0u, 0u, 0u);
 }
 
 /* B2R with the oscillator's table read fused (S093 P3 analysis): the voice's
@@ -566,7 +602,7 @@ void DiodeLadder_renderB2Osc(DiodeLadder *dl, int16_t *buf, const int16_t *row,
                              const float iLadEnd, const float iAbcEnd)
 {
 	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 1, row, phase, phaseInc,
-	                0, 0.0f, 0.0f, 0u, 0.0f);
+	                0, 0.0f, 0.0f, 0u, 0.0f, 0u, 0u, 0u);
 }
 
 /*
@@ -603,7 +639,7 @@ __attribute__((noinline)) void DiodeLadder_renderB2Osc2(DiodeLadder *dl, int16_t
                               const float iLadEnd, const float iAbcEnd)
 {
 	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 2, rowA, phase, phaseInc,
-	                rowB, ff0, ffStep, 0u, 0.0f);
+	                rowB, ff0, ffStep, 0u, 0.0f, 0u, 0u, 0u);
 }
 
 /*
@@ -619,9 +655,10 @@ __attribute__((noinline)) void DiodeLadder_renderB2Osc2(DiodeLadder *dl, int16_t
  *             against 231 inlined).
  * Inputs:     dl (the ladder; DiodeLadder_setNet() and DiodeLadder_setPost()
  *             ran this block), buf (output only), row (a 1,024-point sawTable
- *             row), phase (in/out), phaseInc, pwD (p x 8, 8..1,016 points),
- *             pwSign (+1 Saw sum, -1 Sqr pulse), sScale (the scale x level x
- *             drive), iLadEnd, iAbcEnd (as the other B2R wrappers).
+ *             row), phase (in/out), phaseInc, pwD (oscPwmDRec / DSaw[pos],
+ *             4..512 points), pwSign (+1 Saw sum, -1 Sqr pulse), sScale (the
+ *             scale x level x drive), iLadEnd, iAbcEnd (as the other B2R
+ *             wrappers).
  * Outputs:    buf (int16, the ladder's toned VCA output); *phase; the ladder
  *             state.
  * Accessors:  AlkalineVoice.c alk_renderPwm().
@@ -635,7 +672,41 @@ __attribute__((noinline)) void DiodeLadder_renderB2OscPwm(DiodeLadder *dl, int16
                               const float iLadEnd, const float iAbcEnd)
 {
 	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 3, row, phase, phaseInc,
-	                0, 0.0f, 0.0f, pwD, pwSign);
+	                0, 0.0f, 0.0f, pwD, pwSign, 0u, 0u, 0u);
+}
+
+/*
+ * B2R with the pwm warp fused: Tri (S094 P4, fused mode 4).
+ *
+ * What:       the fused loop with the input s_j = T(psi_j) x sScale: T the
+ *             1,024-point row (the caller's lifted triTable row) linearly
+ *             interpolated in float at psi_j = osc_pwmWarp(ph_j, wPh, wRa,
+ *             wRb); the phase advances by phaseInc per sample and is written
+ *             back.
+ * Why:        the Alkaline's pwm Tri (user, S094 P4): the drum instruments'
+ *             WT form in the ladder loop. noinline, as the other wrappers:
+ *             its registers stay out of the caller and its only loop is the
+ *             audio loop (control_cost.py weight 0).
+ * Inputs:     dl (the ladder; DiodeLadder_setNet() and DiodeLadder_setPost()
+ *             ran this block), buf (output only), row (a 1,024-point row),
+ *             phase (in/out), phaseInc, wPh / wRa / wRb (oscPwmTriW / Ra /
+ *             Rb[pos]), sScale (the scale x the drive), iLadEnd, iAbcEnd (as
+ *             the other B2R wrappers).
+ * Outputs:    buf (int16, the ladder's toned VCA output); *phase; the ladder
+ *             state.
+ * Cost:       S4 measurement (gate <= 234 per sample).
+ * Accessors:  AlkalineVoice.c alk_renderPwm().
+ * Affiliates: oscPwmWarp.h; bench law AL-PWW.
+ */
+__attribute__((noinline)) void DiodeLadder_renderB2OscPwmWt(DiodeLadder *dl, int16_t *buf,
+                              const int16_t *row, uint32_t *phase,
+                              const uint32_t phaseInc, const uint32_t wPh,
+                              const uint32_t wRa, const uint32_t wRb,
+                              const float sScale,
+                              const float iLadEnd, const float iAbcEnd)
+{
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 4, row, phase, phaseInc,
+	                0, 0.0f, 0.0f, 0u, 0.0f, wPh, wRa, wRb);
 }
 
 /* ------------------------------------------------------------------- B-R

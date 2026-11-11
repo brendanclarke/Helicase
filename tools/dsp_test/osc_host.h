@@ -60,4 +60,6 @@ void catalogue_host_reset(void);
 #include "Oscillator.host.h"
 /* S094 P1 S3: generated PWM table declarations. */
 #include "oscPwmTables.host.h"
+/* S094 P4: the shared pwm warp (oscPwmWarp.h), used by Oscillator.c. */
+#include "oscPwmWarp.host.h"
 #endif /* OSC_HOST_H */

@@ -41,6 +41,10 @@
  *               AL-X  the fused oscillator read (DiodeLadder_renderB2Osc,
  *                     S093 P3) is bit-identical to calcWavetableOscBlock()
  *                     then DiodeLadder_renderB2;
+ *               AL-XT (S094 P4) the same for the stock triangle: the fused
+ *                     read on the triTable row equals the separate path bit
+ *                     for bit, and alk_renderWav() under ALK_WAVE_TRI equals
+ *                     the fused call;
  *               AL-O  osc_setTableFreq() (T1-7) gives osc_setFreq()'s
  *                     phaseInc and tableOffset for SAW at every note, with
  *                     pitchMod and modNodeValue at 1 and away from 1.
@@ -67,10 +71,15 @@
  *                     (to the int16 truncation of the one-row read). An
  *                     install rebinds; an empty catalogue plays silence and
  *                     never claims a slot;
- *               AL-TY (S093 P8; S094 P1) Alkaline_setOscType(): 0 -> wav, 1 ->
- *                     wtb, 2 and above -> pwm; wav clamps wav to Sqr, wtb to the last table;
- *                     the phase runs on; the bind is cleared; the same type
- *                     is a no-op.
+ *               AL-TY (S093 P8; S094 P1; S094 P4) Alkaline_setOscType(): 0 ->
+ *                     wav, 1 -> wtb, 2 and above -> pwm; wav and pwm clamp
+ *                     to Tri, wtb to the last table; the phase runs on; the
+ *                     bind is cleared; the same type is a no-op.
+ *               AL-PWW (S094 P4) the Alkaline pwm Tri (fused mode 4) against
+ *                     the unfused drum WT loop then DiodeLadder_renderB2():
+ *                     at least 40 dB below the reference RMS at pos 0, 64
+ *                     and 127; pos 0 against Tri under wav within 40 dB;
+ *                     bounded and sounding at the three positions.
  *             Modes for tools/alkaline/check_c.py:
  *               --traces IN OUT [DRV]   the three kernels fed with SPICE e2e
  *                                       signals (input x DRV)
@@ -93,9 +102,10 @@
 /* S094 P1 S3: the real generated PWM tables referenced by Oscillator.c. */
 #include "oscPwmTables.host.c"
 
-/* the tables the whole Oscillator.c references (unused here, zero) */
+/* the tables the whole Oscillator.c references: the real triangle since
+ * S094 P4 (the Tri laws); sine_table and recTable stay zero stand-ins */
 int16_t sine_table[TABLESIZE + 1];
-int16_t triTable[11][1024];
+#include "alk_triTable.c"
 int16_t recTable[11][1024];
 int16_t GetRngValue(void) { return 0; }
 /*
@@ -147,14 +157,15 @@ void instrumentManager_applyVelocityModulationTarget(uint8_t source_slot, float 
 #define ALK_STEP 5514u   /* a 16th at 120 BPM, samples */
 
 /* law groups (S094 P1: AL-OD0 golden, AL-A3 drive tables, AL-OV overdrive,
- * AL-TN tone, AL-PW pwm appended; the array holds one counter per group) */
-static unsigned g_fail[21];
+ * AL-TN tone, AL-PW pwm appended; S094 P4: AL-XT and AL-PWW appended; the
+ * array holds one counter per group) */
+static unsigned g_fail[23];
 enum { G_B, G_R, G_S, G_N, G_AB, G_D, G_Q, G_F, G_O, G_X, G_A, G_M, G_SO, G_PS, G_W, G_TY,
-       G_OD0, G_A3, G_OV, G_TN, G_PW };
+       G_OD0, G_A3, G_OV, G_TN, G_PW, G_XT, G_PWW };
 static const char *g_name[] = { "AL-B", "AL-R", "AL-S", "AL-N", "AL-AB", "AL-D", "AL-Q",
                                 "AL-F", "AL-O", "AL-X", "AL-A", "AL-M", "AL-SO", "AL-PS",
                                 "AL-W", "AL-TY", "AL-OD0", "AL-A3", "AL-OV", "AL-TN",
-                                "AL-PW" };
+                                "AL-PW", "AL-XT", "AL-PWW" };
 enum { K_B2R = 0, K_AR = 1, K_BR = 2 };
 static const char *k_name[] = { "B2R", "A-R", "B-R" };
 
@@ -601,6 +612,60 @@ static void test_fused(void)
 					fail(G_X, "fused == separate (bit for bit)", w * 2 + d, n);
 			}
 		}
+}
+
+/* ---------------------------------------------------------------- AL-XT
+ * S094 P4: the Tri wav read. The fused loop (DiodeLadder_renderB2Osc on the
+ * triTable row) against the separate path (calcWavetableOscBlock() on
+ * triTable, then DiodeLadder_renderB2): bit-identical output, phase and
+ * ladder state, as AL-X for Saw and Sqr, over the same pattern, drive x1
+ * and x8; and alk_renderWav() under ALK_WAVE_TRI equals the fused call. */
+static void test_fused_tri(void)
+{
+	int d, n;
+
+	for (d = 0; d < 2; d++) {
+		AlkalineVoice a, b;
+
+		memset(&a, 0, sizeof(a));
+		Alkaline_initVoice(&a);
+		a.osc.waveform = ALK_WAVE_TRI;
+		a.reso = 0.9f; a.cutoff = 0.4f; a.envMod = 0.7f; a.accent = 0.8f;
+		a.drive = (float)d;
+		b = a;
+		for (n = 0; n < 1500; n++) {
+			int16_t ba[BLK], bb[BLK], bc[BLK];
+			AlkalineVoice c;
+
+			if (n % 172 == 0) {
+				a.slide = b.slide = (uint8_t)((n / 172) & 1);
+				Alkaline_triggerVoice(&a, 0u, (n / 172) % 3 ? 80u : 127u,
+				                      (uint8_t)(51 + (n * 7) % 30), ALK_STEP);
+				Alkaline_triggerVoice(&b, 0u, (n / 172) % 3 ? 80u : 127u,
+				                      (uint8_t)(51 + (n * 7) % 30), ALK_STEP);
+			}
+			c = a;
+			Alkaline_calcVoiceAsync(&a);
+			DiodeLadder_renderB2Osc(&a.ladder, ba,
+			                        ((const int16_t (*)[1024])triTable)[a.osc.tableOffset],
+			                        &a.osc.phase, a.osc.phaseInc,
+			                        ALK_TRI_SCALE_V * a.driveGain,
+			                        a.iLadEnd, a.iAbcEnd * a.makeup);
+			Alkaline_calcVoiceAsync(&b);
+			calcWavetableOscBlock(&b.osc, (const int16_t (*)[1024])triTable,
+			                      bb, BLK, 1.0f);
+			DiodeLadder_renderB2(&b.ladder, bb, ALK_TRI_SCALE_V * b.driveGain,
+			                     b.iLadEnd, b.iAbcEnd * b.makeup);
+			Alkaline_calcVoiceAsync(&c);
+			Alkaline_calcVoiceSyncBlock(&c, bc, BLK);
+			if (memcmp(ba, bb, sizeof(ba)) || a.osc.phase != b.osc.phase ||
+			    memcmp(&a.ladder, &b.ladder, sizeof(a.ladder)))
+				fail(G_XT, "fused == separate (bit for bit)", d, n);
+			if (memcmp(ba, bc, sizeof(ba)) || a.osc.phase != c.osc.phase ||
+			    memcmp(&a.ladder, &c.ladder, sizeof(a.ladder)))
+				fail(G_XT, "alk_renderWav == fused", d, n);
+		}
+	}
 }
 
 /* ---------------------------------------------------------------- AL-A
@@ -1448,7 +1513,7 @@ static void test_typ(void)
 	v.osc.waveform = 9u;
 	Alkaline_setOscType(&v, ALK_TYP_WAV);
 	if (v.osc.oscType != OSC_TYPE_WAV) fail(G_TY, "0 is wav", v.osc.oscType, 0);
-	if (v.osc.waveform != ALK_WAVE_SQUARE) fail(G_TY, "wav clamps to Sqr", v.osc.waveform, 0);
+	if (v.osc.waveform != ALK_WAVE_TRI) fail(G_TY, "wav clamps to Tri", v.osc.waveform, 0);
 	if (v.osc.phase != 0x12345678u) fail(G_TY, "the phase runs on (wtb -> wav)", 0, 0);
 	/* S093 P8 revision 3: a type change drops the interpolation slot (the
 	 * stamp and the grant), as Drum's osc_setType() does (S087 A18) */
@@ -1457,14 +1522,18 @@ static void test_typ(void)
 	Alkaline_setOscType(&v, ALK_TYP_WTB);
 	if (v.osc.interpStamp != 0u || v.wtbSlot != 0u)
 		fail(G_TY, "a type change keeps the slot", v.osc.interpStamp, v.wtbSlot);
-	/* S094 P1 S5: 2 and above are pwm; pwm clamps wav to Sqr; the phase runs
-	 * on */
+	/* S094 P1 S5: 2 and above are pwm; S094 P4: pwm clamps wav to Tri; the
+	 * phase runs on */
 	v.osc.waveform = 9u;
 	v.osc.phase = 0x0badf00du;
 	Alkaline_setOscType(&v, 7u);
 	if (v.osc.oscType != OSC_TYPE_PWM) fail(G_TY, "7 is pwm", v.osc.oscType, 0);
-	if (v.osc.waveform != ALK_WAVE_SQUARE) fail(G_TY, "pwm clamps to Sqr", v.osc.waveform, 0);
+	if (v.osc.waveform != ALK_WAVE_TRI) fail(G_TY, "pwm clamps to Tri", v.osc.waveform, 0);
 	if (v.osc.phase != 0x0badf00du) fail(G_TY, "the phase runs on (-> pwm)", 0, 0);
+	/* S094 P4: Tri (2) is in both lists: pwm Tri -> wav stays Tri */
+	v.osc.waveform = ALK_WAVE_TRI;
+	Alkaline_setOscType(&v, ALK_TYP_WAV);
+	if (v.osc.waveform != ALK_WAVE_TRI) fail(G_TY, "pwm Tri -> wav Tri", v.osc.waveform, 0);
 }
 
 /* ---------------------------------------------------------------- AL-A3
@@ -1598,13 +1667,16 @@ static void test_tone(void)
 }
 
 /* ---------------------------------------------------------------- AL-PW
- * S094 P1 S5: the Alkaline pwm.
- *   - pos 1, 64, 127 under Saw and Sqr: finite, bounded (the pattern);
+ * S094 P1 S5: the Alkaline pwm (S094 P4 law and Tri).
+ *   - pos 0, 64, 127 under Saw, Sqr and Tri: finite, bounded (the pattern);
  *   - the width slew: positionApplied moves <= OSC_PWM_SLEW_STEPS per block
  *     toward pos and lands; a non-legato note snaps it; the phase runs on
  *     through the note (free-running VCO);
- *   - level: Sqr at pos 64 under pwm within 3 dB RMS of Sqr under wav (the
- *     1.40 scale; printed);
+ *   - level: Sqr at pos 0 under pwm within 3 dB RMS of Sqr under wav (the
+ *     1.40 scale; printed); S094 P4: Tri's ladder input within 0.5 dB of
+ *     Saw's (the row RMS match that sets ALK_TRI_SCALE_V, S9), with the
+ *     voice's own ratio printed for the record (the ladder colours the two
+ *     spectra differently, so it is not a scale measure);
  *   - P-D6 error: this build's render (ALK_PWM_READ_FORM, default 2 after
  *     the S5 measurement) against the form-0 reference written by the second
  *     bench build (build/alk_pwm_ref.bin, Makefile): printed; it must stay
@@ -1659,14 +1731,14 @@ static double pw_rms(uint8_t wave, uint8_t typ, uint8_t pos)
 
 static void test_pwm(void)
 {
-	/* bounds at the width extremes */
+	/* bounds at the width extremes, every wave */
 	{
-		static const uint8_t pos[3] = { 1u, 64u, 127u };
+		static const uint8_t pos[3] = { 0u, 64u, 127u };
+		static const uint8_t wave[3] = { ALK_WAVE_SAW, ALK_WAVE_SQUARE, ALK_WAVE_TRI };
 
-		for (int w = 0; w < 2; w++)
+		for (int w = 0; w < 3; w++)
 			for (int p = 0; p < 3; p++) {
-				const double r = pw_rms(w ? ALK_WAVE_SQUARE : ALK_WAVE_SAW,
-				                        ALK_TYP_PWM, pos[p]);
+				const double r = pw_rms(wave[w], ALK_TYP_PWM, pos[p]);
 
 				if (!isfinite(r) || r <= 0.0) fail(G_PW, "bounded and sounding", w, pos[p]);
 			}
@@ -1697,13 +1769,50 @@ static void test_pwm(void)
 			if (v.osc.phase != ph) fail(G_PW, "the phase runs free through a note", 0, 0);
 		}
 	}
-	/* level against Sqr under wav */
+	/* level against Sqr under wav (pos 0 is the S094 P1 width-1/2 point) */
 	{
-		const double db = 20.0 * log10(pw_rms(ALK_WAVE_SQUARE, ALK_TYP_PWM, 64u) /
+		const double db = 20.0 * log10(pw_rms(ALK_WAVE_SQUARE, ALK_TYP_PWM, 0u) /
 		                               pw_rms(ALK_WAVE_SQUARE, ALK_TYP_WAV, 0u));
 
-		printf("AL-PW: Sqr pwm at 64 against Sqr wav %+.2f dB RMS\n", db);
+		printf("AL-PW: Sqr pwm at 0 against Sqr wav %+.2f dB RMS\n", db);
 		if (fabs(db) > 3.0) fail(G_PW, "pulse level", db, 3.0);
+	}
+	/* S094 P4 / S9: the Tri scale, measured where it is defined: the ladder
+	 * input (the oscillator row x ALK_TRI_SCALE_V x the drive) at the same
+	 * octave row, against the Saw's. */
+	{
+		AlkalineVoice a, b;
+		double sa = 0.0, sb = 0.0;
+
+		gold_voice(&a, ALK_WAVE_TRI, 0u);
+		gold_voice(&b, ALK_WAVE_SAW, 0u);
+		for (int n = 0; n < 64; n++) {
+			int16_t ba[BLK], bb[BLK];
+
+			Alkaline_calcVoiceAsync(&a);
+			Alkaline_calcVoiceAsync(&b);
+			calcWavetableOscBlock(&a.osc, (const int16_t (*)[1024])triTable, ba, BLK, 1.0f);
+			calcWavetableOscBlock(&b.osc, (const int16_t (*)[1024])sawTable, bb, BLK, 1.0f);
+			for (int i = 0; i < BLK; i++) {
+				const double xa = (double)ba[i] * (ALK_TRI_SCALE_V * a.driveGain);
+				const double xb = (double)bb[i] * (ALK_SAW_SCALE_V * b.driveGain);
+
+				sa += xa * xa;
+				sb += xb * xb;
+			}
+		}
+		{
+			const double db = 10.0 * log10((sa + 1e-30) / (sb + 1e-30));
+
+			printf("AL-PW: Tri ladder input against Saw %+.2f dB\n", db);
+			if (fabs(db) > 0.5) fail(G_PW, "tri scale", db, 0.5);
+		}
+	}
+	{
+		const double db = 20.0 * log10(pw_rms(ALK_WAVE_TRI, ALK_TYP_WAV, 0u) /
+		                               pw_rms(ALK_WAVE_SAW, ALK_TYP_WAV, 0u));
+
+		printf("AL-PW: Tri voice against Saw voice (golden knobs) %+.2f dB RMS\n", db);
 	}
 	/* P-D6: against the both-interpolated reference */
 	{
@@ -1741,6 +1850,124 @@ static void test_pwm(void)
 		}
 		if (fi) fclose(fi);
 		free(now); free(ref);
+	}
+}
+
+/* ---------------------------------------------------------------- AL-PWW
+ * S094 P4: the Alkaline pwm Tri (fused mode 4).
+ *   - against an unfused reference: osc_pwmRenderPlain() (the drum
+ *     instruments' WT loop at gain 1 on the same lifted row, W, ra, rb) into
+ *     a buffer, then DiodeLadder_renderB2() at the same scale: the
+ *     difference is at least 40 dB below the reference RMS at pos 0, 64 and
+ *     127 (the reference interpolates in integers and the fused read in
+ *     float, so they are not bit-identical);
+ *   - pos 0 against the unwarped wave: Tri under pwm at pos 0 against Tri
+ *     under wav (the fused one-row read), within 40 dB, the same way;
+ *   - bounded and sounding at pos 0, 64 and 127, and the slew (as AL-PW).
+ * A swapped ra / rb, a wrong lift or a wrong half-cycle offset moves the
+ * peak and fails the first check at pos 64 and 127. */
+static void test_pwm_wt(void)
+{
+	static const uint8_t pos[3] = { 0u, 64u, 127u };
+	int p;
+
+	/* bounded and sounding at the three positions */
+	for (p = 0; p < 3; p++) {
+		const double r = pw_rms(ALK_WAVE_TRI, ALK_TYP_PWM, pos[p]);
+
+		if (!isfinite(r) || r <= 0.0) fail(G_PWW, "bounded and sounding", p, pos[p]);
+	}
+	/* the fused warp against the drum WT loop then the unfused ladder */
+	for (p = 0; p < 3; p++) {
+		AlkalineVoice a, b;
+		double se = 0.0, sr = 0.0;
+		int n;
+
+		gold_voice(&a, ALK_WAVE_TRI, 0u);
+		Alkaline_setOscType(&a, ALK_TYP_PWM);
+		a.osc.position = pos[p];
+		a.osc.positionApplied = pos[p];
+		b = a;
+		for (n = 0; n < 600; n++) {
+			int16_t ba[BLK], bb[BLK];
+			int i;
+
+			if (n % 150 == 0) {
+				Alkaline_triggerVoice(&a, 0u, 80u, 63u, ALK_STEP);
+				Alkaline_triggerVoice(&b, 0u, 80u, 63u, ALK_STEP);
+			}
+			Alkaline_calcVoiceAsync(&a);
+			Alkaline_calcVoiceAsync(&b);
+			{
+				const uint32_t r = (uint32_t)a.osc.tableOffset + oscPwmTriLift[pos[p]];
+
+				DiodeLadder_renderB2OscPwmWt(&a.ladder, ba, triTable[r > 10u ? 10u : r],
+				                             &a.osc.phase, a.osc.phaseInc,
+				                             oscPwmTriW[pos[p]], oscPwmTriRa[pos[p]],
+				                             oscPwmTriRb[pos[p]],
+				                             ALK_TRI_SCALE_V * a.driveGain,
+				                             a.iLadEnd, a.iAbcEnd * a.makeup);
+			}
+			/* the drum WT role reads the drum wave enum: Tri is 1 there */
+			b.osc.waveform = TRI;
+			osc_pwmRenderPlain(&b.osc, bb, BLK, 1.0f);
+			DiodeLadder_renderB2(&b.ladder, bb, ALK_TRI_SCALE_V * b.driveGain,
+			                     b.iLadEnd, b.iAbcEnd * b.makeup);
+			for (i = 0; i < BLK; i++) {
+				const double e = (double)ba[i] - bb[i];
+
+				se += e * e;
+				sr += (double)bb[i] * bb[i];
+			}
+		}
+		{
+			const double db = 10.0 * log10((se + 1e-30) / (sr + 1e-30));
+
+			printf("AL-PWW: Tri pwm at %u against the unfused WT loop: %.1f dB\n",
+			       pos[p], db);
+			if (db > -40.0) fail(G_PWW, "fused vs unfused", pos[p], db);
+		}
+	}
+	/* pos 0 against Tri under wav (the unwarped one-row read) */
+	{
+		AlkalineVoice a, b;
+		double se = 0.0, sr = 0.0;
+		int n;
+
+		gold_voice(&a, ALK_WAVE_TRI, 0u);
+		Alkaline_setOscType(&a, ALK_TYP_PWM);
+		a.osc.position = 0u;
+		a.osc.positionApplied = 0u;
+		gold_voice(&b, ALK_WAVE_TRI, 0u);
+		for (n = 0; n < 300; n++) {
+			int16_t ba[BLK], bb[BLK];
+			int i;
+
+			if (n % 150 == 0) {
+				Alkaline_triggerVoice(&a, 0u, 80u, 63u, ALK_STEP);
+				Alkaline_triggerVoice(&b, 0u, 80u, 63u, ALK_STEP);
+			}
+			Alkaline_calcVoiceAsync(&a);
+			Alkaline_calcVoiceAsync(&b);
+			DiodeLadder_renderB2OscPwmWt(&a.ladder, ba, triTable[a.osc.tableOffset],
+			                             &a.osc.phase, a.osc.phaseInc,
+			                             oscPwmTriW[0], oscPwmTriRa[0], oscPwmTriRb[0],
+			                             ALK_TRI_SCALE_V * a.driveGain,
+			                             a.iLadEnd, a.iAbcEnd * a.makeup);
+			Alkaline_calcVoiceSyncBlock(&b, bb, BLK);
+			for (i = 0; i < BLK; i++) {
+				const double e = (double)ba[i] - bb[i];
+
+				se += e * e;
+				sr += (double)bb[i] * bb[i];
+			}
+		}
+		{
+			const double db = 10.0 * log10((se + 1e-30) / (sr + 1e-30));
+
+			printf("AL-PWW: Tri pwm at 0 against Tri wav: %.1f dB\n", db);
+			if (db > -40.0) fail(G_PWW, "Tri pwm 0 vs wav", 0, db);
+		}
 	}
 }
 
@@ -1798,6 +2025,7 @@ int main(int argc, char **argv)
 	test_fastmath();
 	test_tablefreq();
 	test_fused();
+	test_fused_tri();
 	test_attack();
 	test_meg_range();
 	test_pos();
@@ -1811,6 +2039,8 @@ int main(int argc, char **argv)
 	test_tone();
 	/* S094 P1 S5: the Alkaline pwm */
 	test_pwm();
+	/* S094 P4: the Alkaline pwm Tri (fused mode 4) */
+	test_pwm_wt();
 	/* every group in g_name (S093 P6: fourteen; was a literal 10) */
 	for (g = 0u; g < sizeof g_name / sizeof g_name[0]; g++) {
 		printf("%s: %u failure(s)\n", g_name[g], g_fail[g]);

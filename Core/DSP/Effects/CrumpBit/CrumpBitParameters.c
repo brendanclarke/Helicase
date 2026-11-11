@@ -536,11 +536,9 @@ static void crumpBit_formatNote(uint8_t note, char *out)
  *   position); Position's rhythmic half the stop it plays (clamped);
  *   Density `off`, `buf` (+1) or its stop;
  * - `aux` where it has no meaning yet (`dly`, `cmb`, `rvb`): `---`;
- * - S091 P5, what the two cheaper paths play:
- *   - `typ` in `grn`/`rvb` (F1, Q5): the one-pole's mapped type, `LP`
- *     (LP, LP2, BP, UBP), `HP` (HP, notch) or `off` (peak, off); the stored
- *     value is untouched, so `dly`/`cmb`/`pit` still play it as stored;
- *   - `res` in `grn`/`rvb` (F1): `---` (the one-pole has no resonance);
+ * - S091 P5, what the cheaper paths play (S094 P2 AS-13: `typ` and `res`
+ *   in `grn`/`rvb` show their stored values again, the resonant SVF being
+ *   back there):
  *   - `ton` (`dmp`) in `rvb` above 63 (R1, Q10): `  0`, as 63 shows (the
  *     damping is low-pass only; values above 63 play flat);
  *   - `fbk` in `grn` (G4, Q7): the echo gain in percent, 0..98
@@ -655,29 +653,6 @@ static uint8_t crumpBit_uiFormatValue3(uint8_t index, uint8_t value,
             memcpy(out, crumpBit_grainStopNames[crumpBit_grainDenStop(value)],
                    3u);
         return 1u;
-    }
-    /*
-     * S091 P5 F1: the one-pole sub-types show the type they play and no
-     * resonance. The mapping is crumpBit_onePoleMixTable's (CrumpBitEffect.c):
-     * the low-pass rows, then HP and notch as high-pass, the rest flat.
-     */
-    if (sub == CRUMPBIT_SUBTYPE_GRAIN || sub == CRUMPBIT_SUBTYPE_REVERB) {
-        if (index == CRUMPBIT_PARAM_FILTER_TYPE) {
-            const char *mapped = "off";
-
-            if (value == CRUMPBIT_FILTER_LP || value == CRUMPBIT_FILTER_LP2 ||
-                value == CRUMPBIT_FILTER_BP || value == CRUMPBIT_FILTER_UBP)
-                mapped = "LP ";
-            else if (value == CRUMPBIT_FILTER_HP ||
-                     value == CRUMPBIT_FILTER_NOTCH)
-                mapped = "HP ";
-            memcpy(out, mapped, 3u);
-            return 1u;
-        }
-        if (index == CRUMPBIT_PARAM_FILTER_RESO) {
-            memcpy(out, "---", 3u);
-            return 1u;
-        }
     }
     /* S091 P5 R1: `rvb` damping above 63 plays flat, so it shows 63's 0. */
     if (sub == CRUMPBIT_SUBTYPE_REVERB && index == CRUMPBIT_PARAM_TONE &&

@@ -193,11 +193,10 @@ typedef enum {
  * 2-pole structure that would break constant CPU here (plan Q9).
  * CRUMPBIT_FILTER_OFF passes the input exactly once its one-block coefficient
  * ramp has settled; the filter still runs (constant CPU, warm state).
- * S091 P5 F1: in `grn` and `rvb` the filter is a one-pole and the eight
- * values map onto three: LP, LP2, BP, UBP low-pass; HP, notch high-pass;
- * peak, off flat (the page shows LP/HP/off there).
- * Accessors: crumpBit_descriptors (default/max), crumpBit_filterMix(),
- * crumpBit_onePoleMixTable, crumpBit_uiFormatValue3().
+ * Every sub-type plays all eight on the resonant SVF (S094 P2 AS-13: the
+ * S091 P5 F1 one-pole of `grn` and `rvb`, which mapped them onto three, is
+ * gone).
+ * Accessors: crumpBit_descriptors (default/max), crumpBit_filterMix().
  * Affiliates: MENU_FILTER, StereoFilterEffect.c stereoFilter_writeParam().
  */
 #define CRUMPBIT_FILTER_LP    0u

@@ -65,6 +65,7 @@
 #include "MidiLearn.h"
 #include "modulationNode.h"
 #include "Oscillator.h"
+#include "AlkalineVoice.h"     /* S094 P4: ALK_WAVE_COUNT (the name assert) */
 #include "transientGenerator.h"   /* S087 P3: transient list with user one-shots */
 #include "voiceFold.h"   /* S089 P2: VOICE_CHAIN_* / VOICE_FOLD_* (name asserts) */
 #include <string.h>
@@ -12166,19 +12167,20 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
     memset(nameDst, ' ', SAMPLE_DISPLAY_NAME_LEN);
     memset(codeDst, ' ', 3u);
     /*
-     * S093 P8: an Alkaline slot's osc1 under wav lists Saw, Sqr.
+     * S093 P8: an Alkaline slot's osc1 under wav lists Saw, Sqr, Tri.
      *
-     * What:       value 0 -> "Saw", 1 -> "Sqr" (alkWaveNames), copied to the
-     *             name and compact-code fields; any other value names nothing
-     *             (blank), as a Drum value past its list.
+     * What:       value 0 -> "Saw", 1 -> "Sqr", 2 -> "Tri" (S094 P4)
+     *             (alkWaveNames), copied to the name and compact-code fields;
+     *             any other value names nothing (blank), as a Drum value past
+     *             its list.
      * Why:        the stock list (waveformNames: Sin, Tri, ...) is not the
-     *             Alkaline's; the voice plays Saw for 0 and Sqr for 1
-     *             (alk_renderWav()). Under wtb the Alkaline cell takes the
+     *             Alkaline's; the voice plays Saw for 0, Sqr for 1 and Tri
+     *             for 2 (alk_renderWav()). Under wtb the Alkaline cell takes the
      *             shared branch below (wNN, the table name).
      * Accessors:  menu_formatWaveValue3() (compact cells, overlays, the voice
      *             automation display), the single-parameter painter.
      */
-    /* S094 P1 S5: under pwm the Alkaline's wav list is still Saw, Sqr */
+    /* S094 P4: the Alkaline lists Saw Sqr Tri under both wav and pwm */
     if (isOsc1 && (type == OSC_TYPE_WAV || type == OSC_TYPE_PWM) &&
         instrumentManager_runtimeType(cell->slot) == INSTRUMENT_TYPE_ALK) {
         if (value < (uint8_t)alkWaveNames[0][0]) {
@@ -12542,10 +12544,11 @@ _Static_assert((sizeof(transientNames) / sizeof(transientNames[0])) - 1u ==
 _Static_assert((sizeof(voiceChainNames) / sizeof(voiceChainNames[0])) - 1u ==
                    VOICE_CHAIN_COUNT,
                "voiceChainNames must list every VOICE_CHAIN_* value");
-/* S093 P4: the Alkaline waveform names list both stored values
- * (ALK_WAVE_SAW 0, ALK_WAVE_SQUARE 1, AlkalineVoice.h). */
-_Static_assert((sizeof(alkWaveNames) / sizeof(alkWaveNames[0])) - 1u == 2u,
-               "alkWaveNames must list Saw and Sqr");
+/* S093 P4 / S094 P4: the Alkaline waveform names list every stored value:
+ * Saw, Sqr, Tri (ALK_WAVE_*, AlkalineVoice.h). */
+_Static_assert((sizeof(alkWaveNames) / sizeof(alkWaveNames[0])) - 1u ==
+                   ALK_WAVE_COUNT,
+               "alkWaveNames must list Saw, Sqr and Tri");
 /* S093 P8 / S094 P1: the Alkaline typ list is wav, wtb, pwm (ALK_TYP_COUNT,
  * AlkalineVoice.h) */
 _Static_assert((sizeof(alkTypeNames) / sizeof(alkTypeNames[0])) - 1u == 3u,

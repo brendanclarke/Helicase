@@ -253,18 +253,18 @@ static const char alkTypeNames[][4] = {
 };
 /*
  * Alkaline waveform names (S093 P4; S093 P8: the osc1_wave cell under typ
- * wav).
+ * wav; S094 P4: Tri, under wav and pwm).
  *
- * What:       [0] = count (2), then Saw, Sqr.
- * Why:        an Alkaline slot's wav list under typ wav is these two
- *             (ALK_WAVE_SAW 0, ALK_WAVE_SQUARE 1); menu_formatWaveCell() names
- *             them and instrumentManager_waveDomainMax() limits the range to
- *             them. The count must equal ALK_WAVE_SQUARE + 1 (asserted in
- *             menu.c).
+ * What:       [0] = count (3), then Saw, Sqr, Tri: ALK_WAVE_SAW 0,
+ *             ALK_WAVE_SQUARE 1, ALK_WAVE_TRI 2, the same list under typ wav
+ *             and pwm.
+ * Why:        an Alkaline slot's wave list; menu_formatWaveCell() names it
+ *             and instrumentManager_waveDomainMax() limits the range to it.
+ *             The count must equal ALK_WAVE_COUNT (asserted in menu.c).
  * Accessors:  menu_formatWaveCell() (menu.c).
  */
 static const char alkWaveNames[][4] = {
-    {2}, {"Saw"},{"Sqr"},
+    {3}, {"Saw"},{"Sqr"},{"Tri"},
 };
 /*
  * Wavefolder type names: the wav cell under WFd (S089 P2).

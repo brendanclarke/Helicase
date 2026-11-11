@@ -14,7 +14,8 @@
     - AS-6, the SRAM D-cache;
     - AS-10, `QADD`;
     - the Cymbal and HiHat moved to Basic: no current type is Advanced.
-  - Open: §7 (AS-2, AS-5, AS-7, AS-8, AS-11, AS-12, AS-13).
+  - Done since: AS-13, the resonant SVF back in CrumpBit `grn`/`rvb` (§23).
+  - Open: §7 (AS-2, AS-5, AS-7, AS-8, AS-11, AS-12).
   - Figures marked *measured* come from
   linked scratch builds of the current tree (S094 P1 after S5), counted with
   the project tools (§8). Figures marked *estimate* or *hypothesis* are not
@@ -239,7 +240,7 @@ which keeps the menu and Load/Save fast.
 | AS-10 | `bufferTool_satAdd32()` as one `QADD` (bit-exact) | **Done (user, §22)** |
 | AS-11 | One float-to-integer conversion per output channel (gain × pan folded) | **Yes, after AS-10:** not bit-exact (≤ 1 LSB at 24 bits; it removes an intermediate truncation) |
 | AS-12 | The Alkaline's ladder loop (`DiodeLadder_renderB2Osc*`, 1.4 KB) in ITCM | **Optional (headroom):** it fits the free ITCM (2,400 B after §22); the drum-side PWM stays; not needed to meet §18 if M1 + M2 measure as estimated |
-| AS-13 | The resonant SVF back on CrumpBit `grn` and `rvb` (S091 P5 F1 removed it), inside the 16,634 Effect share (§21) | **Yes (user):** estimated grain 16,260 with it (about 374 spare); to schedule |
+| AS-13 | The resonant SVF back on CrumpBit `grn` and `rvb` (S091 P5 F1 removed it), inside the 16,634 Effect share (§21) | **Done (user, §23):** `grn` 180.8 instructions per frame (measured); about 16,280 cycles per block with `effects_service()` (estimate), about 350 spare |
 
 **If AS-2 is taken, the implementation scope** (for its schedule):
 - the tone stage and its two fields leave `dl_renderB2Body()` and
@@ -1054,3 +1055,69 @@ limited to two per Scene again.
   changes the mixer's inlined loops by design.
 - **The A/B image** `build/s094p2_sram_cached/` is now redundant: the
   regular image has S = 0.
+
+---
+
+## 23. Implemented: the resonant SVF in every CrumpBit sub-type (AS-13, user, 2026-11-11)
+
+**What:** `grn` and `rvb` run the same resonant TPT SVF as `dly`, `cmb` and
+`pit` (stage 4). The S091 P5 F1 one-pole is removed:
+- the branch in `crumpBit_process()`;
+- `crumpBit_onePoleMixTable`;
+- `crumpBit_filterIsOnePole()`;
+- the state hand-over in `crumpBit_enter()`;
+- the `typ` / `res` display mapping in `crumpBit_uiFormatValue3()`;
+- the generated `crumpBit_onePoleK` table.
+
+All eight filter types and `res` act in `grn` and `rvb` again. A sub-type
+switch keeps the filter state: there is one filter for every sub-type.
+
+| File | Change |
+|---|---|
+| `CrumpBitEffect.c` | file header (stage 4); the one-pole table and predicate removed; `crumpBit_enter()`: no hand-over (comment says why); `crumpBit_process()`: one SVF path for every sub-type, comments updated |
+| `CrumpBitEffect.h` | `svf_*` comment: one filter, kept across a switch |
+| `CrumpBitParameters.c/.h` | the `grn`/`rvb` `typ` (LP/HP/off) and `res` (`---`) display mapping removed; comments updated |
+| `tools/plots/gen_crumpbit_tables.py`, `CrumpBitTables.c` (generated), `CrumpBitTables.h` | `crumpBit_onePoleK`, its generator functions and check C7 removed; `--check` OK; the generated file loses only that table |
+| `tools/dsp_test/modules/crumpbit.c` | **CB19 rewritten:** at mix 0, `cmb`, `pit`, `grn` and `rvb` play `dly`'s output bit for bit for all eight types at res 0 and 120; res 120 differs from res 0 on `grn` and `rvb`; a switch leaves `svf_*` untouched and does not jump. The CB6 one-pole k check is removed; the CB11 and CB16 comments are updated |
+| `tools/dsp_test/Makefile` | `break_cb15` re-aimed: a switch that clears the filter state must fail CB19 (was the one-pole hand-over break). `break_cb17` removed: it broke the one-pole's `bal` side, and the SVF's `bal` break covers every sub-type. `crumpbit_cpu_check` cap 170 → **181** |
+| `tools/dsp_test/crumpbit_cpu.py` | `crumpBit_process()` has one frame loop (the SVF) for every sub-type |
+
+**Measured (linked image; `crumpbit_cpu.py`, instructions per frame for the
+whole Effect):**
+
+| Sub-type | Before (one-pole in `grn`/`rvb`) | After (SVF everywhere) |
+|---|---:|---:|
+| `dly` | 157.6 | 156.7 |
+| `cmb` | 153.8 | 152.8 |
+| `pit` | 154.1 | 153.1 |
+| `grn` | 165.6 | **180.8** |
+| `rvb` | 163.9 | **179.4** |
+
+- **`grn` and `rvb` rise by about 15,** as estimated: the SVF loop is 31
+  per frame against the one-pole's 16.
+- **The other three fall by about 1.** `crumpBit_process()`'s per-block
+  part lost the two-filter branch (249 → 219).
+- **The gate's cap** moves from S091 P5's 170 to 181 (worst 180.8). The
+  budget that governs is the Effect's cycle share.
+- **In cycles (estimate):** run 2's grain measured 11,194 cycles of Effect
+  processing at 165.6, about 2.11 cycles per instruction. At 180.8 that is
+  about 12,220. With `effects_service()` (4,057, worst observed) the total
+  is **about 16,280 against the 16,634 share: about 350 spare**.
+- **Flash: about −0.8 KB:**
+  - `crumpBit_onePoleK` −512 B;
+  - `crumpBit_process()` 1,548 → 1,320 B;
+  - `crumpBit_uiFormatValue3()` 1,068 → 1,004 B.
+- **ELF gate** (`crumpbit_elf_check`): every loop at its limit, unchanged
+  (`crumpBit_process` 31).
+
+**Tests:** `make -C tools/dsp_test crumpbit crumpbit_tables`:
+- 0 failures;
+- every break build caught;
+- tables OK.
+
+**Build note:** the P4 implementer was editing the shared tree at the same
+time, and it did not build at that moment: `menu.c` used `ALK_WAVE_COUNT`
+without including `AlkalineVoice.h`, part of P4 S7. The figures above come
+from a scratch copy of the tree with that one include added. The next full
+build of the tree (after P4) confirms them with `crumpbit_cpu_check` and
+`crumpbit_elf_check`.

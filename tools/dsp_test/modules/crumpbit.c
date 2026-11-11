@@ -60,8 +60,8 @@
  *                    S091 P5 A: effective_max(dpn) is 255 in every
  *                    sub-type, and the Position fit `grn` caches after a
  *                    block equals crumpBit_grainPosLimit()'s for the share,
- *                    across shares and a tempo change; the one-pole k
- *                    table (F1) is -3 dB at the SVF's res-0 frequency;
+ *                    across shares and a tempo change (the S091 P5 F1
+ *                    one-pole k table went in S094 P2 AS-13);
  *               CB7  output resonance bound: crumpBit_filterDamping() is in
  *                    [0.0625, 1] for every `res` (Q <= 8), 1 at res 0;
  *               CB8  stability at fbk 127 (gain 1.2; `dly`, the tape
@@ -86,8 +86,8 @@
  *                    mono and short blocks, extreme input: finite, bounded,
  *                    the active engine follows `sub`, each engine's seat
  *                    invariants hold, no byte beyond the share changes;
- *                    S091 P5: the switches cross the SVF and one-pole
- *                    filters (CB19 checks the hand-over itself);
+ *                    S094 P2: every sub-type shares the SVF (CB19 checks
+ *                    that a switch leaves its state untouched);
  *               CB12 `cmb` tuning: the first echo of an impulse arrives at
  *                    crumpBit_combTable[rte] (+-2 samples); `snc` inverts
  *                    the second echo; combNote() is 112 - rte, held at 96;
@@ -121,8 +121,8 @@
  *                    above 63 plays bit-identically to 63;
  *               CB16 `bal` (S091 P4): with balance b, the left channel is
  *                    bit-identical to a run at frq - b and balance 0, the
- *                    right to one at frq + b, for every filter type; S091
- *                    P5: on the SVF (`dly`) and the one-pole (`rvb`) path;
+ *                    right to one at frq + b, for every filter type; on
+ *                    `dly` and on `rvb` (both the SVF since S094 P2);
  *               CB17 (S091 P5 X2) the data-line table equals
  *                    (c & keep) ^ invert for all 256 codes after the first
  *                    block and after every `bof`/`biv` change;
@@ -158,13 +158,14 @@
  *                    at its old D, a silent one takes the new D and rises
  *                    over the next; 2e-6); a reseat silences the tap and
  *                    keeps D inside the new line;
- *               CB19 (S091 P5 F1) the one-pole output filter of `grn`/
- *                    `rvb`: -3 dB at the SVF's res-0 frequency (+-0.3 dB,
- *                    sines through the whole Effect, mix 0); the type
- *                    mapping (LP = LP2 = BP = UBP, HP = notch, peak = off,
- *                    bit for bit; off passes the dry signal exactly); `res`
- *                    has no effect; a switch hands the state over (SVF low
- *                    integrator -> one-pole state -> SVF low integrator).
+ *               CB19 (S094 P2 AS-13; was the S091 P5 F1 one-pole law)
+ *                    every sub-type's output filter is the resonant SVF: at
+ *                    mix 0 (the engines' input to stage 4 is the same dry
+ *                    signal), `cmb`, `pit`, `grn` and `rvb` are bit-identical
+ *                    to `dly` for all eight filter types at res 0 and 120,
+ *                    and res 120 differs from res 0 (resonance acts in `grn`
+ *                    and `rvb`); a sub-type switch leaves the filter state
+ *                    (svf_*) untouched, and the output does not jump.
  * Why:        the board cannot report output sample by sample; the
  *             reference proves the code computes exactly the documented
  *             equations (including that the ramp-origin trim is exact and
@@ -174,11 +175,13 @@
  * Inputs:     build/gen/cb_*.c|h, CrumpBitEffect.host.h/.c (extract.py).
  * Outputs:    one line per failure (first 40); "crumpbit failures: N";
  *             exit 1 if N > 0.
- * Accessors:  make -C tools/dsp_test crumpbit (21 break builds follow).
+ * Accessors:  make -C tools/dsp_test crumpbit (20 break builds follow;
+ *             S094 P2 removed break_cb17 with the one-pole).
  * Affiliates: CrumpBitEffect.c/.h; CrumpBitTables.c; CrumpBitParameters.h;
  *             StepScale.c; S091_P2_Implementation.md §5;
  *             S091_P3_Implementation.md (host laws CB4-CB15);
- *             S091_P5_IMPLEMENTATION.md (CB17-CB19).
+ *             S091_P5_IMPLEMENTATION.md (CB17-CB19);
+ *             S094_P2_ALKALINE_SAVINGS.md §23 (CB19 rewritten).
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -1270,22 +1273,6 @@ static void law_cb6_subtypes(void)
             }
         }
         cb_bpm = 120u;
-    }
-    /*
-     * S091 P5 F1: the one-pole k is -3 dB where the SVF at res 0 is,
-     * tan(w/2) = g sqrt(sqrt 2 - 1), for every index above 0 (0: closed).
-     */
-    expect(crumpBit_onePoleK[0] == 0.0f, "CB6 one-pole k[0] = 0");
-    for (i = 1u; i < 128u; i++) {
-        const double w = 2.0 * atan((double)crumpBit_filterG[i] *
-                                    sqrt(sqrt(2.0) - 1.0));
-        const double k = crumpBit_onePoleK[i];
-        const double a = 1.0 - k;
-        const double g2 = k * k / (1.0 - 2.0 * a * cos(w) + a * a);
-
-        snprintf(msg, sizeof msg, "CB6 one-pole k %u: |H|^2 %.6f", i, g2);
-        expect(fabs(g2 - 0.5) < 1e-5 && k < 1.0 &&
-               crumpBit_onePoleK[i] > crumpBit_onePoleK[i - 1u], msg);
     }
     expect(fabsf(crumpBit_reverbSize[0] - 0.25f) < 1e-7f, "CB6 size 0.25");
     expect(fabsf(crumpBit_reverbSize[127] - 2.5f) < 1e-6f, "CB6 size 2.5");
@@ -2499,9 +2486,9 @@ static void law_cb15(void)
 
 /*
  * CB16: `bal` (S091 P4) ------------------------------------------------------
- * S091 P5: run on `dly` (the SVF) and on `rvb` (the one-pole; `grn` would
- * also be, but it draws a hardware random word per block, so three runs
- * would not see the same engine output).
+ * S091 P5: run on `dly` and on `rvb` (both the SVF since S094 P2 AS-13;
+ * `grn` would also do, but it draws a hardware random word per block, so
+ * three runs would not see the same engine output).
  */
 static void law_cb16_on(uint8_t sub)
 {
@@ -2677,179 +2664,131 @@ static void law_cb18(void)
     }
 }
 
-/* CB19 (S091 P5 F1): the one-pole output filter --------------------------- */
-
-/* Goertzel power at f of `sub`'s output for a sine at f (mix 0). */
-static double cb19_power(uint8_t sub, uint8_t type, uint8_t frq, uint8_t res,
-                         double f)
-{
-    static uint8_t arena_f[16384];
-    fx_share_t share = { arena_f, 0u, sizeof arena_f };
-    const uint32_t total = 44108u;
-    float *out = calloc(total, sizeof(float));
-    CrumpBitRuntime rt;
-    uint32_t got = 0u;
-    uint32_t t = 0u;
-    double p;
-
-    memset(arena_f, 0, sizeof arena_f);
-    p3_init(&rt, sub);
-    p3_write(&rt, CRUMPBIT_PARAM_MIX, 0u, &share);
-    p3_write(&rt, CRUMPBIT_PARAM_FILTER_TYPE, type, &share);
-    p3_write(&rt, CRUMPBIT_PARAM_FILTER_FREQ, frq, &share);
-    p3_write(&rt, CRUMPBIT_PARAM_FILTER_RESO, res, &share);
-    while (got < total) {
-        float l[32], r[32];
-        uint32_t n;
-
-        for (n = 0u; n < 32u; n++, t++) {
-            l[n] = 0.5f * sinf(2.0f * (float)M_PI * (float)f * (float)t /
-                               44108.0f);
-            r[n] = l[n];
-        }
-        p3_block(&rt, &share, l, r, 32u);
-        memcpy(out + got, l, sizeof l);
-        got += 32u;
-    }
-    p = goertzel(out + total / 2u, total / 2u, f);
-    free(out);
-    return p;
-}
-
+/* CB19 (S094 P2 AS-13): the resonant SVF in every sub-type ------------- */
 static void law_cb19(void)
 {
-    static const uint8_t frqs[3] = { 50u, 70u, 90u };
-    uint32_t i;
+    static const uint8_t subs[5] = { CRUMPBIT_SUBTYPE_DELAY,
+                                     CRUMPBIT_SUBTYPE_COMB,
+                                     CRUMPBIT_SUBTYPE_PITCH,
+                                     CRUMPBIT_SUBTYPE_GRAIN,
+                                     CRUMPBIT_SUBTYPE_REVERB };
     char msg[160];
 
-    /* (a) -3 dB at the SVF's res-0 frequency, both filters, vs `off`. */
-    for (i = 0u; i < 3u; i++) {
-        const double w3 = 2.0 * atan((double)crumpBit_filterG[frqs[i]] *
-                                     sqrt(sqrt(2.0) - 1.0));
-        const double f3 = w3 * 44108.0 / (2.0 * M_PI);
-        const double off = cb19_power(CRUMPBIT_SUBTYPE_REVERB,
-                                      CRUMPBIT_FILTER_OFF, frqs[i], 0u, f3);
-        const double one = cb19_power(CRUMPBIT_SUBTYPE_REVERB,
-                                      CRUMPBIT_FILTER_LP, frqs[i], 0u, f3);
-        const double svf = cb19_power(CRUMPBIT_SUBTYPE_DELAY,
-                                      CRUMPBIT_FILTER_LP, frqs[i], 0u, f3);
-        const double db1 = 10.0 * log10(one / off);
-        const double db2 = 10.0 * log10(svf / off);
+    /*
+     * (a) At mix 0 the input to stage 4 is the dry signal in every sub-type,
+     * so with the same filter rows every sub-type must play `dly`'s output
+     * bit for bit: all eight types, at res 0 and at res 120. (b) res 120
+     * must differ from res 0 on `grn` and `rvb` (their S091 P5 one-pole had
+     * no resonance).
+     */
+    {
+        static uint8_t arena_m[5][4096];
+        uint32_t bad = 0u;
+        uint32_t resDiff = 0u;
+        uint32_t type;
+        uint32_t ri;
 
+        for (type = 0u; type <= CRUMPBIT_FILTER_OFF; type++)
+         for (ri = 0u; ri < 2u; ri++) {
+            CrumpBitRuntime rm[5];
+            fx_share_t sh[5];
+            uint32_t block;
+            uint32_t k;
+
+            for (k = 0u; k < 5u; k++) {
+                sh[k].base = arena_m[k];
+                sh[k].offset = 0u;
+                sh[k].bytes = sizeof arena_m[k];
+                memset(arena_m[k], 0, sizeof arena_m[k]);
+                p3_init(&rm[k], subs[k]);
+                p3_write(&rm[k], CRUMPBIT_PARAM_MIX, 0u, &sh[k]);
+                p3_write(&rm[k], CRUMPBIT_PARAM_FILTER_FREQ, 70u, &sh[k]);
+                p3_write(&rm[k], CRUMPBIT_PARAM_FILTER_TYPE, (uint8_t)type, &sh[k]);
+                p3_write(&rm[k], CRUMPBIT_PARAM_FILTER_RESO, ri ? 120u : 0u, &sh[k]);
+            }
+            for (block = 0u; block < 400u; block++) {
+                float l[5][32], r[5][32];
+                uint32_t n;
+
+                for (n = 0u; n < 32u; n++) {
+                    const float a = rndf(-1.0f, 1.0f);
+                    const float b = rndf(-1.0f, 1.0f);
+
+                    for (k = 0u; k < 5u; k++) {
+                        l[k][n] = a;
+                        r[k][n] = b;
+                    }
+                }
+                for (k = 0u; k < 5u; k++)
+                    p3_block(&rm[k], &sh[k], l[k], r[k], 32u);
+                for (n = 0u; n < 32u; n++)
+                    for (k = 1u; k < 5u; k++)
+                        bad += !same_bits(l[k][n], l[0][n]) +
+                               !same_bits(r[k][n], r[0][n]);
+            }
+        }
+        /* (b) resonance acts on `rvb` and `grn`: res 120 against res 0. */
+        {
+            uint32_t k;
+
+            for (k = 3u; k < 5u; k++) {
+                CrumpBitRuntime ra, rb;
+                static uint8_t arena_a[4096], arena_b[4096];
+                fx_share_t sa = { arena_a, 0u, sizeof arena_a };
+                fx_share_t sb = { arena_b, 0u, sizeof arena_b };
+                uint32_t block;
+
+                memset(arena_a, 0, sizeof arena_a);
+                memset(arena_b, 0, sizeof arena_b);
+                p3_init(&ra, subs[k]);
+                p3_init(&rb, subs[k]);
+                p3_write(&ra, CRUMPBIT_PARAM_MIX, 0u, &sa);
+                p3_write(&rb, CRUMPBIT_PARAM_MIX, 0u, &sb);
+                /* LP: the default type, off, passes the input untouched */
+                p3_write(&ra, CRUMPBIT_PARAM_FILTER_TYPE, CRUMPBIT_FILTER_LP, &sa);
+                p3_write(&rb, CRUMPBIT_PARAM_FILTER_TYPE, CRUMPBIT_FILTER_LP, &sb);
+                p3_write(&ra, CRUMPBIT_PARAM_FILTER_FREQ, 70u, &sa);
+                p3_write(&rb, CRUMPBIT_PARAM_FILTER_FREQ, 70u, &sb);
+                p3_write(&rb, CRUMPBIT_PARAM_FILTER_RESO, 120u, &sb);
+                for (block = 0u; block < 100u; block++) {
+                    float la[32], ra_[32], lb[32], rb_[32];
+                    uint32_t n;
+
+                    for (n = 0u; n < 32u; n++) {
+                        la[n] = lb[n] = rndf(-1.0f, 1.0f);
+                        ra_[n] = rb_[n] = rndf(-1.0f, 1.0f);
+                    }
+                    p3_block(&ra, &sa, la, ra_, 32u);
+                    p3_block(&rb, &sb, lb, rb_, 32u);
+                    for (n = 0u; n < 32u; n++)
+                        resDiff += !same_bits(la[n], lb[n]);
+                }
+                snprintf(msg, sizeof msg,
+                         "CB19 res acts on sub %u: %u samples differ", subs[k],
+                         resDiff);
+                expect(resDiff > 1000u, msg);
+                resDiff = 0u;
+            }
+        }
         snprintf(msg, sizeof msg,
-                 "CB19 frq %u at %.0f Hz: one-pole %.2f dB, SVF %.2f dB",
-                 frqs[i], f3, db1, db2);
-        expect(fabs(db1 + 3.01) < 0.3 && fabs(db2 + 3.01) < 0.3, msg);
+                 "CB19 every sub-type plays dly's SVF at mix 0: %u samples differ",
+                 bad);
+        expect(bad == 0u, msg);
         printf("%s\n", msg);
     }
 
     /*
-     * (b) the type mapping and (c) `res` inert, bit for bit, on `rvb`
-     * (LP = LP2 = BP = UBP; HP = notch; peak = off; res 0 = res 120).
-     */
-    {
-        /* cls: each type's one-pole class, 0 low-pass, 1 high-pass, 2 flat. */
-        static const uint8_t cls[8] = { 0u, 1u, 0u, 0u, 1u, 2u, 0u, 2u };
-        static uint8_t arena_m[9][4096];
-        CrumpBitRuntime rm[9];
-        fx_share_t sh[9];
-        uint32_t bad = 0u;
-        uint32_t block;
-        uint32_t k;
-
-        for (k = 0u; k < 9u; k++) {
-            /* 0..7: `rvb` with type k; 8: `rvb` LP at res 120. */
-            sh[k].base = arena_m[k];
-            sh[k].offset = 0u;
-            sh[k].bytes = sizeof arena_m[k];
-            memset(arena_m[k], 0, sizeof arena_m[k]);
-            p3_init(&rm[k], CRUMPBIT_SUBTYPE_REVERB);
-            p3_write(&rm[k], CRUMPBIT_PARAM_MIX, 64u, &sh[k]);
-            p3_write(&rm[k], CRUMPBIT_PARAM_FILTER_FREQ, 60u, &sh[k]);
-            p3_write(&rm[k], CRUMPBIT_PARAM_FILTER_TYPE,
-                     (k < 8u) ? (uint8_t)k : CRUMPBIT_FILTER_LP, &sh[k]);
-            p3_write(&rm[k], CRUMPBIT_PARAM_FILTER_RESO,
-                     (k == 8u) ? 120u : 0u, &sh[k]);
-        }
-        for (block = 0u; block < 2000u; block++) {
-            float l[9][32], r[9][32];
-            uint32_t n;
-
-            for (n = 0u; n < 32u; n++) {
-                const float a = rndf(-1.0f, 1.0f);
-                const float b = rndf(-1.0f, 1.0f);
-
-                for (k = 0u; k < 9u; k++) {
-                    l[k][n] = a;
-                    r[k][n] = b;
-                }
-            }
-            for (k = 0u; k < 9u; k++)
-                p3_block(&rm[k], &sh[k], l[k], r[k], 32u);
-            for (n = 0u; n < 32u; n++) {
-                for (k = 1u; k < 8u; k++) {
-                    /* the first type of each class: LP 0, HP 1, flat 5. */
-                    const uint32_t first = (cls[k] == 0u) ? 0u
-                                         : ((cls[k] == 1u) ? 1u : 5u);
-
-                    bad += !same_bits(l[k][n], l[first][n]) +
-                           !same_bits(r[k][n], r[first][n]);
-                }
-                bad += !same_bits(l[8][n], l[0][n]) +
-                       !same_bits(r[8][n], r[0][n]);
-            }
-        }
-        snprintf(msg, sizeof msg,
-                 "CB19 type mapping and res inert: %u samples differ", bad);
-        expect(bad == 0u, msg);
-    }
-    {
-        /* `off` on the one-pole path is the dry signal, as `dly` `off`. */
-        static uint8_t arena_o[2][4096];
-        CrumpBitRuntime ro[2];
-        fx_share_t sh[2];
-        uint32_t bad = 0u;
-        uint32_t block;
-        uint32_t k;
-
-        for (k = 0u; k < 2u; k++) {
-            sh[k].base = arena_o[k];
-            sh[k].offset = 0u;
-            sh[k].bytes = sizeof arena_o[k];
-            p3_init(&ro[k], k ? CRUMPBIT_SUBTYPE_REVERB
-                              : CRUMPBIT_SUBTYPE_DELAY);
-            p3_write(&ro[k], CRUMPBIT_PARAM_MIX, 0u, &sh[k]);
-        }
-        for (block = 0u; block < 1000u; block++) {
-            float l[2][32], r[2][32];
-            uint32_t n;
-
-            for (n = 0u; n < 32u; n++) {
-                l[0][n] = l[1][n] = rndf(-1.5f, 1.5f);
-                r[0][n] = r[1][n] = rndf(-1.5f, 1.5f);
-            }
-            for (k = 0u; k < 2u; k++)
-                p3_block(&ro[k], &sh[k], l[k], r[k], 32u);
-            for (n = 0u; n < 32u; n++)
-                bad += !same_bits(l[0][n], l[1][n]) +
-                       !same_bits(r[0][n], r[1][n]);
-        }
-        snprintf(msg, sizeof msg, "CB19 one-pole off = dry: %u differ", bad);
-        expect(bad == 0u, msg);
-    }
-
-    /*
-     * (d) the hand-over on a switch: the state moves exactly, and the
-     * output does not jump. A 100 Hz sine through `LP` (frq 90, -3 dB
-     * near 2.6 kHz), mix 0; the sub-type flips dly <-> rvb (and dly ->
-     * grn) every 37 blocks.
+     * (c) A switch keeps the filter state: crumpBit_enter() leaves svf_*
+     * untouched (one filter for every sub-type), and the output does not
+     * jump. A 100 Hz sine through `LP` (frq 90), mix 0; the sub-type flips
+     * dly -> rvb -> dly -> grn every 37 blocks.
      */
     {
         static uint8_t arena_s[4096];
-        static const uint8_t subs[4] = { CRUMPBIT_SUBTYPE_DELAY,
-                                         CRUMPBIT_SUBTYPE_REVERB,
-                                         CRUMPBIT_SUBTYPE_DELAY,
-                                         CRUMPBIT_SUBTYPE_GRAIN };
+        static const uint8_t flips[4] = { CRUMPBIT_SUBTYPE_DELAY,
+                                          CRUMPBIT_SUBTYPE_REVERB,
+                                          CRUMPBIT_SUBTYPE_DELAY,
+                                          CRUMPBIT_SUBTYPE_GRAIN };
         fx_share_t share = { arena_s, 0u, sizeof arena_s };
         CrumpBitRuntime rt;
         float prev = 0.0f;
@@ -2870,22 +2809,15 @@ static void law_cb19(void)
             uint32_t n;
 
             if (sw) {
-                /* The hand-over itself, checked on the bare enter. */
-                const uint8_t next = subs[(block / 37u) % 4u];
+                const uint8_t next = flips[(block / 37u) % 4u];
                 CrumpBitRuntime probe = rt;
 
                 if (next != probe.active_subtype) {
-                    const uint32_t from1 =
-                        crumpBit_filterIsOnePole(probe.active_subtype);
-                    const float l1 = probe.svf_l1;
-                    const float l2 = probe.svf_l2;
-
                     crumpBit_enter(&probe, next, share.bytes);
-                    if (crumpBit_filterIsOnePole(next) && !from1)
-                        moved_bad += !same_bits(probe.svf_l1, l2);
-                    if (!crumpBit_filterIsOnePole(next) && from1)
-                        moved_bad += !same_bits(probe.svf_l2, l1) ||
-                                     probe.svf_l1 != 0.0f;
+                    moved_bad += !same_bits(probe.svf_l1, rt.svf_l1) +
+                                 !same_bits(probe.svf_l2, rt.svf_l2) +
+                                 !same_bits(probe.svf_r1, rt.svf_r1) +
+                                 !same_bits(probe.svf_r2, rt.svf_r2);
                 }
                 p3_write(&rt, CRUMPBIT_PARAM_SUBTYPE, next, &share);
             }
@@ -2906,8 +2838,8 @@ static void law_cb19(void)
             prev = l[31];
         }
         snprintf(msg, sizeof msg,
-                 "CB19 hand-over: %u states wrong; jump at a switch %.4f "
-                 "(steady %.4f)", moved_bad, (double)worst_switch,
+                 "CB19 a switch keeps the SVF state: %u fields moved; jump at "
+                 "a switch %.4f (steady %.4f)", moved_bad, (double)worst_switch,
                  (double)worst_run);
         expect(moved_bad == 0u && worst_switch < 0.05f, msg);
         printf("%s\n", msg);

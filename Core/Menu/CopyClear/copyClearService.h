@@ -2,8 +2,8 @@
  * copyClearService.h — background service for Phase 6 copy and clear.
  *
  * What: a FIFO of up to four pastes/clears, the eight-entry pot-clear
- * register, the 9 kB name buffer borrowed from the filesystem for the length
- * of an operation, bounded Pattern work under the Pattern Stack Service's
+ * register, the dedicated HCNAMES name remap (S094 P3; formerly the 9 kB
+ * name buffer borrowed from the filesystem), bounded Pattern work under the Pattern Stack Service's
  * exclusive boundary (one Scene at a time), Scene-level executors waiting for
  * idle Preset workers, and the end-of-operation name write. Why: pastes and
  * clears must finish after the user releases the copy/clear button, and every
@@ -100,19 +100,18 @@ void ccSvc_interactionStarted(void);
 /* Run state of the job at the queue head (valid only inside an executor). */
 cc_run_t *ccSvc_run(void);
 /*
- * Borrowed 9 kB name buffer (S075 F1-I; S077 reduced scope).
+ * The interaction's HCNAMES row remap (S075 F1-I; S077; S094 P3).
  *
- * What: the filesystem's name cache, lent to copy/clear only for the HCNAMES
- * row remap and the end-of-operation name write. Source block data and the
- * paste source table are no longer stored here (S077: blocks use the
- * background region's pool; the table is a static uint16_t[128]). Clears, pot
- * clears, whole-Pattern copy/reset, non-overlapping pastes and Scene-level
- * data commits never wait for it. ccSvc_scratch() returns NULL while not
- * borrowed. Layout: [0..160] HCNAMES row remap (0xFF = unchanged). Accessors:
- * copyClearService.c, copyOps.c.
+ * What: copy/clear's dedicated remap in filesystem.c (fs_cc_scratch, taken
+ * with filesystem_copyClearRemapBegin()), used for the HCNAMES row remap and
+ * the end-of-operation name write. Until S094 P3 this was the borrowed 9 kB
+ * browser name cache. ccSvc_scratch() returns NULL until the first name is
+ * recorded in an interaction and after its teardown. Layout: [0..160]
+ * HCNAMES row remap (0xFF = unchanged). Accessors: copyClearService.c,
+ * copyOps.c.
  */
 uint8_t *ccSvc_scratch(void);
-/* Borrow scratch for the final name phase; zero while filesystem is busy. */
+/* Take the remap for the final name phase; always ready since S094 P3. */
 uint8_t ccSvc_namesReady(void);
 #define CC_SCRATCH_REMAP_OFFSET   0u
 
@@ -163,10 +162,11 @@ void ccSvc_triggersChangedUi(uint8_t scene);
 /*
  * Name remap for copy/clear (spec §9.10, F1-I).
  *
- * ccSvc_nameCopy() returns 0 when the scratch buffer is not borrowed; callers
- * wait on ccSvc_namesReady() before recording names. Chained pastes resolve
- * to the original source row. ccSvc_nameContentChanged() only clears the
- * resident refreshed flag and arms the final HCNAMES write; it never borrows.
+ * ccSvc_nameCopy() returns 0 until the remap is taken; callers call
+ * ccSvc_namesReady() (always ready since S094 P3) before recording names.
+ * Chained pastes resolve to the original source row.
+ * ccSvc_nameContentChanged() only clears the resident refreshed flag and arms
+ * the final HCNAMES write; it never takes the remap.
  */
 uint8_t ccSvc_nameCopy(uint16_t dst_row, uint16_t src_row);
 void ccSvc_nameContentChanged(uint16_t row);

@@ -209,10 +209,10 @@ typedef struct {
  * follow-up's `pit_fine`):
  * - ac_y_*, ac_c_*: stage 1 AC coupling (outputs; previous codes, int16,
  *   seeded 128 by init);
- * - svf_*: the output filter's two TPT integrators per channel (stage 4).
- *   S091 P5 F1: in `grn` and `rvb` the filter is a one-pole whose state is
- *   svf_l1/svf_r1 (svf_*2 rest); crumpBit_enter() moves the state between
- *   the two forms on a switch;
+ * - svf_*: the output filter's two TPT integrators per channel (stage 4),
+ *   the same filter in every sub-type since S094 P2 AS-13 (the S091 P5 F1
+ *   one-pole of `grn` and `rvb` is gone), so a switch keeps them as they
+ *   are;
  * - row bytes, written by write_param() whatever the sub-type: their
  *   meaning changes per sub-type, their storage does not (plan §2.2);
  * - subtype: the resolved `sub` row; active_subtype: the engine that ran

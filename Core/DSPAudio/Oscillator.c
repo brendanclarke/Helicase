@@ -52,6 +52,7 @@
 #include "MidiPitch.h"
 #include "modulationNode.h"
 #include "oscPwmTables.h"   /* S094 P1 S3: the PWM plan's constants */
+#include "oscPwmWarp.h"     /* S094 P4: the warp law shared with DiodeLadder.c */
 #include <math.h>
 // TODO DSP_PORT
 // #include "sequencer.h"
@@ -1591,7 +1592,9 @@ void osc_typedPositionApply(OscInfo* osc, uint8_t bend)
 	 *
 	 * What:       moves positionApplied toward pos by at most two steps per
 	 *             block; width is linear, not circular. Clears the bend step
-	 *             and leaves phaseInc unchanged.
+	 *             and leaves phaseInc unchanged. S094 P4: pos 0..127 is a
+	 *             monotonic width index (0 = the unmodified wave, 127 = the
+	 *             narrowest; osc_pwmPlan()).
 	 * Why:        pos can be changed once per block by a knob, LFO, Morph,
 	 *             automation or velocity. Limiting the step avoids a hard
 	 *             waveform edge; the trigger snaps to the target separately.
@@ -3595,17 +3598,22 @@ void __attribute__((noinline, noclone)) osc_renderTypedFmRamp(
 **             (forms D / WT / WS x roles plain, FM, FM ramp, ring, sync) and
 **             the five role renderers the typed dispatchers call for
 **             OSC_BIND_PWM.
-**               D   two reads of the descending saw row, w = p x 8 points
-**                   apart, summed (Saw, sign +1) or differenced (Rec, sign
-**                   -1): a band-limited two-saw or pulse, because each read
-**                   is a band-limited saw;
+**               D   two reads of the descending saw row, d points apart
+**                   (oscPwmDRec / oscPwmDSaw[pos]), summed (Saw, sign +1) or
+**                   differenced (Rec, sign -1): a band-limited two-saw or
+**                   pulse, because each read is a band-limited saw;
 **               WT  the triangle row, phase-warped: the rising half-cycle
-**                   over [0, W), the falling one over [W, 2^32), W = p << 25,
-**                   with the octave lifted by oscPwmLift[p] for the
-**                   compressed half;
-**               WS  the same warp on sine_table (a -cos: trough first, so
-**                   its halves are the rising and falling ones and the
-**                   warped wave has no DC; plan finding 1).
+**                   over [0, W), the falling one over [W, 2^32),
+**                   W = oscPwmTriW[pos], with the octave lifted by
+**                   oscPwmTriLift[pos] for the compressed half;
+**               WS  the same warp on sine_table (W = oscPwmSinW[pos]; a
+**                   -cos: trough first, so its halves are the rising and
+**                   falling ones and the warped wave has no DC; plan
+**                   finding 1).
+**             S094 P4 law: pos 0 is the unmodified wave (width 1/2), pos 127
+**             the narrowest (Rec 0.39 %, Saw and Tri 2.54 %, Sin 6.25 %),
+**             linear in width (oscPwmTables.h). Under S094 P1 the width was
+**             pos/128 about 64, and p and 128 - p played the same spectrum.
 ** Why:        S094 P1 plan §5 / PWM draft §1: a width on every stock wave
 **             with a meaning of its own, inside every role's budget. Integer
 **             Q15 interpolation and a Q14 gain replace the stock loops' float
@@ -3642,11 +3650,11 @@ void __attribute__((noinline, noclone)) osc_renderTypedFmRamp(
  * One pwm block's constants (S094 P1 S3).
  *
  * What:       row (D, WT: the 1,024-point row; WS: unused), wPh (the warp's
- *             split point W = p << 25), ra / rb (the half-cycle scales
- *             (2^32 - 1)/p and (2^32 - 1)/(128 - p)), d (D: the second read's
- *             offset, p x 8 points of 1,024), sign (D: +1 sum, -1
- *             difference), gQ14 (the store gain in Q14: level x render
- *             gain), form.
+ *             split point W), ra / rb (the half-cycle scales, oscPwmTables.h),
+ *             d (D: the second read's offset in points of 1,024), sign (D:
+ *             +1 sum, -1 difference), gQ14 (the store gain in Q14: level x
+ *             render gain), form. Every value comes from the pos-indexed
+ *             tables (S094 P4); fields a form does not read are left 0.
  * Why:        filled once per block by osc_pwmPlan() and read by a loop
  *             before its first sample, so nothing is computed per sample and
  *             nothing stays live across the render in the engine.
@@ -3664,106 +3672,86 @@ typedef struct {
 } osc_pwmPlan_t;
 
 /*
- * Build one pwm block's plan (S094 P1 S3).
+ * Build one pwm block's plan (S094 P1 S3; S094 P4 law).
  *
- * What:       p = positionApplied clamped to 1..127 (P-D3: pos 0 acts as 1);
- *             m = max(p, 128 - p) - 64 (0..63, the level index); the warp
- *             constants for every form (unused ones cost two loads); then by
- *             wav: Sin -> WS at gain; Tri -> WT on triTable[min(tableOffset +
- *             lift[p], 10)] at gain; Saw -> D sum, Rec (and any larger value)
- *             -> D difference, both on sawTable[tableOffset] at gain x
- *             level[m] / 16384.
- * Why:        one place holds every per-block decision; the loops are pure.
- *             level keeps the two-read form at the table's peak at every
- *             width (64 / max(p, 128 - p)); the warp keeps the table's own
- *             amplitude, so it needs no level.
+ * What:       k = positionApplied (0..127, the width after the slew); by wav:
+ *               Sin -> WS: W, ra, rb from oscPwmSin*[k], at gain;
+ *               Tri -> WT on triTable[min(tableOffset + oscPwmTriLift[k],
+ *                      10)], W, ra, rb from oscPwmTri*[k], at gain;
+ *               Saw -> D sum on sawTable[tableOffset], d = oscPwmDSaw[k], at
+ *                      gain x oscPwmLevelSawQ14[k] / 16384;
+ *               Rec (and any larger value) -> D difference, d =
+ *                      oscPwmDRec[k], at gain x oscPwmLevelRecQ14[k] / 16384.
+ * Why:        S094 P4 (user): pos 0 is the unmodified wave and pos 127 the
+ *             narrowest, with no wrap: every constant is a lookup by k, so
+ *             the law lives in one generator (gen_pwm_tables.py) and the
+ *             loops are unchanged. Rec narrows to 0.39 %, Saw and Tri to
+ *             2.54 %, Sin to 6.25 % (its warp has no octave rows; a narrower
+ *             half-cycle aliases). The S094 P1 clamp (pos 0 acts as 1) and
+ *             the mirrored index (128 - p) are gone: pos 0 is a width of its
+ *             own, bit-exact with the S094 P1 p = 64 (gen T6, law PW9).
  * Inputs:     osc (waveform, tableOffset from osc_userBind(), positionApplied
  *             from osc_typedPositionApply()), gain (0..1 at every call site).
  * Outputs:    *pl.
- * Cost:       per block, flash; no division (the tables).
+ * Cost:       per block, flash: one form's table loads and one multiply; no
+ *             division.
  * Accessors:  the five osc_pwmRender*() roles.
+ * Affiliates: oscPwmTables.h; oscPwmWarp.h; AlkalineVoice.c alk_renderPwm()
+ *             (the same tables for the Alkaline).
  */
 static __attribute__((noinline, noclone)) void osc_pwmPlan(const OscInfo* osc,
                                                            float gain,
                                                            osc_pwmPlan_t* pl)
 {
-	/* the applied width, 1..127 */
-	uint32_t p = (uint32_t)(osc->positionApplied & 127u);
+	/* the applied width index, 0..127 (S094 P4: no clamp, no mirror) */
+	const uint32_t k = (uint32_t)(osc->positionApplied & 127u);
 
-	if (p < 1u)
-		p = 1u;
-	/* the level index: distance of the wider part from half, 0..63 */
-	{
-		const uint32_t m = ((p > 64u) ? p : (128u - p)) - 64u;
+	pl->wPh = 0u;
+	pl->ra = 0u;
+	pl->rb = 0u;
+	pl->d = 0u;
+	pl->sign = 0;
+	switch (osc->waveform) {
+	case SINE:
+		pl->form = OSC_PWM_FORM_WS;
+		pl->row = 0;
+		pl->wPh = oscPwmSinW[k];
+		pl->ra = oscPwmSinRa[k];
+		pl->rb = oscPwmSinRb[k];
+		pl->gQ14 = (int32_t)(gain * 16384.0f + 0.5f);
+		break;
+	case TRI: {
+		/* the octave row, lifted for the compressed half-cycle */
+		uint32_t r = (uint32_t)osc->tableOffset + oscPwmTriLift[k];
 
-		/* W: the split point and the two half-cycle scales */
-		pl->wPh = p << 25;
-		pl->ra = oscPwmRecip[p];
-		pl->rb = oscPwmRecip[128u - p];
-		/* D: the second read's offset in points: p / 128 of 1,024 */
-		pl->d = p << 3;
-		switch (osc->waveform) {
-		case SINE:
-			pl->form = OSC_PWM_FORM_WS;
-			pl->row = 0;
-			pl->sign = 0;
-			pl->gQ14 = (int32_t)(gain * 16384.0f + 0.5f);
-			break;
-		case TRI: {
-			/* the octave row, lifted for the compressed half-cycle */
-			uint32_t r = (uint32_t)osc->tableOffset + oscPwmLift[p];
-
-			if (r > 10u)
-				r = 10u;
-			pl->form = OSC_PWM_FORM_WT;
-			pl->row = triTable[r];
-			pl->sign = 0;
-			pl->gQ14 = (int32_t)(gain * 16384.0f + 0.5f);
-			break; }
-		case SAW:
-			pl->form = OSC_PWM_FORM_D;
-			pl->row = sawTable[osc->tableOffset];
-			pl->sign = 1;
-			pl->gQ14 = (int32_t)(gain * (float)oscPwmLevelQ14[m] + 0.5f);
-			break;
-		default:   /* REC; a stored value past Rec plays Rec (S087 r8) */
-			pl->form = OSC_PWM_FORM_D;
-			pl->row = sawTable[osc->tableOffset];
-			pl->sign = -1;
-			pl->gQ14 = (int32_t)(gain * (float)oscPwmLevelQ14[m] + 0.5f);
-			break;
-		}
+		if (r > 10u)
+			r = 10u;
+		pl->form = OSC_PWM_FORM_WT;
+		pl->row = triTable[r];
+		pl->wPh = oscPwmTriW[k];
+		pl->ra = oscPwmTriRa[k];
+		pl->rb = oscPwmTriRb[k];
+		pl->gQ14 = (int32_t)(gain * 16384.0f + 0.5f);
+		break; }
+	case SAW:
+		pl->form = OSC_PWM_FORM_D;
+		pl->row = sawTable[osc->tableOffset];
+		pl->d = oscPwmDSaw[k];
+		pl->sign = 1;
+		pl->gQ14 = (int32_t)(gain * (float)oscPwmLevelSawQ14[k] + 0.5f);
+		break;
+	default:   /* REC; a stored value past Rec plays Rec (S087 r8) */
+		pl->form = OSC_PWM_FORM_D;
+		pl->row = sawTable[osc->tableOffset];
+		pl->d = oscPwmDRec[k];
+		pl->sign = -1;
+		pl->gQ14 = (int32_t)(gain * (float)oscPwmLevelRecQ14[k] + 0.5f);
+		break;
 	}
 }
 
-/*
- * The warp (S094 P1 S3, form W).
- *
- * What:       maps the oscillator phase ph to the read phase psi:
- *               ph <  W: psi = umulh(ph, ra) << 6            (0 .. 2^31)
- *               ph >= W: psi = (umulh(ph - W, rb) << 6) + 2^31 (2^31 .. 2^32)
- *             umulh(x, (2^32 - 1)/n) is x / n rounded down, so the first
- *             half maps [0, W) onto [0, 2^31) (x 64/p) and the second maps
- *             [W, 2^32) onto [2^31, 2^32) (x 64/(128 - p)). At p = 64 psi is
- *             ph to within 64 phase units (1/2^26 of a cycle).
- * Why:        both halves are computed and one is selected (a conditional
- *             select): the same instructions run at every width (constant
- *             cost); the << 6 is exact because the loops read only psi >> 7
- *             and above.
- * Inputs:     ph, wPh, ra, rb.  Outputs: psi.
- * Accessors:  the WT and WS loops.
- */
-static inline __attribute__((always_inline)) uint32_t osc_pwmWarp(
-	const uint32_t ph, const uint32_t wPh, const uint32_t ra, const uint32_t rb)
-{
-	/* first half-cycle: x 64/p */
-	const uint32_t lo = (uint32_t)(((uint64_t)ph * ra) >> 32) << 6;
-	/* second half-cycle: x 64/(128 - p), shifted up by half a cycle */
-	const uint32_t hi = ((uint32_t)(((uint64_t)(ph - wPh) * rb) >> 32) << 6)
-	                    + 0x80000000u;
-
-	return (ph < wPh) ? lo : hi;
-}
+/* The warp (form W): osc_pwmWarp() in oscPwmWarp.h (S094 P4: shared with the
+ * Alkaline's fused ladder mode 4). */
 
 /*
  * Read a 1,024-point row at psi, integer interpolation (S094 P1 S3).
@@ -3813,7 +3801,8 @@ static inline __attribute__((always_inline)) int32_t osc_pwmReadS(
  *             so the combined value is interpolated once.
  * Why:        reading B at ph - w (not + w) makes the difference high for the
  *             first w of the cycle, as the stock Rec is (plan finding 2);
- *             p = 64 gives a band-limited square of the Rec orientation.
+ *             pos 0 (d = 512; S094 P4) gives a band-limited square of the Rec
+ *             orientation.
  * Range:      |d1 - d0| <= 2 x 32,767 = 65,534 and 65,534 x 32,767 < 2^31.
  * Accessors:  the D loops.
  */
