@@ -1,11 +1,13 @@
 # MIDI Specification and Code Reference
 
-> **Current as of Session 084 close (2026-10-26), branch
-> `dev-ph7-voice_expansion`.** The S083 MIDI implementation is
+> **Current as of Session 093 close (2026-11-10), branch
+> `dev-ph7-alkaline`.** The S083 MIDI implementation is
 > hardware-checked; the S084 changes (overlay rolls and flams on the master
 > tick, 15 overlay types, external clock interpolation) are built and
-> host-checked, hardware pending. Where this document and the code
-> disagree, the code wins; fix this document in the same change.
+> host-checked, hardware pending. S093 P4/P6 added the Alkaline (TB-303)
+> instrument: velocity 101–127 accents, gate 7/12 step, 28 NRPN rows
+> (§4.3, §5.1). Where this document and the code disagree, the code wins;
+> fix this document in the same change.
 
 The LXR-02 MIDI interface:
 - global MIDI settings and the note-to-track map;

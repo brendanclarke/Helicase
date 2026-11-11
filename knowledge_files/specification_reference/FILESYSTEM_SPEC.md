@@ -158,6 +158,21 @@ Session 090 P2 (Load/Save drops AutoSave, pre-audio settle;
   end-of-file probe (`ASYNCFATFS_REFERENCE.md`, "Open-file size on the
   card"; `AUTOSAVE.md`).
 
+Session 093 (Alkaline instrument, wavetable reassessment;
+`093_SESSION_HANDOFF_LOG.md`):
+
+- **P4/P6:** Alkaline instrument type added (`alk`, `.alk`,
+  `/Instrument/Alkaline/`). The type registry row is designated; 28
+  descriptor keys. `SD_CARD/Instrument/Alkaline/init.alk` ships with the
+  card image. Leading-part `.hcnames` headers accepted (K11 fix).
+- **P3:** `Re3`/`Sw3` stock table waves removed. `OSC_SAMPLE_START` 8 → 6.
+  A file saved between S086 and S093 that selected entry v ≥ 8 now plays
+  entry v − 2 (no migration).
+- **P8:** Sample flash catalogue v3 (`LXC3`, version 3). Every wavetable
+  frame stored as a 1,024 × int16 row resampled at install time. 8-bit WAV
+  files are no longer installed (D10). A v2 card reads STALE and must be
+  reinstalled. Installer counts source points (S4 fix).
+
 AutoSave's hidden-record format, dirty ownership, and background writer are
 authoritative only in `AUTOSAVE.md`. Development flags and diagnostic files are
 authoritative only in `DEV_MODES.md`; this document names those facilities only
@@ -2450,12 +2465,13 @@ Current Pattern notes:
 
 ## Sample
 
-Status: catalogue v2 installed by `Load:[Samples]` (S087). Root pool naming
-is part of the future typed layout.
+Status: catalogue v3 installed by `Load:[Samples]` (S087 initial; S093 P8
+catalogue v3). Root pool naming is part of the future typed layout.
 
 `/samples/` contains `.wav` files to write to flash. The installer walks
 files first, then subfolders, in natural order (`storage_naturalCompare()`),
-depth limit 3. Only mono 16-bit 44.1 kHz PCM WAV files are accepted.
+depth limit 3. Only mono 16-bit 44.1 kHz PCM WAV files are accepted (S093
+P8 D10: 8-bit WAV files are skipped).
 
 ```text
 /samples/
@@ -2477,11 +2493,12 @@ file's `smpl` loop chunk (loop 1 when present, else the whole sample).
 
 ## Wavetable
 
-Status: catalogue v2 (S087). The library/browser remains deferred.
+Status: catalogue v3 (S087 initial; S093 P8 catalogue v3 with 1,024-point
+16-bit copies and 8-bit removal). The library/browser remains deferred.
 
 `/wavetables/` contains one subfolder per wavetable; the `.wav` files inside
-are frames. Natural order. At most 128 frames per wavetable, any frame
-length (A16). Up to 128 wavetables.
+are frames. Natural order. At most 128 frames per wavetable, any source
+frame length 16..2,048 points (A16). Up to 128 wavetables.
 
 ```text
 /wavetables/
@@ -2494,11 +2511,22 @@ length (A16). Up to 128 wavetables.
     002.wav
 ```
 
-Wavetables are loaded during the sample-load process and written to flash
-with catalogue v2 entries. A `wtb` oscillator operates on one wavetable at a
-time; `pos` selects the frame position, and frame blending uses the
-interpolation slots. `w` entries in the modulator `wav` list use the
-wavetable's first frame. The menu shows the wavetable name.
+Wavetables are loaded during the sample-load process. **S093 P8:** each
+frame is resampled at install time to a 1,024-point 16-bit row by a
+band-limited periodic resampler (H=32). The stored frame is always
+1,024 × int16 (2,048 B); the catalogue entry's `frame_len` is 1,024 and
+`bits` is 16 regardless of source. 8-bit WAV files are skipped (D10).
+24-bit sources are converted to 16-bit; stereo to mono. This is catalogue
+v3 (`LXC3`); a v2 card reads as STALE and must be reinstalled via
+`Load:[Samples]`.
+
+A `wtb` oscillator operates on one wavetable at a time; `pos` selects the
+frame position, and frame blending uses the interpolation slots
+(`OSC_INTERP_AUDIT.md`). The Alkaline instrument also reads wavetable
+frames through its fused table loop (S093 P8 revision 3: blend with an
+interpolation slot, claimed in the async). `w` entries in the modulator
+`wav` list use the wavetable's first frame. The menu shows the wavetable
+name.
 
 ## Effect
 

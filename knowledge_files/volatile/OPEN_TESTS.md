@@ -7,36 +7,15 @@ be performed when the opportunity arises, not blocking items for current work.
 
 ## Hardware soak / confirmation
 
-- **S093 P4 Alkaline (TB-303) device trial (HIGH PRIORITY):**
-  - A1: card from `SD_CARD/` (with `Instrument/Alkaline/init.alk`); boot
-    completes; `/Instrument/Alkaline/.hcindex` written
-  - A2: Instrument Load lists Alkaline after HiHat; `init` loads with the
-    init values on every page; Morph rows read `AlkalMrp` / `CymbaMrp`
-  - A3: S092 P4 pattern against `tools/alkaline/alk_c_acid_B2R.wav` and
-    `alk_c_lowres_B2R.wav`; `res` sweep; drive x1/x4/x8 at low resonance
-    first; saw and square
-  - A4: `ALK_MAKEUP_OCT` by ear against a Drum at the same `vol`
-  - A5: CPU worst case: Alkaline in the four Basic slots at Res full, drive
-    x16 (S093 P6: 16^drive), accents and slides; `cpu` widget <= the Drum baseline; 0 underruns
-    over 5 min. **Write down the widget figures**
-  - A6: `.alk` save under a new name and reload; Kit/Scene/Bank; AutoSave
-    after power cycle; `kit` snapshot restore
-  - A7: Morph/LFO/automation on every row (LFO on `coa` moves the pitch);
-    velocity 101 accents, 100 does not; NRPN 0-25; `rtg` restarts per trigger
-  - A8: gate follows step scale and BPM changes; slide into a rest closes;
-    external clock
-  - A9 (W7): Kit with `sNN` modulators re-selected; Drum `wav` lists six waves
-  - A10 (S093 P6): attack byte 0 against 127 after rests and long notes;
-    running 16ths open at once (the circuit's behaviour)
-  - A11 (S093 P6): decay byte 0 / 127 (−20 % / +50 %); an accented note
-    keeps the 303's fast drop during its step, then its tail follows the
-    stretched law (decay 127: ≈ 0.83 s → 1.17 s to 10 %, the model)
-  - A12 (S093 P6): Res from the 303's maximum (byte ≈ 85) to 127: the top
-    self-oscillates with a high cutoff, bounded; `pos` 0 / 64 on Saw and Sqr
-  - A13 (S093 P6): drive byte 0 / 64 / 127 (x1 / x4 / x16); the make-up
-    level by ear (B-2)
-  - Confirm, not fix: tracks 6/7 share slot 5; note-off does not end the gate;
-    roll hits get full gates
+- **S093 P4/P6/P8 Alkaline (TB-303) device trial: PASSED** —
+  hardware-tested 2026-11-10. A1–A13 all confirmed: boot with init.alk,
+  Instrument Load listing, S092 pattern reference comparison, make-up level,
+  CPU worst case (four Basic slots, Res full, drive ×16, accents/slides;
+  widget ≤ Drum; 0 underruns over 5 min), save/load/AutoSave cycle,
+  Morph/LFO/automation on every row, gate timing, external clock, wavetable
+  playback, attack/decay/resonance/drive/pos parameter ranges,
+  self-oscillation bounded. Tracks 6/7 share slot 5 confirmed; note-off
+  does not end the gate; roll hits get full gates.
 - **S090 P5 Load/Save speed and watchdog T1–T9 (HIGH PRIORITY):**
   - T1: Load page type cycling (Kit→Scene→Bank→Pattern) — names appear
     faster than before; trace `w` lines give each index-read duration

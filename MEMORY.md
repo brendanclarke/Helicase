@@ -219,8 +219,9 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   instruction total alone misprices forms with different division counts).
   Never compare audio loops alone. Frozen S093 P3 (linked, after the Re3/Sw3
   removal): Drum dearest ≈ 222.5 loops + 922 per block / 32 + SRR 10 ≈ 261
-  per sample, 3 VDIV (`S093_P3_PREP_WORK_WAVES_KERNEL_CONTROL.md` §1); the
-  per-block count tool is `tools/alkaline/control_cost.py`. `S093_P2_ALKALINE_B-R_PRE_IMPLEMENTATION.md` §8.
+  per sample, 3 VDIV (`093_SESSION_HANDOFF_LOG.md` §4, `CPU_USE_DSP_AUDIT.md`
+  item 71); the per-block count tool is `tools/alkaline/control_cost.py`.
+  `ALKALINE_MODULE_REFERENCE.md` §5.
 - **Alkaline (S093 P4/P6, binding):** the voice is `AlkalineVoice` (548 B
   after P6) in the fifth tagged slot; Basic. Its oscillator is a **table
   wave**: `sawTable`,
@@ -259,7 +260,8 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
 - **Drum FM ramp twins (S089 P3):** `osc_renderTypedFmRamp()` dispatches
   ramped FM copies for `slp`/`smp`/`wtb` in Drum `fm` only. Stock carriers
   keep the S088 pass. Originals are untouched (Cymbal/HiHat still use them).
-  ITCM 15,240 / 16,384 B after P3.
+  ITCM 12,128 / 16,384 B after S093 P8 (was 15,240 before the 8-bit
+  wavetable reader removal).
 - **ITCM subsection order (S089):** linker script pins `.itcm.s089` then
   `.itcm.s089p3`. New ITCM code goes in a new `.itcm.sNNN` subsection after
   the last one. Never edit an existing ITCM function's section attribute.
@@ -272,6 +274,20 @@ and latched menus: `PERFORMANCE_RECORD_SPEC.md` §1, §5.
   wavetable blending. `ampRampArm` arms one block of post-chain/FM ramps;
   never pass unequal ramp endpoints when it is clear. Filter coefficient
   changes in `fre`/`itp` use `SVF_recalcFreqSlew()` (0.28 per block).
+- **Interpolation slot claims in async only (S093 P8 item 79, binding):**
+  a call that writes `modulationNode` state from an engine's sync render
+  moves the mixer's register allocation. Engine-side interpolation-slot
+  claims (e.g. Alkaline `modNode_interpClaim()`) belong in the async, never
+  in the sync render.
+- **Sample flash catalogue v3 (S093 P8, binding):** magic `LXC3`,
+  version 3. Every wavetable frame is stored as a 1,024 × int16 row
+  resampled at install time (H=32). `frame_len` is 1,024, `bits` is 16.
+  8-bit WAV files are not installed (D10). A v2 card reads STALE and must
+  be reinstalled via `Load:[Samples]`. `STORAGE_SRAM_MANIFEST.md` §4.
+- **`OSC_SAMPLE_START` is 6 (S093 P3):** the Re3/Sw3 stock table waves
+  were removed; user catalogue entries start at index 6. Files saved
+  between S086 and S093 that selected entry v ≥ 8 now play entry v − 2.
+  No migration.
 
 ---
 
