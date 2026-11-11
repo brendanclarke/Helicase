@@ -136,6 +136,8 @@ STAGE_ENUM = {
     "d": "AUTOSAVE_TRACE_STAGE_DIR_TRIM",
     # w: S090 P5 F5 filesystem facade owner transitions (Load/Save timing).
     "w": "AUTOSAVE_TRACE_STAGE_FS_OWNER",
+    # p: S094 P2 per-slot render cycle probe (DWT, DEV only).
+    "p": "AUTOSAVE_TRACE_STAGE_CPU_PROBE",
 }
 
 STAGE_PRODUCER = {
@@ -180,6 +182,7 @@ STAGE_PRODUCER = {
     "s": "filesystem_settleAutosaveBlocking() (S090 P2)",
     "d": "filesystem_trimDirectoryTailsBlocking() (S090 P3)",
     "w": "filesystem_traceOwnerTransition() (S090 P5)",
+    "p": "mixer_probeEnd() (S094 P2)",
 }
 
 # AUTOSAVE_TRACE_PHASE_STALL_SITE_* (AutosaveTrace.h). Session 057 widened the
@@ -1101,6 +1104,42 @@ def trace_record_text(index: int, stage: int, flags: int, tick: int,
                       f"lines={(value >> 24) & 0xFF}")
         else:
             detail = f"{enum_name}: unknown event 0x{flags:02x}"
+    elif ch == "p":
+        # S094 P2 cycle probe; layout in AutosaveTrace.h ('p'). One window
+        # is 2048 blocks; 216 MHz / (44108.07 / 32) = 156,705 cycles a block.
+        budget = 216e6 / (44108.07291666667 / 32.0)
+        if (flags & 7) < 6:
+            types = {0: "drm", 1: "snr", 2: "cym", 3: "hat", 4: "alk"}
+            typ = flags >> 3
+            blk = (value >> 16) & 0xFFFF
+            ren = value & 0xFFFF
+            sat = " (saturated)" if 0xFFFF in (blk, ren) else ""
+            detail = (f"{enum_name} via {producer}: slot{flags & 7} "
+                      f"{types.get(typ, f'type {typ}')}: block-rate {blk} + "
+                      f"render {ren} = {blk + ren} cycles/block "
+                      f"({100.0 * (blk + ren) / budget:.1f}% CPU, "
+                      f"{(blk + ren) / 32.0:.1f} cycles/sample){sat}")
+        elif flags in (6, 7):
+            what = "average" if flags == 6 else "maximum"
+            detail = (f"{enum_name} via {producer}: whole mixer block "
+                      f"{what} {value} cycles ({100.0 * value / budget:.1f}% "
+                      f"CPU)")
+        else:
+            sections = {1: "control (itp/modNode/velocity/LFO dispatch)",
+                        2: "effects_service", 3: "set-up (routing, clears)",
+                        4: "SRR decimators", 5: "output/FX-send adds",
+                        6: "Effect (bus, process, return)",
+                        7: "bus compressor"}
+            if flags >> 3 == 8:
+                cached = ("NOT D-cached (S=1)" if value & (1 << 18)
+                          else "D-cached (S=0)")
+                detail = (f"{enum_name} via {producer}: MPU region 0 RASR "
+                          f"0x{value:08x}: SRAM {cached}")
+            else:
+                name = sections.get(flags >> 3, f"section {flags >> 3}")
+                detail = (f"{enum_name} via {producer}: mixer {name} average "
+                          f"{value} cycles ({100.0 * value / budget:.1f}% "
+                          f"CPU)")
     elif ch == "w":
         # S090 P5 F5 facade owner transition; layout in AutosaveTrace.h ('w').
         statuses = {0: "IDLE", 1: "BUSY", 2: "DONE", 3: "ERROR"}

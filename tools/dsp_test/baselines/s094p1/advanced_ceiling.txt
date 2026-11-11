@@ -1,0 +1,46 @@
+# S094 P1 S6 Advanced ceiling (D-2) -- PROPOSED, pending user review
+#
+# Image and method: as basic_worst.txt (the same final image, -g twin and
+# tools). The first frozen Advanced ceiling once the user accepts it.
+# Per block: measured. osc_setFreq tail-branches to osc_userBind, which
+#           elf_blockpath.py counts as an exit, so its paths are split by exit
+#           (a scratch script over elf_blockpath's own DAG, S0 and final -g
+#           twins): stock wave 128 -> 87; typed oscillator (path to the bind
+#           + osc_userBind) 29 + 89 = 118 -> 8 + 88 = 96.
+#
+# ---- Dearest Cymbal (HiHat: the same loops, carrier at gain 0.5): T+D chain,
+#      both modulators on l entries (slp plain), slp FM carrier
+modulator 1: osc_slpPlainBlock                  27   0 VDIV   linked (was crash 30)
+modulator 2: osc_slpPlainBlock                  27   0 VDIV   linked (was crash 30)
+modulator sum (QADD16, unrolled)               2.5   0 VDIV   as §4.7.1
+carrier: osc_slpFmBlock                         50   0 VDIV   linked, = S0
+SVF_calcBlockZDF (dearest type loop)            92   2 VDIV   linked, = S0
+transient_calcClickBlock                        22   0 VDIV   mixer-inlined, = S0
+voicePost_addGainDist (satAdd16 group)          25   1 VDIV   mixer-inlined, = S0
+per-sample loops                             245.5   3 VDIV   (S0 251.5)
+
+per block (§4.7.1: 1,006, which charged osc_setFreq 128 x 3)   1,006
+  osc_setFreq -> typed path + osc_userBind: 3 x 96 for 384      -96   measured
+  osc_typedPositionApply 73 -> 75                                 +2   measured
+  osc_renderUserList x 2 (l-entry modulators)                    +28   measured (14 each; the
+                                                                       crash modulators had none)
+per block total 940 / 32                                        29.4
+mixer SRR (mixer_decimateBlock)                 11   0 VDIV   (S0 10: S3's +1, accepted; see basic_worst.txt)
+
+charged: 245.5 + 29.4 + 11 = 285.9 per sample, 3 VDIV
+# The S094_P0 draft's S0 figure was about 292.9 (with crash): down 7.0.
+# The plan expected about 286.9 (crash only); the bind path's measured drop
+# outweighs the l-entry modulators' render call and the SRR +1.
+#
+# ---- Allocation of the Advanced savings (user, 2026-11-11)
+# Requested on the estimate 4.0 realized + ~3.8 potential = 8.0: 4.0 per
+# sample to each of the two interpolation slots (the pool shared by wtb
+# blends, the itp fade and the Alkaline wtb blend).
+# Confirmed (the osc_setFreq split above): the potential part is 3.0, not
+# ~3.8 (the dearest setting's three oscillators take the typed path, 96 each,
+# not the stock 87), so the confirmed drop is 7.0 (292.9 -> 285.9). The
+# 4.0 + 4.0 allocation exceeds it by 1.0: the split of 7.0 (3.5 each, or
+# otherwise) is for the user to confirm.
+#
+# Not dearer: the pwm carrier (osc_pwmDFmBlock 32, WT/WS 30) against slp FM 50;
+# the WFd chain (fold <= 22 + gain/distortion 21 against 22 + 25).

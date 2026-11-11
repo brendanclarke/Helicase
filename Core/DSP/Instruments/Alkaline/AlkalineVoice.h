@@ -60,25 +60,29 @@
 #define ALK_WAVE_SAW          0u
 #define ALK_WAVE_SQUARE       1u
 /*
- * The typ byte (row osc1_type, S093 P8).
+ * The typ byte (row osc1_type, S093 P8; S094 P1 S5 pwm).
  *
  * What:       the stored and displayed value of the Alkaline typ cell:
- *             0 wav (Saw/Sqr, the 303's VCO), 1 wtb (a wavetable frame);
+ *             0 wav (Saw/Sqr, the 303's VCO), 1 wtb (a wavetable frame),
+ *             2 pwm (S094 P1: Saw = two-saw sum, Sqr = pulse, pos = width);
  *             ALK_TYP_COUNT entries (alkTypeNames, MenuText.h).
- *             Alkaline_setOscType() maps it to OSC_TYPE_WAV / OSC_TYPE_WTB in
- *             osc.oscType.
+ *             Alkaline_setOscType() maps it to OSC_TYPE_WAV / OSC_TYPE_WTB /
+ *             OSC_TYPE_PWM in osc.oscType.
  * Why:        S093 P8: wavetables only. Looped samples are over the Basic
  *             ceiling on their loop alone (P8 assessment §6); one-shot samples
  *             fit (loop 215) but their render grew two mixer loops of other
  *             engines by 1 (P8 schedule §0), so they are left out (user,
- *             S093 P8). osc.oscType keeps the platform's values so the shared
- *             wave-cell helpers (instrumentManager_osc1Type(), osc_userCount(),
- *             menu_formatWaveCell()) need no Alkaline map.
+ *             S093 P8). S094 P1: pwm appended (no stored value changes
+ *             meaning except 2 and above, which were wtb and are now pwm; no
+ *             migration). osc.oscType keeps the platform's values so the
+ *             shared wave-cell helpers (instrumentManager_osc1Type(),
+ *             osc_userCount(), menu_formatWaveCell()) need no Alkaline map.
  * Accessors:  Alkaline_setOscType(); AlkalineParameters.c osc1_type row.
  */
 #define ALK_TYP_WAV           0u
 #define ALK_TYP_WTB           1u
-#define ALK_TYP_COUNT         2u
+#define ALK_TYP_PWM           2u
+#define ALK_TYP_COUNT         3u
 /*
  * The Alkaline's wavetable bind state (S093 P8), kept in
  * osc.sampleCacheLooped.
@@ -128,6 +132,29 @@ typedef struct AlkalineVoiceStruct
 	float   vol;               /* 0..1, read by the mixer only */
 	uint8_t pan;
 	uint8_t slide;             /* 0/1, latched at each trigger */
+	/*
+	 * Post-filter controls (S094 P1 S4).
+	 *
+	 * What:       vcaDrive: the VCA overdrive byte 0..127 (row
+	 *             instrument_drive, the mix page's drv cell; stored by
+	 *             IM_SPECIAL_INSTRUMENT_DRIVE's Alkaline branch): the index of
+	 *             the OTA input gain x1..x32 (S094 P2) and its make-up
+	 *             (alkOvdGain[], alkOvdMakeup[]). tone: the tone byte
+	 *             0..127 (row alk_tone, the mix page's ton cell; generic
+	 *             TYPE_UINT8 store): the index of the one-pole's c
+	 *             (alkToneC[]), 127 = open.
+	 * Why:        P9-A' (post-FX draft §3.4): the shared voice-drive key and
+	 *             cell of the other four types (K1), and a tone that rolls off
+	 *             the overdrive's highs. Bytes, not 0..1 floats: the tables are
+	 *             indexed by the byte, so the async reads it directly (no clamp
+	 *             and float-to-index conversion per block), and the two bytes
+	 *             fill padding after slide.
+	 * Inputs:     descriptor writes (menu, apply, Morph, automation, LFO and
+	 *             velocity targets, all in the 0..127 descriptor domain).
+	 * Outputs:    read by Alkaline_calcVoiceAsync() once per block.
+	 */
+	uint8_t vcaDrive;
+	uint8_t tone;
 
 	/* --- sequencing state --- */
 	uint8_t note;              /* last trigger note */
@@ -160,8 +187,8 @@ typedef struct AlkalineVoiceStruct
 	float   iLadRaw;           /* ladder current before the prewarp (cutoff) */
 	float   iLadEnd;           /* prewarped ladder current at the block end */
 	float   iAbcEnd;           /* OTA control current at the block end */
-	float   driveGain;         /* 16^drive, this block */
-	float   makeup;            /* 2^(ALK_MAKEUP_OCT (1 - drive)), this block */
+	float   driveGain;         /* 16^drive, this block (S094 P1 A3: alkDriveGain[]) */
+	float   makeup;            /* the OTA current's make-up: alkDriveMakeup[drive] x alkOvdMakeup[vcaDrive] (S094 P1) */
 } AlkalineVoice;
 
 void Alkaline_initVoice(AlkalineVoice *voice);
@@ -215,12 +242,12 @@ uint8_t Alkaline_isQuiet(const AlkalineVoice *voice);
 /*
  * Set the oscillator type from the typ byte (S093 P8).
  *
- * What:       maps ALK_TYP_* to osc.oscType (0 wav, 1 and above wtb); clamps
- *             osc.waveform to the new type's list (wav: Saw/Sqr; wtb: the
- *             installed tables); clears the bind so the next block (or
- *             trigger) binds; re-anchors positionApplied to pos. The phase
- *             runs on (both types are 2^32 per cycle). An unchanged type is a
- *             no-op.
+ * What:       maps ALK_TYP_* to osc.oscType (0 wav, 1 wtb, 2 and above pwm);
+ *             clamps osc.waveform to the new type's list (wav and pwm:
+ *             Saw/Sqr; wtb: the installed tables); clears the bind so the
+ *             next block (or trigger) binds; re-anchors positionApplied to
+ *             pos. The phase runs on (every type is 2^32 per cycle). An
+ *             unchanged type is a no-op.
  * Why:        the platform's osc_setType() binds through Drum's generic
  *             osc_userBind() and reads the byte as OSC_TYPE_* (1 = smp); the
  *             Alkaline binds its own tables (P8 §7) and offers wav and wtb.

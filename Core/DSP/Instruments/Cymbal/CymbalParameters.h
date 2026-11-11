@@ -13,7 +13,9 @@
  */
 #define CYMBAL_PARAM_DESCRIPTOR_COUNT 43u /* S088: + osc1_run. S089 P2: + voice_chain. */
 #define CYMBAL_MENU_PAGE_COUNT       8u
-#define CYMBAL_INSTRUMENT_TYPE_FLAGS INSTRUMENT_FLAG_ADVANCED
+/* S094 P2 (user): Basic. The Advanced class (two per Scene,
+** instrumentManager_typeSelectableForSceneSlot()) is kept for future types. */
+#define CYMBAL_INSTRUMENT_TYPE_FLAGS INSTRUMENT_FLAG_BASIC
 
 extern const ParamDescriptor cymbal_param_descriptors[];
 extern const uint8_t cymbal_param_descriptor_count;

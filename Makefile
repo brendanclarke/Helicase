@@ -154,6 +154,7 @@ DSP_SRCS = \
   Core/DSP/Instruments/Alkaline/AlkalineControl.c \
   Core/DSP/Instruments/Alkaline/AlkalineSquareTable.c \
   Core/DSP/Instruments/Alkaline/AlkalineTables.c \
+  Core/DSP/Instruments/Alkaline/AlkalinePostTables.c \
   Core/DSP/Instruments/Alkaline/AlkalineVoice.c \
   Core/DSP/Instruments/Cymbal/CymbalVoice.c \
   Core/DSPAudio/Decay.c \
@@ -165,12 +166,13 @@ DSP_SRCS = \
   Core/DSP/Effects/StereoFilter/StereoFilterEffect.c \
   Core/DSP/Effects/CrumpBit/CrumpBitEffect.c \
   Core/DSPAudio/lfo.c \
+  Core/DSPAudio/lfoRateTable.c \
   Core/DSPAudio/mixer.c \
   Core/DSPAudio/modulationNode.c \
   Core/DSPAudio/Oscillator.c \
+  Core/DSPAudio/oscPwmTables.c \
   Core/DSPAudio/random.c \
   Core/DSPAudio/ResonantFilter.c \
-  Core/DSPAudio/Samples.c \
   Core/DSPAudio/SlopeEg2.c \
   Core/DSPAudio/snapEg.c \
   Core/DSP/Instruments/Snare/Snare.c \
@@ -240,6 +242,10 @@ $(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineTables.o: Core/DSP/Instruments/Al
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
 $(BUILD)/Core/DSP/Instruments/Alkaline/AlkalineSquareTable.o: Core/DSP/Instruments/Alkaline/AlkalineSquareTable.c | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS_DSP) $< -o $@
+# S094 P1 S4: the post-filter and A3 tables (data, with their user).
+$(BUILD)/Core/DSP/Instruments/Alkaline/AlkalinePostTables.o: Core/DSP/Instruments/Alkaline/AlkalinePostTables.c | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS_DSP) $< -o $@
 

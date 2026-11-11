@@ -847,8 +847,9 @@ static uint8_t instrumentManager_waveDomainMax(uint8_t slot,
 
             /* S093 P8: an Alkaline slot under wav has two entries (Saw,
              * Sqr): the LFO/velocity range, menu clamp, edit count and typ
-             * switch clamp all take it from here. */
-            if (osc && osc->oscType == OSC_TYPE_WAV &&
+             * switch clamp all take it from here. S094 P1 S5: pwm has the
+             * same two (sum, pulse). */
+            if (osc && (osc->oscType == OSC_TYPE_WAV || osc->oscType == OSC_TYPE_PWM) &&
                 instrumentManager_slotType(slot) == INSTRUMENT_TYPE_ALK)
                 return (uint8_t)ALK_WAVE_SQUARE;
 
@@ -3851,6 +3852,21 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         transient->pitch = 1.0f + ((byteValue / 33.9f) - 0.75f);
         return 1u; }
     case IM_SPECIAL_INSTRUMENT_DRIVE: {
+        /*
+         * S094 P1 S4 (K1): an Alkaline slot's instrument_drive is the VCA
+         * overdrive, kept as the byte 0..127 (the index of the voice's
+         * overdrive tables, read per block by the async). The
+         * Alkaline has no Distortion, so without this branch the lookup below
+         * returned 0 and the write fell through to the generic offset store
+         * by accident; the branch makes the meaning explicit.
+         */
+        if (instrumentManager_slotType(slot) == INSTRUMENT_TYPE_ALK) {
+            AlkalineVoice *alk = instrumentManager_alkalineRuntime(slot);
+
+            if (!alk) return 0u;
+            alk->vcaDrive = (byteValue > 127u) ? 127u : byteValue;
+            return 1u;
+        }
         Distortion *distortion = instrumentManager_distortion(slot);
         if (!distortion) return 0u;
         setDistortionShape(distortion, byteValue);
@@ -3886,6 +3902,26 @@ static uint8_t instrumentManager_writeSpecialRuntime(
         if (!lfo) return 0u;
         lfo->phaseOffset =
             (uint32_t)(((uint64_t)byteValue * 0xFFFFFFFFu) / 127u);
+        return 1u; }
+    case IM_SPECIAL_LFO_SYNC: {
+        /*
+         * lfo_sync writer (S094 P1 S1).
+         *
+         * What:       lfo_setSync(): stores the byte and recomputes phaseInc
+         *             from the LFO's free rate (sync 0) or the tempo (1..11).
+         * Why:        every path (menu, Kit/Scene/Instrument apply, step
+         *             automation, MIDI) now changes the rate with the mode; the
+         *             row order on load no longer matters, because lfo->freq is
+         *             kept current by IM_SPECIAL_LFO_RATE in both modes.
+         * Inputs:     slot, byteValue (0..11; larger values behave as free,
+         *             lfo_calcPhaseInc()'s default case).
+         * Outputs:    lfo->sync, lfo->phaseInc.
+         * Affiliates: IM_SPECIAL_LFO_RATE (lfo_setFreq()); seq_setBpm() ->
+         *             instrumentManager_recalcRuntimeLfoSync() (tempo).
+         */
+        Lfo *lfo = instrumentManager_runtimeLfo(slot);
+        if (!lfo) return 0u;
+        lfo_setSync(lfo, byteValue);
         return 1u; }
     case IM_SPECIAL_OSC_TYPE: {
         /*
@@ -4073,6 +4109,12 @@ static uint8_t instrumentManager_classifySpecialKey(instrument_type_t type,
      * being written raw by the TYPE_UINT32 path.
      */
     if (strcmp(key, "lfo_offset") == 0) return IM_SPECIAL_LFO_OFFSET;
+    /*
+     * S094 P1 S1: lfo_sync uses IM_SPECIAL_LFO_SYNC so a sync change
+     * recomputes the LFO's phase step (the boot diagnostic compares every
+     * descriptor tag against this rule).
+     */
+    if (strcmp(key, "lfo_sync") == 0) return IM_SPECIAL_LFO_SYNC;
     return IM_SPECIAL_NONE;
 }
 

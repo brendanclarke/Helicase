@@ -56,12 +56,12 @@ OSC_HOST_INC := $(CAT_HOST_INC) -I$(ROOT)/Core/MIDI -Wno-unknown-attributes
 
 .PHONY: all clean oscillator modulation voice_control sequencer \
         instrument_manager samples sampleoptimize run_modes special_tags \
-        stock_tables voicefold fold_tables crumpbit crumpbit_tables \
+        stock_tables voicefold fold_tables pwm_tables crumpbit crumpbit_tables \
         crumpbit_elf_check crumpbit_cpu_check alkaline alkaline_tables \
-        elf_p4_snapshot elf_p4_check seq_steplen
+        elf_p4_snapshot elf_p4_check seq_steplen lfo lfo_rate_table alk_post_tables
 all: oscillator modulation voice_control sequencer seq_steplen instrument_manager samples \
-     sampleoptimize run_modes special_tags stock_tables voicefold fold_tables \
-     crumpbit crumpbit_tables alkaline alkaline_tables
+     sampleoptimize run_modes special_tags stock_tables voicefold fold_tables pwm_tables \
+     crumpbit crumpbit_tables alkaline alkaline_tables alk_post_tables lfo lfo_rate_table
 
 $(GEN):
 	mkdir -p $(GEN)
@@ -74,12 +74,17 @@ $(GEN)/Oscillator.host.h: $(ROOT)/Core/DSPAudio/Oscillator.h | $(GEN)
 	$(EX) --src $< --body --out $@
 $(GEN)/Oscillator.host.c: $(ROOT)/Core/DSPAudio/Oscillator.c | $(GEN)
 	$(EX) --src $< --body --out $@
+$(GEN)/oscPwmTables.host.h: $(ROOT)/Core/DSPAudio/oscPwmTables.h | $(GEN)
+	$(EX) --src $< --body --out $@
+$(GEN)/oscPwmTables.host.c: $(ROOT)/Core/DSPAudio/oscPwmTables.c | $(GEN)
+	$(EX) --src $< --body --out $@
 
 # S089 P3 breaks (fmramp group): the ramp dispatcher sending wtb to the
 # one-frame twin must fail FR1; the depth stepped before its first use
 # (d = d0 + dStep) must fail FR2. Each break edits the generated
 # Oscillator.host.c and is found first through its own -I directory.
-oscillator: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c
+oscillator: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
+	$(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c $(CAT_HOST_SRC) \
 	  -o build/oscillator -lm
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) -DOSC_POS_BEND_CAP=8 -DOSC_POS_TEST_CAP \
@@ -101,6 +106,26 @@ oscillator: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c
 	@if ./build/oscillator_break_fmr2 >/dev/null 2>&1; then \
 	  echo "oscillator_break_fmr2: FAILED (ramp step-order break not caught)"; exit 1; \
 	else echo "oscillator_break_fmr2: caught (law FR2 fails as expected)"; fi
+	# S094 P1 S3 breaks: forward second read fails PW2; unlimited width slew fails PW5.
+	mkdir -p build/break_pwm1 build/break_pwm2
+	sed 's/const uint32_t ib = (ia - d) \& 0x3FFu;/const uint32_t ib = (ia + d) \& 0x3FFu;/' \
+	  $(GEN)/Oscillator.host.c > build/break_pwm1/Oscillator.host.c
+	@grep -q '(ia + d) & 0x3FFu' build/break_pwm1/Oscillator.host.c || \
+	  { echo "oscillator_break_pwm1: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_pwm1 $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c \
+	  $(CAT_HOST_SRC) -o build/oscillator_break_pwm1 -lm
+	@if ./build/oscillator_break_pwm1 >/dev/null 2>&1; then \
+	  echo "oscillator_break_pwm1: FAILED (a forward second read not caught)"; exit 1; \
+	else echo "oscillator_break_pwm1: caught (law PW2 fails as expected)"; fi
+	sed 's/if (d > OSC_PWM_SLEW_STEPS)/if (0)/' \
+	  $(GEN)/Oscillator.host.c > build/break_pwm2/Oscillator.host.c
+	@grep -q 'if (0)' build/break_pwm2/Oscillator.host.c || \
+	  { echo "oscillator_break_pwm2: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_pwm2 $(HOSTFLAGS) $(OSC_HOST_INC) modules/oscillator.c \
+	  $(CAT_HOST_SRC) -o build/oscillator_break_pwm2 -lm
+	@if ./build/oscillator_break_pwm2 >/dev/null 2>&1; then \
+	  echo "oscillator_break_pwm2: FAILED (an unlimited width step not caught)"; exit 1; \
+	else echo "oscillator_break_pwm2: caught (law PW5 fails as expected)"; fi
 
 modulation: $(GEN)/Oscillator.host.h
 	$(EX) --src $(ROOT)/Core/DSPAudio/modulationNode.c \
@@ -110,6 +135,38 @@ modulation: $(GEN)/Oscillator.host.h
 	  --out $(GEN)/modulation_interp.c
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/modulation.c -o build/modulation -lm
 	./build/modulation
+
+# S094 P1 S1: the real LFO phase law and rate table (modules/lfo.c).
+# Breaks: (1) the sync writer storing the byte only (lfo_setSync() without
+# its recomputation) must fail LF1; (2) lfo_calc() scaling by modNodeValue
+# while synced must fail LF4.
+lfo: | $(GEN)
+	$(EX) --src $(ROOT)/Core/DSPAudio/lfo.h --macro LFO_SR --out $(GEN)/lfo_sr.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/lfo.h --macro LFO_SINE --macro LFO_TRI \
+	  --macro LFO_SAW_UP --macro LFO_SAW_DOWN --macro LFO_REC --macro LFO_NOISE \
+	  --macro LFO_EXP_UP --macro LFO_EXP_DOWN --out $(GEN)/lfo_waves.inc
+	$(EX) --src $(ROOT)/Core/DSPAudio/lfoRateTable.c --object lfoRateHz \
+	  --out $(GEN)/lfo_rate_table.c
+	$(EX) --src $(ROOT)/Core/DSPAudio/lfo.c --func lfo_calc --func lfo_calcPhaseInc \
+	  --func lfo_setFreq --func lfo_setSync --out $(GEN)/lfo_funcs.c
+	$(HOSTCC) $(HOSTFLAGS) -I$(GEN) modules/lfo.c -o build/lfo -lm
+	./build/lfo
+	mkdir -p build/break_lfo1 build/break_lfo2
+	sed 's/lfo->sync = sync;/lfo->sync = sync; return;/' \
+	  $(GEN)/lfo_funcs.c > build/break_lfo1/lfo_funcs.c
+	$(HOSTCC) -Ibuild/break_lfo1 $(HOSTFLAGS) -I$(GEN) modules/lfo.c -o build/lfo_break1 -lm
+	@if ./build/lfo_break1 >/dev/null 2>&1; then \
+	  echo "lfo_break1: FAILED (a store-only sync writer not caught)"; exit 1; \
+	else echo "lfo_break1: caught (law LF1 fails as expected)"; fi
+	sed 's/lfo->sync ? 1.0f : lfo->modNodeValue/lfo->modNodeValue/' \
+	  $(GEN)/lfo_funcs.c > build/break_lfo2/lfo_funcs.c
+	$(HOSTCC) -Ibuild/break_lfo2 $(HOSTFLAGS) -I$(GEN) modules/lfo.c -o build/lfo_break2 -lm
+	@if ./build/lfo_break2 >/dev/null 2>&1; then \
+	  echo "lfo_break2: FAILED (a synced LFO following the overlay not caught)"; exit 1; \
+	else echo "lfo_break2: caught (law LF4 fails as expected)"; fi
+
+lfo_rate_table:
+	cd $(ROOT) && python3 tools/plots/gen_lfo_rate_table.py --check
 
 # Break: the old trigger-then-drain order (-DBREAK_DRAIN_AFTER_FIRE); the
 # program reports law 1 failing and exits 0 only when it does.
@@ -315,19 +372,28 @@ ALK_GEN := $(GEN)/DiodeLadder.host.h $(GEN)/DiodeLadder.host.c \
            $(GEN)/AlkalineTables.host.h $(GEN)/AlkalineTables.host.c \
            $(GEN)/AlkalineSquareTable.host.c \
            $(GEN)/AlkalineVoice.host.h $(GEN)/AlkalineVoice.host.c \
-           $(GEN)/alk_sawTable.c
-alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c | $(GEN)
+           $(GEN)/alk_sawTable.c $(GEN)/oscPwmTables.host.h \
+           $(GEN)/oscPwmTables.host.c
+alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c \
+	$(GEN)/oscPwmTables.host.h $(GEN)/oscPwmTables.host.c | $(GEN)
 	$(EX) --src $(ROOT)/Core/DSPAudio/DiodeLadder.h --body --out $(GEN)/DiodeLadder.host.h
 	$(EX) --src $(ROOT)/Core/DSPAudio/DiodeLadder.c --body --out $(GEN)/DiodeLadder.host.c
 	$(EX) --src $(ALK)/AlkalineControl.h --body --out $(GEN)/AlkalineControl.host.h
 	$(EX) --src $(ALK)/AlkalineControl.c --body --out $(GEN)/AlkalineControl.host.c
 	$(EX) --src $(ALK)/AlkalineTables.h --body --out $(GEN)/AlkalineTables.host.h
 	$(EX) --src $(ALK)/AlkalineTables.c --body --out $(GEN)/AlkalineTables.host.c
+	$(EX) --src $(ALK)/AlkalinePostTables.h --body --out $(GEN)/AlkalinePostTables.host.h
+	$(EX) --src $(ALK)/AlkalinePostTables.c --body --out $(GEN)/AlkalinePostTables.host.c
 	$(EX) --src $(ALK)/AlkalineSquareTable.c --body --out $(GEN)/AlkalineSquareTable.host.c
 	$(EX) --src $(ALK)/AlkalineVoice.h --body --out $(GEN)/AlkalineVoice.host.h
 	$(EX) --src $(ALK)/AlkalineVoice.c --body --out $(GEN)/AlkalineVoice.host.c
 	$(EX) --src $(ROOT)/Core/DSPAudio/wavetable.c --object sawTable --out $(GEN)/alk_sawTable.raw.c
 	sed 's/const int16_t sawTable/int16_t sawTable/' $(GEN)/alk_sawTable.raw.c > $(GEN)/alk_sawTable.c
+# S094 P1 S5: the pwm read-form reference (ALK_PWM_READ_FORM 0, both reads
+# interpolated) renders build/alk_pwm_ref.bin for law AL-PW (P-D6 evidence).
+	$(HOSTCC) $(HOSTFLAGS) -DALK_PWM_READ_FORM=0 $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_pwm_ref -lm
+	./build/alkaline_pwm_ref --pwm-render build/alk_pwm_ref.bin
 	$(HOSTCC) $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c $(CAT_HOST_SRC) \
 	  -o build/alkaline -lm
 	./build/alkaline
@@ -366,9 +432,35 @@ alkaline: $(GEN)/Oscillator.host.h $(GEN)/Oscillator.host.c | $(GEN)
 	@if ./build/alkaline_break_glide >/dev/null 2>&1; then \
 	  echo "alkaline_break_glide: FAILED (a glide across a frame boundary not caught)"; exit 1; \
 	else echo "alkaline_break_glide: caught (law AL-W fails as expected)"; fi
+# S094 P1 S4 breaks for P9-D7 (AL-OD0 must fail): (1) the tone not open at
+# 127 (c + 0.001); (2) the overdrive gain not exactly 1 at 0 (x 1.0001).
+	mkdir -p build/break_alk_tone build/break_alk_ovd
+	sed 's/alkToneC\[ti\])/alkToneC[ti] + 0.001f)/' \
+	  $(GEN)/AlkalineVoice.host.c > build/break_alk_tone/AlkalineVoice.host.c
+	@grep -q 'alkToneC\[ti\] + 0.001f' build/break_alk_tone/AlkalineVoice.host.c || \
+	  { echo "alkaline_break_tone: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk_tone $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break_tone -lm
+	@if ./build/alkaline_break_tone >/dev/null 2>&1; then \
+	  echo "alkaline_break_tone: FAILED (a closed tone at 127 not caught)"; exit 1; \
+	else echo "alkaline_break_tone: caught (law AL-OD0 fails as expected)"; fi
+	sed 's/alkOvdGain\[oi\],/alkOvdGain[oi] * 1.0001f,/' \
+	  $(GEN)/AlkalineVoice.host.c > build/break_alk_ovd/AlkalineVoice.host.c
+	@grep -q 'alkOvdGain\[oi\] \* 1.0001f' build/break_alk_ovd/AlkalineVoice.host.c || \
+	  { echo "alkaline_break_ovd: sed did not apply"; exit 1; }
+	$(HOSTCC) -Ibuild/break_alk_ovd $(HOSTFLAGS) $(OSC_HOST_INC) modules/alkaline.c \
+	  $(CAT_HOST_SRC) -o build/alkaline_break_ovd -lm
+	@if ./build/alkaline_break_ovd >/dev/null 2>&1; then \
+	  echo "alkaline_break_ovd: FAILED (an overdrive gain off 1 at 0 not caught)"; exit 1; \
+	else echo "alkaline_break_ovd: caught (law AL-OD0 fails as expected)"; fi
 
 alkaline_tables:
 	cd $(ROOT) && python3 tools/alkaline/gen_alk_tables.py --check
+
+# S094 P1 S4: the post-filter and A3 tables (generator mirror and neutral
+# entries).
+alk_post_tables:
+	cd $(ROOT) && python3 tools/alkaline/gen_alk_post_tables.py --check
 
 # ---------------------------------------------------------------------------
 # S093 P4: linked-image loop gates for the Alkaline integration.
@@ -413,7 +505,14 @@ P4_OSC_SYMS := SVF_calcBlockZDF calcFmBlock calcNextOscSampleBlock \
   osc_wtbFmBlock osc_wtbFmRampBlock osc_wtbPlainBlock osc_wtbPlanBlock \
   osc_wtbRingBlendBlock osc_wtbRingBlock osc_wtbSyncBlendBlock osc_wtbSyncBlock \
   transient_calcUserBlock voiceFold_asnLoop voiceFold_chbLoop voiceFold_fd2Loop \
-  voiceFold_process voiceFold_sinLoop voiceFold_triLoop busComp_processBlock
+  voiceFold_process voiceFold_sinLoop voiceFold_triLoop busComp_processBlock \
+  osc_pwmDPlainBlock osc_pwmWtPlainBlock osc_pwmWsPlainBlock \
+  osc_pwmDFmBlock osc_pwmWtFmBlock osc_pwmWsFmBlock \
+  osc_pwmDFmRampBlock osc_pwmWtFmRampBlock osc_pwmWsFmRampBlock \
+  osc_pwmDRingBlock osc_pwmWtRingBlock osc_pwmWsRingBlock \
+  osc_pwmDSyncBlock osc_pwmWtSyncBlock osc_pwmWsSyncBlock
+# S094 P1 S3: the fifteen PWM loops (.itcm.s094p1) join the gate from the s3
+# snapshot on, so S4/S5 must leave them unchanged.
 
 elf_p4_snapshot:
 	mkdir -p $(P4BASE)
@@ -433,6 +532,9 @@ elf_p4_check:
 
 fold_tables:
 	cd $(ROOT) && python3 tools/plots/gen_fold_tables.py --check
+
+pwm_tables:
+	cd $(ROOT) && python3 tools/plots/gen_pwm_tables.py --check
 
 # S091 P1/P2/P3: the real CrumpBitEffect.c and its generated tables against
 # the references in modules/crumpbit.c (laws CB1-CB22; CB1-CB4, CB10, CB16,

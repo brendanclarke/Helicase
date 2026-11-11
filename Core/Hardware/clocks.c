@@ -176,14 +176,23 @@ void sysclk_init(void)
         MPU_CTRL = 0;
 
         /* Region 0: All internal SRAM — Normal, Write-Through, No Write-Allocate
-        ** TEX=0 C=1 B=0 S=1 → Normal WT, shareable
+        ** TEX=0 C=1 B=0 S=0 → Normal WT, non-shareable
         ** AP=011 → full access.  XN=0.
         ** RASR: XN=0, AP=011(bits[26:24]), TEX=000(bits[21:19]),
-        **       S=1(bit18), C=1(bit17), B=0(bit16),
-        **       SRD=0x00(bits[15:8]), SIZE=19(bits[5:1]), ENABLE=1(bit0) */
+        **       S=0(bit18), C=1(bit17), B=0(bit16),
+        **       SRD=0x00(bits[15:8]), SIZE=19(bits[5:1]), ENABLE=1(bit0)
+        **
+        ** S must stay 0 (S094 P2, AS-6). With CACR.SIWT = 0 (reset, never
+        ** set here) the M7 treats Normal cacheable *shareable* memory as
+        ** non-cacheable, so S=1 (Session 013 to S094) left all SRAM data
+        ** (voice runtimes, the stack, mixer buffers) uncached. S=0 measured
+        ** -14.8 % of the audio block on the same Scene. Coherency: every DMA
+        ** buffer is in .dma_nocache (region 1); USB OTG FS runs without DMA;
+        ** the SD path uses no DMA; write-through keeps memory current. A new
+        ** DMA receive buffer must go in .dma_nocache. */
         MPU_RNR  = 0;
         MPU_RBAR = 0x20000000UL;
-        MPU_RASR = (3UL << 24) | (1UL << 18) | (1UL << 17) | (19UL << 1) | 1UL;
+        MPU_RASR = (3UL << 24) | (1UL << 17) | (19UL << 1) | 1UL;
 
         /*
          * Region 1: DMA buffers (4KB) — Normal, non-cacheable (S073 Step 3b).

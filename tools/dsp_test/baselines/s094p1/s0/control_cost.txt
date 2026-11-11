@@ -1,0 +1,11 @@
+  Alkaline_calcVoiceAsync               957 insn   9 vdiv  (0 loops)
+  Alkaline_calcVoiceSyncBlock           407 insn   0 vdiv  (0 loops)
+    alk_renderWtb                         403 insn   0 vdiv  (0 loops)
+    alk_renderWav                         353 insn   0 vdiv  (0 loops)
+      DiodeLadder_renderB2Osc2              335 insn   0 vdiv  (1 loops)
+      DiodeLadder_renderB2Osc               328 insn   0 vdiv  (1 loops)
+        dl_slowUpdate                         225 insn   0 vdiv  (0 loops)
+    alk_wtbBind                            33 insn   0 vdiv  (0 loops)
+  [osc] memset                              0 insn   0 vdiv
+per block: async 957 + sync block 407 + dispatch 14 = 1378 instructions, 9 VDIV
+per sample (/32): 43.1 instructions, 0.28 VDIV

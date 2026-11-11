@@ -1,0 +1,3 @@
+DiodeLadder_renderB2Osc: loop head 0x8063abc: longest 221 (vdiv 3), shortest 221, paths 1
+DiodeLadder_renderB2Osc2: loop head 0x806404c: longest 234 (vdiv 3), shortest 234, paths 1
+DiodeLadder_renderB2OscPwm: loop head 0x80645fc: longest 215 (vdiv 3), shortest 215, paths 1

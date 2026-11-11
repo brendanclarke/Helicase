@@ -66,9 +66,25 @@ void lfo_init(Lfo *lfo)
 float lfo_calc(Lfo *lfo)
 {
 	uint32_t oldPhase 		= lfo->phase;
-	float inc = lfo->phaseInc*lfo->modNodeValue;
+	/*
+	 * Rate modulation scale (S094 P1 S1, user decision L-D2: sync wins).
+	 *
+	 * What:       lfo->modNodeValue is the 0..2 overlay an LFO or velocity
+	 *             target on lfo_rate writes every block (TYPE_SPECIAL_F,
+	 *             modNode_updateValuePolarity()). While the LFO is synced the
+	 *             scale is 1.0, so the step is exactly the sync division's.
+	 * Why:        "the LFO always uses the sync rate when it is set" (user,
+	 *             S094). A select, not a branch: the same instructions run in
+	 *             both modes (constant cost).
+	 * Cost:       measured in S1.9 with elf_blockpath.py on lfo_calc(); it must
+	 *             not raise the per-block count, or be paid for inside the LFO
+	 *             path (S089), else this select is removed and the S094 report
+	 *             says so.
+	 */
+	const float rateScale	= lfo->sync ? 1.0f : lfo->modNodeValue;
+	float inc = lfo->phaseInc*rateScale;
 	uint32_t incInt = inc;
-	lfo->phase 			   += incInt;//lfo->phaseInc*lfo->modNodeValue;
+	lfo->phase 			   += incInt;
 	const uint8_t overflow 	= oldPhase>lfo->phase;
 
 	switch(lfo->waveform)
@@ -233,15 +249,36 @@ uint32_t lfo_calcPhaseInc(float freq, uint8_t sync)
 	return (lfoSyncfreq / (LFO_SR)) * 0xffffffff;
 }
 //-------------------------------------------------------------
+/*
+ * Free rate from the frq value (S094 P1 S1; contract in lfo.h).
+ *
+ * What:       freq = lfoRateHz[frq]; frq is f rounded down and clamped to
+ *             0..LFO_RATE_COUNT - 1; then the phase step for the current sync.
+ * Why:        the table (D-3) replaces 200 x ((f + 1) / 128)^3. A table read
+ *             is cheaper than the cubic, which matters because a step
+ *             automation ramp can write frq on every block.
+ */
 void lfo_setFreq(Lfo *lfo, float f)
 {
-	f += 1;
-	f = f/128.f;
-	f = f*f*f;
-	lfo->freq = f*LFO_MAX_F;
+	/* the frq value: the special writer passes the byte as a float */
+	const uint32_t frq = (f >= (float)(LFO_RATE_COUNT - 1u))
+	                     ? (LFO_RATE_COUNT - 1u)
+	                     : ((f > 0.0f) ? (uint32_t)f : 0u);
+
+	lfo->freq = lfoRateHz[frq];
 	lfo->phaseInc = lfo_calcPhaseInc(lfo->freq,lfo->sync);
 }
 //-------------------------------------------------------------
+/*
+ * Sync selector write (S094 P1 S1; contract in lfo.h).
+ *
+ * What:       stores sync and recomputes phaseInc from lfo->freq (free) or
+ *             the tempo (synced).
+ * Why:        the S094 bug: the lfo_sync rows stored the byte without this
+ *             recomputation, so a sync change waited for a frq or tempo
+ *             change, and a load applied the rate with the previous sync byte.
+ *             The rows now carry IM_SPECIAL_LFO_SYNC, whose writer calls this.
+ */
 void lfo_setSync(Lfo* lfo, uint8_t sync)
 {
 	lfo->sync = sync;

@@ -39,8 +39,10 @@ TABLE = os.path.join(ROOT, "Core", "DSP", "Instruments", "Alkaline", "AlkalinePa
 OUT = os.path.join(ROOT, "SD_CARD", "Instrument", "Alkaline", "init.alk")
 # one descriptor row: macro name, then the quoted file key
 ROW = re.compile(r'^\s*(ROW[A-Z_]*)\("([^"]+)"')
-# rows whose macro sets INSTRUMENT_PARAM_FLAG_MORPHABLE (FLAGS_IMAGE)
-MORPHABLE = {"ROW", "ROW_SPECIAL", "ROW_MENU", "ROW_NOBIND_IMAGE"}
+# rows whose macro sets INSTRUMENT_PARAM_FLAG_MORPHABLE (FLAGS_IMAGE).
+# S094 P1: ROW_MENU_SPECIAL (lfo_sync) is FLAGS_IMAGE too; without it
+# the [morph] section would lose lfo_sync and init.alk would change.
+MORPHABLE = {"ROW", "ROW_SPECIAL", "ROW_MENU", "ROW_MENU_SPECIAL", "ROW_NOBIND_IMAGE"}
 
 # init bytes per key; every key of the table must be here (and only those)
 INIT = {
@@ -58,6 +60,9 @@ INIT = {
     # S093 P8 (appended row): typ wav (Saw/Sqr); osc1_wave (row 0, was
     # alk_wave) is an image row since P8, so it is under [morph] too
     "osc1_type": "0",
+    # S094 P1 S4 (appended rows): no VCA overdrive, the tone open: the
+    # neutral settings (bit-identical to the S093 voice)
+    "instrument_drive": "0", "alk_tone": "127",
 }
 
 

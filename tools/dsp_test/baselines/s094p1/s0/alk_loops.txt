@@ -1,0 +1,5 @@
+python3 tools/dsp_test/elf_looppath.py --elf build/lxr02.elf --sym DiodeLadder_renderB2Osc --cond-heads --in-range
+DiodeLadder_renderB2Osc: loop head 0x8063d64: longest 213 (vdiv 3), shortest 213, paths 1
+
+python3 tools/dsp_test/elf_looppath.py --elf build/lxr02.elf --sym DiodeLadder_renderB2Osc2 --cond-heads --in-range
+DiodeLadder_renderB2Osc2: loop head 0x80642b8: longest 228 (vdiv 3), shortest 228, paths 1

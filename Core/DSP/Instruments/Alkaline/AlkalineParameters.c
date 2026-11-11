@@ -63,6 +63,10 @@ const uint8_t alkaline_instrument_type_flags = ALKALINE_INSTRUMENT_TYPE_FLAGS;
     { key_, short_, long_, cat_, dtype_, FLAGS_IMAGE, mod_, BIND_SPECIAL(member_, type_, special_) }
 #define ROW_MENU(key_, cat_, long_, short_, menu_, mod_, member_, type_) \
     { key_, short_, long_, cat_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), FLAGS_IMAGE, mod_, BIND(member_, type_) }
+/* ROW_MENU_SPECIAL: ROW_MENU with a constant DSP writer tag (S094 P1; the
+ * Drum table's macro, DrumParameters.c l. 85-87, the same expansion) */
+#define ROW_MENU_SPECIAL(key_, cat_, long_, short_, menu_, mod_, member_, type_, special_) \
+    { key_, short_, long_, cat_, (uint8_t)(DTYPE_MENU | (menu_ << 4)), FLAGS_IMAGE, mod_, BIND_SPECIAL(member_, type_, special_) }
 /*
  * A tagged DTYPE_ON_OFF selector with a special writer (S093 P8; Drum's
  * ROW_SELECT_ONOFF_SPECIAL, DrumParameters.c l. 108-130).
@@ -131,6 +135,12 @@ typedef enum {
     ALK_PARAM_ATTACK,            /* 26: VEG attack as the CPU trigger width */
     ALK_PARAM_OSC1_POSITION,     /* 27: note-start phase (0 = free-running) */
     ALK_PARAM_OSC1_TYPE,         /* 28 (S093 P8): wav / wtb */
+    /*
+     * S094 P1 S4: appended rows (29, 30); every stored cell, automation ID
+     * and NRPN number of rows 0..28 keeps its meaning.
+     */
+    ALK_PARAM_VCA_DRIVE,         /* 29: instrument_drive, the VCA overdrive */
+    ALK_PARAM_TONE,              /* 30: alk_tone, the post-filter tone */
     ALK_PARAM_COUNT
 } alkaline_param_index_t;
 
@@ -200,7 +210,11 @@ const ParamDescriptor alkaline_param_descriptors[] = {
     ROW_MENU("lfo_wave", "LFO", "Waveform", "wav", MENU_LFO_WAVES, MOD_NONE, lfo.waveform, TYPE_UINT8),
     ROW_MENU("lfo_retrigger_voice", "LFO", "Retriggr", "rtg", MENU_RETRIGGER, MOD_NONE, lfo.retrigger, TYPE_UINT8),
     ROW("lfo_polarity", "LFO", "Polarity", "pol", DTYPE_LFO_POLARITY, MOD_NONE, lfo.polarity, TYPE_UINT8),
-    ROW_MENU("lfo_sync", "LFO", "ClockSnc", "snc", MENU_SYNC_RATES, MOD_NONE, lfo.sync, TYPE_UINT8),
+    /* lfo_sync (S094 P1 S1): the special writer recomputes the LFO's phase
+     * step with the mode (IM_SPECIAL_LFO_SYNC -> lfo_setSync()); a plain
+     * byte store left the rate at the previous mode's until frq or the tempo
+     * moved */
+    ROW_MENU_SPECIAL("lfo_sync", "LFO", "ClockSnc", "snc", MENU_SYNC_RATES, MOD_NONE, lfo.sync, TYPE_UINT8, IM_SPECIAL_LFO_SYNC),
     ROW_SPECIAL("lfo_offset", "LFO", "Offset", "ofs", DTYPE_0B127, MOD_NONE, lfo.phaseOffset, TYPE_UINT32, IM_SPECIAL_LFO_OFFSET),
     /* velocity (DrumParameters.c l. 283-284) */
     ROW_NOBIND_IMAGE("velo_mod_amount", "Velocity", "Amount", "amt", DTYPE_0B127, MOD_NONE, INSTRUMENT_BIND_VELOCITY_AMOUNT),
@@ -240,6 +254,32 @@ const ParamDescriptor alkaline_param_descriptors[] = {
      *             Alkaline_calcVoiceSyncBlock() (osc.oscType).
      */
     ROW_SELECT_ONOFF_SPECIAL("osc1_type", "Oscilltr", "Type", "typ", ONOFF_TAG_ALK_TYPE, osc.oscType, TYPE_UINT8, IM_SPECIAL_OSC_TYPE | IM_SPECIAL_OSC1),
+    /*
+     * S094 P1 S4: the VCA overdrive (K1, user P9-D9).
+     *
+     * What:       the shared instrument_drive key and labels of the other four
+     *             types ("Voice" / "Overdriv" / drv) on the mix page's fourth
+     *             cell; the byte 0..127 -> vcaDrive through
+     *             IM_SPECIAL_INSTRUMENT_DRIVE's Alkaline branch
+     *             (InstrumentManager.c); the voice turns it into the OTA input
+     *             gain x1..x32 (S094 P2) and its make-up (alkOvdGain[],
+     *             alkOvdMakeup[]).
+     * Why:        the same name in the LFO/velocity target lists, the NRPN
+     *             chart's voice-drive group and the Learn pattern as the other
+     *             types; the filter page's alk_drive keeps its labels (user:
+     *             category "Filter" makes it clear).
+     */
+    ROW_SPECIAL("instrument_drive", "Voice", "Overdriv", "drv", DTYPE_0B127, MOD_0_127, vcaDrive, TYPE_UINT8, IM_SPECIAL_INSTRUMENT_DRIVE),
+    /*
+     * S094 P1 S4: the tone (post-FX draft §3.4.1).
+     *
+     * What:       the mix page's third cell (the other types' srt cell; the
+     *             Alkaline uses no SRR, so the cell is free, not the row);
+     *             the byte 0..127 -> tone (generic TYPE_UINT8 store), the one-pole's
+     *             c from alkToneC[]: 127 = open (exact), lower values roll off
+     *             toward about 800 Hz. Default 127.
+     */
+    ROW("alk_tone", "Voice", "Tone", "ton", DTYPE_0B127, MOD_0_127, tone, TYPE_UINT8),
 };
 
 /* Runtime registry count used by InstrumentManager bounds checks. */
@@ -284,8 +324,9 @@ const instrument_menu_page_t alkaline_menu_pages[] = {
     {{ ALK_PARAM_CUTOFF, ALK_PARAM_RESO, ALK_PARAM_ENVMOD, ALK_PARAM_DRIVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
     /* 6 LFO: the Drum layout (DrumParameters.c l. 411) */
     {{ ALK_PARAM_LFO_RATE, ALK_PARAM_LFO_SYNC, ALK_PARAM_LFO_WAVE, ALK_PARAM_LFO_OFFSET, ALK_PARAM_LFO_RETRIGGER_VOICE, ALK_PARAM_LFO_POLARITY, ALK_PARAM_LFO_AMOUNT, ALK_PARAM_LFO_AMOUNT_2, ALK_PARAM_LFO_TARGET_VOICE, ALK_PARAM_LFO_TARGET_PARAM, ALK_PARAM_LFO_TARGET_VOICE_2, ALK_PARAM_LFO_TARGET_PARAM_2, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
-    /* 7 MIX: vol pan */
-    {{ ALK_PARAM_INSTRUMENT_VOL, ALK_PARAM_INSTRUMENT_PAN, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
+    /* 7 MIX: vol pan ton drv (S094 P1 S4: the cells line up with the other
+     * four types' vol pan srt drv; ton takes the srt cell) */
+    {{ ALK_PARAM_INSTRUMENT_VOL, ALK_PARAM_INSTRUMENT_PAN, ALK_PARAM_TONE, ALK_PARAM_VCA_DRIVE, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY, INSTRUMENT_MENU_EMPTY }},
 };
 
 const uint8_t alkaline_menu_page_count =
@@ -301,6 +342,7 @@ _Static_assert(ALKALINE_MENU_PAGE_COUNT ==
 #undef ROW
 #undef ROW_SPECIAL
 #undef ROW_MENU
+#undef ROW_MENU_SPECIAL
 #undef ROW_SELECT_ONOFF_SPECIAL
 #undef ROW_NOBIND
 #undef ROW_NOBIND_IMAGE

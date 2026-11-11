@@ -62,6 +62,9 @@
 #include "presetManager.h"
 /* S074 master bus compressor: final stage of mixer_calcNextSampleBlock(). */
 #include "BusCompressor.h"
+#if DEV_MODE_LOGGING
+#include "AutosaveTrace.h"
+#endif
 // TODO DSP_PORT
 // #include "../Hardware/TriggerOut.h"
 //-----------------------------------------------------------------------
@@ -886,8 +889,121 @@ void mixer_calcNextSampleBlockTest(sample_mx_t *output, sample_mx_t *output2)
 //     }
 // }
 //-----------------------------------------------------------------------
+#if DEV_MODE_LOGGING
+/*
+ * Per-slot and per-section render cycle probe (S094 P2 §A/§12; DEV only).
+ *
+ * What:       DWT cycle counts per 32-frame block, attributed to every span
+ *             of mixer_calcNextSampleBlock():
+ *               per slot: block-rate work (filter recalc + calcSlotAsync)
+ *                 and its render (calcSlotSyncBlock only);
+ *               per section (mixer_probe_sec[], MIXER_PROBE_SEC_*): block
+ *                 control up to the LFO dispatch, effects_service(), routing
+ *                 and buffer set-up, the SRR decimators, the output/FX-send
+ *                 adds, the Effect (bus conversion, process, return) and the
+ *                 bus compressor;
+ *               the whole block (average and maximum).
+ *             Every MIXER_PROBE_WINDOW blocks it writes sixteen 'p' trace
+ *             records and restarts: flags 0..5 = slot | runtime type << 3,
+ *             value = block-rate average << 16 | render average (both
+ *             saturated to 16 bits); flags 6 = whole-block average; flags 7
+ *             = whole-block maximum; flags 6 | (section + 1) << 3 = that
+ *             section's average; flags 6 | 8 << 3 = MPU region 0's RASR
+ *             (which SRAM cache configuration ran). The whole block less
+ *             the slots and
+ *             sections is the probe's own overhead.
+ * Why:        the instruction-count model (S093) does not see flash wait
+ *             states, cache misses or VDIV stalls; S094 P2 needs measured
+ *             cycles per slot, and run 1 left a fifth of the block
+ *             unattributed (user: hooks around the mixer and the Effect).
+ * Inputs:     DWT_CYCCNT (enabled by audioCodec_initCycleCounter()).
+ * Outputs:    AutosaveTrace records only; nothing on screen, no product
+ *             state depends on them.
+ * Cost:       94 B RAM; ~30 out-of-line calls per block (noinline so LTO
+ *             keeps them out of the inlined render loops).
+ * Affiliates: AUTOSAVE_TRACE_STAGE_CPU_PROBE, decode_devlogs.py ('p').
+ */
+#define MIXER_PROBE_CYCCNT  (*(volatile uint32_t *)0xE0001004u)
+#define MIXER_PROBE_WINDOW  2048u   /* blocks, about 1.5 s */
+#define MIXER_PROBE_SEC_CTL    0u   /* itp count, modNode, velocity, LFO dispatch */
+#define MIXER_PROBE_SEC_FXSVC  1u   /* effects_service() */
+#define MIXER_PROBE_SEC_SETUP  2u   /* routing, buffer clears, slot-loop overhead */
+#define MIXER_PROBE_SEC_SRR    3u   /* mixer_decimateBlock(), all slots */
+#define MIXER_PROBE_SEC_MIX    4u   /* fader gains + dry/send adds, all slots */
+#define MIXER_PROBE_SEC_FX     5u   /* bus convert, effects_process(), return */
+#define MIXER_PROBE_SEC_COMP   6u   /* busComp_processBlock() */
+#define MIXER_PROBE_SEC_COUNT  7u
+static uint32_t mixer_probe_async[6];
+static uint32_t mixer_probe_sync[6];
+static uint32_t mixer_probe_sec[MIXER_PROBE_SEC_COUNT];
+static uint32_t mixer_probe_total;
+static uint32_t mixer_probe_max;
+static uint32_t mixer_probe_start;
+static uint32_t mixer_probe_last;
+static uint16_t mixer_probe_blocks;
+
+static __attribute__((noinline)) void mixer_probeBegin(void)
+{
+	mixer_probe_start = MIXER_PROBE_CYCCNT;
+	mixer_probe_last = mixer_probe_start;
+}
+
+static __attribute__((noinline)) void mixer_probeAdd(uint32_t *acc)
+{
+	const uint32_t now = MIXER_PROBE_CYCCNT;
+	*acc += now - mixer_probe_last;
+	mixer_probe_last = now;
+}
+
+static uint16_t mixer_probeAvg16(uint32_t sum)
+{
+	sum /= MIXER_PROBE_WINDOW;
+	return (uint16_t)((sum > 0xFFFFu) ? 0xFFFFu : sum);
+}
+
+static __attribute__((noinline)) void mixer_probeEnd(void)
+{
+	const uint32_t block = MIXER_PROBE_CYCCNT - mixer_probe_start;
+
+	mixer_probe_total += block;
+	if (block > mixer_probe_max)
+		mixer_probe_max = block;
+	if (++mixer_probe_blocks < MIXER_PROBE_WINDOW)
+		return;
+	for (uint8_t slot = 0u; slot < 6u; slot++) {
+		autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE,
+				(uint8_t)(slot | ((uint8_t)instrumentManager_runtimeType(slot) << 3)),
+				((uint32_t)mixer_probeAvg16(mixer_probe_async[slot]) << 16)
+				| mixer_probeAvg16(mixer_probe_sync[slot]));
+		mixer_probe_async[slot] = 0u;
+		mixer_probe_sync[slot] = 0u;
+	}
+	autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE, 6u,
+			mixer_probe_total / MIXER_PROBE_WINDOW);
+	autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE, 7u, mixer_probe_max);
+	for (uint8_t sec = 0u; sec < MIXER_PROBE_SEC_COUNT; sec++) {
+		autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE,
+				(uint8_t)(6u | ((sec + 1u) << 3)),
+				mixer_probe_sec[sec] / MIXER_PROBE_WINDOW);
+		mixer_probe_sec[sec] = 0u;
+	}
+	/* Configuration witness: MPU region 0 (all SRAM) RASR; bit 18 (S) set
+	 * means the M7 D-cache treats SRAM as non-cacheable (CACR.SIWT = 0). */
+	*(volatile uint32_t *)0xE000ED98u = 0u;                 /* MPU_RNR */
+	autosaveTrace_record(AUTOSAVE_TRACE_STAGE_CPU_PROBE, (uint8_t)(6u | (8u << 3)),
+			*(volatile uint32_t *)0xE000EDA0u);                 /* MPU_RASR */
+	mixer_probe_total = 0u;
+	mixer_probe_max = 0u;
+	mixer_probe_blocks = 0u;
+}
+#define MIXER_PROBE_SEC(sec) mixer_probeAdd(&mixer_probe_sec[MIXER_PROBE_SEC_##sec])
+#define MIXER_PROBE(call) call
+#else
+#define MIXER_PROBE(call) ((void)0)
+#endif
 void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 {
+	MIXER_PROBE(mixer_probeBegin());
 
 	/*
 	 * itp crossfade slot accounting (S088 P0 §3 Layer 3b).
@@ -925,10 +1041,17 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	 * InstrumentManager owns the dynamic instrument-to-runtime selection.
 	 */
 	instrumentManager_dispatchRuntimeLfos();
+	MIXER_PROBE(MIXER_PROBE_SEC(CTL));
 	for(uint8_t slot=0u; slot<6u; slot++)
+	{
 		instrumentManager_recalcSlotFilter(slot);
+		MIXER_PROBE(mixer_probeAdd(&mixer_probe_async[slot]));
+	}
 	for(uint8_t slot=0u; slot<6u; slot++)
+	{
 		instrumentManager_calcSlotAsync(slot);
+		MIXER_PROBE(mixer_probeAdd(&mixer_probe_async[slot]));
+	}
 
 	/*
 	 * Resolve the active Scene Effect before this block is rendered.
@@ -940,6 +1063,7 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	 * EffectsManager owns type handoff and parameter resolution.
 	 */
 	effects_service();
+	MIXER_PROBE(MIXER_PROBE_SEC(FXSVC));
 
 	//calculate trigger io phase
 	// TODO DSP_PORT
@@ -1012,7 +1136,9 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		uint8_t pan;
 		float voiceGain;
 		float sendGain;
+		MIXER_PROBE(MIXER_PROBE_SEC(SETUP));
 		instrumentManager_calcSlotSyncBlock(slot, sampleData, OUTPUT_DMA_SIZE);
+		MIXER_PROBE(mixer_probeAdd(&mixer_probe_sync[slot]));
 		/*
 		 * S089 P0: SRR runs only when the slot's instrument chain includes it
 		 * (instrumentManager_slotUsesSrr(); off by default, on for the four
@@ -1020,7 +1146,10 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		 * srt value, so the worst case stays constant.
 		 */
 		if (instrumentManager_slotUsesSrr(slot))
+		{
 			mixer_decimateBlock(slot,sampleData);
+			MIXER_PROBE(MIXER_PROBE_SEC(SRR));
+		}
 		/*
 		 * sampleData is the pre-volume voice block (decimated when the chain
 		 * includes SRR). The fader mode
@@ -1066,6 +1195,7 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 					&output[pos],&output[pos+1],&output2[pos],&output2[pos+1]);
 		mixer_voice_last_gain[slot] = voiceGain;
 		mixer_send_last_gain[slot] = sendGain;
+		MIXER_PROBE(MIXER_PROBE_SEC(MIX));
 	}
 
 	if (fx_active) {
@@ -1143,6 +1273,7 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 		mixer_fx_return_last_gain[0] = 0.0f;
 		mixer_fx_return_last_gain[1] = 0.0f;
 	}
+	MIXER_PROBE(MIXER_PROBE_SEC(FX));
 
 	/*
 	 * Master bus compressor (S074), after all voices and the FX return.
@@ -1155,5 +1286,6 @@ void mixer_calcNextSampleBlock(sample_mx_t* output,sample_mx_t* output2)
 	 * Affiliate: BusCompressor.h and voiceControl_triggerNow().
 	 */
 	busComp_processBlock(&output2[pos], &output[pos], fx_scene);
-
+	MIXER_PROBE(MIXER_PROBE_SEC(COMP));
+	MIXER_PROBE(mixer_probeEnd());
 }

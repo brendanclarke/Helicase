@@ -67,8 +67,8 @@
  *                     (to the int16 truncation of the one-row read). An
  *                     install rebinds; an empty catalogue plays silence and
  *                     never claims a slot;
- *               AL-TY (S093 P8) Alkaline_setOscType(): 0 -> wav, 1 and above
- *                     -> wtb; wav clamps wav to Sqr, wtb to the last table;
+ *               AL-TY (S093 P8; S094 P1) Alkaline_setOscType(): 0 -> wav, 1 ->
+ *                     wtb, 2 and above -> pwm; wav clamps wav to Sqr, wtb to the last table;
  *                     the phase runs on; the bind is cleared; the same type
  *                     is a no-op.
  *             Modes for tools/alkaline/check_c.py:
@@ -90,12 +90,13 @@
 
 #include "osc_host.h"
 #include "Oscillator.host.c"
+/* S094 P1 S3: the real generated PWM tables referenced by Oscillator.c. */
+#include "oscPwmTables.host.c"
 
 /* the tables the whole Oscillator.c references (unused here, zero) */
 int16_t sine_table[TABLESIZE + 1];
 int16_t triTable[11][1024];
 int16_t recTable[11][1024];
-unsigned char crashSample[32769];
 int16_t GetRngValue(void) { return 0; }
 /*
  * The interpolation slot claim, host stand-in (S093 P8 revision 3).
@@ -133,21 +134,27 @@ void instrumentManager_applyVelocityModulationTarget(uint8_t source_slot, float 
 #include "DiodeLadder.host.h"
 #include "AlkalineControl.host.h"
 #include "AlkalineTables.host.h"
+#include "AlkalinePostTables.host.h"   /* S094 P1 S4 */
 #include "AlkalineVoice.host.h"
 #include "DiodeLadder.host.c"
 #include "AlkalineControl.host.c"
 #include "AlkalineTables.host.c"
+#include "AlkalinePostTables.host.c"   /* S094 P1 S4: the real generated tables */
 #include "AlkalineSquareTable.host.c"
 #include "AlkalineVoice.host.c"
 
 #define BLK OUTPUT_DMA_SIZE
 #define ALK_STEP 5514u   /* a 16th at 120 BPM, samples */
 
-static unsigned g_fail[16];
-enum { G_B, G_R, G_S, G_N, G_AB, G_D, G_Q, G_F, G_O, G_X, G_A, G_M, G_SO, G_PS, G_W, G_TY };
+/* law groups (S094 P1: AL-OD0 golden, AL-A3 drive tables, AL-OV overdrive,
+ * AL-TN tone, AL-PW pwm appended; the array holds one counter per group) */
+static unsigned g_fail[21];
+enum { G_B, G_R, G_S, G_N, G_AB, G_D, G_Q, G_F, G_O, G_X, G_A, G_M, G_SO, G_PS, G_W, G_TY,
+       G_OD0, G_A3, G_OV, G_TN, G_PW };
 static const char *g_name[] = { "AL-B", "AL-R", "AL-S", "AL-N", "AL-AB", "AL-D", "AL-Q",
                                 "AL-F", "AL-O", "AL-X", "AL-A", "AL-M", "AL-SO", "AL-PS",
-                                "AL-W", "AL-TY" };
+                                "AL-W", "AL-TY", "AL-OD0", "AL-A3", "AL-OV", "AL-TN",
+                                "AL-PW" };
 enum { K_B2R = 0, K_AR = 1, K_BR = 2 };
 static const char *k_name[] = { "B2R", "A-R", "B-R" };
 
@@ -1220,6 +1227,203 @@ static void test_wavetable(void)
 	}
 }
 
+/* ---------------------------------------------------------------- golden
+ * The Alkaline golden capture and law AL-OD0 (S094 P1 S0/S4).
+ *
+ * What:       gold_render() plays a fixed set of voice configurations into
+ *             one int16 stream:
+ *               1. typ wav, Saw then Sqr, x drive bytes 0, 64, 127: the S092
+ *                  P4 pattern (mode_pattern()'s steps) at fixed knobs;
+ *               2. typ wav, Saw, drive 0: the mode_sweep() Res sweep, 4 s;
+ *               3. typ wtb (w_install(1): two tables) at drive 0, the P4
+ *                  pattern, once without a slot (w_grant 0) and once with
+ *                  (w_grant 1).
+ *             --golden OUT writes that stream to OUT (S0, before any firmware
+ *             change). test_golden() renders it again and compares it with
+ *             the committed file:
+ *               - every sample of every drive-0 render must be byte-identical;
+ *               - drive bytes 64 and 127 may differ by at most 2 LSB (A3:
+ *                 their table entries may sit 1 ulp from the runtime
+ *                 exp2 polynomial, plan finding 5); the largest difference is
+ *                 printed either way.
+ * Why:        P9-D7 (user): Overdrive 0 and Tone 127 must leave the output
+ *             bit-identical to today. The capture is made from the S0 tree, so
+ *             every later step (S1..S5) is checked against today's voice, not
+ *             against itself. The voice's new fields (S4: vcaDrive 0, tone 127)
+ *             are set by Alkaline_initVoice(), so this code never names them
+ *             and compiles unchanged before and after S4.
+ * Inputs:     none (fixed configurations); OUT path (--golden); the committed
+ *             file baselines/s094p1/alk_golden.bin (test_golden()).
+ * Outputs:    the file (--golden); law AL-OD0 (test_golden()).
+ * Accessors:  main() (--golden mode; test_golden() in the law run).
+ * Affiliates: mode_pattern(), mode_sweep(), w_install(), w_grant;
+ *             S094_P0_ALKALINE_POST_FX.md §4.
+ */
+#define GOLD_PATH   "baselines/s094p1/alk_golden.bin"
+/* blocks per pattern render: the pattern's 8 steps at 0.125 s plus 0.30 s
+ * of tail, 1.3 s x 44,108 / 32 = 1,791.8 -> 1,792 blocks (an integer
+ * literal, so the buffer sizes below are constant expressions) */
+#define GOLD_PAT_BLOCKS   1792
+/* blocks of the Res sweep: 4 s x 44,108 / 32 = 5,513.5 -> 5,513 */
+#define GOLD_SWEEP_BLOCKS 5513
+/* configurations: 2 waves x 3 drives + 1 sweep + 2 wtb */
+#define GOLD_RUNS   9
+/* samples in the whole capture: 8 pattern renders and one sweep */
+#define GOLD_TOTAL  ((size_t)(8 * GOLD_PAT_BLOCKS + GOLD_SWEEP_BLOCKS) * BLK)
+
+/* one pattern render into out; returns the number of samples written */
+static size_t gold_pattern(AlkalineVoice *v, int16_t *out)
+{
+	/* the S092 P4 pattern: (semitones above C2, accent, slide); -1 = rest */
+	static const int pat[8][3] = { {0, 0, 0}, {0, 1, 0}, {3, 0, 1}, {7, 0, 0},
+	                               {12, 1, 1}, {10, 1, 0}, {-1, 0, 0}, {0, 1, 0} };
+	/* samples per pattern step: 0.125 s */
+	const int stepBlocks = (int)(0.125 * 44108.0 / BLK);
+	int b, next = 0;
+
+	for (b = 0; b < GOLD_PAT_BLOCKS; b++) {
+		/* trigger each step on the first block at or after its start */
+		if (next < 8 && b >= next * stepBlocks) {
+			if (pat[next][0] >= 0) {
+				v->slide = (uint8_t)pat[next][2];
+				Alkaline_triggerVoice(v, 0u, pat[next][1] ? 127u : 80u,
+				                      (uint8_t)(63 + pat[next][0]), ALK_STEP);
+			}
+			next++;
+		}
+		block(v, out + (size_t)b * BLK, K_B2R);
+	}
+	return (size_t)GOLD_PAT_BLOCKS * BLK;
+}
+
+/* a voice at the golden knobs: cutoff, Res, env, decay, accent fixed;
+ * drive = byte / 127 (the descriptor's TYPE_FLT store) */
+static void gold_voice(AlkalineVoice *v, uint8_t wave, uint8_t driveByte)
+{
+	memset(v, 0, sizeof(*v));
+	Alkaline_initVoice(v);
+	v->osc.waveform = wave;
+	v->drive = (float)driveByte / 127.0f;
+	v->cutoff = 0.45f; v->reso = 0.75f; v->envMod = 0.6f;
+	v->decay = 0.4f; v->accent = 0.7f;
+}
+
+/*
+ * Render every golden configuration.
+ *
+ * Inputs:  out (GOLD_TOTAL samples), drv0 (per-run flag array, GOLD_RUNS:
+ *          1 when the run is at drive byte 0), len (per-run sample counts).
+ * Outputs: out; drv0; len; returns the number of samples (GOLD_TOTAL).
+ */
+static size_t gold_render(int16_t *out, uint8_t *drv0, size_t *len)
+{
+	static const uint8_t drives[3] = { 0u, 64u, 127u };
+	AlkalineVoice v;
+	size_t n = 0u;
+	int r = 0;
+
+	/* 1. wav: Saw, Sqr x the three drive bytes */
+	for (int w = 0; w < 2; w++)
+		for (int d = 0; d < 3; d++, r++) {
+			gold_voice(&v, (uint8_t)w, drives[d]);
+			len[r] = gold_pattern(&v, out + n);
+			drv0[r] = (uint8_t)(drives[d] == 0u);
+			n += len[r];
+		}
+	/* 2. the Res sweep (mode_sweep()'s line, 4 s), Saw, drive 0 */
+	{
+		static const int semi[4] = { 0, 0, 3, 12 };
+		int step = 0;
+
+		gold_voice(&v, ALK_WAVE_SAW, 0u);
+		v.cutoff = 0.35f; v.envMod = 0.5f; v.decay = 0.4f; v.accent = 0.6f;
+		for (int b = 0; b < GOLD_SWEEP_BLOCKS; b++) {
+			const double t = (double)b * BLK / 44108.0;
+
+			/* Res 0 -> 1 over the 4 s */
+			v.reso = (float)(t / 4.0);
+			while ((double)step * ALK_STEP <= (double)b * BLK) {
+				v.slide = (uint8_t)((step & 3) == 2);
+				Alkaline_triggerVoice(&v, 0u, (step & 3) == 3 ? 127u : 80u,
+				                      (uint8_t)(63 + semi[step & 3]), ALK_STEP);
+				step++;
+			}
+			block(&v, out + n + (size_t)b * BLK, K_B2R);
+		}
+		len[r] = (size_t)GOLD_SWEEP_BLOCKS * BLK;
+		drv0[r] = 1u;
+		n += len[r];
+		r++;
+	}
+	/* 3. wtb: two installed tables, without and with an interpolation slot */
+	w_install(1);
+	for (int g = 0; g < 2; g++, r++) {
+		gold_voice(&v, 1u, 0u);
+		Alkaline_setOscType(&v, ALK_TYP_WTB);
+		v.osc.position = 40u;             /* between frames: the blend is heard */
+		w_grant = g;
+		len[r] = gold_pattern(&v, out + n);
+		drv0[r] = 1u;
+		n += len[r];
+	}
+	w_grant = 0;
+	return n;
+}
+
+/* --golden OUT: write the capture (run once, at S0) */
+static int mode_golden(const char *path)
+{
+	uint8_t drv0[GOLD_RUNS];
+	size_t len[GOLD_RUNS];
+	int16_t *buf = malloc(GOLD_TOTAL * sizeof(int16_t));
+	const size_t n = gold_render(buf, drv0, len);
+	FILE *fo;
+
+	fo = fopen(path, "wb");
+	if (!fo || fwrite(buf, sizeof(int16_t), n, fo) != n)
+		return 1;
+	fclose(fo);
+	free(buf);
+	printf("golden: %zu samples written to %s\n", n, path);
+	return 0;
+}
+
+/* law AL-OD0: today's renders against the committed capture */
+static void test_golden(void)
+{
+	uint8_t drv0[GOLD_RUNS];
+	size_t len[GOLD_RUNS];
+	const size_t n = GOLD_TOTAL;
+	int16_t *now = malloc(n * sizeof(int16_t)), *ref = malloc(n * sizeof(int16_t));
+	FILE *fi = fopen(GOLD_PATH, "rb");
+	size_t off = 0u;
+
+	if (!fi || fread(ref, sizeof(int16_t), n, fi) != n) {
+		fail(G_OD0, "golden file missing or short", 0, 0);
+		if (fi) fclose(fi);
+		free(now); free(ref);
+		return;
+	}
+	fclose(fi);
+	gold_render(now, drv0, len);
+	for (int r = 0; r < GOLD_RUNS; r++) {
+		int worst = 0;
+
+		/* the largest per-sample difference of this run */
+		for (size_t i = 0; i < len[r]; i++) {
+			const int d = abs((int)now[off + i] - (int)ref[off + i]);
+
+			if (d > worst) worst = d;
+		}
+		printf("AL-OD0 run %d (drive-0 %u): largest difference %d LSB\n", r, drv0[r], worst);
+		/* drive 0: byte-identical; drive bytes 64/127: A3's 1-ulp entries */
+		if (drv0[r] ? (worst != 0) : (worst > 2))
+			fail(G_OD0, "golden render differs", r, worst);
+		off += len[r];
+	}
+	free(now); free(ref);
+}
+
 /* ---------------------------------------------------------------- AL-TY
  * S093 P8: the typ writer. */
 static void test_typ(void)
@@ -1237,7 +1441,8 @@ static void test_typ(void)
 	if (v.osc.phase != 0x12345678u) fail(G_TY, "the phase runs on", 0, 0);
 	if (v.osc.sampleCacheLooped != ALK_BIND_NONE) fail(G_TY, "the bind is cleared", 0, 0);
 	v.osc.sampleCacheLooped = ALK_BIND_WTB;
-	Alkaline_setOscType(&v, 7u);
+	/* S094 P1 S5: 2 and above are pwm now, so the no-op check uses wtb itself */
+	Alkaline_setOscType(&v, ALK_TYP_WTB);
 	if (v.osc.oscType != OSC_TYPE_WTB || v.osc.sampleCacheLooped != ALK_BIND_WTB)
 		fail(G_TY, "the same type is a no-op", v.osc.oscType, 0);
 	v.osc.waveform = 9u;
@@ -1252,6 +1457,291 @@ static void test_typ(void)
 	Alkaline_setOscType(&v, ALK_TYP_WTB);
 	if (v.osc.interpStamp != 0u || v.wtbSlot != 0u)
 		fail(G_TY, "a type change keeps the slot", v.osc.interpStamp, v.wtbSlot);
+	/* S094 P1 S5: 2 and above are pwm; pwm clamps wav to Sqr; the phase runs
+	 * on */
+	v.osc.waveform = 9u;
+	v.osc.phase = 0x0badf00du;
+	Alkaline_setOscType(&v, 7u);
+	if (v.osc.oscType != OSC_TYPE_PWM) fail(G_TY, "7 is pwm", v.osc.oscType, 0);
+	if (v.osc.waveform != ALK_WAVE_SQUARE) fail(G_TY, "pwm clamps to Sqr", v.osc.waveform, 0);
+	if (v.osc.phase != 0x0badf00du) fail(G_TY, "the phase runs on (-> pwm)", 0, 0);
+}
+
+/* ---------------------------------------------------------------- AL-A3
+ * S094 P1 S4: the A3 tables against the runtime formula.
+ *   alkDriveGain[k] / alkDriveMakeup[k] against (alk_exp2f(k/127)^2)^2 and
+ *   alk_exp2f(1 - k/127) evaluated here (the host compiler's contraction):
+ *   entry 0 exactly; every entry within 1 ulp. */
+static int ulps(float a, float b)
+{
+	int32_t ia, ib;
+
+	memcpy(&ia, &a, 4);
+	memcpy(&ib, &b, 4);
+	return abs(ia - ib);
+}
+
+static void test_a3(void)
+{
+	int worst = 0;
+
+	for (unsigned k = 0u; k < ALK_POST_POINTS; k++) {
+		const float drv = (float)k / 127.0f;
+		const float t = alk_exp2f(drv), t2 = t * t;
+		const float g = t2 * t2, m = alk_exp2f(ALK_MAKEUP_OCT * (1.0f - drv));
+		const int e = ulps(g, alkDriveGain[k]) > ulps(m, alkDriveMakeup[k])
+		            ? ulps(g, alkDriveGain[k]) : ulps(m, alkDriveMakeup[k]);
+
+		if (e > worst) worst = e;
+		if (k == 0u && e != 0) fail(G_A3, "drive 0 exact", e, 0);
+		if (e > 1) fail(G_A3, "entry within 1 ulp", k, e);
+	}
+	printf("AL-A3: largest difference %d ulp\n", worst);
+}
+
+/* ---------------------------------------------------------------- AL-OV
+ * S094 P1 S4: the VCA overdrive. The pattern at overdrive bytes 0, 64, 127
+ * (drive 0, tone open): every sample finite and inside int16 (the store
+ * saturates); the crest factor (peak / RMS) falls as the overdrive rises (the
+ * OTA's tanh flattens the peaks). */
+static double ov_crest(uint8_t ovd, double *rms)
+{
+	static int16_t buf[GOLD_PAT_BLOCKS * BLK];
+	AlkalineVoice v;
+	double s = 0.0;
+	int pk = 0;
+
+	gold_voice(&v, ALK_WAVE_SAW, 0u);
+	v.vcaDrive = ovd;
+	gold_pattern(&v, buf);
+	for (size_t i = 0; i < (size_t)GOLD_PAT_BLOCKS * BLK; i++) {
+		s += (double)buf[i] * buf[i];
+		if (abs(buf[i]) > pk) pk = abs(buf[i]);
+	}
+	*rms = sqrt(s / ((double)GOLD_PAT_BLOCKS * BLK));
+	return (*rms > 0.0) ? pk / *rms : 0.0;
+}
+
+static void test_overdrive(void)
+{
+	double r0, r64, r127;
+	const double c0 = ov_crest(0u, &r0), c64 = ov_crest(64u, &r64), c127 = ov_crest(127u, &r127);
+
+	printf("AL-OV: crest %.2f / %.2f / %.2f, RMS %.0f / %.0f / %.0f LSB at overdrive 0 / 64 / 127\n",
+	       c0, c64, c127, r0, r64, r127);
+	if (!(c127 < c0)) fail(G_OV, "the overdrive flattens the peaks", c0, c127);
+	if (!(r0 > 0.0 && r64 > 0.0 && r127 > 0.0)) fail(G_OV, "silent", r64, r127);
+}
+
+/* ---------------------------------------------------------------- AL-TN
+ * S094 P1 S4: the tone.
+ *   table: alkToneC[127] == 0; decreasing; for k <= 63 (design fc up to
+ *   4 kHz) the one-pole's -3 dB point, fc = acos(1 - (1 - c)^2 / (2c)) x
+ *   fs / 2 pi (exact for y = (1 - c) x + c y), within 10 % of the design
+ *   800 x 25^(k/127) Hz (computed: at most 2.7 %). Above 4 kHz
+ *   c = exp(-2 pi fc / fs) drifts above the design toward Nyquist (+25 % at
+ *   k = 100), which is inaudible as a tone setting and not checked;
+ *   render (measured S094 P1 S4): tone 0 lowers the pattern's high band
+ *   (the RMS of the second difference, a 12 dB/octave weighting) by at least
+ *   3 dB at overdrive 0, 63 and 127 (measured 5.4 / 5.4 / 7.5 dB), and by more
+ *   at 127 than at 0 (the tone rolls off the overdrive's added highs). The
+ *   pattern's high band sits at the ladder's resonance peak (about 1-2 kHz,
+ *   where an 800 Hz one-pole takes 5-8 dB); above it the 24 dB/octave ladder
+ *   has already removed most of the energy. */
+static double tn_hiRms(uint8_t tone, uint8_t ovd)
+{
+	static int16_t buf[GOLD_PAT_BLOCKS * BLK];
+	AlkalineVoice v;
+	double s = 0.0;
+
+	gold_voice(&v, ALK_WAVE_SAW, 0u);
+	v.tone = tone;
+	v.vcaDrive = ovd;
+	gold_pattern(&v, buf);
+	for (size_t i = 2; i < (size_t)GOLD_PAT_BLOCKS * BLK; i++) {
+		const double d = (double)buf[i] - 2.0 * buf[i - 1] + buf[i - 2];
+
+		s += d * d;
+	}
+	return sqrt(s / ((double)GOLD_PAT_BLOCKS * BLK));
+}
+
+static void test_tone(void)
+{
+	if (alkToneC[127] != 0.0f) fail(G_TN, "open at 127", alkToneC[127], 0);
+	for (unsigned k = 0u; k + 1u < ALK_POST_POINTS; k++) {
+		if (!(alkToneC[k + 1u] < alkToneC[k])) fail(G_TN, "decreasing", k, alkToneC[k]);
+		if (k <= 63u) {
+			const double c = alkToneC[k];
+			const double fc = acos(1.0 - (1.0 - c) * (1.0 - c) / (2.0 * c)) * 44108.0 / (2.0 * M_PI);
+			const double want = 800.0 * pow(25.0, k / 127.0);
+
+			if (fabs(fc / want - 1.0) > 0.10) fail(G_TN, "-3 dB point", k, fc);
+		}
+	}
+	{
+		double cut[3];
+
+		for (unsigned o = 0u; o < 3u; o++) {
+			/* overdrive bytes 0, 63, 127 */
+			const uint8_t ovd = (uint8_t)(o * 63u + (o == 2u));
+			const double open = tn_hiRms(127u, ovd), dark = tn_hiRms(0u, ovd);
+
+			cut[o] = 20.0 * log10(dark / open);
+			printf("AL-TN: overdrive %u, high band at tone 0 %+.1f dB against tone 127\n",
+			       ovd, cut[o]);
+			if (cut[o] > -3.0) fail(G_TN, "tone 0 rolls off the highs", ovd, cut[o]);
+		}
+		/* the tone's purpose: it takes more off the overdriven voice */
+		if (!(cut[2] < cut[0])) fail(G_TN, "the cut grows with overdrive", cut[0], cut[2]);
+	}
+}
+
+/* ---------------------------------------------------------------- AL-PW
+ * S094 P1 S5: the Alkaline pwm.
+ *   - pos 1, 64, 127 under Saw and Sqr: finite, bounded (the pattern);
+ *   - the width slew: positionApplied moves <= OSC_PWM_SLEW_STEPS per block
+ *     toward pos and lands; a non-legato note snaps it; the phase runs on
+ *     through the note (free-running VCO);
+ *   - level: Sqr at pos 64 under pwm within 3 dB RMS of Sqr under wav (the
+ *     1.40 scale; printed);
+ *   - P-D6 error: this build's render (ALK_PWM_READ_FORM, default 2 after
+ *     the S5 measurement) against the form-0 reference written by the second
+ *     bench build (build/alk_pwm_ref.bin, Makefile): printed; it must stay
+ *     at least 15 dB below the reference RMS (a gross-error guard: about
+ *     -29 dB measured for forms 1 and 2). */
+#define PW_PATH "build/alk_pwm_ref.bin"
+
+static void pw_render(int16_t *out)
+{
+	AlkalineVoice v;
+
+	/* Sqr at pos 32, then Saw at pos 96: one pattern each */
+	gold_voice(&v, ALK_WAVE_SQUARE, 0u);
+	Alkaline_setOscType(&v, ALK_TYP_PWM);
+	v.osc.position = 32u;
+	gold_pattern(&v, out);
+	gold_voice(&v, ALK_WAVE_SAW, 0u);
+	Alkaline_setOscType(&v, ALK_TYP_PWM);
+	v.osc.position = 96u;
+	gold_pattern(&v, out + (size_t)GOLD_PAT_BLOCKS * BLK);
+}
+
+static int mode_pwmRender(const char *path)
+{
+	int16_t *buf = malloc((size_t)2 * GOLD_PAT_BLOCKS * BLK * sizeof(int16_t));
+	FILE *fo = fopen(path, "wb");
+
+	pw_render(buf);
+	if (!fo || fwrite(buf, sizeof(int16_t), (size_t)2 * GOLD_PAT_BLOCKS * BLK, fo)
+	           != (size_t)2 * GOLD_PAT_BLOCKS * BLK)
+		return 1;
+	fclose(fo);
+	free(buf);
+	return 0;
+}
+
+/* the pattern's RMS for one wave (Saw/Sqr), typ and pos */
+static double pw_rms(uint8_t wave, uint8_t typ, uint8_t pos)
+{
+	static int16_t buf[GOLD_PAT_BLOCKS * BLK];
+	AlkalineVoice v;
+	double s = 0.0;
+
+	gold_voice(&v, wave, 0u);
+	Alkaline_setOscType(&v, typ);
+	v.osc.position = pos;
+	gold_pattern(&v, buf);
+	for (size_t i = 0; i < (size_t)GOLD_PAT_BLOCKS * BLK; i++)
+		s += (double)buf[i] * buf[i];
+	return sqrt(s / ((double)GOLD_PAT_BLOCKS * BLK));
+}
+
+static void test_pwm(void)
+{
+	/* bounds at the width extremes */
+	{
+		static const uint8_t pos[3] = { 1u, 64u, 127u };
+
+		for (int w = 0; w < 2; w++)
+			for (int p = 0; p < 3; p++) {
+				const double r = pw_rms(w ? ALK_WAVE_SQUARE : ALK_WAVE_SAW,
+				                        ALK_TYP_PWM, pos[p]);
+
+				if (!isfinite(r) || r <= 0.0) fail(G_PW, "bounded and sounding", w, pos[p]);
+			}
+	}
+	/* the slew and the snap */
+	{
+		AlkalineVoice v;
+		int16_t buf[BLK];
+
+		gold_voice(&v, ALK_WAVE_SAW, 0u);
+		Alkaline_setOscType(&v, ALK_TYP_PWM);
+		v.osc.position = 10u;
+		Alkaline_triggerVoice(&v, 0u, 80u, 63u, ALK_STEP);
+		if (v.osc.positionApplied != 10u) fail(G_PW, "a note snaps the width", v.osc.positionApplied, 10);
+		v.osc.position = 100u;
+		for (int b = 0; b < 60; b++) {
+			const uint8_t before = v.osc.positionApplied;
+
+			block(&v, buf, K_B2R);
+			if (abs((int)v.osc.positionApplied - (int)before) > OSC_PWM_SLEW_STEPS)
+				fail(G_PW, "slew step", b, v.osc.positionApplied);
+		}
+		if (v.osc.positionApplied != 100u) fail(G_PW, "the slew lands", v.osc.positionApplied, 100);
+		{
+			const uint32_t ph = v.osc.phase;
+
+			Alkaline_triggerVoice(&v, 0u, 80u, 63u, ALK_STEP);
+			if (v.osc.phase != ph) fail(G_PW, "the phase runs free through a note", 0, 0);
+		}
+	}
+	/* level against Sqr under wav */
+	{
+		const double db = 20.0 * log10(pw_rms(ALK_WAVE_SQUARE, ALK_TYP_PWM, 64u) /
+		                               pw_rms(ALK_WAVE_SQUARE, ALK_TYP_WAV, 0u));
+
+		printf("AL-PW: Sqr pwm at 64 against Sqr wav %+.2f dB RMS\n", db);
+		if (fabs(db) > 3.0) fail(G_PW, "pulse level", db, 3.0);
+	}
+	/* P-D6: against the both-interpolated reference */
+	{
+		const size_t n = (size_t)2 * GOLD_PAT_BLOCKS * BLK;
+		int16_t *now = malloc(n * sizeof(int16_t)), *ref = malloc(n * sizeof(int16_t));
+		FILE *fi = fopen(PW_PATH, "rb");
+
+		if (fi && fread(ref, sizeof(int16_t), n, fi) == n) {
+			double se = 0.0, sr = 0.0;
+
+			pw_render(now);
+			for (size_t i = 0; i < n; i++) {
+				const double e = (double)now[i] - ref[i];
+
+				se += e * e;
+				sr += (double)ref[i] * ref[i];
+			}
+			{
+				const double db = 10.0 * log10((se + 1e-30) / (sr + 1e-30));
+
+				printf("AL-PW: read form %d against form 0: %.1f dB\n", ALK_PWM_READ_FORM, db);
+				/*
+				 * S094 P1 S5: a gross-error guard, not a quality bound. The
+				 * cheaper forms measure about -29 dB sample for sample
+				 * against form 0 (a steep band-limited edge read at a whole
+				 * table point: a sub-sample time shift, which an RMS of the
+				 * sample difference overstates); the quality call is the
+				 * device listening (plan §10). A read past the row, a lost
+				 * level or a wrong sign comes out near 0 dB.
+				 */
+				if (db > -15.0) fail(G_PW, "read-form error", db, -15.0);
+			}
+		} else {
+			fail(G_PW, "reference render missing", 0, 0);
+		}
+		if (fi) fclose(fi);
+		free(now); free(ref);
+	}
 }
 
 int main(int argc, char **argv)
@@ -1264,6 +1754,12 @@ int main(int argc, char **argv)
 		return mode_pattern(argc, argv);
 	if (argc > 1 && !strcmp(argv[1], "--sweep"))
 		return mode_sweep(argc, argv);
+	/* S094 P1 S0: write the golden capture (once, before any firmware edit) */
+	if (argc > 2 && !strcmp(argv[1], "--golden"))
+		return mode_golden(argv[2]);
+	/* S094 P1 S5: write the pwm reference render (the form-0 build) */
+	if (argc > 2 && !strcmp(argv[1], "--pwm-render"))
+		return mode_pwmRender(argv[2]);
 
 	test_bounds();
 	for (int k = 0; k < 3; k++) {
@@ -1307,6 +1803,14 @@ int main(int argc, char **argv)
 	test_pos();
 	test_wavetable();
 	test_typ();
+	/* S094 P1: law AL-OD0 against the S0 capture (every step re-runs it) */
+	test_golden();
+	/* S094 P1 S4: the drive tables, the overdrive and the tone */
+	test_a3();
+	test_overdrive();
+	test_tone();
+	/* S094 P1 S5: the Alkaline pwm */
+	test_pwm();
 	/* every group in g_name (S093 P6: fourteen; was a literal 10) */
 	for (g = 0u; g < sizeof g_name / sizeof g_name[0]; g++) {
 		printf("%s: %u failure(s)\n", g_name[g], g_fail[g]);

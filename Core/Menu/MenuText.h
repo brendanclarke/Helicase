@@ -142,25 +142,26 @@ static const char extSyncNames[][4] = {
 static const char trackPlayModeNames[][4] = {
     {6}, {"fwd"},{"rev"},{"pip"},{"rnd"},{"onc"},{"1fr"},
 };
-/* The built-in waves SINE..CRASH (Oscillator.h); the count must equal
+/* The built-in waves SINE..NOISE (Oscillator.h); the count must equal
 ** OSC_SAMPLE_START (asserted in menu.c). User samples follow as sNN.
-** S093 P3: the S086 Re3/Sw3 entries were removed with their tables. */
+** S093 P3 removed Re3/Sw3; S094 P1 S2 removes Cym (the card sample
+** 02_crash.wav replaces it). */
 static const char waveformNames[][4] = {
-    {6}, {"Sin"},{"Tri"},{"Saw"},{"Rec"},{"Noi"},{"Cym"},
+    {5}, {"Sin"},{"Tri"},{"Saw"},{"Rec"},{"Noi"},
 };
 /*
- * osc1_type names (S087 stage B).
+ * osc1_type names (S087 stage B; S094 P1 S3 pwm).
  *
- * What:       [0] = count (OSC_TYPE_COUNT), then wav smp slp wtb.
+ * What:       [0] = count (OSC_TYPE_COUNT), then wav smp slp wtb pwm.
  * Why:        the typ cell, its automation display and the single-parameter
- *             view share one table; the menu shows only the first
- *             OSC_TYPE_SELECTABLE entries.
+ *             view share one table; all five values are selectable after
+ *             S094 P1.
  * Accessors:  getMaxEntriesForMenu(), getMenuItemNameForValue(),
  *             menu_automationValueMax() (menu.c).
  * Affiliates: OSC_TYPE_* (Oscillator.h); MENU_OSC_TYPE.
  */
 static const char oscTypeNames[][4] = {
-    {4}, {"wav"},{"smp"},{"slp"},{"wtb"},
+    {5}, {"wav"},{"smp"},{"slp"},{"wtb"},{"pwm"},
 };
 /*
  * DTYPE_ON_OFF high-nibble sub-type tag (S088 P0 §2.1 D12).
@@ -238,18 +239,17 @@ static const char voiceChainNames[][4] = {
  */
 #define ONOFF_TAG_ALK_TYPE      3u
 /*
- * Alkaline type names (S093 P8).
+ * Alkaline type names (S093 P8; S094 P1 S5 pwm).
  *
- * What:       [0] = count (2), then wav, wtb: the Alkaline typ byte 0..1
- *             (ALK_TYP_WAV / ALK_TYP_WTB).
+ * What:       [0] = count (3), then wav, wtb, pwm: the Alkaline typ byte
+ *             0..2 (ALK_TYP_WAV / ALK_TYP_WTB / ALK_TYP_PWM).
  * Why:        display, clamp and automation range of the typ cell come from
- *             this count (the six tagged sites in menu.c); the Alkaline offers
- *             wavetables only (S093 P8). The count must equal ALK_TYP_COUNT
- *             (asserted in menu.c).
+ *             this count (the six tagged sites in menu.c). The count must
+ *             equal ALK_TYP_COUNT (asserted in menu.c).
  * Accessors:  menu_onoffTagNames() (menu.c).
  */
 static const char alkTypeNames[][4] = {
-    {2}, {"wav"},{"wtb"},
+    {3}, {"wav"},{"wtb"},{"pwm"},
 };
 /*
  * Alkaline waveform names (S093 P4; S093 P8: the osc1_wave cell under typ

@@ -1,7 +1,8 @@
 /*
  * Oscillator module host tests (S085 snc/rng, S086 pos (its stock waves
- * Re3/Sw3 were removed in S093 P3),
- * S087 typ, samples and wavetables, S088 itp, S089 P3 Drum FM ramp).
+ * Re3/Sw3 were removed in S093 P3; Cym in S094 P1 S2),
+ * S087 typ, samples and wavetables, S088 itp, S089 P3 Drum FM ramp, and
+ * S094 P1 S3 PWM).
  *
  * What:       compiles the whole real Oscillator.c over the real catalogue
  *             (SampleMemory.c/SampleInstall.c on a RAM flash image) and runs
@@ -11,8 +12,8 @@
  *                      ramped depth; depth 0 is the carrier exactly);
  *               sync   S1 depth 0 == plain; S2 a reset after sample k lands
  *                      on k + 1; S3 osc_syncPull(); S4 osc_buildSyncList();
- *                      S5 osc_syncClockInc() (<< 5 crash, << 10 sample
- *                      modulator, clamps); S6 noise is unsynced; M1 the
+ *                      S5 osc_syncClockInc() (<< 10 sample modulator, clamps);
+ *                      S6 noise is unsynced; M1 the
  *                      depth and ratio maps;
  *               stock  D4 the waveform partitions 0..15 (the S086 D1/D2/D5
  *                      Re3/Sw3 checks went with the waves, S093 P3);
@@ -38,6 +39,9 @@
  *                      block equals a one-sample original at d0 + i x dStep.
  *                      Breaks (Makefile): wtb routed to the one-frame twin
  *                      fails FR1; the depth stepped before use fails FR2.
+ *               pwm    PW1-PW8 the three pulse-width forms, every render role,
+ *                      width slew, type/bind and menu-wave clamp; two breaks
+ *                      prove pulse orientation and the width limit.
  * Why:        the oscillator is the voice's sound; these are the laws each
  *             session proved, kept runnable against today's source.
  * Inputs:     build/gen/Oscillator.host.h/.c (extract.py --body), osc_host.h,
@@ -50,11 +54,14 @@
  */
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>  /* S094 P1 S3: abs() in the PWM laws */
 #include <string.h>
 #include <math.h>
 
 #include "osc_host.h"
 #include "Oscillator.host.c"
+/* S094 P1 S3: the generated tables used by the real Oscillator.c body. */
+#include "oscPwmTables.host.c"
 
 #define N OUTPUT_DMA_SIZE
 
@@ -63,7 +70,6 @@ int16_t sine_table[TABLESIZE + 1];
 int16_t sawTable[11][1024];
 int16_t triTable[11][1024];
 int16_t recTable[11][1024];
-unsigned char crashSample[32769];
 
 static uint32_t host_rng = 0x0850001u;
 static uint8_t g_claim;      /* what modNode_interpClaim() grants */
@@ -118,8 +124,6 @@ static void fill_random_tables(uint32_t seed)
     fill_random(sawTable, &s);
     fill_random(triTable, &s);
     fill_random(recTable, &s);
-    for (unsigned i = 0u; i < 32769u; ++i)
-        crashSample[i] = (unsigned char)golden_rand(&s);
 }
 
 /* The real wave shapes (pos group: continuity is checked per sample). */
@@ -133,9 +137,6 @@ static void fill_shape_tables(void)
             triTable[o][i] = (int16_t)lrint(32767.0 * (1.0 - 4.0 * fabs(x - 0.5)));
             recTable[o][i] = (i < 512u) ? 32767 : -32768;
         }
-    for (unsigned i = 0u; i < 32768u; ++i)
-        crashSample[i] = (unsigned char)(128u + (i & 127u));
-    crashSample[32768] = crashSample[0];
 }
 
 /* A wav-type oscillator (oscType 0) on a stock wave. */
@@ -174,7 +175,7 @@ static int16_t ring_ref(int16_t car, int16_t mod, int32_t d)
  */
 static void test_ring(void)
 {
-    static const uint8_t waves[] = { SINE, TRI, SAW, REC, NOISE, CRASH };
+    static const uint8_t waves[] = { SINE, TRI, SAW, REC, NOISE };
     static const float amts[] = { 0.0f, 1.0f / 127.0f, 0.5f, 126.0f / 127.0f, 1.0f };
     static const uint32_t phases[] = { 0x00000000u, 0x7fff1234u, 0xfffff000u };
     static const uint32_t incs[] = { 0x00800000u, 0x07000000u, 0x30000000u };
@@ -222,7 +223,7 @@ static void test_ring(void)
 /* S1 and S6. Break: the pull applied regardless of depth (or of NONE). */
 static void test_sync_depth0_and_unsynced(void)
 {
-    static const uint8_t waves[] = { SINE, TRI, SAW, REC, NOISE, CRASH };
+    static const uint8_t waves[] = { SINE, TRI, SAW, REC, NOISE };
     static const uint32_t clockIncs[] = { 0x01000000u, 0x30000000u, 0xf0000000u };
 
     for (unsigned w = 0u; w < sizeof(waves); ++w)
@@ -258,7 +259,7 @@ static void test_sync_depth0_and_unsynced(void)
 /* S2. Break: reset applied before sample i; ratio inverted. */
 static void test_sync_hard(void)
 {
-    static const uint8_t waves[] = { SINE, TRI, SAW, REC, CRASH };
+    static const uint8_t waves[] = { SINE, TRI, SAW, REC };
     static const unsigned ks[] = { 0u, 5u, 31u };
     const uint32_t clockInc = 0x20000000u;
     const uint32_t over_k = 0x0abcdef0u;
@@ -266,7 +267,7 @@ static void test_sync_hard(void)
     for (unsigned w = 0u; w < sizeof(waves); ++w)
      for (unsigned kk = 0u; kk < 3u; ++kk) {
         const unsigned k = ks[kk];
-        const uint32_t slaveInc = (waves[w] == CRASH) ? 0x00300000u : 0x03000000u;
+        const uint32_t slaveInc = 0x03000000u;
         const uint32_t ratio = osc_syncRatioQ16(slaveInc, clockInc);
         const uint32_t target = (uint32_t)(((uint64_t)over_k * ratio) >> 16);
         uint32_t over[N];
@@ -332,7 +333,7 @@ static void test_builder(void)
      }
 }
 
-/* S5. Break: the << 5 / << 10 scaling missing; a clamp missing. */
+/* S5. Break: sample << 10 scaling missing; a clamp missing. */
 static void test_clock(void)
 {
     static const float freqs[] = { 55.0f, 440.0f, 3000.0f };
@@ -341,11 +342,6 @@ static void test_clock(void)
     if (osc_syncClockInc(&m) != 0x01234567u) fail("S5 table clock", 0u, 0u, 0u);
     m.waveform = NOISE;
     if (osc_syncClockInc(&m) != 0x01234567u) fail("S5 noise clock", 0u, 0u, 0u);
-    m.waveform = CRASH;
-    m.phaseInc = 0x00100000u;
-    if (osc_syncClockInc(&m) != 0x02000000u) fail("S5 crash << 5", 0u, 0u, 0u);
-    m.phaseInc = 0x09000000u;
-    if (osc_syncClockInc(&m) != 0xffffffe0u) fail("S5 crash clamp", 0u, 0u, 0u);
 
     /* S087: a modulator bound to a user sample runs Q19.12 (<< 10). */
     m = make_osc(OSC_SAMPLE_START, 3u, 0u, 0x00001000u);
@@ -360,13 +356,18 @@ static void test_clock(void)
 
     for (unsigned f = 0u; f < 3u; ++f) {
         OscInfo tri = make_osc(TRI, 3u, 0u, freq2PhaseIncr1024(freqs[f]));
-        OscInfo cr = make_osc(CRASH, 3u, 0u, freq2PhaseIncr32767(freqs[f]));
+        OscInfo sample = make_osc(OSC_SAMPLE_START, 3u, 0u,
+                                  (uint32_t)((freqs[f] * 4194304.0f) / REAL_FS));
+        sample.oscType = OSC_TYPE_MODLIST;
+        sample.sampleCacheLooped = OSC_BIND_SMP;
         const uint32_t a = osc_syncClockInc(&tri);
-        const uint32_t b = osc_syncClockInc(&cr);
+        const uint32_t b = osc_syncClockInc(&sample);
         uint32_t ca = 0u, cb = 0u, over[N];
         unsigned ra = 0u, rb = 0u;
 
-        if ((a > b ? a - b : b - a) > 32u)
+        /* The user sample's Q19.12 rate has 1,024 clock units per integer
+         * step after << 10; allow one such quantization step. */
+        if ((a > b ? a - b : b - a) > 1024u)
             fail("S5 equal clock at equal frequency", f, a, b);
         for (unsigned blk = 0u; blk < 2000u; ++blk) {
             ca = osc_buildSyncList(ca, a, over, N);
@@ -425,16 +426,16 @@ static void random_mod(int16_t *m, uint32_t *s)
 }
 
 /* D4: the waveform partitions, 0..15, wav type: the table waves are
-** Tri/Saw/Rec, user entries start at 6 (S093 P3). Break: a table wave given
+** Tri/Saw/Rec, user entries start at 5 (S094 P1 S2). Break: a table wave given
 ** the sample clock; osc_isTableWave() missing a wave. */
 static void d4_partitions(void)
 {
-    if (OSC_SAMPLE_START != 6) fail("D4 OSC_SAMPLE_START", OSC_SAMPLE_START, 6u, 0u);
-    if (OSC_STOCK_LAST != CRASH) fail("D4 OSC_STOCK_LAST", OSC_STOCK_LAST, CRASH, 0u);
+    if (OSC_SAMPLE_START != 5) fail("D4 OSC_SAMPLE_START", OSC_SAMPLE_START, 5u, 0u);
+    if (OSC_STOCK_LAST != NOISE) fail("D4 OSC_STOCK_LAST", OSC_STOCK_LAST, NOISE, 0u);
     for (uint8_t wv = 0u; wv < 16u; ++wv) {
         const int table = wv == TRI || wv == SAW || wv == REC;
         OscInfo m = make_osc(wv, 0u, 0u, 0x00123456u);
-        const uint32_t want = (wv == CRASH) ? (0x00123456u << 5) : 0x00123456u;
+        const uint32_t want = 0x00123456u;
 
         if (osc_isTableWave(wv) != table) fail("D4 osc_isTableWave", wv, osc_isTableWave(wv), (unsigned)table);
         if (osc_syncClockInc(&m) != want) fail("D4 osc_syncClockInc", wv, osc_syncClockInc(&m), want);
@@ -464,8 +465,6 @@ static void render(OscInfo *osc, int16_t *buf)
 {
     if (osc->waveform == SINE)
         calcSineBlock(osc, buf, N, 1.0f);
-    else if (osc->waveform == CRASH)
-        calcSampleOscBlock(osc, buf, N, 1.0f);
     else
         calcWavetableOscBlock(osc, (const int16_t (*)[1024])wave_table(osc->waveform), buf, N, 1.0f);
 }
@@ -488,13 +487,6 @@ static int16_t expected_sample(uint8_t waveform, uint32_t phase)
         out += frac * (sine_table[itg + 1u] - out);
         return out;
     }
-    if (waveform == CRASH) {
-        const uint32_t itg = phase >> 17;
-        int16_t out = crashSample[itg];
-        const float frac = (phase & 0x0001FFFFu) * 0.00000762939453125f;
-        out += frac * (crashSample[itg + 1u] - out);
-        return (int16_t)((out - 127) * 256);
-    }
     {
         int16_t (*t)[1024] = wave_table(waveform);
         const uint32_t itg = phase >> 22;
@@ -506,7 +498,7 @@ static int16_t expected_sample(uint8_t waveform, uint32_t phase)
     }
 }
 
-static const uint8_t phase_waves[] = { SINE, TRI, SAW, REC, CRASH };
+static const uint8_t phase_waves[] = { SINE, TRI, SAW, REC };
 
 /* P1: trigger offset against an independent truth table. Break: pos << 24;
 ** a wave dropped from osc_positionIsPhase(); the & 127 mask removed. */
@@ -515,8 +507,7 @@ static void test_trigger(void)
     static const unsigned positions[] = { 0u, 1u, 64u, 127u, 128u, 255u };
 
     for (uint8_t w = 0u; w < 16u; ++w) {
-        const int phase_wave = (w == SINE || w == TRI || w == SAW || w == REC ||
-                                w == CRASH);
+        const int phase_wave = (w == SINE || w == TRI || w == SAW || w == REC);
         for (unsigned i = 0u; i < sizeof(positions) / sizeof(positions[0]); ++i) {
             const unsigned p = positions[i];
             OscInfo osc = make_osc(w, 3u, 0x12345678u, 0u);
@@ -1324,6 +1315,313 @@ static void run_fmramp(void)
     g_claim = 0u;
 }
 
+/* ================================================================ pwm --
+ * S094 P1 S3 laws for typ pwm.
+ *   PW1  p = 64: WS equals calcSineBlock() and WT equals the stock table
+ *        read (calcWavetableOscBlock()) within 2 LSB (integer against float
+ *        interpolation) at gain 1;
+ *   PW2  D, both signs, p in {1, 16, 63, 64, 65, 100, 127}, three phases and
+ *        increments: bit-exact against an independent reader written here;
+ *   PW3  orientation on an ideal descending saw (1 - 2x): the difference is
+ *        high (> 0) for the first w of the cycle and low after; the sum and
+ *        the difference both peak at the table's level (within the Q14
+ *        rounding);
+ *   PW4  WT on an ideal triangle: the output's peak sits at phase p / 128
+ *        (within one table point) for p in {8, 32, 64, 96, 120};
+ *   PW5  the width slew moves at most OSC_PWM_SLEW_STEPS per block toward
+ *        pos, lands on it, never overshoots, leaves phaseInc untouched;
+ *        osc_typedTriggerPhase() snaps it and returns 0;
+ *   PW6  depth 0 identities: FM (fmMod 0), FM ramp (d0 = dStep = 0), ring
+ *        (depth 0), sync (depth 0) equal the plain role at gain 1 bit for
+ *        bit, every form;
+ *   PW7  routing: osc_renderTyped / Fm / FmRamp / Ring / Sync send an
+ *        OSC_BIND_PWM oscillator to the pwm roles (outputs equal the role
+ *        called directly); oscSection_renderOldCarrier() on a pwm snapshot
+ *        plays the frozen width;
+ *   PW8  type and bind: osc_setType(pwm) clamps wav 4 -> 3 (Rec);
+ *        osc_isTyped() is 1 for pwm, 0 for OSC_TYPE_MODLIST (5);
+ *        osc_userCount(pwm) is 4; osc_userBind() gives
+ *        freq2PhaseIncr1024(f) and freqToTableIndex(f), bind OSC_BIND_PWM.
+ * Break builds: the Makefile's break_pwm1 (forward second read) and
+ * break_pwm2 (unlimited slew).
+ */
+static OscInfo pwm_osc(uint8_t wave, uint8_t width, uint32_t phase, uint32_t inc)
+{
+    OscInfo o = make_osc(wave, 3u, phase, inc);
+
+    o.oscType = OSC_TYPE_PWM;
+    o.sampleCacheLooped = OSC_BIND_PWM;
+    o.position = width;
+    o.positionApplied = width;
+    return o;
+}
+
+/* the independent D reader (PW2): the law written out, not the loop */
+static int16_t pwm_refD(uint8_t width, int sign, uint32_t ph, int g)
+{
+    const int16_t *row = sawTable[3];
+    const uint32_t w = (uint32_t)(width ? width : 1u) * 8u;
+    const uint32_t ia = ph >> 22, ib = (ia + 1024u - w) & 1023u;
+    const int32_t a0 = row[ia], a1 = row[(ia + 1u) & 1023u];
+    const int32_t b0 = row[ib], b1 = row[(ib + 1u) & 1023u];
+    const int32_t d0 = a0 + sign * b0, d1 = a1 + sign * b1;
+    const int32_t o = d0 + (((d1 - d0) * (int32_t)((ph >> 7) & 0x7FFF)) >> 15);
+    int32_t v = (o * g) >> 14;
+
+    return (int16_t)(v > 32767 ? 32767 : (v < -32768 ? -32768 : v));
+}
+
+static void pwm_d_exact(void)
+{
+    static const uint8_t widths[] = { 1u, 16u, 63u, 64u, 65u, 100u, 127u };
+    static const uint32_t phases[] = { 0u, 0x7fff1234u, 0xfffff000u };
+    static const uint32_t incs[] = { 0x00800000u, 0x07000000u, 0x30000000u };
+    uint32_t seed = 0x94d0u;
+
+    /*
+     * Random row 3, bounded to +-8,192: a wrong offset or sign shows at once,
+     * and every neighbouring-point step stays <= 16,383, inside the D form's
+     * proven range (the stock rows' worst step is 32,767; unbounded random
+     * int16 rows would overflow the Q15 product, which no stock row can).
+     */
+    for (unsigned i = 0u; i < 1024u; ++i)
+        sawTable[3][i] = (int16_t)((int32_t)(golden_rand(&seed) >> 18) - 8192);
+    for (unsigned s = 0u; s < 2u; ++s)
+     for (unsigned w = 0u; w < sizeof widths; ++w)
+      for (unsigned p = 0u; p < 3u; ++p)
+       for (unsigned k = 0u; k < 3u; ++k) {
+        OscInfo o = pwm_osc(s ? REC : SAW, widths[w], phases[p], incs[k]);
+        const unsigned m = ((widths[w] > 64u) ? widths[w] : 128u - widths[w]) - 64u;
+        const int g = oscPwmLevelQ14[m];
+        int16_t out[N];
+        uint32_t ph = phases[p];
+
+        osc_pwmRenderPlain(&o, out, N, 1.0f);
+        for (unsigned i = 0u; i < N; ++i, ph += incs[k])
+            if (out[i] != pwm_refD(widths[w], s ? -1 : 1, ph, g)) {
+                fail("PW2 D exact", s, widths[w], i);
+                break;
+            }
+    }
+}
+
+static void pwm_identities(void)
+{
+    static const uint8_t waves[] = { SINE, TRI, SAW, REC };
+    int16_t mod[N], plain[N], out[N];
+    uint32_t over[N];
+    uint32_t s = 0x94u;
+
+    random_mod(mod, &s);
+    for (unsigned i = 0u; i < N; ++i) over[i] = OSC_SYNC_NONE;
+    for (unsigned w = 0u; w < 4u; ++w) {
+        OscInfo a = pwm_osc(waves[w], 37u, 0x12340000u, 0x02345678u), b;
+
+        b = a; osc_pwmRenderPlain(&b, plain, N, 1.0f);
+        b = a; b.fmMod = 0.0f; osc_pwmRenderFm(&b, mod, out, N, 1.0f);
+        if (!same_buf(out, plain)) fail("PW6 FM depth 0", w, 0u, 0u);
+        b = a; osc_pwmRenderFmRamp(&b, mod, out, N, 1.0f, 0.0f, 0.0f);
+        if (!same_buf(out, plain)) fail("PW6 FM ramp depth 0", w, 0u, 0u);
+        b = a; osc_pwmRenderRing(&b, mod, out, N, 0, 0);
+        if (!same_buf(out, plain)) fail("PW6 ring depth 0", w, 0u, 0u);
+        b = a; osc_pwmRenderSync(&b, over, 65536u, 0, out, N);
+        if (!same_buf(out, plain)) fail("PW6 sync depth 0", w, 0u, 0u);
+        /* PW7: the ITCM dispatchers route OSC_BIND_PWM to the roles */
+        b = a; osc_renderTyped(&b, out, N, 1.0f);
+        if (!same_buf(out, plain)) fail("PW7 osc_renderTyped", w, 0u, 0u);
+        b = a; b.fmMod = 0.0f; osc_renderTypedFm(&b, mod, out, N, 1.0f);
+        if (!same_buf(out, plain) || b.phase != a.phase + N * a.phaseInc)
+            fail("PW7 osc_renderTypedFm", w, 0u, 0u);
+        b = a; osc_renderTypedFmRamp(&b, mod, out, N, 1.0f, 0.0f, 0.0f);
+        if (!same_buf(out, plain) || b.phase != a.phase + N * a.phaseInc)
+            fail("PW7 osc_renderTypedFmRamp", w, 0u, 0u);
+        b = a; osc_renderTypedRing(&b, mod, out, N, 0, 0);
+        if (!same_buf(out, plain) || b.phase != a.phase + N * a.phaseInc)
+            fail("PW7 osc_renderTypedRing", w, 0u, 0u);
+        b = a; osc_renderTypedSync(&b, over, a.phaseInc, 0, out, N);
+        if (!same_buf(out, plain) || b.phase != a.phase + N * a.phaseInc)
+            fail("PW7 osc_renderTypedSync", w, 0u, 0u);
+        /*
+         * PW7: the itp old carrier of a pwm snapshot plays its frozen width.
+         * The live block is the plain render itself, so the crossfade of two
+         * equal signals returns them to within 1 LSB (the blend's float
+         * rounding); a wrong width or a zero block would be far off.
+         */
+        {
+            OscCarrierSnapshot snap;
+            int16_t live[N];
+
+            memset(&snap, 0, sizeof snap);
+            snap.phase = a.phase;
+            snap.phaseInc = a.phaseInc;
+            snap.waveform = a.waveform;
+            snap.tableOffset = a.tableOffset;
+            snap.oscType = OSC_TYPE_PWM;
+            snap.sampleCacheLooped = OSC_BIND_PWM;
+            snap.positionApplied = a.positionApplied;
+            snap.active = 1u;
+            snap.counter = OSC_RUN_ITP_FADE_BLOCKS;
+            memcpy(live, plain, sizeof live);
+            oscSection_renderOldCarrier(&snap, live, N);
+            for (unsigned i = 0u; i < N; ++i)
+                if (abs(live[i] - plain[i]) > 1) {
+                    fail("PW7 old carrier at its frozen width", w, i, 0u);
+                    break;
+                }
+        }
+    }
+}
+
+static void pwm_slew_and_type(void)
+{
+    OscInfo o = pwm_osc(SAW, 10u, 0u, 0x01000000u);
+    const uint32_t inc = o.phaseInc;
+
+    o.position = 100u;
+    for (unsigned b = 0u; b < 60u; ++b) {
+        const uint8_t before = o.positionApplied;
+
+        osc_typedPositionApply(&o, 1u);
+        if (abs((int)o.positionApplied - (int)before) > OSC_PWM_SLEW_STEPS)
+            fail("PW5 slew step", b, before, o.positionApplied);
+        if (o.positionApplied > 100u) fail("PW5 overshoot", b, o.positionApplied, 0u);
+        if (o.phaseInc != inc || o.positionBendStep != 0)
+            fail("PW5 phaseInc untouched", b, 0u, 0u);
+        osc_typedPositionRestore(&o);
+    }
+    if (o.positionApplied != 100u) fail("PW5 lands", o.positionApplied, 100u, 0u);
+    o.position = 3u;
+    if (osc_typedTriggerPhase(&o) != 0u || o.positionApplied != 3u)
+        fail("PW5 trigger snaps", o.positionApplied, 0u, 0u);
+    /* PW8 */
+    {
+        OscInfo t = make_osc(SAW, 0u, 0u, 0u);
+
+        t.freq = 220.0f; t.pitchMod = 1.0f; t.modNodeValue = 1.0f;
+        t.waveform = 4u;
+        osc_setType(&t, OSC_TYPE_PWM);
+        if (t.waveform != 3u) fail("PW8 wav clamps to Rec", t.waveform, 3u, 0u);
+        if (!osc_isTyped(&t)) fail("PW8 pwm is typed", 0u, 0u, 0u);
+        t.oscType = OSC_TYPE_MODLIST;
+        if (osc_isTyped(&t)) fail("PW8 MODLIST is not typed", 0u, 0u, 0u);
+        if (osc_userCount(OSC_TYPE_PWM) != 4u) fail("PW8 count", osc_userCount(OSC_TYPE_PWM), 4u, 0u);
+        t.oscType = OSC_TYPE_PWM;
+        osc_userBind(&t);
+        if (t.sampleCacheLooped != OSC_BIND_PWM || t.phaseInc != freq2PhaseIncr1024(220.0f) ||
+            t.tableOffset != freqToTableIndex(220.0f))
+            fail("PW8 bind law", t.phaseInc, freq2PhaseIncr1024(220.0f), t.tableOffset);
+    }
+}
+
+static void pwm_shapes(void)
+{
+    /* PW1: p = 64 against the stock reads (shape tables) */
+    {
+        OscInfo a = pwm_osc(SINE, 64u, 0x01000000u, 0x00654321u), b;
+        int16_t x[N], y[N];
+
+        b = a; b.oscType = OSC_TYPE_WAV;
+        osc_pwmRenderPlain(&a, x, N, 1.0f);
+        calcSineBlock(&b, y, N, 1.0f);
+        for (unsigned i = 0u; i < N; ++i)
+            if (abs(x[i] - y[i]) > 2) { fail("PW1 sine at 64", i, x[i], y[i]); break; }
+        a = pwm_osc(TRI, 64u, 0x01000000u, 0x00654321u);
+        b = a; b.oscType = OSC_TYPE_WAV;
+        osc_pwmRenderPlain(&a, x, N, 1.0f);
+        calcWavetableOscBlock(&b, (const int16_t (*)[1024])triTable, y, N, 1.0f);
+        for (unsigned i = 0u; i < N; ++i)
+            if (abs(x[i] - y[i]) > 2) { fail("PW1 tri at 64", i, x[i], y[i]); break; }
+    }
+    /* PW3: orientation on an ideal descending saw */
+    for (unsigned i = 0u; i < 1024u; ++i)
+        sawTable[3][i] = (int16_t)lrint(32767.0 * (1.0 - 2.0 * (double)i / 1024.0));
+    {
+        static const uint8_t widths[] = { 16u, 64u, 100u };
+
+        for (unsigned w = 0u; w < 3u; ++w) {
+            OscInfo o = pwm_osc(REC, widths[w], 0u, 0x00800000u);   /* 1/512 cycle */
+            int16_t out[N];
+            unsigned hiBad = 0u, loBad = 0u;
+
+            for (unsigned blk = 0u; blk < 16u; ++blk) {
+                const uint32_t ph0 = o.phase;
+
+                osc_pwmRenderPlain(&o, out, N, 1.0f);
+                for (unsigned i = 0u; i < N; ++i) {
+                    const uint32_t ph = ph0 + i * 0x00800000u;
+                    const uint32_t edge = (uint32_t)widths[w] << 25;
+                    /* away from the two edges (3 points either side) */
+                    const int nearEdge = (ph >> 22) < 3u || (ph >> 22) > 1020u ||
+                        ((ph >> 22) + 3u > (edge >> 22) && (ph >> 22) < (edge >> 22) + 3u);
+
+                    if (nearEdge) continue;
+                    if (ph < edge && out[i] <= 0) hiBad++;
+                    if (ph >= edge && out[i] >= 0) loBad++;
+                }
+            }
+            if (hiBad || loBad) fail("PW3 pulse high first", widths[w], hiBad, loBad);
+        }
+    }
+    /* PW3: the level table keeps both two-saw forms at the stock peak. */
+    {
+        static const uint8_t widths[] = { 16u, 64u, 100u };
+
+        for (unsigned sign = 0u; sign < 2u; ++sign)
+         for (unsigned w = 0u; w < 3u; ++w) {
+            OscInfo o = pwm_osc(sign ? REC : SAW, widths[w], 0u,
+                                0x00400000u); /* 1,024 samples per cycle */
+            int16_t out[N];
+            int peak = 0;
+
+            for (unsigned blk = 0u; blk < 32u; ++blk) {
+                osc_pwmRenderPlain(&o, out, N, 1.0f);
+                for (unsigned i = 0u; i < N; ++i) {
+                    const int level = abs((int)out[i]);
+
+                    if (level > peak)
+                        peak = level;
+                }
+            }
+            if (abs(peak - 32767) > 4)
+                fail("PW3 D form preserves peak", sign, widths[w], peak);
+        }
+    }
+    /* PW4: the warped triangle peaks at p / 128 */
+    fill_shape_tables();
+    {
+        static const uint8_t widths[] = { 8u, 32u, 64u, 96u, 120u };
+
+        for (unsigned w = 0u; w < 5u; ++w) {
+            OscInfo o = pwm_osc(TRI, widths[w], 0u, 0x00400000u);   /* 1/1024 */
+            int16_t out[N];
+            int best = -40000;
+            uint32_t bestPh = 0u;
+
+            for (unsigned blk = 0u; blk < 32u; ++blk) {
+                const uint32_t ph0 = o.phase;
+
+                osc_pwmRenderPlain(&o, out, N, 1.0f);
+                for (unsigned i = 0u; i < N; ++i)
+                    if (out[i] > best) { best = out[i]; bestPh = ph0 + i * 0x00400000u; }
+            }
+            if (abs((int)(bestPh >> 22) - (int)widths[w] * 8) > 1)
+                fail("PW4 tri peak at p/128", widths[w], bestPh >> 22, widths[w] * 8u);
+        }
+    }
+}
+
+static void run_pwm(void)
+{
+    /* the shape tables (bounded steps) for the identities, then pwm_d_exact()
+     * replaces row 3 of the saw with bounded random data */
+    fill_shape_tables();
+    pwm_identities();
+    pwm_slew_and_type();
+    pwm_d_exact();
+    fill_shape_tables();
+    pwm_shapes();
+}
+
 int main(void)
 {
 #ifdef OSC_POS_TEST_CAP
@@ -1338,6 +1636,7 @@ int main(void)
     group("wtb", run_wtb);
     group("itp", run_itp);
     group("fmramp", run_fmramp);
+    group("pwm", run_pwm);
 #endif
     printf("oscillator failures: %u\n", failures);
     return failures ? 1 : 0;

@@ -32,6 +32,8 @@ lfo_target_param_2=255
 alk_attack=0
 osc1_position=0
 osc1_type=0
+instrument_drive=0
+alk_tone=127
 
 [morph]
 osc1_wave=0
@@ -57,4 +59,6 @@ lfo_offset=0
 velo_mod_amount=0
 alk_attack=0
 osc1_position=0
+instrument_drive=0
+alk_tone=127
 

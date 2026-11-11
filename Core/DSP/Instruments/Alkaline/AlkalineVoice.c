@@ -6,6 +6,8 @@
 #include <math.h>
 #include "AlkalineVoice.h"
 #include "AlkalineTables.h"
+#include "AlkalinePostTables.h"   /* S094 P1 S4: overdrive, tone, A3 drive */
+#include "oscPwmTables.h"         /* S094 P1 S5: the pwm level table */
 #include "wavetable.h"
 #include "MidiPitch.h"
 #include "modulationNode.h"     /* S093 P4: velocityModulators[], modNode_updateValue() */
@@ -22,6 +24,22 @@
  * full-scale frame (+-32,767 LSB) swings as far as the stock saw (+-32,625
  * LSB = the 303 saw's 5.35 V), times the block's drive */
 #define ALK_WTB_SCALE_V  ALK_SAW_SCALE_V
+
+/*
+ * The pwm pulse's input scale (S094 P1 S5, plan finding 3).
+ *
+ * What:       volts per LSB of the two-read pulse under Sqr: the saw's scale
+ *             x 1.40.
+ * Why:        the 303 square (alkSqrTable, ALK_SQR_SCALE_V) is tilted and
+ *             carries more RMS than a flat pulse of the same peak: measured
+ *             on rows 3 and 5, square 3.74 / 3.86 V RMS against the saw
+ *             difference's 2.66 / 2.69 V, ratio 1.41 / 1.43 (1.09 on row 1).
+ *             1.40 makes pos 64 under pwm about as loud as Sqr under wav into
+ *             the ladder. Saw under pwm keeps the saw's own scale (its sum at
+ *             pos 64 is the octave-up saw at the same peak).
+ * Accessors:  alk_renderPwm().
+ */
+#define ALK_PWM_SQR_SCALE_V  (ALK_SAW_SCALE_V * 1.40f)
 
 /*
  * The silent row (S093 P8).
@@ -225,6 +243,10 @@ void Alkaline_initVoice(AlkalineVoice *voice)
 	voice->tuning = 63.0f / 127.0f;
 	voice->drive = 0.0f;
 	voice->attack = 0.0f;   /* S093 P6: init.alk alk_attack = 0, today's attack */
+	/* S094 P1 S4: init.alk instrument_drive 0 (no overdrive) and alk_tone
+	 * 127 (open): the neutral, bit-identical settings */
+	voice->vcaDrive = 0u;
+	voice->tone = 127u;
 	voice->vol = 100.0f / 127.0f;
 	voice->pan = 63u;
 	voice->slide = 0u;
@@ -294,10 +316,14 @@ void Alkaline_triggerVoice(AlkalineVoice *voice, const uint8_t source_slot,
 		alkMeg_trigger(&voice->meg);
 		alkVeg_trigger(&voice->veg, voice->attack);
 		/* S093 P8: typ wtb starts on pos's frame position (alk_wtbTrigger();
-		 * revision 3: fractional, blended by the render); Saw/Sqr keep the
-		 * P6 start-phase rule below */
+		 * revision 3: fractional, blended by the render); S094 P1 S5: typ pwm
+		 * snaps the width to pos and leaves the phase free-running (the 303's
+		 * VCO; pos is the width, not a start phase); Saw/Sqr keep the P6
+		 * start-phase rule below */
 		if (voice->osc.oscType == OSC_TYPE_WTB) {
 			alk_wtbTrigger(voice);
+		} else if (voice->osc.oscType == OSC_TYPE_PWM) {
+			voice->osc.positionApplied = (uint8_t)(voice->osc.position & 127u);
 		} else
 		/*
 		 * S093 P6: pos, the note-start phase (user).
@@ -369,7 +395,8 @@ void Alkaline_calcVoiceAsync(AlkalineVoice *voice)
 	voice->osc.freq = alk_exp2f(voice->pitchLog2
 	                        + (voice->tuning * 127.0f - 63.0f) * (7.0f / 12.0f / 63.0f));
 	/* S093 P8: Saw/Sqr (typ wav) keep the table law and the P6 pos bend;
-	 * typ wtb takes its own per-block control (alk_wtbControl()) */
+	 * S094 P1 S5: pwm takes the table law and the width slew; typ wtb takes
+	 * its own per-block control (alk_wtbControl()) */
 	if (voice->osc.oscType == OSC_TYPE_WAV) {
 		osc_setTableFreq(&voice->osc);
 		/*
@@ -404,6 +431,33 @@ void Alkaline_calcVoiceAsync(AlkalineVoice *voice)
 				(uint8_t)(((uint32_t)voice->osc.positionApplied + (uint32_t)d) & 127u);
 			voice->osc.phaseInc += (uint32_t)(d * (int32_t)OSC_POS_BEND_PER_STEP);
 		}
+	} else if (voice->osc.oscType == OSC_TYPE_PWM) {
+		/*
+		 * S094 P1 S5: pwm control.
+		 *
+		 * What:       osc_setTableFreq() (phaseInc and the octave row, as
+		 *             wav: the pwm reads are sawTable rows); then the width
+		 *             slew: positionApplied moves toward pos by at most
+		 *             OSC_PWM_SLEW_STEPS (2), linearly (the drums' rule,
+		 *             osc_typedPositionApply()).
+		 * Why:        a width jump is a waveform step at the block rate; the
+		 *             slew keeps knob and LFO sweeps smooth (P-D7). No phase
+		 *             bend: pos is not a phase under pwm.
+		 * Cost:       per block: the table law (as wav) and about 6
+		 *             instructions for the slew.
+		 */
+		osc_setTableFreq(&voice->osc);
+		{
+			int32_t d = (int32_t)(voice->osc.position & 127u) -
+			            (int32_t)voice->osc.positionApplied;
+
+			if (d > OSC_PWM_SLEW_STEPS)
+				d = OSC_PWM_SLEW_STEPS;
+			else if (d < -OSC_PWM_SLEW_STEPS)
+				d = -OSC_PWM_SLEW_STEPS;
+			voice->osc.positionApplied =
+				(uint8_t)((int32_t)voice->osc.positionApplied + d);
+		}
 	} else {
 		alk_wtbControl(voice);
 	}
@@ -422,17 +476,42 @@ void Alkaline_calcVoiceAsync(AlkalineVoice *voice)
 	voice->iLadRaw = iLad;
 	voice->iLadEnd = iLad * alk_prewarp(iLad, voice->reso);
 
-	/* drive x1..x16 (S093 P6, user: twice the former x8 maximum; D16) and the
-	 * output make-up falling with it (B-2) */
+	/*
+	 * Drive, overdrive and tone for this block (S093 P6 drive x1..x16;
+	 * S094 P1 S4: A3 and the post-filter controls).
+	 *
+	 * What:       each knob (0..1) becomes a byte index 0..127 (x 127 + 0.5,
+	 *             rounded down: a descriptor value k / 127 gives k exactly; a
+	 *             modulated value rounds to the nearest byte, about 0.19 dB of
+	 *             drive per step):
+	 *               di (alk_drive): driveGain = alkDriveGain[di] (x1..x16, the
+	 *                  input pair), the drive make-up alkDriveMakeup[di];
+	 *               oi (instrument_drive, a byte 0..127 already): the OTA
+	 *                  input gain alkOvdGain[oi] and its make-up
+	 *                  alkOvdMakeup[oi], multiplied into the OTA current's
+	 *                  make-up;
+	 *               ti (alk_tone, a byte 0..127 already): the one-pole's c,
+	 *                  alkToneC[ti].
+	 *             The two post-filter bytes are masked to 0..127 (one AND
+	 *             each), so no write path can index past a table.
+	 * Why:        A3 (post-FX §5): two table reads replace two alk_exp2f()
+	 *             calls (-40 per block, measured); bit-identical at drive 0
+	 *             (both entries are the exact f = 0 evaluation). The overdrive
+	 *             and tone are per-block constants of the loop (P9-A').
+	 *             alkOvdMakeup[0] = 1.0f keeps the make-up exact at Overdrive 0.
+	 * Inputs:     voice->drive, vcaDrive, tone.
+	 * Outputs:    voice->driveGain, voice->makeup; ladder otaIn, toneC
+	 *             (DiodeLadder_setPost()).
+	 * Cost:       per block only; no VDIV.
+	 */
 	{
-		const float drv = fminf(fmaxf(voice->drive, 0.0f), 1.0f);
+		const uint32_t di = (uint32_t)(fminf(fmaxf(voice->drive, 0.0f), 1.0f) * 127.0f + 0.5f);
+		const uint32_t oi = (uint32_t)voice->vcaDrive & 127u;
+		const uint32_t ti = (uint32_t)voice->tone & 127u;
 
-		const float t = alk_exp2f(drv);                             /* T1-8 */
-		const float t2 = t * t;
-
-		/* 16^drv = (2^drv)^4: x1 at 0, x4 at the middle, x16 at 1 */
-		voice->driveGain = t2 * t2;
-		voice->makeup = alk_exp2f(ALK_MAKEUP_OCT * (1.0f - drv));
+		voice->driveGain = alkDriveGain[di];
+		voice->makeup = alkDriveMakeup[di] * alkOvdMakeup[oi];
+		DiodeLadder_setPost(&voice->ladder, alkOvdGain[oi], alkToneC[ti]);
 	}
 
 	/* Res-interpolated network for this block */
@@ -586,21 +665,71 @@ static __attribute__((noinline)) void alk_renderWtb(AlkalineVoice *voice, int16_
 	                        voice->iLadEnd, voice->iAbcEnd * voice->makeup);
 }
 
+/*
+ * One block of typ pwm (S094 P1 S5).
+ *
+ * What:       p = the applied width clamped to 1..127; the level
+ *             64 / max(p, 128 - p) from oscPwmLevelQ14[] (the drums' D form:
+ *             keeps the sum and the difference at the table's peak); the
+ *             scale = (Sqr ? ALK_PWM_SQR_SCALE_V : ALK_SAW_SCALE_V) x level x
+ *             the drive; then DiodeLadder_renderB2OscPwm() on the octave's
+ *             sawTable row (osc.tableOffset, set by osc_setTableFreq() in the
+ *             async) with the second read p x 8 points earlier, summed (Saw)
+ *             or differenced (Sqr).
+ * Why:        PWM draft §5: Sqr becomes the variable pulse, Saw the two-saw
+ *             sum (P-D2); both from the band-limited saw rows, so every
+ *             width is band-limited. noinline, as alk_renderWav() and
+ *             alk_renderWtb(): each type's render keeps its registers to
+ *             itself (the S093 P8 spike measured the shared form 2 dearer).
+ * Inputs:     voice (the async ran this block: phaseInc, tableOffset,
+ *             positionApplied, driveGain, makeup, the post-filter controls);
+ *             buf (output).
+ * Outputs:    buf; osc.phase; the ladder state.
+ * Accessors:  Alkaline_calcVoiceSyncBlock().
+ * Affiliates: DiodeLadder_renderB2OscPwm(); oscPwmLevelQ14 (oscPwmTables.h);
+ *             bench law AL-PW.
+ */
+static __attribute__((noinline)) void alk_renderPwm(AlkalineVoice *voice, int16_t *buf)
+{
+	OscInfo *const osc = &voice->osc;
+	/* the applied width, 1..127 (pos 0 acts as 1, P-D3) */
+	uint32_t p = (uint32_t)(osc->positionApplied & 127u);
+
+	if (p < 1u)
+		p = 1u;
+	{
+		/* the level index: distance of the wider part from half, 0..63 */
+		const uint32_t m = ((p > 64u) ? p : (128u - p)) - 64u;
+		/* the level 0.5..1 (Q14 / 16384: a multiply, never a VDIV) */
+		const float level = (float)oscPwmLevelQ14[m] * (1.0f / 16384.0f);
+		const uint8_t square = (uint8_t)(osc->waveform == ALK_WAVE_SQUARE);
+
+		DiodeLadder_renderB2OscPwm(&voice->ladder, buf, sawTable[osc->tableOffset],
+		                           &osc->phase, osc->phaseInc, p << 3,
+		                           square ? -1.0f : 1.0f,
+		                           (square ? ALK_PWM_SQR_SCALE_V : ALK_SAW_SCALE_V)
+		                               * level * voice->driveGain,
+		                           voice->iLadEnd, voice->iAbcEnd * voice->makeup);
+	}
+}
+
 void Alkaline_calcVoiceSyncBlock(AlkalineVoice *voice, int16_t *buf, const uint8_t size)
 {
 	(void)size;   /* the ladder always renders OUTPUT_DMA_SIZE */
 	/*
-	 * S093 P8: the per-block type dispatch.
+	 * S093 P8: the per-block type dispatch (S094 P1 S5: pwm added).
 	 *
 	 * What:       wtb -> alk_renderWtb() (the frame glide; a two-row blend
-	 *             with a slot, the nearest frame without), anything else
-	 *             -> alk_renderWav() (Saw/Sqr).
-	 * Why:        one branch per block, outside every loop; both feed the
-	 *             one out-of-line table loop (S093 P8 spike: 214, mixer 0
+	 *             with a slot, the nearest frame without), pwm ->
+	 *             alk_renderPwm(), anything else -> alk_renderWav() (Saw/Sqr).
+	 * Why:        one branch per block, outside every loop; each type feeds
+	 *             its own out-of-line table loop (S093 P8 spike: 214, mixer 0
 	 *             grew; with the type code inlined beside it, 216).
 	 */
 	if (voice->osc.oscType == OSC_TYPE_WTB)
 		alk_renderWtb(voice, buf);
+	else if (voice->osc.oscType == OSC_TYPE_PWM)
+		alk_renderPwm(voice, buf);
 	else
 		alk_renderWav(voice, buf);
 }
@@ -617,11 +746,13 @@ uint8_t Alkaline_isQuiet(const AlkalineVoice *voice)
 void Alkaline_setOscType(AlkalineVoice *voice, const uint8_t typ)
 {
 	OscInfo *const osc = &voice->osc;
-	/* the byte -> the platform type: 0 wav, 1 and above wtb */
-	const uint8_t type = (typ == ALK_TYP_WAV) ? OSC_TYPE_WAV : OSC_TYPE_WTB;
-	/* the number of entries of the new type's wav list */
-	const uint8_t count = (type == OSC_TYPE_WAV) ? (uint8_t)(ALK_WAVE_SQUARE + 1u)
-	                    : sampleMemory_getNumWavetables();
+	/* the byte -> the platform type: 0 wav, 1 wtb, 2 and above pwm */
+	const uint8_t type = (typ == ALK_TYP_WAV) ? OSC_TYPE_WAV
+	                   : ((typ == ALK_TYP_WTB) ? OSC_TYPE_WTB : OSC_TYPE_PWM);
+	/* the number of entries of the new type's wav list: Saw/Sqr under wav
+	 * and pwm, the installed tables under wtb */
+	const uint8_t count = (type == OSC_TYPE_WTB) ? sampleMemory_getNumWavetables()
+	                    : (uint8_t)(ALK_WAVE_SQUARE + 1u);
 	const uint8_t last = count ? (uint8_t)(count - 1u) : 0u;
 
 	if (type == osc->oscType)

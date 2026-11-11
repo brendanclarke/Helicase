@@ -149,6 +149,26 @@ typedef struct {
 	const DiodeLadderNet *latLo;
 	const DiodeLadderNet *latHi;
 	float latFrac;
+	/*
+	 * Post-filter VCA overdrive and tone (S094 P1 S4).
+	 *
+	 * What:       otaIn: the OTA input argument's scale per block, gain x
+	 *             1/(2 Vt) (DL_2VT); 1/(2 Vt) at Overdrive 0. toneC: the tone
+	 *             one-pole's coefficient c (0 = open). toneZ: the one-pole's
+	 *             state, the last stored output before its int16 saturation.
+	 * Why:        P9-A' (post-FX draft §3): the overdrive turns the OTA's
+	 *             constant input scale into a per-block variable, and the tone
+	 *             filters the OTA output inside the loop; at their neutral
+	 *             values both are exact (bit-identical output, P9-D7).
+	 * Inputs:     DiodeLadder_setPost() (per block, from the async);
+	 *             DiodeLadder_init().
+	 * Outputs:    read by dl_renderB2Body(); toneZ written back per block.
+	 * Layout:     +12 B (DiodeLadder 232 -> 244 B at r6); inside the voice's
+	 *             slot reserve (no RAM growth).
+	 */
+	float otaIn;
+	float toneC;
+	float toneZ;
 	uint8_t rk;           /* blocks of output ramp left */
 	uint8_t phase;        /* block index within the window */
 } DiodeLadder;
@@ -156,6 +176,23 @@ typedef struct {
 void DiodeLadder_init(DiodeLadder *dl);
 void DiodeLadder_setNet(DiodeLadder *dl, const DiodeLadderNet *lo,
                         const DiodeLadderNet *hi, float frac);
+/*
+ * Set the post-filter controls for the next block (S094 P1 S4).
+ *
+ * What:       otaIn = gain x (1 / DL_2VT); toneC = c.
+ * Why:        inline, so the async pays two stores and one multiply; the
+ *             constant 1.0f / DL_2VT is the same expression DiodeLadder.c's
+ *             DL_INV_2VT folds, so gain 1.0f gives today's OTA scale bit for
+ *             bit (x x 1.0f = x).
+ * Inputs:     dl; gain (alkOvdGain[], 1..16); c (alkToneC[], 0..0.9).
+ * Outputs:    dl->otaIn, dl->toneC.
+ * Accessors:  Alkaline_calcVoiceAsync().
+ */
+static inline void DiodeLadder_setPost(DiodeLadder *dl, const float gain, const float c)
+{
+	dl->otaIn = gain * (1.0f / DL_2VT);
+	dl->toneC = c;
+}
 void DiodeLadder_renderB2(DiodeLadder *dl, int16_t *buf, float sScale,
                           float iLadEnd, float iAbcEnd);
 void DiodeLadder_renderB2Osc(DiodeLadder *dl, int16_t *buf, const int16_t *row,
@@ -179,6 +216,15 @@ void DiodeLadder_renderB2Osc2(DiodeLadder *dl, int16_t *buf, const int16_t *rowA
                               const int16_t *rowB, uint32_t *phase, uint32_t phaseInc,
                               float ff0, float ffStep, float sScale,
                               float iLadEnd, float iAbcEnd);
+/*
+ * B2R with the pwm read fused (S094 P1 S5): two reads of one saw row pwD
+ * points apart, s = (A + pwSign x B) x sScale. Contract in DiodeLadder.c.
+ * Accessors: AlkalineVoice.c alk_renderPwm().
+ */
+void DiodeLadder_renderB2OscPwm(DiodeLadder *dl, int16_t *buf, const int16_t *row,
+                                uint32_t *phase, uint32_t phaseInc, uint32_t pwD,
+                                float pwSign, float sScale, float iLadEnd,
+                                float iAbcEnd);
 void DiodeLadder_renderB(DiodeLadder *dl, int16_t *buf, float sScale,
                          float iLadEnd, float iAbcEnd);
 void DiodeLadder_renderA(DiodeLadder *dl, int16_t *buf, float sScale,

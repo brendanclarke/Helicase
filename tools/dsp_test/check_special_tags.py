@@ -24,9 +24,10 @@ TABLES = {
     'CYM': 'Core/DSP/Instruments/Cymbal/CymbalParameters.c',
     'HAT': 'Core/DSP/Instruments/HiHat/HiHatParameters.c',
     # S093 P4: the coarse row classifies as PITCH_COARSE | OSC1 (the osc1_
-    # branch is type-independent here and in the firmware classifier,
-    # InstrumentManager.c l. 3876); every alk_* key and the platform rows
-    # classify as NONE or as their Drum twins.
+    # branch is type-independent here and in the firmware classifier);
+    # every alk_* key and the platform rows classify as NONE or as their
+    # Drum twins. S094 P1 S4: instrument_drive (the VCA overdrive) is the
+    # Drum twin's INSTRUMENT_DRIVE; alk_tone is NONE.
     'ALK': 'Core/DSP/Instruments/Alkaline/AlkalineParameters.c',
 }
 ENUM = 'Core/DSP/Instruments/InstrumentManager.h'
@@ -68,7 +69,10 @@ def expected(t, key):
         # S089 P2: the voice chain selector has its own clamping writer.
         'voice_chain': 'VOICE_CHAIN',
         # S076 P2: lfo_offset now scales its byte through IM_SPECIAL_LFO_OFFSET.
-        'lfo_offset': 'LFO_OFFSET'}
+        'lfo_offset': 'LFO_OFFSET',
+        # S094 P1 S1: lfo_sync recomputes the LFO step through
+        # IM_SPECIAL_LFO_SYNC (lfo_setSync()).
+        'lfo_sync': 'LFO_SYNC'}
     if t == 'HAT' and key == 'amp_envelope_decay_choke':
         return {'IM_SPECIAL_HAT_DECAY_CHOKE'}
     if t in ('DRM', 'SNR'):

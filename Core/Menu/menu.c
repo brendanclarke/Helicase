@@ -12126,6 +12126,7 @@ static void menu_formatUserShortName(char prefix, uint8_t index, char *buf)
  * What:       the 8-character name and the 3-character code of the entry a
  *             wave value selects:
  *             - osc1 under wav: the stock name, no code;
+ *             - osc1 under pwm: Sin/Tri/Saw/Rec, without a compact code;
  *             - osc1 under smp/slp/wtb: the item's catalogue name and
  *               sNN/lNN/wNN; both blank when the type has no item at that
  *               value;
@@ -12177,12 +12178,28 @@ static void menu_formatWaveCell(const menu_cell_t *cell, uint8_t value,
      * Accessors:  menu_formatWaveValue3() (compact cells, overlays, the voice
      *             automation display), the single-parameter painter.
      */
-    if (isOsc1 && type == OSC_TYPE_WAV &&
+    /* S094 P1 S5: under pwm the Alkaline's wav list is still Saw, Sqr */
+    if (isOsc1 && (type == OSC_TYPE_WAV || type == OSC_TYPE_PWM) &&
         instrumentManager_runtimeType(cell->slot) == INSTRUMENT_TYPE_ALK) {
         if (value < (uint8_t)alkWaveNames[0][0]) {
             memcpy(nameDst, alkWaveNames[value + 1u], 3u);
             memcpy(codeDst, alkWaveNames[value + 1u], 3u);
         }
+        return;
+    }
+    /*
+     * S094 P1 S3: osc1 under pwm names Sin, Tri, Saw, Rec.
+     *
+     * What:       value 0..OSC_PWM_WAVE_COUNT - 1 maps to a stock name; an
+     *             out-of-range value remains blank. PWM has no compact code.
+     * Why:        under pwm the wav byte selects one of four stock waves with
+     *             a pulse-width form. The catalogue branch below would read
+     *             the same value as a sample or wavetable index.
+     * Accessors:  menu_formatWaveValue3() and the single-parameter painter.
+     */
+    if (isOsc1 && type == OSC_TYPE_PWM) {
+        if (value < OSC_PWM_WAVE_COUNT)
+            memcpy(nameDst, waveformNames[value + 1u], 3u);
         return;
     }
     if (isOsc1 && type != OSC_TYPE_WAV) {
@@ -12529,9 +12546,10 @@ _Static_assert((sizeof(voiceChainNames) / sizeof(voiceChainNames[0])) - 1u ==
  * (ALK_WAVE_SAW 0, ALK_WAVE_SQUARE 1, AlkalineVoice.h). */
 _Static_assert((sizeof(alkWaveNames) / sizeof(alkWaveNames[0])) - 1u == 2u,
                "alkWaveNames must list Saw and Sqr");
-/* S093 P8: the Alkaline typ list is wav, wtb (ALK_TYP_COUNT, AlkalineVoice.h) */
-_Static_assert((sizeof(alkTypeNames) / sizeof(alkTypeNames[0])) - 1u == 2u,
-               "alkTypeNames must list wav and wtb");
+/* S093 P8 / S094 P1: the Alkaline typ list is wav, wtb, pwm (ALK_TYP_COUNT,
+ * AlkalineVoice.h) */
+_Static_assert((sizeof(alkTypeNames) / sizeof(alkTypeNames[0])) - 1u == 3u,
+               "alkTypeNames must list wav, wtb and pwm");
 _Static_assert((sizeof(foldTypeNames) / sizeof(foldTypeNames[0])) - 1u ==
                    VOICE_FOLD_COUNT &&
                (sizeof(foldTypeLongNames) / sizeof(foldTypeLongNames[0])) - 1u ==

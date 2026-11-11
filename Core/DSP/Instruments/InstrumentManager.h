@@ -211,8 +211,28 @@ typedef enum {
      * Accessors:  instrumentManager_writeSpecialRuntime() switch.
      * Affiliates: VOICE_CHAIN_* (voiceFold.h); voiceChainNames (MenuText.h);
      *             the four voice_chain rows; tools/dsp_test/check_special_tags.py.
-     */
+    */
     IM_SPECIAL_VOICE_CHAIN,
+    /*
+     * S094 P1 S1: lfo_sync writer.
+     *
+     * What:       IM_SPECIAL_LFO_SYNC = 23 (next after IM_SPECIAL_VOICE_CHAIN,
+     *             22); IM_SPECIAL_WRITER_COUNT becomes 24 (<= 32, the 5-bit
+     *             writer field, asserted below). The writer calls
+     *             lfo_setSync(), which stores the byte and recomputes the
+     *             LFO's phase step.
+     * Why:        the plain ROW_MENU store left phaseInc at the previous
+     *             mode's rate until a frq or tempo change (S094 bug report),
+     *             and a Kit/Scene/Instrument load applied lfo_rate (an earlier
+     *             row) with the previous sound's sync byte.
+     * Inputs:     slot, byte value (0..11; MENU_SYNC_RATES).
+     * Outputs:    the slot LFO's sync and phaseInc.
+     * Accessors:  instrumentManager_writeSpecialRuntime() switch.
+     * Affiliates: lfo_setSync() (lfo.c); the five lfo_sync rows;
+     *             tools/dsp_test/check_special_tags.py; the diagnostic
+     *             classifier.
+     */
+    IM_SPECIAL_LFO_SYNC,
     IM_SPECIAL_WRITER_COUNT
 } instrument_special_writer_t;
 

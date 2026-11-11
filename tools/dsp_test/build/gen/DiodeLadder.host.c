@@ -85,6 +85,34 @@ _Static_assert(DL_NET_ROWS * DL_NET_PHASES == ALK_NET_STATES, "rows split evenly
 #ifndef ALK_RES_NEAREST
 #define ALK_RES_NEAREST 0
 #endif
+/*
+ * The Alkaline pwm read form (S094 P1 S5, P-D6).
+ *
+ * What:       how fused mode 3 reads its second (B) point:
+ *               0  A and B both interpolated (the reference: the bench's
+ *                  AL-PW error law builds it; never shipped);
+ *               1  A interpolated as fused mode 1, B truncated at the same
+ *                  point offset (the PWM draft's 212 form);
+ *               2  A and B both truncated (the 204 form; the default, see
+ *                  the S5 measurement below).
+ * Why:        on a ramp both reads share one fraction, so a truncated B
+ *             quantises only the position of B's band-limited edge to
+ *             1/1,024 of a cycle; the ladder's low-pass hides it (AL-PW
+ *             measures the error against form 0).
+ * Inputs:     -DALK_PWM_READ_FORM (bench and measurement builds).
+ * Accessors:  dl_renderB2Body() fused mode 3.
+ */
+/*
+ * S094 P1 S5 measurement (S5.8, linked on the S4 body): the pwm loop is
+ * 236 (form 0), 227 (form 1) and 215 (form 2); with the per block (about
+ * 41.6 per sample) only form 2 stays under S4's Alkaline figure (263.7), so
+ * form 2 is the default. Against form 0 both cheaper forms differ by about
+ * -29 dB RMS sample for sample (AL-PW prints it): B's band-limited edge read
+ * at a whole table point, a sub-sample time shift of a steep edge.
+ */
+#ifndef ALK_PWM_READ_FORM
+#define ALK_PWM_READ_FORM 2
+#endif
 
 /* [5/4] Pade of tanh: tanh(z) = z N(z^2)/D(z^2); secant t = N/D. */
 #define DL_P54N(s)     (945.0f + (s) * (105.0f + (s)))
@@ -131,6 +159,11 @@ void DiodeLadder_init(DiodeLadder *dl)
 	dl->latFrac = 0.0f;
 	dl->rk = 0u;
 	dl->phase = 0u;
+	/* S094 P1 S4: the post-filter controls at their neutral values: the
+	 * OTA's own input scale, the tone open, its state clear */
+	dl->otaIn = DL_INV_2VT;
+	dl->toneC = 0.0f;
+	dl->toneZ = 0.0f;
 }
 
 /* ------------------------------------------------------------ per block
@@ -275,7 +308,8 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 	DiodeLadder *dl, int16_t *buf, const float sScale, const float iLadEnd,
 	const float iAbcEnd, const int fused, const int16_t *const row,
 	uint32_t *const phase, const uint32_t phaseInc,
-	const int16_t *const rowB, const float ff0, const float ffStep)
+	const int16_t *const rowB, const float ff0, const float ffStep,
+	const uint32_t pwD, const float pwSign)
 {
 	/* fused (a compile-time constant in each wrapper):
 	 *   0  buf is the input (the unfused B2R, DiodeLadder_renderB2());
@@ -283,9 +317,13 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 	 *      calcWavetableOscBlock()'s arithmetic exactly (gain 1: linear
 	 *      interpolation, truncation to int16);
 	 *   2  S093 P8 revision 3: two wavetable rows (row, rowB) read at the
-	 *      same phase and mixed by ff (DiodeLadder_renderB2Osc2()).
-	 * rowB, ff0 and ffStep are read only under 2; the other wrappers pass
-	 * 0, 0.0f, 0.0f and the compiler drops them with the branch. */
+	 *      same phase and mixed by ff (DiodeLadder_renderB2Osc2());
+	 *   3  S094 P1 S5: pwm, two reads of one saw row pwD points apart,
+	 *      summed (pwSign +1) or differenced (-1)
+	 *      (DiodeLadder_renderB2OscPwm()).
+	 * rowB, ff0 and ffStep are read only under 2, pwD and pwSign only under
+	 * 3; the other wrappers pass 0 / 0.0f and the compiler drops them with
+	 * the branch. */
 	uint32_t ph = fused ? *phase : 0u;
 	/* S093 P8 r3: the frame mix of fused 2, 0 = row, 1 = rowB; it starts at
 	 * ff0 and moves by ffStep per sample, so a block glides linearly from
@@ -298,6 +336,18 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 	float qu = dl->qu, qv = dl->qv;
 	float tpL = dl->tpLast, xinL = dl->xinLast;
 	float vhpL = dl->vhpLast, vcaL = dl->vcaLast, iaL = dl->iAbcLast;
+	/*
+	 * Post-filter controls for this block (S094 P1 S4).
+	 *
+	 * What:       otaIn, the OTA input scale (constant over the block);
+	 *             toneC, the tone coefficient (constant); tz, the one-pole's
+	 *             running state (loaded here, stored after the loop).
+	 * Why:        locals, as every other ladder value: one load per block, no
+	 *             memory traffic in the loop.
+	 */
+	const float otaIn = dl->otaIn;
+	const float toneC = dl->toneC;
+	float tz = dl->toneZ;
 	float i = dl->iLad, oa = DL_OA * dl->iAbc;
 	float ru = dl->rUPrev, rv = dl->rVPrev;
 	const float di = (iLadEnd - i) * DL_INV_BLOCK;
@@ -345,6 +395,45 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 			ph += phaseInc;
 			s = (a + ff * (b - a)) * sScale;
 			ff += ffStep;
+		} else if (fused == 3) {
+			/*
+			 * S094 P1 S5: the Alkaline pwm read.
+			 *
+			 * What:       A = row at the phase (fused mode 1's read and
+			 *             truncation exactly); B = row pwD points earlier
+			 *             (ph - w, the row wraps at 1,024), truncated
+			 *             (ALK_PWM_READ_FORM 1), interpolated (0) or with A
+			 *             truncated too (2); s = (A + pwSign x B) x sScale.
+			 *             pwSign -1 gives the band-limited pulse (high for the
+			 *             first w of the cycle), +1 the two-saw sum.
+			 * Why:        PWM draft §2.4: inside the fused loop the second
+			 *             read costs about 6 per sample with interpolation and
+			 *             -1 without (measured 219 / 212 / 204 standalone on
+			 *             the S093 P8 body); the form is chosen by the S5
+			 *             linked measurement on the S4 body.
+			 */
+			const uint32_t itg = ph >> 22;
+			const uint32_t ib = (itg - pwD) & 0x000003FFu;
+#if ALK_PWM_READ_FORM == 2
+			const int16_t o = row[itg];
+			const float b = (float)row[ib];
+#else
+			int16_t o = row[itg];
+
+			o += (ph & 0x003FFFFFu) * 2.384185791015625e-07f
+			   * (row[(itg + 1u) & 0x000003FFu] - o);
+#if ALK_PWM_READ_FORM == 0
+			int16_t ob = row[ib];
+
+			ob += (ph & 0x003FFFFFu) * 2.384185791015625e-07f
+			    * (row[(ib + 1u) & 0x000003FFu] - ob);
+			const float b = (float)ob;
+#else
+			const float b = (float)row[ib];
+#endif
+#endif
+			ph += phaseInc;
+			s = ((float)o + pwSign * b) * sScale;
 		} else if (fused) {
 			const uint32_t itg = ph >> 22;
 			int16_t o = row[itg];
@@ -405,7 +494,9 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 		const float zE = dl_clamp(xin, DL_P54_ZMAX), sE = zE * zE;
 		const float nE = DL_P54N(sE);
 		const float dE = DL_P54D(sE) * (fmaxf(fabsf(xin), DL_P54_ZMAX) * (1.0f / DL_P54_ZMAX));
-		const float zG = dl_clamp(vcaL * DL_INV_2VT, DL_P32_ZMAX), sG = zG * zG;
+		/* S094 P1 S4: the OTA argument v / 2Vt x the overdrive gain (otaIn =
+		 * gain / 2Vt, per block; at Overdrive 0 the same operands as before) */
+		const float zG = dl_clamp(vcaL * otaIn, DL_P32_ZMAX), sG = zG * zG;
 		const float nG = DL_P32N(sG), dG = DL_P32D(sG);
 		const float zA = n0 - n1, zB = n1 - n2;
 		const float sA = zA * zA, sB = zB * zB;
@@ -424,7 +515,25 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 		qu = quk + ALK_NET_BE_U * gau0 * tp;
 		qv = ALK_NET_AL_V * qv + ALK_NET_BE_V * gav0 * (tpL + tp);
 		const float vca = rv + qv + dv0 * tp;
-		buf[j] = (int16_t)__SSAT((int32_t)(iaL * zG * tota), 16);   /* R_OTA I_abc tanh(v/2Vt), scaled */
+		/*
+		 * The OTA output and the tone (S094 P1 S4).
+		 *
+		 * What:       o = R_OTA I_abc tanh(v / 2Vt), scaled (today's value,
+		 *             the same product order); tz = o + c (tz - o), a one-pole
+		 *             low-pass on it; the store saturates tz to int16.
+		 * Why:        the c form is exact when open: c = 0 gives o + 0 x (tz - o)
+		 *             = o, fused or not, so Tone 127 stores today's sample
+		 *             (P9-D7; the k form z + k (o - z) is not exact at k = 1).
+		 *             The tone filters the overdrive's added highs after the
+		 *             OTA, inside the loop: no second pass over the block.
+		 * Cost:       one subtract and one multiply-add per sample (the post-FX
+		 *             spike measured the overdrive and tone at 215 -> 219 per
+		 *             sample on the one-row loop).
+		 */
+		const float o = iaL * zG * tota;
+
+		tz = o + toneC * (tz - o);
+		buf[j] = (int16_t)__SSAT((int32_t)tz, 16);   /* R_OTA I_abc tanh(v/2Vt), scaled, toned */
 
 		accTp += tp;
 		accS += s;
@@ -438,6 +547,7 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 	dl->qu = qu; dl->qv = qv;
 	dl->tpLast = tpL; dl->xinLast = xinL;
 	dl->vhpLast = vhpL; dl->vcaLast = vcaL; dl->iAbcLast = iaL;
+	dl->toneZ = tz;   /* S094 P1 S4: the tone state for the next block */
 	dl->iLad = iLadEnd; dl->iAbc = iAbcEnd;
 	if (fused)
 		*phase = ph;
@@ -447,7 +557,7 @@ static inline __attribute__((always_inline)) void dl_renderB2Body(
 void DiodeLadder_renderB2(DiodeLadder *dl, int16_t *buf, const float sScale,
                           const float iLadEnd, const float iAbcEnd)
 {
-	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 0, 0, 0, 0u, 0, 0.0f, 0.0f);
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 0, 0, 0, 0u, 0, 0.0f, 0.0f, 0u, 0.0f);
 }
 
 /* B2R with the oscillator's table read fused (S093 P3 analysis): the voice's
@@ -457,7 +567,7 @@ void DiodeLadder_renderB2Osc(DiodeLadder *dl, int16_t *buf, const int16_t *row,
                              const float iLadEnd, const float iAbcEnd)
 {
 	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 1, row, phase, phaseInc,
-	                0, 0.0f, 0.0f);
+	                0, 0.0f, 0.0f, 0u, 0.0f);
 }
 
 /*
@@ -494,7 +604,39 @@ __attribute__((noinline)) void DiodeLadder_renderB2Osc2(DiodeLadder *dl, int16_t
                               const float iLadEnd, const float iAbcEnd)
 {
 	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 2, rowA, phase, phaseInc,
-	                rowB, ff0, ffStep);
+	                rowB, ff0, ffStep, 0u, 0.0f);
+}
+
+/*
+ * B2R with the pwm read fused (S094 P1 S5).
+ *
+ * What:       the fused loop with the input s_j = (A_j + pwSign x B_j) x
+ *             sScale, A_j the row at the phase (fused mode 1's read), B_j the
+ *             row pwD points earlier (ALK_PWM_READ_FORM); the phase advances
+ *             by phaseInc per sample and is written back.
+ * Why:        the Alkaline's pwm type (PWM draft §2.4): one more loop copy,
+ *             like DiodeLadder_renderB2Osc2(); noinline keeps its registers
+ *             out of the caller (the Osc2 measurement: 228 out of line
+ *             against 231 inlined).
+ * Inputs:     dl (the ladder; DiodeLadder_setNet() and DiodeLadder_setPost()
+ *             ran this block), buf (output only), row (a 1,024-point sawTable
+ *             row), phase (in/out), phaseInc, pwD (p x 8, 8..1,016 points),
+ *             pwSign (+1 Saw sum, -1 Sqr pulse), sScale (the scale x level x
+ *             drive), iLadEnd, iAbcEnd (as the other B2R wrappers).
+ * Outputs:    buf (int16, the ladder's toned VCA output); *phase; the ladder
+ *             state.
+ * Accessors:  AlkalineVoice.c alk_renderPwm().
+ * Affiliates: ALK_PWM_READ_FORM; control_cost.py ITERS (the audio loop is
+ *             rank 1, as the other wrappers).
+ */
+__attribute__((noinline)) void DiodeLadder_renderB2OscPwm(DiodeLadder *dl, int16_t *buf,
+                              const int16_t *row, uint32_t *phase,
+                              const uint32_t phaseInc, const uint32_t pwD,
+                              const float pwSign, const float sScale,
+                              const float iLadEnd, const float iAbcEnd)
+{
+	dl_renderB2Body(dl, buf, sScale, iLadEnd, iAbcEnd, 3, row, phase, phaseInc,
+	                0, 0.0f, 0.0f, pwD, pwSign);
 }
 
 /* ------------------------------------------------------------------- B-R
